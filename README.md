@@ -190,13 +190,15 @@ uv run ruff check .  # lint
 ## 路线图
 
 - **M1-M4（✅）**：引擎内核 → 扩展生态（MCP/Skills/子代理）→ 桌面应用 → 特性对标
-- **M5（进行中）**：开源发布——CI ✅、社区配套 ✅、安装器脚本 ✅、技能广场与
-  [官方种子技能](skills-gallery/) ✅、更新检查 ✅、SmartScreen 指南 ✅、
-  官网页面（`index.html`，GitHub Pages 可用）✅；
-  剩余：正式发布 GitHub 仓库、代码签名分发
+- **M5（✅ 已发布）**：开源发布——仓库上线 [github.com/Sky-scrape/SkySheep](https://github.com/Sky-scrape/SkySheep)：
+  CI ✅、社区配套 ✅、安装器脚本 ✅、技能广场（索引随主仓库发布）✅、更新检查 ✅、
+  SmartScreen 指南 ✅、官网页面（`index.html`，GitHub Pages 可用）✅；剩余：代码签名分发
 - **M6（✅ 0.8.0）**：普通用户可用性补强（详见 [CHANGELOG](CHANGELOG.md)）
-- **后续方向**：无 Key 用户的演示模式与 Ollama 一键启用 ✅（0.8.x）、
-  每日 token 预算护栏 ✅、macOS/Linux 支持、系统级定时调度、提示注入纵深防御
+- **v1.0（✅ 当前版本）**：首个正式版——浏览器控制、手机控制（设置内开关）、
+  主题切换标题栏即时同步、无 Key 激活路径（注册引导 / 演示模式 / Ollama 一键启用）、
+  每日 token 预算护栏、提示注入防线、反馈闭环（诊断包 + 一键反馈）、
+  崩溃哨兵与友好提示、官网与开源全套配套
+- **后续方向**：macOS/Linux 支持、系统级定时调度、提示注入纵深防御
 
 版本与变更以 [CHANGELOG.md](CHANGELOG.md) 为唯一事实来源。
 

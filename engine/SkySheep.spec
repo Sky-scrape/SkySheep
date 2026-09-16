@@ -41,7 +41,9 @@ hiddenimports = [
     "skysheep.mcp.presets",  # 内置常用 MCP 服务预设
     "skysheep.skills",
     "skysheep.session",
-    "skysheep.tools",
+    "skysheep.tools",  # tools/__init__ 显式导入各工具模块（含 browser）
+    "skysheep.tools.browser",  # 浏览器控制（1.0 新增，显式声明保险）
+    "skysheep.startup",  # 开机自启（设置 · 高级，函数内延迟导入）
     "skysheep.tools.computer",  # 电脑控制（截屏/鼠标/键盘/窗口/剪贴板）
     "skysheep.tools.docs",  # read_document（解析库按需导入）
     "skysheep.tools.imagegen",  # generate_image

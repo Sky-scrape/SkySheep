@@ -13,7 +13,7 @@ import httpx
 
 MARKET_URL = os.environ.get(
     "SKYSHEEP_MARKET_URL",
-    "https://raw.githubusercontent.com/Sky-scrape/skills-index/main/index.json",
+    "https://raw.githubusercontent.com/Sky-scrape/SkySheep/main/market/index.json",
 )
 TIMEOUT_S = 6.0
 

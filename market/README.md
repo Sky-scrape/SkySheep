@@ -1,23 +1,17 @@
-# 技能广场索引（发布用）
+# 技能广场索引
 
 设置 · 技能与工具 → 技能广场 的在线索引就是这个 JSON。客户端行为：
 
-1. 默认拉取 `https://raw.githubusercontent.com/Sky-scrape/skills-index/main/index.json`；
-2. 拉不到（离线 / 仓库还没建）时回退到内置清单（`engine/src/skysheep/skills/market.py` 的 `BUILTIN_INDEX`）；
+1. 默认拉取 `https://raw.githubusercontent.com/Sky-scrape/SkySheep/main/market/index.json`
+   （即**本仓库**的 `market/index.json`，与技能本体同仓维护，推上 GitHub 即生效）；
+2. 拉不到（离线）时回退到内置清单（`engine/src/skysheep/skills/market.py` 的 `BUILTIN_INDEX`）；
 3. 环境变量 `SKYSHEEP_MARKET_URL` 可把索引指向任意自建地址（GitHub raw / Gitee raw / 自己的服务器均可）。
 
-## 正式发布（发布仓库时做一次）
+## 发布
 
-```bash
-# 1. 建 GitHub 仓库 Sky-scrape/skills-index（Public）
-# 2. 把本目录的 index.json 推到该仓库 main 分支根目录
-git init && git add index.json && git commit -m "skills index"
-git remote add origin https://github.com/Sky-scrape/skills-index.git
-git push -u origin main
-```
-
-推完即生效，客户端无需任何改动；之后新增技能条目只需编辑 `index.json` 再推送
-（客户端每次打开技能广场都会重新拉取，服务端有 60 秒缓存）。
+索引随主仓库一起发布：把 SkySheep 仓库推上 GitHub 后自动生效，无需额外操作。
+之后新增技能条目只需编辑 `index.json` 再推送（客户端每次打开技能广场都会重新拉取，
+服务端有 60 秒缓存）。
 
 ## 条目格式
 

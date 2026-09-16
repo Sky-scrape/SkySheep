@@ -1,6 +1,6 @@
 {
   "name": "SkySheep 技能广场索引",
-  "description": "发布方式：把本目录推成独立的 GitHub 仓库 Sky-scrape/skills-index（分支 main、文件名 index.json），客户端默认地址即指向它；自建索引用环境变量 SKYSHEEP_MARKET_URL 指向任意可达的 JSON 地址。",
+  "description": "本索引与技能本体同仓维护：SkySheep 主仓库的 market/index.json 推上 GitHub 后技能广场自动生效；自建索引用环境变量 SKYSHEEP_MARKET_URL 指向任意可达的 JSON 地址。",
   "items": [
     {
       "name": "docx 文档技能",

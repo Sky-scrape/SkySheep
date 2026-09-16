@@ -193,7 +193,7 @@ uv run ruff check .  # lint
 - **M5（进行中）**：开源发布——CI ✅、社区配套 ✅、安装器脚本 ✅、技能广场与
   [官方种子技能](skills-gallery/) ✅、更新检查 ✅、SmartScreen 指南 ✅、
   官网页面（`index.html`，GitHub Pages 可用）✅；
-  剩余：正式发布 GitHub 仓库与 skills-index 索引、代码签名分发
+  剩余：正式发布 GitHub 仓库、代码签名分发
 - **M6（✅ 0.8.0）**：普通用户可用性补强（详见 [CHANGELOG](CHANGELOG.md)）
 - **后续方向**：无 Key 用户的演示模式与 Ollama 一键启用 ✅（0.8.x）、
   每日 token 预算护栏 ✅、macOS/Linux 支持、系统级定时调度、提示注入纵深防御

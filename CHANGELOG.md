@@ -58,7 +58,7 @@
   README 重做——首屏改为截图 + 安全叙事，功能对标表下沉为「功能全景」。
 - **官方种子技能包**：`skills-gallery/` 10 个中文场景技能（周报生成 / 会议纪要 /
   公众号文章 / Excel 清洗 / 简历优化 / 长文档精读 / 旅行规划 / 一周菜谱 /
-  英文邮件 / 文件整理），`market/index.json` 同步上架（发布 skills-index 仓库后
+  英文邮件 / 文件整理），`market/index.json` 同步上架（主仓库推上 GitHub 后
   技能广场可直接一键安装）。
 
 ### 修复
@@ -188,7 +188,7 @@
 - **SmartScreen 放行指南**：`docs/smartscreen-说明.md`——未签名安装包被 Windows
   拦截时的三步放行图文说明 + 为什么暂不购买签名证书 + SHA-256 校验方法。
 - **技能广场索引发布件**：`market/index.json`（与内置精选一致的正式索引）+
-  `market/README.md` 发布说明——把该文件推成 `Sky-scrape/skills-index`
+  `market/README.md` 发布说明——技能广场索引随主仓库一起发布（`market/index.json`）
   仓库 main 分支即成为正式在线索引；自建索引用 `SKYSHEEP_MARKET_URL` 指向。
 - **write_document 文档生成工具（read_document 的反向能力）**：此前 Agent 能读 Word/Excel/PDF 却只能
   产出纯文本，「帮我把这些数据整理成 Excel」「输出一份 Word 报告」这类高频诉求只能靠现写 Python 脚本。

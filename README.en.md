@@ -167,7 +167,7 @@ Running into a problem? In the app, go to Settings · About → "💬 Report an 
 
 - **M1-M4 (✅)**: engine core → extension ecosystem (MCP/Skills/sub-agents) → desktop app → feature-parity pass
 - **M5 (in progress)**: open-source release — CI ✅, community docs ✅, installer scripts ✅, Skill Market & [official seed skills](skills-gallery/) ✅, update check ✅, SmartScreen guide ✅, website page (`index.html`, GitHub Pages-ready) ✅;
-  remaining: official launch of the GitHub repo and the skills-index catalog, code-signed distribution
+  remaining: official launch of the GitHub repo, code-signed distribution
 - **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
 - **Further out**: demo mode for keyless users and one-click Ollama setup ✅ (0.8.x), daily token budget guardrails ✅, macOS/Linux support, system-level scheduling, defense-in-depth against prompt injection
 

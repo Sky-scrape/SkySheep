@@ -1,0 +1,56 @@
+[project]
+name = "skysheep-engine"
+version = "0.8.0"
+description = "SkySheep engine — open-source AI agent workbench kernel (agent loop, tools, providers, permissions, sessions)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "SkySheep contributors" }]
+keywords = ["ai", "agent", "llm", "harness", "workbench"]
+dependencies = [
+    "pydantic>=2.7",
+    "httpx>=0.27",
+    "openai>=1.40",
+    "anthropic>=0.40",
+    "rich>=13.7",
+    "prompt-toolkit>=3.0",
+    "aiosqlite>=0.20",
+    "mcp>=2.2.0",
+    "fastapi>=0.141.1",
+    "websockets>=17.1",
+    "pywebview>=6.2.1",
+    "tomli-w>=1.2.0",
+    "winotify>=1.1.0",
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "pillow>=10.0",  # pypdf 初始化会探测 PIL；测试也用它构造样例图（截图功能已移除）
+]
+
+[project.scripts]
+skysheep = "skysheep.cli.app:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skysheep"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

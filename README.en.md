@@ -1,0 +1,178 @@
+# SkySheep 🐑
+
+**An open-source AI Agent workbench that runs on your computer — it can see, it can act, and it asks you before every step.**
+
+<p>
+  <a href="https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows--first-blue">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-informational">
+  <a href="README.md"><img alt="中文" src="https://img.shields.io/badge/docs-中文-red"></a>
+</p>
+
+SkySheep is more than a chat window: it can read and write your files, run commands, operate your computer, and work on a schedule. Every sensitive action — writing files, running commands, moving the mouse — **pops up a confirmation card asking for your consent first**; every round of file changes is automatically snapshotted, so you can undo any of it with one click, anytime.
+
+![SkySheep main window](docs/images/right-panel.png)
+
+## Why SkySheep
+
+Most AI desktop clients out there are just chat windows — the model can talk but can't act. SkySheep is a true **Agent workbench**: hand it a task and it reads the files, runs the commands, and writes out the results on its own. For a desktop Agent built for everyday users, safety comes first, so we made three things the default behavior:
+
+| Triple safety promise | What it means |
+|---|---|
+| 🔐 **Sensitive actions confirmed first** | File writes show a real diff preview and every command passes your eyes one by one; read-only actions run through automatically, no interruptions |
+| 📦 **All data stays on your machine** | Sessions, config, and API keys are stored only on your own computer (SQLite) — zero telemetry, zero uploads |
+| ↩️ **One-click undo for mistakes** | Every round of changes is auto-snapshotted to disk; roll back to any round even after a restart |
+
+On top of that sits a complete Agent capability stack:
+
+- **Multi-provider models**: Zhipu / DeepSeek / Kimi / OpenRouter / SiliconFlow / native Anthropic, one-click setup; local models via [Ollama](https://ollama.com) (no key required); custom relay endpoints + automatic model detection
+- **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + one-click install from the [Skill Market](market/))
+- **Computer control**: screenshots straight into the conversation; mouse / keyboard / window / clipboard (off by default; confirmation-gated, with an action-level whitelist)
+- **Scheduled tasks and agenda**: recurring tasks, due-time reminders, weekly calendar view; continue the chat from your phone over LAN (token + QR code)
+- **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer
+- **Document I/O**: reads PDF / Word / Excel, writes Word / Excel / CSV
+- **Chinese-first**: the UI, built-in help, quick commands, and Skill Market are all designed for Chinese-language scenarios
+
+More screenshots: [model provider settings](docs/images/providers.png) · [agenda weekly view](docs/images/agenda.png) · [usage dashboard](docs/images/usage.png)
+
+## Quick Start
+
+**Option 1: Download the installer (recommended for everyday users)**
+
+Download `SkySheep-<version>-setup.exe` from [Releases](https://github.com/Sky-scrape/SkySheep/releases/latest) and double-click to install. If Windows SmartScreen blocks the first launch, click "More info → Run anyway" (standard treatment for unsigned programs; see the [SmartScreen walkthrough](docs/smartscreen-说明.md)).
+
+**Option 2: Run from source (developers)**
+
+```bash
+cd SkySheep/engine
+uv sync                          # Install dependencies (Python >= 3.11)
+
+uv run skysheep app              # 🖥 Desktop app (native window; --browser for a browser)
+uv run skysheep app <project-dir>  # Open a specific project directory
+uv run skysheep chat             # Terminal mode
+uv run skysheep run "task"       # One-shot headless run (JSON output supported)
+```
+
+No API key on first launch? The setup wizard walks you through three steps (pick a provider → paste the key → go), and auto-detects a local Ollama install; you can also click "Demo mode" first to watch a round of real tool calls. Every provider offers a free or low-cost tier — for users in China, Zhipu or DeepSeek is the recommended starting point. Key-free demo:
+
+```bash
+uv run python examples/demo.py   # FakeProvider multi-step coding task (write → crash → fix → re-test)
+```
+
+In the desktop app: type `/` to bring up the command menu and quick commands, `@` to reference project files/folders, "Add file" to attach files from anywhere on disk, `Ctrl+F` to search within a conversation, `Ctrl+Shift+F` to search across sessions, and `Ctrl+Alt+Space` to summon the window globally. New here? Click the "?" in the top bar for built-in help.
+
+### Double-click launch / packaging
+
+```bash
+cd engine
+.venv\Scripts\python.exe tools\install_shortcut.py        # Start-menu/desktop shortcuts (source build)
+.venv\Scripts\python.exe tools\install_shortcut.py --exe  # Point at the packaged SkySheep.exe
+uv pip install pyinstaller
+.venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec   # Output: dist/SkySheep/SkySheep.exe
+```
+
+Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), then run `ISCC.exe tools\installer.iss`; the output lands in `installer/`.
+
+### Safety mechanisms
+
+- Read-only tools (read/grep/glob/list/web_fetch/web_search/read_document) run without confirmation
+- File writes, image generation, and command execution prompt for confirmation by default: `Allow once / Always allow for this project / Deny`; a tiered "✎ Auto-write" permission mode is also supported (command execution always still requires confirmation)
+- The command whitelist matches by **command prefix**, with rules persisted per project
+- `web_fetch` only allows public http(s): requests resolving to non-public IPs are rejected outright (SSRF protection), and redirects are re-checked hop by hop
+- Checkpoints are persisted per project (last 50 rounds kept), with one-click "undo this round's changes" right in the conversation; changes made by run_command are not tracked
+- Session data is backed up automatically on a rolling basis (20 copies kept), restorable visually under Settings · About
+- The system prompt ships with a built-in **prompt-injection defense**: web/document content is treated as data, and instructions embedded in it are never executed directly
+- Unattended scenarios such as scheduled tasks can only call pre-authorized tools; all other writes/executions are rejected automatically
+- All user data lives in `~/.skysheep/`; exported diagnostic bundles automatically redact all secrets
+
+### Requirements for scheduled tasks and agenda reminders
+
+Scheduled tasks and agenda reminders are triggered by the app's internal loop, so they **only work while SkySheep is running**: choose "Minimize to system tray" when closing the window to keep it running in the background; tasks that come due while the app has fully exited are caught up on the next launch; to have it on duty from boot, enable "Launch at startup" under Settings · Advanced.
+
+## Feature Panorama: Benchmarked Against Mainstream Agents
+
+SkySheep's feature set was built item by item against Claude Code / OpenAI Codex CLI / ZCode (✅ = implemented):
+
+| Capability | Claude Code | Codex CLI | ZCode | SkySheep |
+|---|---|---|---|---|
+| Agent loop (streaming + tool calls) | ✅ | ✅ | ✅ | ✅ |
+| Multi-model / multi-provider (OpenAI-compatible + Anthropic + local) | — | ✅ | ✅ | ✅ built-in presets + custom relay endpoints + auto model detection |
+| MCP client (stdio/HTTP, Claude Desktop config compatible) | ✅ | ✅ | ✅ | ✅ in-app import / manual entry / templates + one-click built-in presets, hot-applied |
+| Skill packages (SKILL.md, progressive disclosure) | ✅ | — | ✅ | ✅ global/project scopes, install from folder/zip/URL + Skill Market |
+| Sub-agents (background tasks + polling) | ✅ | ✅ | ✅ | ✅ spawn_agent / check_task + custom sub-agents |
+| Project memory (AGENTS.md / CLAUDE.md) | ✅ | ✅ | ✅ | ✅ edited in-app + global auto memory (across projects) |
+| Task lists (todos) | ✅ | ✅ | ✅ | ✅ sidebar panel synced in real time |
+| Plan mode (plan first, then execute) | ✅ | ✅ | ✅ | ✅ dual execute/plan modes + one-click execute-the-plan |
+| Automatic context compaction + manual /compact | ✅ | ✅ | ✅ | ✅ CJK-aware estimation + real-usage floor as a fallback |
+| Permission prompts + project whitelist | ✅ | ✅ | ✅ | ✅ confirmation flow + command-prefix whitelist + tiered permission modes |
+| Headless one-shot runs (scripts / CI) | ✅ -p | ✅ exec | ✅ -p | ✅ skysheep run (pre-authorized tools + JSON output + audit) |
+| Ignore files | ✅ | ✅ | ✅ | ✅ .skysheepignore (.gitignore semantics, .env ignored by default) |
+| Slash commands | ✅ | ✅ | ✅ | ✅ /help /new /compact /model /status /todos /export |
+| Message queuing / auto-retry on transient errors | ✅ | ✅ | ✅ | ✅ exponential backoff; in-flight content is never replayed |
+| Web fetch + web search | ✅ | ✅ | ✅ | ✅ web_fetch (SSRF protection) + web_search (Bocha/Tavily/Zhipu) |
+| Document reading + generation | ✅ | — | ✅ | ✅ read_document (PDF/Word/Excel) + write_document (docx/xlsx/csv) |
+| Image input / image generation | ✅ | ✅ | ✅ | ✅ paste/drag-and-drop multimodal input + CogView/Kolors image generation |
+| Computer use | — | — | — | ✅ screenshot/mouse/keyboard/window/clipboard (off by default; confirmation-gated + action whitelist) |
+| Thinking visualization | — | — | — | ✅ ThinkingDelta streaming + collapsible replay |
+| Checkpoints / undo this round's file changes | ✅ checkpoints | ✅ rollback | ✅ | ✅ persisted to disk; rollbacks survive restarts |
+| Session search / management | ✅ | ✅ | ✅ | ✅ cross-project full-text search + visual backup restore + Markdown/HTML export |
+| Right-side panel (terminal / browser / side chat / review / files / tasks / agenda) | — | — | ✅ | ✅ multiple session tabs in parallel |
+| Hooks (pre/post tool-call hooks) | ✅ | — | ✅ | ✅ [hooks] in config.toml; pre-hooks can block |
+| Light/dark themes / desktop form factor | — | — | ✅ | ✅ Paper-ink / Night-ink / follow system + system tray + launch at startup + installer |
+| LAN remote access (continue on your phone) | — | — | — | ✅ token + QR code; listens on localhost only by default |
+
+Where they differ: the big three CLIs are stronger in terminal ecosystem (plugin markets, CI integration); SkySheep puts "safe for everyday desktop users" first — confirmation-gated permissions, purely local storage, no crash without an API key, one-click checkpoint rollback, and computer control tucked away by default. The current release is **Windows-first** (pywebview/WebView2); macOS/Linux are on the roadmap (the `--browser` mode already provides a cross-platform fallback).
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Desktop shell: pywebview native window (WebView2)                │
+│  └─ Browser fallback (--browser)                                 │
+├──────────────────────────────────────────────────────────────────┤
+│ Local server layer: FastAPI + WebSocket                          │
+│  └─ JSON-RPC requests + AgentEvent event stream                  │
+│  └─ Zero-build frontend (vanilla HTML/CSS/JS, served statically) │
+├──────────────────────────────────────────────────────────────────┤
+│ SkySheep Engine (Python 3.11+, asyncio)                          │
+│  ├─ core/      Agent loop, event stream, sub-agents,             │
+│  │             compaction, checkpoints                           │
+│  ├─ models/    Provider layer (openai/anthropic/fake)            │
+│  ├─ tools/     Built-in tools (incl. web_fetch) + schema export  │
+│  ├─ security/  Permission Gate + whitelist                       │
+│  ├─ skills/    Skill discovery / toggle / injection / install    │
+│  ├─ mcp/       MCP client (stdio/HTTP)                           │
+│  ├─ session/   SQLite persistence + full-text search             │
+│  ├─ config/    ~/.skysheep/config.toml                           │
+│  └─ cli/       Terminal REPL / desktop launcher                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Design keynote: **event-stream driven** — the entire agent run is modeled as `AgentEvent`s, and the CLI, GUI, and WebSocket server all consume the same engine API; sensitive operations go through the `PermissionGate`, which emits a `PermissionRequest` event and suspends; once the frontend decides, execution resumes.
+
+## Development
+
+```bash
+cd engine
+uv run pytest        # Full test suite (incl. real MCP stdio integration + end-to-end WebSocket protocol tests)
+uv run ruff check .  # lint
+```
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) (environment setup, coding conventions, PR self-check checklist). To report a security vulnerability, use the private channel in [SECURITY.md](SECURITY.md) — please don't open a public issue. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for the code of conduct.
+
+Running into a problem? In the app, go to Settings · About → "💬 Report an issue" to auto-package a redacted diagnostic bundle and open the feedback page.
+
+## Roadmap
+
+- **M1-M4 (✅)**: engine core → extension ecosystem (MCP/Skills/sub-agents) → desktop app → feature-parity pass
+- **M5 (in progress)**: open-source release — CI ✅, community docs ✅, installer scripts ✅, Skill Market & [official seed skills](skills-gallery/) ✅, update check ✅, SmartScreen guide ✅, website page (`index.html`, GitHub Pages-ready) ✅;
+  remaining: official launch of the GitHub repo and the skills-index catalog, code-signed distribution
+- **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
+- **Further out**: demo mode for keyless users and one-click Ollama setup ✅ (0.8.x), daily token budget guardrails ✅, macOS/Linux support, system-level scheduling, defense-in-depth against prompt injection
+
+[CHANGELOG.md](CHANGELOG.md) is the single source of truth for versions and changes.
+
+## License
+
+[MIT](LICENSE)

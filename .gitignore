@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Node / Tauri (M3)
+node_modules/
+desktop/src-tauri/target/
+
+# 运行时数据
+*.db
+*.db-journal
+.skysheep/
+
+# IDE
+.idea/
+.vscode/
+
+# 打包/安装器产物
+installer/
+
+# 外部 Agent 工具会话状态
+.mimosa/
+**/.mimosa/
+
+# 日志
+*.log

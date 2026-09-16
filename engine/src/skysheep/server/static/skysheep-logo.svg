@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- SkySheep 概念5：手绘小羊描线精修版 · 浅色背景用 -->
+  <defs>
+    <mask id="face-clip-1A1A1A">
+      <rect width="512" height="512" fill="#FFFFFF"/>
+      <ellipse cx="256" cy="205" rx="90" ry="62" fill="#000000" transform="rotate(-6 256 205)"/>
+    </mask>
+  </defs>
+  <g fill="none" stroke="#1A1A1A" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 羊毛大毛球 -->
+    <path d="M 214.3 85.7 A 44.1 44.1 0 0 1 298.7 86.4 A 43.8 43.8 0 0 1 373.3 117.6 A 40.2 40.2 0 0 1 422.7 175.9 A 40.2 40.2 0 0 1 445.2 248.0 A 39.4 39.4 0 0 1 421.9 319.3 A 42.2 42.2 0 0 1 370.8 379.8 A 40.4 40.4 0 0 1 298.2 406.1 A 43.9 43.9 0 0 1 213.2 413.6 A 45.7 45.7 0 0 1 137.9 378.5 A 42.5 42.5 0 0 1 89.5 318.3 A 39.9 39.9 0 0 1 67.7 248.0 A 39.8 39.8 0 0 1 89.2 176.9 A 40.5 40.5 0 0 1 141.5 118.5 A 40.8 40.8 0 0 1 214.3 85.7 Z" stroke-width="14"/>
+
+    <!-- 小弯角（贴脸的月牙形），根部被脸部窗口裁掉 -->
+    <g mask="url(#face-clip-1A1A1A)">
+      <path d="M 306 149 C 308 136 316 124 330 119 C 333 128 330 141 317 149 C 312 151 307 151 306 149 Z" stroke-width="10"/>
+      <path d="M 206 149 C 204 136 196 124 182 119 C 179 128 182 141 195 149 C 200 151 205 151 206 149 Z" stroke-width="10"/>
+      <g stroke-width="5">
+        <path d="M 312 146 L 325 133"/>
+        <path d="M 318 147 L 328 139"/>
+        <path d="M 200 146 L 187 133"/>
+        <path d="M 194 147 L 184 139"/>
+      </g>
+    </g>
+
+    <!-- 耳朵（低位外撇小耳朵） -->
+    <g mask="url(#face-clip-1A1A1A)" stroke-width="11">
+      <ellipse cx="166" cy="244" rx="20" ry="11" transform="rotate(-34 166 244)"/>
+      <ellipse cx="346" cy="244" rx="20" ry="11" transform="rotate(34 346 244)"/>
+    </g>
+
+    <!-- 蛋形脸 -->
+    <ellipse cx="256" cy="205" rx="90" ry="62" stroke-width="13" transform="rotate(-6 256 205)"/>
+
+    <!-- 眯眯眼 + 眉梢小挑 -->
+    <path d="M 227 190 L 225 214" stroke-width="13"/>
+    <path d="M 285 190 L 287 214" stroke-width="13"/>
+    <path d="M 210 192 L 215 199" stroke-width="9"/>
+    <path d="M 302 192 L 297 199" stroke-width="9"/>
+
+    <!-- 腮红小短线 -->
+    <path d="M 186 216 L 191 224" stroke-width="7"/>
+    <path d="M 195 212 L 200 220" stroke-width="7"/>
+    <path d="M 326 216 L 321 224" stroke-width="7"/>
+    <path d="M 317 212 L 312 220" stroke-width="7"/>
+
+    <!-- 大大的笑 -->
+    <path d="M 226 230 Q 256 254 286 230" stroke-width="13"/>
+
+    <!-- 小手 -->
+    <path d="M 196 318 L 170 332 L 198 348" stroke-width="12"/>
+    <path d="M 316 318 L 342 332 L 314 348" stroke-width="12"/>
+
+    <!-- 小脚 -->
+    <path d="M 176 400 L 176 436 L 206 436" stroke-width="12"/>
+    <path d="M 336 400 L 336 436 L 306 436" stroke-width="12"/>
+  </g>
+</svg>

@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SkySheep</title>
+  <link rel="icon" href="/static/skysheep.ico">
+  <style>
+  /* 底色兜底：写在 app.css 之前，样式表还没到位时也不会露 WebView 白底。
+     与 app.css 的 --bg / [data-theme="dark"] --bg 保持一致，改主题色要一起改。 */
+  html { background: #e8dfc7; }
+  html[data-theme="dark"] { background: #171410; }
+  </style>
+  <link rel="stylesheet" href="/static/app.css">
+  <script>
+  // 首帧外观（主题深浅 / 界面缩放 / 侧栏与输入区宽度）由服务端从 ui.json 注入到 <html> 标签上：
+  // 整页加载（首次启动、手动 F5）时第一帧就是正确外观，不会「默认浅色布局闪一下再跳回」。
+  // 项目切换已经改成站内切换（不再整页刷新），不经过这里。
+  // auto（跟随系统）服务端不知道系统深浅，只能在这里同步判定。
+  (function () {
+    var root = document.documentElement;
+    try {
+      var mode = root.getAttribute("data-theme-mode") || "auto";
+      var dark = mode === "dark" || (mode === "auto" && window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches);
+      if (dark) root.setAttribute("data-theme", "dark");
+      else root.removeAttribute("data-theme");
+    } catch (e) {}
+  })();
+  </script>
+</head>
+<body>
+<div id="app">
+
+  <!-- ========== 左栏：控制边栏（报纸边栏风） ========== -->
+  <aside id="sidebar">
+    <div class="brand-row">
+      <img class="logo-mark" src="/static/skysheep-logo.svg" alt="SkySheep">
+      <div class="brand-text">
+        <b>SkySheep</b>
+      </div>
+    </div>
+
+    <!-- 对话模式：侧栏内容 -->
+    <div id="side-chat" class="side-nav">
+      <button id="btn-new" class="nav-new" title="新建一个会话（Ctrl+N）">
+        <span class="nav-ico">＋</span>新建任务
+        <span class="kbd">Ctrl N</span>
+      </button>
+
+      <nav class="side-menu">
+        <button class="nav-item" data-act="todo" title="Agent 拆解出的任务步骤会出现在这里">任务清单</button>
+        <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
+        <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
+        <button class="nav-item" data-act="cron" title="到点让 Agent 自己干活，无人值守">定时任务</button>
+        <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
+      </nav>
+
+      <div class="section">
+        <h3 class="sec-head"><span>项目</span>
+          <button id="btn-project-add" class="sec-ops" title="添加项目：选择一个文件夹（Agent 的工作目录会切过去）">＋</button>
+        </h3>
+        <ul id="project-list" class="list project-list"></ul>
+      </div>
+
+      <div class="section">
+        <h3>会话</h3>
+        <input id="session-search" class="session-search" type="text"
+               placeholder="搜索会话与消息…" autocomplete="off">
+        <div id="search-scope" class="seg-row seg-mini">
+          <button data-scope="project" class="active" title="只在当前项目里搜">本项目</button>
+          <button data-scope="all" title="在所有项目（含快聊）里搜；记不住在哪个项目聊过时用">全部项目</button>
+        </div>
+        <ul id="session-list" class="list"></ul>
+        <div id="session-footer" class="hidden"></div>
+      </div>
+    </div>
+
+    <!-- 设置模式：侧栏切换为设置子项目导航 -->
+    <div id="side-settings" class="side-nav hidden">
+      <div class="section">
+        <h3>设置</h3>
+        <ul id="settings-nav" class="list">
+          <li class="active" data-target="providers">模型服务</li>
+          <li data-target="skills">技能与工具</li>
+          <li data-target="subagents">子代理</li>
+          <li data-target="mcp">MCP 服务</li>
+          <li data-target="rules">本项目白名单</li>
+          <li data-target="advanced">高级</li>
+          <li data-target="memory">全局记忆</li>
+          <li data-target="ui">界面与通知</li>
+          <li data-target="snippets">快捷指令</li>
+          <li data-target="usage">用量</li>
+          <li data-target="about">关于</li>
+        </ul>
+      </div>
+    </div>
+
+    <div id="zoom-row" class="zoom-row" title="调整整个界面的显示大小（字体随内容一起缩放）">
+      <span class="zoom-cap">界面</span>
+      <button id="btn-zoom-out" class="zoom-btn" title="缩小界面">−</button>
+      <span id="zoom-label" class="zoom-label">90%</span>
+      <button id="btn-zoom-in" class="zoom-btn" title="放大界面">＋</button>
+    </div>
+    <button id="btn-settings" class="btn-ghost wide settings-entry">⚙ 设置</button>
+  </aside>
+
+  <!-- 拖动调整侧栏宽度（双击恢复默认） -->
+  <div id="sb-resizer" class="ui-resizer ui-resizer-v" title="拖动调整侧栏宽度 · 双击恢复默认"></div>
+
+  <!-- ========== 右侧主区 ========== -->
+  <main id="main">
+
+    <!-- 视图一：对话 -->
+    <div id="view-chat" class="view">
+      <div id="chat-main">
+        <!-- 会话标签条：多会话并行，单标签时隐藏；放主区最顶行 -->
+        <div id="chat-tabs" class="hidden"></div>
+
+        <header id="topbar">
+          <span class="spacer"></span>
+          <span id="usage" class="dim small"></span>
+          <button id="btn-help" class="tb-icon" title="帮助：快速上手 · 快捷键 · 常见问题">？</button>
+          <button id="btn-bell" class="tb-icon" title="通知中心">🔔<span id="bell-badge" class="bell-badge hidden"></span></button>
+          <button id="btn-tabs" class="tb-icon" title="展开 / 收起右侧面板"></button>
+          <button id="btn-stop" class="btn-ghost danger" hidden>⏹ 停止</button>
+        </header>
+
+        <div id="cfg-banner" hidden>
+          <span id="cfg-banner-text"></span>
+          <button id="cfg-banner-close" class="banner-close" title="关闭">✕</button>
+        </div>
+
+        <div id="chat">
+          <!-- 对话内查找条（Ctrl+F）：在消息里找词、上下跳转、高亮 -->
+          <div id="find-bar" class="find-bar hidden">
+            <input id="find-input" type="text" placeholder="在本对话里查找…" autocomplete="off">
+            <span id="find-count" class="dim small">0/0</span>
+            <button id="find-prev" class="rp-mini" title="上一个（Shift+Enter / ↑）">↑</button>
+            <button id="find-next" class="rp-mini" title="下一个（Enter / ↓）">↓</button>
+            <button id="find-close" class="rp-mini" title="关闭（Esc）">✕</button>
+          </div>
+          <!-- 对话区宠物：云朵小羊（待机浮动 / 干活蹦跶 / 等确认摇晃 / 点击互动；拖动松手会云朵式飘落，双击回默认位，设置里可关） -->
+          <div id="chat-pet" title="云朵小羊 · 拖到哪儿松手就飘落到哪儿 · 双击回到右下角 · 点我一下">
+            <div id="pet-bubble" class="pet-bubble hidden"></div>
+            <img id="pet-img" src="/static/cloud-sheep.png" alt="云朵小羊" draggable="false">
+          </div>
+        </div>
+
+        <div id="permission-bar" hidden>
+          <div class="perm-head">🔒 需要确认：<b id="perm-tool"></b></div>
+          <pre id="perm-args"></pre>
+          <div class="perm-actions">
+            <button class="btn-primary" data-decision="allow_once">允许一次</button>
+            <button class="btn-ghost" data-decision="allow_always">总是允许（本项目）</button>
+            <button class="btn-ghost danger" data-decision="deny">拒绝</button>
+          </div>
+        </div>
+
+        <!-- 输入浮层：/ 命令菜单 与 @ 文件提及 共用 -->
+        <div id="input-menu" class="input-menu hidden"></div>
+
+        <!-- 圆桌成员选择浮层 -->
+        <div id="rt-menu" class="rt-menu hidden"></div>
+
+        <!-- 拖动调整输入区高度（双击恢复默认） -->
+        <div id="cp-resizer" class="ui-resizer ui-resizer-h" title="拖动调整输入区高度 · 双击恢复默认"></div>
+
+        <footer id="composer">
+          <div id="image-tray" class="image-tray hidden"></div>
+          <textarea id="input" rows="2" placeholder="描述你的任务…"></textarea>
+          <div id="composer-bar">
+            <!-- 功能开关收成小图标：悬停看说明，激活亮主题色（规划蓝 / 圆桌紫 / 写入金） -->
+            <button id="mode-switch" class="cp-icon" title="当前：执行模式 · 点击切到规划模式">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.8 13.2h5.7L10.2 22l8.9-11.6h-5.6L13 2z"/></svg>
+            </button>
+            <span id="rt-group">
+              <button id="rt-switch" class="cp-icon" title="圆桌：开启后本条消息由多个模型共同思考，融合成更好的答案">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.7-3.4 2.9-5.2 5.5-5.2s4.8 1.8 5.5 5.2"/><circle cx="17" cy="9.5" r="2.5"/><path d="M15.7 14.6c2.5.3 4.3 1.9 4.8 4.4"/></svg>
+              </button>
+              <button id="rt-pick" class="cp-caret" title="选择圆桌成员">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
+              </button>
+            </span>
+            <button id="accept-switch" class="cp-icon" title="当前每次写入/执行都会征询。点击开启「自动允许写入」（执行命令仍会确认）">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 4.5l4 4L8.5 19.5l-5 1.2 1.2-5L15.5 4.5z"/><path d="M13.5 6.5l4 4"/></svg>
+            </button>
+            <button id="file-attach" class="cp-icon" title="添加文件：选本机任意文件（支持项目外的文件与多选），插入 @ 路径让 Agent 读取；图片可直接粘贴或拖入">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7l-4-4z"/><path d="M14 3v4h4"/><path d="M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg>
+            </button>
+            <span id="cp-hint" title="Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
+            <!-- 连接状态 + 思考强度：贴在模型选择器左侧 -->
+            <span id="conn-status" class="dot off" title="与本地引擎的连接状态"></span>
+            <span id="status-text" class="dim small">连接中…</span>
+            <button id="reasoning-chip" class="chip chip-reasoning hidden"
+                    title="调整模型的思考强度（自动 / 低 / 中 / 高）"></button>
+            <!-- 上下文容量环形仪表：环=已占用比例，环内数字=百分比（≥70% 金 / ≥90% 红） -->
+            <span id="ctx-ring" class="hidden">
+              <svg viewBox="0 0 24 24">
+                <circle class="ring-track" cx="12" cy="12" r="9"></circle>
+                <circle class="ring-val" cx="12" cy="12" r="9"></circle>
+                <text class="ring-txt" x="12" y="12.4"></text>
+              </svg>
+            </span>
+            <!-- 模型选择器：参考 Cherry Studio 布局，放在发送按钮左侧（点击弹已启用模型菜单） -->
+            <span id="model-chip"></span>
+            <button id="btn-send" class="btn-primary">发送</button>
+          </div>
+        </footer>
+      </div>
+
+      <!-- 拖动调整右侧面板宽度（双击恢复默认） -->
+      <div id="rp-resizer" class="ui-resizer ui-resizer-v hidden" title="拖动调整面板宽度 · 双击恢复默认"></div>
+
+      <!-- 右侧标签页面板：标签头由 JS 渲染 -->
+      <aside id="right-panel" class="hidden">
+        <div id="rp-tabs"></div>
+        <div id="rp-body">
+
+          <section id="rp-page-aux" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <span class="dim small">主对话之外的快速提问，独立进行、不占用主会话。</span>
+              <span class="spacer"></span>
+              <button id="aux-clear" class="rp-mini" title="清空辅助对话">清空</button>
+            </div>
+            <div id="aux-log"><div class="rp-empty">在这里问点小问题，不会进入主对话，也不会写进会话记录。</div></div>
+            <div class="aux-row">
+              <textarea id="aux-input" rows="2" placeholder="问点小的…（Enter 发送 / Shift+Enter 换行）"></textarea>
+              <button id="aux-send" class="rp-mini primary">发送</button>
+            </div>
+          </section>
+
+          <section id="rp-page-review" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <span class="dim small">本会话中 Agent 改过的文件，点一轮查看改前 → 现在的差异。</span>
+              <span class="spacer"></span>
+              <button id="review-refresh" class="rp-mini">刷新</button>
+            </div>
+            <div id="review-list"></div>
+            <div id="review-diff" class="hidden">
+              <div class="rp-toolbar">
+                <b id="review-diff-title" class="small"></b>
+                <span class="spacer"></span>
+                <button id="review-diff-close" class="rp-mini">关闭</button>
+              </div>
+              <div id="review-diff-body"></div>
+            </div>
+          </section>
+
+          <section id="rp-page-terminal" class="rp-page hidden">
+            <div id="term-out"></div>
+            <div class="term-row">
+              <button id="term-stop" class="rp-mini danger hidden" title="结束当前命令（整个进程树）">⏹ 停止</button>
+              <span class="term-ps1">❯</span>
+              <input id="term-in" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="输入命令，Enter 运行（↑↓ 翻历史）">
+              <button id="term-to-agent" class="rp-mini" title="把终端最近输出作为上下文带入输入框">→ Agent</button>
+              <button id="term-run" class="rp-mini primary">运行</button>
+            </div>
+          </section>
+
+          <section id="rp-page-files" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <span class="dim small">工作区文件 · 点击预览（只读）</span>
+              <span class="spacer"></span>
+              <button id="files-refresh" class="rp-mini">刷新</button>
+            </div>
+            <div id="files-tree" class="files-tree"></div>
+            <div id="files-preview" class="files-preview hidden">
+              <div class="rp-toolbar">
+                <b id="files-preview-title" class="small"></b>
+                <span class="spacer"></span>
+                <button id="files-preview-open" class="rp-mini" title="用系统默认程序打开（脚本/可执行文件只在文件管理器里定位）">↗ 打开</button>
+                <button id="files-preview-close" class="rp-mini">关闭预览</button>
+              </div>
+              <pre id="files-preview-body"></pre>
+            </div>
+          </section>
+
+          <section id="rp-page-tasks" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <span class="dim small">Agent 拆解出的子代理任务（后台并行）</span>
+              <span class="spacer"></span>
+              <button id="tasks-cancel" class="rp-mini danger">全部取消</button>
+              <button id="tasks-refresh" class="rp-mini">刷新</button>
+            </div>
+            <div id="tasks-list" class="tasks-list"></div>
+          </section>
+
+          <section id="rp-page-browser" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <input id="browser-url" type="text" placeholder="输入网址，如 http://127.0.0.1:8000">
+              <button id="browser-go" class="rp-mini primary">前往</button>
+              <button id="browser-reload" class="rp-mini" title="重新加载">⟳</button>
+            </div>
+            <iframe id="browser-frame" class="hidden" title="浏览器预览"></iframe>
+            <div id="browser-empty" class="rp-empty">在地址栏输入网址即可在面板里预览——比如 Agent 刚帮你起好的本地开发服务器。</div>
+          </section>
+
+          <section id="rp-page-todo" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <span class="dim small">Agent 拆解的任务步骤会实时同步到这里。</span>
+            </div>
+            <ul id="todo-list" class="list todo-list rp-page-list"></ul>
+            <div id="todo-empty" class="rp-empty">当前还没有任务清单 —— 给 Agent 一个多步骤任务，它拆解后的步骤会出现在这里。</div>
+          </section>
+
+          <section id="rp-page-agenda" class="rp-page hidden">
+            <div class="ag-topbar">
+              <div class="ag-heading">
+                <b>日程</b>
+                <span class="dim small">安排你的时间</span>
+              </div>
+              <button id="btn-agenda-add" class="rp-mini primary">＋ 新建日程</button>
+            </div>
+            <div class="ag-hint">✎ 可直接对 Agent 说：创建、调整或删除日程</div>
+            <div class="ag-toolbar">
+              <div class="ag-seg" id="ag-view-seg">
+                <button data-v="week" class="active">周</button>
+                <button data-v="month">月</button>
+              </div>
+              <button id="ag-list-btn" class="rp-mini" title="按时间分组列出全部日程">分组</button>
+              <span class="spacer"></span>
+              <span id="ag-navcluster" class="ag-navcluster">
+                <button id="ag-prev" class="ag-nav" title="上一周">‹</button>
+                <b id="ag-range" class="small"></b>
+                <button id="ag-next" class="ag-nav" title="下一周">›</button>
+                <button id="ag-today" class="rp-mini" title="回到今天所在周">今天</button>
+              </span>
+            </div>
+            <div id="ag-week" class="ag-week"></div>
+            <div id="ag-month" class="ag-month hidden"></div>
+            <ul id="agenda-list" class="list agenda-list rp-page-list hidden"></ul>
+          </section>
+
+          <section id="rp-page-cron" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <span class="dim small">到点让 Agent 自己干活，无人值守。</span>
+              <span class="spacer"></span>
+              <button id="btn-cron-add" class="rp-mini" title="新增定时任务">＋ 新增</button>
+            </div>
+            <ul id="cron-list" class="list cron-list rp-page-list"></ul>
+          </section>
+
+        </div>
+      </aside>
+    </div>
+
+    <!-- 视图二：设置 -->
+    <div id="view-settings" class="view hidden">
+      <header id="settings-topbar">
+        <h2>设置</h2>
+      </header>
+
+      <div class="settings-body">
+        <section class="settings-page" id="settings-page-providers">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3 id="provider-card-title">模型服务</h3>
+              <button id="btn-add-provider" class="btn-ghost">＋ 添加自定义服务</button>
+            </div>
+
+            <!-- 列表视图：紧凑展示每个服务，点一行进入它的配置 -->
+            <div id="provider-list-view">
+              <p class="settings-hint">
+                点是哪一行就进哪个服务的配置。<b class="star">★</b> 是启动默认模型，「使用中」是当前对话所用模型。
+                列表里没有的服务（自建中转、公司内网、其他厂商）用右上角按钮自己添加；
+                用不到的进它的配置里点「删除」即可移出列表（内置服务删掉后可随时恢复）。
+              </p>
+              <div id="provider-status" class="card-status" hidden></div>
+              <div id="provider-list"></div>
+              <div id="provider-hidden" class="hidden-providers" hidden></div>
+            </div>
+
+            <!-- 详情视图：单个服务的配置 -->
+            <div id="provider-detail" hidden>
+              <div class="detail-head">
+                <button id="btn-provider-back" class="btn-ghost">← 服务列表</button>
+                <span class="detail-title" id="provider-detail-title"></span>
+              </div>
+              <div id="provider-detail-status" class="card-status" hidden></div>
+              <div id="provider-detail-body"></div>
+            </div>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-skills">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>技能</h3>
+              <span class="head-ops">
+                <button id="btn-market" class="btn-ghost">🛍 技能广场</button>
+                <button id="btn-import-skill" class="btn-ghost">＋ 导入技能</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              技能是写给 Agent 看的「操作手册」：启用后相关用法会进入系统提示词，Agent 会在合适的任务里自动套用。
+              点右上角「导入技能」：可以选本机的技能文件夹或 .zip 压缩包，也可以直接粘贴
+              <b>GitHub / Gitee 仓库链接</b>在线安装，装完立即生效。「技能广场」里有精选技能可一键安装。
+            </p>
+            <div id="skill-status" class="card-status" hidden></div>
+            <ul id="settings-skill-list" class="list settings-skill-list"></ul>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>联网搜索</h3></div>
+            <p class="settings-hint" id="websearch-hint"></p>
+            <div id="websearch-status" class="card-status" hidden></div>
+            <div id="websearch-form" class="toolcfg-form"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>AI 画图</h3></div>
+            <p class="settings-hint" id="imagegen-hint"></p>
+            <div id="imagegen-status" class="card-status" hidden></div>
+            <div id="imagegen-form" class="toolcfg-form"></div>
+          </section>
+          <section class="settings-card">
+            <h3>内置工具</h3>
+            <p class="settings-hint">
+              Agent 完成任务时可以调用的工具。<b>只读</b>操作自动放行；<b>写入</b>与<b>高危</b>（执行命令）操作默认会先征得你确认。
+            </p>
+            <ul id="settings-tool-list" class="list settings-tool-list"></ul>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-subagents">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>基础设置</h3>
+              <label class="toggle-row"><input type="checkbox" id="subagent-toggle"><span>启用子代理</span></label>
+            </div>
+            <p class="settings-hint">
+              子代理是 Agent 派出去的「分身」：调研、后台跑任务可以并行做，不挤占主对话。
+              关闭后 Agent 只用主对话逐步处理；开启后还可限制每个分身最多干多少轮。
+            </p>
+            <div id="subagent-status" class="card-status" hidden></div>
+            <div id="subagent-form" class="toolcfg-form"></div>
+          </section>
+
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>自定义子代理</h3>
+              <button id="btn-subagent-add" class="btn-ghost">＋ 新建子代理</button>
+            </div>
+            <p class="settings-hint">
+              给特定任务定制「分身」：起个名字、写清楚它负责什么、给它专项指令，再挑一套工具和模型。
+              保存后 Agent 在合适的任务里会自动派它出场（对话里也可以点名让它用）。
+              注意：无论给多少工具，子代理里的写入 / 执行操作仍会被自动拒绝——需要确认的操作由主 Agent 来做。
+            </p>
+            <div id="custom-subagent-status" class="card-status" hidden></div>
+            <ul id="custom-subagent-list" class="list custom-subagent-list"></ul>
+          </section>
+
+          <section class="settings-card">
+            <h3>内置子代理</h3>
+            <p class="settings-hint">
+              general-purpose 负责多步通用任务，Explore 专做只读调研。
+              可以为它们单独指定模型和思考强度；留空（跟随主对话）就用当前对话的模型。
+            </p>
+            <div id="builtin-subagent-status" class="card-status" hidden></div>
+            <ul id="builtin-subagent-list" class="list builtin-subagent-list"></ul>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-mcp">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>MCP 服务</h3>
+              <span class="head-ops">
+                <button id="btn-import-mcp" class="btn-ghost">＋ 导入配置</button>
+                <button id="btn-add-mcp" class="btn-ghost">＋ 手动添加</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              MCP 让 Agent 接入外部工具（浏览器、数据库、办公软件…）。
+              下面一排是内置常用服务，点「＋ 添加」即接入并即时可用；
+              也可「导入配置」粘贴一段 MCP 配置（Claude Desktop 的 <b>mcpServers</b> 格式）或选一个 .json 文件，
+              「手动添加」逐个填。改完立即生效、不用重启。
+            </p>
+            <div id="mcp-status" class="card-status" hidden></div>
+            <div id="settings-mcp-presets" class="mcp-preset-grid"></div>
+            <ul id="settings-mcp-list" class="list settings-mcp-list"></ul>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-rules">
+          <section class="settings-card">
+            <h3>本项目白名单</h3>
+            <p class="settings-hint">
+              你在对话中选择「总是允许」时保存的规则；删除后对应操作会重新询问。
+            </p>
+            <ul id="rules-list" class="list rules-list"></ul>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-advanced">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>运行参数</h3>
+              <button id="btn-advanced-save" class="btn-ghost">保存</button>
+            </div>
+            <p class="settings-hint">
+              这些参数平时不用动。Agent 干到一半自己停下（轮数用尽）、或者长对话总是在快要压缩时卡住时，再来调。
+            </p>
+            <div id="advanced-status" class="card-status" hidden></div>
+            <div class="toolcfg-form">
+              <div class="toolcfg-row">
+                <label>最大执行轮数</label>
+                <input type="number" id="adv-max-iterations" min="1" max="200" step="1">
+                <span class="dim small">默认 40。Agent 调工具一次算一轮；复杂任务可调到 60–80</span>
+              </div>
+              <div class="toolcfg-row">
+                <label>上下文上限</label>
+                <input type="number" id="adv-context-limit" min="4000" max="2000000" step="4000">
+                <span class="dim small" id="adv-context-hint"></span>
+              </div>
+              <div class="toolcfg-row">
+                <label>压缩保留条数</label>
+                <input type="number" id="adv-keep-recent" min="2" max="100" step="1">
+                <span class="dim small">默认 8。自动压缩历史时，最近这么多条原样保留</span>
+              </div>
+              <div class="toolcfg-row">
+                <label>每日 token 预算</label>
+                <input type="number" id="adv-daily-budget" min="0" step="10000" placeholder="0">
+                <span class="dim small">0 = 不限制。当天累计用量达到上限后不再发送新消息，明天自动重置</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-card">
+            <h3>安全与后台</h3>
+            <p class="settings-hint">
+              这些开关影响 Agent 能碰什么、以及它能自己醒着干活的范围。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="adv-restrict-workdir">
+              <span>仅允许 Agent 访问当前工作目录</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              开启后，读写工作目录以外的文件会被直接拒绝（包括 <b>@</b> 引用的外部文件）。
+              只读工具平时是自动放行的，这个开关给"只看这一个项目"上把锁。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="adv-computer-control">
+              <span>启用电脑控制工具（截屏 / 鼠标 / 键盘 / 剪贴板）</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              让 Agent 能「看见并操作」你的桌面：截屏进对话、移动鼠标、输入文字。
+              高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，
+              有「帮我操作这个软件」这类需求时再打开。保存后立即对所有会话生效。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="adv-browser-control">
+              <span>启用浏览器控制（Agent 打开网页 / 搜索）</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              让 Agent 能用你的默认浏览器打开网址或搜索关键词（比如「帮我打开这个链接」
+              「搜一下最近的新闻给我看」）。页面在你的浏览器里打开，逐次确认，
+              可按动作加白名单；<b>默认关闭</b>。Agent 自己读网页内容不受此开关影响（web_fetch）。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="adv-autostart">
+              <span>开机自动启动 SkySheep</span>
+            </label>
+            <p class="dim small adv-toggle-desc" id="adv-autostart-hint"></p>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-memory">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>全局记忆</h3>
+              <button id="btn-memory-save" class="btn-ghost">保存</button>
+            </div>
+            <p class="settings-hint">
+              跨项目生效的用户记忆：Agent 对话中说「记住我喜欢…」时会自动写进来（格式为
+              <b>- [日期] 内容</b> 的列表），每一轮对话都会注入。这里可以直接查看、修改；
+              保存后对所有会话立即生效。与之相对，「项目记忆」只对当前项目生效。
+            </p>
+            <div id="memory-status" class="card-status" hidden></div>
+            <textarea id="memory-text" class="memory-text" rows="14"
+                      placeholder="Agent 还没有记住任何东西。也可以在这里手动添加，例如：&#10;- [2026-09-15] 沟通偏好直接给结论，不用铺垫"></textarea>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-ui">
+          <section class="settings-card">
+            <h3>主题</h3>
+            <p class="settings-hint">
+              「跟随系统」按 Windows 的深浅色自动切换；标题栏颜色会一起变。
+            </p>
+            <div id="theme-seg" class="seg-row">
+              <button data-theme-mode="auto">跟随系统</button>
+              <button data-theme-mode="light">浅色 · 纸墨</button>
+              <button data-theme-mode="dark">深色 · 夜墨</button>
+            </div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>📱 手机控制</h3>
+              <label class="toggle-row"><input type="checkbox" id="lan-toggle"><span>开启</span></label>
+            </div>
+            <p class="settings-hint">
+              用手机遥控这台电脑上的 SkySheep：开启后（<b>重启 SkySheep 生效</b>），同一 Wi-Fi 下的
+              手机 / 平板扫码或输入地址，即可打开<b>完整界面</b>——继续聊天、批准确认、看任务进度，
+              电脑端同步可见。服务将对局域网开放，令牌即密码，请勿在公共网络使用；关闭后恢复仅本机访问。
+            </p>
+            <div id="lan-info" class="lan-info"></div>
+          </section>
+          <section class="settings-card">
+            <h3>Windows 系统通知</h3>
+            <p class="settings-hint">
+              窗口失焦时，任务完成、Agent 等待确认会弹系统通知；前台使用时不打扰。
+              无人值守的定时任务结果也会通知。
+            </p>
+            <label class="toggle-row">
+              <input type="checkbox" id="notify-toggle">
+              <span>开启系统通知</span>
+            </label>
+          </section>
+          <section class="settings-card">
+            <h3>对话区宠物</h3>
+            <p class="settings-hint">
+              聊天流右下角的「云朵小羊」：Agent 干活时它会蹦跶，等待你确认时摇晃提醒，点它会跟你打招呼。
+            </p>
+            <label class="toggle-row">
+              <input type="checkbox" id="pet-toggle">
+              <span>显示云朵小羊</span>
+            </label>
+          </section>
+          <section class="settings-card">
+            <h3>界面缩放</h3>
+            <p class="settings-hint">
+              在左侧边栏底部的「界面 −/+」控件随时调整整个界面的显示大小（70%–120%，步长 10%），
+              字体随内容一起缩放，偏好自动保存。
+            </p>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-snippets">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>快捷指令</h3>
+              <button id="btn-snippet-add" class="btn-ghost">＋ 新建</button>
+            </div>
+            <p class="settings-hint">
+              常用的提示词模板。在输入框输入 <b>/</b> 时会出现在候选最上方，选中即插入到输入框。
+              内容里的 <b>{{clipboard}}</b> 会在插入时替换为当前剪贴板文本。
+            </p>
+            <ul id="snippets-list" class="list snippets-list"></ul>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-usage">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>使用统计</h3>
+              <button id="usage-refresh" class="btn-ghost">刷新</button>
+            </div>
+            <p class="settings-hint">
+              记录每轮对话实际消耗的 tokens。想看费用：在各服务的编辑页填「每百万 tokens 单价」
+              （输入价 / 输出价，单位：元），保存后这里会显示估算费用。
+            </p>
+            <div id="usage-tiles" class="usage-tiles"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>Token 活动</h3>
+              <div class="usage-tabs" id="usage-range-tabs">
+                <button data-days="7">近 7 日</button>
+                <button data-days="14" class="active">近 14 日</button>
+                <button data-days="30">近 30 日</button>
+              </div>
+            </div>
+            <div id="usage-trend" class="usage-trend"></div>
+            <div id="usage-trend-legend" class="usage-legend-inline"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>模型用量</h3>
+              <span id="usage-cost" class="dim small"></span>
+            </div>
+            <div id="usage-models" class="usage-models"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>会话排行</h3>
+            </div>
+            <div id="usage-sessions" class="usage-block"></div>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-about">
+          <section class="settings-card">
+            <h3>关于</h3>
+            <div id="about-info" class="about"></div>
+            <div id="about-update" class="about-update"></div>
+          </section>
+          <section class="settings-card">
+            <h3>数据与隐私</h3>
+            <p class="settings-hint">
+              SkySheep 是纯本地应用：会话记录、配置、API Key 全部只保存在你自己的电脑上，不经过任何第三方服务器。以下是你本机的数据位置。
+            </p>
+            <div id="about-privacy" class="about"></div>
+            <div class="io-row">
+              <button id="btn-open-data" class="btn-ghost">📂 打开数据文件夹</button>
+              <button id="btn-open-logs" class="btn-ghost">📄 打开日志文件夹</button>
+              <button id="btn-diag" class="btn-ghost" title="把版本、系统信息、日志和打码后的配置打包成一个 zip，出问题时发给开发者">🧰 导出诊断包</button>
+              <button id="btn-feedback" class="btn-ghost" title="一键生成诊断包并打开 GitHub 反馈页（诊断包已自动打码，不含会话正文）">💬 反馈问题</button>
+              <span id="diag-msg" class="io-msg"></span>
+            </div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>会话库备份</h3>
+              <button id="btn-backups-refresh" class="btn-ghost">刷新</button>
+            </div>
+            <p class="settings-hint">
+              SkySheep 每次启动前都会给会话数据库留一份备份（保留最近 20 份）。
+              误删了会话、或数据不对劲时，可以在这里挑一个较早的版本恢复。
+              <b>恢复会用备份整体替换当前数据</b>，所以恢复前系统会自动把现状另存一份，随时能换回来。
+            </p>
+            <div id="backup-status" class="card-status" hidden></div>
+            <ul id="backup-list" class="list"></ul>
+          </section>
+          <section class="settings-card">
+            <h3>设置导出 / 导入</h3>
+            <p class="settings-hint">
+              把模型服务（含 API Key）、MCP 配置、界面偏好、全局记忆打包成一个 zip，
+              在另一台电脑上导入即可完成迁移。会话记录不包含在内。
+            </p>
+            <div id="about-io" class="io-row">
+              <button id="btn-settings-export" class="btn-ghost">⬇ 导出设置（zip）</button>
+              <button id="btn-settings-import" class="btn-ghost">⬆ 导入设置</button>
+              <span class="io-msg"></span>
+            </div>
+          </section>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+<div id="session-menu" class="session-menu hidden"></div>
+<div id="model-menu" class="session-menu model-menu hidden"></div>
+<div id="reasoning-menu" class="session-menu model-menu hidden"></div>
+<div id="notif-panel" class="session-menu notif-panel hidden"></div>
+<div id="modal" class="overlay hidden">
+  <div class="modal-box">
+    <h3 id="modal-title"></h3>
+    <div id="modal-content"></div>
+    <div class="modal-ops">
+      <button id="modal-cancel" class="btn-ghost">取消</button>
+      <button id="modal-ok" class="btn-primary">确定</button>
+    </div>
+  </div>
+</div>
+<script src="/static/vendor/mermaid.min.js"></script>
+<script src="/static/vendor/highlight.min.js"></script>
+<script src="/static/vendor/qrcode.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

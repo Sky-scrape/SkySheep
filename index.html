@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkySheep — 跑在你电脑上的 AI Agent 工作台</title>
+<meta name="description" content="SkySheep 是开源（MIT）的桌面 AI Agent 工作台：能读文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键回滚，数据不出本机。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐑</text></svg>">
+<style>
+:root{
+  color-scheme: light;
+  --paper:#E8DFC7;
+  --band:#EFE8D2;
+  --card:#F4EFDE;
+  --ink:#1D1A16;
+  --ink-2:#6B6250;
+  --line:rgba(29,26,22,.16);
+  --line-strong:rgba(29,26,22,.42);
+  --accent:#3B82F6;
+  --accent-soft:rgba(59,130,246,.14);
+  --nav:rgba(232,223,199,.88);
+  --code-bg:#211E19;
+  --code-ink:#E8DFC7;
+  --shot-border:rgba(29,26,22,.5);
+  --shadow:0 12px 32px rgba(29,26,22,.14);
+  --shadow-btn:0 6px 16px rgba(59,130,246,.32);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    color-scheme: dark;
+    --paper:#171512;
+    --band:#1C1915;
+    --card:#201D18;
+    --ink:#E8DFC7;
+    --ink-2:#A99F87;
+    --line:rgba(232,223,199,.14);
+    --line-strong:rgba(232,223,199,.34);
+    --accent:#5B96F8;
+    --accent-soft:rgba(91,150,248,.16);
+    --nav:rgba(23,21,18,.88);
+    --code-bg:#0F0E0C;
+    --code-ink:#E8DFC7;
+    --shot-border:rgba(232,223,199,.24);
+    --shadow:0 12px 32px rgba(0,0,0,.5);
+    --shadow-btn:0 6px 16px rgba(0,0,0,.4);
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:84px}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
+  line-height:1.75;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--accent-soft)}
+a{color:var(--accent)}
+.wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+h1,h2,h3{text-wrap:balance}
+
+/* ── 顶部导航 ─────────────────────────── */
+.nav{
+  position:sticky;top:0;z-index:50;
+  background:var(--nav);
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+}
+.nav-inner{display:flex;align-items:center;gap:14px;height:60px}
+.brand{
+  display:flex;align-items:center;gap:8px;
+  font-weight:800;font-size:1.12rem;letter-spacing:.04em;
+  color:var(--ink);text-decoration:none;white-space:nowrap;
+}
+.nav-links{display:flex;gap:4px;margin-left:auto}
+.nav-links a{
+  color:var(--ink-2);text-decoration:none;
+  padding:6px 12px;border-radius:9px;font-size:.95rem;
+  transition:color .15s,background .15s;
+}
+.nav-links a:hover{color:var(--ink);background:var(--accent-soft)}
+.gh{
+  display:inline-flex;align-items:center;gap:6px;
+  color:var(--ink);text-decoration:none;font-size:.95rem;font-weight:600;
+  border:1px solid var(--line-strong);border-radius:9px;padding:5px 12px;
+  transition:border-color .15s,background .15s;
+  white-space:nowrap;
+}
+.gh:hover{border-color:var(--accent);background:var(--accent-soft)}
+.gh svg{width:17px;height:17px;fill:currentColor;flex:none}
+@media (max-width:640px){
+  .nav-links{display:none}
+  .gh{margin-left:auto}
+}
+
+/* ── Hero ─────────────────────────────── */
+.hero{padding:76px 0 48px;text-align:center}
+.pill{
+  display:inline-block;
+  color:var(--accent);background:var(--accent-soft);
+  border:1px solid var(--accent);
+  border-radius:999px;
+  font-size:.85rem;font-weight:600;letter-spacing:.08em;
+  padding:4px 16px;margin-bottom:22px;
+}
+.hero h1{
+  margin:0 auto;max-width:760px;
+  font-size:clamp(2.1rem,5.4vw,3.5rem);
+  line-height:1.24;letter-spacing:.01em;
+}
+.hl{
+  background:linear-gradient(transparent 62%,var(--accent-soft) 0);
+  box-shadow:inset 0 -0.35em var(--accent-soft);
+}
+.sub{
+  max-width:660px;margin:20px auto 0;
+  color:var(--ink-2);
+  font-size:clamp(1rem,1.7vw,1.14rem);
+}
+.cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin:30px 0 16px}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:12px 26px;border-radius:12px;
+  font-size:1.02rem;font-weight:700;text-decoration:none;
+  transition:transform .15s,box-shadow .15s,filter .15s;
+}
+.btn:hover{transform:translateY(-2px)}
+.btn-primary{background:var(--accent);color:#fff;box-shadow:var(--shadow-btn)}
+.btn-primary:hover{filter:brightness(1.06)}
+.btn-ghost{color:var(--ink);border:1.5px solid var(--line-strong)}
+.btn-ghost:hover{border-color:var(--accent);background:var(--accent-soft)}
+.meta{color:var(--ink-2);font-size:.87rem;letter-spacing:.05em}
+.hero-shot{
+  max-width:960px;margin:44px auto 0;
+  border:1px solid var(--shot-border);
+  border-radius:14px;overflow:hidden;
+  box-shadow:var(--shadow);
+}
+.hero-shot img{display:block;width:100%;height:auto}
+.shot-cap{color:var(--ink-2);font-size:.85rem;margin-top:14px}
+
+/* ── 区块通用 ─────────────────────────── */
+section{padding:68px 0}
+.band{background:var(--band);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.sec-head{text-align:center;max-width:680px;margin:0 auto 40px}
+.kicker{
+  display:inline-block;color:var(--accent);font-weight:700;
+  font-size:.86rem;letter-spacing:.22em;margin-bottom:10px;
+}
+.sec-head h2{margin:0;font-size:clamp(1.5rem,3.2vw,2.15rem);letter-spacing:.01em}
+.sec-head p{margin:12px auto 0;color:var(--ink-2);max-width:600px}
+
+/* ── 三重安全承诺 ─────────────────────── */
+.sec-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px}
+.sec-card{
+  background:var(--card);
+  border:1px solid var(--line);border-radius:16px;
+  padding:28px 26px;
+  transition:transform .15s,box-shadow .15s;
+}
+.sec-card:hover{transform:translateY(-3px);box-shadow:var(--shadow)}
+.num{
+  width:46px;height:46px;border-radius:50%;
+  display:grid;place-items:center;
+  border:1.5px solid var(--accent);color:var(--accent);
+  font-size:1.15rem;font-weight:800;margin-bottom:16px;
+}
+.sec-card h3{margin:0 0 8px;font-size:1.16rem}
+.sec-card p{margin:0;color:var(--ink-2);font-size:.95rem}
+
+/* ── 功能网格 ─────────────────────────── */
+.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+.feat{
+  background:var(--card);
+  border:1px solid var(--line);border-radius:14px;
+  padding:22px;
+  transition:transform .15s,box-shadow .15s,border-color .15s;
+}
+.feat:hover{transform:translateY(-3px);box-shadow:var(--shadow);border-color:var(--line-strong)}
+.ico{
+  width:44px;height:44px;border-radius:11px;
+  display:grid;place-items:center;font-size:1.4rem;
+  background:var(--accent-soft);margin-bottom:14px;
+}
+.feat h3{margin:0 0 6px;font-size:1.05rem}
+.feat p{margin:0;color:var(--ink-2);font-size:.92rem}
+
+/* ── 截图画廊 ─────────────────────────── */
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}
+.shots figure{
+  margin:0;background:var(--card);
+  border:1px solid var(--shot-border);
+  border-radius:14px;overflow:hidden;
+  box-shadow:var(--shadow);
+}
+.shots img{display:block;width:100%;height:auto;border-bottom:1px solid var(--line)}
+.shots figcaption{padding:13px 16px;color:var(--ink-2);font-size:.9rem}
+.shots b{color:var(--ink)}
+
+/* ── 快速开始 ─────────────────────────── */
+.qs-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media (max-width:860px){.qs-grid{grid-template-columns:1fr}}
+.qs{
+  background:var(--card);
+  border:1px solid var(--line);border-radius:16px;
+  padding:28px 26px;display:flex;flex-direction:column;
+}
+.qs .tag{
+  align-self:flex-start;
+  font-size:.8rem;font-weight:700;letter-spacing:.12em;
+  color:var(--accent);background:var(--accent-soft);
+  border-radius:999px;padding:3px 12px;margin-bottom:14px;
+}
+.qs h3{margin:0 0 12px;font-size:1.2rem}
+.qs ol{margin:0;padding-left:22px;color:var(--ink-2);font-size:.95rem}
+.qs ol li{margin-bottom:8px}
+.qs ol b{color:var(--ink)}
+.qs .btn{align-self:flex-start;margin-top:auto;padding:9px 20px;font-size:.95rem}
+pre{
+  margin:0 0 14px;
+  background:var(--code-bg);color:var(--code-ink);
+  border:1px solid var(--line);border-radius:11px;
+  padding:15px 17px;overflow-x:auto;
+  font-family:ui-monospace,SFMono-Regular,Consolas,"Courier New",monospace;
+  font-size:.88rem;line-height:1.65;
+}
+code{
+  font-family:ui-monospace,SFMono-Regular,Consolas,"Courier New",monospace;
+  background:var(--accent-soft);border-radius:6px;
+  padding:1px 7px;font-size:.88em;
+}
+.note{color:var(--ink-2);font-size:.86rem;margin:0}
+
+/* ── 页脚 ─────────────────────────────── */
+footer{
+  border-top:1px solid var(--line);
+  padding:36px 0 44px;text-align:center;
+  color:var(--ink-2);font-size:.92rem;
+}
+footer .f-links{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+footer a{color:var(--ink);font-weight:600;text-decoration:none}
+footer a:hover{color:var(--accent)}
+.dot{color:var(--line-strong)}
+</style>
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top">🐑 SkySheep</a>
+    <nav class="nav-links">
+      <a href="#features">功能</a>
+      <a href="#security">安全</a>
+      <a href="#shots">截图</a>
+      <a href="#download">下载</a>
+    </nav>
+    <a class="gh" href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      GitHub
+    </a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="wrap">
+      <span class="pill">🐑 开源桌面 AI Agent · 纸墨界面</span>
+      <h1>跑在<span class="hl">你电脑</span>上的<br>AI Agent 工作台</h1>
+      <p class="sub">不只是聊天窗口——它能读你的文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键撤销。</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener">⬇️ 下载最新版</a>
+        <a class="btn btn-ghost" href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">查看源码</a>
+      </div>
+      <p class="meta">Windows · 开源 MIT · 数据不出本机</p>
+      <div class="hero-shot">
+        <img src="docs/images/right-panel.png" width="1280" height="720" alt="SkySheep 深色主题完整界面：左侧会话侧栏、中间对话区、右侧实时面板，右下角是桌面宠物小羊">
+      </div>
+      <p class="shot-cap">深色「夜墨」主题完整界面：侧栏 + 对话区 + 右侧实时面板 + 桌面宠物小羊</p>
+    </div>
+  </section>
+
+  <!-- 三重安全承诺 -->
+  <section id="security" class="band">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">三重安全承诺</span>
+        <h2>敢让它动手，也随时能后悔</h2>
+        <p>这是 SkySheep 与所有聊天客户端的根本差异：Agent 真正执行操作，但每一步都在你的视线之内。</p>
+      </div>
+      <div class="sec-grid">
+        <div class="sec-card">
+          <div class="num">壹</div>
+          <h3>敏感操作先确认</h3>
+          <p>写文件先展示 diff 逐行过目，执行命令逐次确认；拿不准的操作，不放行就跑不了。</p>
+        </div>
+        <div class="sec-card">
+          <div class="num">贰</div>
+          <h3>数据全在本机</h3>
+          <p>会话与配置存于本机 SQLite，无账号、无遥测，数据不出你的电脑。</p>
+        </div>
+        <div class="sec-card">
+          <div class="num">叁</div>
+          <h3>检查点一键回滚</h3>
+          <p>每轮改动自动快照成检查点，改坏了随时一键恢复到上一刻。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 功能网格 -->
+  <section id="features">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">功能</span>
+        <h2>小羊的十八般武艺</h2>
+        <p>从一个对话窗口，长成真正能干活的桌面工作台。</p>
+      </div>
+      <div class="feat-grid">
+        <div class="feat">
+          <div class="ico">🔌</div>
+          <h3>多模型服务</h3>
+          <p>智谱、DeepSeek、Kimi、OpenRouter、Anthropic，以及 Ollama 本地模型，填好 API Key 一键接入。</p>
+        </div>
+        <div class="feat">
+          <div class="ico">🧩</div>
+          <h3>MCP 与技能扩展</h3>
+          <p>兼容 Claude Desktop 的 MCP 配置，技能广场一键安装，能力随取随用。</p>
+        </div>
+        <div class="feat">
+          <div class="ico">🖱️</div>
+          <h3>电脑控制</h3>
+          <p>截屏、鼠标、键盘自动化，全程确认制 + 动作级白名单，边界由你划。</p>
+        </div>
+        <div class="feat">
+          <div class="ico">⏰</div>
+          <h3>定时任务与日程</h3>
+          <p>周期任务到点执行、支持提醒，手机可在局域网直接访问工作台。</p>
+        </div>
+        <div class="feat">
+          <div class="ico">👥</div>
+          <h3>圆桌多模型</h3>
+          <p>多个模型并行作答，「主席」模型融合众长，给出更稳的结论。</p>
+        </div>
+        <div class="feat">
+          <div class="ico">📄</div>
+          <h3>文档读写</h3>
+          <p>PDF / Word / Excel 读进来，Word / Excel / CSV 写出去，报告一键生成。</p>
+        </div>
+        <div class="feat">
+          <div class="ico">📊</div>
+          <h3>用量仪表盘</h3>
+          <p>token 用量与费用估算一目了然，花在哪、花多少，心里有数。</p>
+        </div>
+        <div class="feat">
+          <div class="ico">🈶</div>
+          <h3>中文优先</h3>
+          <p>界面、帮助、快捷指令全为中文场景设计，本地模型中文对话同样顺滑。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 截图画廊 -->
+  <section id="shots" class="band">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">截图</span>
+        <h2>眼见为实</h2>
+        <p>纸墨浅色与夜墨深色两套主题，都长在桌面上。</p>
+      </div>
+      <div class="shots">
+        <figure>
+          <img src="docs/images/providers.png" loading="lazy" alt="浅色纸墨主题的模型服务设置页">
+          <figcaption><b>模型服务设置</b>——浅色「纸墨」主题，填好 API Key 即可接入多家服务商。</figcaption>
+        </figure>
+        <figure>
+          <img src="docs/images/agenda.png" loading="lazy" alt="深色主题的日程周历视图">
+          <figcaption><b>日程周历</b>——深色「夜墨」主题，定时任务排进周历，到点自动执行并提醒。</figcaption>
+        </figure>
+        <figure>
+          <img src="docs/images/usage.png" loading="lazy" alt="深色主题的用量统计仪表盘">
+          <figcaption><b>用量仪表盘</b>——token 统计与费用估算实时可见，消耗不再是一笔糊涂账。</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- 快速开始 -->
+  <section id="download">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">快速开始</span>
+        <h2>三分钟跑起来</h2>
+        <p>下载即用，或者从源码亲手拉起来。</p>
+      </div>
+      <div class="qs-grid">
+        <div class="qs">
+          <span class="tag">方式一</span>
+          <h3>下载安装包</h3>
+          <ol>
+            <li>前往 <a href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener">GitHub Releases</a> 下载最新版安装包（Windows）。</li>
+            <li>双击安装，完成后启动 SkySheep 即可。</li>
+            <li>首次运行若被 <b>SmartScreen</b> 拦截，点击「更多信息 → 仍要运行」，详见仓库说明。</li>
+          </ol>
+          <a class="btn btn-primary" href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener">⬇️ 前往下载</a>
+        </div>
+        <div class="qs">
+          <span class="tag">方式二</span>
+          <h3>从源码运行</h3>
+          <pre><code>git clone https://github.com/Sky-scrape/SkySheep.git
+cd SkySheep/engine
+uv sync
+uv run skysheep app</code></pre>
+          <p class="note">需要 Python ≥ 3.11 与 <code>uv</code>；桌面壳基于 pywebview / WebView2，也支持 <code>--browser</code> 兜底。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- 页脚 -->
+<footer>
+  <div class="wrap">
+    <div class="f-links">
+      <span>🐑 SkySheep</span><span class="dot">·</span>
+      <a href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">GitHub</a><span class="dot">·</span>
+      <span>MIT License</span>
+    </div>
+    <div>用 SkySheep 构建 · 云朵小羊与你同在 ☁️</div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,85 @@
+# skysheep-engine
+
+SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置工具、权限门控、会话持久化。
+
+## 模块地图
+
+| 模块 | 职责 |
+|---|---|
+| `skysheep.messages` | 跨 Provider 归一化的消息/内容块模型 |
+| `skysheep.events` | Agent 运行过程的统一事件流 |
+| `skysheep.core` | Agent 核心循环（流式、工具调用、权限交互协议）|
+| `skysheep.models` | 模型适配层：OpenAI 兼容 / Anthropic 原生 |
+| `skysheep.tools` | 内置工具（文件/搜索/命令）+ Schema 导出 |
+| `skysheep.security` | Permission Gate：工具分级、白名单、确认协议 |
+| `skysheep.session` | SQLite 持久化：项目 / 会话 / 消息 / 白名单规则 |
+| `skysheep.config` | `~/.skysheep/config.toml` 配置与 Provider 预设 |
+| `skysheep.cli` | 终端 REPL + `skysheep app` 桌面启动 |
+| `skysheep.server` | 桌面端服务层：FastAPI + WebSocket 协议 + 静态前端 |
+| `desktop.py` | 无终端启动器（双击入口）：单实例、失败弹框、日志兜底 |
+
+## 快速开始
+
+```bash
+uv sync
+uv run skysheep config init   # 生成 ~/.skysheep/config.toml，填入 API Key
+uv run skysheep chat          # 在当前目录启动
+uv run skysheep app           # 桌面窗口（--browser 改用系统浏览器）
+uv run pytest                 # 测试
+```
+
+## 桌面启动与打包
+
+双击启动走 `SkySheep.pyw`（由 `.venv\Scripts\pythonw.exe` 运行，不出控制台窗口），
+实际逻辑在 `desktop.py`：
+
+- **单实例**：命名互斥体，重复双击只把已有窗口唤到前台，不会开出第二个服务端口。
+  窗口缩在托盘时再双击，也能把隐藏的窗口唤回来。
+- **退出选择**：点窗口 × 会弹出三选——**是** 彻底退出、**否** 缩到系统托盘
+  （托盘小羊常驻：双击/左键恢复窗口，右键菜单可打开或彻底退出）、**取消** 留在当前窗口。
+- **窗口定位**：启动时按主屏逻辑尺寸夹住窗口大小（不许比屏幕大）并显式传 x/y 居中、
+  纵向略偏上；不指定位置时 WinForms 的 CenterScreen 在 DPI 缩放下会把窗口推向右下，
+  窗口比屏幕大时则四周溢出被裁。
+- **失败可见**：无控制台时异常无处可看，所以启动失败先在窗口里画出失败页（原因+日志路径），
+  关窗后再弹 Windows 消息框，完整堆栈写进 `~/.skysheep/logs/desktop.log`。
+- **标准流兜底**：windowed 模式下 `sys.stdout` / `sys.stderr` 可能是 `None`，
+  uvicorn 与 rich 一调 `isatty()` 就崩。这里把它们指向日志文件——必须用**真实文件对象**，
+  换成自定义包装器会让 pywebview 窗口静默创建失败（踩过这个坑）。
+- **启动动画**：主窗口第一页就是动画页（`skysheep/bootpages.py`，纯标准库构建），
+  引擎在动画可见之后才导入（`server/__init__` 懒加载是前提），就绪后 `load_url` 原地切换。
+
+### 双击会弹出黑框终端？跑一次修复工具
+
+**`uv` 创建的 venv 里 `Scripts\pythonw.exe` 不是真正的无终端程序**：它与同目录的
+`python.exe` 是同一个文件（SHA256 相同），PE 子系统是 CONSOLE，而且硬编码拉起基础
+解释器的 `python.exe`。用它双击启动，Windows 必然分配一个控制台窗口——这就是"打开
+还是先跳出终端"的原因。
+
+修法是换成 CPython 自带的 GUI 版 venv 启动器（`<base>\Lib\venv\scripts\nt\pythonw.exe`，
+PE 子系统为 GUI，会以基础解释器的 `pythonw.exe` 运行）：
+
+```bash
+.venv\Scripts\python.exe tools\fix_venv_pythonw.py           # 修复 + 启动自检
+.venv\Scripts\python.exe tools\fix_venv_pythonw.py --check   # 只看现状，不改文件
+```
+
+工具会实测子进程是否拿到**可见的**控制台窗口来判定成败（不是只查文件大小）。
+**删掉 `.venv` 重新 `uv sync` 之后要再跑一次**；`tools\install_shortcut.py` 建快捷方式时
+也会自动调用它。
+
+在桌面创建快捷方式（用 `SHGetFolderPathW` 取真实桌面，桌面可能被重定向到别的盘）：
+
+```bash
+.venv\Scripts\python.exe tools\install_shortcut.py           # 指向源码版
+.venv\Scripts\python.exe tools\install_shortcut.py --exe     # 指向打包版
+```
+
+打包成不依赖 Python 环境的独立程序：
+
+```bash
+uv pip install pyinstaller
+.venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec
+```
+
+产物 `dist/SkySheep/SkySheep.exe`（约 62 MB，onedir）。两个要点：入口用 `desktop.py`；
+前端资源靠 `sys._MEIPASS` 定位（`server/app.py` 的 `_static_dir`）。

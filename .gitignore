@@ -31,3 +31,6 @@ installer/
 
 # 日志
 *.log
+
+# 开发期调试占位（非产品代码，不入库）
+engine/tools/render_ref.py

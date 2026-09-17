@@ -18,7 +18,12 @@ def splash_html(static_dir: Path) -> str:
     logo 优先用云朵小羊 PNG（与官网/应用内一致），旧 SVG 兜底，都没有退回 emoji。
     """
     logo = '<div class="logo-fallback">🐑</div>'
-    for name, mime in (("cloud-sheep-icon.png", "image/png"), ("skysheep-logo.svg", "image/svg+xml")):
+    # 加载页固定浅色纸底：优先云朵小羊墨色线稿（透明底直显）
+    for name, mime in (
+        ("cloud-sheep-line.png", "image/png"),
+        ("cloud-sheep-icon.png", "image/png"),
+        ("skysheep-logo.svg", "image/svg+xml"),
+    ):
         logo_path = static_dir / name
         if logo_path.exists():
             b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")

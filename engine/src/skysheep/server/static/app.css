@@ -165,7 +165,11 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 }
 .brand-row { display: flex; align-items: center; gap: 10px; }
 .logo-mark {
-  width: 30px; height: 30px; object-fit: contain; flex-shrink: 0;
+  width: 30px; height: 30px; flex-shrink: 0; display: inline-block;
+  /* 云朵小羊线稿（透明底 PNG 作 mask）：线条色 = 文字色，浅色主题墨线 / 夜墨主题白线 */
+  background: var(--text);
+  -webkit-mask: url("/static/cloud-sheep-line.png") center / contain no-repeat;
+  mask: url("/static/cloud-sheep-line.png") center / contain no-repeat;
 }
 .brand-text { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .brand-text b { font-size: 18px; font-weight: 800; letter-spacing: 2px; }
@@ -385,7 +389,12 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 }
 .w-title { font-size: 20px; font-weight: 800; letter-spacing: 1px; margin-bottom: 8px;
   display: flex; align-items: center; gap: 8px; }
-.w-title .w-logo { width: 34px; height: 34px; object-fit: contain; flex-shrink: 0; }
+.w-title .w-logo {
+  width: 34px; height: 34px; flex-shrink: 0; display: inline-block;
+  background: var(--text);  /* 同 .logo-mark：线稿 mask，线条随主题 */
+  -webkit-mask: url("/static/cloud-sheep-line.png") center / contain no-repeat;
+  mask: url("/static/cloud-sheep-line.png") center / contain no-repeat;
+}
 .w-sub { color: var(--text2); margin-bottom: 14px; line-height: 1.7; }
 .w-samples { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .w-sample {

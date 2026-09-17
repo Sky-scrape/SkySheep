@@ -6,6 +6,15 @@
 <title>SkySheep — 跑在你电脑上的 AI Agent 工作台</title>
 <meta name="description" content="SkySheep 是开源（MIT）的桌面 AI Agent 工作台：能读文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键回滚，数据不出本机。">
 <link rel="icon" type="image/png" href="docs/images/cloud-sheep-icon.png">
+<script>
+/* 首帧前应用手动主题（localStorage 优先，否则跟随系统），避免加载闪色 */
+(function(){
+  try {
+    var t = localStorage.getItem("ss-theme");
+    if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+  } catch (e) { /* 隐私模式等 localStorage 不可用：跟随系统 */ }
+})();
+</script>
 <style>
 :root{
   color-scheme: light;
@@ -25,8 +34,27 @@
   --shadow:0 12px 32px rgba(29,26,22,.14);
   --shadow-btn:0 6px 16px rgba(59,130,246,.32);
 }
+/* 手动深色：导航栏主题按钮写入 <html data-theme="dark">（变量与下方媒体查询块一致） */
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --paper:#171512;
+  --band:#1C1915;
+  --card:#201D18;
+  --ink:#E8DFC7;
+  --ink-2:#A99F87;
+  --line:rgba(232,223,199,.14);
+  --line-strong:rgba(232,223,199,.34);
+  --accent:#5B96F8;
+  --accent-soft:rgba(91,150,248,.16);
+  --nav:rgba(23,21,18,.88);
+  --code-bg:#0F0E0C;
+  --code-ink:#E8DFC7;
+  --shot-border:rgba(232,223,199,.24);
+  --shadow:0 12px 32px rgba(0,0,0,.5);
+  --shadow-btn:0 6px 16px rgba(0,0,0,.4);
+}
 @media (prefers-color-scheme: dark){
-  :root{
+  :root:not([data-theme="light"]){
     color-scheme: dark;
     --paper:#171512;
     --band:#1C1915;
@@ -95,6 +123,15 @@ h1,h2,h3{text-wrap:balance}
   width:24px;height:24px;border-radius:7px;
   vertical-align:-7px;margin-right:2px;
   box-shadow:0 1px 4px rgba(0,0,0,.18);
+}
+.pill-ico{
+  width:17px;height:17px;border-radius:5px;
+  vertical-align:-4px;margin-right:4px;
+}
+/* 主题切换按钮：复用 .gh 的边框胶囊样式，重置 button 默认底色 */
+#theme-toggle{
+  cursor:pointer;background:none;color:var(--ink);
+  font-family:inherit;font-size:14px;line-height:1;
 }
 @media (max-width:640px){
   .nav-links{display:none}
@@ -263,6 +300,7 @@ footer a:hover{color:var(--accent)}
       <a href="#shots">截图</a>
       <a href="#download">下载</a>
     </nav>
+    <button id="theme-toggle" class="gh" type="button" title="切换深浅主题">🌙</button>
     <a class="gh" href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
       GitHub
@@ -275,7 +313,7 @@ footer a:hover{color:var(--accent)}
   <!-- Hero -->
   <section class="hero">
     <div class="wrap">
-      <span class="pill">🐑 开源桌面 AI Agent · 纸墨界面</span>
+      <span class="pill"><img class="pill-ico" src="docs/images/cloud-sheep-icon.png" alt="">开源桌面 AI Agent · 纸墨界面</span>
       <h1>跑在<span class="hl">你电脑</span>上的<br>AI Agent 工作台</h1>
       <p class="sub">不只是聊天窗口——它能读你的文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键撤销。</p>
       <div class="cta">
@@ -442,5 +480,30 @@ uv run skysheep app</code></pre>
   </div>
 </footer>
 
+<script>
+/* 主题切换：点击在 浅色 ⇄ 深色 间切换并记住；未手动选过则跟随系统 */
+(function(){
+  var btn = document.getElementById("theme-toggle");
+  var root = document.documentElement;
+  function resolved(){
+    var t = root.getAttribute("data-theme");
+    if (t === "dark" || t === "light") return t;
+    return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  function render(){
+    var dark = resolved() === "dark";
+    btn.textContent = dark ? "☀️" : "🌙";
+    btn.title = dark ? "切换到浅色主题" : "切换到深色主题";
+  }
+  btn.addEventListener("click", function(){
+    var next = resolved() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("ss-theme", next); } catch (e) {}
+    render();
+  });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+  render();
+})();
+</script>
 </body>
 </html>

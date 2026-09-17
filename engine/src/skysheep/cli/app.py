@@ -566,11 +566,7 @@ def _app_cmd(args) -> None:
         return
 
     # 窗口模式（终端直接 skysheep app）：主窗口第一页是启动动画，引擎就绪后原地切换
-    icon_path = STATIC_DIR / (
-        "skysheep-line-white.ico" if wintheme.read_ui_theme() == "dark" else "skysheep-line-ink.ico"
-    )
-    if not icon_path.exists():
-        icon_path = STATIC_DIR / "skysheep.ico"
+    icon_path = STATIC_DIR / "skysheep.ico"
     from ..server.picker import FilePicker
 
     try:

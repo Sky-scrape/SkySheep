@@ -872,12 +872,9 @@ def _run_windowed() -> int:
         _start_global_hotkey(window, _hotkey_fire)
         _start_theme_watchdog(window)
 
-    # 窗口标题栏图标用主题化线稿版（浅色=墨线 / 深色=白线），随主题在看板线程切换；
-    # exe/托盘保持彩色方块版（深浅任务栏上都可见）
-    initial_theme = wintheme.read_ui_theme()
-    icon = static / ("skysheep-line-white.ico" if initial_theme == "dark" else "skysheep-line-ink.ico")
-    if not icon.exists():
-        icon = static / "skysheep.ico"
+    # 窗口图标启动序列：先统一彩色方块（任务栏第一帧即彩色、不闪线稿），
+    # 看板线程首刷时 apply_window_icon 只把标题栏 SMALL 换成主题线稿
+    icon = static / "skysheep.ico"
     webview.start(_bootstrap, icon=str(icon) if icon.exists() else None)
     _dispose_tray()
 

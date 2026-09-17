@@ -80,45 +80,43 @@ def refresh_now() -> bool:
 _icon_holder: dict = {}
 
 WM_SETICON = 0x0080
+ICON_SMALL = 0
 ICON_BIG = 1
 IMAGE_ICON = 1
 LR_LOADFROMFILE = 0x10
 
 
 def apply_window_icon(native, dark: bool = False) -> bool:
-    """窗口图标分离设置：标题栏小图标=主题线稿（墨线/白线），任务栏/Alt-Tab=彩色方块。
+    """窗口图标分离设置（纯 Win32，不碰 Form.Icon 以免任务栏一起被改）：
 
-    - Form.Icon setter 会同时更新 ICON_SMALL 与 ICON_BIG → 先设线稿版
-    - 再用 WM_SETICON(ICON_BIG) 把任务栏/Alt-Tab 覆盖成彩色方块版 hicon
-      （WinForms 没有独立的"任务栏图标"属性，ICON_BIG 覆盖是标准做法）
+    - 标题栏小图标 WM_SETICON(ICON_SMALL) = 主题线稿（浅色=墨线 / 深色=白线）
+    - 任务栏/Alt-Tab WM_SETICON(ICON_BIG) = 彩色方块（恒定，深浅任务栏都醒目）
+    启动序列：webview.start(icon=彩色) 让任务栏第一帧就是彩色，本函数随后只把
+    标题栏 SMALL 换成线稿——任务栏不再出现"先线稿后彩色"的闪变。
     图标文件来自应用 static 目录（打包态走 sys._MEIPASS）。
     """
     try:
-        from System.Drawing import Icon  # noqa: PLC0415
-
         static = _static_dir()
         line_path = static / ("skysheep-line-white.ico" if dark else "skysheep-line-ink.ico")
         color_path = static / "skysheep.ico"
         if not line_path.exists() or not color_path.exists():
             return False
-        key = str(line_path)
-        if _icon_holder.get("path") != key:
-            _icon_holder["path"] = key
-            _icon_holder["icon"] = Icon(key)  # 持引用
-            native.Icon = _icon_holder["icon"]
+        user32 = ctypes.windll.user32
+        hwnd = int(native.Handle.ToInt64())
+        small_size = user32.GetSystemMetrics(49) or 16  # SM_CXSMICON，随 DPI
 
-            # 任务栏覆盖成彩色版：从彩色 ico 加载 48px HICON
-            user32 = ctypes.windll.user32
-            hicon = user32.LoadImageW(
-                None, str(color_path), IMAGE_ICON, 48, 48, LR_LOADFROMFILE
-            )
-            if hicon:
-                old = _icon_holder.get("big_hicon")
-                if old:
-                    user32.DestroyIcon(old)
-                _icon_holder["big_hicon"] = hicon
-                hwnd = int(native.Handle.ToInt64())
-                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+        small = user32.LoadImageW(None, str(line_path), IMAGE_ICON, small_size, small_size, LR_LOADFROMFILE)
+        big = user32.LoadImageW(None, str(color_path), IMAGE_ICON, 48, 48, LR_LOADFROMFILE)
+        if not small or not big:
+            return False
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, small)
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, big)
+        # 旧句柄销毁防泄漏（首帧时 holder 里还没有旧值）
+        for key, new in (("small", small), ("big", big)):
+            old = _icon_holder.pop(key, None)
+            if old:
+                user32.DestroyIcon(old)
+            _icon_holder[key] = new
         return True
     except Exception:
         return False

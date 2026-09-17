@@ -34,23 +34,27 @@ def splash_html(static_dir: Path) -> str:
         "html,body{margin:0;height:100%;background:#e8dfc7;overflow:hidden;"
         'font-family:"Microsoft YaHei UI","Microsoft YaHei",sans-serif;user-select:none}'
         ".wrap{height:100%;box-sizing:border-box;margin:14px;display:flex;"
-        "flex-direction:column;align-items:center;justify-content:center;gap:18px;"
+        "flex-direction:column;align-items:center;justify-content:center;gap:20px;"
         "background:#f4ecd8;border:2px solid #1d1a16;border-radius:8px;"
         "box-shadow:3px 3px 0 rgba(29,26,22,.35)}"
-        ".logo{width:118px;height:118px;animation:float 1.8s ease-in-out infinite}"
-        ".logo-fallback{font-size:84px;line-height:130px;animation:float 1.8s ease-in-out infinite}"
-        "@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}"
-        ".title{color:#1d1a16;font-size:18px;font-weight:600;letter-spacing:4px}"
-        ".sub{color:#6b6255;font-size:13px;letter-spacing:1px}"
+        ".brand{display:flex;align-items:center;gap:14px;animation:float 1.8s ease-in-out infinite}"
+        ".b-ico{width:52px;height:52px}"
+        ".b-ico-fallback{font-size:44px;line-height:52px}"
+        ".wordmark{color:#1d1a16;font-size:34px;font-weight:800;letter-spacing:5px}"
+        "@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}"
         ".dots span{display:inline-block;width:7px;height:7px;border-radius:50%;"
         "background:#1257c4;margin:0 4px;animation:blink 1.2s infinite}"
         ".dots span:nth-child(2){animation-delay:.2s}"
         ".dots span:nth-child(3){animation-delay:.4s}"
         "@keyframes blink{0%,80%,100%{opacity:.15}40%{opacity:1}}"
+        ".sub{color:#6b6255;font-size:13px;letter-spacing:2px}"
         "</style></head><body>"
-        '<div class="wrap">' + logo + '<div class="title">正在启动 SkySheep</div>'
+        '<div class="wrap">'
+        '<div class="brand">' + logo.replace('class="logo"', 'class="b-ico"')
+        .replace('class="logo-fallback"', 'class="b-ico-fallback"')
+        + '<span class="wordmark">SkySheep</span></div>'
         '<div class="dots"><span></span><span></span><span></span></div>'
-        '<div class="sub">引擎准备中，首次启动可能需要几秒</div>'
+        '<div class="sub">正在启动 · 引擎准备中，首次启动可能需要几秒</div>'
         "</div></body></html>"
     )
 

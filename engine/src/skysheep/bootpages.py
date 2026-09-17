@@ -14,14 +14,16 @@ from pathlib import Path
 def splash_html(static_dir: Path) -> str:
     """启动动画页（主窗口的第一页）：纸墨主题 + 小羊 logo 轻浮动 + 三点呼吸。
 
-    内嵌 base64 SVG，不依赖服务端口（服务还在后台启动中）。
+    内嵌 base64 图片，不依赖服务端口（服务还在后台启动中）。
+    logo 优先用云朵小羊 PNG（与官网/应用内一致），旧 SVG 兜底，都没有退回 emoji。
     """
-    svg_path = static_dir / "skysheep-logo.svg"
-    if svg_path.exists():
-        b64 = base64.b64encode(svg_path.read_bytes()).decode("ascii")
-        logo = f'<img class="logo" alt="" src="data:image/svg+xml;base64,{b64}">'
-    else:
-        logo = '<div class="logo-fallback">🐑</div>'
+    logo = '<div class="logo-fallback">🐑</div>'
+    for name, mime in (("cloud-sheep-icon.png", "image/png"), ("skysheep-logo.svg", "image/svg+xml")):
+        logo_path = static_dir / name
+        if logo_path.exists():
+            b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+            logo = f'<img class="logo" alt="" src="data:{mime};base64,{b64}">'
+            break
     return (
         '<!doctype html><html><head><meta charset="utf-8"><style>'
         "html,body{margin:0;height:100%;background:#e8dfc7;overflow:hidden;"

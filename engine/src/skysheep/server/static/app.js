@@ -380,7 +380,7 @@ function showWelcome() {
   const host = curLog();
   host.innerHTML = `
     <div class="welcome">
-      <div class="w-title"><img class="w-logo" src="/static/skysheep-logo.svg" alt="SkySheep">欢迎使用 SkySheep</div>
+      <div class="w-title"><img class="w-logo" src="/static/cloud-sheep-icon.png" alt="SkySheep">欢迎使用 SkySheep</div>
       <div class="w-sub">一个跑在你电脑上的 AI Agent 工作台。试着给它一个完整任务，比如：</div>
       <div class="w-samples">
         <button class="w-sample" data-q="帮我在这个目录里创建一个贪吃蛇网页游戏，写完自己打开测试一下">🎮 写一个贪吃蛇网页并测试</button>

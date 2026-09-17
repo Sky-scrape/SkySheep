@@ -128,6 +128,8 @@ class ChatApp:
             global_dir=skysheep_home() / "skills",
             project_dir=self.working_dir / ".skysheep" / "skills",
             state_path=self.working_dir / ".skysheep" / "skills.json",
+            scope_path=skysheep_home() / "skills-scope.json",
+            project_root=self.working_dir,
         )
         self.skills.discover()
 
@@ -298,7 +300,12 @@ class ChatApp:
             self.console.print("[dim]" + hint + "[/]")
             return
         for s in skills:
-            mark = "[green]on[/] " if s.enabled else "[red]off[/]"
+            if not self.skills.applies(s.name):
+                mark = "[yellow]--[/] "  # 范围不含本项目
+            elif s.enabled:
+                mark = "[green]on[/] "
+            else:
+                mark = "[red]off[/]"
             self.console.print(
                 f"  {mark} {s.name:<18} [{s.source:^7}] {s.description}"
             )
@@ -674,6 +681,8 @@ async def run_headless(
             global_dir=skysheep_home() / "skills",
             project_dir=working_dir / ".skysheep" / "skills",
             state_path=working_dir / ".skysheep" / "skills.json",
+            scope_path=skysheep_home() / "skills-scope.json",
+            project_root=working_dir,
         )
         skills.discover()
 

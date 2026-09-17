@@ -37,7 +37,7 @@ Most AI desktop clients out there are just chat windows — the model can talk b
 On top of that sits a complete Agent capability stack:
 
 - 🔌 **Multi-provider models**: Zhipu / DeepSeek / Kimi / OpenRouter / SiliconFlow / native Anthropic, one-click setup; local models via [Ollama](https://ollama.com) (no key required); custom relay endpoints + automatic model detection
-- 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + one-click install from the [Skill Market](market/), with keyword search)
+- 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + a dedicated skills page with per-project scope, SKILL.md preview, and keyword search in the [Skill Market](market/))
 - 🖱️ **Computer control**: screenshots straight into the conversation; mouse / keyboard / window / clipboard (off by default; confirmation-gated, with an action-level whitelist)
 - ⏰ **Scheduled tasks and agenda**: recurring tasks, due-time reminders, weekly calendar view; continue the chat from your phone over LAN (token + QR code)
 - 👥 **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer

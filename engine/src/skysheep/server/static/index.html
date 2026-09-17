@@ -397,21 +397,25 @@
         </section>
 
         <section class="settings-page hidden" id="settings-page-skills">
-          <section class="settings-card">
+          <!-- 总览视图：技能卡片整行可点 → 进独立技能页（与模型服务同一套列表/详情范式） -->
+          <div id="skill-list-view">
+          <section class="settings-card" id="skill-card">
             <div class="card-head">
               <h3>技能</h3>
-              <span class="head-ops">
-                <button id="btn-market" class="btn-ghost">🛍 技能广场</button>
-                <button id="btn-import-skill" class="btn-ghost">＋ 导入技能</button>
-              </span>
+              <button id="btn-import-skill" class="btn-ghost">＋ 导入技能</button>
             </div>
             <p class="settings-hint">
               技能是写给 Agent 看的「操作手册」：启用后相关用法会进入系统提示词，Agent 会在合适的任务里自动套用。
               点右上角「导入技能」：可以选本机的技能文件夹或 .zip 压缩包，也可以直接粘贴
-              <b>GitHub / Gitee 仓库链接</b>在线安装，装完立即生效。「技能广场」里有精选技能可一键安装，也可用关键词搜索。
+              <b>GitHub / Gitee 仓库链接</b>在线安装，装完立即生效。
             </p>
-            <div id="skill-status" class="card-status" hidden></div>
-            <ul id="settings-skill-list" class="list settings-skill-list"></ul>
+            <div id="skill-summary" class="skill-entry">
+              <span class="skill-entry-main">
+                <span class="item-name">管理与安装</span>
+                <span class="item-desc" id="skill-summary-text">正在加载…</span>
+              </span>
+              <span class="skill-entry-go" title="进入技能页">›</span>
+            </div>
           </section>
           <section class="settings-card">
             <div class="card-head"><h3>联网搜索</h3></div>
@@ -432,6 +436,40 @@
             </p>
             <ul id="settings-tool-list" class="list settings-tool-list"></ul>
           </section>
+          </div>
+
+          <!-- 独立技能页：呈现技能 / 设定使用范围 / 技能广场 -->
+          <div id="skill-manage-view" hidden>
+            <section class="settings-card">
+              <div class="detail-head">
+                <button id="btn-skill-back" class="btn-ghost">← 返回</button>
+                <span class="detail-title" id="skill-manage-title">技能</span>
+                <span class="head-ops">
+                  <button id="btn-import-skill-2" class="btn-ghost">＋ 导入技能</button>
+                </span>
+              </div>
+              <p class="settings-hint">
+                <b>使用范围</b>决定这个技能在哪些项目里可用（全局技能才可设）；
+                <b>本项目开关</b>只影响当前项目，两者都满足才会进入 Agent 的系统提示词。
+                点技能名可以查看它的完整指令。
+              </p>
+              <div id="skill-status" class="card-status" hidden></div>
+              <ul id="settings-skill-list" class="list settings-skill-list"></ul>
+            </section>
+
+            <section class="settings-card">
+              <div class="card-head">
+                <h3>技能广场</h3>
+              </div>
+              <p class="settings-hint">
+                精选技能一键安装，支持关键词搜索。索引随主仓库发布，随时会有新技能上架。
+              </p>
+              <details id="skill-market" class="market-fold">
+                <summary>展开浏览与安装技能</summary>
+                <div id="skill-market-body" class="market-fold-body"></div>
+              </details>
+            </section>
+          </div>
         </section>
 
         <section class="settings-page hidden" id="settings-page-subagents">

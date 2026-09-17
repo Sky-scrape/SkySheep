@@ -1399,6 +1399,9 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   display: flex; align-items: center; gap: 12px;
   border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 16px;
 }
+/* 技能页的标题行也用 detail-head：右侧「导入技能」靠右站 */
+.detail-head .head-ops { display: flex; gap: 8px; flex-shrink: 0; margin-left: auto; }
+.detail-head #skill-manage-title { flex: 1; min-width: 0; font-weight: 700; }
 .detail-head .btn-ghost { flex-shrink: 0; font-size: 12.5px; padding: 5px 12px; }
 .detail-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 /* 详情页：分区标题在面板外，面板内是字段（布局对齐参考图） */
@@ -1565,17 +1568,91 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .about b { color: var(--text); }
 
 /* 设置页：技能与工具
-   名称 / 安全级别 / 说明 三列定宽网格：不同行之间各部分上下对齐 */
+   内置工具用「名称 / 安全级别 / 说明」三列定宽网格，行间上下对齐 */
 .settings-skill-list li, .settings-tool-list li { display: flex; align-items: center; gap: 10px; cursor: default; }
 .settings-tool-list li {
   display: grid; grid-template-columns: 122px 56px 1fr;
   gap: 4px 10px; align-items: center;
 }
-.settings-skill-list .skill-main {
-  flex: 1; min-width: 0;
-  display: grid; grid-template-columns: 122px 56px 1fr;
-  gap: 4px 10px; align-items: center;
+/* 技能行：设置面板只有 ~410px 宽，塞不下「名称/来源/状态/描述/范围/操作」一整行。
+   固定两行：上行名称+标签+删除，下行描述+范围/开关。列宽固定，行间必然对齐。 */
+.settings-skill-list .skill-row {
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  padding: 9px 10px; border-bottom: 1px solid var(--line);
 }
+.settings-skill-list .skill-row:last-child { border-bottom: none; }
+.skill-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.skill-top .skill-name {
+  background: none; border: none; padding: 0; cursor: pointer; text-align: left;
+  font: inherit; font-weight: 700; font-size: 13px; color: var(--text);
+  max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.skill-top .skill-name:hover { color: var(--blue); text-decoration: underline; }
+.skill-del-cell { margin-left: auto; flex-shrink: 0; display: flex; }
+.skill-bottom { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* 描述占剩余宽度（min-width:0 才能真正收缩），操作区靠右 */
+.skill-desc {
+  flex: 1; min-width: 0;
+  font-size: 12px; color: var(--dim); line-height: 1.55;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.skill-ops { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+.skill-ops .skill-scope {
+  background: var(--paper-raised); color: var(--text);
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  padding: 5px 8px; font-size: 12px; font-family: inherit; max-width: 168px;
+}
+.skill-ops .skill-scope:hover { border-color: var(--blue); }
+.skill-ops .skill-toggle { font-size: 12px; padding: 4px 10px; }
+.chip-warn { color: var(--gold); border-color: var(--gold); }
+/* 「指定项目」的勾选面板：占满整行 */
+.scope-picker {
+  width: 100%; padding: 9px 11px;
+  background: var(--paper-raised); border: 1px solid var(--line2); border-radius: var(--r-sm);
+}
+.scope-picker-title { font-size: 12px; color: var(--dim); margin-bottom: 7px; }
+.scope-opt {
+  display: flex; align-items: center; gap: 7px; padding: 4px 0;
+  font-size: 12.5px; cursor: pointer;
+}
+.scope-opt input { flex-shrink: 0; }
+.scope-opt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-picker-ops { display: flex; align-items: center; gap: 9px; margin-top: 9px; }
+.scope-picker-ops .btn-ghost { font-size: 12px; padding: 4px 11px; }
+.scope-msg.bad { color: var(--reg); }
+/* SKILL.md 预览：等宽、限高、自己滚 */
+.skill-body {
+  max-height: min(58vh, 460px); overflow: auto; margin-top: 8px;
+  padding: 10px 12px; background: var(--paper-sunken);
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word;
+}
+/* 技能总览卡片里的整行入口（与模型服务列表行同一观感） */
+.skill-entry {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 9px 11px; background: var(--paper-raised);
+  border: 1.5px solid var(--line2); border-radius: var(--r-sm);
+  transition: background var(--dur-fast), border-color var(--dur-fast);
+}
+.skill-entry:hover { background: var(--blue-weak); border-color: var(--blue); }
+.skill-entry-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.skill-entry-go { flex-shrink: 0; color: var(--dim); font-size: 16px; line-height: 1; }
+.skill-entry:hover .skill-entry-go { color: var(--blue); }
+/* 技能广场折叠块 */
+.market-fold { margin-top: 4px; }
+.market-fold > summary {
+  cursor: pointer; font-size: 13px; font-weight: 700; color: var(--text);
+  padding: 8px 11px; background: var(--paper-raised);
+  border: 1.5px solid var(--line2); border-radius: var(--r-sm);
+  list-style: none;
+}
+.market-fold > summary::-webkit-details-marker { display: none; }
+.market-fold > summary::before { content: "▸ "; color: var(--dim); }
+.market-fold[open] > summary::before { content: "▾ "; }
+.market-fold > summary:hover { border-color: var(--blue); color: var(--blue); }
+.market-fold[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.market-fold-body { padding: 11px 1px 1px; }
 .item-name { font-weight: 700; font-size: 13px; flex-shrink: 0; }
 .settings-tool-list .item-desc, .settings-skill-list .item-desc { min-width: 0; }
 .item-desc { flex: 1; color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

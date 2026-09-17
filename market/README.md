@@ -1,6 +1,6 @@
 # 技能广场索引
 
-设置 · 技能与工具 → 技能广场 的在线索引就是这个 JSON。客户端行为：
+设置 · 技能与工具 → 技能 → 技能广场 的在线索引就是这个 JSON。客户端行为：
 
 1. 默认拉取 `https://raw.githubusercontent.com/Sky-scrape/SkySheep/main/market/index.json`
    （即**本仓库**的 `market/index.json`，与技能本体同仓维护，推上 GitHub 即生效）；
@@ -10,7 +10,7 @@
 ## 发布
 
 索引随主仓库一起发布：把 SkySheep 仓库推上 GitHub 后自动生效，无需额外操作。
-之后新增技能条目只需编辑 `index.json` 再推送（客户端每次打开技能广场都会重新拉取，
+之后新增技能条目只需编辑 `index.json` 再推送（客户端每次展开技能广场都会重新拉取，
 服务端有 60 秒缓存）。
 
 ## 条目格式

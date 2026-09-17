@@ -500,6 +500,8 @@ class ServerBackend:
             global_dir=skysheep_home() / "skills",
             project_dir=self.working_dir / ".skysheep" / "skills",
             state_path=self.working_dir / ".skysheep" / "skills.json",
+            scope_path=skysheep_home() / "skills-scope.json",
+            project_root=self.working_dir,
         )
         self.skills.discover()
 
@@ -1990,6 +1992,29 @@ class ServerBackend:
             ag.set_system(self.compose_system())
         return {"name": name, "enabled": enabled}
 
+    async def set_skill_scope(
+        self, name: str, mode: str, projects: list[str] | None = None
+    ) -> dict:
+        """设置全局技能的使用范围（跨项目生效，改完立即重建系统提示词）。"""
+        try:
+            result = self.skills.set_scope(name, mode, projects)
+        except KeyError as e:
+            raise RuntimeError(str(e).strip("'\"")) from e
+        self.skills.discover()  # 重新套用范围（set_scope 只改了内存里的当前实例）
+        for ag in self._for_each_agent():
+            ag.set_system(self.compose_system())
+        return {"name": name, **result}
+
+    def skill_body(self, name: str) -> dict:
+        """读 SKILL.md 原文供界面预览（不受启用/范围限制，停用的技能也要能看）。"""
+        try:
+            text = self.skills.raw_text(name)
+        except KeyError as e:
+            raise RuntimeError(str(e).strip("'\"")) from e
+        except OSError as e:
+            raise RuntimeError(f"读取技能文件失败：{e}") from e
+        return {"name": name, "text": text}
+
     # ---- 技能：程序内导入 / 删除 ----
 
     def _skill_root(self, scope: str) -> Path:
@@ -2021,7 +2046,12 @@ class ServerBackend:
             ag.set_system(self.compose_system())
         result["scope"] = scope
         result["skills"] = [
-            {"name": s.name, "description": s.description, "source": s.source, "enabled": s.enabled}
+            {
+                "name": s.name, "description": s.description,
+                "source": s.source, "enabled": s.enabled,
+                "scope": s.scope, "scope_projects": list(s.scope_projects),
+                "applies": self.skills.applies(s.name),
+            }
             for s in self.skills.all()
         ]
         return result
@@ -2948,6 +2978,8 @@ class ServerBackend:
             global_dir=skysheep_home() / "skills",
             project_dir=target / ".skysheep" / "skills",
             state_path=target / ".skysheep" / "skills.json",
+            scope_path=skysheep_home() / "skills-scope.json",
+            project_root=target,
         )
         self.skills.discover()
 
@@ -3491,6 +3523,7 @@ class ServerBackend:
     # 设置导出/导入覆盖的文件（~/.skysheep 下；会话数据库与检查点不导，体积大且含隐私对话）
     SETTINGS_EXPORT_FILES = (
         "config.toml", "mcp.json", "ui.json", "memory.md", "subagents.json",
+        "skills-scope.json",
     )
 
     async def settings_export(self) -> dict:
@@ -3596,12 +3629,18 @@ class ServerBackend:
                 for s in sessions[:30]
             ],
             "skills": [
-                {"name": s.name, "description": s.description, "source": s.source, "enabled": s.enabled}
+                {
+                    "name": s.name, "description": s.description,
+                    "source": s.source, "enabled": s.enabled,
+                    "scope": s.scope, "scope_projects": list(s.scope_projects),
+                    "applies": self.skills.applies(s.name),
+                }
                 for s in self.skills.all()
             ],
             "skill_dirs": {
                 "global": str(skysheep_home() / "skills"),
                 "project": str(self.working_dir / ".skysheep" / "skills"),
+                "scope_config": str(skysheep_home() / "skills-scope.json"),
             },
             "mcp": [
                 {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names}

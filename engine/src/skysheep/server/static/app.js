@@ -4192,6 +4192,7 @@ function openSettings(page = "providers") {
   sideSettings.classList.remove("hidden");
   btnSettings.textContent = "← 返回对话";
   resetProviderView(); // 每次进设置都从服务列表开始，不停在上次打开的详情页
+  resetSkillView();    // 技能页同理：每次都从总览开始
   showSettingsPage(page);
   renderSettings().catch((e) => addNotice("加载设置失败: " + e.message));
 }
@@ -4650,37 +4651,9 @@ async function renderSettings() {
   if (!rules || !rules.length) ul.innerHTML = '<li class="empty-hint">暂无规则（对话中选「总是允许」后会出现在这里）</li>';
 
   // —— 技能 ——
-  const sul = document.getElementById("settings-skill-list");
-  sul.innerHTML = "";
-  (snap.skills || []).forEach((s) => {
-    const li = document.createElement("li");
-    li.innerHTML = `
-      <div class="skill-main">
-        <span class="item-name">${escapeHtml(s.name)}</span>
-        <span class="chip">${s.source === "project" ? "本项目" : "全局"}</span>
-        <span class="item-desc" title="${escapeHtml(s.description)}">${escapeHtml(s.description)}</span>
-      </div>
-      <button class="btn-ghost skill-toggle">${s.enabled ? "🟢 已启用" : "⚪ 已停用"}</button>
-      <button class="btn-ghost danger skill-del" title="删除这个技能（从磁盘移除）">删除</button>`;
-    const toggle = li.querySelector(".skill-toggle");
-    toggle.onclick = async () => {
-      toggle.disabled = true;
-      try {
-        await request("skills.toggle", { name: s.name, enabled: !s.enabled });
-      } catch (e) {
-        toggle.disabled = false;
-        toggle.textContent = "✗ 切换失败";
-        toggle.title = e.message;
-        return;
-      }
-      boot(); // 同步侧栏技能列表
-      await renderSettings();
-    };
-    li.querySelector(".skill-del").onclick = () => deleteSkillModal(s);
-    sul.appendChild(li);
-  });
-  if (!(snap.skills || []).length)
-    sul.innerHTML = '<li class="empty-hint">还没有技能：点右上角「＋ 导入技能」，选一个技能文件夹或 .zip 压缩包即可</li>';
+  // 列表渲染抽到 renderSkillList（技能页要重复用）；这里只负责总览摘要
+  renderSkillSummary(snap.skills || []);
+  if (skillManageOpen) renderSkillList(snap.skills || []);
 
   // —— 内置工具 ——
   const tul = document.getElementById("settings-tool-list");
@@ -5193,6 +5166,7 @@ function deleteSkillModal(s) {
 }
 
 document.getElementById("btn-import-skill").onclick = () => importSkillModal();
+document.getElementById("btn-import-skill-2").onclick = () => importSkillModal();
 
 // ---------- MCP：导入 / 手动添加 / 删除 ----------
 
@@ -6519,18 +6493,18 @@ document.getElementById("btn-subagent-add").onclick = async () => {
   subagentEditorModal(d, null);
 };
 
-// ---------- 设置 · 技能广场 ----------
-async function openMarket() {
-  const box = document.createElement("div");
-  box.innerHTML = '<p class="dim small">正在获取技能索引…</p>';
-  showModal("技能广场", box, async () => {}, "关闭");
+// ---------- 设置 · 技能广场（内嵌到技能页的可折叠区块） ----------
+// 把渲染逻辑抽成函数：技能广场不再是独立弹窗，而是技能页里的一个折叠块，
+// 展开时才拉取索引（不展开就不发请求）。搜索/过滤/高亮逻辑与之前一致。
+async function renderMarketInto(container, opts = {}) {
+  container.innerHTML = '<p class="dim small">正在获取技能索引…</p>';
   let r;
   try { r = await request("skills.market"); } catch (e) {
-    box.innerHTML = `<p>获取失败：${escapeHtml(e.message)}</p>`;
+    container.innerHTML = `<p>获取失败：${escapeHtml(e.message)}</p>`;
     return;
   }
   const items = r.items || [];
-  box.innerHTML =
+  container.innerHTML =
     (r.note ? `<p class="market-note">${escapeHtml(r.note)}</p>` : "") +
     `<div class="market-search">
       <input id="market-q" class="modal-input" type="search" autocomplete="off"
@@ -6540,10 +6514,10 @@ async function openMarket() {
     <p class="market-count" id="market-count"></p>
     <div class="market-list" id="market-list"></div>`;
 
-  const list = box.querySelector("#market-list");
-  const countEl = box.querySelector("#market-count");
-  const input = box.querySelector("#market-q");
-  const clearBtn = box.querySelector("#market-q-clear");
+  const list = container.querySelector("#market-list");
+  const countEl = container.querySelector("#market-count");
+  const input = container.querySelector("#market-q");
+  const clearBtn = container.querySelector("#market-q-clear");
   const terms = [];
 
   // 命中高亮：先转义再逐段包 <mark>（索引内容不可信，不能直接拼 HTML）。
@@ -6641,9 +6615,260 @@ async function openMarket() {
     input.focus();
   };
   renderItems();
-  input.focus(); // 打开就能直接打关键词（索引长了以后找技能是主要动作）
+  if (opts.focus) input.focus(); // 展开就聚焦，直接打关键词
 }
-document.getElementById("btn-market").onclick = () => openMarket();
+
+// 折叠块：首次展开才拉索引；展开状态变化时同步右上角计数
+const skillMarketFold = document.getElementById("skill-market");
+skillMarketFold.addEventListener("toggle", () => {
+  const body = document.getElementById("skill-market-body");
+  if (skillMarketFold.open && !body.dataset.loaded) {
+    body.dataset.loaded = "1";
+    renderMarketInto(body, { focus: true });
+  }
+});
+
+// ---------- 设置 · 技能页：列表与使用范围 ----------
+let skillProjects = [];     // 最近一次拉取到的项目列表（范围勾选用）
+let skillManageOpen = false; // 是否停在独立技能页
+
+// 路径归一化：与后端 normcase 对齐（Windows 大小写不敏感）
+function normPathJs(p) {
+  return String(p == null ? "" : p).replace(/\//g, "\\").toLowerCase().replace(/\\+$/, "");
+}
+
+// 三态：生效中 / 本项目已停用 / 本项目不适用（范围未包含当前项目）
+function skillState(s) {
+  if (!s.applies) return { cls: "chip-warn", label: "本项目不适用" };
+  if (!s.enabled) return { cls: "", label: "本项目已停用" };
+  return { cls: "chip-blue", label: "生效中" };
+}
+
+function openSkillManage() {
+  skillManageOpen = true;
+  document.getElementById("skill-list-view").hidden = true;
+  document.getElementById("skill-manage-view").hidden = false;
+  // 范围勾选需要项目列表（切项目后路径会变，每次都重新拉）
+  request("project.list")
+    .then((r) => {
+      skillProjects = r.projects || [];
+      if (skillManageOpen && bootSnap) renderSkillList(bootSnap.skills || []);
+    })
+    .catch(() => {});
+  if (bootSnap) {
+    renderSkillList(bootSnap.skills || []);
+    return;
+  }
+  // 极快点击（renderSettings 还没回来）：自己拉一次快照再画，避免空白页
+  request("boot")
+    .then((snap) => {
+      bootSnap = snap;
+      if (skillManageOpen) renderSkillList(snap.skills || []);
+    })
+    .catch((e) => addNotice("加载技能失败: " + e.message));
+}
+
+function resetSkillView() {
+  skillManageOpen = false;
+  document.getElementById("skill-manage-view").hidden = true;
+  document.getElementById("skill-list-view").hidden = false;
+}
+
+document.getElementById("skill-summary").onclick = () => openSkillManage();
+document.getElementById("btn-skill-back").onclick = () => {
+  resetSkillView();
+  renderSkillSummary(bootSnap ? bootSnap.skills || [] : []);
+};
+
+function renderSkillSummary(skills) {
+  const el = document.getElementById("skill-summary-text");
+  if (!el) return;
+  const active = skills.filter((s) => s.enabled && s.applies).length;
+  el.textContent = skills.length
+    ? `${skills.length} 个技能 · 本项目生效 ${active} 个 — 点这里查看、设使用范围、逛技能广场`
+    : "还没有技能：点右上角「＋ 导入技能」，选一个技能文件夹或 .zip 压缩包即可";
+}
+
+// 查看技能完整指令（停用的也能看，否则无从判断该不该启用）
+async function previewSkill(name) {
+  const box = document.createElement("div");
+  box.innerHTML = '<p class="dim small">正在读取…</p>';
+  showModal("技能指令 · " + name, box, async () => {}, "关闭");
+  let r;
+  try {
+    r = await request("skills.body", { name });
+  } catch (e) {
+    box.innerHTML = `<p>读取失败：${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  box.innerHTML =
+    `<p class="dim small">这是 SKILL.md 原文。Agent 平时只看得到名称与描述；
+     真正需要时它才用 load_skill 读取下面这段指令。</p>` +
+    `<pre class="skill-body">${escapeHtml(r.text || "")}</pre>`;
+}
+
+// 项目勾选面板：范围为「指定项目」时展开，勾选是暂存的，点「保存」才提交
+function renderScopePicker(li, s) {
+  const panel = document.createElement("div");
+  panel.className = "scope-picker";
+  const known = skillProjects.map((p) => p.root_path);
+  const extra = (s.scope_projects || []).filter(
+    (p) => !known.some((k) => normPathJs(k) === normPathJs(p))
+  );
+  const options = [
+    ...skillProjects.map((p) => ({ path: p.root_path, label: p.name, current: p.is_current })),
+    // 配置里引用了已不在项目列表里的路径：保留展示，避免静默丢掉用户设置
+    ...extra.map((p) => ({ path: p, label: p, missing: true })),
+  ];
+  if (!options.length) {
+    panel.innerHTML = '<span class="dim small">还没有其他项目——先在侧栏切换/新建一个项目，它就会出现在这里。</span>';
+    return panel;
+  }
+  const chosen = new Set((s.scope_projects || []).map(normPathJs));
+  panel.innerHTML =
+    `<div class="scope-picker-title">这个技能在哪些项目里可用：</div>` +
+    options
+      .map((o) => {
+        const on = chosen.has(normPathJs(o.path));
+        const badge = o.current ? '<span class="chip chip-blue">当前</span>' : "";
+        const miss = o.missing ? '<span class="chip chip-warn">路径已不存在</span>' : "";
+        return `<label class="scope-opt">
+          <input type="checkbox" value="${escapeHtml(o.path)}"${on ? " checked" : ""}>
+          <span class="scope-opt-name">${escapeHtml(o.label)}</span>${badge}${miss}
+        </label>`;
+      })
+      .join("") +
+    `<div class="scope-picker-ops">
+      <button class="btn-ghost scope-save">保存范围</button>
+      <span class="scope-msg dim small"></span>
+    </div>`;
+  const msg = panel.querySelector(".scope-msg");
+  panel.querySelector(".scope-save").onclick = async () => {
+    const picked = [...panel.querySelectorAll("input:checked")].map((i) => i.value);
+    if (!picked.length) {
+      msg.textContent = "至少要勾选一个项目；一个都不想用的话请选「任何项目都不用」。";
+      msg.className = "scope-msg bad";
+      return;
+    }
+    msg.textContent = "保存中…";
+    msg.className = "scope-msg dim small";
+    try {
+      await request("skills.scope", { name: s.name, mode: "projects", projects: picked });
+      skillStatus(`✓ 「${s.name}」的使用范围已更新（指定 ${picked.length} 个项目）`);
+      boot();
+      await renderSettings();
+    } catch (e) {
+      msg.textContent = "✗ " + e.message;
+      msg.className = "scope-msg bad";
+    }
+  };
+  return panel;
+}
+
+function renderSkillList(skills) {
+  const sul = document.getElementById("settings-skill-list");
+  if (!sul) return;
+  sul.innerHTML = "";
+  skills.forEach((s) => {
+    const st = skillState(s);
+    const li = document.createElement("li");
+    li.className = "skill-row";
+    li.innerHTML =
+      `<div class="skill-top">
+        <button class="skill-name" type="button" title="查看 SKILL.md 完整指令">${escapeHtml(s.name)}</button>
+        <span class="chip">${s.source === "project" ? "本项目" : "全局"}</span>
+        <span class="chip ${st.cls}">${st.label}</span>
+        <span class="skill-del-cell"></span>
+      </div>
+      <div class="skill-bottom">
+        <span class="skill-desc" title="${escapeHtml(s.description)}">${escapeHtml(s.description)}</span>
+        <span class="skill-ops"></span>
+      </div>`;
+    li.querySelector(".skill-name").onclick = () => previewSkill(s.name);
+
+    const ops = li.querySelector(".skill-ops");
+    if (s.source === "project") {
+      ops.innerHTML = '<span class="dim small" title="项目技能只在本项目生效">仅本项目</span>';
+    } else {
+      const sel = document.createElement("select");
+      sel.className = "skill-scope";
+      sel.title = "这个技能在哪些项目里可用";
+      sel.innerHTML =
+        '<option value="all">所有项目</option>' +
+        '<option value="projects">指定项目…</option>' +
+        '<option value="none">任何项目都不用</option>';
+      sel.value = s.scope === "projects" || s.scope === "none" ? s.scope : "all";
+      sel.onchange = async () => {
+        if (sel.value === "projects") {
+          // 指定项目：先展开勾选面板，不立即提交（后端要求至少一个项目）
+          const old = li.querySelector(".scope-picker");
+          if (old) old.remove();
+          li.appendChild(renderScopePicker(li, s));
+          return;
+        }
+        const old = li.querySelector(".scope-picker");
+        if (old) old.remove();
+        try {
+          await request("skills.scope", { name: s.name, mode: sel.value, projects: [] });
+          skillStatus(
+            sel.value === "none"
+              ? `✓ 「${s.name}」已设为任何项目都不使用`
+              : `✓ 「${s.name}」已设为所有项目可用`
+          );
+          boot();
+          await renderSettings();
+        } catch (e) {
+          skillStatus("✗ " + e.message, false);
+          await renderSettings();
+        }
+      };
+      ops.appendChild(sel);
+    }
+
+    // 本项目开关：范围不适用时不显示（此时它没有意义，只会让人以为开关坏了）
+    if (s.applies) {
+      const toggle = document.createElement("button");
+      toggle.className = "btn-ghost skill-toggle";
+      toggle.textContent = s.enabled ? "🟢 已启用" : "⚪ 已停用";
+      toggle.title = "只影响当前项目";
+      toggle.onclick = async () => {
+        toggle.disabled = true;
+        try {
+          await request("skills.toggle", { name: s.name, enabled: !s.enabled });
+        } catch (e) {
+          toggle.disabled = false;
+          toggle.textContent = "✗ 切换失败";
+          toggle.title = e.message;
+          return;
+        }
+        boot();
+        await renderSettings();
+      };
+      ops.appendChild(toggle);
+    } else {
+      const hint = document.createElement("span");
+      hint.className = "dim small";
+      hint.textContent = "本项目不适用";
+      hint.title = "当前项目的路径不在这个技能的使用范围里；改上面的范围即可让它在这里生效";
+      ops.appendChild(hint);
+    }
+
+    const del = document.createElement("button");
+    del.className = "btn-ghost danger skill-del";
+    del.textContent = "删除";
+    del.title = "删除这个技能（从磁盘移除）";
+    del.onclick = () => deleteSkillModal(s);
+    li.querySelector(".skill-del-cell").appendChild(del);
+
+    // 范围已是「指定项目」时，直接把勾选面板摊开（不用再点一次下拉）
+    if (s.source === "global" && s.scope === "projects") {
+      li.appendChild(renderScopePicker(li, s));
+    }
+    sul.appendChild(li);
+  });
+  if (!skills.length)
+    sul.innerHTML = '<li class="empty-hint">还没有技能：点右上角「＋ 导入技能」，选一个技能文件夹或 .zip 压缩包即可</li>';
+}
 
 // ---------- 设置 · 关于：更新检查 ----------
 function renderUpdatePanel(snap) {

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 
 import httpx
@@ -431,15 +432,17 @@ def test_ws_memory_and_toolcfg_and_lan_and_market(home):
 def test_market_modal_has_keyword_search(home):
     """技能广场必须带关键词搜索（索引长了以后翻找成本高）。
 
-    锁两件事：搜索框/计数/列表容器在弹窗里，以及过滤与高亮的实现约定——
+    锁两件事：搜索框/计数/列表容器在技能页的折叠块里，以及过滤与高亮的实现约定——
     多关键词空格分隔且为 AND 语义，高亮必须走转义（索引内容是外部输入）。
     """
     from skysheep.server.app import STATIC_DIR
 
     js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    body = js[js.index("async function openMarket()"):]
-    body = body[:body.index("\ndocument.getElementById(\"btn-market\")")]
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # 搜索渲染逻辑现在住在 renderMarketInto（技能页的折叠块展开时调用）
+    body = js[js.index("async function renderMarketInto("):]
+    body = body[:body.index("\n// 折叠块")]
 
     for needle in ('id="market-q"', 'id="market-q-clear"', 'id="market-count"', 'id="market-list"'):
         assert needle in body, f"技能广场缺搜索相关节点：{needle}"
@@ -452,7 +455,7 @@ def test_market_modal_has_keyword_search(home):
     for field in ("it.name", "it.description", "it.author", "it.url"):
         assert field in body, f"搜索字段缺 {field}"
     # 高亮先转义再拼标签，且合并重叠区间（不产生嵌套 mark）
-    assert "function markAll" in body or "const markAll" in body
+    assert "const markAll" in body
     assert "escapeHtml(text.slice(a, b))" in body
     assert "merged" in body
     # 列表自己滚（条目多了不至于把搜索框顶出视野）
@@ -460,6 +463,81 @@ def test_market_modal_has_keyword_search(home):
     market_list_css = css[css.index(".market-list {"):]
     market_list_css = market_list_css[:market_list_css.index("}")]
     assert "max-height" in market_list_css and "overflow-y: auto" in market_list_css
+    # 不再是弹窗：入口是技能页里的折叠块，展开时才拉索引
+    assert 'id="skill-market"' in html and "<details" in html
+    assert 'id="btn-market"' not in html
+    assert "renderMarketInto(body" in js
+
+
+def test_skills_page_has_scope_controls(home):
+    """技能独立页：总览卡片可点进入，页内能设使用范围、预览指令、逛广场。"""
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # 总览 / 独立页两个视图都在，且有返回入口
+    for needle in ('id="skill-list-view"', 'id="skill-manage-view"', 'id="btn-skill-back"',
+                   'id="skill-summary"', 'id="settings-skill-list"'):
+        assert needle in html, f"技能页缺节点：{needle}"
+    assert "function openSkillManage()" in js and "function resetSkillView()" in js
+    # 进入设置时回到总览（与模型服务同一套「先重置再进」约定）
+    assert "resetSkillView();" in js[js.index("function openSettings("):][:600]
+
+    # 范围控件：三档 + 项目勾选 + 保存
+    for needle in ('"all"', '"projects"', '"none"', "renderScopePicker", "scope-save"):
+        assert needle in js, f"范围控件缺：{needle}"
+    # 三态如实呈现（生效中 / 本项目已停用 / 本项目不适用）
+    assert "function skillState(" in js
+    for label in ("生效中", "本项目已停用", "本项目不适用"):
+        assert label in js, f"缺少状态文案：{label}"
+    # 范围不适用时不显示本项目开关（否则会让人以为开关坏了）
+    assert "if (s.applies)" in js
+    # 技能名可点开完整指令
+    assert "skills.body" in js and "previewSkill" in js
+    # 指定项目但一个都没勾：前端先拦一道，不发请求
+    assert "至少要勾选一个项目" in js
+    # 项目列表来自 project.list（勾选项要跟着项目变化）
+    assert 'request("project.list")' in js
+
+
+def test_skills_scope_protocol(home):
+    """skills.scope / skills.body 协议：改范围热生效、预览读原文。"""
+    script = [[TextBlock(text="ok")]]
+    gdir = Path(os.environ["SKYSHEEP_HOME"]) / "skills" / "pdf-tools"
+    gdir.mkdir(parents=True, exist_ok=True)
+    (gdir / "SKILL.md").write_text(
+        "---\nname: pdf-tools\ndescription: 合并 PDF\n---\n\n用 pypdf 处理。\n",
+        encoding="utf-8",
+    )
+    with make_client(home, script) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "s1", "method": "boot"})
+        snap = recv_until(ws, "s1")["result"]
+        item = next(s for s in snap["skills"] if s["name"] == "pdf-tools")
+        # 默认所有项目可用，快照带范围字段
+        assert item["scope"] == "all" and item["applies"] is True
+        assert item["scope_projects"] == []
+        assert "scope_config" in snap["skill_dirs"]
+
+        # 设为任何项目都不用 → 立即不生效（热生效，不用重启）
+        ws.send_json({"id": "s2", "method": "skills.scope",
+                      "params": {"name": "pdf-tools", "mode": "none", "projects": []}})
+        r = recv_until(ws, "s2")["result"]
+        assert r["mode"] == "none" and r["applies"] is False
+        ws.send_json({"id": "s3", "method": "boot"})
+        snap2 = recv_until(ws, "s3")["result"]
+        assert next(s for s in snap2["skills"] if s["name"] == "pdf-tools")["applies"] is False
+
+        # 预览：读 SKILL.md 原文（不受启用/范围限制）
+        ws.send_json({"id": "s4", "method": "skills.body", "params": {"name": "pdf-tools"}})
+        body = recv_until(ws, "s4")["result"]
+        assert "name: pdf-tools" in body["text"] and "pypdf" in body["text"]
+
+        # 指定项目但一个都没勾 → 报错（后端也要拦）
+        ws.send_json({"id": "s5", "method": "skills.scope",
+                      "params": {"name": "pdf-tools", "mode": "projects", "projects": []}})
+        err = recv_until(ws, "s5")
+        assert not err["ok"] and "至少" in err["error"]
 
 
 def test_static_assets_send_no_store(home):

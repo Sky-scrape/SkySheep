@@ -569,6 +569,15 @@ def create_app(
             return await backend.toggle_skill(
                 str(params.get("name", "")), bool(params.get("enabled", True))
             )
+        if method == "skills.scope":
+            raw = params.get("projects")
+            return await backend.set_skill_scope(
+                str(params.get("name", "")),
+                str(params.get("mode", "all")),
+                [str(p) for p in raw] if isinstance(raw, list) else None,
+            )
+        if method == "skills.body":
+            return backend.skill_body(str(params.get("name", "")))
         if method == "skills.install":
             return await backend.install_skill(
                 str(params.get("source", "")), str(params.get("scope", "global"))

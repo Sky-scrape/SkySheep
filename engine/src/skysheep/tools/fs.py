@@ -14,6 +14,7 @@ from .base import (
     Tool,
     ToolContext,
     ToolError,
+    check_write_size,
     rel_path,
     resolve_path,
     truncate_output,
@@ -90,6 +91,7 @@ class WriteFileTool(Tool):
         "修改已有文件前应先 read_file 了解现状。"
     )
     safety = Safety.WRITE
+    write_path_arg = True  # 写目标 = args.path（「自动允许写入」档据此判定目录边界）
     args_model = WriteFileArgs
     last_diff = ""
 
@@ -99,6 +101,7 @@ class WriteFileTool(Tool):
     async def run(self, args: WriteFileArgs, ctx: ToolContext) -> str:
         p = resolve_path(ctx, args.path)
         shown = rel_path(ctx, p)
+        check_write_size(args.content, shown)
         if self.recorder is not None:
             self.recorder.record(p)  # 检查点：记下覆盖前的原始内容
         old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
@@ -126,6 +129,7 @@ class EditFileTool(Tool):
         "为唯一匹配请带上足够的上下文行。新建文件请用 write_file。"
     )
     safety = Safety.WRITE
+    write_path_arg = True
     args_model = EditFileArgs
     last_diff = ""
 
@@ -151,6 +155,7 @@ class EditFileTool(Tool):
         if args.old_string == args.new_string:
             raise ToolError("old_string and new_string are identical")
         new_content = content.replace(args.old_string, args.new_string)
+        check_write_size(new_content, shown, previous_len=len(content))
         p.write_text(new_content, encoding="utf-8")
         self.last_diff = make_diff(content, new_content, shown)
         replaced = count if args.replace_all else 1

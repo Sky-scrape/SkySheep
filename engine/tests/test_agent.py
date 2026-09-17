@@ -135,6 +135,24 @@ async def test_allow_always_whitelists_subsequent_calls(tmp_path):
     assert len(reqs) == 1  # 第二次写文件被白名单放行，不再询问
 
 
+async def test_permission_request_previews_always_rule(tmp_path):
+    """确认弹窗上要能看到「总是允许」将写入的规则范围（write_file → 整个工具）。"""
+    provider = FakeProvider(
+        [
+            [ToolUseBlock(id="t1", name="write_file", input={"path": "x.txt", "content": "1"})],
+            [TextBlock(text="done")],
+        ]
+    )
+    agent = make_agent(provider, tmp_path)
+    previews = []
+    async for ev in agent.run_turn("write"):
+        if ev.kind == "permission_request":
+            previews.append((ev.rule_kind, ev.rule_pattern))
+            agent.respond_permission(ev.request_id, "allow_always")
+    assert previews == [("always", "")]
+    assert (tmp_path / "x.txt").exists()
+
+
 async def test_unknown_tool_reported_as_error(tmp_path):
     provider = FakeProvider(
         [

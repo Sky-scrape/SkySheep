@@ -57,3 +57,25 @@ def test_settings_import_rejects_bad_zip(home):
                       "params": {"b64": _zip_b64({"evil.exe": b"MZ..."})}})
         r2 = recv_until(ws, "b2")["result"]
         assert r2["restored"] == []
+
+
+def test_settings_import_never_enables_accept_edits(home):
+    """导入的 ui.json 不允许带着「自动允许写入」进来（等于绕过本机主动切换）。"""
+    import json
+
+    from test_server import make_client, recv_until
+
+    from skysheep.config import skysheep_home
+
+    home_dir = skysheep_home()
+    home_dir.mkdir(parents=True, exist_ok=True)
+    payload = _zip_b64({
+        "ui.json": json.dumps({"accept_edits": 1, "sidebar_w": 300}).encode("utf-8"),
+    })
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "i1", "method": "settings.import", "params": {"b64": payload}})
+        assert "ui.json" in recv_until(ws, "i1")["result"]["restored"]
+        ws.send_json({"id": "m1", "method": "permission.mode"})
+        assert recv_until(ws, "m1")["result"]["mode"] == "confirm"
+    saved = json.loads((home_dir / "ui.json").read_text(encoding="utf-8"))
+    assert "accept_edits" not in saved and saved.get("sidebar_w") == 300

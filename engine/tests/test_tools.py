@@ -178,3 +178,62 @@ async def test_run_command_background_list_and_errors(tmp_path):
         await tool.run(tool.args_model(command="", action="read", id=99999), ctx(tmp_path))
     with pytest.raises(ToolError, match="command 不能为空"):
         await tool.run(tool.args_model(command=""), ctx(tmp_path))
+
+
+# ---- 写入端大小上限（reading 端早有截断，写入端此前无限制） ----
+
+
+async def test_write_file_rejects_oversized_content(tmp_path, monkeypatch):
+    """超过上限的写入直接报错（不截断）：截断会写出半个文件却报告成功。"""
+    from skysheep.tools import base as base_mod
+
+    monkeypatch.setattr(base_mod, "MAX_WRITE_CHARS", 100)
+    w = WriteFileTool()
+    with pytest.raises(ToolError, match="写入内容过大"):
+        await w.run(w.args_model(path="big.txt", content="x" * 101), ctx(tmp_path))
+    assert not (tmp_path / "big.txt").exists(), "被拒绝的写入不应留下任何文件"
+    # 刚好到上限仍可写
+    await w.run(w.args_model(path="ok.txt", content="x" * 100), ctx(tmp_path))
+    assert (tmp_path / "ok.txt").stat().st_size == 100
+
+
+async def test_edit_file_allows_shrinking_oversized_file(tmp_path, monkeypatch):
+    """存量文件已经超上限时，仍然允许把它改小（不因存量挡住修复动作）。"""
+    from skysheep.tools import base as base_mod
+
+    monkeypatch.setattr(base_mod, "MAX_WRITE_CHARS", 100)
+    target = tmp_path / "legacy.txt"
+    target.write_text("y" * 500, encoding="utf-8")
+    e = EditFileTool()
+    out = await e.run(
+        e.args_model(path="legacy.txt", old_string="y" * 500, new_string="y" * 50),
+        ctx(tmp_path),
+    )
+    assert "1 replacement" in out
+    assert target.stat().st_size == 50
+
+
+async def test_edit_file_rejects_growing_beyond_limit(tmp_path, monkeypatch):
+    """把文件改到超过上限则拒绝（改大同样受约束）。"""
+    from skysheep.tools import base as base_mod
+
+    monkeypatch.setattr(base_mod, "MAX_WRITE_CHARS", 100)
+    w = WriteFileTool()
+    await w.run(w.args_model(path="g.txt", content="a" * 50), ctx(tmp_path))
+    e = EditFileTool()
+    with pytest.raises(ToolError, match="写入内容过大"):
+        await e.run(
+            e.args_model(path="g.txt", old_string="a" * 50, new_string="a" * 200),
+            ctx(tmp_path),
+        )
+
+
+async def test_write_document_rejects_oversized_content(tmp_path, monkeypatch):
+    """write_document 与 write_file 同一套上限口径。"""
+    from skysheep.tools import base as base_mod
+    from skysheep.tools.docs import WriteDocumentTool
+
+    monkeypatch.setattr(base_mod, "MAX_WRITE_CHARS", 100)
+    d = WriteDocumentTool()
+    with pytest.raises(ToolError, match="写入内容过大"):
+        await d.run(d.args_model(path="r.csv", content="x" * 101), ctx(tmp_path))

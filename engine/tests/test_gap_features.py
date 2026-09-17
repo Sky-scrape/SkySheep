@@ -30,16 +30,36 @@ async def test_gate_auto_accept_write(home, tmp_path):
     from skysheep.tools.fs import WriteFileTool
     from skysheep.tools.shell import RunCommandTool
 
-    gate = PermissionGate(store=None, project_id=None)
+    # 工作目录是「自动允许写入」档的判定基准：只放行能确认落在目录内的写入
+    gate = PermissionGate(store=None, project_id=None, working_dir=tmp_path)
     write_tool = WriteFileTool()
     cmd_tool = RunCommandTool()
     # 默认档：写入需确认
     assert await gate.authorize(write_tool, {"path": "a", "content": "b"}) is not None
-    # accept_edits：写入自动放行，高危仍需确认
+    # accept_edits：目录内写入自动放行，高危仍需确认
     gate.auto_accept_write = True
     assert await gate.authorize(write_tool, {"path": "a", "content": "b"}) is None
+    assert await gate.authorize(
+        write_tool, {"path": str(tmp_path / "sub" / "a.txt"), "content": "b"}
+    ) is None
+    # 目录之外的写入不回落到自动档（以前这里会被无条件放行）
+    outside = tmp_path.parent / "outside.txt"
+    assert await gate.authorize(
+        write_tool, {"path": str(outside), "content": "b"}
+    ) is not None
     assert cmd_tool.safety == Safety.DANGEROUS
     assert await gate.authorize(cmd_tool, {"command": "ls"}) is not None
+
+
+async def test_auto_accept_write_requires_known_target():
+    """不知道工作目录、或工具说不清写到哪里时，自动档一律不生效。"""
+    from skysheep.tools.fs import WriteFileTool
+
+    write_tool = WriteFileTool()
+    # 没给工作目录（如 CLI 早期路径、测试直连）：无从判定边界 → 仍需确认
+    gate = PermissionGate(store=None, project_id=None)
+    gate.auto_accept_write = True
+    assert await gate.authorize(write_tool, {"path": "a", "content": "b"}) is not None
 
 
 def test_permission_mode_ws_persisted(home):

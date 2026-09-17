@@ -7,24 +7,30 @@
   <link rel="icon" href="/static/skysheep.ico">
   <style>
   /* 底色兜底：写在 app.css 之前，样式表还没到位时也不会露 WebView 白底。
-     与 app.css 的 --bg / [data-theme="dark"] --bg 保持一致，改主题色要一起改。 */
+     与各主题 app.css 里的 --bg 保持一致（纸墨=默认 html 底色），改主题色要一起改。 */
   html { background: #e8dfc7; }
-  html[data-theme="dark"] { background: #171410; }
+  html[data-theme="celadon"] { background: #dce4da; }
+  html[data-theme="kaki"] { background: #ead9bf; }
+  html[data-theme="night"] { background: #171410; }
+  html[data-theme="indigo"] { background: #12161f; }
+  html[data-theme="pine"] { background: #101613; }
   </style>
   <link rel="stylesheet" href="/static/app.css">
   <script>
-  // 首帧外观（主题深浅 / 界面缩放 / 侧栏与输入区宽度）由服务端从 ui.json 注入到 <html> 标签上：
+  // 首帧外观（主题 / 界面缩放 / 侧栏与输入区宽度）由服务端从 ui.json 注入到 <html> 标签上：
   // 整页加载（首次启动、手动 F5）时第一帧就是正确外观，不会「默认浅色布局闪一下再跳回」。
   // 项目切换已经改成站内切换（不再整页刷新），不经过这里。
-  // auto（跟随系统）服务端不知道系统深浅，只能在这里同步判定。
+  // 选了具体主题时服务端已把 data-theme="主题id" 注入好；auto（跟随系统）服务端
+  // 不知道系统深浅，只能在这里同步判定：浅色默认纸墨、深色默认夜墨。
   (function () {
     var root = document.documentElement;
     try {
       var mode = root.getAttribute("data-theme-mode") || "auto";
-      var dark = mode === "dark" || (mode === "auto" && window.matchMedia &&
-        window.matchMedia("(prefers-color-scheme: dark)").matches);
-      if (dark) root.setAttribute("data-theme", "dark");
-      else root.removeAttribute("data-theme");
+      if (mode === "auto") {
+        var dark = window.matchMedia &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches;
+        root.setAttribute("data-theme", dark ? "night" : "paper");
+      }
     } catch (e) {}
   })();
   </script>
@@ -81,15 +87,18 @@
       <div class="section">
         <h3>设置</h3>
         <ul id="settings-nav" class="list">
+          <!-- 分组按「上手顺序 + 使用频率」排：先配能力（模型 / 工具 / 分身 / 外部工具），
+               再调日常习惯（快捷指令 / 记忆 / 界面），然后是安全与实验性（白名单 / 高级），
+               最后是只读信息（用量 / 关于）。新增设置页时按这个分组插进对应段。 -->
           <li class="active" data-target="providers">模型服务</li>
           <li data-target="skills">技能与工具</li>
           <li data-target="subagents">子代理</li>
           <li data-target="mcp">MCP 服务</li>
-          <li data-target="rules">本项目白名单</li>
-          <li data-target="advanced">高级</li>
+          <li data-target="snippets">快捷指令</li>
           <li data-target="memory">全局记忆</li>
           <li data-target="ui">界面与通知</li>
-          <li data-target="snippets">快捷指令</li>
+          <li data-target="rules">本项目白名单</li>
+          <li data-target="advanced">高级</li>
           <li data-target="usage">用量</li>
           <li data-target="about">关于</li>
         </ul>
@@ -127,6 +136,10 @@
 
         <div id="cfg-banner" hidden>
           <span id="cfg-banner-text"></span>
+          <span id="cfg-banner-actions" hidden>
+            <button id="banner-trust" class="btn-ghost" type="button">信任本项目</button>
+            <button id="banner-details" class="btn-ghost" type="button">看详情</button>
+          </span>
           <button id="cfg-banner-close" class="banner-close" title="关闭">✕</button>
         </div>
 
@@ -149,6 +162,8 @@
         <div id="permission-bar" hidden>
           <div class="perm-head">🔒 需要确认：<b id="perm-tool"></b></div>
           <pre id="perm-args"></pre>
+          <p id="perm-note" class="perm-note" hidden></p>
+          <p id="perm-rule" class="perm-rule" hidden></p>
           <div class="perm-actions">
             <button class="btn-primary" data-decision="allow_once">允许一次</button>
             <button class="btn-ghost" data-decision="allow_always">总是允许（本项目）</button>
@@ -181,7 +196,7 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
               </button>
             </span>
-            <button id="accept-switch" class="cp-icon" title="当前每次写入/执行都会征询。点击开启「自动允许写入」（执行命令仍会确认）">
+            <button id="accept-switch" class="cp-icon" title="当前每次写入/执行都会征询。点击开启「自动允许写入」（仅工作目录内，执行命令仍会确认）">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 4.5l4 4L8.5 19.5l-5 1.2 1.2-5L15.5 4.5z"/><path d="M13.5 6.5l4 4"/></svg>
             </button>
             <button id="file-attach" class="cp-icon" title="添加文件：选本机任意文件（支持项目外的文件与多选），插入 @ 路径让 Agent 读取；图片可直接粘贴或拖入">
@@ -260,8 +275,9 @@
 
           <section id="rp-page-files" class="rp-page hidden">
             <div class="rp-toolbar">
-              <span class="dim small">工作区文件 · 点击预览（只读）</span>
+              <span class="dim small">工作区文件 · 点文本文件直接编辑，Ctrl+S 保存</span>
               <span class="spacer"></span>
+              <button id="files-new" class="rp-mini" title="在工作目录里新建一个文本文件">＋ 新建</button>
               <button id="files-refresh" class="rp-mini">刷新</button>
             </div>
             <div id="files-tree" class="files-tree"></div>
@@ -269,10 +285,12 @@
               <div class="rp-toolbar">
                 <b id="files-preview-title" class="small"></b>
                 <span class="spacer"></span>
+                <button id="files-save" class="rp-mini primary hidden" title="保存修改（Ctrl+S）">保存</button>
                 <button id="files-preview-open" class="rp-mini" title="用系统默认程序打开（脚本/可执行文件只在文件管理器里定位）">↗ 打开</button>
-                <button id="files-preview-close" class="rp-mini">关闭预览</button>
+                <button id="files-preview-close" class="rp-mini">关闭</button>
               </div>
-              <pre id="files-preview-body"></pre>
+              <textarea id="files-editor" spellcheck="false" readonly
+                        placeholder="点上面的文件列表打开内容"></textarea>
             </div>
           </section>
 
@@ -533,11 +551,61 @@
 
         <section class="settings-page hidden" id="settings-page-rules">
           <section class="settings-card">
-            <h3>本项目白名单</h3>
+            <div class="card-head">
+              <h3>本项目白名单</h3>
+              <span class="head-ops">
+                <button id="btn-rule-add" class="btn-ghost">＋ 添加规则</button>
+                <button id="btn-rules-export" class="btn-ghost" title="导出本项目的白名单规则为 JSON（可在其它项目导入）">导出</button>
+                <button id="btn-rules-import" class="btn-ghost" title="粘贴导出的 JSON，把规则合并进本项目">导入</button>
+                <button id="btn-rules-clear" class="btn-ghost danger" title="清空本项目的全部白名单规则（可撤销）">清空</button>
+              </span>
+            </div>
             <p class="settings-hint">
-              你在对话中选择「总是允许」时保存的规则；删除后对应操作会重新询问。
+              你在对话中选择「总是允许」时保存的规则；删除后对应操作会重新询问。<br>
+              命令的前缀规则不会命中带 shell 拼接的命令（如 <code>git status; rm -rf /</code>）——
+              这类命令每次都重新询问，要放行它请选择「允许一次」；键盘的「总是允许」只固化那一次
+              输入的内容/键位（内容不同的输入仍需确认）。
             </p>
+            <div id="rule-add-form" class="rule-add-form hidden">
+              <div class="rule-add-row">
+                <label>工具</label>
+                <input id="rule-tool" list="rule-tool-options" autocomplete="off"
+                       placeholder="如 write_file / run_command；也可输入未列出的名称">
+                <datalist id="rule-tool-options"></datalist>
+              </div>
+              <div class="rule-add-row">
+                <label>类型</label>
+                <select id="rule-kind">
+                  <option value="prefix">前缀 —— 以这段文本开头的调用都放行（如 git status）</option>
+                  <option value="always">整个工具 —— 该工具的全部调用都放行</option>
+                  <option value="exact">仅此一条 —— 与这段文本完全一致才放行</option>
+                  <option value="glob">通配 —— 按 * ? 通配符匹配（如 docs/*.md）</option>
+                </select>
+              </div>
+              <div class="rule-add-row">
+                <label>匹配内容</label>
+                <input id="rule-pattern" autocomplete="off" placeholder="如 git status / docs/*.md">
+              </div>
+              <p id="rule-add-hint" class="dim small"></p>
+              <p id="rule-add-warn" class="rule-warn" hidden></p>
+              <label id="rule-add-ack-row" class="rule-add-ack hidden">
+                <input type="checkbox" id="rule-add-ack"> 我了解这条规则的影响
+              </label>
+              <div class="rule-add-ops">
+                <button id="rule-add-save" class="btn-primary">添加</button>
+                <button id="rule-add-cancel" class="btn-ghost">取消</button>
+              </div>
+            </div>
+            <div id="rules-status" class="card-status" hidden></div>
+            <p id="rules-summary" class="dim small" hidden></p>
             <ul id="rules-list" class="list rules-list"></ul>
+            <div class="rule-check">
+              <span class="rule-check-cap">测试</span>
+              <input id="rule-check-tool" list="rule-tool-options" autocomplete="off" placeholder="工具名，如 run_command">
+              <input id="rule-check-text" autocomplete="off" placeholder="参数文本，如 git status --short">
+              <button id="btn-rule-check" class="btn-ghost">试一下</button>
+            </div>
+            <p id="rule-check-result" class="rule-check-result" hidden></p>
           </section>
         </section>
 
@@ -588,11 +656,24 @@
               开启后，读写工作目录以外的文件会被直接拒绝（包括 <b>@</b> 引用的外部文件）。
               只读工具平时是自动放行的，这个开关给"只看这一个项目"上把锁。
             </p>
+            <p class="dim small adv-toggle-desc">
+              关闭时（默认），只读工具（读文件 / 列目录 / 搜索）可以不经确认读取磁盘上
+              任何位置——包括 <b>~/.ssh</b> 下的私钥、浏览器数据。如果 Agent 会被诱导
+              读入外来的网页或文件内容，建议开启这个开关。
+            </p>
+            <div class="toolcfg-row">
+              <label>工作区信任</label>
+              <span id="adv-trust-state" class="dim small">读取中…</span>
+            </div>
+            <p class="dim small adv-toggle-desc">
+              项目目录下的 <b>.skysheep/</b>（mcp.json 与 skills/）是随仓库一起分发的数据，
+              首次打开时会先问一句是否信任，确认前不会执行其中的命令、也不会把技能拼进系统提示词。
+              信任按项目记忆，配置内容一变就需要重新确认；全局配置不受影响。
+            </p>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="adv-computer-control">
               <span>启用电脑控制工具（截屏 / 鼠标 / 键盘 / 剪贴板）</span>
-            </label>
-            <p class="dim small adv-toggle-desc">
+            </label>            <p class="dim small adv-toggle-desc">
               让 Agent 能「看见并操作」你的桌面：截屏进对话、移动鼠标、输入文字。
               高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，
               有「帮我操作这个软件」这类需求时再打开。保存后立即对所有会话生效。
@@ -625,7 +706,7 @@
               <b>- [日期] 内容</b> 的列表），每一轮对话都会注入。这里可以直接查看、修改；
               保存后对所有会话立即生效。与之相对，「项目记忆」只对当前项目生效。
             </p>
-            <div id="memory-status" class="card-status" hidden></div>
+            <div id="memory-global-status" class="card-status" hidden></div>
             <textarea id="memory-text" class="memory-text" rows="14"
                       placeholder="Agent 还没有记住任何东西。也可以在这里手动添加，例如：&#10;- [2026-09-15] 沟通偏好直接给结论，不用铺垫"></textarea>
           </section>
@@ -635,12 +716,38 @@
           <section class="settings-card">
             <h3>主题</h3>
             <p class="settings-hint">
-              「跟随系统」按 Windows 的深浅色自动切换；标题栏颜色会一起变。
+              六套配色共用同一张「纸面」，按喜好挑即可；「跟随系统」按 Windows 的深浅色
+              自动落到浅色纸墨 / 深色夜墨，选中具体主题则不再随系统切换。标题栏颜色会一起变。
             </p>
-            <div id="theme-seg" class="seg-row">
-              <button data-theme-mode="auto">跟随系统</button>
-              <button data-theme-mode="light">浅色 · 纸墨</button>
-              <button data-theme-mode="dark">深色 · 夜墨</button>
+            <div id="theme-grid" class="theme-grid">
+              <button class="theme-card" data-theme-pref="auto" type="button">
+                <span class="theme-swatch"><i style="background:#e8dfc7"></i><i style="background:#1257c4"></i><i style="background:#171410"></i></span>
+                <b>跟随系统</b><small>浅色 / 深色自动切换</small>
+              </button>
+              <button class="theme-card" data-theme-pref="paper" type="button">
+                <span class="theme-swatch"><i style="background:#f4ecd8"></i><i style="background:#1257c4"></i><i style="background:#1d1a16"></i></span>
+                <b>纸墨</b><small>浅色 · 暖纸与墨蓝</small>
+              </button>
+              <button class="theme-card" data-theme-pref="celadon" type="button">
+                <span class="theme-swatch"><i style="background:#e9efe4"></i><i style="background:#0e7a68"></i><i style="background:#1c221d"></i></span>
+                <b>青瓷</b><small>浅色 · 龙泉青釉</small>
+              </button>
+              <button class="theme-card" data-theme-pref="kaki" type="button">
+                <span class="theme-swatch"><i style="background:#f6e9d2"></i><i style="background:#b45309"></i><i style="background:#2b1d12"></i></span>
+                <b>秋柿</b><small>浅色 · 柿染暖橙</small>
+              </button>
+              <button class="theme-card" data-theme-pref="night" type="button">
+                <span class="theme-swatch"><i style="background:#211d17"></i><i style="background:#5b93ee"></i><i style="background:#f4ecd8"></i></span>
+                <b>夜墨</b><small>深色 · 纸墨反转</small>
+              </button>
+              <button class="theme-card" data-theme-pref="indigo" type="button">
+                <span class="theme-swatch"><i style="background:#1a1f2b"></i><i style="background:#7fa3f2"></i><i style="background:#e3e8f2"></i></span>
+                <b>黛夜</b><small>深色 · 靛蓝夜空</small>
+              </button>
+              <button class="theme-card" data-theme-pref="pine" type="button">
+                <span class="theme-swatch"><i style="background:#18201b"></i><i style="background:#52c79d"></i><i style="background:#e8ede6"></i></span>
+                <b>松烟</b><small>深色 · 松烟墨绿</small>
+              </button>
             </div>
           </section>
           <section class="settings-card">
@@ -653,6 +760,19 @@
               电脑端同步可见。服务将对局域网开放，令牌即密码，请勿在公共网络使用；关闭后恢复仅本机访问。
             </p>
             <div id="lan-info" class="lan-info"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>🌐 远程访问（Tailscale）</h3>
+              <label class="toggle-row"><input type="checkbox" id="ts-toggle"><span>开启</span></label>
+            </div>
+            <p class="settings-hint">
+              不在同一 Wi-Fi（手机开流量也行）也能连回家里的 SkySheep：电脑和手机都安装
+              Tailscale（tailscale.com）并登录<b>同一账号</b>，这里开启后（<b>重启 SkySheep 生效</b>），
+              手机在任意网络打开电脑的 Tailscale 地址，就能用完整界面继续聊、批准确认、看任务进度。
+              链路经 Tailscale 端到端加密，访问令牌与「手机控制」共用；未装 Tailscale 的设备
+              （包括同一 Wi-Fi 下的）反而连不进来。
+            </p>
+            <div id="ts-info" class="lan-info"></div>
           </section>
           <section class="settings-card">
             <h3>Windows 系统通知</h3>
@@ -763,9 +883,9 @@
               <button id="btn-backups-refresh" class="btn-ghost">刷新</button>
             </div>
             <p class="settings-hint">
-              SkySheep 每次启动前都会给会话数据库留一份备份（保留最近 20 份）。
-              误删了会话、或数据不对劲时，可以在这里挑一个较早的版本恢复。
-              <b>恢复会用备份整体替换当前数据</b>，所以恢复前系统会自动把现状另存一份，随时能换回来。
+              每次启动前都会给会话数据库留一份备份（保留最近 20 份）；误删会话、或数据不对劲时，
+              在这里挑一个较早的版本恢复即可（默认只列最近几份，更早的点「展开」）。
+              <b>恢复会用备份整体替换当前数据</b>，替换前系统会先把现状另存一份，随时能换回来。
             </p>
             <div id="backup-status" class="card-status" hidden></div>
             <ul id="backup-list" class="list"></ul>

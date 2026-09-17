@@ -169,6 +169,92 @@ async def test_web_search_bocha_and_zhipu_parse():
     assert "智谱结果" in out2
 
 
+# ---- web_search：自定义档（SearXNG GET / 通用 REST POST） ----
+
+
+def _searxng_handler(request: httpx.Request) -> httpx.Response:
+    """SearXNG 的 GET /search?format=json：不带鉴权，参数走查询串。"""
+    assert request.method == "GET"
+    assert request.url.path.endswith("/search")
+    assert request.url.params.get("format") == "json"
+    assert request.url.params.get("q") == "skysheep"
+    return httpx.Response(200, json={"results": [
+        {"title": "SearXNG 结果", "url": "https://s.example.com", "content": "自建搜索摘要"},
+        {"title": "无链接应丢弃", "url": "", "content": "..."},
+    ]})
+
+
+async def test_web_search_custom_searxng_get():
+    tool = WebSearchTool(provider="custom", base_url="http://localhost:8080",
+                         transport=httpx.MockTransport(_searxng_handler))
+    assert tool.configured  # 自建服务不带 Key 也算已配置
+    out = await tool.run(WebSearchArgs(query="skysheep"), make_ctx(Path(".")))
+    assert "SearXNG 结果" in out and "https://s.example.com" in out
+    assert "无链接" not in out
+
+
+def _custom_rest_handler(request: httpx.Request) -> httpx.Response:
+    """通用 REST：POST JSON + Bearer，结果放在 data.results。"""
+    assert request.method == "POST"
+    assert request.headers["Authorization"] == "Bearer ck"
+    import json as _json
+
+    assert _json.loads(request.content) == {"query": "q", "max_results": 6}
+    return httpx.Response(200, json={"data": {"results": [
+        {"name": "自定义结果", "link": "https://c.example.com", "snippet": "摘要"},
+    ]}})
+
+
+async def test_web_search_custom_rest_post():
+    tool = WebSearchTool(provider="custom", api_key="ck",
+                         base_url="https://search.internal/api",
+                         transport=httpx.MockTransport(_custom_rest_handler))
+    out = await tool.run(WebSearchArgs(query="q"), make_ctx(Path(".")))
+    assert "自定义结果" in out and "https://c.example.com" in out
+
+
+async def test_web_search_custom_falls_back_to_other_protocol():
+    """协议猜错时自动互备：地址看着像 SearXNG，实际是 POST 接口。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(405, text="Method Not Allowed")
+        return httpx.Response(200, json={"results": [
+            {"title": "互备结果", "url": "https://f.example.com", "content": "ok"},
+        ]})
+
+    tool = WebSearchTool(provider="custom", base_url="https://searx.example.com",
+                         transport=httpx.MockTransport(handler))
+    out = await tool.run(WebSearchArgs(query="q"), make_ctx(Path(".")))
+    assert "互备结果" in out
+
+
+async def test_web_search_custom_html_response_falls_back():
+    """SearXNG 的 POST /search 会回 HTML 页面（不是 JSON），也要能换协议重试。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, text="<!DOCTYPE html><html>...",
+                                  headers={"content-type": "text/html"})
+        return httpx.Response(200, json={"results": [
+            {"title": "HTML 互备结果", "url": "https://h.example.com", "content": "ok"},
+        ]})
+
+    tool = WebSearchTool(provider="custom", base_url="http://localhost:8080/search",
+                         transport=httpx.MockTransport(handler))
+    out = await tool.run(WebSearchArgs(query="q"), make_ctx(Path(".")))
+    assert "HTML 互备结果" in out
+
+
+async def test_web_search_custom_requires_base_url():
+    from skysheep.tools.base import ToolError
+
+    tool = WebSearchTool(provider="custom")
+    assert not tool.configured
+    with pytest.raises(ToolError, match="联网搜索未配置"):
+        await tool.run(WebSearchArgs(query="x"), make_ctx(Path(".")))
+
+
 # ---- memory ----
 
 
@@ -385,6 +471,18 @@ def test_resolve_websearch(home, monkeypatch):
     assert got2 and got2["provider"] == "tavily"
 
 
+def test_resolve_websearch_custom(home, monkeypatch):
+    """自定义档只认 base_url，Key 可留空（自建 SearXNG 默认无鉴权）。"""
+    update_config_section("websearch", {"provider": "custom", "api_key": "tk"})
+    assert resolve_websearch(load_config()) is None  # 没填地址 → 未配置
+    update_config_section("websearch", {"base_url": "http://localhost:8080"})
+    got = resolve_websearch(load_config())
+    assert got and got["provider"] == "custom" and got["base_url"] == "http://localhost:8080"
+    # 自定义档不参与 auto：自动档里唯一的基础设施是用户自填地址，不能悄悄生效
+    update_config_section("websearch", {"provider": "auto", "api_key": ""})
+    assert resolve_websearch(load_config()) is None
+
+
 def test_resolve_imagegen(home, monkeypatch):
     cfg = load_config()
     assert resolve_imagegen(cfg) is None
@@ -408,10 +506,18 @@ def test_ws_memory_and_toolcfg_and_lan_and_market(home):
         ws.send_json({"id": "w1", "method": "websearch.get"})
         w = recv_until(ws, "w1")["result"]
         assert w["provider"] == "auto" and "bocha" in w["providers"]
+        assert "custom" in w["providers"]  # 设置页要有自定义档可选
         ws.send_json({"id": "w2", "method": "websearch.save",
                       "params": {"provider": "bocha", "api_key": "k9"}})
         w2 = recv_until(ws, "w2")["result"]
         assert w2["resolved_provider"] == "bocha" and w2["has_key"]
+        # 自定义档：存 base_url 后立即可用，无需 Key
+        ws.send_json({"id": "w3", "method": "websearch.save",
+                      "params": {"provider": "custom",
+                                 "base_url": "http://localhost:8080"}})
+        w3 = recv_until(ws, "w3")["result"]
+        assert w3["resolved_provider"] == "custom" and w3["base_url"] == "http://localhost:8080"
+        assert w3["has_key"]
 
         ws.send_json({"id": "i1", "method": "imagegen.get"})
         i1 = recv_until(ws, "i1")["result"]
@@ -570,10 +676,18 @@ def test_preview_route_and_traversal_guard(home):
 
 
 def test_lan_token_guard_http(home, monkeypatch):
+    """局域网模式守卫矩阵：远端必须验令牌（缺失/错误 403，正确放行并种 cookie）；
+    本机永远免令牌——桌面窗口自己不带令牌，不能被挡在门外（2026-09-18 修复）。"""
+    from skysheep.server import app as server_app
+
     update_config_section("server", {"lan": True, "token": "tok-123"})
     script = [[TextBlock(text="x")]]
+    # 本机（TestClient 按本机对待）无令牌直接放行：桌面不能被挡在门外（先于强制来源）
     with make_client(home, script) as client:
-        # 无令牌：首页 403；带令牌：放行并种 cookie
+        assert client.get("/").status_code == 200
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "tailscale")
+    with make_client(home, script) as client:
+        # 远端（tailnet/局域网）无令牌：首页 403；带令牌：放行并种 cookie
         r0 = client.get("/")
         assert r0.status_code == 403 and "令牌" in r0.text
         r1 = client.get("/", params={"token": "tok-123"})
@@ -582,3 +696,27 @@ def test_lan_token_guard_http(home, monkeypatch):
         assert r2.status_code == 200
         # 错误令牌
         assert client.get("/", params={"token": "wrong"}).status_code == 403
+
+
+def test_tailscale_guard_http_local_exempt(home):
+    """仅远程访问（Tailscale）模式：本机免令牌（桌面自己不能被挡在门外）。
+
+    tailnet 来源必须验令牌、物理局域网来源直接拒绝——来源分类在
+    test_server.test_client_origin_classification 里锁，守卫分支与其共用。
+    """
+    update_config_section("server", {"tailscale": True, "token": "tok-123"})
+    script = [[TextBlock(text="x")]]
+    with make_client(home, script) as client:
+        assert client.get("/").status_code == 200
+
+
+def test_tailscale_guard_rejects_nontailnet_even_with_token(home, monkeypatch):
+    """仅远程访问模式：非 tailnet 来源（物理局域网等）带对令牌也 403——
+    IP 段不对就没有商量余地，令牌不再是唯一门槛。"""
+    from skysheep.server import app as server_app
+
+    update_config_section("server", {"tailscale": True, "token": "tok-123"})
+    script = [[TextBlock(text="x")]]
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    with make_client(home, script) as client:
+        assert client.get("/", params={"token": "tok-123"}).status_code == 403

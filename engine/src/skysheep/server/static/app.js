@@ -674,6 +674,12 @@ function finishToolCard(data) {
   const tname = card._toolName || "";
   const tpath = String((card._toolInput || {}).path || "");
   const written = !data.is_error && tpath && (tname === "write_file" || tname === "generate_image");
+  // Agent 落了文件：文件树缓存失效——文件标签开着就直接刷新，
+  // 用户切过去就能看到 Agent 刚写的文件，不用再手动点「刷新」
+  if (!data.is_error && (tname === "write_file" || tname === "edit_file")) {
+    filesLoaded = false;
+    if (rightActive === "files" && !rightPanel.classList.contains("hidden")) loadFiles(true);
+  }
   if (written && /\.(html?|png|jpe?g|webp|svg)$/i.test(tpath)) {
     const btn = document.createElement("button");
     btn.className = "preview-btn";
@@ -943,6 +949,7 @@ function showPermission(data) {
   maybeNotify("需要你确认", `${data.tool_name} 正在等待你的决定`);
   document.getElementById("perm-tool").textContent = `${data.tool_name} [${data.safety}]`;
   const argsEl = document.getElementById("perm-args");
+  const noteEl = document.getElementById("perm-note");
   if (data.diff) {
     // 写入类操作：展示改前→改后 diff，确认时有真实依据
     argsEl.innerHTML = renderDiffText(data.diff);
@@ -950,6 +957,26 @@ function showPermission(data) {
   } else {
     argsEl.textContent = data.detail || JSON.stringify(data.input, null, 2);
     argsEl.classList.remove("is-diff");
+  }
+  // 后端附带的额外说明（如「这条命令带 shell 拼接，前缀白名单不覆盖」）
+  if (noteEl) {
+    noteEl.textContent = data.note || "";
+    noteEl.hidden = !data.note;
+  }
+  // 「总是允许」将写入的规则范围（由 gate.rule_for 生成后随事件下发）：
+  // 点按钮前就能看到它会放行多大范围，而不是事后到设置里才发现
+  const ruleEl = document.getElementById("perm-rule");
+  if (ruleEl) {
+    if (data.rule_kind) {
+      const kind = RULE_KIND_LABEL[data.rule_kind] || data.rule_kind;
+      const raw = data.rule_pattern || "";
+      const pat = raw ? (raw.length > 80 ? raw.slice(0, 80) + "…" : raw) : "（全部）";
+      ruleEl.textContent = `「总是允许」将添加规则：${data.tool_name} · ${kind} ${pat}`;
+      ruleEl.title = raw;
+      ruleEl.hidden = false;
+    } else {
+      ruleEl.hidden = true;
+    }
   }
   document.getElementById("permission-bar").hidden = false;
   petRefresh();
@@ -1399,6 +1426,7 @@ let curSupportsVision = true;
 
 // ---------- 顶栏模型菜单：对话页直接切换已启用的模型（对标 ChatGPT/Claude 模型选择器） ----------
 const modelMenu = document.getElementById("model-menu");
+let modelMenuTab = "preset"; // 菜单当前页签：preset=默认（内置预设）、custom=自定义（用户新增）
 
 function hideModelMenu() {
   modelMenu.classList.add("hidden");
@@ -1413,6 +1441,7 @@ function buildModelRows(detail) {
       rows.push({
         name, model: m, hasKey: p.has_key,
         active: p.is_active && m === (p.active_model || p.model),
+        preset: !!p.is_preset, // 内置预设归「默认」，用户新增的归「自定义」
       });
     }
   }
@@ -1433,15 +1462,19 @@ async function toggleModelMenu(e) {
   modelMenu.style.left = Math.max(8, chipR.right / uiScale - 250) + "px";
   const detail = await request("config.providers").catch(() => null);
   if (!detail || modelMenu.classList.contains("hidden")) return; // 请求失败或期间已被关掉
-  modelMenu.innerHTML = "";
   const rows = buildModelRows(detail);
-  if (!rows.length) {
-    const hint = document.createElement("div");
-    hint.className = "mm-empty";
-    hint.textContent = "还没有已启用的模型服务";
-    modelMenu.appendChild(hint);
-  }
-  rows.forEach((row) => {
+  // 两页：内置预设 = 默认，用户新增 = 自定义（页签沿用侧栏搜索范围的分段控件样式）
+  const groups = [
+    {
+      tab: "preset", label: "默认", rows: rows.filter((r) => r.preset),
+      empty: "内置服务都已停用，可在管理页恢复",
+    },
+    {
+      tab: "custom", label: "自定义", rows: rows.filter((r) => !r.preset),
+      empty: "还没有自定义服务，点下方「管理模型服务」添加",
+    },
+  ];
+  const addRow = (row) => {
     const b = document.createElement("button");
     b.className = "mm-item" + (row.active ? " active" : "");
     b.innerHTML =
@@ -1470,21 +1503,49 @@ async function toggleModelMenu(e) {
       }
     };
     modelMenu.appendChild(b);
-  });
-  const manage = document.createElement("button");
-  manage.className = "mm-manage";
-  manage.textContent = "⚙ 管理模型服务…";
-  manage.title = "到设置里添加服务、启用/停用模型、配置 API Key";
-  manage.onclick = () => {
-    hideModelMenu();
-    openSettings("providers");
   };
-  modelMenu.appendChild(manage);
-  // 内容替换后按实际宽度重新定位：贴着模型徽章上方，右缘对齐徽章（不够放时往左收）
-  const mw = modelMenu.offsetWidth; // 布局像素，无需换算
-  modelMenu.style.bottom = (window.innerHeight / uiScale - chipR.top / uiScale + 6) + "px";
-  modelMenu.style.left =
-    Math.max(8, Math.min(chipR.right / uiScale - mw, window.innerWidth / uiScale - mw - 8)) + "px";
+  // 整页重画（页签 + 当前列表 + 管理入口），切页时数据已在手，无需重新请求
+  const paint = () => {
+    modelMenu.innerHTML = "";
+    const seg = document.createElement("div");
+    seg.className = "seg-row seg-mini mm-seg";
+    for (const g of groups) {
+      const t = document.createElement("button");
+      t.textContent = g.label;
+      t.classList.toggle("active", modelMenuTab === g.tab);
+      t.onclick = (ev) => {
+        ev.stopPropagation(); // 别让冒泡到 document 的 click 把菜单关掉
+        if (modelMenuTab === g.tab) return;
+        modelMenuTab = g.tab;
+        paint();
+      };
+      seg.appendChild(t);
+    }
+    modelMenu.appendChild(seg);
+    const cur = groups.find((g) => g.tab === modelMenuTab) || groups[0];
+    if (!cur.rows.length) {
+      const hint = document.createElement("div");
+      hint.className = "mm-empty";
+      hint.textContent = cur.empty;
+      modelMenu.appendChild(hint);
+    }
+    cur.rows.forEach(addRow);
+    const manage = document.createElement("button");
+    manage.className = "mm-manage";
+    manage.textContent = "⚙ 管理模型服务…";
+    manage.title = "到设置里添加服务、启用/停用模型、配置 API Key";
+    manage.onclick = () => {
+      hideModelMenu();
+      openSettings("providers");
+    };
+    modelMenu.appendChild(manage);
+    // 内容替换后按实际宽度重新定位：贴着模型徽章上方，右缘对齐徽章（不够放时往左收）
+    const mw = modelMenu.offsetWidth; // 布局像素，无需换算
+    modelMenu.style.bottom = (window.innerHeight / uiScale - chipR.top / uiScale + 6) + "px";
+    modelMenu.style.left =
+      Math.max(8, Math.min(chipR.right / uiScale - mw, window.innerWidth / uiScale - mw - 8)) + "px";
+  };
+  paint();
 }
 modelChip.style.cursor = "pointer";
 modelChip.title = "当前模型 · 点击切换已启用的模型";
@@ -1498,14 +1559,118 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("resize", hideModelMenu);
 
-function showBanner(text) {
+function showBanner(text, actions) {
   document.getElementById("cfg-banner-text").textContent = text;
+  const box = document.getElementById("cfg-banner-actions");
+  box.hidden = !actions;
+  // 按钮回调每次重绑（横幅是复用单例，不能把上一次的回调留在 DOM 上）
+  document.getElementById("banner-trust").onclick = actions ? actions.onTrust : null;
+  document.getElementById("banner-details").onclick = actions ? actions.onDetails : null;
   document.getElementById("cfg-banner").hidden = false;
 }
 function hideBanner() {
   document.getElementById("cfg-banner").hidden = true;
+  document.getElementById("cfg-banner-actions").hidden = true;
 }
 document.getElementById("cfg-banner-close").onclick = hideBanner;
+
+// ---------- workspace trust：项目自带配置在确认前不生效 ----------
+// 打开一个带 .skysheep/ 的目录时，横幅提示「这个项目想执行什么」；信任按项目记忆，
+// 配置内容一变（指纹不同）会重新询问。后端在未信任时不读取项目级 mcp.json、
+// 也不发现项目级技能（见 security/trust.py）。
+function renderTrustBanner(trust) {
+  if (!trust || trust.state !== "pending") return false;
+  const items = trust.items || [];
+  const names = items.slice(0, 3).map((i) => i.name).join("、");
+  const more = items.length > 3 ? ` 等 ${items.length} 项` : "";
+  const lead = trust.changed
+    ? "⚠ 本项目自带的配置有变化，需要重新确认："
+    : "⚠ 本项目自带了会被自动执行的配置：";
+  showBanner(
+    `${lead}${names}${more}（确认前不会启用）`,
+    {
+      onTrust: async () => {
+        try {
+          await request("trust.grant");
+          hideBanner();
+          boot();
+        } catch (e) {
+          showBanner("✗ 信任失败：" + e.message);
+        }
+      },
+      onDetails: () => showTrustDetails(trust),
+    },
+  );
+  return true;
+}
+
+function showTrustDetails(trust) {
+  const rows = (trust.items || []).map((i) => {
+    const label = i.kind === "mcp" ? "MCP 服务器" : "技能";
+    const ro = i.readonly ? "（其工具会自动放行）" : "";
+    return `<div class="ob-row"><span class="ob-name">${escapeHtml(i.name)}</span>`
+         + `<span class="dim small ob-url">${escapeHtml(label)}：${escapeHtml(i.detail)}${ro}</span></div>`;
+  }).join("");
+  const box = document.createElement("div");
+  box.innerHTML = `
+    <p class="dim small">这些内容来自当前项目目录下的 <b>.skysheep/</b>，随仓库一起分发。
+    信任后它们会自动生效：MCP 服务器会被启动（其中的本地命令会立即执行），
+    技能描述会拼进系统提示词。如果这个仓库不是你自己的、也不是你确认过来源的，建议先不要信任。</p>
+    <div class="ob-list">${rows || '<div class="dim small">（没有可展示的条目）</div>'}</div>
+    <p class="dim small">信任按项目路径记忆；这些文件的内容一旦变化，需要重新确认。</p>`;
+  // 已经信任时只作展示；待确认时给出确认按钮（两处入口：顶部横幅、设置页）
+  if (!trust || trust.state !== "pending") {
+    showModal("本项目自带的配置", box, async () => {});
+    return;
+  }
+  // 直接用弹窗自带的确认按钮，不另外加一个同义的按钮（截图里两个蓝按钮会让人不知道该点哪个）
+  showModal("本项目自带的配置", box, async () => {
+    await request("trust.grant");
+    renderTrustState();
+    boot();
+  }, "信任本项目");
+}
+
+/** 设置 · 安全与后台里的信任状态行：当前项目已信任/待确认，并提供收回/确认入口。 */
+async function renderTrustState() {
+  const el = document.getElementById("adv-trust-state");
+  if (!el) return;
+  let trust;
+  try {
+    trust = await request("trust.status");
+  } catch (e) {
+    el.textContent = "读取失败：" + e.message;
+    return;
+  }
+  if (!trust || trust.state === "clean") {
+    el.textContent = "本项目没有自带配置（无可信任之物）";
+    return;
+  }
+  if (trust.state === "trusted") {
+    el.innerHTML = '<span style="color:var(--ok,#2e7d32)">✓ 已信任本项目</span> ';
+    const un = document.createElement("button");
+    un.className = "btn-ghost";
+    un.textContent = "收回信任";
+    un.title = "收回后项目自带的 MCP 服务器会被断开，项目级技能不再生效";
+    un.onclick = async () => {
+      try {
+        await request("trust.revoke");
+        renderTrustState();
+      } catch (e) {
+        el.textContent = "✗ " + e.message;
+      }
+    };
+    el.appendChild(un);
+    return;
+  }
+  // pending：项目带配置但未确认
+  el.innerHTML = '<span style="color:var(--gold)">⚠ 待确认</span> ';
+  const go = document.createElement("button");
+  go.className = "btn-ghost";
+  go.textContent = "看详情并信任";
+  go.onclick = () => showTrustDetails(trust);
+  el.appendChild(go);
+}
 
 // ---------- 用量统计（设置页 · 仪表盘布局：统计磁贴 / Token 活动柱状图 / 模型用量环形图 / 会话排行） ----------
 let usageRangeDays = 14; // 范围 tabs 记忆在本窗口内
@@ -1757,8 +1922,11 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
     showBanner("⚠ " + snap.provider_error.split("\n")[0] +
       " —— 配置好后到 设置 · 模型服务 里选择一个已配置 Key 的 provider 即可生效。");
     setModelChip("未配置模型");
-  } else {
+  } else if (!renderTrustBanner(snap.workspace_trust)) {
+    // 模型报错优先于信任提示：两个横幅共用一个位置，先让用户看到「用不了」的原因
     hideBanner();
+    setModelChip(`${snap.provider}/${snap.model}`);
+  } else {
     setModelChip(`${snap.provider}/${snap.model}`);
   }
   curProviderName = snap.provider || "";
@@ -3033,6 +3201,9 @@ function addCheckpointBar(cp) {
       btn.remove();
       label.innerHTML = `↩ 已回滚 ${r.files.length} 个文件到改前状态`;
       addNotice("已撤销本轮文件改动；如需继续任务，Agent 会重新读取最新文件。");
+      // 磁盘被回滚：文件树缓存失效（开着文件标签就直接刷新，与 Agent 写文件后的联动一致）
+      filesLoaded = false;
+      if (rightActive === "files" && !rightPanel.classList.contains("hidden")) loadFiles(true);
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "↩ 撤销本轮改动";
@@ -3546,7 +3717,8 @@ function showHelp() {
         <li>「帮我把这个报错修好，改完跑一遍测试」</li>
       </ul>
       <p>涉及写文件、执行命令时它会先弹确认条（<b>允许一次 / 本项目总是允许 / 拒绝</b>）；
-      只读操作自动放行。想少点确认，可开输入框里的「✎ 自动允许写入」。</p>
+      只读操作自动放行。想少点确认，可开输入框里的「✎ 自动允许写入」——
+      该档只自动放行工作目录内的文件写入，目录外的写入与执行命令仍会征询。</p>
     </div>
     <div class="help-sec">
       <h4>③ 常用开关</h4>
@@ -4218,7 +4390,7 @@ function showSettingsPage(target) {
   );
   if (target === "usage") loadUsage();
   if (target === "memory") loadMemoryPage();
-  if (target === "ui") loadLanPanel();
+  if (target === "ui") { loadLanPanel(); loadTsPanel(); }
   if (target === "subagents") renderSubagentCfg().catch(() => {});
   if (target === "advanced") renderAdvancedCfg().catch(() => {});
   if (target === "about") loadBackups().catch(() => {});
@@ -4620,6 +4792,292 @@ function renderProviderDetail(name) {
 
 document.getElementById("btn-provider-back").onclick = closeProviderDetail;
 
+// ---------- 白名单（设置页）：手动添加 / 撤销 / 清空 / 测试 / 导入导出 ----------
+// 规则类型的中文标签：设置页列表、确认弹窗的「将添加规则」共用
+const RULE_KIND_LABEL = { always: "整个工具", prefix: "前缀", exact: "仅此一条", glob: "通配" };
+
+let rulesStatusTimer = null;
+
+function ruleLabelText(r) {
+  const kind = RULE_KIND_LABEL[r.kind] || r.kind;
+  return `${r.tool} · ${kind} ${r.pattern || "（全部）"}`;
+}
+
+// 操作反馈统一走卡片里的状态行（设置页里对话区是隐藏的，addNotice 看不到）；
+// 带「撤销」按钮的提示停留更久
+function showRulesStatus(text, action) {
+  const el = document.getElementById("rules-status");
+  if (!el) return;
+  el.innerHTML = "";
+  el.appendChild(document.createTextNode(text));
+  if (action) {
+    const btn = document.createElement("button");
+    btn.className = "btn-ghost rule-undo";
+    btn.textContent = action.label;
+    btn.onclick = action.onClick;
+    el.appendChild(btn);
+  }
+  el.hidden = false;
+  if (rulesStatusTimer) clearTimeout(rulesStatusTimer);
+  rulesStatusTimer = setTimeout(() => {
+    el.hidden = true;
+    el.innerHTML = "";
+  }, action ? 12000 : 6000);
+}
+
+function fmtRuleAge(ts) {
+  if (!ts) return "";
+  const s = Date.now() / 1000 - ts;
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  if (s < 86400 * 30) return `${Math.floor(s / 86400)} 天前`;
+  return new Date(ts * 1000).toLocaleDateString();
+}
+
+// exact 规则的来源（轻量推断：三类调用走 exact——含拼接的命令、键盘内容、剪贴板内容，
+// 以及 window 的 close 按标题固化）
+function ruleOriginNote(r) {
+  if (r.kind !== "exact") return "";
+  if (r.tool === "keyboard") return "来源：键盘输入内容";
+  if (r.tool === "clipboard_write") return "来源：剪贴板写入内容";
+  if (r.tool === "window") return "来源：关闭窗口标题";
+  if (r.tool === "run_command" && /[;|&<>`$\r\n]/.test(r.pattern || "")) return "来源：含拼接的命令";
+  return "来源：单次调用参数";
+}
+
+// 手动添加的警示（不阻塞；danger 级需要在表单里勾选确认）
+function ruleAddWarning(tool, kind) {
+  if (!tool) return null;
+  if (kind === "always" && tool === "run_command")
+    return {
+      danger: true,
+      text: "「整个工具」放行 run_command 等于所有命令不再询问（包括删除类命令）。"
+        + "建议改用「前缀」；仍要添加请先勾选下方确认。",
+    };
+  if (kind !== "exact" && (tool === "keyboard" || tool === "clipboard_write"))
+    return {
+      danger: false,
+      text: "键盘 / 剪贴板不按动作整类放行：整类放行等于允许向任意焦点窗口输入任意内容 / "
+        + "把任意内容写进剪贴板，建议改用「仅此一条」。",
+    };
+  if (kind === "prefix" && tool === "window")
+    return {
+      danger: false,
+      text: "窗口动作按动作词放行；其中「关闭窗口」不会整类放行（只按标题匹配）。",
+    };
+  const safety = ((bootSnap && bootSnap.tools) || []).find((t) => t.name === tool)?.safety;
+  if (kind === "always" && (safety === "write" || safety === "dangerous"))
+    return { danger: false, text: `「整个工具」将放行 ${tool} 的全部调用（不限路径 / 目标）。` };
+  return null;
+}
+
+function updateRuleAddFormState() {
+  const tool = document.getElementById("rule-tool").value.trim();
+  const kind = document.getElementById("rule-kind").value;
+  const patternInput = document.getElementById("rule-pattern");
+  const hint = document.getElementById("rule-add-hint");
+  const warnEl = document.getElementById("rule-add-warn");
+  const ackRow = document.getElementById("rule-add-ack-row");
+  const ack = document.getElementById("rule-add-ack");
+  patternInput.disabled = kind === "always";
+  if (kind === "always") {
+    patternInput.value = "";
+    patternInput.placeholder = "「整个工具」无需填写";
+    hint.textContent = "整个工具：该工具的所有调用都会直接放行。";
+  } else if (kind === "prefix") {
+    patternInput.placeholder = "如 git status / click";
+    hint.textContent = "前缀：以这段文本开头的调用都放行（命令类工具不含带 shell 拼接的命令）。";
+  } else if (kind === "exact") {
+    patternInput.placeholder = "与调用文本完全一致的内容";
+    hint.textContent = "仅此一条：与这段文本完全一致的调用才放行。";
+  } else {
+    patternInput.placeholder = "如 docs/*.md";
+    hint.textContent = "通配：按 * ? 通配符匹配（Windows 下大小写不敏感）。";
+  }
+  const warn = ruleAddWarning(tool, kind);
+  if (warn) {
+    warnEl.textContent = "⚠ " + warn.text;
+    warnEl.classList.toggle("danger", !!warn.danger);
+    warnEl.hidden = false;
+  } else {
+    warnEl.hidden = true;
+  }
+  const needAck = !!(warn && warn.danger);
+  ackRow.classList.toggle("hidden", !needAck);
+  if (!needAck) ack.checked = false;
+}
+
+function resetRuleAddForm() {
+  document.getElementById("rule-tool").value = "";
+  document.getElementById("rule-pattern").value = "";
+  document.getElementById("rule-add-ack").checked = false;
+  document.getElementById("rule-add-warn").hidden = true;
+  document.getElementById("rule-add-ack-row").classList.add("hidden");
+  updateRuleAddFormState();
+}
+
+async function submitRuleAdd() {
+  const tool = document.getElementById("rule-tool").value.trim();
+  const kind = document.getElementById("rule-kind").value;
+  const pattern = document.getElementById("rule-pattern").value.trim();
+  if (!tool) {
+    showRulesStatus("请先填写工具名", null);
+    return;
+  }
+  const warn = ruleAddWarning(tool, kind);
+  if (warn && warn.danger && !document.getElementById("rule-add-ack").checked) {
+    showRulesStatus("这条规则影响较大：请先勾选「我了解这条规则的影响」", null);
+    return;
+  }
+  try {
+    await request("whitelist.add", { tool, kind, pattern });
+    document.getElementById("rule-add-form").classList.add("hidden");
+    resetRuleAddForm();
+    await renderSettings();
+    showRulesStatus(
+      `已添加规则：${tool} · ${RULE_KIND_LABEL[kind] || kind}${pattern ? " " + pattern : "（全部）"}`,
+      null
+    );
+  } catch (err) {
+    showRulesStatus("添加失败：" + err.message, null);
+  }
+}
+
+function downloadJson(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], {
+    type: "application/json;charset=utf-8",
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+document.getElementById("btn-rule-add").onclick = () => {
+  const form = document.getElementById("rule-add-form");
+  form.classList.toggle("hidden");
+  if (!form.classList.contains("hidden")) {
+    updateRuleAddFormState();
+    document.getElementById("rule-tool").focus();
+  }
+};
+document.getElementById("rule-add-cancel").onclick = () => {
+  document.getElementById("rule-add-form").classList.add("hidden");
+  resetRuleAddForm();
+};
+document.getElementById("rule-add-save").onclick = submitRuleAdd;
+document.getElementById("rule-kind").onchange = updateRuleAddFormState;
+document.getElementById("rule-tool").oninput = updateRuleAddFormState;
+
+document.getElementById("btn-rules-clear").onclick = async () => {
+  let rules = [];
+  try {
+    rules = ((await request("whitelist.list")).rules) || [];
+  } catch (err) {
+    showRulesStatus("读取规则失败：" + err.message, null);
+    return;
+  }
+  if (!rules.length) {
+    showRulesStatus("当前没有规则可清空", null);
+    return;
+  }
+  const box = document.createElement("div");
+  box.innerHTML = `<p>确定清空本项目的全部 <b>${rules.length}</b> 条白名单规则吗？</p>
+    <p class="dim small">清空后，对应的写入 / 执行 / 操作会重新逐次询问。删除后可以点状态栏的「撤销」恢复。</p>`;
+  showModal("清空白名单", box, async () => {
+    const snapshot = rules.map((r) => ({ tool: r.tool, kind: r.kind, pattern: r.pattern || "" }));
+    const resp = await request("whitelist.clear", {});
+    await renderSettings();
+    showRulesStatus(`已清空 ${resp.removed} 条规则`, {
+      label: "撤销",
+      onClick: async () => {
+        try {
+          for (const item of snapshot) await request("whitelist.add", item);
+          await renderSettings();
+          showRulesStatus(`已恢复 ${snapshot.length} 条规则`, null);
+        } catch (err) {
+          showRulesStatus("恢复失败：" + err.message, null);
+        }
+      },
+    });
+  }, "清空");
+};
+
+document.getElementById("btn-rules-export").onclick = async () => {
+  try {
+    const data = await request("whitelist.export");
+    const safeName = (data.project || "project").replace(/[\\/:*?"<>|\s]+/g, "_");
+    downloadJson(`skysheep-whitelist-${safeName}.json`, data);
+    showRulesStatus(`已导出 ${(data.rules || []).length} 条规则`, null);
+  } catch (err) {
+    showRulesStatus("导出失败：" + err.message, null);
+  }
+};
+
+document.getElementById("btn-rules-import").onclick = () => {
+  const box = document.createElement("div");
+  box.innerHTML = `<p>粘贴白名单 JSON（导出文件 <code>skysheep-whitelist-*.json</code> 的内容）。</p>
+    <textarea id="rule-import-text" class="rule-import-text" rows="6"
+      placeholder='{"version":1,"rules":[{"tool":"run_command","kind":"prefix","pattern":"git status"}]}'></textarea>
+    <p class="dim small">合并导入：已有的相同规则会跳过，不影响现有规则。</p>`;
+  showModal("导入白名单", box, async () => {
+    const raw = box.querySelector("#rule-import-text").value.trim();
+    if (!raw) throw new Error("请先粘贴 JSON 内容");
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      throw new Error("内容不是合法 JSON");
+    }
+    const rules = Array.isArray(data) ? data : data.rules;
+    if (!Array.isArray(rules)) throw new Error("JSON 里没有 rules 数组");
+    const resp = await request("whitelist.import", { rules });
+    await renderSettings();
+    showRulesStatus(
+      `已导入 ${resp.added} 条规则`
+        + (resp.skipped ? `，跳过 ${resp.skipped} 条（重复或格式不符）` : ""),
+      null
+    );
+  }, "导入");
+};
+
+const ruleCheckRun = async () => {
+  const tool = document.getElementById("rule-check-tool").value.trim();
+  const text = document.getElementById("rule-check-text").value;
+  const out = document.getElementById("rule-check-result");
+  if (!tool) {
+    out.textContent = "请先填写工具名";
+    out.className = "rule-check-result warn";
+    out.hidden = false;
+    return;
+  }
+  try {
+    const r = await request("whitelist.check", { tool, text });
+    if (r.allowed) {
+      const hit = r.hit || {};
+      out.textContent = `✓ 会直接放行 —— 命中规则：${hit.tool} · ${RULE_KIND_LABEL[hit.kind] || hit.kind} ${hit.pattern || "（全部）"}`;
+      out.className = "rule-check-result ok";
+    } else {
+      out.textContent = `✗ 需要确认 —— ${r.reason}`;
+      out.className = "rule-check-result warn";
+    }
+    out.hidden = false;
+  } catch (err) {
+    out.textContent = "测试失败：" + err.message;
+    out.className = "rule-check-result warn";
+    out.hidden = false;
+  }
+};
+document.getElementById("btn-rule-check").onclick = ruleCheckRun;
+document.getElementById("rule-check-text").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    ruleCheckRun();
+  }
+});
+
 async function renderSettings() {
   const cfg = await request("config.providers");
   const [{ rules }, snap] = await Promise.all([
@@ -4637,18 +5095,76 @@ async function renderSettings() {
   // —— 白名单 ——
   const ul = document.getElementById("rules-list");
   ul.innerHTML = "";
+  const safetyByName = {};
+  (snap.tools || []).forEach((t) => { safetyByName[t.name] = t.safety; });
+  // 工具名候选：现役工具 ∪ 已有规则里出现过的工具（MCP 暂时掉线的名字也应能预置）
+  const toolDl = document.getElementById("rule-tool-options");
+  if (toolDl) {
+    const names = new Set((snap.tools || []).map((t) => t.name));
+    (rules || []).forEach((r) => names.add(r.tool));
+    toolDl.innerHTML = [...names].sort()
+      .map((n) => `<option value="${escapeHtml(n)}"></option>`).join("");
+  }
+  // 摘要：规则总数 + 整工具放行数量（后者是风险最直观的信号）
+  const summaryEl = document.getElementById("rules-summary");
+  const wholeCount = (rules || []).filter((r) => r.kind === "always").length;
+  if (rules && rules.length) {
+    summaryEl.textContent = `共 ${rules.length} 条规则`
+      + (wholeCount ? `；其中 ${wholeCount} 条为「整个工具」放行` : "");
+    summaryEl.classList.toggle("risk", wholeCount > 0);
+    summaryEl.hidden = false;
+  } else {
+    summaryEl.hidden = true;
+  }
   (rules || []).forEach((r) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="dot on"></span>
-      <span class="rule-text">${escapeHtml(r.tool)} · ${escapeHtml(r.kind)} ${escapeHtml(r.pattern || "(全部)")}</span>
+    // 规则语义说清楚，否则用户会以为前缀规则能放行任何以它开头的调用：
+    // 命令的前缀规则不覆盖 shell 拼接（`a; b` 要重新确认）；键盘 / 剪贴板 / 关窗口
+    // 的「总是允许」只固化那一次的内容，不按动作整类放行。
+    const kind = RULE_KIND_LABEL[r.kind] || r.kind;
+    const extra = r.kind !== "prefix" ? ""
+      : r.tool === "run_command" ? "（命令拼接不会命中）"
+      : r.tool === "browser" ? "（同动作均放行：打开任意网址）"
+      : r.tool === "mouse" ? "（同动作均放行：点任意位置）"
+      : "（同动作均放行）";
+    // 整工具放行且属写 / 高危工具：金色点提示（工具未知时不区分）
+    const risky = r.kind === "always"
+      && (safetyByName[r.tool] === "write" || safetyByName[r.tool] === "dangerous");
+    const origin = ruleOriginNote(r);
+    const age = fmtRuleAge(r.created_at);
+    const tip = [kind + extra, origin].filter(Boolean).join("；");
+    li.innerHTML = `<span class="dot ${risky ? "warn" : "on"}"${risky ? ' title="整工具放行（写 / 高危）"' : ""}></span>
+      <span class="rule-text" title="${escapeHtml(tip)}">${escapeHtml(r.tool)} · ${escapeHtml(kind)}${escapeHtml(extra)} ${escapeHtml(r.pattern || "(全部)")}${origin ? ` <span class="rule-origin">· ${escapeHtml(origin)}</span>` : ""}</span>
+      ${age ? `<span class="rule-age">${escapeHtml(age)}</span>` : ""}
       <button class="rule-del">删除</button>`;
     li.querySelector(".rule-del").onclick = async () => {
-      await request("whitelist.remove", { id: r.id });
-      await renderSettings();
+      try {
+        const label = ruleLabelText(r);
+        await request("whitelist.remove", { id: r.id });
+        await renderSettings();
+        showRulesStatus(`已删除：${label}`, {
+          label: "撤销",
+          onClick: async () => {
+            try {
+              await request("whitelist.add", {
+                tool: r.tool, kind: r.kind, pattern: r.pattern || "",
+              });
+              await renderSettings();
+              showRulesStatus("已恢复规则", null);
+            } catch (err) {
+              showRulesStatus("恢复失败：" + err.message, null);
+            }
+          },
+        });
+      } catch (err) {
+        showRulesStatus("删除失败：" + err.message, null);
+      }
     };
     ul.appendChild(li);
   });
-  if (!rules || !rules.length) ul.innerHTML = '<li class="empty-hint">暂无规则（对话中选「总是允许」后会出现在这里）</li>';
+  if (!rules || !rules.length) {
+    ul.innerHTML = '<li class="empty-hint">暂无规则（对话中选「总是允许」后会出现在这里，也可以点上方「＋ 添加规则」手动预设）</li>';
+  }
 
   // —— 技能 ——
   // 列表渲染抽到 renderSkillList（技能页要重复用）；这里只负责总览摘要
@@ -5666,6 +6182,9 @@ async function refreshReview() {
         const r = await request("checkpoint.restore", { id: cp.id });
         addNotice(`已把 ${r.files.length} 个文件恢复到 ${cp.id} 改动前的状态`);
         refreshReview();
+        // 磁盘被回滚：文件树缓存失效（开着文件标签就直接刷新）
+        filesLoaded = false;
+        if (rightActive === "files" && !rightPanel.classList.contains("hidden")) loadFiles(true);
       } catch (e) {
         rb.disabled = false;
         rb.textContent = "↩ 恢复";
@@ -5714,6 +6233,10 @@ document.getElementById("review-diff-close").onclick = refreshReview;
 
 // —— 文件树：工作区只读浏览 + 文件预览 ——
 let filesLoaded = false;
+// 当前编辑器状态：{ path, baseMtime, origText, editable, sizeText, isNew }
+// baseMtime 是打开时的磁盘 mtime（ns），保存时回传做冲突检测：Agent 或外部
+// 程序若在编辑期间改过文件，后端拒绝落盘并返回 conflict，由用户决定覆盖与否。
+let fileEdit = null;
 
 async function loadFiles(force) {
   if (filesLoaded && !force) return;
@@ -5723,7 +6246,7 @@ async function loadFiles(force) {
     const r = await request("fs.files");
     const root = buildFileTree(r.files || []);
     tree.innerHTML = renderFileNode(root, "", 0) ||
-      '<div class="dim small" style="padding:8px">工作区还没有文件</div>';
+      '<div class="dim small" style="padding:8px">工作区还没有文件，点「＋ 新建」建一个</div>';
     filesLoaded = true;
   } catch (e) {
     tree.innerHTML = `<div class="dim small" style="padding:8px">加载失败：${escapeHtml(e.message)}</div>`;
@@ -5757,43 +6280,171 @@ function renderFileNode(node, path, depth) {
   return out.join("");
 }
 
-async function previewFile(path) {
+function fileEditorBody() {
+  return document.getElementById("files-editor");
+}
+
+function isFileDirty() {
+  return !!(fileEdit && fileEdit.editable &&
+    fileEditorBody().value !== fileEdit.origText);
+}
+
+function fileSizeText(bytes) {
+  return bytes < 1024 ? ` · ${bytes} B` : ` · ${(bytes / 1024).toFixed(1)}KB`;
+}
+
+// 标题行：脏标记 ● / 只读说明 / 保存按钮显隐与只读态，每次输入后都会重画
+function renderFileHead() {
+  if (!fileEdit) return;
+  const dirty = isFileDirty();
+  document.getElementById("files-preview-title").textContent =
+    (dirty ? "● " : "") + fileEdit.path + fileEdit.sizeText +
+    (fileEdit.isNew ? " · 新文件" : "") +
+    (fileEdit.editable ? "" : " · 只读（提取文本 / 过大截断，改了存不回去）");
+  const saveBtn = document.getElementById("files-save");
+  saveBtn.classList.toggle("hidden", !fileEdit.editable);
+  saveBtn.textContent = dirty ? "● 保存" : "保存";
+  fileEditorBody().readOnly = !fileEdit.editable;
+}
+
+// 有未保存修改时的放弃确认：确定 → true（走 onOk），取消 → false
+function confirmDiscard() {
+  return new Promise((resolve) => {
+    const box = document.createElement("div");
+    box.innerHTML = "<p>有未保存的修改，关闭后会丢失。</p>";
+    const cancelBtn = document.getElementById("modal-cancel");
+    cancelBtn.onclick = () => { hideModal(); resolve(false); };
+    showModal("未保存的修改", box, () => resolve(true), "放弃修改并关闭");
+  });
+}
+
+async function openFile(path, opts = {}) {
+  // 切换文件前脏检查（同一文件重复点不重复确认）
+  if (isFileDirty() && fileEdit && fileEdit.path !== path) {
+    if (!(await confirmDiscard())) return;
+  }
   const wrap = document.getElementById("files-preview");
   try {
     const r = await request("fs.read", { path });
-    document.getElementById("files-preview-title").textContent =
-      r.path + (r.doc ? "（已提取文本）" : "") +
-      (r.truncated ? "（过大已截断）" : "") + ` · ${(r.size / 1024).toFixed(1)}KB`;
-    document.getElementById("files-preview-body").textContent = r.text;
-    wrap.classList.remove("hidden");
-    // 预览是只读的；想接着改就交给系统默认程序（脚本/可执行文件会退化为定位）
-    const openBtn = document.getElementById("files-preview-open");
-    openBtn.dataset.path = r.path;
-    openBtn.onclick = async () => {
-      try {
-        const res = await request("fs.open", { path: r.path });
-        addNotice(res.action === "opened"
-          ? `已用系统默认程序打开 ${r.path}`
-          : `已在文件管理器里定位 ${r.path}（脚本/可执行文件不直接运行）`);
-      } catch (e) {
-        addNotice("打开失败: " + e.message);
-      }
+    // textarea 会把 \r\n 规范化成 \n（HTML 标准），基准文本必须做同样规范化，
+    // 否则 Windows 的 CRLF 文件一打开就误报「已修改」
+    const norm = r.text.replace(/\r\n/g, "\n");
+    fileEdit = {
+      path: r.path,
+      baseMtime: r.mtime,
+      origText: norm,
+      editable: !!r.editable,
+      sizeText: fileSizeText(r.size),
+      isNew: !!opts.isNew,
     };
+    const ed = fileEditorBody();
+    ed.value = norm;
+    wrap.classList.remove("hidden");
+    wrap.classList.toggle("expanded", fileEdit.editable);
+    renderFileHead();
+    document.getElementById("files-preview-open").dataset.path = r.path;
+    if (fileEdit.editable) ed.focus();
   } catch (e) {
-    addNotice("预览失败: " + e.message);
+    addNotice("打开失败: " + e.message);
+  }
+}
+
+function closeFileEditor() {
+  document.getElementById("files-preview").classList.add("hidden");
+  document.getElementById("files-preview").classList.remove("expanded");
+  fileEdit = null;
+}
+
+async function saveFile(force = false) {
+  if (!fileEdit || !fileEdit.editable) return;
+  const ed = fileEditorBody();
+  try {
+    const r = await request("fs.write", {
+      path: fileEdit.path,
+      text: ed.value,
+      base_mtime: fileEdit.baseMtime,
+      force,
+    });
+    if (r.conflict) {
+      // 后端拒绝落盘：磁盘上的文件比打开时新（Agent / 外部程序改过）
+      const box = document.createElement("div");
+      box.innerHTML =
+        "<p>这份文件在打开之后被其他程序改过（可能是 Agent 或外部编辑器）。</p>" +
+        "<p class='dim small'>「覆盖保存」用你看到的内容覆盖对方的改动；「取消」后点工具栏「刷新」可重新加载最新内容。</p>";
+      showModal("文件已被外部修改", box, () => saveFile(true), "覆盖保存");
+      return;
+    }
+    const wasNew = fileEdit.isNew;
+    fileEdit.baseMtime = r.mtime;
+    fileEdit.origText = ed.value;
+    fileEdit.isNew = false;
+    renderFileHead();
+    fileIndex = null; // @ 文件提及的 30s 缓存失效，新建的文件立刻能被 @ 到
+    if (wasNew) { filesLoaded = false; loadFiles(true); }
+    addNotice("已保存 " + fileEdit.path);
+  } catch (e) {
+    addNotice("保存失败: " + e.message);
   }
 }
 
 document.getElementById("files-refresh").onclick = () => { filesLoaded = false; loadFiles(true); };
-document.getElementById("files-preview-close").onclick = () =>
-  document.getElementById("files-preview").classList.add("hidden");
+document.getElementById("files-preview-open").onclick = async () => {
+  const p = document.getElementById("files-preview-open").dataset.path || "";
+  if (!p) return;
+  try {
+    const res = await request("fs.open", { path: p });
+    addNotice(res.action === "opened"
+      ? `已用系统默认程序打开 ${p}`
+      : `已在文件管理器里定位 ${p}（脚本/可执行文件不直接运行）`);
+  } catch (e) {
+    addNotice("打开失败: " + e.message);
+  }
+};
+document.getElementById("files-preview-close").onclick = async () => {
+  if (isFileDirty() && !(await confirmDiscard())) return;
+  closeFileEditor();
+};
+document.getElementById("files-save").onclick = () => saveFile();
+document.getElementById("files-editor").addEventListener("input", renderFileHead);
+document.getElementById("files-editor").addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    e.preventDefault();
+    saveFile();
+    return;
+  }
+  // Tab 插入两个空格（保持文本缩进习惯；只读时交给浏览器默认焦点移动）
+  if (e.key === "Tab" && !e.target.readOnly) {
+    e.preventDefault();
+    e.target.setRangeText("  ", e.target.selectionStart, e.target.selectionEnd, "end");
+    e.target.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+});
+document.getElementById("files-new").onclick = () => {
+  const box = document.createElement("div");
+  box.innerHTML =
+    '<p class="dim small">在工作目录里新建文本文件（可带子目录，如 docs/笔记.md）：</p>' +
+    '<input id="files-new-path" class="modal-input" style="width:100%" placeholder="例如：notes/计划.md">';
+  showModal("新建文件", box, async () => {
+    const raw = document.getElementById("files-new-path").value.trim().replace(/\\/g, "/");
+    if (!raw) throw new Error("文件名不能为空");
+    // base_mtime 传 0：已存在同名文件时必然冲突，把「覆盖已有文件」挡在确认框外
+    const r = await request("fs.write", { path: raw, text: "", base_mtime: 0 });
+    if (r.conflict) throw new Error("同名文件已存在，换个名字或直接在树里点开它");
+    addNotice("已创建 " + raw);
+    filesLoaded = false;
+    loadFiles(true);
+    fileIndex = null;
+    await openFile(raw, { isNew: true });
+  }, "创建并打开");
+  setTimeout(() => document.getElementById("files-new-path")?.focus(), 0);
+};
 document.getElementById("files-tree").addEventListener("click", (e) => {
   const el = e.target.closest(".ft-file");
   if (!el) return;
   const p = el.dataset.path || "";
   // 网页/图片文件直接在浏览器标签里打开真实渲染效果
   if (/\.(html?|png|jpe?g|webp|svg|gif)$/i.test(p)) { openHtmlPreview(p); return; }
-  previewFile(p);
+  openFile(p);
 });
 
 // —— 任务：子代理任务簿（running 优先，支持全部取消） ——
@@ -5928,10 +6579,10 @@ async function initUiPrefs() {
   // 系统通知开关（默认开）
   uiNotifyOn = prefs.notify == null ? true : prefs.notify === 1;
   renderNotifyToggle();
-  // 分级权限模式（1 = 自动允许写入；后端 setup 已把档位应用到 gate，这里只同步界面）
+  // 分级权限模式（1 = 自动允许写入，仅工作目录内；后端 setup 已把档位应用到 gate，这里只同步界面）
   renderAcceptSwitch(prefs.accept_edits === 1);
-  // 主题（auto | light | dark，默认 auto 跟随系统）
-  applyThemeMode(prefs.theme === "dark" || prefs.theme === "light" ? prefs.theme : "auto", false);
+  // 主题（auto | 主题 id，默认 auto 跟随系统；旧版 light/dark 映射到纸墨/夜墨）
+  applyThemeMode(normalizeThemePref(prefs.theme), false);
   // 对话区宠物开关（默认显示）+ 横向落点（pet_x；纵向有重力，总是落在底部）
   petOn = prefs.pet == null ? true : prefs.pet === 1;
   renderPetToggle();
@@ -5998,34 +6649,51 @@ setupResizer(rpResizer, "right_w", {
 // （函数声明提升，boot/initUiPrefs 在文件末尾调用时均已可用）
 // ============================================================
 
-// ---------- 主题：纸墨（浅）/ 夜墨（深）/ 跟随系统 ----------
-let themePref = "auto"; // auto | light | dark（存 ui.json 的 theme 键）
+// ---------- 主题：跟随系统 + 六套配色（存 ui.json 的 theme 键） ----------
+// 浅色：纸墨 paper / 青瓷 celadon / 秋柿 kaki；深色：夜墨 night / 黛夜 indigo / 松烟 pine。
+// 每套主题是 app.css 文件尾部的一个完整 [data-theme=…] 变量组，切换 = 换 <html> 的 data-theme；
+// auto 时浅色落纸墨、深色落夜墨。light/dark 是旧版两档值，读取时映射回 paper/night。
+// 与 backend.py 的 THEME_PREFS 白名单、index.html 的主题卡片一一对应，改主题列表要同步。
+const THEMES = {
+  paper: { name: "纸墨", dark: false },
+  celadon: { name: "青瓷", dark: false },
+  kaki: { name: "秋柿", dark: false },
+  night: { name: "夜墨", dark: true },
+  indigo: { name: "黛夜", dark: true },
+  pine: { name: "松烟", dark: true },
+};
+function normalizeThemePref(v) {
+  if (v === "light") return "paper";
+  if (v === "dark") return "night";
+  return Object.prototype.hasOwnProperty.call(THEMES, v) ? v : "auto";
+}
+let themePref = "auto"; // auto | 主题 id
 const themeMql = window.matchMedia("(prefers-color-scheme: dark)");
 
-function resolvedTheme() {
-  return themePref === "auto" ? (themeMql.matches ? "dark" : "light") : themePref;
+function resolvedThemeId() {
+  return themePref === "auto" ? (themeMql.matches ? "night" : "paper") : themePref;
 }
 
 function applyThemeMode(mode, save = true) {
-  themePref = mode === "dark" || mode === "light" ? mode : "auto";
-  const resolved = resolvedTheme();
-  if (resolved === "dark") document.documentElement.setAttribute("data-theme", "dark");
-  else document.documentElement.removeAttribute("data-theme");
+  themePref = normalizeThemePref(mode);
+  const id = resolvedThemeId();
+  document.documentElement.setAttribute("data-theme", id);
   // 首帧脚本（index.html）靠 data-theme-mode 判断 auto 该跟系统深还是浅，跟着同步
   document.documentElement.setAttribute("data-theme-mode", themePref);
-  // 标题栏联动：桌面壳的看板线程按这个值重刷 DWM 标题栏（浏览器模式无副作用）
-  request("app.apply_theme", { resolved }).catch(() => {});
-  mermaidSetTheme(resolved);
-  renderThemeSeg();
+  // 标题栏（wintheme）与 Mermaid 配色只认深浅两档，按主题的明暗折算
+  const dark = THEMES[id].dark;
+  request("app.apply_theme", { resolved: dark ? "dark" : "light" }).catch(() => {});
+  mermaidSetTheme(dark ? "dark" : "default");
+  renderThemePicker();
   if (save) saveUiPrefs({ theme: themePref === "auto" ? null : themePref });
 }
 
-function renderThemeSeg() {
-  document.querySelectorAll("#theme-seg button").forEach((b) =>
-    b.classList.toggle("active", b.dataset.themeMode === themePref));
+function renderThemePicker() {
+  document.querySelectorAll("#theme-grid .theme-card").forEach((b) =>
+    b.classList.toggle("active", b.dataset.themePref === themePref));
 }
-document.querySelectorAll("#theme-seg button").forEach((b) => {
-  b.onclick = () => applyThemeMode(b.dataset.themeMode);
+document.querySelectorAll("#theme-grid .theme-card").forEach((b) => {
+  b.onclick = () => applyThemeMode(b.dataset.themePref);
 });
 themeMql.addEventListener("change", () => {
   if (themePref === "auto") applyThemeMode("auto", false);
@@ -6092,7 +6760,10 @@ async function loadMemoryPage() {
   }
 }
 document.getElementById("btn-memory-save").onclick = async () => {
-  const status = document.getElementById("memory-status");
+  // 注意：这里必须用全局记忆自己的状态行（memory-global-status）——右面板「项目记忆」
+  // 也有一处记忆状态行，两者 id 重名时 getElementById 只会拿到文档里靠前的那个，
+  // 保存结果就显示到右边的面板上去了（本页看着毫无反应）。
+  const status = document.getElementById("memory-global-status");
   try {
     await request("memory.save", { text: document.getElementById("memory-text").value });
     status.textContent = "✓ 已保存，之后所有会话立即生效";
@@ -6104,6 +6775,33 @@ document.getElementById("btn-memory-save").onclick = async () => {
 };
 
 // ---------- 设置 · 局域网访问 ----------
+// 复制访问地址：局域网 / Tailscale 地址都是 http 明文，非安全上下文里
+// navigator.clipboard 不存在，统一走 execCommand 兜底
+async function copyAccessUrl(url, msgId) {
+  if (!url) return;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(url);
+    ok = true;
+  } catch (e) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand("copy");
+      ta.remove();
+    } catch (e2) { ok = false; }
+  }
+  const msg = document.getElementById(msgId);
+  if (msg) {
+    msg.textContent = ok ? "✓ 已复制，发到手机后用浏览器打开" : "✗ 复制失败，请手动长按地址复制";
+    msg.className = "io-msg " + (ok ? "ok" : "bad");
+  }
+}
+
 async function loadLanPanel() {
   let st;
   try { st = await request("lan.status"); } catch (e) { return; }
@@ -6128,34 +6826,7 @@ async function loadLanPanel() {
       </div>
     </div>`;
   const copyBtn = document.getElementById("lan-copy");
-  if (copyBtn) {
-    copyBtn.onclick = async () => {
-      const url = urls[0] || "";
-      if (!url) return;
-      let ok = false;
-      try {
-        await navigator.clipboard.writeText(url);
-        ok = true;
-      } catch (e) {
-        // 非安全上下文（局域网 http）clipboard API 不可用：execCommand 兜底
-        try {
-          const ta = document.createElement("textarea");
-          ta.value = url;
-          ta.style.position = "fixed";
-          ta.style.opacity = "0";
-          document.body.appendChild(ta);
-          ta.select();
-          ok = document.execCommand("copy");
-          ta.remove();
-        } catch (e2) { ok = false; }
-      }
-      const msg = document.getElementById("lan-copy-msg");
-      if (msg) {
-        msg.textContent = ok ? "✓ 已复制，发到手机后用浏览器打开" : "✗ 复制失败，请手动长按地址复制";
-        msg.className = "io-msg " + (ok ? "ok" : "bad");
-      }
-    };
-  }
+  if (copyBtn) copyBtn.onclick = () => copyAccessUrl(urls[0] || "", "lan-copy-msg");
   if (urls.length && st.token && window.QRCode) {
     try {
       new QRCode(document.getElementById("lan-qr"), {
@@ -6175,13 +6846,68 @@ document.getElementById("lan-toggle").addEventListener("change", async (e) => {
   }
 });
 
+// ---------- 设置 · 远程访问（Tailscale）：不在同一网络也能连回家 ----------
+async function loadTsPanel() {
+  let st;
+  try { st = await request("remote.status"); } catch (e) { return; }
+  const info = document.getElementById("ts-info");
+  const toggle = document.getElementById("ts-toggle");
+  toggle.checked = !!st.enabled;
+  const urls = (st.ips || []).map((ip) => `http://${ip}:${location.port}/?token=${st.token || "你的令牌"}`);
+  if (!st.enabled) {
+    info.innerHTML = `<div class="lan-note">${escapeHtml(st.note || "")}</div>`;
+    return;
+  }
+  if (!urls.length) {
+    info.innerHTML = `<div class="lan-note">⚠ 没检测到 Tailscale 地址（100.64 开头的虚拟网卡）。
+      请确认电脑上 Tailscale 已安装、已登录且正在运行，然后重启 SkySheep 再试。</div>`;
+    return;
+  }
+  info.innerHTML = `
+    <div class="lan-note">开启后<b>重启 SkySheep 生效</b>。手机登录同一 Tailscale 账号后，
+      在<b>任意网络</b>（含手机流量）用下面的地址访问，功能与同一 Wi-Fi 时完全一样：</div>
+    <div class="lan-url">${urls.map((u) => `<code>${escapeHtml(u)}</code>`).join("")}</div>
+    <div class="lan-body">
+      <div id="ts-qr" class="qr-box"></div>
+      <div class="lan-note">手机扫码直达。二维码含访问令牌，<b>请勿截图外传</b>；
+        只有你 Tailscale 账号里的设备能连进来，同一 Wi-Fi 下的陌生设备反而进不来。<br>
+        <button id="ts-copy" class="btn-ghost" style="margin-top:6px">⧉ 复制地址</button>
+        <span id="ts-copy-msg" class="io-msg"></span>
+      </div>
+    </div>`;
+  const copyBtn = document.getElementById("ts-copy");
+  if (copyBtn) copyBtn.onclick = () => copyAccessUrl(urls[0] || "", "ts-copy-msg");
+  if (urls.length && st.token && window.QRCode) {
+    try {
+      new QRCode(document.getElementById("ts-qr"), {
+        text: urls[0], width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M,
+      });
+    } catch (e) { /* 二维码失败不影响地址文本 */ }
+  }
+}
+document.getElementById("ts-toggle").addEventListener("change", async (e) => {
+  try {
+    const r = e.target.checked ? await request("remote.enable", {}) : await request("remote.disable");
+    addNotice(r.note || "远程访问设置已更新");
+    loadTsPanel();
+  } catch (err) {
+    addNotice("操作失败: " + err.message);
+    e.target.checked = !e.target.checked;
+  }
+});
+
 // ---------- 设置 · 联网搜索 / AI 画图 ----------
 async function renderWebsearchCfg() {
   let d;
   try { d = await request("websearch.get"); } catch (e) { return; }
   document.getElementById("websearch-hint").textContent = d.config_hint;
   const form = document.getElementById("websearch-form");
-  const labels = { auto: "自动（优先复用智谱 Key）", bocha: "博查 Bocha", tavily: "Tavily", zhipu: "智谱" };
+  const labels = { auto: "自动（优先复用已配置的 Key）", bocha: "博查 Bocha", tavily: "Tavily", zhipu: "智谱", custom: "自定义（自建搜索服务）" };
+  // 自定义档可以用空 Key（自建 SearXNG 默认无鉴权），此时 has_key 为真但没有掩码，
+  // 不能再写「已配置（）」——按是否真有 Key 分别给提示
+  const keyHint = d.key_mask ? "已配置（" + d.key_mask + "），留空不修改"
+    : (d.resolved_provider === "custom" ? "可留空（自建 SearXNG 等无需鉴权）"
+                                         : "粘贴服务商的 API Key");
   form.innerHTML = `
     <div class="toolcfg-row"><label>服务商</label>
       <select data-f="provider">${d.providers.map((p) =>
@@ -6190,17 +6916,24 @@ async function renderWebsearchCfg() {
     </div>
     <div class="toolcfg-row"><label>API Key</label>
       <input type="password" data-f="key" autocomplete="new-password"
-             placeholder="${d.has_key ? "已配置（" + d.key_mask + "），留空不修改" : "粘贴服务商的 API Key"}">
+             placeholder="${keyHint}">
+    </div>
+    <div class="toolcfg-row"><label>接口地址</label>
+      <input type="text" data-f="base_url" value="${escapeHtml(d.base_url || "")}"
+             placeholder="仅自定义服务需要（如 http://localhost:8080 或 .../search?format=json）">
     </div>
     <div class="toolcfg-row">
       <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
-        ? "● 已就绪，当前用「" + d.resolved_provider + "」"
+        ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + "」"
         : "○ 未配置：Agent 联网搜索时会给出配置指引"}</span>
       <span class="spacer"></span>
       <button class="btn-ghost" data-act="save">保存</button>
     </div>`;
   form.querySelector('[data-act="save"]').onclick = async () => {
-    const params = { provider: form.querySelector('[data-f="provider"]').value };
+    const params = {
+      provider: form.querySelector('[data-f="provider"]').value,
+      base_url: form.querySelector('[data-f="base_url"]').value,
+    };
     const key = form.querySelector('[data-f="key"]').value.trim();
     if (key) params.api_key = key;
     try {
@@ -6218,7 +6951,7 @@ async function renderImagegenCfg() {
   try { d = await request("imagegen.get"); } catch (e) { return; }
   document.getElementById("imagegen-hint").textContent = d.config_hint;
   const form = document.getElementById("imagegen-form");
-  const labels = { auto: "自动（智谱 → 硅基流动）", zhipu: "智谱 CogView", siliconflow: "硅基流动 Kolors", custom: "自定义 OpenAI 兼容" };
+  const labels = { auto: "自动（优先复用已配置的 Key）", zhipu: "智谱 CogView", siliconflow: "硅基流动 Kolors", custom: "自定义 OpenAI 兼容" };
   form.innerHTML = `
     <div class="toolcfg-row"><label>服务商</label>
       <select data-f="provider">${d.providers.map((p) =>
@@ -6235,12 +6968,12 @@ async function renderImagegenCfg() {
     </div>
     <div class="toolcfg-row"><label>模型</label>
       <input type="text" data-f="model" value="${escapeHtml(d.model || "")}"
-             placeholder="留空用服务商默认（如 cogview-3-flash）">
+             placeholder="留空用服务商默认模型">
     </div>
     <div class="toolcfg-row">
       <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
-        ? "● 已就绪，当前用「" + d.resolved_provider + " / " + d.resolved_model + "」"
-        : "○ 未配置：给智谱或硅基流动配好 Key 即可零配置使用"}</span>
+        ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + " / " + d.resolved_model + "」"
+        : "○ 未配置：配好任一服务商的 Key 即可零配置使用"}</span>
       <span class="spacer"></span>
       <button class="btn-ghost" data-act="save">保存</button>
     </div>`;
@@ -6923,14 +7656,17 @@ boot();
 initUiPrefs();
 
 // ---------- 分级权限模式：写入确认 / 自动允许写入（对标 Codex Auto-Edit） ----------
-// 高危操作（执行命令）无论哪档都会征询；档位存 ui.json 的 accept_edits。
+// 高危操作（执行命令）无论哪档都会征询；档位存 ui.json 的 accept_edits，
+// 且只对工作目录内的写入生效（目录外的写入仍逐次确认）。
+const ACCEPT_MODE_HINT_ON =
+  "当前：工作目录内的文件写入/画图自动放行，目录外的写入与执行命令仍会征询。点击切回逐步确认";
+const ACCEPT_MODE_HINT_OFF =
+  "当前每次写入/执行都会征询。点击开启「自动允许写入」（仅工作目录内，执行命令仍会确认）";
 function renderAcceptSwitch(on) {
   const b = document.getElementById("accept-switch");
   if (!b) return;
   b.classList.toggle("on", on);
-  b.title = on
-    ? "当前：文件写入/画图自动放行，执行命令仍会征询。点击切回逐步确认"
-    : "当前每次写入/执行都会征询。点击开启「自动允许写入」（执行命令仍会确认）";
+  b.title = on ? ACCEPT_MODE_HINT_ON : ACCEPT_MODE_HINT_OFF;
 }
 document.getElementById("accept-switch").onclick = async () => {
   const cur = document.getElementById("accept-switch").classList.contains("on");
@@ -6939,7 +7675,7 @@ document.getElementById("accept-switch").onclick = async () => {
     const r = await request("permission.set_mode", { mode: next });
     renderAcceptSwitch(r.mode === "accept_edits");
     addNotice(r.mode === "accept_edits"
-      ? "✎ 已开启自动允许写入：文件写入不再逐次确认，执行命令仍会征询"
+      ? "✎ 已开启自动允许写入：工作目录内的文件写入不再逐次确认，目录外写入与执行命令仍会征询"
       : "已切回逐步确认模式：所有写入/执行都会先征询");
   } catch (e) {
     addNotice("切换失败: " + e.message);
@@ -7014,6 +7750,7 @@ async function renderAdvancedCfg() {
   q("adv-context-limit").value = d.context_limit_tokens;
   q("adv-keep-recent").value = d.compaction_keep_recent;
   q("adv-restrict-workdir").checked = !!d.restrict_to_workdir;
+  renderTrustState();
   q("adv-computer-control").checked = !!d.computer_control;
   q("adv-browser-control").checked = !!d.browser_control;
   q("adv-daily-budget").value = d.daily_token_budget || "";
@@ -7118,6 +7855,34 @@ function fmtBackupTime(ts) {
     `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// 备份列表最多 21 行（20 份 + 当前数据），全铺开会把「关于」页撑得很长：
+// 默认只显示「当前数据 + 最近 BACKUP_SHOW 份」，其余折叠到列表末尾的按钮后面。
+const BACKUP_SHOW = 3;
+let backupsExpanded = false;
+
+// 备份名里的时间戳（20260917-084701 → 2026-09-17 08:47:01）；「恢复前」副本只看前缀
+function fmtBackupStamp(stamp, fallbackTs) {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(String(stamp || ""));
+  if (!m) return fmtBackupTime(fallbackTs);
+  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
+
+function backupRowHtml(b) {
+  // 时间取 b.taken（解析自文件名的备份时刻）：备份文件的 mtime 是复制时带过来的源库
+  // 修改时间，20 份备份会显示成同一个时刻。当前数据没有备份时刻，只能标它的写入时间。
+  const size = `${(b.size / 1024).toFixed(0)} KB`;
+  const when = b.current ? "当前数据" : fmtBackupStamp(b.stamp, b.taken || b.mtime);
+  const meta = b.current ? `最后写入 ${fmtBackupTime(b.mtime)} · ${size}` : size;
+  const tag = b.safety ? '<span class="backup-tag">恢复前</span>' : "";
+  return `<li class="backup-row${b.current ? " cur" : ""}">
+      <span class="item-name">${when}</span>${tag}
+      <span class="dim small">${meta}</span>
+      <span class="spacer"></span>
+      ${b.current ? "" : `<button class="btn-ghost" data-restore="${escapeHtml(b.name)}" ` +
+        `data-when="${escapeHtml(when)}">恢复到此版本</button>`}
+    </li>`;
+}
+
 async function loadBackups() {
   const ul = document.getElementById("backup-list");
   let d;
@@ -7126,26 +7891,36 @@ async function loadBackups() {
     return;
   }
   const items = d.backups || [];
-  ul.innerHTML = items.map((b) => `
-    <li class="item-row${b.current ? " cur" : ""}">
-      <span class="item-name">${b.current ? "当前数据" : escapeHtml(b.stamp)}</span>
-      <span class="dim small">${fmtBackupTime(b.mtime)} · ${(b.size / 1024).toFixed(0)} KB</span>
-      <span class="spacer"></span>
-      ${b.current ? "" : `<button class="btn-ghost" data-restore="${escapeHtml(b.name)}">恢复到此版本</button>`}
-    </li>`).join("") || '<li class="dim small">还没有备份（应用下次启动时会自动生成一份）</li>';
+  const cur = items.filter((b) => b.current);
+  const hist = items.filter((b) => !b.current);
+  const shown = backupsExpanded ? hist : hist.slice(0, BACKUP_SHOW);
+  let html = cur.concat(shown).map(backupRowHtml).join("");
+  if (hist.length > BACKUP_SHOW) {
+    const rest = hist.length - shown.length;
+    html += `<li class="backup-more"><button class="btn-ghost" id="backup-toggle">${
+      backupsExpanded
+        ? `收起（只列最近 ${BACKUP_SHOW} 份）`
+        : `展开其余 ${rest} 份更早的备份`}</button></li>`;
+  }
+  ul.innerHTML = html || '<li class="dim small">还没有备份（应用下次启动时会自动生成一份）</li>';
   ul.querySelectorAll("[data-restore]").forEach((btn) => {
-    btn.onclick = () => restoreBackupConfirm(btn.dataset.restore, btn);
+    btn.onclick = () => restoreBackupConfirm(btn.dataset.restore, btn.dataset.when, btn);
   });
+  const toggle = document.getElementById("backup-toggle");
+  if (toggle) {
+    toggle.onclick = () => { backupsExpanded = !backupsExpanded; loadBackups().catch(() => {}); };
+  }
   const bs = document.getElementById("backup-status");
-  bs.textContent = `共 ${items.length} 项 · 备份目录：${d.dir}（保留最近 ${d.keep} 份）`;
+  bs.textContent = `共 ${hist.length} 份备份 · 备份目录：${d.dir}（保留最近 ${d.keep} 份）`;
   bs.className = "card-status ok";
   bs.hidden = false;
 }
 
-function restoreBackupConfirm(name, btn) {
+function restoreBackupConfirm(name, when, btn) {
   const box = document.createElement("div");
-  box.innerHTML = `<p>要用备份 <b>${escapeHtml(name)}</b> 覆盖当前会话数据吗？</p>
-    <p class="dim small">当前数据会先自动另存为一份「恢复前」备份，所以还能再换回来。
+  box.innerHTML = `<p>要用 <b>${escapeHtml(when || name)}</b> 这份备份覆盖当前会话数据吗？</p>
+    <p class="dim small">备份文件：${escapeHtml(name)}<br>
+    当前数据会先自动另存为一份「恢复前」备份，所以还能再换回来；
     恢复后需要刷新界面（会话列表会回到那个时间点的样子）。</p>`;
   showModal("恢复会话库备份", box, async () => {
     btn.disabled = true;

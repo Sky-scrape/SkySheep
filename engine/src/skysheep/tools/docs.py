@@ -33,6 +33,7 @@ from .base import (
     Tool,
     ToolContext,
     ToolError,
+    check_write_size,
     rel_path,
     resolve_path,
     truncate_output,
@@ -400,6 +401,7 @@ class WriteDocumentTool(Tool):
         "用户要 Word/Excel 报告、表格、清单文件时用它。"
     )
     safety = Safety.WRITE
+    write_path_arg = True
     args_model = WriteDocumentArgs
     last_diff = ""
 
@@ -420,6 +422,7 @@ class WriteDocumentTool(Tool):
         content = args.content.strip()
         if not content:
             raise ToolError("content 不能为空")
+        check_write_size(content, shown)
         existed = p.exists()
         if self.recorder is not None:
             self.recorder.record(p)  # 检查点：改前不存在 → 回滚时删除

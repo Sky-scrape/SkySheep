@@ -13,6 +13,7 @@ import hashlib
 import ipaddress
 import json
 import locale
+import logging
 import os
 import secrets
 import socket
@@ -99,7 +100,8 @@ from ..models import Provider
 from ..models.base import ProviderDone, ProviderReasoning, ProviderTextDelta
 from ..models.factory import build_provider
 from ..models.probe import probe_provider_models
-from ..security.gate import HeadlessGate, PermissionGate
+from ..security.gate import RULE_KINDS, HeadlessGate, PermissionGate
+from ..security.trust import WorkspaceTrust
 from ..session import SessionStore
 from ..skills import SkillLoader
 from ..skills.installer import SkillInstallError, install_from_url, remove_skill
@@ -109,9 +111,57 @@ from ..tools import ChangeRecorder, Safety, ToolRegistry, default_tools
 from ..tools.memory import render_memory_section
 from ..tools.skill import LoadSkillTool
 
+logger = logging.getLogger("skysheep.security")
+
 EmitFn = Callable[[dict], Awaitable[None]]
 
 MAX_DIFF_CHARS = 8000
+
+# 用户自定义局域网令牌的最小长度：默认令牌是 secrets.token_urlsafe(16)（22 字符），
+# 这里只挡住明显过弱的自定义值，不强制复杂度（令牌要方便输入与扫码）。
+MIN_LAN_TOKEN_CHARS = 12
+
+# Tailscale 分配的虚拟网段（IPv4 CGNAT 100.64.0.0/10 + 其 IPv6 ULA）。远程访问模式
+# 靠它区分「tailnet 里的设备」与「物理局域网里的陌生设备」：后者连 IP 段都进不来。
+TAILSCALE_NETS = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fd7a:115c:a1e0::/48"),
+)
+
+# ui.json 的 theme 键值域：auto = 跟随系统（浅色默认落纸墨、深色默认落夜墨）；
+# light / dark 是旧版两档值，读取时由前端与首帧注入分别按 paper / night 处理；
+# 其余是主题 id——浅色：纸墨 paper、青瓷 celadon、秋柿 kaki；深色：夜墨 night、
+# 黛夜 indigo、松烟 pine。与 app.js 的 THEMES 表、app.css 的 [data-theme=…] 段、
+# index.html 设置页的主题卡片一一对应，改主题列表要四处同步。
+THEME_PREFS = ("auto", "light", "dark", "paper", "celadon", "kaki", "night", "indigo", "pine")
+
+
+def client_origin(client) -> str:
+    """把连接来源分成三类：local（本机回环）/ tailscale（tailnet 网段）/ other。
+
+    远程访问（Tailscale）模式的 HTTP 守卫与 WS 验签都以此为准：other 一律拒绝，
+    tailscale 必须验令牌，local 免令牌。入参兼容 ws.client 的 (host, port) 元组；
+    TestClient 的 host 是 "testclient"，按本机对待（与既有测试约定一致）。
+    """
+    if not client:
+        return "other"
+    host = client[0] if isinstance(client, (tuple, list)) else str(client)
+    host = str(host).split("%")[0]  # IPv6 zone id（fe80::1%eth0）先去掉
+    if not host:
+        return "other"
+    if host in ("testclient", "localhost"):
+        return "local"
+    try:
+        obj = ipaddress.ip_address(host)
+    except ValueError:
+        return "other"
+    if isinstance(obj, ipaddress.IPv6Address) and obj.ipv4_mapped:
+        obj = obj.ipv4_mapped  # ::ffff:127.0.0.1 / ::ffff:100.64.x.x 这类映射地址
+    if obj.is_loopback:
+        return "local"
+    if any(obj in net for net in TAILSCALE_NETS):
+        return "tailscale"
+    return "other"
 
 
 def _decode_bytes(data: bytes) -> str:
@@ -337,6 +387,8 @@ class ServerBackend:
         self._base_queue: list = []
         self._base_run_task: asyncio.Task | None = None
         self._base_recorder: ChangeRecorder | None = None
+        # workspace trust 懒建：拿到 working_dir 后才能算指纹
+        self._trust: WorkspaceTrust | None = None
         self.runtimes: dict[str, SessionRuntime] = {}
         self.gate: PermissionGate | None = None
         self.mcp: MCPManager | None = None
@@ -486,7 +538,7 @@ class ServerBackend:
             self.provider_name = ""
             self.provider_model = ""
 
-        mcp_configs = load_mcp_configs(self._mcp_global_path(), self._mcp_project_path())
+        mcp_configs = load_mcp_configs(self._mcp_global_path(), self._project_mcp_path_if_trusted())
         self.mcp_configs = mcp_configs
         self.mcp = MCPManager(mcp_configs)
         self.mcp_tools = await self.mcp.connect_all()
@@ -498,7 +550,7 @@ class ServerBackend:
 
         self.skills = SkillLoader(
             global_dir=skysheep_home() / "skills",
-            project_dir=self.working_dir / ".skysheep" / "skills",
+            project_dir=self._project_skills_dir_if_trusted(),
             state_path=self.working_dir / ".skysheep" / "skills.json",
             scope_path=skysheep_home() / "skills-scope.json",
             project_root=self.working_dir,
@@ -1639,12 +1691,12 @@ class ServerBackend:
             "has_price": any(p["price_in"] or p["price_out"] for p in prices.values()),
         }
 
-    async def fs_read(self, params: dict) -> dict:
-        """只读预览工作区文件（文件树用）：文本直接读；PDF/Word/Excel 提取文本；
-        其余二进制拒绝。沙箱限制在工作目录内。"""
-        raw = str(params.get("path", "") or "").strip()
-        if not raw:
-            raise RuntimeError("missing path")
+    def _workspace_path(self, raw: str) -> Path:
+        """把相对/绝对路径解析到工作目录内的真实路径；越界一律拒绝。
+
+        fs_read / fs_write 共用：resolve 消掉 .. 后必须仍在工作目录里，
+        Windows 非法字符（盘符冒号等）在 resolve/relative_to 时抛错同样拦下。
+        """
         target = Path(raw)
         if not target.is_absolute():
             target = self.working_dir / target
@@ -1652,11 +1704,51 @@ class ServerBackend:
             target = target.resolve()
             target.relative_to(self.working_dir)
         except (OSError, ValueError):
-            raise RuntimeError("只能预览工作目录内的文件") from None
+            raise RuntimeError("只能访问工作目录内的文件") from None
+        return target
+
+    # Windows 文件名非法字符与控制字符（建新文件时逐段校验）
+    _BAD_NAME_CHARS = '<>:"|?*'
+    # Windows 保留设备名（含带扩展名形式，如 con.txt：旧系统上这类文件无法正常打开/删除）
+    _RESERVED_NAMES = {"con", "prn", "aux", "nul",
+                       *(f"com{i}" for i in range(1, 10)),
+                       *(f"lpt{i}" for i in range(1, 10))}
+
+    def _validate_rel_path(self, raw: str) -> str:
+        """新建文件的相对路径校验：禁绝对路径、.. 段、非法字符、结尾点/空格。"""
+        raw = raw.replace("\\", "/").strip("/")
+        parts = [p for p in raw.split("/") if p]
+        if not parts:
+            raise RuntimeError("文件名不能为空")
+        for seg in parts:
+            if seg in (".", ".."):
+                raise RuntimeError("路径里不能有 .. 段")
+            if any(c in seg for c in self._BAD_NAME_CHARS) or any(ord(c) < 32 for c in seg):
+                raise RuntimeError("文件名含非法字符：" + seg)
+            if seg.endswith((" ", ".")):
+                raise RuntimeError("Windows 文件名不能以空格或点结尾：" + seg)
+            if seg.split(".", 1)[0].lower() in self._RESERVED_NAMES:
+                raise RuntimeError("文件名是 Windows 保留设备名：" + seg)
+        rel = "/".join(parts)
+        if len(rel) > 240:
+            raise RuntimeError("路径过长（上限 240 字符）")
+        return rel
+
+    async def fs_read(self, params: dict) -> dict:
+        """只读预览工作区文件（文件树用）：文本直接读；PDF/Word/Excel 提取文本；
+        其余二进制拒绝。沙箱限制在工作目录内。返回 mtime 供编辑器保存时做冲突检测，
+        editable 标记「这份文本能不能写回」（提取文本/截断的都不可写回）。"""
+        raw = str(params.get("path", "") or "").strip()
+        if not raw:
+            raise RuntimeError("missing path")
+        target = self._workspace_path(raw)
         if not target.is_file():
             raise RuntimeError("文件不存在（或这是目录）: " + raw)
         try:
             size = target.stat().st_size
+            # 毫秒精度：ns 级时间戳(约 1.7e18)超出 JS Number 安全整数(9e15)，
+            # 经 JSON 往返会丢精度导致冲突检测永远误报
+            mtime = target.stat().st_mtime_ns // 1_000_000
         except OSError as e:
             raise RuntimeError("读取失败: " + str(e)) from None
 
@@ -1676,6 +1768,8 @@ class ServerBackend:
                 "size": size,
                 "truncated": False,
                 "doc": True,
+                "mtime": mtime,
+                "editable": False,
             }
 
         try:
@@ -1685,12 +1779,58 @@ class ServerBackend:
         if b"\x00" in data:
             raise RuntimeError("二进制文件不支持预览")
         text = data.decode("utf-8", errors="replace")
+        truncated = size > 400_000
         return {
             "path": str(target.relative_to(self.working_dir)).replace("\\", "/"),
             "text": text,
             "size": size,
-            "truncated": size > 400_000,
+            "truncated": truncated,
+            "mtime": mtime,
+            "editable": not truncated,
         }
+
+    async def fs_write(self, params: dict) -> dict:
+        """右侧文件面板编辑器的「保存」：把用户改的文本写回工作区文件。
+
+        这是用户本人在界面上点保存（与 project.save_instructions 同级的
+        「用户主动写」，不走 PermissionGate——那道门管的是 Agent 工具调用），
+        但同样严格锁死在工作目录内、只收文本、限 2MB。base_mtime 与磁盘当前
+        不一致时不落盘、返回 conflict=True，由前端让用户选覆盖（force=True）
+        或放弃，避免无意盖掉 Agent / 其他程序正在做的改动。
+        """
+        raw = str(params.get("path", "") or "").strip().replace("\\", "/")
+        if not raw:
+            raise RuntimeError("missing path")
+        text = str(params.get("text", "") or "")
+        force = bool(params.get("force"))
+        base_mtime = params.get("base_mtime")
+        if base_mtime is not None:
+            try:
+                base_mtime = int(base_mtime)
+            except (TypeError, ValueError):
+                raise RuntimeError("base_mtime 必须是整数（fs.read 返回的 mtime）") from None
+        rel = self._validate_rel_path(raw)
+        target = self._workspace_path(rel)
+        data = text.encode("utf-8")
+        if len(data) > 2_000_000:
+            raise RuntimeError("文件太大（超过 2MB），请用系统编辑器处理")
+
+        exists = target.is_file()
+        if exists and base_mtime is not None and not force:
+            try:
+                cur = target.stat().st_mtime_ns // 1_000_000  # 毫秒精度，见 fs_read
+            except OSError as e:
+                raise RuntimeError("读取失败: " + str(e)) from None
+            if int(base_mtime) != cur:
+                # 不落盘，交给前端弹「覆盖 / 放弃」
+                return {"saved": False, "conflict": True, "mtime": cur}
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            mtime = target.stat().st_mtime_ns // 1_000_000
+        except OSError as e:
+            raise RuntimeError("写入失败: " + str(e)) from None
+        return {"saved": True, "mtime": mtime, "size": len(data)}
 
     async def workspace_files(self) -> dict:
         """/@ 文件提及的数据源：项目内文件相对路径清单（跳过依赖与构建目录）。"""
@@ -1858,14 +1998,116 @@ class ServerBackend:
         return "accept_edits" if (self.gate and self.gate.auto_accept_write) else "confirm"
 
     async def set_permission_mode(self, mode: str) -> dict:
-        """confirm = 写入/命令都确认（默认）；accept_edits = 写入自动放行、命令仍确认。"""
+        """confirm = 写入/命令都确认（默认）；accept_edits = 写入自动放行、命令仍确认。
+
+        档位存在 ui.json，下次启动沿用；只由本机用户在界面上切换（远端调用在
+        server/app.py 的 dispatch 层拦下，需测试或脚本驱动时直接调用本方法）。
+        切换记一条日志：这是降低防护的动作，事后能从 ~/.skysheep/logs/desktop.log 追溯。
+        """
         if mode not in ("confirm", "accept_edits"):
             raise RuntimeError("权限模式只支持 confirm / accept_edits")
         if self.gate is None:
             raise RuntimeError("引擎尚未就绪")
         self.gate.auto_accept_write = mode == "accept_edits"
         await self.save_ui_prefs({"accept_edits": 1 if mode == "accept_edits" else 0})
+        logger.info(
+            "权限模式切换为 %s（自动允许写入=%s，工作目录内写入：%s）",
+            self.permission_mode(),
+            mode == "accept_edits",
+            self.working_dir,
+        )
         return {"mode": self.permission_mode()}
+
+    # ---- 白名单（设置页）：手动添加 / 清空 / 测试 / 导入导出 ----
+
+    @staticmethod
+    def _validate_whitelist_rule(tool: str, kind: str, pattern: str) -> tuple[str, str, str]:
+        """手动添加 / 导入共用的规则校验，返回规范化后的 (tool, kind, pattern)。"""
+        tool = (tool or "").strip()
+        pattern = (pattern or "").strip()
+        if not tool:
+            raise RuntimeError("工具名不能为空")
+        if kind not in RULE_KINDS:
+            raise RuntimeError("规则类型不合法")
+        if kind == "always":
+            pattern = ""  # always 不携带参数
+        elif not pattern:
+            raise RuntimeError("该类型需要填写匹配内容")
+        if len(pattern) > 500:
+            raise RuntimeError("匹配内容过长（上限 500 字符）")
+        return tool, kind, pattern
+
+    async def add_whitelist_rule(self, tool: str, kind: str, pattern: str = "") -> dict:
+        """手动添加一条项目级规则（设置页入口）。写库后立即 reload，与 remove 同一路径。"""
+        tool, kind, pattern = self._validate_whitelist_rule(tool, kind, pattern)
+        rules = await self.store.list_rules(self.project.id)
+        if any(
+            r["tool"] == tool and r["kind"] == kind and r["pattern"] == pattern
+            for r in rules
+        ):
+            raise RuntimeError("已存在完全相同的规则")
+        await self.store.add_rule(self.project.id, tool, kind, pattern)
+        await self.gate.load_project_rules()
+        return {"rules": await self.store.list_rules(self.project.id)}
+
+    async def clear_whitelist_rules(self, kind: str = "") -> dict:
+        """清空项目白名单（kind 为空 = 全部；收紧动作，远端也放行）。"""
+        removed = await self.store.clear_rules(
+            self.project.id, kind if kind in RULE_KINDS else ""
+        )
+        await self.gate.load_project_rules()
+        return {"removed": removed}
+
+    def check_whitelist_rule(self, tool: str, text: str) -> dict:
+        """规则测试器：当前规则会让这条调用直接放行、还是弹确认。"""
+        tool = (tool or "").strip()
+        if not tool:
+            raise RuntimeError("工具名不能为空")
+        return self.gate.explain(tool, text or "")
+
+    async def export_whitelist(self) -> dict:
+        rules = await self.store.list_rules(self.project.id)
+        return {
+            "version": 1,
+            "project": self.project.name,
+            "exported_at": time.time(),
+            "rules": [
+                {"tool": r["tool"], "kind": r["kind"], "pattern": r["pattern"]}
+                for r in rules
+            ],
+        }
+
+    async def import_whitelist(self, rules: list) -> dict:
+        """导入规则（合并模式）：逐条走与手动添加相同的校验，重复或不合法的跳过。"""
+        items = rules if isinstance(rules, list) else []
+        existing = await self.store.list_rules(self.project.id)
+        seen = {(r["tool"], r["kind"], r["pattern"]) for r in existing}
+        added = skipped = 0
+        for item in items:
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            try:
+                tool, kind, pattern = self._validate_whitelist_rule(
+                    str(item.get("tool", "")),
+                    str(item.get("kind", "")),
+                    str(item.get("pattern", "") or ""),
+                )
+            except RuntimeError:
+                skipped += 1
+                continue
+            if (tool, kind, pattern) in seen:
+                skipped += 1
+                continue
+            await self.store.add_rule(self.project.id, tool, kind, pattern)
+            seen.add((tool, kind, pattern))
+            added += 1
+        await self.gate.load_project_rules()
+        return {
+            "added": added,
+            "skipped": skipped,
+            "rules": await self.store.list_rules(self.project.id),
+        }
 
     # ---- 模型/配置操作 ----
 
@@ -2044,6 +2286,9 @@ class ServerBackend:
         self.skills.discover()
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
+        # 用户在界面上主动装技能：已信任的项目同步指纹，避免刚装完就回到「待确认」
+        if scope == "project":
+            self.trust.refresh()
         result["scope"] = scope
         result["skills"] = [
             {
@@ -2073,6 +2318,8 @@ class ServerBackend:
         self.skills.discover()
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
+        if scope == "project":
+            self.trust.refresh()  # 删掉项目技能也是用户自己的改动，同步指纹
         result["scope"] = scope
         return result
 
@@ -2081,7 +2328,7 @@ class ServerBackend:
     def _reload_mcp_configs(self) -> None:
         self.mcp_configs = load_mcp_configs(
             self._mcp_global_path(),
-            self._mcp_project_path(),
+            self._project_mcp_path_if_trusted(),
         )
 
     def _mcp_global_path(self) -> Path:
@@ -2089,6 +2336,52 @@ class ServerBackend:
 
     def _mcp_project_path(self) -> Path:
         return self.working_dir / ".skysheep" / "mcp.json"
+
+    # ---- workspace trust：项目级配置在获信任前不得自动生效 ----
+
+    @property
+    def trust(self) -> WorkspaceTrust:
+        """当前项目的信任状态（按项目路径记忆在用户主目录）。"""
+        if self._trust is None:
+            self._trust = WorkspaceTrust(skysheep_home(), self.working_dir)
+        return self._trust
+
+    def _project_mcp_path_if_trusted(self) -> Path | None:
+        """未获信任时返回 None：项目级 MCP 配置不得在本轮启动时被读取/拉起。"""
+        return self._mcp_project_path() if self.trust.is_trusted() else None
+
+    def _project_skills_dir_if_trusted(self) -> Path | None:
+        """未获信任时返回 None：项目级技能不得自动发现并注入系统提示词。"""
+        if not self.trust.is_trusted():
+            return None
+        return self.working_dir / ".skysheep" / "skills"
+
+    async def trust_status(self) -> dict:
+        """当前项目的信任状态（给前端渲染确认横幅）。"""
+        return self.trust.state()
+
+    async def trust_grant(self) -> dict:
+        """用户确认信任本项目：记录指纹，并把项目级 MCP/技能接上（无需重启）。"""
+        state = self.trust.grant()
+        self._reload_mcp_configs()
+        await self._reconnect_mcp()
+        self._reload_project_skills()
+        return {**state, "mcp_warnings": list(self.mcp_warnings)}
+
+    async def trust_revoke(self) -> dict:
+        """取消信任：断开项目级 MCP 服务器，并重新发现技能（项目级不再生效）。"""
+        state = self.trust.revoke()
+        self._reload_mcp_configs()
+        await self._reconnect_mcp()
+        self._reload_project_skills()
+        return {**state, "mcp_warnings": list(self.mcp_warnings)}
+
+    def _reload_project_skills(self) -> None:
+        """按当前信任状态重新发现技能，并把系统提示词刷到所有 agent。"""
+        self.skills.project_dir = self._project_skills_dir_if_trusted()
+        self.skills.discover()
+        for ag in self._for_each_agent():
+            ag.set_system(self.compose_system())
 
     async def _reconnect_mcp(self) -> list[str]:
         """重建 MCP 工具集合并接到 Agent 上（改完配置后调用，无需重启）。"""
@@ -2139,6 +2432,9 @@ class ServerBackend:
         result["scope"] = scope
         result["mcp"] = self._mcp_status_list(self.mcp)
         result["mcp_warnings"] = self.mcp_warnings
+        if scope == "project":
+            self.trust.refresh()  # 用户自己在界面上写的项目级配置，同步指纹
+        self._annotate_untrusted_project_scope(result, scope)
         if result["added"]:
             result["hint"] = "已接入，可直接对话使用" + (
                 "（有服务没连上时看下面的错误信息）" if self.mcp_warnings else ""
@@ -2182,7 +2478,25 @@ class ServerBackend:
         result["scope"] = scope
         result["mcp"] = self._mcp_status_list(self.mcp)
         result["mcp_warnings"] = self.mcp_warnings
+        if scope == "project":
+            self.trust.refresh()  # 同上：用户自己的改动延续既有信任
+        self._annotate_untrusted_project_scope(result, scope)
         return result
+
+    def _annotate_untrusted_project_scope(self, result: dict, scope: str) -> None:
+        """项目级配置写完了但还没信任本项目时，把「为什么没连上」说清楚。
+
+        否则用户会在设置页加了服务却看不到连接，以为是坏了。这里只补一句提示，
+        不自动授信任——项目里可能同时还躺着别的（仓库带来的）服务，一并放行
+        不是用户在这一次操作里表达的意思。
+        """
+        if scope != "project" or self.trust.is_trusted():
+            return
+        result["needs_trust"] = True
+        result["hint"] = (
+            "已写入项目配置，但本项目尚未信任：项目自带的配置在确认前不会自动执行。"
+            "在顶部横幅点「信任本项目」后即会连接。"
+        )
 
     async def add_mcp_preset(self, name: str, scope: str = "global") -> dict:
         """一键添加内置预设 MCP 服务：按预设原文写入 mcp.json 并立即连接。
@@ -2969,6 +3283,8 @@ class ServerBackend:
 
         self.working_dir = target
         self.project = await self.store.get_or_create_project(str(target))
+        # 信任按项目记忆：换了目录必须丢掉旧实例，否则会沿用上一个项目的信任状态
+        self._trust = None
         # 白名单按项目隔离：换项目 = 换一套规则；「自动允许写入」档跨项目保持
         prev_accept = self.gate.auto_accept_write if self.gate else False
         self.gate = PermissionGate(store=self.store, project_id=self.project.id,
@@ -2979,7 +3295,7 @@ class ServerBackend:
 
         self.skills = SkillLoader(
             global_dir=skysheep_home() / "skills",
-            project_dir=target / ".skysheep" / "skills",
+            project_dir=self._project_skills_dir_if_trusted(),
             state_path=target / ".skysheep" / "skills.json",
             scope_path=skysheep_home() / "skills-scope.json",
             project_root=target,
@@ -3199,8 +3515,8 @@ class ServerBackend:
         "aux", "review", "terminal", "browser", "files",
         "tasks", "todo", "agenda", "cron", "memory",
     )
-    # 字符串型偏好（值域白名单）：theme = auto | light | dark
-    STRING_PREFS = {"theme": ("auto", "light", "dark")}
+    # 字符串型偏好（值域白名单）：theme 值域见模块级 THEME_PREFS
+    STRING_PREFS = {"theme": THEME_PREFS}
 
     def _ui_prefs_path(self) -> Path:
         return skysheep_home() / "ui.json"
@@ -3351,24 +3667,28 @@ class ServerBackend:
         key = resolved.get("api_key") if resolved else ""
         return {
             "provider": ws.provider,
-            "providers": ["auto", "bocha", "tavily", "zhipu"],
+            "providers": ["auto", "bocha", "tavily", "zhipu", "custom"],
+            "base_url": ws.base_url,
             "has_key": bool(resolved),
             "key_mask": self._mask_key(key),
             "resolved_provider": (resolved or {}).get("provider", ""),
             "config_hint": (
-                "「自动」优先复用已配置 Key 的智谱服务；也可选博查（bocha.cn）或 "
-                "Tavily 并填入对应 API Key，保存后立即生效。"
+                "「自动」会优先复用你已配置 Key 的服务；也可选博查（bocha.cn）或 "
+                "Tavily 并填入对应 API Key；选「自定义」则填入自建搜索服务地址"
+                "（如 SearXNG，无需 Key）。保存后立即生效。"
             ),
         }
 
     async def websearch_save(self, params: dict) -> dict:
         provider = str(params.get("provider", "")).strip()
-        if provider not in ("", "auto", "bocha", "tavily", "zhipu"):
-            raise RuntimeError("联网搜索服务商只支持 auto / bocha / tavily / zhipu")
+        if provider not in ("", "auto", "bocha", "tavily", "zhipu", "custom"):
+            raise RuntimeError("联网搜索服务商只支持 auto / bocha / tavily / zhipu / custom")
         updates: dict = {"provider": provider or None}
         api_key = params.get("api_key")
         if api_key is not None:
             updates["api_key"] = str(api_key).strip()
+        if params.get("base_url") is not None:
+            updates["base_url"] = str(params["base_url"]).strip()
         update_config_section("websearch", updates)
         self.cfg = load_config()
         self._refresh_web_tool_configs()
@@ -3388,7 +3708,7 @@ class ServerBackend:
             "resolved_provider": (resolved or {}).get("provider", ""),
             "resolved_model": (resolved or {}).get("model", ""),
             "config_hint": (
-                "「自动」优先复用已配置 Key 的智谱 / 硅基流动服务；自定义需填 "
+                "「自动」会优先复用你已配置 Key 的服务；自定义需填 "
                 "OpenAI 兼容的 /images/generations 接口地址与 Key。保存后立即生效。"
             ),
         }
@@ -3417,6 +3737,7 @@ class ServerBackend:
             if ws_tool is not None:
                 ws_tool.provider = ws_kw.get("provider", "")
                 ws_tool.api_key = ws_kw.get("api_key", "")
+                ws_tool.base_url = ws_kw.get("base_url", "")
             ig_tool = ag.registry.get("generate_image")
             if ig_tool is not None:
                 ig_tool.provider = ig_kw.get("provider", "")
@@ -3437,7 +3758,10 @@ class ServerBackend:
 
     async def lan_enable(self, params: dict) -> dict:
         server = self.cfg.server
-        token = str(params.get("token") or "").strip() or server.token or secrets.token_urlsafe(16)
+        supplied = str(params.get("token") or "").strip()
+        if supplied:
+            self._check_lan_token(supplied)
+        token = supplied or server.token or secrets.token_urlsafe(16)
         update_config_section("server", {"lan": True, "token": token})
         self.cfg = load_config()
         return {
@@ -3445,6 +3769,26 @@ class ServerBackend:
             "note": "已开启局域网访问：重启 SkySheep 后生效（服务会监听全部网卡，"
                     "同一 Wi-Fi 下的设备凭令牌访问）。",
         }
+
+    @staticmethod
+    def _check_lan_token(token: str) -> None:
+        """自定义令牌的最小强度校验。
+
+        默认令牌由 secrets.token_urlsafe(16) 生成（22 字符 / 128 bit 熵），无需校验。
+        但 lan_enable 允许调用方传入自定义 token——这是降低整道防护强度的入口，
+        弱令牌（"123456"、"password"）配上传二维码分享等于把服务开给同网段所有人。
+        这里只查长度与字符多样性，不强制复杂度规则：令牌要能方便地输入/扫码。
+        """
+        if len(token) < MIN_LAN_TOKEN_CHARS:
+            raise RuntimeError(
+                f"令牌太短（{len(token)} 位）：至少 {MIN_LAN_TOKEN_CHARS} 位，"
+                "建议直接留空由系统生成随机令牌"
+            )
+        if len(set(token)) < 4:
+            raise RuntimeError(
+                "令牌字符重复度过高（几乎全是同一个字符）：请换一个更随机的令牌，"
+                "或留空由系统生成"
+            )
 
     async def lan_disable(self) -> dict:
         update_config_section("server", {"lan": False})
@@ -3454,9 +3798,44 @@ class ServerBackend:
             "note": "已关闭局域网访问：重启 SkySheep 后恢复仅本机监听。",
         }
 
+    # ---- 远程访问（Tailscale）：手机不在同一网络也能连回这台电脑 ----
+    # 与局域网访问共用令牌；绑定同样要等重启生效。守卫逻辑在 server/app.py：
+    # 物理局域网等非 tailnet 来源直接拒绝，tailnet 来源必须验令牌。
+
+    async def remote_status(self) -> dict:
+        server = self.cfg.server
+        return {
+            "enabled": bool(server.tailscale),
+            "token": server.token,
+            "ips": self._tailscale_ips(),
+            "note": "" if server.tailscale else "远程访问当前关闭。",
+        }
+
+    async def remote_enable(self, params: dict) -> dict:
+        server = self.cfg.server
+        supplied = str(params.get("token") or "").strip()
+        if supplied:
+            self._check_lan_token(supplied)  # 与局域网访问同一把令牌、同一强度要求
+        token = supplied or server.token or secrets.token_urlsafe(16)
+        update_config_section("server", {"tailscale": True, "token": token})
+        self.cfg = load_config()
+        return {
+            **await self.remote_status(),
+            "note": "已开启远程访问：重启 SkySheep 后生效。手机需安装 Tailscale 并登录同一账号，"
+                    "之后在任意网络（含手机流量）都能用下面的地址访问。",
+        }
+
+    async def remote_disable(self) -> dict:
+        update_config_section("server", {"tailscale": False})
+        self.cfg = load_config()
+        return {
+            **await self.remote_status(),
+            "note": "已关闭远程访问：重启 SkySheep 后恢复仅本机监听。",
+        }
+
     @staticmethod
-    def _lan_ips() -> list[str]:
-        """本机在局域网里的 IPv4（UDP connect 技巧，不真正发包）。"""
+    def _hostname_ipv4s() -> list[str]:
+        """本机所有非回环网卡的 IPv4（getaddrinfo 枚举，含 Tailscale 虚拟网卡）。"""
         ips: list[str] = []
         try:
             hostname = socket.gethostname()
@@ -3467,16 +3846,34 @@ class ServerBackend:
                     ips.append(ip)
         except OSError:
             pass
+        return ips
+
+    @classmethod
+    def _lan_ips(cls) -> list[str]:
+        """本机在物理局域网里的 IPv4（排除 Tailscale 虚拟网段；UDP connect 技巧兜底）。"""
+
+        def keep(ip: str) -> bool:
+            obj = ipaddress.ip_address(ip)
+            if isinstance(obj, ipaddress.IPv6Address) and obj.ipv4_mapped:
+                obj = obj.ipv4_mapped
+            return isinstance(obj, ipaddress.IPv4Address) and obj not in TAILSCALE_NETS[0]
+
+        ips = [ip for ip in cls._hostname_ipv4s() if keep(ip)]
         if not ips:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                     s.connect(("10.255.255.255", 1))
                     ip = s.getsockname()[0]
-                if ip and not ipaddress.ip_address(ip).is_loopback and ip not in ips:
+                if ip and not ipaddress.ip_address(ip).is_loopback and keep(ip):
                     ips.append(ip)
             except OSError:
                 pass
         return ips
+
+    @classmethod
+    def _tailscale_ips(cls) -> list[str]:
+        """本机 Tailscale 虚拟网卡的 IPv4（100.64.0.0/10；没装/没运行则为空）。"""
+        return [ip for ip in cls._hostname_ipv4s() if ipaddress.ip_address(ip) in TAILSCALE_NETS[0]]
 
     # ---- 更新检查（设置 · 关于可手动触发；启动时后台已查过一次） ----
 
@@ -3584,7 +3981,12 @@ class ServerBackend:
                 continue  # skills-manifest.json 等：暂不自动恢复，避免覆盖现有技能状态
             try:
                 target = skysheep_home() / name
-                target.write_bytes(zf.read(name))
+                if name == "ui.json":
+                    # 「自动允许写入」属于降低防护的开关，只能由本机用户主动切换：
+                    # 导入包里带来的该字段一律不生效（换机/别人给的包不应该顺手放宽写入）
+                    self._strip_accept_edits_from_ui_export(target, zf.read(name))
+                else:
+                    target.write_bytes(zf.read(name))
                 restored.append(name)
             except OSError:
                 skipped.append(name)
@@ -3593,7 +3995,23 @@ class ServerBackend:
                 self.cfg = load_config()
             except Exception as e:
                 raise RuntimeError(f"配置已写入但加载失败，请检查 config.toml：{e}") from None
+        if "ui.json" in restored:
+            # 导入后同步内存里的档位（否则要等重启才与文件一致）
+            self.gate.auto_accept_write = self._read_ui_prefs().get("accept_edits", 0) == 1
         return {"restored": restored, "skipped": skipped}
+
+    @staticmethod
+    def _strip_accept_edits_from_ui_export(target: Path, blob: bytes) -> None:
+        """写入导入的 ui.json 时去掉 accept_edits（其余偏好照常恢复）。"""
+        try:
+            data = json.loads(blob.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            data = None
+        if not isinstance(data, dict):
+            return  # 内容不是合法 JSON：保留原行为，不写入半个文件
+        if data.pop("accept_edits", None) is not None:
+            logger.info("导入的 ui.json 里带着 accept_edits，已丢弃（该开关只能在本机切换）")
+        target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     async def snapshot(self) -> dict:
         sessions = await self.store.list_sessions(self.project.id)
@@ -3654,7 +4072,9 @@ class ServerBackend:
                 "project": str(self._mcp_project_path()),
                 "global_exists": self._mcp_global_path().exists(),
                 "project_exists": self._mcp_project_path().exists(),
+                "project_active": self._project_mcp_path_if_trusted() is not None,
             },
+            "workspace_trust": self.trust.state(),
             "mcp_presets": presets_public(),
             "mcp_installed": self.mcp_installed_names(),
             "mcp_warnings": self.mcp_warnings,

@@ -45,6 +45,7 @@ from ..models import Provider
 from ..models.factory import build_provider
 from ..models.probe import OLLAMA_BASE, probe_ollama
 from ..security.gate import Decision, HeadlessGate
+from ..security.trust import WorkspaceTrust
 from ..session import SessionStore, export_messages_text
 from ..skills import SkillLoader
 from ..tools import ToolRegistry, default_tools
@@ -98,8 +99,40 @@ class ChatApp:
         self.mcp: MCPManager | None = None
         self.skills: SkillLoader | None = None
         self.tasks: TaskManager | None = None
+        self.trusted = False
 
     # ---- 启动 ----
+
+    def _ask_trust(self, trust: WorkspaceTrust) -> bool:
+        """终端里问一次「是否信任这个项目的自带配置」。
+
+        默认拒绝（直接回车或非 y 都不信任）：这是降低防护的决定，不该因为用户
+        随手回车就默认放行。信任后按项目路径记忆，指纹变了会重新问。
+        """
+        state = trust.state()
+        console.print(
+            "[yellow]这个项目自带了会被自动执行的配置：[/yellow]"
+        )
+        for item in state.get("items", []):
+            label = "MCP 服务器" if item.get("kind") == "mcp" else "技能"
+            ro = "（其工具自动放行）" if item.get("readonly") else ""
+            console.print(f"  · {label} [bold]{item.get('name')}[/bold]：{item.get('detail')}{ro}")
+        if state.get("changed"):
+            console.print("[yellow]（之前信任过，但配置已变更，需要重新确认）[/yellow]")
+        console.print(
+            "先不信任也可以照常使用 Agent，只是这些项目自带配置本次不生效。"
+        )
+        try:
+            answer = input("是否信任并启用？（y/N） ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print("[dim]已跳过（本次不启用项目自带配置）[/dim]")
+            return False
+        if answer in ("y", "yes"):
+            trust.grant()
+            console.print("[green]已信任：项目自带配置已启用[/green]")
+            return True
+        console.print("[dim]未信任：项目自带配置本次不生效（下次打开还会问）[/dim]")
+        return False
 
     async def setup(self) -> None:
         if not self.working_dir.exists():
@@ -111,10 +144,16 @@ class ChatApp:
         await self.gate.load_project_rules()
         self.provider, self.provider_name = self._build_provider(self.args.provider or self.cfg.default)
 
+        # workspace trust：项目自带的 mcp.json / skills 在确认前不生效（详见 security/trust.py）
+        trust = WorkspaceTrust(skysheep_home(), self.working_dir)
+        self.trusted = trust.is_trusted()
+        if not self.trusted:
+            self.trusted = self._ask_trust(trust)
+
         # M2: MCP 服务器连接（失败降级为警告）
         mcp_configs = load_mcp_configs(
             skysheep_home() / "mcp.json",
-            self.working_dir / ".skysheep" / "mcp.json",
+            (self.working_dir / ".skysheep" / "mcp.json") if self.trusted else None,
         )
         self.mcp = MCPManager(mcp_configs)
         # connect_all 返回工具列表（单值）；连接失败的状态从 statuses 取
@@ -126,7 +165,7 @@ class ChatApp:
         # M2: Skills 发现（全局 + 项目）
         self.skills = SkillLoader(
             global_dir=skysheep_home() / "skills",
-            project_dir=self.working_dir / ".skysheep" / "skills",
+            project_dir=(self.working_dir / ".skysheep" / "skills") if self.trusted else None,
             state_path=self.working_dir / ".skysheep" / "skills.json",
             scope_path=skysheep_home() / "skills-scope.json",
             project_root=self.working_dir,
@@ -369,7 +408,14 @@ class ChatApp:
             if not rules:
                 self.console.print("[dim](no rules for this project)[/]")
             for r in rules:
-                self.console.print("  {} {} {}".format(r["tool"], r["kind"], r["pattern"]))
+                # prefix 规则对 run_command 不覆盖 shell 拼接，列表里顺带说明，
+                # 否则用户会奇怪「明明有 git status 规则，为什么拼接命令还问」
+                note = ""
+                if r["kind"] == "prefix" and r["tool"] == "run_command":
+                    note = "[dim]（带 ; | & > 等拼接的命令不会命中）[/]"
+                self.console.print(
+                    "  {} {} {}{}".format(r["tool"], r["kind"], r["pattern"], note)
+                )
         elif cmd == "/skills":
             self._cmd_skills()
         elif cmd == "/skill":
@@ -494,8 +540,9 @@ def _start_backend(args):
     from ..server import create_app
 
     cfg = load_config()
-    # 局域网访问（设置 · 局域网访问 开启）：监听全部网卡，凭令牌访问；默认只听本机
-    host = "0.0.0.0" if cfg.server.lan else "127.0.0.1"
+    # 局域网访问 / 远程访问（Tailscale）开启时监听全部网卡，凭令牌访问；默认只听本机。
+    # 仅远程访问模式下，非 Tailscale 网段的来源会在 HTTP 守卫处被拒绝。
+    host = "0.0.0.0" if (cfg.server.lan or cfg.server.tailscale) else "127.0.0.1"
     if getattr(args, "port", 0):
         port = args.port
     else:
@@ -511,12 +558,20 @@ def _start_backend(args):
     threading.Thread(target=server.run, daemon=True).start()
     if not _wait_port(port):
         raise SystemExit("服务启动失败")
-    url = f"http://{host}:{port}/" if cfg.server.lan else f"http://127.0.0.1:{port}/"
+    # 桌面窗口/浏览器兜底一律加载本机回环地址：0.0.0.0 只是绑定地址不是可访问地址，
+    # 且守卫对回环永远免令牌，本机界面不受局域网/远程访问开关影响
+    url = f"http://127.0.0.1:{port}/"
     console.print(f"[bold cyan]SkySheep[/] 服务已启动: {url}")
     if cfg.server.lan:
         console.print(
             "[yellow]局域网访问已开启：其他设备请用 "
-            f"http://<本机IP>:{port}/?token=你的令牌 访问（令牌见 设置 · 局域网访问）[/]"
+            f"http://<本机IP>:{port}/?token=你的令牌 访问（令牌见 设置 · 手机控制）[/]"
+        )
+    if cfg.server.tailscale:
+        console.print(
+            "[yellow]远程访问已开启（Tailscale）：手机登录同一 Tailscale 账号后，"
+            f"在任意网络用 http://<电脑的Tailscale地址>:{port}/?token=你的令牌 访问"
+            "（地址与二维码见 设置 · 手机控制）[/]"
         )
     return server, url
 
@@ -644,6 +699,7 @@ async def run_headless(
     output: str = "text",
     max_iterations: int = 0,
     provider_factory=None,
+    trust_project: bool = False,
 ) -> dict:
     """非交互跑一轮任务：完整工具链 + 无人值守门控（只读放行，预授权名单放行，
     其余自动拒绝），消息落库可审计。返回结构化结果；失败抛 SystemExit(2)。"""
@@ -677,9 +733,15 @@ async def run_headless(
         )
         await gate.load_project_rules()
 
+        # workspace trust：无人值守场景没有界面可问，只能用显式参数或已有信任记录
+        trusted = WorkspaceTrust(skysheep_home(), working_dir).is_trusted()
+        if trust_project and not trusted:
+            WorkspaceTrust(skysheep_home(), working_dir).grant()
+            trusted = True
+
         skills = SkillLoader(
             global_dir=skysheep_home() / "skills",
-            project_dir=working_dir / ".skysheep" / "skills",
+            project_dir=(working_dir / ".skysheep" / "skills") if trusted else None,
             state_path=working_dir / ".skysheep" / "skills.json",
             scope_path=skysheep_home() / "skills-scope.json",
             project_root=working_dir,
@@ -688,7 +750,7 @@ async def run_headless(
 
         mcp_configs = load_mcp_configs(
             skysheep_home() / "mcp.json",
-            working_dir / ".skysheep" / "mcp.json",
+            (working_dir / ".skysheep" / "mcp.json") if trusted else None,
         )
         mcp = MCPManager(mcp_configs)
         mcp_tools = await mcp.connect_all()
@@ -790,6 +852,7 @@ def _run_cmd(args) -> None:
             allow_tools=[t for t in (args.allow_tool or "").split(",") if t.strip()],
             output=args.output,
             max_iterations=args.max_iterations,
+            trust_project=bool(getattr(args, "trust_project", False)),
         ))
     except SystemExit as e:
         if e.code and not isinstance(e.code, int):
@@ -841,6 +904,11 @@ def main(argv: list[str] | None = None) -> None:
                        help="text=只打印最终回答；json=输出完整结构化结果")
     p_run.add_argument("--max-iterations", type=int, default=0,
                        help="最大工具调用轮数（缺省用 config.toml 的 max_iterations）")
+    p_run.add_argument(
+        "--trust-project", action="store_true",
+        help="信任该项目自带的 .skysheep/ 配置（启用其 mcp.json 与项目级技能）；"
+             "无人值守场景没有界面可确认，故默认不启用，需显式指定",
+    )
 
     p_cfg = sub.add_parser("config", help="config operations")
     p_cfg.add_argument("action", choices=["init", "path"], help="init: create template; path: show path")

@@ -109,13 +109,17 @@ def test_arg_text_and_rules():
     assert wt.arg_text({"action": "activate", "title": "记事本"}) == "activate 记事本"
     for tool, inp, prefix in [
         (mt, {"action": "click", "x": 10, "y": 20}, "click"),
-        (kt, {"keys": "ctrl+s"}, "hotkey"),
-        (kt, {"text": "你好"}, "type"),
         (wt, {"action": "activate", "title": "记事本"}, "activate"),
     ]:
         rule = PermissionGate.rule_for(tool, inp)
         assert rule.kind == "prefix"
         assert rule.pattern == prefix
+    # 键盘例外：type / hotkey 的内容就是对焦点窗口的任意操作，按动作放行等于放行任意输入，
+    # 所以只固化当次内容（exact），而不是发一条 prefix="type" 的规则
+    for inp in ({"keys": "ctrl+s"}, {"text": "你好"}):
+        rule = PermissionGate.rule_for(kt, inp)
+        assert rule.kind == "exact"
+        assert rule.pattern == kt.arg_text(inp)
 
 
 async def test_dangerous_tools_need_confirmation():
@@ -137,6 +141,19 @@ async def test_whitelisted_action_passes_others_still_ask():
     gate.add_session_rule(PermissionGate.rule_for(mt, {"action": "click", "x": 1, "y": 2}))
     assert await gate.authorize(mt, {"action": "click", "x": 9, "y": 9}) is None
     assert await gate.authorize(mt, {"action": "scroll", "amount": 3}) is not None
+
+
+async def test_keyboard_rule_is_exact_only():
+    """键盘不按动作放行：批准一次 ctrl+s 不等于放行任意按键/任意文本输入。"""
+    gate = PermissionGate()
+    kt = KeyboardTool()
+    gate.add_session_rule(PermissionGate.rule_for(kt, {"keys": "ctrl+s"}))
+    assert await gate.authorize(kt, {"keys": "ctrl+s"}) is None
+    assert await gate.authorize(kt, {"keys": "ctrl+a"}) is not None
+    assert await gate.authorize(kt, {"text": "whoami"}) is not None
+    # 确认请求上带一句解释，用户不会误以为白名单坏了
+    p = await gate.authorize(kt, {"text": "whoami"})
+    assert "键盘" in p.note
 
 
 # ---- screenshot（monkeypatch 抓屏，不真截） ----

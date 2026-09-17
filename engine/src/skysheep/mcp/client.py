@@ -99,7 +99,13 @@ class MCPServerConfig(BaseModel):
 
 
 def load_mcp_configs(global_path: Path | None, project_path: Path | None) -> dict[str, MCPServerConfig]:
-    """合并全局与项目 MCP 配置；项目级同名服务器覆盖全局。"""
+    """合并全局与项目 MCP 配置；项目级同名服务器覆盖全局。
+
+    注意 ``project_path``：项目级配置是随仓库分发的数据，会在启动阶段直接
+    ``subprocess`` 拉起命令，必须先经过 workspace trust（见 security/trust.py）。
+    未获信任时调用方应传 ``None`` 跳过它，而不是靠本函数自己判断——信任状态
+    需要用户交互（确认弹窗），不适合藏在一个纯读配置的函数里。
+    """
     merged: dict[str, MCPServerConfig] = {}
     for path in (global_path, project_path):
         if not path or not path.exists():
@@ -137,13 +143,48 @@ def _extract_text(result: CallToolResult) -> str:
     return "\n".join(parts)
 
 
+# MCP 工具的 description 会原样拼进模型可见的工具列表（系统提示词层）。协议本身
+# 不限制长度与内容，而服务器（包括打开项目就自动连接的项目级服务器）可以在这里
+# 夹带 prompt injection payload——过长描述会挤占上下文、也更容易藏指令。这里做
+# 长度截断与换行归一，属于协议层的通用缓解，不针对某个具体服务器。
+MAX_MCP_DESCRIPTION_CHARS = 1000
+
+
+def _sanitize_description(text: str) -> str:
+    """工具描述的展示清理：限长 + 压掉多余空白行。
+
+    只做形状约束（长度、空白），不尝试识别「恶意指令」——那种判断不适合放在按
+    长度/格式的过滤里，会既漏又误伤；真正的边界是 connection 的可信来源（见
+    workspace trust）。截断会附一句提示，便于用户看出描述不全。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "(no description)"
+    # 连续空行压成一个，避免用大量空行把注入内容推到看不见的位置
+    lines = [ln.rstrip() for ln in raw.splitlines()]
+    out: list[str] = []
+    blanks = 0
+    for ln in lines:
+        if not ln:
+            blanks += 1
+            if blanks > 1:
+                continue
+        else:
+            blanks = 0
+        out.append(ln)
+    text_out = "\n".join(out).strip()
+    if len(text_out) > MAX_MCP_DESCRIPTION_CHARS:
+        text_out = text_out[:MAX_MCP_DESCRIPTION_CHARS] + " …（描述过长已截断）"
+    return text_out
+
+
 class MCPTool(Tool):
     """一个 MCP 服务器工具在 SkySheep 工具系统中的包装。"""
 
     def __init__(self, server_name: str, tool_name: str, description: str,
                  input_schema: dict, session: ClientSession, readonly: bool) -> None:
         self.name = f"mcp__{server_name}__{tool_name}"
-        self.description = description or "(no description)"
+        self.description = _sanitize_description(description)
         self.safety = Safety.READONLY if readonly else Safety.WRITE
         self.args_model = _permissive_model(self.name)
         self._raw_name = tool_name

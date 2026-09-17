@@ -1,7 +1,9 @@
 /* ============================================================
- * SkySheep 桌面前端 —— 「纸墨」主题
- * 设计语言源自《带节奏》Demo：深纸底 × 硬墨描边 × 铅字压印投影，
- * 知乎蓝为唯一交互色；小圆角防塑料感；网点只垫在最外层。
+ * SkySheep 桌面前端 —— 主题系统
+ * 默认「纸墨」：设计语言源自《带节奏》Demo——纸面底 × 硬墨描边 × 铅字压印投影；
+ * 另有青瓷 / 秋柿（浅色）与夜墨 / 黛夜 / 松烟（深色），见文件尾部的 [data-theme=…] 段。
+ * 六套共用同一组变量槽位；--blue 是全局交互色（名字是历史遗留，各主题给它不同主色）。
+ * 主题由 data-theme="主题id" 打在 <html> 上切换，跟随系统时浅色落纸墨、深色落夜墨。
  * ============================================================ */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -19,7 +21,7 @@
   --line: #d8cdb0;
   --line2: #c0b394;
   --ink-line: #1d1a16;       /* 硬墨描边（主题标志质感） */
-  /* —— 色 —— */
+  /* —— 色（--blue 是全局交互色，各主题给它不同的主色） —— */
   --blue: #1257c4;
   --blue-deep: #0e429b;
   --blue-weak: rgba(18, 87, 196, .10);
@@ -28,6 +30,7 @@
   --up: #c2261d;
   --down: #0f6b3a;
   --ai: #4f35a8;
+  --on-accent: #f4ecd8;      /* 交互色（主按钮/选中态）上的文字色，随主题换 */
   /* —— 圆角 / 阴影（铅字压印，非弥散阴影） —— */
   --r-xs: 2px; --r-sm: 4px; --r-md: 6px; --r-lg: 8px;
   --shadow-sm: 2px 2px 0 rgba(29, 26, 22, .13);
@@ -54,7 +57,7 @@
   /* —— 界面缩放：整个页面内容（字体随内容）按百分比缩放；
      默认 90% 略小于标准大小，侧栏底部 −/+ 调整，偏好存后端 ui.json —— */
   --ui-zoom: .9;
-  /* —— 主题：body 整体底（网点 + 纸张渐变），暗色主题整体换掉 —— */
+  /* —— 主题：body 整体底（网点 + 纸张渐变），其余主题在文件尾部整体换掉 —— */
   --body-bg:
     radial-gradient(circle at 1px 1px, rgba(29, 26, 22, .055) 1px, transparent 0) 0 0 / 7px 7px,
     linear-gradient(168deg, #efe6cf 0%, var(--bg) 52%, #ddd2b6 100%);
@@ -65,7 +68,7 @@ html, body { height: 100%; overflow: hidden; } /* 页面本身不滚动：滚动
 html { background: var(--bg); }
 body {
   font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-  /* 桌面 = 深纸 + 半调网点；暗色（夜墨）主题见文件尾部的 [data-theme="dark"] 段 */
+  /* 桌面 = 深纸 + 半调网点；其余主题见文件尾部的 [data-theme=…] 段 */
   background: var(--body-bg);
   background-attachment: fixed;
   color: var(--text); font-size: 14px;
@@ -116,7 +119,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 
 /* ---------- 通用组件：盖章按钮 ---------- */
 .btn-primary {
-  background: var(--blue); color: var(--paper-raised);
+  background: var(--blue); color: var(--on-accent);
   border: 2px solid var(--ink-line); border-radius: var(--r-sm);
   padding: 9px 18px; font-size: 14px; font-weight: 700; letter-spacing: 2px;
   box-shadow: var(--shadow-sm);
@@ -251,6 +254,9 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 }
 #cfg-banner[hidden] { display: none; }
 #cfg-banner-text { flex: 1; }
+#cfg-banner-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+#cfg-banner-actions[hidden] { display: none; }
+#cfg-banner-actions .btn-ghost { padding: 3px 10px; font-size: 12px; white-space: nowrap; }
 .banner-close { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 14px; }
 .banner-close:hover { color: var(--text); }
 
@@ -512,6 +518,14 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 }
 .perm-head { margin-bottom: 8px; font-size: 14px; }
 .perm-head b { color: var(--gold); }
+/* 确认弹窗里的额外说明（如「为什么这条命令没命中白名单前缀」）：与正文区分，
+   不能抢过待确认命令本身的注意力。 */
+.perm-note { margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--dim); }
+/* 「总是允许」将写入的规则范围：点按钮前把放行边界说清楚 */
+.perm-rule {
+  margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--gold);
+  font-family: var(--font-mono); word-break: break-all;
+}
 #perm-args {
   max-height: 170px; overflow: auto;
   background: var(--paper-raised); border: 1.5px solid var(--line2);
@@ -746,14 +760,19 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .toggle-row.adv-toggle { justify-content: flex-start; margin-top: 10px; }
 .adv-toggle-desc { margin: 4px 0 0 24px; line-height: 1.7; }
 
-/* 右面板「项目记忆」：编辑区占满余下空间，底部一行状态（文件路径 / 保存结果） */
+/* 右面板「项目记忆」：编辑区占满余下空间，底部一行状态（文件路径 / 保存结果）。
+   底色与同面板的其它标签页保持一致——就铺在面板纸色上，不要另起一张「抬升纸面」，
+   否则整块编辑区像贴了另一张纸（工具条/状态行也是这个底色）。
+   分隔线由 .rp-toolbar 的 border-bottom 提供，编辑区不再自带 border-top，避免双线。 */
 .rp-memory-text {
   flex: 1; min-height: 0; width: 100%; resize: none;
   padding: 9px 11px; font: inherit; font-size: 12.5px; line-height: 1.7;
-  color: var(--text); background: var(--paper-raised);
-  border: none; border-top: 1.5px solid var(--line2); outline: none;
+  color: var(--text); background: transparent;
+  border: none; outline: none;
 }
-.rp-memory-text:focus { background: var(--card); }
+/* 焦点提示：outline 已关，改用内描一圈交互蓝（与 .form-grid textarea:focus 同款提示） */
+.rp-memory-text:focus { box-shadow: inset 0 0 0 1px var(--blue); }
+.rp-memory-text::placeholder { color: var(--dim); }
 .rp-memory-status {
   padding: 5px 10px; min-height: 24px; font-size: 11.5px; color: var(--dim);
   border-top: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -797,11 +816,20 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   flex-shrink: 0; height: 46%; display: flex; flex-direction: column;
   border-top: 2px solid var(--ink-line); background: var(--paper-sunken);
 }
+/* 编辑态加高：改文档需要空间，只读预览维持原高度 */
+.files-preview.expanded { height: 68%; }
 .files-preview pre {
   flex: 1; overflow: auto; margin: 0; padding: 8px 12px;
   font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
   white-space: pre; color: var(--text);
 }
+.files-preview textarea {
+  flex: 1; resize: none; width: 100%; border: none; outline: none;
+  background: var(--paper-sunken); color: var(--text);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  padding: 8px 12px; white-space: pre; overflow: auto;
+}
+.files-preview textarea[readonly] { color: var(--text2); }
 .snippets-list li {
   display: flex; align-items: center; gap: 8px;
   white-space: normal;
@@ -1029,6 +1057,9 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .model-menu .mm-item .mm-prov.no-key { color: var(--gold); border-color: var(--gold); }
+/* 页签（默认 / 自定义）：复用侧栏搜索范围的分段控件（seg-row seg-mini），只收窄内边距适配菜单 */
+.model-menu .mm-seg { margin: 2px 2px 6px; }
+.model-menu .mm-seg button { padding: 4px 4px; }
 .model-menu .mm-manage {
   margin-top: 3px; padding: 7px 10px; font-size: 12.5px;
   color: var(--text2); border-bottom: none;
@@ -1547,12 +1578,78 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   color: var(--reg); font-size: 11.5px; padding: 2px 8px; cursor: pointer;
 }
 .rules-list .rule-del:hover { border-color: var(--reg); background: rgba(143, 29, 29, .08); }
+.rules-list .rule-origin { color: var(--dim); font-style: normal; }
+.rules-list .rule-age { flex-shrink: 0; color: var(--dim); font-size: 11px; white-space: nowrap; }
+.dot.warn { background: var(--gold); }
+#rules-summary { margin: 2px 0 8px; }
+#rules-summary.risk { color: var(--gold); }
 
-/* 会话库备份列表（设置 · 关于） */
-#backup-list li { display: flex; align-items: center; gap: 10px; cursor: default; }
+/* 白名单：手动添加表单 */
+.rule-add-form {
+  margin: 4px 0 10px; padding: 10px 12px;
+  background: var(--paper-sunken); border: 1.5px dashed var(--line2);
+  border-radius: var(--r-md);
+}
+.rule-add-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.rule-add-row label { width: 64px; flex-shrink: 0; color: var(--text2); font-size: 12.5px; }
+.rule-add-row input, .rule-add-row select {
+  flex: 1; min-width: 0; background: var(--paper-raised); color: var(--text);
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
+  padding: 6px 8px; font-size: 12.5px; font-family: inherit;
+}
+.rule-add-row input:disabled { opacity: .55; }
+.rule-warn { margin: 2px 0 8px; color: var(--gold); font-size: 12px; line-height: 1.6; }
+.rule-warn.danger { color: var(--reg); font-weight: 700; }
+.rule-add-ack { display: flex; align-items: center; gap: 6px; margin: 2px 0 8px; font-size: 12.5px; color: var(--reg); }
+.rule-add-ack input { width: auto; }
+.rule-add-ops { display: flex; gap: 8px; }
+
+/* 白名单：规则测试器 */
+.rule-check { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.rule-check-cap { color: var(--text2); font-size: 12.5px; flex-shrink: 0; }
+.rule-check input {
+  background: var(--paper-raised); color: var(--text);
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
+  padding: 6px 8px; font-size: 12.5px; font-family: inherit;
+}
+#rule-check-tool { width: 160px; }
+#rule-check-text { flex: 1; min-width: 140px; }
+.rule-check-result { margin-top: 6px; font-size: 12.5px; line-height: 1.6; }
+.rule-check-result.ok { color: var(--down); }
+.rule-check-result.warn { color: var(--gold); }
+
+/* 白名单：状态行里的撤销按钮、导入 JSON 输入区 */
+.card-status .rule-undo { margin-left: 10px; }
+.rule-import-text {
+  width: 100%; margin-top: 6px; min-height: 110px; resize: vertical;
+  background: var(--paper-raised); color: var(--text);
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
+  padding: 8px; font-size: 12px; font-family: var(--font-mono);
+}
+
+/* 会话库备份列表（设置 · 关于）
+   备份最多 20 份，一行一个「恢复到此版本」按钮能把整页撑得很长：
+   默认只列「当前数据 + 最近几份」，其余由列表末尾的按钮展开 */
+#backup-list li {
+  display: flex; align-items: center; gap: 8px; cursor: default;
+  padding: 2px 8px; font-size: 12.5px;
+}
 #backup-list li.cur { background: var(--blue-weak); border-radius: var(--r-xs); }
-#backup-list .item-name { font-family: var(--font-mono); font-size: 12px; }
+#backup-list .item-name { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
 #backup-list .spacer { flex: 1; }
+/* 恢复按钮是行内小动作，比常规 btn-ghost 矮一档，不再占满行高 */
+#backup-list .btn-ghost { padding: 2px 9px; font-size: 12px; font-weight: 600; }
+/* 「恢复前」安全副本（恢复动作自动留下的那一份）标注出来，免得和启动备份混淆 */
+#backup-list .backup-tag {
+  flex-shrink: 0; font-size: 11px; padding: 0 5px; border-radius: var(--r-xs);
+  border: 1px solid var(--line2); color: var(--dim);
+}
+/* 展开 / 收起：跨整行的虚线按钮，读起来像列表的续行而不是一个操作 */
+#backup-list .backup-more { padding: 0; }
+#backup-list .backup-more .btn-ghost {
+  width: 100%; border-style: dashed; color: var(--dim); font-weight: 600;
+}
+#backup-list .backup-more .btn-ghost:hover { color: var(--blue); border-color: var(--blue); }
 
 /* 帮助弹窗：快速上手 / 快捷键 / 常见问题 */
 .help-body { display: flex; flex-direction: column; gap: 14px; max-height: 62vh; overflow-y: auto; }
@@ -2148,11 +2245,11 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 /* 设置页里的开关行沿用 .toggle-row，无需额外样式 */
 
 /* ============================================================
- * 深色主题「夜墨」：data-theme="dark" 打在 <html> 上
+ * 深色主题「夜墨」（id: night）：data-theme="night" 打在 <html> 上
  * 思路：把纸/墨互换——墨色作底、纸色作字，交互蓝提亮保证对比度；
- * 阴影从「压印」改为纯黑投影。跟随系统由 JS 切 data-theme。
+ * 阴影从「压印」改为纯黑投影。跟随系统时深色默认落到这套。
  * ============================================================ */
-[data-theme="dark"] {
+[data-theme="night"] {
   color-scheme: dark;
   /* —— 纸（暗色下是"底"） —— */
   --bg: #171410;
@@ -2176,6 +2273,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   --up: #e26255;
   --down: #46b276;
   --ai: #a48cf0;
+  --on-accent: #f4ecd8;
   /* —— 阴影：压印感 → 黑色投影 —— */
   --shadow-sm: 2px 2px 0 rgba(0, 0, 0, .45);
   --shadow-md: 3px 3px 0 rgba(0, 0, 0, .5);
@@ -2196,8 +2294,203 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   --hl-add-bg: rgba(70, 178, 118, .16);
   --hl-del-bg: rgba(226, 98, 85, .14);
 }
-[data-theme="dark"] .btn-primary { color: #f4ecd8; }
-[data-theme="dark"] ::selection { background: rgba(91, 147, 238, .35); }
+[data-theme="night"] ::selection { background: rgba(91, 147, 238, .35); }
+
+/* ============================================================
+ * 其余主题：与纸墨/夜墨同一套变量槽位，只换配色。
+ * 浅色：青瓷 celadon（龙泉青釉）、秋柿 kaki（柿染暖橙）；
+ * 深色：黛夜 indigo（靛蓝夜空）、松烟 pine（松烟墨绿）。
+ * 新增主题五处同步：这里加 [data-theme="id"] 段 + index.html 首帧兜底底色
+ * 与设置页卡片 + app.js THEMES 表 + backend.py THEME_PREFS 白名单。
+ * ============================================================ */
+
+/* —— 青瓷：龙泉青瓷的釉青——淡青灰瓷底，黛绿墨线，交互色是釉青本身 —— */
+[data-theme="celadon"] {
+  color-scheme: light;
+  /* —— 瓷 —— */
+  --bg: #dce4da;
+  --card: #e9efe4;
+  --paper-raised: #f2f6ee;
+  --paper-sunken: #dfe7dc;
+  --paper-inset: #d1dccc;
+  /* —— 墨（黛绿） —— */
+  --text: #1c221d;
+  --text2: #46504a;
+  --dim: #6b756c;
+  --line: #c6d2c2;
+  --line2: #a9b8a5;
+  --ink-line: #1c221d;
+  /* —— 色 —— */
+  --blue: #0e7a68;
+  --blue-deep: #0a5f52;
+  --blue-weak: rgba(14, 122, 104, .10);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #4f35a8;
+  --on-accent: #f2f6ee;
+  --shadow-sm: 2px 2px 0 rgba(28, 34, 29, .13);
+  --shadow-md: 3px 3px 0 rgba(28, 34, 29, .17);
+  --shadow-lg: 5px 5px 0 rgba(28, 34, 29, .22), 0 12px 32px rgba(28, 34, 29, .16);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(28, 34, 29, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #e5ebe1 0%, var(--bg) 52%, #cfd9cb 100%);
+  /* —— 代码高亮：瓷底上的釉彩（keyword 用砖红与釉青互衬） —— */
+  --hl-comment: #7f897f;
+  --hl-keyword: #a03428;
+  --hl-string: #116680;
+  --hl-number: #8a6410;
+  --hl-title: #0e7a68;
+  --hl-attr: #4f35a8;
+  --hl-type: #8a6410;
+  --hl-variable: #46504a;
+  --hl-meta: #6b756c;
+  --hl-add-bg: rgba(17, 102, 128, .12);
+  --hl-del-bg: rgba(160, 52, 40, .10);
+}
+[data-theme="celadon"] ::selection { background: rgba(14, 122, 104, .18); }
+
+/* —— 秋柿：柿染的暖橙——烤米纸底，咖色墨线，交互色是熟柿橙 —— */
+[data-theme="kaki"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #ead9bf;
+  --card: #f6e9d2;
+  --paper-raised: #fdf3dd;
+  --paper-sunken: #eddcc0;
+  --paper-inset: #e2ceab;
+  /* —— 墨（咖褐） —— */
+  --text: #2b1d12;
+  --text2: #57432e;
+  --dim: #7d6650;
+  --line: #dcc8a5;
+  --line2: #c3ac85;
+  --ink-line: #2b1d12;
+  /* —— 色 —— */
+  --blue: #b45309;
+  --blue-deep: #8f4006;
+  --blue-weak: rgba(180, 83, 9, .11);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #5b3fa8;
+  --on-accent: #fdf3dd;
+  --shadow-sm: 2px 2px 0 rgba(43, 29, 18, .13);
+  --shadow-md: 3px 3px 0 rgba(43, 29, 18, .17);
+  --shadow-lg: 5px 5px 0 rgba(43, 29, 18, .22), 0 12px 32px rgba(43, 29, 18, .16);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(43, 29, 18, .055) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #f3e3c9 0%, var(--bg) 52%, #ddc7a2 100%);
+  /* —— 代码高亮：暖纸上的柿彩 —— */
+  --hl-comment: #93805c;
+  --hl-keyword: #8f1d1d;
+  --hl-string: #0f6b3a;
+  --hl-number: #8a6410;
+  --hl-title: #b45309;
+  --hl-attr: #5b3fa8;
+  --hl-type: #8a6410;
+  --hl-variable: #57432e;
+  --hl-meta: #7d6650;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+}
+[data-theme="kaki"] ::selection { background: rgba(180, 83, 9, .16); }
+
+/* —— 黛夜：靛蓝夜空——冷靛夜底，月白文字，交互色是提亮的鸢尾蓝 —— */
+[data-theme="indigo"] {
+  color-scheme: dark;
+  /* —— 底 —— */
+  --bg: #12161f;
+  --card: #1a1f2b;
+  --paper-raised: #232a39;
+  --paper-sunken: #161b25;
+  --paper-inset: #2c3446;
+  /* —— 字（月白） —— */
+  --text: #e3e8f2;
+  --text2: #b7c1d5;
+  --dim: #828da3;
+  --line: #2b3345;
+  --line2: #414d66;
+  --ink-line: #0a0d13;
+  /* —— 色 —— */
+  --blue: #7fa3f2;
+  --blue-deep: #5f86e0;
+  --blue-weak: rgba(127, 163, 242, .16);
+  --gold: #d4af5c;
+  --reg: #e26255;
+  --up: #e26255;
+  --down: #46b276;
+  --ai: #a48cf0;
+  --on-accent: #10141d;      /* 亮鸢尾蓝上压深字，对比才够 */
+  --shadow-sm: 2px 2px 0 rgba(0, 0, 0, .45);
+  --shadow-md: 3px 3px 0 rgba(0, 0, 0, .5);
+  --shadow-lg: 5px 5px 0 rgba(0, 0, 0, .55), 0 12px 32px rgba(0, 0, 0, .5);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(227, 232, 242, .045) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #1a2130 0%, var(--bg) 52%, #0c0f16 100%);
+  /* —— 代码高亮黛夜色板 —— */
+  --hl-comment: #828da3;
+  --hl-keyword: #e26255;
+  --hl-string: #46b276;
+  --hl-number: #d4af5c;
+  --hl-title: #7fa3f2;
+  --hl-attr: #a48cf0;
+  --hl-type: #d4af5c;
+  --hl-variable: #b7c1d5;
+  --hl-meta: #828da3;
+  --hl-add-bg: rgba(70, 178, 118, .16);
+  --hl-del-bg: rgba(226, 98, 85, .14);
+}
+[data-theme="indigo"] ::selection { background: rgba(127, 163, 242, .30); }
+
+/* —— 松烟：松烟墨的墨绿——墨绿夜底，暖白文字，交互色是提亮的青瓷/翠色 —— */
+[data-theme="pine"] {
+  color-scheme: dark;
+  /* —— 底 —— */
+  --bg: #101613;
+  --card: #18201b;
+  --paper-raised: #212b24;
+  --paper-sunken: #131a16;
+  --paper-inset: #2a362d;
+  /* —— 字（暖白） —— */
+  --text: #e8ede6;
+  --text2: #bec9bf;
+  --dim: #87968a;
+  --line: #26332a;
+  --line2: #3c4c40;
+  --ink-line: #080d0a;
+  /* —— 色（跌绿压暗一档，别跟交互翠撞色） —— */
+  --blue: #52c79d;
+  --blue-deep: #35a87f;
+  --blue-weak: rgba(82, 199, 157, .14);
+  --gold: #d4af5c;
+  --reg: #e26255;
+  --up: #e26255;
+  --down: #4c9e63;
+  --ai: #a48cf0;
+  --on-accent: #0c1310;      /* 亮翠上压深字 */
+  --shadow-sm: 2px 2px 0 rgba(0, 0, 0, .45);
+  --shadow-md: 3px 3px 0 rgba(0, 0, 0, .5);
+  --shadow-lg: 5px 5px 0 rgba(0, 0, 0, .55), 0 12px 32px rgba(0, 0, 0, .5);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(232, 237, 230, .045) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #19221c 0%, var(--bg) 52%, #0a0f0c 100%);
+  /* —— 代码高亮松烟色板 —— */
+  --hl-comment: #87968a;
+  --hl-keyword: #e26255;
+  --hl-string: #5ecda2;
+  --hl-number: #d4af5c;
+  --hl-title: #52c79d;
+  --hl-attr: #a48cf0;
+  --hl-type: #d4af5c;
+  --hl-variable: #bec9bf;
+  --hl-meta: #87968a;
+  --hl-add-bg: rgba(94, 205, 162, .14);
+  --hl-del-bg: rgba(226, 98, 85, .14);
+}
+[data-theme="pine"] ::selection { background: rgba(82, 199, 157, .26); }
 
 /* ---------- Mermaid 图表：滚动容器 + 主题适配 ---------- */
 .md .mermaid, .mermaid-box {
@@ -2208,7 +2501,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .md .mermaid svg { max-width: 100%; height: auto; }
 .md .mermaid .error-text, .mermaid-box .mermaid-error { color: var(--reg); font-size: 12px; }
 
-/* ---------- 设置页：主题分段选择 ---------- */
+/* ---------- 分段选择（会话搜索范围、圆桌成员等沿用） ---------- */
 .seg-row {
   display: inline-flex; border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
   overflow: hidden; box-shadow: var(--shadow-sm);
@@ -2220,10 +2513,29 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 }
 .seg-row button:last-child { border-right: none; }
 .seg-row button:hover { background: var(--blue-weak); }
-.seg-row button.active { background: var(--blue); color: #f4ecd8; }
+.seg-row button.active { background: var(--blue); color: var(--on-accent); }
 /* 侧栏里的迷你分段控件（会话搜索范围：本项目 / 全部项目） */
 .seg-mini { display: flex; width: 100%; margin: 4px 0 2px; box-shadow: none; }
 .seg-mini button { flex: 1; padding: 3px 4px; font-size: 11.5px; font-weight: 600; }
+
+/* ---------- 设置页：主题选择（跟随系统 + 六套配色卡片） ---------- */
+.theme-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 2px; }
+.theme-card {
+  width: 132px; padding: 8px; text-align: left;
+  background: var(--paper-raised); border: 1.5px solid var(--line2);
+  border-radius: var(--r-md); box-shadow: var(--shadow-sm);
+  transition: border-color var(--dur-fast), transform var(--dur-fast), box-shadow var(--dur-fast);
+}
+.theme-card:hover { border-color: var(--blue); transform: translateY(-1px); }
+.theme-card.active { border-color: var(--blue); box-shadow: 0 0 0 1.5px var(--blue), var(--shadow-sm); }
+/* 配色小样：纸面 / 交互色 / 文字色三段，颜色写在 index.html 的内联样式里（与主题一一对应） */
+.theme-swatch {
+  display: flex; height: 36px; margin-bottom: 7px;
+  border: 1px solid var(--ink-line); border-radius: var(--r-xs); overflow: hidden;
+}
+.theme-swatch i { flex: 1; }
+.theme-card b { display: block; font-size: 13px; color: var(--text); }
+.theme-card small { display: block; font-size: 11px; color: var(--dim); margin-top: 1px; }
 
 /* ---------- 对话内查找条（Ctrl+F） ---------- */
 .find-bar {
@@ -2241,7 +2553,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .find-bar #find-count { white-space: nowrap; }
 .find-bar .rp-mini { min-width: 26px; height: 26px; padding: 0 6px; }
 #chat mark.find-hit { background: var(--gold); color: var(--card); border-radius: 2px; }
-#chat mark.find-hit.cur { background: var(--blue); color: #f4ecd8; }
+#chat mark.find-hit.cur { background: var(--blue); color: var(--on-accent); }
 
 /* ---------- 设置页：全局记忆编辑 ---------- */
 .memory-text {

@@ -90,13 +90,16 @@ class RoundtableConfig(BaseModel):
 class WebSearchConfig(BaseModel):
     """联网搜索（web_search 工具）的服务商配置。
 
-    provider = auto | bocha | tavily | zhipu；auto 按顺序尝试：
+    provider = auto | bocha | tavily | zhipu | custom；auto 按顺序尝试：
     智谱（复用模型服务的 Zhipu Key，零配置）→ 博查（BOCHA_API_KEY）→ Tavily。
+    custom 需自填 base_url 指向自建搜索服务（SearXNG 或任意 REST 接口），
+    key 可留空（SearXNG 默认无需鉴权）。
     """
 
     provider: str = "auto"
     api_key: str = ""
     env_key: str = ""
+    base_url: str = ""
 
 
 class ImageGenConfig(BaseModel):
@@ -115,13 +118,16 @@ class ImageGenConfig(BaseModel):
 
 
 class ServerConfig(BaseModel):
-    """本地服务绑定与局域网访问。
+    """本地服务绑定、局域网与远程（Tailscale）访问。
 
     lan=True 时服务绑定 0.0.0.0，手机/局域网设备凭 token 访问；
+    tailscale=True 时同样绑定 0.0.0.0，但 HTTP 层只放行本机与 Tailscale
+    网段（100.64.0.0/10 及其 IPv6 ULA），手机登录同一 tailnet 即可跨网络访问；
     token 为空时在首次启用时自动生成。默认关闭（只听 127.0.0.1）。
     """
 
     lan: bool = False
+    tailscale: bool = False
     token: str = ""
 
 
@@ -766,8 +772,15 @@ def resolve_websearch(cfg: SkySheepConfig) -> dict | None:
     显式 provider：Key 依次取 配置里的 api_key → env_key → 默认环境变量
     （<PROVIDER>_API_KEY）；zhipu 再回落到模型服务里已配置的 Zhipu Key。
     auto：智谱（复用 Zhipu Key，零配置）→ 博查 → Tavily。
+    custom：只认自填的 base_url，Key 可留空（自建 SearXNG 默认无需鉴权）；
+    custom 不参与 auto 档，因为只有用户自己知道自建服务的地址。
     """
     ws = cfg.websearch
+    if ws.provider == "custom":
+        if not ws.base_url.strip():
+            return None
+        key = ws.api_key or (os.environ.get(ws.env_key) if ws.env_key else "")
+        return {"provider": "custom", "api_key": key, "base_url": ws.base_url.strip()}
     order = _WEBSEARCH_AUTO_ORDER if ws.provider == "auto" else (ws.provider,)
     if ws.provider != "auto" and ws.provider not in _WEBSEARCH_AUTO_ORDER:
         return None

@@ -261,6 +261,9 @@ class Agent:
                 pending = await self.gate.authorize(tool, tu.input)
                 if pending is not None:
                     self._pending[pending.request_id] = pending
+                    # 预告「总是允许」将写入的规则：与落库共用同一个对象，
+                    # 确认弹窗显示的范围就是之后实际生效的范围
+                    always_rule = pending.always_rule or self.gate.rule_for(tool, tu.input)
                     yield PermissionRequest(
                         request_id=pending.request_id,
                         tool_name=tu.name,
@@ -268,13 +271,16 @@ class Agent:
                         safety=pending.safety.value,
                         detail=pending.detail,
                         diff=pending.diff,
+                        note=pending.note,
+                        rule_kind=always_rule.kind,
+                        rule_pattern=always_rule.pattern,
                     )
                     decision = await pending.wait()
                     self._pending.pop(pending.request_id, None)
                     yield PermissionResolved(request_id=pending.request_id, decision=decision)
 
                     if decision == Decision.ALLOW_ALWAYS:
-                        await self.gate.persist_rule(self.gate.rule_for(tool, tu.input))
+                        await self.gate.persist_rule(always_rule)
                     if decision == Decision.DENY:
                         self.history.append(
                             Message.tool_result(tu.id, "User denied this operation.", is_error=True)

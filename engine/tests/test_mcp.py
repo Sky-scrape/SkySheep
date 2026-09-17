@@ -262,3 +262,34 @@ def test_mcp_installed_names(tmp_path, monkeypatch):
     backend = ServerBackend(working_dir=tmp_path)
     backend._reload_mcp_configs()  # 正常启动里由 setup() 做；这里手动触发
     assert backend.mcp_installed_names() == ["fetch"]
+
+
+# ---- 工具描述的形状约束：协议不限制长度/内容，这里做通用缓解 ----
+
+
+def test_long_mcp_description_is_truncated():
+    """超长描述被截断并附提示，避免挤占上下文、也避免藏进长串指令。"""
+    from skysheep.mcp.client import MAX_MCP_DESCRIPTION_CHARS
+
+    tool = MCPTool(
+        server_name="s", tool_name="t", description="x" * (MAX_MCP_DESCRIPTION_CHARS + 500),
+        input_schema={"type": "object"}, session=None, readonly=False,
+    )
+    assert len(tool.description) <= MAX_MCP_DESCRIPTION_CHARS + 20
+    assert "已截断" in tool.description
+
+
+def test_mcp_description_blank_lines_are_collapsed():
+    """大量空行会被压掉：否则可把注入内容推到看不见的位置。"""
+    tool = MCPTool(
+        server_name="s", tool_name="t",
+        description="normal\n" + "\n" * 50 + "hidden instruction",
+        input_schema={"type": "object"}, session=None, readonly=False,
+    )
+    assert "\n\n\n" not in tool.description
+    assert "normal" in tool.description and "hidden instruction" in tool.description
+
+
+def test_empty_mcp_description_has_placeholder():
+    tool = MCPTool("s", "t", "", {"type": "object"}, None, False)
+    assert tool.description == "(no description)"

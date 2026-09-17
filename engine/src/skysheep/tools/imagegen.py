@@ -46,6 +46,7 @@ class GenerateImageTool(Tool):
         "用户让你画图、生成插图/海报/封面时使用；生成的是新图片文件，不会改动其他文件。"
     )
     safety = Safety.WRITE
+    write_path_arg = True  # 路径缺省时落在工作目录内 images/
     args_model = GenerateImageArgs
     last_diff = ""
 

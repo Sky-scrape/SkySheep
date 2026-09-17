@@ -94,9 +94,21 @@ class Renderer:
         elif k == "permission_request":
             self._flush_live()
             args = _one_line(ev.input)
+            body = args if len(args) <= 2000 else args[:2000] + " ..."
+            if ev.note:
+                body += "\n" + ev.note
+            if ev.rule_kind:
+                kind_cn = {
+                    "always": "整个工具",
+                    "prefix": "前缀",
+                    "exact": "仅此一条",
+                    "glob": "通配",
+                }.get(ev.rule_kind, ev.rule_kind)
+                pat = ev.rule_pattern or "（全部）"
+                body += f"\n「总是允许」将添加规则：{ev.tool_name} · {kind_cn} {pat}"
             self.console.print(
                 Panel(
-                    Text(args if len(args) <= 2000 else args[:2000] + " ...", style="yellow"),
+                    Text(body, style="yellow"),
                     title="🔒 需要确认: " + ev.tool_name + " [" + ev.safety + "]",
                     border_style="yellow",
                 )

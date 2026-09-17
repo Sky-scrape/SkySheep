@@ -202,8 +202,15 @@ class RunCommandTool(Tool):
     args_model = RunCommandArgs
 
     def arg_text(self, input_dict: dict) -> str:
-        # 白名单按命令前缀匹配，语义文本就是命令本身
-        return str(input_dict.get("command", ""))
+        # 白名单按命令前缀匹配，语义文本就是命令本身。
+        # action=read/kill/list 这类没有命令的调用如果返回空串，会得到一条 pattern 为空的
+        # 规则——空串能和任何空命令文本相等，等于把整个工具放行了。改为带上动作名，
+        # 粒度就落在「某个动作」上（与鼠标/键盘的动作级白名单同一档）。
+        command = str(input_dict.get("command", ""))
+        if command.strip():
+            return command
+        action = str(input_dict.get("action", "") or "run")
+        return f"action={action}"
 
     async def run(self, args: RunCommandArgs, ctx: ToolContext) -> str:
         if args.action == "read":

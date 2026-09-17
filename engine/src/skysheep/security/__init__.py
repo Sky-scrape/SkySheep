@@ -1,5 +1,6 @@
 from ..tools.base import Safety
 from .gate import Decision, PendingPermission, PermissionGate, WhitelistRule
+from .trust import WorkspaceTrust
 
 __all__ = [
     "Decision",
@@ -7,4 +8,5 @@ __all__ = [
     "PermissionGate",
     "WhitelistRule",
     "Safety",
+    "WorkspaceTrust",
 ]

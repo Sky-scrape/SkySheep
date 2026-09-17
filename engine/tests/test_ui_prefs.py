@@ -103,15 +103,18 @@ def _html_tag(html: str) -> str:
 
 
 def test_index_injects_first_paint_from_ui_json(home):
-    """ui.json 的主题/缩放/栏宽写进 <html>，新页面第一帧就是夜墨 + 用户缩放与栏宽。"""
+    """ui.json 的主题/缩放/栏宽写进 <html>，新页面第一帧就是夜墨 + 用户缩放与栏宽。
+
+    theme 存的是旧版两档值 dark：读取时映射到默认深色主题「夜墨」（id: night）。
+    """
     call_ui(home, "ui.save", {"prefs": {
         "theme": "dark", "ui_scale": 80, "sidebar_w": 320,
         "composer_h": 120, "right_w": 400,
     }})
     with make_client(home, []) as client:
         tag = _html_tag(client.get("/").text)
-    assert 'data-theme-mode="dark"' in tag
-    assert 'data-theme="dark"' in tag
+    assert 'data-theme-mode="night"' in tag
+    assert 'data-theme="night"' in tag
     assert "--ui-zoom:0.8" in tag
     assert "--sb-w:320px" in tag
     assert "--cp-h:120px" in tag
@@ -127,12 +130,38 @@ def test_index_first_paint_defaults_when_prefs_absent(home):
     assert "--ui-zoom" not in tag
 
 
-def test_index_light_theme_not_marked_dark(home):
+def test_index_legacy_light_maps_to_paper(home):
+    """旧版两档值 light 同理映射到默认浅色主题「纸墨」（id: paper）。"""
     call_ui(home, "ui.save", {"prefs": {"theme": "light"}})
     with make_client(home, []) as client:
         tag = _html_tag(client.get("/").text)
-    assert 'data-theme-mode="light"' in tag
-    assert "data-theme=" not in tag
+    assert 'data-theme-mode="paper"' in tag
+    assert 'data-theme="paper"' in tag
+
+
+def test_index_explicit_theme_id_injects_data_theme(home):
+    """新版主题 id：选了哪套就首帧注入哪套，不再交由系统深浅判定。"""
+    call_ui(home, "ui.save", {"prefs": {"theme": "celadon"}})
+    with make_client(home, []) as client:
+        tag = _html_tag(client.get("/").text)
+    assert 'data-theme-mode="celadon"' in tag
+    assert 'data-theme="celadon"' in tag
+
+    call_ui(home, "ui.save", {"prefs": {"theme": "pine"}})
+    with make_client(home, []) as client:
+        tag = _html_tag(client.get("/").text)
+    assert 'data-theme="pine"' in tag
+
+
+def test_ui_prefs_theme_whitelist(home):
+    """theme 键值域：六套主题 id + auto + 旧版 light/dark；未知值丢弃、null 恢复默认。"""
+    for val in ("auto", "light", "dark", "paper", "celadon", "kaki", "night", "indigo", "pine"):
+        frame = call_ui(home, "ui.save", {"prefs": {"theme": val}})
+        assert frame["result"]["prefs"] == {"theme": val}
+    frame = call_ui(home, "ui.save", {"prefs": {"theme": "solarized"}})
+    assert frame["result"]["prefs"] == {}
+    frame = call_ui(home, "ui.save", {"prefs": {"theme": None}})
+    assert frame["result"]["prefs"] == {}
 
 
 def test_index_tolerates_corrupt_ui_json(home):

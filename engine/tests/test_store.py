@@ -56,6 +56,23 @@ async def test_rules(store):
     assert await store.list_rules(p.id) == []
 
 
+async def test_rules_order_and_clear(store):
+    p = await store.get_or_create_project("/tmp/demo-clear")
+    await store.add_rule(p.id, "run_command", "prefix", "git status")
+    await store.add_rule(p.id, "write_file", "always")
+    await store.add_rule(p.id, "write_file", "glob", "docs/*.md")
+    rules = await store.list_rules(p.id)
+    # 新规则在前（id 倒序），created_at 随字段返回
+    assert [r["pattern"] for r in rules] == ["docs/*.md", "", "git status"]
+    assert all(isinstance(r["created_at"], float) for r in rules)
+    # 按 kind 清空：只删 glob
+    assert await store.clear_rules(p.id, kind="glob") == 1
+    assert len(await store.list_rules(p.id)) == 2
+    # 全部清空
+    assert await store.clear_rules(p.id) == 2
+    assert await store.list_rules(p.id) == []
+
+
 async def test_quick_chat_session_without_project(store):
     s = await store.create_session(None, title="quick")
     got = await store.get_session(s.id)

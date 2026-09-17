@@ -84,6 +84,9 @@ class PermissionRequest(Event):
     safety: str = "write"
     detail: str = ""  # 人类可读的操作说明
     diff: str = ""    # 写入类工具的改前→改后预览（write_file / edit_file，可能为空）
+    note: str = ""    # 额外说明：例如白名单前缀为何没命中的命令（shell 拼接）
+    rule_kind: str = ""     # 选「总是允许」将写入的规则类型（always/prefix/exact/glob）
+    rule_pattern: str = ""  # 对应参数；空 = 整个工具（与 gate.rule_for 的产物一致）
 
 
 class PermissionResolved(Event):

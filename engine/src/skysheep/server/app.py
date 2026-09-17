@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -23,7 +24,19 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..config import resolve_api_key
-from .backend import ServerBackend
+from .backend import THEME_PREFS, ServerBackend, client_origin
+
+logger = logging.getLogger("skysheep.security")
+
+
+def _client_is_local(client) -> bool:
+    """WebSocket 客户端是否来自本机。
+
+    用于把「自动允许写入」这类降低防护的开关锁在本机：局域网 / 远程访问模式下
+    服务绑定 0.0.0.0，任何拿到令牌的设备都能连 WS，这类开关不能由远端切换。
+    来源分类（回环 / tailnet 网段 / 其它）统一走 client_origin，与 HTTP 守卫一致。
+    """
+    return client_origin(client) == "local"
 
 
 def _static_dir() -> Path:
@@ -58,6 +71,9 @@ def _no_store_static(app) -> None:
 
 STATIC_DIR = _static_dir()
 
+# 具体主题 id（去掉 auto 与旧版 light/dark 两档）：<html data-theme="…"> 只打这些值
+THEME_IDS = tuple(v for v in THEME_PREFS if v not in ("auto", "light", "dark"))
+
 
 def _first_paint_attrs(prefs: dict) -> str:
     """把 ui.json 的首帧外观偏好翻译成 <html> 上的属性 / CSS 变量。
@@ -68,10 +84,17 @@ def _first_paint_attrs(prefs: dict) -> str:
     第一帧渲染出来就是用户上次的样子。
     """
     parts = []
-    mode = prefs.get("theme") if prefs.get("theme") in ("light", "dark") else "auto"
-    parts.append(f'data-theme-mode="{mode}"')
-    if mode == "dark":
-        parts.append('data-theme="dark"')
+    theme = prefs.get("theme")
+    if theme == "light":  # 旧版两档值：分别映射到默认浅色 / 深色主题
+        theme = "paper"
+    elif theme == "dark":
+        theme = "night"
+    if theme in THEME_IDS:
+        parts.append(f'data-theme-mode="{theme}"')
+        parts.append(f'data-theme="{theme}"')
+    else:
+        # auto（或缺省 / 非法值）：服务端不知道系统深浅，交给首帧脚本按系统判定
+        parts.append('data-theme-mode="auto"')
     style = []
     scale = prefs.get("ui_scale")
     if isinstance(scale, int) and not isinstance(scale, bool):
@@ -132,8 +155,9 @@ def create_app(
     app = FastAPI(title="SkySheep", lifespan=lifespan)
 
     # ---- 局域网访问令牌守卫（默认关闭 = token 为空，本地直连不设防） ----
-    # 开启后服务监听 0.0.0.0（cli/_start_backend 负责），任何请求都要带令牌：
+    # 开启后服务监听 0.0.0.0（cli/_start_backend 负责），远端请求都要带令牌：
     # ?token=…（首次，成功后写 cookie）/ cookie skysheep_token / 头 X-SkySheep-Token。
+    # 本机回环连接免令牌（桌面窗口自己不带令牌，不能被挡在门外）。
     FORBIDDEN_HTML = (
         '<!DOCTYPE html><html lang="zh-CN"><meta charset="utf-8">'
         "<title>SkySheep</title>"
@@ -141,13 +165,23 @@ def create_app(
         'display:flex;align-items:center;justify-content:center;height:100vh;margin:0">'
         "<div style='text-align:center'><h1>🐑 SkySheep</h1>"
         "<p>需要访问令牌：请在地址后加 <code>?token=你的令牌</code></p>"
-        "<p style='opacity:.6'>令牌在桌面端 设置 · 局域网访问 里查看</p></div></body></html>"
+        "<p style='opacity:.6'>令牌在桌面端 设置 · 手机控制 里查看</p></div></body></html>"
     )
 
     @app.middleware("http")
     async def _lan_token_guard(request, call_next):
-        token = backend.cfg.server.token if (
-            backend.cfg is not None and backend.cfg.server.lan
+        cfg = backend.cfg
+        lan = bool(cfg is not None and cfg.server.lan)
+        ts = bool(cfg is not None and cfg.server.tailscale)
+        origin = client_origin(request.client)
+        # 仅远程访问（Tailscale）模式：物理局域网等非 tailnet 来源直接拒绝，
+        # tailnet 设备必须验令牌
+        if ts and not lan and origin == "other":
+            return HTMLResponse(FORBIDDEN_HTML, status_code=403)
+        # 本机（回环）永远免令牌：守卫挡的是别的设备，不能把桌面自己关在门外
+        # （此前 lan=true 时本机也要令牌，桌面窗口会弹"需要访问令牌"——2026-09-18 修复）
+        token = cfg.server.token if (
+            cfg is not None and origin != "local" and (lan or (ts and origin == "tailscale"))
         ) else ""
         if not token:
             return await call_next(request)
@@ -210,7 +244,8 @@ def create_app(
 
     # ---- 方法分发 ----
 
-    async def dispatch(method: str, params: dict, emit) -> dict:
+    async def dispatch(method: str, params: dict, emit, local: bool = True) -> dict:
+        """local=False 表示请求来自局域网远端：降低防护的开关一律拒绝。"""
         if method == "boot":
             return await backend.snapshot()
         if method == "chat.send":
@@ -241,7 +276,12 @@ def create_app(
         if method == "permission.mode":
             return {"mode": backend.permission_mode()}
         if method == "permission.set_mode":
-            return await backend.set_permission_mode(str(params.get("mode", "confirm")))
+            mode = str(params.get("mode", "confirm"))
+            # 「自动允许写入」会放宽所有写入的确认：只能在本机界面上切换，
+            # 不允许被局域网客户端（或远程驱动的前端）打开
+            if mode == "accept_edits" and not local:
+                raise RuntimeError("「自动允许写入」只能在本机界面上切换")
+            return await backend.set_permission_mode(mode)
         if method == "stop":
             return {"cancelled": backend.cancel_run(
                 str(params["session_id"]) if params.get("session_id") else None
@@ -280,6 +320,8 @@ def create_app(
             return await backend.usage_stats(params)
         if method == "fs.read":
             return await backend.fs_read(params)
+        if method == "fs.write":
+            return await backend.fs_write(params)
         if method == "snippets.list":
             return {"snippets": await backend.store.list_snippets()}
         if method == "snippets.add":
@@ -308,8 +350,14 @@ def create_app(
         if method == "checkpoint.diff":
             return await backend.checkpoint_diff(str(params.get("id", "")))
         if method == "term.run":
+            # 终端面板的命令是用户手敲的（不进权限门，见 TerminalManager 注释），
+            # 所以它只在“用户就在这台机器面前”时成立。局域网模式下持有令牌的设备
+            # 也能连 WS，若允许它调用这里，令牌就等于 shell 访问权限。
+            if not local:
+                raise RuntimeError("终端面板只能在本机上使用")
             return await backend.term_run(str(params.get("command", "")), emit)
         if method == "term.stop":
+            # 停止是收紧动作，远端也放行（否则远程发起的命令停不下来）
             return backend.term_stop()
         if method == "chat.aux":
             text = str(params.get("text", ""))
@@ -389,8 +437,23 @@ def create_app(
             return await backend.save_instructions(str(params.get("text", "")))
         if method == "ui.get":
             return await backend.get_ui_prefs()
+        if method == "trust.status":
+            return await backend.trust_status()
+        if method == "trust.grant":
+            # 信任一个项目 = 允许执行它自带的本地命令，只能由本机用户在界面上确认
+            if not local:
+                raise RuntimeError("工作区信任只能在本机界面上确认")
+            return await backend.trust_grant()
+        if method == "trust.revoke":
+            # 收回信任是收紧防护，远调用也允许（避免被远程锁死在信任态）
+            return await backend.trust_revoke()
         if method == "ui.save":
-            return await backend.save_ui_prefs(params.get("prefs") or {})
+            prefs = dict(params.get("prefs") or {})
+            if not local and "accept_edits" in prefs:
+                # 远端不能间接打开自动写入档（permission.set_mode 已拦，这里再堵一次）
+                prefs.pop("accept_edits")
+                logger.warning("远程客户端尝试通过 ui.save 设置 accept_edits，已忽略")
+            return await backend.save_ui_prefs(prefs)
         if method == "app.notify":
             return await backend.notify(params)
         if method == "app.apply_theme":
@@ -441,6 +504,12 @@ def create_app(
             return await backend.lan_enable(params)
         if method == "lan.disable":
             return await backend.lan_disable()
+        if method == "remote.status":
+            return await backend.remote_status()
+        if method == "remote.enable":
+            return await backend.remote_enable(params)
+        if method == "remote.disable":
+            return await backend.remote_disable()
         if method == "subagent.get":
             return backend.subagents_detail()
         if method == "subagent.save":
@@ -565,6 +634,31 @@ def create_app(
             await backend.store.remove_rule(rule_id)
             await backend.gate.load_project_rules()
             return {"removed": rule_id}
+        if method == "whitelist.add":
+            # 添加规则 = 放行更多操作（降防护），只能在本机界面上操作；
+            # 与 permission.set_mode / trust.grant 的约束一致
+            if not local:
+                raise RuntimeError("白名单添加只能在本机界面上操作")
+            return await backend.add_whitelist_rule(
+                str(params.get("tool", "")),
+                str(params.get("kind", "")),
+                str(params.get("pattern", "")),
+            )
+        if method == "whitelist.clear":
+            # 清空是收紧动作，远端也放行（与 remove 一致）
+            return await backend.clear_whitelist_rules(str(params.get("kind", "")))
+        if method == "whitelist.check":
+            return backend.check_whitelist_rule(
+                str(params.get("tool", "")), str(params.get("text", ""))
+            )
+        if method == "whitelist.export":
+            return await backend.export_whitelist()
+        if method == "whitelist.import":
+            # 导入同样是添加规则：与本机约束一致
+            if not local:
+                raise RuntimeError("白名单导入只能在本机界面上操作")
+            rules = params.get("rules")
+            return await backend.import_whitelist(rules if isinstance(rules, list) else [])
         if method == "skills.toggle":
             return await backend.toggle_skill(
                 str(params.get("name", "")), bool(params.get("enabled", True))
@@ -631,9 +725,19 @@ def create_app(
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
-        # 局域网模式：WS 也要验令牌（query/cookie/头任一），不对就拒绝升级
-        token = backend.cfg.server.token if (
-            backend.cfg is not None and backend.cfg.server.lan
+        # 局域网 / 远程访问模式：WS 也要验令牌（query/cookie/头任一），不对就拒绝升级；
+        # 仅远程访问（Tailscale）模式时，非 tailnet 来源（物理局域网等）直接拒绝
+        cfg = backend.cfg
+        lan = bool(cfg is not None and cfg.server.lan)
+        ts = bool(cfg is not None and cfg.server.tailscale)
+        origin = client_origin(ws.client)
+        if ts and not lan and origin == "other":
+            await ws.accept()
+            await ws.close(code=4403)
+            return
+        # 本机（回环）永远免令牌，与 HTTP 守卫同一规则；tailnet 来源必须验令牌
+        token = cfg.server.token if (
+            cfg is not None and origin != "local" and (lan or (ts and origin == "tailscale"))
         ) else ""
         if token:
             supplied = (
@@ -648,6 +752,8 @@ def create_app(
                 return
         await ws.accept()
         lock = asyncio.Lock()
+        # 客户端来源决定部分方法是否可用（远端不允许切换降低防护的开关）
+        client_is_local = _client_is_local(ws.client)
 
         async def send(obj: dict) -> None:
             async with lock:
@@ -670,7 +776,7 @@ def create_app(
 
                 async def process(mid=mid, method=method, params=params):
                     try:
-                        result = await dispatch(method, params, emit)
+                        result = await dispatch(method, params, emit, local=client_is_local)
                         await send({"id": mid, "ok": True, "result": result})
                     except Exception as e:
                         await send({"id": mid, "ok": False, "error": str(e)})

@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import tomllib
 
+import pytest
 from fastapi.testclient import TestClient
 
-from skysheep.config import PRESETS, load_config, restore_provider_in_config
+from skysheep.config import (
+    PRESETS,
+    load_config,
+    restore_provider_in_config,
+    update_config_section,
+)
 from skysheep.messages import TextBlock, ToolUseBlock
 from skysheep.models.fake import FakeProvider
 from skysheep.server import create_app
@@ -718,6 +724,81 @@ def test_settings_whitelist_remove(home, monkeypatch):
         assert recv_until(ws, "w3")["result"]["rules"] == []
 
 
+def test_settings_whitelist_add_and_clear(home, monkeypatch):
+    monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        # 手动添加：合法 → 可见（created_at 随 list 返回；always 的 pattern 被规范化成空）
+        ws.send_json({"id": "a1", "method": "whitelist.add",
+                      "params": {"tool": "run_command", "kind": "prefix", "pattern": "git status"}})
+        r = recv_until(ws, "a1")
+        assert r["ok"] and len(r["result"]["rules"]) == 1
+        assert isinstance(r["result"]["rules"][0]["created_at"], float)
+
+        ws.send_json({"id": "a2", "method": "whitelist.add",
+                      "params": {"tool": "write_file", "kind": "always", "pattern": "x"}})
+        rules = recv_until(ws, "a2")["result"]["rules"]
+        assert next(x for x in rules if x["tool"] == "write_file")["pattern"] == ""
+
+        # 重复 / 非法 kind / 空 pattern：都被拒
+        for mid, params in [
+            ("a3", {"tool": "run_command", "kind": "prefix", "pattern": "git status"}),
+            ("a4", {"tool": "x", "kind": "bogus", "pattern": "y"}),
+            ("a5", {"tool": "write_file", "kind": "exact", "pattern": ""}),
+        ]:
+            ws.send_json({"id": mid, "method": "whitelist.add", "params": params})
+            assert not recv_until(ws, mid)["ok"]
+
+        # 清空（收紧动作，本机/远端都允许）
+        ws.send_json({"id": "c1", "method": "whitelist.clear", "params": {}})
+        assert recv_until(ws, "c1")["result"]["removed"] == 2
+        ws.send_json({"id": "l1", "method": "whitelist.list"})
+        assert recv_until(ws, "l1")["result"]["rules"] == []
+
+
+def test_settings_whitelist_check_export_import(home, monkeypatch):
+    monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))
+    import asyncio
+
+    from skysheep.config import db_path
+    from skysheep.session.store import SessionStore
+
+    async def seed():
+        store = await SessionStore(db_path()).connect()
+        try:
+            project = await store.get_or_create_project(str(home / "proj"))
+            await store.add_rule(project.id, "run_command", "prefix", "git status")
+        finally:
+            await store.close()
+
+    asyncio.run(seed())
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        # 测试器：命中 / 被拼接拦下
+        ws.send_json({"id": "k1", "method": "whitelist.check",
+                      "params": {"tool": "run_command", "text": "git status --short"}})
+        r = recv_until(ws, "k1")["result"]
+        assert r["allowed"] and r["hit"]["pattern"] == "git status"
+
+        ws.send_json({"id": "k2", "method": "whitelist.check",
+                      "params": {"tool": "run_command", "text": "git status; rm -rf /"}})
+        r = recv_until(ws, "k2")["result"]
+        assert not r["allowed"] and "拼接" in r["reason"]
+
+        # 导出
+        ws.send_json({"id": "e1", "method": "whitelist.export"})
+        data = recv_until(ws, "e1")["result"]
+        assert data["version"] == 1 and len(data["rules"]) == 1
+
+        # 导入（合并）：重复跳过、不合法跳过、新规则加入
+        ws.send_json({"id": "i1", "method": "whitelist.import", "params": {"rules": [
+            data["rules"][0],
+            {"tool": "write_file", "kind": "glob", "pattern": "docs/*.md"},
+            {"tool": "", "kind": "always", "pattern": ""},
+        ]}})
+        r = recv_until(ws, "i1")["result"]
+        assert r["added"] == 1 and r["skipped"] == 2 and len(r["rules"]) == 2
+
+
 def test_project_instructions_roundtrip(home):
     """侧栏「项目记忆」：空项目返回 None 路径；保存后落盘 AGENTS.md 并可读回。"""
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
@@ -1306,3 +1387,157 @@ def test_builtin_subagent_override(home):
         f2 = req_ok(ws, "e3", "subagent.save_builtin",
                     {"agent_type": "explore", "provider": "ghost"})
         assert not f2["ok"] and "未知的模型服务" in f2["error"]
+
+
+# ---- 局域网令牌强度：lan_enable 允许自定义令牌，这是降低整道防护强度的入口 ----
+
+
+def test_lan_enable_accepts_auto_generated_token(home):
+    """不传令牌时由系统生成随机令牌（secrets.token_urlsafe(16)），无需强度校验。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "l1", "method": "lan.enable", "params": {}})
+        res = recv_until(ws, "l1")["result"]
+    assert res["enabled"] is True
+    assert len(res["token"]) >= 12
+
+
+def test_lan_enable_rejects_weak_custom_token(home):
+    """过短的自定义令牌直接拒绝：扫码分享等于把服务开给同网段所有人。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "l1", "method": "lan.enable", "params": {"token": "123456"}})
+        frame = recv_until(ws, "l1")
+        assert frame["ok"] is False and "令牌" in frame["error"]
+        # 档位不应被改动
+        ws.send_json({"id": "l2", "method": "lan.status"})
+        assert recv_until(ws, "l2")["result"]["enabled"] is False
+
+
+def test_lan_enable_rejects_low_diversity_token(home):
+    """字符重复度过高的令牌也拒绝（"aaaaaaaaaaaa" 没有实际强度）。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "l1", "method": "lan.enable",
+                      "params": {"token": "aaaaaaaaaaaaaa"}})
+        frame = recv_until(ws, "l1")
+        assert frame["ok"] is False and "重复" in frame["error"]
+
+
+def test_lan_enable_accepts_reasonable_token(home):
+    """正常强度的自定义令牌放行（不强制复杂度，要能方便扫码输入）。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "l1", "method": "lan.enable",
+                      "params": {"token": "skysheep-lan-2026"}})
+        assert recv_until(ws, "l1")["ok"] is True
+
+
+# ---- 远程访问（Tailscale）：与局域网访问共用令牌与强度要求 ----
+
+
+def test_remote_enable_disable_roundtrip(home, monkeypatch):
+    """开启：生成/沿用令牌并落盘 tailscale=true；关闭：只动 tailscale 位。
+
+    IP 枚举密封掉（开发机可能真装着 Tailscale），roundtrip 不依赖真实网卡。
+    """
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setattr(ServerBackend, "_hostname_ipv4s", classmethod(lambda cls: []))
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "r1", "method": "remote.status"})
+        r1 = recv_until(ws, "r1")["result"]
+        assert r1["enabled"] is False and r1["ips"] == []
+
+        ws.send_json({"id": "r2", "method": "remote.enable", "params": {}})
+        r2 = recv_until(ws, "r2")["result"]
+        assert r2["enabled"] is True and len(r2["token"]) >= 12
+        assert "重启" in r2["note"] and "Tailscale" in r2["note"]
+
+        # 关闭后令牌保留（局域网访问可能还在用同一把）
+        ws.send_json({"id": "r3", "method": "remote.disable"})
+        r3 = recv_until(ws, "r3")["result"]
+        assert r3["enabled"] is False and r3["token"] == r2["token"]
+
+    cfg = load_config()
+    assert cfg.server.tailscale is False and cfg.server.token == r2["token"]
+
+
+def test_remote_enable_shares_lan_token(home):
+    """先开局域网再开远程：同一把令牌，不另生成新的。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "l1", "method": "lan.enable", "params": {}})
+        lan = recv_until(ws, "l1")["result"]
+        ws.send_json({"id": "r1", "method": "remote.enable", "params": {}})
+        remote = recv_until(ws, "r1")["result"]
+    assert remote["token"] == lan["token"]
+
+
+def test_remote_enable_rejects_weak_custom_token(home):
+    """与局域网访问同一强度校验（同一把令牌，弱令牌同样开不得）。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "r1", "method": "remote.enable", "params": {"token": "123456"}})
+        frame = recv_until(ws, "r1")
+        assert frame["ok"] is False and "令牌" in frame["error"]
+        ws.send_json({"id": "r2", "method": "remote.status"})
+        assert recv_until(ws, "r2")["result"]["enabled"] is False
+
+
+def test_ws_tailscale_only_local_exempt(home):
+    """仅远程访问模式：本机 WS 不验令牌即可连上（tailnet 来源才验令牌）。"""
+    update_config_section("server", {"tailscale": True, "token": "tok-123"})
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "b1", "method": "boot"})
+        assert recv_until(ws, "b1")["ok"]
+
+
+def test_ws_tailscale_origin_requires_token(home, monkeypatch):
+    """tailnet 来源的 WS 无令牌：接受后以 4401 关闭（与局域网令牌缺失同一码）。"""
+    from starlette.websockets import WebSocketDisconnect
+
+    from skysheep.server import app as server_app
+
+    update_config_section("server", {"tailscale": True, "token": "tok-123"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "tailscale")
+    with make_client(home, []) as client:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+        assert exc_info.value.code == 4401
+
+
+def test_remote_status_lists_tailscale_ips(home, monkeypatch):
+    """Tailscale IP（100.64.0.0/10）只出现在远程状态里，物理局域网 IP 不混入。"""
+    import socket as socket_mod
+
+    fake_addrs = [
+        (socket_mod.AF_INET, None, None, "", ("192.168.1.10", 0)),
+        (socket_mod.AF_INET, None, None, "", ("100.101.1.20", 0)),
+    ]
+    monkeypatch.setattr(socket_mod, "gethostname", lambda: "stub-host")
+    monkeypatch.setattr(socket_mod, "getaddrinfo", lambda *a, **k: fake_addrs)
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "r1", "method": "remote.enable", "params": {}})
+        remote = recv_until(ws, "r1")["result"]
+        assert remote["ips"] == ["100.101.1.20"]
+
+        ws.send_json({"id": "r2", "method": "lan.status"})
+        lan = recv_until(ws, "r2")["result"]
+        assert lan["ips"] == ["192.168.1.10"]
+
+
+def test_client_origin_classification():
+    """HTTP 守卫与 WS 验签共用的来源分类：回环/tailnet 放行，其它来源拒绝。"""
+    from skysheep.server.backend import client_origin
+
+    assert client_origin(("127.0.0.1", 5000)) == "local"
+    assert client_origin(("::1", 5000)) == "local"
+    assert client_origin("localhost") == "local"
+    assert client_origin("testclient") == "local"  # TestClient 约定按本机对待
+    assert client_origin(("::ffff:127.0.0.1", 5000)) == "local"
+    assert client_origin(("100.101.1.20", 4000)) == "tailscale"
+    assert client_origin(("::ffff:100.101.1.20", 4000)) == "tailscale"
+    assert client_origin(("fd7a:115c:a1e0:abcd::1", 4000)) == "tailscale"
+    assert client_origin(("192.168.1.10", 4000)) == "other"
+    assert client_origin(("8.8.8.8", 4000)) == "other"
+    assert client_origin(("fe80::1%eth0", 4000)) == "other"
+    assert client_origin(None) == "other"
+    assert client_origin("") == "other"
+    assert client_origin("not-an-ip") == "other"

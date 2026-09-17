@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import zipfile
 from pathlib import Path
 
@@ -411,6 +412,34 @@ async def test_list_backups_and_restore(home, tmp_path):
     sessions = await s2.list_sessions(proj.id)
     assert any(x.title == "第一条" for x in sessions)
     await s2.close()
+
+
+async def test_backup_list_uses_backup_time_and_flags_safety(home, tmp_path):
+    """列表时间取文件名里的备份时刻，并标出「恢复前」安全副本。
+
+    备份是 shutil.copy2 复制的，会连源库的修改时间一起带过来：若按 mtime 显示，
+    20 份备份会显示成同一时刻（源库最后一次写入），列表看起来像一堆重复项。
+    """
+    from skysheep.session.store import SessionStore
+
+    db = tmp_path / "s.db"
+    db.write_bytes(b"x")  # 占位：list_backups 只 stat 它，不要求是真库
+    d = tmp_path / "backups"
+    d.mkdir()
+    same = 1_700_000_000  # 三份备份的 mtime 完全一样
+    for n in ("s-20260101-010000.db", "s-20260102-020000.db", "s-20260103-030000-恢复前.db"):
+        f = d / n
+        f.write_bytes(b"x")
+        os.utime(f, (same, same))
+
+    items = SessionStore(db).list_backups()
+    assert items[0]["current"] is True  # 当前数据排第一
+    hist = items[1:]
+    assert [b["stamp"] for b in hist] == [
+        "20260103-030000-恢复前", "20260102-020000", "20260101-010000",
+    ]  # 按备份时刻从新到旧，不是 mtime（全相等）
+    assert all(b["taken"] > same for b in hist)  # taken 解析自文件名
+    assert [b["safety"] for b in hist] == [True, False, False]
 
 
 async def test_restore_rejects_traversal(home, tmp_path):

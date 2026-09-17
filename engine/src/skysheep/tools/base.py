@@ -61,6 +61,10 @@ class Tool(abc.ABC):
     description: str = ""
     safety: Safety = Safety.READONLY
     args_model: type[BaseModel]
+    # 写入类工具且写目标就是 args 里的 path 字段时置 True：「自动允许写入」档
+    # 只能凭它判断目标是否落在工作目录内；凭不出来的工具（MCP 写工具、剪贴板等）
+    # 一律回退逐次确认——开关放行「写文件」不等于放行「任意写操作」。
+    write_path_arg: bool = False
 
     @abc.abstractmethod
     async def run(self, args: BaseModel, ctx: ToolContext) -> str:
@@ -135,6 +139,26 @@ class ToolRegistry:
 # ---- 通用工具函数 ----
 
 MAX_OUTPUT_CHARS = 30_000
+
+# 单次写入的内容上限（字符数）。读取端有各自的截断（read_file 的 MAX_FILE_CHARS
+# 等），写入端此前没有任何限制：模型（或被注入污染的上下文）可以一次写一个任意大的
+# 文件把磁盘写满。这里给一个远高于正常源码/文本文件的额度，超出直接报错而不是静默
+# 截断——截断会写出半个文件却报告成功，比拒绝更难排查。真要写更大的产物，应由
+# run_command 走命令的执行确认链路。
+MAX_WRITE_CHARS = 5_000_000
+
+
+def check_write_size(content: str, shown: str, previous_len: int = 0) -> None:
+    """单次写入内容过大直接报错（不截断），避免模型写爆磁盘。
+
+    ``previous_len`` 是改动前的长度（新建/覆盖时为 0）：已经超过上限的文件仍然允许
+    被改小，不因存量文件而挡住修复动作。
+    """
+    if len(content) > MAX_WRITE_CHARS and len(content) > previous_len:
+        raise ToolError(
+            f"写入内容过大（{len(content):,} 字符，上限 {MAX_WRITE_CHARS:,}）：{shown}\n"
+            "（需要生成更大的文件时，请分多次写入或用 run_command 执行生成命令）"
+        )
 
 
 def truncate_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:

@@ -118,8 +118,25 @@ class Session:
     summary: str = ""
 
 
+def parse_backup_stamp(stamp: str) -> float | None:
+    """把备份文件名里的时间戳（`%Y%m%d-%H%M%S`，后面可能跟「-恢复前」）解析成时刻。
+
+    必须按文件名解析、不能拿 mtime 当备份时间：备份是 `shutil.copy2` 复制出来的，
+    会连源库的修改时间一起带过来，于是 20 份备份的 mtime 全都一样（都是源库最后
+    一次写入的那一刻），列表看起来像一堆重复项。
+
+    解析不了（老文件、手改过名字）返回 None，调用方退回文件 mtime。
+    """
+    try:
+        return time.mktime(time.strptime(stamp[:15], "%Y%m%d-%H%M%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
 class SessionStore:
     BACKUP_KEEP = 20
+    # 恢复前自动留的安全副本后缀（列表里单独标记，方便用户认出「这是恢复动作留下的」）
+    SAFETY_TAG = "-恢复前"
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -157,7 +174,13 @@ class SessionStore:
         return self.path.parent / "backups"
 
     def list_backups(self) -> list[dict]:
-        """可用备份列表（新的在前）：时间、大小、路径。"""
+        """可用备份列表（新的在前）：备份时刻、大小、路径。
+
+        `taken` 是从文件名时间戳解析出的**备份时刻**，界面按它排序和显示。不要拿 `mtime`
+        当备份时间：备份用 `shutil.copy2` 复制，会连源库的修改时间一起带过来，于是所有备份
+        都显示成「源库最后一次写入」那一刻，列表看起来像一堆重复项。`safety=True` 的是恢复
+        动作自动留下的「恢复前」副本，界面上单独标注。
+        """
         d = self.backup_dir()
         if not d.is_dir():
             return []
@@ -173,7 +196,9 @@ class SessionStore:
                 "path": str(f),
                 "size": st.st_size,
                 "mtime": st.st_mtime,
+                "taken": parse_backup_stamp(stamp) or st.st_mtime,
                 "stamp": stamp,
+                "safety": stamp.endswith(self.SAFETY_TAG),
                 "current": False,
             })
         try:
@@ -183,12 +208,15 @@ class SessionStore:
                 "path": str(self.path),
                 "size": cur.st_size,
                 "mtime": cur.st_mtime,
+                "taken": cur.st_mtime,  # 当前库没有备份名字，只能用它自己的修改时间
                 "stamp": "当前",
+                "safety": False,
                 "current": True,
             })
         except OSError:
             pass
-        items.sort(key=lambda x: (not x["current"], -x["mtime"]))
+        # 当前数据永远排第一；其余按备份时刻（不是 mtime）由新到旧
+        items.sort(key=lambda x: (not x["current"], -x["taken"]))
         return items
 
     async def restore_backup(self, name: str) -> dict:
@@ -213,7 +241,7 @@ class SessionStore:
         safety = None
         if self.path.exists() and self.path.stat().st_size > 0:
             stamp = time.strftime("%Y%m%d-%H%M%S")
-            safety = d / f"{self.path.stem}-{stamp}-恢复前.db"
+            safety = d / f"{self.path.stem}-{stamp}{self.SAFETY_TAG}.db"
             try:
                 shutil.copy2(self.path, safety)
             except OSError:
@@ -636,15 +664,38 @@ class SessionStore:
 
     async def list_rules(self, project_id: int) -> list[dict]:
         assert self._db
+        # 新规则在前（id 倒序）：设置页白名单列表与最近一次「总是允许」的操作对得上
         cur = await self._db.execute(
-            "SELECT id, tool, kind, pattern FROM whitelist_rules WHERE project_id = ?",
+            "SELECT id, tool, kind, pattern, created_at FROM whitelist_rules"
+            " WHERE project_id = ? ORDER BY id DESC",
             (project_id,),
         )
         rows = await cur.fetchall()
         return [
-            {"id": r["id"], "tool": r["tool"], "kind": r["kind"], "pattern": r["pattern"]}
+            {
+                "id": r["id"],
+                "tool": r["tool"],
+                "kind": r["kind"],
+                "pattern": r["pattern"],
+                "created_at": r["created_at"],
+            }
             for r in rows
         ]
+
+    async def clear_rules(self, project_id: int, kind: str = "") -> int:
+        """清空项目的白名单规则（可按 kind 过滤），返回删除条数。"""
+        assert self._db
+        if kind:
+            cur = await self._db.execute(
+                "DELETE FROM whitelist_rules WHERE project_id = ? AND kind = ?",
+                (project_id, kind),
+            )
+        else:
+            cur = await self._db.execute(
+                "DELETE FROM whitelist_rules WHERE project_id = ?", (project_id,)
+            )
+        await self._db.commit()
+        return cur.rowcount or 0
 
     async def remove_rule(self, rule_id: int) -> None:  # pragma: no cover
         assert self._db

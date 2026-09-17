@@ -149,13 +149,36 @@ class SkillLoader:
         if name not in self._skills:
             return False
         self._skills[name].enabled = enabled
-        if self.state_path:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            disabled = sorted(n for n, s in self._skills.items() if not s.enabled)
-            self.state_path.write_text(
-                json.dumps({"disabled": disabled}, ensure_ascii=False), encoding="utf-8"
-            )
+        self._write_disabled()
         return True
+
+    def _write_disabled(self) -> None:
+        """把「当前项目停用名单」写回 skills.json（只记已发现且被停用的技能）。"""
+        if not self.state_path:
+            return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        disabled = sorted(n for n, s in self._skills.items() if not s.enabled)
+        self.state_path.write_text(
+            json.dumps({"disabled": disabled}, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def forget(self, name: str) -> None:
+        """抹掉一个技能留下来的一切状态记录（删除技能时调）。
+
+        停用名单在 skills.json、范围在 skills-scope.json，两者都以技能名为 key。
+        删除时不清理的话，同名技能重新安装后会莫名“装上了却是停用/任何项目都不用”
+        （用户看不到任何提示，很难自己想明白）——重装的技能应当从干净状态开始。
+        """
+        changed = False
+        if name in self._skills:
+            del self._skills[name]
+            changed = True
+        if name in self._scopes:
+            del self._scopes[name]
+            self._save_scopes()
+            changed = True
+        if changed:
+            self._write_disabled()
 
     # ---- 使用范围（只对全局技能有意义） ----
 

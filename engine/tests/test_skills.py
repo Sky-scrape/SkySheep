@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import zipfile
 
 import pytest
 
 from skysheep.skills import SCOPE_ALL, SCOPE_NONE, SCOPE_PROJECTS, SkillLoader
-from skysheep.skills.installer import SkillInstallError, install_from_zip, resolve_url
+from skysheep.skills.installer import (
+    SkillInstallError,
+    install_from_zip,
+    remove_skill,
+    resolve_url,
+)
 from skysheep.tools.skill import LoadSkillTool, ToolContext, ToolError
 
 
@@ -235,6 +241,118 @@ def test_resolve_url_rejects_bad_links():
         with pytest.raises(SkillInstallError) as ei:
             resolve_url(bad)
         assert why in str(ei.value), (bad, str(ei.value))
+
+
+def test_market_index_falls_back_to_direct_when_proxy_broken(monkeypatch):
+    """先试系统代理、失败再直连：代理挂了不该让整个广场降级成内置清单。
+
+    拉索引过去写死 trust_env=False（忽略系统代理），而国内直连
+    raw.githubusercontent.com 经常超时，表现就是「在线索引暂时拉取不到」。
+    """
+    import asyncio
+
+    from skysheep.skills import market as mk
+
+    calls: list[bool] = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"items": [{"name": "x", "description": "d", "url": "https://github.com/u/r"}]}
+
+    async def fake_get(url, timeout_s, trust_env):
+        calls.append(trust_env)
+        if trust_env:
+            raise RuntimeError("代理不可用")
+        return _Resp()
+
+    monkeypatch.setattr(mk, "_get_index", fake_get)
+    r = asyncio.run(mk.fetch_market_index())
+    assert calls == [True, False], "应当先试代理、失败再直连"
+    assert r["source"] == "remote" and r["items"][0]["name"] == "x"
+
+
+def test_market_index_prefers_proxy_when_available(monkeypatch):
+    """代理可用时一次就拿到，不做多余的直连尝试。"""
+    import asyncio
+
+    from skysheep.skills import market as mk
+
+    calls: list[bool] = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"items": [{"name": "y", "description": "d", "url": "https://github.com/u/r"}]}
+
+    async def fake_get(url, timeout_s, trust_env):
+        calls.append(trust_env)
+        return _Resp()
+
+    monkeypatch.setattr(mk, "_get_index", fake_get)
+    r = asyncio.run(mk.fetch_market_index())
+    assert calls == [True]
+    assert r["source"] == "remote" and r["items"][0]["name"] == "y"
+
+
+def test_market_index_falls_back_to_builtin_when_offline(monkeypatch):
+    """两条路都不通才降级内置清单，且带上可读提示（永不抛错）。"""
+    import asyncio
+
+    from skysheep.skills import market as mk
+
+    async def fake_get(url, timeout_s, trust_env):
+        raise RuntimeError("没网")
+
+    monkeypatch.setattr(mk, "_get_index", fake_get)
+    r = asyncio.run(mk.fetch_market_index())
+    assert r["source"] == "builtin" and r["items"]
+    assert "拉取不到" in r["note"]
+
+
+def test_delete_forgets_leftover_state(tmp_path):
+    """删除技能要抹掉它的遗留状态，否则重装后莫名“装上了却是停用/任何项目都不用”。
+
+    停用名单在 skills.json、范围在 skills-scope.json，两者都以技能名为 key；
+    用户在界面上只做了一个「删除」，看不到这两个文件里还留着东西。
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir(exist_ok=True)
+    scope_cfg = tmp_path / "skills-scope.json"
+    g = tmp_path / "global_skills"
+    (g / "docx").mkdir(parents=True)
+    (g / "docx" / "SKILL.md").write_text("---\nname: docx\ndescription: d\n---\nX\n", encoding="utf-8")
+
+    def make():
+        loader = SkillLoader(
+            global_dir=g,
+            project_dir=proj / ".skysheep" / "skills",
+            state_path=proj / ".skysheep" / "skills.json",
+            scope_path=scope_cfg,
+            project_root=proj,
+        )
+        loader.discover()
+        return loader
+
+    loader = make()
+    loader.set_enabled("docx", False)
+    loader.set_scope("docx", SCOPE_NONE)
+
+    # 删除：后端先删目录（remove_skill），再调 forget 抹状态
+    remove_skill("docx", [g])
+    loader.forget("docx")
+    loader.discover()
+    assert json.loads((proj / ".skysheep" / "skills.json").read_text(encoding="utf-8"))["disabled"] == []
+    assert json.loads(scope_cfg.read_text(encoding="utf-8"))["scopes"] == {}
+
+    # 重新安装 → 干净状态，直接可用
+    (g / "docx").mkdir(parents=True)
+    (g / "docx" / "SKILL.md").write_text("---\nname: docx\ndescription: d\n---\nX\n", encoding="utf-8")
+    fresh = make().get("docx")
+    assert fresh.enabled is True
+    assert make().applies("docx") is True
 
 
 def test_market_index_anthropics_links_are_current():

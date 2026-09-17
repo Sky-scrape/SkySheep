@@ -51,16 +51,31 @@ BUILTIN_INDEX: list[dict] = [
 ]
 
 
+async def _get_index(url: str, timeout_s: float, trust_env: bool) -> httpx.Response:
+    """取一次索引。trust_env 决定是否读系统代理（Windows 上来自注册表）。"""
+    async with httpx.AsyncClient(timeout=timeout_s, trust_env=trust_env) as client:
+        resp = await client.get(url, headers={"Accept": "application/json"})
+    if resp.status_code >= 400:
+        raise RuntimeError(f"HTTP {resp.status_code}")
+    return resp
+
+
 async def fetch_market_index(url: str = MARKET_URL, timeout_s: float = TIMEOUT_S) -> dict:
     """拉取技能广场索引；远程不可用时回退内置清单（永不抛错）。
+
+    代理策略：先走系统代理、失败再直连。国内直连 raw.githubusercontent.com 经常
+    超时（实测同一台机器时而 0.7s 成功、时而 6s 超时），而装了代理的机器
+    （如 127.0.0.1:7890）走代理反而 0.8s 就回来。这里不预设环境哪一种通——
+    先按系统配置试，不行再直连，两条都不行才回退内置清单。
+    注：技能下载（installer）走 urllib，本来就会读系统代理，两边保持一致。
 
     返回 {source: "remote"|"builtin", note: str, items: [{name,description,url,author}]}。
     """
     try:
-        async with httpx.AsyncClient(timeout=timeout_s, trust_env=False) as client:
-            resp = await client.get(url, headers={"Accept": "application/json"})
-        if resp.status_code >= 400:
-            raise RuntimeError(f"HTTP {resp.status_code}")
+        try:
+            resp = await _get_index(url, timeout_s, trust_env=True)
+        except Exception:  # noqa: BLE001 - 代理不可用/没配代理时改直连再试一次
+            resp = await _get_index(url, timeout_s, trust_env=False)
         data = resp.json()
         items = data.get("items") if isinstance(data, dict) else data
         cleaned: list[dict] = []

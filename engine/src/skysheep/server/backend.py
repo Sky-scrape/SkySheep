@@ -2067,6 +2067,9 @@ class ServerBackend:
             result = remove_skill(name, roots)
         except SkillInstallError as e:
             raise RuntimeError(str(e)) from e
+        # 顺手抹掉该技能的遗留状态（停用名单 / 使用范围）：不清理的话，
+        # 同名技能重新安装后会莫名“装上了却是停用”，用户很难自己定位。
+        self.skills.forget(name)
         self.skills.discover()
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())

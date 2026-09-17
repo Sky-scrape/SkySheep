@@ -5,314 +5,521 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SkySheep — 跑在你电脑上的 AI Agent 工作台</title>
 <meta name="description" content="SkySheep 是开源（MIT）的桌面 AI Agent 工作台：能读文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键回滚，数据不出本机。">
-<link rel="icon" id="favicon" type="image/png" href="docs/images/cloud-sheep-line.png">
+<meta property="og:title" content="SkySheep — 跑在你电脑上的 AI Agent 工作台">
+<meta property="og:description" content="开源桌面 AI Agent：敢让它动手，也随时能后悔。Windows · MIT · 数据不出本机。">
+<meta property="og:image" content="docs/images/right-panel.png">
+<link rel="icon" id="favicon" type="image/png" href="docs/images/cloud-sheep-3d.png">
 <script>
 /* 首帧前应用手动主题（localStorage 优先，否则跟随系统），避免加载闪色 */
 (function(){
-  function resolved(){
-    var t = document.documentElement.getAttribute("data-theme");
-    if (t === "dark" || t === "light") return t;
-    return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  }
   try {
     var t = localStorage.getItem("ss-theme");
     if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
-    /* favicon 线稿跟随主题：深色下用白线版，标签栏深色底上才可见 */
-    document.getElementById("favicon").href =
-      resolved() === "dark" ? "docs/images/cloud-sheep-line-white.png" : "docs/images/cloud-sheep-line.png";
   } catch (e) { /* 隐私模式等 localStorage 不可用：跟随系统 */ }
 })();
 </script>
 <style>
+/* ═══════════ 主题变量：白昼晴空 ═══════════ */
 :root{
   color-scheme: light;
-  --line-invert: 0; /* 云朵小羊线稿反色：浅色=墨线(0)，深色=白线(1) */
-  --paper:#E8DFC7;
-  --band:#EFE8D2;
-  --card:#F4EFDE;
-  --ink:#1D1A16;
-  --ink-2:#6B6250;
-  --line:rgba(29,26,22,.16);
-  --line-strong:rgba(29,26,22,.42);
-  --accent:#3B82F6;
-  --accent-soft:rgba(59,130,246,.14);
-  --nav:rgba(232,223,199,.88);
-  --code-bg:#211E19;
-  --code-ink:#E8DFC7;
-  --shot-border:rgba(29,26,22,.5);
-  --shadow:0 12px 32px rgba(29,26,22,.14);
-  --shadow-btn:0 6px 16px rgba(59,130,246,.32);
+  --sky-top:#A9D8F8;
+  --sky-mid:#D9EEFC;
+  --sky-bottom:#F4FAFF;
+  --cloud:#FFFFFF;
+  --cloud-dim:rgba(255,255,255,.85);
+  --card:#FFFFFF;
+  --ink:#12293F;
+  --ink-2:#4E6A87;
+  --line:rgba(18,41,63,.09);
+  --line-strong:rgba(18,41,63,.22);
+  --accent:#1593E4;
+  --accent-deep:#0B73C2;
+  --accent-soft:rgba(21,147,228,.12);
+  --nav:rgba(255,255,255,.7);
+  --code-bg:#0D2237;
+  --code-ink:#D8EEFB;
+  --shot-border:rgba(18,41,63,.14);
+  --shadow:0 24px 60px rgba(21,101,192,.16);
+  --shadow-soft:0 10px 30px rgba(21,101,192,.12);
+  --shadow-btn:0 10px 24px rgba(11,115,194,.35);
 }
-/* 手动深色：导航栏主题按钮写入 <html data-theme="dark">（变量与下方媒体查询块一致） */
+/* ═══════════ 主题变量：夜晚星空 ═══════════ */
 :root[data-theme="dark"]{
   color-scheme: dark;
-  --line-invert: 1;
-  --paper:#171512;
-  --band:#1C1915;
-  --card:#201D18;
-  --ink:#E8DFC7;
-  --ink-2:#A99F87;
-  --line:rgba(232,223,199,.14);
-  --line-strong:rgba(232,223,199,.34);
-  --accent:#5B96F8;
-  --accent-soft:rgba(91,150,248,.16);
-  --nav:rgba(23,21,18,.88);
-  --code-bg:#0F0E0C;
-  --code-ink:#E8DFC7;
-  --shot-border:rgba(232,223,199,.24);
-  --shadow:0 12px 32px rgba(0,0,0,.5);
-  --shadow-btn:0 6px 16px rgba(0,0,0,.4);
+  --sky-top:#030A16;
+  --sky-mid:#07172B;
+  --sky-bottom:#0B2138;
+  --cloud:#13293F;
+  --cloud-dim:rgba(19,41,63,.6);
+  --card:#0E2238;
+  --ink:#E3F0FA;
+  --ink-2:#8CA7C2;
+  --line:rgba(227,240,250,.1);
+  --line-strong:rgba(227,240,250,.26);
+  --accent:#5FB9F6;
+  --accent-deep:#3B9FEA;
+  --accent-soft:rgba(95,185,246,.15);
+  --nav:rgba(6,16,29,.68);
+  --code-bg:#030C17;
+  --code-ink:#C8E4F6;
+  --shot-border:rgba(227,240,250,.16);
+  --shadow:0 24px 60px rgba(0,0,0,.55);
+  --shadow-soft:0 10px 30px rgba(0,0,0,.4);
+  --shadow-btn:0 10px 24px rgba(0,0,0,.45);
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
     color-scheme: dark;
-    --line-invert: 1;
-    --paper:#171512;
-    --band:#1C1915;
-    --card:#201D18;
-    --ink:#E8DFC7;
-    --ink-2:#A99F87;
-    --line:rgba(232,223,199,.14);
-    --line-strong:rgba(232,223,199,.34);
-    --accent:#5B96F8;
-    --accent-soft:rgba(91,150,248,.16);
-    --nav:rgba(23,21,18,.88);
-    --code-bg:#0F0E0C;
-    --code-ink:#E8DFC7;
-    --shot-border:rgba(232,223,199,.24);
-    --shadow:0 12px 32px rgba(0,0,0,.5);
-    --shadow-btn:0 6px 16px rgba(0,0,0,.4);
+    --sky-top:#030A16;
+    --sky-mid:#07172B;
+    --sky-bottom:#0B2138;
+    --cloud:#13293F;
+    --cloud-dim:rgba(19,41,63,.6);
+    --card:#0E2238;
+    --ink:#E3F0FA;
+    --ink-2:#8CA7C2;
+    --line:rgba(227,240,250,.1);
+    --line-strong:rgba(227,240,250,.26);
+    --accent:#5FB9F6;
+    --accent-deep:#3B9FEA;
+    --accent-soft:rgba(95,185,246,.15);
+    --nav:rgba(6,16,29,.68);
+    --code-bg:#030C17;
+    --code-ink:#C8E4F6;
+    --shot-border:rgba(227,240,250,.16);
+    --shadow:0 24px 60px rgba(0,0,0,.55);
+    --shadow-soft:0 10px 30px rgba(0,0,0,.4);
+    --shadow-btn:0 10px 24px rgba(0,0,0,.45);
   }
 }
+
 *{box-sizing:border-box}
-html{scroll-behavior:smooth;scroll-padding-top:84px}
+html{scroll-behavior:smooth;scroll-padding-top:86px}
 body{
   margin:0;
-  background:var(--paper);
   color:var(--ink);
+  background:linear-gradient(180deg,var(--sky-top) 0%,var(--sky-mid) 34%,var(--sky-bottom) 72%) fixed;
   font-family:system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
   line-height:1.75;
   -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+  transition:color .3s;
 }
 ::selection{background:var(--accent-soft)}
 a{color:var(--accent)}
-.wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+.wrap{max-width:1120px;margin:0 auto;padding:0 22px;position:relative;z-index:1}
 h1,h2,h3{text-wrap:balance}
+img{max-width:100%}
 
-/* ── 顶部导航 ─────────────────────────── */
+/* ═══════════ 天空层：云朵 & 星星 ═══════════ */
+.sky-layer{
+  position:fixed;inset:0;z-index:0;
+  pointer-events:none;overflow:hidden;
+}
+.cloud{
+  position:absolute;
+  width:150px;height:48px;
+  background:var(--cloud);
+  border-radius:999px;
+  opacity:.92;
+  animation:drift linear infinite;
+  transition:background .3s;
+}
+.cloud::before,.cloud::after{
+  content:"";position:absolute;background:inherit;border-radius:50%;
+}
+.cloud::before{width:64px;height:64px;top:-30px;left:26px}
+.cloud::after{width:44px;height:44px;top:-20px;right:24px}
+.cloud.c-soft{opacity:.55;filter:blur(1px)}
+@keyframes drift{
+  from{transform:translateX(-30vw) scale(var(--s,1))}
+  to{transform:translateX(125vw) scale(var(--s,1))}
+}
+/* 星星：仅夜间可见（JS 生成 + body.night 控制） */
+.stars{position:absolute;inset:0;display:none;opacity:0;transition:opacity .6s}
+body.night .stars{display:block;opacity:1}
+.star{
+  position:absolute;border-radius:50%;
+  background:#EAF4FF;
+  animation:twinkle var(--tw,3s) ease-in-out infinite;
+}
+@keyframes twinkle{
+  0%,100%{opacity:.15;transform:scale(.8)}
+  50%{opacity:.95;transform:scale(1.15)}
+}
+.moon{
+  position:absolute;top:9%;right:8%;
+  width:76px;height:76px;border-radius:50%;
+  background:radial-gradient(circle at 34% 34%,#FDF7E3,#F3E3AC 72%);
+  box-shadow:0 0 60px 18px rgba(253,240,190,.28);
+  display:none;
+}
+body.night .moon{display:block}
+
+/* ═══════════ 顶部导航 ═══════════ */
 .nav{
   position:sticky;top:0;z-index:50;
   background:var(--nav);
-  backdrop-filter:blur(10px);
-  -webkit-backdrop-filter:blur(10px);
+  backdrop-filter:blur(14px) saturate(1.4);
+  -webkit-backdrop-filter:blur(14px) saturate(1.4);
   border-bottom:1px solid var(--line);
 }
-.nav-inner{display:flex;align-items:center;gap:14px;height:60px}
+.nav-inner{display:flex;align-items:center;gap:14px;height:62px}
 .brand{
-  display:flex;align-items:center;gap:8px;
-  font-weight:800;font-size:1.12rem;letter-spacing:.04em;
+  display:flex;align-items:center;gap:9px;
+  font-weight:800;font-size:1.14rem;letter-spacing:.03em;
   color:var(--ink);text-decoration:none;white-space:nowrap;
 }
-.nav-links{display:flex;gap:4px;margin-left:auto}
+.brand img{width:32px;height:32px;filter:drop-shadow(0 3px 6px rgba(21,101,192,.25))}
+.nav-links{display:flex;gap:2px;margin-left:auto}
 .nav-links a{
   color:var(--ink-2);text-decoration:none;
-  padding:6px 12px;border-radius:9px;font-size:.95rem;
+  padding:7px 14px;border-radius:999px;font-size:.95rem;
   transition:color .15s,background .15s;
 }
 .nav-links a:hover{color:var(--ink);background:var(--accent-soft)}
 .gh{
   display:inline-flex;align-items:center;gap:6px;
-  color:var(--ink);text-decoration:none;font-size:.95rem;font-weight:600;
-  border:1px solid var(--line-strong);border-radius:9px;padding:5px 12px;
+  color:var(--ink);text-decoration:none;font-size:.93rem;font-weight:600;
+  border:1px solid var(--line-strong);border-radius:999px;padding:6px 15px;
   transition:border-color .15s,background .15s;
   white-space:nowrap;
 }
 .gh:hover{border-color:var(--accent);background:var(--accent-soft)}
-.gh svg{width:17px;height:17px;fill:currentColor;flex:none}
-/* 云朵小羊线稿（导航品牌 / 页脚）：透明底，线条颜色随主题反色 */
-.brand-ico{
-  width:24px;height:24px;
-  vertical-align:-7px;margin-right:2px;
-  filter:invert(var(--line-invert));
-}
-.pill-ico{
-  width:17px;height:17px;
-  vertical-align:-4px;margin-right:4px;
-  filter:invert(var(--line-invert));
-}
-/* 主题切换按钮：复用 .gh 的边框胶囊样式，重置 button 默认底色 */
+.gh svg{width:16px;height:16px;fill:currentColor;flex:none}
 #theme-toggle{
   cursor:pointer;background:none;color:var(--ink);
-  font-family:inherit;font-size:14px;line-height:1;
+  font-family:inherit;font-size:15px;line-height:1;
 }
 @media (max-width:640px){
   .nav-links{display:none}
   .gh{margin-left:auto}
+  #theme-toggle{margin-left:auto}
+  #theme-toggle + .gh{margin-left:0}
 }
 
-/* ── Hero ─────────────────────────────── */
-.hero{padding:76px 0 48px;text-align:center}
+/* ═══════════ Hero ═══════════ */
+.hero{padding:74px 0 30px}
+.hero-grid{
+  display:grid;grid-template-columns:1.15fr .85fr;
+  gap:36px;align-items:center;
+}
+@media (max-width:880px){
+  .hero-grid{grid-template-columns:1fr;text-align:center}
+  .hero-side{order:-1}
+}
 .pill{
-  display:inline-block;
-  color:var(--accent);background:var(--accent-soft);
+  display:inline-flex;align-items:center;gap:7px;
+  color:var(--accent-deep);background:var(--accent-soft);
   border:1px solid var(--accent);
   border-radius:999px;
-  font-size:.85rem;font-weight:600;letter-spacing:.08em;
-  padding:4px 16px;margin-bottom:22px;
+  font-size:.85rem;font-weight:600;letter-spacing:.06em;
+  padding:5px 17px;margin-bottom:24px;
 }
+:root[data-theme="dark"] .pill{color:var(--accent)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .pill{color:var(--accent)}}
 .hero h1{
-  margin:0 auto;max-width:760px;
-  font-size:clamp(2.1rem,5.4vw,3.5rem);
-  line-height:1.24;letter-spacing:.01em;
+  margin:0;max-width:640px;
+  font-size:clamp(2.2rem,5.6vw,3.7rem);
+  line-height:1.22;letter-spacing:.01em;
 }
+@media (max-width:880px){.hero h1{margin:0 auto}}
 .hl{
-  background:linear-gradient(transparent 62%,var(--accent-soft) 0);
-  box-shadow:inset 0 -0.35em var(--accent-soft);
+  color:var(--accent-deep);
+  position:relative;white-space:nowrap;
+}
+:root[data-theme="dark"] .hl{color:var(--accent)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .hl{color:var(--accent)}}
+.hl::after{ /* 云形下划线 */
+  content:"";position:absolute;left:2%;right:2%;bottom:-.12em;height:.3em;
+  background:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 14" preserveAspectRatio="none"><path d="M2 10 Q14 2 26 8 Q38 1 50 8 Q62 2 74 8 Q86 1 98 8 Q110 3 118 9" fill="none" stroke="%231593E4" stroke-width="4" stroke-linecap="round" opacity=".55"/></svg>') no-repeat center/100% 100%;
 }
 .sub{
-  max-width:660px;margin:20px auto 0;
+  max-width:560px;margin:22px 0 0;
   color:var(--ink-2);
-  font-size:clamp(1rem,1.7vw,1.14rem);
+  font-size:clamp(1rem,1.7vw,1.15rem);
 }
-.cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin:30px 0 16px}
+@media (max-width:880px){.sub{margin-left:auto;margin-right:auto}}
+.cta{display:flex;gap:14px;flex-wrap:wrap;margin:30px 0 20px}
+@media (max-width:880px){.cta{justify-content:center}}
 .btn{
   display:inline-flex;align-items:center;gap:8px;
-  padding:12px 26px;border-radius:12px;
+  padding:13px 28px;border-radius:999px;
   font-size:1.02rem;font-weight:700;text-decoration:none;
-  transition:transform .15s,box-shadow .15s,filter .15s;
+  transition:transform .18s,box-shadow .18s,filter .18s,background .18s;
 }
-.btn:hover{transform:translateY(-2px)}
-.btn-primary{background:var(--accent);color:#fff;box-shadow:var(--shadow-btn)}
-.btn-primary:hover{filter:brightness(1.06)}
-.btn-ghost{color:var(--ink);border:1.5px solid var(--line-strong)}
+.btn:hover{transform:translateY(-3px)}
+.btn-primary{
+  background:linear-gradient(135deg,var(--accent),var(--accent-deep));
+  color:#fff;box-shadow:var(--shadow-btn);
+}
+.btn-primary:hover{filter:brightness(1.07)}
+.btn-ghost{
+  color:var(--ink);
+  border:1.5px solid var(--line-strong);
+  background:var(--cloud-dim);
+}
 .btn-ghost:hover{border-color:var(--accent);background:var(--accent-soft)}
-.meta{color:var(--ink-2);font-size:.87rem;letter-spacing:.05em}
+.chips{display:flex;gap:10px;flex-wrap:wrap}
+@media (max-width:880px){.chips{justify-content:center}}
+.chip{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:.84rem;font-weight:600;color:var(--ink-2);
+  background:var(--cloud-dim);
+  border:1px solid var(--line);
+  padding:5px 14px;border-radius:999px;
+  backdrop-filter:blur(6px);
+}
+/* 小羊主视觉 */
+.hero-side{position:relative;display:grid;place-items:center;min-height:280px}
+.sheep{
+  width:min(340px,72%);
+  filter:drop-shadow(0 26px 34px rgba(21,101,192,.28));
+  animation:bob 5.2s ease-in-out infinite;
+  will-change:transform;
+}
+@keyframes bob{
+  0%,100%{transform:translateY(0) rotate(-1.2deg)}
+  50%{transform:translateY(-16px) rotate(1.4deg)}
+}
+.sheep-shadow{
+  position:absolute;bottom:6%;left:50%;transform:translateX(-50%);
+  width:46%;height:22px;border-radius:50%;
+  background:radial-gradient(ellipse,rgba(18,41,63,.28),transparent 70%);
+  animation:shadowPulse 5.2s ease-in-out infinite;
+}
+@keyframes shadowPulse{
+  0%,100%{transform:translateX(-50%) scaleX(1);opacity:.9}
+  50%{transform:translateX(-50%) scaleX(.82);opacity:.55}
+}
+.mini-cloud{
+  position:absolute;background:var(--cloud);border-radius:999px;
+  opacity:.95;transition:background .3s;
+}
+.mini-cloud::before{
+  content:"";position:absolute;background:inherit;border-radius:50%;
+}
+.mc1{width:74px;height:26px;top:12%;left:2%;animation:bob 6.4s ease-in-out infinite reverse}
+.mc1::before{width:32px;height:32px;top:-15px;left:14px}
+.mc2{width:58px;height:20px;bottom:16%;right:0;animation:bob 7.1s ease-in-out .8s infinite}
+.mc2::before{width:26px;height:26px;top:-12px;right:10px}
+
+/* Hero 截图：浏览器框 */
 .hero-shot{
-  max-width:960px;margin:44px auto 0;
+  max-width:1000px;margin:56px auto 0;
+  border-radius:18px;overflow:hidden;
   border:1px solid var(--shot-border);
-  border-radius:14px;overflow:hidden;
+  background:var(--card);
   box-shadow:var(--shadow);
 }
+.shot-bar{
+  display:flex;align-items:center;gap:7px;
+  padding:11px 16px;
+  background:var(--cloud-dim);
+  border-bottom:1px solid var(--line);
+}
+.dot3{width:11px;height:11px;border-radius:50%}
+.dot3:nth-child(1){background:#FF5F57}
+.dot3:nth-child(2){background:#FEBC2E}
+.dot3:nth-child(3){background:#28C840}
+.addr{
+  margin-left:10px;flex:1;max-width:340px;
+  font-size:.76rem;color:var(--ink-2);
+  background:var(--accent-soft);
+  border-radius:999px;padding:3px 14px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 .hero-shot img{display:block;width:100%;height:auto}
-.shot-cap{color:var(--ink-2);font-size:.85rem;margin-top:14px}
-
-/* ── 区块通用 ─────────────────────────── */
-section{padding:68px 0}
-.band{background:var(--band);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
-.sec-head{text-align:center;max-width:680px;margin:0 auto 40px}
-.kicker{
-  display:inline-block;color:var(--accent);font-weight:700;
-  font-size:.86rem;letter-spacing:.22em;margin-bottom:10px;
+.shot-cap{
+  text-align:center;color:var(--ink-2);font-size:.86rem;
+  margin:16px 0 0;position:relative;z-index:1;
 }
-.sec-head h2{margin:0;font-size:clamp(1.5rem,3.2vw,2.15rem);letter-spacing:.01em}
-.sec-head p{margin:12px auto 0;color:var(--ink-2);max-width:600px}
 
-/* ── 三重安全承诺 ─────────────────────── */
-.sec-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px}
-.sec-card{
+/* ═══════════ 区块通用 ═══════════ */
+section{padding:56px 0}
+.band{
+  max-width:1180px;margin:26px auto;
+  padding:64px 46px;
   background:var(--card);
-  border:1px solid var(--line);border-radius:16px;
-  padding:28px 26px;
-  transition:transform .15s,box-shadow .15s;
+  border-radius:52px;
+  box-shadow:var(--shadow-soft);
+  border:1px solid var(--line);
+  position:relative;z-index:1;
+  transition:background .3s;
 }
-.sec-card:hover{transform:translateY(-3px);box-shadow:var(--shadow)}
+@media (max-width:720px){.band{padding:44px 22px;border-radius:36px;margin:18px 12px}}
+.sec-head{text-align:center;max-width:680px;margin:0 auto 42px}
+.kicker{
+  display:inline-flex;align-items:center;gap:6px;
+  color:var(--accent);font-weight:700;
+  font-size:.85rem;letter-spacing:.2em;margin-bottom:12px;
+}
+.sec-head h2{margin:0;font-size:clamp(1.55rem,3.2vw,2.2rem);letter-spacing:.01em}
+.sec-head p{margin:14px auto 0;color:var(--ink-2);max-width:600px}
+
+/* ═══════════ 三重安全承诺 ═══════════ */
+.sec-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px}
+.sec-card{
+  background:var(--cloud-dim);
+  border:1px solid var(--line);border-radius:24px;
+  padding:30px 26px;
+  transition:transform .18s,box-shadow .18s;
+}
+.sec-card:hover{transform:translateY(-5px);box-shadow:var(--shadow-soft)}
 .num{
-  width:46px;height:46px;border-radius:50%;
+  width:52px;height:52px;border-radius:50% 50% 46% 54%/56% 54% 46% 44%;
   display:grid;place-items:center;
-  border:1.5px solid var(--accent);color:var(--accent);
-  font-size:1.15rem;font-weight:800;margin-bottom:16px;
+  background:var(--accent-soft);
+  border:2px solid var(--accent);color:var(--accent);
+  font-size:1.2rem;font-weight:800;margin-bottom:18px;
 }
-.sec-card h3{margin:0 0 8px;font-size:1.16rem}
+.sec-card h3{margin:0 0 9px;font-size:1.18rem}
 .sec-card p{margin:0;color:var(--ink-2);font-size:.95rem}
 
-/* ── 功能网格 ─────────────────────────── */
-.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+/* ═══════════ 功能网格 ═══════════ */
+.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
 .feat{
-  background:var(--card);
-  border:1px solid var(--line);border-radius:14px;
-  padding:22px;
-  transition:transform .15s,box-shadow .15s,border-color .15s;
+  background:var(--cloud-dim);
+  border:1px solid var(--line);border-radius:20px;
+  padding:24px 22px;
+  transition:transform .18s,box-shadow .18s,border-color .18s;
 }
-.feat:hover{transform:translateY(-3px);box-shadow:var(--shadow);border-color:var(--line-strong)}
+.feat:hover{transform:translateY(-4px);box-shadow:var(--shadow-soft);border-color:var(--line-strong)}
 .ico{
-  width:44px;height:44px;border-radius:11px;
-  display:grid;place-items:center;font-size:1.4rem;
+  width:46px;height:46px;border-radius:14px;
+  display:grid;place-items:center;font-size:1.42rem;
   background:var(--accent-soft);margin-bottom:14px;
 }
 .feat h3{margin:0 0 6px;font-size:1.05rem}
 .feat p{margin:0;color:var(--ink-2);font-size:.92rem}
 
-/* ── 截图画廊 ─────────────────────────── */
-.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}
+/* ═══════════ 截图画廊 ═══════════ */
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:22px}
 .shots figure{
-  margin:0;background:var(--card);
+  margin:0;background:var(--cloud-dim);
   border:1px solid var(--shot-border);
-  border-radius:14px;overflow:hidden;
-  box-shadow:var(--shadow);
+  border-radius:18px;overflow:hidden;
+  box-shadow:var(--shadow-soft);
+  transition:transform .18s,box-shadow .18s;
 }
+.shots figure:hover{transform:translateY(-5px);box-shadow:var(--shadow)}
 .shots img{display:block;width:100%;height:auto;border-bottom:1px solid var(--line)}
-.shots figcaption{padding:13px 16px;color:var(--ink-2);font-size:.9rem}
+.shots figcaption{padding:14px 17px;color:var(--ink-2);font-size:.9rem}
 .shots b{color:var(--ink)}
 
-/* ── 快速开始 ─────────────────────────── */
+/* ═══════════ 快速开始 ═══════════ */
 .qs-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 @media (max-width:860px){.qs-grid{grid-template-columns:1fr}}
 .qs{
-  background:var(--card);
-  border:1px solid var(--line);border-radius:16px;
-  padding:28px 26px;display:flex;flex-direction:column;
+  background:var(--cloud-dim);
+  border:1px solid var(--line);border-radius:24px;
+  padding:30px 28px;display:flex;flex-direction:column;
+  transition:transform .18s,box-shadow .18s;
 }
+.qs:hover{transform:translateY(-4px);box-shadow:var(--shadow-soft)}
 .qs .tag{
   align-self:flex-start;
   font-size:.8rem;font-weight:700;letter-spacing:.12em;
   color:var(--accent);background:var(--accent-soft);
-  border-radius:999px;padding:3px 12px;margin-bottom:14px;
+  border-radius:999px;padding:4px 14px;margin-bottom:16px;
 }
-.qs h3{margin:0 0 12px;font-size:1.2rem}
-.qs ol{margin:0;padding-left:22px;color:var(--ink-2);font-size:.95rem}
-.qs ol li{margin-bottom:8px}
+.qs h3{margin:0 0 14px;font-size:1.22rem}
+.qs ol{margin:0 0 18px;padding-left:22px;color:var(--ink-2);font-size:.95rem}
+.qs ol li{margin-bottom:9px}
 .qs ol b{color:var(--ink)}
-.qs .btn{align-self:flex-start;margin-top:auto;padding:9px 20px;font-size:.95rem}
+.qs .btn{align-self:flex-start;margin-top:auto;padding:10px 22px;font-size:.95rem}
+.pre-wrap{position:relative;margin-bottom:14px}
 pre{
-  margin:0 0 14px;
+  margin:0;
   background:var(--code-bg);color:var(--code-ink);
-  border:1px solid var(--line);border-radius:11px;
-  padding:15px 17px;overflow-x:auto;
+  border:1px solid var(--line);border-radius:14px;
+  padding:17px 18px;overflow-x:auto;
   font-family:ui-monospace,SFMono-Regular,Consolas,"Courier New",monospace;
-  font-size:.88rem;line-height:1.65;
+  font-size:.88rem;line-height:1.7;
 }
+.copy-btn{
+  position:absolute;top:9px;right:9px;
+  border:1px solid rgba(216,238,251,.3);
+  background:rgba(216,238,251,.1);color:#D8EEFB;
+  font-size:.76rem;font-weight:600;font-family:inherit;
+  border-radius:8px;padding:4px 12px;cursor:pointer;
+  transition:background .15s;
+}
+.copy-btn:hover{background:rgba(216,238,251,.22)}
 code{
   font-family:ui-monospace,SFMono-Regular,Consolas,"Courier New",monospace;
   background:var(--accent-soft);border-radius:6px;
   padding:1px 7px;font-size:.88em;
 }
+pre code{background:none;padding:0;border-radius:0}
 .note{color:var(--ink-2);font-size:.86rem;margin:0}
 
-/* ── 页脚 ─────────────────────────────── */
+/* ═══════════ 页脚 ═══════════ */
 footer{
-  border-top:1px solid var(--line);
-  padding:36px 0 44px;text-align:center;
+  position:relative;z-index:1;
+  padding:44px 0 52px;text-align:center;
   color:var(--ink-2);font-size:.92rem;
 }
-footer .f-links{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+footer .f-brand{
+  display:inline-flex;align-items:center;gap:9px;
+  font-weight:800;font-size:1.1rem;color:var(--ink);margin-bottom:12px;
+}
+footer .f-brand img{width:34px;height:34px}
+footer .f-links{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
 footer a{color:var(--ink);font-weight:600;text-decoration:none}
 footer a:hover{color:var(--accent)}
 .dot{color:var(--line-strong)}
+
+/* ═══════════ 返回顶部 ═══════════ */
+#to-top{
+  position:fixed;right:26px;bottom:26px;z-index:60;
+  width:48px;height:48px;border-radius:50%;
+  border:1px solid var(--line);
+  background:var(--card);color:var(--accent);
+  font-size:1.25rem;cursor:pointer;
+  box-shadow:var(--shadow-soft);
+  opacity:0;transform:translateY(14px);pointer-events:none;
+  transition:opacity .25s,transform .25s;
+}
+#to-top.show{opacity:1;transform:none;pointer-events:auto}
+#to-top:hover{transform:translateY(-3px)}
+
+/* ═══════════ 滚动显现 ═══════════ */
+.reveal{opacity:0;transform:translateY(26px);transition:opacity .7s ease,transform .7s ease}
+.reveal.in{opacity:1;transform:none}
+
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation:none !important;transition:none !important}
+  .reveal{opacity:1;transform:none}
+  html{scroll-behavior:auto}
+}
 </style>
 </head>
 <body>
 
+<!-- 天空层：漂流的云 + 星空 -->
+<div class="sky-layer" aria-hidden="true">
+  <div class="stars" id="stars"></div>
+  <div class="moon"></div>
+  <div class="cloud"        style="top:9%;  --s:1.05; animation-duration:74s; animation-delay:-18s"></div>
+  <div class="cloud c-soft" style="top:19%; --s:.7;   animation-duration:96s; animation-delay:-52s"></div>
+  <div class="cloud"        style="top:34%; --s:.9;   animation-duration:84s; animation-delay:-66s"></div>
+  <div class="cloud c-soft" style="top:52%; --s:1.25; animation-duration:110s; animation-delay:-30s"></div>
+  <div class="cloud"        style="top:68%; --s:.8;   animation-duration:90s; animation-delay:-74s"></div>
+  <div class="cloud c-soft" style="top:82%; --s:1.1;  animation-duration:102s; animation-delay:-8s"></div>
+</div>
+
 <!-- 顶部导航 -->
 <header class="nav">
   <div class="wrap nav-inner">
-    <a class="brand" href="#top"><img class="brand-ico" src="docs/images/cloud-sheep-line.png" alt="SkySheep">SkySheep</a>
+    <a class="brand" href="#top"><img src="docs/images/cloud-sheep-3d.png" alt="SkySheep 云朵小羊">SkySheep</a>
     <nav class="nav-links">
-      <a href="#features">功能</a>
       <a href="#security">安全</a>
+      <a href="#features">功能</a>
       <a href="#shots">截图</a>
       <a href="#download">下载</a>
     </nav>
-    <button id="theme-toggle" class="gh" type="button" title="切换深浅主题">🌙</button>
+    <button id="theme-toggle" class="gh" type="button" title="切换昼夜主题">🌙</button>
     <a class="gh" href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
       GitHub
@@ -325,15 +532,34 @@ footer a:hover{color:var(--accent)}
   <!-- Hero -->
   <section class="hero">
     <div class="wrap">
-      <span class="pill"><img class="pill-ico" src="docs/images/cloud-sheep-line.png" alt="">开源桌面 AI Agent · 纸墨界面</span>
-      <h1>跑在<span class="hl">你电脑</span>上的<br>AI Agent 工作台</h1>
-      <p class="sub">不只是聊天窗口——它能读你的文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键撤销。</p>
-      <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener">⬇️ 下载最新版</a>
-        <a class="btn btn-ghost" href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">查看源码</a>
+      <div class="hero-grid">
+        <div class="hero-main">
+          <span class="pill">☁️ 开源桌面 AI Agent · 云朵小羊</span>
+          <h1>跑在<span class="hl">你电脑</span>上的<br>AI Agent 工作台</h1>
+          <p class="sub">不只是聊天窗口——它能读你的文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键撤销。</p>
+          <div class="cta">
+            <a class="btn btn-primary" href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener">⬇️ 下载最新版</a>
+            <a class="btn btn-ghost" href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">查看源码</a>
+          </div>
+          <div class="chips">
+            <span class="chip">🪟 Windows 优先</span>
+            <span class="chip">📜 开源 MIT</span>
+            <span class="chip">🔒 数据不出本机</span>
+          </div>
+        </div>
+        <div class="hero-side">
+          <div class="mini-cloud mc1"></div>
+          <div class="mini-cloud mc2"></div>
+          <img class="sheep" id="sheep" src="docs/images/cloud-sheep-3d.png" alt="SkySheep 吉祥物：云朵小羊" width="340" height="340">
+          <div class="sheep-shadow"></div>
+        </div>
       </div>
-      <p class="meta">Windows · 开源 MIT · 数据不出本机</p>
-      <div class="hero-shot">
+
+      <div class="hero-shot reveal">
+        <div class="shot-bar">
+          <span class="dot3"></span><span class="dot3"></span><span class="dot3"></span>
+          <span class="addr">SkySheep · 桌面工作台</span>
+        </div>
         <img src="docs/images/right-panel.png" width="1280" height="720" alt="SkySheep 深色主题完整界面：左侧会话侧栏、中间对话区、右侧实时面板，右下角是桌面宠物小羊">
       </div>
       <p class="shot-cap">深色「夜墨」主题完整界面：侧栏 + 对话区 + 右侧实时面板 + 桌面宠物小羊</p>
@@ -342,28 +568,26 @@ footer a:hover{color:var(--accent)}
 
   <!-- 三重安全承诺 -->
   <section id="security" class="band">
-    <div class="wrap">
-      <div class="sec-head">
-        <span class="kicker">三重安全承诺</span>
-        <h2>敢让它动手，也随时能后悔</h2>
-        <p>这是 SkySheep 与所有聊天客户端的根本差异：Agent 真正执行操作，但每一步都在你的视线之内。</p>
+    <div class="sec-head reveal">
+      <span class="kicker">☁️ 三重安全承诺</span>
+      <h2>敢让它动手，也随时能后悔</h2>
+      <p>这是 SkySheep 与所有聊天客户端的根本差异：Agent 真正执行操作，但每一步都在你的视线之内。</p>
+    </div>
+    <div class="sec-grid">
+      <div class="sec-card reveal">
+        <div class="num">壹</div>
+        <h3>敏感操作先确认</h3>
+        <p>写文件先展示 diff 逐行过目，执行命令逐次确认；拿不准的操作，不放行就跑不了。</p>
       </div>
-      <div class="sec-grid">
-        <div class="sec-card">
-          <div class="num">壹</div>
-          <h3>敏感操作先确认</h3>
-          <p>写文件先展示 diff 逐行过目，执行命令逐次确认；拿不准的操作，不放行就跑不了。</p>
-        </div>
-        <div class="sec-card">
-          <div class="num">贰</div>
-          <h3>数据全在本机</h3>
-          <p>会话与配置存于本机 SQLite，无账号、无遥测，数据不出你的电脑。</p>
-        </div>
-        <div class="sec-card">
-          <div class="num">叁</div>
-          <h3>检查点一键回滚</h3>
-          <p>每轮改动自动快照成检查点，改坏了随时一键恢复到上一刻。</p>
-        </div>
+      <div class="sec-card reveal">
+        <div class="num">贰</div>
+        <h3>数据全在本机</h3>
+        <p>会话与配置存于本机 SQLite，无账号、无遥测，数据不出你的电脑。</p>
+      </div>
+      <div class="sec-card reveal">
+        <div class="num">叁</div>
+        <h3>检查点一键回滚</h3>
+        <p>每轮改动自动快照成检查点，改坏了随时一键恢复到上一刻。</p>
       </div>
     </div>
   </section>
@@ -371,48 +595,48 @@ footer a:hover{color:var(--accent)}
   <!-- 功能网格 -->
   <section id="features">
     <div class="wrap">
-      <div class="sec-head">
+      <div class="sec-head reveal">
         <span class="kicker">功能</span>
         <h2>小羊的十八般武艺</h2>
         <p>从一个对话窗口，长成真正能干活的桌面工作台。</p>
       </div>
       <div class="feat-grid">
-        <div class="feat">
+        <div class="feat reveal">
           <div class="ico">🔌</div>
           <h3>多模型服务</h3>
           <p>智谱、DeepSeek、Kimi、OpenRouter、Anthropic，以及 Ollama 本地模型，填好 API Key 一键接入。</p>
         </div>
-        <div class="feat">
+        <div class="feat reveal">
           <div class="ico">🧩</div>
           <h3>MCP 与技能扩展</h3>
           <p>兼容 Claude Desktop 的 MCP 配置，技能广场一键安装，能力随取随用。</p>
         </div>
-        <div class="feat">
+        <div class="feat reveal">
           <div class="ico">🖱️</div>
           <h3>电脑控制</h3>
           <p>截屏、鼠标、键盘自动化，全程确认制 + 动作级白名单，边界由你划。</p>
         </div>
-        <div class="feat">
+        <div class="feat reveal">
           <div class="ico">⏰</div>
           <h3>定时任务与日程</h3>
           <p>周期任务到点执行、支持提醒，手机可在局域网直接访问工作台。</p>
         </div>
-        <div class="feat">
+        <div class="feat reveal">
           <div class="ico">👥</div>
           <h3>圆桌多模型</h3>
           <p>多个模型并行作答，「主席」模型融合众长，给出更稳的结论。</p>
         </div>
-        <div class="feat">
+        <div class="feat reveal">
           <div class="ico">📄</div>
           <h3>文档读写</h3>
           <p>PDF / Word / Excel 读进来，Word / Excel / CSV 写出去，报告一键生成。</p>
         </div>
-        <div class="feat">
+        <div class="feat reveal">
           <div class="ico">📊</div>
           <h3>用量仪表盘</h3>
           <p>token 用量与费用估算一目了然，花在哪、花多少，心里有数。</p>
         </div>
-        <div class="feat">
+        <div class="feat reveal">
           <div class="ico">🈶</div>
           <h3>中文优先</h3>
           <p>界面、帮助、快捷指令全为中文场景设计，本地模型中文对话同样顺滑。</p>
@@ -423,39 +647,37 @@ footer a:hover{color:var(--accent)}
 
   <!-- 截图画廊 -->
   <section id="shots" class="band">
-    <div class="wrap">
-      <div class="sec-head">
-        <span class="kicker">截图</span>
-        <h2>眼见为实</h2>
-        <p>纸墨浅色与夜墨深色两套主题，都长在桌面上。</p>
-      </div>
-      <div class="shots">
-        <figure>
-          <img src="docs/images/providers.png" loading="lazy" alt="浅色纸墨主题的模型服务设置页">
-          <figcaption><b>模型服务设置</b>——浅色「纸墨」主题，填好 API Key 即可接入多家服务商。</figcaption>
-        </figure>
-        <figure>
-          <img src="docs/images/agenda.png" loading="lazy" alt="深色主题的日程周历视图">
-          <figcaption><b>日程周历</b>——深色「夜墨」主题，定时任务排进周历，到点自动执行并提醒。</figcaption>
-        </figure>
-        <figure>
-          <img src="docs/images/usage.png" loading="lazy" alt="深色主题的用量统计仪表盘">
-          <figcaption><b>用量仪表盘</b>——token 统计与费用估算实时可见，消耗不再是一笔糊涂账。</figcaption>
-        </figure>
-      </div>
+    <div class="sec-head reveal">
+      <span class="kicker">☁️ 截图</span>
+      <h2>眼见为实</h2>
+      <p>纸墨浅色与夜墨深色两套主题，都长在桌面上。</p>
+    </div>
+    <div class="shots">
+      <figure class="reveal">
+        <img src="docs/images/providers.png" loading="lazy" alt="浅色纸墨主题的模型服务设置页">
+        <figcaption><b>模型服务设置</b>——浅色「纸墨」主题，填好 API Key 即可接入多家服务商。</figcaption>
+      </figure>
+      <figure class="reveal">
+        <img src="docs/images/agenda.png" loading="lazy" alt="深色主题的日程周历视图">
+        <figcaption><b>日程周历</b>——深色「夜墨」主题，定时任务排进周历，到点自动执行并提醒。</figcaption>
+      </figure>
+      <figure class="reveal">
+        <img src="docs/images/usage.png" loading="lazy" alt="深色主题的用量统计仪表盘">
+        <figcaption><b>用量仪表盘</b>——token 统计与费用估算实时可见，消耗不再是一笔糊涂账。</figcaption>
+      </figure>
     </div>
   </section>
 
   <!-- 快速开始 -->
   <section id="download">
     <div class="wrap">
-      <div class="sec-head">
+      <div class="sec-head reveal">
         <span class="kicker">快速开始</span>
         <h2>三分钟跑起来</h2>
         <p>下载即用，或者从源码亲手拉起来。</p>
       </div>
       <div class="qs-grid">
-        <div class="qs">
+        <div class="qs reveal">
           <span class="tag">方式一</span>
           <h3>下载安装包</h3>
           <ol>
@@ -465,13 +687,16 @@ footer a:hover{color:var(--accent)}
           </ol>
           <a class="btn btn-primary" href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener">⬇️ 前往下载</a>
         </div>
-        <div class="qs">
+        <div class="qs reveal">
           <span class="tag">方式二</span>
           <h3>从源码运行</h3>
-          <pre><code>git clone https://github.com/Sky-scrape/SkySheep.git
+          <div class="pre-wrap">
+            <pre><code id="src-code">git clone https://github.com/Sky-scrape/SkySheep.git
 cd SkySheep/engine
 uv sync
 uv run skysheep app</code></pre>
+            <button class="copy-btn" id="copy-src" type="button">复制</button>
+          </div>
           <p class="note">需要 Python ≥ 3.11 与 <code>uv</code>；桌面壳基于 pywebview / WebView2，也支持 <code>--browser</code> 兜底。</p>
         </div>
       </div>
@@ -483,17 +708,20 @@ uv run skysheep app</code></pre>
 <!-- 页脚 -->
 <footer>
   <div class="wrap">
+    <div class="f-brand"><img src="docs/images/cloud-sheep-3d.png" alt="SkySheep 云朵小羊">SkySheep</div>
     <div class="f-links">
-      <span><img class="brand-ico" src="docs/images/cloud-sheep-line.png" alt="SkySheep">SkySheep</span><span class="dot">·</span>
       <a href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">GitHub</a><span class="dot">·</span>
+      <a href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener">下载</a><span class="dot">·</span>
       <span>MIT License</span>
     </div>
     <div>用 SkySheep 构建 · 云朵小羊与你同在 ☁️</div>
   </div>
 </footer>
 
+<button id="to-top" type="button" title="返回顶部" aria-label="返回顶部">↑</button>
+
 <script>
-/* 主题切换：点击在 浅色 ⇄ 深色 间切换并记住；未手动选过则跟随系统 */
+/* ── 主题切换：白昼晴空 ⇄ 夜晚星空，记住选择；未选过则跟随系统 ── */
 (function(){
   var btn = document.getElementById("theme-toggle");
   var root = document.documentElement;
@@ -504,10 +732,9 @@ uv run skysheep app</code></pre>
   }
   function render(){
     var dark = resolved() === "dark";
+    document.body.classList.toggle("night", dark);
     btn.textContent = dark ? "☀️" : "🌙";
-    btn.title = dark ? "切换到浅色主题" : "切换到深色主题";
-    var fav = document.getElementById("favicon");
-    if (fav) fav.href = dark ? "docs/images/cloud-sheep-line-white.png" : "docs/images/cloud-sheep-line.png";
+    btn.title = dark ? "切换到白昼晴空" : "切换到夜晚星空";
   }
   btn.addEventListener("click", function(){
     var next = resolved() === "dark" ? "light" : "dark";
@@ -517,6 +744,87 @@ uv run skysheep app</code></pre>
   });
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
   render();
+})();
+
+/* ── 星空生成（夜间显示）── */
+(function(){
+  var box = document.getElementById("stars");
+  var n = 90;
+  for (var i = 0; i < n; i++){
+    var s = document.createElement("span");
+    s.className = "star";
+    var size = (Math.random() * 2 + 1).toFixed(1);
+    s.style.width = s.style.height = size + "px";
+    s.style.left = (Math.random() * 100).toFixed(2) + "%";
+    s.style.top = (Math.random() * 62).toFixed(2) + "%";
+    s.style.setProperty("--tw", (Math.random() * 3 + 2).toFixed(2) + "s");
+    s.style.animationDelay = (Math.random() * 4).toFixed(2) + "s";
+    box.appendChild(s);
+  }
+})();
+
+/* ── 滚动显现（交错延迟）── */
+(function(){
+  var els = document.querySelectorAll(".reveal");
+  if (!("IntersectionObserver" in window)){
+    els.forEach(function(el){ el.classList.add("in"); });
+    return;
+  }
+  els.forEach(function(el, i){ el.style.transitionDelay = (i % 4) * 90 + "ms"; });
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target); }
+    });
+  }, { threshold: .12 });
+  els.forEach(function(el){ io.observe(el); });
+})();
+
+/* ── 小羊鼠标视差（轻量，仅指针设备）── */
+(function(){
+  var sheep = document.getElementById("sheep");
+  if (!sheep || !matchMedia("(pointer: fine)").matches) return;
+  var side = sheep.parentElement;
+  side.addEventListener("mousemove", function(e){
+    var r = side.getBoundingClientRect();
+    var dx = (e.clientX - r.left) / r.width - .5;
+    var dy = (e.clientY - r.top) / r.height - .5;
+    sheep.style.translate = (dx * 14).toFixed(1) + "px " + (dy * 10).toFixed(1) + "px";
+  });
+  side.addEventListener("mouseleave", function(){ sheep.style.translate = "0 0"; });
+})();
+
+/* ── 复制源码命令 ── */
+(function(){
+  var btn = document.getElementById("copy-src");
+  var code = document.getElementById("src-code");
+  btn.addEventListener("click", function(){
+    var done = function(){
+      btn.textContent = "已复制 ✓";
+      setTimeout(function(){ btn.textContent = "复制"; }, 1600);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(code.innerText).then(done, done);
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = code.innerText;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch (e) {}
+      document.body.removeChild(ta);
+      done();
+    }
+  });
+})();
+
+/* ── 返回顶部 ── */
+(function(){
+  var btn = document.getElementById("to-top");
+  addEventListener("scroll", function(){
+    btn.classList.toggle("show", scrollY > 640);
+  }, { passive: true });
+  btn.addEventListener("click", function(){
+    scrollTo({ top: 0, behavior: "smooth" });
+  });
 })();
 </script>
 </body>

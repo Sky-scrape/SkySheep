@@ -2220,7 +2220,26 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .lan-note { font-size: 12.5px; color: var(--dim); line-height: 1.6; }
 
 /* ---------- 设置页：技能广场 ---------- */
-.market-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+/* 搜索栏：输入框占满，清空钮薄型贴右 */
+.market-search { display: flex; align-items: center; gap: 6px; }
+.market-search .modal-input { flex: 1; min-width: 0; }
+/* 自带的清除叉（WebKit/Edge 的 decoration）与旁边的手写 ✕ 按钮重复，只留一个 */
+.market-search input[type="search"]::-webkit-search-cancel-button,
+.market-search input[type="search"]::-webkit-search-decoration { -webkit-appearance: none; appearance: none; }
+.market-search .btn-ghost { flex-shrink: 0; padding: 6px 10px; }
+.market-count { font-size: 12px; color: var(--dim); margin: 8px 0 0; }
+/* 条目多了（内置 5 条 + 远程索引）给个高度上限，列表自己滚，
+   搜索框和计数行始终留在视野里 */
+.market-list {
+  display: flex; flex-direction: column; gap: 8px; margin-top: 6px;
+  max-height: min(52vh, 420px); overflow-y: auto; padding-right: 2px;
+}
+.market-item .mi-name mark,
+.market-item .mi-desc mark,
+.market-item .mi-author mark {
+  background: rgba(18, 87, 196, .18); color: var(--blue-deep);
+  border-radius: 2px; padding: 0 1px;
+}
 .market-item {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 11px; background: var(--paper-raised);

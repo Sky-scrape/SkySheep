@@ -428,6 +428,58 @@ def test_ws_memory_and_toolcfg_and_lan_and_market(home):
         assert mk["source"] in ("remote", "builtin") and mk["items"]
 
 
+def test_market_modal_has_keyword_search(home):
+    """技能广场必须带关键词搜索（索引长了以后翻找成本高）。
+
+    锁两件事：搜索框/计数/列表容器在弹窗里，以及过滤与高亮的实现约定——
+    多关键词空格分隔且为 AND 语义，高亮必须走转义（索引内容是外部输入）。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    body = js[js.index("async function openMarket()"):]
+    body = body[:body.index("\ndocument.getElementById(\"btn-market\")")]
+
+    for needle in ('id="market-q"', 'id="market-q-clear"', 'id="market-count"', 'id="market-list"'):
+        assert needle in body, f"技能广场缺搜索相关节点：{needle}"
+    # 输入即过滤（不需要点按钮）
+    assert 'input.addEventListener("input"' in body
+    # 多关键词按空格拆、全部命中（AND）
+    assert "split(/\\s+/)" in body
+    assert "terms.every((t) => hay.includes(t))" in body
+    # 命中范围包含名称/描述/作者/地址
+    for field in ("it.name", "it.description", "it.author", "it.url"):
+        assert field in body, f"搜索字段缺 {field}"
+    # 高亮先转义再拼标签，且合并重叠区间（不产生嵌套 mark）
+    assert "function markAll" in body or "const markAll" in body
+    assert "escapeHtml(text.slice(a, b))" in body
+    assert "merged" in body
+    # 列表自己滚（条目多了不至于把搜索框顶出视野）
+    assert ".market-list {" in css
+    market_list_css = css[css.index(".market-list {"):]
+    market_list_css = market_list_css[:market_list_css.index("}")]
+    assert "max-height" in market_list_css and "overflow-y: auto" in market_list_css
+
+
+def test_static_assets_send_no_store(home):
+    """手写前端资源必须带 Cache-Control: no-store。
+
+    前端零构建、文件名不带指纹：WebView 沿用缓存里的 app.js 会让我改了前端
+    却看不到效果，只能靠用户手动强刷。vendor/ 不在此列（mermaid 单文件 3.3MB，
+    靠 ETag 协商即可，否则局域网手机访问每次重下）。
+    """
+    with make_client(home, []) as client:
+        for path in ("/", "/static/app.js", "/static/app.css", "/static/index.html"):
+            r = client.get(path)
+            assert r.status_code == 200, path
+            assert "no-store" in r.headers.get("cache-control", ""), path
+        # vendor 仍然可缓存（ETag 协商）
+        v = client.get("/static/vendor/qrcode.min.js")
+        assert v.status_code == 200
+        assert "no-store" not in v.headers.get("cache-control", "")
+
+
 def test_preview_route_and_traversal_guard(home):
     (home / "proj" / "page.html").write_text("<h1>hello preview</h1>", encoding="utf-8")
     (home / "secret.txt").write_text("outside", encoding="utf-8")

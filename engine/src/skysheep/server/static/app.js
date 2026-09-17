@@ -6532,33 +6532,116 @@ async function openMarket() {
   const items = r.items || [];
   box.innerHTML =
     (r.note ? `<p class="market-note">${escapeHtml(r.note)}</p>` : "") +
-    `<div class="market-list">${items.map((it, i) => `
+    `<div class="market-search">
+      <input id="market-q" class="modal-input" type="search" autocomplete="off"
+        placeholder="搜索技能：名称、描述、作者" title="输入关键词筛选；多个关键词用空格分隔（全部命中才算匹配）">
+      <button id="market-q-clear" class="btn-ghost" type="button" title="清空搜索" hidden>✕</button>
+    </div>
+    <p class="market-count" id="market-count"></p>
+    <div class="market-list" id="market-list"></div>`;
+
+  const list = box.querySelector("#market-list");
+  const countEl = box.querySelector("#market-count");
+  const input = box.querySelector("#market-q");
+  const clearBtn = box.querySelector("#market-q-clear");
+  const terms = [];
+
+  // 命中高亮：先转义再逐段包 <mark>（索引内容不可信，不能直接拼 HTML）。
+  // 命中区间先合并重叠再统一包裹，避免关键词互相嵌套导致标签错乱。
+  const markAll = (text, ts) => {
+    text = String(text == null ? "" : text);
+    if (!ts.length) return escapeHtml(text);
+    const low = text.toLowerCase();
+    const spans = [];
+    for (const t of ts) {
+      let i = 0;
+      for (;;) {
+        const p = low.indexOf(t, i);
+        if (p < 0) break;
+        spans.push([p, p + t.length]);
+        i = p + t.length;
+      }
+    }
+    if (!spans.length) return escapeHtml(text);
+    spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const merged = [];
+    for (const s of spans) {
+      const last = merged[merged.length - 1];
+      if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1]);
+      else merged.push([s[0], s[1]]);
+    }
+    let out = "";
+    let cursor = 0;
+    for (const [a, b] of merged) {
+      out += escapeHtml(text.slice(cursor, a)) +
+        "<mark>" + escapeHtml(text.slice(a, b)) + "</mark>";
+      cursor = b;
+    }
+    return out + escapeHtml(text.slice(cursor));
+  };
+
+  function renderItems() {
+    const hit = items
+      .map((it, i) => ({ it, i }))
+      .filter(({ it }) => {
+        if (!terms.length) return true;
+        const hay = [it.name, it.description, it.author, it.url]
+          .map((s) => String(s == null ? "" : s).toLowerCase())
+          .join(" ");
+        return terms.every((t) => hay.includes(t));
+      });
+    list.innerHTML = hit.map(({ it, i }) => `
       <div class="market-item" data-i="${i}">
         <div class="mi-main">
-          <span class="mi-name">${escapeHtml(it.name)}</span>
-          <span class="mi-desc" title="${escapeHtml(it.description)}">${escapeHtml(it.description || it.url)}</span>
+          <span class="mi-name">${markAll(it.name, terms)}</span>
+          <span class="mi-desc" title="${escapeHtml(it.description || it.url)}">${markAll(it.description || it.url, terms)}</span>
         </div>
-        <span class="mi-author">${escapeHtml(it.author || "")}</span>
+        <span class="mi-author">${markAll(it.author || "", terms)}</span>
         <button class="btn-ghost" data-url="${escapeHtml(it.url)}">安装</button>
-      </div>`).join("") || '<p class="dim small">索引是空的。</p>'}</div>`;
-  box.querySelectorAll(".market-item button").forEach((btn) => {
-    btn.onclick = async () => {
-      if (btn.disabled) return;
-      btn.disabled = true;
-      btn.textContent = "安装中…";
-      try {
-        const res = await request("skills.install", { source: btn.dataset.url, scope: "global" });
-        skillStatus(`✓ 已从广场安装 ${res.count} 个技能：${res.installed.join("、")}`);
-        btn.textContent = "✓ 已安装";
-        boot();
-        renderSettings();
-      } catch (e) {
-        btn.disabled = false;
-        btn.textContent = "安装";
-        skillStatus("✗ " + e.message, false);
-      }
-    };
+      </div>`).join("") ||
+      (terms.length
+        ? '<p class="dim small">没有匹配的技能——换个关键词，或点 ✕ 清空搜索看全部。</p>'
+        : '<p class="dim small">索引是空的。</p>');
+    countEl.textContent = !items.length
+      ? ""
+      : (terms.length ? `匹配 ${hit.length} / ${items.length} 个技能` : `共 ${items.length} 个技能`);
+    countEl.hidden = !countEl.textContent;
+    list.querySelectorAll(".market-item button").forEach((btn) => {
+      btn.onclick = async () => {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        btn.textContent = "安装中…";
+        try {
+          const res = await request("skills.install", { source: btn.dataset.url, scope: "global" });
+          skillStatus(`✓ 已从广场安装 ${res.count} 个技能：${res.installed.join("、")}`);
+          btn.textContent = "✓ 已安装";
+          boot();
+          renderSettings();
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = "安装";
+          skillStatus("✗ " + e.message, false);
+        }
+      };
+    });
+  }
+
+  // 多个关键词用空格分隔、全部命中才算匹配；顺序无关、大小写不敏感
+  input.addEventListener("input", () => {
+    terms.length = 0;
+    input.value.trim().toLowerCase().split(/\s+/).filter(Boolean).forEach((t) => terms.push(t));
+    clearBtn.hidden = !input.value;
+    renderItems();
   });
+  clearBtn.onclick = () => {
+    input.value = "";
+    terms.length = 0;
+    clearBtn.hidden = true;
+    renderItems();
+    input.focus();
+  };
+  renderItems();
+  input.focus(); // 打开就能直接打关键词（索引长了以后找技能是主要动作）
 }
 document.getElementById("btn-market").onclick = () => openMarket();
 

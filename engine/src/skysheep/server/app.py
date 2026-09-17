@@ -34,6 +34,28 @@ def _static_dir() -> Path:
     return Path(__file__).parent / "static"
 
 
+def _no_store_static(app) -> None:
+    """手写静态资源（index.html / app.js / app.css）一律 no-store。
+
+    前端是零构建手写资源，文件名不带指纹，StaticFiles 默认的 ETag 协商在
+    WebView 上可能让旧窗口继续用缓存里的 app.js——改了前端却看不到效果，
+    每次都要用户手动强刷。这三个文件加起来不到 500KB 且是本地磁盘读，
+    每次都取最新版远比省这点 IO 划算。
+
+    刻意不包括 /static/vendor/：那是第三方构建产物（mermaid 单文件 3.3MB）
+    且随手写代码一起发版，局域网手机访问时每次重下代价太大——它们靠 ETag
+    协商已经足够。
+    """
+    no_store = {"/", "/static/index.html", "/static/app.js", "/static/app.css"}
+
+    @app.middleware("http")
+    async def _static_headers(request, call_next):
+        resp = await call_next(request)
+        if request.url.path in no_store:
+            resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        return resp
+
+
 STATIC_DIR = _static_dir()
 
 
@@ -161,6 +183,9 @@ def create_app(
         if attrs:
             page = page.replace('<html lang="zh-CN">', f'<html lang="zh-CN" {attrs}>', 1)
         return HTMLResponse(page)
+
+    # 静态资源禁缓存：前端零构建、文件名无指纹，否则用户永远卡在旧 app.js
+    _no_store_static(app)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

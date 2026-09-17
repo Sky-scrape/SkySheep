@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 from pathlib import Path
@@ -75,28 +76,49 @@ def refresh_now() -> bool:
     return True
 
 
-# 窗口图标（System.Drawing.Icon 实例）持引用：被 GC 回收后标题栏图标会失效
+# 窗口图标（System.Drawing.Icon / HICON）持引用：被 GC/销毁后标题栏图标会失效
 _icon_holder: dict = {}
+
+WM_SETICON = 0x0080
+ICON_BIG = 1
+IMAGE_ICON = 1
+LR_LOADFROMFILE = 0x10
 
 
 def apply_window_icon(native, dark: bool = False) -> bool:
-    """把窗口标题栏/任务栏小图标换成对应主题的线稿版（浅色=墨线，深色=白线）。
+    """窗口图标分离设置：标题栏小图标=主题线稿（墨线/白线），任务栏/Alt-Tab=彩色方块。
 
-    图标文件来自应用 static 目录（打包态走 sys._MEIPASS）。托盘图标与 exe
-    文件图标保持彩色方块版不随主题变（深浅任务栏上都可见）。
+    - Form.Icon setter 会同时更新 ICON_SMALL 与 ICON_BIG → 先设线稿版
+    - 再用 WM_SETICON(ICON_BIG) 把任务栏/Alt-Tab 覆盖成彩色方块版 hicon
+      （WinForms 没有独立的"任务栏图标"属性，ICON_BIG 覆盖是标准做法）
+    图标文件来自应用 static 目录（打包态走 sys._MEIPASS）。
     """
     try:
         from System.Drawing import Icon  # noqa: PLC0415
 
-        path = _static_dir() / ("skysheep-line-white.ico" if dark else "skysheep-line-ink.ico")
-        if not path.exists():
+        static = _static_dir()
+        line_path = static / ("skysheep-line-white.ico" if dark else "skysheep-line-ink.ico")
+        color_path = static / "skysheep.ico"
+        if not line_path.exists() or not color_path.exists():
             return False
-        key = str(path)
-        if _icon_holder.get("path") == key:
-            return True  # 已是目标图标，避免重复加载闪烁
-        _icon_holder["path"] = key
-        _icon_holder["icon"] = Icon(key)  # 持引用
-        native.Icon = _icon_holder["icon"]
+        key = str(line_path)
+        if _icon_holder.get("path") != key:
+            _icon_holder["path"] = key
+            _icon_holder["icon"] = Icon(key)  # 持引用
+            native.Icon = _icon_holder["icon"]
+
+            # 任务栏覆盖成彩色版：从彩色 ico 加载 48px HICON
+            user32 = ctypes.windll.user32
+            hicon = user32.LoadImageW(
+                None, str(color_path), IMAGE_ICON, 48, 48, LR_LOADFROMFILE
+            )
+            if hicon:
+                old = _icon_holder.get("big_hicon")
+                if old:
+                    user32.DestroyIcon(old)
+                _icon_holder["big_hicon"] = hicon
+                hwnd = int(native.Handle.ToInt64())
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
         return True
     except Exception:
         return False

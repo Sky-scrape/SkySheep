@@ -5,19 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SkySheep — 跑在你电脑上的 AI Agent 工作台</title>
 <meta name="description" content="SkySheep 是开源（MIT）的桌面 AI Agent 工作台：能读文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键回滚，数据不出本机。">
-<link rel="icon" type="image/png" href="docs/images/cloud-sheep-icon.png">
+<link rel="icon" id="favicon" type="image/png" href="docs/images/cloud-sheep-line.png">
 <script>
 /* 首帧前应用手动主题（localStorage 优先，否则跟随系统），避免加载闪色 */
 (function(){
+  function resolved(){
+    var t = document.documentElement.getAttribute("data-theme");
+    if (t === "dark" || t === "light") return t;
+    return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
   try {
     var t = localStorage.getItem("ss-theme");
     if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+    /* favicon 线稿跟随主题：深色下用白线版，标签栏深色底上才可见 */
+    document.getElementById("favicon").href =
+      resolved() === "dark" ? "docs/images/cloud-sheep-line-white.png" : "docs/images/cloud-sheep-line.png";
   } catch (e) { /* 隐私模式等 localStorage 不可用：跟随系统 */ }
 })();
 </script>
 <style>
 :root{
   color-scheme: light;
+  --line-invert: 0; /* 云朵小羊线稿反色：浅色=墨线(0)，深色=白线(1) */
   --paper:#E8DFC7;
   --band:#EFE8D2;
   --card:#F4EFDE;
@@ -37,6 +46,7 @@
 /* 手动深色：导航栏主题按钮写入 <html data-theme="dark">（变量与下方媒体查询块一致） */
 :root[data-theme="dark"]{
   color-scheme: dark;
+  --line-invert: 1;
   --paper:#171512;
   --band:#1C1915;
   --card:#201D18;
@@ -56,6 +66,7 @@
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
     color-scheme: dark;
+    --line-invert: 1;
     --paper:#171512;
     --band:#1C1915;
     --card:#201D18;
@@ -118,15 +129,16 @@ h1,h2,h3{text-wrap:balance}
 }
 .gh:hover{border-color:var(--accent);background:var(--accent-soft)}
 .gh svg{width:17px;height:17px;fill:currentColor;flex:none}
-/* 云朵小羊图标（导航品牌 / 页脚）：与文字基线对齐 */
+/* 云朵小羊线稿（导航品牌 / 页脚）：透明底，线条颜色随主题反色 */
 .brand-ico{
-  width:24px;height:24px;border-radius:7px;
+  width:24px;height:24px;
   vertical-align:-7px;margin-right:2px;
-  box-shadow:0 1px 4px rgba(0,0,0,.18);
+  filter:invert(var(--line-invert));
 }
 .pill-ico{
-  width:17px;height:17px;border-radius:5px;
+  width:17px;height:17px;
   vertical-align:-4px;margin-right:4px;
+  filter:invert(var(--line-invert));
 }
 /* 主题切换按钮：复用 .gh 的边框胶囊样式，重置 button 默认底色 */
 #theme-toggle{
@@ -293,7 +305,7 @@ footer a:hover{color:var(--accent)}
 <!-- 顶部导航 -->
 <header class="nav">
   <div class="wrap nav-inner">
-    <a class="brand" href="#top"><img class="brand-ico" src="docs/images/cloud-sheep-icon.png" alt="SkySheep">SkySheep</a>
+    <a class="brand" href="#top"><img class="brand-ico" src="docs/images/cloud-sheep-line.png" alt="SkySheep">SkySheep</a>
     <nav class="nav-links">
       <a href="#features">功能</a>
       <a href="#security">安全</a>
@@ -313,7 +325,7 @@ footer a:hover{color:var(--accent)}
   <!-- Hero -->
   <section class="hero">
     <div class="wrap">
-      <span class="pill"><img class="pill-ico" src="docs/images/cloud-sheep-icon.png" alt="">开源桌面 AI Agent · 纸墨界面</span>
+      <span class="pill"><img class="pill-ico" src="docs/images/cloud-sheep-line.png" alt="">开源桌面 AI Agent · 纸墨界面</span>
       <h1>跑在<span class="hl">你电脑</span>上的<br>AI Agent 工作台</h1>
       <p class="sub">不只是聊天窗口——它能读你的文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键撤销。</p>
       <div class="cta">
@@ -472,7 +484,7 @@ uv run skysheep app</code></pre>
 <footer>
   <div class="wrap">
     <div class="f-links">
-      <span><img class="brand-ico" src="docs/images/cloud-sheep-icon.png" alt="SkySheep">SkySheep</span><span class="dot">·</span>
+      <span><img class="brand-ico" src="docs/images/cloud-sheep-line.png" alt="SkySheep">SkySheep</span><span class="dot">·</span>
       <a href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener">GitHub</a><span class="dot">·</span>
       <span>MIT License</span>
     </div>
@@ -494,6 +506,8 @@ uv run skysheep app</code></pre>
     var dark = resolved() === "dark";
     btn.textContent = dark ? "☀️" : "🌙";
     btn.title = dark ? "切换到浅色主题" : "切换到深色主题";
+    var fav = document.getElementById("favicon");
+    if (fav) fav.href = dark ? "docs/images/cloud-sheep-line-white.png" : "docs/images/cloud-sheep-line.png";
   }
   btn.addEventListener("click", function(){
     var next = resolved() === "dark" ? "light" : "dark";

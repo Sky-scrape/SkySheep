@@ -1,22 +1,32 @@
-# SkySheep 🐑
+<div align="center">
 
-**跑在你电脑上的开源 AI Agent 工作台 —— 能看、能做、每一步都先问你。**
+[![SkySheep](docs/images/banner.png)](https://sky-scrape.github.io/SkySheep/)
 
-<p>
-  <a href="https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%E4%BC%98%E5%85%88-blue">
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
-  <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-informational">
-  <a href="README.en.md"><img alt="English" src="https://img.shields.io/badge/docs-English-red"></a>
-</p>
+**跑在你电脑上的开源 AI Agent 工作台 —— 能看、能做、每一步都先问你**
+
+[![CI](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg)](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml)
+![Platform](https://img.shields.io/badge/platform-Windows%20%E4%BC%98%E5%85%88-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Python](https://img.shields.io/badge/python-3.11%2B-informational)
+[![English](https://img.shields.io/badge/docs-English-red)](README.en.md)
+
+[🌐 官网](https://sky-scrape.github.io/SkySheep/) · [⬇️ 下载安装包](https://github.com/Sky-scrape/SkySheep/releases/latest) · [🧩 技能广场](market/) · [📖 English Docs](README.en.md)
+
+</div>
 
 SkySheep 不只是聊天窗口：它能读写你的文件、执行命令、操作电脑、定时干活。
 而所有敏感操作——写文件、跑命令、动鼠标——**都会先弹出确认卡片征求你的同意**；
 每一轮文件改动自动快照，反悔随时一键撤销。
 
+<div align="center">
+
 ![SkySheep 主界面](docs/images/right-panel.png)
 
-## 为什么是 SkySheep
+深色「夜墨」主题完整界面：侧栏 + 对话区 + 右侧实时面板 + 桌面宠物小羊
+
+</div>
+
+## ✨ 为什么是 SkySheep
 
 市面上多数 AI 桌面客户端只是「聊天窗口」——模型只能说不能做。SkySheep 是真正的
 **Agent 工作台**：给它一个任务，它会自己读文件、跑命令、写出结果。面向普通用户的
@@ -30,19 +40,24 @@ SkySheep 不只是聊天窗口：它能读写你的文件、执行命令、操�
 
 在此之上，是完整的 Agent 能力栈：
 
-- **多模型服务**：智谱 / DeepSeek / Kimi / OpenRouter / 硅基流动 / Anthropic 原生，一键配置；
+- 🔌 **多模型服务**：智谱 / DeepSeek / Kimi / OpenRouter / 硅基流动 / Anthropic 原生，一键配置；
   本地模型支持 [Ollama](https://ollama.com)（无需 Key）；自定义中转 + 自动检测模型
-- **MCP 与技能扩展**：MCP 客户端（stdio/HTTP，Claude Desktop 配置兼容 + 常用预设一键添加）；
+- 🧩 **MCP 与技能扩展**：MCP 客户端（stdio/HTTP，Claude Desktop 配置兼容 + 常用预设一键添加）；
   [Skills 技能包](skills-gallery/)（全局/项目两级 + [技能广场](market/)一键安装）
-- **电脑控制**：截屏进对话、鼠标 / 键盘 / 窗口 / 剪贴板（默认关闭，确认制 + 动作级白名单）
-- **定时任务与日程**：周期任务、到点提醒、周历视图；手机经局域网继续聊（令牌 + 二维码）
-- **圆桌多模型**：多个模型并行独立作答，主席融合成一份更好的答案
-- **文档读写**：PDF / Word / Excel 读取，Word / Excel / CSV 生成
-- **中文优先**：界面、内置帮助、快捷指令、技能广场全部为中文场景设计
+- 🖱️ **电脑控制**：截屏进对话、鼠标 / 键盘 / 窗口 / 剪贴板（默认关闭，确认制 + 动作级白名单）
+- ⏰ **定时任务与日程**：周期任务、到点提醒、周历视图；手机经局域网继续聊（令牌 + 二维码）
+- 👥 **圆桌多模型**：多个模型并行独立作答，主席融合成一份更好的答案
+- 📄 **文档读写**：PDF / Word / Excel 读取，Word / Excel / CSV 生成
+- 🀄 **中文优先**：界面、内置帮助、快捷指令、技能广场全部为中文场景设计
 
-更多截图：[模型服务设置](docs/images/providers.png) · [日程周历](docs/images/agenda.png) · [用量仪表盘](docs/images/usage.png)
+## 🖼 界面一览
 
-## 快速开始
+| 模型服务设置 | 日程周历 | 用量仪表盘 |
+|:---:|:---:|:---:|
+| ![模型服务设置](docs/images/providers.png) | ![日程周历](docs/images/agenda.png) | ![用量仪表盘](docs/images/usage.png) |
+| 浅色「纸墨」主题，填好 API Key 即可接入多家服务商 | 深色「夜墨」主题，定时任务排进周历，到点自动执行并提醒 | token 统计与费用估算实时可见，消耗不再是一笔糊涂账 |
+
+## 🚀 快速开始
 
 **方式一：下载安装包（推荐普通用户）**
 
@@ -75,7 +90,8 @@ uv run python examples/demo.py   # FakeProvider 多步编码任务（写→跑�
 选任意位置的文件，`Ctrl+F` 对话内查找、`Ctrl+Shift+F` 跨会话搜索、
 `Ctrl+Alt+Space` 全局唤起窗口。刚上手点顶栏「？」看内置帮助。
 
-### 双击启动 / 打包
+<details>
+<summary><b>📦 双击启动 / 打包发布</b>（展开）</summary>
 
 ```bash
 cd engine
@@ -88,7 +104,9 @@ uv pip install pyinstaller
 单文件安装包：安装 [Inno Setup 6](https://jrsoftware.org/isdl.php) 后执行
 `ISCC.exe tools\installer.iss`，产物在 `installer/`。
 
-### 安全机制
+</details>
+
+### 🛡 安全机制
 
 - 只读工具（read/grep/glob/list/web_fetch/web_search/read_document）自动放行
 - 写文件、画图、执行命令默认弹确认：`允许一次 / 本项目总是允许 / 拒绝`；支持
@@ -101,15 +119,16 @@ uv pip install pyinstaller
 - 定时任务等无人值守场景只能调用预授权工具，其余写入/执行自动拒绝
 - 全部用户数据在 `~/.skysheep/`；诊断包导出时自动打码所有密钥
 
-### 定时任务与日程提醒的运行前提
+> **⏰ 定时任务与日程提醒的运行前提**：定时任务、日程提醒由应用内循环触发，
+> **只在 SkySheep 运行期间生效**：关窗时选「缩到系统托盘」即继续后台运行；
+> 彻底退出期间到点的任务在下次启动补跑；想开机即守着，在 设置 · 高级 打开「开机自动启动」。
 
-定时任务、日程提醒由应用内循环触发，**只在 SkySheep 运行期间生效**：关窗时选
-「缩到系统托盘」即继续后台运行；彻底退出期间到点的任务在下次启动补跑；
-想开机即守着，在 设置 · 高级 打开「开机自动启动」。
-
-## 功能全景：对标主流 Agent
+## 🆚 功能全景：对标主流 Agent
 
 SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐（✅ = 已实现）：
+
+<details>
+<summary><b>展开 25 项能力对照表</b></summary>
 
 | 能力 | Claude Code | Codex CLI | ZCode | SkySheep |
 |---|---|---|---|---|
@@ -139,12 +158,14 @@ SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐�
 | 亮暗主题 / 桌面形态 | — | — | ✅ | ✅ 纸墨/夜墨/跟随系统 + 托盘 + 开机自启 + 安装包 |
 | 局域网远程访问（手机继续聊） | — | — | — | ✅ 令牌 + 二维码，默认仅本机监听 |
 
+</details>
+
 差异点：CLI 三杰更强在终端生态（插件市场、CI 集成）；SkySheep 把「桌面普通用户也能
 安全用」放在第一位——权限确认制、纯本地存储、缺 Key 不崩溃、检查点一键回滚、
 电脑控制默认收起。当前版本 **Windows 优先**（pywebview/WebView2），macOS/Linux
 在路线图上（`--browser` 模式已具备跨平台兜底）。
 
-## 架构
+## 🏗 架构
 
 ```
 ┌────────────────────────────────────────────┐
@@ -173,7 +194,7 @@ SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐�
 WebSocket server 消费同一套引擎 API；敏感操作通过 `PermissionGate` 产出
 `PermissionRequest` 事件并挂起，前端决策后恢复执行。
 
-## 开发
+## 🤝 开发
 
 ```bash
 cd engine
@@ -187,7 +208,7 @@ uv run ruff check .  # lint
 
 遇到问题？应用内 设置 · 关于 →「💬 反馈问题」会自动打包脱敏诊断包并打开反馈页。
 
-## 路线图
+## 🗺 路线图
 
 - **M1-M4（✅）**：引擎内核 → 扩展生态（MCP/Skills/子代理）→ 桌面应用 → 特性对标
 - **M5（✅ 已发布）**：开源发布——仓库上线 [github.com/Sky-scrape/SkySheep](https://github.com/Sky-scrape/SkySheep)：
@@ -202,6 +223,14 @@ uv run ruff check .  # lint
 
 版本与变更以 [CHANGELOG.md](CHANGELOG.md) 为唯一事实来源。
 
-## License
+## 📄 License
 
 [MIT](LICENSE)
+
+---
+
+<div align="center">
+
+☁️ **云朵小羊与你同在** ☁️
+
+</div>

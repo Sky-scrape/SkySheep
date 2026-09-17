@@ -1,20 +1,30 @@
-# SkySheep 🐑
+<div align="center">
+
+[![SkySheep](docs/images/banner.png)](https://sky-scrape.github.io/SkySheep/)
 
 **An open-source AI Agent workbench that runs on your computer — it can see, it can act, and it asks you before every step.**
 
-<p>
-  <a href="https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows--first-blue">
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
-  <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-informational">
-  <a href="README.md"><img alt="中文" src="https://img.shields.io/badge/docs-中文-red"></a>
-</p>
+[![CI](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg)](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml)
+![Platform](https://img.shields.io/badge/platform-Windows--first-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Python](https://img.shields.io/badge/python-3.11%2B-informational)
+[![中文](https://img.shields.io/badge/docs-中文-red)](README.md)
+
+[🌐 Website](https://sky-scrape.github.io/SkySheep/) · [⬇️ Download](https://github.com/Sky-scrape/SkySheep/releases/latest) · [🧩 Skill Market](market/) · [📖 中文文档](README.md)
+
+</div>
 
 SkySheep is more than a chat window: it can read and write your files, run commands, operate your computer, and work on a schedule. Every sensitive action — writing files, running commands, moving the mouse — **pops up a confirmation card asking for your consent first**; every round of file changes is automatically snapshotted, so you can undo any of it with one click, anytime.
 
+<div align="center">
+
 ![SkySheep main window](docs/images/right-panel.png)
 
-## Why SkySheep
+The full "Night-ink" dark theme: sidebar + conversation + live right panel + the desktop pet sheep
+
+</div>
+
+## ✨ Why SkySheep
 
 Most AI desktop clients out there are just chat windows — the model can talk but can't act. SkySheep is a true **Agent workbench**: hand it a task and it reads the files, runs the commands, and writes out the results on its own. For a desktop Agent built for everyday users, safety comes first, so we made three things the default behavior:
 
@@ -26,17 +36,22 @@ Most AI desktop clients out there are just chat windows — the model can talk b
 
 On top of that sits a complete Agent capability stack:
 
-- **Multi-provider models**: Zhipu / DeepSeek / Kimi / OpenRouter / SiliconFlow / native Anthropic, one-click setup; local models via [Ollama](https://ollama.com) (no key required); custom relay endpoints + automatic model detection
-- **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + one-click install from the [Skill Market](market/))
-- **Computer control**: screenshots straight into the conversation; mouse / keyboard / window / clipboard (off by default; confirmation-gated, with an action-level whitelist)
-- **Scheduled tasks and agenda**: recurring tasks, due-time reminders, weekly calendar view; continue the chat from your phone over LAN (token + QR code)
-- **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer
-- **Document I/O**: reads PDF / Word / Excel, writes Word / Excel / CSV
-- **Chinese-first**: the UI, built-in help, quick commands, and Skill Market are all designed for Chinese-language scenarios
+- 🔌 **Multi-provider models**: Zhipu / DeepSeek / Kimi / OpenRouter / SiliconFlow / native Anthropic, one-click setup; local models via [Ollama](https://ollama.com) (no key required); custom relay endpoints + automatic model detection
+- 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + one-click install from the [Skill Market](market/))
+- 🖱️ **Computer control**: screenshots straight into the conversation; mouse / keyboard / window / clipboard (off by default; confirmation-gated, with an action-level whitelist)
+- ⏰ **Scheduled tasks and agenda**: recurring tasks, due-time reminders, weekly calendar view; continue the chat from your phone over LAN (token + QR code)
+- 👥 **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer
+- 📄 **Document I/O**: reads PDF / Word / Excel, writes Word / Excel / CSV
+- 🀄 **Chinese-first**: the UI, built-in help, quick commands, and Skill Market are all designed for Chinese-language scenarios
 
-More screenshots: [model provider settings](docs/images/providers.png) · [agenda weekly view](docs/images/agenda.png) · [usage dashboard](docs/images/usage.png)
+## 🖼 Interface Tour
 
-## Quick Start
+| Model provider settings | Agenda weekly view | Usage dashboard |
+|:---:|:---:|:---:|
+| ![Model provider settings](docs/images/providers.png) | ![Agenda weekly view](docs/images/agenda.png) | ![Usage dashboard](docs/images/usage.png) |
+| Light "paper-ink" theme — paste an API key and connect to any provider | Dark "night-ink" theme — scheduled tasks land on the weekly calendar and fire on time | Token stats and cost estimates in real time — no more mystery bills |
+
+## 🚀 Quick Start
 
 **Option 1: Download the installer (recommended for everyday users)**
 
@@ -62,7 +77,8 @@ uv run python examples/demo.py   # FakeProvider multi-step coding task (write �
 
 In the desktop app: type `/` to bring up the command menu and quick commands, `@` to reference project files/folders, "Add file" to attach files from anywhere on disk, `Ctrl+F` to search within a conversation, `Ctrl+Shift+F` to search across sessions, and `Ctrl+Alt+Space` to summon the window globally. New here? Click the "?" in the top bar for built-in help.
 
-### Double-click launch / packaging
+<details>
+<summary><b>📦 Double-click launch / packaging</b> (expand)</summary>
 
 ```bash
 cd engine
@@ -74,7 +90,9 @@ uv pip install pyinstaller
 
 Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), then run `ISCC.exe tools\installer.iss`; the output lands in `installer/`.
 
-### Safety mechanisms
+</details>
+
+### 🛡 Safety mechanisms
 
 - Read-only tools (read/grep/glob/list/web_fetch/web_search/read_document) run without confirmation
 - File writes, image generation, and command execution prompt for confirmation by default: `Allow once / Always allow for this project / Deny`; a tiered "✎ Auto-write" permission mode is also supported (command execution always still requires confirmation)
@@ -86,13 +104,14 @@ Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), 
 - Unattended scenarios such as scheduled tasks can only call pre-authorized tools; all other writes/executions are rejected automatically
 - All user data lives in `~/.skysheep/`; exported diagnostic bundles automatically redact all secrets
 
-### Requirements for scheduled tasks and agenda reminders
+> **⏰ Requirements for scheduled tasks and agenda reminders**: scheduled tasks and agenda reminders are triggered by the app's internal loop, so they **only work while SkySheep is running**: choose "Minimize to system tray" when closing the window to keep it running in the background; tasks that come due while the app has fully exited are caught up on the next launch; to have it on duty from boot, enable "Launch at startup" under Settings · Advanced.
 
-Scheduled tasks and agenda reminders are triggered by the app's internal loop, so they **only work while SkySheep is running**: choose "Minimize to system tray" when closing the window to keep it running in the background; tasks that come due while the app has fully exited are caught up on the next launch; to have it on duty from boot, enable "Launch at startup" under Settings · Advanced.
-
-## Feature Panorama: Benchmarked Against Mainstream Agents
+## 🆚 Feature Panorama: Benchmarked Against Mainstream Agents
 
 SkySheep's feature set was built item by item against Claude Code / OpenAI Codex CLI / ZCode (✅ = implemented):
+
+<details>
+<summary><b>Expand the 25-capability comparison table</b></summary>
 
 | Capability | Claude Code | Codex CLI | ZCode | SkySheep |
 |---|---|---|---|---|
@@ -122,9 +141,11 @@ SkySheep's feature set was built item by item against Claude Code / OpenAI Codex
 | Light/dark themes / desktop form factor | — | — | ✅ | ✅ Paper-ink / Night-ink / follow system + system tray + launch at startup + installer |
 | LAN remote access (continue on your phone) | — | — | — | ✅ token + QR code; listens on localhost only by default |
 
+</details>
+
 Where they differ: the big three CLIs are stronger in terminal ecosystem (plugin markets, CI integration); SkySheep puts "safe for everyday desktop users" first — confirmation-gated permissions, purely local storage, no crash without an API key, one-click checkpoint rollback, and computer control tucked away by default. The current release is **Windows-first** (pywebview/WebView2); macOS/Linux are on the roadmap (the `--browser` mode already provides a cross-platform fallback).
 
-## Architecture
+## 🏗 Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -151,7 +172,7 @@ Where they differ: the big three CLIs are stronger in terminal ecosystem (plugin
 
 Design keynote: **event-stream driven** — the entire agent run is modeled as `AgentEvent`s, and the CLI, GUI, and WebSocket server all consume the same engine API; sensitive operations go through the `PermissionGate`, which emits a `PermissionRequest` event and suspends; once the frontend decides, execution resumes.
 
-## Development
+## 🤝 Development
 
 ```bash
 cd engine
@@ -163,16 +184,29 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) (environment s
 
 Running into a problem? In the app, go to Settings · About → "💬 Report an issue" to auto-package a redacted diagnostic bundle and open the feedback page.
 
-## Roadmap
+## 🗺 Roadmap
 
 - **M1-M4 (✅)**: engine core → extension ecosystem (MCP/Skills/sub-agents) → desktop app → feature-parity pass
-- **M5 (in progress)**: open-source release — CI ✅, community docs ✅, installer scripts ✅, Skill Market & [official seed skills](skills-gallery/) ✅, update check ✅, SmartScreen guide ✅, website page (`index.html`, GitHub Pages-ready) ✅;
-  remaining: official launch of the GitHub repo, code-signed distribution
+- **M5 (✅ shipped)**: open-source release — repo live at [github.com/Sky-scrape/SkySheep](https://github.com/Sky-scrape/SkySheep):
+  CI ✅, community docs ✅, installer scripts ✅, Skill Market (index published with the main repo) ✅, update check ✅,
+  SmartScreen guide ✅, website page (`index.html`, live on GitHub Pages) ✅; remaining: code-signed distribution
 - **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
-- **Further out**: demo mode for keyless users and one-click Ollama setup ✅ (0.8.x), daily token budget guardrails ✅, macOS/Linux support, system-level scheduling, defense-in-depth against prompt injection
+- **v1.0 (✅ current release)**: first stable release — browser control, phone control (in-app toggle),
+  instant title-bar theme sync, keyless activation paths (registration guide / demo mode / one-click Ollama),
+  daily token budget guardrails, prompt-injection defense, feedback loop (diagnostic bundle + one-click report),
+  crash sentinel with friendly messaging, and the full website + open-source kit
+- **Next up**: macOS/Linux support, system-level scheduling, defense-in-depth against prompt injection
 
 [CHANGELOG.md](CHANGELOG.md) is the single source of truth for versions and changes.
 
-## License
+## 📄 License
 
 [MIT](LICENSE)
+
+---
+
+<div align="center">
+
+☁️ **The cloud sheep is with you** ☁️
+
+</div>

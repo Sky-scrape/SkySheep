@@ -138,6 +138,38 @@ def _contains_seq(parts: tuple[str, ...], sub: tuple[str, ...]) -> bool:
     return any(parts[i : i + n] == sub for i in range(len(parts) - n + 1))
 
 
+def _no_match_hint(all_roots: list[Path], staging: Path, only_under: str) -> str:
+    """链接里的子目录没匹配到技能时，给一份能照着改的提示。
+
+    上游仓库改目录结构是常事（anthropics/skills 就把技能从 document-skills/ 移到了
+    skills/），只说「没找到」用户无从下手。这里把包里实际发现的技能目录列出来，
+    并剥掉压缩包外层那层仓库包装目录（GitHub 归档会套一层 repo-main/），
+    让路径正好是用户在链接里该写的那一段。
+    """
+    rels = [r.relative_to(staging).parts for r in all_roots]
+    if not rels:
+        return f"链接指向的目录里没有找到技能（没有 {SKILL_FILE}）：{only_under}"
+    # 所有技能共享同一层前缀时，那就是归档的包装目录，从展示路径里去掉
+    firsts = {p[0] for p in rels}
+    if len(firsts) == 1 and all(len(p) > 1 for p in rels):
+        rels = [p[1:] for p in rels]
+    found = ["/".join(p) for p in rels]
+    shown = "、".join(found[:12]) + ("…" if len(found) > 12 else "")
+
+    lines = [
+        f"链接指向的目录里没有技能（没有 {SKILL_FILE}）：{only_under}",
+        f"这个仓库里实际找到的技能目录是：{shown}",
+    ]
+    # 末段同名（如链接写的 docx、包里也有个 docx）→ 直接把该改成什么写出来
+    wanted = only_under.replace("\\", "/").rstrip("/").split("/")[-1]
+    same = [f for f in found if f.split("/")[-1] == wanted]
+    if same:
+        lines.append(f"链接里的目录多半过期了，把地址中的目录换成：{same[0]}")
+    else:
+        lines.append("多半是上游改了目录结构：把链接里的目录段换成上面其中之一，或直接粘贴仓库主页链接安装全部")
+    return "\n".join(lines)
+
+
 def install_from_zip(
     src: str | Path,
     dest_root: Path,
@@ -168,11 +200,10 @@ def install_from_zip(
         roots = _scan_skills_in_dir(staging)
         if only_under:
             sub = tuple(p for p in only_under.replace("\\", "/").split("/") if p)
-            roots = [r for r in roots if _contains_seq(r.relative_to(staging).parts, sub)]
+            all_roots = list(roots)
+            roots = [r for r in all_roots if _contains_seq(r.relative_to(staging).parts, sub)]
             if not roots:
-                raise SkillInstallError(
-                    f"链接指向的目录里没有找到技能（没有 {SKILL_FILE}）：{only_under}"
-                )
+                raise SkillInstallError(_no_match_hint(all_roots, staging, only_under))
         if not roots:
             raise SkillInstallError(f"压缩包里没找到技能：需要含 {SKILL_FILE} 的文件夹")
         names = [_skill_name_of(r) for r in roots]

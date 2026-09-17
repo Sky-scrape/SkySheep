@@ -266,16 +266,19 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   display: flex; flex-direction: column; gap: 10px;
 }
 
-/* ---------- 会话标签条（主区最顶行） ---------- */
+/* ---------- 会话标签条（顶栏内，与帮助 / 通知中心同一行） ---------- */
 #chat-tabs {
-  display: flex; gap: 6px; padding: 6px 14px 2px;
-  overflow-x: auto; flex-shrink: 0;
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0; flex: 0 1 auto;
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none; /* 顶栏只有 30px 高，横条不占视觉 */
 }
+#chat-tabs::-webkit-scrollbar { height: 0; }
 #chat-tabs.hidden { display: none; }
 /* 独立小胶囊造型（原"文件夹标签"贴边造型是给顶栏下方位置设计的，已随挪动作废） */
 .chat-tab {
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 6px 4px 10px; max-width: 210px;
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  padding: 3px 5px 3px 9px; max-width: 210px;
   background: var(--paper-sunken); border: 1.5px solid var(--line2);
   border-radius: var(--r-sm);
   cursor: pointer; font-size: 12.5px; color: var(--text2);
@@ -1336,6 +1339,9 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 
 /* 设置页：卡片内状态提示（添加/删除结果） */
 .card-status { margin-bottom: 10px; font-size: 12.5px; font-weight: 700; line-height: 1.6; }
+/* 报错里会带多行提示（如「链接指向的目录没有技能」会列出包里实际的技能目录），
+   不保留换行会挤成一长行，读不下去 */
+.card-status { white-space: pre-wrap; word-break: break-word; }
 .card-status.ok { color: var(--down); }
 .card-status.bad { color: var(--reg); }
 

@@ -5,25 +5,25 @@
     {
       "name": "docx 文档技能",
       "description": "创建、编辑、分析 Word 文档（含修订、批注、格式保留）",
-      "url": "https://github.com/anthropics/skills/tree/main/document-skills/docx",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/docx",
       "author": "anthropics"
     },
     {
       "name": "pdf 文档技能",
       "description": "处理 PDF：填表单、合并拆分、提取文本与表格",
-      "url": "https://github.com/anthropics/skills/tree/main/document-skills/pdf",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/pdf",
       "author": "anthropics"
     },
     {
       "name": "pptx 幻灯片技能",
       "description": "创建与编辑 PowerPoint 演示文稿（版式、缩略图、批注）",
-      "url": "https://github.com/anthropics/skills/tree/main/document-skills/pptx",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/pptx",
       "author": "anthropics"
     },
     {
       "name": "xlsx 表格技能",
       "description": "创建与编辑 Excel 表格（公式、图表、条件格式）",
-      "url": "https://github.com/anthropics/skills/tree/main/document-skills/xlsx",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/xlsx",
       "author": "anthropics"
     },
     {

@@ -237,6 +237,32 @@ def test_resolve_url_rejects_bad_links():
         assert why in str(ei.value), (bad, str(ei.value))
 
 
+def test_market_index_anthropics_links_are_current():
+    """索引里的 anthropics/skills 子目录链接必须指向当前结构。
+
+    上游把技能从 document-skills/ 移到 skills/ 后，广场里这 4 条会全部安装失败
+    （报「链接指向的目录里没有找到技能」）。这个错用户很难自己定位，用测试钉住。
+    """
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]  # engine/tests → 仓库根
+    data = json.loads((root / "market" / "index.json").read_text(encoding="utf-8"))
+    anth = [it for it in data["items"] if "anthropics/skills" in it["url"]]
+    assert anth, "索引里应有 anthropics/skills 的条目"
+    for it in anth:
+        assert "document-skills/" not in it["url"], (
+            f"「{it['name']}」链接已过期（上游改为 skills/）：{it['url']}"
+        )
+    # 内置清单与索引保持一致（离线回退时用的是前者）
+    from skysheep.skills.market import BUILTIN_INDEX
+
+    builtin = {b["name"]: b["url"] for b in BUILTIN_INDEX}
+    for it in data["items"]:
+        if it["name"] in builtin:
+            assert builtin[it["name"]] == it["url"], f"内置清单与索引不一致：{it['name']}"
+
+
 def test_install_from_zip_only_under(tmp_path):
     pack = tmp_path / "p.zip"
     with zipfile.ZipFile(pack, "w") as zf:
@@ -249,8 +275,32 @@ def test_install_from_zip_only_under(tmp_path):
     assert (dest / "aaa" / "SKILL.md").is_file()
     assert not (dest / "ccc").exists()
 
-    # 指向不存在的子目录 → 明确报错，不留半个技能
+    # 指向不存在的子目录 → 明确报错，不留半个技能，且提示里要能照看到正确的目录
     with pytest.raises(SkillInstallError) as ei:
         install_from_zip(pack, tmp_path / "skills2", existing=set(), only_under="nope")
-    assert "没有找到技能" in str(ei.value)
+    msg = str(ei.value)
+    assert "没有技能" in msg
+    # 把包里实际找到的技能目录列出来（剥掉 repo-main/ 这层归档包装）
+    assert "skills/aaa" in msg and "skills/bbb" in msg and "other/ccc" in msg
+    assert "repo-main" not in msg
     assert not (tmp_path / "skills2").exists() or list((tmp_path / "skills2").iterdir()) == []
+
+def test_install_hint_points_at_moved_skill_dir(tmp_path):
+    """上游改目录结构时，报错要直接点名该把链接改成什么。
+
+    anthropics/skills 把技能从 document-skills/ 移到了 skills/，索引里的旧链接会全失效。
+    只说「没找到」用户无从下手，提示里应给出可直接照抄的正确目录。
+    """
+    pack = tmp_path / "p.zip"
+    with zipfile.ZipFile(pack, "w") as zf:
+        zf.writestr("skills-main/skills/docx/SKILL.md", "---\nname: docx\ndescription: d\n---\n")
+        zf.writestr("skills-main/skills/pdf/SKILL.md", "---\nname: pdf\ndescription: p\n---\n")
+    with pytest.raises(SkillInstallError) as ei:
+        install_from_zip(
+            pack, tmp_path / "skills", existing=set(),
+            only_under="document-skills/docx",
+        )
+    msg = str(ei.value)
+    # 末段同名（docx）→ 直接给出该改成哪个目录
+    assert "把地址中的目录换成：skills/docx" in msg
+    assert "skills-main" not in msg  # 归档包装目录不展示给用户

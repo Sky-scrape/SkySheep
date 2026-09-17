@@ -3159,8 +3159,11 @@ class ServerBackend:
         # 首次启动配置向导已完成标记（1=完成，不再自动弹出）
         "onboarded": (0, 1),
     }
-    # 右侧面板：打开了哪些标签、激活的是哪个（id 白名单见前端 RIGHT_TABS）
-    RIGHT_TAB_IDS = ("aux", "review", "terminal", "browser", "files", "tasks", "todo", "agenda", "cron")
+    # 右侧面板：打开了哪些标签、激活的是哪个（id 白名单见前端 TAB_META）
+    RIGHT_TAB_IDS = (
+        "aux", "review", "terminal", "browser", "files",
+        "tasks", "todo", "agenda", "cron", "memory",
+    )
     # 字符串型偏好（值域白名单）：theme = auto | light | dark
     STRING_PREFS = {"theme": ("auto", "light", "dark")}
 

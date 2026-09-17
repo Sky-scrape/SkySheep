@@ -200,3 +200,19 @@ def test_ui_prefs_right_panel_keys(home):
         ws.send_json({"id": "u5", "method": "ui.save", "params": {"prefs": {"right_collapsed": 0}}})
         frame = recv_until(ws, "u5")
         assert frame["result"]["prefs"] == {"right_collapsed": 0}
+        # 「项目记忆」也是合法标签：可持久化，切会话/重启后能恢复
+        ws.send_json({
+            "id": "u6",
+            "method": "ui.save",
+            "params": {"prefs": {"right_tabs": ["memory", "cron"], "right_active": "memory"}},
+        })
+        frame = recv_until(ws, "u6")
+        # right_collapsed 沿用上一步的值，这里只断言本步写入的三项
+        prefs = frame["result"]["prefs"]
+        assert prefs["right_tabs"] == ["memory", "cron"]
+        assert prefs["right_active"] == "memory"
+        # 读回验证落盘：重启后也能恢复
+        ws.send_json({"id": "u-read", "method": "ui.get"})
+        stored = recv_until(ws, "u-read")["result"]["prefs"]
+        assert stored["right_tabs"] == ["memory", "cron"]
+        assert stored["right_active"] == "memory"

@@ -1784,6 +1784,8 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
   request("chat.status").then((st) => {
     if (st) setContextUsage(st.context_tokens || 0, st.context_limit || 0);
   }).catch(() => {});
+  // 记忆标签若正开着（启动恢复 / 切项目回来），按当前项目重读
+  if (rightActive === "memory" && !rightPanel.classList.contains("hidden")) loadMemoryPanel();
   // 启动后台已查过更新：有新版本时进通知中心（设置 · 关于里可手动再查）
   if (snap.update) {
     pushNotice(`🆕 新版本 v${snap.update.version} 可用`, "设置 · 关于 里可前往下载");
@@ -2021,6 +2023,12 @@ function resetWorkspaceState() {
 function resetProjectPanels() {
   filesLoaded = false;
   agCache = [];
+  // 项目记忆属于旧项目：内容与"已加载"标记一并作废，激活时由 loader 重读
+  memoryLoaded = false;
+  const memText = document.getElementById("rp-memory-text");
+  if (memText) memText.value = "";
+  const memStatus = document.getElementById("memory-status");
+  if (memStatus) memStatus.textContent = "";
   if (tasksTimer) { clearTimeout(tasksTimer); tasksTimer = null; }
   const tasks = document.getElementById("tasks-list");
   if (tasks) tasks.innerHTML = "";
@@ -3590,7 +3598,7 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     if (act === "todo") return openRightTab("todo");
     if (act === "agenda") return openRightTab("agenda");
     if (act === "cron") return openRightTab("cron");
-    if (act === "memory") return memoryModal();
+    if (act === "memory") return openRightTab("memory");
     if (act === "project") return projectModal();
     if (act === "ext") return openSettings("skills");
     if (navPending[act]) addNotice(`「${navPending[act]}」开发中，即将上线`);
@@ -4075,19 +4083,49 @@ function showAgendaReminder(item) {
   document.body.appendChild(bar);
 }
 
-async function memoryModal() {
-  const r = await request("project.instructions");
-  const box = document.createElement("div");
-  box.innerHTML = `
-    <p class="dim small">记忆文件：<b>${escapeHtml(r.path || "本项目还没有（保存时自动创建 AGENTS.md）")}</b><br>
-    写在这里的项目约定会注入每一轮对话，Agent 会一直遵守（对标 AGENTS.md / CLAUDE.md）。</p>
-    <textarea id="memory-text" class="memory-text" placeholder="例如：&#10;- 提交信息用中文&#10;- 改完代码必须跑 pytest"></textarea>`;
-  box.querySelector("textarea").value = r.text || "";
-  showModal("项目记忆", box, async () => {
-    const res = await request("project.save_instructions", { text: box.querySelector("textarea").value });
-    addNotice(`项目记忆已保存（${res.chars} 字）→ ${res.path}`);
-  }, "保存");
+// ---------- 项目记忆：右侧面板编辑（AGENTS.md，保存即注入每一轮对话） ----------
+// 原来是弹窗；改成与日程/定时任务同款的右面板标签——编辑约定时还能同时看着对话。
+const rpMemoryText = document.getElementById("rp-memory-text");
+let memoryLoaded = false; // 与项目绑定：切项目后由 resetProjectPanels 置回 false
+
+function memoryStatus(text, ok = true) {
+  const el = document.getElementById("memory-status");
+  el.textContent = text;
+  el.className = "rp-memory-status" + (ok ? "" : " bad");
 }
+
+async function loadMemoryPanel(force = false) {
+  if (memoryLoaded && !force) return;
+  try {
+    const r = await request("project.instructions");
+    rpMemoryText.value = r.text || "";
+    memoryLoaded = true;
+    memoryStatus(r.path
+      ? `记忆文件：${r.path}`
+      : "本项目还没有记忆文件，保存时会自动创建 AGENTS.md");
+  } catch (e) {
+    memoryStatus("✗ 读取失败：" + e.message, false);
+  }
+}
+
+async function saveMemoryPanel() {
+  try {
+    const res = await request("project.save_instructions", { text: rpMemoryText.value });
+    memoryStatus(`✓ 已保存（${res.chars} 字）→ ${res.path}，下一轮对话即生效`);
+    addNotice(`项目记忆已保存（${res.chars} 字）→ ${res.path}`);
+  } catch (e) {
+    memoryStatus("✗ 保存失败：" + e.message, false);
+  }
+}
+document.getElementById("memory-save").onclick = () => { saveMemoryPanel(); };
+document.getElementById("memory-reload").onclick = () => { loadMemoryPanel(true); };
+// Ctrl+S 在面板内直接保存（不劫持全局）
+rpMemoryText.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === "s") {
+    e.preventDefault();
+    saveMemoryPanel();
+  }
+});
 
 // ---------- 工作项目：查看与切换（应用内设定工作目录） ----------
 async function projectModal() {
@@ -5311,6 +5349,7 @@ const RP_ICONS = {
   todo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 6h11M9.5 12h11M9.5 18h11"/><path d="m3.5 6 1.2 1.2L7 4.9M3.5 12l1.2 1.2L7 10.9M4 18h.01"/></svg>',
   agenda: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15" rx="2"/><path d="M8 3.5v4M16 3.5v4M4 10.5h16"/></svg>',
   cron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+  memory: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M9 3.5v17"/><path d="M12.5 8h4M12.5 12h4"/></svg>',
   // 面板开关：箭头指明点击后的动作——收起时 `>`（向右展开）、展开时 `<`（向左收起），
   // 展开态把面板列填色提示"此刻是开着的"
   panelClosed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M14.5 4.5v15"/><path d="m8.5 9.5 2.5 2.5-2.5 2.5"/></svg>',
@@ -5326,6 +5365,7 @@ const TAB_META = {
   todo: { title: "任务清单" },
   agenda: { title: "日程" },
   cron: { title: "定时任务" },
+  memory: { title: "项目记忆" },
 };
 let rightTabs = [];    // 打开的标签 id（有序）
 let rightActive = null;
@@ -5376,6 +5416,7 @@ function openRightTab(id) {
   if (id === "tasks") loadTasks();
   if (id === "agenda") loadAgenda();
   if (id === "cron") loadCron();
+  if (id === "memory") loadMemoryPanel();
   if (id === "terminal" && document.hasFocus()) termIn.focus();
 }
 
@@ -5388,6 +5429,7 @@ function activateRightTab(id) {
   if (id === "tasks") loadTasks();
   if (id === "agenda") loadAgenda();
   if (id === "cron") loadCron();
+  if (id === "memory") loadMemoryPanel();
   if (id === "terminal" && document.hasFocus()) termIn.focus();
 }
 

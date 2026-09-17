@@ -342,6 +342,18 @@
             <ul id="cron-list" class="list cron-list rp-page-list"></ul>
           </section>
 
+          <section id="rp-page-memory" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <span class="dim small">项目记忆（AGENTS.md）· 每轮对话自动注入</span>
+              <span class="spacer"></span>
+              <button id="memory-reload" class="rp-mini" title="放弃修改，重新从磁盘读取">重读</button>
+              <button id="memory-save" class="rp-mini primary">保存</button>
+            </div>
+            <textarea id="rp-memory-text" class="rp-memory-text" spellcheck="false"
+                      placeholder="写给 Agent 看的项目约定，例如：&#10;- 提交信息用中文&#10;- 改完代码必须跑一遍测试&#10;- 所有新接口都要带错误处理"></textarea>
+            <div id="memory-status" class="rp-memory-status"></div>
+          </section>
+
         </div>
       </aside>
     </div>

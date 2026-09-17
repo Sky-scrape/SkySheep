@@ -743,6 +743,20 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .toggle-row.adv-toggle { justify-content: flex-start; margin-top: 10px; }
 .adv-toggle-desc { margin: 4px 0 0 24px; line-height: 1.7; }
 
+/* 右面板「项目记忆」：编辑区占满余下空间，底部一行状态（文件路径 / 保存结果） */
+.rp-memory-text {
+  flex: 1; min-height: 0; width: 100%; resize: none;
+  padding: 9px 11px; font: inherit; font-size: 12.5px; line-height: 1.7;
+  color: var(--text); background: var(--paper-raised);
+  border: none; border-top: 1.5px solid var(--line2); outline: none;
+}
+.rp-memory-text:focus { background: var(--card); }
+.rp-memory-status {
+  padding: 5px 10px; min-height: 24px; font-size: 11.5px; color: var(--dim);
+  border-top: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rp-memory-status.bad { color: var(--reg); }
+
 /* 定时任务的预授权工具勾选表：两列密排，只读项灰显（本来就放行） */
 .cron-tools {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));

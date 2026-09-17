@@ -50,7 +50,8 @@ def register_window(window) -> None:
 def refresh_now() -> bool:
     """按当前主题立即重刷标题栏与窗口底色；没有注册窗口（浏览器模式等）返回 False。
 
-    与看板线程的 _paint 同一套动作：DWM 标题栏三属性 + WinForms BackColor。
+    与看板线程的 _paint 同一套动作：DWM 标题栏三属性 + WinForms BackColor，
+    并同步切换窗口标题栏小图标（浅色=墨线 / 深色=白线，见 apply_window_icon）。
     调用方（backend.apply_theme）在 WS 线程——与看板线程一样是非 UI 线程，
     BackColor 直接赋值在 pywebview 的 WinForms 窗体上已验证可行。
     """
@@ -68,9 +69,45 @@ def refresh_now() -> bool:
         native = getattr(window, "native", None)
         if native is not None:
             native.BackColor = ColorTranslator.FromHtml(window_background())
+            apply_window_icon(native, dark=dark)
     except Exception:
         pass
     return True
+
+
+# 窗口图标（System.Drawing.Icon 实例）持引用：被 GC 回收后标题栏图标会失效
+_icon_holder: dict = {}
+
+
+def apply_window_icon(native, dark: bool = False) -> bool:
+    """把窗口标题栏/任务栏小图标换成对应主题的线稿版（浅色=墨线，深色=白线）。
+
+    图标文件来自应用 static 目录（打包态走 sys._MEIPASS）。托盘图标与 exe
+    文件图标保持彩色方块版不随主题变（深浅任务栏上都可见）。
+    """
+    try:
+        from System.Drawing import Icon  # noqa: PLC0415
+
+        path = _static_dir() / ("skysheep-line-white.ico" if dark else "skysheep-line-ink.ico")
+        if not path.exists():
+            return False
+        key = str(path)
+        if _icon_holder.get("path") == key:
+            return True  # 已是目标图标，避免重复加载闪烁
+        _icon_holder["path"] = key
+        _icon_holder["icon"] = Icon(key)  # 持引用
+        native.Icon = _icon_holder["icon"]
+        return True
+    except Exception:
+        return False
+
+
+def _static_dir() -> Path:
+    """应用静态资源目录（与 server/app.py 同一套打包兼容逻辑）。"""
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        return Path(bundle) / "skysheep" / "server" / "static"
+    return Path(__file__).parent / "server" / "static"
 
 
 def window_background(theme: str | None = None) -> str:

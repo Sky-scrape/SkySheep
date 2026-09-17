@@ -530,6 +530,7 @@ def _start_theme_watchdog(window) -> None:
             native = getattr(window, "native", None)
             if native is not None:
                 native.BackColor = ColorTranslator.FromHtml(wintheme.window_background(mode))
+                wintheme.apply_window_icon(native, dark=(mode == "dark"))
         except Exception:
             pass
 
@@ -871,7 +872,12 @@ def _run_windowed() -> int:
         _start_global_hotkey(window, _hotkey_fire)
         _start_theme_watchdog(window)
 
-    icon = static / "skysheep.ico"
+    # 窗口标题栏图标用主题化线稿版（浅色=墨线 / 深色=白线），随主题在看板线程切换；
+    # exe/托盘保持彩色方块版（深浅任务栏上都可见）
+    initial_theme = wintheme.read_ui_theme()
+    icon = static / ("skysheep-line-white.ico" if initial_theme == "dark" else "skysheep-line-ink.ico")
+    if not icon.exists():
+        icon = static / "skysheep.ico"
     webview.start(_bootstrap, icon=str(icon) if icon.exists() else None)
     _dispose_tray()
 

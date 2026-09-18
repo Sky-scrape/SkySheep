@@ -2662,7 +2662,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 }
 .tool-card .preview-btn:hover { background: var(--blue-weak); }
 
-#btn-menu { display: none; }
+#btn-menu, #btn-menu-settings { display: none; }
 
 /* ---------- 窄屏（局域网手机访问 / 小窗口）基础适配 ---------- */
 @media (max-width: 860px) {
@@ -2675,7 +2675,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   }
   body.sidebar-open #sidebar { transform: translateX(0); }
   #sb-resizer { display: none; }
-  #btn-menu { display: inline-flex; }
+  #btn-menu, #btn-menu-settings { display: inline-flex; }
   #right-panel {
     position: fixed; z-index: 110; top: 0; bottom: 0; right: 0;
     width: 92vw !important; max-width: 420px !important; min-width: 0 !important;

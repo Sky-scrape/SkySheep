@@ -3766,6 +3766,9 @@ const navPending = {}; // 已全部上线，保留结构便于扩展
 document.querySelectorAll(".nav-item").forEach((btn) => {
   btn.onclick = () => {
     const act = btn.dataset.act;
+    // 窄屏上侧栏是抽屉：点了导航就收回（任务清单等打开的是右侧面板标签，
+    // 不收回的话侧栏（z 更高）正好盖住刚打开的面板）
+    document.body.classList.remove("sidebar-open");
     // 任务清单/日程/定时任务：右侧面板标签（不再用侧栏折叠区）
     if (act === "todo") return openRightTab("todo");
     if (act === "agenda") return openRightTab("agenda");
@@ -4360,6 +4363,9 @@ function openSettings(page = "providers") {
   settingsOpen = true;
   viewChat.classList.add("hidden");
   viewSettings.classList.remove("hidden");
+  // 窄屏上侧栏是抽屉：切到设置页必须收回它，否则抽屉盖在设置页上、
+  // 而"点一下收回"的监听挂在 #chat 上（设置页里点不到）→ 卡死
+  document.body.classList.remove("sidebar-open");
   sideChat.classList.add("hidden");
   sideSettings.classList.remove("hidden");
   btnSettings.textContent = "← 返回对话";
@@ -4372,6 +4378,7 @@ function backToChat() {
   settingsOpen = false;
   viewSettings.classList.add("hidden");
   viewChat.classList.remove("hidden");
+  document.body.classList.remove("sidebar-open"); // 手机：返回对话同样先收回抽屉
   sideSettings.classList.add("hidden");
   sideChat.classList.remove("hidden");
   btnSettings.textContent = "⚙ 设置";
@@ -4396,7 +4403,10 @@ function showSettingsPage(target) {
   if (target === "about") loadBackups().catch(() => {});
 }
 document.querySelectorAll("#settings-nav li").forEach((li) => {
-  li.onclick = () => showSettingsPage(li.dataset.target);
+  li.onclick = () => {
+    document.body.classList.remove("sidebar-open"); // 手机：切换子页前先收回侧栏抽屉
+    showSettingsPage(li.dataset.target);
+  };
 });
 
 // ---------- 模型服务：列表视图 ----------
@@ -7654,6 +7664,15 @@ btnMenu.title = "打开菜单";
 btnMenu.textContent = "☰";
 btnMenu.onclick = () => document.body.classList.toggle("sidebar-open");
 document.getElementById("topbar").prepend(btnMenu);
+// 设置页的抽屉开关：设置模式隐藏整个 #view-chat，对话区顶栏的 ☰ 一起消失——
+// 手机上没有它就无法唤出侧栏，而设置子页导航与「← 返回对话」全在侧栏里（进去就出不来）
+const btnMenuSettings = document.createElement("button");
+btnMenuSettings.id = "btn-menu-settings";
+btnMenuSettings.className = "tb-icon";
+btnMenuSettings.title = "打开菜单";
+btnMenuSettings.textContent = "☰";
+btnMenuSettings.onclick = () => document.body.classList.toggle("sidebar-open");
+document.getElementById("settings-topbar").prepend(btnMenuSettings);
 document.getElementById("chat").addEventListener("click", () => {
   if (document.body.classList.contains("sidebar-open")) {
     document.body.classList.remove("sidebar-open");

@@ -5878,6 +5878,7 @@ btnTabs.innerHTML = RP_ICONS.panelClosed;
 
 function renderRightPanel() {
   const open = rightTabs.length > 0 && !rightCollapsed;
+  document.body.classList.toggle("right-open", open); // 窄屏抽屉背衬的显示依据
   rightPanel.classList.toggle("hidden", !open);
   rpResizer.classList.toggle("hidden", !open);
   btnTabs.classList.toggle("on", open);
@@ -5906,6 +5907,7 @@ function renderRightPanel() {
 
 function openRightTab(id) {
   if (!TAB_META[id]) return;
+  document.body.classList.remove("sidebar-open"); // 手机互斥：开右抽屉就收侧栏
   if (!rightTabs.includes(id)) rightTabs.push(id);
   rightActive = id;
   rightCollapsed = false;
@@ -5987,6 +5989,7 @@ window.addEventListener("keydown", (e) => { if (e.key === "Escape") hideTabsMenu
 btnTabs.onclick = () => {
   if (!rightTabs.length) { openRightTab("terminal"); return; } // 一个标签都没有 → 展开默认终端
   rightCollapsed = !rightCollapsed;
+  if (!rightCollapsed) document.body.classList.remove("sidebar-open"); // 手机互斥
   renderRightPanel();
   persistRightCollapsed();
 };
@@ -7657,12 +7660,22 @@ function renderUpdatePanel(snap) {
 }
 
 // ---------- 窄屏适配：侧栏抽屉开关（局域网手机访问用） ----------
+// 窄屏互斥：两个抽屉（侧栏 / 右面板）同时开着会把屏幕盖满、彼此挡住收回入口——
+// 所以开其中一个时自动收起另一个。
+function openSidebarDrawer() {
+  const wasOpen = document.body.classList.contains("sidebar-open");
+  document.body.classList.toggle("sidebar-open");
+  if (!wasOpen && NARROW_MQ.matches && rightTabs.length && !rightCollapsed) {
+    rightCollapsed = true;
+    renderRightPanel();
+  }
+}
 const btnMenu = document.createElement("button");
 btnMenu.id = "btn-menu";
 btnMenu.className = "tb-icon";
 btnMenu.title = "打开菜单";
 btnMenu.textContent = "☰";
-btnMenu.onclick = () => document.body.classList.toggle("sidebar-open");
+btnMenu.onclick = openSidebarDrawer;
 document.getElementById("topbar").prepend(btnMenu);
 // 设置页的抽屉开关：设置模式隐藏整个 #view-chat，对话区顶栏的 ☰ 一起消失——
 // 手机上没有它就无法唤出侧栏，而设置子页导航与「← 返回对话」全在侧栏里（进去就出不来）
@@ -7671,8 +7684,27 @@ btnMenuSettings.id = "btn-menu-settings";
 btnMenuSettings.className = "tb-icon";
 btnMenuSettings.title = "打开菜单";
 btnMenuSettings.textContent = "☰";
-btnMenuSettings.onclick = () => document.body.classList.toggle("sidebar-open");
+btnMenuSettings.onclick = openSidebarDrawer;
 document.getElementById("settings-topbar").prepend(btnMenuSettings);
+// 抽屉背衬：抽屉打开时盖住其余区域（暗色），点它 = 收回所有抽屉回到对话。
+// 这样无论抽屉多宽，屏幕上总有可点的地方能出去。
+const drawerBackdrop = document.createElement("div");
+drawerBackdrop.id = "drawer-backdrop";
+drawerBackdrop.onclick = () => {
+  document.body.classList.remove("sidebar-open");
+  if (NARROW_MQ.matches && rightTabs.length && !rightCollapsed) {
+    rightCollapsed = true;
+    renderRightPanel();
+  }
+};
+document.body.appendChild(drawerBackdrop);
+// 侧栏自带的关闭钮：有的内核把抽屉渲染得过宽时背衬可能被挤没，得有内部出口
+const sidebarClose = document.createElement("button");
+sidebarClose.id = "sidebar-close";
+sidebarClose.title = "收起菜单";
+sidebarClose.textContent = "✕";
+sidebarClose.onclick = () => document.body.classList.remove("sidebar-open");
+document.getElementById("sidebar").appendChild(sidebarClose);
 document.getElementById("chat").addEventListener("click", () => {
   if (document.body.classList.contains("sidebar-open")) {
     document.body.classList.remove("sidebar-open");

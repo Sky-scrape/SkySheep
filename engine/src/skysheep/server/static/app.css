@@ -2663,9 +2663,24 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .tool-card .preview-btn:hover { background: var(--blue-weak); }
 
 #btn-menu, #btn-menu-settings { display: none; }
+#drawer-backdrop { display: none; }
+#sidebar-close { display: none; }
 
 /* ---------- 窄屏（局域网手机访问 / 小窗口）基础适配 ---------- */
 @media (max-width: 860px) {
+  /* 抽屉背衬：任一抽屉打开时盖住其余区域，点它 = 收回所有抽屉（z 低于两个抽屉） */
+  body.sidebar-open #drawer-backdrop, body.right-open #drawer-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 105;
+    background: rgba(29, 26, 22, .45);
+  }
+  /* 侧栏内部关闭钮：抽屉渲染过宽挤掉背衬时也有出口 */
+  #sidebar-close {
+    display: inline-flex; position: absolute; top: 10px; right: 10px; z-index: 5;
+    width: 30px; height: 30px; align-items: center; justify-content: center;
+    font-size: 14px; background: var(--paper-raised); color: var(--text2);
+    border: 1.5px solid var(--ink-line); border-radius: var(--r-xs);
+  }
+  #sidebar-close:hover { color: var(--reg); }
   #sidebar {
     position: fixed; z-index: 120; top: 0; bottom: 0; left: 0;
     /* 不用 min()：老内核（部分安卓 X5）不支持时会整条声明失效、退回桌面宽度 */

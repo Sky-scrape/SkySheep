@@ -2668,7 +2668,8 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 @media (max-width: 860px) {
   #sidebar {
     position: fixed; z-index: 120; top: 0; bottom: 0; left: 0;
-    width: min(84vw, 320px) !important; min-width: 0 !important;
+    /* 不用 min()：老内核（部分安卓 X5）不支持时会整条声明失效、退回桌面宽度 */
+    width: 84vw !important; max-width: 320px !important; min-width: 0 !important;
     transform: translateX(-100%); transition: transform var(--dur-base) var(--ease-out);
     box-shadow: 6px 0 24px rgba(0, 0, 0, .3);
   }
@@ -2677,11 +2678,13 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   #btn-menu { display: inline-flex; }
   #right-panel {
     position: fixed; z-index: 110; top: 0; bottom: 0; right: 0;
-    width: min(92vw, 420px) !important; min-width: 0 !important;
+    width: 92vw !important; max-width: 420px !important; min-width: 0 !important;
     box-shadow: -6px 0 24px rgba(0, 0, 0, .3);
   }
   #rp-resizer { display: none; }
-  #btn-tabs { display: none; }
+  /* 顶栏的面板开关要保留：手机上面板是覆盖抽屉，它是唯一的收回入口
+     （启动时 app.js 会强制收起、点对话区也能收回，但都不该是唯一出路） */
+  .rp-tab .rp-x { opacity: 1; }  /* 触屏没有 hover：标签关闭钮常显 */
   .msg .msg-ops { display: flex; }  /* 触屏没有 hover：消息操作常显 */
   #topbar { padding: 8px 10px; gap: 6px; }
   #usage { display: none; }

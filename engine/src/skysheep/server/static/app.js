@@ -5900,7 +5900,9 @@ function openRightTab(id) {
   rightActive = id;
   rightCollapsed = false;
   renderRightPanel();
-  saveUiPrefs({ right_tabs: [...rightTabs], right_active: id, right_collapsed: 0 });
+  const openPrefs = { right_tabs: [...rightTabs], right_active: id };
+  if (!NARROW_MQ.matches) openPrefs.right_collapsed = 0;
+  saveUiPrefs(openPrefs);
   if (id === "review") refreshReview();
   if (id === "files") loadFiles();
   if (id === "tasks") loadTasks();
@@ -5929,16 +5931,23 @@ function closeRightTab(id) {
   if (rightActive === id) rightActive = rightTabs[rightTabs.length - 1] || null;
   if (!rightTabs.length) rightCollapsed = true; // 最后一个标签关掉 → 面板收起
   renderRightPanel();
-  saveUiPrefs({
-    right_tabs: [...rightTabs],
-    right_active: rightActive,
-    right_collapsed: rightCollapsed ? 1 : 0,
-  });
+  const closePrefs = { right_tabs: [...rightTabs], right_active: rightActive };
+  if (!NARROW_MQ.matches) closePrefs.right_collapsed = rightCollapsed ? 1 : 0;
+  saveUiPrefs(closePrefs);
 }
 
 // 面板收起/展开由顶栏按钮直接切换；「＋」菜单选要打开的标签（小浮层，不弹窗）
 let rightCollapsed = false;
 let tabsMenuEl = null;
+// 窄屏（手机，与 app.css 的 @media max-width:860px 同一断点）：右面板是覆盖抽屉。
+// 展开/收起在那里是会话内的临时状态——启动一律收起（不照搬桌面 ui.json 的
+// right_collapsed，否则手机一进来就被抽屉盖住），操作也不回写偏好（桌面端不受手机影响）。
+const NARROW_MQ = window.matchMedia("(max-width: 860px)");
+
+function persistRightCollapsed() {
+  if (NARROW_MQ.matches) return;
+  saveUiPrefs({ right_collapsed: rightCollapsed ? 1 : 0 });
+}
 
 function hideTabsMenu() {
   if (tabsMenuEl) { tabsMenuEl.remove(); tabsMenuEl = null; }
@@ -5969,7 +5978,7 @@ btnTabs.onclick = () => {
   if (!rightTabs.length) { openRightTab("terminal"); return; } // 一个标签都没有 → 展开默认终端
   rightCollapsed = !rightCollapsed;
   renderRightPanel();
-  saveUiPrefs({ right_collapsed: rightCollapsed ? 1 : 0 });
+  persistRightCollapsed();
 };
 
 // —— 终端：命令经后端在工作目录执行，输出按块流式回显 ——
@@ -6600,6 +6609,7 @@ async function initUiPrefs() {
     ? prefs.right_active
     : (rightTabs[rightTabs.length - 1] || null);
   rightCollapsed = prefs.right_collapsed === 1;
+  if (NARROW_MQ.matches) rightCollapsed = true; // 手机启动一律收起覆盖抽屉，别让面板盖住对话区
   renderRightPanel();
 }
 
@@ -7647,6 +7657,11 @@ document.getElementById("topbar").prepend(btnMenu);
 document.getElementById("chat").addEventListener("click", () => {
   if (document.body.classList.contains("sidebar-open")) {
     document.body.classList.remove("sidebar-open");
+  }
+  // 窄屏上右面板是覆盖抽屉：点一下对话区就收回（抽屉打开时顶栏开关被它压着）
+  if (NARROW_MQ.matches && !rightCollapsed && rightTabs.length) {
+    rightCollapsed = true;
+    renderRightPanel();
   }
 });
 

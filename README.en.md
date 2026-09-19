@@ -37,7 +37,7 @@ Most AI desktop clients out there are just chat windows — the model can talk b
 On top of that sits a complete Agent capability stack:
 
 - 🔌 **Multi-provider models**: Zhipu / DeepSeek / Kimi / OpenRouter / SiliconFlow / native Anthropic, one-click setup; local models via [Ollama](https://ollama.com) (no key required); custom relay endpoints + automatic model detection
-- 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + a dedicated skills page with per-project scope, SKILL.md preview, and keyword search in the [Skill Market](market/))
+- 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + one-click install from the [Skill Market](market/) + "scan this computer" to pick up skills already installed by Claude Code and other tools; a dedicated skills page with per-project scope, SKILL.md preview, and keyword search)
 - 🖱️ **Computer control**: screenshots straight into the conversation; mouse / keyboard / window / clipboard (off by default; confirmation-gated, with an action-level whitelist)
 - ⏰ **Scheduled tasks and agenda**: recurring tasks, due-time reminders, weekly calendar view; continue the chat from your phone over LAN (token + QR code)
 - 👥 **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer
@@ -191,7 +191,12 @@ Running into a problem? In the app, go to Settings · About → "💬 Report an 
   CI ✅, community docs ✅, installer scripts ✅, Skill Market (index published with the main repo) ✅, update check ✅,
   SmartScreen guide ✅, website page (`index.html`, live on GitHub Pages) ✅; remaining: code-signed distribution
 - **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
-- **v1.0 (✅ current release)**: first stable release — browser control, phone control (in-app toggle),
+- **v1.8 (✅ current release)**: real terminal (multi-tab PowerShell via ConPTY + xterm.js), bot
+  channels (Telegram / WeChat QR login), task time estimates, voice input, session archive & tags,
+  cross-session references, live sub-agent streaming with true cancellation, round-table multi-turn
+  debate, three-layer hardening from an external security review, safe non-UTF-8 text I/O (GBK etc.),
+  PPTX read/write, and provider presets expanded to 10 vendors
+- **v1.0 (✅)**: first stable release — browser control, phone control (in-app toggle),
   instant title-bar theme sync, keyless activation paths (registration guide / demo mode / one-click Ollama),
   daily token budget guardrails, prompt-injection defense, feedback loop (diagnostic bundle + one-click report),
   crash sentinel with friendly messaging, and the full website + open-source kit

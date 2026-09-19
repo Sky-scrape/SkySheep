@@ -1,6 +1,6 @@
 [project]
 name = "skysheep-engine"
-version = "1.5"
+version = "1.8"
 description = "SkySheep engine — open-source AI agent workbench kernel (agent loop, tools, providers, permissions, sessions)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +25,8 @@ dependencies = [
     "python-docx>=1.1",
     "openpyxl>=3.1",
     "pillow>=10.0",  # pypdf 初始化会探测 PIL；测试也用它构造样例图（截图功能已移除）
+    "python-pptx>=1.0.2",
+    "pywinpty>=3.0.5",
 ]
 
 [project.scripts]

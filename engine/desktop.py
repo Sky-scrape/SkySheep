@@ -29,8 +29,10 @@ MUTEX_NAME = "Local\\SkySheepDesktopSingleton"
 LOG_MAX_BYTES = 1_000_000
 ERROR_ALREADY_EXISTS = 183
 SW_RESTORE = 9
+SW_SHOWMAXIMIZED = 3
 
 _MUTEX_HANDLE = None
+_LAUNCH_T0 = time.monotonic()  # 启动计时基准：日志里记录"窗口多久后可见"
 
 
 def app_dir() -> Path:
@@ -210,6 +212,80 @@ def paint_caption(hwnd: int, paper_rgb=(244, 236, 216), ink_rgb=(29, 26, 22)) ->
         _set(35, paper_rgb)  # DWMWA_CAPTION_COLOR 标题栏底色
         _set(36, ink_rgb)  # DWMWA_TEXT_COLOR 标题文字
         _set(34, ink_rgb)  # DWMWA_BORDER_COLOR 窗口边框
+        # pywebview 按系统深色模式设了沉浸式深色标题栏（20=1，深色系统下是黑）。
+        # 不显式关掉的话，窗口最大化/还原等 DWM 重绘场景会把标题栏画回系统黑
+        # （只在窗口以最大化创建时必现，普通路径不触发）。
+        _set(20, (0, 0, 0))  # DWMWA_USE_IMMERSIVE_DARK_MODE = 关
+    except Exception:
+        pass
+
+
+class _WINDOWPLACEMENT(ctypes.Structure):
+    """GetWindowPlacement 出参：showCmd + rcNormalPosition（物理像素工作区坐标）。"""
+
+    _fields_ = [
+        ("length", wintypes.UINT),
+        ("flags", wintypes.UINT),
+        ("showCmd", wintypes.UINT),
+        ("ptMinPosition", wintypes.POINT),
+        ("ptMaxPosition", wintypes.POINT),
+        ("rcNormalPosition", wintypes.RECT),
+    ]
+
+
+def _capture_window_geometry(window) -> dict | None:
+    """采集主窗口几何（逻辑像素 + 是否最大化），供退出前落盘；失败返回 None。
+
+    统一取 GetWindowPlacement 的 rcNormalPosition：窗口最大化时它仍记录着
+    "还原后"的正常位置，配合 maximized 标志就能完整还原上次状态；而且它
+    不像 GetWindowRect 那样含 Win10/11 DWM 阴影的隐形边框偏差。物理像素
+    按窗口 DPI 折算回逻辑像素，与 create_window 的 width/height/x/y 同一
+    坐标系（pywebview 会按窗口所在屏的 DPI 换算）。
+    """
+    try:
+        native = getattr(window, "native", None)
+        if native is None:
+            return None
+        hwnd = int(native.Handle.ToInt64())
+        user32 = ctypes.windll.user32
+        wp = _WINDOWPLACEMENT()
+        wp.length = ctypes.sizeof(_WINDOWPLACEMENT)
+        if not user32.GetWindowPlacement(ctypes.c_void_p(hwnd), ctypes.byref(wp)):
+            return None
+        dpi = 96
+        try:
+            dpi = user32.GetDpiForWindow(ctypes.c_void_p(hwnd)) or 96
+        except Exception:
+            pass
+        scale = dpi / 96.0
+        if scale <= 0:
+            scale = 1.0
+        r = wp.rcNormalPosition
+        width = round((r.right - r.left) / scale)
+        height = round((r.bottom - r.top) / scale)
+        x = round(r.left / scale)
+        y = round(r.top / scale)
+        if width <= 0 or height <= 0:
+            return None
+        return {
+            "width": width,
+            "height": height,
+            "x": x,
+            "y": y,
+            "maximized": wp.showCmd == SW_SHOWMAXIMIZED,
+        }
+    except Exception:
+        return None
+
+
+def _remember_window(window) -> None:
+    """彻底退出前把窗口几何存进 window_state.json；任何失败都静默，不能挡退出。"""
+    try:
+        from skysheep import windowstate  # noqa: PLC0415  引擎导入在启动后期才发生
+
+        geometry = _capture_window_geometry(window)
+        if geometry is not None:
+            windowstate.save_state(geometry)
     except Exception:
         pass
 
@@ -518,10 +594,10 @@ def _start_theme_watchdog(window) -> None:
     """
     from skysheep import wintheme
 
-    def _paint(mode: str) -> None:
-        """标题栏 + 窗口底色一起按主题刷（失败静默：老系统没有 DWM 属性）。"""
+    def _paint() -> None:
+        """标题栏 + 窗口底色一起按当前主题刷（失败静默：老系统没有 DWM 属性）。"""
         try:
-            wintheme.apply_caption_theme(window, dark=(mode == "dark"))
+            wintheme.apply_caption_theme(window)
         except Exception:
             pass
         try:
@@ -529,8 +605,8 @@ def _start_theme_watchdog(window) -> None:
 
             native = getattr(window, "native", None)
             if native is not None:
-                native.BackColor = ColorTranslator.FromHtml(wintheme.window_background(mode))
-                wintheme.apply_window_icon(native, dark=(mode == "dark"))
+                native.BackColor = ColorTranslator.FromHtml(wintheme.window_background())
+                wintheme.apply_window_icon(native, dark=wintheme.theme_is_dark())
         except Exception:
             pass
 
@@ -538,18 +614,69 @@ def _start_theme_watchdog(window) -> None:
         # 注册主窗口：前端切主题时 backend.apply_theme 会调 wintheme.refresh_now()
         # 事件驱动重刷（立即生效）；下面的轮询退化为兜底（窗口未就绪时错过的那次）。
         wintheme.register_window(window)
-        wintheme.set_theme_mode(wintheme.read_ui_theme())
+        resolved = wintheme.read_ui_theme()
+        wintheme.set_theme_mode(resolved)
+        _log(f"主题看板：启动解析主题 {resolved}（ui.json 偏好 / auto 跟随系统）")
         last = wintheme.current_theme_mode()
-        _paint(last)
+        # native 由 GUI 循环创建：等它就绪再首刷，保证底色与标题栏小图标不缺席
+        deadline = time.monotonic() + 30
+        while getattr(window, "native", None) is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        _paint()
         while True:
             time.sleep(1.0)
             cur = wintheme.current_theme_mode()
+            if cur != last:
+                _log(f"主题看板：主题变化 {last} → {cur}（apply_theme 回写）")
+            # 每秒重设自管标题栏颜色：DWM 在窗口最大化/还原、系统主题重绘等时机
+            # 可能把 DWMWA_CAPTION_COLOR 画回系统默认色（深色系统下是黑），
+            # pywebview 也会按系统深色模式设沉浸式深色标志。同值重设无视觉变化，
+            # 成本可忽略；主题真的变了才动底色与图标。
+            try:
+                wintheme.apply_caption_theme(window)
+            except Exception:
+                pass
             if cur == last:
                 continue
             last = cur
-            _paint(cur)
+            _paint()
 
     threading.Thread(target=_thread, name="skysheep-theme", daemon=True).start()
+
+
+def _show_on_first_paint(window) -> None:
+    """等启动动画页首帧就绪后再显示窗口（窗口创建时 hidden=True）。
+
+    背景：pywebview 先 Show() 窗口、WebView2 再异步初始化，两者之间的空窗期
+    露出的是一块未绘制底色（用户持续反馈的"启动时明显黑屏，之后才出现开场动画"）。
+    loaded 事件在页面（含内联样式/图片）就绪后触发，此时 show 第一眼就是动画。
+    兜底：事件没来（初始化慢/失败）也在 4 秒后显示，绝不把窗口藏死；
+    只显示一次：主界面导航完成后 loaded 会再次触发，不能重复抢焦点。
+    """
+    shown = threading.Event()
+
+    def _show(*_args, **_kwargs) -> None:
+        if shown.is_set():
+            return
+        shown.set()
+        _log(f"splash 首帧就绪，显示窗口（启动后 {time.monotonic() - _LAUNCH_T0:.2f}s）")
+        try:
+            window.show()
+        except Exception:
+            pass
+
+    try:
+        window.events.loaded += _show
+    except Exception:
+        _show()
+        return
+
+    def _fallback() -> None:
+        if not window.events.loaded.wait(4):
+            _log("splash 首帧超时（4s），直接显示窗口")
+            _show()
+
+    threading.Thread(target=_fallback, name="skysheep-first-paint", daemon=True).start()
 
 
 def _run_windowed() -> int:
@@ -568,41 +695,73 @@ def _run_windowed() -> int:
 
     static = static_dir()
     picker = FilePicker()
-    # 提前初始化 GUI 库并取主屏：用 screen= 让 pywebview 按 DPI 正确地居中开窗
-    # （不指定位置时 WinForms 的 CenterScreen 在 DPI 缩放下会把窗口推向右下）。
-    # initialize() 只导入平台模块，start() 里再调用走模块缓存，无额外成本。
+    # 提前初始化 GUI 库并取屏幕列表：默认开窗位置用主屏（不指定位置时 WinForms
+    # 的 CenterScreen 在 DPI 缩放下会把窗口推向右下）；恢复窗口几何时的屏幕
+    # 边界校验也用它。initialize() 只导入平台模块，start() 里再调用走模块缓存，
+    # 无额外成本。矩形用逻辑像素 (x, y, w, h)，与 Screen 属性同一坐标系。
     try:
-        screen = webview.screens[0]
+        screens = [(s.x, s.y, s.width, s.height) for s in webview.screens]
     except Exception:
-        screen = None
+        screens = []
 
     width, height = 1360, 860
     x = y = None
-    if screen is not None:
+    if screens:
         # 小屏适配：窗口不许比屏幕大（此前 1360x860 在 1280 宽的屏上四周溢出，
         # 看起来"偏右下"——其实是窗口超出屏幕被裁掉了）。
-        width = max(980, min(width, screen.width - 24))
-        height = max(640, min(height, screen.height - 80))
+        sx, sy, sw, sh = screens[0]
+        width = max(980, min(width, sw - 24))
+        height = max(640, min(height, sh - 80))
         # 在屏幕内水平居中、纵向略偏上（给任务栏留空间，保证整窗都在工作区内）。
         # x/y 与 screen.width 同为逻辑像素，pywebview 会按窗口 DPI 换算。
-        x = screen.x + (screen.width - width) // 2
-        y = screen.y + max((screen.height - height) // 3, 16)
+        x = sx + (sw - width) // 2
+        y = sy + max((sh - height) // 3, 16)
 
+    # 上次退出时记下的窗口几何：完整有效就原样恢复，最大化关的这次仍按最大化开。
+    # 没有可靠记录（首次启动 / 记录损坏 / 换了屏幕配置）走上面的默认居中逻辑。
+    maximized = False
+    try:
+        from skysheep import windowstate  # noqa: PLC0415  引擎导入尽量后置
+
+        width, height, x, y, maximized = windowstate.resolve_geometry(
+            windowstate.load_state(), (width, height), screens, (980, 640),
+        )
+    except Exception:
+        pass
+
+    # 主题尽量提前定下来：窗口底色 / 启动页 / 标题栏用同一份解析结果——
+    # 「跟随系统」深色下若启动页还是纸色而标题栏已变深，首屏几秒很割裂
+    wintheme.set_theme_mode(wintheme.read_ui_theme())
     window = webview.create_window(
         "SkySheep",
-        html=splash_html(static),
+        html=splash_html(static, dark=wintheme.theme_is_dark()),
         width=width,
         height=height,
         min_size=(980, 640),
         js_api=picker,
         x=x,
         y=y,
+        # 允许选中页面文字（pywebview 默认给 body 注入 user-select:none）：
+        # 「引用回答片段」等选区交互依赖它
+        text_select=True,
+        # 上次是最大化关的就按最大化开（normal 态几何仍一并传给上面，
+        # 用户"还原"后回到的是上次的正常大小，而不是默认尺寸）。
+        maximized=maximized,
+        # 先隐藏创建：窗口 Show() 与 WebView2 初始化是异步的，控件首帧绘制之前
+        # 整窗是一块未绘制的底色（旧版本用户看到的那道"黑屏"就发生在这里）。
+        # 等加载动画页真正画出来（loaded 事件）再 show，用户第一眼就是动画。
+        hidden=True,
         # 窗口底色跟主题：pywebview 默认白底，页面刷新/首帧等尚未绘制的瞬间
         # 会露出它（WebView2 的 DefaultBackgroundColor 被设成透明）
-        background_color=wintheme.window_background(wintheme.read_ui_theme()),
+        background_color=wintheme.window_background(),
     )
+    _show_on_first_paint(window)
     picker.attach(window)
     wintheme.hook_caption_theme(window)  # 标题栏染成纸墨主题色（老系统自动跳过）
+    wintheme.allow_microphone(window)  # 放行麦克风（语音输入用；WebView2 默认静默拒绝）
+    # 看板线程提前到启动期就在跑（原先在引擎加载完成后才启动）：启动期也每秒
+    # 兜底重刷标题栏颜色，且底色/标题栏图标的首刷不再依赖引擎加载完成。
+    _start_theme_watchdog(window)
 
     state = {"quitting": False}
     tray_holder: dict[str, object] = {}
@@ -789,10 +948,13 @@ def _run_windowed() -> int:
     def _on_closing() -> bool:
         """返回 False = 阻止关闭（pywebview closing 事件语义）。"""
         if state["quitting"]:
+            # 彻底退出前记住窗口几何（本分支覆盖托盘「退出」路径）
+            _remember_window(window)
             return True
         choice = _ask_close_choice()
         if choice == 6:  # 是：彻底退出
             state["quitting"] = True
+            _remember_window(window)
             _stop_server_early()
             _dispose_tray()
             return True
@@ -844,7 +1006,8 @@ def _run_windowed() -> int:
         except BaseException as exc:  # noqa: BLE001  失败页就地显示，关窗后再走弹框上报
             errors.append(exc)
             try:
-                window.load_html(error_html(str(exc) or type(exc).__name__, str(log_path())))
+                window.load_html(error_html(str(exc) or type(exc).__name__, str(log_path()),
+                                             dark=wintheme.theme_is_dark()))
             except Exception:
                 pass
             return
@@ -870,7 +1033,6 @@ def _run_windowed() -> int:
                 pass
 
         _start_global_hotkey(window, _hotkey_fire)
-        _start_theme_watchdog(window)
 
     # 窗口图标启动序列：先统一彩色方块（任务栏第一帧即彩色、不闪线稿），
     # 看板线程首刷时 apply_window_icon 只把标题栏 SMALL 换成主题线稿

@@ -19,12 +19,16 @@ from .computer import (
 )
 from .docs import ReadDocumentTool, WriteDocumentTool
 from .fs import (
+    DeleteFileTool,
     EditFileTool,
     GlobTool,
     ListDirTool,
+    MakeDirTool,
+    MoveFileTool,
     ReadFileTool,
     WriteFileTool,
 )
+from .image import ReadImageTool
 from .imagegen import GenerateImageTool
 from .memory import MemoryWriteTool
 from .schedule import ScheduleWriteTool
@@ -50,13 +54,17 @@ def default_tools(
     websearch / imagegen 传入 config.resolve_*() 的解析结果（provider/api_key 等），
     为 None 时对应工具仍注册，调用时会给出配置指引（不阻塞其他工具）。
     computer_control=False 时不注册电脑控制七件套（screenshot / window_list / clipboard /
-    mouse / keyboard / window），对应设置 · 高级里的总开关（默认关，缩小攻击面）。
+    mouse / keyboard / window），对应设置 · 远程控制里的总开关（默认关，缩小攻击面）。
     browser_control=False 时不注册 browser 工具（用系统浏览器开网页/搜索），同样默认关。
     """
     tools = [
         ReadFileTool(),
+        ReadImageTool(),
         WriteFileTool(recorder=recorder),
         EditFileTool(recorder=recorder),
+        MoveFileTool(recorder=recorder),
+        DeleteFileTool(recorder=recorder),
+        MakeDirTool(),
         ListDirTool(),
         GlobTool(),
         GrepTool(),
@@ -97,8 +105,12 @@ __all__ = [
     "default_tools",
     "BrowserTool",
     "ReadFileTool",
+    "ReadImageTool",
     "WriteFileTool",
     "EditFileTool",
+    "MoveFileTool",
+    "DeleteFileTool",
+    "MakeDirTool",
     "ListDirTool",
     "GlobTool",
     "GrepTool",

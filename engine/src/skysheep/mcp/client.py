@@ -87,6 +87,10 @@ class MCPServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     url: str | None = None       # streamable HTTP 传输
+    # 远程 MCP 的鉴权头（如 {"Authorization": "Bearer xxx"}）。很多托管服务
+    # （Notion / Linear / GitHub 官方 Remote MCP）用 Bearer 或自定义头做鉴权，
+    # 没有这个字段就只能连匿名服务器。stdio 传输忽略它。
+    headers: dict[str, str] = Field(default_factory=dict)
     readonly: bool = False       # true=工具自动放行；false=调用前需确认
 
     @property
@@ -96,6 +100,15 @@ class MCPServerConfig(BaseModel):
         if self.command:
             return "stdio"
         return "invalid"
+
+
+def _headers_only(cfg: MCPServerConfig) -> dict[str, str]:
+    """过滤出合法的请求头（名与值都必须是非空字符串）。"""
+    out: dict[str, str] = {}
+    for k, v in (cfg.headers or {}).items():
+        if isinstance(k, str) and isinstance(v, str) and k.strip():
+            out[k.strip()] = v
+    return out
 
 
 def load_mcp_configs(global_path: Path | None, project_path: Path | None) -> dict[str, MCPServerConfig]:
@@ -242,7 +255,19 @@ class MCPManager:
                 params = StdioServerParameters(command=cfg.command, args=cfg.args, env=cfg.env or None)
                 read, write = await stack.enter_async_context(stdio_client(params))
             else:
-                read, write = await stack.enter_async_context(streamable_http_client(cfg.url))
+                # 带鉴权的远程 MCP：把配置里的 headers 注入 HTTP 客户端。
+                # streamable_http_client 本身不收 headers（签名只有 url / http_client），
+                # 所以要在 httpx.AsyncClient 上带默认头。
+                extra_headers = _headers_only(cfg)
+                http_client = None
+                if extra_headers:
+                    import httpx  # 局部导入：无鉴权场景不必碰 httpx
+
+                    http_client = httpx.AsyncClient(headers=extra_headers, timeout=CONNECT_TIMEOUT_S)
+                    await stack.enter_async_context(http_client)
+                read, write = await stack.enter_async_context(
+                    streamable_http_client(cfg.url, http_client=http_client)
+                )
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
             listing = await session.list_tools()

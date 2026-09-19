@@ -18,6 +18,7 @@ import io
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -32,6 +33,11 @@ IS_WINDOWS = sys.platform == "win32"
 MAX_TYPE_CHARS = 2000
 # 附加图像超过该宽度时等比缩小（控制 base 体积；缩放比会在返回文本中声明）
 MAX_IMAGE_WIDTH = 2400
+
+# 截图副本保留上限（~/.skysheep/screenshots）：每次截屏都会存一份，
+# 但没有上限时它会无声涨下去（与检查点不同，那里有 MAX_CHECKPOINTS 淘汰）。
+# 副本只用于事后回看，保留最近若干张足够用。
+KEEP_SCREENSHOTS = 60
 
 
 def _require_windows(what: str) -> None:
@@ -475,6 +481,29 @@ def _encode_png(img: Any) -> bytes:
     return buf.getvalue()
 
 
+def _prune_screenshots(shots: Path) -> None:
+    """截图副本保留策略：超过 KEEP_SCREENSHOTS 时删最旧的。
+
+    只处理 .png 文件（不动用户自己丢进来的其它东西），删除失败静默——
+    清目录是附带的维护动作，不该让截图本身报错。
+    """
+    try:
+        files = [f for f in shots.glob("*.png") if f.is_file()]
+    except OSError:
+        return
+    if len(files) <= KEEP_SCREENSHOTS:
+        return
+    try:
+        files.sort(key=lambda f: f.stat().st_mtime)
+    except OSError:
+        return
+    for old in files[: len(files) - KEEP_SCREENSHOTS]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
 def _capture(screen: str) -> tuple[Any, tuple[int, int], tuple[int, int]]:
     """抓屏，返回 (图像, 覆盖区域原点, 虚拟屏幕尺寸)。"""
     if IS_WINDOWS:
@@ -543,6 +572,7 @@ class ScreenshotTool(Tool):
         path = shots / f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
         try:
             path.write_bytes(png)
+            _prune_screenshots(shots)
         except OSError:
             pass  # 副本保存失败不影响主流程
 
@@ -603,8 +633,13 @@ class ClipboardReadArgs(BaseModel):
 
 class ClipboardReadTool(Tool):
     name = "clipboard_read"
-    description = "读取当前剪贴板中的文本内容。只读操作。"
-    safety = Safety.READONLY
+    description = (
+        "读取当前剪贴板中的文本内容。剪贴板可能刚被用户复制过密码等敏感"
+        "信息，属于高敏感数据源，调用前会请求用户确认。"
+    )
+    # 安全审查 D4：剪贴板常驻密码管理器刚复制的凭据，不能与普通只读工具一样
+    # 自动放行——与 clipboard_write 同一确认姿态。
+    safety = Safety.WRITE
     args_model = ClipboardReadArgs
 
     async def run(self, args: ClipboardReadArgs, ctx: ToolContext) -> str:

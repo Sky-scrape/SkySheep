@@ -1,62 +1,128 @@
-"""右侧标签页面板：终端（term.run/term.stop）、辅助对话（chat.aux）、
+"""底部终端面板（PTY 真终端：term.spawn/input/resize/close）、辅助对话（chat.aux）、
 审查（checkpoint.diff）、以及界面偏好的标签持久化（right_tabs 等）。"""
 
 from __future__ import annotations
 
 import sys
+import time
 
+import pytest
 from test_server import make_client, recv_until
 
 from skysheep.messages import TextBlock, ToolUseBlock
 
+WIN_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="ConPTY 终端仅 Windows")
 
-def test_terminal_run_streams_and_done(home):
+
+@WIN_ONLY
+def test_terminal_spawn_input_output(home):
+    """PTY 终端：spawn 后敲命令，输出经 term_data 事件流回传。"""
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
-        ws.send_json({"id": "t1", "method": "term.run", "params": {"command": "echo sky_sheep_ok"}})
+        ws.send_json({"id": "s1", "method": "term.spawn",
+                      "params": {"term_id": "tab-a", "rows": 24, "cols": 100}})
+        assert recv_until(ws, "s1")["ok"]
+        ws.send_json({"id": "i1", "method": "term.input",
+                      "params": {"term_id": "tab-a", "data": "echo sky_pty_a\r"}})
+        assert recv_until(ws, "i1")["ok"]
+        ws.send_json({"id": "i2", "method": "term.input",
+                      "params": {"term_id": "tab-a", "data": "echo sky_pty_b\r"}})
+        assert recv_until(ws, "i2")["ok"]
+        # PTY 输出是单条有序流；PowerShell 冷启动在本机（Defender 实时扫描）可到
+        # 4~5 秒，轮询窗口放宽到 15 秒避免环境性误报
         events = []
-        frame = recv_until(ws, "t1", events)
-        assert frame["ok"], frame
-        chunks = "".join(
-            e["data"]["text"] for e in events if e["event"] == "terminal_chunk"
-        )
-        assert "sky_sheep_ok" in chunks
-        done = [e for e in events if e["event"] == "terminal_done"]
-        assert done and done[0]["data"]["code"] == 0
-        # 跑完之后应回到空闲，可以再跑下一条
-        ws.send_json({"id": "t2", "method": "term.run", "params": {"command": "echo again"}})
-        frame2 = recv_until(ws, "t2")
-        assert frame2["ok"]
+        found = False
+        for i in range(150):
+            chunks = "".join(
+                e["data"]["text"] for e in events if e["event"] == "term_data"
+            )
+            if "sky_pty_a" in chunks and "sky_pty_b" in chunks:
+                found = True
+                break
+            time.sleep(0.1)
+            ws.send_json({"id": f"w{i}", "method": "term.resize",
+                          "params": {"term_id": "tab-a", "rows": 24, "cols": 100}})
+            recv_until(ws, f"w{i}", events)
+        assert found, "echo 输出应经 term_data 事件回传"
 
 
-def test_terminal_busy_rejected_then_stop(home):
-    long_cmd = "ping -n 30 127.0.0.1" if sys.platform == "win32" else "sleep 30"
+@WIN_ONLY
+def test_terminal_tabs_are_independent(home):
+    """两个标签各自一条 PTY 流（term_id 路由互不串线）；关标签广播 term_exit。"""
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
-        ws.send_json({"id": "t1", "method": "term.run", "params": {"command": long_cmd}})
-        # 运行中第二条直接被拒
-        ws.send_json({"id": "t2", "method": "term.run", "params": {"command": "echo x"}})
-        busy = recv_until(ws, "t2")
-        assert not busy["ok"] and "已有命令在运行" in busy["error"]
-        # 停止 → 第一条立刻收尾且标记 stopped
-        ws.send_json({"id": "s1", "method": "term.stop"})
-        stop = recv_until(ws, "s1")
-        assert stop["ok"] and stop["result"]["stopped"] is True
-        frame = recv_until(ws, "t1")
-        assert frame["ok"] and frame["result"]["stopped"] is True
-        # 进程树已被杀，可以再次运行
-        ws.send_json({"id": "t3", "method": "term.run", "params": {"command": "echo after_stop"}})
+        for tid in ("tab-a", "tab-b"):
+            ws.send_json({"id": "s-" + tid, "method": "term.spawn",
+                          "params": {"term_id": tid, "rows": 24, "cols": 100}})
+            assert recv_until(ws, "s-" + tid)["ok"]
+        ws.send_json({"id": "a1", "method": "term.input",
+                      "params": {"term_id": "tab-a", "data": "echo mark_from_a\r"}})
+        assert recv_until(ws, "a1")["ok"]
+        ws.send_json({"id": "b1", "method": "term.input",
+                      "params": {"term_id": "tab-b", "data": "echo mark_from_b\r"}})
+        assert recv_until(ws, "b1")["ok"]
+
         events = []
-        frame3 = recv_until(ws, "t3", events)
-        assert frame3["ok"]
-        assert "after_stop" in "".join(
-            e["data"]["text"] for e in events if e["event"] == "terminal_chunk"
+        a_ok = b_ok = False
+        # 两个 PowerShell 冷启动叠加可到 6 秒以上，窗口放宽到 15 秒避免环境性误报
+        for i in range(150):
+            ws.send_json({"id": f"w{i}", "method": "term.resize",
+                          "params": {"term_id": "tab-b", "rows": 24, "cols": 100}})
+            recv_until(ws, f"w{i}", events)
+            chunks = "".join(
+                e["data"]["text"] for e in events if e["event"] == "term_data"
+            )
+            a_ok = "mark_from_a" in chunks
+            b_ok = "mark_from_b" in chunks
+            if a_ok and b_ok:
+                break
+            time.sleep(0.1)
+        assert a_ok and b_ok
+        # 每个标签的流里只有自己的标记（term_id 路由正确、互不串线）
+        a_only = "".join(
+            e["data"]["text"] for e in events
+            if e["event"] == "term_data" and e["data"].get("term_id") == "tab-a"
         )
+        b_only = "".join(
+            e["data"]["text"] for e in events
+            if e["event"] == "term_data" and e["data"].get("term_id") == "tab-b"
+        )
+        assert "mark_from_a" in a_only and "mark_from_b" not in a_only
+        assert "mark_from_b" in b_only and "mark_from_a" not in b_only
+
+        # 关闭 tab-a：term_exit 广播；tab-b 照常可用
+        ws.send_json({"id": "c1", "method": "term.close", "params": {"term_id": "tab-a"}})
+        assert recv_until(ws, "c1")["ok"]
+        exited = False
+        for i in range(15, 165):
+            ws.send_json({"id": f"w{i}", "method": "term.resize",
+                          "params": {"term_id": "tab-b", "rows": 24, "cols": 100}})
+            recv_until(ws, f"w{i}", events)
+            if any(
+                e["event"] == "term_exit" and e["data"].get("term_id") == "tab-a"
+                for e in events
+            ):
+                exited = True
+                break
+            time.sleep(0.1)
+        assert exited, "关闭标签后应广播 term_exit"
+        ws.send_json({"id": "b2", "method": "term.input",
+                      "params": {"term_id": "tab-b", "data": "echo still_ok\r"}})
+        assert recv_until(ws, "b2")["ok"]
 
 
-def test_terminal_empty_command_rejected(home):
+@WIN_ONLY
+def test_terminal_tab_cap(home):
+    """标签数有上限：开满 MAX_TERMINALS 后再开新的要被拒。"""
+    from skysheep.server.backend import TerminalManager
+
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
-        ws.send_json({"id": "t1", "method": "term.run", "params": {"command": "   "}})
-        frame = recv_until(ws, "t1")
-        assert not frame["ok"]
+        for i in range(TerminalManager.MAX_TERMINALS):
+            ws.send_json({"id": f"r{i}", "method": "term.spawn",
+                          "params": {"term_id": f"cap-{i}", "rows": 24, "cols": 100}})
+            assert recv_until(ws, f"r{i}")["ok"]
+        ws.send_json({"id": "over", "method": "term.spawn",
+                      "params": {"term_id": "cap-over", "rows": 24, "cols": 100}})
+        frame = recv_until(ws, "over")
+        assert not frame["ok"] and "最多" in frame["error"]
 
 
 def test_chat_aux_streams_and_keeps_history(home):

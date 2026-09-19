@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from test_server import make_client, recv_until
@@ -338,24 +339,31 @@ def test_install_project_skill_keeps_trust(home):
         assert pending["workspace_trust"]["state"] == STATE_PENDING  # 内容变了，待重新确认
 
 
-def test_remote_cannot_run_terminal_command(home, monkeypatch):
-    """终端面板的命令是用户手敲的，不进权限门；因此不能由局域网远端调用。"""
+def test_remote_cannot_use_terminal(home, monkeypatch):
+    """终端是用户本机的常驻 shell（不进权限门），因此不能由局域网远端调用。"""
     import skysheep.server.app as server_app
 
     monkeypatch.setattr(server_app, "_client_is_local", lambda client: False)
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
-        ws.send_json({"id": "c1", "method": "term.run",
-                      "params": {"command": "echo x > remote_evidence.txt"}})
+        ws.send_json({"id": "c1", "method": "term.spawn",
+                      "params": {"term_id": "t1", "rows": 24, "cols": 100}})
         frame = recv_until(ws, "c1")
         assert frame["ok"] is False and "本机" in frame["error"]
     assert not (home / "proj" / "remote_evidence.txt").exists()
 
 
-def test_local_can_still_run_terminal_command(home):
-    """本机用户照常能用终端面板（不能因噎废食）。"""
+def test_local_can_still_use_terminal(home):
+    """本机用户照常能用终端面板（PTY 里跑的重定向真实落盘，不能因噎废食）。"""
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
-        ws.send_json({"id": "c1", "method": "term.run",
-                      "params": {"command": "echo local_ok > local_evidence.txt"}})
-        frame = recv_until(ws, "c1")
-        assert frame["ok"] is True
-    assert (home / "proj" / "local_evidence.txt").exists()
+        ws.send_json({"id": "c1", "method": "term.spawn",
+                      "params": {"term_id": "t1", "rows": 24, "cols": 100}})
+        assert recv_until(ws, "c1")["ok"]
+        ws.send_json({"id": "c2", "method": "term.input",
+                      "params": {"term_id": "t1", "data": "echo local_ok > local_evidence.txt\r"}})
+        assert recv_until(ws, "c2")["ok"]
+        target = home / "proj" / "local_evidence.txt"
+        for _ in range(150):
+            if target.exists():
+                break
+            time.sleep(0.1)
+        assert target.exists()

@@ -48,6 +48,9 @@ class ProviderDone:
     stop_reason: str = "end_turn"  # end_turn | tool_use
     input_tokens: int = 0
     output_tokens: int = 0
+    # 本次请求命中提示词缓存的 token 数（input_tokens 已含这部分）。
+    # 服务不上报缓存明细时为 0；用于界面「平均缓存命中率」。
+    cached_tokens: int = 0
 
 
 ProviderEvent = ProviderTextDelta | ProviderReasoning | ProviderToolUse | ProviderDone
@@ -81,6 +84,11 @@ class Provider(abc.ABC):
 
     @abc.abstractmethod
     def stream(
-        self, messages: list[Message], tool_schemas: list[dict]
+        self, messages: list[Message], tool_schemas: list[dict],
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        """发起一次流式对话。messages 含 system 时由 Provider 自行提取处理。"""
+        """发起一次流式对话。messages 含 system 时由 Provider 自行提取处理。
+
+        effort：本次调用的思考强度覆盖（自动档按任务复杂度实时估档用，
+        见 core/effort.py）；None = 沿用自身 reasoning_effort。
+        """

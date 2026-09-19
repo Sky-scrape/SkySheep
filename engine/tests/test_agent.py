@@ -251,3 +251,37 @@ async def test_edit_file_carries_diff(tmp_path):
     finished = [e for e in events if e.kind == "tool_call_finished"][0]
     assert "-    pass" in finished.diff
     assert "+    print('hi')" in finished.diff
+
+
+async def test_cache_hit_tokens_accumulate(tmp_path):
+    """Provider 上报缓存命中时按会话累计；分母是含缓存部分的完整输入 token。"""
+    from skysheep.models.base import ProviderDone, ProviderTextDelta
+
+    class CachedProvider(FakeProvider):
+        # 模拟「提示词缓存生效」的上游：输入 200、其中 180 命中缓存
+        async def stream(self, messages, tool_schemas, effort=None):
+            blocks = self.scripted.pop(0) if self.scripted else self.scripted_default
+            for b in blocks:
+                if isinstance(b, TextBlock):
+                    yield ProviderTextDelta(b.text)
+            yield ProviderDone(
+                stop_reason="end_turn", input_tokens=200, output_tokens=5, cached_tokens=180,
+            )
+
+    provider = CachedProvider([[TextBlock(text="一")], [TextBlock(text="二")]])
+    agent = make_agent(provider, tmp_path)
+    await collect(agent, "a")
+    await collect(agent, "b")
+
+    assert agent.total_in_tokens == 400
+    assert agent.total_cached_tokens == 360
+
+
+async def test_provider_without_cache_reports_zero(tmp_path):
+    """不上报缓存的服务（如 FakeProvider）不产生命中计数，界面据此显示「—」。"""
+    provider = FakeProvider([[TextBlock(text="好")]])
+    agent = make_agent(provider, tmp_path)
+    await collect(agent, "a")
+
+    assert agent.total_in_tokens == 11
+    assert agent.total_cached_tokens == 0

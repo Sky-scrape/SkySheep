@@ -46,6 +46,7 @@ from ..models.base import (
 from ..security.gate import Decision, PendingPermission, PermissionGate
 from ..tools.base import Safety, Tool, ToolContext, ToolError, ToolRegistry, truncate_output
 from .context import compact_history, estimate_tokens
+from .effort import resolve_auto_effort
 
 MAX_TOOL_PREVIEW = 500
 
@@ -109,6 +110,9 @@ class Agent:
         self._pending: dict[str, PendingPermission] = {}
         self.total_in_tokens = 0
         self.total_out_tokens = 0
+        # 累计命中提示词缓存的 token（分母用 total_in_tokens：provider 已把
+        # input_tokens 归一为含缓存部分的完整提示词）。用于界面「平均缓存命中率」。
+        self.total_cached_tokens = 0
         # 最近一次模型调用上报的真实输入 token（即那一次请求的整体提示词长度）。
         # 估算再准也有偏差（各家中转的 tokenizer 不同），用它给估算值兜一个下限，
         # 保证界面显示的占用与自动压缩的判断都不会比真实情况乐观。
@@ -175,7 +179,12 @@ class Agent:
             for attempt in range(1, MAX_STREAM_RETRIES + 2):
                 blocks, text_parts, reasoning_parts, reasoning_sig = [], [], [], ""
                 try:
-                    async for pe in self.provider.stream(self.history, self.registry.schemas()):
+                    # 自动档：每次调用前按当前上下文实时估档（简单任务降、调试设计升），
+                    # 其余档位不覆盖、沿用用户所选（见 core/effort.py）
+                    async for pe in self.provider.stream(
+                        self.history, self.registry.schemas(),
+                        effort=resolve_auto_effort(self.provider, self.history),
+                    ):
                         if isinstance(pe, ProviderTextDelta):
                             text_parts.append(pe.text)
                             yield TextDelta(text=pe.text)
@@ -191,6 +200,8 @@ class Agent:
                             if pe.input_tokens or pe.output_tokens:
                                 self.total_in_tokens += pe.input_tokens
                                 self.total_out_tokens += pe.output_tokens
+                                if pe.cached_tokens:
+                                    self.total_cached_tokens += pe.cached_tokens
                                 if pe.input_tokens:
                                     self.last_prompt_tokens = pe.input_tokens
                                 yield Usage(

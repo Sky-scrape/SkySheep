@@ -300,3 +300,199 @@ async def test_subagent_provider_resolver_failure_is_reported(tmp_path):
     )
     with pytest.raises(RuntimeError, match="启动失败"):
         await tasks.run_sync("broken", "跑一下")
+
+
+# ---- 记账 / 取消 / 并发护栏 / 直播 / 终态广播 / 详情 ----
+
+
+class SlowProvider(FakeProvider):
+    """永不一样的慢模型：stream 挂起不结束，用来测真取消。"""
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.calls.append(list(messages))
+        await asyncio.sleep(30)
+        yield  # pragma: no cover - 取消后走不到这里
+
+
+async def _wait_status(tasks, task_id, status, timeout=5.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        rec = tasks.status(task_id)
+        if rec.status == status:
+            return rec
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"任务未在 {timeout}s 内变为 {status}（当前 {rec.status}）")
+
+
+async def test_usage_recorded_for_subagent(tmp_path):
+    """子代理烧掉的 token 要入账：归属派生会话、带子代理自己的 provider/模型。"""
+    from skysheep.core.subagent import TaskManager
+
+    recorded: list[tuple] = []
+
+    async def recorder(session_id, provider, model, in_tok, out_tok):
+        recorded.append((session_id, provider, model, in_tok, out_tok))
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="REPORT: ok")]]),
+        working_dir=tmp_path,
+        usage_recorder=recorder,
+    )
+    tasks.set_active_session("sess-1")
+    report = await tasks.run_sync("explore", "看看")
+    assert "REPORT" in report
+    assert recorded and recorded[0][0] == "sess-1"
+    assert recorded[0][1] == "fake" and recorded[0][2] == "fake-1"
+    assert recorded[0][3] > 0 and recorded[0][4] > 0
+    rec = list(tasks._tasks.values())[0]
+    assert rec.tokens_in > 0 and rec.tokens_out > 0
+
+
+async def test_cancel_all_really_cancels_background(tmp_path):
+    """「全部取消」要真正终止后台任务（此前只改状态字段，任务照跑照烧钱）。"""
+    import contextlib
+
+    from skysheep.core.subagent import TaskManager
+
+    tasks = TaskManager(
+        provider_factory=SlowProvider,
+        working_dir=tmp_path,
+    )
+    task_id = tasks.start_background("explore", "慢慢调研")
+    await _wait_status(tasks, task_id, "running")
+    tasks.cancel_all()
+    rec = tasks.status(task_id)
+    # 任务可能尚未被调度就被取消（await 会抛 CancelledError），两种路径都算已取消
+    with contextlib.suppress(asyncio.CancelledError):
+        await rec.asyncio_task
+    assert rec.status == "cancelled"
+    assert "取消" in (rec.error or "")
+
+
+async def test_concurrency_limit_blocks_extra_spawns(tmp_path):
+    """后台并发到上限后再派 → 友好报错，不是默默继续烧钱。"""
+    from skysheep.core.subagent import SubagentLimitError, TaskManager
+    from skysheep.tools.base import ToolContext, ToolError
+
+    tasks = TaskManager(
+        provider_factory=SlowProvider,
+        working_dir=tmp_path,
+        max_concurrent=1,
+    )
+    tasks.start_background("explore", "第一个")
+    with pytest.raises(SubagentLimitError, match="上限"):
+        tasks.start_background("explore", "第二个")
+    with pytest.raises(SubagentLimitError, match="上限"):
+        await tasks.run_sync("explore", "同步的也算")
+    # SpawnAgentTool 把它转成 ToolError 返回给模型
+    from skysheep.core.subagent import SpawnAgentTool
+
+    tool = SpawnAgentTool(tasks)
+    with pytest.raises(ToolError, match="上限"):
+        await tool.run(
+            tool.args_model(agent_type="explore", prompt="x", background=True),
+            ToolContext(working_dir=tmp_path),
+        )
+    tasks.cancel_all()
+
+
+async def test_subagent_events_forwarded_filtered(tmp_path):
+    """直播：过程事件转发给宿主 emitter；permission_request 不转发（已预拒绝）。"""
+    from skysheep.core.subagent import TaskManager
+
+    sub_script = [
+        [ToolUseBlock(id="r1", name="list_dir", input={"path": "."})],
+        [TextBlock(text="REPORT: 直播结束")],
+    ]
+    seen: list[dict] = []
+
+    def emitter(ev: dict) -> None:
+        seen.append(ev)
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider(list(sub_script)),
+        working_dir=tmp_path,
+        event_emitter=emitter,
+    )
+    report = await tasks.run_sync("explore", "列目录")
+    assert "REPORT" in report
+    kinds = [s["event"]["kind"] for s in seen]
+    assert "tool_call_started" in kinds and "tool_call_finished" in kinds
+    assert "text_delta" in kinds and "assistant_message" in kinds
+    assert "permission_request" not in kinds
+    first = seen[0]
+    assert first["kind"] == "subagent_event"
+    assert first["agent_type"] == "explore" and first["task_id"]
+    # 工具调用事件带名字与参数，前端直播行靠它渲染
+    started = next(s for s in seen if s["event"]["kind"] == "tool_call_started")
+    assert started["event"]["name"] == "list_dir"
+
+
+async def test_task_finished_broadcast_on_background(tmp_path):
+    """后台任务终态广播 task_finished（前端弹通知 + 刷新任务簿）。"""
+    from skysheep.core.subagent import TaskManager
+
+    seen: list[dict] = []
+
+    def emitter(ev: dict) -> None:
+        seen.append(ev)
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="BG: done")]]),
+        working_dir=tmp_path,
+        event_emitter=emitter,
+    )
+    task_id = tasks.start_background("explore", "后台调研")
+    await _wait_status(tasks, task_id, "done")
+    finished = [s for s in seen if s["kind"] == "task_finished"]
+    assert finished and finished[-1]["task_id"] == task_id
+    assert finished[-1]["status"] == "done"
+    assert finished[-1]["agent_type"] == "explore"
+
+
+async def test_get_detail_returns_full_record(tmp_path):
+    """详情：完整 prompt/报告不截断，带 provider 与 token 信息。"""
+    from skysheep.core.subagent import TaskManager
+
+    long_result = "R" * 5000
+    long_prompt = "P" * 5000
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text=long_result)]]),
+        working_dir=tmp_path,
+    )
+    task_id = tasks.start_background("explore", long_prompt)
+    await _wait_status(tasks, task_id, "done")
+    detail = tasks.get_detail(task_id)
+    assert detail["prompt"] == long_prompt
+    assert detail["result"] == long_result
+    assert detail["provider"] == "fake / fake-1"
+    assert detail["tokens_in"] > 0
+    # 列表快照仍是截断版
+    snap = tasks.list_tasks()[0]
+    assert len(snap["prompt"]) == 160 and len(snap["result"]) == 800
+    assert tasks.get_detail("nope") is None
+
+
+async def test_tasks_get_backend_method(tmp_path):
+    """backend.tasks_get 返回详情；未知 id 报错（WS 层转 ok=false）。"""
+    from skysheep.core.subagent import TaskManager
+    from skysheep.server.backend import ServerBackend
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]),
+        working_dir=tmp_path,
+    )
+    task_id = tasks.start_background("explore", "看看")
+    await _wait_status(tasks, task_id, "done")
+
+    be = object.__new__(ServerBackend)  # 只验证方法逻辑，不跑完整启动
+    be.tasks = tasks
+    out = await be.tasks_get({"task_id": task_id})
+    assert out["task"]["id"] == task_id
+    try:
+        await be.tasks_get({"task_id": "ghost"})
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised

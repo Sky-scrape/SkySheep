@@ -112,7 +112,8 @@ class AnthropicProvider(Provider):
         self._client = client or AsyncAnthropic(**kw)
 
     async def stream(
-        self, messages: list[Message], tool_schemas: list[dict]
+        self, messages: list[Message], tool_schemas: list[dict],
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         sys = system_text(messages)
         kwargs: dict = {
@@ -127,15 +128,17 @@ class AnthropicProvider(Provider):
                 {"name": s["name"], "description": s["description"], "input_schema": s["input_schema"]}
                 for s in tool_schemas
             ]
-        # 思考强度 → 扩展思考预算（auto 不启用，保持服务默认行为）
-        budget = self.THINKING_BUDGETS.get(self.reasoning_effort) if self.supports_reasoning else None
+        # 思考强度 → 扩展思考预算（auto 不启用，保持服务默认行为）；
+        # effort 覆盖（自动档实时估档，见 core/effort.py）优先于自身档位
+        eff = effort or self.reasoning_effort
+        budget = self.THINKING_BUDGETS.get(eff) if self.supports_reasoning else None
         if budget:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         # 采样温度：只有用户填了才传（扩展思考模式下温度固定为 1，传了反而会被拒绝）
         if self.temperature is not None and not budget:
             kwargs["temperature"] = self.temperature
         try:
-            in_tokens = out_tokens = 0
+            in_tokens = out_tokens = cached_tokens = 0
             tool_blocks: dict[int, dict] = {}
             async with self._client.messages.stream(**kwargs) as stream:
                 async for event in stream:
@@ -163,7 +166,15 @@ class AnthropicProvider(Provider):
                         if event.usage:
                             out_tokens = event.usage.output_tokens or out_tokens
                     elif etype == "message_start" and event.message and event.message.usage:
-                        in_tokens = event.message.usage.input_tokens or in_tokens
+                        u = event.message.usage
+                        in_tokens = u.input_tokens or in_tokens
+                        # Anthropic 的 input_tokens 不含缓存部分：归一成「完整提示词」
+                        # （加上缓存读/写）；命中数只计 cache_read（本次真正省下的部分）
+                        cr = getattr(u, "cache_read_input_tokens", 0) or 0
+                        cc = getattr(u, "cache_creation_input_tokens", 0) or 0
+                        if cr or cc:
+                            in_tokens = (in_tokens or 0) + cr + cc
+                            cached_tokens = cr
             for idx in sorted(tool_blocks):
                 tb = tool_blocks[idx]
                 try:
@@ -175,6 +186,7 @@ class AnthropicProvider(Provider):
                 stop_reason="tool_use" if tool_blocks else "end_turn",
                 input_tokens=in_tokens,
                 output_tokens=out_tokens,
+                cached_tokens=cached_tokens,
             )
         except ProviderError:
             raise

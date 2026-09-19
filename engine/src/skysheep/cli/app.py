@@ -597,6 +597,34 @@ def _show_error_page(window, exc: BaseException) -> None:
         pass
 
 
+def _show_on_first_paint(window) -> None:
+    """等启动动画页首帧就绪后再显示窗口（窗口 hidden=True 创建）。
+
+    pywebview 先 Show() 窗口、WebView2 再异步初始化，两者之间的空窗期露出的是
+    一块未绘制底色（用户看到的启动"黑屏"）。loaded 事件在页面就绪后触发，此时
+    show 第一眼就是动画；4 秒兜底避免初始化异常时窗口藏死。
+    """
+    import threading
+
+    def _show(*_args, **_kwargs) -> None:
+        try:
+            window.show()
+        except Exception:
+            pass
+
+    try:
+        window.events.loaded += _show
+    except Exception:
+        _show()
+        return
+
+    def _fallback() -> None:
+        if not window.events.loaded.wait(4):
+            _show()
+
+    threading.Thread(target=_fallback, daemon=True).start()
+
+
 def _app_cmd(args) -> None:
     """桌面模式：本地服务 + pywebview 原生窗口（浏览器兜底）。"""
     import time
@@ -646,22 +674,32 @@ def _app_cmd(args) -> None:
         y = screen.y + max((screen.height - height) // 3, 16)
 
     picker = FilePicker()
+    # 主题尽量提前定下来：窗口底色 / 启动页 / 标题栏用同一份解析结果
+    wintheme.set_theme_mode(wintheme.read_ui_theme())
     window = webview.create_window(
         "SkySheep",
-        html=splash_html(STATIC_DIR),
+        html=splash_html(STATIC_DIR, dark=wintheme.theme_is_dark()),
         width=width,
         height=height,
         min_size=(980, 640),
         js_api=picker,
         x=x,
         y=y,
+        # 允许选中页面文字（pywebview 默认给 body 注入 user-select:none）：
+        # 「引用回答片段」等选区交互依赖它
+        text_select=True,
+        # 先隐藏创建，等启动动画页首帧就绪（loaded）再显示：窗口 Show 与 WebView2
+        # 初始化是异步的，控件首帧之前整窗是一块未绘制底色（启动时的"黑屏"）。
+        hidden=True,
         # 窗口底色跟主题：默认白底在整页刷新（切项目）/首帧瞬间会露出来
-        background_color=wintheme.window_background(wintheme.read_ui_theme()),
+        background_color=wintheme.window_background(),
     )
+    _show_on_first_paint(window)
     picker.attach(window)
-    from ..wintheme import hook_caption_theme, register_window
+    from ..wintheme import allow_microphone, hook_caption_theme, register_window
 
     hook_caption_theme(window)  # 标题栏染成纸墨主题色（老系统自动跳过）
+    allow_microphone(window)  # 放行麦克风（语音输入用；WebView2 默认静默拒绝）
     register_window(window)  # 前端切主题时事件驱动重刷标题栏（与 desktop.py 同机制）
 
     def _bootstrap() -> None:

@@ -5,8 +5,10 @@
     → 一轮 turn 结束 → backend 把快照存入 CheckpointStore
     → 用户点「撤销本轮改动」→ restore() 把字节写回（新建的文件删除）
 
-只追踪 write_file / edit_file / generate_image 三个落盘工具；run_command 等
-命令造成的改动不追踪（界面上会提示这一边界）。
+只追踪 write_file / edit_file / write_document / generate_image / move_file /
+make_dir / delete_file 这些落盘工具；run_command 等命令造成的改动不追踪
+（界面上会提示这一边界）——这也是工具层要提供 move_file / delete_file 的原因：
+让文件整理这类典型任务走可回滚的正规工具，而不是 run_command 里的 mv / rm。
 
 持久化：构造时传入 root（~/.skysheep/backups/checkpoints/<项目指纹>/）即落盘
 ——每个检查点一个目录（meta.json + 改前内容 blob），重启后仍可回滚；
@@ -192,7 +194,12 @@ class CheckpointStore:
         for path_s, data in cp["files"].items():
             p = Path(path_s)
             if data is None:
-                if p.exists():
+                # 改前不存在 → 回滚时应删除。目录要连内容一起删（delete_file /
+                # move_file 记的是目录本身，shutil.move 后路径已不存在，只有
+                # 「目标位置是新建目录」这类情况会走到这里）。
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                elif p.exists():
                     p.unlink()
             else:
                 p.parent.mkdir(parents=True, exist_ok=True)

@@ -246,3 +246,62 @@ async def test_window_list_smoke():
 async def test_clipboard_read_smoke(tmp_path):
     out = await ClipboardReadTool().run(ClipboardReadTool().args_model(), ctx(tmp_path))
     assert isinstance(out, str)
+
+
+# ---- 截图副本保留策略 ----
+
+
+def test_prune_screenshots_keeps_recent(tmp_path):
+    """副本只保留最近 KEEP_SCREENSHOTS 张（删最旧的），否则会无声涨满磁盘。"""
+    import time as _t
+
+    from skysheep.tools.computer import KEEP_SCREENSHOTS, _prune_screenshots
+
+    shots = tmp_path / "screenshots"
+    shots.mkdir()
+    total = KEEP_SCREENSHOTS + 12
+    names: list[str] = []
+    for i in range(total):
+        name = f"20260101_0000{i:02d}_aaaa.png"
+        names.append(name)
+        (shots / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        # mtime 必须错开：_prune 按 mtime 排序淘汰
+        _t.sleep(0.002)
+    _prune_screenshots(shots)
+    left = sorted(shots.glob("*.png"))
+    assert len(left) == KEEP_SCREENSHOTS
+    remaining = {p.name for p in left}
+    # 最先写的 12 张（最旧）被删，最后一张（最新）留着
+    assert set(names[:12]).isdisjoint(remaining)
+    assert names[-1] in remaining
+
+
+def test_prune_screenshots_noop_below_limit(tmp_path):
+    from skysheep.tools.computer import _prune_screenshots
+
+    shots = tmp_path / "screenshots"
+    shots.mkdir()
+    (shots / "a.png").write_bytes(b"x")
+    (shots / "b.png").write_bytes(b"x")
+    _prune_screenshots(shots)
+    assert len(list(shots.glob("*.png"))) == 2
+
+
+def test_prune_screenshots_ignores_non_png(tmp_path):
+    """用户自己放进目录的其它文件不该被清理动作波及。"""
+    from skysheep.tools.computer import KEEP_SCREENSHOTS, _prune_screenshots
+
+    shots = tmp_path / "screenshots"
+    shots.mkdir()
+    (shots / "notes.txt").write_text("keep me", encoding="utf-8")
+    for i in range(KEEP_SCREENSHOTS + 5):
+        (shots / f"s{i}.png").write_bytes(b"x")
+    _prune_screenshots(shots)
+    assert (shots / "notes.txt").exists()
+    assert len(list(shots.glob("*.png"))) == KEEP_SCREENSHOTS
+
+
+def test_prune_screenshots_missing_dir_is_silent(tmp_path):
+    from skysheep.tools.computer import _prune_screenshots
+
+    _prune_screenshots(tmp_path / "nope")  # 不抛

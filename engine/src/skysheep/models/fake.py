@@ -27,7 +27,10 @@ class FakeProvider(Provider):
         self.scripted_default = blocks
         return self
 
-    async def stream(self, messages: list[Message], tool_schemas: list[dict]) -> AsyncIterator:
+    async def stream(
+        self, messages: list[Message], tool_schemas: list[dict],
+        effort: str | None = None,
+    ) -> AsyncIterator:
         self.calls.append(list(messages))
         blocks = self.scripted.pop(0) if self.scripted else self.scripted_default
         tool_used = False

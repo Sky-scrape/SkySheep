@@ -7,25 +7,23 @@ FastAPI WebSocket 端点消费它并转发事件流。
 from __future__ import annotations
 
 import asyncio
-import codecs
 import difflib
 import hashlib
 import ipaddress
 import json
-import locale
 import logging
 import os
 import secrets
 import socket
-import subprocess
-import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from .. import __version__
+from ..channels import ChannelGate, ChannelManager
 from ..config import (
     PRESET_SIGNUP_URLS,
     PRESETS,
@@ -43,9 +41,11 @@ from ..config import (
     remove_provider_from_config,
     resolve_api_key,
     resolve_imagegen,
+    resolve_speech,
     resolve_websearch,
     restore_provider_in_config,
     set_advanced_settings_in_config,
+    set_hooks_in_config,
     set_provider_models_in_config,
     set_subagent_settings_in_config,
     skysheep_home,
@@ -54,7 +54,8 @@ from ..config import (
 )
 from ..core import Agent, build_system_prompt
 from ..core.checkpoints import CheckpointStore
-from ..core.context import compact_history
+from ..core.context import compact_history, estimate_text_tokens, estimate_tokens
+from ..core.estimate import estimate_task
 from ..core.hooks import HookRunner, hooks_from_config, load_raw_config
 from ..core.prompt import (
     MAX_INSTRUCTIONS_CHARS,
@@ -62,7 +63,13 @@ from ..core.prompt import (
     load_project_instructions,
     render_instructions_section,
 )
-from ..core.roundtable import MemberSpec, RoundtableOutcome, run_roundtable
+from ..core.roundtable import (
+    MemberSpec,
+    RoundtableOutcome,
+    clip_draft,
+    run_roundtable,
+    usage_rows,
+)
 from ..core.subagent import CheckTaskTool, SpawnAgentTool, TaskManager
 from ..core.subagent_store import (
     BUILTIN_AGENT_TYPES,
@@ -77,7 +84,9 @@ from ..core.uptodate import is_newer_version
 from ..events import (
     AssistantMessage,
     ErrorEvent,
+    NoticeEvent,
     QueueUpdated,
+    TaskEstimate,
     TurnFinished,
     TurnStarted,
 )
@@ -103,10 +112,18 @@ from ..models.probe import probe_provider_models
 from ..security.gate import RULE_KINDS, HeadlessGate, PermissionGate
 from ..security.trust import WorkspaceTrust
 from ..session import SessionStore
+from ..session.store import export_messages_text
 from ..skills import SkillLoader
-from ..skills.installer import SkillInstallError, install_from_url, remove_skill
+from ..skills.installer import (
+    LOCAL_SKILL_SOURCES,
+    SkillInstallError,
+    install_from_url,
+    remove_skill,
+    scan_computer_skills,
+)
 from ..skills.installer import install as install_skill
 from ..skills.market import fetch_market_index
+from ..textio import encode_text
 from ..tools import ChangeRecorder, Safety, ToolRegistry, default_tools
 from ..tools.memory import render_memory_section
 from ..tools.skill import LoadSkillTool
@@ -186,7 +203,11 @@ class QueuedTurn:
     fut: asyncio.Future = field(repr=False)
     roundtable: bool = False
     members: list | None = None  # 圆桌成员 [{provider, model}]，None=默认策略
-    images: list[ImageBlock] = field(default_factory=list)  # 本轮图片附件（圆桌轮忽略）
+    images: list[ImageBlock] = field(default_factory=list)  # 本轮图片附件（圆桌轮不发给成员，仅随消息保留）
+    refs: list[str] = field(default_factory=list)  # 本轮引用的会话 id（& 引用对话）
+    compare: bool = False  # 圆桌 A/B 对比模式（不融合）
+    debate_rounds: int | None = None  # 本轮辩论修订轮数（None=用配置值）
+    chair_answers: bool | None = None  # 本轮主席是否出草稿（None=用配置值）
 
     def resolve(self, result: dict) -> None:
         if not self.fut.done():
@@ -195,6 +216,22 @@ class QueuedTurn:
     def fail(self, e: BaseException) -> None:
         if not self.fut.done():
             self.fut.set_exception(e)
+
+
+def _strip_image_blocks(history: list[Message]) -> list[Message]:
+    """剥掉历史里的图片块（圆桌是纯文本协作）。
+
+    成员模型与主席融合都不该看到图片：非多模态服务拿到图片块会直接报错，
+    整张成员卡就废了。图片仍随 user 消息持久化，后续普通轮能正常用到。
+    """
+    out: list[Message] = []
+    for m in history:
+        if any(getattr(b, "type", "") == "image" for b in m.content):
+            kept = [b for b in m.content if getattr(b, "type", "") != "image"]
+            out.append(m.model_copy(update={"content": kept or [TextBlock(text="")]}))
+        else:
+            out.append(m)
+    return out
 
 
 def _msg_brief(m: Message) -> dict:
@@ -215,6 +252,19 @@ def _msg_brief(m: Message) -> dict:
 
 # 无人值守门控：定时任务与 headless run 共用 security.gate.HeadlessGate
 CronGate = HeadlessGate
+
+
+def _normalize_id_list(raw) -> list[str]:
+    """把界面传来的允许名单归一成字符串列表。
+
+    界面用 textarea（每行一个）提交，备份/脚本可能传列表；数字 id 是常见笔误，
+    而名单比较是字符串相等，不转换会静默失效——这种失败很难排查。
+    """
+    if isinstance(raw, str):
+        raw = raw.replace(",", "\n").splitlines()
+    if not isinstance(raw, (list, tuple)):
+        raw = [raw] if raw is not None else []
+    return [str(x).strip() for x in raw if str(x).strip()]
 
 
 def _html_escape(s: str) -> str:
@@ -270,98 +320,192 @@ class SessionRuntime:
     run_task: asyncio.Task | None = None
 
 
-class TerminalManager:
-    """右侧「终端」标签页的后端：在工作目录里执行用户手敲的命令，流式回传输出。
+class TerminalSlot:
+    """单个终端标签的常驻 PowerShell（ConPTY 伪终端，pywinpty）。
 
-    与 run_command 工具的两点不同：命令由用户亲自输入，不经过权限门；
-    输出走事件流实时回显（同一条命令 stdout/stderr 交错出现），并随时可停。
-    同一时间只运行一条命令（界面有运行态与「停止」按钮）。
+    与旧「命令执行器」的区别：这是真终端——提示符、ANSI 颜色、↑↓ 历史、
+    Ctrl+C、交互程序（python / git commit 等）都按真实控制台工作，cd 与
+    环境变量跨命令保留。命令由用户在 xterm 界面亲自敲，不经过权限门
+    （同旧 term.run 的约定，见 TerminalManager 注释）。
     """
 
     def __init__(self) -> None:
-        self.proc: subprocess.Popen | None = None
-        self._stop_requested = False
+        self.proc: Any | None = None  # winpty.PtyProcess（仅 Windows 有实现）
+        self.pump_task: asyncio.Task | None = None
+        self.pump_proc: Any | None = None  # 泵正在读的进程（重启后区别新旧会话）
 
-    def busy(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.isalive()
 
-    async def run(self, command: str, cwd: Path, emit: EmitFn) -> dict:
-        if self.busy():
-            raise RuntimeError("已有命令在运行，请先等它结束或点「停止」")
-        if sys.platform == "win32":
-            argv = ["cmd.exe", "/d", "/s", "/c", command]
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        else:
-            argv = ["/bin/bash", "-c", command]
-            flags = 0
-        # 中文 Windows 的 cmd 工具链默认输出 ANSI 代码页（cp936），按本机编码解码
-        enc = locale.getpreferredencoding(False) or "utf-8"
+    def spawn(self, cwd: Path, rows: int, cols: int) -> None:
+        """启动常驻 shell（已存活时幂等）；cwd 用调用时刻的项目工作目录。"""
+        if self.alive():
+            return
         try:
-            self.proc = subprocess.Popen(  # noqa: S603 - exe 固定为 cmd/bash，命令经权限外的人工输入
-                argv,
+            from winpty import PtyProcess  # noqa: PLC0415  仅 Windows 提供
+        except Exception as e:  # ImportError / 底层 DLL 缺失
+            raise RuntimeError("终端组件不可用（ConPTY 仅支持 Windows）") from e
+        try:
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+            self.proc = PtyProcess.spawn(
+                "powershell.exe -NoLogo",
                 cwd=str(cwd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
-                creationflags=flags,
+                dimensions=(max(2, int(rows)), max(10, int(cols))),
             )
-        except OSError as e:
-            self.proc = None
-            raise RuntimeError(f"无法启动命令：{e}") from None
+        except Exception as e:
+            raise RuntimeError(f"无法启动 PowerShell：{e}") from None
 
-        proc = self.proc
-        decoders = {name: codecs.getincrementaldecoder(enc)(errors="replace") for name in ("out", "err")}
+    def write(self, data: str) -> None:
+        if not self.alive():
+            raise RuntimeError("终端进程未运行")
+        self.proc.write(data)
 
-        async def pump(stream, name: str) -> None:
-            # read1：管道里有多少就回多少，不凑满缓冲区，保证输出实时到达
+    def resize(self, rows: int, cols: int) -> None:
+        if self.alive():
             try:
-                while True:
-                    chunk = await asyncio.to_thread(stream.read1, 4096)
-                    if not chunk:
-                        break
-                    text = decoders[name].decode(chunk)
-                    if text:
-                        await emit({"kind": "terminal_chunk", "stream": name, "text": text})
-            except Exception:  # noqa: BLE001 - 客户端断开时丢弃输出，进程照常跑完
-                return
-
-        t_out = asyncio.create_task(pump(proc.stdout, "out"))
-        t_err = asyncio.create_task(pump(proc.stderr, "err"))
-        await asyncio.to_thread(proc.wait)
-        # 先短暂等读取任务把尾部输出排干；有残留子进程攥着管道时最多再等 5 秒
-        _, pending = await asyncio.wait({t_out, t_err}, timeout=5)
-        for t in pending:
-            t.cancel()
-        code = proc.returncode
-        stopped = self._stop_requested
-        self.proc = None
-        self._stop_requested = False
-        try:
-            await emit({"kind": "terminal_done", "code": code, "stopped": stopped})
-        except Exception:  # noqa: BLE001
-            pass
-        return {"code": code, "stopped": stopped}
-
-    def stop(self) -> bool:
-        proc = self.proc
-        if proc is None or proc.poll() is not None:
-            return False
-        self._stop_requested = True
-        try:
-            if sys.platform == "win32":
-                # 树杀：cmd /c 起的子进程要一并结束
-                subprocess.run(  # noqa: S603 - exe 固定为 taskkill
-                    ["taskkill.exe", "/PID", str(proc.pid), "/T", "/F"],
-                    capture_output=True, timeout=5,
-                )
-            else:
-                proc.kill()
-        except Exception:  # noqa: BLE001
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
+                self.proc.setwinsize(max(2, int(rows)), max(10, int(cols)))
+            except Exception:  # noqa: BLE001 - 尺寸超界等：终端照常工作
                 pass
+
+    def interrupt(self) -> bool:
+        """发 Ctrl+C（sendintr）；进程不在时返回 False。"""
+        if not self.alive():
+            return False
+        try:
+            self.proc.sendintr()
+        except Exception:  # noqa: BLE001
+            return False
         return True
+
+    def kill(self) -> bool:
+        """结束 shell；泵任务不取消——它读到 EOF 后自己收尾并广播 term_exit。"""
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return False
+        try:
+            if proc.isalive():
+                proc.terminate(force=True)
+        except Exception:  # noqa: BLE001 - 进程已退出等：忽略
+            pass
+        # 别留着旧 PtyProcess 引用：ConPTY 句柄不关，对应的 conhost 宿主
+        # 进程就一直活着（每次切项目泄漏一个）。泵收尾时会再清一次。
+        self.pump_proc = None
+        return True
+
+
+class TerminalManager:
+    """底部终端面板的后端：每个标签一个常驻 PowerShell（ConPTY 伪终端）。
+
+    与 run_command 工具的两点不同：命令由用户亲自输入，不经过权限门；
+    输出由每槽的 pump 任务持续读取，经 backend.ws_emitters 广播
+    term_data / term_exit（term_id 路由，页面刷新后的新连接照常收到）。
+    关闭标签或服务退出时结束对应进程；标签数有上限，防进程开满一圈。
+    """
+
+    MAX_TERMINALS = 8
+    _ID_LEN = 64
+
+    def __init__(self) -> None:
+        self.terms: dict[str, TerminalSlot] = {}
+
+    def _key(self, term_id: str) -> str:
+        return (term_id or "default")[: self._ID_LEN]
+
+    def slot(self, term_id: str) -> TerminalSlot:
+        key = self._key(term_id)
+        slot = self.terms.get(key)
+        if slot is None:
+            if len(self.terms) >= self.MAX_TERMINALS:
+                raise RuntimeError(f"终端标签最多同时开 {self.MAX_TERMINALS} 个，先关掉不用的再新建")
+            slot = TerminalSlot()
+            self.terms[key] = slot
+        return slot
+
+    def peek(self, term_id: str) -> TerminalSlot | None:
+        return self.terms.get(self._key(term_id))
+
+    def spawn(self, term_id: str, cwd: Path, rows: int, cols: int, backend: Any) -> dict:
+        key = self._key(term_id)
+        slot = self.slot(term_id)
+        slot.spawn(cwd, rows, cols)
+        self._ensure_pump(key, slot, backend)
+        return {"spawned": True, "alive": slot.alive()}
+
+    def _ensure_pump(self, key: str, slot: TerminalSlot, backend: Any) -> None:
+        # 泵跟随具体那次 spawn 的进程：shell 退出后自动重启时，旧泵可能还没
+        # 收尾完（阻塞在读线程里），按 pump_proc 区分新旧，别误跳过新泵
+        if (
+            slot.pump_task is not None
+            and not slot.pump_task.done()
+            and slot.pump_proc is slot.proc
+        ):
+            return
+        slot.pump_proc = slot.proc
+        slot.pump_task = asyncio.create_task(self._pump(key, slot, backend))
+
+    async def _pump(self, key: str, slot: TerminalSlot, backend: Any) -> None:
+        """持续读 PTY 输出并广播；阻塞 recv 放线程池，不堵事件循环。"""
+        proc = slot.pump_proc
+        while proc is not None and proc.isalive():
+            try:
+                data = await asyncio.to_thread(proc.read, 4096)
+            except Exception:  # EOFError（进程退出）/ 底层异常：收尾广播
+                break
+            if not data:
+                continue
+            ev = {"kind": "term_data", "term_id": key, "text": data}
+            for ws_emit in list(backend.ws_emitters):
+                try:
+                    asyncio.create_task(ws_emit(ev))
+                except RuntimeError:
+                    break  # 无事件循环（纯测试环境）：丢弃输出
+        # 释放旧 PtyProcess 的最后一份引用：ConPTY 句柄随 GC 关闭，对应的
+        # conhost 宿主进程才能退出（否则每次关标签/切项目泄漏一个 conhost）。
+        # 只在泵读的仍是自己那个进程时清（期间 shell 可能已自动重启换新）。
+        if slot.pump_proc is proc:
+            slot.pump_proc = None
+        for ws_emit in list(backend.ws_emitters):
+            try:
+                asyncio.create_task(ws_emit({"kind": "term_exit", "term_id": key}))
+            except RuntimeError:
+                break
+
+    def input(self, term_id: str, cwd: Path, data: str, rows: int, cols: int, backend: Any) -> dict:
+        """向标签的 shell 写入按键；shell 已退出时自动重启（pump 一并续上）。"""
+        key = self._key(term_id)
+        slot = self.slot(term_id)
+        if not slot.alive():
+            slot.spawn(cwd, rows, cols)
+        self._ensure_pump(key, slot, backend)
+        slot.write(data)
+        return {"ok": True}
+
+    def resize(self, term_id: str, rows: int, cols: int) -> dict:
+        slot = self.peek(term_id)
+        if slot is not None:
+            slot.resize(rows, cols)
+        return {"ok": True}
+
+    def stop(self, term_id: str | None = None) -> bool:
+        """向前台进程发 Ctrl+C（sendintr）；不带 term_id 时发给所有标签。"""
+        if term_id:
+            slot = self.peek(term_id)
+            return slot.interrupt() if slot else False
+        sent = False
+        for slot in self.terms.values():
+            sent = slot.interrupt() or sent
+        return sent
+
+    def close(self, term_id: str) -> bool:
+        """关闭标签：结束 shell 并丢弃执行槽。"""
+        slot = self.terms.pop(self._key(term_id), None)
+        return slot.kill() if slot else False
+
+    def close_all(self) -> None:
+        """服务退出 / 切项目：结束全部标签的 shell。"""
+        for slot in self.terms.values():
+            slot.kill()
+        self.terms.clear()
 
 
 class ServerBackend:
@@ -412,6 +556,11 @@ class ServerBackend:
         self.update_info: dict | None = None  # {"version","url","notes"}：发现的新版本
         self.update_error: str | None = None  # 手动检查时的失败原因（进设置 · 关于）
         self._market_cache: tuple[float, dict] | None = None  # 技能广场索引缓存
+        self.channels: ChannelManager | None = None  # 聊天软件渠道（Bot Channel）
+        self._channel_gates: dict[str, ChannelGate] = {}  # 渠道会话 id → 门控
+        self._channel_names: dict[str, str] = {}  # 渠道会话 id → 平台名（反向查找）
+        self._channel_last_chat: dict[str, str] = {}  # 平台名 → 最近一次入站的 chat_id
+        self._weixin_login_channel = None  # 未启用微信时，仅供扫码登录用的一次性实例
 
     # ---- 多会话运行时：agent/queue/_run_task/_recorder 指向活动会话的 runtime，
     # ---- 后台会话通过 runtimes[sid] 直接访问（并行 turn 不经 property）。
@@ -568,6 +717,9 @@ class ServerBackend:
             store=self.subagent_store,
             provider_resolver=self._subagent_provider,
             registry_resolver=self._subagent_registry,
+            max_concurrent=3,
+            usage_recorder=self._record_subagent_usage,
+            event_emitter=self._ws_broadcast,
         )
 
         self._base_agent = Agent(
@@ -584,6 +736,12 @@ class ServerBackend:
         # 后台查一次新版本：几秒超时、失败完全静默，结果随 boot 快照到前端
         self._update_task = asyncio.create_task(self._check_update_quietly())
         await self.open_initial_session()
+        # 聊天软件渠道：按配置拉起已启用的平台（失败只记状态，不影响启动）
+        self.channels = ChannelManager(self, self._channels_config)
+        try:
+            await self.channels.restart()
+        except Exception as e:  # noqa: BLE001 - 渠道起不来不能让应用启动失败
+            logger.warning("渠道初始化失败：%s", e)
 
     # ---- 新功能配置解析 / 检查点目录 ----
 
@@ -597,6 +755,30 @@ class ServerBackend:
             return resolve_websearch(self.cfg)
         except Exception:  # noqa: BLE001
             return None
+
+    def _configured_services(self) -> list[dict]:
+        """已配好 Key 的模型服务清单（设置页里“需要选服务”的下拉复用它们）。
+
+        搜索 / 画图 / 语音这些能力都跑在 OpenAI 兼容接口上，用户不必再抄一遍
+        Key 与地址——下拉里直接选已配置的服务即可。只回传掩码与地址，不回传明文。
+        """
+        out: list[dict] = []
+        for name, pc in self.cfg.providers.items():
+            if pc.kind == "fake":
+                continue
+            key = resolve_api_key(name, pc)
+            if not key:
+                continue
+            out.append(
+                {
+                    "name": name,
+                    "kind": pc.kind,
+                    "base_url": (pc.base_url or "").rstrip("/"),
+                    "model": pc.model,
+                    "key_mask": self._mask_key(key),
+                }
+            )
+        return out
 
     def _imagegen_kwargs(self) -> dict | None:
         try:
@@ -643,13 +825,18 @@ class ServerBackend:
             rt.agent.registry = self._build_full_registry(rt.recorder)
 
     async def shutdown(self) -> None:
+        if self.channels is not None:
+            try:
+                await self.channels.stop()
+            except Exception:  # noqa: BLE001
+                pass
         for rt in self.runtimes.values():
             t = rt.run_task
             if t and not t.done():
                 t.cancel()
         self.cancel_run()
         self.stop_cron_loop()
-        self.term.stop()
+        self.term.close_all()
         self.stop_reminder_loop()
         if self.mcp:
             await self.mcp.shutdown()
@@ -715,6 +902,26 @@ class ServerBackend:
                 )
             except RuntimeError:
                 continue  # 无事件循环（如纯测试环境）
+
+    def _ws_broadcast(self, ev: dict) -> None:
+        """引擎侧产生的广播事件（子代理直播 / 任务终态）发给在线前端。"""
+        for ws_emit in list(self.ws_emitters):
+            try:
+                asyncio.create_task(ws_emit(ev))
+            except RuntimeError:
+                continue  # 无事件循环（如纯测试环境）
+
+    async def _record_subagent_usage(
+        self, session_id: str, provider: str, model: str,
+        in_tokens: int, out_tokens: int,
+    ) -> None:
+        """子代理任务用量落库：归属派生它的会话（未知时记空串，聚合页仍可见）。"""
+        await self.store.add_usage(
+            session_id or "",
+            provider or self.provider_name,
+            model or self.provider_model,
+            in_tokens, out_tokens,
+        )
 
     # ---- 到点提醒循环 ----
 
@@ -820,6 +1027,7 @@ class ServerBackend:
         task = await self.store.get_cron_task(tid)
         if task is None:
             raise RuntimeError("任务不存在: " + str(tid))
+        self._check_cron_ownership(task)
         kw = {}
         if params.get("name") is not None:
             kw["name"] = str(params["name"]).strip()[:40] or task["name"]
@@ -852,6 +1060,10 @@ class ServerBackend:
 
     async def cron_delete(self, params: dict) -> dict:
         tid = int(params.get("id", 0))
+        task = await self.store.get_cron_task(tid)
+        if task is not None:
+            # 归属校验（安全审查 B8）：凭枚举到的 task_id 不能删别的项目的任务
+            self._check_cron_ownership(task)
         ok = await self.store.delete_cron_task(tid)
         return {"deleted": ok, "id": tid}
 
@@ -860,8 +1072,32 @@ class ServerBackend:
         task = await self.store.get_cron_task(tid)
         if task is None:
             raise RuntimeError("任务不存在: " + str(tid))
+        self._check_cron_ownership(task)
         await self._run_cron_task(tid, force=True)
         return {"started": True, "id": tid}
+
+    def _check_cron_ownership(self, task: dict) -> None:
+        """定时任务必须属于当前项目才能改/删/触发（安全审查 B8）。
+
+        报错文案与其他归属校验一致（不区分「不存在/无权」，防枚举）。
+        """
+        if task.get("project_id") != self.project.id:
+            raise RuntimeError("任务不存在: " + str(task.get("id")))
+
+    async def _cron_execution_context(self, task: dict) -> tuple[int, Path]:
+        """定时任务的项目上下文：返回（project_id, working_dir）。
+
+        扫描循环会看到所有项目的到点任务，但后端只挂在当前项目上；
+        不区分归属的话，B 项目的任务会把 prompt 执行到 A 项目的文件上
+        （会话/白名单/工作目录全部错位）。目录已不存在时回退当前项目，
+        任务本身的错误由运行结果体现。
+        """
+        pid = task.get("project_id")
+        if pid is not None and pid != self.project.id:
+            proj = await self.store.get_project(pid)
+            if proj is not None and Path(proj.root_path).is_dir():
+                return pid, Path(proj.root_path)
+        return self.project.id, self.working_dir
 
     async def _run_cron_task(self, task_id: int, force: bool = False) -> None:
         """跑一个定时任务：独立会话 + headless 门控；结果写回任务行并广播。"""
@@ -878,11 +1114,15 @@ class ServerBackend:
             if self.provider is None:
                 raise RuntimeError("尚未配置可用的模型 API Key")
 
+            # 按任务自身项目跑（见 _cron_execution_context）：会话归属、白名单、
+            # 工作目录都要对上，不能把别的项目的任务挂到当前项目执行
+            cron_pid, cron_workdir = await self._cron_execution_context(task)
+
             # 每个任务一个独立会话（同名），历史随运行累积
-            sess = await self.store.create_session(self.project.id, title=f"⏰ {task['name']}")
+            sess = await self.store.create_session(cron_pid, title=f"⏰ {task['name']}")
             sid = sess.id
             gate = CronGate(allowed=task["allowed_tools"], store=self.store,
-                            project_id=self.project.id, working_dir=self.working_dir)
+                            project_id=cron_pid, working_dir=cron_workdir)
             recorder = ChangeRecorder()
             runtime = SessionRuntime(
                 sid=sid,
@@ -890,7 +1130,7 @@ class ServerBackend:
                     provider=self.provider,
                     registry=self._build_full_registry(recorder),
                     gate=gate,
-                    working_dir=self.working_dir,
+                    working_dir=cron_workdir,
                     max_iterations=self.cfg.max_iterations,
                     context_limit_tokens=self._context_limit(),
                     compaction_keep_recent=self.cfg.compaction_keep_recent,
@@ -1012,6 +1252,19 @@ class ServerBackend:
         removed = await self.store.delete_empty_sessions(self.project.id, keep_id=keep)
         return {"removed": removed}
 
+    async def _get_owned_session(self, session_id: str):
+        """取属于当前项目的会话；不存在或属于其他项目一律报错。
+
+        安全边界（安全审查 B 族）：store.get_session 只按 id 查询，所有
+        按会话 id 的远程操作（chat.send/refs/export/delete/元数据…）必须
+        先过这里，否则别的项目的会话会被挂进当前项目的工作目录与权限门下。
+        报错不区分「不存在/无权」，避免给枚举探测提供区分信号。
+        """
+        sess = await self.store.get_session_for_project(session_id, self.project.id)
+        if sess is None:
+            raise RuntimeError("session not found: " + session_id)
+        return sess
+
     async def truncate_session(self, params: dict) -> dict:
         """消息级回退：为「重新生成 / 编辑重发」截断历史。
 
@@ -1025,9 +1278,7 @@ class ServerBackend:
         rt = self.runtimes.get(sid)
         if rt and rt.run_task and not rt.run_task.done():
             raise RuntimeError("该会话正在运行，等当前轮结束再操作")
-        sess = await self.store.get_session(sid)
-        if sess is None:
-            raise RuntimeError("session not found: " + sid)
+        await self._get_owned_session(sid)
 
         seq = params.get("seq")
         mode = str(params.get("mode", "regen"))
@@ -1063,9 +1314,7 @@ class ServerBackend:
     async def fork_session(self, params: dict) -> dict:
         """从某条消息分叉出新会话：复制 seq <= 锚点 的消息（缺省全部）。"""
         sid = str(params.get("id", "") or (self.session.id if self.session else ""))
-        sess = await self.store.get_session(sid)
-        if sess is None:
-            raise RuntimeError("session not found: " + sid)
+        sess = await self._get_owned_session(sid)
         seq = int(params["seq"]) if params.get("seq") is not None else (
             await self.store.max_seq(sid) or 0)
         new_sess = await self.store.create_session(
@@ -1083,9 +1332,7 @@ class ServerBackend:
 
     async def activate_session(self, session_id: str) -> dict:
         """只切活动指针，不重载历史（标签切换用；runtime 已存在时不做任何重活）。"""
-        sess = await self.store.get_session(session_id)
-        if sess is None:
-            raise RuntimeError("session not found: " + session_id)
+        sess = await self._get_owned_session(session_id)
         self.session = sess
         if session_id not in self.runtimes:
             rt = self._get_runtime(session_id)
@@ -1094,9 +1341,7 @@ class ServerBackend:
         return {"id": sess.id, "title": sess.title}
 
     async def resume_session(self, session_id: str) -> dict:
-        sess = await self.store.get_session(session_id)
-        if sess is None:
-            raise RuntimeError("session not found: " + session_id)
+        sess = await self._get_owned_session(session_id)
         self.session = sess
         rt = self._get_runtime(session_id)
         msgs = await self.store.load_messages(session_id)
@@ -1126,13 +1371,76 @@ class ServerBackend:
             out.append(ImageBlock(media_type=mt, data=data))
         return out
 
+    # ---- 「& 引用对话」：会话引用的清洗与上下文拼装 ----
+
+    REF_MAX_SESSIONS = 3      # 单轮最多引用的对话数
+    REF_MAX_CHARS = 4_000     # 每个被引用对话注入的最大字符数（保尾留新，最近的对话最相关）
+
+    def _sanitize_refs(self, refs: list[str] | None, exclude: str | None) -> list[str]:
+        """清洗引用清单：去重、剔除目标会话自己、截断数量上限。"""
+        out: list[str] = []
+        for r in refs or []:
+            rid = str(r)
+            if not rid or rid == exclude or rid in out:
+                continue
+            out.append(rid)
+            if len(out) >= self.REF_MAX_SESSIONS:
+                break
+        return out
+
+    async def _recent_turn_seconds(self, limit: int = 30) -> list[float]:
+        """本项目近期实测轮耗时（秒），任务耗时预估的历史校准样本。
+
+        store 不可用（纯测试环境等）时返回空列表，预估退化为纯启发式。
+        """
+        if self.store is None or self.project is None:
+            return []
+        try:
+            return await self.store.recent_turn_seconds(self.project.id, limit=limit)
+        except Exception:  # noqa: BLE001 - 校准样本拿不到不该挡住发消息
+            return []
+
+    async def _build_refs_context(self, refs: list[str]) -> str:
+        """把被引用会话的记录拼成注入本轮的上下文块。
+
+        会话不存在、不属于当前项目或没有可读消息时静默跳过；超长的保留尾部
+        （最近的对话与当前任务最相关），并标注省略。格式与 /export 的导出文本
+        一致。归属校验（安全审查 B2）：引用列表由客户端提交，不校验会把
+        别的项目的历史注入当前 Agent 上下文。
+        """
+        blocks: list[str] = []
+        for rid in refs:
+            if await self.store.get_session_for_project(rid, self.project.id) is None:
+                continue  # 不属于本项目的会话：当作不存在，不注入
+            title = await self.store.get_session_title(rid)
+            try:
+                msgs = await self.store.load_messages(rid)
+            except Exception:  # noqa: BLE001 - 引用的会话读不到就不注入，别挡住正常提问
+                continue
+            text = export_messages_text(msgs).strip()
+            if not text:
+                continue
+            if len(text) > self.REF_MAX_CHARS:
+                text = "（前文过长，此处省略——以下是对话的最近部分）\n" + text[-self.REF_MAX_CHARS:]
+            blocks.append(f"──── 引用对话「{title or '未命名会话'}」 ────\n{text}")
+        if not blocks:
+            return ""
+        return (
+            "[引用对话] 用户在本轮点名引用了下面的历史对话记录，回答时可参考其中内容：\n\n"
+            + "\n\n".join(blocks)
+            + "\n\n[引用对话结束]\n\n"
+        )
+
     async def send(self, text: str, emit: EmitFn, plan_mode: bool = False,
                    roundtable: bool = False, members: list | None = None,
                    images: list[dict] | None = None,
                    session_id: str | None = None,
                    wants_title: bool = False,
                    regenerate: bool = False,
-                   compare: bool = False) -> dict:
+                   compare: bool = False,
+                   refs: list[str] | None = None,
+                   debate_rounds: int | None = None,
+                   chair_answers: bool | None = None) -> dict:
         """跑一轮对话；过程事件通过 emit 推送；结束后持久化新消息。
 
         Agent 正在工作时再次 send 不再报错，而是**排队**：等当前轮结束后
@@ -1145,15 +1453,25 @@ class ServerBackend:
         roundtable=True 时本轮走「圆桌」流程：多个模型并行独立作答，
         主席（当前主模型）融合成最终答案；members 为显式成员列表
         [{provider, model}]，缺省时自动选取（见 _resolve_members）。
+        debate_rounds / chair_answers 为本轮覆盖值（None=用 config.toml 的
+        [roundtable] 配置）：前者是额外辩论修订轮数（0-2），后者控制主席
+        是否也出一份草稿。
 
         images 为用户消息携带的图片附件 [{media_type, data(base64)}]，
         只在普通轮生效（圆桌轮是纯文本协作，忽略图片）。
+
+        refs 为「& 引用对话」选中的会话 id 列表：每轮最多 REF_MAX_SESSIONS
+        个，会话记录会被注入本轮上下文（见 _build_refs_context）。
 
         session_id 指定目标会话（多会话并行时前端按标签传入）；缺省用活动会话。
         目标会话不是当前活动会话时先轻量激活（运行中的其他会话不受影响）。
         """
         if session_id and (not self.session or self.session.id != session_id):
             await self.activate_session(session_id)
+        # 引用排除目标会话自己：引用当前对话没有意义
+        clean_refs = self._sanitize_refs(
+            refs, exclude=self.session.id if self.session else None
+        )
         if self.provider is None:
             raise RuntimeError(
                 "尚未配置可用的模型 API Key——"
@@ -1193,6 +1511,8 @@ class ServerBackend:
                 text=text, emit=emit, plan_mode=plan_mode, fut=loop.create_future(),
                 roundtable=roundtable, members=members,
                 images=self._sanitize_images(images),
+                refs=clean_refs, compare=compare,
+                debate_rounds=debate_rounds, chair_answers=chair_answers,
             )
             if rt_now is not None:
                 rt_now.queue.append(item)
@@ -1212,7 +1532,8 @@ class ServerBackend:
                 text, emit, plan_mode, roundtable=roundtable, members_params=members,
                 images=clean_images, runtime=runtime,
                 session_id=self.session.id, wants_title=wants_title,
-                regenerate=regenerate, compare=compare,
+                regenerate=regenerate, compare=compare, refs=clean_refs,
+                debate_rounds=debate_rounds, chair_answers=chair_answers,
             )
         except asyncio.CancelledError:
             # 用户在 turn 真正开始前点了停止：无产出，返回诚实的 stopped 结果，
@@ -1229,6 +1550,7 @@ class ServerBackend:
                 "roundtable": False,
                 "context_tokens": runtime.agent.used_context_tokens(),
                 "context_limit": runtime.agent.context_limit_tokens,
+                "context_detail": self._context_detail(runtime.agent),
             }
         except BaseException:
             # pipeline 启动阶段就抛出（还没走到它自己的标志管理）时把位让出来，
@@ -1299,6 +1621,9 @@ class ServerBackend:
         wants_title: bool = False,
         regenerate: bool = False,
         compare: bool = False,
+        refs: list[str] | None = None,
+        debate_rounds: int | None = None,
+        chair_answers: bool | None = None,
     ) -> dict:
         """真正执行一轮对话（含持久化、规划模式切换、检查点保存）。
 
@@ -1315,10 +1640,48 @@ class ServerBackend:
         async def emit_ev(ev: dict) -> None:
             await emit({**ev, "session_id": sid})
 
+        # 「用户消息」广播给其余在线客户端：轮次事件只发给发起连接，其他窗口 /
+        # 手机端此前既看不到用户消息也没有任何「有人发了话」的来源。发起连接的
+        # 前端已在 send() 里本地渲染过气泡，按对象身份排除，避免重复渲染。
+        # 重新生成（text 为空串）不广播。
+        others = [w for w in list(self.ws_emitters) if w is not emit]
+        if others and (text or images):
+            u_ev = {
+                "kind": "user_message", "session_id": sid, "text": text,
+                "images": [
+                    {"media_type": b.media_type, "data": b.data}
+                    for b in (images or []) if getattr(b, "type", "") == "image"
+                ],
+            }
+            for ws_emit in others:
+                try:
+                    asyncio.create_task(ws_emit(u_ev))
+                except RuntimeError:
+                    continue  # 无事件循环（如纯测试环境）
+
         sess_title = await self.store.get_session_title(sid)
         if not sess_title and not regenerate:
             sess_title = text[:40] or ("[图片]" if images else "")
             await self.store.set_title(sid, sess_title)
+
+        # 任务耗时预估：接手任务时按启发式 + 本项目近期实测给出预计区间，
+        # 先于本轮任何输出事件到达，前端显示「预计 X~Y 分钟」并对照已用时。
+        # 重新生成轮（text 为空）不算接手新任务，不发。
+        if text or images:
+            est = estimate_task(
+                text,
+                history=agent.history,
+                images=len(images or []),
+                members=len(members_params or []) if roundtable else 0,
+                debate_rounds=(debate_rounds or 0) if roundtable else 0,
+                recent=await self._recent_turn_seconds(),
+            )
+            await emit_ev(TaskEstimate(
+                min_seconds=est.min_seconds,
+                max_seconds=est.max_seconds,
+                level=est.level,
+                basis=est.basis,
+            ).model_dump())
 
         readonly_registry = None
         if plan_mode:
@@ -1328,6 +1691,13 @@ class ServerBackend:
                 [t for t in agent.registry.all() if t.safety == Safety.READONLY]
             )
             agent.registry = readonly_registry
+        # 「& 引用对话」：把被引用会话的记录拼在消息最前面注入本轮上下文
+        #（与 PLAN_MODE_PREFIX 同一套做法，随用户消息一起持久化）
+        if refs:
+            refs_ctx = await self._build_refs_context(refs)
+            if refs_ctx:
+                text = refs_ctx + text
+        if plan_mode:
             text = PLAN_MODE_PREFIX + text
 
         n_before = len(agent.history)
@@ -1335,11 +1705,21 @@ class ServerBackend:
         rt_meta: dict | None = None
         tin0, tout0 = agent.total_in_tokens, agent.total_out_tokens
         runtime.run_task = asyncio.current_task()
+        turn_exc: BaseException | None = None
+        # 本轮运行期间派生的子代理任务把用量记到这个会话名下；finally 里清除
+        if self.tasks:
+            self.tasks.set_active_session(sid)
         try:
             if roundtable:
                 rt_meta = await self._roundtable_body(
                     text, emit_ev, members_params, agent=agent, compare=compare,
+                    sid=sid, images=images,
+                    debate_rounds=debate_rounds, chair_answers=chair_answers,
+                    regenerate=regenerate,
                 )
+                # 圆桌的取消在引擎层收敛（保留已产出的部分文本），这里同步停止位
+                if (rt_meta or {}).get("status") == "cancelled":
+                    stopped = True
             else:
                 async for ev in agent.run_turn(text, images=images, append_user=not regenerate):
                     await emit_ev(ev.model_dump())
@@ -1347,7 +1727,14 @@ class ServerBackend:
                         await self.store.touch(sid)
         except asyncio.CancelledError:
             stopped = True
+        except Exception as e:  # noqa: BLE001
+            # 意外错误也要走完整收尾（落库/用量/队列交棒/释放运行位），
+            # 否则 runtime.run_task 悬挂、后续消息永远排队。收尾后原样上抛，
+            # 让 WS 层返回 ok=false 的诚实错误。
+            turn_exc = e
         finally:
+            if self.tasks:
+                self.tasks.set_active_session("")
             if plan_mode and readonly_registry is not None:
                 # 恢复完整工具集（只读注册表只在本轮生效）
                 agent.registry = self._build_full_registry(runtime.recorder)
@@ -1422,6 +1809,7 @@ class ServerBackend:
             "roundtable": rt_meta,
             "context_tokens": agent.used_context_tokens(),
             "context_limit": agent.context_limit_tokens,
+            "context_detail": self._context_detail(agent),
         }
         if checkpoint is not None:
             result["checkpoint"] = checkpoint
@@ -1439,6 +1827,8 @@ class ServerBackend:
                 )
             except Exception:  # noqa: BLE001
                 pass
+        if turn_exc is not None:
+            raise turn_exc  # 收尾已做完，原样上抛交给 WS 层
         return result
 
     async def _run_queued(self, item: QueuedTurn, runtime: SessionRuntime) -> None:
@@ -1447,7 +1837,9 @@ class ServerBackend:
             item.resolve(await self._run_turn_pipeline(
                 item.text, item.emit, item.plan_mode,
                 roundtable=item.roundtable, members_params=item.members,
-                images=item.images, runtime=runtime,
+                images=item.images, runtime=runtime, refs=item.refs,
+                compare=item.compare, debate_rounds=item.debate_rounds,
+                chair_answers=item.chair_answers,
             ))
         except Exception as e:  # noqa: BLE001 - 错误要送回等待中的请求
             item.fail(e)
@@ -1476,17 +1868,24 @@ class ServerBackend:
             pc = pc.model_copy(update={"model": model})
         return build_provider(name, pc)
 
-    def _resolve_members(self, members_params: list | None) -> list[MemberSpec]:
+    def _resolve_members(
+        self, members_params: list | None, chair_answers: bool | None = None,
+    ) -> list[MemberSpec]:
         """解析圆桌成员：显式列表优先；缺省时取所有已配置 Key 的服务的当前模型。
 
         规则：
         - 去重（同名同模型只留一个）；上限 cfg.roundtable.max_members（不含主席）；
-        - 主席（当前主模型）默认也已作为成员出草稿，与它重复的成员跳过；
+        - chair_answers 为 None 时用配置值；为 True 时跳过与主席重复的成员
+          （主席会被单独插到队列最前）；
         - 单个成员构建失败（缺 Key/未知服务）不阻断，作答时以错误卡片呈现。
         """
         specs: list[MemberSpec] = []
         seen: set[tuple[str, str]] = set()
         limit = self.cfg.roundtable.max_members
+        chair_in = (
+            self.cfg.roundtable.chair_answers if chair_answers is None
+            else bool(chair_answers)
+        )
         chair_key = (self.provider_name, self.provider_model)
 
         def _add(name: str, model: str) -> None:
@@ -1512,14 +1911,14 @@ class ServerBackend:
                 if not name:
                     continue
                 model = str((m or {}).get("model", "") or "").strip()
-                if self.cfg.roundtable.chair_answers and (name, model) == chair_key:
+                if chair_in and (name, model) == chair_key:
                     continue
                 _add(name, model)
         else:
             for name, pc in self.cfg.providers.items():
                 if resolve_api_key(name, pc) is None:
                     continue
-                if self.cfg.roundtable.chair_answers and (name, pc.model) == chair_key:
+                if chair_in and (name, pc.model) == chair_key:
                     continue
                 _add(name, pc.model)
         return specs
@@ -1527,11 +1926,18 @@ class ServerBackend:
     async def _roundtable_body(
         self, text: str, emit: EmitFn, members_params: list | None,
         agent: Agent | None = None, compare: bool = False,
+        sid: str | None = None, images: list[ImageBlock] | None = None,
+        debate_rounds: int | None = None, chair_answers: bool | None = None,
+        regenerate: bool = False,
     ) -> dict:
-        """圆桌轮主体：成员并行作答 → 主席融合 → 结果并入主历史。
+        """圆桌轮主体：成员并行作答（+ 可选辩论）→ 主席融合 → 结果并入主历史。
 
-        返回随轮次结果回传前端的圆桌元数据；历史只追加
-        user(问题) + assistant(融合答案)，成员草稿不入主历史。
+        返回随轮次结果回传前端的圆桌元数据。历史追加 user(问题) + assistant
+        (融合答案)；成员草稿不入主历史，但随融合消息的 roundtable 元数据持久化
+        （历史回放时圆桌卡仍可展开回看）。
+
+        取消语义与 agent.run_turn 对齐：user 消息在成员开跑前就入历史，
+        中途点停止问题不会丢；融合中途取消时已流出的部分文本也照样落库。
         agent 缺省时用活动会话的（单会话调用路径兼容）。
         """
         if agent is None:
@@ -1539,53 +1945,122 @@ class ServerBackend:
         if self.provider is None:
             raise RuntimeError("圆桌需要当前主模型可用；请先在模型下拉中选择一个已配置 Key 的服务")
 
+        cfg = self.cfg.roundtable
+        debate = cfg.debate_rounds if debate_rounds is None else max(0, min(int(debate_rounds), 2))
+        chair_in = cfg.chair_answers if chair_answers is None else bool(chair_answers)
+
         async def emit_ev(ev) -> None:
             await emit(ev.model_dump())
 
         await emit_ev(TurnStarted(iteration=1))
-        members = self._resolve_members(members_params)
+
+        # 圆桌是纯文本协作：图片不会发给成员/主席，但得让用户知道，不能静默丢弃
+        if images:
+            await emit_ev(NoticeEvent(
+                message=f"圆桌轮为纯文本协作：本轮的 {len(images)} 张图片不会发给成员模型"
+                        "（已随消息保留）；需要模型看图请关闭圆桌后重发。"
+            ))
+
+        # 用户消息先入历史（与普通轮一致）：中途停止问题也能落库，不丢上下文。
+        # 重新生成时提问已在历史末尾（session.truncate 已删掉旧回答），不再重复追加。
+        if regenerate:
+            question = text
+            for m in reversed(agent.history):
+                if m.role == "user" and m.text.strip():
+                    question = m.text
+                    break
+        else:
+            question = text
+            agent.history.append(Message.user(text, images))
+
+        # 上下文压缩护栏：成员与主席都要吃全量历史 + 全部草稿，超限时先压缩
+        #（与 agent.run_turn 开头一致），否则最容易爆的反而是主席自己的上下文
+        if agent.used_context_tokens() > agent.context_limit_tokens:
+            ev = await compact_history(agent, keep_recent=self.cfg.compaction_keep_recent)
+            if ev is not None:
+                await emit_ev(ev)
+
+        members = self._resolve_members(members_params, chair_in)
+        # 面板选了超过上限的成员会被静默截断，明确告知而不是让用户猜
+        if members_params:
+            wanted = len({
+                (str((m or {}).get("provider", "")).strip(),
+                 str((m or {}).get("model", "")).strip())
+                for m in members_params
+                if str((m or {}).get("provider", "")).strip()
+            })
+            if wanted > cfg.max_members:
+                await emit_ev(NoticeEvent(
+                    message=f"圆桌成员上限为 {cfg.max_members} 个（设置 · 圆桌 可调），"
+                            f"本轮只用了面板顺序前 {cfg.max_members} 个。"
+                ))
         if not members:
             await emit_ev(TurnFinished(stop_reason="error", iterations=1))
             raise RuntimeError(
                 "圆桌没有可用成员：请先在成员面板选择，或给更多模型服务配置 API Key"
             )
-        if self.cfg.roundtable.chair_answers:
+        if chair_in:
             members.insert(0, MemberSpec(
                 provider_name=self.provider_name,
                 model=self.provider_model,
                 provider=self.provider,
             ))
 
+        # 成员/主席都不看图片（纯文本协作），历史里的图片块单独剥离；
+        # history[:-1] 排除刚追加的本次提问（由 run_roundtable 自己拼在末尾）
+        member_history = _strip_image_blocks(agent.history[:-1])
+
         system = history_system_text(agent.history) or self.compose_system()
         outcome: RoundtableOutcome = await run_roundtable(
             members=members,
             chair=self.provider,
             system_text=system,
-            history=agent.history,
-            user_text=text,
-            timeout_s=self.cfg.roundtable.member_timeout_s,
+            history=member_history,
+            user_text=question,
+            timeout_s=cfg.member_timeout_s,
             emit=emit_ev,
+            debate_rounds=debate,
+            fuse=not compare,
+            chair_provider=self.provider_name or "",
+            chair_model=self.provider_model or "",
         )
 
-        agent.history.append(Message.user(text))
+        def member_meta(r) -> dict:
+            return {
+                "provider": r.spec.provider_name,
+                "model": r.spec.model,
+                "status": r.status,
+                "error": r.error,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                # 草稿随消息持久化（限长）：刷新/重进会话后圆桌卡仍可展开回看
+                "draft": clip_draft(r.text.strip()) if r.text.strip() else "",
+            }
+
         meta = {
-            "mode": "roundtable",
+            "mode": "compare" if compare else "roundtable",
             "chair": {"provider": self.provider_name, "model": self.provider_model},
-            "chair_answers": self.cfg.roundtable.chair_answers,
-            "members": [
-                {
-                    "provider": r.spec.provider_name,
-                    "model": r.spec.model,
-                    "status": r.status,
-                    "error": r.error,
-                    "output_tokens": r.output_tokens,
-                }
-                for r in outcome.members
-            ],
+            "chair_answers": chair_in,
+            "debate_rounds": debate,
+            "rounds": 1 + debate,
+            "members": [member_meta(r) for r in outcome.members],
         }
+
+        # 用量入账：圆桌不走 agent.run_turn，agent.total_* 不会动（pipeline 那行
+        # add_usage 记的是 0）。这里按成员逐条写 usage_log、融合记主席名下，
+        # 统计页与每日 token 预算护栏才看得见圆桌的真实成本。
+        if sid:
+            try:
+                for row in usage_rows(outcome):
+                    await self.store.add_usage(
+                        sid, row["provider"], row["model"],
+                        row["input_tokens"], row["output_tokens"],
+                    )
+            except Exception:  # noqa: BLE001 - 记账失败不影响本轮结果
+                pass
+
         if compare:
             # A/B 对比：每个成员的回答单独成一条消息（带归属徽标），不融合
-            meta["mode"] = "compare"
             kept = 0
             for r in outcome.members:
                 if r.status != "done" or not r.text.strip():
@@ -1594,11 +2069,7 @@ class ServerBackend:
                 m.roundtable = {
                     "mode": "compare",
                     "chair": meta["chair"],
-                    "members": [{
-                        "provider": r.spec.provider_name, "model": r.spec.model,
-                        "status": r.status, "error": r.error,
-                        "output_tokens": r.output_tokens,
-                    }],
+                    "members": [member_meta(r)],
                 }
                 agent.history.append(m)
                 await emit_ev(AssistantMessage(message=m.model_dump()))
@@ -1608,21 +2079,89 @@ class ServerBackend:
                 stop_reason="end_turn" if kept else "error", iterations=1
             ))
             return meta
+
+        if outcome.status == "cancelled":
+            # 用户中途停止：已流出的部分融合文本照样落库（用户已经看到了，
+            # 不落库刷新就没了）。TurnFinished 由 pipeline 的 stopped 结果收尾。
+            meta["status"] = "cancelled"
+            if outcome.fused_text.strip():
+                assistant = Message.assistant([TextBlock(text=outcome.fused_text)])
+                assistant.roundtable = meta
+                agent.history.append(assistant)
+                await emit_ev(AssistantMessage(message=assistant.model_dump()))
+            await emit_ev(TurnFinished(stop_reason="cancelled", iterations=1))
+            return meta
+
         if outcome.fused_text:
             assistant = Message.assistant([TextBlock(text=outcome.fused_text)])
             assistant.roundtable = meta
             agent.history.append(assistant)
             await emit_ev(AssistantMessage(message=assistant.model_dump()))
-        else:
-            await emit_ev(ErrorEvent(
-                message=f"圆桌融合失败：{outcome.error or '所有成员均未产出回答'}"
+            await emit_ev(TurnFinished(stop_reason="end_turn", iterations=1))
+            return meta
+
+        # 融合失败：成员草稿已经花了钱，降级成对比式逐条保留，不至于空手而归
+        drafts = [r for r in outcome.members if r.status == "done" and r.text.strip()]
+        await emit_ev(ErrorEvent(
+            message=f"圆桌融合失败：{outcome.error or '所有成员均未产出回答'}"
+        ))
+        if drafts:
+            await emit_ev(NoticeEvent(
+                message=f"已保留 {len(drafts)} 份成员草稿（见下方消息），融合结果未能生成。"
             ))
+            meta["mode"] = "compare"
+            meta["degraded"] = True
             meta["status"] = "error"
             meta["error"] = outcome.error
-        await emit_ev(TurnFinished(
-            stop_reason="end_turn" if outcome.fused_text else "error", iterations=1
-        ))
+            for r in drafts:
+                m = Message.assistant([TextBlock(text=r.text.strip())])
+                m.roundtable = {
+                    "mode": "compare", "chair": meta["chair"], "degraded": True,
+                    "members": [member_meta(r)],
+                }
+                agent.history.append(m)
+                await emit_ev(AssistantMessage(message=m.model_dump()))
+            await emit_ev(TurnFinished(stop_reason="end_turn", iterations=1))
+        else:
+            meta["status"] = "error"
+            meta["error"] = outcome.error
+            await emit_ev(TurnFinished(stop_reason="error", iterations=1))
         return meta
+
+    # ---- 圆桌设置（设置 · 圆桌）：读回当前值 → 编辑 → 保存后热生效 ----
+
+    def roundtable_detail(self) -> dict:
+        """设置页圆桌卡片的数据。"""
+        rt = self.cfg.roundtable
+        return {
+            "max_members": rt.max_members,
+            "member_timeout_s": rt.member_timeout_s,
+            "chair_answers": rt.chair_answers,
+            "debate_rounds": rt.debate_rounds,
+            "configured_services": len(self._configured_services()),
+            "config_hint": (
+                "圆桌让多个模型并行独立作答，再由主席（当前主模型）融合成一份答案，"
+                "token 成本约为单模型的「成员数 + 1」倍；每多一轮辩论修订，成员成本"
+                "再翻一倍（草稿已收敛的成员会自动跳过）。成员来自「模型服务」里已配好"
+                " Key 的服务，可在输入框的圆桌面板逐个勾选。圆桌全程不调用工具、不写文件。"
+            ),
+        }
+
+    async def roundtable_save(self, params: dict) -> dict:
+        """保存圆桌设置并热生效（写 config.toml 的 [roundtable] 段）。"""
+        updates: dict = {}
+        if params.get("max_members") is not None:
+            updates["max_members"] = max(1, min(8, int(params["max_members"])))
+        if params.get("member_timeout_s") is not None:
+            updates["member_timeout_s"] = max(10, int(params["member_timeout_s"]))
+        if params.get("chair_answers") is not None:
+            updates["chair_answers"] = bool(params["chair_answers"])
+        if params.get("debate_rounds") is not None:
+            updates["debate_rounds"] = max(0, min(2, int(params["debate_rounds"])))
+        if updates:
+            update_config_section("roundtable", updates)
+            self.cfg = load_config()
+        return self.roundtable_detail()
 
     # ---- Slash 命令支撑（/compact /status /todos，前端输入 / 唤出菜单） ----
 
@@ -1637,7 +2176,45 @@ class ServerBackend:
             "summary_chars": ev.summary_chars if ev else 0,
             "context_tokens": agent.used_context_tokens(),
             "context_limit": agent.context_limit_tokens,
+            "context_detail": self._context_detail(agent),
         }
+
+    def _context_detail(self, agent: Agent) -> dict:
+        """上下文构成明细（输入栏环形仪表的悬停弹层）：按消息 / 系统提示词 /
+        技能 / 工具分桶估算 token 占用，附会话累计的平均缓存命中率。
+        纯估算、仅供界面参考；「其他」吸收图片输入与各家 tokenizer 的估算偏差
+        （真实上报 − 各桶估算之和，负值归零）。"""
+        sys_text = (
+            build_system_prompt(self.working_dir)
+            + render_instructions_section(self.instructions_file, self.instructions_text)
+            + render_memory_section()
+        )
+        skills_text = self.skills.render_prompt_section() if self.skills else ""
+        mcp_names = {t.name for t in (self.mcp_tools or [])}
+        schemas = agent.registry.schemas()
+        buckets = [
+            ("消息", estimate_tokens([m for m in agent.history if m.role != "system"])),
+            ("系统工具", estimate_text_tokens(json.dumps(
+                [s for s in schemas if s["name"] not in mcp_names], ensure_ascii=False))),
+            ("技能", estimate_text_tokens(skills_text)),
+            ("系统提示词", estimate_text_tokens(sys_text)),
+            ("MCP 工具", estimate_text_tokens(json.dumps(
+                [s for s in schemas if s["name"] in mcp_names], ensure_ascii=False))),
+        ]
+        total = agent.used_context_tokens()
+        rest = total - sum(n for _, n in buckets)
+        buckets.append(("其他", max(0, rest)))
+        denom = sum(n for _, n in buckets) or 1
+        rows = [
+            {"label": label, "tokens": n, "pct": round(100 * n / denom, 1)}
+            for label, n in sorted(buckets, key=lambda kv: -kv[1])
+        ]
+        rate = None
+        if agent.total_cached_tokens > 0 and agent.total_in_tokens > 0:
+            # 服务从未上报过缓存明细时保持 None（前端显示「—」），不冒充 0%
+            rate = round(100 * agent.total_cached_tokens / agent.total_in_tokens, 1)
+        return {"tokens": total, "limit": agent.context_limit_tokens,
+                "rows": rows, "cache_rate": rate}
 
     def status(self) -> dict:
         """/status：模型、上下文占用、工具数、任务清单一览。"""
@@ -1651,24 +2228,43 @@ class ServerBackend:
             "session_id": self.session.id if self.session else None,
             "context_tokens": self.agent.used_context_tokens(),
             "context_limit": self.agent.context_limit_tokens,
+            "context_detail": self._context_detail(self.agent),
             "history_messages": len(self.agent.history),
             "tool_count": len(self.agent.registry),
             "queued": len(self.queue),
             "todos": list(getattr(todo_tool, "items", []) or []),
         }
 
-    async def tasks_list(self) -> dict:
-        return {"tasks": self.tasks.list_tasks() if self.tasks else []}
+    async def tasks_list(self, params: dict | None = None, *, session_id: str | None = None) -> dict:
+        """任务簿列表；session_id 给出时只返回该会话的任务（远程客户端隔离，B13）。"""
+        sid = session_id
+        if sid is None:
+            raw = (params or {}).get("session_id")
+            sid = str(raw) if raw else None
+        return {"tasks": self.tasks.list_tasks(session_id=sid) if self.tasks else []}
 
-    async def tasks_cancel_all(self) -> dict:
+    async def tasks_get(self, params: dict, *, session_id: str | None = None) -> dict:
+        task_id = str((params or {}).get("task_id", ""))
+        detail = self.tasks.get_detail(task_id, session_id=session_id) if self.tasks else None
+        if detail is None:
+            raise ValueError("unknown task_id: " + task_id)
+        return {"task": detail}
+
+    async def tasks_cancel_all(self, *, session_id: str | None = None) -> dict:
+        """取消运行中的子代理任务；session_id 给出时只取消该会话的（B13）。"""
         if self.tasks:
-            self.tasks.cancel_all()
+            self.tasks.cancel_all(session_id=session_id)
         return {"cancelled": True}
 
     async def usage_stats(self, params: dict) -> dict:
-        """用量统计：按天/会话/服务聚合 + 按 provider 单价估算费用。"""
+        """用量统计：按天/会话/服务聚合 + 按 provider 单价估算费用。
+
+        只统计当前项目的用量（安全审查 B14：by_session 带会话标题，
+        跨项目聚合会借远程接口泄露）；每日预算护栏用的 usage_today 仍是
+        全局口径（预算本身是全局设置）。
+        """
         days = min(90, max(1, int(params.get("days", 14))))
-        st = await self.store.usage_stats(days)
+        st = await self.store.usage_stats(days, project_id=self.project.id)
         prices = {
             name: {"price_in": pc.price_in, "price_out": pc.price_out}
             for name, pc in self.cfg.providers.items()
@@ -1689,6 +2285,9 @@ class ServerBackend:
             "total_out": total_out,
             "cost": round(cost, 4),
             "has_price": any(p["price_in"] or p["price_out"] for p in prices.values()),
+            # 每日预算与当日用量：用量页据此显示「今日已用 / 预算」，0 = 未设上限
+            "budget": self.cfg.daily_token_budget,
+            "today": await self.store.usage_today(),
         }
 
     def _workspace_path(self, raw: str) -> Path:
@@ -1735,9 +2334,10 @@ class ServerBackend:
         return rel
 
     async def fs_read(self, params: dict) -> dict:
-        """只读预览工作区文件（文件树用）：文本直接读；PDF/Word/Excel 提取文本；
-        其余二进制拒绝。沙箱限制在工作目录内。返回 mtime 供编辑器保存时做冲突检测，
-        editable 标记「这份文本能不能写回」（提取文本/截断的都不可写回）。"""
+        """只读预览工作区文件（文件树用）：文本直接读（自动识别编码）；
+        PDF/Word/Excel/PPT 提取文本；其余二进制拒绝。沙箱限制在工作目录内。
+        返回 mtime 供编辑器保存时做冲突检测，editable 标记「这份文本能不能写回」
+        （提取文本 / 截断 / 编码不明的都不可写回）。"""
         raw = str(params.get("path", "") or "").strip()
         if not raw:
             raise RuntimeError("missing path")
@@ -1753,7 +2353,7 @@ class ServerBackend:
             raise RuntimeError("读取失败: " + str(e)) from None
 
         # 文档类文件：提取文本预览（与 read_document 工具同一套解析器）
-        if target.suffix.lower() in (".pdf", ".docx", ".xlsx"):
+        if target.suffix.lower() in (".pdf", ".docx", ".xlsx", ".pptx"):
             if size > 50_000_000:
                 raise RuntimeError(f"文件太大（{size / 1048576:.0f}MB），上限 50MB")
             from ..tools.docs import extract_document_text
@@ -1778,15 +2378,22 @@ class ServerBackend:
             raise RuntimeError("读取失败: " + str(e)) from None
         if b"\x00" in data:
             raise RuntimeError("二进制文件不支持预览")
-        text = data.decode("utf-8", errors="replace")
+        # 文本文件：探测编码，GBK / GB18030 文件不再显示成替换字符
+        from ..textio import decode_bytes
+
+        loaded = decode_bytes(data)
         truncated = size > 400_000
         return {
             "path": str(target.relative_to(self.working_dir)).replace("\\", "/"),
-            "text": text,
+            "text": loaded.text,
             "size": size,
             "truncated": truncated,
             "mtime": mtime,
-            "editable": not truncated,
+            # 编码探不出来时不允许写回：用替换字符覆盖原文等于损坏文件
+            "editable": not truncated and loaded.certain,
+            "encoding": loaded.encoding,
+            "encoding_text": "UTF-8" if loaded.encoding == "utf-8" else loaded.encoding.upper(),
+            "newline": loaded.newline,
         }
 
     async def fs_write(self, params: dict) -> dict:
@@ -1797,6 +2404,9 @@ class ServerBackend:
         但同样严格锁死在工作目录内、只收文本、限 2MB。base_mtime 与磁盘当前
         不一致时不落盘、返回 conflict=True，由前端让用户选覆盖（force=True）
         或放弃，避免无意盖掉 Agent / 其他程序正在做的改动。
+
+        落盘沿用文件原本的编码与行尾符：缓存里只存了探测结果的小字典（不读全文，
+        避免每次保存多读一遍盘）；拿不到时回退 UTF-8 + LF。
         """
         raw = str(params.get("path", "") or "").strip().replace("\\", "/")
         if not raw:
@@ -1811,7 +2421,17 @@ class ServerBackend:
                 raise RuntimeError("base_mtime 必须是整数（fs.read 返回的 mtime）") from None
         rel = self._validate_rel_path(raw)
         target = self._workspace_path(rel)
-        data = text.encode("utf-8")
+        # 沿用文件原本的编码与行尾符：探测结果有小缓存，拿不到时回退 UTF-8 + LF。
+        # 前端编辑器按 HTML 规范会把内容统一成 LF，所以写回时必须还原行尾符，
+        # 否则保存一次 CRLF 文件就变成 LF（或反之），整文件 diff 全是噪声。
+        enc, nl = self._file_text_meta(target)
+        try:
+            data = encode_text(text, enc, nl)
+        except (UnicodeEncodeError, LookupError):
+            raise RuntimeError(
+                f"内容无法用原编码（{enc}）保存：里面出现了该编码不支持的字符。"
+                "请改用 UTF-8 另存，或删掉这些字符后重试。"
+            ) from None
         if len(data) > 2_000_000:
             raise RuntimeError("文件太大（超过 2MB），请用系统编辑器处理")
 
@@ -1830,7 +2450,37 @@ class ServerBackend:
             mtime = target.stat().st_mtime_ns // 1_000_000
         except OSError as e:
             raise RuntimeError("写入失败: " + str(e)) from None
-        return {"saved": True, "mtime": mtime, "size": len(data)}
+        self._text_meta_cache[str(target)] = (mtime, enc, nl)
+        return {"saved": True, "mtime": mtime, "size": len(data), "encoding_text": enc.upper()}
+
+    # 文本文件编码 / 行尾符探测结果缓存：fs.read 写入、fs.write 读回。
+    # 存的是探测结果（mtime + 两个短字符串），不存文件内容，避免每次保存多读一遍盘。
+    _text_meta_cache: dict[str, tuple[int, str, str]] = {}
+
+    def _file_text_meta(self, target: Path) -> tuple[str, str]:
+        """取文件原本的（编码, 行尾符）；缓存过期或文件已变时重探。
+
+        探不出确凿编码时回退 UTF-8 + LF（与 fs_read 返回 editable=False 一致：
+        那种文件前端不会让用户编辑，走不到这里）。
+        """
+        from ..textio import decode_bytes
+
+        try:
+            mtime = target.stat().st_mtime_ns // 1_000_000
+        except OSError:
+            return "utf-8", "\n"
+        key = str(target)
+        cached = self._text_meta_cache.get(key)
+        if cached and cached[0] == mtime:
+            return cached[1], cached[2]
+        try:
+            loaded = decode_bytes(target.read_bytes()[:400_000])
+        except OSError:
+            return "utf-8", "\n"
+        if loaded.binary or not loaded.certain:
+            return "utf-8", "\n"
+        self._text_meta_cache[key] = (mtime, loaded.encoding, loaded.newline)
+        return loaded.encoding, loaded.newline
 
     async def workspace_files(self) -> dict:
         """/@ 文件提及的数据源：项目内文件相对路径清单（跳过依赖与构建目录）。"""
@@ -1879,6 +2529,14 @@ class ServerBackend:
 
     async def restore_checkpoint(self, checkpoint_id: str) -> dict:
         """把某轮的文件改动回滚到改前状态；并告知模型「文件已被回滚」。"""
+        cp = self.checkpoints.get(checkpoint_id)
+        if cp is None:
+            raise RuntimeError(
+                f"检查点 {checkpoint_id} 不存在或已过期（保留最近 50 轮，更早的会被淘汰）"
+            )
+        # 归属校验（安全审查 B12）：检查点 id 顺序可枚举，不属于当前项目的
+        # 快照不能凭 id 恢复（否则别的项目的文件内容会被写回磁盘）
+        await self._check_checkpoint_ownership(cp)
         try:
             files = self.checkpoints.restore(checkpoint_id)
         except KeyError:
@@ -1890,13 +2548,24 @@ class ServerBackend:
             + ", ".join(files)
             + "。后续如需引用这些文件请先重新读取。"
         )
-        cp = self.checkpoints.get(checkpoint_id)
         sid = (cp or {}).get("session_id") or (self.session.id if self.session else None)
         agent = self.runtimes[sid].agent if sid and sid in self.runtimes else self.agent
         agent.history.append(note)
         if sid:
             await self.store.append_message(sid, note)
         return {"restored": checkpoint_id, "files": files}
+
+    async def _check_checkpoint_ownership(self, cp: dict) -> None:
+        """检查点必须属于当前活动会话（B12：cp id 顺序可枚举）。
+
+        同项目里其他会话的快照也不能凭枚举到的 id 恢复/对比——恢复是写盘原语，
+        对比会返回文件内容。无会话归属的旧检查点（meta 里没写 session_id）
+        无法校验，同样拒绝。
+        """
+        sid = (cp or {}).get("session_id") or ""
+        active = self.session.id if self.session else ""
+        if not sid or not active or sid != active:
+            raise RuntimeError("该检查点不属于当前会话，无法校验归属")
 
     async def checkpoint_diff(self, checkpoint_id: str) -> dict:
         """「审查」标签页：某个检查点里每个文件的 改前快照 vs 磁盘现状 的 unified diff。"""
@@ -1905,6 +2574,8 @@ class ServerBackend:
             raise RuntimeError(
                 f"检查点 {checkpoint_id} 不存在或已过期（保留最近 50 轮，更早的会被淘汰）"
             )
+        # 同 restore：凭枚举 id 不能读别的项目会话的文件快照（B12）
+        await self._check_checkpoint_ownership(cp)
         files: list[dict] = []
         for path_s, pre in cp["files"].items():
             try:
@@ -1932,14 +2603,23 @@ class ServerBackend:
 
     # ---- 右侧面板：终端 / 辅助对话 ----
 
-    async def term_run(self, command: str, emit: EmitFn) -> dict:
-        command = (command or "").strip()
-        if not command:
-            raise RuntimeError("命令不能为空")
-        return await self.term.run(command, self.working_dir, emit)
+    def term_spawn(self, term_id: str, rows: int, cols: int) -> dict:
+        """在当前项目工作目录里开一个常驻 PowerShell 标签。"""
+        return self.term.spawn(term_id, self.working_dir, rows, cols, self)
 
-    def term_stop(self) -> dict:
-        return {"stopped": self.term.stop()}
+    def term_input(self, term_id: str, data: str, rows: int, cols: int) -> dict:
+        """向标签的 shell 写按键（shell 已退出时自动重启）。"""
+        return self.term.input(term_id, self.working_dir, data, rows, cols, self)
+
+    def term_resize(self, term_id: str, rows: int, cols: int) -> dict:
+        return self.term.resize(term_id, rows, cols)
+
+    def term_stop(self, term_id: str = "") -> dict:
+        """向前台进程发 Ctrl+C；不带 term_id 时发给所有标签。"""
+        return {"stopped": self.term.stop(term_id or None)}
+
+    def term_close(self, term_id: str) -> dict:
+        return {"closed": self.term.close(term_id)}
 
     AUX_SYSTEM = (
         "你是 SkySheep 侧边面板中的辅助助手，负责回答主对话之外的快速小问题。"
@@ -2057,6 +2737,17 @@ class ServerBackend:
         )
         await self.gate.load_project_rules()
         return {"removed": removed}
+
+    async def remove_whitelist_rule(self, rule_id: int) -> dict:
+        """删一条项目级规则（设置页入口）。带归属校验：凭枚举到的 rule_id
+        不能删其他项目的规则（安全审查 B11），store 层把 project_id 写进 DELETE。
+        """
+        rules = await self.store.list_rules(self.project.id)
+        if not any(r["id"] == rule_id for r in rules):
+            raise RuntimeError("规则不存在，可能已被删除")
+        await self.store.remove_rule(rule_id, project_id=self.project.id)
+        await self.gate.load_project_rules()
+        return {"removed": rule_id}
 
     def check_whitelist_rule(self, tool: str, text: str) -> dict:
         """规则测试器：当前规则会让这条调用直接放行、还是弹确认。"""
@@ -2301,6 +2992,19 @@ class ServerBackend:
         ]
         return result
 
+    async def scan_local_skills(self) -> dict:
+        """扫描本机常见的别家技能目录，找出可以复用的技能候选。
+
+        纯只读探测（Claude Code / agents / Codex 的 home 目录 + 本项目 .claude）：
+        找到的候选交给设置页勾选，真正的安装走既有 skills.install 复制流程，
+        这里不移动、不删除、不修改扫描到的任何文件。
+        """
+        roots = [(label, Path(p).expanduser()) for label, p in LOCAL_SKILL_SOURCES]
+        roots.append(("本项目", self.working_dir / ".claude" / "skills"))
+        existing = {s.name for s in self.skills.all()}
+        candidates = await asyncio.to_thread(scan_computer_skills, roots, existing)
+        return {"candidates": candidates}
+
     async def delete_skill(self, name: str) -> dict:
         """删除技能目录。全局技能与项目技能都可能重名，按当前加载到的那一份删。"""
         skill = self.skills.get(name)
@@ -2451,6 +3155,7 @@ class ServerBackend:
         args: list[str] | None = None,
         url: str = "",
         env: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
         readonly: bool = False,
         scope: str = "global",
         overwrite: bool = True,
@@ -2465,6 +3170,11 @@ class ServerBackend:
             raw["url"] = url.strip()
         if env:
             raw["env"] = {str(k): str(v) for k, v in env.items()}
+        # 请求头仅对 HTTP 传输有意义：stdio 服务带上它只会让人困惑
+        if headers and url.strip():
+            raw["headers"] = {
+                str(k): str(v) for k, v in headers.items() if str(k).strip()
+            }
         if readonly:
             raw["readonly"] = True
         try:
@@ -2603,7 +3313,68 @@ class ServerBackend:
             return {"supported": startup.is_supported(), "enabled": False,
                     "command": "", "current": "", "stale": False, "error": str(e)}
 
+    def hooks_settings(self) -> dict:
+        """当前 config.toml 里的钩子规则（设置页 · Hooks 面板）。
+
+        同时回传已生效的规则条数：未生效与没配置是两回事，界面要能区分。
+        """
+        raw = load_raw_config()
+        pre, post = hooks_from_config(raw)
+        hooks = raw.get("hooks") if isinstance(raw.get("hooks"), dict) else {}
+
+        def _pub(key: str) -> list[dict]:
+            out: list[dict] = []
+            for item in hooks.get(key) or []:
+                if isinstance(item, dict) and str(item.get("command", "")).strip():
+                    out.append({
+                        "match": str(item.get("match", "*") or "*"),
+                        "command": str(item["command"]).strip(),
+                        "timeout_s": float(item.get("timeout_s") or 10),
+                    })
+            return out
+
+        return {
+            "pre": _pub("pre_tool_use"),
+            "post": _pub("post_tool_use"),
+            "active_pre": len(pre),
+            "active_post": len(post),
+            "config_path": str(config_path()),
+            "tool_names": sorted(t.name for t in self._build_full_registry().all()),
+        }
+
+    async def save_hooks_settings(self, params: dict) -> dict:
+        """保存钩子规则并热生效（重建 HookRunner 并推给所有活动 Agent）。
+
+        钩子命令等价于用户自己敲的命令（来自用户配置），不走权限门——但它是
+        「工具调用前的最后一道人工闸门」，所以保存动作本身写进日志便于回查。
+        """
+        pre = params.get("pre")
+        post = params.get("post")
+        try:
+            set_hooks_in_config(
+                pre=None if pre is None else list(pre),
+                post=None if post is None else list(post),
+            )
+        except ConfigError as e:
+            raise RuntimeError(str(e)) from e
+        self._reload_hooks()
+        return self.hooks_settings()
+
+    def _reload_hooks(self) -> None:
+        """重新读 hooks 配置并推给基础 Agent 与所有会话 Agent（不重启即生效）。"""
+        raw_cfg = load_raw_config()
+        pre_rules, post_rules = hooks_from_config(raw_cfg)
+        # 无规则时置 None：Agent 循环里的判断是「hooks is not None」，
+        # 空 Runner 也会走一遍调用链，没必要
+        self.hooks = HookRunner(pre_rules, post_rules, working_dir=self.working_dir) \
+            if (pre_rules or post_rules) else None
+        if hasattr(self, "_base_agent") and self._base_agent is not None:
+            self._base_agent.hooks = self.hooks
+        for ag in self._for_each_agent():
+            ag.hooks = self.hooks
+
     def advanced_settings(self) -> dict:
+
         return {
             "max_iterations": self.cfg.max_iterations,
             "context_limit_tokens": self.cfg.context_limit_tokens,
@@ -2984,6 +3755,7 @@ class ServerBackend:
             key = resolve_api_key(name, pc)
             detail[name] = {
                 "kind": pc.kind,
+                "label": pc.label or name,  # 界面显示名（预设如「智谱」「小米 Mimo」）
                 "base_url": pc.base_url or "",
                 "model": pc.model,
                 "has_key": key is not None,
@@ -3215,6 +3987,8 @@ class ServerBackend:
         return None
 
     async def delete_session(self, session_id: str) -> dict:
+        # 归属校验：别的项目的会话不能凭枚举到的 id 删除（安全审查 B6）
+        await self._get_owned_session(session_id)
         # 先停掉该会话正在跑的 turn，再清理 runtime，最后删数据
         self.cancel_run(session_id)
         rt = self.runtimes.pop(session_id, None)
@@ -3230,6 +4004,7 @@ class ServerBackend:
         }
 
     async def rename_session(self, session_id: str, title: str) -> dict:
+        await self._get_owned_session(session_id)
         title = title.strip()
         if not title:
             raise RuntimeError("标题不能为空")
@@ -3239,16 +4014,61 @@ class ServerBackend:
         return {"id": session_id, "title": title}
 
     async def pin_session(self, session_id: str, pinned: bool) -> dict:
+        await self._get_owned_session(session_id)
         await self.store.set_pinned(session_id, pinned)
         return {"id": session_id, "pinned": pinned}
 
+    async def archive_session(self, session_id: str, archived: bool) -> dict:
+        """归档/取消归档：归档后会话从侧栏与搜索里消失，可在归档弹窗恢复。"""
+        await self._get_owned_session(session_id)
+        await self.store.set_archived(session_id, archived)
+        return {"id": session_id, "archived": archived}
+
+    async def list_archived_sessions(self) -> dict:
+        """归档弹窗列表（当前项目，最近活跃在前）。"""
+        sessions = await self.store.list_archived_sessions(self.project.id)
+        return {
+            "sessions": [
+                {
+                    "id": s.id, "title": s.title, "updated_at": s.updated_at,
+                    "pinned": bool(s.pinned), "project_id": s.project_id,
+                    "summary": s.summary,
+                    "tags": [t for t in str(s.tags or "").split(",") if t],
+                    "archived": bool(s.archived),
+                }
+                for s in sessions
+            ]
+        }
+
+    async def set_session_tags(self, session_id: str, tags: list[str] | str) -> dict:
+        """给会话打标签（侧栏分组用）；传空清空。"""
+        await self._get_owned_session(session_id)
+        value = await self.store.set_tags(session_id, tags)
+        return {
+            "id": session_id,
+            "tags": [t for t in value.split(",") if t],
+            "all_tags": await self.store.list_all_tags(self.project.id),
+        }
+
     async def move_session(self, session_id: str, project_id: int | None) -> dict:
-        """把会话移动到另一个项目；project_id=None 移入快聊。"""
+        """把会话移动到另一个项目；project_id=None 移入快聊。
+
+        源会话必须属于当前项目（安全审查 B7）：旧实现只验目标项目存在，
+        凭枚举到的 session_id 可以把别的项目的会话改归属。
+        """
+        await self._get_owned_session(session_id)
         if project_id is not None:
             projects = {p.id: p for p in await self.store.list_projects()}
             if project_id not in projects:
                 raise RuntimeError(f"project not found: {project_id}")
         await self.store.move_session(session_id, project_id)
+        # 移出当前项目时同步丢弃 runtime：它带着旧项目的门控/工作目录，
+        # 留着会让后续轮次错在别的项目上下文里执行（与 delete_session 对齐）
+        if project_id != self.project.id:
+            self.cancel_run(session_id)
+            rt = self.runtimes.pop(session_id, None)
+            if rt is not None:
+                self._forget_runtime(rt)
         was_active = self.session and self.session.id == session_id
         moved_to_active = was_active and project_id == self.project.id
         switched = await self._switch_after_removal() if (was_active and not moved_to_active) else None
@@ -3365,12 +4185,13 @@ class ServerBackend:
         return {"removed": project_id}
 
     async def export_session(self, session_id: str, *, fmt: str = "md") -> dict:
-        """导出会话：fmt=md 为 Markdown 原文；fmt=html 为带样式的自包含单文件。"""
+        """导出会话：fmt=md 为 Markdown 原文；fmt=html 为带样式的自包含单文件。
+
+        归属校验（安全审查 B3）：别的项目的会话不能凭枚举到的 id 导出。
+        """
         import re
 
-        sess = await self.store.get_session(session_id)
-        if sess is None:
-            raise RuntimeError("session not found: " + session_id)
+        sess = await self._get_owned_session(session_id)
         msgs = await self.store.load_messages(session_id)
         safe_title = re.sub(r"[^\w\-]+", "_", sess.title or sess.id)[:40] or sess.id
         if fmt == "html":
@@ -3513,7 +4334,7 @@ class ServerBackend:
     # 右侧面板：打开了哪些标签、激活的是哪个（id 白名单见前端 TAB_META）
     RIGHT_TAB_IDS = (
         "aux", "review", "terminal", "browser", "files",
-        "tasks", "todo", "agenda", "cron", "memory",
+        "tasks", "todo", "agenda", "cron", "memory", "ext",
     )
     # 字符串型偏好（值域白名单）：theme 值域见模块级 THEME_PREFS
     STRING_PREFS = {"theme": THEME_PREFS}
@@ -3667,7 +4488,8 @@ class ServerBackend:
         key = resolved.get("api_key") if resolved else ""
         return {
             "provider": ws.provider,
-            "providers": ["auto", "bocha", "tavily", "zhipu", "custom"],
+            "providers": ["auto", "custom"],  # 前端只渲染「自动 / 自定义 / 已配置」三档
+            "configured_services": self._configured_services(),
             "base_url": ws.base_url,
             "has_key": bool(resolved),
             "key_mask": self._mask_key(key),
@@ -3675,14 +4497,18 @@ class ServerBackend:
             "config_hint": (
                 "「自动」会优先复用你已配置 Key 的服务；也可选博查（bocha.cn）或 "
                 "Tavily 并填入对应 API Key；选「自定义」则填入自建搜索服务地址"
-                "（如 SearXNG，无需 Key）。保存后立即生效。"
+                "（如 SearXNG，无需 Key）；右侧「已配置」则列出你已在「模型服务」里"
+                "配好的服务，选中即复用它的地址与 Key（前提是它本身提供搜索接口）。"
+                "保存后立即生效。"
             ),
         }
 
     async def websearch_save(self, params: dict) -> dict:
         provider = str(params.get("provider", "")).strip()
-        if provider not in ("", "auto", "bocha", "tavily", "zhipu", "custom"):
-            raise RuntimeError("联网搜索服务商只支持 auto / bocha / tavily / zhipu / custom")
+        if provider not in ("", "auto", "bocha", "tavily", "zhipu", "custom") and (
+            provider not in self.cfg.providers
+        ):
+            raise RuntimeError("联网搜索服务商只支持 auto / custom，或已配置的模型服务")
         updates: dict = {"provider": provider or None}
         api_key = params.get("api_key")
         if api_key is not None:
@@ -3700,7 +4526,8 @@ class ServerBackend:
         key = resolved.get("api_key") if resolved else ""
         return {
             "provider": ig.provider,
-            "providers": ["auto", "zhipu", "siliconflow", "custom"],
+            "providers": ["auto", "custom"],  # 前端只渲染「自动 / 自定义 / 已配置」三档
+            "configured_services": self._configured_services(),
             "model": ig.model,
             "base_url": ig.base_url,
             "has_key": bool(resolved),
@@ -3709,14 +4536,18 @@ class ServerBackend:
             "resolved_model": (resolved or {}).get("model", ""),
             "config_hint": (
                 "「自动」会优先复用你已配置 Key 的服务；自定义需填 "
-                "OpenAI 兼容的 /images/generations 接口地址与 Key。保存后立即生效。"
+                "OpenAI 兼容的 /images/generations 接口地址与 Key；右侧「已配置」"
+                "列出你已在「模型服务」里配好的服务，选中即复用它的地址与 Key，"
+                "此时请在「模型」里填它支持的画图模型名。保存后立即生效。"
             ),
         }
 
     async def imagegen_save(self, params: dict) -> dict:
         provider = str(params.get("provider", "")).strip()
-        if provider not in ("", "auto", "zhipu", "siliconflow", "custom"):
-            raise RuntimeError("画图服务商只支持 auto / zhipu / siliconflow / custom")
+        if provider not in ("", "auto", "zhipu", "siliconflow", "custom") and (
+            provider not in self.cfg.providers
+        ):
+            raise RuntimeError("画图服务商只支持 auto / custom，或已配置的模型服务")
         updates: dict = {"provider": provider or None}
         for field_name in ("api_key", "model", "base_url"):
             if params.get(field_name) is not None:
@@ -3725,6 +4556,120 @@ class ServerBackend:
         self.cfg = load_config()
         self._refresh_web_tool_configs()
         return await self.imagegen_detail()
+
+    # ---- 语音输入（麦克风转文字） ----
+
+    async def speech_detail(self) -> dict:
+        """设置页语音输入卡片的数据（不返回明文 Key）。"""
+        sp = self.cfg.speech
+        resolved = resolve_speech(self.cfg)
+        key = (resolved or {}).get("api_key", "")
+        return {
+            "provider": sp.provider,
+            "providers": ["auto", "custom"],  # 前端只渲染「自动 / 自定义 / 已配置」三档
+            "configured_services": self._configured_services(),
+            "base_url": sp.base_url,
+            "model": sp.model,
+            "language": sp.language,
+            "has_key": bool(resolved),
+            "key_mask": self._mask_key(key),
+            "resolved_provider": (resolved or {}).get("provider", ""),
+            "resolved_model": (resolved or {}).get("model", ""),
+            "config_hint": (
+                "决定输入框里的麦克风按钮用哪个服务把语音转成文字。"
+                "「自动」会复用你已配置 Key 的同协议服务（智谱 / 硅基流动 / OpenAI）；"
+                "也可选「自定义」填任何 OpenAI 兼容的 /audio/transcriptions 地址"
+                "（如本地 faster-whisper 服务，无需 Key）；右侧「已配置」列出你已在"
+                "「模型服务」里配好的服务，选中即复用它的地址与 Key，"
+                "但需要它本身提供语音识别接口。未配置时麦克风按钮会提示来这里配置。"
+            ),
+        }
+
+    async def speech_save(self, params: dict) -> dict:
+        provider = str(params.get("provider", "")).strip()
+        if provider not in ("", "auto", "zhipu", "siliconflow", "openai", "custom") and (
+            provider not in self.cfg.providers
+        ):
+            raise RuntimeError("语音服务商只支持 auto / custom，或已配置的模型服务")
+        updates: dict = {"provider": provider or None}
+        for field_name in ("api_key", "model", "base_url", "language"):
+            if params.get(field_name) is not None:
+                updates[field_name] = str(params[field_name]).strip()
+        update_config_section("speech", updates)
+        self.cfg = load_config()
+        return await self.speech_detail()
+
+    async def speech_transcribe(self, audio_b64: str, mime: str = "") -> dict:
+        """把一段录音（base64）交给配置好的服务转成文字。
+
+        走 OpenAI 协议的 multipart /audio/transcriptions（智谱 GLM-ASR、硅基流动
+        SenseVoice、OpenAI Whisper、本地 faster-whisper 服务都兼容）。
+        没配置服务时抛可读错误——前端会把「去哪配」告诉用户，不静默失败。
+        """
+        import base64
+
+        import httpx
+
+        resolved = resolve_speech(self.cfg)
+        if not resolved:
+            raise RuntimeError(
+                "还没配置语音转写服务。打开 设置 · 语音输入，选一个服务商并填入 API Key"
+                "（或在「自定义」里填本地转写服务地址），保存后再试。"
+            )
+        try:
+            audio = base64.b64decode(audio_b64, validate=True)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError("录音数据无效（base64 解码失败）") from e
+        if not audio:
+            raise RuntimeError("没有收到录音数据")
+        if len(audio) > 25 * 1024 * 1024:
+            raise RuntimeError("录音过长（上限 25 MB），请缩短后重试")
+
+        suffix = ".wav"
+        low = (mime or "").lower()
+        if "webm" in low:
+            suffix = ".webm"
+        elif "ogg" in low:
+            suffix = ".ogg"
+        elif "mp4" in low or "m4a" in low:
+            suffix = ".m4a"
+        elif "mpeg" in low:
+            suffix = ".mp3"
+        files = {"file": ("audio" + suffix, audio, mime or "application/octet-stream")}
+        data = {"model": resolved["model"]}
+        if resolved.get("language"):
+            data["language"] = resolved["language"]
+
+        base = (resolved.get("base_url") or "").rstrip("/")
+        if not base:
+            raise RuntimeError("语音服务缺少接口地址，请到 设置 · 语音输入 里补全")
+        headers = {}
+        if resolved.get("api_key"):
+            headers["Authorization"] = "Bearer " + resolved["api_key"]
+        try:
+            async with httpx.AsyncClient(timeout=120, trust_env=True) as client:
+                resp = await client.post(
+                    base + "/audio/transcriptions", headers=headers, files=files, data=data
+                )
+        except httpx.HTTPError as e:
+            raise RuntimeError(
+                f"连接语音转写服务失败：{e}（可在 设置 · 语音输入 里检查接口地址/网络）"
+            ) from e
+        if resp.status_code >= 400:
+            detail = resp.text.strip()[:300]
+            raise RuntimeError(
+                f"语音转写失败（HTTP {resp.status_code}）：{detail or '服务未返回内容'}"
+            )
+        try:
+            payload = resp.json()
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError("语音转写服务返回的不是 JSON，检查接口地址是否指向 OpenAI 兼容服务") from e
+        text = ""
+        if isinstance(payload, dict):
+            text = str(payload.get("text") or payload.get("result") or "").strip()
+        if not text:
+            raise RuntimeError("没有识别到文字（可能是静音或语种不符），请靠近麦克风重试")
+        return {"text": text, "provider": resolved["provider"], "model": resolved["model"]}
 
     def _refresh_web_tool_configs(self) -> None:
         """把新的搜索/画图配置热更新到所有会话的工具实例上（不重建注册表）。"""
@@ -3747,11 +4692,17 @@ class ServerBackend:
 
     # ---- 局域网访问：绑定开关 + 令牌（重启服务后生效；前端拼 URL 与二维码） ----
 
-    async def lan_status(self) -> dict:
+    async def lan_status(self, include_token: bool = True) -> dict:
+        """局域网访问状态；include_token=False 时不回传令牌（安全审查 A9）。
+
+        令牌就是远程访问凭据本身：手机端设置页只需要知道「已设置」，
+        不需要（也不应该）拿到明文。
+        """
         server = self.cfg.server
         return {
             "enabled": bool(server.lan),
-            "token": server.token,
+            "token": server.token if include_token else "",
+            "has_token": bool(server.token),
             "ips": self._lan_ips(),
             "note": "" if server.lan else "局域网访问当前关闭：服务只监听本机 127.0.0.1。",
         }
@@ -3802,11 +4753,13 @@ class ServerBackend:
     # 与局域网访问共用令牌；绑定同样要等重启生效。守卫逻辑在 server/app.py：
     # 物理局域网等非 tailnet 来源直接拒绝，tailnet 来源必须验令牌。
 
-    async def remote_status(self) -> dict:
+    async def remote_status(self, include_token: bool = True) -> dict:
+        """远程访问状态；include_token=False 时不回传令牌（同 lan_status，A9）。"""
         server = self.cfg.server
         return {
             "enabled": bool(server.tailscale),
-            "token": server.token,
+            "token": server.token if include_token else "",
+            "has_token": bool(server.token),
             "ips": self._tailscale_ips(),
             "note": "" if server.tailscale else "远程访问当前关闭。",
         }
@@ -3832,6 +4785,437 @@ class ServerBackend:
             **await self.remote_status(),
             "note": "已关闭远程访问：重启 SkySheep 后恢复仅本机监听。",
         }
+
+    # ---- 聊天软件渠道（Bot Channel）：设置、会话、运行 ----
+    # 安全姿态与 computer_control / browser_control 同类：默认关、属降低防护的开关，
+    # 因此 channel.* 的写操作在 server/app.py 的 dispatch 层仅允许本机调用。
+
+    def _channels_config(self) -> dict:
+        """给 ChannelManager 的配置提供者：每次都读最新 cfg，改完设置即时生效。"""
+        if self.cfg is None:
+            return {}
+        return dict(self.cfg.channels.platforms or {})
+
+    async def channel_status(self) -> dict:
+        """渠道运行态 + 见过的来源（设置页渲染用）。"""
+        cfg = self.cfg.channels if self.cfg is not None else None
+        platforms = dict((cfg.platforms if cfg else {}) or {})
+        manager_status = self.channels.status() if self.channels else {
+            "channels": [], "supported": ["telegram"],
+        }
+        # 把配置里与支持的平台都并进来：未启动、未配置的渠道也要在界面上可见可编辑，
+        # 否则用户得先“添加”才能看到入口（体验上多一步且不像开关）。
+        known = {c["name"] for c in manager_status["channels"]}
+        for name in manager_status.get("supported") or []:
+            if name not in known:
+                manager_status["channels"].append({
+                    "name": name,
+                    "enabled": False,
+                    "running": False,
+                    "configured": False,
+                    "error": "",
+                    "seen_sources": [],
+                })
+                known.add(name)
+        for name, section in platforms.items():
+            if name not in known:
+                manager_status["channels"].append({
+                    "name": name,
+                    "enabled": bool(section.get("enabled", False)),
+                    "running": False,
+                    "configured": bool(str(section.get("token", "")).strip()),
+                    "error": "",
+                    "seen_sources": [],
+                })
+        # 允许名单回显（含凭据是否就绪，不回显凭据本身）
+        for item in manager_status["channels"]:
+            section = platforms.get(item["name"]) or {}
+            item["allowed_ids"] = [str(x) for x in (section.get("allowed_ids") or [])]
+            item["has_token"] = bool(str(section.get("token", "")).strip())
+            item["approve_enabled"] = bool(section.get("approve_enabled", False))
+            # 微信：凭据来自扫码，且会失效，界面要显示得更具体
+            item["has_login"] = bool(str(section.get("bot_token", "")).strip())
+            item["needs_qr"] = item["name"] == "weixin" and not item["has_login"]
+        manager_status["approve_timeout"] = int(cfg.approve_timeout) if cfg else 120
+        # 见过的来源合并持久化记录（重启后不丢，方便事后认领）
+        if self.store is not None:
+            try:
+                seen = await self.store.list_channel_sources()
+            except Exception:  # noqa: BLE001
+                seen = []
+            by_channel: dict[str, list] = {}
+            for row in seen:
+                by_channel.setdefault(row["channel"], []).append({
+                    "actor": row["actor"], "chat_id": row["chat_id"],
+                    "ts": row["last_seen"], "count": row["hits"],
+                })
+            for item in manager_status["channels"]:
+                memory = {s["chat_id"] for s in item.get("seen_sources") or []}
+                for row in by_channel.get(item["name"], []):
+                    if row["chat_id"] not in memory:
+                        item.setdefault("seen_sources", []).append(row)
+        return manager_status
+
+    async def channel_save(self, params: dict) -> dict:
+        """保存一个平台的配置（不启停，启停走 channel_enable / channel_disable）。
+
+        只在显式传入 token 时才覆盖已存值：界面保存允许名单时不该把 Token 清掉。
+        """
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise RuntimeError("缺少平台名 name")
+        platforms = dict(self.cfg.channels.platforms or {})
+        section = dict(platforms.get(name) or {})
+        if params.get("token") is not None:
+            section["token"] = str(params["token"]).strip()
+        if params.get("allowed_ids") is not None:
+            section["allowed_ids"] = _normalize_id_list(params["allowed_ids"])
+        if params.get("approve_enabled") is not None:
+            section["approve_enabled"] = bool(params["approve_enabled"])
+        if params.get("allowed_tools") is not None:
+            raw_tools = params["allowed_tools"]
+            if isinstance(raw_tools, str):
+                raw_tools = [x for x in raw_tools.replace(",", "\n").splitlines()]
+            section["allowed_tools"] = [str(x).strip() for x in (raw_tools or []) if str(x).strip()]
+        platforms[name] = section
+        update_config_section("channels", {"platforms": platforms})
+        self.cfg = load_config()
+        return await self.channel_status()
+
+    async def channel_save_state(self, name: str, state: dict) -> None:
+        """把适配器的运行时状态（微信的 bot_token / 游标）落盘。
+
+        与 channel_save 分开：这是适配器自己触发的（扫码成功、游标推进），
+        不是用户在界面上的操作。写前重读最新配置再合并，避免并发覆盖用户的改动。
+        """
+        if not isinstance(state, dict):
+            return
+        try:
+            fresh = load_config()
+            platforms = dict(fresh.channels.platforms or {})
+            section = dict(platforms.get(name) or {})
+            for key in ("bot_token", "base_url", "cursor"):
+                if key in state and state[key] is not None:
+                    section[key] = str(state[key])
+            platforms[name] = section
+            update_config_section("channels", {"platforms": platforms})
+            self.cfg = load_config()
+        except Exception as e:  # noqa: BLE001 - 状态落盘失败不应影响对话
+            logger.warning("渠道 %s 状态落盘失败：%s", name, e)
+
+    # ---- 微信扫码登录（交互式流程，桌面端驱动） ----
+
+    async def channel_weixin_login_start(self) -> dict:
+        """生成微信登录二维码。"""
+        channel = self._channel_obj("weixin")
+        if channel is None:
+            # 尚未建渠道实例（未启用过）时临时建一个，只用于走登录流程
+            from ..channels.weixin import WeixinChannel
+
+            section = dict((self.cfg.channels.platforms or {}).get("weixin") or {})
+            channel = WeixinChannel(section, lambda _m: None)
+            self._weixin_login_channel = channel
+        info = await channel.fetch_qrcode()
+        return {
+            "qrcode": info["qrcode"],
+            "url": info["url"],
+            "note": "用手机微信扫码并在手机上确认，确认后点下方「我已完成扫码」。",
+        }
+
+    async def channel_weixin_login_poll(self, params: dict) -> dict:
+        """轮询扫码状态；confirmed 时保存凭据并重建渠道。"""
+        qrcode = str(params.get("qrcode", "")).strip()
+        if not qrcode:
+            raise RuntimeError("缺少 qrcode")
+        channel = self._channel_obj("weixin") or getattr(self, "_weixin_login_channel", None)
+        if channel is None:
+            raise RuntimeError("微信渠道尚未初始化，请先点「生成二维码」")
+        result = await channel.poll_qrcode(qrcode)
+        if result.get("status") != "confirmed":
+            return result
+        token = str(result.get("bot_token") or "").strip()
+        if not token:
+            raise RuntimeError("服务器返回已确认，但没有拿到 bot_token，请重新生成二维码")
+        base_url = str(result.get("base_url") or "")
+        # 落盘（含 base_url，服务器可能下发不同的接入点）
+        await self.channel_save_state("weixin", {
+            "bot_token": token, **({"base_url": base_url} if base_url else {}),
+        })
+        if channel is not None:
+            await channel.apply_login(token, base_url)
+        # 重建渠道使新 token 生效
+        if self.channels is not None:
+            await self.channels.restart()
+        return {"status": "confirmed", "saved": True}
+
+    async def channel_weixin_logout(self) -> dict:
+        """清除微信登录态（用户主动退出或 token 失效后重登）。"""
+        fresh = load_config()
+        platforms = dict(fresh.channels.platforms or {})
+        section = dict(platforms.get("weixin") or {})
+        section.pop("bot_token", None)
+        section.pop("cursor", None)
+        platforms["weixin"] = section
+        update_config_section("channels", {"platforms": platforms})
+        self.cfg = load_config()
+        if self.channels is not None:
+            await self.channels.restart()
+        return await self.channel_status()
+
+    def _channel_obj(self, name: str):
+        if self.channels is None:
+            return None
+        return self.channels.channels.get(name)
+
+    async def channel_enable(self, params: dict) -> dict:
+        """启用一个平台并立即重建渠道（不再要求重启整个应用）。
+
+        强制要求允许名单非空：空名单等于拒绝一切，启用它只会让用户以为“没反应”。
+        与其静默失败，不如在启用时就退回一句可操作的提示。
+
+        凭据要求因平台而异：Telegram 是手填的 Bot Token，微信是扫码换来的 bot_token。
+        """
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise RuntimeError("缺少平台名 name")
+        platforms = dict(self.cfg.channels.platforms or {})
+        section = dict(platforms.get(name) or {})
+        if name == "weixin":
+            if not str(section.get("bot_token", "")).strip():
+                raise RuntimeError("微信还没登录：先在下方点「生成二维码」并扫码确认")
+        elif not str(section.get("token", "")).strip():
+            raise RuntimeError(f"「{name}」还没填 Bot Token，先填好再启用")
+        if not (section.get("allowed_ids") or []):
+            raise RuntimeError(
+                f"「{name}」的允许名单是空的：空名单会拒绝所有消息。\n"
+                "先给机器人发一条消息，然后把界面上«发现的来源»里的 ID 加入允许名单。"
+            )
+        section["enabled"] = True
+        platforms[name] = section
+        update_config_section("channels", {"platforms": platforms})
+        self.cfg = load_config()
+        await self.channels.restart()
+        return await self.channel_status()
+
+    async def channel_disable(self, params: dict) -> dict:
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise RuntimeError("缺少平台名 name")
+        platforms = dict(self.cfg.channels.platforms or {})
+        section = dict(platforms.get(name) or {})
+        section["enabled"] = False
+        platforms[name] = section
+        update_config_section("channels", {"platforms": platforms})
+        self.cfg = load_config()
+        await self.channels.restart()
+        return await self.channel_status()
+
+    async def channel_set_timeout(self, params: dict) -> dict:
+        value = max(10, min(3600, int(params.get("approve_timeout") or 120)))
+        update_config_section("channels", {"approve_timeout": value})
+        self.cfg = load_config()
+        return await self.channel_status()
+
+    async def channel_test(self, params: dict) -> dict:
+        """试发一条消息，验证 token 与 chat_id 是否都对。"""
+        name = str(params.get("name", "")).strip()
+        chat_id = str(params.get("chat_id", "")).strip()
+        if not name or not chat_id:
+            raise RuntimeError("需要平台名与 chat_id")
+        if self.channels is None:
+            raise RuntimeError("渠道管理器尚未就绪")
+        channel = self.channels.channels.get(name)
+        if channel is None:
+            raise RuntimeError(f"平台「{name}」还没启用")
+        ok = await channel.send_text(chat_id, "🐑 SkySheep 测试消息：这条能收到，说明配置通了。")
+        return {"ok": ok, "error": channel.error}
+
+    # ---- 渠道会话与运行（ChannelManager 的回调面） ----
+
+    async def channel_ensure_session(self, channel_name: str) -> str:
+        """取（或建）某个渠道绑定的会话。不切活动会话指针——渠道与桌面可并行。
+
+        绑定指向的会话必须属于当前项目：会话可能被桌面端移到别的项目或删除，
+        此时并到下方的自愈路径重开一个，而不是把别的项目的会话挂进当前
+        项目的工作目录与门控下（归属校验，同 B 族）。
+        """
+        bound = await self.store.get_channel_binding(channel_name)
+        if bound and await self.store.get_session_for_project(bound, self.project.id) is not None:
+            # 绑定存在但 runtime 可能不在：重启后首次使用、或该会话被桌面端切走时。
+            # 这里必须补建，否则 channel_run 会因「会话不存在」直接失败。
+            await self._get_channel_runtime(bound, channel_name)
+            return bound
+        sess = await self.store.create_session(self.project.id, title=f"🤖 {channel_name}")
+        await self.store.set_channel_binding(channel_name, sess.id)
+        await self._get_channel_runtime(sess.id, channel_name)
+        return sess.id
+
+    async def channel_new_session(self, channel_name: str) -> str:
+        """给渠道开一个新会话（/new），旧的保留可查。"""
+        sess = await self.store.create_session(self.project.id, title=f"🤖 {channel_name}")
+        await self.store.set_channel_binding(channel_name, sess.id)
+        await self._get_channel_runtime(sess.id, channel_name)
+        return sess.id
+
+    async def _get_channel_runtime(self, session_id: str, channel_name: str) -> SessionRuntime:
+        """渠道会话的 runtime：用 ChannelGate 而非默认门控。
+
+        与 _get_runtime 的差别只在 gate——渠道的权限姿态必须由渠道决定：
+        默认门控会产出 PermissionRequest 并无限期等前端，渠道场景下没有前端。
+        """
+        rt = self.runtimes.get(session_id)
+        if rt is not None:
+            return rt
+        section = dict((self.cfg.channels.platforms or {}).get(channel_name) or {})
+        gate = ChannelGate(
+            allowed=list(section.get("allowed_tools") or []),
+            approve_enabled=bool(section.get("approve_enabled", False)),
+            approve_timeout=int(self.cfg.channels.approve_timeout),
+            notify=lambda pending: self._notify_channel_approval(channel_name, pending),
+            store=self.store,
+            project_id=self.project.id,
+            working_dir=self.working_dir,
+        )
+        recorder = ChangeRecorder()
+        rt = SessionRuntime(
+            sid=session_id,
+            agent=Agent(
+                provider=self.provider,
+                registry=self._build_full_registry(recorder),
+                gate=gate,
+                working_dir=self.working_dir,
+                max_iterations=self.cfg.max_iterations,
+                context_limit_tokens=self._context_limit(),
+                compaction_keep_recent=self.cfg.compaction_keep_recent,
+                hooks=self.hooks,
+                restrict_to_workdir=self.cfg.restrict_to_workdir,
+            ),
+            recorder=recorder,
+        )
+        rt.agent.set_system(self.compose_system())
+        msgs = await self.store.load_messages(session_id)
+        if msgs:
+            rt.agent.load_history(msgs)
+        self.runtimes[session_id] = rt
+        self._channel_gates[session_id] = gate
+        self._channel_names[session_id] = channel_name
+        return rt
+
+    async def _notify_channel_approval(self, channel_name: str, pending) -> None:
+        """把审批卡片推到聊天窗口。"""
+        if self.channels is None:
+            return
+        chat_id = self._channel_last_chat.get(channel_name, "")
+        channel = self.channels.channels.get(channel_name)
+        if not chat_id or channel is None:
+            return
+        lines = [
+            "⚠ 需要你确认一个操作",
+            "",
+            f"工具：{pending.tool_name}",
+            f"内容：{pending.detail}",
+        ]
+        if pending.diff:
+            lines += ["", "改动预览：", "```", pending.diff[:1500], "```"]
+        lines += [
+            "",
+            "回复 allow（允许一次）/ allow always（本项目总是允许）/ deny（拒绝）。",
+            f"超过 {self.cfg.channels.approve_timeout} 秒未回复会自动拒绝。",
+        ]
+        try:
+            await channel.send_text(chat_id, "\n".join(lines))
+        except Exception as e:  # noqa: BLE001 - 推卡片失败由 Gate 退化成拒绝
+            logger.warning("推送审批卡片失败：%s", e)
+            raise
+
+    async def channel_run(self, session_id: str, text: str) -> dict:
+        """跑一轮渠道对话，返回回复文本。不劫持活动会话。"""
+        if self.provider is None:
+            return {"error": "尚未配置可用的模型 API Key"}
+        rt = self.runtimes.get(session_id)
+        if rt is None:
+            # 自愈：runtime 可能尚未建立（重启后首次、或已被回收）。反查渠道绑定补建，
+            # 而不是直接把「会话不存在」丢给聊天窗口——用户看到这句无从下手。
+            channel_name = self._channel_names.get(session_id, "")
+            if not channel_name:
+                try:
+                    channel_name = await self.store.find_channel_by_session(session_id) or ""
+                except Exception:  # noqa: BLE001 - 反查失败退化成下方提示
+                    channel_name = ""
+            if not channel_name:
+                return {"error": "这个会话已不是渠道会话了，发送 /new 开一个新的"}
+            # 自愈前先验归属：会话被移到别的项目后不能挂回当前项目执行（同 B 族）
+            if await self.store.get_session_for_project(session_id, self.project.id) is None:
+                return {"error": "这个会话已不在当前项目里，发送 /new 开一个新的"}
+            rt = await self._get_channel_runtime(session_id, channel_name)
+        collected: list[str] = []
+
+        async def collect(ev: dict) -> None:
+            if ev.get("kind") == "assistant_message":
+                msg = ev.get("message")
+                text_out = getattr(msg, "text", None) or (
+                    msg.get("text", "") if isinstance(msg, dict) else ""
+                )
+                if text_out:
+                    collected.append(str(text_out))
+
+        try:
+            result = await self._run_turn_pipeline(
+                text, collect, plan_mode=False, runtime=rt, session_id=session_id,
+            )
+        except asyncio.CancelledError:
+            return {"error": "这一轮被中断"}
+        except Exception as e:  # noqa: BLE001 - 把原因回给聊天窗口
+            return {"error": str(e)}
+        if result.get("stopped") and not collected:
+            return {"error": "这一轮被中断"}
+        # assistant_message 事件带的是完整消息；没有则回落到历史里最后一条助手文本
+        reply = collected[-1] if collected else ""
+        if not reply:
+            for m in reversed(rt.agent.history):
+                if m.role == "assistant" and m.text.strip():
+                    reply = m.text.strip()
+                    break
+        return {"text": reply, "session_id": session_id}
+
+    async def channel_stop(self, session_id: str) -> None:
+        self.cancel_run(session_id)
+
+    async def channel_status_text(self, session_id: str) -> str:
+        """给 /status 命令用的简短状态。"""
+        sess = await self.store.get_session(session_id)
+        title = (sess.title if sess else "") or "（无标题）"
+        return (
+            f"会话：{title}\n"
+            f"模型：{self.provider_name or '未配置'} / {self.provider_model or '-'}\n"
+            f"项目：{self.project.name if self.project else '-'}\n"
+            f"上下文：{self._context_limit():,} tokens"
+        )
+
+    async def channel_list_sessions(self) -> list[dict]:
+        rows = await self.store.list_sessions(self.project.id)
+        current_ids = set(self._channel_gates.keys())
+        return [
+            {
+                "id": s.id,
+                "title": s.title,
+                "current": s.id in current_ids,
+            }
+            for s in rows
+        ]
+
+    async def channel_submit_decision(self, channel_name: str, decision: str) -> bool:
+        """把聊天窗口的审批回复投给等待中的门控。"""
+        session_id = await self.store.get_channel_binding(channel_name)
+        if not session_id:
+            return False
+        gate = self._channel_gates.get(session_id)
+        if gate is None:
+            return False
+        return gate.submit_latest(decision) is not None
+
+    def note_channel_chat(self, channel_name: str, chat_id: str) -> None:
+        self._channel_last_chat[channel_name] = chat_id
 
     @staticmethod
     def _hostname_ipv4s() -> list[str]:
@@ -3908,15 +5292,21 @@ class ServerBackend:
     async def apply_theme(self, params: dict) -> dict:
         from .. import wintheme
 
-        mode = "dark" if str(params.get("resolved", "light")) == "dark" else "light"
-        wintheme.set_theme_mode(mode)
+        # 前端把解析后的主题回传：优先用主题 id（标题栏 / 窗口底色逐主题精确一致），
+        # 旧版字段 resolved（light/dark 两档）兜底；未知值回退 paper。
+        theme = str(params.get("theme") or "").strip().lower()
+        if theme in wintheme.THEME_PALETTE:
+            wintheme.set_theme_mode(theme)
+        else:
+            mode = "dark" if str(params.get("resolved", "light")) == "dark" else "light"
+            wintheme.set_theme_mode(mode)
         # 事件驱动重刷标题栏：前端 CSS 变量是瞬时变色，而桌面壳看板线程每秒才
         # 轮询一次——不等这里推一把，页面和系统标题栏的变色时间肉眼可见地不一致。
         try:
             wintheme.refresh_now()
         except Exception:  # noqa: BLE001 - 浏览器模式无窗口 / 老系统无 DWM：静默
             pass
-        return {"mode": mode}
+        return {"mode": wintheme.current_theme_mode()}
 
     # ---- 快照 ----
 

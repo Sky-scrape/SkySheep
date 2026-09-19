@@ -32,8 +32,12 @@ def db_path() -> Path:
     return skysheep_home() / "skysheep.db"
 
 
-# 思考强度档位：auto = 不干预（沿用服务默认）；其余档位由各 Provider 映射到自家参数
+# 思考强度档位：auto = 引擎按任务复杂度逐轮实时估档（core/effort.py，在 low/medium/high
+# 间升降）；其余档位固定映射到各 Provider 的原生参数
 REASONING_EFFORTS = ("auto", "low", "medium", "high")
+
+# 钩子（[hooks]）超时默认值：与 core/hooks.py 的 DEFAULT_TIMEOUT_S 保持一致
+DEFAULT_HOOK_TIMEOUT_S = 10.0
 REASONING_EFFORT_LABELS = {
     "auto": "自动",
     "low": "低",
@@ -61,13 +65,16 @@ class ProviderConfig(BaseModel):
     # 该服务的模型是否支持图片输入（多模态）。关掉后贴图/截图会给出可读提示，
     # 而不是把一个看不见的图片塞给纯文本模型换来一句上游报错。
     supports_vision: bool = True
+    # 界面显示名（如 "智谱" / "小米 Mimo"）。空 = 直接用配置键名。
+    # 只做展示，不参与配置读写；预设自带，自定义服务一般留空。
+    label: str = ""
     # 每百万 tokens 单价（元），用于用量统计里的费用估算；0 = 不计价
     price_in: float = 0.0
     price_out: float = 0.0
-    # 思考强度：auto 不传参（保持服务默认）；low/medium/high 映射到厂商参数
+    # 思考强度：auto 按任务复杂度逐轮估档（core/effort.py）；low/medium/high 固定映射
     reasoning_effort: str = "auto"
-    # 是否在界面上提供思考强度控件。默认开启：auto 档不发送任何参数，
-    # 因此对"其实不支持该参数"的服务也无副作用；若某服务明确不支持，
+    # 是否在界面上提供思考强度控件。默认开启：auto 档的估档只对声明支持的服务
+    # 实际下发参数，对"其实不支持该参数"的服务也无副作用；若某服务明确不支持，
     # 可在设置里关掉以隐藏控件（避免给出无效选项）。
     supports_reasoning: bool = True
     # HTTP(S) 代理地址（如 http://127.0.0.1:7890）；空 = 不用代理。
@@ -85,6 +92,9 @@ class RoundtableConfig(BaseModel):
     max_members: int = Field(default=3, ge=1, le=8)  # 参与成员上限（不含主席）
     member_timeout_s: int = Field(default=180, ge=10)  # 单成员作答超时
     chair_answers: bool = True  # 主席是否也出一份草稿参与融合
+    # 额外辩论修订轮数：0=成员只独立作答一轮；1=成员看到彼此草稿后再修订
+    # 一轮（token 成本约翻倍，已收敛的成员自动跳过）；上限 2
+    debate_rounds: int = Field(default=0, ge=0, le=2)
 
 
 class WebSearchConfig(BaseModel):
@@ -117,6 +127,26 @@ class ImageGenConfig(BaseModel):
     model: str = ""
 
 
+class SpeechConfig(BaseModel):
+    """语音输入（麦克风转文字）的服务商配置。
+
+    provider = auto | openai | zhipu | siliconflow | custom；openai 档兼容任何
+    OpenAI 协议的 /audio/transcriptions（如 OpenAI、硅基流动 SenseVoice、本地
+    faster-whisper 服务等），custom 需自填 base_url。
+
+    auto 优先复用已配置 Key 的同协议服务（智谱 GLM-ASR → 硅基流动 SenseVoice），
+    都配不出时语音按钮会提示去设置里填 Key——与联网搜索/画图的“未配置就给指引”
+    一致，不静默失败。
+    """
+
+    provider: str = "auto"
+    api_key: str = ""
+    env_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    language: str = "zh"  # 传给转写接口的语言提示；空串 = 自动
+
+
 class ServerConfig(BaseModel):
     """本地服务绑定、局域网与远程（Tailscale）访问。
 
@@ -131,6 +161,28 @@ class ServerConfig(BaseModel):
     token: str = ""
 
 
+class ChannelsConfig(BaseModel):
+    """聊天软件渠道总配置。
+
+    platforms 是「平台名 → 扁平配置 dict」，不建固定子模型：平台是开放集合
+    （Telegram / 飞书 / 钉钉 / …），且每个平台的专属字段不同（token、app_id、
+    secret…）。扁平结构在 TOML 里读写都自然：
+
+        [channels.platforms.telegram]
+        enabled = true
+        allowed_ids = ["12345"]
+        token = "…"
+
+    加新平台只改 channels.ADAPTERS，不动配置模型。
+
+    approve_timeout：审批等待秒数。**这个值必须有**——respond_permission 对已
+    失效的 request_id 返回 False，不超时兜底会让 Agent 永久挂起。
+    """
+
+    approve_timeout: int = Field(default=120, ge=10, le=3600)
+    platforms: dict[str, dict] = Field(default_factory=dict)
+
+
 class SkySheepConfig(BaseModel):
     default: str = "deepseek"
     max_iterations: int = Field(default=40, ge=1, le=200)
@@ -143,7 +195,7 @@ class SkySheepConfig(BaseModel):
     restrict_to_workdir: bool = False
     # 电脑控制工具（screenshot/mouse/keyboard/window/clipboard）总开关，默认关：
     # 普通用户用不到，收起入口可以缩小攻击面、降低杀软误报概率。需要时在
-    # 设置 · 高级 里打开，热生效。
+    # 设置 · 远程控制 里打开，热生效。
     computer_control: bool = False
     # 浏览器控制工具（browser：用系统浏览器打开网址/搜索）总开关，默认关，
     # 与电脑控制同一安全姿态；打开后 Agent 可把网页/搜索结果展示给用户看。
@@ -154,68 +206,110 @@ class SkySheepConfig(BaseModel):
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
+    speech: SpeechConfig = Field(default_factory=SpeechConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
 
-# 内置预设：OpenAI 兼容协议覆盖国内主流与聚合平台，anthropic 为原生协议
+# 内置预设：按「默认」页签的展示顺序排列（Anthropic → 小米 Mimo，末尾 Ollama 本地）。
+# label 是界面显示名；配置键保持 ASCII 稳定标识（老配置里的 [providers.deepseek] 等段落
+# 升级后继续生效）。此前预设里的 openrouter / siliconflow 已移出：老用户配置过的条目
+# 会按自定义服务保留（配置原样、Key 不丢），只是挪到「自定义」页签。
 PRESETS: dict[str, ProviderConfig] = {
+    "anthropic": ProviderConfig(
+        kind="anthropic",
+        env_key="ANTHROPIC_API_KEY",
+        model="claude-opus-5",
+        supports_reasoning=True,  # 映射为 thinking.budget_tokens
+        label="Anthropic",
+    ),
+    "openai": ProviderConfig(
+        kind="openai",
+        base_url="https://api.openai.com/v1",
+        env_key="OPENAI_API_KEY",
+        model="gpt-5",
+        label="OpenAI",
+    ),
+    "google": ProviderConfig(
+        kind="openai",  # Gemini 的 OpenAI 兼容端点
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        env_key="GEMINI_API_KEY",
+        model="gemini-3.1-pro",
+        label="Google",
+    ),
+    "xai": ProviderConfig(
+        kind="openai",
+        base_url="https://api.x.ai/v1",
+        env_key="XAI_API_KEY",
+        model="grok-4",
+        label="xAI",
+    ),
+    "minimax": ProviderConfig(
+        kind="openai",
+        base_url="https://api.minimaxi.com/v1",
+        env_key="MINIMAX_API_KEY",
+        model="MiniMax-M2.1",
+        label="MiniMax",
+    ),
     "deepseek": ProviderConfig(
         kind="openai",
         base_url="https://api.deepseek.com",
         env_key="DEEPSEEK_API_KEY",
         model="deepseek-chat",
         supports_reasoning=True,  # deepseek-reasoner 等型号认 reasoning_effort
+        label="Deepseek",
     ),
     "zhipu": ProviderConfig(
         kind="openai",
         base_url="https://open.bigmodel.cn/api/paas/v4",
         env_key="ZHIPUAI_API_KEY",
         model="glm-5.3",
+        label="智谱",
     ),
     "moonshot": ProviderConfig(
         kind="openai",
         base_url="https://api.moonshot.cn/v1",
         env_key="MOONSHOT_API_KEY",
         model="kimi-k3",
+        label="Kimi",
     ),
-    "openrouter": ProviderConfig(
+    "qwen": ProviderConfig(
         kind="openai",
-        base_url="https://openrouter.ai/api/v1",
-        env_key="OPENROUTER_API_KEY",
-        model="anthropic/claude-opus-5",
-        supports_reasoning=True,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        env_key="DASHSCOPE_API_KEY",
+        model="qwen3-max",
+        label="Qwen",
     ),
-    "siliconflow": ProviderConfig(
+    "mimo": ProviderConfig(
         kind="openai",
-        base_url="https://api.siliconflow.cn/v1",
-        env_key="SILICONFLOW_API_KEY",
-        model="deepseek-ai/DeepSeek-V3.2",
-        supports_reasoning=True,
-    ),
-    "anthropic": ProviderConfig(
-        kind="anthropic",
-        env_key="ANTHROPIC_API_KEY",
-        model="claude-opus-5",
-        supports_reasoning=True,  # 映射为 thinking.budget_tokens
+        base_url="https://api.xiaomimimo.com/v1",
+        env_key="MIMO_API_KEY",
+        model="MiMo-V2.5-Pro",
+        label="小米 Mimo",
     ),
     "ollama": ProviderConfig(
         kind="openai",
         base_url="http://localhost:11434/v1",
         api_key="ollama",
         model="qwen3:8b",
+        label="Ollama",
     ),
 }
 
 # 预设服务的「注册/控制台」入口：首启向导里引导新用户去拿 API Key。
 # 只做展示链接，不参与任何请求逻辑。
 PRESET_SIGNUP_URLS: dict[str, str] = {
+    "anthropic": "https://console.anthropic.com/settings/keys",
+    "openai": "https://platform.openai.com/api-keys",
+    "google": "https://aistudio.google.com/apikey",
+    "xai": "https://console.x.ai/",
+    "minimax": "https://platform.minimaxi.com/",
     "deepseek": "https://platform.deepseek.com/",
     "zhipu": "https://open.bigmodel.cn/",
     "moonshot": "https://platform.moonshot.cn/",
-    "openrouter": "https://openrouter.ai/settings/keys",
-    "siliconflow": "https://cloud.siliconflow.cn/account/ak",
-    "anthropic": "https://console.anthropic.com/settings/keys",
+    "qwen": "https://bailian.console.aliyun.com/?apiKey=1",
+    "mimo": "https://platform.xiaomimimo.com/",
 }
 
 
@@ -232,7 +326,9 @@ def load_config() -> SkySheepConfig:
     roundtable = RoundtableConfig()
     websearch = WebSearchConfig()
     imagegen = ImageGenConfig()
+    speech = SpeechConfig()
     server = ServerConfig()
+    channels = ChannelsConfig()
     p = config_path()
     if p.exists():
         try:
@@ -259,6 +355,7 @@ def load_config() -> SkySheepConfig:
         for section_name, model_cls, cur in (
             ("websearch", WebSearchConfig, websearch),
             ("imagegen", ImageGenConfig, imagegen),
+            ("speech", SpeechConfig, speech),
             ("server", ServerConfig, server),
         ):
             section = raw.get(section_name)
@@ -268,8 +365,11 @@ def load_config() -> SkySheepConfig:
                 websearch = cur
             elif section_name == "imagegen":
                 imagegen = cur
+            elif section_name == "speech":
+                speech = cur
             else:
                 server = cur
+        channels = _load_channels(raw.get("channels"))
         for name, section in (raw.get("providers") or {}).items():
             if not isinstance(section, dict):
                 continue
@@ -313,7 +413,9 @@ def load_config() -> SkySheepConfig:
         roundtable=roundtable,
         websearch=websearch,
         imagegen=imagegen,
+        speech=speech,
         server=server,
+        channels=channels,
         providers=merged,
     )
 
@@ -353,6 +455,59 @@ def set_advanced_settings_in_config(
     if daily_token_budget is not None:
         raw["daily_token_budget"] = max(0, int(daily_token_budget))
     _write_raw_config(p, raw)
+
+
+def set_hooks_in_config(
+    pre: list[dict] | None = None, post: list[dict] | None = None
+) -> None:
+    """写入 config.toml 的 [hooks] 表（None 表示该组不动）。
+
+    设置页的 Hooks 面板走这里，不直接编辑 config.toml 文本——保持与其它设置项
+    同一套读写路径（含目录边界校验），也避免手写 TOML 的格式错。
+    每项形如 {"match": "write_file", "command": "python check.py", "timeout_s": 10}。
+    """
+    p, raw = _read_raw_config()
+    hooks = raw.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    if pre is not None:
+        hooks["pre_tool_use"] = _clean_hook_items(pre)
+    if post is not None:
+        hooks["post_tool_use"] = _clean_hook_items(post)
+    # 两组都空时删掉整张表：留空表会让用户以为钩子还在生效
+    if not any(hooks.get(k) for k in ("pre_tool_use", "post_tool_use")):
+        raw.pop("hooks", None)
+    else:
+        raw["hooks"] = hooks
+    _write_raw_config(p, raw)
+
+
+def _clean_hook_items(items: list) -> list[dict]:
+    """校验并整理钩子条目（坏条目直接报错，而不是静默丢掉）。"""
+    out: list[dict] = []
+    for i, item in enumerate(items or [], start=1):
+        if not isinstance(item, dict):
+            raise ConfigError(f"第 {i} 条钩子必须是一个对象")
+        command = str(item.get("command", "") or "").strip()
+        if not command:
+            raise ConfigError(f"第 {i} 条钩子缺少 command（要执行的命令）")
+        if "\n" in command:
+            raise ConfigError(f"第 {i} 条钩子的 command 不能包含换行")
+        match = str(item.get("match", "") or "*").strip() or "*"
+        raw_timeout = item.get("timeout_s")
+        if raw_timeout is None or raw_timeout == "":
+            timeout = DEFAULT_HOOK_TIMEOUT_S
+        else:
+            try:
+                # 显式给了值就严格校验：0 / 负数 / "abc" 都报错，
+                # 不用 `or 10` 把非法值静默变成默认值
+                timeout = float(raw_timeout)
+            except (TypeError, ValueError):
+                raise ConfigError(f"第 {i} 条钩子的 timeout_s 必须是数字") from None
+        if not 1 <= timeout <= 600:
+            raise ConfigError(f"第 {i} 条钩子的超时要在 1–600 秒之间")
+        out.append({"match": match, "command": command, "timeout_s": timeout})
+    return out
 
 
 def set_subagent_settings_in_config(
@@ -741,6 +896,38 @@ def write_config_template(force: bool = False) -> Path:
     return p
 
 
+def _load_channels(section) -> ChannelsConfig:
+    """解析 config.toml 的 [channels] 段。
+
+    platforms 用扁平 dict 承载，但不盲信文件内容：非 dict 的平台条目直接丢掉，
+    allowed_ids 一律归一成字符串列表（TOML 里写成数字 id 是常见笔误，而
+    Channel.is_allowed 做的是字符串比较，不转换会静默失效——这种失败很难排查）。
+    """
+    if not isinstance(section, dict):
+        return ChannelsConfig()
+    raw_platforms = section.get("platforms")
+    platforms: dict[str, dict] = {}
+    if isinstance(raw_platforms, dict):
+        for name, entry in raw_platforms.items():
+            if not isinstance(entry, dict):
+                continue
+            clean = dict(entry)
+            ids = clean.get("allowed_ids")
+            if isinstance(ids, (list, tuple)):
+                clean["allowed_ids"] = [str(x).strip() for x in ids if str(x).strip()]
+            elif ids is None:
+                clean["allowed_ids"] = []
+            else:
+                clean["allowed_ids"] = [str(ids).strip()] if str(ids).strip() else []
+            clean["enabled"] = bool(clean.get("enabled", False))
+            platforms[str(name)] = clean
+    try:
+        timeout = int(section.get("approve_timeout", 120))
+    except (TypeError, ValueError):
+        timeout = 120
+    return ChannelsConfig(approve_timeout=timeout, platforms=platforms)
+
+
 def update_config_section(section: str, updates: dict) -> dict:
     """写 config.toml 的一个普通 section（[websearch] / [imagegen] / [server]）。
 
@@ -805,7 +992,9 @@ def resolve_imagegen(cfg: SkySheepConfig) -> dict | None:
     """解析画图用哪个服务商 + Key + 模型；一个都配不出时返回 None。
 
     auto：智谱（cogview-3-flash）→ 硅基流动（Kolors），Key 复用模型服务配置；
-    custom：必须显式填 base_url（OpenAI 兼容 /images/generations）。
+    custom：必须显式填 base_url（OpenAI 兼容 /images/generations）；
+    其他名字：当作「复用已配置的模型服务」（如 cavoti / openrouter），
+    直接用它的 base_url 与 Key，不用再把地址与 Key 拄一遍。
     """
     ig = cfg.imagegen
     if ig.provider == "custom":
@@ -816,6 +1005,8 @@ def resolve_imagegen(cfg: SkySheepConfig) -> dict | None:
                 "base_url": ig.base_url, "model": ig.model,
             }
         return None
+    if ig.provider not in ("", "auto", "zhipu", "siliconflow"):
+        return _reuse_configured_service(cfg, ig.provider, ig.api_key, ig.env_key, ig.model or "")
     order = (("zhipu", "cogview-3-flash"), ("siliconflow", "Kwai-Kolors/Kolors")) \
         if ig.provider == "auto" else ((ig.provider, ig.model),)
     for name, default_model in order:
@@ -826,10 +1017,105 @@ def resolve_imagegen(cfg: SkySheepConfig) -> dict | None:
             pc = cfg.providers.get(name)
             if pc is not None:
                 key = resolve_api_key(name, pc) or ""
-        if not key and name == ig.provider:
+        if not key:
+            # siliconflow 已不在内置预设里：画图的 Key 复用只认环境变量，
+            # 不要求模型服务列表里还配着这个服务
             key = os.environ.get(
                 "ZHIPUAI_API_KEY" if name == "zhipu" else "SILICONFLOW_API_KEY", "")
         if key:
             model = (ig.model if name == ig.provider and ig.model else "") or default_model
             return {"provider": name, "api_key": key, "base_url": "", "model": model}
+    return None
+
+
+def _reuse_configured_service(
+    cfg: SkySheepConfig, name: str, own_key: str, env_key: str, model: str
+) -> dict | None:
+    """按名字复用「已配置的模型服务」（搜索/画图/语音共用）。
+
+    用户已经在模型服务里配好的第三方聚合服务（如 cavoti / openrouter）不该
+    在搜索、画图、语音的配置里再拄一遍地址与 Key；下拉里选中它即可。
+    base_url 必须存在（没有地址的服务无法拼出接口）；Key 依次取：本档自己的 →
+    环境变量 → 该模型服务已配置的。
+    """
+    pc = cfg.providers.get(name)
+    if pc is None or pc.kind != "openai":
+        return None
+    base = (pc.base_url or "").strip().rstrip("/")
+    if not base:
+        return None
+    key = own_key or (os.environ.get(env_key) if env_key else "") or (resolve_api_key(name, pc) or "")
+    return {
+        "provider": name,
+        "api_key": key,
+        "base_url": base,
+        "model": model or "",
+    }
+
+
+# 语音转写：服务商 → (默认模型, 默认 base_url, 默认环境变量)
+_SPEECH_PRESETS: dict[str, tuple[str, str, str]] = {
+    "zhipu": ("glm-asr", "https://open.bigmodel.cn/api/paas/v4", "ZHIPUAI_API_KEY"),
+    "siliconflow": (
+        "FunAudioLLM/SenseVoiceSmall",
+        "https://api.siliconflow.cn/v1",
+        "SILICONFLOW_API_KEY",
+    ),
+    "openai": ("whisper-1", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+}
+
+
+def resolve_speech(cfg: SkySheepConfig) -> dict | None:
+    """解析语音转写用哪个服务商 + Key + 模型；一个都配不出时返回 None。
+
+    provider = auto 时按 zhipu → siliconflow → openai 顺序找**已配置 Key**的服务，
+    Key 依次取 speech 档自己的 → env_key → 同名环境变量 → 模型服务里已配置的 Key；
+    custom 只认自填 base_url（OpenAI 兼容 /audio/transcriptions，Key 可留空，
+    对应本地 faster-whisper 这类无鉴权服务）。
+    """
+    sp = cfg.speech
+    own_key = sp.api_key or (os.environ.get(sp.env_key) if sp.env_key else "")
+    if sp.provider == "custom":
+        if not sp.base_url.strip():
+            return None
+        return {
+            "provider": "custom",
+            "api_key": own_key,
+            "base_url": sp.base_url.strip().rstrip("/"),
+            "model": sp.model or "whisper-1",
+            "language": sp.language,
+        }
+    if sp.provider == "auto":
+        order: tuple[str, ...] = ("zhipu", "siliconflow", "openai")
+    elif sp.provider in _SPEECH_PRESETS:
+        order = (sp.provider,)
+    else:
+        # 其他名字：当作复用已配置的模型服务（如 cavoti），模型留空时用通用默认名
+        reused = _reuse_configured_service(
+            cfg, sp.provider, own_key, sp.env_key, sp.model or "whisper-1"
+        )
+        if reused is None:
+            return None
+        reused["language"] = sp.language
+        return reused
+    for name in order:
+        default_model, default_base, default_env = _SPEECH_PRESETS[name]
+        key = own_key
+        if not key:
+            pc = cfg.providers.get(name)
+            if pc is not None:
+                key = resolve_api_key(name, pc) or ""
+        if not key:
+            key = os.environ.get(default_env, "")
+        if not key:
+            continue
+        # base_url：自定义档优先，否则用服务商默认（兼容 OpenAI 协议的第三方镜像）
+        base = (sp.base_url.strip().rstrip("/") if sp.provider == name and sp.base_url.strip() else "")
+        return {
+            "provider": name,
+            "api_key": key,
+            "base_url": base or default_base,
+            "model": (sp.model if sp.provider == name and sp.model else "") or default_model,
+            "language": sp.language,
+        }
     return None

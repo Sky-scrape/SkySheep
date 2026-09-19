@@ -78,7 +78,7 @@ async def test_context_overflow_error_has_actionable_hint(home, tmp_path):
     from skysheep.tools import ToolRegistry
 
     class BoomProvider(FakeProvider):
-        async def stream(self, messages, tool_schemas):
+        async def stream(self, messages, tool_schemas, effort=None):
             raise RuntimeError("This model's maximum context length is 65536 tokens")
             yield  # pragma: no cover - 让它是个 async generator
 

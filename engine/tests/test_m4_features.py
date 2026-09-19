@@ -58,7 +58,7 @@ class FlakyProvider(FakeProvider):
         self.failures = failures
         self.calls_made = 0
 
-    async def stream(self, messages, tool_schemas):
+    async def stream(self, messages, tool_schemas, effort=None):
         self.calls_made += 1
         if self.failures > 0:
             self.failures -= 1
@@ -83,7 +83,7 @@ async def test_transient_error_retries_then_succeeds(tmp_path, monkeypatch):
 
 
 class BoomProvider(FakeProvider):
-    async def stream(self, messages, tool_schemas):
+    async def stream(self, messages, tool_schemas, effort=None):
         raise RuntimeError("invalid api key (401)")
         yield  # noqa: B901 不可达；仅为把函数变成异步生成器（与 Provider 协议一致）
 
@@ -99,7 +99,7 @@ async def test_non_transient_error_no_retry(tmp_path):
 
 
 class MidStreamFailProvider(FakeProvider):
-    async def stream(self, messages, tool_schemas):
+    async def stream(self, messages, tool_schemas, effort=None):
         yield ProviderTextDelta("已经吐了一半 ")
         raise RuntimeError("429 rate limited mid-stream")
 

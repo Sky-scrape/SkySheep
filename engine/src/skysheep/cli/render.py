@@ -12,6 +12,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from ..core.estimate import format_range
 from ..events import AgentEvent
 
 
@@ -133,6 +134,12 @@ class Renderer:
                 f"（摘要 {ev.summary_chars} 字符）"
             )
             self.console.print(Text(msg, style="cyan dim"))
+        elif k == "task_estimate":
+            self._flush_live()
+            line = f"⏱ 预计耗时 {format_range(ev.min_seconds, ev.max_seconds)}"
+            if ev.basis:
+                line += f"（{ev.basis}）"
+            self.console.print(Text(line, style="dim"))
         elif k == "turn_finished":
             self._flush_live()
 

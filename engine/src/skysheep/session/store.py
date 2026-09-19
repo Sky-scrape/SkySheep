@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
     pinned INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -96,6 +97,41 @@ CREATE TABLE IF NOT EXISTS schedules (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_start ON schedules(start_at);
+CREATE TABLE IF NOT EXISTS channel_bindings (
+    channel TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS channel_sources (
+    channel TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    hits INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (channel, chat_id)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+"""
+
+# 全文搜索索引：messages 的 FTS5 虚表（trigram 分词）。
+#
+# 为什么用 trigram：跨会话搜索要能命中中文子串，而 FTS5 默认的 unicode61
+# 分词器把整段中文当一个 token（搜「测试」命不中「中文测试内容」）。trigram
+# 按三字符滑窗建索引，中文与英文子串都能直接命中，也不需要外部分词库。
+#
+# 独立建表（不用 external content 模式）是刻意选择：这样同步只需在写入/删除
+# 消息时一并操作本表，不用触发器，也不会因为 messages 的行被 UPDATE 而
+# 遗留脏索引。代价只是多存一份文本。
+#
+# 行号对齐：插入时显式指定 rowid = messages.id，两边一一对应，删除同样按
+# rowid 定位；不需要额外的关联列，也不会因自增差异而错位。
+FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    plain,
+    tokenize='trigram'
+);
 """
 
 
@@ -116,6 +152,22 @@ class Session:
     updated_at: float
     pinned: int = 0
     summary: str = ""
+    # 用户给会话打的标签（自由文本，逗号分隔存库；侧栏按标签分组）。
+    # 用字符串而非单独的表：一个会话标签数很少，分组只需前缀匹配/包含，
+    # 不需要为它维护关联表与外键。
+    tags: str = ""
+    # 归档：1 = 已归档（侧栏默认不显示，可从归档弹窗恢复）
+    archived: int = 0
+
+
+def session_from_row(r) -> Session:
+    """从一行 sessions 记录构造 Session（兼容缺列的旧库行）。"""
+    return Session(
+        r["id"], r["project_id"], r["title"],
+        r["created_at"], r["updated_at"], r["pinned"], r["summary"],
+        r["tags"] if "tags" in r.keys() else "",
+        r["archived"] if "archived" in r.keys() else 0,
+    )
 
 
 def parse_backup_stamp(stamp: str) -> float | None:
@@ -133,6 +185,11 @@ def parse_backup_stamp(stamp: str) -> float | None:
         return None
 
 
+# usage_stats 的 project_id 哨兵：None 在项目语义里表示快聊（合法过滤目标），
+# 因此「不过滤」用独立哨兵表示，避免与 NULL 项目混淆（安全审查 B14 的过滤参数）。
+_ALL = object()
+
+
 class SessionStore:
     BACKUP_KEEP = 20
     # 恢复前自动留的安全副本后缀（列表里单独标记，方便用户认出「这是恢复动作留下的」）
@@ -142,6 +199,9 @@ class SessionStore:
         self.path = path
         self._db: aiosqlite.Connection | None = None
         self.backup_created: str | None = None
+        # FTS5 全文索引是否就绪（断开后 connect 会重新判定）；
+        # False 时 search_messages 退到 LIKE 扫描，功能不降级只是变慢。
+        self.fts_ready = False
 
     def _rolling_backup(self) -> str | None:
         """打开数据库前先滚动备份（保留最近 BACKUP_KEEP 份），防止误删无法恢复。"""
@@ -283,8 +343,92 @@ class SessionStore:
             )
         except Exception:
             pass
+        # 旧库迁移：sessions 补 tags 列（用户自定义标签，侧栏可按标签分组）
+        try:
+            await self._db.execute(
+                "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+        # 旧库迁移：sessions 补 archived 列（归档：侧栏默认隐藏，可从归档弹窗恢复）
+        try:
+            await self._db.execute(
+                "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
         await self._db.commit()
+        await self._setup_fts()
         return self
+
+    # ---- 全文搜索索引（messages_fts） ----
+
+    async def _setup_fts(self) -> None:
+        """建 FTS 表并回填已有消息。失败时置 fts_ready=False，搜索自动退到 LIKE。
+
+        回填只在「FTS 表是空的而 messages 非空」时做，避免每次启动都重扫。
+        虚表建不出来（极少数 SQLite 未编 FTS5）不影响应用启动。
+        """
+        assert self._db
+        self.fts_ready = False
+        try:
+            await self._db.executescript(FTS_SCHEMA)
+        except Exception:
+            return  # 没有 FTS5 支持：保留 LIKE 扫描路径
+        try:
+            cur = await self._db.execute("SELECT count(*) AS n FROM messages_fts")
+            row = await cur.fetchone()
+            indexed = int(row["n"] or 0) if row else 0
+            if indexed == 0:
+                await self._backfill_fts()
+        except Exception:
+            return
+        self.fts_ready = True
+
+    async def _backfill_fts(self) -> None:
+        """把现有 messages 全量灌进 FTS（旧库升级后第一次启动走一趟）。"""
+        assert self._db
+        cur = await self._db.execute("SELECT id, content FROM messages")
+        rows = await cur.fetchall()
+        payload = [(int(r["id"]), self._plain_text(r["content"])) for r in rows]
+        if payload:
+            await self._db.executemany(
+                "INSERT INTO messages_fts(rowid, plain) VALUES (?, ?)", payload
+            )
+            await self._db.commit()
+
+    @staticmethod
+    def _plain_text(raw: str) -> str:
+        """消息 JSON → 可搜索的纯文本（与旧 LIKE 搜索的可见内容一致）。"""
+        try:
+            return Message.model_validate_json(raw).to_plain()
+        except Exception:  # noqa: BLE001 - 坏行退化成原始字符串，不能让它挡住索引
+            return str(raw)
+
+    async def _fts_insert(self, message_id: int, content_json: str) -> None:
+        """同步一条消息进 FTS；未启用时无事发生。"""
+        if not self.fts_ready or self._db is None:
+            return
+        try:
+            await self._db.execute(
+                "INSERT INTO messages_fts(rowid, plain) VALUES (?, ?)",
+                (int(message_id), self._plain_text(content_json)),
+            )
+        except Exception:
+            pass  # 索引写失败不影响主存储
+
+    async def _fts_delete(self, where_sql: str, args: tuple) -> None:
+        """按 messages 的命中行同步删除 FTS 行（where_sql 作用于 messages 子查询）。"""
+        if not self.fts_ready or self._db is None:
+            return
+        try:
+            await self._db.execute(
+                "DELETE FROM messages_fts WHERE rowid IN "
+                f"(SELECT id FROM messages WHERE {where_sql})",
+                args,
+            )
+        except Exception:
+            pass
 
     async def close(self) -> None:
         if self._db:
@@ -315,10 +459,20 @@ class SessionStore:
         rows = await cur.fetchall()
         return [Project(r["id"], r["root_path"], r["name"], r["created_at"]) for r in rows]
 
+    async def get_project(self, project_id: int) -> Project | None:
+        """按 id 取项目记录（定时任务按自身项目执行时解析工作目录用）。"""
+        assert self._db
+        cur = await self._db.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+        row = await cur.fetchone()
+        return Project(row["id"], row["root_path"], row["name"], row["created_at"]) if row else None
+
     async def delete_project(self, project_id: int) -> int:
         """删除项目记录及其全部会话（含消息）与白名单规则，返回删除的行数（0=不存在）。
         只清数据库记录，电脑上的项目文件夹不受影响。"""
         assert self._db
+        await self._fts_delete(
+            "session_id IN (SELECT id FROM sessions WHERE project_id = ?)", (project_id,)
+        )
         await self._db.execute(
             "DELETE FROM messages WHERE session_id IN "
             "(SELECT id FROM sessions WHERE project_id = ?)",
@@ -349,31 +503,84 @@ class SessionStore:
         row = await cur.fetchone()
         if not row:
             return None
-        return Session(
-            row["id"], row["project_id"], row["title"],
-            row["created_at"], row["updated_at"], row["pinned"], row["summary"],
+        return session_from_row(row)
+
+    async def get_session_for_project(
+        self, session_id: str, project_id: int | None
+    ) -> Session | None:
+        """按 id 取会话并校验项目归属：不属于该项目的（含快聊边界）返回 None。
+
+        安全边界：get_session 只按 id 查询，持有远程令牌的客户端可以拿别的
+        项目的 session_id 走 chat.send / export / delete 等接口，把他人会话
+        挂进当前项目的工作目录与权限门下执行。所有跨网络的按 id 操作必须
+        走本方法；project_id=None 表示快聊（project_id IS NULL 的会话）。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM sessions WHERE id = ?"
+            " AND ((? IS NULL AND project_id IS NULL) OR project_id = ?)",
+            (session_id, project_id, project_id),
         )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return session_from_row(row)
 
     async def list_sessions(self, project_id: int | None = None, limit: int = 50) -> list[Session]:
+        """侧栏会话列表（已归档的不在其中，见 list_archived_sessions）。"""
         assert self._db
         if project_id is None:
             cur = await self._db.execute(
-                "SELECT * FROM sessions ORDER BY pinned DESC, updated_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM sessions WHERE archived = 0"
+                " ORDER BY pinned DESC, updated_at DESC LIMIT ?", (limit,)
             )
         else:
             cur = await self._db.execute(
-                "SELECT * FROM sessions WHERE project_id = ?"
+                "SELECT * FROM sessions WHERE project_id = ? AND archived = 0"
                 " ORDER BY pinned DESC, updated_at DESC LIMIT ?",
                 (project_id, limit),
             )
         rows = await cur.fetchall()
-        return [
-            Session(
-                r["id"], r["project_id"], r["title"],
-                r["created_at"], r["updated_at"], r["pinned"], r["summary"],
+        return [session_from_row(r) for r in rows]
+
+    async def list_archived_sessions(
+        self, project_id: int | None = None, limit: int = 100
+    ) -> list[Session]:
+        """已归档会话（归档弹窗用），最近活跃在前。"""
+        assert self._db
+        if project_id is None:
+            cur = await self._db.execute(
+                "SELECT * FROM sessions WHERE archived = 1"
+                " ORDER BY updated_at DESC LIMIT ?", (limit,)
             )
-            for r in rows
-        ]
+        else:
+            cur = await self._db.execute(
+                "SELECT * FROM sessions WHERE project_id = ? AND archived = 1"
+                " ORDER BY updated_at DESC LIMIT ?",
+                (project_id, limit),
+            )
+        rows = await cur.fetchall()
+        return [session_from_row(r) for r in rows]
+
+    async def count_archived_sessions(self, project_id: int | None = None) -> int:
+        """当前项目（或全部项目）的归档会话数，侧栏归档入口的角标用。"""
+        assert self._db
+        if project_id is None:
+            cur = await self._db.execute("SELECT COUNT(*) AS n FROM sessions WHERE archived = 1")
+        else:
+            cur = await self._db.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE project_id = ? AND archived = 1",
+                (project_id,),
+            )
+        row = await cur.fetchone()
+        return int(row["n"] or 0) if row else 0
+
+    async def set_archived(self, session_id: str, archived: bool) -> None:
+        assert self._db
+        await self._db.execute(
+            "UPDATE sessions SET archived = ? WHERE id = ?", (1 if archived else 0, session_id)
+        )
+        await self._db.commit()
 
     async def find_last_user_seq(self, session_id: str) -> int | None:
         """最后一条 user 消息的 seq（消息级重生成/编辑的默认锚点）。"""
@@ -427,6 +634,8 @@ class SessionStore:
         """
         assert self._db
         op = ">=" if include_self else ">"
+        # FTS 是独立表，删 messages 前先按同一条件清掉对应行
+        await self._fts_delete(f"session_id = ? AND seq {op} ?", (session_id, seq))
         cur = await self._db.execute(
             f"DELETE FROM messages WHERE session_id = ? AND seq {op} ?",
             (session_id, seq),
@@ -447,11 +656,13 @@ class SessionStore:
         rows = await cur.fetchall()
         n = 0
         for r in rows:
-            await self._db.execute(
+            cur2 = await self._db.execute(
                 "INSERT INTO messages (session_id, seq, role, content, created_at)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (dst_session, r["seq"], r["role"], r["content"], r["created_at"]),
             )
+            if cur2.lastrowid is not None:
+                await self._fts_insert(int(cur2.lastrowid), r["content"])
             n += 1
         await self._db.commit()
         return n
@@ -478,27 +689,69 @@ class SessionStore:
         )
         await self._db.commit()
 
-    async def latest_session(self, project_id: int | None) -> Session | None:
-        """取项目下最近活跃的会话（用于启动时"接着上次继续"）。"""
+    async def set_tags(self, session_id: str, tags: list[str] | str) -> str:
+        """设置会话标签，返回归一化后的存库字符串。
+
+        归一化规则：去除空白与逗号（标签用逗号分隔存一列）、去重、保持顺序，
+        总数限 12 个、每个不超 24 字——侧栏展示位置有限，不靠数据库拦截奇葩输入。
+        """
+        assert self._db
+        items: list[str] = []
+        raw = tags if isinstance(tags, str) else ",".join(str(t) for t in tags)
+        for piece in str(raw).replace("，", ",").split(","):
+            t = piece.strip()[:24]
+            if t and t not in items:
+                items.append(t)
+            if len(items) >= 12:
+                break
+        value = ",".join(items)
+        await self._db.execute(
+            "UPDATE sessions SET tags = ? WHERE id = ?", (value, session_id)
+        )
+        await self._db.commit()
+        return value
+
+    async def list_all_tags(self, project_id: int | None) -> list[dict]:
+        """当前项目下出现过的标签及各自会话数（侧栏分组头部用）。"""
         assert self._db
         if project_id is None:
             cur = await self._db.execute(
-                "SELECT * FROM sessions WHERE project_id IS NULL"
+                "SELECT tags FROM sessions WHERE project_id IS NULL AND tags != ''"
+            )
+        else:
+            cur = await self._db.execute(
+                "SELECT tags FROM sessions WHERE project_id = ? AND tags != ''", (project_id,)
+            )
+        rows = await cur.fetchall()
+        counts: dict[str, int] = {}
+        for r in rows:
+            for t in str(r["tags"] or "").split(","):
+                t = t.strip()
+                if t:
+                    counts[t] = counts.get(t, 0) + 1
+        return [
+            {"tag": t, "count": n}
+            for t, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+
+    async def latest_session(self, project_id: int | None) -> Session | None:
+        """取项目下最近活跃的会话（用于启动时"接着上次继续"；已归档不参与）。"""
+        assert self._db
+        if project_id is None:
+            cur = await self._db.execute(
+                "SELECT * FROM sessions WHERE project_id IS NULL AND archived = 0"
                 " ORDER BY pinned DESC, updated_at DESC LIMIT 1"
             )
         else:
             cur = await self._db.execute(
-                "SELECT * FROM sessions WHERE project_id = ?"
+                "SELECT * FROM sessions WHERE project_id = ? AND archived = 0"
                 " ORDER BY pinned DESC, updated_at DESC LIMIT 1",
                 (project_id,),
             )
         row = await cur.fetchone()
         if not row:
             return None
-        return Session(
-            row["id"], row["project_id"], row["title"],
-            row["created_at"], row["updated_at"], row["pinned"], row["summary"],
-        )
+        return session_from_row(row)
 
     async def count_empty_sessions(self, project_id: int | None) -> int:
         """统计没有任何消息的会话（"空会话"）。"""
@@ -559,6 +812,7 @@ class SessionStore:
     async def delete_session(self, session_id: str) -> None:
         """删除会话及其全部消息。"""
         assert self._db
+        await self._fts_delete("session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         await self._db.commit()
@@ -573,11 +827,14 @@ class SessionStore:
         )
         row = await cur.fetchone()
         seq = row[0]
+        content_json = message.model_dump_json()
         cur = await self._db.execute(
             "INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (session_id, seq, message.role, message.model_dump_json(), time.time()),
+            (session_id, seq, message.role, content_json, time.time()),
         )
         await self._db.commit()
+        if cur.lastrowid is not None:
+            await self._fts_insert(int(cur.lastrowid), content_json)
         message.seq = seq  # 回填给内存历史/前端 brief 用
         return cur.lastrowid
 
@@ -598,40 +855,33 @@ class SessionStore:
     async def search_messages(
         self, project_id: int | None, query: str, limit: int = 20, scope: str = "project"
     ) -> list[dict]:
-        """跨会话搜索消息内容（LIKE 匹配，大小写不敏感看 SQLite 默认 ASCII 规则）。
+        """跨会话搜索消息内容。
+
+        优先走 FTS5（trigram 分词）——中文子串、大小写不敏感、不扫全表；
+        FTS 不可用时（旧库无虚表 / SQLite 未编 FTS5 / 查询语法异常）自动退到
+        LIKE 扫描，行为与之前一致。
 
         每个会话只取最新排序下最先命中的片段，返回 [{session_id,title,snippet,…}]。
         scope="all" 时忽略项目过滤，在所有项目（含快聊）里找——用户在多个项目之间
         往往记不住某件事是在哪个项目里聊的。结果附带项目名，便于在列表里区分。
         """
         assert self._db
-        like = f"%{query}%"
-        if scope == "all":
-            cond, args = "1 = 1", ()
+        query = (query or "").strip()
+        if not query:
+            return []
+        if self.fts_ready:
+            rows = await self._search_fts(project_id, query, scope)
         else:
-            cond = "s.project_id IS NULL" if project_id is None else "s.project_id = ?"
-            args = (project_id,) if project_id is not None else ()
-        cur = await self._db.execute(
-            "SELECT m.session_id, s.title, s.updated_at, m.content, s.project_id,"
-            "       p.name AS project_name, p.root_path AS project_path"
-            " FROM messages m"
-            " JOIN sessions s ON s.id = m.session_id"
-            " LEFT JOIN projects p ON p.id = s.project_id"
-            f" WHERE {cond} AND m.content LIKE ?"
-            " ORDER BY s.pinned DESC, s.updated_at DESC, m.seq",
-            args + (like,),
-        )
-        rows = await cur.fetchall()
+            rows = await self._search_like(project_id, query, scope)
+
         results: list[dict] = []
         seen: set[str] = set()
         for r in rows:
             if r["session_id"] in seen:
                 continue
             seen.add(r["session_id"])
-            try:
-                plain = Message.model_validate_json(r["content"]).to_plain()
-            except Exception:
-                plain = str(r["content"])
+            plain = self._plain_text(r["content"])
+            # 命中位置用大小写不敏感查找（FTS 与 LIKE 都可能在大小写上放宽）
             low, q = plain.lower(), query.lower()
             pos = low.find(q)
             start = max(0, pos - 40)
@@ -650,6 +900,83 @@ class SessionStore:
             if len(results) >= limit:
                 break
         return results
+
+    SEARCH_SELECT = (
+        "SELECT m.session_id, s.title, s.updated_at, m.content, s.project_id,"
+        "       p.name AS project_name, p.root_path AS project_path"
+        " FROM messages m"
+        " JOIN sessions s ON s.id = m.session_id"
+        " LEFT JOIN projects p ON p.id = s.project_id"
+    )
+
+    def _scope_condition(self, project_id: int | None, scope: str) -> tuple[str, tuple]:
+        # 已归档会话不进搜索结果（归档 = 眼不见；要找就去归档弹窗恢复）
+        if scope == "all":
+            return "s.archived = 0", ()
+        cond = "s.project_id IS NULL" if project_id is None else "s.project_id = ?"
+        args = (project_id,) if project_id is not None else ()
+        return f"({cond}) AND s.archived = 0", args
+
+    async def _search_fts(self, project_id: int | None, query: str, scope: str) -> list:
+        """FTS5 查询；语法异常或虚表缺失时自动退到 LIKE。
+
+        trigram 索引要求查询至少 3 个字符才有意义（少于 3 字符无法构成一个
+        三字符片段），这种短查询直接走 LIKE——结果更准，也不浪费一次抛错。
+        """
+        if len(query) < 3:
+            return await self._search_like(project_id, query, scope)
+        cond, args = self._scope_condition(project_id, scope)
+        try:
+            # 用双引号包成字符串字面量：不加引号时查询里的 " - * : ^ 等
+            # 会被 FTS 当成语法，普通用户的搜索词不该有这种副作用。
+            match = '"' + query.replace('"', '""') + '"'
+            cur = await self._db.execute(
+                self.SEARCH_SELECT
+                + " JOIN messages_fts f ON f.rowid = m.id"
+                + f" WHERE {cond} AND messages_fts MATCH ?"
+                " ORDER BY s.pinned DESC, s.updated_at DESC, m.seq",
+                args + (match,),
+            )
+            return await cur.fetchall()
+        except Exception:  # noqa: BLE001 - 索引/语法问题不应对用户显形
+            return await self._search_like(project_id, query, scope)
+
+    async def _search_like(self, project_id: int | None, query: str, scope: str) -> list:
+        """LIKE 全扫描：FTS 不可用时的兜底（也用于 1–2 字符的短查询）。"""
+        cond, args = self._scope_condition(project_id, scope)
+        cur = await self._db.execute(
+            self.SEARCH_SELECT
+            + f" WHERE {cond} AND m.content LIKE ?"
+            " ORDER BY s.pinned DESC, s.updated_at DESC, m.seq",
+            args + (f"%{query}%",),
+        )
+        return await cur.fetchall()
+
+    # ---- 任务耗时预估的实测样本 ----
+
+    async def recent_turn_seconds(self, project_id: int | None, limit: int = 30) -> list[float]:
+        """本项目最近 N 次「用户消息→助手回复」的实测耗时（秒），新→旧。
+
+        取同项目各会话里相邻的 user→assistant 消息对时间差；剔除 1 秒以内
+        （重试/拆分噪音）与 2 小时以上（挂起过夜、中途离开）的样本。供
+        core/estimate.py 做历史校准——启发式再准也不如用户机器上的真实记录。
+        """
+        assert self._db
+        cond = "s.project_id IS NULL" if project_id is None else "s.project_id = ?"
+        args = () if project_id is None else (project_id,)
+        cur = await self._db.execute(
+            "SELECT a.created_at - u.created_at AS dur"
+            " FROM messages u"
+            " JOIN sessions s ON s.id = u.session_id"
+            " JOIN messages a"
+            "   ON a.session_id = u.session_id AND a.seq = u.seq + 1 AND a.role = 'assistant'"
+            f" WHERE u.role = 'user' AND {cond}"
+            " ORDER BY u.created_at DESC"
+            " LIMIT ?",
+            args + (limit * 2,),
+        )
+        rows = await cur.fetchall()
+        return [r["dur"] for r in rows if 1 <= r["dur"] <= 7200][:limit]
 
     # ---- whitelist rules ----
 
@@ -697,10 +1024,93 @@ class SessionStore:
         await self._db.commit()
         return cur.rowcount or 0
 
-    async def remove_rule(self, rule_id: int) -> None:  # pragma: no cover
+    async def remove_rule(self, rule_id: int, project_id: int | None = None) -> None:
+        """删除一条白名单规则；给出 project_id 时只删该项目的规则。
+
+        远程客户端不该能凭枚举到的 rule_id 删掉别的项目的白名单
+        （安全审查 B11），store 层直接把归属条件写进 DELETE。
+        """
         assert self._db
-        await self._db.execute("DELETE FROM whitelist_rules WHERE id = ?", (rule_id,))
+        if project_id is None:
+            await self._db.execute("DELETE FROM whitelist_rules WHERE id = ?", (rule_id,))
+        else:
+            await self._db.execute(
+                "DELETE FROM whitelist_rules WHERE id = ? AND project_id = ?",
+                (rule_id, project_id),
+            )
         await self._db.commit()
+
+    # ---- 聊天软件渠道（Bot Channel）：平台与会话的绑定 + 见过的来源 ----
+
+    async def get_channel_binding(self, channel: str) -> str | None:
+        """取某个渠道当前绑定的会话 id（没有则 None）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT session_id FROM channel_bindings WHERE channel = ?", (channel,)
+        )
+        row = await cur.fetchone()
+        return row["session_id"] if row else None
+
+    async def set_channel_binding(self, channel: str, session_id: str) -> None:
+        """绑定（或改绑）渠道到会话。UPSERT：同一平台重复绑定只保留最新一条。"""
+        assert self._db
+        await self._db.execute(
+            "INSERT INTO channel_bindings (channel, session_id, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(channel) DO UPDATE SET session_id = excluded.session_id,"
+            " updated_at = excluded.updated_at",
+            (channel, session_id, time.time()),
+        )
+        await self._db.commit()
+
+    async def find_channel_by_session(self, session_id: str) -> str | None:
+        """反查：这个会话绑定的是哪个渠道。
+
+        自愈路径需要它：runtime 丢了之后要重建，重建时要拿到平台名去取渠道配置，
+        而平台名的事实来源是这个绑定关系。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT channel FROM channel_bindings WHERE session_id = ?", (session_id,)
+        )
+        row = await cur.fetchone()
+        return row["channel"] if row else None
+
+    async def clear_channel_binding(self, channel: str) -> None:
+        assert self._db
+        await self._db.execute("DELETE FROM channel_bindings WHERE channel = ?", (channel,))
+        await self._db.commit()
+
+    async def record_channel_source(self, channel: str, chat_id: str, actor: str = "") -> None:
+        """记一个「见过的来源」，供桌面端认领 chat_id。
+
+        只在名单外调用。同一 (channel, chat_id) 重复出现只累加 hits 与 last_seen，
+        否则重试风暴会把表写成垃圾。
+        """
+        assert self._db
+        now = time.time()
+        await self._db.execute(
+            "INSERT INTO channel_sources (channel, chat_id, actor, first_seen, last_seen, hits)"
+            " VALUES (?, ?, ?, ?, ?, 1)"
+            " ON CONFLICT(channel, chat_id) DO UPDATE SET"
+            " actor = excluded.actor, last_seen = excluded.last_seen, hits = hits + 1",
+            (channel, chat_id, actor, now, now),
+        )
+        await self._db.commit()
+
+    async def list_channel_sources(self, channel: str | None = None) -> list[dict]:
+        """列出见过的来源，最近出现的在前。"""
+        assert self._db
+        if channel:
+            cur = await self._db.execute(
+                "SELECT * FROM channel_sources WHERE channel = ? ORDER BY last_seen DESC",
+                (channel,),
+            )
+        else:
+            cur = await self._db.execute(
+                "SELECT * FROM channel_sources ORDER BY last_seen DESC"
+            )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
     # ---- schedules（用户级日程，存在全局库里，切项目不丢） ----
 
@@ -839,36 +1249,47 @@ class SessionStore:
         )
         await self._db.commit()
 
-    async def usage_stats(self, days: int = 14) -> dict:
+    async def usage_stats(self, days: int = 14, *, project_id: int | None | object = _ALL) -> dict:
         """按天聚合 + 按会话聚合（近 N 天）。日期用本地时区。
 
+        project_id 给出时只统计该项目的用量（安全审查 B14：by_session 带着
+        会话标题，跨项目聚合会泄露给远程客户端）；缺省不过滤（CLI/测试/全局场景）。
         注意：date() 必须带 'unixepoch' 修饰符——ts 是 Unix 秒，
         直写 date(ts,'localtime') 在部分 SQLite 构建上会解析成错误年份。
         """
         assert self._db
         since = time.time() - days * 86400
+        scoped = project_id is not _ALL
         by_day, by_session, by_provider = [], [], []
         try:
+            join = (
+                " FROM usage_log l JOIN sessions s ON s.id = l.session_id"
+                if scoped else " FROM usage_log l"
+            )
+            cond = " WHERE l.ts >= ?" + (" AND s.project_id = ?" if scoped else "")
+            args: tuple = (since, project_id) if scoped else (since,)
             cur = await self._db.execute(
-                "SELECT date(ts, 'unixepoch', 'localtime') AS day,"
-                " SUM(in_tokens) AS it, SUM(out_tokens) AS ot"
-                " FROM usage_log WHERE ts >= ? GROUP BY day ORDER BY day DESC LIMIT ?",
-                (since, days),
+                "SELECT date(l.ts, 'unixepoch', 'localtime') AS day,"
+                " SUM(l.in_tokens) AS it, SUM(l.out_tokens) AS ot"
+                + join + cond + " GROUP BY day ORDER BY day DESC LIMIT ?",
+                (*args, days),
             )
             by_day = [dict(r) for r in await cur.fetchall()]
             cur = await self._db.execute(
                 "SELECT l.session_id AS sid, MAX(s.title) AS title,"
                 " SUM(l.in_tokens) AS it, SUM(l.out_tokens) AS ot, MAX(l.ts) AS last_ts"
                 " FROM usage_log l LEFT JOIN sessions s ON s.id = l.session_id"
-                " WHERE l.ts >= ? GROUP BY l.session_id"
+                " WHERE l.ts >= ?" + (" AND s.project_id = ?" if scoped else "")
+                + " GROUP BY l.session_id"
                 " ORDER BY last_ts DESC LIMIT 12",
-                (since,),
+                args,
             )
             by_session = [dict(r) for r in await cur.fetchall()]
             cur = await self._db.execute(
-                "SELECT provider, MAX(model) AS model, SUM(in_tokens) AS it, SUM(out_tokens) AS ot"
-                " FROM usage_log WHERE ts >= ? GROUP BY provider",
-                (since,),
+                "SELECT l.provider AS provider, MAX(l.model) AS model,"
+                " SUM(l.in_tokens) AS it, SUM(l.out_tokens) AS ot"
+                + join + cond + " GROUP BY l.provider",
+                args,
             )
             by_provider = [dict(r) for r in await cur.fetchall()]
         except Exception:

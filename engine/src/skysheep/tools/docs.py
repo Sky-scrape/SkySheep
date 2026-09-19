@@ -42,7 +42,7 @@ from .base import (
 DEFAULT_MAX_CHARS = 20_000
 MAX_DOC_BYTES = 50_000_000  # 50MB：文档类文件的超上限基本是拿错了文件
 
-SUPPORTED = (".pdf", ".docx", ".xlsx")
+SUPPORTED = (".pdf", ".docx", ".xlsx", ".pptx")
 
 
 def extract_document_text(p: Path, max_chars: int = DEFAULT_MAX_CHARS) -> str:
@@ -58,6 +58,8 @@ def extract_document_text(p: Path, max_chars: int = DEFAULT_MAX_CHARS) -> str:
             return _extract_pdf(p, max_chars)
         if suffix == ".docx":
             return _extract_docx(p)
+        if suffix == ".pptx":
+            return _extract_pptx(p)
         return _extract_xlsx(p, max_chars)
     except ToolError:
         raise
@@ -129,6 +131,44 @@ def _extract_docx(p: Path) -> str:
     return f"[Word 文档]\n\n{text}"
 
 
+def _extract_pptx(p: Path) -> str:
+    """抽取 PPT 文本：每页标出页码、标题、正文层级与备注。
+
+    包含备注：演示稿的要点往往写在备注里，只读正文会漏掉一半信息。
+    图层形状的位置不保证与阅读顺序一致（pptx 是绝对定位的），所以只能按
+    「形状在 XML 里的顺序」输出；表格按行展开为 | 分隔。
+    """
+    from pptx import Presentation
+
+    prs = Presentation(str(p))
+    parts: list[str] = []
+    for i, slide in enumerate(prs.slides, start=1):
+        lines: list[str] = []
+        for shape in slide.shapes:
+            if shape.has_table:
+                for row in shape.table.rows:
+                    cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                    if any(cells):
+                        lines.append("| " + " | ".join(cells) + " |")
+                continue
+            if not shape.has_text_frame:
+                continue
+            for para in shape.text_frame.paragraphs:
+                text = "".join(run.text for run in para.runs).strip()
+                if not text:
+                    continue
+                indent = "  " * min(para.level or 0, 4)
+                lines.append(indent + text)
+        notes = ""
+        if slide.has_notes_slide:
+            note_text = (slide.notes_slide.notes_text_frame.text or "").strip()
+            if note_text:
+                notes = "\n[备注] " + note_text.replace("\n", " / ")
+        body = "\n".join(lines) if lines else "(本页无文本，可能只有图片)"
+        parts.append(f"--- 第 {i} 页 ---\n{body}{notes}")
+    return f"[PPT 演示文稿，共 {len(prs.slides)} 页]\n\n" + "\n\n".join(parts)
+
+
 def _extract_xlsx(p: Path, max_chars: int) -> str:
     import openpyxl
 
@@ -152,8 +192,9 @@ def _extract_xlsx(p: Path, max_chars: int) -> str:
 class ReadDocumentTool(Tool):
     name = "read_document"
     description = (
-        "读取 PDF / Word(.docx) / Excel(.xlsx) 文档的文本内容（PDF 按页、Word 含表格、"
-        "Excel 按工作表逐行）。纯文本文件请用 read_file。用户让你「看/读/总结某个文档」时用它。"
+        "读取 PDF / Word(.docx) / Excel(.xlsx) / PPT(.pptx) 文档的文本内容（PDF 按页、"
+        "Word 含表格、Excel 按工作表逐行、PPT 按页含备注）。"
+        "纯文本文件请用 read_file。用户让你「看/读/总结某个文档」时用它。"
     )
     safety = Safety.READONLY
     args_model = ReadDocumentArgs
@@ -185,18 +226,20 @@ class ReadDocumentTool(Tool):
 
 # ===================== write_document：生成 Word / Excel / CSV =====================
 
-WRITE_SUPPORTED = (".docx", ".xlsx", ".csv")
+WRITE_SUPPORTED = (".docx", ".xlsx", ".csv", ".pptx")
 
 
 class WriteDocumentArgs(BaseModel):
     path: str = Field(
         description="目标文档路径（相对当前工作目录或绝对路径），扩展名决定格式："
-        ".docx（Word）/ .xlsx（Excel）/ .csv"
+        ".docx（Word）/ .xlsx（Excel）/ .csv / .pptx（演示文稿）"
     )
     content: str = Field(
         description="文档内容源格式——.docx：Markdown 子集（#/##/### 标题、段落、"
         "- 列表、| 表格 |、**加粗**、`代码`）；.xlsx：JSON 对象 {\"工作表名\": "
-        "[[单元格,...],...]}，单元格为字符串/数字/布尔/null；.csv：CSV 文本"
+        "[[单元格,...],...]}，单元格为字符串/数字/布尔/null；.csv：CSV 文本；"
+        ".pptx：Markdown 子集，## 一级标题开一页（首行 # 作为封面标题），"
+        "- 列表变成项目符号，> 引用作为该页演讲者备注"
     )
 
 
@@ -391,14 +434,147 @@ def build_xlsx(target: Path, content: str) -> str:
     return f"Excel 已生成：{len(sheets)} 个工作表（{names}）、共 {total_rows} 行"
 
 
+class _Slide:
+    """构建中的一页：标题 + 正文行 + 备注。"""
+
+    def __init__(self, title: str = "") -> None:
+        self.title = title
+        self.bullets: list[tuple[int, str]] = []  # (层级, 文本)
+        self.notes: list[str] = []
+        self.paragraphs: list[str] = []
+
+
+def _parse_slide_markdown(content: str) -> tuple[str, list[_Slide]]:
+    """Markdown 子集 → (封面标题, 页列表）。
+
+    约定（写在工具描述里，模型需按此产出）：
+    - 首行 `# 标题` 作封面；后面每个 `##` 开一页；
+    - `###` 作为页内小标题（当项目符号写）；`-` / `*` / 数字列表作为项目符号；
+    - `> 内容` 归入当前页的演讲者备注；
+    - 其余行按段落写入正文。
+    """
+    cover = ""
+    slides: list[_Slide] = []
+    cur: _Slide | None = None
+
+    for raw in content.replace("\r\n", "\n").split("\n"):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if m:
+            level, title = len(m.group(1)), m.group(2).strip()
+            if level == 1 and not cover and cur is None:
+                cover = title
+                continue
+            if level <= 2:
+                cur = _Slide(title)
+                slides.append(cur)
+                continue
+            # ### 及更深：页内小标题，作为顶层项目符号
+            if cur is None:
+                cur = _Slide()
+                slides.append(cur)
+            cur.bullets.append((0, title))
+            continue
+        if stripped.startswith(">"):
+            text = stripped.lstrip("> ").strip()
+            target = cur or (slides[-1] if slides else None)
+            if target is None:
+                cover = cover or text
+                continue
+            target.notes.append(text)
+            continue
+        if cur is None:
+            # 没有 ## 之前的散行：归入封面副标题（作为第一页的引言）
+            cur = _Slide()
+            slides.append(cur)
+        bullet = re.match(r"^([-*+])\s+(.*)$", stripped)
+        number = re.match(r"^(\d+)[.)]\s+(.*)$", stripped)
+        if bullet or number:
+            text = (bullet or number).group(2).strip()
+            # 两空格缩进 = 降一级，支持简单层级
+            indent = len(raw) - len(raw.lstrip(" \t"))
+            cur.bullets.append((min(indent // 2, 2), text))
+            continue
+        cur.paragraphs.append(stripped)
+    return cover, slides
+
+
+def build_pptx(target: Path, content: str) -> str:
+    """Markdown 子集 → .pptx（同步，线程里跑）。返回结果摘要。
+
+    用 python-pptx 的默认模板：版式取自 slide_layouts（0=标题页、1=标题+内容），
+    不引入外部主题文件，保证装了依赖就能跑。正文字号随内容量自适应，
+    避免文字溢出幻灯片（超量时给出提示而不是默默截断）。
+    """
+    from pptx import Presentation
+    from pptx.util import Pt
+
+    cover, slides = _parse_slide_markdown(content)
+    if not cover and not slides:
+        raise ToolError("content 里没有可生成的内容（至少给一个 `# 标题` 或 `## 页标题`）")
+
+    prs = Presentation()
+    title_layout, body_layout = prs.slide_layouts[0], prs.slide_layouts[1]
+
+    if cover:
+        slide = prs.slides.add_slide(title_layout)
+        slide.shapes.title.text = cover
+        subtitle = slide.placeholders[1]
+        first = slides[0] if slides else None
+        subtitle.text = " ".join(first.paragraphs)[:200] if first and first.paragraphs else ""
+
+    overflow: list[int] = []
+    for idx, s in enumerate(slides, start=1):
+        slide = prs.slides.add_slide(body_layout)
+        slide.shapes.title.text = s.title or f"第 {idx} 页"
+        body = slide.placeholders[1]
+        tf = body.text_frame
+        tf.word_wrap = True
+        items: list[tuple[int, str]] = list(s.bullets)
+        items += [(0, p) for p in s.paragraphs]
+        if not items:
+            items = [(0, "")]
+        # 内容多则缩小字号：把溢出挡在生成阶段
+        size = 20 if len(items) <= 6 else (17 if len(items) <= 10 else 14)
+        if len(items) > 16:
+            overflow.append(idx)
+        first_item = True
+        for level, text in items:
+            para = tf.paragraphs[0] if first_item else tf.add_paragraph()
+            first_item = False
+            para.text = text
+            para.level = min(level, 4)
+            for run in para.runs:
+                run.font.size = Pt(size - min(level, 2) * 2)
+        if s.notes:
+            slide.notes_slide.notes_text_frame.text = "\n".join(s.notes)
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        prs.save(str(target))
+    except OSError as e:
+        raise ToolError(f"cannot write {target.name}: {e}") from e
+    summary = f"PPT 已生成：{len(prs.slides)} 页"
+    if overflow:
+        summary += (
+            f"；第 {'、'.join(str(i) for i in overflow)} 页内容较多（超过 16 条），"
+            "已自动缩小字号，建议拆分成多页"
+        )
+    return summary
+
+
 class WriteDocumentTool(Tool):
     name = "write_document"
     description = (
         "生成 Office 文档文件：.docx（Word，content 用 Markdown 子集：#/##/### 标题、"
         "段落、- 列表、| 表格 |、**加粗**、`代码`）；.xlsx（Excel，content 用 JSON："
         "{\"工作表名\": [[单元格,...],...]}，单元格为 字符串/数字/布尔/null）；.csv（content "
-        "直接给 CSV 文本，带 BOM 可被 Excel 正确打开）。普通文本文件请用 write_file。"
-        "用户要 Word/Excel 报告、表格、清单文件时用它。"
+        "直接给 CSV 文本，带 BOM 可被 Excel 正确打开）；.pptx（PPT，content 用 Markdown "
+        "子集：# 标题作封面、## 开新页、- 列表变项目符号、> 引用作演讲者备注）。"
+        "普通文本文件请用 write_file。用户要 Word/Excel/PPT 报告、表格、清单、"
+        "演示稿时用它。"
     )
     safety = Safety.WRITE
     write_path_arg = True
@@ -431,6 +607,8 @@ class WriteDocumentTool(Tool):
                 summary = await asyncio.to_thread(build_docx, p, content)
             elif suffix == ".xlsx":
                 summary = await asyncio.to_thread(build_xlsx, p, content)
+            elif suffix == ".pptx":
+                summary = await asyncio.to_thread(build_pptx, p, content)
             else:  # .csv：utf-8-sig（带 BOM），Excel 双击打开中文不乱码
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content.replace("\r\n", "\n") + "\n", encoding="utf-8-sig")

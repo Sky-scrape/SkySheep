@@ -95,6 +95,43 @@ def install_from_dir(src: str | Path, dest_root: Path, *, existing: set[str]) ->
     return {"installed": installed, "count": len(installed), "dest": str(dest_root)}
 
 
+# 别家 agent 工具的技能也装在 home 下的固定位置：「扫描本机技能」逐个探测，
+# 找到即可勾选导入 SkySheep 复用（路径在调用时 expanduser，兼容 Windows/macOS/Linux）
+LOCAL_SKILL_SOURCES: list[tuple[str, str]] = [
+    ("Claude Code", "~/.claude/skills"),
+    ("agents", "~/.agents/skills"),
+    ("Codex", "~/.codex/skills"),
+]
+
+
+def scan_computer_skills(roots: list[tuple[str, Path]], existing: set[str]) -> list[dict]:
+    """只读扫描 (来源, 目录) 清单，返回可导入的技能候选（不动磁盘上的任何文件）。
+
+    同一技能目录（同一路径）只出现一次；解析不出名称的 SKILL.md 直接跳过。
+    候选带 installed 标记（与已装技能同名）供前端默认排除——真正的重名把关
+    仍由 install_from_dir 做，这里只负责预览。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for label, base in roots:
+        for p in _scan_skills_in_dir(Path(base)):
+            key = str(p.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            skill = _load_skill_from_dir(p, "global")
+            if skill is None:
+                continue
+            out.append({
+                "name": skill.name,
+                "description": skill.description,
+                "path": str(p),
+                "origin": label,
+                "installed": skill.name in existing,
+            })
+    return out
+
+
 def _safe_members(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     """过滤 zip 条目：挡绝对路径 / 上级目录穿越 / 符号链接 / 超量。"""
     members: list[zipfile.ZipInfo] = []

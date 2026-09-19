@@ -11,35 +11,61 @@ import json
 from skysheep import wintheme
 
 
-def test_window_background_follows_theme():
-    """窗口底色跟主题：默认白底在整页刷新时会露出来，必须等于 app.css 的 --bg。"""
+def test_window_background_follows_theme_per_theme():
+    """窗口底色逐主题精确取值（默认白底在整页刷新时会露出来）。"""
+    assert wintheme.window_background("paper") == "#E8DFC7"
+    assert wintheme.window_background("celadon") == "#DCE4DA"
+    assert wintheme.window_background("kaki") == "#EAD9BF"
+    assert wintheme.window_background("night") == "#171410"
+    assert wintheme.window_background("indigo") == "#12161F"
+    assert wintheme.window_background("pine") == "#101613"
+    # 旧版两档值映射到默认浅色 / 深色（纸墨 / 夜墨）
     assert wintheme.window_background("light") == "#E8DFC7"
-    assert wintheme.window_background("dark") == "#1D1A16"
+    assert wintheme.window_background("dark") == "#171410"
 
 
 def test_window_background_uses_current_mode_by_default():
-    wintheme.set_theme_mode("dark")
-    assert wintheme.window_background() == "#1D1A16"
-    wintheme.set_theme_mode("light")
+    wintheme.set_theme_mode("night")
+    assert wintheme.window_background() == "#171410"
+    wintheme.set_theme_mode("paper")
     assert wintheme.window_background() == "#E8DFC7"
 
 
-def test_read_ui_theme_explicit_modes(home):
+def test_theme_is_dark_by_family():
+    for key in ("night", "indigo", "pine", "dark"):
+        assert wintheme.theme_is_dark(key), key
+    for key in ("paper", "celadon", "kaki", "light"):
+        assert not wintheme.theme_is_dark(key), key
+
+
+def test_read_ui_theme_returns_theme_id(home):
     base = home / "home"
     base.mkdir(parents=True, exist_ok=True)
-    (base / "ui.json").write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
-    assert wintheme.read_ui_theme(base) == "dark"
+    (base / "ui.json").write_text(json.dumps({"theme": "kaki"}), encoding="utf-8")
+    assert wintheme.read_ui_theme(base) == "kaki"
+    # 旧版两档值分别映射纸墨 / 夜墨
     (base / "ui.json").write_text(json.dumps({"theme": "light"}), encoding="utf-8")
-    assert wintheme.read_ui_theme(base) == "light"
+    assert wintheme.read_ui_theme(base) == "paper"
+    (base / "ui.json").write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
+    assert wintheme.read_ui_theme(base) == "night"
 
 
-def test_read_ui_theme_falls_back_to_light_when_missing_or_broken(home):
-    """读不到/损坏一律按 light，绝不让窗口创建失败。"""
-    assert wintheme.read_ui_theme(home / "nope") == "light"
+def test_read_ui_theme_all_theme_ids(home):
+    """六套主题 id 直接命中，不再落进「跟随系统」兜底。"""
+    base = home / "home"
+    base.mkdir(parents=True, exist_ok=True)
+    for theme_id in ("paper", "celadon", "kaki", "night", "indigo", "pine"):
+        (base / "ui.json").write_text(json.dumps({"theme": theme_id}), encoding="utf-8")
+        assert wintheme.read_ui_theme(base) == theme_id
+
+
+def test_read_ui_theme_falls_back_to_paper_when_missing_or_broken(home):
+    """读不到/损坏一律按 paper 浅色，绝不让窗口创建失败、也不探注册表。"""
+    assert wintheme.read_ui_theme(home / "nope") == "paper"
     base = home / "home"
     base.mkdir(parents=True, exist_ok=True)
     (base / "ui.json").write_text("{ not json", encoding="utf-8")
-    assert wintheme.read_ui_theme(base) == "light"
+    assert wintheme.read_ui_theme(base) == "paper"
 
 
 def test_read_ui_theme_auto_resolves_via_system(home, monkeypatch):
@@ -48,9 +74,9 @@ def test_read_ui_theme_auto_resolves_via_system(home, monkeypatch):
     base.mkdir(parents=True, exist_ok=True)
     (base / "ui.json").write_text(json.dumps({"theme": "auto"}), encoding="utf-8")
     monkeypatch.setattr(wintheme, "_system_prefers_dark", lambda: True)
-    assert wintheme.read_ui_theme(base) == "dark"
+    assert wintheme.read_ui_theme(base) == "night"
     monkeypatch.setattr(wintheme, "_system_prefers_dark", lambda: False)
-    assert wintheme.read_ui_theme(base) == "light"
+    assert wintheme.read_ui_theme(base) == "paper"
 
 
 def test_register_window_and_refresh_now(monkeypatch):
@@ -63,12 +89,15 @@ def test_register_window_and_refresh_now(monkeypatch):
     class _FakeWindow:
         native = None  # 无原生句柄：apply/BackColor 路径都会静默跳过
 
-    monkeypatch.setattr(wintheme, "apply_caption_theme",
-                        lambda w, dark=False: painted.append(("caption", dark)) or True)
+    monkeypatch.setattr(
+        wintheme,
+        "apply_caption_theme",
+        lambda w: painted.append(wintheme.current_theme_mode()) or True,
+    )
     wintheme.register_window(_FakeWindow())
-    wintheme.set_theme_mode("dark")
+    wintheme.set_theme_mode("night")
     assert wintheme.refresh_now() is True
-    assert painted == [("caption", True)]
-    wintheme.set_theme_mode("light")
+    assert painted == ["night"]
+    wintheme.set_theme_mode("paper")
     assert wintheme.refresh_now() is True
-    assert painted == [("caption", True), ("caption", False)]
+    assert painted == ["night", "paper"]

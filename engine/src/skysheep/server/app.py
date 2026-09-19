@@ -39,6 +39,67 @@ def _client_is_local(client) -> bool:
     return client_origin(client) == "local"
 
 
+# ---- 远程客户端（局域网 / Tailscale，持有令牌）不可调用的方法 ----
+# 安全审查 2026-09 根因一：dispatch 里只有零星几个方法有本机门禁，其余几十个
+# 写接口只靠 WS Token 一层防护。这里集中收口：凡是「改配置、写凭据、启动
+# 本机程序、导出含密数据、切换全局安全姿态」的 RPC 一律本机专属。
+# 收紧类动作（trust.revoke / lan.disable / whitelist.remove 等）不在此表，
+# 远端仍可调用；聊天、会话、文件面板、任务/用量查看等常规遥控功能不受影响。
+LOCAL_ONLY_METHODS = frozenset({
+    # 模型服务配置（改 base_url/Key → 凭据外发面；probe 会把已存 Key 发往任填地址）
+    "config.add_provider", "config.save_provider", "config.delete_provider",
+    "config.restore_provider", "config.set_provider_enabled",
+    "config.add_provider_model", "config.remove_provider_model",
+    "config.probe_models",
+    # 联网搜索 / 画图 / 语音：改 endpoint + Key 复用 = 凭据外发
+    "websearch.save", "imagegen.save", "speech.save",
+    # 钩子命令不经权限门直接 cmd 执行
+    "hooks.save",
+    # 安全姿态开关（restrict_to_workdir / computer_control / browser_control / 自启）
+    "advanced.save",
+    # 全局记忆文件（持久注入 system prompt）
+    "memory.save",
+    # 设置包导出含明文 API Key；导入可覆盖全局配置
+    "settings.export", "settings.import",
+    # MCP：写入任意 command 保存即启动本地程序
+    "mcp.save_server", "mcp.import", "mcp.delete", "mcp.add_preset",
+    # 技能：正文直接进 system prompt
+    "skills.install", "skills.toggle", "skills.scope", "skills.delete",
+    # 定时任务：allowed_tools 可预授权 run_command 等危险工具
+    "cron.add", "cron.update", "cron.run_now",
+    # 网络暴露开关（放宽方向；disable 是收紧、不在表内）
+    "lan.enable", "remote.enable",
+    # 项目边界：切任意目录 / 删项目 / 改 AGENTS.md（持久 prompt 注入链）
+    "project.switch", "project.delete", "project.save_instructions",
+    # 整库恢复（覆盖全部项目的会话数据）
+    "session.restore_backup",
+    # 子代理定义（自定义 prompt 注入）
+    "subagent.save", "subagent.save_builtin", "subagent.save_custom",
+    "subagent.delete_custom",
+    # 其余写配置入口
+    "demo.enable", "ollama.enable", "app.export_diagnostics",
+})
+
+
+def _ws_origin_allowed(ws: WebSocket) -> bool:
+    """浏览器 WebSocket 握手必须来自应用自己的页面（Origin 与 Host 一致）。
+
+    安全审查 D5：/preview 里的项目文件与浏览器面板里嵌入的外部网页，脚本能
+    从本机回环发起 WS 连接（令牌守卫拦不住），等于拿到与本机界面同级的
+    调用权。但它们的 Origin 分别是 null（sandbox iframe）或外部地址，
+    与 Host 对不上——一律拒绝，切断这条链。
+    非浏览器客户端（测试/脚本）不带 Origin 头，不受影响。
+    """
+    origin = ws.headers.get("origin")
+    if not origin:
+        return True
+    host = ws.headers.get("host")
+    if not host:
+        return False
+    scheme = "https" if ws.url.scheme == "wss" else "http"
+    return origin.rstrip("/").lower() == f"{scheme}://{host}".lower()
+
+
 def _static_dir() -> Path:
     """打包后静态资源被解包到 sys._MEIPASS；开发态直接用源码目录。"""
     bundle = getattr(sys, "_MEIPASS", None)
@@ -240,12 +301,22 @@ def create_app(
             return HTMLResponse("只能预览工作目录内的文件", status_code=403)
         if not target.is_file():
             return HTMLResponse("文件不存在（或这是目录）", status_code=404)
-        return FileResponse(target)
+        # 安全审查 D5：预览的文件与主界面同源，脚本天然能带凭据调同源接口。
+        # iframe 的 sandbox 属性是主防线（见 index.html），这里再给响应本身
+        # 加 CSP sandbox：即使被直接打开（不经 iframe）也是隔离环境。
+        return FileResponse(target, headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox allow-scripts allow-forms",
+        })
 
     # ---- 方法分发 ----
 
     async def dispatch(method: str, params: dict, emit, local: bool = True) -> dict:
         """local=False 表示请求来自局域网远端：降低防护的开关一律拒绝。"""
+        if not local and method in LOCAL_ONLY_METHODS:
+            # 安全审查根因一：配置/管理类 RPC 集中收口，与 permission.set_mode /
+            # trust.grant 同一姿态——手机遥控可以聊天，但不能改引擎的安全配置。
+            raise RuntimeError("该操作涉及配置或本机权限，只能在桌面端本机执行")
         if method == "boot":
             return await backend.snapshot()
         if method == "chat.send":
@@ -255,6 +326,10 @@ def create_app(
             if not text and not (isinstance(images, list) and images) and not regenerate:
                 raise RuntimeError("empty text")
             members = params.get("members")
+            raw_refs = params.get("refs")
+            # 圆桌本轮覆盖值：只在客户端显式传了才覆盖 config（None=用配置值）
+            raw_debate = params.get("debate_rounds")
+            raw_chair = params.get("chair_answers")
             return await backend.send(
                 text,
                 emit,
@@ -266,6 +341,13 @@ def create_app(
                 wants_title=bool(params.get("wants_title", False)),
                 regenerate=bool(params.get("regenerate", False)),
                 compare=bool(params.get("compare", False)),
+                refs=[str(r) for r in raw_refs] if isinstance(raw_refs, list) else None,
+                debate_rounds=(
+                    max(0, min(2, int(raw_debate)))
+                    if isinstance(raw_debate, int) and not isinstance(raw_debate, bool)
+                    else None
+                ),
+                chair_answers=raw_chair if isinstance(raw_chair, bool) else None,
             )
         if method == "permission.respond":
             return {
@@ -313,9 +395,16 @@ def create_app(
         if method == "chat.compact":
             return await backend.compact_now()
         if method == "tasks.list":
-            return await backend.tasks_list()
+            # 远程客户端只能看自己正在交互的会话的子代理任务（安全审查 B13：
+            # 任务详情含 prompt/result，本机任务簿保持全局视图不变）
+            only = backend.session.id if (not local and backend.session) else None
+            return await backend.tasks_list(params, session_id=only)
+        if method == "tasks.get":
+            only = backend.session.id if (not local and backend.session) else None
+            return await backend.tasks_get(params, session_id=only)
         if method == "tasks.cancel_all":
-            return await backend.tasks_cancel_all()
+            only = backend.session.id if (not local and backend.session) else None
+            return await backend.tasks_cancel_all(session_id=only)
         if method == "usage.stats":
             return await backend.usage_stats(params)
         if method == "fs.read":
@@ -349,16 +438,27 @@ def create_app(
             return await backend.restore_checkpoint(str(params.get("id", "")))
         if method == "checkpoint.diff":
             return await backend.checkpoint_diff(str(params.get("id", "")))
-        if method == "term.run":
-            # 终端面板的命令是用户手敲的（不进权限门，见 TerminalManager 注释），
+        if method in ("term.spawn", "term.input", "term.resize"):
+            # 终端是常驻 shell（用户手敲命令，不进权限门，见 TerminalManager 注释），
             # 所以它只在“用户就在这台机器面前”时成立。局域网模式下持有令牌的设备
             # 也能连 WS，若允许它调用这里，令牌就等于 shell 访问权限。
             if not local:
                 raise RuntimeError("终端面板只能在本机上使用")
-            return await backend.term_run(str(params.get("command", "")), emit)
+            tid = str(params.get("term_id", "") or "")
+            rows = int(params.get("rows", 24) or 24)
+            cols = int(params.get("cols", 100) or 100)
+            if method == "term.spawn":
+                return backend.term_spawn(tid, rows, cols)
+            if method == "term.input":
+                return backend.term_input(tid, str(params.get("data", "")), rows, cols)
+            return backend.term_resize(tid, rows, cols)
         if method == "term.stop":
-            # 停止是收紧动作，远端也放行（否则远程发起的命令停不下来）
-            return backend.term_stop()
+            # Ctrl+C 是收紧动作，远端也放行（否则远程发起的程序停不下来）；
+            # 不带 term_id 时发给所有终端标签的前台进程
+            return backend.term_stop(str(params.get("term_id", "") or ""))
+        if method == "term.close":
+            # 关闭终端标签：结束该标签的 shell 并丢弃执行槽
+            return backend.term_close(str(params.get("term_id", "") or ""))
         if method == "chat.aux":
             text = str(params.get("text", ""))
             return await backend.chat_aux(text, emit)
@@ -366,6 +466,10 @@ def create_app(
             return backend.aux_clear()
         if method == "session.search":
             scope = "all" if str(params.get("scope", "project")) == "all" else "project"
+            if scope == "all" and not local:
+                # 跨项目搜索是有意的本机产品功能，但远程客户端不该能借它枚举
+                # 其他项目的会话 id/标题/片段（安全审查：scope=all 是 B 族的放大器）
+                raise RuntimeError("跨项目搜索只能在桌面端本机使用")
             return {
                 "query": str(params.get("query", "")),
                 "scope": scope,
@@ -376,13 +480,17 @@ def create_app(
         if method == "session.list":
             sessions = await backend.store.list_sessions(backend.project.id)
             empty_count = await backend.store.count_empty_sessions(backend.project.id)
+            archived_count = await backend.store.count_archived_sessions(backend.project.id)
             return {
                 "empty_count": empty_count,
+                "archived_count": archived_count,
                 "sessions": [
                     {
                         "id": s.id, "title": s.title, "updated_at": s.updated_at,
                         "pinned": bool(s.pinned), "project_id": s.project_id,
                         "summary": s.summary,
+                        "tags": [t for t in str(s.tags or "").split(",") if t],
+                        "archived": bool(s.archived),
                     }
                     for s in sessions[:50]
                 ],
@@ -413,16 +521,31 @@ def create_app(
             return await backend.pin_session(
                 str(params.get("id", "")), bool(params.get("pinned", False))
             )
+        if method == "session.archive":
+            return await backend.archive_session(
+                str(params.get("id", "")), bool(params.get("archived", False))
+            )
+        if method == "session.list_archived":
+            return await backend.list_archived_sessions()
         if method == "session.move":
             pid = params.get("project_id")
             return await backend.move_session(
                 str(params.get("id", "")), int(pid) if pid is not None else None
             )
+        if method == "session.tags":
+            return await backend.set_session_tags(
+                str(params.get("id", "")), params.get("tags") or []
+            )
+        if method == "session.tags_list":
+            return {"tags": await backend.store.list_all_tags(backend.project.id)}
         if method == "project.list":
             projects = await backend.store.list_projects()
+            # 安全审查 C5：项目根目录的绝对路径是 B/C 族攻击的目标枚举器，
+            # 远程客户端只需要名称与当前标记（切换/删除本已限本机）
             return {"projects": [
                 {
-                    "id": p.id, "name": p.name, "root_path": p.root_path,
+                    "id": p.id, "name": p.name,
+                    "root_path": p.root_path if local else "",
                     "is_current": p.id == backend.project.id,
                 }
                 for p in projects
@@ -468,6 +591,10 @@ def create_app(
             return backend.advanced_settings()
         if method == "advanced.save":
             return await backend.save_advanced_settings(params)
+        if method == "hooks.get":
+            return backend.hooks_settings()
+        if method == "hooks.save":
+            return await backend.save_hooks_settings(params)
         if method == "app.open_path":
             return backend.open_path(str(params.get("kind", "")))
         if method == "app.open_external":
@@ -483,33 +610,93 @@ def create_app(
         if method == "fs.open":
             return await backend.open_workspace_file(str(params.get("path", "")))
         if method == "session.backups":
-            return backend.list_session_backups()
+            # 安全审查 C4：备份列表带绝对路径，远程客户端只看名称/时间
+            # （恢复动作本已限本机，列表仅供查看）
+            out = backend.list_session_backups()
+            if not local:
+                out = {
+                    **out,
+                    "dir": "",
+                    "backups": [
+                        {**b, "path": ""} for b in out.get("backups", [])
+                    ],
+                }
+            return out
         if method == "session.restore_backup":
             return await backend.restore_session_backup(str(params.get("name", "")))
         if method == "websearch.get":
             return await backend.websearch_detail()
         if method == "websearch.save":
             return await backend.websearch_save(params)
+        if method == "roundtable.get":
+            return backend.roundtable_detail()
+        if method == "roundtable.save":
+            return await backend.roundtable_save(params)
         if method == "imagegen.get":
             return await backend.imagegen_detail()
         if method == "imagegen.save":
             return await backend.imagegen_save(params)
+        if method == "speech.get":
+            return await backend.speech_detail()
+        if method == "speech.save":
+            return await backend.speech_save(params)
+        if method == "speech.transcribe":
+            # 录音转文字：只读型能力（把音频交给已配置的服务），不弹确认；
+            # 但它会向外发请求，局域网远端不给用（本地终端场景）
+            if not local:
+                raise RuntimeError("语音输入只能在本机界面上使用")
+            return await backend.speech_transcribe(
+                str(params.get("audio", "")), str(params.get("mime", ""))
+            )
         if method == "settings.export":
             return await backend.settings_export()
         if method == "settings.import":
             return await backend.settings_import(params)
         if method == "lan.status":
-            return await backend.lan_status()
+            # 令牌就是远程访问凭据本身：只给本机界面（安全审查 A9）
+            return await backend.lan_status(include_token=local)
         if method == "lan.enable":
             return await backend.lan_enable(params)
         if method == "lan.disable":
             return await backend.lan_disable()
         if method == "remote.status":
-            return await backend.remote_status()
+            return await backend.remote_status(include_token=local)
         if method == "remote.enable":
             return await backend.remote_enable(params)
         if method == "remote.disable":
             return await backend.remote_disable()
+        # 聊天软件渠道：写配置/启停属降低防护的操作，与开局域网同一姿态——仅本机可改。
+        # 远端（局域网/ tailnet）能看状态，但不能改，否则一个被扫码链接挟持的手机
+        # 就能把 Agent 接给任意聊天账号。
+        if method == "channel.status":
+            return await backend.channel_status()
+        if method in ("channel.save", "channel.enable", "channel.disable",
+                      "channel.set_timeout", "channel.test"):
+            if not local:
+                raise RuntimeError("聊天机器人渠道的配置只能在桌面端本机修改")
+            if method == "channel.save":
+                return await backend.channel_save(params)
+            if method == "channel.enable":
+                return await backend.channel_enable(params)
+            if method == "channel.disable":
+                return await backend.channel_disable(params)
+            if method == "channel.set_timeout":
+                return await backend.channel_set_timeout(params)
+            return await backend.channel_test(params)
+        # 微信扫码登录：生成二维码 / 轮询确认 / 退出登录。扫码得到的是能操控 Agent 的凭据，
+        # 与启用渠道同一敏感度，因此同样只允许本机操作。
+        if method == "channel.weixin_login_start":
+            if not local:
+                raise RuntimeError("微信扫码登录只能在桌面端本机完成")
+            return await backend.channel_weixin_login_start()
+        if method == "channel.weixin_login_poll":
+            if not local:
+                raise RuntimeError("微信扫码登录只能在桌面端本机完成")
+            return await backend.channel_weixin_login_poll(params)
+        if method == "channel.weixin_logout":
+            if not local:
+                raise RuntimeError("微信登录状态只能在桌面端本机修改")
+            return await backend.channel_weixin_logout()
         if method == "subagent.get":
             return backend.subagents_detail()
         if method == "subagent.save":
@@ -630,10 +817,8 @@ def create_app(
                 api_key=str(params.get("api_key", "")),
             )
         if method == "whitelist.remove":
-            rule_id = int(params.get("id", 0))
-            await backend.store.remove_rule(rule_id)
-            await backend.gate.load_project_rules()
-            return {"removed": rule_id}
+            # 归属校验在 backend：凭枚举到的 rule_id 不能删别的项目的规则（B11）
+            return await backend.remove_whitelist_rule(int(params.get("id", 0)))
         if method == "whitelist.add":
             # 添加规则 = 放行更多操作（降防护），只能在本机界面上操作；
             # 与 permission.set_mode / trust.grant 的约束一致
@@ -672,6 +857,8 @@ def create_app(
             )
         if method == "skills.body":
             return backend.skill_body(str(params.get("name", "")))
+        if method == "skills.scan_local":
+            return await backend.scan_local_skills()
         if method == "skills.install":
             return await backend.install_skill(
                 str(params.get("source", "")), str(params.get("scope", "global"))
@@ -692,6 +879,7 @@ def create_app(
                 args=params.get("args") or None,
                 url=str(params.get("url", "")),
                 env=params.get("env") or None,
+                headers=params.get("headers") or None,
                 readonly=bool(params.get("readonly", False)),
                 scope=str(params.get("scope", "global")),
             )
@@ -735,6 +923,12 @@ def create_app(
             await ws.accept()
             await ws.close(code=4403)
             return
+        # 浏览器握手的 Origin 必须是本应用自己的页面（安全审查 D5）：被 sandbox
+        # 隔离的预览 iframe（Origin: null）与浏览器面板里嵌入的外部网页都过不了这关。
+        if not _ws_origin_allowed(ws):
+            await ws.accept()
+            await ws.close(code=4403)
+            return
         # 本机（回环）永远免令牌，与 HTTP 守卫同一规则；tailnet 来源必须验令牌
         token = cfg.server.token if (
             cfg is not None and origin != "local" and (lan or (ts and origin == "tailscale"))
@@ -754,12 +948,26 @@ def create_app(
         lock = asyncio.Lock()
         # 客户端来源决定部分方法是否可用（远端不允许切换降低防护的开关）
         client_is_local = _client_is_local(ws.client)
+        # 该连接正在交互的会话（activate/resume/chat.send 时更新）：远程连接的
+        # 子代理直播 / 任务终态事件只推给它正在看的会话（安全审查 B15），
+        # 本机前端不过滤（多标签由前端自行路由）。
+        conn_state = {"session": None}
 
         async def send(obj: dict) -> None:
             async with lock:
                 await ws.send_text(json.dumps(obj, ensure_ascii=False, default=str))
 
         async def emit(ev: dict) -> None:
+            if not client_is_local:
+                k = ev.get("kind")
+                if k == "turn_started" and ev.get("session_id"):
+                    # 轮次事件只发给发起连接：据此自动绑定（兼容首条消息懒建会话、
+                    # 客户端还没拿到 session_id 的情况）
+                    conn_state["session"] = ev["session_id"]
+                elif k in ("subagent_event", "task_finished"):
+                    sid = ev.get("session_id") or ""
+                    if not sid or conn_state["session"] != sid:
+                        return  # 不是这个客户端正在交互的会话：不推送
             await send({"event": ev.get("kind", ""), "data": ev})
 
         backend.ws_emitters.append(emit)
@@ -774,9 +982,22 @@ def create_app(
                 method = str(msg.get("method", ""))
                 params = msg.get("params") or {}
 
+                # 消息发出时先登记目标会话（后续广播事件据此隔离）
+                if method == "chat.send" and params.get("session_id"):
+                    conn_state["session"] = str(params["session_id"])
+
                 async def process(mid=mid, method=method, params=params):
                     try:
                         result = await dispatch(method, params, emit, local=client_is_local)
+                        # 跟踪连接当前交互的会话（B15 的事件隔离用）
+                        if method in ("session.new", "session.activate", "session.resume",
+                                      "session.fork", "session.truncate", "session.delete"):
+                            sid = (result or {}).get("id")
+                            if isinstance(sid, str) and sid:
+                                conn_state["session"] = sid
+                        elif method == "project.switch":
+                            sess = ((result or {}).get("session") or {})
+                            conn_state["session"] = sess.get("id") if isinstance(sess, dict) else None
                         await send({"id": mid, "ok": True, "result": result})
                     except Exception as e:
                         await send({"id": mid, "ok": False, "error": str(e)})

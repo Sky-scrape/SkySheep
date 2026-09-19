@@ -8,7 +8,8 @@
     DWMWA_TEXT_COLOR(36)    标题文字色
 
 更老的系统（Win10 等）调用返回非 0 错误码——就地忽略、保留系统默认标题栏，
-绝不影响启动。颜色取自前端 app.css 的 :root 变量，改主题时两处要一起改。
+绝不影响启动。颜色逐主题取自前端 app.css 的 --bg / --text / --ink-line
+（见 THEME_PALETTE），改主题色时两处要一起改。
 """
 
 from __future__ import annotations
@@ -18,15 +19,25 @@ import os
 import sys
 from pathlib import Path
 
-PAPER_BG = "E8DFC7"  # app.css --bg 桌面深纸（标题栏与界面融为一体）
-INK = "1D1A16"       # app.css --ink-line 硬墨描边（标题文字/边框）
-
-# 夜墨主题（app.css [data-theme="dark"] 对应值）：深底浅字
-DARK_BG = "1D1A16"
-DARK_TEXT = "F4ECD8"
+# 六套主题（app.js THEMES）的标题栏 / 窗口底色 / 标题文字 / 边线，逐主题取自
+# app.css 的 --bg / --text / --ink-line（改主题色时两处要一起改）。
+# 标题栏与页面底色同源，深浅两族都不再是近似色。
+THEME_PALETTE = {
+    "paper":   {"bg": "E8DFC7", "text": "1D1A16", "line": "1D1A16"},
+    "celadon": {"bg": "DCE4DA", "text": "1C221D", "line": "1C221D"},
+    "kaki":    {"bg": "EAD9BF", "text": "2B1D12", "line": "2B1D12"},
+    "night":   {"bg": "171410", "text": "F4ECD8", "line": "0E0C09"},
+    "indigo":  {"bg": "12161F", "text": "E3E8F2", "line": "0A0D13"},
+    "pine":    {"bg": "101613", "text": "E8EDE6", "line": "080D0A"},
+}
+# 旧版两档值与六套主题同义；ui.json 存的是主题 id；
+# "auto"（存为 null）与未知值跟随系统深浅（深 → night / 浅 → paper）
+LEGACY_MODES = {"light": "paper", "dark": "night"}
+LIGHT_THEME_IDS = {"paper", "celadon", "kaki", "light"}
+DARK_THEME_IDS = {"night", "indigo", "pine", "dark"}
 
 # 前端主题切换的回写点：apply_theme WS 方法设置，桌面壳的看板线程轮询
-_theme_mode = "light"  # "light" | "dark"
+_theme_key = "paper"  # 六套主题 id 之一
 
 # 桌面壳注册的主窗口：apply_theme 切主题时 refresh_now() 立即重刷标题栏，
 # 不必等看板线程的下一秒轮询——否则页面先变色、标题栏晚一拍，肉眼可见。
@@ -34,12 +45,21 @@ _registered_window = None
 
 
 def set_theme_mode(mode: str) -> None:
-    global _theme_mode
-    _theme_mode = "dark" if mode == "dark" else "light"
+    """设置当前主题：接受主题 id，也兼容旧版 light/dark 两档值；未知值回退 paper。"""
+    global _theme_key
+    key = str(mode or "").strip().lower()
+    key = LEGACY_MODES.get(key, key)
+    _theme_key = key if key in THEME_PALETTE else "paper"
 
 
 def current_theme_mode() -> str:
-    return _theme_mode
+    """当前主题 id（paper / celadon / … / pine）。"""
+    return _theme_key
+
+
+def theme_is_dark(key: str | None = None) -> bool:
+    """主题是否深色系；不传参时看当前主题。"""
+    return (key or _theme_key) in DARK_THEME_IDS
 
 
 def register_window(window) -> None:
@@ -59,9 +79,8 @@ def refresh_now() -> bool:
     window = _registered_window
     if window is None:
         return False
-    dark = _theme_mode == "dark"
     try:
-        apply_caption_theme(window, dark=dark)
+        apply_caption_theme(window)
     except Exception:
         pass
     try:
@@ -70,7 +89,7 @@ def refresh_now() -> bool:
         native = getattr(window, "native", None)
         if native is not None:
             native.BackColor = ColorTranslator.FromHtml(window_background())
-            apply_window_icon(native, dark=dark)
+            apply_window_icon(native, dark=theme_is_dark())
     except Exception:
         pass
     return True
@@ -131,21 +150,26 @@ def _static_dir() -> Path:
 
 
 def window_background(theme: str | None = None) -> str:
-    """pywebview 窗口底色（#RRGGBB），跟当前主题走。
+    """pywebview 窗口底色（#RRGGBB），跟当前主题走（可传主题 id 或旧版 light/dark）。
 
     pywebview 默认 background_color="#FFFFFF"，而它又把 WebView2 的
     DefaultBackgroundColor 设成透明——页面任何还没画出来的瞬间（首帧、
     整页刷新、切换项目）露出的是这层纯白。夜墨主题下就是一次刺眼白闪，
     所以这里让窗口底色始终等于 app.css 的 --bg。
     """
-    dark = (theme or _theme_mode) == "dark"
-    return "#" + (DARK_BG if dark else PAPER_BG)
+    key = str(theme or "").strip().lower() if theme else ""
+    key = LEGACY_MODES.get(key, key)
+    if key not in THEME_PALETTE:
+        key = _theme_key
+    return "#" + THEME_PALETTE[key]["bg"]
 
 
 def read_ui_theme(home: Path | None = None) -> str:
-    """从 ui.json 读主题偏好（light/dark），用于窗口创建前就定好底色。
+    """从 ui.json 读主题偏好，返回主题 id（paper / celadon / … / pine）。
 
-    启动时窗口比服务先建，拿不到前端状态，只能直接读文件；读失败按 light。
+    启动时窗口比服务先建，拿不到前端状态，只能直接读文件；
+    auto（存为 null）与未知值跟随系统深浅（深 → night / 浅 → paper），
+    文件缺失/损坏按 paper（不依赖注册表，探不到就当浅色）。
     """
     import json
 
@@ -156,16 +180,15 @@ def read_ui_theme(home: Path | None = None) -> str:
     try:
         prefs = json.loads((base / "ui.json").read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        return "light"
+        return "paper"
     if not isinstance(prefs, dict):
-        return "light"
-    # auto 跟随系统：Windows 下用注册表判断，拿不到就按 light
-    mode = prefs.get("theme")
-    if mode == "dark":
-        return "dark"
-    if mode == "light":
-        return "light"
-    return "dark" if _system_prefers_dark() else "light"
+        return "paper"
+    # auto（存为 null）与未知值：跟随系统深浅（Windows 下看注册表）
+    mode = str(prefs.get("theme") or "").strip().lower()
+    mode = LEGACY_MODES.get(mode, mode)
+    if mode in THEME_PALETTE:
+        return mode
+    return "night" if _system_prefers_dark() else "paper"
 
 
 def _system_prefers_dark() -> bool:
@@ -186,6 +209,7 @@ def _system_prefers_dark() -> bool:
         return False
 
 
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_BORDER_COLOR = 34
 DWMWA_CAPTION_COLOR = 35
 DWMWA_TEXT_COLOR = 36
@@ -215,8 +239,8 @@ def _hwnd_of(window) -> int | None:
     return int(handle)
 
 
-def apply_caption_theme(window, dark: bool = False) -> bool:
-    """把窗口标题栏底色/文字/边框染成主题色；全部成功返回 True。"""
+def apply_caption_theme(window) -> bool:
+    """把窗口标题栏底色/文字/边框染成当前主题色；全部成功返回 True。"""
     if sys.platform != "win32":
         return False
     try:
@@ -225,14 +249,17 @@ def apply_caption_theme(window, dark: bool = False) -> bool:
         hwnd = _hwnd_of(window)
         if not hwnd:
             return False
-        bg = DARK_BG if dark else PAPER_BG
-        text = DARK_TEXT if dark else INK
+        pal = THEME_PALETTE[_theme_key]
         dwm = ctypes.windll.dwmapi
         ok = True
         for attr, color in (
-            (DWMWA_CAPTION_COLOR, _colorref(bg)),
-            (DWMWA_TEXT_COLOR, _colorref(text)),
-            (DWMWA_BORDER_COLOR, _colorref(INK)),
+            (DWMWA_CAPTION_COLOR, _colorref(pal["bg"])),
+            (DWMWA_TEXT_COLOR, _colorref(pal["text"])),
+            (DWMWA_BORDER_COLOR, _colorref(pal["line"])),
+            # pywebview 构造窗体时按系统深色模式设了沉浸式深色标题栏（20=1，
+            # 深色系统下标题栏走系统黑）。我们自管颜色，必须显式关掉它：
+            # 否则窗口最大化/还原等 DWM 重绘场景会把标题栏画回系统黑。
+            (DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.c_uint(0)),
         ):
             if dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(color), 4) != 0:
                 ok = False  # 老系统不支持该属性 → 保留系统默认
@@ -245,9 +272,54 @@ def hook_caption_theme(window) -> None:
     """窗口显示后应用标题栏配色（shown 事件时原生句柄已创建）；失败静默。"""
 
     def _on_shown(*_args, **_kwargs) -> None:
+        # 按窗口创建前就已解析的主题着色，深色主题用户不会先闪一下浅色标题栏
         apply_caption_theme(window)
 
     try:
         window.events.shown += _on_shown
     except Exception:
         pass
+
+
+_microphone_hooked = False
+
+
+def allow_microphone(window) -> None:
+    """放行 WebView2 里的麦克风权限（语音输入用）。
+
+    WebView2 对 getUserMedia 默认静默不响应（不弹窗也不放行），必须挂
+    CoreWebView2.PermissionRequested 把 Microphone 请求置为 Allow。
+    挂载动作必须发生在 UI 线程——钩在 pywebview 的 EdgeChrome.on_webview_ready
+    上（页面就绪回调本来就在 UI 线程跑），只挂一次。失败静默：语音输入不可用时
+    前端会给出「麦克风不可用」的提示，不影响应用其它功能。
+    """
+    global _microphone_hooked
+    if _microphone_hooked:
+        return
+    try:
+        from Microsoft.Web.WebView2.Core import (  # noqa: PLC0415
+            CoreWebView2PermissionState,
+        )
+        from webview.platforms import edgechromium  # noqa: PLC0415
+    except Exception:
+        return
+
+    def _on_permission(sender, args) -> None:
+        try:
+            if str(args.PermissionKind) == "Microphone":
+                args.State = CoreWebView2PermissionState.Allow
+        except Exception:
+            pass
+
+    original = edgechromium.EdgeChrome.on_webview_ready
+
+    def patched(self, sender, args):
+        outcome = original(self, sender, args)
+        try:
+            sender.CoreWebView2.PermissionRequested += _on_permission
+        except Exception:
+            pass
+        return outcome
+
+    edgechromium.EdgeChrome.on_webview_ready = patched
+    _microphone_hooked = True

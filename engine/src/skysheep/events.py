@@ -67,6 +67,20 @@ class ToolCallFinished(Event):
     duration_ms: int = 0
 
 
+class TaskEstimate(Event):
+    """接手任务时的耗时预估（core/estimate.py：启发式 + 历史实测校准）。
+
+    先于本轮任何输出事件到达；前端显示「预计 X~Y 分钟」并在运行中对照
+    已用时。basis 是人类可读的预估依据（悬停可见）。
+    """
+
+    kind: Literal["task_estimate"] = "task_estimate"
+    min_seconds: int = 0
+    max_seconds: int = 0
+    level: str = "normal"  # trivial / light / normal / moderate / heavy / major
+    basis: str = ""
+
+
 class TodoUpdated(Event):
     """Agent 的任务清单发生变化（todo_write 工具）。"""
 
@@ -146,6 +160,7 @@ class RoundtableStarted(Event):
 
     kind: Literal["roundtable_started"] = "roundtable_started"
     members: list[dict] = Field(default_factory=list)  # [{index, provider, model}]
+    rounds: int = 1  # 总轮数（1=只独立作答；2=含一轮辩论修订）
 
 
 class RoundtableMemberDelta(Event):
@@ -154,15 +169,22 @@ class RoundtableMemberDelta(Event):
     kind: Literal["roundtable_member_delta"] = "roundtable_member_delta"
     member_index: int = 0
     text: str = ""
+    round: int = 0  # 0=独立作答轮；>=1=辩论修订轮（前端据此重置卡片文本）
 
 
 class RoundtableMemberFinished(Event):
-    """圆桌成员作答结束：status=done 时 output_tokens 有效，error 时携带错误摘要。"""
+    """圆桌成员作答结束：status=done 时 output_tokens 有效，error 时携带错误摘要。
+
+    skipped=True：辩论修订轮里该成员草稿已收敛（上一轮没改动）而跳过了修订，
+    本轮用量为 0；前端据此把卡片标为「已收敛」并完成本轮结算。
+    """
 
     kind: Literal["roundtable_member_finished"] = "roundtable_member_finished"
     member_index: int = 0
     status: str = "done"  # done | error
     error: str = ""
+    round: int = 0
+    skipped: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
 
@@ -178,6 +200,7 @@ AgentEvent = (
     | PermissionResolved
     | Usage
     | TodoUpdated
+    | TaskEstimate
     | CompactionEvent
     | TurnFinished
     | ErrorEvent

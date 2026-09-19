@@ -44,7 +44,7 @@ def normalize_server(raw: dict) -> MCPServerConfig:
     """把一段用户给的 JSON（或表单字段）变成校验过的 MCPServerConfig。"""
     if not isinstance(raw, dict):
         raise MCPInstallError("服务定义必须是一个 JSON 对象")
-    known = {"command", "args", "env", "url", "readonly"}
+    known = {"command", "args", "env", "url", "headers", "readonly"}
     section = {k: v for k, v in raw.items() if k in known}
     if not section:
         raise MCPInstallError(
@@ -65,6 +65,14 @@ def normalize_server(raw: dict) -> MCPServerConfig:
         isinstance(k, str) and isinstance(v, str) for k, v in cfg.env.items()
     ):
         raise MCPInstallError("env 必须是「字符串→字符串」的对象")
+    if cfg.headers and not all(
+        isinstance(k, str) and isinstance(v, str) and k.strip()
+        for k, v in cfg.headers.items()
+    ):
+        raise MCPInstallError(
+            "headers 必须是「字符串→字符串」的对象，例如 "
+            '{"Authorization": "Bearer ..."}'
+        )
     return cfg
 
 

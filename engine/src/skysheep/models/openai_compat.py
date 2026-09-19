@@ -100,16 +100,19 @@ class OpenAICompatProvider(Provider):
         self._client = client or AsyncOpenAI(**kw)
 
     async def stream(
-        self, messages: list[Message], tool_schemas: list[dict]
+        self, messages: list[Message], tool_schemas: list[dict],
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         params: dict = {
             "model": self.model,
             "messages": to_openai_messages(messages),
             "stream": True,
         }
-        # 思考强度：auto 不传（沿用服务默认），其余档位透传（OpenAI/兼容网关通用参数）
-        if self.supports_reasoning and self.reasoning_effort != "auto":
-            params["reasoning_effort"] = self.reasoning_effort
+        # 思考强度：auto 不传（沿用服务默认），其余档位透传（OpenAI/兼容网关通用参数）；
+        # effort 覆盖（自动档实时估档，见 core/effort.py）优先于自身档位
+        eff = effort or self.reasoning_effort
+        if self.supports_reasoning and eff != "auto":
+            params["reasoning_effort"] = eff
         # 采样温度：只有用户在服务设置里填了才传，否则完全交给服务默认
         if self.temperature is not None:
             params["temperature"] = self.temperature
@@ -120,12 +123,20 @@ class OpenAICompatProvider(Provider):
         try:
             stream = await self._client.chat.completions.create(**params)
             tool_acc: dict[int, dict] = {}
-            in_tokens = out_tokens = 0
+            in_tokens = out_tokens = cached_tokens = 0
             stop = "end_turn"
             async for chunk in stream:
                 if chunk.usage:
                     in_tokens = chunk.usage.prompt_tokens or in_tokens
                     out_tokens = chunk.usage.completion_tokens or out_tokens
+                    # 缓存命中：OpenAI 系走 prompt_tokens_details.cached_tokens，
+                    # DeepSeek 系走 prompt_cache_hit_tokens；都没有说明该服务不上报
+                    det = getattr(chunk.usage, "prompt_tokens_details", None)
+                    hit = getattr(det, "cached_tokens", None) if det else None
+                    if hit is None:
+                        hit = getattr(chunk.usage, "prompt_cache_hit_tokens", None)
+                    if hit:
+                        cached_tokens = hit
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
@@ -160,6 +171,7 @@ class OpenAICompatProvider(Provider):
                 stop_reason=stop if tool_acc or stop == "end_turn" else "end_turn",
                 input_tokens=in_tokens,
                 output_tokens=out_tokens,
+                cached_tokens=cached_tokens,
             )
         except ProviderError:
             raise

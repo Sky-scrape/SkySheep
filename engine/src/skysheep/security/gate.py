@@ -312,20 +312,15 @@ class PermissionGate:
             )
         return WhitelistRule(tool=tool.name, kind="always")
 
-    def _write_target_inside_workdir(self, tool: Tool, input_dict: dict) -> bool:
-        """「自动允许写入」档的适用范围判断：只放行能确认落在工作目录内的写入。
-
-        - 工具声明了 write_path_arg（写目标就是 args 里的 path 字段）时才参与判断；
-        - 连工作目录都不知道、路径缺失、路径解析失败、路径在工作目录外：都回退确认。
-        - 带 ``path`` 但留空且工具会用默认落点（如 generate_image 落在 images/）时才放行。
-        """
-        if self.working_dir is None or not getattr(tool, "write_path_arg", False):
+    def _path_inside_workdir(self, raw: str) -> bool:
+        """单个路径参数是否确实落在工作目录内（解析后判定，拦不住的现象交给工具层）。"""
+        if self.working_dir is None:
             return False
-        raw = str(input_dict.get("path", "") or "").strip()
+        raw = str(raw or "").strip()
         if raw.startswith("@"):
             raw = raw[1:]
         if not raw:
-            return tool.name == "generate_image"  # 空路径 = 落到工作目录内的 images/
+            return False
         try:
             target = Path(raw)
             if not target.is_absolute():
@@ -333,6 +328,29 @@ class PermissionGate:
             target.resolve().relative_to(self.working_dir)
         except (OSError, ValueError):
             return False
+        return True
+
+    def _write_target_inside_workdir(self, tool: Tool, input_dict: dict) -> bool:
+        """「自动允许写入」档的适用范围判断：只放行能确认落在工作目录内的写入。
+
+        - 工具声明了 write_path_arg 时才参与判断；
+        - 写目标字段由 write_target_arg 指定（默认 path；move_file 是 destination）；
+        - guard_path_args 列出的字段（如 move_file 的 source）也必须落在工作目录内——
+          否则「把工作目录里的文件移出去」会被当成目录内写入面自动放行；
+        - 连工作目录都不知道、路径缺失、路径解析失败、路径在工作目录外：都回退确认；
+        - 带 path 但留空且工具会用默认落点（如 generate_image 落在 images/）时才放行。
+        """
+        if self.working_dir is None or not getattr(tool, "write_path_arg", False):
+            return False
+        field = getattr(tool, "write_target_arg", "path") or "path"
+        raw = str(input_dict.get(field, "") or "").strip()
+        if not raw:
+            return tool.name == "generate_image"  # 空路径 = 落到工作目录内的 images/
+        if not self._path_inside_workdir(raw):
+            return False
+        for extra in getattr(tool, "guard_path_args", ()) or ():
+            if not self._path_inside_workdir(str(input_dict.get(extra, "") or "")):
+                return False
         return True
 
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
@@ -369,7 +387,11 @@ class PermissionGate:
     DIFF_PREVIEW_MAX_LINES = 160
 
     def _preview_diff(self, tool: Tool, input_dict: dict) -> str:
-        if not self.working_dir or tool.name not in ("write_file", "edit_file", "write_document"):
+        if not self.working_dir:
+            return ""
+        if tool.name in ("move_file", "delete_file"):
+            return self._preview_fs_impact(tool, input_dict)
+        if tool.name not in ("write_file", "edit_file", "write_document"):
             return ""
         raw = str(input_dict.get("path", "") or "")
         if not raw:
@@ -382,8 +404,8 @@ class PermissionGate:
         except (OSError, ValueError):
             return ""  # 工作目录之外：不给预览（工具层还会拦）
         try:
-            old = target.read_text(encoding="utf-8") if target.is_file() else ""
-        except (OSError, UnicodeDecodeError):
+            old = self._read_text_for_preview(target)
+        except OSError:
             return ""
         if tool.name == "write_file":
             new = str(input_dict.get("content", "") or "")
@@ -391,10 +413,6 @@ class PermissionGate:
             # 确认弹窗展示源内容（Markdown/JSON）预览；.csv 是文本可做真实 diff，
             # 覆盖已有 docx/xlsx 时旧内容是二进制，给不出有意义的文本 diff
             if target.exists() and target.suffix.lower() != ".csv":
-                return ""
-            try:
-                old = target.read_text(encoding="utf-8-sig") if target.is_file() else ""
-            except (OSError, UnicodeDecodeError):
                 return ""
             new = str(input_dict.get("content", "") or "")
         else:  # edit_file：按工具语义模拟替换
@@ -416,6 +434,96 @@ class PermissionGate:
             rest = len(lines) - self.DIFF_PREVIEW_MAX_LINES
             lines = lines[: self.DIFF_PREVIEW_MAX_LINES] + [f"…（余 {rest} 行省略）"]
         return "\n".join(lines)
+
+    @staticmethod
+    def _read_text_for_preview(target: Path) -> str:
+        """读旧内容做 diff 预览：按探测到的编码读（GBK 文件预览不再是乱码）。
+
+        探不出编码 / 是二进制时退回 utf-8 忽略错误，旧内容仅用于展示。
+        """
+        from ..textio import decode_bytes
+
+        if not target.is_file():
+            return ""
+        loaded = decode_bytes(target.read_bytes()[:400_000])
+        if loaded.binary or not loaded.certain:
+            return target.read_text(encoding="utf-8", errors="replace")
+        return loaded.text
+
+    def _preview_fs_impact(self, tool: Tool, input_dict: dict) -> str:
+        """move_file / delete_file 的确认预览：列出将被处置的实际路径。
+
+        删除与移动没有「改前→改后文本 diff」可言，但用户需要看到的恰恰是
+        「到底动哪些东西」。目录递归时把内容完整列出来（超长截断），
+        避免确认弹窗上只有一个模糊的目录名。
+        """
+
+        def resolve(raw: str) -> Path | None:
+            if not raw:
+                return None
+            p = Path(raw)
+            if not p.is_absolute():
+                p = self.working_dir / p
+            try:
+                p = p.resolve()
+                p.relative_to(self.working_dir)
+            except (OSError, ValueError):
+                return None
+            return p
+
+        if tool.name == "move_file":
+            src = resolve(str(input_dict.get("source", "") or ""))
+            if src is None:
+                return ""
+            dst_raw = str(input_dict.get("destination", "") or "")
+            dst = resolve(dst_raw)
+            if dst is None:
+                dst = Path(dst_raw)
+            elif dst.is_dir():
+                dst = dst / src.name
+            lines = [f"移动：{src} → {dst}"]
+            if src.exists():
+                lines += self._list_tree_lines(src, label="将移动")
+            return "\n".join(lines)
+
+        target = resolve(str(input_dict.get("path", "") or ""))
+        if target is None:
+            return ""
+        lines = [f"删除：{target}"]
+        if target.exists():
+            lines += self._list_tree_lines(target, label="将删除")
+        return "\n".join(lines)
+
+    TREE_PREVIEW_MAX = 120
+
+    def _list_tree_lines(self, target: Path, label: str) -> list[str]:
+        """列出文件 / 目录下的条目（确认弹窗用），超长截断。"""
+        if target.is_file():
+            try:
+                size = target.stat().st_size
+            except OSError:
+                return [f"{label}：{target.name}"]
+            return [f"{label}：{target.name}（{size:,} B）"]
+        try:
+            entries = sorted(target.rglob("*"))
+        except OSError:
+            return []
+        files = [e for e in entries if e.is_file()]
+        total = 0
+        for f in files:
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+        lines = [f"{label}：整个目录，{len(files)} 个文件，共 {total:,} B"]
+        for e in files[: self.TREE_PREVIEW_MAX]:
+            try:
+                lines.append("  " + str(e.relative_to(target)))
+            except ValueError:
+                lines.append("  " + str(e))
+        if len(files) > self.TREE_PREVIEW_MAX:
+            lines.append(f"  …（其余 {len(files) - self.TREE_PREVIEW_MAX} 个文件省略）")
+        return lines
 
     async def persist_rule(self, rule: WhitelistRule) -> None:
         """把"永久允许"规则写入项目存储并立即生效。"""

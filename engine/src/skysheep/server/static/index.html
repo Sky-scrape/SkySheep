@@ -15,6 +15,7 @@
   html[data-theme="indigo"] { background: #12161f; }
   html[data-theme="pine"] { background: #101613; }
   </style>
+  <link rel="stylesheet" href="/static/vendor/xterm.css">
   <link rel="stylesheet" href="/static/app.css">
   <script>
   // 首帧外观（主题 / 界面缩放 / 侧栏与输入区宽度）由服务端从 ui.json 注入到 <html> 标签上：
@@ -94,6 +95,7 @@
           <li data-target="skills">技能与工具</li>
           <li data-target="subagents">子代理</li>
           <li data-target="mcp">MCP 服务</li>
+          <li data-target="remote">远程控制</li>
           <li data-target="snippets">快捷指令</li>
           <li data-target="memory">全局记忆</li>
           <li data-target="ui">界面与通知</li>
@@ -105,13 +107,11 @@
       </div>
     </div>
 
-    <div id="zoom-row" class="zoom-row" title="调整整个界面的显示大小（字体随内容一起缩放）">
-      <span class="zoom-cap">界面</span>
-      <button id="btn-zoom-out" class="zoom-btn" title="缩小界面">−</button>
-      <span id="zoom-label" class="zoom-label">90%</span>
-      <button id="btn-zoom-in" class="zoom-btn" title="放大界面">＋</button>
+    <!-- 侧栏底部固定组：归档入口贴着设置按钮上方（归档无内容时整块隐藏，设置按钮仍在底部） -->
+    <div id="side-bottom">
+      <div id="session-archive" class="hidden"></div>
+      <button id="btn-settings" class="btn-ghost wide settings-entry">⚙ 设置</button>
     </div>
-    <button id="btn-settings" class="btn-ghost wide settings-entry">⚙ 设置</button>
   </aside>
 
   <!-- 拖动调整侧栏宽度（双击恢复默认） -->
@@ -128,8 +128,9 @@
           <div id="chat-tabs" class="hidden"></div>
           <span class="spacer"></span>
           <span id="usage" class="dim small"></span>
-          <button id="btn-help" class="tb-icon" title="帮助：快速上手 · 快捷键 · 常见问题">？</button>
+          <button id="btn-help" class="tb-icon" title="帮助：快速上手 · 快捷键 · 常见问题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>
           <button id="btn-bell" class="tb-icon" title="通知中心">🔔<span id="bell-badge" class="bell-badge hidden"></span></button>
+          <button id="btn-term" class="tb-icon" title="终端面板：多开命令行标签（Ctrl+`）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="m7.5 9.5 3 2.5-3 2.5"/><path d="M12.5 15h4"/></svg></button>
           <button id="btn-tabs" class="tb-icon" title="展开 / 收起右侧面板"></button>
           <button id="btn-stop" class="btn-ghost danger" hidden>⏹ 停止</button>
         </header>
@@ -182,7 +183,8 @@
 
         <footer id="composer">
           <div id="image-tray" class="image-tray hidden"></div>
-          <textarea id="input" rows="2" placeholder="描述你的任务…"></textarea>
+          <div id="ref-tray" class="ref-tray hidden"></div>
+          <textarea id="input" rows="2" placeholder="描述你的任务… 输入 & 引用对话 · @ 引用文件 · / 命令 · 可粘贴/拖入图片"></textarea>
           <div id="composer-bar">
             <!-- 功能开关收成小图标：悬停看说明，激活亮主题色（规划蓝 / 圆桌紫 / 写入金） -->
             <button id="mode-switch" class="cp-icon" title="当前：执行模式 · 点击切到规划模式">
@@ -202,13 +204,12 @@
             <button id="file-attach" class="cp-icon" title="添加文件：选本机任意文件（支持项目外的文件与多选），插入 @ 路径让 Agent 读取；图片可直接粘贴或拖入">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7l-4-4z"/><path d="M14 3v4h4"/><path d="M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg>
             </button>
-            <span id="cp-hint" title="Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
-            <!-- 连接状态 + 思考强度：贴在模型选择器左侧 -->
-            <span id="conn-status" class="dot off" title="与本地引擎的连接状态"></span>
-            <span id="status-text" class="dim small">连接中…</span>
-            <button id="reasoning-chip" class="chip chip-reasoning hidden"
-                    title="调整模型的思考强度（自动 / 低 / 中 / 高）"></button>
-            <!-- 上下文容量环形仪表：环=已占用比例，环内数字=百分比（≥70% 金 / ≥90% 红） -->
+            <!-- 语音输入：点一下开始录音，再点停止并转写（转写服务在 设置 · 语音输入 里配） -->
+            <button id="voice-btn" class="cp-icon" title="语音输入：点击开始录音，再点一下结束并转成文字">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21M8.5 21h7"/></svg>
+            </button>
+            <!-- 上下文容量环形仪表（贴着语音输入）：环=已占用比例，环内数字=百分比（≥70% 金 / ≥90% 红）；
+                 悬停/点按展开构成明细弹层（消息/系统提示词/技能/工具分桶 + 平均缓存命中率） -->
             <span id="ctx-ring" class="hidden">
               <svg viewBox="0 0 24 24">
                 <circle class="ring-track" cx="12" cy="12" r="9"></circle>
@@ -216,11 +217,36 @@
                 <text class="ring-txt" x="12" y="12.4"></text>
               </svg>
             </span>
+            <span id="cp-hint" title="Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
+            <!-- 连接状态 + 思考强度：贴在模型选择器左侧 -->
+            <span id="conn-status" class="dot off" title="与本地引擎的连接状态"></span>
+            <span id="status-text" class="dim small">连接中…</span>
+            <button id="reasoning-chip" class="chip chip-reasoning hidden"
+                    title="调整模型的思考强度（自动 / 低 / 中 / 高）"></button>
             <!-- 模型选择器：参考 Cherry Studio 布局，放在发送按钮左侧（点击弹已启用模型菜单） -->
             <span id="model-chip"></span>
             <button id="btn-send" class="btn-primary">发送</button>
           </div>
+          <!-- 上下文容量详情弹层：环形仪表悬停/点按展开（fixed 定位，坐标由 JS 贴着环算） -->
+          <div id="ctx-pop" class="ctx-pop hidden"></div>
         </footer>
+
+        <!-- 底部终端停靠面板：多标签各自独立执行（后端按 term_id 区分进程），
+             顶栏按钮或 Ctrl+` 开关；标签条仿桌面 IDE：＋ 新建、✕ 关闭标签 / 收起面板 -->
+        <div id="term-dock" class="hidden">
+          <div id="term-dock-bar">
+            <span class="td-cap">终端</span>
+            <div id="td-tabs"></div>
+            <button id="td-add" class="td-btn" title="新建 PowerShell 标签">＋</button>
+            <span class="spacer"></span>
+            <button id="term-to-agent" class="td-btn" title="把当前终端最近输出作为上下文带入输入框">→ Agent</button>
+            <button id="term-clear" class="td-btn" title="清空当前终端的屏显（不影响正在跑的程序）">清屏</button>
+            <button id="td-close" class="td-btn" title="收起终端面板（会话继续在后台跑）">✕</button>
+          </div>
+          <section id="rp-page-terminal" class="rp-page">
+            <div id="term-host"></div>
+          </section>
+        </div>
       </div>
 
       <!-- 拖动调整右侧面板宽度（双击恢复默认） -->
@@ -261,18 +287,6 @@
             </div>
           </section>
 
-          <section id="rp-page-terminal" class="rp-page hidden">
-            <div id="term-out"></div>
-            <div class="term-row">
-              <button id="term-stop" class="rp-mini danger hidden" title="结束当前命令（整个进程树）">⏹ 停止</button>
-              <span class="term-ps1">❯</span>
-              <input id="term-in" type="text" autocomplete="off" spellcheck="false"
-                     placeholder="输入命令，Enter 运行（↑↓ 翻历史）">
-              <button id="term-to-agent" class="rp-mini" title="把终端最近输出作为上下文带入输入框">→ Agent</button>
-              <button id="term-run" class="rp-mini primary">运行</button>
-            </div>
-          </section>
-
           <section id="rp-page-files" class="rp-page hidden">
             <div class="rp-toolbar">
               <span class="dim small">工作区文件 · 点文本文件直接编辑，Ctrl+S 保存</span>
@@ -310,7 +324,11 @@
               <button id="browser-go" class="rp-mini primary">前往</button>
               <button id="browser-reload" class="rp-mini" title="重新加载">⟳</button>
             </div>
-            <iframe id="browser-frame" class="hidden" title="浏览器预览"></iframe>
+            <!-- sandbox（安全审查 D5）：预览的本地文件与主界面同源，不加隔离的话项目里的
+                 HTML/SVG 脚本能带凭据调同源管理接口。不给 allow-same-origin —— 预览内容
+                 运行在独立的不透明源里，脚本可跑但碰不到本应用的 Cookie/DOM/存储。 -->
+            <iframe id="browser-frame" class="hidden" title="浏览器预览"
+                    sandbox="allow-scripts allow-forms allow-popups allow-downloads"></iframe>
             <div id="browser-empty" class="rp-empty">在地址栏输入网址即可在面板里预览——比如 Agent 刚帮你起好的本地开发服务器。</div>
           </section>
 
@@ -371,6 +389,9 @@
             <div id="memory-status" class="rp-memory-status"></div>
           </section>
 
+          <!-- MCP / Skills：卡片平时住在设置页，打开本标签时由 app.js 整体搬进来 -->
+          <section id="rp-page-ext" class="rp-page hidden"></section>
+
         </div>
       </aside>
     </div>
@@ -394,9 +415,14 @@
               <p class="settings-hint">
                 点是哪一行就进哪个服务的配置。<b class="star">★</b> 是启动默认模型，「使用中」是当前对话所用模型。
                 列表里没有的服务（自建中转、公司内网、其他厂商）用右上角按钮自己添加；
-                用不到的进它的配置里点「删除」即可移出列表（内置服务删掉后可随时恢复）。
+                用不到的进它的配置里移出列表即可——内置服务只是<b>停用</b>、随时可恢复，自定义服务才会真正<b>删除</b>。
               </p>
               <div id="provider-status" class="card-status" hidden></div>
+              <!-- 列表页签：默认（内置预设）/ 自定义（用户新增），沿用侧栏分段控件样式 -->
+              <div id="provider-tabs" class="seg-row seg-mini" hidden>
+                <button data-tab="preset" class="active" title="内置预设服务">默认</button>
+                <button data-tab="custom" title="自己添加的服务">自定义</button>
+              </div>
               <div id="provider-list"></div>
               <div id="provider-hidden" class="hidden-providers" hidden></div>
             </div>
@@ -419,12 +445,16 @@
           <section class="settings-card" id="skill-card">
             <div class="card-head">
               <h3>技能</h3>
-              <button id="btn-import-skill" class="btn-ghost">＋ 导入技能</button>
+              <span class="head-ops">
+                <button id="btn-scan-skill" class="btn-ghost">扫描本机</button>
+                <button id="btn-import-skill" class="btn-ghost">＋ 导入技能</button>
+              </span>
             </div>
             <p class="settings-hint">
               技能是写给 Agent 看的「操作手册」：启用后相关用法会进入系统提示词，Agent 会在合适的任务里自动套用。
               点右上角「导入技能」：可以选本机的技能文件夹或 .zip 压缩包，也可以直接粘贴
-              <b>GitHub / Gitee 仓库链接</b>在线安装，装完立即生效。
+              <b>GitHub / Gitee 仓库链接</b>在线安装；「扫描本机」则自动识别 Claude Code
+              等工具已装在本机的技能，勾选即可复用，装完立即生效。
             </p>
             <div id="skill-summary" class="skill-entry">
               <span class="skill-entry-main">
@@ -447,11 +477,47 @@
             <div id="imagegen-form" class="toolcfg-form"></div>
           </section>
           <section class="settings-card">
+            <div class="card-head"><h3>语音输入</h3></div>
+            <p class="settings-hint" id="speech-hint"></p>
+            <div id="speech-status" class="card-status" hidden></div>
+            <div id="speech-form" class="toolcfg-form"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>圆桌</h3></div>
+            <p class="settings-hint" id="roundtable-hint"></p>
+            <div id="roundtable-status" class="card-status" hidden></div>
+            <div id="roundtable-form" class="toolcfg-form"></div>
+          </section>
+          <section class="settings-card">
             <h3>内置工具</h3>
             <p class="settings-hint">
               Agent 完成任务时可以调用的工具。<b>只读</b>操作自动放行；<b>写入</b>与<b>高危</b>（执行命令）操作默认会先征得你确认。
+              下面两个总开关<b>默认关闭</b>，打开后对应工具才会出现在列表里（打开即生效）。
             </p>
-            <ul id="settings-tool-list" class="list settings-tool-list"></ul>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="tool-computer-control">
+              <span>启用电脑控制工具（截屏 / 鼠标 / 键盘 / 剪贴板 / 窗口）</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              让 Agent 能「看见并操作」你的桌面：截屏进对话、移动鼠标、输入文字。
+              高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，
+              有「帮我操作这个软件」这类需求时再打开。
+            </p>
+            <div id="tool-computer-status" class="card-status" hidden></div>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="tool-browser-control">
+              <span>启用浏览器控制（Agent 打开网页 / 搜索）</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              让 Agent 能用你的默认浏览器打开网址或搜索关键词（比如「帮我打开这个链接」
+              「搜一下最近的新闻给我看」）。页面在你的浏览器里打开，逐次确认，
+              可按动作加白名单；<b>默认关闭</b>。Agent 自己读网页内容不受此开关影响（web_fetch）。
+            </p>
+            <div id="tool-browser-status" class="card-status" hidden></div>
+            <details id="tool-list-fold" class="market-fold">
+              <summary id="tool-list-fold-cap">展开查看全部内置工具</summary>
+              <ul id="settings-tool-list" class="list settings-tool-list"></ul>
+            </details>
           </section>
           </div>
 
@@ -462,6 +528,7 @@
                 <button id="btn-skill-back" class="btn-ghost">← 返回</button>
                 <span class="detail-title" id="skill-manage-title">技能</span>
                 <span class="head-ops">
+                  <button id="btn-scan-skill-2" class="btn-ghost">扫描本机</button>
                   <button id="btn-import-skill-2" class="btn-ghost">＋ 导入技能</button>
                 </span>
               </div>
@@ -564,7 +631,8 @@
               你在对话中选择「总是允许」时保存的规则；删除后对应操作会重新询问。<br>
               命令的前缀规则不会命中带 shell 拼接的命令（如 <code>git status; rm -rf /</code>）——
               这类命令每次都重新询问，要放行它请选择「允许一次」；键盘的「总是允许」只固化那一次
-              输入的内容/键位（内容不同的输入仍需确认）。
+              输入的内容/键位（内容不同的输入仍需确认）。「允许访问哪些目录」是另一层限制，
+              在 <b>高级 · 安全与后台</b> 里设置。
             </p>
             <div id="rule-add-form" class="rule-add-form hidden">
               <div class="rule-add-row">
@@ -610,6 +678,44 @@
         </section>
 
         <section class="settings-page hidden" id="settings-page-advanced">
+          <datalist id="hook-tools"></datalist>
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>钩子（Hooks）</h3>
+              <button id="btn-hooks-save" class="btn-ghost">保存</button>
+            </div>
+            <p class="settings-hint">
+              在 Agent 每次调用工具的前 / 后自动跑一条你自己的命令。典型用途：写入前先跑
+              格式检查、跑完命令弹个提醒、把关键操作记进自己的日志。
+              <b>前钩子可以阻挡这次调用</b>：退出码 2（或输出 {"decision":"block"}）就拦下，
+              标准错误会作为原因告诉 Agent。例如 match 填 <code>write_file</code>、
+              命令填 <code>python check.py</code>：脚本退出码为 2 时，这次写入就会被拦下。
+            </p>
+            <p class="settings-hint">
+              命令会把一份 JSON 从标准输入交给你的程序：
+              <code>{"tool": "write_file", "input": {...}, "working_dir": "..."}</code>。
+              命令来自你自己的配置，等价于你手敲，<b>不经过权限确认</b>——请只填可信的命令。
+            </p>
+            <div id="hooks-status" class="card-status" hidden></div>
+            <div class="hooks-group">
+              <div class="hooks-head">
+                <b>调用前（pre）</b>
+                <span class="dim small" id="hooks-active-pre"></span>
+                <button id="btn-hook-add-pre" class="btn-ghost rp-mini">＋ 添加</button>
+              </div>
+              <div id="hooks-pre-list" class="hooks-list"></div>
+            </div>
+            <div class="hooks-group">
+              <div class="hooks-head">
+                <b>调用后（post）</b>
+                <span class="dim small" id="hooks-active-post"></span>
+                <button id="btn-hook-add-post" class="btn-ghost rp-mini">＋ 添加</button>
+              </div>
+              <div id="hooks-post-list" class="hooks-list"></div>
+            </div>
+            <p class="dim small" id="hooks-config-path"></p>
+          </section>
+
           <section class="settings-card">
             <div class="card-head">
               <h3>运行参数</h3>
@@ -671,27 +777,56 @@
               信任按项目记忆，配置内容一变就需要重新确认；全局配置不受影响。
             </p>
             <label class="toggle-row adv-toggle">
-              <input type="checkbox" id="adv-computer-control">
-              <span>启用电脑控制工具（截屏 / 鼠标 / 键盘 / 剪贴板）</span>
-            </label>            <p class="dim small adv-toggle-desc">
-              让 Agent 能「看见并操作」你的桌面：截屏进对话、移动鼠标、输入文字。
-              高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，
-              有「帮我操作这个软件」这类需求时再打开。保存后立即对所有会话生效。
-            </p>
-            <label class="toggle-row adv-toggle">
-              <input type="checkbox" id="adv-browser-control">
-              <span>启用浏览器控制（Agent 打开网页 / 搜索）</span>
-            </label>
-            <p class="dim small adv-toggle-desc">
-              让 Agent 能用你的默认浏览器打开网址或搜索关键词（比如「帮我打开这个链接」
-              「搜一下最近的新闻给我看」）。页面在你的浏览器里打开，逐次确认，
-              可按动作加白名单；<b>默认关闭</b>。Agent 自己读网页内容不受此开关影响（web_fetch）。
-            </p>
-            <label class="toggle-row adv-toggle">
               <input type="checkbox" id="adv-autostart">
               <span>开机自动启动 SkySheep</span>
             </label>
             <p class="dim small adv-toggle-desc" id="adv-autostart-hint"></p>
+          </section>
+        </section>
+
+        <section class="settings-page hidden" id="settings-page-remote">
+          <section class="settings-card">
+            <h3>远程控制</h3>
+            <p class="settings-hint">
+              把 SkySheep 接到别的设备上用：手机 / 平板扫同一 Wi-Fi 或经 Tailscale
+              跨网络打开完整界面，或在 Telegram / 微信里给机器人发消息遥控。
+              这些能力<b>默认全部关闭</b>，需要时逐项打开。
+            </p>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>📱 手机控制</h3>
+              <label class="toggle-row"><input type="checkbox" id="lan-toggle"><span>开启</span></label>
+            </div>
+            <p class="settings-hint">
+              用手机遥控这台电脑上的 SkySheep：开启后（<b>重启 SkySheep 生效</b>），同一 Wi-Fi 下的
+              手机 / 平板扫码或输入地址，即可打开<b>完整界面</b>——继续聊天、批准确认、看任务进度，
+              电脑端同步可见。服务将对局域网开放，令牌即密码，请勿在公共网络使用；关闭后恢复仅本机访问。
+            </p>
+            <div id="lan-info" class="lan-info"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>🌐 远程访问（Tailscale）</h3>
+              <label class="toggle-row"><input type="checkbox" id="ts-toggle"><span>开启</span></label>
+            </div>
+            <p class="settings-hint">
+              不在同一 Wi-Fi（手机开流量也行）也能连回家里的 SkySheep：电脑和手机都安装
+              Tailscale（tailscale.com）并登录<b>同一账号</b>，这里开启后（<b>重启 SkySheep 生效</b>），
+              手机在任意网络打开电脑的 Tailscale 地址，就能用完整界面继续聊、批准确认、看任务进度。
+              链路经 Tailscale 端到端加密，访问令牌与「手机控制」共用；未装 Tailscale 的设备
+              （包括同一 Wi-Fi 下的）反而连不进来。
+            </p>
+            <div id="ts-info" class="lan-info"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>🤖 聊天机器人渠道</h3></div>
+            <p class="settings-hint">
+              把 <b>Telegram / 微信</b> 接成遥控端：在手机上给机器人发消息，就能让这台电脑上的
+              SkySheep 干活，回复直接回到聊天窗口。渠道<b>默认关闭</b>；启用前必须先把你的账号加入
+              <b>允许名单</b>——没有名单的机器人等于对所有人开放，而知道机器人账号的人都能给它发消息。
+              <b>「允许操作」未开启时，机器人只能读不能写</b>（改文件、跑命令一律自动拒绝）。
+              Telegram 需自备 Bot Token；微信无需 Token，扫二维码登录即可。
+            </p>
+            <div id="channel-panel" class="lan-info"></div>
           </section>
         </section>
 
@@ -704,7 +839,8 @@
             <p class="settings-hint">
               跨项目生效的用户记忆：Agent 对话中说「记住我喜欢…」时会自动写进来（格式为
               <b>- [日期] 内容</b> 的列表），每一轮对话都会注入。这里可以直接查看、修改；
-              保存后对所有会话立即生效。与之相对，「项目记忆」只对当前项目生效。
+              保存后对所有会话立即生效。与之相对，「项目记忆」只对当前项目生效，
+              在对话窗口右侧面板的「记忆」页签里查看和编辑。
             </p>
             <div id="memory-global-status" class="card-status" hidden></div>
             <textarea id="memory-text" class="memory-text" rows="14"
@@ -751,36 +887,12 @@
             </div>
           </section>
           <section class="settings-card">
-            <div class="card-head"><h3>📱 手机控制</h3>
-              <label class="toggle-row"><input type="checkbox" id="lan-toggle"><span>开启</span></label>
-            </div>
-            <p class="settings-hint">
-              用手机遥控这台电脑上的 SkySheep：开启后（<b>重启 SkySheep 生效</b>），同一 Wi-Fi 下的
-              手机 / 平板扫码或输入地址，即可打开<b>完整界面</b>——继续聊天、批准确认、看任务进度，
-              电脑端同步可见。服务将对局域网开放，令牌即密码，请勿在公共网络使用；关闭后恢复仅本机访问。
-            </p>
-            <div id="lan-info" class="lan-info"></div>
-          </section>
-          <section class="settings-card">
-            <div class="card-head"><h3>🌐 远程访问（Tailscale）</h3>
-              <label class="toggle-row"><input type="checkbox" id="ts-toggle"><span>开启</span></label>
-            </div>
-            <p class="settings-hint">
-              不在同一 Wi-Fi（手机开流量也行）也能连回家里的 SkySheep：电脑和手机都安装
-              Tailscale（tailscale.com）并登录<b>同一账号</b>，这里开启后（<b>重启 SkySheep 生效</b>），
-              手机在任意网络打开电脑的 Tailscale 地址，就能用完整界面继续聊、批准确认、看任务进度。
-              链路经 Tailscale 端到端加密，访问令牌与「手机控制」共用；未装 Tailscale 的设备
-              （包括同一 Wi-Fi 下的）反而连不进来。
-            </p>
-            <div id="ts-info" class="lan-info"></div>
-          </section>
-          <section class="settings-card">
             <h3>Windows 系统通知</h3>
             <p class="settings-hint">
               窗口失焦时，任务完成、Agent 等待确认会弹系统通知；前台使用时不打扰。
               无人值守的定时任务结果也会通知。
             </p>
-            <label class="toggle-row">
+            <label class="toggle-row adv-toggle">
               <input type="checkbox" id="notify-toggle">
               <span>开启系统通知</span>
             </label>
@@ -790,7 +902,7 @@
             <p class="settings-hint">
               聊天流右下角的「云朵小羊」：Agent 干活时它会蹦跶，等待你确认时摇晃提醒，点它会跟你打招呼。
             </p>
-            <label class="toggle-row">
+            <label class="toggle-row adv-toggle">
               <input type="checkbox" id="pet-toggle">
               <span>显示云朵小羊</span>
             </label>
@@ -798,9 +910,15 @@
           <section class="settings-card">
             <h3>界面缩放</h3>
             <p class="settings-hint">
-              在左侧边栏底部的「界面 −/+」控件随时调整整个界面的显示大小（70%–120%，步长 10%），
+              调整整个界面的显示大小（70%–120%，步长 10%），
               字体随内容一起缩放，偏好自动保存。
             </p>
+            <div id="zoom-row" class="zoom-row" title="调整整个界面的显示大小（字体随内容一起缩放）">
+              <span class="zoom-cap">界面</span>
+              <button id="btn-zoom-out" class="zoom-btn" title="缩小界面">−</button>
+              <span id="zoom-label" class="zoom-label">90%</span>
+              <button id="btn-zoom-in" class="zoom-btn" title="放大界面">＋</button>
+            </div>
           </section>
         </section>
 
@@ -813,6 +931,7 @@
             <p class="settings-hint">
               常用的提示词模板。在输入框输入 <b>/</b> 时会出现在候选最上方，选中即插入到输入框。
               内容里的 <b>{{clipboard}}</b> 会在插入时替换为当前剪贴板文本。
+              还没有自定义指令时，<code>/</code> 菜单会附带几条内置示例；一旦添加了自己的指令，示例就不再出现。
             </p>
             <ul id="snippets-list" class="list snippets-list"></ul>
           </section>
@@ -829,6 +948,7 @@
               （输入价 / 输出价，单位：元），保存后这里会显示估算费用。
             </p>
             <div id="usage-tiles" class="usage-tiles"></div>
+            <p id="usage-budget" class="dim small" hidden></p>
           </section>
           <section class="settings-card">
             <div class="card-head">
@@ -860,6 +980,9 @@
         <section class="settings-page hidden" id="settings-page-about">
           <section class="settings-card">
             <h3>关于</h3>
+            <p class="settings-hint">
+              启动时也会自动检查更新，发现新版本会在顶栏横幅提示；这里也可以手动检查。
+            </p>
             <div id="about-info" class="about"></div>
             <div id="about-update" class="about-update"></div>
           </section>
@@ -884,7 +1007,7 @@
             </div>
             <p class="settings-hint">
               每次启动前都会给会话数据库留一份备份（保留最近 20 份）；误删会话、或数据不对劲时，
-              在这里挑一个较早的版本恢复即可（默认只列最近几份，更早的点「展开」）。
+              在这里挑一个较早的版本恢复即可（完整列表在下方滚动查看）。
               <b>恢复会用备份整体替换当前数据</b>，替换前系统会先把现状另存一份，随时能换回来。
             </p>
             <div id="backup-status" class="card-status" hidden></div>
@@ -893,8 +1016,8 @@
           <section class="settings-card">
             <h3>设置导出 / 导入</h3>
             <p class="settings-hint">
-              把模型服务（含 API Key）、MCP 配置、界面偏好、全局记忆打包成一个 zip，
-              在另一台电脑上导入即可完成迁移。会话记录不包含在内。
+              把模型服务（含 API Key）、MCP 配置、界面偏好、全局记忆、自定义子代理与技能启用范围
+              打包成一个 zip，在另一台电脑上导入即可完成迁移。会话记录不包含在内。
             </p>
             <div id="about-io" class="io-row">
               <button id="btn-settings-export" class="btn-ghost">⬇ 导出设置（zip）</button>
@@ -909,6 +1032,7 @@
 </div>
 <div id="session-menu" class="session-menu hidden"></div>
 <div id="model-menu" class="session-menu model-menu hidden"></div>
+<div id="ref-menu" class="session-menu model-menu hidden" title=""></div>
 <div id="reasoning-menu" class="session-menu model-menu hidden"></div>
 <div id="notif-panel" class="session-menu notif-panel hidden"></div>
 <div id="modal" class="overlay hidden">
@@ -924,6 +1048,8 @@
 <script src="/static/vendor/mermaid.min.js"></script>
 <script src="/static/vendor/highlight.min.js"></script>
 <script src="/static/vendor/qrcode.min.js"></script>
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/xterm-fit.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

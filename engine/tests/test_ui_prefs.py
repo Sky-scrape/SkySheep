@@ -248,7 +248,7 @@ def test_frontend_workspace_reset_covers_project_bound_state(home):
         assert name in reset_body, f"resetWorkspaceState 漏清 {name}"
     panels = js[js.index("function resetProjectPanels()"):]
     panels_body = panels[:panels.index("\n}\n")]
-    for name in ("filesLoaded", "agCache", "tasksTimer", "termBusy"):
+    for name in ("filesLoaded", "agCache", "tasksTimer", "resetTermTabs"):
         assert name in panels_body, f"resetProjectPanels 漏清 {name}"
 
 

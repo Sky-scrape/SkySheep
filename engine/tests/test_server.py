@@ -115,11 +115,12 @@ def test_apply_theme_triggers_immediate_repaint(home, monkeypatch):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "t1", "method": "app.apply_theme", "params": {"resolved": "dark"}})
         r = recv_until(ws, "t1")
-        assert r["ok"] and r["result"]["mode"] == "dark"
-        ws.send_json({"id": "t2", "method": "app.apply_theme", "params": {"resolved": "light"}})
-        assert recv_until(ws, "t2")["ok"]
+        assert r["ok"] and r["result"]["mode"] == "night"  # 旧字段两档值 → 夜墨
+        ws.send_json({"id": "t2", "method": "app.apply_theme", "params": {"theme": "kaki"}})
+        r2 = recv_until(ws, "t2")
+        assert r2["ok"] and r2["result"]["mode"] == "kaki"  # 主题 id 优先且原样回传
     assert len(calls) == 2
-    assert wintheme.current_theme_mode() == "light"
+    assert wintheme.current_theme_mode() == "kaki"
 
 
 def test_advanced_budget_persists(home):
@@ -1541,3 +1542,197 @@ def test_client_origin_classification():
     assert client_origin(None) == "other"
     assert client_origin("") == "other"
     assert client_origin("not-an-ip") == "other"
+
+
+def test_refs_inject_referenced_transcript(home):
+    """「& 引用对话」：被引用会话的记录应注入本轮用户消息并随消息持久化。"""
+    script = [
+        [TextBlock(text="天空是蓝的因为瑞利散射")],
+        [TextBlock(text="已总结引用的对话")],
+    ]
+    with make_client(home, script) as client, client.websocket_connect("/ws") as ws:
+        # 会话 A：先聊一轮，产生可引用的记录
+        ws.send_json({"id": "a", "method": "chat.send", "params": {"text": "天空为什么是蓝的"}})
+        fa = recv_until(ws, "a")
+        assert fa["ok"] and fa["result"]["done"]
+        sid_a = fa["result"]["session_id"]
+
+        # 新会话 B 引用 A 提问
+        ws.send_json({"id": "n", "method": "session.new", "params": {}})
+        sid_b = recv_until(ws, "n")["result"]["id"]
+        ws.send_json({"id": "b", "method": "chat.send",
+                      "params": {"text": "总结刚才那段对话", "refs": [sid_a]}})
+        fb = recv_until(ws, "b")
+        assert fb["ok"] and fb["result"]["done"]
+
+        ws.send_json({"id": "e", "method": "session.export",
+                      "params": {"id": sid_b, "fmt": "md"}})
+        md = recv_until(ws, "e")["result"]["markdown"]
+        assert "[引用对话]" in md
+        assert "天空为什么是蓝的" in md  # 被引用会话的用户消息注入成功
+        assert "瑞利散射" in md          # 被引用会话的助手回复注入成功
+        assert "总结刚才那段对话" in md   # 本轮正文仍在（引用块之后）
+
+
+def test_refs_with_unknown_session_skipped(home):
+    """引用不存在的会话：静默跳过，不影响消息正常发送。"""
+    script = [[TextBlock(text="好的")]]
+    with make_client(home, script) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c", "method": "chat.send",
+                      "params": {"text": "你好", "refs": ["no-such-session"]}})
+        fc = recv_until(ws, "c")
+        assert fc["ok"] and fc["result"]["done"]
+        sid = fc["result"]["session_id"]
+        ws.send_json({"id": "e", "method": "session.export",
+                      "params": {"id": sid, "fmt": "md"}})
+        md = recv_until(ws, "e")["result"]["markdown"]
+        assert "[引用对话]" not in md
+
+
+def test_speech_settings_roundtrip(home, monkeypatch):
+    """语音输入设置卡的读写：provider 校验、Key 留空不覆盖、resolve 结果如实呈现。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "s0", "method": "speech.get"})
+        d = recv_until(ws, "s0")["result"]
+        assert d["provider"] == "auto" and "custom" in d["providers"]
+        assert d["has_key"] is False  # 全新 home，没配任何 Key
+
+        # 非法 provider 被拒
+        ws.send_json({"id": "s1", "method": "speech.save", "params": {"provider": "bogus"}})
+        assert not recv_until(ws, "s1")["ok"]
+
+        # 存自定义档：base_url 即生效（本地转写服务可无 Key）
+        ws.send_json({"id": "s2", "method": "speech.save",
+                      "params": {"provider": "custom",
+                                 "base_url": "http://127.0.0.1:9/v1"}})
+        d2 = recv_until(ws, "s2")["result"]
+        assert d2["has_key"] and d2["resolved_provider"] == "custom"
+
+        # 存 Key 但留空 model/language：字段不被覆盖成空
+        ws.send_json({"id": "s3", "method": "speech.save",
+                      "params": {"provider": "custom", "api_key": "k-sp", "model": "whisper-1"}})
+        d3 = recv_until(ws, "s3")["result"]
+        assert d3["has_key"] and d3["resolved_model"] == "whisper-1"
+
+
+def test_speech_transcribe_unconfigured(home):
+    """没配置转写服务时，麦克风上传会得到可读错误（而不是静默失败）。"""
+    import base64
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "t1", "method": "speech.transcribe",
+                      "params": {"audio": base64.b64encode(b"xx").decode(), "mime": "audio/webm"}})
+        r = recv_until(ws, "t1")
+        assert not r["ok"] and "语音转写服务" in r["error"]
+
+
+def test_speech_transcribe_via_local_stub(home, monkeypatch):
+    """完整链路：本地桩 ASR 服务收 multipart、返回文本；后端解析 text 字段。"""
+    import base64
+    import http.server
+    import json as _json
+    import threading
+
+    seen: dict = {}
+
+    class Stub(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length)
+            seen["auth"] = self.headers.get("Authorization")
+            seen["ct"] = self.headers.get("Content-Type", "")
+            seen["body_head"] = body[:400]
+            payload = _json.dumps({"text": "你好，世界"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):  # noqa: A003
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    wav = base64.b64encode(b"RIFF-fake-audio").decode()
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "sp1", "method": "speech.save",
+                      "params": {"provider": "custom",
+                                 "base_url": f"http://127.0.0.1:{port}",
+                                 "model": "whisper-1", "api_key": "sk-stub"}})
+        assert recv_until(ws, "sp1")["ok"]
+        ws.send_json({"id": "sp2", "method": "speech.transcribe",
+                      "params": {"audio": wav, "mime": "audio/wav"}})
+        r = recv_until(ws, "sp2")["result"]
+        assert r["text"] == "你好，世界"
+        assert r["provider"] == "custom" and r["model"] == "whisper-1"
+
+    srv.shutdown()
+    assert "Bearer sk-stub" == seen["auth"]
+    assert "multipart/form-data" in seen["ct"]
+    assert b"name=\"file\"" in seen["body_head"] and b"whisper-1" in seen["body_head"]
+
+
+def test_settings_provider_lists_configured_services(home, monkeypatch):
+    """搜索 / 画图 / 语音的「服务商」下拉要带上已配置的模型服务，可直接复用其地址与 Key。"""
+    monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))
+    # 写一份带第三方聚合服务的 config.toml（模拟用户已配好的服务）
+    cfg_dir = home / "home"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.toml").write_text(
+        '[providers.mypool]\n'
+        'kind = "openai"\n'
+        'base_url = "https://pool.example.com/v1"\n'
+        'model = "some-model"\n'
+        'api_key = "sk-pool-1234567890"\n',
+        encoding="utf-8",
+    )
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        for method, key in (("websearch.get", "w"), ("imagegen.get", "i"), ("speech.get", "s")):
+            ws.send_json({"id": key + "1", "method": method})
+            d = recv_until(ws, key + "1")["result"]
+            names = [x["name"] for x in d["configured_services"]]
+            assert "mypool" in names, method
+            entry = next(x for x in d["configured_services"] if x["name"] == "mypool")
+            assert entry["base_url"] == "https://pool.example.com/v1"
+            assert entry["key_mask"] and "sk-pool-1234567890" not in entry["key_mask"]
+
+        # 选中已配置服务（语音）→ 解析成它的地址与 Key，无需再填
+        ws.send_json({"id": "s2", "method": "speech.save",
+                      "params": {"provider": "mypool", "model": "whisper-1"}})
+        d2 = recv_until(ws, "s2")["result"]
+        assert d2["has_key"] and d2["resolved_provider"] == "mypool"
+
+        # 画图同样：选已配置服务后可用
+        ws.send_json({"id": "i2", "method": "imagegen.save",
+                      "params": {"provider": "mypool", "model": "img-model"}})
+        d3 = recv_until(ws, "i2")["result"]
+        assert d3["has_key"] and d3["resolved_provider"] == "mypool"
+
+
+def test_context_detail_in_send_and_status(home):
+    """输入栏环形仪表的悬停明细：chat.send / chat.status 携带构成分桶与缓存命中率。"""
+    script = [[TextBlock(text="答")]]
+    with make_client(home, script) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "chat.send", "params": {"text": "hi"}})
+        frame = recv_until(ws, "c1")
+        assert frame["ok"] and frame["result"]["done"]
+        detail = frame["result"]["context_detail"]
+        assert detail["limit"] > 0
+        assert detail["tokens"] > 0
+        labels = {r["label"] for r in detail["rows"]}
+        assert {"消息", "系统提示词", "系统工具", "技能", "其他", "MCP 工具"} <= labels
+        # 分桶按占用降序；占比合计 ≈ 100%
+        toks = [r["tokens"] for r in detail["rows"]]
+        assert toks == sorted(toks, reverse=True)
+        assert abs(sum(r["pct"] for r in detail["rows"]) - 100) < 0.5
+        # fake 服务从不上报缓存明细：命中率保持 None（前端显示「—」）
+        assert detail["cache_rate"] is None
+
+        ws.send_json({"id": "st", "method": "chat.status"})
+        st = recv_until(ws, "st")["result"]
+        assert st["context_detail"]["tokens"] == frame["result"]["context_tokens"]
+        assert st["context_detail"]["limit"] == st["context_limit"]

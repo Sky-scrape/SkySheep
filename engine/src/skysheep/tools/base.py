@@ -65,6 +65,12 @@ class Tool(abc.ABC):
     # 只能凭它判断目标是否落在工作目录内；凭不出来的工具（MCP 写工具、剪贴板等）
     # 一律回退逐次确认——开关放行「写文件」不等于放行「任意写操作」。
     write_path_arg: bool = False
+    # 写目标不是 args.path 时（如 move_file 的落点是 destination），在这里指明字段名。
+    # 权限门按它取目标路径做目录边界判断，避免把「源在工作目录内」误当成落点在内。
+    write_target_arg: str = "path"
+    # 除写目标外还需一并留在工作目录内的路径参数（如 move_file 的 source）：
+    # 「自动允许写入」档要求列出的每个字段都解析在工作目录内。
+    guard_path_args: tuple[str, ...] = ()
 
     @abc.abstractmethod
     async def run(self, args: BaseModel, ctx: ToolContext) -> str:

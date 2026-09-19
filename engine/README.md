@@ -10,9 +10,13 @@ SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置
 | `skysheep.events` | Agent 运行过程的统一事件流 |
 | `skysheep.core` | Agent 核心循环（流式、工具调用、权限交互协议）|
 | `skysheep.models` | 模型适配层：OpenAI 兼容 / Anthropic 原生 |
-| `skysheep.tools` | 内置工具（文件/搜索/命令）+ Schema 导出 |
+| `skysheep.tools` | 内置工具（文件读写/移动删除、搜索、命令、文档、图片、联网、电脑控制）+ Schema 导出 |
 | `skysheep.security` | Permission Gate：工具分级、白名单、确认协议 |
-| `skysheep.session` | SQLite 持久化：项目 / 会话 / 消息 / 白名单规则 |
+| `skysheep.session` | SQLite 持久化：项目 / 会话 / 消息 / 白名单规则，含 `messages_fts` 全文索引 |
+| `skysheep.textio` | 文本文件的编码（UTF-8 / GB18030 / BOM）与行尾符探测与安全写回 |
+| `skysheep.channels` | 聊天机器人渠道：Telegram / 微信遥控端（默认关闭） |
+| `skysheep.mcp` | MCP 客户端（stdio / Streamable HTTP，支持自定义鉴权请求头） |
+| `skysheep.skills` | SKILL.md 发现 / 开关 / 注入 / 安装 / 技能广场 |
 | `skysheep.config` | `~/.skysheep/config.toml` 配置与 Provider 预设 |
 | `skysheep.cli` | 终端 REPL + `skysheep app` 桌面启动 |
 | `skysheep.server` | 桌面端服务层：FastAPI + WebSocket 协议 + 静态前端 |

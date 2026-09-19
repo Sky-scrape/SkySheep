@@ -505,8 +505,10 @@ def test_ws_memory_and_toolcfg_and_lan_and_market(home):
 
         ws.send_json({"id": "w1", "method": "websearch.get"})
         w = recv_until(ws, "w1")["result"]
-        assert w["provider"] == "auto" and "bocha" in w["providers"]
-        assert "custom" in w["providers"]  # 设置页要有自定义档可选
+        assert w["provider"] == "auto"
+        # 设置页只渲染「自动 / 自定义 / 已配置」三档；已配置服务是单独一屏的列表
+        assert w["providers"] == ["auto", "custom"]
+        assert "configured_services" in w
         ws.send_json({"id": "w2", "method": "websearch.save",
                       "params": {"provider": "bocha", "api_key": "k9"}})
         w2 = recv_until(ws, "w2")["result"]

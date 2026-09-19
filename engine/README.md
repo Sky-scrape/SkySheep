@@ -8,7 +8,7 @@ SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置
 |---|---|
 | `skysheep.messages` | 跨 Provider 归一化的消息/内容块模型 |
 | `skysheep.events` | Agent 运行过程的统一事件流 |
-| `skysheep.core` | Agent 核心循环（流式、工具调用、权限交互协议）|
+| `skysheep.core` | Agent 核心循环（流式、工具调用、权限交互协议），附任务耗时预估（`estimate.py`）与思考强度自动估档（`effort.py`）|
 | `skysheep.models` | 模型适配层：OpenAI 兼容 / Anthropic 原生 |
 | `skysheep.tools` | 内置工具（文件读写/移动删除、搜索、命令、文档、图片、联网、电脑控制）+ Schema 导出 |
 | `skysheep.security` | Permission Gate：工具分级、白名单、确认协议 |
@@ -20,6 +20,7 @@ SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置
 | `skysheep.config` | `~/.skysheep/config.toml` 配置与 Provider 预设 |
 | `skysheep.cli` | 终端 REPL + `skysheep app` 桌面启动 |
 | `skysheep.server` | 桌面端服务层：FastAPI + WebSocket 协议 + 静态前端 |
+| `skysheep.windowstate` | 窗口几何记忆：退出时保存大小/位置/最大化状态，启动恢复（显示器配置变化自动回退默认居中） |
 | `desktop.py` | 无终端启动器（双击入口）：单实例、失败弹框、日志兜底 |
 
 ## 快速开始

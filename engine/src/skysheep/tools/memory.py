@@ -6,10 +6,15 @@ Agent 在对话中学到值得长期记住的事实（用户偏好、常用环�
 
 安全边界：只能写 SkySheep 自己的记忆文件（路径固定、不接受任何路径参数），
 与 schedule_write 写应用自有存储同理，READONLY 免确认。
+
+本模块还承载「归档自动记忆」的纯函数部分（backend 在会话归档后调用）：
+digest_transcript / build_digest_prompt / parse_digest 负责提炼，
+remember_lines 负责落盘，判定标准与 memory_write 保持一致。
 """
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -22,6 +27,14 @@ MemoryAction = Literal["append", "list", "delete"]
 
 MAX_MEMORY_CHARS = 4000          # 注入系统提示词的上限
 MAX_MEMORY_FILE_CHARS = 200_000  # 文件本身的上限（防无限膨胀）
+
+# ---- 归档自动提炼（判定标准与 memory_write 一致：偏好/环境/背景，勿记任务细节与机密） ----
+
+DIGEST_MIN_CHARS = 300                # 会话正文低于此长度视为寒暄，不提炼
+DIGEST_MAX_TRANSCRIPT_CHARS = 12_000  # 送入模型的会话正文上限（超出丢最旧）
+DIGEST_MAX_ENTRIES = 8                # 单次最多提炼条数
+DIGEST_ENTRY_MAX_CHARS = 100          # 单条记忆长度上限
+_DIGEST_PLACEHOLDERS = {"无", "没有", "（无）", "(none)", "none", "n/a"}
 
 
 def memory_path() -> Path:
@@ -47,6 +60,102 @@ def render_memory_section() -> str:
     return f"\n# User memory（跨项目的用户记忆，管理用 memory_write）\n{text}\n"
 
 
+def digest_transcript(messages) -> str:
+    """把会话消息压成「用户/助手：正文」的提炼稿；正文总量太短返回空串。
+
+    messages 是 skysheep.messages.Message 列表（鸭子类型：只要有 role/text）。
+    每条消息截前 800 字；总量超出预算时丢最旧的（近期上下文对提炼最有用）。
+    """
+    lines: list[str] = []
+    total = 0
+    for m in messages:
+        if getattr(m, "role", "") not in ("user", "assistant"):
+            continue
+        text = (m.text or "").strip()
+        if not text:
+            continue
+        total += len(text)
+        lines.append(f"{'用户' if m.role == 'user' else '助手'}：{text[:800]}")
+    if total < DIGEST_MIN_CHARS:
+        return ""
+    while lines and sum(len(ln) + 2 for ln in lines) > DIGEST_MAX_TRANSCRIPT_CHARS:
+        lines.pop(0)
+    return "\n\n".join(lines)
+
+
+def build_digest_prompt(transcript: str) -> str:
+    return (
+        "下面是一段已结束的助手会话记录。请站在「长期为这位用户服务」的角度，"
+        "提炼值得跨项目长期记住的信息（用户的偏好、习惯、环境、背景），"
+        "例如常用工具链、目录位置、交付形式偏好、固定的做事约定。\n"
+        "要求：\n"
+        f"- 每条一行、以「- 」开头，最多 {DIGEST_MAX_ENTRIES} 条；没有值得记的就只输出：无\n"
+        f"- 每条不超过 {DIGEST_ENTRY_MAX_CHARS} 字，具体、可长期有效、可独立理解\n"
+        "- 一次性的任务细节（改了哪个文件、报了什么错）不要记\n"
+        "- 密码、API Key 等机密信息绝对不要记\n\n"
+        "会话记录：\n" + transcript
+    )
+
+
+def parse_digest(raw: str) -> list[str]:
+    """解析模型输出的提炼稿：剥列表符号/编号，滤空行与「无」类占位，批内去重。"""
+    out: list[str] = []
+    for ln in raw.splitlines():
+        s = re.sub(r"^\d+[.、)）]\s*", "", re.sub(r"^[-*·•]\s*", "", ln.strip())).strip()
+        if not s or s.lower() in _DIGEST_PLACEHOLDERS:
+            continue
+        if len(s) > DIGEST_ENTRY_MAX_CHARS:
+            s = s[:DIGEST_ENTRY_MAX_CHARS].rstrip() + "…"
+        if s not in out:
+            out.append(s)
+        if len(out) >= DIGEST_MAX_ENTRIES:
+            break
+    return out
+
+
+def _read_lines(p: Path) -> list[str]:
+    # memory.md 是引擎自产文件（本模块恒以 UTF-8 落盘），不走 textio 的编码探测——
+    # textio 面向的是用户手写的未知编码文件；这里用 errors="replace" 只作兜底
+    try:
+        return p.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
+def _write_lines(p: Path, lines: list[str]) -> None:
+    # 容量护栏：超限从最旧的条目开始丢
+    while lines and sum(len(ln) + 1 for ln in lines) > MAX_MEMORY_FILE_CHARS:
+        lines.pop(0)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    except OSError as e:
+        raise ToolError(f"cannot write memory file: {e}") from e
+
+
+def remember_lines(lines: list[str]) -> list[str]:
+    """批量追加记忆条目（自动加日期前缀与「(自动)」来源标记），返回真正新增的内容。
+
+    与 memory_write append 同一去重规则：内容已是现有条目的子串则跳过；
+    容量护栏（MAX_MEMORY_FILE_CHARS）由 _write_lines 统一兜底。
+    「(自动)」标记：归档提炼是无确认的后台写入，用户在全局记忆页要能
+    一眼分辨并清理（手动 memory_write 的条目不带标记）。
+    """
+    p = memory_path()
+    existing = _read_lines(p)
+    added: list[str] = []
+    today = date.today().isoformat()
+    for content in lines:
+        content = content.strip()
+        if not content or any(content in ln for ln in existing):
+            continue
+        existing.append(f"- [{today}] (自动) {content}")
+        added.append(content)
+    if added:
+        _write_lines(p, existing)
+    return added
+
+
 class MemoryWriteArgs(BaseModel):
     action: MemoryAction = Field(description="append 追加一条 / list 查看全部 / delete 按内容删除")
     content: str = Field(default="", description="append：要记住的内容（一句话，具体、可长期有效）")
@@ -69,14 +178,14 @@ class MemoryWriteTool(Tool):
             content = (args.content or "").strip()
             if not content:
                 raise ToolError("append 需要 content（要记住的内容）")
-            lines = self._read_lines(p)
+            lines = _read_lines(p)
             if any(content in ln for ln in lines):
                 return "already remembered（已有相同内容的记忆，不重复追加）"
             lines.append(f"- [{date.today().isoformat()}] {content}")
-            self._write_lines(p, lines)
+            _write_lines(p, lines)
             return f"remembered: {content[:80]}"
         if args.action == "list":
-            lines = self._read_lines(p)
+            lines = _read_lines(p)
             if not lines:
                 return "(memory is empty)"
             return "\n".join(lines)
@@ -84,28 +193,10 @@ class MemoryWriteTool(Tool):
         match = (args.match or "").strip()
         if not match:
             raise ToolError("delete 需要 match（要删除条目包含的片段）")
-        lines = self._read_lines(p)
+        lines = _read_lines(p)
         kept = [ln for ln in lines if match not in ln]
         removed = len(lines) - len(kept)
         if not removed:
             return f"no memory entry contains {match!r}"
-        self._write_lines(p, kept)
+        _write_lines(p, kept)
         return f"forgot {removed} entr{'y' if removed == 1 else 'ies'}"
-
-    @staticmethod
-    def _read_lines(p: Path) -> list[str]:
-        try:
-            return p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return []
-
-    @staticmethod
-    def _write_lines(p: Path, lines: list[str]) -> None:
-        # 容量护栏：超限从最旧的条目开始丢
-        while lines and sum(len(ln) + 1 for ln in lines) > MAX_MEMORY_FILE_CHARS:
-            lines.pop(0)
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-        except OSError as e:
-            raise ToolError(f"cannot write memory file: {e}") from e

@@ -67,6 +67,9 @@ LOCAL_ONLY_METHODS = frozenset({
     "skills.install", "skills.toggle", "skills.scope", "skills.delete",
     # 定时任务：allowed_tools 可预授权 run_command 等危险工具
     "cron.add", "cron.update", "cron.run_now",
+    # 任务编排：无人值守节点同样按 allowed_tools 预授权危险工具
+    "pipeline.create", "pipeline.start", "pipeline.cancel",
+    "pipeline.delete", "pipeline.node_rerun",
     # 网络暴露开关（放宽方向；disable 是收紧、不在表内）
     "lan.enable", "remote.enable",
     # 项目边界：切任意目录 / 删项目 / 改 AGENTS.md（持久 prompt 注入链）
@@ -199,6 +202,7 @@ def create_app(
         await backend.setup()
         backend.start_reminder_loop()
         backend.start_cron_loop()
+        backend.start_pipeline_loop()
         import logging
 
         logging.getLogger("skysheep").info(
@@ -206,6 +210,7 @@ def create_app(
         )
         yield
         backend.stop_cron_loop()
+        backend.stop_pipeline_loop()
         backend.stop_reminder_loop()
         await backend.shutdown()
         try:
@@ -405,6 +410,20 @@ def create_app(
         if method == "tasks.cancel_all":
             only = backend.session.id if (not local and backend.session) else None
             return await backend.tasks_cancel_all(session_id=only)
+        if method == "pipeline.list":
+            return await backend.pipeline_list()
+        if method == "pipeline.get":
+            return await backend.pipeline_get(params)
+        if method == "pipeline.create":
+            return await backend.pipeline_create(params)
+        if method == "pipeline.start":
+            return await backend.pipeline_start(params)
+        if method == "pipeline.cancel":
+            return await backend.pipeline_cancel(params)
+        if method == "pipeline.delete":
+            return await backend.pipeline_delete(params)
+        if method == "pipeline.node_rerun":
+            return await backend.pipeline_node_rerun(params)
         if method == "usage.stats":
             return await backend.usage_stats(params)
         if method == "fs.read":
@@ -587,6 +606,9 @@ def create_app(
             return await backend.memory_get()
         if method == "memory.save":
             return await backend.memory_save(str(params.get("text", "")))
+        if method == "memory.digest_save":
+            # 归档自动记忆总闸：只切一个布尔开关，不写敏感配置，远程可调
+            return await backend.memory_digest_save(bool(params.get("enabled", True)))
         if method == "advanced.get":
             return backend.advanced_settings()
         if method == "advanced.save":

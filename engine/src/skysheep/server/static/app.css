@@ -30,6 +30,10 @@
   --reg: #8f1d1d;
   --up: #c2261d;
   --down: #0f6b3a;
+  /* 状态色别名：成功/失败走各主题的绿/红槽位（用量、IO 状态等共用），
+     按元素所在主题实时解析，深浅色自动适配 */
+  --ok: var(--down);
+  --bad: var(--up);
   --ai: #4f35a8;
   --on-accent: #f4ecd8;      /* 交互色（主按钮/选中态）上的文字色，随主题换 */
   /* —— 圆角 / 阴影（铅字压印，非弥散阴影） —— */
@@ -365,6 +369,9 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   background: var(--card); border: 1.5px solid var(--line2); border-radius: var(--r-md);
   padding: 12px 16px; box-shadow: var(--shadow-sm); line-height: 1.75;
 }
+/* 无空格长串（超长链接、Base64 等）在助手里也要断行：用户气泡已有同款规则，
+   缺了这行 .md 内容会把整栏撑到两千多像素宽 */
+.msg.assistant .md, .msg.error .md { overflow-wrap: break-word; min-width: 0; }
 .msg.notice {
   align-self: center; color: var(--dim); font-size: 12px;
   background: var(--paper-sunken); border: 1px solid var(--line);
@@ -880,6 +887,63 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .cron-tool:hover { background: var(--paper-inset); }
 .cron-tool .ct-name { font-family: var(--font-mono); font-size: 11.5px; }
 .cron-tool.locked { opacity: .62; cursor: default; }
+
+/* ---------- 任务编排（流水线，右面板标签） ---------- */
+/* 列表项沿用 .cron-item 骨架；节点状态用小胶囊一条排开，一眼看出推进到哪了 */
+.pipeline-item { align-items: flex-start; }
+.pl-nodebar {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px;
+}
+.pl-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  max-width: 100%; font-size: 11px; line-height: 1.6;
+  padding: 0 7px; border-radius: 999px;
+  border: 1px solid var(--line2); color: var(--text2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pl-st-done { border-color: var(--ok); color: var(--ok); }
+.pl-st-running { border-color: var(--blue); color: var(--blue); }
+.pl-st-error { border-color: var(--reg); color: var(--reg); }
+.pl-st-ready { border-color: var(--amber, #b07d2b); color: var(--amber, #b07d2b); }
+.pl-st-cancelled { opacity: .6; }
+/* 流水线整体状态：失败的纸面提示靠左缘色条 */
+.pl-pipe-failed { box-shadow: inset 2px 0 0 var(--reg); }
+.pl-pipe-running { box-shadow: inset 2px 0 0 var(--blue); }
+
+/* 详情弹窗里的节点卡片 */
+.pl-node-view {
+  border: 1.5px solid var(--line2); border-radius: var(--r-sm);
+  padding: 8px 10px; margin-top: 8px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.pl-node-view.pl-st-error { border-color: var(--reg); }
+.pl-node-view.pl-st-running { border-color: var(--blue); }
+.pl-node-head { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+.pl-node-err { font-size: 12px; color: var(--reg); }
+.pl-node-result {
+  font-size: 12px; color: var(--text2); line-height: 1.65; white-space: pre-wrap;
+  background: var(--paper-sunken); border-radius: var(--r-xs); padding: 6px 8px;
+}
+
+/* 新建弹窗里的节点编辑行 */
+.pl-node-edit {
+  border: 1.5px solid var(--line2); border-radius: var(--r-sm);
+  padding: 8px 10px; margin-top: 8px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.pl-node-edit-head { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text); }
+.pl-node-edit-head .spacer { flex: 1; }
+.pl-deps { font-size: 12px; color: var(--text2); display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.pl-dep { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
+.pl-tools { font-size: 12px; }
+.pl-tools summary { cursor: pointer; color: var(--text2); }
+.pl-tools-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 2px 10px; max-height: 170px; overflow-y: auto; margin-top: 6px;
+  background: var(--paper-sunken); border: 1.5px solid var(--line2);
+  border-radius: var(--r-sm); padding: 7px 9px;
+}
+
 
 /* ---------- 文件树（右面板「文件」标签） ---------- */
 .files-tree {
@@ -1409,6 +1473,12 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .rt-menu-item .mi-nokey { margin-left: auto; color: var(--reg); font-size: 11px; flex-shrink: 0; }
+.rt-menu-item .mi-role {
+  margin-left: auto; flex-shrink: 0; font-size: 11px; padding: 1px 2px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--card); color: var(--text); max-width: 76px;
+}
+.rt-menu-item .mi-role:disabled { opacity: 0.45; }
 .rt-menu-actions {
   display: flex; justify-content: flex-end; align-items: center; gap: 10px;
   padding-top: 8px; margin-top: 6px; border-top: 1px solid var(--line);
@@ -1471,6 +1541,11 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .rt-member .rt-m-model {
   font-family: var(--font-mono); font-size: 11px; color: var(--dim); flex: 1;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rt-member .rt-m-role {
+  flex-shrink: 0; font-size: 10.5px; color: var(--ai);
+  border: 1px solid currentColor; border-radius: 999px;
+  padding: 0 6px; line-height: 1.7;
 }
 .rt-member .rt-m-status { flex-shrink: 0; color: var(--dim); font-size: 12px; }
 .rt-member.ok .rt-m-status { color: var(--down); }

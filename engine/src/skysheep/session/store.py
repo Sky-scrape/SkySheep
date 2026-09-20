@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     summary TEXT NOT NULL DEFAULT '',
     pinned INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
+    memory_digested INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -52,6 +53,33 @@ CREATE TABLE IF NOT EXISTS whitelist_rules (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
+CREATE TABLE IF NOT EXISTS pipelines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER REFERENCES projects(id),
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    concurrency INTEGER NOT NULL DEFAULT 2,
+    created_at REAL NOT NULL,
+    finished_at REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS pipeline_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_id INTEGER NOT NULL REFERENCES pipelines(id),
+    seq INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    allowed_tools TEXT NOT NULL DEFAULT '',
+    depends_on TEXT NOT NULL DEFAULT '',
+    dep_mode TEXT NOT NULL DEFAULT 'all',
+    status TEXT NOT NULL DEFAULT 'blocked',
+    result TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    runs INTEGER NOT NULL DEFAULT 0,
+    started_at REAL NOT NULL DEFAULT 0,
+    finished_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_nodes_pipeline ON pipeline_nodes(pipeline_id, seq);
 CREATE TABLE IF NOT EXISTS usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -357,6 +385,14 @@ class SessionStore:
             )
         except Exception:
             pass
+        # 旧库迁移：sessions 补 memory_digested 列（归档自动记忆：同会话只提炼一次，
+        # 取消归档再归档不重复花钱）
+        try:
+            await self._db.execute(
+                "ALTER TABLE sessions ADD COLUMN memory_digested INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
         await self._db.commit()
         await self._setup_fts()
         return self
@@ -579,6 +615,22 @@ class SessionStore:
         assert self._db
         await self._db.execute(
             "UPDATE sessions SET archived = ? WHERE id = ?", (1 if archived else 0, session_id)
+        )
+        await self._db.commit()
+
+    async def get_session_memory_digested(self, session_id: str) -> bool:
+        """归档自动记忆是否已对该会话提炼过（取消归档再归档不重复提炼）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT memory_digested FROM sessions WHERE id = ?", (session_id,)
+        )
+        row = await cur.fetchone()
+        return bool(row and row[0])
+
+    async def mark_session_memory_digested(self, session_id: str) -> None:
+        assert self._db
+        await self._db.execute(
+            "UPDATE sessions SET memory_digested = 1 WHERE id = ?", (session_id,)
         )
         await self._db.commit()
 
@@ -1449,6 +1501,324 @@ class SessionStore:
         )
         rows = await cur.fetchall()
         return [self._cron_row(r) for r in rows]
+
+    # ---- 任务编排（pipelines / pipeline_nodes）：按依赖顺序自动跑的 Agent 任务 ----
+    # 流水线是「草稿 → 运行 → 终态」的容器；节点是 DAG 上的一个 headless 运行，
+    # 依赖满足（dep_mode: all/any）才就绪，由服务层编排循环调度执行。
+
+    # 规模上限：并发调度兜住的是「同时跑多少」，这里兜的是「一共排多少」——
+    # 没有限制时一条几千节点的流水线会让列表渲染和每 5 秒的扫描都变慢
+    MAX_PIPELINE_NODES = 50
+    MAX_NODE_PROMPT_CHARS = 10_000
+    MAX_NODE_TITLE_CHARS = 200
+    MAX_PIPELINE_NAME_CHARS = 100
+
+    @staticmethod
+    def _pipeline_row(r) -> dict:
+        return {
+            "id": r["id"],
+            "project_id": r["project_id"],
+            "name": r["name"],
+            "status": r["status"],
+            "concurrency": r["concurrency"],
+            "created_at": r["created_at"],
+            "finished_at": r["finished_at"],
+        }
+
+    @staticmethod
+    def _pipeline_node_row(r) -> dict:
+        return {
+            "id": r["id"],
+            "pipeline_id": r["pipeline_id"],
+            "seq": r["seq"],
+            "title": r["title"],
+            "prompt": r["prompt"],
+            "allowed_tools": [t for t in (r["allowed_tools"] or "").split(",") if t],
+            "depends_on": [
+                int(x) for x in (r["depends_on"] or "").split(",") if x.strip().lstrip("-").isdigit()
+            ],
+            "dep_mode": r["dep_mode"],
+            "status": r["status"],
+            "result": r["result"],
+            "last_error": r["last_error"],
+            "session_id": r["session_id"],
+            "runs": r["runs"],
+            "started_at": r["started_at"],
+            "finished_at": r["finished_at"],
+        }
+
+    async def list_pipelines(self, project_id: int | None = None) -> list[dict]:
+        """流水线列表（含全部节点），新建序倒序。"""
+        assert self._db
+        if project_id is None:
+            cur = await self._db.execute("SELECT * FROM pipelines ORDER BY created_at DESC, id DESC")
+        else:
+            cur = await self._db.execute(
+                "SELECT * FROM pipelines WHERE project_id = ? ORDER BY created_at DESC, id DESC",
+                (project_id,),
+            )
+        prows = await cur.fetchall()
+        out = []
+        for pr in prows:
+            pipe = self._pipeline_row(pr)
+            pipe["nodes"] = await self.list_pipeline_nodes(pipe["id"])
+            out.append(pipe)
+        return out
+
+    async def get_pipeline(self, pipeline_id: int) -> dict | None:
+        assert self._db
+        cur = await self._db.execute("SELECT * FROM pipelines WHERE id = ?", (pipeline_id,))
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        pipe = self._pipeline_row(row)
+        pipe["nodes"] = await self.list_pipeline_nodes(pipeline_id)
+        return pipe
+
+    async def get_pipeline_node(self, node_id: int) -> dict | None:
+        assert self._db
+        cur = await self._db.execute("SELECT * FROM pipeline_nodes WHERE id = ?", (node_id,))
+        row = await cur.fetchone()
+        return self._pipeline_node_row(row) if row else None
+
+    async def list_pipeline_nodes(self, pipeline_id: int) -> list[dict]:
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM pipeline_nodes WHERE pipeline_id = ? ORDER BY seq ASC, id ASC",
+            (pipeline_id,),
+        )
+        rows = await cur.fetchall()
+        return [self._pipeline_node_row(r) for r in rows]
+
+    async def add_pipeline(
+        self,
+        project_id: int,
+        name: str,
+        nodes: list[dict] | None = None,
+        concurrency: int = 2,
+    ) -> dict:
+        """建流水线（草稿态）+ 一次性落全部节点。
+
+        nodes 里每项的 depends_on 用「同批次序号」（0 起，见 tools/pipeline.py 的
+        after 字段），这里统一物化成真实节点 id——对外（WS/工具查询）只有 id 一种引用。
+        """
+        assert self._db
+        nodes = list(nodes or [])
+        if len(nodes) > self.MAX_PIPELINE_NODES:
+            raise ValueError(f"一条流水线最多 {self.MAX_PIPELINE_NODES} 个节点")
+        if len(name) > self.MAX_PIPELINE_NAME_CHARS:
+            raise ValueError(f"流水线名不能超过 {self.MAX_PIPELINE_NAME_CHARS} 个字")
+        for n in nodes:
+            self._validate_node_text(n.get("title") or "", n.get("prompt") or "")
+        now = time.time()
+        cur = await self._db.execute(
+            "INSERT INTO pipelines (project_id, name, status, concurrency, created_at)"
+            " VALUES (?, ?, 'draft', ?, ?)",
+            (project_id, name, max(1, min(4, int(concurrency or 2))), now),
+        )
+        pid = cur.lastrowid
+        ids: list[int] = []
+        for i, n in enumerate(nodes or []):
+            deps = await self._materialize_deps(n.get("depends_on") or [], ids)
+            nid = await self._insert_node(
+                pid, i, n.get("title") or f"节点 {i + 1}", n.get("prompt") or "",
+                n.get("allowed_tools") or [], deps, n.get("dep_mode") or "all",
+            )
+            ids.append(nid)
+        await self._db.commit()
+        return await self.get_pipeline(pid)
+
+    async def add_pipeline_node(
+        self,
+        pipeline_id: int,
+        title: str,
+        prompt: str,
+        allowed_tools: list[str] | None = None,
+        depends_on: list[int] | None = None,
+        dep_mode: str = "all",
+    ) -> dict:
+        """追加节点；depends_on 直接给真实节点 id（必须是同流水线的节点）。"""
+        assert self._db
+        self._validate_node_text(title, prompt)
+        existing = await self.list_pipeline_nodes(pipeline_id)
+        if len(existing) >= self.MAX_PIPELINE_NODES:
+            raise ValueError(f"一条流水线最多 {self.MAX_PIPELINE_NODES} 个节点")
+        await self._check_dep_refs(pipeline_id, depends_on or [], exclude_id=None)
+        seq = max((n["seq"] for n in existing), default=-1) + 1
+        nid = await self._insert_node(
+            pipeline_id, seq, title, prompt, allowed_tools or [],
+            depends_on or [], dep_mode,
+        )
+        await self._db.commit()
+        return await self.get_pipeline_node(nid)
+
+    @staticmethod
+    def _validate_node_text(title: str, prompt: str) -> None:
+        """节点文本的长度上限（超限报中文错，而不是默默截断让指令失真）。"""
+        if len(title) > SessionStore.MAX_NODE_TITLE_CHARS:
+            raise ValueError(f"节点名不能超过 {SessionStore.MAX_NODE_TITLE_CHARS} 个字")
+        if len(prompt) > SessionStore.MAX_NODE_PROMPT_CHARS:
+            raise ValueError(f"节点指令不能超过 {SessionStore.MAX_NODE_PROMPT_CHARS} 个字")
+
+    async def _insert_node(
+        self, pipeline_id: int, seq: int, title: str, prompt: str,
+        allowed_tools: list[str], depends_on: list[int], dep_mode: str,
+    ) -> int:
+        assert self._db
+        cur = await self._db.execute(
+            "INSERT INTO pipeline_nodes (pipeline_id, seq, title, prompt, allowed_tools,"
+            " depends_on, dep_mode, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'blocked')",
+            (pipeline_id, seq, title, prompt, ",".join(allowed_tools),
+             ",".join(str(int(x)) for x in depends_on), dep_mode),
+        )
+        return cur.lastrowid
+
+    async def _materialize_deps(self, deps: list, ids: list[int]) -> list[int]:
+        """把同批次序号物化成节点 id；越界序号直接丢弃（宽松处理，避免建流水线被卡死）。"""
+        out = []
+        for d in deps or []:
+            try:
+                idx = int(d)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(ids):
+                out.append(ids[idx])
+        return out
+
+    async def _check_dep_refs(
+        self, pipeline_id: int, depends_on: list[int], exclude_id: int | None,
+    ) -> None:
+        """依赖必须是同流水线的其他节点；并做环检测（改依赖时可能成环）。"""
+        valid = {
+            n["id"]
+            for n in await self.list_pipeline_nodes(pipeline_id)
+            if n["id"] != exclude_id
+        }
+        for d in depends_on or []:
+            if int(d) not in valid:
+                raise ValueError(f"依赖的节点 #{d} 不存在（或不是本流水线的节点）")
+
+    async def has_dependency_cycle(self, pipeline_id: int, node_id: int, new_deps: list[int]) -> bool:
+        """假设把 node_id 的依赖改成 new_deps，图里是否会出现环。
+
+        节点很少（个位数），DFS 足够。node_id 引用自己也按环处理。
+        """
+        graph = {
+            n["id"]: [int(d) for d in n["depends_on"]]
+            for n in await self.list_pipeline_nodes(pipeline_id)
+        }
+        graph[node_id] = [int(d) for d in new_deps]
+        if node_id in graph[node_id]:
+            return True
+        seen: set[int] = set()
+
+        def walk(cur: int, path: set[int]) -> bool:
+            if cur in path:
+                return True
+            if cur in seen:
+                return False
+            path.add(cur)
+            for nxt in graph.get(cur, []):
+                if nxt in graph and walk(nxt, path):
+                    return True
+            path.discard(cur)
+            seen.add(cur)
+            return False
+
+        return any(walk(nid, set()) for nid in list(graph))
+
+    async def update_pipeline_node(self, node_id: int, **kw) -> dict | None:
+        assert self._db
+        if "title" in kw or "prompt" in kw:
+            node = await self.get_pipeline_node(node_id)
+            if node is not None:
+                self._validate_node_text(
+                    kw.get("title", node["title"]), kw.get("prompt", node["prompt"])
+                )
+        allowed = ("seq", "title", "prompt", "allowed_tools", "depends_on", "dep_mode",
+                   "status", "result", "last_error", "session_id", "runs",
+                   "started_at", "finished_at")
+        fields, args = [], []
+        for k, v in kw.items():
+            if k not in allowed:
+                continue
+            if k == "allowed_tools":
+                v = ",".join(str(x) for x in (v or []))
+            elif k == "depends_on":
+                v = ",".join(str(int(x)) for x in (v or []))
+            fields.append(f"{k} = ?")
+            args.append(v)
+        if not fields:
+            return await self.get_pipeline_node(node_id)
+        args.append(node_id)
+        await self._db.execute(
+            f"UPDATE pipeline_nodes SET {', '.join(fields)} WHERE id = ?", args
+        )
+        await self._db.commit()
+        return await self.get_pipeline_node(node_id)
+
+    async def update_pipeline(self, pipeline_id: int, **kw) -> dict | None:
+        assert self._db
+        allowed = ("name", "status", "concurrency", "finished_at")
+        fields, args = [], []
+        for k, v in kw.items():
+            if k not in allowed:
+                continue
+            if k == "concurrency":
+                v = max(1, min(4, int(v or 2)))
+            fields.append(f"{k} = ?")
+            args.append(v)
+        if not fields:
+            return await self.get_pipeline(pipeline_id)
+        args.append(pipeline_id)
+        await self._db.execute(
+            f"UPDATE pipelines SET {', '.join(fields)} WHERE id = ?", args
+        )
+        await self._db.commit()
+        return await self.get_pipeline(pipeline_id)
+
+    async def delete_pipeline_node(self, node_id: int) -> bool:
+        assert self._db
+        node = await self.get_pipeline_node(node_id)
+        if node is None:
+            return False
+        # 引用了它的依赖一并摘除，避免悬空引用卡死下游判定
+        for n in await self.list_pipeline_nodes(node["pipeline_id"]):
+            if node_id in n["depends_on"]:
+                await self.update_pipeline_node(
+                    n["id"], depends_on=[d for d in n["depends_on"] if d != node_id]
+                )
+        await self._db.execute("DELETE FROM pipeline_nodes WHERE id = ?", (node_id,))
+        await self._db.commit()
+        return True
+
+    async def delete_pipeline(self, pipeline_id: int) -> bool:
+        assert self._db
+        await self._db.execute(
+            "DELETE FROM pipeline_nodes WHERE pipeline_id = ?", (pipeline_id,)
+        )
+        cur = await self._db.execute("DELETE FROM pipelines WHERE id = ?", (pipeline_id,))
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def reset_interrupted_pipelines(self) -> int:
+        """应用启动时调用：上次运行中被中断的节点标为错误，就绪态退回等待。
+
+        中断的节点不自动重跑（无人值守运行恢复执行有风险），由用户在
+        「任务编排」面板手动重跑；流水线保持 running，其余节点照常调度。
+        """
+        assert self._db
+        await self._db.execute(
+            "UPDATE pipeline_nodes SET status = 'blocked' WHERE status = 'ready'"
+        )
+        cur = await self._db.execute(
+            "UPDATE pipeline_nodes SET status = 'error',"
+            " last_error = '应用重启时运行被中断，可手动重跑', finished_at = ?"
+            " WHERE status = 'running'",
+            (time.time(),),
+        )
+        await self._db.commit()
+        return cur.rowcount
 
     @staticmethod
     def compute_next_run(row: dict, now: float | None = None) -> float:

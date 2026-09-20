@@ -262,12 +262,14 @@ def test_no_api_key_boots_gracefully(home, monkeypatch):
         ws.send_json({"id": "b", "method": "boot"})
         snap = recv_until(ws, "b")["result"]
         assert snap["provider_error"], "应记录 provider_error 而非启动失败"
-        assert "DEEPSEEK_API_KEY" in snap["provider_error"]
+        assert "还没有配置 API Key" in snap["provider_error"]
 
         ws.send_json({"id": "c", "method": "chat.send", "params": {"text": "hi"}})
         frame = recv_until(ws, "c")
         assert not frame["ok"]
         assert "API Key" in frame["error"]
+        # 面向普通用户的文案指路设置页，不要求手改配置文件（P1-1）
+        assert "config.toml" not in frame["error"]
 
 
 def test_settings_save_provider(home, monkeypatch):
@@ -671,7 +673,7 @@ def test_failed_model_switch_keeps_current(home, monkeypatch):
         ws.send_json({"id": "s1", "method": "model.switch", "params": {"name": "zhipu"}})
         frame = recv_until(ws, "s1")
         assert not frame["ok"], "没配 Key 的服务不应切换成功"
-        assert "API key" in frame["error"], frame["error"]
+        assert "还没有配置 API Key" in frame["error"], frame["error"]
 
         ws.send_json({"id": "b1", "method": "boot"})
         snap = recv_until(ws, "b1")["result"]

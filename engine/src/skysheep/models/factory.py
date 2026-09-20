@@ -12,10 +12,10 @@ from .openai_compat import OpenAICompatProvider
 def build_provider(name: str, cfg: ProviderConfig) -> Provider:
     key = resolve_api_key(name, cfg)
     if key is None:
-        env_hint = cfg.env_key or (name + "_API_KEY").upper()
+        # 这段文案直接进前端横幅/报错条：面向的是普通用户，指路设置页而不是配置文件
         raise ConfigError(
-            f"provider '{name}' has no API key: set api_key in ~/.skysheep/config.toml "
-            f"or export {env_hint}"
+            f"模型服务「{name}」还没有配置 API Key——"
+            "打开 ⚙ 设置 · 模型服务，选一个服务粘贴 Key 即可"
         )
     if cfg.kind == "fake":
         # 首启向导的「演示模式」：脚本化回放，不访问任何网络服务。

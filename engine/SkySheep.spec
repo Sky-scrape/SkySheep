@@ -54,9 +54,19 @@ hiddenimports = [
     "skysheep.models.probe",
 ]
 
-datas = [
-    (str(static), "skysheep/server/static"),
+# static/ 整目录拷贝会把开发期工具残留（.mimosa 之类点开头目录）一起带进安装包，
+# 且该目录被 StaticFiles 挂载、未认证可读——逐文件收集并跳过点开头路径，从源头挡住
+static_datas = [
+    (
+        str(p),
+        str((Path("skysheep") / "server" / "static" / p.relative_to(static).parent)),
+    )
+    for p in sorted(static.rglob("*"))
+    if p.is_file()
+    and not any(part.startswith(".") for part in p.relative_to(static).parts)
 ]
+
+datas = static_datas
 
 a = Analysis(
     [str(project_root / "desktop.py")],

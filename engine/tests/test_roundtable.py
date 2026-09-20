@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from skysheep.config import load_config
 from skysheep.core.roundtable import (
+    PER_PROVIDER_CONCURRENCY,
     MemberSpec,
     run_roundtable,
     usage_rows,
@@ -88,6 +89,58 @@ def make_member(spec_provider, text: str) -> MemberSpec:
         model=spec_provider.model,
         provider=spec_provider,
     )
+
+
+class DeltaThenHang(Provider):
+    """先吐一段草稿再挂住（用于取消回收测试）。"""
+
+    name, model = "dh", "d1"
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        yield ProviderTextDelta("部分草稿")
+        await asyncio.sleep(30)
+
+
+class AlwaysFail(Provider):
+    """每次调用都抛非瞬态错误（如 Key 无效）。"""
+
+    name, model = "af", "a1"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.calls += 1
+        raise RuntimeError("fatal always")
+        yield  # pragma: no cover
+
+
+class ConcurrencyProbe:
+    """跨实例共享的并发观测器。"""
+
+    def __init__(self) -> None:
+        self.cur = 0
+        self.peak = 0
+
+
+class ThrottleProbeProvider(Provider):
+    """同名服务探针：记录观测到的并发峰值。"""
+
+    name, model = "same", "x"
+
+    def __init__(self, probe: ConcurrencyProbe) -> None:
+        super().__init__()
+        self.probe = probe
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.probe.cur += 1
+        self.probe.peak = max(self.probe.peak, self.probe.cur)
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            self.probe.cur -= 1
+        yield ProviderTextDelta("草稿")
 
 
 def collector():
@@ -301,7 +354,10 @@ def test_roundtable_send_end_to_end(home):
         ws.send_json({"id": "r1", "method": "chat.send", "params": {
             "text": "什么是黑洞",
             "roundtable": True,
-            "members": [{"provider": "fa", "model": "ma"}, {"provider": "fb", "model": "mb"}],
+            "members": [
+                {"provider": "fa", "model": "ma", "role": "critic"},
+                {"provider": "fb", "model": "mb"},
+            ],
         }})
         events = []
         frame = recv_until(ws, "r1", events)
@@ -320,6 +376,7 @@ def test_roundtable_send_end_to_end(home):
     assert [m["index"] for m in members] == [0, 1, 2]
     assert members[0]["provider"] == "fake"  # 主席作为成员 0 出草稿
     assert members[1]["provider"] == "fa" and members[2]["provider"] == "fb"
+    assert members[1]["role"] == "critic" and members[2]["role"] == ""
 
     # 融合答案 = 本轮正式助手消息，带圆桌元数据
     assistant = next(e for e in events if e["event"] == "assistant_message")
@@ -331,6 +388,8 @@ def test_roundtable_send_end_to_end(home):
     assert meta["chair_answers"] is True
     assert meta["debate_rounds"] == 0 and meta["rounds"] == 1
     assert [m["status"] for m in meta["members"]] == ["done", "done", "done"]
+    # 身份随元数据持久化（回放徽标用）
+    assert [m["role"] for m in meta["members"]] == ["", "critic", ""]
     # 草稿随消息元数据持久化（刷新/重进会话后圆桌卡可回看）；用量分成员记录
     assert [m["draft"] for m in meta["members"]] == ["主席草稿", "成员A草稿", "成员B草稿"]
     assert all(m["input_tokens"] > 0 and m["output_tokens"] > 0 for m in meta["members"])
@@ -402,7 +461,7 @@ model = "m4"
     # 构建失败（缺 Key）的成员降级为错误卡片而不是拖垮整场
     specs3 = backend._resolve_members([{"provider": "p4", "model": "m4"}])
     assert specs3[0].provider is None
-    assert "API key" in specs3[0].build_error
+    assert "还没有配置 API Key" in specs3[0].build_error
 
 
 def test_roundtable_without_members_errors_cleanly(home):
@@ -691,6 +750,7 @@ def test_roundtable_settings_roundtrip(home):
         ws.send_json({"id": "s1", "method": "roundtable.save", "params": {
             "max_members": 5, "member_timeout_s": 90,
             "debate_rounds": 1, "chair_answers": False,
+            "member_history_turns": 2,
         }})
         saved = recv_until(ws, "s1")
         assert saved["ok"]
@@ -701,12 +761,14 @@ def test_roundtable_settings_roundtrip(home):
         ws.send_json({"id": "g2", "method": "roundtable.get"})
         again = recv_until(ws, "g2")
         assert again["result"]["member_timeout_s"] == 90
+        assert again["result"]["member_history_turns"] == 2
 
     raw = (home / "home" / "config.toml").read_text(encoding="utf-8")
     data = tomllib.loads(raw)
     assert data["roundtable"]["max_members"] == 5
     assert data["roundtable"]["debate_rounds"] == 1
     assert data["roundtable"]["chair_answers"] is False
+    assert data["roundtable"]["member_history_turns"] == 2
 
 
 def test_roundtable_regenerate_reruns_roundtable(home):
@@ -749,3 +811,260 @@ def test_roundtable_regenerate_reruns_roundtable(home):
     assert json.loads(rows[-1][1])["content"][0]["text"] == "融合2"
     # 成员参与了第二轮圆桌（实例被重用，脚本的第二条被用掉）
     assert len(member.calls) == 2
+
+
+# ---------- 取消回收 / 草稿总预算 / 并发闸 / 辩论轮跳过（健壮性修订） ----------
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_members_keeps_partial_drafts():
+    """成员阶段取消：进行中成员已流出的部分草稿回收进 outcome，
+    状态 error（标注已取消）——用户已看到的内容不凭空消失。"""
+    events, emit = collector()
+    task = asyncio.create_task(run_roundtable(
+        members=[make_member(DeltaThenHang(), "part")],
+        chair=FakeProvider([[TextBlock(text="融合")]]),
+        system_text="", history=HISTORY, user_text="Q",
+        timeout_s=30, emit=emit,
+    ))
+    await asyncio.sleep(0.1)  # 等第一条 delta 流出
+    task.cancel()
+    outcome = await task
+    assert outcome.status == "cancelled"
+    assert len(outcome.members) == 1
+    r = outcome.members[0]
+    assert r.status == "error" and "已取消" in r.error
+    assert r.text == "部分草稿"
+    assert any(e.kind == "roundtable_member_delta" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_fusion_drafts_clipped_to_total_budget():
+    """主席上下文有限时：融合草稿按总预算等比截断（每个成员都保留开头），
+    而不是把整场融合撑爆。"""
+    chair = FakeProvider([[TextBlock(text="融合")]])
+    events, emit = collector()
+    outcome = await run_roundtable(
+        members=[
+            make_member(FakeProvider([[TextBlock(text="甲" * 5000)]]), "a"),
+            make_member(FakeProvider([[TextBlock(text="乙" * 5000)]]), "b"),
+            make_member(FakeProvider([[TextBlock(text="丙" * 5000)]]), "c"),
+        ],
+        chair=chair, system_text="SYS", history=HISTORY, user_text="Q",
+        timeout_s=30, emit=emit, chair_context_tokens=10_000,
+    )
+    assert outcome.status == "done"
+    combined = chair.calls[0][-1].text
+    # 预算 ≈ 10000 − 历史/问题/指令估算 − 答案余量（下限随上下文 5% 缩放，
+    # 10000 上下文落到绝对下限 2000 档之上、由剩余空间决定）
+    assert len(combined) < 11_000  # 草稿总量被压进预算 + 三节标题 + 融合指令
+    assert combined.count("已截断") == 3
+    assert all(f"### 成员{i}" in combined for i in (1, 2, 3))  # 每个成员的观点都还在
+
+
+@pytest.mark.asyncio
+async def test_fusion_budget_floor_scales_with_context():
+    """小上下文主席：预算下限随上下文缩放（5%，绝对下限 2000），
+    不再把 8000 字草稿硬塞进塞不下的上下文。"""
+    chair = FakeProvider([[TextBlock(text="融合")]])
+    events, emit = collector()
+    outcome = await run_roundtable(
+        members=[
+            make_member(FakeProvider([[TextBlock(text="甲" * 5000)]]), "a"),
+            make_member(FakeProvider([[TextBlock(text="乙" * 5000)]]), "b"),
+        ],
+        chair=chair, system_text="SYS", history=HISTORY, user_text="Q",
+        timeout_s=30, emit=emit, chair_context_tokens=6_000,
+    )
+    assert outcome.status == "done"
+    combined = chair.calls[0][-1].text
+    # 6000 上下文 − 历史与指令估算 − 4000 答案余量为负 → 落到下限
+    # max(2000, 6000//20=300) = 2000 字符：融合仍成功，草稿总量远小于旧行为的 8000
+    assert len(combined) < 4_000
+    assert outcome.fused_text == "融合"
+
+
+@pytest.mark.asyncio
+async def test_same_provider_members_are_throttled():
+    """同一 provider_name 的多个成员共享并发闸：4 个成员只允许 2 路并发，
+    避免一把 API Key 并发多路触发限流（流式吐到一半的 429 是不可重试的）。"""
+    probe = ConcurrencyProbe()
+    events, emit = collector()
+    outcome = await run_roundtable(
+        members=[make_member(ThrottleProbeProvider(probe), f"m{i}") for i in range(4)],
+        chair=FakeProvider([[TextBlock(text="融合")]]),
+        system_text="", history=HISTORY, user_text="Q",
+        timeout_s=30, emit=emit,
+    )
+    assert outcome.status == "done"
+    assert probe.peak == PER_PROVIDER_CONCURRENCY
+
+
+@pytest.mark.asyncio
+async def test_debate_skips_hopeless_members():
+    """辩论轮跳过规则：构建失败成员从第一个辩论轮起零成本跳过；运行期失败
+    的成员在第一个辩论轮还有一次重试机会，连败两轮后不再重试；正常成员照常。"""
+    ok_member = FakeProvider([[TextBlock(text="C1")], [TextBlock(text="C1")]])
+    boom = AlwaysFail()
+    chair = FakeProvider([[TextBlock(text="融合")]])
+    events, emit = collector()
+    dead_spec = MemberSpec(
+        provider_name="dead", model="d", provider=None, build_error="no key",
+    )
+
+    outcome = await run_roundtable(
+        members=[dead_spec, make_member(boom, "boom"), make_member(ok_member, "ok")],
+        chair=chair,
+        system_text="", history=HISTORY, user_text="Q",
+        timeout_s=30, emit=emit, debate_rounds=2,
+    )
+
+    assert outcome.status == "done"
+    assert [r.status for r in outcome.members] == ["error", "error", "done"]
+    assert boom.calls == 2  # 首轮 + 辩论轮的一次重试机会，之后跳过
+    assert len(ok_member.calls) == 2  # 第 3 轮已收敛跳过
+    skipped = [e for e in events if e.kind == "roundtable_member_finished" and e.skipped]
+    # 第 2 轮跳过：dead；第 3 轮跳过：dead + boom + ok
+    assert {(e.member_index, e.round) for e in skipped} == {
+        (0, 1), (0, 2), (1, 2), (2, 2),
+    }
+    # 融合照常进行：可用草稿与失败占位并存
+    fusion = chair.calls[0][-1].text
+    assert "C1" in fusion and fusion.count("该成员作答失败") == 2
+
+
+def test_cancel_persists_member_drafts_as_compare(home):
+    """成员阶段取消（无融合文本）：已完成的成员草稿按对比式落库，
+    刷新/重进会话后不消失——用户已经看到过这些卡。"""
+
+    class ChairDraftThenHang(Provider):
+        """第 1 次调用（主席草稿）正常完成，第 2 次（融合）永远挂住。"""
+
+        name, model = "fake", "fake-1"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            self.calls += 1
+            if self.calls == 1:
+                yield ProviderTextDelta("主席草稿")
+                yield ProviderDone(stop_reason="end_turn", input_tokens=3, output_tokens=3)
+                return
+            await asyncio.sleep(30)
+            yield  # pragma: no cover
+
+    with make_rt_client(
+        home, [ChairDraftThenHang(), [[TextBlock(text="成员A草稿")]]]
+    ) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "x1", "method": "chat.send", "params": {
+            "text": "问题", "roundtable": True,
+            "members": [{"provider": "fa", "model": "ma"}],
+        }})
+        finished = 0
+        while True:
+            frame = ws.receive_json()
+            if frame.get("event") == "roundtable_member_finished":
+                finished += 1
+                if finished == 2:  # 主席草稿 + 成员A 已产出，融合（挂住）进行中
+                    ws.send_json({"id": "s1", "method": "stop", "params": {}})
+            if frame.get("id") == "x1":
+                break
+    assert frame["ok"] and frame["result"]["stopped"] is True
+    meta = frame["result"]["roundtable"]
+    assert meta["mode"] == "compare" and meta["status"] == "cancelled"
+    db = sqlite3.connect(home / "home" / "skysheep.db")
+    rows = db.execute("SELECT role, content FROM messages ORDER BY id").fetchall()
+    assert [r[0] for r in rows] == ["user", "assistant", "assistant"]
+    texts = [json.loads(r[1])["content"][0]["text"] for r in rows[1:]]
+    assert texts == ["主席草稿", "成员A草稿"]
+    for r in rows[1:]:
+        saved = json.loads(r[1])["roundtable"]
+        assert saved["cancelled"] is True and saved["mode"] == "compare"
+
+
+# ---------- 成员身份 / 轻上下文 / 近重去重（token 三件套） ----------
+
+
+@pytest.mark.asyncio
+async def test_member_role_changes_system_prompt():
+    """身份预设：角色提示词拼进成员系统提示词（独立作答轮与辩论轮都在），
+    并随 roundtable_started 事件透出（前端徽标用）。"""
+    member = FakeProvider([[TextBlock(text="甲1")], [TextBlock(text="甲2修订")]])
+    chair = FakeProvider([[TextBlock(text="融合")]])
+    events, emit = collector()
+    spec = MemberSpec(provider_name="fake", model="fake-1", provider=member, role="critic")
+
+    outcome = await run_roundtable(
+        members=[spec],
+        chair=chair, system_text="SYS", history=HISTORY, user_text="Q",
+        timeout_s=30, emit=emit, debate_rounds=1,
+    )
+
+    assert outcome.status == "done"
+    for call in member.calls:  # 两轮的系统提示词都带身份
+        assert "批评者" in call[0].text
+        assert "圆桌讨论的成员之一" in call[0].text  # 圆桌成员提示词仍在
+    started = next(e for e in events if e.kind == "roundtable_started")
+    assert started.members[0]["role"] == "critic"
+
+
+@pytest.mark.asyncio
+async def test_member_light_history_trims_member_context():
+    """member_history_turns=1：成员只看最近一轮历史，主席融合仍吃全量。"""
+    long_history = [
+        Message.system("SYS"),
+        Message.user("第一轮问题"), Message.assistant([TextBlock(text="第一轮回答")]),
+        Message.user("第二轮问题"), Message.assistant([TextBlock(text="第二轮回答")]),
+    ]
+    member = FakeProvider([[TextBlock(text="草稿")]])
+    chair = FakeProvider([[TextBlock(text="融合")]])
+    events, emit = collector()
+
+    outcome = await run_roundtable(
+        members=[make_member(member, "m")],
+        chair=chair, system_text="SYS", history=long_history, user_text="新问题",
+        timeout_s=30, emit=emit, member_history_turns=1,
+    )
+
+    assert outcome.status == "done"
+    member_msgs = member.calls[0]
+    texts = [m.text for m in member_msgs]
+    assert "第二轮问题" in texts  # 最近一轮保留
+    assert "第一轮问题" not in texts  # 更早的轮次被裁掉
+    assert member_msgs[-1].text == "新问题"
+    # 主席融合仍吃全量历史（历史在独立消息里，不在合并后的草稿消息里）
+    fusion_all = "\n".join(m.text for m in chair.calls[0])
+    assert "第一轮问题" in fusion_all and "第二轮问题" in fusion_all
+
+
+@pytest.mark.asyncio
+async def test_fusion_dedupes_similar_drafts():
+    """近重去重：雷同的长草稿在融合提示词里替换为指回占位，不再逐字重复；
+    短草稿不参与（相似度高是常态、语义可能相反）。"""
+    same = "黑洞是引力坍缩的产物。" * 60  # 720 字，超过参与门槛
+    member_a = FakeProvider([[TextBlock(text=same)]])
+    member_b = FakeProvider([[TextBlock(text=same + "（微调）")]])
+    chair = FakeProvider([[TextBlock(text="融合")]])
+    events, emit = collector()
+
+    outcome = await run_roundtable(
+        members=[make_member(member_a, "a"), make_member(member_b, "b")],
+        chair=chair, system_text="", history=HISTORY, user_text="Q",
+        timeout_s=30, emit=emit,
+    )
+
+    assert outcome.status == "done"
+    fusion = chair.calls[0][-1].text
+    assert "与成员1基本一致" in fusion  # 成员B 被替换为占位
+    assert "（微调）" not in fusion  # 雷同正文不再逐字进入提示词
+
+
+@pytest.mark.asyncio
+async def test_dedupe_keeps_short_drafts_untouched():
+    """短草稿即使完全相同也不去重（语义可能相反，替换反而丢信息）。"""
+    from skysheep.core.roundtable import dedupe_similar_bodies
+
+    bodies = dedupe_similar_bodies([(0, "是的"), (1, "是的")])
+    assert bodies == ["是的", "是的"]

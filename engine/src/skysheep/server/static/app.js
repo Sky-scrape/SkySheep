@@ -260,7 +260,9 @@ function curLog() { const t = curTab(); return t ? t.logEl : chatBox; }
 function scrollLog() {
   const t = curTab();
   if (t && t !== activeTab) return; // 后台标签追加内容不抢滚动
-  chatBox.scrollTop = chatBox.scrollHeight;
+  // 滚动发生在当前标签的 .chat-log 上（#chat 本体 overflow:hidden，滚它无效）
+  const el = (t && t.logEl) || chatBox.querySelector(".chat-log");
+  if (el) el.scrollTop = el.scrollHeight;
 }
 function withTab(tab, fn) { routeTab = tab; try { fn(); } finally { routeTab = null; } }
 
@@ -774,6 +776,7 @@ function buildRtMemberCard(m) {
   mcard.innerHTML =
     `<div class="rt-m-head"><span class="rt-m-name">${escapeHtml(m.provider)}</span>` +
     `<span class="rt-m-model">${escapeHtml(m.model)}</span>` +
+    `<span class="rt-m-role"${m.role ? "" : " hidden"}>${m.role ? escapeHtml(rtRoleLabel(m.role)) : ""}</span>` +
     '<span class="rt-m-round" hidden></span>' +
     '<span class="rt-m-status">⋯</span></div>' +
     '<div class="rt-m-body"><div class="md"></div></div>' +
@@ -1394,7 +1397,22 @@ function handleEvent(kind, data) {
       }
       break;
     }
+    case "pipeline_updated": {
+      if (data.pipeline) {
+        const p = data.pipeline;
+        const prev = pipelineSeenStatus[p.id];
+        pipelineSeenStatus[p.id] = p.status;
+        if (prev === "running" && (p.status === "done" || p.status === "failed")) {
+          const bad = (p.nodes || []).filter((n) => n.status !== "done").length;
+          pushNotice(p.status === "done" ? `✅ 流水线完成：${p.name}`
+            : `⚠️ 流水线结束（${bad} 个节点未成功）：${p.name}`);
+        }
+        if (rightTabs.includes("pipeline") && !rightCollapsed) loadPipelines();
+      }
+      break;
+    }
     case "notice": addNotice("⏳ " + data.message); break;
+    case "memory_digest": addNotice("🧠 " + data.message); break;
     case "compaction":
       addNotice(`🗜 上下文压缩：${data.before_messages} → ${data.after_messages} 条消息`);
       break;
@@ -1455,6 +1473,9 @@ function handleEvent(kind, data) {
   }
 }
 
+// 工具安全级展示名：权限条/勾选表等面向用户的界面统一用它，不露内部枚举值
+const SAFETY_LABELS = { readonly: "只读", write: "写入", dangerous: "高危" };
+
 function showPermission(data) {
   if (routeTab && routeTab !== activeTab) {
     // 后台会话的确认请求：标到标签上，切过去再展示
@@ -1466,7 +1487,8 @@ function showPermission(data) {
   }
   permRequest = data.request_id;
   maybeNotify("需要你确认", `${data.tool_name} 正在等待你的决定`);
-  document.getElementById("perm-tool").textContent = `${data.tool_name} [${data.safety}]`;
+  document.getElementById("perm-tool").textContent =
+    `${data.tool_name} · ${SAFETY_LABELS[data.safety] || data.safety}`;
   const argsEl = document.getElementById("perm-args");
   const noteEl = document.getElementById("perm-note");
   if (data.diff) {
@@ -1967,6 +1989,14 @@ function hideModal() {
   document.getElementById("modal").classList.add("hidden");
 }
 document.getElementById("modal-cancel").onclick = hideModal;
+// Esc = 点「取消」：走 cancel 按钮的当前语义（首启向导的跳过会记 onboarded 标记），
+// 不做隐藏弹层之外的事；菜单/查找条有自己的 Esc 分支，互不影响
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && modalOpen()) {
+    e.preventDefault();
+    document.getElementById("modal-cancel").click();
+  }
+});
 
 async function moveSessionModal(s) {
   const { projects } = await request("project.list");
@@ -2263,13 +2293,26 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("resize", hideModelMenu);
 
+// actions: [{ label, onClick }]，最多两个——横幅是复用单例，按钮位固定、
+// 标签与回调每次随调用重写，用不到的位隐藏（不能把上一次的回调留在 DOM 上）
 function showBanner(text, actions) {
   document.getElementById("cfg-banner-text").textContent = text;
   const box = document.getElementById("cfg-banner-actions");
-  box.hidden = !actions;
-  // 按钮回调每次重绑（横幅是复用单例，不能把上一次的回调留在 DOM 上）
-  document.getElementById("banner-trust").onclick = actions ? actions.onTrust : null;
-  document.getElementById("banner-details").onclick = actions ? actions.onDetails : null;
+  const slots = [
+    document.getElementById("banner-trust"),
+    document.getElementById("banner-details"),
+  ];
+  const list = Array.isArray(actions) ? actions : [];
+  list.slice(0, slots.length).forEach((a, i) => {
+    slots[i].textContent = a.label;
+    slots[i].onclick = a.onClick;
+    slots[i].hidden = false;
+  });
+  slots.slice(list.length).forEach((b) => {
+    b.hidden = true;
+    b.onclick = null;
+  });
+  box.hidden = !list.length;
   document.getElementById("cfg-banner").hidden = false;
 }
 function hideBanner() {
@@ -2292,18 +2335,21 @@ function renderTrustBanner(trust) {
     : "⚠ 本项目自带了会被自动执行的配置：";
   showBanner(
     `${lead}${names}${more}（确认前不会启用）`,
-    {
-      onTrust: async () => {
-        try {
-          await request("trust.grant");
-          hideBanner();
-          boot();
-        } catch (e) {
-          showBanner("✗ 信任失败：" + e.message);
-        }
+    [
+      {
+        label: "信任本项目",
+        onClick: async () => {
+          try {
+            await request("trust.grant");
+            hideBanner();
+            boot();
+          } catch (e) {
+            showBanner("✗ 信任失败：" + e.message);
+          }
+        },
       },
-      onDetails: () => showTrustDetails(trust),
-    },
+      { label: "看详情", onClick: () => showTrustDetails(trust) },
+    ],
   );
   return true;
 }
@@ -2568,8 +2614,9 @@ function renderSnippets() {
     edit.onclick = (e) => { e.stopPropagation(); snippetModal(s); };
     del.onclick = async (e) => {
       e.stopPropagation();
-      await request("snippets.delete", { id: s.id });
-      await loadSnippets();
+      try { await request("snippets.delete", { id: s.id }); }
+      catch (err) { addNotice("删除失败: " + err.message); }
+      await loadSnippets(); // 失败也重拉一次，列表与后端保持一致
     };
     li.appendChild(ops);
     li.onclick = () => snippetModal(s);
@@ -2626,6 +2673,8 @@ window.__quickFocus = (text) => {
 };
 
 // ---------- 引导 ----------
+let providerBroken = false; // 上次 boot 是否「无可用模型」；send() 预检用（applyWorkspaceData 刷新）
+
 /** 工作区数据预取：站内切换项目时先拿齐数据，再动界面。
  *
  *  分开取数/渲染的目的很具体：列表 DOM 的清空与填充必须在同一个同步块里完成，
@@ -2643,14 +2692,17 @@ async function fetchWorkspaceData() {
 /** 把预取到的数据一次性画上去（同步为主）。 */
 async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
   currentSessionId = snap.session ? snap.session.id : null;
+  // 后端最后一次报告的「无可用模型」状态：send() 的预检依据（每次 boot 刷新）
+  providerBroken = !snap.provider || !!snap.provider_error;
   const projPath = document.getElementById("project-path"); // 侧栏已移除工作目录框
   if (projPath) {
     projPath.textContent = snap.working_dir;
     projPath.title = snap.working_dir;
   }
   if (snap.provider_error) {
-    showBanner("⚠ " + snap.provider_error.split("\n")[0] +
-      " —— 配置好后到 设置 · 模型服务 里选择一个已配置 Key 的 provider 即可生效。");
+    showBanner("⚠ " + snap.provider_error.split("\n")[0] + " —— 配置好模型后即可开始对话。", [
+      { label: "去配置", onClick: () => { hideBanner(); openSettings("providers"); } },
+    ]);
     setModelChip("未配置模型");
   } else if (!renderTrustBanner(snap.workspace_trust)) {
     // 模型报错优先于信任提示：两个横幅共用一个位置，先让用户看到「用不了」的原因
@@ -2711,7 +2763,14 @@ async function boot() {
 // 无 Key 用户还有两条免注册出路：本机 Ollama（自动检测）与内置演示模式。
 function maybeOnboard(snap) {
   const hasWorkingProvider = !snap.provider_error && snap.provider;
-  const anyKeyed = Object.values(snap.providers || {}).some((p) => p.has_key);
+  // Ollama 预设出厂自带占位 Key（本机服务不校验 Key），其 has_key 恒为 true——
+  // 「用户真的配过 Key」必须排除 localhost 服务，否则全新机器也会被误判成
+  // 已配置，向导一次都不弹、还倒写 onboarded 把自己永久关掉
+  const isLocalSvc = (u) =>
+    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?(\/|$)/i.test(String(u || ""));
+  const anyKeyed = Object.values(snap.providers || {}).some(
+    (p) => p.has_key && !isLocalSvc(p.base_url)
+  );
   request("ui.get").then((ui) => {
     if (ui && ui.prefs && ui.prefs.onboarded) return; // 用户之前已跳过/完成
     if (hasWorkingProvider || anyKeyed) {
@@ -2992,6 +3051,7 @@ async function reloadProjectPanels() {
       tasks: () => loadTasks(),
       agenda: () => loadAgenda(),
       cron: () => loadCron(),
+      pipeline: () => loadPipelines(),
       review: () => refreshReview(),
     };
     await Promise.allSettled(
@@ -3098,6 +3158,15 @@ let rtDebate = (() => {
   return v >= 1 && v <= 2 ? v : 0;
 })();
 let rtChair = localStorage.getItem("skysheep.rt.chair") !== "0";
+// 圆桌成员身份预设（与后端 core/roundtable.py 的 MEMBER_ROLES 一一对应，id 随元数据持久化勿改）
+const RT_ROLES = [
+  ["", "普通"],
+  ["critic", "批评者"],
+  ["factcheck", "事实核查员"],
+  ["concise", "简洁派"],
+  ["practitioner", "实干者"],
+];
+const rtRoleLabel = (id) => (RT_ROLES.find((r) => r[0] === id) || RT_ROLES[0])[1];
 
 function setRtOn(on) {
   rtOn = on;
@@ -3130,6 +3199,7 @@ async function showRtMenu(e) {
   const list = document.createElement("div");
   list.className = "rt-menu-list";
   const selected = new Set((rtMembers || []).map((m) => m.provider + "/" + m.model));
+  const roleOf = new Map((rtMembers || []).map((m) => [m.provider + "/" + m.model, m.role || ""]));
   let entries = 0;
   Object.entries(cfg.providers || {}).forEach(([name, p]) => {
     (p.models || []).forEach((m) => {
@@ -3143,6 +3213,25 @@ async function showRtMenu(e) {
         `<span class="mi-cmd">${escapeHtml(name)}</span>` +
         `<span class="mi-model">${escapeHtml(m)}</span>` +
         (hasKey ? "" : '<span class="mi-nokey">缺 Key</span>');
+      if (hasKey) {
+        // 身份下拉：给这个成员注入不同视角的作答提示词（普通 = 无附加身份）
+        const cb = label.querySelector("input");
+        const sel = document.createElement("select");
+        sel.className = "mi-role";
+        sel.title = "成员身份：让不同成员带着不同视角作答，辩论更有分歧";
+        RT_ROLES.forEach(([id, text]) => {
+          const o = document.createElement("option");
+          o.value = id;
+          o.textContent = text;
+          sel.appendChild(o);
+        });
+        sel.value = roleOf.get(key) || "";
+        sel.disabled = !cb.checked;
+        sel.onclick = (e) => e.stopPropagation();
+        sel.onchange = () => roleOf.set(key, sel.value);
+        cb.addEventListener("change", () => { sel.disabled = !cb.checked; });
+        label.appendChild(sel);
+      }
       list.appendChild(label);
     });
   });
@@ -3196,7 +3285,9 @@ async function showRtMenu(e) {
   ok.onclick = () => {
     const picked = [...list.querySelectorAll("input:checked")].map((i) => {
       const idx = i.value.indexOf("/");
-      return { provider: i.value.slice(0, idx), model: i.value.slice(idx + 1) };
+      const item = { provider: i.value.slice(0, idx), model: i.value.slice(idx + 1) };
+      const role = roleOf.get(i.value) || "";
+      return role ? Object.assign(item, { role }) : item;
     });
     rtMembers = picked.length ? picked : null;
     try { localStorage.setItem("skysheep.rt.members", JSON.stringify(rtMembers)); } catch {}
@@ -3613,6 +3704,19 @@ async function send() {
       "若该模型其实支持看图，可到 设置 · 模型服务 里打开「模型支持图片输入」。");
     return; // 留在输入框里，别把用户贴的图清掉
   }
+  // 无模型的机器先把人引去配置，而不是入队一轮注定失败的发送（产生会话、
+  // 气泡、运行态一整套残留）。本地缓存可能过期：拦截前先向后端要一次最新判定，
+  // 刚在设置页/别的窗口配好 Key 的场景不会被旧状态挡住。
+  if (providerBroken) {
+    try {
+      const fresh = await request("boot");
+      providerBroken = !fresh.provider || !!fresh.provider_error;
+    } catch (e) { /* 后端够不着时按本地缓存判定 */ }
+    if (providerBroken) {
+      addNotice("还没有可用的模型服务——打开 ⚙ 设置 · 模型服务，选一个服务粘贴 API Key 后再发送。");
+      return;
+    }
+  }
   recordInputHistory(text); // 输入历史：供空输入按 ↑ 回看
   const tab = activeTab;
   // 新标签（无会话）：先向后端申请一个全新会话，避免消息落进旧的活动会话
@@ -3980,7 +4084,10 @@ async function msgRegenerate(tab, el, seq) {
     // 圆桌回答的重新生成：沿用原配置重跑同样的圆桌（成员/融合或对比/辩论轮数）
     if (rtMeta && (rtMeta.members || []).length) {
       params.roundtable = true;
-      params.members = rtMeta.members.map((m) => ({ provider: m.provider, model: m.model }));
+      params.members = rtMeta.members.map((m) => {
+        const item = { provider: m.provider, model: m.model };
+        return m.role ? Object.assign(item, { role: m.role }) : item;
+      });
       if (rtMeta.mode === "compare") {
         params.compare = true;
         params.chair_answers = false; // 只重跑这一个成员，别把主席再拉进来
@@ -4561,7 +4668,8 @@ document.getElementById("input").addEventListener("keydown", (e) => {
   if (e.key === "Escape" && menuOpen) { e.preventDefault(); hideInputMenu(); return; }
   // 输入历史召回：空输入 ↑ 进入回看；历史态内 ↑↓ 无条件导航（点击/编辑已退出历史态后，
   // 方向键恢复原生光标行为），↓ 走到底还原草稿，Esc 直接还原
-  if (!menuOpen && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+  // isComposing：输入法选词过程（拼音候选上屏前的回车/方向键）不能被这里劫持
+  if (!menuOpen && !e.isComposing && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.key === "ArrowUp" && (inputEl.value === "" || histActive())) {
       e.preventDefault();
       recallHistory(-1);
@@ -4580,7 +4688,7 @@ document.getElementById("input").addEventListener("keydown", (e) => {
       return;
     }
   }
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
 document.getElementById("btn-new").onclick = () => { startNewTab(); refreshSessions(); };
 window.addEventListener("keydown", (e) => {
@@ -4594,6 +4702,11 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   const k = String(e.key).toLowerCase();
+  // 正在输入框/可编辑元素里打字时不触发会抢焦点/丢草稿的动作
+  //（Ctrl+N 新会话、Ctrl+K 模型菜单、Ctrl+W 关标签）；按键本身仍吞掉，
+  // 交给浏览器默认行为在 WebView2 里没有意义，放行只会引入意外
+  const tgt = e.target;
+  const typing = !!(tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable));
   // Ctrl+` 终端面板开关（对标 VS Code 的集成终端）
   if (k === "`") {
     e.preventDefault();
@@ -4610,7 +4723,7 @@ window.addEventListener("keydown", (e) => {
   // Ctrl+N 新建会话
   if (k === "n") {
     e.preventDefault();
-    if (!settingsOpen) document.getElementById("btn-new").click();
+    if (!typing && !settingsOpen) document.getElementById("btn-new").click();
     return;
   }
   // Ctrl+F 在本对话里查找（所有编辑类软件的惯例；会话搜索见 Ctrl+Shift+F）
@@ -4622,13 +4735,13 @@ window.addEventListener("keydown", (e) => {
   // Ctrl+K 模型切换菜单
   if (k === "k" && !settingsOpen) {
     e.preventDefault();
-    toggleModelMenu();
+    if (!typing) toggleModelMenu();
     return;
   }
   // Ctrl+W 关闭当前会话标签
   if (k === "w" && !settingsOpen) {
     e.preventDefault();
-    if (activeTab) closeTab(activeTab);
+    if (!typing && activeTab) closeTab(activeTab);
     return;
   }
 });
@@ -4850,6 +4963,7 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     if (act === "todo") return openRightTab("todo");
     if (act === "agenda") return openRightTab("agenda");
     if (act === "cron") return openRightTab("cron");
+    if (act === "pipeline") return openRightTab("pipeline");
     if (act === "memory") return openRightTab("memory");
     if (act === "project") return projectModal();
     if (act === "ext") return openRightTab("ext");
@@ -5058,12 +5172,14 @@ function renderAgenda(items) {
         `<button class="agenda-op" data-op="del" title="删除">✕</button>`;
       ops.querySelector('[data-op="done"]').onclick = async (e) => {
         e.stopPropagation();
-        await request("schedule.update", { id: it.id, done: true });
+        try { await request("schedule.update", { id: it.id, done: true }); }
+        catch (err) { addNotice("操作失败: " + err.message); }
         await loadAgenda();
       };
       ops.querySelector('[data-op="del"]').onclick = async (e) => {
         e.stopPropagation();
-        await request("schedule.delete", { id: it.id });
+        try { await request("schedule.delete", { id: it.id }); }
+        catch (err) { addNotice("删除失败: " + err.message); }
         await loadAgenda();
       };
       li.appendChild(ops);
@@ -5201,12 +5317,14 @@ async function loadCron() {
     };
     ops.querySelector('[data-op="toggle"]').onclick = async (e) => {
       e.stopPropagation();
-      await request("cron.update", { id: t.id, enabled: !t.enabled });
+      try { await request("cron.update", { id: t.id, enabled: !t.enabled }); }
+      catch (err) { addNotice("操作失败: " + err.message); }
       await loadCron();
     };
     ops.querySelector('[data-op="del"]').onclick = async (e) => {
       e.stopPropagation();
-      await request("cron.delete", { id: t.id });
+      try { await request("cron.delete", { id: t.id }); }
+      catch (err) { addNotice("删除失败: " + err.message); }
       await loadCron();
     };
     li.appendChild(ops);
@@ -5225,7 +5343,6 @@ function cronModal(existing) {
   const allowed = new Set(t.allowed_tools || []);
   // 工具勾选表：从最近一次 boot 快照取工具清单（含权限级别），让用户勾而不是背工具名
   const tools = (bootSnap && bootSnap.tools) || [];
-  const safetyLabel = { readonly: "只读", write: "写入", dangerous: "高危" };
   const toolRows = tools.length
     ? tools.map((tool) => {
         const locked = tool.safety === "readonly";  // 只读本来就是自动放行的
@@ -5233,7 +5350,7 @@ function cronModal(existing) {
         return `<label class="cron-tool${locked ? " locked" : ""}" title="${escapeHtml(tool.description || "")}">
             <input type="checkbox" data-tool="${escapeHtml(tool.name)}"${on ? " checked" : ""}${locked ? " disabled" : ""}>
             <span class="ct-name">${escapeHtml(tool.name)}</span>
-            <span class="chip ${tool.safety === "dangerous" ? "danger-mark" : tool.safety === "write" ? "write-mark" : "safe-mark"}">${safetyLabel[tool.safety] || tool.safety}</span>
+            <span class="chip ${tool.safety === "dangerous" ? "danger-mark" : tool.safety === "write" ? "write-mark" : "safe-mark"}">${SAFETY_LABELS[tool.safety] || tool.safety}</span>
           </label>`;
       }).join("")
     : '<div class="dim small">（暂时取不到工具清单，保存后可在任务列表里再编辑）</div>';
@@ -5304,6 +5421,235 @@ function cronModal(existing) {
 }
 
 document.getElementById("btn-cron-add").onclick = () => cronModal(null);
+
+// ---------- 任务编排：流水线（pipeline.list/create/start/cancel/delete/node_rerun） ----------
+// 多个任务排成依赖图：并行开发 → 最后一个汇总审查。与定时任务同一套无人值守
+// 门控（预授权名单外的写/执行自动拒绝），差别是按「依赖完成」触发而非时间。
+
+const PL_NODE_STATUS = {
+  blocked: "等待依赖", ready: "待运行", running: "运行中",
+  done: "已完成", error: "失败", cancelled: "已取消",
+};
+const PL_NODE_MARK = { blocked: "◌", ready: "▸", running: "●", done: "✓", error: "✗", cancelled: "⏹" };
+const PL_PIPE_STATUS = {
+  draft: "草稿（未启动）", running: "运行中", done: "已完成",
+  failed: "有失败", cancelled: "已停止",
+};
+const pipelineSeenStatus = {}; // pipeline_updated 判状态迁移用（只报完成/失败一次）
+
+function plToolPicker(selected) {
+  // 工具勾选表：与定时任务同源（boot 快照），只读工具天然放行不用勾
+  const allowed = new Set(selected || []);
+  const tools = (bootSnap && bootSnap.tools) || [];
+  if (!tools.length) return '<div class="dim small">（暂时取不到工具清单，默认仅只读运行）</div>';
+  return tools.map((tool) => {
+    const locked = tool.safety === "readonly";
+    const on = locked || allowed.has(tool.name);
+    return `<label class="cron-tool${locked ? " locked" : ""}" title="${escapeHtml(tool.description || "")}">
+        <input type="checkbox" data-tool="${escapeHtml(tool.name)}"${on ? " checked" : ""}${locked ? " disabled" : ""}>
+        <span class="ct-name">${escapeHtml(tool.name)}</span>
+        <span class="chip ${tool.safety === "dangerous" ? "danger-mark" : tool.safety === "write" ? "write-mark" : "safe-mark"}">${SAFETY_LABELS[tool.safety] || tool.safety}</span>
+      </label>`;
+  }).join("");
+}
+
+async function loadPipelines() {
+  if (!bootSnap || !bootSnap.tools) {
+    try { bootSnap = await request("boot"); } catch (e) { /* 取不到就退化提示 */ }
+  }
+  let pipes = [];
+  try {
+    pipes = (await request("pipeline.list")).pipelines || [];
+  } catch (e) {
+    document.getElementById("pipeline-list").innerHTML =
+      `<li class="dim small" style="padding:6px 10px">加载失败：${escapeHtml(e.message)}</li>`;
+    return;
+  }
+  pipes.forEach((p) => { pipelineSeenStatus[p.id] = p.status; });
+  const ul = document.getElementById("pipeline-list");
+  ul.innerHTML = "";
+  if (!pipes.length) {
+    ul.innerHTML = '<li class="dim small" style="padding:6px 10px">还没有流水线 —— 点右上角 ＋ 新建，把几个任务排成「并行开发 → 汇总审查」</li>';
+    return;
+  }
+  pipes.forEach((p) => {
+    const done = (p.nodes || []).filter((n) => n.status === "done").length;
+    const li = document.createElement("li");
+    li.className = "cron-item pipeline-item pl-pipe-" + p.status;
+    li.innerHTML =
+      `<div class="cron-main">
+         <span class="cron-title">${escapeHtml(p.name)}</span>
+         <span class="cron-sched">${PL_PIPE_STATUS[p.status] || p.status} · 节点 ${done}/${(p.nodes || []).length} · 并发 ${p.concurrency}</span>
+         <span class="pl-nodebar">${(p.nodes || []).map((n) =>
+           `<span class="pl-chip pl-st-${n.status}" title="${escapeHtml(n.title)} · ${PL_NODE_STATUS[n.status] || n.status}">${PL_NODE_MARK[n.status] || "◌"} ${escapeHtml(n.title)}</span>`
+         ).join("")}</span>
+       </div>`;
+    const ops = document.createElement("span");
+    ops.className = "cron-ops";
+    if (p.status === "running") {
+      ops.innerHTML = `<button class="cron-op" data-op="stop" title="停止流水线">⏹</button>` +
+        `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
+    } else if (p.status === "draft" || p.status === "cancelled") {
+      ops.innerHTML = `<button class="cron-op" data-op="start" title="启动">▶</button>` +
+        `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
+    } else {
+      ops.innerHTML = `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
+    }
+    const start = ops.querySelector('[data-op="start"]');
+    if (start) start.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await request("pipeline.start", { id: p.id });
+        addNotice(`流水线「${p.name}」已启动，依赖满足的节点会自动运行`);
+      } catch (err) { addNotice("启动失败: " + err.message); }
+      await loadPipelines();
+    };
+    const stop = ops.querySelector('[data-op="stop"]');
+    if (stop) stop.onclick = async (e) => {
+      e.stopPropagation();
+      try { await request("pipeline.cancel", { id: p.id }); }
+      catch (err) { addNotice("停止失败: " + err.message); }
+      await loadPipelines();
+    };
+    ops.querySelector('[data-op="del"]').onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`删除流水线「${p.name}」？运行中的节点也会停止，记录不可恢复。`)) return;
+      try { await request("pipeline.delete", { id: p.id }); }
+      catch (err) { addNotice("删除失败: " + err.message); }
+      await loadPipelines();
+    };
+    li.onclick = () => pipelineModal(p);
+    ul.appendChild(li);
+  });
+}
+
+function pipelineModal(p) {
+  const box = document.createElement("div");
+  const rows = (p.nodes || []).map((n) => {
+    const dep = (n.depends_on || []).map((d) => {
+      const dn = (p.nodes || []).find((x) => x.id === d);
+      return dn ? dn.title : "#" + d;
+    }).join("、");
+    return `<div class="pl-node-view pl-st-${n.status}">
+        <div class="pl-node-head">
+          <b>${PL_NODE_MARK[n.status] || "◌"} ${escapeHtml(n.title)}</b>
+          <span class="chip ${n.status === "done" ? "safe-mark" : n.status === "error" ? "danger-mark" : n.status === "running" ? "write-mark" : ""}">${PL_NODE_STATUS[n.status] || n.status}</span>
+        </div>
+        ${dep ? `<div class="dim small">依赖：${escapeHtml(dep)}</div>` : ""}
+        ${n.allowed_tools && n.allowed_tools.length ? `<div class="dim small">预授权：${escapeHtml(n.allowed_tools.join("、"))}</div>` : ""}
+        ${n.last_error ? `<div class="pl-node-err">✗ ${escapeHtml(n.last_error)}</div>` : ""}
+        ${n.result ? `<div class="pl-node-result">${escapeHtml(n.result.length > 400 ? n.result.slice(0, 400) + "…" : n.result)}</div>` : ""}
+        ${(n.status === "error" || n.status === "cancelled")
+          ? `<button class="rp-mini" data-rerun="${n.id}">↻ 重跑这个节点</button>` : ""}
+      </div>`;
+  }).join("");
+  box.innerHTML = `
+    <div class="cron-fields">
+      <p class="dim small">流水线「${escapeHtml(p.name)}」· ${PL_PIPE_STATUS[p.status] || p.status} ·
+        每个节点是一次无人值守运行（预授权名单外的写/执行自动拒绝）；上游完成后下游自动开始，产出会注入下游的指令里。</p>
+      ${rows || '<div class="dim small">（没有节点）</div>'}
+      <p class="dim small">要改节点/指令：删除后重建（Agent 对话里说一句也能帮你重排）。</p>
+    </div>`;
+  box.querySelectorAll("[data-rerun]").forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await request("pipeline.node_rerun", { id: Number(btn.dataset.rerun) });
+        addNotice("节点已重新排队，依赖满足后自动运行");
+      } catch (err) { addNotice("重跑失败: " + err.message); }
+      hideModal();
+      await loadPipelines();
+    };
+  });
+  // 弹窗只有一个确认键：按状态给主操作（草稿/已停止 → 启动；运行中 → 停止；其余 → 关闭）
+  let okLabel = "关闭";
+  let onOk = async () => {};
+  if (p.status === "draft" || p.status === "cancelled") {
+    okLabel = "▶ 启动";
+    onOk = async () => {
+      await request("pipeline.start", { id: p.id });
+      addNotice(`流水线「${p.name}」已启动，依赖满足的节点会自动运行`);
+      await loadPipelines();
+    };
+  } else if (p.status === "running") {
+    okLabel = "⏹ 停止";
+    onOk = async () => {
+      await request("pipeline.cancel", { id: p.id });
+      addNotice(`流水线「${p.name}」已停止`);
+      await loadPipelines();
+    };
+  }
+  showModal(`任务编排 · ${p.name}`, box, onOk, okLabel);
+}
+
+function pipelineCreateModal() {
+  const box = document.createElement("div");
+  box.innerHTML = `
+    <div class="cron-fields">
+      <label>流水线名</label>
+      <input id="pl-name" class="modal-input" type="text" placeholder="例如：登录模块开发">
+      <label>同时运行的节点数（1~4）</label>
+      <input id="pl-conc" class="modal-input" type="number" min="1" max="4" value="2">
+      <div id="pl-nodes"></div>
+      <button id="pl-add-node" class="rp-mini" type="button">＋ 添加节点</button>
+      <p class="dim small">节点按依赖自动排序：勾选「依赖前面的节点」，被依赖的全部完成后才会开始。
+        最后一个节点勾选依赖它前面的全部节点，就是汇总审查。</p>
+      <p class="dim small">安全说明：每个节点无人值守运行，<b>只读工具本来就放行</b>；
+        写入/执行类必须在该节点勾选，否则运行时自动拒绝。启动前请再检查一遍各节点的预授权。</p>
+    </div>`;
+  const nodesBox = box.querySelector("#pl-nodes");
+  const addNodeRow = () => {
+    const idx = nodesBox.children.length;
+    const row = document.createElement("div");
+    row.className = "pl-node-edit";
+    const priorDeps = [];
+    for (let i = 0; i < idx; i++) {
+      const t = nodesBox.children[i].querySelector(".pl-node-title").value.trim();
+      priorDeps.push(t || `节点 ${i + 1}`);
+    }
+    row.innerHTML = `
+      <div class="pl-node-edit-head">
+        <b>节点 ${idx + 1}</b>
+        <span class="spacer"></span>
+        ${idx > 0 ? '<button class="rp-mini pl-del-node" type="button" title="删除这个节点">✕</button>' : ""}
+      </div>
+      <input class="modal-input pl-node-title" type="text" placeholder="节点名，例如：实现登录接口">
+      <textarea class="modal-input pl-node-prompt" rows="2" placeholder="这一步的完整指令（自包含，例如：在 src/auth 下实现登录接口并写测试）"></textarea>
+      ${idx > 0 ? `<div class="pl-deps">依赖（完成后才运行本节点）：
+        ${priorDeps.map((t, i) => `<label class="pl-dep"><input type="checkbox" value="${i}" checked>${escapeHtml(t)}</label>`).join("")}
+      </div>` : ""}
+      <details class="pl-tools"><summary>预授权工具（默认仅只读）</summary>
+        <div class="pl-tools-list">${plToolPicker([])}</div>
+      </details>`;
+    const del = row.querySelector(".pl-del-node");
+    if (del) del.onclick = () => { row.remove(); rebuildTitles(); };
+    nodesBox.appendChild(row);
+  };
+  const rebuildTitles = () => {
+    // 删节点后重排序号与依赖勾选标签（依赖索引始终指向当前列表位置）
+    [...nodesBox.children].forEach((row, i) => {
+      row.querySelector("b").textContent = `节点 ${i + 1}`;
+    });
+  };
+  addNodeRow();
+  box.querySelector("#pl-add-node").onclick = addNodeRow;
+  showModal("新建流水线", box, async () => {
+    const name = box.querySelector("#pl-name").value.trim();
+    const concurrency = Math.max(1, Math.min(4, Number(box.querySelector("#pl-conc").value) || 2));
+    const nodes = [...nodesBox.children].map((row, i) => {
+      const title = row.querySelector(".pl-node-title").value.trim();
+      const prompt = row.querySelector(".pl-node-prompt").value.trim();
+      if (!prompt) throw new Error(`节点 ${i + 1} 的指令不能为空`);
+      const after = [...row.querySelectorAll(".pl-dep input:checked")].map((el) => Number(el.value));
+      const allowed_tools = [...row.querySelectorAll("input[data-tool]:checked")].map((el) => el.dataset.tool);
+      return { title: title || `节点 ${i + 1}`, prompt, after, allowed_tools };
+    });
+    await request("pipeline.create", { name: name || "未命名流水线", concurrency, nodes });
+    await loadPipelines();
+    addNotice("流水线已创建（草稿）。检查各节点的预授权后点 ▶ 启动。");
+  }, "创建");
+}
+
+document.getElementById("btn-pipeline-add").onclick = () => pipelineCreateModal();
 
 // 到点提醒横幅（后台循环推送 schedule_reminder 事件）
 function showAgendaReminder(item) {
@@ -7083,6 +7429,7 @@ const RP_ICONS = {
   todo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 6h11M9.5 12h11M9.5 18h11"/><path d="m3.5 6 1.2 1.2L7 4.9M3.5 12l1.2 1.2L7 10.9M4 18h.01"/></svg>',
   agenda: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15" rx="2"/><path d="M8 3.5v4M16 3.5v4M4 10.5h16"/></svg>',
   cron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+  pipeline: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="6" r="2.1"/><circle cx="5.5" cy="18" r="2.1"/><circle cx="18.5" cy="12" r="2.1"/><path d="M7.4 6.9 16.6 11.1M7.4 17.1 16.6 12.9"/></svg>',
   memory: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M9 3.5v17"/><path d="M12.5 8h4M12.5 12h4"/></svg>',
   ext: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5V8M15 3.5V8"/><path d="M6.5 8h11v2.5a5.5 5.5 0 0 1-5.5 5.5 5.5 5.5 0 0 1-5.5-5.5z"/><path d="M12 16v4.5"/></svg>',
   // 面板开关：箭头指明点击后的动作——收起时 `>`（向右展开）、展开时 `<`（向左收起），
@@ -7099,6 +7446,7 @@ const TAB_META = {
   todo: { title: "任务清单" },
   agenda: { title: "日程" },
   cron: { title: "定时任务" },
+  pipeline: { title: "任务编排" },
   memory: { title: "项目记忆" },
   ext: { title: "MCP / Skills" },
 };
@@ -7155,6 +7503,7 @@ function openRightTab(id) {
   if (id === "tasks") loadTasks();
   if (id === "agenda") loadAgenda();
   if (id === "cron") loadCron();
+  if (id === "pipeline") loadPipelines();
   if (id === "memory") loadMemoryPanel();
   if (id === "ext") openExtPanel();
 }
@@ -7168,6 +7517,7 @@ function activateRightTab(id) {
   if (id === "tasks") loadTasks();
   if (id === "agenda") loadAgenda();
   if (id === "cron") loadCron();
+  if (id === "pipeline") loadPipelines();
   if (id === "memory") loadMemoryPanel();
   if (id === "ext") openExtPanel();
 }
@@ -8296,6 +8646,8 @@ async function loadMemoryPage() {
   try {
     const r = await request("memory.get");
     document.getElementById("memory-text").value = r.text || "";
+    const t = document.getElementById("memory-digest-toggle");
+    if (t) t.checked = !!r.digest_enabled;
   } catch (e) {
     addNotice("记忆加载失败: " + e.message);
   }
@@ -8314,6 +8666,26 @@ document.getElementById("btn-memory-save").onclick = async () => {
     status.hidden = false;
   }
 };
+// 归档自动记忆总闸：切换即保存（失败回拨，与电脑控制开关同一交互）
+const memoryDigestToggle = document.getElementById("memory-digest-toggle");
+if (memoryDigestToggle) {
+  memoryDigestToggle.addEventListener("change", async (e) => {
+    const el = e.target;
+    const st = document.getElementById("memory-digest-status");
+    try {
+      const r = await request("memory.digest_save", { enabled: el.checked });
+      el.checked = !!r.enabled; // 以落库值为准
+      if (st) st.hidden = true;
+    } catch (err) {
+      el.checked = !el.checked;
+      if (st) {
+        st.textContent = "✗ 保存失败：" + err.message;
+        st.className = "card-status bad";
+        st.hidden = false;
+      }
+    }
+  });
+}
 
 // ---------- 设置 · 局域网访问 ----------
 // 复制访问地址：局域网 / Tailscale 地址都是 http 明文，非安全上下文里
@@ -9030,6 +9402,10 @@ async function renderRoundtableCfg() {
         <option value="2">2 轮 · 修订两次</option>
       </select>
     </div>
+    <div class="toolcfg-row"><label>成员历史上下文</label>
+      <input type="number" data-f="member_history_turns" min="0" class="num-sm" value="${d.member_history_turns}">
+      <span class="dim small">轮（0 = 全量；只带最近 N 轮能省不少 token，主席融合始终吃全量）</span>
+    </div>
     <label class="toggle-row adv-toggle"><input type="checkbox" data-f="chair_answers"
       ${d.chair_answers ? "checked" : ""}><span>主席出草稿：当前主模型也作为成员先答一份</span></label>
     <div class="toolcfg-row">
@@ -9049,6 +9425,7 @@ async function renderRoundtableCfg() {
       max_members: Number(form.querySelector('[data-f="max_members"]').value),
       member_timeout_s: Number(form.querySelector('[data-f="member_timeout_s"]').value),
       debate_rounds: Number(sel.value),
+      member_history_turns: Number(form.querySelector('[data-f="member_history_turns"]').value),
       chair_answers: form.querySelector('[data-f="chair_answers"]').checked,
     };
     try {

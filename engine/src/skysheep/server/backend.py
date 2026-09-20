@@ -64,6 +64,7 @@ from ..core.prompt import (
     render_instructions_section,
 )
 from ..core.roundtable import (
+    MEMBER_ROLES,
     MemberSpec,
     RoundtableOutcome,
     clip_draft,
@@ -125,10 +126,18 @@ from ..skills.installer import install as install_skill
 from ..skills.market import fetch_market_index
 from ..textio import encode_text
 from ..tools import ChangeRecorder, Safety, ToolRegistry, default_tools
-from ..tools.memory import render_memory_section
+from ..tools.memory import (
+    build_digest_prompt,
+    digest_transcript,
+    parse_digest,
+    remember_lines,
+    render_memory_section,
+)
+from ..tools.pipeline import PipelineWriteTool
 from ..tools.skill import LoadSkillTool
 
 logger = logging.getLogger("skysheep.security")
+memory_log = logging.getLogger("skysheep.memory")
 
 EmitFn = Callable[[dict], Awaitable[None]]
 
@@ -552,7 +561,11 @@ class ServerBackend:
         self._reminder_task: asyncio.Task | None = None
         self._cron_task: asyncio.Task | None = None
         self._cron_running: set[int] = set()  # 正在跑的定时任务 id（防重复触发）
+        self._pipeline_task: asyncio.Task | None = None
+        self._pipeline_running: set[int] = set()  # 正在跑的编排节点 id（并发约束）
+        self._pipeline_node_tasks: dict[int, asyncio.Task] = {}  # 节点句柄（停止流水线用）
         self._titling: set[str] = set()  # 正在自动生成标题的会话
+        self._digesting: set[str] = set()  # 正在归档提炼记忆的会话
         self.update_info: dict | None = None  # {"version","url","notes"}：发现的新版本
         self.update_error: str | None = None  # 手动检查时的失败原因（进设置 · 关于）
         self._market_cache: tuple[float, dict] | None = None  # 技能广场索引缓存
@@ -672,6 +685,12 @@ class ServerBackend:
         self.checkpoints = CheckpointStore(root=self._checkpoint_root())
         self.store = self._store_override or await SessionStore(db_path()).connect()
         self.project = await self.store.get_or_create_project(str(self.working_dir))
+        # 上次退出时正在跑的编排节点：标为错误等用户手动重跑（无人值守恢复执行有风险）
+        _interrupted = await self.store.reset_interrupted_pipelines()
+        if _interrupted:
+            logging.getLogger("skysheep").info(
+                "任务编排：%d 个节点因上次退出被中断，已标记待重跑", _interrupted
+            )
         self.gate = PermissionGate(store=self.store, project_id=self.project.id,
                                    working_dir=self.working_dir)
         await self.gate.load_project_rules()
@@ -814,6 +833,8 @@ class ServerBackend:
         if self.cfg.subagent_enabled:
             registry.register(SpawnAgentTool(self.tasks))
             registry.register(CheckTaskTool(self.tasks))
+        # 任务编排：Agent 可以排流水线（草稿），启动与否由用户在面板决定
+        registry.register(PipelineWriteTool(self.store, lambda: self.project.id))
         for t in self.mcp_tools:
             registry.register(t)
         return registry
@@ -1139,7 +1160,7 @@ class ServerBackend:
                 ),
                 recorder=recorder,
             )
-            runtime.agent.set_system(self.compose_system())
+            runtime.agent.set_system(self.compose_system_for(cron_workdir))
 
             async def cron_emit(ev: dict) -> None:
                 pass  # 无人值守：流式/权限/队列事件不进前端，结果走任务行
@@ -1197,6 +1218,374 @@ class ServerBackend:
         finally:
             self._cron_running.discard(task_id)
 
+    # ---- 任务编排（pipelines）：按依赖顺序自动跑的无人值守节点 ----
+    # 与定时任务同一套执行底座（独立会话 + HeadlessGate 白名单 + 完整工具集），
+    # 差别在触发方式：定时任务按时间到点触发，编排节点按「依赖的节点全部完成」
+    # 触发——并行开发三个功能、最后一个审查汇总，就是它要解的问题。
+
+    PIPELINE_INTERVAL = 5  # 扫描周期（秒）；节点结束会立刻补扫一次，不等周期
+    PIPELINE_GLOBAL_CAP = 3  # 跨流水线同时在跑的节点数上限（保护机器）
+    NODE_RESULT_INJECT_CHARS = 2000  # 依赖产出注入下游 prompt 的截断长度
+    DEP_FAIL_MARK = "依赖的节点"  # 依赖失败型错误的固定前缀（重跑时识别可回退的下游）
+
+    def start_pipeline_loop(self) -> None:
+        self._pipeline_task = asyncio.create_task(self._pipeline_loop())
+
+    def stop_pipeline_loop(self) -> None:
+        if getattr(self, "_pipeline_task", None):
+            self._pipeline_task.cancel()
+            self._pipeline_task = None
+
+    async def _pipeline_loop(self) -> None:
+        while True:
+            try:
+                await self._pipeline_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # 单轮扫描失败不终止循环
+            await asyncio.sleep(self.PIPELINE_INTERVAL)
+
+    async def _pipeline_pass(self) -> None:
+        for pipe in await self.store.list_pipelines():
+            if pipe["status"] != "running":
+                continue
+            await self._pipeline_advance(pipe)
+
+    async def _pipeline_advance(self, pipe: dict) -> None:
+        """一轮推进：依赖判定（blocked → ready/error）+ 并发调度（ready → running）+ 终态收尾。"""
+        by_id = {n["id"]: n for n in pipe["nodes"]}
+        for node in pipe["nodes"]:
+            if node["status"] != "blocked":
+                continue
+            deps = [by_id[d] for d in node["depends_on"] if d in by_id]
+            failed = [d for d in deps if d["status"] in ("error", "cancelled")]
+            if failed:
+                await self.store.update_pipeline_node(
+                    node["id"], status="error",
+                    last_error=f"{self.DEP_FAIL_MARK}「{failed[0]['title']}」未成功，未自动运行",
+                    finished_at=time.time(),
+                )
+                node["status"] = "error"
+                await self.notify({
+                    "title": f"⚙️ 流水线节点失败：{node['title']}",
+                    "body": f"依赖的「{failed[0]['title']}」没有成功，可在「任务编排」面板重跑",
+                })
+                continue
+            if node["dep_mode"] == "any":
+                satisfied = any(d["status"] == "done" for d in deps)
+            else:
+                satisfied = all(d["status"] == "done" for d in deps)
+            if satisfied:
+                await self.store.update_pipeline_node(node["id"], status="ready")
+                node["status"] = "ready"
+        # 调度：按 seq 顺序占并发额度；全局有上限，防止多条流水线一起跑拖垮机器。
+        # 在跑数从句柄集合统计（而不是本轮 DB 快照）：扫描周期与节点结束的补扫可能
+        # 并发推进，快照是调度前的旧状态，会把同一流水线的并发上限算小、短暂超跑。
+        # _pipeline_running 兼做去重：DB 里还是 ready 而句柄未注册时不重复派跑。
+        running = len(self._pipeline_running.intersection(by_id))
+        for node in sorted(
+            (n for n in pipe["nodes"] if n["status"] == "ready"), key=lambda n: n["seq"]
+        ):
+            if node["id"] in self._pipeline_running:
+                continue
+            if running >= max(1, int(pipe["concurrency"] or 1)):
+                break
+            if len(self._pipeline_running) >= self.PIPELINE_GLOBAL_CAP:
+                break
+            node["status"] = "running"
+            running += 1
+            self._pipeline_running.add(node["id"])
+            task = asyncio.get_running_loop().create_task(self._run_pipeline_node(pipe, node))
+            self._pipeline_node_tasks[node["id"]] = task
+        await self._maybe_finish_pipeline(pipe)
+
+    def _broadcast_pipeline(self, pipe: dict | None) -> None:
+        if pipe is None:
+            return
+        for ws_emit in list(self.ws_emitters):
+            try:
+                asyncio.get_running_loop().create_task(
+                    ws_emit({"kind": "pipeline_updated", "pipeline": pipe})
+                )
+            except Exception:
+                pass
+
+    async def _pipeline_execution_context(self, pipe: dict) -> tuple[int, Path]:
+        """流水线归属项目的执行上下文（对标 _cron_execution_context）。"""
+        pid = pipe.get("project_id")
+        if pid is not None and pid != self.project.id:
+            proj = await self.store.get_project(pid)
+            if proj is not None and Path(proj.root_path).is_dir():
+                return pid, Path(proj.root_path)
+        return self.project.id, self.working_dir
+
+    async def _compose_node_prompt(self, node: dict) -> str:
+        """把依赖节点的产出摘要注入节点 prompt：汇总/审查节点靠这个看到上游结果。"""
+        parts = []
+        for d in node["depends_on"]:
+            dep = await self.store.get_pipeline_node(int(d))
+            if dep is not None and dep["status"] == "done" and dep["result"]:
+                parts.append(
+                    f"## 前置任务「{dep['title']}」的产出\n"
+                    + dep["result"][: self.NODE_RESULT_INJECT_CHARS]
+                )
+        if not parts:
+            return node["prompt"]
+        head = (
+            "你是任务编排流水线中的一个节点。以下是前置任务的产出，"
+            "请结合它们完成自己的任务。\n\n" + "\n\n".join(parts) + "\n\n---\n\n你的任务：\n"
+        )
+        return head + node["prompt"]
+
+    async def _run_pipeline_node(self, pipe: dict, node: dict) -> None:
+        """跑一个节点：独立会话 + headless 门控；产出写回节点行（对标 _run_cron_task）。"""
+        sid = ""
+        try:
+            if self.provider is None:
+                raise RuntimeError("尚未配置可用的模型 API Key")
+            run_pid, run_workdir = await self._pipeline_execution_context(pipe)
+            node = await self.store.update_pipeline_node(
+                node["id"], status="running", started_at=time.time(),
+                runs=(node["runs"] or 0) + 1, last_error="",
+            )
+            self._broadcast_pipeline(await self.store.get_pipeline(pipe["id"]))
+
+            prompt = await self._compose_node_prompt(node)
+            sess = await self.store.create_session(
+                run_pid, title=f"⚙️ {pipe['name']} · {node['title']}"
+            )
+            sid = sess.id
+            gate = HeadlessGate(allowed=node["allowed_tools"], store=self.store,
+                                project_id=run_pid, working_dir=run_workdir)
+            recorder = ChangeRecorder()
+            runtime = SessionRuntime(
+                sid=sid,
+                agent=Agent(
+                    provider=self.provider,
+                    registry=self._build_full_registry(recorder),
+                    gate=gate,
+                    working_dir=run_workdir,
+                    max_iterations=self.cfg.max_iterations,
+                    context_limit_tokens=self._context_limit(),
+                    compaction_keep_recent=self.cfg.compaction_keep_recent,
+                    hooks=self.hooks,
+                    restrict_to_workdir=self.cfg.restrict_to_workdir,
+                ),
+                recorder=recorder,
+            )
+            runtime.agent.set_system(self.compose_system_for(run_workdir))
+
+            async def pipe_emit(ev: dict) -> None:
+                pass  # 无人值守：流式/权限事件不进前端，产出走节点行
+
+            result = await self._run_turn_pipeline(
+                prompt, pipe_emit, plan_mode=False,
+                images=None, runtime=runtime, session_id=sid,
+            )
+            last_text = ""
+            for m in reversed(runtime.agent.history):
+                if m.role == "assistant" and m.text.strip():
+                    last_text = m.text.strip()
+                    break
+            if result.get("stopped"):
+                await self.store.update_pipeline_node(
+                    node["id"], status="error", last_error="运行被中断",
+                    session_id=sid, finished_at=time.time(),
+                )
+                await self.notify({"title": f"⚙️ 流水线节点失败：{node['title']}",
+                                   "body": "运行被中断"})
+            elif not last_text:
+                await self.store.update_pipeline_node(
+                    node["id"], status="error", last_error="节点没有产出",
+                    session_id=sid, finished_at=time.time(),
+                )
+                await self.notify({"title": f"⚙️ 流水线节点失败：{node['title']}",
+                                   "body": "这一轮没有产出文本"})
+            else:
+                await self.store.update_pipeline_node(
+                    node["id"], status="done", result=last_text,
+                    session_id=sid, finished_at=time.time(),
+                )
+        except asyncio.CancelledError:
+            await self.store.update_pipeline_node(
+                node["id"], status="cancelled", last_error="用户停止流水线",
+                session_id=sid, finished_at=time.time(),
+            )
+        except Exception as e:  # noqa: BLE001 - 节点失败也要落状态
+            try:
+                await self.store.update_pipeline_node(
+                    node["id"], status="error", last_error=str(e)[:300],
+                    session_id=sid, finished_at=time.time(),
+                )
+                await self.notify({"title": f"⚙️ 流水线节点失败：{node['title']}",
+                                   "body": str(e)[:160]})
+            except Exception:
+                pass
+        finally:
+            self._pipeline_running.discard(node["id"])
+            self._pipeline_node_tasks.pop(node["id"], None)
+            # 立刻补扫：刚完成的节点可能解锁了下游，不等下一个扫描周期
+            asyncio.get_running_loop().create_task(self._pipeline_kick())
+
+    async def _pipeline_kick(self) -> None:
+        try:
+            await self._pipeline_pass()
+        except Exception:
+            pass
+
+    async def _maybe_finish_pipeline(self, pipe: dict) -> None:
+        """全部节点到终态时给流水线收尾：全 done → done，否则 failed。"""
+        if pipe["status"] != "running":
+            return
+        nodes = await self.store.list_pipeline_nodes(pipe["id"])
+        if not nodes or any(n["status"] in ("blocked", "ready", "running") for n in nodes):
+            return
+        all_done = all(n["status"] == "done" for n in nodes)
+        updated = await self.store.update_pipeline(
+            pipe["id"], status="done" if all_done else "failed", finished_at=time.time()
+        )
+        self._broadcast_pipeline(updated)
+        bad = [n for n in nodes if n["status"] != "done"]
+        await self.notify({
+            "title": ("✅ 流水线完成：" if all_done else "⚠️ 流水线结束（有失败）：") + pipe["name"],
+            "body": (f"全部 {len(nodes)} 个节点完成"
+                     if all_done else f"{len(bad)} 个节点未成功：{bad[0]['title']}"),
+        })
+
+    # ---- 任务编排：WS 方法 ----
+
+    async def pipeline_list(self) -> dict:
+        return {"pipelines": await self.store.list_pipelines(self.project.id)}
+
+    async def pipeline_get(self, params: dict) -> dict:
+        pipe = await self.store.get_pipeline(int(params.get("id", 0)))
+        if pipe is None or pipe["project_id"] != self.project.id:
+            raise RuntimeError("流水线不存在: " + str(params.get("id")))
+        return {"pipeline": pipe}
+
+    async def pipeline_create(self, params: dict) -> dict:
+        name = str(params.get("name") or "").strip() or "未命名流水线"
+        raw_nodes = params.get("nodes")
+        if not isinstance(raw_nodes, list) or not raw_nodes:
+            raise RuntimeError("流水线至少要有一个节点")
+        nodes = []
+        for i, raw in enumerate(raw_nodes):
+            if not isinstance(raw, dict):
+                continue
+            prompt = str(raw.get("prompt") or "").strip()
+            if not prompt:
+                raise RuntimeError(f"第 {i + 1} 个节点的指令不能为空")
+            nodes.append({
+                "title": str(raw.get("title") or "").strip() or f"节点 {i + 1}",
+                "prompt": prompt,
+                # after = 同批次序号（0 起），由 store 物化成节点 id
+                "depends_on": [int(d) for d in raw.get("after") or []],
+                "allowed_tools": [str(t).strip() for t in raw.get("allowed_tools") or []],
+                "dep_mode": "any" if raw.get("dep_mode") == "any" else "all",
+            })
+        if not nodes:
+            raise RuntimeError("流水线至少要有一个节点")
+        pipe = await self.store.add_pipeline(
+            self.project.id, name, nodes=nodes,
+            concurrency=int(params.get("concurrency") or 2),
+        )
+        self._broadcast_pipeline(pipe)
+        return {"pipeline": pipe}
+
+    def _check_pipeline_ownership(self, pipe: dict) -> None:
+        """流水线必须属于当前项目才能改/删/启停（同 _check_cron_ownership，防枚举）。"""
+        if pipe.get("project_id") != self.project.id:
+            raise RuntimeError("流水线不存在: " + str(pipe.get("id")))
+
+    async def pipeline_start(self, params: dict) -> dict:
+        pipe = await self.store.get_pipeline(int(params.get("id", 0)))
+        if pipe is None:
+            raise RuntimeError("流水线不存在: " + str(params.get("id")))
+        self._check_pipeline_ownership(pipe)
+        if pipe["status"] == "running":
+            raise RuntimeError("流水线已在运行中")
+        if not pipe["nodes"]:
+            raise RuntimeError("流水线没有节点，先编辑再加节点")
+        if all(n["status"] == "done" for n in pipe["nodes"]):
+            raise RuntimeError("全部节点都已完成；要重跑某个节点请用节点上的重跑按钮")
+        # 上次被停止的节点退回等待，重新参与调度
+        for n in pipe["nodes"]:
+            if n["status"] == "cancelled":
+                await self.store.update_pipeline_node(n["id"], status="blocked", last_error="")
+        # 全部停在终态（done/error 混合）且没有可重置的停止节点：直接启动只会
+        # 立刻再收尾一次（多发一遍完成通知），明确告诉用户先重跑失败节点
+        if all(n["status"] in ("done", "error") for n in pipe["nodes"]):
+            raise RuntimeError("没有可运行的节点——失败节点请先在详情里点「重跑」，或删除后重建流水线")
+        pipe = await self.store.update_pipeline(pipe["id"], status="running", finished_at=0)
+        self._broadcast_pipeline(pipe)
+        asyncio.get_running_loop().create_task(self._pipeline_pass())
+        return {"pipeline": pipe, "started": True}
+
+    async def pipeline_cancel(self, params: dict) -> dict:
+        pipe = await self.store.get_pipeline(int(params.get("id", 0)))
+        if pipe is None:
+            raise RuntimeError("流水线不存在: " + str(params.get("id")))
+        self._check_pipeline_ownership(pipe)
+        if pipe["status"] != "running":
+            raise RuntimeError("流水线不在运行中")
+        pipe = await self.store.update_pipeline(pipe["id"], status="cancelled",
+                                                finished_at=time.time())
+        for n in pipe["nodes"]:
+            if n["status"] in ("blocked", "ready"):
+                await self.store.update_pipeline_node(
+                    n["id"], status="cancelled", last_error="用户停止流水线",
+                    finished_at=time.time(),
+                )
+            elif n["status"] == "running":
+                t = self._pipeline_node_tasks.get(n["id"])
+                if t is not None and not t.done():
+                    t.cancel()  # 协程收尾会把节点标为 cancelled
+        self._broadcast_pipeline(pipe)
+        return {"pipeline": pipe, "cancelled": True}
+
+    async def pipeline_delete(self, params: dict) -> dict:
+        pid = int(params.get("id", 0))
+        pipe = await self.store.get_pipeline(pid)
+        if pipe is not None:
+            self._check_pipeline_ownership(pipe)
+            for n in pipe["nodes"]:
+                if n["status"] == "running":
+                    t = self._pipeline_node_tasks.get(n["id"])
+                    if t is not None and not t.done():
+                        t.cancel()
+        ok = await self.store.delete_pipeline(pid)
+        return {"deleted": ok, "id": pid}
+
+    async def pipeline_node_rerun(self, params: dict) -> dict:
+        """重跑一个节点：节点退回等待；因依赖失败而挂掉的下游一并退回等待。"""
+        node = await self.store.get_pipeline_node(int(params.get("id", 0)))
+        if node is None:
+            raise RuntimeError("节点不存在: " + str(params.get("id")))
+        pipe = await self.store.get_pipeline(node["pipeline_id"])
+        if pipe is None:
+            raise RuntimeError("流水线不存在")
+        self._check_pipeline_ownership(pipe)
+        if node["status"] == "running":
+            raise RuntimeError("节点正在运行，不能重跑")
+        await self.store.update_pipeline_node(
+            node["id"], status="blocked", result="", last_error="", finished_at=0,
+        )
+        # 只回退「因依赖失败」的错误下游（DEP_FAIL_MARK 前缀）；自身跑挂的不动
+        for n in pipe["nodes"]:
+            if (n["id"] != node["id"] and n["status"] == "error"
+                    and node["id"] in n["depends_on"]
+                    and n["last_error"].startswith(self.DEP_FAIL_MARK)):
+                await self.store.update_pipeline_node(
+                    n["id"], status="blocked", last_error="", finished_at=0,
+                )
+        if pipe["status"] in ("failed", "cancelled"):
+            pipe = await self.store.update_pipeline(pipe["id"], status="running", finished_at=0)
+        self._broadcast_pipeline(pipe)
+        if pipe["status"] == "running":
+            asyncio.get_running_loop().create_task(self._pipeline_pass())
+        return {"pipeline": pipe}
+
     # ---- 模型 ----
 
     def _build_provider(self, name: str, model: str | None = None) -> Provider:
@@ -1217,7 +1606,8 @@ class ServerBackend:
         try:
             provider = build_provider(name, pc)
         except ConfigError as e:
-            raise RuntimeError(str(e) + "\nhint: skysheep config init 后填入 API Key") from e
+            # ConfigError 文案自带出路（设置页指引）；CLI 场景的 config init 提示不适用于图形界面
+            raise RuntimeError(str(e)) from e
         self.provider_name = name
         self.provider_model = pc.model
         return provider
@@ -1225,10 +1615,20 @@ class ServerBackend:
     # ---- 系统提示词 / 会话 ----
 
     def compose_system(self) -> str:
+        return self.compose_system_for(self.working_dir)
+
+    def compose_system_for(self, workdir: Path) -> str:
+        """无人值守跨项目运行（定时任务/流水线节点）按目标目录组装系统提示词。
+
+        工作目录与项目约定（AGENTS.md）必须取目标目录的——否则提示词里写着
+        A 目录、实际却在 B 目录干活，Agent 会找错地方；技能段沿用当前装载的
+        SkillLoader（按目录重挂载过重），全局记忆本就跨项目。
+        """
+        instr_file, instr_text = load_project_instructions(workdir)
         return (
-            build_system_prompt(self.working_dir)
+            build_system_prompt(workdir)
             + self.skills.render_prompt_section()
-            + render_instructions_section(self.instructions_file, self.instructions_text)
+            + render_instructions_section(instr_file, instr_text)
             + render_memory_section()
         )
 
@@ -1475,8 +1875,7 @@ class ServerBackend:
         if self.provider is None:
             raise RuntimeError(
                 "尚未配置可用的模型 API Key——"
-                "请在 ~/.skysheep/config.toml 填入 api_key（或设置对应环境变量）后重启，"
-                "或在左侧模型下拉中选择一个已配置 Key 的 provider。"
+                "打开 ⚙ 设置 · 模型服务，选一个服务粘贴 API Key 即可开始对话。"
             )
         # 每日 token 预算护栏（设置 · 高级，默认 0 = 不限制）：超限即停，
         # 给可读的出路而不是让费用悄悄滚大。演示模式不受限（不产生真实费用）。
@@ -1888,21 +2287,24 @@ class ServerBackend:
         )
         chair_key = (self.provider_name, self.provider_model)
 
-        def _add(name: str, model: str) -> None:
+        def _add(name: str, model: str, role: str = "") -> None:
             key = (name, model)
             if key in seen or len(seen) >= limit:
                 return
             seen.add(key)
+            if role not in MEMBER_ROLES:
+                role = ""  # 未知身份 id 一律按普通成员处理
             try:
                 provider = self._build_member_provider(name, model)
                 specs.append(MemberSpec(
                     provider_name=name,
                     model=model or getattr(provider, "model", ""),
                     provider=provider,
+                    role=role,
                 ))
             except Exception as e:  # noqa: BLE001 - 构建失败降级为错误成员卡片
                 specs.append(MemberSpec(
-                    provider_name=name, model=model, build_error=str(e)[:200]
+                    provider_name=name, model=model, build_error=str(e)[:200], role=role,
                 ))
 
         if members_params:
@@ -1911,9 +2313,10 @@ class ServerBackend:
                 if not name:
                     continue
                 model = str((m or {}).get("model", "") or "").strip()
+                role = str((m or {}).get("role", "") or "").strip()
                 if chair_in and (name, model) == chair_key:
                     continue
-                _add(name, model)
+                _add(name, model, role)
         else:
             for name, pc in self.cfg.providers.items():
                 if resolve_api_key(name, pc) is None:
@@ -2023,12 +2426,15 @@ class ServerBackend:
             fuse=not compare,
             chair_provider=self.provider_name or "",
             chair_model=self.provider_model or "",
+            chair_context_tokens=agent.context_limit_tokens,
+            member_history_turns=cfg.member_history_turns,
         )
 
         def member_meta(r) -> dict:
             return {
                 "provider": r.spec.provider_name,
                 "model": r.spec.model,
+                "role": r.spec.role,
                 "status": r.status,
                 "error": r.error,
                 "input_tokens": r.input_tokens,
@@ -2089,6 +2495,22 @@ class ServerBackend:
                 assistant.roundtable = meta
                 agent.history.append(assistant)
                 await emit_ev(AssistantMessage(message=assistant.model_dump()))
+            else:
+                # 成员阶段取消：流式时用户已经看到过这些成员卡，草稿按对比式
+                # 落库（与融合失败降级同思路——已花的钱和已看的内容不随刷新消失）。
+                # 部分草稿成员的状态是 error（引擎标注「已取消」），如实呈现。
+                kept = [r for r in outcome.members if r.text.strip()]
+                if kept:
+                    meta["mode"] = "compare"
+                    for r in kept:
+                        m = Message.assistant([TextBlock(text=r.text.strip())])
+                        m.roundtable = {
+                            "mode": "compare", "chair": meta["chair"],
+                            "cancelled": True,
+                            "members": [member_meta(r)],
+                        }
+                        agent.history.append(m)
+                        await emit_ev(AssistantMessage(message=m.model_dump()))
             await emit_ev(TurnFinished(stop_reason="cancelled", iterations=1))
             return meta
 
@@ -2138,12 +2560,14 @@ class ServerBackend:
             "member_timeout_s": rt.member_timeout_s,
             "chair_answers": rt.chair_answers,
             "debate_rounds": rt.debate_rounds,
+            "member_history_turns": rt.member_history_turns,
             "configured_services": len(self._configured_services()),
             "config_hint": (
                 "圆桌让多个模型并行独立作答，再由主席（当前主模型）融合成一份答案，"
                 "token 成本约为单模型的「成员数 + 1」倍；每多一轮辩论修订，成员成本"
-                "再翻一倍（草稿已收敛的成员会自动跳过）。成员来自「模型服务」里已配好"
-                " Key 的服务，可在输入框的圆桌面板逐个勾选。圆桌全程不调用工具、不写文件。"
+                "再翻一倍（草稿已收敛的成员会自动跳过，雷同草稿在融合时自动去重）。"
+                "成员来自「模型服务」里已配好 Key 的服务，可在输入框的圆桌面板逐个"
+                "勾选并指定身份（批评者 / 事实核查员等）。圆桌全程不调用工具、不写文件。"
             ),
         }
 
@@ -2158,6 +2582,8 @@ class ServerBackend:
             updates["chair_answers"] = bool(params["chair_answers"])
         if params.get("debate_rounds") is not None:
             updates["debate_rounds"] = max(0, min(2, int(params["debate_rounds"])))
+        if params.get("member_history_turns") is not None:
+            updates["member_history_turns"] = max(0, int(params["member_history_turns"]))
         if updates:
             update_config_section("roundtable", updates)
             self.cfg = load_config()
@@ -4019,10 +4445,72 @@ class ServerBackend:
         return {"id": session_id, "pinned": pinned}
 
     async def archive_session(self, session_id: str, archived: bool) -> dict:
-        """归档/取消归档：归档后会话从侧栏与搜索里消失，可在归档弹窗恢复。"""
-        await self._get_owned_session(session_id)
+        """归档/取消归档：归档后会话从侧栏与搜索里消失，可在归档弹窗恢复。
+
+        归档（且此前未归档、未提炼过）时后台自动提炼用户记忆：归档通常意味着
+        「这事完了」，是判断哪些信息值得长期记住的自然时机；提炼失败静默，
+        不影响归档本身。提炼过一次就不再重来（取消归档再归档也不重复花钱）。
+        """
+        sess = await self._get_owned_session(session_id)
+        already = bool(sess.archived)
         await self.store.set_archived(session_id, archived)
+        if archived and not already \
+                and not await self.store.get_session_memory_digested(session_id):
+            self._schedule_memory_digest(session_id)
         return {"id": session_id, "archived": archived}
+
+    # ---- 归档自动记忆（提炼纯函数在 tools/memory.py） ----
+
+    def _schedule_memory_digest(self, session_id: str) -> None:
+        if not self.cfg.memory_digest:
+            return  # 设置 · 全局记忆里关掉了归档自动记忆（保存即热生效）
+        if session_id in self._digesting:
+            return
+        self._digesting.add(session_id)
+        try:
+            asyncio.create_task(self._memory_digest(session_id))
+        except RuntimeError:
+            self._digesting.discard(session_id)  # 无事件循环（如纯测试环境）
+
+    async def _memory_digest(self, sid: str) -> None:
+        """归档后用当前模型通读会话，提炼可长期记住的信息写入用户记忆。
+
+        与 _auto_title 同一套边界：走当前 provider 但失败静默，绝不影响主流程；
+        写入成功后像 save_instructions 一样全局刷新系统提示词，让所有会话
+        下一轮就带上新记忆。
+        """
+        try:
+            if getattr(self.provider, "demo_mode", False):
+                return  # 演示模式不消耗脚本组
+            transcript = digest_transcript(await self.store.load_messages(sid))
+            if not transcript:
+                return  # 寒暄/单条短问答，不值得提炼
+            parts: list[str] = []
+            async for ev in self.provider.stream(
+                [Message.user(build_digest_prompt(transcript))], []
+            ):
+                if isinstance(ev, ProviderTextDelta):
+                    parts.append(ev.text)
+                elif isinstance(ev, ProviderDone):
+                    break
+            added = remember_lines(parse_digest("".join(parts)))
+            # 提炼跑完（无论有没有提出新条目）就标记：模型调用已经花过钱，
+            # 取消归档再归档不应再来一遍；上面任何一步抛错则不标记，下次可重试
+            await self.store.mark_session_memory_digested(sid)
+            if not added:
+                return
+            for ag in self._for_each_agent():
+                ag.set_system(self.compose_system())
+            self._ws_broadcast({
+                "kind": "memory_digest", "session_id": sid, "added": len(added),
+                "message": f"归档后新记住 {len(added)} 条：" + "；".join(added)[:200],
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            memory_log.warning("archive memory digest failed: %s", e)
+        finally:
+            self._digesting.discard(sid)
 
     async def list_archived_sessions(self) -> dict:
         """归档弹窗列表（当前项目，最近活跃在前）。"""
@@ -4467,7 +4955,11 @@ class ServerBackend:
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
-        return {"path": str(p), "text": text[:MAX_MEMORY_FILE_CHARS]}
+        return {
+            "path": str(p),
+            "text": text[:MAX_MEMORY_FILE_CHARS],
+            "digest_enabled": self.cfg.memory_digest,
+        }
 
     async def memory_save(self, text: str) -> dict:
         from ..tools.memory import MAX_MEMORY_FILE_CHARS, memory_path
@@ -4479,6 +4971,15 @@ class ServerBackend:
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
         return {"saved": True, "path": str(p), "chars": len(text)}
+
+    async def memory_digest_save(self, enabled: bool) -> dict:
+        """归档自动记忆总闸：写 config.toml 并热生效（下一次归档即按新值决定）。"""
+        try:
+            set_advanced_settings_in_config(memory_digest=bool(enabled))
+        except ConfigError as e:
+            raise RuntimeError(str(e)) from e
+        self.cfg = load_config()
+        return {"enabled": self.cfg.memory_digest}
 
     # ---- 联网搜索 / AI 画图：设置页配置（写 config.toml + 热更新工具实例） ----
 
@@ -5418,6 +5919,7 @@ class ServerBackend:
                 name: {
                     "kind": pc.kind,
                     "model": pc.model,
+                    "base_url": pc.base_url,
                     "has_key": resolve_api_key(name, pc) is not None,
                     "supports_vision": bool(pc.supports_vision),
                 }

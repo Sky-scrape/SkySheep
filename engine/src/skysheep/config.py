@@ -95,6 +95,10 @@ class RoundtableConfig(BaseModel):
     # 额外辩论修订轮数：0=成员只独立作答一轮；1=成员看到彼此草稿后再修订
     # 一轮（token 成本约翻倍，已收敛的成员自动跳过）；上限 2
     debate_rounds: int = Field(default=0, ge=0, le=2)
+    # 成员轻上下文：成员只看最近 N 轮历史（0=全量）。主席融合始终吃全量历史，
+    # 砍的只是成员侧的输入放大（N 个成员 × 全量历史是圆桌最大的 token 开销）。
+    # 需要长程上下文的连续追问任务建议保持全量。
+    member_history_turns: int = Field(default=0, ge=0)
 
 
 class WebSearchConfig(BaseModel):
@@ -203,6 +207,10 @@ class SkySheepConfig(BaseModel):
     # 每日 token 预算护栏：当天累计输入+输出超过该值后拒绝发送新消息（0 = 不限制）。
     # 面向"怕烧钱"的普通用户；用量统计（usage_log）是现成的数据源。
     daily_token_budget: int = Field(default=0, ge=0)
+    # 归档自动记忆：会话归档后后台用当前模型提炼持久事实写进用户记忆
+    # （memory.md），默认开。这是「越用越懂你」的正向能力，总闸给在意
+    # 额外模型调用或不想被打扰的用户；开关在 设置 · 全局记忆。
+    memory_digest: bool = True
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
@@ -346,6 +354,7 @@ def load_config() -> SkySheepConfig:
         computer_control = bool(raw.get("computer_control", False))
         browser_control = bool(raw.get("browser_control", False))
         daily_budget = max(0, int(raw.get("daily_token_budget", 0)))
+        memory_digest = bool(raw.get("memory_digest", True))
         disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
         rt_raw = raw.get("roundtable")
         if isinstance(rt_raw, dict):
@@ -388,6 +397,7 @@ def load_config() -> SkySheepConfig:
         computer_control = False
         browser_control = False
         daily_budget = 0
+        memory_digest = True
     for name in disabled:
         merged.pop(name, None)
     # 老配置只有 model 没有 models：把当前模型视为已启用列表的首个成员
@@ -410,6 +420,7 @@ def load_config() -> SkySheepConfig:
         computer_control=computer_control,
         browser_control=browser_control,
         daily_token_budget=daily_budget,
+        memory_digest=memory_digest,
         roundtable=roundtable,
         websearch=websearch,
         imagegen=imagegen,
@@ -429,6 +440,7 @@ def set_advanced_settings_in_config(
     computer_control: bool | None = None,
     browser_control: bool | None = None,
     daily_token_budget: int | None = None,
+    memory_digest: bool | None = None,
 ) -> None:
     """写入「高级」设置（config.toml 顶层；None 表示该项不动）。"""
     if max_iterations is not None and not 1 <= int(max_iterations) <= 200:
@@ -454,6 +466,8 @@ def set_advanced_settings_in_config(
         raw["browser_control"] = bool(browser_control)
     if daily_token_budget is not None:
         raw["daily_token_budget"] = max(0, int(daily_token_budget))
+    if memory_digest is not None:
+        raw["memory_digest"] = bool(memory_digest)
     _write_raw_config(p, raw)
 
 

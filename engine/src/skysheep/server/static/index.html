@@ -60,6 +60,7 @@
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
         <button class="nav-item" data-act="cron" title="到点让 Agent 自己干活，无人值守">定时任务</button>
+        <button class="nav-item" data-act="pipeline" title="多个任务按依赖顺序自动跑：前面的并行做，最后的汇总审查">任务编排</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
       </nav>
 
@@ -128,10 +129,10 @@
           <div id="chat-tabs" class="hidden"></div>
           <span class="spacer"></span>
           <span id="usage" class="dim small"></span>
-          <button id="btn-help" class="tb-icon" title="帮助：快速上手 · 快捷键 · 常见问题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>
-          <button id="btn-bell" class="tb-icon" title="通知中心">🔔<span id="bell-badge" class="bell-badge hidden"></span></button>
-          <button id="btn-term" class="tb-icon" title="终端面板：多开命令行标签（Ctrl+`）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="m7.5 9.5 3 2.5-3 2.5"/><path d="M12.5 15h4"/></svg></button>
-          <button id="btn-tabs" class="tb-icon" title="展开 / 收起右侧面板"></button>
+          <button id="btn-help" class="tb-icon" title="帮助：快速上手 · 快捷键 · 常见问题" aria-label="帮助"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>
+          <button id="btn-bell" class="tb-icon" title="通知中心" aria-label="通知中心">🔔<span id="bell-badge" class="bell-badge hidden"></span></button>
+          <button id="btn-term" class="tb-icon" title="终端面板：多开命令行标签（Ctrl+`）" aria-label="终端面板"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="m7.5 9.5 3 2.5-3 2.5"/><path d="M12.5 15h4"/></svg></button>
+          <button id="btn-tabs" class="tb-icon" title="展开 / 收起右侧面板" aria-label="展开或收起右侧面板"></button>
           <button id="btn-stop" class="btn-ghost danger" hidden>⏹ 停止</button>
         </header>
 
@@ -375,6 +376,15 @@
               <button id="btn-cron-add" class="rp-mini" title="新增定时任务">＋ 新增</button>
             </div>
             <ul id="cron-list" class="list cron-list rp-page-list"></ul>
+          </section>
+
+          <section id="rp-page-pipeline" class="rp-page hidden">
+            <div class="rp-toolbar">
+              <span class="dim small">前面的节点并行做，依赖满足后自动跑下一个，最后一个汇总审查。</span>
+              <span class="spacer"></span>
+              <button id="btn-pipeline-add" class="rp-mini" title="新建流水线">＋ 新建</button>
+            </div>
+            <ul id="pipeline-list" class="list pipeline-list rp-page-list"></ul>
           </section>
 
           <section id="rp-page-memory" class="rp-page hidden">
@@ -845,6 +855,20 @@
             <div id="memory-global-status" class="card-status" hidden></div>
             <textarea id="memory-text" class="memory-text" rows="14"
                       placeholder="Agent 还没有记住任何东西。也可以在这里手动添加，例如：&#10;- [2026-09-15] 沟通偏好直接给结论，不用铺垫"></textarea>
+          </section>
+          <section class="settings-card">
+            <h3>归档自动记忆</h3>
+            <p class="settings-hint">
+              归档会话时，后台用当前模型通读这段对话，把值得长期记住的信息（偏好、
+              常用环境、做事约定；不含一次性任务细节与机密）自动提炼进上面的全局记忆，
+              最多 8 条、与已有记忆重复的自动跳过，提炼完成会通知你记住了什么。
+              额外消耗一次模型调用；寒暄、单条短问答不会触发。
+            </p>
+            <label class="toggle-row">
+              <input type="checkbox" id="memory-digest-toggle">
+              <span>归档会话时自动总结记忆</span>
+            </label>
+            <div id="memory-digest-status" class="card-status" hidden></div>
           </section>
         </section>
 

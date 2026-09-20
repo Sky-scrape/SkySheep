@@ -191,7 +191,8 @@ Running into a problem? In the app, go to Settings · About → "💬 Report an 
   CI ✅, community docs ✅, installer scripts ✅, Skill Market (index published with the main repo) ✅, update check ✅,
   SmartScreen guide ✅, website page (`index.html`, live on GitHub Pages) ✅; remaining: code-signed distribution
 - **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
-- **v1.8 (✅ current release)**: real terminal (multi-tab PowerShell via ConPTY + xterm.js), bot
+- **v1.9 (✅ current release)**: task pipelines (chain tasks by dependency — parallel dev work feeds an automatic review stage), archive-time memory digest (distills long-term user memory when a session is archived), roundtable token saver trio (light member context / duplicate-draft dedupe / member role presets) plus robustness fixes, installer static-asset hardening
+- **v1.8 (✅)**: real terminal (multi-tab PowerShell via ConPTY + xterm.js), bot
   channels (Telegram / WeChat QR login), task time estimates, voice input, session archive & tags,
   cross-session references, live sub-agent streaming with true cancellation, round-table multi-turn
   debate, three-layer hardening from an external security review, safe non-UTF-8 text I/O (GBK etc.),

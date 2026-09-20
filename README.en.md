@@ -40,9 +40,10 @@ On top of that sits a complete Agent capability stack:
 - 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + one-click install from the [Skill Market](market/) + "scan this computer" to pick up skills already installed by Claude Code and other tools; a dedicated skills page with per-project scope, SKILL.md preview, and keyword search)
 - 🖱️ **Computer control**: screenshots straight into the conversation; mouse / keyboard / window / clipboard (off by default; confirmation-gated, with an action-level whitelist)
 - ⏰ **Scheduled tasks and agenda**: recurring tasks, due-time reminders, weekly calendar view; continue the chat from your phone over LAN (token + QR code)
-- 👥 **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer
+- 👥 **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer — with debate rounds (members see each other's drafts and revise), member role presets (critic / fact-checker / concision / pragmatist), a token-saver trio (light member context, duplicate-draft dedupe, fusion budget), and every draft kept on the message for later review
+- 🔗 **Task pipelines**: chain tasks by dependency — upstream nodes run in parallel, downstream starts automatically, a review node closes the loop; per-node timeouts, auto-retry with the last failure reason, PASS/FAIL gates, and the same unattended permission gating as scheduled tasks
 - 📄 **Document I/O**: reads PDF / Word / Excel, writes Word / Excel / CSV
-- 🀄 **Chinese-first**: the UI, built-in help, quick commands, and Skill Market are all designed for Chinese-language scenarios
+- 🀄 **Chinese-first**: the UI, built-in help, prompt templates, and Skill Market are all designed for Chinese-language scenarios
 
 ## 🖼 Interface Tour
 
@@ -75,7 +76,7 @@ No API key on first launch? The setup wizard walks you through three steps (pick
 uv run python examples/demo.py   # FakeProvider multi-step coding task (write → crash → fix → re-test)
 ```
 
-In the desktop app: type `/` to bring up the command menu and quick commands, `@` to reference project files/folders, "Add file" to attach files from anywhere on disk, `Ctrl+F` to search within a conversation, `Ctrl+Shift+F` to search across sessions, and `Ctrl+Alt+Space` to summon the window globally. New here? Click the "?" in the top bar for built-in help.
+In the desktop app: type `~` to bring up the prompt-template menu (built-in examples included, manage your own under Settings · Prompts), `/` for the command menu, `@` to reference project files/folders, "Add file" to attach files from anywhere on disk, `Ctrl+F` to search within a conversation, `Ctrl+Shift+F` to search across sessions, and `Ctrl+Alt+Space` to summon the window globally. New here? Click the "?" in the top bar for built-in help.
 
 <details>
 <summary><b>📦 Double-click launch / packaging</b> (expand)</summary>
@@ -95,7 +96,7 @@ Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), 
 ### 🛡 Safety mechanisms
 
 - Read-only tools (read/grep/glob/list/web_fetch/web_search/read_document) run without confirmation
-- File writes, image generation, and command execution prompt for confirmation by default: `Allow once / Always allow for this project / Deny`; a tiered "✎ Auto-write" permission mode is also supported (command execution always still requires confirmation)
+- File writes, image generation, and command execution prompt for confirmation by default: `Allow once / Always allow for this project / Deny`; the permission button in the composer cycles three modes — **Safe execution** (confirm everything) → **Auto-edit** (auto-approves writes inside the working directory only) → **Full access** (writes and commands run without prompts, shown in warning red); relaxation modes can only be switched from the local UI, never over LAN/remote
 - The command whitelist matches by **command prefix**, with rules persisted per project
 - `web_fetch` only allows public http(s): requests resolving to non-public IPs are rejected outright (SSRF protection), and redirects are re-checked hop by hop
 - Checkpoints are persisted per project (last 50 rounds kept), with one-click "undo this round's changes" right in the conversation; changes made by run_command are not tracked
@@ -191,7 +192,8 @@ Running into a problem? In the app, go to Settings · About → "💬 Report an 
   CI ✅, community docs ✅, installer scripts ✅, Skill Market (index published with the main repo) ✅, update check ✅,
   SmartScreen guide ✅, website page (`index.html`, live on GitHub Pages) ✅; remaining: code-signed distribution
 - **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
-- **v1.9 (✅ current release)**: task pipelines (chain tasks by dependency — parallel dev work feeds an automatic review stage), archive-time memory digest (distills long-term user memory when a session is archived), roundtable token saver trio (light member context / duplicate-draft dedupe / member role presets) plus robustness fixes, installer static-asset hardening
+- **v2.0 (✅ current release)**: "quick commands" renamed to "prompts" with a `~` trigger (split from `/` slash commands), three-mode permission button (safe execution / auto-edit / full access), built-in example prompts seeded as editable records on first boot, Skill Market grown to 20 official Chinese skills, prompt-dialog fix
+- **v1.9 (✅)**: task pipelines (chain tasks by dependency — parallel dev work feeds an automatic review stage), archive-time memory digest (distills long-term user memory when a session is archived), roundtable token saver trio (light member context / duplicate-draft dedupe / member role presets) plus robustness fixes, installer static-asset hardening
 - **v1.8 (✅)**: real terminal (multi-tab PowerShell via ConPTY + xterm.js), bot
   channels (Telegram / WeChat QR login), task time estimates, voice input, session archive & tags,
   cross-session references, live sub-agent streaming with true cancellation, round-table multi-turn

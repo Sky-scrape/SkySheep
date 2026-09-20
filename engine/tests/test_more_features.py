@@ -60,6 +60,8 @@ def test_no_auto_title_without_flag(home):
 def test_snippets_crud_via_ws(home):
     from test_server import make_client, recv_until
 
+    from skysheep.server.backend import BUILTIN_SNIPPETS
+
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "a1", "method": "snippets.add", "params": {
             "name": "代码审查", "content": "请审查：{{clipboard}}"}})
@@ -68,7 +70,9 @@ def test_snippets_crud_via_ws(home):
 
         ws.send_json({"id": "l1", "method": "snippets.list", "params": {}})
         lst = recv_until(ws, "l1")["result"]["snippets"]
-        assert len(lst) == 1
+        # 首启已播种内置示例 + 本条新建
+        assert len(lst) == len(BUILTIN_SNIPPETS) + 1
+        assert "代码审查" in [s["name"] for s in lst]
 
         ws.send_json({"id": "u1", "method": "snippets.update", "params": {
             "id": lst[0]["id"], "name": "改名", "content": "新内容"}})
@@ -80,6 +84,73 @@ def test_snippets_crud_via_ws(home):
         # 空名拒绝
         ws.send_json({"id": "a2", "method": "snippets.add", "params": {"name": "", "content": "x"}})
         assert not recv_until(ws, "a2")["ok"]
+
+
+# ---- 内置示例快捷指令：首启播种 ----
+
+
+def _snippet_ids(ws):
+    from test_server import recv_until
+
+    ws.send_json({"id": "q", "method": "snippets.list", "params": {}})
+    return [(s["id"], s["name"]) for s in recv_until(ws, "q")["result"]["snippets"]]
+
+
+def test_builtin_snippets_seeded_editable(home):
+    """首启把内置示例落成真实记录：设置页可见、可编辑；响应里带 / 菜单兜底列表。"""
+
+    from test_server import make_client, recv_until
+
+    from skysheep.server.backend import BUILTIN_SNIPPETS
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        rows = _snippet_ids(ws)
+        # 列表按创建时间倒序：只比对集合，不比对顺序
+        assert sorted(name for _, name in rows) == sorted(s["name"] for s in BUILTIN_SNIPPETS)
+        ws.send_json({"id": "b", "method": "snippets.list", "params": {}})
+        assert len(recv_until(ws, "b")["result"]["builtin"]) == len(BUILTIN_SNIPPETS)
+        # 示例就是普通记录：改名字、改内容都行
+        ws.send_json({"id": "u1", "method": "snippets.update",
+                      "params": {"id": rows[0][0], "name": "项目速览（改）", "content": "新内容"}})
+        assert recv_until(ws, "u1")["ok"]
+        assert "项目速览（改）" in [name for _, name in _snippet_ids(ws)]
+    # 播种哨兵落盘（下次启动不再补种）
+    assert (home / "home" / "snippets-seeded").exists()
+
+
+def test_builtin_snippets_delete_is_sticky(home):
+    """删光示例后重启不复活：播种只做一次，删光是用户的明确决定。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        for sid, _ in _snippet_ids(ws):
+            ws.send_json({"id": "d", "method": "snippets.delete", "params": {"id": sid}})
+            assert recv_until(ws, "d")["result"]["deleted"] is True
+        assert _snippet_ids(ws) == []
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        assert _snippet_ids(ws) == []
+        # 但 / 菜单的兜底列表仍然随响应下发
+        ws.send_json({"id": "b", "method": "snippets.list", "params": {}})
+        assert len(recv_until(ws, "b")["result"]["builtin"]) == 5  # 与 BUILTIN_SNIPPETS 等长
+
+
+async def test_builtin_snippets_skip_legacy_users(home):
+    """升级老用户已有自定义指令时不播种（保持「加了自定义后示例不再出现」旧约定）。"""
+    from test_server import make_client
+
+    from skysheep.config import db_path
+    from skysheep.session.store import SessionStore
+
+    # 首个客户端启动前，指令库里已有一条自建指令（模拟老用户）
+    s = await SessionStore(db_path()).connect()
+    await s.add_snippet("我的旧指令", "老内容")
+    await s.close()
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        rows = _snippet_ids(ws)
+        assert [name for _, name in rows] == ["我的旧指令"]
+    # 哨兵仍会落盘：之后删光也不补种
+    assert (home / "home" / "snippets-seeded").exists()
 
 
 # ---- fs.read 沙箱 ----

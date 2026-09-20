@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..config import resolve_api_key
-from .backend import THEME_PREFS, ServerBackend, client_origin
+from .backend import BUILTIN_SNIPPETS, THEME_PREFS, ServerBackend, client_origin
 
 logger = logging.getLogger("skysheep.security")
 
@@ -70,6 +70,10 @@ LOCAL_ONLY_METHODS = frozenset({
     # 任务编排：无人值守节点同样按 allowed_tools 预授权危险工具
     "pipeline.create", "pipeline.start", "pipeline.cancel",
     "pipeline.delete", "pipeline.node_rerun",
+    # 纳入现有任务：挂接任务簿 / 定时任务导入（可停用原任务）/ 会话续跑
+    "pipeline.attach", "pipeline.import_cron", "pipeline.add_session",
+    # 流水线复制 / 导入（allowed_tools 可随节点预授权危险工具；导出只读不在表内）
+    "pipeline.duplicate", "pipeline.import",
     # 网络暴露开关（放宽方向；disable 是收紧、不在表内）
     "lan.enable", "remote.enable",
     # 项目边界：切任意目录 / 删项目 / 改 AGENTS.md（持久 prompt 注入链）
@@ -203,6 +207,7 @@ def create_app(
         backend.start_reminder_loop()
         backend.start_cron_loop()
         backend.start_pipeline_loop()
+        backend.start_memory_maintenance_loop()
         import logging
 
         logging.getLogger("skysheep").info(
@@ -212,6 +217,7 @@ def create_app(
         backend.stop_cron_loop()
         backend.stop_pipeline_loop()
         backend.stop_reminder_loop()
+        backend.stop_memory_maintenance_loop()
         await backend.shutdown()
         try:
             flag.unlink(missing_ok=True)
@@ -219,6 +225,8 @@ def create_app(
             pass
 
     app = FastAPI(title="SkySheep", lifespan=lifespan)
+    # 测试与扩展从 app.state 取引擎句柄（create_app 的闭包变量外部不可见）
+    app.state.backend = backend
 
     # ---- 局域网访问令牌守卫（默认关闭 = token 为空，本地直连不设防） ----
     # 开启后服务监听 0.0.0.0（cli/_start_backend 负责），远端请求都要带令牌：
@@ -364,10 +372,10 @@ def create_app(
             return {"mode": backend.permission_mode()}
         if method == "permission.set_mode":
             mode = str(params.get("mode", "confirm"))
-            # 「自动允许写入」会放宽所有写入的确认：只能在本机界面上切换，
+            # 「自动编辑 / 完全访问」会放宽写入与执行的确认：只能在本机界面上切换，
             # 不允许被局域网客户端（或远程驱动的前端）打开
-            if mode == "accept_edits" and not local:
-                raise RuntimeError("「自动允许写入」只能在本机界面上切换")
+            if mode in ("accept_edits", "full_access") and not local:
+                raise RuntimeError("放宽权限的档位（自动编辑/完全访问）只能在本机界面上切换")
             return await backend.set_permission_mode(mode)
         if method == "stop":
             return {"cancelled": backend.cancel_run(
@@ -424,6 +432,18 @@ def create_app(
             return await backend.pipeline_delete(params)
         if method == "pipeline.node_rerun":
             return await backend.pipeline_node_rerun(params)
+        if method == "pipeline.attach":
+            return await backend.pipeline_attach(params)
+        if method == "pipeline.import_cron":
+            return await backend.pipeline_import_cron(params)
+        if method == "pipeline.add_session":
+            return await backend.pipeline_add_session(params)
+        if method == "pipeline.duplicate":
+            return await backend.pipeline_duplicate(params)
+        if method == "pipeline.export":
+            return await backend.pipeline_export(params)
+        if method == "pipeline.import":
+            return await backend.pipeline_import(params)
         if method == "usage.stats":
             return await backend.usage_stats(params)
         if method == "fs.read":
@@ -431,7 +451,9 @@ def create_app(
         if method == "fs.write":
             return await backend.fs_write(params)
         if method == "snippets.list":
-            return {"snippets": await backend.store.list_snippets()}
+            # builtin 随响应下发：用户把指令删光时，前端 / 菜单用它兜底
+            return {"snippets": await backend.store.list_snippets(),
+                    "builtin": BUILTIN_SNIPPETS}
         if method == "snippets.add":
             name = str(params.get("name", "")).strip()
             content = str(params.get("content", "")).strip()
@@ -497,7 +519,15 @@ def create_app(
                 ),
             }
         if method == "session.list":
-            sessions = await backend.store.list_sessions(backend.project.id)
+            # 分组侧栏要全部项目的会话；跨项目的标题/摘要是枚举其他项目的放大器，
+            # 与 session.search scope=all 同一安全口径：只给本机桌面端（安全审查 B 族）
+            if params.get("all_projects"):
+                if not local:
+                    raise RuntimeError("跨项目会话列表只能在桌面端本机使用")
+                grouped = await backend.store.list_sessions_by_project(50)
+                sessions = [s for group in grouped.values() for s in group]
+            else:
+                sessions = await backend.store.list_sessions(backend.project.id)
             empty_count = await backend.store.count_empty_sessions(backend.project.id)
             archived_count = await backend.store.count_archived_sessions(backend.project.id)
             return {
@@ -511,7 +541,7 @@ def create_app(
                         "tags": [t for t in str(s.tags or "").split(",") if t],
                         "archived": bool(s.archived),
                     }
-                    for s in sessions[:50]
+                    for s in (sessions if params.get("all_projects") else sessions[:50])
                 ],
             }
         if method == "session.new":
@@ -606,6 +636,16 @@ def create_app(
             return await backend.memory_get()
         if method == "memory.save":
             return await backend.memory_save(str(params.get("text", "")))
+        if method == "memory.maintain_save":
+            gi, pi = params.get("global_enabled"), params.get("project_enabled")
+            ih = params.get("interval_hours")
+            return await backend.memory_maintain_save(
+                global_enabled=None if gi is None else bool(gi),
+                project_enabled=None if pi is None else bool(pi),
+                interval_hours=None if ih is None else int(ih),
+            )
+        if method == "memory.maintain_now":
+            return await backend.memory_maintain_now()
         if method == "memory.digest_save":
             # 归档自动记忆总闸：只切一个布尔开关，不写敏感配置，远程可调
             return await backend.memory_digest_save(bool(params.get("enabled", True)))

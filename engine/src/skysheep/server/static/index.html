@@ -46,6 +46,7 @@
       <div class="brand-text">
         <b>SkySheep</b>
       </div>
+      <button id="btn-left-collapse" class="side-collapse" title="收起侧栏（Ctrl+B）">«</button>
     </div>
 
     <!-- 对话模式：侧栏内容 -->
@@ -64,15 +65,38 @@
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
       </nav>
 
-      <div class="section">
+      <!-- 分组视图（sidebar_view=grouped）下这一区整体隐藏：项目变成会话列表里的文件夹头 -->
+      <div class="section" id="project-section">
         <h3 class="sec-head"><span>项目</span>
           <button id="btn-project-add" class="sec-ops" title="添加项目：选择一个文件夹（Agent 的工作目录会切过去）">＋</button>
         </h3>
         <ul id="project-list" class="list project-list"></ul>
       </div>
 
-      <div class="section">
-        <h3>会话</h3>
+      <div class="section" id="session-section">
+        <h3 class="sec-head"><span>会话</span>
+          <span class="head-ops">
+            <span id="session-view" class="view-seg" role="group" aria-label="会话列表呈现形式">
+              <button data-view="classic" class="active" aria-pressed="true" title="经典视图：项目、会话分成两区（原样式）">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                  <path d="M2.5 4h11M2.5 8h11M2.5 12h11"/>
+                </svg>
+              </button>
+              <button data-view="grouped" aria-pressed="false" title="分组视图：会话收进各自项目下，项目多时省空间">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                </svg>
+              </button>
+            </span>
+            <!-- 分组视图专属：一键把所有项目组收拢（全收后变成一键展开）；
+                 经典视图没有可折叠组，搜索结果也是平铺，这两种情况都隐藏 -->
+            <button id="btn-fold-all" class="sec-ops fold-all hidden" title="折叠全部项目" aria-label="折叠全部项目">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 4.5l4 4 4-4M4 8.5l4 4 4-4"/>
+              </svg>
+            </button>
+          </span>
+        </h3>
         <input id="session-search" class="session-search" type="text"
                placeholder="搜索会话与消息…" autocomplete="off">
         <div id="search-scope" class="seg-row seg-mini">
@@ -90,18 +114,23 @@
         <h3>设置</h3>
         <ul id="settings-nav" class="list">
           <!-- 分组按「上手顺序 + 使用频率」排：先配能力（模型 / 工具 / 分身 / 外部工具），
-               再调日常习惯（快捷指令 / 记忆 / 界面），然后是安全与实验性（白名单 / 高级），
-               最后是只读信息（用量 / 关于）。新增设置页时按这个分组插进对应段。 -->
+               再调日常习惯（提示词 / 记忆 / 界面），然后是安全与实验性（白名单 / 高级），
+               最后是只读信息（用量 / 关于）。新增设置页时按这个分组插进对应段。
+               分组标题只是扫描锚点（.nav-cap），无 data-target，点击绑定在 li[data-target] 上 -->
+          <li class="nav-cap" aria-hidden="true">能力</li>
           <li class="active" data-target="providers">模型服务</li>
           <li data-target="skills">技能与工具</li>
           <li data-target="subagents">子代理</li>
           <li data-target="mcp">MCP 服务</li>
           <li data-target="remote">远程控制</li>
-          <li data-target="snippets">快捷指令</li>
+          <li class="nav-cap" aria-hidden="true">日常</li>
+          <li data-target="snippets">提示词</li>
           <li data-target="memory">全局记忆</li>
           <li data-target="ui">界面与通知</li>
+          <li class="nav-cap" aria-hidden="true">安全</li>
           <li data-target="rules">本项目白名单</li>
           <li data-target="advanced">高级</li>
+          <li class="nav-cap" aria-hidden="true">信息</li>
           <li data-target="usage">用量</li>
           <li data-target="about">关于</li>
         </ul>
@@ -118,6 +147,41 @@
   <!-- 拖动调整侧栏宽度（双击恢复默认） -->
   <div id="sb-resizer" class="ui-resizer ui-resizer-v" title="拖动调整侧栏宽度 · 双击恢复默认"></div>
 
+  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航六件套 + 功能图标（新建 / 搜索）
+       + 最近会话的首字快捷列（点击直接切换会话，当前项高亮）。
+       显隐完全交给 CSS 的 body.left-collapsed（宽度 / 负 margin 滑动过渡，非硬切）——
+       不要给 rail 及其按钮加 .hidden 类：它是 display:none !important，会把
+       展开态的显示规则一起压掉（此前「折叠后再也打不开侧栏」正是它造成的）。 -->
+  <aside id="sb-rail" aria-label="侧栏已折叠">
+    <button id="rail-expand" class="rail-btn" title="展开侧栏（Ctrl+B）">»</button>
+    <!-- 功能导航六件套：与侧栏 .side-menu 同一套动作（openRightTab）；图标为本项目手绘线稿 -->
+    <button class="rail-btn" data-rail-act="todo" title="任务清单：Agent 拆解出的任务步骤会出现在这里">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V4"/><path d="m9 13.5 2.2 2.2 4-4.5"/></svg>
+    </button>
+    <button class="rail-btn" data-rail-act="agenda" title="日程：到点在应用内提醒，跨会话保留">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15.5" rx="2"/><path d="M8 3v4M16 3v4M4 10.5h16"/></svg>
+    </button>
+    <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，自动注入每一轮对话">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h5.5A3.5 3.5 0 0 1 12 7.5V21a2.5 2.5 0 0 0-2.5-2.5H3Z"/><path d="M21 4h-5.5A3.5 3.5 0 0 0 12 7.5V21a2.5 2.5 0 0 1 2.5-2.5H21Z"/></svg>
+    </button>
+    <button class="rail-btn" data-rail-act="cron" title="定时任务：到点让 Agent 自己干活，无人值守">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
+    </button>
+    <button class="rail-btn" data-rail-act="pipeline" title="任务编排：多个任务按依赖顺序自动跑，前面的并行做，最后的汇总审查">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="1.5"/><rect x="13" y="13" width="7.5" height="7.5" rx="1.5"/><path d="M7.25 11v3.75a2.5 2.5 0 0 0 2.5 2.5h3.25"/></svg>
+    </button>
+    <button class="rail-btn" data-rail-act="ext" title="MCP / Skills：技能包与 MCP 服务管理">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/></svg>
+    </button>
+    <div class="rail-sep" aria-hidden="true"></div>
+    <button id="rail-new" class="rail-btn" title="新建任务（Ctrl+N）">＋</button>
+    <button id="rail-search" class="rail-btn" title="搜索会话：展开侧栏并聚焦搜索框">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+    </button>
+    <div class="rail-sep" aria-hidden="true"></div>
+    <div id="rail-sessions" class="rail-sessions" aria-label="最近会话"></div>
+  </aside>
+
   <!-- ========== 右侧主区 ========== -->
   <main id="main">
 
@@ -130,7 +194,7 @@
           <span class="spacer"></span>
           <span id="usage" class="dim small"></span>
           <button id="btn-help" class="tb-icon" title="帮助：快速上手 · 快捷键 · 常见问题" aria-label="帮助"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>
-          <button id="btn-bell" class="tb-icon" title="通知中心" aria-label="通知中心">🔔<span id="bell-badge" class="bell-badge hidden"></span></button>
+          <button id="btn-bell" class="tb-icon" title="通知中心" aria-label="通知中心"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M10.3 21a2 2 0 0 0 3.4 0"/></svg><span id="bell-badge" class="bell-badge hidden"></span></button>
           <button id="btn-term" class="tb-icon" title="终端面板：多开命令行标签（Ctrl+`）" aria-label="终端面板"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="m7.5 9.5 3 2.5-3 2.5"/><path d="M12.5 15h4"/></svg></button>
           <button id="btn-tabs" class="tb-icon" title="展开 / 收起右侧面板" aria-label="展开或收起右侧面板"></button>
           <button id="btn-stop" class="btn-ghost danger" hidden>⏹ 停止</button>
@@ -161,7 +225,7 @@
           </div>
         </div>
 
-        <div id="permission-bar" hidden>
+        <div id="permission-bar" hidden role="alert">
           <div class="perm-head">🔒 需要确认：<b id="perm-tool"></b></div>
           <pre id="perm-args"></pre>
           <p id="perm-note" class="perm-note" hidden></p>
@@ -185,7 +249,7 @@
         <footer id="composer">
           <div id="image-tray" class="image-tray hidden"></div>
           <div id="ref-tray" class="ref-tray hidden"></div>
-          <textarea id="input" rows="2" placeholder="描述你的任务… 输入 & 引用对话 · @ 引用文件 · / 命令 · 可粘贴/拖入图片"></textarea>
+          <textarea id="input" rows="2" placeholder="描述你的任务… 输入 & 引用对话 · @ 引用文件 · ~ 提示词 · / 命令 · 可粘贴/拖入图片"></textarea>
           <div id="composer-bar">
             <!-- 功能开关收成小图标：悬停看说明，激活亮主题色（规划蓝 / 圆桌紫 / 写入金） -->
             <button id="mode-switch" class="cp-icon" title="当前：执行模式 · 点击切到规划模式">
@@ -199,8 +263,8 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
               </button>
             </span>
-            <button id="accept-switch" class="cp-icon" title="当前每次写入/执行都会征询。点击开启「自动允许写入」（仅工作目录内，执行命令仍会确认）">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 4.5l4 4L8.5 19.5l-5 1.2 1.2-5L15.5 4.5z"/><path d="M13.5 6.5l4 4"/></svg>
+            <button id="accept-switch" class="cp-icon" title="当前：安全执行 · 每次写入/执行都会征询。点击切到「自动编辑」（工作目录内写入放行）">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             </button>
             <button id="file-attach" class="cp-icon" title="添加文件：选本机任意文件（支持项目外的文件与多选），插入 @ 路径让 Agent 读取；图片可直接粘贴或拖入">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7l-4-4z"/><path d="M14 3v4h4"/><path d="M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg>
@@ -219,14 +283,17 @@
               </svg>
             </span>
             <span id="cp-hint" title="Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
-            <!-- 连接状态 + 思考强度：贴在模型选择器左侧 -->
-            <span id="conn-status" class="dot off" title="与本地引擎的连接状态"></span>
-            <span id="status-text" class="dim small">连接中…</span>
-            <button id="reasoning-chip" class="chip chip-reasoning hidden"
-                    title="调整模型的思考强度（自动 / 低 / 中 / 高）"></button>
-            <!-- 模型选择器：参考 Cherry Studio 布局，放在发送按钮左侧（点击弹已启用模型菜单） -->
-            <span id="model-chip"></span>
-            <button id="btn-send" class="btn-primary">发送</button>
+            <!-- 右侧簇整体不拆行：窗口再窄也整簇换行并靠右，「发送」永远在最右 -->
+            <span id="cp-right">
+              <!-- 连接状态 + 思考强度：贴在模型选择器左侧 -->
+              <span id="conn-status" class="dot off" title="与本地引擎的连接状态" role="status"></span>
+              <span id="status-text" class="dim small" role="status">连接中…</span>
+              <button id="reasoning-chip" class="chip chip-reasoning hidden"
+                      title="调整模型的思考强度（自动 / 低 / 中 / 高）"></button>
+              <!-- 模型选择器：参考 Cherry Studio 布局，放在发送按钮左侧（点击弹已启用模型菜单） -->
+              <span id="model-chip"></span>
+              <button id="btn-send" class="btn-primary">发送</button>
+            </span>
           </div>
           <!-- 上下文容量详情弹层：环形仪表悬停/点按展开（fixed 定位，坐标由 JS 贴着环算） -->
           <div id="ctx-pop" class="ctx-pop hidden"></div>
@@ -351,7 +418,7 @@
             </div>
             <div class="ag-hint">✎ 可直接对 Agent 说：创建、调整或删除日程</div>
             <div class="ag-toolbar">
-              <div class="ag-seg" id="ag-view-seg">
+              <div class="seg-row ag-seg" id="ag-view-seg">
                 <button data-v="week" class="active">周</button>
                 <button data-v="month">月</button>
               </div>
@@ -380,8 +447,8 @@
 
           <section id="rp-page-pipeline" class="rp-page hidden">
             <div class="rp-toolbar">
-              <span class="dim small">前面的节点并行做，依赖满足后自动跑下一个，最后一个汇总审查。</span>
               <span class="spacer"></span>
+              <button id="btn-pipeline-import" class="rp-mini" title="纳入定时任务 / 任务簿任务 / 已有会话，或从导出的 JSON 恢复整条流水线">⤵ 导入</button>
               <button id="btn-pipeline-add" class="rp-mini" title="新建流水线">＋ 新建</button>
             </div>
             <ul id="pipeline-list" class="list pipeline-list rp-page-list"></ul>
@@ -394,6 +461,11 @@
               <button id="memory-reload" class="rp-mini" title="放弃修改，重新从磁盘读取">重读</button>
               <button id="memory-save" class="rp-mini primary">保存</button>
             </div>
+            <label class="toggle-row check-row rp-maintain-row"
+                   title="按全局设置的周期，用当前模型通读本项目的 AGENTS.md：合并重复、清理过时、精简表述；整理前自动备份原件为 .bak。不足 600 字时自动跳过、不花模型调用">
+              <input type="checkbox" id="rp-memory-maintain">
+              <span>定期整理项目记忆（按全局设置的周期）</span>
+            </label>
             <textarea id="rp-memory-text" class="rp-memory-text" spellcheck="false"
                       placeholder="写给 Agent 看的项目约定，例如：&#10;- 提交信息用中文&#10;- 改完代码必须跑一遍测试&#10;- 所有新接口都要带错误处理"></textarea>
             <div id="memory-status" class="rp-memory-status"></div>
@@ -804,7 +876,7 @@
             </p>
           </section>
           <section class="settings-card">
-            <div class="card-head"><h3>📱 手机控制</h3>
+            <div class="card-head"><h3>手机控制</h3>
               <label class="toggle-row"><input type="checkbox" id="lan-toggle"><span>开启</span></label>
             </div>
             <p class="settings-hint">
@@ -815,7 +887,7 @@
             <div id="lan-info" class="lan-info"></div>
           </section>
           <section class="settings-card">
-            <div class="card-head"><h3>🌐 远程访问（Tailscale）</h3>
+            <div class="card-head"><h3>远程访问（Tailscale）</h3>
               <label class="toggle-row"><input type="checkbox" id="ts-toggle"><span>开启</span></label>
             </div>
             <p class="settings-hint">
@@ -828,7 +900,7 @@
             <div id="ts-info" class="lan-info"></div>
           </section>
           <section class="settings-card">
-            <div class="card-head"><h3>🤖 聊天机器人渠道</h3></div>
+            <div class="card-head"><h3>聊天机器人渠道</h3></div>
             <p class="settings-hint">
               把 <b>Telegram / 微信</b> 接成遥控端：在手机上给机器人发消息，就能让这台电脑上的
               SkySheep 干活，回复直接回到聊天窗口。渠道<b>默认关闭</b>；启用前必须先把你的账号加入
@@ -857,17 +929,42 @@
                       placeholder="Agent 还没有记住任何东西。也可以在这里手动添加，例如：&#10;- [2026-09-15] 沟通偏好直接给结论，不用铺垫"></textarea>
           </section>
           <section class="settings-card">
-            <h3>归档自动记忆</h3>
+            <h3>自动记忆与整理</h3>
             <p class="settings-hint">
-              归档会话时，后台用当前模型通读这段对话，把值得长期记住的信息（偏好、
-              常用环境、做事约定；不含一次性任务细节与机密）自动提炼进上面的全局记忆，
+              <b>归档提炼</b>：归档会话时，后台用当前模型通读这段对话，把值得长期记住的信息
+              （偏好、常用环境、做事约定；不含一次性任务细节与机密）自动提炼进上面的全局记忆，
               最多 8 条、与已有记忆重复的自动跳过，提炼完成会通知你记住了什么。
               额外消耗一次模型调用；寒暄、单条短问答不会触发。
             </p>
-            <label class="toggle-row">
+            <p class="settings-hint">
+              <b>定期整理</b>：按周期用当前模型通读记忆，合并重复、相似或过时的条目，
+              让记忆越用越精炼而不是越攒越长。整理前自动把原件备份为 <b>.bak</b> 文件（同目录），
+              整理完成后会通知你。全局记忆不足 400 字时自动跳过、不花模型调用；
+              项目记忆（AGENTS.md）的整理开关在右侧面板的「项目记忆」页签最上方。
+            </p>
+            <label class="toggle-row check-row">
               <input type="checkbox" id="memory-digest-toggle">
               <span>归档会话时自动总结记忆</span>
             </label>
+            <label class="toggle-row check-row">
+              <input type="checkbox" id="memory-maintain-global">
+              <span>定期整理全局记忆</span>
+            </label>
+            <div class="maintain-row">
+              <label for="memory-maintain-interval">整理周期</label>
+              <select id="memory-maintain-interval">
+                <option value="24">每天</option>
+                <option value="72">每 3 天</option>
+                <option value="168">每周</option>
+                <option value="720">每 30 天</option>
+              </select>
+            </div>
+            <p id="memory-maintain-last" class="dim small maintain-last" hidden></p>
+            <div class="maintain-row maintain-actions">
+              <button id="memory-maintain-save" class="btn-ghost">保存</button>
+              <button id="memory-maintain-now" class="btn-ghost">🧹 立即整理</button>
+            </div>
+            <div id="memory-maintain-status" class="card-status" hidden></div>
             <div id="memory-digest-status" class="card-status" hidden></div>
           </section>
         </section>
@@ -949,13 +1046,14 @@
         <section class="settings-page hidden" id="settings-page-snippets">
           <section class="settings-card">
             <div class="card-head">
-              <h3>快捷指令</h3>
+              <h3>提示词</h3>
               <button id="btn-snippet-add" class="btn-ghost">＋ 新建</button>
             </div>
             <p class="settings-hint">
-              常用的提示词模板。在输入框输入 <b>/</b> 时会出现在候选最上方，选中即插入到输入框。
+              常用的提示词模板。在输入框输入 <b>~</b> 时会出现在候选最上方，选中即插入到输入框。
               内容里的 <b>{{clipboard}}</b> 会在插入时替换为当前剪贴板文本。
-              还没有自定义指令时，<code>/</code> 菜单会附带几条内置示例；一旦添加了自己的指令，示例就不再出现。
+              首次启动已内置几条示例提示词，和其他提示词一样可直接编辑或删除；
+              把提示词删光后，<code>~</code> 菜单仍会附带内置示例兜底。
             </p>
             <ul id="snippets-list" class="list snippets-list"></ul>
           </section>
@@ -977,7 +1075,7 @@
           <section class="settings-card">
             <div class="card-head">
               <h3>Token 活动</h3>
-              <div class="usage-tabs" id="usage-range-tabs">
+              <div class="seg-row usage-tabs" id="usage-range-tabs">
                 <button data-days="7">近 7 日</button>
                 <button data-days="14" class="active">近 14 日</button>
                 <button data-days="30">近 30 日</button>
@@ -1031,7 +1129,7 @@
             </div>
             <p class="settings-hint">
               每次启动前都会给会话数据库留一份备份（保留最近 20 份）；误删会话、或数据不对劲时，
-              在这里挑一个较早的版本恢复即可（完整列表在下方滚动查看）。
+              在这里挑一个较早的版本恢复即可。下方默认只列最近几份，点「展开」看全部。
               <b>恢复会用备份整体替换当前数据</b>，替换前系统会先把现状另存一份，随时能换回来。
             </p>
             <div id="backup-status" class="card-status" hidden></div>
@@ -1060,7 +1158,7 @@
 <div id="reasoning-menu" class="session-menu model-menu hidden"></div>
 <div id="notif-panel" class="session-menu notif-panel hidden"></div>
 <div id="modal" class="overlay hidden">
-  <div class="modal-box">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <h3 id="modal-title"></h3>
     <div id="modal-content"></div>
     <div class="modal-ops">

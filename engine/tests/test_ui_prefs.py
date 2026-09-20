@@ -43,6 +43,32 @@ def test_ui_prefs_ui_scale_clamped(home):
     assert frame["result"]["prefs"] == {}
 
 
+def test_ui_prefs_sidebar_view_whitelist(home):
+    """侧栏呈现形式（classic/grouped）：合法值直接存；未知值删键（theme 同款语义）；null 恢复默认。"""
+    frame = call_ui(home, "ui.save", {"prefs": {"sidebar_view": "grouped"}})
+    assert frame["result"]["prefs"] == {"sidebar_view": "grouped"}
+    frame = call_ui(home, "ui.save", {"prefs": {"sidebar_view": "compact"}})
+    assert frame["result"]["prefs"] == {}
+    frame = call_ui(home, "ui.save", {"prefs": {"sidebar_view": "classic"}})
+    assert frame["result"]["prefs"] == {"sidebar_view": "classic"}
+    frame = call_ui(home, "ui.save", {"prefs": {"sidebar_view": None}})
+    assert frame["result"]["prefs"] == {}
+    frame = call_ui(home, "ui.get")
+    assert frame["result"]["prefs"] == {}
+
+
+def test_ui_prefs_left_collapsed_clamped(home):
+    """左侧栏折叠态（1=折叠，折叠钮/Ctrl+B 切换）：0/1 直接存，越界收敛，null 恢复默认。"""
+    frame = call_ui(home, "ui.save", {"prefs": {"left_collapsed": 1}})
+    assert frame["result"]["prefs"] == {"left_collapsed": 1}
+    frame = call_ui(home, "ui.save", {"prefs": {"left_collapsed": 9}})
+    assert frame["result"]["prefs"] == {"left_collapsed": 1}
+    frame = call_ui(home, "ui.save", {"prefs": {"left_collapsed": -3}})
+    assert frame["result"]["prefs"] == {"left_collapsed": 0}
+    frame = call_ui(home, "ui.save", {"prefs": {"left_collapsed": None}})
+    assert frame["result"]["prefs"] == {}
+
+
 def test_ui_prefs_null_deletes_key(home):
     call_ui(home, "ui.save", {"prefs": {"sidebar_w": 300}})
     frame = call_ui(home, "ui.save", {"prefs": {"sidebar_w": None}})
@@ -211,6 +237,26 @@ def test_frontend_project_switch_is_in_page(home):
     # 底色仍留在 html 上（浏览器模式 F5 刷新时的防白底兜底）
     assert "html { background: var(--bg); }" in css
     assert "data-theme-mode" in html
+
+
+def test_grouped_view_fold_all_button_protocol(home):
+    """分组视图「折叠全部项目」按钮的三处隐式协议：
+    index.html 出按钮，app.css 管显隐与全收态的箭头翻转，app.js 用
+    data-gkey 找回各组开合状态并在视图切换/分组渲染/搜索渲染三处同步按钮。
+    名字任一处漂移按钮就失灵，这里锁住。"""
+    from skysheep.server.app import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="btn-fold-all"' in html
+    assert ".head-ops" in css and ".fold-all.expand" in css
+    assert "function syncFoldAllBtn()" in js
+    assert "head.dataset.gkey" in js and "groupState(h.dataset.gkey)" in js
+    # 三个调用点：applySidebarView（视图切换）、refreshSessionsGrouped（渲染尾部）、
+    # renderSessionList（搜索结果没有组，按钮要随之隐藏）
+    assert js.count("syncFoldAllBtn();") >= 3
 
 
 def _strip_js_comments(src: str) -> str:

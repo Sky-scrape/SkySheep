@@ -7,13 +7,15 @@ Agent 在对话中学到值得长期记住的事实（用户偏好、常用环�
 安全边界：只能写 SkySheep 自己的记忆文件（路径固定、不接受任何路径参数），
 与 schedule_write 写应用自有存储同理，READONLY 免确认。
 
-本模块还承载「归档自动记忆」的纯函数部分（backend 在会话归档后调用）：
-digest_transcript / build_digest_prompt / parse_digest 负责提炼，
+本模块还承载「归档自动记忆」与「定期自动整理」的纯函数部分（backend 调用）：
+digest_transcript / build_digest_prompt / parse_digest 负责归档提炼，
+maintenance_* / build_maintain_prompt / clean_maintained_text 负责定期整理，
 remember_lines 负责落盘，判定标准与 memory_write 保持一致。
 """
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from pathlib import Path
@@ -35,6 +37,12 @@ DIGEST_MAX_TRANSCRIPT_CHARS = 12_000  # 送入模型的会话正文上限（超�
 DIGEST_MAX_ENTRIES = 8                # 单次最多提炼条数
 DIGEST_ENTRY_MAX_CHARS = 100          # 单条记忆长度上限
 _DIGEST_PLACEHOLDERS = {"无", "没有", "（无）", "(none)", "none", "n/a"}
+
+# ---- 定期自动整理（全局 memory.md 与项目 AGENTS.md 的周期性合并去重） ----
+
+MAINTAIN_MIN_GLOBAL_CHARS = 400    # 全局记忆短于此不整理（没东西可合并）
+MAINTAIN_MIN_PROJECT_CHARS = 600   # 项目记忆是手写约定，更短时不值得动
+MAINTENANCE_STATE_FILE = "memory-maintenance.json"  # ~/.skysheep/ 下的上次整理时间
 
 
 def memory_path() -> Path:
@@ -154,6 +162,84 @@ def remember_lines(lines: list[str]) -> list[str]:
     if added:
         _write_lines(p, existing)
     return added
+
+
+# ---- 定期自动整理：状态、到期判断、提示词与输出清洗（backend 调用的纯函数） ----
+
+
+def maintenance_state_path() -> Path:
+    from ..config import skysheep_home
+
+    return skysheep_home() / MAINTENANCE_STATE_FILE
+
+
+def load_maintenance_state() -> dict:
+    """上次整理时间（{"global_last": ts, "project_last": {工作目录: ts}}）；损坏按空处理。"""
+    try:
+        raw = maintenance_state_path().read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def save_maintenance_state(state: dict) -> None:
+    p = maintenance_state_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # 状态写不进去只影响下次提前整理，不值得打断主流程
+
+
+def maintenance_due(
+    state: dict, *, global_enabled: bool, project_enabled: bool,
+    interval_hours: int, workdir: str, now: float,
+) -> tuple[bool, bool]:
+    """返回（全局是否到期, 项目是否到期）。没整理过（无记录）视为早已到期。"""
+    p_last = float((state.get("project_last") or {}).get(workdir) or 0)
+    g_last = float(state.get("global_last") or 0)
+    span = max(1, int(interval_hours)) * 3600
+    return (
+        bool(global_enabled) and now - g_last >= span,
+        bool(project_enabled) and now - p_last >= span,
+    )
+
+
+def build_maintain_prompt(scope: str, text: str) -> str:
+    if scope == "global":
+        return (
+            "下面是一份跨项目的用户长期记忆（每条一行，格式「- [日期] 内容」）。"
+            "请整理这份列表：合并重复与意思相近的条目（日期保留更早的那条）、"
+            "删除明显过时或相互矛盾的条目里过时的那条、精简啰嗦的表述，"
+            "不要添加列表之外的新信息，不要改变「- [日期] 内容」的格式。\n"
+            "只输出整理后的完整列表，不要任何解释或代码块标记。\n\n" + text
+        )
+    return (
+        "下面是一份项目约定文件（AGENTS.md），每一轮对话都会注入给助手。"
+        "请整理这份文件：保留所有仍然有效的约定与原有结构，合并重复表述，"
+        "删除明显过时、与其它条目矛盾的内容，不要添加文件之外的新约定，"
+        "不要改变 Markdown 结构与小节标题。\n"
+        "只输出整理后的完整文件内容，不要任何解释或代码块标记。\n\n" + text
+    )
+
+
+def clean_maintained_text(raw: str, old_text: str, max_chars: int) -> str | None:
+    """清洗模型输出的整理稿：剥外围空白与代码围栏；无效或与原文相同返回 None。
+
+    max_chars 是落盘上限（全局/项目各自不同），超限视为模型输出失控，拒绝。
+    """
+    s = raw.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[1] if "\n" in s else ""
+        if s.endswith("```"):
+            s = s[: -3]
+    s = s.strip()
+    if not s or s == old_text.strip() or len(s) > max_chars:
+        return None
+    return s
 
 
 class MemoryWriteArgs(BaseModel):

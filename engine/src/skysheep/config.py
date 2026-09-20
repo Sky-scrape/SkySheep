@@ -187,6 +187,16 @@ class ChannelsConfig(BaseModel):
     platforms: dict[str, dict] = Field(default_factory=dict)
 
 
+class MemoryMaintenanceConfig(BaseModel):
+    """定期自动整理记忆：后台按周期用当前模型通读记忆文件，合并重复、
+    清理过时条目。全局记忆（memory.md）与项目记忆（AGENTS.md）各自有
+    开关，共用一个周期；整理前自动备份原件（.bak）。"""
+
+    global_enabled: bool = True
+    project_enabled: bool = True
+    interval_hours: int = Field(default=168, ge=1, le=8760)
+
+
 class SkySheepConfig(BaseModel):
     default: str = "deepseek"
     max_iterations: int = Field(default=40, ge=1, le=200)
@@ -211,6 +221,7 @@ class SkySheepConfig(BaseModel):
     # （memory.md），默认开。这是「越用越懂你」的正向能力，总闸给在意
     # 额外模型调用或不想被打扰的用户；开关在 设置 · 全局记忆。
     memory_digest: bool = True
+    memory_maintenance: MemoryMaintenanceConfig = Field(default_factory=MemoryMaintenanceConfig)
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
@@ -337,6 +348,7 @@ def load_config() -> SkySheepConfig:
     speech = SpeechConfig()
     server = ServerConfig()
     channels = ChannelsConfig()
+    memory_maintenance = MemoryMaintenanceConfig()
     p = config_path()
     if p.exists():
         try:
@@ -366,6 +378,7 @@ def load_config() -> SkySheepConfig:
             ("imagegen", ImageGenConfig, imagegen),
             ("speech", SpeechConfig, speech),
             ("server", ServerConfig, server),
+            ("memory_maintenance", MemoryMaintenanceConfig, memory_maintenance),
         ):
             section = raw.get(section_name)
             if isinstance(section, dict):
@@ -376,6 +389,8 @@ def load_config() -> SkySheepConfig:
                 imagegen = cur
             elif section_name == "speech":
                 speech = cur
+            elif section_name == "memory_maintenance":
+                memory_maintenance = cur
             else:
                 server = cur
         channels = _load_channels(raw.get("channels"))
@@ -421,6 +436,7 @@ def load_config() -> SkySheepConfig:
         browser_control=browser_control,
         daily_token_budget=daily_budget,
         memory_digest=memory_digest,
+        memory_maintenance=memory_maintenance,
         roundtable=roundtable,
         websearch=websearch,
         imagegen=imagegen,
@@ -468,6 +484,29 @@ def set_advanced_settings_in_config(
         raw["daily_token_budget"] = max(0, int(daily_token_budget))
     if memory_digest is not None:
         raw["memory_digest"] = bool(memory_digest)
+    _write_raw_config(p, raw)
+
+
+def set_memory_maintenance_in_config(
+    global_enabled: bool | None = None,
+    project_enabled: bool | None = None,
+    interval_hours: int | None = None,
+) -> None:
+    """写入 config.toml 的 [memory_maintenance] 表（None 表示该项不动）。
+
+    设置 · 全局记忆的「定期整理」走这里，与其它设置项同一套读写路径。
+    """
+    if interval_hours is not None and not 1 <= int(interval_hours) <= 8760:
+        raise ConfigError("整理周期要在 1–8760 小时之间")
+    p, raw = _read_raw_config()
+    section = dict(raw.get("memory_maintenance") or {})
+    if global_enabled is not None:
+        section["global_enabled"] = bool(global_enabled)
+    if project_enabled is not None:
+        section["project_enabled"] = bool(project_enabled)
+    if interval_hours is not None:
+        section["interval_hours"] = int(interval_hours)
+    raw["memory_maintenance"] = section
     _write_raw_config(p, raw)
 
 

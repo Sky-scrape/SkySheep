@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS pipeline_nodes (
     allowed_tools TEXT NOT NULL DEFAULT '',
     depends_on TEXT NOT NULL DEFAULT '',
     dep_mode TEXT NOT NULL DEFAULT 'all',
+    kind TEXT NOT NULL DEFAULT 'run',
+    ref_id TEXT NOT NULL DEFAULT '',
+    control TEXT NOT NULL DEFAULT '',
+    max_runs INTEGER NOT NULL DEFAULT 1,
+    timeout_s INTEGER NOT NULL DEFAULT 3600,
     status TEXT NOT NULL DEFAULT 'blocked',
     result TEXT NOT NULL DEFAULT '',
     last_error TEXT NOT NULL DEFAULT '',
@@ -393,6 +398,41 @@ class SessionStore:
             )
         except Exception:
             pass
+        # 旧库迁移：pipeline_nodes 补 kind / ref_id 列（纳入现有任务：挂接任务簿任务、
+        # 会话续跑；本特性发布前建的表没有这两列）
+        try:
+            await self._db.execute(
+                "ALTER TABLE pipeline_nodes ADD COLUMN kind TEXT NOT NULL DEFAULT 'run'"
+            )
+        except Exception:
+            pass
+        try:
+            await self._db.execute(
+                "ALTER TABLE pipeline_nodes ADD COLUMN ref_id TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+        # 旧库迁移：补 control / max_runs 列（控制流：条件门 / 终止 / 迭代 + 失败重试）
+        try:
+            await self._db.execute(
+                "ALTER TABLE pipeline_nodes ADD COLUMN control TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+        try:
+            await self._db.execute(
+                "ALTER TABLE pipeline_nodes ADD COLUMN max_runs INTEGER NOT NULL DEFAULT 1"
+            )
+        except Exception:
+            pass
+        # 旧库迁移：补 timeout_s 列（节点超时；0 = 不限时）。
+        # 存量节点补为 3600（1 小时）：与「无人值守不能无限占用并发槽」的新约定一致
+        try:
+            await self._db.execute(
+                "ALTER TABLE pipeline_nodes ADD COLUMN timeout_s INTEGER NOT NULL DEFAULT 3600"
+            )
+        except Exception:
+            pass
         await self._db.commit()
         await self._setup_fts()
         return self
@@ -578,6 +618,30 @@ class SessionStore:
             )
         rows = await cur.fetchall()
         return [session_from_row(r) for r in rows]
+
+    async def list_sessions_by_project(
+        self, limit_per_project: int = 50
+    ) -> dict[int | None, list[Session]]:
+        """分组侧栏用：每个项目各自取最近未归档会话（置顶在前）。
+
+        一个窗口函数按 project_id 分区各取前 N 条，避免「全局前 N」把会话多的
+        项目挤没；project_id 为 NULL 的快聊会话自成一区（键为 None）。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM ("
+            "  SELECT s.*, ROW_NUMBER() OVER ("
+            "    PARTITION BY project_id ORDER BY pinned DESC, updated_at DESC) AS _rn"
+            "  FROM sessions s WHERE s.archived = 0"
+            ") WHERE _rn <= ? ORDER BY project_id, pinned DESC, updated_at DESC",
+            (limit_per_project,),
+        )
+        rows = await cur.fetchall()
+        out: dict[int | None, list[Session]] = {}
+        for r in rows:
+            s = session_from_row(r)
+            out.setdefault(s.project_id, []).append(s)
+        return out
 
     async def list_archived_sessions(
         self, project_id: int | None = None, limit: int = 100
@@ -1538,6 +1602,11 @@ class SessionStore:
                 int(x) for x in (r["depends_on"] or "").split(",") if x.strip().lstrip("-").isdigit()
             ],
             "dep_mode": r["dep_mode"],
+            "kind": r["kind"],
+            "ref_id": r["ref_id"],
+            "control": r["control"] if "control" in r.keys() else "",
+            "max_runs": r["max_runs"] if "max_runs" in r.keys() else 1,
+            "timeout_s": r["timeout_s"] if "timeout_s" in r.keys() else 3600,
             "status": r["status"],
             "result": r["result"],
             "last_error": r["last_error"],
@@ -1623,6 +1692,9 @@ class SessionStore:
             nid = await self._insert_node(
                 pid, i, n.get("title") or f"节点 {i + 1}", n.get("prompt") or "",
                 n.get("allowed_tools") or [], deps, n.get("dep_mode") or "all",
+                kind=n.get("kind") or "run", ref_id=str(n.get("ref_id") or ""),
+                control=str(n.get("control") or ""), max_runs=int(n.get("max_runs") or 1),
+                timeout_s=n.get("timeout_s") if n.get("timeout_s") is not None else 3600,
             )
             ids.append(nid)
         await self._db.commit()
@@ -1636,9 +1708,18 @@ class SessionStore:
         allowed_tools: list[str] | None = None,
         depends_on: list[int] | None = None,
         dep_mode: str = "all",
+        kind: str = "run",
+        ref_id: str = "",
+        timeout_s: int = 3600,
     ) -> dict:
-        """追加节点；depends_on 直接给真实节点 id（必须是同流水线的节点）。"""
+        """追加节点；depends_on 直接给真实节点 id（必须是同流水线的节点）。
+
+        kind：run=无人值守新会话（默认）/ task=挂接任务簿任务 / session=指定会话续跑；
+        task / session 节点的 ref_id 分别是任务簿任务 id 与会话 id。
+        """
         assert self._db
+        if kind not in ("run", "task", "session"):
+            raise ValueError(f"未知节点类型：{kind}")
         self._validate_node_text(title, prompt)
         existing = await self.list_pipeline_nodes(pipeline_id)
         if len(existing) >= self.MAX_PIPELINE_NODES:
@@ -1647,7 +1728,8 @@ class SessionStore:
         seq = max((n["seq"] for n in existing), default=-1) + 1
         nid = await self._insert_node(
             pipeline_id, seq, title, prompt, allowed_tools or [],
-            depends_on or [], dep_mode,
+            depends_on or [], dep_mode, kind=kind, ref_id=ref_id,
+            timeout_s=timeout_s,
         )
         await self._db.commit()
         return await self.get_pipeline_node(nid)
@@ -1663,13 +1745,17 @@ class SessionStore:
     async def _insert_node(
         self, pipeline_id: int, seq: int, title: str, prompt: str,
         allowed_tools: list[str], depends_on: list[int], dep_mode: str,
+        kind: str = "run", ref_id: str = "",
+        control: str = "", max_runs: int = 1, timeout_s: int = 3600,
     ) -> int:
         assert self._db
         cur = await self._db.execute(
             "INSERT INTO pipeline_nodes (pipeline_id, seq, title, prompt, allowed_tools,"
-            " depends_on, dep_mode, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'blocked')",
+            " depends_on, dep_mode, kind, ref_id, control, max_runs, timeout_s, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked')",
             (pipeline_id, seq, title, prompt, ",".join(allowed_tools),
-             ",".join(str(int(x)) for x in depends_on), dep_mode),
+             ",".join(str(int(x)) for x in depends_on), dep_mode, kind, ref_id,
+             control, max(1, int(max_runs or 1)), max(0, int(timeout_s if timeout_s is not None else 3600))),
         )
         return cur.lastrowid
 
@@ -1737,7 +1823,7 @@ class SessionStore:
                 )
         allowed = ("seq", "title", "prompt", "allowed_tools", "depends_on", "dep_mode",
                    "status", "result", "last_error", "session_id", "runs",
-                   "started_at", "finished_at")
+                   "started_at", "finished_at", "control", "max_runs", "timeout_s")
         fields, args = [], []
         for k, v in kw.items():
             if k not in allowed:
@@ -1746,6 +1832,8 @@ class SessionStore:
                 v = ",".join(str(x) for x in (v or []))
             elif k == "depends_on":
                 v = ",".join(str(int(x)) for x in (v or []))
+            elif k == "timeout_s":
+                v = max(0, int(v or 0))  # 0 = 不限时
             fields.append(f"{k} = ?")
             args.append(v)
         if not fields:
@@ -1800,6 +1888,20 @@ class SessionStore:
         cur = await self._db.execute("DELETE FROM pipelines WHERE id = ?", (pipeline_id,))
         await self._db.commit()
         return cur.rowcount > 0
+
+    async def pipeline_usage(self, pipeline_id: int) -> dict:
+        """流水线的 token 用量汇总：节点产出的会话都记在 sessions 表（title 带 ⚙
+        前缀），按 session_id 聚合 usage_log。用量列是新增能力，旧数据自然为 0。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT COALESCE(SUM(l.in_tokens), 0) AS in_tokens,"
+            " COALESCE(SUM(l.out_tokens), 0) AS out_tokens"
+            " FROM usage_log l JOIN pipeline_nodes n ON n.session_id = l.session_id"
+            " WHERE n.pipeline_id = ?",
+            (pipeline_id,),
+        )
+        row = await cur.fetchone()
+        return {"in_tokens": int(row["in_tokens"]), "out_tokens": int(row["out_tokens"])}
 
     async def reset_interrupted_pipelines(self) -> int:
         """应用启动时调用：上次运行中被中断的节点标为错误，就绪态退回等待。

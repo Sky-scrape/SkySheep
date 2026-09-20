@@ -1,6 +1,6 @@
 """对标主流 Agent 工具补齐的三项能力测试：
 
-- 分级权限模式（accept_edits 自动允许写入；命令仍确认；ui.json 持久化）
+- 分级权限模式（confirm/accept_edits/full_access 三档；ui.json 持久化；远端拦截见 test_permission_hardening）
 - 忽略文件（.skysheepignore / .gitignore / .env 内建默认 → @索引/glob/grep）
 - headless 一次性运行（skysheep run：预授权门控 + 落库 + 结构化结果）
 """
@@ -108,6 +108,60 @@ def test_permission_mode_ws_persisted(home):
         # 拒绝后 ui.json 回落到 0
         prefs2 = json.loads((home / "home" / "ui.json").read_text(encoding="utf-8"))
         assert prefs2.get("accept_edits") == 0
+
+
+async def test_gate_full_access(home, tmp_path):
+    """完全访问档：写入（含目录外）与执行命令都自动放行；收回后恢复确认。"""
+    from skysheep.tools.base import Safety
+    from skysheep.tools.fs import WriteFileTool
+    from skysheep.tools.shell import RunCommandTool
+
+    gate = PermissionGate(store=None, project_id=None, working_dir=tmp_path)
+    write_tool = WriteFileTool()
+    cmd_tool = RunCommandTool()
+    assert cmd_tool.safety == Safety.DANGEROUS
+    # 只开自动编辑：命令仍需确认
+    gate.auto_accept_write = True
+    assert await gate.authorize(cmd_tool, {"command": "echo hi"}) is not None
+    # 开完全访问：写入（连目录外）与命令都放行
+    gate.auto_accept_all = True
+    assert await gate.authorize(write_tool, {"path": "a", "content": "b"}) is None
+    assert await gate.authorize(
+        write_tool, {"path": str(tmp_path.parent / "outside.txt"), "content": "b"}
+    ) is None
+    assert await gate.authorize(cmd_tool, {"command": "echo hi"}) is None
+    # 收回完全访问：命令回到确认
+    gate.auto_accept_all = False
+    assert await gate.authorize(cmd_tool, {"command": "echo hi"}) is not None
+
+
+def test_full_access_mode_ws_and_restart(home):
+    """完全访问档走 WS 通路：命令类高危也不再弹确认；档位持久化且重启后保持。"""
+    script = [
+        [ToolUseBlock(id="t1", name="write_file", input={"path": "auto.txt", "content": "hi"})],
+        [TextBlock(text="写好了")],
+    ]
+    with make_client(home, script) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "m1", "method": "permission.set_mode",
+                      "params": {"mode": "full_access"}})
+        assert recv_until(ws, "m1")["result"]["mode"] == "full_access"
+        # 非法档位直接报错，档位不变
+        ws.send_json({"id": "mx", "method": "permission.set_mode",
+                      "params": {"mode": "yolo"}})
+        assert recv_until(ws, "mx")["ok"] is False
+        ws.send_json({"id": "m2", "method": "permission.mode"})
+        assert recv_until(ws, "m2")["result"]["mode"] == "full_access"
+        # 写文件一轮：不应出现任何权限请求事件
+        events = []
+        ws.send_json({"id": "c1", "method": "chat.send", "params": {"text": "写个文件"}})
+        recv_until(ws, "c1", events)
+        assert "permission_request" not in [e["event"] for e in events]
+        prefs = json.loads((home / "home" / "ui.json").read_text(encoding="utf-8"))
+        assert prefs.get("accept_edits") == 2
+    # 重启（新 client）：完全访问档从 ui.json 恢复
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "m3", "method": "permission.mode"})
+        assert recv_until(ws, "m3")["result"]["mode"] == "full_access"
 
 
 # ---- 忽略文件 ----

@@ -91,6 +91,66 @@
       "description": "扫描杂乱文件夹，先出分类方案和完整移动清单，你确认后才动手，整理完留报告",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/file-tidy",
       "author": "skysheep"
+    },
+    {
+      "name": "报错排查报告",
+      "description": "贴一段报错先复现定位、最小修复并验证，产出根因、修复点、防回归建议的排查报告",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/bug-report",
+      "author": "skysheep"
+    },
+    {
+      "name": "数据分析报告",
+      "description": "读取 Excel/CSV 做完整分析——清洗、统计、找结论、配图表，产出能直接汇报的分析报告",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/data-report",
+      "author": "skysheep"
+    },
+    {
+      "name": "PPT 制作",
+      "description": "先定大纲再生成 .pptx：每页一个观点、要点不超五行，汇报/提案/分享场景都能用",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/ppt-maker",
+      "author": "skysheep"
+    },
+    {
+      "name": "合同风险速审",
+      "description": "通读合同逐条标注风险级别，付款、违约、知识产权、退出机制重点核查，给谈判要点清单",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/contract-review",
+      "author": "skysheep"
+    },
+    {
+      "name": "代码审查",
+      "description": "对代码或改动做分级审查——安全、正确性、可维护性逐层过，问题带文件行号和修复示例",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/code-review",
+      "author": "skysheep"
+    },
+    {
+      "name": "学习笔记",
+      "description": "把教材文章整理成结构化笔记——人话讲解、落地例子、自测题三件套，可导出 docx 复习",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/study-notes",
+      "author": "skysheep"
+    },
+    {
+      "name": "短视频口播脚本",
+      "description": "黄金三秒开头、分镜口播稿、发布文案与话题标签三件套，按账号定位批量出选题",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/douyin-script",
+      "author": "skysheep"
+    },
+    {
+      "name": "面试准备",
+      "description": "拿 JD 和简历预测高频面试题，STAR 要点写答案、备好追问应对，可模拟追问到脱稿",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/interview-prep",
+      "author": "skysheep"
+    },
+    {
+      "name": "行业动态简报",
+      "description": "联网追踪一个话题产出带来源的简报——重点、时间线、不同观点，可配定时任务周期自动更新",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/news-brief",
+      "author": "skysheep"
+    },
+    {
+      "name": "记账与预算",
+      "description": "账单自动分类、月度对比、超支预警，生成长期可维护的记账 xlsx 和下月预算建议",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/budget-tracker",
+      "author": "skysheep"
     }
   ]
 }

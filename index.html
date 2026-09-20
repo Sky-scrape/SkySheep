@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SkySheep — 跑在你电脑上的 AI Agent 工作台</title>
-<meta name="description" content="SkySheep 是开源（MIT）的桌面 AI Agent 工作台：能读文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键回滚，数据不出本机。">
+<meta name="description" content="SkySheep 是开源（MIT）的桌面 AI Agent 工作台：圆桌多模型共同作答、任务排成流水线自动接力；能读文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键回滚，数据不出本机。">
 <meta property="og:title" content="SkySheep — 跑在你电脑上的 AI Agent 工作台">
-<meta property="og:description" content="开源桌面 AI Agent：敢让它动手，也随时能后悔。Windows · MIT · 数据不出本机。">
+<meta property="og:description" content="开源桌面 AI Agent：圆桌多模型 + 任务编排 + 三档权限。敢让它动手，也随时能后悔。Windows · MIT · 数据不出本机。">
 <meta property="og:image" content="docs/images/right-panel.png">
 <link rel="icon" id="favicon" type="image/png" href="docs/images/cloud-sheep-3d.png">
 <script>
@@ -393,6 +393,34 @@ section{padding:56px 0}
 .feat h3{margin:0 0 6px;font-size:1.05rem}
 .feat p{margin:0;color:var(--ink-2);font-size:.92rem}
 
+/* ═══════════ 招牌能力 ═══════════ */
+.sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+@media (max-width:860px){.sig-grid{grid-template-columns:1fr}}
+.sig{
+  background:linear-gradient(160deg,var(--accent-soft),transparent 58%),var(--cloud-dim);
+  border:1.5px solid var(--line-strong);border-radius:28px;
+  padding:34px 30px;position:relative;overflow:hidden;
+  transition:transform .18s,box-shadow .18s;
+}
+.sig:hover{transform:translateY(-5px);box-shadow:var(--shadow-soft)}
+.sig .sig-badge{
+  display:inline-flex;align-items:center;
+  font-size:.78rem;font-weight:700;letter-spacing:.14em;
+  color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent-deep));
+  border-radius:999px;padding:4px 14px;margin-bottom:16px;
+}
+.sig h3{margin:0 0 10px;font-size:1.38rem}
+.sig .sig-lead{margin:0 0 14px;color:var(--ink);font-weight:600}
+.sig ul{margin:0;padding:0;list-style:none}
+.sig li{
+  color:var(--ink-2);font-size:.93rem;
+  padding:5px 0 5px 24px;position:relative;
+}
+.sig li::before{
+  content:"☁";position:absolute;left:0;top:5px;
+  color:var(--accent);font-size:.85rem;
+}
+
 /* ═══════════ 截图画廊 ═══════════ */
 .shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:22px}
 .shots figure{
@@ -515,6 +543,7 @@ footer a:hover{color:var(--accent)}
     <a class="brand" href="#top"><img src="docs/images/cloud-sheep-3d.png" alt="SkySheep 云朵小羊">SkySheep</a>
     <nav class="nav-links">
       <a href="#security">安全</a>
+      <a href="#signature">招牌</a>
       <a href="#features">功能</a>
       <a href="#shots">截图</a>
       <a href="#download">下载</a>
@@ -598,6 +627,37 @@ footer a:hover{color:var(--accent)}
     </div>
   </section>
 
+  <!-- 招牌能力 -->
+  <section id="signature" class="band">
+    <div class="sec-head reveal">
+      <span class="kicker">☁️ 招牌能力</span>
+      <h2>两件别的客户端做不到的事</h2>
+      <p>不是把聊天窗口搬上桌面，而是给模型装上「群体智慧」和「自动流水线」。</p>
+    </div>
+    <div class="sig-grid">
+      <div class="sig reveal">
+        <span class="sig-badge">👥 圆桌多模型</span>
+        <h3>一次提问，几个模型一起答</h3>
+        <p class="sig-lead">多个模型并行独立作答，「主席」融合众长给出一份更稳的答案——还能开辩论轮，让成员互看草稿再改一遍。</p>
+        <ul>
+          <li><b>成员身份预设</b>：批评者 / 事实核查员 / 简洁派 / 实干者，答案权衡锋利与全面</li>
+          <li><b>省 token 三件套</b>：成员轻上下文 + 雷同草稿去重 + 融合预算收敛，圆桌≠账单翻倍</li>
+          <li><b>草稿全留存</b>：每份草稿随消息落库，回看、引用、追问；也支持 A/B 对比</li>
+        </ul>
+      </div>
+      <div class="sig reveal">
+        <span class="sig-badge">🔗 任务编排</span>
+        <h3>一串任务，排成自动接力的流水线</h3>
+        <p class="sig-lead">「并行调研 → 全部完成后汇总审查 → 不过自动重做」——多步骤工作流连成节点图，后台自己跑。</p>
+        <ul>
+          <li><b>依赖调度</b>：上游并行、依赖到齐自动接力，PASS/FAIL 条件门控制分支</li>
+          <li><b>失败韧性</b>：节点超时、自动重试带上失败原因、遇忙退避重排队</li>
+          <li><b>无人值守门控</b>：与定时任务同一套预授权，预授权外的写入/执行自动拒绝</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
   <!-- 功能网格 -->
   <section id="features">
     <div class="wrap">
@@ -625,12 +685,22 @@ footer a:hover{color:var(--accent)}
         <div class="feat reveal">
           <div class="ico">⏰</div>
           <h3>定时任务与日程</h3>
-          <p>周期任务到点执行、支持提醒，手机可在局域网直接访问工作台。</p>
+          <p>周期任务到点执行、支持提醒；手机局域网直连，装 Tailscale 跨网络也能连回家。</p>
         </div>
         <div class="feat reveal">
           <div class="ico">👥</div>
           <h3>圆桌多模型</h3>
-          <p>多个模型并行作答，「主席」模型融合众长，给出更稳的结论。</p>
+          <p>多模型并行作答、主席融合，辩论轮再修订；成员角色预设 + 省 token 三件套。</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ico">🔗</div>
+          <h3>任务编排</h3>
+          <p>任务排成依赖流水线：并行接力、条件门、超时重试，无人值守也有权限门控。</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ico">⚡</div>
+          <h3>三档权限按钮</h3>
+          <p>安全执行 / 自动编辑 / 完全访问一键循环，放开尺度自己掌握，状态一眼可辨。</p>
         </div>
         <div class="feat reveal">
           <div class="ico">📄</div>
@@ -645,7 +715,7 @@ footer a:hover{color:var(--accent)}
         <div class="feat reveal">
           <div class="ico">🈶</div>
           <h3>中文优先</h3>
-          <p>界面、帮助、快捷指令全为中文场景设计，本地模型中文对话同样顺滑。</p>
+          <p>界面、帮助、提示词（输入 ~ 即插即用）、技能广场全为中文场景设计。</p>
         </div>
       </div>
     </div>

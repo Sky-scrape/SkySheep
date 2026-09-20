@@ -34,11 +34,16 @@ def test_remote_client_cannot_enable_accept_edits(home, monkeypatch):
                       "params": {"mode": "accept_edits"}})
         frame = recv_until(ws, "m1")
         assert frame["ok"] is False and "本机" in frame["error"]
+        # 完全访问档放得更开，同样只许本机切换
+        ws.send_json({"id": "m1b", "method": "permission.set_mode",
+                      "params": {"mode": "full_access"}})
+        frame = recv_until(ws, "m1b")
+        assert frame["ok"] is False and "本机" in frame["error"]
         ws.send_json({"id": "m2", "method": "permission.mode"})
         assert recv_until(ws, "m2")["result"]["mode"] == "confirm"
-        # 也不允许通过 ui.save 间接写入 accept_edits
+        # 也不允许通过 ui.save 间接写入 accept_edits（含完全访问的 2 档）
         ws.send_json({"id": "u1", "method": "ui.save",
-                      "params": {"prefs": {"accept_edits": 1, "sidebar_w": 300}}})
+                      "params": {"prefs": {"accept_edits": 2, "sidebar_w": 300}}})
         prefs = recv_until(ws, "u1")["result"]["prefs"]
         assert "accept_edits" not in prefs and prefs.get("sidebar_w") == 300
         assert "accept_edits" not in (home / "home" / "ui.json").read_text(encoding="utf-8")

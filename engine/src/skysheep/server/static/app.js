@@ -247,6 +247,9 @@ let sessionMeta = {}; // sid -> {title}（refreshSessions / snapshot 维护，�
 function newTabObj(sid, title) {
   const logEl = document.createElement("div");
   logEl.className = "chat-log";
+  // role=log（隐含 aria-live=polite）：新消息插入时屏幕阅读器播报，流式增量不打断
+  logEl.setAttribute("role", "log");
+  logEl.setAttribute("aria-label", "对话消息");
   return {
     sid: sid || null, title: title || "", logEl, running: false,
     streamingEl: null, streamingText: "", rtCard: null, rtMemberEls: [],
@@ -269,11 +272,16 @@ function withTab(tab, fn) { routeTab = tab; try { fn(); } finally { routeTab = n
 function renderTabs() {
   const bar = document.getElementById("chat-tabs");
   bar.classList.toggle("hidden", chatTabs.length <= 1);
+  bar.setAttribute("role", "tablist");
+  bar.setAttribute("aria-label", "会话标签");
   bar.innerHTML = "";
   chatTabs.forEach((t) => {
     const el = document.createElement("div");
     el.className = "chat-tab" + (t === activeTab ? " active" : "") +
       (t.running ? " running" : "") + (t.needsPerm ? " needs-perm" : "");
+    el.setAttribute("role", "tab");
+    el.setAttribute("aria-selected", t === activeTab ? "true" : "false");
+    el.tabIndex = t === activeTab ? 0 : -1; // roving tabindex：只有当前标签在 Tab 链上
     const title = t.title || (t.sid ? (sessionMeta[t.sid] || {}).title || "会话" : "新会话");
     el.innerHTML = `<span class="tab-title">${escapeHtml(title)}</span>` +
       (t.running ? '<span class="tab-dot" title="运行中"></span>' : "") +
@@ -290,10 +298,31 @@ function renderTabs() {
     };
     bar.appendChild(el);
   });
+  // 方向键在标签间切换（激活即聚焦）；div 无原生键盘激活，Enter/空格补上。
+  // bar 元素常驻，委托只绑一次
+  if (!bar._navBound) {
+    bar._navBound = true;
+    bar.addEventListener("keydown", (e) => {
+      const tabs = [...bar.querySelectorAll('[role="tab"]')];
+      if (!tabs.length) return;
+      const idx = tabs.indexOf(document.activeElement);
+      if (e.key === "Enter" || e.key === " ") {
+        if (idx >= 0) { e.preventDefault(); tabs[idx].click(); }
+        return;
+      }
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      if (idx === -1) return;
+      e.preventDefault();
+      const next = e.key === "ArrowRight" ? (idx + 1) % tabs.length : (idx - 1 + tabs.length) % tabs.length;
+      tabs[next].focus();
+      tabs[next].click();
+    });
+  }
 }
 
 // ---------- 消息导航条（minimap）：右侧一列小圆点，一颗对应一条消息 ----------
-// 平时半透明圆点，当前视口所在消息的那颗拉长成实色亮条；点它平滑跳到对应消息，
+// 平时半透明圆点，当前视口所在消息的那颗拉长成实色亮条，相邻圆点按距离
+// 渐变（近长远短，4 步外回到圆点）；点它平滑跳到对应消息，
 // 悬停提示消息开头文字。消息太多匀不下时等距抽样（一颗代表一段，跳到段首）。
 // 只在内容可滚动且不止一条消息时出现；随 attachTabLog 绑定当前标签的聊天流。
 const chatMinimap = document.createElement("div");
@@ -304,11 +333,16 @@ const MINI_ITEM_H = 10, MINI_GAP = 4; // 与 app.css 的圆点热区高 / 列间
 let miniLog = null, miniMut = null, miniRO = null, miniTargets = [], miniTops = [];
 let miniTimer = 0, miniRaf = 0, miniRemap = 0, miniGen = 0;
 
-// 消息在聊天流内容坐标系里的纵位。必须在动画结束后量：入场动画 rise 带着
-// translateY transform，getBoundingClientRect 会把它算进去，量早了位置永久偏移。
+// 消息在聊天流内容坐标系（= scrollTop / scrollTo 所在的坐标系）里的纵位。
+// 两个坑：
+//  1) getBoundingClientRect 返回物理像素，而 #app 上有 zoom（--ui-zoom），
+//     不除回 uiScale 会与 scrollTop 差一个缩放倍率（0.9 缩放时偏小 10%）；
+//     长对话里偏差累积，点圆点会落到错误位置、高亮也跟着错位。
+//  2) 入场动画 rise 带 translateY transform，会被 rect 算进去，
+//     所以必须在动画结束后校准（见 miniRebuild 里的 miniRemap）。
 function miniTopOf(el) {
   const r = miniLog.getBoundingClientRect();
-  return el.getBoundingClientRect().top - r.top + miniLog.scrollTop;
+  return (el.getBoundingClientRect().top - r.top) / uiScale + miniLog.scrollTop;
 }
 
 function miniBind(log) {
@@ -338,9 +372,23 @@ function miniMsgs() {
   if (!miniLog) return [];
   const out = [];
   for (const el of miniLog.children) {
-    if (el.classList.contains("msg")) out.push(el); // .welcome 欢迎页不计
+    // 只收真正的消息卡片：user / assistant / error。
+    // 不能用 classList.contains("msg") 粗筛——.msg.notice（系统提示胶囊，如
+    // 「已切换到规划模式」）与 .msg.plan-actions（计划执行按钮条）也带 msg 前缀，
+    // 会被当成消息，多出圆点、与对话对不上（welcome 卡同理，它连 msg 都没有）
+    if (!el.classList.contains("msg")) continue;
+    if (el.classList.contains("notice") || el.classList.contains("plan-actions")) continue;
+    out.push(el);
   }
   return out;
+}
+
+// 一个圆点必须对应一个「真能滚到」的位置：目标位置钳到可滚动范围内。
+// 不钳制的话，末尾几条消息的目标会超出 maxScroll，点了只能滚到底、
+// 高亮一律落到最后一颗（「点不动第 N 个圆点」的成因）。
+function miniScrollTarget(el) {
+  const maxScroll = Math.max(0, miniLog.scrollHeight - miniLog.clientHeight);
+  return Math.min(maxScroll, Math.max(0, miniTopOf(el) - 10));
 }
 
 function miniRebuild() {
@@ -350,19 +398,29 @@ function miniRebuild() {
   const scrollable = msgs.length > 1 && miniLog.scrollHeight > logH + 4;
   chatMinimap.classList.toggle("hidden", !scrollable);
   if (!scrollable) { chatMinimap.textContent = ""; return; }
+  // 目标位置相同的连续消息合并成一颗（保留最后一条——滚到底时看到的正是末尾那几条）。
+  // 内容只比视口高一点点时，末尾好几条的目标会被一起钳到底部；
+  // 不合并就会出现多颗点了没反应、高亮全落最后一颗的死圆点。
+  const slots = [];
+  for (const el of msgs) {
+    const target = miniScrollTarget(el);
+    const last = slots[slots.length - 1];
+    if (last && Math.abs(last.target - target) < 1) last.el = el;
+    else slots.push({ el, target });
+  }
   const availH = Math.max(120, Math.min(logH - 130, 560));
   const maxDots = Math.max(1, Math.floor((availH + MINI_GAP) / (MINI_ITEM_H + MINI_GAP)));
-  const n = Math.min(msgs.length, maxDots);
-  const step = msgs.length / n;
+  const n = Math.min(slots.length, maxDots);
+  const step = slots.length / n;
   miniTargets = []; miniTops = [];
   const frag = document.createDocumentFragment();
   for (let i = 0; i < n; i++) {
-    const el = msgs[Math.floor(i * step)];
+    const el = slots[Math.floor(i * step)].el;
     const d = document.createElement("div");
     d.className = "chat-minimap-dot";
     const txt = (el.textContent || "").trim().replace(/\s+/g, " ");
     d.title = txt.length > 80 ? txt.slice(0, 80) + "…" : txt;
-    d.onclick = () => miniLog.scrollTo({ top: miniTopOf(el) - 10, behavior: "smooth" });
+    d.onclick = () => miniLog.scrollTo({ top: miniScrollTarget(el), behavior: "smooth" });
     frag.appendChild(d);
     miniTargets.push(el);
     miniTops.push(miniTopOf(el));
@@ -387,8 +445,14 @@ function miniUpdateActive() {
   let on = 0;
   for (let i = 0; i < miniTops.length; i++) if (miniTops[i] <= mark) on = i;
   if (atBottom) on = miniTops.length - 1; // 贴底时末尾短消息到不了顶缘，强制亮最后一根
+  // 从亮条向上下渐变：紧邻的略长、越远越短，4 步外回到圆点；
+  // 宽度写在 --mini-w 上（CSS 的 width: var(--mini-w) 接住），transition 负责平滑
   const bars = chatMinimap.children;
-  for (let i = 0; i < bars.length; i++) bars[i].classList.toggle("on", i === on);
+  for (let i = 0; i < bars.length; i++) {
+    const dist = Math.abs(i - on);
+    bars[i].classList.toggle("on", i === on);
+    bars[i].style.setProperty("--mini-w", (dist ? 10 + 22 * Math.max(0, 1 - dist / 4) : 32).toFixed(1) + "px");
+  }
 }
 
 function miniOnScroll() {
@@ -1042,8 +1106,11 @@ let usageIn = 0, usageOut = 0;
 
 function renderUsage() {
   if (usageIn || usageOut) {
-    document.getElementById("usage").textContent =
+    const el = document.getElementById("usage");
+    el.textContent =
       `tokens ↑${usageIn.toLocaleString()} ↓${usageOut.toLocaleString()}`;
+    el.title =
+      `本会话累计消耗 tokens：↑ 输入 ${usageIn.toLocaleString()} / ↓ 输出 ${usageOut.toLocaleString()}（全部会话的统计见 设置 · 用量）`;
   }
 }
 
@@ -1403,9 +1470,11 @@ function handleEvent(kind, data) {
         const prev = pipelineSeenStatus[p.id];
         pipelineSeenStatus[p.id] = p.status;
         if (prev === "running" && (p.status === "done" || p.status === "failed")) {
-          const bad = (p.nodes || []).filter((n) => n.status !== "done").length;
-          pushNotice(p.status === "done" ? `✅ 流水线完成：${p.name}`
-            : `⚠️ 流水线结束（${bad} 个节点未成功）：${p.name}`);
+          const bad = (p.nodes || []).filter((n) => n.status !== "done" && n.status !== "skipped").length;
+          const skipped = (p.nodes || []).filter((n) => n.status === "skipped").length;
+          const skippedTxt = skipped ? `，${skipped} 个被条件门跳过` : "";
+          pushNotice(p.status === "done" ? `✅ 流水线完成：${p.name}${skippedTxt}`
+            : `⚠️ 流水线结束（${bad} 个节点未成功${skippedTxt}）：${p.name}`);
         }
         if (rightTabs.includes("pipeline") && !rightCollapsed) loadPipelines();
       }
@@ -1413,6 +1482,7 @@ function handleEvent(kind, data) {
     }
     case "notice": addNotice("⏳ " + data.message); break;
     case "memory_digest": addNotice("🧠 " + data.message); break;
+    case "memory_maintain": addNotice("🧹 " + data.message); break;
     case "compaction":
       addNotice(`🗜 上下文压缩：${data.before_messages} → ${data.after_messages} 条消息`);
       break;
@@ -1542,6 +1612,8 @@ let sessionSearchActive = false; // 搜索结果展示期间，禁止列表刷�
 
 async function refreshSessions(prefetched) {
   if (sessionSearchActive) return;
+  // 分组视图：项目与合到一起，渲染走另一条路（见 refreshSessionsGrouped）
+  if (sidebarView === "grouped") return refreshSessionsGrouped();
   // prefetched：站内切换项目时已先取回，直接渲染（不经过网络等待，避免列表先清空）
   const { sessions, empty_count, archived_count } = prefetched || await request("session.list");
   const ul = document.getElementById("session-list");
@@ -1585,7 +1657,12 @@ async function refreshSessions(prefetched) {
     ul.innerHTML += '<li class="empty-hint">这一组下没有会话</li>';
   }
   if (!sessions.length) ul.innerHTML = '<li class="empty-hint">暂无会话</li>';
+  renderSessionExtras({ empty_count, archived_count });
+  renderRailSessions(sessions);
+}
 
+// 空会话清理入口与归档入口：经典/分组两种视图共用（都只看当前项目）
+function renderSessionExtras({ empty_count = 0, archived_count = 0 } = {}) {
   // 空会话清理入口（仅当确实存在空会话时出现）
   const footer = document.getElementById("session-footer");
   if (footer) {
@@ -1618,6 +1695,43 @@ async function refreshSessions(prefetched) {
 
 // 当前生效的标签过滤（点分组头切换）；只在内存里，不写偏好
 let activeTagFilter = null;
+
+// ---------- 折叠态窄栏（mini rail）：最近会话的首字快捷列 ----------
+// 折叠后侧栏整条退场，窄栏承接「扫一眼、快速切」：列最近的会话，每项是标题
+// 首字（中文单字 / 英文首字母），当前会话高亮。数据复用侧栏那次请求，不额外发 WS。
+const RAIL_SESSION_MAX = 12; // 上限：再多也没人挨个认
+
+function railInitial(title) {
+  const t = String(title || "").trim();
+  if (!t) return "·";
+  return [...t][0].toUpperCase(); // 迭代器取字符：emoji / 代理对不会被截半
+}
+
+function renderRailSessions(sessions) {
+  const box = document.getElementById("rail-sessions");
+  if (!box) return;
+  const list = (sessions || []).slice(0, RAIL_SESSION_MAX);
+  box.innerHTML = "";
+  if (!list.length) {
+    const empty = document.createElement("span");
+    empty.className = "rail-sess-empty";
+    empty.textContent = "空";
+    box.appendChild(empty);
+    return;
+  }
+  list.forEach((s) => {
+    const b = document.createElement("button");
+    const active = s.id === currentSessionId;
+    b.className = "rail-sess" + (active ? " active" : "");
+    b.textContent = railInitial(s.title);
+    b.title = (s.title || "(未命名)") + (active ? "（当前会话）" : "") + " · 点击切换";
+    b.onclick = () => {
+      if (settingsOpen) backToChat();
+      openTabForSession(s.id, s.title);
+    };
+    box.appendChild(b);
+  });
+}
 
 function renderSessionItem(s, ul) {
   const li = document.createElement("li");
@@ -1656,6 +1770,221 @@ function renderSessionItem(s, ul) {
     if (t && !t.running) t.needHistory = false;
   };
   return li;
+}
+
+// ---------- 分组视图：会话按项目折叠收拢（项目一多，经典两区挤不下会话） ----------
+// 与经典视图并存，sidebar_view 偏好记住选择（classic=原两区样式，保留不删）
+let sidebarView = "classic";
+let groupSeq = 0; // 渲染序号：两次并发的分组渲染，慢的那个回来后直接丢弃
+const projGroupState = new Map(); // 分组 key -> { open, all }：折叠与「显示更多」记忆，重渲染不丢
+const GROUP_PREVIEW = 5; // 每个项目默认露出的会话条数，其余收进「显示更多」
+
+function groupState(key) {
+  // 项目 id 从 JSON 来是数字、dataset.gkey 读回是字符串，同一组会存成两个键——
+  // 折叠全部（走 dataset）就会与渲染（走原始 id）各写各的。入口统一成字符串
+  key = String(key);
+  if (!projGroupState.has(key)) projGroupState.set(key, { open: true, all: false });
+  return projGroupState.get(key);
+}
+
+function applySidebarView() {
+  document.querySelectorAll("#session-view button").forEach((b) => {
+    const on = b.dataset.view === sidebarView;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  const sec = document.getElementById("project-section");
+  if (sec) sec.classList.toggle("hidden", sidebarView === "grouped");
+  const ul = document.getElementById("session-list");
+  if (ul) ul.classList.toggle("by-project", sidebarView === "grouped");
+  // 分组视图本身就是全部项目的会话：「本项目/全部项目」切换没有意义，隐藏，
+  // 搜索范围固定「全部项目」；切回经典时恢复用户在经典模式下选的范围
+  const seg = document.getElementById("search-scope");
+  if (seg) seg.classList.toggle("hidden", sidebarView === "grouped");
+  searchScope = sidebarView === "grouped" ? "all" : classicScope;
+  document.querySelectorAll("#search-scope button").forEach((x) =>
+    x.classList.toggle("active", x.dataset.scope === searchScope));
+  syncFoldAllBtn();
+}
+
+document.querySelectorAll("#session-view button").forEach((b) => {
+  b.onclick = () => {
+    if (sidebarView === b.dataset.view) return;
+    sidebarView = b.dataset.view;
+    applySidebarView();
+    saveUiPrefs({ sidebar_view: sidebarView });
+    // 搜索范围随视图切换（分组=全部项目）：输入框有词就地按新范围重搜
+    const q = searchEl.value.trim();
+    if (q) renderSessionList(q);
+    else refreshSessions();
+  };
+});
+
+// 「折叠全部项目」（分组视图专属）：项目一多时一键全收，全收后变成「展开全部项目」。
+// 开合记忆与单组折叠同源（projGroupState）；经典视图与搜索结果没有可折叠组，按钮隐藏
+function groupHeads() {
+  return [...document.querySelectorAll("#session-list .pgroup-head")];
+}
+
+function syncFoldAllBtn() {
+  const btn = document.getElementById("btn-fold-all");
+  if (!btn) return;
+  const heads = groupHeads();
+  const expand = heads.length > 0 && heads.every((h) => !groupState(h.dataset.gkey).open);
+  btn.classList.toggle("hidden",
+    sidebarView !== "grouped" || sessionSearchActive || !heads.length);
+  btn.classList.toggle("expand", expand);
+  const tip = expand ? "展开全部项目" : "折叠全部项目";
+  btn.title = tip;
+  btn.setAttribute("aria-label", tip);
+}
+
+const foldAllBtn = document.getElementById("btn-fold-all");
+if (foldAllBtn) foldAllBtn.onclick = () => {
+  const heads = groupHeads();
+  const expand = heads.length > 0 && heads.every((h) => !groupState(h.dataset.gkey).open);
+  heads.forEach((h) => { groupState(h.dataset.gkey).open = expand; });
+  refreshSessionsGrouped(); // 尾部的 syncFoldAllBtn 会把按钮翻成展开态
+};
+
+async function refreshSessionsGrouped() {
+  const seq = ++groupSeq;
+  const [listRes, projRes] = await Promise.all([
+    request("session.list", { all_projects: 1 }).catch(() => null),
+    request("project.list").catch(() => ({ projects: [] })),
+  ]);
+  if (seq !== groupSeq) return; // 已有更新的一轮在后面，别拿旧数据盖新
+  if (!listRes) {
+    // 远程客户端拿不到跨项目列表（安全口径同 scope=all）：退回经典视图，
+    // 偏好一并还原，免得远程端每次进来都要退一次
+    sidebarView = "classic";
+    applySidebarView();
+    saveUiPrefs({ sidebar_view: null });
+    addNotice("分组视图只在本机桌面端可用，已切回经典视图");
+    refreshSessions();
+    return;
+  }
+  const projects = projRes.projects || [];
+  const sessions = listRes.sessions || [];
+  // 按 project_id 分桶；不属于任何已列项目的（含 NULL 的快聊）收进结尾的兜底组
+  const byProject = new Map();
+  sessions.forEach((s) => {
+    const k = s.project_id == null ? "quick" : s.project_id;
+    if (!byProject.has(k)) byProject.set(k, []);
+    byProject.get(k).push(s);
+  });
+  const ul = document.getElementById("session-list");
+  const frag = document.createDocumentFragment();
+  let sawProject = false;
+  // 当前项目的组排最前（正在用的项目一眼可见），其余保持 project.list 的原序
+  const ordered = [...projects].sort((a, b) => (b.is_current ? 1 : 0) - (a.is_current ? 1 : 0));
+  ordered.forEach((p) => {
+    sawProject = true;
+    renderProjectGroup(frag, {
+      key: p.id, name: p.name, list: byProject.get(p.id) || [],
+      isCurrent: !!p.is_current, rootPath: p.root_path || "", project: p,
+    });
+    byProject.delete(p.id);
+  });
+  const loose = [];
+  byProject.forEach((list, key) => {
+    if (key !== "quick") loose.push(...list);
+  });
+  if (byProject.has("quick")) {
+    renderProjectGroup(frag, {
+      key: "quick", name: "快聊", list: byProject.get("quick"),
+      isCurrent: false, rootPath: "", project: null,
+    });
+  }
+  if (loose.length) {
+    renderProjectGroup(frag, {
+      key: "loose", name: "其他", list: loose,
+      isCurrent: false, rootPath: "", project: null,
+    });
+  }
+  if (!sawProject && !sessions.length) {
+    const hint = document.createElement("li");
+    hint.className = "empty-hint";
+    hint.textContent = "还没有项目和会话";
+    frag.appendChild(hint);
+  }
+  // 「添加项目」ghost 行：分组视图把项目区整个收掉了，入口挪到列表末尾
+  const add = document.createElement("li");
+  add.className = "pgroup-add";
+  add.innerHTML = '<span class="pg-plus">＋</span><span>添加项目</span>';
+  add.title = "添加项目：选择一个文件夹（Agent 的工作目录会切过去）";
+  add.onclick = () => projectModal();
+  frag.appendChild(add);
+  ul.innerHTML = "";
+  ul.appendChild(frag);
+  renderSessionExtras(listRes);
+  renderRailSessions(sessions);
+  syncFoldAllBtn();
+}
+
+function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, project }) {
+  const ul = document.getElementById("session-list");
+  const st = groupState(key);
+  const head = document.createElement("li");
+  head.className = "pgroup-head" + (isCurrent ? " active" : "") + (st.open ? " open" : "");
+  head.dataset.gkey = key; // 折叠全部/展开全部要靠它找回各组的状态
+  head.innerHTML = FOLDER_SVG +
+    `<span class="pg-name">${escapeHtml(name)}</span>` +
+    (list.length ? `<span class="pg-count">${list.length}</span>` : "") +
+    (project && !isCurrent
+      ? '<button class="pg-del" title="从列表中移除这个项目">✕</button>' : "") +
+    '<span class="pg-chev"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M6 4l4 4-4 4"/></svg></span>';
+  head.title = `${name} —— 点击展开/折叠该项目下的会话`;
+  // 整行点击都只做展开/折叠（切换项目走「点该项目下的会话」或经典视图）
+  head.onclick = () => {
+    st.open = !st.open;
+    refreshSessionsGrouped();
+  };
+  head.querySelector(".pg-chev").onclick = (e) => {
+    e.stopPropagation();
+    st.open = !st.open;
+    refreshSessionsGrouped();
+  };
+  const del = head.querySelector(".pg-del");
+  if (del) del.onclick = (e) => { e.stopPropagation(); deleteProjectModal(project); };
+  frag.appendChild(head);
+  if (!st.open) return;
+  const visible = st.all ? list : list.slice(0, GROUP_PREVIEW);
+  visible.forEach((s) => {
+    const li = renderSessionItem(s, ul);
+    if (rootPath && !isCurrent) {
+      // 其他项目的会话不能在当前项目里直接激活：先切工作项目再打开
+      // （同「全部项目」搜索命中的流程），覆盖 renderSessionItem 的默认点击
+      li.title = `属于项目「${name}」—— 点击切换过去并打开`;
+      li.onclick = async () => {
+        try {
+          await request("project.switch", { path: rootPath });
+          await applyWorkspaceData(await fetchWorkspaceData());
+        } catch (e) {
+          addNotice("切换到该项目失败：" + e.message);
+          return;
+        }
+        openTabForSession(s.id, s.title);
+        clearTodoPanel();
+        addNotice(`已打开会话 ${s.title || s.id}`);
+      };
+    }
+    frag.appendChild(li);
+  });
+  if (list.length > visible.length || (st.all && list.length > GROUP_PREVIEW)) {
+    const more = document.createElement("li");
+    more.className = "pgroup-more";
+    if (st.all) {
+      more.textContent = "收起";
+      more.onclick = () => { st.all = false; refreshSessionsGrouped(); };
+    } else {
+      more.textContent = `显示更多 ${list.length - visible.length} 个`;
+      more.onclick = () => { st.all = true; refreshSessionsGrouped(); };
+    }
+    frag.appendChild(more);
+  }
 }
 
 // 「引用此会话」：挂进输入框的引用托盘，随下一条消息把该会话内容注入上下文
@@ -1739,15 +2068,18 @@ async function openArchiveModal() {
 // ---------- 会话搜索（标题 + 消息全文，对标 Claude Code /resume 检索） ----------
 const searchEl = document.getElementById("session-search");
 let searchTimer = null;
-let searchScope = "project"; // project | all
+let searchScope = "project"; // project | all（随视图走：分组视图固定 all，见 applySidebarView）
+let classicScope = "project"; // 经典模式下「本项目/全部项目」的选择，切视图时恢复用
 searchEl.addEventListener("input", () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => renderSessionList(searchEl.value.trim()), 200);
 });
-// 搜索范围切换：本项目 / 全部项目（记不住某件事在哪个项目聊过时用）
+// 搜索范围切换：本项目 / 全部项目（记不住某件事在哪个项目聊过时用；
+// 该切换只在经典视图显示，分组视图固定按全部项目搜）
 document.querySelectorAll("#search-scope button").forEach((b) => {
   b.onclick = () => {
     searchScope = b.dataset.scope;
+    classicScope = searchScope;
     document.querySelectorAll("#search-scope button").forEach((x) =>
       x.classList.toggle("active", x === b));
     if (searchEl.value.trim()) renderSessionList(searchEl.value.trim());
@@ -1786,6 +2118,7 @@ async function renderSessionList(query) {
   const r = await request("session.search", { query, scope: searchScope })
     .catch(() => ({ results: [] }));
   ul.innerHTML = "";
+  syncFoldAllBtn(); // 搜索结果是平铺列表，没有组可折，「折叠全部」随之隐藏
   if (!r.results.length) {
     ul.innerHTML = searchScope === "all"
       ? '<li class="empty-hint">所有项目里都没有匹配的会话或消息</li>'
@@ -1957,7 +2290,18 @@ function startInlineRename(s, li) {
   input.ondblclick = (e) => e.stopPropagation();
 }
 
+let modalTriggerEl = null; // 打开弹窗时的焦点来源，关闭时归还
+
+// 弹层内可聚焦元素（Tab 循环用）：过滤禁用/隐藏/不可见
+function modalFocusables() {
+  const box = document.querySelector("#modal .modal-box");
+  if (!box) return [];
+  return [...box.querySelectorAll("button, input, select, textarea, a[href], [tabindex]:not([tabindex='-1'])")]
+    .filter((x) => !x.disabled && !x.hidden && x.offsetParent !== null);
+}
+
 function showModal(title, contentEl, onOk, okLabel = "确定") {
+  modalTriggerEl = document.activeElement; // 记录触发源（可能是 null，hideModal 会判断）
   document.getElementById("modal-title").textContent = title;
   const content = document.getElementById("modal-content");
   content.innerHTML = "";
@@ -1971,6 +2315,13 @@ function showModal(title, contentEl, onOk, okLabel = "确定") {
   okBtn.textContent = okLabel;
   okBtn.disabled = false;
   document.getElementById("modal").classList.remove("hidden");
+  // 焦点闭环入口：等一拍再接管——不少调用方打开后会自行聚焦输入框，
+  // 焦点仍留在弹层外（纯确认框）时才聚焦「取消」，不与调用方抢
+  setTimeout(() => {
+    if (modalOpen() && !modalFocusables().includes(document.activeElement)) {
+      document.getElementById("modal-cancel").focus();
+    }
+  }, 0);
   okBtn.onclick = async () => {
     err.hidden = true;
     okBtn.disabled = true;
@@ -1987,14 +2338,34 @@ function showModal(title, contentEl, onOk, okLabel = "确定") {
 }
 function hideModal() {
   document.getElementById("modal").classList.add("hidden");
+  // 焦点归还触发源：元素可能已被重渲染移除（contains 判断），失败则静默
+  if (modalTriggerEl && document.contains(modalTriggerEl)) {
+    try { modalTriggerEl.focus(); } catch (e) {}
+  }
+  modalTriggerEl = null;
 }
 document.getElementById("modal-cancel").onclick = hideModal;
 // Esc = 点「取消」：走 cancel 按钮的当前语义（首启向导的跳过会记 onboarded 标记），
-// 不做隐藏弹层之外的事；菜单/查找条有自己的 Esc 分支，互不影响
+// 不做隐藏弹层之外的事；菜单/查找条有自己的 Esc 分支，互不影响。
+// Tab 在弹层内循环：焦点不会漏到被遮罩的背景内容上
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && modalOpen()) {
     e.preventDefault();
     document.getElementById("modal-cancel").click();
+    return;
+  }
+  if (e.key === "Tab" && modalOpen()) {
+    const items = modalFocusables();
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    const inBox = items.includes(document.activeElement);
+    if (e.shiftKey && (!inBox || document.activeElement === first)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (!inBox || document.activeElement === last)) {
+      e.preventDefault();
+      first.focus();
+    }
   }
 });
 
@@ -2569,27 +2940,22 @@ document.querySelectorAll("#usage-range-tabs button").forEach((b) => {
   };
 });
 
-// ---------- 快捷指令：自定义提示词模板（/ 菜单置顶展示） ----------
+// ---------- 提示词：自定义提示词模板（输入 ~ 时展示；原名「快捷指令」，2.0 起更名并换触发符号） ----------
 let snippetsCache = [];
 
-// 内置示例模板：用户一条自定义指令都没有时，/ 菜单给几个点一下就能跑的
-// 场景（第一个任务的成功时刻比空输入框更能留住新用户）。不落库、不可删，
-// 用户自己的指令始终排在前面。
-const BUILTIN_SNIPPETS = [
-  { id: "builtin-summarize", name: "总结当前项目", content: "请浏览当前项目的结构和关键文件，用中文总结：这个项目是做什么的、怎么运行、代码组织如何。" },
-  { id: "builtin-pdf", name: "总结 PDF 文档", content: "请读取 @文件.pdf，提炼要点成一页速览：核心结论（不超过 5 条）、关键数据、值得注意的风险或限制。" },
-  { id: "builtin-excel", name: "Excel 转图表报告", content: "请读取 @表格.xlsx，检查数据质量（缺失/重复/格式问题），清洗后生成一份汇总报告，告诉我有什么发现。" },
-  { id: "builtin-web", name: "调研一个话题", content: "请联网调研：，把最新进展整理成带信息来源的简报（重点、时间线、不同观点）。" },
-  { id: "builtin-fix", name: "帮我修报错", content: "我遇到了这个报错：\n\n（粘贴报错信息）\n\n请分析原因并给出修复方案；如果是代码问题，直接读文件帮我改好。" },
-];
+// 内置示例模板（内容定义在后端 BUILTIN_SNIPPETS，首启已落成真实记录、可在设置页
+// 编辑/删除）：只在用户把指令删光时给 / 菜单兜底，随 snippets.list 响应下发。
+let builtinSnippetsCache = [];
 
 function builtinSnippets() {
-  return snippetsCache.length ? [] : BUILTIN_SNIPPETS;
+  return snippetsCache.length ? [] : builtinSnippetsCache;
 }
 
 async function loadSnippets() {
   try {
-    snippetsCache = (await request("snippets.list")).snippets || [];
+    const r = await request("snippets.list");
+    snippetsCache = r.snippets || [];
+    builtinSnippetsCache = r.builtin || builtinSnippetsCache;
   } catch (e) { snippetsCache = []; }
   if (document.getElementById("snippets-list")) renderSnippets();
 }
@@ -2598,8 +2964,8 @@ function renderSnippets() {
   const ul = document.getElementById("snippets-list");
   ul.innerHTML = "";
   if (!snippetsCache.length) {
-    ul.innerHTML = '<li class="dim small" style="padding:6px 10px">还没有自定义快捷指令 —— 点右上角「＋ 新建」；' +
-      '输入 / 时可先用内置示例模板。</li>';
+    ul.innerHTML = '<li class="dim small" style="padding:6px 10px">还没有自定义提示词 —— 点右上角「＋ 新建」；' +
+      '输入 ~ 时可先用内置示例模板。</li>';
     return;
   }
   snippetsCache.forEach((s) => {
@@ -2628,12 +2994,12 @@ function snippetModal(existing) {
   const box = document.createElement("div");
   box.innerHTML = `
     <div class="cron-fields">
-      <label>名称（/ 菜单里显示）</label>
+      <label>名称（输入 ~ 时显示）</label>
       <input id="sn-name" class="modal-input" type="text" maxlength="40" placeholder="例如：代码审查" value="${existing ? escapeHtml(existing.name) : ""}">
       <label>内容（{{clipboard}} 会替换为剪贴板文本）</label>
-      <textarea id="sn-content" class="modal-input" rows="5" placeholder="请审查以下代码，关注正确性与边界情况：&#10;${clipboard}">${existing ? escapeHtml(existing.content) : ""}</textarea>
+      <textarea id="sn-content" class="modal-input" rows="5" placeholder="请审查以下代码，关注正确性与边界情况：&#10;{{clipboard}}">${existing ? escapeHtml(existing.content) : ""}</textarea>
     </div>`;
-  showModal(existing ? "编辑快捷指令" : "新建快捷指令", box, async () => {
+  showModal(existing ? "编辑提示词" : "新建提示词", box, async () => {
     const name = box.querySelector("#sn-name").value.trim();
     const content = box.querySelector("#sn-content").value.trim();
     if (!name || !content) throw new Error("名称与内容不能为空");
@@ -2729,6 +3095,7 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
     refreshProjects(projects),
   ]);
   snippetsCache = snippets.snippets || [];
+  builtinSnippetsCache = snippets.builtin || builtinSnippetsCache;
   if (document.getElementById("snippets-list")) renderSnippets();
   // 输入栏的上下文环形仪表：启动即用当前会话的占用初始化（此前只在发过消息后才出现，用户会以为没有这个功能）
   request("chat.status").then((st) => {
@@ -3131,7 +3498,7 @@ const MODE_TITLE = {
 };
 
 // 输入框占位的技巧提示：&/@/斜杠与图片入口，两种模式共用，切模式不丢
-const INPUT_HINT = "输入 & 引用对话 · @ 引用文件 · / 命令 · 可粘贴/拖入图片";
+const INPUT_HINT = "输入 & 引用对话 · @ 引用文件 · ~ 提示词 · / 命令 · 可粘贴/拖入图片";
 
 function setWorkMode(mode) {
   workMode = mode;
@@ -3202,18 +3569,18 @@ async function showRtMenu(e) {
   const roleOf = new Map((rtMembers || []).map((m) => [m.provider + "/" + m.model, m.role || ""]));
   let entries = 0;
   Object.entries(cfg.providers || {}).forEach(([name, p]) => {
+    // 只列已配置 Key 的模型：缺 Key 的服务选了也跑不了，列出来只是噪声
+    if (!p.key_mask) return;
     (p.models || []).forEach((m) => {
       entries += 1;
-      const hasKey = !!p.key_mask;
       const key = name + "/" + m;
       const label = document.createElement("label");
-      label.className = "rt-menu-item" + (hasKey ? "" : " nokey");
+      label.className = "rt-menu-item";
       label.innerHTML =
-        `<input type="checkbox" value="${escapeHtml(key)}" ${selected.has(key) ? "checked" : ""} ${hasKey ? "" : "disabled"}>` +
+        `<input type="checkbox" value="${escapeHtml(key)}" ${selected.has(key) ? "checked" : ""}>` +
         `<span class="mi-cmd">${escapeHtml(name)}</span>` +
-        `<span class="mi-model">${escapeHtml(m)}</span>` +
-        (hasKey ? "" : '<span class="mi-nokey">缺 Key</span>');
-      if (hasKey) {
+        `<span class="mi-model">${escapeHtml(m)}</span>`;
+      {
         // 身份下拉：给这个成员注入不同视角的作答提示词（普通 = 无附加身份）
         const cb = label.querySelector("input");
         const sel = document.createElement("select");
@@ -3226,17 +3593,17 @@ async function showRtMenu(e) {
           sel.appendChild(o);
         });
         sel.value = roleOf.get(key) || "";
-        sel.disabled = !cb.checked;
+        sel.hidden = !cb.checked;
         sel.onclick = (e) => e.stopPropagation();
         sel.onchange = () => roleOf.set(key, sel.value);
-        cb.addEventListener("change", () => { sel.disabled = !cb.checked; });
+        cb.addEventListener("change", () => { sel.hidden = !cb.checked; });
         label.appendChild(sel);
       }
       list.appendChild(label);
     });
   });
   if (!entries) {
-    list.innerHTML = '<div class="rt-menu-tip">暂无可用模型服务——先到「设置 · 模型服务」配置 API Key。</div>';
+    list.innerHTML = '<div class="rt-menu-tip">还没有已配置 Key 的模型——先到「设置 · 模型服务」配置 API Key，再回来挑选成员。</div>';
   }
   menu.appendChild(list);
   // 辩论修订 / 主席出草稿：本轮生效（也随 localStorage 记住选择）
@@ -3266,14 +3633,15 @@ async function showRtMenu(e) {
     rtChair = chairCb.checked;
     try { localStorage.setItem("skysheep.rt.chair", rtChair ? "1" : "0"); } catch {}
   };
-  extra.append(debRow, chairRow);
+  const cmpRow = document.createElement("label");
+  cmpRow.className = "rt-menu-row";
+  cmpRow.title = "不融合各成员回答，而是并排保留每个模型的原始回答（A/B 对比）";
+  cmpRow.innerHTML = `<input type="checkbox" id="rt-compare">` +
+    "<span>对比模式（不融合，保留各自回答）</span>";
+  extra.append(debRow, chairRow, cmpRow);
   menu.appendChild(extra);
   const actions = document.createElement("div");
   actions.className = "rt-menu-actions";
-  const cmpLabel = document.createElement("label");
-  cmpLabel.className = "rt-compare-toggle";
-  cmpLabel.title = "不融合各成员回答，而是并排保留每个模型的原始回答（A/B 对比）";
-  cmpLabel.innerHTML = `<input type="checkbox" id="rt-compare"> 对比模式（不融合，保留各自回答）`;
   const clear = document.createElement("button");
   clear.className = "link-btn";
   clear.textContent = "恢复自动";
@@ -3281,7 +3649,6 @@ async function showRtMenu(e) {
   const ok = document.createElement("button");
   ok.className = "btn-primary";
   ok.textContent = "确定";
-  actions.prepend(cmpLabel);
   ok.onclick = () => {
     const picked = [...list.querySelectorAll("input:checked")].map((i) => {
       const idx = i.value.indexOf("/");
@@ -3355,7 +3722,9 @@ function renderBell() {
   const n = notifPanel.classList.contains("hidden") ? notifUnread : 0;
   badge.classList.toggle("hidden", n <= 0);
   badge.textContent = n > 9 ? "9+" : String(n);
-  document.getElementById("btn-bell").classList.toggle("has-unread", n > 0);
+  const bell = document.getElementById("btn-bell");
+  bell.classList.toggle("has-unread", n > 0);
+  bell.setAttribute("aria-label", n > 0 ? `通知中心，${n} 条未读` : "通知中心");
 }
 
 function fmtNotifTime(ts) {
@@ -4599,25 +4968,37 @@ async function updateFileIndex() {
 function updateInputMenu() {
   const caret = inputEl.selectionStart;
   const before = inputEl.value.slice(0, caret);
+  // ~ 唤起提示词菜单（原「快捷指令」，自带内置示例兜底）。
+  // 查询段用 \S*：提示词名是中文，\w 匹配不到 CJK；空格视为结束（收起菜单）
+  const tilde = before.match(/^~(\S*)$/);
+  if (tilde) {
+    const q = tilde[1].toLowerCase();
+    const items = snippetsCache.concat(builtinSnippets())
+      .filter((s) => !q || s.name.toLowerCase().includes(q))
+      .slice(0, 8)
+      .map((s) => ({
+        label: "◆ " + s.name,
+        desc: snippetsCache.includes(s) ? "提示词 · 选中即插入" : "内置示例 · 选中即插入",
+        onPick: () => {
+          // ~ 查询串只是唤起器，不属于消息内容：插入前把它从输入框里去掉
+          inputEl.value = inputEl.value.replace(/^~[^\n]*/, "");
+          insertSnippet(s);
+        },
+      }));
+    showInputMenu(items, items.length
+      ? "（回车或点击插入到输入框，~ 后接着输入可过滤）"
+      : "（没有匹配的提示词；在设置 · 提示词里可以新建）");
+    return;
+  }
   const slash = before.match(/^\/([\w-]*)$/);
   if (slash) {
     const q = slash[1].toLowerCase();
-    const snips = snippetsCache.concat(builtinSnippets())
-      .filter((s) => !q || s.name.toLowerCase().includes(q))
-      .slice(0, 5)
-      .map((s) => ({
-        label: "◆ " + s.name,
-        desc: snippetsCache.includes(s) ? "快捷指令 · 选中即插入" : "内置示例 · 选中即插入",
-        onPick: () => insertSnippet(s),
+    const items = SLASH_COMMANDS.filter((c) => c.cmd.startsWith("/" + q))
+      .map((c) => ({
+        label: c.cmd,
+        desc: c.desc,
+        onPick: () => { inputEl.value = ""; autoGrowInput(); execSlash(c.cmd); },
       }));
-    const items = snips.concat(
-      SLASH_COMMANDS.filter((c) => c.cmd.startsWith("/" + q))
-        .map((c) => ({
-          label: c.cmd,
-          desc: c.desc,
-          onPick: () => { inputEl.value = ""; autoGrowInput(); execSlash(c.cmd); },
-        }))
-    );
     showInputMenu(items, "（没有匹配的命令，回车仍会作为消息发送）");
     return;
   }
@@ -4736,6 +5117,12 @@ window.addEventListener("keydown", (e) => {
   if (k === "k" && !settingsOpen) {
     e.preventDefault();
     if (!typing) toggleModelMenu();
+    return;
+  }
+  // Ctrl+B 左侧栏折叠/展开（对标 VS Code 的侧栏开关；输入框聚焦时也响应）
+  if (k === "b") {
+    e.preventDefault();
+    toggleLeftSidebar();
     return;
   }
   // Ctrl+W 关闭当前会话标签
@@ -4883,6 +5270,7 @@ const HELP_KEYS = [
   ["Esc", "停止正在运行的任务"],
   ["Enter / Shift + Enter", "发送 / 换行"],
   ["Ctrl + Alt + Space", "全局热键：唤起窗口并预填剪贴板内容"],
+  ["输入 ~", "提示词菜单：选中即插入模板（在设置 · 提示词里维护）"],
   ["输入 /", "命令菜单（/help /new /compact /model /status /todos /export）"],
   ["输入 @", "引用项目文件或文件夹"],
   ["空输入按 ↑", "回看之前发过的消息"],
@@ -4906,8 +5294,9 @@ function showHelp() {
         <li>「帮我把这个报错修好，改完跑一遍测试」</li>
       </ul>
       <p>涉及写文件、执行命令时它会先弹确认条（<b>允许一次 / 本项目总是允许 / 拒绝</b>）；
-      只读操作自动放行。想少点确认，可开输入框里的「✎ 自动允许写入」——
-      该档只自动放行工作目录内的文件写入，目录外的写入与执行命令仍会征询。</p>
+      只读操作自动放行。想少点确认，可点输入框工具条上的权限按钮（盾牌图标）在三档间切换：
+      「自动编辑」只自动放行工作目录内的文件写入，目录外的写入与执行命令仍会征询；
+      「完全访问」连执行命令也不再征询，仅在完全信任任务的环境里使用。</p>
     </div>
     <div class="help-sec">
       <h4>③ 常用开关</h4>
@@ -5214,7 +5603,7 @@ function agendaModal(existing, defaultTs) {
       <input id="ag-notes" class="modal-input" type="text" value="${existing ? escapeHtml(existing.notes || "") : ""}">
       <label class="agenda-remind"><input id="ag-remind" type="checkbox" ${!existing || existing.remind ? "checked" : ""}> 到点在应用内提醒</label>
       <label>提前量</label>
-      <select id="ag-remind-before" class="modal-input agenda-select">
+      <select id="ag-remind-before" class="modal-input">
         <option value="0">到点才提醒</option>
         <option value="5">提前 5 分钟</option>
         <option value="10">提前 10 分钟</option>
@@ -5306,6 +5695,7 @@ async function loadCron() {
     ops.className = "cron-ops";
     ops.innerHTML =
       `<button class="cron-op" data-op="run" title="立即运行一次">▶</button>` +
+      `<button class="cron-op" data-op="pipeline" title="纳入任务编排（复制成流水线节点）">⛓</button>` +
       `<button class="cron-op" data-op="toggle" title="${t.enabled ? "暂停" : "启用"}">${t.enabled ? "⏸" : "▶"}</button>` +
       `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
     ops.querySelector('[data-op="run"]').onclick = async (e) => {
@@ -5314,6 +5704,10 @@ async function loadCron() {
         await request("cron.run_now", { id: t.id });
         addNotice(`已开始运行「${t.name}」，结果会写回列表`);
       } catch (err) { addNotice("运行失败: " + err.message); }
+    };
+    ops.querySelector('[data-op="pipeline"]').onclick = async (e) => {
+      e.stopPropagation();
+      await pipelineImportModal({ source: "cron", cron_id: t.id });
     };
     ops.querySelector('[data-op="toggle"]').onclick = async (e) => {
       e.stopPropagation();
@@ -5428,9 +5822,15 @@ document.getElementById("btn-cron-add").onclick = () => cronModal(null);
 
 const PL_NODE_STATUS = {
   blocked: "等待依赖", ready: "待运行", running: "运行中",
-  done: "已完成", error: "失败", cancelled: "已取消",
+  done: "已完成", error: "失败", cancelled: "已取消", skipped: "已跳过",
 };
-const PL_NODE_MARK = { blocked: "◌", ready: "▸", running: "●", done: "✓", error: "✗", cancelled: "⏹" };
+const PL_NODE_MARK = { blocked: "◌", ready: "▸", running: "●", done: "✓", error: "✗", cancelled: "⏹", skipped: "–" };
+// 控制流节点（control 字段）：改变运行逻辑本身，而不是执行一个任务步骤
+const PL_CONTROL = {
+  gate: { label: "条件门", mark: "◇", hint: "产出首行 PASS = 放行下游，FAIL = 下游跳过" },
+  stop: { label: "终止", mark: "⏹", hint: "依赖满足时在此截停整条流水线" },
+  loop: { label: "迭代", mark: "↻", hint: "反复执行直到产出首行出现 DONE，或达到轮数上限" },
+};
 const PL_PIPE_STATUS = {
   draft: "草稿（未启动）", running: "运行中", done: "已完成",
   failed: "有失败", cancelled: "已停止",
@@ -5451,6 +5851,93 @@ function plToolPicker(selected) {
         <span class="chip ${tool.safety === "dangerous" ? "danger-mark" : tool.safety === "write" ? "write-mark" : "safe-mark"}">${SAFETY_LABELS[tool.safety] || tool.safety}</span>
       </label>`;
   }).join("");
+}
+
+// 流水线依赖图：分层布局（layer = 1 + 最深上游）+ SVG 贝塞尔连线。
+// 纯 HTML/SVG 自绘，不引 mermaid——节点量小、要融入面板配色、同步渲染即可。
+// 宽度在挂载后实测（行卡/弹窗宽度不定），ResizeObserver 兜底重排（面板拖宽/收展）。
+function mountPipelineGraph(el, nodes, opts = {}) {
+  if (!el) return;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const layerOf = new Map();
+  const depth = (n) => {
+    if (layerOf.has(n.id)) return layerOf.get(n.id);
+    layerOf.set(n.id, 0); // 先占位防环（后端保证无环，这里只防手滑）
+    const ups = (n.depends_on || []).map((id) => byId.get(id)).filter(Boolean);
+    const l = ups.length ? Math.max(...ups.map(depth)) + 1 : 0;
+    layerOf.set(n.id, l);
+    return l;
+  };
+  nodes.forEach(depth);
+  const layers = [];
+  nodes.forEach((n) => {
+    const l = layerOf.get(n.id) || 0;
+    (layers[l] = layers[l] || []).push(n);
+  });
+  const rows = layers.filter(Boolean);
+  const W = Math.max(el.clientWidth || 0, 180);
+  const LAYER_H = 48, NODE_H = 26, GAP = 8;
+  const maxRow = Math.max(...rows.map((r) => r.length));
+  const nodeW = Math.max(64, Math.min(150, Math.floor((W - GAP) / maxRow) - GAP));
+  const H = rows.length * LAYER_H;
+  const pos = new Map();
+  rows.forEach((layer, li) => {
+    const slot = W / layer.length;
+    layer.forEach((n, i) => {
+      pos.set(n.id, {
+        x: slot * i + (slot - nodeW) / 2,
+        y: li * LAYER_H + (LAYER_H - NODE_H) / 2,
+      });
+    });
+  });
+  let edges = "";
+  nodes.forEach((n) => {
+    (n.depends_on || []).forEach((id) => {
+      const up = pos.get(id), me = pos.get(n.id);
+      if (!up || !me) return;
+      const x1 = up.x + nodeW / 2, y1 = up.y + NODE_H;
+      const x2 = me.x + nodeW / 2, y2 = me.y;
+      const mid = (y1 + y2) / 2;
+      edges += `<path class="pl-edge" marker-end="url(#pl-arrow)" d="M${x1} ${y1} C${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}"/>`;
+    });
+  });
+  let boxes = "";
+  nodes.forEach((n) => {
+    const p = pos.get(n.id);
+    const ctl = PL_CONTROL[n.control];
+    const mark = ctl ? ctl.mark : (PL_NODE_MARK[n.status] || "◌");
+    const loopTag = n.control === "loop" && (n.max_runs || 0) > 1
+      ? ` ${n.runs || 0}/${n.max_runs}` : "";
+    boxes += `<div class="pl-gnode pl-st-${n.status}${ctl ? " pl-ctl-" + n.control : ""}" style="left:${p.x}px;top:${p.y}px;width:${nodeW}px"` +
+      (opts.onPick ? ` data-gid="${n.id}"` : "") +
+      ` title="${escapeHtml(n.title)} · ${PL_NODE_STATUS[n.status] || n.status}${ctl ? " · " + ctl.label : ""}">` +
+      `<span>${mark} ${escapeHtml(n.title)}${loopTag}</span></div>`;
+  });
+  el.innerHTML = `<div class="pl-graph" style="height:${H}px">` +
+    `<svg width="${W}" height="${H}">` +
+    `<defs><marker id="pl-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">` +
+    `<path d="M0 0L8 4L0 8" fill="none" stroke="currentColor" stroke-width="1.2"/></marker></defs>${edges}</svg>` +
+    `${boxes}</div>`;
+  if (opts.onPick) {
+    el.querySelectorAll("[data-gid]").forEach((b) => {
+      b.onclick = () => opts.onPick(b.dataset.gid);
+    });
+  }
+  // 宽度变化超过阈值才重排一次：innerHTML 重写自身也会触发 RO，靠门槛断掉循环；
+  // 重排挪进 rAF（下一帧再动布局），否则 RO 回调内同步改尺寸会刷
+  // 「ResizeObserver loop completed」告警、被全局错误横幅接住吓到用户
+  let raf = 0;
+  const ro = new ResizeObserver(() => {
+    const w = el.clientWidth;
+    if (!w || Math.abs(w - (+el.dataset.w || 0)) < 24) return;
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      el.dataset.w = String(el.clientWidth);
+      mountPipelineGraph(el, nodes, opts);
+    });
+  });
+  el.dataset.w = String(W);
+  ro.observe(el);
 }
 
 async function loadPipelines() {
@@ -5480,21 +5967,29 @@ async function loadPipelines() {
       `<div class="cron-main">
          <span class="cron-title">${escapeHtml(p.name)}</span>
          <span class="cron-sched">${PL_PIPE_STATUS[p.status] || p.status} · 节点 ${done}/${(p.nodes || []).length} · 并发 ${p.concurrency}</span>
-         <span class="pl-nodebar">${(p.nodes || []).map((n) =>
-           `<span class="pl-chip pl-st-${n.status}" title="${escapeHtml(n.title)} · ${PL_NODE_STATUS[n.status] || n.status}">${PL_NODE_MARK[n.status] || "◌"} ${escapeHtml(n.title)}</span>`
-         ).join("")}</span>
+         <div class="pl-graph-mount"></div>
        </div>`;
     const ops = document.createElement("span");
     ops.className = "cron-ops";
     if (p.status === "running") {
       ops.innerHTML = `<button class="cron-op" data-op="stop" title="停止流水线">⏹</button>` +
-        `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
-    } else if (p.status === "draft" || p.status === "cancelled") {
-      ops.innerHTML = `<button class="cron-op" data-op="start" title="启动">▶</button>` +
+        `<button class="cron-op" data-op="dup" title="复制为草稿">⧉</button>` +
         `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
     } else {
-      ops.innerHTML = `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
+      // 草稿/已停止/已完成/有失败都可启动：延展了新节点或重跑失败节点后要能再跑
+      //（没有可运行节点时后端会拒绝并提示，不会空转）
+      ops.innerHTML = `<button class="cron-op" data-op="start" title="启动">▶</button>` +
+        `<button class="cron-op" data-op="dup" title="复制为草稿">⧉</button>` +
+        `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
     }
+    ops.querySelector("[data-op='dup']").onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        const r = await request("pipeline.duplicate", { id: p.id });
+        addNotice(`已复制为草稿「${r.pipeline.name}」，结构与预授权保持一致`);
+      } catch (err) { addNotice("复制失败: " + err.message); }
+      await loadPipelines();
+    };
     const start = ops.querySelector('[data-op="start"]');
     if (start) start.onclick = async (e) => {
       e.stopPropagation();
@@ -5520,41 +6015,105 @@ async function loadPipelines() {
     };
     li.onclick = () => pipelineModal(p);
     ul.appendChild(li);
+    const gbox = li.querySelector(".pl-graph-mount");
+    if (gbox && (p.nodes || []).length) mountPipelineGraph(gbox, p.nodes);
   });
 }
 
 function pipelineModal(p) {
   const box = document.createElement("div");
+  const KIND_BADGE = { task: "⛓ 挂接任务", session: "💬 会话续跑" };
+  const timeoutTxt = (n) => n.kind !== "task"
+    ? (n.timeout_s > 0 ? ` · 超时 ${Math.round(n.timeout_s / 60)} 分钟` : " · 不限时") : "";
   const rows = (p.nodes || []).map((n) => {
     const dep = (n.depends_on || []).map((d) => {
       const dn = (p.nodes || []).find((x) => x.id === d);
       return dn ? dn.title : "#" + d;
     }).join("、");
-    return `<div class="pl-node-view pl-st-${n.status}">
+    const badge = KIND_BADGE[n.kind]
+      ? `<span class="chip">${KIND_BADGE[n.kind]}</span>` : "";
+    const rerun = n.kind !== "task" && n.status !== "running"
+      ? `<button class="rp-mini" data-rerun="${n.id}">↻ 重跑这个节点${n.status === "done" ? "（含下游）" : ""}</button>` : "";
+    const taskNote = n.kind === "task"
+      ? `<div class="dim small">跟随原任务的状态与产出，不占流水线并发；任务本身在「任务」页管理。</div>` : "";
+    const ctl = PL_CONTROL[n.control];
+    const ctlNote = ctl
+      ? `<div class="dim small">${ctl.mark} ${ctl.label}：${ctl.hint}${n.control === "loop" ? `（当前第 ${n.runs || 0}/${n.max_runs} 轮）` : ""}</div>` : "";
+    return `<div class="pl-node-view pl-st-${n.status}" data-nid="${n.id}">
         <div class="pl-node-head">
-          <b>${PL_NODE_MARK[n.status] || "◌"} ${escapeHtml(n.title)}</b>
+          <b>${ctl ? ctl.mark : (PL_NODE_MARK[n.status] || "◌")} ${escapeHtml(n.title)}</b>
+          ${badge}
+          ${ctl ? `<span class="chip">${ctl.label}</span>` : ""}
           <span class="chip ${n.status === "done" ? "safe-mark" : n.status === "error" ? "danger-mark" : n.status === "running" ? "write-mark" : ""}">${PL_NODE_STATUS[n.status] || n.status}</span>
         </div>
+        ${ctlNote}
+        ${taskNote}
         ${dep ? `<div class="dim small">依赖：${escapeHtml(dep)}</div>` : ""}
         ${n.allowed_tools && n.allowed_tools.length ? `<div class="dim small">预授权：${escapeHtml(n.allowed_tools.join("、"))}</div>` : ""}
+        ${n.kind !== "task" ? `<div class="dim small">运行方式：无人值守${escapeHtml(timeoutTxt(n))} · 已尝试 ${n.runs || 0} 次</div>` : ""}
         ${n.last_error ? `<div class="pl-node-err">✗ ${escapeHtml(n.last_error)}</div>` : ""}
         ${n.result ? `<div class="pl-node-result">${escapeHtml(n.result.length > 400 ? n.result.slice(0, 400) + "…" : n.result)}</div>` : ""}
-        ${(n.status === "error" || n.status === "cancelled")
-          ? `<button class="rp-mini" data-rerun="${n.id}">↻ 重跑这个节点</button>` : ""}
+        ${rerun}
       </div>`;
   }).join("");
   box.innerHTML = `
     <div class="cron-fields">
       <p class="dim small">流水线「${escapeHtml(p.name)}」· ${PL_PIPE_STATUS[p.status] || p.status} ·
         每个节点是一次无人值守运行（预授权名单外的写/执行自动拒绝）；上游完成后下游自动开始，产出会注入下游的指令里。</p>
+      <div class="dim small" id="pl-usage" style="display:flex;gap:12px;align-items:center">
+        <span>用量统计中…</span>
+        <span class="spacer"></span>
+        <button class="rp-mini" data-op="export">⇩ 导出 JSON</button>
+      </div>
+      <div id="pl-graph-wrap" class="pl-graph-wrap"></div>
       ${rows || '<div class="dim small">（没有节点）</div>'}
       <p class="dim small">要改节点/指令：删除后重建（Agent 对话里说一句也能帮你重排）。</p>
     </div>`;
+  // 用量汇总 + 导出：现拉一次详情（列表接口不带用量，避免每次刷新都聚合）
+  request("pipeline.get", { id: p.id }).then((r) => {
+    const u = r.usage || {};
+    const el = box.querySelector("#pl-usage");
+    if (el) el.firstElementChild.textContent =
+      `已用 tokens：输入 ${(u.in_tokens || 0).toLocaleString()} / 输出 ${(u.out_tokens || 0).toLocaleString()}`;
+  }).catch(() => {
+    const el = box.querySelector("#pl-usage");
+    if (el) el.firstElementChild.textContent = "用量统计不可用";
+  });
+  box.querySelector("[data-op='export']").onclick = async () => {
+    try {
+      const r = await request("pipeline.export", { id: p.id });
+      const blob = new Blob([JSON.stringify(r.export, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${p.name.replace(/[\\/:*?"<>|]/g, "_")}.pipeline.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) { addNotice("导出失败: " + err.message); }
+  };
+  // 依赖图：点节点跳到对应详情卡并高亮一下
+  const graphBox = box.querySelector("#pl-graph-wrap");
+  mountPipelineGraph(graphBox, p.nodes || [], {
+    onPick: (id) => {
+      const card = box.querySelector(`.pl-node-view[data-nid="${id}"]`);
+      if (!card) return;
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
+      card.classList.add("flash");
+      setTimeout(() => card.classList.remove("flash"), 1200);
+    },
+  });
   box.querySelectorAll("[data-rerun]").forEach((btn) => {
     btn.onclick = async () => {
       try {
-        await request("pipeline.node_rerun", { id: Number(btn.dataset.rerun) });
-        addNotice("节点已重新排队，依赖满足后自动运行");
+        const r = await request("pipeline.node_rerun", { id: Number(btn.dataset.rerun) });
+        if (r.needs_confirm) {
+          // done 节点重跑：下游产出基于旧结果，明确问一句再级联
+          const names = (r.downstream || []).join("、");
+          if (!confirm(`下游 ${r.downstream.length} 个节点（${names}）的产出基于它的旧结果。\n一并重跑这些下游吗？（取消 = 仅重跑本节点，下游保持旧产出）`)) return;
+          await request("pipeline.node_rerun", { id: Number(btn.dataset.rerun), cascade: true });
+          addNotice("节点与全部下游已重新排队，依赖满足后自动运行");
+        } else {
+          addNotice("节点已重新排队，依赖满足后自动运行");
+        }
       } catch (err) { addNotice("重跑失败: " + err.message); }
       hideModal();
       await loadPipelines();
@@ -5563,7 +6122,7 @@ function pipelineModal(p) {
   // 弹窗只有一个确认键：按状态给主操作（草稿/已停止 → 启动；运行中 → 停止；其余 → 关闭）
   let okLabel = "关闭";
   let onOk = async () => {};
-  if (p.status === "draft" || p.status === "cancelled") {
+  if (p.status !== "running") {
     okLabel = "▶ 启动";
     onOk = async () => {
       await request("pipeline.start", { id: p.id });
@@ -5609,17 +6168,43 @@ function pipelineCreateModal() {
     row.innerHTML = `
       <div class="pl-node-edit-head">
         <b>节点 ${idx + 1}</b>
+        <select class="pl-node-type" title="节点的运行方式：普通=跑一步任务；条件门=判断走不走；终止=到此截停；迭代=反复打磨">
+          <option value="">普通任务</option>
+          <option value="gate">条件门（判断走不走）</option>
+          <option value="stop">终止（到此截停）</option>
+          <option value="loop">迭代（反复打磨）</option>
+        </select>
         <span class="spacer"></span>
         ${idx > 0 ? '<button class="rp-mini pl-del-node" type="button" title="删除这个节点">✕</button>' : ""}
       </div>
       <input class="modal-input pl-node-title" type="text" placeholder="节点名，例如：实现登录接口">
       <textarea class="modal-input pl-node-prompt" rows="2" placeholder="这一步的完整指令（自包含，例如：在 src/auth 下实现登录接口并写测试）"></textarea>
+      <label class="pl-retry-row dim small">失败自动重试 <input type="number" class="pl-node-retries" min="0" max="3" value="0"> 次</label>
+      <label class="pl-loop-row dim small" hidden>最多迭代 <input type="number" class="pl-node-loopmax" min="2" max="10" value="3"> 轮（完成时把回复第一行写成 DONE）</label>
+      <label class="pl-timeout-row dim small">超时 <input type="number" class="pl-node-timeout" min="0" max="1440" value="60"> 分钟（0 = 不限时；超时按失败重试处理，防卡死）</label>
       ${idx > 0 ? `<div class="pl-deps">依赖（完成后才运行本节点）：
         ${priorDeps.map((t, i) => `<label class="pl-dep"><input type="checkbox" value="${i}" checked>${escapeHtml(t)}</label>`).join("")}
       </div>` : ""}
       <details class="pl-tools"><summary>预授权工具（默认仅只读）</summary>
         <div class="pl-tools-list">${plToolPicker([])}</div>
       </details>`;
+    const typeSel = row.querySelector(".pl-node-type");
+    const promptEl = row.querySelector(".pl-node-prompt");
+    const promptPh = "这一步的完整指令（自包含，例如：在 src/auth 下实现登录接口并写测试）";
+    typeSel.onchange = () => {
+      const t = typeSel.value;
+      promptEl.hidden = t === "stop"; // 终止节点不执行任务，不需要指令
+      row.querySelector(".pl-retry-row").hidden = t !== "";
+      row.querySelector(".pl-loop-row").hidden = t !== "loop";
+      row.querySelector(".pl-timeout-row").hidden = t === "stop"; // 终止节点不派 Agent，无超时
+      promptEl.placeholder = t === "gate"
+        ? "描述要检查的条件。Agent 会在回复第一行输出 PASS（放行下游）或 FAIL（下游跳过），例如：检查 dist 目录是否存在"
+        : t === "loop"
+          ? "描述要反复打磨的任务。每轮结束会带着产出继续；完成时让 Agent 把回复第一行写成 DONE"
+          : t === "stop"
+            ? "（终止节点不执行任务：上游完成后即在此截停整条流水线）"
+            : promptPh;
+    };
     const del = row.querySelector(".pl-del-node");
     if (del) del.onclick = () => { row.remove(); rebuildTitles(); };
     nodesBox.appendChild(row);
@@ -5637,11 +6222,23 @@ function pipelineCreateModal() {
     const concurrency = Math.max(1, Math.min(4, Number(box.querySelector("#pl-conc").value) || 2));
     const nodes = [...nodesBox.children].map((row, i) => {
       const title = row.querySelector(".pl-node-title").value.trim();
-      const prompt = row.querySelector(".pl-node-prompt").value.trim();
-      if (!prompt) throw new Error(`节点 ${i + 1} 的指令不能为空`);
+      const control = row.querySelector(".pl-node-type").value;
+      const prompt = row.querySelector(".pl-node-prompt").hidden
+        ? "" : row.querySelector(".pl-node-prompt").value.trim();
+      if (!prompt && control !== "stop") throw new Error(`节点 ${i + 1} 的指令不能为空`);
       const after = [...row.querySelectorAll(".pl-dep input:checked")].map((el) => Number(el.value));
       const allowed_tools = [...row.querySelectorAll("input[data-tool]:checked")].map((el) => el.dataset.tool);
-      return { title: title || `节点 ${i + 1}`, prompt, after, allowed_tools };
+      let max_runs = 1;
+      if (control === "loop") {
+        max_runs = Math.max(2, Math.min(10, Number(row.querySelector(".pl-node-loopmax").value) || 3));
+      } else if (!control) {
+        max_runs = Math.max(1, Math.min(4, (Number(row.querySelector(".pl-node-retries").value) || 0) + 1));
+      }
+      // 超时分钟转秒；终止节点不派 Agent，固定 0（不限时也无意义）
+      const timeoutMin = control === "stop"
+        ? 0 : Math.max(0, Math.min(1440, Number(row.querySelector(".pl-node-timeout").value) || 0));
+      return { title: title || `节点 ${i + 1}`, prompt, after, allowed_tools, control, max_runs,
+        timeout_s: timeoutMin * 60 };
     });
     await request("pipeline.create", { name: name || "未命名流水线", concurrency, nodes });
     await loadPipelines();
@@ -5650,6 +6247,189 @@ function pipelineCreateModal() {
 }
 
 document.getElementById("btn-pipeline-add").onclick = () => pipelineCreateModal();
+document.getElementById("btn-pipeline-import").onclick = () => pipelineImportModal({});
+async function pipelineImportModal(preset) {
+  const source = preset.source || "cron";
+  // 三类来源的候选一次性并行拉取（选中的那个才显示，失败静默降级为空）
+  const [crons, tasks, sessions, pipes] = await Promise.all([
+    request("cron.list").then((r) => r.tasks || []).catch(() => []),
+    request("tasks.list").then((r) => (r.tasks || []).slice(0, 30)).catch(() => []),
+    request("session.list").then((r) => (r.sessions || []).slice(0, 30)).catch(() => []),
+    // 已结束的流水线也可以纳入新节点做延展（启动时按依赖继续调度）
+    request("pipeline.list").then((r) => r.pipelines || []).catch(() => []),
+  ]);
+  const box = document.createElement("div");
+  const opt = (v, label) => `<option value="${escapeHtml(String(v))}">${escapeHtml(label)}</option>`;
+  const cronOptions = crons.map((c) =>
+    opt(c.id, `${c.enabled ? "" : "（已停用）"}${c.name} · ${c.prompt.slice(0, 30)}`)).join("");
+  const srcOptions = {
+    cron: cronOptions,
+    task: tasks.map((t) => opt(t.id, `[${t.status === "done" ? "已完成" : t.status === "running" ? "运行中" : t.status === "error" ? "失败" : "已取消"}] ${t.prompt.slice(0, 42)}`)).join(""),
+    session: sessions.map((s) => opt(s.id, (s.title || s.id).slice(0, 42))).join(""),
+  };
+  box.innerHTML = `
+    <div class="cron-fields">
+      <label>纳入什么</label>
+      <div class="pl-src">
+        <label class="pl-dep"><input type="radio" name="pl-src" value="cron" ${source === "cron" ? "checked" : ""}> 定时任务（复制指令与预授权）</label>
+        <label class="pl-dep"><input type="radio" name="pl-src" value="task" ${source === "task" ? "checked" : ""}> 任务簿任务（跟随它在跑的状态与产出）</label>
+        <label class="pl-dep"><input type="radio" name="pl-src" value="session" ${source === "session" ? "checked" : ""}> 已有会话（在原会话里续跑）</label>
+        <label class="pl-dep"><input type="radio" name="pl-src" value="file" ${source === "file" ? "checked" : ""}> 导出文件（从 JSON 恢复整条流水线）</label>
+      </div>
+      <label id="pl-src-label">选定时任务</label>
+      <select id="pl-src-obj" class="modal-input cron-select"></select>
+      <div id="pl-file-wrap" class="hidden">
+        <label>选择导出的 JSON 文件</label>
+        <input id="pl-file-input" class="modal-input" type="file" accept=".json,application/json">
+        <div id="pl-file-name" class="dim small">恢复为草稿，启动前请检查各节点的预授权。</div>
+      </div>
+      <label id="pl-target-label">放进哪条流水线</label>
+      <select id="pl-target" class="modal-input cron-select">
+        <option value="0">（新建流水线）</option>
+        ${pipes.map((p) => opt(p.id, `${p.name}（${PL_PIPE_STATUS[p.status] || p.status}，${(p.nodes || []).length} 节点）`)).join("")}
+      </select>
+      <div id="pl-newname-wrap" class="hidden">
+        <label>新流水线名</label>
+        <input id="pl-newname" class="modal-input" type="text" placeholder="例如：登录模块开发">
+      </div>
+      <div id="pl-prompt-wrap" class="hidden">
+        <label>这一轮要它做什么（在该会话已有的上下文里继续）</label>
+        <textarea id="pl-session-prompt" class="modal-input" rows="2" placeholder="例如：结合刚才的实现，把接口文档补全"></textarea>
+      </div>
+      <div id="pl-deps-wrap" class="hidden">
+        <label>等哪些节点完成后再跑（不勾 = 立即可跑）</label>
+        <div id="pl-deps-box" class="pl-deps"></div>
+      </div>
+      <label class="pl-dep" id="pl-disable-wrap"><input type="checkbox" id="pl-disable-cron"> 导入后停用原定时任务（不再按周期独立运行）</label>
+      <p class="dim small">安全说明：纳入的节点同样无人值守执行——只读工具放行，其余按节点预授权名单，
+        名单外自动拒绝。挂接节点跟随原任务、不占并发额度；会话节点在该会话正被使用时会等空闲。</p>
+    </div>`;
+  const q = (sel) => box.querySelector(sel);
+  const srcObjs = { cron: srcOptions.cron, task: srcOptions.task, session: srcOptions.session };
+  const srcLabels = { cron: "选定时任务", task: "选任务簿任务", session: "选会话" };
+  const curSource = () => box.querySelector('input[name="pl-src"]:checked').value;
+  const curObjVal = () => q("#pl-src-obj").value;
+  let fileExport = null; // 「导出文件」来源：解析后的 JSON（提交时交给 pipeline.import）
+  const renderSrc = () => {
+    const s = curSource();
+    // 「导出文件」恢复的是整条流水线：不选对象、不选目标流水线，只选文件
+    const isFile = s === "file";
+    q("#pl-src-label").classList.toggle("hidden", isFile);
+    q("#pl-src-obj").classList.toggle("hidden", isFile);
+    q("#pl-file-wrap").classList.toggle("hidden", !isFile);
+    q("#pl-target-label").classList.toggle("hidden", isFile);
+    q("#pl-target").classList.toggle("hidden", isFile);
+    if (isFile) {
+      q("#pl-newname-wrap").classList.add("hidden");
+      q("#pl-deps-wrap").classList.add("hidden");
+      q("#pl-prompt-wrap").classList.add("hidden");
+      q("#pl-disable-wrap").classList.add("hidden");
+      return;
+    }
+    q("#pl-src-obj").innerHTML = srcObjs[s];
+    q("#pl-src-label").textContent = srcLabels[s];
+    q("#pl-src-obj").disabled = !srcObjs[s];
+    if (!srcObjs[s]) q("#pl-src-obj").innerHTML = `<option value="">（暂时没有可纳入的${srcLabels[s].slice(1)}）</option>`;
+    // 预设来源对象（从任务簿/定时任务行的 ⛓ 进来）
+    if (preset.cron_id && s === "cron") q("#pl-src-obj").value = String(preset.cron_id);
+    if (preset.task_id && s === "task") q("#pl-src-obj").value = String(preset.task_id);
+    if (preset.session_id && s === "session") q("#pl-src-obj").value = String(preset.session_id);
+    q("#pl-prompt-wrap").classList.toggle("hidden", s !== "session");
+    q("#pl-disable-wrap").classList.toggle("hidden", s !== "cron");
+    syncTargetUi();
+  };
+  const renderDeps = () => {
+    const target = q("#pl-target").value;
+    const wrap = q("#pl-deps-wrap");
+    const p = pipes.find((x) => String(x.id) === target);
+    if (!p || !(p.nodes || []).length) { wrap.classList.add("hidden"); return; }
+    wrap.classList.remove("hidden");
+    q("#pl-deps-box").innerHTML = p.nodes
+      .map((n) => `<label class="pl-dep"><input type="checkbox" value="${n.id}">${escapeHtml(n.title.slice(0, 24))}</label>`)
+      .join("");
+  };
+  const syncTargetUi = () => {
+    const isNew = q("#pl-target").value === "0";
+    q("#pl-newname-wrap").classList.toggle("hidden", !isNew);
+    if (isNew) q("#pl-deps-wrap").classList.add("hidden");
+    else renderDeps();
+  };
+  box.querySelectorAll('input[name="pl-src"]').forEach((el) => el.addEventListener("change", renderSrc));
+  q("#pl-target").addEventListener("change", syncTargetUi);
+  q("#pl-file-input").addEventListener("change", async () => {
+    const file = q("#pl-file-input").files && q("#pl-file-input").files[0];
+    const nameEl = q("#pl-file-name");
+    fileExport = null;
+    if (!file) { nameEl.textContent = "恢复为草稿，启动前请检查各节点的预授权。"; return; }
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (!parsed || parsed.format !== "skysheep-pipeline") throw new Error("不是 SkySheep 流水线导出文件");
+      fileExport = parsed;
+      nameEl.textContent = `✓ ${file.name}：${(parsed.nodes || []).length} 个节点`;
+    } catch (err) {
+      nameEl.textContent = "✗ " + err.message;
+    }
+  });
+  renderSrc();
+
+  showModal("导入到任务编排", box, async () => {
+    const s = curSource();
+    if (s === "file") {
+      // 从导出 JSON 恢复整条流水线（草稿态，启动仍由用户在面板确认预授权）
+      if (!fileExport) throw new Error("先选择一个 SkySheep 导出的 JSON 文件");
+      const r = await request("pipeline.import", { export: fileExport });
+      await loadPipelines();
+      addNotice(`已导入流水线「${r.pipeline.name}」（草稿）。检查各节点的预授权后点 ▶ 启动。`);
+      return;
+    }
+    const objId = curObjVal();
+    if (!objId) throw new Error("先选一个要纳入的对象");
+    const targetId = Number(q("#pl-target").value);
+    const dependsOn = [...box.querySelectorAll("#pl-deps-box input:checked")].map((el) => Number(el.value));
+    let targetLabel;
+    if (targetId === 0) {
+      // 新建流水线：直接 create 一个带该节点的流水线（create 支持 task_id/session_id）
+      const name = q("#pl-newname").value.trim();
+      let node;
+      if (s === "cron") {
+        const c = crons.find((x) => String(x.id) === objId) || {};
+        if (!c.prompt) throw new Error("该定时任务没有指令内容");
+        node = {
+          title: `定时任务：${c.name || ""}`.trim(),
+          prompt: c.prompt, allowed_tools: c.allowed_tools || [],
+        };
+      } else if (s === "task") {
+        node = { task_id: String(objId) };
+      } else {
+        const prompt = q("#pl-session-prompt").value.trim();
+        if (!prompt) throw new Error("会话节点要写清这一轮要做什么");
+        node = { session_id: String(objId), prompt };
+      }
+      await request("pipeline.create", { name: name || "未命名流水线", nodes: [node] });
+      targetLabel = name || "未命名流水线";
+    } else if (s === "cron") {
+      const r = await request("pipeline.import_cron", {
+        id: targetId, cron_id: Number(objId), depends_on: dependsOn,
+        disable_source: q("#pl-disable-cron").checked,
+      });
+      targetLabel = r.pipeline.name;
+    } else if (s === "task") {
+      const r = await request("pipeline.attach", {
+        id: targetId, task_id: String(objId), depends_on: dependsOn,
+      });
+      targetLabel = r.pipeline.name;
+    } else {
+      const prompt = q("#pl-session-prompt").value.trim();
+      if (!prompt) throw new Error("会话节点要写清这一轮要做什么");
+      const r = await request("pipeline.add_session", {
+        id: targetId, session_id: String(objId), prompt, depends_on: dependsOn,
+      });
+      targetLabel = r.pipeline.name;
+    }
+    await loadPipelines();
+    addNotice(`已纳入流水线「${targetLabel}」（草稿/运行中都会按依赖自动调度）`);
+  }, "纳入");
+}
 
 // 到点提醒横幅（后台循环推送 schedule_reminder 事件）
 function showAgendaReminder(item) {
@@ -5704,6 +6484,17 @@ async function loadMemoryPanel(force = false) {
   } catch (e) {
     memoryStatus("✗ 读取失败：" + e.message, false);
   }
+  // 项目记忆的定期整理开关（就是设置页移过来的那个）：跟随后台配置回填
+  try {
+    const m = (await request("memory.get")).maintain || {};
+    maintainState = {
+      global_enabled: m.global_enabled !== false,
+      project_enabled: m.project_enabled !== false,
+      interval_hours: m.interval_hours || 168,
+    };
+    const t = document.getElementById("rp-memory-maintain");
+    if (t) t.checked = maintainState.project_enabled;
+  } catch (e) { /* 拉不到就保持默认勾选，失败在切换时才暴露 */ }
 }
 
 async function saveMemoryPanel() {
@@ -5716,6 +6507,28 @@ async function saveMemoryPanel() {
   }
 }
 document.getElementById("memory-save").onclick = () => { saveMemoryPanel(); };
+// 项目记忆定期整理开关（设置页移入）：切换即保存；全局开关与周期仍归设置页管，
+// 这里透传后台现值，避免单独切这一个开关时覆盖其他配置
+const rpMemoryMaintain = document.getElementById("rp-memory-maintain");
+if (rpMemoryMaintain) {
+  rpMemoryMaintain.addEventListener("change", async (e) => {
+    const el = e.target;
+    try {
+      const r = await request("memory.maintain_save", {
+        global_enabled: maintainState.global_enabled,
+        project_enabled: el.checked,
+        interval_hours: maintainState.interval_hours,
+      });
+      maintainState = { global_enabled: r.global_enabled, project_enabled: r.project_enabled,
+        interval_hours: r.interval_hours };
+      el.checked = !!r.project_enabled; // 以落库值为准
+      memoryStatus(`✓ 项目记忆定期整理已${r.project_enabled ? "开启" : "关闭"}（周期跟全局设置）`);
+    } catch (err) {
+      el.checked = !el.checked; // 失败回拨
+      memoryStatus("✗ 保存失败：" + err.message, false);
+    }
+  });
+}
 document.getElementById("memory-reload").onclick = () => { loadMemoryPanel(true); };
 // Ctrl+S 在面板内直接保存（不劫持全局）
 rpMemoryText.addEventListener("keydown", (e) => {
@@ -5737,12 +6550,12 @@ async function projectModal() {
       <span class="mono-path">${escapeHtml(snap.working_dir)}</span></p>
     <p class="dim small">Agent 的文件读写、命令执行都发生在这个文件夹里。切换后白名单、项目记忆、项目技能也会跟着切换到新项目。</p>
     ${others.length ? '<div class="section"><h3>最近的项目</h3><ul class="list" id="proj-list"></ul></div>' : ""}
-    <div class="pr-fields" style="margin-top:10px">
+    <div class="pr-fields">
       <label>切换到其他文件夹</label>
       <div class="model-line">
-        <input id="proj-path-input" autocomplete="off"
+        <input id="proj-path-input" autocomplete="off" spellcheck="false"
           placeholder="${canPick ? "点右侧按钮选择文件夹，或直接粘贴完整路径" : "粘贴文件夹完整路径，如 D:\\\\works\\\\demo"}">
-        ${canPick ? '<button id="proj-pick" class="btn-ghost" style="flex-shrink:0">📁 选择</button>' : ""}
+        ${canPick ? '<button id="proj-pick" class="btn-ghost">' + FOLDER_SVG + '选择</button>' : ""}
       </div>
     </div>`;
   const input = () => box.querySelector("#proj-path-input").value.trim();
@@ -5827,7 +6640,7 @@ function showSettingsPage(target) {
   if (target === "advanced") { renderAdvancedCfg().catch(() => {}); renderHooksCfg(); }
   if (target === "about") loadBackups().catch(() => {});
 }
-document.querySelectorAll("#settings-nav li").forEach((li) => {
+document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
   li.onclick = () => {
     document.body.classList.remove("sidebar-open"); // 手机：切换子页前先收回侧栏抽屉
     showSettingsPage(li.dataset.target);
@@ -5839,6 +6652,7 @@ let providerCfg = null;   // 最近一次拉取到的服务清单
 let bootSnap = null;      // 最近一次 boot 快照（模板里要用工作目录等）
 let availCacheModels = null; // 详情页探测到的可用模型（切视图不丢）
 let availNoteState = null;   // 可用模型面板的提示状态
+let availListCollapsed = false; // 检测到的模型列表是否收起（上百行时给页面让地方）
 let detailOpen = false;   // 是否正停在某个服务的配置页
 let detailName = "";
 let providerTab = "preset"; // 列表页签：preset=默认（内置预设）、custom=自定义（用户新增）
@@ -5977,6 +6791,7 @@ function renderProviderList() {
 function openProviderDetail(name) {
   detailOpen = true;
   detailName = name;
+  availListCollapsed = false; // 每次进详情默认展开
   document.getElementById("provider-list-view").hidden = true;
   document.getElementById("provider-detail").hidden = false;
   document.getElementById("btn-add-provider").hidden = true;
@@ -6095,10 +6910,13 @@ function renderProviderDetail(name) {
       <button class="btn-ghost fetch" type="button" title="用上面填的地址和 Key 检测连接并拉取模型列表；地址或 Key 不对时在这里给出原因">⬇ 检测并获取模型</button>
     </div>
     <div class="flat-panel">
-      <div class="panel-note" id="avail-note">还没有拉取：点右上角「检测并获取模型」，或在下面手动填写模型 ID。</div>
+      <div class="avail-note-row">
+        <div class="panel-note" id="avail-note">还没有拉取：点右上角「检测并获取模型」，或在下面手动填写模型 ID。</div>
+        <button id="avail-toggle" class="link-btn hidden" type="button"></button>
+      </div>
       <div id="avail-list"></div>
       <div class="add-row">
-        <input data-f="manual_model" placeholder="模型 ID（如 deepseek-chat / glm-5.3）" autocomplete="off">
+        <input data-f="manual_model" autocomplete="off" title="手动填写模型 ID（如 deepseek-chat / glm-5.3），回车或点 ＋ 添加">
         <button class="btn-ghost add-manual" type="button" title="把它设为该服务的启用模型">＋</button>
       </div>
     </div>
@@ -6149,6 +6967,15 @@ function renderProviderDetail(name) {
     list.querySelectorAll(".avail-model:not(.on)").forEach((el) => {
       el.onclick = () => setEnabledModel(el.dataset.model);
     });
+    // 收起 / 展开同步：有检测结果才给按钮；收起时列表整块隐藏（重新拉取也保持）
+    const toggleBtn = document.getElementById("avail-toggle");
+    if (toggleBtn) {
+      const has = (availCacheModels || []).length > 0;
+      toggleBtn.classList.toggle("hidden", !has);
+      toggleBtn.textContent = availListCollapsed ? "展开 ▾" : "收起 ▴";
+      toggleBtn.title = availListCollapsed ? "展开检测到的模型列表" : "收起检测到的模型列表";
+    }
+    list.classList.toggle("hidden", availListCollapsed);
     if (availNoteState) {
       const el = document.getElementById("avail-note");
       el.textContent = availNoteState.text;
@@ -6259,6 +7086,15 @@ function renderProviderDetail(name) {
     const v = input.value.trim();
     if (v) setEnabledModel(v);
     input.value = "";
+  };
+  // 回车 = 点 ＋：手动填模型的输入框不再只认鼠标
+  q('input[data-f="manual_model"]').addEventListener("keydown", (e) => {
+    if (e.key === "Enter") q(".add-manual").click();
+  });
+  // 收起 / 展开：检测列表可能上百行，收起给页面让地方（每次进详情默认展开）
+  q("#avail-toggle").onclick = () => {
+    availListCollapsed = !availListCollapsed;
+    renderAvailPanel(); // 复用同一处同步逻辑（列表显隐 + 按钮文案）
   };
 
   // 启用开关：关闭 = 从列表隐藏（配置保留），自动回到服务列表
@@ -7457,6 +8293,23 @@ const rightPanel = document.getElementById("right-panel");
 const rpTabs = document.getElementById("rp-tabs");
 const rpResizer = document.getElementById("rp-resizer");
 const btnTabs = document.getElementById("btn-tabs");
+
+// 标签头是真正的 tablist：左右方向键在标签间移动焦点并激活（roving focus，
+// 焦点不在标签上时从端头进）；＋按钮不参与 tab 语义，仍用 Tab 键到达
+rpTabs.setAttribute("role", "tablist");
+rpTabs.setAttribute("aria-label", "右侧面板标签");
+rpTabs.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  const tabs = [...rpTabs.querySelectorAll(".rp-tab")];
+  if (!tabs.length) return;
+  const idx = tabs.indexOf(document.activeElement);
+  const next = idx === -1
+    ? (e.key === "ArrowRight" ? 0 : tabs.length - 1)
+    : e.key === "ArrowRight" ? (idx + 1) % tabs.length : (idx - 1 + tabs.length) % tabs.length;
+  e.preventDefault();
+  tabs[next].focus();
+  activateRightTab(tabs[next].dataset.tabId);
+});
 btnTabs.innerHTML = RP_ICONS.panelClosed;
 
 function renderRightPanel() {
@@ -7471,6 +8324,9 @@ function renderRightPanel() {
   rightTabs.forEach((id) => {
     const b = document.createElement("button");
     b.className = "rp-tab" + (id === rightActive ? " active" : "");
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", id === rightActive ? "true" : "false");
+    b.dataset.tabId = id;
     b.title = TAB_META[id].title;
     b.innerHTML = RP_ICONS[id] + "<span>" + TAB_META[id].title + '</span><span class="rp-x" title="关闭标签">✕</span>';
     b.querySelector(".rp-x").onclick = (e) => { e.stopPropagation(); closeRightTab(id); };
@@ -7602,6 +8458,55 @@ btnTabs.onclick = () => {
   renderRightPanel();
   persistRightCollapsed();
 };
+
+// —— 左侧栏折叠：标题行右缘的「«」收起，折叠后由窄栏（mini rail）的「»」展开（Ctrl+B 同效）。
+// 收起状态落盘 ui.json 的 left_collapsed（后端白名单已加）；手机上侧栏是覆盖抽屉，
+// 由顶栏 ☰ 管理，折叠钮在窄屏 CSS 里隐藏，快捷键与恢复逻辑同样不参与——
+// 强制 leftCollapsed = false，避免抽屉被折叠态吞掉。
+let leftCollapsed = false;
+function applyLeftCollapsed() {
+  document.body.classList.toggle("left-collapsed", leftCollapsed);
+  // 滑出的一侧不参与焦点与点击：inert 比 display:none 温和，过渡期间不会点到看不见的按钮
+  const rail = document.getElementById("sb-rail");
+  if (rail) rail.inert = !leftCollapsed;
+  const sidebar = document.getElementById("sidebar");
+  if (sidebar) sidebar.inert = leftCollapsed;
+}
+function persistLeftCollapsed() {
+  if (NARROW_MQ.matches) return;
+  saveUiPrefs({ left_collapsed: leftCollapsed ? 1 : 0 });
+}
+function toggleLeftSidebar() {
+  if (NARROW_MQ.matches) return; // 手机抽屉有自己的开关（☰）
+  leftCollapsed = !leftCollapsed;
+  applyLeftCollapsed();
+  persistLeftCollapsed();
+}
+document.getElementById("btn-left-collapse").onclick = toggleLeftSidebar;
+// 窄栏：展开钮与折叠钮同一对；新建 / 搜索照侧栏同名功能走；会话快捷在
+// renderRailSessions 里各自接管。停在设置页时先回对话再看结果。
+document.getElementById("rail-expand").onclick = toggleLeftSidebar;
+document.getElementById("rail-new").onclick = () => {
+  if (settingsOpen) backToChat();
+  startNewTab();
+  refreshSessions();
+};
+document.getElementById("rail-search").onclick = () => {
+  if (settingsOpen) backToChat();
+  if (leftCollapsed) toggleLeftSidebar();
+  requestAnimationFrame(() => {
+    const el = document.getElementById("session-search");
+    if (el) { el.focus(); el.select(); }
+  });
+};
+// 窄栏功能导航六件套：与侧栏导航项同一套动作（openRightTab 打开右侧面板标签）；
+// 停在设置页时先回对话，别让面板开在看不见的地方。
+document.querySelectorAll("#sb-rail [data-rail-act]").forEach((btn) => {
+  btn.onclick = () => {
+    if (settingsOpen) backToChat();
+    openRightTab(btn.dataset.railAct);
+  };
+});
 
 // —— 终端：底部停靠面板，每个标签一个常驻 PowerShell（ConPTY 真会话）——
 // 前端用 xterm.js（vendor/）渲染：提示符、ANSI 颜色、Ctrl+C、交互程序都真实可用；
@@ -8259,9 +9164,14 @@ async function loadTasks() {
       item.innerHTML =
         `<div class="task-head"><b>${escapeHtml(t.agent_type)}</b>` +
         (tk ? `<span class="task-tokens">≈${fmtTokens(tk)}</span>` : "") +
-        `<span class="task-status">${escapeHtml(st)}</span></div>` +
+        `<span class="task-status">${escapeHtml(st)}</span>` +
+        `<button class="cron-op" data-op="pipeline" title="纳入任务编排（挂接为流水线节点）">⛓</button></div>` +
         `<div class="task-prompt">${escapeHtml(t.prompt)}</div>` +
         (t.result ? `<div class="task-result">${escapeHtml(t.result.slice(0, 300))}</div>` : "");
+      item.querySelector('[data-op="pipeline"]').onclick = async (e) => {
+        e.stopPropagation();
+        await pipelineImportModal({ source: "task", task_id: t.id });
+      };
       item.onclick = () => openTaskDetail(t.id);
       ul.appendChild(item);
     });
@@ -8466,10 +9376,15 @@ async function initUiPrefs() {
   // 系统通知开关（默认开）
   uiNotifyOn = prefs.notify == null ? true : prefs.notify === 1;
   renderNotifyToggle();
-  // 分级权限模式（1 = 自动允许写入，仅工作目录内；后端 setup 已把档位应用到 gate，这里只同步界面）
-  renderAcceptSwitch(prefs.accept_edits === 1);
+  // 分级权限模式（0=安全执行 1=自动编辑 2=完全访问；后端 setup 已把档位应用到 gate，这里只同步界面）
+  renderAcceptSwitch(prefs.accept_edits === 2 ? "full_access" : prefs.accept_edits === 1 ? "accept_edits" : "confirm");
   // 主题（auto | 主题 id，默认 auto 跟随系统；旧版 light/dark 映射到纸墨/夜墨）
   applyThemeMode(normalizeThemePref(prefs.theme), false);
+  // 侧栏呈现形式（classic=原两区 | grouped=按项目分组）。boot 的首渲染可能已按
+  // 默认的 classic 画过一帧，是分组就再补渲染一次
+  sidebarView = prefs.sidebar_view === "grouped" ? "grouped" : "classic";
+  applySidebarView();
+  if (sidebarView === "grouped") refreshSessions();
   // 对话区宠物开关（默认显示）+ 横向落点（pet_x；纵向有重力，总是落在底部）
   petOn = prefs.pet == null ? true : prefs.pet === 1;
   renderPetToggle();
@@ -8490,6 +9405,13 @@ async function initUiPrefs() {
   if (NARROW_MQ.matches) rightCollapsed = true; // 手机启动一律收起覆盖抽屉，别让面板盖住对话区
   renderRightPanel();
   if (rightActive === "ext" && !rightCollapsed) openExtPanel(); // 上次停在 MCP/Skills：把卡片搬进面板
+  // 恢复左侧栏折叠态（手机不参与：抽屉由 ☰ 管理，折叠恒为展开）。
+  // 恢复在无过渡下完成：启动直接呈现目标状态，不重播「侧栏滑出」动画。
+  document.body.classList.add("ui-anim-off");
+  leftCollapsed = prefs.left_collapsed === 1 && !NARROW_MQ.matches;
+  applyLeftCollapsed();
+  void document.body.offsetWidth; // 强制回流：让折叠态在禁过渡下立即定型
+  requestAnimationFrame(() => document.body.classList.remove("ui-anim-off"));
 }
 
 function setupResizer(el, key, compute) {
@@ -8642,12 +9564,40 @@ function openHtmlPreview(relPath) {
 }
 
 // ---------- 设置 · 全局记忆 ----------
+// 定期整理的后台状态缓存：设置页只保留全局开关与周期，项目开关已移到右面板；
+// 保存时 project_enabled 必须传「当前真实值」而不是 undefined，否则会把项目整理误关
+let maintainState = { global_enabled: true, project_enabled: true, interval_hours: 168 };
 async function loadMemoryPage() {
   try {
     const r = await request("memory.get");
     document.getElementById("memory-text").value = r.text || "";
     const t = document.getElementById("memory-digest-toggle");
     if (t) t.checked = !!r.digest_enabled;
+    const m = r.maintain || {};
+    maintainState = {
+      global_enabled: m.global_enabled !== false,
+      project_enabled: m.project_enabled !== false,
+      interval_hours: m.interval_hours || 168,
+    };
+    const g = document.getElementById("memory-maintain-global");
+    if (g) g.checked = maintainState.global_enabled;
+    const sel = document.getElementById("memory-maintain-interval");
+    if (sel) {
+      const v = String(m.interval_hours || 168);
+      if (!sel.querySelector(`option[value="${v}"]`)) {
+        const opt = document.createElement("option");
+        opt.value = v;
+        opt.textContent = `每 ${v} 小时`;
+        sel.appendChild(opt);
+      }
+      sel.value = v;
+    }
+    const last = document.getElementById("memory-maintain-last");
+    if (last) {
+      const fmt = (ts) => ts > 0 ? new Date(ts * 1000).toLocaleString() : "还没有整理过";
+      last.textContent = `上次整理 · 全局：${fmt(m.global_last)}，项目：${fmt(m.project_last)}`;
+      last.hidden = false;
+    }
   } catch (e) {
     addNotice("记忆加载失败: " + e.message);
   }
@@ -8686,6 +9636,52 @@ if (memoryDigestToggle) {
     }
   });
 }
+// 定期整理：保存开关与周期；「立即整理」无视周期手动跑一轮（仍守最短规模阈值）
+document.getElementById("memory-maintain-save").onclick = async () => {
+  const st = document.getElementById("memory-maintain-status");
+  try {
+    const r = await request("memory.maintain_save", {
+      global_enabled: document.getElementById("memory-maintain-global").checked,
+      project_enabled: maintainState.project_enabled, // 项目开关在右面板，这里只透传现值
+      interval_hours: parseInt(document.getElementById("memory-maintain-interval").value, 10),
+    });
+    maintainState = { global_enabled: r.global_enabled, project_enabled: r.project_enabled,
+      interval_hours: r.interval_hours };
+    st.textContent = `✓ 已保存：周期「每 ${r.interval_hours} 小时」，` +
+      `全局${r.global_enabled ? "开" : "关"}、项目${r.project_enabled ? "开" : "关"}`;
+    st.className = "card-status";
+    st.hidden = false;
+  } catch (e) {
+    st.textContent = "✗ 保存失败：" + e.message;
+    st.className = "card-status bad";
+    st.hidden = false;
+  }
+};
+document.getElementById("memory-maintain-now").onclick = async (e) => {
+  const btn = e.target;
+  const st = document.getElementById("memory-maintain-status");
+  btn.disabled = true;
+  btn.textContent = "🧹 整理中…";
+  try {
+    const r = await request("memory.maintain_now");
+    if (r.ran) {
+      const done = [r.global && "全局", r.project && "项目"].filter(Boolean).join("、");
+      st.textContent = `✓ 已整理：${done}（原件备份为 .bak），系统提示词已刷新`;
+    } else {
+      st.textContent = r.message;
+    }
+    st.className = "card-status";
+    st.hidden = false;
+    loadMemoryPage(); // 刷新「上次整理」时间
+  } catch (err) {
+    st.textContent = "✗ 整理失败：" + err.message;
+    st.className = "card-status bad";
+    st.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🧹 立即整理";
+  }
+};
 
 // ---------- 设置 · 局域网访问 ----------
 // 复制访问地址：局域网 / Tailscale 地址都是 http 明文，非安全上下文里
@@ -9621,10 +10617,13 @@ function subagentStatus(text, ok = true, which = "base") {
 }
 
 function modelOptions(d, selectedProvider, selectedModel) {
-  // 一个下拉同时选服务与模型：value = "provider|model"；空值 = 跟随主对话
+  // 一个下拉同时选服务与模型：value = "provider|model"；空值 = 跟随主对话。
+  // 只列出配了 Key 的服务（Ollama 等本机服务出厂即视为已配）；当前选中的服务
+  // 即使未配 Key 也保留并标注，避免已有配置被静默丢弃、用户却找不到原因
   const sel = `${(selectedProvider || "").trim()}|${(selectedModel || "").trim()}`;
   let html = `<option value="">跟随主对话</option>`;
   (d.providers || []).forEach((p) => {
+    if (!p.has_key && p.name !== (selectedProvider || "").trim()) return;
     const models = p.models.length ? p.models : [p.model];
     html += `<optgroup label="${escapeHtml(p.name)}${p.has_key ? "" : "（未配 Key）"}">` +
       models.map((m) => {
@@ -10271,28 +11270,42 @@ boot();
 // 必须在 connect() 之后：ws 尚未创建时 request() 会抛错（被 catch 吞掉、偏好悄悄不生效）
 initUiPrefs();
 
-// ---------- 分级权限模式：写入确认 / 自动允许写入（对标 Codex Auto-Edit） ----------
-// 高危操作（执行命令）无论哪档都会征询；档位存 ui.json 的 accept_edits，
-// 且只对工作目录内的写入生效（目录外的写入仍逐次确认）。
-const ACCEPT_MODE_HINT_ON =
-  "当前：工作目录内的文件写入/画图自动放行，目录外的写入与执行命令仍会征询。点击切回逐步确认";
-const ACCEPT_MODE_HINT_OFF =
-  "当前每次写入/执行都会征询。点击开启「自动允许写入」（仅工作目录内，执行命令仍会确认）";
-function renderAcceptSwitch(on) {
+// ---------- 分级权限模式：安全执行 / 自动编辑 / 完全访问（对标 Codex / Claude Code 三档） ----------
+// 点击循环切换：安全执行（写入/执行都征询）→ 自动编辑（工作目录内写入放行，命令仍征询）
+// → 完全访问（写入与命令都不再征询）→ 回到安全执行。档位存 ui.json 的 accept_edits
+// （0/1/2），自动编辑只对工作目录内的写入生效（目录外仍逐次确认）。
+let acceptMode = "confirm"; // 当前档位，与后端 permission.mode 同步
+const ACCEPT_ICONS = {
+  confirm: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  accept_edits: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 4.5l4 4L8.5 19.5l-5 1.2 1.2-5L15.5 4.5z"/><path d="M13.5 6.5l4 4"/></svg>',
+  full_access: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10.5" width="15" height="9.5" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 7.9-1"/></svg>',
+};
+const ACCEPT_TITLE = {
+  confirm: "当前：安全执行 · 每次写入/执行都会征询。点击切到「自动编辑」（工作目录内写入放行）",
+  accept_edits: "当前：自动编辑 · 工作目录内的文件写入自动放行，执行命令仍会征询。点击切到「完全访问」",
+  full_access: "当前：完全访问 · 写入与命令执行都自动放行。点击切回「安全执行」",
+};
+const ACCEPT_NOTICE = {
+  confirm: "已切到安全执行模式：所有写入/执行都会先征询",
+  accept_edits: "✎ 已切到自动编辑模式：工作目录内的文件写入不再逐次确认，目录外写入与执行命令仍会征询",
+  full_access: "🔓 已切到完全访问模式：写入与命令执行都不再逐次确认，请确保当前任务可信",
+};
+function renderAcceptSwitch(mode) {
   const b = document.getElementById("accept-switch");
   if (!b) return;
-  b.classList.toggle("on", on);
-  b.title = on ? ACCEPT_MODE_HINT_ON : ACCEPT_MODE_HINT_OFF;
+  acceptMode = ACCEPT_ICONS[mode] ? mode : "confirm";
+  b.innerHTML = ACCEPT_ICONS[acceptMode];
+  b.title = ACCEPT_TITLE[acceptMode];
+  b.classList.toggle("on", acceptMode === "accept_edits");
+  b.classList.toggle("full", acceptMode === "full_access");
 }
 document.getElementById("accept-switch").onclick = async () => {
-  const cur = document.getElementById("accept-switch").classList.contains("on");
-  const next = cur ? "confirm" : "accept_edits";
+  const order = ["confirm", "accept_edits", "full_access"];
+  const next = order[(order.indexOf(acceptMode) + 1) % order.length];
   try {
     const r = await request("permission.set_mode", { mode: next });
-    renderAcceptSwitch(r.mode === "accept_edits");
-    addNotice(r.mode === "accept_edits"
-      ? "✎ 已开启自动允许写入：工作目录内的文件写入不再逐次确认，目录外写入与执行命令仍会征询"
-      : "已切回逐步确认模式：所有写入/执行都会先征询");
+    renderAcceptSwitch(r.mode);
+    addNotice(ACCEPT_NOTICE[r.mode] || ACCEPT_NOTICE.confirm);
   } catch (e) {
     addNotice("切换失败: " + e.message);
   }
@@ -10588,6 +11601,9 @@ function fmtBackupStamp(stamp, fallbackTs) {
   return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
 }
 
+let backupsExpanded = false; // 展开状态在本页内存里保持；重新加载后回到默认收起
+const BACKUP_PREVIEW = 4; // 收起时展示的最近备份数
+
 function backupRowHtml(b) {
   // 时间取 b.taken（解析自文件名的备份时刻）：备份文件的 mtime 是复制时带过来的源库
   // 修改时间，20 份备份会显示成同一个时刻。当前数据没有备份时刻，只能标它的写入时间。
@@ -10614,10 +11630,23 @@ async function loadBackups() {
   const items = d.backups || [];
   const cur = items.filter((b) => b.current);
   const hist = items.filter((b) => !b.current);
-  const html = cur.concat(hist).map(backupRowHtml).join("");
-  ul.innerHTML = html || '<li class="dim small">还没有备份（应用下次启动时会自动生成一份）</li>';
+  // 默认收起：只列「当前数据 + 最近几份」，卡片不再被 20 行撑满；
+  // 其余收进末尾的展开/收起按钮（样式在 .backup-more）
+  const shown = backupsExpanded ? hist : hist.slice(0, BACKUP_PREVIEW);
+  const rows = cur.concat(shown).map(backupRowHtml);
+  const hidden = hist.length - shown.length;
+  if (hidden > 0) {
+    rows.push(`<li class="backup-more"><button class="btn-ghost" data-more="1">▾ 展开其余 ${hidden} 份备份</button></li>`);
+  } else if (backupsExpanded && hist.length > BACKUP_PREVIEW) {
+    rows.push(`<li class="backup-more"><button class="btn-ghost" data-more="1">▴ 收起备份列表</button></li>`);
+  }
+  ul.className = "list" + (backupsExpanded ? " expanded" : "");
+  ul.innerHTML = rows.join("") || '<li class="dim small">还没有备份（应用下次启动时会自动生成一份）</li>';
   ul.querySelectorAll("[data-restore]").forEach((btn) => {
     btn.onclick = () => restoreBackupConfirm(btn.dataset.restore, btn.dataset.when, btn);
+  });
+  ul.querySelectorAll("[data-more]").forEach((btn) => {
+    btn.onclick = () => { backupsExpanded = !backupsExpanded; loadBackups().catch(() => {}); };
   });
   const bs = document.getElementById("backup-status");
   bs.textContent = `共 ${hist.length} 份备份 · 备份目录：${d.dir}（保留最近 ${d.keep} 份）`;

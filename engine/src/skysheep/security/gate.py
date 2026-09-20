@@ -164,6 +164,10 @@ class PermissionGate:
         # 能确认落点的工具；目标路径在工作目录外、或无法确认落点（MCP 写工具、
         # 剪贴板等）仍逐次确认。「高危」（run_command 等）任何档都走确认。
         self.auto_accept_write: bool = False
+        # 「完全访问」档（对标 Claude Code bypassPermissions）：写入与执行命令
+        # 一律自动放行。只在档位上放宽，工具层的安全防护（SSRF、路径拦截面等）
+        # 不受影响；只应由本机用户在界面上主动开启（server/app.py 拦远程调用）。
+        self.auto_accept_all: bool = False
         self._project_rules: list[WhitelistRule] = []
         self.on_request: Callable[[PendingPermission], Awaitable[None]] | None = None
 
@@ -356,6 +360,9 @@ class PermissionGate:
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
         """返回 None 表示放行；返回 PendingPermission 表示需要用户决策。"""
         if tool.safety == Safety.READONLY:
+            return None
+        # 完全访问档：写入与执行都自动放行（白名单之外的全部放开）
+        if self.auto_accept_all:
             return None
         # 自动允许写入档：只放行 WRITE 级，且目标必须确认在工作目录内；
         # 高危（执行命令）与目录外写入仍然逐次确认

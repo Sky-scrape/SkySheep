@@ -1874,7 +1874,8 @@ async function refreshSessions(prefetched) {
   // 分组视图：项目与合到一起，渲染走另一条路（见 refreshSessionsGrouped）
   if (sidebarView === "grouped") return refreshSessionsGrouped();
   // prefetched：站内切换项目时已先取回，直接渲染（不经过网络等待，避免列表先清空）
-  const { sessions, empty_count, archived_count } = prefetched || await request("session.list");
+  const { sessions, empty_count, archived_count, quick_sessions } =
+    prefetched || await request("session.list");
   const ul = document.getElementById("session-list");
   ul.innerHTML = "";
   // 经典视图同样按家族块（└/⑂ 子跟随父）+ 保存序排（键 = 当前项目 id，
@@ -1926,9 +1927,67 @@ async function refreshSessions(prefetched) {
   if (grouped && activeTagFilter && !ul.querySelector("li:not(.s-group)")) {
     ul.innerHTML += '<li class="empty-hint">这一组下没有会话</li>';
   }
-  if (!sessions.length) ul.innerHTML = '<li class="empty-hint">暂无会话</li>';
+  // 有快聊时把那句「暂无会话」说准：列表里马上会多出一个快聊区块
+  if (!sessions.length) {
+    ul.innerHTML = (quick_sessions || []).length
+      ? '<li class="empty-hint">当前项目下暂无会话</li>'
+      : '<li class="empty-hint">暂无会话</li>';
+  }
+  // 快聊区块放最后：它不受标签分组过滤影响，也不参与「暂无会话 / 这一组下
+  // 没有会话」的判断（那两句会把列表当当前项目的全部内容）。
+  // 远程客户端拿不到 quick_sessions（字段都不下发）：不显示一个永远为空的区块
+  if (Array.isArray(quick_sessions)) renderQuickSection(ul, quick_sessions);
   renderSessionExtras({ empty_count, archived_count });
   renderRailSessions(sessions);
+}
+
+/** 经典视图底部的常驻「快聊」区块。
+
+    快聊会话的 project_id 是 NULL，而经典视图的会话列表只取当前项目，所以
+    它们在这里原本一个都看不到——只在分组视图与「全部项目」搜索里露面。
+    单开一节常驻列表末尾：不绑定文件夹、只想聊一句的对话有固定去处，与分组
+    视图的「快聊」组共用同一份数据与折叠状态（键都是 "quick"）。 */
+function renderQuickSection(ul, list) {
+  const st = groupState("quick"); // 与分组视图的快聊组共用折叠 / 显示更多记忆
+  const head = document.createElement("li");
+  head.className = "s-group s-quick";
+  head.innerHTML = '<span class="s-group-name">快聊</span>' +
+    (list.length ? `<span class="s-group-count">${list.length}</span>` : "") +
+    '<button class="s-quick-add" title="新建快聊（不需要文件夹，随时能聊）">＋</button>';
+  head.title = "快聊 —— 不绑定任何文件夹的对话，点击展开/折叠";
+  head.querySelector(".s-quick-add").onclick = async (e) => {
+    e.stopPropagation();
+    const r = await request("session.new_task", {});
+    await openTabForSession(r.id, r.title);
+    refreshSessions();
+  };
+  head.onclick = () => {
+    st.open = !st.open;
+    refreshSessions();
+  };
+  ul.appendChild(head);
+  if (!st.open) return;
+  const ordered = orderedSessionList(list, "quick");
+  lastGroupedListByGroup.set("quick", ordered);
+  if (!ordered.length) {
+    const hint = document.createElement("li");
+    hint.className = "empty-hint";
+    hint.textContent = "还没有快聊——点上面的 ＋ 开一个不需要文件夹的对话";
+    ul.appendChild(hint);
+    return;
+  }
+  const visible = st.all ? ordered : ordered.slice(0, GROUP_PREVIEW);
+  // 不接拖动排序：经典视图的 commitSessionOrder 按整张列表收集会话 id，
+  // 快聊行混进去会把当前项目与快聊两个区块的顺序互相污染（分组视图里的
+  // 快聊组仍可拖，那份顺序在这里照常生效——orderedSessionList 会读偏好）
+  visible.forEach((s) => ul.appendChild(renderSessionItem(s, ul)));
+  if (ordered.length > visible.length) {
+    const more = document.createElement("li");
+    more.className = "pgroup-more";
+    more.textContent = st.all ? "收起" : `显示更多 ${ordered.length - visible.length} 个`;
+    more.onclick = () => { st.all = !st.all; refreshSessions(); };
+    ul.appendChild(more);
+  }
 }
 
 // 空会话清理入口与归档入口：经典/分组两种视图共用（都只看当前项目）
@@ -4021,19 +4080,18 @@ function deleteProjectModal(p) {
   box.innerHTML =
     `<p>确定从列表中移除项目 <b>${escapeHtml(p.name)}</b> 吗？</p>` +
     (cur
-      ? `<p class="dim small">这是<b>当前正在使用的项目</b>：它的全部会话、白名单与任务会被清空，` +
-        `然后用同一目录重新开始（干净的项目）。</p>`
+      ? `<p class="dim small">这是<b>当前正在使用的项目</b>：它的全部会话、白名单与任务会被删除，` +
+        `然后切换到其他项目（没有其他项目就进入快聊）。</p>`
       : `<p class="dim small">该项目下的<b>会话记录与白名单会一并删除</b>；电脑上的文件夹和文件` +
         `<b>不受影响</b>，以后随时可以重新添加回来。</p>`) +
     `<span class="mono-path">${escapeHtml(p.root_path)}</span>`;
   showModal("删除项目", box, async () => {
     const r = await request("project.delete", { id: p.id });
-    if (r.reset_current) {
-      await applyWorkspaceData(await fetchWorkspaceData());
-      addNotice(`项目「${p.name}」已重置：会话与记录清空，从新开始。`);
+    await applyWorkspaceData(await fetchWorkspaceData());
+    if (r.switched_to) {
+      addNotice(`已删除项目「${p.name}」，已切换到「${r.switched_to.name}」。`);
     } else {
-      refreshProjects();
-      addNotice(`已移除项目「${p.name}」；文件夹仍保留在电脑上。`);
+      addNotice(`已删除项目「${p.name}」；文件夹仍保留在电脑上，当前处于快聊。`);
     }
   }, "移除");
 }
@@ -6046,13 +6104,27 @@ function renderWeekGrid() {
   let evts = "";
   agCache.forEach((it) => {
     const t = it.start_at * 1000;
-    if (t < weekStart || t >= weekEnd) return;
+    // 时间段可能跨天：起点或终点任一天在本周就画出来（按起点列定位）
+    const endMs = it.end_at ? it.end_at * 1000 : 0;
+    if (t >= weekEnd || (endMs && endMs < weekStart)) return;
+    if (t < weekStart && !endMs) return;
     const d = new Date(t);
-    const dayIdx = Math.floor((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() - weekStart) / 86400000);
-    const mins = d.getHours() * 60 + d.getMinutes();
-    const evtTitle = `${agPad(d.getHours())}:${agPad(d.getMinutes())} ${it.title}${it.notes ? " · " + it.notes : ""}`;
-    evts += `<div class="ag-evt${it.done ? " done" : ""}" data-id="${it.id}"
-      style="top:${Math.round(mins / 60 * AG_HOUR_H) + 1}px;left:calc(${dayIdx} * 100% / 7 + 2px);width:calc(100% / 7 - 4px)"
+    // 起点在本周之前时钉在本周首列，否则定位到它所在的那天
+    const dayIdx = t < weekStart ? 0 : Math.floor(
+      (new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() - weekStart) / 86400000);
+    const mins = t < weekStart ? 0 : d.getHours() * 60 + d.getMinutes();
+    // 有时段就按真实持续时间撑高（最少 20 分钟，否则字都挤不下）；
+    // 跨天/跨周的区间封顶到当天 24:00（完整区间在悬停提示与列表里看），不溢出网格
+    const rawMin = endMs ? Math.round((endMs - t) / 60000) : 0;
+    const spanMin = rawMin ? Math.max(20, Math.min(rawMin, 1440 - mins)) : 0;
+    const top = Math.round(mins / 60 * AG_HOUR_H) + 1;
+    const h = spanMin ? `height:${Math.max(18, Math.round(spanMin / 60 * AG_HOUR_H) - 2)}px;` : "";
+    const timeTxt = it.end_at
+      ? `${agPad(d.getHours())}:${agPad(d.getMinutes())}–${agHm(it.end_at)}`
+      : `${agPad(d.getHours())}:${agPad(d.getMinutes())}`;
+    const evtTitle = `${timeTxt} ${it.title}${it.notes ? " · " + it.notes : ""}`;
+    evts += `<div class="ag-evt${it.done ? " done" : ""}${spanMin ? " span" : ""}" data-id="${it.id}"
+      style="top:${top}px;${h}left:calc(${dayIdx} * 100% / 7 + 2px);width:calc(100% / 7 - 4px)"
       title="${escapeHtml(evtTitle)}">${it.done ? "✓ " : ""}${escapeHtml(it.title)}</div>`;
   });
   let now = "";
@@ -6141,6 +6213,23 @@ function fmtAgendaTime(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
 }
 
+// "HH:MM" 形式的时刻（给时间段用：同一天的区间只重复时刻，不重写日期）
+function agHm(ts) {
+  const d = new Date(ts * 1000);
+  return `${agPad(d.getHours())}:${agPad(d.getMinutes())}`;
+}
+
+// 日程时间的完整文案：无结束时间就是单个时刻，有时段则拼成「起—止」；
+// 跨天时右侧带上日期，避免只看到 23:00–01:00 分不清哪天结束
+function fmtAgendaSpan(it) {
+  const head = fmtAgendaTime(it.start_at);
+  if (!it.end_at) return head;
+  const s = new Date(it.start_at * 1000), e = new Date(it.end_at * 1000);
+  const crossDay = s.getFullYear() !== e.getFullYear()
+    || s.getMonth() !== e.getMonth() || s.getDate() !== e.getDate();
+  return `${head}—${crossDay ? fmtAgendaTime(it.end_at) : agHm(it.end_at)}`;
+}
+
 function agendaGroup(item, now) {
   const t = item.start_at * 1000;
   const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
@@ -6171,7 +6260,7 @@ function renderAgenda(items) {
       li.innerHTML =
         `<div class="agenda-main">
            <span class="agenda-title">${escapeHtml(it.title)}</span>
-           <span class="agenda-time">${fmtAgendaTime(it.start_at)}</span>
+           <span class="agenda-time">${fmtAgendaSpan(it)}</span>
          </div>` +
         (it.notes ? `<div class="agenda-notes">${escapeHtml(it.notes)}</div>` : "");
       const ops = document.createElement("span");
@@ -6213,12 +6302,22 @@ function agendaModal(existing, defaultTs) {
     : new Date(Date.now() + 3600000);
   const p = (n) => String(n).padStart(2, "0");
   const dtLocal = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  // 结束时间：默认 1 小时后（新建）或沿用已有值；没填就是按点事件
+  const hasEnd = !!(existing && existing.end_at);
+  const endD = hasEnd ? new Date(existing.end_at * 1000)
+    : existing ? new Date(existing.start_at * 1000 + 3600000)
+    : new Date(d.getTime() + 3600000);
+  const endLocal = `${endD.getFullYear()}-${p(endD.getMonth() + 1)}-${p(endD.getDate())}T${p(endD.getHours())}:${p(endD.getMinutes())}`;
   box.innerHTML = `
     <div class="agenda-fields">
       <label>标题</label>
       <input id="ag-title" class="modal-input" type="text" placeholder="例如：小组会 / 交房租" value="${existing ? escapeHtml(existing.title) : ""}">
-      <label>时间</label>
+      <label>开始</label>
       <input id="ag-time" class="modal-input" type="datetime-local" value="${dtLocal}">
+      <label class="agenda-remind"><input id="ag-span-on" type="checkbox" ${hasEnd ? "checked" : ""}> 设定时间段（填结束时间）</label>
+      <label id="ag-end-label" class="agenda-end-label">结束
+        <input id="ag-end" class="modal-input" type="datetime-local" value="${endLocal}">
+      </label>
       <label>备注（可选）</label>
       <input id="ag-notes" class="modal-input" type="text" value="${existing ? escapeHtml(existing.notes || "") : ""}">
       <label class="agenda-remind"><input id="ag-remind" type="checkbox" ${!existing || existing.remind ? "checked" : ""}> 到点在应用内提醒</label>
@@ -6233,16 +6332,43 @@ function agendaModal(existing, defaultTs) {
       </select>
     </div>`;
   box.querySelector("#ag-remind-before").value = String(existing?.remind_before ?? 0);
+  // 未勾选「设定时间段」时藏起结束时间输入框，避免让人以为它是必填项
+  const spanOn = box.querySelector("#ag-span-on");
+  const endLabel = box.querySelector("#ag-end-label");
+  const endInput = box.querySelector("#ag-end");
+  const syncEnd = () => { endLabel.classList.toggle("hidden", !spanOn.checked); };
+  syncEnd();
+  spanOn.onchange = syncEnd;
+  // 改动开始时间时把结束时间跟着平移，保持原来的时长（不然容易一下子变成倒置区间）
+  box.querySelector("#ag-time").onchange = () => {
+    if (!spanOn.checked) return;
+    const sv = box.querySelector("#ag-time").value;
+    const ev = endInput.value;
+    if (!sv || !ev) return;
+    const delta = new Date(ev).getTime() - new Date(dtLocal).getTime();
+    const next = new Date(new Date(sv).getTime() + (delta > 0 ? delta : 3600000));
+    endInput.value = `${next.getFullYear()}-${p(next.getMonth() + 1)}-${p(next.getDate())}T${p(next.getHours())}:${p(next.getMinutes())}`;
+  };
   showModal(isEdit ? "编辑日程" : "新增日程", box, async () => {
     const title = box.querySelector("#ag-title").value.trim();
     const tstr = box.querySelector("#ag-time").value;
     if (!title) throw new Error("请填写标题");
-    if (!tstr) throw new Error("请选择时间");
+    if (!tstr) throw new Error("请选择开始时间");
     const ts = new Date(tstr).getTime() / 1000;
     if (Number.isNaN(ts)) throw new Error("时间格式不正确");
+    // 结束时间为空 = 取消时间段，显式传 0 让后端清掉旧值（编辑已有日程时）
+    let endTs = 0;
+    if (spanOn.checked) {
+      const estr = endInput.value;
+      if (!estr) throw new Error("请选择结束时间，或取消勾选「设定时间段」");
+      endTs = new Date(estr).getTime() / 1000;
+      if (Number.isNaN(endTs)) throw new Error("结束时间格式不正确");
+      if (endTs <= ts) throw new Error("结束时间要晚于开始时间");
+    }
     const params = {
       title,
       start_at: ts,
+      end_at: endTs,
       notes: box.querySelector("#ag-notes").value.trim(),
       remind: box.querySelector("#ag-remind").checked,
       remind_before: Number(box.querySelector("#ag-remind-before").value) || 0,
@@ -7061,7 +7187,7 @@ function showAgendaReminder(item) {
     `<span class="ar-ico">⏰</span>
      <div class="ar-body">
        <b>${escapeHtml(item.title)}</b>
-       <span class="small dim">${fmtAgendaTime(item.start_at)}${remainTxt}${item.notes ? " · " + escapeHtml(item.notes) : ""}</span>
+       <span class="small dim">${fmtAgendaSpan(item)}${remainTxt}${item.notes ? " · " + escapeHtml(item.notes) : ""}</span>
      </div>
      <button class="btn-ghost" data-a="done">完成</button>
      <button class="btn-ghost" data-a="snooze">稍后提醒</button>
@@ -8660,79 +8786,88 @@ function importSkillModal(prefill = "") {
   }, "导入");
 }
 
-// 扫描本机技能：只读探测 Claude Code / agents / Codex / 本项目 .claude 里已有的技能，
-// 勾选后复用既有导入逻辑（skills.install 复制安装），扫描本身不动任何文件
-async function scanLocalSkillsModal() {
-  skillStatus("正在扫描本机技能目录（Claude Code / agents / Codex / 本项目 .claude）…");
+// 本机现存技能：只读探测 Claude Code / agents / Codex / 本项目 .claude 里已有的技能，
+// 结果直接平铺在技能页按钮下方的面板里（不再弹窗），勾选后复用既有导入逻辑
+// （skills.install 复制安装），探测本身不动任何文件
+async function loadLocalSkills() {
+  const panel = document.getElementById("skill-local-panel");
+  if (!panel) return;
+  panel.hidden = false;
+  const list = document.getElementById("skill-local-list");
+  const note = document.getElementById("skill-local-note");
+  list.innerHTML = '<li class="empty-hint">正在探测本机技能目录（Claude Code / agents / Codex / 本项目 .claude）…</li>';
+  note.textContent = "";
   let r;
   try {
     r = await request("skills.scan_local");
   } catch (e) {
-    skillStatus("✗ 扫描失败: " + e.message, false);
+    list.innerHTML = `<li class="empty-hint">✗ 探测失败：${escapeHtml(e.message)}</li>`;
+    skillStatus("✗ 读取本机技能失败: " + e.message, false);
     return;
   }
   const cands = r.candidates || [];
-  const box = document.createElement("div");
   if (!cands.length) {
-    box.innerHTML = `<p>本机常见技能目录里没有找到新技能。</p>
-      <p class="dim small">扫描位置：~/.claude/skills、~/.agents/skills、~/.codex/skills、本项目 .claude/skills。
-      技能在别处的话，用「＋ 导入技能」选文件夹，或粘贴路径 / GitHub·Gitee 链接安装。</p>`;
-    showModal("扫描本机技能", box, async () => {}, "知道了");
+    list.innerHTML = `<li class="empty-hint">本机常见技能目录里没有找到技能。
+      探测位置：~/.claude/skills、~/.agents/skills、~/.codex/skills、本项目 .claude/skills。
+      技能在别处的话，用「＋ 导入技能」选文件夹，或粘贴路径 / GitHub·Gitee 链接安装。</li>`;
+    note.textContent = "";
     return;
   }
   const doneCnt = cands.filter((c) => c.installed).length;
-  box.innerHTML = `
-    <p class="dim small">找到 ${cands.length} 个技能${doneCnt ? `（${doneCnt} 个已装过，灰显不可选）` : "，均可导入"}。
-    勾选要装进 SkySheep 的技能，装完立即生效。</p>
-    <div class="scan-toolbar">
-      <button class="btn-ghost" data-act="all">全选</button>
-      <button class="btn-ghost" data-act="none">全不选</button>
-      <span class="dim small">已装过的灰显项不受影响</span>
-    </div>
-    <ul class="scan-list">${cands.map((c) => `
-      <li><label class="${c.installed ? "done" : ""}" title="${escapeHtml(c.path)}">
-        <input type="checkbox" data-path="${escapeHtml(c.path)}" ${c.installed ? "disabled" : "checked"}>
-        <span class="scan-name">${escapeHtml(c.name)}</span>
-        <span class="scan-desc">${escapeHtml(c.description || "")}</span>
-        <span class="scan-origin">${escapeHtml(c.origin)}</span>
-      </label></li>`).join("")}
-    </ul>
-    <div class="form-grid scan-scope"><label>装到哪里
-      <select data-f="scope">
-        <option value="global">全局（所有项目都能用）</option>
-        <option value="project">仅本项目</option>
-      </select>
-    </label></div>`;
-  box.querySelectorAll(".scan-toolbar button").forEach((b) => {
+  note.textContent = `共 ${cands.length} 个${doneCnt ? `，其中 ${doneCnt} 个已装过（灰显不可选）` : "，均可导入"}`;
+  list.innerHTML = cands.map((c) => `
+    <li><label class="${c.installed ? "done" : ""}" title="${escapeHtml(c.path)}">
+      <input type="checkbox" data-path="${escapeHtml(c.path)}" ${c.installed ? "disabled" : "checked"}>
+      <span class="scan-name">${escapeHtml(c.name)}</span>
+      <span class="scan-desc">${escapeHtml(c.description || "")}</span>
+      <span class="scan-origin">${escapeHtml(c.origin)}</span>
+    </label></li>`).join("");
+}
+
+// 面板里的全选 / 全不选：只作用于可选（未装过）的勾选框
+function bindLocalSkillToolbar() {
+  const panel = document.getElementById("skill-local-panel");
+  if (!panel) return;
+  panel.querySelectorAll(".scan-toolbar button").forEach((b) => {
     b.onclick = () => {
-      box.querySelectorAll('.scan-list input[type=checkbox]:not(:disabled)').forEach(
+      panel.querySelectorAll(".scan-list input[type=checkbox]:not(:disabled)").forEach(
         (cb) => { cb.checked = b.dataset.act === "all"; });
     };
   });
-  showModal("扫描本机技能", box, async () => {
-    const scope = box.querySelector('select[data-f="scope"]').value;
-    const picked = [...box.querySelectorAll("input[type=checkbox]:checked")]
-      .map((x) => x.dataset.path);
-    if (!picked.length) throw new Error("先勾选要导入的技能");
-    const ok = [];
-    const bad = [];
-    for (const p of picked) {
-      try {
-        const res = await request("skills.install", { source: p, scope });
-        ok.push(...res.installed);
-      } catch (e) {
-        bad.push(`${p.split(/[\\/]/).filter(Boolean).pop()}（${e.message}）`);
-      }
+}
+
+// 导入面板里勾选的候选：逐个走 skills.install，单个失败不中断其余
+async function importLocalSkills() {
+  const panel = document.getElementById("skill-local-panel");
+  const scope = document.getElementById("skill-local-scope").value;
+  const picked = [...panel.querySelectorAll(".scan-list input[type=checkbox]:checked")]
+    .map((x) => x.dataset.path);
+  if (!picked.length) {
+    skillStatus("✗ 先勾选要导入的技能", false);
+    return;
+  }
+  const btn = document.getElementById("btn-skill-local-import");
+  btn.disabled = true;
+  const ok = [];
+  const bad = [];
+  for (const p of picked) {
+    try {
+      const res = await request("skills.install", { source: p, scope });
+      ok.push(...res.installed);
+    } catch (e) {
+      bad.push(`${p.split(/[\\/]/).filter(Boolean).pop()}（${e.message}）`);
     }
-    await renderSettings();
-    boot();
-    const where = scope === "project" ? "本项目" : "全局";
-    if (ok.length) {
-      skillStatus(`✓ 已导入 ${ok.length} 个技能到${where}：${ok.join("、")}（已启用，可直接使用）`);
-    } else {
-      skillStatus("✗ " + (bad[0] || "导入失败"), false);
-    }
-  }, "导入所选");
+  }
+  btn.disabled = false;
+  await renderSettings();
+  boot();
+  const where = scope === "project" ? "本项目" : "全局";
+  if (ok.length) {
+    skillStatus(`✓ 已导入 ${ok.length} 个技能到${where}：${ok.join("、")}（已启用，可直接使用）`);
+    loadLocalSkills();  // 重新探测：刚装过的转为灰显，剩余候选一眼可见
+  } else {
+    skillStatus("✗ " + (bad[0] || "导入失败"), false);
+  }
 }
 
 function deleteSkillModal(s) {
@@ -8770,8 +8905,14 @@ function batchDeleteSkillsModal(names) {
 
 document.getElementById("btn-import-skill").onclick = () => importSkillModal();
 document.getElementById("btn-import-skill-2").onclick = () => importSkillModal();
-document.getElementById("btn-scan-skill").onclick = () => scanLocalSkillsModal();
-document.getElementById("btn-scan-skill-2").onclick = () => scanLocalSkillsModal();
+document.getElementById("btn-scan-skill").onclick = () => {
+  // 总览卡片的按钮：先进入技能页再拉取，候选始终只在技能页内平铺
+  openSkillManage();
+  loadLocalSkills();
+};
+document.getElementById("btn-scan-skill-2").onclick = () => loadLocalSkills();
+document.getElementById("btn-skill-local-import").onclick = () => importLocalSkills();
+bindLocalSkillToolbar();
 
 // ---------- MCP：导入 / 手动添加 / 删除 ----------
 
@@ -10697,9 +10838,16 @@ function channelCard(c) {
     : `<div class="channel-field">Bot Token</div>
        <input class="channel-input channel-token" data-name="${c.name}" type="password"
          placeholder="${c.has_token ? "已保存（留空则不修改）" : "粘贴 BotFather 给的 Token"}">`;
+  // 首次配置的顺序指引：启用不需要先填名单（机器人跑起来才能发现来源），
+  // 但名单为空时它对一切消息保持沉默，所以要提示用户「启用 → 发消息 → 回来认领」
+  const needClaim = c.enabled && !(c.allowed_ids || []).length;
   const hint = c.name === "weixin"
-    ? "登录后给机器人发一句话，然后点上方「加入允许名单」，就能拿到你的 OpenID。"
-    : "在 Telegram 里搜到你的机器人，给它发一句话，再点上方「加入允许名单」拿到你的 chat id。";
+    ? (needClaim
+      ? "已启用但名单还是空的：现在给机器人发一句话，下方出现「见过的来源」后点「加入允许名单」，它才会开始回复。"
+      : "登录后给机器人发一句话，然后点上方「加入允许名单」，就能拿到你的 OpenID。")
+    : (needClaim
+      ? "已启用但名单还是空的：现在在 Telegram 里给机器人发一句话，下方出现「见过的来源」后点「加入允许名单」，它才会开始回复。"
+      : "在 Telegram 里搜到你的机器人，给它发一句话，再点上方「加入允许名单」拿到你的 chat id。");
   // 允许名单的例值与叫法按平台区分：微信的 id 是 OpenID 形态，写成 Telegram 那种纯数字会误导
   const isWx = c.name === "weixin";
   const idLabel = isWx ? "OpenID" : "chat id";
@@ -10712,6 +10860,7 @@ function channelCard(c) {
         ${c.enabled ? "checked" : ""}><span>启用</span></label>
     </div>
     ${err}
+    ${needClaim ? '<div class="channel-hint bad">⚠ 名单还是空的：现在机器人对一切消息保持沉默。先给它发一句话，再回来点「加入允许名单」。</div>' : ""}
     ${credBlock}
     <div class="channel-field">允许名单（每行一个 ${idLabel}；<b>空名单 = 拒绝一切</b>）</div>
     <textarea class="channel-ids" data-name="${c.name}" rows="3"
@@ -10731,6 +10880,24 @@ function channelCard(c) {
 }
 
 // ---------- 微信扫码登录 ----------
+// 微信接口的 qrcode_img_content 是「要编码进二维码的链接」（扫码后打开的授权页），
+// 不是图片地址：直接塞进 <img src> 会因为返回的是网页而破图。这里用页面已加载的
+// vendor/qrcode.min.js 渲染（与局域网/Tailscale 二维码同一套），并保留链接兑底。
+function renderQrInto(elId, text) {
+  const box = document.getElementById(elId);
+  if (!box) return;
+  box.innerHTML = "";
+  if (!window.QRCode) {
+    box.innerHTML = '<div class="channel-hint bad">二维码组件未加载，请刷新页面重试</div>';
+    return;
+  }
+  try {
+    new QRCode(box, { text, width: 168, height: 168, correctLevel: QRCode.CorrectLevel.M });
+  } catch (e) {
+    box.innerHTML = `<div class="channel-hint bad">二维码生成失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
 async function startWeixinLogin() {
   const area = document.getElementById("wx-qr-area");
   if (area) area.innerHTML = `<div class="channel-hint">正在获取二维码…</div>`;
@@ -10742,17 +10909,23 @@ async function startWeixinLogin() {
     return;
   }
   wxLoginQrcode = info.qrcode || "";
-  const img = info.url || "";
+  const link = info.url || "";
   if (area) {
-    area.innerHTML = `
+    if (!link) {
+      area.innerHTML = `<div class="channel-hint">没能取到二维码内容，请点「生成登录二维码」重试。</div>`;
+    } else {
+      area.innerHTML = `
       <div class="wx-login">
-        ${img ? `<div class="wx-qr"><img src="${escapeHtml(img)}" alt="微信登录二维码"></div>`
-              : `<div class="channel-hint">没能取到二维码图片，请点「生成登录二维码」重试。</div>`}
+        <div id="wx-qr-box" class="wx-qr"></div>
         <div class="wx-login-side">
           <div class="channel-hint">用<b>手机微信</b>扫描左侧二维码，并在手机上确认登录。</div>
           <div class="channel-hint" id="wx-qr-status">等待扫描…</div>
+          <div class="channel-hint">扫不出来？在手机微信里打开这个链接也可以继续：
+            <a href="${escapeHtml(link)}" target="_blank" rel="noreferrer noopener">打开微信登录链接</a></div>
         </div>
       </div>`;
+      renderQrInto("wx-qr-box", link);
+    }
   }
   pollWeixinLogin();
 }
@@ -11793,6 +11966,9 @@ function resetSkillView() {
   skillManageOpen = false;
   document.getElementById("skill-manage-view").hidden = true;
   document.getElementById("skill-list-view").hidden = false;
+  // 返回总览时收起本机候选面板：留着上次的结果容易让人以为它就是当前状态
+  const local = document.getElementById("skill-local-panel");
+  if (local) local.hidden = true;
 }
 
 document.getElementById("skill-summary").onclick = () => openSkillManage();
@@ -11807,7 +11983,7 @@ function renderSkillSummary(skills) {
   const active = skills.filter((s) => s.enabled && s.applies).length;
   el.textContent = skills.length
     ? `${skills.length} 个技能 · 本项目生效 ${active} 个 — 点这里查看、设使用范围、逛技能广场`
-    : "还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「扫描本机」自动识别已装的技能";
+    : "还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能";
 }
 
 // 查看技能完整指令（停用的也能看，否则无从判断该不该启用）
@@ -12018,7 +12194,7 @@ function renderSkillList(skills) {
     sul.appendChild(li);
   });
   if (!skills.length)
-    sul.innerHTML = '<li class="empty-hint">还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「扫描本机」自动识别已装的技能</li>';
+    sul.innerHTML = '<li class="empty-hint">还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能</li>';
 }
 
 // ---------- 设置 · 关于：更新检查 ----------

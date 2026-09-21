@@ -37,6 +37,64 @@ async def test_schedule_store_crud(store):
     assert await store.delete_schedule(row["id"]) is False
 
 
+async def test_schedule_store_span(store):
+    """结束时间：不传 = 按点事件（end_at 为 0），传了就是一个时间段。"""
+    now = time.time()
+    point = await store.add_schedule("交房租", now + 3600)
+    assert point["end_at"] == 0
+
+    span = await store.add_schedule("午休", now + 7200, end_at=now + 10800)
+    assert span["end_at"] == pytest.approx(now + 10800)
+
+    # 部分更新：只改结束时间，开始时间不动
+    upd = await store.update_schedule(span["id"], end_at=now + 12600)
+    assert upd["end_at"] == pytest.approx(now + 12600)
+    assert upd["start_at"] == pytest.approx(now + 7200)
+
+    # 传 0 清除结束时间，回到按点事件
+    cleared = await store.update_schedule(span["id"], end_at=0)
+    assert cleared["end_at"] == 0
+
+    # 非法值（负数）归一到 0，不写入负时间戳
+    neg = await store.update_schedule(span["id"], end_at=-100)
+    assert neg["end_at"] == 0
+
+
+async def test_schedule_end_at_migration(tmp_path):
+    """旧库升级：建表时没有 end_at 列的 schedules 表补上该列，旧数据不丢。"""
+    import aiosqlite
+
+    from skysheep.session import SessionStore
+
+    db = tmp_path / "old.db"
+    conn = await aiosqlite.connect(db)
+    await conn.executescript(
+        "CREATE TABLE schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,"
+        " notes TEXT NOT NULL DEFAULT '', start_at REAL NOT NULL, remind INTEGER NOT NULL DEFAULT 1,"
+        " remind_before INTEGER NOT NULL DEFAULT 0, reminded INTEGER NOT NULL DEFAULT 0,"
+        " done INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL);"
+    )
+    old_ts = time.time() + 3600
+    await conn.execute(
+        "INSERT INTO schedules (title, notes, start_at, created_at, updated_at)"
+        " VALUES ('旧日程', '', ?, ?, ?)",
+        (old_ts, time.time(), time.time()),
+    )
+    await conn.commit()
+    await conn.close()
+
+    s = await SessionStore(db).connect()
+    try:
+        rows = await s.list_schedules()
+        assert [r["title"] for r in rows] == ["旧日程"]
+        assert rows[0]["end_at"] == 0  # 补列默认 0 = 按点事件
+        # 新列可立即写入
+        upd = await s.update_schedule(rows[0]["id"], end_at=old_ts + 1800)
+        assert upd["end_at"] == pytest.approx(old_ts + 1800)
+    finally:
+        await s.close()
+
+
 async def test_schedule_store_due_filter(store):
     now = time.time()
     past = await store.add_schedule("过期件", now - 100)
@@ -96,8 +154,31 @@ async def test_schedule_tool_roundtrip(store, tmp_path):
     )
     assert "提前15分钟提醒" in out
 
+    # 时间段：add 带 end_at 后输出「起—止」；只写一个时刻时不拼区间
+    base = time.time() + 90000
+    out = await tool.run(
+        tool.args_model(action="add", title="周会", start_at=base, end_at=base + 5400),
+        ctx,
+    )
+    assert "周会" in out
+    assert "-" in out.split("周会")[0]  # 日期与时刻拼成区间
+    span_id = (await store.list_schedules())[-1]["id"]
+    span_row = await store.get_schedule(span_id)
+    assert span_row["end_at"] == pytest.approx(base + 5400)
+
+    # 只改结束时间：不传 start_at 也不能被误判成倒置区间
+    out = await tool.run(
+        tool.args_model(action="update", id=span_id, end_at=base + 7200), ctx
+    )
+    assert "updated" in out
+    assert (await store.get_schedule(span_id))["end_at"] == pytest.approx(base + 7200)
+
+    # 传 0 清除结束时间，回到按点事件
+    await tool.run(tool.args_model(action="update", id=span_id, end_at=0), ctx)
+    assert (await store.get_schedule(span_id))["end_at"] == 0
+
     rows = await store.list_schedules()
-    assert len(rows) == 2
+    assert len(rows) == 3
     sid = rows[0]["id"]
 
     out = await tool.run(tool.args_model(action="list"), ctx)
@@ -135,6 +216,22 @@ async def test_schedule_tool_validation(store, tmp_path):
         await tool.run(tool.args_model(action="update", id=1), ctx)  # 无修改字段
     with pytest.raises(ToolError):
         await tool.run(tool.args_model(action="delete"), ctx)
+    # 结束时间必须晚于开始时间；区间倒置一律拦下
+    now = time.time()
+    with pytest.raises(ToolError):
+        await tool.run(
+            tool.args_model(action="add", title="倒置", start_at=now, end_at=now - 60), ctx
+        )
+    with pytest.raises(ToolError):
+        await tool.run(
+            tool.args_model(action="add", title="同时刻", start_at=now, end_at=now), ctx
+        )
+    # 编辑时把已有日程的结束时间改到开始之前，同样要拦
+    row = await store.add_schedule("正会", now + 3600, end_at=now + 5400)
+    with pytest.raises(ToolError):
+        await tool.run(
+            tool.args_model(action="update", id=row["id"], end_at=now + 3000), ctx
+        )
 
 
 # ---- WS 分发 + 提醒扫描 ----
@@ -160,10 +257,27 @@ def test_schedule_ws_roundtrip(home):
         frame = recv_frame(ws, "a1")
         assert frame["ok"], frame.get("error")
         sid = frame["result"]["id"]
+        assert frame["result"]["end_at"] == 0
 
         ws.send_json({"id": "l1", "method": "schedule.list", "params": {}})
         frame = recv_frame(ws, "l1")
         assert [r["title"] for r in frame["result"]] == ["牙医"]
+        assert frame["result"][0]["end_at"] == 0
+
+        # 时间段：带 end_at 新增 → 能读回；改回 0 即取消区间
+        t0 = time.time() + 7200
+        ws.send_json({"id": "a2", "method": "schedule.add",
+                      "params": {"title": "午休", "start_at": t0, "end_at": t0 + 5400}})
+        frame = recv_frame(ws, "a2")
+        assert frame["ok"], frame.get("error")
+        span_id = frame["result"]["id"]
+        assert frame["result"]["end_at"] == pytest.approx(t0 + 5400)
+
+        ws.send_json({"id": "u2", "method": "schedule.update",
+                      "params": {"id": span_id, "end_at": 0}})
+        assert recv_frame(ws, "u2")["result"]["end_at"] == 0
+        ws.send_json({"id": "d2", "method": "schedule.delete", "params": {"id": span_id}})
+        recv_frame(ws, "d2")
 
         ws.send_json({"id": "u1", "method": "schedule.update",
                       "params": {"id": sid, "title": "牙医（改期）"}})

@@ -147,11 +147,15 @@ def describe_sources(project_root: Path) -> list[dict]:
 
 
 class WorkspaceTrust:
-    """按项目记忆的信任状态。每打开一个项目建一个实例。"""
+    """按项目记忆的信任状态。每打开一个项目建一个实例。
 
-    def __init__(self, home: Path | str, project_root: Path | str) -> None:
+    ``project_root=None`` 是无项目态（快聊）：没有项目就没有项目级配置，
+    无可信任之物，state 恒为 clean，变更操作一律 no-op。
+    """
+
+    def __init__(self, home: Path | str, project_root: Path | str | None) -> None:
         self.home = Path(home)
-        self.project_root = Path(project_root)
+        self.project_root = Path(project_root) if project_root is not None else None
         self.path = self.home / TRUST_FILE_NAME
 
     # ---- 存储 ----
@@ -177,6 +181,11 @@ class WorkspaceTrust:
 
     def state(self) -> dict:
         """当前状态：``clean`` / ``trusted`` / ``pending``，附指纹与待确认清单。"""
+        if self.project_root is None:
+            return {
+                "state": STATE_CLEAN, "fingerprint": "", "sources": [],
+                "items": [], "trusted_at": None,
+            }
         fingerprint, labels = compute_fingerprint(self.project_root)
         if not fingerprint:
             return {
@@ -208,6 +217,8 @@ class WorkspaceTrust:
     # ---- 变更 ----
 
     def grant(self) -> dict:
+        if self.project_root is None:
+            return self.state()
         fingerprint, _ = compute_fingerprint(self.project_root)
         projects = self._load()
         if not fingerprint:
@@ -230,7 +241,7 @@ class WorkspaceTrust:
         技能就把仓库里其它东西一并放行）。
         """
         projects = self._load()
-        if _norm_root(self.project_root) not in projects:
+        if self.project_root is None or _norm_root(self.project_root) not in projects:
             return self.state()
         fingerprint, _ = compute_fingerprint(self.project_root)
         if fingerprint:
@@ -244,6 +255,8 @@ class WorkspaceTrust:
         return self.state()
 
     def revoke(self) -> dict:
+        if self.project_root is None:
+            return self.state()
         projects = self._load()
         projects.pop(_norm_root(self.project_root), None)
         self._save(projects)

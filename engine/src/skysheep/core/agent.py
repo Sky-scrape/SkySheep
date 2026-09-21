@@ -90,7 +90,7 @@ class Agent:
         provider: Provider,
         registry: ToolRegistry,
         gate: PermissionGate,
-        working_dir: Path,
+        working_dir: Path | None,
         max_iterations: int = 40,
         context_limit_tokens: int = 1_000_000,
         compaction_keep_recent: int = 8,

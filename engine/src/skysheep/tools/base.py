@@ -35,12 +35,26 @@ class ToolError(Exception):
     """工具执行失败——错误信息会作为 tool_result 返回给模型。"""
 
 
+# 无项目态的统一提示：没有绑定项目 = 没有工作目录，文件/命令类工具不可用。
+# 所有依赖目录的工具（fs / search / shell / docs / image）都经由 resolve_path
+# 或 require_working_dir 拿到这条可读错误，而不是对 None 直接崩。
+NO_PROJECT_HINT = (
+    "当前没有打开任何项目（没有工作目录），文件与命令类工具无法使用。"
+    "请先在侧栏「项目」区点 ＋ 添加项目并选择一个文件夹，再重试。"
+)
+
+
 class ToolContext:
-    """工具执行上下文。"""
+    """工具执行上下文。
+
+    working_dir 为 None 表示「无项目」态（没有绑定任何文件夹）：路径/命令类
+    工具一律拒绝执行（见 resolve_path / require_working_dir），只读的
+    对话/联网/任务类工具不受影响。
+    """
 
     def __init__(
         self,
-        working_dir: Path,
+        working_dir: Path | None,
         aborted: asyncio.Event | None = None,
         *,
         supports_vision: bool = True,
@@ -205,13 +219,25 @@ def truncate_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return head + note + tail
 
 
+def require_working_dir(ctx: ToolContext) -> Path:
+    """需要真实工作目录的工具从这里取：无项目态给出可读错误。"""
+    if ctx.working_dir is None:
+        raise ToolError(NO_PROJECT_HINT)
+    return ctx.working_dir
+
+
 def resolve_path(ctx: ToolContext, raw: str) -> Path:
     """把模型给的路径解析为绝对路径（相对路径基于工作目录）。
+
+    无项目态（working_dir 为 None）直接拒绝——没有工作目录就没有「基于工作
+    目录」可言，绝对路径也不放行，否则无项目会话变成无沙箱的任意文件读写。
 
     设置了 restrict_to_workdir（设置 · 高级里的「仅允许访问工作目录」）时，
     越界路径直接拒绝——只读工具是自动放行的，没有这道闸 Agent 可以不问就
     读走磁盘上任何文件（SSH 私钥、浏览器数据、别的项目）。
     """
+    if ctx.working_dir is None:
+        raise ToolError(NO_PROJECT_HINT)
     if raw is not None and raw.startswith("@") and len(raw) > 1:
         raw = raw[1:]  # 用户 @ 引用带进提示词的写法，容错剥掉
     p = Path(raw)
@@ -231,6 +257,8 @@ def resolve_path(ctx: ToolContext, raw: str) -> Path:
 
 def rel_path(ctx: ToolContext, p: Path) -> str:
     """展示用：优先显示相对工作目录的路径。"""
+    if ctx.working_dir is None:
+        return str(p)  # 无项目态到不了这里（resolve_path 已拒绝），兜个底
     try:
         return str(p.relative_to(ctx.working_dir))
     except ValueError:

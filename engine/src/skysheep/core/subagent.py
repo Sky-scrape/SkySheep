@@ -120,7 +120,7 @@ class SubagentPlan:
 async def run_subagent(
     *,
     provider: Provider,
-    working_dir: Path,
+    working_dir: Path | None,
     agent_type: str,
     prompt: str,
     max_iterations: int = 25,
@@ -214,7 +214,7 @@ class TaskManager:
     def __init__(
         self,
         provider_factory: Callable[[], Provider],
-        working_dir: Path,
+        working_dir: Path | None,
         max_iterations: int = 25,
         store=None,
         provider_resolver: Callable[[str, str, str], Provider] | None = None,

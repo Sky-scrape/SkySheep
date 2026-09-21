@@ -52,7 +52,7 @@
     <!-- 对话模式：侧栏内容 -->
     <div id="side-chat" class="side-nav">
       <button id="btn-new" class="nav-new" title="新建一个会话（Ctrl+N）">
-        <span class="nav-ico">＋</span>新建任务
+        <span class="nav-ico">＋</span>新建会话
         <span class="kbd">Ctrl N</span>
       </button>
 
@@ -146,7 +146,7 @@
   <!-- 拖动调整侧栏宽度（双击恢复默认） -->
   <div id="sb-resizer" class="ui-resizer ui-resizer-v" title="拖动调整侧栏宽度 · 双击恢复默认"></div>
 
-  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航六件套 + 功能图标（新建 / 搜索）
+  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航六件套 + 功能图标（新建会话 / 搜索）
        + 最近会话的首字快捷列（点击直接切换会话，当前项高亮）。
        显隐完全交给 CSS 的 body.left-collapsed（宽度 / 负 margin 滑动过渡，非硬切）——
        不要给 rail 及其按钮加 .hidden 类：它是 display:none !important，会把
@@ -173,7 +173,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/></svg>
     </button>
     <div class="rail-sep" aria-hidden="true"></div>
-    <button id="rail-new" class="rail-btn" title="新建任务（Ctrl+N）">＋</button>
+    <button id="rail-new" class="rail-btn" title="新建会话（Ctrl+N）">＋</button>
     <button id="rail-search" class="rail-btn" title="搜索会话：展开侧栏并聚焦搜索框">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
     </button>
@@ -543,15 +543,15 @@
             <div class="card-head">
               <h3>技能</h3>
               <span class="head-ops">
-                <button id="btn-scan-skill" class="btn-ghost">扫描本机</button>
+                <button id="btn-scan-skill" class="btn-ghost">本机现存</button>
                 <button id="btn-import-skill" class="btn-ghost">＋ 导入技能</button>
               </span>
             </div>
             <p class="settings-hint">
               技能是写给 Agent 看的「操作手册」：启用后相关用法会进入系统提示词，Agent 会在合适的任务里自动套用。
               点右上角「导入技能」：可以选本机的技能文件夹或 .zip 压缩包，也可以直接粘贴
-              <b>GitHub / Gitee 仓库链接</b>在线安装；「扫描本机」则自动识别 Claude Code
-              等工具已装在本机的技能，勾选即可复用，装完立即生效。
+              <b>GitHub / Gitee 仓库链接</b>在线安装；「本机现存」则在下方列出 Claude Code
+              等工具已装在本机的技能，勾选即可导入，装完立即生效。
             </p>
             <div id="skill-summary" class="skill-entry">
               <span class="skill-entry-main">
@@ -625,7 +625,7 @@
                 <button id="btn-skill-back" class="btn-ghost">← 返回</button>
                 <span class="detail-title" id="skill-manage-title">技能</span>
                 <span class="head-ops">
-                  <button id="btn-scan-skill-2" class="btn-ghost">扫描本机</button>
+                  <button id="btn-scan-skill-2" class="btn-ghost">本机现存</button>
                   <button id="btn-import-skill-2" class="btn-ghost">＋ 导入技能</button>
                 </span>
               </div>
@@ -636,6 +636,26 @@
               </p>
               <div id="skill-status" class="card-status" hidden></div>
               <ul id="settings-skill-list" class="list settings-skill-list"></ul>
+              <!-- 「本机现存」候选：点按钮后探测本机别家技能目录，结果直接平铺在这里
+                   （不再弹窗），勾选后可一次导入 -->
+              <div id="skill-local-panel" hidden>
+                <div class="scan-toolbar">
+                  <span class="scan-title">本机现存技能</span>
+                  <button class="btn-ghost" data-act="all">全选</button>
+                  <button class="btn-ghost" data-act="none">全不选</button>
+                  <span class="dim small" id="skill-local-note"></span>
+                </div>
+                <ul class="scan-list" id="skill-local-list"></ul>
+                <div class="scan-foot">
+                  <label>装到哪里
+                    <select id="skill-local-scope">
+                      <option value="global">全局（所有项目都能用）</option>
+                      <option value="project">仅本项目</option>
+                    </select>
+                  </label>
+                  <button class="btn-primary" id="btn-skill-local-import">导入所选</button>
+                </div>
+              </div>
             </section>
 
             <section class="settings-card">

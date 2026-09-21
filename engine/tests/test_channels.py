@@ -456,6 +456,47 @@ async def test_manager_enabled_without_token_reports_error():
     await mgr.stop()
 
 
+async def test_onboarding_claim_flow_after_empty_allowlist_enable():
+    """首次配置闭环：名单为空也能启用 → 陌生人消息只记进「发现的来源」→
+    认领后同一条来源的消息才被真正处理。
+
+    回归背景：启用曾被要求名单非空，而 chat id 只能由运行中的机器人发现，
+    两个条件互斥，首次配置永远卡死（用户视角就是「渠道用不了」）。
+    """
+    from skysheep.channels.base import ChannelMessage
+
+    config = {"telegram": {"enabled": True, "token": "t", "allowed_ids": []}}
+    mgr, host, ch = _manager(config)
+
+    # 启用后机器人开始工作；第一条消息来自名单外 → 只记录，不回复、不执行
+    await mgr._on_message(ChannelMessage(
+        channel="telegram", actor="777", chat_id="777", text="你好", approved=False))
+    assert ch.out == [] and host.ran == []
+    seen = mgr.status()["channels"][0]["seen_sources"]
+    assert [s["chat_id"] for s in seen] == ["777"]
+
+    # 用户在界面上点「加入允许名单」→ 名单更新（模拟 channel.save 后的重建）
+    config["telegram"]["allowed_ids"] = ["777"]
+    mgr2, host2, ch2 = _manager(config)
+    await mgr2._on_message(ChannelMessage(
+        channel="telegram", actor="777", chat_id="777", text="看下项目", approved=True))
+    assert host2.ran == [("sess-telegram", "看下项目")]
+    assert ch2.out and ch2.out[0][0] == "777"
+
+
+async def test_enabled_channel_with_empty_allowlist_stays_silent():
+    """空名单运行中：陌生来源反复发消息也绝不回复、绝不执行（安全边界不因放开启用而松动）。"""
+    from skysheep.channels.base import ChannelMessage
+
+    mgr, host, ch = _manager({"telegram": {"enabled": True, "token": "t", "allowed_ids": []}})
+    for i in range(3):
+        await mgr._on_message(ChannelMessage(
+            channel="telegram", actor="e", chat_id="e", text=f"第{i}条", approved=False))
+    assert ch.out == [] and host.ran == []
+    seen = mgr.status()["channels"][0]["seen_sources"]
+    assert len(seen) == 1 and seen[0]["count"] == 3
+
+
 # ---------- 配置读写 ----------
 
 
@@ -552,11 +593,19 @@ def test_channel_enable_requires_token_and_allowlist(client, home):
         assert frame["ok"] is False
         assert "Token" in frame["error"]
 
-        # 填了 token 但名单为空
-        _ws_call(ws, "c2", "channel.save", {"name": "telegram", "token": "abc"})
-        frame = _ws_call(ws, "c3", "channel.enable", {"name": "telegram"})
-        assert frame["ok"] is False
-        assert "名单" in frame["error"]
+
+def test_channel_enable_with_empty_allowlist_starts_polling(client, home):
+    """名单为空也允许启用：chat id 只能由运行中的机器人记进「发现的来源」，
+    若启用时要求名单非空，首次配置就死锁（机器人不跑 → 永远收不到第一条消息）。
+    安全语义不变：空名单 = 拒绝一切，由消息层强制，机器人对陌生人保持沉默。"""
+    with client.websocket_connect("/ws") as ws:
+        _ws_call(ws, "c1", "channel.save", {"name": "telegram", "token": "abc"})
+        frame = _ws_call(ws, "c2", "channel.enable", {"name": "telegram"})
+        assert frame["ok"] is True
+        tg = next(c for c in frame["result"]["channels"] if c["name"] == "telegram")
+        assert tg["enabled"] is True
+        assert tg["running"] is True, "启用后必须真的开始轮询，否则永远发现不了来源"
+        assert tg["allowed_ids"] == []
 
 
 def test_channel_enable_persists_and_disables(client, home):
@@ -738,6 +787,9 @@ async def test_weixin_fetch_qrcode_and_poll():
     info = await ch.fetch_qrcode()
     assert info["qrcode"] == "qr123"
     assert info["url"].startswith("https://")
+    # 契约关键：url 是「要编码进二维码的链接」，不是图片地址。
+    # 前端必须用二维码库渲染它（直接塞 <img src> 会因返回的是网页而破图）。
+    assert "liteapp.weixin.qq.com" in info["url"]
     st = await ch.poll_qrcode("qr123")
     assert st["status"] == "wait"
     await ch.stop()

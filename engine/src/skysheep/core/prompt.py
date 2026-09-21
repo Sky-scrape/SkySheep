@@ -99,12 +99,34 @@ Write it in the language of the prompt.
 """
 
 
-def build_system_prompt(working_dir: Path) -> str:
-    return PROMPT_TEMPLATE.format(
-        workdir=str(working_dir),
+# 无项目态的系统提示词补丁：告诉模型当前是快聊（没有工作目录），
+# 文件/命令类工具会拒绝执行，别白试也别装作能读写。
+NO_PROJECT_NOTE = """
+# No working directory (quick chat)
+- The user has NOT opened any project: there is no working directory in this
+  conversation, and file/command tools (read_file, write_file, edit_file,
+  list_dir, glob, grep, run_command, read_document, write_document,
+  generate_image) will return an error asking the user to add a project first.
+  Do not call them, and do not claim you have read or written any file.
+- You can still: chat, reason, use web_search / web_fetch for public info, and
+  use memory_write / schedule_write / todo_write (they do not need a folder).
+- When the user wants file or command work, tell them to click ＋ next to
+  「项目」 in the sidebar (添加项目) and pick a folder; once a project is open
+  the full toolset becomes available.
+"""
+
+
+def build_system_prompt(working_dir: Path | None) -> str:
+    """工作目录为 None 表示无项目态（快聊）：补一段说明而不是编造一个目录。"""
+    text = PROMPT_TEMPLATE.format(
+        workdir=("(none - no project is open; quick chat only)" if working_dir is None
+                 else str(working_dir)),
         osname=f"{platform.system()} {platform.release()}",
         date=date.today().isoformat(),
     )
+    if working_dir is None:
+        text += NO_PROJECT_NOTE
+    return text
 
 
 # ---- AGENTS.md / CLAUDE.md 项目说明（对标 Codex AGENTS.md / Claude Code CLAUDE.md）----

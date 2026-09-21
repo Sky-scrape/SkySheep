@@ -1,6 +1,6 @@
 [project]
 name = "skysheep-engine"
-version = "1.6"
+version = "1.7"
 description = "SkySheep engine — open-source AI agent workbench kernel (agent loop, tools, providers, permissions, sessions)"
 readme = "README.md"
 requires-python = ">=3.11"

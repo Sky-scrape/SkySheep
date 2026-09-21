@@ -75,6 +75,34 @@ async def test_list_sessions_by_project_cap_and_archive(store):
     assert [s.id for s in grouped2[p1]] == [made[-2].id, made[-3].id]
 
 
+async def test_list_quick_sessions_only_projectless(store):
+    """快聊专用口径：只取 project_id IS NULL 的会话，不带任何项目的会话。
+
+    list_sessions(None) 的语义是「全部会话」（CLI 与渠道在用），拿它当快聊
+    会连别的项目的会话一起捞出来，所以经典视图的快聊区块必须走本方法。
+    """
+    p1 = (await store.get_or_create_project("/p1")).id
+    in_project = await store.create_session(p1, "项目会话")
+    await store.append_message(in_project.id, Message.user("x"))
+    quick = await store.create_session(None, "快聊会话")
+    await store.append_message(quick.id, Message.user("x"))
+
+    listed = await store.list_quick_sessions()
+    assert [s.id for s in listed] == [quick.id]
+
+    # 归档 / 置顶排序与项目列表同一口径
+    await store.set_archived(quick.id, True)
+    assert await store.list_quick_sessions() == []
+    await store.set_archived(quick.id, False)
+    older = await store.create_session(None, "快聊旧会话")
+    await store.append_message(older.id, Message.user("x"))
+    await set_time(store, older.id, 100.0)
+    await set_time(store, quick.id, 200.0)
+    assert [s.id for s in await store.list_quick_sessions()] == [quick.id, older.id]
+    await store.set_pinned(older.id, True)
+    assert [s.id for s in await store.list_quick_sessions()] == [older.id, quick.id]
+
+
 # ---------------------------------------------------------------- WS 层
 
 
@@ -95,11 +123,21 @@ def test_session_list_all_projects_local_only(home, monkeypatch):
         ws.send_json({"id": "l1", "method": "session.list"})
         plain = recv_until(ws, "l1")["result"]
         assert [s["id"] for s in plain["sessions"]] == [created[1]]
+        # 经典视图的快聊区块：快聊会话的 project_id 是 NULL，永远不会进当前项目
+        # 列表，必须靠 quick_sessions 单独下发（否则经典视图根本看不到它们）
+        assert plain["quick_sessions"] == []
+        ws.send_json({"id": "t1", "method": "session.new_task", "params": {}})
+        quick = recv_until(ws, "t1")["result"]["id"]
+        ws.send_json({"id": "l1b", "method": "session.list"})
+        after = recv_until(ws, "l1b")["result"]
+        assert [s["id"] for s in after["sessions"]] == [created[1]]  # 当前项目列表不受影响
+        assert [s["id"] for s in after["quick_sessions"]] == [quick]
+        assert all(s["project_id"] is None for s in after["quick_sessions"])
 
         ws.send_json({"id": "l2", "method": "session.list", "params": {"all_projects": 1}})
         grouped = recv_until(ws, "l2")["result"]
-        assert sorted(s["id"] for s in grouped["sessions"]) == sorted(created)
-        assert len({s["project_id"] for s in grouped["sessions"]}) == 2
+        assert sorted(s["id"] for s in grouped["sessions"]) == sorted(created + [quick])
+        assert len({s["project_id"] for s in grouped["sessions"]}) == 3  # 两个项目 + 快聊
 
     from skysheep.server import app as server_app
     from skysheep.server.app import _client_is_local
@@ -110,6 +148,10 @@ def test_session_list_all_projects_local_only(home, monkeypatch):
         frame = recv_until(ws, "r1")
         assert frame["ok"] is False and "本机" in frame["error"]
         ws.send_json({"id": "r2", "method": "session.list"})
-        assert recv_until(ws, "r2")["ok"]
+        # 远程客户端连快聊列表也拿不到：快聊不属于当前项目，与 all_projects
+        # 同一安全口径（不能拿它枚举本机其他会话的标题）。字段直接不下发，
+        # 远程侧栏也就不会出现一个永远为空的快聊区块。
+        remote = recv_until(ws, "r2")
+        assert remote["ok"] and "quick_sessions" not in remote["result"]
     # 只恢复本机判定函数本身（同 test_security_hardening 的做法，不动环境变量）
     monkeypatch.setattr(server_app, "_client_is_local", _client_is_local)

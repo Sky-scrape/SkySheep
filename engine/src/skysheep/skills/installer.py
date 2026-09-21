@@ -97,7 +97,7 @@ def install_from_dir(src: str | Path, dest_root: Path, *, existing: set[str]) ->
     return {"installed": installed, "count": len(installed), "dest": str(dest_root)}
 
 
-# 别家 agent 工具的技能也装在 home 下的固定位置：「扫描本机技能」逐个探测，
+# 别家 agent 工具的技能也装在 home 下的固定位置：「本机现存」逐个探测，
 # 找到即可勾选导入 SkySheep 复用（路径在调用时 expanduser，兼容 Windows/macOS/Linux）
 LOCAL_SKILL_SOURCES: list[tuple[str, str]] = [
     ("Claude Code", "~/.claude/skills"),

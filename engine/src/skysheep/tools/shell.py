@@ -23,7 +23,7 @@ import time
 
 from pydantic import BaseModel, Field
 
-from .base import Safety, Tool, ToolContext, ToolError, truncate_output
+from .base import Safety, Tool, ToolContext, ToolError, require_working_dir, truncate_output
 
 DEFAULT_TIMEOUT_S = 120
 MAX_TIMEOUT_S = 600
@@ -287,10 +287,11 @@ class RunCommandTool(Tool):
             return _bg_list()
         if not args.command.strip():
             raise ToolError("command 不能为空")
+        workdir = require_working_dir(ctx)  # 无项目态：没有 cwd 可落，给可读拒绝
         _bg_gc()
         argv = _shell_argv(args.command)  # 参数列表形式（shell=False），与前台路径一致
         if args.background:
-            info = await asyncio.to_thread(_bg_start, argv, str(ctx.working_dir))
+            info = await asyncio.to_thread(_bg_start, argv, str(workdir))
             return (
                 f"后台进程已启动: id={info['pid']}（系统 PID {info['os_pid']}）\n"
                 f"命令: {args.command}\n"
@@ -299,7 +300,7 @@ class RunCommandTool(Tool):
             )
 
         status, out, err, code = await asyncio.to_thread(
-            _run_sync, argv, str(ctx.working_dir), args.timeout_s
+            _run_sync, argv, str(workdir), args.timeout_s
         )
         if status == "timeout":
             parts = [f"command timed out after {args.timeout_s}s（进程树已终止，以下是超时前的输出）"]

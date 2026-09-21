@@ -57,6 +57,72 @@ def test_ui_prefs_sidebar_view_whitelist(home):
     assert frame["result"]["prefs"] == {}
 
 
+def test_agenda_time_span_ui(home):
+    """日程时间段的前端契约：可设结束时间，且三种视图都按区间呈现。
+
+    锁四件事：弹窗有「设定时间段」开关与结束时间输入；未勾选时结束时间行隐藏；
+    周视图按持续时间给块高而不是固定 20px；列表/横幅走 fmtAgendaSpan（拼「起—止」）。
+    后端侧的时间段行为在 test_schedule.py。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+    modal = js[js.index("function agendaModal("):]
+    modal = modal[:modal.index('document.getElementById("btn-agenda-add")')]
+    for needle in ("ag-span-on", "ag-end", "ag-end-label", "设定时间段"):
+        assert needle in modal, f"日程弹窗缺时间段节点：{needle}"
+    # 结束时间早于或等于开始时间在前端先拦一道（后端也会拦）
+    assert "结束时间要晚于开始时间" in modal
+    assert "end_at" in modal
+
+    # 周视图：块高由持续时间算，最少 20 分钟；按点事件仍用默认高度
+    week = js[js.index("function renderWeekGrid("):]
+    week = week[:week.index("function renderMonthGrid(")]
+    assert "it.end_at" in week and "spanMin" in week
+    assert "Math.max(20" in week, "过短的时段也要保证块能放下标题"
+    assert "ag-evt" in css and ".ag-evt.span" in css
+
+    # 列表与提醒横幅共用同一套时间段文案
+    assert "function fmtAgendaSpan(" in js
+    assert "fmtAgendaSpan(it)" in js
+    assert "fmtAgendaSpan(item)" in js
+
+
+def test_classic_view_lists_quick_chats(home):
+    """经典视图底部要常驻一个「快聊」区块。
+
+    快聊会话的 project_id 是 NULL，而经典视图只取当前项目列表，所以它们
+    在那里原本一个都看不到（只在分组视图与「全部项目」搜索里露面）。
+    这里锁住三处协议：session.list 下发 quick_sessions（仅本机）、
+    经典视图单开一节渲染它、渲染位置在标签分组之后。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    # 经典视图渲染函数拿得到快聊数据（服务端单独下发，不混进「当前项目」）
+    body = js[js.index("async function refreshSessions("):]
+    body = body[:body.index("// 空会话清理入口")]
+    assert "quick_sessions" in body
+    assert "renderQuickSection(ul, quick_sessions" in body
+    # 字段缺失（远程客户端）时不渲染那个永远为空的区块
+    assert "Array.isArray(quick_sessions)" in body
+    # 区块在标签分组与空提示之后渲染：不能被「暂无会话」那句盖掉
+    assert body.index('暂无会话') < body.index("renderQuickSection(")
+    # 常驻：没会话时也要出席（快聊区块本身不发空提示）
+    quick = js[js.index("function renderQuickSection("):]
+    quick = quick[:quick.index("// ---- 拖动排序")]
+    assert 'groupState("quick")' in quick, "与分组视图的快聊组共用折叠状态"
+    assert "session.new_task" in quick, "组头 ＋ 要能新建快聊对话"
+    assert "orderedSessionList(list, \"quick\")" in quick, "组内序走同一份偏好"
+    assert "GROUP_PREVIEW" in quick, "组内默认只露几条，其余收进「显示更多」"
+    assert "不接拖动排序" in js, "经典视图的快聊行不能混进当前项目的拖动序"
+    # 样式：组头 ＋ 的手感同分组视图
+    assert ".s-quick-add" in css and ".s-quick" in css
+
+
 def test_ui_prefs_left_collapsed_clamped(home):
     """左侧栏折叠态（1=折叠，折叠钮/Ctrl+B 切换）：0/1 直接存，越界收敛，null 恢复默认。"""
     frame = call_ui(home, "ui.save", {"prefs": {"left_collapsed": 1}})

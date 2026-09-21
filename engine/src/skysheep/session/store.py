@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     title TEXT NOT NULL,
     notes TEXT NOT NULL DEFAULT '',
     start_at REAL NOT NULL,
+    end_at REAL NOT NULL DEFAULT 0,
     remind INTEGER NOT NULL DEFAULT 1,
     remind_before INTEGER NOT NULL DEFAULT 0,
     reminded INTEGER NOT NULL DEFAULT 0,
@@ -445,6 +446,13 @@ class SessionStore:
         try:
             await self._db.execute(
                 "ALTER TABLE schedules ADD COLUMN remind_before INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+        # 旧库迁移：schedules 补 end_at 列（可选结束时间；0 = 只记开始时刻，按点事件）
+        try:
+            await self._db.execute(
+                "ALTER TABLE schedules ADD COLUMN end_at REAL NOT NULL DEFAULT 0"
             )
         except Exception:
             pass
@@ -783,6 +791,22 @@ class SessionStore:
         rows = await cur.fetchall()
         return [session_from_row(r) for r in rows]
 
+    async def list_quick_sessions(self, limit: int = 50) -> list[Session]:
+        """只取快聊会话（project_id IS NULL），最近活跃在前。
+
+        经典视图的「快聊」区块用它：list_sessions(None) 的语义是「全部会话」
+        （CLI 与渠道在用），拿它当快聊会连别的项目的会话一起捞出来，所以
+        单独一条口径。已归档的同样不在这里（去归档弹窗恢复）。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM sessions WHERE project_id IS NULL AND archived = 0"
+            " ORDER BY pinned DESC, updated_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [session_from_row(r) for r in rows]
+
     async def list_sessions_by_project(
         self, limit_per_project: int = 50
     ) -> dict[int | None, list[Session]]:
@@ -808,14 +832,27 @@ class SessionStore:
         return out
 
     async def list_archived_sessions(
-        self, project_id: int | None = None, limit: int = 100
+        self, project_id: int | None = None, limit: int = 100,
+        include_projectless: bool = False,
     ) -> list[Session]:
-        """已归档会话（归档弹窗用），最近活跃在前。"""
+        """已归档会话（归档弹窗用），最近活跃在前。
+
+        include_projectless=True 时连同快聊（project_id IS NULL）的归档会话
+        一起返回：侧栏的「快聊」分组是常驻的，它的会话归档后必须能在同一个
+        弹窗里找回，否则不属于任何项目就意味着归档即永久消失。
+        """
         assert self._db
         if project_id is None:
             cur = await self._db.execute(
                 "SELECT * FROM sessions WHERE archived = 1"
                 " ORDER BY updated_at DESC LIMIT ?", (limit,)
+            )
+        elif include_projectless:
+            cur = await self._db.execute(
+                "SELECT * FROM sessions WHERE archived = 1"
+                " AND (project_id = ? OR project_id IS NULL)"
+                " ORDER BY updated_at DESC LIMIT ?",
+                (project_id, limit),
             )
         else:
             cur = await self._db.execute(
@@ -826,11 +863,23 @@ class SessionStore:
         rows = await cur.fetchall()
         return [session_from_row(r) for r in rows]
 
-    async def count_archived_sessions(self, project_id: int | None = None) -> int:
-        """当前项目（或全部项目）的归档会话数，侧栏归档入口的角标用。"""
+    async def count_archived_sessions(
+        self, project_id: int | None = None, include_projectless: bool = False
+    ) -> int:
+        """当前项目（或全部项目）的归档会话数，侧栏归档入口的角标用。
+
+        口径与 list_archived_sessions 一致（include_projectless 时含快聊），
+        否则角标会漏报快聊的归档会话，入口根本不出现。
+        """
         assert self._db
         if project_id is None:
             cur = await self._db.execute("SELECT COUNT(*) AS n FROM sessions WHERE archived = 1")
+        elif include_projectless:
+            cur = await self._db.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE archived = 1"
+                " AND (project_id = ? OR project_id IS NULL)",
+                (project_id,),
+            )
         else:
             cur = await self._db.execute(
                 "SELECT COUNT(*) AS n FROM sessions WHERE project_id = ? AND archived = 1",
@@ -1414,6 +1463,8 @@ class SessionStore:
             "title": r["title"],
             "notes": r["notes"],
             "start_at": r["start_at"],
+            # 0 = 未设结束时间（按点事件）；>0 时 start_at~end_at 是一个时间段
+            "end_at": float(r["end_at"] or 0),
             "remind": bool(r["remind"]),
             "remind_before": int(r["remind_before"]),
             "reminded": bool(r["reminded"]),
@@ -1429,13 +1480,23 @@ class SessionStore:
         notes: str = "",
         remind: bool = True,
         remind_before: int = 0,
+        end_at: float = 0,
     ) -> dict:
         assert self._db
         now = time.time()
         cur = await self._db.execute(
-            "INSERT INTO schedules (title, notes, start_at, remind, remind_before, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (title, notes, start_at, 1 if remind else 0, max(0, int(remind_before)), now, now),
+            "INSERT INTO schedules (title, notes, start_at, end_at, remind, remind_before,"
+            " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                title,
+                notes,
+                start_at,
+                max(0.0, float(end_at or 0)),
+                1 if remind else 0,
+                max(0, int(remind_before)),
+                now,
+                now,
+            ),
         )
         await self._db.commit()
         return await self.get_schedule(cur.lastrowid)  # type: ignore[return-value]
@@ -1463,11 +1524,15 @@ class SessionStore:
         title: str | None = None,
         notes: str | None = None,
         start_at: float | None = None,
+        end_at: float | None = None,
         remind: bool | None = None,
         remind_before: int | None = None,
         done: bool | None = None,
     ) -> dict | None:
-        """按传入字段部分更新；start_at 变化时重置已提醒标记（新时间要重新提醒）。"""
+        """按传入字段部分更新；start_at 变化时重置已提醒标记（新时间要重新提醒）。
+
+        end_at 传 0（或 None 以外的零值）即清除结束时间，回到按点事件。
+        """
         assert self._db
         row = await self.get_schedule(schedule_id)
         if not row:
@@ -1484,6 +1549,9 @@ class SessionStore:
             sets.append("start_at = ?")
             args.append(start_at)
             sets.append("reminded = 0")
+        if end_at is not None:
+            sets.append("end_at = ?")
+            args.append(max(0.0, float(end_at or 0)))
         if remind is not None:
             sets.append("remind = ?")
             args.append(1 if remind else 0)

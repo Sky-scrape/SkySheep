@@ -577,6 +577,43 @@ def test_market_modal_has_keyword_search(home):
     assert "renderMarketInto(body" in js
 
 
+def test_local_skills_render_inline_not_modal(home):
+    """「本机现存」：候选直接平铺在技能页按钮下方，不再弹窗。
+
+    锁住三件事：面板节点在技能页 HTML 里；候选渲染进面板而不是 showModal；
+    导入后重新探测（已装过的要转为灰显）。后端只读探测协议不变
+    （skills.scan_local 覆盖在 test_skills_scan.py）。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    for needle in ("btn-scan-skill", "btn-scan-skill-2", "skill-local-panel",
+                   "skill-local-list", "skill-local-scope", "btn-skill-local-import"):
+        assert needle in html, f"技能页缺本机候选节点：{needle}"
+    # 两个入口按钮的文案都改为「本机现存」，旧的「扫描本机」不再出现
+    assert html.count("本机现存") >= 4, "按钮与说明文案都要改叫「本机现存」"
+    assert "扫描本机" not in html
+
+    # 渲染函数住在 loadLocalSkills 里，且把候选写进面板容器
+    body = js[js.index("async function loadLocalSkills()"):]
+    body = body[:body.index("function deleteSkillModal")]
+    assert 'request("skills.scan_local")' in body
+    assert 'id="skill-local-list"' not in body  # 用 getElementById 取，不拼标签
+    assert "skill-local-list" in body and "scan-list" in body
+    # 不再是弹窗：这段代码里不该出现 showModal
+    assert "showModal" not in body
+    # 导入走既有 skills.install，单个失败不中断；成功后重新探测
+    import_body = js[js.index("async function importLocalSkills()"):]
+    import_body = import_body[:import_body.index("function deleteSkillModal")]
+    assert 'request("skills.install"' in import_body
+    assert "loadLocalSkills()" in import_body
+    # 面板样式：候选列表自己滚，底部一行是「装到哪里 + 导入所选」
+    assert "#skill-local-panel" in css and ".scan-foot" in css
+
+
 def test_skills_page_has_scope_controls(home):
     """技能独立页：总览卡片可点进入，页内能设使用范围、预览指令、逛广场。"""
     from skysheep.server.app import STATIC_DIR

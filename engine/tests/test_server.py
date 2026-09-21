@@ -714,6 +714,11 @@ def test_settings_whitelist_remove(home, monkeypatch):
             await store.add_rule(project.id, "run_command", "prefix", "git status")
         finally:
             await store.close()
+        # 无项目态成为合法状态后，启动只恢复 ui.json 记住的当前项目：
+        # 把种子项目记成「当前」，模拟上次退出时正开着它
+        (home / "home").mkdir(parents=True, exist_ok=True)
+        (home / "home" / "ui.json").write_text(
+            json.dumps({"active_project": project.id}), encoding="utf-8")
 
     asyncio.run(seed())
 
@@ -772,6 +777,10 @@ def test_settings_whitelist_check_export_import(home, monkeypatch):
             await store.add_rule(project.id, "run_command", "prefix", "git status")
         finally:
             await store.close()
+        # 同 whitelist_remove：把种子项目记成 ui.json 的当前项目
+        (home / "home").mkdir(parents=True, exist_ok=True)
+        (home / "home" / "ui.json").write_text(
+            json.dumps({"active_project": project.id}), encoding="utf-8")
 
     asyncio.run(seed())
 

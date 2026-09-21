@@ -250,7 +250,7 @@ body.ui-anim-off #sb-rail { transition: none !important; }
 .brand-text { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .brand-text b { font-size: 18px; font-weight: 800; letter-spacing: 2px; }
 
-/* —— 侧栏功能导航（新建任务 + 五个入口） —— */
+/* —— 侧栏功能导航（新建会话 + 五个入口） —— */
 .nav-new {
   display: flex; align-items: center; gap: 8px; width: 100%;
   background: var(--paper-raised); color: var(--text);
@@ -887,6 +887,8 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   display: block; margin: 9px 0 3px; font-size: 12.5px; color: var(--text2);
 }
 .agenda-fields label.agenda-remind { margin-top: 10px; }
+/* 结束时间行：未勾选「设定时间段」时加 .hidden 整体隐藏（.hidden 是全站通用工具类） */
+.agenda-fields label.agenda-end-label { margin-top: 6px; }
 .agenda-fields .modal-input { width: 100%; }
 /* 勾选框与 toggle-row 同规格：主题色 accent、16px 命中面积 */
 .agenda-remind input { accent-color: var(--blue); width: 16px; height: 16px; cursor: pointer; }
@@ -1409,6 +1411,20 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 #session-list li.s-group .s-group-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 #session-list li.s-group .s-group-count {
   flex-shrink: 0; font-size: 11px; opacity: .75; font-variant-numeric: var(--num);
+}
+/* 经典视图底部常驻的「快聊」区块：组头多一个 ＋，手感同分组视图组头的 .pg-add
+   （默认隐藏、悬停/聚焦才现，避免常驻列表里多出一个一直在闪的按钮） */
+#session-list li.s-group.s-quick { margin-top: 10px; }
+#session-list li.s-group .s-quick-add {
+  flex-shrink: 0; border: none; background: none; cursor: pointer;
+  color: var(--dim); font-size: 13px; line-height: 1; font-weight: 700;
+  padding: 2px 7px; border-radius: var(--r-xs);
+  opacity: 0; transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+}
+#session-list li.s-group:hover .s-quick-add,
+#session-list li.s-group .s-quick-add:focus { opacity: 1; }
+#session-list li.s-group .s-quick-add:hover {
+  color: var(--accent); background: var(--accent-weak, rgba(30, 90, 168, .08));
 }
 #session-list li .s-tags {
   display: flex; flex-wrap: wrap; gap: 4px;
@@ -2354,7 +2370,10 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .skill-toolbar .pick-all { display: flex; align-items: center; gap: 5px; cursor: pointer; }
 .skill-toolbar button:disabled { opacity: 0.45; cursor: default; }
 .skill-row .skill-pick { flex-shrink: 0; margin: 0; cursor: pointer; }
-/* 扫描本机技能：弹窗里的候选勾选列表（名称 + 描述 + 来源徽章，已装过的灰显） */
+/* 扫描本机技能：候选勾选列表（名称 + 描述 + 来源徽章，已装过的灰显）。
+   以前在弹窗里，现在直接平铺在技能页按钮下方的 #skill-local-panel 内 */
+#skill-local-panel { margin-top: 10px; }
+#skill-local-panel[hidden] { display: none; }
 .scan-list {
   list-style: none; margin: 8px 0; padding: 0;
   max-height: 300px; overflow: auto;
@@ -2378,6 +2397,30 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   border: 1px solid var(--line2); border-radius: var(--r-xs);
   padding: 1px 6px; background: var(--paper-raised);
 }
+/* 面板工具条：标题 + 全选/全不选 + 计数（行内平铺，不用弹窗那套下边距） */
+#skill-local-panel .scan-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px solid var(--line); border-bottom: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0; background: var(--paper-raised);
+}
+#skill-local-panel .scan-toolbar .scan-title { font-weight: 700; font-size: 13px; flex-shrink: 0; }
+#skill-local-panel .scan-toolbar button { font-size: 12px; padding: 3px 10px; }
+#skill-local-panel .scan-list { margin: 0; border-radius: 0 0 var(--r-sm) var(--r-sm); }
+/* 面板底部：装到哪里 + 导入所选 */
+.scan-foot {
+  display: flex; align-items: center; gap: 10px; margin-top: 9px;
+}
+.scan-foot label {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12.5px; color: var(--text2);
+}
+.scan-foot select {
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  padding: 5px 9px; font-size: 12.5px; font-family: inherit;
+}
+.scan-foot select:focus { outline: none; border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue); }
+.scan-foot .btn-primary { margin-left: auto; padding: 6px 16px; font-size: 13px; letter-spacing: 1px; }
 .scan-scope { margin-top: 2px; }  /* 主题样式走 .form-grid（与导入技能弹窗同款 select） */
 .skill-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .skill-top .skill-name {
@@ -2805,7 +2848,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 }
 #session-list li.pgroup-head:hover .pg-del { opacity: 1; }
 #session-list li.pgroup-head .pg-del:hover { color: var(--reg); background: rgba(143, 29, 29, .08); }
-/* 「任务」分组组头的 ＋：新建任务对话（手感同 pg-del，配色走主色） */
+/* 「任务」分组组头的 ＋：新建快聊对话（手感同 pg-del，配色走主色） */
 #session-list li.pgroup-head .pg-add {
   flex-shrink: 0; border: none; background: none; cursor: pointer;
   color: var(--dim); font-size: 13px; line-height: 1; font-weight: 700;
@@ -3448,10 +3491,13 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   flex: 0 0 96px; font-size: 13px; font-weight: 700; color: var(--text2);
 }
 /* 文本类控件统一纸墨样式：type 枚举写全会漏（number/date… 会掉回浏览器默认白框），
-   所以用「排除勾选框」的方式选中所有输入框 */
+   所以用「排除勾选框」的方式选中所有输入框。
+   min-width: 0 不能省：flex 项默认 min-width:auto，而表单控件的「自动最小宽度」
+   取自身固有尺寸（数字框约 180px），会把 flex-basis 顶开——声明 110px 的框实际
+   渲染成 ~181px、同一行里宽窄不一，根源就在这里 */
 .toolcfg-row select,
 .toolcfg-row input:not([type="checkbox"]):not([type="radio"]) {
-  flex: 0 0 340px; max-width: 100%;
+  flex: 0 0 340px; max-width: 100%; min-width: 0;
   padding: 7px 10px; font: inherit; color: var(--text);
   background: var(--paper-raised); border: 1.5px solid var(--line2);
   border-radius: var(--r-sm);
@@ -3461,9 +3507,11 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .toolcfg-row input[type="number"]:not([type="checkbox"]):not([type="radio"]) {
   flex: 0 0 110px; font-variant-numeric: var(--num);
 }
-/* 小数字框 / 中下拉：圆桌等短数值行用（把原先的内联 width 收进样式） */
-.toolcfg-row input[type="number"].num-sm:not([type="checkbox"]):not([type="radio"]) { flex: 0 0 80px; }
-.toolcfg-row select.sel-md { flex: 0 0 200px; }
+/* 短数值行（圆桌设置）：数字框与下拉同宽，左边缘对齐、右边缘齐平。
+   200px 取下拉需要的最宽值（最长选项「1 轮 · 看彼此草稿后修订」不被截断），
+   数字框跟随同一宽度，避免一行里出现 80 / 181 / 200 三种宽度。 */
+.toolcfg-row input[type="number"].num-sm:not([type="checkbox"]):not([type="radio"]),
+.toolcfg-row select.sel-md { flex: 0 0 200px; min-width: 0; }
 .toolcfg-row input:disabled {
   color: var(--dim); background: var(--paper-sunken); cursor: not-allowed;
 }
@@ -3616,7 +3664,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   flex-shrink: 0; padding: 6px; background: #fff; line-height: 0;
   border: 1.5px solid var(--ink-line); border-radius: var(--r-sm); box-shadow: var(--shadow-sm);
 }
-.wx-qr img { display: block; width: 168px; height: 168px; }
+.wx-qr img, .wx-qr canvas { display: block; }
 .wx-login-side { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 6px; }
 /* 底部全局项（审批等待时间）：与卡片同宽的一行，顶部一条细分隔线 */
 .channel-footer {
@@ -3808,6 +3856,11 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   font-weight: 600; background: var(--blue); color: var(--paper-raised);
   border: 1px solid var(--ink-line); border-radius: var(--r-xs); box-shadow: var(--shadow-sm);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; z-index: 2;
+}
+/* 时间段块：高度由持续时间决定（内联 style），文字改为顶部对齐、写不下就截断 */
+.ag-evt.span {
+  white-space: normal; line-height: 1.35; overflow: hidden;
+  display: flex; align-items: flex-start; padding-top: 1px;
 }
 .ag-evt:hover { filter: brightness(1.07); z-index: 4; }
 .ag-evt.done {

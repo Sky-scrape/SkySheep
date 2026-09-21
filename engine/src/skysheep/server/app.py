@@ -537,35 +537,56 @@ def create_app(
                 "query": str(params.get("query", "")),
                 "scope": scope,
                 "results": await backend.store.search_messages(
-                    backend.project.id, str(params.get("query", "")), scope=scope
+                    backend._cur_project_id(), str(params.get("query", "")), scope=scope
                 ),
             }
         if method == "session.list":
             # 分组侧栏要全部项目的会话；跨项目的标题/摘要是枚举其他项目的放大器，
             # 与 session.search scope=all 同一安全口径：只给本机桌面端（安全审查 B 族）
+            def _sess_brief(s) -> dict:
+                return {
+                    "id": s.id, "title": s.title, "updated_at": s.updated_at,
+                    "pinned": bool(s.pinned), "project_id": s.project_id,
+                    "summary": s.summary,
+                    "tags": [t for t in str(s.tags or "").split(",") if t],
+                    "archived": bool(s.archived),
+                }
+
+            quick_sessions: list = []
             if params.get("all_projects"):
                 if not local:
                     raise RuntimeError("跨项目会话列表只能在桌面端本机使用")
                 grouped = await backend.store.list_sessions_by_project(50)
                 sessions = [s for group in grouped.values() for s in group]
             else:
-                sessions = await backend.store.list_sessions(backend.project.id)
-            empty_count = await backend.store.count_empty_sessions(backend.project.id)
-            archived_count = await backend.store.count_archived_sessions(backend.project.id)
-            return {
+                sessions = (
+                    await backend.store.list_sessions(backend.project.id)
+                    if backend.project is not None
+                    else []
+                )
+                # 经典视图的快聊区块：快聊会话的 project_id 是 NULL，永远不会出现在
+                # 「当前项目」列表里，不带这个字段侧栏就看不到它们。与 all_projects
+                # 同一安全口径：快聊不属于当前项目，只给本机桌面端（远程客户端
+                # 连字段都不下发，侧栏也就不用显示一个永远为空的区块）。
+                if local:
+                    quick_sessions = await backend.store.list_quick_sessions()
+            empty_count = await backend.store.count_empty_sessions(backend._cur_project_id())
+            # 归档角标含快聊：侧栏归档弹窗能列快聊归档会话（见 list_archived_sessions），
+            # 这里的计数必须同一口径，否则入口不出现，弹窗也就点不开。
+            archived_count = await backend.store.count_archived_sessions(
+                backend._cur_project_id(), include_projectless=True
+            )
+            out = {
                 "empty_count": empty_count,
                 "archived_count": archived_count,
                 "sessions": [
-                    {
-                        "id": s.id, "title": s.title, "updated_at": s.updated_at,
-                        "pinned": bool(s.pinned), "project_id": s.project_id,
-                        "summary": s.summary,
-                        "tags": [t for t in str(s.tags or "").split(",") if t],
-                        "archived": bool(s.archived),
-                    }
+                    _sess_brief(s)
                     for s in (sessions if params.get("all_projects") else sessions[:50])
                 ],
             }
+            if local and not params.get("all_projects"):
+                out["quick_sessions"] = [_sess_brief(s) for s in quick_sessions]
+            return out
         if method == "session.new":
             return await backend.new_session()
         if method == "session.new_task":
@@ -613,7 +634,7 @@ def create_app(
                 str(params.get("id", "")), params.get("tags") or []
             )
         if method == "session.tags_list":
-            return {"tags": await backend.store.list_all_tags(backend.project.id)}
+            return {"tags": await backend.store.list_all_tags(backend._cur_project_id())}
         if method == "project.list":
             projects = await backend.store.list_projects()
             # 拖动排序（分组视图）：有保存的顺序就按它来（见 Backend.ordered_projects）
@@ -624,7 +645,7 @@ def create_app(
                 {
                     "id": p.id, "name": p.name,
                     "root_path": p.root_path if local else "",
-                    "is_current": p.id == backend.project.id,
+                    "is_current": (backend.project is not None and p.id == backend.project.id),
                 }
                 for p in projects
             ]}
@@ -1020,7 +1041,10 @@ def create_app(
                 for t in backend.agent.registry.all()
             ]}
         if method == "whitelist.list":
-            rules = await backend.store.list_rules(backend.project.id)
+            rules = (
+                await backend.store.list_rules(backend.project.id)
+                if backend.project is not None else []
+            )
             return {"rules": rules}
         raise RuntimeError("unknown method: " + method)
 

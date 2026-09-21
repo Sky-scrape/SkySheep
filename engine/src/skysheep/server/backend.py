@@ -859,7 +859,10 @@ class ServerBackend:
         provider_factory: Callable[[], Provider] | None = None,
         store: SessionStore | None = None,
     ) -> None:
-        self.working_dir = Path(working_dir).resolve()
+        # 启动目录只作首启建项目用；真正的工作目录在 setup/_bind_project 里
+        # 按记住的当前项目确定（无项目态是合法状态，working_dir 可为 None）
+        self._startup_dir: Path | None = Path(working_dir).resolve()
+        self.working_dir: Path | None = self._startup_dir
         self.provider_name_arg = provider_name
         self._provider_factory_override = provider_factory
         self._store_override = store
@@ -1050,29 +1053,37 @@ class ServerBackend:
     # ---- 生命周期 ----
 
     async def setup(self) -> None:
-        if not self.working_dir.exists():
-            raise RuntimeError("directory not found: " + str(self.working_dir))
         self.cfg = load_config()
-        # hooks（工具调用前后的用户钩子，config.toml [hooks]）
-        raw_cfg = load_raw_config()
-        pre_rules, post_rules = hooks_from_config(raw_cfg)
-        self.hooks = HookRunner(pre_rules, post_rules, working_dir=self.working_dir) \
-            if (pre_rules or post_rules) else None
-        # 检查点落盘：按项目隔离目录（切项目互不可见，重启后仍可回滚）
-        self.checkpoints = CheckpointStore(root=self._checkpoint_root())
         self.store = self._store_override or await SessionStore(db_path()).connect()
-        self.project = await self.store.get_or_create_project(str(self.working_dir))
+        # 启动即确定「当前项目」：优先恢复上次用的（ui.json 的 active_project，
+        # 0 = 明确的无项目态）；没有记住过（首次启动/老版本升级）才沿用启动目录。
+        # 无项目态是合法状态：不建任何项目记录，快聊照常可用。
+        prefs = self._read_ui_prefs()
+        remembered = prefs.get("active_project")
+        projects = await self.store.list_projects()
+        target: Path | None = None
+        if remembered:
+            row = next((p for p in projects if p.id == remembered), None)
+            if row is not None and Path(row.root_path).is_dir():
+                target = Path(row.root_path)
+        elif not projects:
+            # 首次启动（没有任何项目记录、也没记住过当前项目）：把启动目录
+            # 登记成第一个项目，保持「装完即用」的开箱体验
+            if self._startup_dir is not None and self._startup_dir.is_dir():
+                target = self._startup_dir
+        if target is not None and not target.is_dir():
+            target = None
+        self.working_dir = target
         # 上次退出时正在跑的编排节点：标为错误等用户手动重跑（无人值守恢复执行有风险）
         _interrupted = await self.store.reset_interrupted_pipelines()
         if _interrupted:
             logging.getLogger("skysheep").info(
                 "任务编排：%d 个节点因上次退出被中断，已标记待重跑", _interrupted
             )
-        self.gate = PermissionGate(store=self.store, project_id=self.project.id,
-                                   working_dir=self.working_dir)
-        await self.gate.load_project_rules()
+        self.subagent_store.load()
+        await self._bind_project(target)
         # 分级权限模式：上次会话选的档位（0=安全执行 1=自动编辑 2=完全访问）重启后保持
-        self._apply_gate_accept_pref(self._read_ui_prefs().get("accept_edits", 0))
+        self._apply_gate_accept_pref(prefs.get("accept_edits", 0))
         # 内置示例快捷指令：首启落成真实记录（老用户已有自定义指令则跳过）
         await self._seed_builtin_snippets()
         # 缺 API Key 不阻塞启动：记录状态，界面里可见/可切换后再用
@@ -1094,31 +1105,6 @@ class ServerBackend:
             for name, st in self.mcp.statuses.items()
             if st.error
         ]
-
-        self.skills = SkillLoader(
-            global_dir=skysheep_home() / "skills",
-            project_dir=self._project_skills_dir_if_trusted(),
-            state_path=self.working_dir / ".skysheep" / "skills.json",
-            scope_path=skysheep_home() / "skills-scope.json",
-            project_root=self.working_dir,
-        )
-        self.skills.discover()
-
-        # 项目说明（对标 Codex AGENTS.md / Claude Code CLAUDE.md）
-        self.instructions_file, self.instructions_text = load_project_instructions(self.working_dir)
-
-        self.subagent_store.load()
-        self.tasks = TaskManager(
-            provider_factory=lambda: self.provider,
-            working_dir=self.working_dir,
-            max_iterations=self.cfg.subagent_max_iterations,
-            store=self.subagent_store,
-            provider_resolver=self._subagent_provider,
-            registry_resolver=self._subagent_registry,
-            max_concurrent=3,
-            usage_recorder=self._record_subagent_usage,
-            event_emitter=self._ws_broadcast,
-        )
 
         self._base_agent = Agent(
             provider=self.provider,
@@ -1145,8 +1131,22 @@ class ServerBackend:
 
     def _checkpoint_root(self) -> Path:
         """当前项目的检查点目录（按工作目录指纹隔离）。"""
-        tag = hashlib.sha256(str(self.working_dir).lower().encode("utf-8")).hexdigest()[:12]
+        tag = hashlib.sha256(
+            (str(self.working_dir) if self.working_dir else "(no-project)").lower()
+            .encode("utf-8")
+        ).hexdigest()[:12]
         return skysheep_home() / "backups" / "checkpoints" / tag
+
+    def _cur_project_id(self) -> int | None:
+        """当前项目 id；无项目态返回 None（快聊/无项目语义）。"""
+        return self.project.id if self.project is not None else None
+
+    def _require_project(self, action: str = "执行这个操作") -> None:
+        """项目级能力（定时任务/编排/白名单/项目任务）的统一门槛：无项目给可读错误。"""
+        if self.project is None:
+            raise RuntimeError(
+                f"当前没有项目，无法{action}——先在侧栏「项目」区点 ＋ 添加项目并选择一个文件夹。"
+            )
 
     def _websearch_kwargs(self) -> dict | None:
         try:
@@ -1209,13 +1209,16 @@ class ServerBackend:
             browser_control=self.cfg.browser_control,
         ))
         registry.register(LoadSkillTool(self.skills))
-        if self.cfg.subagent_enabled:
+        # 无项目态不注册子代理/编排：子代理要工作目录、流水线绑定项目，
+        # 没项目时给了模型也只会空转；切回项目后重建注册表自动恢复
+        if self.cfg.subagent_enabled and self.project is not None:
             registry.register(SpawnAgentTool(self.tasks))
             registry.register(CheckTaskTool(self.tasks))
         # 任务编排：Agent 可以排流水线（草稿），启动与否由用户在面板决定
-        registry.register(PipelineWriteTool(
-            self.store, lambda: self.project.id, lambda: self.tasks,
-        ))
+        if self.project is not None:
+            registry.register(PipelineWriteTool(
+                self.store, lambda: self.project.id, lambda: self.tasks,
+            ))
         for t in self.mcp_tools:
             registry.register(t)
         return registry
@@ -1262,6 +1265,7 @@ class ServerBackend:
             notes=str(params.get("notes", "")),
             remind=bool(params.get("remind", True)),
             remind_before=int(params.get("remind_before", 0) or 0),
+            end_at=float(params.get("end_at") or 0),
         )
         self.notify_schedule_changed()
         return row
@@ -1275,6 +1279,8 @@ class ServerBackend:
             kw["notes"] = str(params["notes"])
         if params.get("start_at") is not None:
             kw["start_at"] = float(params["start_at"])
+        if params.get("end_at") is not None:
+            kw["end_at"] = float(params["end_at"] or 0)
         if params.get("remind") is not None:
             kw["remind"] = bool(params["remind"])
         if params.get("remind_before") is not None:
@@ -1406,10 +1412,12 @@ class ServerBackend:
                 pass
 
     async def cron_list(self) -> dict:
+        self._require_project("列出定时任务")
         tasks = await self.store.list_cron_tasks(self.project.id)
         return {"tasks": tasks}
 
     async def cron_add(self, params: dict) -> dict:
+        self._require_project("新建定时任务")  # 定时任务绑定项目的工作目录与白名单
         name = str(params.get("name", "")).strip()[:40] or "未命名任务"
         prompt = str(params.get("prompt", "")).strip()
         if not prompt:
@@ -1488,23 +1496,27 @@ class ServerBackend:
         """定时任务必须属于当前项目才能改/删/触发（安全审查 B8）。
 
         报错文案与其他归属校验一致（不区分「不存在/无权」，防枚举）。
+        无项目态没有可归属的项目，同样按不存在处理。
         """
-        if task.get("project_id") != self.project.id:
+        if task.get("project_id") != self._cur_project_id():
             raise RuntimeError("任务不存在: " + str(task.get("id")))
 
-    async def _cron_execution_context(self, task: dict) -> tuple[int, Path]:
+    async def _cron_execution_context(self, task: dict) -> tuple[int | None, Path | None]:
         """定时任务的项目上下文：返回（project_id, working_dir）。
 
         扫描循环会看到所有项目的到点任务，但后端只挂在当前项目上；
         不区分归属的话，B 项目的任务会把 prompt 执行到 A 项目的文件上
         （会话/白名单/工作目录全部错位）。目录已不存在时回退当前项目，
-        任务本身的错误由运行结果体现。
+        任务本身的错误由运行结果体现；无项目态（当前项目已删空）时返回
+        (None, None)，由调用方把任务标成「所属项目已不存在」。
         """
         pid = task.get("project_id")
-        if pid is not None and pid != self.project.id:
+        if pid is not None and pid != self._cur_project_id():
             proj = await self.store.get_project(pid)
             if proj is not None and Path(proj.root_path).is_dir():
                 return pid, Path(proj.root_path)
+        if self.project is None:
+            return None, None
         return self.project.id, self.working_dir
 
     async def _run_cron_task(self, task_id: int, force: bool = False) -> None:
@@ -1525,6 +1537,9 @@ class ServerBackend:
             # 按任务自身项目跑（见 _cron_execution_context）：会话归属、白名单、
             # 工作目录都要对上，不能把别的项目的任务挂到当前项目执行
             cron_pid, cron_workdir = await self._cron_execution_context(task)
+            if cron_pid is None or cron_workdir is None:
+                # 项目已删空（无项目态）：没有可落的工作目录，不再重排下一次运行
+                raise RuntimeError("任务所属的项目已不存在，定时任务已停用")
 
             # 每个任务一个独立会话（同名），历史随运行累积
             sess = await self.store.create_session(cron_pid, title=f"⏰ {task['name']}")
@@ -1871,13 +1886,17 @@ class ServerBackend:
             "body": f"终止节点「{node['title']}」条件满足，后续节点已停止。",
         })
 
-    async def _pipeline_execution_context(self, pipe: dict) -> tuple[int, Path]:
-        """流水线归属项目的执行上下文（对标 _cron_execution_context）。"""
+    async def _pipeline_execution_context(self, pipe: dict) -> tuple[int | None, Path | None]:
+        """流水线归属项目的执行上下文（对标 _cron_execution_context）。
+
+        无项目态（流水线所属项目已删空）返回 (None, None)，调用方报错终止。"""
         pid = pipe.get("project_id")
-        if pid is not None and pid != self.project.id:
+        if pid is not None and pid != self._cur_project_id():
             proj = await self.store.get_project(pid)
             if proj is not None and Path(proj.root_path).is_dir():
                 return pid, Path(proj.root_path)
+        if self.project is None:
+            return None, None
         return self.project.id, self.working_dir
 
     @staticmethod
@@ -1896,11 +1915,13 @@ class ServerBackend:
             if not path.is_absolute():
                 pipe = await self.store.get_pipeline(node["pipeline_id"])
                 pid = pipe.get("project_id") if pipe else None
-                if pid is not None and pid != self.project.id:
+                if pid is not None and pid != self._cur_project_id():
                     proj = await self.store.get_project(pid)
                     base = Path(proj.root_path) if proj is not None else self.working_dir
                 else:
                     base = self.working_dir
+                if base is None:
+                    return  # 无项目态：没有可落的工作目录，只留摘要注入
                 path = base / path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(result, encoding="utf-8")
@@ -1953,6 +1974,8 @@ class ServerBackend:
             if self.provider is None:
                 raise RuntimeError("尚未配置可用的模型 API Key")
             run_pid, run_workdir = await self._pipeline_execution_context(pipe)
+            if run_pid is None or run_workdir is None:
+                raise RuntimeError("流水线所属的项目已不存在，无法继续执行")
             prev_error = node.get("last_error") or ""  # 重试上下文要取更新前的快照
             if node["kind"] == "session":
                 # 会话续跑预检：会话正被使用时不硬拒——不占并发、不消耗重试次数，
@@ -2189,11 +2212,12 @@ class ServerBackend:
     # ---- 任务编排：WS 方法 ----
 
     async def pipeline_list(self) -> dict:
+        self._require_project("列出任务编排")  # 流水线绑定项目的工作目录
         return {"pipelines": await self.store.list_pipelines(self.project.id)}
 
     async def pipeline_get(self, params: dict) -> dict:
         pipe = await self.store.get_pipeline(int(params.get("id", 0)))
-        if pipe is None or pipe["project_id"] != self.project.id:
+        if pipe is None or pipe["project_id"] != self._cur_project_id():
             raise RuntimeError("流水线不存在: " + str(params.get("id")))
         # token 用量汇总：节点会话的 usage_log 聚合（无人值守批量跑的成本一眼可见）
         try:
@@ -2209,7 +2233,7 @@ class ServerBackend:
         启动时对账会标错，用户可删；不在这里静默转 run（指令可能为空）。
         """
         pipe = await self.store.get_pipeline(int(params.get("id", 0)))
-        if pipe is None or pipe["project_id"] != self.project.id:
+        if pipe is None or pipe["project_id"] != self._cur_project_id():
             raise RuntimeError("流水线不存在: " + str(params.get("id")))
         by_old = {n["id"]: i for i, n in enumerate(pipe["nodes"])}
         nodes = []
@@ -2235,7 +2259,7 @@ class ServerBackend:
     async def pipeline_export(self, params: dict) -> dict:
         """导出流水线为可分享的 JSON（依赖转为同批次序号，导入时重新物化）。"""
         pipe = await self.store.get_pipeline(int(params.get("id", 0)))
-        if pipe is None or pipe["project_id"] != self.project.id:
+        if pipe is None or pipe["project_id"] != self._cur_project_id():
             raise RuntimeError("流水线不存在: " + str(params.get("id")))
         by_id = {n["id"]: i for i, n in enumerate(pipe["nodes"])}
         nodes = []
@@ -2266,6 +2290,7 @@ class ServerBackend:
         raw_nodes = raw.get("nodes")
         if not isinstance(raw_nodes, list) or not raw_nodes:
             raise RuntimeError("导出内容里没有节点")
+        self._require_project("新建任务编排")  # 流水线绑定项目的工作目录
         nodes = await self._normalize_pipeline_nodes(raw_nodes)
         pipe = await self.store.add_pipeline(
             self.project.id, name, nodes=nodes,
@@ -2331,7 +2356,7 @@ class ServerBackend:
                 })
             elif session_id:
                 sess = await self.store.get_session(session_id)
-                if sess is None or sess.project_id != self.project.id:
+                if sess is None or sess.project_id != self._cur_project_id():
                     raise RuntimeError(f"第 {i + 1} 个节点的会话不存在或不属于当前项目")
                 base.update({
                     "title": base["title"] or f"会话续跑：{(sess.title or session_id)[:40]}",
@@ -2348,6 +2373,7 @@ class ServerBackend:
         return nodes
 
     async def pipeline_create(self, params: dict) -> dict:
+        self._require_project("新建任务编排")  # 流水线绑定项目的工作目录
         name = str(params.get("name") or "").strip() or "未命名流水线"
         nodes = await self._normalize_pipeline_nodes(params.get("nodes"))
         pipe = await self.store.add_pipeline(
@@ -2397,7 +2423,7 @@ class ServerBackend:
             raise RuntimeError("流水线不存在: " + str(params.get("id")))
         self._check_pipeline_ownership(pipe)
         cron = await self.store.get_cron_task(int(params.get("cron_id", 0)))
-        if cron is None or cron["project_id"] != self.project.id:
+        if cron is None or cron["project_id"] != self._cur_project_id():
             raise RuntimeError("定时任务不存在（或不属于当前项目）")
         depends_on = params.get("depends_on")
         node = await self.store.add_pipeline_node(
@@ -2445,7 +2471,7 @@ class ServerBackend:
 
     def _check_pipeline_ownership(self, pipe: dict) -> None:
         """流水线必须属于当前项目才能改/删/启停（同 _check_cron_ownership，防枚举）。"""
-        if pipe.get("project_id") != self.project.id:
+        if pipe.get("project_id") != self._cur_project_id():
             raise RuntimeError("流水线不存在: " + str(pipe.get("id")))
 
     async def pipeline_start(self, params: dict) -> dict:
@@ -2610,14 +2636,17 @@ class ServerBackend:
     def compose_system(self) -> str:
         return self.compose_system_for(self.working_dir)
 
-    def compose_system_for(self, workdir: Path) -> str:
+    def compose_system_for(self, workdir: Path | None) -> str:
         """无人值守跨项目运行（定时任务/流水线节点）按目标目录组装系统提示词。
 
         工作目录与项目约定（AGENTS.md）必须取目标目录的——否则提示词里写着
         A 目录、实际却在 B 目录干活，Agent 会找错地方；技能段沿用当前装载的
         SkillLoader（按目录重挂载过重），全局记忆本就跨项目。
+        workdir 为 None 是无项目态：提示词里说明没有工作目录，快聊不可读写文件。
         """
-        instr_file, instr_text = load_project_instructions(workdir)
+        instr_file, instr_text = (
+            load_project_instructions(workdir) if workdir is not None else (None, "")
+        )
         return (
             build_system_prompt(workdir)
             + self.skills.render_prompt_section()
@@ -2626,7 +2655,8 @@ class ServerBackend:
         )
 
     async def new_session(self) -> dict:
-        self.session = await self.store.create_session(self.project.id)
+        # 无项目态新建的会话归入快聊（project_id 为 NULL）：没有项目可归属
+        self.session = await self.store.create_session(self._cur_project_id())
         self._get_runtime(self.session.id)  # 预建 runtime（自带系统提示词）
         return {"id": self.session.id, "title": "", "summary": ""}
 
@@ -2640,17 +2670,20 @@ class ServerBackend:
 
     async def open_initial_session(self) -> dict | None:
         """启动时接着上次的会话继续；完全没历史则不创建（懒创建：发第一条消息时才落库），
-        避免每次启动都堆积空会话。"""
-        latest = await self.store.latest_session(self.project.id)
+        避免每次启动都堆积空会话。无项目态接快聊最近的会话（latest_session(None)
+        的语义就是 project_id IS NULL）。"""
+        latest = await self.store.latest_session(self._cur_project_id())
         if latest is not None:
             return await self.resume_session(latest.id)
         self.session = None
         return None
 
     async def cleanup_empty_sessions(self) -> dict:
-        """删除本项目下没有任何消息的空会话（保留当前会话与置顶会话）。"""
+        """删除本项目下没有任何消息的空会话（保留当前会话与置顶会话）。
+
+        无项目态清的是快聊的空会话（delete_empty_sessions(None) 的口径）。"""
         keep = self.session.id if self.session else None
-        removed = await self.store.delete_empty_sessions(self.project.id, keep_id=keep)
+        removed = await self.store.delete_empty_sessions(self._cur_project_id(), keep_id=keep)
         return {"removed": removed}
 
     async def _get_owned_session(self, session_id: str):
@@ -2660,8 +2693,19 @@ class ServerBackend:
         按会话 id 的远程操作（chat.send/refs/export/delete/元数据…）必须
         先过这里，否则别的项目的会话会被挂进当前项目的工作目录与权限门下。
         报错不区分「不存在/无权」，避免给枚举探测提供区分信号。
+
+        快聊会话（project_id IS NULL）不属于任何项目，却出现在侧栏的常驻
+        「快聊」分组里，用户理应能像普通会话一样点开与删除：只按当前项目
+        校验会让它们全部报「session not found」（列表看得见、点不动）。
+        这里显式承认快聊的开放归属——它不带任何项目上下文，挂进当前项目的
+        工作目录不构成跨项目越权；其他项目的会话仍然照旧拒绝。
         """
-        sess = await self.store.get_session_for_project(session_id, self.project.id)
+        pid = self.project.id if self.project is not None else None
+        sess = await self.store.get_session_for_project(session_id, pid)
+        if sess is None:
+            # 快聊会话在项目查询下必然为 None：再确认它确实是无项目会话，
+            # 而不是「属于别的项目」。两者放行的只有前者。
+            sess = await self.store.get_session_for_project(session_id, None)
         if sess is None:
             raise RuntimeError("session not found: " + session_id)
         return sess
@@ -2719,7 +2763,7 @@ class ServerBackend:
         seq = int(params["seq"]) if params.get("seq") is not None else (
             await self.store.max_seq(sid) or 0)
         new_sess = await self.store.create_session(
-            self.project.id, title=(f"└ {sess.title or '分叉'}")[:40]
+            self._cur_project_id(), title=(f"└ {sess.title or '分叉'}")[:40]
         )
         n = await self.store.copy_messages_between(sid, new_sess.id, seq)
         await self.store.touch(new_sess.id)
@@ -2830,7 +2874,7 @@ class ServerBackend:
         """
         blocks: list[str] = []
         for rid in refs:
-            if await self.store.get_session_for_project(rid, self.project.id) is None:
+            if await self.store.get_session_for_project(rid, self._cur_project_id()) is None:
                 continue  # 不属于本项目的会话：当作不存在，不注入
             title = await self.store.get_session_title(rid)
             try:
@@ -3753,7 +3797,7 @@ class ServerBackend:
         todo_tool = self.agent.registry.get("todo_write")
         return {
             "version": __version__,
-            "working_dir": str(self.working_dir),
+            "working_dir": str(self.working_dir or ""),
             "provider": self.provider_name,
             "model": self.provider_model,
             "provider_error": self.provider_error,
@@ -3796,7 +3840,13 @@ class ServerBackend:
         全局口径（预算本身是全局设置）。
         """
         days = min(90, max(1, int(params.get("days", 14))))
-        st = await self.store.usage_stats(days, project_id=self.project.id)
+        # 无项目态没有可归属的项目：不传过滤目标 = 全局口径（此时库里也没有
+        # 别的项目，等价于快聊用量；带会话标题的 by_session 只在有项目时下发）
+        if self.project is not None:
+            st = await self.store.usage_stats(days, project_id=self.project.id)
+        else:
+            st = await self.store.usage_stats(days)
+            st["by_session"] = []  # 无项目态不展示按会话用量（B14：防跨项目标题枚举）
         prices = {
             name: {"price_in": pc.price_in, "price_out": pc.price_out}
             for name, pc in self.cfg.providers.items()
@@ -3827,7 +3877,12 @@ class ServerBackend:
 
         fs_read / fs_write 共用：resolve 消掉 .. 后必须仍在工作目录里，
         Windows 非法字符（盘符冒号等）在 resolve/relative_to 时抛错同样拦下。
+        无项目态（没有工作目录）直接给可读拒绝。
         """
+        if self.working_dir is None:
+            raise RuntimeError(
+                "当前没有项目，文件面板不可用——先在侧栏「项目」区点 ＋ 添加项目并选择一个文件夹。"
+            )
         target = Path(raw)
         if not target.is_absolute():
             target = self.working_dir / target
@@ -4020,6 +4075,8 @@ class ServerBackend:
 
     async def workspace_files(self) -> dict:
         """/@ 文件提及的数据源：项目内文件相对路径清单（跳过依赖与构建目录）。"""
+        if self.working_dir is None:
+            return {"files": [], "dirs": [], "no_project": True}
         return await asyncio.to_thread(self._walk_workspace_files)
 
     SKIP_DIRS = {
@@ -4141,10 +4198,16 @@ class ServerBackend:
 
     def term_spawn(self, term_id: str, rows: int, cols: int) -> dict:
         """在当前项目工作目录里开一个常驻 PowerShell 标签。"""
+        if self.working_dir is None:
+            raise RuntimeError(
+                "当前没有项目，终端不可用——先在侧栏「项目」区点 ＋ 添加项目并选择一个文件夹。"
+            )
         return self.term.spawn(term_id, self.working_dir, rows, cols, self)
 
     def term_input(self, term_id: str, data: str, rows: int, cols: int) -> dict:
         """向标签的 shell 写按键（shell 已退出时自动重启）。"""
+        if self.working_dir is None:
+            raise RuntimeError("当前没有项目，终端不可用——先添加一个项目。")
         return self.term.input(term_id, self.working_dir, data, rows, cols, self)
 
     def term_resize(self, term_id: str, rows: int, cols: int) -> dict:
@@ -4172,7 +4235,8 @@ class ServerBackend:
             detail = self.provider_error or "请先在 设置 · 模型服务 里启用一个模型"
             raise RuntimeError(f"模型服务未配置或不可用：{detail}")
         if not self.aux_history:
-            self.aux_history.append(Message.system(self.AUX_SYSTEM.format(cwd=self.working_dir)))
+            self.aux_history.append(Message.system(
+                self.AUX_SYSTEM.format(cwd=str(self.working_dir or "（未选择项目）"))))
         self.aux_history.append(Message.user(text))
         parts: list[str] = []
         think_parts: list[str] = []
@@ -4298,6 +4362,7 @@ class ServerBackend:
 
     async def add_whitelist_rule(self, tool: str, kind: str, pattern: str = "") -> dict:
         """手动添加一条项目级规则（设置页入口）。写库后立即 reload，与 remove 同一路径。"""
+        self._require_project("保存白名单规则")  # 白名单按项目持久化
         tool, kind, pattern = self._validate_whitelist_rule(tool, kind, pattern)
         rules = await self.store.list_rules(self.project.id)
         if any(
@@ -4310,7 +4375,11 @@ class ServerBackend:
         return {"rules": await self.store.list_rules(self.project.id)}
 
     async def clear_whitelist_rules(self, kind: str = "") -> dict:
-        """清空项目白名单（kind 为空 = 全部；收紧动作，远端也放行）。"""
+        """清空项目白名单（kind 为空 = 全部；收紧动作，远端也放行）。
+
+        无项目态没有可清的白名单：直接返回 0（收紧动作不报错，远端也放行）。"""
+        if self.project is None:
+            return {"removed": 0}
         removed = await self.store.clear_rules(
             self.project.id, kind if kind in RULE_KINDS else ""
         )
@@ -4321,6 +4390,7 @@ class ServerBackend:
         """删一条项目级规则（设置页入口）。带归属校验：凭枚举到的 rule_id
         不能删其他项目的规则（安全审查 B11），store 层把 project_id 写进 DELETE。
         """
+        self._require_project("删除白名单规则")  # 白名单按项目持久化
         rules = await self.store.list_rules(self.project.id)
         if not any(r["id"] == rule_id for r in rules):
             raise RuntimeError("规则不存在，可能已被删除")
@@ -4336,6 +4406,7 @@ class ServerBackend:
         return self.gate.explain(tool, text or "")
 
     async def export_whitelist(self) -> dict:
+        self._require_project("导出白名单")  # 白名单按项目持久化
         rules = await self.store.list_rules(self.project.id)
         return {
             "version": 1,
@@ -4349,6 +4420,7 @@ class ServerBackend:
 
     async def import_whitelist(self, rules: list) -> dict:
         """导入规则（合并模式）：逐条走与手动添加相同的校验，重复或不合法的跳过。"""
+        self._require_project("导入白名单规则")  # 白名单按项目持久化
         items = rules if isinstance(rules, list) else []
         existing = await self.store.list_rules(self.project.id)
         seen = {(r["tool"], r["kind"], r["pattern"]) for r in existing}
@@ -4532,6 +4604,10 @@ class ServerBackend:
     def _skill_root(self, scope: str) -> Path:
         """技能安装位置：global = 所有项目共用，project = 只在当前项目生效。"""
         if scope == "project":
+            if self.working_dir is None:
+                raise RuntimeError(
+                    "项目技能需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。"
+                )
             return self.working_dir / ".skysheep" / "skills"
         if scope != "global":
             raise RuntimeError("scope 只能是 global 或 project: " + str(scope))
@@ -4572,14 +4648,15 @@ class ServerBackend:
         return result
 
     async def scan_local_skills(self) -> dict:
-        """扫描本机常见的别家技能目录，找出可以复用的技能候选。
+        """探测本机常见的别家技能目录，找出可以复用的技能候选。
 
         纯只读探测（Claude Code / agents / Codex 的 home 目录 + 本项目 .claude）：
-        找到的候选交给设置页勾选，真正的安装走既有 skills.install 复制流程，
-        这里不移动、不删除、不修改扫描到的任何文件。
+        找到的候选交给设置页技能页就地列出（「本机现存」面板）勾选，真正的安装
+        走既有 skills.install 复制流程，这里不移动、不删除、不修改探测到的任何文件。
         """
         roots = [(label, Path(p).expanduser()) for label, p in LOCAL_SKILL_SOURCES]
-        roots.append(("本项目", self.working_dir / ".claude" / "skills"))
+        if self.working_dir is not None:
+            roots.append(("本项目", self.working_dir / ".claude" / "skills"))
         existing = {s.name for s in self.skills.all()}
         candidates = await asyncio.to_thread(scan_computer_skills, roots, existing)
         return {"candidates": candidates}
@@ -4590,7 +4667,9 @@ class ServerBackend:
         if skill is None:
             raise RuntimeError("skill not found: " + name)
         scope = "project" if skill.source == "project" else "global"
-        roots = [self.working_dir / ".skysheep" / "skills", skysheep_home() / "skills"]
+        roots = [skysheep_home() / "skills"]
+        if self.working_dir is not None:
+            roots.insert(0, self.working_dir / ".skysheep" / "skills")
         try:
             result = remove_skill(name, roots)
         except SkillInstallError as e:
@@ -4631,11 +4710,13 @@ class ServerBackend:
 
     def _project_mcp_path_if_trusted(self) -> Path | None:
         """未获信任时返回 None：项目级 MCP 配置不得在本轮启动时被读取/拉起。"""
-        return self._mcp_project_path() if self.trust.is_trusted() else None
+        if self.working_dir is None or not self.trust.is_trusted():
+            return None
+        return self._mcp_project_path()
 
     def _project_skills_dir_if_trusted(self) -> Path | None:
         """未获信任时返回 None：项目级技能不得自动发现并注入系统提示词。"""
-        if not self.trust.is_trusted():
+        if self.working_dir is None or not self.trust.is_trusted():
             return None
         return self.working_dir / ".skysheep" / "skills"
 
@@ -4798,7 +4879,11 @@ class ServerBackend:
         preset = preset_by_name(name)
         if preset is None:
             raise RuntimeError(f"没有这个内置预设：{name}")
-        args = [str(a).replace("{dir}", str(self.working_dir)) for a in preset["args"]]
+        if self.working_dir is None and any("{dir}" in str(a) for a in preset["args"]):
+            raise RuntimeError(
+                "该预设要用当前项目的工作目录——先在侧栏「项目」区点 ＋ 添加项目。"
+            )
+        args = [str(a).replace("{dir}", str(self.working_dir or "")) for a in preset["args"]]
         result = await self.save_mcp_server(
             preset["name"],
             command=preset["command"],
@@ -4971,7 +5056,7 @@ class ServerBackend:
             ),
             "home": str(skysheep_home()),
             "logs_dir": str(skysheep_home() / "logs"),
-            "working_dir": str(self.working_dir),
+            "working_dir": str(self.working_dir or ""),
             "autostart": self._startup_status(),
         }
 
@@ -5038,11 +5123,15 @@ class ServerBackend:
             "logs": base / "logs",
             "backups": base / "backups",
             "skills": base / "skills",
-            "workdir": Path(self.working_dir),
+            "workdir": self.working_dir,
         }
         target = mapping.get(str(kind or ""))
         if target is None:
             raise RuntimeError("未知的目录类型：" + str(kind))
+        if target == self.working_dir and self.working_dir is None:
+            raise RuntimeError(
+                "当前没有项目，没有工作目录可打开——先在侧栏「项目」区点 ＋ 添加项目。"
+            )
         return target
 
     def open_path(self, kind: str) -> dict:
@@ -5151,6 +5240,10 @@ class ServerBackend:
         """
         from .. import support
 
+        if self.working_dir is None:
+            raise RuntimeError(
+                "当前没有项目，文件预览不可用——先在侧栏「项目」区点 ＋ 添加项目。"
+            )
         raw = str(path or "").strip()
         if not raw:
             raise RuntimeError("缺少文件路径")
@@ -5600,7 +5693,7 @@ class ServerBackend:
 
     async def _switch_after_removal(self) -> dict | None:
         """当前会话被删除/移走后：优先切到最近的其他会话；一个都不剩就回到"待新建"状态。"""
-        latest = await self.store.latest_session(self.project.id)
+        latest = await self.store.latest_session(self._cur_project_id())
         if latest is not None:
             await self.resume_session(latest.id)
             return {"id": latest.id, "title": latest.title}
@@ -5739,7 +5832,7 @@ class ServerBackend:
         due_g, due_p = maintenance_due(
             load_maintenance_state(),
             global_enabled=st.global_enabled, project_enabled=st.project_enabled,
-            interval_hours=st.interval_hours, workdir=str(self.working_dir),
+            interval_hours=st.interval_hours, workdir=str(self.working_dir or ""),
             now=time.time(),
         )
         if due_g:
@@ -5808,9 +5901,10 @@ class ServerBackend:
                 state["global_last"] = time.time()
                 msg = "已整理全局记忆（原件备份为 memory.md.bak）"
             else:
-                proj = dict(state.get("project_last") or {})
-                proj[str(self.working_dir)] = time.time()
-                state["project_last"] = proj
+                if self.working_dir is not None:
+                    proj = dict(state.get("project_last") or {})
+                    proj[str(self.working_dir)] = time.time()
+                    state["project_last"] = proj
                 msg = "已整理项目记忆（AGENTS.md，原件备份为 AGENTS.md.bak）"
             save_maintenance_state(state)
             if not force:  # 手动触发的结果在按钮状态行里看，不弹通知
@@ -5825,8 +5919,14 @@ class ServerBackend:
             self._maintaining = False
 
     async def list_archived_sessions(self) -> dict:
-        """归档弹窗列表（当前项目，最近活跃在前）。"""
-        sessions = await self.store.list_archived_sessions(self.project.id)
+        """归档弹窗列表（当前项目 + 快聊，最近活跃在前）。
+
+        带上快聊：侧栏的快聊分组常驻，它的会话归档后如果不在这个弹窗里，
+        用户就再也没地方恢复或删除它（归档弹窗是唯一入口）。
+        """
+        sessions = await self.store.list_archived_sessions(
+            self._cur_project_id(), include_projectless=True
+        )
         return {
             "sessions": [
                 {
@@ -5847,7 +5947,7 @@ class ServerBackend:
         return {
             "id": session_id,
             "tags": [t for t in value.split(",") if t],
-            "all_tags": await self.store.list_all_tags(self.project.id),
+            "all_tags": await self.store.list_all_tags(self._cur_project_id()),
         }
 
     async def move_session(self, session_id: str, project_id: int | None) -> dict:
@@ -5863,18 +5963,104 @@ class ServerBackend:
                 raise RuntimeError(f"project not found: {project_id}")
         await self.store.move_session(session_id, project_id)
         # 移出当前项目时同步丢弃 runtime：它带着旧项目的门控/工作目录，
-        # 留着会让后续轮次错在别的项目上下文里执行（与 delete_session 对齐）
-        if project_id != self.project.id:
+        # 留着会让后续轮次错在别的项目上下文里执行（与 delete_session 对齐）；
+        # 无项目态当前归属是快聊（None），移进任何项目都算移出
+        if project_id != self._cur_project_id():
             self.cancel_run(session_id)
             rt = self.runtimes.pop(session_id, None)
             if rt is not None:
                 self._forget_runtime(rt)
         was_active = self.session and self.session.id == session_id
-        moved_to_active = was_active and project_id == self.project.id
+        moved_to_active = was_active and project_id == self._cur_project_id()
         switched = await self._switch_after_removal() if (was_active and not moved_to_active) else None
         return {"id": session_id, "project_id": project_id, "switched_to": switched}
 
     # ---- 工作项目切换（应用内设定工作目录，对标 Claude Code /add-dir 等） ----
+
+    async def _bind_project(self, target: Path | None) -> None:
+        """把引擎整体绑定到一个工作目录（None = 释放项目，进入无项目态）。
+
+        switch_project / 删除项目 / setup 共用这一条重绑路径：白名单（权限门）、
+        项目技能、项目记忆、项目级 MCP、子代理工作目录、检查点、钩子全部跟着
+        target 走；无项目态只有全局技能/全局 MCP/全局记忆可用，快照会话归属
+        快聊（project_id 为 NULL）。模型服务是全局配置，不受影响。
+        """
+        # 旧项目的子代理还引用着旧工作目录，先全部停掉
+        if self.tasks:
+            self.tasks.cancel_all()
+
+        self.working_dir = target
+        self.project = (
+            await self.store.get_or_create_project(str(target)) if target is not None else None
+        )
+        # 信任按项目记忆：换了目录必须丢掉旧实例，否则会沿用上一个项目的信任状态
+        self._trust = None
+        # 白名单按项目隔离：换项目 = 换一套规则；权限档位跨项目保持
+        prev_accept = self.gate.auto_accept_write if self.gate else False
+        prev_full = self.gate.auto_accept_all if self.gate else False
+        self.gate = PermissionGate(store=self.store, project_id=self._cur_project_id(),
+                                   working_dir=self.working_dir)
+        self.gate.auto_accept_write = prev_accept
+        self.gate.auto_accept_all = prev_full
+        await self.gate.load_project_rules()
+        if self._base_agent is not None:
+            self._base_agent.gate = self.gate
+
+        self.skills = SkillLoader(
+            global_dir=skysheep_home() / "skills",
+            project_dir=self._project_skills_dir_if_trusted(),
+            state_path=(target / ".skysheep" / "skills.json") if target else None,
+            scope_path=skysheep_home() / "skills-scope.json",
+            project_root=target,
+        )
+        self.skills.discover()
+
+        self.instructions_file, self.instructions_text = (
+            load_project_instructions(target) if target is not None else (None, "")
+        )
+
+        self.tasks = TaskManager(
+            provider_factory=lambda: self.provider,
+            working_dir=target,
+            max_iterations=self.cfg.subagent_max_iterations,
+            store=self.subagent_store,
+            provider_resolver=self._subagent_provider,
+            registry_resolver=self._subagent_registry,
+            max_concurrent=3,
+            usage_recorder=self._record_subagent_usage,
+            event_emitter=self._ws_broadcast,
+        )
+
+        # 项目级 mcp.json 指向新目录 → 重连；顺带用新技能/子代理重建完整注册表
+        if self.mcp is not None:
+            await self._reconnect_mcp()
+
+        # 钩子与检查点跟项目走：钩子换工作目录，检查点换目录树，避免把
+        # A 项目的文件快照回滚到 B 项目
+        raw_cfg = load_raw_config()
+        pre_rules, post_rules = hooks_from_config(raw_cfg)
+        self.hooks = HookRunner(pre_rules, post_rules, working_dir=target) \
+            if (pre_rules or post_rules) else None
+        self.checkpoints = CheckpointStore(root=self._checkpoint_root())
+
+        # 旧项目的会话 runtime 全部失效：停任务、释放、清空
+        for rt in list(self.runtimes.values()):
+            t = rt.run_task
+            if t and not t.done():
+                t.cancel()
+            self._forget_runtime(rt)
+        self.runtimes.clear()
+
+        if self._base_agent is not None:
+            self._base_agent.working_dir = target
+            self._base_agent.hooks = self.hooks
+            for ag in self._for_each_agent():
+                ag.working_dir = target
+            for ag in self._for_each_agent():
+                ag.set_system(self.compose_system())
+
+        # 记住当前项目（无项目态记 0）：重启后回到同一个状态
+        await self._write_ui_prefs({"active_project": self._cur_project_id() or 0})
 
     async def switch_project(self, path: str) -> dict:
         """把引擎整体切到另一个工作目录：项目记录（含白名单）、项目技能、
@@ -5897,69 +6083,7 @@ class ServerBackend:
                 "reason": "这已经是当前项目",
             }
 
-        # 旧项目的子代理还引用着旧工作目录，先全部停掉
-        if self.tasks:
-            self.tasks.cancel_all()
-
-        self.working_dir = target
-        self.project = await self.store.get_or_create_project(str(target))
-        # 信任按项目记忆：换了目录必须丢掉旧实例，否则会沿用上一个项目的信任状态
-        self._trust = None
-        # 白名单按项目隔离：换项目 = 换一套规则；权限档位跨项目保持
-        prev_accept = self.gate.auto_accept_write if self.gate else False
-        prev_full = self.gate.auto_accept_all if self.gate else False
-        self.gate = PermissionGate(store=self.store, project_id=self.project.id,
-                                   working_dir=self.working_dir)
-        self.gate.auto_accept_write = prev_accept
-        self.gate.auto_accept_all = prev_full
-        await self.gate.load_project_rules()
-        self._base_agent.gate = self.gate
-
-        self.skills = SkillLoader(
-            global_dir=skysheep_home() / "skills",
-            project_dir=self._project_skills_dir_if_trusted(),
-            state_path=target / ".skysheep" / "skills.json",
-            scope_path=skysheep_home() / "skills-scope.json",
-            project_root=target,
-        )
-        self.skills.discover()
-
-        self.instructions_file, self.instructions_text = load_project_instructions(target)
-
-        self.tasks = TaskManager(
-            provider_factory=lambda: self.provider,
-            working_dir=target,
-            max_iterations=self.cfg.subagent_max_iterations,
-            store=self.subagent_store,
-            provider_resolver=self._subagent_provider,
-            registry_resolver=self._subagent_registry,
-        )
-
-        # 项目级 mcp.json 指向新目录 → 重连；顺带用新技能/子代理重建完整注册表
-        await self._reconnect_mcp()
-
-        # 钩子与检查点跟项目走：钩子换工作目录，检查点换目录树，避免把
-        # A 项目的文件快照回滚到 B 项目
-        raw_cfg = load_raw_config()
-        pre_rules, post_rules = hooks_from_config(raw_cfg)
-        self.hooks = HookRunner(pre_rules, post_rules, working_dir=target) \
-            if (pre_rules or post_rules) else None
-        self.checkpoints = CheckpointStore(root=self._checkpoint_root())
-
-        # 旧项目的会话 runtime 全部失效：停任务、释放、清空
-        for rt in list(self.runtimes.values()):
-            t = rt.run_task
-            if t and not t.done():
-                t.cancel()
-            self._forget_runtime(rt)
-        self.runtimes.clear()
-
-        self._base_agent.working_dir = target
-        self._base_agent.hooks = self.hooks
-        for ag in self._for_each_agent():
-            ag.working_dir = target
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        await self._bind_project(target)
 
         latest = await self.store.latest_session(self.project.id)
         if latest is not None:
@@ -5977,21 +6101,40 @@ class ServerBackend:
         }
 
     async def delete_project(self, project_id: int) -> dict:
-        """把一个项目从列表里移除：项目记录、它的会话、白名单与任务清单一并删除；
-        电脑上的文件夹不受影响。最后一个项目（当前项目）也可以删——删掉后立刻
-        为工作目录重建一条干净的项目记录（等于重置这个项目，重新开始）。"""
+        """把一个项目从列表里移除：项目记录、它的会话、白名单、任务清单与
+        定时任务/流水线一并删除；电脑上的文件夹不受影响。
+
+        删除是真实的删除：当前项目删掉后**不再重建一条同目录的新记录**——
+        还有别的项目就切到最近的一个，一个都不剩就进入无项目态（列表为空，
+        快聊照常可用）。无项目态也是合法状态，重启后保持。"""
         is_current = self.project is not None and project_id == self.project.id
         if is_current and self._run_task and not self._run_task.done():
             raise RuntimeError("当前有任务正在运行，请先停止再删除项目")
         removed = await self.store.delete_project(project_id)
         if not removed:
             raise RuntimeError("项目不存在，可能已被删除")
-        if is_current:
-            # self.project 置空绕过 switch_project 的「已是当前项目」短路，
-            # 走一遍完整的切项目重绑：技能/MCP/钩子/子代理/会话全部归零重来
-            self.project = None
-            await self.switch_project(str(self.working_dir))
-        return {"removed": project_id, "reset_current": is_current}
+        if not is_current:
+            return {"removed": project_id, "was_current": False}
+        # 删的是当前项目：不再为同一目录重建记录；还有别的项目就接上最近的，
+        # 一个都不剩就进入无项目态（列表为空，快聊继续可用）
+        remaining = self.ordered_projects(await self.store.list_projects())
+        if remaining:
+            next_path = remaining[0].root_path
+            await self._bind_project(Path(next_path))
+            self.session = None
+            latest = await self.store.latest_session(self.project.id)
+            if latest is not None:
+                await self.resume_session(latest.id)
+            else:
+                self._base_agent.load_history([Message.system(self.compose_system())])
+            return {
+                "removed": project_id, "was_current": True,
+                "switched_to": {"path": str(self.project.root_path), "name": self.project.name},
+            }
+        await self._bind_project(None)
+        self.session = None
+        self._base_agent.load_history([Message.system(self.compose_system())])
+        return {"removed": project_id, "was_current": True, "switched_to": None}
 
     # ---- 项目任务清单（右侧「任务清单」页签；任务与项目绑定，删项目一并删） ----
 
@@ -6209,6 +6352,9 @@ class ServerBackend:
         "pet_y": (0, 4000),
         # 首次启动配置向导已完成标记（1=完成，不再自动弹出）
         "onboarded": (0, 1),
+        # 当前项目 id（0 = 无项目态）：后端在切项目/删项目/首启建项目时写入，
+        # 重启后回到同一个状态；上限给足任意合法 SQLite rowid
+        "active_project": (0, 2_147_483_647),
     }
     # 右侧面板：打开了哪些标签、激活的是哪个（id 白名单见前端 TAB_META）
     RIGHT_TAB_IDS = (
@@ -6320,7 +6466,13 @@ class ServerBackend:
         return sorted(known, key=lambda p: rank[p.id]) + unknown
 
     async def get_ui_prefs(self) -> dict:
-        return {"prefs": self._read_ui_prefs()}
+        return {"prefs": self._frontend_prefs(self._read_ui_prefs())}
+
+    @staticmethod
+    def _frontend_prefs(prefs: dict) -> dict:
+        """WS prefs 面只暴露前端自己的偏好。active_project 由后端在切项目/
+        删项目/首启时自写自读（0 = 无项目态），不给前端看、也不许前端写。"""
+        return {k: v for k, v in prefs.items() if k != "active_project"}
 
     def first_paint_prefs(self) -> dict:
         """首帧外观偏好：由 server/app.py 注入到 index.html 的 <html> 标签。
@@ -6329,12 +6481,21 @@ class ServerBackend:
         随后再跳一次；这里提前给服务端用。读失败静默返回空（保持默认外观）。
         """
         try:
-            return self._read_ui_prefs()
+            return self._frontend_prefs(self._read_ui_prefs())
         except Exception:  # noqa: BLE001
             return {}
 
     async def save_ui_prefs(self, prefs: dict) -> dict:
-        """合并保存；某项传 null 表示恢复默认（删除该项）。未知键忽略、越界值收敛到合法区间。"""
+        """WS 入口：前端偏好合并保存。active_project 后端独占，前端传了也忽略。"""
+        cleaned = {k: v for k, v in (prefs or {}).items() if k != "active_project"}
+        return await self._write_ui_prefs(cleaned)
+
+    async def _write_ui_prefs(self, prefs: dict) -> dict:
+        """合并保存；某项传 null 表示恢复默认（删除该项）。未知键忽略、越界值收敛到合法区间。
+
+        后端自己也走这里写偏好（如 _bind_project 落 active_project），因此
+        不在这里过滤键——过滤只发生在 save_ui_prefs 入口与读取面（_frontend_prefs）。
+        """
         current = self._read_ui_prefs()
         for key, val in (prefs or {}).items():
             known = ("right_tabs", "right_active", "project_order", "session_order")
@@ -6419,7 +6580,7 @@ class ServerBackend:
         path = self._ui_prefs_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
-        return {"prefs": current}
+        return {"prefs": self._frontend_prefs(current)}
 
     # ---- 全局记忆：设置页直接查看/编辑 memory.md ----
 
@@ -6443,7 +6604,7 @@ class ServerBackend:
                 "interval_hours": st.interval_hours,
                 "global_last": float(state.get("global_last") or 0),
                 "project_last": float(
-                    (state.get("project_last") or {}).get(str(self.working_dir)) or 0
+                    (state.get("project_last") or {}).get(str(self.working_dir or "")) or 0
                 ),
             },
         }
@@ -6980,10 +7141,10 @@ class ServerBackend:
     async def channel_enable(self, params: dict) -> dict:
         """启用一个平台并立即重建渠道（不再要求重启整个应用）。
 
-        强制要求允许名单非空：空名单等于拒绝一切，启用它只会让用户以为“没反应”。
-        与其静默失败，不如在启用时就退回一句可操作的提示。
-
-        凭据要求因平台而异：Telegram 是手填的 Bot Token，微信是扫码换来的 bot_token。
+        只校验凭据（Telegram 是手填的 Bot Token，微信是扫码换来的 bot_token）。
+        允许名单**允许为空**：chat id 只能由运行中的机器人记进「发现的来源」，
+        不先启用就永远拿不到第一条消息——这里的名单检查曾把首次配置锁死。
+        空名单的安全语义（拒绝一切、未授权只记录不回复）由消息层强制，不在这一步。
         """
         name = str(params.get("name", "")).strip()
         if not name:
@@ -6995,11 +7156,12 @@ class ServerBackend:
                 raise RuntimeError("微信还没登录：先在下方点「生成二维码」并扫码确认")
         elif not str(section.get("token", "")).strip():
             raise RuntimeError(f"「{name}」还没填 Bot Token，先填好再启用")
-        if not (section.get("allowed_ids") or []):
-            raise RuntimeError(
-                f"「{name}」的允许名单是空的：空名单会拒绝所有消息。\n"
-                "先给机器人发一条消息，然后把界面上«发现的来源»里的 ID 加入允许名单。"
-            )
+        # 注意：这里**不能**再要求允许名单非空。chat id 只能由运行中的机器人
+        # 收到第一条消息后记进「发现的来源」（见 manager.note_seen），而机器人
+        # 只有启用后才会轮询——先启用再认领是唯一能走通的顺序，把名单检查
+        # 放在这里就是一个引导死锁（永远拿不到第一个 chat id）。
+        # 安全性不受影响：空名单 = 拒绝一切由消息层的 manager._on_message 强制，
+        # 未授权来源只记录不回复，机器人跑着也不会应答陌生人。
         section["enabled"] = True
         platforms[name] = section
         update_config_section("channels", {"platforms": platforms})
@@ -7050,19 +7212,19 @@ class ServerBackend:
         项目的工作目录与门控下（归属校验，同 B 族）。
         """
         bound = await self.store.get_channel_binding(channel_name)
-        if bound and await self.store.get_session_for_project(bound, self.project.id) is not None:
+        if bound and await self.store.get_session_for_project(bound, self._cur_project_id()) is not None:
             # 绑定存在但 runtime 可能不在：重启后首次使用、或该会话被桌面端切走时。
             # 这里必须补建，否则 channel_run 会因「会话不存在」直接失败。
             await self._get_channel_runtime(bound, channel_name)
             return bound
-        sess = await self.store.create_session(self.project.id, title=f"🤖 {channel_name}")
+        sess = await self.store.create_session(self._cur_project_id(), title=f"🤖 {channel_name}")
         await self.store.set_channel_binding(channel_name, sess.id)
         await self._get_channel_runtime(sess.id, channel_name)
         return sess.id
 
     async def channel_new_session(self, channel_name: str) -> str:
         """给渠道开一个新会话（/new），旧的保留可查。"""
-        sess = await self.store.create_session(self.project.id, title=f"🤖 {channel_name}")
+        sess = await self.store.create_session(self._cur_project_id(), title=f"🤖 {channel_name}")
         await self.store.set_channel_binding(channel_name, sess.id)
         await self._get_channel_runtime(sess.id, channel_name)
         return sess.id
@@ -7083,7 +7245,7 @@ class ServerBackend:
             approve_timeout=int(self.cfg.channels.approve_timeout),
             notify=lambda pending: self._notify_channel_approval(channel_name, pending),
             store=self.store,
-            project_id=self.project.id,
+            project_id=self._cur_project_id(),
             working_dir=self.working_dir,
         )
         recorder = ChangeRecorder()
@@ -7155,7 +7317,7 @@ class ServerBackend:
             if not channel_name:
                 return {"error": "这个会话已不是渠道会话了，发送 /new 开一个新的"}
             # 自愈前先验归属：会话被移到别的项目后不能挂回当前项目执行（同 B 族）
-            if await self.store.get_session_for_project(session_id, self.project.id) is None:
+            if await self.store.get_session_for_project(session_id, self._cur_project_id()) is None:
                 return {"error": "这个会话已不在当前项目里，发送 /new 开一个新的"}
             rt = await self._get_channel_runtime(session_id, channel_name)
         collected: list[str] = []
@@ -7227,7 +7389,11 @@ class ServerBackend:
         )
 
     async def channel_list_sessions(self) -> list[dict]:
-        rows = await self.store.list_sessions(self.project.id)
+        rows = (
+            await self.store.list_sessions(self._cur_project_id())
+            if self.project is not None
+            else await self.store.list_quick_sessions()
+        )
         current_ids = set(self._channel_gates.keys())
         return [
             {
@@ -7492,12 +7658,15 @@ class ServerBackend:
         target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     async def snapshot(self) -> dict:
-        sessions = await self.store.list_sessions(self.project.id)
+        sessions = (
+            await self.store.list_sessions(self.project.id) if self.project is not None
+            else await self.store.list_quick_sessions()
+        )
         return {
             "version": __version__,
             "frozen": self._is_frozen,  # 安装版可应用内一键更新；源码版提示 git pull
-            "working_dir": str(self.working_dir),
-            "project": self.project.name,
+            "working_dir": str(self.working_dir or ""),
+            "project": self.project.name if self.project else "（未选择项目）",
             "project_id": self.project.id if self.project else None,
             "provider": self.provider_name,
             "model": getattr(self.provider, "model", ""),
@@ -7541,7 +7710,8 @@ class ServerBackend:
             ],
             "skill_dirs": {
                 "global": str(skysheep_home() / "skills"),
-                "project": str(self.working_dir / ".skysheep" / "skills"),
+                "project": (str(self.working_dir / ".skysheep" / "skills")
+                            if self.working_dir is not None else ""),
                 "scope_config": str(skysheep_home() / "skills-scope.json"),
             },
             "mcp": [

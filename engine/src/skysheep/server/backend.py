@@ -3468,7 +3468,10 @@ class ServerBackend:
             }
 
         try:
-            data = target.read_bytes()[:400_000]
+            # 只读预览需要的 400KB 前缀：先整个 read_bytes 再切片会把几百 MB 的
+            # 日志/数据集全量吞进内存，同步读盘还会卡住事件循环（UI 全部停摆）
+            with target.open("rb") as fh:
+                data = fh.read(400_000)
         except OSError as e:
             raise RuntimeError("读取失败: " + str(e)) from None
         if b"\x00" in data:
@@ -3569,7 +3572,8 @@ class ServerBackend:
         if cached and cached[0] == mtime:
             return cached[1], cached[2]
         try:
-            loaded = decode_bytes(target.read_bytes()[:400_000])
+            with target.open("rb") as fh:  # 同 fs_read：只探前缀，不整读大文件
+                loaded = decode_bytes(fh.read(400_000))
         except OSError:
             return "utf-8", "\n"
         if loaded.binary or not loaded.certain:

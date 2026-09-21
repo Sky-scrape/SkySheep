@@ -340,8 +340,8 @@ let miniTimer = 0, miniRaf = 0, miniRemap = 0, miniGen = 0;
 //     长对话里偏差累积，点圆点会落到错误位置、高亮也跟着错位。
 //  2) 入场动画 rise 带 translateY transform，会被 rect 算进去，
 //     所以必须在动画结束后校准（见 miniRebuild 里的 miniRemap）。
-function miniTopOf(el) {
-  const r = miniLog.getBoundingClientRect();
+function miniTopOf(el, logRect) {
+  const r = logRect || miniLog.getBoundingClientRect();
   return (el.getBoundingClientRect().top - r.top) / uiScale + miniLog.scrollTop;
 }
 
@@ -349,6 +349,9 @@ function miniBind(log) {
   if (miniLog === log) { miniSchedule(); return; }
   if (miniMut) { miniMut.disconnect(); miniMut = null; }
   if (miniRO) { miniRO.disconnect(); miniRO = null; }
+  // 旧流不再可见前先解绑它的 scroll 监听：来回切标签每次都重新 bind，
+  // 不解绑的话同一个 log 会越积越多的 scroll 回调（内存慢性泄漏）
+  if (miniLog) miniLog.removeEventListener("scroll", miniOnScroll);
   clearTimeout(miniRemap);
   miniGen++; // 换流后旧流的校准定时器作废
   miniLog = log;
@@ -356,7 +359,10 @@ function miniBind(log) {
   chatMinimap.classList.add("hidden");
   if (!log) return;
   miniMut = new MutationObserver(miniSchedule);
-  miniMut.observe(log, { childList: true, subtree: true, characterData: true });
+  // 只观察 childList：流式渲染走 innerHTML 整树替换（childList 命中），
+  // 高度变化还有 ResizeObserver 兜底；characterData 会在流式期间被
+  // 逐字变更轰炸，防抖形同虚设
+  miniMut.observe(log, { childList: true, subtree: true });
   miniRO = new ResizeObserver(miniSchedule);
   miniRO.observe(log);
   log.addEventListener("scroll", miniOnScroll, { passive: true });
@@ -386,9 +392,9 @@ function miniMsgs() {
 // 一个圆点必须对应一个「真能滚到」的位置：目标位置钳到可滚动范围内。
 // 不钳制的话，末尾几条消息的目标会超出 maxScroll，点了只能滚到底、
 // 高亮一律落到最后一颗（「点不动第 N 个圆点」的成因）。
-function miniScrollTarget(el) {
+function miniScrollTarget(el, logRect) {
   const maxScroll = Math.max(0, miniLog.scrollHeight - miniLog.clientHeight);
-  return Math.min(maxScroll, Math.max(0, miniTopOf(el) - 10));
+  return Math.min(maxScroll, Math.max(0, miniTopOf(el, logRect) - 10));
 }
 
 function miniRebuild() {
@@ -398,12 +404,15 @@ function miniRebuild() {
   const scrollable = msgs.length > 1 && miniLog.scrollHeight > logH + 4;
   chatMinimap.classList.toggle("hidden", !scrollable);
   if (!scrollable) { chatMinimap.textContent = ""; return; }
+  // 容器 rect 只读一次：循环里每条消息各读一次 getBoundingClientRect
+  // 会强制布局多次（长会话 rebuild 期间每秒多次全量布局的来源之一）
+  const logRect = miniLog.getBoundingClientRect();
   // 目标位置相同的连续消息合并成一颗（保留最后一条——滚到底时看到的正是末尾那几条）。
   // 内容只比视口高一点点时，末尾好几条的目标会被一起钳到底部；
   // 不合并就会出现多颗点了没反应、高亮全落最后一颗的死圆点。
   const slots = [];
   for (const el of msgs) {
-    const target = miniScrollTarget(el);
+    const target = miniScrollTarget(el, logRect);
     const last = slots[slots.length - 1];
     if (last && Math.abs(last.target - target) < 1) last.el = el;
     else slots.push({ el, target });
@@ -418,12 +427,25 @@ function miniRebuild() {
     const el = slots[Math.floor(i * step)].el;
     const d = document.createElement("div");
     d.className = "chat-minimap-dot";
-    const txt = (el.textContent || "").trim().replace(/\s+/g, " ");
-    d.title = txt.length > 80 ? txt.slice(0, 80) + "…" : txt;
+    // title 只在消息定稿（有 seq）后算一次并缓存；流式中的消息内容未定，
+    // 每次重算（几千字的消息一次 rebuild 就是几千字符的扫描）
+    let txt;
+    if (el.dataset.seq) {
+      txt = el._miniTitle;
+      if (txt === undefined) {
+        txt = (el.textContent || "").trim().replace(/\s+/g, " ");
+        txt = txt.length > 80 ? txt.slice(0, 80) + "…" : txt;
+        el._miniTitle = txt;
+      }
+    } else {
+      txt = (el.textContent || "").trim().replace(/\s+/g, " ");
+      txt = txt.length > 80 ? txt.slice(0, 80) + "…" : txt;
+    }
+    d.title = txt;
     d.onclick = () => miniLog.scrollTo({ top: miniScrollTarget(el), behavior: "smooth" });
     frag.appendChild(d);
     miniTargets.push(el);
-    miniTops.push(miniTopOf(el));
+    miniTops.push(miniTopOf(el, logRect));
   }
   chatMinimap.textContent = "";
   chatMinimap.appendChild(frag);
@@ -651,8 +673,17 @@ function appendStream(txt) {
     if (sum) sum.textContent = `💭 思考过程（${Math.round(t.thinkText.length / 10) * 10} 字）· 点击展开`;
   }
   t.streamingText += txt;
-  t.streamingEl.firstElementChild.innerHTML = renderMarkdown(t.streamingText) + "<p>▍</p>";
-  scrollLog();
+  // 节流渲染：delta 频率远高于人眼需要，逐条对全量累积文本重跑 markdown
+  // 正则 + 整树 innerHTML 是 O(n²)，长回答越吐越卡（圆桌成员流 80ms 方案，
+  // 这里同样处理）；流结束由 finishAssistant 全量渲染兜底
+  if (!t._streamRenderTimer) {
+    t._streamRenderTimer = setTimeout(() => {
+      t._streamRenderTimer = null;
+      if (!t.streamingEl) return;
+      t.streamingEl.firstElementChild.innerHTML = renderMarkdown(t.streamingText) + "<p>▍</p>";
+      scrollLog();
+    }, 80);
+  }
 }
 
 // ---------- 思考过程块（思考型模型：流式灰显，正文开始后折叠，可展开回看） ----------
@@ -688,12 +719,27 @@ function appendThinking(txt) {
   const el = ensureThinkEl(t);
   if (!el) return;
   t.thinkText += txt;
-  el.querySelector(".think-body .md").innerHTML = renderMarkdown(t.thinkText);
-  scrollLog();
+  // 节流渲染（同 appendStream）：思考文本往往比正文还长
+  if (!t._thinkRenderTimer) {
+    t._thinkRenderTimer = setTimeout(() => {
+      t._thinkRenderTimer = null;
+      if (!t.thinkEl || !t.thinkText) return;
+      const body = t.thinkEl.querySelector(".think-body .md");
+      if (body) body.innerHTML = renderMarkdown(t.thinkText);
+      scrollLog();
+    }, 80);
+  }
 }
 
 function finishThinking(t) {
   if (!t || !t.thinkEl || !t.thinkText) return;
+  // 补上节流攒下的最后一次渲染，再更新折叠摘要
+  if (t._thinkRenderTimer) {
+    clearTimeout(t._thinkRenderTimer);
+    t._thinkRenderTimer = null;
+    const body = t.thinkEl.querySelector(".think-body .md");
+    if (body) body.innerHTML = renderMarkdown(t.thinkText);
+  }
   const folded = t.thinkEl.classList.contains("folded");
   const sum = t.thinkEl.querySelector(".think-sum");
   if (sum && !folded) {
@@ -724,6 +770,7 @@ function finishAssistant(rtMeta, seq) {
   finishThinking(t);
   t.thinkEl = null;
   t.thinkText = "";
+  if (t._streamRenderTimer) { clearTimeout(t._streamRenderTimer); t._streamRenderTimer = null; }
   t.streamingEl.firstElementChild.innerHTML = renderMarkdown(t.streamingText);
   if (rtMeta) {
     addRtBadge(t.streamingEl, rtMeta);
@@ -1024,13 +1071,24 @@ function addToolCard(data) {
     card._spawnTaskId = "";
     card.classList.add("open");
   }
+  // 登记进在途表：finishToolCard 直接 O(1) 取，不在整个聊天流里
+  // 属性选择器扫描（一轮几十上百个工具调用时是 O(n²)）
+  const t = curTab();
+  if (!t._toolCards) t._toolCards = new Map();
+  t._toolCards.set(data.tool_call_id, card);
   curLog().appendChild(card);
   scrollLog();
 }
 
 function finishToolCard(data) {
   finishAssistant();
-  const card = curLog().querySelector(`[data-call-id="${data.tool_call_id}"]`);
+  const t = curTab();
+  let card = t._toolCards ? t._toolCards.get(data.tool_call_id) : null;
+  if (card) t._toolCards.delete(data.tool_call_id); // 完成即出表，不持已分离节点
+  if (!card || !card.isConnected) {
+    // 兜底：历史渲染/重渲染路径的卡片没登记过，退回选择器查找
+    card = curLog().querySelector(`[data-call-id="${data.tool_call_id}"]`);
+  }
   if (!card) return;
   if (card === curSpawnCard) curSpawnCard = null;
   card.classList.add(data.is_error ? "err" : "ok");
@@ -1521,8 +1579,8 @@ function handleEvent(kind, data) {
     case "aux_delta":
       if (auxStreamingEl) {
         auxStreamingText += data.text || "";
-        auxStreamingEl.innerHTML = renderMarkdown(auxStreamingText);
-        auxLog.scrollTop = auxLog.scrollHeight;
+        auxThinkingPhase = false;
+        auxScheduleRender();
       }
       break;
     case "aux_thinking":
@@ -4381,6 +4439,7 @@ function decorateFinalMessage(el, tab, getText, seq) {
 
 function renderHistory(tab, messages) {
   tab.logEl.innerHTML = "";
+  tab._toolCards = new Map(); // 在途工具卡随流清空，避免持已分离节点
   withTab(tab, () => {
     (messages || []).forEach((m) => {
       let el = null;
@@ -4402,7 +4461,9 @@ function renderHistory(tab, messages) {
     });
   });
   attachHistoryOps(tab);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  // 滚动容器是 .chat-log（#chat 外层 overflow:hidden），滚 chatBox 从不生效——
+  // 历史渲染完其实一直没滚到底
+  tab.logEl.scrollTop = tab.logEl.scrollHeight;
 }
 
 // ---------- 消息级操作：历史恢复后给用户消息挂（复制/编辑）；助手消息在渲染时已挂 ----------
@@ -4653,21 +4714,20 @@ function appendQuoteToInput(text, max = QUOTE_MAX_CHARS) {
 
 function maybeShowSelQuoteBtn() {
   const sel = window.getSelection();
-  if (!sel || sel.isCollapsed || !sel.rangeCount) { selQuoteBtn.title = "dbg:collapsed"; hideSelQuoteBtn(); return; }
+  if (!sel || sel.isCollapsed || !sel.rangeCount) { hideSelQuoteBtn(); return; }
   const node = sel.anchorNode;
   const el = node && (node.nodeType === 1 ? node : node.parentElement);
   // 只对聊天流里的助手消息生效（流式中的回复内容还在变，不引用）
-  if (!el || !chatBox.contains(el)) { selQuoteBtn.title = "dbg:outside"; hideSelQuoteBtn(); return; }
+  if (!el || !chatBox.contains(el)) { hideSelQuoteBtn(); return; }
   const msg = el.closest ? el.closest(".msg") : null;
-  if (!msg || !msg.classList.contains("assistant") || msg.classList.contains("streaming")) {
-    selQuoteBtn.title = "dbg:no-msg";
+  if (!msg || !msg.classList.contains("assistant") || (activeTab && msg === activeTab.streamingEl)) {
     hideSelQuoteBtn();
     return;
   }
   const text = sel.toString().replace(/\u00a0/g, " ").trim();
-  if (!text) { selQuoteBtn.title = "dbg:empty"; hideSelQuoteBtn(); return; }
+  if (!text) { hideSelQuoteBtn(); return; }
   const rect = sel.getRangeAt(0).getBoundingClientRect();
-  if (!rect || (!rect.width && !rect.height)) { selQuoteBtn.title = "dbg:no-rect"; hideSelQuoteBtn(); return; }
+  if (!rect || (!rect.width && !rect.height)) { hideSelQuoteBtn(); return; }
   // 浮层与其它菜单同款：元素带 zoom，物理像素 rect 先除回 uiScale 再定位
   const layoutW = 118;
   const left = Math.min(
@@ -5249,7 +5309,10 @@ function stepFind(delta) {
 }
 
 document.getElementById("find-input").addEventListener("input", (e) => {
-  runFind(e.target.value);
+  // 200ms 防抖：每次击键都是「拆掉上一轮全部 mark + 全消息 TreeWalker 扫描
+  // + 逐命中 DOM 替换」，长会话里直通会每键卡几百毫秒（与会话搜索框同一配方）
+  clearTimeout(runFind._t);
+  runFind._t = setTimeout(() => runFind(e.target.value), 200);
 });
 document.getElementById("find-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
@@ -8730,17 +8793,29 @@ let auxStreamingEl = null;
 let auxStreamingText = "";
 let auxThinkingText = "";
 let auxBusy = false;
+// 流式渲染节流（同主聊天 appendStream 的 80ms 方案）：思考/正文两阶段共用
+// 一个定时器，按最新阶段决定渲染形态；auxSend 的最终全量渲染兜底
+let auxRenderTimer = null;
+let auxThinkingPhase = false;
+function auxScheduleRender() {
+  if (auxRenderTimer) return;
+  auxRenderTimer = setTimeout(() => {
+    auxRenderTimer = null;
+    if (!auxStreamingEl) return;
+    auxStreamingEl.innerHTML = auxThinkingPhase
+      ? '<div class="think-inline">💭 思考中…<br>' +
+        escapeHtml(auxThinkingText.slice(-400)) +
+        "</div><p>▍</p>"
+      : renderMarkdown(auxStreamingText);
+    auxLog.scrollTop = auxLog.scrollHeight;
+  }, 80);
+}
 
 // 思考模型的推理增量：面板内灰显（收尾后被正文渲染覆盖），不进历史
 function auxThinkingDelta(txt) {
   auxThinkingText += txt || "";
-  if (auxStreamingEl) {
-    auxStreamingEl.innerHTML =
-      '<div class="think-inline">💭 思考中…<br>' +
-      escapeHtml(auxThinkingText.slice(-400)) +
-      "</div><p>▍</p>";
-    auxLog.scrollTop = auxLog.scrollHeight;
-  }
+  auxThinkingPhase = !auxStreamingText;
+  auxScheduleRender();
 }
 
 function auxAddUser(text) {
@@ -8775,6 +8850,7 @@ async function auxSend() {
   } catch (e) {
     stream.innerHTML = '<p class="dim">✗ ' + escapeHtml(e.message) + "</p>";
   } finally {
+    if (auxRenderTimer) { clearTimeout(auxRenderTimer); auxRenderTimer = null; }
     auxStreamingEl = null;
     auxStreamingText = "";
     auxThinkingText = "";
@@ -9257,8 +9333,14 @@ function renderSubEvent(card, ev) {
     line.classList.add(ev.is_error ? "err" : "ok");
     line.textContent = (ev.is_error ? "✗ " : "✓ ") + (ev.name || "") + ` (${ev.duration_ms || 0}ms)`;
   } else if (ev.kind === "text_delta") {
-    report.textContent += ev.text || "";
-    report.scrollTop = report.scrollHeight;
+    // 增量追加：textContent += 每条 delta 都要整体重写字符串节点，长报告 O(n²)
+    report.insertAdjacentText("beforeend", ev.text || "");
+    if (!card._subScrollTimer) {
+      card._subScrollTimer = setTimeout(() => {
+        card._subScrollTimer = null;
+        report.scrollTop = report.scrollHeight;
+      }, 80);
+    }
   } else if (ev.kind === "assistant_message") {
     const text = messageText(ev.message);
     if (text) report.textContent = text; // 用最终完整文本覆盖增量拼接

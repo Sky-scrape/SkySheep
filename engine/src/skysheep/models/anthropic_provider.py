@@ -1,6 +1,7 @@
 """Anthropic 原生协议 Provider（官方 anthropic SDK）。
 
-支持流式输出与 prompt caching（system 提示词标记 ephemeral 缓存点）。
+支持流式输出与 prompt caching（system 与最后一条消息各打一个 ephemeral
+缓存点，对话历史在迭代间增量命中缓存）。
 连续的 tool_result 消息会合并进单条 user 消息（Anthropic 协议要求）。
 """
 
@@ -30,6 +31,29 @@ from .base import (
     ProviderTextDelta,
     ProviderToolUse,
 )
+
+
+def _mark_cache_breakpoint(msgs: list[dict]) -> None:
+    """在最后一条消息的末尾内容块上打缓存断点（原地修改，增量缓存对话历史）。
+
+    system 上已有一个断点（只覆盖工具定义+系统提示词）；对话历史每轮迭代
+    只追加不改动，断点打在最后一条消息上即可让上一轮请求的全部前缀命中
+    缓存（Anthropic 允许至多 4 个断点，这里固定用 2 个）。长会话的历史
+    主体是省钱大头，没有这个断点就永远按全价 input 计费。
+    thinking 块不接受 cache_control，遇到时落到它前面最近的块上。
+    """
+    if not msgs:
+        return
+    content = msgs[-1]["content"]
+    if isinstance(content, str):
+        msgs[-1]["content"] = [
+            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+        ]
+        return
+    for block in reversed(content):
+        if block.get("type") != "thinking":
+            block["cache_control"] = {"type": "ephemeral"}
+            return
 
 
 def to_anthropic_messages(messages: list[Message]) -> list[dict]:
@@ -116,10 +140,12 @@ class AnthropicProvider(Provider):
         effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         sys = system_text(messages)
+        msgs = to_anthropic_messages(messages)
+        _mark_cache_breakpoint(msgs)
         kwargs: dict = {
             "model": self.model,
             "max_tokens": self._max_tokens,
-            "messages": to_anthropic_messages(messages),
+            "messages": msgs,
         }
         if sys:
             kwargs["system"] = [{"type": "text", "text": sys, "cache_control": {"type": "ephemeral"}}]

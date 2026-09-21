@@ -43,6 +43,23 @@ with no other memory. Capture, in compact markdown:
 {transcript}
 --- END ---"""
 
+# 进入压缩提示词的单条消息上限：触发压缩时历史已经逼近窗口，把超长的
+# 工具结果（单条最多 3 万字符）原样再发一遍，压缩请求自己就会先吃 400——
+# 最容易失败的时刻恰好最需要它成功。保头去尾：摘要要的是事实与进展，
+# 不是逐字全文。
+COMPACT_MSG_CHAR_LIMIT = 8_000
+COMPACT_MSG_KEEP_TAIL = 1_500
+
+
+def _clip_for_transcript(text: str) -> str:
+    if len(text) <= COMPACT_MSG_CHAR_LIMIT:
+        return text
+    return (
+        text[: COMPACT_MSG_CHAR_LIMIT - COMPACT_MSG_KEEP_TAIL]
+        + "\n…（本条过长，中间已截断）…\n"
+        + text[-COMPACT_MSG_KEEP_TAIL:]
+    )
+
 
 def estimate_text_tokens(text: str) -> int:
     """按字符类别估算 token 数（CJK 与西文分别折算）。"""
@@ -88,7 +105,9 @@ async def compact_history(
         return None
     recent = history[start:]
 
-    transcript = "\n\n".join(f"[{m.role.upper()}] {m.to_plain()}" for m in to_summarize)
+    transcript = "\n\n".join(
+        f"[{m.role.upper()}] {_clip_for_transcript(m.to_plain())}" for m in to_summarize
+    )
     summary_parts: list[str] = []
     async for pe in agent.provider.stream(
         [Message.system(COMPACT_SYSTEM), Message.user(COMPACT_USER_TEMPLATE.format(transcript=transcript))],

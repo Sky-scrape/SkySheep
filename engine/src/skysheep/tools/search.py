@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -44,16 +47,8 @@ class GrepTool(Tool):
         except re.error as e:
             raise ToolError("invalid regex: " + str(e)) from e
         base = resolve_path(ctx, args.path)
-
-        if base.is_file():
-            files: list[Path] = [base]
-        elif base.is_dir():
-            files = sorted(base.rglob("*"))
-        else:
+        if not base.is_file() and not base.is_dir():
             raise ToolError("path not found: " + rel_path(ctx, base))
-
-        total = 0
-        out: list[str] = []
         # 遵循项目忽略文件（.skysheepignore / .gitignore / .env 内建默认）
         try:
             from ..core.ignore import IgnoreRules
@@ -61,24 +56,27 @@ class GrepTool(Tool):
             ignore = IgnoreRules.load(ctx.working_dir)
         except OSError:
             ignore = None
-        for f in files:
+        # 整个扫描（目录遍历 + 逐文件读取）放线程：大项目根上一次同步扫描
+        # 会把事件循环卡住数秒，流式输出与其他会话一起停摆
+        return await asyncio.to_thread(self._scan, rx, base, ctx, ignore, args.include)
+
+    @staticmethod
+    def _scan(
+        rx: re.Pattern,
+        base: Path,
+        ctx: ToolContext,
+        ignore: object | None,
+        include: str,
+    ) -> str:
+        total = 0
+        out: list[str] = []
+        for f in GrepTool._iter_files(base, ctx, ignore):
             if total >= MAX_MATCHES:
                 out.append(f"... stopped at {MAX_MATCHES} matches")
                 break
-            if not f.is_file() or f.suffix.lower() in BINARY_EXT:
+            if f.suffix.lower() in BINARY_EXT:
                 continue
-            if any(part in SKIP_DIRS for part in f.parts):
-                continue
-            if ignore is not None:
-                try:
-                    rel_norm = f.resolve().relative_to(
-                        Path(ctx.working_dir).resolve()
-                    ).as_posix()
-                except (OSError, ValueError):
-                    rel_norm = None
-                if rel_norm and ignore.matches(rel_norm):
-                    continue
-            if args.include and not f.match(args.include):
+            if include and not f.match(include):
                 continue
             try:
                 if f.stat().st_size > MAX_FILE_SIZE:
@@ -100,3 +98,42 @@ class GrepTool(Tool):
         if not out:
             return "(no matches)"
         return "\n".join(out)
+
+    @staticmethod
+    def _iter_files(base: Path, ctx: ToolContext, ignore: object | None) -> Iterator[Path]:
+        """惰性产出待搜索的文件：os.walk 剪枝，跳过的目录根本不进遍历。
+
+        旧实现 sorted(base.rglob("*")) 会先把整棵树（含 .git / node_modules
+        的全部条目）物化成列表再逐个过滤，大项目上白列几十万条；剪枝后这些
+        子树一次都不进。匹配 MAX_MATCHES 提前 break 时也不会再往下走。
+        """
+        if base.is_file():
+            yield base
+            return
+        workroot = Path(ctx.working_dir).resolve()
+
+        def rel_norm(p: Path) -> str | None:
+            try:
+                return p.resolve().relative_to(workroot).as_posix()
+            except (OSError, ValueError):
+                return None
+
+        for dirpath, dirnames, filenames in os.walk(base):
+            kept: list[str] = []
+            for d in sorted(dirnames):
+                if d in SKIP_DIRS or d.startswith(".git"):
+                    continue
+                if ignore is not None:
+                    rn = rel_norm(Path(dirpath) / d)
+                    if rn is not None and ignore.matches(rn, is_dir=True):
+                        continue
+                kept.append(d)
+            dirnames[:] = kept
+            for name in sorted(filenames):
+                p = Path(dirpath) / name
+                if ignore is not None:
+                    rn = rel_norm(p)
+                    if rn is not None and ignore.matches(rn):
+                        continue
+                if p.is_file():
+                    yield p

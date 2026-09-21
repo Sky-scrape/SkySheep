@@ -32,6 +32,8 @@ from ..tools.base import Safety, Tool, ToolContext, ToolError, truncate_output
 MAX_MCP_OUTPUT_CHARS = 30_000
 CONNECT_TIMEOUT_S = 20.0        # 单个服务器的连接上限；超时视为失败而不是无限等待
 PREFLIGHT_TIMEOUT_S = 3.0       # 连之前先探一次端口：地址写错时秒回，不用等 SDK 超时
+CALL_TIMEOUT_S = 120.0          # 单次工具调用上限：SDK 默认无限等，一个挂死的服务器
+                                # 会把整轮对话（含权限门之后的执行栈）停在原地
 
 
 def _friendly_error(e: Exception) -> str:
@@ -209,7 +211,18 @@ class MCPTool(Tool):
 
     async def run(self, args: BaseModel, ctx: ToolContext) -> str:
         try:
-            result = await self._session.call_tool(self._raw_name, arguments=args.model_dump())
+            # SDK 的 call_tool 默认无限等读；挂死的半死服务器会把整轮对话卡在
+            # 这里（连取消前的兜底都走不到），所以调用层自己掐表。
+            # 超时取消后该 session 可能已不可用——错误如实上报，连接由
+            # reconnect 机制在下次重建时恢复。
+            result = await asyncio.wait_for(
+                self._session.call_tool(self._raw_name, arguments=args.model_dump()),
+                timeout=CALL_TIMEOUT_S,
+            )
+        except TimeoutError:
+            raise ToolError(
+                f"MCP call timed out after {CALL_TIMEOUT_S:g}s: {self._raw_name}"
+            ) from None
         except Exception as e:
             raise ToolError(f"MCP call failed: {e}") from e
         if getattr(result, "is_error", False):
@@ -293,23 +306,33 @@ class MCPManager:
         return tools
 
     async def connect_all(self) -> list[Tool]:
-        """连接全部服务器，返回已注册的 MCPTool 列表。
+        """并发连接全部服务器，返回已注册的 MCPTool 列表。
 
-        每个服务器单独限时：地址不通时不能让设置页一直转圈。
+        每个服务器单独限时（地址不通时不能让设置页一直转圈），并且并发连：
+        串行时每台坏服务器独占最长 preflight+连接上限，几台配置错误的服务器
+        会让启动/切换项目白等一分钟；statuses 按名各写各的，无共享状态冲突。
         """
         tools: list[Tool] = []
         if not self._configs:
             return tools
-        for name, cfg in self._configs.items():
+
+        async def connect_limited(name: str, cfg: MCPServerConfig) -> list[Tool]:
             try:
                 async with asyncio.timeout(CONNECT_TIMEOUT_S):
-                    tools.extend(await self._connect_one(name, cfg))
+                    return await self._connect_one(name, cfg)
             except TimeoutError:
                 self.statuses[name].error = (
                     f"连接超时（{CONNECT_TIMEOUT_S:g} 秒无响应）：地址或启动命令可能不对"
                 )
             except Exception as e:
                 self.statuses[name].error = _friendly_error(e)
+            return []
+
+        results = await asyncio.gather(
+            *(connect_limited(n, c) for n, c in self._configs.items())
+        )
+        for part in results:
+            tools.extend(part)
         return tools
 
     async def shutdown(self) -> None:

@@ -143,6 +143,7 @@ class TaskRecord:
         self.session_id = session_id  # 派生时的会话（用量记账归属）
         self.status = "running"  # running | done | error | cancelled
         self.result: str | None = None
+        self.result_delivered = False  # check_task 已把完整报告投递进主上下文
         self.error: str | None = None
         self.tokens_in = 0
         self.tokens_out = 0
@@ -558,7 +559,16 @@ class CheckTaskTool(Tool):
             raise ToolError("unknown task_id: " + args.task_id)
         lines = [f"task_id: {rec.id}", f"type: {rec.agent_type}", f"status: {rec.status}"]
         if rec.status == "done" and rec.result is not None:
-            lines.append("--- result ---\n" + rec.result)
+            if rec.result_delivered:
+                # 报告可能数千到上万 token；模型「稍后再查」的惯性会让同一份
+                # 长报告反复注入上下文——已投递就只回显开头防丢线索
+                lines.append(
+                    "（完整结果已在此前的查询里投递进上下文，不再重复。开头回显："
+                    + rec.result[:200] + "）"
+                )
+            else:
+                lines.append("--- result ---\n" + rec.result)
+                rec.result_delivered = True
         if rec.error:
             lines.append("--- error ---\n" + rec.error)
         return "\n".join(lines)

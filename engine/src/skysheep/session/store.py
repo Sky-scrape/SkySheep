@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     in_tokens INTEGER NOT NULL DEFAULT 0,
     out_tokens INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts);
 CREATE TABLE IF NOT EXISTS snippets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -354,6 +355,13 @@ class SessionStore:
         self._rolling_backup()
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
+        # WAL + NORMAL：一轮对话多次小写的 fsync 次数大幅下降，读不再被
+        # 写事务的 journal 排他锁挡住；busy_timeout 兜住偶发的写写碰撞。
+        # journal_mode 是库级持久属性，synchronous/busy_timeout 是连接级的，
+        # 所以每次 connect 都要设全这三样。
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        await self._db.execute("PRAGMA busy_timeout=5000")
         await self._db.executescript(SCHEMA)
         # 旧库迁移：sessions 补 pinned 列（已存在则忽略）
         try:
@@ -440,9 +448,11 @@ class SessionStore:
     # ---- 全文搜索索引（messages_fts） ----
 
     async def _setup_fts(self) -> None:
-        """建 FTS 表并回填已有消息。失败时置 fts_ready=False，搜索自动退到 LIKE。
+        """建 FTS 表并按 rowid 补漏已有消息。失败时置 fts_ready=False，搜索自动退到 LIKE。
 
-        回填只在「FTS 表是空的而 messages 非空」时做，避免每次启动都重扫。
+        补漏按「messages 里比 FTS 最大 rowid 新的行」增量做：旧库升级后
+        第一次启动等于全量回填，日常启动已同步时零成本，历史遗留的漂移
+        （旧版本 FTS 写在 commit 之后）也在启动时自动修复。
         虚表建不出来（极少数 SQLite 未编 FTS5）不影响应用启动。
         """
         assert self._db
@@ -452,25 +462,28 @@ class SessionStore:
         except Exception:
             return  # 没有 FTS5 支持：保留 LIKE 扫描路径
         try:
-            cur = await self._db.execute("SELECT count(*) AS n FROM messages_fts")
-            row = await cur.fetchone()
-            indexed = int(row["n"] or 0) if row else 0
-            if indexed == 0:
-                await self._backfill_fts()
+            await self._backfill_fts()
         except Exception:
             return
         self.fts_ready = True
 
     async def _backfill_fts(self) -> None:
-        """把现有 messages 全量灌进 FTS（旧库升级后第一次启动走一趟）。"""
+        """把 messages 里尚未进 FTS 的行灌进去（按 rowid 增量，旧库首次等于全量）。"""
         assert self._db
-        cur = await self._db.execute("SELECT id, content FROM messages")
-        rows = await cur.fetchall()
-        payload = [(int(r["id"]), self._plain_text(r["content"])) for r in rows]
-        if payload:
+        cur = await self._db.execute(
+            "SELECT id, content FROM messages "
+            "WHERE id > (SELECT COALESCE(MAX(rowid), 0) FROM messages_fts)"
+        )
+        payload = []
+        while True:
+            rows = await cur.fetchmany(500)
+            if not rows:
+                break
+            payload = [(int(r["id"]), self._plain_text(r["content"])) for r in rows]
             await self._db.executemany(
                 "INSERT INTO messages_fts(rowid, plain) VALUES (?, ?)", payload
             )
+        if payload:
             await self._db.commit()
 
     @staticmethod
@@ -948,9 +961,10 @@ class SessionStore:
             "INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
             (session_id, seq, message.role, content_json, time.time()),
         )
+        # FTS 与主表同一事务：写在 commit 之后会挂进新的隐式事务，
+        # 靠下一次写操作的 commit 才顺带提交，收尾/崩溃时尾部落空
+        await self._fts_insert(int(cur.lastrowid), content_json)
         await self._db.commit()
-        if cur.lastrowid is not None:
-            await self._fts_insert(int(cur.lastrowid), content_json)
         message.seq = seq  # 回填给内存历史/前端 brief 用
         return cur.lastrowid
 

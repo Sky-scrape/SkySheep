@@ -165,10 +165,23 @@ class Agent:
             ev = await compact_history(self, keep_recent=self.compaction_keep_recent)
             if ev is not None:
                 yield ev
+        # 已尽力压缩仍超限（历史太短/摘要失败）：本轮不再逐迭代重试
+        compaction_stuck = False
 
         for iteration in range(1, self.max_iterations + 1):
             iterations = iteration
             yield TurnStarted(iteration=iteration)
+
+            # turn 内压缩复查：单轮内工具结果可膨胀数十 k token，只在开头
+            # 查一次会半路爆窗（上游 400 拒绝，前面迭代烧掉的费用全部作废）。
+            # 每次模型调用前复查一次；帮不上忙时置位，避免白算 O(n) 估算。
+            if iteration > 1 and not compaction_stuck \
+                    and self.used_context_tokens() > self.context_limit_tokens:
+                ev = await compact_history(self, keep_recent=self.compaction_keep_recent)
+                if ev is not None:
+                    yield ev
+                else:
+                    compaction_stuck = True
 
             # 1. 流式调用模型：瞬态错误（限流/超时/断流）自动重试，
             #    但只要已经吐出过任何内容就不再重放（避免文本重复）

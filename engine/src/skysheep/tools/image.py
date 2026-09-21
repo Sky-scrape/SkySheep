@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import struct
@@ -77,6 +78,12 @@ def _shrink(data: bytes, media_type: str) -> tuple[bytes, bool]:
         return data, False
 
 
+def _prepare_image(data: bytes) -> tuple[bytes, str, bool]:
+    """缩放（需要时）+ base64 编码，供 to_thread 调用。返回 (最终字节, base64, 是否缩放)。"""
+    shrunk_data, shrunk = _shrink(data, "")
+    return shrunk_data, base64.b64encode(shrunk_data).decode(), shrunk
+
+
 class ReadImageTool(Tool):
     name = "read_image"
     description = (
@@ -124,10 +131,10 @@ class ReadImageTool(Tool):
                 f"{shown} 的内容不是有效图片（后缀是 {suffix}，但缺少对应文件头）。"
                 "文件可能损坏，或改名改错了。"
             )
-        data, shrunk = _shrink(data, media_type)
-        ctx.images.append(
-            ImageBlock(media_type=media_type, data=base64.b64encode(data).decode())
-        )
+        # PIL 解码/缩放/optimize 编码与大文件 base64 都是毫秒到秒级的 CPU 活，
+        # 与 screenshot 一样放线程做，不卡事件循环
+        data, b64, shrunk = await asyncio.to_thread(_prepare_image, data)
+        ctx.images.append(ImageBlock(media_type=media_type, data=b64))
         lines = [
             f"图片已附加到本条消息之后（模型可直接查看）：{shown}",
             f"- 格式: {media_type}，原始大小: {size:,} B",

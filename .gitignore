@@ -16,6 +16,10 @@ desktop/src-tauri/target/
 # 运行时数据
 *.db
 *.db-journal
+# WAL 模式（1.9 起 journal_mode=WAL）下与 .db 同时出现的伴生素材：
+# 长连接未关闭时 -wal 里可能还有已提交数据，漏忽略会被误提交
+*.db-wal
+*.db-shm
 .skysheep/
 
 # IDE
@@ -34,3 +38,14 @@ installer/
 
 # 开发期调试占位（非产品代码，不入库）
 engine/tools/render_ref.py
+
+# 临时/隔离运行目录（SKYSHEEP_HOME 指向的临时 home、截图与验证用工作目录）
+.tmp-*/
+
+# Windows 误重定向产物：把 `> /dev/null` 写成 `> nul` 会建出名为 nul 的文件
+nul
+
+# 操作系统垃圾文件
+Thumbs.db
+desktop.ini
+.DS_Store

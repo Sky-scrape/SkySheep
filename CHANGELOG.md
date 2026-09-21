@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+### 清理
+
+- **出库开发期调试残留**：`engine/x1.txt`、`engine/x2.txt`（`tests/test_agent.py`
+  实际走 `tmp_path`，这两个是手动跑测试留在仓库根旁的残留）、
+  `engine/rt-menu-default.png`（全库无任何代码或文档引用）、
+  `engine/AGENTS.md`（0 字节空文件，2.0 提交时以零变更单独入库）。四者都不会
+  进入构建产物，只是把仓库表弄脏。
+- **`.gitignore` 补齐防回归规则**：`*.db-wal` / `*.db-shm`（1.9 起 SQLite 用
+  `journal_mode=WAL`，此前只忽略了 `*.db-journal`，长连接未关闭时这两个伴生
+  文件里还可能带着已提交数据）；`.tmp-*/`（`SKYSHEEP_HOME` 指向的临时 home 与
+  截图验证工作目录）；`nul`（Windows 上把 `> /dev/null` 误写成 `> nul` 会建出
+  名为 nul 的文件）；`Thumbs.db` / `desktop.ini` / `.DS_Store`（此前 `Thumbs.db`
+  只是被 `*.db` 规则意外匹配，属巧合而非有意忽略）。
+
+### 修复
+
+- **启动脚本写死作者本机绝对路径**：`启动SkySheep.bat` 原先直接 `cd /d` 到一个
+  作者本机的绝对路径，别人克隆后一行都跑不起来，同时把作者的本地目录结构留在
+  了公开仓库顶层。改为用 `%~dp0` 按脚本自身位置定位 `engine`，并补
+  `pyproject.toml` 存在性检查（脚本被挪出仓库根时给出明确提示而不是扑空的 cd）；
+  顺带去掉了让 `@echo off` 失效的 UTF-8 BOM（首行带 BOM 时 cmd 会把 `@echo off`
+  当成未知命令报错），文件回归纯 ASCII。
+
 ## [2.1] - 2026-09-21
 
 ### 修复

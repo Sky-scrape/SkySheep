@@ -21,7 +21,12 @@ from starlette.websockets import WebSocketDisconnect
 from test_server import make_client, recv_until  # noqa: F401
 
 import skysheep.server.app as server_app
-from skysheep.server.app import LOCAL_ONLY_METHODS, _client_is_local
+from skysheep.server.app import (
+    LOCAL_ONLY_METHODS,
+    STATIC_DIR,
+    _client_is_local,
+    _is_hidden_static_path,
+)
 
 # ---- 1. dispatch 层本机门禁 ----
 
@@ -489,6 +494,33 @@ def test_clipboard_read_requires_confirmation():
     from skysheep.tools.computer import ClipboardReadTool
 
     assert ClipboardReadTool.safety == Safety.WRITE
+
+
+def test_static_hidden_paths_not_served(home):
+    """static 下的点开头路径一律 404。
+
+    StaticFiles 不拒隐藏路径：开发期目录（.mimosa/ 等）一旦被误打进安装包，
+    就会随 /static 挂载变成未认证可读（1.0/1.5/1.8 安装包正是这样泄露了
+    变更哈希、会话 id 与源码快照）。打包侧已跳过点开头路径，这里是运行期
+    的第二道防线，避免构建配置回退时重现同一问题。
+    """
+    import shutil
+
+    hidden_dir = STATIC_DIR / ".mimosa" / "reports"
+    shutil.rmtree(STATIC_DIR / ".mimosa", ignore_errors=True)
+    hidden_dir.mkdir(parents=True, exist_ok=True)
+    (hidden_dir / "leak.json").write_text('{"secret_probe": true}', encoding="utf-8")
+    try:
+        assert _is_hidden_static_path("/static/.mimosa/reports/leak.json")
+        assert _is_hidden_static_path("/static/.git/config")
+        assert not _is_hidden_static_path("/static/app.js")
+        assert not _is_hidden_static_path("/static/vendor/qrcode.min.js")
+        with make_client(home, []) as client:
+            assert client.get("/static/.mimosa/reports/leak.json").status_code == 404
+            # 正常资源不受影响
+            assert client.get("/static/app.js").status_code == 200
+    finally:
+        shutil.rmtree(STATIC_DIR / ".mimosa", ignore_errors=True)
 
 
 # ---- 6. 客户端来源判定（保持既有行为不回归） ----

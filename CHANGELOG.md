@@ -18,6 +18,17 @@
   名为 nul 的文件）；`Thumbs.db` / `desktop.ini` / `.DS_Store`（此前 `Thumbs.db`
   只是被 `*.db` 规则意外匹配，属巧合而非有意忽略）。
 
+### 安全
+
+- **static 挂载对点开头路径的纵深防线**：`StaticFiles` 不拒隐藏路径，
+  `/static/.<any>` 会按普通文件返回。1.0/1.5/1.8 的安装包正因打包侧整目录
+  收集静态资源，把开发期的 `.mimosa/`（变更哈希、会话 id、前端源码快照）
+  打进了 `_internal/skysheep/server/static/`，而该目录被 `StaticFiles` 挂载，
+  未认证可读（仅回环免令牌，是完整的对外可达路径）。打包侧（`SkySheep.spec`）
+  自 1.9 起已在收集阶段跳过点开头路径，本次在 `app.py` 的 `/static` 挂载前
+  再堵一道：点开头分段一律 404（`_is_hidden_static_path`）。附回归测试
+  `test_static_hidden_paths_not_served`（已反向验证：移除防线则测试失败）。
+
 ### 修复
 
 - **启动脚本写死作者本机绝对路径**：`启动SkySheep.bat` 原先直接 `cd /d` 到一个

@@ -139,6 +139,19 @@ def _no_store_static(app) -> None:
 
 STATIC_DIR = _static_dir()
 
+
+def _is_hidden_static_path(path: str) -> bool:
+    """请求路径是否落在 static 下的点开头（隐藏）文件/目录里。
+
+    纵深防线：StaticFiles 不会拒绝点开头路径，而这些目录（如开发期的
+    .mimosa/、外部 Agent 工具会话状态）一旦被误打进安装包，就会随
+    /static 挂载变成未认证可读，泄露变更哈希、会话 id 与源码快照。
+    打包侧（SkySheep.spec）已在收集阶段跳过点开头路径，这里再堵一道，
+    确保即使构建配置回退也不会把这类内容提供出去。
+    """
+    tail = path[len("/static"):]
+    return any(part.startswith(".") for part in tail.split("/") if part)
+
 # 具体主题 id（去掉 auto 与旧版 light/dark 两档）：<html data-theme="…"> 只打这些值
 THEME_IDS = tuple(v for v in THEME_PREFS if v not in ("auto", "light", "dark"))
 
@@ -294,6 +307,15 @@ def create_app(
 
     # 静态资源禁缓存：前端零构建、文件名无指纹，否则用户永远卡在旧 app.js
     _no_store_static(app)
+
+    # 点开头路径先挡在挂载之外：StaticFiles 不拒隐藏路径，见 _is_hidden_static_path。
+    @app.middleware("http")
+    async def _static_hidden_guard(request, call_next):
+        if request.url.path.startswith("/static") and _is_hidden_static_path(
+            request.url.path
+        ):
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        return await call_next(request)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

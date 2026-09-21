@@ -1738,3 +1738,42 @@ def test_context_detail_in_send_and_status(home):
         st = recv_until(ws, "st")["result"]
         assert st["context_detail"]["tokens"] == frame["result"]["context_tokens"]
         assert st["context_detail"]["limit"] == st["context_limit"]
+
+
+def test_probe_context_wiring(home, monkeypatch):
+    """上下文窗口检测：结果透传前端；模型名回落到已保存配置；传入值优先。"""
+    calls = []
+
+    async def fake_probe(*, kind="openai", base_url=None, api_key=None, model="", timeout_s=15.0):
+        calls.append({"kind": kind, "base_url": base_url, "model": model})
+        return {"limit": 131072, "note": "检测到上下文窗口 131,072 tokens"}
+
+    monkeypatch.setattr("skysheep.server.backend.probe_context_limit", fake_probe)
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "config.probe_context", "params": {"name": "deepseek"}})
+        r = recv_until(ws, "c1")
+        assert r["ok"] and r["result"]["limit"] == 131_072
+        assert calls[-1]["model"], "模型名应回落到该服务已保存的当前模型"
+
+        # 传入值优先（详情页里改了还没保存的场景）
+        ws.send_json({"id": "c2", "method": "config.probe_context", "params": {
+            "name": "deepseek", "model": "glm-5.3", "api_key": "sk-x"}})
+        r2 = recv_until(ws, "c2")
+        assert r2["ok"] and calls[-1]["model"] == "glm-5.3"
+
+    # 与 probe_models 同列本机专属（probe 会把已存 Key 发往任填地址）
+    from skysheep.server.app import LOCAL_ONLY_METHODS
+    assert "config.probe_context" in LOCAL_ONLY_METHODS
+
+
+def test_extract_context_limit_fields():
+    """/models 条目里的窗口字段各厂家不统一：逐个候选试，输出上限不算窗口。"""
+    from skysheep.models.probe import _extract_context_limit as x
+    assert x({"context_length": 128000}) == 128_000            # OpenRouter
+    assert x({"max_context_length": 65536}) == 65_536          # SiliconFlow
+    assert x({"max_model_len": 32768}) == 32_768               # vLLM
+    assert x({"top_provider": {"context_length": 1_000_000}}) == 1_000_000
+    assert x({"max_tokens": 8192}) is None                     # 输出上限不是窗口
+    assert x({"context_length": 0}) is None
+    assert x({}) is None

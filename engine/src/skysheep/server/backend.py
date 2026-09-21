@@ -15,6 +15,9 @@ import logging
 import os
 import secrets
 import socket
+import subprocess
+import sys
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -111,7 +114,7 @@ from ..messages import system_text as history_system_text
 from ..models import Provider
 from ..models.base import ProviderDone, ProviderReasoning, ProviderTextDelta
 from ..models.factory import build_provider
-from ..models.probe import probe_provider_models
+from ..models.probe import probe_context_limit, probe_provider_models
 from ..obs import info as obs_info
 from ..security.gate import RULE_KINDS, HeadlessGate, PermissionGate
 from ..security.trust import WorkspaceTrust
@@ -898,6 +901,8 @@ class ServerBackend:
         self._maintaining = False  # 定期整理进行中（全局+项目共用一把，防叠加）
         self.update_info: dict | None = None  # {"version","url","notes"}：发现的新版本
         self.update_error: str | None = None  # 手动检查时的失败原因（进设置 · 关于）
+        self._pending_update: str | None = None  # 已下载待安装的更新包路径
+        self._is_frozen: bool = bool(getattr(sys, "frozen", False))  # 安装版=True，源码版=False
         self._market_cache: tuple[float, dict] | None = None  # 技能广场索引缓存
         self.channels: ChannelManager | None = None  # 聊天软件渠道（Bot Channel）
         self._channel_gates: dict[str, ChannelGate] = {}  # 渠道会话 id → 门控
@@ -5477,6 +5482,34 @@ class ServerBackend:
             "models": models,
         }
 
+    async def probe_context(
+        self,
+        *,
+        name: str = "",
+        kind: str = "",
+        base_url: str = "",
+        api_key: str = "",
+        model: str = "",
+    ) -> dict:
+        """探测某个模型服务的上下文窗口上限（供「上下文上限」一键填入）。
+
+        与 probe_models 同一套取值口径：界面改了还没保存的地址/Key 优先，
+        没传的部分回落到已保存配置（含环境变量里的 Key）；模型名同样优先
+        用传入值，回落到该服务当前启用的模型。
+        """
+        pc = self.cfg.providers.get(name) if name else None
+        eff_kind = (kind or (pc.kind if pc else "openai")).strip()
+        eff_url = (base_url or (pc.base_url if pc else "") or "").strip()
+        eff_key = (api_key or "").strip()
+        if not eff_key and pc is not None:
+            eff_key = resolve_api_key(name, pc) or ""
+        eff_model = (model or (pc.model if pc else "") or "").strip()
+
+        out = await probe_context_limit(
+            kind=eff_kind, base_url=eff_url or None, api_key=eff_key or None, model=eff_model
+        )
+        return {"provider": name, "kind": eff_kind, "model": eff_model, **out}
+
     async def save_provider(
         self,
         name: str,
@@ -7198,9 +7231,62 @@ class ServerBackend:
         self.update_error = None
         if is_newer_version(info["version"], __version__):
             self.update_info = info
-            return {"available": True, "current": __version__, **info}
+            return {"available": True, "current": __version__, "frozen": self._is_frozen, **info}
         self.update_info = None
-        return {"available": False, "current": __version__, "latest": info["version"]}
+        return {"available": False, "current": __version__, "frozen": self._is_frozen,
+                "latest": info["version"]}
+
+    async def install_update(self) -> dict:
+        """应用内一键更新（仅安装版）：下载最新版安装包到临时目录。
+
+        源码版直接拒绝——源码的更新方式是 git pull，静默装安装包反而会把
+        运行中的源码目录搅乱。下载完成后并不自动安装，等 apply_update 确认。
+        """
+        if not self._is_frozen:
+            raise RuntimeError("源码版不支持应用内更新：请在仓库里执行 git pull 后重启")
+        from ..core.uptodate import DEFAULT_RELEASES_API
+
+        info = await check_latest_release(DEFAULT_RELEASES_API)
+        if not is_newer_version(info["version"], __version__):
+            return {"update_available": False, "current": __version__, "latest": info["version"]}
+        url = info.get("setup_url") or ""
+        if not url:
+            raise RuntimeError("最新版没有 Windows 安装包附件，请到 GitHub Releases 手动下载")
+        dest = Path(tempfile.gettempdir()) / f"SkySheep-{info['version']}-setup.exe"
+        await asyncio.to_thread(_download_setup, url, dest)
+        self._pending_update = str(dest)
+        return {"update_available": True, "version": info["version"], "path": str(dest)}
+
+    async def apply_update(self) -> dict:
+        """退出本应用并静默运行已下载的安装包。安装包声明了与本应用相同的
+        单实例互斥体，且我们延迟 2 秒再拉起它——届时本进程已退出、互斥体已释放。"""
+        pending = self._pending_update or ""
+        if not pending or not Path(pending).is_file():
+            raise RuntimeError("还没有下载好的更新包，请先执行「下载更新」")
+        helper = f'timeout /t 2 /nobreak >nul & "{pending}" /SILENT /CLOSEAPPLICATIONS'
+        flags = 0
+        if hasattr(subprocess, "DETACHED_PROCESS"):
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", helper],
+                creationflags=flags, close_fds=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cwd=str(Path(pending).parent),
+            )
+        except OSError as e:
+            raise RuntimeError(f"无法启动安装程序：{e}") from e
+
+        async def _quit_soon() -> None:
+            await asyncio.sleep(1.0)  # 给 WS 回复留出送达时间
+            try:
+                await self.shutdown()
+            except Exception:  # noqa: BLE001 - 退出路径不再抛
+                pass
+            os._exit(0)
+
+        asyncio.create_task(_quit_soon())
+        return {"quitting": True, "installer": pending}
 
     # ---- 技能广场：远程索引优先，内置清单兜底（60s 缓存） ----
 
@@ -7415,3 +7501,27 @@ class ServerBackend:
                 for t in self._base_agent.registry.all()
             ],
         }
+
+
+def _download_setup(url: str, dest: Path) -> None:
+    """把安装包下载到 dest（.part 暂存、完成后改名）。同步阻塞，须在线程里跑。
+
+    follow_redirects 必开：browser_download_url 会 302 到 objects.githubusercontent.com。
+    """
+    import httpx
+
+    part = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+            with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                with open(part, "wb") as f:
+                    for chunk in resp.iter_bytes(1 << 16):
+                        f.write(chunk)
+        # 校验是 PE 可执行文件（MZ 头）再落正式名：防中途断流留下半截文件被误装
+        with open(part, "rb") as f:
+            if f.read(2) != b"MZ":
+                raise RuntimeError("下载的内容不是 Windows 安装包（头部校验失败）")
+        part.replace(dest)
+    finally:
+        part.unlink(missing_ok=True)

@@ -7371,7 +7371,11 @@ function renderProviderDetail(name) {
         <label class="switch"><input type="checkbox" data-f="supports_vision" checked><span class="slider"></span></label>
       </div>
       <div class="field">
-        <label>上下文上限（tokens）</label>
+        <div class="label-row">
+          <label>上下文上限（tokens）</label>
+          <button class="btn-ghost ctx-detect" type="button"
+            title="向该服务查询此模型的上下文窗口。部分服务不提供该信息时会说明原因">🔍 检测</button>
+        </div>
         <input data-f="context_limit" type="number" min="0" step="1000"
                value="${p.context_limit ? p.context_limit : ""}"
                placeholder="留空 = 用全局默认 ${p.global_context_limit || 1000000}"
@@ -7379,6 +7383,7 @@ function renderProviderDetail(name) {
         <div class="field-tip">按官方文档填模型的上下文窗口（如 64k 模型填 64000，128k 填 128000）。
           留空则用全局默认（当前 ${(p.global_context_limit || 1000000).toLocaleString()}，可在 设置 · 高级 里改）；
           当前生效值 ${(p.effective_context_limit || p.global_context_limit || 0).toLocaleString()} tokens</div>
+        <div class="field-tip ctx-note hidden"></div>
       </div>
       <div class="field">
         <label>温度 temperature（可选）</label>
@@ -7578,6 +7583,33 @@ function renderProviderDetail(name) {
     }
   };
   q(".fetch").onclick = () => probeFill();
+
+  // 上下文窗口检测：查询到窗口值就填进输入框（保存后生效），查不到给出原因
+  const ctxBtn = q(".ctx-detect");
+  const ctxNote = q(".ctx-note");
+  ctxBtn.onclick = async () => {
+    ctxBtn.disabled = true;
+    ctxNote.classList.remove("hidden");
+    ctxNote.textContent = "检测中…正在向该服务查询上下文窗口";
+    try {
+      const r = await request("config.probe_context", {
+        name,
+        kind: q("select[data-f='kind']").value,
+        base_url: q('input[data-f="base_url"]').value.trim(),
+        api_key: q('input[data-f="api_key"]').value.trim(),
+      });
+      if (r.limit) {
+        q('input[data-f="context_limit"]').value = r.limit;
+        ctxNote.textContent = `✓ ${r.note}（已填入，点「保存」后生效）`;
+      } else {
+        ctxNote.textContent = "✗ " + r.note;
+      }
+    } catch (e) {
+      ctxNote.textContent = "✗ " + e.message;
+    } finally {
+      ctxBtn.disabled = false;
+    }
+  };
   q(".add-manual").onclick = () => {
     const input = q('input[data-f="manual_model"]');
     const v = input.value.trim();

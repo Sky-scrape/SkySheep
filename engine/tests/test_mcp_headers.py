@@ -88,6 +88,12 @@ def test_headers_default_empty():
 class _HeaderRecorder(BaseHTTPRequestHandler):
     """记录收到的请求头；对 MCP 握手一律返回 401（我们只关心头有没有到）。"""
 
+    # HTTP/1.0 响应完即断连，慢 runner 上 mcp 客户端挂着的读会撞上
+    # ConnectionAbortedError（WinError 10053），SDK 的任务组随即取消
+    # initialize，CancelledError 绕过 except Exception 直接判红——CI #41 的偶发失败。
+    # 升到 1.1（do_POST 已带 Content-Length，keep-alive 语义完整）消掉这个时序窗口。
+    protocol_version = "HTTP/1.1"
+
     seen: list[dict] = []
 
     def do_POST(self):  # noqa: N802

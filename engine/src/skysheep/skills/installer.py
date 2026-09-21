@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
+import time
 import zipfile
 from pathlib import Path
 
@@ -280,12 +282,38 @@ def install(
     return install_from_dir(src_path, dest_root, existing=existing)
 
 
+def rmtree_force(path: Path) -> None:
+    """整树删除，兜住 Windows 的两类删除失败：.git 的 pack/idx 文件带只读位
+    （git 克隆安装的技能全中招，报 WinError 5 拒绝访问），杀软短暂锁住文件。
+    先清只读位再删，权限错误时稍等重试一次。"""
+    def clear_ro(p: Path) -> None:
+        try:
+            os.chmod(p, stat.S_IWRITE)
+        except OSError:
+            pass
+
+    for attempt in (1, 2):
+        try:
+            for p in path.rglob("*"):
+                clear_ro(p)
+            clear_ro(path)
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == 1:
+                time.sleep(0.5)
+            else:
+                raise
+
+
 def remove_skill(name: str, roots: list[Path]) -> dict:
     """删除一个技能目录（在给定的候选根目录里找）。"""
     for root in roots:
         target = root / name
         if target.is_dir() and (target / SKILL_FILE).is_file():
-            shutil.rmtree(target)
+            rmtree_force(target)
             return {"removed": name, "from": str(root)}
     raise SkillInstallError("找不到技能目录：" + name)
 

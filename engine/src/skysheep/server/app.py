@@ -50,7 +50,7 @@ LOCAL_ONLY_METHODS = frozenset({
     "config.add_provider", "config.save_provider", "config.delete_provider",
     "config.restore_provider", "config.set_provider_enabled",
     "config.add_provider_model", "config.remove_provider_model",
-    "config.probe_models",
+    "config.probe_models", "config.probe_context",
     # 联网搜索 / 画图 / 语音：改 endpoint + Key 复用 = 凭据外发
     "websearch.save", "imagegen.save", "speech.save",
     # 钩子命令不经权限门直接 cmd 执行
@@ -659,6 +659,10 @@ def create_app(
             return await backend.apply_theme(params)
         if method == "app.check_update":
             return await backend.check_update()
+        if method == "app.install_update":
+            return await backend.install_update()
+        if method == "app.apply_update":
+            return await backend.apply_update()
         if method == "memory.get":
             return await backend.memory_get()
         if method == "memory.save":
@@ -904,6 +908,14 @@ def create_app(
                 kind=str(params.get("kind", "")),
                 base_url=str(params.get("base_url", "")),
                 api_key=str(params.get("api_key", "")),
+            )
+        if method == "config.probe_context":
+            return await backend.probe_context(
+                name=str(params.get("name", "")),
+                kind=str(params.get("kind", "")),
+                base_url=str(params.get("base_url", "")),
+                api_key=str(params.get("api_key", "")),
+                model=str(params.get("model", "")),
             )
         if method == "whitelist.remove":
             # 归属校验在 backend：凭枚举到的 rule_id 不能删别的项目的规则（B11）

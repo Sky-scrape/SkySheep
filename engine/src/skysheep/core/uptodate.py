@@ -14,6 +14,7 @@ import httpx
 DEFAULT_RELEASES_API = "https://api.github.com/repos/Sky-scrape/SkySheep/releases/latest"
 RELEASES_PAGE = "https://github.com/Sky-scrape/SkySheep/releases"
 TIMEOUT_S = 6.0
+SETUP_ASSET_SUFFIX = "-setup.exe"
 
 _VERSION_RE = re.compile(r"\d+")
 
@@ -53,5 +54,12 @@ async def fetch_latest_release(api_url: str = DEFAULT_RELEASES_API,
         raise RuntimeError("更新源返回的不是 JSON") from e
     if not tag:
         raise RuntimeError("更新源没有版本号")
+    # Windows 安装包资产地址（应用内一键更新用）：最新 release 附件里的 *-setup.exe
+    setup_url = ""
+    for a in data.get("assets") or []:
+        name = str(a.get("name") or "")
+        if name.endswith(SETUP_ASSET_SUFFIX):
+            setup_url = str(a.get("browser_download_url") or "")
+            break
     return {"version": tag.lstrip("vV"), "tag": tag, "url": html_url,
-            "notes": body.strip()[:400]}
+            "notes": body.strip()[:400], "setup_url": setup_url}

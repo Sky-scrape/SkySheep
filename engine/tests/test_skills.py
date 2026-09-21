@@ -498,3 +498,31 @@ def test_frontmatter_block_scalar_description(tmp_path):
 
     plain = loader.get("plain")
     assert plain is not None and plain.description == "单行写法"
+
+
+def test_remove_skill_handles_readonly_git_files(tmp_path):
+    """git 克隆安装的技能带 .git（pack/idx 文件带只读位）——Windows 上普通
+    rmtree 会报 WinError 5 拒绝访问，删除前必须清只读位。"""
+    import os
+    import stat
+
+    from skysheep.skills.installer import remove_skill, rmtree_force
+
+    root = tmp_path / "skills"
+    d = root / "self-improvement"
+    pack_dir = d / ".git" / "objects" / "pack"
+    pack_dir.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: self-improvement\ndescription: x\n---\n正文\n", encoding="utf-8"
+    )
+    pack = pack_dir / "pack-1d687ce60241f44008f4eed22f58a87d754234ab.idx"
+    pack.write_bytes(b"\xf7tOc")  # 真实 idx 魔数
+    os.chmod(pack, stat.S_IREAD)  # git 写 pack 文件后置只读位
+    os.chmod(pack_dir, stat.S_IREAD)  # 目录也可能带只读位
+
+    res = remove_skill("self-improvement", [root])
+    assert res["removed"] == "self-improvement"
+    assert not d.exists()
+
+    # rmtree_force 单独用：目录不存在时安静返回
+    rmtree_force(tmp_path / "no-such-dir")

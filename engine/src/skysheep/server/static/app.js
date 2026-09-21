@@ -11846,27 +11846,82 @@ function renderSkillList(skills) {
 }
 
 // ---------- 设置 · 关于：更新检查 ----------
+const RELEASES_PAGE = "https://github.com/Sky-scrape/SkySheep/releases";
 function renderUpdatePanel(snap) {
   const box = document.getElementById("about-update");
   if (!box) return;
   const cur = snap.version || "";
+  const frozen = !!snap.frozen; // 安装版=可在应用内静默更新；源码版提示 git pull
   const upd = snap.update || null;
   box.innerHTML = `
     <button class="btn-ghost" id="btn-check-update">检查更新</button>
     <span class="upd-state ${upd ? "new" : ""}" id="upd-state">${
       upd
-        ? `🆕 发现新版本 v${escapeHtml(upd.version)}（当前 v${escapeHtml(cur)}），<a href="${escapeHtml(upd.url)}" target="_blank">前往下载</a>`
+        ? `🆕 发现新版本 v${escapeHtml(upd.version)}（当前 v${escapeHtml(cur)}）`
         : `当前版本 v${escapeHtml(cur)}`
-    }</span>`;
+    }</span>
+    <span id="upd-actions"></span>`;
+  const state = box.querySelector("#upd-state");
+  const actions = box.querySelector("#upd-actions");
+
+  // 一键更新：下载最新安装包 → 退出并静默安装（仅安装版；源码版提示 git pull）
+  const setUpdButtons = (version) => {
+    actions.innerHTML = "";
+    const link = `<a href="${RELEASES_PAGE}" target="_blank">前往下载页</a>`;
+    if (!frozen) {
+      actions.innerHTML = `<span class="dim small">源码版请在仓库里 git pull 后重启更新，或${link}</span>`;
+      return;
+    }
+    const b = document.createElement("button");
+    b.className = "btn-ghost";
+    b.textContent = `⬇ 一键更新到 v${escapeHtml(version)}`;
+    b.onclick = async () => {
+      b.disabled = true;
+      state.textContent = "正在下载更新包…";
+      try {
+        const r = await request("app.install_update");
+        if (!r.update_available) {
+          state.textContent = `已是最新版本（v${escapeHtml(r.current)}）`;
+          actions.innerHTML = "";
+          return;
+        }
+        state.textContent = "下载完成。点「退出并安装」后应用会自动退出并静默安装，装完重新打开 SkySheep 即为新版本。";
+        const b2 = document.createElement("button");
+        b2.className = "btn-ghost";
+        b2.textContent = "退出并安装";
+        b2.onclick = async () => {
+          b2.disabled = true;
+          state.textContent = "正在退出并启动安装程序…安装完成后重新打开 SkySheep 即为新版本。";
+          try {
+            await request("app.apply_update");
+          } catch (e) {
+            state.textContent = "启动安装失败：" + e.message;
+            b2.disabled = false;
+          }
+        };
+        actions.innerHTML = "";
+        actions.appendChild(b2);
+      } catch (e) {
+        state.textContent = "更新失败：" + e.message;
+        b.disabled = false;
+      }
+    };
+    actions.appendChild(b);
+    actions.insertAdjacentHTML("beforeend", `<span class="dim small">或${link}</span>`);
+  };
+
+  if (upd && upd.version) setUpdButtons(upd.version);
+
   box.querySelector("#btn-check-update").onclick = async () => {
-    const state = box.querySelector("#upd-state");
     state.textContent = "正在检查更新…";
     state.className = "upd-state";
+    actions.innerHTML = "";
     try {
       const r = await request("app.check_update");
       if (r.available) {
-        state.innerHTML = `🆕 发现新版本 v${escapeHtml(r.version)}（当前 v${escapeHtml(r.current)}），<a href="${escapeHtml(r.url)}" target="_blank">前往下载</a>`;
+        state.innerHTML = `🆕 发现新版本 v${escapeHtml(r.version)}（当前 v${escapeHtml(r.current)}）`;
         state.className = "upd-state new";
+        setUpdButtons(r.version);
       } else if (r.error) {
         state.textContent = "检查失败：" + r.error;
       } else {

@@ -7227,7 +7227,8 @@ class ServerBackend:
         except Exception as e:  # noqa: BLE001 - 手动检查要把失败原因说清楚
             self.update_error = str(e)
             self.update_info = None
-            return {"available": False, "current": __version__, "error": str(e)}
+            return {"available": False, "current": __version__, "frozen": self._is_frozen,
+                    "error": str(e)}
         self.update_error = None
         if is_newer_version(info["version"], __version__):
             self.update_info = info

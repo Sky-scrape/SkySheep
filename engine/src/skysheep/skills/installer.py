@@ -107,28 +107,38 @@ LOCAL_SKILL_SOURCES: list[tuple[str, str]] = [
 def scan_computer_skills(roots: list[tuple[str, Path]], existing: set[str]) -> list[dict]:
     """只读扫描 (来源, 目录) 清单，返回可导入的技能候选（不动磁盘上的任何文件）。
 
-    同一技能目录（同一路径）只出现一次；解析不出名称的 SKILL.md 直接跳过。
-    候选带 installed 标记（与已装技能同名）供前端默认排除——真正的重名把关
-    仍由 install_from_dir 做，这里只负责预览。
+    同一技能只出一条：按名称去重——同名技能常同时装在多家 agent 的目录里，
+    首个来源作为导入路径，其余来源并进 origin（如「Claude Code、Codex」）。
+    解析不出名称的 SKILL.md 直接跳过。候选带 installed 标记（与已装技能同名）
+    供前端默认排除——真正的重名把关仍由 install_from_dir 做，这里只负责预览。
     """
     out: list[dict] = []
-    seen: set[str] = set()
+    by_name: dict[str, dict] = {}
+    seen_paths: set[str] = set()
     for label, base in roots:
         for p in _scan_skills_in_dir(Path(base)):
             key = str(p.resolve())
-            if key in seen:
+            if key in seen_paths:
                 continue
-            seen.add(key)
+            seen_paths.add(key)
             skill = _load_skill_from_dir(p, "global")
             if skill is None:
                 continue
-            out.append({
+            hit = by_name.get(skill.name)
+            if hit is not None:
+                # 同名技能已在更早来源出现过：并进去处即可，不重复出条
+                if label not in hit["origin"]:
+                    hit["origin"] = f'{hit["origin"]}、{label}'
+                continue
+            entry = {
                 "name": skill.name,
                 "description": skill.description,
                 "path": str(p),
                 "origin": label,
                 "installed": skill.name in existing,
-            })
+            }
+            by_name[skill.name] = entry
+            out.append(entry)
     return out
 
 

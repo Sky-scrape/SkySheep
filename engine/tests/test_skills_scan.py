@@ -131,3 +131,18 @@ def test_scan_local_ws_roundtrip(home, monkeypatch):
         ws.send_json({"id": "s2", "method": "skills.scan_local", "params": {}})
         r2 = recv_until(ws, "s2")["result"]
         assert r2["candidates"][0]["installed"] is True
+
+
+def test_scan_dedupes_same_name_across_roots(tmp_path):
+    """同名技能常同时装在多家 agent 目录里：只出一条，来源合并标注，导入取首个来源。"""
+    claude = tmp_path / "claude"
+    codex = tmp_path / "codex"
+    a = _skill(claude, "pdf", "pdf-tools", "Claude Code 里的那份")
+    _skill(codex, "tools/pdf", "pdf-tools", "Codex 里的那份")
+    cands = scan_computer_skills([("Claude Code", claude), ("Codex", codex)], existing=set())
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["name"] == "pdf-tools"
+    assert c["origin"] == "Claude Code、Codex"
+    assert c["description"] == "Claude Code 里的那份"  # 描述取首个来源
+    assert Path(c["path"]).resolve() == a.resolve()

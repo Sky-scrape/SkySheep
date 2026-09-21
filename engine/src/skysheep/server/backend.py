@@ -7418,6 +7418,7 @@ class ServerBackend:
         sessions = await self.store.list_sessions(self.project.id)
         return {
             "version": __version__,
+            "frozen": self._is_frozen,  # 安装版可应用内一键更新；源码版提示 git pull
             "working_dir": str(self.working_dir),
             "project": self.project.name,
             "project_id": self.project.id if self.project else None,

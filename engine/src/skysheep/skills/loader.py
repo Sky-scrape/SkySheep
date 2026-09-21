@@ -61,7 +61,12 @@ def _norm_path(p: str | Path) -> str:
 
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
-    """解析 SKILL.md 头部 frontmatter（--- 包围的 key: value 行）。"""
+    """解析 SKILL.md 头部 frontmatter（--- 包围的 key: value 行）。
+
+    支持值写在行内的普通写法，也支持 YAML 块标量（description: >- / | 之类，
+    内容在后续缩进行）——技能广场与第三方包大量使用这种写法，此前会被读成
+    字面量 ">-"，描述整段丢失。
+    """
     body = text
     meta: dict[str, str] = {}
     if text.startswith("---"):
@@ -73,10 +78,34 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
                     end = i
                     break
             if end is not None:
-                for line in lines[1:end]:
+                fm = lines[1:end]
+                i = 0
+                while i < len(fm):
+                    line = fm[i]
                     if ":" in line:
                         key, _, value = line.partition(":")
-                        meta[key.strip().lower()] = value.strip()
+                        key = key.strip().lower()
+                        value = value.strip()
+                        if value in (">", ">-", ">+", "|", "|-", "|+"):
+                            # 块标量：取后续缩进行。> 折叠为空格，| 保留换行；
+                            # 回到零缩进的非空行即块结束。首尾空白交给 sanitize。
+                            block: list[str] = []
+                            i += 1
+                            while i < len(fm):
+                                nxt = fm[i]
+                                if not nxt.strip():
+                                    block.append("")
+                                elif len(nxt) - len(nxt.lstrip()) == 0:
+                                    break
+                                else:
+                                    block.append(nxt.strip())
+                                i += 1
+                            joiner = " " if value.startswith(">") else "\n"
+                            meta[key] = joiner.join(block).strip()
+                            continue
+                        if key:
+                            meta[key] = value
+                    i += 1
                 body = "\n".join(lines[end + 1 :])
     return meta, body.strip()
 

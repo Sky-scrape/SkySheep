@@ -300,10 +300,16 @@ async def test_add_mcp_preset_writes_and_substitutes_dir(tmp_path, monkeypatch):
     await backend.add_mcp_preset("git")
     assert called["name"] == "git"
     assert called["command"] == "uvx"
-    assert str(tmp_path / "proj") in called["args"]  # {dir} 已替换
-    assert "{dir}" not in "".join(called["args"])
+    # git 预设不带 --repository {dir}：指向非 git 目录时服务器会启动即退出
+    assert called["args"] == ["mcp-server-git"]
     assert called["readonly"] is True
     assert called["overwrite"] is False  # 预设不覆盖已有
+
+    # {dir} 替换逻辑由 filesystem 预设覆盖（它的目录参数是允许目录，非 git 仓库也能用）
+    await backend.add_mcp_preset("filesystem")
+    assert called["name"] == "filesystem"
+    assert str(tmp_path / "proj") in called["args"]  # {dir} 已替换
+    assert "{dir}" not in "".join(called["args"])
 
 
 async def test_add_mcp_preset_unknown_name(tmp_path, monkeypatch):

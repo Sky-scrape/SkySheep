@@ -100,10 +100,11 @@ def test_delete_current_project_refused_and_unknown_id(home):
         r = recv_until(ws, "del")
         assert not r["ok"] and "正在使用" in r["error"]
 
-        # 不存在的 id
+        # 不存在的 id：只剩一个项目时先撞上「至少保留一个」守卫
+        # （守卫在存在性检查之前，杜绝任何路径把列表删空）
         ws.send_json({"id": "del2", "method": "project.delete", "params": {"id": 99999}})
         r2 = recv_until(ws, "del2")
-        assert not r2["ok"] and "不存在" in r2["error"]
+        assert not r2["ok"] and "保留" in r2["error"]
 
         # 项目仍然健在
         ws.send_json({"id": "pl2", "method": "project.list", "params": {}})

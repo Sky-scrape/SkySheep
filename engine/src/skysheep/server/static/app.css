@@ -2306,8 +2306,14 @@ select option[value=""] { color: var(--dim); font-style: italic; }
    内置工具用「名称 / 安全级别 / 说明」三列定宽网格，行间上下对齐 */
 .settings-skill-list li, .settings-tool-list li { display: flex; align-items: center; gap: 10px; cursor: default; }
 .settings-tool-list li {
-  display: grid; grid-template-columns: 122px 56px 1fr;
+  /* 名称列定宽保住行间对齐；MCP 工具名（mcp__server__tool）很长，必须截断——
+     不截的话会溢出格子画到后面两列底下（徽章盖住中段、描述里混进名字尾巴） */
+  display: grid; grid-template-columns: 150px 56px 1fr;
   gap: 4px 10px; align-items: center;
+}
+.settings-tool-list .item-name {
+  font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* 技能行：设置面板只有 ~410px 宽，塞不下「名称/来源/状态/描述/范围/操作」一整行。
    固定两行：上行名称+标签+删除，下行描述+范围/开关。列宽固定，行间必然对齐。 */
@@ -2316,6 +2322,14 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   padding: 9px 10px; border-bottom: 1px solid var(--line);
 }
 .settings-skill-list .skill-row:last-child { border-bottom: none; }
+/* 技能批量删除：列表顶部工具条（全选 / 删除所选）与每行行首勾选框 */
+.skill-toolbar {
+  padding: 7px 10px; border-bottom: 1px solid var(--line);
+  font-size: 12.5px; background: var(--paper-sunken);
+}
+.skill-toolbar .pick-all { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.skill-toolbar button:disabled { opacity: 0.45; cursor: default; }
+.skill-row .skill-pick { flex-shrink: 0; margin: 0; cursor: pointer; }
 /* 扫描本机技能：弹窗里的候选勾选列表（名称 + 描述 + 来源徽章，已装过的灰显） */
 .scan-list {
   list-style: none; margin: 8px 0; padding: 0;

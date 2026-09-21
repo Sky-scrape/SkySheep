@@ -5918,9 +5918,12 @@ class ServerBackend:
 
     async def delete_project(self, project_id: int) -> dict:
         """把一个项目从列表里移除：项目记录、它的会话与白名单一并删除；
-        电脑上的文件夹不受影响。当前正在使用的项目不允许删。"""
+        电脑上的文件夹不受影响。当前正在使用的项目与最后一个项目不允许删。"""
         if self.project is not None and project_id == self.project.id:
             raise RuntimeError("不能删除正在使用的项目；先切换到其他项目再删除")
+        projects = await self.store.list_projects()
+        if len(projects) <= 1:
+            raise RuntimeError("至少要保留一个项目，最后一个项目不能删除")
         removed = await self.store.delete_project(project_id)
         if not removed:
             raise RuntimeError("项目不存在，可能已被删除")

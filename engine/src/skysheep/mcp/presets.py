@@ -58,10 +58,13 @@ MCP_PRESETS: list[MCPPreset] = [
     {
         "name": "git",
         "label": "Git 仓库",
-        "desc": "查看 / 操作本地 Git 仓库",
+        "desc": "查看 / 操作本地 Git 仓库（调用时传入仓库路径）",
         "need": "uv",
         "command": "uvx",
-        "args": ["mcp-server-git", "--repository", "{dir}"],
+        # 不带 --repository：它指向的目录不是 git 仓库时服务器会启动即退出
+        # （Connection closed），整台服务器废掉；不带参数则启动常驻，仓库路径
+        # 由模型在每次工具调用时传入，指错也只是单次调用报错。
+        "args": ["mcp-server-git"],
         "readonly": True,
     },
     {

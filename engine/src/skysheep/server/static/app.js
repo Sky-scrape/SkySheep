@@ -8012,7 +8012,7 @@ async function renderSettings() {
     const [label, cls] = safetyMeta[t.safety] || [t.safety, ""];
     const li = document.createElement("li");
     li.innerHTML = `
-      <span class="item-name">${escapeHtml(t.name)}</span>
+      <span class="item-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
       <span class="chip ${cls}">${escapeHtml(label)}</span>
       <span class="item-desc" title="${escapeHtml(t.description)}">${escapeHtml(t.description)}</span>`;
     tul.appendChild(li);
@@ -8529,6 +8529,11 @@ async function scanLocalSkillsModal() {
   box.innerHTML = `
     <p class="dim small">找到 ${cands.length} 个技能${doneCnt ? `（${doneCnt} 个已装过，灰显不可选）` : "，均可导入"}。
     勾选要装进 SkySheep 的技能，装完立即生效。</p>
+    <div class="scan-toolbar">
+      <button class="btn-ghost" data-act="all">全选</button>
+      <button class="btn-ghost" data-act="none">全不选</button>
+      <span class="dim small">已装过的灰显项不受影响</span>
+    </div>
     <ul class="scan-list">${cands.map((c) => `
       <li><label class="${c.installed ? "done" : ""}" title="${escapeHtml(c.path)}">
         <input type="checkbox" data-path="${escapeHtml(c.path)}" ${c.installed ? "disabled" : "checked"}>
@@ -8543,6 +8548,12 @@ async function scanLocalSkillsModal() {
         <option value="project">仅本项目</option>
       </select>
     </label></div>`;
+  box.querySelectorAll(".scan-toolbar button").forEach((b) => {
+    b.onclick = () => {
+      box.querySelectorAll('.scan-list input[type=checkbox]:not(:disabled)').forEach(
+        (cb) => { cb.checked = b.dataset.act === "all"; });
+    };
+  });
   showModal("扫描本机技能", box, async () => {
     const scope = box.querySelector('select[data-f="scope"]').value;
     const picked = [...box.querySelectorAll("input[type=checkbox]:checked")]
@@ -8580,6 +8591,26 @@ function deleteSkillModal(s) {
     boot();
     skillStatus(`✓ 已删除技能「${s.name}」`);
   }, "删除");
+}
+
+function batchDeleteSkillsModal(names) {
+  const box = document.createElement("div");
+  box.innerHTML = `<p>确定删除选中的 <b>${names.length}</b> 个技能吗？</p>
+    <p class="dim small">会把这些技能文件夹从磁盘上删除，不可恢复：
+    ${names.map((n) => `<span class="mono-path">${escapeHtml(n)}</span>`).join("、")}</p>`;
+  showModal("批量删除技能", box, async () => {
+    const bad = [];
+    for (const n of names) {
+      try {
+        await request("skills.delete", { name: n });
+      } catch (e) {
+        bad.push(`${n}（${e.message}）`);
+      }
+    }
+    await renderSettings();
+    boot();
+    skillStatus(bad.length ? `✗ 部分删除失败：${bad.join("、")}` : `✓ 已删除 ${names.length} 个技能`);
+  }, "全部删除");
 }
 
 document.getElementById("btn-import-skill").onclick = () => importSkillModal();
@@ -11651,12 +11682,41 @@ function renderSkillList(skills) {
   const sul = document.getElementById("settings-skill-list");
   if (!sul) return;
   sul.innerHTML = "";
+  // 批量删除工具条：全选 / 删除所选。勾选状态不跨渲染保留（重渲染即清零）。
+  let syncPicks = null;
+  if (skills.length) {
+    const bar = document.createElement("li");
+    bar.className = "skill-toolbar";
+    bar.innerHTML = `
+      <label class="pick-all"><input type="checkbox"> 全选</label>
+      <button class="btn-ghost danger" disabled>删除所选</button>
+      <span class="dim small"></span>`;
+    const pickAll = bar.querySelector(".pick-all input");
+    const delBtn = bar.querySelector("button");
+    const note = bar.querySelector("span.dim");
+    const picked = () => [...sul.querySelectorAll(".skill-pick:checked")];
+    syncPicks = () => {
+      const all = [...sul.querySelectorAll(".skill-pick")];
+      const boxes = picked();
+      delBtn.disabled = !boxes.length;
+      delBtn.textContent = boxes.length ? `删除所选（${boxes.length}）` : "删除所选";
+      note.textContent = boxes.length ? "" : "勾选要删除的技能，可一次删多个";
+      pickAll.checked = all.length > 0 && boxes.length === all.length;
+    };
+    pickAll.onchange = () => {
+      sul.querySelectorAll(".skill-pick").forEach((cb) => { cb.checked = pickAll.checked; });
+      syncPicks();
+    };
+    delBtn.onclick = () => batchDeleteSkillsModal(picked().map((cb) => cb.dataset.name));
+    sul.appendChild(bar);
+  }
   skills.forEach((s) => {
     const st = skillState(s);
     const li = document.createElement("li");
     li.className = "skill-row";
     li.innerHTML =
       `<div class="skill-top">
+        <input type="checkbox" class="skill-pick" data-name="${escapeHtml(s.name)}" title="勾选以批量删除">
         <button class="skill-name" type="button" title="查看 SKILL.md 完整指令">${escapeHtml(s.name)}</button>
         <span class="chip">${s.source === "project" ? "本项目" : "全局"}</span>
         <span class="chip ${st.cls}">${st.label}</span>
@@ -11666,6 +11726,7 @@ function renderSkillList(skills) {
         <span class="skill-desc" title="${escapeHtml(s.description)}">${escapeHtml(s.description)}</span>
         <span class="skill-ops"></span>
       </div>`;
+    li.querySelector(".skill-pick").onchange = () => syncPicks && syncPicks();
     li.querySelector(".skill-name").onclick = () => previewSkill(s.name);
 
     const ops = li.querySelector(".skill-ops");

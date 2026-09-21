@@ -460,3 +460,41 @@ def test_install_hint_points_at_moved_skill_dir(tmp_path):
     # 末段同名（docx）→ 直接给出该改成哪个目录
     assert "把地址中的目录换成：skills/docx" in msg
     assert "skills-main" not in msg  # 归档包装目录不展示给用户
+
+
+def test_frontmatter_block_scalar_description(tmp_path):
+    """第三方技能大量用 YAML 块标量写描述（description: >- / | 后跟缩进行）——
+    此前朴素逐行解析会把值读成字面量 ">-"，描述整段丢失只剩两个字符。"""
+    g = tmp_path / "global_skills"
+    p = tmp_path / "proj" / ".skysheep" / "skills"
+    p.mkdir(parents=True, exist_ok=True)
+
+    d = g / "folded"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: folded\ndescription: >-\n  第一段说明，\n  接着同一句。\n\n  新的一段。\n---\n正文\n",
+        encoding="utf-8",
+    )
+    d2 = g / "literal"
+    d2.mkdir(parents=True, exist_ok=True)
+    (d2 / "SKILL.md").write_text(
+        "---\nname: literal\ndescription: |\n  第一行\n  第二行\n---\n正文\n",
+        encoding="utf-8",
+    )
+    d3 = g / "plain"
+    d3.mkdir(parents=True, exist_ok=True)
+    (d3 / "SKILL.md").write_text("---\nname: plain\ndescription: 单行写法\n---\n正文\n", encoding="utf-8")
+
+    loader = SkillLoader(global_dir=g, project_dir=p, state_path=tmp_path / "skills.json")
+    loader.discover()
+
+    folded = loader.get("folded")
+    assert folded is not None and folded.description
+    assert ">-" not in folded.description, "块标量标记不能原样出现在描述里"
+    assert "第一段说明，" in folded.description and "接着同一句" in folded.description
+
+    literal = loader.get("literal")
+    assert literal is not None and "第一行" in literal.description and "第二行" in literal.description
+
+    plain = loader.get("plain")
+    assert plain is not None and plain.description == "单行写法"

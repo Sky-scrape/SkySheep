@@ -1,7 +1,8 @@
 """子代理定义的持久化：~/.skysheep/subagents.json。
 
 设置页里的「子代理」管理的就是这份文件：
-- builtin：两个内置子代理（general-purpose=task / Explore=explore）的覆盖项
+- builtin：内置子代理（general-purpose=task / Explore=explore / Reviewer=reviewer /
+  Researcher=researcher / Writer=writer / Planner=planner）的覆盖项
   （用哪个模型、思考强度），留空表示跟随主对话当前设置；
 - custom：用户自建的子代理——名称、描述、专项提示词、工具范围（"all" /
   "readonly" / 工具名列表）、使用的模型（provider+model，留空跟随主对话）。
@@ -21,8 +22,15 @@ from pydantic import BaseModel, ValidationError
 from ..config import REASONING_EFFORTS
 
 SUBAGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
-BUILTIN_AGENT_TYPES = ("task", "explore")
-BUILTIN_DISPLAY = {"task": "general-purpose", "explore": "Explore"}
+BUILTIN_AGENT_TYPES = ("task", "explore", "reviewer", "researcher", "writer", "planner")
+BUILTIN_DISPLAY = {
+    "task": "general-purpose",
+    "explore": "Explore",
+    "reviewer": "Reviewer",
+    "researcher": "Researcher",
+    "writer": "Writer",
+    "planner": "Planner",
+}
 TOOL_POLICY_ALL = "all"
 TOOL_POLICY_READONLY = "readonly"
 

@@ -33,19 +33,48 @@ from ..tools import GlobTool, GrepTool, ListDirTool, ReadFileTool, Safety, Tool,
 from ..tools.base import ToolContext
 from .agent import Agent
 from .prompt import SUBAGENT_PROMPT
+from .subagent_store import BUILTIN_AGENT_TYPES
 
-# 只读研究型工具集（explore / task 共用基础）
+# 只读研究型工具集（所有内置型共用基础）
 RESEARCH_TOOL_NAMES = ("read_file", "list_dir", "glob", "grep")
+
+# 各内置型在基础只读集之上追加的工具（按名字从主注册表的工具里挑）。
+# SubagentGate 仍会拦截一切需确认的操作——这里给多少都越不过安全边界。
+EXTRA_TOOL_NAMES_BY_TYPE = {
+    "task": ("write_file", "edit_file", "write_document"),
+    "researcher": ("web_search", "web_fetch"),
+}
+
+# 内置型的角色提示词（追加在 SUBAGENT_PROMPT 之后）。task/explore 不用额外说明。
+BUILTIN_ROLE_PROMPTS = {
+    "reviewer": (
+        "\nRole: 代码/文档审查员。仔细审阅任务指定的文件或改动，从正确性、边界条件、"
+        "安全隐患、可读性四个维度找问题；输出按「严重 / 建议 / 疑问」分级的审查清单，"
+        "每条给出文件与行号和一句话修改建议。不要动手改任何文件。"
+    ),
+    "researcher": (
+        "\nRole: 联网调研员。优先用 web_search / web_fetch 搜集公开资料（可读本地文件补充上下文）；"
+        "交叉核对多个来源，结论注明来源链接；明确区分「已证实的事实」与「你的推断」。"
+    ),
+    "writer": (
+        "\nRole: 写作助手。根据任务产出结构清晰、可直接使用的成稿（文档/公告/README/报告等），"
+        "先想清楚读者与用途再动笔；用任务的语言写作；只输出成稿本体与必要的简短说明，"
+        "不要输出写作过程流水账。"
+    ),
+    "planner": (
+        "\nRole: 规划师。先调研现状（读文件/搜索），再把任务拆成可执行的分步计划："
+        "每步写清做什么、动哪些文件、怎么验证；标注步骤间的依赖与风险点。不改动任何文件。"
+    ),
+}
 
 
 def build_subagent_registry(agent_type: str, extra_tools: list[Tool] | None = None) -> ToolRegistry:
     by_name = {t.name: t for t in (ReadFileTool(), ListDirTool(), GlobTool(), GrepTool())}
     tools: list[Tool] = [by_name[n] for n in RESEARCH_TOOL_NAMES]
-    if agent_type == "task" and extra_tools:
-        # task 型可写文件/生成文档（但写操作会被 SubagentGate 自动拒绝，见模块 docstring）
-        for t in extra_tools:
-            if t.safety == Safety.READONLY or t.name in ("write_file", "edit_file", "write_document"):
-                tools.append(t)
+    if extra_tools:
+        wanted = EXTRA_TOOL_NAMES_BY_TYPE.get(agent_type, ())
+        have = {t.name: t for t in extra_tools}
+        tools.extend(have[n] for n in wanted if n in have)
     return ToolRegistry(tools)
 
 
@@ -114,6 +143,7 @@ async def run_subagent(
     )
     agent.set_system(
         SUBAGENT_PROMPT.format(agent_type=agent_type, workdir=str(working_dir))
+        + BUILTIN_ROLE_PROMPTS.get(agent_type, "")
         + (system_extra or "")
     )
     final_text = ""
@@ -195,6 +225,7 @@ class TaskManager:
         self._usage_recorder = usage_recorder
         self._event_emitter = event_emitter
         self._extra: list[Tool] | None = None
+        self._extra_research: list[Tool] | None = None
         self._tasks: dict[str, TaskRecord] = {}
         self._restrict_to_workdir = False
         self._active_sid = ""  # 当前正在跑的轮次所属会话（派生时归属用量）
@@ -214,8 +245,8 @@ class TaskManager:
     # ---- 自定义子代理的解析 ----
 
     def known_agent_type(self, agent_type: str) -> bool:
-        """内置 explore/task，或启用中的自定义子代理名。"""
-        if agent_type in ("explore", "task"):
+        """内置型（task/explore/reviewer/researcher/writer/planner），或启用中的自定义子代理名。"""
+        if agent_type in BUILTIN_AGENT_TYPES:
             return True
         return self._store is not None and self._store.get_custom(agent_type, enabled_only=True) is not None
 
@@ -253,13 +284,21 @@ class TaskManager:
             )
         return None
 
-    def _extra_tools_for_task(self) -> list[Tool]:
-        """task 型子代理可尝试写文件/生成文档（写入动作会被 SubagentGate 自动拒绝）。"""
-        if self._extra is None:
-            from ..tools import EditFileTool, WriteDocumentTool, WriteFileTool
+    def _builtin_extra_tools(self, agent_type: str) -> list[Tool] | None:
+        """内置型在只读基础集之上可尝试的额外工具（写入动作仍会被 SubagentGate 拒）。"""
+        if agent_type == "task":
+            if self._extra is None:
+                from ..tools import EditFileTool, WriteDocumentTool, WriteFileTool
 
-            self._extra = [WriteFileTool(), EditFileTool(), WriteDocumentTool()]
-        return self._extra
+                self._extra = [WriteFileTool(), EditFileTool(), WriteDocumentTool()]
+            return self._extra
+        if agent_type == "researcher":
+            if self._extra_research is None:
+                from ..tools import WebFetchTool, WebSearchTool
+
+                self._extra_research = [WebSearchTool(), WebFetchTool()]
+            return self._extra_research
+        return None
 
     def _new_record(self, agent_type: str, prompt: str) -> TaskRecord:
         task_id = uuid.uuid4().hex[:10]
@@ -354,7 +393,7 @@ class TaskManager:
             provider = self._provider_factory()
         rec.provider_name = getattr(provider, "name", "") or ""
         rec.provider_model = getattr(provider, "model", "") or ""
-        extra = self._extra_tools_for_task() if (plan is None and rec.agent_type == "task") else None
+        extra = None if plan is not None else self._builtin_extra_tools(rec.agent_type)
 
         agent: Agent | None = None
         try:
@@ -495,8 +534,10 @@ def asyncio_create(coro: Awaitable) -> object:
 class SpawnAgentArgs(BaseModel):
     agent_type: str = Field(
         default="explore",
-        description="explore=只读调研（推荐）；task=额外可尝试写文件，"
-        "但子代理内的写/命令操作会被自动拒绝（无确认通道）",
+        description="内置型：explore=只读调研（推荐）；task=通用多步任务（额外可尝试写文件）；"
+        "reviewer=代码/文档审查；researcher=联网调研（带搜索/网页工具）；"
+        "writer=文档/报告成稿写作；planner=拆解任务出分步计划。"
+        "子代理内的写/命令操作会被自动拒绝（无确认通道）",
     )
     prompt: str = Field(description="给子代理的完整任务说明，要自包含（子代理看不到当前对话）")
     background: bool = Field(default=False, description="true=后台运行立即返回 task_id，用 check_task 查询")
@@ -529,7 +570,7 @@ class SpawnAgentTool(Tool):
         from ..tools.base import ToolError
 
         if not self._tasks.known_agent_type(args.agent_type):
-            available = ["explore", "task"] + [n for n, _ in self._tasks.list_custom()]
+            available = list(BUILTIN_AGENT_TYPES) + [n for n, _ in self._tasks.list_custom()]
             raise ToolError(
                 f"未知的子代理类型「{args.agent_type}」，可用：{('、'.join(available))}"
             )

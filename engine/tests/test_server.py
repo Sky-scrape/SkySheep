@@ -1295,8 +1295,11 @@ def test_subagent_detail_payload(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         d = req_ok(ws, "g", "subagent.get")["result"]
         assert d["enabled"] is True
-        assert set(d["builtin"]) == {"task", "explore"}
+        assert set(d["builtin"]) == {
+            "task", "explore", "reviewer", "researcher", "writer", "planner",
+        }
         assert d["builtin_display"]["explore"] == "Explore"
+        assert d["builtin_display"]["reviewer"] == "Reviewer"
         assert d["custom"] == []
         assert d["providers"], "要能列出可选模型服务"
         assert {"name", "model", "models", "has_key"} <= set(d["providers"][0])

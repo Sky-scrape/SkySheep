@@ -11284,6 +11284,10 @@ function parseModelValue(v) {
 const SUBAGENT_TYPE_DESC = {
   task: "多步通用任务：可以拆步骤、尝试写文件（写入仍会被自动拒绝）。",
   explore: "只读调研：在代码与文件里广泛搜集信息，不改任何东西。",
+  reviewer: "审查员：细读代码 / 文档，按严重度输出审查清单（不改文件）。",
+  researcher: "调研员：联网搜索与抓取公开资料，结论注明来源。",
+  writer: "写手：产出可直接使用的文档 / 报告 / README 成稿。",
+  planner: "规划师：调研现状并拆解成分步计划（含验证方式与风险）。",
 };
 
 function renderBuiltinSubagents(d) {

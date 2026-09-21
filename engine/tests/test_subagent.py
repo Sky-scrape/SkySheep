@@ -131,7 +131,9 @@ def test_subagent_store_roundtrip(tmp_path):
     path = tmp_path / "subagents.json"
     store = SubagentStore(path)
     store.load()
-    assert set(store.builtin) == {"task", "explore"}
+    assert set(store.builtin) == {
+        "task", "explore", "reviewer", "researcher", "writer", "planner",
+    }
     store.upsert_custom(SubagentDef(
         name="repo-auditor", description="审计仓库", prompt="先列目录",
         tools=["read_file", "grep"], provider="zhipu", model="glm-5.3",
@@ -496,3 +498,41 @@ async def test_tasks_get_backend_method(tmp_path):
     except ValueError:
         raised = True
     assert raised
+
+
+async def test_new_builtin_types_registry_and_role_prompt(tmp_path):
+    """新增内置型：reviewer/writer/planner 用只读基础集，researcher 额外带联网
+    工具；角色提示词要拼进系统消息（模型才知道自己是干嘛的）。"""
+    from skysheep.core.subagent import (
+        BUILTIN_ROLE_PROMPTS,
+        build_subagent_registry,
+        run_subagent,
+    )
+    from skysheep.models.fake import FakeProvider
+    from skysheep.tools import WebFetchTool, WebSearchTool
+
+    reg = build_subagent_registry("reviewer")
+    assert {t.name for t in reg.all()} == {"read_file", "list_dir", "glob", "grep"}
+
+    web_reg = build_subagent_registry(
+        "researcher", [WebSearchTool(), WebFetchTool()]
+    )
+    assert "web_search" in {t.name for t in web_reg.all()}
+    assert "web_fetch" in {t.name for t in web_reg.all()}
+
+    # 未知类型不拼角色词；六个内置型都有角色词或显式为空
+    assert BUILTIN_ROLE_PROMPTS.get("ghost", "") == ""
+    for t in ("reviewer", "researcher", "writer", "planner"):
+        assert BUILTIN_ROLE_PROMPTS.get(t)
+
+    sub_script = [[TextBlock(text="调研完成")]]
+    provider = FakeProvider(list(sub_script))
+    _, agent = await run_subagent(
+        provider=provider,
+        working_dir=tmp_path,
+        agent_type="researcher",
+        prompt="查一下 X",
+    )
+    system_text = agent.history[0].to_plain()
+    assert "联网调研员" in system_text
+    assert "read_file" in system_text  # 基础 SUBAGENT_PROMPT 仍在

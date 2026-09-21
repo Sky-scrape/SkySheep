@@ -12,7 +12,7 @@
 ; （0.6.0 起三处一致，见 AGENTS.md）。
 
 #define MyAppName "SkySheep"
-#define MyAppVersion "2.2"
+#define MyAppVersion "1.6"
 #define MyAppPublisher "SkySheep contributors"
 #define MyAppURL "https://github.com/Sky-scrape/SkySheep"
 #define MyAppExeName "SkySheep.exe"

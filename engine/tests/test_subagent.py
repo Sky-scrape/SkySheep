@@ -536,3 +536,60 @@ async def test_new_builtin_types_registry_and_role_prompt(tmp_path):
     system_text = agent.history[0].to_plain()
     assert "联网调研员" in system_text
     assert "read_file" in system_text  # 基础 SUBAGENT_PROMPT 仍在
+
+
+def test_builtin_override_editable_fields(tmp_path):
+    """内置子代理的说明与角色提示词可编辑且持久化；留空 = 回到内置默认。"""
+    from skysheep.core.subagent_store import SubagentStore
+
+    path = tmp_path / "subagents.json"
+    store = SubagentStore(path)
+    store.load()
+    store.set_override("reviewer", provider="", model="", reasoning="",
+                       description="只审 Python 文件", prompt="按公司规范逐条审查")
+    store2 = SubagentStore(path)
+    store2.load()
+    ov = store2.builtin["reviewer"]
+    assert ov.description == "只审 Python 文件"
+    assert ov.prompt == "按公司规范逐条审查"
+    assert ov.provider == "" and ov.model == ""
+
+
+def test_builtin_prompt_override_reaches_plan(tmp_path):
+    """改写内置型角色提示词后要真正生效：plan 带覆盖词；清空后回到内置默认；
+    描述覆盖进 spawn_agent 的说明文字。"""
+    from skysheep.core.subagent import TaskManager
+    from skysheep.core.subagent_store import SubagentStore
+
+    store = SubagentStore(tmp_path / "subagents.json")
+    store.load()
+    store.set_override("researcher", provider="", model="", reasoning="",
+                       description="只查 arXiv", prompt="按给定清单逐项核对")
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([TextBlock(text="ok")]),
+        working_dir=tmp_path, store=store,
+    )
+    plan = tasks._plan_for("researcher")
+    assert plan is not None and plan.role_prompt == "按给定清单逐项核对"
+
+    store.set_override("researcher", provider="", model="", reasoning="",
+                       description="只查 arXiv", prompt="")
+    plan2 = tasks._plan_for("researcher")
+    assert plan2 is not None and "联网调研员" in (plan2.role_prompt or "")
+
+    assert dict(tasks.list_builtin_desc())["researcher"] == "只查 arXiv"
+    assert "只查 arXiv" not in dict(tasks.list_builtin_desc())["explore"]
+
+
+async def test_run_subagent_role_prompt_override(tmp_path):
+    """role_prompt 传空串 = 不拼内置角色词（自定义覆盖通道）；None = 内置默认。"""
+    from skysheep.core.subagent import run_subagent
+
+    provider = FakeProvider([TextBlock(text="ok")])
+    _, agent = await run_subagent(
+        provider=provider, working_dir=tmp_path, agent_type="researcher",
+        prompt="查一下", role_prompt="自定义角色词",
+    )
+    system_text = agent.history[0].to_plain()
+    assert "自定义角色词" in system_text
+    assert "联网调研员" not in system_text

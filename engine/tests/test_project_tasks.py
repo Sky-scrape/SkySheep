@@ -89,3 +89,19 @@ def test_deleting_project_cascades_its_tasks(home):
         assert task_rows_of_project(home, proj2_id) == []
         rows = task_rows_of_project(home, cur_pid)
         assert len(rows) == 1
+
+
+def test_new_task_chat_creates_projectless_session(home):
+    """侧栏「任务」分组的 ＋：建一个不绑定任何文件夹的会话。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "t1", "method": "session.new_task", "params": {}})
+        r = recv_until(ws, "t1")
+        assert r["ok"] and r["result"]["id"]
+        con = sqlite3.connect(home / "home" / "skysheep.db")
+        try:
+            row = con.execute(
+                "SELECT project_id FROM sessions WHERE id = ?", (r["result"]["id"],)
+            ).fetchone()
+        finally:
+            con.close()
+        assert row is not None and row[0] is None

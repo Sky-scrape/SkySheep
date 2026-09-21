@@ -2805,6 +2805,16 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 }
 #session-list li.pgroup-head:hover .pg-del { opacity: 1; }
 #session-list li.pgroup-head .pg-del:hover { color: var(--reg); background: rgba(143, 29, 29, .08); }
+/* 「任务」分组组头的 ＋：新建任务对话（手感同 pg-del，配色走主色） */
+#session-list li.pgroup-head .pg-add {
+  flex-shrink: 0; border: none; background: none; cursor: pointer;
+  color: var(--dim); font-size: 13px; line-height: 1; font-weight: 700;
+  padding: 2px 7px; border-radius: var(--r-xs);
+  opacity: 0; transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+}
+#session-list li.pgroup-head:hover .pg-add,
+#session-list li.pgroup-head .pg-add:focus { opacity: 1; }
+#session-list li.pgroup-head .pg-add:hover { color: var(--accent); background: var(--accent-weak, rgba(30, 90, 168, .08)); }
 /* 「显示更多 / 收起」与「添加项目」ghost 行 */
 #session-list li.pgroup-more { color: var(--dim); font-size: 12px; }
 #session-list li.pgroup-add {
@@ -3713,6 +3723,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   .agenda-item .agenda-ops { visibility: visible; }
   .project-list li .p-del { opacity: 1; }
   #session-list li.pgroup-head .pg-del { opacity: 1; }
+  #session-list li.pgroup-head .pg-add { opacity: 1; }
   #session-list li .s-archive,
   #session-list li .s-more { display: block; }
   /* 会话行：桌面端悬浮时用隐藏时间给按钮让位，触屏下按钮常显，时间不必再让位 */

@@ -815,6 +815,8 @@ def create_app(
                 provider=str(params.get("provider", "")),
                 model=str(params.get("model", "")),
                 reasoning=str(params.get("reasoning", "")),
+                description=str(params.get("description", "")),
+                prompt=str(params.get("prompt", "")),
             )
         if method == "subagent.save_custom":
             tools = params.get("tools")

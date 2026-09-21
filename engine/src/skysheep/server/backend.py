@@ -2630,6 +2630,14 @@ class ServerBackend:
         self._get_runtime(self.session.id)  # 预建 runtime（自带系统提示词）
         return {"id": self.session.id, "title": "", "summary": ""}
 
+    async def create_task_chat(self) -> dict:
+        """新建一个不绑定任何文件夹的「任务」会话（侧栏「任务」分组的 ＋）。
+
+        只落库、不切换当前会话——前端拿到 id 自己打开（走普通会话激活路径）。
+        """
+        s = await self.store.create_session(None)
+        return {"id": s.id, "title": s.title}
+
     async def open_initial_session(self) -> dict | None:
         """启动时接着上次的会话继续；完全没历史则不创建（懒创建：发第一条消息时才落库），
         避免每次启动都堆积空会话。"""

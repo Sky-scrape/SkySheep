@@ -2206,7 +2206,6 @@ async function refreshSessionsGrouped() {
   });
   const ul = document.getElementById("session-list");
   const frag = document.createDocumentFragment();
-  let sawProject = false;
   // 组内会话应用拖动保存的自定义序（orderedSessionList：保存过的排前，新会话按时间追加）
   byProject.forEach((list, k) => {
     byProject.set(k, orderedSessionList(list, k));
@@ -2223,7 +2222,6 @@ async function refreshSessionsGrouped() {
   }
   lastGroupedCurrentKey = currentKey;
   projects.forEach((p) => {
-    sawProject = true;
     renderProjectGroup(frag, {
       key: p.id, name: p.name, list: byProject.get(p.id) || [],
       isCurrent: !!p.is_current, rootPath: p.root_path || "", project: p,
@@ -2234,10 +2232,17 @@ async function refreshSessionsGrouped() {
   byProject.forEach((list, key) => {
     if (key !== "quick") loose.push(...list);
   });
-  if (byProject.has("quick")) {
+  {
+    // 「任务」分组常驻：不绑定文件夹的对话都在这里（有时候只是想聊一句、
+    // 做点小任务，不需要工作目录）。组头 ＋ 一键新建任务对话。
     renderProjectGroup(frag, {
-      key: "quick", name: "快聊", list: byProject.get("quick"),
+      key: "quick", name: "任务", list: byProject.get("quick") || [],
       isCurrent: false, rootPath: "", project: null,
+      headPlus: async () => {
+        const r = await request("session.new_task", {});
+        await openTabForSession(r.id, r.title);
+        refreshSessionsGrouped();
+      },
     });
   }
   if (loose.length) {
@@ -2245,12 +2250,6 @@ async function refreshSessionsGrouped() {
       key: "loose", name: "其他", list: loose,
       isCurrent: false, rootPath: "", project: null,
     });
-  }
-  if (!sawProject && !sessions.length) {
-    const hint = document.createElement("li");
-    hint.className = "empty-hint";
-    hint.textContent = "还没有项目和会话";
-    frag.appendChild(hint);
   }
   // 「添加项目」ghost 行：分组视图把项目区整个收掉了，入口挪到列表末尾
   const add = document.createElement("li");
@@ -2266,7 +2265,7 @@ async function refreshSessionsGrouped() {
   syncFoldAllBtn();
 }
 
-function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, project }) {
+function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, project, headPlus }) {
   const ul = document.getElementById("session-list");
   const st = groupState(key);
   const head = document.createElement("li");
@@ -2275,12 +2274,16 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
   head.innerHTML = FOLDER_SVG +
     `<span class="pg-name">${escapeHtml(name)}</span>` +
     (list.length ? `<span class="pg-count">${list.length}</span>` : "") +
+    (headPlus
+      ? '<button class="pg-add" title="新建一个任务对话（不需要文件夹，随时能聊）">＋</button>' : "") +
     (project
       ? `<button class="pg-del" title="${isCurrent ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目"}">✕</button>` : "") +
     '<span class="pg-chev"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
     'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M6 4l4 4-4 4"/></svg></span>';
   head.title = `${name} —— 点击展开/折叠该项目下的会话`;
+  const addBtn = head.querySelector(".pg-add");
+  if (addBtn) addBtn.onclick = (e) => { e.stopPropagation(); headPlus(); };
   // 整行点击都只做展开/折叠（切换项目走「点该项目下的会话」或经典视图）
   head.onclick = () => {
     st.open = !st.open;
@@ -11418,14 +11421,17 @@ function renderBuiltinSubagents(d) {
   const ul = document.getElementById("builtin-subagent-list");
   ul.innerHTML = "";
   (d.builtin_display ? Object.keys(d.builtin_display) : []).forEach((type) => {
-    const ov = (d.builtin || {})[type] || { provider: "", model: "", reasoning: "" };
+    const ov = (d.builtin || {})[type] || { provider: "", model: "", reasoning: "", description: "", prompt: "" };
+    const effDesc = (d.builtin_desc || {})[type] || SUBAGENT_TYPE_DESC[type] || "";
+    const customized = !!(ov.description || ov.prompt);
+    const display = d.builtin_display[type] || type;
     const li = document.createElement("li");
     li.className = "subagent-row";
     li.innerHTML = `
       <div class="skill-main">
-        <span class="item-name" title="${escapeHtml(d.builtin_display[type] || type)}">${escapeHtml(d.builtin_display[type] || type)}</span>
-        <span class="tag-cell"><span class="chip">内置</span></span>
-        <span class="item-desc" title="${escapeHtml(SUBAGENT_TYPE_DESC[type] || "")}">${escapeHtml(SUBAGENT_TYPE_DESC[type] || "")}</span>
+        <span class="item-name" title="${escapeHtml(display)}">${escapeHtml(display)}</span>
+        <span class="tag-cell"><span class="chip">内置</span>${customized ? '<span class="chip">已定制</span>' : ""}</span>
+        <span class="item-desc" title="${escapeHtml(effDesc)}">${escapeHtml(effDesc)}</span>
       </div>
       <span class="subagent-ops">
         <select data-f="model" title="这个子代理用哪个模型">${modelOptions(d, ov.provider, ov.model)}</select>
@@ -11434,6 +11440,7 @@ function renderBuiltinSubagents(d) {
           ${(d.reasoning_efforts || []).map((r) =>
             `<option value="${r.value}"${r.value === ov.reasoning ? " selected" : ""}>思考：${escapeHtml(r.label)}</option>`).join("")}
         </select>
+        <button class="btn-ghost subagent-bedit" title="编辑它的职责描述与角色提示词">编辑</button>
       </span>`;
     const save = async () => {
       const mv = parseModelValue(li.querySelector('[data-f="model"]').value);
@@ -11443,16 +11450,57 @@ function renderBuiltinSubagents(d) {
           provider: mv.provider,
           model: mv.model,
           reasoning: li.querySelector('[data-f="reasoning"]').value,
+          description: ov.description || "",  // 行内改模型不能抹掉已编辑的说明/指令
+          prompt: ov.prompt || "",
         });
-        subagentStatus(`✓ 已保存「${d.builtin_display[type] || type}」的设置`, true, "builtin");
+        subagentStatus(`✓ 已保存「${display}」的设置`, true, "builtin");
       } catch (e) {
         subagentStatus("✗ 保存失败：" + e.message, false, "builtin");
       }
     };
     li.querySelector('[data-f="model"]').onchange = save;
     li.querySelector('[data-f="reasoning"]').onchange = save;
+    li.querySelector(".subagent-bedit").onclick = () => editBuiltinModal(d, type, ov);
     ul.appendChild(li);
   });
+}
+
+function editBuiltinModal(d, type, ov) {
+  const display = (d.builtin_display || {})[type] || type;
+  const defDesc = (d.builtin_desc || {})[type] || SUBAGENT_TYPE_DESC[type] || "";
+  const defPrompt = (d.builtin_default_prompt || {})[type] || "";
+  const box = document.createElement("div");
+  box.innerHTML = `
+    <div class="form-grid">
+      <label class="wide">职责描述（一句话说明它负责什么，会展示给 Agent；留空恢复内置默认）
+        <input data-f="description" autocomplete="off" placeholder="${escapeHtml(defDesc)}"
+               value="${escapeHtml(ov.description || "")}">
+      </label>
+      <label class="wide">角色提示词（注入它的系统提示词，写清工作方法与输出要求；留空恢复内置默认）
+        <textarea data-f="prompt" rows="7" placeholder="${escapeHtml(defPrompt)}">${escapeHtml(ov.prompt || "")}</textarea>
+      </label>
+      <p class="dim small">占位文字是内置默认值。工具集按内置型固定（安全边界不变）；模型与思考强度在列表行里改；改完点「保存」，想回到内置默认就清空两栏再保存。</p>
+    </div>`;
+  const resetBtn = document.createElement("button");
+  resetBtn.className = "btn-ghost";
+  resetBtn.textContent = "恢复内置默认文案";
+  resetBtn.onclick = () => {
+    box.querySelector('[data-f="description"]').value = "";
+    box.querySelector('[data-f="prompt"]').value = "";
+  };
+  box.querySelector(".form-grid").appendChild(resetBtn);
+  showModal(`编辑内置子代理：${display}`, box, async () => {
+    await request("subagent.save_builtin", {
+      agent_type: type,
+      provider: ov.provider || "",
+      model: ov.model || "",
+      reasoning: ov.reasoning || "",
+      description: box.querySelector('[data-f="description"]').value.trim(),
+      prompt: box.querySelector('[data-f="prompt"]').value.trim(),
+    });
+    subagentStatus(`✓ 已保存「${display}」的定制`, true, "builtin");
+    renderSubagentCfg();
+  }, "保存");
 }
 
 function renderCustomSubagents(d) {

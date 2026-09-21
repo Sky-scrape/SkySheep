@@ -3,6 +3,8 @@
 每个预设声明它依赖的运行时（need）与参数里的 ``{dir}`` 占位符：
 - need="uv"：走 uvx（uv 随 SkySheep 开发环境自带；打包版看用户机器有没有 uv）；
 - need="node"：走 npx（需要本机装过 Node.js）；
+- need="local"：本机已安装的独立程序（command 即程序名，缺了会连不上，
+  由预设 desc 告知安装来源）；
 - ``{dir}``：添加时由后端替换成当前工作目录（见 backend.add_mcp_preset）。
 
 这里只声明"怎么配"，不预写入任何用户的 mcp.json——点了「＋ 添加」才落地，
@@ -18,7 +20,7 @@ class MCPPreset(TypedDict):
     name: str      # 写入 mcp.json 的服务名，也是 mcp__<name>__<tool> 的前缀
     label: str     # 界面展示名
     desc: str      # 一句话说明（卡片正文 + 悬停）
-    need: str      # 依赖运行时："uv" | "node"
+    need: str      # 依赖运行时："uv" | "node" | "local"
     command: str
     args: list[str]
     readonly: bool  # True → 工具自动放行（纯只读/纯推理，无副作用）
@@ -78,6 +80,17 @@ MCP_PRESETS: list[MCPPreset] = [
         "need": "node",
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "readonly": False,
+    },
+    {
+        "name": "cua-driver",
+        "label": "cua 电脑驱动",
+        "desc": "cua.ai 开源桌面驱动：按界面元素精准操控本机应用与浏览器，"
+        "不抢鼠标键盘焦点；需先按 cua.ai 指引安装 cua-driver 程序",
+        "need": "local",
+        "command": "cua-driver",
+        "args": ["mcp"],
+        # 操控真实桌面，绝不能标只读——标了 READONLY 权限门会自动放行
         "readonly": False,
     },
 ]

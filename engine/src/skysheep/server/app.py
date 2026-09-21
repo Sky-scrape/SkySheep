@@ -592,6 +592,8 @@ def create_app(
             return {"tags": await backend.store.list_all_tags(backend.project.id)}
         if method == "project.list":
             projects = await backend.store.list_projects()
+            # 拖动排序（分组视图）：有保存的顺序就按它来（见 Backend.ordered_projects）
+            projects = backend.ordered_projects(projects)
             # 安全审查 C5：项目根目录的绝对路径是 B/C 族攻击的目标枚举器，
             # 远程客户端只需要名称与当前标记（切换/删除本已限本机）
             return {"projects": [

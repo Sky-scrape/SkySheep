@@ -184,7 +184,7 @@ def test_mcp_presets_shape():
     for p in MCP_PRESETS:
         assert SERVER_NAME_RE.match(p["name"])
         validate_name(p["name"])  # 非法名字会抛
-        assert p["need"] in ("uv", "node")
+        assert p["need"] in ("uv", "node", "local")
         assert p["label"] and p["desc"]
         assert isinstance(p["args"], list) and all(isinstance(a, str) for a in p["args"])
         assert p["command"]
@@ -192,6 +192,13 @@ def test_mcp_presets_shape():
     # 主打项：结构化分步思考，与内置工具互补
     st = preset_by_name("sequential-thinking")
     assert st is not None and st["need"] == "node"
+    # cua-driver：操控真实桌面的预设，绝不能标只读（只读会被权限门自动放行）；
+    # 命令与官方 MCP 接入方式一致（cua-driver mcp，stdio）
+    cd = preset_by_name("cua-driver")
+    assert cd is not None
+    assert cd["readonly"] is False
+    assert cd["need"] == "local"
+    assert cd["command"] == "cua-driver" and cd["args"] == ["mcp"]
     # 前端只拿元数据，不外泄 command/args
     pub = presets_public()
     assert set(pub[0]) == {"name", "label", "desc", "need", "readonly"}

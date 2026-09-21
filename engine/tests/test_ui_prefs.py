@@ -328,3 +328,86 @@ def test_roundtable_menu_opens_on_left_and_keeps_actions_reachable(home):
     assert "rt-switch" in body and "chat-main" in body
     assert "uiScale" in body, "物理像素要换算回布局坐标"
     assert "Math.min" in body and "Math.max" in body, "要有容器内收敛"
+
+
+# ---------- project_order：分组视图拖动排序的持久化与 project.list 生效 ----------
+
+
+def _list_projects(home, wid):
+    frame = call_ui(home, "project.list")
+    assert frame["ok"], frame
+    return frame["result"]["projects"], wid
+
+
+def test_ui_prefs_project_order_roundtrip_and_cleanup(home):
+    """project_order：合法 id 数组直接存；去重、去非正数/非整数、null 删键。"""
+    frame = call_ui(home, "ui.save", {"prefs": {"project_order": [3, 1, 2]}})
+    assert frame["result"]["prefs"] == {"project_order": [3, 1, 2]}
+    # 去重 + 丢弃非法项（bool 是 int 子类也要挡掉）
+    frame = call_ui(home, "ui.save", {"prefs": {"project_order": [2, 2, 0, -1, "5", True, 7]}})
+    assert frame["result"]["prefs"] == {"project_order": [2, 7]}
+    # 全无效 → 删键（视为未自定义排序）
+    frame = call_ui(home, "ui.save", {"prefs": {"project_order": ["x", 0, -3]}})
+    assert frame["result"]["prefs"] == {}
+    frame = call_ui(home, "ui.save", {"prefs": {"project_order": None}})
+    assert frame["result"]["prefs"] == {}
+    frame = call_ui(home, "ui.save", {"prefs": {"project_order": "1,2,3"}})
+    assert frame["result"]["prefs"] == {}
+
+
+def test_project_list_follows_saved_order(home):
+    """拖动排序生效：project.list 按 project_order 返回；名单外的项目仍按原序垫底。"""
+    proj2 = home / "proj2"
+    proj2.mkdir()
+    proj3 = home / "proj3"
+    proj3.mkdir()
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "sw2", "method": "project.switch", "params": {"path": str(proj2)}})
+        assert recv_until(ws, "sw2")["ok"]
+        ws.send_json({"id": "sw3", "method": "project.switch", "params": {"path": str(proj3)}})
+        assert recv_until(ws, "sw3")["ok"]
+        ws.send_json({"id": "pl1", "method": "project.list", "params": {}})
+        projects = recv_until(ws, "pl1")["result"]["projects"]
+        # 无保存序：默认 created_at DESC → proj3, proj2, proj
+        assert [p["name"] for p in projects] == ["proj3", "proj2", "proj"]
+        ids = {p["name"]: p["id"] for p in projects}
+
+        # 保存拖动后的顺序：proj 排最前，其余跟随
+        order = [ids["proj"], ids["proj3"], ids["proj2"]]
+        frame = call_ui(home, "ui.save", {"prefs": {"project_order": order}})
+        assert frame["result"]["prefs"] == {"project_order": order}
+
+        ws.send_json({"id": "pl2", "method": "project.list", "params": {}})
+        projects = recv_until(ws, "pl2")["result"]["projects"]
+        assert [p["name"] for p in projects] == ["proj", "proj3", "proj2"]
+
+        # 名单外的新项目（proj4）不被旧偏好藏掉：追加在已排序尾部
+        proj4 = home / "proj4"
+        proj4.mkdir()
+        ws.send_json({"id": "sw4", "method": "project.switch", "params": {"path": str(proj4)}})
+        assert recv_until(ws, "sw4")["ok"]
+        ws.send_json({"id": "pl3", "method": "project.list", "params": {}})
+        projects = recv_until(ws, "pl3")["result"]["projects"]
+        assert [p["name"] for p in projects] == ["proj", "proj3", "proj2", "proj4"]
+
+
+def test_ui_prefs_session_order_roundtrip_and_cleanup(home):
+    """session_order（组内会话拖动序）：合法字典直接存；非字符串 id / 空组剔除；null 删键。"""
+    good = {"12": ["s3", "s1", "s2"], "quick": ["a", "b"]}
+    frame = call_ui(home, "ui.save", {"prefs": {"session_order": good}})
+    assert frame["result"]["prefs"] == {"session_order": good}
+    # 非字符串 id 剔除、空组剔除、数字键转字符串；全部无效 → 删键
+    frame = call_ui(home, "ui.save", {"prefs": {"session_order": {
+        "5": ["ok", 3, None, ""], "": ["x"], "bad": "not-a-list",
+    }}})
+    assert frame["result"]["prefs"] == {"session_order": {"5": ["ok"]}}
+    frame = call_ui(home, "ui.save", {"prefs": {"session_order": {"x": [1, 2]}}})
+    assert frame["result"]["prefs"] == {}
+    frame = call_ui(home, "ui.save", {"prefs": {"session_order": "nolist"}})
+    assert frame["result"]["prefs"] == {}
+    frame = call_ui(home, "ui.save", {"prefs": {"session_order": None}})
+    assert frame["result"]["prefs"] == {}
+    # 整体替换语义：第二次保存只含新组，旧组不残留
+    call_ui(home, "ui.save", {"prefs": {"session_order": good}})
+    frame = call_ui(home, "ui.save", {"prefs": {"session_order": {"7": ["z"]}}})
+    assert frame["result"]["prefs"] == {"session_order": {"7": ["z"]}}

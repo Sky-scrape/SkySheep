@@ -40,6 +40,41 @@ ADAPTERS: dict[str, type[Channel]] = {
 MAX_SEEN = 20
 
 
+def _fmt_dur(seconds: float) -> str:
+    """渠道回复尾部的时长文案：45 秒 / 3 分 20 秒 / 1 小时 5 分。"""
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s} 秒"
+    m, sec = divmod(s, 60)
+    if m < 60:
+        return f"{m} 分 {sec} 秒" if sec else f"{m} 分钟"
+    h, mm = divmod(m, 60)
+    return f"{h} 小时 {mm} 分" if mm else f"{h} 小时"
+
+
+def _usage_note(result: dict) -> str:
+    """渠道回复尾部的弱化备注：用时（+ 思考字数）。无数据返回空串。
+
+    为什么只报字数不报全文：渠道端多是手机，长思考文本刷屏反而淹没回答；
+    但完全不透出也不行——思考型模型思考期间看着就像卡死。字数与耗时
+    足以让用户知道「它在想、想了多久」。
+    """
+    ms = int(result.get("duration_ms") or 0)
+    if not ms:
+        return ""
+    note = f"⏱ 用时 {_fmt_dur(ms / 1000)}"
+    think_ms = int(result.get("thinking_ms") or 0)
+    chars = int(result.get("thinking_chars") or 0)
+    if think_ms or chars:
+        bits = []
+        if think_ms:
+            bits.append(f"思考 {_fmt_dur(think_ms / 1000)}")
+        if chars:
+            bits.append(f"{chars} 字")
+        note += " · " + " · ".join(bits)
+    return note
+
+
 class ChannelManager:
     def __init__(self, host, config_provider) -> None:
         """config_provider 返回 {平台名: {...配置...}}；每次 restart 时重新读取，
@@ -261,4 +296,10 @@ class ChannelManager:
             await self._reply(channel, msg, f"这一轮出错了：{result['error']}")
             return
         reply = (result or {}).get("text", "") if isinstance(result, dict) else str(result or "")
+        # 尾部附一行用时（渠道端看不到桌面界面的用时芯片，这是唯一的耗时反馈）。
+        # 思考过程不整段回传（遥控端屏幕小、且多是手机）；只报字数与耗时。
+        if isinstance(result, dict):
+            note = _usage_note(result)
+            if note:
+                reply = (reply + "\n\n" + note) if reply else note
         await self._reply(channel, msg, reply or "（这一轮没有产出内容）")

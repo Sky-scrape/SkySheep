@@ -8,11 +8,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 import httpx
-from openai import AsyncOpenAI
 
 from ..messages import ImageBlock, Message, ThinkingBlock, ToolResultBlock, dialogue, system_text
+
+if TYPE_CHECKING:
+    # 仅注解用：运行时延迟到建客户端时才导入（见 __init__ 内注释）
+    from openai import AsyncOpenAI
+
 from .base import (
     Provider,
     ProviderDone,
@@ -99,6 +104,10 @@ class OpenAICompatProvider(Provider):
         kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 1}
         if proxy:
             kw["http_client"] = httpx.AsyncClient(proxy=proxy, timeout=300.0, trust_env=False)
+        # SDK 延迟到建客户端时才导入：openai 包导入约 0.77s，而启动期（splash/服务）
+        # 用不到它——只有真正发起对话时才需要。顶层导入曾把桌面首帧拖慢约 1/3。
+        from openai import AsyncOpenAI  # noqa: PLC0415  启动性能：见上注释
+
         self._client = client or AsyncOpenAI(**kw)
 
     async def stream(

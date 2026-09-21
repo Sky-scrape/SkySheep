@@ -19,15 +19,18 @@ import json
 import shutil
 from contextlib import AsyncExitStack
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamable_http_client
-from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from ..tools.base import Safety, Tool, ToolContext, ToolError, truncate_output
+
+if TYPE_CHECKING:
+    # 仅注解用：mcp SDK 导入约 0.4s，且启动期（splash/服务就绪）完全用不到——
+    # 只有真正连接 MCP 服务器时才需要，运行时导入点见 _extract_text / connect
+    from mcp import ClientSession
+    from mcp.types import CallToolResult
 
 MAX_MCP_OUTPUT_CHARS = 30_000
 CONNECT_TIMEOUT_S = 20.0        # 单个服务器的连接上限；超时视为失败而不是无限等待
@@ -148,6 +151,8 @@ def _permissive_model(tool_name: str) -> type[BaseModel]:
 
 
 def _extract_text(result: CallToolResult) -> str:
+    from mcp.types import TextContent  # noqa: PLC0415  运行时延迟导入（见 TYPE_CHECKING）
+
     parts = []
     for item in result.content or []:
         if isinstance(item, TextContent):
@@ -264,6 +269,11 @@ class MCPManager:
         tools: list[Tool] = []
         stack = AsyncExitStack()
         try:
+            # mcp SDK 运行时延迟导入：启动期用不到（见 TYPE_CHECKING），首次连接时才加载
+            from mcp import ClientSession, StdioServerParameters  # noqa: PLC0415
+            from mcp.client.stdio import stdio_client  # noqa: PLC0415
+            from mcp.client.streamable_http import streamable_http_client  # noqa: PLC0415
+
             if cfg.transport == "stdio":
                 params = StdioServerParameters(command=cfg.command, args=cfg.args, env=cfg.env or None)
                 read, write = await stack.enter_async_context(stdio_client(params))

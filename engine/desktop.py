@@ -30,6 +30,13 @@ LOG_MAX_BYTES = 1_000_000
 ERROR_ALREADY_EXISTS = 183
 SW_RESTORE = 9
 SW_SHOWMAXIMIZED = 3
+# 旧实例"占着互斥体却一直没有可见窗口"的宽限期：正常启动 splash 2~3 秒内就可见，
+# 超过这个时长仍看不到窗口就判定为卡死实例，结束它并接管（见 _stale_holder_pid）
+STALE_GRACE_SECONDS = 12.0
+# 窗口创建的兜底看门狗：超过它还没建出窗体就退出，把单实例互斥体还给系统
+STARTUP_WATCHDOG_SECONDS = 30.0
+PROCESS_TERMINATE = 0x0001
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 _MUTEX_HANDLE = None
 _LAUNCH_T0 = time.monotonic()  # 启动计时基准：日志里记录"窗口多久后可见"
@@ -42,10 +49,18 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def log_path() -> Path:
+def _home_dir() -> Path:
     home = os.environ.get("SKYSHEEP_HOME")
-    base = Path(home).expanduser() if home else Path.home() / ".skysheep"
-    return base / "logs" / "desktop.log"
+    return Path(home).expanduser() if home else Path.home() / ".skysheep"
+
+
+def log_path() -> Path:
+    return _home_dir() / "logs" / "desktop.log"
+
+
+def _pid_path() -> Path:
+    """单实例记录：当前桌面实例的 pid + 进程创建时刻（防 pid 复用）。"""
+    return _home_dir() / "desktop.pid"
 
 
 def _log(message: str) -> None:
@@ -131,35 +146,174 @@ def _release_stale_mutex() -> None:
         _MUTEX_HANDLE = None
 
 
-def _find_main_hwnd() -> int:
-    """按标题找 SkySheep 主窗口句柄；找不到返回 0。"""
+def _window_pid(hwnd: int) -> int:
+    """窗口所属进程 pid；失败返回 0。"""
     user32 = ctypes.windll.user32
-    found = [0]
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+    return int(pid.value)
+
+
+def _is_hung(hwnd: int) -> bool:
+    """窗口所属线程是否已无响应（Windows 判定：约 5 秒不泵消息）。"""
+    try:
+        user32 = ctypes.windll.user32
+        user32.IsHungAppWindow.argtypes = [ctypes.c_void_p]
+        return bool(user32.IsHungAppWindow(ctypes.c_void_p(hwnd)))
+    except Exception:
+        return False
+
+
+def _find_main_hwnd() -> int:
+    """按标题找 SkySheep 主窗口句柄（可见窗口优先）；找不到返回 0。
+
+    读标题前先跳过卡死窗口：GetWindowTextW 会给目标窗口发 WM_GETTEXT，
+    对方线程停转时本进程会被一起挂住——本次"双击打不开"的第二处卡点
+    就在这里（py-spy：三个进程都停在 GetWindowText / ShowWindow）。
+    """
+    user32 = ctypes.windll.user32
+    candidates: list[int] = []
 
     def _collect(hwnd, _lparam):
         length = user32.GetWindowTextLengthW(hwnd)
-        if length:
+        if length and not _is_hung(hwnd):
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             if buf.value.strip() == APP_TITLE:
-                found[0] = int(hwnd)
-                return False  # 找到即停
+                candidates.append(int(hwnd))
         return True
 
     callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(_collect)
     user32.EnumWindows(callback, None)
-    return found[0]
+    # 多个窗口时可见的优先（托盘的隐藏辅助窗口同名也算命中）
+    for hwnd in candidates:
+        if user32.IsWindowVisible(hwnd):
+            return hwnd
+    return candidates[0] if candidates else 0
 
 
 def _focus_existing_window() -> bool:
-    """把已经在跑的 SkySheep 主窗口唤到前台，成功返回 True。"""
+    """把已经在跑的 SkySheep 主窗口唤到前台，成功返回 True。
+
+    只用不阻塞的调用：ShowWindow 是同步的，目标窗口线程卡死时本进程会被
+    一起拖住（实测连一行日志都写不出）；ShowWindowAsync 只投递请求立即返回。
+    """
     hwnd = _find_main_hwnd()
-    if not hwnd:
+    if not hwnd or _is_hung(hwnd):
         return False
     user32 = ctypes.windll.user32
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
+    user32.ShowWindowAsync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+    user32.ShowWindowAsync(ctypes.c_void_p(hwnd), SW_RESTORE)
+    user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
     return True
+
+
+def _wait_mutex_free(seconds: float) -> bool:
+    """等旧实例退出、互斥体被系统释放；拿到互斥体返回 True。"""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if _acquire_single_instance():
+            return True
+        _release_stale_mutex()
+        time.sleep(0.2)
+    return False
+
+
+def _process_start_time(pid: int) -> float | None:
+    """进程创建时刻（epoch 秒）；进程不存在返回 None。
+
+    pid 会被系统回收复用，只有"pid + 创建时刻"才能唯一标识一个进程——
+    接管前用它确认目标还是当初记下的那个 SkySheep，避免误杀同号 pid 的
+    其它程序。
+    """
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created, exited, sys_t, user_t = (wintypes.FILETIME() for _ in range(4))
+        ok = kernel32.GetProcessTimes(
+            ctypes.c_void_p(handle), ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(sys_t), ctypes.byref(user_t),
+        )
+        if not ok:
+            return None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return ticks / 10_000_000 - 11_644_473_600  # FILETIME(1601) → epoch(1970)
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def _write_pid_record() -> None:
+    """记下当前实例的 pid 与创建时刻，供后来者识别卡死实例。"""
+    try:
+        pid = os.getpid()
+        created = _process_start_time(pid) or 0.0
+        path = _pid_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{pid} {created:.3f}", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_pid_record() -> tuple[int, float] | None:
+    try:
+        raw = _pid_path().read_text(encoding="utf-8").split()
+    except OSError:
+        return None
+    if len(raw) != 2:
+        return None
+    try:
+        return int(raw[0]), float(raw[1])
+    except ValueError:
+        return None
+
+
+def _stale_holder_pid() -> int | None:
+    """找出"占着互斥体却不可用"的旧实例 pid；确认不了返回 None。
+
+    两条证据链（都以创建时刻校验身份，防 pid 复用误杀）：
+    ① 有标题为 SkySheep 的窗口 → 取窗口属主，且窗口已无响应（IsHungAppWindow）；
+    ② 连窗口都没有 → 用 pid 记录，且实例存活已超过启动宽限期
+      （正常启动 splash 2~3 秒可见，窗口迟迟不出现就是卡死信号）。
+    """
+    hwnd = _find_main_hwnd()
+    if hwnd:
+        pid = _window_pid(hwnd)
+        if pid and pid != os.getpid() and _is_hung(hwnd) and _process_start_time(pid) is not None:
+            return pid
+        return None
+    rec = _read_pid_record()
+    if not rec:
+        return None
+    pid, created = rec
+    if pid == os.getpid():
+        return None
+    actual = _process_start_time(pid)
+    if actual is None or abs(actual - created) > 1.0:
+        return None  # 记录过期或 pid 被复用
+    age = time.time() - actual
+    if age < STALE_GRACE_SECONDS:
+        return None  # 可能只是还在启动
+    return pid
+
+
+def _terminate_process(pid: int) -> bool:
+    """强杀指定进程（仅用于确认卡死的自家实例）。"""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+    if not handle:
+        return False
+    try:
+        kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        return bool(kernel32.TerminateProcess(ctypes.c_void_p(handle), 1))
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 
 def alert(message: str) -> None:
@@ -645,23 +799,30 @@ def _start_theme_watchdog(window) -> None:
 
 
 def _show_on_first_paint(window) -> None:
-    """等启动动画页首帧就绪后再显示窗口（窗口创建时 hidden=True）。
+    """记录启动动画页首帧时刻（窗口已改为创建后立即显示，见 create_window 处注释）。
 
-    背景：pywebview 先 Show() 窗口、WebView2 再异步初始化，两者之间的空窗期
-    露出的是一块未绘制底色（用户持续反馈的"启动时明显黑屏，之后才出现开场动画"）。
-    loaded 事件在页面（含内联样式/图片）就绪后触发，此时 show 第一眼就是动画。
-    兜底：事件没来（初始化慢/失败）也在 4 秒后显示，绝不把窗口藏死；
-    只显示一次：主界面导航完成后 loaded 会再次触发，不能重复抢焦点。
+    历史：1.8 之前窗口先 Show、WebView2 后初始化，空窗期露出未设置背景色的
+    底色，被用户投诉"启动黑屏"，于是改成 hidden=True + 首帧后再 show。
+    现在窗体 BackColor 已是主题纸色（与 splash 页同色），提前显示无缝，
+    hidden=True 的理由不再成立——show 逻辑保留为兜底（幂等）与首帧计时。
     """
     shown = threading.Event()
+
+    def _on_before_show(*_args, **_kwargs) -> None:
+        _log(f"窗口已显示（窗体就绪，启动后 {time.monotonic() - _LAUNCH_T0:.2f}s）")
+
+    try:
+        window.events.before_show += _on_before_show
+    except Exception:
+        pass
 
     def _show(*_args, **_kwargs) -> None:
         if shown.is_set():
             return
         shown.set()
-        _log(f"splash 首帧就绪，显示窗口（启动后 {time.monotonic() - _LAUNCH_T0:.2f}s）")
+        _log(f"splash 首帧就绪（启动后 {time.monotonic() - _LAUNCH_T0:.2f}s）")
         try:
-            window.show()
+            window.show()  # 幂等：窗口通常已由创建流程显示
         except Exception:
             pass
 
@@ -677,6 +838,32 @@ def _show_on_first_paint(window) -> None:
             _show()
 
     threading.Thread(target=_fallback, name="skysheep-first-paint", daemon=True).start()
+
+
+def _start_launch_watchdog(window) -> None:
+    """窗口迟迟建不出来就退出，把单实例互斥体还给系统。
+
+    pywebview 的 create_window 在 WebView2/.NET 初始化异常时会永久阻塞：
+    主线程停在等 GUI 线程的轮询里，既不报错也不建窗口，进程却一直握着
+    互斥体——之后每次双击都打不开，只能去任务管理器杀进程（实测踩过）。
+    窗口正常 1~3 秒内就绪（native 有值），这里只在超时后兜底退出。
+    """
+    def _ready() -> bool:
+        try:
+            return getattr(window, "native", None) is not None
+        except Exception:
+            return False
+
+    def _watch() -> None:
+        deadline = time.monotonic() + STARTUP_WATCHDOG_SECONDS
+        while time.monotonic() < deadline:
+            if _ready():
+                return
+            time.sleep(0.5)
+        _log(f"窗口创建超时（{STARTUP_WATCHDOG_SECONDS:.0f}s），退出以释放单实例锁")
+        os._exit(3)
+
+    threading.Thread(target=_watch, name="skysheep-launch-watchdog", daemon=True).start()
 
 
 def _run_windowed() -> int:
@@ -747,15 +934,18 @@ def _run_windowed() -> int:
         # 上次是最大化关的就按最大化开（normal 态几何仍一并传给上面，
         # 用户"还原"后回到的是上次的正常大小，而不是默认尺寸）。
         maximized=maximized,
-        # 先隐藏创建：窗口 Show() 与 WebView2 初始化是异步的，控件首帧绘制之前
-        # 整窗是一块未绘制的底色（旧版本用户看到的那道"黑屏"就发生在这里）。
-        # 等加载动画页真正画出来（loaded 事件）再 show，用户第一眼就是动画。
-        hidden=True,
+        # 创建后立即显示：窗体构造时 pywebview 已把 BackColor 设为主题纸色
+        # （winforms.py:292，与 splash 页背景同色），提前 Show 不会白闪/黑闪。
+        # 窗体在启动后约 1 秒就创建完成，而 WebView2 初始化+渲染要再花约 0.8 秒——
+        # 若等首帧再显示（旧做法 hidden=True），用户多盯着空桌面干等一秒。
+        # 提前显示的视觉：窗口先出现（纯纸色），动画紧接着开始，接近无缝。
+        hidden=False,
         # 窗口底色跟主题：pywebview 默认白底，页面刷新/首帧等尚未绘制的瞬间
         # 会露出它（WebView2 的 DefaultBackgroundColor 被设成透明）
         background_color=wintheme.window_background(),
     )
     _show_on_first_paint(window)
+    _start_launch_watchdog(window)
     picker.attach(window)
     wintheme.hook_caption_theme(window)  # 标题栏染成纸墨主题色（老系统自动跳过）
     wintheme.allow_microphone(window)  # 放行麦克风（语音输入用；WebView2 默认静默拒绝）
@@ -1037,7 +1227,17 @@ def _run_windowed() -> int:
     # 窗口图标启动序列：先统一彩色方块（任务栏第一帧即彩色、不闪线稿），
     # 看板线程首刷时 apply_window_icon 只把标题栏 SMALL 换成主题线稿
     icon = static / "skysheep.ico"
-    webview.start(_bootstrap, icon=str(icon) if icon.exists() else None)
+    # WebView2 用固定用户数据目录并关闭私有模式：默认私有模式每次启动都拿一个
+    # 全新临时 profile，浏览器环境每次从零初始化（splash 首帧 2~3 秒的主要构成）；
+    # 固定目录后 profile 复用，二次启动明显变快，cookie/localStorage 也随之持久化。
+    # 临时 profile 目录原先还从不清理，每次启动都在 TEMP 漏一个（实测踩过）。
+    # 单实例互斥体保证不会有两个进程同时使用同一个 profile 目录。
+    webview.start(
+        _bootstrap,
+        private_mode=False,
+        storage_path=str(_home_dir() / "webview"),
+        icon=str(icon) if icon.exists() else None,
+    )
     _dispose_tray()
 
     if errors:
@@ -1074,36 +1274,46 @@ def main() -> int:
     _setup_logging()
     _log(f"=== SkySheep desktop launch (pid {os.getpid()}) ===")
 
-    if not _acquire_single_instance():
-        if _focus_existing_window():
-            _log("already running; focused existing window")
-            # 旧实例可能正在退出（刚点过彻底退出，窗口销毁要零点几秒）：聚焦后
-            # 再观察一小会儿，窗口若消失就转入下面的等待逻辑、正常启动新实例，
-            # 否则用户会面对"旧窗口关了、新窗口又没开"的空白。
-            deadline = time.monotonic() + 1.5
-            while time.monotonic() < deadline:
-                time.sleep(0.25)
-                if not _focus_existing_window():
-                    break
-            else:
-                return 0
-            _log("focused window vanished; previous instance is exiting")
-        # 互斥体还在、窗口却没了：旧实例正在收尾（窗口已销毁，但 WebView2 与
-        # 服务的退出还要几秒）。这时双击不该报"已经在运行"——等旧进程真正
-        # 退出、互斥体被系统释放后，作为新实例正常启动。
-        _log("mutex held but no window; waiting for previous instance to exit")
-        _release_stale_mutex()
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            _release_stale_mutex()
-            time.sleep(0.25)
-            if _acquire_single_instance():
-                _log("previous instance exited; launching fresh")
-                return _launch()
-        alert("SkySheep 已经在运行了。\n\n请查看任务栏中已打开的 SkySheep 窗口。")
-        return 0
+    if _acquire_single_instance():
+        _write_pid_record()
+        return _launch()
 
-    return _launch()
+    # 互斥体被占：先看旧实例的窗口是否可用（含刚点过彻底退出的收尾场景）
+    if _focus_existing_window():
+        _log("already running; focused existing window")
+        # 旧实例可能正在退出（窗口销毁要零点几秒）：聚焦后再观察一小会儿，
+        # 窗口若消失就转入等待逻辑、正常启动新实例，否则用户会面对
+        # "旧窗口关了、新窗口又没开"的空白。
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            time.sleep(0.25)
+            if not _focus_existing_window():
+                break
+        else:
+            return 0
+        _log("focused window vanished; previous instance is exiting")
+
+    # 没有可聚焦的窗口：两种可能。① 旧实例正在启动/收尾——等它让出互斥体；
+    # ② 旧实例卡死（WebView2 初始化阻塞，进程握着锁却迟迟不出窗口）——
+    # 它永远不会自己退出，继续等只会让用户反复双击、堆积僵尸进程，
+    # 必须结束它并接管（2026-09-21 实测：一天内三次"双击打不开"）。
+    _log("mutex held but no usable window; probing previous instance")
+    _release_stale_mutex()
+    if _wait_mutex_free(STALE_GRACE_SECONDS):
+        _log("previous instance exited; launching fresh")
+        _write_pid_record()
+        return _launch()
+    stale = _stale_holder_pid()
+    if stale:
+        _log(f"previous instance (pid {stale}) is unresponsive; taking over")
+        _terminate_process(stale)
+        if _wait_mutex_free(5.0):
+            _log("stale instance terminated; launching fresh")
+            _write_pid_record()
+            return _launch()
+        _log("stale instance did not release mutex in time")
+    alert("SkySheep 已经在运行了。\n\n请查看任务栏中已打开的 SkySheep 窗口。")
+    return 0
 
 
 if __name__ == "__main__":

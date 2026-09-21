@@ -1,0 +1,280 @@
+"""桌面启动器（desktop.py）单实例与卡死恢复逻辑测试。
+
+背景：2026-09-21 一天内出现三次"双击打不开"——卡死实例握着单实例互斥体
+却不出窗口，后续双击进程又被卡死窗口的同步 Win32 调用（GetWindowText /
+ShowWindow）一起拖住，进程堆积。这里守住四条：
+  1. 聚焦只用不阻塞的调用，窗口无响应时直接放弃聚焦；
+  2. 卡死实例按"pid + 进程创建时刻"双重校验身份后才接管，防 pid 复用误杀；
+  3. 启动宽限期内不接管（可能只是还在启动）；
+  4. 窗口创建超时由看门狗退出，把互斥体还给系统。
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="desktop 启动器仅 Windows")
+
+_ENGINE = Path(__file__).resolve().parents[1]
+_SPEC = importlib.util.spec_from_file_location("skysheep_desktop_launcher", _ENGINE / "desktop.py")
+desktop = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(desktop)
+
+
+class FakeTime:
+    """可控时钟：monotonic 每次调用推进 step，sleep 立即返回。"""
+
+    def __init__(self, step: float = 1.0) -> None:
+        self.t = 1000.0
+        self.step = step
+
+    def monotonic(self) -> float:
+        self.t += self.step
+        return self.t
+
+    def sleep(self, _seconds: float) -> None:
+        return None
+
+    def time(self) -> float:
+        return self.t
+
+
+@pytest.fixture
+def fake_time(monkeypatch):
+    ft = FakeTime()
+    monkeypatch.setattr(desktop, "time", ft)
+    return ft
+
+
+@pytest.fixture
+def isolated_home(monkeypatch, tmp_path):
+    """pid/日志文件都落在临时目录，绝不碰真实 ~/.skysheep。"""
+    monkeypatch.setenv("SKYSHEEP_HOME", str(tmp_path / "home"))
+    return tmp_path / "home"
+
+
+def test_write_and_read_pid_record(isolated_home):
+    desktop._write_pid_record()
+    rec = desktop._read_pid_record()
+    assert rec is not None
+    pid, created = rec
+    assert pid == desktop.os.getpid()
+    assert created > 0
+
+
+def test_find_main_hwnd_skips_hung_window(monkeypatch):
+    """卡死窗口不能读标题：读之前必须被 IsHungAppWindow 挡住。"""
+    calls = []
+
+    class FakeUser32:
+        def GetWindowTextLengthW(self, hwnd):
+            calls.append(("len", hwnd))
+            return 8  # 有长度（假装标题匹配），验证 hung 守卫先于取标题
+
+        def GetWindowTextW(self, hwnd, buf, max_len):
+            calls.append(("text", hwnd))
+            return 8
+
+        def IsWindowVisible(self, hwnd):
+            return False
+
+        def EnumWindows(self, cb, _lp):
+            cb(111, None)
+            return True
+
+    monkeypatch.setattr(desktop.ctypes, "windll", type("W", (), {"user32": FakeUser32()})())
+    monkeypatch.setattr(desktop, "_is_hung", lambda hwnd: True)
+
+    assert desktop._find_main_hwnd() == 0
+    assert ("text", 111) not in calls  # 卡死窗口没有被读标题
+
+
+def test_focus_existing_window_gives_up_on_hung(monkeypatch):
+    """窗口无响应时聚焦必须放弃（旧实现会同步 ShowWindow 跟着挂死）。"""
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 12345)
+    monkeypatch.setattr(desktop, "_is_hung", lambda hwnd: True)
+    assert desktop._focus_existing_window() is False
+
+
+def test_stale_holder_from_hung_window(monkeypatch):
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 12345)
+    monkeypatch.setattr(desktop, "_window_pid", lambda hwnd: 4242)
+    monkeypatch.setattr(desktop, "_is_hung", lambda hwnd: True)
+    monkeypatch.setattr(desktop, "_process_start_time", lambda pid: 100.0 if pid == 4242 else None)
+    monkeypatch.setattr(desktop.os, "getpid", lambda: 999)
+    assert desktop._stale_holder_pid() == 4242
+
+
+def test_stale_holder_none_when_window_healthy(monkeypatch):
+    """窗口活着（未卡死）说明实例健康，绝不能接管。"""
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 12345)
+    monkeypatch.setattr(desktop, "_window_pid", lambda hwnd: 4242)
+    monkeypatch.setattr(desktop, "_is_hung", lambda hwnd: False)
+    assert desktop._stale_holder_pid() is None
+
+
+def test_stale_holder_respects_startup_grace(monkeypatch, fake_time, isolated_home):
+    """没有窗口 + 实例还年轻：可能只是启动中，不允许接管。"""
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    desktop._write_pid_record()
+    assert desktop._stale_holder_pid() is None
+
+
+def test_stale_holder_from_pid_record_after_grace(monkeypatch, fake_time, isolated_home):
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    # 模拟“另一个实例”写的记录：pid 不能是本进程（本进程会被视为自己而拒接管）
+    other_pid = desktop.os.getpid() + 1
+    desktop._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    desktop._pid_path().write_text(f"{other_pid} 100.0", encoding="utf-8")
+    monkeypatch.setattr(desktop, "_process_start_time", lambda x: 100.0 if x == other_pid else None)
+    monkeypatch.setattr(desktop.os, "getpid", lambda: other_pid - 5)
+    # 走过宽限期（FakeTime 每次调用 +1s，age = time.time() - created）
+    assert desktop._stale_holder_pid() == other_pid
+
+
+def test_stale_holder_rejects_pid_reuse(monkeypatch, fake_time, isolated_home):
+    """pid 被复用（创建时刻对不上）：绝不接管，防误杀无关进程。"""
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    other_pid = desktop.os.getpid() + 1
+    desktop._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    desktop._pid_path().write_text(f"{other_pid} 100.0", encoding="utf-8")
+    # 同号 pid 但创建时刻对不上 → 记录过期，拒绝接管
+    monkeypatch.setattr(desktop, "_process_start_time", lambda x: 999.0 if x == other_pid else None)
+    monkeypatch.setattr(desktop.os, "getpid", lambda: other_pid - 5)
+    assert desktop._stale_holder_pid() is None
+
+
+def test_terminate_process_targets_only_recorded(monkeypatch, fake_time, isolated_home):
+    """接管的杀进程路径：只杀 _stale_holder_pid 确认过的 pid。"""
+    killed: list[int] = []
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    other_pid = desktop.os.getpid() + 1
+    desktop._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    desktop._pid_path().write_text(f"{other_pid} 100.0", encoding="utf-8")
+    monkeypatch.setattr(desktop, "_process_start_time", lambda x: 100.0 if x == other_pid else None)
+    monkeypatch.setattr(desktop.os, "getpid", lambda: other_pid - 5)
+    monkeypatch.setattr(desktop, "_terminate_process", lambda p: killed.append(p) or True)
+
+    stale = desktop._stale_holder_pid()
+    assert stale == other_pid
+    desktop._terminate_process(stale)
+    assert killed == [other_pid]
+
+
+def test_wait_mutex_free_acquires_when_released(monkeypatch, fake_time):
+    """旧实例退出（第 2 次 acquire 成功）→ 等待循环拿到互斥体。"""
+    results = iter([False, True])
+    monkeypatch.setattr(desktop, "_acquire_single_instance", lambda: next(results))
+    monkeypatch.setattr(desktop, "_release_stale_mutex", lambda: None)
+    assert desktop._wait_mutex_free(10.0) is True
+
+
+def test_wait_mutex_free_times_out(monkeypatch, fake_time):
+    monkeypatch.setattr(desktop, "_acquire_single_instance", lambda: False)
+    monkeypatch.setattr(desktop, "_release_stale_mutex", lambda: None)
+    assert desktop._wait_mutex_free(3.0) is False
+
+
+def test_watchdog_exits_when_window_never_ready(monkeypatch, tmp_path):
+    """窗口创建超时 → 看门狗以退出码 3 结束进程（释放互斥体）。"""
+    exited: list[int] = []
+    monkeypatch.setattr(desktop, "STARTUP_WATCHDOG_SECONDS", 0.05)
+    monkeypatch.setattr(desktop.os, "_exit", lambda code: exited.append(code))
+    monkeypatch.setattr(desktop, "_log", lambda msg: None)
+
+    class FakeWindow:
+        @property
+        def native(self):  # 永远创建不出来
+            raise RuntimeError("not created yet")
+
+    desktop._start_launch_watchdog(FakeWindow())
+    deadline = time.monotonic() + 3
+    while not exited and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert exited == [3]
+
+
+def test_watchdog_returns_when_window_ready(monkeypatch):
+    """窗口正常就绪 → 看门狗静默返回，不退出。"""
+    exited: list[int] = []
+    monkeypatch.setattr(desktop, "STARTUP_WATCHDOG_SECONDS", 0.05)
+    monkeypatch.setattr(desktop.os, "_exit", lambda code: exited.append(code))
+    monkeypatch.setattr(desktop, "_log", lambda msg: None)
+
+    class FakeWindow:
+        native = object()  # 窗体已创建
+
+    desktop._start_launch_watchdog(FakeWindow())
+    time.sleep(0.1)  # 等看门狗线程进入轮询
+    deadline = time.monotonic() + 2
+    finished = False
+    while time.monotonic() < deadline:
+        alive = any(
+            t.name == "skysheep-launch-watchdog" and t.is_alive()
+            for t in threading.enumerate()
+        )
+        if not alive:
+            finished = True
+            break
+        time.sleep(0.02)
+    assert finished, "watchdog thread did not finish"
+    assert not exited
+
+
+def test_main_focuses_healthy_instance(monkeypatch, fake_time, isolated_home):
+    """健康实例在跑：聚焦并返回 0，绝不 `_launch` 也绝不杀进程。"""
+    launched: list[int] = []
+    killed: list[int] = []
+    monkeypatch.setattr(desktop, "_acquire_single_instance", lambda: False)
+    monkeypatch.setattr(desktop, "_focus_existing_window", lambda: True)
+    monkeypatch.setattr(desktop, "_release_stale_mutex", lambda: None)
+    monkeypatch.setattr(desktop, "_launch", lambda: launched.append(1) or 0)
+    monkeypatch.setattr(desktop, "_stale_holder_pid", lambda: killed.append(2) or 4242)
+    monkeypatch.setattr(desktop, "_terminate_process", lambda pid: killed.append(pid) or True)
+    monkeypatch.setattr(desktop, "_log", lambda msg: None)
+    assert desktop.main() == 0
+    assert launched == []
+    assert killed == []
+
+
+def test_main_takes_over_hung_instance(monkeypatch, fake_time, isolated_home):
+    """卡死实例：接管（杀掉）后正常启动新实例。"""
+    launched: list[int] = []
+    acquire_results = iter([False, False, True])  # 首次失败 → 宽限等待失败 → 接管后成功
+    monkeypatch.setattr(desktop, "_acquire_single_instance", lambda: next(acquire_results))
+    monkeypatch.setattr(desktop, "_focus_existing_window", lambda: False)
+    monkeypatch.setattr(desktop, "_wait_mutex_free", lambda seconds: next(acquire_results, True))
+    monkeypatch.setattr(desktop, "_stale_holder_pid", lambda: 4242)
+    killed: list[int] = []
+    monkeypatch.setattr(desktop, "_terminate_process", lambda pid: killed.append(pid) or True)
+    monkeypatch.setattr(desktop, "_launch", lambda: launched.append(1) or 0)
+    monkeypatch.setattr(desktop, "_log", lambda msg: None)
+    monkeypatch.setattr(desktop, "_write_pid_record", lambda: None)
+    monkeypatch.setattr(desktop, "alert", lambda msg: None)
+
+    assert desktop.main() == 0
+    assert killed == [4242]
+    assert launched == [1]
+
+
+def test_main_alerts_when_cannot_confirm(monkeypatch, fake_time, isolated_home):
+    """无法确认卡死实例（无记录/无窗口）：不杀任何进程，退回提示弹窗。"""
+    launched: list[int] = []
+    alerts: list[str] = []
+    monkeypatch.setattr(desktop, "_acquire_single_instance", lambda: False)
+    monkeypatch.setattr(desktop, "_focus_existing_window", lambda: False)
+    monkeypatch.setattr(desktop, "_wait_mutex_free", lambda seconds: False)
+    monkeypatch.setattr(desktop, "_stale_holder_pid", lambda: None)
+    monkeypatch.setattr(desktop, "_launch", lambda: launched.append(1) or 0)
+    monkeypatch.setattr(desktop, "_log", lambda msg: None)
+    monkeypatch.setattr(desktop, "alert", lambda msg: alerts.append(msg))
+
+    assert desktop.main() == 0
+    assert launched == []
+    assert len(alerts) == 1

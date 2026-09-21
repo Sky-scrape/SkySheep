@@ -114,8 +114,8 @@
         <h3>设置</h3>
         <ul id="settings-nav" class="list">
           <!-- 分组按「上手顺序 + 使用频率」排：先配能力（模型 / 工具 / 分身 / 外部工具），
-               再调日常习惯（提示词 / 记忆 / 界面），然后是安全与实验性（白名单 / 高级），
-               最后是只读信息（用量 / 关于）。新增设置页时按这个分组插进对应段。
+               再调日常习惯（提示词 / 记忆 / 界面），然后是安全与实验性（高级里含
+               本项目白名单卡片），最后是只读信息（用量 / 关于）。新增设置页时按这个分组插进对应段。
                分组标题只是扫描锚点（.nav-cap），无 data-target，点击绑定在 li[data-target] 上 -->
           <li class="nav-cap" aria-hidden="true">能力</li>
           <li class="active" data-target="providers">模型服务</li>
@@ -128,7 +128,6 @@
           <li data-target="memory">全局记忆</li>
           <li data-target="ui">界面与通知</li>
           <li class="nav-cap" aria-hidden="true">安全</li>
-          <li data-target="rules">本项目白名单</li>
           <li data-target="advanced">高级</li>
           <li class="nav-cap" aria-hidden="true">信息</li>
           <li data-target="usage">用量</li>
@@ -698,8 +697,9 @@
           </section>
         </section>
 
-        <section class="settings-page hidden" id="settings-page-rules">
-          <section class="settings-card">
+        <section class="settings-page hidden" id="settings-page-advanced">
+          <datalist id="hook-tools"></datalist>
+          <section class="settings-card" id="rules-card">
             <div class="card-head">
               <h3>本项目白名单</h3>
               <span class="head-ops">
@@ -710,11 +710,9 @@
               </span>
             </div>
             <p class="settings-hint">
-              你在对话中选择「总是允许」时保存的规则；删除后对应操作会重新询问。<br>
-              命令的前缀规则不会命中带 shell 拼接的命令（如 <code>git status; rm -rf /</code>）——
-              这类命令每次都重新询问，要放行它请选择「允许一次」；键盘的「总是允许」只固化那一次
-              输入的内容/键位（内容不同的输入仍需确认）。「允许访问哪些目录」是另一层限制，
-              在 <b>高级 · 安全与后台</b> 里设置。
+              你在对话中选择「总是允许」时保存的规则；删除后对应操作会重新询问。
+              命令的前缀规则不命中带 shell 拼接的命令（如 <code>git status; rm -rf /</code>）；
+              键盘 / 鼠标 / 关窗口的「总是允许」只固化那一次的内容或动作。
             </p>
             <div id="rule-add-form" class="rule-add-form hidden">
               <div class="rule-add-row">
@@ -749,18 +747,19 @@
             <div id="rules-status" class="card-status" hidden></div>
             <p id="rules-summary" class="dim small" hidden></p>
             <ul id="rules-list" class="list rules-list"></ul>
-            <div class="rule-check">
-              <span class="rule-check-cap">测试</span>
-              <input id="rule-check-tool" list="rule-tool-options" autocomplete="off" placeholder="工具名，如 run_command">
-              <input id="rule-check-text" autocomplete="off" placeholder="参数文本，如 git status --short">
-              <button id="btn-rule-check" class="btn-ghost">试一下</button>
-            </div>
-            <p id="rule-check-result" class="rule-check-result" hidden></p>
+            <!-- 测试器：排查工具，平时不用——折叠成一行链接，点开才展开 -->
+            <details class="rule-check-fold">
+              <summary>规则测试器（试一条命令会不会被放行）</summary>
+              <div class="rule-check">
+                <span class="rule-check-cap">测试</span>
+                <input id="rule-check-tool" list="rule-tool-options" autocomplete="off" placeholder="工具名，如 run_command">
+                <input id="rule-check-text" autocomplete="off" placeholder="参数文本，如 git status --short">
+                <button id="btn-rule-check" class="btn-ghost">试一下</button>
+              </div>
+              <p id="rule-check-result" class="rule-check-result" hidden></p>
+            </details>
           </section>
-        </section>
 
-        <section class="settings-page hidden" id="settings-page-advanced">
-          <datalist id="hook-tools"></datalist>
           <section class="settings-card">
             <div class="card-head">
               <h3>钩子（Hooks）</h3>

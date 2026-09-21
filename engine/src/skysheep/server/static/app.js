@@ -255,6 +255,7 @@ function newTabObj(sid, title) {
     streamingEl: null, streamingText: "", rtCard: null, rtMemberEls: [],
     lastAssistantText: "", usage: null, needsPerm: false, permData: null,
     needHistory: false, eta: null, etaEl: null,
+    thinkMs: 0, thinkT0: 0,
   };
 }
 function tabFor(sid) { return sid ? chatTabs.find((t) => t.sid === sid) || null : null; }
@@ -422,11 +423,19 @@ function miniRebuild() {
   const n = Math.min(slots.length, maxDots);
   const step = slots.length / n;
   miniTargets = []; miniTops = [];
-  const frag = document.createDocumentFragment();
+  // 就地复用已有圆点，只在数量变化时增删——不能像以前那样每次 textContent=""
+  // 重建整列：新插入的元素首帧就带着目标宽度，浏览器没有「起始值」可插值，
+  // transition 被直接跳过，于是滚动时宽度是一档一档跳变而不是渐变（实测复现）。
+  // 复用同一批元素后，宽度从旧值平滑变到新值，--mini-w 的 transition 才真正生效。
+  const bars = chatMinimap.children;
   for (let i = 0; i < n; i++) {
     const el = slots[Math.floor(i * step)].el;
-    const d = document.createElement("div");
-    d.className = "chat-minimap-dot";
+    let d = bars[i];
+    if (!d) {
+      d = document.createElement("div");
+      d.className = "chat-minimap-dot";
+      chatMinimap.appendChild(d);
+    }
     // title 只在消息定稿（有 seq）后算一次并缓存；流式中的消息内容未定，
     // 每次重算（几千字的消息一次 rebuild 就是几千字符的扫描）
     let txt;
@@ -442,20 +451,24 @@ function miniRebuild() {
       txt = txt.length > 80 ? txt.slice(0, 80) + "…" : txt;
     }
     d.title = txt;
+    // onclick 每轮重绑：闭包捕获的是本条消息的滚动目标，复用元素时必须跟着换
     d.onclick = () => miniLog.scrollTo({ top: miniScrollTarget(el), behavior: "smooth" });
-    frag.appendChild(d);
     miniTargets.push(el);
     miniTops.push(miniTopOf(el, logRect));
   }
-  chatMinimap.textContent = "";
-  chatMinimap.appendChild(frag);
+  // 多余的圆点从尾部移除（消息变少 / 容器变矮时）
+  while (chatMinimap.children.length > n) chatMinimap.removeChild(chatMinimap.lastChild);
   miniUpdateActive();
   // 入场动画（320ms）结束的位置才作数：等它播完再校准一遍缓存的纵位与高亮
   const gen = ++miniGen;
   clearTimeout(miniRemap);
   miniRemap = setTimeout(() => {
     if (gen !== miniGen || !miniLog || !miniLog.isConnected) return;
-    miniTops = miniTargets.map(miniTopOf);
+    // 必须包一层箭头函数：.map(miniTopOf) 会把数组索引当第二个参数传进去，
+    // 而第二参是 logRect（矩形对象）——拿到索引后 r.top 是 undefined，
+    // 整列纵位全变 NaN，miniUpdateActive 里 NaN <= mark 恒为假，
+    // 高亮就永远卡在第一颗（滑动时看着像「从最后一个点直接跳到第一个点」）。
+    miniTops = miniTargets.map((el) => miniTopOf(el));
     miniUpdateActive();
   }, 480);
 }
@@ -704,6 +717,9 @@ function beginAssistant() {
   t.streamingText = "";
   t.thinkEl = null;
   t.thinkText = "";
+  t.thinkMs = 0;
+  t.thinkT0 = 0;
+  t.thinkT1 = 0;
 }
 
 function appendStream(txt) {
@@ -713,7 +729,7 @@ function appendStream(txt) {
   if (t.thinkText && t.thinkEl && !t.thinkEl.classList.contains("folded")) {
     t.thinkEl.classList.add("folded");
     const sum = t.thinkEl.querySelector(".think-sum");
-    if (sum) sum.textContent = `💭 思考过程（${Math.round(t.thinkText.length / 10) * 10} 字）· 点击展开`;
+    if (sum) sum.textContent = thinkSummary(t.thinkEl, true);
   }
   t.streamingText += txt;
   // 节流渲染：delta 频率远高于人眼需要，逐条对全量累积文本重跑 markdown
@@ -730,6 +746,28 @@ function appendStream(txt) {
 }
 
 // ---------- 思考过程块（思考型模型：流式灰显，正文开始后折叠，可展开回看） ----------
+// 摘要文案统一走 thinkSummary：思考耗时优先用引擎实测值（历史恢复时带上），
+// 流式期间用本地起止时刻估算，都没有就退到只显示字数。
+function fmtThinkMs(ms) {
+  if (!ms || ms < 0) return "";
+  const s = ms / 1000;
+  return s < 10 ? `${s.toFixed(1)} 秒` : `${Math.round(s)} 秒`;
+}
+
+function thinkSummary(el, folded) {
+  // 数据存在元素自身上（el._think）而不是 tab 状态：历史恢复后 tab 状态
+  // 已清空，点击展开时才能继续显示字数与耗时。
+  const data = (el && el._think) || {};
+  const text = data.text || "";
+  const n = Math.round(text.length / 10) * 10;
+  const parts = [];
+  if (n) parts.push(`${n} 字`);
+  const dur = fmtThinkMs(data.ms || 0);
+  if (dur) parts.push(`思考 ${dur}`);
+  const tail = folded ? "点击展开" : "点击折叠";
+  return `💭 思考过程${parts.length ? "（" + parts.join(" · ") + "）" : ""} · ${tail}`;
+}
+
 function ensureThinkEl(t) {
   if (!t) return null;
   if (!t.thinkEl || !t.thinkEl.isConnected) {
@@ -741,12 +779,7 @@ function ensureThinkEl(t) {
     el.querySelector(".think-sum").onclick = () => {
       const folded = el.classList.toggle("folded");
       const sum = el.querySelector(".think-sum");
-      if (sum) {
-        const n = (t.thinkText || "").length;
-        sum.textContent = folded
-          ? `💭 思考过程（${Math.round(n / 10) * 10} 字）· 点击展开`
-          : "💭 思考过程 · 点击折叠";
-      }
+      if (sum) sum.textContent = thinkSummary(el, folded);
     };
     const log = curLog();
     if (t.streamingEl) log.insertBefore(el, t.streamingEl);
@@ -761,7 +794,12 @@ function appendThinking(txt) {
   const t = curTab();
   const el = ensureThinkEl(t);
   if (!el) return;
+  // 首个思考增量记起点：思考耗时 = 首个增量 → 最后一个增量的跨度
+  if (!t.thinkT0) t.thinkT0 = Date.now();
+  t.thinkT1 = Date.now();
   t.thinkText += txt;
+  // 元素自持一份摘要数据（见 thinkSummary）：历史恢复清空 tab 状态后仍可展开回看
+  el._think = { text: t.thinkText, ms: t.thinkMs || (t.thinkT0 && t.thinkT1 ? t.thinkT1 - t.thinkT0 : 0) };
   // 节流渲染（同 appendStream）：思考文本往往比正文还长
   if (!t._thinkRenderTimer) {
     t._thinkRenderTimer = setTimeout(() => {
@@ -786,24 +824,31 @@ function finishThinking(t) {
   const folded = t.thinkEl.classList.contains("folded");
   const sum = t.thinkEl.querySelector(".think-sum");
   if (sum && !folded) {
-    sum.textContent = `💭 思考过程（${Math.round(t.thinkText.length / 10) * 10} 字）· 点击折叠`;
+    sum.textContent = thinkSummary(t.thinkEl, false);
   }
 }
 
 // 历史恢复：按消息携带的 thinking 文本渲染折叠块
-function addThinkingDone(text, tab) {
+function addThinkingDone(text, tab, ms) {
   const t = tab || curTab();
   if (!text) return;
   const el = ensureThinkEl(t);
   t.thinkText = text;
+  // 思考耗时由后端随消息下发（引擎实测）；旧消息没有则只显示字数
+  t.thinkMs = ms || 0;
+  t.thinkT0 = 0;
+  t.thinkT1 = 0;
   el.querySelector(".think-body .md").innerHTML = renderMarkdown(text);
   // 历史渲染默认折叠，不占空间
   el.classList.add("folded");
+  // 摘要数据挂在元素上（tab 状态马上会被清空，点击展开时还要用）
+  el._think = { text: text, ms: ms || 0 };
   const sum = el.querySelector(".think-sum");
-  if (sum) sum.textContent = `💭 思考过程（${Math.round(text.length / 10) * 10} 字）· 点击展开`;
+  if (sum) sum.textContent = thinkSummary(el, true);
   // 历史恢复的思考块是一次性的：随消息渲染后断开流式关联
   t.thinkEl = null;
   t.thinkText = "";
+  t.thinkMs = 0;
   return el;
 }
 
@@ -1457,10 +1502,12 @@ function tickEtaChips() {
   if (!live && etaTimer) { clearInterval(etaTimer); etaTimer = null; }
 }
 
-function finishEta(t) {
+function finishEta(t, engineMs) {
   if (!t || !t.eta || t.eta.done) return;
   t.eta.done = true;
-  t.eta.actual = (Date.now() - t.eta.start) / 1000;
+  // 优先用引擎实测值（与落库后历史恢复显示的完全一致）；
+  // 没有则退到前端本地计时（旧引擎 / 中断路径）
+  t.eta.actual = engineMs ? engineMs / 1000 : (Date.now() - t.eta.start) / 1000;
   updateEtaChip(t);
 }
 
@@ -1631,7 +1678,9 @@ function handleEvent(kind, data) {
       break;
     case "turn_finished": {
       finishAssistant();
-      finishEta(routeTab);
+      // 用引擎实测耗时定格芯片：前端本地计时从收到预估事件算起，与引擎的
+      // 墙钟起点差一个网络往返，两个数字对不上（刷新后又变成引擎值）。
+      finishEta(routeTab, data.duration_ms);
       refreshSessions();
       // 实时轮的用户气泡没有 seq：挂上操作（后端会按「最后一条 user」回退）
       if (routeTab && routeTab === activeTab) {
@@ -1719,6 +1768,11 @@ async function refreshSessions(prefetched) {
   const { sessions, empty_count, archived_count } = prefetched || await request("session.list");
   const ul = document.getElementById("session-list");
   ul.innerHTML = "";
+  // 经典视图同样按家族块（└/⑂ 子跟随父）+ 保存序排（键 = 当前项目 id，
+  // 与分组视图共用 session_order）；classic 列表即当前项目，直接取
+  const classicGk = bootSnap && bootSnap.project_id != null ? String(bootSnap.project_id) : null;
+  const classicList = classicGk != null ? orderedSessionList(sessions, classicGk) : sessions;
+  if (classicGk != null) lastGroupedListByGroup.set(classicGk, classicList);
   // 按标签分组：有标签的会话归入对应组（可属多组），无标签的在「未分组」；
   // 全部会话都没标签时不分组，列表与从前完全一致（空分组头只是噪声）
   const tagMap = new Map();
@@ -1729,13 +1783,13 @@ async function refreshSessions(prefetched) {
     });
   });
   const grouped = tagMap.size > 0;
-  const untagged = sessions.filter((s) => !(s.tags || []).length);
+  const untagged = classicList.filter((s) => !(s.tags || []).length);
   const groups = [];
   if (grouped) {
     for (const [tag, list] of tagMap) groups.push({ tag, list });
     if (untagged.length) groups.push({ tag: "未分组", list: untagged });
   } else {
-    groups.push({ tag: null, list: sessions });
+    groups.push({ tag: null, list: classicList });
   }
   groups.forEach(({ tag, list }) => {
     if (tag) {
@@ -1752,7 +1806,13 @@ async function refreshSessions(prefetched) {
       ul.appendChild(head);
     }
     if (activeTagFilter && tag !== activeTagFilter) return;
-    list.forEach((s) => ul.appendChild(renderSessionItem(s, ul)));
+    list.forEach((s) => {
+      const li = renderSessionItem(s, ul);
+      if (classicGk != null) {
+        wireSessionDrag(li, s, classicList, classicGk, () => refreshSessions());
+      }
+      ul.appendChild(li);
+    });
   });
   if (grouped && activeTagFilter && !ul.querySelector("li:not(.s-group)")) {
     ul.innerHTML += '<li class="empty-hint">这一组下没有会话</li>';
@@ -1846,6 +1906,7 @@ function renderSessionItem(s, ul) {
       <button class="s-archive" title="归档">${svgIcon("archive")}</button>
       <button class="s-more" title="更多操作">⋯</button>` +
     (tagChips ? `<span class="s-tags">${tagChips}</span>` : "");
+  li.dataset.sid = s.id; // 组内拖动排序：commitSessionOrder 沿 DOM 收集会话 id
   // 悬浮时时间让位：右侧出现归档与 ⋯
   li.querySelector(".s-archive").onclick = (e) => {
     e.stopPropagation();
@@ -1878,7 +1939,67 @@ function renderSessionItem(s, ul) {
 let sidebarView = "classic";
 let groupSeq = 0; // 渲染序号：两次并发的分组渲染，慢的那个回来后直接丢弃
 const projGroupState = new Map(); // 分组 key -> { open, all }：折叠与「显示更多」记忆，重渲染不丢
+let lastGroupedCurrentKey = null; // 上一次分组渲染时的当前项目 key：项目切换时自动展开新组（取代旧「当前置顶」）
+// 组内会话的自定义顺序（ui.json 的 session_order，偏好回包后由 initUiPrefs 填充）。
+// 键 = 组 key（字符串化项目 id），值 = 会话 id 数组（只记手动拖过的，新的照时间追加）
+let sessionOrderPrefs = {};
+const lastGroupedListByGroup = new Map(); // 组 key -> 该组本次渲染的会话列表（家族归并要用，渲染前写入）
 const GROUP_PREVIEW = 5; // 每个项目默认露出的会话条数，其余收进「显示更多」
+const SUB_MARK = "└"; // session.fork 生成的分支会话标题前缀（「└ 父标题」），即子会话标记。
+// 旧标题用 ⑂（OCR fork 字符，中文字体下笔画过细看不清），2.0 后新分叉统一用 └；
+// 兼容期两个都认，见 SUB_MARKS
+
+const SUB_MARKS = [SUB_MARK, "⑂"]; // 兼容：旧版本分叉的会话标题仍是 ⑂ 前缀
+
+function subParentTitleOf(title) {
+  const t = title || "";
+  for (const mark of SUB_MARKS) {
+    if (t.startsWith(mark)) return t.slice(mark.length).trimStart();
+  }
+  return null;
+}
+
+/** 在组列表里找子会话的父会话（fork 标题截断到 40 字符，子标题去前缀后可能只
+    是父标题的前缀，所以双向 startsWith 兜底）；找不到父时子会话按顶层对待 */
+function findParentInGroup(list, s) {
+  const pt = subParentTitleOf(s.title);
+  if (!pt) return null;
+  return list.find((p) => p.id !== s.id && !subParentTitleOf(p.title) &&
+    (p.title === pt || p.title.startsWith(pt) || pt.startsWith(p.title))) || null;
+}
+
+/** 组内会话的展示序：保存过的 id 按保存序排前，其余（没拖过的/新会话）按
+    后端默认序（置顶在前、新在前）接着排——旧偏好不藏新会话，同 project_order。
+    之后做家族聚拢：⑂ 子会话强制紧跟其父之后——它们是分支关系不是平级，
+    不能因 updated_at 更新就跑到父上面，也不能被手动排序漂进别的会话之间 */
+function orderedSessionList(list, gkey) {
+  const saved = sessionOrderPrefs[String(gkey)];
+  let base = list;
+  if (saved && saved.length) {
+    const rank = new Map(saved.map((id, i) => [id, i]));
+    base = [...list.filter((s) => rank.has(s.id)).sort((a, b) => rank.get(a.id) - rank.get(b.id)),
+            ...list.filter((s) => !rank.has(s.id))];
+  }
+  const subsByParent = new Map(); // 父 id -> 子数组（保持 base 相对序）
+  const isSub = new Set();
+  for (const s of base) {
+    if (!subParentTitleOf(s.title)) continue;
+    const parent = findParentInGroup(base, s);
+    if (parent) {
+      if (!subsByParent.has(parent.id)) subsByParent.set(parent.id, []);
+      subsByParent.get(parent.id).push(s);
+      isSub.add(s.id);
+    }
+  }
+  const out = [];
+  for (const s of base) {
+    if (isSub.has(s.id)) continue; // 子已跟随父输出
+    out.push(s);
+    const subs = subsByParent.get(s.id);
+    if (subs) out.push(...subs);
+  }
+  return out;
+}
 
 function groupState(key) {
   // 项目 id 从 JSON 来是数字、dataset.gkey 读回是字符串，同一组会存成两个键——
@@ -1977,9 +2098,22 @@ async function refreshSessionsGrouped() {
   const ul = document.getElementById("session-list");
   const frag = document.createDocumentFragment();
   let sawProject = false;
-  // 当前项目的组排最前（正在用的项目一眼可见），其余保持 project.list 的原序
-  const ordered = [...projects].sort((a, b) => (b.is_current ? 1 : 0) - (a.is_current ? 1 : 0));
-  ordered.forEach((p) => {
+  // 组内会话应用拖动保存的自定义序（orderedSessionList：保存过的排前，新会话按时间追加）
+  byProject.forEach((list, k) => {
+    byProject.set(k, orderedSessionList(list, k));
+    lastGroupedListByGroup.set(String(k), byProject.get(k));
+  });
+  // 组序保持 project.list 原序：项目在侧栏的位置稳定，不因「对话页正显示哪个
+  // 项目的会话」而上跳下蹿；当前项目改用「变化时自动展开它的组」来指示——
+  // 只在切到新项目那一刻展开一次，手动折叠的组不会被反复顶开。
+  // 上一次的当前项目记在模块级 lastGroupedCurrentKey，跨渲染对比才知道「变化」
+  const curProj = projects.find((p) => p.is_current);
+  const currentKey = curProj ? curProj.id : null;
+  if (currentKey != null && String(currentKey) !== String(lastGroupedCurrentKey)) {
+    groupState(currentKey).open = true;
+  }
+  lastGroupedCurrentKey = currentKey;
+  projects.forEach((p) => {
     sawProject = true;
     renderProjectGroup(frag, {
       key: p.id, name: p.name, list: byProject.get(p.id) || [],
@@ -2050,6 +2184,7 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
   };
   const del = head.querySelector(".pg-del");
   if (del) del.onclick = (e) => { e.stopPropagation(); deleteProjectModal(project); };
+  if (project) wireGroupDrag(head, key);
   frag.appendChild(head);
   if (!st.open) return;
   const visible = st.all ? list : list.slice(0, GROUP_PREVIEW);
@@ -2072,6 +2207,7 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
         addNotice(`已打开会话 ${s.title || s.id}`);
       };
     }
+    wireSessionDrag(li, s, list, key);
     frag.appendChild(li);
   });
   if (list.length > visible.length || (st.all && list.length > GROUP_PREVIEW)) {
@@ -2086,6 +2222,187 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
     }
     frag.appendChild(more);
   }
+}
+
+// ---- 拖动排序（分组视图组头 / 组内会话行 / 经典视图项目行、会话行共用）----
+// 顺序存 ui.json 的 project_order / session_order，拖拽只改顺序不改数据本身；
+// 两种视图共享同一份顺序，分组视图调好序经典视图同享。
+
+/** 通用拖拽接线：手势部分（start/over/leave/end）全在这，落点重定向与
+    提交由 opts 决定：
+      over(e, item, src) -> 悬停时的落点 { id, pos } 或 null（不允许落/不响应）；
+                            不传则默认上/下缘对半判定；id 默认 item.id
+      commit(dst, pos)   -> dragend 里真正落库，返回 promise，resolve 后 rerender()
+      rerender()         -> 保存成功后的重渲染
+    进行态存 wireListDrag.active（dataTransfer 只在 drop 可读，跨事件传状态用模块级） */
+function wireListDrag(el, item, opts) {
+  el.draggable = true;
+  el.addEventListener("dragstart", (e) => {
+    wireListDrag.active = { item, over: null };
+    el.classList.add("dragging", "sess-dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", String(item.id ?? "")); // Firefox：不 setData 不起拖
+  });
+  el.addEventListener("dragend", () => {
+    el.classList.remove("dragging", "sess-dragging");
+    const st = wireListDrag.active;
+    wireListDrag.active = null;
+    clearDragVisual();
+    clearSessionDragVisual();
+    if (!st || !st.over) return;
+    if (st.over.id !== item.id && opts.commit) {
+      Promise.resolve(opts.commit(st.over, st.over.pos || "before")).then(() => {
+        if (opts.rerender) opts.rerender();
+      });
+    }
+  });
+  el.addEventListener("dragover", (e) => {
+    const st = wireListDrag.active;
+    if (!st || st.item.id === item.id) return;
+    const t = opts.over ? opts.over(e, item, st.item)
+      : { id: item.id, pos: dragHalfPos(e, el) };
+    if (!t || t.id === st.item.id) return;
+    e.preventDefault(); // 允许作为落点
+    e.dataTransfer.dropEffect = "move";
+    if (st.over && st.over.id === t.id && st.over.pos === t.pos) return;
+    clearDragVisual();
+    clearSessionDragVisual();
+    st.over = t;
+    el.classList.add(t.pos === "before" ? "drop-above" : "drop-below");
+  });
+  el.addEventListener("dragleave", () => {
+    const st = wireListDrag.active;
+    if (st && st.over && st.over.id === item.id) {
+      el.classList.remove("drop-above", "drop-below");
+      st.over = null;
+    }
+  });
+  el.addEventListener("drop", (e) => e.preventDefault()); // 提交统一在 dragend
+}
+wireListDrag.active = null;
+
+function dragHalfPos(e, el) {
+  const rect = el.getBoundingClientRect();
+  return e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+/** 给组头接上拖拽（分组视图）。head 的点击行为（折叠）不受影响：拖拽与点击是两套手势。 */
+function wireGroupDrag(head, key) {
+  wireListDrag(head, { id: String(key) }, {
+    commit: (dst, pos) => commitProjectOrder(dst.id, pos),
+    rerender: refreshSessionsGrouped,
+  });
+}
+
+function clearDragVisual() {
+  document.querySelectorAll("#session-list .pgroup-head.drop-above, #session-list .pgroup-head.drop-below, #project-list li.drop-above, #project-list li.drop-below")
+    .forEach((el) => el.classList.remove("drop-above", "drop-below"));
+}
+
+/** 项目新序提交：listId 决定从哪个列表读当前 DOM 序（分组视图从组头、
+    经典视图从项目行），两种视图保存同一份 project_order */
+function commitProjectOrder(srcKey, dstKey, pos, listId = "session-list", rowSel = ".pgroup-head", attr = "gkey") {
+  const keys = [...document.querySelectorAll(`#${listId} ${rowSel}`)]
+    .map((h) => String(h.dataset[attr]))
+    .filter((k) => k !== "quick" && k !== "loose"); // 伪组不进偏好
+  const from = keys.indexOf(srcKey);
+  let to = keys.indexOf(dstKey);
+  if (from < 0 || to < 0 || from === to) return Promise.resolve();
+  keys.splice(from, 1);
+  to = keys.indexOf(dstKey); // 抽走 src 后下标可能前移，重找
+  if (pos === "after") to += 1;
+  keys.splice(to, 0, srcKey);
+  return request("ui.save", {
+    prefs: { project_order: keys.map((k) => parseInt(k, 10)).filter((n) => n > 0) },
+  }).catch(() => {});
+}
+
+/** 给会话行接上组内拖拽（分组/经典两种视图共用）。同级限制：└/⑂ 子会话跟随父
+    （作为一整个家族块）参与排序；拖到子行上时落点重定向到它的父（即插到该
+    家族块的前/后），不会插进父与子之间 */
+function wireSessionDrag(li, s, list, gkey, rerender) {
+  const parent = findParentInGroup(list, s);
+  const srcFamily = parent ? parent.id : s.id;
+  wireListDrag(li, s, {
+    over: (e, item) => {
+      // 同级判定：拖到子行上重定向到父；同家族块不响应
+      const overRow = findParentInGroup(list, item);
+      const overFamily = overRow ? overRow.id : item.id;
+      if (overFamily === srcFamily) return null;
+      return { id: overRow ? overRow.id : item.id, pos: dragHalfPos(e, li) };
+    },
+    commit: (dst, pos) => commitSessionOrder(String(gkey), s.id, dst.id, pos),
+    rerender: rerender || refreshSessionsGrouped,
+  });
+}
+
+function clearSessionDragVisual() {
+  document.querySelectorAll("#session-list li.drop-above, #session-list li.drop-below")
+    .forEach((el) => el.classList.remove("drop-above", "drop-below"));
+}
+
+/** 会话新序提交（同级限制，分组/经典两种视图共用）：先按家族块（└/⑂ 子跟随父）
+    把可见行归并为顶层块序，再按落点移动整个块；子行永远跟在父后，不会被拖散。
+    经典视图传 view="classic"：整张 session-list 就是当前项目的会话（中间可能夹
+    标签分组头，按 data-sid 收集即可），gkey 用 bootSnap.project_id。
+    返回保存 promise。 */
+function commitSessionOrder(gkey, srcId, dstId, pos, view = "grouped") {
+  const gk = String(gkey);
+  const listSel = view === "classic" ? "#session-list li[data-sid]"
+                                     : "#session-list .pgroup-head";
+  let visibleIds;
+  if (view === "classic") {
+    visibleIds = [...document.querySelectorAll(listSel)].map((el) => el.dataset.sid);
+  } else {
+    visibleIds = [...document.querySelectorAll("#session-list .pgroup-head")]
+      .filter((h) => String(h.dataset.gkey) === gk)
+      .flatMap((h) => {
+        const out = [];
+        let el = h.nextElementSibling;
+        while (el && !el.classList.contains("pgroup-head")) {
+          if (el.dataset && el.dataset.sid) out.push(el.dataset.sid);
+          el = el.nextElementSibling;
+        }
+        return out;
+      });
+  }
+  if (!visibleIds.includes(srcId) || !visibleIds.includes(dstId)) return Promise.resolve();
+  // 用渲染时的组列表做家族归并（DOM 无标题信息）；lastGroupedListByGroup 由两种
+  // 视图各自的渲染函数在渲染前写入（经典视图键 = 当前项目 id）
+  const list = lastGroupedListByGroup.get(gk) || [];
+  const byId = new Map(list.map((s) => [s.id, s]));
+  const blockOf = new Map(); // 会话 id -> 块代表（顶层父）id
+  const blockMembers = new Map(); // 块代表 id -> [父, ...子]（渲染序）
+  for (const id of visibleIds) {
+    const row = byId.get(id);
+    if (!row || blockOf.has(id)) continue;
+    blockOf.set(id, id);
+    blockMembers.set(id, [id]);
+    for (const cand of list) {
+      if (blockOf.has(cand.id) || cand.id === id) continue;
+      const pp = findParentInGroup(list, cand);
+      if (pp && pp.id === id && visibleIds.includes(cand.id)) {
+        blockOf.set(cand.id, id);
+        blockMembers.get(id).push(cand.id);
+      }
+    }
+  }
+  const srcBlock = blockOf.get(srcId);
+  const dstBlock = blockOf.get(dstId);
+  if (srcBlock == null || dstBlock == null || srcBlock === dstBlock) return Promise.resolve();
+  const heads = visibleIds.filter((id) => blockOf.get(id) === id);
+  const from = heads.indexOf(srcBlock);
+  let to = heads.indexOf(dstBlock);
+  if (from < 0 || to < 0) return Promise.resolve();
+  heads.splice(from, 1);
+  to = heads.indexOf(dstBlock);
+  if (pos === "after") to += 1;
+  heads.splice(to, 0, srcBlock);
+  // 块序展开回会话序（每块：父在前、子随后）；隐藏行（不在本次可见名单的）补尾
+  const orderedIds = heads.flatMap((h) => blockMembers.get(h) || [h]);
+  const merged = [...new Set([...orderedIds, ...(sessionOrderPrefs[gk] || [])])];
+  sessionOrderPrefs[gk] = merged;
+  return request("ui.save", { prefs: { session_order: sessionOrderPrefs } }).catch(() => {});
 }
 
 // 「引用此会话」：挂进输入框的引用托盘，随下一条消息把该会话内容注入上下文
@@ -3159,6 +3476,9 @@ async function fetchWorkspaceData() {
 /** 把预取到的数据一次性画上去（同步为主）。 */
 async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
   currentSessionId = snap.session ? snap.session.id : null;
+  // 同步 boot 快照：classicGk（当前项目 id）等字段要跟手，项目切换后旧值会过期；
+  // 保留其它分区已读入的字段（模板直接读 bootSnap.tools 等）
+  bootSnap = bootSnap ? { ...bootSnap, ...snap } : snap;
   // 后端最后一次报告的「无可用模型」状态：send() 的预检依据（每次 boot 刷新）
   providerBroken = !snap.provider || !!snap.provider_error;
   const projPath = document.getElementById("project-path"); // 侧栏已移除工作目录框
@@ -3548,6 +3868,12 @@ async function refreshProjects(prefetched) {
     if (p.is_current) li.classList.add("active");
     li.innerHTML = FOLDER_SVG + `<span class="s-title">${escapeHtml(p.name)}</span>`;
     li.title = p.root_path + (p.is_current ? "（当前项目）" : "—— 点击切换到这个项目");
+    // 拖动排序：与分组视图共用 project_order（project.list 已按它返回）
+    wireListDrag(li, { id: String(p.id) }, {
+      commit: (dst, pos) => commitProjectOrder(String(p.id), dst.id, pos, "project-list", "li", "pid"),
+      rerender: () => refreshProjects(),
+    });
+    li.dataset.pid = p.id; // commitProjectOrder 从 DOM 收集当前序
     // 非当前项目：悬浮出移除按钮（连带会话与白名单，不删电脑上的文件夹）
     if (!p.is_current) {
       const del = document.createElement("button");
@@ -4375,10 +4701,24 @@ function messageText(message) {
   return message.content.filter((b) => b.type === "text").map((b) => b.text || "").join("");
 }
 
-function addAssistantDone(text, rtMeta, tab, seq, thinking) {
+function addAssistantDone(text, rtMeta, tab, seq, thinking, thinkingMs, durationMs, estimate) {
+  const t = tab || curTab();
   const d = document.createElement("div");
   d.className = "msg assistant";
-  if (thinking) addThinkingDone(thinking, tab);
+  if (thinking) addThinkingDone(thinking, t, thinkingMs);
+  // 历史恢复的用时芯片：重建在回答上方（与流式期间的芯片位置一致）。
+  // 旧消息没有 duration_ms（0）时不渲染，不给历史凭空造一条用时记录。
+  if (durationMs) {
+    const chip = document.createElement("div");
+    chip.className = "eta-chip done";
+    const lo = (estimate && estimate.min_seconds) || 0;
+    const hi = (estimate && estimate.max_seconds) || 0;
+    if (estimate && estimate.basis) chip.title = "预估依据：" + estimate.basis;
+    chip.textContent = hi
+      ? `⏱ 用时 ${fmtEtaDur(durationMs / 1000)} · 预估 ${fmtEtaRange(lo, hi)}`
+      : `⏱ 用时 ${fmtEtaDur(durationMs / 1000)}`;
+    curLog().appendChild(chip);
+  }
   d.innerHTML = `<div class="md">${renderMarkdown(text || "")}</div>`;
   if (rtMeta) {
     d._rtMeta = rtMeta; // 重新生成时据此重跑同样的圆桌配置
@@ -4497,7 +4837,10 @@ function renderHistory(tab, messages) {
           renderMermaidIn(rtCard);
           highlightCodeIn(rtCard);
         }
-        addAssistantDone(m.text, m.roundtable, tab, m.seq, m.thinking);
+        addAssistantDone(
+          m.text, m.roundtable, tab, m.seq, m.thinking,
+          m.thinking_ms, m.duration_ms, m.estimate,
+        );
         el = curLog().lastElementChild;
       }
       if (el && m.seq) el.dataset.seq = String(m.seq);
@@ -8515,7 +8858,7 @@ function closeExtPanel() {
   if (skillsPage.parentElement !== extPanelPage) return; // 卡片本来就在设置页
   const body = document.querySelector(".settings-body");
   body.insertBefore(skillsPage, document.getElementById("settings-page-subagents"));
-  body.insertBefore(mcpPage, document.getElementById("settings-page-rules"));
+  body.insertBefore(mcpPage, document.getElementById("settings-page-advanced"));
   if (rightTabs.includes("ext")) closeRightTab("ext"); // 内容回设置页，面板不留空壳标签
 }
 
@@ -9511,6 +9854,9 @@ async function initUiPrefs() {
   // 侧栏呈现形式（classic=原两区 | grouped=按项目分组）。boot 的首渲染可能已按
   // 默认的 classic 画过一帧，是分组就再补渲染一次
   sidebarView = prefs.sidebar_view === "grouped" ? "grouped" : "classic";
+  // 组内会话的自定义拖动序（分组视图）：渲染前先填好缓存
+  sessionOrderPrefs = (prefs.session_order && typeof prefs.session_order === "object")
+    ? prefs.session_order : {};
   applySidebarView();
   if (sidebarView === "grouped") refreshSessions();
   // 对话区宠物开关（默认显示）+ 横向落点（pet_x；纵向有重力，总是落在底部）

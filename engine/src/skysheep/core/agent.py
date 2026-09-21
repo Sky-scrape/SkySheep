@@ -176,6 +176,10 @@ class Agent:
         iterations = 0
         stop_reason = "max_iterations"  # 正常结束时在 break 前改为 end_turn
 
+        # 本轮墙钟耗时：轮末盖在最后一条助手消息上（前端刷新后仍能显示「用时 X」）。
+        # 用 monotonic 而非 time.time：系统时间被 NTP 校准/手动调整时不受影响。
+        turn_t0 = time.monotonic()
+
         finished_by_error = False
 
         # 0. 上下文压缩：接近上下文上限时，先用摘要替换旧历史
@@ -207,8 +211,12 @@ class Agent:
             text_parts: list[str] = []
             reasoning_parts: list[str] = []
             reasoning_sig = ""
+            # 本次模型调用的推理起止时刻（首个/最后一个 thinking 增量）
+            think_t0: float | None = None
+            think_t1: float | None = None
             for attempt in range(1, MAX_STREAM_RETRIES + 2):
                 blocks, text_parts, reasoning_parts, reasoning_sig = [], [], [], ""
+                think_t0 = think_t1 = None
                 try:
                     # 自动档：每次调用前按当前上下文实时估档（简单任务降、调试设计升），
                     # 其余档位不覆盖、沿用用户所选（见 core/effort.py）
@@ -221,6 +229,11 @@ class Agent:
                             yield TextDelta(text=pe.text)
                         elif isinstance(pe, ProviderReasoning):
                             if pe.text:
+                                # 只统计真正有内容的增量：签名块的空文本增量不算思考时间
+                                now = time.monotonic()
+                                if think_t0 is None:
+                                    think_t0 = now
+                                think_t1 = now
                                 reasoning_parts.append(pe.text)
                                 yield ThinkingDelta(text=pe.text)
                             if pe.signature:
@@ -270,12 +283,23 @@ class Agent:
             if text_parts:
                 blocks.insert(0, TextBlock(text="".join(text_parts)))
             if reasoning_parts:
-                blocks.insert(0, ThinkingBlock(text="".join(reasoning_parts), signature=reasoning_sig))
+                think_ms = 0
+                if think_t0 is not None and think_t1 is not None:
+                    think_ms = int((think_t1 - think_t0) * 1000)
+                blocks.insert(0, ThinkingBlock(
+                    text="".join(reasoning_parts), signature=reasoning_sig,
+                    duration_ms=think_ms,
+                ))
             assistant = Message.assistant(blocks)
+            # 最终回答（无后续工具调用）盖本轮实测耗时，供历史恢复展示；
+            # 中间迭代不盖（那是过程消息，不是用户等待的交付物）。
+            is_final = not assistant.tool_uses
+            if is_final:
+                assistant.duration_ms = int((time.monotonic() - turn_t0) * 1000)
             self.history.append(assistant)
             yield AssistantMessage(message=assistant.model_dump())
 
-            if not assistant.tool_uses:
+            if is_final:
                 stop_reason = "end_turn"
                 break
 
@@ -459,7 +483,10 @@ class Agent:
 
         if finished_by_error:
             stop_reason = "error"
-        yield TurnFinished(stop_reason=stop_reason, iterations=iterations)
+        yield TurnFinished(
+            stop_reason=stop_reason, iterations=iterations,
+            duration_ms=int((time.monotonic() - turn_t0) * 1000),
+        )
 
     async def _exec_tool(
         self, tu: ToolUseBlock, tool: Tool, ctx: ToolContext,

@@ -1868,17 +1868,24 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column; gap: 10px;
 }
-#settings-nav li { padding: 7px 10px; font-size: 13.5px; }
+/* 条目与全局 .list 统一（13px / 5px 8px）：整列紧凑，字号避开 13.5px 的半像素发虚。
+   分组条目相对标题缩进，用一档左内边距建立从属关系 */
+#settings-nav li { padding: 5px 8px 5px 20px; font-size: 13px; }
 #settings-nav li.active {
-  background: var(--blue-weak); border-color: var(--blue);
+  background: var(--blue-weak); border-color: transparent;
   color: var(--blue); font-weight: 700;
 }
-/* 设置导航的分组标题：不是可点项，只作扫描锚点（点击绑定在 li[data-target] 上） */
+/* 设置导航的分组标题：不是可点项，只作扫描锚点（点击绑定在 li[data-target] 上）。
+   「标题相」靠三件事：通栏底线（同 .section h3 的分区语言）、更粗的字重、
+   与子项的缩进差——否则同一列起点、相近留白，看起来就像多出来的一行 */
 #settings-nav li.nav-cap {
-  padding: 9px 10px 1px; font-size: 10.5px; font-weight: 800;
-  letter-spacing: 2px; color: var(--dim); cursor: default;
+  padding: 10px 8px 4px; font-size: 11px; font-weight: 800;
+  letter-spacing: 1px; color: var(--dim); cursor: default;
+  border-bottom: 1px solid var(--line2);
 }
-#settings-nav li.nav-cap:not(:first-child) { border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 8px; }
+#settings-nav li.nav-cap:not(:first-child) { margin-top: 10px; }
+/* 首个分组标题贴着区块头，不需要额外上间距；底线保留——它是「标题相」的一部分 */
+#settings-nav li.nav-cap:first-child { margin-top: 0; }
 
 /* ---------- 设置页 ---------- */
 #settings-topbar {
@@ -2216,6 +2223,16 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 
 /* 白名单：规则测试器 */
 .rule-check { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+/* 规则测试器折叠：平时只占一行摘要，排查工具不占版面 */
+.rule-check-fold { margin-top: 10px; }
+.rule-check-fold > summary {
+  cursor: pointer; color: var(--dim); font-size: 12px; list-style: none;
+}
+.rule-check-fold > summary::-webkit-details-marker { display: none; }
+.rule-check-fold > summary::before { content: "▸ "; }
+.rule-check-fold[open] > summary::before { content: "▾ "; }
+.rule-check-fold > summary:hover { color: var(--blue); }
+.rule-check-fold[open] .rule-check { margin-top: 8px; }
 .rule-check-cap { color: var(--text2); font-size: 12.5px; flex-shrink: 0; }
 .rule-check input {
   background: var(--paper-raised); color: var(--text);
@@ -2723,6 +2740,24 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 #session-list li.pgroup-head .pg-chev svg { width: 12px; height: 12px; }
 #session-list li.pgroup-head.open .pg-chev { transform: rotate(90deg); }
 #session-list li.pgroup-head.active, #session-list li.pgroup-head.active .p-ico { color: var(--blue); }
+/* 组头拖动排序：拖动中半透明，悬停目标的插入位置用上下缘实线指示 */
+#session-list li.pgroup-head.dragging { opacity: .45; }
+#session-list li.pgroup-head.drop-above { box-shadow: inset 0 2px 0 var(--blue); }
+#session-list li.pgroup-head.drop-below { box-shadow: inset 0 -2px 0 var(--blue); }
+#session-list li.pgroup-head[draggable="true"] { cursor: grab; }
+#session-list li.pgroup-head.dragging:active { cursor: grabbing; }
+/* 组内会话行拖动排序：同款指示线（插在行上/下缘），拖动中半透明。
+   经典视图项目行/会话行同用（项目行有 .dragging，会话行有 .sess-dragging） */
+#session-list.by-project li.sess-dragging { opacity: .45; }
+#session-list.by-project li.drop-above { box-shadow: inset 0 2px 0 var(--blue); }
+#session-list.by-project li.drop-below { box-shadow: inset 0 -2px 0 var(--blue); }
+#project-list li[draggable="true"], #project-list li.sess-dragging { cursor: grab; }
+#project-list li.dragging { opacity: .45; }
+#project-list li.drop-above { box-shadow: inset 0 2px 0 var(--blue); }
+#project-list li.drop-below { box-shadow: inset 0 -2px 0 var(--blue); }
+#session-list:not(.by-project) li.sess-dragging { opacity: .45; }
+#session-list:not(.by-project) li.drop-above { box-shadow: inset 0 2px 0 var(--blue); }
+#session-list:not(.by-project) li.drop-below { box-shadow: inset 0 -2px 0 var(--blue); }
 /* 项目头的悬浮移除钮：手感同 .project-list 的 .p-del */
 #session-list li.pgroup-head .pg-del {
   flex-shrink: 0; border: none; background: none; cursor: pointer;

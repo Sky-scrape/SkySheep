@@ -206,6 +206,27 @@ def session_from_row(r) -> Session:
     )
 
 
+def _message_duration_seconds(content_json: str) -> float | None:
+    """从消息 JSON 里取实测轮耗时（秒）；没有该字段（旧消息）返回 None。
+
+    直接解 JSON 而不是走 Message.model_validate_json：这里只关心一个标量，
+    历史行里可能有旧版本写下的结构，完整校验失败就会丢掉整条样本。
+    过滤 1 秒以内（重试/拆分噪音）与 2 小时以上（挂起过夜）与旧逻辑同口径。
+    """
+    try:
+        raw = json.loads(content_json)
+    except Exception:  # noqa: BLE001 - 坏行不参与校准
+        return None
+    if not isinstance(raw, dict):
+        return None
+    ms = raw.get("duration_ms") or 0
+    try:
+        sec = int(ms) / 1000.0
+    except (TypeError, ValueError):
+        return None
+    return sec if 1 <= sec <= 7200 else None
+
+
 def parse_backup_stamp(stamp: str) -> float | None:
     """把备份文件名里的时间戳（`%Y%m%d-%H%M%S`，后面可能跟「-恢复前」）解析成时刻。
 
@@ -1127,15 +1148,18 @@ class SessionStore:
     async def recent_turn_seconds(self, project_id: int | None, limit: int = 30) -> list[float]:
         """本项目最近 N 次「用户消息→助手回复」的实测耗时（秒），新→旧。
 
-        取同项目各会话里相邻的 user→assistant 消息对时间差；剔除 1 秒以内
-        （重试/拆分噪音）与 2 小时以上（挂起过夜、中途离开）的样本。供
-        core/estimate.py 做历史校准——启发式再准也不如用户机器上的真实记录。
+        优先读消息自带的 duration_ms（轮末实测墙钟，含工具与思考时间）——
+        一轮的 user/assistant 消息是轮末批量落库的，两条 created_at 只差几毫秒，
+        按时间差反推轮耗时从来算不准（旧写法因此一直拿不到样本）。旧库里的
+        历史消息没有该字段，仍按 created_at 差值兜底（剔除 1 秒以内与 2 小时
+        以上：前者是重试/拆分噪音，后者是挂起过夜或中途离开）。
+        供 core/estimate.py 做历史校准——启发式再准也不如用户机器上的真实记录。
         """
         assert self._db
         cond = "s.project_id IS NULL" if project_id is None else "s.project_id = ?"
         args = () if project_id is None else (project_id,)
         cur = await self._db.execute(
-            "SELECT a.created_at - u.created_at AS dur"
+            "SELECT a.content AS acontent, a.created_at - u.created_at AS dur"
             " FROM messages u"
             " JOIN sessions s ON s.id = u.session_id"
             " JOIN messages a"
@@ -1146,7 +1170,16 @@ class SessionStore:
             args + (limit * 2,),
         )
         rows = await cur.fetchall()
-        return [r["dur"] for r in rows if 1 <= r["dur"] <= 7200][:limit]
+        out: list[float] = []
+        for r in rows:
+            real = _message_duration_seconds(r["acontent"])
+            if real is not None:
+                out.append(real)
+            elif 1 <= r["dur"] <= 7200:
+                out.append(r["dur"])
+            if len(out) >= limit:
+                break
+        return out
 
     # ---- whitelist rules ----
 

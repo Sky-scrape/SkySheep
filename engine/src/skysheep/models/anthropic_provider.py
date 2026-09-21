@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-
-from anthropic import AsyncAnthropic
+from typing import TYPE_CHECKING
 
 from ..messages import (
     ImageBlock,
@@ -22,6 +21,11 @@ from ..messages import (
     dialogue,
     system_text,
 )
+
+if TYPE_CHECKING:
+    # 仅注解用：运行时延迟到建客户端时才导入（anthropic 包导入约 0.75s，启动期用不到）
+    from anthropic import AsyncAnthropic
+
 from .base import (
     Provider,
     ProviderDone,
@@ -136,6 +140,8 @@ class AnthropicProvider(Provider):
             except ImportError:
                 import httpx as _httpx
             kw["http_client"] = _httpx.AsyncClient(proxy=proxy, timeout=300.0, trust_env=False)
+        from anthropic import AsyncAnthropic  # noqa: PLC0415  启动性能：见 TYPE_CHECKING 处注释
+
         self._client = client or AsyncAnthropic(**kw)
 
     async def stream(

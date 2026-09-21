@@ -205,7 +205,8 @@ SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐�
 | 文档阅读 + 生成 | ✅ | — | ✅ | ✅ read_document（PDF/Word/Excel）+ write_document（docx/xlsx/csv） |
 | 图片输入 / 图片生成 | ✅ | ✅ | ✅ | ✅ 粘贴/拖拽多模态 + CogView/Kolors 画图 |
 | 电脑控制（Computer Use） | — | — | — | ✅ screenshot/mouse/keyboard/window/clipboard（默认关，确认制 + 动作白名单，键盘与剪贴板按内容固化、关窗口不整类放行） |
-| 思考过程可视化 | — | — | — | ✅ ThinkingDelta 流式 + 可折叠回看 |
+| 思考过程可视化 | — | — | — | ✅ ThinkingDelta 流式 + 可折叠回看 + 思考耗时 |
+| 任务耗时预估 / 用时记录 | ✅ | — | ✅ | ✅ 接手时预估区间，轮末记录实测用时（随消息落库，刷新后仍在）|
 | 检查点 / 撤销本轮文件改动 | ✅ checkpoints | ✅ rollback | ✅ | ✅ 落盘持久化，重启后仍可回滚 |
 | 会话搜索 / 管理 | ✅ | ✅ | ✅ | ✅ 跨项目全文搜索 + 备份可视化恢复 + 导出 Markdown/HTML |
 | 右侧面板（终端/浏览器/辅助对话/审查/文件/任务/日程） | — | — | ✅ | ✅ 多会话标签并行 |

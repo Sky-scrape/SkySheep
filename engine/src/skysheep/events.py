@@ -119,6 +119,9 @@ class TurnFinished(Event):
     kind: Literal["turn_finished"] = "turn_finished"
     stop_reason: str = "end_turn"  # end_turn / max_iterations / aborted
     iterations: int = 0
+    # 本轮实测耗时（毫秒）：前端据此把「已用时」芯片定格成引擎真实值，
+    # 而不是前端自己从收到预估事件那一刻起的本地计时（两者会有偏差）。
+    duration_ms: int = 0
 
 
 class CompactionEvent(Event):

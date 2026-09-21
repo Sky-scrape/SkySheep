@@ -250,7 +250,7 @@ def test_fork_session(home):
 
         ws.send_json({"id": "sl", "method": "session.list", "params": {}})
         titles = {s["title"] for s in recv_until(ws, "sl")["result"]["sessions"]}
-        assert any(t.startswith("⑂") for t in titles)
+        assert any(t.startswith("└") for t in titles)
 
 
 # ---- 用量统计 ----

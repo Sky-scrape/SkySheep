@@ -57,7 +57,7 @@ from ..config import (
 from ..core import Agent, build_system_prompt
 from ..core.checkpoints import CheckpointStore
 from ..core.context import compact_history, estimate_text_tokens, estimate_tokens
-from ..core.estimate import estimate_task
+from ..core.estimate import estimate_task, format_range
 from ..core.hooks import HookRunner, hooks_from_config, load_raw_config
 from ..core.prompt import (
     MAX_INSTRUCTIONS_CHARS,
@@ -317,7 +317,102 @@ def _msg_brief(m: Message) -> dict:
         "roundtable": m.roundtable,
         # 思考型模型的推理内容（前端渲染为可折叠块）；其他角色为空串
         "thinking": "".join(b.text for b in m.content if getattr(b, "type", "") == "thinking"),
+        # 思考耗时（毫秒）：折叠标题显示「思考 X 秒」，与正文用时区分开
+        "thinking_ms": max(
+            (getattr(b, "duration_ms", 0) for b in m.content
+             if getattr(b, "type", "") == "thinking"),
+            default=0,
+        ),
+        # 本轮实测耗时与接手时下发的预估区间：前端历史恢复重建「用时」芯片。
+        # 旧消息没有这两个字段（都是 0 / None），前端据此不渲染芯片。
+        "duration_ms": getattr(m, "duration_ms", 0),
+        "estimate": getattr(m, "estimate", None),
     }
+
+
+def _fmt_export_dur(seconds: float) -> str:
+    """导出里的时长文案：45 秒 / 3 分 20 秒 / 1 小时 5 分（与界面 fmtEtaDur 同口径）。"""
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s} 秒"
+    m, sec = divmod(s, 60)
+    if m < 60:
+        return f"{m} 分 {sec} 秒" if sec else f"{m} 分钟"
+    h, mm = divmod(m, 60)
+    return f"{h} 小时 {mm} 分" if mm else f"{h} 小时"
+
+
+def _export_eta_html(m: Message) -> str:
+    """导出 HTML 的用时芯片（无实测耗时的旧消息返回空串，不凭空造记录）。"""
+    if not getattr(m, "duration_ms", 0):
+        return ""
+    est = getattr(m, "estimate", None) or {}
+    lo, hi = est.get("min_seconds", 0), est.get("max_seconds", 0)
+    text = f"⏱ 用时 {_fmt_export_dur(m.duration_ms / 1000)}"
+    if hi:
+        text += f" · 预估 {format_range(lo, hi)}"
+    title = (
+        f' title="预估依据：{_html_escape(str(est.get("basis", "")))}"'
+        if est.get("basis") else ""
+    )
+    return f'<div class="eta"{title}>{_html_escape(text)}</div>'
+
+
+def _export_thinking_html(m: Message) -> str:
+    """导出 HTML 的思考过程折叠块（<details> 无需 JS）；没有推理内容返回空串。"""
+    think = m.thinking
+    if not think:
+        return ""
+    ms = m.thinking_ms
+    label = "💭 思考过程"
+    if ms:
+        label += f"（思考 {_fmt_export_dur(ms / 1000)}）"
+    return (
+        f'<details class="think"><summary>{_html_escape(label)}</summary>'
+        f'<div class="think-body">{_html_escape(think)}</div></details>'
+    )
+
+
+def _export_body_text(m: Message) -> str:
+    """导出正文：与 to_plain 一致，但省略已单独成段的思考块（避免重复）。
+
+    只对带推理内容的 assistant 消息生效；其余直接走 to_plain。
+    """
+    if m.role != "assistant" or not m.thinking:
+        return m.to_plain()
+    kept = m.model_copy(update={
+        "content": [b for b in m.content if getattr(b, "type", "") != "thinking"]
+    })
+    return kept.to_plain()
+
+
+def _stamp_turn_estimate(new_msgs: list, estimate: dict | None, turn_t0: float = 0.0) -> None:
+    """把本轮预估区间与实测耗时盖到轮末助手消息上（原地修改，落库前调用）。
+
+    为什么需要这一步：`Agent.run_turn` 只知道自己花多久（它盖 duration_ms），
+    预估区间是 backend 在开工时算的，两边分开。圆桌路径连 run_turn 都不走
+    （成员并行 → 主席融合，没有 agent 主循环），它的最终回答也就没人盖耗时，
+    刷新后看不到「用时」。所以统一在落库前从后往前找最后一条有正文的助手
+    消息：缺耗时的按本轮墙钟补上，预估区间一并盖上；取消/出错轮没有最终回答
+    则不盖（前端也不会显示）。
+    """
+    target = None
+    for m in reversed(new_msgs):
+        if getattr(m, "role", "") != "assistant":
+            continue
+        if target is None and (getattr(m, "text", "") or "").strip():
+            target = m
+        if getattr(m, "duration_ms", 0):
+            # 引擎已盖过（普通路径的最终回答）：只需补预估
+            if estimate:
+                m.estimate = estimate
+            return
+    if target is None:
+        return
+    if turn_t0:
+        target.duration_ms = int((time.monotonic() - turn_t0) * 1000)
+    if estimate:
+        target.estimate = estimate
 
 
 # 无人值守门控：定时任务与 headless run 共用 security.gate.HeadlessGate
@@ -363,6 +458,14 @@ EXPORT_HTML_TEMPLATE = """<!DOCTYPE html>
   .msg.tool {{ background: #faf7ee; color: #57503f; font-size: 13px; }}
   .msg.tool.err {{ border-color: #b03a2e; }}
   .msg pre {{ margin: 6px 0 0; white-space: pre-wrap; font: 12px/1.6 Consolas, monospace; }}
+  .msg .body {{ white-space: pre-wrap; overflow-wrap: break-word; }}
+  .eta {{ display: inline-block; margin: 0 0 8px; padding: 2px 9px; font-size: 12px;
+          color: #6b6459; border: 1px solid #c9bfa5; border-radius: 999px; }}
+  .think {{ margin: 0 0 8px; padding: 6px 10px; background: #faf7ee;
+            border: 1px dashed #c9bfa5; border-radius: 8px; }}
+  .think summary {{ cursor: pointer; font-size: 12px; color: #6b6459; }}
+  .think-body {{ margin-top: 6px; font-size: 13px; color: #57503f;
+                 white-space: pre-wrap; overflow-wrap: break-word; }}
 </style>
 </head>
 <body>
@@ -2472,7 +2575,7 @@ class ServerBackend:
         seq = int(params["seq"]) if params.get("seq") is not None else (
             await self.store.max_seq(sid) or 0)
         new_sess = await self.store.create_session(
-            self.project.id, title=(f"⑂ {sess.title or '分叉'}")[:40]
+            self.project.id, title=(f"└ {sess.title or '分叉'}")[:40]
         )
         n = await self.store.copy_messages_between(sid, new_sess.id, seq)
         await self.store.touch(new_sess.id)
@@ -2839,6 +2942,9 @@ class ServerBackend:
         # 任务耗时预估：接手任务时按启发式 + 本项目近期实测给出预计区间，
         # 先于本轮任何输出事件到达，前端显示「预计 X~Y 分钟」并对照已用时。
         # 重新生成轮（text 为空）不算接手新任务，不发。
+        # turn_estimate 随轮末消息一起落库：刷新/重进会话后「用时 X · 预估 Y」
+        # 芯片仍能重建（旧消息没有该字段时前端不渲染）。
+        turn_estimate: dict | None = None
         if text or images:
             est = estimate_task(
                 text,
@@ -2848,6 +2954,12 @@ class ServerBackend:
                 debate_rounds=(debate_rounds or 0) if roundtable else 0,
                 recent=await self._recent_turn_seconds(),
             )
+            turn_estimate = {
+                "min_seconds": est.min_seconds,
+                "max_seconds": est.max_seconds,
+                "level": est.level,
+                "basis": est.basis,
+            }
             await emit_ev(TaskEstimate(
                 min_seconds=est.min_seconds,
                 max_seconds=est.max_seconds,
@@ -2873,6 +2985,8 @@ class ServerBackend:
             text = PLAN_MODE_PREFIX + text
 
         n_before = len(agent.history)
+        # 本轮墙钟起点：圆桌路径没有 agent 主循环计时，这里兜底（见 _stamp_turn_estimate）
+        turn_t0 = time.monotonic()
         stopped = False
         rt_meta: dict | None = None
         tin0, tout0 = agent.total_in_tokens, agent.total_out_tokens
@@ -2917,6 +3031,7 @@ class ServerBackend:
         # shield 让落库在后台继续，CancelledError 被捕获后正常走完收尾返回 stopped 结果，
         # 避免 send() 抛异常导致 runtime.run_task 悬挂、后续消息误入死队列。
         new_msgs = agent.history[n_before:]
+        _stamp_turn_estimate(new_msgs, turn_estimate, turn_t0)
         try:
             await asyncio.shield(self._persist_turn(sid, new_msgs))
         except asyncio.CancelledError:
@@ -3128,6 +3243,13 @@ class ServerBackend:
         async def emit_ev(ev) -> None:
             await emit(ev.model_dump())
 
+        # 圆桌轮耗时起点：成员并行 + 辩论 + 主席融合的总墙钟，随 TurnFinished
+        # 下发，前端据此把「已用时」芯片定格成真实值（与落库后显示一致）。
+        rt_t0 = time.monotonic()
+
+        def _rt_ms() -> int:
+            return int((time.monotonic() - rt_t0) * 1000)
+
         await emit_ev(TurnStarted(iteration=1))
 
         # 圆桌是纯文本协作：图片不会发给成员/主席，但得让用户知道，不能静默丢弃
@@ -3171,7 +3293,7 @@ class ServerBackend:
                             f"本轮只用了面板顺序前 {cfg.max_members} 个。"
                 ))
         if not members:
-            await emit_ev(TurnFinished(stop_reason="error", iterations=1))
+            await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_rt_ms()))
             raise RuntimeError(
                 "圆桌没有可用成员：请先在成员面板选择，或给更多模型服务配置 API Key"
             )
@@ -3255,7 +3377,7 @@ class ServerBackend:
                 kept += 1
             meta["compared"] = kept
             await emit_ev(TurnFinished(
-                stop_reason="end_turn" if kept else "error", iterations=1
+                stop_reason="end_turn" if kept else "error", iterations=1, duration_ms=_rt_ms()
             ))
             return meta
 
@@ -3284,7 +3406,9 @@ class ServerBackend:
                         }
                         agent.history.append(m)
                         await emit_ev(AssistantMessage(message=m.model_dump()))
-            await emit_ev(TurnFinished(stop_reason="cancelled", iterations=1))
+            await emit_ev(TurnFinished(
+                stop_reason="cancelled", iterations=1, duration_ms=_rt_ms()
+            ))
             return meta
 
         if outcome.fused_text:
@@ -3292,7 +3416,9 @@ class ServerBackend:
             assistant.roundtable = meta
             agent.history.append(assistant)
             await emit_ev(AssistantMessage(message=assistant.model_dump()))
-            await emit_ev(TurnFinished(stop_reason="end_turn", iterations=1))
+            await emit_ev(TurnFinished(
+                stop_reason="end_turn", iterations=1, duration_ms=_rt_ms()
+            ))
             return meta
 
         # 融合失败：成员草稿已经花了钱，降级成对比式逐条保留，不至于空手而归
@@ -3316,11 +3442,15 @@ class ServerBackend:
                 }
                 agent.history.append(m)
                 await emit_ev(AssistantMessage(message=m.model_dump()))
-            await emit_ev(TurnFinished(stop_reason="end_turn", iterations=1))
+            await emit_ev(TurnFinished(
+                stop_reason="end_turn", iterations=1, duration_ms=_rt_ms()
+            ))
         else:
             meta["status"] = "error"
             meta["error"] = outcome.error
-            await emit_ev(TurnFinished(stop_reason="error", iterations=1))
+            await emit_ev(TurnFinished(
+                stop_reason="error", iterations=1, duration_ms=_rt_ms()
+            ))
         return meta
 
     # ---- 圆桌设置（设置 · 圆桌）：读回当前值 → 编辑 → 保存后热生效 ----
@@ -5628,7 +5758,14 @@ class ServerBackend:
                 if m.role == "user":
                     body.append(f'<div class="msg user">{_html_escape(m.text)}</div>')
                 elif m.role == "assistant":
-                    body.append(f'<div class="msg ai">{_html_escape(m.text)}</div>')
+                    # 用时芯片：有实测耗时的消息才加（旧消息没有）
+                    chip = _export_eta_html(m)
+                    # 思考过程：折叠块（<details> 无需 JS，与界面上的可折叠块对应）
+                    think = _export_thinking_html(m)
+                    body.append(
+                        f'<div class="msg ai">{chip}{think}'
+                        f'<div class="body">{_html_escape(m.text)}</div></div>'
+                    )
                 elif m.role == "tool":
                     for b in m.content:
                         content = getattr(b, "content", "")
@@ -5649,8 +5786,25 @@ class ServerBackend:
             if m.role == "system":
                 continue
             lines.append(f"## {m.role}")
+            # 用时：随正文标题行一起给出（旧消息没有实测耗时则省略）
+            if m.role == "assistant" and getattr(m, "duration_ms", 0):
+                est = getattr(m, "estimate", None) or {}
+                lo, hi = est.get("min_seconds", 0), est.get("max_seconds", 0)
+                eta = f"用时 {_fmt_export_dur(m.duration_ms / 1000)}"
+                if hi:
+                    eta += f" · 预估 {format_range(lo, hi)}"
+                lines.append("")
+                lines.append(f"> ⏱ {eta}")
+            # 思考过程：导出时保留完整推理文本（界面里是折叠块，导出用引用块区分）。
+            # 单独成段后，正文不再重复带 [thinking]（见 _export_body_text）。
+            think = m.thinking if m.role == "assistant" else ""
+            if think:
+                lines.append("")
+                lines.append("### 💭 思考过程")
+                lines.append("")
+                lines.extend(f"> {ln}" for ln in think.splitlines())
             lines.append("")
-            lines.append(m.to_plain())
+            lines.append(_export_body_text(m))
             lines.append("")
         return {
             "filename": f"skysheep-{safe_title}.md",
@@ -5797,6 +5951,23 @@ class ServerBackend:
         active = data.get("right_active")
         if isinstance(active, str) and active in self.RIGHT_TAB_IDS:
             prefs["right_active"] = active
+        order = data.get("project_order")
+        if isinstance(order, list) and all(
+            isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in order
+        ) and order:
+            prefs["project_order"] = order
+        sorder = data.get("session_order")
+        if isinstance(sorder, dict) and sorder:
+            cleaned_sorder: dict[str, list[str]] = {}
+            for gk, ids in sorder.items():
+                gks = str(gk)
+                if not gks or not isinstance(ids, list):
+                    continue
+                gseen = [x for x in ids if isinstance(x, str) and x]
+                if gseen:
+                    cleaned_sorder[gks] = gseen
+            if cleaned_sorder:
+                prefs["session_order"] = cleaned_sorder
         for key, allowed in self.STRING_PREFS.items():
             val = data.get(key)
             if isinstance(val, str) and val in allowed:
@@ -5832,6 +6003,24 @@ class ServerBackend:
         toast.set_audio(audio.Silent, loop=False)
         toast.show()
 
+    def ordered_projects(self, projects: list) -> list:
+        """按用户拖动保存的顺序排项目（ui.json 的 project_order，见 save_ui_prefs）。
+
+        只把名单里的项目按保存序提前，其余（新增项目、名单外的）仍按原序（
+        created_at DESC）排在后面；名单里已不存在的 id 自然忽略。这样旧偏好
+        不会把新项目藏到看不见的位置，拖动只固定用户明确排过序的那部分。
+        """
+        try:
+            order = self._read_ui_prefs().get("project_order")
+        except Exception:  # noqa: BLE001
+            order = None
+        if not isinstance(order, list) or not order:
+            return projects
+        rank = {pid: i for i, pid in enumerate(order)}
+        known = [p for p in projects if p.id in rank]
+        unknown = [p for p in projects if p.id not in rank]
+        return sorted(known, key=lambda p: rank[p.id]) + unknown
+
     async def get_ui_prefs(self) -> dict:
         return {"prefs": self._read_ui_prefs()}
 
@@ -5850,7 +6039,8 @@ class ServerBackend:
         """合并保存；某项传 null 表示恢复默认（删除该项）。未知键忽略、越界值收敛到合法区间。"""
         current = self._read_ui_prefs()
         for key, val in (prefs or {}).items():
-            if key not in self.UI_PREFS_LIMITS and key not in ("right_tabs", "right_active") \
+            known = ("right_tabs", "right_active", "project_order", "session_order")
+            if key not in self.UI_PREFS_LIMITS and key not in known \
                     and key not in self.STRING_PREFS:
                 continue
             if val is None:
@@ -5878,6 +6068,51 @@ class ServerBackend:
                     current["right_active"] = val
                 else:
                     current.pop("right_active", None)
+                continue
+            if key == "project_order":
+                # 分组视图拖动排序的项目 id 顺序（项目列表的展示序，随 ui.json 持久化）。
+                # 只收正整数；去重防同一 id 重复占位，封顶防异常超大载荷；
+                # 一个有效 id 都没有时删键（空数组与脏数据都视为「未自定义排序」）
+                if isinstance(val, list):
+                    seen: list[int] = []
+                    for x in val:
+                        if isinstance(x, int) and not isinstance(x, bool) and x > 0 and x not in seen:
+                            seen.append(x)
+                            if len(seen) >= 200:
+                                break
+                    if seen:
+                        current["project_order"] = seen
+                    else:
+                        current.pop("project_order", None)
+                else:
+                    current.pop("project_order", None)
+                continue
+            if key == "session_order":
+                # 分组视图组内会话的拖动序：{ 项目 key: [会话 id, ...] }。项目 key 用
+                # 字符串（数字项目 id 与 quick/loose 伪组同构）；id 是非空字符串，
+                # 每组去重封顶 200、整体封顶 100 组——一个组都没有时删键
+                if isinstance(val, dict):
+                    cleaned_order: dict[str, list[str]] = {}
+                    for gk, ids in val.items():
+                        gks = str(gk)
+                        if not gks or not isinstance(ids, list):
+                            continue
+                        gseen: list[str] = []
+                        for x in ids:
+                            if isinstance(x, str) and x and x not in gseen:
+                                gseen.append(x)
+                                if len(gseen) >= 200:
+                                    break
+                        if gseen:
+                            cleaned_order[gks] = gseen
+                        if len(cleaned_order) >= 100:
+                            break
+                    if cleaned_order:
+                        current["session_order"] = cleaned_order
+                    else:
+                        current.pop("session_order", None)
+                else:
+                    current.pop("session_order", None)
                 continue
             if isinstance(val, bool) or not isinstance(val, (int, float)):
                 continue
@@ -6626,15 +6861,28 @@ class ServerBackend:
                 return {"error": "这个会话已不在当前项目里，发送 /new 开一个新的"}
             rt = await self._get_channel_runtime(session_id, channel_name)
         collected: list[str] = []
+        think_text = ""
+        think_ms = 0
+        turn_ms = 0
 
         async def collect(ev: dict) -> None:
-            if ev.get("kind") == "assistant_message":
-                msg = ev.get("message")
-                text_out = getattr(msg, "text", None) or (
-                    msg.get("text", "") if isinstance(msg, dict) else ""
+            nonlocal think_text, think_ms, turn_ms
+            if ev.get("kind") != "assistant_message":
+                return
+            msg = ev.get("message")
+            if not isinstance(msg, dict):
+                return
+            text_out = msg.get("text", "")
+            if text_out:
+                collected.append(str(text_out))
+            # 思考与耗时只在最终回答上取（中间迭代是过程消息，没有耗时）
+            if msg.get("duration_ms"):
+                turn_ms = int(msg.get("duration_ms") or 0)
+                think_ms = int(msg.get("thinking_ms") or 0)
+                think_text = "".join(
+                    str(b.get("text", "")) for b in (msg.get("content") or [])
+                    if isinstance(b, dict) and b.get("type") == "thinking"
                 )
-                if text_out:
-                    collected.append(str(text_out))
 
         try:
             result = await self._run_turn_pipeline(
@@ -6652,8 +6900,19 @@ class ServerBackend:
             for m in reversed(rt.agent.history):
                 if m.role == "assistant" and m.text.strip():
                     reply = m.text.strip()
+                    if getattr(m, "duration_ms", 0):
+                        turn_ms = int(m.duration_ms)
+                        think_ms = int(m.thinking_ms)
+                        think_text = m.thinking
                     break
-        return {"text": reply, "session_id": session_id}
+        return {
+            "text": reply,
+            "session_id": session_id,
+            # 渠道端也透出思考与用时（遥控时看不到桌面界面，这是唯一的进度感）
+            "thinking_chars": len(think_text),
+            "thinking_ms": think_ms,
+            "duration_ms": turn_ms,
+        }
 
     async def channel_stop(self, session_id: str) -> None:
         self.cancel_run(session_id)
@@ -6886,6 +7145,7 @@ class ServerBackend:
             "version": __version__,
             "working_dir": str(self.working_dir),
             "project": self.project.name,
+            "project_id": self.project.id if self.project else None,
             "provider": self.provider_name,
             "model": getattr(self.provider, "model", ""),
             "provider_error": self.provider_error,

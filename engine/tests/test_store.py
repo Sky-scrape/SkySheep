@@ -79,11 +79,14 @@ async def test_quick_chat_session_without_project(store):
     assert got.project_id is None
 
 
-async def test_rolling_backup_on_connect(tmp_path):
-    """每次打开数据库前滚动备份，误删后可从 backups/ 恢复。"""
+async def test_rolling_backup_on_connect(tmp_path, monkeypatch):
+    """连接时滚动备份（窗口外/首次），误删后可从 backups/ 恢复；
+    频率窗口内不重复拷（桌面应用一天多次启动不再每次全量压一份）。"""
     import sqlite3
     import time
 
+    # 关掉「每日一份」的频率窗口，验证备份本身的内容与时机
+    monkeypatch.setattr(SessionStore, "BACKUP_MIN_INTERVAL_S", 0)
     db = tmp_path / "app.db"
     s1 = await SessionStore(db).connect()
     project = await s1.get_or_create_project("/tmp/backup-proj")
@@ -102,6 +105,15 @@ async def test_rolling_backup_on_connect(tmp_path):
     finally:
         con.close()
     await s2.close()
+
+    # 恢复默认频率窗口（第一阶段为验证备份本身设成了 0）：
+    # 最新备份很新鲜 → 窗口内的重复启动不再产生新备份
+    monkeypatch.setattr(SessionStore, "BACKUP_MIN_INTERVAL_S", 20 * 3600)
+    s3 = await SessionStore(db).connect()
+    try:
+        assert s3.backup_created is None, "频率窗口内的重复启动不应再拷一份"
+    finally:
+        await s3.close()
 
 
 async def test_empty_session_helpers(store):

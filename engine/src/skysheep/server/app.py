@@ -554,6 +554,9 @@ def create_app(
             return await backend.activate_session(str(params.get("id", "")))
         if method == "session.resume":
             return await backend.resume_session(str(params.get("id", "")))
+        if method == "session.image":
+            # 历史图片按需拉取（boot/历史只下占位，见 _msg_brief）
+            return await backend.session_image(params)
         if method == "session.delete":
             return await backend.delete_session(str(params.get("id", "")))
         if method == "session.export":

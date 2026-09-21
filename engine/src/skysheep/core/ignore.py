@@ -51,13 +51,33 @@ class _Rule:
 
 
 class IgnoreRules:
-    """编译后的忽略规则集；`matches` 语义 = 后匹配的规则覆盖先前的（gitignore 同款）。"""
+    """编译后的忽略规则集；`matches` 语义 = 后匹配的规则覆盖先前的（gitignore 同款）。
+
+    load() 带模块级 mtime 缓存：glob/grep/@ 索引/文件树每次调用都会 load 一遍，
+    规则文件在会话内几乎不变，按（目录, 各 ignore 文件 mtime）缓存编译结果，
+    文件变了自动失效。
+    """
+
+    # (目录, (文件 mtime 元组)) -> 编译好的规则集；None = 文件不存在时的稳定键
+    _cache: dict[tuple[str, tuple], IgnoreRules] = {}
+    _CACHE_MAX = 64
 
     def __init__(self, rules: list[_Rule]) -> None:
         self._rules = rules
 
     @classmethod
     def load(cls, working_dir: Path) -> IgnoreRules:
+        root = str(Path(working_dir))
+        stamps: list = []
+        for name in (IGNORE_FILE, ".gitignore"):
+            try:
+                stamps.append((Path(root) / name).stat().st_mtime_ns)
+            except OSError:
+                stamps.append(None)
+        key = (root, tuple(stamps))
+        hit = cls._cache.get(key)
+        if hit is not None:
+            return hit
         lines: list[str] = []
         for name in (IGNORE_FILE, ".gitignore"):
             p = Path(working_dir) / name
@@ -68,7 +88,11 @@ class IgnoreRules:
                 continue
         lines.extend(BUILTIN_PATTERNS)
         rules = [_Rule(ln) for ln in lines if ln.strip() and not ln.strip().startswith("#")]
-        return cls(rules)
+        compiled = cls(rules)
+        if len(cls._cache) >= cls._CACHE_MAX:
+            cls._cache.clear()  # 简单防膨胀：跨大量项目目录时整表重来
+        cls._cache[key] = compiled
+        return compiled
 
     def matches(self, rel: str, is_dir: bool = False) -> bool:
         """rel 是否被忽略（posix 相对路径；目录可传 is_dir=True 或以 / 结尾）。"""

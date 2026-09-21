@@ -117,14 +117,32 @@ class Agent:
         # 估算再准也有偏差（各家中转的 tokenizer 不同），用它给估算值兜一个下限，
         # 保证界面显示的占用与自动压缩的判断都不会比真实情况乐观。
         self.last_prompt_tokens = 0
+        # 全量 token 估算的指纹缓存（见 used_context_tokens）
+        self._ctx_cache_fp: tuple | None = None
+        self._ctx_cache = 0
 
     # ---- 状态管理 ----
 
     def used_context_tokens(self) -> int:
-        """当前上下文占用（估算与真实上报取大者，见 last_prompt_tokens）。"""
-        return max(estimate_tokens(self.history), self.last_prompt_tokens)
+        """当前上下文占用（估算与真实上报取大者，见 last_prompt_tokens）。
+
+        估算带指纹缓存：历史是「只追加 / 整体替换」的结构，(列表 id, 长度,
+        末条 id) 不变就复用上次的全量估算——此前每次调用都把整段历史 join
+        成大字符串再逐字符正则，长会话每轮的压缩复查与界面明细要白算好几遍。
+        set_system 原地替换 system 消息不改这三样，单独置脏。
+        """
+        fp = (
+            id(self.history),
+            len(self.history),
+            id(self.history[-1]) if self.history else 0,
+        )
+        if self._ctx_cache_fp != fp:
+            self._ctx_cache = estimate_tokens(self.history)
+            self._ctx_cache_fp = fp
+        return max(self._ctx_cache, self.last_prompt_tokens)
 
     def set_system(self, text: str) -> None:
+        self._ctx_cache_fp = None
         if self.history and self.history[0].role == "system":
             self.history[0] = Message.system(text)
         else:

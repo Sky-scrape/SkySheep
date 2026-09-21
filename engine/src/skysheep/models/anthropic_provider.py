@@ -125,7 +125,10 @@ class AnthropicProvider(Provider):
         self.name = name
         self.model = model
         self._max_tokens = max_tokens
-        kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 2}
+        # SDK 内置重试降为 1：agent/圆桌层有自己的重试编排（带退避与「已吐内容
+        # 不重放」判断，还会发通知事件），SDK 再各自叠 2 次会把持续性限流的
+        # 最坏等待翻倍，界面长时间卡在「第 1/3 次重试」上
+        kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 1}
         if proxy:
             # anthropic SDK 同样接受 http_client；不同 SDK 版本绑定 httpx 或 httpx2
             try:

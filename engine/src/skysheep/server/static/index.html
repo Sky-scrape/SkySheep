@@ -1167,11 +1167,10 @@
     </div>
   </div>
 </div>
-<script src="/static/vendor/mermaid.min.js"></script>
 <script src="/static/vendor/highlight.min.js"></script>
 <script src="/static/vendor/qrcode.min.js"></script>
-<script src="/static/vendor/xterm.js"></script>
-<script src="/static/vendor/xterm-fit.js"></script>
+<!-- mermaid（3.3MB）与 xterm 双文件按需加载：首次渲染图表 / 首次开终端时
+     才由 app.js 的 loadLib 注入 script，冷启动不再白等这几 MB 的解析 -->
 <script src="/static/app.js"></script>
 </body>
 </html>

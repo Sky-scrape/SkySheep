@@ -766,6 +766,17 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   margin-top: 6px; border: 1.5px solid var(--ink-line);
   border-radius: var(--r-sm); cursor: zoom-in;
 }
+/* 历史图片的按需加载占位（session.image 拉回真身前后的形态） */
+.msg.user .user-image.img-pending {
+  width: 160px; height: 100px;
+  background: var(--card-alt, rgba(127, 127, 127, 0.12));
+  cursor: default;
+}
+.msg.user .user-image.img-missing {
+  width: 160px; height: 44px; object-fit: contain;
+  background: var(--card-alt, rgba(127, 127, 127, 0.12));
+  cursor: default;
+}
 .msg.user.image-only { padding: 8px; }
 
 /* 消息级操作：常驻在消息下方，纯简笔图标（助手：复制/分叉/回退/重新生成；用户：复制/编辑）

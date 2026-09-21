@@ -121,6 +121,10 @@ class ChangeRecorder:
 class ToolRegistry:
     def __init__(self, tools: list[Tool] | None = None) -> None:
         self._tools: dict[str, Tool] = {}
+        # schema 缓存：注册表运行期静态不变，但 schemas() 每次模型调用都会被
+        # 拉一遍——pydantic 的 model_json_schema() 不缓存，几十个工具每次重新
+        # 生成一遍是纯浪费。注册时置 None，下次取时重建。
+        self._schema_cache: list[dict[str, Any]] | None = None
         for t in tools or []:
             self.register(t)
 
@@ -128,6 +132,7 @@ class ToolRegistry:
         if tool.name in self._tools:
             raise ValueError("duplicate tool name: " + tool.name)
         self._tools[tool.name] = tool
+        self._schema_cache = None
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -136,7 +141,9 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def schemas(self) -> list[dict[str, Any]]:
-        return [t.to_schema() for t in self._tools.values()]
+        if self._schema_cache is None:
+            self._schema_cache = [t.to_schema() for t in self._tools.values()]
+        return list(self._schema_cache)
 
     def __len__(self) -> int:
         return len(self._tools)

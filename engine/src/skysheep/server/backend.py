@@ -16,6 +16,7 @@ import os
 import secrets
 import socket
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -293,15 +294,26 @@ def _strip_image_blocks(history: list[Message]) -> list[Message]:
 
 
 def _msg_brief(m: Message) -> dict:
-    """历史消息的轻量 JSON（前端渲染历史用）：role + 文本 + 图片；工具轮略。"""
+    """历史消息的轻量 JSON（前端渲染历史用）：role + 文本 + 图片占位；工具轮略。
+
+    图片只带占位（media_type/seq/index），不带 base64 本体——boot/切会话此前
+    把整个会话的历史原图整包下发，截图多的会话一次几十 MB；前端进入视口时
+    用 session.image 按需拉取（见 backend.session_image）。
+    """
+    ordinal = 0
+    images: list[dict] = []
+    for b in m.content:
+        if getattr(b, "type", "") == "image":
+            images.append(
+                {"media_type": b.media_type, "seq": m.seq,
+                 "index": ordinal, "placeholder": True}
+            )
+            ordinal += 1
     return {
         "role": m.role,
         "text": m.text,
         "seq": m.seq,
-        "images": [
-            {"media_type": b.media_type, "data": b.data}
-            for b in m.content if getattr(b, "type", "") == "image"
-        ],
+        "images": images,
         "roundtable": m.roundtable,
         # 思考型模型的推理内容（前端渲染为可折叠块）；其他角色为空串
         "thinking": "".join(b.text for b in m.content if getattr(b, "type", "") == "thinking"),
@@ -501,9 +513,34 @@ class TerminalManager:
         slot.pump_proc = slot.proc
         slot.pump_task = asyncio.create_task(self._pump(key, slot, backend))
 
+    # 终端输出广播的合并窗口与单窗上限：逐 4KB 分片对每个连接 create_task +
+    # JSON 序列化，npm install / 构建这类高频输出每秒几百片会把 CPU 与 WS
+    # 帧数打爆，还在发送锁后面挤占对话流式事件；40ms 攒一条肉眼无感
+    TERM_MERGE_S = 0.04
+    TERM_MERGE_MAX = 262_144
+
     async def _pump(self, key: str, slot: TerminalSlot, backend: Any) -> None:
         """持续读 PTY 输出并广播；阻塞 recv 放线程池，不堵事件循环。"""
         proc = slot.pump_proc
+        buf: dict = {"chunks": [], "size": 0, "timer": None}
+
+        async def broadcast(chunks: list[str]) -> None:
+            ev = {"kind": "term_data", "term_id": key, "text": "".join(chunks)}
+            for ws_emit in list(backend.ws_emitters):
+                try:
+                    asyncio.create_task(ws_emit(ev))
+                except RuntimeError:
+                    return  # 无事件循环（纯测试环境）：丢弃输出
+
+        async def flush_later() -> None:
+            await asyncio.sleep(self.TERM_MERGE_S)
+            buf["timer"] = None
+            chunks = buf["chunks"]
+            if chunks:
+                buf["chunks"] = []
+                buf["size"] = 0
+                await broadcast(chunks)
+
         while proc is not None and proc.isalive():
             try:
                 data = await asyncio.to_thread(proc.read, 4096)
@@ -511,12 +548,23 @@ class TerminalManager:
                 break
             if not data:
                 continue
-            ev = {"kind": "term_data", "term_id": key, "text": data}
-            for ws_emit in list(backend.ws_emitters):
-                try:
-                    asyncio.create_task(ws_emit(ev))
-                except RuntimeError:
-                    break  # 无事件循环（纯测试环境）：丢弃输出
+            buf["chunks"].append(data)
+            buf["size"] += len(data)
+            # 窗口未到先攒着；攒太猛（>256KB）就立刻发，不再等窗口
+            if buf["timer"] is None:
+                if buf["size"] >= self.TERM_MERGE_MAX:
+                    chunks = buf["chunks"]
+                    buf["chunks"] = []
+                    buf["size"] = 0
+                    await broadcast(chunks)
+                else:
+                    buf["timer"] = asyncio.create_task(flush_later())
+        if buf["timer"] is not None:
+            buf["timer"].cancel()
+            buf["timer"] = None
+        if buf["chunks"]:
+            await broadcast(buf["chunks"])
+            buf["chunks"] = []
         # 释放旧 PtyProcess 的最后一份引用：ConPTY 句柄随 GC 关闭，对应的
         # conhost 宿主进程才能退出（否则每次关标签/切项目泄漏一个 conhost）。
         # 只在泵读的仍是自己那个进程时清（期间 shell 可能已自动重启换新）。
@@ -591,7 +639,8 @@ class ServerBackend:
         self._base_recorder: ChangeRecorder | None = None
         # workspace trust 懒建：拿到 working_dir 后才能算指纹
         self._trust: WorkspaceTrust | None = None
-        self.runtimes: dict[str, SessionRuntime] = {}
+        # 会话运行时池（OrderedDict：访问即移到末尾，最旧的在前面淘汰）
+        self.runtimes: OrderedDict[str, SessionRuntime] = OrderedDict()
         self.gate: PermissionGate | None = None
         self.mcp: MCPManager | None = None
         self.mcp_configs: dict = {}
@@ -631,10 +680,22 @@ class ServerBackend:
     # ---- 多会话运行时：agent/queue/_run_task/_recorder 指向活动会话的 runtime，
     # ---- 后台会话通过 runtimes[sid] 直接访问（并行 turn 不经 property）。
 
+    # runtime 池上限：点开过的每个会话（含定时任务/流水线产物、渠道会话）都
+    # 常驻一整套 Agent+注册表（含 MCP 工具实例）+全量历史，桌面应用一开数天
+    # 会单调上涨——「用一天后变卡」的主因。超出上限从最旧开始回收空闲的；
+    # 历史都在 SQLite，下次 activate/send 会带着历史重建。
+    MAX_RUNTIMES = 12
+
     def _get_runtime(self, session_id: str) -> SessionRuntime:
-        """取（或懒建）一个会话的运行时；新 runtime 自带系统提示词与完整工具集。"""
+        """取（或懒建）一个会话的运行时；新 runtime 自带系统提示词与完整工具集。
+
+        LRU 淘汰：访问即移到末尾；超限后从最旧开始找「空闲」的回收
+        （见 _evictable_runtime）——只回收空闲的，宁可超限也不丢运行状态。
+        """
         rt = self.runtimes.get(session_id)
-        if rt is None:
+        if rt is not None:
+            self.runtimes.move_to_end(session_id)
+        else:
             recorder = ChangeRecorder()
             rt = SessionRuntime(
                 sid=session_id,
@@ -653,7 +714,31 @@ class ServerBackend:
             )
             rt.agent.set_system(self.compose_system())
             self.runtimes[session_id] = rt
+        while len(self.runtimes) > self.MAX_RUNTIMES:
+            victim = self._evictable_runtime()
+            if victim is None:
+                break
+            self.runtimes.pop(victim.sid)
+            self._forget_runtime(victim)
         return rt
+
+    def _evictable_runtime(self) -> SessionRuntime | None:
+        """最旧的空闲 runtime：非当前会话、没在跑的轮、没排队消息、
+        没有待确认的权限、没有未落检查点的改动记录。"""
+        cur_sid = self.session.id if self.session else ""
+        for rt in self.runtimes.values():
+            if rt.sid == cur_sid:
+                continue
+            if rt.run_task is not None and not rt.run_task.done():
+                continue
+            if rt.queue:
+                continue
+            if getattr(rt.agent, "_pending", None):
+                continue
+            if rt.recorder.pre:
+                continue
+            return rt
+        return None
 
     # ---- 当前服务的模型能力（上下文窗口 / 图片输入） ----
 
@@ -2419,6 +2504,25 @@ class ServerBackend:
             "id": sess.id, "title": sess.title, "summary": sess.summary,
             "messages": [_msg_brief(m) for m in msgs if m.role in ("user", "assistant")],
         }
+
+    async def session_image(self, params: dict) -> dict:
+        """按 (会话, seq, 图片序号) 取一张历史图片的 base64。
+
+        历史消息里的图片只下发占位（见 _msg_brief），前端滚到可见时才来取——
+        刷新/切会话不再为整段历史里的原图付几十 MB 的传输与内存。
+        """
+        sid = str(params.get("session_id", "") or "")
+        seq = int(params.get("seq", 0) or 0)
+        index = int(params.get("index", 0) or 0)
+        await self._get_owned_session(sid)  # 归属校验：跨项目会话按不存在拒绝
+        m = await self.store.get_message_at(sid, seq)
+        if m is None:
+            raise RuntimeError("消息不存在")
+        imgs = [b for b in m.content if getattr(b, "type", "") == "image"]
+        if index < 0 or index >= len(imgs):
+            raise RuntimeError("图片不存在")
+        b = imgs[index]
+        return {"media_type": b.media_type, "data": b.data}
 
     # ---- 对话主流程 ----
 

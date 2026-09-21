@@ -101,6 +101,14 @@ class CheckpointStore:
                 files[path_s] = None  # blob 丢了按「新建文件」处理，回滚时删除
         cp["files"] = files
 
+    def _release(self, cp: dict) -> None:
+        """用后释放：磁盘模式下内容已落 blob，内存里的副本可以丢弃，
+        下次 get/restore 再懒加载。纯内存模式（无 root）不能丢——那是唯一副本。
+        不释放的话，点一次「对比/撤销」就让改前字节（含图片等大二进制）常驻
+        到该检查点被 50 条上限挤出为止。"""
+        if self._root is not None:
+            cp["files"] = None
+
     def _persist(self, cp: dict) -> None:
         """把检查点写进磁盘目录；失败静默（内存里的仍在，回滚能力不打折）。"""
         cp_dir = self._cp_dir(cp)
@@ -157,6 +165,7 @@ class CheckpointStore:
         self._items[cp["id"]] = cp
         if self._root is not None:
             self._persist(cp)
+            self._release(cp)  # 内容已落 blob：内存只留索引，回滚时再懒加载
         self._prune()
         return {"id": cp["id"], "paths": cp["paths"], "ts": cp["ts"]}
 
@@ -168,18 +177,23 @@ class CheckpointStore:
         ]
 
     def get(self, checkpoint_id: str) -> dict | None:
-        """按 id 取检查点（含改前内容，供 diff / 审查用）；不存在返回 None。"""
+        """按 id 取检查点（含改前内容，供 diff / 审查用）；不存在返回 None。
+
+        内容随返回结构走：store 本体用后即释放，改前字节不再常驻内存。
+        """
         cp = self._items.get(checkpoint_id)
         if cp is None:
             return None
         self._hydrate(cp)
-        return {
+        out = {
             "id": cp["id"],
             "session_id": cp["session_id"],
             "files": cp["files"],
             "paths": cp["paths"],
             "ts": cp["ts"],
         }
+        self._release(cp)
+        return out
 
     def restore(self, checkpoint_id: str) -> list[str]:
         """把快照写回磁盘：有改前内容的恢复内容，新建文件直接删除。
@@ -205,4 +219,5 @@ class CheckpointStore:
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(data)
             restored.append(path_s)
+        self._release(cp)
         return restored

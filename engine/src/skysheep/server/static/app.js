@@ -604,6 +604,38 @@ function addNotice(text) {
   scrollLog();
 }
 
+// 历史图片按需加载：boot/切会话只收占位（_msg_brief 不再带 base64），
+// 图片滚到视口附近（提前 300px）才向後端取真身，取回前显示灰底占位
+const _lazyImgs = new IntersectionObserver((ents) => {
+  for (const en of ents) {
+    if (!en.isIntersecting) continue;
+    const el = en.target;
+    _lazyImgs.unobserve(el);
+    loadMsgImage(el);
+  }
+}, { rootMargin: "300px" });
+
+function lazyImgObserve(img) {
+  if (img instanceof Element) _lazyImgs.observe(img);
+}
+
+async function loadMsgImage(img) {
+  try {
+    const r = await request("session.image", {
+      session_id: img.dataset.imgSid || "",
+      seq: Number(img.dataset.imgSeq || 0),
+      index: Number(img.dataset.imgIndex || 0),
+    });
+    img.src = `data:${r.media_type};base64,${r.data}`;
+    img.classList.remove("img-pending");
+  } catch (e) {
+    img.classList.remove("img-pending");
+    img.classList.add("img-missing");
+    img.alt = "图片加载失败";
+    img.title = String((e && e.message) || e);
+  }
+}
+
 function addUser(text, images, refs) {
   const d = document.createElement("div");
   d.className = "msg user";
@@ -634,9 +666,20 @@ function addUser(text, images, refs) {
   (images || []).forEach((im) => {
     const img = document.createElement("img");
     img.className = "user-image";
-    img.src = `data:${im.media_type};base64,${im.data}`;
     img.alt = "图片附件";
-    img.onclick = () => window.open(img.src, "_blank");
+    if (im.data) {
+      img.src = `data:${im.media_type};base64,${im.data}`;
+    } else {
+      // 历史图片是占位（boot/切会话不再整包 base64，见 session.image）：
+      // 进入视口前后再按需拉取真身
+      const t = curTab();
+      img.dataset.imgSid = String(im.session_id || (t ? t.sid : "") || "");
+      img.dataset.imgSeq = String(im.seq || "");
+      img.dataset.imgIndex = String(im.index || 0);
+      img.classList.add("img-pending");
+      lazyImgObserve(img);
+    }
+    img.onclick = () => { if (img.src) window.open(img.src, "_blank"); };
     bubble.appendChild(img);
   });
   if (refs && refs.length) {
@@ -7962,7 +8005,7 @@ function renderMcpPresets(snap) {
   head.textContent = "常用预设 · 点「＋ 添加」一键接入";
   box.appendChild(head);
   presets.forEach((p) => {
-    const need = p.need === "uv" ? "需 uv（随 SkySheep 自带）" : "需 Node.js";
+    const need = { uv: "需 uv（随 SkySheep 自带）", node: "需 Node.js", local: "需先安装本机程序" }[p.need] || "需 Node.js";
     const has = installed.has(p.name);
     const card = document.createElement("div");
     card.className = "mcp-preset-card" + (has ? " added" : "");
@@ -8631,9 +8674,12 @@ function xtermTheme() {
   return Object.assign(base, ansi);
 }
 
-function ensureTermScreen(t) {
+async function ensureTermScreen(t) {
   if (t.term) return t.term;
-  if (!window.Terminal || !window.FitAddon) {
+  // xterm 按需加载（首次开终端才拉双文件库），失败按提示兜底
+  try {
+    await ensureXterm();
+  } catch (e) {
     addNotice("xterm 组件没有加载成功，终端不可用（vendor/xterm.js 缺失？）");
     return null;
   }
@@ -9594,6 +9640,37 @@ themeMql.addEventListener("change", () => {
   if (themePref === "auto") applyThemeMode("auto", false);
 });
 
+// ---------- 第三方大库按需加载 ----------
+// mermaid 单文件 3.3MB、xterm 双文件约 400KB，此前页面一打开就同步解析，
+// 冷启动白屏几百毫秒到秒级，而绝大多数会话一张图不画、底部终端默认关着。
+// 首次用到时才注入 <script>；加载失败由调用方按纯文本兜底。
+const _libLoads = {};
+function loadLib(name, srcs) {
+  if (!(_libLoads[name] instanceof Promise)) {
+    _libLoads[name] = new Promise((resolve, reject) => {
+      let i = 0;
+      const next = () => {
+        if (i >= srcs.length) { reject(new Error("库加载失败: " + name)); return; }
+        const s = document.createElement("script");
+        s.src = srcs[i++];
+        s.onload = () => (i < srcs.length ? next() : resolve());
+        s.onerror = () => reject(new Error("库加载失败: " + s.src));
+        document.head.appendChild(s);
+      };
+      next();
+    });
+  }
+  return _libLoads[name];
+}
+function ensureMermaid() {
+  if (window.mermaid) return Promise.resolve();
+  return loadLib("mermaid", ["/static/vendor/mermaid.min.js"]);
+}
+function ensureXterm() {
+  if (window.Terminal && window.FitAddon) return Promise.resolve();
+  return loadLib("xterm", ["/static/vendor/xterm.js", "/static/vendor/xterm-fit.js"]);
+}
+
 // ---------- Mermaid：```\mermaid 代码块 → SVG（vendor 本地库，零构建） ----------
 let mermaidThemeCurrent = "default";
 
@@ -9608,13 +9685,18 @@ function mermaidSetTheme(resolved) {
   }
 }
 async function renderMermaidIn(container) {
-  if (!window.mermaid || !container) return;
+  if (!container) return;
   const nodes = container.querySelectorAll(".mermaid:not([data-processed])");
   if (!nodes.length) return;
   try {
+    await ensureMermaid();
+    // 懒加载后第一次使用：按当前主题初始化（mermaidSetTheme 在库缺席时只记录）
+    window.mermaid.initialize({
+      startOnLoad: false, securityLevel: "strict", theme: mermaidThemeCurrent,
+    });
     await window.mermaid.run({ nodes });
   } catch (e) {
-    // 语法有误的图：退回普通代码块展示原文，不吞掉用户内容
+    // 加载失败 / 语法有误的图：退回普通代码块展示原文，不吞掉用户内容
     nodes.forEach((n) => {
       n.setAttribute("data-processed", "true");
       const err = n.querySelector(".error-text");

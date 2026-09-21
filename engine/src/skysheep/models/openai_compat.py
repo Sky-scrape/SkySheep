@@ -94,7 +94,9 @@ class OpenAICompatProvider(Provider):
         self.name = name
         self.model = model
         # 代理：服务级设置（如 http://127.0.0.1:7890）；格式错误由 httpx 报可读错误
-        kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 2}
+        # SDK 内置重试降为 1（与 anthropic_provider 同因）：上层有自己的重试编排，
+        # SDK 再各自叠 2 次会把持续性限流的最坏等待翻倍
+        kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 1}
         if proxy:
             kw["http_client"] = httpx.AsyncClient(proxy=proxy, timeout=300.0, trust_env=False)
         self._client = client or AsyncOpenAI(**kw)

@@ -1,14 +1,14 @@
 """命令执行工具：run_command。
 
 实现说明：
-- 前台用 subprocess.run + 线程池（asyncio.to_thread）而不是 asyncio 子进程，
+- 前台用 Popen + 读线程 + 线程池（asyncio.to_thread）而不是 asyncio 子进程，
   因为 Windows 上 prompt_toolkit 需要 Selector 事件循环，而 asyncio 的
   子进程 API 只支持 Proactor 循环；
 - argv 列表 + 字面量 shell 可执行文件（Windows: cmd /c，POSIX: bash -c），
   shell=False；命令本身属于产品核心能力，由 Permission Gate 在调用前
   进行人工确认/白名单控制；
-- 输出截断，防止超长输出撑爆上下文；
-- 超时返回超时前已产生的输出（模型能据此诊断，不再盲猜）；
+- 输出限量收集（头+尾），防止刷屏命令撑爆内存；最终再按上下文截断；
+- 超时树杀并返回超时前已产生的输出（模型能据此诊断，不再盲猜）；
 - background=true 立即返回进程号，输出由后台读线程持续收入缓冲，
   之后用 action=read 增量读取、action=kill 结束（树杀）、action=list 列出。
 """
@@ -29,6 +29,12 @@ DEFAULT_TIMEOUT_S = 120
 MAX_TIMEOUT_S = 600
 IS_WINDOWS = sys.platform == "win32"
 BG_MAX_CHARS = 8_000  # 后台进程输出缓冲上限（字符），保留最近内容
+# 前台输出收集上限：头 FG_MAX_BYTES + 尾 FG_TAIL_BYTES（超限继续读、只滚动尾窗，
+# 不读管道子进程会被塞满的管道卡死）。此前 capture_output=True 无上限，
+# 一条刷屏命令在超时窗口内能吃掉数百 MB 内存。
+FG_MAX_BYTES = 4_000_000
+FG_TAIL_BYTES = 64_000
+_FG_CLIP_MARK = b"\n...\n"
 
 # 后台进程注册表（进程级共享）：id -> 状态；跨轮读取
 _BG: dict[int, dict] = {}
@@ -51,20 +57,76 @@ def _decode(raw: bytes | str) -> str:
         return raw.decode(sys.getfilesystemencoding(), errors="replace")
 
 
-def _run_sync(argv: list[str], cwd: str, timeout_s: int):
+def _collect(pipe, acc: dict) -> None:
+    """前台读线程：头 FG_MAX_BYTES 全收，超限后只滚动保留最近 FG_TAIL_BYTES。"""
     try:
-        return subprocess.run(
-            argv,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired as e:
-        # 超时也带回已产生的输出，模型才能据此诊断（否则只能盲猜）
-        return ("timeout", _decode(e.stdout or ""), _decode(e.stderr or ""))
+        for raw in iter(pipe.readline, b""):
+            if len(acc["head"]) < FG_MAX_BYTES:
+                acc["head"] += raw
+            else:
+                acc["capped"] = True
+                acc["tail"] = (acc["tail"] + raw)[-FG_TAIL_BYTES:]
+    except Exception:  # noqa: BLE001 - 进程被杀时管道关闭，静默收尾
+        pass
+    finally:
+        try:
+            pipe.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _acc_text(acc: dict) -> str:
+    data = acc["head"]
+    if acc["capped"]:
+        data = data[:FG_MAX_BYTES] + _FG_CLIP_MARK + acc["tail"]
+    return _decode(data)
+
+
+def _fg_kill(proc: subprocess.Popen) -> None:
+    """前台超时收尾：Windows 树杀（cmd /c 的子进程一并结束），POSIX 直接杀。"""
+    try:
+        if IS_WINDOWS:
+            subprocess.run(  # noqa: S603 - exe 固定为 taskkill
+                ["taskkill.exe", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True, timeout=5,
+            )
+        else:
+            proc.kill()
+    except Exception:  # noqa: BLE001
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _run_sync(argv: list[str], cwd: str, timeout_s: int):
+    """前台执行：输出限量收集，超时树杀。返回 (status, stdout, stderr, returncode)。
+
+    status: ok | timeout。超时也带回已产生的输出（模型才能据此诊断，不盲猜）。
+    """
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out_acc: dict = {"head": b"", "tail": b"", "capped": False}
+    err_acc: dict = {"head": b"", "tail": b"", "capped": False}
+    readers = [
+        threading.Thread(target=_collect, args=(proc.stdout, out_acc), daemon=True),
+        threading.Thread(target=_collect, args=(proc.stderr, err_acc), daemon=True),
+    ]
+    for t in readers:
+        t.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _fg_kill(proc)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    for t in readers:
+        t.join(timeout=5)
+    return ("timeout" if timed_out else "ok",
+            _acc_text(out_acc), _acc_text(err_acc), proc.returncode)
 
 
 def _pump(pipe, buf: dict) -> None:
@@ -232,23 +294,23 @@ class RunCommandTool(Tool):
                 f"action=\"kill\" 结束。"
             )
 
-        proc = await asyncio.to_thread(
+        status, out, err, code = await asyncio.to_thread(
             _run_sync, argv, str(ctx.working_dir), args.timeout_s
         )
-        if isinstance(proc, tuple):  # ("timeout", stdout, stderr)
-            parts = [f"command timed out after {args.timeout_s}s（进程已结束，以下是超时前的输出）"]
-            if proc[1].strip():
-                parts.append("--- stdout ---\n" + proc[1].rstrip())
-            if proc[2].strip():
-                parts.append("--- stderr ---\n" + proc[2].rstrip())
-            if not proc[1].strip() and not proc[2].strip():
+        if status == "timeout":
+            parts = [f"command timed out after {args.timeout_s}s（进程树已终止，以下是超时前的输出）"]
+            if out.strip():
+                parts.append("--- stdout ---\n" + out.rstrip())
+            if err.strip():
+                parts.append("--- stderr ---\n" + err.rstrip())
+            if not out.strip() and not err.strip():
                 parts.append("(没有任何输出——命令可能在等待交互输入，"
                              "考虑用 background=true 后台运行再读输出)")
             raise ToolError("\n".join(parts))
 
-        parts = [f"exit code: {proc.returncode}"]
-        if proc.stdout and proc.stdout.strip():
-            parts.append("--- stdout ---\n" + proc.stdout.rstrip())
-        if proc.stderr and proc.stderr.strip():
-            parts.append("--- stderr ---\n" + proc.stderr.rstrip())
+        parts = [f"exit code: {code}"]
+        if out.strip():
+            parts.append("--- stdout ---\n" + out.rstrip())
+        if err.strip():
+            parts.append("--- stderr ---\n" + err.rstrip())
         return truncate_output("\n".join(parts))

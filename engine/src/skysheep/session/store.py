@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
@@ -228,6 +230,10 @@ class SessionStore:
     BACKUP_KEEP = 20
     # 恢复前自动留的安全副本后缀（列表里单独标记，方便用户认出「这是恢复动作留下的」）
     SAFETY_TAG = "-恢复前"
+    # 启动备份的频率上限：最新一份备份还在这个窗口内就不再重复拷。
+    # 桌面应用一天可能启动多次，此前每次启动都全量拷一份——库大了以后启动
+    # 变慢（同步 copy2 卡事件循环）、磁盘上还压着 20 份全量。
+    BACKUP_MIN_INTERVAL_S = 20 * 3600
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -237,30 +243,61 @@ class SessionStore:
         # False 时 search_messages 退到 LIKE 扫描，功能不降级只是变慢。
         self.fts_ready = False
 
-    def _rolling_backup(self) -> str | None:
-        """打开数据库前先滚动备份（保留最近 BACKUP_KEEP 份），防止误删无法恢复。"""
-        import shutil
+    async def _rolling_backup(self, existed: bool = True) -> str | None:
+        """连接建立后做滚动备份（保留最近 BACKUP_KEEP 份），防止误删无法恢复。
 
-        if not self.path.exists():
+        拷贝与目录清理放线程（同步 copy2 会卡事件循环）；拷之前先
+        wal_checkpoint(TRUNCATE) 把 WAL 收进主文件，保证拷到完整的最新数据
+        （WAL 模式下已提交的数据可能还在 -wal 里，直接拷 .db 会丢尾巴）。
+        频率限制见 BACKUP_MIN_INTERVAL_S：备份时刻按文件名时间戳解析
+        （与 list_backups 同口径），窗口内已有备份就只做保留数清理。
+        """
+        if not existed or not self.path.exists():
             return None
         backup_dir = self.path.parent / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        target = backup_dir / f"{self.path.stem}-{stamp}.db"
         try:
-            if not target.exists() and self.path.stat().st_size > 0:
-                shutil.copy2(self.path, target)
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backups = sorted(backup_dir.glob(self.path.stem + "-*.db"))
+            now = time.time()
+            fresh = any(
+                (s := parse_backup_stamp(f.stem[len(self.path.stem) + 1:])) is not None
+                and now - s < self.BACKUP_MIN_INTERVAL_S
+                for f in backups
+            )
+            if fresh:
+                self._prune_backups(backups)
+                return None
+            try:
+                await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:  # noqa: BLE001 - checkpoint 失败不拦备份：至多拷到稍旧数据
+                pass
+            if self.path.stat().st_size <= 0:
+                return None
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            target = backup_dir / f"{self.path.stem}-{stamp}.db"
+
+            def _copy() -> bool:
+                try:
+                    if not target.exists():
+                        shutil.copy2(self.path, target)
+                    return True
+                except OSError:
+                    return False
+
+            if await asyncio.to_thread(_copy):
                 self.backup_created = str(target)
+            self._prune_backups(sorted(backup_dir.glob(self.path.stem + "-*.db")))
         except OSError:
             return None
-        # 只保留最近的 N 份
-        backups = sorted(backup_dir.glob(self.path.stem + "-*.db"))
+        return self.backup_created
+
+    def _prune_backups(self, backups: list[Path]) -> None:
+        """只保留最近的 BACKUP_KEEP 份。"""
         for old in backups[: max(0, len(backups) - self.BACKUP_KEEP)]:
             try:
                 old.unlink()
             except OSError:
                 pass
-        return self.backup_created
 
     # ---- 会话库备份：列出 / 恢复（设置 · 关于里的「从备份恢复」） ----
 
@@ -318,8 +355,6 @@ class SessionStore:
 
         会关闭再重开数据库连接；调用方（backend）负责随后刷新内存里的会话状态。
         """
-        import shutil
-
         d = self.backup_dir()
         # 只接受纯文件名：带路径分隔符/上级目录的输入直接拒绝，不做静默归一化
         if Path(name).name != name or not name.endswith(".db"):
@@ -343,7 +378,8 @@ class SessionStore:
         if self._db is not None:
             await self._db.close()
             self._db = None
-        shutil.copy2(src, self.path)
+        # 整库拷贝放线程：库到几百 MB 时同步 copy2 会把事件循环冻住数秒
+        await asyncio.to_thread(shutil.copy2, src, self.path)
         await self.connect()
         return {
             "restored": src.name,
@@ -352,7 +388,9 @@ class SessionStore:
 
     async def connect(self) -> SessionStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._rolling_backup()
+        # 文件是否本就存在：本次新建的库没有可备的内容，跳过备份（与旧版
+        # 「连接前备份」对首启的语义一致）
+        existed = self.path.exists()
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         # WAL + NORMAL：一轮对话多次小写的 fsync 次数大幅下降，读不再被
@@ -362,6 +400,8 @@ class SessionStore:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA busy_timeout=5000")
+        # 滚动备份要在连接建立、WAL checkpoint 之后做（数据才完整），见 _rolling_backup
+        await self._rolling_backup(existed)
         await self._db.executescript(SCHEMA)
         # 旧库迁移：sessions 补 pinned 列（已存在则忽略）
         try:

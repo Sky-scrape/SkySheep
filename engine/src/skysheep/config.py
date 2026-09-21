@@ -205,7 +205,7 @@ class MemoryMaintenanceConfig(BaseModel):
 class SkySheepConfig(BaseModel):
     default: str = "deepseek"
     max_iterations: int = Field(default=40, ge=1, le=200)
-    context_limit_tokens: int = Field(default=80_000, ge=4_000)
+    context_limit_tokens: int = Field(default=1_000_000, ge=4_000)
     compaction_keep_recent: int = Field(default=8, ge=2)
     subagent_enabled: bool = True
     subagent_max_iterations: int = Field(default=25, ge=1, le=100)
@@ -363,7 +363,7 @@ def load_config() -> SkySheepConfig:
             raise ConfigError(f"failed to parse {p}: {e}") from e
         default = raw.get("default", default)
         max_iterations = int(raw.get("max_iterations", max_iterations))
-        context_limit = int(raw.get("context_limit_tokens", 80_000))
+        context_limit = int(raw.get("context_limit_tokens", 1_000_000))
         keep_recent = int(raw.get("compaction_keep_recent", 8))
         sub_enabled = bool(raw.get("subagent_enabled", True))
         sub_iters = int(raw.get("subagent_max_iterations", 25))
@@ -409,7 +409,7 @@ def load_config() -> SkySheepConfig:
             else:
                 merged[name] = ProviderConfig(**section)
     else:
-        context_limit = 80_000
+        context_limit = 1_000_000
         keep_recent = 8
         sub_enabled = True
         sub_iters = 25

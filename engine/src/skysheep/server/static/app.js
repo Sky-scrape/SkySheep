@@ -5818,7 +5818,7 @@ function showHelp() {
       或到 设置 · 模型服务 里确认该服务的「模型支持图片输入」是否开着。</div>
       <div class="faq-q">长对话越来越慢、提示上下文满了？</div>
       <div class="faq-a">输入 <code>/compact</code> 压缩历史，或在 设置 · 高级 里把
-      「上下文上限」调成模型真实的窗口大小（默认 80000）。</div>
+      「上下文上限」调成模型真实的窗口大小（默认 1000000）。</div>
       <div class="faq-q">定时任务到点没执行？</div>
       <div class="faq-a">定时任务只在 SkySheep 运行期间触发。关窗时选「缩到系统托盘」它就继续在后台跑；
       彻底退出期间错过的任务会在下次打开时补跑。想让它常驻，可在 设置 · 高级 打开「开机自动启动」。</div>
@@ -7374,10 +7374,10 @@ function renderProviderDetail(name) {
         <label>上下文上限（tokens）</label>
         <input data-f="context_limit" type="number" min="0" step="1000"
                value="${p.context_limit ? p.context_limit : ""}"
-               placeholder="留空 = 用全局默认 ${p.global_context_limit || 80000}"
+               placeholder="留空 = 用全局默认 ${p.global_context_limit || 1000000}"
                title="该服务模型真实的上下文窗口；填对了才能在撑爆之前自动压缩历史">
         <div class="field-tip">按官方文档填模型的上下文窗口（如 64k 模型填 64000，128k 填 128000）。
-          留空则用全局默认（当前 ${(p.global_context_limit || 80000).toLocaleString()}，可在 设置 · 高级 里改）；
+          留空则用全局默认（当前 ${(p.global_context_limit || 1000000).toLocaleString()}，可在 设置 · 高级 里改）；
           当前生效值 ${(p.effective_context_limit || p.global_context_limit || 0).toLocaleString()} tokens</div>
       </div>
       <div class="field">
@@ -12135,7 +12135,7 @@ async function renderAdvancedCfg() {
   const src = d.current_provider_context_limit
     ? `当前服务「${d.current_provider}」自带设置 ${d.current_provider_context_limit.toLocaleString()}`
     : "当前服务没单独设置，用这个全局值";
-  hint.textContent = `默认 80000。${src}；当前实际生效 ${d.context_limit_tokens_effective.toLocaleString()} tokens`;
+  hint.textContent = `默认 1000000。${src}；当前实际生效 ${d.context_limit_tokens_effective.toLocaleString()} tokens`;
   // 开机自启（仅 Windows 桌面）
   const auto = q("adv-autostart");
   const autoHint = q("adv-autostart-hint");

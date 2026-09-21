@@ -179,7 +179,7 @@ def test_boot_snapshot_reports_vision_and_limit(home):
         ws.send_json({"id": "b1", "method": "boot"})
         snap = recv_until(ws, "b1")["result"]
     assert snap["supports_vision"] is True
-    assert snap["context_limit"] == 80_000
+    assert snap["context_limit"] == 1_000_000
 
 
 # ---- 工作目录限制 ----

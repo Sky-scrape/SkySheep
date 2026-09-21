@@ -149,6 +149,16 @@ CREATE TABLE IF NOT EXISTS channel_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+CREATE TABLE IF NOT EXISTS project_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    done INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    done_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id, done);
 """
 
 # 全文搜索索引：messages 的 FTS5 虚表（trigram 分词）。
@@ -630,7 +640,87 @@ class SessionStore:
         )
         await self._db.execute("DELETE FROM sessions WHERE project_id = ?", (project_id,))
         await self._db.execute("DELETE FROM whitelist_rules WHERE project_id = ?", (project_id,))
+        await self._db.execute("DELETE FROM project_tasks WHERE project_id = ?", (project_id,))
         cur = await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        await self._db.commit()
+        return cur.rowcount
+
+    # ---- 项目任务清单 ----
+
+    @staticmethod
+    def _project_task_row(row) -> dict:
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "title": row["title"],
+            "detail": row["detail"],
+            "done": bool(row["done"]),
+            "created_at": row["created_at"],
+            "done_at": row["done_at"],
+        }
+
+    async def add_project_task(self, project_id: int, title: str, detail: str = "") -> dict:
+        assert self._db
+        now = time.time()
+        cur = await self._db.execute(
+            "INSERT INTO project_tasks (project_id, title, detail, created_at) VALUES (?, ?, ?, ?)",
+            (project_id, title, detail, now),
+        )
+        await self._db.commit()
+        row = await self.get_project_task(cur.lastrowid)  # type: ignore[arg-type]
+        assert row is not None
+        return row
+
+    async def get_project_task(self, task_id: int) -> dict | None:
+        assert self._db
+        cur = await self._db.execute("SELECT * FROM project_tasks WHERE id = ?", (task_id,))
+        row = await cur.fetchone()
+        return self._project_task_row(row) if row else None
+
+    async def list_project_tasks(self, project_id: int) -> list[dict]:
+        """未完成在前（按加入顺序，像清单步骤），已完成垫底（按完成时间倒序）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM project_tasks WHERE project_id = ? "
+            "ORDER BY done ASC, CASE WHEN done = 0 THEN id ELSE -done_at END",
+            (project_id,),
+        )
+        rows = await cur.fetchall()
+        return [self._project_task_row(r) for r in rows]
+
+    async def update_project_task(
+        self, task_id: int, *, title: str | None = None, detail: str | None = None,
+        done: bool | None = None,
+    ) -> dict | None:
+        """按传入字段部分更新；勾掉/重开时刷新 done_at。"""
+        assert self._db
+        row = await self.get_project_task(task_id)
+        if not row:
+            return None
+        sets: list[str] = []
+        args: list = []
+        if title is not None:
+            sets.append("title = ?")
+            args.append(title)
+        if detail is not None:
+            sets.append("detail = ?")
+            args.append(detail)
+        if done is not None:
+            sets.append("done = ?")
+            args.append(1 if done else 0)
+            sets.append("done_at = ?")
+            args.append(time.time() if done else 0)
+        if sets:
+            args.append(task_id)
+            await self._db.execute(
+                f"UPDATE project_tasks SET {', '.join(sets)} WHERE id = ?", args
+            )
+            await self._db.commit()
+        return await self.get_project_task(task_id)
+
+    async def delete_project_task(self, task_id: int) -> int:
+        assert self._db
+        cur = await self._db.execute("DELETE FROM project_tasks WHERE id = ?", (task_id,))
         await self._db.commit()
         return cur.rowcount
 

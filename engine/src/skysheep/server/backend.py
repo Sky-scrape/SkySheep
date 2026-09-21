@@ -5950,17 +5950,59 @@ class ServerBackend:
         }
 
     async def delete_project(self, project_id: int) -> dict:
-        """把一个项目从列表里移除：项目记录、它的会话与白名单一并删除；
-        电脑上的文件夹不受影响。当前正在使用的项目与最后一个项目不允许删。"""
+        """把一个项目从列表里移除：项目记录、它的会话、白名单与任务清单一并删除；
+        电脑上的文件夹不受影响。正在使用的项目不允许删（切走后可删）。"""
         if self.project is not None and project_id == self.project.id:
             raise RuntimeError("不能删除正在使用的项目；先切换到其他项目再删除")
-        projects = await self.store.list_projects()
-        if len(projects) <= 1:
-            raise RuntimeError("至少要保留一个项目，最后一个项目不能删除")
         removed = await self.store.delete_project(project_id)
         if not removed:
             raise RuntimeError("项目不存在，可能已被删除")
         return {"removed": project_id}
+
+    # ---- 项目任务清单（右侧「任务清单」页签；任务与项目绑定，删项目一并删） ----
+
+    def _target_project_id(self, project_id) -> int:
+        pid = int(project_id) if project_id else (self.project.id if self.project else 0)
+        if not pid:
+            raise RuntimeError("没有当前项目")
+        return pid
+
+    async def project_task_list(self, project_id: int | None = None) -> dict:
+        pid = self._target_project_id(project_id)
+        return {"project_id": pid, "tasks": await self.store.list_project_tasks(pid)}
+
+    async def project_task_add(self, params: dict) -> dict:
+        title = str(params.get("title") or "").strip()
+        if not title:
+            raise RuntimeError("任务内容不能为空")
+        pid = self._target_project_id(params.get("project_id"))
+        task = await self.store.add_project_task(pid, title[:200], str(params.get("detail") or "")[:2000])
+        return {"task": task}
+
+    async def project_task_update(self, params: dict) -> dict:
+        tid = int(params.get("id") or 0)
+        if not tid:
+            raise RuntimeError("缺少任务 id")
+        title = params.get("title")
+        detail = params.get("detail")
+        task = await self.store.update_project_task(
+            tid,
+            title=(str(title).strip()[:200] or None) if title is not None else None,
+            detail=None if detail is None else str(detail)[:2000],
+            done=(bool(params["done"]) if "done" in params else None),
+        )
+        if not task:
+            raise RuntimeError("任务不存在")
+        return {"task": task}
+
+    async def project_task_delete(self, params: dict) -> dict:
+        tid = int(params.get("id") or 0)
+        if not tid:
+            raise RuntimeError("缺少任务 id")
+        removed = await self.store.delete_project_task(tid)
+        if not removed:
+            raise RuntimeError("任务不存在")
+        return {"removed": tid}
 
     async def export_session(self, session_id: str, *, fmt: str = "md") -> dict:
         """导出会话：fmt=md 为 Markdown 原文；fmt=html 为带样式的自包含单文件。

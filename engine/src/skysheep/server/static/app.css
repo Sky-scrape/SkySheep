@@ -827,6 +827,30 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .todo-txt.completed { color: var(--dim); text-decoration: line-through; }
 .todo-txt.in_progress { font-weight: 700; }
 
+/* ---------- 项目任务（与项目绑定，删项目一并清掉） ---------- */
+.ptask-input {
+  width: 100%; padding: 6px 9px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--paper); color: var(--text);
+  font-size: 12.5px;
+}
+.ptask-input:focus { outline: none; border-color: var(--accent); }
+.ptask-list li {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 7px 4px; border-bottom: 1px solid var(--line);
+  white-space: normal; line-height: 1.45;
+}
+.ptask-row .ptask-check { flex-shrink: 0; margin: 2px 0 0; cursor: pointer; }
+.ptask-row .ptask-main { flex: 1; min-width: 0; cursor: pointer; }
+.ptask-title { display: block; font-size: 13px; }
+.ptask-detail { display: block; color: var(--dim); font-size: 12px; margin-top: 2px; }
+.ptask-row.done .ptask-title { color: var(--dim); text-decoration: line-through; }
+.ptask-del {
+  flex-shrink: 0; border: none; background: none; color: var(--dim);
+  cursor: pointer; font-size: 12px; padding: 0 2px; visibility: hidden;
+}
+.ptask-list li:hover .ptask-del { visibility: visible; }
+.ptask-del:hover { color: var(--danger, #c0392b); }
+
 /* ---------- 日程（侧栏列表 + 提醒横幅） ---------- */
 .agenda-head {
   font-size: 11px; color: var(--dim); letter-spacing: 1px;

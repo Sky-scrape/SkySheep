@@ -1418,6 +1418,116 @@ function clearTodoPanel() {
   if (empty) empty.classList.remove("hidden");
 }
 
+// ---------- 项目任务（右侧「项目任务」页签；与项目绑定，删项目一并清掉） ----------
+
+let ptasksLoadedFor = null; // 记上次加载的项目名，切项目后强制重取
+
+async function loadProjectTasks(force) {
+  const ul = document.getElementById("ptask-list");
+  if (!ul) return;
+  const projName = currentProjectName();
+  if (!force && ptasksLoadedFor === projName) return; // 同一项目不反复拉
+  ptasksLoadedFor = projName;
+  const projLabel = document.getElementById("ptasks-project");
+  if (projLabel) projLabel.textContent = projName || "当前项目";
+  let tasks = [];
+  try {
+    const r = await request("project.task_list", {});
+    tasks = r.tasks || [];
+  } catch (e) {
+    ul.innerHTML = `<li class="empty-hint">加载失败：${escapeHtml(e.message)}</li>`;
+    return;
+  }
+  renderProjectTasks(tasks);
+}
+
+function renderProjectTasks(tasks) {
+  const ul = document.getElementById("ptask-list");
+  const empty = document.getElementById("ptask-empty");
+  if (!ul) return;
+  const has = tasks && tasks.length;
+  if (empty) empty.classList.toggle("hidden", !!has);
+  ul.innerHTML = "";
+  tasks.forEach((t) => {
+    const li = document.createElement("li");
+    li.className = "ptask-row" + (t.done ? " done" : "");
+    li.innerHTML = `
+      <input type="checkbox" class="ptask-check" ${t.done ? "checked" : ""} title="${t.done ? "重新打开" : "标记完成"}">
+      <span class="ptask-main">
+        <span class="ptask-title">${escapeHtml(t.title)}</span>
+        ${t.detail ? `<span class="ptask-detail">${escapeHtml(t.detail)}</span>` : ""}
+      </span>
+      <button class="ptask-del" title="删除这条任务">✕</button>`;
+    li.querySelector(".ptask-check").onchange = async (e) => {
+      try {
+        await request("project.task_update", { id: t.id, done: e.target.checked });
+        loadProjectTasks(true);
+      } catch (err) {
+        e.target.checked = !e.target.checked;
+        addNotice("更新任务失败：" + err.message);
+      }
+    };
+    li.querySelector(".ptask-del").onclick = async () => {
+      try {
+        await request("project.task_delete", { id: t.id });
+        loadProjectTasks(true);
+      } catch (err) {
+        addNotice("删除任务失败：" + err.message);
+      }
+    };
+    li.querySelector(".ptask-main").onclick = () => ptaskModal(t);
+    ul.appendChild(li);
+  });
+}
+
+function ptaskModal(t) {
+  const isNew = !t;
+  const box = document.createElement("div");
+  box.innerHTML = `
+    <div class="form-grid">
+      <label class="wide">要做什么
+        <input data-f="title" type="text" maxlength="200" value="${t ? escapeHtml(t.title) : ""}"
+               placeholder="一句话说清要做什么">
+      </label>
+      <label class="wide">完成标准 / 详细要求（可选）
+        <textarea data-f="detail" rows="3" maxlength="2000"
+                  placeholder="做到什么程度算完成；有什么约束或偏好">${t ? escapeHtml(t.detail || "") : ""}</textarea>
+      </label>
+    </div>`;
+  showModal(isNew ? "新建任务" : "编辑任务", box, async () => {
+    const title = box.querySelector('[data-f="title"]').value.trim();
+    if (!title) throw new Error("任务内容不能为空");
+    const detail = box.querySelector('[data-f="detail"]').value;
+    if (isNew) {
+      await request("project.task_add", { title, detail });
+    } else {
+      await request("project.task_update", { id: t.id, title, detail });
+    }
+    loadProjectTasks(true);
+  }, isNew ? "添加" : "保存");
+}
+
+function wireProjectTasksPanel() {
+  const input = document.getElementById("ptask-input");
+  const addBtn = document.getElementById("btn-ptask-add");
+  if (!input || input.dataset.wired) return;
+  input.dataset.wired = "1";
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const title = input.value.trim();
+    if (!title) return;
+    input.disabled = true;
+    request("project.task_add", { title })
+      .then(() => { input.value = ""; loadProjectTasks(true); })
+      .catch((err) => addNotice("添加任务失败：" + err.message))
+      .finally(() => { input.disabled = false; });
+  });
+  if (addBtn && !addBtn.dataset.wired) {
+    addBtn.dataset.wired = "1";
+    addBtn.onclick = () => ptaskModal(null);
+  }
+}
+
 function setRunning(on, tab) {
   const t = tab || activeTab;
   if (t) t.running = on;
@@ -3840,6 +3950,7 @@ async function reloadProjectPanels() {
       files: () => loadFiles(true),
       tasks: () => loadTasks(),
       agenda: () => loadAgenda(),
+      ptasks: () => loadProjectTasks(),
       cron: () => loadCron(),
       pipeline: () => loadPipelines(),
       review: () => refreshReview(),
@@ -8823,6 +8934,7 @@ const RP_ICONS = {
   files: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M9 13h6"/></svg>',
   tasks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>',
   todo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 6h11M9.5 12h11M9.5 18h11"/><path d="m3.5 6 1.2 1.2L7 4.9M3.5 12l1.2 1.2L7 10.9M4 18h.01"/></svg>',
+  ptasks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 4.5h9a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2h.5"/><path d="M9 2.5h4.5v4H9z"/><path d="m9 13 2 2 4.5-4.5M9 17.5h6"/></svg>',
   agenda: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15" rx="2"/><path d="M8 3.5v4M16 3.5v4M4 10.5h16"/></svg>',
   cron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
   pipeline: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="6" r="2.1"/><circle cx="5.5" cy="18" r="2.1"/><circle cx="18.5" cy="12" r="2.1"/><path d="M7.4 6.9 16.6 11.1M7.4 17.1 16.6 12.9"/></svg>',
@@ -8840,6 +8952,7 @@ const TAB_META = {
   files: { title: "文件" },
   tasks: { title: "任务" },
   todo: { title: "任务清单" },
+  ptasks: { title: "项目任务" },
   agenda: { title: "日程" },
   cron: { title: "定时任务" },
   pipeline: { title: "任务编排" },
@@ -8918,6 +9031,7 @@ function openRightTab(id) {
   if (id === "files") loadFiles();
   if (id === "tasks") loadTasks();
   if (id === "agenda") loadAgenda();
+  if (id === "ptasks") loadProjectTasks();
   if (id === "cron") loadCron();
   if (id === "pipeline") loadPipelines();
   if (id === "memory") loadMemoryPanel();
@@ -8932,6 +9046,7 @@ function activateRightTab(id) {
   if (id === "files") loadFiles();
   if (id === "tasks") loadTasks();
   if (id === "agenda") loadAgenda();
+  if (id === "ptasks") loadProjectTasks();
   if (id === "cron") loadCron();
   if (id === "pipeline") loadPipelines();
   if (id === "memory") loadMemoryPanel();
@@ -12425,3 +12540,6 @@ document.getElementById("btn-backups-refresh").onclick = () => loadBackups().cat
   });
 })();
 // __ERR_TRAP_END
+
+// 面板一次性接线：输入框回车快速添加、「＋ 新建任务」按钮
+wireProjectTasksPanel();

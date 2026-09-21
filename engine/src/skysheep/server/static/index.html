@@ -407,6 +407,22 @@
             <div id="todo-empty" class="rp-empty">当前还没有任务清单 —— 给 Agent 一个多步骤任务，它拆解后的步骤会出现在这里。</div>
           </section>
 
+          <section id="rp-page-ptasks" class="rp-page hidden">
+            <div class="ag-topbar">
+              <div class="ag-heading">
+                <b>项目任务</b>
+                <span class="dim small" id="ptasks-project"></span>
+              </div>
+              <button id="btn-ptask-add" class="rp-mini primary">＋ 新建任务</button>
+            </div>
+            <div class="rp-toolbar">
+              <input id="ptask-input" class="ptask-input" type="text" maxlength="200"
+                     placeholder="写一个要做的任务，回车快速添加；完成后点前面的方框勾掉">
+            </div>
+            <ul id="ptask-list" class="list ptask-list rp-page-list"></ul>
+            <div id="ptask-empty" class="rp-empty">这个项目还没有任务。把要做的事一条条加进来，做完勾掉；删项目时会一起清掉。</div>
+          </section>
+
           <section id="rp-page-agenda" class="rp-page hidden">
             <div class="ag-topbar">
               <div class="ag-heading">

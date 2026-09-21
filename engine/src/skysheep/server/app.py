@@ -630,6 +630,14 @@ def create_app(
             return await backend.switch_project(str(params.get("path", "")))
         if method == "project.delete":
             return await backend.delete_project(int(params.get("id", 0)))
+        if method == "project.task_list":
+            return await backend.project_task_list(params.get("project_id"))
+        if method == "project.task_add":
+            return await backend.project_task_add(params)
+        if method == "project.task_update":
+            return await backend.project_task_update(params)
+        if method == "project.task_delete":
+            return await backend.project_task_delete(params)
         if method == "project.instructions":
             return await backend.get_instructions()
         if method == "project.save_instructions":

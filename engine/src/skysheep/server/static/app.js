@@ -2233,10 +2233,10 @@ async function refreshSessionsGrouped() {
     if (key !== "quick") loose.push(...list);
   });
   {
-    // 「任务」分组常驻：不绑定文件夹的对话都在这里（有时候只是想聊一句、
-    // 做点小任务，不需要工作目录）。组头 ＋ 一键新建任务对话。
+    // 「快聊」分组常驻：不绑定文件夹的对话都在这里（有时候只是想聊一句、
+    // 做点小任务，不需要工作目录）。组头 ＋ 一键新建快聊对话。
     renderProjectGroup(frag, {
-      key: "quick", name: "任务", list: byProject.get("quick") || [],
+      key: "quick", name: "快聊", list: byProject.get("quick") || [],
       isCurrent: false, rootPath: "", project: null,
       headPlus: async () => {
         const r = await request("session.new_task", {});
@@ -2275,7 +2275,7 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
     `<span class="pg-name">${escapeHtml(name)}</span>` +
     (list.length ? `<span class="pg-count">${list.length}</span>` : "") +
     (headPlus
-      ? '<button class="pg-add" title="新建一个任务对话（不需要文件夹，随时能聊）">＋</button>' : "") +
+      ? '<button class="pg-add" title="新建快聊（不需要文件夹，随时能聊）">＋</button>' : "") +
     (project
       ? `<button class="pg-del" title="${isCurrent ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目"}">✕</button>` : "") +
     '<span class="pg-chev"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +

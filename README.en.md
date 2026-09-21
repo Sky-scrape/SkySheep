@@ -195,19 +195,19 @@ Running into a problem? In the app, go to Settings · About → "💬 Report an 
   CI ✅, community docs ✅, installer scripts ✅, Skill Market (index published with the main repo) ✅, update check ✅,
   SmartScreen guide ✅, website page (`index.html`, live on GitHub Pages) ✅; remaining: code-signed distribution
 - **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
-- **v2.2 (✅ current release)**: multi-instance support (source tree runs a `dev` identity isolated from the installed app), structured logging (per-session turn / tool / permission timings), bounded auto-reconnect for MCP (no replay of the failed call), shell-chaining detection per actual shell (plugs the cmd.exe single-quote & `%VAR%` bypasses), full MCP annotations on all 31 built-in tools (listed in the M8ven Trust Index), merged streaming deltas, chunked long-history rendering, and a real-socket end-to-end test layer
-- **v2.1 (✅)**: root fix for the launcher "double-click does nothing" hang chain (non-blocking focus / stale-instance takeover / window-creation watchdog) plus a persistent WebView2 profile, drag-to-reorder projects & sessions (shared by grouped and classic views, fork families stay together), thinking & elapsed time persisted with messages (survives refresh; surfaced in exports and Telegram / WeChat channels), cua computer-driver preset, and two performance passes (Anthropic cache breakpoints / SQLite WAL / runtime-pool LRU / on-demand history images / merged terminal output / lazy mermaid·xterm)
-- **v2.0 (✅)**: "quick commands" renamed to "prompts" with a `~` trigger (split from `/` slash commands), three-mode permission button (safe execution / auto-edit / full access), built-in example prompts seeded as editable records on first boot, Skill Market grown to 20 official Chinese skills, prompt-dialog fix
-- **v1.9 (✅)**: task pipelines (chain tasks by dependency — parallel dev work feeds an automatic review stage), archive-time memory digest (distills long-term user memory when a session is archived), roundtable token saver trio (light member context / duplicate-draft dedupe / member role presets) plus robustness fixes, installer static-asset hardening
+- **v1.0 (✅)**: first stable release — browser control, phone control (in-app toggle),
+  instant title-bar theme sync, keyless activation paths (registration guide / demo mode / one-click Ollama),
+  daily token budget guardrails, prompt-injection defense, feedback loop (diagnostic bundle + one-click report),
+  crash sentinel with friendly messaging, and the full website + open-source kit
 - **v1.8 (✅)**: real terminal (multi-tab PowerShell via ConPTY + xterm.js), bot
   channels (Telegram / WeChat QR login), task time estimates, voice input, session archive & tags,
   cross-session references, live sub-agent streaming with true cancellation, round-table multi-turn
   debate, three-layer hardening from an external security review, safe non-UTF-8 text I/O (GBK etc.),
   PPTX read/write, and provider presets expanded to 10 vendors
-- **v1.0 (✅)**: first stable release — browser control, phone control (in-app toggle),
-  instant title-bar theme sync, keyless activation paths (registration guide / demo mode / one-click Ollama),
-  daily token budget guardrails, prompt-injection defense, feedback loop (diagnostic bundle + one-click report),
-  crash sentinel with friendly messaging, and the full website + open-source kit
+- **v1.9 (✅)**: task pipelines (chain tasks by dependency — parallel dev work feeds an automatic review stage), archive-time memory digest (distills long-term user memory when a session is archived), roundtable token saver trio (light member context / duplicate-draft dedupe / member role presets) plus robustness fixes, installer static-asset hardening
+- **v2.0 (✅)**: "quick commands" renamed to "prompts" with a `~` trigger (split from `/` slash commands), three-mode permission button (safe execution / auto-edit / full access), built-in example prompts seeded as editable records on first boot, Skill Market grown to 20 official Chinese skills, prompt-dialog fix
+- **v2.1 (✅)**: root fix for the launcher "double-click does nothing" hang chain (non-blocking focus / stale-instance takeover / window-creation watchdog) plus a persistent WebView2 profile, drag-to-reorder projects & sessions (shared by grouped and classic views, fork families stay together), thinking & elapsed time persisted with messages (survives refresh; surfaced in exports and Telegram / WeChat channels), cua computer-driver preset, and two performance passes (Anthropic cache breakpoints / SQLite WAL / runtime-pool LRU / on-demand history images / merged terminal output / lazy mermaid·xterm)
+- **v2.2 (✅ current release)**: multi-instance support (source tree runs a `dev` identity isolated from the installed app), structured logging (per-session turn / tool / permission timings), bounded auto-reconnect for MCP (no replay of the failed call), shell-chaining detection per actual shell (plugs the cmd.exe single-quote & `%VAR%` bypasses), full MCP annotations on all 31 built-in tools (listed in the M8ven Trust Index), merged streaming deltas, chunked long-history rendering, and a real-socket end-to-end test layer
 - **Next up**: macOS/Linux support, system-level scheduling, defense-in-depth against prompt injection
 
 [CHANGELOG.md](CHANGELOG.md) is the single source of truth for versions and changes.

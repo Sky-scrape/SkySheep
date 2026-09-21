@@ -568,6 +568,8 @@ def create_app(
             }
         if method == "session.new":
             return await backend.new_session()
+        if method == "session.new_task":
+            return await backend.create_task_chat()
         if method == "session.truncate":
             return await backend.truncate_session(params)
         if method == "session.fork":

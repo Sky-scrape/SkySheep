@@ -33,7 +33,7 @@ from ..tools import GlobTool, GrepTool, ListDirTool, ReadFileTool, Safety, Tool,
 from ..tools.base import ToolContext
 from .agent import Agent
 from .prompt import SUBAGENT_PROMPT
-from .subagent_store import BUILTIN_AGENT_TYPES
+from .subagent_store import BUILTIN_AGENT_TYPES, BUILTIN_DESCRIPTIONS
 
 # 只读研究型工具集（所有内置型共用基础）
 RESEARCH_TOOL_NAMES = ("read_file", "list_dir", "glob", "grep")
@@ -97,9 +97,11 @@ class SubagentGate(PermissionGate):
 class SubagentPlan:
     """一次子代理运行的完整输入。
 
-    宿主（server backend）把「自定义子代理定义 / 内置覆盖」解析成它，
+    宿主（server backend）把「自定义子代理定义 / 内置子代理的定制」解析成它，
     TaskManager 拿到非 None 的计划就照此运行：registry=None 表示沿用
     agent_type 的内置工具集，system_extra 追加到子代理系统提示词之后。
+    role_prompt=None 表示用该内置型的默认角色提示词；自定义子代理传 ""
+    （它们有自己的专项指令，不套内置角色）。
     """
 
     def __init__(
@@ -107,10 +109,12 @@ class SubagentPlan:
         provider: Provider,
         registry: ToolRegistry | None = None,
         system_extra: str = "",
+        role_prompt: str | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
         self.system_extra = system_extra
+        self.role_prompt = role_prompt
 
 
 async def run_subagent(
@@ -123,6 +127,7 @@ async def run_subagent(
     extra_tools: list[Tool] | None = None,
     registry: ToolRegistry | None = None,
     system_extra: str = "",
+    role_prompt: str | None = None,
     restrict_to_workdir: bool = False,
     on_event: Callable[[object], Awaitable[None]] | None = None,
 ) -> tuple[str, Agent]:
@@ -130,8 +135,10 @@ async def run_subagent(
 
     registry 不传时按 agent_type 用内置只读工具集；宿主（设置页的自定义
     子代理）可以传入自己组装的注册表。system_extra 追加在子代理系统提示词
-    之后，用来注入自定义子代理的描述与专项指令。on_event 传入时每产生一个
-    引擎事件就回调一次（宿主据此向前端直播子代理的工作过程）。
+    之后，用来注入自定义子代理的描述与专项指令。role_prompt=None 时用该
+    内置型的默认角色提示词（BUILTIN_ROLE_PROMPTS），传 "" 则不拼角色词——
+    这是设置页「编辑内置子代理」覆盖默认提示词的通道。on_event 传入时每
+    产生一个引擎事件就回调一次（宿主据此向前端直播子代理的工作过程）。
     """
     agent = Agent(
         provider=provider,
@@ -141,9 +148,10 @@ async def run_subagent(
         max_iterations=max_iterations,
         restrict_to_workdir=restrict_to_workdir,
     )
+    role = BUILTIN_ROLE_PROMPTS.get(agent_type, "") if role_prompt is None else role_prompt
     agent.set_system(
         SUBAGENT_PROMPT.format(agent_type=agent_type, workdir=str(working_dir))
-        + BUILTIN_ROLE_PROMPTS.get(agent_type, "")
+        + role
         + (system_extra or "")
     )
     final_text = ""
@@ -256,6 +264,23 @@ class TaskManager:
             return []
         return [(d.name, d.description) for d in self._store.custom if d.enabled]
 
+    def list_builtin_desc(self) -> list[tuple[str, str]]:
+        """内置子代理 [(显示名, 生效描述)]，给 spawn_agent 的说明文字用。
+
+        描述被用户改过就用覆盖值，否则用内置默认。
+        """
+        out = []
+        for t in BUILTIN_AGENT_TYPES:
+            desc = ""
+            if self._store is not None:
+                ov = self._store.builtin.get(t)
+                if ov is not None and ov.description.strip():
+                    desc = ov.description.strip()
+            if not desc:
+                desc = BUILTIN_DESCRIPTIONS.get(t, "")
+            out.append((t, desc))
+        return out
+
     def _plan_for(self, agent_type: str):
         """把定义解析成一次运行所需的 (provider, registry, system_extra)。
 
@@ -276,11 +301,23 @@ class TaskManager:
                 system_extra="\n\n".join(parts),
             )
         ov = self._store.builtin.get(agent_type)
-        if ov is not None and (ov.provider or ov.model or ov.reasoning):
+        if ov is not None and (
+            ov.provider or ov.model or ov.reasoning
+            or ov.description.strip() or ov.prompt.strip()
+        ):
+            # 只改了说明/指令、没指定模型时：沿用主对话默认 provider
+            if (ov.provider or ov.model or ov.reasoning) and self._provider_resolver is not None:
+                provider = self._provider_resolver(ov.provider, ov.model, ov.reasoning)
+            else:
+                provider = self._provider_factory()
             return SubagentPlan(
-                provider=self._provider_resolver(ov.provider, ov.model, ov.reasoning),
+                provider=provider,
                 registry=None,
                 system_extra="",
+                role_prompt=(
+                    ov.prompt.strip() if ov.prompt.strip()
+                    else BUILTIN_ROLE_PROMPTS.get(agent_type, "")
+                ),
             )
         return None
 
@@ -405,6 +442,7 @@ class TaskManager:
                 max_iterations=self._max_iterations,
                 registry=plan.registry if plan is not None else None,
                 system_extra=plan.system_extra if plan is not None else "",
+                role_prompt=plan.role_prompt if plan is not None else None,
                 extra_tools=extra,
                 restrict_to_workdir=self._restrict_to_workdir,
                 on_event=self._make_forwarder(rec),
@@ -559,6 +597,8 @@ class SpawnAgentTool(Tool):
             "派生一个子代理去完成独立子任务（如：调研代码结构、在多个文件里搜集信息）。"
             "子代理看不到主对话，所以 prompt 必须自包含。"
             "适合耗时的探索性工作，避免污染主上下文。"
+            "\n内置子代理："
+            + "；".join(f"{name}（{desc}）" if desc else name for name, desc in tasks.list_builtin_desc())
         )
         custom = tasks.list_custom()
         if custom:

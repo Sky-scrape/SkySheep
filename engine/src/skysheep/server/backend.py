@@ -76,9 +76,15 @@ from ..core.roundtable import (
     run_roundtable,
     usage_rows,
 )
-from ..core.subagent import CheckTaskTool, SpawnAgentTool, TaskManager
+from ..core.subagent import (
+    BUILTIN_ROLE_PROMPTS,
+    CheckTaskTool,
+    SpawnAgentTool,
+    TaskManager,
+)
 from ..core.subagent_store import (
     BUILTIN_AGENT_TYPES,
+    BUILTIN_DESCRIPTIONS,
     BUILTIN_DISPLAY,
     SubagentDef,
     SubagentDefError,
@@ -5225,6 +5231,15 @@ class ServerBackend:
             **self.subagent_settings(),
             "builtin": {t: ov.model_dump() for t, ov in self.subagent_store.builtin.items()},
             "builtin_display": dict(BUILTIN_DISPLAY),
+            # 生效描述（覆盖值优先，否则内置默认）+ 默认角色提示词（编辑框占位展示）
+            "builtin_desc": {
+                t: (
+                    ov.description.strip()
+                    or BUILTIN_DESCRIPTIONS.get(t, "")
+                )
+                for t, ov in self.subagent_store.builtin.items()
+            },
+            "builtin_default_prompt": dict(BUILTIN_ROLE_PROMPTS),
             "custom": [d.model_dump() for d in self.subagent_store.custom],
             "providers": providers,
             "tools": tools,
@@ -5235,16 +5250,20 @@ class ServerBackend:
         }
 
     async def save_subagent_builtin(
-        self, agent_type: str, *, provider: str = "", model: str = "", reasoning: str = ""
+        self, agent_type: str, *, provider: str = "", model: str = "", reasoning: str = "",
+        description: str = "", prompt: str = "",
     ) -> dict:
-        """内置子代理的模型/思考强度覆盖（留空 = 跟随主对话）。"""
+        """内置子代理的定制：模型/思考强度覆盖 + 说明与角色提示词的改写。
+
+        description/prompt 留空 = 恢复该内置型的内置默认（不是删掉功能）。"""
         if provider and provider not in self.cfg.providers:
             raise RuntimeError("未知的模型服务: " + provider)
         if agent_type not in BUILTIN_AGENT_TYPES:
             raise RuntimeError("未知的内置子代理: " + str(agent_type))
         try:
             ov = self.subagent_store.set_override(
-                agent_type, provider=provider, model=model, reasoning=reasoning
+                agent_type, provider=provider, model=model, reasoning=reasoning,
+                description=description, prompt=prompt,
             )
         except SubagentDefError as e:
             raise RuntimeError(str(e)) from e
@@ -5951,13 +5970,20 @@ class ServerBackend:
 
     async def delete_project(self, project_id: int) -> dict:
         """把一个项目从列表里移除：项目记录、它的会话、白名单与任务清单一并删除；
-        电脑上的文件夹不受影响。正在使用的项目不允许删（切走后可删）。"""
-        if self.project is not None and project_id == self.project.id:
-            raise RuntimeError("不能删除正在使用的项目；先切换到其他项目再删除")
+        电脑上的文件夹不受影响。最后一个项目（当前项目）也可以删——删掉后立刻
+        为工作目录重建一条干净的项目记录（等于重置这个项目，重新开始）。"""
+        is_current = self.project is not None and project_id == self.project.id
+        if is_current and self._run_task and not self._run_task.done():
+            raise RuntimeError("当前有任务正在运行，请先停止再删除项目")
         removed = await self.store.delete_project(project_id)
         if not removed:
             raise RuntimeError("项目不存在，可能已被删除")
-        return {"removed": project_id}
+        if is_current:
+            # self.project 置空绕过 switch_project 的「已是当前项目」短路，
+            # 走一遍完整的切项目重绑：技能/MCP/钩子/子代理/会话全部归零重来
+            self.project = None
+            await self.switch_project(str(self.working_dir))
+        return {"removed": project_id, "reset_current": is_current}
 
     # ---- 项目任务清单（右侧「任务清单」页签；任务与项目绑定，删项目一并删） ----
 

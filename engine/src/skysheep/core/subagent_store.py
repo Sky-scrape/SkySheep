@@ -52,9 +52,25 @@ class SubagentDef(BaseModel):
 
 
 class BuiltinOverride(BaseModel):
+    """内置子代理的用户定制；全部留空 = 完全用内置默认。"""
+
     provider: str = ""
     model: str = ""
     reasoning: str = ""  # 留空 = 跟随全局；auto/low/medium/high
+    description: str = ""  # 留空 = 用内置默认描述（spawn 说明与设置页展示）
+    prompt: str = ""  # 留空 = 用内置默认角色提示词
+
+
+# 内置子代理的默认描述（spawn_agent 说明、设置页展示、模型选型的依据）。
+# 用户在设置页改过某型的描述后，覆盖值优先。
+BUILTIN_DESCRIPTIONS = {
+    "task": "多步通用任务：可以拆步骤、尝试写文件（写入仍会被自动拒绝）。",
+    "explore": "只读调研：在代码与文件里广泛搜集信息，不改任何东西。",
+    "reviewer": "审查员：细读代码 / 文档，按严重度输出审查清单（不改文件）。",
+    "researcher": "调研员：联网搜索与抓取公开资料，结论注明来源。",
+    "writer": "写手：产出可直接使用的文档 / 报告 / README 成稿。",
+    "planner": "规划师：调研现状并拆解成分步计划（含验证方式与风险）。",
+}
 
 
 def validate_subagent_name(name: str, *, allow_builtin: bool = False) -> str:
@@ -117,7 +133,8 @@ class SubagentStore:
     # ---- 内置覆盖 ----
 
     def set_override(
-        self, agent_type: str, *, provider: str, model: str, reasoning: str
+        self, agent_type: str, *, provider: str, model: str, reasoning: str,
+        description: str = "", prompt: str = "",
     ) -> BuiltinOverride:
         if agent_type not in BUILTIN_AGENT_TYPES:
             raise SubagentDefError("未知的内置子代理: " + str(agent_type))
@@ -128,6 +145,8 @@ class SubagentStore:
             provider=(provider or "").strip(),
             model=(model or "").strip(),
             reasoning=reasoning,
+            description=(description or "").strip(),
+            prompt=(prompt or "").strip(),
         )
         self.builtin[agent_type] = ov
         self.save()

@@ -88,8 +88,11 @@ async def probe_provider_models(
 
 
 def _friendly_error(e: Exception, base: str | None) -> str:
-    """把 SDK 抛出的异常翻译成用户能照着改的提示。"""
+    """把 SDK / httpx 抛出的异常翻译成用户能照着改的提示。"""
     status = getattr(e, "status_code", None)
+    if status is None:
+        resp = getattr(e, "response", None)  # httpx 的状态码挂在 response 上
+        status = getattr(resp, "status_code", None)
     where = base or "默认接口地址"
     if status in (401, 403):
         return f"API Key 无效或没有权限（{where}）"

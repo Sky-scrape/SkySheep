@@ -90,23 +90,23 @@ def test_delete_project_cascades_sessions_and_rules_keeps_disk(home):
         assert (home / "proj" / "keep.txt").read_text(encoding="utf-8") == "磁盘文件不应被删"
 
 
-def test_delete_current_project_refused_and_unknown_id(home):
+def test_delete_current_project_resets_and_unknown_id(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "pl", "method": "project.list", "params": {}})
         cur = next(p for p in recv_until(ws, "pl")["result"]["projects"] if p["is_current"])
 
-        # 当前项目拒绝删除
+        # 当前项目也允许删：清空后为同一工作目录重建干净的项目记录
         ws.send_json({"id": "del", "method": "project.delete", "params": {"id": cur["id"]}})
         r = recv_until(ws, "del")
-        assert not r["ok"] and "正在使用" in r["error"]
+        assert r["ok"] and r["result"]["reset_current"] is True
+
+        # 项目记录换了新 id（旧会话全部清空，干净的开始）
+        ws.send_json({"id": "pl2", "method": "project.list", "params": {}})
+        projects = recv_until(ws, "pl2")["result"]["projects"]
+        assert len(projects) == 1 and projects[0]["id"] != cur["id"]
+        assert session_rows_of_project(home, projects[0]["id"]) == []
 
         # 不存在的 id：直接报不存在
         ws.send_json({"id": "del2", "method": "project.delete", "params": {"id": 99999}})
         r2 = recv_until(ws, "del2")
         assert not r2["ok"] and "不存在" in r2["error"]
-
-        # 项目仍然健在
-        ws.send_json({"id": "pl2", "method": "project.list", "params": {}})
-        assert any(
-            p["id"] == cur["id"] for p in recv_until(ws, "pl2")["result"]["projects"]
-        )

@@ -2275,8 +2275,8 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
   head.innerHTML = FOLDER_SVG +
     `<span class="pg-name">${escapeHtml(name)}</span>` +
     (list.length ? `<span class="pg-count">${list.length}</span>` : "") +
-    (project && !isCurrent
-      ? '<button class="pg-del" title="从列表中移除这个项目">✕</button>' : "") +
+    (project
+      ? `<button class="pg-del" title="${isCurrent ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目"}">✕</button>` : "") +
     '<span class="pg-chev"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
     'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M6 4l4 4-4 4"/></svg></span>';
@@ -3987,12 +3987,12 @@ async function refreshProjects(prefetched) {
       rerender: () => refreshProjects(),
     });
     li.dataset.pid = p.id; // commitProjectOrder 从 DOM 收集当前序
-    // 非当前项目：悬浮出移除按钮（连带会话与白名单，不删电脑上的文件夹）
-    if (!p.is_current) {
+    // 移除按钮：当前项目也能删（清空会话与记录后用同一目录重置重新开始）
+    {
       const del = document.createElement("button");
       del.className = "p-del";
       del.textContent = "✕";
-      del.title = "从列表中移除这个项目";
+      del.title = p.is_current ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目";
       del.onclick = (e) => {
         e.stopPropagation();
         deleteProjectModal(p);
@@ -4014,15 +4014,24 @@ async function refreshProjects(prefetched) {
 // 删除项目：确认后连带删掉它的会话与白名单（磁盘文件夹不动）
 function deleteProjectModal(p) {
   const box = document.createElement("div");
+  const cur = !!p.is_current;
   box.innerHTML =
-    `<p>确定从列表中移除项目 <b>${escapeHtml(p.name)}</b> 吗？</p>
-     <p class="dim small">该项目下的<b>会话记录与白名单会一并删除</b>；电脑上的文件夹和文件
-     <b>不受影响</b>，以后随时可以重新添加回来。</p>
-     <span class="mono-path">${escapeHtml(p.root_path)}</span>`;
+    `<p>确定从列表中移除项目 <b>${escapeHtml(p.name)}</b> 吗？</p>` +
+    (cur
+      ? `<p class="dim small">这是<b>当前正在使用的项目</b>：它的全部会话、白名单与任务会被清空，` +
+        `然后用同一目录重新开始（干净的项目）。</p>`
+      : `<p class="dim small">该项目下的<b>会话记录与白名单会一并删除</b>；电脑上的文件夹和文件` +
+        `<b>不受影响</b>，以后随时可以重新添加回来。</p>`) +
+    `<span class="mono-path">${escapeHtml(p.root_path)}</span>`;
   showModal("删除项目", box, async () => {
-    await request("project.delete", { id: p.id });
-    refreshProjects();
-    addNotice(`已移除项目「${p.name}」；文件夹仍保留在电脑上。`);
+    const r = await request("project.delete", { id: p.id });
+    if (r.reset_current) {
+      await applyWorkspaceData(await fetchWorkspaceData());
+      addNotice(`项目「${p.name}」已重置：会话与记录清空，从新开始。`);
+    } else {
+      refreshProjects();
+      addNotice(`已移除项目「${p.name}」；文件夹仍保留在电脑上。`);
+    }
   }, "移除");
 }
 

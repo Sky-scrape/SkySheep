@@ -197,6 +197,10 @@ class ReadDocumentTool(Tool):
         "纯文本文件请用 read_file。用户让你「看/读/总结某个文档」时用它。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = ReadDocumentArgs
 
     async def run(self, args: ReadDocumentArgs, ctx: ToolContext) -> str:
@@ -578,6 +582,10 @@ class WriteDocumentTool(Tool):
     )
     safety = Safety.WRITE
     write_path_arg = True
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = False
     args_model = WriteDocumentArgs
     last_diff = ""
 

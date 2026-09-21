@@ -128,8 +128,18 @@ class OpenAICompatProvider(Provider):
         if self.temperature is not None:
             params["temperature"] = self.temperature
         if tool_schemas:
+            # 按白名单取键：schema 里的 annotations（MCP 注解）不发往
+            # OpenAI 兼容端点，严格网关会拒收 function 上的未知字段
             params["tools"] = [
-                {"type": "function", "function": s} for s in tool_schemas
+                {
+                    "type": "function",
+                    "function": {
+                        "name": s["name"],
+                        "description": s["description"],
+                        "input_schema": s["input_schema"],
+                    },
+                }
+                for s in tool_schemas
             ]
         try:
             stream = await self._client.chat.completions.create(**params)

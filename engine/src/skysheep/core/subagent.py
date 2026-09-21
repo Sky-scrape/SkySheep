@@ -505,6 +505,11 @@ class SpawnAgentArgs(BaseModel):
 class SpawnAgentTool(Tool):
     name = "spawn_agent"
     safety = Safety.READONLY
+    # 派生的子代理会真实执行任务，对外按「有写动作」如实标注
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = False
     args_model = SpawnAgentArgs
 
     def __init__(self, tasks: TaskManager) -> None:
@@ -546,6 +551,10 @@ class CheckTaskTool(Tool):
     name = "check_task"
     description = "查询后台子代理任务的状态与结果。status=running 时可稍后再查。"
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = CheckTaskArgs
 
     def __init__(self, tasks: TaskManager) -> None:

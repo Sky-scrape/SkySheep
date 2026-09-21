@@ -9,6 +9,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.11%2B-informational)
 [![中文](https://img.shields.io/badge/docs-中文-red)](README.md)
+[![M8ven Verified](https://m8ven.ai/badge/mcp/sky-scrape/skysheep?variant=verified)](https://m8ven.ai/mcp/sky-scrape/skysheep)
 
 [🌐 Website](https://sky-scrape.github.io/SkySheep/) · [⬇️ Download](https://github.com/Sky-scrape/SkySheep/releases/latest) · [🧩 Skill Market](market/) · [📖 中文文档](README.md)
 
@@ -172,6 +173,8 @@ Where they differ: the big three CLIs are stronger in terminal ecosystem (plugin
 ```
 
 Design keynote: **event-stream driven** — the entire agent run is modeled as `AgentEvent`s, and the CLI, GUI, and WebSocket server all consume the same engine API; sensitive operations go through the `PermissionGate`, which emits a `PermissionRequest` event and suspends; once the frontend decides, execution resumes.
+
+Auditability: all project source (the Python engine and the frontend trio) ships as readable, unobfuscated code; the mermaid/xterm bundles under `server/static/vendor/` are upstream minified build artifacts of third-party libraries (versions pinned, never modified) — published assets, not project source. Built-in tools export standard MCP annotations (readOnlyHint / destructiveHint / idempotentHint / openWorldHint) for MCP hosts.
 
 ## 🤝 Development
 

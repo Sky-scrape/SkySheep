@@ -39,6 +39,10 @@ class GrepTool(Tool):
         "默认跳过 .git、node_modules 等目录和二进制文件。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = GrepArgs
 
     async def run(self, args: GrepArgs, ctx: ToolContext) -> str:

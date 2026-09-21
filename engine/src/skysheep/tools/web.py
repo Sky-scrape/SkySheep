@@ -157,6 +157,10 @@ class WebFetchTool(Tool):
         "仅支持 http/https 公网地址，内网与回环地址会被拒绝；长文本会被截断。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = True
     args_model = WebFetchArgs
 
     def __init__(self, allow_private_hosts: bool = False) -> None:
@@ -322,6 +326,10 @@ class WebSearchTool(Tool):
         "需要查资料、找文档、核实时效性信息时先用它，再用 web_fetch 读感兴趣的页面全文。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = True
     args_model = WebSearchArgs
 
     def __init__(self, provider: str = "", api_key: str = "",

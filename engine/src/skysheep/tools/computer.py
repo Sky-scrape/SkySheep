@@ -545,6 +545,10 @@ class ScreenshotTool(Tool):
         "操作电脑前先截图定位；返回文本会说明坐标原点与缩放比。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = ScreenshotArgs
 
     async def run(self, args: ScreenshotArgs, ctx: ToolContext) -> str:
@@ -607,6 +611,10 @@ class WindowListTool(Tool):
         "用于在 window activate/close 前找到目标窗口。只读操作。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = WindowListArgs
 
     async def run(self, args: WindowListArgs, ctx: ToolContext) -> str:
@@ -640,6 +648,11 @@ class ClipboardReadTool(Tool):
     # 安全审查 D4：剪贴板常驻密码管理器刚复制的凭据，不能与普通只读工具一样
     # 自动放行——与 clipboard_write 同一确认姿态。
     safety = Safety.WRITE
+    # 读不改环境；safety=WRITE 是因剪贴板可能含敏感内容，读取也需确认
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = ClipboardReadArgs
 
     async def run(self, args: ClipboardReadArgs, ctx: ToolContext) -> str:
@@ -661,6 +674,10 @@ class ClipboardWriteTool(Tool):
         "适合粘贴长文本）。写操作，会先请求用户确认。"
     )
     safety = Safety.WRITE
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = False
     args_model = ClipboardWriteArgs
 
     def arg_text(self, input_dict: dict) -> str:
@@ -702,6 +719,10 @@ class MouseTool(Tool):
         "直接操作用户电脑，高危操作，会先请求用户确认。"
     )
     safety = Safety.DANGEROUS
+    read_only_hint = False
+    destructive_hint = True
+    idempotent_hint = False
+    open_world_hint = False
     args_model = MouseArgs
 
     def arg_text(self, input_dict: dict) -> str:
@@ -749,6 +770,10 @@ class KeyboardTool(Tool):
         "的输入框），或 keys 发送组合键。直接操作用户电脑，高危操作，会先请求用户确认。"
     )
     safety = Safety.DANGEROUS
+    read_only_hint = False
+    destructive_hint = True
+    idempotent_hint = False
+    open_world_hint = False
     args_model = KeyboardArgs
 
     def arg_text(self, input_dict: dict) -> str:
@@ -792,6 +817,10 @@ class WindowTool(Tool):
         "影响用户桌面，高危操作，会先请求用户确认。"
     )
     safety = Safety.DANGEROUS
+    read_only_hint = False
+    destructive_hint = True
+    idempotent_hint = False
+    open_world_hint = False
     args_model = WindowArgs
 
     def arg_text(self, input_dict: dict) -> str:

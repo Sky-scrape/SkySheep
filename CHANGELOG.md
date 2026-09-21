@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **内置工具全量导出 MCP 注解**：`Tool` 新增 `read_only_hint` / `destructive_hint` /
+  `idempotent_hint` / `open_world_hint` 四个类属性，`to_schema()` 以 `annotations`
+  （`readOnlyHint` 等四布尔，MCP `tools/list` 标准语义）导出，31 个内置工具全部按
+  真实语义显式声明；接入的远程 MCP 工具未声明时落到基类缺省（宁可疑其有写、有
+  破坏性，让宿主多确认一次）。发往模型 API 的载荷不含注解——openai_compat 改为
+  按白名单取键（anthropic_provider 本就如此），严格网关不会因未知字段拒收。外部
+  宿主与工具目录（M8ven Trust Index、OpenAI directory 等）据此在调用前分级提示。
+  新增 `tests/test_tool_annotations.py`，把全部内置工具逐个点名锁住注解齐全与语义。
+- **README 挂 M8ven Trust Index 徽章**：收录页 m8ven.ai/mcp/sky-scrape/skysheep，
+  徽章为对方实时维护的图片（认领并核验后由「M8ven Trust」自动翻转为「M8ven
+  Verified」）；架构一节补充代码可审计性说明（`vendor/` 为第三方上游压缩发布件，
+  非混淆的项目源码）。
+
 ### 清理
 
 - **出库开发期调试残留**：`engine/x1.txt`、`engine/x2.txt`（`tests/test_agent.py`

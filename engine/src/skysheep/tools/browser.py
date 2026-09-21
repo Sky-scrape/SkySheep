@@ -81,6 +81,10 @@ class BrowserTool(Tool):
         "会在用户的真实浏览器里打开页面，高危操作，会先请求用户确认。"
     )
     safety = Safety.DANGEROUS
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = True
     args_model = BrowserArgs
 
     def arg_text(self, input_dict: dict) -> str:

@@ -92,6 +92,10 @@ class ReadImageTool(Tool):
         "要看当前屏幕请用 screenshot。图片路径不能是目录。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = ReadImageArgs
 
     async def run(self, args: ReadImageArgs, ctx: ToolContext) -> str:

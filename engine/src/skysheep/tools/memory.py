@@ -256,6 +256,11 @@ class MemoryWriteTool(Tool):
         "用户要求忘记某事时用 delete。记忆会自动注入你之后的每一轮对话。"
     )
     safety = Safety.READONLY  # 只写 SkySheep 自有记忆文件，不需要确认
+    # 只写 SkySheep 自有记忆文件（safety=READONLY 免确认），但对环境有写动作
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = False
     args_model = MemoryWriteArgs
 
     async def run(self, args: MemoryWriteArgs, ctx: ToolContext) -> str:

@@ -83,6 +83,10 @@ class ReadFileTool(Tool):
         "图片用 read_image，PDF/Word/Excel/PPT 用 read_document。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = ReadFileArgs
 
     async def run(self, args: ReadFileArgs, ctx: ToolContext) -> str:
@@ -144,6 +148,10 @@ class WriteFileTool(Tool):
     )
     safety = Safety.WRITE
     write_path_arg = True  # 写目标 = args.path（「自动允许写入」档据此判定目录边界）
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = False
     args_model = WriteFileArgs
     last_diff = ""
 
@@ -186,6 +194,10 @@ class EditFileTool(Tool):
     )
     safety = Safety.WRITE
     write_path_arg = True
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = False
     args_model = EditFileArgs
     last_diff = ""
 
@@ -246,6 +258,10 @@ class MoveFileTool(Tool):
     write_path_arg = True  # 写目标是 destination：自动允许写入档按它判目录边界
     write_target_arg = "destination"
     guard_path_args = ("source",)  # 源也必须落在工作目录内，否则「移出去」会被自动放行
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = False
     args_model = MoveFileArgs
 
     def __init__(self, recorder: ChangeRecorder | None = None) -> None:
@@ -310,6 +326,10 @@ class DeleteFileTool(Tool):
     )
     safety = Safety.DANGEROUS
     write_path_arg = True
+    read_only_hint = False
+    destructive_hint = True
+    idempotent_hint = False
+    open_world_hint = False
     args_model = DeleteFileArgs
 
     def __init__(self, recorder: ChangeRecorder | None = None) -> None:
@@ -359,6 +379,11 @@ class MakeDirTool(Tool):
     description = "创建目录（含父目录）。已有同名目录时直接返回提示，不报错。"
     safety = Safety.WRITE
     write_path_arg = True
+    # mkdir -p 语义，重复创建无额外效果
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = MakeDirArgs
 
     async def run(self, args: MakeDirArgs, ctx: ToolContext) -> str:
@@ -387,6 +412,10 @@ class ListDirTool(Tool):
     name = "list_dir"
     description = "列出目录内容（一层），标注目录/文件与大小。"
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = ListDirArgs
 
     async def run(self, args: ListDirArgs, ctx: ToolContext) -> str:
@@ -422,6 +451,10 @@ class GlobTool(Tool):
         "找文件比 list_dir 更高效。遵循 .skysheepignore 忽略规则。"
     )
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = GlobArgs
 
     async def run(self, args: GlobArgs, ctx: ToolContext) -> str:

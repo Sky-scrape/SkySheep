@@ -47,6 +47,10 @@ class GenerateImageTool(Tool):
     )
     safety = Safety.WRITE
     write_path_arg = True  # 路径缺省时落在工作目录内 images/
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = True
     args_model = GenerateImageArgs
     last_diff = ""
 

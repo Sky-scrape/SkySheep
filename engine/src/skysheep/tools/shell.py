@@ -261,6 +261,10 @@ class RunCommandTool(Tool):
         "高危操作，会先请求用户确认。"
     )
     safety = Safety.DANGEROUS
+    read_only_hint = False
+    destructive_hint = True
+    idempotent_hint = False
+    open_world_hint = True
     args_model = RunCommandArgs
 
     def arg_text(self, input_dict: dict) -> str:

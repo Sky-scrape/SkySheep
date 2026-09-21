@@ -35,6 +35,11 @@ class TodoWriteTool(Tool):
         "每完成一步就更新状态；全部完成时全部标 completed。简单任务（1-2 步）不要使用。"
     )
     safety = Safety.READONLY
+    # 每次全量覆盖清单，同参数重复写入结果一致
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = TodoWriteArgs
 
     def __init__(self) -> None:

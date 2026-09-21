@@ -46,6 +46,11 @@ class ScheduleWriteTool(Tool):
         + SCHEDULE_HINT
     )
     safety = Safety.READONLY
+    # 只写 SkySheep 自有日程库（safety=READONLY 免确认），但对环境有写动作
+    read_only_hint = False
+    destructive_hint = False
+    idempotent_hint = False
+    open_world_hint = False
     args_model = ScheduleWriteArgs
 
     def __init__(self, store) -> None:

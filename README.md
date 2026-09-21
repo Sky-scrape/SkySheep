@@ -9,6 +9,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.11%2B-informational)
 [![English](https://img.shields.io/badge/docs-English-red)](README.en.md)
+[![M8ven Verified](https://m8ven.ai/badge/mcp/sky-scrape/skysheep?variant=verified)](https://m8ven.ai/mcp/sky-scrape/skysheep)
 
 [🌐 官网](https://sky-scrape.github.io/SkySheep/) · [⬇️ 下载安装包](https://github.com/Sky-scrape/SkySheep/releases/latest) · [🧩 技能广场](market/) · [📖 English Docs](README.en.md)
 
@@ -251,6 +252,11 @@ SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐�
 设计要点：**事件流驱动**——Agent 运行过程全部建模为 `AgentEvent`，CLI、GUI、
 WebSocket server 消费同一套引擎 API；敏感操作通过 `PermissionGate` 产出
 `PermissionRequest` 事件并挂起，前端决策后恢复执行。
+
+代码可审计性：本项目全部源码（Python 引擎与前端三件套）均为未混淆的可读原始代码；
+`server/static/vendor/` 下随附的 mermaid、xterm 等是第三方库的上游压缩构建产物
+（版本锁定、未经改写），属发布件而非本项目源码。内置工具对 MCP 宿主导出标准
+annotations 注解（readOnlyHint / destructiveHint / idempotentHint / openWorldHint）。
 
 ## 🤝 开发
 

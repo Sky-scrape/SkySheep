@@ -18,6 +18,10 @@ class LoadSkillTool(Tool):
     name = "load_skill"
     description = "读取一个技能的完整指令。执行技能相关任务前应先加载。"
     safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = LoadSkillArgs
 
     def __init__(self, loader: SkillLoader) -> None:

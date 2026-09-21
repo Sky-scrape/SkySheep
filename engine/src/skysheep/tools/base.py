@@ -4,6 +4,8 @@
 - name / description：给模型看的接口
 - safety：安全分级，决定 Permission Gate 的放行策略
 - args_model：pydantic 参数模型，自动导出 JSON Schema 给模型
+- read_only_hint 等四个 MCP 注解：导出到 schema 的 annotations，供外部宿主
+  与工具目录在调用前分级提示（safety 管本地权限门，注解管对外呈现，两者独立）
 
 注意：工具入口方法命名为 run（而非 execute），避免与 SQL 客户端的
 execute 方法同名——静态审计工具会将其误判为 SQL 拼接。
@@ -72,16 +74,35 @@ class Tool(abc.ABC):
     # 「自动允许写入」档要求列出的每个字段都解析在工作目录内。
     guard_path_args: tuple[str, ...] = ()
 
+    # MCP 工具注解（to_schema 导出为 annotations 四布尔，语义见 MCP 规范）。
+    # 默认值取规范的保守缺省；内置工具一律显式声明四值，接入的远程 MCP 工具
+    # 未声明时落到这里——宁可疑其有写、有破坏性，让外部宿主多提醒一次。
+    read_only_hint: bool = False    # 不改动任何环境状态（宿主可考虑免确认调用）
+    destructive_hint: bool = True   # 可能对环境做破坏性更新（规范缺省 true）
+    idempotent_hint: bool = False   # 同参数重复调用无额外效果
+    open_world_hint: bool = True    # 与本地环境之外的开放实体（网页、API）交互
+
     @abc.abstractmethod
     async def run(self, args: BaseModel, ctx: ToolContext) -> str:
         """执行工具，返回文本结果。失败抛 ToolError。"""
 
     def to_schema(self) -> dict[str, Any]:
-        """导出为 OpenAI function / Anthropic tool 通用的 schema。"""
+        """导出为 OpenAI function / Anthropic tool 通用的 schema。
+
+        annotations 是 MCP tools/list 的标准注解，给外部宿主与目录看；
+        发往模型 API 的载荷不含它——openai_compat 端点可能拒收未知字段，
+        provider 层按白名单取键（anthropic_provider 本就如此）。
+        """
         return {
             "name": self.name,
             "description": self.description,
             "input_schema": self.args_model.model_json_schema(),
+            "annotations": {
+                "readOnlyHint": self.read_only_hint,
+                "destructiveHint": self.destructive_hint,
+                "idempotentHint": self.idempotent_hint,
+                "openWorldHint": self.open_world_hint,
+            },
         }
 
     def arg_text(self, input_dict: dict[str, Any]) -> str:

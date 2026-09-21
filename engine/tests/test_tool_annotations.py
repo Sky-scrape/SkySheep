@@ -68,7 +68,14 @@ def _build(name: str) -> Tool:
     if name == "pipeline_write":
         return PipelineWriteTool(store=None, project_id_fn=lambda: 0)
     if name == "spawn_agent":
-        tasks = type("_Tasks", (), {"list_custom": staticmethod(lambda: [])})()
+        tasks = type(
+            "_Tasks",
+            (),
+            {
+                "list_custom": staticmethod(lambda: []),
+                "list_builtin_desc": staticmethod(lambda: [("researcher", "调研")]),
+            },
+        )()
         return SpawnAgentTool(tasks)
     if name == "check_task":
         return CheckTaskTool(None)

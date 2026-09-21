@@ -20,6 +20,29 @@ if not exist "%ENGINE_DIR%\pyproject.toml" (
 )
 cd /d "%ENGINE_DIR%"
 
+rem Source-tree runs default to the "dev" instance so their data lands in
+rem ~/.skysheep-dev and never mixes with an installed copy's ~/.skysheep.
+rem This script is for editing/verifying code; an installed build is for daily use.
+rem Do not override an explicit SKYSHEEP_HOME / SKYSHEEP_INSTANCE.
+rem NOTE: keep every comment in this file ASCII-only. cmd.exe parses .bat bytes
+rem in the OEM code page, so UTF-8 multi-byte characters split into stray commands.
+if not defined SKYSHEEP_HOME if not defined SKYSHEEP_INSTANCE set "SKYSHEEP_INSTANCE=dev"
+
+rem Logically: data dir = SKYSHEEP_HOME, else ~/.skysheep[-<instance>].
+if defined SKYSHEEP_HOME (
+    set "SKY_DATA=%SKYSHEEP_HOME%"
+    set "SKY_LABEL=custom"
+) else if defined SKYSHEEP_INSTANCE (
+    set "SKY_DATA=%USERPROFILE%\.skysheep-%SKYSHEEP_INSTANCE%"
+    set "SKY_LABEL=%SKYSHEEP_INSTANCE%"
+) else (
+    set "SKY_DATA=%USERPROFILE%\.skysheep"
+    set "SKY_LABEL=default"
+)
+title SkySheep [%SKY_LABEL%]
+echo   Instance: %SKY_LABEL%   Data: %SKY_DATA%
+echo.
+
 where uv >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] uv not found in PATH. Screenshot this window.

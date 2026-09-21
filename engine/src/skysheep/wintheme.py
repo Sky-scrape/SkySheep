@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import ctypes
-import os
 import sys
 from pathlib import Path
 
@@ -173,10 +172,9 @@ def read_ui_theme(home: Path | None = None) -> str:
     """
     import json
 
-    base = home
-    if base is None:
-        env = os.environ.get("SKYSHEEP_HOME")
-        base = Path(env).expanduser() if env else Path.home() / ".skysheep"
+    from . import instance
+
+    base = home if home is not None else instance.data_home()
     try:
         prefs = json.loads((base / "ui.json").read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001

@@ -112,6 +112,7 @@ from ..models import Provider
 from ..models.base import ProviderDone, ProviderReasoning, ProviderTextDelta
 from ..models.factory import build_provider
 from ..models.probe import probe_provider_models
+from ..obs import info as obs_info
 from ..security.gate import RULE_KINDS, HeadlessGate, PermissionGate
 from ..security.trust import WorkspaceTrust
 from ..session import SessionStore
@@ -151,6 +152,130 @@ logger = logging.getLogger("skysheep.security")
 memory_log = logging.getLogger("skysheep.memory")
 
 EmitFn = Callable[[dict], Awaitable[None]]
+
+# 流式增量事件的合并窗口（秒）与单条合并上限（字符）。
+#
+# 上游 delta 的粒度由各家 provider 决定，常见是每个 SSE chunk 一个 token 级增量，
+# 一轮长回答就是上千条事件——每条都要过 WS 的发送锁、单独 JSON 序列化一帧。
+# 终端输出已经做过同类合并（见 TerminalManager.TERM_MERGE_S），对话流此前没有。
+# 这里把连续的同类型增量拼成一条：首条立即发出（不动首字延迟），之后按窗口聚批。
+STREAM_MERGE_S = 0.04
+STREAM_MERGE_MAX_CHARS = 2_000
+
+# 可不经合并直接发出的高频增量事件类型（其余事件一律先冲刷缓冲，保证顺序）。
+_MERGEABLE_DELTA_KINDS = ("text_delta", "thinking_delta", "roundtable_member_delta")
+
+
+class StreamDeltaMerger:
+    """把连续的流式增量拼成批量事件，减少 WS 帧数。
+
+    设计要点：
+    - **顺序不变**：任何非增量事件（工具调用、权限、用量、轮末…）到达时先冲刷缓冲；
+      不同类型增量（text ↔ thinking）互相切换也各自冲刷，不跨界合并。
+    - **不增加首字延迟**：缓冲为空时首条增量立即发出，之后才进入窗口聚批。
+      首条发出后记下已发长度（``_sent``），flush 只补发之后累积的部分。
+    - **收尾必冲刷**：``flush()`` 必须在轮末、异常、取消三条路径上都调到，
+      否则最后几十毫秒的增量会丢在前端。
+    - ``roundtable_member_delta`` 带 member_index/round，只在同一成员同一轮内合并。
+    """
+
+    def __init__(self, emit: EmitFn, *, window_s: float = STREAM_MERGE_S) -> None:
+        self._emit = emit
+        self._window_s = window_s
+        self._pending: dict | None = None
+        self._key: tuple | None = None
+        self._sent = 0  # 当前缓冲里已经发出去的字符数
+        self._last_emit = 0.0
+        self._timer: asyncio.Task | None = None
+
+    @staticmethod
+    def _delta_key(ev: dict) -> tuple | None:
+        kind = ev.get("kind")
+        if kind not in _MERGEABLE_DELTA_KINDS:
+            return None
+        if kind == "roundtable_member_delta":
+            return (kind, ev.get("member_index"), ev.get("round"))
+        return (kind,)
+
+    def _schedule_flush(self) -> None:
+        """预约一次定时冲刷。
+
+        只靠「下一条增量到达时再发」会把尾巴揨住：模型中途停顿（限流、思考、
+        长工具前奏）时，缓冲里那几十字符会一直不上屏，用户看到回答卡住。
+        定时器把滞留上限固定在 window_s，与合并带来的帧数下降取得平衡。
+        """
+        if self._timer is not None:
+            return
+        try:
+            self._timer = asyncio.get_running_loop().create_task(self._timed_flush())
+        except RuntimeError:
+            self._timer = None  # 无事件循环（纯同步调用）：交给下一次 send/flush
+
+    async def _timed_flush(self) -> None:
+        try:
+            await asyncio.sleep(self._window_s)
+        except asyncio.CancelledError:
+            return
+        # 先清句柄再冲刷：flush 里据此避免取消自己（取消当前任务会抛 CancelledError）
+        self._timer = None
+        try:
+            await self.flush()
+        except Exception:  # noqa: BLE001 - 客户端断开不影响后续事件
+            pass
+
+    async def send(self, ev: dict) -> None:
+        key = self._delta_key(ev)
+        if key is None:
+            # 非增量事件：先冲刷，再原样发出（工具/权限/轮末事件绝不能等）
+            await self.flush()
+            await self._emit(ev)
+            return
+
+        now = time.monotonic()
+        text = ev.get("text", "") or ""
+        can_merge = (
+            self._pending is not None
+            and self._key == key
+            and now - self._last_emit < self._window_s
+            and len(self._pending.get("text", "")) < STREAM_MERGE_MAX_CHARS
+        )
+        if can_merge:
+            # 窗口内且同类型：只累积（这里无 await，与定时器不会交错）
+            self._pending["text"] = self._pending.get("text", "") + text
+            return
+
+        # 新一段增量的首条（或超过窗口 / 超过上限）：先冲刷旧缓冲，再立即发这条
+        await self.flush()
+        self._pending = dict(ev)
+        self._pending["text"] = text
+        self._key = key
+        self._sent = len(text)
+        self._last_emit = now
+        await self._emit(self._pending)  # 首条立即发：首字延迟与合并前一致
+        self._schedule_flush()  # 预约冲刷，避免尾巴被无限期揨住
+
+    async def flush(self) -> None:
+        """补发缓冲里尚未发出的增量；无待发内容时是空操作。"""
+        timer = self._timer
+        if timer is not None:
+            self._timer = None
+            # 不要取消自己（定时器回调也走 flush）
+            if timer is not asyncio.current_task():
+                timer.cancel()
+        pending = self._pending
+        tail = ""
+        if pending is not None:
+            full = pending.get("text", "") or ""
+            tail = full[self._sent:]
+        self._pending = None
+        self._key = None
+        self._sent = 0
+        if pending is None or not tail:
+            return
+        await self._emit({**pending, "text": tail})
+
+    async def aclose(self) -> None:
+        await self.flush()
 
 MAX_DIFF_CHARS = 8000
 
@@ -2912,8 +3037,38 @@ class ServerBackend:
         sid = session_id or runtime.sid
         agent = runtime.agent
 
+        # 流式增量合并：emit_ev 下发给前端前先过一层缓冲，把连续的同类型增量
+        # （text_delta / thinking_delta / roundtable_member_delta）拼成批量帧。
+        # 其余事件在 merger 里会先冲刷缓冲再原样发出，顺序与合并前一致。
+        merger = StreamDeltaMerger(emit)
+
+        # 本轮工具/权限的耗时统计（给轮末结构化日志用）。
+        # 从事件流里数而不是侵入 agent 循环：事件本就带 duration_ms，
+        # 这里只做累加，不在热路径上加任何计算。
+        turn_stats: dict[str, int] = {
+            "tool_calls": 0, "tool_ms": 0, "tool_errors": 0,
+            "permission_waits": 0, "permission_ms": 0,
+        }
+        _perm_pending: dict[str, float] = {}
+
         async def emit_ev(ev: dict) -> None:
-            await emit({**ev, "session_id": sid})
+            kind = ev.get("kind")
+            if kind == "tool_call_finished":
+                turn_stats["tool_calls"] += 1
+                turn_stats["tool_ms"] += int(ev.get("duration_ms") or 0)
+                if ev.get("is_error"):
+                    turn_stats["tool_errors"] += 1
+            elif kind == "permission_request":
+                rid = ev.get("request_id") or ""
+                if rid:
+                    _perm_pending[rid] = time.monotonic()
+            elif kind == "permission_resolved":
+                rid = ev.get("request_id") or ""
+                t0 = _perm_pending.pop(rid, None)
+                if t0 is not None:
+                    turn_stats["permission_waits"] += 1
+                    turn_stats["permission_ms"] += int((time.monotonic() - t0) * 1000)
+            await merger.send({**ev, "session_id": sid})
 
         # 「用户消息」广播给其余在线客户端：轮次事件只发给发起连接，其他窗口 /
         # 手机端此前既看不到用户消息也没有任何「有人发了话」的来源。发起连接的
@@ -3019,6 +3174,13 @@ class ServerBackend:
             # 让 WS 层返回 ok=false 的诚实错误。
             turn_exc = e
         finally:
+            # 先冲刷流式增量缓冲：取消/异常/正常结束三条路径都要走到，
+            # 否则最后几十毫秒的正文会丢在前端（用户看到回答缺尾）。
+            # 放在恢复工具集之前，保证 flush 出去的事件仍带本轮 session_id 顺序。
+            try:
+                await merger.aclose()
+            except Exception:  # noqa: BLE001 - 客户端断开不影响收尾
+                pass
             if self.tasks:
                 self.tasks.set_active_session("")
             if plan_mode and readonly_registry is not None:
@@ -3045,6 +3207,28 @@ class ServerBackend:
                 agent.total_in_tokens - tin0, agent.total_out_tokens - tout0,
             )
         except Exception:
+            pass
+
+        # 结构化耗时记录：回答「这轮为什么慢」
+        # （总耗时 / 工具次数与总耗时 / 权限等待——这三项最容易看出卡在哪一段）。
+        try:
+            obs_info(
+                "turn",
+                f"turn finished sid={sid}",
+                session_id=sid,
+                duration_ms=int((time.monotonic() - turn_t0) * 1000),
+                stopped=stopped or None,
+                roundtable=bool(rt_meta) or None,
+                tool_calls=turn_stats["tool_calls"] or None,
+                tool_ms=turn_stats["tool_ms"] or None,
+                tool_errors=turn_stats["tool_errors"] or None,
+                permission_waits=turn_stats["permission_waits"] or None,
+                permission_ms=turn_stats["permission_ms"] or None,
+                in_tokens=agent.total_in_tokens - tin0 or None,
+                out_tokens=agent.total_out_tokens - tout0 or None,
+                error=type(turn_exc).__name__ if turn_exc else None,
+            )
+        except Exception:  # noqa: BLE001 - 日志不偿能影响主流程
             pass
 
         # 首轮对话：后台用模型生成简短标题（8-12 字），替换首行截断文本
@@ -4481,7 +4665,9 @@ class ServerBackend:
         if manager is None:
             return []
         return [
-            {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names}
+            {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names,
+             "reconnecting": getattr(st, "reconnecting", False),
+             "restarts": getattr(st, "restarts", 0)}
             for n, st in manager.statuses.items()
         ]
 
@@ -7192,7 +7378,9 @@ class ServerBackend:
                 "scope_config": str(skysheep_home() / "skills-scope.json"),
             },
             "mcp": [
-                {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names}
+                {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names,
+             "reconnecting": getattr(st, "reconnecting", False),
+             "restarts": getattr(st, "restarts", 0)}
                 for n, st in self.mcp.statuses.items()
             ],
             "mcp_config": {

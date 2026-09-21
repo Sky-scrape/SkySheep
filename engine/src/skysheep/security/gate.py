@@ -8,8 +8,10 @@
 白名单规则四类（WhitelistRule.kind）：
 - ``always``：整个工具放行；
 - ``prefix``：参数文本按**完整词**前缀命中，且命令类工具额外要求整条命令里没有
-  shell 拼接/替换元字符（``;`` ``|`` ``&`` ``<`` ``>`` ` ``` `` `` ``$`` 换行），
-  ``git status; rm -rf /`` 这类拼接命令不会被 ``git status`` 的前缀规则放行；
+  shell 拼接/替换元字符（分隔符 ``;`` ``|`` ``&`` ``<`` ``>``、展开符 ``$`` 与反引号、
+  换行；Windows 的 ``cmd.exe`` 上再加单引号 ``'`` 与 ``%VAR%`` 展开——见
+  ``_has_shell_chain``），``git status; rm -rf /`` 这类拼接命令不会被 ``git status``
+  的前缀规则放行；
 - ``exact``：与当初批准的那次调用参数完全一致才放行。三类调用走这一类：含 shell 拼接的
   命令（用户批准的就是那一条，不给它顺带放行同前缀的其它命令）、键盘 `type` / `hotkey`
   与 `clipboard_write`（内容本身就是对焦点窗口/剪贴板的任意操作，按动作整类放行等于
@@ -53,31 +55,69 @@ RULE_KINDS = ("always", "prefix", "exact", "glob")
 # 这里显式判断，让规则语义可读、可预期。
 _CASE_INSENSITIVE_FS = os.name == "nt"
 
+# 命令实际交给哪个 shell 执行（见 tools/shell.py：Windows 是 cmd.exe，其它平台是 bash）。
+# 两者的引号与展开语义不同，白名单的「是否有命令拼接」判定必须按平台取，见 _has_shell_chain。
+_IS_WINDOWS = os.name == "nt"
+
+# 两平台都危险的展开/替换字符：POSIX 的变量替换（$VAR）、命令替换（$(...)）与反引号，
+# 以及换行。Windows 的 cmd 不展开 $ 与反引号，但保守拦下没有代价（只是回到逐次确认），
+# 而一旦漏判就是白名单被绕过。
+_CHAIN_EXPAND_CHARS = "`$\r\n"
+
+# 命令分隔/重定向字符。`;` 在 cmd 中并不是分隔符，但它在本表里两平台一并拦下——
+# 纵深防御：命令字符串的解析方未必永远是我们这里指定的 shell，宁可多问一次。
+_CHAIN_SEP_CHARS = ";|&<>"
+
 
 def _has_shell_chain(text: str) -> bool:
     r"""命令里是否出现 shell 拼接/替换元字符。
 
+    必须按实际执行该命令的 shell 判定（见 tools/shell.py）：Windows 是 ``cmd.exe /c``，
+    其它平台是 ``bash -c``。两边的引号语义并不相同，用一套规则同时套两边会漏判：
+
+    - **单引号**：POSIX 下是字面量引号（内部一切安全），但 ``cmd.exe`` 不认单引号，
+      ``echo ' & whoami`` 里的 ``&`` 照样分隔命令。所以只有 POSIX 才跳过单引号内容。
+    - **双引号**：两平台都会抑制分隔符语义（实测 cmd 中 ``" & whoami"`` 不分割），
+      保留跳过行为；但 ``$`` 与反引号在双引号内仍会展开。
+    - **``%``**：``cmd.exe`` 会做 ``%VAR%`` 环境变量展开，而变量值里可以带分隔符——
+      等于把「参数」变成「命令」，所以 Windows 上 ``%`` 与分隔符同等对待。
+
     保守实现：不识别反斜杠 / 脱字符转义——POSIX 用 ``\``，cmd.exe 用 ``^``，两套语义
     不同，任何一处漏判都等于白名单被绕过；宁可让 ``git status; rm -rf /`` 这类命令回退
-    成逐次确认。单引号内是字面量（POSIX），双引号内的 ``$`` 与反引号仍会被展开，
-    所以只有 ``;|&<>`` 这类分隔符在双引号内可以放过。
+    成逐次确认。
     """
     single = False
     double = False
     for ch in text:
-        if ch == "'" and not double:
-            single = not single
-            continue
         if ch == '"' and not single:
             double = not double
             continue
+        if ch == "'" and not double:
+            # POSIX：单引号开合，内部是字面量；cmd.exe 不认单引号，其内容照常参与判定
+            if not _IS_WINDOWS:
+                single = not single
+            continue
         if single:
             continue
-        if ch in "`$" or ch in "\r\n":
+        if ch in _CHAIN_EXPAND_CHARS or (_IS_WINDOWS and ch == "%"):
             return True
-        if not double and ch in ";|&<>":
+        if double:
+            continue
+        if ch in _CHAIN_SEP_CHARS:
             return True
     return False
+
+
+def _chain_hint() -> str:
+    """确认弹窗/测试器里解释「为什么这条命令没命中前缀规则」时用的字符集说明。
+
+    与 _has_shell_chain 的实际判定保持一致：Windows 上额外包含单引号（cmd 不认它）
+    与环境变量展开；两平台都列出 ``;``（纵深防御，见 _CHAIN_SEP_CHARS）。
+    """
+    base = "; | & < > ` $ 或换行"
+    if _IS_WINDOWS:
+        return base + "，以及单引号 ' 与 %VAR% 环境变量展开"
+    return base
 
 
 def _prefix_match(text: str, pattern: str) -> bool:
@@ -203,7 +243,7 @@ class PermissionGate:
                 "allowed": False,
                 "hit": None,
                 "reason": (
-                    "命令包含 shell 拼接/替换（; | & < > ` $ 或换行），"
+                    f"命令包含 shell 拼接/替换（{_chain_hint()}），"
                     "前缀规则不覆盖它，每次都会重新询问"
                 ),
             }
@@ -234,7 +274,7 @@ class PermissionGate:
         """
         if self._matched_but_for_chaining(tool.name, arg_text):
             return (
-                "该命令以白名单里的前缀开头，但包含 shell 拼接/替换（; | & < > ` $ 或换行），"
+                f"该命令以白名单里的前缀开头，但包含 shell 拼接/替换（{_chain_hint()}），"
                 "前缀规则不覆盖它，所以每次都要确认。要整类放行请先看设置 · 白名单。"
             )
         # 只固化当次参数的规则（键盘输入 / 剪贴板内容 / 关闭窗口）：白名单里已有同工具规则时

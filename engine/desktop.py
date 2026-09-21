@@ -16,6 +16,7 @@ import ctypes
 import ctypes.wintypes
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -24,8 +25,14 @@ from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
-APP_TITLE = "SkySheep"
-MUTEX_NAME = "Local\\SkySheepDesktopSingleton"
+DEFAULT_TITLE = "SkySheep"
+DEFAULT_HOME_NAME = ".skysheep"
+INSTANCE_ENV = "SKYSHEEP_INSTANCE"
+# 与 skysheep.instance 同一套白名单：启动器刻意不在模块级导入引擎（引擎导入
+# 约 2.4s，必须等窗口可见后才做），所以这里镜像一份规则，并由
+# tests/test_instance.py 锁住两边一致。
+_INSTANCE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")
+
 LOG_MAX_BYTES = 1_000_000
 ERROR_ALREADY_EXISTS = 183
 SW_RESTORE = 9
@@ -42,6 +49,29 @@ _MUTEX_HANDLE = None
 _LAUNCH_T0 = time.monotonic()  # 启动计时基准：日志里记录"窗口多久后可见"
 
 
+def instance_name() -> str | None:
+    """实例身份名；未设置或不合规时 None（等同默认身份）。见 skysheep.instance。"""
+    raw = (os.environ.get(INSTANCE_ENV) or "").strip()
+    return raw if _INSTANCE_RE.match(raw) else None
+
+
+def app_title() -> str:
+    """窗口标题：带身份后缀，两个身份在任务栏/托盘上能分辨。
+
+    单实例识别（_find_main_hwnd）也靠它——标题不同即视为不同的身份，
+    不会把另一份安装的窗口当成自己人，也不会把它当成卡死实例接管。
+    """
+    name = instance_name()
+    return DEFAULT_TITLE if name is None else f"{DEFAULT_TITLE} [{name}]"
+
+
+def mutex_name() -> str:
+    """单实例互斥体名：按身份区分，两个身份各自只允许一个实例。"""
+    name = instance_name()
+    suffix = "" if name is None else "-" + name
+    return f"Local\\{DEFAULT_TITLE}DesktopSingleton{suffix}"
+
+
 def app_dir() -> Path:
     """启动器所在目录：开发态是 engine/，打包态是 exe 所在目录。"""
     if getattr(sys, "frozen", False):
@@ -50,8 +80,11 @@ def app_dir() -> Path:
 
 
 def _home_dir() -> Path:
-    home = os.environ.get("SKYSHEEP_HOME")
-    return Path(home).expanduser() if home else Path.home() / ".skysheep"
+    env = os.environ.get("SKYSHEEP_HOME")
+    if env:
+        return Path(env).expanduser()
+    name = instance_name()
+    return Path.home() / (DEFAULT_HOME_NAME if name is None else f"{DEFAULT_HOME_NAME}-{name}")
 
 
 def log_path() -> Path:
@@ -120,7 +153,7 @@ def _acquire_single_instance() -> bool:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.restype = ctypes.c_void_p
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-    handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    handle = kernel32.CreateMutexW(None, False, mutex_name())
     # last error 必须紧跟调用读取，中间不能插入其它可能覆盖它的操作
     already_running = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
     if not handle:
@@ -179,7 +212,7 @@ def _find_main_hwnd() -> int:
         if length and not _is_hung(hwnd):
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
-            if buf.value.strip() == APP_TITLE:
+            if buf.value.strip() == app_title():
                 candidates.append(int(hwnd))
         return True
 
@@ -326,7 +359,7 @@ def alert(message: str) -> None:
             ctypes.c_wchar_p,
             ctypes.c_uint,
         ]
-        user32.MessageBoxW(None, message, APP_TITLE, 0x10)  # MB_ICONERROR
+        user32.MessageBoxW(None, message, app_title(), 0x10)  # MB_ICONERROR
     except Exception:
         pass
 
@@ -566,8 +599,8 @@ def _tray_worker(icon_path: str, holder: dict) -> None:
             # 先 SetForegroundWindow：菜单才能在点击外部时自动关闭（Win32 惯例）
             user32.SetForegroundWindow(hwnd)
             menu = user32.CreatePopupMenu()
-            user32.AppendMenuW(menu, MF_STRING, IDM_OPEN, "打开 SkySheep")
-            user32.AppendMenuW(menu, MF_STRING, IDM_QUIT, "退出 SkySheep")
+            user32.AppendMenuW(menu, MF_STRING, IDM_OPEN, f"打开 {app_title()}")
+            user32.AppendMenuW(menu, MF_STRING, IDM_QUIT, f"退出 {app_title()}")
             pt = wintypes.POINT()
             user32.GetCursorPos(ctypes.byref(pt))
             cmd = user32.TrackPopupMenuEx(
@@ -643,7 +676,7 @@ def _tray_worker(icon_path: str, holder: dict) -> None:
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = _TRAY_MSG
         nid.hIcon = hicon
-        nid.szTip = "SkySheep（双击打开，右键菜单）"
+        nid.szTip = f"{app_title()}（双击打开，右键菜单）"
         if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
             log("tray: Shell_NotifyIconW(NIM_ADD) failed")
             return
@@ -920,7 +953,7 @@ def _run_windowed() -> int:
     # 「跟随系统」深色下若启动页还是纸色而标题栏已变深，首屏几秒很割裂
     wintheme.set_theme_mode(wintheme.read_ui_theme())
     window = webview.create_window(
-        "SkySheep",
+        app_title(),
         html=splash_html(static, dark=wintheme.theme_is_dark()),
         width=width,
         height=height,
@@ -991,7 +1024,7 @@ def _run_windowed() -> int:
         blue_dark = Color.FromArgb(15, 72, 163)
 
         dlg = WinForms.Form()
-        dlg.Text = "SkySheep"
+        dlg.Text = app_title()
         dlg.FormBorderStyle = WinForms.FormBorderStyle.FixedDialog
         dlg.MaximizeBox = False
         dlg.MinimizeBox = False
@@ -1023,7 +1056,7 @@ def _run_windowed() -> int:
         dlg.Controls.Add(pic)
 
         title = WinForms.Label()
-        title.Text = "要退出 SkySheep 吗？"
+        title.Text = f"要退出 {app_title()} 吗？"
         title.ForeColor = ink
         title.AutoSize = True
         title.Font = Font("Microsoft YaHei UI", 12, FontStyle.Bold)
@@ -1158,7 +1191,7 @@ def _run_windowed() -> int:
                 try:
                     nid.uFlags |= NIF_INFO
                     nid.szInfo = "双击托盘图标恢复窗口；右键图标可打开或退出。"
-                    nid.szInfoTitle = "SkySheep 已在后台运行"
+                    nid.szInfoTitle = f"{app_title()} 已在后台运行"
                     nid.dwInfoFlags = NIIF_INFO
                     ctypes.windll.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
                 except Exception:
@@ -1261,10 +1294,10 @@ def _launch() -> int:
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
         if code:
-            _report_failure(f"SkySheep 启动失败（退出码 {code}）")
+            _report_failure(f"{app_title()} 启动失败（退出码 {code}）")
         return code
     except BaseException:
-        _report_failure("SkySheep 启动失败")
+        _report_failure(f"{app_title()} 启动失败")
         return 1
 
 
@@ -1312,7 +1345,11 @@ def main() -> int:
             _write_pid_record()
             return _launch()
         _log("stale instance did not release mutex in time")
-    alert("SkySheep 已经在运行了。\n\n请查看任务栏中已打开的 SkySheep 窗口。")
+    alert(
+        f"{app_title()} 已经在运行了。\n\n"
+        "请查看任务栏中已打开的窗口。\n\n"
+        "（不同身份可各自运行一份，身份由环境变量 " + INSTANCE_ENV + " 指定。）"
+    )
     return 0
 
 

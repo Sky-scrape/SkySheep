@@ -1193,11 +1193,10 @@ function finishToolCard(data) {
   const tname = card._toolName || "";
   const tpath = String((card._toolInput || {}).path || "");
   const written = !data.is_error && tpath && (tname === "write_file" || tname === "generate_image");
-  // Agent 落了文件：文件树缓存失效——文件标签开着就直接刷新，
+  // Agent 落了文件：文件树缓存失效，防抖后刷新（连续写多个文件只在最后一次刷新），
   // 用户切过去就能看到 Agent 刚写的文件，不用再手动点「刷新」
   if (!data.is_error && (tname === "write_file" || tname === "edit_file")) {
-    filesLoaded = false;
-    if (rightActive === "files" && !rightPanel.classList.contains("hidden")) loadFiles(true);
+    scheduleFilesRefresh();
   }
   if (written && /\.(html?|png|jpe?g|webp|svg)$/i.test(tpath)) {
     const btn = document.createElement("button");
@@ -3805,6 +3804,9 @@ function resetWorkspaceState() {
  *  亮出（本函数不加点，快速切换连变暗都不出现）。 */
 function resetProjectPanels() {
   filesLoaded = false;
+  // 切项目时待发起的文件树防抖刷新一并作废：它请求的是旧项目的 fs.files，
+  // 不取消就会在新项目里把旧目录树画上来（随后被新项目的刷新覆盖，但会先闪一下）
+  if (filesRefreshTimer) { clearTimeout(filesRefreshTimer); filesRefreshTimer = 0; }
   agCache = [];
   // 项目记忆属于旧项目：内容与"已加载"标记一并作废，激活时由 loader 重读。
   // 文本框是可编辑的，不能留旧项目的 AGENTS.md 在屏上（Ctrl+S 会写进新项目），
@@ -4820,11 +4822,52 @@ function decorateFinalMessage(el, tab, getText, seq) {
   attachCodeCopy(el);
 }
 
+// 长会话分批渲染的阀值与每帧份量。
+// 一次同步画完数千条消息（每条还要跑 markdown / mermaid / 代码高亮）会把主线程
+// 占满，切到大会话时就是一段白屏。分批把工作切成多帧，让浏览器有机会先画出首屏。
+// 阀值以下的短会话仍一次画完（不多付一帧的延迟），行为与以前完全一致。
+const HISTORY_SYNC_LIMIT = 200;
+const HISTORY_CHUNK = 100;
+
 function renderHistory(tab, messages) {
+  const all = messages || [];
+  // 渲染代际：期间又渲染过同一条聊天流（切标签 / 重进会话）时，旧的批处理作废
+  const gen = (tab._historyGen = (tab._historyGen || 0) + 1);
   tab.logEl.innerHTML = "";
   tab._toolCards = new Map(); // 在途工具卡随流清空，避免持已分离节点
+
+  if (all.length <= HISTORY_SYNC_LIMIT) {
+    paintHistorySlice(tab, all, 0, all.length);
+    finishHistoryRender(tab, true);
+    return;
+  }
+
+  // 先同步画头一段：openTabForSession 会在 renderHistory 返回后马上看
+  // children.length 判断是否空会话，零节点会被误当成空会话而错误地弹欢迎页
+  const first = Math.min(HISTORY_CHUNK, all.length);
+  paintHistorySlice(tab, all, 0, first);
+  tab.logEl.scrollTop = tab.logEl.scrollHeight;
+  let i = first;
+  const step = () => {
+    if (gen !== tab._historyGen) return; // 已被更新的渲染取代
+    // 追加前先看用户是不是在底部：在底部就继续跟随最新内容，
+    // 用户已经往上翻了就不抢他的位置（分批期间尤其重要）
+    const atBottom = tab.logEl.scrollTop + tab.logEl.clientHeight >= tab.logEl.scrollHeight - 4;
+    const end = Math.min(i + HISTORY_CHUNK, all.length);
+    paintHistorySlice(tab, all, i, end);
+    if (atBottom) tab.logEl.scrollTop = tab.logEl.scrollHeight;
+    i = end;
+    if (i < all.length) requestAnimationFrame(step);
+    else finishHistoryRender(tab, atBottom);
+  };
+  requestAnimationFrame(step);
+}
+
+// 把 messages[start:end) 画进当前聊天流（调用方负责 withTab 路由与滚动位置）。
+function paintHistorySlice(tab, messages, start, end) {
   withTab(tab, () => {
-    (messages || []).forEach((m) => {
+    for (let i = start; i < end; i++) {
+      const m = messages[i];
       let el = null;
       if (m.role === "user") {
         addUser(m.text, m.images);
@@ -4844,12 +4887,17 @@ function renderHistory(tab, messages) {
         el = curLog().lastElementChild;
       }
       if (el && m.seq) el.dataset.seq = String(m.seq);
-    });
+    }
   });
+}
+
+// forceBottom：定稿后是否强制滚到底。短会话（一次画完）保持原行为；
+// 长会话分批画时，用户很可能在分批期间往上翻了，这时不能把他拉回底部。
+function finishHistoryRender(tab, forceBottom) {
   attachHistoryOps(tab);
   // 滚动容器是 .chat-log（#chat 外层 overflow:hidden），滚 chatBox 从不生效——
   // 历史渲染完其实一直没滚到底
-  tab.logEl.scrollTop = tab.logEl.scrollHeight;
+  if (forceBottom) tab.logEl.scrollTop = tab.logEl.scrollHeight;
 }
 
 // ---------- 消息级操作：历史恢复后给用户消息挂（复制/编辑）；助手消息在渲染时已挂 ----------
@@ -9374,6 +9422,25 @@ document.getElementById("review-diff-close").onclick = refreshReview;
 
 // —— 文件树：工作区只读浏览 + 文件预览 ——
 let filesLoaded = false;
+
+// 文件树的「被 Agent 改动」刷新：尾部防抖。
+//
+// Agent 一轮里连续写多个文件时，每次都直接 loadFiles(true) 会变成
+// 「一次 fs.files 全量 os.walk + 一次整树重渲染」× N——写 10 个文件就是 10 轮，
+// 全部挤在流式事件之间。改成最后一次改动后统一刷一次：中间状态本就没人看，
+// 最终树才是用户要的。手动「刷新」按钮仍走立即路径（用户的点击要有即时反馈）。
+const FILES_REFRESH_DEBOUNCE_MS = 400;
+let filesRefreshTimer = 0;
+
+function scheduleFilesRefresh() {
+  filesLoaded = false;
+  if (filesRefreshTimer) clearTimeout(filesRefreshTimer);
+  filesRefreshTimer = setTimeout(() => {
+    filesRefreshTimer = 0;
+    if (rightActive === "files" && !rightPanel.classList.contains("hidden")) loadFiles(true);
+  }, FILES_REFRESH_DEBOUNCE_MS);
+}
+
 // 当前编辑器状态：{ path, baseMtime, origText, editable, sizeText, isNew }
 // baseMtime 是打开时的磁盘 mtime（ns），保存时回传做冲突检测：Agent 或外部
 // 程序若在编辑期间改过文件，后端拒绝落盘并返回 conflict，由用户决定覆盖与否。

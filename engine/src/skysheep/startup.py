@@ -14,12 +14,22 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from . import instance
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-VALUE_NAME = "SkySheep"
 
 
 def is_supported() -> bool:
     return sys.platform == "win32"
+
+
+def value_name() -> str:
+    """自启项的注册表值名：按实例身份区分。
+
+    两个身份各自开着自启时，少一个后缀就会互相覆盖——后写的那个把先写的顶掉，
+    而用户看到的开关状态还是“已开启”。
+    """
+    return instance.autostart_value_name()
 
 
 def launch_command() -> str:
@@ -45,7 +55,7 @@ class _WindowsRegistry:
 
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-                value, _ = winreg.QueryValueEx(key, VALUE_NAME)
+                value, _ = winreg.QueryValueEx(key, value_name())
                 return str(value)
         except FileNotFoundError:
             return None
@@ -56,14 +66,14 @@ class _WindowsRegistry:
         import winreg
 
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            winreg.SetValueEx(key, VALUE_NAME, 0, winreg.REG_SZ, command)
+            winreg.SetValueEx(key, value_name(), 0, winreg.REG_SZ, command)
 
     def delete(self) -> None:
         import winreg
 
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-                winreg.DeleteValue(key, VALUE_NAME)
+                winreg.DeleteValue(key, value_name())
         except FileNotFoundError:
             pass
 
@@ -101,4 +111,11 @@ def set_enabled(enabled: bool, reg=None) -> dict:
     return status(reg=reg)
 
 
-__all__ = ["RUN_KEY", "VALUE_NAME", "is_supported", "launch_command", "set_enabled", "status"]
+__all__ = [
+    "RUN_KEY",
+    "is_supported",
+    "launch_command",
+    "set_enabled",
+    "status",
+    "value_name",
+]

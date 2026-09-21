@@ -51,11 +51,18 @@ def create_shortcut(link: Path, target: Path, arguments: str, workdir: Path) -> 
 def main() -> int:
     parser = argparse.ArgumentParser(description="create a desktop shortcut for SkySheep")
     parser.add_argument("--exe", action="store_true", help="point at dist/SkySheep/SkySheep.exe")
-    parser.add_argument("--name", default="SkySheep", help="shortcut name without .lnk")
+    parser.add_argument(
+        "--name", default=None,
+        help="shortcut name without .lnk（缺省：源码版用 SkySheep-源码版，打包版用 SkySheep）",
+    )
     parser.add_argument("--remove", action="store_true", help="delete the shortcut instead")
     args = parser.parse_args()
 
-    link = desktop_dir() / f"{args.name}.lnk"
+    # 缺省名按模式区分：源码版指向的开发数据在 ~/.skysheep-dev，安装版在
+    # ~/.skysheep。两个快捷方式同名同桌时，用户没法从图标分辨点的是哪个，
+    # 而表现差异（会话列表、配置不同）看起来就像“数据丢了”。
+    name = args.name or ("SkySheep" if args.exe else "SkySheep-源码版")
+    link = desktop_dir() / f"{name}.lnk"
 
     if args.remove:
         if link.exists():
@@ -93,6 +100,8 @@ def main() -> int:
     print(f"  target : {target}")
     print(f"  args   : {arguments or '(none)'}")
     print(f"  workdir: {workdir}")
+    if not args.exe:
+        print("  身份   : dev（数据目录 ~\\.skysheep-dev，与安装版 ~\\.skysheep 隔离）")
     return 0
 
 

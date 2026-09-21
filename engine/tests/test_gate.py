@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from skysheep.security.gate import Decision, PermissionGate, WhitelistRule
 from skysheep.tools import EditFileTool, ReadFileTool, RunCommandTool, WriteFileTool
 
@@ -140,14 +143,93 @@ async def test_prefix_rule_requires_word_boundary():
 
 
 async def test_quoted_separator_is_not_chaining():
-    """引号里的分隔符是字面量参数，不该被误判成拼接（避免规则永远命中不了）。"""
+    """引号里的分隔符是字面量参数，不该被误判成拼接（避免规则永远命中不了）。
+
+    引号语义按实际执行的 shell 取（见 ``_has_shell_chain``）：Windows 走 ``cmd.exe``，
+    它不认单引号、会展开 ``%VAR%``；其它平台走 ``bash``，单引号内是纯字面量。
+    用显式前缀规则检验，因为 ``;`` 落在命令里时 ``rule_for`` 只会给出 ``exact``。
+    """
     gate = PermissionGate()
     cmd = RunCommandTool()
-    gate.add_session_rule(gate.rule_for(cmd, {"command": "git commit -m 'a; b'"}))
-    assert await gate.authorize(cmd, {"command": "git commit -m 'a; b'"}) is None
-    # 单引号内允许出现 $，但双引号内的 $ 仍会展开 → 仍然要求确认
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="prefix", pattern="git commit"))
+    if os.name == "nt":
+        # cmd 不认单引号：其中的分隔符照样分隔命令，必须回到确认；
+        # 双引号在 cmd 中确实抑制分隔符，照常放行。
+        assert await gate.authorize(cmd, {"command": "git commit -m 'a; b'"}) is not None
+        assert await gate.authorize(cmd, {"command": "git commit -m 'a'"}) is None
+        assert await gate.authorize(cmd, {"command": 'git commit -m "a; b"'}) is None
+    else:
+        # POSIX 单引号内一切字面量；双引号内 $ 与反引号仍会展开。
+        assert await gate.authorize(cmd, {"command": "git commit -m 'a; b'"}) is None
+        assert await gate.authorize(cmd, {"command": 'git commit -m "a; b"'}) is None
+    # 单引号内的 $ 在 POSIX 下安全，但管道一定不安全
     assert await gate.authorize(cmd, {"command": "git commit -m 'a; b' | sh"}) is not None
-    assert await gate.authorize(cmd, {"command": 'git commit -m "a; b"'}) is None
+
+
+async def test_prefix_rule_rejects_windows_quirk_expansions():
+    """cmd.exe 特有的两条绕过面：单引号不是引号、``%VAR%`` 会被展开。
+
+    实测证据（Windows）：``cmd /c "echo ' & whoami"`` 会执行 whoami；
+    ``echo %VAR%`` 在变量值含 ``&`` 时会分割出第二条命令。两者都必须
+    让前缀规则失效，回退到逐次确认。
+    """
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="prefix", pattern="git status"))
+    if os.name == "nt":
+        for evil in (
+            "git status ' & whoami",
+            "git status ' | whoami",
+            "git status ' && whoami",
+            r"git status %TEMP%\x",
+            r"git status %USERPROFILE%\evil.bat",
+            "git status %COMSPEC%",
+        ):
+            assert await gate.authorize(cmd, {"command": evil}) is not None, evil
+    # 两平台共有的展开/分隔仍照旧拦下
+    for evil in ("git status; rm -rf /", "git status && whoami", "git status $(whoami)"):
+        assert await gate.authorize(cmd, {"command": evil}) is not None, evil
+    # 正常命令不受影响
+    assert await gate.authorize(cmd, {"command": "git status -s"}) is None
+
+
+async def test_prefix_rule_rejects_unicode_and_unc_edge_cases():
+    """锁定一批「碰巧拦住」的边界：不锁住就可能被后续改动反向。
+
+    Unicode 空白（U+00A0 / U+3000）与全角分号都不等于 ASCII 元字符，靠字符不等价
+    侥幸拦住；UNC 路径则必须被目录边界判断判为「工作目录之外」。
+    """
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="prefix", pattern="git status"))
+    for evil in (
+        "git status\u00a0; rm -rf /",
+        "git status\u3000; rm -rf /",
+        "git status\uff1b rm -rf /",
+    ):
+        assert await gate.authorize(cmd, {"command": evil}) is not None, repr(evil)
+
+    # UNC 路径：工作目录之外的落点，自动允许写入档不得放行
+    gate2 = PermissionGate(working_dir=Path.cwd())
+    gate2.auto_accept_write = True
+    assert gate2._path_inside_workdir(r"\\server\share\evil.txt") is False
+    assert not gate2._write_target_inside_workdir(
+        WriteFileTool(), {"path": r"\\server\share\evil.txt"}
+    )
+    # 目录外写入同样回退确认
+    assert not gate2._write_target_inside_workdir(WriteFileTool(), {"path": "../outside.txt"})
+    assert gate2._write_target_inside_workdir(WriteFileTool(), {"path": "inside.txt"})
+
+
+async def test_chain_hint_mentions_platform_quirks():
+    """确认弹窗的说明文案与实际判定一致（Windows 上要提到单引号与 %VAR%）。"""
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    gate.add_session_rule(gate.rule_for(cmd, {"command": "git status --short"}))
+    note = gate.explain("run_command", "git status; rm -rf /")["reason"]
+    assert "拼接" in note
+    if os.name == "nt":
+        assert "%VAR%" in note
 
 
 async def test_chained_command_rule_is_exact_only():

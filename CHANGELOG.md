@@ -6,6 +6,19 @@
 
 ### 新增
 
+- **多实例并存（`SKYSHEEP_INSTANCE`）**：给一份安装起一个身份名（如 `dev`），数据目录、
+  单实例互斥体名、窗口标题、开机自启注册表项四处同时跟随身份变化，因此同一台机器上
+  可以同时跑两份 SkySheep 而互不干扰。典型用法是**源码版用来改代码/跑验证、安装版
+  用来日常使用**：源码目录的三个入口（`启动SkySheep.bat`、`engine/SkySheep.pyw`、
+  `uv run skysheep app`）现在默认落到 `dev` 身份（数据在 `~/.skysheep-dev/`），安装版
+  继续用 `~/.skysheep/`，两边会话、配置、技能、日志、权限档位（`ui.json` 的
+  `accept_edits`）全部隔离，也不再互相抢互斥体。显式指定 `SKYSHEEP_HOME` 时仍按它走、
+  不叠加后缀（测试与临时环境语义不变）。身份名限 `[a-z0-9][a-z0-9_-]{0,23}`：它会进
+  文件名与互斥体名，放过路径分隔符会变成目录穿越，放过大小写变体则会让 `Local\` 下的
+  两个互斥体判定成不同名字、隔离静默失效。新增 `src/skysheep/instance.py` 作为唯一
+  口径来源；`engine/desktop.py` 为保启动速度镜像了一份同样的规则，两边一致性由
+  `tests/test_instance.py` 逐项锁定。
+
 - **内置工具全量导出 MCP 注解**：`Tool` 新增 `read_only_hint` / `destructive_hint` /
   `idempotent_hint` / `open_world_hint` 四个类属性，`to_schema()` 以 `annotations`
   （`readOnlyHint` 等四布尔，MCP `tools/list` 标准语义）导出，31 个内置工具全部按
@@ -14,26 +27,76 @@
   按白名单取键（anthropic_provider 本就如此），严格网关不会因未知字段拒收。外部
   宿主与工具目录（M8ven Trust Index、OpenAI directory 等）据此在调用前分级提示。
   新增 `tests/test_tool_annotations.py`，把全部内置工具逐个点名锁住注解齐全与语义。
+
 - **README 挂 M8ven Trust Index 徽章**：收录页 m8ven.ai/mcp/sky-scrape/skysheep，
   徽章为对方实时维护的图片（认领并核验后由「M8ven Trust」自动翻转为「M8ven
   Verified」）；架构一节补充代码可审计性说明（`vendor/` 为第三方上游压缩发布件，
   非混淆的项目源码）。
 
-### 清理
+- **结构化日志与可观测性**：桌面日志此前只有固定文本格式，回答「这个任务为什么
+  卡了 30 秒」只能翻几千行文本估时间差，`usage_log` 也只看得到 token。新增
+  `src/skysheep/obs.py`：不引入新依赖、不改变既有行格式，而是在消息尾部追加一段以
+  固定标记 `| json | ` 开头的 JSON，既有日志阅读方式与诊断包的尾读逻辑都不受影响，
+  需要机器分析时按标记切出 JSON 即可（`obs.parse_structured`）。轮次收尾处记录一条
+  `ev=turn`：总耗时、工具调用次数与总耗时、工具错误数、权限等待次数与等待耗时、
+  token 出入、是否被停止/是否圆桌/异常类型；这些统计从事件流累加得到，不进核心
+  循环热路径。用例见 `tests/test_obs.py`。
 
-- **出库开发期调试残留**：`engine/x1.txt`、`engine/x2.txt`（`tests/test_agent.py`
-  实际走 `tmp_path`，这两个是手动跑测试留在仓库根旁的残留）、
-  `engine/rt-menu-default.png`（全库无任何代码或文档引用）、
-  `engine/AGENTS.md`（0 字节空文件，2.0 提交时以零变更单独入库）。四者都不会
-  进入构建产物，只是把仓库表弄脏。
-- **`.gitignore` 补齐防回归规则**：`*.db-wal` / `*.db-shm`（1.9 起 SQLite 用
-  `journal_mode=WAL`，此前只忽略了 `*.db-journal`，长连接未关闭时这两个伴生
-  文件里还可能带着已提交数据）；`.tmp-*/`（`SKYSHEEP_HOME` 指向的临时 home 与
-  截图验证工作目录）；`nul`（Windows 上把 `> /dev/null` 误写成 `> nul` 会建出
-  名为 nul 的文件）；`Thumbs.db` / `desktop.ini` / `.DS_Store`（此前 `Thumbs.db`
-  只是被 `*.db` 规则意外匹配，属巧合而非有意忽略）。
+- **测试分层与真实网络栈端到端**：新增 `e2e` / `slow` 两个 marker（`pyproject.toml`），
+  `pytest -m e2e` 只跑端到端、`-m "not e2e"` 跳过。新增 `tests/test_ws_e2e.py`：
+  这是全库唯一经真实 uvicorn + 真实 socket 的用例（此前全部走 `TestClient` 的进程内
+  ASGI 直调，握手、分帧、长连接都没被测过），覆盖 boot 快照、一轮流式对话的事件到达
+  与正文拼接、同一条连接连续两轮、未知方法返回 `ok=false` 而非断开。
+
+
+### 修复
+
+- **MCP 服务器崩溃后不再只能手动重建，且断连不再让工具永久失效**：
+  `MCPTool` 此前在构造时固持 `session`，服务器一崩，已注册进 registry 的工具实例
+  会永远指向那个死会话——重连再成功也修不好这些工具对象；同时没有任何重连机制，
+  只能靠用户改配置或重启触发重建。现在：工具改为保存 manager + 服务器名，调用时
+  向 manager 取**当前**会话（`session_for`）；传输层失败（超时/连接错）由
+  `note_call_failure` 标记断线并预约后台重连，但**不重放本次调用**——服务器可能已
+  执行过这条工具，重放会重复副作用；重连按指数退避（2s 起，封顶 20s）有界进行
+  （`MAX_AUTO_RESTARTS = 3`），达到上限即停手并把结论写进状态，交给用户在设置页
+  手动重连；同一台服务器同时只允许一条重连链（`request_reconnect` 去重），
+  `shutdown()` 会先取消这些后台任务再关连接，避免与退出抢资源。工具层的语义错误
+  （`is_error`，如参数不对）不视作断线，不触发重连。状态新增 `reconnecting` /
+  `restarts` 两个字段随 MCP 状态一并回传前端。回归用例见 `tests/test_mcp.py`
+  （会话调用时解析、断线不重放、重连去重、达上限停手、未连接时的可读错误）。
+
+- **启动脚本写死作者本机绝对路径**：`启动SkySheep.bat` 原先直接 `cd /d` 到一个
+  作者本机的绝对路径，别人克隆后一行都跑不起来，同时把作者的本地目录结构留在
+  了公开仓库顶层。改为用 `%~dp0` 按脚本自身位置定位 `engine`，并补
+  `pyproject.toml` 存在性检查（脚本被挪出仓库根时给出明确提示而不是扑空的 cd）；
+  顺带去掉了让 `@echo off` 失效的 UTF-8 BOM（首行带 BOM 时 cmd 会把 `@echo off`
+  当成未知命令报错），文件回归纯 ASCII。
+
 
 ### 安全
+
+- **命令白名单的拼接判定按实际 shell 取，堵住 `cmd.exe` 的两条绕过面**：
+  `security/gate.py` 的 `_has_shell_chain` 此前用一套 POSIX 引号规则同时套两平台，
+  而 Windows 的命令实际交给 `cmd.exe /d /s /c`（见 `tools/shell.py`）。实测两个漏洞：
+  ① `cmd.exe` **不认单引号**，`git status ' & whoami` 里的 `&` 照样分隔命令，旧逻辑
+  却因“单引号内是字面量”跳过判定，于是带 `git status` 前缀白名单的用户会被放行一条
+  会执行第二条命令的输入；② `cmd.exe` 会做 `%VAR%` 环境变量展开，而变量值可以含
+  `&`/`|`（本机 `PATH`、`PATHEXT` 即含 `;`），等于把“参数”变成“命令”，旧逻辑完全
+  未把 `%` 视为拼接面。现在单引号只在非 Windows 下作为引号处理，Windows 上额外把
+  `%` 与分隔符同等对待；`;` 在两平台都拦（纵深防御）。确认弹窗与设置页规则测试器的
+  解释文案改由 `_chain_hint()` 按平台生成，与实际判定一致。回归用例：`test_gate.py`
+  的 `test_prefix_rule_rejects_windows_quirk_expansions`（含 `%TEMP%` / `%COMSPEC%` / 单引号拼接）、
+  `test_quoted_separator_is_not_chaining`（按平台分支）、`test_prefix_rule_rejects_unicode_and_unc_edge_cases`
+  （Unicode 空白、全角分号、UNC 路径）与 `test_chain_hint_mentions_platform_quirks`。
+
+- **技能 name/description 限长后再进系统提示词**：`SKILL.md` 的 frontmatter 来自
+  外部（技能广场 / 第三方仓库），而 `render_prompt_section` 会把 name 与 description
+  拼进系统提示词的 Skills 清单。此前二者都无长度限制（实测 5000 字符描述原样注入），
+  超长描述会挤占上下文，也能用大量空白行把内容推到看不见的位置——与 MCP 工具描述
+  同一类风险，但 MCP 侧已有 1000 字符截断而技能侧没有。现改走 `_sanitize_name` /
+  `_sanitize_description`（120 / 1000 字符上限 + 压掉连续空行），与
+  `mcp/client.py` 的 `_sanitize_description` 同一套处理；正文不受影响，仍由
+  `load_skill` 的 20000 字符上限兜住。回归用例 `test_skill_description_and_name_are_bounded`。
 
 - **static 挂载对点开头路径的纵深防线**：`StaticFiles` 不拒隐藏路径，
   `/static/.<any>` 会按普通文件返回。1.0/1.5/1.8 的安装包正因打包侧整目录
@@ -44,14 +107,50 @@
   再堵一道：点开头分段一律 404（`_is_hidden_static_path`）。附回归测试
   `test_static_hidden_paths_not_served`（已反向验证：移除防线则测试失败）。
 
-### 修复
 
-- **启动脚本写死作者本机绝对路径**：`启动SkySheep.bat` 原先直接 `cd /d` 到一个
-  作者本机的绝对路径，别人克隆后一行都跑不起来，同时把作者的本地目录结构留在
-  了公开仓库顶层。改为用 `%~dp0` 按脚本自身位置定位 `engine`，并补
-  `pyproject.toml` 存在性检查（脚本被挪出仓库根时给出明确提示而不是扑空的 cd）；
-  顺带去掉了让 `@echo off` 失效的 UTF-8 BOM（首行带 BOM 时 cmd 会把 `@echo off`
-  当成未知命令报错），文件回归纯 ASCII。
+### 性能
+
+- **对话流式事件合并降帧**：上游 provider 的 delta 粒度是 token 级（实测按 4 字符
+  一段产出），一轮长回答会产生上千条事件，每条都要过 WS 发送锁并单独 JSON 序列化
+  一帧；终端输出早已做过同类合并（`TerminalManager.TERM_MERGE_S`），对话流此前没有。
+  新增 `server/backend.py` 的 `StreamDeltaMerger`：把连续的同类型增量
+  （`text_delta` / `thinking_delta` / `roundtable_member_delta`，后者按
+  `(member_index, round)` 再分组）拼成批量帧，三条硬约束都有回归用例锁定——
+  ①不丢内容（合并前后拼接逐字一致）；②顺序不变（非增量事件到达时先冲刷缓冲，
+  不同类型切换也各自冲刷）；③收尾必冲刷（含一个窗口定时器，避免模型中途停顿时
+  尾巴被无限期挂在缓冲里；`_run_turn_pipeline` 的 `finally` 覆盖正常/异常/取消三条
+  路径）。首条增量仍立即发出，首字延迟不变。用例见 `tests/test_stream_merge.py`
+  （含 1000 条增量的帧数回归门槛）。
+
+- **长会话切换不再一次同步画完**：`renderHistory` 此前对全部消息一个同步循环重建
+  DOM，每条 assistant 消息还各跑一次 markdown / mermaid / 代码高亮；数千条的会话
+  会把主线程占满，表现为切会话长白屏。现改为分批渲染（阈值 `HISTORY_SYNC_LIMIT = 200`，
+  每次 `HISTORY_CHUNK = 100` 条，`requestAnimationFrame` 分帧）：阈值以下仍一次画完
+  （不多付一帧延迟，行为与从前一致）；超阈值时首段同步画（`openTabForSession` 返回后
+  立即看 `children.length` 判空会话，零节点会被误判为空会话），后续分批追加，
+  并在追加前检查用户是否仍在底部——已往上翻就不再抢滚动位置。
+
+- **文件树刷新加尾部防抖**：Agent 一轮里连续写多个文件时，此前每次都直接
+  `loadFiles(true)`，等于「一次 `fs.files` 全量 `os.walk` + 一次整树重渲染」× N。
+  改为 `scheduleFilesRefresh()` 尾部防抖（400ms），只刷最后一次；手动「刷新」按钮
+  仍是立即路径（用户的点击要有即时反馈），切项目时 `resetProjectPanels` 会清掉待发
+  定时器，避免把旧项目的目录树画到新项目上。
+
+
+### 清理
+
+- **出库开发期调试残留**：`engine/x1.txt`、`engine/x2.txt`（`tests/test_agent.py`
+  实际走 `tmp_path`，这两个是手动跑测试留在仓库根旁的残留）、
+  `engine/rt-menu-default.png`（全库无任何代码或文档引用）、
+  `engine/AGENTS.md`（0 字节空文件，2.0 提交时以零变更单独入库）。四者都不会
+  进入构建产物，只是把仓库表弄脏。
+
+- **`.gitignore` 补齐防回归规则**：`*.db-wal` / `*.db-shm`（1.9 起 SQLite 用
+  `journal_mode=WAL`，此前只忽略了 `*.db-journal`，长连接未关闭时这两个伴生
+  文件里还可能带着已提交数据）；`.tmp-*/`（`SKYSHEEP_HOME` 指向的临时 home 与
+  截图验证工作目录）；`nul`（Windows 上把 `> /dev/null` 误写成 `> nul` 会建出
+  名为 nul 的文件）；`Thumbs.db` / `desktop.ini` / `.DS_Store`（此前 `Thumbs.db`
+  只是被 `*.db` 规则意外匹配，属巧合而非有意忽略）。
 
 ## [2.1] - 2026-09-21
 

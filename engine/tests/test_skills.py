@@ -86,6 +86,44 @@ def test_prompt_section_injection(tmp_path):
     assert loader.render_prompt_section() == ""
 
 
+def test_skill_description_and_name_are_bounded(tmp_path):
+    """技能名/描述会被拼进系统提示词：必须限长并压掉空白，不让外部
+    frontmatter 撑破清单排版或把注入内容推到看不见的位置。"""
+    g = tmp_path / "global_skills"
+    p = tmp_path / "proj" / ".skysheep" / "skills"
+    p.mkdir(parents=True, exist_ok=True)
+    long_desc = "A" * 5000
+    long_name = "n" * 500
+    d = g / "bloated"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {long_name}\ndescription: {long_desc}\n---\n正文\n",
+        encoding="utf-8",
+    )
+    # 用连续空行把内容往下推、并在描述里塞换行：都不该出现在清单里
+    d2 = g / "multiline"
+    d2.mkdir(parents=True, exist_ok=True)
+    (d2 / "SKILL.md").write_text(
+        "---\nname: multi\ndescription: 第一行\n\n\n\n第二行\n---\n正文\n",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(global_dir=g, project_dir=p, state_path=tmp_path / "skills.json")
+    loader.discover()
+
+    skill = loader.get("n" * 120)
+    assert skill is not None, "超长技能名应被截断到上限，而不是原样保留"
+    assert len(skill.name) == 120
+    assert len(skill.description) < 1100 and skill.description.endswith("（描述过长已截断）")
+
+    multi = loader.get("multi")
+    assert "\n\n\n" not in multi.description  # 连续空行已压缩
+
+    # 清单里每条仍是一行，超长描述不会把后续技能挤没
+    section = loader.render_prompt_section()
+    for line in section.splitlines():
+        assert len(line) < 1200, "单条清单行不应被外部描述撑爆"
+
+
 async def test_load_skill_tool(tmp_path):
     loader = make_skills(tmp_path)
     loader.discover()

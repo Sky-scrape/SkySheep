@@ -81,6 +81,57 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     return meta, body.strip()
 
 
+# 技能 description 会直接拼进系统提示词的 Skills 清单（见 render_prompt_section）。
+# 技能包（尤其从技能广场 / 第三方仓库装的）里的 frontmatter 由外部内容决定，
+# 超长描述会挤占上下文，也能用大量空白把注入内容推到看不见的位置——与 MCP 工具
+# 描述同一类风险，所以用同一套限长与压空白处理（见 mcp/client._sanitize_description）。
+# 正文另有 load_skill 的 20000 字符上限，不受这里影响。
+MAX_SKILL_DESCRIPTION_CHARS = 1000
+
+# 技能名同样会拼进系统提示词的 Skills 清单（作为 load_skill 的参数），也一并限长。
+MAX_SKILL_NAME_CHARS = 120
+
+
+def _sanitize_name(name: str) -> str:
+    """技能名归一：去掉换行 / 首尾空白，并限长。
+
+    frontmatter 的 name 是外部内容，换行可以在一行清单里制造额外条目；
+    过长的名字也会把同一行的描述挤出视线。名字本身要能作为 load_skill 的参数，
+    所以只做形状清理，不改字符。
+    """
+    raw = " ".join((name or "").split())
+    if len(raw) > MAX_SKILL_NAME_CHARS:
+        raw = raw[:MAX_SKILL_NAME_CHARS]
+    return raw
+
+
+def _sanitize_description(text: str) -> str:
+    """技能描述的展示清理：限长 + 压掉多余空白行。
+
+    只做形状约束（长度、空白），不尝试识别「恶意指令」——那种判断不适合放在按
+    长度/格式的过滤里，会既漏又误伤；真正的边界是技能来源是否可信。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    # 连续空行压成一个，避免用大量空行把内容推到看不见的位置
+    lines = [ln.rstrip() for ln in raw.splitlines()]
+    out: list[str] = []
+    blanks = 0
+    for ln in lines:
+        if not ln:
+            blanks += 1
+            if blanks > 1:
+                continue
+        else:
+            blanks = 0
+        out.append(ln)
+    text_out = "\n".join(out).strip()
+    if len(text_out) > MAX_SKILL_DESCRIPTION_CHARS:
+        text_out = text_out[:MAX_SKILL_DESCRIPTION_CHARS] + " …（描述过长已截断）"
+    return text_out
+
+
 def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
     md = skill_dir / "SKILL.md"
     if not md.is_file():
@@ -94,7 +145,11 @@ def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
     description = meta.get("description")
     if not description and body:
         description = body.splitlines()[0][:120]
-    return Skill(name=name, description=description or "", path=md, source=source)
+    return Skill(
+        name=_sanitize_name(name),
+        description=_sanitize_description(description or ""),
+        path=md, source=source,
+    )
 
 
 class SkillLoader:
@@ -345,5 +400,7 @@ class SkillLoader:
             return ""
         lines = ["", "# Skills", "可用技能（需要时先用 load_skill 读取完整指令再行动）："]
         for s in skills:
+            # 名称/描述在加载时已做限长与压空白（见 _sanitize_name/_sanitize_description），
+            # 一行一条，不让外部 frontmatter 撑破清单排版
             lines.append("- {}: {}".format(s.name, s.description or "(no description)"))
         return "\n".join(lines) + "\n"

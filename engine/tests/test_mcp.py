@@ -62,14 +62,49 @@ class FakeSession:
         return self.result
 
 
+class FakeManager:
+    """只实现 MCPTool 需要的那部分契约（会话解析 + 断线上报）。"""
+
+    def __init__(self, session=None) -> None:
+        self.session = session
+        self.failures: list[str] = []
+        self.reconnect_requests: list[str] = []
+
+    def session_for(self, name):
+        return self.session
+
+    def note_call_failure(self, name):
+        # 镜像真实 MCPManager 的契约：断线后既记录失败也预约重连
+        self.failures.append(name)
+        self.request_reconnect(name)
+
+    def request_reconnect(self, name):
+        self.reconnect_requests.append(name)
+
+
+class ExplodingSession:
+    """模拟传输层断开的会话（连接错，不是工具层 is_error）。"""
+
+    async def call_tool(self, name, arguments=None):
+        raise ConnectionError("server gone")
+
+
+def make_tool(session, readonly=False, server="calc", tool="add"):
+    return MCPTool(
+        manager=FakeManager(session), server_name=server, tool_name=tool,
+        description="", input_schema={"type": "object"}, readonly=readonly,
+    )
+
+
 def test_mcp_tool_wrapping_and_safety():
     session = FakeSession(CallToolResult(
         content=[TextContent(type="text", text="42")], is_error=False
     ))
     tool = MCPTool(
-        server_name="calc", tool_name="add", description="加法",
+        manager=FakeManager(session), server_name="calc", tool_name="add",
+        description="加法",
         input_schema={"type": "object", "properties": {"a": {"type": "integer"}}},
-        session=session, readonly=False,
+        readonly=False,
     )
     assert tool.name == "mcp__calc__add"
     assert tool.safety == Safety.WRITE
@@ -84,10 +119,7 @@ async def test_mcp_tool_run_and_error():
     session = FakeSession(CallToolResult(
         content=[TextContent(type="text", text="42")], is_error=False
     ))
-    tool = MCPTool(
-        server_name="calc", tool_name="add", description="",
-        input_schema={"type": "object"}, session=session, readonly=True,
-    )
+    tool = make_tool(session, readonly=True)
     assert tool.safety == Safety.READONLY
     ctx = ToolContext(working_dir=Path("."))
     args = tool.args_model(a=40, b=2)
@@ -98,12 +130,56 @@ async def test_mcp_tool_run_and_error():
     err_session = FakeSession(CallToolResult(
         content=[TextContent(type="text", text="boom")], is_error=True
     ))
-    tool2 = MCPTool("calc", "sub", "", {"type": "object"}, err_session, False)
+    tool2 = make_tool(err_session, tool="sub")
     try:
         await tool2.run(tool2.args_model(x=1), ctx)
         raise AssertionError("should raise")
     except ToolError as e:
         assert "boom" in str(e)
+    # 工具层语义错误（is_error）不是断线：不应误触发重连
+    assert tool2._manager.failures == []
+    assert tool2._manager.reconnect_requests == []
+
+
+async def test_mcp_tool_resolves_session_at_call_time():
+    """工具不固持 session：重连后换上新会话，已注册的工具实例照常可用。"""
+    manager = FakeManager(None)
+    tool = MCPTool(
+        manager=manager, server_name="calc", tool_name="add", description="",
+        input_schema={"type": "object"}, readonly=True,
+    )
+    ctx = ToolContext(working_dir=Path("."))
+    # 服务器未连接：给可读错误，并预约重连，而不是让调用卡到超时
+    try:
+        await tool.run(tool.args_model(), ctx)
+        raise AssertionError("should raise")
+    except ToolError as e:
+        assert "未连接" in str(e)
+    assert manager.reconnect_requests == ["calc"]
+
+    # 重连成功（manager 换上新会话）后，同一个工具对象直接可用
+    session = FakeSession(CallToolResult(
+        content=[TextContent(type="text", text="ok")], is_error=False
+    ))
+    manager.session = session
+    assert await tool.run(tool.args_model(), ctx) == "ok"
+
+
+async def test_mcp_tool_transport_error_reports_failure_without_replay():
+    """传输层断开：上报断线并预约重连，但**不重放**本次调用（副作用可能已发生）。"""
+    manager = FakeManager(ExplodingSession())
+    tool = MCPTool(
+        manager=manager, server_name="calc", tool_name="write", description="",
+        input_schema={"type": "object"}, readonly=False,
+    )
+    ctx = ToolContext(working_dir=Path("."))
+    try:
+        await tool.run(tool.args_model(x=1), ctx)
+        raise AssertionError("should raise")
+    except ToolError as e:
+        assert "MCP call failed" in str(e)
+    assert manager.failures == ["calc"]
+    assert manager.reconnect_requests == ["calc"]
 
 
 SERVER_SCRIPT = Path(__file__).parents[1] / "examples" / "mcp_demo_server.py"
@@ -276,27 +352,74 @@ def test_mcp_installed_names(tmp_path, monkeypatch):
 
 def test_long_mcp_description_is_truncated():
     """超长描述被截断并附提示，避免挤占上下文、也避免藏进长串指令。"""
-    from skysheep.mcp.client import MAX_MCP_DESCRIPTION_CHARS
+    from skysheep.mcp.client import MAX_MCP_DESCRIPTION_CHARS, _sanitize_description
 
-    tool = MCPTool(
-        server_name="s", tool_name="t", description="x" * (MAX_MCP_DESCRIPTION_CHARS + 500),
-        input_schema={"type": "object"}, session=None, readonly=False,
-    )
-    assert len(tool.description) <= MAX_MCP_DESCRIPTION_CHARS + 20
-    assert "已截断" in tool.description
+    out = _sanitize_description("x" * (MAX_MCP_DESCRIPTION_CHARS + 500))
+    assert len(out) <= MAX_MCP_DESCRIPTION_CHARS + 20
+    assert "已截断" in out
 
 
 def test_mcp_description_blank_lines_are_collapsed():
     """大量空行会被压掉：否则可把注入内容推到看不见的位置。"""
-    tool = MCPTool(
-        server_name="s", tool_name="t",
-        description="normal\n" + "\n" * 50 + "hidden instruction",
-        input_schema={"type": "object"}, session=None, readonly=False,
-    )
-    assert "\n\n\n" not in tool.description
-    assert "normal" in tool.description and "hidden instruction" in tool.description
+    from skysheep.mcp.client import _sanitize_description
+
+    out = _sanitize_description("normal\n" + "\n" * 50 + "hidden instruction")
+    assert "\n\n\n" not in out
+    assert "normal" in out and "hidden instruction" in out
 
 
 def test_empty_mcp_description_has_placeholder():
-    tool = MCPTool("s", "t", "", {"type": "object"}, None, False)
-    assert tool.description == "(no description)"
+    from skysheep.mcp.client import _sanitize_description
+
+    assert _sanitize_description("") == "(no description)"
+
+
+# ---- 断连重连：有界、去重、不重放 ----
+
+
+async def test_manager_reconnect_is_deduplicated():
+    """同一台服务器同时只允许一条重连链，重复预约不叠加。"""
+    mgr = MCPManager({"srv": MCPServerConfig(command="definitely-not-a-real-cmd-xyz")})
+    mgr.request_reconnect("srv")
+    first = mgr._restart_tasks.get("srv")
+    mgr.request_reconnect("srv")
+    assert mgr._restart_tasks.get("srv") is first, "重复预约不该开出第二条重连链"
+    await mgr.shutdown()
+    assert not mgr._restart_tasks
+
+
+async def test_manager_gives_up_after_restart_cap():
+    """达到重连上限后停止自动重试，并把结论写进 status 交给用户手动处理。"""
+    mgr = MCPManager({"srv": MCPServerConfig(command="definitely-not-a-real-cmd-xyz")})
+    st = mgr.statuses["srv"]
+    st.restarts = mgr.MAX_AUTO_RESTARTS
+    mgr.request_reconnect("srv")
+    assert "srv" in mgr._gave_up
+    assert mgr._restart_tasks.get("srv") is None, "已放弃的服务器不该再起重连任务"
+    assert "已停止重试" in (st.error or "")
+    await mgr.shutdown()
+
+
+async def test_manager_note_call_failure_marks_disconnected_and_schedules():
+    """调用失败要把连接标记为断开、清掉旧会话，并预约一次后台重连。"""
+    mgr = MCPManager({"srv": MCPServerConfig(command="definitely-not-a-real-cmd-xyz")})
+    st = mgr.statuses["srv"]
+    st.connected = True
+    mgr._sessions["srv"] = object()  # 假装有个会话
+    mgr.note_call_failure("srv")
+    assert st.connected is False
+    assert mgr.session_for("srv") is None
+    assert "srv" in mgr._restart_tasks
+    await mgr.shutdown()
+
+
+async def test_session_for_returns_none_when_not_connected():
+    """未连接的服务器不给会话：工具据此走可读错误而不是拿死会话去调。"""
+    mgr = MCPManager({"srv": MCPServerConfig(command="x")})
+    assert mgr.session_for("srv") is None
+    st = mgr.statuses["srv"]
+    st.connected = True
+    fake = object()
+    mgr._sessions["srv"] = fake
+    assert mgr.session_for("srv") is fake
+    await mgr.shutdown()

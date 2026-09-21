@@ -199,38 +199,56 @@ def _sanitize_description(text: str) -> str:
 
 
 class MCPTool(Tool):
-    """一个 MCP 服务器工具在 SkySheep 工具系统中的包装。"""
+    """一个 MCP 服务器工具在 SkySheep 工具系统中的包装。
 
-    def __init__(self, server_name: str, tool_name: str, description: str,
-                 input_schema: dict, session: ClientSession, readonly: bool) -> None:
+    会话不在这里固持：保存 manager + 服务器名，调用时向 manager 取**当前**会话。
+    否则服务器崩溃重连后，已经注册进 registry 的工具实例会永远指向那个已死的 session，
+    重连再成功也修不好这些工具对象。
+    """
+
+    def __init__(self, manager: MCPManager, server_name: str, tool_name: str,
+                 description: str, input_schema: dict, readonly: bool) -> None:
         self.name = f"mcp__{server_name}__{tool_name}"
         self.description = _sanitize_description(description)
         self.safety = Safety.READONLY if readonly else Safety.WRITE
         self.args_model = _permissive_model(self.name)
         self._raw_name = tool_name
         self._schema = input_schema or {"type": "object"}
-        self._session = session
+        self._manager = manager
+        self._server = server_name
 
     def to_schema(self) -> dict:
         return {"name": self.name, "description": self.description, "input_schema": self._schema}
 
     async def run(self, args: BaseModel, ctx: ToolContext) -> str:
+        session = self._manager.session_for(self._server)
+        if session is None:
+            # 服务器当前不可用（未连上 / 正在重连）：告知实情并触发一次重连预约，
+            # 不要在这里同步重连——那是启动路径，会把工具调用卡到连接超时。
+            self._manager.request_reconnect(self._server)
+            raise ToolError(
+                f"MCP 服务器「{self._server}」当前未连接，无法调用 {self._raw_name}。"
+                "（正在尝试重连；也可在设置 · MCP 里手动重连）"
+            )
         try:
             # SDK 的 call_tool 默认无限等读；挂死的半死服务器会把整轮对话卡在
-            # 这里（连取消前的兜底都走不到），所以调用层自己掐表。
-            # 超时取消后该 session 可能已不可用——错误如实上报，连接由
-            # reconnect 机制在下次重建时恢复。
+            # 这里（连取消前的兜底都走不到），所以调用层自己拧表。
             result = await asyncio.wait_for(
-                self._session.call_tool(self._raw_name, arguments=args.model_dump()),
+                session.call_tool(self._raw_name, arguments=args.model_dump()),
                 timeout=CALL_TIMEOUT_S,
             )
         except TimeoutError:
+            # 超时后该 session 可能已不可用：标记断线并预约重连，但**不重放本次调用**——
+            # 服务器可能已经执行过这条工具（副作用已发生），重放会重复写入。
+            self._manager.note_call_failure(self._server)
             raise ToolError(
                 f"MCP call timed out after {CALL_TIMEOUT_S:g}s: {self._raw_name}"
             ) from None
         except Exception as e:
+            self._manager.note_call_failure(self._server)
             raise ToolError(f"MCP call failed: {e}") from e
         if getattr(result, "is_error", False):
+            # 工具层报错（如参数不对）不是连接问题：不当作断线，不触发重连
             raise ToolError(_extract_text(result) or "MCP tool returned an error")
         return truncate_output(_extract_text(result), MAX_MCP_OUTPUT_CHARS)
 
@@ -241,6 +259,8 @@ class MCPServerStatus:
         self.connected = False
         self.error: str | None = None
         self.tool_names: list[str] = []
+        self.reconnecting = False   # 正在后台重连（前端可显示「重连中」）
+        self.restarts = 0           # 已自动重连成功次数（诊断用）
 
 
 class MCPManager:
@@ -248,13 +268,108 @@ class MCPManager:
 
     每个服务器一个独立的退出栈：某一个连不上（地址写错、命令不存在）时，
     只关掉它自己的资源，已经连上的服务器不受影响。
+
+    重连：服务器崩溃/超时后不再只能靠用户手动改配置重建。断线事件（调用失败）
+    会交给后台按指数退避重连，次数有上限；重连成功后已注册的工具实例照常可用，
+    因为工具不固持 session，而是每次向 manager 取当前的那个（见 MCPTool）。
     """
+
+    # 自动重连上限：连到上限就停手，把状态留给用户在设置页手动重连。
+    # 不无限重试：配置写错（命令不存在、地址填错）时无限重连只是白耗进程与日志。
+    MAX_AUTO_RESTARTS = 3
+    RESTART_BASE_DELAY_S = 2.0
+    RESTART_MAX_DELAY_S = 20.0
 
     def __init__(self, servers: dict[str, MCPServerConfig]) -> None:
         self._configs = servers
         self._stacks: dict[str, AsyncExitStack] = {}
         self._sessions: dict[str, ClientSession] = {}
         self.statuses: dict[str, MCPServerStatus] = {n: MCPServerStatus(n) for n in servers}
+        # 后台重连任务句柄（每台一个）：去重避免同台服务器开出多个重连链
+        self._restart_tasks: dict[str, asyncio.Task] = {}
+        # 已放弃自动重连的服务器（达到上限 / 配置根本没救），不再重复预约
+        self._gave_up: set[str] = set()
+
+    # ---- 会话获取与断线上报（供 MCPTool 调用） ----
+
+    def session_for(self, name: str) -> ClientSession | None:
+        """取该服务器当前可用的会话；未连上时返回 None。"""
+        if not self.statuses.get(name, MCPServerStatus(name)).connected:
+            return None
+        return self._sessions.get(name)
+
+    def note_call_failure(self, name: str) -> None:
+        """调用失败（超时/连接错）：标记断线并预约后台重连。
+
+        由 MCPTool 在捕获到传输层异常时调用；工具层语义错误（is_error）不走这里。
+        """
+        status = self.statuses.get(name)
+        if status is None:
+            return
+        status.connected = False
+        status.error = status.error or "连接已断开，正在尝试重连"
+        self._sessions.pop(name, None)
+        stack = self._stacks.pop(name, None)
+        if stack is not None:
+            # 旧栈要真正关掉：不关会积累子进程与 socket 句柄
+            asyncio.ensure_future(self._close_stack(stack))
+        self.request_reconnect(name)
+
+    async def _close_stack(self, stack: AsyncExitStack) -> None:
+        try:
+            await stack.aclose()
+        except Exception:  # noqa: BLE001 - 已死的连接关不掉不影响后续重连
+            pass
+
+    def request_reconnect(self, name: str) -> None:
+        """预约一次后台重连（已有限 / 已达上限 / 已在跑的服务器不重复安排）。"""
+        if name not in self._configs or name in self._gave_up:
+            return
+        existing = self._restart_tasks.get(name)
+        if existing is not None and not existing.done():
+            return
+        status = self.statuses.get(name)
+        if status is not None and status.restarts >= self.MAX_AUTO_RESTARTS:
+            self._gave_up.add(name)
+            status.error = (
+                f"已自动重连 {status.restarts} 次仍失败，已停止重试："
+                "请在设置 · MCP 里检查配置后手动重连"
+            )
+            return
+        try:
+            self._restart_tasks[name] = asyncio.get_running_loop().create_task(
+                self._restart_loop(name)
+            )
+        except RuntimeError:
+            pass  # 无事件循环（纯同步/测试环境）：跳过自动重连
+
+    async def _restart_loop(self, name: str) -> None:
+        """指数退避重连一台服务器，直到成功或达到次数上限。"""
+        status = self.statuses[name]
+        cfg = self._configs[name]
+        status.reconnecting = True
+        try:
+            while status.restarts < self.MAX_AUTO_RESTARTS and not status.connected:
+                delay = min(
+                    self.RESTART_BASE_DELAY_S * (2 ** status.restarts),
+                    self.RESTART_MAX_DELAY_S,
+                )
+                await asyncio.sleep(delay)
+                # 返回的工具列表这里不用：注册表由 backend 在配置变更/重连入口重建，
+                # 重连的职责只是把连接恢复成可用
+                await self._connect_one(name, cfg)
+                if status.connected:
+                    status.restarts += 1
+                    status.error = None
+                    status.reconnecting = False
+                    # 工具列表可能已变（服务器升级/配置改动）：更新 status 里的名字
+                    # 但**不**改已注册的 registry——注册表属于 backend 的职责，
+                    # 它会随下次配置变更/重连入口重建；这里只保证连接可用。
+                    return
+        except asyncio.CancelledError:
+            raise
+        finally:
+            status.reconnecting = False
 
     async def _connect_one(self, name: str, cfg: MCPServerConfig) -> list[Tool]:
         """连一个服务器并返回它的工具；失败时把错误写进 status 并返回空。"""
@@ -301,15 +416,15 @@ class MCPManager:
         self._stacks[name] = stack
         self._sessions[name] = session
         status.connected = True
+        status.tool_names = [t.name for t in listing.tools]
         for t in listing.tools:
-            status.tool_names.append(t.name)
             tools.append(
                 MCPTool(
+                    manager=self,
                     server_name=name,
                     tool_name=t.name,
                     description=t.description or "",
                     input_schema=t.input_schema,
-                    session=session,
                     readonly=cfg.readonly,
                 )
             )
@@ -346,6 +461,11 @@ class MCPManager:
         return tools
 
     async def shutdown(self) -> None:
+        # 先停后台重连：它会在 sleep 后重建连接，不先取消会与 shutdown 抢资源
+        for task in list(self._restart_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._restart_tasks.clear()
         for name, stack in list(self._stacks.items()):
             try:
                 await stack.aclose()

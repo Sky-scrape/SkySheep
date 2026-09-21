@@ -14,14 +14,19 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from . import instance
+
 
 class ConfigError(Exception):
     pass
 
 
 def skysheep_home() -> Path:
-    env = os.environ.get("SKYSHEEP_HOME")
-    return Path(env).expanduser() if env else Path.home() / ".skysheep"
+    """数据目录：``SKYSHEEP_HOME`` 优先，其次按 ``SKYSHEEP_INSTANCE`` 加后缀。
+
+    实例身份的意义见 :mod:`skysheep.instance`（源码版与安装版并存互不干扰）。
+    """
+    return instance.data_home()
 
 
 def config_path() -> Path:

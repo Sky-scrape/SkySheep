@@ -985,7 +985,9 @@ def create_app(
             return {"mcp": backend._mcp_status_list(backend.mcp), "mcp_warnings": warnings}
         if method == "mcp.status":
             return {"mcp": [
-                {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names}
+                {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names,
+             "reconnecting": getattr(st, "reconnecting", False),
+             "restarts": getattr(st, "restarts", 0)}
                 for n, st in backend.mcp.statuses.items()
             ]}
         if method == "tools.list":

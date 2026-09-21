@@ -632,7 +632,7 @@ def _app_cmd(args) -> None:
 
     import webview
 
-    from .. import wintheme
+    from .. import instance, wintheme
     from ..server.app import STATIC_DIR
 
     use_browser = getattr(args, "browser", False)
@@ -677,7 +677,7 @@ def _app_cmd(args) -> None:
     # 主题尽量提前定下来：窗口底色 / 启动页 / 标题栏用同一份解析结果
     wintheme.set_theme_mode(wintheme.read_ui_theme())
     window = webview.create_window(
-        "SkySheep",
+        instance.app_title(),
         html=splash_html(STATIC_DIR, dark=wintheme.theme_is_dark()),
         width=width,
         height=height,

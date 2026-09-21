@@ -11,8 +11,9 @@ desktop.py 里做；无窗口环境（测试 / --browser 兜底）也可安全�
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
+
+from . import instance
 
 FILE_NAME = "window_state.json"
 
@@ -22,10 +23,7 @@ MIN_VISIBLE = 100
 
 
 def state_path(home: Path | None = None) -> Path:
-    base = home
-    if base is None:
-        env = os.environ.get("SKYSHEEP_HOME")
-        base = Path(env).expanduser() if env else Path.home() / ".skysheep"
+    base = home if home is not None else instance.data_home()
     return base / FILE_NAME
 
 

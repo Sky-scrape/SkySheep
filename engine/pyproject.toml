@@ -1,6 +1,6 @@
 [project]
 name = "skysheep-engine"
-version = "2.1"
+version = "2.2"
 description = "SkySheep engine — open-source AI agent workbench kernel (agent loop, tools, providers, permissions, sessions)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,6 +49,12 @@ packages = ["src/skysheep"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# 测试分层：默认全跑；用 `-m "not e2e"` 跳过真实网络栈用例（需要本机端口），
+# 用 `-m e2e` 只跑它们。slow 留给将来需要长时运行的用例。
+markers = [
+    "e2e: 起真实服务/真实 socket 的端到端用例（比进程内用例慢）",
+    "slow: 耗时明显、不适合每次提交都跑的用例",
+]
 
 [tool.ruff]
 line-length = 110

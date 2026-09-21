@@ -12,7 +12,7 @@
 ; （0.6.0 起三处一致，见 AGENTS.md）。
 
 #define MyAppName "SkySheep"
-#define MyAppVersion "2.1"
+#define MyAppVersion "2.2"
 #define MyAppPublisher "SkySheep contributors"
 #define MyAppURL "https://github.com/Sky-scrape/SkySheep"
 #define MyAppExeName "SkySheep.exe"
@@ -20,6 +20,12 @@
 [Setup]
 AppId={{7C1B6E9A-52C4-4B7D-9A34-A1B2C3D4E5F6}
 AppName={#MyAppName}
+; 安装器与桌面启动器共用同名单实例互斥体（default 身份，即 skysheep.instance 的
+; mutex_name()）。否则安装程序会在应用运行时直接覆盖被占用的文件（PyInstaller
+; 产物含 dll/pyd，占用中的文件无法替换，结果是装出一个半新半旧、启动即崩的目录）。
+; 只声明 default 身份：源码版跑在 dev 身份、持的是另一个互斥体，装安装版不会
+; 被它误拦，这正是两份并存应有的行为。
+AppMutex=Local\SkySheepDesktopSingleton
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}

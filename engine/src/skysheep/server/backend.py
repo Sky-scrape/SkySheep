@@ -4696,7 +4696,10 @@ class ServerBackend:
     def _mcp_global_path(self) -> Path:
         return mcp_config_path(skysheep_home())
 
-    def _mcp_project_path(self) -> Path:
+    def _mcp_project_path(self) -> Path | None:
+        """项目级 mcp.json 路径；无项目态返回 None（没有可指向的项目目录）。"""
+        if self.working_dir is None:
+            return None
         return self.working_dir / ".skysheep" / "mcp.json"
 
     # ---- workspace trust：项目级配置在获信任前不得自动生效 ----
@@ -4788,6 +4791,8 @@ class ServerBackend:
         else:
             raise RuntimeError("请粘贴 MCP 配置，或指定一个 .json 文件路径")
         target = self._mcp_global_path() if scope == "global" else self._mcp_project_path()
+        if target is None:
+            raise RuntimeError("项目级 MCP 配置需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。")
         try:
             result = import_servers(servers, target, overwrite=overwrite)
         except MCPInstallError as e:
@@ -4842,6 +4847,10 @@ class ServerBackend:
         try:
             cfg = normalize_server(raw)
             target = self._mcp_global_path() if scope == "global" else self._mcp_project_path()
+            if target is None:
+                raise RuntimeError(
+                    "项目级 MCP 配置需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。"
+                )
             result = import_servers({name.strip(): cfg}, target, overwrite=overwrite)
         except MCPInstallError as e:
             raise RuntimeError(str(e)) from e
@@ -4911,19 +4920,24 @@ class ServerBackend:
 
     async def delete_mcp_server(self, name: str, scope: str = "global") -> dict:
         """删除一个 MCP 服务并断开它的连接。"""
-        path = self._mcp_global_path() if scope == "global" else self._mcp_project_path()
+        project_path = self._mcp_project_path()
+        path = self._mcp_global_path() if scope == "global" else project_path
+        if path is None:
+            raise RuntimeError("项目级 MCP 配置需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。")
         try:
             result = remove_server(name, path)
         except MCPInstallError as e:
             # 全局/项目两边都试试，用户不必知道它当初存在哪
-            other = self._mcp_project_path() if scope == "global" else self._mcp_global_path()
+            other = project_path if scope == "global" else self._mcp_global_path()
+            if other is None:
+                raise RuntimeError(str(e)) from e
             try:
                 result = remove_server(name, other)
                 path = other
             except MCPInstallError:
                 raise RuntimeError(str(e)) from e
         await self._reconnect_mcp()
-        result["scope"] = "project" if path == self._mcp_project_path() else "global"
+        result["scope"] = "project" if path == project_path else "global"
         result["mcp"] = self._mcp_status_list(self.mcp)
         return result
 
@@ -7662,6 +7676,7 @@ class ServerBackend:
             await self.store.list_sessions(self.project.id) if self.project is not None
             else await self.store.list_quick_sessions()
         )
+        project_mcp = self._mcp_project_path()
         return {
             "version": __version__,
             "frozen": self._is_frozen,  # 安装版可应用内一键更新；源码版提示 git pull
@@ -7722,9 +7737,9 @@ class ServerBackend:
             ],
             "mcp_config": {
                 "global": str(self._mcp_global_path()),
-                "project": str(self._mcp_project_path()),
+                "project": str(project_mcp or ""),
                 "global_exists": self._mcp_global_path().exists(),
-                "project_exists": self._mcp_project_path().exists(),
+                "project_exists": project_mcp is not None and project_mcp.exists(),
                 "project_active": self._project_mcp_path_if_trusted() is not None,
             },
             "workspace_trust": self.trust.state(),

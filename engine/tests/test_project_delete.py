@@ -140,3 +140,57 @@ def test_delete_current_project_switches_clears_and_unknown_id(home):
         ws.send_json({"id": "del3", "method": "project.delete", "params": {"id": 99999}})
         r3 = recv_until(ws, "del3")
         assert not r3["ok"] and "不存在" in r3["error"]
+
+
+def test_no_project_boot_snapshot_and_mcp_scopes(home):
+    """删空项目后重启（无项目态）：boot 快照与 MCP 读写都不得拿 None 当路径用。
+
+    回归：snapshot 的 mcp_config 曾直接 ``working_dir / ".skysheep" / "mcp.json"``，
+    无项目态 working_dir 是 None，前端一连上就收到
+    ``TypeError: unsupported operand type(s) for /: 'NoneType' and 'str'``。
+    """
+    import asyncio
+
+    from skysheep.config import db_path
+    from skysheep.session.store import SessionStore
+
+    async def seed():
+        store = await SessionStore(db_path()).connect()
+        try:
+            await store.get_or_create_project(str(home / "proj"))
+        finally:
+            await store.close()
+        # 记成无项目态（active_project=0）：重启后停在快聊，不自动接回
+        (home / "home").mkdir(parents=True, exist_ok=True)
+        (home / "home" / "ui.json").write_text('{"active_project": 0}', encoding="utf-8")
+
+    asyncio.run(seed())
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "b", "method": "boot", "params": {}})
+        r = recv_until(ws, "b")
+        assert r["ok"], r.get("error")
+        snap = r["result"]
+        assert snap["working_dir"] == "" and snap["project_id"] is None
+        assert snap["mcp_config"]["project"] == ""
+        assert snap["mcp_config"]["project_exists"] is False
+        assert snap["mcp_config"]["project_active"] is False
+        assert snap["workspace_trust"]["state"] == "clean"
+
+        # 项目级 MCP 写入：干净的业务报错（而不是 TypeError 崩溃帧）
+        ws.send_json({"id": "sp", "method": "mcp.save_server",
+                      "params": {"name": "x", "command": "echo", "args": [],
+                                 "scope": "project"}})
+        rs = recv_until(ws, "sp")
+        assert not rs["ok"] and "项目" in rs["error"]
+
+        # 删不存在的服务：scope=project 给「先添加项目」提示；scope=global 走
+        # 全局→项目的兜底查找也不得碰 None 路径，最终以业务报错收场
+        ws.send_json({"id": "dp", "method": "mcp.delete",
+                      "params": {"name": "no-such-server", "scope": "project"}})
+        rp = recv_until(ws, "dp")
+        assert not rp["ok"] and "项目" in rp["error"]
+        ws.send_json({"id": "dg", "method": "mcp.delete",
+                      "params": {"name": "no-such-server", "scope": "global"}})
+        rg = recv_until(ws, "dg")
+        assert not rg["ok"] and "no-such-server" in rg["error"]

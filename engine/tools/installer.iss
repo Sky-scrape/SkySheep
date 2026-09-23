@@ -65,7 +65,21 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; 程序内更新链路（apply_update 传 /RESTARTAPP）：静默装完自动拉起新版，
+; 免去「装完没动静、用户以为没更新」的空窗。runasoriginaluser 避免新版继承安装器的管理员权限。
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: RestartAppRequested
 
 [UninstallDelete]
 ; 清理运行产生的临时日志目录外的安装目录残留（用户数据 ~/.skysheep 不在安装目录，不受影响）
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+function RestartAppRequested(): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if SameText(ParamStr(I), '/RESTARTAPP') then
+      Result := True;
+end;

@@ -215,6 +215,31 @@ def test_backup_before_maintain_rotates(mem_file):
     assert baks[-1].read_text(encoding="utf-8") == f"第{MAINTENANCE_BACKUP_KEEP + 1}版原件"
 
 
+def test_backup_colliding_stamp_numbered_not_overwritten(mem_file, monkeypatch):
+    """Windows 计时器在部分机器（CI 虚拟机常见）把连续调用桶进同一 ~15.6ms，
+    datetime.now() 返回完全相同的时间戳，按名写会互相覆盖（CI 上曾 7 份只剩
+    3 份）。撞名时必须追加零填充序号，既不覆盖、字典序也仍按时间推进。"""
+    from skysheep.tools import memory as memory_mod
+
+    frozen = memory_mod.datetime(2026, 9, 23, 8, 16, 21, 598394)
+
+    class _Bucketed(memory_mod.datetime):
+        @classmethod
+        def now(cls):
+            return frozen
+
+    monkeypatch.setattr(memory_mod, "datetime", _Bucketed)
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    p1 = backup_before_maintain(mem_file, "先到")
+    p2 = backup_before_maintain(mem_file, "后到")
+    p3 = backup_before_maintain(mem_file, "再后")
+    assert len({p1, p2, p3}) == 3
+    assert p2.name.endswith("-001") and p3.name.endswith("-002")
+    assert sorted(mem_file.parent.glob("memory.md.bak-*")) == sorted([p1, p2, p3])
+    assert "先到" in p1.read_text(encoding="utf-8")
+    assert "后到" in p2.read_text(encoding="utf-8")
+
+
 def test_memory_save_mtime_guard(home, mem_file):
     """设置页保存带基线 mtime：编辑期间后台写过记忆就拒绝，重读后才能存。"""
     _seed_global(mem_file)

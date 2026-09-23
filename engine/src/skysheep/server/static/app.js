@@ -14040,13 +14040,13 @@ function renderUpdatePanel(snap) {
           actions.innerHTML = "";
           return;
         }
-        state.textContent = "下载完成。点「退出并安装」后应用会自动退出并静默安装，装完重新打开 SkySheep 即为新版本。";
+        state.textContent = "下载完成。点「退出并安装」后应用会自动退出并静默安装，装完自动重新打开。若弹出「用户账户控制」提示请点「是」。";
         const b2 = document.createElement("button");
         b2.className = "btn-ghost";
         b2.textContent = "退出并安装";
         b2.onclick = async () => {
           b2.disabled = true;
-          state.textContent = "正在退出并启动安装程序…安装完成后重新打开 SkySheep 即为新版本。";
+          state.textContent = "正在退出并启动安装程序…装完会自动重新打开 SkySheep。";
           try {
             await request("app.apply_update");
           } catch (e) {

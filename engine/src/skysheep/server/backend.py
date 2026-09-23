@@ -8727,13 +8727,15 @@ class ServerBackend:
         pending = self._pending_update or ""
         if not pending or not Path(pending).is_file():
             raise RuntimeError("还没有下载好的更新包，请先执行「下载更新」")
-        helper = f'timeout /t 2 /nobreak >nul & "{pending}" /SILENT /CLOSEAPPLICATIONS'
+        log_path = _prepare_update_log(pending)
+        override = _setup_privilege_override()
+        helper = _build_update_helper(pending, log_path, override)
         flags = 0
         if hasattr(subprocess, "DETACHED_PROCESS"):
             flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         try:
             subprocess.Popen(
-                ["cmd", "/c", helper],
+                ["cmd", "/v:on", "/c", helper],
                 creationflags=flags, close_fds=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 cwd=str(Path(pending).parent),
@@ -8750,7 +8752,8 @@ class ServerBackend:
             os._exit(0)
 
         spawn_bg(_quit_soon())
-        return {"quitting": True, "installer": pending}
+        return {"quitting": True, "installer": pending, "log": str(log_path) if log_path else "",
+                "uac": override != "/CURRENTUSER"}
 
     # ---- 技能广场：远程索引优先，随包索引兜底（60s 缓存，装/更新后作废） ----
 
@@ -9104,3 +9107,65 @@ def _update_dir() -> Path:
         except OSError:
             continue
     return Path(tempfile.mkdtemp(prefix="skysheep-update-"))
+
+
+_SETUP_APPID = "{7C1B6E9A-52C4-4B7D-9A34-A1B2C3D4E5F6}"  # 与 tools/installer.iss 的 AppId 保持一致
+
+
+def _setup_privilege_override() -> str:
+    """按现有安装登记的侧别决定要不要给安装器传权限覆盖。
+
+    安装包默认要管理员权限（PrivilegesRequired=admin），标准用户下静默安装
+    会卡在 UAC 等确认——程序内更新的窗口期用户往往没注意到弹窗，表现成
+    「更新了但版本没变」。装在用户目录（登记在 HKCU）的安装完全不需要提权：
+    传 /CURRENTUSER 即可静默直装；登记在 HKLM（装时选了「为所有用户安装」）
+    的必须提权，维持默认行为；查询失败或无登记也不传，不改变现状。
+    """
+    try:
+        import winreg
+    except ImportError:  # 非 Windows：apply_update 走不到这里
+        return ""
+    key = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{_SETUP_APPID}_is1"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key):
+            return "/CURRENTUSER"
+    except OSError:
+        return ""
+
+
+def _prepare_update_log(pending: str) -> Path | None:
+    """在用户日志目录准备一份更新安装日志（固定名，每次覆盖只留最近一次）。
+
+    安装器从此不再是黑箱：/LOG 让 Inno 记录自己的安装过程，本函数先写入一行
+    头部（何时、装哪个包、走哪条权限路径），安装结束后 cmd 侧再追加退出码。
+    目录/文件建不出来就返回 None，安装命令里相应省略日志参数——日志失败
+    不阻断更新。
+    """
+    log_path = Path.home() / ".skysheep" / "logs" / "update-setup.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        side = "HKCU，无需 UAC" if _setup_privilege_override() else "需管理员授权，可能弹 UAC"
+        with open(log_path, "w", encoding="utf-8", errors="replace") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 开始静默安装更新：{pending}"
+                    f"（权限：{side}）\n")
+    except OSError:
+        return None
+    return log_path
+
+
+def _build_update_helper(pending: str, log_path: Path | None, override: str = "") -> str:
+    """构造「延迟 2 秒 → 静默安装 → 记录退出码」的 cmd 命令串（配 `cmd /v:on` 用）。
+
+    延迟用 ping 而不是 timeout：更新以 DETACHED_PROCESS 拉起 cmd，进程没有
+    控制台，timeout 的输入重定向检查会立即报错返回，2 秒等待名存实亡——届时
+    本应用还没退出、单实例互斥体未释放，安装器会当作已有实例在跑而放弃。
+    ping 没有控制台依赖，-n 3 恰好约 2 秒。/RESTARTAPP 让安装器装完自动拉起
+    新版（installer.iss 的 [Run] 按此参数决定，手动静默安装不受影响）。
+    """
+    cmd = f'ping -n 3 127.0.0.1 >nul & "{pending}" /SILENT /CLOSEAPPLICATIONS /RESTARTAPP'
+    if override:
+        cmd += f" {override}"
+    if log_path is not None:
+        cmd += f' /LOG="{log_path}"'
+        cmd += f' & >>"{log_path}" echo [setup 退出码: !errorlevel!]'
+    return cmd

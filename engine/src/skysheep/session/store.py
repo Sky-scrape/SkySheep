@@ -774,7 +774,10 @@ class SessionStore:
 
     async def list_projects(self) -> list[Project]:
         assert self._db
-        cur = await self._db.execute("SELECT * FROM projects ORDER BY created_at DESC")
+        # created_at 是秒级，同一秒内建的项目顺序不稳定；id 自增作次级键，
+        # 同秒时后建的 id 更大排前面，与「新的在前」语义一致
+        cur = await self._db.execute(
+            "SELECT * FROM projects ORDER BY created_at DESC, id DESC")
         rows = await cur.fetchall()
         return [Project(r["id"], r["root_path"], r["name"], r["created_at"]) for r in rows]
 

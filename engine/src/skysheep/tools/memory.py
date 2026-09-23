@@ -222,6 +222,13 @@ def backup_before_maintain(path: Path, old_text: str) -> Path:
     """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     bak = path.with_name(f"{path.name}.bak-{stamp}")
+    # Windows 的 datetime.now() 在部分机器（CI 虚拟机常见）精度只有 ~15.6ms，
+    # 连续两次备份可能拿到同一个时间戳，按名直接写会把上一份盖掉。重名时追加
+    # 零填充序号：字典序仍落在原时间戳之后，滚动清理的「按名排序取最新」不变。
+    n = 0
+    while bak.exists():
+        n += 1
+        bak = path.with_name(f"{path.name}.bak-{stamp}-{n:03d}")
     bak.write_text(old_text, encoding="utf-8")
     try:
         baks = sorted(path.parent.glob(path.name + ".bak-*"))

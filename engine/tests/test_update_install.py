@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from test_server import make_client, recv_until  # home fixture 在 conftest.py
 
@@ -75,3 +77,59 @@ def test_release_tag_is_sanitized_before_reaching_paths():
         assert is_safe_tag(good), good
     info = release_from_redirect(RELEASES_LATEST, "/Sky-scrape/SkySheep/releases/tag/v1.7")
     assert info["setup_url"].endswith("/v1.7/SkySheep-1.7-setup.exe")
+
+
+def test_build_update_helper_uses_ping_delay_and_restart():
+    """安装命令串：ping 延迟（DETACHED 下 timeout 会立即失败，互斥体来不及
+    释放）、/RESTARTAPP 让安装器装完自动拉起新版、/LOG 与退出码回写落盘。"""
+    from skysheep.server.backend import _build_update_helper
+
+    log = r"C:\Users\x\.skysheep\logs\update-setup.log"
+    helper = _build_update_helper(r"C:\tmp\SkySheep-1.9-setup.exe", Path(log), "/CURRENTUSER")
+    assert helper.startswith("ping -n 3 127.0.0.1 >nul & ")
+    assert '"C:\\tmp\\SkySheep-1.9-setup.exe" /SILENT /CLOSEAPPLICATIONS /RESTARTAPP' in helper
+    assert " /CURRENTUSER" in helper
+    assert f'/LOG="{log}"' in helper
+    assert helper.count(log) == 2  # 传给安装器一份，退出码追加写一份
+    assert "!errorlevel!" in helper  # 延迟展开，配 cmd /v:on
+
+    # 无日志（建不出来）与无覆盖参数的退化形态：命令仍然完整可用
+    bare = _build_update_helper(r"C:\tmp\setup.exe", None, "")
+    assert "ping -n 3" in bare and "/RESTARTAPP" in bare
+    assert "/LOG" not in bare and "/CURRENTUSER" not in bare and "errorlevel" not in bare
+
+
+class _FakeWinreg:
+    """够 _setup_privilege_override 用的 winreg 桩：按侧别决定键是否存在。"""
+
+    HKEY_CURRENT_USER = "hkcu"
+    HKEY_LOCAL_MACHINE = "hklm"
+
+    def __init__(self, hkcu_has: bool):
+        self.hkcu_has = hkcu_has
+
+    def OpenKey(self, root, key):
+        if root == self.HKEY_CURRENT_USER and self.hkcu_has:
+            return _OpenKeyOk()
+        raise OSError("not found")
+
+
+class _OpenKeyOk:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_setup_privilege_override_follows_install_side(monkeypatch):
+    """安装登记在 HKCU（per-user，装在用户目录）→ 传 /CURRENTUSER 免 UAC；
+    HKLM（为所有用户安装，必须提权）或无登记 → 不传参数，维持默认行为。"""
+    import sys
+
+    from skysheep.server.backend import _setup_privilege_override
+
+    monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(hkcu_has=True))
+    assert _setup_privilege_override() == "/CURRENTUSER"
+    monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(hkcu_has=False))
+    assert _setup_privilege_override() == ""

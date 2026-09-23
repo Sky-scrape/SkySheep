@@ -2502,6 +2502,15 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   font-family: var(--font-mono); font-size: 12px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 列表自身限高滚动：技能一多不再把整页撑长，头部说明与下面的技能广场保持可达
+   （与「本机现存」候选 .scan-list、#backup-list 同一限高范式）；
+   scrollbar-gutter 让滚动条出现时行宽不横跳。
+   .list 是 flex 列，限高后子项会被压扁而不是溢出，必须关掉收缩让内容自然溢出
+   （同 #project-list / #session-list 的处理，见那边注释） */
+.settings-skill-list {
+  max-height: 420px; overflow-y: auto; scrollbar-gutter: stable;
+}
+.settings-skill-list > li { flex-shrink: 0; }
 /* 技能行：设置面板只有 ~410px 宽，塞不下「名称/来源/状态/描述/范围/操作」一整行。
    固定两行：上行名称+标签+删除，下行描述+范围/开关。列宽固定，行间必然对齐。 */
 .settings-skill-list .skill-row {
@@ -2509,8 +2518,10 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   padding: 9px 10px; border-bottom: 1px solid var(--line);
 }
 .settings-skill-list .skill-row:last-child { border-bottom: none; }
-/* 技能批量删除：列表顶部工具条（全选 / 删除所选）与每行行首勾选框 */
+/* 技能批量删除：列表顶部工具条（全选 / 删除所选）与每行行首勾选框。
+   工具条钉在滚动列表顶上：滚到中部仍能全选 / 删除 */
 .skill-toolbar {
+  position: sticky; top: 0; z-index: 1;
   padding: 7px 10px; border-bottom: 1px solid var(--line);
   font-size: 12.5px; background: var(--paper-sunken);
 }

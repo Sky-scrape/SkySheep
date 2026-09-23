@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,7 @@ from skysheep.skills.installer import (
     remove_skill,
     resolve_url,
 )
+from skysheep.skills.loader import _load_skill_from_dir
 from skysheep.tools.skill import LoadSkillTool, ToolContext, ToolError
 
 
@@ -41,6 +43,35 @@ def test_discover_finds_global_and_project(tmp_path):
     assert names == {"pdf-tools", "repo-audit"}
     sources = {s.name: s.source for s in skills}
     assert sources == {"pdf-tools": "global", "repo-audit": "project"}
+
+
+def test_discover_tolerates_stat_oserror(tmp_path, monkeypatch):
+    """不受信任装入点（WinError 448）这类 OSError 会从 is_dir() 冒泡；
+    发现循环把读不出来的条目跳过，不拖垮启动加载。"""
+    real_is_dir = Path.is_dir
+
+    def boom(self, **kw):
+        if self.name == "broken":
+            raise OSError(448, "无法遍历该路径，因为它包含不受信任的装入点。")
+        return real_is_dir(self, **kw)
+
+    monkeypatch.setattr(Path, "is_dir", boom)
+    loader = make_skills(tmp_path)
+    (tmp_path / "global_skills" / "broken").mkdir()  # 让 patch 真的命中一个条目
+    names = {s.name for s in loader.discover()}
+    assert names == {"pdf-tools", "repo-audit"}
+
+
+def test_load_skill_from_dir_survives_stat_oserror(tmp_path, monkeypatch):
+    real_is_file = Path.is_file
+
+    def boom(self, **kw):
+        if self.name == "SKILL.md":
+            raise OSError(448, "无法遍历该路径，因为它包含不受信任的装入点。")
+        return real_is_file(self, **kw)
+
+    monkeypatch.setattr(Path, "is_file", boom)
+    assert _load_skill_from_dir(tmp_path / "any", "global") is None
 
 
 def test_frontmatter_and_body(tmp_path):

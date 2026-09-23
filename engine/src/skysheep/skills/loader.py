@@ -184,7 +184,13 @@ def _read_source_marker(skill_dir: Path) -> str:
 
 def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
     md = skill_dir / "SKILL.md"
-    if not md.is_file():
+    # is_file() 只吞 ENOENT/ELOOP 这类常见错误；Windows 上不受信任装入点
+    # （WinError 448）等 OSError 会直接冒泡。一律当「没有」处理，不拖垮发现/扫描。
+    try:
+        regular = md.is_file()
+    except OSError:
+        return None
+    if not regular:
         return None
     try:
         text = md.read_text(encoding="utf-8", errors="replace")
@@ -241,7 +247,11 @@ class SkillLoader:
             if not base or not base.is_dir():
                 continue
             for skill_dir in sorted(base.iterdir()):
-                if not skill_dir.is_dir():
+                try:
+                    is_dir = skill_dir.is_dir()
+                except OSError:
+                    continue  # 同上：单个读不出来的条目跳过，不让发现整体失败
+                if not is_dir:
                     continue
                 skill = _load_skill_from_dir(skill_dir, source)
                 if skill and skill.name not in self._skills:

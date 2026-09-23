@@ -106,14 +106,38 @@ def _write_source_marker(target: Path, source_url: str) -> None:
         pass
 
 
+def _has_skill_file(candidate: Path) -> bool:
+    """is_file() 的容错版：pathlib 只吞 ENOENT/ELOOP 这类常见错误，
+    Windows 上不受信任装入点（WinError 448）等 OSError 会直接冒泡。
+    这里一律按「没有 SKILL.md」处理——单条读不出来的目录不拖垮整次扫描。"""
+    try:
+        return (candidate / SKILL_FILE).is_file()
+    except OSError:
+        return False
+
+
+def _is_reparse_dir(candidate: Path) -> bool:
+    """目录联接（junction）与符号链接在 Windows 上都带 reparse 属性；
+    is_symlink() 认不出 junction，只能查属性位（POSIX 没有该属性，恒为否）。
+    属性本身读不出来也按是处理：不下钻、不作候选，宁可少列一个。"""
+    try:
+        st = candidate.stat(follow_symlinks=False)
+    except OSError:
+        return True
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def _scan_skills_in_dir(base: Path, max_depth: int = 3) -> list[Path]:
     """找出 base 下方（含 base 自己）带 SKILL.md 的技能目录。
 
     最多往下钻 max_depth 层——GitHub 仓库包常见三层套法 repo-main/skills/xxx，
     再深的基本不是用户想要的东西。找到技能目录后不再往它内部下钻，
     避免技能自带的 examples 又被当成独立技能重复导入。
+    联接目录既不作候选也不下钻：不受信任的装入点会让单次 stat 直接报
+    WinError 448（.claude\\skills 里别家安装器留的 junction 实测如此），
+    指向上级的联接还会让 os.walk 成环；探测一律把 OSError 当「没有」。
     """
-    if (base / SKILL_FILE).is_file():
+    if _has_skill_file(base):
         return [base]
     found: list[Path] = []
     base_depth = len(base.parts)
@@ -124,7 +148,10 @@ def _scan_skills_in_dir(base: Path, max_depth: int = 3) -> list[Path]:
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         for name in list(dirnames):  # 快照迭代：命中后要从 dirnames 里移除防下钻
             candidate = Path(dirpath) / name
-            if (candidate / SKILL_FILE).is_file():
+            if _is_reparse_dir(candidate):
+                dirnames.remove(name)  # 联接不进不钻：从 dirnames 剪掉即断环
+                continue
+            if _has_skill_file(candidate):
                 found.append(candidate)
                 dirnames.remove(name)  # 技能目录内部不下钻
     return sorted(found)

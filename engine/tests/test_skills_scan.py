@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from skysheep.models.fake import FakeProvider
@@ -146,3 +149,41 @@ def test_scan_dedupes_same_name_across_roots(tmp_path):
     assert c["origin"] == "Claude Code、Codex"
     assert c["description"] == "Claude Code 里的那份"  # 描述取首个来源
     assert Path(c["path"]).resolve() == a.resolve()
+
+
+def _make_junction(link: Path, target: Path) -> None:
+    # junction 不需要管理员权限；mklink 是 cmd 内建命令，得走 cmd 调
+    r = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True
+    )
+    assert r.returncode == 0, r.stderr.decode(errors="replace")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="目录联接是 Windows 概念")
+def test_scan_skips_junctions_without_crash(tmp_path):
+    """真实故障结构（2026-09）：.claude\\skills 里别家安装器留的 junction，
+    遍历它的 stat 会报 WinError 448 打挂整次扫描；指向上级的联接还会让
+    os.walk 成环。联接一律不作候选也不下钻，真实目录照常扫出。"""
+    _skill(tmp_path / "target", "real-one", "联接指向的真实技能")
+    claude = tmp_path / "claude"
+    _skill(claude, "pdf", "pdf-tools")
+    _make_junction(claude / "linked", tmp_path / "target" / "real-one")
+    _make_junction(claude / "loop", claude)  # 自引用成环
+    cands = scan_computer_skills([("Claude Code", claude)], existing=set())
+    assert [c["name"] for c in cands] == ["pdf-tools"]
+
+
+def test_scan_survives_stat_oserror(tmp_path, monkeypatch):
+    """不受信任装入点的 WinError 448 之类 OSError 会在 is_file() 处冒泡
+    （pathlib 只吞 ENOENT/ELOOP）；探测把 OSError 当「没有」，少列不抛错。"""
+    real_is_file = Path.is_file
+
+    def boom(self, **kw):
+        if self.name == "SKILL.md":
+            raise OSError(448, "无法遍历该路径，因为它包含不受信任的装入点。")
+        return real_is_file(self, **kw)
+
+    monkeypatch.setattr(Path, "is_file", boom)
+    claude = tmp_path / "claude"
+    _skill(claude, "pdf", "pdf-tools")
+    assert scan_computer_skills([("Claude Code", claude)], existing=set()) == []

@@ -353,6 +353,7 @@ class MCPServerStatus:
         self.error: str | None = None
         self.tool_names: list[str] = []
         self.reconnecting = False   # 正在后台重连（前端可显示「重连中」）
+        self.connecting = False     # 正在建立首连（启动后台连接/手动连接期间）
         self.restarts = 0           # 自动重连成功次数（诊断用）
         self.attempts = 0           # 本轮重连链里已失败的尝试次数（达到上限就停手）
 
@@ -531,6 +532,7 @@ class MCPManager:
         if not cfg.enabled:
             await self.disconnect_server(name)
             return []
+        status.connecting = True
         try:
             async with asyncio.timeout(CONNECT_TIMEOUT_S):
                 return await self._connect_one(name, cfg)
@@ -538,6 +540,8 @@ class MCPManager:
             status.error = f"连接超时（{CONNECT_TIMEOUT_S:g} 秒无响应）：地址或启动命令可能不对"
         except Exception as e:
             status.error = _friendly_error(e)
+        finally:
+            status.connecting = False
         return []
 
     async def disconnect_server(self, name: str) -> None:
@@ -764,6 +768,7 @@ class MCPManager:
         async def connect_limited(name: str, cfg: MCPServerConfig) -> list[Tool]:
             if not cfg.enabled:
                 return []
+            self.statuses[name].connecting = True
             try:
                 async with asyncio.timeout(CONNECT_TIMEOUT_S):
                     return await self._connect_one(name, cfg)
@@ -773,6 +778,8 @@ class MCPManager:
                 )
             except Exception as e:
                 self.statuses[name].error = _friendly_error(e)
+            finally:
+                self.statuses[name].connecting = False
             return []
 
         results = await asyncio.gather(

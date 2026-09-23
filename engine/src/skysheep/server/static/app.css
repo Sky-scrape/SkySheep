@@ -2669,6 +2669,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .mcp-head { display: flex; align-items: center; gap: 8px; }
 .mcp-ok { color: var(--down); font-size: 12px; }
 .mcp-bad { color: var(--reg); font-size: 12px; }
+.mcp-pending { color: var(--dim); font-size: 12px; }
 .mcp-tools { display: flex; flex-wrap: wrap; gap: 5px; padding-left: 18px; }
 .mcp-del { margin-left: auto; flex-shrink: 0; font-size: 12px; padding: 4px 10px; }
 .mcp-head .mcp-toggle { margin-left: auto; flex-shrink: 0; font-size: 12px; padding: 4px 10px; }

@@ -307,7 +307,10 @@ async def test_generate_image_b64_path_and_checkpoint(tmp_path):
         return httpx.Response(200, json={"data": [{"b64_json": payload}]})
 
     rec = ChangeRecorder()
+    # 生成端点用公网 IP 字面量：不解析服务商默认域名（本机代理 Fake-IP 模式下
+    # 真实 DNS 会答出保留网段，守卫按设计拒绝——测试不该依赖真实网络）
     tool = GenerateImageTool(provider="siliconflow", api_key="k", recorder=rec,
+                             base_url="http://93.184.216.34/v1",
                              transport=httpx.MockTransport(handler))
     out = await tool.run(GenerateImageArgs(prompt="一只羊", path="img/sheep.png"), make_ctx(tmp_path))
     assert "image saved" in out
@@ -327,6 +330,7 @@ async def test_generate_image_url_download_path(tmp_path):
         return httpx.Response(200, content=png, headers={"content-type": "image/png"})
 
     tool = GenerateImageTool(provider="zhipu", api_key="k",
+                             base_url="http://93.184.216.34/v1",
                              transport=httpx.MockTransport(handler))
     out = await tool.run(GenerateImageArgs(prompt="x"), make_ctx(tmp_path))
     assert "image saved" in out and ".png" in out

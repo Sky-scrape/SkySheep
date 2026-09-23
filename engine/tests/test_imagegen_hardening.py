@@ -76,10 +76,14 @@ def test_imagegen_dials_verified_ip_without_second_dns(tmp_path):
         return httpx.Response(200, content=png, headers={"content-type": "image/png"})
 
     tool = GenerateImageTool(provider="zhipu", api_key="k",
+                             base_url="http://gen.test/v1",
                              transport=httpx.MockTransport(handler))
+    # 生成端点与下载主机的解析都在测试内作答（不碰真实 DNS——本机若开着
+    # 代理的 Fake-IP 模式，真实解析会答出保留网段，守卫按设计拒绝）：
     # 解析阶段答公网 IP（通过校验）；如果建连时再解析一次，explode 会炸
     with patch.object(socket, "getaddrinfo", side_effect=lambda h, *a, **k: (
-        _answers(["93.184.216.34"]) if h == "rebind.test" else REAL_GETADDRINFO(h, *a, **k)
+        _answers(["93.184.216.34"]) if h in ("rebind.test", "gen.test")
+        else REAL_GETADDRINFO(h, *a, **k)
     )):
         _url, body, _mime = tool._generate_sync("x")
     assert body == png
@@ -96,6 +100,8 @@ def test_rebinding_second_lookup_answers_private_ip(tmp_path):
             # 只有第一次（校验）答公网；若实现错误地二次解析，这里答内网 127.0.0.1
             return _answers(["93.184.216.34"] if lookups.count("rebind.test") == 1
                             else ["127.0.0.1"])
+        if host == "gen.test":  # 生成端点：恒答公网（本测试只盯 rebind.test 的解析次数）
+            return _answers(["93.184.216.34"])
         return REAL_GETADDRINFO(host, *a, **k)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -104,6 +110,7 @@ def test_rebinding_second_lookup_answers_private_ip(tmp_path):
         return httpx.Response(200, content=png, headers={"content-type": "image/png"})
 
     tool = GenerateImageTool(provider="zhipu", api_key="k",
+                             base_url="http://gen.test/v1",
                              transport=httpx.MockTransport(handler))
     with patch.object(socket, "getaddrinfo", side_effect=fake_getaddrinfo):
         _url, body, _mime = tool._generate_sync("x")
@@ -212,7 +219,9 @@ def test_relative_redirect_location_is_joined(tmp_path):
             return httpx.Response(302, headers={"Location": "/b/real.png"})
         return httpx.Response(200, content=png, headers={"content-type": "image/png"})
 
+    # 生成端点用公网 IP 字面量：getaddrinfo 对数字地址本地作答，不碰真实 DNS
     tool = GenerateImageTool(provider="zhipu", api_key="k",
+                             base_url="http://93.184.216.34/v1",
                              transport=httpx.MockTransport(handler))
     _url, body, _mime = tool._generate_sync("x")
     assert body == png

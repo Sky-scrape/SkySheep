@@ -1833,6 +1833,11 @@ function handleEvent(kind, data) {
       if (rightTabs.includes("agenda") && !rightCollapsed) loadAgenda();
       break;
     }
+    case "mcp_updated": {
+      // MCP 后台连接完成/状态变化（启动不阻塞，连完推送）：设置页开着就刷新
+      if (settingsOpen) renderSettings().catch(() => {});
+      break;
+    }
     case "schedule_reminder":
       pushNotice("⏰ 日程提醒", data.title || "");
       showAgendaReminder(data);
@@ -9449,15 +9454,18 @@ async function renderSettings() {
     const toolChips = (m.tools || [])
       .map((t) => `<span class="chip">${escapeHtml(t)}</span>`)
       .join("");
-    // 停用是「配置保留、只是不连接」：与删除（配置也删）区分开
+    // 停用是「配置保留、只是不连接」：与删除（配置也删）区分开。
+    // 连接已改为启动后台进行：连上前后端推送 mcp_updated 刷新这里
     const stateText = m.enabled === false
       ? "已停用"
-      : (m.connected ? `已连接 · ${m.tools.length} 个工具` : escapeHtml(m.error || "未连接"));
+      : (m.connected
+        ? `已连接 · ${m.tools.length} 个工具`
+        : (m.connecting ? "连接中…" : escapeHtml(m.error || "未连接")));
     li.innerHTML = `
       <div class="mcp-head">
         <span class="dot ${m.connected ? "on" : "off"}"></span>
         <span class="item-name">${escapeHtml(m.name)}</span>
-        <span class="${m.connected ? "mcp-ok" : "mcp-bad"}">${stateText}</span>
+        <span class="${m.connected ? "mcp-ok" : (m.connecting ? "mcp-pending" : "mcp-bad")}">${stateText}</span>
         <button class="btn-ghost mcp-toggle" title="${m.enabled === false ? "重新连接这个服务" : "停用：配置保留，工具从 Agent 移除"}">${m.enabled === false ? "启用" : "停用"}</button>
         <button class="btn-ghost danger mcp-del" title="删除这个 MCP 服务">删除</button>
       </div>

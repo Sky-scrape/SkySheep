@@ -596,6 +596,63 @@ def test_mcp_installed_names(tmp_path, monkeypatch):
     assert backend.mcp_installed_names() == ["fetch"]
 
 
+async def test_setup_connects_mcp_in_background(home):
+    """启动不再同步等 MCP：setup 立即返回，连接在后台完成后注入注册表。"""
+    from skysheep.mcp.installer import mcp_config_path
+    from skysheep.server.backend import ServerBackend
+
+    _write_mcp_json(mcp_config_path(home / "home"), {
+        "mcpServers": {"demo": {"command": sys.executable, "args": [str(SERVER_SCRIPT)]}},
+    })
+    be = ServerBackend(working_dir=home / "proj")
+    try:
+        await be.setup()
+        # setup 返回即服务可就绪：连接交给后台任务，完成后才注入 mcp_tools
+        assert be._mcp_connect_task is not None
+        await asyncio.wait_for(be._mcp_connect_task, timeout=30)
+        st = be.mcp.statuses["demo"]
+        assert st.connected is True
+        assert st.connecting is False  # 完成后「连接中」标记要清掉
+        assert "mcp__demo__add" in {t.name for t in be.mcp_tools}
+        # 注册表随后台连接重建：Agent 不等下一轮配置操作就能看到 MCP 工具
+        assert "mcp__demo__add" in {t.name for t in be._base_agent.registry.all()}
+        row = next(s for s in be._mcp_status_list(be.mcp) if s["name"] == "demo")
+        assert row["connected"] is True and row["connecting"] is False
+        assert be.mcp_warnings == []
+    finally:
+        await be.shutdown()
+
+
+async def test_hanging_mcp_does_not_delay_boot(home, tmp_path, monkeypatch):
+    """MCP 服务器挂死不再拖住启动：连接超时只在后台烧，setup 立即返回。
+
+    2026-09-22/23 实测踩过：同步等 MCP 连接（代理拒连 + uvx 拉包重试 15~19s）
+    把「服务就绪」拖过桌面端启动预算，弹了「启动失败」页——连接已后台化。
+    """
+    import time
+
+    from skysheep.mcp.installer import mcp_config_path
+    from skysheep.server.backend import ServerBackend
+
+    script = tmp_path / "hang_server.py"
+    script.write_text(_HANG_SERVER, encoding="utf-8")
+    _write_mcp_json(mcp_config_path(home / "home"), {
+        "mcpServers": {"hang": {"command": sys.executable, "args": [str(script), "init"]}},
+    })
+    be = ServerBackend(working_dir=home / "proj")
+    try:
+        started = time.monotonic()
+        await be.setup()
+        elapsed = time.monotonic() - started
+        assert elapsed < 10, "setup 不应等 MCP 连接（超时预算 20s 只许在后台烧）"
+        # 连接仍在后台进行：「连接中」已标记、任务未完成；关机时会被取消收割
+        assert be._mcp_connect_task is not None and not be._mcp_connect_task.done()
+        assert be.mcp.statuses["hang"].connecting is True
+    finally:
+        await be.shutdown()
+    assert be.mcp.statuses["hang"].connecting is False
+
+
 # ---- 工具描述的形状约束：协议不限制长度/内容，这里做通用缓解 ----
 
 

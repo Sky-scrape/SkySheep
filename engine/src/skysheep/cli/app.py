@@ -513,8 +513,13 @@ async def _models_cmd() -> None:
         print("接入方式：在 config.toml 的 [providers.ollama] 中把 model 改为上面的名称之一。")
 
 
-def _wait_port(port: int, timeout_s: float = 20.0) -> bool:
-    """轮询本机 TCP 端口直到可连接（服务就绪）。主机固定为环回，不构造 URL。"""
+def _wait_port(port: int, timeout_s: float = 60.0) -> bool:
+    """轮询本机 TCP 端口直到可连接（服务就绪）。主机固定为环回，不构造 URL。
+
+    预算要盖住偶发慢路径（数据库恢复、大库备份轮转、会话重开等）：桌面端
+    宁可多等，也不能把「慢」判成「死」弹启动失败页（MCP 连接已后台化，
+    不再占这里的预算，但别的初始化仍可能偶尔超过几十秒）。
+    """
     import socket
     import time
 

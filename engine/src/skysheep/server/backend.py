@@ -1015,6 +1015,7 @@ class ServerBackend:
         self.mcp: MCPManager | None = None
         self.mcp_configs: dict = {}
         self.mcp_tools: list = []
+        self._mcp_connect_task: asyncio.Task | None = None  # 启动期的后台连接
         self.skills: SkillLoader | None = None
         self.tasks: TaskManager | None = None
         self.subagent_store = SubagentStore(skysheep_home() / "subagents.json")
@@ -1263,7 +1264,8 @@ class ServerBackend:
         # 「远程连接」固定项目：启动即建（飞书/微信等渠道对话的归属），
         # 与是否配置渠道无关——侧栏里它是一个常驻分组
         await self.store.ensure_remote_project()
-        await self._bind_project(target)
+        # connect_mcp=False：启动不在这里同步连 MCP，统一交给下面的后台任务
+        await self._bind_project(target, connect_mcp=False)
         # 分级权限模式：上次会话选的档位（0=安全执行 1=自动编辑 2=完全访问）重启后保持
         self._apply_gate_accept_pref(prefs.get("accept_edits", 0))
         # 内置示例快捷指令：首启落成真实记录（老用户已有自定义指令则跳过）
@@ -1283,11 +1285,15 @@ class ServerBackend:
         )
         self.mcp_configs = mcp_configs
         self.mcp = MCPManager(mcp_configs, on_tools_changed=self._on_mcp_tools_changed)
-        self.mcp_tools = await self.mcp.connect_all()
-        self.mcp_warnings = [
-            *mcp_config_warnings,
-            *(f"{name}: {st.error}" for name, st in self.mcp.statuses.items() if st.error),
-        ]
+        # MCP 连接放后台：单台服务器连不上（uvx 冷启动拉包、代理没就绪、地址写错）
+        # 各自最多烧 CONNECT_TIMEOUT_S，同步等它会把「服务就绪」拖过桌面端的启动
+        # 预算，弹「启动失败」页（2026-09-22/23 实测踩过：代理拒连重试 15~19 秒，
+        # 引擎 20.5s 才就绪，桌面 20s 已判死）。连完由 _connect_mcp_after_boot 注入。
+        self.mcp_tools = []
+        self.mcp_warnings = list(mcp_config_warnings)
+        self._mcp_connect_task = asyncio.create_task(
+            self._connect_mcp_after_boot(list(mcp_config_warnings))
+        )
 
         self._base_agent = Agent(
             provider=self.provider,
@@ -1457,6 +1463,7 @@ class ServerBackend:
         self.stop_cron_loop()
         self.term.close_all()
         self.stop_reminder_loop()
+        await self._cancel_mcp_boot_connect()
         if self.mcp:
             await self.mcp.shutdown()
         if self.tasks:
@@ -5285,6 +5292,56 @@ class ServerBackend:
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
 
+    async def _connect_mcp_after_boot(self, cfg_warnings: list[str]) -> None:
+        """启动后的后台 MCP 连接：不阻塞「服务就绪」，连完注入注册表并广播状态。
+
+        与 setup 共用同一台 manager；配置差量同步/全部重连/关机会先取消本任务
+        （_cancel_mcp_boot_connect），避免半路的 connect_all 与它们互踩。
+        """
+        manager = self.mcp
+        if manager is None:
+            return
+        try:
+            tools = await manager.connect_all()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - 单台错误已记进 statuses，这里是兜底
+            logger.warning("MCP 后台连接出错：%s", e)
+            tools = []
+        self.mcp_tools = tools
+        self.mcp_warnings = [
+            *cfg_warnings,
+            *(f"{name}: {st.error}" for name, st in manager.statuses.items() if st.error),
+        ]
+        self._apply_registry_to_agents()
+        self.notify_mcp_updated()
+
+    def notify_mcp_updated(self) -> None:
+        """MCP 状态变化后广播事件（无在线连接时静默，如 CLI/测试）。"""
+        for ws_emit in list(self.ws_emitters):
+            try:
+                spawn_bg(ws_emit({"kind": "mcp_updated"}))
+            except RuntimeError:
+                continue  # 无事件循环（如纯测试环境）
+
+    async def _cancel_mcp_boot_connect(self) -> None:
+        """取消启动期的后台连接并等它收尾（配置同步/全部重连/关机前调用）。
+
+        connect_all 取消时 _connect_one 会走 _close_connection 收割半开的
+        keeper 与子进程（见其 except BaseException 路径），不会留孤儿。
+        """
+        task = self._mcp_connect_task
+        self._mcp_connect_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 - 收尾不挡配置同步/关机
+            pass
+
     async def _sync_mcp_changes(self) -> list[str]:
         """按配置差量同步 MCP 连接（改完配置后调用，无需重启）。
 
@@ -5293,6 +5350,7 @@ class ServerBackend:
         拽下来重连一遍。工具注册表每次按 manager 的最新状态整体重建——注册表
         本身只是对象图，重建不费时，费时的网络连接已经被差量化了。
         """
+        await self._cancel_mcp_boot_connect()
         old = self.mcp_configs or {}
         configs, cfg_warnings = load_mcp_configs(
             self._mcp_global_path(), self._project_mcp_path_if_trusted()
@@ -5319,6 +5377,7 @@ class ServerBackend:
         只给设置页「重连」按钮和信任状态翻转这类「用户明确要重来」的入口用；
         配置增删改走 _sync_mcp_changes 的差量路径，不惊动无关服务器。
         """
+        await self._cancel_mcp_boot_connect()
         if self.mcp is not None:
             await self.mcp.shutdown()
         configs, cfg_warnings = load_mcp_configs(
@@ -5347,6 +5406,7 @@ class ServerBackend:
         return [
             {"name": n, "connected": st.connected, "enabled": st.enabled,
              "error": st.error, "tools": st.tool_names,
+             "connecting": getattr(st, "connecting", False),
              "reconnecting": getattr(st, "reconnecting", False),
              "restarts": getattr(st, "restarts", 0)}
             for n, st in manager.statuses.items()
@@ -6751,13 +6811,18 @@ class ServerBackend:
 
     # ---- 工作项目切换（应用内设定工作目录，对标 Claude Code /add-dir 等） ----
 
-    async def _bind_project(self, target: Path | None) -> None:
+    async def _bind_project(self, target: Path | None, *, connect_mcp: bool = True) -> None:
         """把引擎整体绑定到一个工作目录（None = 释放项目，进入无项目态）。
 
         switch_project / 删除项目 / setup 共用这一条重绑路径：白名单（权限门）、
         项目技能、项目记忆、项目级 MCP、子代理工作目录、检查点、钩子全部跟着
         target 走；无项目态只有全局技能/全局 MCP/全局记忆可用，快照会话归属
         快聊（project_id 为 NULL）。模型服务是全局配置，不受影响。
+
+        connect_mcp=False 只给启动路径（setup）用：项目绑定本身不同步连 MCP，
+        连接由 setup 的后台任务统一做——同步连会把「服务就绪」拖过桌面端启动
+        预算（挂死/慢的服务器各烧一个连接超时），而且 setup 随后还要整体重建
+        manager 再连一遍，白费一倍进程。
         """
         # 旧项目的子代理还引用着旧工作目录，先全部停掉
         if self.tasks:
@@ -6806,8 +6871,10 @@ class ServerBackend:
             state_path=skysheep_home() / "subagent_tasks.json",
         )
 
-        # 项目级 mcp.json 指向新目录 → 差量接入新目录的服务器；顺带用新技能/子代理重建完整注册表
-        await self._sync_mcp_changes()
+        # 项目级 mcp.json 指向新目录 → 差量接入新目录的服务器；顺带用新技能/子代理重建完整注册表。
+        # 启动路径（connect_mcp=False）跳过：连接统一走 setup 的后台任务，避免同步等待与双重连接
+        if connect_mcp:
+            await self._sync_mcp_changes()
 
         # 钩子与检查点跟项目走：钩子换工作目录，检查点换目录树，避免把
         # A 项目的文件快照回滚到 B 项目

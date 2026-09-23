@@ -10,8 +10,10 @@ from test_server import make_client, recv_until  # noqa: F401  (helpers re-expor
 from skysheep.messages import Message, TextBlock
 from skysheep.models.fake import FakeProvider
 from skysheep.tools.memory import (
+    MAX_MEMORY_CHARS,
     build_digest_prompt,
     digest_transcript,
+    load_memory_text,
     parse_digest,
     remember_lines,
 )
@@ -33,6 +35,34 @@ def mem_file(tmp_path, monkeypatch):
 def test_parse_digest_strips_and_filters():
     raw = "- 用户用 uv 管理依赖\n1. 团队项目在 D 盘\n2、喜欢中文回复\n\n* 又一条要点\n无"
     assert parse_digest(raw) == ["用户用 uv 管理依赖", "团队项目在 D 盘", "喜欢中文回复", "又一条要点"]
+
+
+def test_parse_digest_filters_placeholder_punctuation_and_preambles():
+    """「无。」带句尾标点的占位、「以下是提炼结果：」类前导语都不能混进记忆。"""
+    raw = (
+        "好的，以下是提炼结果：\n"
+        "- 用户团队用 uv 管理 Python 依赖\n"
+        "无。\n"
+        "没有。\n"
+        "（无）\n"
+        "none.\n"
+        "没有值得记录的内容！\n"
+        "无需保存：\n"
+        "1. 用户项目都放在 D 盘\n"
+    )
+    assert parse_digest(raw) == ["用户团队用 uv 管理 Python 依赖", "用户项目都放在 D 盘"]
+
+
+def test_load_memory_text_truncates_at_line_boundary(mem_file):
+    """注入超上限按行截断：半条记忆对模型是噪声，最后一条必须完整。"""
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    line = "- [2026-09-01] 条目" + "x" * 90
+    mem_file.write_text("\n".join(line for _ in range(60)), encoding="utf-8")
+    text = load_memory_text()
+    assert len(text) <= MAX_MEMORY_CHARS
+    assert text.endswith("x" * 90)  # 截在行边界：最后一条是完整的
+    full = mem_file.read_text(encoding="utf-8")
+    assert text == full[:MAX_MEMORY_CHARS].rsplit("\n", 1)[0]
 
 
 def test_parse_digest_caps_entries_and_length():

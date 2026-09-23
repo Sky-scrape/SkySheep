@@ -10,10 +10,11 @@
 host 对象（通常就是 ServerBackend）需要提供：
     channel_ensure_session(channel_name) -> str
     channel_new_session(channel_name) -> str
-    channel_run(session_id, text) -> dict          # {"text": str} 或 {"error": str}
+    channel_run(session_id, text, actor="") -> dict   # {"text": str} 或 {"error": str}
     channel_stop(session_id) -> None
     channel_status_text(session_id) -> str
     channel_list_sessions() -> list[dict]
+    channel_submit_decision(channel_name, decision, actor="") -> dict
 """
 
 from __future__ import annotations
@@ -24,20 +25,34 @@ import time
 
 from . import commands
 from .base import Channel, ChannelMessage, ChannelStatus
-from .gate import parse_decision
-from .telegram import TelegramChannel
+from .feishu import FeishuChannel
+from .gate import AMBIGUOUS_ACK_WORDS, parse_decision
 from .weixin import WeixinChannel
 
 logger = logging.getLogger("skysheep.channels")
 
 # 平台名 → 适配器类。加新平台时只改这张表 + 新适配器文件。
 ADAPTERS: dict[str, type[Channel]] = {
-    "telegram": TelegramChannel,
+    "feishu": FeishuChannel,
     "weixin": WeixinChannel,
 }
 
 # 上限：发现来源只用于首次配置时认领 chat_id，留最近若干条即可
 MAX_SEEN = 20
+
+# 排队上限：一轮消息跑着时再进来的消息按序排队。每条排队消息都是一整轮
+# Agent 调用（真金白银的 token），不设上限的话刷屏等于刷预算；超限直接
+# 拒收并告诉用户怎么办。
+MAX_PENDING_TURNS = 5
+
+# 入站文本上限：飞书单条可到 150 KB，全量进上下文既费 token 也没必要；
+# 超过这个长度按截断处理并注明。
+MAX_INBOUND_TEXT = 8000
+
+# 这一轮超过多久没回音就先发一条「还在处理」，免得思考型模型跑着时
+# 聊天窗口一片死寂（渠道端看不到桌面的用时芯片，会以为掉线了）。
+BUSY_NOTICE_DELAY = 10.0
+BUSY_NOTICE_TEXT = "⏳ 这一轮还在处理（可能在思考或执行工具），完成后自动回复。"
 
 
 def _fmt_dur(seconds: float) -> str:
@@ -87,6 +102,8 @@ class ChannelManager:
         # 同一时刻只允许一条渠道消息在跑：两个聊天窗口同时下指令会让
         # Agent 的权限确认与上下文交叉，行为难以预期。
         self._lock = asyncio.Lock()
+        # 正在等锁的消息数（不含正在跑的那条）：排队回执里报位置、超限拒收
+        self._pending_turns = 0
 
     # ---- 生命周期 ----
 
@@ -108,7 +125,9 @@ class ChannelManager:
             self.channels[name] = channel
             if channel.enabled:
                 if not channel.configured():
-                    channel.error = "配置不完整（请先填写 Bot Token）"
+                    # 凭据字段各平台不同（飞书是 App ID + App Secret，微信是扫码
+                    # 换来的 bot_token），这里是平台无关的兑底文案，不写死具体字段名。
+                    channel.error = "配置不完整（缺少凭据，请在下方填好再启用）"
                     continue
                 try:
                     await channel.start()
@@ -195,6 +214,8 @@ class ChannelManager:
         channel = self.channels.get(msg.channel)
         if channel is None:
             return
+        if len(msg.text) > MAX_INBOUND_TEXT:
+            msg.text = msg.text[:MAX_INBOUND_TEXT] + "\n\n（消息过长，超出部分已截断）"
 
         # 名单外：只记录，不回复。这是刻意的——任何知道 bot 用户名的人都能发消息，
         # 回复会向陌生人确认 bot 是活的。
@@ -215,12 +236,34 @@ class ChannelManager:
 
         # 审批回复优先于一切：有等待中的确认时，allow / deny 这类词是决定而不是提问。
         # 不先拦这一层，用户回 "allow" 会被当成新消息再跑一轮，确认永远无人应答。
+        # 决定只认这一轮的发起人（群聊里名单是按 chat_id 命中的，所有成员的消息
+        # 都是 approved 的）；不是发起人时明确告知，而不是把 "allow" 当新消息跑掉。
         decision = parse_decision(msg.text)
         if decision is not None:
-            hit = await self.host.channel_submit_decision(msg.channel, decision)
-            if hit:
-                await self._reply(channel, msg, "已收到，继续。" if decision != "deny" else "已拒绝。")
+            res = await self.host.channel_submit_decision(msg.channel, decision, msg.actor)
+            if res.get("hit"):
+                await self._reply(
+                    channel, msg,
+                    "已收到，继续。" if decision != "deny" else "已拒绝。",
+                )
                 return
+            if res.get("actor_mismatch"):
+                await self._reply(
+                    channel, msg,
+                    "这一轮是别人发起的，审批只能由发起人回复。"
+                    "你想跑任务的话直接说需求，会另开一轮。",
+                )
+                return
+
+        # 模棱两可的应和（"ok"/"1"/"可以"）不当作批准：有待审批项时给明确指引，
+        # 不把它当新消息排队（前一轮正卡在审批上，排队的消息会一直等到超时被拒）
+        ack_like = (msg.text or "").strip().lower() in AMBIGUOUS_ACK_WORDS
+        if ack_like and await self.host.channel_has_waiting_decision(msg.channel):
+            await self._reply(
+                channel, msg,
+                "看到你在回应确认卡：批准请回 allow（或 yes / 允许），拒绝请回 deny（或 拒绝）。",
+            )
+            return
 
         cmd = commands.parse(msg.text)
         if cmd.name == "__unknown__":
@@ -230,15 +273,46 @@ class ChannelManager:
             await self._handle_command(channel, msg, cmd)
             return
 
-        # 普通消息：串行跑一轮，避免多渠道交叉
+        # 普通消息：串行跑一轮，避免多渠道交叉。已在跑时排队并回执，让用户
+        # 知道消息没有丢；排队过长直接拒收（每条排队消息都是一整轮的 token）。
+        if self._lock.locked():
+            if self._pending_turns >= MAX_PENDING_TURNS:
+                await self._reply(
+                    channel, msg,
+                    f"排队的消息太多了（前面还有 {self._pending_turns} 条），这条没有执行。"
+                    "等当前这轮结束再发，或发 /stop 中断当前轮。",
+                )
+                return
+            self._pending_turns += 1
+            try:
+                await self._reply(
+                    channel, msg,
+                    f"已收到。前面还有 {self._pending_turns} 条在排队，轮到后会开始处理。",
+                )
+                async with self._lock:
+                    await self._run_prompt(channel, msg, msg.text)
+            finally:
+                self._pending_turns -= 1
+            return
         async with self._lock:
             await self._run_prompt(channel, msg, msg.text)
 
     async def _reply(self, channel: Channel, msg: ChannelMessage, text: str) -> None:
+        await self._send_text(channel, msg.chat_id, text)
+
+    async def _send_text(self, channel: Channel, chat_id: str, text: str) -> None:
         try:
-            await channel.send_text(msg.chat_id, text)
+            await channel.send_text(chat_id, text)
         except Exception as e:  # noqa: BLE001 - 回消息失败只记日志
             logger.warning("渠道 %s 回消息失败：%s", channel.name, e)
+
+    async def _delayed_busy_notice(self, channel: Channel, chat_id: str) -> None:
+        """一轮跑了太久时先补一条「还在处理」。完成得快就取消，不打扰。"""
+        try:
+            await asyncio.sleep(BUSY_NOTICE_DELAY)
+        except asyncio.CancelledError:
+            return
+        await self._send_text(channel, chat_id, BUSY_NOTICE_TEXT)
 
     async def _handle_command(self, channel: Channel, msg: ChannelMessage, cmd: commands.Command) -> None:
         sid = await self._session_id(channel.name)
@@ -287,11 +361,17 @@ class ChannelManager:
         except Exception as e:  # noqa: BLE001
             await self._reply(channel, msg, f"会话不可用：{e}")
             return
+        # 跑太久先补一条「还在处理」，最后取消：一轮可能好几分钟（思考型模型
+        # + 工具轮次），渠道端没有任何过程反馈，超过 10 秒没动静就像掉线。
+        busy = asyncio.create_task(self._delayed_busy_notice(channel, msg.chat_id))
         try:
-            result = await self.host.channel_run(sid, text)
-        except Exception as e:  # noqa: BLE001 - 一轮失败要让用户看到原因
-            await self._reply(channel, msg, f"这一轮出错了：{e}")
-            return
+            try:
+                result = await self.host.channel_run(sid, text, actor=msg.actor)
+            except Exception as e:  # noqa: BLE001 - 一轮失败要让用户看到原因
+                await self._reply(channel, msg, f"这一轮出错了：{e}")
+                return
+        finally:
+            busy.cancel()
         if isinstance(result, dict) and result.get("error"):
             await self._reply(channel, msg, f"这一轮出错了：{result['error']}")
             return

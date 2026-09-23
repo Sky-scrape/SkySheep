@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..textio import decode_bytes
 from .base import Safety, Tool, ToolContext, ToolError, rel_path, resolve_path
 
 SKIP_DIRS = {
@@ -85,9 +86,17 @@ class GrepTool(Tool):
             try:
                 if f.stat().st_size > MAX_FILE_SIZE:
                     continue
-                text = f.read_text(encoding="utf-8", errors="replace")
+                raw = f.read_bytes()
             except OSError:
                 continue
+            # 按 textio 的编码探测解码（UTF-8 → GB18030，round-trip 校验）：
+            # 旧实现固定按 UTF-8 读，GBK 中文文件整片漏检（读出来全是替换字符，
+            # 匹配不上任何中文模式）——安全审查低危项。二进制在这里被跳过，
+            # 解不出编码的文件退回替换字符（至少 ASCII 部分仍可搜到）。
+            loaded = decode_bytes(raw)
+            if loaded.binary:
+                continue
+            text = loaded.text
             per_file = 0
             for i, line in enumerate(text.splitlines(), 1):
                 if per_file >= MAX_PER_FILE:

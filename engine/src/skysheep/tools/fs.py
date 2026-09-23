@@ -153,7 +153,6 @@ class WriteFileTool(Tool):
     idempotent_hint = False
     open_world_hint = False
     args_model = WriteFileArgs
-    last_diff = ""
 
     def __init__(self, recorder: ChangeRecorder | None = None) -> None:
         self.recorder = recorder
@@ -174,7 +173,7 @@ class WriteFileTool(Tool):
             write_text_file(p, args.content, encoding, newline)
         except OSError as e:
             raise ToolError("cannot write " + shown + ": " + str(e)) from e
-        self.last_diff = make_diff(old, to_lf(args.content), shown)
+        ctx.last_diff = make_diff(old, to_lf(args.content), shown)
         n = len(args.content.splitlines())
         return f"wrote {n} lines ({len(args.content)} chars) to {shown}"
 
@@ -199,7 +198,6 @@ class EditFileTool(Tool):
     idempotent_hint = False
     open_world_hint = False
     args_model = EditFileArgs
-    last_diff = ""
 
     def __init__(self, recorder: ChangeRecorder | None = None) -> None:
         self.recorder = recorder
@@ -229,7 +227,7 @@ class EditFileTool(Tool):
             write_text_file(p, new_content, loaded.encoding, loaded.newline)
         except OSError as e:
             raise ToolError("cannot write " + shown + ": " + str(e)) from e
-        self.last_diff = make_diff(content, new_content, shown)
+        ctx.last_diff = make_diff(content, new_content, shown)
         replaced = count if args.replace_all else 1
         return f"edited {shown}: {replaced} replacement(s)"
 

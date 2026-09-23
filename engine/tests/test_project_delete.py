@@ -76,10 +76,11 @@ def test_delete_project_cascades_sessions_and_rules_keeps_disk(home):
         r = recv_until(ws, "del")
         assert r["ok"] and r["result"]["removed"] == proj["id"]
 
-        # 列表里只剩 proj2
+        # 列表里只剩 proj2（+ 固定项目「远程连接」：无真实目录，永远非当前）
         ws.send_json({"id": "pl2", "method": "project.list", "params": {}})
         rest = recv_until(ws, "pl2")["result"]["projects"]
-        assert [p["id"] for p in rest] == [p["id"] for p in rest if p["is_current"]]
+        assert [p["id"] for p in rest] == [p["id"] for p in rest
+                                           if p["is_current"] or p["root_path"] == ""]
 
         # 数据库级联：项目/会话/白名单全部清掉（置顶会话也不留）、无孤儿消息
         assert project_rows(home, proj["id"]) == []
@@ -125,7 +126,10 @@ def test_delete_current_project_switches_clears_and_unknown_id(home):
         assert r2["ok"] and r2["result"]["was_current"] is True
         assert r2["result"]["switched_to"] is None
         ws.send_json({"id": "pl4", "method": "project.list", "params": {}})
-        assert recv_until(ws, "pl4")["result"]["projects"] == []
+        # 真实项目全删光：只剩固定项目「远程连接」（无真实目录，非当前）
+        rest4 = recv_until(ws, "pl4")["result"]["projects"]
+        assert [p["name"] for p in rest4] == ["远程连接"]
+        assert all(p["root_path"] == "" and not p["is_current"] for p in rest4)
         prefs = json.loads((home / "home" / "ui.json").read_text(encoding="utf-8"))
         assert prefs.get("active_project") == 0
 

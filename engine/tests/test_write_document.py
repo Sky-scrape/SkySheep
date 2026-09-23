@@ -56,11 +56,13 @@ async def test_write_document_docx_roundtrip(tmp_path):
 async def test_write_document_docx_new_file_diff_and_checkpoint(tmp_path):
     rec = ChangeRecorder()
     tool = WriteDocumentTool(recorder=rec)
-    await tool.run(WriteDocumentArgs(path="r.docx", content=DOC_MD), make_ctx(tmp_path))
-    # 新建：改前不存在（回滚时应删除），diff 为源内容全文新增
+    ctx = make_ctx(tmp_path)
+    await tool.run(WriteDocumentArgs(path="r.docx", content=DOC_MD), ctx)
+    # 新建：改前不存在（回滚时应删除），diff 为源内容全文新增（挂在 ctx 上，
+    # 不在工具实例上——实例会被并行任务共享）
     assert list(rec.pre) == [str(tmp_path / "r.docx")]
     assert rec.pre[str(tmp_path / "r.docx")] is None
-    assert tool.last_diff and "+# 季度报告" in tool.last_diff
+    assert ctx.last_diff and "+# 季度报告" in ctx.last_diff
 
 
 async def test_write_document_docx_overwrite_no_diff_and_checkpoint(tmp_path):
@@ -68,9 +70,10 @@ async def test_write_document_docx_overwrite_no_diff_and_checkpoint(tmp_path):
     p.write_bytes(b"OLDBINARY")
     rec = ChangeRecorder()
     tool = WriteDocumentTool(recorder=rec)
-    await tool.run(WriteDocumentArgs(path=str(p), content=DOC_MD), make_ctx(tmp_path))
+    ctx = make_ctx(tmp_path)
+    await tool.run(WriteDocumentArgs(path=str(p), content=DOC_MD), ctx)
     assert rec.pre[str(p)] == b"OLDBINARY"  # 覆盖前快照 → 可回滚
-    assert tool.last_diff == ""  # 旧内容是二进制，给不出有意义的文本 diff
+    assert ctx.last_diff == ""  # 旧内容是二进制，给不出有意义的文本 diff
 
 
 async def test_write_document_xlsx_roundtrip(tmp_path):

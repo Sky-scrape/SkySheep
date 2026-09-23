@@ -97,6 +97,22 @@ def compute_fingerprint(project_root: Path) -> tuple[str, list[str]]:
     return digest.hexdigest(), labels
 
 
+def source_hashes(project_root: Path) -> dict[str, str]:
+    """每个来源文件/目录的内容哈希（相对路径 → sha256），用于「谁变了」的判定。"""
+    out: dict[str, str] = {}
+    for f in project_sources(project_root):
+        try:
+            rel = f.relative_to(project_root).as_posix()
+        except ValueError:
+            rel = f.name
+        try:
+            data = f.read_bytes()
+        except OSError:
+            data = b"<unreadable>"
+        out[rel] = hashlib.sha256(data).hexdigest()
+    return out
+
+
 def describe_sources(project_root: Path) -> list[dict]:
     """给确认界面用的摘要：这个项目「想做什么」。
 
@@ -227,11 +243,14 @@ class WorkspaceTrust:
             projects[_norm_root(self.project_root)] = {
                 "fingerprint": fingerprint,
                 "trusted_at": int(time.time()),
+                # 逐来源哈希：refresh(touched=...) 据此判断「变的是不是只有
+                # 用户刚动的那个来源」（见 refresh 的洗白说明）
+                "sources": source_hashes(self.project_root),
             }
         self._save(projects)
         return self.state()
 
-    def refresh(self) -> dict:
+    def refresh(self, touched: str | Path | None = None) -> dict:
         """用户自己改动了项目级配置后，同步指纹（仅在已信任时生效）。
 
         用户在设置页主动往当前项目装技能 / 加 MCP 服务时，项目级配置的内容变了，
@@ -239,15 +258,48 @@ class WorkspaceTrust:
         表现就是「装上了却像没生效」。这里把用户自己的改动视为延续既有信任：
         本来就信任才刷新；未信任时保持不变（仍然需要确认，不会因为装了一个
         技能就把仓库里其它东西一并放行）。
+
+        touched（安全审查低危项「refresh 洗白边角」）：本次操作实际写入的来源
+        （项目级 mcp.json 或项目级技能目录）。旧实现无条件把**全部**来源重新
+        指纹并延续信任——若在用户上次信任之后，别的来源被第三方改过（git pull
+        带来恶意 .skysheep/mcp.json、或被注入的 Agent 写的），用户随手装一个
+        技能就会连它一起洗白并自动连接。现在逐来源比对：只有「变了的来源都落在
+        touched 之内」才延续信任，否则保持 pending 让用户重新确认。
+        touched=None（调用方未指明）时按旧行为延续——此时无法区分是谁改的，
+        但至少不再扩大范围：只有本来就信任的项目才会走到这里。
         """
         projects = self._load()
         if self.project_root is None or _norm_root(self.project_root) not in projects:
             return self.state()
+        entry = projects.get(_norm_root(self.project_root)) or {}
+        prev_sources = entry.get("sources") if isinstance(entry, dict) else None
+        if touched is not None and isinstance(prev_sources, dict) and prev_sources:
+            try:
+                rel = Path(touched).expanduser().resolve().relative_to(
+                    self.project_root.resolve()
+                ).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                rel = Path(str(touched)).name
+            now_sources = source_hashes(self.project_root)
+            changed = {
+                name for name, digest in now_sources.items()
+                if prev_sources.get(name) != digest
+            }
+            # touched 可能是目录（技能目录）：按前缀判定「这一来源下的文件」
+            prefix = rel.rstrip("/") + "/"
+            stray = sorted(
+                name for name in changed
+                if name != rel and not name.startswith(prefix)
+            )
+            if stray:
+                # 别的来源也变了：不延续信任（可能正是被第三方塞进来的改动）
+                return self.state()
         fingerprint, _ = compute_fingerprint(self.project_root)
         if fingerprint:
             projects[_norm_root(self.project_root)] = {
                 "fingerprint": fingerprint,
                 "trusted_at": int(time.time()),
+                "sources": source_hashes(self.project_root),
             }
         else:
             projects.pop(_norm_root(self.project_root), None)
@@ -261,3 +313,58 @@ class WorkspaceTrust:
         projects.pop(_norm_root(self.project_root), None)
         self._save(projects)
         return self.state()
+
+
+def list_trusted(home: Path | str) -> list[dict]:
+    """全部已信任项目的清单（设置页管理用）：路径 + 信任时刻。
+
+    只读信任记录，不逐项目重算指纹——管理页只要「记过什么」，状态是否
+    仍有效等真正打开该项目时自然会见分晓。
+    """
+    path = Path(home) / TRUST_FILE_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("version") != TRUST_VERSION:
+        return []
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        return []
+    out: list[dict] = []
+    for key, entry in projects.items():
+        if not isinstance(entry, dict):
+            continue
+        out.append({
+            # 存的是 normcase 后的路径，仅作展示（Windows 上小写化）；撤销按同键删除
+            "path": str(key),
+            "fingerprint": str(entry.get("fingerprint") or ""),
+            "trusted_at": entry.get("trusted_at"),
+        })
+    out.sort(key=lambda e: e.get("trusted_at") or 0, reverse=True)
+    return out
+
+
+def revoke_by_path(home: Path | str, project_root: str | Path) -> bool:
+    """按路径撤销信任（设置页管理用）：不要求该项目是「当前项目」。
+
+    返回是否真的删了一条记录；路径不存在于记录中时为 False。
+    """
+    path = Path(home) / TRUST_FILE_NAME
+    projects: dict = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("projects"), dict):
+            projects = data["projects"]
+    except (OSError, ValueError):
+        return False
+    key = _norm_root(project_root)
+    if key not in projects:
+        return False
+    projects.pop(key, None)
+    Path(home).mkdir(parents=True, exist_ok=True)
+    payload = {"version": TRUST_VERSION, "projects": projects}
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return True

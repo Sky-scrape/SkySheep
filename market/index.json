@@ -1,156 +1,221 @@
 {
   "name": "SkySheep 技能广场索引",
-  "description": "本索引与技能本体同仓维护：SkySheep 主仓库的 market/index.json 推上 GitHub 后技能广场自动生效；自建索引用环境变量 SKYSHEEP_MARKET_URL 指向任意可达的 JSON 地址。",
+  "description": "本索引与技能本体同仓维护：SkySheep 主仓库的 market/index.json 推上 GitHub 后技能广场自动生效；自建索引用环境变量 SKYSHEEP_MARKET_URL 指向任意可达的 JSON 地址。条目字段：name/description/url/author 必填，category/version/updated_at 可选（category 供界面分类筛选；version 与 SKILL.md 的 version 比对后提示可更新）。",
   "items": [
-    {
-      "name": "docx 文档技能",
-      "description": "创建、编辑、分析 Word 文档（含修订、批注、格式保留）",
-      "url": "https://github.com/anthropics/skills/tree/main/skills/docx",
-      "author": "anthropics"
-    },
-    {
-      "name": "pdf 文档技能",
-      "description": "处理 PDF：填表单、合并拆分、提取文本与表格",
-      "url": "https://github.com/anthropics/skills/tree/main/skills/pdf",
-      "author": "anthropics"
-    },
-    {
-      "name": "pptx 幻灯片技能",
-      "description": "创建与编辑 PowerPoint 演示文稿（版式、缩略图、批注）",
-      "url": "https://github.com/anthropics/skills/tree/main/skills/pptx",
-      "author": "anthropics"
-    },
-    {
-      "name": "xlsx 表格技能",
-      "description": "创建与编辑 Excel 表格（公式、图表、条件格式）",
-      "url": "https://github.com/anthropics/skills/tree/main/skills/xlsx",
-      "author": "anthropics"
-    },
-    {
-      "name": "anthropics/skills 全仓库",
-      "description": "官方技能仓库整包：一次安装仓库里发现的全部技能",
-      "url": "https://github.com/anthropics/skills",
-      "author": "anthropics"
-    },
     {
       "name": "周报生成",
       "description": "汇总本周工作生成结构化中文周报，四段式输出，可保存为 docx",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/weekly-report",
-      "author": "skysheep"
+      "author": "skysheep",
+      "category": "办公写作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
       "name": "会议纪要",
       "description": "把转写文本、速记或聊天记录整理成带行动项（负责人 + 截止时间）的会议纪要，行动项可写入日程",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/meeting-notes",
-      "author": "skysheep"
-    },
-    {
-      "name": "公众号文章写作",
-      "description": "选题沟通、大纲确认、成稿三步走，写出开头有钩子、结尾引导互动的新媒体文案",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/wechat-article",
-      "author": "skysheep"
-    },
-    {
-      "name": "Excel 清洗与报表",
-      "description": "读取 .xlsx/.csv，按你确认的规则去重补空、统一格式、拆分列，产出干净表格和清洗说明",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/excel-clean",
-      "author": "skysheep"
+      "author": "skysheep",
+      "category": "办公写作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
       "name": "简历优化",
       "description": "对照目标岗位 JD 逐条对齐，给出量化改写建议并产出优化版 docx 简历",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/resume-polish",
-      "author": "skysheep"
-    },
-    {
-      "name": "长文档精读",
-      "description": "先给一页速览（5 条核心结论带页码），再按你的追问逐章展开，长 PDF/Word 不用自己啃",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/doc-digest",
-      "author": "skysheep"
-    },
-    {
-      "name": "旅行规划",
-      "description": "问清天数预算偏好后查实时门票交通信息，输出按天行程表和预算估算，可写入日程",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/travel-planner",
-      "author": "skysheep"
-    },
-    {
-      "name": "一周菜谱与采购清单",
-      "description": "按人数忌口排七天三餐，自动汇总分类采购清单，可保存为 xlsx 照单买菜",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/meal-plan",
-      "author": "skysheep"
+      "author": "skysheep",
+      "category": "办公写作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
       "name": "英文邮件润色",
       "description": "中译英或润色商务邮件，正式/中性/轻松三个语气版本任选，并解释关键用词",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/english-email",
-      "author": "skysheep"
-    },
-    {
-      "name": "目录文件整理",
-      "description": "扫描杂乱文件夹，先出分类方案和完整移动清单，你确认后才动手，整理完留报告",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/file-tidy",
-      "author": "skysheep"
-    },
-    {
-      "name": "报错排查报告",
-      "description": "贴一段报错先复现定位、最小修复并验证，产出根因、修复点、防回归建议的排查报告",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/bug-report",
-      "author": "skysheep"
-    },
-    {
-      "name": "数据分析报告",
-      "description": "读取 Excel/CSV 做完整分析——清洗、统计、找结论、配图表，产出能直接汇报的分析报告",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/data-report",
-      "author": "skysheep"
-    },
-    {
-      "name": "PPT 制作",
-      "description": "先定大纲再生成 .pptx：每页一个观点、要点不超五行，汇报/提案/分享场景都能用",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/ppt-maker",
-      "author": "skysheep"
+      "author": "skysheep",
+      "category": "办公写作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
       "name": "合同风险速审",
       "description": "通读合同逐条标注风险级别，付款、违约、知识产权、退出机制重点核查，给谈判要点清单",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/contract-review",
-      "author": "skysheep"
+      "author": "skysheep",
+      "category": "办公写作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
-      "name": "代码审查",
-      "description": "对代码或改动做分级审查——安全、正确性、可维护性逐层过，问题带文件行号和修复示例",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/code-review",
-      "author": "skysheep"
+      "name": "公众号文章写作",
+      "description": "选题沟通、大纲确认、成稿三步走，写出开头有钩子、结尾引导互动的新媒体文案",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/wechat-article",
+      "author": "skysheep",
+      "category": "内容创作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
-      "name": "学习笔记",
-      "description": "把教材文章整理成结构化笔记——人话讲解、落地例子、自测题三件套，可导出 docx 复习",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/study-notes",
-      "author": "skysheep"
+      "name": "PPT 制作",
+      "description": "先定大纲再生成 .pptx：每页一个观点、要点不超五行，汇报/提案/分享场景都能用",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/ppt-maker",
+      "author": "skysheep",
+      "category": "内容创作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
       "name": "短视频口播脚本",
       "description": "黄金三秒开头、分镜口播稿、发布文案与话题标签三件套，按账号定位批量出选题",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/douyin-script",
-      "author": "skysheep"
-    },
-    {
-      "name": "面试准备",
-      "description": "拿 JD 和简历预测高频面试题，STAR 要点写答案、备好追问应对，可模拟追问到脱稿",
-      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/interview-prep",
-      "author": "skysheep"
+      "author": "skysheep",
+      "category": "内容创作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
       "name": "行业动态简报",
       "description": "联网追踪一个话题产出带来源的简报——重点、时间线、不同观点，可配定时任务周期自动更新",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/news-brief",
-      "author": "skysheep"
+      "author": "skysheep",
+      "category": "内容创作",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "Excel 清洗与报表",
+      "description": "读取 .xlsx/.csv，按你确认的规则去重补空、统一格式、拆分列，产出干净表格和清洗说明",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/excel-clean",
+      "author": "skysheep",
+      "category": "数据与分析",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "数据分析报告",
+      "description": "读取 Excel/CSV 做完整分析——清洗、统计、找结论、配图表，产出能直接汇报的分析报告",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/data-report",
+      "author": "skysheep",
+      "category": "数据与分析",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "长文档精读",
+      "description": "先给一页速览（5 条核心结论带页码），再按你的追问逐章展开，长 PDF/Word 不用自己啃",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/doc-digest",
+      "author": "skysheep",
+      "category": "学习成长",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "学习笔记",
+      "description": "把教材文章整理成结构化笔记——人话讲解、落地例子、自测题三件套，可导出 docx 复习",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/study-notes",
+      "author": "skysheep",
+      "category": "学习成长",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "面试准备",
+      "description": "拿 JD 和简历预测高频面试题，STAR 要点写答案、备好追问应对，可模拟追问到脱稿",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/interview-prep",
+      "author": "skysheep",
+      "category": "学习成长",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "报错排查报告",
+      "description": "贴一段报错先复现定位、最小修复并验证，产出根因、修复点、防回归建议的排查报告",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/bug-report",
+      "author": "skysheep",
+      "category": "开发辅助",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "代码审查",
+      "description": "对代码或改动做分级审查——安全、正确性、可维护性逐层过，问题带文件行号和修复示例",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/code-review",
+      "author": "skysheep",
+      "category": "开发辅助",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "目录文件整理",
+      "description": "扫描杂乱文件夹，先出分类方案和完整移动清单，你确认后才动手，整理完留报告",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/file-tidy",
+      "author": "skysheep",
+      "category": "效率工具",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "旅行规划",
+      "description": "问清天数预算偏好后查实时门票交通信息，输出按天行程表和预算估算，可写入日程",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/travel-planner",
+      "author": "skysheep",
+      "category": "生活助手",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "一周菜谱与采购清单",
+      "description": "按人数忌口排七天三餐，自动汇总分类采购清单，可保存为 xlsx 照单买菜",
+      "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/meal-plan",
+      "author": "skysheep",
+      "category": "生活助手",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
     },
     {
       "name": "记账与预算",
       "description": "账单自动分类、月度对比、超支预警，生成长期可维护的记账 xlsx 和下月预算建议",
       "url": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/budget-tracker",
-      "author": "skysheep"
+      "author": "skysheep",
+      "category": "生活助手",
+      "version": "1.0.0",
+      "updated_at": "2026-09-22"
+    },
+    {
+      "name": "docx 文档技能",
+      "description": "创建、编辑、分析 Word 文档（含修订、批注、格式保留）",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/docx",
+      "author": "anthropics",
+      "category": "文档处理"
+    },
+    {
+      "name": "pdf 文档技能",
+      "description": "处理 PDF：填表单、合并拆分、提取文本与表格",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/pdf",
+      "author": "anthropics",
+      "category": "文档处理"
+    },
+    {
+      "name": "pptx 幻灯片技能",
+      "description": "创建与编辑 PowerPoint 演示文稿（版式、缩略图、批注）",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/pptx",
+      "author": "anthropics",
+      "category": "文档处理"
+    },
+    {
+      "name": "xlsx 表格技能",
+      "description": "创建与编辑 Excel 表格（公式、图表、条件格式）",
+      "url": "https://github.com/anthropics/skills/tree/main/skills/xlsx",
+      "author": "anthropics",
+      "category": "文档处理"
+    },
+    {
+      "name": "anthropics/skills 全仓库",
+      "description": "官方技能仓库整包：一次安装仓库里发现的全部技能",
+      "url": "https://github.com/anthropics/skills",
+      "author": "anthropics",
+      "category": "文档处理"
     }
   ]
 }

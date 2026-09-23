@@ -1,6 +1,7 @@
 ---
 name: budget-tracker
 description: 把账单记录变成看得懂的收支表——自动分类、月度对比、超支预警，生成可长期维护的记账 xlsx 和下月预算建议。
+version: 1.0.0
 ---
 
 ## 目标

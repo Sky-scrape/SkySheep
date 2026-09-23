@@ -57,6 +57,9 @@ def test_local_only_covers_config_and_rce_surface():
         "memory.save",                             # A14：持久注入
         "project.switch", "project.delete", "project.save_instructions",  # C1/C2/C3
         "advanced.save",                           # A16：安全姿态开关
+        # M1：应用内更新 = 下载安装包 + `cmd /c` 静默安装 exe + os._exit 强退，
+        # 与「启动本机程序一律本机专属」同一口径（app.restart 早就在表里）
+        "app.install_update", "app.apply_update",
     }
     assert must <= LOCAL_ONLY_METHODS
 
@@ -113,6 +116,43 @@ def test_remote_project_list_and_backups_strip_paths(home, monkeypatch):
         ws.send_json({"id": "b1", "method": "session.backups"})
         out = recv_until(ws, "b1")["result"]
         assert out["dir"] == "" and all(b["path"] == "" for b in out["backups"])
+
+
+def test_remote_boot_snapshot_strips_local_paths_and_endpoints(home, monkeypatch):
+    """M7：boot 快照对远程打码，口径跟 project.list 对齐。
+
+    旧实现把本机绝对路径与服务 endpoint 无条件发给任何连上来的客户端，
+    而 project.list 已经对远程打码 root_path——同一份信息换个方法就能拿全。
+    """
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "l1", "method": "boot"})
+        local_snap = recv_until(ws, "l1")["result"]
+    assert local_snap["working_dir"]  # 本机：路径原样下发（前端顶栏要显示）
+    assert any(p["base_url"] for p in local_snap["providers"].values())
+    assert local_snap["skill_dirs"]["global"] and local_snap["mcp_config"]["global"]
+
+    monkeypatch.setattr(server_app, "_client_is_local", lambda client: False)
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "r1", "method": "boot"})
+        remote = recv_until(ws, "r1")["result"]
+
+    # 路径类：全部打码（working_dir / 技能目录 / mcp 配置路径 / 指示文件）
+    assert remote["working_dir"] == ""
+    assert remote["skill_dirs"] == {"global": "", "project": "", "scope_config": ""}
+    assert remote["mcp_config"]["global"] == "" and remote["mcp_config"]["project"] == ""
+    assert remote["instructions_file"] == ""
+    # endpoint：不给（本机拿得到、远程拿不到）
+    assert all(p["base_url"] == "" for p in remote["providers"].values())
+    # 「能不能用」的信息照给：远程控制要显示当前服务与可用能力
+    assert remote["version"] == local_snap["version"]
+    assert remote["provider"] == local_snap["provider"]
+    assert remote["model"] == local_snap["model"]
+    assert sorted(remote["providers"]) == sorted(local_snap["providers"])
+    assert all(
+        remote["providers"][n]["has_key"] == local_snap["providers"][n]["has_key"]
+        for n in remote["providers"]
+    )
+    assert [t["name"] for t in remote["tools"]] == [t["name"] for t in local_snap["tools"]]
 
 
 # ---- 2. Store/Backend 层归属校验 ----
@@ -288,10 +328,13 @@ async def test_usage_stats_scoped_to_project(store):
     sids = [r["sid"] for r in scoped["by_session"]]
     assert sids == [sa.id]
     assert sum(r["it"] for r in scoped["by_provider"]) == 100
+    # 去重会话数按项目过滤（计数不带标题，无项目态也能下发）
+    assert scoped["session_count"] == 1
 
     # 缺省不过滤（CLI / 全局场景的行为保持不变）
     full = await store.usage_stats(14)
     assert {r["sid"] for r in full["by_session"]} == {sa.id, sb.id}
+    assert full["session_count"] == 2
 
 
 def test_checkpoint_restore_checks_session_ownership(home):
@@ -345,10 +388,9 @@ async def test_taskmanager_session_scoping(tmp_path):
 
     fp = FakeProvider([]).with_default([TextBlock(text="done")])
     tasks = TaskManager(provider_factory=lambda: fp, working_dir=tmp_path)
-    tasks.set_active_session("sess-1")
-    tid1 = tasks.start_background("explore", "任务一")
-    tasks.set_active_session("sess-2")
-    tid2 = tasks.start_background("explore", "任务二")
+    # 会话归属在派生时随调用传入（两个会话并行派生也各归各，不再依赖全局指针）
+    tid1 = tasks.start_background("explore", "任务一", session_id="sess-1")
+    tid2 = tasks.start_background("explore", "任务二", session_id="sess-2")
     # 等两个任务都跑完（过滤对终态记录同样生效）
     for _ in range(100):
         if tasks.status(tid1).status == "done" and tasks.status(tid2).status == "done":
@@ -378,8 +420,7 @@ async def test_subagent_events_carry_session_id(tmp_path):
         working_dir=tmp_path,
         event_emitter=lambda ev: seen.append(ev),
     )
-    tasks.set_active_session("sess-x")
-    tasks.start_background("explore", "调研")
+    tasks.start_background("explore", "调研", session_id="sess-x")
     for _ in range(100):
         if any(e["kind"] == "task_finished" for e in seen):
             break
@@ -455,6 +496,70 @@ def test_ws_allows_matching_origin(home):
         ) as ws:
             ws.send_json({"id": "b1", "method": "boot"})
             assert recv_until(ws, "b1")["ok"]
+
+
+# ---- 4b. Host 白名单（M2：DNS rebinding） ----
+
+
+def test_host_header_must_point_at_this_machine():
+    """回环 / 本机名 / 本机地址算本机；外来域名不算（rebinding 的识别点）。"""
+    import socket
+
+    from skysheep.server.app import _host_header_is_own_machine, _request_host_allowed
+
+    assert _host_header_is_own_machine("127.0.0.1:8765")
+    assert _host_header_is_own_machine("localhost:8765")
+    assert _host_header_is_own_machine("[::1]:8765")
+    assert _host_header_is_own_machine(socket.gethostname())
+    assert not _host_header_is_own_machine("evil.example:8765")
+    assert not _host_header_is_own_machine("attacker-localhost.com:80")
+    assert not _host_header_is_own_machine("")
+
+    # 对端是本机（含 rebinding：浏览器从回环发起）→ 必须校 Host
+    assert not _request_host_allowed("evil.example:8765", ("127.0.0.1", 5000))
+    assert _request_host_allowed("127.0.0.1:8765", ("127.0.0.1", 5000))
+    # 非本机对端（局域网 / Tailscale）不校：它们可能用机器名、mDNS 名或自定义
+    # 域名访问，一律拒绍会直接打断远程控制；这些来源本来就靠令牌把关
+    assert _request_host_allowed("nas.local:8765", ("192.168.1.20", 5000))
+    assert _request_host_allowed("", ("100.64.0.7", 5000))
+    # TestClient 的固定 Host 只在 peer 确实是 TestClient 时认
+    assert _request_host_allowed("testserver", ("testclient", 50000))
+    assert not _request_host_allowed("testserver", ("127.0.0.1", 5000))
+
+
+def test_ws_rejects_rebinding_host(home):
+    """对端是回环、Host 却是外来域名（DNS rebinding）：WS 不得升级。"""
+    with make_client(home, []) as client:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws", headers={"Host": "evil.example"}) as ws:
+                ws.send_json({"id": "x1", "method": "boot"})
+                ws.receive_json()
+        assert exc_info.value.code == 4403
+
+
+def test_http_rejects_rebinding_host(home):
+    """HTTP 侧同一口径：静态资源也不得随外来 Host 提供（否则项目文件可读）。"""
+    with make_client(home, []) as client:
+        r = client.get("/static/app.js", headers={"Host": "evil.example"})
+        assert r.status_code == 421
+        assert client.get("/static/app.js").status_code == 200
+
+
+def test_static_responses_forbid_framing(home):
+    """界面响应带 X-Frame-Options / frame-ancestors（防外部页面点击劫持）。"""
+    with make_client(home, []) as client:
+        r = client.get("/static/app.js")
+        assert r.headers.get("x-frame-options") == "SAMEORIGIN"
+        assert "frame-ancestors" in r.headers.get("content-security-policy", "")
+
+
+def test_markdown_external_links_use_noopener(home):
+    """模型输出里的外链带 rel="noopener noreferrer"（新窗口拿不到 opener）。"""
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    i = js.index("function renderMarkdown(")
+    seg = js[i:i + 4000]
+    assert 'rel="noopener noreferrer"' in seg
+    assert 'target="_blank"' in seg
 
 
 def test_preview_frame_has_sandbox():

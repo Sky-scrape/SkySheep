@@ -76,6 +76,9 @@ class ProviderConfig(BaseModel):
     # 每百万 tokens 单价（元），用于用量统计里的费用估算；0 = 不计价
     price_in: float = 0.0
     price_out: float = 0.0
+    # 缓存命中部分的单价（元 / 百万 tokens）。多数服务对命中提示词缓存的输入
+    # 收得更便宜（DeepSeek 约 1/10）。0 = 不区分缓存，输入全部按 price_in 计。
+    price_cache: float = 0.0
     # 思考强度：auto 按任务复杂度逐轮估档（core/effort.py）；low/medium/high 固定映射
     reasoning_effort: str = "auto"
     # 是否在界面上提供思考强度控件。默认开启：auto 档的估档只对声明支持的服务
@@ -174,13 +177,15 @@ class ChannelsConfig(BaseModel):
     """聊天软件渠道总配置。
 
     platforms 是「平台名 → 扁平配置 dict」，不建固定子模型：平台是开放集合
-    （Telegram / 飞书 / 钉钉 / …），且每个平台的专属字段不同（token、app_id、
-    secret…）。扁平结构在 TOML 里读写都自然：
+    （飞书 / 微信 / 钉钉 / …），且每个平台的专属字段不同（飞书是 app_id +
+    app_secret，微信是扫码换来的 bot_token，其它平台可能是单个 token）。
+    扁平结构在 TOML 里读写都自然：
 
-        [channels.platforms.telegram]
+        [channels.platforms.feishu]
         enabled = true
-        allowed_ids = ["12345"]
-        token = "…"
+        allowed_ids = ["ou_xxx"]
+        app_id = "cli_xxx"
+        app_secret = "…"
 
     加新平台只改 channels.ADAPTERS，不动配置模型。
 
@@ -207,8 +212,14 @@ class SkySheepConfig(BaseModel):
     max_iterations: int = Field(default=40, ge=1, le=200)
     context_limit_tokens: int = Field(default=1_000_000, ge=4_000)
     compaction_keep_recent: int = Field(default=8, ge=2)
+    # 压缩触发比例：上下文占用达到上限的这个比例就自动压缩（默认 0.9）。
+    # 顶满 100% 才压缩，容易在「快要压缩时」撞上上游 400 拒绝，前面迭代的
+    # 费用全部作废；提前留出余量，压缩本身也有更大的操作空间。
+    compaction_trigger: float = Field(default=0.9, ge=0.5, le=0.98)
     subagent_enabled: bool = True
     subagent_max_iterations: int = Field(default=25, ge=1, le=100)
+    # 后台子代理并发上限：同时跑的分身数（防模型一口气派大量任务烧钱）
+    subagent_max_concurrent: int = Field(default=3, ge=1, le=8)
     # 只允许工具访问工作目录内的路径（默认关：开着就没法处理目录外的文件）。
     # 只读工具是自动放行的，这个开关是"只看当前项目"的一键闸门。
     restrict_to_workdir: bool = False
@@ -337,6 +348,22 @@ PRESET_SIGNUP_URLS: dict[str, str] = {
 }
 
 
+def _clamp_int(raw: dict, key: str, default: int, lo: int, hi: int | None = None) -> int:
+    """读一个整数配置并夹到合法区间（安全审查 M13）。
+
+    手改 config.toml 写越界（或写成非数字）时，旧实现只做 int() 转换，
+    越界值直接送进 pydantic 校验 → 启动就炸在 ValidationError 上，用户
+    只能去手改文件才能恢复。这里夹回合法区间，越界时按边界值生效。
+    """
+    try:
+        val = int(raw.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    if hi is not None:
+        val = min(hi, val)
+    return max(lo, val)
+
+
 def load_config() -> SkySheepConfig:
     """读取 config.toml 并与预设合并（文件条目按字段覆盖预设）。
 
@@ -362,15 +389,22 @@ def load_config() -> SkySheepConfig:
         except Exception as e:
             raise ConfigError(f"failed to parse {p}: {e}") from e
         default = raw.get("default", default)
-        max_iterations = int(raw.get("max_iterations", max_iterations))
-        context_limit = int(raw.get("context_limit_tokens", 1_000_000))
-        keep_recent = int(raw.get("compaction_keep_recent", 8))
+        # 手改配置越界/写成非数字时夹回合法区间（区间与下方 SkySheepConfig 的
+        # Field 约束一致），别让启动炸在 pydantic 校验上——安全审查 M13
+        max_iterations = _clamp_int(raw, "max_iterations", max_iterations, 1, 200)
+        context_limit = _clamp_int(raw, "context_limit_tokens", 1_000_000, 4_000)
+        keep_recent = _clamp_int(raw, "compaction_keep_recent", 8, 2)
+        try:
+            compaction_trigger = min(0.98, max(0.5, float(raw.get("compaction_trigger", 0.9))))
+        except (TypeError, ValueError):
+            compaction_trigger = 0.9
         sub_enabled = bool(raw.get("subagent_enabled", True))
-        sub_iters = int(raw.get("subagent_max_iterations", 25))
+        sub_iters = _clamp_int(raw, "subagent_max_iterations", 25, 1, 100)
+        sub_conc = _clamp_int(raw, "subagent_max_concurrent", 3, 1, 8)
         restrict_workdir = bool(raw.get("restrict_to_workdir", False))
         computer_control = bool(raw.get("computer_control", False))
         browser_control = bool(raw.get("browser_control", False))
-        daily_budget = max(0, int(raw.get("daily_token_budget", 0)))
+        daily_budget = _clamp_int(raw, "daily_token_budget", 0, 0)
         memory_digest = bool(raw.get("memory_digest", True))
         disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
         rt_raw = raw.get("roundtable")
@@ -411,8 +445,10 @@ def load_config() -> SkySheepConfig:
     else:
         context_limit = 1_000_000
         keep_recent = 8
+        compaction_trigger = 0.9
         sub_enabled = True
         sub_iters = 25
+        sub_conc = 3
         restrict_workdir = False
         computer_control = False
         browser_control = False
@@ -434,8 +470,10 @@ def load_config() -> SkySheepConfig:
         max_iterations=max_iterations,
         context_limit_tokens=context_limit,
         compaction_keep_recent=keep_recent,
+        compaction_trigger=compaction_trigger,
         subagent_enabled=sub_enabled,
         subagent_max_iterations=sub_iters,
+        subagent_max_concurrent=max(1, min(8, sub_conc)),
         restrict_to_workdir=restrict_workdir,
         computer_control=computer_control,
         browser_control=browser_control,
@@ -457,6 +495,7 @@ def set_advanced_settings_in_config(
     max_iterations: int | None = None,
     context_limit_tokens: int | None = None,
     compaction_keep_recent: int | None = None,
+    compaction_trigger: float | None = None,
     restrict_to_workdir: bool | None = None,
     computer_control: bool | None = None,
     browser_control: bool | None = None,
@@ -470,6 +509,8 @@ def set_advanced_settings_in_config(
         raise ConfigError("上下文上限要在 4000–2000000 tokens 之间")
     if compaction_keep_recent is not None and not 2 <= int(compaction_keep_recent) <= 100:
         raise ConfigError("压缩保留条数要在 2–100 之间")
+    if compaction_trigger is not None and not 0.5 <= float(compaction_trigger) <= 0.98:
+        raise ConfigError("压缩触发比例要在 0.5–0.98 之间")
     if daily_token_budget is not None and int(daily_token_budget) > 100_000_000:
         raise ConfigError("每日 token 预算过大，请填写 0（不限制）到 1 亿之间的整数")
     p, raw = _read_raw_config()
@@ -479,6 +520,8 @@ def set_advanced_settings_in_config(
         raw["context_limit_tokens"] = int(context_limit_tokens)
     if compaction_keep_recent is not None:
         raw["compaction_keep_recent"] = int(compaction_keep_recent)
+    if compaction_trigger is not None:
+        raw["compaction_trigger"] = min(0.98, max(0.5, float(compaction_trigger)))
     if restrict_to_workdir is not None:
         raw["restrict_to_workdir"] = bool(restrict_to_workdir)
     if computer_control is not None:
@@ -516,13 +559,17 @@ def set_memory_maintenance_in_config(
 
 
 def set_hooks_in_config(
-    pre: list[dict] | None = None, post: list[dict] | None = None
+    *,
+    pre: list[dict] | None = None,
+    post: list[dict] | None = None,
+    stop: list[dict] | None = None,
 ) -> None:
     """写入 config.toml 的 [hooks] 表（None 表示该组不动）。
 
     设置页的 Hooks 面板走这里，不直接编辑 config.toml 文本——保持与其它设置项
     同一套读写路径（含目录边界校验），也避免手写 TOML 的格式错。
-    每项形如 {"match": "write_file", "command": "python check.py", "timeout_s": 10}。
+    pre/post 每项形如 {"match": "write_file", "command": "python check.py",
+    "timeout_s": 10, "enabled": true}；stop 项没有 match（任务完成事件不按工具过滤）。
     """
     p, raw = _read_raw_config()
     hooks = raw.get("hooks")
@@ -532,15 +579,17 @@ def set_hooks_in_config(
         hooks["pre_tool_use"] = _clean_hook_items(pre)
     if post is not None:
         hooks["post_tool_use"] = _clean_hook_items(post)
-    # 两组都空时删掉整张表：留空表会让用户以为钩子还在生效
-    if not any(hooks.get(k) for k in ("pre_tool_use", "post_tool_use")):
+    if stop is not None:
+        hooks["stop"] = _clean_hook_items(stop, with_match=False)
+    # 三组都空时删掉整张表：留空表会让用户以为钩子还在生效
+    if not any(hooks.get(k) for k in ("pre_tool_use", "post_tool_use", "stop")):
         raw.pop("hooks", None)
     else:
         raw["hooks"] = hooks
     _write_raw_config(p, raw)
 
 
-def _clean_hook_items(items: list) -> list[dict]:
+def _clean_hook_items(items: list, *, with_match: bool = True) -> list[dict]:
     """校验并整理钩子条目（坏条目直接报错，而不是静默丢掉）。"""
     out: list[dict] = []
     for i, item in enumerate(items or [], start=1):
@@ -551,7 +600,9 @@ def _clean_hook_items(items: list) -> list[dict]:
             raise ConfigError(f"第 {i} 条钩子缺少 command（要执行的命令）")
         if "\n" in command:
             raise ConfigError(f"第 {i} 条钩子的 command 不能包含换行")
-        match = str(item.get("match", "") or "*").strip() or "*"
+        cleaned: dict = {}
+        if with_match:
+            cleaned["match"] = str(item.get("match", "") or "*").strip() or "*"
         raw_timeout = item.get("timeout_s")
         if raw_timeout is None or raw_timeout == "":
             timeout = DEFAULT_HOOK_TIMEOUT_S
@@ -564,21 +615,30 @@ def _clean_hook_items(items: list) -> list[dict]:
                 raise ConfigError(f"第 {i} 条钩子的 timeout_s 必须是数字") from None
         if not 1 <= timeout <= 600:
             raise ConfigError(f"第 {i} 条钩子的超时要在 1–600 秒之间")
-        out.append({"match": match, "command": command, "timeout_s": timeout})
+        cleaned["command"] = command
+        cleaned["timeout_s"] = timeout
+        # enabled 是可选字段：缺省 true（停用一条钩子不必删配置，勾掉即可）
+        cleaned["enabled"] = bool(item.get("enabled", True))
+        out.append(cleaned)
     return out
 
 
 def set_subagent_settings_in_config(
-    *, enabled: bool | None = None, max_iterations: int | None = None
+    *, enabled: bool | None = None, max_iterations: int | None = None,
+    max_concurrent: int | None = None,
 ) -> None:
     """写入子代理设置（config.toml 顶层；None 表示该项不动）。"""
     if max_iterations is not None and not 1 <= int(max_iterations) <= 100:
         raise ConfigError("子代理迭代轮数要在 1–100 之间")
+    if max_concurrent is not None and not 1 <= int(max_concurrent) <= 8:
+        raise ConfigError("子代理并发上限要在 1–8 之间")
     p, raw = _read_raw_config()
     if enabled is not None:
         raw["subagent_enabled"] = bool(enabled)
     if max_iterations is not None:
         raw["subagent_max_iterations"] = int(max_iterations)
+    if max_concurrent is not None:
+        raw["subagent_max_concurrent"] = int(max_concurrent)
     _write_raw_config(p, raw)
 
 
@@ -611,8 +671,10 @@ def _read_raw_config() -> tuple[Path, dict]:
 def _write_raw_config(p: Path, raw: dict) -> None:
     import tomli_w
 
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(tomli_w.dumps(raw), encoding="utf-8")
+    from .textio import write_text_atomic
+
+    # 原子写（安全审查 M13）：写一半被中断时旧配置仍然完整，不会留下截断的 TOML
+    write_text_atomic(p, tomli_w.dumps(raw))
 
 
 def update_provider_in_config(
@@ -630,6 +692,7 @@ def update_provider_in_config(
     temperature: float | str | None = None,
     price_in: float | None = None,
     price_out: float | None = None,
+    price_cache: float | None = None,
     proxy: str | None = None,
 ) -> None:
     """把一个 provider 的字段写回 ~/.skysheep/config.toml（整体重写，注释会丢失）。
@@ -678,6 +741,8 @@ def update_provider_in_config(
         section["price_in"] = max(0.0, float(price_in))
     if price_out is not None:
         section["price_out"] = max(0.0, float(price_out))
+    if price_cache is not None:
+        section["price_cache"] = max(0.0, float(price_cache))
     if proxy is not None:
         proxy = str(proxy).strip()
         if proxy:

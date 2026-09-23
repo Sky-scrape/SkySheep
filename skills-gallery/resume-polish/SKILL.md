@@ -1,6 +1,7 @@
 ---
 name: resume-polish
 description: 读取中文简历与目标岗位 JD，逐条对齐岗位要求给出改写建议，产出重点突出、量化表达的优化版 docx 简历。
+version: 1.0.0
 ---
 
 ## 目标

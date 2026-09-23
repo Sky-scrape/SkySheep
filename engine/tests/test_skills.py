@@ -526,3 +526,91 @@ def test_remove_skill_handles_readonly_git_files(tmp_path):
 
     # rmtree_force 单独用：目录不存在时安静返回
     rmtree_force(tmp_path / "no-such-dir")
+
+
+# --------------------------------------------------------------- H1：技能名路径穿越
+#
+# SKILL.md frontmatter 的 name 是技能包作者可控的外部内容，而安装落点是
+# `dest_root / name`、overwrite 时先 rmtree 再写——名字带 `..`/分隔符/盘符就能
+# 在技能目录之外任意删除+写入。下面三个用例卡住这条链。
+
+_EVIL_NAMES = [
+    "..\\..\\evil",
+    "../../evil",
+    "..",
+    ".",
+    "C:\\Windows\\Temp\\evil",
+    "a/b",
+    "a\\b",
+    "...",
+]
+
+
+def _zip_with_skill(path, name: str):
+    """造一个最小技能 zip：外层套一层目录，frontmatter 的 name 由参数决定。"""
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("pkg/SKILL.md", f"---\nname: {name}\ndescription: x\n---\n正文\n")
+    return path
+
+
+@pytest.mark.parametrize("evil", _EVIL_NAMES)
+def test_install_from_zip_rejects_traversing_skill_name(tmp_path, evil):
+    """恶意 name 的技能包必须装不进去，且技能目录之外一个字节都不动。"""
+    dest = tmp_path / "skills"
+    dest.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("别动我", encoding="utf-8")
+
+    zp = _zip_with_skill(tmp_path / "evil.zip", evil)
+    # overwrite=True 是市场「更新/重装」走的路径：不卡名字就是先删后写
+    with pytest.raises(SkillInstallError):
+        install_from_zip(zp, dest, existing=set(), overwrite=True)
+
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "别动我"
+    assert list(dest.iterdir()) == []  # 暂存目录也已在 finally 里清掉
+
+
+@pytest.mark.parametrize("evil", _EVIL_NAMES)
+def test_remove_skill_rejects_traversing_name(tmp_path, evil):
+    """remove_skill 的 name 来自界面/请求参数，不得 rmtree 到候选根之外。"""
+    root = tmp_path / "skills"
+    (root / "good").mkdir(parents=True)
+    (root / "good" / "SKILL.md").write_text(
+        "---\nname: good\ndescription: x\n---\n", encoding="utf-8"
+    )
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "SKILL.md").write_text("---\nname: v\ndescription: x\n---\n", encoding="utf-8")
+
+    with pytest.raises(SkillInstallError):
+        remove_skill(evil, [root])
+    assert victim.exists() and (victim / "SKILL.md").exists()
+
+    # 正常名字仍然能删（别把合法路径一并卡死）
+    assert remove_skill("good", [root])["removed"] == "good"
+    assert not (root / "good").exists()
+
+
+def test_skill_name_shape_and_target_containment(tmp_path):
+    """单元级：名字形状校验 + 落点包含性校验。"""
+    from skysheep.skills.installer import _skill_target, _validate_skill_name
+
+    dest = tmp_path / "skills"
+    dest.mkdir()
+    assert _skill_target(dest, "pdf-tools") == (dest / "pdf-tools").resolve()
+    assert _validate_skill_name("  pdf-tools  ") == "pdf-tools"
+
+    for bad in _EVIL_NAMES + ["", "   ", "a:b", "x" * 200]:
+        with pytest.raises(SkillInstallError):
+            _validate_skill_name(bad)
+
+    # 名字合法但 resolve 后跑到根外（符号链接等）也要拦：直接造一个指向外部的链接
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (dest / "link").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("本平台不允许创建目录符号链接")
+    with pytest.raises(SkillInstallError):
+        _skill_target(dest, "link")

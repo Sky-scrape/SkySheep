@@ -16,6 +16,7 @@ import json
 import re
 from pathlib import Path
 
+from ..textio import write_text_atomic
 from .client import MCPServerConfig
 
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
@@ -44,7 +45,7 @@ def normalize_server(raw: dict) -> MCPServerConfig:
     """把一段用户给的 JSON（或表单字段）变成校验过的 MCPServerConfig。"""
     if not isinstance(raw, dict):
         raise MCPInstallError("服务定义必须是一个 JSON 对象")
-    known = {"command", "args", "env", "url", "headers", "readonly"}
+    known = {"command", "args", "env", "url", "headers", "readonly", "timeout", "enabled"}
     section = {k: v for k, v in raw.items() if k in known}
     if not section:
         raise MCPInstallError(
@@ -73,6 +74,8 @@ def normalize_server(raw: dict) -> MCPServerConfig:
             "headers 必须是「字符串→字符串」的对象，例如 "
             '{"Authorization": "Bearer ..."}'
         )
+    if cfg.timeout is not None and (not isinstance(cfg.timeout, (int, float)) or cfg.timeout <= 0):
+        raise MCPInstallError("timeout 必须是正数（单位秒），例如 300")
     return cfg
 
 
@@ -139,12 +142,40 @@ def parse_file(path: str | Path) -> dict[str, MCPServerConfig]:
         raise MCPInstallError(f"{p.name}：{e}") from e
 
 
+def _existing_names(path: Path) -> set[str]:
+    """已配置的服务名集合（给确认逻辑判断哪些 stdio 定义会真的写进去）。"""
+    return set(load_servers(path))
+
+
+def pending_stdio_commands(
+    servers: dict[str, MCPServerConfig], path: Path, *, overwrite: bool = False
+) -> list[dict]:
+    """dry-run：这次导入会实际写入的 stdio 服务及其命令行（给前端弹确认框用）。
+
+    不写文件、不抛异常。同名且不覆盖的定义本次会被跳过，不算待确认项。
+    """
+    existing = load_servers(path)
+    out: list[dict] = []
+    for name, cfg in servers.items():
+        if cfg.transport != "stdio":
+            continue
+        if name in existing and not overwrite:
+            continue
+        out.append({
+            "name": name,
+            "command": cfg.command,
+            "args": list(cfg.args or []),
+        })
+    return out
+
+
 def save_servers(path: Path, servers: dict[str, dict]) -> None:
-    """整体写回 mcp.json（保持 Claude Desktop 的 mcpServers 结构）。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"mcpServers": servers}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    """整体写回 mcp.json（保持 Claude Desktop 的 mcpServers 结构）。
+
+    原子写（安全审查 M13 同族）：写一半被中断会丢掉整份 MCP 配置。
+    """
+    write_text_atomic(
+        path, json.dumps({"mcpServers": servers}, ensure_ascii=False, indent=2) + "\n"
     )
 
 
@@ -153,10 +184,34 @@ def import_servers(
     path: Path,
     *,
     overwrite: bool = False,
+    confirmed: bool = False,
 ) -> dict:
-    """把服务写进 mcp.json。同名的默认跳过（除非 overwrite=True）。"""
+    """把服务写进 mcp.json。同名的默认跳过（除非 overwrite=True）。
+
+    confirmed（安全审查 M10）：要导入的定义里含 stdio（command）服务时必须为
+    True——连接即执行本机命令，粘贴一段 JSON 就等于声明「允许在本机跑这些
+    程序」。社工面在「本机用户自己粘贴」这一步：导入前必须让人看清楚要执行
+    什么。纯 http/url 服务不执行本机程序，无需确认。
+    """
     if not servers:
         raise MCPInstallError("没有要导入的服务")
+    stdio_pending = {n for n, c in servers.items() if c.transport == "stdio"}
+    if stdio_pending and not confirmed:
+        # 只拦「这次真的会写进去」的 stdio 定义：同名且不覆盖的本来就会被跳过
+        existing = load_servers(path)
+        pending = sorted(
+            n for n in stdio_pending if overwrite or n not in existing
+        )
+        if pending:
+            lines = [
+                f"- {n}: {servers[n].command} " + " ".join(servers[n].args or [])
+                for n in pending
+            ]
+            raise MCPInstallError(
+                "导入的服务会在连接时执行本机命令：" + chr(10) + chr(10).join(lines)
+                + chr(10) + chr(10)
+                + "请确认这些命令来自可信来源（继续导入 = 允许在本机运行上述程序）。"
+            )
     existing = load_servers(path)
     added: list[str] = []
     skipped: list[str] = []

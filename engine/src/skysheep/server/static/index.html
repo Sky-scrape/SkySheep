@@ -22,7 +22,7 @@
   // 整页加载（首次启动、手动 F5）时第一帧就是正确外观，不会「默认浅色布局闪一下再跳回」。
   // 项目切换已经改成站内切换（不再整页刷新），不经过这里。
   // 选了具体主题时服务端已把 data-theme="主题id" 注入好；auto（跟随系统）服务端
-  // 不知道系统深浅，只能在这里同步判定：浅色默认纸墨、深色默认夜墨。
+  // 不知道系统深浅，只能在这里同步判定：按服务端注入的深浅落点（缺省纸墨/夜墨）。
   (function () {
     var root = document.documentElement;
     try {
@@ -30,7 +30,8 @@
       if (mode === "auto") {
         var dark = window.matchMedia &&
           window.matchMedia("(prefers-color-scheme: dark)").matches;
-        root.setAttribute("data-theme", dark ? "night" : "paper");
+        var mapped = root.getAttribute(dark ? "data-theme-auto-dark" : "data-theme-auto-light");
+        root.setAttribute("data-theme", mapped || (dark ? "night" : "paper"));
       }
     } catch (e) {}
   })();
@@ -67,42 +68,46 @@
 
       <!-- 分组视图（sidebar_view=grouped）下这一区整体隐藏：项目变成会话列表里的文件夹头 -->
       <div class="section" id="project-section">
+        <!-- 两态：有项目=标题行（＋ 在标题右）+ 列表；无项目=一行动作行（整行可点，
+             不再留一个「标题 + 空提示」的死区，也不把入口缩成 16px 的小加号）。
+             两态由 refreshProjects 按 projects.length 切换 .empty 类。 -->
         <h3 class="sec-head"><span>项目</span>
-          <button id="btn-project-add" class="sec-ops" title="添加项目：选择一个文件夹（Agent 的工作目录会切过去）">＋</button>
+          <!-- 经典视图下视图切换＋添加项目搬到这里（第一条横线右方）；
+               分组视图下项目区整体隐藏，按钮回「会话」标题行，由 applySidebarView 搬移 -->
+          <span class="head-ops" id="project-head-ops"></span>
         </h3>
         <ul id="project-list" class="list project-list"></ul>
       </div>
 
       <div class="section" id="session-section">
         <h3 class="sec-head"><span>会话</span>
-          <span class="head-ops">
-            <span id="session-view" class="view-seg" role="group" aria-label="会话列表呈现形式">
-              <button data-view="classic" class="active" aria-pressed="true" title="经典视图：项目、会话分成两区（原样式）">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-                  <path d="M2.5 4h11M2.5 8h11M2.5 12h11"/>
-                </svg>
-              </button>
-              <button data-view="grouped" aria-pressed="false" title="分组视图：会话收进各自项目下，项目多时省空间">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                </svg>
-              </button>
-            </span>
+          <span class="head-ops" id="session-head-ops">
             <!-- 分组视图专属：一键把所有项目组收拢（全收后变成一键展开）；
-                 经典视图没有可折叠组，搜索结果也是平铺，这两种情况都隐藏 -->
+                 经典视图没有可折叠组，搜索结果也是平铺，这两种情况都隐藏。
+                 在分组视图下排在视图切换钮左侧（用户指定的顺序） -->
             <button id="btn-fold-all" class="sec-ops fold-all hidden" title="折叠全部项目" aria-label="折叠全部项目">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M4 4.5l4 4 4-4M4 8.5l4 4 4-4"/>
               </svg>
             </button>
+            <!-- 视图切换合并成单按钮：图标显示当前所在视图（同原先分段控件高亮
+                 图标的含义），点击切换视图、图标随之翻到另一个。位置随视图搬移：
+                 经典视图在「项目」标题行右端，分组视图在「会话」标题行（折叠钮之后） -->
+            <button id="view-toggle" class="sec-ops" data-current="classic" title="经典视图（点击切换到分组视图：会话收进各自项目下，项目多时省空间）">
+              <svg class="vt-classic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <path d="M2.5 4h11M2.5 8h11M2.5 12h11"/>
+              </svg>
+              <svg class="vt-grouped" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              </svg>
+            </button>
+            <!-- 添加项目：两种视图共用同一个按钮，位置随视图搬移（跟随视图切换钮）。
+                 点击弹项目选择弹窗 -->
+            <button id="session-add-project" class="sec-ops" title="添加项目：选择一个文件夹（Agent 的工作目录会切过去）">＋</button>
           </span>
         </h3>
         <input id="session-search" class="session-search" type="text"
                placeholder="搜索会话与消息…" autocomplete="off">
-        <div id="search-scope" class="seg-row seg-mini">
-          <button data-scope="project" class="active" title="只在当前项目里搜">本项目</button>
-          <button data-scope="all" title="在所有项目（含快聊）里搜；记不住在哪个项目聊过时用">全部项目</button>
-        </div>
         <ul id="session-list" class="list"></ul>
         <div id="session-footer" class="hidden"></div>
       </div>
@@ -188,8 +193,9 @@
     <div id="view-chat" class="view">
       <div id="chat-main">
         <header id="topbar">
-          <!-- 会话标签条：多会话并行，单标签时隐藏；与帮助/通知中心同处顶栏一行 -->
-          <div id="chat-tabs" class="hidden"></div>
+          <!-- 会话标签条：浏览器式页签，常驻（单标签也显示，右侧带 ＋ 新建）；
+               与帮助/通知中心同处顶栏一行 -->
+          <div id="chat-tabs"></div>
           <span class="spacer"></span>
           <span id="usage" class="dim small"></span>
           <button id="btn-help" class="tb-icon" title="帮助：快速上手 · 快捷键 · 常见问题" aria-label="帮助"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>
@@ -663,7 +669,8 @@
                 <h3>技能广场</h3>
               </div>
               <p class="settings-hint">
-                精选技能一键安装，支持关键词搜索。索引随主仓库发布，随时会有新技能上架。
+                精选技能一键安装：支持关键词搜索与分类筛选，装过的技能有新版本会标「更新」。
+                索引随主仓库发布，随时会有新技能上架（点「↻ 刷新」立即拉取）。
               </p>
               <details id="skill-market" class="market-fold">
                 <summary>展开浏览与安装技能</summary>
@@ -803,11 +810,14 @@
               <b>前钩子可以阻挡这次调用</b>：退出码 2（或输出 {"decision":"block"}）就拦下，
               标准错误会作为原因告诉 Agent。例如 match 填 <code>write_file</code>、
               命令填 <code>python check.py</code>：脚本退出码为 2 时，这次写入就会被拦下。
+              「任务完成」钩子在一轮以最终回答结束时触发，适合「干完活通知我」。
             </p>
             <p class="settings-hint">
               命令会把一份 JSON 从标准输入交给你的程序：
-              <code>{"tool": "write_file", "input": {...}, "working_dir": "..."}</code>。
+              <code>{"tool": "write_file", "input": {...}, "working_dir": "...", "session_id": "..."}</code>。
               命令来自你自己的配置，等价于你手敲，<b>不经过权限确认</b>——请只填可信的命令。
+              每条钩子可用开关临时停用（配置保留）；钩子自身故障（非 0 非 2 退出码）
+              不影响任务，但会记进下方「最近执行」。
             </p>
             <div id="hooks-status" class="card-status" hidden></div>
             <div class="hooks-group">
@@ -826,13 +836,49 @@
               </div>
               <div id="hooks-post-list" class="hooks-list"></div>
             </div>
+            <div class="hooks-group">
+              <div class="hooks-head">
+                <b>任务完成（stop）</b>
+                <span class="dim small" id="hooks-active-stop"></span>
+                <button id="btn-hook-add-stop" class="btn-ghost rp-mini">＋ 添加</button>
+              </div>
+              <div id="hooks-stop-list" class="hooks-list"></div>
+            </div>
+            <!-- 测试器与执行记录：排查工具，平时不用——折叠成一行链接，点开才展开 -->
+            <details class="rule-check-fold">
+              <summary>钩子测试器（拿示例参数实跑一遍，不保存、不进记录）</summary>
+              <div class="rule-check">
+                <span class="rule-check-cap">类型</span>
+                <select id="hook-test-kind">
+                  <option value="pre">调用前（pre）</option>
+                  <option value="post">调用后（post）</option>
+                  <option value="stop">任务完成（stop）</option>
+                </select>
+                <input id="hook-test-tool" list="hook-tools" autocomplete="off" placeholder="工具名，如 write_file">
+                <input id="hook-test-cmd" autocomplete="off" placeholder="命令，如 python check.py" class="hook-test-cmd">
+                <input id="hook-test-timeout" type="number" min="1" max="600" step="1" value="10" title="超时秒数（1–600）">
+                <button id="btn-hook-test" class="btn-ghost">试一下</button>
+              </div>
+              <div class="rule-check" id="hook-test-input-row">
+                <span class="rule-check-cap">参数</span>
+                <textarea id="hook-test-input" rows="2" class="hook-test-input" placeholder='示例参数 JSON（选填），如 {"path": "demo.txt", "content": "hi"}'></textarea>
+              </div>
+              <p id="hook-test-result" class="rule-check-result" hidden></p>
+            </details>
+            <details class="rule-check-fold" id="hooks-recent-fold">
+              <summary>最近执行（含故障；重启后清空）</summary>
+              <ul id="hooks-recent-list" class="list"></ul>
+            </details>
             <p class="dim small" id="hooks-config-path"></p>
           </section>
 
           <section class="settings-card">
             <div class="card-head">
               <h3>运行参数</h3>
-              <button id="btn-advanced-save" class="btn-ghost">保存</button>
+              <span class="head-ops">
+                <button id="btn-advanced-reset" class="btn-ghost" title="把本卡的五个参数恢复为默认值并保存">恢复默认</button>
+                <button id="btn-advanced-save" class="btn-ghost">保存</button>
+              </span>
             </div>
             <p class="settings-hint">
               这些参数平时不用动。Agent 干到一半自己停下（轮数用尽）、或者长对话总是在快要压缩时卡住时，再来调。
@@ -853,6 +899,11 @@
                 <label>压缩保留条数</label>
                 <input type="number" id="adv-keep-recent" min="2" max="100" step="1">
                 <span class="dim small">默认 8。自动压缩历史时，最近这么多条原样保留</span>
+              </div>
+              <div class="toolcfg-row">
+                <label>压缩触发比例</label>
+                <input type="number" id="adv-compaction-trigger" min="50" max="98" step="1">
+                <span class="dim small">默认 90。上下文用到上限的这个比例（%）就自动压缩，留出余量避免顶满时被服务拒绝</span>
               </div>
               <div class="toolcfg-row">
                 <label>每日 token 预算</label>
@@ -889,11 +940,24 @@
               首次打开时会先问一句是否信任，确认前不会执行其中的命令、也不会把技能拼进系统提示词。
               信任按项目记忆，配置内容一变就需要重新确认；全局配置不受影响。
             </p>
+            <details class="rule-check-fold" id="trust-list-fold">
+              <summary>已信任的项目（查看 / 撤销）</summary>
+              <ul id="trust-list" class="list"></ul>
+            </details>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="adv-autostart">
               <span>开机自动启动 SkySheep</span>
             </label>
             <p class="dim small adv-toggle-desc" id="adv-autostart-hint"></p>
+            <label class="toggle-row adv-toggle" for="adv-hotkey">
+              <span>全局唤起热键</span>
+              <input type="text" id="adv-hotkey" class="adv-hotkey" placeholder="Ctrl+Alt+Space"
+                     autocomplete="off" spellcheck="false">
+            </label>
+            <p class="dim small adv-toggle-desc">
+              在任何应用里按这个组合键唤起 SkySheep 并预填剪贴板内容（仅 Windows 桌面版）。
+              形如「修饰键+主键」，主键限 Space、F1–F12 与部分符号键；改完点「保存」并重启应用生效。
+            </p>
           </section>
         </section>
 
@@ -902,8 +966,13 @@
             <h3>远程控制</h3>
             <p class="settings-hint">
               把 SkySheep 接到别的设备上用：手机 / 平板扫同一 Wi-Fi 或经 Tailscale
-              跨网络打开完整界面，或在 Telegram / 微信里给机器人发消息遥控。
+              跨网络打开完整界面，或在飞书 / 微信里给机器人发消息遥控。
               这些能力<b>默认全部关闭</b>，需要时逐项打开。
+            </p>
+            <p class="settings-hint">
+              改完「手机控制 / 远程访问」后需要重启才能生效：
+              <button id="btn-app-restart" class="btn-ghost">↻ 立即重启 SkySheep</button>
+              <span id="app-restart-msg" class="io-msg"></span>
             </p>
           </section>
           <section class="settings-card">
@@ -913,7 +982,8 @@
             <p class="settings-hint">
               用手机遥控这台电脑上的 SkySheep：开启后（<b>重启 SkySheep 生效</b>），同一 Wi-Fi 下的
               手机 / 平板扫码或输入地址，即可打开<b>完整界面</b>——继续聊天、批准确认、看任务进度，
-              电脑端同步可见。服务将对局域网开放，令牌即密码，请勿在公共网络使用；关闭后恢复仅本机访问。
+              电脑端同步可见。服务将对局域网开放，令牌即密码；地址是 <b>http 明文传输</b>，
+              请勿在公共网络使用；关闭后恢复仅本机访问。
             </p>
             <div id="lan-info" class="lan-info"></div>
           </section>
@@ -933,11 +1003,13 @@
           <section class="settings-card">
             <div class="card-head"><h3>聊天机器人渠道</h3></div>
             <p class="settings-hint">
-              把 <b>Telegram / 微信</b> 接成遥控端：在手机上给机器人发消息，就能让这台电脑上的
+              把 <b>飞书 / 微信</b> 接成遥控端：在手机上给机器人发消息，就能让这台电脑上的
               SkySheep 干活，回复直接回到聊天窗口。渠道<b>默认关闭</b>；启用前必须先把你的账号加入
               <b>允许名单</b>——没有名单的机器人等于对所有人开放，而知道机器人账号的人都能给它发消息。
               <b>「允许操作」未开启时，机器人只能读不能写</b>（改文件、跑命令一律自动拒绝）。
-              Telegram 需自备 Bot Token；微信无需 Token，扫二维码登录即可。
+              名单建议只填你个人的 OpenID——填群 chat id 等于群里每个人都能指挥机器人、
+              并对审批操作表态（决定只认发起人）。审批只能单次允许，没有「总是允许」。
+              飞书需自备 App ID / App Secret；微信无需 Token，扫二维码登录即可。
             </p>
             <div id="channel-panel" class="lan-info"></div>
           </section>
@@ -958,6 +1030,8 @@
             <div id="memory-global-status" class="card-status" hidden></div>
             <textarea id="memory-text" class="memory-text" rows="14"
                       placeholder="Agent 还没有记住任何东西。也可以在这里手动添加，例如：&#10;- [2026-09-15] 沟通偏好直接给结论，不用铺垫"></textarea>
+            <p id="memory-inject-note" class="dim small" hidden></p>
+            <p id="memory-auto-note" class="dim small" hidden></p>
           </section>
           <section class="settings-card">
             <h3>自动记忆与整理</h3>
@@ -969,9 +1043,10 @@
             </p>
             <p class="settings-hint">
               <b>定期整理</b>：按周期用当前模型通读记忆，合并重复、相似或过时的条目，
-              让记忆越用越精炼而不是越攒越长。整理前自动把原件备份为 <b>.bak</b> 文件（同目录），
+              让记忆越用越精炼而不是越攒越长。整理前自动备份原件（同目录带时间戳，保留最近 5 份），
               整理完成后会通知你。全局记忆不足 400 字时自动跳过、不花模型调用；
               项目记忆（AGENTS.md）的整理开关在右侧面板的「项目记忆」页签最上方。
+              开关与周期即改即存、热生效，不用单独点保存。
             </p>
             <label class="toggle-row check-row">
               <input type="checkbox" id="memory-digest-toggle">
@@ -992,7 +1067,6 @@
             </div>
             <p id="memory-maintain-last" class="dim small maintain-last" hidden></p>
             <div class="maintain-row maintain-actions">
-              <button id="memory-maintain-save" class="btn-ghost">保存</button>
               <button id="memory-maintain-now" class="btn-ghost">🧹 立即整理</button>
             </div>
             <div id="memory-maintain-status" class="card-status" hidden></div>
@@ -1005,7 +1079,8 @@
             <h3>主题</h3>
             <p class="settings-hint">
               六套配色共用同一张「纸面」，按喜好挑即可；「跟随系统」按 Windows 的深浅色
-              自动落到浅色纸墨 / 深色夜墨，选中具体主题则不再随系统切换。标题栏颜色会一起变。
+              自动落到下面选的浅色 / 深色主题（默认纸墨 / 夜墨），选中具体主题则不再随系统切换。
+              标题栏颜色会一起变。
             </p>
             <div id="theme-grid" class="theme-grid">
               <button class="theme-card" data-theme-pref="auto" type="button">
@@ -1037,17 +1112,45 @@
                 <b>松烟</b><small>深色 · 松烟墨绿</small>
               </button>
             </div>
+            <div id="theme-auto-row" class="theme-auto-row">
+              <span>跟随系统时：</span>
+              <label>浅色用
+                <select id="theme-auto-light">
+                  <option value="paper">纸墨</option>
+                  <option value="celadon">青瓷</option>
+                  <option value="kaki">秋柿</option>
+                </select>
+              </label>
+              <label>深色用
+                <select id="theme-auto-dark">
+                  <option value="night">夜墨</option>
+                  <option value="indigo">黛夜</option>
+                  <option value="pine">松烟</option>
+                </select>
+              </label>
+            </div>
           </section>
           <section class="settings-card">
             <h3>Windows 系统通知</h3>
             <p class="settings-hint">
-              窗口失焦时，任务完成、Agent 等待确认会弹系统通知；前台使用时不打扰。
-              无人值守的定时任务结果也会通知。
+              窗口失焦时，任务完成、Agent 等待确认会弹系统通知（点击通知可把窗口唤回前台）；
+              前台使用时不打扰。无人值守的定时任务结果也会通知。
             </p>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="notify-toggle">
               <span>开启系统通知</span>
             </label>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="notify-kind-done">
+              <span>任务完成时通知</span>
+            </label>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="notify-kind-perm">
+              <span>Agent 等待确认时通知</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              关掉的类型不再弹系统通知、也不响提示音，但仍会进应用内通知中心。
+            </p>
           </section>
           <section class="settings-card">
             <h3>对话区宠物</h3>
@@ -1058,12 +1161,22 @@
               <input type="checkbox" id="pet-toggle">
               <span>显示云朵小羊</span>
             </label>
+            <div id="pet-scale-row" class="zoom-row" title="调整云朵小羊的显示大小">
+              <span class="zoom-cap">大小</span>
+              <button id="btn-pet-out" class="zoom-btn" title="缩小小羊">−</button>
+              <span id="pet-scale-label" class="zoom-label">100%</span>
+              <button id="btn-pet-in" class="zoom-btn" title="放大小羊">＋</button>
+            </div>
+            <p class="dim small adv-toggle-desc">
+              60%–140%，双击数值回默认（100%）。偏好自动保存。
+            </p>
           </section>
           <section class="settings-card">
             <h3>界面缩放</h3>
             <p class="settings-hint">
               调整整个界面的显示大小（70%–120%，步长 10%），
               字体随内容一起缩放，偏好自动保存。
+              也可用 Ctrl+滚轮 或 Ctrl＋ / Ctrl－，Ctrl+0 回默认。
             </p>
             <div id="zoom-row" class="zoom-row" title="调整整个界面的显示大小（字体随内容一起缩放）">
               <span class="zoom-cap">界面</span>
@@ -1071,6 +1184,45 @@
               <span id="zoom-label" class="zoom-label">90%</span>
               <button id="btn-zoom-in" class="zoom-btn" title="放大界面">＋</button>
             </div>
+            <p class="dim small adv-toggle-desc">双击数值回默认（90%）。</p>
+          </section>
+          <section class="settings-card">
+            <h3>阅读行宽</h3>
+            <p class="settings-hint">
+              调整对话区消息卡的最大宽度（680–1400px）。宽屏想让一行多装点字就调大，
+              喜欢窄栏短行更好扫读就调小；双击数值回默认（880px）。偏好自动保存。
+            </p>
+            <div id="readwidth-row" class="zoom-row" title="调整对话区消息卡的最大宽度">
+              <span class="zoom-cap">行宽</span>
+              <button id="btn-readwidth-out" class="zoom-btn" title="收窄行宽">−</button>
+              <span id="readwidth-label" class="zoom-label">880px</span>
+              <button id="btn-readwidth-in" class="zoom-btn" title="加宽行宽">＋</button>
+            </div>
+          </section>
+          <section class="settings-card">
+            <h3>发送键与提示音</h3>
+            <p class="settings-hint">
+              按键习惯与提醒方式。两项都即时生效、偏好自动保存。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="send-key-toggle">
+              <span>用 Ctrl+Enter 发送</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              开启后 Enter 一律换行、Ctrl+Enter 才发送；默认 Enter 直接发送、Shift+Enter 换行。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="notify-sound-toggle">
+              <span>提示音（任务完成 / 等确认时播一声）</span>
+            </label>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="notify-sound-focus">
+              <span>仅窗口失焦时提示音</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              合成短音，不引资源文件；勾选提示音时试听一声。默认只在窗口失焦时响
+              （前台人已在看，不必响），取消勾选则每次都响。默认关闭提示音。
+            </p>
           </section>
         </section>
 
@@ -1078,14 +1230,21 @@
           <section class="settings-card">
             <div class="card-head">
               <h3>提示词</h3>
-              <button id="btn-snippet-add" class="btn-ghost">＋ 新建</button>
+              <span class="head-ops">
+                <button id="btn-snippet-add" class="btn-ghost">＋ 新建</button>
+                <button id="btn-snippets-import" class="btn-ghost" title="从导出的 JSON 文件合并导入提示词（名称与内容都相同的跳过）">导入</button>
+                <button id="btn-snippets-export" class="btn-ghost" title="导出全部提示词为 JSON（可备份、可分享给别的机器）">导出</button>
+                <button id="btn-snippets-restore" class="btn-ghost" title="把内置示例提示词加回来（同名已存在的跳过）">恢复示例</button>
+              </span>
             </div>
             <p class="settings-hint">
-              常用的提示词模板。在输入框输入 <b>~</b> 时会出现在候选最上方，选中即插入到输入框。
-              内容里的 <b>{{clipboard}}</b> 会在插入时替换为当前剪贴板文本。
-              首次启动已内置几条示例提示词，和其他提示词一样可直接编辑或删除；
-              把提示词删光后，<code>~</code> 菜单仍会附带内置示例兜底。
+              常用的提示词模板。在输入框输入 <b>~</b> 时会出现在候选最上方，选中即插入到输入框；
+              列表顺序就是候选顺序，按住行首 <b>⋮⋮</b> 拖动可调整。
+              内容里支持占位符：<b>{{clipboard}}</b>（插入时替换为剪贴板文本）、
+              <b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b>（当天日期 / 当前时间 / 当前项目名）。
+              删掉的内置示例可以点「恢复示例」加回来；把提示词删光后，<code>~</code> 菜单仍会附带内置示例兜底。
             </p>
+            <p id="snippets-status" class="dim small" hidden></p>
             <ul id="snippets-list" class="list snippets-list"></ul>
           </section>
         </section>
@@ -1098,7 +1257,8 @@
             </div>
             <p class="settings-hint">
               记录每轮对话实际消耗的 tokens。想看费用：在各服务的编辑页填「每百万 tokens 单价」
-              （输入价 / 输出价，单位：元），保存后这里会显示估算费用。
+              （输入价 / 输出价，单位：元），保存后这里会显示估算费用；对提示词缓存打折的服务
+              （如 DeepSeek）再填上「缓存命中价」，费用会按命中部分拆算。
             </p>
             <div id="usage-tiles" class="usage-tiles"></div>
             <p id="usage-budget" class="dim small" hidden></p>
@@ -1106,10 +1266,16 @@
           <section class="settings-card">
             <div class="card-head">
               <h3>Token 活动</h3>
-              <div class="seg-row usage-tabs" id="usage-range-tabs">
-                <button data-days="7">近 7 日</button>
-                <button data-days="14" class="active">近 14 日</button>
-                <button data-days="30">近 30 日</button>
+              <div class="usage-head-right">
+                <div class="seg-row usage-chart-tabs" id="usage-chart-tabs" title="图表类型">
+                  <button data-chart="bar" class="active">柱状</button>
+                  <button data-chart="line">折线</button>
+                </div>
+                <div class="seg-row usage-tabs" id="usage-range-tabs">
+                  <button data-days="7">近 7 日</button>
+                  <button data-days="14" class="active">近 14 日</button>
+                  <button data-days="30">近 30 日</button>
+                </div>
               </div>
             </div>
             <div id="usage-trend" class="usage-trend"></div>
@@ -1135,7 +1301,12 @@
             <h3>关于</h3>
             <p class="settings-hint">
               启动时也会自动检查更新，发现新版本会在顶栏横幅提示；这里也可以手动检查。
+              内网 / 离线环境可关掉自动检查（下方开关），手动检查不受影响。
             </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="update-check-toggle" checked>
+              <span>启动时自动检查更新</span>
+            </label>
             <div id="about-info" class="about"></div>
             <div id="about-update" class="about-update"></div>
           </section>
@@ -1156,11 +1327,16 @@
           <section class="settings-card">
             <div class="card-head">
               <h3>会话库备份</h3>
-              <button id="btn-backups-refresh" class="btn-ghost">刷新</button>
+              <span class="card-head-actions">
+                <button id="btn-backup-now" class="btn-ghost" title="马上给当前会话数据留一份备份（同样计入保留的 20 份）">立即备份</button>
+                <button id="btn-open-backups" class="btn-ghost">打开目录</button>
+                <button id="btn-backups-refresh" class="btn-ghost">刷新</button>
+              </span>
             </div>
             <p class="settings-hint">
               每次启动前都会给会话数据库留一份备份（保留最近 20 份）；误删会话、或数据不对劲时，
-              在这里挑一个较早的版本恢复即可。下方默认只列最近几份，点「展开」看全部。
+              在这里挑一个较早的版本恢复即可。要做大操作前也可以点「立即备份」手动留一份。
+              下方默认只列最近几份，点「展开」看全部。
               <b>恢复会用备份整体替换当前数据</b>，替换前系统会先把现状另存一份，随时能换回来。
             </p>
             <div id="backup-status" class="card-status" hidden></div>
@@ -1171,9 +1347,10 @@
             <p class="settings-hint">
               把模型服务（含 API Key）、MCP 配置、界面偏好、全局记忆、自定义子代理与技能启用范围
               打包成一个 zip，在另一台电脑上导入即可完成迁移。会话记录不包含在内。
+              <b>zip 内是明文 API Key，请妥善保管，不要发到公开场合。</b>
             </p>
             <div id="about-io" class="io-row">
-              <button id="btn-settings-export" class="btn-ghost">⬇ 导出设置（zip）</button>
+              <button id="btn-settings-export" class="btn-ghost" title="导出的 zip 内含明文 API Key，请妥善保管">⬇ 导出设置（zip）</button>
               <button id="btn-settings-import" class="btn-ghost">⬆ 导入设置</button>
               <span class="io-msg"></span>
             </div>

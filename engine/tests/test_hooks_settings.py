@@ -23,7 +23,7 @@ def test_set_hooks_writes_and_reads_back(home):
         post=[{"match": "*", "command": "notify.exe", "timeout_s": 20}],
     )
     raw = load_raw_config()
-    pre, post = hooks_from_config(raw)
+    pre, post, _stop = hooks_from_config(raw)
     assert len(pre) == 1 and pre[0].match == "write_file" and pre[0].command == "check.bat"
     assert len(post) == 1 and post[0].timeout_s == 20
 
@@ -40,7 +40,7 @@ def test_set_hooks_keeps_other_group_when_only_one_passed(home):
     set_hooks_in_config(pre=[{"match": "*", "command": "a.bat"}])
     set_hooks_in_config(post=[{"match": "*", "command": "b.bat"}])
     raw = load_raw_config()
-    pre, post = hooks_from_config(raw)
+    pre, post, _stop = hooks_from_config(raw)
     assert len(pre) == 1 and pre[0].command == "a.bat"
     assert len(post) == 1 and post[0].command == "b.bat"
 
@@ -71,7 +71,7 @@ def test_set_hooks_rejects_bad_timeout(home):
 def test_set_hooks_defaults_match_and_timeout(home):
     set_hooks_in_config(pre=[{"command": "a.bat"}])
     raw = load_raw_config()
-    pre, _ = hooks_from_config(raw)
+    pre, _post, _stop = hooks_from_config(raw)
     assert pre[0].match == "*" and pre[0].timeout_s == 10
 
 
@@ -97,9 +97,12 @@ def test_hooks_get_returns_rules_and_tool_names(home):
         frame = recv_until(ws, "h1")
     assert frame["ok"], frame
     r = frame["result"]
-    assert r["pre"] == [{"match": "write_file", "command": "chk.bat", "timeout_s": 7.0}]
-    assert r["post"] == []
-    assert r["active_pre"] == 1 and r["active_post"] == 0
+    assert r["pre"] == [
+        {"match": "write_file", "command": "chk.bat", "timeout_s": 7.0, "enabled": True}
+    ]
+    assert r["post"] == [] and r["stop"] == []
+    assert r["active_pre"] == 1 and r["active_post"] == 0 and r["active_stop"] == 0
+    assert r["recent"] == []
     assert r["config_path"]
     # 工具名候选可供前端 datalist，写 match 不用凭记忆
     assert "read_file" in r["tool_names"] and "write_file" in r["tool_names"]
@@ -179,3 +182,120 @@ def test_load_config_unaffected_by_hooks(home):
     set_hooks_in_config(pre=[{"match": "*", "command": "a.bat"}])
     cfg = load_config()
     assert cfg.max_iterations >= 1
+
+
+# ---------------------------------------------------------------- stop / 启停 / 测试器
+
+
+def test_set_hooks_stop_group_roundtrip(home):
+    """stop 组没有 match 字段：保存、读回都不该要求它。"""
+    set_hooks_in_config(stop=[{"command": "notify-done.exe", "timeout_s": 3}])
+    raw = load_raw_config()
+    _pre, _post, stop = hooks_from_config(raw)
+    assert len(stop) == 1 and stop[0].command == "notify-done.exe" and stop[0].timeout_s == 3
+    # 三个组都空时整表删除（与 pre/post 同一约定）
+    set_hooks_in_config(pre=[], post=[], stop=[])
+    assert "hooks" not in load_raw_config()
+
+
+def test_enabled_flag_roundtrip_and_active_counts(home):
+    """停用的规则保留在配置里，但「已生效」计数不含它。"""
+    set_hooks_in_config(pre=[
+        {"match": "*", "command": "on.bat", "enabled": True},
+        {"match": "*", "command": "off.bat", "enabled": False},
+    ])
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "e1", "method": "hooks.get"})
+        r = recv_until(ws, "e1")["result"]
+    assert len(r["pre"]) == 2
+    flags = {x["command"]: x["enabled"] for x in r["pre"]}
+    assert flags["on.bat"] is True and flags["off.bat"] is False
+    assert r["active_pre"] == 1  # 停用那条不算「已生效」
+
+
+async def test_hook_tester_runs_command_and_reports(home):
+    """钩子测试器：实跑命令，回退出码 / 输出；退出码 2 → 会阻止。"""
+    from skysheep.server.backend import ServerBackend
+
+    be = ServerBackend(working_dir=home / "proj")
+    await be.setup()
+    try:
+        r = await be.test_hook({
+            "kind": "pre", "tool": "write_file",
+            "command": 'python -c "import sys,json;d=json.load(sys.stdin);print(d[\'input\'][\'path\'])"',
+            "timeout_s": 10, "input": {"path": "demo.txt"},
+        })
+        assert r["code"] == 0 and r["blocked"] is False
+        assert "demo.txt" in r["stdout"]
+        # stdin 载荷必须带 session_id 字段（值为空串也算有）
+        r2 = await be.test_hook({
+            "kind": "pre", "tool": "write_file",
+            "command": 'python -c "import sys,json;print(\'session_id\' in json.load(sys.stdin))"',
+            "timeout_s": 10, "input": {},
+        })
+        assert r2["stdout"].strip() == "True"
+        # 退出码 2：pre 语义下 = 阻止
+        r3 = await be.test_hook({
+            "kind": "pre", "tool": "write_file",
+            "command": 'python -c "import sys; sys.exit(2)"', "timeout_s": 10,
+        })
+        assert r3["code"] == 2 and r3["blocked"] is True
+    finally:
+        await be.shutdown()
+
+
+async def test_hook_tester_stop_payload(home):
+    """stop 测试的 stdin 载荷带 event=stop，不带 tool/input。"""
+    from skysheep.server.backend import ServerBackend
+
+    be = ServerBackend(working_dir=home / "proj")
+    await be.setup()
+    try:
+        r = await be.test_hook({
+            "kind": "stop",
+            "command": 'python -c "import sys,json;print(json.dumps(json.load(sys.stdin)))"',
+            "timeout_s": 10,
+        })
+        assert r["code"] == 0 and r["blocked"] is False
+        assert '"event": "stop"' in r["stdout"]
+        assert '"tool"' not in r["stdout"]
+    finally:
+        await be.shutdown()
+
+
+def test_hook_tester_rejects_bad_params(home):
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "t1", "method": "hooks.test",
+                      "params": {"kind": "pre", "command": ""}})
+        frame = recv_until(ws, "t1")
+        assert not frame["ok"] and "命令" in frame["error"]
+        ws.send_json({"id": "t2", "method": "hooks.test",
+                      "params": {"kind": "bogus", "command": "x.bat"}})
+        frame = recv_until(ws, "t2")
+        assert not frame["ok"] and "pre" in frame["error"]
+
+
+async def test_disabled_rules_are_skipped_and_failures_recorded(tmp_path):
+    """启停开关真的生效：停用的规则不执行；自身故障（非 0 非 2）记进最近执行。"""
+    from skysheep.core.hooks import (
+        HookRule,
+        HookRunner,
+        recent_hook_runs,
+    )
+
+    runs = HookRunner(
+        [HookRule(match="*", command="python -c \"import sys; sys.exit(2)\"", enabled=False)],
+        working_dir=tmp_path,
+    )
+    # 全部停用：has_pre 回 False（只读工具可以恢复并发，语义同「没配钩子」）
+    assert runs.has_pre is False
+    assert await runs.run_pre("write_file", {}) == ""  # 放行，命令没被执行
+
+    runner = HookRunner(
+        [HookRule(match="*", command="python -c \"import sys; sys.exit(1)\"")],
+        working_dir=tmp_path,
+    )
+    reason = await runner.run_pre("write_file", {"path": "a.txt"}, session_id="sess-1")
+    assert reason == ""  # 非 0 非 2：钩子自身故障，不阻断
+    recent = [r for r in recent_hook_runs() if r["tool"] == "write_file"]
+    assert recent and recent[-1]["status"] == "error" and recent[-1]["code"] == 1

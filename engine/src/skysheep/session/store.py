@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 import time
 import uuid
@@ -17,6 +18,8 @@ from pathlib import Path
 import aiosqlite
 
 from ..messages import Message
+
+logger = logging.getLogger("skysheep.store")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -51,7 +54,10 @@ CREATE TABLE IF NOT EXISTS whitelist_rules (
     tool TEXT NOT NULL,
     kind TEXT NOT NULL,
     pattern TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    last_hit_at REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
@@ -94,14 +100,18 @@ CREATE TABLE IF NOT EXISTS usage_log (
     model TEXT NOT NULL DEFAULT '',
     ts REAL NOT NULL,
     in_tokens INTEGER NOT NULL DEFAULT 0,
-    out_tokens INTEGER NOT NULL DEFAULT 0
+    out_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts);
 CREATE TABLE IF NOT EXISTS snippets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    sort_order REAL NOT NULL DEFAULT 0,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS cron_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -331,10 +341,48 @@ class SessionStore:
             except OSError:
                 pass
 
-    # ---- 会话库备份：列出 / 恢复（设置 · 关于里的「从备份恢复」） ----
+    # ---- 会话库备份：列出 / 手动备份 / 删除 / 恢复（设置 · 关于） ----
 
     def backup_dir(self) -> Path:
         return self.path.parent / "backups"
+
+    async def backup_now(self) -> dict:
+        """手动触发一次备份（设置 · 关于的「立即备份」按钮）。
+
+        与启动滚动备份的差异：不受 BACKUP_MIN_INTERVAL_S 窗口限制——用户点了
+        按钮就是要当前时刻的一份存档；仍按 BACKUP_KEEP 裁剪，总量不会超。
+        拷贝放线程、拷之前 checkpoint 收 WAL，与 _rolling_backup 同口径。
+        """
+        if not self.path.exists() or self.path.stat().st_size <= 0:
+            raise RuntimeError("还没有可备份的会话数据")
+        d = self.backup_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        if self._db is not None:
+            try:
+                await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:  # noqa: BLE001 - checkpoint 失败不拦备份：至多拷到稍旧数据
+                pass
+        target = d / f"{self.path.stem}-{time.strftime('%Y%m%d-%H%M%S')}.db"
+        # 同一秒内点第二次：覆盖写，落盘的仍是当前时刻的数据
+        await asyncio.to_thread(shutil.copy2, self.path, target)
+        self._prune_backups(sorted(d.glob(self.path.stem + "-*.db")))
+        return {"name": target.name, "path": str(target)}
+
+    async def delete_backup(self, name: str) -> dict:
+        """删除单份备份（设置 · 关于的备份列表，每行一个删除入口）。"""
+        d = self.backup_dir()
+        # 与 restore_backup 同一套校验：只收纯 .db 文件名，不静默归一化
+        if Path(name).name != name or not name.endswith(".db"):
+            raise ValueError("备份文件名不合法")
+        target = (d / name).resolve()
+        try:
+            target.relative_to(d.resolve())
+        except ValueError:
+            raise ValueError("备份文件名不合法") from None
+        if not target.is_file():
+            raise FileNotFoundError("备份不存在：" + name)
+        await asyncio.to_thread(target.unlink)
+        return {"deleted": target.name}
 
     def list_backups(self) -> list[dict]:
         """可用备份列表（新的在前）：备份时刻、大小、路径。
@@ -520,7 +568,57 @@ class SessionStore:
             )
         except Exception:
             pass
+        # 旧库迁移：snippets 补 sort_order / use_count / last_used_at 列（提示词排序
+        # 与使用统计）。旧行 sort_order=0，列表先按它升序、同值再按 created_at 倒序，
+        # 与升级前「最新创建的在最上」的行为一致。
+        try:
+            await self._db.execute(
+                "ALTER TABLE snippets ADD COLUMN sort_order REAL NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+        try:
+            await self._db.execute(
+                "ALTER TABLE snippets ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+        try:
+            await self._db.execute(
+                "ALTER TABLE snippets ADD COLUMN last_used_at REAL NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+        # 旧库迁移：usage_log 补 cached_tokens 列（提示词缓存命中入账）。旧行补 0
+        # （未记录），聚合与费用拆算按 0 处理，行为与升级前一致。
+        try:
+            await self._db.execute(
+                "ALTER TABLE usage_log ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+        # 旧库迁移：whitelist_rules 补 enabled / hit_count / last_hit_at 列
+        # （规则启停开关与命中统计：临时停用不必删配置，命中情况帮用户清理陈旧规则）
+        try:
+            await self._db.execute(
+                "ALTER TABLE whitelist_rules ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+            )
+        except Exception:
+            pass
+        try:
+            await self._db.execute(
+                "ALTER TABLE whitelist_rules ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+        try:
+            await self._db.execute(
+                "ALTER TABLE whitelist_rules ADD COLUMN last_hit_at REAL NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
         await self._db.commit()
+        self._fts_dirty = False  # 索引写失败过 → 下次启动走查漏模式
         await self._setup_fts()
         return self
 
@@ -547,12 +645,25 @@ class SessionStore:
         self.fts_ready = True
 
     async def _backfill_fts(self) -> None:
-        """把 messages 里尚未进 FTS 的行灌进去（按 rowid 增量，旧库首次等于全量）。"""
+        """把 messages 里尚未进 FTS 的行灌进去。
+
+        默认走 rowid 水位增量（旧库首次等于全量，日常启动零成本）；一旦发生过
+        索引写失败（_fts_dirty），改用「缺哪行补哪行」的查漏模式——水位法只补
+        水位以上的行，修不回水位以下的空洞（安全审查低危项：个别消息搜不到且
+        backfill 修不回）。查漏是全表 LEFT JOIN，只在脏标记下走一次。
+        """
         assert self._db
-        cur = await self._db.execute(
-            "SELECT id, content FROM messages "
-            "WHERE id > (SELECT COALESCE(MAX(rowid), 0) FROM messages_fts)"
-        )
+        if self._fts_dirty:
+            sql = (
+                "SELECT m.id AS id, m.content AS content FROM messages m "
+                "LEFT JOIN messages_fts f ON f.rowid = m.id WHERE f.rowid IS NULL"
+            )
+        else:
+            sql = (
+                "SELECT id, content FROM messages "
+                "WHERE id > (SELECT COALESCE(MAX(rowid), 0) FROM messages_fts)"
+            )
+        cur = await self._db.execute(sql)
         payload = []
         while True:
             rows = await cur.fetchmany(500)
@@ -564,6 +675,9 @@ class SessionStore:
             )
         if payload:
             await self._db.commit()
+            logger.info("FTS 索引补齐 %d 条消息（%s）", len(payload),
+                        "查漏模式" if self._fts_dirty else "水位增量")
+        self._fts_dirty = False
 
     @staticmethod
     def _plain_text(raw: str) -> str:
@@ -574,7 +688,11 @@ class SessionStore:
             return str(raw)
 
     async def _fts_insert(self, message_id: int, content_json: str) -> None:
-        """同步一条消息进 FTS；未启用时无事发生。"""
+        """同步一条消息进 FTS；未启用时无事发生。
+
+        写失败不影响主存储，但要留痕并置脏：静默吞掉会让这条消息永久搜不到
+        （水位法补不回它），脏标记让下次启动走查漏模式修复（安全审查低危项）。
+        """
         if not self.fts_ready or self._db is None:
             return
         try:
@@ -582,8 +700,9 @@ class SessionStore:
                 "INSERT INTO messages_fts(rowid, plain) VALUES (?, ?)",
                 (int(message_id), self._plain_text(content_json)),
             )
-        except Exception:
-            pass  # 索引写失败不影响主存储
+        except Exception as e:  # noqa: BLE001
+            self._fts_dirty = True
+            logger.warning("FTS 索引写入失败（消息 %s，下次启动补齐）：%s", message_id, e)
 
     async def _fts_delete(self, where_sql: str, args: tuple) -> None:
         """按 messages 的命中行同步删除 FTS 行（where_sql 作用于 messages 子查询）。"""
@@ -595,8 +714,11 @@ class SessionStore:
                 f"(SELECT id FROM messages WHERE {where_sql})",
                 args,
             )
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            # 删失败会留下悬挂索引行（搜索 JOIN 会过滤掉，危害有限），
+            # 但要留痕并置脏，让下次启动的查漏模式把索引对齐
+            self._fts_dirty = True
+            logger.warning("FTS 索引删除失败（下次启动对齐）：%s", e)
 
     async def close(self) -> None:
         if self._db:
@@ -604,6 +726,35 @@ class SessionStore:
             self._db = None
 
     # ---- projects ----
+
+    # 「远程连接」固定项目的哨兵路径：不是真实目录，只作 projects.root_path 的
+    # 唯一键（幂等创建/识别都用它）。不指向磁盘上任何位置，永远不会被 switch。
+    REMOTE_PROJECT_PATH = "//skysheep-remote"
+
+    async def ensure_remote_project(self) -> Project:
+        """取（或建）固定的「远程连接」项目：飞书/微信等渠道的对话都归到它名下。
+
+        渠道对话与桌面上的工作目录无关（工作目录是远程设备的），不落到当前
+        项目或快聊里；项目本身不可切换、不可删除（backend/app.py 层拦截）。
+        幂等：按哨兵路径唯一键查建，多渠道并发调用也只建一条。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM projects WHERE root_path = ?", (self.REMOTE_PROJECT_PATH,)
+        )
+        row = await cur.fetchone()
+        if row:
+            return Project(row["id"], row["root_path"], row["name"], row["created_at"])
+        await self._db.execute(
+            "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
+            (self.REMOTE_PROJECT_PATH, "远程连接", time.time()),
+        )
+        await self._db.commit()
+        cur = await self._db.execute(
+            "SELECT * FROM projects WHERE root_path = ?", (self.REMOTE_PROJECT_PATH,)
+        )
+        row = await cur.fetchone()
+        return Project(row["id"], row["root_path"], row["name"], row["created_at"])
 
     async def get_or_create_project(self, root_path: str, name: str = "") -> Project:
         assert self._db
@@ -1335,8 +1486,8 @@ class SessionStore:
         assert self._db
         # 新规则在前（id 倒序）：设置页白名单列表与最近一次「总是允许」的操作对得上
         cur = await self._db.execute(
-            "SELECT id, tool, kind, pattern, created_at FROM whitelist_rules"
-            " WHERE project_id = ? ORDER BY id DESC",
+            "SELECT id, tool, kind, pattern, created_at, enabled, hit_count, last_hit_at"
+            " FROM whitelist_rules WHERE project_id = ? ORDER BY id DESC",
             (project_id,),
         )
         rows = await cur.fetchall()
@@ -1347,9 +1498,40 @@ class SessionStore:
                 "kind": r["kind"],
                 "pattern": r["pattern"],
                 "created_at": r["created_at"],
+                "enabled": bool(r["enabled"]),
+                "hit_count": r["hit_count"],
+                "last_hit_at": r["last_hit_at"],
             }
             for r in rows
         ]
+
+    async def set_rule_enabled(
+        self, rule_id: int, project_id: int, enabled: bool,
+    ) -> None:
+        """启停一条白名单规则。归属条件写进 UPDATE：凭枚举到的 rule_id
+        不能改其他项目的规则（与 remove_rule 同一约束）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "UPDATE whitelist_rules SET enabled = ? WHERE id = ? AND project_id = ?",
+            (1 if enabled else 0, rule_id, project_id),
+        )
+        await self._db.commit()
+        if not cur.rowcount:
+            raise KeyError("rule not found in this project")
+
+    async def record_rule_hit(self, rule_id: int) -> None:
+        """白名单命中记账：次数 +1、刷新最近命中时间。
+
+        authorize 的放行路径上调用，只做一次小 UPDATE；失败由调用方吞掉
+        （记账不该影响放行）。
+        """
+        assert self._db
+        await self._db.execute(
+            "UPDATE whitelist_rules SET hit_count = hit_count + 1, last_hit_at = ?"
+            " WHERE id = ?",
+            (time.time(), rule_id),
+        )
+        await self._db.commit()
 
     async def clear_rules(self, project_id: int, kind: str = "") -> int:
         """清空项目的白名单规则（可按 kind 过滤），返回删除条数。"""
@@ -1598,23 +1780,25 @@ class SessionStore:
 
     async def add_usage(
         self, session_id: str, provider: str, model: str,
-        in_tokens: int, out_tokens: int,
+        in_tokens: int, out_tokens: int, cached_tokens: int = 0,
     ) -> None:
         if in_tokens <= 0 and out_tokens <= 0:
             return
         assert self._db
         await self._db.execute(
-            "INSERT INTO usage_log (session_id, provider, model, ts, in_tokens, out_tokens)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, provider, model, time.time(), in_tokens, out_tokens),
+            "INSERT INTO usage_log (session_id, provider, model, ts, in_tokens, out_tokens, cached_tokens)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, provider, model, time.time(), in_tokens, out_tokens, max(0, cached_tokens)),
         )
         await self._db.commit()
 
     async def usage_stats(self, days: int = 14, *, project_id: int | None | object = _ALL) -> dict:
-        """按天聚合 + 按会话聚合（近 N 天）。日期用本地时区。
+        """按天聚合 + 按会话聚合 + 按服务×模型聚合（近 N 天）。日期用本地时区。
 
         project_id 给出时只统计该项目的用量（安全审查 B14：by_session 带着
         会话标题，跨项目聚合会泄露给远程客户端）；缺省不过滤（CLI/测试/全局场景）。
+        session_count 是窗口内真实去重会话数（纯计数不带标题，无项目态也可下发），
+        与 by_session 的「最近 12 条」不是一回事。
         注意：date() 必须带 'unixepoch' 修饰符——ts 是 Unix 秒，
         直写 date(ts,'localtime') 在部分 SQLite 构建上会解析成错误年份。
         """
@@ -1622,6 +1806,7 @@ class SessionStore:
         since = time.time() - days * 86400
         scoped = project_id is not _ALL
         by_day, by_session, by_provider = [], [], []
+        session_count = 0
         try:
             join = (
                 " FROM usage_log l JOIN sessions s ON s.id = l.session_id"
@@ -1637,6 +1822,12 @@ class SessionStore:
             )
             by_day = [dict(r) for r in await cur.fetchall()]
             cur = await self._db.execute(
+                "SELECT COUNT(DISTINCT session_id) AS c" + join + cond,
+                args,
+            )
+            row = await cur.fetchone()
+            session_count = int(row[0] or 0) if row else 0
+            cur = await self._db.execute(
                 "SELECT l.session_id AS sid, MAX(s.title) AS title,"
                 " SUM(l.in_tokens) AS it, SUM(l.out_tokens) AS ot, MAX(l.ts) AS last_ts"
                 " FROM usage_log l LEFT JOIN sessions s ON s.id = l.session_id"
@@ -1646,16 +1837,24 @@ class SessionStore:
                 args,
             )
             by_session = [dict(r) for r in await cur.fetchall()]
+            # 按 服务×模型 分组：同一服务先后用过多个模型时（改配置、历史行），
+            # MAX(model) 会任意挑一个展示；按模型拆行图例才如实。
             cur = await self._db.execute(
-                "SELECT l.provider AS provider, MAX(l.model) AS model,"
-                " SUM(l.in_tokens) AS it, SUM(l.out_tokens) AS ot"
-                + join + cond + " GROUP BY l.provider",
+                "SELECT l.provider AS provider, l.model AS model,"
+                " SUM(l.in_tokens) AS it, SUM(l.out_tokens) AS ot,"
+                " SUM(l.cached_tokens) AS cached"
+                + join + cond + " GROUP BY l.provider, l.model",
                 args,
             )
             by_provider = [dict(r) for r in await cur.fetchall()]
         except Exception:
             pass
-        return {"by_day": by_day, "by_session": by_session, "by_provider": by_provider}
+        return {
+            "by_day": by_day,
+            "by_session": by_session,
+            "by_provider": by_provider,
+            "session_count": session_count,
+        }
 
     async def usage_today(self) -> int:
         """今天（本地时区零点起）累计消耗的 token 总量，供每日预算护栏判断。"""
@@ -1672,25 +1871,61 @@ class SessionStore:
         except Exception:
             return 0
 
-    # ---- 快捷指令（snippets）：用户自定义提示词模板，/ 菜单置顶展示 ----
+    # ---- 快捷指令（snippets）：用户自定义提示词模板，~ 菜单展示 ----
 
     async def list_snippets(self) -> list[dict]:
         assert self._db
-        cur = await self._db.execute("SELECT * FROM snippets ORDER BY created_at DESC")
+        # sort_order 升序 = 手动排序（设置页拖拽 / 新条目置顶）；同值回退
+        # created_at 倒序——旧库行都是 0，行为与升级前一致
+        cur = await self._db.execute(
+            "SELECT * FROM snippets ORDER BY sort_order ASC, created_at DESC"
+        )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
     async def add_snippet(self, name: str, content: str) -> dict:
         assert self._db
+        # 新条目排在列表最前：sort_order 取现有最小值 - 1（空库取 0），
+        # 保证「刚建的提示词马上能在 ~ 候选前几位看到」
+        cur = await self._db.execute("SELECT MIN(sort_order) FROM snippets")
+        row = await cur.fetchone()
+        base = row[0] if row and row[0] is not None else None
+        sort_order = 0.0 if base is None else float(base) - 1.0
         cur = await self._db.execute(
-            "INSERT INTO snippets (name, content, created_at) VALUES (?, ?, ?)",
-            (name[:40], content[:8000], time.time()),
+            "INSERT INTO snippets (name, content, created_at, sort_order) VALUES (?, ?, ?, ?)",
+            (name[:40], content[:8000], time.time(), sort_order),
         )
         await self._db.commit()
         row = await (await self._db.execute(
             "SELECT * FROM snippets WHERE id = ?", (cur.lastrowid,)
         )).fetchone()
         return dict(row)
+
+    async def reorder_snippets(self, ids: list[int]) -> int:
+        """按给定顺序重写 sort_order（0..n-1）；未提及的 id 保持原值。
+
+        设置页拖拽排序提交整份顺序；写入值离散化后，后续新建条目
+        仍取 min-1 置顶，两种来源不会打架。返回实际更新的行数。"""
+        assert self._db
+        changed = 0
+        for idx, sid in enumerate(ids):
+            cur = await self._db.execute(
+                "UPDATE snippets SET sort_order = ? WHERE id = ?",
+                (float(idx), int(sid)),
+            )
+            changed += cur.rowcount
+        await self._db.commit()
+        return changed
+
+    async def mark_snippet_used(self, snippet_id: int) -> bool:
+        """记一次插入使用：计数 +1、刷新最近使用时间（设置页展示用）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "UPDATE snippets SET use_count = use_count + 1, last_used_at = ? WHERE id = ?",
+            (time.time(), snippet_id),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
 
     async def update_snippet(self, snippet_id: int, name: str, content: str) -> bool:
         assert self._db

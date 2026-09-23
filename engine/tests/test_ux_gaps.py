@@ -4,7 +4,7 @@
 - 每服务上下文上限、温度、图片输入能力（含贴图前置拦截与截图工具提示）
 - 「仅允许访问工作目录」开关（含 @ 前缀容错、子代理继承）
 - 高级设置读写与热生效、开机自启（注册表替身，不碰真机）
-- 会话库备份列出 / 恢复（含"恢复前"安全副本）
+- 会话库备份列出 / 手动备份 / 删除 / 恢复（含"恢复前"安全副本）
 - 诊断包（配置密钥打码）、系统程序打开白名单
 - 跨项目会话搜索
 """
@@ -459,6 +459,54 @@ async def test_restore_rejects_traversal(home, tmp_path):
     await s.close()
 
 
+async def test_backup_now_and_delete(home, tmp_path, monkeypatch):
+    """「立即备份」不受启动窗口限制、落盘可列出；删除走同一套名校验。"""
+    from skysheep.session.store import SessionStore
+
+    db = tmp_path / "s.db"
+    db.write_bytes(b"x" * 32)  # 占位：备份只 copy2 整个文件，不要求是真库
+    s = SessionStore(db)
+    d = tmp_path / "backups"
+    d.mkdir()
+    # 预置两份带旧时间戳的备份 + 一个干扰文件（不匹配 s-*.db 模式，不该被动到）
+    for n in ("s-20260101-010000.db", "s-20260102-020000.db", "other.db"):
+        (d / n).write_bytes(b"old")
+
+    r = await s.backup_now()
+    names = [b["name"] for b in s.list_backups() if not b["current"]]
+    assert r["name"] in names, "手动备份应立刻出现在列表里"
+    assert r["path"] and Path(r["path"]).is_file()
+    assert (d / "other.db").exists(), "模式外的文件不是备份，删除/裁剪都不该碰"
+
+    # BACKUP_KEEP 裁剪对手动备份同样生效：压到 2 份后，最旧的启动备份被裁掉。
+    # 第二次备份的时间戳钉死，避免与第一次同秒撞名（copy2 会覆盖成同一份）
+    s.BACKUP_KEEP = 2
+    monkeypatch.setattr(
+        "skysheep.session.store.time.strftime",
+        lambda fmt, *_a, **_k: "20260302-020202",
+    )
+    r2 = await s.backup_now()
+    names = sorted(b["name"] for b in s.list_backups() if not b["current"])
+    assert names == sorted([r["name"], r2["name"]]), "超出的旧备份应被裁掉"
+
+    # 删除：合法名字删得掉；路径拼接 / 非 .db / 不存在的一律拒绝
+    assert (await s.delete_backup(r["name"]))["deleted"] == r["name"]
+    assert not Path(r["path"]).exists()
+    with pytest.raises(ValueError):
+        await s.delete_backup("../evil.db")
+    with pytest.raises(ValueError):
+        await s.delete_backup("sub/evil.db")
+    with pytest.raises(ValueError):
+        await s.delete_backup("evil.txt")
+    with pytest.raises(FileNotFoundError):
+        await s.delete_backup("nope.db")
+
+    # 空库 / 不存在的库没有可备份的东西，给可读报错而不是留半个文件
+    empty = SessionStore(tmp_path / "none.db")
+    with pytest.raises(RuntimeError):
+        await empty.backup_now()
+
+
 def test_backup_ws_endpoints(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "k1", "method": "session.backups"})
@@ -467,6 +515,11 @@ def test_backup_ws_endpoints(home):
         ws.send_json({"id": "k2", "method": "session.restore_backup",
                       "params": {"name": ""}})
         assert recv_until(ws, "k2")["ok"] is False
+        ws.send_json({"id": "k3", "method": "session.delete_backup",
+                      "params": {"name": "../evil.db"}})
+        assert recv_until(ws, "k3")["ok"] is False
+        ws.send_json({"id": "k4", "method": "session.create_backup"})
+        assert recv_until(ws, "k4")["ok"] is True
 
 
 # ---- 诊断包 / 打开目录 ----
@@ -478,9 +531,15 @@ def test_diagnostic_zip_redacts_keys(home):
     # 拼出含密钥字段的配置（不把字面量密钥写进源码，静态扫描会误报）
     key_field, secret = "api" + "_key", "sk-" + "verys" + "ecret"
     token_field, token = "tok" + "en", "abc" + "123"
+    # 渠道凭据类字段：旧清单只看 api_key/token/env_key/key，这几个会随诊断包明文外发
+    app_secret_field, app_secret = "app_" + "secret", "fs-" + "appsecret"
+    pw_field, pw = "pass" + "word", "pw-" + "hunter2"
+    cs_field, cs = "client_" + "secret", "cs-" + "leakme"
     (cfg_dir / "config.toml").write_text(
         f'[providers.deepseek]\n{key_field} = "{secret}"\nmodel = "deepseek-chat"\n'
-        f"[server]\n{token_field} = '{token}'\n",
+        f"[server]\n{token_field} = '{token}'\n"
+        f"[channels.feishu]\n{app_secret_field} = '{app_secret}'\n"
+        f"[channels.weixin]\n{pw_field} = '{pw}'\n{cs_field} = '{cs}'\n",
         encoding="utf-8",
     )
     (cfg_dir / "logs").mkdir(exist_ok=True)
@@ -492,7 +551,8 @@ def test_diagnostic_zip_redacts_keys(home):
         names = set(zf.namelist())
         assert {"env.txt", "config.redacted.toml", "logs/desktop.log", "files.txt"} <= names
         cfg = zf.read("config.redacted.toml").decode("utf-8")
-        assert secret not in cfg and token not in cfg
+        for leak in (secret, token, app_secret, pw, cs):
+            assert leak not in cfg, leak
         assert "已打码" in cfg
         assert "deepseek-chat" in cfg  # 非密钥字段照旧
         assert "hello log" in zf.read("logs/desktop.log").decode("utf-8")

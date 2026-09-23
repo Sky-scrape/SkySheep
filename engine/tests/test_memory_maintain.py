@@ -9,6 +9,7 @@ asyncio.run 到测试自己的循环上）。
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 from test_server import make_client, recv_until  # noqa: F401  (helpers re-exported)
@@ -17,6 +18,8 @@ from skysheep.messages import TextBlock
 from skysheep.models.fake import FakeProvider
 from skysheep.tools.memory import (
     MAINTAIN_MIN_GLOBAL_CHARS,
+    MAINTENANCE_BACKUP_KEEP,
+    backup_before_maintain,
     build_maintain_prompt,
     clean_maintained_text,
     load_maintenance_state,
@@ -98,9 +101,11 @@ def test_maintain_now_global_and_project(home, mem_file):
         assert res["ran"] is True and res["global"] and res["project"]
 
         assert mem_file.read_text(encoding="utf-8").strip() == GLOBAL_NEW  # 围栏已剥
-        assert mem_file.with_name("memory.md.bak").read_text(encoding="utf-8") == GLOBAL_OLD
+        g_baks = list(mem_file.parent.glob("memory.md.bak-*"))
+        assert len(g_baks) == 1 and g_baks[0].read_text(encoding="utf-8") == GLOBAL_OLD
         assert agents_md.read_text(encoding="utf-8").strip() == PROJECT_NEW
-        assert agents_md.with_name("AGENTS.md.bak").read_text(encoding="utf-8") == PROJECT_OLD
+        p_baks = list(agents_md.parent.glob("AGENTS.md.bak-*"))
+        assert len(p_baks) == 1 and p_baks[0].read_text(encoding="utf-8") == PROJECT_OLD
 
         st = load_maintenance_state()
         assert st["global_last"] > 0 and st["project_last"][str(home / "proj")] > 0
@@ -170,6 +175,99 @@ def test_maintain_too_short_skips(home, mem_file):
     provider = FakeProvider([[TextBlock(text=GLOBAL_NEW)]])
     with make_client(home, [], provider=provider) as client:
         backend = client.app.state.backend
-        assert asyncio.run(backend._maintain_memory("global", force=True)) is False
+        assert asyncio.run(backend._maintain_memory("global", force=True)) == "skipped"
         assert len(provider.calls) == 0  # 阈值不足：模型都没调
         assert mem_file.read_text(encoding="utf-8") == "- [2026-09-01] 就一条"
+
+
+def test_maintain_memory_unchanged_keeps_file(home, mem_file):
+    """模型输出与原文一致（认为无需改动）→ 返回 unchanged，原文件与备份都不动。"""
+    _seed_global(mem_file)
+    provider = FakeProvider([[TextBlock(text=GLOBAL_OLD)]])
+    with make_client(home, [], provider=provider) as client:
+        backend = client.app.state.backend
+        assert asyncio.run(backend._maintain_memory("global", force=True)) == "unchanged"
+        assert mem_file.read_text(encoding="utf-8") == GLOBAL_OLD
+        assert not list(mem_file.parent.glob("memory.md.bak-*"))  # 没落盘就没备份
+
+
+def test_maintain_now_blocked_in_demo_mode(home, mem_file):
+    """演示模式点「立即整理」必须拒绝：fake provider 的脚本文本不许盖掉真实记忆。"""
+    _seed_global(mem_file)
+    provider = FakeProvider([[TextBlock(text=GLOBAL_NEW)]])
+    provider.demo_mode = True
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "d1", "method": "memory.maintain_now"})
+        res = recv_until(ws, "d1")
+        assert res["ok"] is False and "演示模式" in res["error"]
+        assert mem_file.read_text(encoding="utf-8") == GLOBAL_OLD  # 原件未被脚本文本覆盖
+        assert len(provider.calls) == 0  # 模型都没调
+
+
+def test_backup_before_maintain_rotates(mem_file):
+    """整理备份带时间戳滚动保留：新备份写入，超出保留数的最旧被清掉。"""
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    for i in range(MAINTENANCE_BACKUP_KEEP + 2):
+        backup_before_maintain(mem_file, f"第{i}版原件")
+    baks = sorted(mem_file.parent.glob("memory.md.bak-*"))
+    assert len(baks) == MAINTENANCE_BACKUP_KEEP
+    assert baks[-1].read_text(encoding="utf-8") == f"第{MAINTENANCE_BACKUP_KEEP + 1}版原件"
+
+
+def test_memory_save_mtime_guard(home, mem_file):
+    """设置页保存带基线 mtime：编辑期间后台写过记忆就拒绝，重读后才能存。"""
+    _seed_global(mem_file)
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "g1", "method": "memory.get"})
+        r = recv_until(ws, "g1")["result"]
+        assert r["mtime"] > 0 and r["inject_chars"] == len(r["text"])
+
+        # 模拟后台（归档提炼）写入：文件内容与 mtime 都变了
+        newer = "- [2026-09-21] (自动) 归档提炼的新条目"
+        mem_file.write_text(GLOBAL_OLD + "\n" + newer, encoding="utf-8")
+        os.utime(mem_file, (r["mtime"] - 10, r["mtime"] - 10))
+
+        ws.send_json({"id": "s1", "method": "memory.save",
+                      "params": {"text": GLOBAL_OLD, "base_mtime": r["mtime"]}})
+        res = recv_until(ws, "s1")
+        assert res["ok"] is False and "被更新过" in res["error"]
+        assert newer in mem_file.read_text(encoding="utf-8")  # 后台新条目没有被盖掉
+
+        # 重读拿新 mtime 后保存成功，返回新 mtime
+        ws.send_json({"id": "g2", "method": "memory.get"})
+        r2 = recv_until(ws, "g2")["result"]
+        ws.send_json({"id": "s2", "method": "memory.save",
+                      "params": {"text": GLOBAL_OLD + "\n" + newer + "\n- 手动新增",
+                                 "base_mtime": r2["mtime"]}})
+        res2 = recv_until(ws, "s2")["result"]
+        assert res2["saved"] and res2["mtime"] > 0
+        assert "- 手动新增" in mem_file.read_text(encoding="utf-8")
+
+
+def test_project_instructions_mtime_guard(home):
+    """右侧面板保存同理：编辑期间定期整理重写过 AGENTS.md 就拒绝，重读后可存。"""
+    agents_md = home / "proj" / "AGENTS.md"
+    agents_md.parent.mkdir(parents=True, exist_ok=True)
+    agents_md.write_text(PROJECT_OLD, encoding="utf-8")
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "i1", "method": "project.instructions"})
+        r = recv_until(ws, "i1")["result"]
+        assert r["mtime"] > 0 and "约定1" in r["text"]
+
+        # 模拟后台（定期整理）重写：内容与 mtime 都变了
+        agents_md.write_text(PROJECT_NEW, encoding="utf-8")
+        os.utime(agents_md, (r["mtime"] - 10, r["mtime"] - 10))
+
+        ws.send_json({"id": "s1", "method": "project.save_instructions",
+                      "params": {"text": "用户编辑区的旧内容", "base_mtime": r["mtime"]}})
+        res = recv_until(ws, "s1")
+        assert res["ok"] is False and "重读" in res["error"]
+        assert agents_md.read_text(encoding="utf-8") == PROJECT_NEW
+
+        ws.send_json({"id": "i2", "method": "project.instructions"})
+        r2 = recv_until(ws, "i2")["result"]
+        ws.send_json({"id": "s2", "method": "project.save_instructions",
+                      "params": {"text": PROJECT_NEW + "\n\n## 新约定\n\n- 用中文写提交信息",
+                                 "base_mtime": r2["mtime"]}})
+        assert recv_until(ws, "s2")["ok"] is True

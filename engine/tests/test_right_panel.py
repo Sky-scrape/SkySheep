@@ -282,3 +282,38 @@ def test_ui_prefs_right_panel_keys(home):
         stored = recv_until(ws, "u-read")["result"]["prefs"]
         assert stored["right_tabs"] == ["memory", "cron"]
         assert stored["right_active"] == "memory"
+
+
+def test_rp_tabs_compress_no_scroll(home):
+    """标签条压缩呈现：不横向滚动，标签均分宽度、逐级降级（藏图标/藏非激活关闭钮）。
+
+    标签一多以前靠 overflow-x: auto 出滚动条——滚动条占面板高度且难拖；
+    改为均分 + 省略号 + title 提示，降级档位由 JS 渲染后按均分宽度判定。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    # CSS：容器不再横向滚动；标签可压缩、文字截断；两档降级类存在
+    tabs_block = css.split("#rp-tabs {")[1].split("}")[0]
+    assert "overflow-x: auto" not in tabs_block, "标签条不得再横向滚动"
+    tab_block = css.split(".rp-tab {")[1].split("}")[0]
+    assert "flex: 1 1 0" in tab_block and "min-width: 0" in tab_block
+    span_rule = css.split(".rp-tab > span:not(.rp-x) {")[1].split("}")[0]
+    assert "text-overflow: ellipsis" in span_rule
+    assert "#rp-tabs.rp-tight" in css and "#rp-tabs.rp-cramped" in css
+    assert "#rp-tabs.rp-icon" in css, "更挤时有只显图标的档位"
+    # JS：档位判定抽成 applyRpTabDensity，渲染与容器宽度变化（ResizeObserver）共用；
+    # 图标档与其它两档互斥（整格只剩图标时 tight/cramped 规则无意义）
+    assert "function applyRpTabDensity(" in js
+    assert 'classList.toggle("rp-icon", iconOnly)' in js
+    assert 'classList.toggle("rp-tight", !iconOnly && per < 92)' in js
+    assert 'classList.toggle("rp-cramped", !iconOnly && per < 64)' in js
+    assert "ResizeObserver" in js, "拖面板宽度后档位要即时跟上"
+    # RO 回调必须 rAF 推迟 + 档位无变化不写 DOM：回调内同步改布局会刷
+    # 「ResizeObserver loop completed」告警，被全局错误横幅接住吓到用户
+    # （与行卡 RO 同一套做法，见 mountPipelineGraph 注释）
+    assert "requestAnimationFrame(() => applyRpTabDensity())" in js
+    assert "if (key === _rpDensityKey) return" in js
+    # 错误陷阱忽略该浏览器良性告警（真循环的根因在各自 RO 回调里修）
+    assert 'indexOf("ResizeObserver loop") >= 0) return' in js

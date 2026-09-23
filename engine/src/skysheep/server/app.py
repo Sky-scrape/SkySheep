@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import ipaddress
 import json
 import logging
+import socket
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -23,6 +25,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..bgtasks import spawn_bg
 from ..config import resolve_api_key
 from .backend import BUILTIN_SNIPPETS, THEME_PREFS, ServerBackend, client_origin
 
@@ -63,8 +66,13 @@ LOCAL_ONLY_METHODS = frozenset({
     "settings.export", "settings.import",
     # MCP：写入任意 command 保存即启动本地程序
     "mcp.save_server", "mcp.import", "mcp.delete", "mcp.add_preset",
+    # 停用/启用同样是服务配置面：远端停用会让本机 Agent 失去工具
+    "mcp.set_enabled",
     # 技能：正文直接进 system prompt
     "skills.install", "skills.toggle", "skills.scope", "skills.delete",
+    # 新会话默认模型：与凭据无关但是服务配置面（ui.json 写入不算敏感，
+    # 但远程改它会改变后续会话的服务选择，仍收敛为本机操作）
+    "default_model.set",
     # 定时任务：allowed_tools 可预授权 run_command 等危险工具
     "cron.add", "cron.update", "cron.run_now",
     # 任务编排：无人值守节点同样按 allowed_tools 预授权危险工具
@@ -76,16 +84,125 @@ LOCAL_ONLY_METHODS = frozenset({
     "pipeline.duplicate", "pipeline.import",
     # 网络暴露开关（放宽方向；disable 是收紧、不在表内）
     "lan.enable", "remote.enable",
+    # 换共享令牌：远程一换，桌面端与其它设备的已存 cookie 全部失效
+    "lan.rotate_token",
+    # 重启 / 装更新 = 在本机拉起新进程：更新还会 `cmd /c` 静默安装 exe 后
+    # os._exit 强退，持令牌的局域网设备不应该能远程触发
+    "app.restart", "app.install_update", "app.apply_update",
     # 项目边界：切任意目录 / 删项目 / 改 AGENTS.md（持久 prompt 注入链）
     "project.switch", "project.delete", "project.save_instructions",
     # 整库恢复（覆盖全部项目的会话数据）
     "session.restore_backup",
+    # 手动备份 / 删单份备份：写的是本机会话数据，与整库恢复同面
+    "session.create_backup", "session.delete_backup",
     # 子代理定义（自定义 prompt 注入）
     "subagent.save", "subagent.save_builtin", "subagent.save_custom",
     "subagent.delete_custom",
     # 其余写配置入口
     "demo.enable", "ollama.enable", "app.export_diagnostics",
 })
+
+
+_OWN_HOST_NAMES: frozenset[str] | None = None
+
+
+def _own_host_names() -> frozenset[str]:
+    """本机可用于访问自己的主机名 / 地址集合（进程内缓存）。
+
+    取不到的部分静默跳过：这份清单只用于「对端是本机时 Host 必须指向本机」
+    的判定，宁可少几个别名（大不了回退到拒绍），也不能因为拿不到就把校验关掉。
+    """
+    global _OWN_HOST_NAMES
+    if _OWN_HOST_NAMES is not None:
+        return _OWN_HOST_NAMES
+    names = {"localhost", "127.0.0.1", "::1"}
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        hostname = ""
+    if hostname:
+        low = hostname.lower()
+        names.add(low)
+        names.add(low.split(".", 1)[0])
+        try:
+            fqdn = socket.getfqdn(hostname).lower()
+            names.add(fqdn)
+            names.add(fqdn.split(".", 1)[0])
+        except OSError:
+            pass
+        # 本机名解析出的各网卡地址（LAN / Tailscale 客户端用的就是这些）
+        try:
+            for info in socket.getaddrinfo(hostname, None):
+                names.add(str(info[4][0]).split("%")[0].lower())
+        except OSError:
+            pass
+    _OWN_HOST_NAMES = frozenset(names)
+    return _OWN_HOST_NAMES
+
+
+def _strip_port(host_header: str) -> str:
+    """从 Host 头里取出主机部分（IPv6 字面量带方括号，不能按冒号直接切）。"""
+    h = (host_header or "").strip().lower()
+    if h.startswith("["):
+        return h[1:].split("]", 1)[0]
+    if h.count(":") == 1:
+        return h.split(":", 1)[0]
+    return h
+
+
+def _host_header_is_own_machine(host_header: str) -> bool:
+    """Host 头指向的是不是本机自己。
+
+    DNS rebinding 的关口在这里：攻击者的域名解析到 127.0.0.1 后，受害者浏览器
+    发出的请求里 Origin 与 Host 相等（都写着 evil.com），「Origin 与 Host 一致」
+    那条检查照过；而按对端 IP 判定又是 local → 免令牌 + 可调本机专属方法。
+    真正的判据不是两者一致，而是这个主机名确实是本机自己的地址。
+    """
+    host = _strip_port(host_header)
+    if not host:
+        return False
+    if host in _own_host_names():
+        return True
+    try:
+        obj = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(obj, ipaddress.IPv6Address) and obj.ipv4_mapped:
+        obj = obj.ipv4_mapped
+    return bool(obj.is_loopback)
+
+
+def _request_host_allowed(host_header: str, client) -> bool:
+    """对端是本机时，Host 头必须指向本机；其它来源不校验。
+
+    非本机对端不校验是有意的：局域网 / Tailscale 客户端可能用机器名、mDNS 名
+    或自定义域名访问，那些名字不在本机清单里，一律拒绍会直接打断远程控制；
+    而 rebinding 的前提就是「浏览器从本机发起」，对端必然是回环地址。
+    """
+    if client_origin(client) != "local":
+        return True
+    # Starlette TestClient：peer 固定 ("testclient", 50000)、Host 固定 testserver。
+    # 只在 peer 确实是 TestClient 时认这个 Host，免得把它变成通用的单标签名白名单。
+    peer = client[0] if isinstance(client, (tuple, list)) and client else ""
+    if str(peer) == "testclient" and (host_header or "").strip().lower() == "testserver":
+        return True
+    return _host_header_is_own_machine(host_header)
+
+
+def _host_guard(app) -> None:
+    """HTTP 侧的 Host 校验（WS 侧在 ws_endpoint 里单独做：中间件不覆盖 websocket）。"""
+
+    @app.middleware("http")
+    async def _reject_foreign_host(request, call_next):
+        if not _request_host_allowed(request.headers.get("host", ""), request.client):
+            # 421 Misdirected Request：语义正好是「本服务器不愿为该 Host 服务」
+            return JSONResponse({"detail": "Host 不指向本机，已拒绍"}, status_code=421)
+        resp = await call_next(request)
+        # 界面不允许被外部页面嵌进 iframe（安全审查低危项）：点击劫持面收掉。
+        # /preview 自己的 iframe 是内嵌资源、不受这条限制（只作用于本响应）
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
+        return resp
 
 
 def _ws_origin_allowed(ws: WebSocket) -> bool:
@@ -174,8 +291,15 @@ def _first_paint_attrs(prefs: dict) -> str:
         parts.append(f'data-theme-mode="{theme}"')
         parts.append(f'data-theme="{theme}"')
     else:
-        # auto（或缺省 / 非法值）：服务端不知道系统深浅，交给首帧脚本按系统判定
+        # auto（或缺省 / 非法值）：服务端不知道系统深浅，交给首帧脚本按系统判定；
+        # 深浅各自的落点（设置页「跟随系统时」选的主题）也一并注入，缺省 = 纸墨/夜墨
         parts.append('data-theme-mode="auto"')
+        auto_light = prefs.get("theme_auto_light")
+        auto_dark = prefs.get("theme_auto_dark")
+        if auto_light in ("paper", "celadon", "kaki"):
+            parts.append(f'data-theme-auto-light="{auto_light}"')
+        if auto_dark in ("night", "indigo", "pine"):
+            parts.append(f'data-theme-auto-dark="{auto_dark}"')
     style = []
     scale = prefs.get("ui_scale")
     if isinstance(scale, int) and not isinstance(scale, bool):
@@ -267,11 +391,20 @@ def create_app(
             return HTMLResponse(FORBIDDEN_HTML, status_code=403)
         # 本机（回环）永远免令牌：守卫挡的是别的设备，不能把桌面自己关在门外
         # （此前 lan=true 时本机也要令牌，桌面窗口会弹"需要访问令牌"——2026-09-18 修复）
-        token = cfg.server.token if (
-            cfg is not None and origin != "local" and (lan or (ts and origin == "tailscale"))
-        ) else ""
-        if not token:
+        needs_token = origin != "local" and (lan or (ts and origin == "tailscale"))
+        if not needs_token:
             return await call_next(request)
+        # fail closed：远程来源需要令牌而令牌为空（配置被手改坏等）时直接拒绝，
+        # 不能因为「没令牌可比对」就退化成无鉴权放行。连续试错的来源由
+        # token_throttle 即时拒绝（见 backend.TokenThrottle），失败都留痕给设置页。
+        ip = str(request.client[0]) if request.client else ""
+        if backend.token_throttle.blocked(ip):
+            backend.note_token_failure(ip, "http")
+            return HTMLResponse(FORBIDDEN_HTML, status_code=403)
+        token = (cfg.server.token if cfg is not None else "") or ""
+        if not token:
+            backend.note_token_failure(ip, "http")
+            return HTMLResponse(FORBIDDEN_HTML, status_code=403)
         supplied = (
             request.query_params.get("token")
             or request.cookies.get("skysheep_token")
@@ -279,6 +412,7 @@ def create_app(
             or ""
         )
         if supplied and hmac.compare_digest(supplied, token):
+            backend.token_throttle.note_success(ip)
             response = await call_next(request)
             if request.query_params.get("token"):
                 # 首次带 token 访问成功后种 cookie，静态资源等后续请求免拼参数
@@ -286,6 +420,8 @@ def create_app(
                     "skysheep_token", token, max_age=30 * 86400, httponly=True, samesite="lax"
                 )
             return response
+        backend.token_throttle.note_failure(ip)
+        backend.note_token_failure(ip, "http")
         if request.url.path == "/health":
             return JSONResponse({"ok": False, "error": "token required"}, status_code=403)
         return HTMLResponse(FORBIDDEN_HTML, status_code=403)
@@ -307,6 +443,7 @@ def create_app(
 
     # 静态资源禁缓存：前端零构建、文件名无指纹，否则用户永远卡在旧 app.js
     _no_store_static(app)
+    _host_guard(app)
 
     # 点开头路径先挡在挂载之外：StaticFiles 不拒隐藏路径，见 _is_hidden_static_path。
     @app.middleware("http")
@@ -353,7 +490,8 @@ def create_app(
             # trust.grant 同一姿态——手机遥控可以聊天，但不能改引擎的安全配置。
             raise RuntimeError("该操作涉及配置或本机权限，只能在桌面端本机执行")
         if method == "boot":
-            return await backend.snapshot()
+            # 安全审查 M7：远程客户端拿到的快照不含本机绝对路径与服务 endpoint
+            return await backend.snapshot(local=local)
         if method == "chat.send":
             text = str(params.get("text", "")).strip()
             images = params.get("images")
@@ -440,6 +578,9 @@ def create_app(
         if method == "tasks.cancel_all":
             only = backend.session.id if (not local and backend.session) else None
             return await backend.tasks_cancel_all(session_id=only)
+        if method == "tasks.cancel":
+            only = backend.session.id if (not local and backend.session) else None
+            return await backend.tasks_cancel(params, session_id=only)
         if method == "pipeline.list":
             return await backend.pipeline_list()
         if method == "pipeline.get":
@@ -493,12 +634,27 @@ def create_app(
             return {"updated": True}
         if method == "snippets.delete":
             return {"deleted": await backend.store.delete_snippet(int(params.get("id", 0)))}
+        if method == "snippets.used":
+            # 插入使用上报：计数 +1 与最近使用时间（设置页展示用）；失败不影响插入
+            return {"updated": await backend.store.mark_snippet_used(int(params.get("id", 0)))}
+        if method == "snippets.reorder":
+            # 拖拽排序提交整份顺序；上限兜底，防异常载荷
+            ids = [int(i) for i in (params.get("ids") or [])][:500]
+            return {"reordered": await backend.store.reorder_snippets(ids)}
+        if method == "snippets.restore_builtin":
+            return {"added": await backend.restore_builtin_snippets()}
+        if method == "snippets.export":
+            return await backend.export_snippets()
+        if method == "snippets.import":
+            return await backend.import_snippets(params)
         if method == "fs.files":
             return await backend.workspace_files()
         if method == "checkpoint.list":
             return await backend.list_checkpoints()
         if method == "checkpoint.restore":
-            return await backend.restore_checkpoint(str(params.get("id", "")))
+            return await backend.restore_checkpoint(
+                str(params.get("id", "")), force=bool(params.get("force", False))
+            )
         if method == "checkpoint.diff":
             return await backend.checkpoint_diff(str(params.get("id", "")))
         if method in ("term.spawn", "term.input", "term.resize"):
@@ -588,7 +744,7 @@ def create_app(
                 out["quick_sessions"] = [_sess_brief(s) for s in quick_sessions]
             return out
         if method == "session.new":
-            return await backend.new_session()
+            return await backend.new_session(str(params.get("title", "")))
         if method == "session.new_task":
             return await backend.create_task_chat()
         if method == "session.truncate":
@@ -644,7 +800,9 @@ def create_app(
             return {"projects": [
                 {
                     "id": p.id, "name": p.name,
-                    "root_path": p.root_path if local else "",
+                    # 「远程连接」固定项目没有真实目录：root_path 报空，
+                    # 前端据此不提供切换/删除（点击组内会话直接打开）
+                    "root_path": "" if backend.is_remote_project(p) else (p.root_path if local else ""),
                     "is_current": (backend.project is not None and p.id == backend.project.id),
                 }
                 for p in projects
@@ -664,11 +822,23 @@ def create_app(
         if method == "project.instructions":
             return await backend.get_instructions()
         if method == "project.save_instructions":
-            return await backend.save_instructions(str(params.get("text", "")))
+            bm = params.get("base_mtime")
+            return await backend.save_instructions(
+                str(params.get("text", "")),
+                base_mtime=None if bm is None else float(bm),
+            )
         if method == "ui.get":
             return await backend.get_ui_prefs()
         if method == "trust.status":
             return await backend.trust_status()
+        if method == "trust.list":
+            # 清单含全部项目的绝对路径：与 session.backups 同理，只给本机界面
+            if not local:
+                raise RuntimeError("信任清单只能在本机界面上查看")
+            return backend.trust_list()
+        if method == "trust.revoke_path":
+            # 撤销信任是收紧动作，远端也允许（避免被远程锁死在信任态）
+            return await backend.trust_revoke_path(str(params.get("path", "")))
         if method == "trust.grant":
             # 信任一个项目 = 允许执行它自带的本地命令，只能由本机用户在界面上确认
             if not local:
@@ -694,10 +864,17 @@ def create_app(
             return await backend.install_update()
         if method == "app.apply_update":
             return await backend.apply_update()
+        if method == "app.restart":
+            # 重启等于在本机拉起新进程：LOCAL_ONLY_METHODS 已把远程拦下
+            return await backend.app_restart()
         if method == "memory.get":
             return await backend.memory_get()
         if method == "memory.save":
-            return await backend.memory_save(str(params.get("text", "")))
+            bm = params.get("base_mtime")
+            return await backend.memory_save(
+                str(params.get("text", "")),
+                base_mtime=None if bm is None else float(bm),
+            )
         if method == "memory.maintain_save":
             gi, pi = params.get("global_enabled"), params.get("project_enabled")
             ih = params.get("interval_hours")
@@ -719,6 +896,11 @@ def create_app(
             return backend.hooks_settings()
         if method == "hooks.save":
             return await backend.save_hooks_settings(params)
+        if method == "hooks.test":
+            # 测试会真实执行命令，与 hooks.save 同一信任模型：本机专属
+            if not local:
+                raise RuntimeError("钩子测试只能在本机界面上操作")
+            return await backend.test_hook(params)
         if method == "app.open_path":
             return backend.open_path(str(params.get("kind", "")))
         if method == "app.open_external":
@@ -748,6 +930,10 @@ def create_app(
             return out
         if method == "session.restore_backup":
             return await backend.restore_session_backup(str(params.get("name", "")))
+        if method == "session.create_backup":
+            return await backend.create_session_backup()
+        if method == "session.delete_backup":
+            return await backend.delete_session_backup(str(params.get("name", "")))
         if method == "websearch.get":
             return await backend.websearch_detail()
         if method == "websearch.save":
@@ -783,6 +969,9 @@ def create_app(
             return await backend.lan_enable(params)
         if method == "lan.disable":
             return await backend.lan_disable()
+        if method == "lan.rotate_token":
+            # 换共享令牌立即生效：旧地址/二维码/cookie 全部作废（LOCAL_ONLY 已拦远程）
+            return await backend.lan_rotate_token()
         if method == "remote.status":
             return await backend.remote_status(include_token=local)
         if method == "remote.enable":
@@ -826,9 +1015,11 @@ def create_app(
         if method == "subagent.save":
             enabled = params.get("enabled")
             max_iters = params.get("max_iterations")
+            max_conc = params.get("max_concurrent")
             return await backend.save_subagent_settings(
                 enabled=bool(enabled) if enabled is not None else None,
                 max_iterations=(int(max_iters) if max_iters not in (None, "") else None),
+                max_concurrent=(int(max_conc) if max_conc not in (None, "") else None),
             )
         if method == "subagent.save_builtin":
             return await backend.save_subagent_builtin(
@@ -853,7 +1044,9 @@ def create_app(
         if method == "subagent.delete_custom":
             return await backend.delete_subagent_custom(str(params.get("name", "")))
         if method == "skills.market":
-            return await backend.market_list()
+            return await backend.market_list(refresh=bool(params.get("refresh", False)))
+        if method == "skills.market_detail":
+            return await backend.market_detail(str(params.get("url", "")))
         if method == "model.list":
             return {
                 "current": backend.provider_name,
@@ -879,6 +1072,10 @@ def create_app(
             return await backend.switch_model(
                 str(params.get("name", "")), model=params.get("model") or None
             )
+        if method == "default_model.get":
+            return backend.default_model_state()
+        if method == "default_model.set":
+            return await backend.set_default_model(params)
         if method == "config.add_provider_model":
             return await backend.add_provider_model(
                 str(params.get("name", "")), str(params.get("model", ""))
@@ -914,6 +1111,7 @@ def create_app(
                 ),
                 price_in=(float(params["price_in"]) if params.get("price_in") is not None else None),
                 price_out=(float(params["price_out"]) if params.get("price_out") is not None else None),
+                price_cache=(float(params["price_cache"]) if params.get("price_cache") is not None else None),
                 proxy=(str(params["proxy"]) if params.get("proxy") is not None else None),
             )
         if method == "config.add_provider":
@@ -972,6 +1170,14 @@ def create_app(
             )
         if method == "whitelist.export":
             return await backend.export_whitelist()
+        if method == "whitelist.enable":
+            # 启停规则：停用是收紧（远端也允许），启用是放宽 = 与 whitelist.add 同限本机
+            enabling = bool(params.get("enabled", True))
+            if enabling and not local:
+                raise RuntimeError("启用白名单规则只能在本机界面上操作")
+            return await backend.set_whitelist_rule_enabled(
+                int(params.get("id", 0)), enabling
+            )
         if method == "whitelist.import":
             # 导入同样是添加规则：与本机约束一致
             if not local:
@@ -995,7 +1201,8 @@ def create_app(
             return await backend.scan_local_skills()
         if method == "skills.install":
             return await backend.install_skill(
-                str(params.get("source", "")), str(params.get("scope", "global"))
+                str(params.get("source", "")), str(params.get("scope", "global")),
+                overwrite=bool(params.get("overwrite", False)),
             )
         if method == "skills.delete":
             return await backend.delete_skill(str(params.get("name", "")))
@@ -1005,6 +1212,8 @@ def create_app(
                 path=str(params.get("path", "")),
                 scope=str(params.get("scope", "global")),
                 overwrite=bool(params.get("overwrite", False)),
+                # M10：含 stdio 定义时先回 needs_confirm，前端确认后带 true 重试
+                confirmed=bool(params.get("confirmed", False)),
             )
         if method == "mcp.save_server":
             return await backend.save_mcp_server(
@@ -1015,6 +1224,7 @@ def create_app(
                 env=params.get("env") or None,
                 headers=params.get("headers") or None,
                 readonly=bool(params.get("readonly", False)),
+                timeout=float(params.get("timeout") or 0),
                 scope=str(params.get("scope", "global")),
             )
         if method == "mcp.delete":
@@ -1025,16 +1235,17 @@ def create_app(
             return await backend.add_mcp_preset(
                 str(params.get("name", "")), str(params.get("scope", "global"))
             )
+        if method == "mcp.set_enabled":
+            return await backend.set_mcp_enabled(
+                str(params.get("name", "")),
+                bool(params.get("enabled", True)),
+                str(params.get("scope", "global")),
+            )
         if method == "mcp.reconnect":
             warnings = await backend._reconnect_mcp()
             return {"mcp": backend._mcp_status_list(backend.mcp), "mcp_warnings": warnings}
         if method == "mcp.status":
-            return {"mcp": [
-                {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names,
-             "reconnecting": getattr(st, "reconnecting", False),
-             "restarts": getattr(st, "restarts", 0)}
-                for n, st in backend.mcp.statuses.items()
-            ]}
+            return {"mcp": backend._mcp_status_list(backend.mcp)}
         if method == "tools.list":
             return {"tools": [
                 {"name": t.name, "safety": t.safety.value, "description": t.description}
@@ -1068,21 +1279,34 @@ def create_app(
             await ws.accept()
             await ws.close(code=4403)
             return
-        # 本机（回环）永远免令牌，与 HTTP 守卫同一规则；tailnet 来源必须验令牌
-        token = cfg.server.token if (
-            cfg is not None and origin != "local" and (lan or (ts and origin == "tailscale"))
-        ) else ""
-        if token:
-            supplied = (
-                ws.query_params.get("token")
-                or ws.cookies.get("skysheep_token")
-                or ws.headers.get("x-skysheep-token")
-                or ""
-            )
-            if not supplied or not hmac.compare_digest(supplied, token):
+        # 安全审查 M2：对端是本机时 Host 必须指向本机。DNS rebinding 页面下
+        # Origin 与 Host 同时写成攻击者域名，上面那条一致性检查拦不住，
+        # 而按对端 IP 判定又是 local → 免令牌且可调本机专属方法。
+        if not _request_host_allowed(ws.headers.get("host", ""), ws.client):
+            await ws.accept()
+            await ws.close(code=4403)
+            return
+        # 本机（回环）永远免令牌，与 HTTP 守卫同一规则；tailnet 来源必须验令牌；
+        # 远程来源需要令牌而令牌为空时同样 fail closed（不能退化成无鉴权放行）
+        needs_token = origin != "local" and (lan or (ts and origin == "tailscale"))
+        if needs_token:
+            ip = str(ws.client[0]) if ws.client else ""
+            token = (cfg.server.token if cfg is not None else "") or ""
+            supplied = ""
+            if token and not backend.token_throttle.blocked(ip):
+                supplied = (
+                    ws.query_params.get("token")
+                    or ws.cookies.get("skysheep_token")
+                    or ws.headers.get("x-skysheep-token")
+                    or ""
+                )
+            if not token or not supplied or not hmac.compare_digest(supplied, token):
+                backend.token_throttle.note_failure(ip)
+                backend.note_token_failure(ip, "ws")
                 await ws.accept()
                 await ws.close(code=4401)
                 return
+            backend.token_throttle.note_success(ip)
         await ws.accept()
         lock = asyncio.Lock()
         # 客户端来源决定部分方法是否可用（远端不允许切换降低防护的开关）
@@ -1103,7 +1327,7 @@ def create_app(
                     # 轮次事件只发给发起连接：据此自动绑定（兼容首条消息懒建会话、
                     # 客户端还没拿到 session_id 的情况）
                     conn_state["session"] = ev["session_id"]
-                elif k in ("subagent_event", "task_finished"):
+                elif k in ("subagent_spawned", "subagent_event", "task_finished"):
                     sid = ev.get("session_id") or ""
                     if not sid or conn_state["session"] != sid:
                         return  # 不是这个客户端正在交互的会话：不推送
@@ -1141,7 +1365,7 @@ def create_app(
                     except Exception as e:
                         await send({"id": mid, "ok": False, "error": str(e)})
 
-                asyncio.create_task(process())
+                spawn_bg(process())
         except WebSocketDisconnect:
             return
         finally:

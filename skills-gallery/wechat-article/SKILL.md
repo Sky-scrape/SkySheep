@@ -1,6 +1,7 @@
 ---
 name: wechat-article
 description: 按选题沟通、大纲确认、成稿三步写中文公众号文章，开头有钩子、小标题分段、穿插金句、结尾引导互动，交付 Markdown。
+version: 1.0.0
 ---
 
 ## 目标

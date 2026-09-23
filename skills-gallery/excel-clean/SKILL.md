@@ -1,6 +1,7 @@
 ---
 name: excel-clean
 description: 读取 Excel 或 CSV 文件，按用户确认的规则完成去重、补空、格式统一、拆分列等清洗，产出干净表格和一段清洗说明。
+version: 1.0.0
 ---
 
 ## 目标

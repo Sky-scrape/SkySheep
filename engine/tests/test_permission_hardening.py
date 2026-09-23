@@ -109,3 +109,74 @@ def test_accept_edits_only_covers_workdir_writes(home):
         assert kinds.count("permission_request") == 1
         assert (home / "proj" / "inside.txt").read_text(encoding="utf-8") == "1"
         assert outside.read_text(encoding="utf-8") == "2"
+
+
+# ---- M3：permission.respond 的 decision 白名单（未知值按拒绝，不是按放行） ----
+
+
+def test_normalize_decision_is_fail_closed():
+    """白名单外的 decision 一律收敛成 deny：主循环只显式处理 ALLOW_ALWAYS/DENY，
+    其余值都会落到「执行工具」那条路上，所以透传等于「乱码 = 放行」。"""
+    from skysheep.security.gate import Decision, normalize_decision
+
+    assert normalize_decision("allow_once") == Decision.ALLOW_ONCE
+    assert normalize_decision("allow_always") == Decision.ALLOW_ALWAYS
+    assert normalize_decision("deny") == Decision.DENY
+    assert normalize_decision("  deny  ") == Decision.DENY  # 前后空白无妨
+    assert normalize_decision("DENY") == Decision.DENY      # 大小写归一
+    for bad in ("allow", "allowalways", "yes", "y", "ok", "true", "", "deny ",
+                "None", "null", "\x00", None, 1, True, ["allow_once"], {"d": "allow_once"}):
+        assert normalize_decision(bad) == Decision.DENY, repr(bad)
+
+
+async def test_agent_respond_permission_denies_unknown(tmp_path):
+    """Agent.respond_permission 落地的就是白名单值：未知值投递后按拒绝执行。"""
+    from conftest import FakeProvider
+
+    from skysheep.core import Agent
+    from skysheep.messages import TextBlock, ToolUseBlock
+    from skysheep.security.gate import Decision, PermissionGate
+    from skysheep.tools import ToolRegistry, WriteFileTool
+
+    prov = FakeProvider([
+        [ToolUseBlock(id="t1", name="write_file",
+                      input={"path": "a.txt", "content": "x"})],
+        [TextBlock(text="done")],
+    ])
+    agent = Agent(provider=prov, registry=ToolRegistry([WriteFileTool()]),
+                  gate=PermissionGate(), working_dir=tmp_path, max_iterations=5)
+    resolved = []
+    async for ev in agent.run_turn("写文件"):
+        if ev.kind == "permission_request":
+            # 前端回了个白名单外的字符串（大小写差异 / 乱码 / 被篡改）
+            assert agent.respond_permission(ev.request_id, "Allow_Once_Typo")
+        elif ev.kind == "permission_resolved":
+            resolved.append(ev.decision)
+    assert resolved == [Decision.DENY]
+    assert not (tmp_path / "a.txt").exists(), "未知 decision 不得被当成放行执行"
+
+
+def test_ws_permission_respond_unknown_decision_denies(home):
+    """端到端：WS 上回未知 decision → 工具不执行，事件里如实报 deny。"""
+    from skysheep.messages import TextBlock, ToolUseBlock
+
+    script = [
+        [ToolUseBlock(id="t1", name="write_file",
+                      input={"path": "a.txt", "content": "x"})],
+        [TextBlock(text="done")],
+    ]
+    with make_client(home, script) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "chat.send", "params": {"text": "写文件"}})
+        rid, decisions = None, []
+        while True:
+            frame = ws.receive_json()
+            if frame.get("event") == "permission_request":
+                rid = frame["data"]["request_id"]
+                ws.send_json({"id": "pr", "method": "permission.respond",
+                              "params": {"request_id": rid, "decision": "allow_always!"}})
+            elif frame.get("event") == "permission_resolved":
+                decisions.append(frame["data"]["decision"])
+            elif frame.get("id") == "c1":
+                break
+        assert decisions == ["deny"]
+        assert not (home / "proj" / "a.txt").exists()

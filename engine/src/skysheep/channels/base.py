@@ -16,14 +16,14 @@ from dataclasses import dataclass, field
 class ChannelMessage:
     """归一化后的入站消息。
 
-    各平台字段差异大（Telegram 是 chat.id + from.id，飞书是 open_id + chat_id），
+    各平台字段差异大（飞书是 open_id + chat_id，微信是 OpenID），统一成这四项后，
     统一成这四项后，路由与命令解析就不必感知平台差异。
 
     approved 是渠道级安全闸门的结果：不在允许名单内的来源，消息仍会构造出来
     （用于"发现新来源"提示），但 approved=False，路由层据此拒绝执行。
     """
 
-    channel: str            # "telegram" / "feishu" / ...
+    channel: str            # "feishu" / "weixin" / ...
     actor: str              # 发送者标识（用于日志与来源列表展示）
     chat_id: str            # 回消息的目标会话（渠道内唯一）
     text: str = ""
@@ -53,7 +53,7 @@ class Channel(abc.ABC):
     收尾时报 "Task was destroyed but it is pending"）。
 
     出站：send_text() 负责把 Agent 的回复发回聊天窗口，并处理平台长度限制
-    （Telegram 单条 4096 字符，超长要切分）。
+    （飞书单条 150 KB、微信侧更保守），超长要切分。
     """
 
     name: str = ""
@@ -105,7 +105,7 @@ class Channel(abc.ABC):
     def is_allowed(self, actor: str, chat_id: str) -> bool:
         """来源是否被允许。actor 与 chat_id 任一命中即可。
 
-        两个都认是有意的：Telegram 里私聊时 chat.id == from.id，群聊时两者不同，
+        两个都认是有意的：飞书群聊里 sender open_id 与 chat_id 不同，
         用户可能只填了其中一个。
         """
         allowed = self.allowed_ids
@@ -132,7 +132,7 @@ class Channel(abc.ABC):
 def split_text(text: str, limit: int) -> list[str]:
     """按长度切分长回复，尽量在换行处断开（保留可读性）。空文本返回空列表。
 
-    聊天平台普遍有单条消息长度上限（Telegram 4096，微信侧更保守），
+    聊天平台普遍有单条消息长度上限（飞书文本 150 KB，微信侧更保守），
     超长回复必须切成多条发送，否则平台直接报错、用户一个字都收不到。
     """
     if not text:

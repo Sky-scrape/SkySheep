@@ -31,6 +31,19 @@ COMPACT_SYSTEM = (
     "Produce a dense, factual summary in the SAME LANGUAGE as the conversation."
 )
 
+# 压缩摘要消息的识别标记。摘要以一条 user 消息的形式插进历史（对模型来说这是
+# 最自然的「此前对话」载体），但它是引擎的上下文管理产物、不是用户说的话：
+# 落库与回传前端时都要能把它认出来（见 server/backend.py 的轮末落库）。
+# 标记文本只能由这里的常量生成，不要 elsewhere 再字面量写一份，否则两边会走偏。
+SUMMARY_OPEN_TAG = "<earlier-conversation-summary>"
+SUMMARY_CLOSE_TAG = "</earlier-conversation-summary>"
+SUMMARY_NOTE = "(以上是此前对话的摘要，原始消息已省略。)"
+
+
+def is_compaction_summary(m: Message) -> bool:
+    """这条消息是不是 compact_history 生成的压缩摘要。"""
+    return m.role == "user" and m.text.lstrip().startswith(SUMMARY_OPEN_TAG)
+
 COMPACT_USER_TEMPLATE = """\
 Summarize the conversation segment below for an AI agent that will continue the task \
 with no other memory. Capture, in compact markdown:
@@ -120,8 +133,7 @@ async def compact_history(
         return None
 
     summary_msg = Message.user(
-        f"<earlier-conversation-summary>\n{summary}\n</earlier-conversation-summary>\n"
-        "(以上是此前对话的摘要，原始消息已省略。)"
+        f"{SUMMARY_OPEN_TAG}\n{summary}\n{SUMMARY_CLOSE_TAG}\n{SUMMARY_NOTE}"
     )
     agent.history = [history[0], summary_msg] + list(recent)
     return CompactionEvent(

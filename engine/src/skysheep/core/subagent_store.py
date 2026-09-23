@@ -20,6 +20,7 @@ from pathlib import Path
 from pydantic import BaseModel, ValidationError
 
 from ..config import REASONING_EFFORTS
+from ..textio import write_text_atomic
 
 SUBAGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 BUILTIN_AGENT_TYPES = ("task", "explore", "reviewer", "researcher", "writer", "planner")
@@ -43,11 +44,12 @@ class SubagentDef(BaseModel):
     name: str
     description: str = ""
     prompt: str = ""
-    # "all"=主 Agent 的全部工具（除派生工具）；"readonly"=只读；
+    # "all"=主 Agent 的全部工具（除派生工具与电脑控制七件套）；"readonly"=只读；
     # 或工具名列表（自定义勾选）
     tools: str | list[str] = TOOL_POLICY_READONLY
     provider: str = ""   # 留空 = 跟随主对话当前模型
     model: str = ""
+    reasoning: str = ""  # 留空 = 跟随全局；auto/low/medium/high（与内置覆盖同语义）
     enabled: bool = True
 
 
@@ -64,7 +66,7 @@ class BuiltinOverride(BaseModel):
 # 内置子代理的默认描述（spawn_agent 说明、设置页展示、模型选型的依据）。
 # 用户在设置页改过某型的描述后，覆盖值优先。
 BUILTIN_DESCRIPTIONS = {
-    "task": "多步通用任务：可以拆步骤、尝试写文件（写入仍会被自动拒绝）。",
+    "task": "多步通用任务：拆步骤推进；子代理内写文件会被自动拒绝，把写入方案写进报告由主 Agent 执行。",
     "explore": "只读调研：在代码与文件里广泛搜集信息，不改任何东西。",
     "reviewer": "审查员：细读代码 / 文档，按严重度输出审查清单（不改文件）。",
     "researcher": "调研员：联网搜索与抓取公开资料，结论注明来源。",
@@ -125,9 +127,9 @@ class SubagentStore:
             "builtin": {t: ov.model_dump() for t, ov in self.builtin.items()},
             "custom": [d.model_dump() for d in self.custom],
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        # 原子写（安全审查 M13）：写一半被中断时旧任务簿仍完整，不会留下半截 JSON
+        write_text_atomic(
+            self.path, json.dumps(data, ensure_ascii=False, indent=2) + "\n"
         )
 
     # ---- 内置覆盖 ----

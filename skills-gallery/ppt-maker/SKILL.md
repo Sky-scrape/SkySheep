@@ -1,6 +1,7 @@
 ---
 name: ppt-maker
 description: 从一个主题或一份材料出发，先定大纲再生成 PPT——每页一个观点、要点不超过五行，产出可直接讲的 .pptx。
+version: 1.0.0
 ---
 
 ## 目标

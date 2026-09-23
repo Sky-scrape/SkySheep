@@ -180,6 +180,46 @@ async def test_run_command_background_list_and_errors(tmp_path):
         await tool.run(tool.args_model(command=""), ctx(tmp_path))
 
 
+async def test_background_process_scoped_to_owning_session():
+    """并行会话隔离：后台进程按启动会话归属，read/kill/list 都碰不到别家的。"""
+    from skysheep.tools import shell as shell_mod
+
+    class _FakeProc:
+        def __init__(self, code=None) -> None:
+            self._code = code
+
+        def poll(self):
+            return self._code
+
+        returncode = 0
+
+    saved = dict(shell_mod._BG)
+    shell_mod._BG.clear()
+    try:
+        shell_mod._BG[1] = {
+            "proc": _FakeProc(), "command": "python -m http.server 8000",
+            "buf": {"out": "serving"}, "started": 0.0, "owner": "sess-A",
+        }
+        # 自己可读；别的会话读不到（也不泄露输出）
+        assert "serving" in shell_mod._bg_read(1, False, "sess-A")
+        with pytest.raises(ToolError, match="其他会话"):
+            shell_mod._bg_read(1, False, "sess-B")
+        # 别家 kill 被拒且记录还在；list 只列自己的
+        assert "不能从这里终止" in shell_mod._bg_kill(1, "sess-B")
+        assert 1 in shell_mod._BG
+        assert shell_mod._bg_list("sess-B") == "当前没有后台进程记录"
+        assert "http.server" in shell_mod._bg_list("sess-A")
+        # 无会话态（CLI / 旧记录 owner 为空）保持可用
+        assert "serving" in shell_mod._bg_read(1, False, "")
+        # 自己能清理（已退出的记录直接出栈）
+        shell_mod._BG[1]["proc"] = _FakeProc(code=0)
+        assert "早已退出" in shell_mod._bg_kill(1, "sess-A")
+        assert 1 not in shell_mod._BG
+    finally:
+        shell_mod._BG.clear()
+        shell_mod._BG.update(saved)
+
+
 # ---- 写入端大小上限（reading 端早有截断，写入端此前无限制） ----
 
 

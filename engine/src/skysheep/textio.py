@@ -22,6 +22,9 @@
 from __future__ import annotations
 
 import codecs
+import os
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -141,7 +144,84 @@ def encode_text(text: str, encoding: str, newline: str) -> bytes:
     return prepared.encode(encoding)
 
 
-def write_text_file(path: Path, text: str, encoding: str, newline: str) -> None:
-    """按目标编码与行尾符落盘（先建父目录）。可能抛 OSError / UnicodeEncodeError。"""
+def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """原子写「引擎自己的」状态文件（config.toml / 任务簿 / mcp.json / ui.json）。
+
+    与 write_text_file 的分工：那个面向用户文件（要保留原编码与行尾符），这个
+    面向引擎自有的固定 UTF-8 状态文件。共同点是「先写同目录临时文件、再
+    os.replace」：直接覆盖写在写一半时的中间态会暴露给并发读者，进程被杀还会
+    留下半个文件——对 JSON 而言就是整个配置/任务簿读不出来（安全审查 M13）。
+    同目录保证同一卷，rename 才是原子语义。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(encode_text(text, encoding, newline))
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode(encoding))
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """原子写字节内容（检查点回滚、图片落盘这类二进制写用）。
+
+    与 write_text_atomic 同款：先写同目录临时文件再 os.replace，写一半被
+    中断时目标仍是旧内容（安全审查低危项：检查点 restore 此前是直接
+    write_bytes，回滚到一半崩溃会留下半截文件）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def write_text_file(path: Path, text: str, encoding: str, newline: str) -> None:
+    """按目标编码与行尾符落盘（先建父目录）。可能抛 OSError / UnicodeEncodeError。
+
+    原子写：先写同目录临时文件，再 os.replace 覆盖目标。直接覆盖写在
+    「写了一半」的中间态会暴露给并发的读者（别的会话/任务的工具、检查点
+    回滚、编辑器自动重载），进程被杀时还会留下半个文件；同目录保证同一卷，
+    rename 才是原子语义——要么旧内容，要么新内容。临时文件名唯一，两个
+    并行写同一目标时各自落各自的临时文件，不会互相覆盖半成品。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = encode_text(text, encoding, newline)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        if os.name != "nt":
+            # POSIX：mkstemp 建出的文件是 0600，替换后会带着这个权限位。
+            # 覆盖已有文件时保留原权限位；新建文件还原成普通 umask 语义。
+            # Windows 走目录 ACL 继承，不需要处理。
+            try:
+                mode = stat.S_IMODE(path.stat().st_mode)
+            except OSError:
+                umask = os.umask(0o022)
+                os.umask(umask)
+                mode = 0o666 & ~umask
+            os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise

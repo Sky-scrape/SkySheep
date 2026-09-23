@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from conftest import FakeProvider
 
 from skysheep.core import Agent
-from skysheep.messages import TextBlock, ToolUseBlock
+from skysheep.messages import Message, TextBlock, ToolUseBlock
 from skysheep.security.gate import PermissionGate
 from skysheep.tools import ToolRegistry, default_tools
 
@@ -176,6 +177,87 @@ async def test_max_iterations_stops(tmp_path):
     assert events[-1].kind == "turn_finished"
     assert events[-1].stop_reason == "max_iterations"
     assert events[-1].iterations == 3
+
+
+# ---- M12：取消路径的三处收尾 ----
+
+
+async def test_pending_permission_cleared_on_cancel(tmp_path):
+    """取消后未决权限必须清掉：残留 request_id 不能再被「成功投递」。"""
+    import asyncio
+
+    provider = FakeProvider([[
+        ToolUseBlock(id="t1", name="write_file", input={"path": "a.txt", "content": "x"}),
+    ]])
+    agent = make_agent(provider, tmp_path)
+    seen: dict = {}
+
+    agen = agent.run_turn("写个文件")
+
+    async def consume():
+        async for ev in agen:
+            if ev.kind == "permission_request":
+                seen["rid"] = ev.request_id
+                await asyncio.sleep(30)  # 模拟用户没点确认，轮次被取消
+
+    task = asyncio.create_task(consume())
+    for _ in range(200):
+        if "rid" in seen:
+            break
+        await asyncio.sleep(0.01)
+    assert "rid" in seen, "没等到权限请求"
+    assert agent._pending, "弹窗期间应有未决请求"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # 消费方收尾：关掉这一轮的生成器（后端在取消后也会显式 clear_pending，
+    # 这里验证 Agent 侧的兜底——关掉生成器就要清未决权限）
+    await agen.aclose()
+    assert agent._pending == {}, "轮次结束后不得残留未决权限"
+    assert agent.respond_permission(seen["rid"], "allow_once") is False
+
+
+async def test_cancelled_tool_loop_is_repaired_before_next_turn(tmp_path):
+    """断裂历史（有 tool_use 无 tool_result）在下一轮开始前自动补上。"""
+    provider = FakeProvider([[TextBlock(text="接着做")]])
+    agent = make_agent(provider, tmp_path)
+    # 手工构造「上一轮被取消」的断口：assistant 发了 tool_use，结果没落进历史
+    agent.load_history([
+        Message.user("写个文件"),
+        Message.assistant([ToolUseBlock(id="dangling", name="write_file",
+                                        input={"path": "a.txt", "content": "x"})]),
+    ])
+    await collect(agent, "继续", auto_respond=None)
+
+    roles = [m.role for m in agent.history]
+    # user / assistant(tool_use) / tool(补的中断结果) / user / assistant
+    assert roles == ["user", "assistant", "tool", "user", "assistant"], roles
+    repaired = agent.history[2]
+    assert repaired.content[0].tool_use_id == "dangling"
+    assert repaired.content[0].is_error
+
+
+async def test_repair_is_noop_when_history_is_consistent(tmp_path):
+    """历史已经自洽时不动它（不重复补、不重排）。"""
+    provider = FakeProvider([[TextBlock(text="ok")]])
+    agent = make_agent(provider, tmp_path)
+    await collect(agent, "你好", auto_respond=None)
+    before = list(agent.history)
+    assert agent.repair_dangling_tool_uses() == []
+    assert agent.history == before
+
+
+async def test_max_iterations_emits_notice(tmp_path):
+    """到迭代上限时给明确事件，不再静默断头。"""
+    tu = [ToolUseBlock(id="loop", name="list_dir", input={})]
+    provider = FakeProvider([tu]).with_default(tu)
+    agent = make_agent(provider, tmp_path, max_iterations=2)
+    events = await collect(agent, "loop", auto_respond=None)
+
+    notices = [e for e in events if e.kind == "notice"]
+    assert notices and "上限" in notices[-1].message
+    assert events[-1].kind == "turn_finished"
+    assert events[-1].stop_reason == "max_iterations"
 
 
 async def test_history_includes_tool_args_for_provider(tmp_path):

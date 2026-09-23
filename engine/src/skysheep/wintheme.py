@@ -21,13 +21,34 @@ from pathlib import Path
 # 六套主题（app.js THEMES）的标题栏 / 窗口底色 / 标题文字 / 边线，逐主题取自
 # app.css 的 --bg / --text / --ink-line（改主题色时两处要一起改）。
 # 标题栏与页面底色同源，深浅两族都不再是近似色。
+# 除标题栏三色外还包含桌面壳各页面共用的 UI 色（card/raised/sunken/text2/dim/
+# line2/blue/blue-deep），逐项取自 app.css 同名变量：启动动画页、启动失败页、
+# 退出选择框都用这份色板渲染，保证与界面内主题逐像素一致。
 THEME_PALETTE = {
-    "paper":   {"bg": "E8DFC7", "text": "1D1A16", "line": "1D1A16"},
-    "celadon": {"bg": "DCE4DA", "text": "1C221D", "line": "1C221D"},
-    "kaki":    {"bg": "EAD9BF", "text": "2B1D12", "line": "2B1D12"},
-    "night":   {"bg": "171410", "text": "F4ECD8", "line": "0E0C09"},
-    "indigo":  {"bg": "12161F", "text": "E3E8F2", "line": "0A0D13"},
-    "pine":    {"bg": "101613", "text": "E8EDE6", "line": "080D0A"},
+    "paper":   {"bg": "E8DFC7", "text": "1D1A16", "line": "1D1A16",
+                "card": "F4ECD8", "raised": "FBF5E6", "sunken": "ECE3CB",
+                "text2": "4A4336", "dim": "6A6252", "line2": "C0B394",
+                "blue": "1257C4", "blue_deep": "0E429B"},
+    "celadon": {"bg": "DCE4DA", "text": "1C221D", "line": "1C221D",
+                "card": "E9EFE4", "raised": "F2F6EE", "sunken": "DFE7DC",
+                "text2": "46504A", "dim": "5F6A60", "line2": "A9B8A5",
+                "blue": "0E7A68", "blue_deep": "0A5F52"},
+    "kaki":    {"bg": "EAD9BF", "text": "2B1D12", "line": "2B1D12",
+                "card": "F6E9D2", "raised": "FDF3DD", "sunken": "EDDCC0",
+                "text2": "57432E", "dim": "6F5A44", "line2": "C3AC85",
+                "blue": "B45309", "blue_deep": "8F4006"},
+    "night":   {"bg": "171410", "text": "F4ECD8", "line": "0E0C09",
+                "card": "211D17", "raised": "2B261E", "sunken": "1B1813",
+                "text2": "D3C8AD", "dim": "A89D84", "line2": "574C3A",
+                "blue": "5B93EE", "blue_deep": "4077D6"},
+    "indigo":  {"bg": "12161F", "text": "E3E8F2", "line": "0A0D13",
+                "card": "1A1F2B", "raised": "232A39", "sunken": "161B25",
+                "text2": "B7C1D5", "dim": "93A0B8", "line2": "414D66",
+                "blue": "7FA3F2", "blue_deep": "5F86E0"},
+    "pine":    {"bg": "101613", "text": "E8EDE6", "line": "080D0A",
+                "card": "18201B", "raised": "212B24", "sunken": "131A16",
+                "text2": "BEC9BF", "dim": "98A89C", "line2": "3C4C40",
+                "blue": "52C79D", "blue_deep": "35A87F"},
 }
 # 旧版两档值与六套主题同义；ui.json 存的是主题 id；
 # "auto"（存为 null）与未知值跟随系统深浅（深 → night / 浅 → paper）
@@ -167,8 +188,9 @@ def read_ui_theme(home: Path | None = None) -> str:
     """从 ui.json 读主题偏好，返回主题 id（paper / celadon / … / pine）。
 
     启动时窗口比服务先建，拿不到前端状态，只能直接读文件；
-    auto（存为 null）与未知值跟随系统深浅（深 → night / 浅 → paper），
-    文件缺失/损坏按 paper（不依赖注册表，探不到就当浅色）。
+    auto（存为 null）与未知值跟随系统深浅，落点按 ui.json 的
+    theme_auto_light / theme_auto_dark（设置页「跟随系统时」两个下拉，
+    缺省 = 纸墨 / 夜墨），文件缺失/损坏按纸墨（不依赖注册表，探不到就当浅色）。
     """
     import json
 
@@ -186,7 +208,12 @@ def read_ui_theme(home: Path | None = None) -> str:
     mode = LEGACY_MODES.get(mode, mode)
     if mode in THEME_PALETTE:
         return mode
-    return "night" if _system_prefers_dark() else "paper"
+    dark = _system_prefers_dark()
+    auto_val = str(prefs.get("theme_auto_dark" if dark else "theme_auto_light") or "")
+    auto_val = auto_val.strip().lower()
+    if auto_val in THEME_PALETTE:
+        return auto_val
+    return "night" if dark else "paper"
 
 
 def _system_prefers_dark() -> bool:

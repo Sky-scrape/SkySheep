@@ -43,7 +43,12 @@ from ..models.base import (
     ProviderTextDelta,
     ProviderToolUse,
 )
-from ..security.gate import Decision, PendingPermission, PermissionGate
+from ..security.gate import (
+    Decision,
+    PendingPermission,
+    PermissionGate,
+    normalize_decision,
+)
 from ..tools.base import Safety, Tool, ToolContext, ToolError, ToolRegistry, truncate_output
 from .context import compact_history, estimate_tokens
 from .effort import resolve_auto_effort
@@ -94,8 +99,10 @@ class Agent:
         max_iterations: int = 40,
         context_limit_tokens: int = 1_000_000,
         compaction_keep_recent: int = 8,
+        compaction_trigger: float = 0.9,
         hooks=None,
         restrict_to_workdir: bool = False,
+        session_id: str = "",
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -104,8 +111,13 @@ class Agent:
         self.max_iterations = max_iterations
         self.context_limit_tokens = context_limit_tokens
         self.compaction_keep_recent = compaction_keep_recent
+        # 占用达到上限的这个比例就触发压缩（0.9 = 留 10% 余量）：顶满才压缩
+        # 容易半路撞上上游 400，见 run_turn 开头的两处检查
+        self.compaction_trigger = min(0.98, max(0.5, float(compaction_trigger)))
         self.hooks = hooks  # core.hooks.HookRunner | None：工具调用前后用户钩子
         self.restrict_to_workdir = restrict_to_workdir
+        # 会话 id：透传给钩子命令的 stdin JSON（多会话场景钩子可区分来源）
+        self.session_id = session_id
         self.history: list[Message] = []
         self._pending: dict[str, PendingPermission] = {}
         self.total_in_tokens = 0
@@ -152,26 +164,102 @@ class Agent:
         self.history = list(messages)
 
     def respond_permission(self, request_id: str, decision: str) -> bool:
-        """前端对 PermissionRequest 的回复。返回是否成功投递。"""
+        """前端对 PermissionRequest 的回复。返回是否成功投递。
+
+        decision 先过白名单再投递：认不出来的值按拒绍处理。不能直接透传——
+        主循环只显式处理 ALLOW_ALWAYS 与 DENY，其余一律落到执行工具，
+        也就是说透传等于「乱码 = 放行」。
+        """
         pending = self._pending.get(request_id)
         if pending is None:
             return False
-        pending.resolve(decision)
+        pending.resolve(normalize_decision(decision))
         return True
 
     # ---- 主循环 ----
+
+    def repair_dangling_tool_uses(self) -> list[str]:
+        """给「有 tool_use 无 tool_result」的历史补一条中断说明，返回补过的 id。
+
+        取消/异常会把工具循环截断在中间：assistant 消息里的 tool_use 已经进了
+        历史，配对的 tool_result 没来得及追加。Anthropic 协议要求每个 tool_use
+        都有对应 tool_result（缺一个下一次调用直接 400；OpenAI 兼容层宽松些，
+        但语义同样不清）。轮首调用一次让历史自洽：被中断的调用按 is_error 结果
+        补上，模型据此知道那次没跑完（安全审查 M12）。
+        """
+        fixed: list[str] = []
+        out: list[Message] = []
+        i = 0
+        total = len(self.history)
+        while i < total:
+            msg = self.history[i]
+            out.append(msg)
+            uses = msg.tool_uses if msg.role == "assistant" else []
+            if not uses:
+                i += 1
+                continue
+            # 紧跟其后的 tool 消息（已补过的也在内）：收集已有的结果 id
+            j = i + 1
+            got: set[str] = set()
+            while j < total and self.history[j].role == "tool":
+                for blk in self.history[j].content:
+                    tid = getattr(blk, "tool_use_id", "")
+                    if tid:
+                        got.add(tid)
+                out.append(self.history[j])
+                j += 1
+            for tu in uses:
+                if tu.id not in got:
+                    out.append(Message.tool_result(
+                        tu.id,
+                        "interrupted: this tool call did not finish "
+                        "(turn cancelled or crashed before it returned).",
+                        is_error=True,
+                    ))
+                    fixed.append(tu.id)
+            i = j
+        if fixed:
+            self.history = out
+        return fixed
+
+    def clear_pending(self) -> None:
+        """清掉所有未决的权限请求（轮次结束/被取消时调用）。
+
+        取消后弹窗可能还留在屏上，但那一轮已经结束了：残留的 request_id 再被
+        respond_permission 投递会「成功」，前端以为决策生效（安全审查 M12）。
+        """
+        self._pending.clear()
 
     async def run_turn(
         self, user_text: str, images: list[ImageBlock] | None = None,
         append_user: bool = True,
     ) -> AsyncIterator[AgentEvent]:
+        """一轮对话：追加用户消息 → 跑主循环 → 收尾清未决权限。
+
+        主体在 _turn_events 里，这里只做「包一层」：把轮次前后的收尾放 finally，
+        无论正常结束、异常还是被取消（含生成器在 yield 处被关闭）都会走到。
+        """
+        # 历史自洽：上一轮被取消时可能留下「有 tool_use 无 tool_result」的断口。
+        # 必须在追加新用户消息之前补（Anthropic 协议要求 tool_result 紧跟对应的
+        # assistant tool_use，顺序反了同样 400）——安全审查 M12
+        self.repair_dangling_tool_uses()
         # append_user=False：重新生成——用户消息已在历史末尾，直接重跑这一轮
         if append_user:
             self.history.append(Message.user(user_text, images=images))
+        try:
+            async for ev in self._turn_events():
+                yield ev
+        finally:
+            # 轮次结束（正常/取消/异常）后未决权限不再有意义：清掉，避免
+            # 「取消后残留可再成功投递决策」（安全审查 M12）
+            self.clear_pending()
+
+    async def _turn_events(self) -> AsyncIterator[AgentEvent]:
         ctx = ToolContext(
             working_dir=self.working_dir,
             supports_vision=getattr(self.provider, "supports_vision", True),
             restrict_to_workdir=self.restrict_to_workdir,
+            session_id=self.session_id,
         )
         iterations = 0
         stop_reason = "max_iterations"  # 正常结束时在 break 前改为 end_turn
@@ -182,8 +270,9 @@ class Agent:
 
         finished_by_error = False
 
-        # 0. 上下文压缩：接近上下文上限时，先用摘要替换旧历史
-        if self.used_context_tokens() > self.context_limit_tokens:
+        # 0. 上下文压缩：占用达到「上限 × 触发比例」时，先用摘要替换旧历史
+        #    （默认 0.9：留出余量，避免顶满上限时才压缩、半路撞上游 400）
+        if self.used_context_tokens() > self.context_limit_tokens * self.compaction_trigger:
             ev = await compact_history(self, keep_recent=self.compaction_keep_recent)
             if ev is not None:
                 yield ev
@@ -198,7 +287,7 @@ class Agent:
             # 查一次会半路爆窗（上游 400 拒绝，前面迭代烧掉的费用全部作废）。
             # 每次模型调用前复查一次；帮不上忙时置位，避免白算 O(n) 估算。
             if iteration > 1 and not compaction_stuck \
-                    and self.used_context_tokens() > self.context_limit_tokens:
+                    and self.used_context_tokens() > self.context_limit_tokens * self.compaction_trigger:
                 ev = await compact_history(self, keep_recent=self.compaction_keep_recent)
                 if ev is not None:
                     yield ev
@@ -341,15 +430,24 @@ class Agent:
                         rule_kind=always_rule.kind,
                         rule_pattern=always_rule.pattern,
                     )
-                    decision = await pending.wait()
-                    self._pending.pop(pending.request_id, None)
+                    try:
+                        decision = await pending.wait()
+                    finally:
+                        # 取消/异常也要摘掉：残留的 request_id 之后还能被
+                        # respond_permission 投递成功，等于给一个已经结束的轮次
+                        # 补决策（安全审查 M12：取消后残留可再「成功投递」）
+                        self._pending.pop(pending.request_id, None)
                     yield PermissionResolved(request_id=pending.request_id, decision=decision)
 
                     if decision == Decision.ALLOW_ALWAYS:
                         await self.gate.persist_rule(always_rule)
                     if decision == Decision.DENY:
                         self.history.append(
-                            Message.tool_result(tu.id, "User denied this operation.", is_error=True)
+                            Message.tool_result(
+                                tu.id,
+                                pending.deny_note or "User denied this operation.",
+                                is_error=True,
+                            )
                         )
                         yield ToolCallStarted(tool_call_id=tu.id, name=tu.name, input=tu.input)
                         yield ToolCallFinished(
@@ -361,7 +459,9 @@ class Agent:
 
                 # 3b. pre 钩子：用户配置的工具调用前检查（退出码 2 / decision=block 阻止）
                 if self.hooks is not None and self.hooks.has_pre:
-                    block_reason = await self.hooks.run_pre(tu.name, tu.input)
+                    block_reason = await self.hooks.run_pre(
+                        tu.name, tu.input, session_id=self.session_id
+                    )
                     if block_reason:
                         self.history.append(
                             Message.tool_result(
@@ -401,7 +501,7 @@ class Agent:
                         results = await asyncio.gather(*(
                             self._exec_tool(b_tu, b_tool, ctx) for b_tu, b_tool, _ in batch
                         ))
-                        for (b_tu, b_tool, _), (result, is_error, duration_ms) in zip(
+                        for (b_tu, b_tool, _), (result, is_error, duration_ms, diff) in zip(
                             batch, results, strict=True
                         ):
                             self.history.append(
@@ -420,7 +520,7 @@ class Agent:
                                         images=attached,
                                     )
                                 )
-                            diff = getattr(b_tool, "last_diff", "") if not is_error else ""
+                            diff = diff if not is_error else ""
                             yield ToolCallFinished(
                                 tool_call_id=b_tu.id,
                                 name=b_tu.name,
@@ -439,12 +539,14 @@ class Agent:
 
                 # 3c. 串行执行（单个只读或需确认/写入/执行的工具）
                 yield ToolCallStarted(tool_call_id=tu.id, name=tu.name, input=tu.input)
-                result, is_error, duration_ms = await self._exec_tool(tu, tool, ctx)
+                result, is_error, duration_ms, diff = await self._exec_tool(tu, tool, ctx)
 
                 # 3d. post 钩子：仅通知，不影响工具结果
                 if self.hooks is not None and self.hooks.post_rules:
                     try:
-                        note = await self.hooks.run_post(tu.name, tu.input)
+                        note = await self.hooks.run_post(
+                            tu.name, tu.input, session_id=self.session_id
+                        )
                         if note:
                             yield NoticeEvent(message=note)
                     except Exception:  # noqa: BLE001 - post 钩子失败不阻断主流程
@@ -465,7 +567,7 @@ class Agent:
                             images=attached,
                         )
                     )
-                diff = getattr(tool, "last_diff", "") if not is_error else ""
+                diff = diff if not is_error else ""
                 yield ToolCallFinished(
                     tool_call_id=tu.id,
                     name=tu.name,
@@ -483,6 +585,22 @@ class Agent:
 
         if finished_by_error:
             stop_reason = "error"
+        if stop_reason == "max_iterations":
+            # 到顶不是「说完了」：明确给出停止原因（安全审查 M12——旧实现静默断头，
+            # 前端看起来像回答被截断，用户与模型都不知道还能继续）
+            yield NoticeEvent(message=(
+                f"已达到本轮迭代上限（{self.max_iterations} 次工具循环），"
+                "已停止继续调用工具。需要继续的话直接回复一条消息即可接着做。"
+            ))
+        # 任务完成钩子：一轮以最终回答结束（不再调工具、没出错）时触发。
+        # 与 post 同姿态仅通知不阻断；「跑完弹提醒」这类用途不再需要逐个 match 工具。
+        if stop_reason == "end_turn" and self.hooks is not None and self.hooks.has_stop:
+            try:
+                note = await self.hooks.run_stop(session_id=self.session_id)
+                if note:
+                    yield NoticeEvent(message=note)
+            except Exception:  # noqa: BLE001 - stop 钩子失败不影响本轮收尾
+                pass
         yield TurnFinished(
             stop_reason=stop_reason, iterations=iterations,
             duration_ms=int((time.monotonic() - turn_t0) * 1000),
@@ -490,18 +608,39 @@ class Agent:
 
     async def _exec_tool(
         self, tu: ToolUseBlock, tool: Tool, ctx: ToolContext,
-    ) -> tuple[str, bool, int]:
-        """执行单个工具，返回 (结果文本, 是否出错, 耗时ms)。不产出事件、不写历史。"""
+    ) -> tuple[str, bool, int, str]:
+        """执行单个工具，返回 (结果文本, 是否出错, 耗时ms, diff)。不产出事件、不写历史。
+
+        diff 取自 ctx.last_diff（写工具在执行中写入，调用前先清空）：
+        按调用取回而不是读工具实例属性——工具实例会被并行任务共享，
+        实例属性会把上一个任务的 diff 错配给当前任务。
+
+        写工具执行前经权限门领写租约（并行任务写同一文件的协调，见
+        security/leases.py），finally 里归还；租约带出的冲突注记追加进
+        结果文本，模型与用户都看得到这次并行写入。
+        """
         t0 = time.monotonic()
+        ctx.last_diff = ""
+        lease = None
+        if tool.safety != Safety.READONLY:
+            try:
+                lease = await self.gate.claim_write(tool, tu.input, owner=ctx.session_id)
+            except Exception:  # noqa: BLE001 - 租约是协调不是闸门，故障不挡执行
+                lease = None
         try:
-            args = tool.args_model.model_validate(tu.input)
-            result = await tool.run(args, ctx)
-            is_error = False
-        except ToolError as e:
-            result = str(e)
-            is_error = True
-        except Exception as e:  # 参数校验失败或工具内部异常
-            result = f"tool failed: {type(e).__name__}: {e}"
-            is_error = True
+            try:
+                args = tool.args_model.model_validate(tu.input)
+                result = await tool.run(args, ctx)
+                is_error = False
+            except ToolError as e:
+                result = str(e)
+                is_error = True
+            except Exception as e:  # 参数校验失败或工具内部异常
+                result = f"tool failed: {type(e).__name__}: {e}"
+                is_error = True
+        finally:
+            note = lease.release() if lease is not None else ""
+        if note and not is_error:
+            result = result + "\n\n" + note
         duration_ms = int((time.monotonic() - t0) * 1000)
-        return result, is_error, duration_ms
+        return result, is_error, duration_ms, ("" if is_error else ctx.last_diff)

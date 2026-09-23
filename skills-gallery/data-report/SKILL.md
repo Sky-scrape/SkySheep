@@ -1,6 +1,7 @@
 ---
 name: data-report
 description: 读取 Excel/CSV 数据做一次完整分析——清洗、统计、找结论、配图表，产出一份能直接汇报的数据分析报告。
+version: 1.0.0
 ---
 
 ## 目标

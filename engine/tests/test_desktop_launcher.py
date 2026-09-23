@@ -278,3 +278,67 @@ def test_main_alerts_when_cannot_confirm(monkeypatch, fake_time, isolated_home):
     assert desktop.main() == 0
     assert launched == []
     assert len(alerts) == 1
+
+
+def test_url_scheme_matches_instance_identity(monkeypatch):
+    """协议名与实例身份同步：默认 skysheep，命名身份 skysheep-<name>。
+
+    引擎侧 backend._toast_launch_uri 按同一拼法读注册表，两边不一致的话
+    点击系统通知就唤不回窗口——所以这里锁死拼法。
+    """
+    monkeypatch.delenv("SKYSHEEP_INSTANCE", raising=False)
+    assert desktop.url_scheme() == "skysheep"
+    monkeypatch.setenv("SKYSHEEP_INSTANCE", "dev")
+    assert desktop.url_scheme() == "skysheep-dev"
+
+
+def test_ensure_url_protocol_registers_command(monkeypatch, isolated_home):
+    """打包态注册 skysheep:// 协议：URL Protocol 值 + shell/open/command 指向 exe。"""
+    import winreg
+
+    created: list[str] = []
+    values: dict = {}
+    current = {"path": ""}
+
+    class FakeKey:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_create_key(_root, path, *_args, **_kwargs):
+        created.append(path)
+        current["path"] = path
+        return FakeKey()
+
+    def fake_set_value(_key, name, _reserved, _type, value):
+        values[(current["path"], name)] = value
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "C:\\app\\SkySheep.exe", raising=False)
+    monkeypatch.setattr(winreg, "CreateKey", fake_create_key)
+    monkeypatch.setattr(winreg, "SetValueEx", fake_set_value)
+    monkeypatch.delenv("SKYSHEEP_INSTANCE", raising=False)
+    desktop._ensure_url_protocol()
+    root = "Software\\Classes\\skysheep"
+    # 子键以键对象为父创建，记录的是相对路径
+    cmd = "shell\\open\\command"
+    assert created == [root, cmd]
+    # 根键：空 REG_SZ 的 URL Protocol 值（协议注册的标志）+ 友好名
+    assert values[(root, "URL Protocol")] == ""
+    assert values[(root, None)] == "SkySheep"
+    # command 键：点击 toast 后系统执行的命令行——指向当前 exe，%1 接 URI
+    assert values[(cmd, None)] == '"C:\\app\\SkySheep.exe" "%1"'
+
+
+def test_ensure_url_protocol_noop_without_freeze(monkeypatch):
+    """开发态不注册协议：注册表不该留下指向临时虚拟环境的路径。"""
+    import winreg
+
+    def fail_create(*_args, **_kwargs):
+        raise AssertionError("开发态不应触碰注册表")
+
+    monkeypatch.setattr(winreg, "CreateKey", fail_create)
+    monkeypatch.delenv("SKYSHEEP_INSTANCE", raising=False)
+    desktop._ensure_url_protocol()  # 不抛错即通过（早退，没碰 winreg）

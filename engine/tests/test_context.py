@@ -90,3 +90,48 @@ async def test_no_compaction_below_threshold(tmp_path):
     async for ev in agent.run_turn("hello"):
         events.append(ev)
     assert all(e.kind != "compaction" for e in events)
+
+
+async def test_compaction_trigger_ratio_compacts_early(tmp_path):
+    """触发比例：占用超过「上限 × 比例」就压缩，不必顶满 100%。
+
+    历史约 300 tokens、上限 1000、触发比例 0.5 → 阈值 500：顶满判断不成立，
+    但按新比例该压。
+    """
+    provider = FakeProvider(
+        [
+            [TextBlock(text="SUMMARY: 历史摘要。")],  # 压缩调用
+            [TextBlock(text="好的，继续。")],  # 正常回合
+        ]
+    )
+    agent = make_agent(
+        provider, tmp_path,
+        context_limit_tokens=1000, compaction_keep_recent=2, compaction_trigger=0.5,
+    )
+    agent.set_system("sys")
+    filler = "A" * 200  # ≈50 tokens/条
+    for i in range(12):
+        agent.history.append(Message.user(f"第{i}轮 {filler}"))
+        agent.history.append(Message.assistant([TextBlock(text=f"回复{i}")]))
+
+    events = []
+    async for ev in agent.run_turn("继续"):
+        events.append(ev)
+    assert any(e.kind == "compaction" for e in events)
+
+
+async def test_compaction_trigger_ratio_default_stays_below_limit(tmp_path):
+    """默认触发比例 0.9：占用在 90% 以下不压缩（与低占用不压缩同一行为）。"""
+    provider = FakeProvider([[TextBlock(text="hi")]])
+    agent = make_agent(
+        provider, tmp_path,
+        context_limit_tokens=10_000, compaction_trigger=0.9,
+    )
+    agent.set_system("sys")
+    filler = "A" * 200  # 历史约 250 tokens（含输入），远低于 9000
+    agent.history.append(Message.user(filler))
+    agent.history.append(Message.assistant([TextBlock(text=filler)]))
+    events = []
+    async for ev in agent.run_turn("hello"):
+        events.append(ev)
+    assert all(e.kind != "compaction" for e in events)

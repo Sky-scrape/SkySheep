@@ -105,6 +105,9 @@ async def test_subagent_gate_unit():
     pending = await gate.authorize(WriteFileTool(), {"path": "x"})
     assert pending is not None
     assert await pending.wait() == Decision.DENY  # 已预拒绝，不阻塞
+    # deny_note 把话说死：模型不再反复重试写操作
+    assert "不要重试" in pending.deny_note
+    assert "报告" in pending.deny_note
 
 
 class ReadTool:
@@ -310,6 +313,9 @@ async def test_subagent_provider_resolver_failure_is_reported(tmp_path):
 class SlowProvider(FakeProvider):
     """永不一样的慢模型：stream 挂起不结束，用来测真取消。"""
 
+    def __init__(self, scripted: list[list] | None = None) -> None:
+        super().__init__(scripted or [])
+
     async def stream(self, messages, tool_schemas, effort=None):
         self.calls.append(list(messages))
         await asyncio.sleep(30)
@@ -333,20 +339,20 @@ async def test_usage_recorded_for_subagent(tmp_path):
 
     recorded: list[tuple] = []
 
-    async def recorder(session_id, provider, model, in_tok, out_tok):
-        recorded.append((session_id, provider, model, in_tok, out_tok))
+    async def recorder(session_id, provider, model, in_tok, out_tok, cached_tok=0):
+        recorded.append((session_id, provider, model, in_tok, out_tok, cached_tok))
 
     tasks = TaskManager(
         provider_factory=lambda: FakeProvider([[TextBlock(text="REPORT: ok")]]),
         working_dir=tmp_path,
         usage_recorder=recorder,
     )
-    tasks.set_active_session("sess-1")
-    report = await tasks.run_sync("explore", "看看")
+    report = await tasks.run_sync("explore", "看看", session_id="sess-1")
     assert "REPORT" in report
     assert recorded and recorded[0][0] == "sess-1"
     assert recorded[0][1] == "fake" and recorded[0][2] == "fake-1"
     assert recorded[0][3] > 0 and recorded[0][4] > 0
+    assert recorded[0][5] >= 0  # 缓存命中数随记账透传（Fake 不报明细时为 0）
     rec = list(tasks._tasks.values())[0]
     assert rec.tokens_in > 0 and rec.tokens_out > 0
 
@@ -373,7 +379,9 @@ async def test_cancel_all_really_cancels_background(tmp_path):
 
 
 async def test_concurrency_limit_blocks_extra_spawns(tmp_path):
-    """后台并发到上限后再派 → 友好报错，不是默默继续烧钱。"""
+    """并发护栏：同步派生满员 → 友好报错；后台派生满员 → 自动排队不报错。"""
+    import contextlib
+
     from skysheep.core.subagent import SubagentLimitError, TaskManager
     from skysheep.tools.base import ToolContext, ToolError
 
@@ -382,9 +390,12 @@ async def test_concurrency_limit_blocks_extra_spawns(tmp_path):
         working_dir=tmp_path,
         max_concurrent=1,
     )
-    tasks.start_background("explore", "第一个")
-    with pytest.raises(SubagentLimitError, match="上限"):
-        tasks.start_background("explore", "第二个")
+    first = tasks.start_background("explore", "第一个")
+    assert tasks.status(first).status == "running"
+    # 后台满员 → 排队（不报错），稍后有空位自动开跑
+    second = tasks.start_background("explore", "第二个")
+    assert tasks.status(second).status == "queued"
+    # 同步派生满员 → 报错（模型要等或改后台）
     with pytest.raises(SubagentLimitError, match="上限"):
         await tasks.run_sync("explore", "同步的也算")
     # SpawnAgentTool 把它转成 ToolError 返回给模型
@@ -393,10 +404,351 @@ async def test_concurrency_limit_blocks_extra_spawns(tmp_path):
     tool = SpawnAgentTool(tasks)
     with pytest.raises(ToolError, match="上限"):
         await tool.run(
-            tool.args_model(agent_type="explore", prompt="x", background=True),
+            tool.args_model(agent_type="explore", prompt="x"),
             ToolContext(working_dir=tmp_path),
         )
+    # 取消全部：排队的也要落终态，不留幽灵
     tasks.cancel_all()
+    assert tasks.status(second).status == "cancelled"
+    with contextlib.suppress(asyncio.CancelledError):
+        await tasks.status(first).asyncio_task
+    assert tasks.status(first).status == "cancelled"
+
+
+async def test_background_queue_auto_promotes(tmp_path):
+    """并发空位出来后，排队的后台任务按序自动开跑（补位成功的标志：转为 running）。"""
+    import contextlib
+
+    from skysheep.core.subagent import TaskManager
+
+    tasks = TaskManager(provider_factory=SlowProvider, working_dir=tmp_path, max_concurrent=1)
+    first = tasks.start_background("explore", "占位")
+    await _wait_status(tasks, first, "running")
+    second = tasks.start_background("explore", "排队")
+    assert tasks.status(second).status == "queued"
+    tasks.cancel_task(first)  # 只取消占位任务 → 空位 → 排队任务自动补位
+    await _wait_status(tasks, second, "running")
+    # 收尾：把补位的也取消掉
+    assert tasks.cancel_task(second) is True
+    with contextlib.suppress(asyncio.CancelledError):
+        await tasks.status(second).asyncio_task
+    assert tasks.status(first).status == "cancelled"
+    with contextlib.suppress(asyncio.CancelledError):
+        await tasks.status(first).asyncio_task
+
+
+async def test_run_sync_cancel_leaves_no_zombie(tmp_path):
+    """点「停止」取消主轮时，同步子代理必须落终态——否则僵尸 running
+    永久占并发名额，几次停止之后再也派不出子代理（只能重启）。"""
+    import contextlib
+
+    from skysheep.core.subagent import TaskManager
+
+    tasks = TaskManager(provider_factory=SlowProvider, working_dir=tmp_path, max_concurrent=1)
+    runner = asyncio.create_task(tasks.run_sync("explore", "慢慢跑"))
+    task_id = ""
+    for _ in range(200):
+        running = [r for r in tasks._tasks.values() if r.status == "running"]
+        if running and running[0].duration_s > 0:
+            task_id = running[0].id
+            break
+        await asyncio.sleep(0.01)
+    assert task_id, "任务没有真正开跑"
+    runner.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await runner
+    rec = tasks.status(task_id)
+    assert rec.status == "cancelled" and "取消" in (rec.error or "")
+    # 并发名额已释放：能立即再派且直接运行（而不是被僵尸挡成报错/排队）
+    new_id = tasks.start_background("explore", "再来一个")
+    assert tasks.status(new_id).status == "running"
+    tasks.cancel_all()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tasks.status(new_id).asyncio_task
+
+
+async def test_check_task_rejects_other_session(tmp_path):
+    """归属校验（B13 同款）：别的会话派生的任务，本会话的模型不能取报告。"""
+    from skysheep.core.subagent import CheckTaskTool, TaskManager
+    from skysheep.tools.base import ToolContext, ToolError
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="BG-SECRET")]]),
+        working_dir=tmp_path,
+    )
+    task_id = tasks.start_background("explore", "看看", session_id="sess-A")
+    await _wait_status(tasks, task_id, "done")
+    tool = CheckTaskTool(tasks)
+    # 同会话正常取（归属随 ctx.session_id 走，不再依赖全局「当前会话」指针）
+    assert "BG-SECRET" in await tool.run(
+        tool.args_model(task_id=task_id),
+        ToolContext(working_dir=tmp_path, session_id="sess-A"),
+    )
+    # 换会话后不可取（也不泄露存在性：同样报 unknown task_id）
+    with pytest.raises(ToolError, match="unknown task_id"):
+        await tool.run(
+            tool.args_model(task_id=task_id),
+            ToolContext(working_dir=tmp_path, session_id="sess-B"),
+        )
+
+
+async def test_spawn_tool_attributes_via_ctx_session(tmp_path):
+    """spawn_agent 从 ctx.session_id 归属任务：并行轮各自归属，无全局「当前会话」指针。"""
+    from skysheep.core.subagent import SpawnAgentTool, TaskManager
+    from skysheep.tools.base import ToolContext
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="R")]]),
+        working_dir=tmp_path,
+    )
+    tool = SpawnAgentTool(tasks)
+    out = await tool.run(
+        tool.args_model(agent_type="explore", prompt="看看", background=True),
+        ToolContext(working_dir=tmp_path, session_id="sess-Z"),
+    )
+    task_id = out.split("task_id=")[1].split(";")[0]
+    await _wait_status(tasks, task_id, "done")
+    assert tasks.get_detail(task_id, session_id="sess-Z") is not None
+    assert tasks.get_detail(task_id, session_id="other") is None
+    # 用量也记到派生会话名下
+    assert tasks.status(task_id).session_id == "sess-Z"
+
+
+async def test_parallel_sessions_keep_own_attribution(tmp_path):
+    """两个会话交错派生：用量与任务簿归属不串台（修复前共享单指针会互盖）。"""
+    recorded: list[str] = []
+
+    async def recorder(session_id, provider, model, in_tok, out_tok, cached_tok=0):
+        recorded.append(session_id)
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="R")]]),
+        working_dir=tmp_path,
+        usage_recorder=recorder,
+        max_concurrent=2,
+    )
+    a = tasks.start_background("explore", "A 的任务", session_id="sess-A")
+    b = tasks.start_background("explore", "B 的任务", session_id="sess-B")
+    await _wait_status(tasks, a, "done")
+    await _wait_status(tasks, b, "done")
+    assert sorted(recorded) == ["sess-A", "sess-B"]
+    assert tasks.get_detail(a, session_id="sess-A") is not None
+    assert tasks.get_detail(a, session_id="sess-B") is None
+    assert tasks.get_detail(b, session_id="sess-B") is not None
+    assert tasks.get_detail(b, session_id="sess-A") is None
+
+
+async def test_wait_task_blocks_until_done_and_dedups(tmp_path):
+    """wait_task：等到终态立即返回结果；投递去重与 check_task 共用。"""
+    from skysheep.core.subagent import CheckTaskTool, TaskManager, WaitTaskTool
+    from skysheep.tools.base import ToolContext
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="WAIT-OK")]]),
+        working_dir=tmp_path,
+    )
+    task_id = tasks.start_background("explore", "跑一下")
+    tool = WaitTaskTool(tasks)
+    ctx = ToolContext(working_dir=tmp_path)
+    out = await tool.run(tool.args_model(task_id=task_id, timeout_seconds=5), ctx)
+    assert "done" in out and "WAIT-OK" in out
+    # 报告已投递：再查只回显开头
+    check = CheckTaskTool(tasks)
+    again = await check.run(check.args_model(task_id=task_id), ctx)
+    assert "已在此前的查询里投递" in again and "WAIT-OK" in again
+
+
+async def test_wait_task_timeout_returns_running(tmp_path):
+    """wait_task 超时：不报错，返回当前状态让模型决定继续等或先干别的。"""
+    import contextlib
+
+    from skysheep.core.subagent import TaskManager, WaitTaskTool
+    from skysheep.tools.base import ToolContext
+
+    tasks = TaskManager(provider_factory=SlowProvider, working_dir=tmp_path)
+    task_id = tasks.start_background("explore", "慢活")
+    tool = WaitTaskTool(tasks)
+    out = await tool.run(tool.args_model(task_id=task_id, timeout_seconds=1),
+                         ToolContext(working_dir=tmp_path))
+    assert "超时" in out and "running" in out
+    tasks.cancel_all()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tasks.status(task_id).asyncio_task
+
+
+async def test_long_report_written_to_file_and_excerpted(tmp_path):
+    """长报告落盘 .skysheep/reports/，投递只带路径 + 摘录；短报告保持内联。"""
+    from pathlib import Path
+
+    from skysheep.core.subagent import TaskManager
+
+    long_text = "很长的报告内容" * 500  # 远超内联阈值
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text=long_text)]]),
+        working_dir=tmp_path,
+    )
+    delivered = await tasks.run_sync("explore", "写个长报告")
+    assert len(delivered) < len(long_text)  # 投的是摘录
+    assert ".skysheep" in delivered and "reports" in delivered
+    rec = next(iter(tasks._tasks.values()))
+    assert rec.report_path
+    p = Path(rec.report_path)
+    assert p.exists() and p.read_text(encoding="utf-8") == long_text
+
+    # 短报告：不落盘，整份内联（行为不变）
+    tasks2 = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="短报告")]]),
+        working_dir=tmp_path,
+    )
+    out2 = await tasks2.run_sync("explore", "短的")
+    assert out2 == "短报告"
+    assert next(iter(tasks2._tasks.values())).report_path == ""
+
+
+def test_task_book_persists_and_marks_interrupted(tmp_path):
+    """任务簿持久化：终态记录重启后仍可查；running 重启即标中断，不留假运行。"""
+    from skysheep.core.subagent import TaskManager
+
+    state = tmp_path / "subagent_tasks.json"
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]),
+        working_dir=tmp_path, state_path=state,
+    )
+    done = tasks._new_record("explore", "完成的")
+    done.status = "done"
+    done.result = "结果在这里"
+    done.finished_at = 1.0
+    running = tasks._new_record("explore", "跑一半的")
+    running.status = "running"
+    tasks._persist()
+
+    again = TaskManager(
+        provider_factory=lambda: FakeProvider([]),
+        working_dir=tmp_path, state_path=state,
+    )
+    assert again.status(done.id).status == "done"
+    assert again.status(done.id).result == "结果在这里"
+    r2 = again.status(running.id)
+    assert r2.status == "error" and "重启" in (r2.error or "")
+
+
+async def test_spawn_announce_precedes_stream(tmp_path):
+    """subagent_spawned 广播先于任务过程事件（前端靠它绑定直播卡片）。"""
+    from skysheep.core.subagent import TaskManager
+
+    seen: list[dict] = []
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="R")]]),
+        working_dir=tmp_path,
+        event_emitter=lambda ev: seen.append(ev),
+    )
+    await tasks.run_sync("explore", "看看", session_id="sess-1")
+    assert seen[0]["kind"] == "subagent_spawned"
+    assert seen[0]["session_id"] == "sess-1"
+    assert seen[0]["background"] is False and seen[0]["task_id"]
+    kinds = [s["kind"] for s in seen]
+    assert "subagent_event" in kinds
+
+    seen.clear()
+    tid = tasks.start_background("explore", "后台的")
+    await _wait_status(tasks, tid, "done")
+    sp = [s for s in seen if s["kind"] == "subagent_spawned"]
+    assert sp and sp[0]["background"] is True and sp[0]["task_id"] == tid
+
+
+async def test_turn_note_injected_then_consumed(tmp_path):
+    """后台任务完成 → 记注记；下一轮注入；报告被 check_task 取走后不再提示。"""
+    from skysheep.core.subagent import CheckTaskTool, TaskManager
+    from skysheep.tools.base import ToolContext
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="BG")]]),
+        working_dir=tmp_path,
+    )
+    tid = tasks.start_background("explore", "后台活", session_id="sess-1")
+    await _wait_status(tasks, tid, "done")
+
+    note = tasks.pop_turn_note("sess-1")
+    assert tid in note and "check_task" in note
+    assert tasks.pop_turn_note("sess-1") == ""  # 取走即清
+
+    # 报告已被模型取走 → 不再注入过期提示
+    tid2 = tasks.start_background("explore", "取过的", session_id="sess-1")
+    await _wait_status(tasks, tid2, "done")
+    tool = CheckTaskTool(tasks)
+    await tool.run(tool.args_model(task_id=tid2),
+                   ToolContext(working_dir=tmp_path, session_id="sess-1"))
+    assert tasks.pop_turn_note("sess-1") == ""
+
+
+async def test_cancel_single_task(tmp_path):
+    """单任务取消：排队中直接落终态；运行中的真取消。"""
+    import contextlib
+
+    from skysheep.core.subagent import TaskManager
+
+    tasks = TaskManager(provider_factory=SlowProvider, working_dir=tmp_path, max_concurrent=1)
+    first = tasks.start_background("explore", "运行中的")
+    await _wait_status(tasks, first, "running")
+    second = tasks.start_background("explore", "排队的")
+    assert tasks.status(second).status == "queued"
+    # 排队中的：直接落终态并移出队列
+    assert tasks.cancel_task(second) is True
+    assert tasks.status(second).status == "cancelled"
+    # 运行中的：真取消
+    assert tasks.cancel_task(first) is True
+    with contextlib.suppress(asyncio.CancelledError):
+        await tasks.status(first).asyncio_task
+    assert tasks.status(first).status == "cancelled"
+    # 终态任务不可再取消；未知 id 返回 False
+    assert tasks.cancel_task(first) is False
+    assert tasks.cancel_task("ghost") is False
+
+
+def test_subagent_all_policy_excludes_computer_tools(tmp_path):
+    """tools="all" 不含电脑控制七件套；勾选模式仍可显式点名。"""
+    from types import SimpleNamespace
+
+    from skysheep.server.backend import ServerBackend
+    from skysheep.tools import MouseTool, ReadFileTool, ScreenshotTool, ToolRegistry, WriteFileTool
+
+    registry = ToolRegistry([ReadFileTool(), WriteFileTool(), ScreenshotTool(), MouseTool()])
+    be = object.__new__(ServerBackend)
+    be._base_agent = SimpleNamespace(registry=registry)
+
+    all_names = {t.name for t in be._subagent_registry("all").all()}
+    assert "write_file" in all_names and "read_file" in all_names
+    assert "screenshot" not in all_names and "mouse" not in all_names
+
+    ro_names = {t.name for t in be._subagent_registry("readonly").all()}
+    assert ro_names == {"read_file"}  # 只读策略同样不含电脑控制
+
+    # 勾选模式是用户显式点名：允许给 screenshot
+    pick_names = {t.name for t in be._subagent_registry(["screenshot"]).all()}
+    assert pick_names == {"screenshot"}
+
+
+async def test_custom_subagent_reasoning_reaches_resolver(tmp_path):
+    """自定义子代理的思考强度要传给 provider 解析器（与内置覆盖同语义）。"""
+    from skysheep.core.subagent import TaskManager
+    from skysheep.core.subagent_store import SubagentDef, SubagentStore
+
+    store = SubagentStore(tmp_path / "s.json")
+    store.load()
+    store.upsert_custom(SubagentDef(name="thinker", reasoning="high"))
+    calls: list[tuple] = []
+
+    def resolver(provider, model, reasoning):
+        calls.append((provider, model, reasoning))
+        return FakeProvider([[TextBlock(text="ok")]])
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="default")]]),
+        working_dir=tmp_path, store=store, provider_resolver=resolver,
+        registry_resolver=lambda policy: None,
+    )
+    await tasks.run_sync("thinker", "跑")
+    assert calls == [("", "", "high")]
 
 
 async def test_subagent_events_forwarded_filtered(tmp_path):
@@ -419,15 +771,20 @@ async def test_subagent_events_forwarded_filtered(tmp_path):
     )
     report = await tasks.run_sync("explore", "列目录")
     assert "REPORT" in report
-    kinds = [s["event"]["kind"] for s in seen]
+    events = [s for s in seen if s["kind"] == "subagent_event"]
+    assert events, "没有转发任何过程事件"
+    kinds = [s["event"]["kind"] for s in events]
     assert "tool_call_started" in kinds and "tool_call_finished" in kinds
     assert "text_delta" in kinds and "assistant_message" in kinds
     assert "permission_request" not in kinds
-    first = seen[0]
+    # spawned 广播在最前（前端靠它绑定直播卡片），带任务与类型
+    assert seen[0]["kind"] == "subagent_spawned"
+    assert seen[0]["agent_type"] == "explore" and seen[0]["task_id"]
+    first = events[0]
     assert first["kind"] == "subagent_event"
     assert first["agent_type"] == "explore" and first["task_id"]
     # 工具调用事件带名字与参数，前端直播行靠它渲染
-    started = next(s for s in seen if s["event"]["kind"] == "tool_call_started")
+    started = next(s for s in events if s["event"]["kind"] == "tool_call_started")
     assert started["event"]["name"] == "list_dir"
 
 

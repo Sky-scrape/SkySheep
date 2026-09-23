@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..tools.base import Safety, Tool
+from . import leases
 
 if TYPE_CHECKING:
     from ..session.store import SessionStore
@@ -138,13 +139,42 @@ class Decision:
     DENY = "deny"
 
 
+# 决策白名单：任何回传的 decision 字符串都必须先过这一关。
+ALL_DECISIONS = frozenset({Decision.ALLOW_ONCE, Decision.ALLOW_ALWAYS, Decision.DENY})
+
+
+def normalize_decision(value: object) -> str:
+    """把前端/渠道回传的 decision 收敛到白名单，认不出来的一律按拒绍。
+
+    这里是 fail-open 还是 fail-closed，直接决定「大小写差异、乱码、被篡改的
+    回复」会不会被当成放行：主循环只显式处理 ALLOW_ALWAYS 与 DENY，其余值
+    全部落到「执行工具」那条路上。CLI 侧本来就是 fail-closed
+    （DECISION_MAP.get(..., Decision.DENY)），WS 侧必须同一口径。
+    """
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ALL_DECISIONS:
+            return v
+    return Decision.DENY
+
+
 @dataclass
 class WhitelistRule:
     tool: str
     kind: str  # "always" | "prefix" | "exact" | "glob"
     pattern: str = ""
+    # 项目级规则带库里的 id（命中记账用）；会话内生成的规则没有
+    rule_id: int | None = None
+    # 停用的规则不参与匹配：临时停用不必删配置（设置页开关）
+    enabled: bool = True
 
     def matches(self, tool_name: str, arg_text: str) -> bool:
+        if not self.enabled:
+            return False
+        return self._matches_core(tool_name, arg_text)
+
+    def _matches_core(self, tool_name: str, arg_text: str) -> bool:
+        """忽略启停开关的匹配本体（测试器判断「停用的规则本可命中」时用）。"""
         if self.tool != tool_name:
             return False
         if self.kind == "always":
@@ -176,6 +206,9 @@ class PendingPermission:
     # 选「总是允许」时将写入的项目规则：授权时算好，让确认弹窗能预告范围，
     # 并保证「预告的 = 落库的」（persist 时复用同一对象，不再二次计算）
     always_rule: WhitelistRule | None = None
+    # 预拒绝时直接给模型的落库文案（子代理门用它说死「别重试，写进报告」；
+    # 空 = 主循环默认的 "User denied this operation."）
+    deny_note: str = ""
 
     def resolve(self, decision: str) -> None:
         if not self._future.done():
@@ -215,22 +248,34 @@ class PermissionGate:
         if self.store and self.project_id is not None:
             rows = await self.store.list_rules(self.project_id)
             self._project_rules = [
-                WhitelistRule(tool=r["tool"], kind=r["kind"], pattern=r["pattern"]) for r in rows
+                WhitelistRule(
+                    tool=r["tool"], kind=r["kind"], pattern=r["pattern"],
+                    rule_id=r["id"], enabled=bool(r.get("enabled", True)),
+                )
+                for r in rows
             ]
 
     def add_session_rule(self, rule: WhitelistRule) -> None:
         self.session_rules.append(rule)
 
+    def _matching_rule(self, tool: Tool, arg_text: str) -> WhitelistRule | None:
+        """第一条命中的规则（authorize 放行 + 命中记账共用）。"""
+        for r in self.session_rules + self._project_rules:
+            if r.matches(tool.name, arg_text):
+                return r
+        return None
+
     def _match(self, tool: Tool, arg_text: str) -> bool:
-        rules = self.session_rules + self._project_rules
-        return any(r.matches(tool.name, arg_text) for r in rules)
+        return self._matching_rule(tool, arg_text) is not None
 
     def explain(self, tool_name: str, arg_text: str) -> dict:
         """设置页「规则测试器」：这条调用会命中哪条规则 / 为何被拦。
 
         与 authorize() 走同一套匹配逻辑（含 shell 拼接拦截），测试结果就是实际行为，
-        用户不用对着规则列表猜边界。
+        用户不用对着规则列表猜边界。停用的规则不参与匹配，但单独提示——
+        否则「明明有规则却还要确认」看起来像白名单坏了。
         """
+        disabled_hit: WhitelistRule | None = None
         for r in self.session_rules + self._project_rules:
             if r.matches(tool_name, arg_text):
                 return {
@@ -238,6 +283,10 @@ class PermissionGate:
                     "hit": {"tool": r.tool, "kind": r.kind, "pattern": r.pattern},
                     "reason": "",
                 }
+            if r.enabled or disabled_hit is not None:
+                continue
+            if r._matches_core(tool_name, arg_text):
+                disabled_hit = r
         if self._matched_but_for_chaining(tool_name, arg_text):
             return {
                 "allowed": False,
@@ -247,6 +296,16 @@ class PermissionGate:
                     "前缀规则不覆盖它，每次都会重新询问"
                 ),
             }
+        if disabled_hit is not None:
+            return {
+                "allowed": False,
+                "hit": None,
+                "reason": (
+                    f"有条规则（{disabled_hit.tool} · {disabled_hit.kind} "
+                    f"{disabled_hit.pattern or '（全部）'}）本可命中，但它已被停用——"
+                    "到规则列表里打开开关即可恢复放行"
+                ),
+            }
         return {"allowed": False, "hit": None, "reason": "没有命中任何规则，会弹出确认"}
 
     def _matched_but_for_chaining(self, tool_name: str, arg_text: str) -> bool:
@@ -254,12 +313,12 @@ class PermissionGate:
 
         命中时确认弹窗多一句解释，否则用户会以为白名单坏了（明明勾过「总是允许」）。
         这里只看前缀本身是否成立，不管词边界：``git status; rm -rf /`` 与 ``git status``
-        前缀相同、被拦的是拼接，就属于要解释的情形。
+        前缀相同、被拦的是拼接，就属于要解释的情形。停用的规则不算。
         """
         if tool_name != _RUN_COMMAND or not _has_shell_chain(arg_text):
             return False
         for r in self.session_rules + self._project_rules:
-            if r.tool != tool_name or not r.pattern:
+            if not r.enabled or r.tool != tool_name or not r.pattern:
                 continue
             if r.kind == "exact" and arg_text == r.pattern:
                 return True
@@ -374,6 +433,48 @@ class PermissionGate:
             return False
         return True
 
+    def _resolve_arg_path(self, raw: str) -> Path | None:
+        """把路径参数解析成绝对路径（与 _path_inside_workdir 同一口径），解不出返回 None。"""
+        if self.working_dir is None:
+            return None
+        raw = str(raw or "").strip()
+        if raw.startswith("@"):
+            raw = raw[1:]
+        if not raw:
+            return None
+        try:
+            target = Path(raw)
+            if not target.is_absolute():
+                target = self.working_dir / target
+            return target.resolve()
+        except OSError:
+            return None
+
+    def _write_is_actually_delete(self, tool: Tool, input_dict: dict) -> bool:
+        """本次写入实质上会递归删除已有目录吗？是的话不得自动放行。
+
+        move_file(overwrite=true) 碰到「目标已存在的目录」时会先 shutil.rmtree
+        整棵子树再移进去（tools/fs.py）。而 move_file 是 WRITE 级，「自动允许写入」
+        档下只要源和目标都在工作目录内就免确认——等于绕开了 delete_file
+        （DANGEROUS，永不自动放行）的强制确认。检查点也兜不住：recorder 只记
+        源与目标两项，被 rmtree 掉的目录内容不在其中。
+
+        这里按 fs.py 的同一套语义还原落点（目标已存在且是目录 → 移进去保留原名），
+        只在「源是目录 + 落点也是已存在目录」时返回 True。判定不了（路径解不出、
+        目标不存在）一律返回 False，交给工具层自己的存在性检查。
+        """
+        if tool.name != "move_file" or not input_dict.get("overwrite"):
+            return False
+        src = self._resolve_arg_path(input_dict.get("source", ""))
+        dst = self._resolve_arg_path(
+            input_dict.get(getattr(tool, "write_target_arg", "path") or "path", "")
+        )
+        if src is None or dst is None or not src.is_dir():
+            return False
+        if dst.is_dir():
+            dst = dst / src.name
+        return dst.is_dir()
+
     def _write_target_inside_workdir(self, tool: Tool, input_dict: dict) -> bool:
         """「自动允许写入」档的适用范围判断：只放行能确认落在工作目录内的写入。
 
@@ -397,6 +498,62 @@ class PermissionGate:
                 return False
         return True
 
+    def _write_target_paths(self, tool: Tool, input_dict: dict) -> list[tuple[Path, str]]:
+        """解析本次写调用的落点路径 [(路径, 展示名)]，供写租约用。
+
+        与 `_write_target_inside_workdir` 同一套字段约定（write_target_arg +
+        guard_path_args），但**不要求**落点在工作目录内——租约是协调不是安全
+        边界，目录外的写入同样可能撞车。解析不出的字段跳过；一个都解析不出
+        （含 generate_image 的空路径默认落点）时返回空，调用方按「不参与租约」
+        放行（fail open，与检查点「run_command 改动不追踪」同一姿态）。
+        """
+        if self.working_dir is None:
+            return []
+        fields = [getattr(tool, "write_target_arg", "path") or "path"]
+        fields += list(getattr(tool, "guard_path_args", ()) or ())
+        out: list[tuple[Path, str]] = []
+        seen: set[str] = set()
+        for f in fields:
+            raw = str(input_dict.get(f, "") or "").strip()
+            if raw.startswith("@"):
+                raw = raw[1:].strip()
+            if not raw:
+                continue
+            p = Path(raw)
+            if not p.is_absolute():
+                p = self.working_dir / p
+            try:
+                p = p.resolve()
+            except OSError:
+                continue
+            if str(p) in seen:
+                continue
+            seen.add(str(p))
+            try:
+                label = str(p.relative_to(self.working_dir))
+            except ValueError:
+                label = str(p)
+            out.append((p, label))
+        return out
+
+    async def claim_write(self, tool: Tool, input_dict: dict, owner: str = ""):
+        """写操作执行前领租约（并行写路径协调，见 security/leases.py）。
+
+        只读工具、声明不了写落点的工具（run_command / MCP 写工具）不参与，
+        返回 None；其余返回租约句柄——执行完必须 release()（agent 循环在
+        finally 里做）。与目标路径冲突的其他会话写入会先等待，超时按原计划
+        放行、租约带冲突注记（追加进工具结果，模型与用户都看得见）。
+        """
+        if tool.safety == Safety.READONLY or not getattr(tool, "write_path_arg", False):
+            return None
+        hub = leases.hub_for(self.working_dir)
+        if hub is None:
+            return None
+        paths = self._write_target_paths(tool, input_dict)
+        if not paths:
+            return None
+        return await hub.claim(paths, owner=owner)
+
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
         """返回 None 表示放行；返回 PendingPermission 表示需要用户决策。"""
         if tool.safety == Safety.READONLY:
@@ -405,15 +562,24 @@ class PermissionGate:
         if self.auto_accept_all:
             return None
         # 自动允许写入档：只放行 WRITE 级，且目标必须确认在工作目录内；
-        # 高危（执行命令）与目录外写入仍然逐次确认
+        # 高危（执行命令）、目录外写入、以及「名义上是移动实为删目录」仍逐次确认
         if (
             self.auto_accept_write
             and tool.safety == Safety.WRITE
             and self._write_target_inside_workdir(tool, input_dict)
+            and not self._write_is_actually_delete(tool, input_dict)
         ):
             return None
         arg_text = tool.arg_text(input_dict)
-        if self._match(tool, arg_text):
+        rule = self._matching_rule(tool, arg_text)
+        if rule is not None:
+            # 命中记账：只记有库 id 的项目级规则（次数 + 最近命中时间，
+            # 设置页展示用）。记账失败不影响放行——这只是统计。
+            if rule.rule_id is not None and self.store is not None:
+                try:
+                    await self.store.record_rule_hit(rule.rule_id)
+                except Exception:  # noqa: BLE001
+                    pass
             return None
         pending = PendingPermission(
             request_id=uuid.uuid4().hex[:12],

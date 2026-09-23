@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -37,12 +37,15 @@ DIGEST_MAX_TRANSCRIPT_CHARS = 12_000  # 送入模型的会话正文上限（超�
 DIGEST_MAX_ENTRIES = 8                # 单次最多提炼条数
 DIGEST_ENTRY_MAX_CHARS = 100          # 单条记忆长度上限
 _DIGEST_PLACEHOLDERS = {"无", "没有", "（无）", "(none)", "none", "n/a"}
+# 「没有值得记录的内容」类占位句（剥标点后整体匹配，限长防误伤真条目）
+_DIGEST_NOTHING_RE = re.compile(r"^(没有?|无需|不必|无可|没什么).{0,16}(记录|记住|提炼|值得|保存)")
 
 # ---- 定期自动整理（全局 memory.md 与项目 AGENTS.md 的周期性合并去重） ----
 
 MAINTAIN_MIN_GLOBAL_CHARS = 400    # 全局记忆短于此不整理（没东西可合并）
 MAINTAIN_MIN_PROJECT_CHARS = 600   # 项目记忆是手写约定，更短时不值得动
 MAINTENANCE_STATE_FILE = "memory-maintenance.json"  # ~/.skysheep/ 下的上次整理时间
+MAINTENANCE_BACKUP_KEEP = 5        # 整理备份保留份数：带时间戳滚动，防单份 .bak 被下次覆盖
 
 
 def memory_path() -> Path:
@@ -51,11 +54,18 @@ def memory_path() -> Path:
     return skysheep_home() / "memory.md"
 
 
+def inject_text(text: str) -> str:
+    """系统提示词实际注入的记忆文本：超上限按行边界截断（半条记忆对模型是噪声）。"""
+    if len(text) <= MAX_MEMORY_CHARS:
+        return text
+    return text[:MAX_MEMORY_CHARS].rsplit("\n", 1)[0]
+
+
 def load_memory_text() -> str:
-    """读取记忆文本（超长截断）；没有文件返回空串。"""
+    """读取记忆文本（超长按行边界截断）；没有文件返回空串。"""
     p = memory_path()
     try:
-        return p.read_text(encoding="utf-8", errors="replace")[:MAX_MEMORY_CHARS]
+        return inject_text(p.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return ""
 
@@ -106,11 +116,21 @@ def build_digest_prompt(transcript: str) -> str:
 
 
 def parse_digest(raw: str) -> list[str]:
-    """解析模型输出的提炼稿：剥列表符号/编号，滤空行与「无」类占位，批内去重。"""
+    """解析模型输出的提炼稿：剥列表符号/编号，滤空行、占位行与前导语，批内去重。"""
     out: list[str] = []
     for ln in raw.splitlines():
         s = re.sub(r"^\d+[.、)）]\s*", "", re.sub(r"^[-*·•]\s*", "", ln.strip())).strip()
-        if not s or s.lower() in _DIGEST_PLACEHOLDERS:
+        if not s:
+            continue
+        # 占位行常带句尾标点（「无。」「没有值得记录的内容。」），剥掉再比对；
+        # 剥完为空的纯标点行同样丢弃
+        probe = s.rstrip("。．.!！?？；;，,、~～")
+        if not probe or probe.lower() in _DIGEST_PLACEHOLDERS or (
+            len(probe) <= 24 and _DIGEST_NOTHING_RE.search(probe)
+        ):
+            continue
+        # 以冒号收尾的是「以下是提炼结果：」类前导语/标题，不是可独立理解的条目
+        if s.endswith(("：", ":")):
             continue
         if len(s) > DIGEST_ENTRY_MAX_CHARS:
             s = s[:DIGEST_ENTRY_MAX_CHARS].rstrip() + "…"
@@ -192,6 +212,24 @@ def save_maintenance_state(state: dict) -> None:
         p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass  # 状态写不进去只影响下次提前整理，不值得打断主流程
+
+
+def backup_before_maintain(path: Path, old_text: str) -> Path:
+    """整理前把原件备份为带时间戳的 .bak-YYYYMMDD-HHMMSS-微秒，滚动保留最近数份。
+
+    备份写失败直接抛 OSError——调用方应放弃本次覆盖（宁可不整理也不裸写）；
+    旧备份清理失败只影响磁盘占用，不跟着失败。
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    bak = path.with_name(f"{path.name}.bak-{stamp}")
+    bak.write_text(old_text, encoding="utf-8")
+    try:
+        baks = sorted(path.parent.glob(path.name + ".bak-*"))
+        for extra in baks[:-MAINTENANCE_BACKUP_KEEP]:
+            extra.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return bak
 
 
 def maintenance_due(

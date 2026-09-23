@@ -587,7 +587,6 @@ class WriteDocumentTool(Tool):
     idempotent_hint = False
     open_world_hint = False
     args_model = WriteDocumentArgs
-    last_diff = ""
 
     def __init__(self, recorder: ChangeRecorder | None = None) -> None:
         self.recorder = recorder
@@ -630,9 +629,9 @@ class WriteDocumentTool(Tool):
 
         # 确认弹窗/工具卡的改动预览：新建文档展示源内容 diff；覆盖已有文档（旧内容是
         # 二进制）给不出有意义的文本 diff，保持为空
-        self.last_diff = ""
+        ctx.last_diff = ""
         if not existed and suffix != ".csv":
             from .fs import make_diff
 
-            self.last_diff = make_diff("", content, shown)
+            ctx.last_diff = make_diff("", content, shown)
         return f"{summary} → {shown}"

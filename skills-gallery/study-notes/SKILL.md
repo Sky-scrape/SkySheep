@@ -1,6 +1,7 @@
 ---
 name: study-notes
 description: 把教材、文章、视频文稿整理成结构化学习笔记——核心概念、费曼式讲解、自测题三件套，存成 Markdown 方便复习。
+version: 1.0.0
 ---
 
 ## 目标

@@ -6,12 +6,17 @@
 
 安装结果必须是「一个技能一个文件夹，里面带 SKILL.md」——所以这里做三件事：
 1. 找到包里的技能根（用户可能选中了外层目录，或 zip 里套了一层）；
-2. 校验 SKILL.md 存在且能解析出名称，且不与已有技能重名（重名不覆盖，报错让用户先改名）；
+2. 校验 SKILL.md 存在且能解析出名称，且不与已有技能重名（默认重名不覆盖，
+   报错让用户先改名；技能广场的「更新/重装」走 overwrite=True 覆盖同名技能）；
 3. 复制/解压进去。zip 解压逐条目检查路径，挡住 ../ 穿越与绝对路径。
+
+从网址安装时会在每个装好的技能目录里写 .source.json（安装来源 url），
+技能广场据此把条目标成「已安装/可更新」。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -19,7 +24,11 @@ import time
 import zipfile
 from pathlib import Path
 
-from .loader import _load_skill_from_dir  # 与发现逻辑共用同一套 SKILL.md 解析
+from .loader import (  # 与发现逻辑共用同一套 SKILL.md 解析
+    MAX_SKILL_NAME_CHARS,
+    SOURCE_MARKER,
+    _load_skill_from_dir,
+)
 
 SKILL_FILE = "SKILL.md"
 MAX_SKILL_FILES = 2_000          # 单个技能包的文件数上限（防误选整个盘）
@@ -28,6 +37,73 @@ MAX_UNPACKED_BYTES = 120 * 1024 * 1024
 
 class SkillInstallError(Exception):
     pass
+
+
+# --------------------------------------------------------------- 落点安全
+#
+# SKILL.md frontmatter 里的 name 会被直接当成「技能目录名」拼安装落点，而它由
+# 技能包作者自由填写——技能广场条目、任意 GitHub 仓库都可能带恶意值。名字里带
+# `..`、路径分隔符或盘符就能把落点指到技能目录之外：配合 overwrite（市场「更新/
+# 重装」走这条路）先 rmtree_force 再落内容，等于任意目录删除 + 写入；remove_skill
+# 同理。解压层那三重 zip-slip 防护拦不住这条，因为穿越发生在解压**之后**的落点
+# 拼接。所以所有落点一律经 _skill_target() 算出来，不得手拼 `root / name`。
+
+
+def _validate_skill_name(name: str) -> str:
+    """校验技能名能安全地当作「技能目录下的一个子目录名」，返回规范后的名字。
+
+    只接受单个目录名的形状：非空、限长、不含路径分隔符与冒号、不是 `.`/`..`。
+    冒号一并拒绝是因为它既是 Windows 盘符（`C:`）也是 NTFS 数据流（`file:stream`）
+    的分隔符。不合法时抛 SkillInstallError（面向用户的中文提示）。
+    """
+    raw = (name or "").strip()
+    if not raw:
+        raise SkillInstallError("技能名不能为空")
+    if len(raw) > MAX_SKILL_NAME_CHARS:
+        raise SkillInstallError(
+            f"技能名过长（最多 {MAX_SKILL_NAME_CHARS} 字符）：{raw[:80]}…"
+        )
+    if "/" in raw or "\\" in raw:
+        raise SkillInstallError(f"技能名不能包含路径分隔符（/ 或 \\）：{raw}")
+    if ":" in raw:
+        raise SkillInstallError(f"技能名不能包含冒号（盘符/数据流）：{raw}")
+    if raw.strip(". ") == "":
+        # `.`、`..`、`...`、纯点纯空格：都是目录引用或无意义名，不能当目录名
+        raise SkillInstallError(f"技能名不能是目录引用：{raw}")
+    return raw
+
+
+def _skill_target(dest_root: Path, name: str) -> Path:
+    """算出并校验安装/删除落点，返回可直接使用的绝对路径。
+
+    两道关卡：
+    1. 名字形状（_validate_skill_name）——挡住 `..`、分隔符、盘符；
+    2. resolve 后的包含性——兜住其余一切能改变落点的手段（目录符号链接、
+       Windows 保留设备名被解析成 `\\\\.\\con` 之类、相对盘符路径展开等）。
+    任一道不过即抛 SkillInstallError，绝不返回技能目录之外的路径。
+    """
+    clean = _validate_skill_name(name)
+    root_path = Path(dest_root).expanduser()
+    root = root_path.resolve()
+    target = (root_path / clean).resolve()
+    if target == root or not target.is_relative_to(root):
+        raise SkillInstallError(f"技能名指向技能目录之外，已拒绝：{clean}")
+    return target
+
+
+def _write_source_marker(target: Path, source_url: str) -> None:
+    """在装好的技能目录里记下安装来源（广场条目 url），供「已安装/可更新」判定。
+
+    写不进也不影响安装本身（来源标记是附加能力，不是安装的前提）。
+    """
+    if not source_url:
+        return
+    try:
+        (target / SOURCE_MARKER).write_text(
+            json.dumps({"market_url": source_url}, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def _scan_skills_in_dir(base: Path, max_depth: int = 3) -> list[Path]:
@@ -69,8 +145,18 @@ def _ensure_free(names: list[str], existing: set[str]) -> None:
         )
 
 
-def install_from_dir(src: str | Path, dest_root: Path, *, existing: set[str]) -> dict:
-    """把本机文件夹里的技能包复制到 dest_root。"""
+def install_from_dir(
+    src: str | Path,
+    dest_root: Path,
+    *,
+    existing: set[str],
+    overwrite: bool = False,
+    source_url: str | None = None,
+) -> dict:
+    """把本机文件夹里的技能包复制到 dest_root。
+
+    overwrite=True 供「更新/重装」用：同名技能整目录替换，而不是报错。
+    """
     src_path = Path(src).expanduser()
     if not src_path.exists():
         raise SkillInstallError("路径不存在：" + str(src_path))
@@ -83,16 +169,20 @@ def install_from_dir(src: str | Path, dest_root: Path, *, existing: set[str]) ->
             f"在「{src_path}」里没找到技能：技能包必须是含 {SKILL_FILE} 的文件夹"
         )
     names = [_skill_name_of(r) for r in roots]
-    _ensure_free(names, existing)
+    if not overwrite:
+        _ensure_free(names, existing)
 
     dest_root.mkdir(parents=True, exist_ok=True)
     installed: list[str] = []
     for root in roots:
         name = _skill_name_of(root)
-        target = dest_root / name
+        target = _skill_target(dest_root, name)
         if target.exists():
-            raise SkillInstallError(f"目标已存在：{target}")
+            if not overwrite:
+                raise SkillInstallError(f"目标已存在：{target}")
+            rmtree_force(target)
         shutil.copytree(root, target)
+        _write_source_marker(target, source_url or "")
         installed.append(name)
     return {"installed": installed, "count": len(installed), "dest": str(dest_root)}
 
@@ -225,12 +315,15 @@ def install_from_zip(
     *,
     existing: set[str],
     only_under: str | None = None,
+    overwrite: bool = False,
+    source_url: str | None = None,
 ) -> dict:
     """把 .zip 技能包解压到 dest_root（先解到暂存目录再改名，失败不留半个技能）。
 
     only_under：只安装压缩包里这个子目录下的技能（给「从 GitHub 链接装仓库里
     某个 skills/xxx 子目录」用）。压缩包外层通常套着一层 repo-main 之类的目录，
     所以这里按「路径里包含这段连续目录」来匹配，不锚定开头。
+    overwrite=True 供「更新/重装」用：同名技能整目录替换，而不是报错。
     """
     src_path = Path(src).expanduser()
     if not src_path.is_file():
@@ -256,13 +349,17 @@ def install_from_zip(
         if not roots:
             raise SkillInstallError(f"压缩包里没找到技能：需要含 {SKILL_FILE} 的文件夹")
         names = [_skill_name_of(r) for r in roots]
-        _ensure_free(names, existing)
+        if not overwrite:
+            _ensure_free(names, existing)
         for root in roots:
             name = _skill_name_of(root)
-            target = dest_root / name
+            target = _skill_target(dest_root, name)
             if target.exists():
-                raise SkillInstallError(f"目标已存在：{target}")
+                if not overwrite:
+                    raise SkillInstallError(f"目标已存在：{target}")
+                rmtree_force(target)
             root.replace(target)
+            _write_source_marker(target, source_url or "")
             installed.append(name)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -274,12 +371,13 @@ def install(
     dest_root: Path,
     *,
     existing: set[str],
+    overwrite: bool = False,
 ) -> dict:
     """按来源类型分派：.zip 解压，其余按文件夹处理。"""
     src_path = Path(src).expanduser()
     if src_path.is_file() and src_path.suffix.lower() == ".zip":
-        return install_from_zip(src_path, dest_root, existing=existing)
-    return install_from_dir(src_path, dest_root, existing=existing)
+        return install_from_zip(src_path, dest_root, existing=existing, overwrite=overwrite)
+    return install_from_dir(src_path, dest_root, existing=existing, overwrite=overwrite)
 
 
 def rmtree_force(path: Path) -> None:
@@ -309,13 +407,18 @@ def rmtree_force(path: Path) -> None:
 
 
 def remove_skill(name: str, roots: list[Path]) -> dict:
-    """删除一个技能目录（在给定的候选根目录里找）。"""
+    """删除一个技能目录（在给定的候选根目录里找）。
+
+    name 由界面/请求参数给出，先卡名字形状，再逐 root 用 _skill_target 卡落点——
+    否则 `remove_skill("../../x")` 会 rmtree 掉技能目录之外的任意目录。
+    """
+    clean = _validate_skill_name(name)
     for root in roots:
-        target = root / name
+        target = _skill_target(root, clean)
         if target.is_dir() and (target / SKILL_FILE).is_file():
             rmtree_force(target)
-            return {"removed": name, "from": str(root)}
-    raise SkillInstallError("找不到技能目录：" + name)
+            return {"removed": clean, "from": str(root)}
+    raise SkillInstallError("找不到技能目录：" + clean)
 
 
 # ---- 从网址安装（GitHub / Gitee 仓库页 / .zip 直链） ----
@@ -491,8 +594,62 @@ def download_to(url: str) -> Path:
     return tmp
 
 
-def install_from_url(url: str, dest_root: Path, *, existing: set[str]) -> dict:
-    """下载并安装。分支没写明时依次试候选地址，404 换下一个。"""
+def raw_skillmd_urls(url: str) -> list[str]:
+    """把仓库页链接解析成候选的 SKILL.md raw 直链（技能广场详情预览用）。
+
+    与 resolve_url 同一套形态约束，只是产物从归档 zip 换成 raw 文本：
+        https://github.com/<用户>/<仓库>[/tree/<分支>[/<子目录>]]/SKILL.md
+        https://gitee.com/<用户>/<仓库>/raw/<分支>[/<子目录>]/SKILL.md
+    链接没写分支时依次猜 main / master；只支持已列入白名单的托管域。
+    """
+    url = (url or "").strip()
+    _host_allowed(url)
+    if url.split("?", 1)[0].lower().endswith(".zip"):
+        raise SkillInstallError(".zip 直链没有可预览的 SKILL.md，请直接安装")
+    after_scheme = url.split("://", 1)[1]
+    authority = after_scheme.split("/", 1)[0].lower()
+    rest_path = after_scheme.split("/", 1)
+    segments = [seg for seg in (rest_path[1] if len(rest_path) > 1 else "").split("/") if seg]
+
+    is_github = authority in ("github.com", "www.github.com")
+    if len(segments) < 2:
+        site = "GitHub" if is_github else "Gitee"
+        raise SkillInstallError(f"{site} 链接要像 https://{authority}/用户名/仓库：" + url)
+    user, repo = segments[0], segments[1].removesuffix(".git")
+    rest = segments[2:]
+    if rest and rest[0] != "tree":
+        site = "GitHub" if is_github else "Gitee"
+        raise SkillInstallError(f"这种 {site} 页面没有可预览的 SKILL.md：" + url)
+
+    if rest:
+        branches = [rest[1]]
+        sub = "/".join(rest[2:])
+    else:
+        branches = list(GUESS_BRANCHES)
+        sub = ""
+
+    def raw(branch: str) -> str:
+        if is_github:
+            base = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}"
+        else:
+            base = f"https://gitee.com/{user}/{repo}/raw/{branch}"
+        return f"{base}/{sub}/SKILL.md" if sub else f"{base}/SKILL.md"
+
+    return [raw(b) for b in branches]
+
+
+def install_from_url(
+    url: str,
+    dest_root: Path,
+    *,
+    existing: set[str],
+    overwrite: bool = False,
+) -> dict:
+    """下载并安装。分支没写明时依次试候选地址，404 换下一个。
+
+    装好的每个技能目录里写 .source.json 记录本次安装的来源 url，
+    技能广场据此判定「已安装 / 可更新」。
+    """
     candidates, only_under = resolve_url(url)
     last: DownloadError | None = None
     for candidate in candidates:
@@ -504,7 +661,10 @@ def install_from_url(url: str, dest_root: Path, *, existing: set[str]) -> dict:
                 continue  # 分支猜测：这个分支不存在，试下一个
             raise SkillInstallError(str(e)) from e
         try:
-            return install_from_zip(tmp, dest_root, existing=existing, only_under=only_under)
+            return install_from_zip(
+                tmp, dest_root, existing=existing, only_under=only_under,
+                overwrite=overwrite, source_url=url,
+            )
         finally:
             tmp.unlink(missing_ok=True)
     tried = "、".join(candidates)

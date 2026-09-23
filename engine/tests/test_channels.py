@@ -1,7 +1,8 @@
 """聊天软件渠道（Bot Channel）测试。
 
-不打真实网络：Telegram 适配器用 httpx.MockTransport 承载，验证请求形状与
-消息归一化；权限门与命令解析是纯逻辑，直接单测。
+不打真实网络：飞书适配器驱动官方 lark-cli 子进程，子进程用假脚本复刻（复刻官方 CLI 的
+stdout NDJSON / stderr ready 标记 / 退出码契约）；微信的 REST 部分用 httpx.MockTransport
+承载。权限门与命令解析是纯逻辑，直接单测。
 
 安全相关的断言是本文件的重点——空名单必须拒绝一切、无人值守时必须自动拒绝
 写操作、审批超时必须自动拒绝。这三条错了就是把 Agent 的控制权交出去。
@@ -17,9 +18,9 @@ import httpx
 import pytest
 
 from skysheep.channels.commands import parse as parse_command
+from skysheep.channels.feishu import FeishuChannel, _split
 from skysheep.channels.gate import ChannelGate, parse_decision
 from skysheep.channels.manager import ChannelManager
-from skysheep.channels.telegram import TelegramChannel, _split
 from skysheep.security.gate import Decision
 from skysheep.tools.base import Safety, Tool
 
@@ -49,7 +50,7 @@ def test_command_parsing():
     assert parse_command("/status").name == "status"
     assert parse_command("/help").name == "help"
     assert parse_command("/状态").name == "status"
-    # Telegram 群聊里命令带 @botname 后缀
+    # 群聊里命令可能带 @botname 后缀
     assert parse_command("/stop@my_bot").name == "stop"
     # 未知命令单独标记：不能当成普通消息送给模型，否则打错命令会得到莫名回答
     assert parse_command("/nope").name == "__unknown__"
@@ -74,6 +75,14 @@ def test_approval_word_parsing():
     # 模糊匹配是危险的：这些都不该命中
     for word in ("yes please", "no idea", "okay then"):
         assert parse_decision(word) is None, word
+    # 低危项：随口应和不是批准（"1" 在中文聊天里是「收到」）——待审批窗口期
+    # 把它们当批准会吞掉正常聊天，甚至替一次写/执行操作背书
+    for word in ("ok", "1", "可以", "好的", "嗯", "收到"):
+        assert parse_decision(word) is None, word
+    # 明确授权的写法仍然认
+    assert parse_decision("yes") == Decision.ALLOW_ONCE
+    assert parse_decision("允许") == Decision.ALLOW_ONCE
+    assert parse_decision("同意") == Decision.ALLOW_ONCE
 
 
 # ---------- 权限门：安全核心 ----------
@@ -143,6 +152,54 @@ async def test_submit_without_waiting_returns_false():
     assert gate.submit("nonexistent", Decision.ALLOW_ONCE) is False
 
 
+async def test_allow_always_downgrades_to_once_from_channel():
+    """渠道端没有「总是允许」：allow always 落到门控里必须降级为单次放行。
+
+    白名单规则是持久化的——从聊天窗口写入后所有渠道会话都不再询问，
+    账号被盗或手滑的代价与「少打一次 allow」完全不成比例。
+    """
+    gate = ChannelGate(approve_enabled=True, approve_timeout=5, notify=lambda p: _noop())
+
+    async def answer():
+        await asyncio.sleep(0.1)
+        # 用户在聊天窗口回复的是「总是允许」的写法
+        assert gate.submit_latest(Decision.ALLOW_ALWAYS) is not None
+
+    asyncio.create_task(answer())
+    pending = await gate.authorize(_WriteTool(), {"path": "x"})
+    assert await asyncio.wait_for(pending.wait(), timeout=5) == Decision.ALLOW_ONCE
+
+
+async def test_approval_decision_bound_to_turn_actor():
+    """审批决定只认发起人：群聊里其他成员的 allow/deny 不生效。"""
+    gate = ChannelGate(approve_enabled=True, approve_timeout=5, notify=lambda p: _noop())
+    gate.turn_actor = "u-owner"
+
+    async def hijack():
+        await asyncio.sleep(0.1)
+        # 同群成员（chat_id 在名单内所以是 approved 的）抢答 allow：必须被拒
+        assert gate.submit_latest(Decision.ALLOW_ONCE, actor="u-other") is None
+        # 发起人本人回复：生效
+        assert gate.submit_latest(Decision.ALLOW_ONCE, actor="u-owner") is not None
+
+    asyncio.create_task(hijack())
+    pending = await gate.authorize(_WriteTool(), {"path": "x"})
+    assert await asyncio.wait_for(pending.wait(), timeout=5) == Decision.ALLOW_ONCE
+
+
+async def test_approval_actor_binding_keeps_old_hosts_working():
+    """turn_actor 为空（旧宿主没传 actor）时保持旧行为：任何 approved 来源可决定。"""
+    gate = ChannelGate(approve_enabled=True, approve_timeout=5, notify=lambda p: _noop())
+
+    async def answer():
+        await asyncio.sleep(0.1)
+        assert gate.submit_latest(Decision.ALLOW_ONCE, actor="anyone") is not None
+
+    asyncio.create_task(answer())
+    pending = await gate.authorize(_WriteTool(), {"path": "x"})
+    assert await asyncio.wait_for(pending.wait(), timeout=5) == Decision.ALLOW_ONCE
+
+
 async def _noop():
     return None
 
@@ -152,145 +209,429 @@ async def _noop():
 
 def test_empty_allowlist_denies_everything():
     """空名单 = 拒绝一切。这是渠道安全的第一道门，不能反着来。"""
-    ch = TelegramChannel({"token": "t", "allowed_ids": []}, _noop_msg)
-    assert ch.is_allowed("123", "123") is False
-    assert ch.is_allowed("999", "999") is False
+    ch = FeishuChannel({"app_id": "a", "app_secret": "b", "allowed_ids": []}, _noop_msg)
+    assert ch.is_allowed("ou_1", "ou_1") is False
+    assert ch.is_allowed("ou_9", "ou_9") is False
 
 
 def test_allowlist_matches_actor_or_chat():
-    ch = TelegramChannel({"token": "t", "allowed_ids": ["123"]}, _noop_msg)
-    assert ch.is_allowed("123", "123") is True
-    # 群聊里 from.id != chat.id，任一命中即可
-    assert ch.is_allowed("123", "456") is True
-    assert ch.is_allowed("456", "123") is True
-    assert ch.is_allowed("456", "789") is False
+    ch = FeishuChannel({"app_id": "a", "app_secret": "b", "allowed_ids": ["ou_1"]}, _noop_msg)
+    assert ch.is_allowed("ou_1", "ou_1") is True
+    # 群聊里 sender open_id 与 chat_id 不同，任一命中即可
+    assert ch.is_allowed("ou_1", "oc_9") is True
+    assert ch.is_allowed("oc_9", "ou_1") is True
+    assert ch.is_allowed("ou_9", "oc_9") is False
 
 
 async def _noop_msg(msg):  # pragma: no cover - 仅作为占位回调
     return None
 
 
-# ---------- Telegram 适配器（MockTransport，不打真实网络） ----------
+# ---------- 飞书适配器（驱动 lark-cli 子进程，不打真实网络） ----------
+#
+# 协议细节（WebSocket / protobuf 帧 / ACK）已交给官方 lark-cli 维护，本适配器只负责
+# 进程编排与事件归一化。所以这里测的是「编排契约」而不是「协议正确性」：用假 CLI 复刻
+# 官方 CLI 的 stdout(NDJSON) / stderr(ready 标记) / 退出码契约，不打真实网络。
 
 
-def _mock_transport(handler):
-    return httpx.MockTransport(handler)
+def _fake_cli(tmp_path, *, ready=True, events=(), exit_after=None, send_ok=True,
+              init_ok=True):
+    """写一个假 lark-cli 脚本，复刻官方 CLI 的对外契约。
+
+    只依赖 Python 自身（用当前解释器执行），不引入 Node，也不依赖真实 lark-cli。
+    """
+    import sys as _sys
+
+    script = tmp_path / "fake_lark_cli.py"
+    payload = {
+        "ready": ready,
+        "events": list(events),
+        "exit_after": exit_after,
+        "send_ok": send_ok,
+        "init_ok": init_ok,
+    }
+    body = [
+        "import json, os, sys, time",
+        "CFG = " + repr(payload),
+        "args = sys.argv[1:]",
+        "def out(o):",
+        "    sys.stdout.write(json.dumps(o, ensure_ascii=True) + chr(10)); sys.stdout.flush()",
+        "if 'config' in args and 'init' in args:",
+        "    sys.stdin.read()",
+        "    if CFG['init_ok']:",
+        "        d = os.environ.get('LARKSUITE_CLI_CONFIG_DIR', '.')",
+        "        os.makedirs(d, exist_ok=True)",
+        "        aid = args[args.index('--app-id')+1]",
+        "        json.dump({'appId': aid, 'brand': 'feishu'},",
+        "                  open(os.path.join(d, 'config.json'), 'w'))",
+        "        out({'ok': True})",
+        "    else:",
+        "        out({'ok': False, 'error': {'type': 'config', 'subtype': 'invalid_client',",
+        "             'code': 20002, 'message': 'The client secret is invalid.',",
+        "             'hint': 'run config init to set valid app_id and app_secret'}})",
+        "    sys.exit(0)",
+        "if 'im' in args and '+messages-send' in args:",
+        "    if CFG['send_ok']:",
+        "        out({'ok': True, 'data': {'message_id': 'om_sent'}})",
+        "    else:",
+        "        out({'ok': False, 'error': {'message': 'bot is not in the chat'}})",
+        "    sys.exit(0)",
+        "if 'event' in args and 'stop' in args:",
+        "    out({'ok': True}); sys.exit(0)",
+        "if 'event' in args and 'consume' in args:",
+        "    if CFG['ready']:",
+        "        sys.stderr.write('[event] ready event_key=im.message.receive_v1' + chr(10))",
+        "        sys.stderr.flush()",
+        "    for ev in CFG['events']:",
+        "        out(ev)",
+        "    if CFG['exit_after'] is None:",
+        "        time.sleep(60)",
+        "    else:",
+        "        time.sleep(CFG['exit_after'])",
+        "    sys.exit(0)",
+        "out({'ok': True})",
+    ]
+    script.write_text("\n".join(body) + "\n", encoding="utf-8")
+    bat = tmp_path / "fake_lark_cli.bat"
+    bat.write_text(
+        '@echo off\r\n"' + _sys.executable + '" "' + str(script) + '" %*\r\n',
+        encoding="utf-8",
+    )
+    return str(bat)
 
 
-async def test_telegram_poll_normalizes_message():
-    captured = []
+def _event(**kw):
+    """造一条与 lark-cli 实际输出同形的扁平事件（注意：content 已预渲染成纯文本）。"""
+    ev = {
+        "type": "im.message.receive_v1",
+        "message_id": "om_1",
+        "id": "om_1",
+        "chat_id": "oc_abc",
+        "chat_type": "p2p",
+        "message_type": "text",
+        "sender_id": "ou_sender",
+        "sender_type": "user",
+        "content": "你好",
+    }
+    ev.update(kw)
+    return ev
 
-    async def on_message(msg):
-        captured.append(msg)
 
-    delivered = {"n": 0}
+def _channel(**cfg):
+    """构造飞书渠道。键缺省即代表「配置里没有这个字段」，而不是用默认值填上。"""
+    from skysheep.channels.feishu import FeishuChannel
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        if "getUpdates" not in str(request.url):
-            return httpx.Response(200, json={"ok": True, "result": {}})
-        # 第一次是启动清积压（timeout=0），之后只投递一次消息
-        if body.get("timeout") == 0:
-            return httpx.Response(200, json={"ok": True, "result": []})
-        if delivered["n"] == 0:
-            delivered["n"] += 1
-            return httpx.Response(200, json={
-                "ok": True,
-                "result": [{
-                    "update_id": 5,
-                    "message": {
-                        "message_id": 1,
-                        "chat": {"id": 12345},
-                        "from": {"id": 12345},
-                        "text": "你好",
-                    },
-                }],
-            })
-        return httpx.Response(200, json={"ok": True, "result": []})
+    cfg.setdefault("cli_path", "")
+    return FeishuChannel(cfg, _noop_msg)
 
-    ch = TelegramChannel({"token": "t", "allowed_ids": ["12345"]}, on_message)
-    ch._transport = _mock_transport(handler)
-    await ch.start()
-    await asyncio.sleep(0.3)
+
+def test_feishu_parses_flat_cli_event():
+    """CLI 的事件体是扁平的，且 content 已是人类可读文本——直接取用，不再解 JSON。"""
+    from skysheep.channels.feishu import parse_event
+
+    msg = parse_event(_event(content="看下项目结构", chat_id="oc_1", sender_id="ou_1"))
+    assert msg is not None
+    assert msg["chat_id"] == "oc_1"
+    assert msg["actor"] == "ou_1"
+    assert msg["text"] == "看下项目结构"
+    assert msg["message_id"] == "om_1"
+
+
+def test_feishu_ignores_bot_own_messages():
+    """机器人/应用自己发的消息必须丢掉，否则会自己回自己。"""
+    from skysheep.channels.feishu import parse_event
+
+    assert parse_event(_event(sender_type="bot")) is None
+    assert parse_event(_event(sender_type="app")) is None
+
+
+def test_feishu_ignores_other_events_and_non_text():
+    from skysheep.channels.feishu import parse_event
+
+    assert parse_event(_event(type="im.chat.updated_v1")) is None
+    assert parse_event(_event(message_type="image")) is None
+    assert parse_event(_event(content="")) is None
+    assert parse_event(_event(chat_id="")) is None
+    assert parse_event({}) is None
+    assert parse_event("not a dict") is None
+
+
+def test_feishu_group_requires_mention():
+    """群聊要求有提及：避免应用被授予「接收群聊所有消息」权限后对每句话插嘴。"""
+    from skysheep.channels.feishu import parse_event
+
+    mentions = [{"key": "@_user_1", "id": "ou_bot", "name": "羊"}]
+    assert parse_event(_event(chat_type="group", mentions=[])) is None
+    assert parse_event(_event(chat_type="group")) is None
+    msg = parse_event(_event(chat_type="group", mentions=mentions))
+    assert msg is not None and msg["chat_id"] == "oc_abc"
+    # 关掉该限制后，群聊无提及也放行
+    assert parse_event(_event(chat_type="group"), require_mention_in_group=False) is not None
+
+
+async def test_feishu_reads_event_stream_from_subprocess(tmp_path, home):
+    """端到端：起假 CLI → 等 ready → 读 NDJSON → 交给 on_message。"""
+    from skysheep.channels.feishu import FeishuChannel
+
+    got = []
+
+    async def on_msg(m):
+        got.append(m)
+
+    cli = _fake_cli(tmp_path, events=[_event(content="看下项目结构")])
+    ch = FeishuChannel(
+        {"app_id": "cli_x", "app_secret": "sec", "allowed_ids": ["ou_sender"],
+         "cli_path": cli},
+        on_msg,
+    )
+    try:
+        await ch.start()
+        for _ in range(80):
+            if got:
+                break
+            await asyncio.sleep(0.1)
+        assert ch.connected is True
+        assert ch.error == ""
+        assert len(got) == 1
+        m = got[0]
+        assert m.channel == "feishu"
+        assert m.actor == "ou_sender"
+        assert m.chat_id == "oc_abc"
+        assert m.text == "看下项目结构"
+        assert m.approved is True
+    finally:
+        await ch.stop()
+    assert ch.connected is False
+
+
+async def test_feishu_marks_unapproved_source(tmp_path, home):
+    """名单外来源仍会构造出消息，但 approved=False —— 安全性由消息层强制。"""
+    from skysheep.channels.feishu import FeishuChannel
+
+    got = []
+
+    async def on_msg(m):
+        got.append(m)
+
+    cli = _fake_cli(tmp_path, events=[_event(sender_id="ou_stranger", chat_id="oc_s")])
+    ch = FeishuChannel(
+        {"app_id": "cli_x", "app_secret": "sec", "allowed_ids": ["ou_known"],
+         "cli_path": cli},
+        on_msg,
+    )
+    try:
+        await ch.start()
+        for _ in range(80):
+            if got:
+                break
+            await asyncio.sleep(0.1)
+        assert len(got) == 1 and got[0].approved is False
+    finally:
+        await ch.stop()
+
+
+async def test_feishu_dedups_repeated_message_id(home):
+    """重连后 CLI 可能重推同一条消息，按 message_id 去重（CLI 明确要求用它）。"""
+    from skysheep.channels.feishu import FeishuChannel
+
+    got = []
+
+    async def on_msg(m):
+        got.append(m)
+
+    ch = FeishuChannel(
+        {"app_id": "cli_x", "app_secret": "sec", "allowed_ids": ["ou_sender"]}, on_msg
+    )
+    await ch._on_event(_event(message_id="om_same"))
+    await ch._on_event(_event(message_id="om_same"))
+    assert len(got) == 1
+
+
+async def test_feishu_reports_ready_timeout(tmp_path, home):
+    """CLI 没打出 ready 标记（如应用未开启机器人能力）时必须报错，不能静默挂着。"""
+    from skysheep.channels import feishu as feishu_mod
+    from skysheep.channels.feishu import FeishuChannel
+
+    cli = _fake_cli(tmp_path, ready=False)
+    ch = FeishuChannel({"app_id": "cli_x", "app_secret": "sec", "cli_path": cli}, _noop_msg)
+    old = feishu_mod.READY_TIMEOUT
+    feishu_mod.READY_TIMEOUT = 1.5
+    try:
+        with pytest.raises(RuntimeError, match="没有就绪"):
+            await ch._consume_once()
+    finally:
+        feishu_mod.READY_TIMEOUT = old
+        await ch.stop()
+
+
+async def test_feishu_surfaces_invalid_credentials(tmp_path, home):
+    """CLI 判定凭据无效时，原因要转成可读提示并停止重连。"""
+    from skysheep.channels.feishu import FeishuChannel
+
+    cli = _fake_cli(tmp_path, init_ok=False)
+    ch = FeishuChannel({"app_id": "cli_x", "app_secret": "bad", "cli_path": cli}, _noop_msg)
+    with pytest.raises(RuntimeError):
+        await ch._consume_once()
+    assert "client secret is invalid" in ch.error
+    assert "config init" in ch.error  # 带上 CLI 给的处理提示
     await ch.stop()
 
-    assert len(captured) == 1, "同一 update_id 只能被处理一次"
-    msg = captured[0]
-    assert msg.channel == "telegram"
-    assert msg.chat_id == "12345"
-    assert msg.actor == "12345"
-    assert msg.text == "你好"
-    assert msg.approved is True
+
+def test_feishu_parses_ok_line_with_json_envelope(tmp_path, home):
+    """真实 CLI 的输出是「OK 提示行 + JSON 信封」混在一段 stdout 里（实测）。
+
+    config init 成功时只有一行 "OK: Configuration saved to ..."（无 JSON），失败时才是
+    OK 行 + 错误信封连在一起——信封还可能是**多行 pretty-printed**（实测 code 20048
+    就是这种形态）。解析器必须能在混杂输出里定位 JSON，否则成功会被误判成失败、
+    失败原因提取不出来——这是真实发生过的 bug。
+    """
+    import subprocess
+    from unittest.mock import patch
+
+    from skysheep.channels.feishu import FeishuChannel
+
+    ok_line = r"OK: Configuration saved to C:\x\config.json"
+    envelope = (
+        '{"ok":false,"error":{"type":"config","subtype":"invalid_client",'
+        '"code":20002,"message":"The client secret is invalid.",'
+        '"hint":"run `lark-cli config init` to set valid app_id and app_secret"}}'
+    )
+    pretty = (
+        '{\n  "ok": false,\n  "error": {\n    "type": "config",\n'
+        '    "subtype": "invalid_instance",\n    "code": 20048,\n'
+        '    "message": "instance not found"\n  }\n}'
+    )
+    ch = FeishuChannel({"app_id": "cli_x", "app_secret": "bad"}, _noop_msg)
+    ch.cli = "fake"
+
+    def _run(std: str):
+        def run(args, **kw):
+            class P:
+                stdout = std
+                stderr = ""
+                returncode = 0
+            return P()
+        return run
+
+    with patch.object(subprocess, "run", _run(ok_line + "\n")):
+        ok, payload = ch._run_cli(["config", "init", "--app-id", "c", "--app-secret-stdin"])
+        assert ok is True and "error" not in payload
+    with patch.object(subprocess, "run", _run(ok_line + "\n" + envelope + "\n")):
+        ok2, payload2 = ch._run_cli(["config", "init", "--app-id", "c", "--app-secret-stdin"])
+        assert ok2 is False
+        assert "client secret is invalid" in ch._err_text(payload2)
+    with patch.object(subprocess, "run", _run(ok_line + "\n" + pretty + "\n")):
+        ok3, payload3 = ch._run_cli(["config", "init", "--app-id", "c", "--app-secret-stdin"])
+        assert ok3 is False
+        assert "instance not found" in ch._err_text(payload3)
+    # 纯 NDJSON（事件流/发送成功的正常形态）不受影响
+    with patch.object(subprocess, "run", _run('{"ok":true,"data":{"message_id":"om_1"}}\n')):
+        ok4, payload4 = ch._run_cli(["im", "+messages-send", "--chat-id", "oc", "--text", "x"])
+        assert ok4 is True and payload4["data"]["message_id"] == "om_1"
 
 
-async def test_telegram_unapproved_source_marked_and_offset_advances():
-    captured = []
+def test_feishu_accepts_real_cli_config_shape(tmp_path, home):
+    """真实 CLI 的 config.json 是 {"apps": [{"appId": ...}]}（实测），
+    不是顶层 appId。凭据快路径要能认出它，否则每次启动都重跑 config init。"""
+    import json as _json
 
-    async def on_message(msg):
-        captured.append(msg)
+    from skysheep.channels.feishu import FeishuChannel
+    from skysheep.config import skysheep_home
 
-    delivered = {"n": 0}
+    cfg_dir = skysheep_home() / "feishu-cli"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.json").write_text(
+        _json.dumps({"apps": [{"appId": "cli_real", "brand": "feishu"}]}),
+        encoding="utf-8",
+    )
+    ch = FeishuChannel({"app_id": "cli_real", "app_secret": "sec"}, _noop_msg)
+    # 同 appId → 不重写（返回 True 且不调 CLI）；换 appId → 才走重写路径
+    assert ch._sync_cli_credentials() is True
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "getUpdates" not in str(request.url):
-            return httpx.Response(200, json={"ok": True, "result": {}})
-        body = json.loads(request.content)
-        if body.get("timeout") == 0:
-            return httpx.Response(200, json={"ok": True, "result": []})
-        if delivered["n"] == 0:
-            delivered["n"] += 1
-            return httpx.Response(200, json={
-                "ok": True,
-                "result": [{
-                    "update_id": 9,
-                    "message": {"chat": {"id": 777}, "from": {"id": 777}, "text": "hi"},
-                }],
-            })
-        return httpx.Response(200, json={"ok": True, "result": []})
-
-    ch = TelegramChannel({"token": "t", "allowed_ids": ["12345"]}, on_message)
-    ch._transport = _mock_transport(handler)
-    await ch.start()
-    await asyncio.sleep(0.3)
-    await ch.stop()
-
-    assert len(captured) == 1
-    assert captured[0].approved is False
-    # offset 必须推进，否则同一条消息会被反复处理
-    assert ch._offset >= 10
+    ch2 = FeishuChannel({"app_id": "cli_other", "app_secret": "sec"}, _noop_msg)
+    assert ch2._sync_cli_credentials() is False  # 此处会真调 CLI，但没配 cli_path → 失败返回
 
 
-async def test_telegram_text_is_split_for_long_replies():
-    sent = []
+async def test_feishu_writes_credentials_into_skysheep_home(tmp_path, monkeypatch):
+    """凭据必须落进 SKYSHEEP_HOME 下，而不是 CLI 默认的 ~/.lark-cli。
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(json.loads(request.content))
-        return httpx.Response(200, json={"ok": True, "result": {}})
+    这是硬要求：默认目录既违反「用户数据一律在 ~/.skysheep」的约定，也会让
+    dev 身份与安装版抢同一份凭据（多实例隔离失效）。
+    """
+    import json as _json
 
-    ch = TelegramChannel({"token": "t"}, _noop_msg)
-    ch._transport = _mock_transport(handler)
-    ok = await ch.send_text("1", "x" * 9000)
-    assert ok is True
-    assert len(sent) >= 3
-    assert all(len(m["text"]) <= 3900 for m in sent)
+    from skysheep.channels.feishu import FeishuChannel
 
+    home = tmp_path / "sshome"
+    monkeypatch.setenv("SKYSHEEP_HOME", str(home))
+    cli = _fake_cli(tmp_path)
+    ch = FeishuChannel({"app_id": "cli_abc", "app_secret": "sec", "cli_path": cli}, _noop_msg)
 
-async def test_telegram_send_reports_http_error():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"ok": False, "description": "Unauthorized"})
-
-    ch = TelegramChannel({"token": "bad"}, _noop_msg)
-    ch._transport = _mock_transport(handler)
-    assert await ch.send_text("1", "hi") is False
-    assert "401" in ch.error
+    assert ch.config_dir() == str(home / "feishu-cli")
+    assert await asyncio.to_thread(ch._sync_cli_credentials) is True
+    cfg = _json.loads((home / "feishu-cli" / "config.json").read_text(encoding="utf-8"))
+    assert cfg["appId"] == "cli_abc"
 
 
-async def test_telegram_without_token_is_not_configured():
-    ch = TelegramChannel({"token": ""}, _noop_msg)
-    assert ch.configured() is False
+def test_feishu_without_credentials_is_not_configured():
+    """凭据是两个字段，缺任一都不算配好——否则启用后只会在运行时报错。"""
+    for cfg in ({}, {"app_id": "a"}, {"app_secret": "b"}):
+        assert _channel(**cfg).configured() is False
+
+
+async def test_feishu_without_cli_gives_actionable_error(tmp_path, home):
+    """没装 lark-cli 时要给可操作提示（装什么、怎么指定路径），而不是崩栈。"""
+    from skysheep.channels.feishu import FeishuChannel
+
+    ch = FeishuChannel(
+        {"app_id": "cli_x", "app_secret": "sec",
+         "cli_path": str(tmp_path / "nope" / "lark-cli.exe")},
+        _noop_msg,
+    )
+    assert ch.cli is None
     await ch.start()
     assert ch.running is False
-    assert "Token" in ch.error
+    assert "npm install -g @larksuite/cli" in ch.error
+    assert "cli_path" in ch.error
+    # 状态里也要能看出是 CLI 缺失
+    assert ch.status().extra["cli"] is False
+
+
+async def test_feishu_text_is_split_for_long_replies(tmp_path, home):
+    """超长回复要切分：飞书文本上限 150 KB，切分避免整条发失败。"""
+    from skysheep.channels.feishu import FeishuChannel
+
+    sent = []
+    ch = FeishuChannel(
+        {"app_id": "cli_x", "app_secret": "sec", "cli_path": _fake_cli(tmp_path)}, _noop_msg
+    )
+    real = ch._run_cli
+
+    def spy(args, **kw):
+        if "+messages-send" in args:
+            sent.append(args)
+        return real(args, **kw)
+
+    ch._run_cli = spy
+    ok = await ch.send_text("oc_1", "x" * 9000)
+    assert ok is True
+    assert len(sent) >= 3
+    for args in sent:
+        chunk = args[args.index("--text") + 1]
+        assert len(chunk) <= 4000
+        assert args[args.index("--as") + 1] == "bot"
+        assert args[args.index("--chat-id") + 1] == "oc_1"
+
+
+async def test_feishu_send_failure_is_reported(tmp_path, home):
+    from skysheep.channels.feishu import FeishuChannel
+
+    ch = FeishuChannel(
+        {"app_id": "cli_x", "app_secret": "sec", "cli_path": _fake_cli(tmp_path, send_ok=False)},
+        _noop_msg,
+    )
+    assert await ch.send_text("oc_1", "hi") is False
+    assert "not in the chat" in ch.error
 
 
 def test_split_helpers():
@@ -309,6 +650,7 @@ class _FakeHost:
 
     def __init__(self):
         self.ran = []
+        self.actors = []
         self.sessions = {}
         self.decisions = []
         self.chats = []
@@ -321,8 +663,9 @@ class _FakeHost:
         self.sessions[name] = f"sess-{name}-new"
         return self.sessions[name]
 
-    async def channel_run(self, session_id, text):
+    async def channel_run(self, session_id, text, actor=""):
         self.ran.append((session_id, text))
+        self.actors.append((session_id, actor))
         return {"text": "回复：" + text}
 
     async def channel_stop(self, session_id):
@@ -334,15 +677,17 @@ class _FakeHost:
     async def channel_list_sessions(self):
         return [{"id": "s1", "title": "会话一"}]
 
-    async def channel_submit_decision(self, name, decision):
-        self.decisions.append((name, decision))
-        return bool(getattr(self, "waiting", False))
+    async def channel_submit_decision(self, name, decision, actor=""):
+        self.decisions.append((name, decision, actor))
+        if getattr(self, "actor_mismatch", False):
+            return {"hit": False, "actor_mismatch": True}
+        return {"hit": bool(getattr(self, "waiting", False))}
 
     def note_channel_chat(self, name, chat_id):
         self.chats.append((name, chat_id))
 
 
-class _RecordingChannel(TelegramChannel):
+class _RecordingChannel(FeishuChannel):
     """把发出的消息记下来，替代真实 HTTP。"""
 
     def __init__(self, config, on_message):
@@ -357,17 +702,17 @@ class _RecordingChannel(TelegramChannel):
 def _manager(config):
     host = _FakeHost()
     mgr = ChannelManager(host, lambda: config)
-    ch = _RecordingChannel(config.get("telegram") or {}, mgr._on_message)
-    mgr.channels["telegram"] = ch
+    ch = _RecordingChannel(config.get("feishu") or {}, mgr._on_message)
+    mgr.channels["feishu"] = ch
     return mgr, host, ch
 
 
 async def test_manager_ignores_unapproved_source_silently():
-    mgr, host, ch = _manager({"telegram": {"enabled": True, "allowed_ids": []}})
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": []}})
     from skysheep.channels.base import ChannelMessage
 
     await mgr._on_message(ChannelMessage(
-        channel="telegram", actor="9", chat_id="9", text="你好", approved=False,
+        channel="feishu", actor="9", chat_id="9", text="你好", approved=False,
     ))
     # 关键：不回复。回复等于向陌生人确认机器人是活的。
     assert ch.out == []
@@ -376,30 +721,30 @@ async def test_manager_ignores_unapproved_source_silently():
 
 
 async def test_manager_runs_prompt_for_approved_source():
-    mgr, host, ch = _manager({"telegram": {"enabled": True, "allowed_ids": ["9"]}})
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
     from skysheep.channels.base import ChannelMessage
 
     await mgr._on_message(ChannelMessage(
-        channel="telegram", actor="9", chat_id="9", text="看下项目", approved=True,
+        channel="feishu", actor="9", chat_id="9", text="看下项目", approved=True,
     ))
-    assert host.ran == [("sess-telegram", "看下项目")]
+    assert host.ran == [("sess-feishu", "看下项目")]
     assert ch.out and "回复：看下项目" in ch.out[0][1]
-    assert host.chats == [("telegram", "9")]
+    assert host.chats == [("feishu", "9")]
 
 
 async def test_manager_commands_do_not_hit_agent():
-    mgr, host, ch = _manager({"telegram": {"enabled": True, "allowed_ids": ["9"]}})
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
     from skysheep.channels.base import ChannelMessage
 
     await mgr._on_message(ChannelMessage(
-        channel="telegram", actor="9", chat_id="9", text="/status", approved=True,
+        channel="feishu", actor="9", chat_id="9", text="/status", approved=True,
     ))
     assert host.ran == []
     assert ch.out and "状态" in ch.out[0][1]
 
     ch.out.clear()
     await mgr._on_message(ChannelMessage(
-        channel="telegram", actor="9", chat_id="9", text="/nope", approved=True,
+        channel="feishu", actor="9", chat_id="9", text="/nope", approved=True,
     ))
     assert host.ran == []
     assert ch.out and "未知命令" in ch.out[0][1]
@@ -407,40 +752,172 @@ async def test_manager_commands_do_not_hit_agent():
 
 async def test_manager_routes_approval_reply_before_agent():
     """待审批时回 allow 必须是决定，不能当成新消息再跑一轮。"""
-    mgr, host, ch = _manager({"telegram": {"enabled": True, "allowed_ids": ["9"]}})
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
     host.waiting = True
     from skysheep.channels.base import ChannelMessage
 
     await mgr._on_message(ChannelMessage(
-        channel="telegram", actor="9", chat_id="9", text="allow", approved=True,
+        channel="feishu", actor="9", chat_id="9", text="allow", approved=True,
     ))
-    assert host.decisions == [("telegram", Decision.ALLOW_ONCE)]
+    assert host.decisions == [("feishu", Decision.ALLOW_ONCE, "9")]
     assert host.ran == [], "审批回复不应触发新一轮 Agent 运行"
 
     # 没有待审批项时，allow 这种词应作为普通消息正常送进 Agent
     host.waiting = False
     await mgr._on_message(ChannelMessage(
-        channel="telegram", actor="9", chat_id="9", text="allow", approved=True,
+        channel="feishu", actor="9", chat_id="9", text="allow", approved=True,
     ))
-    assert host.ran == [("sess-telegram", "allow")]
+    assert host.ran == [("sess-feishu", "allow")]
+
+
+async def test_manager_approval_rejected_for_non_initiator():
+    """审批决定只认发起人：群聊里别人的 allow/deny 不生效，也不当新消息跑掉。"""
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["group-1"]}})
+    host.waiting = True
+    host.actor_mismatch = True
+    from skysheep.channels.base import ChannelMessage
+
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="someone-else", chat_id="group-1", text="allow", approved=True,
+    ))
+    assert host.decisions == [("feishu", Decision.ALLOW_ONCE, "someone-else")]
+    assert host.ran == []
+    # 明确告知「不是发起人」，而不是装作无事发生
+    assert ch.out and "发起" in ch.out[-1][1]
+
+
+async def test_manager_passes_actor_to_run():
+    """一轮的发起人要透传给宿主：后端拿它绑定审批决定。"""
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="u-77", chat_id="9", text="看下项目", approved=True,
+    ))
+    assert host.actors == [("sess-feishu", "u-77")]
+
+
+async def test_manager_inbound_long_text_is_truncated():
+    """入站超长文本截断并注明，不能整段灌进上下文（平台单条可到 150 KB）。"""
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+    from skysheep.channels.manager import MAX_INBOUND_TEXT
+
+    big = "啊" * (MAX_INBOUND_TEXT + 5000)
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text=big, approved=True,
+    ))
+    sent = host.ran[0][1]
+    assert len(sent) < len(big)
+    assert sent.startswith("啊" * 100)
+    assert "截断" in sent
+
+
+async def test_manager_queues_message_with_ack():
+    """一轮跑着时新消息排队并回执「已收到」，不能无声无息。"""
+    import asyncio as _aio
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    release = _aio.Event()
+
+    async def slow_run(session_id, text, actor=""):
+        host.ran.append((session_id, text))
+        await release.wait()
+        return {"text": "done"}
+
+    host.channel_run = slow_run
+    first = _aio.create_task(mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="第一条", approved=True,
+    )))
+    await _aio.sleep(0)  # 让第一条拿到锁、跑进 slow_run
+    second = _aio.create_task(mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="第二条", approved=True,
+    )))
+    await _aio.sleep(0.05)
+    # 第二条应先收到排队回执，而不是等到第一轮结束
+    acks = [t for _, t in ch.out if "排队" in t]
+    assert acks, "排队消息应收到回执"
+    assert "前面还有 1 条" in acks[0]
+    release.set()
+    await _aio.gather(first, second)
+    assert host.ran and host.ran[-1][1] == "第二条"
+
+
+async def test_manager_rejects_when_queue_is_full():
+    """排队超过上限直接拒收并告知：每条排队消息都是一整轮的 token。"""
+    import asyncio as _aio
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+    from skysheep.channels.manager import MAX_PENDING_TURNS
+
+    release = _aio.Event()
+
+    async def slow_run(session_id, text, actor=""):
+        host.ran.append((session_id, text))
+        await release.wait()
+        return {"text": "done"}
+
+    host.channel_run = slow_run
+    tasks = [_aio.create_task(mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text=f"m{i}", approved=True,
+    ))) for i in range(MAX_PENDING_TURNS + 2)]
+    # 等锁分配稳定：1 条在跑 + MAX_PENDING_TURNS 条排队，其余被拒收
+    await _aio.sleep(0.1)
+    release.set()
+    await _aio.gather(*tasks)
+    rejected = [t for _, t in ch.out if "没有执行" in t]
+    assert len(rejected) == 1
+    assert "排队的消息太多" in rejected[0]
+
+
+async def test_manager_sends_busy_notice_for_slow_turn(monkeypatch):
+    """一轮超过阈值没回音要先补一条「还在处理」；快轮不发（不打扰）。"""
+    import asyncio as _aio
+
+    import skysheep.channels.manager as manager_mod
+
+    monkeypatch.setattr(manager_mod, "BUSY_NOTICE_DELAY", 0.05)
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    async def slow_run(session_id, text, actor=""):
+        await _aio.sleep(0.2)
+        return {"text": "done"}
+
+    host.channel_run = slow_run
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="慢任务", approved=True,
+    ))
+    assert any("还在处理" in t for _, t in ch.out)
+
+    # 快轮：完成得比阈值早，不发提醒
+    ch.out.clear()
+    monkeypatch.setattr(manager_mod, "BUSY_NOTICE_DELAY", 30.0)
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="快任务", approved=True,
+    ))
+    assert not any("还在处理" in t for _, t in ch.out)
 
 
 async def test_manager_reports_run_error_back_to_chat():
-    mgr, host, ch = _manager({"telegram": {"enabled": True, "allowed_ids": ["9"]}})
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
     from skysheep.channels.base import ChannelMessage
 
-    async def boom(session_id, text):
+    async def boom(session_id, text, actor=""):
         raise RuntimeError("模型未配置")
 
     host.channel_run = boom
     await mgr._on_message(ChannelMessage(
-        channel="telegram", actor="9", chat_id="9", text="你好", approved=True,
+        channel="feishu", actor="9", chat_id="9", text="你好", approved=True,
     ))
     assert ch.out and "模型未配置" in ch.out[0][1]
 
 
 async def test_manager_disabled_channel_is_not_started():
-    mgr = ChannelManager(_FakeHost(), lambda: {"telegram": {"enabled": False, "token": "t"}})
+    mgr = ChannelManager(_FakeHost(), lambda: {"feishu": {"enabled": False, "app_id": "a"}})
     await mgr.restart()
     status = mgr.status()
     assert status["channels"][0]["running"] is False
@@ -448,11 +925,12 @@ async def test_manager_disabled_channel_is_not_started():
 
 
 async def test_manager_enabled_without_token_reports_error():
-    mgr = ChannelManager(_FakeHost(), lambda: {"telegram": {"enabled": True, "token": ""}})
+    mgr = ChannelManager(_FakeHost(), lambda: {"feishu": {"enabled": True, "app_id": "", "app_secret": ""}})
     await mgr.restart()
     item = mgr.status()["channels"][0]
     assert item["running"] is False
-    assert "Token" in item["error"]
+    # 错误文案是平台无关的兑底：不同平台缺的凭据字段不同，不能写死字段名
+    assert "凭据" in item["error"]
     await mgr.stop()
 
 
@@ -465,22 +943,22 @@ async def test_onboarding_claim_flow_after_empty_allowlist_enable():
     """
     from skysheep.channels.base import ChannelMessage
 
-    config = {"telegram": {"enabled": True, "token": "t", "allowed_ids": []}}
+    config = {"feishu": {"enabled": True, "app_id": "a", "app_secret": "b", "allowed_ids": []}}
     mgr, host, ch = _manager(config)
 
     # 启用后机器人开始工作；第一条消息来自名单外 → 只记录，不回复、不执行
     await mgr._on_message(ChannelMessage(
-        channel="telegram", actor="777", chat_id="777", text="你好", approved=False))
+        channel="feishu", actor="777", chat_id="777", text="你好", approved=False))
     assert ch.out == [] and host.ran == []
     seen = mgr.status()["channels"][0]["seen_sources"]
     assert [s["chat_id"] for s in seen] == ["777"]
 
     # 用户在界面上点「加入允许名单」→ 名单更新（模拟 channel.save 后的重建）
-    config["telegram"]["allowed_ids"] = ["777"]
+    config["feishu"]["allowed_ids"] = ["777"]
     mgr2, host2, ch2 = _manager(config)
     await mgr2._on_message(ChannelMessage(
-        channel="telegram", actor="777", chat_id="777", text="看下项目", approved=True))
-    assert host2.ran == [("sess-telegram", "看下项目")]
+        channel="feishu", actor="777", chat_id="777", text="看下项目", approved=True))
+    assert host2.ran == [("sess-feishu", "看下项目")]
     assert ch2.out and ch2.out[0][0] == "777"
 
 
@@ -488,10 +966,12 @@ async def test_enabled_channel_with_empty_allowlist_stays_silent():
     """空名单运行中：陌生来源反复发消息也绝不回复、绝不执行（安全边界不因放开启用而松动）。"""
     from skysheep.channels.base import ChannelMessage
 
-    mgr, host, ch = _manager({"telegram": {"enabled": True, "token": "t", "allowed_ids": []}})
+    mgr, host, ch = _manager(
+        {"feishu": {"enabled": True, "app_id": "a", "app_secret": "b", "allowed_ids": []}}
+    )
     for i in range(3):
         await mgr._on_message(ChannelMessage(
-            channel="telegram", actor="e", chat_id="e", text=f"第{i}条", approved=False))
+            channel="feishu", actor="e", chat_id="e", text=f"第{i}条", approved=False))
     assert ch.out == [] and host.ran == []
     seen = mgr.status()["channels"][0]["seen_sources"]
     assert len(seen) == 1 and seen[0]["count"] == 3
@@ -507,14 +987,14 @@ def test_channels_config_defaults_and_roundtrip(home):
     assert cfg.channels.platforms == {}
     assert cfg.channels.approve_timeout == 120
 
-    update_config_section("channels", {"platforms": {"telegram": {
-        "enabled": True, "token": "abc", "allowed_ids": ["1", "2"],
+    update_config_section("channels", {"platforms": {"feishu": {
+        "enabled": True, "app_id": "cli_x", "app_secret": "sec", "allowed_ids": ["1", "2"],
     }}})
     cfg2 = load_config()
-    tg = cfg2.channels.platforms["telegram"]
-    assert tg["enabled"] is True
-    assert tg["token"] == "abc"
-    assert tg["allowed_ids"] == ["1", "2"]
+    fs = cfg2.channels.platforms["feishu"]
+    assert fs["enabled"] is True
+    assert fs["app_id"] == "cli_x"
+    assert fs["allowed_ids"] == ["1", "2"]
 
 
 def test_channels_config_normalizes_numeric_ids(home):
@@ -525,13 +1005,13 @@ def test_channels_config_normalizes_numeric_ids(home):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
         "[channels]\napprove_timeout = 60\n"
-        "[channels.platforms.telegram]\nenabled = true\ntoken = \"t\"\n"
+        "[channels.platforms.feishu]\nenabled = true\napp_id = \"a\"\napp_secret = \"b\"\n"
         "allowed_ids = [12345, 67890]\n",
         encoding="utf-8",
     )
     cfg = load_config()
     assert cfg.channels.approve_timeout == 60
-    assert cfg.channels.platforms["telegram"]["allowed_ids"] == ["12345", "67890"]
+    assert cfg.channels.platforms["feishu"]["allowed_ids"] == ["12345", "67890"]
 
 
 def test_channels_config_tolerates_garbage(home):
@@ -541,7 +1021,7 @@ def test_channels_config_tolerates_garbage(home):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
         "[channels]\napprove_timeout = \"not-a-number\"\n"
-        "[channels.platforms]\ntelegram = \"这不是配置\"\n",
+        "[channels.platforms]\nfeishu = \"这不是配置\"\n",
         encoding="utf-8",
     )
     cfg = load_config()  # 不能抛
@@ -582,61 +1062,106 @@ def test_channel_status_over_ws(client):
         frame = _ws_call(ws, "c1", "channel.status")
         assert frame["ok"] is True
         data = frame["result"]
-        assert "telegram" in data["supported"]
+        assert "feishu" in data["supported"]
         assert data["approve_timeout"] == 120
+
+
+def test_channel_status_hides_unsupported_platforms(client, home):
+    """升级后配置里残留的已下线平台（如旧 telegram 段）不应再渲染成卡片。
+
+    它没有适配器，列出来就是一个永远启不动的死入口；但也不能去改用户配置文件。
+    """
+    from skysheep.config import update_config_section
+
+    update_config_section("channels", {"platforms": {
+        "telegram": {"enabled": True, "token": "stale", "allowed_ids": ["1"]},
+    }})
+    with client.websocket_connect("/ws") as ws:
+        names = [c["name"] for c in _ws_call(ws, "c1", "channel.status")["result"]["channels"]]
+    assert "telegram" not in names
+    assert {"feishu", "weixin"} <= set(names)
 
 
 def test_channel_enable_requires_token_and_allowlist(client, home):
     with client.websocket_connect("/ws") as ws:
-        # 没填 token
-        frame = _ws_call(ws, "c1", "channel.enable", {"name": "telegram"})
+        # 飞书的凭据是两个字段：先都不填
+        frame = _ws_call(ws, "c1", "channel.enable", {"name": "feishu"})
         assert frame["ok"] is False
-        assert "Token" in frame["error"]
+        assert "App ID" in frame["error"]
+        # 只填 App ID 仍不能启用
+        _ws_call(ws, "c2", "channel.save", {"name": "feishu", "app_id": "cli_x"})
+        frame = _ws_call(ws, "c3", "channel.enable", {"name": "feishu"})
+        assert frame["ok"] is False
+        assert "App Secret" in frame["error"]
 
 
 def test_channel_enable_with_empty_allowlist_starts_polling(client, home):
     """名单为空也允许启用：chat id 只能由运行中的机器人记进「发现的来源」，
     若启用时要求名单非空，首次配置就死锁（机器人不跑 → 永远收不到第一条消息）。
     安全语义不变：空名单 = 拒绝一切，由消息层强制，机器人对陌生人保持沉默。"""
+    cli = _fake_cli(home, events=[])   # home 同时是 tmp_path，假 CLI 与配置都落在隔离目录
     with client.websocket_connect("/ws") as ws:
-        _ws_call(ws, "c1", "channel.save", {"name": "telegram", "token": "abc"})
-        frame = _ws_call(ws, "c2", "channel.enable", {"name": "telegram"})
+        _ws_call(ws, "c1", "channel.save",
+                 {"name": "feishu", "app_id": "a", "app_secret": "b", "cli_path": cli})
+        frame = _ws_call(ws, "c2", "channel.enable", {"name": "feishu"})
         assert frame["ok"] is True
-        tg = next(c for c in frame["result"]["channels"] if c["name"] == "telegram")
-        assert tg["enabled"] is True
-        assert tg["running"] is True, "启用后必须真的开始轮询，否则永远发现不了来源"
-        assert tg["allowed_ids"] == []
+        fs = next(c for c in frame["result"]["channels"] if c["name"] == "feishu")
+        assert fs["enabled"] is True
+        assert fs["running"] is True, "启用后必须真的建立长连接，否则永远发现不了来源"
+        assert fs["allowed_ids"] == []
 
 
 def test_channel_enable_persists_and_disables(client, home):
     with client.websocket_connect("/ws") as ws:
         _ws_call(ws, "c1", "channel.save", {
-            "name": "telegram", "token": "abc", "allowed_ids": "12345\n67890",
+            "name": "feishu", "app_id": "cli_x", "app_secret": "sec",
+            "allowed_ids": "12345\n67890",
         })
-        frame = _ws_call(ws, "c2", "channel.enable", {"name": "telegram"})
+        frame = _ws_call(ws, "c2", "channel.enable", {"name": "feishu"})
         assert frame["ok"] is True
-        tg = next(c for c in frame["result"]["channels"] if c["name"] == "telegram")
-        assert tg["enabled"] is True
-        assert tg["allowed_ids"] == ["12345", "67890"]
-        # token 不回显，只回「已填」
-        assert tg["has_token"] is True
-        assert "token" not in tg
+        fs = next(c for c in frame["result"]["channels"] if c["name"] == "feishu")
+        assert fs["enabled"] is True
+        assert fs["allowed_ids"] == ["12345", "67890"]
+        # 凭据不回显，只回「已填」
+        assert fs["has_app_id"] is True and fs["has_app_secret"] is True
+        assert "app_secret" not in fs
 
-        frame = _ws_call(ws, "c3", "channel.disable", {"name": "telegram"})
-        tg = next(c for c in frame["result"]["channels"] if c["name"] == "telegram")
-        assert tg["enabled"] is False
+        frame = _ws_call(ws, "c3", "channel.disable", {"name": "feishu"})
+        fs = next(c for c in frame["result"]["channels"] if c["name"] == "feishu")
+        assert fs["enabled"] is False
 
 
 def test_channel_save_does_not_wipe_token_when_omitted(client, home):
     """界面保存允许名单时不该把已存的 Token 清掉。"""
     with client.websocket_connect("/ws") as ws:
-        _ws_call(ws, "c1", "channel.save", {"name": "telegram", "token": "secret"})
+        _ws_call(ws, "c1", "channel.save", {"name": "feishu", "app_id": "cli_x", "app_secret": "sec"})
         frame = _ws_call(ws, "c2", "channel.save", {
-            "name": "telegram", "allowed_ids": "999",
+            "name": "feishu", "allowed_ids": "999",
         })
-        tg = next(c for c in frame["result"]["channels"] if c["name"] == "telegram")
-        assert tg["has_token"] is True
-        assert tg["allowed_ids"] == ["999"]
+        fs = next(c for c in frame["result"]["channels"] if c["name"] == "feishu")
+        assert fs["has_app_id"] is True and fs["has_app_secret"] is True
+        assert fs["allowed_ids"] == ["999"]
+
+
+def test_channel_save_applies_allowlist_to_running_adapter(client, home):
+    """保存名单必须重建适配器（热生效）：适配器拿的是构造时那份配置，
+    不重建的话「加入允许名单」后机器人仍用启动时的旧名单判断，
+    消息继续被忽略——名单存进去了，机器人却永远不回话。"""
+    cli = _fake_cli(home, events=[])
+    with client.websocket_connect("/ws") as ws:
+        _ws_call(ws, "c1", "channel.save",
+                 {"name": "feishu", "app_id": "cli_x", "app_secret": "sec",
+                  "cli_path": cli})
+        _ws_call(ws, "c2", "channel.enable", {"name": "feishu"})
+        # 启用后（名单为空）再保存名单 —— 不点启用开关，只点保存
+        frame = _ws_call(ws, "c3", "channel.save", {"name": "feishu", "allowed_ids": "ou_ok"})
+        fs = next(c for c in frame["result"]["channels"] if c["name"] == "feishu")
+        assert fs["enabled"] is True and fs["running"] is True
+        # 重建后的适配器必须看到新名单：直接问正在跑的实例
+        backend = client.app.state.backend
+        ch = backend.channels.channels["feishu"]
+        assert ch.is_allowed("ou_ok", "oc_any") is True
+        assert ch.is_allowed("ou_stranger", "oc_other") is False
 
 
 def test_channel_set_timeout_clamps(client):
@@ -663,7 +1188,7 @@ def test_channel_session_binding_survives_runtime_loss(home):
         )
         await be.setup()
         try:
-            sid = await be.channel_ensure_session("telegram")
+            sid = await be.channel_ensure_session("feishu")
             assert sid in be.runtimes
             # 模拟 runtime 丢失（重启后尚未重建）
             be.runtimes.clear()
@@ -671,7 +1196,7 @@ def test_channel_session_binding_survives_runtime_loss(home):
             be._channel_names.clear()
 
             # ensure 要能补建
-            again = await be.channel_ensure_session("telegram")
+            again = await be.channel_ensure_session("feishu")
             assert again == sid
             assert sid in be.runtimes
 
@@ -719,7 +1244,7 @@ def test_channel_remote_cannot_change_settings(home, monkeypatch):
             frame = _ws_call(ws, "c1", "channel.status")
             assert frame["ok"] is True
             # 改配置必须被拒
-            frame = _ws_call(ws, "c2", "channel.enable", {"name": "telegram"})
+            frame = _ws_call(ws, "c2", "channel.enable", {"name": "feishu"})
             assert frame["ok"] is False
             assert "桌面端" in frame["error"]
 
@@ -727,6 +1252,10 @@ def test_channel_remote_cannot_change_settings(home, monkeypatch):
 # ---------- 微信 iLink 渠道 ----------
 # 协议形状取自腾讯官方 npm 包 @tencent-weixin/openclaw-weixin 的源码，
 # 用 httpx.MockTransport 复刻响应，不打真实网络。
+
+
+def _mock_transport(handler):
+    return httpx.MockTransport(handler)
 
 
 def _wx(config=None, on_message=None):
@@ -1046,7 +1575,7 @@ async def test_channels_do_not_share_sessions(home):
     """每个渠道要有自己的会话与会话标题，不能串台。
 
     这个 bug 真实发生过：路由用适配器的 name 属性，而字典键用注册键，
-    两者不一致时微信的回复会落到 Telegram 的会话里（/status 显示错平台）。
+    两者不一致时微信的回复会落到飞书的会话里（/status 显示错平台）。
     现在由 ChannelManager 在注册时把字典键写回适配器实例，此处锁住该行为。
     """
     from skysheep.channels.base import ChannelMessage
@@ -1063,27 +1592,27 @@ async def test_channels_do_not_share_sessions(home):
     try:
         mgr = be.channels
         mgr.channels.clear()
-        tg = _RecordingChannel({"allowed_ids": ["t1"]}, mgr._on_message)
+        fs = _RecordingChannel({"app_id": "a", "app_secret": "b", "allowed_ids": ["t1"]}, mgr._on_message)
         wx = _RecordingChannel({"bot_token": "k", "allowed_ids": ["w1"]}, mgr._on_message)
-        tg.name = "telegram"
+        fs.name = "feishu"
         wx.name = "weixin"
-        mgr.channels["telegram"] = tg
+        mgr.channels["feishu"] = fs
         mgr.channels["weixin"] = wx
 
         await mgr._on_message(ChannelMessage(
             channel="weixin", actor="w1", chat_id="w1", text="你好", approved=True))
         await mgr._on_message(ChannelMessage(
-            channel="telegram", actor="t1", chat_id="t1", text="你好", approved=True))
+            channel="feishu", actor="t1", chat_id="t1", text="你好", approved=True))
 
         sid_wx = await be.store.get_channel_binding("weixin")
-        sid_tg = await be.store.get_channel_binding("telegram")
-        assert sid_wx and sid_tg
-        assert sid_wx != sid_tg, "两个渠道必须是独立会话"
+        sid_fs = await be.store.get_channel_binding("feishu")
+        assert sid_wx and sid_fs
+        assert sid_wx != sid_fs, "两个渠道必须是独立会话"
 
         sess_wx = await be.store.get_session(sid_wx)
-        sess_tg = await be.store.get_session(sid_tg)
+        sess_fs = await be.store.get_session(sid_fs)
         assert "weixin" in sess_wx.title
-        assert "telegram" in sess_tg.title
+        assert "feishu" in sess_fs.title
     finally:
         await be.shutdown()
 
@@ -1092,8 +1621,83 @@ async def test_manager_sets_adapter_name_from_registry_key():
     """注册键要写回适配器实例，让事件里的 channel 字段与字典键一致。"""
     from skysheep.channels.manager import ChannelManager
 
-    mgr = ChannelManager(_FakeHost(), lambda: {"telegram": {"enabled": False, "token": "t"}})
+    mgr = ChannelManager(_FakeHost(), lambda: {"feishu": {"enabled": False, "app_id": "a"}})
     await mgr.restart()
-    ch = mgr.channels["telegram"]
-    assert ch.name == "telegram"
+    ch = mgr.channels["feishu"]
+    assert ch.name == "feishu"
     await mgr.stop()
+
+
+def test_channel_sessions_live_in_fixed_remote_project(home):
+    """渠道会话固定归到「远程连接」项目：不随当前项目走、项目不可删、归属校验放行。
+
+    「远程连接」是哨兵项目（无真实目录）：channel_ensure_session / channel_new_session
+    建的会话都挂它名下；桌面端按 id 打开（_get_owned_session）时要像快聊一样放行，
+    否则侧栏里看得见点不动；project.delete 必须拒绝删除这个固定项目。
+    """
+    import asyncio
+
+    from skysheep.messages import TextBlock
+    from skysheep.models.fake import FakeProvider
+    from skysheep.server.backend import ServerBackend
+    from skysheep.session.store import SessionStore
+
+    async def scenario():
+        be = ServerBackend(
+            working_dir=home / "proj",
+            provider_name="fake",
+            provider_factory=lambda: FakeProvider([]).with_default([TextBlock(text="好")]),
+        )
+        await be.setup()
+        try:
+            # 启动目录会自动登记为当前项目：渠道会话仍归「远程连接」，不落当前项目
+            assert be.project is not None
+            sid = await be.channel_ensure_session("feishu")
+            sess = await be.store.get_session(sid)
+            remote = await be.store.ensure_remote_project()
+            assert sess.project_id == remote.id, "渠道会话必须挂在「远程连接」下"
+            assert sess.project_id != be.project.id, "不能挂在桌面当前项目下"
+
+            # 幂等：重复 ensure 只有一条「远程连接」记录
+            again = await be.store.ensure_remote_project()
+            assert again.id == remote.id
+            all_projects = await be.store.list_projects()
+            assert sum(1 for p in all_projects if p.root_path == SessionStore.REMOTE_PROJECT_PATH) == 1
+
+            # 渠道 /new 也归「远程连接」，即使桌面正开着别的（当前）项目
+            new_sid = await be.channel_new_session("feishu")
+            new_sess = await be.store.get_session(new_sid)
+            assert new_sess.project_id == remote.id
+            assert new_sid != sid
+
+            # 桌面端按 id 打开渠道会话（当前项目是启动目录，会话属于远程项目）：放行
+            owned = await be._get_owned_session(sid)
+            assert owned.id == sid
+
+            # 固定项目不可删除
+            try:
+                await be.delete_project(remote.id)
+                raise AssertionError("删除「远程连接」应当被拒绝")
+            except RuntimeError as e:
+                assert "远程连接" in str(e)
+
+            # 渠道自愈的归属校验认「远程连接」：runtime 丢了也能补建并跑通
+            be.runtimes.clear()
+            be._channel_names.clear()
+            result = await be.channel_run(new_sid, "你好")
+            assert "error" not in result, result
+        finally:
+            await be.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_channel_allowed_tools_warning():
+    """渠道预授权写/执行类工具时给出明确告警（无人值守 = 任意命令）。"""
+    from skysheep.server.backend import _channel_allowed_tools_warning
+
+    assert _channel_allowed_tools_warning([]) == ""
+    assert _channel_allowed_tools_warning(["read_file", "glob"]) == ""
+    msg = _channel_allowed_tools_warning(["read_file", "run_command", "write_file"])
+    assert "run_command" in msg and "write_file" in msg
+    assert "无人值守" in msg

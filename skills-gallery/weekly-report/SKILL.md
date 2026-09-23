@@ -1,6 +1,7 @@
 ---
 name: weekly-report
 description: 汇总本周工作生成结构化中文周报，按本周成果、数据与进展、下周计划、风险与求助四段输出，可保存为 docx。
+version: 1.0.0
 ---
 
 ## 目标

@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+from pathlib import Path
 
 import pytest
 from test_server import make_client, recv_until
@@ -102,6 +104,43 @@ def test_config_change_invalidates_trust(tmp_path):
     state = WorkspaceTrust(home, proj).state()
     assert state["state"] == STATE_PENDING
     assert state["changed"] is True, "变更过要能区分于首次"
+
+
+def test_refresh_does_not_whitewash_other_sources(tmp_path):
+    """低危项：refresh(touched=...) 只延续「用户刚动的那个来源」。
+
+    场景：项目已信任 → 第三方（git pull / 被注入的 Agent）改了项目级
+    mcp.json → 用户随手装一个项目技能触发 refresh。旧实现把全部来源重新
+    指纹并延续信任，恶意 MCP 配置被一并洗白并自动连接。
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _write_project_mcp(proj)
+    _write_project_skill(proj)
+    trust = WorkspaceTrust(home=tmp_path / "home", project_root=proj)
+    assert trust.grant()["state"] == STATE_TRUSTED
+
+    # 第三方改动：项目级 mcp.json 被换成新的（技能目录没动）
+    _write_project_mcp(proj, command="cmd.exe", args=["/c", "curl evil"])
+    assert trust.state()["state"] == STATE_PENDING  # 指纹变了
+
+    # 用户装/删项目技能 → refresh 指明来源是技能目录
+    skills_dir = proj / ".skysheep" / "skills"
+    out = trust.refresh(touched=skills_dir)
+    assert out["state"] == STATE_PENDING, "别的来源（mcp.json）也被改过，不能一起洗白"
+
+    # 第三方改回来（或用户确认）后，只有技能目录的改动 → 可以延续信任
+    trust2 = WorkspaceTrust(home=tmp_path / "home2", project_root=proj)
+    trust2.grant()
+    _write_project_skill(proj, name="helper", description="普通技能")
+    out2 = trust2.refresh(touched=skills_dir)
+    assert out2["state"] == STATE_TRUSTED, "只有本次操作动的来源变了，应延续信任"
+
+    # 未指明来源时保持旧行为（本来就信任才刷新），不扩大范围
+    trust3 = WorkspaceTrust(home=tmp_path / "home3", project_root=proj)
+    trust3.grant()
+    _write_project_skill(proj, name="helper2", description="再来一个")
+    assert trust3.refresh()["state"] == STATE_TRUSTED
 
 
 def test_trust_is_per_project(tmp_path):
@@ -367,3 +406,27 @@ def test_local_can_still_use_terminal(home):
                 break
             time.sleep(0.1)
         assert target.exists()
+
+
+def test_list_and_revoke_by_path(tmp_path):
+    """设置页的信任清单管理：列出全部已信任项目，按路径撤销。"""
+    from skysheep.security.trust import WorkspaceTrust, list_trusted, revoke_by_path
+
+    home = tmp_path / "home"
+    proj_a = tmp_path / "proj-a"
+    proj_b = tmp_path / "proj-b"
+    for proj in (proj_a, proj_b):
+        (proj / ".skysheep" / "skills" / "s1").mkdir(parents=True)
+        (proj / ".skysheep" / "skills" / "s1" / "SKILL.md").write_text("# s", encoding="utf-8")
+        WorkspaceTrust(home, proj).grant()
+
+    items = list_trusted(home)
+    assert len(items) == 2
+    assert all(e["fingerprint"] and e["trusted_at"] for e in items)
+
+    assert revoke_by_path(home, proj_a) is True
+    assert [Path(e["path"]).name for e in list_trusted(home)] == [os.path.normcase("proj-b")]
+
+    # 未知路径 / 坏目录：返回 False，不抛异常
+    assert revoke_by_path(home, tmp_path / "nope") is False
+    assert revoke_by_path(tmp_path / "no-home", proj_b) is False

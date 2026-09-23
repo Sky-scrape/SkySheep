@@ -49,6 +49,10 @@ class Skill(BaseModel):
     # 使用范围（只对 source == "global" 有意义；项目级技能由 loader 置为 "project"）
     scope: str = SCOPE_ALL
     scope_projects: list[str] = []
+    # 技能版本（frontmatter 的 version 字段，可选）：技能广场拿它和索引版本比，提示可更新
+    version: str = ""
+    # 安装来源（installer 写进技能目录的 .source.json，可选）：广场条目据此判定「已安装」
+    source_url: str = ""
 
 
 def _norm_path(p: str | Path) -> str:
@@ -120,6 +124,13 @@ MAX_SKILL_DESCRIPTION_CHARS = 1000
 # 技能名同样会拼进系统提示词的 Skills 清单（作为 load_skill 的参数），也一并限长。
 MAX_SKILL_NAME_CHARS = 120
 
+# version / 来源标记只进界面展示与广场比对，不进系统提示词，限个合理长度防脏数据即可。
+MAX_SKILL_VERSION_CHARS = 32
+
+# 安装来源标记：installer 从网址安装时写进技能目录，记录安装时的广场条目 url。
+# 独立小文件而不是改 SKILL.md——技能正文是第三方内容，我们不修改它。
+SOURCE_MARKER = ".source.json"
+
 
 def _sanitize_name(name: str) -> str:
     """技能名归一：去掉换行 / 首尾空白，并限长。
@@ -161,6 +172,16 @@ def _sanitize_description(text: str) -> str:
     return text_out
 
 
+def _read_source_marker(skill_dir: Path) -> str:
+    """读技能目录的安装来源标记（.source.json 的 market_url）；没有/坏了返回空串。"""
+    try:
+        data = json.loads((skill_dir / SOURCE_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    url = data.get("market_url") if isinstance(data, dict) else None
+    return str(url or "").strip()[:500]
+
+
 def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
     md = skill_dir / "SKILL.md"
     if not md.is_file():
@@ -174,10 +195,13 @@ def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
     description = meta.get("description")
     if not description and body:
         description = body.splitlines()[0][:120]
+    version = " ".join((meta.get("version") or "").split())[:MAX_SKILL_VERSION_CHARS]
     return Skill(
         name=_sanitize_name(name),
         description=_sanitize_description(description or ""),
         path=md, source=source,
+        version=version,
+        source_url=_read_source_marker(skill_dir),
     )
 
 
@@ -204,6 +228,14 @@ class SkillLoader:
     # ---- 发现 ----
 
     def discover(self) -> list[Skill]:
+        """发现全局与项目技能。
+
+        同名优先级：**全局优先，项目级同名技能被遮蔽**（安全审查低危项：此前
+        没写明，且与 MCP「项目覆盖全局」的惯例相反）。这是有意的：项目技能来自
+        仓库，只有在工作区被信任后才会被发现；让仓库里的技能覆盖用户自己的全局
+        技能，等于把「项目能改模型行为」的边界又扩大一圈。需要按项目定制时，
+        给技能换个名字，或用技能范围的 scope 机制限定全局技能的生效项目。
+        """
         self._skills = {}
         for source, base in (("global", self.global_dir), ("project", self.project_dir)):
             if not base or not base.is_dir():

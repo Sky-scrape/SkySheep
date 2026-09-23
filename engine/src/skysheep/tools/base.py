@@ -59,6 +59,7 @@ class ToolContext:
         *,
         supports_vision: bool = True,
         restrict_to_workdir: bool = False,
+        session_id: str = "",
     ) -> None:
         self.working_dir = working_dir
         self.aborted = aborted or asyncio.Event()
@@ -67,9 +68,19 @@ class ToolContext:
         self.supports_vision = supports_vision
         # 只允许访问工作目录内的路径（设置里可开；默认关，保持"能做任意文件活"的能力）
         self.restrict_to_workdir = restrict_to_workdir
+        # 本次工具调用所属的会话：子代理派生（用量/任务簿归属）、后台进程
+        # 注册表（读写归属校验）都从 ctx 取，不再依赖任何全局「当前会话」指针
+        # ——并行会话各跑各的轮时，全局指针会被后来者覆盖导致串台。
+        self.session_id = session_id
         # 工具产生的图片附件（如 screenshot 的截图）：agent 循环在 tool_result
         # 之后把它们作为 user 消息并入历史，模型才能"看见"图像。
         self.images: list[ImageBlock] = []
+        # 写工具（write_file / edit_file / write_document）本次调用产生的 diff，
+        # agent 循环在工具返回后立即取走放进 ToolCallFinished 事件。挂在 ctx
+        # 而不是工具实例上：同一套工具实例会被并行任务共享（任务簿缓存、
+        # 自定义子代理复用主注册表），实例属性会把 A 任务的 diff 给到 B 任务。
+        # 只在串行路径上由写工具写入——并发批只收 READONLY 工具，不会写它。
+        self.last_diff: str = ""
 
 
 class Tool(abc.ABC):

@@ -262,6 +262,7 @@ class MemberResult:
     error: str = ""
     input_tokens: int = 0  # 累计（多轮辩论时含各轮；含重试中已上报的部分）
     output_tokens: int = 0
+    cached_tokens: int = 0  # 命中提示词缓存的部分（含在 input_tokens 里）
 
     @property
     def label(self) -> str:
@@ -287,6 +288,7 @@ class RoundtableOutcome:
     # 融合轮（主席）的用量单独放：调用方把成员逐条入账、融合记主席名下
     chair_input_tokens: int = 0
     chair_output_tokens: int = 0
+    chair_cached_tokens: int = 0
     # 主席标识（backend 填，供 usage_rows 与展示）
     chair_provider: str = ""
     chair_model: str = ""
@@ -307,6 +309,7 @@ def usage_rows(outcome: RoundtableOutcome) -> list[dict]:
             "model": r.spec.model,
             "input_tokens": r.input_tokens,
             "output_tokens": r.output_tokens,
+            "cached_tokens": r.cached_tokens,
         }
         for r in outcome.members
         if r.input_tokens or r.output_tokens
@@ -317,6 +320,7 @@ def usage_rows(outcome: RoundtableOutcome) -> list[dict]:
             "model": outcome.chair_model,
             "input_tokens": outcome.chair_input_tokens,
             "output_tokens": outcome.chair_output_tokens,
+            "cached_tokens": outcome.chair_cached_tokens,
         })
     return rows
 
@@ -386,6 +390,7 @@ async def _run_member(
             elif isinstance(pe, ProviderDone):
                 result.input_tokens += pe.input_tokens
                 result.output_tokens += pe.output_tokens
+                result.cached_tokens += pe.cached_tokens
 
     async def consume() -> None:
         if semaphore is not None:
@@ -505,18 +510,18 @@ async def _run_fusion(
     messages: list[Message],
     timeout_s: int,
     emit: EmitFn,
-) -> tuple[str, str, int, int]:
-    """主席融合：流式产出最终答案。返回 (text, error, input_tokens, output_tokens)。
+) -> tuple[str, str, int, int, int]:
+    """主席融合：流式产出最终答案。返回 (text, error, input_tokens, output_tokens, cached_tokens)。
 
     失败但已有部分文本时，保留部分文本一并返回（用户已经看到了，落库保持一致）。
     取消时同样返回已产出的部分文本（error="cancelled"），由调用方决定落库；
     不把 CancelledError 向上抛，避免丢失已流出的内容。
     """
     parts: list[str] = []
-    usage_in = usage_out = 0
+    usage_in = usage_out = usage_cached = 0
 
     async def consume() -> None:
-        nonlocal usage_in, usage_out
+        nonlocal usage_in, usage_out, usage_cached
         async for pe in chair.stream(
             messages, [], effort=resolve_auto_effort(chair, messages),
         ):
@@ -526,16 +531,17 @@ async def _run_fusion(
             elif isinstance(pe, ProviderDone):
                 usage_in += pe.input_tokens
                 usage_out += pe.output_tokens
+                usage_cached += pe.cached_tokens
 
     error = ""
     try:
         for attempt in range(1, MAX_STREAM_RETRIES + 2):
             parts = []
-            usage_in = usage_out = 0
+            usage_in = usage_out = usage_cached = 0
             retryable = False
             try:
                 await asyncio.wait_for(consume(), timeout=timeout_s)
-                return "".join(parts), "", usage_in, usage_out
+                return "".join(parts), "", usage_in, usage_out, usage_cached
             except TimeoutError:
                 error = f"融合超时（>{timeout_s} 秒）"
                 retryable = not parts and attempt <= MAX_STREAM_RETRIES
@@ -551,9 +557,9 @@ async def _run_fusion(
     except asyncio.CancelledError:
         # 用户取消：已流出的部分文本交给调用方落库
         asyncio.current_task().uncancel()
-        return "".join(parts), "cancelled", usage_in, usage_out
+        return "".join(parts), "cancelled", usage_in, usage_out, usage_cached
 
-    return "".join(parts), error, usage_in, usage_out
+    return "".join(parts), error, usage_in, usage_out, usage_cached
 
 
 async def _run_round(
@@ -618,6 +624,7 @@ async def _run_round(
         if i < len(prev):
             r.input_tokens += prev[i].input_tokens
             r.output_tokens += prev[i].output_tokens
+            r.cached_tokens += prev[i].cached_tokens
         return r
 
     return list(await asyncio.gather(*(run_one(i) for i in range(len(members)))))
@@ -755,12 +762,13 @@ async def run_roundtable(
     fusion_messages = build_fusion_messages(
         system_text, history, user_text, results, total_char_budget=fusion_budget,
     )
-    fused, error, usage_in, usage_out = await _run_fusion(
+    fused, error, usage_in, usage_out, usage_cached = await _run_fusion(
         chair, fusion_messages, max(timeout_s * 2, 300), emit,
     )
     outcome.fused_text = fused
     outcome.chair_input_tokens = usage_in
     outcome.chair_output_tokens = usage_out
+    outcome.chair_cached_tokens = usage_cached
     if error == "cancelled":
         outcome.status = "cancelled"
         return outcome

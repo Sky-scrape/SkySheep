@@ -26,6 +26,7 @@ from skysheep.tools.web import (
     WebFetchTool,
     _PinnedBackend,
     _resolve_public_ips,
+    _safe_charset,
 )
 
 REAL_GETADDRINFO = socket.getaddrinfo
@@ -200,5 +201,58 @@ def test_oversized_body_is_aborted_while_streaming(tmp_path):
         out = asyncio.run(tool.run(WebFetchArgs(url=f"http://127.0.0.1:{port}/big"), ctx))
         assert "已截断" in out, "超限响应应带上截断说明"
         assert len(out) < MAX_RESPONSE_BYTES, "不会把整个超大响应带进上下文"
+    finally:
+        srv.shutdown()
+
+
+# ---- 低危项：charset 与 URL 凭据 ----
+
+
+def test_safe_charset_falls_back_on_bogus_name():
+    """对端声明的 charset 认不出来时回 utf-8，不让 LookupError 穿透成 500。"""
+    assert _safe_charset("gbk") == "gbk"
+    assert _safe_charset("UTF-8") == "UTF-8"
+    assert _safe_charset(None) == "utf-8"
+    assert _safe_charset("") == "utf-8"
+    assert _safe_charset("x-nonexistent-charset") == "utf-8"
+    assert _safe_charset("utf-8" + chr(0) + "evil") == "utf-8"
+
+
+class _EchoHeaderHandler(BaseHTTPRequestHandler):
+    seen: list = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        type(self).seen.append({
+            "path": self.path,
+            "auth": self.headers.get("Authorization"),
+        })
+        body = b"ok"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=x-bogus")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_url_userinfo_is_stripped_and_bogus_charset_tolerated(tmp_path):
+    """URL 里的 userinfo 不发给对端；伪造 charset 不炸。"""
+    _EchoHeaderHandler.seen = []
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _EchoHeaderHandler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        tool = WebFetchTool(allow_private_hosts=True)
+        ctx = ToolContext(working_dir=tmp_path)
+        out = asyncio.run(tool.run(
+            WebFetchArgs(url=f"http://user:secret@127.0.0.1:{port}/page"), ctx,
+        ))
+        assert "ok" in out  # 伪造 charset 不影响取回
+        assert _EchoHeaderHandler.seen, "桩服务器应收到请求"
+        got = _EchoHeaderHandler.seen[0]
+        assert got["auth"] is None, "URL 里的凭据不得发给对端"
+        assert "secret" not in got["path"]
     finally:
         srv.shutdown()

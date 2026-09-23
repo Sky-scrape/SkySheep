@@ -436,3 +436,130 @@ async def test_explain_matches_authorize():
 
     miss = gate.explain("run_command", "npm publish")
     assert not miss["allowed"] and "没有命中" in miss["reason"]
+
+
+async def test_disabled_rule_does_not_match():
+    """停用的规则不参与匹配：授权回到逐次确认，测试器单独点名它。"""
+    gate = PermissionGate()
+    gate.add_session_rule(
+        WhitelistRule(tool="write_file", kind="always", enabled=False)
+    )
+    assert await gate.authorize(WriteFileTool(), {"path": "a.txt"}) is not None
+
+    result = gate.explain("write_file", "a.txt")
+    assert not result["allowed"] and "停用" in result["reason"]
+
+
+async def test_rule_hit_recorded_on_authorize(store):
+    """白名单放行时记命中：次数 +1、最近命中时间刷新；测试器 explain 不记账。"""
+    project = await store.get_or_create_project("/tmp/demo-hits")
+    gate = PermissionGate(store=store, project_id=project.id)
+    await gate.load_project_rules()
+    await gate.persist_rule(WhitelistRule(tool="write_file", kind="always"))
+
+    # 新 gate 走库里加载的规则（带 id）才有记账；放行前 hit_count 为 0
+    gate2 = PermissionGate(store=store, project_id=project.id)
+    await gate2.load_project_rules()
+    rules = await store.list_rules(project.id)
+    assert rules[0]["hit_count"] == 0
+
+    assert await gate2.authorize(WriteFileTool(), {"path": "a.txt"}) is None
+    rules = await store.list_rules(project.id)
+    assert rules[0]["hit_count"] == 1 and rules[0]["last_hit_at"] > 0
+    assert await gate2.authorize(WriteFileTool(), {"path": "b.txt"}) is None
+    rules = await store.list_rules(project.id)
+    assert rules[0]["hit_count"] == 2
+
+    # 测试器只读：explain 命中也不加次数
+    gate2.explain("write_file", "c.txt")
+    rules = await store.list_rules(project.id)
+    assert rules[0]["hit_count"] == 2
+
+
+async def test_set_rule_enabled_roundtrip(store):
+    """store 层启停：带归属校验，停用的规则加载后不参与匹配。"""
+    project = await store.get_or_create_project("/tmp/demo-toggle")
+    await store.add_rule(project.id, "write_file", "always")
+    rules = await store.list_rules(project.id)
+    rule_id = rules[0]["id"]
+
+    await store.set_rule_enabled(rule_id, project.id, False)
+    gate = PermissionGate(store=store, project_id=project.id)
+    await gate.load_project_rules()
+    assert await gate.authorize(WriteFileTool(), {"path": "a.txt"}) is not None
+
+    await store.set_rule_enabled(rule_id, project.id, True)
+    gate2 = PermissionGate(store=store, project_id=project.id)
+    await gate2.load_project_rules()
+    assert await gate2.authorize(WriteFileTool(), {"path": "a.txt"}) is None
+
+    # 归属校验：别的项目改不了这条规则
+    other = await store.get_or_create_project("/tmp/demo-toggle-other")
+    try:
+        await store.set_rule_enabled(rule_id, other.id, False)
+        raised = False
+    except KeyError:
+        raised = True
+    assert raised
+
+
+# ---- M4：move_file(overwrite) 覆盖已存在目录 = 递归删除，不得自动放行 ----
+
+
+async def test_move_file_overwrite_dir_requires_confirm(tmp_path):
+    """自动写入档下，「名义是移动、实际会 rmtree 一棵子树」仍要逐次确认。
+
+    move_file 是 WRITE 级；源和目标都在工作目录内时自动放行，等于绕开了
+    delete_file（DANGEROUS，永不自动放行）的强制确认。检查点也兜不住：
+    recorder 只记源与目标两项，被 rmtree 掉的目录内容不在其中。
+    """
+    from skysheep.tools import MoveFileTool
+
+    (tmp_path / "src_dir").mkdir()
+    (tmp_path / "src_dir" / "f.txt").write_text("new", encoding="utf-8")
+    (tmp_path / "dst_dir").mkdir()
+    # 落点会是 dst_dir/src_dir（工具语义：目标是目录就移进去保留原名）
+    (tmp_path / "dst_dir" / "src_dir").mkdir()
+    (tmp_path / "dst_dir" / "src_dir" / "old.txt").write_text("old", encoding="utf-8")
+
+    gate = PermissionGate(working_dir=tmp_path)
+    gate.auto_accept_write = True
+    tool = MoveFileTool()
+    pending = await gate.authorize(tool, {
+        "source": "src_dir", "destination": "dst_dir", "overwrite": True})
+    assert pending is not None, "覆盖已存在目录的 move_file 不能自动放行"
+    assert pending.safety.value == "write"
+
+    # 目标目录里没有同名子目录 → 不涉及递归删除，照常免确认
+    (tmp_path / "fresh").mkdir()
+    assert await gate.authorize(tool, {
+        "source": "src_dir", "destination": "fresh", "overwrite": True}) is None
+
+    # 不传 overwrite 时工具自己会以 ToolError 拒（不是删除面）→ 免确认
+    assert await gate.authorize(tool, {"source": "src_dir", "destination": "dst_dir"}) is None
+
+    # 覆盖已存在的普通文件仍是常规写入面 → 免确认
+    (tmp_path / "src_file.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "dst_file.txt").write_text("y", encoding="utf-8")
+    assert await gate.authorize(tool, {
+        "source": "src_file.txt", "destination": "dst_file.txt", "overwrite": True}) is None
+
+
+async def test_move_file_overwrite_dir_denied_keeps_subtree(tmp_path):
+    """弹确认后用户拒绝：目标子树一个文件都不该少。"""
+    from skysheep.tools import MoveFileTool
+
+    (tmp_path / "s").mkdir()
+    (tmp_path / "s" / "f.txt").write_text("new", encoding="utf-8")
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "s").mkdir()
+    (tmp_path / "d" / "s" / "keep.txt").write_text("keep", encoding="utf-8")
+
+    gate = PermissionGate(working_dir=tmp_path)
+    gate.auto_accept_write = True
+    pending = await gate.authorize(
+        MoveFileTool(), {"source": "s", "destination": "d", "overwrite": True})
+    assert pending is not None
+    pending.resolve(Decision.DENY)
+    assert await pending.wait() == Decision.DENY
+    assert (tmp_path / "d" / "s" / "keep.txt").read_text(encoding="utf-8") == "keep"

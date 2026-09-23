@@ -18,11 +18,12 @@ Codex 联网检索，SkySheep 由此获得联网能力）。
 from __future__ import annotations
 
 import asyncio
+import codecs
 import html as html_mod
 import ipaddress
 import re
 import socket
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpcore
 import httpx
@@ -42,6 +43,21 @@ class WebFetchArgs(BaseModel):
     max_chars: int = Field(
         default=DEFAULT_MAX_CHARS, ge=200, le=100_000, description="返回文本的最大字符数"
     )
+
+
+def _safe_charset(name: str | None) -> str:
+    """对端声明的 charset 不可信：认不出来的一律回 utf-8。
+
+    旧实现直接把它交给 bytes.decode——伪造的 charset（如 "x-nonexistent"）
+    会让 LookupError 穿透成 500（安全审查低危项）。codecs.lookup 先校验。
+    """
+    if not name:
+        return "utf-8"
+    try:
+        codecs.lookup(name)
+    except (LookupError, ValueError):
+        return "utf-8"
+    return name
 
 
 def _assert_public_host(host: str) -> None:
@@ -208,7 +224,7 @@ class WebFetchTool(Tool):
             async with client.stream("GET", url) as resp:
                 status = resp.status_code
                 headers = dict(resp.headers)
-                charset = resp.charset_encoding or "utf-8"
+                charset = _safe_charset(resp.charset_encoding)
                 if status in (301, 302, 303, 307, 308):
                     return status, headers, b""  # 重定向体无意义，不读
                 async for chunk in resp.aiter_bytes():
@@ -231,6 +247,16 @@ class WebFetchTool(Tool):
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ToolError("web_fetch 需要 http/https URL，例如 https://example.com/docs")
+        # URL 里带 userinfo（https://user:pass@host/）时剥掉再请求：凭据会随请求
+        # 发给对端并留在历史/日志里，而模型生成的 URL 里出现凭据基本都是泄漏
+        # （安全审查低危项）
+        if parsed.username or parsed.password:
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            url = urlunparse(parsed._replace(netloc=netloc))
+            parsed = urlparse(url)
+
         ips = self._pin(parsed.hostname)
 
         current = url
@@ -257,7 +283,7 @@ class WebFetchTool(Tool):
         if status >= 400:
             raise ToolError(f"HTTP {status}: {current}")
         ctype = headers.get("content-type", "")
-        charset = headers.get("x-skysheep-charset") or "utf-8"
+        charset = _safe_charset(headers.get("x-skysheep-charset"))
         if "html" in ctype.lower() or b"<html" in body[:600].lower():
             text = html_to_text(body.decode(charset, errors="replace"))
         else:

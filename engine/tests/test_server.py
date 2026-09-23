@@ -763,6 +763,32 @@ def test_settings_whitelist_add_and_clear(home, monkeypatch):
         assert recv_until(ws, "l1")["result"]["rules"] == []
 
 
+def test_settings_whitelist_enable_toggle(home, monkeypatch):
+    """规则启停：停用后 enabled=False 且带命中统计字段；再启用恢复。"""
+    monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "whitelist.add",
+                      "params": {"tool": "run_command", "kind": "prefix", "pattern": "git status"}})
+        r = recv_until(ws, "a1")
+        assert r["ok"] and r["result"]["rules"][0]["enabled"] is True
+        rule_id = r["result"]["rules"][0]["id"]
+
+        ws.send_json({"id": "d1", "method": "whitelist.enable",
+                      "params": {"id": rule_id, "enabled": False}})
+        r2 = recv_until(ws, "d1")
+        assert r2["ok"] and r2["result"]["rules"][0]["enabled"] is False
+
+        ws.send_json({"id": "e1", "method": "whitelist.enable",
+                      "params": {"id": rule_id, "enabled": True}})
+        r3 = recv_until(ws, "e1")
+        assert r3["ok"] and r3["result"]["rules"][0]["enabled"] is True
+
+        # 不存在的规则：报错而不是静默成功
+        ws.send_json({"id": "x1", "method": "whitelist.enable",
+                      "params": {"id": 999999, "enabled": False}})
+        assert not recv_until(ws, "x1")["ok"]
+
+
 def test_settings_whitelist_check_export_import(home, monkeypatch):
     monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))
     import asyncio
@@ -1139,20 +1165,32 @@ def test_mcp_import_snippet_and_delete(home):
                                                   "readonly": True}}})
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "m", "method": "mcp.import", "params": {"snippet": snippet}})
-        r = recv_until(ws, "m")["result"]
-        assert r["added"] == ["demo"]
+        r0 = recv_until(ws, "m")["result"]
+        # M10：含 stdio 定义先回 needs_confirm（连接即执行本机命令），确认后才写盘
+        assert r0["needs_confirm"] is True and r0["pending"][0]["name"] == "demo"
         cfg_file = home / "home" / "mcp.json"
+        assert not cfg_file.exists(), "未确认前不得写盘"
+
+        ws.send_json({"id": "m0", "method": "mcp.import",
+                      "params": {"snippet": snippet, "confirmed": True}})
+        r = recv_until(ws, "m0")["result"]
+        assert r["added"] == ["demo"]
         assert cfg_file.is_file()
         saved = json.loads(cfg_file.read_text(encoding="utf-8"))
         assert saved["mcpServers"]["demo"]["readonly"] is True
 
-        # 重复导入 → 跳过；勾选覆盖后才替换
+        # 重复导入 → 跳过（同名不覆盖本就不会写盘，不再要求确认）
         ws.send_json({"id": "m2", "method": "mcp.import", "params": {"snippet": snippet}})
         r2 = recv_until(ws, "m2")["result"]
         assert r2["added"] == [] and r2["skipped"] == ["demo"]
+        # 覆盖同名 stdio 定义 = 重新写一条要执行的命令 → 同样要确认
         ws.send_json({"id": "m3", "method": "mcp.import",
                       "params": {"snippet": snippet, "overwrite": True}})
-        assert recv_until(ws, "m3")["result"]["added"] == ["demo"]
+        assert recv_until(ws, "m3")["result"]["needs_confirm"] is True
+        ws.send_json({"id": "m4", "method": "mcp.import",
+                      "params": {"snippet": snippet, "overwrite": True,
+                                 "confirmed": True}})
+        assert recv_until(ws, "m4")["result"]["added"] == ["demo"]
 
         # 删除
         ws.send_json({"id": "d", "method": "mcp.delete", "params": {"name": "demo"}})
@@ -1165,7 +1203,10 @@ def test_mcp_import_single_server_and_errors(home):
         # 单个服务定义（带 name）
         one = json.dumps({"name": "fetch", "command": "uvx", "args": ["mcp-server-fetch"]})
         ws.send_json({"id": "m", "method": "mcp.import", "params": {"snippet": one}})
-        assert recv_until(ws, "m")["result"]["added"] == ["fetch"]
+        assert recv_until(ws, "m")["result"]["needs_confirm"] is True
+        ws.send_json({"id": "m1", "method": "mcp.import",
+                      "params": {"snippet": one, "confirmed": True}})
+        assert recv_until(ws, "m1")["result"]["added"] == ["fetch"]
 
         # 坏 JSON
         ws.send_json({"id": "e1", "method": "mcp.import", "params": {"snippet": "{oops"}})

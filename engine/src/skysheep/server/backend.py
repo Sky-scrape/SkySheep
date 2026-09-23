@@ -13,7 +13,9 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -27,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..bgtasks import spawn_bg
 from ..channels import ChannelGate, ChannelManager
 from ..config import (
     PRESET_SIGNUP_URLS,
@@ -58,10 +61,21 @@ from ..config import (
     update_provider_in_config,
 )
 from ..core import Agent, build_system_prompt
-from ..core.checkpoints import CheckpointStore
-from ..core.context import compact_history, estimate_text_tokens, estimate_tokens
+from ..core.checkpoints import CheckpointConflictError, CheckpointStore
+from ..core.context import (
+    compact_history,
+    estimate_text_tokens,
+    estimate_tokens,
+    is_compaction_summary,
+)
 from ..core.estimate import estimate_task, format_range
-from ..core.hooks import HookRunner, hooks_from_config, load_raw_config
+from ..core.hooks import (
+    HookRule,
+    HookRunner,
+    hooks_from_config,
+    load_raw_config,
+    recent_hook_runs,
+)
 from ..core.prompt import (
     MAX_INSTRUCTIONS_CHARS,
     PLAN_MODE_PREFIX,
@@ -81,6 +95,7 @@ from ..core.subagent import (
     CheckTaskTool,
     SpawnAgentTool,
     TaskManager,
+    WaitTaskTool,
 )
 from ..core.subagent_store import (
     BUILTIN_AGENT_TYPES,
@@ -107,13 +122,16 @@ from ..mcp import (
     MCPManager,
     import_servers,
     load_mcp_configs,
+    load_servers,
     mcp_config_path,
     normalize_server,
     parse_file,
     parse_snippet,
+    pending_stdio_commands,
     preset_by_name,
     presets_public,
     remove_server,
+    save_servers,
 )
 from ..messages import ImageBlock, Message, TextBlock
 from ..messages import system_text as history_system_text
@@ -122,8 +140,9 @@ from ..models.base import ProviderDone, ProviderReasoning, ProviderTextDelta
 from ..models.factory import build_provider
 from ..models.probe import probe_context_limit, probe_provider_models
 from ..obs import info as obs_info
+from ..security import leases
 from ..security.gate import RULE_KINDS, HeadlessGate, PermissionGate
-from ..security.trust import WorkspaceTrust
+from ..security.trust import WorkspaceTrust, list_trusted, revoke_by_path
 from ..session import SessionStore
 from ..session.store import export_messages_text
 from ..skills import SkillLoader
@@ -131,17 +150,26 @@ from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
     SkillInstallError,
     install_from_url,
+    raw_skillmd_urls,
     remove_skill,
     scan_computer_skills,
 )
 from ..skills.installer import install as install_skill
-from ..skills.market import fetch_market_index
-from ..textio import encode_text
-from ..tools import ChangeRecorder, Safety, ToolRegistry, default_tools
+from ..skills.market import fetch_market_index, fetch_remote_text, merge_installed_state
+from ..textio import encode_text, read_text_file, write_text_atomic
+from ..tools import (
+    COMPUTER_TOOL_NAMES,
+    ChangeRecorder,
+    Safety,
+    ToolRegistry,
+    default_tools,
+)
 from ..tools.memory import (
     MAINTAIN_MIN_GLOBAL_CHARS,
     MAINTAIN_MIN_PROJECT_CHARS,
+    MAINTENANCE_BACKUP_KEEP,
     MAX_MEMORY_FILE_CHARS,
+    backup_before_maintain,
     build_digest_prompt,
     build_maintain_prompt,
     clean_maintained_text,
@@ -311,18 +339,36 @@ BUILTIN_SNIPPETS = [
         "name": "Excel 转图表报告",
         "content": (
             "请读取 @表格.xlsx，检查数据质量（缺失/重复/格式问题），"
-            "清洗后生成一份汇总报告，告诉我有什么发现。"
+            "清洗后生成一份汇总报告，并挑合适的维度画出趋势/分布图（保存为图片），"
+            "告诉我有什么发现。"
         ),
     },
     {
         "name": "调研一个话题",
-        "content": "请联网调研：，把最新进展整理成带信息来源的简报（重点、时间线、不同观点）。",
+        "content": (
+            "请联网调研「在此填写话题」，把最新进展整理成带信息来源的简报"
+            "（重点、时间线、不同观点）。今天是 {{date}}，请优先采用近三个月内的信息来源。"
+        ),
     },
     {
         "name": "帮我修报错",
         "content": (
-            "我遇到了这个报错：\n\n（粘贴报错信息）\n\n"
+            "我遇到了这个报错：\n\n{{clipboard}}\n\n"
             "请分析原因并给出修复方案；如果是代码问题，直接读文件帮我改好。"
+        ),
+    },
+    {
+        "name": "解释这段代码",
+        "content": (
+            "请解释下面这段代码：先一段话总览它做什么，再按关键步骤说明逻辑，"
+            "最后指出潜在问题或可改进点。\n\n{{clipboard}}"
+        ),
+    },
+    {
+        "name": "写一份周报",
+        "content": (
+            "请把下面的工作内容整理成简洁的中文周报："
+            "本周完成 / 进行中 / 风险与问题 / 下周计划。\n\n{{clipboard}}"
         ),
     },
 ]
@@ -330,6 +376,65 @@ BUILTIN_SNIPPETS = [
 # 用户自定义局域网令牌的最小长度：默认令牌是 secrets.token_urlsafe(16)（22 字符），
 # 这里只挡住明显过弱的自定义值，不强制复杂度（令牌要方便输入与扫码）。
 MIN_LAN_TOKEN_CHARS = 12
+
+
+class TokenThrottle:
+    """对令牌验证失败的来源做有界的即时节流。
+
+    目标不是防住分布式爆破（默认令牌 128 bit 随机，本就不怕枚举），而是把
+    「同一来源连续试错」变成得不偿失：连续失败达阈值后，该来源的后续请求
+    一律立即拒绝（不再做比对），冷却时长指数递增、封顶 10 分钟；验证成功
+    （含本机回环直连）即清零。状态只在内存里，重启即清空。不 sleep——
+    中间件里阻塞事件循环的代价远大于省下的这一次比对。
+    """
+
+    def __init__(
+        self, threshold: int = 5, base_delay: float = 30.0, max_delay: float = 600.0
+    ) -> None:
+        self.threshold = max(1, threshold)
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+        self._fails: dict[str, int] = {}
+        self._blocked_until: dict[str, float] = {}
+
+    def blocked(self, ip: str, now: float | None = None) -> bool:
+        until = self._blocked_until.get(ip)
+        if until is None:
+            return False
+        current = time.monotonic() if now is None else now
+        if current >= until:
+            self._blocked_until.pop(ip, None)
+            return False
+        return True
+
+    def note_failure(self, ip: str, now: float | None = None) -> float:
+        """记录一次失败；触发封锁时返回本次封锁的时长（秒），未触发返回 0。"""
+        n = self._fails.get(ip, 0) + 1
+        self._fails[ip] = n
+        if n < self.threshold:
+            return 0.0
+        delay = min(self.base_delay * (2 ** (n - self.threshold)), self.max_delay)
+        self._blocked_until[ip] = (time.monotonic() if now is None else now) + delay
+        return delay
+
+    def note_success(self, ip: str) -> None:
+        self._fails.pop(ip, None)
+        self._blocked_until.pop(ip, None)
+
+    def reset_failures(self, *, keep_blocks: bool = True) -> None:
+        """清空失败计数；keep_blocks=True 时保留已生效的封锁。
+
+        令牌轮换用（安全审查低危项）：旧实现直接换一个新 TokenThrottle，
+        正在被封锁的爆破来源跟着一起解封——换了锁不等于要放人进来，
+        已生效的封锁按原冷却时间走完更安全。
+        """
+        self._fails.clear()
+        if not keep_blocks:
+            self._blocked_until.clear()
+
+
+# 令牌验证失败的留痕上限：设置页只需要「最近谁在敲门」，总次数单独计数。
+TOKEN_FAILURE_LOG_MAX = 20
 
 # Tailscale 分配的虚拟网段（IPv4 CGNAT 100.64.0.0/10 + 其 IPv6 ULA）。远程访问模式
 # 靠它区分「tailnet 里的设备」与「物理局域网里的陌生设备」：后者连 IP 段都进不来。
@@ -344,6 +449,10 @@ TAILSCALE_NETS = (
 # 黛夜 indigo、松烟 pine。与 app.js 的 THEMES 表、app.css 的 [data-theme=…] 段、
 # index.html 设置页的主题卡片一一对应，改主题列表要四处同步。
 THEME_PREFS = ("auto", "light", "dark", "paper", "celadon", "kaki", "night", "indigo", "pine")
+# 「跟随系统」时的落点映射（设置页主题卡下方两个下拉）：浅色/深色各落一个具体主题，
+# 与 wintheme.read_ui_theme、前端 themeAutoLight/themeAutoDark、首帧注入共用同一值域。
+THEME_AUTO_LIGHT = ("paper", "celadon", "kaki")
+THEME_AUTO_DARK = ("night", "indigo", "pine")
 
 
 def client_origin(client) -> str:
@@ -765,7 +874,7 @@ class TerminalManager:
             ev = {"kind": "term_data", "term_id": key, "text": "".join(chunks)}
             for ws_emit in list(backend.ws_emitters):
                 try:
-                    asyncio.create_task(ws_emit(ev))
+                    spawn_bg(ws_emit(ev))
                 except RuntimeError:
                     return  # 无事件循环（纯测试环境）：丢弃输出
 
@@ -809,7 +918,7 @@ class TerminalManager:
             slot.pump_proc = None
         for ws_emit in list(backend.ws_emitters):
             try:
-                asyncio.create_task(ws_emit({"kind": "term_exit", "term_id": key}))
+                spawn_bg(ws_emit({"kind": "term_exit", "term_id": key}))
             except RuntimeError:
                 break
 
@@ -851,6 +960,26 @@ class TerminalManager:
         self.terms.clear()
 
 
+# 渠道预授权名单里出现这些工具时告警：它们在无人值守渠道里等于「任意命令 / 任意写」
+_CHANNEL_DANGEROUS_TOOLS = (
+    "run_command", "write_file", "edit_file", "delete_file", "move_file",
+    "make_dir", "write_document", "generate_image",
+)
+
+
+def _channel_allowed_tools_warning(allowed) -> str:
+    """渠道预授权名单里含写/执行类工具时返回告警文案，否则空串。"""
+    names = {str(t).strip() for t in (allowed or []) if str(t).strip()}
+    hit = sorted(names & set(_CHANNEL_DANGEROUS_TOOLS))
+    if not hit:
+        return ""
+    return (
+        "注意：" + "、".join(hit) + " 是写/执行类工具，加入预授权名单后，"
+        "渠道会话在无人值守时也会直接执行、不再逐次确认。"
+        "只在你完全信任该渠道的允许名单成员时这样做。"
+    )
+
+
 class ServerBackend:
     def __init__(
         self,
@@ -869,6 +998,7 @@ class ServerBackend:
         self.cfg: SkySheepConfig | None = None
         self.store: SessionStore | None = None
         self.project = None
+        self._remote_project_id_cache: int | None = None
         self.session = None
         self.provider: Provider | None = None
         # agent/queue/_run_task/_recorder 是 property（指向活动会话 runtime）；
@@ -906,6 +1036,8 @@ class ServerBackend:
         # 清零后重试也不伤——busy 预检还在，会再次退避。
         self._pipeline_busy_until: dict[int, float] = {}
         self._titling: set[str] = set()  # 正在自动生成标题的会话
+        self._manually_named: set[str] = set()  # 用户手改过名字的会话（自动标题让路）
+        self._default_model_sessions: set[str] = set()  # 适用「新会话默认模型」的会话
         self._digesting: set[str] = set()  # 正在归档提炼记忆的会话
         self._maintaining = False  # 定期整理进行中（全局+项目共用一把，防叠加）
         self.update_info: dict | None = None  # {"version","url","notes"}：发现的新版本
@@ -918,6 +1050,17 @@ class ServerBackend:
         self._channel_names: dict[str, str] = {}  # 渠道会话 id → 平台名（反向查找）
         self._channel_last_chat: dict[str, str] = {}  # 平台名 → 最近一次入站的 chat_id
         self._weixin_login_channel = None  # 未启用微信时，仅供扫码登录用的一次性实例
+        # 访问令牌的失败节流与留痕：设置页展示「有谁在试你的门」，节流让连错
+        # 变得不划算。都是内存态，重启即清空（真实排查看桌面日志）。
+        self.token_throttle = TokenThrottle()
+        self._text_meta_cache: dict[str, tuple[int, str, str]] = {}
+        self._token_failures: list[dict] = []  # 最近 TOKEN_FAILURE_LOG_MAX 条 {ts, ip, where}
+        self._token_failure_total = 0  # 自启动以来的失败总数（留痕列表只留最近几条）
+        # 一键重启的两个钩子，由宿主注入（见 cli/app.py._start_backend 与 desktop.py）：
+        # request_shutdown 让 uvicorn 优雅退出（走完 lifespan 收尾）；restart_hook
+        # 是桌面专属——关窗口/托盘收尾，不注入时服务停了窗口还在（浏览器模式够用）。
+        self.request_shutdown: Callable[[], None] | None = None
+        self.restart_hook: Callable[[], None] | None = None
 
     # ---- 多会话运行时：agent/queue/_run_task/_recorder 指向活动会话的 runtime，
     # ---- 后台会话通过 runtimes[sid] 直接访问（并行 turn 不经 property）。
@@ -942,15 +1085,17 @@ class ServerBackend:
             rt = SessionRuntime(
                 sid=session_id,
                 agent=Agent(
-                    provider=self.provider,
+                    provider=self._runtime_provider(session_id),
                     registry=self._build_full_registry(recorder),
                     gate=self.gate,
                     working_dir=self.working_dir,
                     max_iterations=self.cfg.max_iterations,
                     context_limit_tokens=self._context_limit(),
                     compaction_keep_recent=self.cfg.compaction_keep_recent,
+                    compaction_trigger=self.cfg.compaction_trigger,
                     hooks=self.hooks,
                     restrict_to_workdir=self.cfg.restrict_to_workdir,
+                    session_id=session_id,
                 ),
                 recorder=recorder,
             )
@@ -963,6 +1108,40 @@ class ServerBackend:
             self.runtimes.pop(victim.sid)
             self._forget_runtime(victim)
         return rt
+
+    # ---- 新会话默认模型（ui.json 的 default_model） ----
+
+    def _default_model_pref(self) -> tuple[str, str]:
+        """读新会话默认模型偏好，返回 (provider, model)；未设置返回 ("", "")。"""
+        try:
+            prefs = self._read_ui_prefs()
+        except Exception:
+            return "", ""
+        name = str(prefs.get(self.DEFAULT_MODEL_PROVIDER_KEY) or "").strip()
+        if not name or name not in self.cfg.providers:
+            return "", ""
+        model = str(prefs.get("default_model_name") or "").strip()
+        return name, model
+
+    def _runtime_provider(self, session_id: str):
+        """会话的起始 provider：设了「新会话默认模型」的新会话用专用实例，
+        其余跟随全局。基底会话（懒创建窗口）与已存在 runtime 的老会话都走全局。
+
+        判断「新会话」的口径：session_tabs 恢复/切项目重拉的老会话在 setup 时
+        已建 runtime 或经 resume 建过；这里只在**首次建 runtime** 时生效，
+        所以不会覆盖用户在会话中途手动 model.switch 的结果（switch 会直接
+        改全局 provider 并同步所有 agent）。
+        """
+        name, model = self._default_model_pref()
+        if not name:
+            return self.provider
+        # 只对新建的会话生效：懒创建的会话在 new_session() 里打标记
+        if session_id not in getattr(self, "_default_model_sessions", set()):
+            return self.provider
+        try:
+            return self._build_provider(name, model or None)
+        except Exception:
+            return self.provider  # 预设被删/停用时回退全局，不让发消息失败
 
     def _evictable_runtime(self) -> SessionRuntime | None:
         """最旧的空闲 runtime：非当前会话、没在跑的轮、没排队消息、
@@ -1081,6 +1260,9 @@ class ServerBackend:
                 "任务编排：%d 个节点因上次退出被中断，已标记待重跑", _interrupted
             )
         self.subagent_store.load()
+        # 「远程连接」固定项目：启动即建（飞书/微信等渠道对话的归属），
+        # 与是否配置渠道无关——侧栏里它是一个常驻分组
+        await self.store.ensure_remote_project()
         await self._bind_project(target)
         # 分级权限模式：上次会话选的档位（0=安全执行 1=自动编辑 2=完全访问）重启后保持
         self._apply_gate_accept_pref(prefs.get("accept_edits", 0))
@@ -1096,14 +1278,15 @@ class ServerBackend:
             self.provider_name = ""
             self.provider_model = ""
 
-        mcp_configs = load_mcp_configs(self._mcp_global_path(), self._project_mcp_path_if_trusted())
+        mcp_configs, mcp_config_warnings = load_mcp_configs(
+            self._mcp_global_path(), self._project_mcp_path_if_trusted()
+        )
         self.mcp_configs = mcp_configs
-        self.mcp = MCPManager(mcp_configs)
+        self.mcp = MCPManager(mcp_configs, on_tools_changed=self._on_mcp_tools_changed)
         self.mcp_tools = await self.mcp.connect_all()
         self.mcp_warnings = [
-            f"{name}: {st.error}"
-            for name, st in self.mcp.statuses.items()
-            if st.error
+            *mcp_config_warnings,
+            *(f"{name}: {st.error}" for name, st in self.mcp.statuses.items() if st.error),
         ]
 
         self._base_agent = Agent(
@@ -1114,6 +1297,7 @@ class ServerBackend:
             max_iterations=self.cfg.max_iterations,
             context_limit_tokens=self._context_limit(),
             compaction_keep_recent=self.cfg.compaction_keep_recent,
+            compaction_trigger=self.cfg.compaction_trigger,
             hooks=self.hooks,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
         )
@@ -1140,6 +1324,29 @@ class ServerBackend:
     def _cur_project_id(self) -> int | None:
         """当前项目 id；无项目态返回 None（快聊/无项目语义）。"""
         return self.project.id if self.project is not None else None
+
+    async def _remote_project_id(self) -> int:
+        """「远程连接」固定项目的 id（幂等创建 + 实例内缓存）。
+
+        渠道（飞书/微信）会话的归属项目：与桌面工作目录无关，见
+        store.ensure_remote_project。缓存失效不需处理——该项目拒绝删除。
+        """
+        if self._remote_project_id_cache is None:
+            proj = await self.store.ensure_remote_project()
+            self._remote_project_id_cache = proj.id
+        return self._remote_project_id_cache
+
+    async def _reject_remote_project(self, project_id: int, action: str) -> None:
+        """固定项目「远程连接」不可删除/切换的统一拦截。"""
+        if project_id == await self._remote_project_id():
+            raise RuntimeError(f"「远程连接」是固定项目（飞书/微信对话的归属），不能{action}")
+
+    def is_remote_project(self, project) -> bool:
+        """按哨兵路径判断是否「远程连接」固定项目（同步，project.list 等渲染用）。"""
+        try:
+            return project.root_path == self.store.REMOTE_PROJECT_PATH
+        except AttributeError:
+            return False
 
     def _require_project(self, action: str = "执行这个操作") -> None:
         """项目级能力（定时任务/编排/白名单/项目任务）的统一门槛：无项目给可读错误。"""
@@ -1185,10 +1392,14 @@ class ServerBackend:
             return None
 
     async def _check_update_quietly(self) -> None:
-        from ..core.uptodate import DEFAULT_RELEASES_API
-
+        # 用户关掉了自动检查（关于页开关）就不再请求：内网/离线用户不必等超时
         try:
-            info = await check_latest_release(DEFAULT_RELEASES_API)
+            if self._read_ui_prefs().get("update_check", 1) != 1:
+                return
+        except Exception:
+            pass
+        try:
+            info = await check_latest_release()
             if is_newer_version(info["version"], __version__):
                 self.update_info = info
         except Exception:  # noqa: BLE001 - 离线/仓库不存在：完全静默
@@ -1197,8 +1408,8 @@ class ServerBackend:
     def _build_full_registry(self, recorder: ChangeRecorder | None = None) -> ToolRegistry:
         """完整工具集：内置（write/edit/画图挂检查点记录器）+ 日程 + 技能 + 子代理 + MCP。
 
-        子代理可在设置页整体关闭：关掉后 spawn_agent / check_task 不注册，
-        模型看不到这两个工具（配置里 subagent_enabled = false）。
+        子代理可在设置页整体关闭：关掉后 spawn_agent / check_task / wait_task
+        不注册，模型看不到这些工具（配置里 subagent_enabled = false）。
         """
         registry = ToolRegistry(default_tools(
             recorder=recorder or self._recorder,
@@ -1214,6 +1425,7 @@ class ServerBackend:
         if self.cfg.subagent_enabled and self.project is not None:
             registry.register(SpawnAgentTool(self.tasks))
             registry.register(CheckTaskTool(self.tasks))
+            registry.register(WaitTaskTool(self.tasks))
         # 任务编排：Agent 可以排流水线（草稿），启动与否由用户在面板决定
         if self.project is not None:
             registry.register(PipelineWriteTool(
@@ -1225,6 +1437,8 @@ class ServerBackend:
 
     def _apply_registry_to_agents(self, recorder: ChangeRecorder | None = None) -> None:
         """把按当前配置重建的工具集发给基础 Agent 与所有会话运行时。"""
+        if self._base_agent is None:
+            return  # 启动早期（MCP connect_all 触发工具变更回调时）基础 Agent 还没建
         self._base_agent.registry = self._build_full_registry()
         for rt in self.runtimes.values():
             rt.agent.registry = self._build_full_registry(rt.recorder)
@@ -1305,7 +1519,7 @@ class ServerBackend:
         """日程变化后广播事件（无在线连接时静默，如 CLI/测试）。"""
         for ws_emit in list(self.ws_emitters):
             try:
-                asyncio.create_task(
+                spawn_bg(
                     ws_emit({"kind": "schedule_updated"})
                 )
             except RuntimeError:
@@ -1316,25 +1530,25 @@ class ServerBackend:
         if isinstance(ev, dict) and ev.get("kind") == "task_finished":
             # 任务簿任务终态：挂接了它的流水线节点立即对账，不等下一个扫描周期
             try:
-                asyncio.get_running_loop().create_task(self._pipeline_kick())
+                spawn_bg(self._pipeline_kick())
             except RuntimeError:
                 pass  # 无事件循环（如纯测试环境）
         for ws_emit in list(self.ws_emitters):
             try:
-                asyncio.create_task(ws_emit(ev))
+                spawn_bg(ws_emit(ev))
             except RuntimeError:
                 continue  # 无事件循环（如纯测试环境）
 
     async def _record_subagent_usage(
         self, session_id: str, provider: str, model: str,
-        in_tokens: int, out_tokens: int,
+        in_tokens: int, out_tokens: int, cached_tokens: int = 0,
     ) -> None:
         """子代理任务用量落库：归属派生它的会话（未知时记空串，聚合页仍可见）。"""
         await self.store.add_usage(
             session_id or "",
             provider or self.provider_name,
             model or self.provider_model,
-            in_tokens, out_tokens,
+            in_tokens, out_tokens, cached_tokens,
         )
 
     # ---- 到点提醒循环 ----
@@ -1400,12 +1614,12 @@ class ServerBackend:
             if row["id"] in self._cron_running:
                 continue
             # 后台触发：任务跑多久都不阻塞扫描循环（下一轮扫描跳过 in-flight 任务）
-            asyncio.get_running_loop().create_task(self._run_cron_task(row["id"]))
+            spawn_bg(self._run_cron_task(row["id"]))
 
     def _broadcast_cron(self, task: dict) -> None:
         for ws_emit in list(self.ws_emitters):
             try:
-                asyncio.get_running_loop().create_task(
+                spawn_bg(
                     ws_emit({"kind": "cron_updated", "task": task})
                 )
             except Exception:
@@ -1557,8 +1771,10 @@ class ServerBackend:
                     max_iterations=self.cfg.max_iterations,
                     context_limit_tokens=self._context_limit(),
                     compaction_keep_recent=self.cfg.compaction_keep_recent,
+                    compaction_trigger=self.cfg.compaction_trigger,
                     hooks=self.hooks,
                     restrict_to_workdir=self.cfg.restrict_to_workdir,
+                    session_id=sid,
                 ),
                 recorder=recorder,
             )
@@ -1816,7 +2032,7 @@ class ServerBackend:
             return
         for ws_emit in list(self.ws_emitters):
             try:
-                asyncio.get_running_loop().create_task(
+                spawn_bg(
                     ws_emit({"kind": "pipeline_updated", "pipeline": pipe})
                 )
             except Exception:
@@ -2031,15 +2247,18 @@ class ServerBackend:
                     max_iterations=self.cfg.max_iterations,
                     context_limit_tokens=self._context_limit(),
                     compaction_keep_recent=self.cfg.compaction_keep_recent,
+                    compaction_trigger=self.cfg.compaction_trigger,
                     hooks=self.hooks,
                     restrict_to_workdir=self.cfg.restrict_to_workdir,
+                    session_id=sid,
                 ),
                 recorder=recorder,
             )
-            runtime.agent.set_system(self.compose_system_for(run_workdir))
+            pipe_system = self.compose_system_for(run_workdir)
             if node["kind"] == "session":
-                msgs = await self.store.load_messages(sid)
-                runtime.agent.load_history(msgs or [Message.system(self.compose_system_for(run_workdir))])
+                await self._reload_agent_history(runtime.agent, sid, pipe_system)
+            else:
+                runtime.agent.set_system(pipe_system)
 
             async def pipe_emit(ev: dict) -> None:
                 pass  # 无人值守：流式/权限事件不进前端，产出走节点行
@@ -2105,7 +2324,7 @@ class ServerBackend:
             self._pipeline_running.discard(node["id"])
             self._pipeline_node_tasks.pop(node["id"], None)
             # 立刻补扫：刚完成的节点可能解锁了下游，不等下一个扫描周期
-            asyncio.get_running_loop().create_task(self._pipeline_kick())
+            spawn_bg(self._pipeline_kick())
 
     def _loop_settle(self, node: dict, text: str) -> tuple[str, bool]:
         """迭代节点（control=loop）的收尾：产出首行 DONE = 完成；否则返回未完成、
@@ -2495,7 +2714,7 @@ class ServerBackend:
             raise RuntimeError("没有可运行的节点——失败节点请先在详情里点「重跑」，或删除后重建流水线")
         pipe = await self.store.update_pipeline(pipe["id"], status="running", finished_at=0)
         self._broadcast_pipeline(pipe)
-        asyncio.get_running_loop().create_task(self._pipeline_pass())
+        spawn_bg(self._pipeline_pass())
         return {"pipeline": pipe, "started": True}
 
     async def pipeline_cancel(self, params: dict) -> dict:
@@ -2587,7 +2806,7 @@ class ServerBackend:
             pipe = await self.store.update_pipeline(pipe["id"], status="running", finished_at=0)
         self._broadcast_pipeline(pipe)
         if pipe["status"] == "running":
-            asyncio.get_running_loop().create_task(self._pipeline_pass())
+            spawn_bg(self._pipeline_pass())
         return {"pipeline": pipe}
 
     @staticmethod
@@ -2654,11 +2873,18 @@ class ServerBackend:
             + render_memory_section()
         )
 
-    async def new_session(self) -> dict:
-        # 无项目态新建的会话归入快聊（project_id 为 NULL）：没有项目可归属
-        self.session = await self.store.create_session(self._cur_project_id())
+    async def new_session(self, title: str = "") -> dict:
+        # 无项目态新建的会话归入快聊（project_id 为 NULL）：没有项目可归属。
+        # title：前端在空标签上预命名时随创建一起落库（标签命名功能的懒创建路径），
+        # 带了名字就记为手动命名，首轮的自动标题不会再覆盖它。
+        title = (title or "").strip()
+        self.session = await self.store.create_session(self._cur_project_id(), title)
+        if title:
+            self._manually_named.add(self.session.id)
+        # 标记为「新会话」：若设了新会话默认模型，首次建 runtime 时用专用 provider
+        self._default_model_sessions.add(self.session.id)
         self._get_runtime(self.session.id)  # 预建 runtime（自带系统提示词）
-        return {"id": self.session.id, "title": "", "summary": ""}
+        return {"id": self.session.id, "title": self.session.title, "summary": ""}
 
     async def create_task_chat(self) -> dict:
         """新建一个不绑定任何文件夹的「任务」会话（侧栏「任务」分组的 ＋）。
@@ -2671,7 +2897,18 @@ class ServerBackend:
     async def open_initial_session(self) -> dict | None:
         """启动时接着上次的会话继续；完全没历史则不创建（懒创建：发第一条消息时才落库），
         避免每次启动都堆积空会话。无项目态接快聊最近的会话（latest_session(None)
-        的语义就是 project_id IS NULL）。"""
+        的语义就是 project_id IS NULL）。
+
+        恢复目标优先 ui.json 的 session_active（上次激活的标签）；没有/失效才
+        落到「最近会话」。标签列表（session_tabs）由前端按 snapshot 的 open_tabs
+        恢复——后端只负责把活动指针指对，不代拉历史。"""
+        prefs = self._read_ui_prefs()
+        remembered = prefs.get("session_active")
+        if isinstance(remembered, str) and remembered:
+            try:
+                return await self.resume_session(remembered)
+            except Exception:
+                pass  # 已删/跨项目：静默落回最近会话
         latest = await self.store.latest_session(self._cur_project_id())
         if latest is not None:
             return await self.resume_session(latest.id)
@@ -2706,6 +2943,13 @@ class ServerBackend:
             # 快聊会话在项目查询下必然为 None：再确认它确实是无项目会话，
             # 而不是「属于别的项目」。两者放行的只有前者。
             sess = await self.store.get_session_for_project(session_id, None)
+        if sess is None:
+            # 「远程连接」项目的会话同理开放归属：渠道对话在侧栏可见可点，
+            # 但它不属于任何桌面工作目录，挂进当前项目的门控不构成跨项目越权
+            # （渠道会话的 runtime 自带 ChannelGate，不走这里的默认门控）。
+            remote = await self._remote_project_id()
+            if remote is not None:
+                sess = await self.store.get_session_for_project(session_id, remote)
         if sess is None:
             raise RuntimeError("session not found: " + session_id)
         return sess
@@ -2749,8 +2993,7 @@ class ServerBackend:
         deleted = await self.store.truncate_from(sid, pivot, include_self=include)
         # 同步 runtime 内的历史（存在则从存储重载）
         if sid in self.runtimes:
-            msgs = await self.store.load_messages(sid)
-            self.runtimes[sid].agent.load_history(msgs or [Message.system(self.compose_system())])
+            await self._reload_agent_history(self.runtimes[sid].agent, sid)
         out = {"deleted": deleted, "pivot_seq": pivot, "mode": mode}
         if mode == "edit":
             out["text"] = anchor["text"]
@@ -2779,18 +3022,26 @@ class ServerBackend:
         """只切活动指针，不重载历史（标签切换用；runtime 已存在时不做任何重活）。"""
         sess = await self._get_owned_session(session_id)
         self.session = sess
+        # 启动恢复：记住当前激活的标签，下次启动回到它。失败静默（偏好写不进
+        # 不影响切换本身）。
+        try:
+            await self._write_ui_prefs({self.SESSION_ACTIVE_KEY: session_id})
+        except Exception:
+            pass
         if session_id not in self.runtimes:
             rt = self._get_runtime(session_id)
-            msgs = await self.store.load_messages(session_id)
-            rt.agent.load_history(msgs or [Message.system(self.compose_system())])
+            await self._reload_agent_history(rt.agent, session_id)
         return {"id": sess.id, "title": sess.title}
 
     async def resume_session(self, session_id: str) -> dict:
         sess = await self._get_owned_session(session_id)
         self.session = sess
+        try:
+            await self._write_ui_prefs({self.SESSION_ACTIVE_KEY: session_id})
+        except Exception:
+            pass
         rt = self._get_runtime(session_id)
-        msgs = await self.store.load_messages(session_id)
-        rt.agent.load_history(msgs or [Message.system(self.compose_system())])
+        msgs = await self._reload_agent_history(rt.agent, session_id)
         return {
             "id": sess.id, "title": sess.title, "summary": sess.summary,
             "messages": [_msg_brief(m) for m in msgs if m.role in ("user", "assistant")],
@@ -3030,6 +3281,8 @@ class ServerBackend:
             return  # 演示模式不额外消耗脚本组，标题保持首行截断即可
         if sid in self._titling:
             return
+        if sid in self._manually_named:
+            return  # 用户手改过名字：自动标题不覆盖，尊重命名
         self._titling.add(sid)
         try:
             cur_title = await self.store.get_session_title(sid)
@@ -3061,6 +3314,23 @@ class ServerBackend:
             pass  # 标题生成失败完全静默
         finally:
             self._titling.discard(sid)
+
+    async def _reload_agent_history(
+        self, agent, sid: str, system: str | None = None
+    ) -> list[Message]:
+        """从存储重载会话历史，并保证系统提示词仍在最前面；返回重载到的消息。
+
+        system 消息从不落库——它由 compose_system() 按当前技能/项目/工具实时生成，
+        落库等于把过期提示词固化下来。所以 load_history(msgs) 之后必须补回：
+        少了这一步，重载过的会话下一轮会带着「没有系统提示词」的历史去调模型，
+        Agent 的工具用法约定、项目上下文、技能清单全部丢失。旧写法
+        `load_history(msgs or [Message.system(...)])` 只兜住了空会话，非空会话
+        （也就是真正需要重载的那些）正好漏掉。
+        """
+        msgs = await self.store.load_messages(sid)
+        agent.load_history(msgs)
+        agent.set_system(system if system is not None else self.compose_system())
+        return msgs
 
     async def _persist_turn(self, sid: str, new_msgs: list) -> None:
         """一轮对话的落库（独立方法便于 shield 保护：取消时后台完成落库）。"""
@@ -3148,7 +3418,7 @@ class ServerBackend:
             }
             for ws_emit in others:
                 try:
-                    asyncio.create_task(ws_emit(u_ev))
+                    spawn_bg(ws_emit(u_ev))
                 except RuntimeError:
                     continue  # 无事件循环（如纯测试环境）
 
@@ -3201,18 +3471,28 @@ class ServerBackend:
                 text = refs_ctx + text
         if plan_mode:
             text = PLAN_MODE_PREFIX + text
+        # 自上一轮以来结束、还没人取报告的后台子代理任务 → 注入一条系统提示，
+        # 主 Agent 开轮就知道「有任务做完了」，不用用户来催（后台模式闭环）
+        if self.tasks:
+            bg_note = self.tasks.pop_turn_note(sid)
+            if bg_note:
+                text = bg_note + text
 
-        n_before = len(agent.history)
+        # 轮末落库靠「消息身份」挑出本轮新增，不靠下标切片：compact_history 会在
+        # 本轮内把 history 整体换成更短的新列表（core/context.py），旧下标随即失效：
+        # 新长度 ≤ n_before 时 `history[n_before:]` 为空（本轮用户消息、工具调用、
+        # 回答全部不落库，重启即丢），略大时又会把早已入库的旧消息重复插入。
+        # 消息 id 由 Message 默认工厂生成、随序列化保留，压缩后 recent 段仍是原对象
+        # （id 不变），所以「不在轮前 id 集合里」正好等于「本轮新增」。
+        pre_ids = {m.id for m in agent.history}
         # 本轮墙钟起点：圆桌路径没有 agent 主循环计时，这里兜底（见 _stamp_turn_estimate）
         turn_t0 = time.monotonic()
         stopped = False
         rt_meta: dict | None = None
         tin0, tout0 = agent.total_in_tokens, agent.total_out_tokens
+        tcached0 = agent.total_cached_tokens
         runtime.run_task = asyncio.current_task()
         turn_exc: BaseException | None = None
-        # 本轮运行期间派生的子代理任务把用量记到这个会话名下；finally 里清除
-        if self.tasks:
-            self.tasks.set_active_session(sid)
         try:
             if roundtable:
                 rt_meta = await self._roundtable_body(
@@ -3244,8 +3524,6 @@ class ServerBackend:
                 await merger.aclose()
             except Exception:  # noqa: BLE001 - 客户端断开不影响收尾
                 pass
-            if self.tasks:
-                self.tasks.set_active_session("")
             if plan_mode and readonly_registry is not None:
                 # 恢复完整工具集（只读注册表只在本轮生效）
                 agent.registry = self._build_full_registry(runtime.recorder)
@@ -3255,7 +3533,13 @@ class ServerBackend:
         # 取消保护：用户点停止时，已产出的消息仍要落库、运行位必须释放；
         # shield 让落库在后台继续，CancelledError 被捕获后正常走完收尾返回 stopped 结果，
         # 避免 send() 抛异常导致 runtime.run_task 悬挂、后续消息误入死队列。
-        new_msgs = agent.history[n_before:]
+        # 压缩摘要不落库：它是引擎生成的上下文产物，入库会被当成一条 user 消息
+        # 回传前端（渲染成假的用户气泡），也会进 FTS 与会话导出；不落库的代价
+        # 只是重启后长会话重新压缩一次，比上面两类污染便宜得多。
+        new_msgs = [
+            m for m in agent.history
+            if m.id not in pre_ids and not is_compaction_summary(m)
+        ]
         _stamp_turn_estimate(new_msgs, turn_estimate, turn_t0)
         try:
             await asyncio.shield(self._persist_turn(sid, new_msgs))
@@ -3263,11 +3547,12 @@ class ServerBackend:
             stopped = True
             asyncio.current_task().uncancel()
 
-        # 用量记录：本轮实际消耗的输入/输出 tokens
+        # 用量记录：本轮实际消耗的输入/输出 tokens（含缓存命中数，费用按缓存价拆算）
         try:
             await self.store.add_usage(
                 sid, self.provider_name, self.provider_model,
                 agent.total_in_tokens - tin0, agent.total_out_tokens - tout0,
+                agent.total_cached_tokens - tcached0,
             )
         except Exception:
             pass
@@ -3301,7 +3586,7 @@ class ServerBackend:
                 (m.text.strip() for m in new_msgs if m.role == "assistant" and m.text.strip()), ""
             )
             if first_user:
-                asyncio.get_running_loop().create_task(
+                spawn_bg(
                     self._auto_title(sid, first_user, first_reply)
                 )
 
@@ -3384,6 +3669,17 @@ class ServerBackend:
         task = (rt.run_task if rt else None) or (self._run_task if not session_id else None)
         if task and not task.done():
             task.cancel()
+            # 取消时立刻清未决权限：权限弹窗可能还留在屏上，但这一轮已经结束，
+            # 残留的 request_id 再被投递会「成功」（前端以为决策生效）。
+            # 安全审查 M12——Agent 侧还有一层 finally 兜底
+            agent = getattr(rt, "agent", None) if rt is not None else None
+            if agent is None:
+                agent = getattr(self, "agent", None)
+            if agent is not None:
+                try:
+                    agent.clear_pending()
+                except Exception:  # noqa: BLE001 - 清理失败不挡停止
+                    pass
             return True
         return False
 
@@ -3603,6 +3899,7 @@ class ServerBackend:
                     await self.store.add_usage(
                         sid, row["provider"], row["model"],
                         row["input_tokens"], row["output_tokens"],
+                        row.get("cached_tokens", 0),
                     )
             except Exception:  # noqa: BLE001 - 记账失败不影响本轮结果
                 pass
@@ -3832,6 +4129,17 @@ class ServerBackend:
             self.tasks.cancel_all(session_id=session_id)
         return {"cancelled": True}
 
+    async def tasks_cancel(self, params: dict, *, session_id: str | None = None) -> dict:
+        """取消单个子代理任务（排队中直接落终态，运行中的真取消）。"""
+        task_id = str((params or {}).get("task_id", ""))
+        if self.tasks is None:
+            raise ValueError("no task manager")
+        # 远程客户端只能取消自己会话的任务（与 tasks_list/tasks_get 同款隔离）
+        ok = self.tasks.cancel_task(task_id, session_id=session_id)
+        if not ok:
+            raise ValueError("unknown or finished task_id: " + task_id)
+        return {"cancelled": True, "task_id": task_id}
+
     async def usage_stats(self, params: dict) -> dict:
         """用量统计：按天/会话/服务聚合 + 按 provider 单价估算费用。
 
@@ -3848,16 +4156,30 @@ class ServerBackend:
             st = await self.store.usage_stats(days)
             st["by_session"] = []  # 无项目态不展示按会话用量（B14：防跨项目标题枚举）
         prices = {
-            name: {"price_in": pc.price_in, "price_out": pc.price_out}
+            name: {
+                "price_in": pc.price_in,
+                "price_out": pc.price_out,
+                "price_cache": pc.price_cache,
+            }
             for name, pc in self.cfg.providers.items()
         }
         cost = 0.0
         for row in st["by_provider"]:
             pr = prices.get(row["provider"] or "", {})
-            cost += (row["it"] or 0) / 1e6 * pr.get("price_in", 0.0)
-            cost += (row["ot"] or 0) / 1e6 * pr.get("price_out", 0.0)
+            it, ot = row["it"] or 0, row["ot"] or 0
+            # 缓存命中价（>0）时把命中部分从输入价里拆出来单算：
+            # 多数服务命中提示词缓存的输入便宜得多（DeepSeek 约输入价 1/10）
+            cached = row.get("cached") or 0
+            price_cache = pr.get("price_cache", 0.0)
+            if price_cache > 0 and cached > 0:
+                cost += max(0, it - cached) / 1e6 * pr.get("price_in", 0.0)
+                cost += cached / 1e6 * price_cache
+            else:
+                cost += it / 1e6 * pr.get("price_in", 0.0)
+            cost += ot / 1e6 * pr.get("price_out", 0.0)
         total_in = sum(r["it"] or 0 for r in st["by_provider"])
         total_out = sum(r["ot"] or 0 for r in st["by_provider"])
+        total_cached = sum(r.get("cached") or 0 for r in st["by_provider"])
         return {
             "days": days,
             "by_day": st["by_day"],
@@ -3865,6 +4187,9 @@ class ServerBackend:
             "by_provider": st["by_provider"],
             "total_in": total_in,
             "total_out": total_out,
+            "total_cached": total_cached,
+            # 真实去重会话数：无项目态与 by_session 被截断时它才是准确口径
+            "session_count": st.get("session_count", 0),
             "cost": round(cost, 4),
             "has_price": any(p["price_in"] or p["price_out"] for p in prices.values()),
             # 每日预算与当日用量：用量页据此显示「今日已用 / 预算」，0 = 未设上限
@@ -4034,18 +4359,36 @@ class ServerBackend:
             if int(base_mtime) != cur:
                 # 不落盘，交给前端弹「覆盖 / 放弃」
                 return {"saved": False, "conflict": True, "mtime": cur}
+        # 写租约：用户保存也要和并行 Agent 写同一文件错开（短等待，面板是交互场景）；
+        # 冲突注记随结果带回（前端当前未展示，agent 侧写完会带同样的注记给模型）
+        hub = leases.hub_for(self.working_dir)
+        lease = None
+        if hub is not None:
+            try:
+                lease = await hub.claim(
+                    [(target, rel)],
+                    owner=(self.session.id if self.session else ""),
+                    wait_s=3.0,
+                )
+            except Exception:  # noqa: BLE001 - 租约是协调不是闸门，故障不挡保存
+                lease = None
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            mtime = target.stat().st_mtime_ns // 1_000_000
-        except OSError as e:
-            raise RuntimeError("写入失败: " + str(e)) from None
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                mtime = target.stat().st_mtime_ns // 1_000_000
+            except OSError as e:
+                raise RuntimeError("写入失败: " + str(e)) from None
+        finally:
+            note = lease.release() if lease is not None else ""
         self._text_meta_cache[str(target)] = (mtime, enc, nl)
-        return {"saved": True, "mtime": mtime, "size": len(data), "encoding_text": enc.upper()}
+        return {"saved": True, "mtime": mtime, "size": len(data),
+                "encoding_text": enc.upper(), **({"lease_note": note} if note else {})}
 
     # 文本文件编码 / 行尾符探测结果缓存：fs.read 写入、fs.write 读回。
     # 存的是探测结果（mtime + 两个短字符串），不存文件内容，避免每次保存多读一遍盘。
-    _text_meta_cache: dict[str, tuple[int, str, str]] = {}
+    # 实例属性而不是类属性（安全审查低危项）：类属性会被所有实例共享——测试里
+    # 两个后端实例互相看到对方的探测结果，多工作区/多实例场景下也会串味。
 
     def _file_text_meta(self, target: Path) -> tuple[str, str]:
         """取文件原本的（编码, 行尾符）；缓存过期或文件已变时重探。
@@ -4120,21 +4463,32 @@ class ServerBackend:
         sid = self.session.id if self.session else ""
         return {"checkpoints": self.checkpoints.list_for(sid)}
 
-    async def restore_checkpoint(self, checkpoint_id: str) -> dict:
-        """把某轮的文件改动回滚到改前状态；并告知模型「文件已被回滚」。"""
+    async def restore_checkpoint(self, checkpoint_id: str, force: bool = False) -> dict:
+        """把某轮的文件改动回滚到改前状态；并告知模型「文件已被回滚」。
+
+        回滚前引擎会比对「快照保存之后文件有没有又被改过」（并行会话/任务
+        写同一文件的场景）：有冲突且未 force 时不动磁盘，返回 conflict 结果，
+        前端把冲突文件列给用户确认后再带 force=true 重试。
+        """
         cp = self.checkpoints.get(checkpoint_id)
         if cp is None:
             raise RuntimeError(
-                f"检查点 {checkpoint_id} 不存在或已过期（保留最近 50 轮，更早的会被淘汰）"
+                f"检查点 {checkpoint_id} 不存在或已过期（每会话保留最近 50 轮，更早的会被淘汰）"
             )
         # 归属校验（安全审查 B12）：检查点 id 顺序可枚举，不属于当前项目的
         # 快照不能凭 id 恢复（否则别的项目的文件内容会被写回磁盘）
         await self._check_checkpoint_ownership(cp)
         try:
-            files = self.checkpoints.restore(checkpoint_id)
+            files = self.checkpoints.restore(checkpoint_id, force=force)
+        except CheckpointConflictError as e:
+            return {
+                "conflict": True,
+                "checkpoint_id": checkpoint_id,
+                "files": e.conflicts,
+            }
         except KeyError:
             raise RuntimeError(
-                f"检查点 {checkpoint_id} 不存在或已过期（保留最近 50 轮，更早的会被淘汰）"
+                f"检查点 {checkpoint_id} 不存在或已过期（每会话保留最近 50 轮，更早的会被淘汰）"
             ) from None
         note = Message.user(
             "(系统提示) 用户执行了「撤销本轮改动」，以下文件已恢复到本轮改动前的状态："
@@ -4165,7 +4519,7 @@ class ServerBackend:
         cp = self.checkpoints.get(checkpoint_id)
         if cp is None:
             raise RuntimeError(
-                f"检查点 {checkpoint_id} 不存在或已过期（保留最近 50 轮，更早的会被淘汰）"
+                f"检查点 {checkpoint_id} 不存在或已过期（每会话保留最近 50 轮，更早的会被淘汰）"
             )
         # 同 restore：凭枚举 id 不能读别的项目会话的文件快照（B12）
         await self._check_checkpoint_ownership(cp)
@@ -4314,6 +4668,80 @@ class ServerBackend:
         except OSError:
             pass  # 写不进哨兵（只读盘等）：下次启动重查一遍，无副作用
 
+    async def restore_builtin_snippets(self) -> int:
+        """把内置示例提示词加回指令库（按名称去重，已存在的跳过），返回新增条数。
+
+        与首启播种不同：这是用户的显式动作，删过的示例可以被主动找回；
+        哨兵文件不动，重启仍不会自动补种。
+        """
+        existing = {s["name"] for s in await self.store.list_snippets()}
+        added = 0
+        for s in BUILTIN_SNIPPETS:
+            if s["name"] in existing:
+                continue
+            await self.store.add_snippet(s["name"], s["content"])
+            added += 1
+        return added
+
+    async def export_snippets(self) -> dict:
+        """导出全部提示词为可分享的 JSON（只带名称与内容，不含排序/统计）。"""
+        rows = await self.store.list_snippets()
+        return {
+            "format": "skysheep-snippets",
+            "version": 1,
+            "snippets": [{"name": s["name"], "content": s["content"]} for s in rows],
+        }
+
+    async def import_snippets(self, params: dict) -> dict:
+        """合并导入提示词：params.data 为导出 JSON（对象或字符串），或 params.path 为文件路径。
+
+        去重规则：名称与内容都相同的条目跳过；其余追加到列表最前（与新建一致）。
+        条数上限 200、文件上限 1MB——提示词库是手写资产，超过这个量级不是正常用法。
+        """
+        raw = params.get("data")
+        path = str(params.get("path") or "").strip()
+        if raw is None and path:
+            p = Path(path)
+            if not p.is_file():
+                raise RuntimeError("文件不存在：" + path)
+            if p.stat().st_size > 1_000_000:
+                raise RuntimeError("文件过大，不像是提示词导出文件")
+            try:
+                tf = read_text_file(p)
+            except OSError as e:
+                raise RuntimeError(f"读取失败：{e}") from None
+            if tf.binary:
+                raise RuntimeError("这是一个二进制文件，不是提示词导出 JSON")
+            try:
+                raw = json.loads(tf.text)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"不是有效的 JSON：{e}") from None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"不是有效的 JSON：{e}") from None
+        if raw is None:
+            raise RuntimeError("缺少导入内容")
+        items = raw.get("snippets") if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            raise RuntimeError("不是 SkySheep 提示词导出文件（缺少 snippets 列表）")
+        existing = {(s["name"], s["content"]) for s in await self.store.list_snippets()}
+        added = skipped = 0
+        for it in items[:200]:
+            if not isinstance(it, dict):
+                skipped += 1
+                continue
+            name = str(it.get("name") or "").strip()[:40]
+            content = str(it.get("content") or "").strip()[:8000]
+            if not name or not content or (name, content) in existing:
+                skipped += 1
+                continue
+            await self.store.add_snippet(name, content)
+            existing.add((name, content))
+            added += 1
+        return {"added": added, "skipped": skipped}
+
     async def set_permission_mode(self, mode: str) -> dict:
         """confirm = 安全执行，写入/命令都确认（默认）；accept_edits = 自动编辑，
         工作目录内写入自动放行、命令仍确认；full_access = 完全访问，写入与命令
@@ -4398,6 +4826,18 @@ class ServerBackend:
         await self.gate.load_project_rules()
         return {"removed": rule_id}
 
+    async def set_whitelist_rule_enabled(self, rule_id: int, enabled: bool) -> dict:
+        """启停一条项目级规则（设置页开关）：临时停用不必删配置。
+
+        停用是收紧（远端也允许）；启用是放宽，与 whitelist.add 同姿态，
+        由 app.py 限本机调用。归属校验在 store 层（同 remove_rule）。
+        """
+        self._require_project("修改白名单规则")
+        await self.store.set_rule_enabled(rule_id, self.project.id, bool(enabled))
+        await self.gate.load_project_rules()
+        return {"id": rule_id, "enabled": bool(enabled),
+                "rules": await self.store.list_rules(self.project.id)}
+
     def check_whitelist_rule(self, tool: str, text: str) -> dict:
         """规则测试器：当前规则会让这条调用直接放行、还是弹确认。"""
         tool = (tool or "").strip()
@@ -4467,6 +4907,43 @@ class ServerBackend:
             "reasoning": self.reasoning_state(),
             "context_limit": limit,
             "supports_vision": self._supports_vision(),
+        }
+
+    # ---- 新会话默认模型（设置/清除走 WS：default_model.set / default_model.get） ----
+
+    async def set_default_model(self, params: dict) -> dict:
+        """设定 / 清除「新会话默认模型」。
+
+        name 传空串 = 清除（新会话回到跟随全局）；name+model = 只对这些
+        **新创建**的会话用专用 provider，已存在的会话（含当前对话）不受影响。
+        服务名必须在 config.toml 里存在，模型名必须是该服务已登记的模型
+        （或留空 = 用该服务的默认模型）。"""
+        name = str(params.get("name") or "").strip()
+        model = str(params.get("model") or "").strip()
+        if name:
+            if name not in self.cfg.providers:
+                raise RuntimeError(f"未知服务：{name}")
+            pc = self.cfg.providers[name]
+            if model and pc.models and model not in pc.models:
+                raise RuntimeError(f"服务 {name} 没有登记模型 {model}，先在模型服务里添加")
+        elif model:
+            raise RuntimeError("清除默认模型时不能只留模型名")
+        try:
+            await self._write_ui_prefs({
+                self.DEFAULT_MODEL_PROVIDER_KEY: name or None,
+                "default_model_name": model or None,
+            })
+        except Exception as e:
+            raise RuntimeError(f"写入偏好失败：{e}") from e
+        return self.default_model_state()
+
+    def default_model_state(self) -> dict:
+        name, model = self._default_model_pref()
+        return {
+            "provider": name,
+            "model": model,
+            "label": (f"{name} / {model}" if name and model
+                      else name if name else ""),
         }
 
     def reasoning_state(self) -> dict:
@@ -4613,34 +5090,45 @@ class ServerBackend:
             raise RuntimeError("scope 只能是 global 或 project: " + str(scope))
         return skysheep_home() / "skills"
 
-    async def install_skill(self, source: str, scope: str = "global") -> dict:
+    async def install_skill(self, source: str, scope: str = "global", overwrite: bool = False) -> dict:
         """把技能装进技能目录，装完立即生效（无需重启）。
 
         source 可以是本机文件夹、.zip 路径，或 GitHub / Gitee 的仓库链接与
         .zip 直链（网址下载放到工作线程，不卡事件循环）。
+        overwrite=True 供技能广场的「更新/重装」用：同名技能整目录替换；
+        网址安装会同时记录来源 url，供广场判定「已安装/可更新」。
         """
         root = self._skill_root(scope)
         existing = {s.name for s in self.skills.all()}
         try:
             if str(source).strip().lower().startswith(("http://", "https://")):
-                result = await asyncio.to_thread(install_from_url, source, root, existing=existing)
+                result = await asyncio.to_thread(
+                    install_from_url, source, root, existing=existing, overwrite=overwrite
+                )
             else:
-                result = await asyncio.to_thread(install_skill, source, root, existing=existing)
+                result = await asyncio.to_thread(
+                    install_skill, source, root, existing=existing, overwrite=overwrite
+                )
         except SkillInstallError as e:
             raise RuntimeError(str(e)) from e
+        # 装完/更新完让广场缓存作废：下次拉取重新标注「已安装/可更新」
+        self._market_cache = None
         # 重新发现 + 重建系统提示词：新技能马上出现在清单里
         self.skills.discover()
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
-        # 用户在界面上主动装技能：已信任的项目同步指纹，避免刚装完就回到「待确认」
+        # 用户在界面上主动装技能：已信任的项目同步指纹，避免刚装完就回到「待确认」。
+        # 指明本次动的来源（项目技能目录）：别的来源若也被改过（git pull 塞进来的
+        # 项目级 mcp.json 等），不跟着一起洗白（安全审查低危项）
         if scope == "project":
-            self.trust.refresh()
+            self.trust.refresh(touched=self._project_skills_dir())
         result["scope"] = scope
         result["skills"] = [
             {
                 "name": s.name, "description": s.description,
                 "source": s.source, "enabled": s.enabled,
                 "scope": s.scope, "scope_projects": list(s.scope_projects),
+                "version": s.version, "source_url": s.source_url,
                 "applies": self.skills.applies(s.name),
             }
             for s in self.skills.all()
@@ -4681,17 +5169,30 @@ class ServerBackend:
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
         if scope == "project":
-            self.trust.refresh()  # 删掉项目技能也是用户自己的改动，同步指纹
+            # 删掉项目技能也是用户自己的改动；来源限定在项目技能目录
+            self.trust.refresh(touched=self._project_skills_dir())
         result["scope"] = scope
         return result
 
     # ---- MCP：程序内导入 / 删除 / 重连 ----
 
     def _reload_mcp_configs(self) -> None:
-        self.mcp_configs = load_mcp_configs(
+        configs, warnings = load_mcp_configs(
             self._mcp_global_path(),
             self._project_mcp_path_if_trusted(),
         )
+        self.mcp_configs = configs
+        self.mcp_warnings = warnings
+
+    def _project_skills_dir(self) -> Path | None:
+        """当前项目的技能目录（trust.refresh 指明来源用；无项目时为 None）。
+
+        与 _project_skills_dir_if_trusted 的区别：这个不要求项目已信任——
+        refresh 的场景恰恰是「用户刚动过它、要判断能否延续信任」。
+        """
+        if self.working_dir is None:
+            return None
+        return self.working_dir / ".skysheep" / "skills"
 
     def _mcp_global_path(self) -> Path:
         return mcp_config_path(skysheep_home())
@@ -4727,19 +5228,53 @@ class ServerBackend:
         """当前项目的信任状态（给前端渲染确认横幅）。"""
         return self.trust.state()
 
+    def trust_list(self) -> dict:
+        """全部已信任项目的清单（设置页 · 安全与后台 管理用）。
+
+        记录里是归一化路径（Windows 上小写），当前项目单独标出来；
+        含绝对路径，与 session.backups 同理只给本机界面。
+        """
+        current = str(self.working_dir) if self.working_dir else ""
+        items = list_trusted(skysheep_home())
+        for e in items:
+            e["is_current"] = bool(current) and os.path.normcase(current) == e["path"]
+        return {"items": items}
+
+    async def trust_revoke_path(self, path: str) -> dict:
+        """按路径撤销信任（收紧动作，远端也允许）。
+
+        撤的是「当前项目」时，还要断开项目级 MCP、重载技能——与 trust.revoke
+        同一套收尾；撤别的项目只删记录（它没在跑，无需断开任何东西）。
+        """
+        root = str(path or "").strip()
+        if not root:
+            raise RuntimeError("缺少项目路径")
+        removed = revoke_by_path(skysheep_home(), root)
+        if not removed:
+            raise RuntimeError("该路径不在已信任清单里")
+        is_current = (
+            self.working_dir is not None
+            and os.path.normcase(str(self.working_dir)) == os.path.normcase(root)
+        )
+        if is_current:
+            self._trust = None  # 失效缓存，下次访问按已撤销重算
+            state = self.trust.state()
+            await self._sync_mcp_changes()
+            self._reload_project_skills()
+            return {**state, "revoked": root}
+        return {"revoked": root}
+
     async def trust_grant(self) -> dict:
         """用户确认信任本项目：记录指纹，并把项目级 MCP/技能接上（无需重启）。"""
         state = self.trust.grant()
-        self._reload_mcp_configs()
-        await self._reconnect_mcp()
+        await self._sync_mcp_changes()
         self._reload_project_skills()
         return {**state, "mcp_warnings": list(self.mcp_warnings)}
 
     async def trust_revoke(self) -> dict:
         """取消信任：断开项目级 MCP 服务器，并重新发现技能（项目级不再生效）。"""
         state = self.trust.revoke()
-        self._reload_mcp_configs()
-        await self._reconnect_mcp()
+        await self._sync_mcp_changes()
         self._reload_project_skills()
         return {**state, "mcp_warnings": list(self.mcp_warnings)}
 
@@ -4750,25 +5285,68 @@ class ServerBackend:
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
 
+    async def _sync_mcp_changes(self) -> list[str]:
+        """按配置差量同步 MCP 连接（改完配置后调用，无需重启）。
+
+        对比新旧配置，只连接新增/变更的服务器、断开被移除的：改一个预设不再
+        把其它已连接的服务器（尤其是带鉴权、重连要重新握手的远程 HTTP）全部
+        拽下来重连一遍。工具注册表每次按 manager 的最新状态整体重建——注册表
+        本身只是对象图，重建不费时，费时的网络连接已经被差量化了。
+        """
+        old = self.mcp_configs or {}
+        configs, cfg_warnings = load_mcp_configs(
+            self._mcp_global_path(), self._project_mcp_path_if_trusted()
+        )
+        if self.mcp is None:
+            self.mcp = MCPManager(configs, on_tools_changed=self._on_mcp_tools_changed)
+        manager = self.mcp
+        for name in [n for n in old if n not in configs]:
+            await manager.disconnect_server(name)
+            manager.forget_server(name)
+        for name in [n for n in configs if n not in old or old[n] != configs[n]]:
+            await manager.connect_server(name, configs[name])
+        self.mcp_configs = configs
+        self.mcp_tools = [t for n in configs for t in manager.tools_for(n)]
+        self.mcp_warnings = cfg_warnings + [
+            f"{name}: {st.error}" for name, st in manager.statuses.items() if st.error
+        ]
+        self._apply_registry_to_agents()
+        return self.mcp_warnings
+
     async def _reconnect_mcp(self) -> list[str]:
-        """重建 MCP 工具集合并接到 Agent 上（改完配置后调用，无需重启）。"""
+        """全部重连：整台 manager 重建，顺带清零各服务器的重连计数。
+
+        只给设置页「重连」按钮和信任状态翻转这类「用户明确要重来」的入口用；
+        配置增删改走 _sync_mcp_changes 的差量路径，不惊动无关服务器。
+        """
         if self.mcp is not None:
             await self.mcp.shutdown()
-        self._reload_mcp_configs()
-        self.mcp = MCPManager(self.mcp_configs)
+        configs, cfg_warnings = load_mcp_configs(
+            self._mcp_global_path(), self._project_mcp_path_if_trusted()
+        )
+        self.mcp_configs = configs
+        self.mcp = MCPManager(configs, on_tools_changed=self._on_mcp_tools_changed)
         self.mcp_tools = await self.mcp.connect_all()
-        self.mcp_warnings = [
+        self.mcp_warnings = cfg_warnings + [
             f"{name}: {st.error}" for name, st in self.mcp.statuses.items() if st.error
         ]
         self._apply_registry_to_agents()
         return self.mcp_warnings
+
+    async def _on_mcp_tools_changed(self, server_name: str) -> None:
+        """MCP 服务器推送 tools/list_changed：换上最新工具清单并刷新注册表。"""
+        if self.mcp is None:
+            return
+        self.mcp_tools = [t for n in self.mcp_configs for t in self.mcp.tools_for(n)]
+        self._apply_registry_to_agents()
 
     @staticmethod
     def _mcp_status_list(manager: MCPManager | None) -> list[dict]:
         if manager is None:
             return []
         return [
-            {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names,
+            {"name": n, "connected": st.connected, "enabled": st.enabled,
+             "error": st.error, "tools": st.tool_names,
              "reconnecting": getattr(st, "reconnecting", False),
              "restarts": getattr(st, "restarts", 0)}
             for n, st in manager.statuses.items()
@@ -4782,8 +5360,14 @@ class ServerBackend:
         scope: str = "global",
         overwrite: bool = False,
         reconnect: bool = True,
+        confirmed: bool = False,
     ) -> dict:
-        """导入 MCP 服务：从粘贴的 JSON（snippet）或一个本机 .json 文件（path）。"""
+        """导入 MCP 服务：从粘贴的 JSON（snippet）或一个本机 .json 文件（path）。
+
+        安全审查 M10：含 stdio（command）定义时先返回 needs_confirm + 命令清单
+        让前端弹一次显式确认，confirmed=true 才真正写盘——连接即执行本机命令，
+        不能粘贴一段 JSON 就等于声明允许在本机运行任意程序。
+        """
         if snippet.strip():
             servers = parse_snippet(snippet)
         elif path.strip():
@@ -4793,18 +5377,24 @@ class ServerBackend:
         target = self._mcp_global_path() if scope == "global" else self._mcp_project_path()
         if target is None:
             raise RuntimeError("项目级 MCP 配置需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。")
+        if not confirmed:
+            pending = pending_stdio_commands(servers, target, overwrite=overwrite)
+            if pending:
+                return {"needs_confirm": True, "pending": pending}
         try:
-            result = import_servers(servers, target, overwrite=overwrite)
+            result = import_servers(servers, target, overwrite=overwrite, confirmed=True)
         except MCPInstallError as e:
             raise RuntimeError(str(e)) from e
 
         if reconnect and result["added"]:
-            await self._reconnect_mcp()
+            await self._sync_mcp_changes()
+        result["needs_confirm"] = False
         result["scope"] = scope
         result["mcp"] = self._mcp_status_list(self.mcp)
         result["mcp_warnings"] = self.mcp_warnings
         if scope == "project":
-            self.trust.refresh()  # 用户自己在界面上写的项目级配置，同步指纹
+            # 用户自己在界面上写的项目级配置；来源限定项目级 mcp.json
+            self.trust.refresh(touched=self._mcp_project_path())
         self._annotate_untrusted_project_scope(result, scope)
         if result["added"]:
             result["hint"] = "已接入，可直接对话使用" + (
@@ -4824,6 +5414,7 @@ class ServerBackend:
         env: dict[str, str] | None = None,
         headers: dict[str, str] | None = None,
         readonly: bool = False,
+        timeout: float = 0.0,
         scope: str = "global",
         overwrite: bool = True,
     ) -> dict:
@@ -4844,6 +5435,8 @@ class ServerBackend:
             }
         if readonly:
             raw["readonly"] = True
+        if timeout and timeout > 0:
+            raw["timeout"] = timeout
         try:
             cfg = normalize_server(raw)
             target = self._mcp_global_path() if scope == "global" else self._mcp_project_path()
@@ -4851,16 +5444,21 @@ class ServerBackend:
                 raise RuntimeError(
                     "项目级 MCP 配置需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。"
                 )
-            result = import_servers({name.strip(): cfg}, target, overwrite=overwrite)
+            # 分字段表单：用户看着 command/args 输入框亲手填的，保存动作本身
+            # 就是明确意图（M10 的确认只针对粘贴/导入这种「命令不可见」的路径）
+            result = import_servers(
+                {name.strip(): cfg}, target, overwrite=overwrite, confirmed=True
+            )
         except MCPInstallError as e:
             raise RuntimeError(str(e)) from e
         if result["added"]:
-            await self._reconnect_mcp()
+            await self._sync_mcp_changes()
         result["scope"] = scope
         result["mcp"] = self._mcp_status_list(self.mcp)
         result["mcp_warnings"] = self.mcp_warnings
         if scope == "project":
-            self.trust.refresh()  # 同上：用户自己的改动延续既有信任
+            # 同上：用户自己的改动延续既有信任，来源限定项目级 mcp.json
+            self.trust.refresh(touched=self._mcp_project_path())
         self._annotate_untrusted_project_scope(result, scope)
         return result
 
@@ -4936,9 +5534,53 @@ class ServerBackend:
                 path = other
             except MCPInstallError:
                 raise RuntimeError(str(e)) from e
-        await self._reconnect_mcp()
+        await self._sync_mcp_changes()
         result["scope"] = "project" if path == project_path else "global"
         result["mcp"] = self._mcp_status_list(self.mcp)
+        return result
+
+    async def set_mcp_enabled(self, name: str, enabled: bool, scope: str = "global") -> dict:
+        """停用/启用一个 MCP 服务：配置原样保留（env/headers 不用重填），停用只是不连接。
+
+        找配置文件时按请求的 scope 优先、另一边兜底（与 delete_mcp_server 一致，
+        用户不必知道服务当初存在哪边）。
+        """
+        project_path = self._mcp_project_path()
+        first = self._mcp_global_path() if scope == "global" else project_path
+        second = project_path if scope == "global" else self._mcp_global_path()
+        candidates = [p for p in (first, second) if p is not None]
+        hit: Path | None = None
+        for p in candidates:
+            servers = load_servers(p)
+            if name not in servers:
+                continue
+            section = dict(servers[name])
+            if enabled:
+                section.pop("enabled", None)  # 默认即启用，不写冗余字段
+            else:
+                section["enabled"] = False
+            servers[name] = section
+            save_servers(p, servers)
+            hit = p
+            break
+        if hit is None:
+            raise RuntimeError(f"找不到 MCP 服务：{name}")
+        await self._sync_mcp_changes()
+        result: dict = {
+            "name": name,
+            "enabled": enabled,
+            "scope": "project" if hit == project_path else "global",
+            "mcp": self._mcp_status_list(self.mcp),
+            "mcp_warnings": self.mcp_warnings,
+        }
+        if not enabled:
+            result["hint"] = f"已停用「{name}」：它的工具已从 Agent 移除，配置保留，随时可重新启用"
+        else:
+            st = next((m for m in result["mcp"] if m["name"] == name), None)
+            if st and st["connected"]:
+                result["hint"] = f"✓ 已启用「{name}」，连上 {len(st['tools'])} 个工具"
+            else:
+                result["hint"] = f"已启用「{name}」，但没连上：{(st or {}).get('error') or '未知错误'}"
         return result
 
     # ---- 设置页 ----
@@ -4949,13 +5591,15 @@ class ServerBackend:
         return {
             "enabled": self.cfg.subagent_enabled,
             "max_iterations": self.cfg.subagent_max_iterations,
+            "max_concurrent": self.cfg.subagent_max_concurrent,
             "main_max_iterations": self.cfg.max_iterations,
         }
 
     async def save_subagent_settings(
-        self, *, enabled: bool | None = None, max_iterations: int | None = None
+        self, *, enabled: bool | None = None, max_iterations: int | None = None,
+        max_concurrent: int | None = None,
     ) -> dict:
-        """保存子代理设置并立即生效：开关控注册表、轮数热更新任务簿，不用重启。"""
+        """保存子代理设置并立即生效：开关控注册表、轮数与并发热更新任务簿，不用重启。"""
         if max_iterations is not None:
             try:
                 max_iterations = int(max_iterations)
@@ -4963,12 +5607,23 @@ class ServerBackend:
                 raise RuntimeError("迭代轮数要是 1–100 之间的整数") from None
             if not 1 <= max_iterations <= 100:
                 raise RuntimeError("迭代轮数要在 1–100 之间")
+        if max_concurrent is not None:
+            try:
+                max_concurrent = int(max_concurrent)
+            except (TypeError, ValueError):
+                raise RuntimeError("并发上限要是 1–8 之间的整数") from None
+            if not 1 <= max_concurrent <= 8:
+                raise RuntimeError("并发上限要在 1–8 之间")
         try:
-            set_subagent_settings_in_config(enabled=enabled, max_iterations=max_iterations)
+            set_subagent_settings_in_config(
+                enabled=enabled, max_iterations=max_iterations,
+                max_concurrent=max_concurrent,
+            )
         except ConfigError as e:
             raise RuntimeError(str(e)) from e
         self.cfg = load_config()
         self.tasks.set_max_iterations(self.cfg.subagent_max_iterations)
+        self.tasks.set_max_concurrent(self.cfg.subagent_max_concurrent)
         if enabled is not None:
             self._apply_registry_to_agents()
         return self.subagent_settings()
@@ -4982,6 +5637,7 @@ class ServerBackend:
             ag.max_iterations = self.cfg.max_iterations
             ag.context_limit_tokens = limit
             ag.compaction_keep_recent = self.cfg.compaction_keep_recent
+            ag.compaction_trigger = self.cfg.compaction_trigger
             ag.restrict_to_workdir = self.cfg.restrict_to_workdir
 
     def _startup_status(self) -> dict:
@@ -4993,13 +5649,24 @@ class ServerBackend:
             return {"supported": startup.is_supported(), "enabled": False,
                     "command": "", "current": "", "stale": False, "error": str(e)}
 
+    def _hotkey_pref(self) -> str:
+        """全局唤起热键偏好（校验在 desktop._parse_hotkey，注册时非法值自带回退，
+        这里只读不验避免两处规则漂移）。desktop 是打包壳、服务进程里没有，
+        所以独立实现读取，不 import。"""
+        try:
+            return str(self._read_ui_prefs().get("hotkey") or "")
+        except Exception:
+            return ""
+
     def hooks_settings(self) -> dict:
         """当前 config.toml 里的钩子规则（设置页 · Hooks 面板）。
 
-        同时回传已生效的规则条数：未生效与没配置是两回事，界面要能区分。
+        同时回传启用中的规则条数：未生效与没配置是两回事，界面要能区分；
+        另带最近执行记录——钩子自身故障（非 0 非 2 退出码）按设计静默放行，
+        但必须让用户在设置页看到它失效了，而不是「配了像没配一样」。
         """
         raw = load_raw_config()
-        pre, post = hooks_from_config(raw)
+        pre, post, stop = hooks_from_config(raw)
         hooks = raw.get("hooks") if isinstance(raw.get("hooks"), dict) else {}
 
         def _pub(key: str) -> list[dict]:
@@ -5010,14 +5677,18 @@ class ServerBackend:
                         "match": str(item.get("match", "*") or "*"),
                         "command": str(item["command"]).strip(),
                         "timeout_s": float(item.get("timeout_s") or 10),
+                        "enabled": bool(item.get("enabled", True)),
                     })
             return out
 
         return {
             "pre": _pub("pre_tool_use"),
             "post": _pub("post_tool_use"),
-            "active_pre": len(pre),
-            "active_post": len(post),
+            "stop": _pub("stop"),
+            "active_pre": len([r for r in pre if r.enabled]),
+            "active_post": len([r for r in post if r.enabled]),
+            "active_stop": len([r for r in stop if r.enabled]),
+            "recent": recent_hook_runs(),
             "config_path": str(config_path()),
             "tool_names": sorted(t.name for t in self._build_full_registry().all()),
         }
@@ -5030,24 +5701,58 @@ class ServerBackend:
         """
         pre = params.get("pre")
         post = params.get("post")
+        stop = params.get("stop")
         try:
             set_hooks_in_config(
                 pre=None if pre is None else list(pre),
                 post=None if post is None else list(post),
+                stop=None if stop is None else list(stop),
             )
         except ConfigError as e:
             raise RuntimeError(str(e)) from e
         self._reload_hooks()
         return self.hooks_settings()
 
+    async def test_hook(self, params: dict) -> dict:
+        """钩子测试器：拿示例参数把一条钩子命令实跑一遍，回完整结果。
+
+        与 hooks.save 同一信任模型——命令来自本机界面上的用户输入，等价于手敲，
+        不经过权限门，因此同列为本机专属方法（远程客户端不可调用）。
+        只执行、不落配置：测试的命令不保存，也不进「最近执行」记录。
+        """
+        kind = str(params.get("kind") or "pre")
+        if kind not in ("pre", "post", "stop"):
+            raise RuntimeError("钩子类型只能是 pre / post / stop")
+        command = str(params.get("command") or "").strip()
+        if not command:
+            raise RuntimeError("请先填写要测试的命令")
+        if "\n" in command:
+            raise RuntimeError("命令不能包含换行")
+        try:
+            timeout_s = float(params.get("timeout_s") or 10)
+        except (TypeError, ValueError):
+            raise RuntimeError("超时秒数必须是数字") from None
+        tool = str(params.get("tool") or "").strip() or "write_file"
+        raw_input = params.get("input")
+        input_dict = raw_input if isinstance(raw_input, dict) else {}
+        rule = HookRule(match="*", command=command, timeout_s=timeout_s)
+        runner = HookRunner(
+            [rule] if kind == "pre" else [],
+            [rule] if kind == "post" else [],
+            working_dir=self.working_dir,
+            stop_rules=[rule] if kind == "stop" else [],
+        )
+        return await runner.test_run(kind, rule, tool, input_dict)
+
     def _reload_hooks(self) -> None:
         """重新读 hooks 配置并推给基础 Agent 与所有会话 Agent（不重启即生效）。"""
         raw_cfg = load_raw_config()
-        pre_rules, post_rules = hooks_from_config(raw_cfg)
+        pre_rules, post_rules, stop_rules = hooks_from_config(raw_cfg)
         # 无规则时置 None：Agent 循环里的判断是「hooks is not None」，
         # 空 Runner 也会走一遍调用链，没必要
-        self.hooks = HookRunner(pre_rules, post_rules, working_dir=self.working_dir) \
-            if (pre_rules or post_rules) else None
+        self.hooks = HookRunner(pre_rules, post_rules, working_dir=self.working_dir,
+                                stop_rules=stop_rules) \
+            if (pre_rules or post_rules or stop_rules) else None
         if hasattr(self, "_base_agent") and self._base_agent is not None:
             self._base_agent.hooks = self.hooks
         for ag in self._for_each_agent():
@@ -5059,6 +5764,7 @@ class ServerBackend:
             "max_iterations": self.cfg.max_iterations,
             "context_limit_tokens": self.cfg.context_limit_tokens,
             "compaction_keep_recent": self.cfg.compaction_keep_recent,
+            "compaction_trigger": self.cfg.compaction_trigger,
             "restrict_to_workdir": self.cfg.restrict_to_workdir,
             "computer_control": self.cfg.computer_control,
             "browser_control": self.cfg.browser_control,
@@ -5072,6 +5778,9 @@ class ServerBackend:
             "logs_dir": str(skysheep_home() / "logs"),
             "working_dir": str(self.working_dir or ""),
             "autostart": self._startup_status(),
+            # 全局唤起热键（仅 Windows 桌面版生效；其它平台 supported=False）
+            "hotkey": self._hotkey_pref(),
+            "hotkey_supported": sys.platform == "win32",
         }
 
     async def save_advanced_settings(self, params: dict) -> dict:
@@ -5083,6 +5792,15 @@ class ServerBackend:
                     ints[key] = int(params[key])
                 except (TypeError, ValueError):
                     raise RuntimeError(f"{key} 需要一个整数") from None
+        # 压缩触发比例：前端按百分数编辑，传比例（0.5–0.98）；越界在 config 层报错
+        trigger = params.get("compaction_trigger")
+        if trigger is not None and trigger != "":
+            try:
+                trigger = float(trigger)
+            except (TypeError, ValueError):
+                raise RuntimeError("压缩触发比例需要一个数字") from None
+        else:
+            trigger = None
         restrict = params.get("restrict_to_workdir")
         budget = params.get("daily_token_budget")
         if budget is not None and budget != "":
@@ -5097,6 +5815,7 @@ class ServerBackend:
                 max_iterations=ints.get("max_iterations"),
                 context_limit_tokens=ints.get("context_limit_tokens"),
                 compaction_keep_recent=ints.get("compaction_keep_recent"),
+                compaction_trigger=trigger,
                 restrict_to_workdir=None if restrict is None else bool(restrict),
                 computer_control=(
                     None if params.get("computer_control") is None
@@ -5116,6 +5835,16 @@ class ServerBackend:
         # （与 MCP 热生效同一套机制；运行中的轮次下一次调用时自然使用新清单）
         self._apply_registry_to_agents()
         self.tasks.set_restrict_to_workdir(self.cfg.restrict_to_workdir)
+
+        # 全局唤起热键改键：存 ui.json 的 hotkey 键（白名单校验在 desktop._parse_hotkey，
+        # 非法值注册时静默回退默认）。生效在下次启动（热键线程随窗口创建）。空串 = 回默认。
+        hotkey = params.get("hotkey")
+        if hotkey is not None:
+            combo = str(hotkey).strip()
+            try:
+                await self._write_ui_prefs({"hotkey": combo or None})
+            except Exception:
+                pass
 
         autostart = params.get("autostart")
         if autostart is not None:
@@ -5305,13 +6034,16 @@ class ServerBackend:
     def _subagent_registry(self, policy):
         """把工具范围策略解析成子代理注册表。
 
-        派生工具（spawn_agent/check_task）永远不进子代理——禁止递归派生；
+        派生工具（spawn_agent/check_task/wait_task）永远不进子代理——禁止递归派生；
         就算给了写工具，SubagentGate 也会自动拒绝需要确认的操作。
+        电脑控制七件套不随「全部工具 / 仅只读」顺手进子代理（截屏/窗口列表属于
+        隐私敏感只读）；勾选模式是用户显式点名，不受此限。
         """
         base = self._base_agent.registry
-        exclude = {"spawn_agent", "check_task"}
+        exclude = {"spawn_agent", "check_task", "wait_task"}
         if isinstance(policy, str):
             policy = (policy or "").strip().lower() or "readonly"
+            exclude |= set(COMPUTER_TOOL_NAMES)  # 桶装策略：电脑控制一律不带
             if policy == "all":
                 tools = [t for t in base.all() if t.name not in exclude]
             else:
@@ -5340,7 +6072,7 @@ class ServerBackend:
         tools = [
             {"name": t.name, "safety": t.safety.value, "description": t.description}
             for t in self._base_agent.registry.all()
-            if t.name not in ("spawn_agent", "check_task")
+            if t.name not in ("spawn_agent", "check_task", "wait_task")
         ]
         return {
             **self.subagent_settings(),
@@ -5394,6 +6126,7 @@ class ServerBackend:
         tools="readonly",
         provider: str = "",
         model: str = "",
+        reasoning: str = "",
         enabled: bool = True,
     ) -> dict:
         """新建或更新一个自定义子代理（同名即更新），保存后立即可用。"""
@@ -5403,11 +6136,14 @@ class ServerBackend:
             raise RuntimeError(str(e)) from e
         description = (description or "").strip()[:500]
         prompt = (prompt or "").strip()[:20_000]
+        reasoning = (reasoning or "").strip().lower()
+        if reasoning and reasoning not in REASONING_EFFORTS:
+            raise RuntimeError("思考强度只支持 留空 / " + " / ".join(REASONING_EFFORTS))
         if provider and provider not in self.cfg.providers:
             raise RuntimeError("未知的模型服务: " + provider)
         known = {
             t.name for t in self._base_agent.registry.all()
-        } - {"spawn_agent", "check_task"}
+        } - {"spawn_agent", "check_task", "wait_task"}
         if isinstance(tools, str):
             tools = tools.strip().lower() or "readonly"
             if tools not in ("all", "readonly"):
@@ -5427,6 +6163,7 @@ class ServerBackend:
             tools=tools,
             provider=provider.strip(),
             model=model.strip(),
+            reasoning=reasoning,
             enabled=bool(enabled),
         )
         self.subagent_store.upsert_custom(d)
@@ -5480,6 +6217,7 @@ class ServerBackend:
                 "proxy": pc.proxy or "",
                 "price_in": pc.price_in,
                 "price_out": pc.price_out,
+                "price_cache": pc.price_cache,
             }
         return {
             "config_path": str(config_path()),
@@ -5659,6 +6397,7 @@ class ServerBackend:
         temperature: float | str | None = None,
         price_in: float | None = None,
         price_out: float | None = None,
+        price_cache: float | None = None,
         proxy: str | None = None,
     ) -> dict:
         """保存 provider 字段到 config.toml 并热生效（若是当前使用的模型）。"""
@@ -5680,6 +6419,7 @@ class ServerBackend:
             temperature=temperature,
             price_in=price_in,
             price_out=price_out,
+            price_cache=price_cache,
             proxy=proxy,
         )
         self.cfg = load_config()
@@ -5738,8 +6478,17 @@ class ServerBackend:
         if not title:
             raise RuntimeError("标题不能为空")
         await self.store.set_title(session_id, title)
+        # 用户手改过名字：自动标题不再覆盖（含首轮在跑时才改名的竞态窗口）
+        self._manually_named.add(session_id)
         if self.session and self.session.id == session_id:
             self.session.title = title
+        # 广播给其它连接（另一窗口 / 手机端），让它们的标签与侧栏同步改名
+        for ws_emit in list(self.ws_emitters):
+            try:
+                await ws_emit({"kind": "session_updated",
+                               "session_id": session_id, "title": title})
+            except Exception:
+                pass
         return {"id": session_id, "title": title}
 
     async def pin_session(self, session_id: str, pinned: bool) -> dict:
@@ -5771,7 +6520,7 @@ class ServerBackend:
             return
         self._digesting.add(session_id)
         try:
-            asyncio.create_task(self._memory_digest(session_id))
+            spawn_bg(self._memory_digest(session_id))
         except RuntimeError:
             self._digesting.discard(session_id)  # 无事件循环（如纯测试环境）
 
@@ -5855,22 +6604,32 @@ class ServerBackend:
             await self._maintain_memory("project")
 
     async def memory_maintain_now(self) -> dict:
-        """手动「立即整理」：无视周期与开关（明确点击即用户意图），仍守阈值。"""
+        """手动「立即整理」：无视周期与开关（明确点击即用户意图），仍守阈值与规模。"""
         if self.provider is None:
             raise RuntimeError("还没有可用的模型服务，先在 设置 · 模型服务 配置 API Key")
+        if getattr(self.provider, "demo_mode", False):
+            # 与归档提炼/定时巡检同一守卫：演示模式只有脚本文本，真整理会拿脚本
+            # 内容去覆盖 memory.md / AGENTS.md
+            raise RuntimeError("演示模式没有真实模型，整理不了记忆；先在 设置 · 模型服务 配置")
         g = await self._maintain_memory("global", force=True)
         p = await self._maintain_memory("project", force=True)
-        if not g and not p:
+        if "changed" in (g, p):
+            return {"ran": True, "global": g == "changed", "project": p == "changed"}
+        if g == "skipped" and p == "skipped":
             return {"ran": False, "message": "两份记忆都还没到需要整理的规模（全局 ≥400 字、项目 ≥600 字）"}
-        return {"ran": True, "global": g, "project": p}
+        if g == "unchanged" and p == "unchanged":
+            return {"ran": False, "message": "整理完成：没有发现需要合并或删除的条目，记忆维持原样"}
+        return {"ran": False, "message": "整理完成：跑过的部分无需改动（另一份还没到整理规模）"}
 
-    async def _maintain_memory(self, scope: str, force: bool = False) -> bool:
+    async def _maintain_memory(self, scope: str, force: bool = False) -> str:
         """整理一份记忆文件：模型重写 → 备份原件 → 落盘 → 刷新系统提示词。
 
-        返回是否真的整理了；失败静默记日志（整理是锦上添花，绝不打扰主流程）。
+        返回 "changed"（整理并落盘）/ "unchanged"（模型认为无需改动或输出无效）
+        / "skipped"（没到整理规模或上一轮还在跑）。失败静默记日志
+        （整理是锦上添花，绝不打扰主流程）；「立即整理」按三态分别给用户反馈。
         """
         if self._maintaining:
-            return False  # 上一轮还没跑完（手动+定时叠加时直接让路）
+            return "skipped"  # 上一轮还没跑完（手动+定时叠加时直接让路）
         if scope == "global":
             path = memory_path()
             min_chars = MAINTAIN_MIN_GLOBAL_CHARS
@@ -5886,7 +6645,7 @@ class ServerBackend:
             except OSError:
                 old_text = ""
         if len(old_text.strip()) < min_chars:
-            return False  # 还没到值得整理的规模，也不消耗「上次整理时间」
+            return "skipped"  # 还没到值得整理的规模，也不消耗「上次整理时间」
         self._maintaining = True
         try:
             parts: list[str] = []
@@ -5899,13 +6658,14 @@ class ServerBackend:
                     break
             new_text = clean_maintained_text("".join(parts), old_text, max_chars)
             if new_text is None:
-                return False  # 输出为空/与原文一致/超长失控：一律不动原文件
+                return "unchanged"  # 输出为空/与原文一致/超长失控：一律不动原文件
             try:
-                path.with_name(path.name + ".bak").write_text(old_text, encoding="utf-8")
+                # 先备份后写：备份失败（磁盘满/权限）就放弃本次整理，不裸写
+                backup_before_maintain(path, old_text)
                 path.write_text(new_text + chr(10), encoding="utf-8")
             except OSError as e:
                 memory_log.warning("memory maintain write failed (%s): %s", scope, e)
-                return False
+                return "skipped"
             if scope == "project":
                 self.instructions_text = new_text
             for ag in self._for_each_agent():
@@ -5913,22 +6673,22 @@ class ServerBackend:
             state = load_maintenance_state()
             if scope == "global":
                 state["global_last"] = time.time()
-                msg = "已整理全局记忆（原件备份为 memory.md.bak）"
+                msg = f"已整理全局记忆（原件已备份，同目录保留最近 {MAINTENANCE_BACKUP_KEEP} 份）"
             else:
                 if self.working_dir is not None:
                     proj = dict(state.get("project_last") or {})
                     proj[str(self.working_dir)] = time.time()
                     state["project_last"] = proj
-                msg = "已整理项目记忆（AGENTS.md，原件备份为 AGENTS.md.bak）"
+                msg = f"已整理项目记忆（AGENTS.md，原件已备份，同目录保留最近 {MAINTENANCE_BACKUP_KEEP} 份）"
             save_maintenance_state(state)
             if not force:  # 手动触发的结果在按钮状态行里看，不弹通知
                 self._ws_broadcast({"kind": "memory_maintain", "scope": scope, "message": msg})
-            return True
+            return "changed"
         except asyncio.CancelledError:
             raise
         except Exception as e:
             memory_log.warning("memory maintain failed (%s): %s", scope, e)
-            return False
+            return "skipped"
         finally:
             self._maintaining = False
 
@@ -6040,21 +6800,22 @@ class ServerBackend:
             store=self.subagent_store,
             provider_resolver=self._subagent_provider,
             registry_resolver=self._subagent_registry,
-            max_concurrent=3,
+            max_concurrent=self.cfg.subagent_max_concurrent,
             usage_recorder=self._record_subagent_usage,
             event_emitter=self._ws_broadcast,
+            state_path=skysheep_home() / "subagent_tasks.json",
         )
 
-        # 项目级 mcp.json 指向新目录 → 重连；顺带用新技能/子代理重建完整注册表
-        if self.mcp is not None:
-            await self._reconnect_mcp()
+        # 项目级 mcp.json 指向新目录 → 差量接入新目录的服务器；顺带用新技能/子代理重建完整注册表
+        await self._sync_mcp_changes()
 
         # 钩子与检查点跟项目走：钩子换工作目录，检查点换目录树，避免把
         # A 项目的文件快照回滚到 B 项目
         raw_cfg = load_raw_config()
-        pre_rules, post_rules = hooks_from_config(raw_cfg)
-        self.hooks = HookRunner(pre_rules, post_rules, working_dir=target) \
-            if (pre_rules or post_rules) else None
+        pre_rules, post_rules, stop_rules = hooks_from_config(raw_cfg)
+        self.hooks = HookRunner(pre_rules, post_rules, working_dir=target,
+                                stop_rules=stop_rules) \
+            if (pre_rules or post_rules or stop_rules) else None
         self.checkpoints = CheckpointStore(root=self._checkpoint_root())
 
         # 旧项目的会话 runtime 全部失效：停任务、释放、清空
@@ -6120,7 +6881,9 @@ class ServerBackend:
 
         删除是真实的删除：当前项目删掉后**不再重建一条同目录的新记录**——
         还有别的项目就切到最近的一个，一个都不剩就进入无项目态（列表为空，
-        快聊照常可用）。无项目态也是合法状态，重启后保持。"""
+        快聊照常可用）。无项目态也是合法状态，重启后保持。
+        「远程连接」是固定项目（渠道会话的归属），拒绝删除。"""
+        await self._reject_remote_project(project_id, "删除")
         is_current = self.project is not None and project_id == self.project.id
         if is_current and self._run_task and not self._run_task.done():
             raise RuntimeError("当前有任务正在运行，请先停止再删除项目")
@@ -6130,8 +6893,11 @@ class ServerBackend:
         if not is_current:
             return {"removed": project_id, "was_current": False}
         # 删的是当前项目：不再为同一目录重建记录；还有别的项目就接上最近的，
-        # 一个都不剩就进入无项目态（列表为空，快聊继续可用）
-        remaining = self.ordered_projects(await self.store.list_projects())
+        # 一个都不剩就进入无项目态（列表为空，快聊继续可用）。
+        # 「远程连接」是固定项目（无真实目录），不计入候选——否则删完所有
+        # 真实项目后会把工作目录绑到哨兵路径上
+        remaining = [p for p in self.ordered_projects(await self.store.list_projects())
+                     if not self.is_remote_project(p)]
         if remaining:
             next_path = remaining[0].root_path
             await self._bind_project(Path(next_path))
@@ -6200,8 +6966,6 @@ class ServerBackend:
 
         归属校验（安全审查 B3）：别的项目的会话不能凭枚举到的 id 导出。
         """
-        import re
-
         sess = await self._get_owned_session(session_id)
         msgs = await self.store.load_messages(session_id)
         safe_title = re.sub(r"[^\w\-]+", "_", sess.title or sess.id)[:40] or sess.id
@@ -6277,10 +7041,27 @@ class ServerBackend:
                     text = p.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     text = ""
-        return {"path": self.instructions_file, "text": text}
+        mtime = 0.0
+        if self.instructions_file:
+            try:
+                mtime = round(Path(self.instructions_file).stat().st_mtime, 3)
+            except OSError:
+                mtime = 0.0
+        # mtime 供右侧面板保存时比对：编辑期间定期整理重写过 AGENTS.md 就拒绝覆盖
+        return {"path": self.instructions_file, "text": text, "mtime": mtime}
 
-    async def save_instructions(self, text: str) -> dict:
+    async def save_instructions(self, text: str, base_mtime: float | None = None) -> dict:
         """保存项目记忆并立即刷新系统提示词（对当前会话也生效）。"""
+        if base_mtime is not None and float(base_mtime) > 0 and self.instructions_file:
+            try:
+                cur = round(Path(self.instructions_file).stat().st_mtime, 3)
+            except OSError:
+                cur = 0.0
+            if cur != float(base_mtime):
+                raise RuntimeError(
+                    "项目记忆在你编辑期间被更新过（如定期整理已重写 AGENTS.md），"
+                    "本次保存已阻止；请点「重读」后再编辑保存"
+                )
         text = text[:MAX_INSTRUCTIONS_CHARS]
         if self.instructions_file:
             path = Path(self.instructions_file)
@@ -6292,9 +7073,13 @@ class ServerBackend:
         self.instructions_text = text
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
-        return {"saved": True, "path": str(path), "chars": len(text)}
+        try:
+            mtime = round(path.stat().st_mtime, 3)
+        except OSError:
+            mtime = 0.0
+        return {"saved": True, "path": str(path), "chars": len(text), "mtime": mtime}
 
-    # ---- 会话库备份：列出 / 恢复 ----
+    # ---- 会话库备份：列出 / 手动备份 / 删除 / 恢复 ----
 
     def list_session_backups(self) -> dict:
         """可恢复的会话库备份（含"当前"一项，便于对照时间）。"""
@@ -6304,6 +7089,29 @@ class ServerBackend:
             "dir": str(self.store.backup_dir()),
             "keep": self.store.BACKUP_KEEP,
         }
+
+    async def create_session_backup(self) -> dict:
+        """手动备份会话库（设置 · 关于的「立即备份」）。
+
+        与恢复同一道防线：有会话在跑时不动手——checkpoint 与 copy 之间若还有
+        并发写，可能拷出撕裂的库文件。
+        """
+        running = [
+            rt for rt in self.runtimes.values() if rt.run_task and not rt.run_task.done()
+        ]
+        if running:
+            raise RuntimeError("还有会话正在运行，先停止（Esc）或等它结束再备份")
+        try:
+            return await self.store.backup_now()
+        except OSError as e:
+            raise RuntimeError(f"备份失败：{e}") from None
+
+    async def delete_session_backup(self, name: str) -> dict:
+        """删除单份会话库备份（文件名校验在 store 层，与恢复同一套）。"""
+        try:
+            return await self.store.delete_backup(str(name or "").strip())
+        except (OSError, ValueError, FileNotFoundError) as e:
+            raise RuntimeError(f"删除失败：{e}") from None
 
     async def restore_session_backup(self, name: str) -> dict:
         """从备份恢复会话库：先关库、换文件、重开，再重建内存状态。
@@ -6366,6 +7174,22 @@ class ServerBackend:
         "pet_y": (0, 4000),
         # 首次启动配置向导已完成标记（1=完成，不再自动弹出）
         "onboarded": (0, 1),
+        # 自动检查更新（1=开，默认开）：关于页开关，关掉后启动不再请求 GitHub
+        "update_check": (0, 1),
+        # 发送键：1 = Ctrl+Enter 发送、Enter 换行（默认 0 = Enter 发送）
+        "ctrl_enter_send": (0, 1),
+        # 通知提示音（1=开，默认关）：任务完成 / 等确认时 WebAudio 合成短音
+        "notify_sound": (0, 1),
+        # 提示音作用域（1=仅窗口失焦时响，默认 1）：前台人已在看，响一声反而吵
+        "notify_sound_focus": (0, 1),
+        # 通知类型开关（1=开，默认开）：关掉的类型不弹系统通知、不响提示音，
+        # 仍进应用内通知中心（那里是「错过提醒」的聚合日志，不该有死角）
+        "notify_kind_done": (0, 1),
+        "notify_kind_perm": (0, 1),
+        # 对话区宠物大小百分比（60–140，100 = 默认 76px 宽；null/缺省 = 默认）
+        "pet_scale": (60, 140),
+        # 阅读行宽：对话区消息卡最大宽度 px（680–1400；null/缺省 = 主题默认 880）
+        "read_width": (680, 1400),
         # 当前项目 id（0 = 无项目态）：后端在切项目/删项目/首启建项目时写入，
         # 重启后回到同一个状态；上限给足任意合法 SQLite rowid
         "active_project": (0, 2_147_483_647),
@@ -6375,15 +7199,57 @@ class ServerBackend:
         "aux", "review", "terminal", "browser", "files",
         "tasks", "todo", "agenda", "cron", "memory", "ext",
     )
+    # 会话标签恢复：session.tabs 存 sid 数组（与 tab_order 同款上限），
+    # session.active 存激活的 sid。都在前端写（标签开/关/切换时），
+    # snapshot() 读出来校验归属后下发给前端恢复。
+    SESSION_TABS_KEY = "session_tabs"
+    SESSION_ACTIVE_KEY = "session_active"
+    SESSION_TABS_MAX = 200
+    # 应用内通知中心的持久化日志（notif_log）：错过提醒要扛得住进程重启
+    NOTIF_LOG_MAX = 60
     # 字符串型偏好（值域白名单）：theme 值域见模块级 THEME_PREFS
     STRING_PREFS = {
         "theme": THEME_PREFS,
         # 侧栏呈现形式：classic=项目/会话两区（原样式），grouped=会话收进各自项目下
         "sidebar_view": ("classic", "grouped"),
+        # 用量页 Token 活动的图表类型：bar=柱状（默认），line=折线
+        "usage_chart": ("bar", "line"),
+        # 「跟随系统」的深浅落点（浅/深各一个具体主题；缺省 = 纸墨 / 夜墨）
+        "theme_auto_light": THEME_AUTO_LIGHT,
+        "theme_auto_dark": THEME_AUTO_DARK,
     }
+    # 新会话默认模型（ui.json 的 default_model）：provider 键用字符串白名单校验
+    # （只能是已配置的服务名），模型名随 provider 一起存进 value（"name::model"）
+    DEFAULT_MODEL_PROVIDER_KEY = "default_model_provider"
+    DEFAULT_MODEL_VALUE_SEP = "::"
 
     def _ui_prefs_path(self) -> Path:
         return skysheep_home() / "ui.json"
+
+    @staticmethod
+    def _clean_notif_log(val) -> list[dict]:
+        """清洗通知中心日志：字段白名单 + 截断，封顶 60 条；无有效条目返回空表。
+
+        前端存的是 [{ts, title, body, kind}]（sid 等跳转元数据只活在内存里，
+        跨进程无意义不收）；title 空的条目是脏数据，直接丢弃。
+        """
+        if not isinstance(val, list):
+            return []
+        cleaned: list[dict] = []
+        for item in val:
+            if not isinstance(item, dict):
+                continue
+            entry = {
+                "ts": float(item.get("ts") or 0.0),
+                "title": str(item.get("title") or "")[:120],
+                "body": str(item.get("body") or "")[:300],
+                "kind": str(item.get("kind") or "")[:16],
+            }
+            if entry["title"]:
+                cleaned.append(entry)
+            if len(cleaned) >= 60:
+                break
+        return cleaned
 
     def _read_ui_prefs(self) -> dict:
         p = self._ui_prefs_path()
@@ -6426,6 +7292,30 @@ class ServerBackend:
                     cleaned_sorder[gks] = gseen
             if cleaned_sorder:
                 prefs["session_order"] = cleaned_sorder
+        torder = data.get("tab_order")
+        if isinstance(torder, list) and torder and all(
+            isinstance(x, str) and x for x in torder
+        ):
+            seen: set[str] = set()
+            deduped = [x for x in torder if not (x in seen or seen.add(x))]
+            prefs["tab_order"] = deduped
+        nlog = self._clean_notif_log(data.get("notif_log"))
+        if nlog:
+            prefs["notif_log"] = nlog
+        # 自由字符串键（启动恢复 / 新会话默认模型 / 全局热键）：
+        # 读取时与写入同一套清洗（session_tabs 去重封顶，其余非空字符串直取）
+        stabs = data.get("session_tabs")
+        if isinstance(stabs, list) and stabs:
+            seen_st: set[str] = set()
+            deduped_st = [x for x in stabs
+                          if isinstance(x, str) and x and not (x in seen_st or seen_st.add(x))]
+            if deduped_st:
+                prefs["session_tabs"] = deduped_st[: self.SESSION_TABS_MAX]
+        for key in ("session_active", "hotkey", "default_model_name",
+                    "default_model_provider"):
+            v = data.get(key)
+            if isinstance(v, str) and v:
+                prefs[key] = v
         for key, allowed in self.STRING_PREFS.items():
             val = data.get(key)
             if isinstance(val, str) and val in allowed:
@@ -6454,10 +7344,37 @@ class ServerBackend:
             return {"sent": False}
 
     @staticmethod
+    def _toast_launch_uri() -> str:
+        """点击 toast 时的激活 URI（skysheep://focus）；协议未注册返回空串（点击无动作）。
+
+        协议由桌面壳（desktop.py，仅打包版）写进 HKCU\\Software\\Classes\\<scheme>：
+        点击通知系统按协议再拉起一次 exe，单实例互斥让第二个进程自动转成
+        「聚焦已有窗口」，通知才算从「发得出」变成「收得回」。这里只读注册表
+        判断有没有——浏览器兜底模式没有桌面壳，读不到，行为与旧版一致。
+        """
+        if sys.platform != "win32":
+            return ""
+        try:
+            import winreg
+
+            from .. import instance
+
+            name = instance.instance_name()
+            scheme = "skysheep" if name is None else f"skysheep-{name}"
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, rf"Software\Classes\{scheme}"
+            ) as key:
+                winreg.QueryValueEx(key, "URL Protocol")  # 有这个值才算注册完整
+            return f"{scheme}://focus"
+        except Exception:  # noqa: BLE001 - 读取失败按未注册处理，不影响弹通知
+            return ""
+
+    @staticmethod
     def _toast_blocking(title: str, body: str) -> None:
         from winotify import Notification, audio
 
-        toast = Notification(app_id="SkySheep", title=title, msg=body)
+        launch = ServerBackend._toast_launch_uri()
+        toast = Notification(app_id="SkySheep", title=title, msg=body, launch=launch)
         toast.set_audio(audio.Silent, loop=False)
         toast.show()
 
@@ -6512,12 +7429,23 @@ class ServerBackend:
         """
         current = self._read_ui_prefs()
         for key, val in (prefs or {}).items():
-            known = ("right_tabs", "right_active", "project_order", "session_order")
+            known = ("right_tabs", "right_active", "project_order", "session_order",
+                     "tab_order", "session_tabs", "session_active",
+                     "hotkey", "default_model_name", "default_model_provider",
+                     "notif_log")
             if key not in self.UI_PREFS_LIMITS and key not in known \
                     and key not in self.STRING_PREFS:
                 continue
             if val is None:
                 current.pop(key, None)
+                continue
+            if key in ("hotkey", "default_model_name", "default_model_provider"):
+                # 自由字符串键（热键组合串 / 新会话默认模型）：非空收、空串删。
+                # 值域校验在各自消费方（desktop._parse_hotkey / set 时校验服务名）
+                if isinstance(val, str) and val.strip():
+                    current[key] = val.strip()
+                else:
+                    current.pop(key, None)
                 continue
             if key in self.STRING_PREFS:
                 if isinstance(val, str) and val in self.STRING_PREFS[key]:
@@ -6587,30 +7515,86 @@ class ServerBackend:
                 else:
                     current.pop("session_order", None)
                 continue
+            if key == "tab_order":
+                # 标签栏页签的拖动序：sid 字符串数组（无 sid 的空标签不进序——
+                # 它没有稳定 id，始终排在最后）。去重封顶 200；一个都没有时删键。
+                if isinstance(val, list):
+                    seen_tab: list[str] = []
+                    for x in val:
+                        if isinstance(x, str) and x and x not in seen_tab:
+                            seen_tab.append(x)
+                            if len(seen_tab) >= 200:
+                                break
+                    if seen_tab:
+                        current["tab_order"] = seen_tab
+                    else:
+                        current.pop("tab_order", None)
+                else:
+                    current.pop("tab_order", None)
+                continue
+            if key == "session_tabs":
+                # 启动恢复：上次开着的会话标签（sid 数组，序即标签序）。去重封顶同
+                # tab_order；空数组 = 全关了，删键（下次启动回到欢迎页）
+                if isinstance(val, list):
+                    seen_st: list[str] = []
+                    for x in val:
+                        if isinstance(x, str) and x and x not in seen_st:
+                            seen_st.append(x)
+                            if len(seen_st) >= self.SESSION_TABS_MAX:
+                                break
+                    if seen_st:
+                        current["session_tabs"] = seen_st
+                    else:
+                        current.pop("session_tabs", None)
+                else:
+                    current.pop("session_tabs", None)
+                continue
+            if key == "session_active":
+                # 启动恢复：激活的是哪张标签（sid）。空串/非法删键
+                if isinstance(val, str) and val:
+                    current["session_active"] = val
+                else:
+                    current.pop("session_active", None)
+                continue
+            if key == "notif_log":
+                # 通知中心的持久化日志：同一套清洗；清空数组 = 删键（下次启动从零开始）
+                cleaned_nl = self._clean_notif_log(val)
+                if cleaned_nl:
+                    current["notif_log"] = cleaned_nl
+                else:
+                    current.pop("notif_log", None)
+                continue
             if isinstance(val, bool) or not isinstance(val, (int, float)):
                 continue
             lo, hi = self.UI_PREFS_LIMITS[key]
             current[key] = int(min(hi, max(lo, round(val))))
-        path = self._ui_prefs_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+        # 原子写（M13 同族）：ui.json 写一半会让启动读偏好直接失败
+        write_text_atomic(self._ui_prefs_path(), json.dumps(current, ensure_ascii=False))
         return {"prefs": self._frontend_prefs(current)}
 
     # ---- 全局记忆：设置页直接查看/编辑 memory.md ----
 
     async def memory_get(self) -> dict:
-        from ..tools.memory import MAX_MEMORY_FILE_CHARS, memory_path
+        from ..tools.memory import MAX_MEMORY_FILE_CHARS, inject_text, memory_path
 
         p = memory_path()
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
+        try:
+            mtime = round(p.stat().st_mtime, 3)
+        except OSError:
+            mtime = 0.0
         st = self.cfg.memory_maintenance
         state = load_maintenance_state()
         return {
             "path": str(p),
             "text": text[:MAX_MEMORY_FILE_CHARS],
+            # mtime 供设置页保存时比对：编辑期间后台提炼/整理改过文件就拒绝覆盖
+            "mtime": mtime,
+            # 系统提示词实际注入的字数（超 4000 字按行截断），页面据此提示
+            "inject_chars": len(inject_text(text)),
             "digest_enabled": self.cfg.memory_digest,
             "maintain": {
                 "global_enabled": st.global_enabled,
@@ -6623,16 +7607,34 @@ class ServerBackend:
             },
         }
 
-    async def memory_save(self, text: str) -> dict:
-        from ..tools.memory import MAX_MEMORY_FILE_CHARS, memory_path
+    async def memory_save(self, text: str, base_mtime: float | None = None) -> dict:
+        from ..tools.memory import MAX_MEMORY_FILE_CHARS, inject_text, memory_path
 
         p = memory_path()
+        if base_mtime is not None and float(base_mtime) > 0:
+            # 防覆盖：用户打开编辑器期间，归档提炼/定期整理可能已写入新条目；
+            # 拿旧编辑整体落盘会把它们静默抹掉，mtime 对不上就拒绝
+            try:
+                cur = round(p.stat().st_mtime, 3)
+            except OSError:
+                cur = 0.0
+            if cur != float(base_mtime):
+                raise RuntimeError(
+                    "记忆在你编辑期间被更新过（归档提炼或定期整理已写入），"
+                    "本次保存已阻止；请刷新本页重新编辑，以免丢掉新记忆"
+                )
+        full = text[:MAX_MEMORY_FILE_CHARS]
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text[:MAX_MEMORY_FILE_CHARS], encoding="utf-8")
+        p.write_text(full, encoding="utf-8")
         # 记忆注入系统提示词：保存后立刻对当前所有会话生效
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
-        return {"saved": True, "path": str(p), "chars": len(text)}
+        try:
+            mtime = round(p.stat().st_mtime, 3)
+        except OSError:
+            mtime = 0.0
+        return {"saved": True, "path": str(p), "chars": len(text),
+                "mtime": mtime, "inject_chars": len(inject_text(full))}
 
     async def memory_digest_save(self, enabled: bool) -> dict:
         """归档自动记忆总闸：写 config.toml 并热生效（下一次归档即按新值决定）。"""
@@ -6877,6 +7879,20 @@ class ServerBackend:
 
     # ---- 局域网访问：绑定开关 + 令牌（重启服务后生效；前端拼 URL 与二维码） ----
 
+    def note_token_failure(self, ip: str, where: str) -> None:
+        """留痕一次令牌验证失败（HTTP 守卫与 WS 握手共用）。"""
+        self._token_failure_total += 1
+        self._token_failures.append({"ts": time.time(), "ip": ip, "where": where})
+        del self._token_failures[:-TOKEN_FAILURE_LOG_MAX]
+
+    def token_failure_summary(self) -> dict:
+        """给设置页的失败概览：总次数 + 最近几条（ip / 时间）。"""
+        recent = [
+            {"ip": str(f.get("ip", "")), "ts": float(f.get("ts", 0) or 0)}
+            for f in self._token_failures[-5:]
+        ]
+        return {"total": self._token_failure_total, "recent": recent}
+
     async def lan_status(self, include_token: bool = True) -> dict:
         """局域网访问状态；include_token=False 时不回传令牌（安全审查 A9）。
 
@@ -6889,6 +7905,7 @@ class ServerBackend:
             "token": server.token if include_token else "",
             "has_token": bool(server.token),
             "ips": self._lan_ips(),
+            "token_failures": self.token_failure_summary(),
             "note": "" if server.lan else "局域网访问当前关闭：服务只监听本机 127.0.0.1。",
         }
 
@@ -6903,7 +7920,27 @@ class ServerBackend:
         return {
             **await self.lan_status(),
             "note": "已开启局域网访问：重启 SkySheep 后生效（服务会监听全部网卡，"
-                    "同一 Wi-Fi 下的设备凭令牌访问）。",
+                    "同一 Wi-Fi 下的设备凭令牌访问）。手机连不上时先看 Windows 防火墙——"
+                    "首次弹出的「是否允许访问网络」要点允许；已错过的话在防火墙设置里"
+                    "放行 SkySheep 后再试。",
+        }
+
+    async def lan_rotate_token(self) -> dict:
+        """重新生成访问令牌，立即生效（守卫每次请求都读最新配置，不用重启）。
+
+        旧令牌与已种下的 cookie 随即作废：之前发给手机的地址、二维码全部失效，
+        手机要用新地址重新打开。失败计数与节流也一并清零——换了锁，旧的敲门
+        记录不再有意义。
+        """
+        token = secrets.token_urlsafe(16)
+        update_config_section("server", {"token": token})
+        self.cfg = load_config()
+        # 只清失败计数，已生效的封锁保留（见 reset_failures 的说明）
+        self.token_throttle.reset_failures(keep_blocks=True)
+        return {
+            **await self.lan_status(),
+            "note": "已生成新令牌并立即生效：之前的地址与二维码作废，"
+                    "手机需要用下方新地址重新打开。",
         }
 
     @staticmethod
@@ -6946,6 +7983,7 @@ class ServerBackend:
             "token": server.token if include_token else "",
             "has_token": bool(server.token),
             "ips": self._tailscale_ips(),
+            "token_failures": self.token_failure_summary(),
             "note": "" if server.tailscale else "远程访问当前关闭。",
         }
 
@@ -6971,6 +8009,76 @@ class ServerBackend:
             "note": "已关闭远程访问：重启 SkySheep 后恢复仅本机监听。",
         }
 
+    # ---- 一键重启：拉起等价的新进程，再请求当前进程优雅退出 ----
+    # 新的桌面实例会先等旧进程的互斥体释放（desktop.py 的 _wait_mutex_free），
+    # 所以这里不用掐着点：先发人再退场。退出走正常收尾（lifespan shutdown、
+    # crash.flag 清除、窗口几何保存），不用 os._exit——那会留下「上次未正常
+    # 关闭」的崩溃标记，下次启动吓用户一跳。
+
+    @staticmethod
+    def _relaunch_command() -> list[str] | None:
+        """构造与当前进程等价的重启命令；无法确定时返回 None。
+
+        * 打包态（PyInstaller）：重跑当前 exe，原样带上参数；
+        * 脚本态（.py / .pyw 直接跑，如 SkySheep.pyw）：同一解释器重跑同一脚本；
+        * 开发态（console script / -m，argv[0] 形态不定）：统一用 ``-c`` 调
+          ``skysheep.cli.app.main()``，命令行参数原样透传。
+        """
+        if getattr(sys, "frozen", False):
+            return [sys.executable, *sys.argv[1:]]
+        arg0 = sys.argv[0] or ""
+        if arg0.lower().endswith((".py", ".pyw")) and os.path.isfile(arg0):
+            return [sys.executable, arg0, *sys.argv[1:]]
+        return [
+            sys.executable,
+            "-c",
+            "import sys; from skysheep.cli.app import main; sys.exit(main())",
+            *sys.argv[1:],
+        ]
+
+    async def app_restart(self) -> dict:
+        """重启应用。仅本机可调（dispatch 层 LOCAL_ONLY 门禁）。"""
+        cmd = self._relaunch_command()
+        if not cmd:
+            raise RuntimeError("无法确定重启命令，请手动关闭后重新打开 SkySheep")
+        kwargs: dict = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "cwd": os.getcwd(),
+        }
+        if os.name == "nt":
+            # DETACHED_PROCESS 脱离当前控制台；CREATE_NEW_PROCESS_GROUP 隔离
+            # Ctrl+C/信号传播——新实例必须活得比当前进程久。不弹新窗口。
+            kwargs["creationflags"] = subprocess.DETACHED_PROCESS | (  # type: ignore[attr-defined]
+                subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+            )
+        else:
+            kwargs["start_new_session"] = True
+        try:
+            subprocess.Popen(cmd, **kwargs)  # noqa: S603 - 命令由 _relaunch_command 构造
+        except OSError as e:
+            raise RuntimeError(f"重启失败：{e}") from None
+        logger.info("应用重启：新进程已拉起（%s），当前进程即将退出", cmd[0])
+        spawn_bg(self._shutdown_soon())
+        return {"ok": True, "note": "正在重启 SkySheep，窗口会自动恢复。"}
+
+    async def _shutdown_soon(self) -> None:
+        """稍等回包发出、前端有机会提示后，再走退出路径。"""
+        await asyncio.sleep(0.6)
+        hook = self.restart_hook
+        if hook is not None:
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 - 桌面钩子失败还有服务级兜底
+                logger.warning("重启钩子（桌面收尾）执行失败", exc_info=True)
+        shutdown = self.request_shutdown
+        if shutdown is not None:
+            try:
+                shutdown()
+            except Exception:  # noqa: BLE001
+                logger.warning("请求服务退出失败", exc_info=True)
+
     # ---- 聊天软件渠道（Bot Channel）：设置、会话、运行 ----
     # 安全姿态与 computer_control / browser_control 同类：默认关、属降低防护的开关，
     # 因此 channel.* 的写操作在 server/app.py 的 dispatch 层仅允许本机调用。
@@ -6981,15 +8089,31 @@ class ServerBackend:
             return {}
         return dict(self.cfg.channels.platforms or {})
 
+    def _channel_credentials_ready(self, name: str, section: dict) -> bool:
+        """该平台的凭据是否齐全（未启用、未配置的渠道也要能正确判定）。
+
+        各平台凭据形状不同：飞书是 app_id + app_secret 两个字段，微信是扫码换来的
+        bot_token（运行态而非手填），其余历史平台用单个 token。
+        """
+        if name == "weixin":
+            return bool(str(section.get("bot_token", "")).strip())
+        if name == "feishu":
+            return bool(
+                str(section.get("app_id", "")).strip()
+                and str(section.get("app_secret", "")).strip()
+            )
+        return bool(str(section.get("token", "")).strip())
+
     async def channel_status(self) -> dict:
         """渠道运行态 + 见过的来源（设置页渲染用）。"""
         cfg = self.cfg.channels if self.cfg is not None else None
         platforms = dict((cfg.platforms if cfg else {}) or {})
         manager_status = self.channels.status() if self.channels else {
-            "channels": [], "supported": ["telegram"],
+            "channels": [], "supported": ["feishu", "weixin"],
         }
         # 把配置里与支持的平台都并进来：未启动、未配置的渠道也要在界面上可见可编辑，
         # 否则用户得先“添加”才能看到入口（体验上多一步且不像开关）。
+        supported = set(manager_status.get("supported") or [])
         known = {c["name"] for c in manager_status["channels"]}
         for name in manager_status.get("supported") or []:
             if name not in known:
@@ -7003,15 +8127,19 @@ class ServerBackend:
                 })
                 known.add(name)
         for name, section in platforms.items():
-            if name not in known:
-                manager_status["channels"].append({
-                    "name": name,
-                    "enabled": bool(section.get("enabled", False)),
-                    "running": False,
-                    "configured": bool(str(section.get("token", "")).strip()),
-                    "error": "",
-                    "seen_sources": [],
-                })
+            # 只列当前版本真的支持（有适配器）的平台：升级后配置里可能残留已下线的
+            # 平台（如旧的 telegram 段），把它当卡片列出来会得到一个永远启不动的
+            # 死入口；这里直接跳过，不动用户的配置文件。
+            if name not in supported or name in known:
+                continue
+            manager_status["channels"].append({
+                "name": name,
+                "enabled": bool(section.get("enabled", False)),
+                "running": False,
+                "configured": self._channel_credentials_ready(name, section),
+                "error": "",
+                "seen_sources": [],
+            })
         # 允许名单回显（含凭据是否就绪，不回显凭据本身）
         for item in manager_status["channels"]:
             section = platforms.get(item["name"]) or {}
@@ -7021,6 +8149,14 @@ class ServerBackend:
             # 微信：凭据来自扫码，且会失效，界面要显示得更具体
             item["has_login"] = bool(str(section.get("bot_token", "")).strip())
             item["needs_qr"] = item["name"] == "weixin" and not item["has_login"]
+            # 飞书：凭据是两个字段，界面要分别回显“已保存”而不是只认一个 token
+            item["has_app_id"] = bool(str(section.get("app_id", "")).strip())
+            item["has_app_secret"] = bool(str(section.get("app_secret", "")).strip())
+            # 预授权名单（只读回显 + 危险工具告警）：配置里手写的 run_command
+            # 等于「无人值守任意命令」，界面上必须看得见（安全审查低危项）
+            allowed_tools = [str(x) for x in (section.get("allowed_tools") or [])]
+            item["allowed_tools"] = allowed_tools
+            item["tools_warning"] = _channel_allowed_tools_warning(allowed_tools)
         manager_status["approve_timeout"] = int(cfg.approve_timeout) if cfg else 120
         # 见过的来源合并持久化记录（重启后不丢，方便事后认领）
         if self.store is not None:
@@ -7044,7 +8180,7 @@ class ServerBackend:
     async def channel_save(self, params: dict) -> dict:
         """保存一个平台的配置（不启停，启停走 channel_enable / channel_disable）。
 
-        只在显式传入 token 时才覆盖已存值：界面保存允许名单时不该把 Token 清掉。
+        只在显式传入凭据时才覆盖已存值：界面保存允许名单时不该把凭据清掉。
         """
         name = str(params.get("name", "")).strip()
         if not name:
@@ -7053,6 +8189,15 @@ class ServerBackend:
         section = dict(platforms.get(name) or {})
         if params.get("token") is not None:
             section["token"] = str(params["token"]).strip()
+        # 飞书的凭据是两个字段（App ID / App Secret），不像微信那样是扫码换来的
+        # 单个 bot_token。与 token 一样只在显式传入时覆盖，避免保存名单时把已存凭据清掉。
+        if params.get("app_id") is not None:
+            section["app_id"] = str(params["app_id"]).strip()
+        if params.get("app_secret") is not None:
+            section["app_secret"] = str(params["app_secret"]).strip()
+        # 飞书依赖外部 lark-cli；允许显式指定路径（留空即用 PATH 查找）
+        if params.get("cli_path") is not None:
+            section["cli_path"] = str(params["cli_path"]).strip()
         if params.get("allowed_ids") is not None:
             section["allowed_ids"] = _normalize_id_list(params["allowed_ids"])
         if params.get("approve_enabled") is not None:
@@ -7065,7 +8210,19 @@ class ServerBackend:
         platforms[name] = section
         update_config_section("channels", {"platforms": platforms})
         self.cfg = load_config()
-        return await self.channel_status()
+        # 预授权名单是整工具级放行：把 run_command / write_file 这类写进渠道配置，
+        # 等于「无人值守时任意命令/任意写入」——保存成功时明确告警（安全审查低危项）
+        warning = _channel_allowed_tools_warning(section.get("allowed_tools"))
+        # 名单/凭据改动必须重建适配器才能热生效：适配器拿的是构造时那份 section，
+        # 不重建的话「加入允许名单」后机器人仍用旧名单判断，消息继续被忽略——
+        # 这是真实发生过的 bug（名单存进去了，机器人却永远不回话）。
+        # 微信的运行态 token 由 channel_save_state 持久化，重建不会丢登录态。
+        if self.channels is not None:
+            await self.channels.restart()
+        out = await self.channel_status()
+        if warning:
+            out["warning"] = warning
+        return out
 
     async def channel_save_state(self, name: str, state: dict) -> None:
         """把适配器的运行时状态（微信的 bot_token / 游标）落盘。
@@ -7155,7 +8312,7 @@ class ServerBackend:
     async def channel_enable(self, params: dict) -> dict:
         """启用一个平台并立即重建渠道（不再要求重启整个应用）。
 
-        只校验凭据（Telegram 是手填的 Bot Token，微信是扫码换来的 bot_token）。
+        只校验凭据（飞书是手填的 App ID + App Secret，微信是扫码换来的 bot_token）。
         允许名单**允许为空**：chat id 只能由运行中的机器人记进「发现的来源」，
         不先启用就永远拿不到第一条消息——这里的名单检查曾把首次配置锁死。
         空名单的安全语义（拒绝一切、未授权只记录不回复）由消息层强制，不在这一步。
@@ -7168,8 +8325,13 @@ class ServerBackend:
         if name == "weixin":
             if not str(section.get("bot_token", "")).strip():
                 raise RuntimeError("微信还没登录：先在下方点「生成二维码」并扫码确认")
+        elif name == "feishu":
+            if not str(section.get("app_id", "")).strip():
+                raise RuntimeError("飞书还没填 App ID，先填好再启用")
+            if not str(section.get("app_secret", "")).strip():
+                raise RuntimeError("飞书还没填 App Secret，先填好再启用")
         elif not str(section.get("token", "")).strip():
-            raise RuntimeError(f"「{name}」还没填 Bot Token，先填好再启用")
+            raise RuntimeError(f"「{name}」还没填凭据，先填好再启用")
         # 注意：这里**不能**再要求允许名单非空。chat id 只能由运行中的机器人
         # 收到第一条消息后记进「发现的来源」（见 manager.note_seen），而机器人
         # 只有启用后才会轮询——先启用再认领是唯一能走通的顺序，把名单检查
@@ -7221,24 +8383,27 @@ class ServerBackend:
     async def channel_ensure_session(self, channel_name: str) -> str:
         """取（或建）某个渠道绑定的会话。不切活动会话指针——渠道与桌面可并行。
 
-        绑定指向的会话必须属于当前项目：会话可能被桌面端移到别的项目或删除，
-        此时并到下方的自愈路径重开一个，而不是把别的项目的会话挂进当前
-        项目的工作目录与门控下（归属校验，同 B 族）。
+        渠道会话固定归到「远程连接」项目（不落当前项目或快聊）：渠道对话的
+        工作目录与桌面项目无关。绑定指向的会话必须属于该项目：会话可能被
+        桌面端移到别的项目或删除，此时并到下方的自愈路径重开一个，而不是把
+        别的项目的会话挂进渠道的工作目录与门控下（归属校验，同 B 族）。
         """
+        remote_pid = await self._remote_project_id()
         bound = await self.store.get_channel_binding(channel_name)
-        if bound and await self.store.get_session_for_project(bound, self._cur_project_id()) is not None:
+        if bound and await self.store.get_session_for_project(bound, remote_pid) is not None:
             # 绑定存在但 runtime 可能不在：重启后首次使用、或该会话被桌面端切走时。
             # 这里必须补建，否则 channel_run 会因「会话不存在」直接失败。
             await self._get_channel_runtime(bound, channel_name)
             return bound
-        sess = await self.store.create_session(self._cur_project_id(), title=f"🤖 {channel_name}")
+        sess = await self.store.create_session(remote_pid, title=f"🤖 {channel_name}")
         await self.store.set_channel_binding(channel_name, sess.id)
         await self._get_channel_runtime(sess.id, channel_name)
         return sess.id
 
     async def channel_new_session(self, channel_name: str) -> str:
-        """给渠道开一个新会话（/new），旧的保留可查。"""
-        sess = await self.store.create_session(self._cur_project_id(), title=f"🤖 {channel_name}")
+        """给渠道开一个新会话（/new），旧的保留可查。固定挂在「远程连接」项目下。"""
+        remote_pid = await self._remote_project_id()
+        sess = await self.store.create_session(remote_pid, title=f"🤖 {channel_name}")
         await self.store.set_channel_binding(channel_name, sess.id)
         await self._get_channel_runtime(sess.id, channel_name)
         return sess.id
@@ -7248,10 +8413,14 @@ class ServerBackend:
 
         与 _get_runtime 的差别只在 gate——渠道的权限姿态必须由渠道决定：
         默认门控会产出 PermissionRequest 并无限期等前端，渠道场景下没有前端。
+        工作目录与白名单归属都走「远程连接」项目（渠道对话与桌面工作目录无关；
+        文件/命令类工具本就在 ChannelGate 允许清单默认拒绝之列）。
         """
         rt = self.runtimes.get(session_id)
         if rt is not None:
             return rt
+        remote_pid = await self._remote_project_id()
+        remote_dir = Path.home()
         section = dict((self.cfg.channels.platforms or {}).get(channel_name) or {})
         gate = ChannelGate(
             allowed=list(section.get("allowed_tools") or []),
@@ -7259,8 +8428,8 @@ class ServerBackend:
             approve_timeout=int(self.cfg.channels.approve_timeout),
             notify=lambda pending: self._notify_channel_approval(channel_name, pending),
             store=self.store,
-            project_id=self._cur_project_id(),
-            working_dir=self.working_dir,
+            project_id=remote_pid,
+            working_dir=remote_dir,
         )
         recorder = ChangeRecorder()
         rt = SessionRuntime(
@@ -7269,19 +8438,18 @@ class ServerBackend:
                 provider=self.provider,
                 registry=self._build_full_registry(recorder),
                 gate=gate,
-                working_dir=self.working_dir,
+                working_dir=remote_dir,
                 max_iterations=self.cfg.max_iterations,
                 context_limit_tokens=self._context_limit(),
                 compaction_keep_recent=self.cfg.compaction_keep_recent,
+                compaction_trigger=self.cfg.compaction_trigger,
                 hooks=self.hooks,
                 restrict_to_workdir=self.cfg.restrict_to_workdir,
+                session_id=session_id,
             ),
             recorder=recorder,
         )
-        rt.agent.set_system(self.compose_system())
-        msgs = await self.store.load_messages(session_id)
-        if msgs:
-            rt.agent.load_history(msgs)
+        await self._reload_agent_history(rt.agent, session_id)
         self.runtimes[session_id] = rt
         self._channel_gates[session_id] = gate
         self._channel_names[session_id] = channel_name
@@ -7305,7 +8473,10 @@ class ServerBackend:
             lines += ["", "改动预览：", "```", pending.diff[:1500], "```"]
         lines += [
             "",
-            "回复 allow（允许一次）/ allow always（本项目总是允许）/ deny（拒绝）。",
+            # 渠道端没有「总是允许」：白名单规则是持久化的，从聊天窗口写入后
+            # 所有渠道会话都不再询问，代价与便利不成比例（ChannelGate 里强制
+            # 降级为单次），需要预授权时在桌面端本机界面操作。
+            "回复 allow（允许一次）或 deny（拒绝），只有发起这一轮的账号能决定；"
             f"超过 {self.cfg.channels.approve_timeout} 秒未回复会自动拒绝。",
         ]
         try:
@@ -7314,8 +8485,12 @@ class ServerBackend:
             logger.warning("推送审批卡片失败：%s", e)
             raise
 
-    async def channel_run(self, session_id: str, text: str) -> dict:
-        """跑一轮渠道对话，返回回复文本。不劫持活动会话。"""
+    async def channel_run(self, session_id: str, text: str, actor: str = "") -> dict:
+        """跑一轮渠道对话，返回回复文本。不劫持活动会话。
+
+        actor 是这一轮的发起人（渠道消息里的 sender 标识）：写进门控后，
+        本轮的审批决定只认他，群聊里其他成员的 allow/deny 不生效。
+        """
         if self.provider is None:
             return {"error": "尚未配置可用的模型 API Key"}
         rt = self.runtimes.get(session_id)
@@ -7330,10 +8505,17 @@ class ServerBackend:
                     channel_name = ""
             if not channel_name:
                 return {"error": "这个会话已不是渠道会话了，发送 /new 开一个新的"}
-            # 自愈前先验归属：会话被移到别的项目后不能挂回当前项目执行（同 B 族）
-            if await self.store.get_session_for_project(session_id, self._cur_project_id()) is None:
-                return {"error": "这个会话已不在当前项目里，发送 /new 开一个新的"}
+            # 自愈前先验归属：会话被移到别的项目后不能挂回渠道执行（同 B 族）。
+            # 渠道会话的归属项目是「远程连接」，不再随当前项目走。
+            if await self.store.get_session_for_project(
+                session_id, await self._remote_project_id()
+            ) is None:
+                return {"error": "这个会话已不在「远程连接」项目里，发送 /new 开一个新的"}
             rt = await self._get_channel_runtime(session_id, channel_name)
+        # 本轮发起人写进门控：审批决定只认他（见 ChannelGate.submit_latest）。
+        gate = self._channel_gates.get(session_id)
+        if gate is not None:
+            gate.turn_actor = str(actor or "")
         collected: list[str] = []
         think_text = ""
         think_ms = 0
@@ -7418,15 +8600,33 @@ class ServerBackend:
             for s in rows
         ]
 
-    async def channel_submit_decision(self, channel_name: str, decision: str) -> bool:
-        """把聊天窗口的审批回复投给等待中的门控。"""
+    async def channel_submit_decision(
+        self, channel_name: str, decision: str, actor: str = ""
+    ) -> dict:
+        """把聊天窗口的审批回复投给等待中的门控。
+
+        返回 ``{"hit": bool, "actor_mismatch": bool}``：hit=True 表示决定已生效；
+        actor_mismatch=True 表示有待决策项、但回复者不是这一轮的发起人（群聊
+        场景），决定不生效——调用方据此提示，而不是把 "allow" 当新消息再跑一轮。
+        """
+        session_id = await self.store.get_channel_binding(channel_name)
+        if not session_id:
+            return {"hit": False}
+        gate = self._channel_gates.get(session_id)
+        if gate is None or not gate.waiting:
+            return {"hit": False}
+        expected = gate.turn_actor or ""
+        if expected and str(actor or "") and actor != expected:
+            return {"hit": False, "actor_mismatch": True}
+        return {"hit": bool(gate.submit_latest(decision, actor))}
+
+    async def channel_has_waiting_decision(self, channel_name: str) -> bool:
+        """该渠道是否有等待中的审批（manager 用它区分「回应确认卡」与普通消息）。"""
         session_id = await self.store.get_channel_binding(channel_name)
         if not session_id:
             return False
         gate = self._channel_gates.get(session_id)
-        if gate is None:
-            return False
-        return gate.submit_latest(decision) is not None
+        return bool(gate is not None and gate.waiting)
 
     def note_channel_chat(self, channel_name: str, chat_id: str) -> None:
         self._channel_last_chat[channel_name] = chat_id
@@ -7476,10 +8676,8 @@ class ServerBackend:
     # ---- 更新检查（设置 · 关于可手动触发；启动时后台已查过一次） ----
 
     async def check_update(self) -> dict:
-        from ..core.uptodate import DEFAULT_RELEASES_API
-
         try:
-            info = await check_latest_release(DEFAULT_RELEASES_API)
+            info = await check_latest_release()
         except Exception as e:  # noqa: BLE001 - 手动检查要把失败原因说清楚
             self.update_error = str(e)
             self.update_info = None
@@ -7501,18 +8699,27 @@ class ServerBackend:
         """
         if not self._is_frozen:
             raise RuntimeError("源码版不支持应用内更新：请在仓库里执行 git pull 后重启")
-        from ..core.uptodate import DEFAULT_RELEASES_API
-
-        info = await check_latest_release(DEFAULT_RELEASES_API)
+        info = await check_latest_release()
         if not is_newer_version(info["version"], __version__):
             return {"update_available": False, "current": __version__, "latest": info["version"]}
-        url = info.get("setup_url") or ""
-        if not url:
-            raise RuntimeError("最新版没有 Windows 安装包附件，请到 GitHub Releases 手动下载")
-        dest = Path(tempfile.gettempdir()) / f"SkySheep-{info['version']}-setup.exe"
-        await asyncio.to_thread(_download_setup, url, dest)
+        # setup_url 是按发布约定拼的（releases/download/<tag>/SkySheep-<版本>-setup.exe），
+        # 附件真缺要到下载时才以 404 暴露
+        url = info["setup_url"]
+        # 落在随机名的私有临时目录里，不用可预测的固定文件名（同机同用户抢置）
+        dest = _update_dir() / f"SkySheep-{info['version']}-setup.exe"
+        import httpx
+
+        expected = await asyncio.to_thread(_fetch_setup_sha256, url)
+        try:
+            await asyncio.to_thread(_download_setup, url, dest, expected)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise RuntimeError(
+                    "最新版没有 Windows 安装包附件，请到 GitHub Releases 手动下载") from e
+            raise
         self._pending_update = str(dest)
-        return {"update_available": True, "version": info["version"], "path": str(dest)}
+        return {"update_available": True, "version": info["version"], "path": str(dest),
+                "verified": bool(expected)}
 
     async def apply_update(self) -> dict:
         """退出本应用并静默运行已下载的安装包。安装包声明了与本应用相同的
@@ -7542,18 +8749,34 @@ class ServerBackend:
                 pass
             os._exit(0)
 
-        asyncio.create_task(_quit_soon())
+        spawn_bg(_quit_soon())
         return {"quitting": True, "installer": pending}
 
-    # ---- 技能广场：远程索引优先，内置清单兜底（60s 缓存） ----
+    # ---- 技能广场：远程索引优先，随包索引兜底（60s 缓存，装/更新后作废） ----
 
-    async def market_list(self) -> dict:
+    async def market_list(self, refresh: bool = False) -> dict:
+        """拉广场索引并标注本地状态；refresh=True 绕过缓存重新拉（手动刷新按钮用）。"""
         now = time.monotonic()
-        if self._market_cache and now - self._market_cache[0] < 60:
+        if not refresh and self._market_cache and now - self._market_cache[0] < 60:
             return self._market_cache[1]
         result = await fetch_market_index()
+        # 官方索引 = 默认发布地址；环境变量把索引指去别处时如实标注「第三方」
+        result["official"] = not bool(os.environ.get("SKYSHEEP_MARKET_URL"))
+        merge_installed_state(result.get("items") or [], self.skills.all())
         self._market_cache = (now, result)
         return result
+
+    async def market_detail(self, url: str) -> dict:
+        """拉取广场条目指向技能的 SKILL.md 原文（安装前预览，纯只读）。"""
+        try:
+            candidates = raw_skillmd_urls(url)
+        except SkillInstallError as e:
+            raise RuntimeError(str(e)) from e
+        try:
+            content, truncated = await fetch_remote_text(candidates)
+        except RuntimeError as e:
+            raise RuntimeError(str(e)) from e
+        return {"url": url, "content": content, "truncated": truncated}
 
     # ---- 主题：标题栏联动（前端把解析后的主题回传给桌面壳） ----
 
@@ -7671,16 +8894,56 @@ class ServerBackend:
             logger.info("导入的 ui.json 里带着 accept_edits，已丢弃（该开关只能在本机切换）")
         target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    async def snapshot(self) -> dict:
+    async def snapshot(self, local: bool = True) -> dict:
+        """首屏快照。local=False（局域网 / Tailscale 远端）时打码本机信息。
+
+        安全审查 M7：旧实现把本机绝对路径（working_dir / skill_dirs / mcp_config）
+        与服务 endpoint（providers[*].base_url）无条件发给任何连上来的客户端，
+        与 project.list 对远程打码 root_path 的口径自相矛盾——同一份信息从
+        另一个方法就能拿全，打码等于没打。这里统一口径：远程拿到的是空串，
+        「能不能用」的信息（model / has_key / connected / 工具与技能清单）照给，
+        远程控制要显示当前服务与可用能力；「装在哪、连的哪个私有中转」不给。
+        """
+        def _p(v) -> str:
+            """路径字段：本机原样，远程空串（与 project.list 的 root_path 同口径）。"""
+            return str(v or "") if local else ""
+
         sessions = (
             await self.store.list_sessions(self.project.id) if self.project is not None
             else await self.store.list_quick_sessions()
         )
         project_mcp = self._mcp_project_path()
+        # 启动恢复：优先把活动会话指回上次激活的那张（session_active）。
+        # 只做指针校验与切换，不拉历史——历史由前端按 open_tabs 恢复标签时自行
+        # session.resume 拉取；记录的 sid 已被删/属于其他项目时静默落回现状。
+        prefs = self._read_ui_prefs()
+        want_active = prefs.get("session_active")
+        if isinstance(want_active, str) and want_active \
+                and (self.session is None or self.session.id != want_active):
+            try:
+                await self.activate_session(want_active)
+            except Exception:
+                pass
+        # 上次开着的标签列表：逐个校验归属（别的项目/已删的丢弃），保序去重
+        open_tabs: list[dict] = []
+        want_tabs = prefs.get("session_tabs")
+        if isinstance(want_tabs, list):
+            for sid in want_tabs:
+                if not isinstance(sid, str) or not sid \
+                        or any(t["id"] == sid for t in open_tabs):
+                    continue
+                try:
+                    s = await self._get_owned_session(sid)
+                except Exception:
+                    continue
+                open_tabs.append({"id": s.id, "title": s.title})
+                if len(open_tabs) >= self.SESSION_TABS_MAX:
+                    break
         return {
             "version": __version__,
             "frozen": self._is_frozen,  # 安装版可应用内一键更新；源码版提示 git pull
-            "working_dir": str(self.working_dir or ""),
+            "open_tabs": open_tabs,  # 启动恢复标签列表（空 = 前端走欢迎页路径）
+            "working_dir": _p(self.working_dir),
             "project": self.project.name if self.project else "（未选择项目）",
             "project_id": self.project.id if self.project else None,
             "provider": self.provider_name,
@@ -7692,7 +8955,7 @@ class ServerBackend:
                 name: {
                     "kind": pc.kind,
                     "model": pc.model,
-                    "base_url": pc.base_url,
+                    "base_url": (pc.base_url if local else ""),
                     "has_key": resolve_api_key(name, pc) is not None,
                     "supports_vision": bool(pc.supports_vision),
                 }
@@ -7709,7 +8972,9 @@ class ServerBackend:
                     ),
                 } if self.session else None
             ),
-            "instructions_file": self.instructions_file,
+            # 启动恢复标签列表（归属校验后的 sid+标题，按记录序）。只在至少
+            # 记录了一张时下发；空列表让前端走原有的「开一张欢迎页」路径
+            "instructions_file": (self.instructions_file if local else ""),
             "sessions": [
                 {"id": s.id, "title": s.title, "updated_at": s.updated_at}
                 for s in sessions[:30]
@@ -7724,20 +8989,15 @@ class ServerBackend:
                 for s in self.skills.all()
             ],
             "skill_dirs": {
-                "global": str(skysheep_home() / "skills"),
-                "project": (str(self.working_dir / ".skysheep" / "skills")
-                            if self.working_dir is not None else ""),
-                "scope_config": str(skysheep_home() / "skills-scope.json"),
+                "global": _p(skysheep_home() / "skills"),
+                "project": _p(self.working_dir / ".skysheep" / "skills"
+                              if self.working_dir is not None else ""),
+                "scope_config": _p(skysheep_home() / "skills-scope.json"),
             },
-            "mcp": [
-                {"name": n, "connected": st.connected, "error": st.error, "tools": st.tool_names,
-             "reconnecting": getattr(st, "reconnecting", False),
-             "restarts": getattr(st, "restarts", 0)}
-                for n, st in self.mcp.statuses.items()
-            ],
+            "mcp": self._mcp_status_list(self.mcp),
             "mcp_config": {
-                "global": str(self._mcp_global_path()),
-                "project": str(project_mcp or ""),
+                "global": _p(self._mcp_global_path()),
+                "project": _p(project_mcp),
                 "global_exists": self._mcp_global_path().exists(),
                 "project_exists": project_mcp is not None and project_mcp.exists(),
                 "project_active": self._project_mcp_path_if_trusted() is not None,
@@ -7766,25 +9026,81 @@ class ServerBackend:
         }
 
 
-def _download_setup(url: str, dest: Path) -> None:
+# 安装包体积上限：本项目安装包在百 MB 量级，超出说明下载被换成了别的东西。
+# 限流式边下边校，不先全量进内存（否则上限形同虚设）。
+MAX_SETUP_BYTES = 300 << 20
+
+
+def _download_setup(url: str, dest: Path, expected_sha256: str = "") -> None:
     """把安装包下载到 dest（.part 暂存、完成后改名）。同步阻塞，须在线程里跑。
 
     follow_redirects 必开：browser_download_url 会 302 到 objects.githubusercontent.com。
+    trust_env=False 与 web_fetch 同口径：不让环境变量里的代理/netrc 插手更新链。
     """
     import httpx
 
     part = dest.with_suffix(dest.suffix + ".part")
     try:
-        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=60.0, follow_redirects=True, trust_env=False) as client:
             with client.stream("GET", url) as resp:
                 resp.raise_for_status()
+                digest = hashlib.sha256()
+                total = 0
                 with open(part, "wb") as f:
                     for chunk in resp.iter_bytes(1 << 16):
+                        total += len(chunk)
+                        if total > MAX_SETUP_BYTES:
+                            raise RuntimeError(
+                                f"安装包超过 {MAX_SETUP_BYTES // (1 << 20)}MB 上限，已中止下载")
+                        digest.update(chunk)
                         f.write(chunk)
         # 校验是 PE 可执行文件（MZ 头）再落正式名：防中途断流留下半截文件被误装
         with open(part, "rb") as f:
             if f.read(2) != b"MZ":
                 raise RuntimeError("下载的内容不是 Windows 安装包（头部校验失败）")
+        # 发布方附带了 .sha256 就按它校验；没附带时上面两道（MZ 头 + 体积上限）兜底
+        if expected_sha256 and digest.hexdigest().lower() != expected_sha256.lower():
+            raise RuntimeError("安装包校验和不匹配，已丢弃（下载可能被篡改）")
         part.replace(dest)
     finally:
         part.unlink(missing_ok=True)
+
+
+def _fetch_setup_sha256(url: str) -> str:
+    """取同名 `.sha256` 附件；没有就返回空串（不阻断更新）。
+
+    本项目的更新检查走 releases/latest 页面跳转而不走 api.github.com（后者
+    匿名限流 60 次/小时/IP，国内共享出口很容易被耗尽），所以拿不到附件清单，
+    只能按发布约定试探同目录下的 .sha256。因此这项是「有则必校」：发布方
+    上传了校验和就能防住篡改，没上传就退回 MZ 头 + 体积上限两道。
+    """
+    import httpx
+
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True, trust_env=False) as client:
+            resp = client.get(url + ".sha256")
+    except httpx.HTTPError:
+        return ""
+    if resp.status_code != 200:
+        return ""
+    # 兼容 `<hex>` 与 `<hex>  <filename>` 两种常见写法
+    m = re.fullmatch(r"([0-9a-fA-F]{64}).*", resp.text.strip(), re.S)
+    return m.group(1).lower() if m else ""
+
+
+def _update_dir() -> Path:
+    """为本轮更新开一个随机名的私有临时目录，并顺手清掉旧目录。
+
+    不能落到固定可预测的 `%TEMP%\\SkySheep-<版本>-setup.exe`：那个路径同机同
+    用户的任何进程都能提前占位（写一个恶意 exe 在那里），下载层只会看到
+    「文件已存在」而照装不误。随机目录名使抢置需要先猜中 128 位随机串。
+    旧目录按修改时间清（>24h），避免每轮更新都往 %TEMP% 里堆几十 MB。
+    """
+    tmp = Path(tempfile.gettempdir())
+    for old in tmp.glob("skysheep-update-*"):
+        try:
+            if old.is_dir() and time.time() - old.stat().st_mtime > 86400:
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            continue
+    return Path(tempfile.mkdtemp(prefix="skysheep-update-"))

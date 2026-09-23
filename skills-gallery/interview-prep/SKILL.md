@@ -1,6 +1,7 @@
 ---
 name: interview-prep
 description: 拿 JD 和简历做面试准备——预测高频问题、按 STAR 写答案要点、准备反问环节，模拟追问链帮你练到能脱稿。
+version: 1.0.0
 ---
 
 ## 目标

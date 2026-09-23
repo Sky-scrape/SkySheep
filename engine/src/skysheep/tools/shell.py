@@ -10,12 +10,14 @@
 - 输出限量收集（头+尾），防止刷屏命令撑爆内存；最终再按上下文截断；
 - 超时树杀并返回超时前已产生的输出（模型能据此诊断，不再盲猜）；
 - background=true 立即返回进程号，输出由后台读线程持续收入缓冲，
-  之后用 action=read 增量读取、action=kill 结束（树杀）、action=list 列出。
+  之后用 action=read 增量读取、action=kill 结束（树杀）、action=list 列出；
+  三者都按启动会话做归属过滤，并行会话读/杀不到彼此的进程。
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import threading
@@ -36,15 +38,64 @@ FG_MAX_BYTES = 4_000_000
 FG_TAIL_BYTES = 64_000
 _FG_CLIP_MARK = b"\n...\n"
 
-# 后台进程注册表（进程级共享）：id -> 状态；跨轮读取
+# 后台进程注册表（进程级共享）：id -> 状态；跨轮读取。
+# 每条记录带 owner（启动它的会话 id）：read/kill/list 按归属过滤——并行会话
+# （或流水线/定时任务）不能读、杀别家起的服务进程。owner 为空串（CLI/旧态）
+# 时只对同样为空的调用方可见，语义与「无会话态」一致。
 _BG: dict[int, dict] = {}
 _BG_NEXT_ID = [1]
+
+
+# 子进程环境剥离（安全审查 M6）：以环境变量形态配置的 API Key 会随 os.environ
+# 整体继承给 run_command 拉起的任何命令——被确认执行一次 `echo %OPENAI_API_KEY%`
+# 就能把它读进对话（再由 web_fetch 外发）；「完全访问」档下连确认都没有。
+# 这里按变量名里的密钥词剥掉这类变量。只影响 run_command 的子进程，不动本进程
+# 自己的 os.environ（config.resolve_api_key 读密钥照常）。
+# 已知局限：用户把 env_key 配成不含下列任何词的名字（如 MY_LLM_CRED）时剥不掉；
+# 默认约定 <PROVIDER>_API_KEY 与常见服务商变量都在覆盖范围内。
+_SECRET_ENV_WORDS = (
+    "api_key", "apikey", "secret", "token", "passwd", "password",
+    "credential", "private_key", "access_key", "auth_key", "_key",
+)
+# 名字里带这些词但不是密钥本体的常见变量：保留，别把开发环境弄坏
+_SECRET_ENV_ALLOW = frozenset({"git_askpass", "ssh_askpass", "ssh_auth_sock"})
+
+
+def _is_secret_env_name(name: str) -> bool:
+    low = name.lower()
+    if low in _SECRET_ENV_ALLOW:
+        return False
+    return any(w in low for w in _SECRET_ENV_WORDS)
+
+
+def _child_env() -> dict[str, str]:
+    """给 run_command 子进程用的环境：剥掉密钥类变量，其余原样继承。
+
+    PATH / SystemRoot / ComSpec / TEMP / HOME / USERPROFILE 这些必须留着，
+    否则 cmd.exe 与绝大多数命令直接跑不起来。返回新 dict，不改 os.environ。
+    """
+    return {k: v for k, v in os.environ.items() if not _is_secret_env_name(k)}
+
+
+def _windows_exe(name: str) -> str:
+    """Windows 系统程序一律用绝对路径调用（安全审查低危项）。
+
+    裸名（cmd.exe / taskkill.exe）走 PATH 与当前目录搜索：工作目录里放一个
+    同名 exe 就能被优先执行。系统程序的位置是固定的，没有理由靠搜索。
+    """
+    root = os.environ.get("SystemRoot") or (chr(67) + ":") + os.sep + "Windows"
+    if name.lower() in ("cmd.exe", "cmd"):
+        comspec = os.environ.get("ComSpec") or ""
+        if comspec and os.path.isfile(comspec):
+            return comspec
+    full = os.path.join(root, "System32", name)
+    return full if os.path.isfile(full) else name  # 找不到就退回裸名（不阻断执行）
 
 
 def _shell_argv(command: str) -> list[str]:
     """把命令字符串包装成固定 shell 的参数列表（不经过 shell=True）。"""
     if IS_WINDOWS:
-        return ["cmd.exe", "/d", "/s", "/c", command]
+        return [_windows_exe("cmd.exe"), "/d", "/s", "/c", command]
     return ["/bin/bash", "-c", command]
 
 
@@ -87,7 +138,7 @@ def _fg_kill(proc: subprocess.Popen) -> None:
     try:
         if IS_WINDOWS:
             subprocess.run(  # noqa: S603 - exe 固定为 taskkill
-                ["taskkill.exe", "/PID", str(proc.pid), "/T", "/F"],
+                [_windows_exe("taskkill.exe"), "/PID", str(proc.pid), "/T", "/F"],
                 capture_output=True, timeout=5,
             )
         else:
@@ -104,7 +155,9 @@ def _run_sync(argv: list[str], cwd: str, timeout_s: int):
 
     status: ok | timeout。超时也带回已产生的输出（模型才能据此诊断，不盲猜）。
     """
-    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_child_env(),
+    )
     out_acc: dict = {"head": b"", "tail": b"", "capped": False}
     err_acc: dict = {"head": b"", "tail": b"", "capped": False}
     readers = [
@@ -151,31 +204,47 @@ def _popen_bg(argv: list[str], cwd: str):
             argv, cwd=cwd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            env=_child_env(),
         )
     else:
         proc = subprocess.Popen(
             argv, cwd=cwd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True,  # 独立进程组，kill 时不会伤及自身
+            env=_child_env(),
         )
     return proc
 
 
-def _bg_start(argv: list[str], cwd: str) -> dict:
+def _bg_start(argv: list[str], cwd: str, owner: str = "") -> dict:
     proc = _popen_bg(argv, cwd)
     bid = _BG_NEXT_ID[0]
     _BG_NEXT_ID[0] += 1
     buf = {"out": ""}
     threading.Thread(target=_pump, args=(proc.stdout, buf), daemon=True).start()
     threading.Thread(target=_pump, args=(proc.stderr, buf), daemon=True).start()
-    _BG[bid] = {"proc": proc, "command": argv[-1], "buf": buf, "started": time.time()}
+    _BG[bid] = {
+        "proc": proc, "command": argv[-1], "buf": buf,
+        "started": time.time(), "owner": owner,
+    }
     return {"pid": bid, "os_pid": proc.pid}
 
 
-def _bg_read(bid: int, clear: bool) -> str:
+def _bg_owned(bid: int, st: dict, sid: str) -> bool:
+    """归属校验：owner 与调用方任一为空（无会话态）时放行，规则与任务簿一致。"""
+    owner = st.get("owner") or ""
+    return not owner or not sid or owner == sid
+
+
+def _bg_read(bid: int, clear: bool, sid: str = "") -> str:
     st = _BG.get(bid)
     if st is None:
         raise ToolError(f"后台进程 {bid} 不存在或已被清理（用 action=list 查看）")
+    if not _bg_owned(bid, st, sid):
+        raise ToolError(
+            f"后台进程 {bid} 由其他会话启动，无法从这里读取"
+            "（用启动它的那个会话查看，或改用终端面板）"
+        )
     code = st["proc"].poll()
     out = st["buf"]["out"]
     if clear:
@@ -190,7 +259,13 @@ def _bg_read(bid: int, clear: bool) -> str:
     return truncate_output("\n".join(parts))
 
 
-def _bg_kill(bid: int) -> str:
+def _bg_kill(bid: int, sid: str = "") -> str:
+    st = _BG.get(bid, None)
+    if st is not None and not _bg_owned(bid, st, sid):
+        return (
+            f"后台进程 {bid} 由其他会话启动，不能从这里终止"
+            "（防止并行任务误杀彼此的进程；用启动它的那个会话操作）"
+        )
     st = _BG.pop(bid, None)
     if st is None:
         return f"后台进程 {bid} 不存在（可能已结束并被清理）"
@@ -201,7 +276,7 @@ def _bg_kill(bid: int) -> str:
         if IS_WINDOWS:
             # 树杀：cmd /c 起的子进程要一并结束（与终端面板同款实现）
             subprocess.run(  # noqa: S603 - exe 固定为 taskkill
-                ["taskkill.exe", "/PID", str(proc.pid), "/T", "/F"],
+                [_windows_exe("taskkill.exe"), "/PID", str(proc.pid), "/T", "/F"],
                 capture_output=True, timeout=5,
             )
         else:
@@ -214,11 +289,12 @@ def _bg_kill(bid: int) -> str:
     return f"后台进程 {bid} 已终止（{st['command'][:120]}）"
 
 
-def _bg_list() -> str:
-    if not _BG:
+def _bg_list(sid: str = "") -> str:
+    mine = {b: st for b, st in _BG.items() if _bg_owned(b, st, sid)}
+    if not mine:
         return "当前没有后台进程记录"
     lines = []
-    for bid, st in sorted(_BG.items()):
+    for bid, st in sorted(mine.items()):
         code = st["proc"].poll()
         alive = "运行中" if code is None else f"已退出(code {code})"
         lines.append(f"{bid}: {st['command'][:100]} [{alive}]")
@@ -258,7 +334,8 @@ class RunCommandTool(Tool):
         "在工作目录执行命令。默认同步执行并返回 stdout/stderr/退出码，长输出截断；"
         "background=true 立即返回进程号不等待（dev server / 长安装 / 交互式程序），"
         "之后用 action=\"read\" 读输出、action=\"kill\" 结束、action=\"list\" 列出。"
-        "高危操作，会先请求用户确认。"
+        "高危操作，会先请求用户确认。子进程环境里已剥掉密钥类变量（*_API_KEY / "
+        "*_TOKEN / *_SECRET 等），需要凭据的命令请走该工具自己的登录态或配置文件。"
     )
     safety = Safety.DANGEROUS
     read_only_hint = False
@@ -280,18 +357,18 @@ class RunCommandTool(Tool):
 
     async def run(self, args: RunCommandArgs, ctx: ToolContext) -> str:
         if args.action == "read":
-            return _bg_read(args.id, args.clear)
+            return _bg_read(args.id, args.clear, ctx.session_id)
         if args.action == "kill":
-            return _bg_kill(args.id)
+            return _bg_kill(args.id, ctx.session_id)
         if args.action == "list":
-            return _bg_list()
+            return _bg_list(ctx.session_id)
         if not args.command.strip():
             raise ToolError("command 不能为空")
         workdir = require_working_dir(ctx)  # 无项目态：没有 cwd 可落，给可读拒绝
         _bg_gc()
         argv = _shell_argv(args.command)  # 参数列表形式（shell=False），与前台路径一致
         if args.background:
-            info = await asyncio.to_thread(_bg_start, argv, str(workdir))
+            info = await asyncio.to_thread(_bg_start, argv, str(workdir), ctx.session_id)
             return (
                 f"后台进程已启动: id={info['pid']}（系统 PID {info['os_pid']}）\n"
                 f"命令: {args.command}\n"

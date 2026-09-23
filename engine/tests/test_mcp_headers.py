@@ -37,7 +37,7 @@ def test_config_headers_parsed(tmp_path):
     })
     from skysheep.mcp.client import load_mcp_configs
 
-    cfg = load_mcp_configs(p, None)
+    cfg, _warn = load_mcp_configs(p, None)
     assert cfg["remote"].headers == {"Authorization": "Bearer tok123"}
 
 

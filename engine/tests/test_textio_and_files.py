@@ -110,6 +110,7 @@ def test_decode_bytes_binary_flag():
 
 
 def _ctx(tmp_path):
+    """工具层测试的公共上下文：绑定 tmp_path 作为工作目录。"""
     return ToolContext(tmp_path)
 
 
@@ -388,6 +389,68 @@ async def test_move_is_recoverable_by_checkpoint(tmp_path):
 # ---------------------------------------------------------------- 权限门与新增工具
 
 
+def test_checkpoint_prune_is_per_session(tmp_path):
+    """淘汰按会话分桶：一个会话轮次再多也不挤掉另一个会话的快照。
+
+    并行会话（或流水线节点）各写各的目录时，旧实现按全局 FIFO 淘汰，
+    活跃会话会把别的会话还能回滚的快照挤掉。
+    """
+    from skysheep.core.checkpoints import MAX_CHECKPOINTS
+
+    store = CheckpointStore()  # 纯内存（不落盘）
+    other = tmp_path / "other.txt"
+    other.write_text("x", encoding="utf-8")
+    keep = store.save("B", {str(other): b"before-b"})
+    same = tmp_path / "same.txt"
+    same.write_text("y", encoding="utf-8")
+    for _ in range(MAX_CHECKPOINTS + 3):
+        store.save("A", {str(same): b"before-a"})
+
+    assert keep["id"] in {c["id"] for c in store.list_for("B")}, "别的会话的配额不该挤掉 B"
+    assert len(store.list_for("A")) == MAX_CHECKPOINTS
+
+
+def test_checkpoint_restore_conflicts_when_file_changed_after_save(tmp_path):
+    """快照之后文件又被改过：回滚前抛冲突（防抹掉并行改动），force 才覆盖。"""
+    from skysheep.core.checkpoints import CheckpointConflictError
+
+    store = CheckpointStore()
+    p = tmp_path / "doc.txt"
+    p.write_text("旧内容", encoding="utf-8")
+    cp = store.save("s1", {str(p): b"before"})
+    # 保存之后文件被改了（模拟并行任务/用户手改）
+    p.write_text("别人改的", encoding="utf-8")
+    with pytest.raises(CheckpointConflictError) as ei:
+        store.restore(cp["id"])
+    assert str(p) in ei.value.conflicts
+    assert p.read_text(encoding="utf-8") == "别人改的", "冲突时不得覆盖"
+
+    store.restore(cp["id"], force=True)  # 用户确认后强制回滚
+    assert p.read_text(encoding="utf-8") == "before"
+
+
+def test_checkpoint_legacy_meta_without_sigs_skips_dirty_check(tmp_path):
+    """旧版快照（meta 里没有 sigs 字段）不做脏检查，回滚保持旧行为。"""
+    import json as _json
+
+    root = tmp_path / "cps"
+    store = CheckpointStore(root)
+    p = tmp_path / "legacy.txt"
+    p.write_text("旧", encoding="utf-8")
+    cp = store.save("s1", {str(p): b"before"})
+
+    # 手工抹掉 meta 里的 sigs，模拟旧版（升级前）写下的快照
+    meta_path = store._cp_dir(store._items[cp["id"]]) / "meta.json"
+    meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("sigs", None)
+    meta_path.write_text(_json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    reloaded = CheckpointStore(root)  # 重新加载：sigs 是空表
+
+    p.write_text("又被改了", encoding="utf-8")
+    reloaded.restore(cp["id"])  # 不做脏检查，不抛冲突
+    assert p.read_text(encoding="utf-8") == "before"
+
+
 def test_move_write_target_is_destination():
     """自动允许写入档按 destination 判目录边界，而不是 source。"""
     from pathlib import Path
@@ -435,3 +498,181 @@ def test_move_rule_is_prefix_free_always():
     tool = ToolRegistry(default_tools()).get("move_file")
     rule = PermissionGate.rule_for(tool, {"source": "a", "destination": "b"})
     assert rule.tool == "move_file"
+
+
+async def test_last_diff_lives_on_context_not_tool_instance(tmp_path):
+    """diff 记在 ctx 上、不落在工具实例上：实例被并行任务共享，
+    实例属性会把另一个任务的 diff 错配给当前调用。"""
+    import asyncio
+
+    tool = ToolRegistry(default_tools()).get("write_file")
+    ctx_a = ToolContext(tmp_path, session_id="A")
+    ctx_b = ToolContext(tmp_path, session_id="B")
+
+    await asyncio.gather(
+        tool.run(WriteFileArgs(path="a.txt", content="AAA"), ctx_a),
+        tool.run(WriteFileArgs(path="b.txt", content="BBB"), ctx_b),
+    )
+    assert "a.txt" in ctx_a.last_diff and "b.txt" not in ctx_a.last_diff
+    assert "b.txt" in ctx_b.last_diff and "a.txt" not in ctx_b.last_diff
+
+
+def test_write_text_file_is_atomic_no_residue(tmp_path):
+    """原子写：落盘后不留临时文件（同目录 .tmp 中间态不外泄）。"""
+    from skysheep.textio import write_text_file
+
+    p = tmp_path / "note.txt"
+    write_text_file(p, "第一行\n第二行\n", "utf-8", "\n")
+    assert p.read_text(encoding="utf-8") == "第一行\n第二行\n"
+    assert [f.name for f in tmp_path.iterdir()] == ["note.txt"], "临时文件必须清理"
+
+
+def test_write_text_file_replace_failure_keeps_original(tmp_path, monkeypatch):
+    """替换失败（进程被杀/目标被占用）时旧内容原样保留，临时文件清理掉。"""
+    import os as _os
+
+    from skysheep.textio import write_text_file
+
+    p = tmp_path / "note.txt"
+    write_text_file(p, "原始内容\n", "utf-8", "\n")
+
+    def boom(*a, **k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(_os, "replace", boom)
+    with pytest.raises(OSError):
+        write_text_file(p, "新内容\n", "utf-8", "\n")
+    monkeypatch.undo()
+    assert p.read_text(encoding="utf-8") == "原始内容\n", "失败时旧内容必须原样保留"
+    assert [f.name for f in tmp_path.iterdir()] == ["note.txt"]
+
+
+
+def test_write_text_atomic_replaces_and_leaves_no_temp(tmp_path):
+    """引擎自有状态文件的原子写：覆盖后目标完整，临时文件不残留。"""
+    from skysheep.textio import write_text_atomic
+
+    target = tmp_path / "sub" / "config.toml"
+    write_text_atomic(target, "a = 1\n")
+    assert target.read_text(encoding="utf-8") == "a = 1\n"
+    write_text_atomic(target, "a = 2\n")  # 覆盖写
+    assert target.read_text(encoding="utf-8") == "a = 2\n"
+    leftovers = [f.name for f in target.parent.iterdir() if f.name != "config.toml"]
+    assert leftovers == [], leftovers
+
+
+def test_write_text_atomic_keeps_old_content_on_failure(tmp_path):
+    """写失败（编码错误）时旧内容原样保留，不留半个文件。"""
+    from skysheep.textio import write_text_atomic
+
+    target = tmp_path / "state.json"
+    payload = '{"ok": true}'
+    write_text_atomic(target, payload)
+    with pytest.raises(UnicodeEncodeError):
+        write_text_atomic(target, "坏的" + "\ud800", encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == payload
+    leftovers = [f.name for f in tmp_path.iterdir() if f.name != "state.json"]
+    assert leftovers == [], leftovers
+
+
+def test_config_writes_are_atomic_and_clamped(home):
+    """config.toml：越界/非数字值夹回合法区间；写入后文件完整可解析。"""
+    import tomllib
+
+    from skysheep.config import config_path, load_config, update_config_section
+
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "max_iterations = 9999\n"
+        "compaction_keep_recent = 0\n"
+        "subagent_max_concurrent = 100\n"
+        'context_limit_tokens = "not-a-number"\n'
+        "daily_token_budget = -5\n",
+        encoding="utf-8",
+    )
+    cfg = load_config()  # 不能抛 ValidationError
+    assert cfg.max_iterations == 200          # le=200 上界
+    assert cfg.compaction_keep_recent == 2    # ge=2 下界
+    assert cfg.subagent_max_concurrent == 8   # le=8 上界
+    assert cfg.context_limit_tokens == 1_000_000  # 非数字回默认
+    assert cfg.daily_token_budget == 0        # 负值夹到 0
+
+    update_config_section("memory", {"digest_enabled": True})
+    raw = tomllib.loads(p.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)  # 写回后仍是完整 TOML
+    leftovers = [f.name for f in p.parent.iterdir() if f.name != p.name]
+    assert leftovers == [], leftovers
+
+
+# ---- M15：检查点字节上限（条数限制挡不住大文件） ----
+
+
+def test_checkpoint_skips_oversized_file(tmp_path, monkeypatch):
+    """单个超大文件不进快照（其余文件照常可回滚），不因它丢掉整条检查点。"""
+    import skysheep.core.checkpoints as ckpt
+
+    monkeypatch.setattr(ckpt, "MAX_CHECKPOINT_FILE_BYTES", 1024)
+    store = ckpt.CheckpointStore()
+    small = tmp_path / "small.txt"
+    small.write_text("小", encoding="utf-8")
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * 2048)
+    cp = store.save("s1", {
+        str(small): b"old-small",
+        str(big): b"y" * 2048,
+    })
+    assert cp["paths"] == [str(small)], "超限的大文件应被跳过"
+    assert cp["skipped"] == [str(big)]
+    store.restore(cp["id"])
+    assert small.read_text(encoding="utf-8") == "old-small"
+
+    # 全都超限时整条不存（返回 None），不产生空检查点
+    assert store.save("s1", {str(big): b"z" * 2048}) is None
+
+
+def test_checkpoint_total_bytes_evicts_oldest(tmp_path, monkeypatch):
+    """全库字节上限：条数没超但总量超了，按时间淘汰最旧的。"""
+    import skysheep.core.checkpoints as ckpt
+
+    monkeypatch.setattr(ckpt, "MAX_CHECKPOINT_BYTES", 100)
+    monkeypatch.setattr(ckpt, "MAX_CHECKPOINT_TOTAL_BYTES", 250)
+    store = ckpt.CheckpointStore()
+    p = tmp_path / "f.txt"
+    p.write_text("x", encoding="utf-8")
+    ids = []
+    for _ in range(5):  # 每条 100 字节：第 4 条起开始淘汰最旧的
+        cp = store.save("s1", {str(p): b"z" * 100})
+        ids.append(cp["id"])
+    assert ids[0] not in store._items, "超出全库字节上限时应淘汰最旧的"
+    assert ids[-1] in store._items
+    total = sum(int(c.get("bytes") or 0) for c in store._items.values())
+    assert total <= 250
+
+# ---- 低危项：grep 支持非 UTF-8 文本 ----
+
+
+def test_grep_matches_gbk_file(tmp_path):
+    """GBK/GB18030 中文文件能被搜到（旧实现固定按 UTF-8 读，整片漏检）。"""
+    import asyncio
+
+    from skysheep.tools.search import GrepArgs, GrepTool
+
+    gbk = tmp_path / "gbk.txt"
+    gbk.write_bytes("中文内容：密钥在这里\n第二行".encode("gbk"))
+    utf8 = tmp_path / "utf8.txt"
+    utf8.write_text("中文内容：另一份\n", encoding="utf-8")
+    ctx = ToolContext(working_dir=tmp_path)
+
+    out = asyncio.run(GrepTool().run(GrepArgs(pattern="密钥"), ctx))
+    assert "gbk.txt:1" in out, out
+    assert "utf8.txt" not in out
+
+    # 两份文件都要能被同一个模式命中（编码不影响匹配）
+    out2 = asyncio.run(GrepTool().run(GrepArgs(pattern="中文内容"), ctx))
+    assert "gbk.txt:1" in out2 and "utf8.txt:1" in out2
+
+    # 二进制不参与匹配（也不因解码失败误报）
+    (tmp_path / "blob.dat").write_bytes(b"\x00\x01\x00")
+    out3 = asyncio.run(GrepTool().run(GrepArgs(pattern="密钥"), ctx))
+    assert "blob.dat" not in out3

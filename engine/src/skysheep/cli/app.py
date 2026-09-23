@@ -151,15 +151,16 @@ class ChatApp:
             self.trusted = self._ask_trust(trust)
 
         # M2: MCP 服务器连接（失败降级为警告）
-        mcp_configs = load_mcp_configs(
+        mcp_configs, mcp_config_warnings = load_mcp_configs(
             skysheep_home() / "mcp.json",
             (self.working_dir / ".skysheep" / "mcp.json") if self.trusted else None,
         )
         self.mcp = MCPManager(mcp_configs)
-        # connect_all 返回工具列表（单值）；连接失败的状态从 statuses 取
+        # connect_all 返回工具列表（单值）；解析告警与连接失败状态合并
         mcp_tools = await self.mcp.connect_all()
         mcp_warnings = [
-            f"{n}: {st.error}" for n, st in self.mcp.statuses.items() if st.error
+            *mcp_config_warnings,
+            *(f"{n}: {st.error}" for n, st in self.mcp.statuses.items() if st.error),
         ]
 
         # M2: Skills 发现（全局 + 项目）
@@ -193,9 +194,10 @@ class ChatApp:
             registry.register(t)
 
         raw_cfg = load_raw_config()
-        pre_rules, post_rules = hooks_from_config(raw_cfg)
-        hooks = HookRunner(pre_rules, post_rules, working_dir=self.working_dir) \
-            if (pre_rules or post_rules) else None
+        pre_rules, post_rules, stop_rules = hooks_from_config(raw_cfg)
+        hooks = HookRunner(pre_rules, post_rules, working_dir=self.working_dir,
+                           stop_rules=stop_rules) \
+            if (pre_rules or post_rules or stop_rules) else None
 
         self.agent = Agent(
             provider=self.provider,
@@ -555,6 +557,9 @@ def _start_backend(args):
     server = uvicorn.Server(
         uvicorn.Config(fast_app, host=host, port=port, log_level="warning")
     )
+    # 让 backend 能请求优雅退出（一键重启用）：置 should_exit 后 uvicorn 会走完
+    # lifespan 收尾（crash.flag 清除等）再退出线程，不是硬杀。
+    fast_app.state.backend.request_shutdown = lambda: setattr(server, "should_exit", True)
     threading.Thread(target=server.run, daemon=True).start()
     if not _wait_port(port):
         raise SystemExit("服务启动失败")
@@ -592,7 +597,10 @@ def _show_error_page(window, exc: BaseException) -> None:
 
     detail = str(exc) or type(exc).__name__
     try:
-        window.load_html(error_html(detail, str(skysheep_home() / "logs" / "desktop.log")))
+        from .. import wintheme
+
+        window.load_html(error_html(detail, str(skysheep_home() / "logs" / "desktop.log"),
+                                     theme=wintheme.current_theme_mode()))
     except Exception:
         pass
 
@@ -678,7 +686,7 @@ def _app_cmd(args) -> None:
     wintheme.set_theme_mode(wintheme.read_ui_theme())
     window = webview.create_window(
         instance.app_title(),
-        html=splash_html(STATIC_DIR, dark=wintheme.theme_is_dark()),
+        html=splash_html(STATIC_DIR, theme=wintheme.current_theme_mode()),
         width=width,
         height=height,
         min_size=(980, 640),
@@ -786,7 +794,7 @@ async def run_headless(
         )
         skills.discover()
 
-        mcp_configs = load_mcp_configs(
+        mcp_configs, _mcp_config_warnings = load_mcp_configs(
             skysheep_home() / "mcp.json",
             (working_dir / ".skysheep" / "mcp.json") if trusted else None,
         )
@@ -812,9 +820,10 @@ async def run_headless(
             registry.register(t)
 
         raw_cfg = load_raw_config()
-        pre_rules, post_rules = hooks_from_config(raw_cfg)
-        hooks = HookRunner(pre_rules, post_rules, working_dir=working_dir) \
-            if (pre_rules or post_rules) else None
+        pre_rules, post_rules, stop_rules = hooks_from_config(raw_cfg)
+        hooks = HookRunner(pre_rules, post_rules, working_dir=working_dir,
+                           stop_rules=stop_rules) \
+            if (pre_rules or post_rules or stop_rules) else None
 
         agent = Agent(
             provider=provider_obj,

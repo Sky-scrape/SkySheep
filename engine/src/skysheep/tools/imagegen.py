@@ -6,29 +6,90 @@
 
 安全模型与 write_file 一致（Safety.WRITE 需确认）：工具会把生成的图片写入
 工作目录内的文件，且接入检查点记录器（recorder），回滚时新建的图片一并删除。
-下载生成结果前校验目标地址为公网（复用 web_fetch 的 SSRF 防护）。
+下载生成结果与调用生成接口前校验目标地址为公网，并把连接固定到已校验 IP
+（防 SSRF 与 DNS rebinding；与 web_fetch 的 _PinnedBackend 同一范式的同步版），
+响应体流式限长，超上限立即中止（安全审查 M9）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import time
+from urllib.parse import urljoin, urlparse
 
+import httpcore
 import httpx
 from pydantic import BaseModel, Field
 
 from .base import ChangeRecorder, Safety, Tool, ToolContext, ToolError, rel_path, resolve_path
-from .web import _assert_public_host
+from .web import _resolve_public_ips
 
 TIMEOUT_S = 60.0
 MAX_IMAGE_BYTES = 8_000_000
+# 生成接口的 JSON 响应上限：b64_json 内联大图时可达数 MB；无上限时恶意/被劫持的
+# endpoint 可以让「画一张图」变成内存耗尽（安全审查 M9，与 web_fetch 同思路）
+MAX_API_JSON_BYTES = 8_000_000
+MAX_REDIRECTS = 4
 
 # 自动档尝试顺序：[(provider 名, 默认模型)]
 AUTO_PROVIDERS = (
     ("zhipu", "cogview-3-flash"),
     ("siliconflow", "Kwai-Kolors/Kolors"),
 )
+
+
+class _SyncPinnedBackend(httpcore.SyncBackend):
+    """把指定主机的 TCP 连接固定到已校验 IP（web.py _PinnedBackend 的同步镜像）。
+
+    imagegen 在线程里用同步 httpx.Client，复用不了 web_fetch 的 Async 版；
+    语义完全一致：命中被固定主机时直连已校验 IP、不再走 DNS（防 rebinding 的
+    TOCTOU 窗口），Host 头与 TLS SNI 仍用原主机名（httpcore 生成）。
+    """
+
+    def __init__(self, pinned: dict[str, list[str]]) -> None:
+        self._pinned = {h.lower(): ips for h, ips in pinned.items()}
+        self._inner = httpcore.SyncBackend()
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ):
+        targets = self._pinned.get(host.lower())
+        if not targets:
+            return self._inner.connect_tcp(
+                host, port, timeout=timeout, local_address=local_address,
+                socket_options=socket_options,
+            )
+        last: Exception | None = None
+        for ip in targets:
+            try:
+                return self._inner.connect_tcp(
+                    ip, port, timeout=timeout, local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:
+                last = e
+        raise last if last is not None else httpcore.ConnectError(
+            f"没有可用的已校验地址: {host}"
+        )
+
+
+def _pinned_transport(host: str, ips: list[str] | None = None) -> httpx.HTTPTransport:
+    """返回把连接固定到已校验 IP 的同步 transport。
+
+    ips 不传时先解析校验（必须全部公网）。校验与建连分开做：调用方总是先
+    _resolve_public_ips 校验，这里只负责固定——测试注入 transport 接管网络层时
+    公网校验也照常发生（M9：校验不能随网络层注入一起被跳过）。
+    """
+    transport = httpx.HTTPTransport(trust_env=False)
+    transport._pool._network_backend = _SyncPinnedBackend({host: ips or _resolve_public_ips(host)})
+    return transport
 
 
 class GenerateImageArgs(BaseModel):
@@ -52,7 +113,6 @@ class GenerateImageTool(Tool):
     idempotent_hint = False
     open_world_hint = True
     args_model = GenerateImageArgs
-    last_diff = ""
 
     def __init__(
         self,
@@ -124,15 +184,32 @@ class GenerateImageTool(Tool):
             raise ToolError(f"未知的图片服务商: {self.provider}")
 
         headers = {"Authorization": "Bearer " + self.api_key}
-        with httpx.Client(timeout=TIMEOUT_S, trust_env=False, transport=self._transport) as client:
-            resp = client.post(
-                base + "/images/generations",
-                json={"model": model, "prompt": prompt},
-                headers=headers,
-            )
-            if resp.status_code >= 400:
-                raise ToolError(f"画图接口返回 HTTP {resp.status_code}: {resp.text[:200]}")
-            data = resp.json()
+
+        def _capped(resp: httpx.Response, cap: int) -> bytes:
+            """流式读响应体，边读边计数，超上限立即中止（M9：不再先全量进内存）。"""
+            buf = bytearray()
+            for chunk in resp.iter_bytes(1 << 16):
+                if len(buf) + len(chunk) > cap:
+                    raise ToolError(f"响应体超过 {cap // (1 << 20)}MB 上限，已中止下载")
+                buf += chunk
+            return bytes(buf)
+
+        # 生成接口：base_url 是本机设置页（LOCAL_ONLY）配的，默认值是公网官方端点；
+        # 但可手填任意值——公网校验无条件做，注入 transport（测试桩）也不例外
+        gen_host = urlparse(base).hostname or ""
+        gen_ips = _resolve_public_ips(gen_host)
+        gen_transport = (
+            self._transport if self._transport is not None else _pinned_transport(gen_host, gen_ips)
+        )
+        with httpx.Client(timeout=TIMEOUT_S, trust_env=False, transport=gen_transport) as client:
+            with client.stream(
+                "POST", base + "/images/generations",
+                json={"model": model, "prompt": prompt}, headers=headers,
+            ) as resp:
+                if resp.status_code >= 400:
+                    snippet = resp.read()[:200].decode("utf-8", errors="replace")
+                    raise ToolError(f"画图接口返回 HTTP {resp.status_code}: {snippet}")
+                data = json.loads(_capped(resp, MAX_API_JSON_BYTES))
             item = ((data.get("data") or data.get("images")) or [{}])[0] or {}
             b64 = item.get("b64_json")
             if b64:
@@ -140,24 +217,37 @@ class GenerateImageTool(Tool):
             image_url = item.get("url") or ""
             if not image_url:
                 raise ToolError(f"画图接口没有返回图片地址：{str(data)[:200]}")
-            # 下载生成结果：来源是服务商返回的地址，逐跳做公网校验（防 SSRF）
-            from urllib.parse import urlparse
 
-            current = image_url
-            for _ in range(4):
-                parsed = urlparse(current)
-                if parsed.scheme not in ("http", "https") or not parsed.hostname:
-                    raise ToolError(f"图片地址协议不支持: {current}")
-                _assert_public_host(parsed.hostname)
-                dl = client.get(current, headers={"User-Agent": "SkySheep-imagegen/0.7"})
-                if dl.status_code in (301, 302, 303, 307, 308):
-                    loc = dl.headers.get("location", "")
-                    if not loc:
-                        raise ToolError("图片下载重定向缺少 Location")
-                    current = loc
-                    continue
-                if dl.status_code >= 400:
-                    raise ToolError(f"图片下载失败 HTTP {dl.status_code}")
-                mime = (dl.headers.get("content-type") or "image/png").split(";")[0].strip()
-                return image_url, dl.content, mime
-            raise ToolError("图片下载重定向次数过多")
+        # 下载生成结果：来源是服务商返回的地址，不受我们控制——每一跳都重新做
+        # 公网校验并把连接固定到已校验 IP（防 SSRF 与 DNS rebinding 的 TOCTOU 窗口，
+        # M9：与 web_fetch 的 _PinnedBackend 同一范式，同步版）
+        current = image_url
+        for _ in range(MAX_REDIRECTS + 1):
+            parsed = urlparse(current)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                raise ToolError(f"图片地址协议不支持: {current}")
+            dl_ips = _resolve_public_ips(parsed.hostname)  # 内网地址在这里就被拒绝
+            dl_transport = (
+                self._transport if self._transport is not None
+                else _pinned_transport(parsed.hostname, dl_ips)
+            )
+            with httpx.Client(
+                timeout=TIMEOUT_S, trust_env=False, transport=dl_transport,
+                follow_redirects=False,
+            ) as dl_client:
+                with dl_client.stream(
+                    "GET", current, headers={"User-Agent": "SkySheep-imagegen/0.7"}
+                ) as dl:
+                    if dl.status_code in (301, 302, 303, 307, 308):
+                        loc = dl.headers.get("location", "")
+                        if not loc:
+                            raise ToolError("图片下载重定向缺少 Location")
+                        # Location 允许是相对路径（RFC 7231），按当前 URL 补全
+                        current = urljoin(current, loc)
+                        continue
+                    if dl.status_code >= 400:
+                        raise ToolError(f"图片下载失败 HTTP {dl.status_code}")
+                    mime = (dl.headers.get("content-type") or "image/png").split(";")[0].strip()
+                    body = _capped(dl, MAX_IMAGE_BYTES)
+            return image_url, body, mime
+        raise ToolError("图片下载重定向次数过多")

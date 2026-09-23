@@ -1,6 +1,7 @@
 ---
 name: travel-planner
 description: 问清目的地、天数、预算与偏好后检索实时信息，输出按天中文行程表（Markdown 表格）、预算估算，可把行程写入日程。
+version: 1.0.0
 ---
 
 ## 目标

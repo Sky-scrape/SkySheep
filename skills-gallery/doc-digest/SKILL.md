@@ -1,6 +1,7 @@
 ---
 name: doc-digest
 description: 精读长篇 PDF 或 Word 文档，先给含 5 条核心结论的一页速览，再按用户追问逐章展开，所有要点注明页码出处。
+version: 1.0.0
 ---
 
 ## 目标

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -14,6 +16,30 @@ from rich.text import Text
 
 from ..core.estimate import format_range
 from ..events import AgentEvent
+
+# 终端控制序列剥离（安全审查 M14）：模型输出、工具结果、命令输出里可能嵌
+# ANSI 转义——\x1b[2J 清屏、\x1b]0;标题 改窗口标题、\x1b[?25l 隐藏光标。
+# rich 的 strip_control_codes 不剥 ESC，这些序列会被原样打到终端（已实测复现）。
+# 这些内容都来自不可信输入，渲染前必须剥掉；只影响 CLI 面（GUI 是浏览器渲染，
+# 转义序列本就惰性）。
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")            # CSI：光标/清屏/颜色
+_ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")  # OSC：改标题
+_ANSI_ESC_RE = re.compile(r"\x1b.")  # 双字符转义（ESC 7/8 存游标这类）
+_ANSI_C1_RE = re.compile(r"\x9b[0-?]*[ -/]*[@-~]")  # C1 CSI（单字节 0x9b 起）
+# 字符集/编码选择：ESC ( B、ESC % G 这类三字符序列（先于通用双字符规则匹配）
+_ANSI_CHARSET_RE = re.compile(r"\x1b[()*+#%][^\x1b]?")
+# 其余控制符：C0（保留 \n \t）与 C1（含 DEL）。残留的孤立 ESC 也在这里被清掉
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def sanitize_terminal_text(text: str) -> str:
+    """剥掉终端控制序列与不可打印控制符，保留换行与制表符。"""
+    text = _ANSI_OSC_RE.sub("", text)
+    text = _ANSI_CSI_RE.sub("", text)
+    text = _ANSI_CHARSET_RE.sub("", text)
+    text = _ANSI_ESC_RE.sub("", text)
+    text = _ANSI_C1_RE.sub("", text)
+    return _CONTROL_RE.sub("", text)
 
 
 def _message_text(message_dict: dict) -> str:
@@ -55,20 +81,20 @@ class Renderer:
         k = ev.kind
         if k == "thinking_delta":
             # 思考先于正文：实时灰色展示（transient，结束时擦除，不与正文混淆）
-            self._think.append(ev.text)
+            self._think.append(sanitize_terminal_text(ev.text))
             self._buf = []
             self._ensure_live(Text("".join(self._think), style="dim"))
         elif k == "text_delta":
             if self._think:
                 self._think = []
-            self._buf.append(ev.text)
+            self._buf.append(sanitize_terminal_text(ev.text))
             self._ensure_live()
         elif k == "assistant_message":
             self._flush_live()
             if self._think:
                 self.console.print(Text(f"💭 思考过程（{len(''.join(self._think))} 字）", style="dim"))
                 self._think = []
-            text = _message_text(ev.message)
+            text = sanitize_terminal_text(_message_text(ev.message))
             if text.strip():
                 self.console.print(Markdown(text))
                 self.console.print()
@@ -87,7 +113,7 @@ class Renderer:
             head = f"  {flag} {ev.name} ({ev.duration_ms}ms)"
             self.console.print(Text(head, style=style))
             if ev.preview:
-                for line in ev.preview.splitlines()[:8]:
+                for line in sanitize_terminal_text(ev.preview).splitlines()[:8]:
                     self.console.print(Text("    " + line, style="dim"))
                 more = ev.preview.splitlines()
                 if len(more) > 8:
@@ -97,7 +123,7 @@ class Renderer:
             args = _one_line(ev.input)
             body = args if len(args) <= 2000 else args[:2000] + " ..."
             if ev.note:
-                body += "\n" + ev.note
+                body += "\n" + sanitize_terminal_text(ev.note)
             if ev.rule_kind:
                 kind_cn = {
                     "always": "整个工具",
@@ -105,7 +131,7 @@ class Renderer:
                     "exact": "仅此一条",
                     "glob": "通配",
                 }.get(ev.rule_kind, ev.rule_kind)
-                pat = ev.rule_pattern or "（全部）"
+                pat = sanitize_terminal_text(ev.rule_pattern) or "（全部）"
                 body += f"\n「总是允许」将添加规则：{ev.tool_name} · {kind_cn} {pat}"
             self.console.print(
                 Panel(
@@ -123,10 +149,14 @@ class Renderer:
             self.console.print(Text("  → " + label, style="dim"))
         elif k == "notice":
             self._flush_live()
-            self.console.print(Text("⏳ " + ev.message, style="yellow dim"))
+            self.console.print(
+                Text("⏳ " + sanitize_terminal_text(ev.message), style="yellow dim")
+            )
         elif k == "error":
             self._flush_live()
-            self.console.print(Text("✗ " + ev.message, style="bold red"))
+            self.console.print(
+                Text("✗ " + sanitize_terminal_text(ev.message), style="bold red")
+            )
         elif k == "compaction":
             self._flush_live()
             msg = (
@@ -150,7 +180,7 @@ class Renderer:
 def _one_line(d: dict, limit: int = 160) -> str:
     parts = []
     for key, value in d.items():
-        s = str(value)
+        s = sanitize_terminal_text(str(value))
         if len(s) > limit:
             s = s[:limit] + "..."
         parts.append(f"{key}={s}")

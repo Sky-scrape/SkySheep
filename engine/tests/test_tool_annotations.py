@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from skysheep.core.subagent import CheckTaskTool, SpawnAgentTool
+from skysheep.core.subagent import CheckTaskTool, SpawnAgentTool, WaitTaskTool
 from skysheep.tools import ToolRegistry, default_tools
 from skysheep.tools.base import Tool
 from skysheep.tools.pipeline import PipelineWriteTool
@@ -20,7 +20,7 @@ from skysheep.tools.skill import LoadSkillTool
 
 ANNOTATION_KEYS = {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
 
-# default_tools() 的默认全集（computer/browser 控制默认开；store 不传无 schedule_write）
+# default_tools() 显式打开 computer/browser 控制时的全集（store 不传无 schedule_write）
 DEFAULT_TOOLS = [
     "read_file",
     "read_image",
@@ -50,6 +50,18 @@ DEFAULT_TOOLS = [
     "browser",
 ]
 
+# 电脑控制七件套 + 浏览器控制：形参默认关（安全审查 M16），要显式打开才注册
+CONTROL_TOOLS = [
+    "screenshot",
+    "window_list",
+    "clipboard_read",
+    "clipboard_write",
+    "mouse",
+    "keyboard",
+    "window",
+    "browser",
+]
+
 # server 端按需装配、不在 default_tools() 默认集里的工具
 CONTEXTUAL_TOOLS = [
     "schedule_write",
@@ -57,6 +69,7 @@ CONTEXTUAL_TOOLS = [
     "pipeline_write",
     "spawn_agent",
     "check_task",
+    "wait_task",
 ]
 
 
@@ -79,7 +92,12 @@ def _build(name: str) -> Tool:
         return SpawnAgentTool(tasks)
     if name == "check_task":
         return CheckTaskTool(None)
-    return ToolRegistry(default_tools()).get(name)
+    if name == "wait_task":
+        return WaitTaskTool(None)
+    # 注解抽查要覆盖电脑/浏览器控制工具，它们默认关，这里显式打开
+    return ToolRegistry(
+        default_tools(computer_control=True, browser_control=True)
+    ).get(name)
 
 
 def _annotations(name: str) -> dict:
@@ -89,8 +107,23 @@ def _annotations(name: str) -> dict:
 
 
 def test_default_registry_has_exactly_the_documented_tools():
-    registry = ToolRegistry(default_tools())
+    registry = ToolRegistry(default_tools(computer_control=True, browser_control=True))
     assert sorted(t.name for t in registry.all()) == sorted(DEFAULT_TOOLS)
+
+
+def test_control_tools_are_off_by_default():
+    """M16：形参默认关——新调用方漏传不会静默打开截屏/键鼠/剪贴板与浏览器控制。
+
+    默认值必须与 config.computer_control / browser_control 同一口径（都是 False），
+    否则「配置里默认关、工具集里默认开」这种矛盾迟早会变成真实的攻击面。
+    """
+    from skysheep.config import SkySheepConfig
+
+    names = {t.name for t in default_tools()}
+    assert not (names & set(CONTROL_TOOLS)), names & set(CONTROL_TOOLS)
+    assert names == set(DEFAULT_TOOLS) - set(CONTROL_TOOLS)
+    cfg = SkySheepConfig()
+    assert cfg.computer_control is False and cfg.browser_control is False
 
 
 @pytest.mark.parametrize("name", DEFAULT_TOOLS + CONTEXTUAL_TOOLS)
@@ -114,6 +147,7 @@ def test_every_tool_declares_four_boolean_hints(name):
         ("clipboard_read", True, False, True, False),
         ("spawn_agent", False, False, False, False),
         ("check_task", True, False, True, False),
+        ("wait_task", True, False, False, False),
     ],
 )
 def test_annotation_values_match_tool_semantics(name, ro, dest, idem, world):

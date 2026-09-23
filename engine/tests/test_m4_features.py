@@ -242,10 +242,17 @@ async def test_checkpoint_recorder_and_restore(tmp_path):
     assert store.list_for("s1")[0]["id"] == cp["id"]
     assert store.list_for("other") == []
 
-    # 改动继续发生后再回滚
+    # 改动继续发生后再回滚：快照之后文件又被改过（等价于并行任务写了同一文件）
+    # → 引擎先报冲突不动磁盘；用户确认后带 force 恢复，回滚才落盘
+    from skysheep.core.checkpoints import CheckpointConflictError
+
     f.write_text("v3", encoding="utf-8")
     new_file.write_text("changed", encoding="utf-8")
-    files = store.restore(cp["id"])
+    with pytest.raises(CheckpointConflictError) as ei:
+        store.restore(cp["id"])
+    assert sorted(ei.value.conflicts) == sorted([str(f), str(new_file)])
+    assert f.read_text(encoding="utf-8") == "v3", "冲突时磁盘未被触碰"
+    files = store.restore(cp["id"], force=True)
     assert f.read_text(encoding="utf-8") == "v1"
     assert not new_file.exists(), "新建文件回滚 = 删除"
     assert sorted(files) == sorted(cp["paths"])

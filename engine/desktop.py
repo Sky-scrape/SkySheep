@@ -72,6 +72,42 @@ def mutex_name() -> str:
     return f"Local\\{DEFAULT_TITLE}DesktopSingleton{suffix}"
 
 
+def url_scheme() -> str:
+    """toast 点击唤起用的 URL 协议名：按身份区分，两个身份各自注册各自的。
+
+    与引擎侧 backend._toast_launch_uri 的拼法保持一致（那边只读注册表判断
+    有没有注册，这边负责写）。
+    """
+    name = instance_name()
+    return DEFAULT_TITLE.lower() if name is None else f"{DEFAULT_TITLE.lower()}-{name}"
+
+
+def _ensure_url_protocol() -> None:
+    """注册 skysheep:// 协议（HKCU），让「点击系统通知」能把窗口唤回前台。
+
+    toast 带 launch="skysheep://focus" 时，点击通知系统会按协议再拉起一次
+    本程序：单实例互斥让第二个进程自动转成「聚焦已有窗口」（见 main 的
+    already-running 分支），通知就从「发得出」变成「收得回」。
+    只在打包版注册：开发态注册表会留下指向临时虚拟环境的路径，不值得——
+    开发态点击通知无动作，与旧版一致。失败只记日志，不影响弹通知。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import winreg
+
+        with winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER, rf"Software\Classes\{url_scheme()}"
+        ) as root:
+            winreg.SetValueEx(root, "URL Protocol", 0, winreg.REG_SZ, "")
+            winreg.SetValueEx(root, None, 0, winreg.REG_SZ, DEFAULT_TITLE)
+            with winreg.CreateKey(root, r"shell\open\command") as cmd:
+                winreg.SetValueEx(cmd, None, 0, winreg.REG_SZ, f'"{sys.executable}" "%1"')
+        _log(f"URL 协议已注册：{url_scheme()}:// → {sys.executable}")
+    except Exception as exc:
+        _log(f"URL 协议注册失败（点击系统通知将无法唤起窗口）: {exc!r}")
+
+
 def app_dir() -> Path:
     """启动器所在目录：开发态是 engine/，打包态是 exe 所在目录。"""
     if getattr(sys, "frozen", False):
@@ -374,6 +410,12 @@ def _report_failure(title: str) -> None:
     )
 
 
+def _hex_rgb(hex6: str) -> tuple[int, int, int]:
+    """#RRGGBB / RRGGBB → (r, g, b)，供 paint_caption / System.Drawing 用。"""
+    hex6 = hex6.lstrip("#")
+    return int(hex6[0:2], 16), int(hex6[2:4], 16), int(hex6[4:6], 16)
+
+
 def static_dir() -> Path:
     """前端静态资源目录：开发态在源码树里，打包态在 _MEIPASS。"""
     if getattr(sys, "frozen", False):
@@ -381,14 +423,31 @@ def static_dir() -> Path:
     return app_dir() / "src" / "skysheep" / "server" / "static"
 
 
-def paint_caption(hwnd: int, paper_rgb=(244, 236, 216), ink_rgb=(29, 26, 22)) -> None:
-    """把窗口标题栏刷成纸色、文字与边框用墨色（Win11 DWM；旧系统自动跳过）。
+def paint_caption(hwnd: int, paper_rgb=None, ink_rgb=None, border_rgb=None) -> None:
+    """把窗口标题栏刷成主题纸色、文字与边框用墨色（Win11 DWM；旧系统自动跳过）。
 
     不处理的话标题栏是刺眼的白色，和纸色卡体割裂（用户实测反馈）。
+    不传色值时按当前主题解析（wintheme.THEME_PALETTE，与 app.css 同源）——
+    深色主题下标题文字是亮纸色、边框是近黑墨线，所以文字与边框分开设。
     """
     try:
         if sys.getwindowsversion().build < 22000:
             return  # Win10 没有 DWMWA_CAPTION_COLOR
+        if paper_rgb is None or ink_rgb is None or border_rgb is None:
+            try:
+                from skysheep import wintheme
+
+                pal = (
+                    wintheme.THEME_PALETTE.get(wintheme.current_theme_mode())
+                    or wintheme.THEME_PALETTE["paper"]
+                )
+                paper_rgb = paper_rgb or _hex_rgb(pal["bg"])
+                ink_rgb = ink_rgb or _hex_rgb(pal["text"])
+                border_rgb = border_rgb or _hex_rgb(pal["line"])
+            except Exception:
+                paper_rgb = paper_rgb or (244, 236, 216)
+                ink_rgb = ink_rgb or (29, 26, 22)
+                border_rgb = border_rgb or ink_rgb
         dwm = ctypes.windll.dwmapi
 
         def _set(attr: int, rgb: tuple[int, int, int]) -> None:
@@ -398,7 +457,7 @@ def paint_caption(hwnd: int, paper_rgb=(244, 236, 216), ink_rgb=(29, 26, 22)) ->
 
         _set(35, paper_rgb)  # DWMWA_CAPTION_COLOR 标题栏底色
         _set(36, ink_rgb)  # DWMWA_TEXT_COLOR 标题文字
-        _set(34, ink_rgb)  # DWMWA_BORDER_COLOR 窗口边框
+        _set(34, border_rgb)  # DWMWA_BORDER_COLOR 窗口边框
         # pywebview 按系统深色模式设了沉浸式深色标题栏（20=1，深色系统下是黑）。
         # 不显式关掉的话，窗口最大化/还原等 DWM 重绘场景会把标题栏画回系统黑
         # （只在窗口以最大化创建时必现，普通路径不触发）。
@@ -733,23 +792,75 @@ def _read_clipboard_text() -> str:
         return ""
 
 
-def _start_global_hotkey(window, on_trigger) -> None:
-    """注册全局热键：Ctrl+Alt+Space 唤起窗口 + 预填剪贴板。
+# 全局热键可改键：修饰键与主键码白名单（防任意 VK 注入；主键限 F1-F12 与
+# 少量符号键，避开字母数字——全局抢字母键会让人无法正常打字）。
+# 偏好存 ui.json 的 hotkey 键（"Ctrl+Alt+Space" 形式的组合串），由设置页写入。
+_HOTKEY_MODS = {"Ctrl": 0x0002, "Alt": 0x0001, "Shift": 0x0004, "Win": 0x0008}
+_HOTKEY_MOD_ORDER = ("Ctrl", "Alt", "Shift", "Win")
+_HOTKEY_VKS = {
+    "Space": 0x20, "`": 0xC0, ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD,
+    ".": 0xBE, "/": 0xBF, "[": 0xDB, "]": 0xDD, "\\": 0xDC, "'": 0xDE,
+    **{f"F{n}": 0x6F + n for n in range(1, 13)},
+}
+_HOTKEY_DEFAULT = "Ctrl+Alt+Space"
+
+
+def _parse_hotkey(combo: str):
+    """"Ctrl+Alt+Space" 形式 → (mods, vk)；非法/白名单外返回 None。"""
+    try:
+        parts = [p.strip() for p in str(combo or "").split("+") if p.strip()]
+        if not parts:
+            return None
+        *mods, key = parts
+        if key not in _HOTKEY_VKS or not (1 <= len(mods) <= 3):
+            return None
+        mask = 0
+        for m in mods:
+            if m not in _HOTKEY_MODS:
+                return None
+            mask |= _HOTKEY_MODS[m]
+        if not mods:
+            return None
+        return mask | 0x4000, _HOTKEY_VKS[key]  # 恒带 MOD_NOREPEAT
+    except Exception:
+        return None
+
+
+def _read_hotkey_pref() -> str:
+    """从 ui.json 读热键偏好；缺失/损坏/白名单外回退默认。"""
+    try:
+        import json
+
+        from skysheep.instance import data_home
+
+        prefs = json.loads((data_home() / "ui.json").read_text(encoding="utf-8"))
+        combo = str((prefs or {}).get("hotkey") or _HOTKEY_DEFAULT)
+        return combo if _parse_hotkey(combo) else _HOTKEY_DEFAULT
+    except Exception:
+        return _HOTKEY_DEFAULT
+
+
+def _start_global_hotkey(window, on_trigger, combo: str = "") -> None:
+    """注册全局热键（默认 Ctrl+Alt+Space，可由 ui.json 的 hotkey 偏好改键）：
+    唤起窗口 + 预填剪贴板。
 
     在独立线程里跑 GetMessage 循环；注册失败（冲突/无权限）静默跳过。
     仅 Windows 桌面模式调用；--browser 兜底路径不启用。
     """
-    MOD_CONTROL, MOD_ALT, MOD_NOREPEAT = 0x0002, 0x0001, 0x4000
-    VK_SPACE = 0x20
+    combo = combo or _read_hotkey_pref()
+    parsed = _parse_hotkey(combo)
+    if parsed is None:
+        combo, parsed = _HOTKEY_DEFAULT, _parse_hotkey(_HOTKEY_DEFAULT)
+    mods, vk = parsed
     WM_HOTKEY = 0x0312
 
     def _thread() -> None:
         try:
-            ok = ctypes.windll.user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE)
+            ok = ctypes.windll.user32.RegisterHotKey(None, 1, mods, vk)
         except Exception:
             ok = False
         if not ok:
-            _log("全局热键注册失败（可能与其他程序冲突），已跳过")
+            _log(f"全局热键注册失败（{combo}，可能与其他程序冲突），已跳过")
         msg = ctypes.wintypes.MSG()
         try:
             while ctypes.windll.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -913,6 +1024,8 @@ def _run_windowed() -> int:
     from skysheep.bootpages import error_html, splash_html
     from skysheep.server.picker import FilePicker
 
+    _ensure_url_protocol()  # 打包版注册 skysheep:// 协议：点击系统通知可唤回窗口
+
     static = static_dir()
     picker = FilePicker()
     # 提前初始化 GUI 库并取屏幕列表：默认开窗位置用主屏（不指定位置时 WinForms
@@ -954,7 +1067,7 @@ def _run_windowed() -> int:
     wintheme.set_theme_mode(wintheme.read_ui_theme())
     window = webview.create_window(
         app_title(),
-        html=splash_html(static, dark=wintheme.theme_is_dark()),
+        html=splash_html(static, theme=wintheme.current_theme_mode()),
         width=width,
         height=height,
         min_size=(980, 640),
@@ -990,14 +1103,54 @@ def _run_windowed() -> int:
     tray_holder: dict[str, object] = {}
 
     def _ask_close_choice() -> int:
-        """纸墨主题的退出选择框。返回 6=彻底退出 7=缩到系统托盘 2=取消。
+        """主题化退出选择框。返回 6=彻底退出 7=缩到系统托盘 2=取消。
 
+        配色逐项取自 wintheme.THEME_PALETTE（与 app.css 同名变量同源），
+        深色主题下不再是刺眼的浅色对话框。
         在 closing 事件里同步弹出（GUI 线程），owner 挂主窗口保证置前。
         注意：System.Windows.Forms 的类型必须用模块属性访问（WinForms.X），
         pythonnet 的 `from System.Windows.Forms import 枚举` 会报 unknown location。
         """
         import System.Windows.Forms as WinForms
         from System.Drawing import Color, Font, FontStyle, Icon, Point, Size
+
+        # 主题色板：与界面内主题逐项同源（改主题色时跟 app.css 一起改）
+        pal = (
+            wintheme.THEME_PALETTE.get(wintheme.current_theme_mode())
+            or wintheme.THEME_PALETTE["paper"]
+        )
+
+        def _rgb6(hex6: str) -> Color:
+            r, g, b = _hex_rgb(hex6)
+            return Color.FromArgb(r, g, b)
+
+        ink = _rgb6(pal["line"])      # 墨线/描边（浅色=深墨、深色=近黑）
+        text_c = _rgb6(pal["text"])   # 主文字（深色主题下是亮纸色）
+        paper = _rgb6(pal["card"])    # 对话框底 = 界面卡纸
+        paper2 = _rgb6(pal["bg"])     # 取消悬停 = 桌面深纸（悬停沉一格同界面语言）
+        ink_soft = _rgb6(pal["dim"])  # 次要文字
+        blue = _rgb6(pal["blue"])
+        blue_dark = _rgb6(pal["blue_deep"])
+
+        def _ink_hover() -> Color:
+            """墨底按钮的悬停色：向亮色混 12%（浅色主题用卡纸提亮，深色主题用亮文字）。
+
+            墨线色在六主题里都是深色，但浅色主题的 text 也是深色——向 text 混合
+            几乎无变化（青瓷下实测悬停看不出），所以按主题方向选混合目标。"""
+            r1, g1, b1 = _hex_rgb(pal["line"])
+            target = "text" if wintheme.theme_is_dark() else "card"
+            r2, g2, b2 = _hex_rgb(pal[target])
+            mix = 0.12
+            return Color.FromArgb(
+                int(r1 + (r2 - r1) * mix),
+                int(g1 + (g2 - g1) * mix),
+                int(b1 + (b2 - b1) * mix),
+            )
+
+        # 墨底按钮的对比字色：墨线色恆为深色，字色取「亮的那一档」——
+        # 深色主题用亮纸文字色，浅色主题用卡纸底色（浅色主题的 text 是深色，
+        # 深字配深底会看不见，实测踩过）
+        quit_fore = text_c if wintheme.theme_is_dark() else _rgb6(pal["card"])
 
         # 应用是 DPI 感知的：WinForms 把窗体缩放基准自动记录成当前 DPI，
         # 对 ClientSize/Location 不做任何二次缩放——所以所有几何尺寸要自己
@@ -1016,13 +1169,6 @@ def _run_windowed() -> int:
         def px(v: int) -> int:
             return int(v * scale)
 
-        ink = Color.FromArgb(29, 26, 22)  # #1d1a16
-        paper = Color.FromArgb(244, 236, 216)  # #f4ecd8
-        paper2 = Color.FromArgb(232, 223, 199)  # #e8dfc7
-        ink_soft = Color.FromArgb(107, 98, 85)  # #6b6255
-        blue = Color.FromArgb(18, 87, 196)  # #1257c4
-        blue_dark = Color.FromArgb(15, 72, 163)
-
         dlg = WinForms.Form()
         dlg.Text = app_title()
         dlg.FormBorderStyle = WinForms.FormBorderStyle.FixedDialog
@@ -1030,7 +1176,7 @@ def _run_windowed() -> int:
         dlg.MinimizeBox = False
         dlg.ShowInTaskbar = False
         dlg.BackColor = paper
-        dlg.ForeColor = ink
+        dlg.ForeColor = text_c
         dlg.Font = Font("Microsoft YaHei UI", 10)
         dlg.ClientSize = Size(px(436), px(172))
         dlg.StartPosition = (
@@ -1043,7 +1189,13 @@ def _run_windowed() -> int:
         except Exception:
             pass
         try:
-            paint_caption(int(dlg.Handle.ToInt64()))
+            # 对话框标题栏跟对话框本体：底=卡纸、文字=主文字色、边框=墨线
+            paint_caption(
+                int(dlg.Handle.ToInt64()),
+                paper_rgb=_hex_rgb(pal["card"]),
+                ink_rgb=_hex_rgb(pal["text"]),
+                border_rgb=_hex_rgb(pal["line"]),
+            )
         except Exception:
             pass
 
@@ -1057,7 +1209,7 @@ def _run_windowed() -> int:
 
         title = WinForms.Label()
         title.Text = f"要退出 {app_title()} 吗？"
-        title.ForeColor = ink
+        title.ForeColor = text_c
         title.AutoSize = True
         title.Font = Font("Microsoft YaHei UI", 12, FontStyle.Bold)
         title.Location = Point(px(88), px(26))
@@ -1084,7 +1236,7 @@ def _run_windowed() -> int:
             btn.Cursor = WinForms.Cursors.Hand
             return btn
 
-        btn_quit = _stamp(WinForms.Button(), ink, paper, Color.FromArgb(45, 41, 36))
+        btn_quit = _stamp(WinForms.Button(), ink, quit_fore, _ink_hover())
         btn_quit.Text = "彻底退出"
         btn_quit.Size = Size(px(118), px(36))
         btn_quit.Location = Point(px(52), px(110))
@@ -1094,7 +1246,7 @@ def _run_windowed() -> int:
         btn_tray.Size = Size(px(132), px(36))
         btn_tray.Location = Point(px(180), px(110))
 
-        btn_cancel = _stamp(WinForms.Button(), paper, ink, paper2)
+        btn_cancel = _stamp(WinForms.Button(), paper, text_c, paper2)
         btn_cancel.Text = "取消"
         btn_cancel.Size = Size(px(88), px(36))
         btn_cancel.Location = Point(px(322), px(110))
@@ -1230,7 +1382,7 @@ def _run_windowed() -> int:
             errors.append(exc)
             try:
                 window.load_html(error_html(str(exc) or type(exc).__name__, str(log_path()),
-                                             dark=wintheme.theme_is_dark()))
+                                             theme=wintheme.current_theme_mode()))
             except Exception:
                 pass
             return
@@ -1242,8 +1394,16 @@ def _run_windowed() -> int:
             pass
         running["server"] = server
 
-        # 全局热键：Ctrl+Alt+Space 唤起 + 剪贴板预填
-        # （页面就绪后再注册，on_trigger 经 evaluate_js 打进已加载的前端）
+        # 一键重启的桌面收尾钩子：走与托盘「退出」相同的路径（置 quitting、
+        # 提前停服务、WM_CLOSE 回 GUI 线程关窗），保证窗口几何保存与托盘清理
+        # 都不缺席；服务级退出由 backend.request_shutdown（_start_backend 注入）兜底。
+        try:
+            server.app.state.backend.restart_hook = _quit_from_tray
+        except Exception:
+            pass
+
+        # 全局热键：默认 Ctrl+Alt+Space（可改键，ui.json 的 hotkey 偏好）
+        # 唤起 + 剪贴板预填；页面就绪后再注册，on_trigger 经 evaluate_js 打进已加载的前端）
         def _hotkey_fire(text: str) -> None:
             import json as _json
 

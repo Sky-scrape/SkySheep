@@ -3,8 +3,11 @@
 刻意只依赖标准库：desktop.py 要在**引擎导入之前**就把窗口和动画画出来，
 任何沉重的导入（fastapi、引擎核心）都会推迟窗口出现的时间（实测 2.4 秒+）。
 
-配色跟解析后的主题走（浅色 / 深色两套，与 app.css 同族）：启动页、窗口底色、
-标题栏从首帧起就是同一套颜色，不再出现「纸色启动页 + 深色标题栏」的割裂。
+配色跟解析后的主题走：splash_html / error_html 接受主题 id（paper / celadon /
+kaki / night / indigo / pine），逐项取自 wintheme.THEME_PALETTE（与 app.css
+同名变量同源，改主题色时跟 app.css 一起改）——启动页、窗口底色、标题栏从
+首帧起就是同一套颜色，且与界面内切换主题后的观感一致。旧版 dark 布尔参数
+仍兼容（dark=True 等价 night），已传布尔的旧调用方不需要改。
 """
 
 from __future__ import annotations
@@ -13,33 +16,55 @@ import base64
 import html as _html
 from pathlib import Path
 
-# 两套配色：浅色对标纸墨、深色对标夜墨（改主题色时这里跟 app.css 一起改）
-_LIGHT_PAL = {
-    "bg": "#e8dfc7", "panel": "#f4ecd8", "line": "#1d1a16",
-    "text": "#1d1a16", "sub": "#6b6255", "accent": "#1257c4",
-    "shadow": "rgba(29,26,22,.35)",
-    "err": "#a03030", "pre_bg": "#efe5cb", "pre_line": "#cbbfa4", "pre_text": "#1d1a16",
-}
-_DARK_PAL = {
-    "bg": "#171410", "panel": "#211d17", "line": "#574c3a",
-    "text": "#f4ecd8", "sub": "#9d9179", "accent": "#5b93ee",
-    "shadow": "rgba(0,0,0,.55)",
-    "err": "#e26255", "pre_bg": "#1b1813", "pre_line": "#3b3428", "pre_text": "#f4ecd8",
-}
+# 旧版两档入口：dark 布尔 → 主题 id（与 wintheme.LEGACY_MODES 同义）。
+# 色板本体不在这里复制：wintheme.THEME_PALETTE 已与 app.css 逐项同步，
+# 且 wintheme 只依赖标准库，不会拖慢启动首帧。
+_DARK_BOOL_THEME = "night"
+_LIGHT_BOOL_THEME = "paper"
+_DARK_THEME_IDS = {"night", "indigo", "pine"}
+
+# 失败页的代码块预览色与错误红：蓝主色与六主题共用，pre 三色与 err 逐主题取自
+# app.css 对应段落（pre 区在失败页里就是 --paper-sunken 底 + --line 边界）
+_ERR = {"paper": "8F1D1D", "celadon": "8F1D1D", "kaki": "8F1D1D",
+        "night": "E26255", "indigo": "E26255", "pine": "E26255"}
 
 
-def _palette(dark: bool) -> dict:
-    return _DARK_PAL if dark else _LIGHT_PAL
+def _palette(theme: str) -> dict:
+    """主题 id → boot 页面所需的扁平色板（色值都带 #）。
+
+    色板唯一来源是 wintheme.THEME_PALETTE（与 app.css 同名变量逐项同步）。
+    """
+    from . import wintheme
+
+    pal = wintheme.THEME_PALETTE.get(theme) or wintheme.THEME_PALETTE[_LIGHT_BOOL_THEME]
+    out = {
+        "bg": "#" + pal["bg"].lower(),
+        "panel": "#" + pal["card"].lower(),
+        "line": "#" + pal["line"].lower(),
+        "text": "#" + pal["text"].lower(),
+        "sub": "#" + pal["dim"].lower(),
+        "accent": "#" + pal["blue"].lower(),
+        "shadow": "rgba(0,0,0,.5)" if theme in wintheme.DARK_THEME_IDS else "rgba(29,26,22,.35)",
+        "err": "#" + _ERR.get(theme, _ERR["paper"]).lower(),
+        "pre_bg": "#" + pal["sunken"].lower(),
+        "pre_line": "#" + pal["line2"].lower(),
+        "pre_text": "#" + pal["text"].lower(),
+    }
+    return out
 
 
-def splash_html(static_dir: Path, dark: bool = False) -> str:
+def splash_html(static_dir: Path, theme: str = "paper", dark: bool | None = None) -> str:
     """启动动画页（主窗口的第一页）：主题配色 + 小羊 logo 轻浮动 + 三点呼吸。
 
     内嵌 base64 图片，不依赖服务端口（服务还在后台启动中）。
     logo：浅色主题优先云朵小羊墨色线稿，深色主题优先白色线稿（透明底直显）；
     都没有退回 emoji。
+    旧版 dark 布尔仍兼容：dark=True → 夜墨；只传 theme 则按主题 id 取色。
     """
-    pal = _palette(dark)
+    if dark:
+        theme = _DARK_BOOL_THEME
+    pal = _palette(theme)
+    is_dark = theme in _DARK_THEME_IDS
     logo = '<div class="logo-fallback">🐑</div>'
     names = (
         (
@@ -48,7 +73,7 @@ def splash_html(static_dir: Path, dark: bool = False) -> str:
             ("cloud-sheep-icon.png", "image/png"),
             ("skysheep-logo.svg", "image/svg+xml"),
         )
-        if dark
+        if is_dark
         else (
             ("cloud-sheep-line.png", "image/png"),
             ("cloud-sheep-icon.png", "image/png"),
@@ -91,9 +116,11 @@ def splash_html(static_dir: Path, dark: bool = False) -> str:
     )
 
 
-def error_html(detail: str, log_path: str, dark: bool = False) -> str:
+def error_html(detail: str, log_path: str, theme: str = "paper", dark: bool | None = None) -> str:
     """启动失败页：与动画页同一个窗口就地显示，免得用户对着白屏疑惑。"""
-    pal = _palette(dark)
+    if dark:
+        theme = _DARK_BOOL_THEME
+    pal = _palette(theme)
     d = _html.escape(detail)
     p = _html.escape(log_path)
     return (

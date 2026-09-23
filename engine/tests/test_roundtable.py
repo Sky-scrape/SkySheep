@@ -612,13 +612,36 @@ def test_roundtable_usage_logged_per_member(home):
     assert frame["ok"]
     db = sqlite3.connect(home / "home" / "skysheep.db")
     rows = db.execute(
-        "SELECT provider, model, in_tokens, out_tokens FROM usage_log"
+        "SELECT provider, model, in_tokens, out_tokens, cached_tokens FROM usage_log"
     ).fetchall()
     # 3 条：主席草稿 + 成员A + 融合（都记在各自 provider/model 名下）
     assert len(rows) == 3
     assert all(r[2] > 0 and r[3] > 0 for r in rows)
     models = {r[1] for r in rows}
     assert "ma" in models and "fake-1" in models
+    # FakeProvider 不报缓存明细 → cached_tokens 落 0，但列必须在
+    assert all(r[4] == 0 for r in rows)
+
+
+def test_usage_rows_carries_cached_tokens():
+    """usage_rows 把成员与主席的缓存命中数一并透出，供 usage_log 入账。"""
+    from skysheep.core.roundtable import MemberResult, RoundtableOutcome
+
+    spec = MemberSpec(provider_name="pa", model="m1")
+    member = MemberResult(spec=spec, index=0,
+                          input_tokens=100, output_tokens=20, cached_tokens=80)
+    outcome = RoundtableOutcome(members=[member])
+    outcome.chair_provider, outcome.chair_model = "pb", "m2"
+    outcome.chair_input_tokens = 50
+    outcome.chair_output_tokens = 10
+    outcome.chair_cached_tokens = 40
+
+    rows = usage_rows(outcome)
+    assert rows[0] == {
+        "provider": "pa", "model": "m1",
+        "input_tokens": 100, "output_tokens": 20, "cached_tokens": 80,
+    }
+    assert rows[1]["cached_tokens"] == 40
 
 
 def test_fusion_failure_degrades_to_member_drafts(home):

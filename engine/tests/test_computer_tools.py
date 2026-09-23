@@ -208,7 +208,8 @@ async def test_agent_screenshot_becomes_user_image_message(tmp_path, monkeypatch
     )
     agent = Agent(
         provider=provider,
-        registry=ToolRegistry(default_tools()),
+        # 电脑控制工具默认关（M16），这个用例要的就是它，显式打开
+        registry=ToolRegistry(default_tools(computer_control=True)),
         gate=PermissionGate(),
         working_dir=tmp_path,
     )

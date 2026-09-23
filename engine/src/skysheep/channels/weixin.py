@@ -1,6 +1,6 @@
 """微信渠道：腾讯 iLink Bot API（官方「微信 ClawBot」能力）。
 
-与 Telegram 适配器的**结构性差异**（不是细节差异，是设计上的三处不同）：
+与飞书适配器的**结构性差异**（不是细节差异，是设计上的三处不同）：
 
 1. **登录方式**：微信不给静态 Token。必须调 `get_bot_qrcode` 拿二维码，用户在手机微信里
    扫码确认后，轮询 `get_qrcode_status` 换取 `bot_token`。所以这个渠道必须有一个交互式
@@ -14,7 +14,7 @@
 已按源码核对请求头、长轮询形状与 sendmessage 结构。官方文档：
 https://developers.weixin.qq.com/doc/aispeech/knowledge/openapi/Clawbotrelated.html
 
-安全：与 Telegram 渠道同一姿态——allowed_ids 为空即拒绝一切；未授权来源只记录不回复。
+安全：与飞书渠道同一姿态——allowed_ids 为空即拒绝一切；未授权来源只记录不回复。
 另外注意 `-14`（session timeout / token 失效）：官方实现的处理是**冷却一小时**再重试，
 本适配器沿用这个策略，并把状态告诉宿主人以便界面提示「需要重新登录」。
 """

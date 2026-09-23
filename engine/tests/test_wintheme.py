@@ -101,3 +101,31 @@ def test_register_window_and_refresh_now(monkeypatch):
     wintheme.set_theme_mode("paper")
     assert wintheme.refresh_now() is True
     assert painted == ["night", "paper"]
+
+
+def test_read_ui_theme_auto_mapping(home, monkeypatch):
+    """auto 的深浅落点可配（theme_auto_light / theme_auto_dark），非法值回退纸墨/夜墨。"""
+    base = home / "home"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "ui.json").write_text(
+        json.dumps({"theme": "auto", "theme_auto_light": "celadon", "theme_auto_dark": "pine"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(wintheme, "_system_prefers_dark", lambda: False)
+    assert wintheme.read_ui_theme(base) == "celadon"
+    monkeypatch.setattr(wintheme, "_system_prefers_dark", lambda: True)
+    assert wintheme.read_ui_theme(base) == "pine"
+    # 非法/缺失映射：回默认纸墨 / 夜墨
+    (base / "ui.json").write_text(
+        json.dumps({"theme": "auto", "theme_auto_light": "neon", "theme_auto_dark": ""}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(wintheme, "_system_prefers_dark", lambda: False)
+    assert wintheme.read_ui_theme(base) == "paper"
+    monkeypatch.setattr(wintheme, "_system_prefers_dark", lambda: True)
+    assert wintheme.read_ui_theme(base) == "night"
+    # 选中具体主题时映射不参与
+    (base / "ui.json").write_text(
+        json.dumps({"theme": "kaki", "theme_auto_dark": "pine"}), encoding="utf-8"
+    )
+    assert wintheme.read_ui_theme(base) == "kaki"

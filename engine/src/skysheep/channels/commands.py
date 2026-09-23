@@ -65,7 +65,7 @@ def parse(text: str) -> Command:
     key = head.strip().lower()
     if not key:
         return Command()
-    # Telegram 群聊里命令常写成 /status@botname，去掉 @ 后缀
+    # 群聊里命令可能写成 /status@botname（部分客户端会自动补机器人名后缀）
     key = key.split("@", 1)[0]
     name = _ALIASES.get(key)
     if name is None:

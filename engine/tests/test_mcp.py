@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
 
+import pytest
 from mcp.types import CallToolResult, TextContent
 
 from skysheep.mcp.client import (
     MCPManager,
     MCPServerConfig,
+    MCPServerStatus,
     MCPTool,
     load_mcp_configs,
 )
@@ -33,7 +36,7 @@ def test_config_merge_project_overrides_global(tmp_path):
     _write_mcp_json(pp, {
         "mcpServers": {"fs": {"url": "http://b:8000/mcp"}}  # 项目覆盖同名
     })
-    cfg = load_mcp_configs(gp, pp)
+    cfg, _warn = load_mcp_configs(gp, pp)
     assert set(cfg) == {"fetch", "fs"}
     assert cfg["fetch"].transport == "stdio"
     assert cfg["fs"].url == "http://b:8000/mcp"
@@ -44,12 +47,30 @@ def test_config_merge_project_overrides_global(tmp_path):
 def test_config_invalid_entries(tmp_path):
     p = tmp_path / "bad.json"
     _write_mcp_json(p, {"mcpServers": {"broken": {"foo": 1}, "ok": {"command": "x"}}})
-    cfg = load_mcp_configs(None, p)
+    cfg, _warn = load_mcp_configs(None, p)
     # pydantic 默认忽略未知字段，broken 也能构造但 transport 无效
     # （connect_all 会跳过并记录警告），ok 正常保留
     assert set(cfg) == {"broken", "ok"}
     assert cfg["broken"].transport == "invalid"
     assert cfg["ok"].transport == "stdio"
+
+
+def test_broken_config_json_reports_warning(tmp_path):
+    """配置 JSON 解析失败必须变成可读告警：静默当空配置会让用户以为从没配过。"""
+    p = tmp_path / "mcp.json"
+    p.write_text('{"mcpServers": { "fetch": ', encoding="utf-8")
+    configs, warnings = load_mcp_configs(p, None)
+    assert configs == {}
+    assert warnings and "解析失败" in warnings[0]
+
+
+def test_invalid_server_entry_reports_warning(tmp_path):
+    """单个服务定义不合法：跳过它，但要在告警里点名，不能无声消失。"""
+    p = tmp_path / "mcp.json"
+    _write_mcp_json(p, {"mcpServers": {"bad": {"args": 123}, "ok": {"command": "x"}}})
+    configs, warnings = load_mcp_configs(p, None)
+    assert set(configs) == {"ok"}
+    assert any("bad" in w for w in warnings)
 
 
 class FakeSession:
@@ -182,6 +203,84 @@ async def test_mcp_tool_transport_error_reports_failure_without_replay():
     assert manager.reconnect_requests == ["calc"]
 
 
+async def test_mcp_protocol_error_does_not_disconnect():
+    """JSON-RPC 层错误（未知工具/服务端参数校验）说明连接是好的：不断线不重连。"""
+    from mcp.shared.exceptions import MCPError
+
+    class ProtocolErrorSession:
+        async def call_tool(self, name, arguments=None):
+            raise MCPError(404, "Tool not found: nope")
+
+    manager = FakeManager(ProtocolErrorSession())
+    tool = MCPTool(
+        manager=manager, server_name="calc", tool_name="nope", description="",
+        input_schema={"type": "object"}, readonly=False,
+    )
+    ctx = ToolContext(working_dir=Path("."))
+    try:
+        await tool.run(tool.args_model(), ctx)
+        raise AssertionError("should raise")
+    except ToolError as e:
+        assert "Tool not found" in str(e)
+    assert manager.failures == [], "协议错误不是断线：不该上报 note_call_failure"
+    assert manager.reconnect_requests == []
+
+
+async def test_image_content_becomes_context_attachment():
+    """MCP 返回的图片转成 ctx.images 附件（模型真能看到），文本照常拼接。"""
+    from mcp.types import ImageContent
+
+    session = FakeSession(CallToolResult(content=[
+        TextContent(type="text", text="截图好了"),
+        ImageContent(type="image", data="aGk=", mimeType="image/png"),
+    ], is_error=False))
+    tool = make_tool(session)
+    ctx = ToolContext(working_dir=Path("."))
+    out = await tool.run(tool.args_model(), ctx)
+    assert "截图好了" in out and "1 张图片" in out
+    assert len(ctx.images) == 1
+    assert ctx.images[0].media_type == "image/png"
+    assert ctx.images[0].data == "aGk="
+
+
+def test_per_server_timeout_passthrough():
+    """每服务器可配调用上限：配了用它，没配回落全局默认。"""
+    from skysheep.mcp.client import CALL_TIMEOUT_S
+
+    fast = make_tool(None)
+    assert fast._call_timeout == CALL_TIMEOUT_S
+    slow = MCPTool(
+        manager=FakeManager(None), server_name="s", tool_name="t",
+        description="", input_schema={}, readonly=False, call_timeout=300,
+    )
+    assert slow._call_timeout == 300
+
+
+def test_server_readonly_narrowed_by_tool_annotations():
+    """注解只收窄不放宽：hint=False 收回自动放行，缺失不回收服务器级授权。"""
+    from skysheep.mcp.client import _effective_readonly
+
+    class Ann:
+        def __init__(self, hint):
+            self.read_only_hint = hint
+
+    assert _effective_readonly(False, "x", Ann(False)) is False  # 服务器没授权，注解说什么都不放行
+    assert _effective_readonly(False, "x", Ann(True)) is False
+    assert _effective_readonly(True, "git_status", Ann(True)) is True    # 读操作保持顺滑
+    assert _effective_readonly(True, "git_add", Ann(False)) is False     # 写操作回权限门
+    assert _effective_readonly(True, "fetch", None) is True              # 无注解不误伤
+    assert _effective_readonly(True, "x", Ann(None)) is True             # hint 缺省 None
+
+
+def test_friendly_error_maps_auth_failures():
+    """401/403 要翻译成「凭证可能过期」的可读提示，而不是裸 httpx 错误。"""
+    from skysheep.mcp.client import _friendly_error
+
+    assert "鉴权失败" in _friendly_error(Exception("Server error '401 Unauthorized'"))
+    assert "鉴权失败" in _friendly_error(Exception("Forbidden for url https://x"))
+    assert "鉴权失败" not in _friendly_error(Exception("connection refused"))
+
+
 SERVER_SCRIPT = Path(__file__).parents[1] / "examples" / "mcp_demo_server.py"
 
 
@@ -226,6 +325,141 @@ async def test_one_bad_server_does_not_break_others():
     assert manager.statuses["demo"].connected is False
 
 
+# ---- M10：导入 stdio 定义要显式确认 ----
+
+
+def test_import_stdio_requires_confirmation(tmp_path):
+    """含 command 的定义：未确认时不写盘，报错里列出将执行的命令。"""
+    from skysheep.mcp import MCPInstallError, import_servers, normalize_server
+
+    path = tmp_path / "mcp.json"
+    servers = {
+        "fetch": normalize_server({"command": "uvx", "args": ["mcp-server-fetch"]}),
+        "remote": normalize_server({"url": "http://example.com/mcp"}),
+    }
+    with pytest.raises(MCPInstallError) as e:
+        import_servers(servers, path)
+    msg = str(e.value)
+    assert "uvx" in msg and "fetch" in msg
+    assert "本机" in msg
+    assert not path.exists(), "未确认前不得写盘"
+
+    # 确认后写入；纯 http 服务不受影响
+    out = import_servers(servers, path, confirmed=True)
+    assert sorted(out["added"]) == ["fetch", "remote"]
+
+
+def test_import_http_only_needs_no_confirmation(tmp_path):
+    """只有 url 的服务不执行本机程序，无需确认。"""
+    from skysheep.mcp import import_servers, normalize_server
+
+    path = tmp_path / "mcp.json"
+    out = import_servers({"remote": normalize_server({"url": "http://example.com/mcp"})}, path)
+    assert out["added"] == ["remote"]
+
+
+def test_pending_stdio_commands_skips_names_that_will_be_skipped(tmp_path):
+    """dry-run 只列「这次真的会写进去」的 stdio 定义：同名不覆盖的不算。"""
+    from skysheep.mcp import (
+        normalize_server,
+        pending_stdio_commands,
+        save_servers,
+    )
+
+    path = tmp_path / "mcp.json"
+    save_servers(path, {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}})
+    servers = {
+        "fetch": normalize_server({"command": "uvx", "args": ["mcp-server-fetch"]}),
+        "other": normalize_server({"command": "npx", "args": ["-y", "some-mcp"]}),
+    }
+    assert pending_stdio_commands(servers, path) == [
+        {"name": "other", "command": "npx", "args": ["-y", "some-mcp"]}
+    ]
+    assert [p["name"] for p in pending_stdio_commands(servers, path, overwrite=True)] == [
+        "fetch", "other",
+    ]
+
+
+# ---- M11：keeper 内 initialize/list_tools 挂死必须被收割 ----
+
+_HANG_SERVER = """
+import json
+import sys
+import time
+
+mode = sys.argv[1]
+for line in sys.stdin:
+    try:
+        req = json.loads(line)
+    except Exception:
+        continue
+    method = req.get("method", "")
+    if method == "initialize":
+        if mode == "init":
+            time.sleep(3600)  # 挂死：对 initialize 永不响应
+        print(json.dumps({
+            "jsonrpc": "2.0", "id": req["id"],
+            "result": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "serverInfo": {"name": "hang", "version": "1"}},
+        }), flush=True)
+    elif method == "tools/list":
+        if mode == "tools":
+            time.sleep(3600)  # 挂死：initialize 已过，list_tools 永不响应
+        print(json.dumps({
+            "jsonrpc": "2.0", "id": req["id"], "result": {"tools": []},
+        }), flush=True)
+"""
+
+
+async def _connect_hanging_server(tmp_path, mode, monkeypatch):
+    """连接一台会挂死在握手某一步的 stdio 服务器，返回 (manager, tools)。"""
+    script = tmp_path / "hang_server.py"
+    script.write_text(_HANG_SERVER, encoding="utf-8")
+    # 压缩超时窗口：外层 connect 超时与 keeper 内部超时共用这个常量
+    monkeypatch.setattr("skysheep.mcp.client.CONNECT_TIMEOUT_S", 2.0)
+    manager = MCPManager({"hang": MCPServerConfig(
+        command=sys.executable, args=[str(script), mode],
+    )})
+    tools = await manager.connect_server("hang", MCPServerConfig(
+        command=sys.executable, args=[str(script), mode],
+    ))
+    return manager, tools
+
+
+async def test_hanging_initialize_is_collected(tmp_path, monkeypatch):
+    """服务器对 initialize 永不响应：不能留下常驻 keeper 与孤儿子进程。
+
+    旧实现只在 keeper 外包超时——超时后 set 一下 stop 事件就返回，而卡在
+    initialize 里的 keeper 根本没在等这个事件，从此无人收割（直到关机）。
+    """
+    manager, tools = await _connect_hanging_server(tmp_path, "init", monkeypatch)
+    try:
+        assert tools == []
+        st = manager.statuses["hang"]
+        assert st.connected is False
+        assert st.error and "超时" in st.error
+        # 关键断言：失败连接不留常驻 keeper / stop 事件（旧实现会泄漏在这里）
+        assert "hang" not in manager._keepers
+        assert "hang" not in manager._stops
+        task = manager._keepers.get("hang")
+        assert task is None or task.done()
+    finally:
+        await manager.shutdown()
+
+
+async def test_hanging_list_tools_is_collected(tmp_path, monkeypatch):
+    """initialize 正常、tools/list 挂死：同样必须被收割，不留半开连接。"""
+    manager, tools = await _connect_hanging_server(tmp_path, "tools", monkeypatch)
+    try:
+        assert tools == []
+        st = manager.statuses["hang"]
+        assert st.connected is False
+        assert "hang" not in manager._keepers
+        assert "hang" not in manager._stops
+    finally:
+        await manager.shutdown()
+
+
 async def test_real_stdio_roundtrip():
     """真实 MCP 集成：通过 stdio 启动本地 demo server 并完成一次工具调用。"""
     assert SERVER_SCRIPT.exists(), SERVER_SCRIPT
@@ -268,6 +502,14 @@ def test_mcp_presets_shape():
     # 主打项：结构化分步思考，与内置工具互补
     st = preset_by_name("sequential-thinking")
     assert st is not None and st["need"] == "node"
+    # git 预设：服务器级标只读（查询免弹窗）——写操作由客户端按服务器自带的
+    # read_only_hint=False 收回自动放行（见 _effective_readonly 的测试）
+    git = preset_by_name("git")
+    assert git is not None and git["readonly"] is True
+    assert "确认" in git["desc"], "desc 要说清写操作会请求确认"
+    # 每个预设声明探测用的运行时名（前端据此置灰缺依赖的卡片）
+    for p in MCP_PRESETS:
+        assert p["runtime"], f"预设 {p['name']} 缺 runtime 探测名"
     # cua-driver：操控真实桌面的预设，绝不能标只读（只读会被权限门自动放行）；
     # 命令与官方 MCP 接入方式一致（cua-driver mcp，stdio）
     cd = preset_by_name("cua-driver")
@@ -275,10 +517,11 @@ def test_mcp_presets_shape():
     assert cd["readonly"] is False
     assert cd["need"] == "local"
     assert cd["command"] == "cua-driver" and cd["args"] == ["mcp"]
-    # 前端只拿元数据，不外泄 command/args
+    # 前端只拿元数据，不外泄 command/args；available 是运行时探测结果
     pub = presets_public()
-    assert set(pub[0]) == {"name", "label", "desc", "need", "readonly"}
+    assert set(pub[0]) == {"name", "label", "desc", "need", "readonly", "available"}
     assert "command" not in pub[0]
+    assert isinstance(pub[0]["available"], bool)
 
 
 async def test_add_mcp_preset_writes_and_substitutes_dir(tmp_path, monkeypatch):
@@ -394,16 +637,60 @@ async def test_manager_reconnect_is_deduplicated():
     assert not mgr._restart_tasks
 
 
-async def test_manager_gives_up_after_restart_cap():
-    """达到重连上限后停止自动重试，并把结论写进 status 交给用户手动处理。"""
+async def test_restart_loop_stops_after_consecutive_failures(monkeypatch):
+    """回归：**连续失败**达到上限必须停手，不能以恒定间隔无限重试下去。
+
+    旧实现只在成功时计数，失败从不累加——一台永远起不来的服务器会被
+    每 2 秒拉起一次进程直到天荒地老，前端还一直显示「重连中」。
+    """
     mgr = MCPManager({"srv": MCPServerConfig(command="definitely-not-a-real-cmd-xyz")})
-    st = mgr.statuses["srv"]
-    st.restarts = mgr.MAX_AUTO_RESTARTS
+    mgr.RESTART_BASE_DELAY_S = 0.01
+    mgr.RESTART_MAX_DELAY_S = 0.02
+    calls = {"n": 0}
+    real = mgr._connect_one
+
+    async def counting(name, cfg):
+        calls["n"] += 1
+        return await real(name, cfg)
+
+    monkeypatch.setattr(mgr, "_connect_one", counting)
     mgr.request_reconnect("srv")
+    await asyncio.wait_for(mgr._restart_tasks["srv"], 10)
+    assert calls["n"] == mgr.MAX_AUTO_RESTARTS, "恰好尝试上限次，一次不多"
     assert "srv" in mgr._gave_up
-    assert mgr._restart_tasks.get("srv") is None, "已放弃的服务器不该再起重连任务"
-    assert "已停止重试" in (st.error or "")
+    assert "已停止重试" in (mgr.statuses["srv"].error or "")
+    assert mgr.statuses["srv"].reconnecting is False
+    # 放弃后重复预约不再开新链（已完成的旧句柄留在字典里无妨）
+    done_task = mgr._restart_tasks["srv"]
+    mgr.request_reconnect("srv")
+    assert mgr._restart_tasks.get("srv") is done_task, "已放弃的服务器不该再起重连任务"
     await mgr.shutdown()
+
+
+async def test_successful_reconnect_resets_failure_cap():
+    """成功重连清零连续失败计数：长期会话里偶尔断一次不该被历史失败误伤。"""
+    mgr = MCPManager({"srv": MCPServerConfig(command="definitely-not-a-real-cmd-xyz")})
+    mgr.RESTART_BASE_DELAY_S = 0.01
+    mgr.RESTART_MAX_DELAY_S = 0.02
+    mgr.request_reconnect("srv")
+    await asyncio.wait_for(mgr._restart_tasks["srv"], 10)
+    assert "srv" in mgr._gave_up
+    assert mgr.statuses["srv"].attempts == mgr.MAX_AUTO_RESTARTS
+
+    # 手动换上能连的配置：显式连接清零计数与放弃标记
+    tools = await mgr.connect_server(
+        "srv", MCPServerConfig(command=sys.executable, args=[str(SERVER_SCRIPT)])
+    )
+    assert "mcp__srv__add" in {t.name for t in tools}
+    assert mgr.statuses["srv"].connected is True
+    assert mgr.statuses["srv"].attempts == 0
+    assert "srv" not in mgr._gave_up
+
+    # 再断一次：自动重连应重新被允许（计数已清零）
+    mgr.note_call_failure("srv")
+    assert "srv" in mgr._restart_tasks
+    await mgr.shutdown()
+    assert mgr.statuses["srv"].connected is False
 
 
 async def test_manager_note_call_failure_marks_disconnected_and_schedules():
@@ -429,3 +716,139 @@ async def test_session_for_returns_none_when_not_connected():
     mgr._sessions["srv"] = fake
     assert mgr.session_for("srv") is fake
     await mgr.shutdown()
+
+
+# ---- 停用与按服务器连接管理（配置差量同步的地基） ----
+
+
+async def test_disabled_server_is_listed_but_never_connected():
+    """停用的服务器保留状态条目（前端显示「已停用」）但不发起连接。"""
+    mgr = MCPManager({
+        "off": MCPServerConfig(command=sys.executable, args=[str(SERVER_SCRIPT)], enabled=False),
+    })
+    try:
+        tools = await mgr.connect_all()
+        assert tools == []
+        st = mgr.statuses["off"]
+        assert st.connected is False and st.enabled is False
+        assert mgr.session_for("off") is None
+        # 停用状态也不该被重连链拉起
+        mgr.request_reconnect("off")
+        assert "off" not in mgr._restart_tasks
+    finally:
+        await mgr.shutdown()
+
+
+async def test_connect_server_replaces_and_forget_removes():
+    """connect_server 按新配置连接（含停用→断开）；forget_server 抹掉全部痕迹。"""
+    mgr = MCPManager({})
+    tools = await mgr.connect_server(
+        "demo", MCPServerConfig(command=sys.executable, args=[str(SERVER_SCRIPT)])
+    )
+    assert "mcp__demo__add" in {t.name for t in tools}
+    assert mgr.tools_for("demo")  # per-server 工具存储供 backend 重建注册表
+
+    # 改成停用：连接应断开、配置保留
+    await mgr.connect_server("demo", MCPServerConfig(command="x", enabled=False))
+    assert mgr.statuses["demo"].connected is False
+    assert mgr.statuses["demo"].enabled is False
+    assert mgr.session_for("demo") is None
+
+    # 停用的服务器重新启用 → 换回正常配置即可恢复
+    await mgr.connect_server(
+        "demo", MCPServerConfig(command=sys.executable, args=[str(SERVER_SCRIPT)])
+    )
+    assert mgr.statuses["demo"].connected is True
+
+    mgr.forget_server("demo")
+    assert "demo" not in mgr.statuses
+    assert mgr.tools_for("demo") == []
+    await mgr.shutdown()
+
+
+async def test_backend_sync_mcp_changes_is_incremental(tmp_path, monkeypatch):
+    """配置差量同步：只连新增/变更的、断开删除的，未变更的不动。"""
+    from skysheep.mcp.installer import mcp_config_path, save_servers
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setenv("SKYSHEEP_HOME", str(tmp_path / "home"))
+    backend = ServerBackend(working_dir=tmp_path)
+    backend._apply_registry_to_agents = lambda: None  # 无 setup 环境不重建注册表
+
+    class FakeMgr:
+        def __init__(self):
+            self.statuses: dict = {}
+            self.calls: list[tuple] = []
+
+        async def disconnect_server(self, name):
+            self.calls.append(("disconnect", name))
+
+        def forget_server(self, name):
+            self.calls.append(("forget", name))
+
+        async def connect_server(self, name, cfg):
+            self.calls.append(("connect", name))
+            return []
+
+        def tools_for(self, name):
+            return []
+
+    backend.mcp = FakeMgr()
+    backend.mcp_configs = {
+        "keep": MCPServerConfig(command="x"),
+        "drop": MCPServerConfig(command="y"),
+    }
+    save_servers(mcp_config_path(tmp_path / "home"), {
+        "keep": {"command": "x"},   # 未变更：不应触发连接
+        "new": {"command": "z"},    # 新增：要连
+    })
+    warnings = await backend._sync_mcp_changes()
+    assert warnings == []
+    assert ("connect", "new") in backend.mcp.calls
+    assert ("connect", "keep") not in backend.mcp.calls
+    assert ("forget", "drop") in backend.mcp.calls
+    assert set(backend.mcp_configs) == {"keep", "new"}
+
+
+async def test_backend_set_mcp_enabled_flips_config(tmp_path, monkeypatch):
+    """停用开关：mcp.json 里写 enabled=false，配置其余字段原样保留。"""
+    from skysheep.mcp.installer import load_servers, mcp_config_path, save_servers
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setenv("SKYSHEEP_HOME", str(tmp_path / "home"))
+    backend = ServerBackend(working_dir=tmp_path)
+    backend._apply_registry_to_agents = lambda: None
+    cfg_path = mcp_config_path(tmp_path / "home")
+    save_servers(cfg_path, {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}})
+
+    class FakeMgr:
+        def __init__(self):
+            self.statuses: dict = {}
+
+        async def disconnect_server(self, name):
+            pass
+
+        def forget_server(self, name):
+            pass
+
+        async def connect_server(self, name, cfg):
+            st = MCPServerStatus(name)
+            st.enabled = cfg.enabled
+            self.statuses[name] = st
+            return []
+
+        def tools_for(self, name):
+            return []
+
+    backend.mcp = FakeMgr()
+    backend.mcp_configs = {"fetch": MCPServerConfig(command="uvx")}
+
+    r = await backend.set_mcp_enabled("fetch", False)
+    assert r["enabled"] is False and "已停用" in r["hint"]
+    saved = load_servers(cfg_path)["fetch"]
+    assert saved["enabled"] is False
+    assert saved["command"] == "uvx" and saved["args"] == ["mcp-server-fetch"]
+
+    r = await backend.set_mcp_enabled("fetch", True)
+    assert r["enabled"] is True
+    assert "enabled" not in load_servers(cfg_path)["fetch"], "启用即默认态，不写冗余字段"

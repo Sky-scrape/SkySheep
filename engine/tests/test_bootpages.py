@@ -32,3 +32,25 @@ def test_splash_prefers_white_logo_on_dark(tmp_path):
     assert encoded in dark
     light = splash_html(tmp_path, dark=False)
     assert encoded not in light
+
+
+def test_splash_follows_theme_id(home):
+    """主题 id 直传：六个主题各自取色（与 app.css 同名变量同源），未知回退纸墨。
+
+    此前启动页只有浅/深两套，青瓷/秋柿/黛夜/松烟下启动页与界面主题割裂。
+    """
+    from skysheep import wintheme
+
+    for tid, pal in wintheme.THEME_PALETTE.items():
+        page = splash_html(home, theme=tid)
+        assert "background:#" + pal["bg"].lower() in page, f"{tid} 启动页底色未跟主题"
+    # 未知主题 id 回退纸墨，不抛异常
+    assert "background:#e8dfc7" in splash_html(home, theme="nonexistent")
+
+
+def test_error_page_follows_theme_id(home):
+    celadon = error_html("boom", "log.txt", theme="celadon")
+    night = error_html("boom", "log.txt", theme="night")
+    assert "#dce4da" in celadon and "#e8dfc7" not in celadon
+    assert "#171410" in night
+    assert "boom" in night and "log.txt" in night

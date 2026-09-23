@@ -27,7 +27,11 @@ from skysheep.config import (
     resolve_websearch,
     update_config_section,
 )
-from skysheep.core.checkpoints import MAX_CHECKPOINTS, CheckpointStore
+from skysheep.core.checkpoints import (
+    MAX_CHECKPOINTS,
+    CheckpointConflictError,
+    CheckpointStore,
+)
 from skysheep.core.hooks import HookRule, HookRunner, hooks_from_config
 from skysheep.core.uptodate import is_newer_version
 from skysheep.messages import TextBlock
@@ -338,27 +342,50 @@ def test_checkpoint_store_persists_across_instances(tmp_path):
     store = CheckpointStore(root=root)
     cp = store.save("sess-1", {str(f): b"v1"})
     assert cp and cp["id"]
-    # 模拟重启：全新实例从磁盘恢复
+    # 模拟重启：全新实例从磁盘恢复（保存时刻的内容签名也随 meta 持久化）
     store2 = CheckpointStore(root=root)
     listing = store2.list_for("sess-1")
     assert [c["id"] for c in listing] == [cp["id"]]
     f.write_text("v2-broken")
-    restored = store2.restore(cp["id"])
-    assert restored == [str(f)]
+    # 快照之后文件又被改过 → 先报冲突不动磁盘；确认后 force 才恢复
+    with pytest.raises(CheckpointConflictError):
+        store2.restore(cp["id"])
+    assert f.read_text() == "v2-broken"
+    assert store2.restore(cp["id"], force=True) == [str(f)]
     assert f.read_text() == "v1"
 
 
-def test_checkpoint_store_prunes_fifo(tmp_path):
+def test_checkpoint_store_prunes_per_session(tmp_path):
     root = tmp_path / "cps"
     store = CheckpointStore(root=root)
     f = tmp_path / "x.txt"
     f.write_bytes(b"x")
     ids = []
-    for i in range(MAX_CHECKPOINTS + 5):
-        cp = store.save(f"s{i}", {str(f): None})
+    for _ in range(MAX_CHECKPOINTS + 5):
+        cp = store.save("s1", {str(f): None})
         ids.append(cp["id"])
-    assert len(store.list_for("s0")) == 0  # 最老的被淘汰
+    # 同一会话超限：只挤本会话最旧的，别的会话不受影响（分桶淘汰）
+    assert len(store.list_for("s1")) == MAX_CHECKPOINTS
+    assert store.get(ids[0]) is None
+    assert store.get(ids[5]) is not None
     assert len(list(root.rglob("meta.json"))) == MAX_CHECKPOINTS
+
+
+def test_checkpoint_store_global_backstop(tmp_path, monkeypatch):
+    """跨会话兜底上限：海量会话时按时间淘汰全库最旧的，磁盘不无界增长。"""
+    from skysheep.core import checkpoints as cp_mod
+
+    monkeypatch.setattr(cp_mod, "MAX_CHECKPOINTS_TOTAL", 10)
+    root = tmp_path / "cps"
+    store = CheckpointStore(root=root)
+    f = tmp_path / "x.txt"
+    f.write_bytes(b"x")
+    ids = [store.save(f"s{i}", {str(f): None})["id"] for i in range(15)]
+    # 每个会话各 1 条都没超分桶配额，但总数触顶 → 全库按时间淘汰最旧的
+    assert len(store._items) == 10
+    assert store.get(ids[0]) is None
+    assert store.get(ids[-1]) is not None
+    assert len(list(root.rglob("meta.json"))) == 10
 
 
 # ---- hooks ----
@@ -408,7 +435,7 @@ def test_hooks_config_parsing():
         "post_tool_use": [{"command": ""}],  # 空 command：跳过
         "bad": [{"match": 1}],
     }}
-    pre, post = hooks_from_config(raw)
+    pre, post, _stop = hooks_from_config(raw)
     assert len(pre) == 1 and pre[0].match == "write_file" and pre[0].timeout_s == 5
     assert post == []
     assert HookRunner([], []).has_pre is False
@@ -445,6 +472,54 @@ def test_is_newer_version():
     assert not is_newer_version("0.6.0", "0.6.0")
     assert not is_newer_version("0.5.9", "0.6.0")
     assert not is_newer_version("", "0.6.0")
+
+
+def test_release_from_redirect_builds_setup_url():
+    from skysheep.core.uptodate import RELEASES_LATEST, release_from_redirect
+
+    info = release_from_redirect(
+        RELEASES_LATEST, "https://github.com/Sky-scrape/SkySheep/releases/tag/v1.8")
+    assert info["tag"] == "v1.8" and info["version"] == "1.8"
+    assert info["url"].endswith("/releases/tag/v1.8")
+    assert info["setup_url"] == (
+        "https://github.com/Sky-scrape/SkySheep/releases/download/v1.8/SkySheep-1.8-setup.exe")
+    # 相对 Location 也能拼；预发布 tag 只去 v 前缀、保留原名
+    rel = release_from_redirect(RELEASES_LATEST, "/Sky-scrape/SkySheep/releases/tag/v0.6.0-beta1")
+    assert rel["version"] == "0.6.0-beta1" and rel["tag"] == "v0.6.0-beta1"
+    with pytest.raises(RuntimeError):
+        release_from_redirect(RELEASES_LATEST, "")
+
+
+def _mock_fetch(handler):
+    import asyncio
+
+    import httpx
+
+    from skysheep.core.uptodate import fetch_latest_release
+    return asyncio.run(fetch_latest_release(transport=httpx.MockTransport(handler)))
+
+
+def test_fetch_latest_release_reads_location_not_body():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={
+            "Location": "/Sky-scrape/SkySheep/releases/tag/v1.8"})
+
+    info = _mock_fetch(handler)
+    assert info["version"] == "1.8"
+
+
+def test_fetch_latest_release_errors_surface():
+    def forbidden(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        _mock_fetch(forbidden)
+
+    def no_release(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)  # 一个 release 都没有时 /releases/latest 不跳转
+
+    with pytest.raises(RuntimeError, match="没有版本号"):
+        _mock_fetch(no_release)
 
 
 # ---- config 解析 ----

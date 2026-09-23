@@ -124,7 +124,13 @@ def open_folder(path: Path) -> None:
 
 # ---- 诊断包 ----
 
-SECRET_KEYS = ("api_key", "token", "env_key", "key")
+# 打码按「键名包含」匹配，宁可多打不可漏打：诊断包是要发给外部开发者的，
+# 里面的明文密钥一旦外发就等同泄露（渠道的 app_secret / client_secret 就落在
+# config.toml 里，旧清单只看 api_key/token/env_key/key 拦不住它们）。
+SECRET_KEYS = (
+    "api_key", "token", "env_key", "key",
+    "secret", "password", "passwd", "credential", "private",
+)
 
 
 def _redact_toml(path: Path) -> str:

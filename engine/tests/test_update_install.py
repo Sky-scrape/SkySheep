@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -79,24 +80,78 @@ def test_release_tag_is_sanitized_before_reaching_paths():
     assert info["setup_url"].endswith("/v1.7/SkySheep-1.7-setup.exe")
 
 
-def test_build_update_helper_uses_ping_delay_and_restart():
-    """安装命令串：ping 延迟（DETACHED 下 timeout 会立即失败，互斥体来不及
-    释放）、/RESTARTAPP 让安装器装完自动拉起新版、/LOG 与退出码回写落盘。"""
-    from skysheep.server.backend import _build_update_helper
+def test_write_update_helper_batch_content(tmp_path):
+    """更新助手批处理：ping 延迟（DETACHED 下 timeout 会立即失败，互斥体来不及
+    释放）、/RESTARTAPP 让安装器装完自动拉起新版、/LOG 与退出码回写落盘。
 
-    log = r"C:\Users\x\.skysheep\logs\update-setup.log"
-    helper = _build_update_helper(r"C:\tmp\SkySheep-1.9-setup.exe", Path(log), "/CURRENTUSER")
-    assert helper.startswith("ping -n 3 127.0.0.1 >nul & ")
-    assert '"C:\\tmp\\SkySheep-1.9-setup.exe" /SILENT /CLOSEAPPLICATIONS /RESTARTAPP' in helper
-    assert " /CURRENTUSER" in helper
-    assert f'/LOG="{log}"' in helper
-    assert helper.count(log) == 2  # 传给安装器一份，退出码追加写一份
-    assert "!errorlevel!" in helper  # 延迟展开，配 cmd /v:on
+    回归背景：此前是拼命令串交给 `cmd /c`（Popen 传列表），Python 会把引号转义成
+    `\\"` 而 cmd.exe 不认——安装包路径与重定向整段解析失败、安装器根本起不来
+    （日志只剩一行头部，表现为「更新点了没下文」）。现在落成 .cmd 文件执行，
+    这里锁住「引号按 cmd 规则原样出现」与各参数形状。
+    """
+    from skysheep.server.backend import _write_update_helper
 
-    # 无日志（建不出来）与无覆盖参数的退化形态：命令仍然完整可用
-    bare = _build_update_helper(r"C:\tmp\setup.exe", None, "")
-    assert "ping -n 3" in bare and "/RESTARTAPP" in bare
-    assert "/LOG" not in bare and "/CURRENTUSER" not in bare and "errorlevel" not in bare
+    pending = str(tmp_path / "SkySheep-1.9-setup.exe")
+    (tmp_path / "SkySheep-1.9-setup.exe").write_bytes(b"stub")
+    log = tmp_path / "update-setup.log"
+    log.write_text("[head]\n", encoding="utf-8")
+
+    script = _write_update_helper(pending, log, "/CURRENTUSER")
+    assert script is not None and script.name == "apply-update.cmd"
+    text = script.read_text(encoding="gbk")
+    assert "\\\"" not in text, "批处理里不能出现被转义的引号（cmd 不认）"
+    assert text.index("ping -n 3 127.0.0.1 >nul") < text.index(f'"{pending}"')
+    assert f'"{pending}" /SILENT /CLOSEAPPLICATIONS /RESTARTAPP /CURRENTUSER' in text
+    assert f'/LOG="{log}"' in text          # 传给安装器：Inno 自己记安装过程
+    assert f'>>"{log}" echo [setup 退出码: %errorlevel%]' in text  # 装完回写退出码
+    assert "%errorlevel%" in text
+    assert "if not exist" in text  # 安装包缺失时的显式失败行
+
+    # 无日志（建不出来）的退化形态：命令仍完整，只是不落日志
+    bare = _write_update_helper(pending, None, "")
+    bare_text = bare.read_text(encoding="gbk")
+    assert f'"{pending}" /SILENT /CLOSEAPPLICATIONS /RESTARTAPP' in bare_text
+    assert "/LOG" not in bare_text and "/CURRENTUSER" not in bare_text
+    assert "errorlevel" not in bare_text
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="批处理执行只在 Windows 成立")
+def test_update_helper_batch_actually_runs_and_logs_exit_code(tmp_path):
+    """真跑一遍批处理（用 exit /b 7 的替身代替安装包）：退出码必须落进日志。
+
+    这一条是上面那个 bug 的正面回归——旧实现里批处理/命令串"看起来对"，
+    但执行链断了；只有真的执行一次才能证明它通。
+    """
+    import subprocess
+
+    from skysheep.server.backend import _write_update_helper
+
+    stub = tmp_path / "fake-setup.cmd"
+    stub.write_text("@echo off\r\nexit /b 7\r\n", encoding="gbk")
+    log = tmp_path / "update-setup.log"
+
+    script = _write_update_helper(str(stub), log, "")
+    assert script is not None
+    proc = subprocess.run(["cmd", "/c", script.name], cwd=str(tmp_path),
+                          capture_output=True, timeout=60)
+    assert proc.returncode == 0, proc
+    content = log.read_text(encoding="gbk", errors="replace")
+    # 安装器替身的退出码 7 必须落进日志：这正是旧实现断掉、也最需要证据的一环
+    assert "[setup 退出码: 7]" in content, content
+    assert "开始运行安装包" in content
+
+
+def test_install_update_result_reports_uac_need():
+    """install_update 的结果要带 uac 标记：本机是「所有用户」安装时，
+    前端必须在应用退出前就把「留意授权窗口」讲清楚（退出后提示就看不见了）。"""
+    from skysheep.server.app import STATIC_DIR
+
+    backend_src = (Path(__file__).resolve().parents[1] / "src" / "skysheep"
+                   / "server" / "backend.py").read_text(encoding="utf-8")
+    assert '"uac": _setup_privilege_override() != "/CURRENTUSER"' in backend_src
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "r.uac" in js and "用户账户控制" in js
+    assert 'request("app.notify", {' in js  # 退出前的系统通知提醒
 
 
 class _FakeWinreg:

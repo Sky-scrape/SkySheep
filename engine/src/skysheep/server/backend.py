@@ -8938,26 +8938,36 @@ class ServerBackend:
             raise
         self._pending_update = str(dest)
         return {"update_available": True, "version": info["version"], "path": str(dest),
-                "verified": bool(expected)}
+                "verified": bool(expected),
+                # 本机安装登记的侧别决定装的时候要不要提权（HKLM=所有用户=弹 UAC，
+                # HKCU=当前用户=静默直装）。前端据此在退出前就把「留意系统弹窗」
+                # 讲清楚——应用退出后提示文本就看不见了。
+                "uac": _setup_privilege_override() != "/CURRENTUSER"}
 
     async def apply_update(self) -> dict:
         """退出本应用并静默运行已下载的安装包。安装包声明了与本应用相同的
-        单实例互斥体，且我们延迟 2 秒再拉起它——届时本进程已退出、互斥体已释放。"""
+        单实例互斥体，且批处理延迟 2 秒再拉起它——届时本进程已退出、互斥体已释放。
+
+        执行走 apply-update.cmd（见 _write_update_helper 的注释：直接拼命令串
+        会被 Popen 的参数转义弄坏，安装器根本起不来）。
+        """
         pending = self._pending_update or ""
         if not pending or not Path(pending).is_file():
             raise RuntimeError("还没有下载好的更新包，请先执行「下载更新」")
         log_path = _prepare_update_log(pending)
         override = _setup_privilege_override()
-        helper = _build_update_helper(pending, log_path, override)
+        script = _write_update_helper(pending, log_path, override)
+        if script is None:
+            raise RuntimeError("无法写出更新脚本（临时目录不可写），请到 GitHub Releases 手动下载安装")
         flags = 0
         if hasattr(subprocess, "DETACHED_PROCESS"):
             flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         try:
             subprocess.Popen(
-                ["cmd", "/v:on", "/c", helper],
+                ["cmd", "/c", script.name],
                 creationflags=flags, close_fds=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                cwd=str(Path(pending).parent),
+                cwd=str(script.parent),  # 相对名执行，彻底避开路径引号问题
             )
         except OSError as e:
             raise RuntimeError(f"无法启动安装程序：{e}") from e
@@ -9346,19 +9356,49 @@ def _prepare_update_log(pending: str) -> Path | None:
     return log_path
 
 
-def _build_update_helper(pending: str, log_path: Path | None, override: str = "") -> str:
-    """构造「延迟 2 秒 → 静默安装 → 记录退出码」的 cmd 命令串（配 `cmd /v:on` 用）。
+def _write_update_helper(pending: str, log_path: Path | None, override: str = "") -> Path | None:
+    """把「延迟等应用退出 → 静默安装 → 记录退出码」写成 apply-update.cmd。
+
+    以前是把命令串直接交给 `cmd /c`（Popen 传列表）：Python 会把串里的引号转义成
+    `\\"`，而 cmd.exe 不认反斜杠转义——安装包路径与 `/LOG=`、退出码重定向整段被
+    解析坏（"文件名、目录名或卷标语法不正确"），安装器从未真正启动，日志里也
+    只剩一行头部，表现为「点了更新、应用退出后再没下文」。改成先落一个批处理、
+    再 `cmd /c apply-update.cmd` 执行：批处理里没有跨层转义，引号按 cmd 的规则
+    原样生效，路径含空格/中文也安全。
 
     延迟用 ping 而不是 timeout：更新以 DETACHED_PROCESS 拉起 cmd，进程没有
     控制台，timeout 的输入重定向检查会立即报错返回，2 秒等待名存实亡——届时
     本应用还没退出、单实例互斥体未释放，安装器会当作已有实例在跑而放弃。
     ping 没有控制台依赖，-n 3 恰好约 2 秒。/RESTARTAPP 让安装器装完自动拉起
     新版（installer.iss 的 [Run] 按此参数决定，手动静默安装不受影响）。
+
+    批处理用 GBK 写（cmd 按 OEM 代码页读 .cmd，中文 Windows 即 cp936），只有
+    提示文案受影响，命令本身是 ASCII。写不出文件返回 None（调用方保持原行为）。
     """
-    cmd = f'ping -n 3 127.0.0.1 >nul & "{pending}" /SILENT /CLOSEAPPLICATIONS /RESTARTAPP'
+    script = Path(pending).parent / "apply-update.cmd"
+    args = "/SILENT /CLOSEAPPLICATIONS /RESTARTAPP"
     if override:
-        cmd += f" {override}"
+        args += f" {override}"
     if log_path is not None:
-        cmd += f' /LOG="{log_path}"'
-        cmd += f' & >>"{log_path}" echo [setup 退出码: !errorlevel!]'
-    return cmd
+        args += f' /LOG="{log_path}"'
+    lines = [
+        "@echo off",
+        "rem SkySheep 程序内更新助手（由应用生成；安装完成后可整个目录删除）",
+        "ping -n 3 127.0.0.1 >nul",
+    ]
+    if log_path is not None:
+        lines += [
+            f'if not exist "{pending}" (',
+            f'  >>"{log_path}" echo [更新失败] 安装包不存在：{pending}',
+            "  exit /b 1",
+            ")",
+            f'>>"{log_path}" echo [%DATE% %TIME%] 开始运行安装包',
+        ]
+    lines.append(f'call "{pending}" {args}')
+    if log_path is not None:
+        lines.append(f'>>"{log_path}" echo [setup 退出码: %errorlevel%]')
+    try:
+        script.write_text("\r\n".join(lines) + "\r\n", encoding="gbk", errors="replace")
+    except OSError:
+        return None
+    return script

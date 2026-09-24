@@ -14422,13 +14422,26 @@ function renderUpdatePanel(snap) {
           actions.innerHTML = "";
           return;
         }
-        state.textContent = "下载完成。点「退出并安装」后应用会自动退出并静默安装，装完自动重新打开。若弹出「用户账户控制」提示请点「是」。";
+        state.textContent = r.uac
+          ? "下载完成。本机是「为所有用户」安装，点「退出并安装」后应用会先退出，"
+            + "紧接着系统弹出授权窗口（用户账户控制）——请点「是」，装完自动重新打开。"
+          : "下载完成。点「退出并安装」后应用会自动退出并静默安装，装完自动重新打开。";
         const b2 = document.createElement("button");
         b2.className = "btn-ghost";
         b2.textContent = "退出并安装";
         b2.onclick = async () => {
           b2.disabled = true;
           state.textContent = "正在退出并启动安装程序…装完会自动重新打开 SkySheep。";
+          if (r.uac) {
+            // 应用马上退出，界面上的提示留不住：补一条系统通知（停在通知中心），
+            // 提醒用户去点稍后出现的授权窗口
+            request("app.notify", {
+              title: "正在更新 SkySheep",
+              body: `请在系统授权窗口（用户账户控制）中点「是」；装完会自动打开 v${version}。`,
+            }).catch(() => {});
+            // 授权窗口紧随应用退出出现，给通知与消息送达留一拍
+            await new Promise((ok) => setTimeout(ok, 900));
+          }
           try {
             await request("app.apply_update");
           } catch (e) {

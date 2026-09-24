@@ -1,6 +1,11 @@
 # 技能广场索引
 
-设置 · 技能与工具 → 技能 → 技能广场 的在线索引就是这个 JSON。客户端行为：
+> **1.9 起客户端设置页不再有「技能广场」入口**（应用内一键安装界面下线；索引文件、
+> 后端 `skills.market` 方法与版本标注能力按现状保留）。安装技能请走
+> 设置 · 技能与工具 → 右上角「＋ 导入技能」（文件夹 / .zip / GitHub·Gitee 链接）
+> 或「本机现存」。本目录继续作为索引发布件维护，供自建客户端或后续恢复入口使用。
+
+这份 JSON 即技能广场的在线索引。客户端（`skills.market`）行为：
 
 1. 默认拉取 `https://raw.githubusercontent.com/Sky-scrape/SkySheep/main/market/index.json`
    （即**本仓库**的 `market/index.json`，与技能本体同仓维护，推上 GitHub 即生效）；
@@ -8,13 +13,12 @@
    作为数据文件带进安装包；开发态直接读仓库里的 `market/index.json`），
    再兜底才是 `engine/src/skysheep/skills/market.py` 的 `BUILTIN_INDEX` 精简清单；
 3. 环境变量 `SKYSHEEP_MARKET_URL` 可把索引指向任意自建地址（GitHub raw / Gitee raw /
-   自己的服务器均可）；非默认地址时界面会标注「第三方索引」。
+   自己的服务器均可）。
 
 ## 发布
 
 索引随主仓库一起发布：把 SkySheep 仓库推上 GitHub 后自动生效，无需额外操作。
-之后新增技能条目只需编辑 `index.json` 再推送（客户端展开技能广场时拉取，
-服务端有 60 秒缓存，界面另有「↻ 刷新」按钮绕过缓存即时重拉）。
+之后新增技能条目只需编辑 `index.json` 再推送（客户端拉取时有 60 秒缓存）。
 
 ## 条目格式
 

@@ -121,6 +121,12 @@ def test_update_helper_batch_actually_runs_and_logs_exit_code(tmp_path):
 
     这一条是上面那个 bug 的正面回归——旧实现里批处理/命令串"看起来对"，
     但执行链断了；只有真的执行一次才能证明它通。
+
+    断言只锁 ASCII 骨架（方括号、退出码数字、安装包文件名），不拿「退出码」
+    这类汉字当锚点：.cmd 里的中文按 GBK 落盘，而 cmd 按**本机**代码页解读
+    （中文 Windows 是 cp936，GitHub 英文 CI 是 cp437/1252），同一份脚本在
+    非 GBK 机器上 echo 进日志的中文必然是另一串字符——拿汉字断言就等于
+    「测试只在中文系统上能过」（CI #61 即栽在这里）。
     """
     import subprocess
 
@@ -136,9 +142,18 @@ def test_update_helper_batch_actually_runs_and_logs_exit_code(tmp_path):
                           capture_output=True, timeout=60)
     assert proc.returncode == 0, proc
     content = log.read_text(encoding="gbk", errors="replace")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 2, content          # 头部时间行 + 退出码行，一行不多
+    assert lines[0].startswith("["), content  # [%DATE% %TIME%] …
     # 安装器替身的退出码 7 必须落进日志：这正是旧实现断掉、也最需要证据的一环
-    assert "[setup 退出码: 7]" in content, content
-    assert "开始运行安装包" in content
+    assert lines[-1].startswith("[setup ") and lines[-1].rstrip().endswith("7]"), content
+
+    # 守卫分支也要真的拦：安装包不存在 → 整个批处理退出码 1，路径（ASCII）落日志
+    missing = _write_update_helper(str(tmp_path / "nope-setup.exe"), log, "")
+    proc2 = subprocess.run(["cmd", "/c", missing.name], cwd=str(tmp_path),
+                           capture_output=True, timeout=60)
+    assert proc2.returncode == 1, proc2
+    assert "nope-setup.exe" in log.read_text(encoding="gbk", errors="replace")
 
 
 def test_install_update_result_reports_uac_need():

@@ -552,6 +552,55 @@ def test_pipeline_attach_method_and_session_node(home):
         assert "前置任务" in blob, "续跑应注入上游节点产出"
 
 
+def test_pipeline_add_task_ws(home):
+    """pipeline.add_task 直接写指令新建 run 节点：排进已有流水线并按依赖跑通。"""
+    from test_server import make_client, recv_until
+
+    provider = FakeProvider([
+        [TextBlock(text="占位完成")],
+        [TextBlock(text="文档补全完成")],
+    ])
+    with (
+        make_client(home, [], provider=provider) as client,
+        client.websocket_connect("/ws") as ws,
+    ):
+        ws.send_json({"id": "c1", "method": "pipeline.create", "params": {
+            "name": "新任务线", "nodes": [{"title": "占位", "prompt": "先做点别的"}],
+        }})
+        pipe = recv_until(ws, "c1")["result"]["pipeline"]
+
+        # 空指令明确报错（前端在弹窗里也拦，这里是协议层兜底）
+        ws.send_json({"id": "nt0", "method": "pipeline.add_task", "params": {
+            "id": pipe["id"], "prompt": "   "}})
+        bad = recv_until(ws, "nt0")
+        assert not bad["ok"], "空指令要报错"
+
+        # 正常新建：依赖占位节点，完成后才跑
+        ws.send_json({"id": "nt", "method": "pipeline.add_task", "params": {
+            "id": pipe["id"], "prompt": "把接口文档补全",
+            "depends_on": [pipe["nodes"][0]["id"]],}})
+        r = recv_until(ws, "nt")
+        assert r["ok"], r.get("error")
+        assert r["result"]["node"]["kind"] == "run"
+        assert "新任务：" in r["result"]["node"]["title"], "标题默认带指令摘要"
+
+        ws.send_json({"id": "s1", "method": "pipeline.start", "params": {"id": pipe["id"]}})
+        recv_until(ws, "s1")
+        done = _wait_pipe(ws, pipe["id"], ("done", "failed"))
+        by_title = {n["title"]: n for n in done["nodes"]}
+        assert done["status"] == "done"
+        assert by_title["占位"]["status"] == "done"
+        new_task = next(n for n in done["nodes"] if n["title"].startswith("新任务："))
+        assert new_task["status"] == "done" and new_task["result"] == "文档补全完成"
+
+        # 依赖释放：新任务那轮的 prompt 注入了上游产出
+        injected = [m for m in provider.calls
+                    if m and getattr(m[-1], "role", "") == "user"
+                    and "接口文档" in m[-1].text]
+        blob = "".join(getattr(m, "text", "") for m in injected[-1])
+        assert "占位完成" in blob, "新任务节点应注入上游节点产出"
+
+
 def test_pipeline_import_cron_ws(home):
     """WS 导入定时任务：复制指令与预授权成节点，可选停用原任务。"""
     from test_server import make_client, recv_until

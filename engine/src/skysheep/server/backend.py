@@ -2680,6 +2680,31 @@ class ServerBackend:
         return {"pipeline": pipe, "node": node,
                 "source_disabled": bool(params.get("disable_source"))}
 
+    async def pipeline_add_task(self, params: dict) -> dict:
+        """直接写一条指令新建 run 节点：不必先有定时任务/任务簿/会话，就地排进流水线。
+
+        与 add_session 同样无人值守：按节点预授权名单执行（新建时名单为空，只读放行，
+        其余在流水线面板里逐节点补预授权）。
+        """
+        pipe = await self.store.get_pipeline(int(params.get("id", 0)))
+        if pipe is None:
+            raise RuntimeError("流水线不存在: " + str(params.get("id")))
+        self._check_pipeline_ownership(pipe)
+        prompt = str(params.get("prompt") or "").strip()
+        if not prompt:
+            raise RuntimeError("新任务要写清要做什么（指令不能为空）")
+        depends_on = params.get("depends_on")
+        node = await self.store.add_pipeline_node(
+            pipe["id"],
+            str(params.get("title") or "").strip() or f"新任务：{prompt[:40]}",
+            prompt,
+            allowed_tools=params.get("allowed_tools") or [],
+            depends_on=[int(d) for d in depends_on] if isinstance(depends_on, list) else [],
+        )
+        pipe = await self.store.get_pipeline(pipe["id"])
+        self._broadcast_pipeline(pipe)
+        return {"pipeline": pipe, "node": node}
+
     async def pipeline_add_session(self, params: dict) -> dict:
         """把已有会话纳入流水线：节点在该会话里续跑（带其历史上下文）。
 

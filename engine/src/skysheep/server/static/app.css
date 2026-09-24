@@ -1163,8 +1163,18 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .pl-gnode.pl-ctl-stop { border-color: var(--reg); color: var(--reg); }
 .pl-gnode.pl-ctl-loop { border-style: dotted; border-color: var(--blue); }
 .pl-st-skipped { opacity: .55; }
-.pl-retry-row input, .pl-loop-row input { width: auto; width: 52px; }
-.pl-node-edit-head .pl-node-type { max-width: 190px; padding: 3px 6px; font-size: 12px; }
+/* 节点编辑行里的小控件（重试/迭代/超时数字框、类型与满足方式下拉）：
+   此前是 WebView 原生样式——白底细边、高度参差、宽度各自为政
+   （重试 52px、超时吃原生 ~70px），跟同卡片里 .modal-input 的大框不配套。
+   统一成同款纸面外观：同底色/边框/圆角/字体，行内紧凑尺寸，三类数字框同宽 */
+.pl-node-edit input[type="number"], .pl-node-edit select {
+  width: auto; height: 26px; padding: 0 7px;
+  background: var(--paper-raised); color: var(--text);
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
+  font: inherit; font-size: 12.5px; vertical-align: middle;
+}
+.pl-node-edit input[type="number"] { width: 56px; }
+.pl-node-edit-head .pl-node-type { max-width: 190px; padding: 0 5px; font-size: 12.5px; }
 /* 详情弹窗：图容器铺一层纸底；点图上节点，对应详情卡高亮一下 */
 .pl-graph-wrap {
   border: 1px solid var(--line2); border-radius: var(--r-sm);
@@ -2550,6 +2560,10 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   padding: 7px 10px; border-bottom: 1px solid var(--line);
   font-size: 12.5px; background: var(--paper-sunken);
 }
+/* 工具条不吃通用行 hover 底色（.list li:hover 的 --blue-weak 是半透明色，
+   一盖上去，滚到工具条底下的首行就透出来，看着像两行重叠）：
+   hover 时按回不透明底色，与常态一致 */
+.list li.skill-toolbar:hover { background: var(--paper-sunken); }
 .skill-toolbar .pick-all { display: flex; align-items: center; gap: 5px; cursor: pointer; }
 .skill-toolbar button:disabled { opacity: 0.45; cursor: default; }
 .skill-row .skill-pick { flex-shrink: 0; margin: 0; cursor: pointer; }
@@ -2588,6 +2602,8 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 }
 #skill-local-panel .scan-toolbar .scan-title { font-weight: 700; font-size: 13px; flex-shrink: 0; }
 #skill-local-panel .scan-toolbar button { font-size: 12px; padding: 3px 10px; }
+/* 收起按钮顶到工具条最右：面板可随手关上，不用再借「← 返回」离开技能页 */
+#skill-local-panel .scan-toolbar .scan-close { margin-left: auto; }
 #skill-local-panel .scan-list { margin: 0; border-radius: 0 0 var(--r-sm) var(--r-sm); }
 /* 面板底部：装到哪里 + 导入所选 */
 .scan-foot {

@@ -80,8 +80,10 @@ LOCAL_ONLY_METHODS = frozenset({
     # 任务编排：无人值守节点同样按 allowed_tools 预授权危险工具
     "pipeline.create", "pipeline.start", "pipeline.cancel",
     "pipeline.delete", "pipeline.node_rerun",
-    # 纳入现有任务：挂接任务簿 / 定时任务导入（可停用原任务）/ 会话续跑
+    # 纳入现有任务：挂接任务簿 / 定时任务导入（可停用原任务）/ 会话续跑；
+    # 直接写指令新建节点同样无人值守（allowed_tools 可预授权危险工具）
     "pipeline.attach", "pipeline.import_cron", "pipeline.add_session",
+    "pipeline.add_task",
     # 流水线复制 / 导入（allowed_tools 可随节点预授权危险工具；导出只读不在表内）
     "pipeline.duplicate", "pipeline.import",
     # 网络暴露开关（放宽方向；disable 是收紧、不在表内）
@@ -601,6 +603,8 @@ def create_app(
             return await backend.pipeline_import_cron(params)
         if method == "pipeline.add_session":
             return await backend.pipeline_add_session(params)
+        if method == "pipeline.add_task":
+            return await backend.pipeline_add_task(params)
         if method == "pipeline.duplicate":
             return await backend.pipeline_duplicate(params)
         if method == "pipeline.export":

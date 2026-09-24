@@ -8604,6 +8604,7 @@ async function pipelineImportModal(preset) {
     <div class="cron-fields">
       <label>纳入什么</label>
       <div class="pl-src">
+        <label class="pl-dep"><input type="radio" name="pl-src" value="newtask" ${source === "newtask" ? "checked" : ""}> 新建任务（直接写指令，就地排进流水线）</label>
         <label class="pl-dep"><input type="radio" name="pl-src" value="cron" ${source === "cron" ? "checked" : ""}> 定时任务（复制指令与预授权）</label>
         <label class="pl-dep"><input type="radio" name="pl-src" value="task" ${source === "task" ? "checked" : ""}> 任务簿任务（跟随它在跑的状态与产出）</label>
         <label class="pl-dep"><input type="radio" name="pl-src" value="session" ${source === "session" ? "checked" : ""}> 已有会话（在原会话里续跑）</label>
@@ -8626,7 +8627,7 @@ async function pipelineImportModal(preset) {
         <input id="pl-newname" class="modal-input" type="text" placeholder="例如：登录模块开发">
       </div>
       <div id="pl-prompt-wrap" class="hidden">
-        <label>这一轮要它做什么（在该会话已有的上下文里继续）</label>
+        <label id="pl-prompt-label">这一轮要它做什么（在该会话已有的上下文里继续）</label>
         <textarea id="pl-session-prompt" class="modal-input" rows="2" placeholder="例如：结合刚才的实现，把接口文档补全"></textarea>
       </div>
       <div id="pl-deps-wrap" class="hidden">
@@ -8634,21 +8635,29 @@ async function pipelineImportModal(preset) {
         <div id="pl-deps-box" class="pl-deps"></div>
       </div>
       <label class="pl-dep" id="pl-disable-wrap"><input type="checkbox" id="pl-disable-cron"> 导入后停用原定时任务（不再按周期独立运行）</label>
-      <p class="dim small">安全说明：纳入的节点同样无人值守执行——只读工具放行，其余按节点预授权名单，
-        名单外自动拒绝。挂接节点跟随原任务、不占并发额度；会话节点在该会话正被使用时会等空闲。</p>
+      <!-- 安全说明写成单行：模板里换行缩进会被 HTML 折叠成一个空格，
+           恰好落在段落自动换行处时左缘就参差了（看着像没对齐） -->
+      <p class="dim small">安全说明：纳入的节点同样无人值守执行——只读工具放行，其余按节点预授权名单，名单外自动拒绝。挂接节点跟随原任务、不占并发额度；会话节点在该会话正被使用时会等空闲。</p>
     </div>`;
   const q = (sel) => box.querySelector(sel);
   const srcObjs = { cron: srcOptions.cron, task: srcOptions.task, session: srcOptions.session };
   const srcLabels = { cron: "选定时任务", task: "选任务簿任务", session: "选会话" };
+  // 「新建任务」与「已有会话」共用同一条指令输入框，只换标签与示例
+  const promptHints = {
+    session: ["这一轮要它做什么（在该会话已有的上下文里继续）", "例如：结合刚才的实现，把接口文档补全"],
+    newtask: ["任务指令（启动后无人值守执行，可在面板里按节点补预授权）", "例如：把 docs 目录里的接口文档全部补全"],
+  };
   const curSource = () => box.querySelector('input[name="pl-src"]:checked').value;
   const curObjVal = () => q("#pl-src-obj").value;
   let fileExport = null; // 「导出文件」来源：解析后的 JSON（提交时交给 pipeline.import）
   const renderSrc = () => {
     const s = curSource();
-    // 「导出文件」恢复的是整条流水线：不选对象、不选目标流水线，只选文件
+    // 「导出文件」恢复的是整条流水线：不选对象、不选目标流水线，只选文件；
+    // 「新建任务」同样不选对象，但要选目标流水线并写指令
     const isFile = s === "file";
-    q("#pl-src-label").classList.toggle("hidden", isFile);
-    q("#pl-src-obj").classList.toggle("hidden", isFile);
+    const isNewTask = s === "newtask";
+    q("#pl-src-label").classList.toggle("hidden", isFile || isNewTask);
+    q("#pl-src-obj").classList.toggle("hidden", isFile || isNewTask);
     q("#pl-file-wrap").classList.toggle("hidden", !isFile);
     q("#pl-target-label").classList.toggle("hidden", isFile);
     q("#pl-target").classList.toggle("hidden", isFile);
@@ -8659,15 +8668,20 @@ async function pipelineImportModal(preset) {
       q("#pl-disable-wrap").classList.add("hidden");
       return;
     }
-    q("#pl-src-obj").innerHTML = srcObjs[s];
-    q("#pl-src-label").textContent = srcLabels[s];
-    q("#pl-src-obj").disabled = !srcObjs[s];
-    if (!srcObjs[s]) q("#pl-src-obj").innerHTML = `<option value="">（暂时没有可纳入的${srcLabels[s].slice(1)}）</option>`;
-    // 预设来源对象（从任务簿/定时任务行的 ⛓ 进来）
-    if (preset.cron_id && s === "cron") q("#pl-src-obj").value = String(preset.cron_id);
-    if (preset.task_id && s === "task") q("#pl-src-obj").value = String(preset.task_id);
-    if (preset.session_id && s === "session") q("#pl-src-obj").value = String(preset.session_id);
-    q("#pl-prompt-wrap").classList.toggle("hidden", s !== "session");
+    if (!isNewTask) {
+      q("#pl-src-obj").innerHTML = srcObjs[s];
+      q("#pl-src-label").textContent = srcLabels[s];
+      q("#pl-src-obj").disabled = !srcObjs[s];
+      if (!srcObjs[s]) q("#pl-src-obj").innerHTML = `<option value="">（暂时没有可纳入的${srcLabels[s].slice(1)}）</option>`;
+      // 预设来源对象（从任务簿/定时任务行的 ⛓ 进来）
+      if (preset.cron_id && s === "cron") q("#pl-src-obj").value = String(preset.cron_id);
+      if (preset.task_id && s === "task") q("#pl-src-obj").value = String(preset.task_id);
+      if (preset.session_id && s === "session") q("#pl-src-obj").value = String(preset.session_id);
+    }
+    const [pLabel, pPh] = promptHints[s] || promptHints.session;
+    q("#pl-prompt-label").textContent = pLabel;
+    q("#pl-session-prompt").placeholder = pPh;
+    q("#pl-prompt-wrap").classList.toggle("hidden", !(s === "session" || isNewTask));
     q("#pl-disable-wrap").classList.toggle("hidden", s !== "cron");
     syncTargetUi();
   };
@@ -8716,7 +8730,8 @@ async function pipelineImportModal(preset) {
       return;
     }
     const objId = curObjVal();
-    if (!objId) throw new Error("先选一个要纳入的对象");
+    // 「新建任务」没有来源对象可选，只要求指令非空（分支里各自校验）
+    if (s !== "newtask" && !objId) throw new Error("先选一个要纳入的对象");
     const targetId = Number(q("#pl-target").value);
     const dependsOn = [...box.querySelectorAll("#pl-deps-box input:checked")].map((el) => Number(el.value));
     let targetLabel;
@@ -8733,6 +8748,10 @@ async function pipelineImportModal(preset) {
         };
       } else if (s === "task") {
         node = { task_id: String(objId) };
+      } else if (s === "newtask") {
+        const prompt = q("#pl-session-prompt").value.trim();
+        if (!prompt) throw new Error("新任务要写清要做什么");
+        node = { title: `新任务：${prompt.slice(0, 40)}`, prompt };
       } else {
         const prompt = q("#pl-session-prompt").value.trim();
         if (!prompt) throw new Error("会话节点要写清这一轮要做什么");
@@ -8740,6 +8759,13 @@ async function pipelineImportModal(preset) {
       }
       await request("pipeline.create", { name: name || "未命名流水线", nodes: [node] });
       targetLabel = name || "未命名流水线";
+    } else if (s === "newtask") {
+      const prompt = q("#pl-session-prompt").value.trim();
+      if (!prompt) throw new Error("新任务要写清要做什么");
+      const r = await request("pipeline.add_task", {
+        id: targetId, prompt, depends_on: dependsOn,
+      });
+      targetLabel = r.pipeline.name;
     } else if (s === "cron") {
       const r = await request("pipeline.import_cron", {
         id: targetId, cron_id: Number(objId), depends_on: dependsOn,
@@ -10334,11 +10360,25 @@ async function pickPath(kind) {
   }
 }
 
+let skillStatusTimer = 0;
 function skillStatus(text, ok = true) {
   const el = document.getElementById("skill-status");
   el.textContent = text;
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = !text;
+  // 成功提示几秒后自动消失（一次性确认，不必手动清）；错误保留，
+  // 留时间读原因，直到下一次操作覆盖它
+  clearTimeout(skillStatusTimer);
+  if (text && ok) {
+    skillStatusTimer = setTimeout(() => { el.hidden = true; el.textContent = ""; }, 6000);
+  }
+}
+
+// 长名单截短：导入几十个技能时不能把 78 个名字全点名一遍，
+// 只列前几个 + 「等 N 个」，全量名单在技能列表里本来就能看到
+function nameList(names, max = 6) {
+  if (names.length <= max) return names.join("、");
+  return `${names.slice(0, max).join("、")} 等 ${names.length} 个`;
 }
 
 function mcpStatus(text, ok = true) {
@@ -10473,17 +10513,20 @@ function importSkillModal(prefill = "") {
     await renderSettings();
     boot();
     const where = r.scope === "project" ? "本项目" : "全局";
-    skillStatus(`✓ 已导入 ${r.count} 个技能到${where}：${r.installed.join("、")}（已启用，可直接使用）`);
+    skillStatus(`✓ 已导入 ${r.count} 个技能到${where}：${nameList(r.installed)}（已启用，可直接使用）`);
   }, "导入");
 }
 
 // 本机现存技能：只读探测 Claude Code / agents / Codex / 本项目 .claude 里已有的技能，
-// 结果直接平铺在技能页按钮下方的面板里（不再弹窗），勾选后复用既有导入逻辑
+// 结果平铺在技能列表上方的面板里（不再弹窗），勾选后复用既有导入逻辑
 // （skills.install 复制安装），探测本身不动任何文件
 async function loadLocalSkills() {
   const panel = document.getElementById("skill-local-panel");
   if (!panel) return;
+  const wasHidden = panel.hidden;
   panel.hidden = false;
+  // 面板在列表上方，点按钮后滚到面板顶部，保证工具条与候选首行可见
+  if (wasHidden) panel.scrollIntoView({ block: "nearest" });
   const list = document.getElementById("skill-local-list");
   const note = document.getElementById("skill-local-note");
   list.innerHTML = '<li class="empty-hint">正在探测本机技能目录（Claude Code / agents / Codex / 本项目 .claude）…</li>';
@@ -10515,12 +10558,14 @@ async function loadLocalSkills() {
     </label></li>`).join("");
 }
 
-// 面板里的全选 / 全不选：只作用于可选（未装过）的勾选框
+// 面板里的全选 / 全不选 / 收起：前两个只作用于可选（未装过）的勾选框，
+// 收起则整个面板藏起来（结果不销毁，再点「本机现存」重新探测）
 function bindLocalSkillToolbar() {
   const panel = document.getElementById("skill-local-panel");
   if (!panel) return;
   panel.querySelectorAll(".scan-toolbar button").forEach((b) => {
     b.onclick = () => {
+      if (b.dataset.act === "close") { panel.hidden = true; return; }
       panel.querySelectorAll(".scan-list input[type=checkbox]:not(:disabled)").forEach(
         (cb) => { cb.checked = b.dataset.act === "all"; });
     };
@@ -10554,7 +10599,7 @@ async function importLocalSkills() {
   boot();
   const where = scope === "project" ? "本项目" : "全局";
   if (ok.length) {
-    skillStatus(`✓ 已导入 ${ok.length} 个技能到${where}：${ok.join("、")}（已启用，可直接使用）`);
+    skillStatus(`✓ 已导入 ${ok.length} 个技能到${where}：${nameList(ok)}（已启用，可直接使用）`);
     loadLocalSkills();  // 重新探测：刚装过的转为灰显，剩余候选一眼可见
   } else {
     skillStatus("✗ " + (bad[0] || "导入失败"), false);
@@ -10601,7 +10646,12 @@ document.getElementById("btn-scan-skill").onclick = () => {
   openSkillManage();
   loadLocalSkills();
 };
-document.getElementById("btn-scan-skill-2").onclick = () => loadLocalSkills();
+document.getElementById("btn-scan-skill-2").onclick = () => {
+  // 已展开时再点一次即收起（与面板里的「收起」等效），否则探测展开
+  const panel = document.getElementById("skill-local-panel");
+  if (panel && !panel.hidden) { panel.hidden = true; return; }
+  loadLocalSkills();
+};
 document.getElementById("btn-skill-local-import").onclick = () => importLocalSkills();
 bindLocalSkillToolbar();
 

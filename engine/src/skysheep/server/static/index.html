@@ -668,15 +668,16 @@
                 点技能名可以查看它的完整指令。
               </p>
               <div id="skill-status" class="card-status" hidden></div>
-              <ul id="settings-skill-list" class="list settings-skill-list"></ul>
-              <!-- 「本机现存」候选：点按钮后探测本机别家技能目录，结果直接平铺在这里
-                   （不再弹窗），勾选后可一次导入 -->
+              <!-- 「本机现存」候选：点按钮后探测本机别家技能目录，结果平铺在列表上方
+                   （不再弹窗）——放在列表前而不是后面，点开就在页首可视区，
+                   不会被压到页面底部（右下角桌宠会盖住底部内容），勾选后可一次导入 -->
               <div id="skill-local-panel" hidden>
                 <div class="scan-toolbar">
                   <span class="scan-title">本机现存技能</span>
                   <button class="btn-ghost" data-act="all">全选</button>
                   <button class="btn-ghost" data-act="none">全不选</button>
                   <span class="dim small" id="skill-local-note"></span>
+                  <button class="btn-ghost scan-close" data-act="close" title="收起本机现存面板">收起</button>
                 </div>
                 <ul class="scan-list" id="skill-local-list"></ul>
                 <div class="scan-foot">
@@ -689,6 +690,7 @@
                   <button class="btn-primary" id="btn-skill-local-import">导入所选</button>
                 </div>
               </div>
+              <ul id="settings-skill-list" class="list settings-skill-list"></ul>
             </section>
           </div>
         </section>

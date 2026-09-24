@@ -381,14 +381,50 @@
             </div>
           </section>
 
+          <!-- 任务：原「子代理任务 / 任务清单 / 项目任务」三个标签合成一个——
+               三者都是列表，却占了菜单三格，用户看着像同一件事的三个入口。
+               这里用顶部分段切换（各自仍是原来的 DOM 与渲染函数，只换了归属），
+               侧栏与窄栏的「任务清单 / 项目任务」入口点进来直接落在对应分段 -->
           <section id="rp-page-tasks" class="rp-page hidden">
-            <div class="rp-toolbar">
-              <span class="dim small">Agent 拆解出的子代理任务（后台并行）</span>
-              <span class="spacer"></span>
-              <button id="tasks-cancel" class="rp-mini danger">全部取消</button>
-              <button id="tasks-refresh" class="rp-mini">刷新</button>
+            <div class="rp-segs seg-row seg-mini" id="rp-segs-tasks" data-tab="tasks">
+              <button data-view="tasks" class="active" title="Agent 派出去的子代理任务（后台并行）">子代理任务</button>
+              <button data-view="todo" title="Agent 为本会话拆解的任务步骤">任务清单</button>
+              <button data-view="ptasks" title="这个项目要做的事，自己加、做完勾掉">项目任务</button>
             </div>
-            <div id="tasks-list" class="tasks-list"></div>
+
+            <div class="rp-seg-view" id="rp-view-tasks">
+              <div class="rp-toolbar">
+                <span class="dim small">Agent 拆解出的子代理任务（后台并行）</span>
+                <span class="spacer"></span>
+                <button id="tasks-cancel" class="rp-mini danger">全部取消</button>
+                <button id="tasks-refresh" class="rp-mini">刷新</button>
+              </div>
+              <div id="tasks-list" class="tasks-list"></div>
+            </div>
+
+            <div class="rp-seg-view hidden" id="rp-view-todo">
+              <div class="rp-toolbar">
+                <span class="dim small">Agent 拆解的任务步骤会实时同步到这里。</span>
+              </div>
+              <ul id="todo-list" class="list todo-list rp-page-list"></ul>
+              <div id="todo-empty" class="rp-empty">当前还没有任务清单 —— 给 Agent 一个多步骤任务，它拆解后的步骤会出现在这里。</div>
+            </div>
+
+            <div class="rp-seg-view hidden" id="rp-view-ptasks">
+              <div class="ag-topbar">
+                <div class="ag-heading">
+                  <b>项目任务</b>
+                  <span class="dim small" id="ptasks-project"></span>
+                </div>
+                <button id="btn-ptask-add" class="rp-mini primary">＋ 新建任务</button>
+              </div>
+              <div class="rp-toolbar">
+                <input id="ptask-input" class="ptask-input" type="text" maxlength="200"
+                       placeholder="写一个要做的任务，回车快速添加；完成后点前面的方框勾掉">
+              </div>
+              <ul id="ptask-list" class="list ptask-list rp-page-list"></ul>
+              <div id="ptask-empty" class="rp-empty">这个项目还没有任务。把要做的事一条条加进来，做完勾掉；删项目时会一起清掉。</div>
+            </div>
           </section>
 
           <section id="rp-page-browser" class="rp-page hidden">
@@ -408,30 +444,6 @@
               提示：很多公网站点出于安全禁止被内嵌，若这里一直空白就是被对方拒绝了——复制地址用系统浏览器打开即可。
             </div>
             <div id="browser-empty" class="rp-empty">在地址栏输入网址即可在面板里预览——比如 Agent 刚帮你起好的本地开发服务器。</div>
-          </section>
-
-          <section id="rp-page-todo" class="rp-page hidden">
-            <div class="rp-toolbar">
-              <span class="dim small">Agent 拆解的任务步骤会实时同步到这里。</span>
-            </div>
-            <ul id="todo-list" class="list todo-list rp-page-list"></ul>
-            <div id="todo-empty" class="rp-empty">当前还没有任务清单 —— 给 Agent 一个多步骤任务，它拆解后的步骤会出现在这里。</div>
-          </section>
-
-          <section id="rp-page-ptasks" class="rp-page hidden">
-            <div class="ag-topbar">
-              <div class="ag-heading">
-                <b>项目任务</b>
-                <span class="dim small" id="ptasks-project"></span>
-              </div>
-              <button id="btn-ptask-add" class="rp-mini primary">＋ 新建任务</button>
-            </div>
-            <div class="rp-toolbar">
-              <input id="ptask-input" class="ptask-input" type="text" maxlength="200"
-                     placeholder="写一个要做的任务，回车快速添加；完成后点前面的方框勾掉">
-            </div>
-            <ul id="ptask-list" class="list ptask-list rp-page-list"></ul>
-            <div id="ptask-empty" class="rp-empty">这个项目还没有任务。把要做的事一条条加进来，做完勾掉；删项目时会一起清掉。</div>
           </section>
 
           <section id="rp-page-agenda" class="rp-page hidden">
@@ -462,22 +474,32 @@
             <ul id="agenda-list" class="list agenda-list rp-page-list hidden"></ul>
           </section>
 
-          <section id="rp-page-cron" class="rp-page hidden">
-            <div class="rp-toolbar">
-              <span class="dim small">到点让 Agent 自己干活，无人值守。</span>
-              <span class="spacer"></span>
-              <button id="btn-cron-add" class="rp-mini" title="新增定时任务">＋ 新增</button>
+          <!-- 自动化：原「定时任务 / 任务编排」两个标签合成一个——
+               两者都是「不用盯着、到点或按依赖自己跑」的配置页，分段切换 -->
+          <section id="rp-page-auto" class="rp-page hidden">
+            <div class="rp-segs seg-row seg-mini" id="rp-segs-auto" data-tab="auto">
+              <button data-view="cron" class="active" title="到点让 Agent 自己干活，无人值守">定时任务</button>
+              <button data-view="pipeline" title="多个任务按依赖顺序自动跑：前面的并行做，最后的汇总审查">任务编排</button>
             </div>
-            <ul id="cron-list" class="list cron-list rp-page-list"></ul>
-          </section>
 
-          <section id="rp-page-pipeline" class="rp-page hidden">
-            <div class="rp-toolbar">
-              <span class="spacer"></span>
-              <button id="btn-pipeline-import" class="rp-mini" title="纳入定时任务 / 任务簿任务 / 已有会话，或从导出的 JSON 恢复整条流水线">⤵ 导入</button>
-              <button id="btn-pipeline-add" class="rp-mini" title="新建流水线">＋ 新建</button>
+            <div class="rp-seg-view" id="rp-view-cron">
+              <div class="rp-toolbar">
+                <span class="dim small">到点让 Agent 自己干活，无人值守。</span>
+                <span class="spacer"></span>
+                <button id="btn-cron-add" class="rp-mini" title="新增定时任务">＋ 新增</button>
+              </div>
+              <ul id="cron-list" class="list cron-list rp-page-list"></ul>
             </div>
-            <ul id="pipeline-list" class="list pipeline-list rp-page-list"></ul>
+
+            <div class="rp-seg-view hidden" id="rp-view-pipeline">
+              <div class="rp-toolbar">
+                <span class="dim small">多个任务按依赖顺序自动跑。</span>
+                <span class="spacer"></span>
+                <button id="btn-pipeline-import" class="rp-mini" title="纳入定时任务 / 任务簿任务 / 已有会话，或从导出的 JSON 恢复整条流水线">⤵ 导入</button>
+                <button id="btn-pipeline-add" class="rp-mini" title="新建流水线">＋ 新建</button>
+              </div>
+              <ul id="pipeline-list" class="list pipeline-list rp-page-list"></ul>
+            </div>
           </section>
 
           <section id="rp-page-memory" class="rp-page hidden">

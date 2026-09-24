@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from test_server import make_client, recv_until
 
 
@@ -825,11 +827,12 @@ def test_right_tab_restore_loads_data_on_startup(home):
     assert "for (const id of rightTabs) loadRightTab(id)" in init, \
         "启动恢复标签时没拉数据：重启后日程页会是空白网格"
 
-    # openRightTab / activateRightTab 不再各自维护一份 if 链
+    # openRightTab / activateRightTab 不再各自维护一份 if 链（合并标签后拉的是
+    # 当前分段，所以入口统一成 loadRightTab(rightActiveView())）
     for fn in ("function openRightTab(", "function activateRightTab("):
         body = js[js.index(fn):]
         body = body[:body.index("\n}\n")]
-        assert "loadRightTab(id)" in body, f"{fn} 没走统一加载入口"
+        assert "loadRightTab(rightActiveView())" in body, f"{fn} 没走统一加载入口"
         assert 'if (id === "agenda") loadAgenda()' not in body, f"{fn} 还留着旧 if 链"
 
     # ③ 切项目重拉同样走统一入口，且面板收起时不早退（否则展开即旧内容）
@@ -838,6 +841,80 @@ def test_right_tab_restore_loads_data_on_startup(home):
     assert "loadRightTab(id, true)" in reload_body
     assert "if (!rightTabs.length || rightCollapsed) return" not in reload_body, \
         "面板收起时早退：切项目后展开会看到上一个项目的内容"
+
+
+def test_right_panel_merged_tabs_keep_every_view_reachable(home):
+    """合并标签（任务 / 自动化）之后，每一个分段都还得点得到。
+
+    12 个平铺标签收成 9 个：任务 = 子代理任务/任务清单/项目任务，自动化 =
+    定时任务/任务编排。合并最容易埋的坑是「分段加了、某一头没跟上」——
+    按钮少一个、分段视图 div 没写、加载函数漏注册、后端偏好白名单漏收 id，
+    都表现为同一类故障：某一页从界面上消失，或者升级后标签静默丢失。
+    这份用例把五处对齐：TAB_META 容器 ↔ TAB_VIEWS 分段 ↔ TAB_OF 映射 ↔
+    index.html 的分段按钮与分段视图 ↔ RIGHT_TAB_LOADERS ↔ 后端白名单。
+    """
+    from skysheep.server.app import STATIC_DIR
+    from skysheep.server.backend import ServerBackend
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # ① 菜单里只剩 9 格，合并掉的四个不再作为标签出现
+    meta = js[js.index("const TAB_META = {"):]
+    meta = meta[:meta.index("\n};")]
+    tab_ids = re.findall(r"^  (\w+): \{", meta, re.M)
+    assert tab_ids == ["aux", "review", "browser", "files", "tasks", "agenda",
+                       "auto", "memory", "ext"], f"标签集合变了：{tab_ids}"
+    for old in ("todo", "ptasks", "cron", "pipeline"):
+        assert f"\n  {old}: {{" not in meta, f"{old} 已并入容器标签，不该再单独占一格菜单"
+
+    # ② 分段表：TAB_VIEWS 的每个分段都映射回所属容器，TAB_OF 不多不少
+    #    （两张表都是单行声明，切到行尾的 "};" 为止，别把后面的 rightView 也吃进来）
+    views = js[js.index("const TAB_VIEWS = {"):]
+    views = views[:views.index("};")]
+    merged = dict(re.findall(r'(\w+): \[([^\]]*)\]', views))
+    merged = {k: re.findall(r'"(\w+)"', v) for k, v in merged.items()}
+    assert merged == {"tasks": ["tasks", "todo", "ptasks"], "auto": ["cron", "pipeline"]}, merged
+    tab_of = js[js.index("const TAB_OF = {"):]
+    tab_of = tab_of[:tab_of.index("};")]
+    tab_of = dict(re.findall(r'(\w+): "(\w+)"', tab_of))
+    for tab, segs in merged.items():
+        for seg in segs:
+            assert tab_of.get(seg) == tab, f"TAB_OF 缺 {seg} → {tab}"
+    assert set(tab_of) == {s for segs in merged.values() for s in segs}, \
+        "TAB_OF 与 TAB_VIEWS 不是互为镜像（多一个映射会让老偏好映射到不存在的分段）"
+
+    # ③ 前端三件套齐全：容器页、分段条、分段按钮、分段视图、加载函数
+    loaders = js[js.index("const RIGHT_TAB_LOADERS = {"):]
+    loaders = loaders[:loaders.index("};\n")]
+    icons = js[js.index("const RP_ICONS = {"):]
+    icons = icons[:icons.index("\n};")]
+    for tab, segs in merged.items():
+        assert f'id="rp-page-{tab}"' in html, f"{tab} 缺容器页"
+        assert f'id="rp-segs-{tab}"' in html and f'data-tab="{tab}"' in html, \
+            f"{tab} 缺分段条"
+        for seg in segs:
+            assert f'data-view="{seg}"' in html, f"{seg} 没有分段按钮，点不到"
+            assert f'id="rp-view-{seg}"' in html, f"{seg} 缺分段视图"
+            assert f"\n  {seg}:" in loaders, f"RIGHT_TAB_LOADERS 缺分段 {seg}"
+    # 每个标签都得有图标：漏一个，菜单里就渲染成一行「undefined 名称」
+    for tab in tab_ids:
+        assert f"\n  {tab}:" in icons, f"RP_ICONS 缺 {tab} 的图标"
+
+    # ④ 恢复偏好时要按 TAB_OF 映射（老 ui.json 存的是分段 id），并还原分段
+    init = js[js.index("async function initUiPrefs()"):]
+    init = init[:init.index("// ----------")]
+    assert "const tab = rightTabFor(t);" in init, "老偏好里的分段 id 没映射回容器标签"
+    assert "rightView[tab] = t" in init, "老偏好里打开的分段没还原"
+
+    # ⑤ 后端白名单要收得下容器与分段两种 id：漏收即升级后标签静默消失
+    for one in list(merged) + [s for segs in merged.values() for s in segs]:
+        assert one in ServerBackend.RIGHT_TAB_IDS, f"RIGHT_TAB_IDS 漏收 {one}"
+
+    # ⑥ #rp-body 里不留孤儿页：每个 rp-page-* 都得是上面这 9 个标签之一
+    #    （rp-page-terminal 是底部终端面板的宿主，不在右面板内）
+    pages = set(re.findall(r'id="rp-page-(\w+)"', html)) - {"terminal"}
+    assert pages <= set(tab_ids), f"右面板里有已不存在的页：{pages - set(tab_ids)}"
 
 
 def test_roundtable_menu_opens_on_left_and_keeps_actions_reachable(home):

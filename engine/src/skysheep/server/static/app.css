@@ -3173,6 +3173,13 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 /* .settings-page 的列向 flex + gap 已由全局基类提供，这里只需补多页之间的间距 */
 #rp-page-ext .settings-page + .settings-page { margin-top: 12px; }
 
+/* —— 合并标签（任务 / 自动化）的分段条与分段视图 ——
+   分段条沿用设置页的 .seg-row.seg-mini（全宽均分、小字号），这里只补面板内的
+   外边距；每个分段视图自己撑满剩余高度，内部仍是「工具条 + 列表」的原布局 */
+.rp-segs { flex-shrink: 0; margin: 8px 10px 6px; }
+.rp-segs button { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rp-seg-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+
 /* 页内工具条与小按钮 */
 .rp-toolbar {
   display: flex; align-items: center; gap: 8px; flex-shrink: 0;

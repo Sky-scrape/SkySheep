@@ -631,7 +631,7 @@ async function activateTab(tab) {
   // 内容冒充本会话（工具栏还写着「本会话中 Agent 改过的文件」）。上面的
   // activate / resume 与这两个请求同一条 WS 按序到达，后端看到的已是新会话。
   if (rightTabs.includes("review")) loadRightTab("review");
-  if (rightTabs.includes("todo")) loadRightTab("todo");
+  if (rightTabs.includes("tasks")) loadRightTab(rightView.tasks);
   petPrevRunning = !!tab.running;
   petRefresh();
   refreshSessions();
@@ -1979,7 +1979,7 @@ function handleEvent(kind, data) {
     case "todo_updated": renderTodoPanel(data.items); break;
     case "task_estimate": showTaskEstimate(data); break;
     case "schedule_updated": {
-      if (rightTabs.includes("agenda") && !rightCollapsed) loadAgenda();
+      if (rightViewVisible("agenda")) loadAgenda();
       break;
     }
     case "mcp_updated": {
@@ -2041,7 +2041,7 @@ function handleEvent(kind, data) {
           data.task.last_status === "error" ? "运行失败：" + (data.task.last_result || "") :
           data.task.last_result || "已更新");
       }
-      if (rightTabs.includes("cron") && !rightCollapsed) {
+      if (rightViewVisible("cron")) {
         loadCron();
       }
       break;
@@ -2058,7 +2058,7 @@ function handleEvent(kind, data) {
           pushNotice(p.status === "done" ? `✅ 流水线完成：${p.name}${skippedTxt}`
             : `⚠️ 流水线结束（${bad} 个节点未成功${skippedTxt}）：${p.name}`);
         }
-        if (rightTabs.includes("pipeline") && !rightCollapsed) loadPipelines();
+        if (rightViewVisible("pipeline")) loadPipelines();
       }
       break;
     }
@@ -4554,7 +4554,7 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
     }
   }).catch(() => {});
   // 记忆标签若正开着（启动恢复 / 切项目回来），按当前项目重读
-  if (rightActive === "memory" && !rightPanel.classList.contains("hidden")) loadMemoryPanel();
+  if (rightViewVisible("memory")) loadMemoryPanel();
   // 启动后台已查过更新：有新版本时进通知中心（设置 · 关于里可手动再查）
   if (snap.update) {
     pushNotice(`🆕 新版本 v${snap.update.version} 可用`, "设置 · 关于 里可前往下载");
@@ -6371,7 +6371,7 @@ function addCheckpointBar(cp) {
       addNotice("已撤销本轮文件改动；如需继续任务，Agent 会重新读取最新文件。");
       // 磁盘被回滚：文件树缓存失效（开着文件标签就直接刷新，与 Agent 写文件后的联动一致）
       filesLoaded = false;
-      if (rightActive === "files" && !rightPanel.classList.contains("hidden")) loadFiles(true);
+      if (rightViewVisible("files")) loadFiles(true);
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "↩ 撤销本轮改动";
@@ -8782,12 +8782,12 @@ function showAgendaReminder(item) {
   const close = () => bar.remove();
   bar.querySelector('[data-a="done"]').onclick = async () => {
     await request("schedule.update", { id: item.id, done: true });
-    if (rightTabs.includes("agenda") && !rightCollapsed) await loadAgenda();
+    if (rightViewVisible("agenda")) await loadAgenda();
     close();
   };
   bar.querySelector('[data-a="snooze"]').onclick = async () => {
     await request("schedule.update", { id: item.id, start_at: Date.now() / 1000 + 600 });
-    if (rightTabs.includes("agenda") && !rightCollapsed) await loadAgenda();
+    if (rightViewVisible("agenda")) await loadAgenda();
     close();
   };
   bar.querySelector(".ar-close").onclick = close;
@@ -10801,6 +10801,8 @@ const RP_ICONS = {
   ptasks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 4.5h9a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2h.5"/><path d="M9 2.5h4.5v4H9z"/><path d="m9 13 2 2 4.5-4.5M9 17.5h6"/></svg>',
   agenda: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15" rx="2"/><path d="M8 3.5v4M16 3.5v4M4 10.5h16"/></svg>',
   cron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+  // 自动化（定时任务 + 任务编排 的容器标签）：闪电＝「不用盯着、自己会跑」
+  auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 2.5 5.5 13h5L10 21.5 18.5 11h-5.2z"/></svg>',
   pipeline: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="6" r="2.1"/><circle cx="5.5" cy="18" r="2.1"/><circle cx="18.5" cy="12" r="2.1"/><path d="M7.4 6.9 16.6 11.1M7.4 17.1 16.6 12.9"/></svg>',
   memory: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M9 3.5v17"/><path d="M12.5 8h4M12.5 12h4"/></svg>',
   ext: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5V8M15 3.5V8"/><path d="M6.5 8h11v2.5a5.5 5.5 0 0 1-5.5 5.5 5.5 5.5 0 0 1-5.5-5.5z"/><path d="M12 16v4.5"/></svg>',
@@ -10809,22 +10811,54 @@ const RP_ICONS = {
   panelClosed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M14.5 4.5v15"/><path d="m8.5 9.5 2.5 2.5-2.5 2.5"/></svg>',
   panelOpen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M14.5 4.5v15"/><path d="M15.5 6h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-3z" fill="currentColor" stroke="none" opacity=".3"/><path d="m11.5 9.5-2.5 2.5 2.5 2.5"/></svg>',
 };
+// 面板标签：原先 12 个平铺在「＋」菜单里，其中三个「任务…」和两个自动化页
+// 挤在一起看着像同一件事的多个入口。现在合并成两个带分段的标签：
+//   任务   = 子代理任务 / 任务清单 / 项目任务
+//   自动化 = 定时任务 / 任务编排
+// 合并的只是「菜单里占几格」：各分段仍是原来的 DOM、原来的渲染与加载函数，
+// 侧栏与窄栏的入口（任务清单 / 项目任务 / 定时任务 / 任务编排）点进去直接
+// 落在对应分段，不因为合并就多一步点击。
 const TAB_META = {
   aux: { title: "辅助对话" },
   review: { title: "审查" },
   browser: { title: "浏览器" },
   files: { title: "文件" },
-  tasks: { title: "任务" },
-  todo: { title: "任务清单" },
-  ptasks: { title: "项目任务" },
+  tasks: { title: "任务", sub: "子代理任务 · 任务清单 · 项目任务" },
   agenda: { title: "日程" },
-  cron: { title: "定时任务" },
-  pipeline: { title: "任务编排" },
+  auto: { title: "自动化", sub: "定时任务 · 任务编排" },
   memory: { title: "项目记忆" },
   ext: { title: "MCP / Skills" },
 };
-let rightTabs = [];    // 打开的标签 id（有序）
+// 分段 id → 所属标签。合并前的 ui.json 里存的就是分段 id（todo / ptasks /
+// cron / pipeline），靠这张表映射回所属标签并把分段一并还原。
+const TAB_OF = { tasks: "tasks", todo: "tasks", ptasks: "tasks", cron: "auto", pipeline: "auto" };
+// 标签 id → 分段顺序（第一个是打开时的默认段）；不在表里的标签没有分段
+const TAB_VIEWS = { tasks: ["tasks", "todo", "ptasks"], auto: ["cron", "pipeline"] };
+let rightTabs = [];    // 打开的标签 id（有序；只存容器标签，不存分段）
 let rightActive = null;
+// 每个合并标签当前显示哪一段（内存态：落盘时把分段 id 写进 right_active，
+// 重启后还原——见 rightActiveView / initUiPrefs）
+const rightView = { tasks: "tasks", auto: "cron" };
+
+/** 分段 id（或普通标签 id）→ 面板标签 id。 */
+function rightTabFor(id) {
+  return TAB_OF[id] || id;
+}
+
+/** 当前标签实际显示的视图 id：合并标签返回当前分段，普通标签就是它自己。
+    落盘与「某视图是否正显示」都以它为准（right_active 存的就是视图）。 */
+function rightActiveView() {
+  if (!rightActive) return null;
+  return TAB_VIEWS[rightActive] ? rightView[rightActive] : rightActive;
+}
+
+/** 某个视图此刻是否正显示在面板上（标签打开着、面板没收起、分段也对）。
+    后台事件（文件变更 / 子代理任务推进）用它决定要不要立刻重绘。 */
+function rightViewVisible(view) {
+  if (!view || rightCollapsed || !rightActive) return false;
+  if (rightPanel.classList.contains("hidden")) return false;
+  return rightActiveView() === view;
+}
 
 const rightPanel = document.getElementById("right-panel");
 const rpTabs = document.getElementById("rp-tabs");
@@ -10849,7 +10883,7 @@ rpTabs.addEventListener("keydown", (e) => {
 });
 btnTabs.innerHTML = RP_ICONS.panelClosed;
 
-/** 右面板各标签的数据加载入口（一处定义，多处复用）。
+/** 右面板各视图的数据加载入口（一处定义，多处复用）。
 
     以前 openRightTab / activateRightTab / reloadProjectPanels 各抄一份 if 链，
     而 initUiPrefs 恢复上次打开的标签时一份都没调——启动后面板里那几个页
@@ -10869,9 +10903,15 @@ const RIGHT_TAB_LOADERS = {
   todo: () => loadTodoPanel(),
 };
 
-/** 按需加载某个标签的数据；未知 id（如 aux 辅助对话，没有远端数据）静默跳过。 */
+/** 按需加载某个视图的数据；未知 id（如 aux 辅助对话，没有远端数据）静默跳过。
+
+    传分段 id（todo / cron…）拉它自己；传容器标签 id（tasks / auto）拉该标签
+    当前的分段——initUiPrefs 恢复标签、reloadProjectPanels 重拉打开的标签、
+    renderRightPanel 展开面板都传的是容器 id，靠这一条统一接住。 */
 function loadRightTab(id, force) {
-  const fn = RIGHT_TAB_LOADERS[id];
+  const tab = rightTabFor(id);
+  const view = TAB_VIEWS[tab] ? (id === tab ? rightView[tab] : id) : tab;
+  const fn = RIGHT_TAB_LOADERS[view];
   return fn ? fn(force) : undefined;
 }
 
@@ -10890,7 +10930,7 @@ function renderRightPanel() {
     b.setAttribute("role", "tab");
     b.setAttribute("aria-selected", id === rightActive ? "true" : "false");
     b.dataset.tabId = id;
-    b.title = TAB_META[id].title;
+    b.title = TAB_META[id].title + (TAB_META[id].sub ? "：" + TAB_META[id].sub : "");
     b.setAttribute("aria-label", TAB_META[id].title); // 图标档藏文字后无障碍名不丢
     b.innerHTML = RP_ICONS[id] + "<span>" + TAB_META[id].title + '</span><span class="rp-x" title="关闭标签">✕</span>';
     b.querySelector(".rp-x").onclick = (e) => { e.stopPropagation(); closeRightTab(id); };
@@ -10910,6 +10950,7 @@ function renderRightPanel() {
   applyRpTabDensity();
   document.querySelectorAll("#rp-body .rp-page").forEach((p) => p.classList.add("hidden"));
   if (rightActive && !rightCollapsed) document.getElementById("rp-page-" + rightActive).classList.remove("hidden");
+  applyRightSubView(rightActive); // 合并标签里该露哪一段（收起时也刷，展开即正确）
 }
 
 /** 标签栏压缩档位：按均分到每个标签的宽度逐级降级（CSS 规则见 app.css 的
@@ -10945,32 +10986,74 @@ if (typeof ResizeObserver === "function") {
   }).observe(rpTabs);
 }
 
+/** 合并标签的分段切换（任务 / 自动化）。
+
+    分段按钮的高亮与分段视图的显隐都从 rightView 一处推导：打开标签、恢复偏好、
+    点分段三条路径共用同一函数，免得某一条漏刷出现「按钮亮着、内容却是另一段」。 */
+function applyRightSubView(tabId) {
+  const views = TAB_VIEWS[tabId];
+  if (!views) return;
+  const active = rightView[tabId];
+  views.forEach((v) => {
+    const page = document.getElementById("rp-view-" + v);
+    if (page) page.classList.toggle("hidden", v !== active);
+  });
+  const bar = document.getElementById("rp-segs-" + tabId);
+  if (bar) {
+    bar.querySelectorAll("button[data-view]").forEach((b) => {
+      b.classList.toggle("active", b.dataset.view === active);
+    });
+  }
+}
+
+/** 点分段：切内容并拉这一段的数据。「当前分段」借着 right_active 落盘
+    （存的是视图 id，如 ptasks）——不新增偏好键，老的 ui.json 也能原样读回来。 */
+function setRightSubView(tabId, view) {
+  if (!TAB_VIEWS[tabId] || !TAB_VIEWS[tabId].includes(view)) return;
+  rightView[tabId] = view;
+  applyRightSubView(tabId);
+  if (rightActive === tabId) {
+    loadRightTab(view);
+    saveUiPrefs({ right_active: view });
+  }
+}
+
+document.querySelectorAll("#rp-body .rp-segs").forEach((bar) => {
+  const tabId = bar.dataset.tab;
+  bar.querySelectorAll("button[data-view]").forEach((b) => {
+    b.onclick = () => setRightSubView(tabId, b.dataset.view);
+  });
+});
+
 function openRightTab(id) {
-  if (!TAB_META[id]) return;
+  const tab = rightTabFor(id);
+  if (!TAB_META[tab]) return;
+  if (TAB_VIEWS[tab] && id !== tab) rightView[tab] = id; // 入口指定了分段就落到那一段
   document.body.classList.remove("sidebar-open"); // 手机互斥：开右抽屉就收侧栏
-  if (!rightTabs.includes(id)) rightTabs.push(id);
-  rightActive = id;
+  if (!rightTabs.includes(tab)) rightTabs.push(tab);
+  rightActive = tab;
   rightCollapsed = false;
   renderRightPanel();
-  const openPrefs = { right_tabs: [...rightTabs], right_active: id };
+  const openPrefs = { right_tabs: [...rightTabs], right_active: rightActiveView() };
   if (!NARROW_MQ.matches) openPrefs.right_collapsed = 0;
   saveUiPrefs(openPrefs);
-  loadRightTab(id);
+  loadRightTab(rightActiveView());
 }
 
 function activateRightTab(id) {
-  rightActive = id;
+  rightActive = rightTabFor(id);
   renderRightPanel();
-  saveUiPrefs({ right_active: id });
-  loadRightTab(id);
+  saveUiPrefs({ right_active: rightActiveView() });
+  loadRightTab(rightActiveView());
 }
 
 function closeRightTab(id) {
-  rightTabs = rightTabs.filter((t) => t !== id);
-  if (rightActive === id) rightActive = rightTabs[rightTabs.length - 1] || null;
+  const tab = rightTabFor(id);
+  rightTabs = rightTabs.filter((t) => t !== tab);
+  if (rightActive === tab) rightActive = rightTabs[rightTabs.length - 1] || null;
   if (!rightTabs.length) rightCollapsed = true; // 最后一个标签关掉 → 面板收起
   renderRightPanel();
-  const closePrefs = { right_tabs: [...rightTabs], right_active: rightActive };
+  const closePrefs = { right_tabs: [...rightTabs], right_active: rightActiveView() };
   if (!NARROW_MQ.matches) closePrefs.right_collapsed = rightCollapsed ? 1 : 0;
   saveUiPrefs(closePrefs);
 }
@@ -11475,7 +11558,7 @@ async function refreshReview() {
         refreshReview();
         // 磁盘被回滚：文件树缓存失效（开着文件标签就直接刷新）
         filesLoaded = false;
-        if (rightActive === "files" && !rightPanel.classList.contains("hidden")) loadFiles(true);
+        if (rightViewVisible("files")) loadFiles(true);
       } catch (e) {
         rb.disabled = false;
         rb.textContent = "↩ 恢复";
@@ -11539,7 +11622,7 @@ function scheduleFilesRefresh() {
   if (filesRefreshTimer) clearTimeout(filesRefreshTimer);
   filesRefreshTimer = setTimeout(() => {
     filesRefreshTimer = 0;
-    if (rightActive === "files" && !rightPanel.classList.contains("hidden")) loadFiles(true);
+    if (rightViewVisible("files")) loadFiles(true);
   }, FILES_REFRESH_DEBOUNCE_MS);
 }
 
@@ -11963,7 +12046,7 @@ function onTaskFinished(data) {
   const label = { done: "完成", cancelled: "已取消", error: "失败" }[data.status] || data.status;
   addNotice(`后台子代理任务${label}（${data.agent_type || ""}）：${data.prompt || ""}`);
   offerTaskSummary(data);
-  if (rightActive === "tasks" && !rightPanel.classList.contains("hidden")) loadTasks();
+  if (rightViewVisible("tasks")) loadTasks();
 }
 
 // 任务做完且属于当前打开的会话 → 给「现在汇总」快捷按钮，点了以固定话术
@@ -12003,7 +12086,7 @@ document.getElementById("tasks-cancel").onclick = async () => {
 };
 // 面板打开期间轻量轮询（3s），关闭即停
 setInterval(() => {
-  if (rightActive === "tasks" && !rightPanel.classList.contains("hidden")) loadTasks();
+  if (rightViewVisible("tasks")) loadTasks();
 }, 3000);
 
 // —— 浏览器：iframe 预览（本地开发服务器 / 可内嵌网页） ——
@@ -12258,11 +12341,26 @@ async function initUiPrefs() {
       if (b.ok) petApplyPos(...petClampPos(prefs.pet_x, b.floor));
     }
   }
-  // 恢复右侧面板：上次打开了哪些标签、激活的是哪个、面板是否收起
-  rightTabs = (prefs.right_tabs || []).filter((t) => TAB_META[t]);
-  rightActive = rightTabs.includes(prefs.right_active)
-    ? prefs.right_active
-    : (rightTabs[rightTabs.length - 1] || null);
+  // 恢复右侧面板：上次打开了哪些标签、激活的是哪个、面板是否收起。
+  // right_tabs 只收容器标签；老 ui.json 里存的分段 id（todo / ptasks / cron /
+  // pipeline）在这里映射回所属标签，并把该分段一并还原——升级后打开的面板
+  // 与升级前看到的是同一页，不会退到默认分段。
+  rightTabs = [];
+  for (const t of prefs.right_tabs || []) {
+    const tab = rightTabFor(t);
+    if (!TAB_META[tab] || rightTabs.includes(tab)) continue;
+    rightTabs.push(tab);
+    if (TAB_VIEWS[tab] && t !== tab) rightView[tab] = t;
+  }
+  const activeTab = rightTabFor(prefs.right_active);
+  if (rightTabs.includes(activeTab)) {
+    rightActive = activeTab;
+    if (TAB_VIEWS[activeTab] && TAB_VIEWS[activeTab].includes(prefs.right_active)) {
+      rightView[activeTab] = prefs.right_active;
+    }
+  } else {
+    rightActive = rightTabs[rightTabs.length - 1] || null;
+  }
   rightCollapsed = prefs.right_collapsed === 1;
   if (NARROW_MQ.matches) rightCollapsed = true; // 手机启动一律收起覆盖抽屉，别让面板盖住对话区
   renderRightPanel();

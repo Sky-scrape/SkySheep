@@ -7407,10 +7407,15 @@ class ServerBackend:
         # 重启后回到同一个状态；上限给足任意合法 SQLite rowid
         "active_project": (0, 2_147_483_647),
     }
-    # 右侧面板：打开了哪些标签、激活的是哪个（id 白名单见前端 TAB_META）
+    # 右侧面板：打开了哪些标签、激活的是哪个（id 白名单见前端 TAB_META）。
+    # 标签分「容器」与「分段」两层：任务是子代理任务/任务清单/项目任务的容器，
+    # 自动化是定时任务/任务编排的容器。两层 id 都收——right_tabs 只写容器，但
+    # right_active 写的是分段 id，且旧 ui.json 里整份都是分段 id（前端按 TAB_OF
+    # 映射回容器）。漏收哪个，升级后面板就会静默少一个标签（ptasks/pipeline
+    # 在合并前就漏收过，一并补上）；terminal 是更早的终端标签，留着不碍事。
     RIGHT_TAB_IDS = (
-        "aux", "review", "terminal", "browser", "files",
-        "tasks", "todo", "agenda", "cron", "memory", "ext",
+        "aux", "review", "browser", "files", "tasks", "agenda", "auto", "memory", "ext",
+        "todo", "ptasks", "cron", "pipeline", "terminal",
     )
     # 会话标签恢复：session.tabs 存 sid 数组（与 tab_order 同款上限），
     # session.active 存激活的 sid。都在前端写（标签开/关/切换时），

@@ -2,12 +2,16 @@
  * SkySheep 桌面前端 —— 主题系统
  * 默认「纸墨」：设计语言源自《带节奏》Demo——纸面底 × 硬墨描边 × 铅字压印投影；
  * 另有青瓷 / 秋柿（浅色）与夜墨 / 黛夜 / 松烟（深色），见文件尾部的 [data-theme=…] 段。
+ * 纸墨的变量组同时挂在 :root 与 [data-theme="paper"] 上（见下方说明）。
  * 六套共用同一组变量槽位；--blue 是全局交互色（名字是历史遗留，各主题给它不同主色）。
  * 主题由 data-theme="主题id" 打在 <html> 上切换，跟随系统时浅色落纸墨、深色落夜墨。
  * ============================================================ */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-:root {
+/* 纸墨同时挂在 [data-theme="paper"] 上：设置页色板探针（app.js themeSwatchColors）
+   靠这个属性读各主题变量，纸墨若是裸 :root，探针会命中不了、继承当前主题的颜色 */
+:root,
+[data-theme="paper"] {
   color-scheme: light;       /* 原生弹层（datalist 候选/下拉/滚动条）按它配色，不声明会被深色系统画成黑底 */
   /* —— 纸 —— */
   --bg: #e8dfc7;             /* 桌面深纸 */
@@ -1509,12 +1513,35 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 #session-archive .link-btn svg { width: 14px; height: 14px; flex: 0 0 auto; }
 /* 设置模式下归档入口跟着会话区一起隐藏（它属于会话区，只留在对话模式侧栏） */
 #side-settings:not(.hidden) ~ #side-bottom #session-archive { display: none; }
+/* 归档弹窗：方框长宽固定（内容再多也不撑高弹窗），列表区自己滚、
+   批量操作条常驻在列表上方 */
+.modal-box:has(.archive-wrap) {
+  width: 560px; max-width: calc(100vw - 32px);
+  height: 520px; max-height: 82vh;
+  display: flex; flex-direction: column;
+}
+.modal-box:has(.archive-wrap) #modal-content { flex: 1; min-height: 0; display: flex; }
+.archive-wrap {
+  flex: 1; min-height: 0; width: 100%;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.archive-bulk { flex-shrink: 0; display: flex; align-items: center; gap: 10px; }
+.archive-bulk .bulk-spacer { flex: 1; }
+.archive-count { font-size: 12px; color: var(--dim); }
+.archive-pick {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; cursor: pointer; flex-shrink: 0;
+}
+.archive-pick input {
+  width: 15px; height: 15px; margin: 0;
+  accent-color: var(--blue); cursor: pointer;
+}
 .archive-list {
   display: flex; flex-direction: column; gap: 8px;
-  max-height: 55vh; overflow: auto; min-width: 320px;
+  flex: 1; min-height: 0; overflow: auto;
 }
 .archive-row {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
   border: 1px solid var(--line2); border-radius: var(--r-sm);
   padding: 8px 10px;
 }
@@ -1536,23 +1563,8 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 #session-list li.s-group:hover { color: var(--text); }
 #session-list li.s-group.active { background: var(--blue); color: var(--on-accent); }
 #session-list li.s-group .s-group-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-/* 经典视图底部常驻的「快聊」区块：组头多一个 ＋，手感同分组视图组头的 .pg-add
-   （默认隐藏、悬停/聚焦才现，避免常驻列表里多出一个一直在闪的按钮） */
-#session-list li.s-group.s-quick { margin-top: 10px; }
-#session-list li.s-group .s-quick-add {
-  flex-shrink: 0; border: none; background: none; cursor: pointer;
-  color: var(--dim); font-size: 13px; line-height: 1; font-weight: 700;
-  padding: 2px 7px; border-radius: var(--r-xs);
-  opacity: 0; transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
-}
-#session-list li.s-group:hover .s-quick-add,
-#session-list li.s-group .s-quick-add:focus { opacity: 1; }
-/* 空快聊：＋ 是唯一的建会话入口，常显（悬停才现的规则只适用于列表里已经有
-   会话、不缺入口的情形） */
-#session-list li.s-group.s-quick.is-empty .s-quick-add { opacity: 1; }
-#session-list li.s-group .s-quick-add:hover {
-  color: var(--accent); background: var(--accent-weak, rgba(30, 90, 168, .08));
-}
+/* 快聊提升为项目区一行后的历史样式（底部常驻区块）已移除，
+   分组视图的快聊组仍用 .pgroup-head 系列样式 */
 #session-list li .s-tags {
   display: flex; flex-wrap: wrap; gap: 4px;
   padding: 2px 0 0 2px; max-width: 100%;
@@ -2082,6 +2094,18 @@ select option[value=""] { color: var(--dim); font-style: italic; }
    而 ID 选择器优先级高于 UA 的 [hidden]{display:none}——不显式兜底会让两个视图同时显示 */
 #skill-list-view[hidden],
 #skill-manage-view[hidden] { display: none; }
+/* 技能详情页铺满可视区（技能广场移除后不再留半页空白）：页面撑满设置体、
+   详情卡吃满剩余高度、技能列表吃满卡片剩余高度并自己滚。
+   限定在 .settings-body 之下——右面板（#rp-page-ext）复用同一节点时是自动
+   高度，沿用 .settings-skill-list 的 420px 上限，不把面板撑爆 */
+.settings-body > #settings-page-skills { flex: 1; min-height: 0; }
+.settings-body #skill-manage-view { flex: 1; min-height: 0; }
+.settings-body #skill-manage-view > .settings-card {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
+.settings-body #skill-manage-view .settings-skill-list {
+  max-height: none; flex: 1; min-height: 0;
+}
 .settings-card {
   background: var(--card); border: 1.5px solid var(--line2); border-radius: var(--r-md);
   box-shadow: var(--shadow-sm); padding: 12px 14px;
@@ -2502,8 +2526,9 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   font-family: var(--font-mono); font-size: 12px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* 列表自身限高滚动：技能一多不再把整页撑长，头部说明与下面的技能广场保持可达
-   （与「本机现存」候选 .scan-list、#backup-list 同一限高范式）；
+/* 列表自身限高滚动：技能一多不再把整页撑长（与「本机现存」候选 .scan-list、
+   #backup-list 同一限高范式）；技能页内由下面的铺满规则接管：列表吃满卡片
+   剩余高度、自己滚，不再用固定 420px 上限。
    scrollbar-gutter 让滚动条出现时行宽不横跳。
    .list 是 flex 列，限高后子项会被压扁而不是溢出，必须关掉收缩让内容自然溢出
    （同 #project-list / #session-list 的处理，见那边注释） */
@@ -2638,7 +2663,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .skill-entry-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .skill-entry-go { flex-shrink: 0; color: var(--dim); font-size: 16px; line-height: 1; }
 .skill-entry:hover .skill-entry-go { color: var(--blue); }
-/* 技能广场折叠块 */
+/* 折叠块（内置工具清单等）：默认收起、展开查阅 */
 .market-fold { margin-top: 4px; }
 .market-fold > summary {
   cursor: pointer; font-size: 13px; font-weight: 700; color: var(--text);
@@ -2649,7 +2674,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .market-fold > summary::-webkit-details-marker { display: none; }
 .market-fold > summary::before { content: "▸ "; color: var(--dim); }
 .market-fold[open] > summary::before { content: "▾ "; }
-/* 内置工具清单折叠块：与技能广场同一套折叠样式，默认收起、展开查阅 */
+/* 内置工具清单折叠块：与上面的折叠块同一套样式 */
 #tool-list-fold { margin-top: 10px; }
 #tool-list-fold .settings-tool-list { margin-top: 8px; }
 .market-fold > summary:hover { border-color: var(--blue); color: var(--blue); }
@@ -2932,7 +2957,18 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 .project-list li { display: flex; align-items: center; gap: 7px; }
 .project-list .p-ico { width: 15px; height: 15px; flex-shrink: 0; color: var(--text2); }
 .project-list li.active .p-ico { color: var(--blue); }
-.project-list li .s-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* s-title 吸收行内余量：✕/＋ 悬浮按钮永远钉在行最右（否则跟着名称挤在左边） */
+.project-list li .s-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 项目行悬浮＋（新建对话）：手感同 .p-del，配色走主色；与分组视图组头的＋同一行为 */
+.project-list li .p-add {
+  flex-shrink: 0; border: none; background: none; cursor: pointer;
+  color: var(--dim); font-size: 13px; line-height: 1; font-weight: 700;
+  padding: 2px 7px; border-radius: var(--r-xs);
+  opacity: 0; transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+}
+.project-list li:hover .p-add,
+.project-list li .p-add:focus { opacity: 1; }
+.project-list li .p-add:hover { color: var(--accent); background: var(--accent-weak, rgba(30, 90, 168, .08)); }
 /* 项目行悬浮移除按钮（同会话行悬浮按钮的手感，红色示意删除） */
 .project-list li .p-del {
   flex-shrink: 0; border: none; background: none; cursor: pointer;
@@ -2942,6 +2978,11 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 }
 .project-list li:hover .p-del { opacity: 1; }
 .project-list li .p-del:hover { color: var(--reg); background: rgba(143, 29, 29, .08); }
+/* 快聊行（经典视图项目区末尾）：与真项目同款陈列；激活态与 .list li.active 同底色，
+   但它表示「正在看快聊」而非引擎当前项目（后者不会因此改变） */
+.project-list li.quick-row .p-ico { color: var(--dim); }
+.project-list li.quick-row.active .p-ico,
+.project-list li.quick-row.active .s-title { color: var(--blue); }
 
 /* ---------- 侧栏两种呈现（ui.json 的 sidebar_view） ----------
    classic = 项目/会话分成两区（上方原有样式，保留不删）；
@@ -2962,7 +3003,7 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 /* 全收状态下按钮转为「展开全部」，箭头随之翻转朝上 */
 .fold-all.expand svg { transform: rotate(180deg); }
 
-/* 分组视图：文件夹头一行（点名称切项目、点箭头折叠），会话条目缩进挂在其下 */
+/* 分组视图：文件夹头一行（整行点击展开/折叠，＋新建对话），会话条目缩进挂在其下 */
 #session-list.by-project li:not(.pgroup-head):not(.pgroup-more):not(.empty-hint) {
   margin-left: 15px;
 }
@@ -2974,12 +3015,10 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 #session-list li.pgroup-head .pg-name {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-#session-list li.pgroup-head .pg-chev {
-  flex: 0 0 auto; display: inline-flex; color: var(--dim);
-  transition: transform var(--dur-fast);
-}
-#session-list li.pgroup-head .pg-chev svg { width: 12px; height: 12px; }
-#session-list li.pgroup-head.open .pg-chev { transform: rotate(90deg); }
+/* 折叠态指示（箭头已移除，＋取代其位置）：有会话的组折叠时名称降透明度，
+   展开后恢复——组下有没有展开的会话行一眼可辨；空组本来无行可藏，不降 */
+#session-list li.pgroup-head:not(.open):not(.is-empty) .pg-name { opacity: .62; }
+#session-list li.pgroup-head:not(.open):not(.is-empty):hover .pg-name { opacity: 1; }
 #session-list li.pgroup-head.active, #session-list li.pgroup-head.active .p-ico { color: var(--blue); }
 /* 组头拖动排序：拖动中半透明，悬停目标的插入位置用上下缘实线指示 */
 #session-list li.pgroup-head.dragging { opacity: .45; }
@@ -3011,17 +3050,14 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 }
 #session-list li.pgroup-head:hover .pg-del { opacity: 1; }
 #session-list li.pgroup-head .pg-del:hover { color: var(--reg); background: rgba(143, 29, 29, .08); }
-/* 「任务」分组组头的 ＋：新建快聊对话（手感同 pg-del，配色走主色） */
+/* 组头的 ＋（新建对话）：常显——它已取代原折叠箭头成为组头唯一的右侧操作，
+   悬停才现会让「新建对话」入口难以发现（原箭头位置现在就是它） */
 #session-list li.pgroup-head .pg-add {
   flex-shrink: 0; border: none; background: none; cursor: pointer;
   color: var(--dim); font-size: 13px; line-height: 1; font-weight: 700;
   padding: 2px 7px; border-radius: var(--r-xs);
-  opacity: 0; transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+  transition: color var(--dur-fast), background var(--dur-fast);
 }
-#session-list li.pgroup-head:hover .pg-add,
-#session-list li.pgroup-head .pg-add:focus { opacity: 1; }
-/* 空组头（尤其快聊）：＋ 常显——空的时候它是唯一的建会话入口 */
-#session-list li.pgroup-head.is-empty .pg-add { opacity: 1; }
 #session-list li.pgroup-head .pg-add:hover { color: var(--accent); background: var(--accent-weak, rgba(30, 90, 168, .08)); }
 /* 「显示更多 / 收起」与「添加项目」行 */
 #session-list li.pgroup-more { color: var(--dim); font-size: 12px; }
@@ -3259,6 +3295,10 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 }
 #browser-url:focus { outline: none; }
 #browser-frame { flex: 1; width: 100%; border: 0; background: #fff; }
+/* 外网站点拒绝内嵌时的说明行：压缩到一行，不把 iframe 挤没 */
+.rp-browser-hint {
+  flex: 0 0 auto; padding: 5px 12px; border-top: 1px dashed var(--line2);
+}
 
 /* ============================================================
  * 对话区宠物：云朵小羊
@@ -3657,6 +3697,19 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
   margin-top: 10px; font-size: 12.5px; color: var(--text2);
 }
 .theme-auto-row label { display: inline-flex; align-items: center; gap: 6px; }
+/* 两个下拉走设置页纸面框同款（与上方主题卡、模型选择一致的硬墨描边 + 铅字投影）；
+   原生箭头保留（color-scheme 跟着主题深浅走），只收拾外框 */
+.theme-auto-row select {
+  background: var(--paper-raised); color: var(--text);
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
+  padding: 4px 8px; font-size: 12.5px; font-family: inherit; cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+.theme-auto-row select:hover { border-color: var(--blue); }
+.theme-auto-row select:focus {
+  outline: none; border-color: var(--blue);
+  box-shadow: 0 0 0 1.5px var(--blue), var(--shadow-sm);
+}
 
 /* ---------- 对话内查找条（Ctrl+F） ---------- */
 .find-bar {
@@ -3918,69 +3971,6 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
   font-size: 12.5px; color: var(--dim);
 }
 .channel-footer .channel-input { width: 84px; flex: 0 0 auto; text-align: center; }
-
-/* ---------- 设置页：技能广场 ---------- */
-/* 搜索栏：输入框占满，清空钮薄型贴右 */
-.market-search { display: flex; align-items: center; gap: 6px; }
-.market-search .modal-input { flex: 1; min-width: 0; }
-/* 自带的清除叉（WebKit/Edge 的 decoration）与旁边的手写 ✕ 按钮重复，只留一个 */
-.market-search input[type="search"]::-webkit-search-cancel-button,
-.market-search input[type="search"]::-webkit-search-decoration { -webkit-appearance: none; appearance: none; }
-.market-search .btn-ghost { flex-shrink: 0; padding: 6px 10px; }
-.market-count { font-size: 12px; color: var(--dim); margin: 8px 0 0; }
-/* 条目多了（内置 5 条 + 远程索引）给个高度上限，列表自己滚，
-   搜索框和计数行始终留在视野里 */
-.market-list {
-  display: flex; flex-direction: column; gap: 8px; margin-top: 6px;
-  max-height: min(52vh, 420px); overflow-y: auto; padding-right: 2px;
-}
-.market-item .mi-name mark,
-.market-item .mi-desc mark,
-.market-item .mi-author mark {
-  background: rgba(18, 87, 196, .18); color: var(--blue-deep);
-  border-radius: 2px; padding: 0 1px;
-}
-.market-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 11px; background: var(--paper-raised);
-  border: 1.5px solid var(--line2); border-radius: var(--r-sm);
-}
-.market-item .mi-main { flex: 1; min-width: 0; }
-.market-item .mi-name { font-weight: 700; font-size: 13.5px; }
-.market-item .mi-meta { display: block; font-size: 11px; color: var(--dim); margin-top: 1px; }
-.market-item .mi-desc {
-  display: block; font-size: 12.5px; color: var(--dim);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.market-item .mi-author { font-size: 11px; color: var(--dim); flex-shrink: 0; }
-.market-note { font-size: 12.5px; color: var(--gold); margin-top: 4px; }
-/* 工具行：安装范围选择靠左，「↻ 刷新」贴右 */
-.market-toolbar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-.market-scope { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--dim); }
-.market-scope select { font-size: 12.5px; padding: 4px 6px; }
-.market-toolbar #market-refresh { margin-left: auto; padding: 4px 10px; font-size: 12.5px; }
-/* 分类筛选标签：胶囊形，单选；选中态用主题蓝描边 */
-.market-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.market-chip {
-  border: 1px solid var(--line2); background: var(--paper-raised); color: var(--dim);
-  border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer;
-}
-.market-chip:hover { color: var(--blue); border-color: var(--blue); }
-.market-chip.active {
-  background: var(--blue-weak); color: var(--blue); border-color: var(--blue); font-weight: 600;
-}
-/* 卡片右侧按钮组：详情 + 安装/更新/已安装 */
-.market-item .mi-btns { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.market-item .mi-btns .btn-ghost[disabled] { opacity: .55; cursor: default; }
-.market-item .mi-btns .mi-update { color: var(--gold); border-color: var(--gold); font-weight: 600; }
-/* 详情弹窗里的 SKILL.md 原文 */
-.market-detail-pre {
-  max-height: 46vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
-  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
-  background: var(--paper-raised); border: 1px solid var(--line2);
-  border-radius: var(--r-sm); padding: 10px; margin: 8px 0 0;
-}
-.market-detail-src { word-break: break-all; margin-top: 8px; }
 
 /* ---------- 设置页：关于 · 更新检查 ---------- */
 .about-update { margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

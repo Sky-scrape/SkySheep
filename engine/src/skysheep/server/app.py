@@ -68,6 +68,8 @@ LOCAL_ONLY_METHODS = frozenset({
     "mcp.save_server", "mcp.import", "mcp.delete", "mcp.add_preset",
     # 停用/启用同样是服务配置面：远端停用会让本机 Agent 失去工具
     "mcp.set_enabled",
+    # 重连按已存配置重新拉起 stdio 命令进程，与「启动本机程序」同面
+    "mcp.reconnect",
     # 技能：正文直接进 system prompt
     "skills.install", "skills.toggle", "skills.scope", "skills.delete",
     # 新会话默认模型：与凭据无关但是服务配置面（ui.json 写入不算敏感，
@@ -355,11 +357,9 @@ def create_app(
         backend.stop_pipeline_loop()
         backend.stop_reminder_loop()
         backend.stop_memory_maintenance_loop()
+        # crash.flag 的清除在 backend.shutdown() 开头做：收尾链最后一环最容易
+        # 被截断（桌面壳 1.5s 上限、程序内更新的 os._exit），清在末尾等于没清
         await backend.shutdown()
-        try:
-            flag.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     app = FastAPI(title="SkySheep", lifespan=lifespan)
     # 测试与扩展从 app.state 取引擎句柄（create_app 的闭包变量外部不可见）
@@ -1353,8 +1353,13 @@ def create_app(
                     try:
                         result = await dispatch(method, params, emit, local=client_is_local)
                         # 跟踪连接当前交互的会话（B15 的事件隔离用）
-                        if method in ("session.new", "session.activate", "session.resume",
-                                      "session.fork", "session.truncate", "session.delete"):
+                        if method == "session.delete":
+                            # 删除后后端已自动切走：跟随 new_active（可能为 None）。
+                            # 删除的返回里没有 id 键，照下面的通用分支取会让跟踪
+                            # 永远停在已删会话上，之后收不到子代理等定向事件
+                            conn_state["session"] = (result or {}).get("new_active")
+                        elif method in ("session.new", "session.activate", "session.resume",
+                                        "session.fork", "session.truncate"):
                             sid = (result or {}).get("id")
                             if isinstance(sid, str) and sid:
                                 conn_state["session"] = sid

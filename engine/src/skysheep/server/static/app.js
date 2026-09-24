@@ -198,11 +198,32 @@ let reqSeq = 0;
 const pendingReplies = new Map();
 
 // ---------- 连接（WS 协议客户端） ----------
+let wsEverConnected = false; // 是否成功连上过至少一次（区分首次连接与断线重连）
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onopen = () => setConn(true);
-  ws.onclose = () => { setConn(false); setTimeout(connect, 1500); };
+  ws.onopen = () => {
+    setConn(true);
+    // 断线期间挂着的请求（没来得及发出去的）挪到新连接上补发
+    pendingReplies.forEach((p) => { if (!p.sent && p.send) p.send(); });
+    // 曾连上过又断开 → 现在恢复了：断线期间面板里的数据（日程/任务/文件树…）
+    // 可能已经变了，整体重拉一遍；首次连接不刷（boot/initUiPrefs 自己会拉）
+    if (wsEverConnected) reloadProjectPanels();
+    wsEverConnected = true;
+  };
+  ws.onclose = () => {
+    setConn(false);
+    // 断线清账：已经发出去的请求永远不会等到回包（新连接不认识旧 id），
+    // 就地报错让调用方的 finally / catch 走起来——否则像辅助对话的 auxBusy
+    // 会永远卡在 true，发送按钮从此没反应。还没发出去的留在表里等重连补发。
+    pendingReplies.forEach((p, id) => {
+      if (p.sent) {
+        pendingReplies.delete(id);
+        p.reject(new Error("连接已断开，请重试"));
+      }
+    });
+    setTimeout(connect, 1500);
+  };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
@@ -219,17 +240,22 @@ function connect() {
 function request(method, params = {}) {
   const id = "r" + (++reqSeq);
   return new Promise((resolve, reject) => {
-    pendingReplies.set(id, { resolve, reject });
-    const doSend = () => {
+    const entry = { resolve, reject, sent: false, send: null };
+    pendingReplies.set(id, entry);
+    // send 幂等：断线清账 / 重连补发 / 「等 open」监听三条路径都可能叫到它，
+    // 真正发出去的只许一次（重复发送会让后端把同一请求执行两遍）
+    entry.send = () => {
+      if (entry.sent || !pendingReplies.has(id)) return;
       try {
         ws.send(JSON.stringify({ id, method, params }));
+        entry.sent = true;
       } catch (e) {
         pendingReplies.delete(id);
         reject(e);
       }
     };
-    if (ws.readyState === WebSocket.OPEN) doSend();
-    else ws.addEventListener("open", doSend, { once: true }); // 连接就绪再发，避免首屏 boot 静默失败
+    if (ws.readyState === WebSocket.OPEN) entry.send();
+    else ws.addEventListener("open", entry.send, { once: true }); // 连接就绪再发，避免首屏 boot 静默失败
   });
 }
 
@@ -330,7 +356,8 @@ function renderTabs() {
     bar.appendChild(el);
   });
   // 标签栏尾部的 ＋ 新建：浏览器式页签的固定收尾。与侧栏「新建会话」/ Ctrl+N
-  // 同一个动作（startNewTab），只是把入口放到用户视线所在的标签栏上
+  // 同一个动作（newSessionFromHighlight：落在侧栏高亮的项目/快聊里），
+  // 只是把入口放到用户视线所在的标签栏上
   let plus = bar.querySelector(".tab-new");
   if (!plus) {
     plus = document.createElement("button");
@@ -339,7 +366,7 @@ function renderTabs() {
     plus.title = "新建会话（Ctrl+N）";
     plus.setAttribute("aria-label", "新建会话");
     plus.textContent = "＋";
-    plus.onclick = () => startNewTab();
+    plus.onclick = () => newSessionFromHighlight();
     bar.appendChild(plus);
   }
   // 方向键在标签间切换（激活即聚焦）；div 无原生键盘激活，Enter/空格补上。
@@ -570,6 +597,12 @@ function attachTabLog(tab) {
 
 async function activateTab(tab) {
   if (!tab) return;
+  // 切标签/点会话：分组视图里「点组头」借走的高亮到此交回活动会话所在组
+  // （没借过就不动，也不多画一下；早退路径补一次重画）
+  if (groupedClickGk != null) {
+    groupedClickGk = null;
+    if (tab === activeTab) refreshSessions();
+  }
   if (tab === activeTab) { attachTabLog(tab); return; }
   // 查找高亮挂在旧标签的 DOM 上：切标签先收掉，避免 mark 残留计数错乱
   if (findHits.length || !document.getElementById("find-bar").classList.contains("hidden")) {
@@ -580,6 +613,9 @@ async function activateTab(tab) {
   renderTabs();
   hidePermission();
   currentSessionId = tab.sid;
+  // 侧栏会话行选中态跟着活动标签走（与分组视图组头高亮同一来源）：
+  // 否则从侧栏点开 A 会话再切到快聊标签，组头高亮动了、行高亮还留在 A
+  activeSessionSid = tab.sid || null;
   // 后台标签从未渲染过历史（事件创建的）→ 拉一次历史；否则轻量激活。
   // 两种情形互斥：正在跑的标签不能去拉历史（会把流式内容盖掉），只做轻量激活。
   if (tab.needHistory && tab.sid && !tab.running) {
@@ -590,6 +626,12 @@ async function activateTab(tab) {
   if (tab.usage) setContextUsage(tab.usage.tokens, tab.usage.limit, tab);
   else setContextUsage(0, 0, tab); // 该标签还没发过消息：清掉读数并隐藏环，避免残留上一标签的数值
   if (tab.needsPerm && tab.permData) showPermission(tab.permData);
+  // 会话变了，右侧面板里「跟会话绑定」的页跟着换数据：审查页取的是后端当前
+  // 会话的检查点、任务清单取的是当前会话的 todo——不重拉就会拿上一个会话的
+  // 内容冒充本会话（工具栏还写着「本会话中 Agent 改过的文件」）。上面的
+  // activate / resume 与这两个请求同一条 WS 按序到达，后端看到的已是新会话。
+  if (rightTabs.includes("review")) loadRightTab("review");
+  if (rightTabs.includes("todo")) loadRightTab("todo");
   petPrevRunning = !!tab.running;
   petRefresh();
   refreshSessions();
@@ -693,6 +735,9 @@ function closeTab(tab) {
   const idx = chatTabs.indexOf(tab);
   if (idx < 0) return;
   if (tab.running && tab.sid) request("stop", { session_id: tab.sid }).catch(() => {});
+  // 关标签＝只把这张页签从对话页收掉，会话本身留着（侧栏仍在，随时点回来）。
+  // 删除会话是另一件事：统一走左侧会话行的 ⋯ →「删除会话」或底部「清理空
+  // 会话」，不在关标签时顺带删任何数据
   tab.logEl.remove();
   chatTabs.splice(idx, 1);
   if (activeTab === tab) {
@@ -706,33 +751,119 @@ function closeTab(tab) {
       activeTab = t;
       attachTabLog(t);
       currentSessionId = null;
+      activeSessionSid = null;
+      groupedClickGk = null;
       showWelcome();
       renderTabs();
+      refreshSessions(); // 侧栏组头高亮回落引擎当前项目（欢迎页无会话可跟）
     }
   } else renderTabs();
 }
 
-function startNewTab() {
-  // 已经站在一张空标签上就不再叠一张：连点「新建会话」/ Ctrl+N 之前会一直往上
-  // 堆「新会话」标签，每个都只是同一张欢迎页。直接复用它。
-  // 正在跑的无会话标签不算「空」——那是在办正事，不能把它的标签抽走。
-  if (isBlankTab(activeTab)) {
-    attachTabLog(activeTab);
+let creatingTab = false; // 防连点：session.new 在途时再点新建不再叠请求
+
+/** 新建会话标签。
+ *
+ *  原则统一：只要点击，就在当前高亮的项目下真正新建一个会话。persist=true
+ *  （默认）立即向后端落库——侧栏列表只陈列已落库的会话，不落库就永远不会
+ *  出现（用户报的「新建后侧栏没有新标签」正是这个错位）。发送首条消息时
+ *  send() 见 sid 已存在就直接用，欢迎页照旧。creatingTab 只挡「一次请求
+ *  还在路上」的连击，不是行为规则；连点会落下多个空会话，交给
+ *  「清理空会话」兜底。
+ *
+ *  persist=false：仅启动恢复时无可恢复会话用——保持懒创建（后端
+ *  open_initial_session 的同一取舍：启动不落库，免得每次启动都堆空会话），
+ *  发首条消息时才落。落库失败时也退回这条路径，只弹提示。 */
+async function startNewTab(persist = true) {
+  // 新建会话＝回到当前项目语境：「点组头」借来的高亮交回（新会话激活后跟它走）
+  groupedClickGk = null;
+  const blank = () => {
+    const t = newTabObj(null, "");
+    chatTabs.push(t);
+    activeTab = t;
+    attachTabLog(t);
     currentSessionId = null;
+    activeSessionSid = null;
     clearTodoPanel();
-    withTab(activeTab, showWelcome); // 重申欢迎页（用户可能在上面写过东西）
+    showWelcome();
     renderTabs();
-    return activeTab;
+    refreshSessions();
+    return t;
+  };
+  if (!persist) return blank();
+  if (creatingTab) return activeTab;
+  creatingTab = true;
+  try {
+    const s = await request("session.new", {});
+    const t = newTabObj(s.id, s.title || "");
+    chatTabs.push(t);
+    activeTab = t;
+    attachTabLog(t);
+    currentSessionId = s.id;
+    activeSessionSid = s.id;
+    clearTodoPanel();
+    showWelcome();
+    renderTabs();
+    // 新会话归属当前项目：列表切回本项目视图（哪怕之前在看快聊/远程），新行马上可见
+    if (classicViewGk != null) {
+      classicViewGk = null;
+      refreshProjects();
+    }
+    refreshSessions(); // 侧栏立即出现新会话行
+    return t;
+  } catch (e) {
+    const t = blank();
+    addNotice("会话创建失败，已先打开欢迎页：" + e.message);
+    return t;
+  } finally {
+    creatingTab = false;
   }
-  const t = newTabObj(null, "");
-  chatTabs.push(t);
-  activeTab = t;
-  attachTabLog(t);
-  currentSessionId = null;
-  clearTodoPanel();
-  showWelcome();
-  renderTabs();
-  return t;
+}
+
+/** 「新建会话」的落点＝侧栏项目区高亮的那一项（点哪行亮哪行，新会话就建哪）：
+      高亮快聊 → 新建快聊会话（列表不动，新行马上出现在快聊里）；
+      高亮其他真实项目 → 先切过去再新建（同组头 ＋）；
+      高亮「远程连接 / 其他」→ 没有本地工作目录，就地提示不建；
+      其余（当前项目 / 无所依）→ startNewTab 照旧在当前项目里建。
+    左上按钮 / Ctrl+N / 窄栏＋ / 标签栏＋ / 命令 /new 共用这一处；
+    组头与项目行自己的 ＋ 不走这里——它们本身就是明确落点。 */
+async function newSessionFromHighlight() {
+  const litKey = sidebarView === "grouped" ? lastGroupedHighlightKey : classicViewGk;
+  if (litKey === "quick") {
+    try {
+      const r = await request("session.new_task", {});
+      await openTabForSession(r.id, r.title);
+      refreshSessions();
+    } catch (e) { addNotice("新建快聊失败：" + e.message); }
+    return;
+  }
+  if (litKey === "loose") {
+    addNotice("「其他」里的会话属于已被移除的项目，不能在这里新建");
+    return;
+  }
+  if (litKey && String(litKey).startsWith("remote:")) { // 经典视图点亮的远程行
+    addNotice("「远程连接」的对话来自飞书/微信渠道，不能在这里新建");
+    return;
+  }
+  const projects = ((await request("project.list").catch(() => null)) || {}).projects || [];
+  const lit = projects.find((p) => litKey != null && String(p.id) === String(litKey));
+  if (lit && !lit.is_current) {
+    if (!lit.root_path) { // 「远程连接」固定项目：同经典视图远程行
+      addNotice("「远程连接」的对话来自飞书/微信渠道，不能在这里新建");
+      return;
+    }
+    try {
+      await request("project.switch", { path: lit.root_path });
+      await applyWorkspaceData(await fetchWorkspaceData());
+    } catch (e) {
+      addNotice("切换到该项目失败：" + e.message);
+      return;
+    }
+    startNewTab();
+    addNotice(`已切换到项目「${lit.name}」，新建对话`);
+    return;
+  }
+  startNewTab();
 }
 
 function showWelcome() {
@@ -1341,9 +1472,12 @@ function finishToolCard(data) {
   const tpath = String((card._toolInput || {}).path || "");
   const written = !data.is_error && tpath && (tname === "write_file" || tname === "generate_image");
   // Agent 落了文件：文件树缓存失效，防抖后刷新（连续写多个文件只在最后一次刷新），
-  // 用户切过去就能看到 Agent 刚写的文件，不用再手动点「刷新」
-  if (!data.is_error && (tname === "write_file" || tname === "edit_file")) {
+  // 用户切过去就能看到 Agent 刚写的文件，不用再手动点「刷新」；
+  // 审查页同理——新的改动轮次自动出现在列表里
+  if (!data.is_error && (tname === "write_file" || tname === "edit_file" ||
+      tname === "move_file" || tname === "delete_file" || tname === "make_dir")) {
     scheduleFilesRefresh();
+    scheduleReviewRefresh();
   }
   if (written && /\.(html?|png|jpe?g|webp|svg)$/i.test(tpath)) {
     const btn = document.createElement("button");
@@ -1565,6 +1699,17 @@ function clearTodoPanel() {
   if (empty) empty.classList.remove("hidden");
 }
 
+/** 拉当前会话的任务清单画一遍（chat.status 的 todos 字段，/todos 命令同源）。
+ *
+ *  todo_updated 事件只在 Agent 写清单时来；切会话 / 展开面板 / 恢复上次打开的
+ *  标签这些路径没有事件，不主动拉就会显示上一个会话的清单或一层空壳。 */
+async function loadTodoPanel() {
+  try {
+    const st = await request("chat.status");
+    renderTodoPanel(st.todos || []);
+  } catch (e) { /* 拉不到就保留现状（多为无项目/断线，别拿错误刷掉旧内容） */ }
+}
+
 // ---------- 项目任务（右侧「项目任务」页签；与项目绑定，删项目一并清掉） ----------
 
 let ptasksLoadedFor = null; // 记上次加载的项目名，切项目后强制重取
@@ -1768,8 +1913,12 @@ function finishEta(t, engineMs) {
 }
 
 function handleEvent(kind, data) {
-  // 多会话路由：事件带 session_id → 找到（或后台创建）对应标签再渲染
-  if (data && data.session_id) {
+  // 多会话路由：事件带 session_id → 找到（或后台创建）对应标签再渲染。
+  // session_updated 例外：它只是另一窗口「改名/归档/移动」等元数据操作的广播
+  // 回声，不承载轮次内容——为它开标签会把刚归档（或刚关掉标签）的会话原样
+  // 弹回标签栏（用户报的「归档后自动冒出一个新标签」正是它）。它的 case 自带
+  // 缓存更新与 refreshSessions，不需要 routeTab。
+  if (data && data.session_id && kind !== "session_updated") {
     routeTab = tabFor(data.session_id);
     if (!routeTab) {
       // 无绑定会话的运行中标签：说明这是它懒创建的会话，直接认领，避免重复建标签
@@ -1834,18 +1983,41 @@ function handleEvent(kind, data) {
       break;
     }
     case "mcp_updated": {
-      // MCP 后台连接完成/状态变化（启动不阻塞，连完推送）：设置页开着就刷新
-      if (settingsOpen) renderSettings().catch(() => {});
+      // MCP 后台连接完成/状态变化（启动不阻塞，连完推送）：设置页开着或
+      // MCP/Skills 标签开着都重绘——ext 页签的卡片是从设置页搬过去的同一份
+      // DOM，不刷就会一直显示旧的连接态
+      if (settingsOpen || rightTabs.includes("ext")) {
+        renderSettings().catch(() => {});
+      }
       break;
     }
     case "schedule_reminder":
       pushNotice("⏰ 日程提醒", data.title || "");
       showAgendaReminder(data);
+      break;
     case "session_updated": {
       if (data.session_id) {
-        sessionMeta[data.session_id] = { title: data.title || "" };
-        const t = tabFor(data.session_id);
-        if (t) { t.title = data.title || t.title; renderTabs(); }
+        if (data.deleted) {
+          // 其他窗口删了这个会话：摘掉本地缓存与打开的标签，列表随之刷新
+          delete sessionMeta[data.session_id];
+          const dead = tabFor(data.session_id);
+          if (dead) closeTab(dead);
+        } else {
+          if (data.archived === true) {
+            // 归档：侧栏行消失，上方标签一并收掉（与删除同一处置，但会话没删——
+            // 归档弹窗里恢复后重新点开即可）。收标签走 closeTab，标签集合与
+            // ui.json 的恢复列表由 renderTabs 同步写回，重启不会把归档标签还原。
+            const t = tabFor(data.session_id);
+            if (t) closeTab(t);
+          }
+          if (data.title) {
+            // 只在带标题时覆盖缓存：pin/移动/标签的广播不带新标题，
+            // 拿空串覆盖会把标签名抹成空白
+            sessionMeta[data.session_id] = { title: data.title };
+            const t = tabFor(data.session_id);
+            if (t) { t.title = data.title; renderTabs(); }
+          }
+        }
         refreshSessions();
       }
       break;
@@ -2025,6 +2197,12 @@ document.querySelectorAll("#permission-bar [data-decision]").forEach((btn) => {
 // ---------- 侧栏 ----------
 let sessionSearchActive = false; // 搜索结果展示期间，禁止列表刷新覆盖
 let activeSessionSid = null; // 侧栏里被点开的会话 id（两种视图共用）：列表因折叠/快照等重画后，选中高亮照它恢复
+// 经典视图选中的项目列表：null=当前项目；"quick"=快聊；"remote:<id>"=远程连接。
+// 点哪行亮哪行（项目区同时最多一行高亮）；会话区高亮独立、最多一条（sess-active）
+let classicViewGk = null;
+// 本机桌面端才拿得到跨项目会话列表（session.list all_projects）：首次探测后
+// 记住 true/false，远程端不再反复请求（false=项目区不放快聊/远程行）
+let classicQuickAvailable = null;
 
 async function refreshSessions(prefetched) {
   if (sessionSearchActive) return;
@@ -2038,6 +2216,39 @@ async function refreshSessions(prefetched) {
   // 经典视图同样按家族块（└/⑂ 子跟随父）+ 保存序排（键 = 当前项目 id，
   // 与分组视图共用 session_order）；classic 列表即当前项目，直接取
   const classicGk = bootSnap && bootSnap.project_id != null ? String(bootSnap.project_id) : null;
+  // 无项目态默认陈列快聊（会话区只可能是快聊）；已选远程连接时不覆盖。
+  // 远程客户端拿不到 quick_sessions（字段不下发），不强推快聊视图
+  if (classicGk == null && classicViewGk == null && Array.isArray(quick_sessions)) {
+    classicViewGk = "quick";
+  }
+  // 特殊列表（快聊 / 远程连接）：由项目行点击切换（见 refreshProjects）。
+  // 不随标签切换自动进退——高亮与陈列都只由「点哪行」决定
+  if (classicViewGk === "quick") {
+    // 无快聊对话时不摆空态提示（入口就在项目区的「快聊」行上，不必再教一遍）
+    renderPlainList(ul, Array.isArray(quick_sessions) ? quick_sessions : [], "quick", "");
+    const footer = document.getElementById("session-footer");
+    if (footer) { // 页脚统计是当前项目的，特殊列表下不展示也不残留
+      footer.classList.add("hidden");
+      footer.innerHTML = "";
+    }
+    renderRailSessions(sessions);
+    return;
+  }
+  if (classicViewGk && classicViewGk.startsWith("remote:")) {
+    // 「远程连接」列表：跨项目拉取后按项目过滤（本机桌面端才有 all_projects）
+    const rid = classicViewGk.slice("remote:".length);
+    const all = await request("session.list", { all_projects: 1 }).catch(() => null);
+    const rlist = ((all && all.sessions) || []).filter((s) => String(s.project_id) === rid);
+    renderPlainList(ul, rlist, classicViewGk,
+      "还没有渠道对话——在飞书/微信里给机器人发条消息就会出现在这里");
+    const footer = document.getElementById("session-footer");
+    if (footer) {
+      footer.classList.add("hidden");
+      footer.innerHTML = "";
+    }
+    renderRailSessions(sessions);
+    return;
+  }
   const classicList = classicGk != null ? orderedSessionList(sessions, classicGk) : sessions;
   if (classicGk != null) lastGroupedListByGroup.set(classicGk, classicList);
   // 按标签分组：有标签的会话归入对应组（可属多组），无标签的在「未分组」；
@@ -2080,48 +2291,25 @@ async function refreshSessions(prefetched) {
       ul.appendChild(li);
     });
   });
-  // 快聊区块放最后：它不受标签分组过滤影响，也不参与空列表的判断。
-  // 远程客户端拿不到 quick_sessions（字段都不下发）：不显示一个永远为空的区块
-  if (Array.isArray(quick_sessions)) renderQuickSection(ul, quick_sessions);
   renderSessionExtras({ empty_count, archived_count });
   renderRailSessions(sessions);
 }
 
-/** 经典视图底部的常驻「快聊」区块。
-
-    快聊会话的 project_id 是 NULL，而经典视图的会话列表只取当前项目，所以
-    它们在这里原本一个都看不到——只在分组视图与「全部项目」搜索里露面。
-    单开一节常驻列表末尾：不绑定文件夹、只想聊一句的对话有固定去处，与分组
-    视图的「快聊」组共用同一份数据与折叠状态（键都是 "quick"）。 */
-function renderQuickSection(ul, list) {
-  const st = groupState("quick"); // 与分组视图的快聊组共用折叠 / 显示更多记忆
-  const head = document.createElement("li");
-  // 空快聊时多一个 .is-empty：那时组头的 ＋ 是唯一的建会话入口，
-  // 必须常显（平时仍靠悬停才现，避免常驻列表里一直闪一个按钮）
-  head.className = "s-group s-quick" + (list.length ? "" : " is-empty");
-  head.innerHTML = '<span class="s-group-name">快聊</span>' +
-    '<button class="s-quick-add" title="新建快聊（不需要文件夹，随时能聊）">＋</button>';
-  head.title = "快聊 —— 不绑定任何文件夹的对话，点击展开/折叠";
-  head.querySelector(".s-quick-add").onclick = async (e) => {
-    e.stopPropagation();
-    const r = await request("session.new_task", {});
-    await openTabForSession(r.id, r.title);
-    refreshSessions();
-  };
-  head.onclick = () => {
-    st.open = !st.open;
-    refreshSessions();
-  };
-  ul.appendChild(head);
-  if (!st.open) return;
-  const ordered = orderedSessionList(list, "quick");
-  lastGroupedListByGroup.set("quick", ordered);
-  // 没快聊时只留组头（＋ 就在上面），不再补一行空提示
-  if (!ordered.length) return;
+/** 经典视图特殊列表（快聊 / 远程连接）的平铺陈列：无组头——项目区对应行
+    就是入口。展开/「显示更多」状态按 gk 独立记忆（键 "quick" / "remote:<id>"）。
+    不接拖动排序：经典视图的 commitSessionOrder 按整张列表收集会话 id，混入
+    特殊列表会把当前项目的拖动序污染（分组视图里的对应组仍可拖，那份顺序在
+    这里照常生效——orderedSessionList 会读偏好）。 */
+function renderPlainList(ul, list, gk, emptyHint) {
+  const st = groupState(gk);
+  const ordered = orderedSessionList(list, gk);
+  lastGroupedListByGroup.set(gk, ordered);
+  if (!ordered.length) {
+    // emptyHint 为空＝这个列表不摆空态提示（如快聊：入口就在项目区行上）
+    ul.innerHTML = emptyHint ? `<li class="empty-hint">${escapeHtml(emptyHint)}</li>` : "";
+    return;
+  }
   const visible = st.all ? ordered : ordered.slice(0, GROUP_PREVIEW);
-  // 不接拖动排序：经典视图的 commitSessionOrder 按整张列表收集会话 id，
-  // 快聊行混进去会把当前项目与快聊两个区块的顺序互相污染（分组视图里的
-  // 快聊组仍可拖，那份顺序在这里照常生效——orderedSessionList 会读偏好）
   visible.forEach((s) => ul.appendChild(renderSessionItem(s, ul)));
   if (ordered.length > visible.length) {
     const more = document.createElement("li");
@@ -2246,7 +2434,8 @@ function renderSessionItem(s, ul) {
     li.classList.add("sess-active");
     const t = openTabForSession(s.id, s.title);
     clearTodoPanel();
-    addNotice(`已恢复会话 ${s.title || s.id}`);
+    // 点的就是当前会话时不提示：反复点同一行不该反复弹「已恢复」
+    if (currentSessionId !== s.id) addNotice(`已恢复会话 ${s.title || s.id}`);
     if (t && !t.running) t.needHistory = false;
   };
   return li;
@@ -2258,6 +2447,13 @@ let sidebarView = "classic";
 let groupSeq = 0; // 渲染序号：两次并发的分组渲染，慢的那个回来后直接丢弃
 const projGroupState = new Map(); // 分组 key -> { open, all }：折叠与「显示更多」记忆，重渲染不丢
 let lastGroupedCurrentKey = null; // 上一次分组渲染时的当前项目 key：项目切换时自动展开新组（取代旧「当前置顶」）
+// 「点组头亮它」：组头高亮平时跟活动会话所在组（快聊会话亮快聊组）；点了
+// 某个组头后高亮先借给那个组（折叠/展开都算一次点击），切标签/点会话时交回。
+// 单值状态，同一时刻最多一个组头亮
+let groupedClickGk = null;
+// 上次分组渲染实际点亮的高亮 key（groupedClickGk || 活动会话所在组 || 当前
+// 项目）：与组头高亮同一来源——「新建会话」的落点也读它（newSessionFromHighlight）
+let lastGroupedHighlightKey = null;
 // 组内会话的自定义顺序（ui.json 的 session_order，偏好回包后由 initUiPrefs 填充）。
 // 键 = 组 key（字符串化项目 id），值 = 会话 id 数组（只记手动拖过的，新的照时间追加）
 let sessionOrderPrefs = {};
@@ -2362,6 +2558,8 @@ function applySidebarView() {
 
 document.getElementById("view-toggle").onclick = () => {
   sidebarView = sidebarView === "grouped" ? "classic" : "grouped";
+  classicViewGk = null; // 经典视图快聊态是视图内状态，切视图后随当前项目重置
+  groupedClickGk = null; // 分组视图「点组头」的高亮同样是视图内状态
   applySidebarView();
   saveUiPrefs({ sidebar_view: sidebarView });
   // 两个视图的列表渲染不同：切过去就重画；搜索词还在就按新视图重搜
@@ -2440,10 +2638,40 @@ async function refreshSessionsGrouped() {
     groupState(currentKey).open = true;
   }
   lastGroupedCurrentKey = currentKey;
+  // 组头高亮跟随「正在看的会话」所在组：快聊/远程连接的会话激活时引擎工作项目
+  // 不变（切目录才有意义），若高亮仍挂在当前项目上，「看到的组」与「高亮的组」
+  // 就对不上（用户报的「已切到快聊、高亮还在 A」）。没有活动会话（欢迎页/
+  // 空标签）回落引擎当前项目——欢迎页属于当前项目的工作上下文。切换/删除/
+  // 跨项目会话点击仍按 isCurrent（引擎当前）判定，高亮纯视觉。
+  // 活动会话不在本次列表（超 50 条被截/已归档）时同样回落。点了组头
+  // （groupedClickGk，见下）时高亮先借给点的那个组，切会话/切标签再交回。
+  const knownIds = new Set(projects.map((p) => String(p.id)));
+  const sidToGroup = new Map();
+  sessions.forEach((s) => {
+    sidToGroup.set(String(s.id),
+      s.project_id == null ? "quick"
+        : (knownIds.has(String(s.project_id)) ? String(s.project_id) : "loose"));
+  });
+  // 点了某个组头就先亮它（点哪行亮哪行）；那个组已不在（项目被移除、孤儿
+  // 清空）就丢弃，落回活动会话——免得整列一个都不亮
+  if (groupedClickGk != null) {
+    const looseNow = [...byProject.keys()].some(
+      (k) => k !== "quick" && !knownIds.has(String(k)));
+    const stillThere = groupedClickGk === "quick"
+      || (groupedClickGk === "loose" ? looseNow : knownIds.has(groupedClickGk));
+    if (!stillThere) groupedClickGk = null;
+  }
+  const activeSid = activeTab && activeTab.sid != null ? String(activeTab.sid)
+    : (currentSessionId != null ? String(currentSessionId) : null);
+  const highlightKey = groupedClickGk ||
+    (activeSid && sidToGroup.get(activeSid)) ||
+    (currentKey != null ? String(currentKey) : null);
+  lastGroupedHighlightKey = highlightKey; // 「新建会话」的落点＝这里点亮的那一项
   projects.forEach((p) => {
     renderProjectGroup(frag, {
       key: p.id, name: p.name, list: byProject.get(p.id) || [],
       isCurrent: !!p.is_current, rootPath: p.root_path || "", project: p,
+      isActive: String(p.id) === highlightKey,
     });
     byProject.delete(p.id);
   });
@@ -2457,6 +2685,7 @@ async function refreshSessionsGrouped() {
     renderProjectGroup(frag, {
       key: "quick", name: "快聊", list: byProject.get("quick") || [],
       isCurrent: false, rootPath: "", project: null,
+      isActive: highlightKey === "quick",
       headPlus: async () => {
         const r = await request("session.new_task", {});
         await openTabForSession(r.id, r.title);
@@ -2468,6 +2697,7 @@ async function refreshSessionsGrouped() {
     renderProjectGroup(frag, {
       key: "loose", name: "其他", list: loose,
       isCurrent: false, rootPath: "", project: null,
+      isActive: highlightKey === "loose",
     });
   }
   ul.innerHTML = "";
@@ -2477,41 +2707,66 @@ async function refreshSessionsGrouped() {
   syncFoldAllBtn();
 }
 
-function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, project, headPlus }) {
+function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, project, headPlus, isActive }) {
   const ul = document.getElementById("session-list");
   const st = groupState(key);
   const head = document.createElement("li");
-  // 空组头的 ＋ 常显（is-empty）：空的时候它是唯一的建会话入口；
-  // 有会话时仍靠悬停才现（与 .s-quick-add 同一套手势）
-  head.className = "pgroup-head" + (isCurrent ? " active" : "") +
+  // is-empty 保留：空组头样式钩子（无会话行可藏）；高亮（active）跟
+  // 「正在看的会话所在组」走（点组头时先借给点的那个组），isCurrent 只管切换/删除等逻辑
+  head.className = "pgroup-head" + (isActive ? " active" : "") +
     (st.open ? " open" : "") + (list.length ? "" : " is-empty");
   head.dataset.gkey = key; // 折叠全部/展开全部要靠它找回各组的状态
   head.innerHTML = FOLDER_SVG +
     `<span class="pg-name">${escapeHtml(name)}</span>` +
-    (headPlus
-      ? '<button class="pg-add" title="新建快聊（不需要文件夹，随时能聊）">＋</button>' : "") +
     // 「远程连接」固定项目（无真实目录）不提供删除
     (project && rootPath
       ? `<button class="pg-del" title="${isCurrent ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目"}">✕</button>` : "") +
-    '<span class="pg-chev"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
-    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-    '<path d="M6 4l4 4-4 4"/></svg></span>';
-  head.title = `${name} —— 点击展开/折叠该项目下的会话`;
+    // 兜底组「其他」（project=null 且非快聊）不提供新建：那些会话本属某项目，
+    // 只是项目被移除后成了孤儿，新建无意义
+    (headPlus || project
+      ? `<button class="pg-add" title="${headPlus ? "新建快聊（不需要文件夹，随时能聊）" : "新建对话"}">＋</button>` : "");
+  // 组头交互：整行点击展开/折叠；右侧＋新建对话（箭头已移除，展开态靠组下
+  // 会话行本身可见）。＋行为按组分流：快聊保持原 headPlus；当前项目=新标签
+  // （发送第一条消息时才落库，见 create_task_chat）；其他项目先切过去再新建；
+  // 远程连接没有工作目录，打开它名下最近的对话。
+  head.title = `${name} —— 点击展开/折叠该项目下的会话；点＋新建对话`;
   const addBtn = head.querySelector(".pg-add");
-  if (addBtn) addBtn.onclick = (e) => { e.stopPropagation(); headPlus(); };
-  // 整行点击都只做展开/折叠（切换项目走「点该项目下的会话」或经典视图）
+  if (addBtn) {
+    addBtn.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        if (headPlus) {
+          // 快聊组：沿用自带的新建流程
+          await headPlus();
+        } else if (isCurrent) {
+          // 当前项目：立即落库一个新会话（无需先切；startNewTab 自带侧栏刷新）
+          startNewTab();
+        } else if (rootPath) {
+          // 其他项目：先切工作项目再新建（applyWorkspaceData 会重画侧栏）
+          await request("project.switch", { path: rootPath });
+          await applyWorkspaceData(await fetchWorkspaceData());
+          startNewTab();
+          addNotice(`已切换到项目「${name}」，新建对话`);
+        } else {
+          // 远程连接：无工作目录，打开最近的渠道对话
+          await switchToGroupProject(project, name, rootPath);
+        }
+      } catch (e2) {
+        addNotice("新建对话失败：" + e2.message);
+      }
+    };
+  }
+  // 行点击＝展开/折叠＋把高亮收过来（点哪行亮哪行；切换项目走经典视图或会话行；
+  // ＋/✕ 自行 stopPropagation）
   head.onclick = () => {
     st.open = !st.open;
+    groupedClickGk = String(key);
     refreshSessionsGrouped();
   };
-  head.querySelector(".pg-chev").onclick = (e) => {
-    e.stopPropagation();
-    st.open = !st.open;
-    refreshSessionsGrouped();
-  };
+  // 拖动与点击是两套手势：拖组头换位仍走整行 dragstart，不受行点击影响
+  if (project) wireGroupDrag(head, key);
   const del = head.querySelector(".pg-del");
   if (del) del.onclick = (e) => { e.stopPropagation(); deleteProjectModal(project); };
-  if (project) wireGroupDrag(head, key);
   frag.appendChild(head);
   if (!st.open) return;
   const visible = st.all ? list : list.slice(0, GROUP_PREVIEW);
@@ -2613,6 +2868,30 @@ wireListDrag.active = null;
 function dragHalfPos(e, el) {
   const rect = el.getBoundingClientRect();
   return e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+/** 分组视图组头＋（远程连接分支用）：固定项目不可切工作目录，打开它名下
+    最近的会话——与经典视图点「远程连接」同一行为。 */
+async function switchToGroupProject(project, name, rootPath) {
+  if (!rootPath) {
+    // 远程连接：无真实目录，切工作目录无从谈起，直接开最近的渠道会话
+    const r = await request("session.list", { all_projects: 1 }).catch(() => null);
+    const list = ((r && r.sessions) || [])
+      .filter((s) => s.project_id === project.id)
+      .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    if (!list.length) {
+      addNotice("「远程连接」还没有对话——在飞书/微信里给机器人发条消息就会出现在这里");
+      return;
+    }
+    await openTabForSession(list[0].id, list[0].title);
+    refreshSessionsGrouped();
+    return;
+  }
+  try {
+    await switchProject(rootPath);
+  } catch (e) {
+    addNotice("切换失败: " + e.message);
+  }
 }
 
 /** 给组头接上拖拽（分组视图）。head 的点击行为（折叠）不受影响：拖拽与点击是两套手势。 */
@@ -2767,6 +3046,23 @@ function exportSession(s) {
 async function openArchiveModal() {
   const r = await request("session.list_archived");
   const list = r.sessions || [];
+  // 弹窗固定长宽（CSS :has(.archive-wrap)），列表区自己滚；批量操作条常驻列表上方
+  const wrap = document.createElement("div");
+  wrap.className = "archive-wrap";
+  const bulk = document.createElement("div");
+  bulk.className = "archive-bulk";
+  bulk.innerHTML =
+    '<label class="archive-pick"><input type="checkbox" data-f="all">全选</label>' +
+    '<span class="archive-count" data-f="count">已选 0</span>' +
+    '<span class="bulk-spacer"></span>';
+  const restoreSel = document.createElement("button");
+  restoreSel.className = "rp-mini";
+  restoreSel.textContent = "恢复所选";
+  const delSel = document.createElement("button");
+  delSel.className = "rp-mini danger";
+  delSel.textContent = "删除所选";
+  bulk.appendChild(restoreSel);
+  bulk.appendChild(delSel);
   const box = document.createElement("div");
   box.className = "archive-list";
   if (!list.length) {
@@ -2775,12 +3071,70 @@ async function openArchiveModal() {
   const closeIfEmpty = () => {
     if (!box.querySelector(".archive-row")) { hideModal(); refreshSessions(); }
   };
+  const rowsOf = () => [...box.querySelectorAll(".archive-row")];
+  const pickedOf = () =>
+    rowsOf().filter((el) => el.querySelector(".archive-pick input").checked);
+  let armedBatch = false; // 批量删除的二次确认：选择一变就要求重新确认
+  const syncBulk = () => {
+    const total = rowsOf().length;
+    const n = pickedOf().length;
+    const all = bulk.querySelector('[data-f="all"]');
+    bulk.querySelector('[data-f="count"]').textContent = `已选 ${n}`;
+    all.checked = total > 0 && n === total;
+    all.indeterminate = n > 0 && n < total;
+    armedBatch = false;
+    delSel.textContent = n ? `删除所选（${n}）` : "删除所选";
+    restoreSel.textContent = n ? `恢复所选（${n}）` : "恢复所选";
+  };
+  bulk.querySelector('[data-f="all"]').onchange = (e) => {
+    rowsOf().forEach((el) => { el.querySelector(".archive-pick input").checked = e.target.checked; });
+    syncBulk();
+  };
+  restoreSel.onclick = async () => {
+    const rows = pickedOf();
+    if (!rows.length) { addNotice("先勾选要恢复的会话"); return; }
+    let ok = 0;
+    for (const el of rows) {
+      try {
+        await request("session.archive", { id: el.dataset.sid, archived: false });
+        ok += 1;
+        el.remove();
+      } catch (e) { addNotice("恢复失败: " + e.message); }
+    }
+    if (ok) addNotice(`已恢复 ${ok} 个会话`);
+    syncBulk();
+    closeIfEmpty();
+  };
+  delSel.onclick = async () => {
+    const rows = pickedOf();
+    if (!rows.length) { addNotice("先勾选要删除的会话"); return; }
+    if (!armedBatch) { // 与单行删除同一套「确认删除」两步手感
+      armedBatch = true;
+      delSel.textContent = `确认删除 ${rows.length} 个？`;
+      return;
+    }
+    armedBatch = false;
+    let ok = 0;
+    for (const el of rows) {
+      try {
+        await request("session.delete", { id: el.dataset.sid });
+        ok += 1;
+        el.remove();
+      } catch (e) { addNotice("删除失败: " + e.message); }
+    }
+    if (ok) addNotice(`已删除 ${ok} 个会话`);
+    syncBulk();
+    closeIfEmpty();
+  };
   list.forEach((s) => {
     const row = document.createElement("div");
     row.className = "archive-row";
+    row.dataset.sid = s.id;
     row.innerHTML =
+      '<label class="archive-pick"><input type="checkbox"></label>' +
       `<div class="archive-main"><b>${escapeHtml(s.title || "(未命名)")}</b>` +
       `<span class="archive-time">最近活跃：${fmtRuleAge(s.updated_at)}</span></div>`;
+    row.querySelector("input").onchange = syncBulk;
     const ops = document.createElement("div");
     ops.className = "archive-ops";
     const restore = document.createElement("button");
@@ -2790,6 +3144,7 @@ async function openArchiveModal() {
       await request("session.archive", { id: s.id, archived: false });
       addNotice(`已恢复「${s.title || "(未命名)"}」`);
       row.remove();
+      syncBulk();
       closeIfEmpty();
     };
     const del = document.createElement("button");
@@ -2802,6 +3157,7 @@ async function openArchiveModal() {
       catch (e) { addNotice("删除失败: " + e.message); return; }
       addNotice(`已删除「${s.title || "(未命名)"}」`);
       row.remove();
+      syncBulk();
       closeIfEmpty();
     };
     ops.appendChild(restore);
@@ -2809,7 +3165,10 @@ async function openArchiveModal() {
     row.appendChild(ops);
     box.appendChild(row);
   });
-  showModal("归档会话", box, async () => {}, "关闭");
+  if (list.length) wrap.appendChild(bulk); // 无条目时不摆批量操作条
+  wrap.appendChild(box);
+  syncBulk();
+  showModal("归档会话", wrap, async () => {}, "关闭");
 }
 
 // ---------- 会话搜索（标题 + 消息全文，对标 Claude Code /resume 检索） ----------
@@ -2902,6 +3261,7 @@ function svgIcon(name) {
     rename: '<path d="M11.2 2.4l2.4 2.4L6 12.4l-3.2.8.8-3.2 7.6-7.6z"/>',
     trash: '<path d="M2.5 4h11M6.5 4V2.8h3V4M4.2 4l.6 9h6.4l.6-9"/><path d="M6.6 6.5v4.5M9.4 6.5v4.5"/>',
     archive: '<path d="M2.5 2.8h11v2.4h-11z"/><path d="M3.6 5.2v7.1a.8.8 0 0 0 .8.8h7.2a.8.8 0 0 0 .8-.8V5.2"/><path d="M6.3 8.1h3.4"/>',
+    tag: '<path d="M2.5 3.5h4.4l6.6 6.6-4.4 4.4-6.6-6.6z"/><circle cx="5.8" cy="5.8" r="1"/>',
   };
   return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"' +
     ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + P[name] + "</svg>";
@@ -2920,7 +3280,19 @@ function showSessionMenu(s, li, pos) {
         refreshSessions();
       },
     },
+    { icon: "tag", label: "编辑标签", act: () => editSessionTags(s) },
     { icon: "move", label: "迁移到其他项目", act: () => moveSessionModal(s) },
+    {
+      icon: "archive",
+      label: s.archived ? "取消归档" : "归档会话",
+      act: async () => {
+        await request("session.archive", { id: s.id, archived: !s.archived });
+        addNotice(s.archived
+          ? `已恢复「${s.title || "(未命名)"}」`
+          : `已归档「${s.title || "(未命名)"}」，点侧栏底部「归档会话」可找回`);
+        refreshSessions();
+      },
+    },
     { icon: "rename", label: "重命名", act: () => startInlineRename(s, li) },
     { icon: "trash", label: "删除会话", danger: true, act: () => deleteSessionModal(s) },
   ];
@@ -2981,6 +3353,7 @@ function startTabRename(t, el) {
   input.type = "text";
   input.className = "rename-inline tab-rename";
   input.value = t.title || "";
+  input.maxLength = 80;
   input.placeholder = "会话名称";
   // 页签可拖动排序（draggable）：输入框里拖选文本会被当成拖页签，改名期间先关掉
   const wasDraggable = el.draggable;
@@ -3080,6 +3453,7 @@ function startInlineRename(s, li) {
   input.type = "text";
   input.className = "rename-inline";
   input.value = s.title || "";
+  input.maxLength = 80;
   input.placeholder = "会话名称";
   titleEl.replaceWith(input);
   input.focus();
@@ -3202,13 +3576,19 @@ async function moveSessionModal(s) {
         `<label class="move-opt"><input type="radio" name="move-target" value="${p.id}"> <b>${escapeHtml(p.name)}</b> <span class="dim small">${escapeHtml(p.root_path)}</span></label>`
     )
     .join("");
+  // 快聊也是合法目标（后端 project_id=None）：不属于任何项目的会话已在快聊，不重复给入口
+  const quickOpt = s.project_id == null ? "" :
+    '<label class="move-opt"><input type="radio" name="move-target" value="quick"> <b>快聊</b> <span class="dim small">不绑定文件夹的对话区</span></label>';
   box.innerHTML = `
-    <p class="dim small">把会话移动到其他项目（移走后可在对应项目的会话列表中找到）：</p>
-    <div class="move-list">${options || '<p class="dim small">暂无其他项目——先在其他目录启动一次 SkySheep 即可创建。</p>'}</div>`;
+    <p class="dim small">把会话移动到其他项目或快聊（移走后可在对应列表中找到）：</p>
+    <div class="move-list">${quickOpt}${options || '<p class="dim small">暂无其他项目——先在其他目录启动一次 SkySheep 即可创建。</p>'}</div>`;
   showModal("移动会话", box, async () => {
     const checked = box.querySelector("input[name=move-target]:checked");
     if (!checked) throw new Error("请先选择目标项目");
-    const r = await request("session.move", { id: s.id, project_id: Number(checked.value) });
+    const r = await request("session.move", {
+      id: s.id,
+      project_id: checked.value === "quick" ? null : Number(checked.value),
+    });
     if (r.switched_to) {
       addNotice(`会话已移动，已切换到「${r.switched_to.title || "(未命名)"}」`);
     } else {
@@ -4156,7 +4536,7 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
     openTabForSession(snap.session.id, snap.session.title,
                       { withMessages: snap.session.messages || [] });
   } else {
-    startNewTab();
+    startNewTab(false); // 启动无可恢复会话：只开欢迎页，不落库（发首条消息时才建）
   }
   // 会话列表与项目列表一起画（数据已在手，不会出现空列表帧）
   await Promise.allSettled([
@@ -4426,6 +4806,8 @@ function resetWorkspaceState() {
 
   // —— 会话列表与搜索 ——
   sessionSearchActive = false;
+  classicViewGk = null; // 旧项目“正在看快聊”的状态随切项目作废
+  groupedClickGk = null; // 分组视图「点组头」的落点也按旧项目作废
   searchEl.value = "";
   document.getElementById("session-list").innerHTML = "";
 
@@ -4470,6 +4852,19 @@ function resetProjectPanels() {
   if (reviewDiff) reviewDiff.classList.add("hidden");
   const preview = document.getElementById("files-preview");
   if (preview) preview.classList.add("hidden");
+  // 浏览器预览若停在本项目的 /preview 相对地址上：切项目后同一路径已是新项目的
+  // 文件（或 404），留着只会「看着是旧页面、实际已是别的东西」。收回空态最诚实。
+  {
+    const frame = document.getElementById("browser-frame");
+    const empty = document.getElementById("browser-empty");
+    if (frame && empty && (frame.getAttribute("src") || "").startsWith(location.origin + "/preview")) {
+      frame.removeAttribute("src");
+      frame.classList.add("hidden");
+      empty.classList.remove("hidden");
+      const urlBox = document.getElementById("browser-url");
+      if (urlBox) urlBox.value = "";
+    }
+  }
   // 终端：命令是在项目目录里跑的，旧项目的输出与运行态一并作废
   resetTermTabs();
 }
@@ -4510,17 +4905,24 @@ async function refreshProjects(prefetched) {
   if (sec) sec.classList.toggle("empty", !projects.length);
   if (!projects.length) {
     applySidebarView(); // 会话区的空态文案也跟着变，与项目区同帧
+    await appendQuickRow(ul); // 无项目态：项目区只剩快聊一行（快聊是一等入口）
     return;
   }
   projects.forEach((p) => {
     const li = document.createElement("li");
-    if (p.is_current) li.classList.add("active");
+    const remote = !p.root_path;
+    // 高亮唯一（项目区同时最多一行亮）：看「项目列表」时亮当前项目；看
+    // 「远程连接」列表时亮它；看快聊时亮快聊行（见 appendQuickRow）。
+    // classicViewGk 由点击决定；is_current 仍用于切换/删除等逻辑判定
+    if (remote ? classicViewGk === "remote:" + p.id
+               : (p.is_current && classicViewGk == null)) {
+      li.classList.add("active");
+    }
     li.innerHTML = FOLDER_SVG + `<span class="s-title">${escapeHtml(p.name)}</span>`;
     // 「远程连接」固定项目：无真实目录（root_path 报空），不可切换/删除，
-    // 它名下是飞书/微信等渠道的对话——点名称不切项目
-    const remote = !p.root_path;
+    // 它名下是飞书/微信等渠道的对话——点它陈列这组对话，不切工作目录
     li.title = remote
-      ? "远程连接 —— 飞书/微信等渠道的对话都归在这里（固定项目，不可切换）；点击打开最近的对话"
+      ? "远程连接 —— 飞书/微信等渠道的对话都归在这里（固定项目，不可切换）；点击查看它的对话"
       : p.root_path + (p.is_current ? "（当前项目）" : "—— 点击切换到这个项目");
     if (remote) li.classList.add("remote-fixed");
     // 拖动排序：与分组视图共用 project_order（project.list 已按它返回）
@@ -4542,22 +4944,47 @@ async function refreshProjects(prefetched) {
       };
       li.appendChild(del);
     }
-    li.onclick = async () => {
-      if (p.is_current) return;
-      if (remote) {
-        // 「远程连接」不可切换工作目录：点它打开该项目里最近的会话
-        // （没有就提示去渠道里发一条——飞书/微信来的对话会出现在这里）
-        const r = await request("session.list", { all_projects: 1 }).catch(() => null);
-        const list = ((r && r.sessions) || [])
-          .filter((s) => s.project_id === p.id)
-          .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-        if (!list.length) {
-          addNotice("「远程连接」还没有对话——在飞书/微信里给机器人发条消息就会出现在这里");
-          return;
+    // 悬浮＋（新建对话）：与分组视图组头的＋同一行为——当前项目=新标签，
+    // 其他项目=先切过去再新建；远程连接无工作目录，不提供（行点击已能
+    // 打开最近对话，两个入口重复）。与 ✕ 同靠悬停才现，不挤常驻空间
+    if (!remote) {
+      const add = document.createElement("button");
+      add.className = "p-add";
+      add.textContent = "＋";
+      add.title = p.is_current ? "新建对话" : "切换到该项目并新建对话";
+      add.onclick = async (e) => {
+        e.stopPropagation();
+        try {
+          if (!p.is_current) {
+            await request("project.switch", { path: p.root_path });
+            await applyWorkspaceData(await fetchWorkspaceData());
+            addNotice(`已切换到项目「${p.name}」，新建对话`);
+          }
+          startNewTab(); // 自带侧栏刷新
+        } catch (e2) {
+          addNotice("新建对话失败：" + e2.message);
         }
-        await openTabForSession(list[0].id, list[0].title);
+      };
+      li.appendChild(add);
+    }
+    li.onclick = async () => {
+      if (remote) {
+        // 「远程连接」固定项目：点它=高亮它并陈列渠道对话（不改工作目录）
+        classicViewGk = "remote:" + p.id;
+        refreshProjects();
+        refreshSessions();
         return;
       }
+      if (p.is_current) {
+        // 当前项目：点它=高亮它并回到本项目会话列表（从快聊/远程列表切回）
+        if (classicViewGk != null) {
+          classicViewGk = null;
+          refreshProjects();
+          refreshSessions();
+        }
+        return;
+      }
+      // 其他项目：切换过去（切完即成为当前项目、高亮它）
       try {
         await switchProject(p.root_path);
       } catch (e) {
@@ -4566,6 +4993,52 @@ async function refreshProjects(prefetched) {
     };
     ul.appendChild(li);
   });
+  await appendQuickRow(ul);
+}
+
+/** 项目区末尾的「快聊」行：不绑文件夹的对话在这里当项目陈列，点它高亮并在
+    会话区陈列快聊列表（不改引擎工作项目，同分组视图的快聊组语义）。悬浮＋新建
+    快聊；高亮唯一——看快聊时项目行不亮，回项目列表点项目行。探测只发一次请求：
+    本机桌面端才拿得到跨项目会话列表，远程端记住不可用、不放这行。 */
+async function appendQuickRow(ul) {
+  if (classicQuickAvailable == null) {
+    classicQuickAvailable = await request("session.list", { all_projects: 1 })
+      .then((r) => Array.isArray(r && r.sessions))
+      .catch(() => false);
+  }
+  if (!classicQuickAvailable) return;
+  // 无项目态：会话区只可能是快聊，快聊行直接算选中（未选远程时）；否则跟 classicViewGk 走
+  const noProject = !(bootSnap && bootSnap.project_id != null);
+  const quickActive = classicViewGk === "quick" || (noProject && classicViewGk == null);
+  const li = document.createElement("li");
+  if (quickActive) li.classList.add("active", "quick-row");
+  else li.classList.add("quick-row");
+  li.innerHTML = FOLDER_SVG + '<span class="s-title">快聊</span>';
+  li.title = "快聊 —— 不绑定任何文件夹的对话；点击高亮并查看快聊列表，点＋新建";
+  const add = document.createElement("button");
+  add.className = "p-add";
+  add.textContent = "＋";
+  add.title = "新建快聊（不需要文件夹，随时能聊）";
+  add.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      const r = await request("session.new_task", {});
+      classicViewGk = "quick"; // 新建的快聊会话在快聊列表里看
+      await openTabForSession(r.id, r.title);
+      refreshProjects();
+      refreshSessions();
+    } catch (e2) {
+      addNotice("新建快聊失败：" + e2.message);
+    }
+  };
+  li.appendChild(add);
+  li.onclick = () => {
+    // 点它=高亮快聊并陈列快聊列表（回项目列表点任一项目行）
+    classicViewGk = "quick";
+    refreshProjects();
+    refreshSessions();
+  };
+  ul.appendChild(li);
 }
 
 // 删除项目：确认后连带删掉它的会话与白名单（磁盘文件夹不动）
@@ -5379,8 +5852,10 @@ async function send() {
       tab.sid = s.id;
       tab.title = tab.title || text.slice(0, 20) || "新会话";
       currentSessionId = s.id;
+      activeSessionSid = s.id;
       if (tab.logEl.querySelector(".welcome")) tab.logEl.innerHTML = ""; // 清掉欢迎页
       renderTabs();
+      refreshSessions(); // 侧栏立即出现新会话行（启动欢迎页首发消息的懒创建路径）
       tab.firstSend = !preNamed; // 预命名过：首轮不自动起标题（尊重用户命名）
     } catch (e) {
       addNotice("新建会话失败: " + e.message);
@@ -6274,8 +6749,7 @@ async function execSlash(cmd) {
         "更多说明点右上角「？」看帮助。");
       break;
     case "/new": {
-      startNewTab();
-      refreshSessions();
+      newSessionFromHighlight();
       break;
     }
     case "/compact": {
@@ -6311,7 +6785,7 @@ async function execSlash(cmd) {
         addNotice("当前没有任务清单。给 Agent 一个多步任务，它会用 todo_write 维护步骤。");
         break;
       }
-      const icon = { pending: "○", in_progress: "◐", done: "●" };
+      const icon = { pending: "○", in_progress: "◐", completed: "●" };
       addNotice("任务清单：\n" + r.todos.map((t) => `${icon[t.status] || "○"} ${t.content}`).join("\n"));
       break;
     }
@@ -6448,7 +6922,7 @@ document.getElementById("input").addEventListener("keydown", (e) => {
     if (!e.shiftKey) { e.preventDefault(); send(); }
   }
 });
-document.getElementById("btn-new").onclick = () => { startNewTab(); refreshSessions(); };
+document.getElementById("btn-new").onclick = () => newSessionFromHighlight();
 window.addEventListener("keydown", (e) => {
   if (!e.ctrlKey && !e.metaKey) {
     // Esc 停止运行（设置页/弹窗打开时不劫持——它们有自己的 Esc 语义）
@@ -7564,6 +8038,9 @@ async function loadCron() {
     };
     ops.querySelector('[data-op="del"]').onclick = async (e) => {
       e.stopPropagation();
+      if (!(await confirmModal("删除定时任务",
+        `<p>确定删除定时任务 <b>${escapeHtml(t.name)}</b> 吗？</p>` +
+        `<p class="dim small">到点不再运行；历史配置不可恢复。</p>`, "删除"))) return;
       try { await request("cron.delete", { id: t.id }); }
       catch (err) { addNotice("删除失败: " + err.message); }
       await loadCron();
@@ -7795,8 +8272,10 @@ async function loadPipelines() {
   try {
     pipes = (await request("pipeline.list")).pipelines || [];
   } catch (e) {
-    document.getElementById("pipeline-list").innerHTML =
-      `<li class="dim small" style="padding:6px 10px">加载失败：${escapeHtml(e.message)}</li>`;
+    // 无项目态是正常状态不是故障：给引导而不是「加载失败」
+    document.getElementById("pipeline-list").innerHTML = String(e.message || "").startsWith("当前没有项目")
+      ? '<li class="dim small" style="padding:6px 10px">先在侧栏「项目」区添加项目，再创建流水线（流水线按项目的工作目录运行）</li>'
+      : `<li class="dim small" style="padding:6px 10px">加载失败：${escapeHtml(e.message)}</li>`;
     return;
   }
   pipes.forEach((p) => { pipelineSeenStatus[p.id] = p.status; });
@@ -7895,7 +8374,7 @@ function pipelineModal(p) {
         </div>
         ${ctlNote}
         ${taskNote}
-        ${dep ? `<div class="dim small">依赖：${escapeHtml(dep)}</div>` : ""}
+        ${dep ? `<div class="dim small">依赖：${escapeHtml(dep)}（${n.dep_mode === "any" ? "任一完成即可开始" : "全部完成才开始"}）</div>` : ""}
         ${n.allowed_tools && n.allowed_tools.length ? `<div class="dim small">预授权：${escapeHtml(n.allowed_tools.join("、"))}</div>` : ""}
         ${n.kind !== "task" ? `<div class="dim small">运行方式：无人值守${escapeHtml(timeoutTxt(n))} · 已尝试 ${n.runs || 0} 次</div>` : ""}
         ${n.last_error ? `<div class="pl-node-err">✗ ${escapeHtml(n.last_error)}</div>` : ""}
@@ -8031,6 +8510,12 @@ function pipelineCreateModal() {
       <label class="pl-timeout-row dim small">超时 <input type="number" class="pl-node-timeout" min="0" max="1440" value="60"> 分钟（0 = 不限时；超时按失败重试处理，防卡死）</label>
       ${idx > 0 ? `<div class="pl-deps">依赖（完成后才运行本节点）：
         ${priorDeps.map((t, i) => `<label class="pl-dep"><input type="checkbox" value="${i}" checked>${escapeHtml(t)}</label>`).join("")}
+        <label class="pl-dep pl-dep-mode">满足方式
+          <select class="pl-node-depmode">
+            <option value="all">全部完成</option>
+            <option value="any">任一完成</option>
+          </select>
+        </label>
       </div>` : ""}
       <details class="pl-tools"><summary>预授权工具（默认仅只读）</summary>
         <div class="pl-tools-list">${plToolPicker([])}</div>
@@ -8074,6 +8559,7 @@ function pipelineCreateModal() {
         ? "" : row.querySelector(".pl-node-prompt").value.trim();
       if (!prompt && control !== "stop") throw new Error(`节点 ${i + 1} 的指令不能为空`);
       const after = [...row.querySelectorAll(".pl-dep input:checked")].map((el) => Number(el.value));
+      const dep_mode = row.querySelector(".pl-node-depmode")?.value === "any" ? "any" : "all";
       const allowed_tools = [...row.querySelectorAll("input[data-tool]:checked")].map((el) => el.dataset.tool);
       let max_runs = 1;
       if (control === "loop") {
@@ -8084,7 +8570,7 @@ function pipelineCreateModal() {
       // 超时分钟转秒；终止节点不派 Agent，固定 0（不限时也无意义）
       const timeoutMin = control === "stop"
         ? 0 : Math.max(0, Math.min(1440, Number(row.querySelector(".pl-node-timeout").value) || 0));
-      return { title: title || `节点 ${i + 1}`, prompt, after, allowed_tools, control, max_runs,
+      return { title: title || `节点 ${i + 1}`, prompt, after, dep_mode, allowed_tools, control, max_runs,
         timeout_s: timeoutMin * 60 };
     });
     await request("pipeline.create", { name: name || "未命名流水线", concurrency, nodes });
@@ -8313,6 +8799,7 @@ function showAgendaReminder(item) {
 const rpMemoryText = document.getElementById("rp-memory-text");
 let memoryLoaded = false; // 与项目绑定：切项目后由 resetProjectPanels 置回 false
 let rpMemoryMtime = 0; // 加载时的文件 mtime：保存时带回比对，防覆盖后台重写的 AGENTS.md
+let rpMemoryOrig = ""; // 加载时的原文：重读前判断「有没有未保存的修改」用
 
 function memoryStatus(text, ok = true) {
   const el = document.getElementById("memory-status");
@@ -8326,10 +8813,13 @@ async function loadMemoryPanel(force = false) {
     const r = await request("project.instructions");
     rpMemoryText.value = r.text || "";
     rpMemoryMtime = r.mtime || 0;
+    rpMemoryOrig = rpMemoryText.value;
     memoryLoaded = true;
-    memoryStatus(r.path
+    memoryStatus((r.path
       ? `记忆文件：${r.path}`
-      : "本项目还没有记忆文件，保存时会自动创建 AGENTS.md");
+      : "本项目还没有记忆文件，保存时会自动创建 AGENTS.md") +
+      (r.encoding_text ? ` · ${r.encoding_text}` : "") +
+      (r.editable === false ? " · 只读（编码无法识别，改了存不回去）" : ""));
   } catch (e) {
     memoryStatus("✗ 读取失败：" + e.message, false);
   }
@@ -8352,8 +8842,17 @@ async function saveMemoryPanel() {
       text: rpMemoryText.value, base_mtime: rpMemoryMtime,
     });
     rpMemoryMtime = res.mtime || 0;
-    memoryStatus(`✓ 已保存（${res.chars} 字）→ ${res.path}，下一轮对话即生效`);
-    addNotice(`项目记忆已保存（${res.chars} 字）→ ${res.path}`);
+    rpMemoryOrig = rpMemoryText.value; // 已落盘：重读不再视为「有未保存修改」
+    if (res.truncated) {
+      // 截断不再静默：明说超了多少、文件里留了多少
+      memoryStatus(
+        `⚠ 已保存，但超出 ${res.limit} 字上限：只保留前 ${res.chars} 字，` +
+        `后 ${res.original_chars - res.chars} 字没有写入 → ${res.path}`, false);
+      addNotice(`项目记忆超出 ${res.limit} 字上限，超出部分未保存`);
+    } else {
+      memoryStatus(`✓ 已保存（${res.chars} 字）→ ${res.path}，下一轮对话即生效`);
+      addNotice(`项目记忆已保存（${res.chars} 字）→ ${res.path}`);
+    }
   } catch (e) {
     memoryStatus("✗ 保存失败：" + e.message, false);
   }
@@ -8381,7 +8880,16 @@ if (rpMemoryMaintain) {
     }
   });
 }
-document.getElementById("memory-reload").onclick = () => { loadMemoryPanel(true); };
+document.getElementById("memory-reload").onclick = async () => {
+  // 重读会丢掉未保存的修改：编辑框与加载基线不一致时先确认（与文件编辑器同一套）
+  if (memoryLoaded && rpMemoryText.value !== rpMemoryOrig &&
+      !(await confirmModal("放弃修改并重读？",
+        "<p>项目记忆有未保存的修改，重读会用磁盘上的内容覆盖编辑框。</p>",
+        "放弃修改并重读"))) {
+    return;
+  }
+  loadMemoryPanel(true);
+};
 // Ctrl+S 在面板内直接保存（不劫持全局）
 rpMemoryText.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === "s") {
@@ -10358,6 +10866,7 @@ const RIGHT_TAB_LOADERS = {
   review: () => refreshReview(),
   memory: () => loadMemoryPanel(),
   ext: () => openExtPanel(),
+  todo: () => loadTodoPanel(),
 };
 
 /** 按需加载某个标签的数据；未知 id（如 aux 辅助对话，没有远端数据）静默跳过。 */
@@ -10570,8 +11079,7 @@ document.getElementById("btn-left-collapse").onclick = toggleLeftSidebar;
 document.getElementById("rail-expand").onclick = toggleLeftSidebar;
 document.getElementById("rail-new").onclick = () => {
   if (settingsOpen) backToChat();
-  startNewTab();
-  refreshSessions();
+  newSessionFromHighlight();
 };
 document.getElementById("rail-search").onclick = () => {
   if (settingsOpen) backToChat();
@@ -10854,6 +11362,9 @@ async function auxSend() {
   const text = auxInput.value.trim();
   if (!text || auxBusy) return;
   auxBusy = true;
+  const sendBtn = document.getElementById("aux-send");
+  sendBtn.disabled = true; // 忙碌反馈：生成中按钮变灰（断线清账保证 busy 一定能解开）
+  sendBtn.textContent = "…";
   auxInput.value = "";
   auxAddUser(text);
   const stream = document.createElement("div");
@@ -10877,12 +11388,18 @@ async function auxSend() {
     auxStreamingText = "";
     auxThinkingText = "";
     auxBusy = false;
+    sendBtn.disabled = false;
+    sendBtn.textContent = "发送";
     auxLog.scrollTop = auxLog.scrollHeight;
   }
 }
 
-function auxClear() {
-  request("aux.clear").catch(() => {});
+async function auxClear() {
+  // 面板里的对话与后端记忆（模型还记得的上下文）一起清；有内容先问一声
+  if (auxLog.querySelector(".aux-msg") &&
+      !(await confirmModal("清空辅助对话",
+        "<p>清空辅助对话？模型对这段对话的记忆也会一并重置。</p>", "清空"))) return;
+  request("aux.clear").catch((e) => addNotice("重置辅助对话记忆失败：" + e.message));
   auxLog.innerHTML = AUX_EMPTY;
   auxStreamingEl = null;
   auxStreamingText = "";
@@ -11026,6 +11543,19 @@ function scheduleFilesRefresh() {
   }, FILES_REFRESH_DEBOUNCE_MS);
 }
 
+// 审查页的自动刷新：Agent 每次落盘（写/改/移/删文件）都会生成新的检查点，
+// 防抖后重拉列表，审查页不必手动点「刷新」才能看到最新改动轮次。
+let reviewRefreshTimer = 0;
+function scheduleReviewRefresh() {
+  if (reviewRefreshTimer) clearTimeout(reviewRefreshTimer);
+  reviewRefreshTimer = setTimeout(() => {
+    reviewRefreshTimer = 0;
+    if (rightTabs.includes("review") && !rightPanel.classList.contains("hidden")) {
+      refreshReview();
+    }
+  }, FILES_REFRESH_DEBOUNCE_MS);
+}
+
 // 当前编辑器状态：{ path, baseMtime, origText, editable, sizeText, isNew }
 // baseMtime 是打开时的磁盘 mtime（ns），保存时回传做冲突检测：Agent 或外部
 // 程序若在编辑期间改过文件，后端拒绝落盘并返回 conflict，由用户决定覆盖与否。
@@ -11112,14 +11642,20 @@ function renderFileHead() {
 }
 
 // 有未保存修改时的放弃确认：确定 → true（走 onOk），取消 → false
-function confirmDiscard() {
+/** 通用确认弹窗：确定 → true，取消/Esc → false。用于「重读丢修改」「全部取消」
+ *  这类破坏性操作的两击确认（showModal 的 onOk 抛错路径不适合纯询问）。 */
+function confirmModal(title, html, okText = "确定") {
   return new Promise((resolve) => {
     const box = document.createElement("div");
-    box.innerHTML = "<p>有未保存的修改，关闭后会丢失。</p>";
+    box.innerHTML = html;
     const cancelBtn = document.getElementById("modal-cancel");
     cancelBtn.onclick = () => { hideModal(); resolve(false); };
-    showModal("未保存的修改", box, () => resolve(true), "放弃修改并关闭");
+    showModal(title, box, () => resolve(true), okText);
   });
+}
+
+function confirmDiscard() {
+  return confirmModal("未保存的修改", "<p>有未保存的修改，关闭后会丢失。</p>", "放弃修改并关闭");
 }
 
 async function openFile(path, opts = {}) {
@@ -11458,7 +11994,10 @@ function offerTaskSummary(data) {
 
 document.getElementById("tasks-refresh").onclick = () => loadTasks();
 document.getElementById("tasks-cancel").onclick = async () => {
-  await request("tasks.cancel_all");
+  // 取消不可恢复（任务没有「继续跑」）：确认一下再动手
+  if (!(await confirmModal("取消全部子任务",
+    "<p>取消所有运行中与排队中的子代理任务？已完成的任务不受影响。</p>", "全部取消"))) return;
+  await request("tasks.cancel_all").catch((e) => addNotice("取消失败: " + e.message));
   addNotice("已请求取消全部运行中的子任务");
   loadTasks();
 };
@@ -11471,6 +12010,18 @@ setInterval(() => {
 const browserUrl = document.getElementById("browser-url");
 const browserFrame = document.getElementById("browser-frame");
 const browserEmpty = document.getElementById("browser-empty");
+const browserHint = document.getElementById("browser-hint");
+
+// 内网/本机地址（开发服务器一般不设 X-Frame-Options，基本都能嵌）；公网站点
+// 大多带 X-Frame-Options / frame-ancestors 拒绝内嵌——只留一片空白，提前说清
+function isLocalishUrl(u) {
+  try {
+    const h = new URL(u).hostname;
+    return h === "localhost" || h === "::1" ||
+      /^127\./.test(h) || /^192\.168\./.test(h) || /^10\./.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h);
+  } catch (e) { return true; }
+}
 
 function browserGo() {
   let u = browserUrl.value.trim();
@@ -11480,6 +12031,7 @@ function browserGo() {
   browserFrame.src = u;
   browserFrame.classList.remove("hidden");
   browserEmpty.classList.add("hidden");
+  if (browserHint) browserHint.classList.toggle("hidden", isLocalishUrl(u));
 }
 document.getElementById("browser-go").onclick = browserGo;
 document.getElementById("browser-reload").onclick = () => {
@@ -11771,7 +12323,7 @@ setupResizer(rpResizer, "right_w", {
 
 // ============================================================
 // 新功能区块：主题 / Mermaid / 预览 / 记忆页 / 局域网 /
-// 联网搜索与画图配置 / 技能广场 / 更新检查 / 窄屏适配
+// 联网搜索与画图配置 / 更新检查 / 窄屏适配
 // （函数声明提升，boot/initUiPrefs 在文件末尾调用时均已可用）
 // ============================================================
 
@@ -11829,7 +12381,9 @@ function renderThemePicker() {
 // ---------- 主题色卡：运行时从 CSS 变量取色 ----------
 // 内联在 index.html 里的色块只是首帧兜底；真色板从这里来，改主题色不会两处失真。
 // 技巧：变量定义在 [data-theme=…] 选择器上，挂一个同属性隐藏元素即可读任意主题
-// 的变量，不必真的切全局主题（切了会整页闪）。
+// 的变量，不必真的切全局主题（切了会整页闪）。纸墨是默认主题、变量在 :root 上，
+// 靠 app.css 把该组同时挂到 [data-theme="paper"] 才能被这里读到（裸 :root 会继承
+// 当前主题，纸墨卡就跟着变色了）。
 function themeSwatchColors(id) {
   const probe = document.createElement("div");
   probe.setAttribute("data-theme", id);
@@ -11859,7 +12413,9 @@ function renderThemeSwatches() {
     blocks[2].style.background = g;
   };
   for (const id of Object.keys(THEMES)) paint(id, id);
-  paint("auto", resolvedThemeId()); // 跟随系统卡显示当前解析落点的色板
+  // 跟随系统卡是「若此刻为 auto 会落到哪」的预览：只看下方两个下拉 + 系统深浅，
+  // 与当前选中的主题无关（否则选了具体主题后，这张卡会跟那张卡长得一模一样）
+  paint("auto", themeMql.matches ? themeAutoDark : themeAutoLight);
 }
 
 // 「跟随系统时」的深浅落点下拉：改了立即按新落点重解析（当前是 auto 才有视觉效果）
@@ -11892,6 +12448,7 @@ document.querySelectorAll("#theme-grid .theme-card").forEach((b) => {
 });
 themeMql.addEventListener("change", () => {
   if (themePref === "auto") applyThemeMode("auto", false);
+  else renderThemeSwatches(); // 选着具体主题时也刷新跟随系统卡的预览落点
 });
 
 // ---------- 第三方大库按需加载 ----------
@@ -11987,13 +12544,13 @@ function openHtmlPreview(relPath) {
 let maintainState = { global_enabled: true, project_enabled: true, interval_hours: 168 };
 let memoryPageMtime = 0; // 打开页面时的文件 mtime：保存时带回比对，防覆盖后台新写的记忆
 
-// 注入上限提示：文件超过注入上限时，页面必须明说 Agent 只看到了前一段（默认是静默截断）
+// 注入上限提示：文件超过注入上限时，页面必须明说 Agent 只看到了最近一段（默认是静默截断）
 function memoryInjectNote(fullLen, injectLen) {
   const el = document.getElementById("memory-inject-note");
   if (!el) return;
   if (fullLen > injectLen && injectLen > 0) {
-    el.textContent = `⚠ 记忆共 ${fullLen} 字，超过单轮注入上限：每轮只注入前 ${injectLen} 字（按行截断），` +
-      "超出部分 Agent 看不到；可精简表述或删掉过时条目。";
+    el.textContent = `⚠ 记忆共 ${fullLen} 字，超过单轮注入上限：每轮只注入最近 ${injectLen} 字（按行截断），` +
+      "更早的条目 Agent 看不到（文件里不会丢）；可精简表述或删掉过时条目。";
     el.hidden = false;
   } else {
     el.hidden = true;
@@ -12382,6 +12939,8 @@ const CHANNEL_LABEL = { feishu: "飞书", weixin: "微信" };
 // 微信的凭据来自扫码（不是手填 Token），且会失效需重登
 let wxLoginQrcode = "";
 let wxLoginTimer = null;
+let wxLoginRefreshCount = 0; // 连续自动换新的二维码数（检测到扫描即清零），防止接口异常时无限重取
+let wxVerifyCode = ""; // 风控配对码：手机微信上显示的数字，轮询时随 verify_code 带回
 
 // 渠道卡片的操作结果就地显示，不走 addNotice。
 // 原因：设置页打开时对话区（#view-chat）是 hidden，而 addNotice 写进的是对话日志
@@ -12562,6 +13121,7 @@ async function startWeixinLogin() {
     return;
   }
   wxLoginQrcode = info.qrcode || "";
+  wxVerifyCode = ""; // 新码是新会话，旧配对码作废
   const link = info.url || "";
   if (area) {
     if (!link) {
@@ -12590,7 +13150,10 @@ function pollWeixinLogin() {
     if (!wxLoginQrcode) return;
     let st;
     try {
-      st = await request("channel.weixin_login_poll", { qrcode: wxLoginQrcode });
+      st = await request("channel.weixin_login_poll", {
+        qrcode: wxLoginQrcode,
+        verify_code: wxVerifyCode || undefined,
+      });
     } catch (e) {
       const el = document.getElementById("wx-qr-status");
       if (el) el.textContent = "轮询失败：" + e.message;
@@ -12600,15 +13163,65 @@ function pollWeixinLogin() {
     const el = document.getElementById("wx-qr-status");
     if (st.status === "confirmed") {
       wxLoginQrcode = "";
+      wxVerifyCode = "";
       channelMsg("微信登录成功", "ok");
       loadChannelPanel();
       return;
     }
-    if (st.status === "expired") {
-      if (el) el.textContent = "二维码已过期，请重新生成。";
+    if (st.status === "error") {
+      // 服务器明确报错（如二维码失效）：把原因亮出来并停止，不能装作还在等待
       wxLoginQrcode = "";
+      wxVerifyCode = "";
+      if (el) el.textContent = "扫码流程出错：" + (st.error || "未知错误") + "，请点「生成登录二维码」重试。";
       return;
     }
+    if (st.status === "binded") {
+      // 官方 binded_redirect：该微信已绑定过机器人，再扫不会成功
+      wxLoginQrcode = "";
+      wxVerifyCode = "";
+      if (el) el.textContent = "该微信已连接过此机器人，无需重复扫码。";
+      return;
+    }
+    if (st.status === "need_verifycode") {
+      // 风控配对码：手机微信上会显示数字，填进来继续；已填过再要就是输错了
+      const wrong = Boolean(wxVerifyCode);
+      if (el) {
+        el.innerHTML = (wrong ? "数字不匹配，请重新输入" : "请输入") +
+          "手机微信上显示的数字：" +
+          `<input id="wx-verify-input" class="modal-input" inputmode="numeric" maxlength="8" autocomplete="off"> ` +
+          `<button class="btn-ghost" id="wx-verify-ok">提交</button>`;
+        const submit = () => {
+          const inp = document.getElementById("wx-verify-input");
+          const v = inp ? String(inp.value || "").trim() : "";
+          if (!v) return;
+          wxVerifyCode = v;
+          pollWeixinLogin();
+        };
+        const ok = document.getElementById("wx-verify-ok");
+        const input = document.getElementById("wx-verify-input");
+        if (ok) ok.onclick = submit;
+        if (input) {
+          input.onkeydown = (ev) => { if (ev.key === "Enter") submit(); };
+          input.focus();
+        }
+      }
+      return; // 停在输入框上等用户提交，不继续轮询
+    }
+    if (st.status === "expired") {
+      // 过期自动换新码继续等，但限制连续次数；检测到扫描会清零计数
+      wxLoginQrcode = "";
+      wxVerifyCode = "";
+      if (!document.getElementById("wx-qr-area")) return; // 面板已关，别在后台空转
+      if (wxLoginRefreshCount >= 3) {
+        if (el) el.textContent = "二维码已过期，请点「生成登录二维码」重新开始。";
+        return;
+      }
+      wxLoginRefreshCount++;
+      if (el) el.textContent = "二维码已过期，正在自动重新生成…";
+      wxLoginTimer = setTimeout(startWeixinLogin, 1500);
+      return;
+    }
+    if (st.status === "scaned") { wxLoginRefreshCount = 0; wxVerifyCode = ""; } // 配对码被接受
     if (el) el.textContent = st.status === "scaned" ? "已扫描，请在手机上确认…" : "等待扫描…";
     wxLoginTimer = setTimeout(tick, 1000);
   };
@@ -12617,7 +13230,10 @@ function pollWeixinLogin() {
 
 function bindChannelEvents() {
   const wxLogin = document.querySelector(".channel-wx-login");
-  if (wxLogin) wxLogin.onclick = () => startWeixinLogin();
+  if (wxLogin) wxLogin.onclick = () => {
+    wxLoginRefreshCount = 0; // 手动重开视为新一轮，恢复自动换新额度
+    startWeixinLogin();
+  };
 
   const wxLogout = document.querySelector(".channel-wx-logout");
   if (wxLogout) wxLogout.onclick = async () => {
@@ -13489,248 +14105,6 @@ document.getElementById("btn-subagent-add").onclick = async () => {
   subagentEditorModal(d, null);
 };
 
-// ---------- 设置 · 技能广场（内嵌到技能页的可折叠区块） ----------
-// 把渲染逻辑抽成函数：技能广场不再是独立弹窗，而是技能页里的一个折叠块，
-// 展开时才拉取索引（不展开就不发请求）。搜索/过滤/高亮逻辑与之前一致；
-// 在此之上叠加：分类筛选标签、安装范围选择、手动刷新、详情预览（拉远端
-// SKILL.md）、已安装/可更新标注（后端按安装来源标记与版本号并进条目）。
-async function renderMarketInto(container, opts = {}) {
-  container.innerHTML = '<p class="dim small">正在获取技能索引…</p>';
-  let r;
-  try { r = await request("skills.market", { refresh: !!opts.refresh }); } catch (e) {
-    container.innerHTML = `<p>获取失败：${escapeHtml(e.message)}</p>`;
-    return;
-  }
-  const items = r.items || [];
-  // 分类筛选标签：按索引里首次出现的顺序去重（索引没写 category 时整行隐藏）
-  const cats = [];
-  for (const it of items) {
-    const c = String(it.category || "").trim();
-    if (c && !cats.includes(c)) cats.push(c);
-  }
-  let activeCat = "";
-  container.innerHTML =
-    (r.note ? `<p class="market-note">${escapeHtml(r.note)}</p>` : "") +
-    (r.official === false
-      ? '<p class="market-note">当前用的是第三方自建索引（SKYSHEEP_MARKET_URL）——条目非官方精选，安装前请自行确认来源可信。</p>'
-      : "") +
-    `<div class="market-toolbar">
-      <label class="market-scope">安装到
-        <select id="market-scope">
-          <option value="global">全局技能</option>
-          <option value="project">当前项目</option>
-        </select>
-      </label>
-      <button id="market-refresh" class="btn-ghost" type="button"
-        title="重新拉取索引：刚发布的新技能立即可见（平时有 60 秒缓存）">↻ 刷新</button>
-    </div>
-    <div class="market-search">
-      <input id="market-q" class="modal-input" type="search" autocomplete="off"
-        placeholder="搜索技能：名称、描述、作者" title="输入关键词筛选；多个关键词用空格分隔（全部命中才算匹配）；匹配范围含名称、描述、作者与地址；分类用下方标签筛">
-      <button id="market-q-clear" class="btn-ghost" type="button" title="清空搜索" hidden>✕</button>
-    </div>
-    <div class="market-chips" id="market-chips"${cats.length ? "" : " hidden"}>
-      <button class="market-chip active" type="button" data-cat="">全部</button>` +
-    cats.map((c) => `<button class="market-chip" type="button" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join("") +
-    `</div>
-    <p class="market-count" id="market-count"></p>
-    <div class="market-list" id="market-list"></div>`;
-
-  const list = container.querySelector("#market-list");
-  const countEl = container.querySelector("#market-count");
-  const input = container.querySelector("#market-q");
-  const clearBtn = container.querySelector("#market-q-clear");
-  const scopeSel = container.querySelector("#market-scope");
-  const terms = [];
-
-  // 安装范围：没打开项目时「当前项目」不可选（后端同样会拒绝）
-  if (!bootSnap || !bootSnap.working_dir) {
-    scopeSel.querySelector('option[value="project"]').disabled = true;
-    scopeSel.title = "没有打开的项目；技能将装进全局";
-  }
-
-  // 命中高亮：先转义再逐段包 <mark>（索引内容不可信，不能直接拼 HTML）。
-  // 命中区间先合并重叠再统一包裹，避免关键词互相嵌套导致标签错乱。
-  const markAll = (text, ts) => {
-    text = String(text == null ? "" : text);
-    if (!ts.length) return escapeHtml(text);
-    const low = text.toLowerCase();
-    const spans = [];
-    for (const t of ts) {
-      let i = 0;
-      for (;;) {
-        const p = low.indexOf(t, i);
-        if (p < 0) break;
-        spans.push([p, p + t.length]);
-        i = p + t.length;
-      }
-    }
-    if (!spans.length) return escapeHtml(text);
-    spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    const merged = [];
-    for (const s of spans) {
-      const last = merged[merged.length - 1];
-      if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1]);
-      else merged.push([s[0], s[1]]);
-    }
-    let out = "";
-    let cursor = 0;
-    for (const [a, b] of merged) {
-      out += escapeHtml(text.slice(cursor, a)) +
-        "<mark>" + escapeHtml(text.slice(a, b)) + "</mark>";
-      cursor = b;
-    }
-    return out + escapeHtml(text.slice(cursor));
-  };
-
-  // 按钮文案与行为由安装状态决定：没装 → 安装；索引有新版 → 更新（覆盖重装）；
-  // 已是最新 → 置灰；装过但两边都拿不到版本号 → 重装（覆盖重装）
-  function installButton(it) {
-    if (!it.installed) return '<button class="btn-ghost" data-mode="new">安装</button>';
-    if (it.update_available) return '<button class="btn-ghost mi-update" data-mode="update">更新</button>';
-    if (it.version || it.installed_version) {
-      return '<button class="btn-ghost" disabled title="已安装，且不比索引上的版本旧">✓ 已安装</button>';
-    }
-    return '<button class="btn-ghost" data-mode="re" title="已安装过；重装会覆盖同名技能">重装</button>';
-  }
-
-  function renderItems() {
-    const hit = items
-      .map((it, i) => ({ it, i }))
-      .filter(({ it }) => {
-        if (activeCat && String(it.category || "") !== activeCat) return false;
-        if (!terms.length) return true;
-        const hay = [it.name, it.description, it.author, it.url]
-          .map((s) => String(s == null ? "" : s).toLowerCase())
-          .join(" ");
-        return terms.every((t) => hay.includes(t));
-      });
-    // 搜索时按名称相关性排（前缀命中 > 包含命中 > 只在描述/作者/地址命中），
-    // 同档保持索引原序——名字就是用户想搜的那个词的技能，应该出现在第一屏
-    if (terms.length) {
-      const score = (it) => {
-        const name = String(it.name || "").toLowerCase();
-        if (terms.some((t) => name.startsWith(t))) return 0;
-        if (terms.some((t) => name.includes(t))) return 1;
-        return 2;
-      };
-      hit.sort((a, b) => score(a.it) - score(b.it));
-    }
-    list.innerHTML = hit.map(({ it, i }) => {
-      const meta = [it.category || "", it.version ? "v" + it.version : "", it.updated_at || ""]
-        .filter(Boolean).join(" · ");
-      return `
-      <div class="market-item" data-i="${i}">
-        <div class="mi-main">
-          <span class="mi-name">${markAll(it.name, terms)}</span>
-          ${meta ? `<span class="mi-meta">${escapeHtml(meta)}</span>` : ""}
-          <span class="mi-desc" title="${escapeHtml(it.description || it.url)}">${markAll(it.description || it.url, terms)}</span>
-        </div>
-        <span class="mi-author">${markAll(it.author || "", terms)}</span>
-        <span class="mi-btns">
-          <button class="btn-ghost mi-detail" data-url="${escapeHtml(it.url)}" data-name="${escapeHtml(it.name || "")}">详情</button>
-          ${installButton(it)}
-        </span>
-      </div>`;
-    }).join("") ||
-      (terms.length || activeCat
-        ? '<p class="dim small">没有匹配的技能——换个关键词、换个分类，或点 ✕ 清空搜索看全部。</p>'
-        : '<p class="dim small">索引是空的。</p>');
-    countEl.textContent = !items.length
-      ? ""
-      : (terms.length || activeCat ? `匹配 ${hit.length} / ${items.length} 个技能` : `共 ${items.length} 个技能`);
-    countEl.hidden = !countEl.textContent;
-
-    // 详情：拉该技能 SKILL.md 原文（只读），安装前先看清楚它会让 Agent 做什么
-    list.querySelectorAll(".market-item .mi-detail").forEach((btn) => {
-      btn.onclick = async () => {
-        const url = btn.dataset.url;
-        const box = document.createElement("div");
-        box.innerHTML = '<p class="dim small">正在拉取 SKILL.md …</p>';
-        showModal("技能详情 · " + (btn.dataset.name || "未命名"), box, async () => {}, "关闭");
-        let d;
-        try { d = await request("skills.market_detail", { url }); } catch (e) {
-          box.innerHTML = `<p>拉取失败：${escapeHtml(e.message)}</p>`;
-          return;
-        }
-        box.innerHTML =
-          `<p class="dim small">这是该技能 SKILL.md 的原文${d.truncated ? "（过长，已截断）" : ""}。
-           安装后 Agent 平时只看名称与描述，需要时才读取下面这段指令——装之前先确认它是你愿意让它做的事。</p>
-           <pre class="market-detail-pre">${escapeHtml(d.content || "（空）")}</pre>
-           <p class="dim small market-detail-src" title="${escapeHtml(url)}">来源：${escapeHtml(url)}</p>`;
-      };
-    });
-    list.querySelectorAll(".market-item button[data-mode]").forEach((btn) => {
-      btn.onclick = async () => {
-        const mode = btn.dataset.mode; // new | update | re
-        const entry = items[+btn.closest(".market-item").dataset.i];
-        const verb = mode === "new" ? "安装" : mode === "update" ? "更新" : "重装";
-        btn.disabled = true;
-        btn.textContent = verb + "中…";
-        try {
-          const res = await request("skills.install", {
-            source: entry.url,
-            scope: scopeSel.value,
-            overwrite: mode !== "new",
-          });
-          skillStatus(
-            `✓ 已${verb} ${res.count} 个技能（${scopeSel.value === "project" ? "当前项目" : "全局"}）：${res.installed.join("、")}`
-          );
-          // 就地刷新这一条的安装状态（安装结果带回技能真实版本），不重置搜索与筛选
-          const names = new Set((res.installed || []).map((n) => String(n).toLowerCase()));
-          const verHit = (res.skills || [])
-            .find((s) => names.has(String(s.name || "").toLowerCase()) && s.version);
-          entry.installed = true;
-          entry.installed_version = verHit ? verHit.version : (entry.version || entry.installed_version || "");
-          entry.update_available = false;
-          renderItems();
-          boot(); // 技能清单与系统提示词已变，后台刷新全局快照
-        } catch (e) {
-          btn.disabled = false;
-          btn.textContent = verb;
-          skillStatus("✗ " + e.message, false);
-        }
-      };
-    });
-  }
-
-  // 多个关键词用空格分隔、全部命中才算匹配；顺序无关、大小写不敏感
-  input.addEventListener("input", () => {
-    terms.length = 0;
-    input.value.trim().toLowerCase().split(/\s+/).filter(Boolean).forEach((t) => terms.push(t));
-    clearBtn.hidden = !input.value;
-    renderItems();
-  });
-  clearBtn.onclick = () => {
-    input.value = "";
-    terms.length = 0;
-    clearBtn.hidden = true;
-    renderItems();
-    input.focus();
-  };
-  container.querySelector("#market-chips").addEventListener("click", (e) => {
-    const chip = e.target.closest(".market-chip");
-    if (!chip) return;
-    activeCat = chip.dataset.cat || "";
-    container.querySelectorAll("#market-chips .market-chip")
-      .forEach((b) => b.classList.toggle("active", b === chip));
-    renderItems();
-  });
-  container.querySelector("#market-refresh").onclick = () => renderMarketInto(container, { refresh: true });
-  renderItems();
-  if (opts.focus) input.focus(); // 展开就聚焦，直接打关键词
-}
-
-// 折叠块：首次展开才拉索引；展开状态变化时同步右上角计数
-const skillMarketFold = document.getElementById("skill-market");
-skillMarketFold.addEventListener("toggle", () => {
-  const body = document.getElementById("skill-market-body");
-  if (skillMarketFold.open && !body.dataset.loaded) {
-    body.dataset.loaded = "1";
-    renderMarketInto(body, { focus: true });
-  }
-});
-
 // ---------- 设置 · 技能页：列表与使用范围 ----------
 let skillProjects = [];     // 最近一次拉取到的项目列表（范围勾选用）
 let skillManageOpen = false; // 是否停在独立技能页
@@ -13791,7 +14165,7 @@ function renderSkillSummary(skills) {
   if (!el) return;
   const active = skills.filter((s) => s.enabled && s.applies).length;
   el.textContent = skills.length
-    ? `${skills.length} 个技能 · 本项目生效 ${active} 个 — 点这里查看、设使用范围、逛技能广场`
+    ? `${skills.length} 个技能 · 本项目生效 ${active} 个 — 点这里查看、设使用范围`
     : "还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能";
 }
 

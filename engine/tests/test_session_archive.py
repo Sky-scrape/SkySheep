@@ -120,3 +120,32 @@ def test_archive_ws_rejects_unknown_session(home):
         frame = recv_until(ws, "a3")
     assert frame["ok"] is False
     assert "session not found" in frame["error"]
+
+
+def test_archive_broadcast_carries_archived_flag(home):
+    """归档/恢复广播要带 archived 标记。
+
+    前端据此把该会话在标签栏的标签一并收掉（app.js 的 session_updated 分支）；
+    没有这个标记，前端只靠 title 无法区分「归档」与「改名/移动」，标签就会
+    留在标签栏里与侧栏状态脱节。
+
+    广播经 spawn_bg 异步投递，顺序上在方法回复之后到达，所以先收回复再收事件帧。
+    """
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "n1", "method": "session.new"})
+        sid = recv_until(ws, "n1")["result"]["id"]
+
+        ws.send_json({"id": "a1", "method": "session.archive",
+                      "params": {"id": sid, "archived": True}})
+        assert recv_until(ws, "a1")["result"]["archived"] is True
+        frame = ws.receive_json()
+        assert frame.get("event") == "session_updated", frame
+        assert frame["data"].get("session_id") == sid
+        assert frame["data"].get("archived") is True
+
+        ws.send_json({"id": "a2", "method": "session.archive",
+                      "params": {"id": sid, "archived": False}})
+        assert recv_until(ws, "a2")["result"]["archived"] is False
+        frame = ws.receive_json()
+        assert frame.get("event") == "session_updated", frame
+        assert frame["data"].get("archived") is False

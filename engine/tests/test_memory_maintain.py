@@ -25,6 +25,7 @@ from skysheep.tools.memory import (
     load_maintenance_state,
     maintenance_due,
     maintenance_state_path,
+    remember_lines,
     save_maintenance_state,
 )
 
@@ -75,6 +76,18 @@ def test_clean_maintained_text():
     assert clean_maintained_text("x" * 1001, old, 1000) is None  # 超长失控
     assert "不要任何解释" in build_maintain_prompt("global", old)
     assert "AGENTS.md" in build_maintain_prompt("project", old)
+
+
+def test_clean_maintained_text_rejects_prose_overwriting_list():
+    """原文是条目列表而输出一条列表行都不剩：模型把记忆写成了散文，拒绝落盘。"""
+    old = "- [2026-09-01] 条目甲\n- [2026-09-02] 条目乙"
+    prose = "该用户偏好简洁的回复，常用 uv 管理依赖。"
+    assert clean_maintained_text(prose, old, 1000) is None
+    # 原文没有列表行（如纯散文的 AGENTS.md）不受守卫影响
+    assert clean_maintained_text("纯散文新内容", "纯散文旧内容", 1000) == "纯散文新内容"
+    # 列表格式保留的正常整理不受影响
+    assert clean_maintained_text("- [2026-09-01] 条目甲乙合并", old, 1000) == \
+        "- [2026-09-01] 条目甲乙合并"
 
 
 # ---------------------------------------------------------------- 整合行为
@@ -188,6 +201,33 @@ def test_maintain_memory_unchanged_keeps_file(home, mem_file):
         backend = client.app.state.backend
         assert asyncio.run(backend._maintain_memory("global", force=True)) == "unchanged"
         assert mem_file.read_text(encoding="utf-8") == GLOBAL_OLD
+        assert not list(mem_file.parent.glob("memory.md.bak-*"))  # 没落盘就没备份
+
+
+def test_maintain_yields_when_file_changed_concurrently(home, mem_file):
+    """整理读旧稿后文件被并发写过（如归档提炼追加了新条目）：让路不覆盖。
+
+    新条目必须保留、原件不被旧快照的整理稿盖掉、整理时间不推进
+    （巡检下一轮带着新内容重新整理）。
+    """
+    _seed_global(mem_file)
+
+    class DigestDuringMaintain(FakeProvider):
+        """模拟整理调模型的窗口里，另一会话的归档提炼写入了 memory.md。"""
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            remember_lines(["整理期间归档提炼的新条目"])
+            async for ev in super().stream(messages, tool_schemas, effort):
+                yield ev
+
+    provider = DigestDuringMaintain([[TextBlock(text=GLOBAL_NEW)]])
+    with make_client(home, [], provider=provider) as client:
+        backend = client.app.state.backend
+        assert asyncio.run(backend._maintain_memory("global", force=True)) == "conflict"
+        text = mem_file.read_text(encoding="utf-8")
+        assert "整理期间归档提炼的新条目" in text  # 并发写入的新条目还在
+        assert "用户偏好条目1" in text  # 原件没被按旧快照生成的整理稿覆盖
+        assert load_maintenance_state().get("global_last", 0) == 0  # 时间没推进，下轮重试
         assert not list(mem_file.parent.glob("memory.md.bak-*"))  # 没落盘就没备份
 
 

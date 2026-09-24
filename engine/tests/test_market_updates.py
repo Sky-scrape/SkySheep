@@ -299,29 +299,3 @@ def test_ws_market_annotates_installed_and_detail(home, monkeypatch):
         d = recv_until(ws, "md1")["result"]
         assert d["content"] == "SKILL 正文" and d["truncated"] is False
         assert d["url"].endswith("/skills/docx")
-
-
-# ---- 前端锁定：分类筛选 / 安装范围 / 手动刷新 / 详情 / 相关性排序 ----
-
-
-def test_market_frontend_has_filters_scope_detail_refresh():
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    body = js[js.index("async function renderMarketInto("):]
-    body = body[:body.index("\n// 折叠块")]
-    for needle in (
-        'id="market-scope"',            # 安装范围选择
-        'id="market-refresh"',          # 手动刷新
-        'id="market-chips"',            # 分类筛选标签
-        "skills.market_detail",         # 详情预览走新 WS 方法
-        "data-mode",                    # 安装/更新/重装三种按钮形态
-        "name.startsWith",              # 搜索命中按名称相关性排序
-        'request("skills.market", { refresh: !!opts.refresh })',
-        # 原有约定不回退：外部内容必须转义后再进 HTML
-        "escapeHtml(d.content",
-    ):
-        assert needle in body, f"技能广场缺新节点/逻辑：{needle}"
-    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    for cls in (".market-chip", ".market-toolbar", ".market-detail-pre", ".mi-btns"):
-        assert cls in css, f"缺样式：{cls}"

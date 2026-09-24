@@ -334,7 +334,7 @@
             <div class="rp-toolbar">
               <span class="dim small">主对话之外的快速提问，独立进行、不占用主会话。</span>
               <span class="spacer"></span>
-              <button id="aux-clear" class="rp-mini" title="清空辅助对话">清空</button>
+              <button id="aux-clear" class="rp-mini" title="清空辅助对话（模型对这段对话的记忆一并重置）">清空</button>
             </div>
             <div id="aux-log"><div class="rp-empty">在这里问点小问题，不会进入主对话，也不会写进会话记录。</div></div>
             <div class="aux-row">
@@ -402,6 +402,11 @@
                  运行在独立的不透明源里，脚本可跑但碰不到本应用的 Cookie/DOM/存储。 -->
             <iframe id="browser-frame" class="hidden" title="浏览器预览"
                     sandbox="allow-scripts allow-forms allow-popups allow-downloads"></iframe>
+            <!-- 外网站点大多拒绝被内嵌（X-Frame-Options / frame-ancestors），iframe 只会一片
+                 白，不提前说明用户会以为是坏了。内网/本机地址不提示（由 app.js 按地址切换显隐） -->
+            <div id="browser-hint" class="rp-browser-hint dim small hidden">
+              提示：很多公网站点出于安全禁止被内嵌，若这里一直空白就是被对方拒绝了——复制地址用系统浏览器打开即可。
+            </div>
             <div id="browser-empty" class="rp-empty">在地址栏输入网址即可在面板里预览——比如 Agent 刚帮你起好的本地开发服务器。</div>
           </section>
 
@@ -624,7 +629,7 @@
           </section>
           </div>
 
-          <!-- 独立技能页：呈现技能 / 设定使用范围 / 技能广场 -->
+          <!-- 独立技能页：呈现技能 / 设定使用范围 -->
           <div id="skill-manage-view" hidden>
             <section class="settings-card">
               <div class="detail-head">
@@ -662,20 +667,6 @@
                   <button class="btn-primary" id="btn-skill-local-import">导入所选</button>
                 </div>
               </div>
-            </section>
-
-            <section class="settings-card">
-              <div class="card-head">
-                <h3>技能广场</h3>
-              </div>
-              <p class="settings-hint">
-                精选技能一键安装：支持关键词搜索与分类筛选，装过的技能有新版本会标「更新」。
-                索引随主仓库发布，随时会有新技能上架（点「↻ 刷新」立即拉取）。
-              </p>
-              <details id="skill-market" class="market-fold">
-                <summary>展开浏览与安装技能</summary>
-                <div id="skill-market-body" class="market-fold-body"></div>
-              </details>
             </section>
           </div>
         </section>

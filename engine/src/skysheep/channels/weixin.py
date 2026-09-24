@@ -27,6 +27,7 @@ import json
 import logging
 import random
 import time
+from urllib.parse import quote
 
 import httpx
 
@@ -183,6 +184,8 @@ class WeixinChannel(Channel):
         注意：官方包是 POST 且带 local_token_list（便于服务器识别已登录过的账号）。
         首次登录本地没有 token，传空列表即可。
         """
+        # 新登录从固定接入点开始：上一轮可能按 redirect_host 切过主机，别带进新一轮
+        self.base_url = str(self.config.get("base_url", "") or API_BASE).rstrip("/")
         data = await self._post(
             f"ilink/bot/get_bot_qrcode?bot_type={BOT_TYPE}",
             {"local_token_list": _known_tokens(self.config)},
@@ -196,31 +199,73 @@ class WeixinChannel(Channel):
             raise RuntimeError(f"返回里没有 qrcode：{str(data)[:200]}")
         return {"qrcode": qrcode, "url": url}
 
-    async def poll_qrcode(self, qrcode: str) -> dict:
+    async def poll_qrcode(self, qrcode: str, *, verify_code: str = "") -> dict:
         """轮询扫码状态。返回 {status, bot_token?, base_url?}。
 
-        status: wait（等待扫描）/ scaned（已扫描）/ confirmed（已确认）/ expired（已过期）
+        status: wait（等待扫描）/ scaned（已扫描，含 IDC 迁移后的继续等待）/
+        confirmed（已确认）/ expired（已过期）/ need_verifycode（要配对码）/
+        binded（该微信已绑定过，无需重复连）/ error。
+
+        协议形状按官方包 login-qr.ts 的 StatusResponse 接口对齐：bot_token /
+        ilink_bot_id / baseurl / redirect_host 都在响应**顶层**——官方文档页写的
+        credentials 包一层是另一套 API 的形状，实测不存在，仅保留为兜底。
+        scaned_but_redirect 表示服务器迁移，要换到 redirect_host 继续轮询；
+        need_verifycode 要把手机微信上显示的数字经 verify_code 参数带上重试。
         """
-        resp = await self._get(
-            f"ilink/bot/get_qrcode_status?qrcode={qrcode}",
-            timeout=QR_POLL_TIMEOUT,
-        )
+        endpoint = f"ilink/bot/get_qrcode_status?qrcode={qrcode}"
+        code = verify_code.strip()
+        if code:
+            endpoint += f"&verify_code={quote(code)}"
+        resp = await self._get(endpoint, timeout=QR_POLL_TIMEOUT)
         if resp is None:
             # 长轮询客户端超时属正常，按「继续等」处理
             return {"status": "wait"}
-        code = resp.get("ret", resp.get("errcode", 0))
-        if code not in (0, None):
-            return {"status": "error", "error": str(resp.get("errmsg") or code)}
+        ret = resp.get("ret", resp.get("errcode", 0))
+        if ret not in (0, None):
+            return {"status": "error", "error": str(resp.get("errmsg") or ret)}
         status = str(resp.get("status", "") or "wait")
+        if status == "scaned_but_redirect":
+            # IDC 迁移：官方包直接把轮询主机换到 redirect_host 再继续
+            host = str(resp.get("redirect_host", "") or "").strip()
+            if host:
+                self.base_url = f"https://{host}"
+                logger.info("weixin 扫码轮询按服务器指示切换主机：%s", host)
+            return {"status": "scaned"}
+        if status == "verify_code_blocked":
+            # 配对码错太多次：官方按二维码过期处理——重新生成（前端有次数上限）
+            logger.warning("weixin 配对码错太多次（verify_code_blocked），按过期换新码")
+            return {"status": "expired", "reason": "verify_code_blocked"}
+        if status == "binded_redirect":
+            return {"status": "binded"}
         result = {"status": status}
         if status == "confirmed":
-            creds = resp.get("credentials") or {}
-            token = str(creds.get("bot_token", "") or "")
-            base = str(resp.get("baseurl", "") or resp.get("base_url", "") or "")
+            creds = resp.get("credentials")
+            if not isinstance(creds, dict):
+                creds = {}
+            token = ""
+            for source in (resp, creds):  # 顶层优先，credentials 兜底
+                for key in ("bot_token", "ilink_bot_token", "token"):
+                    value = str(source.get(key, "") or "").strip()
+                    if value:
+                        token = value
+                        break
+                if token:
+                    break
+            base = ""
+            for source in (resp, creds):
+                value = str(source.get("baseurl", "") or source.get("base_url", "") or "").strip()
+                if value:
+                    base = value.rstrip("/")
+                    break
             if token:
                 result["bot_token"] = token
             if base:
-                result["base_url"] = base.rstrip("/")
+                result["base_url"] = base
+            if not token:
+                # 拿不到凭据时把脱敏响应记进日志，否则没法远程排障
+                logger.warning(
+                    "weixin 扫码已确认但响应里没有 bot_token，脱敏响应：%s", _redact(resp)
+                )
         return result
 
     async def apply_login(self, bot_token: str, base_url: str = "") -> None:
@@ -379,6 +424,19 @@ class WeixinChannel(Channel):
             "logged_in": bool(self.bot_token),
         }
         return st
+
+
+def _redact(value, _depth: int = 0):
+    """递归脱敏：长字符串只留前缀和长度，便于把响应结构记进日志而不落凭据。"""
+    if _depth > 6:
+        return "…"
+    if isinstance(value, dict):
+        return {str(k): _redact(v, _depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact(v, _depth + 1) for v in list(value)[:20]]
+    if isinstance(value, str) and len(value) > 24:
+        return f"{value[:6]}…(len={len(value)})"
+    return value
 
 
 def _client_version() -> int:

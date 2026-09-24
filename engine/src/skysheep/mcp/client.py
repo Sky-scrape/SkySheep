@@ -260,7 +260,8 @@ class MCPTool(Tool):
 
     def __init__(self, manager: MCPManager, server_name: str, tool_name: str,
                  description: str, input_schema: dict, readonly: bool,
-                 call_timeout: float | None = None) -> None:
+                 call_timeout: float | None = None,
+                 annotations: object | None = None) -> None:
         self.name = f"mcp__{server_name}__{tool_name}"
         self.description = _sanitize_description(description)
         self.safety = Safety.READONLY if readonly else Safety.WRITE
@@ -271,9 +272,30 @@ class MCPTool(Tool):
         self._server = server_name
         # 每服务器可配的单次调用上限；没配用全局默认
         self._call_timeout = call_timeout if call_timeout and call_timeout > 0 else CALL_TIMEOUT_S
+        # MCP 四注解：read_only_hint 用收窄后的最终判定（= 本项目权限门的实际
+        # 口径）；其余三项透传服务器显式声明的值，未声明落 Tool 基类的保守缺省
+        # （可疑其有写、有破坏性）——注解只进目录展示，权限判定看 safety 字段。
+        self.read_only_hint = readonly
+        for attr, default in (
+            ("destructive_hint", True),
+            ("idempotent_hint", False),
+            ("open_world_hint", True),
+        ):
+            declared = getattr(annotations, attr, None)
+            setattr(self, attr, default if declared is None else bool(declared))
 
     def to_schema(self) -> dict:
-        return {"name": self.name, "description": self.description, "input_schema": self._schema}
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self._schema,
+            "annotations": {
+                "readOnlyHint": self.read_only_hint,
+                "destructiveHint": self.destructive_hint,
+                "idempotentHint": self.idempotent_hint,
+                "openWorldHint": self.open_world_hint,
+            },
+        }
 
     async def run(self, args: BaseModel, ctx: ToolContext) -> str:
         session = self._manager.session_for(self._server)
@@ -697,6 +719,7 @@ class MCPManager:
                     # 的工具回到逐次确认，其余沿用服务器级 readonly
                     readonly=_effective_readonly(cfg.readonly, t.name, t.annotations),
                     call_timeout=cfg.timeout,
+                    annotations=t.annotations,
                 )
             )
         self._tools[name] = tools
@@ -740,6 +763,7 @@ class MCPManager:
                 input_schema=t.input_schema,
                 readonly=_effective_readonly(cfg.readonly, t.name, t.annotations),
                 call_timeout=cfg.timeout,
+                annotations=t.annotations,
             )
             for t in listing.tools
         ]

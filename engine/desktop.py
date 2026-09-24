@@ -191,8 +191,12 @@ def _acquire_single_instance() -> bool:
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
     handle = kernel32.CreateMutexW(None, False, mutex_name())
     # last error 必须紧跟调用读取，中间不能插入其它可能覆盖它的操作
-    already_running = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+    err = ctypes.get_last_error()
+    already_running = err == ERROR_ALREADY_EXISTS
     if not handle:
+        # fail-open：拿不到互斥体（权限异常等）时宁可不 enforce 单实例也别挡
+        # 启动，但必须留痕——「双击两次开了两个」这类报告先来日志里查
+        _log(f"单实例互斥体创建失败（GetLastError={err}），本次跳过单实例检查")
         return True
     globals()["_MUTEX_HANDLE"] = handle  # 持有句柄，避免被回收后互斥体消失
     return not already_running
@@ -317,13 +321,13 @@ def _process_start_time(pid: int) -> float | None:
 
 
 def _write_pid_record() -> None:
-    """记下当前实例的 pid 与创建时刻，供后来者识别卡死实例。"""
+    """记下当前实例的 pid 与创建时刻，供后来者识别卡死实例（原子写防半截文件）。"""
     try:
         pid = os.getpid()
         created = _process_start_time(pid) or 0.0
-        path = _pid_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"{pid} {created:.3f}", encoding="utf-8")
+        from skysheep.textio import write_text_atomic  # noqa: PLC0415  引擎导入尽量后置
+
+        write_text_atomic(_pid_path(), f"{pid} {created:.3f}")
     except OSError:
         pass
 
@@ -341,19 +345,78 @@ def _read_pid_record() -> tuple[int, float] | None:
         return None
 
 
+def _own_image_path() -> str:
+    """本进程可执行文件的绝对路径（小写）；取不到返回空串。"""
+    try:
+        return os.path.realpath(sys.executable).lower()
+    except Exception:
+        return ""
+
+
+def _find_hung_sheep_hwnd() -> int:
+    """找出已无响应（IsHungAppWindow）且属主进程是本程序镜像的窗口；找不到返回 0。
+
+    _find_main_hwnd 刻意跳过卡死窗口（读它们的标题有同步卡点），所以那条路
+    永远碰不到"卡死的主窗口"——卡死实例的证据链①由这里补上。身份改按属主
+    进程的镜像路径（QueryFullProcessImageName）认：全程不读标题、不发窗口
+    消息，不会像 GetWindowText 那样被停转的目标拖住。
+    """
+    target = _own_image_path()
+    if not target:
+        return 0
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    def _owner_is_sheep(pid: int) -> bool:
+        if not pid or pid == os.getpid():
+            return False
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+            kernel32.QueryFullProcessImageNameW.argtypes = [
+                ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            if not kernel32.QueryFullProcessImageNameW(
+                ctypes.c_void_p(handle), 0, buf, ctypes.byref(size)
+            ):
+                return False
+            return os.path.realpath(buf.value).lower() == target
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+    found = 0
+
+    def _collect(hwnd, _lparam):
+        nonlocal found
+        pid = _window_pid(hwnd)
+        if pid and _is_hung(hwnd) and _owner_is_sheep(pid):
+            found = int(hwnd)
+            return False  # 命中即停（False 让 EnumWindows 停止枚举）
+        return True
+
+    callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(_collect)
+    user32.EnumWindows(callback, None)
+    return found
+
+
 def _stale_holder_pid() -> int | None:
     """找出"占着互斥体却不可用"的旧实例 pid；确认不了返回 None。
 
-    两条证据链（都以创建时刻校验身份，防 pid 复用误杀）：
-    ① 有标题为 SkySheep 的窗口 → 取窗口属主，且窗口已无响应（IsHungAppWindow）；
-    ② 连窗口都没有 → 用 pid 记录，且实例存活已超过启动宽限期
-      （正常启动 splash 2~3 秒可见，窗口迟迟不出现就是卡死信号）。
+    有可读标题的窗口（_find_main_hwnd，全是活窗口）就谈不上卡死，交给聚焦
+    逻辑。之下两条证据链，都以「pid + 创建时刻」核对身份（防 pid 复用误杀）：
+    ① pid 记录的进程有一个**卡死**的本程序窗口（_find_hung_sheep_hwnd 按属主
+      进程镜像认亲）→ 窗口停转是比"迟迟没出窗"更强的卡死证据，不必再等宽限期；
+    ② 连窗口都没有 → 实例存活已超过启动宽限期（正常启动 splash 2~3 秒可见，
+      窗口迟迟不出现就是卡死信号）。
     """
-    hwnd = _find_main_hwnd()
-    if hwnd:
-        pid = _window_pid(hwnd)
-        if pid and pid != os.getpid() and _is_hung(hwnd) and _process_start_time(pid) is not None:
-            return pid
+    if _find_main_hwnd():
         return None
     rec = _read_pid_record()
     if not rec:
@@ -364,9 +427,11 @@ def _stale_holder_pid() -> int | None:
     actual = _process_start_time(pid)
     if actual is None or abs(actual - created) > 1.0:
         return None  # 记录过期或 pid 被复用
-    age = time.time() - actual
-    if age < STALE_GRACE_SECONDS:
-        return None  # 可能只是还在启动
+    hwnd = _find_hung_sheep_hwnd()
+    if hwnd and _window_pid(hwnd) == pid:
+        return pid  # 链①：记录进程的窗口已停转
+    if time.time() - actual < STALE_GRACE_SECONDS:
+        return None  # 链②：可能只是还在启动
     return pid
 
 
@@ -1388,11 +1453,12 @@ def _run_windowed() -> int:
             return
         # 动画至少停留片刻，热启动时避免一闪而过
         _time.sleep(max(0.0, 0.8 - (_time.monotonic() - shown_at)))
+        # 先登记再切页：切页失败（窗口被提前关掉）时外层收尾仍能停到服务
+        running["server"] = server
         try:
             window.load_url(url)
         except Exception:  # noqa: BLE001  窗口被用户提前关掉：无处可切，静默收场
             pass
-        running["server"] = server
 
         # 一键重启的桌面收尾钩子：走与托盘「退出」相同的路径（置 quitting、
         # 提前停服务、WM_CLOSE 回 GUI 线程关窗），保证窗口几何保存与托盘清理
@@ -1438,9 +1504,18 @@ def _run_windowed() -> int:
     server = running.get("server")
     if server is not None:
         server.should_exit = True
-        # 给服务最多 1.5s 优雅收尾，然后直接结束进程：解释器/.NET 的收尾会拖住
-        # 单实例互斥体好几秒，用户立刻重开就会被误报"已经在运行"（实测踩过）。
-        _time.sleep(1.5)
+        # 等服务真正收完尾再退，不等的话 lifespan 收尾会被进程退出直接掐断。
+        # 上限仍 1.5s：解释器/.NET 的收尾会拖住单实例互斥体好几秒，用户立刻
+        # 重开就会被误报"已经在运行"（实测踩过）——收尾卡住也按上限硬退
+        # （crash.flag 已在 backend.shutdown() 开头清除，截断不再留下误报）。
+        thread = getattr(server, "uvicorn_thread", None)
+        if thread is not None:
+            try:
+                thread.join(timeout=1.5)
+            except RuntimeError:
+                pass
+        else:
+            _time.sleep(1.5)
     _log("app exited normally")
     os._exit(0)
 

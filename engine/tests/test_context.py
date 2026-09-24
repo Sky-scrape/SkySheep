@@ -5,8 +5,8 @@ from __future__ import annotations
 from conftest import FakeProvider
 
 from skysheep.core import Agent
-from skysheep.core.context import _safe_recent_start, estimate_tokens
-from skysheep.messages import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from skysheep.core.context import _safe_recent_start, compact_history, estimate_tokens
+from skysheep.messages import Message, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock
 from skysheep.security.gate import PermissionGate
 from skysheep.tools import ToolRegistry, default_tools
 
@@ -90,6 +90,23 @@ async def test_no_compaction_below_threshold(tmp_path):
     async for ev in agent.run_turn("hello"):
         events.append(ev)
     assert all(e.kind != "compaction" for e in events)
+
+
+async def test_compaction_summary_ignores_thinking_deltas(tmp_path):
+    """思考型模型的 reasoning 增量同样带 text 字段，不许混进压缩摘要（只收正文增量）。"""
+    provider = FakeProvider([
+        [ThinkingBlock(text="我先想想该总结什么"), TextBlock(text="SUMMARY：用户要求写诗")],
+    ])
+    agent = make_agent(provider, tmp_path)
+    agent.set_system("sys")
+    agent.history.append(Message.user("问题" + "长" * 200))
+    agent.history.append(Message.assistant([TextBlock(text="回答")]))
+    agent.history.append(Message.user("继续"))
+    ev = await compact_history(agent, keep_recent=1)
+    assert ev is not None and ev.summary_chars > 0
+    summary = agent.history[1].text
+    assert "SUMMARY" in summary
+    assert "想想" not in summary  # 思考内容没有混进摘要
 
 
 async def test_compaction_trigger_ratio_compacts_early(tmp_path):

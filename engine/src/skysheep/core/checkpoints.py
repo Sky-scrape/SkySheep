@@ -134,15 +134,27 @@ class CheckpointStore:
                 meta_path = cp_dir / "meta.json"
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    blobs = {str(k): v for k, v in (meta.get("blobs") or {}).items()}
+                    bytes_total = int(meta.get("bytes") or 0)
+                    if not bytes_total:
+                        # 旧版 meta 没存 bytes：按 blob 文件实际大小补算，
+                        # 全库字节上限对存量检查点才继续有效
+                        for blob in blobs.values():
+                            if blob:
+                                try:
+                                    bytes_total += (cp_dir / str(blob)).stat().st_size
+                                except OSError:
+                                    pass
                     cp = {
                         "id": str(meta["id"]),
                         "session_id": meta.get("session_id"),
                         "paths": [str(p) for p in meta.get("paths") or []],
                         "ts": float(meta.get("ts") or 0),
-                        "blobs": {str(k): v for k, v in (meta.get("blobs") or {}).items()},
+                        "blobs": blobs,
                         # 保存时刻的内容签名（旧版 meta 没有该字段 → 空表 =
                         # 跳过脏检查，回滚保持旧行为）
                         "sigs": {str(k): v for k, v in (meta.get("sigs") or {}).items()},
+                        "bytes": bytes_total,
                         "files": None,  # 懒加载：get/restore 时才读 blob
                     }
                 except (OSError, ValueError, TypeError):
@@ -154,19 +166,23 @@ class CheckpointStore:
         self._seq = max_seq
 
     def _hydrate(self, cp: dict) -> None:
-        """把磁盘上的 blob 读进 cp['files']（仅 root 模式且未加载时）。"""
+        """把磁盘上的 blob 读进 cp['files']（仅 root 模式且未加载时）。
+
+        blob 读不到（被外部清理/局部丢失）的路径直接剔除：绝不能按「改前
+        不存在」处理——那会让回滚把用户现存的文件删掉。恢复不了就少恢复
+        一个文件，不制造破坏。"""
         if cp.get("files") is not None or not self._root:
             return
         files: dict[str, bytes | None] = {}
         cp_dir = self._cp_dir(cp)
         for path_s, blob in (cp.get("blobs") or {}).items():
             if blob is None:
-                files[path_s] = None
+                files[path_s] = None  # 改前确实不存在（落库时就是 None）
                 continue
             try:
                 files[path_s] = (cp_dir / str(blob)).read_bytes()
             except OSError:
-                files[path_s] = None  # blob 丢了按「新建文件」处理，回滚时删除
+                continue  # blob 丢了：这个路径回滚不了，也别碰它
         cp["files"] = files
 
     def _release(self, cp: dict) -> None:
@@ -177,8 +193,8 @@ class CheckpointStore:
         if self._root is not None:
             cp["files"] = None
 
-    def _persist(self, cp: dict) -> None:
-        """把检查点写进磁盘目录；失败静默（内存里的仍在，回滚能力不打折）。"""
+    def _persist(self, cp: dict) -> bool:
+        """把检查点写进磁盘目录；返回是否写成功（失败时内存副本不能丢）。"""
         cp_dir = self._cp_dir(cp)
         try:
             cp_dir.mkdir(parents=True, exist_ok=True)
@@ -197,11 +213,14 @@ class CheckpointStore:
                 "paths": cp["paths"],
                 "blobs": blobs,
                 "sigs": cp.get("sigs") or {},
+                # 字节量随 meta 持久化：重启后全库字节上限（淘汰）才有数可依
+                "bytes": int(cp.get("bytes") or 0),
             }
             write_text_atomic(cp_dir / "meta.json", json.dumps(meta, ensure_ascii=False))
             cp["blobs"] = blobs
+            return True
         except OSError:
-            pass
+            return False
 
     def _prune(self) -> None:
         """超限淘汰（内存 + 磁盘）。
@@ -267,8 +286,10 @@ class CheckpointStore:
         }
         self._items[cp["id"]] = cp
         if self._root is not None:
-            self._persist(cp)
-            self._release(cp)  # 内容已落 blob：内存只留索引，回滚时再懒加载
+            # 落盘成功才释放内存副本；写失败（磁盘满等）时内存是唯一副本，
+            # 丢了这条检查点就只剩一个空壳 id，回滚时静默无效
+            if self._persist(cp):
+                self._release(cp)  # 内容已落 blob：内存只留索引，回滚时再懒加载
         self._prune()
         return {
             "id": cp["id"], "paths": cp["paths"], "ts": cp["ts"], "skipped": skipped,
@@ -280,6 +301,21 @@ class CheckpointStore:
             for c in sorted(self._items.values(), key=lambda c: c["ts"])
             if c["session_id"] == session_id
         ]
+
+    def forget_session(self, session_id: str | None) -> int:
+        """清除某会话的全部检查点（内存索引 + 磁盘目录），返回清除条数。
+
+        会话被删除时调用：改前字节是用户文件的完整快照，会话没了就不该
+        再留——靠条数淘汰慢慢蒸发太慢，还占磁盘。只清当前 store 根目录
+        （本项目绑定）下能找到的；会话在其他项目绑定期间留下的检查点
+        归那次绑定的根目录管，由删项目时的整目录清理兜底。"""
+        victims = [k for k, cp in self._items.items()
+                   if cp.get("session_id") == session_id]
+        for k in victims:
+            cp = self._items.pop(k, None)
+            if cp is not None and self._root is not None:
+                shutil.rmtree(self._cp_dir(cp), ignore_errors=True)
+        return len(victims)
 
     def get(self, checkpoint_id: str) -> dict | None:
         """按 id 取检查点（含改前内容，供 diff / 审查用）；不存在返回 None。

@@ -550,13 +550,15 @@ def _start_backend(args):
     # 局域网访问 / 远程访问（Tailscale）开启时监听全部网卡，凭令牌访问；默认只听本机。
     # 仅远程访问模式下，非 Tailscale 网段的来源会在 HTTP 守卫处被拒绝。
     host = "0.0.0.0" if (cfg.server.lan or cfg.server.tailscale) else "127.0.0.1"
-    if getattr(args, "port", 0):
-        port = args.port
-    else:
+    # 随机端口时把预绑定 socket 直接交给 uvicorn：先 close 再让 uvicorn 重 bind
+    # 有个小窗口会被别的进程抢走（抢走后白等 60s 才判「启动失败」），占住不放没这个问题
+    port = getattr(args, "port", 0) or 0
+    sockets = None
+    if not port:
         s = socket.socket()
-        s.bind(("127.0.0.1", 0))
+        s.bind((host, 0))
         port = s.getsockname()[1]
-        s.close()
+        sockets = [s]
 
     fast_app = create_app(working_dir=args.directory or ".", provider_name=args.provider)
     server = uvicorn.Server(
@@ -565,7 +567,15 @@ def _start_backend(args):
     # 让 backend 能请求优雅退出（一键重启用）：置 should_exit 后 uvicorn 会走完
     # lifespan 收尾（crash.flag 清除等）再退出线程，不是硬杀。
     fast_app.state.backend.request_shutdown = lambda: setattr(server, "should_exit", True)
-    threading.Thread(target=server.run, daemon=True).start()
+    thread = threading.Thread(
+        target=server.run,
+        daemon=True,
+        name="skysheep-uvicorn",
+        kwargs={"sockets": sockets} if sockets is not None else {},
+    )
+    thread.start()
+    # 退出路径 join 用：置了 should_exit 还得等 lifespan 真正走完再退进程
+    server.uvicorn_thread = thread
     if not _wait_port(port):
         raise SystemExit("服务启动失败")
     # 桌面窗口/浏览器兜底一律加载本机回环地址：0.0.0.0 只是绑定地址不是可访问地址，
@@ -584,6 +594,28 @@ def _start_backend(args):
             "（地址与二维码见 设置 · 手机控制）[/]"
         )
     return server, url
+
+
+def _stop_backend(server, timeout_s: float = 5.0) -> None:
+    """请求 uvicorn 优雅退出并**等它走完**。
+
+    只置 should_exit 就返回的话，daemon 服务线程会被解释器直接掐掉，lifespan
+    收尾（渠道/MCP/终端/数据库关闭、crash.flag 清除）走不完——表现为每次正常
+    退出后，下次启动都提示「上次未正常关闭」。这里 join 服务线程直到收尾完成
+    （上限 timeout_s，收尾卡住也不能拖住退出）。
+    """
+    if server is None:
+        return
+    try:
+        server.should_exit = True
+    except Exception:  # noqa: BLE001 - 退出路径不再抛
+        pass
+    thread = getattr(server, "uvicorn_thread", None)
+    if thread is not None:
+        try:
+            thread.join(timeout=timeout_s)
+        except RuntimeError:
+            pass
 
 
 def run_desktop_backend(directory: str, provider: str | None = None, port: int = 0):
@@ -665,7 +697,8 @@ def _app_cmd(args) -> None:
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
-        server.should_exit = True
+        # 等 lifespan 收尾真正走完再退进程，否则 crash.flag 残留、资源不收尾
+        _stop_backend(server)
         return
 
     # 窗口模式（终端直接 skysheep app）：主窗口第一页是启动动画，引擎就绪后原地切换
@@ -723,20 +756,30 @@ def _app_cmd(args) -> None:
             errors.append(exc)
             _show_error_page(window, exc)
             return
+        # 先登记再切页：切页失败（窗口被提前关掉）时外层收尾仍能停到服务
+        running["server"] = server
         try:
             window.load_url(url)
         except Exception:  # noqa: BLE001  窗口被用户提前关掉：无处可切，静默收场
             pass
-        running["server"] = server
 
     errors: list[BaseException] = []
     running: dict[str, object] = {}
-    webview.start(_bootstrap, icon=str(icon_path) if icon_path.exists() else None)
+    # 固定 profile 目录并关闭私有模式（与 desktop.py 同一优化）：默认私有模式
+    # 每次启动都拿一个全新临时 profile，从不清理（每次启动往 TEMP 漏一个），
+    # 浏览器环境每次从零初始化、首帧明显变慢。目录放在实例数据目录下的
+    # webview-app/，与桌面壳的 webview/ 各用各的——本路径没有单实例互斥体，
+    # 两个入口同开时不会争同一个 WebView2 profile（同路径并发第二个窗口会
+    # 初始化失败）；同一个入口连开两份属于边缘用法，将争用同一 profile。
+    webview.start(
+        _bootstrap,
+        private_mode=False,
+        storage_path=str(instance.data_home() / "webview-app"),
+        icon=str(icon_path) if icon_path.exists() else None,
+    )
     if errors:
         raise errors[0]
-    server = running.get("server")
-    if server is not None:
-        server.should_exit = True
+    _stop_backend(running.get("server"))
 
 
 # ---- headless 一次性运行（对标 claude -p / codex exec / gemini -p） ----

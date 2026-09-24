@@ -28,11 +28,15 @@ def state_path(home: Path | None = None) -> Path:
 
 
 def save_state(geometry: dict, home: Path | None = None) -> bool:
-    """保存窗口几何；失败静默返回 False（调用点都在退出路径上，不能阻塞/报错）。"""
+    """保存窗口几何；失败静默返回 False（调用点都在退出路径上，不能阻塞/报错）。
+
+    原子写（临时文件 + replace）：写在退出瞬间，写一半被强杀会留下半截 JSON，
+    下次启动就丢了整套窗口几何。
+    """
     try:
-        path = state_path(home)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(geometry, ensure_ascii=False), encoding="utf-8")
+        from .textio import write_text_atomic
+
+        write_text_atomic(state_path(home), json.dumps(geometry, ensure_ascii=False))
         return True
     except OSError:
         return False

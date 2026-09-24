@@ -23,6 +23,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..textio import write_text_atomic
 from .base import Safety, Tool, ToolContext, ToolError
 
 MemoryAction = Literal["append", "list", "delete"]
@@ -55,10 +56,15 @@ def memory_path() -> Path:
 
 
 def inject_text(text: str) -> str:
-    """系统提示词实际注入的记忆文本：超上限按行边界截断（半条记忆对模型是噪声）。"""
+    """系统提示词实际注入的记忆文本：超上限保最新的尾部、按行边界截断。
+
+    条目按时间追加（新条目在文件尾部），越新越可能仍然有效——超限丢头不丢尾，
+    与 _write_lines 的容量护栏（丢最旧条目）同一方向。半条记忆对模型是噪声，
+    截断必须落在行边界；单行超长时退化为硬截该行（不会超出上限）。
+    """
     if len(text) <= MAX_MEMORY_CHARS:
         return text
-    return text[:MAX_MEMORY_CHARS].rsplit("\n", 1)[0]
+    return text[-MAX_MEMORY_CHARS:].split("\n", 1)[-1]
 
 
 def load_memory_text() -> str:
@@ -71,10 +77,24 @@ def load_memory_text() -> str:
 
 
 def render_memory_section() -> str:
-    """系统提示词的记忆段落；无记忆时返回空串。"""
-    text = load_memory_text().strip()
+    """系统提示词的记忆段落；无记忆时返回空串。
+
+    发生截断时给模型一行说明：它看到的不是全部，更早的条目可用 memory_write
+    的 list 动作查看——静默截断会让模型把「没注入」当成「不存在」。
+    """
+    p = memory_path()
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = inject_text(raw).strip()
     if not text:
         return ""
+    if len(raw) > MAX_MEMORY_CHARS:
+        text = (
+            "（记忆条数超出单轮注入上限，以下只是最近的条目；"
+            "更早的可用 memory_write 的 list 动作查看）\n" + text
+        )
     return f"\n# User memory（跨项目的用户记忆，管理用 memory_write）\n{text}\n"
 
 
@@ -155,8 +175,9 @@ def _write_lines(p: Path, lines: list[str]) -> None:
     while lines and sum(len(ln) + 1 for ln in lines) > MAX_MEMORY_FILE_CHARS:
         lines.pop(0)
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        # 原子写：memory.md 是引擎自有状态文件，写一半被杀会留下半截记忆
+        # 且它没有备份可回——整份记忆就这一次写入机会
+        write_text_atomic(p, "\n".join(lines) + ("\n" if lines else ""))
     except OSError as e:
         raise ToolError(f"cannot write memory file: {e}") from e
 
@@ -206,10 +227,8 @@ def load_maintenance_state() -> dict:
 
 
 def save_maintenance_state(state: dict) -> None:
-    p = maintenance_state_path()
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        write_text_atomic(maintenance_state_path(), json.dumps(state, ensure_ascii=False))
     except OSError:
         pass  # 状态写不进去只影响下次提前整理，不值得打断主流程
 
@@ -229,7 +248,8 @@ def backup_before_maintain(path: Path, old_text: str) -> Path:
     while bak.exists():
         n += 1
         bak = path.with_name(f"{path.name}.bak-{stamp}-{n:03d}")
-    bak.write_text(old_text, encoding="utf-8")
+    # 备份也走原子写：备份是原件的唯一恢复途径，半截备份等于没有备份
+    write_text_atomic(bak, old_text)
     try:
         baks = sorted(path.parent.glob(path.name + ".bak-*"))
         for extra in baks[:-MAINTENANCE_BACKUP_KEEP]:
@@ -271,10 +291,15 @@ def build_maintain_prompt(scope: str, text: str) -> str:
     )
 
 
+_LIST_LINE_RE = re.compile(r"\s*-\s")
+
+
 def clean_maintained_text(raw: str, old_text: str, max_chars: int) -> str | None:
     """清洗模型输出的整理稿：剥外围空白与代码围栏；无效或与原文相同返回 None。
 
     max_chars 是落盘上限（全局/项目各自不同），超限视为模型输出失控，拒绝。
+    另有结构守卫：原文是条目列表而输出里一条列表行都不剩，是模型把记忆写成了
+    散文——行格式被破坏后 (自动) 标记、追加去重都失效，宁可不动原件。
     """
     s = raw.strip()
     if s.startswith("```"):
@@ -283,6 +308,10 @@ def clean_maintained_text(raw: str, old_text: str, max_chars: int) -> str | None
             s = s[: -3]
     s = s.strip()
     if not s or s == old_text.strip() or len(s) > max_chars:
+        return None
+    if any(_LIST_LINE_RE.match(ln) for ln in old_text.splitlines()) and not any(
+        _LIST_LINE_RE.match(ln) for ln in s.splitlines()
+    ):
         return None
     return s
 

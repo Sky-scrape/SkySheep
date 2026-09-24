@@ -54,15 +54,31 @@ def test_parse_digest_filters_placeholder_punctuation_and_preambles():
 
 
 def test_load_memory_text_truncates_at_line_boundary(mem_file):
-    """注入超上限按行截断：半条记忆对模型是噪声，最后一条必须完整。"""
+    """注入超上限保最新的尾部条目、按行截断：半条记忆对模型是噪声，最后一条必须完整。"""
     mem_file.parent.mkdir(parents=True, exist_ok=True)
-    line = "- [2026-09-01] 条目" + "x" * 90
-    mem_file.write_text("\n".join(line for _ in range(60)), encoding="utf-8")
+    lines = ["- [2026-08-01] 最早的一条"] + ["- 条目" + "x" * 90 for _ in range(60)]
+    lines.append("- [2026-09-24] 最新的一条")
+    mem_file.write_text("\n".join(lines), encoding="utf-8")
     text = load_memory_text()
     assert len(text) <= MAX_MEMORY_CHARS
-    assert text.endswith("x" * 90)  # 截在行边界：最后一条是完整的
-    full = mem_file.read_text(encoding="utf-8")
-    assert text == full[:MAX_MEMORY_CHARS].rsplit("\n", 1)[0]
+    assert "最新的一条" in text  # 保尾：越新的记忆越可能仍然有效，必须注入
+    assert "最早的一条" not in text  # 丢头：最旧的让位（与容量护栏丢最旧同方向）
+    assert all(ln.startswith("-") for ln in text.splitlines())  # 截在行边界，无半条
+
+
+def test_render_memory_section_marks_truncation(mem_file):
+    """发生截断时段落里必须说明「以下只是最近条目」，让模型知道更早的可 list 查看。"""
+    from skysheep.tools.memory import render_memory_section
+
+    assert render_memory_section() == ""  # 没有记忆文件
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    mem_file.write_text("- [2026-09-01] 就一条", encoding="utf-8")
+    short = render_memory_section()
+    assert "就一条" in short and "注入上限" not in short
+    mem_file.write_text("\n".join("- 条目" + "x" * 90 for _ in range(60)), encoding="utf-8")
+    truncated = render_memory_section()
+    assert "注入上限" in truncated and "list" in truncated
+    assert "最近" in truncated and "- 条目" in truncated  # 提示之外注入的仍是记忆本体
 
 
 def test_parse_digest_caps_entries_and_length():

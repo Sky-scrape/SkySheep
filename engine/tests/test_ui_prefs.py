@@ -141,12 +141,13 @@ def test_agenda_week_drag_select_ui(home):
 
 
 def test_classic_view_lists_quick_chats(home):
-    """经典视图底部要常驻一个「快聊」区块。
+    """经典视图要能看到快聊会话（快聊提升为项目区一行）。
 
     快聊会话的 project_id 是 NULL，而经典视图只取当前项目列表，所以它们
     在那里原本一个都看不到（只在分组视图与「全部项目」搜索里露面）。
-    这里锁住三处协议：session.list 下发 quick_sessions（仅本机）、
-    经典视图单开一节渲染它、渲染位置在标签分组之后。
+    这里锁三处协议：session.list 下发 quick_sessions（仅本机）、经典视图
+    点「快聊」行陈列快聊列表（含空列表引导）、陈列函数与分组视图共用
+    折叠/显示更多状态且不接拖动排序。
     """
     from skysheep.server.app import STATIC_DIR
 
@@ -156,23 +157,27 @@ def test_classic_view_lists_quick_chats(home):
     body = js[js.index("async function refreshSessions("):]
     body = body[:body.index("// 空会话清理入口")]
     assert "quick_sessions" in body
-    assert "renderQuickSection(ul, quick_sessions" in body
-    # 字段缺失（远程客户端）时不渲染那个永远为空的区块
+    assert 'renderPlainList(ul, Array.isArray(quick_sessions) ? quick_sessions : [], "quick"' in body
+    # 字段缺失（远程客户端）时不渲染那个永远为空的列表
     assert "Array.isArray(quick_sessions)" in body
-    # 区块渲染位置：快聊区块在会话列表的标签分组之后渲染，不会被分组头盖掉。
-    # 不断言具体文案——空提示已经整体删掉（会话列表为空就留空，不再写引导文字），
-    # 靠字面量锁的断言会随文案消失而失真。
-    assert body.index("groups.forEach(({ tag, list })") < body.index("renderQuickSection(")
-    # 常驻：没会话时也要出席（快聊区块本身不发空提示）
-    quick = js[js.index("function renderQuickSection("):]
-    quick = quick[:quick.index("// ---- 拖动排序")]
-    assert 'groupState("quick")' in quick, "与分组视图的快聊组共用折叠状态"
-    assert "session.new_task" in quick, "组头 ＋ 要能新建快聊对话"
-    assert "orderedSessionList(list, \"quick\")" in quick, "组内序走同一份偏好"
+    # 「远程连接」列一下：跨项目拉取后按项目过滤（项目行点击后切换）
+    assert 'classicViewGk.startsWith("remote:")' in body
+    assert "all_projects: 1" in body
+    # 陈列函数：与分组视图的组共用展开/显示更多状态（按 gk），组内序走同一份偏好
+    quick = js[js.index("function renderPlainList("):]
+    quick = quick[:quick.index("// 空会话清理入口")]
+    assert "groupState(gk)" in quick, "与分组视图的快聊组共用折叠状态"
+    assert 'orderedSessionList(list, gk)' in quick, "组内序走同一份偏好"
     assert "GROUP_PREVIEW" in quick, "组内默认只露几条，其余收进「显示更多」"
+    assert "emptyHint" in quick, "空列表给引导提示"
     assert "不接拖动排序" in js, "经典视图的快聊行不能混进当前项目的拖动序"
-    # 样式：组头 ＋ 的手感同分组视图
-    assert ".s-quick-add" in css and ".s-quick" in css
+    # 项目区的「快聊」行：点击高亮并陈列；悬浮＋走 session.new_task 新建快聊
+    row = js[js.index("async function appendQuickRow("):]
+    row = row[:row.index("// 删除项目：")]
+    assert 'classicViewGk = "quick"' in row, "点快聊行切到快聊列表"
+    assert "session.new_task" in row, "行的 ＋ 要能新建快聊对话"
+    # 样式：快聊行沿用项目行布局，选中态高亮
+    assert ".quick-row" in css
 
 
 def test_tab_rename_protocol(home):
@@ -203,8 +208,8 @@ def test_tab_rename_protocol(home):
     # 页签常驻：renderTabs 不再按数量隐藏（单会话也显示，浏览器式）
     assert 'classList.toggle("hidden", chatTabs.length' not in tabs, \
         "标签栏改常驻后不得再按数量隐藏"
-    # 标签栏尾部有 ＋ 新建入口
-    assert "tab-new" in tabs and "startNewTab" in tabs
+    # 标签栏尾部有 ＋ 新建入口（与侧栏「新建会话」同一动作：跟随侧栏高亮）
+    assert "tab-new" in tabs and "newSessionFromHighlight" in tabs
 
     # ② 行内改名与落库
     assert "function startTabRename(" in js
@@ -291,7 +296,7 @@ def test_tab_takes_over_blank_placeholder(home):
       ② 优先接管当前激活那张，否则激活的空标签会赖在栏上；
       ③ 接管后要补上标签名与 currentSessionId（activateTab 对「已是当前标签」
          会早退，这些记账不做就永远停在「新会话」）；
-      ④ 连点「新建会话」不堆空标签（startNewTab 先复用）。
+      ④ 「新建会话」点击即新建（原则统一后不再复用未用过的标签）。
     """
     from skysheep.server.app import STATIC_DIR
 
@@ -317,18 +322,79 @@ def test_tab_takes_over_blank_placeholder(home):
     assert "currentSessionId = t.sid" in open_fn
     assert "loadTabHistory" in open_fn, "接管后要补拉历史（activateTab 会早退）"
 
-    # ④ 连点「新建会话」不堆空标签
+    # ④ 「新建会话」原则统一：点击即在当前高亮项目下新建，不再复用未发过
+    #    消息的标签（连点留下多个空会话，交给「清理空会话」兜底）
     start = js[js.index("function startNewTab("):]
     start = start[:start.index("\n}\n")]
-    assert "isBlankTab(activeTab)" in start, "已在空标签上时不应再叠一张"
-    assert start.index("isBlankTab(activeTab)") < start.index("chatTabs.push(t)"), \
-        "复用判定必须在新建之前"
+    assert "isUnusedTab" not in start, "复用分支已按新原则移除：点击即新建"
+    assert "if (!persist) return blank();" in start, "启动恢复仍走懒创建（不落库）"
+    assert "if (creatingTab) return activeTab;" in start, "creatingTab 只是在途请求的连击互斥"
+    assert 'request("session.new"' in start, "新建会话要立即落库（侧栏才有行）"
+    assert start.index('request("session.new"') < \
+        start.index("chatTabs.push(t)", start.index('request("session.new"')), \
+        "先落库拿到 sid，再开新标签"
 
     # 历史加载收口到一处：activateTab 与 openTabForSession 共用，不再各写一份
     assert "async function loadTabHistory(" in js
     activate = js[js.index("async function activateTab("):]
     activate = activate[:activate.index("\n}\n")]
     assert "await loadTabHistory(tab)" in activate, "activateTab 要走共用的历史加载"
+
+
+def test_session_updated_broadcast_does_not_spawn_tabs(home):
+    """session_updated 元数据广播的两条标签栏不变量：不多开、不少关。
+
+    回归一（不多开）：广播带 session_id，handleEvent 的多会话路由此前对
+    「没有打开标签的 session_id」一律后台补开一张标签——归档一个没开着标签
+    的会话，它会立刻以「会话」标签原样弹回标签栏。元数据广播只该更新缓存与
+    侧栏，不建标签；轮次事件（其他窗口/手机端发消息）的自动跟签行为不变。
+
+    回归二（不少关）：归档后侧栏行消失，但该会话在标签栏的标签此前留在原地
+    （用户报的「左侧标签消失，上方标签没跟着消失」）。带 archived 标记的
+    广播现在把标签一并 closeTab 收掉。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    routing = js[js.index("function handleEvent("):]
+    routing = routing[:routing.index("switch (kind)")]
+    assert 'kind !== "session_updated"' in routing, \
+        "元数据广播不走自动开标签的路由"
+    # 自动开标签的兜底只属于轮次路由本身（openTabForSession background 路径）
+    assert "openTabForSession(data.session_id" in routing
+
+    # 归档广播（带 archived 标记）要把该会话的标签一并收掉：侧栏行与标签栏
+    # 同步消失，不能只剩侧栏变化。收标签必须走 closeTab（它会同步写回
+    # ui.json 的恢复列表，否则重启又把归档标签还原出来）。
+    case = js[js.index('case "session_updated"'):]
+    case = case[:case.index('case "user_message"')]
+    assert "data.archived === true" in case
+    assert "const t = tabFor(data.session_id)" in case and "closeTab(t)" in case
+
+
+def test_archive_modal_fixed_size_and_bulk_ops(home):
+    """归档弹窗：方框长宽固定 + 批量选择。
+
+    尺寸由 CSS `.modal-box:has(.archive-wrap)` 固定（列表区自己滚，条目再多
+    也不撑高弹窗）；批量操作条常驻列表上方，提供全选 / 恢复所选 / 删除所选，
+    删除沿用单行那套「确认删除」两步手感，选择一变要重新确认。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert ".modal-box:has(.archive-wrap)" in css, "归档弹窗要有固定尺寸规则"
+    fixed = css[css.index(".modal-box:has(.archive-wrap)"):]
+    fixed = fixed[:fixed.index("}")]
+    assert "width:" in fixed and "height:" in fixed, "长宽都要固定"
+
+    fn = js[js.index("async function openArchiveModal("):]
+    fn = fn[:fn.index("\n}\n")]
+    assert "archive-bulk" in fn and "全选" in fn, "批量操作条：全选"
+    assert "恢复所选" in fn and "删除所选" in fn
+    assert "确认删除 ${rows.length} 个？" in fn, "批量删除要二次确认"
+    assert 'row.dataset.sid = s.id' in fn, "批量操作要按落库的会话 id 发请求"
+    assert "syncBulk()" in fn, "单行操作后要同步批量条的计数与全选态"
 
 
 def test_sidebar_no_project_state_and_empty_text(home):
@@ -378,9 +444,12 @@ def test_sidebar_no_project_state_and_empty_text(home):
     assert ".list li.empty-hint { cursor: default; }" in css
     assert ".list li.empty-hint:hover { background: none; }" in css
 
-    # 4. 空组头的 ＋ 常显（空的时候它是唯一的建会话入口）
-    assert ".is-empty" in js and "s-quick.is-empty .s-quick-add" in css
-    assert "pgroup-head.is-empty .pg-add" in css
+    # 4. 组头的 ＋ 常显（已取代折叠箭头，不靠悬停才现）；快聊行沿用项目行样式
+    assert "is-empty" in js
+    pg_add = css[css.index("#session-list li.pgroup-head .pg-add {"):]
+    pg_add = pg_add[:pg_add.index("}")]
+    assert "opacity: 0" not in pg_add, "＋ 常显（悬停才现会让入口难以发现）"
+    assert ".quick-row" in css and "quick-row" in js, "快聊行沿用项目行（激活态高亮）"
 
     # 5. 不报数字：会话标题与各分组头都不挂条数——列表本身按行陈列，
     #    标题旁再挂个数字是噪声（2026-09-22 应用户要求移除）
@@ -601,6 +670,93 @@ def test_grouped_view_fold_all_button_protocol(home):
     # 三个调用点：applySidebarView（视图切换）、refreshSessionsGrouped（渲染尾部）、
     # renderSessionList（搜索结果没有组，按钮要随之隐藏）
     assert js.count("syncFoldAllBtn();") >= 3
+
+
+def test_grouped_head_click_highlight_protocol(home):
+    """分组视图组头「点哪行亮哪行」：点组头把高亮收过来，切语境时交回。
+
+    组头高亮平时跟活动会话所在组（快聊会话亮快聊组）；点了某个组头（折叠/
+    展开）后高亮先借给那个组，再点会话/切标签时交回。单值状态保证同一时刻
+    最多一个组头亮；点的组若已不存在自动落回，不整列无高亮。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    # 单值状态：最多一个组头亮
+    assert "let groupedClickGk = null;" in js
+    # 点组头（折叠/展开）时把高亮收给点的那个组
+    head = js[js.index("function renderProjectGroup("):]
+    head = head[:head.index("// ---- 拖动排序")]
+    assert "groupedClickGk = String(key);" in head
+    assert "st.open = !st.open;" in head, "行点击仍要展开/折叠"
+    # 渲染时：点了组头先亮它；组没了落回活动会话（不整列无高亮）
+    body = js[js.index("async function refreshSessionsGrouped("):]
+    body = body[:body.index("function renderProjectGroup(")]
+    assert "const highlightKey = groupedClickGk ||" in body
+    assert "if (!stillThere) groupedClickGk = null;" in body
+    # 切标签/点会话、新建会话、切视图、切项目：临时高亮都要复位
+    act = js[js.index("async function activateTab("):]
+    act = act[:act.index("\n}\n")]
+    assert "groupedClickGk = null;" in act, "切标签/点会话把高亮交回活动会话"
+    start = js[js.index("async function startNewTab("):]
+    start = start[:start.index("\n}\n")]
+    assert "groupedClickGk = null;" in start, "新建会话回到当前项目语境"
+    assert js.count("groupedClickGk = null") >= 4, "切视图/切项目等复位点至少在位"
+
+
+def test_close_tab_only_closes_tab(home):
+    """关标签只把页签从对话页收掉，不删会话；删除统一走左侧会话行。
+
+    回归：为「新建后侧栏没有新行」补的立即落库一度配了「关掉未发送标签顺手
+    删空会话」——那是关标签路径里的隐式删除，用户明确要求关标签≠删会话：
+    关掉后会话仍在侧栏，删除只能显式走侧栏 ⋯ →「删除会话」（或底部批量
+    「清理空会话」）。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    close = js[js.index("function closeTab("):]
+    close = close[:close.index("\n}\n")]
+    assert "session.delete" not in close, "关标签不得顺带删会话"
+    assert "tab.logEl.remove();" in close, "只从对话页收掉页签"
+    assert 'request("stop"' in close, "跑着的标签先停（这不是删除会话）"
+    # 删除入口仍在左侧：会话行 ⋯ 菜单（带确认弹窗）+ 底部批量清空会话
+    menu = js[js.index("function showSessionMenu("):]
+    menu = menu[:menu.index("function showTabMenu(")]
+    assert "删除会话" in menu and "deleteSessionModal" in menu
+    assert 'request("session.delete"' in js[js.index("function deleteSessionModal("):]
+    assert "session.cleanup_empty" in js, "空会话批量清理入口在侧栏底部"
+
+
+def test_new_session_follows_sidebar_highlight(home):
+    """「新建会话」的落点＝侧栏项目区高亮的那一项（两视图统一）。
+
+    分组视图点亮的组头（或活动会话所在组）与经典视图正在看的行，就是
+    左上按钮 / Ctrl+N / 窄栏＋ / 标签栏＋ / /new 的建会话落点：
+    快聊=建快聊、其他项目=先切过去、远程/其他=提示不建。此前恒在当前项目
+    建并跳回当前项目视图（「点了 A，新会话却跑去反代」）。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    # 高亮来源与组头渲染同一份：分组视图渲染时记下 highlightKey
+    assert "let lastGroupedHighlightKey = null;" in js
+    body = js[js.index("async function refreshSessionsGrouped("):]
+    body = body[:body.index("function renderProjectGroup(")]
+    assert "lastGroupedHighlightKey = highlightKey;" in body
+    # 分发函数：快聊=session.new_task；其他项目=切过去再建；远程=提示不建
+    fn = js[js.index("async function newSessionFromHighlight("):]
+    fn = fn[:fn.index("\n}\n")]
+    assert 'request("session.new_task"' in fn
+    assert 'request("project.switch"' in fn and "startNewTab();" in fn
+    assert "不能在这里新建" in fn
+    # 五个入口都走它（标签栏＋ / 左上按钮 / 窄栏＋ / /new）
+    assert "plus.onclick = () => newSessionFromHighlight();" in js
+    assert 'getElementById("btn-new").onclick = () => newSessionFromHighlight();' in js
+    rail = js[js.index('getElementById("rail-new").onclick'):]
+    assert "newSessionFromHighlight();" in rail[:200]
+    slash = js[js.index('case "/new"'):]
+    assert "newSessionFromHighlight();" in slash[:200]
 
 
 def _strip_js_comments(src: str) -> str:

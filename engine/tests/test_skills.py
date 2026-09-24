@@ -645,3 +645,88 @@ def test_skill_name_shape_and_target_containment(tmp_path):
         pytest.skip("本平台不允许创建目录符号链接")
     with pytest.raises(SkillInstallError):
         _skill_target(dest, "link")
+
+
+def test_frontmatter_quoted_values(tmp_path):
+    """frontmatter 值允许 YAML 成对引号：第三方技能包大量这种写法。
+
+    此前引号原样进技能名——装出来的目录名、load_skill 参数、清单显示全带
+    引号，与用户在广场里看到的名字对不上。只剥一层且必须首尾配对。
+    """
+    d = tmp_path / "quoted"
+    d.mkdir()
+    (d / "SKILL.md").write_text(
+        "---\nname: \"pdf-tools\"\ndescription: '合并、拆分 PDF'\nversion: \"1.2\"\n---\n正文\n",
+        encoding="utf-8",
+    )
+    skill = _load_skill_from_dir(d, "global")
+    assert skill.name == "pdf-tools"
+    assert skill.description == "合并、拆分 PDF"
+    assert skill.version == "1.2"
+
+    # 不配对的引号是内容的一部分，不剥
+    d2 = tmp_path / "odd"
+    d2.mkdir()
+    (d2 / "SKILL.md").write_text("---\nname: \"odd\n---\nb\n", encoding="utf-8")
+    assert _load_skill_from_dir(d2, "global").name == '"odd'
+
+
+def test_discover_skips_dot_directories(tmp_path):
+    """点开头目录不是技能：.git、安装中断留下的 .importing-* 暂存残留等。
+
+    与 installer._scan_skills_in_dir 的过滤保持一致——否则解压暂存目录一旦
+    残留，里面的 SKILL.md 会被当成可用技能常驻清单。
+    """
+    g = tmp_path / "skills"
+    for hidden in (".importing-repo", ".git", ".obsidian"):
+        (g / hidden).mkdir(parents=True)
+        (g / hidden / "SKILL.md").write_text(
+            "---\nname: ghost\ndescription: x\n---\nb\n", encoding="utf-8"
+        )
+    (g / "real").mkdir()
+    (g / "real" / "SKILL.md").write_text(
+        "---\nname: real\ndescription: r\n---\nb\n", encoding="utf-8"
+    )
+    skills = SkillLoader(global_dir=g).discover()
+    assert [s.name for s in skills] == ["real"]
+
+
+async def test_delete_skill_removes_loaded_side_of_duplicated_name(tmp_path, monkeypatch):
+    """全局/项目同名技能：发现时全局版遮蔽项目版，删除必须删掉加载到的那份。
+
+    此前的候选根顺序固定项目优先，导致用户看到的是全局版、删掉的却是被
+    遮蔽的项目版——清单里的技能纹丝不动，另一份被静默删除。
+    """
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setenv("SKYSHEEP_HOME", str(tmp_path / "home"))
+    global_dir = tmp_path / "home" / "skills"
+    proj_dir = tmp_path / "proj" / ".skysheep" / "skills"
+
+    def write_skill(base):
+        (base / "dup").mkdir(parents=True)
+        (base / "dup" / "SKILL.md").write_text(
+            "---\nname: dup\ndescription: d\n---\nX\n", encoding="utf-8"
+        )
+
+    write_skill(global_dir)
+    write_skill(proj_dir)
+    backend = ServerBackend(working_dir=tmp_path / "proj")
+    backend._for_each_agent = lambda: iter(())
+    backend.skills = SkillLoader(
+        global_dir=global_dir, project_dir=proj_dir, project_root=tmp_path / "proj",
+    )
+    backend.skills.discover()
+    assert backend.skills.get("dup").source == "global"
+
+    result = await backend.delete_skill("dup")
+    assert result["scope"] == "global"
+    assert not (global_dir / "dup").exists(), "要删的是用户看到的全局版"
+    assert (proj_dir / "dup").exists(), "被遮蔽的项目版不动"
+
+    # 只剩项目版时，加载到的就是项目版，删除走项目目录
+    backend.skills.discover()
+    assert backend.skills.get("dup").source == "project"
+    result = await backend.delete_skill("dup")
+    assert result["scope"] == "project"
+    assert not (proj_dir / "dup").exists()

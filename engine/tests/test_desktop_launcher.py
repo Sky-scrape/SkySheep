@@ -102,12 +102,64 @@ def test_focus_existing_window_gives_up_on_hung(monkeypatch):
     assert desktop._focus_existing_window() is False
 
 
-def test_stale_holder_from_hung_window(monkeypatch):
-    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 12345)
+def test_find_hung_sheep_hwnd_matches_by_image(monkeypatch):
+    """卡死实例证据链①：按属主进程镜像认亲找到卡死窗口（全程不读标题）。"""
     monkeypatch.setattr(desktop, "_window_pid", lambda hwnd: 4242)
     monkeypatch.setattr(desktop, "_is_hung", lambda hwnd: True)
+    monkeypatch.setattr(desktop.os, "getpid", lambda: 999)
+
+    class FakeKernel32:
+        @staticmethod
+        def OpenProcess(_access, _inherit, pid):
+            return 77 if pid == 4242 else 0
+
+        @staticmethod
+        def QueryFullProcessImageNameW(handle, _flags, buf, size_ptr):
+            # 生产代码传 c_void_p 句柄与 byref(size)，fake 里还原取值
+            if getattr(handle, "value", handle) != 77:
+                return 0
+            buf.value = desktop.sys.executable
+            size_ptr._obj.value = len(desktop.sys.executable)
+            return 1
+
+        @staticmethod
+        def CloseHandle(_handle):
+            return True
+
+    class FakeUser32:
+        def EnumWindows(self, cb, _lp):
+            cb(555, None)
+            return True
+
+    monkeypatch.setattr(
+        desktop.ctypes, "windll",
+        type("W", (), {"user32": FakeUser32(), "kernel32": FakeKernel32()})(),
+    )
+    assert desktop._find_hung_sheep_hwnd() == 555
+
+
+def test_find_hung_sheep_hwnd_skips_healthy_window(monkeypatch):
+    """没停转的窗口不算卡死证据：返回 0（交给标题匹配/聚焦那条路）。"""
+    monkeypatch.setattr(desktop, "_is_hung", lambda hwnd: False)
+    monkeypatch.setattr(
+        desktop.ctypes, "windll",
+        type("W", (), {
+            "user32": type("U", (), {"EnumWindows": lambda self, cb, lp: True})(),
+            "kernel32": object(),
+        })(),
+    )
+    assert desktop._find_hung_sheep_hwnd() == 0
+
+
+def test_stale_holder_from_hung_window(monkeypatch, isolated_home):
+    """链①：记录进程的窗口已停转 → 不等宽限期直接按窗口属主接管。"""
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    monkeypatch.setattr(desktop, "_find_hung_sheep_hwnd", lambda: 12345)
+    monkeypatch.setattr(desktop, "_window_pid", lambda hwnd: 4242)
     monkeypatch.setattr(desktop, "_process_start_time", lambda pid: 100.0 if pid == 4242 else None)
     monkeypatch.setattr(desktop.os, "getpid", lambda: 999)
+    desktop._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    desktop._pid_path().write_text("4242 100.0", encoding="utf-8")
     assert desktop._stale_holder_pid() == 4242
 
 
@@ -122,12 +174,14 @@ def test_stale_holder_none_when_window_healthy(monkeypatch):
 def test_stale_holder_respects_startup_grace(monkeypatch, fake_time, isolated_home):
     """没有窗口 + 实例还年轻：可能只是启动中，不允许接管。"""
     monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    monkeypatch.setattr(desktop, "_find_hung_sheep_hwnd", lambda: 0)
     desktop._write_pid_record()
     assert desktop._stale_holder_pid() is None
 
 
 def test_stale_holder_from_pid_record_after_grace(monkeypatch, fake_time, isolated_home):
     monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    monkeypatch.setattr(desktop, "_find_hung_sheep_hwnd", lambda: 0)
     # 模拟“另一个实例”写的记录：pid 不能是本进程（本进程会被视为自己而拒接管）
     other_pid = desktop.os.getpid() + 1
     desktop._pid_path().parent.mkdir(parents=True, exist_ok=True)
@@ -141,6 +195,7 @@ def test_stale_holder_from_pid_record_after_grace(monkeypatch, fake_time, isolat
 def test_stale_holder_rejects_pid_reuse(monkeypatch, fake_time, isolated_home):
     """pid 被复用（创建时刻对不上）：绝不接管，防误杀无关进程。"""
     monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    monkeypatch.setattr(desktop, "_find_hung_sheep_hwnd", lambda: 0)
     other_pid = desktop.os.getpid() + 1
     desktop._pid_path().parent.mkdir(parents=True, exist_ok=True)
     desktop._pid_path().write_text(f"{other_pid} 100.0", encoding="utf-8")
@@ -150,10 +205,26 @@ def test_stale_holder_rejects_pid_reuse(monkeypatch, fake_time, isolated_home):
     assert desktop._stale_holder_pid() is None
 
 
+def test_stale_holder_ignores_foreign_hung_window(monkeypatch, fake_time, isolated_home):
+    """卡死窗口属主与 pid 记录不符：不按窗口属主加速接管（宁可等宽限期，
+    按记录本身接管——记录才是身份锚点，窗口只是加速证据）。"""
+    monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    monkeypatch.setattr(desktop, "_find_hung_sheep_hwnd", lambda: 12345)
+    monkeypatch.setattr(desktop, "_window_pid", lambda hwnd: 777)  # 与记录不一致
+    other_pid = desktop.os.getpid() + 1
+    desktop._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    desktop._pid_path().write_text(f"{other_pid} 100.0", encoding="utf-8")
+    monkeypatch.setattr(desktop, "_process_start_time", lambda x: 100.0 if x == other_pid else None)
+    monkeypatch.setattr(desktop.os, "getpid", lambda: other_pid - 5)
+    # FakeTime 每次调用 +1s：走过宽限期后按记录接管（绝不是杀窗口属主 777）
+    assert desktop._stale_holder_pid() == other_pid
+
+
 def test_terminate_process_targets_only_recorded(monkeypatch, fake_time, isolated_home):
     """接管的杀进程路径：只杀 _stale_holder_pid 确认过的 pid。"""
     killed: list[int] = []
     monkeypatch.setattr(desktop, "_find_main_hwnd", lambda: 0)
+    monkeypatch.setattr(desktop, "_find_hung_sheep_hwnd", lambda: 0)
     other_pid = desktop.os.getpid() + 1
     desktop._pid_path().parent.mkdir(parents=True, exist_ok=True)
     desktop._pid_path().write_text(f"{other_pid} 100.0", encoding="utf-8")

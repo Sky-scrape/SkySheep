@@ -13,6 +13,7 @@ import re
 
 from ..events import CompactionEvent
 from ..messages import Message
+from ..models.base import ProviderTextDelta
 
 # 西文/代码约 3.5 字符一个 token；CJK 一个字符约 0.7 个 token。
 # 早期版本一律按 3.5 折算，中文会话的占用率会被低估约 2 倍（中文并不是
@@ -126,7 +127,9 @@ async def compact_history(
         [Message.system(COMPACT_SYSTEM), Message.user(COMPACT_USER_TEMPLATE.format(transcript=transcript))],
         [],
     ):
-        if hasattr(pe, "text"):
+        # 只收正文增量：思考型模型的 reasoning 增量同样带 text 字段，混进摘要
+        # 既浪费注入预算又污染事实（与 backend 归档提炼同一过滤口径）
+        if isinstance(pe, ProviderTextDelta):
             summary_parts.append(pe.text)
     summary = "".join(summary_parts).strip()
     if not summary:

@@ -448,6 +448,14 @@ class SessionStore:
             raise FileNotFoundError("备份不存在：" + name)
         # 先给"当前"存一份，用户万一恢复错了还能回来
         safety = None
+        if self._db is not None:
+            # 与 _rolling_backup / backup_now 同口径：拷贝前先 checkpoint 收 WAL，
+            # 否则已提交的数据可能还在 -wal 里，安全副本缺最近一段消息——
+            # 恢复失败想退回时退不回「恢复前一刻」
+            try:
+                await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:  # noqa: BLE001 - checkpoint 失败不拦恢复：至多拷到稍旧数据
+                pass
         if self.path.exists() and self.path.stat().st_size > 0:
             stamp = time.strftime("%Y%m%d-%H%M%S")
             safety = d / f"{self.path.stem}-{stamp}{self.SAFETY_TAG}.db"
@@ -641,6 +649,9 @@ class SessionStore:
         try:
             await self._backfill_fts()
         except Exception:
+            # 回填半途而废会留下水位以下的洞（水位增量只补水位以上的行），
+            # 必须置脏：下次启动改走查漏模式，把洞补回来（与 _fts_insert 同口径）
+            self._fts_dirty = True
             return
         self.fts_ready = True
 
@@ -789,8 +800,12 @@ class SessionStore:
         return Project(row["id"], row["root_path"], row["name"], row["created_at"]) if row else None
 
     async def delete_project(self, project_id: int) -> int:
-        """删除项目记录及其全部会话（含消息）与白名单规则，返回删除的行数（0=不存在）。
-        只清数据库记录，电脑上的项目文件夹不受影响。"""
+        """删除项目记录及其全部会话（含消息）、白名单规则、任务清单与定时任务/
+        流水线（与 backend.delete_project 的声明同一口径），返回删除的行数（0=不存在）。
+        只清数据库记录，电脑上的项目文件夹不受影响。
+
+        定时任务/流水线必须级联：留下孤儿任务的话，到点扫描仍会捞到它，
+        执行上下文兜底会把它挂到「当前项目」的工作目录与白名单下继续跑。"""
         assert self._db
         await self._fts_delete(
             "session_id IN (SELECT id FROM sessions WHERE project_id = ?)", (project_id,)
@@ -803,6 +818,13 @@ class SessionStore:
         await self._db.execute("DELETE FROM sessions WHERE project_id = ?", (project_id,))
         await self._db.execute("DELETE FROM whitelist_rules WHERE project_id = ?", (project_id,))
         await self._db.execute("DELETE FROM project_tasks WHERE project_id = ?", (project_id,))
+        await self._db.execute(
+            "DELETE FROM pipeline_nodes WHERE pipeline_id IN "
+            "(SELECT id FROM pipelines WHERE project_id = ?)",
+            (project_id,),
+        )
+        await self._db.execute("DELETE FROM pipelines WHERE project_id = ?", (project_id,))
+        await self._db.execute("DELETE FROM cron_tasks WHERE project_id = ?", (project_id,))
         cur = await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         await self._db.commit()
         return cur.rowcount
@@ -1237,16 +1259,21 @@ class SessionStore:
         return session_from_row(row)
 
     async def count_empty_sessions(self, project_id: int | None) -> int:
-        """统计没有任何消息的会话（"空会话"）。"""
+        """统计能被 delete_empty_sessions 清掉的空会话数（"清理 N 个空会话"角标）。
+
+        口径必须与 delete_empty_sessions 完全一致（置顶/归档的不算）：
+        角标显示 N、点清理却删不掉 N 个，操作看起来就像坏了。"""
         assert self._db
         if project_id is None:
             cur = await self._db.execute(
                 "SELECT COUNT(*) FROM sessions WHERE project_id IS NULL"
+                " AND pinned = 0 AND archived = 0"
                 " AND id NOT IN (SELECT DISTINCT session_id FROM messages)"
             )
         else:
             cur = await self._db.execute(
                 "SELECT COUNT(*) FROM sessions WHERE project_id = ?"
+                " AND pinned = 0 AND archived = 0"
                 " AND id NOT IN (SELECT DISTINCT session_id FROM messages)",
                 (project_id,),
             )
@@ -1254,18 +1281,22 @@ class SessionStore:
         return int(row[0])
 
     async def delete_empty_sessions(self, project_id: int | None, keep_id: str | None = None) -> int:
-        """删除空会话（保留 keep_id 指定的当前会话与置顶会话），返回删除数量。"""
+        """删除空会话（保留 keep_id 指定的当前会话与置顶会话），返回删除数量。
+
+        归档的空会话不动：用户特意归档收起来的东西，不该被清理顺手删掉。"""
         assert self._db
         keep = keep_id or ""
         if project_id is None:
             cur = await self._db.execute(
                 "DELETE FROM sessions WHERE project_id IS NULL AND pinned = 0"
+                " AND archived = 0"
                 " AND id NOT IN (SELECT DISTINCT session_id FROM messages) AND id != ?",
                 (keep,),
             )
         else:
             cur = await self._db.execute(
                 "DELETE FROM sessions WHERE project_id = ? AND pinned = 0"
+                " AND archived = 0"
                 " AND id NOT IN (SELECT DISTINCT session_id FROM messages) AND id != ?",
                 (project_id, keep),
             )
@@ -1368,6 +1399,8 @@ class SessionStore:
             # 命中位置用大小写不敏感查找（FTS 与 LIKE 都可能在大小写上放宽）
             low, q = plain.lower(), query.lower()
             pos = low.find(q)
+            if pos < 0:
+                pos = 0  # 行确实命中（SQL 侧放宽）但正文里定位不到：片段从头截
             start = max(0, pos - 40)
             fragment = plain[start : pos + len(query) + 80].replace("\n", " ").strip()
             results.append(
@@ -1426,13 +1459,19 @@ class SessionStore:
             return await self._search_like(project_id, query, scope)
 
     async def _search_like(self, project_id: int | None, query: str, scope: str) -> list:
-        """LIKE 全扫描：FTS 不可用时的兜底（也用于 1–2 字符的短查询）。"""
+        """LIKE 全扫描：FTS 不可用时的兜底（也用于 1–2 字符的短查询）。
+
+        通配符要转义：查询里的 % / _ 是用户想找的字面字符，不当通配符——
+        不转义的话搜「%」等于全表命中，搜「100%」变成前缀匹配。"""
         cond, args = self._scope_condition(project_id, scope)
+        escaped = (
+            query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
         cur = await self._db.execute(
             self.SEARCH_SELECT
-            + f" WHERE {cond} AND m.content LIKE ?"
+            + f" WHERE {cond} AND m.content LIKE ? ESCAPE '\\'"
             " ORDER BY s.pinned DESC, s.updated_at DESC, m.seq",
-            args + (f"%{query}%",),
+            args + (f"%{escaped}%",),
         )
         return await cur.fetchall()
 

@@ -909,3 +909,108 @@ async def test_backend_set_mcp_enabled_flips_config(tmp_path, monkeypatch):
     r = await backend.set_mcp_enabled("fetch", True)
     assert r["enabled"] is True
     assert "enabled" not in load_servers(cfg_path)["fetch"], "启用即默认态，不写冗余字段"
+
+
+def test_mcp_tool_exports_annotations():
+    """to_schema 必须带 annotations 四布尔（与内置工具同一份契约）。
+
+    read_only_hint 用收窄后的最终判定（= 权限门的实际口径，注解只收窄不
+    放宽）；其余三项透传服务器显式声明的值，未声明落 Tool 基类的保守缺省
+    ——可疑其有写、有破坏性，让外部宿主多提醒一次。
+    """
+    from types import SimpleNamespace
+
+    declared = SimpleNamespace(
+        read_only_hint=False, destructive_hint=False,
+        idempotent_hint=True, open_world_hint=False,
+    )
+    # 调用点（_connect_one）传的就是收窄后的 readonly：服务器标 readonly
+    # 但工具自带 read_only_hint=False 时算出 False → WRITE 口径
+    from skysheep.mcp.client import _effective_readonly
+
+    narrowed = _effective_readonly(True, "t", declared)
+    assert narrowed is False
+    tool = MCPTool(
+        manager=FakeManager(None), server_name="srv", tool_name="t",
+        description="", input_schema={"type": "object"}, readonly=narrowed,
+        annotations=declared,
+    )
+    schema = tool.to_schema()
+    assert set(schema) == {"name", "description", "input_schema", "annotations"}
+    assert tool.safety == Safety.WRITE
+    assert schema["annotations"] == {
+        "readOnlyHint": False, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": False,
+    }
+
+    # 未声明任何注解：read_only 沿用服务器级授权，其余落保守缺省
+    plain_readonly = MCPTool(
+        manager=FakeManager(None), server_name="srv", tool_name="t",
+        description="", input_schema={"type": "object"}, readonly=True,
+    ).to_schema()["annotations"]
+    assert plain_readonly == {
+        "readOnlyHint": True, "destructiveHint": True,
+        "idempotentHint": False, "openWorldHint": True,
+    }
+    plain_write = MCPTool(
+        manager=FakeManager(None), server_name="srv", tool_name="t",
+        description="", input_schema={"type": "object"}, readonly=False,
+    ).to_schema()["annotations"]
+    assert plain_write["readOnlyHint"] is False
+    assert plain_write["destructiveHint"] is True
+
+
+async def test_backend_save_mcp_server_preserves_disabled_state(tmp_path, monkeypatch):
+    """表单没有「停用」字段：覆盖已停用的同名服务时保留停用状态。
+
+    否则用户只是改个参数保存，服务就被顺手重新启用并拉起（stdio 等于立即
+    执行本机命令），超出这次操作表达的意思；停用的服务也不得发起连接。
+    """
+    from skysheep.mcp.installer import load_servers, mcp_config_path, save_servers
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setenv("SKYSHEEP_HOME", str(tmp_path / "home"))
+    backend = ServerBackend(working_dir=tmp_path)
+    backend._apply_registry_to_agents = lambda: None
+    cfg_path = mcp_config_path(tmp_path / "home")
+
+    class FakeMgr:
+        def __init__(self):
+            self.statuses: dict = {}
+            self.connected: list[str] = []
+
+        async def disconnect_server(self, name):
+            pass
+
+        def forget_server(self, name):
+            pass
+
+        async def connect_server(self, name, cfg):
+            if cfg.enabled:
+                self.connected.append(name)
+            st = MCPServerStatus(name)
+            st.enabled = cfg.enabled
+            self.statuses[name] = st
+            return []
+
+        def tools_for(self, name):
+            return []
+
+    mgr = FakeMgr()
+    backend.mcp = mgr
+
+    save_servers(cfg_path, {"fetch": {"command": "uvx", "enabled": False}})
+    backend.mcp_configs = {"fetch": MCPServerConfig(command="uvx", enabled=False)}
+    await backend.save_mcp_server("fetch", command="uvx", args=["mcp-server-fetch", "--new"])
+    saved = load_servers(cfg_path)["fetch"]
+    assert saved["enabled"] is False, "改参数不能顺手把停用的服务启用"
+    assert saved["args"] == ["mcp-server-fetch", "--new"], "其余字段正常更新"
+    assert mgr.connected == [], "停用的服务不得被拉起"
+
+    # 已存在且未停用的服务：保存后照常连接（编辑不等同于保留停用）
+    save_servers(cfg_path, {"fetch": {"command": "uvx"}})
+    backend.mcp_configs = {"fetch": MCPServerConfig(command="uvx")}
+    await backend.save_mcp_server("fetch", command="uvx", args=["mcp-server-fetch"])
+    assert mgr.connected == ["fetch"]
+    # 落盘带的是显式默认值 enabled: true（model_dump 非 None 字段），语义即启用
+    assert load_servers(cfg_path)["fetch"]["enabled"] is True

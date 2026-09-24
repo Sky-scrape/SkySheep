@@ -63,6 +63,35 @@ def test_boot_snapshot(home):
     assert "crashed_last_run" in snap
 
 
+def test_shutdown_clears_crash_flag(home):
+    """崩溃哨兵在 backend.shutdown() 一进来就清。
+
+    清在收尾链开头，被截断的收尾（桌面壳 1.5s 上限、程序内更新的 os._exit）
+    也不会留下「正常退出却提示上次未正常关闭」的误报；程序内更新绕过
+    lifespan 直接调 backend.shutdown() 的路径同样覆盖。
+    """
+    import asyncio
+
+    from skysheep.config import skysheep_home
+
+    flag = skysheep_home() / "crash.flag"
+    app = create_app(
+        working_dir=home / "proj",
+        provider_name="fake",
+        provider_factory=lambda: FakeProvider([]),
+    )
+    backend = app.state.backend
+    with TestClient(app):
+        assert flag.exists()  # 启动即落标记
+        assert backend.crashed_last_run is False
+    assert not flag.exists()  # lifespan 收尾清除
+
+    # 模拟 apply_update：直接调 backend.shutdown()（不经 lifespan）
+    flag.write_text("leftover", encoding="utf-8")
+    asyncio.run(backend.shutdown())
+    assert not flag.exists()
+
+
 def test_computer_control_toggle_hot_applies(home):
     """设置 · 高级打开「电脑控制」总开关：热生效，工具清单即时出现七件套。"""
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:

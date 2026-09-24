@@ -11,7 +11,7 @@
 [![English](https://img.shields.io/badge/docs-English-red)](README.en.md)
 [![M8ven Verified](https://m8ven.ai/badge/mcp/sky-scrape/skysheep?variant=verified)](https://m8ven.ai/mcp/sky-scrape/skysheep)
 
-[🌐 官网](https://sky-scrape.github.io/SkySheep/) · [⬇️ 下载安装包](https://github.com/Sky-scrape/SkySheep/releases/latest) · [🧩 技能广场](market/) · [📖 English Docs](README.en.md)
+[🌐 官网](https://sky-scrape.github.io/SkySheep/) · [⬇️ 下载安装包](https://github.com/Sky-scrape/SkySheep/releases/latest) · [📖 English Docs](README.en.md)
 
 </div>
 
@@ -45,9 +45,9 @@ SkySheep 不只是聊天窗口：它能读写你的文件、执行命令、操�
 - 🔌 **多模型服务**：智谱 / DeepSeek / Kimi / OpenRouter / 硅基流动 / Anthropic 原生，一键配置；
   本地模型支持 [Ollama](https://ollama.com)（无需 Key）；自定义中转 + 自动检测模型
 - 🧩 **MCP 与技能扩展**：MCP 客户端（stdio/HTTP，Claude Desktop 配置兼容 + 常用预设一键添加）；
-  [Skills 技能包](skills-gallery/)（全局/项目两级 + [技能广场](market/)分类筛选、关键词搜索、
-  装前详情预览、一键安装与版本更新 + 「本机现存」列出 Claude Code 等工具已装的技能供勾选导入；
-  独立技能页可设使用范围、可搜索）
+  [Skills 技能包](skills-gallery/)（全局/项目两级，支持从文件夹、.zip、GitHub / Gitee 链接安装；
+  「本机现存」列出 Claude Code 等工具已装的技能供勾选导入；独立技能页可设使用范围、可搜索、
+  可批量删除）
 - 🖱️ **电脑控制**：截屏进对话、鼠标 / 键盘 / 窗口 / 剪贴板（默认关闭，确认制 + 动作级白名单，
   键盘输入只固化批准过的那一次）
 - ⏰ **定时任务与日程**：周期任务、到点提醒、周历视图；手机经局域网继续聊（令牌 + 二维码），
@@ -62,7 +62,7 @@ SkySheep 不只是聊天窗口：它能读写你的文件、执行命令、操�
 - 👥 **圆桌多模型**：多个模型并行独立作答，主席融合成一份更好的答案；可开启辩论修订轮
   （成员互看草稿后再改一遍）、A/B 对比保留各自回答；草稿随消息留存可回看与引用追问
 - 📄 **文档读写**：PDF / Word / Excel 读取，Word / Excel / CSV 生成
-- 🀄 **中文优先**：界面、内置帮助、提示词、技能广场全部为中文场景设计
+- 🀄 **中文优先**：界面、内置帮助、提示词全部为中文场景设计
 
 ## 👑 两大招牌
 
@@ -286,7 +286,7 @@ uv run ruff check .  # lint
 
 - **M1-M4（✅）**：引擎内核 → 扩展生态（MCP/Skills/子代理）→ 桌面应用 → 特性对标
 - **M5（✅ 已发布）**：开源发布——仓库上线 [github.com/Sky-scrape/SkySheep](https://github.com/Sky-scrape/SkySheep)：
-  CI ✅、社区配套 ✅、安装器脚本 ✅、技能广场（索引随主仓库发布）✅、更新检查 ✅、
+  CI ✅、社区配套 ✅、安装器脚本 ✅、更新检查 ✅、
   SmartScreen 指南 ✅、官网页面（`index.html`，GitHub Pages 可用）✅；剩余：代码签名分发
 - **M6（✅ 0.8.0）**：普通用户可用性补强（详见 [CHANGELOG](CHANGELOG.md)）
 - **v1.0（✅）**：首个正式版——浏览器控制、手机控制（设置内开关）、
@@ -322,13 +322,18 @@ uv run ruff check .  # lint
   项目任务清单、内置子代理扩到六个且全部可编辑、应用内一键更新（安装版）、
   模型服务上下文窗口一键检测、全局上下文上限默认提到 100 万 token，
   以及快聊会话操作、渠道首次配置死锁、微信扫码二维码等一批修复
-- **v1.8（✅ 当前版本）**：子代理隔离派生（git worktree 目录级隔离，任务跑独立分支、
+- **v1.8（✅）**：子代理隔离派生（git worktree 目录级隔离，任务跑独立分支、
   完成自动提交、合并由主会话确认）与并行任务写租约（同项目多会话写同一文件先等后写、
   冲突带注记）；聊天渠道从 Telegram 换成飞书（官方 SDK，远程连接固定项目）；
   设置 · 高级补齐八件事（钩子测试器 / 最近执行面板 / 钩子与白名单启停开关 /
   白名单命中统计 / stop 钩子 / 压缩触发比例 / 运行参数恢复默认 / 已信任项目清单）；
   安全审查第二轮逐项修复（技能名路径穿越、压缩后落库切片两个高危 + 16 项中危）；
   提示词页排序 / 统计 / 导入导出、会话标签命名与拖动排序等一批界面打磨
+- **v1.9（✅ 当前版本）**：五轮专项审计修复（会话操作、信息与记忆管理、技能管理、
+  MCP 管理与使用、右侧面板 12 个页签链路）+ 微信扫码登录两处根因修复 +
+  桌面启动/退出生命周期收尾（不再误报「上次未正常关闭」）；交互统一一批：
+  「新建会话」点击即建、归档连标签一起收、归档弹窗固定尺寸 + 批量选择、
+  技能页铺满整页（技能广场入口下线）
 - **后续方向**：macOS/Linux 支持、系统级定时调度、提示注入纵深防御
 
 版本与变更以 [CHANGELOG.md](CHANGELOG.md) 为唯一事实来源。

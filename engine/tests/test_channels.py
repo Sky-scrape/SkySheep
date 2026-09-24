@@ -1325,11 +1325,12 @@ async def test_weixin_fetch_qrcode_and_poll():
 
 
 async def test_weixin_login_confirmed_returns_credentials():
+    """确认响应的凭据在**顶层**（官方包 login-qr.ts 的 StatusResponse 形状）。"""
     def handler(request: httpx.Request) -> httpx.Response:
         if "get_qrcode_status" in str(request.url):
             return httpx.Response(200, json={
                 "status": "confirmed", "ret": 0,
-                "credentials": {"bot_token": "bt-1", "ilink_bot_id": "b1", "ilink_user_id": "u1"},
+                "bot_token": "bt-1", "ilink_bot_id": "b1", "ilink_user_id": "u1",
                 "baseurl": "https://ilinkai.weixin.qq.com",
             })
         return httpx.Response(200, json={"ret": 0})
@@ -1339,7 +1340,91 @@ async def test_weixin_login_confirmed_returns_credentials():
     st = await ch.poll_qrcode("qr")
     assert st["status"] == "confirmed"
     assert st["bot_token"] == "bt-1"
+    assert st["base_url"] == "https://ilinkai.weixin.qq.com"
     await ch.stop()
+
+
+async def test_weixin_login_confirmed_credentials_fallback_still_works():
+    """官方文档页的 credentials 包一层是旧形状；顶层没有时按兜底取。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "get_qrcode_status" in str(request.url):
+            return httpx.Response(200, json={
+                "status": "confirmed", "ret": 0,
+                "credentials": {"bot_token": "bt-2"},
+            })
+        return httpx.Response(200, json={"ret": 0})
+
+    ch = _wx({})
+    ch._transport = _mock_transport(handler)
+    st = await ch.poll_qrcode("qr")
+    assert st["status"] == "confirmed"
+    assert st["bot_token"] == "bt-2"
+    await ch.stop()
+
+
+async def test_weixin_login_confirmed_without_token_returns_no_token():
+    """确认了却没有凭据：结果里不带 bot_token（结构已记日志），由宿主给出报错。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "get_qrcode_status" in str(request.url):
+            return httpx.Response(200, json={"status": "confirmed", "ret": 0})
+        return httpx.Response(200, json={"ret": 0})
+
+    ch = _wx({})
+    ch._transport = _mock_transport(handler)
+    st = await ch.poll_qrcode("qr")
+    assert st["status"] == "confirmed"
+    assert "bot_token" not in st
+    await ch.stop()
+
+
+async def test_weixin_poll_redirect_switches_host():
+    """scaned_but_redirect（IDC 迁移）：轮询主机要换到 redirect_host 再继续。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "get_qrcode_status" in str(request.url):
+            return httpx.Response(200, json={
+                "status": "scaned_but_redirect", "ret": 0,
+                "redirect_host": "il-hop.weixin.qq.com",
+            })
+        return httpx.Response(200, json={"ret": 0})
+
+    ch = _wx({})
+    ch._transport = _mock_transport(handler)
+    st = await ch.poll_qrcode("qr")
+    assert st == {"status": "scaned"}
+    assert ch.base_url == "https://il-hop.weixin.qq.com"
+    await ch.stop()
+
+
+async def test_weixin_poll_binded_and_verify_code_roundtrip():
+    """binded_redirect 映射为 binded；need_verifycode 时 verify_code 要带上重试。"""
+    seen_urls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        seen_urls.append(url)
+        if "get_qrcode_status" in url:
+            if "verify_code=1234" in url:
+                return httpx.Response(200, json={"status": "scaned", "ret": 0})
+            return httpx.Response(200, json={"status": "need_verifycode", "ret": 0})
+        return httpx.Response(200, json={"ret": 0})
+
+    ch = _wx({})
+    ch._transport = _mock_transport(handler)
+    st = await ch.poll_qrcode("qr")
+    assert st["status"] == "need_verifycode"
+    st = await ch.poll_qrcode("qr", verify_code=" 1234 ")  # 带空白也要剥掉再编码
+    assert st["status"] == "scaned"
+    assert any("verify_code=1234" in u for u in seen_urls)
+
+    def binded_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "binded_redirect", "ret": 0})
+
+    ch2 = _wx({})
+    ch2._transport = _mock_transport(binded_handler)
+    st2 = await ch2.poll_qrcode("qr")
+    assert st2 == {"status": "binded"}
+    await ch.stop()
+    await ch2.stop()
 
 
 async def test_weixin_apply_login_persists_state():

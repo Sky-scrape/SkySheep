@@ -1,5 +1,6 @@
 """底部终端面板（PTY 真终端：term.spawn/input/resize/close）、辅助对话（chat.aux）、
-审查（checkpoint.diff）、以及界面偏好的标签持久化（right_tabs 等）。"""
+审查（checkpoint.diff）、项目记忆读写（编码安全 / 截断明示 / 切项目重置 aux 历史）、
+以及界面偏好的标签持久化（right_tabs 等）。"""
 
 from __future__ import annotations
 
@@ -169,6 +170,82 @@ def test_chat_aux_requires_provider(home):
         ws.send_json({"id": "a1", "method": "chat.aux", "params": {"text": "hi"}})
         frame = recv_until(ws, "a1")
         assert not frame["ok"] and "模型服务未配置" in frame["error"]
+
+
+def test_aux_history_resets_on_project_switch(home):
+    """切项目必须重置辅助对话历史：system 消息里的 cwd 只在历史为空时注入，
+    不清掉的话切项目后模型仍以为在上一个目录里。"""
+    from skysheep.models.fake import FakeProvider
+
+    prov = FakeProvider([[TextBlock(text="答一")], [TextBlock(text="答二")]])
+    other = home / "other"
+    other.mkdir()
+    with make_client(home, [], provider=prov) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "chat.aux", "params": {"text": "问一"}})
+        assert recv_until(ws, "a1")["ok"]
+        ws.send_json({"id": "s1", "method": "project.switch",
+                      "params": {"path": str(other)}})
+        frame = recv_until(ws, "s1")
+        assert frame["ok"] and frame["result"]["switched"]
+        ws.send_json({"id": "a2", "method": "chat.aux", "params": {"text": "问二"}})
+        assert recv_until(ws, "a2")["ok"]
+        # 切项目后的第一问：历史被重置 → 只带新的 system（含新目录）+ 本条消息
+        second = prov.calls[1]
+        assert [m.role for m in second] == ["system", "user"]
+        assert str(other) in second[0].text
+        assert str(home / "proj") not in second[0].text
+
+
+def test_project_instructions_encoding_and_truncation(home):
+    """项目记忆读写走 textio：GBK 的 AGENTS.md 不再被读成替换字符、保存保编码；
+    超上限截断随结果明示（truncated / original_chars / limit），不再静默。"""
+    from skysheep.core.prompt import MAX_INSTRUCTIONS_CHARS
+
+    proj = home / "proj"
+    agents = proj / "AGENTS.md"
+    agents.write_bytes("提交信息用中文\n改完必须跑测试\n".encode("gb18030"))
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "g1", "method": "project.instructions"})
+        got = recv_until(ws, "g1")["result"]
+        assert "提交信息用中文" in got["text"], "GBK 内容应正确解码"
+        assert "\ufffd" not in got["text"], "不得出现替换字符"
+        assert got["encoding_text"] == "GB18030"
+        assert got["editable"] is True
+
+        ws.send_json({"id": "s1", "method": "project.save_instructions",
+                      "params": {"text": "提交信息用中文\n新增一条约定\n",
+                                 "base_mtime": got["mtime"]}})
+        saved = recv_until(ws, "s1")["result"]
+        assert saved["saved"] and not saved["truncated"]
+        # 写回保留 GB18030：磁盘字节仍按 GBK 解得回（没有被悄悄换成 UTF-8）
+        assert "新增一条约定" in agents.read_bytes().decode("gb18030")
+        assert agents.read_bytes() != "提交信息用中文\n新增一条约定\n".encode()
+
+        # 超上限：截断落盘，且 truncated / original_chars / limit 如实带回
+        over = 123
+        big = "字" * (MAX_INSTRUCTIONS_CHARS + over)
+        ws.send_json({"id": "s2", "method": "project.save_instructions",
+                      "params": {"text": big, "base_mtime": saved["mtime"]}})
+        saved2 = recv_until(ws, "s2")["result"]
+        assert saved2["truncated"] is True
+        assert saved2["chars"] == MAX_INSTRUCTIONS_CHARS
+        assert saved2["original_chars"] == MAX_INSTRUCTIONS_CHARS + over
+        assert saved2["limit"] == MAX_INSTRUCTIONS_CHARS
+        # 落盘的仍是 GB18030（沿用原编码）：按原编码解出 8000 字
+        assert len(agents.read_bytes().decode("gb18030")) == MAX_INSTRUCTIONS_CHARS
+
+
+def test_load_project_instructions_gbk(tmp_path):
+    """系统提示词注入侧同样走 textio：GBK 的 AGENTS.md 不再把替换字符带进每轮提示词。"""
+    from skysheep.core.prompt import load_project_instructions
+
+    p = tmp_path / "AGENTS.md"
+    p.write_bytes("约定内容".encode("gb18030"))
+    path, text = load_project_instructions(tmp_path)
+    assert path == str(p)
+    assert "约定内容" in text and "\ufffd" not in text
 
 
 def test_checkpoint_diff_shows_changes(home):

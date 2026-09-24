@@ -6,6 +6,8 @@ import platform
 from datetime import date
 from pathlib import Path
 
+from ..textio import read_text_file
+
 PROMPT_TEMPLATE = """\
 You are SkySheep, an open-source AI agent workbench running on the user's machine. \
 You are pragmatic, careful, and get real work done.
@@ -138,16 +140,18 @@ MAX_INSTRUCTIONS_CHARS = 8000
 
 
 def load_project_instructions(working_dir: Path) -> tuple[str | None, str]:
-    """按优先级查找项目说明文件，返回 (路径, 内容)；找不到返回 (None, "")。"""
+    """按优先级查找项目说明文件，返回 (路径, 内容)；找不到返回 (None, "")。
+
+    读走 textio 探测编码：GBK 等非 UTF-8 的 AGENTS.md 不再被读成一串替换
+    字符注进每轮系统提示词（utf-8+replace 是被项目规范点名的损坏路径）。"""
     for name in INSTRUCTION_FILES:
         fp = Path(working_dir) / name
         if fp.is_file():
             try:
-                return str(fp), fp.read_text(encoding="utf-8", errors="replace")[
-                    :MAX_INSTRUCTIONS_CHARS
-                ]
+                loaded = read_text_file(fp)
             except OSError:
                 return None, ""
+            return str(fp), loaded.text[:MAX_INSTRUCTIONS_CHARS]
     return None, ""
 
 

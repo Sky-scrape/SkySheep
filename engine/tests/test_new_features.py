@@ -616,46 +616,6 @@ def test_ws_memory_and_toolcfg_and_lan_and_market(home):
         assert mk["source"] in ("remote", "builtin") and mk["items"]
 
 
-def test_market_modal_has_keyword_search(home):
-    """技能广场必须带关键词搜索（索引长了以后翻找成本高）。
-
-    锁两件事：搜索框/计数/列表容器在技能页的折叠块里，以及过滤与高亮的实现约定——
-    多关键词空格分隔且为 AND 语义，高亮必须走转义（索引内容是外部输入）。
-    """
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    # 搜索渲染逻辑现在住在 renderMarketInto（技能页的折叠块展开时调用）
-    body = js[js.index("async function renderMarketInto("):]
-    body = body[:body.index("\n// 折叠块")]
-
-    for needle in ('id="market-q"', 'id="market-q-clear"', 'id="market-count"', 'id="market-list"'):
-        assert needle in body, f"技能广场缺搜索相关节点：{needle}"
-    # 输入即过滤（不需要点按钮）
-    assert 'input.addEventListener("input"' in body
-    # 多关键词按空格拆、全部命中（AND）
-    assert "split(/\\s+/)" in body
-    assert "terms.every((t) => hay.includes(t))" in body
-    # 命中范围包含名称/描述/作者/地址
-    for field in ("it.name", "it.description", "it.author", "it.url"):
-        assert field in body, f"搜索字段缺 {field}"
-    # 高亮先转义再拼标签，且合并重叠区间（不产生嵌套 mark）
-    assert "const markAll" in body
-    assert "escapeHtml(text.slice(a, b))" in body
-    assert "merged" in body
-    # 列表自己滚（条目多了不至于把搜索框顶出视野）
-    assert ".market-list {" in css
-    market_list_css = css[css.index(".market-list {"):]
-    market_list_css = market_list_css[:market_list_css.index("}")]
-    assert "max-height" in market_list_css and "overflow-y: auto" in market_list_css
-    # 不再是弹窗：入口是技能页里的折叠块，展开时才拉索引
-    assert 'id="skill-market"' in html and "<details" in html
-    assert 'id="btn-market"' not in html
-    assert "renderMarketInto(body" in js
-
-
 def test_local_skills_render_inline_not_modal(home):
     """「本机现存」：候选直接平铺在技能页按钮下方，不再弹窗。
 

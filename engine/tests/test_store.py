@@ -126,7 +126,8 @@ async def test_empty_session_helpers(store):
     pinned_empty = await store.create_session(p.id)
     await store.set_pinned(pinned_empty.id, True)
 
-    assert await store.count_empty_sessions(p.id) == 3  # e1/e2/置顶空会话
+    # 计数口径与 delete_empty_sessions 一致（置顶/归档的不算）：只数 e1/e2
+    assert await store.count_empty_sessions(p.id) == 2
     removed = await store.delete_empty_sessions(p.id, keep_id=e1.id)
     assert removed == 1  # 只删掉 e2（e1 是当前会话、置顶会话、含内容的都保留）
     assert await store.get_session(e2.id) is None

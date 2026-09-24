@@ -11,7 +11,7 @@
 [![中文](https://img.shields.io/badge/docs-中文-red)](README.md)
 [![M8ven Verified](https://m8ven.ai/badge/mcp/sky-scrape/skysheep?variant=verified)](https://m8ven.ai/mcp/sky-scrape/skysheep)
 
-[🌐 Website](https://sky-scrape.github.io/SkySheep/) · [⬇️ Download](https://github.com/Sky-scrape/SkySheep/releases/latest) · [🧩 Skill Market](market/) · [📖 中文文档](README.md)
+[🌐 Website](https://sky-scrape.github.io/SkySheep/) · [⬇️ Download](https://github.com/Sky-scrape/SkySheep/releases/latest) · [📖 中文文档](README.md)
 
 </div>
 
@@ -38,13 +38,13 @@ Most AI desktop clients out there are just chat windows — the model can talk b
 On top of that sits a complete Agent capability stack:
 
 - 🔌 **Multi-provider models**: Zhipu / DeepSeek / Kimi / OpenRouter / SiliconFlow / native Anthropic, one-click setup; local models via [Ollama](https://ollama.com) (no key required); custom relay endpoints + automatic model detection
-- 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes + category filters, keyword search, pre-install SKILL.md preview, and one-click install/version updates from the [Skill Market](market/) + "scan this computer" to pick up skills already installed by Claude Code and other tools; a dedicated skills page with per-project scope, SKILL.md preview, and keyword search)
+- 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes, install from a folder, a .zip, or a GitHub / Gitee URL + "scan this computer" to pick up skills already installed by Claude Code and other tools; a dedicated skills page with per-project scope, search, and bulk delete)
 - 🖱️ **Computer control**: screenshots straight into the conversation; mouse / keyboard / window / clipboard (off by default; confirmation-gated, with an action-level whitelist)
 - ⏰ **Scheduled tasks and agenda**: recurring tasks, due-time reminders, weekly calendar view; continue the chat from your phone over LAN (token + QR code)
 - 👥 **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer — with debate rounds (members see each other's drafts and revise), member role presets (critic / fact-checker / concision / pragmatist), a token-saver trio (light member context, duplicate-draft dedupe, fusion budget), and every draft kept on the message for later review
 - 🔗 **Task pipelines**: chain tasks by dependency — upstream nodes run in parallel, downstream starts automatically, a review node closes the loop; per-node timeouts, auto-retry with the last failure reason, PASS/FAIL gates, and the same unattended permission gating as scheduled tasks
 - 📄 **Document I/O**: reads PDF / Word / Excel, writes Word / Excel / CSV
-- 🀄 **Chinese-first**: the UI, built-in help, prompt templates, and Skill Market are all designed for Chinese-language scenarios
+- 🀄 **Chinese-first**: the UI, built-in help, and prompt templates are all designed for Chinese-language scenarios
 
 ## 🖼 Interface Tour
 
@@ -120,7 +120,7 @@ SkySheep's feature set was built item by item against Claude Code / OpenAI Codex
 | Agent loop (streaming + tool calls) | ✅ | ✅ | ✅ | ✅ |
 | Multi-model / multi-provider (OpenAI-compatible + Anthropic + local) | — | ✅ | ✅ | ✅ built-in presets + custom relay endpoints + auto model detection |
 | MCP client (stdio/HTTP, Claude Desktop config compatible) | ✅ | ✅ | ✅ | ✅ in-app import / manual entry / templates + one-click built-in presets, hot-applied |
-| Skill packages (SKILL.md, progressive disclosure) | ✅ | — | ✅ | ✅ global/project scopes, install from folder/zip/URL + Skill Market |
+| Skill packages (SKILL.md, progressive disclosure) | ✅ | — | ✅ | ✅ global/project scopes, install from folder/zip/URL |
 | Sub-agents (background tasks + polling) | ✅ | ✅ | ✅ | ✅ spawn_agent / check_task + custom sub-agents |
 | Project memory (AGENTS.md / CLAUDE.md) | ✅ | ✅ | ✅ | ✅ edited in-app + global auto memory (across projects) |
 | Task lists (todos) | ✅ | ✅ | ✅ | ✅ sidebar panel synced in real time |
@@ -192,7 +192,7 @@ Running into a problem? In the app, go to Settings · About → "💬 Report an 
 
 - **M1-M4 (✅)**: engine core → extension ecosystem (MCP/Skills/sub-agents) → desktop app → feature-parity pass
 - **M5 (✅ shipped)**: open-source release — repo live at [github.com/Sky-scrape/SkySheep](https://github.com/Sky-scrape/SkySheep):
-  CI ✅, community docs ✅, installer scripts ✅, Skill Market (index published with the main repo) ✅, update check ✅,
+  CI ✅, community docs ✅, installer scripts ✅, update check ✅,
   SmartScreen guide ✅, website page (`index.html`, live on GitHub Pages) ✅; remaining: code-signed distribution
 - **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
 - **v1.0 (✅)**: first stable release — browser control, phone control (in-app toggle),
@@ -209,7 +209,8 @@ Running into a problem? In the app, go to Settings · About → "💬 Report an 
 - **v1.5 (✅)**: root fix for the launcher "double-click does nothing" hang chain (non-blocking focus / stale-instance takeover / window-creation watchdog) plus a persistent WebView2 profile, drag-to-reorder projects & sessions (shared by grouped and classic views, fork families stay together), thinking & elapsed time persisted with messages (survives refresh; surfaced in exports and Telegram / WeChat channels), cua computer-driver preset, and two performance passes (Anthropic cache breakpoints / SQLite WAL / runtime-pool LRU / on-demand history images / merged terminal output / lazy mermaid·xterm)
 - **v1.6 (✅)**: multi-instance support (source tree runs a `dev` identity isolated from the installed app), structured logging (per-session turn / tool / permission timings), bounded auto-reconnect for MCP (no replay of the failed call), shell-chaining detection per actual shell (plugs the cmd.exe single-quote & `%VAR%` bypasses), full MCP annotations on all 31 built-in tools (listed in the M8ven Trust Index), merged streaming deltas, chunked long-history rendering, and a real-socket end-to-end test layer
 - **v1.7 (✅)**: projects may be deleted down to zero — the no-project state (quick chat) is now a first-class, reboot-persistent mode (current project recorded backend-side in ui.json), a permanent quick-chat section in the classic view, schedule time spans, a per-project task list, six built-in sub-agents all editable, one-click in-app update for the installed build, one-click context-window detection for model services, default context limit raised to 1M tokens, plus a batch of fixes (quick-chat session ops, channel first-config deadlock, WeChat QR rendering)
-- **v1.8 (✅ current release)**: isolated sub-agent spawns on a dedicated git worktree & branch (writes never touch the main workspace; engine auto-commits, merging stays under the main session's control) and write leases for parallel tasks (same-project sessions coordinate file writes, conflicts are annotated); the chat channel switches from Telegram to Feishu (official SDK, remote chats pinned to a dedicated project); eight Settings → Advanced additions (hook tester / recent-run panel / enable toggles for hooks & whitelist rules / whitelist hit stats / stop hooks / compaction trigger ratio / restore-default run params / trusted-projects list); the second security-review pass fixed 2 high + 16 medium findings (skill-name path traversal, post-compaction persistence slicing, and more); plus a UI polish batch (prompt page sort/stats/import-export, renamable & draggable session tabs)
+- **v1.8 (✅)**: isolated sub-agent spawns on a dedicated git worktree & branch (writes never touch the main workspace; engine auto-commits, merging stays under the main session's control) and write leases for parallel tasks (same-project sessions coordinate file writes, conflicts are annotated); the chat channel switches from Telegram to Feishu (official SDK, remote chats pinned to a dedicated project); eight Settings → Advanced additions (hook tester / recent-run panel / enable toggles for hooks & whitelist rules / whitelist hit stats / stop hooks / compaction trigger ratio / restore-default run params / trusted-projects list); the second security-review pass fixed 2 high + 16 medium findings (skill-name path traversal, post-compaction persistence slicing, and more); plus a UI polish batch (prompt page sort/stats/import-export, renamable & draggable session tabs)
+- **v1.9 (✅ current release)**: five audit batches (session operations, memory & information management, skill management, MCP management/usage, and the right panel's 12 tabs) + two root-cause fixes for WeChat QR login + desktop start/exit lifecycle cleanup (no more false "last exit was abnormal" reports); plus a UX consistency batch: every "new session" click creates one, archiving closes its tab, a fixed-size archive dialog with bulk select, and the skills page now fills the viewport (Skill Market entry retired)
 - **Next up**: macOS/Linux support, system-level scheduling, defense-in-depth against prompt injection
 
 [CHANGELOG.md](CHANGELOG.md) is the single source of truth for versions and changes.

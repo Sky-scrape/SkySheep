@@ -156,7 +156,7 @@ from ..skills.installer import (
 )
 from ..skills.installer import install as install_skill
 from ..skills.market import fetch_market_index, fetch_remote_text, merge_installed_state
-from ..textio import encode_text, read_text_file, write_text_atomic
+from ..textio import encode_text, read_text_file, write_text_atomic, write_text_file
 from ..tools import (
     COMPUTER_TOOL_NAMES,
     ChangeRecorder,
@@ -1041,6 +1041,9 @@ class ServerBackend:
         self._default_model_sessions: set[str] = set()  # 适用「新会话默认模型」的会话
         self._digesting: set[str] = set()  # 正在归档提炼记忆的会话
         self._maintaining = False  # 定期整理进行中（全局+项目共用一把，防叠加）
+        # 记忆文件的写互斥：归档提炼的追加、定期整理的整稿覆盖、设置页整稿保存
+        # 三条写路径共用（整理读旧稿 → 调模型的窗口里可能有人写入，见 _maintain_memory）
+        self._memory_io_lock = asyncio.Lock()
         self.update_info: dict | None = None  # {"version","url","notes"}：发现的新版本
         self.update_error: str | None = None  # 手动检查时的失败原因（进设置 · 关于）
         self._pending_update: str | None = None  # 已下载待安装的更新包路径
@@ -1319,13 +1322,18 @@ class ServerBackend:
 
     # ---- 新功能配置解析 / 检查点目录 ----
 
-    def _checkpoint_root(self) -> Path:
-        """当前项目的检查点目录（按工作目录指纹隔离）。"""
+    @staticmethod
+    def _checkpoint_root_for(working_dir: Path | None) -> Path:
+        """按工作目录指纹算检查点根目录（隔离不同项目的快照）。"""
         tag = hashlib.sha256(
-            (str(self.working_dir) if self.working_dir else "(no-project)").lower()
+            (str(working_dir) if working_dir else "(no-project)").lower()
             .encode("utf-8")
         ).hexdigest()[:12]
         return skysheep_home() / "backups" / "checkpoints" / tag
+
+    def _checkpoint_root(self) -> Path:
+        """当前项目的检查点目录（按工作目录指纹隔离）。"""
+        return self._checkpoint_root_for(self.working_dir)
 
     def _cur_project_id(self) -> int | None:
         """当前项目 id；无项目态返回 None（快聊/无项目语义）。"""
@@ -1450,6 +1458,15 @@ class ServerBackend:
             rt.agent.registry = self._build_full_registry(rt.recorder)
 
     async def shutdown(self) -> None:
+        # 崩溃哨兵在收尾一进来就清：这里是一切退出路径（uvicorn lifespan、
+        # 程序内更新 apply_update 的直接调用）的必经点，且清在开头——收尾链
+        # 越靠后越容易被截断（桌面壳给优雅退出只留 1.5s 上限、更新路径随后
+        # os._exit），清在最后一步就会「明明是正常退出，下次启动却提示上次
+        # 未正常关闭」。已开始优雅收尾就不再是崩溃，语义也成立。
+        try:
+            (skysheep_home() / "crash.flag").unlink(missing_ok=True)
+        except OSError:
+            pass
         if self.channels is not None:
             try:
                 await self.channels.stop()
@@ -2884,7 +2901,7 @@ class ServerBackend:
         # 无项目态新建的会话归入快聊（project_id 为 NULL）：没有项目可归属。
         # title：前端在空标签上预命名时随创建一起落库（标签命名功能的懒创建路径），
         # 带了名字就记为手动命名，首轮的自动标题不会再覆盖它。
-        title = (title or "").strip()
+        title = (title or "").strip()[:80]  # 预命名同 rename 的限长口径
         self.session = await self.store.create_session(self._cur_project_id(), title)
         if title:
             self._manually_named.add(self.session.id)
@@ -3001,7 +3018,8 @@ class ServerBackend:
         # 同步 runtime 内的历史（存在则从存储重载）
         if sid in self.runtimes:
             await self._reload_agent_history(self.runtimes[sid].agent, sid)
-        out = {"deleted": deleted, "pivot_seq": pivot, "mode": mode}
+        # 带 id：WS 层按返回里的 id 跟踪连接当前交互的会话（会话不变，仍是它）
+        out = {"id": sid, "deleted": deleted, "pivot_seq": pivot, "mode": mode}
         if mode == "edit":
             out["text"] = anchor["text"]
         return out
@@ -3010,6 +3028,10 @@ class ServerBackend:
         """从某条消息分叉出新会话：复制 seq <= 锚点 的消息（缺省全部）。"""
         sid = str(params.get("id", "") or (self.session.id if self.session else ""))
         sess = await self._get_owned_session(sid)
+        # 与 truncate 同一守卫：轮末才批量落库，运行中分叉会复制到不完整的历史
+        rt = self.runtimes.get(sid)
+        if rt and rt.run_task and not rt.run_task.done():
+            raise RuntimeError("该会话正在运行，等当前轮结束再分叉")
         seq = int(params["seq"]) if params.get("seq") is not None else (
             await self.store.max_seq(sid) or 0)
         new_sess = await self.store.create_session(
@@ -4485,6 +4507,12 @@ class ServerBackend:
         # 归属校验（安全审查 B12）：检查点 id 顺序可枚举，不属于当前项目的
         # 快照不能凭 id 恢复（否则别的项目的文件内容会被写回磁盘）
         await self._check_checkpoint_ownership(cp)
+        # 会话运行中拒绝回滚（与 truncate 同一守卫）：回滚会改写正在跑的
+        # 历史并往 runtime 追加系统提示，轮末落库会把这条提示再插一遍
+        cp_sid = (cp or {}).get("session_id")
+        cp_rt = self.runtimes.get(cp_sid) if cp_sid else None
+        if cp_rt and cp_rt.run_task and not cp_rt.run_task.done():
+            raise RuntimeError("该会话正在运行，等当前轮结束再回滚")
         try:
             files = self.checkpoints.restore(checkpoint_id, force=force)
         except CheckpointConflictError as e:
@@ -5157,14 +5185,21 @@ class ServerBackend:
         return {"candidates": candidates}
 
     async def delete_skill(self, name: str) -> dict:
-        """删除技能目录。全局技能与项目技能都可能重名，按当前加载到的那一份删。"""
+        """删除技能目录。全局技能与项目技能都可能重名，按当前加载到的那一份删。
+
+        同名技能两边各存一份时，发现逻辑让全局版遮蔽项目版（见 SkillLoader.discover）
+        ——用户看到、点删除的是全局版，所以全局根必须排在候选首位；否则会静默删掉
+        被遮蔽的项目版，清单里的技能纹丝不动。项目版被加载时反过来，项目根优先。
+        """
         skill = self.skills.get(name)
         if skill is None:
             raise RuntimeError("skill not found: " + name)
         scope = "project" if skill.source == "project" else "global"
         roots = [skysheep_home() / "skills"]
         if self.working_dir is not None:
-            roots.insert(0, self.working_dir / ".skysheep" / "skills")
+            roots.append(self.working_dir / ".skysheep" / "skills")
+        if scope == "project":
+            roots.reverse()
         try:
             result = remove_skill(name, roots)
         except SkillInstallError as e:
@@ -5504,6 +5539,13 @@ class ServerBackend:
                 raise RuntimeError(
                     "项目级 MCP 配置需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。"
                 )
+            # 表单没有「停用」字段：覆盖一个已停用的同名服务时保留停用状态，
+            # 否则只是改个参数保存，服务就被顺手重新启用并拉起（stdio 等于
+            # 立即执行本机命令），超出用户这次操作表达的意思
+            prior = load_servers(target).get(name.strip())
+            if isinstance(prior, dict) and prior.get("enabled") is False:
+                raw["enabled"] = False
+                cfg = normalize_server(raw)
             # 分字段表单：用户看着 command/args 输入框亲手填的，保存动作本身
             # 就是明确意图（M10 的确认只针对粘贴/导入这种「命令不可见」的路径）
             result = import_servers(
@@ -6521,11 +6563,36 @@ class ServerBackend:
         # 先停掉该会话正在跑的 turn，再清理 runtime，最后删数据
         self.cancel_run(session_id)
         rt = self.runtimes.pop(session_id, None)
-        if rt is not None:
-            self._forget_runtime(rt)
-        await self.store.delete_session(session_id)
         was_active = self.session is not None and self.session.id == session_id
+        if rt is not None:
+            # 排队中的轮次随 runtime 一起消失，Future 必须逐个落空：
+            # 不然那些发消息的请求永远等不到响应（请求挂死 + 协程泄漏）
+            for item in list(rt.queue):
+                item.fail(RuntimeError("会话已删除"))
+            rt.queue.clear()
+            if was_active and self._base_queue:
+                # 懒创建窗口排进基底队列的消息同属这个会话，一并落空
+                for item in list(self._base_queue):
+                    item.fail(RuntimeError("会话已删除"))
+                self._base_queue.clear()
+            self._forget_runtime(rt)
+            task = rt.run_task
+            if task is not None and not task.done():
+                # 等被取消的轮次收尾（含 shield 保护的落库）跑完再删行：
+                # 落库在取消后仍会继续执行，删早了消息会插在删除之后，留下孤儿行
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=10)
+                except Exception:  # noqa: BLE001 - 超时/任务异常都不拦删除本身
+                    pass
+        await self.store.delete_session(session_id)
+        # 检查点（改前文件快照）随会话一起清：会话没了，快照不该继续占磁盘
+        await asyncio.to_thread(self.checkpoints.forget_session, session_id)
+        self._manually_named.discard(session_id)
+        self._default_model_sessions.discard(session_id)
         switched = await self._switch_after_removal() if was_active else None
+        # 广播给其它连接（另一窗口 / 手机端）：删掉的会话从列表与标签里消失
+        self._ws_broadcast({"kind": "session_updated",
+                            "session_id": session_id, "deleted": True})
         return {
             "deleted": session_id,
             "switched_to": switched,
@@ -6534,7 +6601,7 @@ class ServerBackend:
 
     async def rename_session(self, session_id: str, title: str) -> dict:
         await self._get_owned_session(session_id)
-        title = title.strip()
+        title = title.strip()[:80]  # 限长：超长标题撑爆侧栏/标签布局
         if not title:
             raise RuntimeError("标题不能为空")
         await self.store.set_title(session_id, title)
@@ -6552,8 +6619,11 @@ class ServerBackend:
         return {"id": session_id, "title": title}
 
     async def pin_session(self, session_id: str, pinned: bool) -> dict:
-        await self._get_owned_session(session_id)
+        sess = await self._get_owned_session(session_id)
         await self.store.set_pinned(session_id, pinned)
+        # 广播给其它连接：另一窗口的侧栏同步置顶位（列表整条刷新拿新状态）
+        self._ws_broadcast({"kind": "session_updated",
+                            "session_id": session_id, "title": sess.title})
         return {"id": session_id, "pinned": pinned}
 
     async def archive_session(self, session_id: str, archived: bool) -> dict:
@@ -6569,6 +6639,12 @@ class ServerBackend:
         if archived and not already \
                 and not await self.store.get_session_memory_digested(session_id):
             self._schedule_memory_digest(session_id)
+        # 广播给其它连接：归档/恢复后另一窗口的侧栏与搜索同步隐/现。
+        # archived 标记供前端把该会话的标签一并收掉——归档＝这条对话收摊，
+        # 侧栏行与标签栏保持同步（恢复后从归档弹窗重新点开即可）。
+        self._ws_broadcast({"kind": "session_updated",
+                            "session_id": session_id, "title": sess.title,
+                            "archived": archived})
         return {"id": session_id, "archived": archived}
 
     # ---- 归档自动记忆（提炼纯函数在 tools/memory.py） ----
@@ -6605,7 +6681,7 @@ class ServerBackend:
                     parts.append(ev.text)
                 elif isinstance(ev, ProviderDone):
                     break
-            added = remember_lines(parse_digest("".join(parts)))
+            added = await self._remember_digest_entries(parts)
             # 提炼跑完（无论有没有提出新条目）就标记：模型调用已经花过钱，
             # 取消归档再归档不应再来一遍；上面任何一步抛错则不标记，下次可重试
             await self.store.mark_session_memory_digested(sid)
@@ -6623,6 +6699,11 @@ class ServerBackend:
             memory_log.warning("archive memory digest failed: %s", e)
         finally:
             self._digesting.discard(sid)
+
+    async def _remember_digest_entries(self, parts: list[str]) -> list[str]:
+        """提炼稿解析落盘：走记忆写锁，避免与定期整理/设置页保存交错写 memory.md。"""
+        async with self._memory_io_lock:
+            return remember_lines(parse_digest("".join(parts)))
 
     # ---- 定期自动整理：按周期用模型合并去重全局/项目记忆（纯函数在 tools/memory.py） ----
 
@@ -6673,6 +6754,9 @@ class ServerBackend:
             raise RuntimeError("演示模式没有真实模型，整理不了记忆；先在 设置 · 模型服务 配置")
         g = await self._maintain_memory("global", force=True)
         p = await self._maintain_memory("project", force=True)
+        if "conflict" in (g, p):
+            return {"ran": False, "message":
+                    "记忆刚被归档提炼写入过新条目，本次整理已让路以免覆盖；稍后再点一次即可"}
         if "changed" in (g, p):
             return {"ran": True, "global": g == "changed", "project": p == "changed"}
         if g == "skipped" and p == "skipped":
@@ -6685,8 +6769,10 @@ class ServerBackend:
         """整理一份记忆文件：模型重写 → 备份原件 → 落盘 → 刷新系统提示词。
 
         返回 "changed"（整理并落盘）/ "unchanged"（模型认为无需改动或输出无效）
-        / "skipped"（没到整理规模或上一轮还在跑）。失败静默记日志
-        （整理是锦上添花，绝不打扰主流程）；「立即整理」按三态分别给用户反馈。
+        / "skipped"（没到整理规模或上一轮还在跑）/ "conflict"（读旧稿后文件被
+        并发写过，让路不写，不推进「上次整理时间」，下一轮巡检自动重试）。
+        失败静默记日志（整理是锦上添花，绝不打扰主流程）；「立即整理」按四态
+        分别给用户反馈。
         """
         if self._maintaining:
             return "skipped"  # 上一轮还没跑完（手动+定时叠加时直接让路）
@@ -6718,14 +6804,25 @@ class ServerBackend:
                     break
             new_text = clean_maintained_text("".join(parts), old_text, max_chars)
             if new_text is None:
-                return "unchanged"  # 输出为空/与原文一致/超长失控：一律不动原文件
-            try:
-                # 先备份后写：备份失败（磁盘满/权限）就放弃本次整理，不裸写
-                backup_before_maintain(path, old_text)
-                path.write_text(new_text + chr(10), encoding="utf-8")
-            except OSError as e:
-                memory_log.warning("memory maintain write failed (%s): %s", scope, e)
-                return "skipped"
+                return "unchanged"  # 输出为空/与原文一致/超长失控/结构破坏：一律不动原文件
+            async with self._memory_io_lock:
+                # 读旧稿之后文件可能已被并发写过（归档提炼追加了新条目、设置页
+                # 保存）：整理稿按旧快照生成，直接覆盖会把新内容静默抹掉。对不上
+                # 就让路——整理时间不推进，巡检下一轮会带着新内容重新整理。
+                try:
+                    cur = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    cur = ""
+                if cur != old_text:
+                    return "conflict"
+                try:
+                    # 先备份后写：备份失败（磁盘满/权限）就放弃本次整理，不裸写
+                    backup_before_maintain(path, old_text)
+                    # 原子写（textio 同族）：写一半被杀不能留下半截记忆文件
+                    write_text_atomic(path, new_text + "\n")
+                except OSError as e:
+                    memory_log.warning("memory maintain write failed (%s): %s", scope, e)
+                    return "skipped"
             if scope == "project":
                 self.instructions_text = new_text
             for ag in self._for_each_agent():
@@ -6776,8 +6873,11 @@ class ServerBackend:
 
     async def set_session_tags(self, session_id: str, tags: list[str] | str) -> dict:
         """给会话打标签（侧栏分组用）；传空清空。"""
-        await self._get_owned_session(session_id)
+        sess = await self._get_owned_session(session_id)
         value = await self.store.set_tags(session_id, tags)
+        # 广播给其它连接：另一窗口的侧栏同步标签分组
+        self._ws_broadcast({"kind": "session_updated",
+                            "session_id": session_id, "title": sess.title})
         return {
             "id": session_id,
             "tags": [t for t in value.split(",") if t],
@@ -6790,7 +6890,7 @@ class ServerBackend:
         源会话必须属于当前项目（安全审查 B7）：旧实现只验目标项目存在，
         凭枚举到的 session_id 可以把别的项目的会话改归属。
         """
-        await self._get_owned_session(session_id)
+        sess = await self._get_owned_session(session_id)
         if project_id is not None:
             projects = {p.id: p for p in await self.store.list_projects()}
             if project_id not in projects:
@@ -6803,10 +6903,17 @@ class ServerBackend:
             self.cancel_run(session_id)
             rt = self.runtimes.pop(session_id, None)
             if rt is not None:
+                # 排队轮随 runtime 消失：Future 逐个落空，请求不能挂死
+                for item in list(rt.queue):
+                    item.fail(RuntimeError("会话已移出当前项目"))
+                rt.queue.clear()
                 self._forget_runtime(rt)
         was_active = self.session and self.session.id == session_id
         moved_to_active = was_active and project_id == self._cur_project_id()
         switched = await self._switch_after_removal() if (was_active and not moved_to_active) else None
+        # 广播给其它连接：另一窗口的侧栏按新归属刷新（本项目列表不再有它）
+        self._ws_broadcast({"kind": "session_updated",
+                            "session_id": session_id, "title": sess.title})
         return {"id": session_id, "project_id": project_id, "switched_to": switched}
 
     # ---- 工作项目切换（应用内设定工作目录，对标 Claude Code /add-dir 等） ----
@@ -6834,6 +6941,9 @@ class ServerBackend:
         )
         # 信任按项目记忆：换了目录必须丢掉旧实例，否则会沿用上一个项目的信任状态
         self._trust = None
+        # 辅助对话的历史里带着旧项目的 cwd（系统消息只在历史为空时注入），
+        # 换项目不清掉的话，模型仍以为还在上一个目录里干活
+        self.aux_history = []
         # 白名单按项目隔离：换项目 = 换一套规则；权限档位跨项目保持
         prev_accept = self.gate.auto_accept_write if self.gate else False
         prev_full = self.gate.auto_accept_all if self.gate else False
@@ -6954,9 +7064,15 @@ class ServerBackend:
         is_current = self.project is not None and project_id == self.project.id
         if is_current and self._run_task and not self._run_task.done():
             raise RuntimeError("当前有任务正在运行，请先停止再删除项目")
+        proj = await self.store.get_project(project_id)
         removed = await self.store.delete_project(project_id)
         if not removed:
             raise RuntimeError("项目不存在，可能已被删除")
+        # 该项目的检查点目录（改前文件快照）一并清掉：项目没了，留着它的
+        # 完整文件快照只会占磁盘——且对应 store 已被替换，永远不会再被淘汰
+        if proj is not None and proj.root_path:
+            cp_root = self._checkpoint_root_for(Path(proj.root_path))
+            await asyncio.to_thread(shutil.rmtree, cp_root, True)
         if not is_current:
             return {"removed": project_id, "was_current": False}
         # 删的是当前项目：不再为同一目录重建记录；还有别的项目就接上最近的，
@@ -7101,11 +7217,19 @@ class ServerBackend:
 
     async def get_instructions(self) -> dict:
         text = ""
+        enc_text = ""
+        certain = True
         if self.instructions_file:
             p = Path(self.instructions_file)
             if p.is_file():
                 try:
-                    text = p.read_text(encoding="utf-8", errors="replace")
+                    # 走 textio 探测编码：GBK 等非 UTF-8 的 AGENTS.md 不再被读成
+                    # 一串替换字符（此前 utf-8+replace 读完一旦保存就把乱码写死了）
+                    loaded = read_text_file(p)
+                    text = loaded.text
+                    if loaded.encoding != "utf-8":
+                        enc_text = loaded.encoding.upper()
+                    certain = loaded.certain
                 except OSError:
                     text = ""
         mtime = 0.0
@@ -7115,10 +7239,15 @@ class ServerBackend:
             except OSError:
                 mtime = 0.0
         # mtime 供右侧面板保存时比对：编辑期间定期整理重写过 AGENTS.md 就拒绝覆盖
-        return {"path": self.instructions_file, "text": text, "mtime": mtime}
+        return {"path": self.instructions_file, "text": text, "mtime": mtime,
+                "encoding_text": enc_text, "editable": certain}
 
     async def save_instructions(self, text: str, base_mtime: float | None = None) -> dict:
-        """保存项目记忆并立即刷新系统提示词（对当前会话也生效）。"""
+        """保存项目记忆并立即刷新系统提示词（对当前会话也生效）。
+
+        落盘走 textio：沿用文件原本的编码与行尾符（新建文件 UTF-8 + LF），
+        原子写；超出 MAX_INSTRUCTIONS_CHARS 的部分截掉，但不静默——truncated /
+        original_chars / limit 随结果带回，由界面明示。"""
         if base_mtime is not None and float(base_mtime) > 0 and self.instructions_file:
             try:
                 cur = round(Path(self.instructions_file).stat().st_mtime, 3)
@@ -7129,14 +7258,34 @@ class ServerBackend:
                     "项目记忆在你编辑期间被更新过（如定期整理已重写 AGENTS.md），"
                     "本次保存已阻止；请点「重读」后再编辑保存"
                 )
+        original_chars = len(text)
+        truncated = original_chars > MAX_INSTRUCTIONS_CHARS
         text = text[:MAX_INSTRUCTIONS_CHARS]
         if self.instructions_file:
             path = Path(self.instructions_file)
         else:
             path = Path(self.working_dir) / "AGENTS.md"
             self.instructions_file = str(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        # 沿用原编码与行尾符；文件还不存在（首次创建）时按 UTF-8 + LF。
+        # 编码探不确定意味着原文件读出来就带替换字符——按它写回等于把乱码固化，
+        # 按项目规范「宁可拒绝写」，直接报错指路
+        enc, nl = "utf-8", "\n"
+        if path.is_file():
+            try:
+                loaded = read_text_file(path)
+            except OSError:
+                loaded = None
+            if loaded is not None and not loaded.certain:
+                raise RuntimeError(
+                    "这份 AGENTS.md 的编码无法识别（读出来是替换字符），"
+                    "为避免写坏原文件已拒绝保存；请在外部编辑器里把它转成 UTF-8 后重试"
+                )
+            if loaded is not None:
+                enc, nl = loaded.encoding, loaded.newline
+        try:
+            write_text_file(path, text, enc, nl)
+        except (OSError, UnicodeEncodeError) as e:
+            raise RuntimeError(f"写入失败: {e}") from None
         self.instructions_text = text
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
@@ -7144,7 +7293,9 @@ class ServerBackend:
             mtime = round(path.stat().st_mtime, 3)
         except OSError:
             mtime = 0.0
-        return {"saved": True, "path": str(path), "chars": len(text), "mtime": mtime}
+        return {"saved": True, "path": str(path), "chars": len(text), "mtime": mtime,
+                "truncated": truncated, "original_chars": original_chars,
+                "limit": MAX_INSTRUCTIONS_CHARS}
 
     # ---- 会话库备份：列出 / 手动备份 / 删除 / 恢复 ----
 
@@ -7660,7 +7811,7 @@ class ServerBackend:
             "text": text[:MAX_MEMORY_FILE_CHARS],
             # mtime 供设置页保存时比对：编辑期间后台提炼/整理改过文件就拒绝覆盖
             "mtime": mtime,
-            # 系统提示词实际注入的字数（超 4000 字按行截断），页面据此提示
+            # 系统提示词实际注入的字数（超 4000 字保最新条目按行截断），页面据此提示
             "inject_chars": len(inject_text(text)),
             "digest_enabled": self.cfg.memory_digest,
             "maintain": {
@@ -7678,21 +7829,22 @@ class ServerBackend:
         from ..tools.memory import MAX_MEMORY_FILE_CHARS, inject_text, memory_path
 
         p = memory_path()
-        if base_mtime is not None and float(base_mtime) > 0:
-            # 防覆盖：用户打开编辑器期间，归档提炼/定期整理可能已写入新条目；
-            # 拿旧编辑整体落盘会把它们静默抹掉，mtime 对不上就拒绝
-            try:
-                cur = round(p.stat().st_mtime, 3)
-            except OSError:
-                cur = 0.0
-            if cur != float(base_mtime):
-                raise RuntimeError(
-                    "记忆在你编辑期间被更新过（归档提炼或定期整理已写入），"
-                    "本次保存已阻止；请刷新本页重新编辑，以免丢掉新记忆"
-                )
         full = text[:MAX_MEMORY_FILE_CHARS]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(full, encoding="utf-8")
+        async with self._memory_io_lock:
+            if base_mtime is not None and float(base_mtime) > 0:
+                # 防覆盖：用户打开编辑器期间，归档提炼/定期整理可能已写入新条目；
+                # 拿旧编辑整体落盘会把它们静默抹掉，mtime 对不上就拒绝
+                try:
+                    cur = round(p.stat().st_mtime, 3)
+                except OSError:
+                    cur = 0.0
+                if cur != float(base_mtime):
+                    raise RuntimeError(
+                        "记忆在你编辑期间被更新过（归档提炼或定期整理已写入），"
+                        "本次保存已阻止；请刷新本页重新编辑，以免丢掉新记忆"
+                    )
+            # 原子写（textio 同族）：写一半被杀不能留下半截记忆文件
+            write_text_atomic(p, full)
         # 记忆注入系统提示词：保存后立刻对当前所有会话生效
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
@@ -8339,12 +8491,17 @@ class ServerBackend:
         channel = self._channel_obj("weixin") or getattr(self, "_weixin_login_channel", None)
         if channel is None:
             raise RuntimeError("微信渠道尚未初始化，请先点「生成二维码」")
-        result = await channel.poll_qrcode(qrcode)
+        result = await channel.poll_qrcode(
+            qrcode, verify_code=str(params.get("verify_code", "") or "")
+        )
         if result.get("status") != "confirmed":
             return result
         token = str(result.get("bot_token") or "").strip()
         if not token:
-            raise RuntimeError("服务器返回已确认，但没有拿到 bot_token，请重新生成二维码")
+            raise RuntimeError(
+                "服务器返回已确认，但没有拿到 bot_token（响应结构已记入引擎日志），"
+                "请重新生成二维码再试一次；仍失败请带日志反馈"
+            )
         base_url = str(result.get("base_url") or "")
         # 落盘（含 base_url，服务器可能下发不同的接入点）
         await self.channel_save_state("weixin", {

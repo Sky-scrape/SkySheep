@@ -33,6 +33,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from ..textio import write_text_atomic
+
 # 范围模式：所有项目 / 仅指定项目 / 任何项目都不用
 SCOPE_ALL = "all"
 SCOPE_PROJECTS = "projects"
@@ -64,12 +66,24 @@ def _norm_path(p: str | Path) -> str:
     return os.path.normcase(str(resolved))
 
 
+def _unquote(value: str) -> str:
+    """剥掉 frontmatter 值外层的成对引号（YAML 允许 name: "docx" 写法）。
+
+    技能广场与第三方包的 SKILL.md 大量带引号——不剥的话引号会原样进技能名，
+    install 拿它建目录、load_skill 拿它当参数，与清单里显示的名字对不上。
+    只剥一层且必须首尾配对；中间内容原样保留。
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", "'"):
+        return value[1:-1]
+    return value
+
+
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     """解析 SKILL.md 头部 frontmatter（--- 包围的 key: value 行）。
 
-    支持值写在行内的普通写法，也支持 YAML 块标量（description: >- / | 之类，
-    内容在后续缩进行）——技能广场与第三方包大量使用这种写法，此前会被读成
-    字面量 ">-"，描述整段丢失。
+    支持值写在行内的普通写法（含成对引号包裹），也支持 YAML 块标量
+    （description: >- / | 之类，内容在后续缩进行）——技能广场与第三方包
+    大量使用这种写法，此前会被读成字面量 ">-"，描述整段丢失。
     """
     body = text
     meta: dict[str, str] = {}
@@ -89,7 +103,7 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
                     if ":" in line:
                         key, _, value = line.partition(":")
                         key = key.strip().lower()
-                        value = value.strip()
+                        value = _unquote(value.strip())
                         if value in (">", ">-", ">+", "|", "|-", "|+"):
                             # 块标量：取后续缩进行。> 折叠为空格，| 保留换行；
                             # 回到零缩进的非空行即块结束。首尾空白交给 sanitize。
@@ -247,6 +261,11 @@ class SkillLoader:
             if not base or not base.is_dir():
                 continue
             for skill_dir in sorted(base.iterdir()):
+                # 点开头目录不是技能（.git / .importing-* 解压残留 / 别家工具的
+                # 隐藏目录）：与 installer._scan_skills_in_dir 的过滤保持一致，
+                # 否则安装中断留下的暂存目录会被当成技能常驻清单
+                if skill_dir.name.startswith("."):
+                    continue
                 try:
                     is_dir = skill_dir.is_dir()
                 except OSError:
@@ -279,13 +298,17 @@ class SkillLoader:
         return True
 
     def _write_disabled(self) -> None:
-        """把「当前项目停用名单」写回 skills.json（只记已发现且被停用的技能）。"""
+        """把「当前项目停用名单」写回 skills.json（只记已发现且被停用的技能）。
+
+        原子写：写一半被中断会让整份停用名单丢失（已停用的技能全部复活）。
+        """
         if not self.state_path:
             return
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         disabled = sorted(n for n, s in self._skills.items() if not s.enabled)
-        self.state_path.write_text(
-            json.dumps({"disabled": disabled}, ensure_ascii=False), encoding="utf-8"
+        write_text_atomic(
+            self.state_path,
+            json.dumps({"disabled": disabled}, ensure_ascii=False),
         )
 
     def forget(self, name: str) -> None:
@@ -336,9 +359,10 @@ class SkillLoader:
         if not self.scope_path:
             return
         self.scope_path.parent.mkdir(parents=True, exist_ok=True)
-        self.scope_path.write_text(
+        # 原子写（与 skills.json 同理：写一半被中断会丢掉全部范围配置）
+        write_text_atomic(
+            self.scope_path,
             json.dumps({"scopes": self._scopes}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def _apply_scopes(self) -> None:

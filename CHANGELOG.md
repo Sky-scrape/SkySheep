@@ -2,6 +2,20 @@
 
 本项目的所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.3.0/)。
 
+## [Unreleased]
+
+### 移除
+
+- **技能广场整体下线（不再回归）**：1.9 只是摘掉了设置页入口，这次把整条链路清干净——
+  前端索引/搜索/安装界面（已在 1.9 移除）、后端 `skills/market.py` 与
+  `skills.market` / `skills.market_detail` 两个 WS 方法、60 秒索引缓存、
+  随包索引数据文件（`market/index.json`，打包脚本与 `SkySheep.spec` 同步清理）、
+  仓库根的 `market/` 索引发布件，以及只服务于「已安装/可更新」标注的
+  `.source.json` 来源标记（`loader` 的 `source_url` 字段与读取、`installer` 的
+  标记写入与 `raw_skillmd_urls` 详情预览链）。技能安装本身不受影响：仍支持
+  文件夹 / .zip / GitHub·Gitee 链接导入、「本机现存」扫描导入与批量删除；
+  skill 目录若残留旧的 `.source.json`，装载时忽略（不再读取）。
+
 ## [1.9] - 2026-09-24
 
 ### 变更

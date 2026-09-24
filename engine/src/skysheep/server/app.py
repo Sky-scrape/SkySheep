@@ -1043,10 +1043,6 @@ def create_app(
             )
         if method == "subagent.delete_custom":
             return await backend.delete_subagent_custom(str(params.get("name", "")))
-        if method == "skills.market":
-            return await backend.market_list(refresh=bool(params.get("refresh", False)))
-        if method == "skills.market_detail":
-            return await backend.market_detail(str(params.get("url", "")))
         if method == "model.list":
             return {
                 "current": backend.provider_name,

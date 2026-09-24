@@ -7,7 +7,7 @@
 - 检查点落盘持久化（跨实例恢复 + 新建文件回滚删除 + FIFO 淘汰）
 - hooks（pre 阻断 / JSON block / post 通知 + 配置解析）
 - 版本比较 + 更新检查数据结构
-- 新 WS 协议：memory/websearch/imagegen/lan/market + /preview 路由与穿越防护
+- 新 WS 协议：memory/websearch/imagegen/lan + /preview 路由与穿越防护
 - config 解析：resolve_websearch / resolve_imagegen / update_config_section
 """
 
@@ -573,7 +573,7 @@ def test_resolve_imagegen(home, monkeypatch):
 # ---- WS 协议：新方法 + /preview ----
 
 
-def test_ws_memory_and_toolcfg_and_lan_and_market(home):
+def test_ws_memory_and_toolcfg_and_lan(home):
     script = [[TextBlock(text="ok")]]
     with make_client(home, script) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "m1", "method": "memory.save", "params": {"text": "- [x] 记住测试"}})
@@ -610,10 +610,6 @@ def test_ws_memory_and_toolcfg_and_lan_and_market(home):
         ws.send_json({"id": "l2", "method": "lan.enable", "params": {}})
         l2 = recv_until(ws, "l2")["result"]
         assert l2["token"] and "重启" in l2["note"]
-
-        ws.send_json({"id": "mk1", "method": "skills.market"})
-        mk = recv_until(ws, "mk1")["result"]
-        assert mk["source"] in ("remote", "builtin") and mk["items"]
 
 
 def test_local_skills_render_inline_not_modal(home):

@@ -150,12 +150,10 @@ from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
     SkillInstallError,
     install_from_url,
-    raw_skillmd_urls,
     remove_skill,
     scan_computer_skills,
 )
 from ..skills.installer import install as install_skill
-from ..skills.market import fetch_market_index, fetch_remote_text, merge_installed_state
 from ..textio import encode_text, read_text_file, write_text_atomic, write_text_file
 from ..tools import (
     COMPUTER_TOOL_NAMES,
@@ -1048,7 +1046,6 @@ class ServerBackend:
         self.update_error: str | None = None  # 手动检查时的失败原因（进设置 · 关于）
         self._pending_update: str | None = None  # 已下载待安装的更新包路径
         self._is_frozen: bool = bool(getattr(sys, "frozen", False))  # 安装版=True，源码版=False
-        self._market_cache: tuple[float, dict] | None = None  # 技能广场索引缓存
         self.channels: ChannelManager | None = None  # 聊天软件渠道（Bot Channel）
         self._channel_gates: dict[str, ChannelGate] = {}  # 渠道会话 id → 门控
         self._channel_names: dict[str, str] = {}  # 渠道会话 id → 平台名（反向查找）
@@ -5146,8 +5143,6 @@ class ServerBackend:
                 )
         except SkillInstallError as e:
             raise RuntimeError(str(e)) from e
-        # 装完/更新完让广场缓存作废：下次拉取重新标注「已安装/可更新」
-        self._market_cache = None
         # 重新发现 + 重建系统提示词：新技能马上出现在清单里
         self.skills.discover()
         for ag in self._for_each_agent():
@@ -5163,7 +5158,7 @@ class ServerBackend:
                 "name": s.name, "description": s.description,
                 "source": s.source, "enabled": s.enabled,
                 "scope": s.scope, "scope_projects": list(s.scope_projects),
-                "version": s.version, "source_url": s.source_url,
+                "version": s.version,
                 "applies": self.skills.applies(s.name),
             }
             for s in self.skills.all()
@@ -8978,32 +8973,6 @@ class ServerBackend:
         spawn_bg(_quit_soon())
         return {"quitting": True, "installer": pending, "log": str(log_path) if log_path else "",
                 "uac": override != "/CURRENTUSER"}
-
-    # ---- 技能广场：远程索引优先，随包索引兜底（60s 缓存，装/更新后作废） ----
-
-    async def market_list(self, refresh: bool = False) -> dict:
-        """拉广场索引并标注本地状态；refresh=True 绕过缓存重新拉（手动刷新按钮用）。"""
-        now = time.monotonic()
-        if not refresh and self._market_cache and now - self._market_cache[0] < 60:
-            return self._market_cache[1]
-        result = await fetch_market_index()
-        # 官方索引 = 默认发布地址；环境变量把索引指去别处时如实标注「第三方」
-        result["official"] = not bool(os.environ.get("SKYSHEEP_MARKET_URL"))
-        merge_installed_state(result.get("items") or [], self.skills.all())
-        self._market_cache = (now, result)
-        return result
-
-    async def market_detail(self, url: str) -> dict:
-        """拉取广场条目指向技能的 SKILL.md 原文（安装前预览，纯只读）。"""
-        try:
-            candidates = raw_skillmd_urls(url)
-        except SkillInstallError as e:
-            raise RuntimeError(str(e)) from e
-        try:
-            content, truncated = await fetch_remote_text(candidates)
-        except RuntimeError as e:
-            raise RuntimeError(str(e)) from e
-        return {"url": url, "content": content, "truncated": truncated}
 
     # ---- 主题：标题栏联动（前端把解析后的主题回传给桌面壳） ----
 

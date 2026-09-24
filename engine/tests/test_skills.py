@@ -312,75 +312,6 @@ def test_resolve_url_rejects_bad_links():
         assert why in str(ei.value), (bad, str(ei.value))
 
 
-def test_market_index_falls_back_to_direct_when_proxy_broken(monkeypatch):
-    """先试系统代理、失败再直连：代理挂了不该让整个广场降级成内置清单。
-
-    拉索引过去写死 trust_env=False（忽略系统代理），而国内直连
-    raw.githubusercontent.com 经常超时，表现就是「在线索引暂时拉取不到」。
-    """
-    import asyncio
-
-    from skysheep.skills import market as mk
-
-    calls: list[bool] = []
-
-    class _Resp:
-        status_code = 200
-
-        def json(self):
-            return {"items": [{"name": "x", "description": "d", "url": "https://github.com/u/r"}]}
-
-    async def fake_get(url, timeout_s, trust_env):
-        calls.append(trust_env)
-        if trust_env:
-            raise RuntimeError("代理不可用")
-        return _Resp()
-
-    monkeypatch.setattr(mk, "_get_index", fake_get)
-    r = asyncio.run(mk.fetch_market_index())
-    assert calls == [True, False], "应当先试代理、失败再直连"
-    assert r["source"] == "remote" and r["items"][0]["name"] == "x"
-
-
-def test_market_index_prefers_proxy_when_available(monkeypatch):
-    """代理可用时一次就拿到，不做多余的直连尝试。"""
-    import asyncio
-
-    from skysheep.skills import market as mk
-
-    calls: list[bool] = []
-
-    class _Resp:
-        status_code = 200
-
-        def json(self):
-            return {"items": [{"name": "y", "description": "d", "url": "https://github.com/u/r"}]}
-
-    async def fake_get(url, timeout_s, trust_env):
-        calls.append(trust_env)
-        return _Resp()
-
-    monkeypatch.setattr(mk, "_get_index", fake_get)
-    r = asyncio.run(mk.fetch_market_index())
-    assert calls == [True]
-    assert r["source"] == "remote" and r["items"][0]["name"] == "y"
-
-
-def test_market_index_falls_back_to_builtin_when_offline(monkeypatch):
-    """两条路都不通才降级内置清单，且带上可读提示（永不抛错）。"""
-    import asyncio
-
-    from skysheep.skills import market as mk
-
-    async def fake_get(url, timeout_s, trust_env):
-        raise RuntimeError("没网")
-
-    monkeypatch.setattr(mk, "_get_index", fake_get)
-    r = asyncio.run(mk.fetch_market_index())
-    assert r["source"] == "builtin" and r["items"]
-    assert "拉取不到" in r["note"]
-
-
 def test_delete_forgets_leftover_state(tmp_path):
     """删除技能要抹掉它的遗留状态，否则重装后莫名“装上了却是停用/任何项目都不用”。
 
@@ -422,32 +353,6 @@ def test_delete_forgets_leftover_state(tmp_path):
     fresh = make().get("docx")
     assert fresh.enabled is True
     assert make().applies("docx") is True
-
-
-def test_market_index_anthropics_links_are_current():
-    """索引里的 anthropics/skills 子目录链接必须指向当前结构。
-
-    上游把技能从 document-skills/ 移到 skills/ 后，广场里这 4 条会全部安装失败
-    （报「链接指向的目录里没有找到技能」）。这个错用户很难自己定位，用测试钉住。
-    """
-    import json
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[2]  # engine/tests → 仓库根
-    data = json.loads((root / "market" / "index.json").read_text(encoding="utf-8"))
-    anth = [it for it in data["items"] if "anthropics/skills" in it["url"]]
-    assert anth, "索引里应有 anthropics/skills 的条目"
-    for it in anth:
-        assert "document-skills/" not in it["url"], (
-            f"「{it['name']}」链接已过期（上游改为 skills/）：{it['url']}"
-        )
-    # 内置清单与索引保持一致（离线回退时用的是前者）
-    from skysheep.skills.market import BUILTIN_INDEX
-
-    builtin = {b["name"]: b["url"] for b in BUILTIN_INDEX}
-    for it in data["items"]:
-        if it["name"] in builtin:
-            assert builtin[it["name"]] == it["url"], f"内置清单与索引不一致：{it['name']}"
 
 
 def test_install_from_zip_only_under(tmp_path):

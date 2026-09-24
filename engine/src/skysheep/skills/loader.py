@@ -51,10 +51,8 @@ class Skill(BaseModel):
     # 使用范围（只对 source == "global" 有意义；项目级技能由 loader 置为 "project"）
     scope: str = SCOPE_ALL
     scope_projects: list[str] = []
-    # 技能版本（frontmatter 的 version 字段，可选）：技能广场拿它和索引版本比，提示可更新
+    # 技能版本（frontmatter 的 version 字段，可选）：随技能清单透出，界面可展示
     version: str = ""
-    # 安装来源（installer 写进技能目录的 .source.json，可选）：广场条目据此判定「已安装」
-    source_url: str = ""
 
 
 def _norm_path(p: str | Path) -> str:
@@ -69,7 +67,7 @@ def _norm_path(p: str | Path) -> str:
 def _unquote(value: str) -> str:
     """剥掉 frontmatter 值外层的成对引号（YAML 允许 name: "docx" 写法）。
 
-    技能广场与第三方包的 SKILL.md 大量带引号——不剥的话引号会原样进技能名，
+    第三方技能包的 SKILL.md 大量带引号——不剥的话引号会原样进技能名，
     install 拿它建目录、load_skill 拿它当参数，与清单里显示的名字对不上。
     只剥一层且必须首尾配对；中间内容原样保留。
     """
@@ -82,7 +80,7 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     """解析 SKILL.md 头部 frontmatter（--- 包围的 key: value 行）。
 
     支持值写在行内的普通写法（含成对引号包裹），也支持 YAML 块标量
-    （description: >- / | 之类，内容在后续缩进行）——技能广场与第三方包
+    （description: >- / | 之类，内容在后续缩进行）——第三方技能包
     大量使用这种写法，此前会被读成字面量 ">-"，描述整段丢失。
     """
     body = text
@@ -129,7 +127,7 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 
 
 # 技能 description 会直接拼进系统提示词的 Skills 清单（见 render_prompt_section）。
-# 技能包（尤其从技能广场 / 第三方仓库装的）里的 frontmatter 由外部内容决定，
+# 技能包（尤其从第三方仓库装的）里的 frontmatter 由外部内容决定，
 # 超长描述会挤占上下文，也能用大量空白把注入内容推到看不见的位置——与 MCP 工具
 # 描述同一类风险，所以用同一套限长与压空白处理（见 mcp/client._sanitize_description）。
 # 正文另有 load_skill 的 20000 字符上限，不受这里影响。
@@ -140,10 +138,6 @@ MAX_SKILL_NAME_CHARS = 120
 
 # version / 来源标记只进界面展示与广场比对，不进系统提示词，限个合理长度防脏数据即可。
 MAX_SKILL_VERSION_CHARS = 32
-
-# 安装来源标记：installer 从网址安装时写进技能目录，记录安装时的广场条目 url。
-# 独立小文件而不是改 SKILL.md——技能正文是第三方内容，我们不修改它。
-SOURCE_MARKER = ".source.json"
 
 
 def _sanitize_name(name: str) -> str:
@@ -186,16 +180,6 @@ def _sanitize_description(text: str) -> str:
     return text_out
 
 
-def _read_source_marker(skill_dir: Path) -> str:
-    """读技能目录的安装来源标记（.source.json 的 market_url）；没有/坏了返回空串。"""
-    try:
-        data = json.loads((skill_dir / SOURCE_MARKER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    url = data.get("market_url") if isinstance(data, dict) else None
-    return str(url or "").strip()[:500]
-
-
 def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
     md = skill_dir / "SKILL.md"
     # is_file() 只吞 ENOENT/ELOOP 这类常见错误；Windows 上不受信任装入点
@@ -221,7 +205,6 @@ def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
         description=_sanitize_description(description or ""),
         path=md, source=source,
         version=version,
-        source_url=_read_source_marker(skill_dir),
     )
 
 

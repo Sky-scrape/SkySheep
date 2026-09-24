@@ -66,13 +66,7 @@ static_datas = [
     and not any(part.startswith(".") for part in p.relative_to(static).parts)
 ]
 
-# 技能广场的随包完整索引（离线兜底用）：仓库根 market/index.json 原样带进安装包，
-# 运行时从 <_MEIPASS>/market/index.json 读（见 skills/market.py 的 bundled_index_items）
-market_datas = [
-    (str(project_root.parent / "market" / "index.json"), "market"),
-]
-
-datas = static_datas + market_datas
+datas = static_datas
 
 a = Analysis(
     [str(project_root / "desktop.py")],

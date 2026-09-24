@@ -17,7 +17,7 @@ SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置
 | `skysheep.textio` | 文本文件的编码（UTF-8 / GB18030 / BOM）与行尾符探测与安全写回；`write_text_atomic` / `write_bytes_atomic` 供引擎自有状态文件（config.toml、任务簿、mcp.json、ui.json、检查点）原子落盘 |
 | `skysheep.channels` | 聊天机器人渠道：飞书 / 微信遥控端（默认关闭，允许名单为空即拒绝一切；无人值守时写与执行自动拒绝，预授权写/执行类工具会显式告警）|
 | `skysheep.mcp` | MCP 客户端（stdio / Streamable HTTP，支持自定义鉴权请求头）。工具不固持会话，断线后有界自动重连（不重放失败的调用）；keeper 内握手与工具列表各带超时，导入 stdio 定义需显式确认 |
-| `skysheep.skills` | SKILL.md 发现 / 开关 / 注入 / 安装 / 技能广场索引（1.9 起设置页入口下线，后端保留） |
+| `skysheep.skills` | SKILL.md 发现 / 开关 / 注入 / 安装 |
 | `skysheep.config` | `~/.skysheep/config.toml` 配置与 Provider 预设 |
 | `skysheep.cli` | 终端 REPL + `skysheep app` 桌面启动；渲染前剥终端控制序列 |
 | `skysheep.server` | 桌面端服务层：FastAPI + WebSocket 协议 + 静态前端（Host 守卫防 DNS rebinding，安全响应头防点击劫持）|

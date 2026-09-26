@@ -194,7 +194,7 @@ uv pip install pyinstaller
 SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐（✅ = 已实现）：
 
 <details>
-<summary><b>展开 25 项能力对照表</b></summary>
+<summary><b>展开 26 项能力对照表</b></summary>
 
 | 能力 | Claude Code | Codex CLI | ZCode | SkySheep |
 |---|---|---|---|---|
@@ -204,6 +204,7 @@ SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐�
 | Skills 技能包（SKILL.md，渐进披露） | ✅ | — | ✅ | ✅ 独立技能页：全局/项目两级、按项目限定使用范围、正文预览、广场搜索安装 |
 | 子代理（后台任务 + 轮询） | ✅ | ✅ | ✅ | ✅ spawn_agent / check_task + 自定义子代理 |
 | 项目记忆（AGENTS.md / CLAUDE.md） | ✅ | ✅ | ✅ | ✅ 界面内编辑 + 全局自动记忆（跨项目） |
+| 记忆地图（项目演化可视化） | — | — | — | ✅ 演化时间线 + 主题图谱 + LLM 演化摘要（文件足迹 / 活跃热力图 / 任务与记忆标注） |
 | 任务清单（todo） | ✅ | ✅ | ✅ | ✅ 侧栏面板实时同步 |
 | 规划模式（先出计划再执行） | ✅ | ✅ | ✅ | ✅ 执行/规划双模式 + 一键按计划执行 |
 | 上下文自动压缩 + 手动 /compact | ✅ | ✅ | ✅ | ✅ CJK 感知估算 + 真实用量下限兜底 |

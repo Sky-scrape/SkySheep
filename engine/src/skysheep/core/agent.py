@@ -418,7 +418,8 @@ class Agent:
                     self._pending[pending.request_id] = pending
                     # 预告「总是允许」将写入的规则：与落库共用同一个对象，
                     # 确认弹窗显示的范围就是之后实际生效的范围
-                    always_rule = pending.always_rule or self.gate.rule_for(tool, tu.input)
+                    always_rule = pending.always_rule or self.gate.rule_for(
+                        tool, tu.input, self.gate.working_dir)
                     yield PermissionRequest(
                         request_id=pending.request_id,
                         tool_name=tu.name,

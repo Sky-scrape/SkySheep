@@ -29,6 +29,7 @@ import httpcore
 import httpx
 from pydantic import BaseModel, Field
 
+from .. import obs
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 
 MAX_REDIRECTS = 5
@@ -37,9 +38,20 @@ DEFAULT_MAX_CHARS = 20_000
 TIMEOUT_S = 20.0
 USER_AGENT = "SkySheep-web-fetch/0.4 (+open-source agent workbench)"
 
+# NAT64/DNS64、6to4、Teredo：这些 IPv6 段内嵌着 IPv4 地址，经翻译网关可达
+# 内网——`is_global` 认它们是公网（地址段本身注册在公网），但语义上等价于
+# 访问被内嵌的那个 IPv4（如 64:ff9b::7f00:1 → 127.0.0.1）。显式排除（审查 C-1）。
+_TRANSLATION_NETS = tuple(
+    ipaddress.ip_network(n) for n in ("64:ff9b::/96", "2002::/16", "2001::/32")
+)
+
 
 class WebFetchArgs(BaseModel):
-    url: str = Field(description="要抓取的 http(s) 网页地址")
+    # URL 总长上限（审查 P1-2）：web_fetch 是 READONLY 自动放行，不加约束的话
+    # 模型可以把任意长的会话内容拼进 query 外带；正常网页 URL 远用不到这么长。
+    url: str = Field(
+        max_length=2048, description="要抓取的 http(s) 网页地址"
+    )
     max_chars: int = Field(
         default=DEFAULT_MAX_CHARS, ge=200, le=100_000, description="返回文本的最大字符数"
     )
@@ -77,6 +89,11 @@ def _resolve_public_ips(host: str) -> list[str]:
     DNS rebinding）。任何一个结果落在非公网段都直接拒绝：一个域名同时答出
     公网与内网地址时，不能只挑好听的用。
     """
+    # 畸形 URL 的 hostname 可能是 None / 空串（如 userinfo + IPv6 字面量剥凭据后
+    # 再解析的形态）：显式拒绝而不是让它炸成 AttributeError（审查 P2-8）。
+    host = str(host or "").strip()
+    if not host:
+        raise ToolError("web_fetch：URL 缺少主机名，无法定位目标")
     if host.lower() in ("localhost", "0.0.0.0", "::", "[::]"):
         raise ToolError(f"web_fetch 拒绝内网地址: {host}")
     try:
@@ -94,6 +111,17 @@ def _resolve_public_ips(host: str) -> list[str]:
             raise ToolError(
                 f"web_fetch 拒绝非公网地址（{host} → {ip}）：内网/回环地址不允许访问"
             )
+        if isinstance(ip, ipaddress.IPv6Address):
+            v4 = ip.ipv4_mapped
+            if v4 is not None and not v4.is_global:
+                raise ToolError(
+                    f"web_fetch 拒绝 IPv4 映射地址（{host} → {ip}）：内嵌非公网 IPv4"
+                )
+            if any(ip in net for net in _TRANSLATION_NETS):
+                raise ToolError(
+                    f"web_fetch 拒绝翻译段地址（{host} → {ip}）："
+                    "NAT64/6to4/Teredo 可翻译到内网 IPv4"
+                )
         text = str(ip)
         if text not in ips:
             ips.append(text)
@@ -171,6 +199,8 @@ class WebFetchTool(Tool):
         "抓取一个公网网页并转为纯文本返回（HTML 自动去标签）。"
         "适合查官方文档、读在线资料、核对接口行为。"
         "仅支持 http/https 公网地址，内网与回环地址会被拒绝；长文本会被截断。"
+        "URL 只用于定位要看的网页：不要把会话内容、文件内容、密钥或用户隐私"
+        "拼进 URL（含 query 参数）——这是单向抓取工具，不是数据外发通道。"
     )
     safety = Safety.READONLY
     read_only_hint = True
@@ -242,22 +272,36 @@ class WebFetchTool(Tool):
         headers["x-skysheep-charset"] = charset
         return status, headers, bytes(buffer)
 
+    @staticmethod
+    def _strip_userinfo(url: str) -> str:
+        """URL 带 userinfo（https://user:pass@host/）时剥掉再请求：凭据会随请求
+        发给对端并留在历史/日志里，而 URL 里出现凭据基本都是泄漏（安全审查
+        低危项）。重定向的每一跳同样适用——Location 里带的凭据 httpx 会转成
+        Basic Auth 发出去，只在首跳剥挡不住（审查 C-2）。
+        """
+        parsed = urlparse(url)
+        if not (parsed.username or parsed.password):
+            return url
+        netloc = parsed.hostname or ""
+        # IPv6 字面量的 hostname 不带方括号：原样拼回去再解析会把它当「主机:端口」
+        # 切碎，hostname 变 None（审查 P2-8）
+        if ":" in netloc:
+            netloc = f"[{netloc}]"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        return urlunparse(parsed._replace(netloc=netloc))
+
     async def run(self, args: WebFetchArgs, ctx: ToolContext) -> str:
         url = args.url.strip()
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ToolError("web_fetch 需要 http/https URL，例如 https://example.com/docs")
-        # URL 里带 userinfo（https://user:pass@host/）时剥掉再请求：凭据会随请求
-        # 发给对端并留在历史/日志里，而模型生成的 URL 里出现凭据基本都是泄漏
-        # （安全审查低危项）
-        if parsed.username or parsed.password:
-            netloc = parsed.hostname or ""
-            if parsed.port:
-                netloc += f":{parsed.port}"
-            url = urlunparse(parsed._replace(netloc=netloc))
-            parsed = urlparse(url)
+        url = self._strip_userinfo(url)
+        parsed = urlparse(url)
 
-        ips = self._pin(parsed.hostname)
+        # getaddrinfo 是同步调用：放线程池，别让慢 DNS 停摆整个事件循环
+        # （审查 P2-6；web_search / imagegen 早已是 to_thread 口径）
+        ips = await asyncio.to_thread(self._pin, parsed.hostname)
 
         current = url
         status = 0
@@ -273,7 +317,9 @@ class WebFetchTool(Tool):
                 p2 = urlparse(nxt)
                 if p2.scheme not in ("http", "https") or not p2.hostname:
                     raise ToolError(f"重定向到不支持的协议: {nxt}")
-                ips = self._pin(p2.hostname)  # 每一跳重新解析、校验并固定
+                nxt = self._strip_userinfo(nxt)
+                p2 = urlparse(nxt)
+                ips = await asyncio.to_thread(self._pin, p2.hostname)  # 每一跳重新解析、校验并固定
                 current = nxt
                 continue
             break
@@ -293,6 +339,15 @@ class WebFetchTool(Tool):
         note = ""
         if headers.get("x-skysheep-truncated"):
             note = f"\n\n... [响应体超过 {MAX_RESPONSE_BYTES // 1024 // 1024} MB，已截断] ..."
+        # 外发审计（审查 P1-2）：READONLY 工具零确认外发，日志里留一条「去了哪」。
+        # 刻意只记 host/path 与 query 长度——query 本体可能正是被外带的敏感值，
+        # 落盘会随诊断包二次泄漏；长度异常本身就是最有用的排查信号。
+        parsed_final = urlparse(current)
+        obs.info(
+            "web_fetch", "外发请求完成",
+            host=parsed_final.hostname, path=parsed_final.path[:200],
+            query_len=len(parsed_final.query), status=status, bytes=len(body),
+        )
         return f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" + truncate_output(
             text + note, args.max_chars
         )

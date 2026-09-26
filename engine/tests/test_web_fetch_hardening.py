@@ -256,3 +256,80 @@ def test_url_userinfo_is_stripped_and_bogus_charset_tolerated(tmp_path):
         assert "secret" not in got["path"]
     finally:
         srv.shutdown()
+
+
+# ---- 审查 C（2026-09-25）：翻译段地址与重定向 userinfo ----
+
+
+def test_resolve_rejects_nat64_translation_address():
+    """NAT64/DNS64 合成地址（64:ff9b::/96）is_global=True 但语义是访问内嵌
+    的内网 IPv4——公网校验必须显式拒绝。"""
+
+    def fake(host, port, *a, **k):
+        if host == "rebind.test":
+            return [
+                (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                 ("64:ff9b::7f00:1", 0, 0, 0))  # 127.0.0.1 的 NAT64 合成形式
+            ]
+        return REAL_GETADDRINFO(host, port, *a, **k)
+
+    with patch.object(socket, "getaddrinfo", side_effect=fake):
+        with pytest.raises(ToolError):
+            _resolve_public_ips("rebind.test")
+
+
+def test_resolve_rejects_6to4_address():
+    """6to4（2002::/16）内嵌 IPv4，同样不得过公网校验。"""
+
+    def fake(host, port, *a, **k):
+        if host == "tunnel.test":
+            return [
+                (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                 ("2002:7f00:1::", 0, 0, 0))  # 内嵌 127.0.0.1
+            ]
+        return REAL_GETADDRINFO(host, port, *a, **k)
+
+    with patch.object(socket, "getaddrinfo", side_effect=fake):
+        with pytest.raises(ToolError):
+            _resolve_public_ips("tunnel.test")
+
+
+class _RedirectorHandler(BaseHTTPRequestHandler):
+    target = ""
+    log_message = _EchoHeaderHandler.log_message
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", type(self).target)
+        self.end_headers()
+
+
+def test_redirect_userinfo_is_stripped_per_hop(tmp_path):
+    """重定向 Location 携带的 userinfo 在下一跳被剥掉，不转成 Basic Auth 发出。
+
+    首跳剥离只保护初始 URL；302 的 Location 里带 user:pass 时，httpx 会把它
+    当 Basic Auth 发给对端——每一跳都要过同一把剪刀。
+    """
+    _EchoHeaderHandler.seen = []
+    catcher = ThreadingHTTPServer(("127.0.0.1", 0), _EchoHeaderHandler)
+    redir = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectorHandler)
+    _RedirectorHandler.target = (
+        f"http://alice:secret@127.0.0.1:{catcher.server_address[1]}/cred"
+    )
+    for s in (catcher, redir):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        tool = WebFetchTool(allow_private_hosts=True)  # 测试后门：本机桩
+        ctx = ToolContext(working_dir=tmp_path)
+        out = asyncio.run(tool.run(
+            WebFetchArgs(url=f"http://127.0.0.1:{redir.server_address[1]}/start"), ctx,
+        ))
+        assert "ok" in out
+        assert _EchoHeaderHandler.seen, "第二跳桩应收到请求"
+        got = _EchoHeaderHandler.seen[0]
+        assert got["auth"] is None, "重定向带进来的凭据不得转成 Basic Auth"
+        assert "secret" not in got["path"]
+        assert "secret" not in out, "凭据也不该留在返回文本里"
+    finally:
+        redir.shutdown()
+        catcher.shutdown()

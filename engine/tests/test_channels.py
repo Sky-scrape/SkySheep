@@ -122,12 +122,13 @@ async def test_approval_timeout_denies_and_cleans_up():
 
 async def test_approval_allow_from_chat():
     gate = ChannelGate(approve_enabled=True, approve_timeout=5, notify=lambda p: _noop())
+    gate.turn_actor = "u-owner"  # P3-17 收紧：决定必须由带 id 的发起人提交
 
     async def answer():
         await asyncio.sleep(0.1)
-        assert gate.submit_latest(Decision.ALLOW_ONCE) is not None
+        assert gate.submit_latest(Decision.ALLOW_ONCE, actor="u-owner") is not None
         # 已投递过的请求不能再被投第二次
-        assert gate.submit_latest(Decision.ALLOW_ONCE) is None
+        assert gate.submit_latest(Decision.ALLOW_ONCE, actor="u-owner") is None
 
     asyncio.create_task(answer())
     pending = await gate.authorize(_WriteTool(), {"path": "x"})
@@ -159,11 +160,12 @@ async def test_allow_always_downgrades_to_once_from_channel():
     账号被盗或手滑的代价与「少打一次 allow」完全不成比例。
     """
     gate = ChannelGate(approve_enabled=True, approve_timeout=5, notify=lambda p: _noop())
+    gate.turn_actor = "u-owner"  # P3-17 收紧：决定必须由带 id 的发起人提交
 
     async def answer():
         await asyncio.sleep(0.1)
         # 用户在聊天窗口回复的是「总是允许」的写法
-        assert gate.submit_latest(Decision.ALLOW_ALWAYS) is not None
+        assert gate.submit_latest(Decision.ALLOW_ALWAYS, actor="u-owner") is not None
 
     asyncio.create_task(answer())
     pending = await gate.authorize(_WriteTool(), {"path": "x"})
@@ -187,17 +189,36 @@ async def test_approval_decision_bound_to_turn_actor():
     assert await asyncio.wait_for(pending.wait(), timeout=5) == Decision.ALLOW_ONCE
 
 
-async def test_approval_actor_binding_keeps_old_hosts_working():
-    """turn_actor 为空（旧宿主没传 actor）时保持旧行为：任何 approved 来源可决定。"""
+async def test_approval_actor_binding_requires_id_equality():
+    """审查 S-08（2026-09-25）收紧后的绑定语义：任何一方带 id 就必须相等。
+
+    - 绑定为空 + 回复带 id（宿主漏绑/伪造 id）：拒绝——这正是「群聊里任何人
+      可替发起人批准」的缺口；
+    - 绑定带 id + 回复缺 id（丢失 actor 的消息）：同样拒绝；
+    - 两侧都为空（平台根本不提供消息者 id）：同样拒绝（P3-17 收紧——id 是
+      校验的根本依据，缺失时宁可让发起人在桌面端确认，也不开「任何人可批」
+      的口子；现平台飞书/微信恒带 id，不受影响）。
+    """
     gate = ChannelGate(approve_enabled=True, approve_timeout=5, notify=lambda p: _noop())
 
     async def answer():
         await asyncio.sleep(0.1)
-        assert gate.submit_latest(Decision.ALLOW_ONCE, actor="anyone") is not None
+        assert gate.submit_latest(Decision.ALLOW_ONCE, actor="anyone") is None
 
     asyncio.create_task(answer())
     pending = await gate.authorize(_WriteTool(), {"path": "x"})
-    assert await asyncio.wait_for(pending.wait(), timeout=5) == Decision.ALLOW_ONCE
+    assert await asyncio.wait_for(pending.wait(), timeout=5) == Decision.DENY
+
+    gate2 = ChannelGate(approve_enabled=True, approve_timeout=5, notify=lambda p: _noop())
+    gate2.turn_actor = "u-owner"
+
+    async def answer2():
+        await asyncio.sleep(0.1)
+        assert gate2.submit_latest(Decision.ALLOW_ONCE, actor="") is None
+
+    asyncio.create_task(answer2())
+    pending2 = await gate2.authorize(_WriteTool(), {"path": "x"})
+    assert await asyncio.wait_for(pending2.wait(), timeout=5) == Decision.DENY
 
 
 async def _noop():
@@ -651,6 +672,7 @@ class _FakeHost:
     def __init__(self):
         self.ran = []
         self.actors = []
+        self.chat_ids = []
         self.sessions = {}
         self.decisions = []
         self.chats = []
@@ -663,9 +685,10 @@ class _FakeHost:
         self.sessions[name] = f"sess-{name}-new"
         return self.sessions[name]
 
-    async def channel_run(self, session_id, text, actor=""):
+    async def channel_run(self, session_id, text, actor="", chat_id=""):
         self.ran.append((session_id, text))
         self.actors.append((session_id, actor))
+        self.chat_ids.append((session_id, chat_id))
         return {"text": "回复：" + text}
 
     async def channel_stop(self, session_id):
@@ -822,7 +845,7 @@ async def test_manager_queues_message_with_ack():
 
     release = _aio.Event()
 
-    async def slow_run(session_id, text, actor=""):
+    async def slow_run(session_id, text, actor="", chat_id=""):
         host.ran.append((session_id, text))
         await release.wait()
         return {"text": "done"}
@@ -855,7 +878,7 @@ async def test_manager_rejects_when_queue_is_full():
 
     release = _aio.Event()
 
-    async def slow_run(session_id, text, actor=""):
+    async def slow_run(session_id, text, actor="", chat_id=""):
         host.ran.append((session_id, text))
         await release.wait()
         return {"text": "done"}
@@ -883,7 +906,7 @@ async def test_manager_sends_busy_notice_for_slow_turn(monkeypatch):
     mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
     from skysheep.channels.base import ChannelMessage
 
-    async def slow_run(session_id, text, actor=""):
+    async def slow_run(session_id, text, actor="", chat_id=""):
         await _aio.sleep(0.2)
         return {"text": "done"}
 
@@ -906,7 +929,7 @@ async def test_manager_reports_run_error_back_to_chat():
     mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
     from skysheep.channels.base import ChannelMessage
 
-    async def boom(session_id, text, actor=""):
+    async def boom(session_id, text, actor="", chat_id=""):
         raise RuntimeError("模型未配置")
 
     host.channel_run = boom

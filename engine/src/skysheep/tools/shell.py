@@ -68,13 +68,20 @@ def _is_secret_env_name(name: str) -> bool:
     return any(w in low for w in _SECRET_ENV_WORDS)
 
 
-def _child_env() -> dict[str, str]:
-    """给 run_command 子进程用的环境：剥掉密钥类变量，其余原样继承。
+def child_environment() -> dict[str, str]:
+    """给引擎拉起的子进程用的环境：剥掉密钥类变量，其余原样继承。
 
     PATH / SystemRoot / ComSpec / TEMP / HOME / USERPROFILE 这些必须留着，
     否则 cmd.exe 与绝大多数命令直接跑不起来。返回新 dict，不改 os.environ。
+    所有「引擎侧拉起子进程」的路径共用这一份口径——run_command 与终端面板
+    （TerminalSlot.spawn）都必须走这里，任何一条新命令执行路径也不例外。
     """
     return {k: v for k, v in os.environ.items() if not _is_secret_env_name(k)}
+
+
+def _child_env() -> dict[str, str]:
+    """兼容别名：历史测试与内部调用点引用的旧名字。"""
+    return child_environment()
 
 
 def _windows_exe(name: str) -> str:
@@ -349,10 +356,17 @@ class RunCommandTool(Tool):
         # action=read/kill/list 这类没有命令的调用如果返回空串，会得到一条 pattern 为空的
         # 规则——空串能和任何空命令文本相等，等于把整个工具放行了。改为带上动作名，
         # 粒度就落在「某个动作」上（与鼠标/键盘的动作级白名单同一档）。
+        # kill 再带上进程号（审查 P3-16）：exact 规则按整串相等匹配，不带 id 的
+        # "action=kill" 固化一次等于放行「杀本会话任意后台进程」；带上 id 后每次
+        # 杀别的进程都要重新确认（与 keyboard 固化当次内容同一处理）。
         command = str(input_dict.get("command", ""))
         if command.strip():
             return command
         action = str(input_dict.get("action", "") or "run")
+        if action == "kill":
+            rid = str(input_dict.get("id", 0) or 0)
+            if rid:
+                return f"action=kill id={rid}"
         return f"action={action}"
 
     async def run(self, args: RunCommandArgs, ctx: ToolContext) -> str:

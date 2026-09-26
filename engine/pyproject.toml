@@ -1,6 +1,6 @@
 [project]
 name = "skysheep-engine"
-version = "1.9"
+version = "2.0"
 description = "SkySheep engine — open-source AI agent workbench kernel (agent loop, tools, providers, permissions, sessions)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,8 @@ skysheep = "skysheep.cli.app:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=7.0",
+    "pytest-timeout>=2.3",
     "ruff>=0.6",
 ]
 
@@ -55,6 +57,10 @@ markers = [
     "e2e: 起真实服务/真实 socket 的端到端用例（比进程内用例慢）",
     "slow: 耗时明显、不适合每次提交都跑的用例",
 ]
+# 单用例超时保护：挂死的 async 用例（比如等一个永远不会来的事件）会拖死整个 CI。
+# thread 法对不配合的 C 级等待也能强杀；120s 覆盖最慢的 e2e/覆盖率场景绰绰有余。
+timeout = 120
+timeout_method = "thread"
 
 [tool.ruff]
 line-length = 110

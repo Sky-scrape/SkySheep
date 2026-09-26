@@ -859,12 +859,12 @@ def test_right_panel_merged_tabs_keep_every_view_reachable(home):
     js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
-    # ① 菜单里只剩 9 格，合并掉的四个不再作为标签出现
+    # ① 菜单里只剩 10 格（含记忆地图），合并掉的四个不再作为标签出现
     meta = js[js.index("const TAB_META = {"):]
     meta = meta[:meta.index("\n};")]
     tab_ids = re.findall(r"^  (\w+): \{", meta, re.M)
     assert tab_ids == ["aux", "review", "browser", "files", "tasks", "agenda",
-                       "auto", "memory", "ext"], f"标签集合变了：{tab_ids}"
+                       "auto", "memory", "map", "ext"], f"标签集合变了：{tab_ids}"
     for old in ("todo", "ptasks", "cron", "pipeline"):
         assert f"\n  {old}: {{" not in meta, f"{old} 已并入容器标签，不该再单独占一格菜单"
 

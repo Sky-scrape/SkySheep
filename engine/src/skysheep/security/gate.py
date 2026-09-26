@@ -70,6 +70,61 @@ _CHAIN_EXPAND_CHARS = "`$\r\n"
 _CHAIN_SEP_CHARS = ";|&<>"
 
 
+# 「下一参数就是任意代码文本」的解释器/shell 旗标（小写）。规则提炼（rule_for）
+# 与匹配（WhitelistRule._matches_core）共用：这类调用提炼不出有边界的前缀，
+# "python -c" 前缀规则等于放行任意 Python 代码。
+_CODE_EXEC_FLAGS = frozenset({
+    "-c", "-e", "-p", "-r", "-lc", "-ic", "/c", "/k",
+    "-command", "-encodedcommand", "--eval", "--command",
+})
+
+
+def _has_code_exec_flag(text: str, head: int = 4) -> bool:
+    """命令前几个词里是否出现代码执行旗标（覆盖 `py -3 -c`、
+    `powershell -NoProfile -Command` 这类旗标不在第二词的形态）。"""
+    return any(w.lower() in _CODE_EXEC_FLAGS for w in text.split()[:head])
+
+
+def _write_targets_engine_home(working_dir, tool, input_dict: dict) -> bool:
+    """写入落点是否在引擎自身数据目录（~/.skysheep[-instance]）内。
+
+    是的话白名单（含整工具 always 规则）不得自动放行：全局技能目录里的
+    SKILL.md 会注入**所有项目**（含未信任项目）的 system prompt，config.toml
+    更是明文凭据本体——沉淀规则之后模型就能免确认改写它们（审查 P2-7）。
+    判定路径与文件工具同口径（resolve 后比对，symlink 安全）；解析不了
+    （无工作目录的相对路径、OSError）返回 False，交给工具层。
+    authorize 的规则放行分支与 rule_for 的规则提炼共用本判定。
+    """
+    path_arg = getattr(tool, "write_path_arg", False)
+    if not path_arg:
+        return False
+    # 落点参数名在 write_target_arg（默认 "path"）；guard_path_args 是一并要看
+    # 的伴随路径（如 move_file 的 source——把主目录里的东西移走同样是破坏）。
+    target_arg = getattr(tool, "write_target_arg", "path") or "path"
+    raw_paths = [input_dict.get(target_arg, "")] + [
+        input_dict.get(a, "") for a in getattr(tool, "guard_path_args", ())
+    ]
+    for raw in raw_paths:
+        raw = str(raw or "").strip()
+        if raw.startswith("@"):
+            raw = raw[1:]
+        if not raw:
+            continue
+        try:
+            target = Path(raw)
+            if not target.is_absolute():
+                if working_dir is None:
+                    continue
+                target = working_dir / target
+            from ..config import skysheep_home  # noqa: PLC0415  延迟导入防环
+
+            target.resolve().relative_to(skysheep_home().resolve())
+        except (OSError, ValueError):
+            continue
+        return True
+    return False
+
+
 def _has_shell_chain(text: str) -> bool:
     r"""命令里是否出现 shell 拼接/替换元字符。
 
@@ -178,15 +233,30 @@ class WhitelistRule:
         if self.tool != tool_name:
             return False
         if self.kind == "always":
+            # delete_file 的整工具规则不再产也不再认（审查 S-12）：库里遗留的
+            # always 规则一律失效，用户按新语义逐次固化具体路径
+            if tool_name == "delete_file":
+                return False
             return True
         if self.kind == "prefix":
-            # 命令类前缀规则不覆盖 shell 拼接：`git status; rm -rf /` 必须重新询问
-            if tool_name == _RUN_COMMAND and _has_shell_chain(arg_text):
+            # 命令类前缀规则不覆盖 shell 拼接：`git status; rm -rf /` 必须重新询问；
+            # 同样不覆盖「下一参数即任意代码」的解释器调用——手建/历史遗留的
+            # "python -c" 前缀规则放行不了另一段代码（审查 B-1）
+            if tool_name == _RUN_COMMAND and (
+                _has_shell_chain(arg_text) or _has_code_exec_flag(arg_text)
+            ):
                 return False
             return _prefix_match(arg_text, self.pattern)
         if self.kind == "exact":
             return arg_text == self.pattern
         if self.kind == "glob":
+            # 与 prefix 分支同一道防线：run_command 的 glob 规则也不放行带 shell
+            # 拼接或解释器代码旗标的命令——`git *` 不该命中 `git status & calc`，
+            # `python *` 不该命中 `python -c <任意代码>`（审查 B-1/B-2）
+            if tool_name == _RUN_COMMAND and (
+                _has_shell_chain(arg_text) or _has_code_exec_flag(arg_text)
+            ):
+                return False
             if _CASE_INSENSITIVE_FS:
                 return fnmatch.fnmatchcase(arg_text.lower(), self.pattern.lower())
             return fnmatch.fnmatchcase(arg_text, self.pattern)
@@ -363,7 +433,9 @@ class PermissionGate:
     _ACTION_PREFIX_TOOLS = ("mouse", "window", "browser")
     # 例外 ①：键盘注入的「内容」就是对当前焦点窗口的任意操作（文本可以是任何命令），
     # 按动作词放行 type / hotkey 等于放行任意输入——改成固化用户当时批准的那一条。
-    _EXACT_ONLY_TOOLS = ("keyboard", "clipboard_write")
+    # delete_file 同理（例外 ③）：整工具放行等于把 DANGEROUS 级删除面沉淀成永久
+    # 规则，之后连 recursive=true 的整目录删除都零确认——只固化当次参数（审查 S-12）。
+    _EXACT_ONLY_TOOLS = ("keyboard", "clipboard_write", "delete_file")
     # 例外 ②：动作名相同但后果不可逆/匹配模糊的动作，也不按动作整类放行。
     # window 的 close 按标题**子串**匹配：放行一次 close 等于允许关掉任何标题含该
     # 子串的窗口（子串很容易误中整个应用），所以只固化当时那个标题。
@@ -377,18 +449,28 @@ class PermissionGate:
             "剪贴板写入只固化「总是允许」时的那一段内容：内容不同会重新询问。"
             "（整类放行等于允许把任意内容写进你的剪贴板，包括你即将粘贴的位置）"
         ),
+        "delete_file": (
+            "删除不提供整工具放行：「总是允许」只固化这一次的路径与参数，"
+            "删别的文件/目录会重新询问。（DANGEROUS 级的删除面不沉淀成永久规则）"
+        ),
     }
 
+    # 「下一参数是任意代码」的解释器旗标清单见模块级 _CODE_EXEC_FLAGS
+    # （规则提炼与匹配共用同一份）。
+
     @staticmethod
-    def rule_for(tool: Tool, input_dict: dict) -> WhitelistRule:
+    def rule_for(tool: Tool, input_dict: dict, working_dir: Path | None = None) -> WhitelistRule:
         """根据本次调用生成"永久允许"规则。
 
         - run_command：简单命令取前两个词做前缀（如 "git status" / "npm run"），前缀规则
-          本身会拒绝带 shell 拼接的整条命令；带拼接的命令没有安全前缀可提炼，改成
+          本身会拒绝带 shell 拼接的整条命令；带拼接的命令、以及「下一参数是任意代码」
+          的解释器调用（python -c / powershell -Command 等）没有安全前缀可提炼，改成
           ``exact`` 只放行用户当时批准的这一条；
         - 动作型工具（鼠标/窗口/浏览器）：按动作词生成前缀规则；
         - 键盘（type / hotkey）与剪贴板写入：不按动作放行，只固化这一次的内容/键位；
         - window 的 close：只固化这一个标题（按子串匹配，整类放行等于允许关掉任意应用）；
+        - move_file：删除形态（覆盖已存在目录 = rmtree）不产 always 规则，只固化本次
+          参数——落库的 exact 规则也不会自动放行这类调用（authorize 的删除守卫优先）；
         - 其余工具：整工具放行。
         """
         arg_text = tool.arg_text(input_dict)
@@ -398,8 +480,10 @@ class PermissionGate:
                 # 不能顺带放行同前缀的其它命令，只固化这一条；空命令（action=read/kill/list）
                 # 提炼不出前缀，同样只能固化当次参数，否则会退化成「整个工具放行」。
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
-            # 取前两个词作为前缀，如 "git status" / "npm run"，避免把整条命令固化
             words = arg_text.split()
+            if _has_code_exec_flag(arg_text):
+                return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+            # 取前两个词作为前缀，如 "git status" / "npm run"，避免把整条命令固化
             prefix = " ".join(words[:2]) if words else arg_text
             return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix)
         if tool.name in PermissionGate._EXACT_ONLY_TOOLS:
@@ -413,6 +497,18 @@ class PermissionGate:
             return WhitelistRule(
                 tool=tool.name, kind="prefix", pattern=action
             )
+        if tool.name == "move_file" and PermissionGate._delete_shape(
+            working_dir, tool.name, input_dict,
+            getattr(tool, "write_target_arg", "path") or "path",
+        ):
+            return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+        # 落点在引擎数据目录的写入只固化当次参数（审查 P2-7）：整工具 always
+        # 规则即使产出来也会在 authorize 被守卫拦下，只会在白名单页留一条
+        # 永远不生效的死规则误导用户。
+        if getattr(tool, "write_path_arg", None) and _write_targets_engine_home(
+            working_dir, tool, input_dict
+        ):
+            return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
         return WhitelistRule(tool=tool.name, kind="always")
 
     def _path_inside_workdir(self, raw: str) -> bool:
@@ -450,6 +546,43 @@ class PermissionGate:
         except OSError:
             return None
 
+    @staticmethod
+    def _delete_shape(
+        working_dir: Path | None, tool_name: str, input_dict: dict,
+        write_target_arg: str = "path",
+    ) -> bool:
+        """「本次调用会递归删除已有目录」的形态判定（与权限档位无关的共用本体）。
+
+        权限门（_write_is_actually_delete）与规则提炼（rule_for）都要用；
+        working_dir 为 None 时解析不出路径，一律返回 False。
+        """
+        if tool_name != "move_file" or not input_dict.get("overwrite"):
+            return False
+        if working_dir is None:
+            return False
+
+        def _resolve(raw: object) -> Path | None:
+            raw = str(raw or "").strip()
+            if raw.startswith("@"):
+                raw = raw[1:]
+            if not raw:
+                return None
+            try:
+                p = Path(raw)
+                if not p.is_absolute():
+                    p = working_dir / p
+                return p.resolve()
+            except OSError:
+                return None
+
+        src = _resolve(input_dict.get("source", ""))
+        dst = _resolve(input_dict.get(write_target_arg, ""))
+        if src is None or dst is None or not src.is_dir():
+            return False
+        if dst.is_dir():
+            dst = dst / src.name
+        return dst.is_dir()
+
     def _write_is_actually_delete(self, tool: Tool, input_dict: dict) -> bool:
         """本次写入实质上会递归删除已有目录吗？是的话不得自动放行。
 
@@ -462,18 +595,16 @@ class PermissionGate:
         这里按 fs.py 的同一套语义还原落点（目标已存在且是目录 → 移进去保留原名），
         只在「源是目录 + 落点也是已存在目录」时返回 True。判定不了（路径解不出、
         目标不存在）一律返回 False，交给工具层自己的存在性检查。
+        判定本体在 _delete_shape（规则提炼的静态场景共用同一份）。
         """
-        if tool.name != "move_file" or not input_dict.get("overwrite"):
-            return False
-        src = self._resolve_arg_path(input_dict.get("source", ""))
-        dst = self._resolve_arg_path(
-            input_dict.get(getattr(tool, "write_target_arg", "path") or "path", "")
+        return self._delete_shape(
+            self.working_dir, tool.name, input_dict,
+            getattr(tool, "write_target_arg", "path") or "path",
         )
-        if src is None or dst is None or not src.is_dir():
-            return False
-        if dst.is_dir():
-            dst = dst / src.name
-        return dst.is_dir()
+
+    def _write_hits_engine_home(self, tool: Tool, input_dict: dict) -> bool:
+        """authorize 侧入口：见模块级 _write_targets_engine_home。"""
+        return _write_targets_engine_home(self.working_dir, tool, input_dict)
 
     def _write_target_inside_workdir(self, tool: Tool, input_dict: dict) -> bool:
         """「自动允许写入」档的适用范围判断：只放行能确认落在工作目录内的写入。
@@ -572,7 +703,19 @@ class PermissionGate:
             return None
         arg_text = tool.arg_text(input_dict)
         rule = self._matching_rule(tool, arg_text)
-        if rule is not None:
+        if (
+            rule is not None
+            # 白名单命中也不放行「名义是移动、实为递归删除」的调用：它等效
+            # delete_file（DANGEROUS，永不自动放行）的删除面，任何档位/规则
+            # 都要逐次确认——只靠 auto_accept_write 分支的守卫挡不住白名单
+            # 整工具放行（审查 A-1/A-2）。
+            and not self._write_is_actually_delete(tool, input_dict)
+            # 白名单命中也不放行落进引擎自身数据目录的写入：全局技能会注入
+            # 所有项目（含未信任项目）的 system prompt，config.toml 是凭据
+            # 本体——沉淀一条整工具规则就等于跨信任边界的自由写入面
+            # （审查 P2-7），与上一条同级，退回逐次确认。
+            and not self._write_hits_engine_home(tool, input_dict)
+        ):
             # 命中记账：只记有库 id 的项目级规则（次数 + 最近命中时间，
             # 设置页展示用）。记账失败不影响放行——这只是统计。
             if rule.rule_id is not None and self.store is not None:
@@ -590,8 +733,21 @@ class PermissionGate:
             note=self._note_for(tool, arg_text),
             _future=asyncio.get_running_loop().create_future(),
             diff=self._preview_diff(tool, input_dict),
-            always_rule=self.rule_for(tool, input_dict),
+            always_rule=self.rule_for(tool, input_dict, self.working_dir),
         )
+        if (
+            pending.always_rule is not None
+            and pending.always_rule.kind == "always"
+            and getattr(tool, "write_path_arg", False)
+        ):
+            # 审查 S-12 明示义务：写入类工具的整工具规则不受工作目录约束
+            # （白名单不做路径校验），预告里必须说清，不能借「自动编辑档会拦
+            # 目录外写入」的印象让用户误判范围
+            pending.note = (pending.note + "\n" if pending.note else "") + (
+                "注意：「总是允许」= 整工具放行，写入目标不限工作目录"
+                "（工作目录外的文件也会免确认放行）。"
+                "引擎自身数据目录（~/.skysheep）内的写入例外：永远逐次确认。"
+            )
         if self.on_request:
             await self.on_request(pending)
         return pending

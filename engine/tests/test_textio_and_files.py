@@ -386,6 +386,54 @@ async def test_move_is_recoverable_by_checkpoint(tmp_path):
     assert not (tmp_path / "docs" / "b.txt").exists()
 
 
+async def test_move_dir_is_fully_recoverable_by_checkpoint(tmp_path):
+    """目录移动逐文件进检查点：撤销后源树整体还原、目标处清空。
+
+    旧实现把源目录记成 None（语义=改前不存在），回滚删得掉移过去的树
+    却还原不出源——目录内容直接丢失（审查 A-3 附带缺陷）。
+    """
+    rec = ChangeRecorder()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.txt").write_text("aaa", encoding="utf-8")
+    (tmp_path / "src" / "sub").mkdir()
+    (tmp_path / "src" / "sub" / "b.txt").write_text("bbb", encoding="utf-8")
+    tool = ToolRegistry(default_tools(recorder=rec)).get("move_file")
+    await tool.run(MoveFileArgs(source="src", destination="dst"), _ctx(tmp_path))
+    assert (tmp_path / "dst" / "sub" / "b.txt").exists()
+
+    store = CheckpointStore()
+    saved = store.save("s1", dict(rec.pre))
+    store.restore(saved["id"])
+    assert (tmp_path / "src" / "a.txt").read_text(encoding="utf-8") == "aaa"
+    assert (tmp_path / "src" / "sub" / "b.txt").read_text(encoding="utf-8") == "bbb"
+    assert not (tmp_path / "dst").exists()
+
+
+async def test_move_overwrite_dir_checkpoint_restores_both_sides(tmp_path):
+    """覆盖已存在目录的移动：回滚后源树、被覆盖的旧内容都在，移入副本清干净。
+
+    覆盖 = 对目标子树 rmtree（审查 A-3 主缺陷）：旧实现目标旧内容不进
+    检查点、目标目录被记成 None（回滚时二次删除），整树数据不可恢复。
+    """
+    rec = ChangeRecorder()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "new.txt").write_text("new", encoding="utf-8")
+    (tmp_path / "dst" / "src").mkdir(parents=True)
+    (tmp_path / "dst" / "src" / "old.txt").write_text("old", encoding="utf-8")
+    tool = ToolRegistry(default_tools(recorder=rec)).get("move_file")
+    await tool.run(
+        MoveFileArgs(source="src", destination="dst", overwrite=True), _ctx(tmp_path))
+    assert (tmp_path / "dst" / "src" / "new.txt").exists()
+    assert not (tmp_path / "dst" / "src" / "old.txt").exists()
+
+    store = CheckpointStore()
+    saved = store.save("s1", dict(rec.pre))
+    store.restore(saved["id"])
+    assert (tmp_path / "src" / "new.txt").read_text(encoding="utf-8") == "new"
+    assert (tmp_path / "dst" / "src" / "old.txt").read_text(encoding="utf-8") == "old"
+    assert not (tmp_path / "dst" / "src" / "new.txt").exists(), "移入副本应被回滚清掉"
+
+
 # ---------------------------------------------------------------- 权限门与新增工具
 
 

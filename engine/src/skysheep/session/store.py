@@ -170,6 +170,20 @@ CREATE TABLE IF NOT EXISTS project_tasks (
     done_at REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id, done);
+CREATE TABLE IF NOT EXISTS map_digests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    kind TEXT NOT NULL DEFAULT 'phase',
+    title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    highlights TEXT NOT NULL DEFAULT '[]',
+    topics TEXT NOT NULL DEFAULT '[]',
+    session_ids TEXT NOT NULL DEFAULT '[]',
+    start_ts REAL NOT NULL DEFAULT 0,
+    end_ts REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_map_digests_project ON map_digests(project_id, start_ts);
 """
 
 # 全文搜索索引：messages 的 FTS5 虚表（trigram 分词）。
@@ -907,6 +921,200 @@ class SessionStore:
         cur = await self._db.execute("DELETE FROM project_tasks WHERE id = ?", (task_id,))
         await self._db.commit()
         return cur.rowcount
+
+    # ---- 记忆地图：演化摘要（map_digests）与项目演化时间线聚合 ----
+
+    @staticmethod
+    def _map_digest_row(row) -> dict:
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "kind": row["kind"],
+            "title": row["title"],
+            "summary": row["summary"],
+            "highlights": json.loads(row["highlights"] or "[]"),
+            "topics": json.loads(row["topics"] or "[]"),
+            "session_ids": json.loads(row["session_ids"] or "[]"),
+            "start_ts": row["start_ts"],
+            "end_ts": row["end_ts"],
+            "created_at": row["created_at"],
+        }
+
+    async def list_map_digests(self, project_id: int) -> list[dict]:
+        """某项目的演化摘要；overview 行排最前，其余按阶段起始时间升序。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM map_digests WHERE project_id = ?"
+            " ORDER BY CASE WHEN kind = 'overview' THEN 0 ELSE 1 END, start_ts ASC",
+            (project_id,),
+        )
+        rows = await cur.fetchall()
+        return [self._map_digest_row(r) for r in rows]
+
+    async def latest_map_digest_ts(self, project_id: int) -> float:
+        """最近一次生成演化摘要的时间（没有则 0）；自动巡检的「冷却期」用。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT MAX(created_at) FROM map_digests WHERE project_id = ?", (project_id,)
+        )
+        row = await cur.fetchone()
+        return float(row[0] or 0) if row else 0.0
+
+    async def count_project_sessions_since(self, project_id: int, since_ts: float) -> int:
+        """某项目自某时刻以来新建的会话数（自动生成演化摘要的触发阈值用）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT COUNT(*) FROM sessions WHERE project_id = ? AND created_at > ?",
+            (project_id, since_ts),
+        )
+        row = await cur.fetchone()
+        return int(row[0] or 0) if row else 0
+
+    async def replace_map_digests(self, project_id: int, rows: list[dict]) -> None:
+        """整体替换某项目的演化摘要（隐式事务内先删后插，一次 commit）。
+
+        生成是「重新总结一遍」而不是增量合并：阶段划分随每次生成整体作废，
+        避免新旧阶段时间窗交错让地图自相矛盾。写失败时整体回滚到旧摘要。
+        """
+        assert self._db
+        now = time.time()
+        await self._db.execute("DELETE FROM map_digests WHERE project_id = ?", (project_id,))
+        for r in rows:
+            await self._db.execute(
+                "INSERT INTO map_digests (project_id, kind, title, summary, highlights,"
+                " topics, session_ids, start_ts, end_ts, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    project_id,
+                    "overview" if r.get("kind") == "overview" else "phase",
+                    str(r.get("title") or "")[:200],
+                    str(r.get("summary") or "")[:2000],
+                    json.dumps(
+                        [str(x)[:200] for x in (r.get("highlights") or [])[:10]],
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        [str(x)[:40] for x in (r.get("topics") or [])[:12]],
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        [str(x) for x in (r.get("session_ids") or [])[:500]],
+                        ensure_ascii=False,
+                    ),
+                    float(r.get("start_ts") or 0),
+                    float(r.get("end_ts") or 0),
+                    now,
+                ),
+            )
+        await self._db.commit()
+
+    async def map_sessions_with_stats(
+        self, project_id: int, start_ts: float, end_ts: float,
+    ) -> list[dict]:
+        """记忆地图时间线的会话主体：窗口内的会话（含已归档）带消息数与 token 量。
+
+        归档会话是演化史的一半，必须计入；ORDER BY created_at 让前端按时间
+        铺时间线。消息数与 token 各自 LEFT JOIN，没发过消息/没消耗的会话
+        （比如空的分叉）以 0 计，不丢行。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT s.id, s.title, s.summary, s.tags, s.pinned, s.archived,"
+            " s.created_at, s.updated_at,"
+            " COALESCE(m.cnt, 0) AS msg_count,"
+            " COALESCE(u.it, 0) AS in_tokens, COALESCE(u.ot, 0) AS out_tokens"
+            " FROM sessions s"
+            " LEFT JOIN (SELECT session_id, COUNT(*) AS cnt FROM messages GROUP BY session_id) m"
+            "   ON m.session_id = s.id"
+            " LEFT JOIN (SELECT session_id,"
+            "   SUM(in_tokens) AS it, SUM(out_tokens) AS ot FROM usage_log GROUP BY session_id) u"
+            "   ON u.session_id = s.id"
+            " WHERE s.project_id = ? AND s.created_at >= ? AND s.created_at <= ?"
+            " ORDER BY s.created_at ASC",
+            (project_id, start_ts, end_ts),
+        )
+        rows = await cur.fetchall()
+        return [
+            {
+                "id": r["id"], "title": r["title"], "summary": r["summary"],
+                "tags": [t for t in str(r["tags"] or "").split(",") if t],
+                "pinned": bool(r["pinned"]), "archived": bool(r["archived"]),
+                "created_at": r["created_at"], "updated_at": r["updated_at"],
+                "msg_count": int(r["msg_count"]),
+                "in_tokens": int(r["in_tokens"]), "out_tokens": int(r["out_tokens"]),
+            }
+            for r in rows
+        ]
+
+    async def map_day_stats(
+        self, project_id: int, start_ts: float, end_ts: float,
+    ) -> list[dict]:
+        """按天聚合（本地时区）：活跃会话数与 token 消耗，热力图数据源。
+
+        会话数按 sessions.created_at、token 按 usage_log.ts 各自聚合后按天
+        FULL JOIN——SQLite 没有完整 FULL JOIN，这里以 token 日历为主表左连
+        会话日历（有会话没消耗、有消耗没会话都要成格，靠 UNION 拼全键）。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT day, MAX(sc) AS sessions, MAX(tk) AS tokens FROM ("
+            "  SELECT date(u.ts, 'unixepoch', 'localtime') AS day, 0 AS sc,"
+            "    SUM(u.in_tokens + u.out_tokens) AS tk"
+            "  FROM usage_log u JOIN sessions s ON s.id = u.session_id"
+            "  WHERE s.project_id = ? AND u.ts >= ? AND u.ts <= ?"
+            "  GROUP BY day"
+            "  UNION"
+            "  SELECT date(s.created_at, 'unixepoch', 'localtime'), COUNT(*), 0"
+            "  FROM sessions s"
+            "  WHERE s.project_id = ? AND s.created_at >= ? AND s.created_at <= ?"
+            "  GROUP BY 1"
+            ") GROUP BY day ORDER BY day ASC",
+            (project_id, start_ts, end_ts, project_id, start_ts, end_ts),
+        )
+        return [
+            {"day": r["day"], "sessions": int(r["sessions"]), "tokens": int(r["tokens"] or 0)}
+            for r in await cur.fetchall()
+        ]
+
+    async def map_project_events(
+        self, project_id: int, start_ts: float, end_ts: float,
+    ) -> list[dict]:
+        """项目演化事件：任务清单/流水线/定时任务的创建与完成时刻，时间升序。
+
+        任务清单的「创建」与「完成」各算一件事（同一行出两条）；流水线只取
+        跑完的（finished_at > 0）；定时任务取最近一次运行（表里只留末次结果）。
+        """
+        assert self._db
+        events: list[dict] = []
+        cur = await self._db.execute(
+            "SELECT id, title, done, created_at, done_at FROM project_tasks"
+            " WHERE project_id = ?", (project_id,),
+        )
+        for r in await cur.fetchall():
+            if start_ts <= r["created_at"] <= end_ts:
+                events.append({"ts": r["created_at"], "kind": "task_created",
+                               "title": r["title"], "ref": r["id"]})
+            if r["done"] and start_ts <= r["done_at"] <= end_ts:
+                events.append({"ts": r["done_at"], "kind": "task_done",
+                               "title": r["title"], "ref": r["id"]})
+        cur = await self._db.execute(
+            "SELECT id, name, status, finished_at FROM pipelines"
+            " WHERE project_id = ? AND finished_at > 0", (project_id,),
+        )
+        for r in await cur.fetchall():
+            if start_ts <= r["finished_at"] <= end_ts:
+                events.append({"ts": r["finished_at"], "kind": "pipeline",
+                               "title": r["name"], "ref": r["id"]})
+        cur = await self._db.execute(
+            "SELECT id, name, last_run_at FROM cron_tasks"
+            " WHERE project_id = ? AND last_run_at > 0", (project_id,),
+        )
+        for r in await cur.fetchall():
+            if start_ts <= r["last_run_at"] <= end_ts:
+                events.append({"ts": r["last_run_at"], "kind": "cron",
+                               "title": r["name"], "ref": r["id"]})
+        events.sort(key=lambda e: e["ts"])
+        return events
 
     # ---- sessions ----
 

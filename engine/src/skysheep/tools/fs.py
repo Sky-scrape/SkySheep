@@ -288,8 +288,18 @@ class MoveFileTool(Tool):
                 "（如需覆盖请显式传 overwrite=true；不动已有文件时先换个目标名）"
             )
         # 检查点：记下改前状态——移动是「源消失 + 目标出现」两处变化，两边都要记，
-        # 回滚时才能同时还原源、清掉目标。目标已有内容时也一并记下（覆盖可回滚）。
+        # 回滚时才能同时还原源、清掉目标。目录源要逐文件记录（目录本身只记哨兵），
+        # 否则「撤销」删得掉移过去的树却还原不出源；覆盖目标时旧内容同样逐文件
+        # 记录，目标里没有同位文件的源文件补记 None（改前不存在），回滚时才能
+        # 把移入的副本删干净（审查 A-3：目录只记 None 导致回滚丢数据/二次删除）。
         if self.recorder is not None:
+            if src.is_dir():
+                self.recorder.record_tree(src)
+                if args.overwrite and dst.exists() and dst.is_dir():
+                    self.recorder.record_tree(dst)
+                    for child in src.rglob("*"):
+                        if child.is_file():
+                            self.recorder.record(dst / child.relative_to(src))
             self.recorder.record(src)
             self.recorder.record(dst)
         try:

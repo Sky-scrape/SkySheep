@@ -182,6 +182,28 @@ def _write_lines(p: Path, lines: list[str]) -> None:
         raise ToolError(f"cannot write memory file: {e}") from e
 
 
+_MEMORY_LINE_RE = re.compile(r"^-\s*\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$")
+
+
+def parse_memory_entries(text: str, limit: int = 30) -> list[dict]:
+    """解析记忆条目为 {date, text} 列表（旧→新，取最近 limit 条），记忆地图标注用。
+
+    只认带日期前缀的行（`- [YYYY-MM-DD] 内容`，引擎写入的标准格式）；没有
+    日期前缀的手写行跳过——没有可信时间，标到时间线上会误导。记忆是全局
+    的（不分项目），项目归属由展示侧（地图）用「全局」徽记声明。
+    """
+    out: list[dict] = []
+    for ln in text.splitlines():
+        m = _MEMORY_LINE_RE.match(ln.strip())
+        if not m:
+            continue
+        body = m.group(2).strip()
+        if not body:
+            continue
+        out.append({"date": m.group(1), "text": body[:200]})
+    return out[-limit:]
+
+
 def remember_lines(lines: list[str]) -> list[str]:
     """批量追加记忆条目（自动加日期前缀与「(自动)」来源标记），返回真正新增的内容。
 

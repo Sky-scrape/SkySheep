@@ -563,3 +563,139 @@ async def test_move_file_overwrite_dir_denied_keeps_subtree(tmp_path):
     pending.resolve(Decision.DENY)
     assert await pending.wait() == Decision.DENY
     assert (tmp_path / "d" / "s" / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+# ---- 审查 A（2026-09-25）：白名单命中也绕不过删除守卫 ----
+
+
+async def test_move_file_whitelist_never_covers_overwrite_dir(tmp_path):
+    """「总是允许」产出的 move_file 整工具规则放行不了删除形态的调用。
+
+    用户对一次普通移动点过「总是允许」后，带 overwrite=true 的「覆盖已存在
+    目录」调用（工具层会 shutil.rmtree 整棵子树）仍必须逐次确认——等效
+    delete_file（DANGEROUS，永不自动放行）的删除面，任何档位/规则都拦不下它。
+    """
+    from skysheep.tools import MoveFileTool
+
+    (tmp_path / "src_dir").mkdir()
+    (tmp_path / "dst_dir" / "src_dir").mkdir(parents=True)
+    (tmp_path / "dst_dir" / "src_dir" / "old.txt").write_text("old", encoding="utf-8")
+
+    gate = PermissionGate(working_dir=tmp_path)
+    gate.add_session_rule(WhitelistRule(tool="move_file", kind="always"))
+    pending = await gate.authorize(MoveFileTool(), {
+        "source": "src_dir", "destination": "dst_dir", "overwrite": True})
+    assert pending is not None, "白名单命中也放行不了删除形态的 move_file"
+
+    # 普通移动（落点不是已存在目录）仍走白名单免确认
+    (tmp_path / "fresh").mkdir()
+    assert await gate.authorize(MoveFileTool(), {
+        "source": "src_dir", "destination": "fresh"}) is None
+
+
+async def test_move_file_whitelist_delete_outside_workdir_requires_confirm(tmp_path):
+    """删除形态判定按绝对路径解析，工作目录外的覆盖删除同样拦得住。"""
+    from skysheep.tools import MoveFileTool
+
+    (tmp_path / "src_dir").mkdir()
+    outside = tmp_path.parent / "audit-outside-dst"
+    (outside / "src_dir").mkdir(parents=True)
+    try:
+        gate = PermissionGate(working_dir=tmp_path)
+        gate.add_session_rule(WhitelistRule(tool="move_file", kind="always"))
+        pending = await gate.authorize(MoveFileTool(), {
+            "source": "src_dir", "destination": str(outside), "overwrite": True})
+        assert pending is not None, "工作目录外的覆盖删除不能因白名单免确认"
+    finally:
+        import shutil as _sh
+        _sh.rmtree(outside, ignore_errors=True)
+
+
+def test_move_rule_for_delete_shape_is_exact(tmp_path):
+    """删除形态的 move_file 点「总是允许」只固化当次参数，不产整工具 always。"""
+    from skysheep.tools import MoveFileTool
+
+    (tmp_path / "src_dir").mkdir()
+    (tmp_path / "dst_dir" / "src_dir").mkdir(parents=True)
+    gate = PermissionGate(working_dir=tmp_path)
+    rule = gate.rule_for(MoveFileTool(), {
+        "source": "src_dir", "destination": "dst_dir", "overwrite": True}, tmp_path)
+    assert rule.kind == "exact"
+    # 普通移动仍是整工具规则（用户显式选择，保持既有语义）
+    assert gate.rule_for(MoveFileTool(), {"source": "a", "destination": "b"}).kind == "always"
+
+
+# ---- 审查 B（2026-09-25）：解释器代码旗标与 glob 规则的拼接防线 ----
+
+
+def test_run_command_interpreter_flag_gets_exact_rule():
+    """「python -c」这类『下一参数即任意代码』的调用只固化当次，不产前缀规则。"""
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    assert gate.rule_for(cmd, {"command": 'python -c "print(1)"'}).kind == "exact"
+    # 旗标不在第二词的形态
+    assert gate.rule_for(cmd, {"command": 'powershell -NoProfile -Command "dir"'}).kind == "exact"
+    assert gate.rule_for(cmd, {"command": 'py -3 -c "print(1)"'}).kind == "exact"
+    assert gate.rule_for(cmd, {"command": "node -e \"console.log(1)\""}).kind == "exact"
+    # 普通命令与「python 脚本.py」（文件名不是代码文本）仍取前缀
+    assert gate.rule_for(cmd, {"command": "git status --short"}).kind == "prefix"
+    assert gate.rule_for(cmd, {"command": "python manage.py runserver"}).kind == "prefix"
+
+
+async def test_legacy_interpreter_prefix_rule_cannot_run_other_code(tmp_path):
+    """历史遗留/手建的 "python -c" 前缀规则放行不了另一段代码（匹配层拦截）。"""
+    gate = PermissionGate(working_dir=tmp_path)
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="prefix", pattern="python -c"))
+    cmd = RunCommandTool()
+    # 前缀规则对含代码旗标的调用整体失效（同文本也不例外——只有 exact 能固化
+    # 具体一条；「总是允许」此后提炼出的正是 exact）
+    assert await gate.authorize(cmd, {"command": 'python -c "print(1)"'}) is not None
+    evil = 'python -c "import os; os.system(\'calc\')"'
+    assert await gate.authorize(cmd, {"command": evil}) is not None
+
+
+async def test_run_command_glob_rule_blocked_on_chain_and_code_flag(tmp_path):
+    """glob 规则与 prefix 同一道防线：不放行带拼接或解释器旗标的命令。"""
+    gate = PermissionGate(working_dir=tmp_path)
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="glob", pattern="git *"))
+    cmd = RunCommandTool()
+    assert await gate.authorize(cmd, {"command": "git status"}) is None
+    assert await gate.authorize(cmd, {"command": "git status & calc"}) is not None
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="glob", pattern="python *"))
+    assert await gate.authorize(cmd, {"command": "python script.py"}) is None
+    assert await gate.authorize(cmd, {"command": 'python -c "import os"'}) is not None
+
+
+# ---- 审查 S-12（2026-09-25）：delete_file 不沉淀整工具放行 + 范围明示 ----
+
+
+def test_delete_file_never_gets_always_rule():
+    """delete_file 的「总是允许」只固化当次参数，不产整工具规则。"""
+    from skysheep.tools import DeleteFileTool
+
+    rule = PermissionGate.rule_for(DeleteFileTool(), {"path": "a.txt"})
+    assert rule.kind == "exact", "DANGEROUS 级删除面不得沉淀成整工具规则"
+
+
+async def test_legacy_delete_file_always_rule_is_defused(tmp_path):
+    """库中遗留的 delete_file 整工具规则不再自动放行（匹配层失效）。"""
+    from skysheep.tools import DeleteFileTool
+
+    gate = PermissionGate(working_dir=tmp_path)
+    gate.add_session_rule(WhitelistRule(tool="delete_file", kind="always"))
+    pending = await gate.authorize(DeleteFileTool(), {"path": "old.txt"})
+    assert pending is not None, "遗留的 delete_file always 规则不得继续免确认"
+
+
+async def test_always_rule_for_write_tool_discloses_path_scope(tmp_path):
+    """写入类工具的整工具规则在确认预告里明示「不限工作目录」。"""
+    gate = PermissionGate(working_dir=tmp_path)
+    pending = await gate.authorize(WriteFileTool(), {"path": "a.txt"})
+    assert pending is not None
+    assert "不限工作目录" in (pending.note or ""), "整工具放行的路径范围必须明示"
+    # 带路径边界的规则形态（exact/prefix）不触发该明示
+    gate2 = PermissionGate(working_dir=tmp_path)
+    pending2 = await gate2.authorize(WriteFileTool(), {"path": "a.txt"})
+    pending2.resolve(Decision.ALLOW_ONCE)
+    rule = gate2.rule_for(WriteFileTool(), {"path": "a.txt"})
+    assert rule.kind == "always"  # write_file 本身仍是整工具规则（显式选择）

@@ -104,6 +104,12 @@ LOCAL_ONLY_METHODS = frozenset({
     "subagent.delete_custom",
     # 其余写配置入口
     "demo.enable", "ollama.enable", "app.export_diagnostics",
+    # 本机体验/信息面（审查 P1-3）：远端没有正当使用场景，但能干扰本机或读敏感面
+    "app.notify",       # 远端在桌面弹 toast（社工/骚扰面）
+    "fs.open",          # 用系统默认程序打开工作区文件（配合 fs.write 可让攻击者内容在本机被打开）
+    "term.close",       # 纯破坏向：远端杀本机终端 shell（term.stop 是收紧向，仍远端可）
+    "memory.get",       # 全局记忆全文回远端
+    "model.switch",     # 切当前对话模型（费用/行为面；default_model.set 已在本表）
 })
 
 
@@ -205,7 +211,29 @@ def _host_guard(app) -> None:
         # 界面不允许被外部页面嵌进 iframe（安全审查低危项）：点击劫持面收掉。
         # /preview 自己的 iframe 是内嵌资源、不受这条限制（只作用于本响应）
         resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-        resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
+        if request.url.path == "/":
+            # 主文档上完整 CSP（审查 P3-21）：脚本只认自身文件 + 首帧主题脚本
+            # 的内容哈希（index.html 内联的那段「首帧外观」）；样式放行内联
+            # （Markdown 渲染器/代码高亮大量内联样式与 style 属性）；iframe 面
+            # 板要能打开外部网页（浏览器预览）。其余响应维持仅 frame-ancestors
+            # ——/preview 装的是用户项目里的 HTML，自带脚本，套本应用的脚本
+            # 白名单会把它们全拦死。
+            resp.headers.setdefault(
+                "Content-Security-Policy",
+                # 首帧主题脚本的 sha256：index.html 里唯一一段内联脚本
+                "default-src 'self'; "
+                "script-src 'self' 'sha256-c937d1705e12f092136602323e666a5c0c5305678a5f3ee4f5e3ac1fc90392d1'; "  # noqa: E501
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: blob:; "
+                "font-src 'self' data:; "
+                "connect-src 'self' ws: wss:; "
+                "frame-src 'self' http: https:; "
+                "media-src 'self' data: blob:; "
+                "object-src 'none'; base-uri 'self'; form-action 'self'; "
+                "frame-ancestors 'self'",
+            )
+        else:
+            resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
         return resp
 
 
@@ -684,7 +712,8 @@ def create_app(
             return backend.term_close(str(params.get("term_id", "") or ""))
         if method == "chat.aux":
             text = str(params.get("text", ""))
-            return await backend.chat_aux(text, emit)
+            # 远端调用走一次性历史：不读本机共享面板历史、也不写入（审查 P1-3 收口）
+            return await backend.chat_aux(text, emit, local=local)
         if method == "aux.clear":
             return backend.aux_clear()
         if method == "session.search":
@@ -892,6 +921,13 @@ def create_app(
         if method == "memory.digest_save":
             # 归档自动记忆总闸：只切一个布尔开关，不写敏感配置，远程可调
             return await backend.memory_digest_save(bool(params.get("enabled", True)))
+        if method == "map.get":
+            # 记忆地图载荷：跨项目查看是枚举面（标题/摘要/文件路径），只给本机
+            return await backend.map_get(params, local=local)
+        if method == "map.generate":
+            return await backend.map_generate(params, local=local)
+        if method == "map.save_config":
+            return await backend.map_save_config(params)
         if method == "advanced.get":
             return backend.advanced_settings()
         if method == "advanced.save":
@@ -908,7 +944,7 @@ def create_app(
         if method == "app.open_path":
             return backend.open_path(str(params.get("kind", "")))
         if method == "app.open_external":
-            return backend.open_external(str(params.get("target", "")))
+            return backend.open_external(str(params.get("target", "")), local=local)
         if method == "app.export_diagnostics":
             return backend.export_diagnostics()
         if method == "demo.enable":
@@ -1331,6 +1367,11 @@ def create_app(
                     sid = ev.get("session_id") or ""
                     if not sid or conn_state["session"] != sid:
                         return  # 不是这个客户端正在交互的会话：不推送
+                elif k in ("term_data", "term_exit"):
+                    # 终端输出只属于本机终端面板：spawn/input 仅本机（app.py:664），
+                    # 输出里可能含用户亲手回显的环境变量等敏感值，远端一律不推送
+                    # （审查 P1-1）。
+                    return
             await send({"event": ev.get("kind", ""), "data": ev})
 
         backend.ws_emitters.append(emit)

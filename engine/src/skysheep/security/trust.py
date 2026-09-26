@@ -273,7 +273,16 @@ class WorkspaceTrust:
             return self.state()
         entry = projects.get(_norm_root(self.project_root)) or {}
         prev_sources = entry.get("sources") if isinstance(entry, dict) else None
-        if touched is not None and isinstance(prev_sources, dict) and prev_sources:
+        fingerprint, _ = compute_fingerprint(self.project_root)
+        if touched is not None and (not isinstance(prev_sources, dict) or not prev_sources):
+            # 旧格式记录（无逐来源哈希，1.9 前的 grant 只存整体指纹）：无法区分
+            # 「用户刚动的」与「第三方改的」。只认「内容没变」——指纹一致才延续
+            # 信任，并顺带把记录升级成带 sources 的新格式；内容有变一律保持
+            # pending，让用户重新确认一次（审查 P2-6：legacy 记录曾会被全量洗白）。
+            recorded_fp = str(entry.get("fingerprint") or "")
+            if fingerprint and fingerprint != recorded_fp:
+                return self.state()
+        elif touched is not None and isinstance(prev_sources, dict) and prev_sources:
             try:
                 rel = Path(touched).expanduser().resolve().relative_to(
                     self.project_root.resolve()
@@ -294,7 +303,6 @@ class WorkspaceTrust:
             if stray:
                 # 别的来源也变了：不延续信任（可能正是被第三方塞进来的改动）
                 return self.state()
-        fingerprint, _ = compute_fingerprint(self.project_root)
         if fingerprint:
             projects[_norm_root(self.project_root)] = {
                 "fingerprint": fingerprint,

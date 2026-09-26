@@ -61,6 +61,7 @@
         <button class="nav-item" data-act="todo" title="Agent 拆解出的任务步骤会出现在这里">任务清单</button>
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
+        <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
         <button class="nav-item" data-act="cron" title="到点让 Agent 自己干活，无人值守">定时任务</button>
         <button class="nav-item" data-act="pipeline" title="多个任务按依赖顺序自动跑：前面的并行做，最后的汇总审查">任务编排</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
@@ -167,6 +168,9 @@
     </button>
     <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，自动注入每一轮对话">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h5.5A3.5 3.5 0 0 1 12 7.5V21a2.5 2.5 0 0 0-2.5-2.5H3Z"/><path d="M21 4h-5.5A3.5 3.5 0 0 0 12 7.5V21a2.5 2.5 0 0 1 2.5-2.5H21Z"/></svg>
+    </button>
+    <button class="rail-btn" data-rail-act="map" title="记忆地图：项目演化的可视化（时间线 + 主题图谱）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="cron" title="定时任务：到点让 Agent 自己干活，无人值守">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
@@ -517,6 +521,35 @@
             <textarea id="rp-memory-text" class="rp-memory-text" spellcheck="false"
                       placeholder="写给 Agent 看的项目约定，例如：&#10;- 提交信息用中文&#10;- 改完代码必须跑一遍测试&#10;- 所有新接口都要带错误处理"></textarea>
             <div id="memory-status" class="rp-memory-status"></div>
+          </section>
+
+          <!-- 记忆地图：项目演化的可视化。时间线（会话/事件/里程碑按月铺开）与
+               主题图谱（阶段-主题-文件-记忆 关联网络）双视图；热力图与文件足迹
+               常驻底部。数据来自 map.get，摘要生成走 map.generate（后台任务）。 -->
+          <section id="rp-page-map" class="rp-page hidden">
+            <div class="rp-toolbar map-toolbar">
+              <select id="map-project" class="map-select" title="选择要查看的项目"></select>
+              <select id="map-range" class="map-select" title="时间范围">
+                <option value="30">近 30 天</option>
+                <option value="90" selected>近 90 天</option>
+                <option value="0">全部</option>
+              </select>
+              <span class="spacer"></span>
+              <button id="map-auto" class="rp-mini" title="自动生成演化摘要：开启后项目累计足量新会话时，后台自动总结（每次都是一次真实模型调用）">自动</button>
+              <button id="map-gen" class="rp-mini primary" title="用当前模型通读项目会话史，总结演化阶段与主题">✦ 生成演化摘要</button>
+            </div>
+            <div class="seg-row seg-mini map-segbar" id="map-segbar">
+              <button data-view="timeline" class="active">时间线</button>
+              <button data-view="graph">图谱</button>
+            </div>
+            <div id="map-body" class="map-body">
+              <div id="map-timeline" class="map-timeline"></div>
+              <div id="map-graph" class="map-graph hidden"></div>
+            </div>
+            <div id="map-aside" class="map-aside">
+              <div id="map-files" class="map-files" title="改动最多的文件（来自检查点记录），点击只看涉及它的会话"></div>
+              <div id="map-heat" class="map-heat"></div>
+            </div>
           </section>
 
           <!-- MCP / Skills：卡片平时住在设置页，打开本标签时由 app.js 整体搬进来 -->

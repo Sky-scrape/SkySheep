@@ -1014,3 +1014,33 @@ async def test_backend_save_mcp_server_preserves_disabled_state(tmp_path, monkey
     assert mgr.connected == ["fetch"]
     # 落盘带的是显式默认值 enabled: true（model_dump 非 None 字段），语义即启用
     assert load_servers(cfg_path)["fetch"]["enabled"] is True
+
+
+def test_mcp_status_list_flags_insecure_http_with_headers():
+    """审查 S-09：http:// + 鉴权头 → insecure_http=True（不下发 headers 内容）。
+
+    https、或没配鉴权头的 http 都不算明文风险面。
+    """
+    from types import SimpleNamespace
+
+    from skysheep.mcp.client import MCPServerConfig, MCPServerStatus
+    from skysheep.server.backend import ServerBackend
+
+    def mgr(configs: dict):
+        return SimpleNamespace(
+            statuses={n: MCPServerStatus(n) for n in configs},
+            _configs=configs,
+        )
+
+    rows = ServerBackend._mcp_status_list(mgr({
+        "plain-http": MCPServerConfig(url="http://intranet.example/mcp",
+                                      headers={"Authorization": "Bearer x"}),
+        "tls": MCPServerConfig(url="https://ok.example/mcp",
+                               headers={"Authorization": "Bearer x"}),
+        "no-headers": MCPServerConfig(url="http://lan.example/mcp"),
+    }))
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["plain-http"]["insecure_http"] is True
+    assert by_name["tls"]["insecure_http"] is False
+    assert by_name["no-headers"]["insecure_http"] is False
+    assert all("headers" not in r for r in rows), "鉴权头内容不得进前端载荷"

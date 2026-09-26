@@ -187,8 +187,9 @@ function renderMarkdown(src) {
       : `<p>${p.replace(/\n/g, "<br>")}</p>`;
   });
   text = parts.join("");
-  // 还原代码块
-  text = text.replace(/\u0000CODE(\d+)\u0000/g, (_, i) => codeBlocks[i]);
+  // 还原代码块（占位符可能被模型在正文里伪造：越界索引一律替换为空，
+  // 不能把 "undefined" 渲染出来）
+  text = text.replace(/\u0000CODE(\d+)\u0000/g, (_, i) => codeBlocks[i] ?? "");
   return text;
 }
 
@@ -2065,6 +2066,14 @@ function handleEvent(kind, data) {
     case "notice": addNotice("⏳ " + data.message); break;
     case "memory_digest": addNotice("🧠 " + data.message); break;
     case "memory_maintain": addNotice("🧹 " + data.message); break;
+    case "map_updated": {
+      // 演化摘要生成完成/失败：按钮状态复位 + 提示 + 面板正开着就重拉
+      mapState.genBusy = false;
+      updateMapGenBtn();
+      addNotice((data.ok === false ? "🗺 " : "🗺✦ ") + (data.message || "演化摘要已更新"));
+      if (rightViewVisible("map")) loadMemoryMap();
+      break;
+    }
     case "compaction":
       addNotice(`🗜 上下文压缩：${data.before_messages} → ${data.after_messages} 条消息`);
       break;
@@ -2286,7 +2295,7 @@ async function refreshSessions(prefetched) {
     list.forEach((s) => {
       const li = renderSessionItem(s, ul);
       if (classicGk != null) {
-        wireSessionDrag(li, s, classicList, classicGk, () => refreshSessions());
+        wireSessionDrag(li, s, classicList, classicGk, () => refreshSessions(), "classic");
       }
       ul.appendChild(li);
     });
@@ -2897,7 +2906,10 @@ async function switchToGroupProject(project, name, rootPath) {
 /** 给组头接上拖拽（分组视图）。head 的点击行为（折叠）不受影响：拖拽与点击是两套手势。 */
 function wireGroupDrag(head, key) {
   wireListDrag(head, { id: String(key) }, {
-    commit: (dst, pos) => commitProjectOrder(dst.id, pos),
+    // commitProjectOrder 的签名是 (srcKey, dstKey, pos)：第一个参数必须是
+    // 被拖的那个组，落点组与落点位置随后——曾经漏传 srcKey、把 pos 当成了
+    // dstKey，indexOf 必然落空直接早退，分组视图拖组头从未真正保存过
+    commit: (dst, pos) => commitProjectOrder(String(key), dst.id, pos),
     rerender: refreshSessionsGrouped,
   });
 }
@@ -2927,19 +2939,26 @@ function commitProjectOrder(srcKey, dstKey, pos, listId = "session-list", rowSel
 
 /** 给会话行接上组内拖拽（分组/经典两种视图共用）。同级限制：└/⑂ 子会话跟随父
     （作为一整个家族块）参与排序；拖到子行上时落点重定向到它的父（即插到该
-    家族块的前/后），不会插进父与子之间 */
-function wireSessionDrag(li, s, list, gkey, rerender) {
-  const parent = findParentInGroup(list, s);
-  const srcFamily = parent ? parent.id : s.id;
+    家族块的前/后），不会插进父与子之间。经典视图必须传 view="classic"——
+    commitSessionOrder 靠它决定沿 DOM 收集会话行的方式，漏传会按分组视图的
+    .pgroup-head 去收集，经典视图里一个都找不到，拖动永远空转 */
+function wireSessionDrag(li, s, list, gkey, rerender, view = "grouped") {
   wireListDrag(li, s, {
-    over: (e, item) => {
-      // 同级判定：拖到子行上重定向到父；同家族块不响应
+    over: (e, item, dragged) => {
+      // 同级判定：拖到子行上重定向到父；同家族块不响应。
+      // 注意三个来源别搞混：item＝被悬停的行（本闭包绑定的会话），
+      // dragged＝wireListDrag 传进来的拖动源（st.item）——家族比较必须是
+      // 「拖动源的家族 vs 悬停行的家族」。曾经误用本闭包的 srcFamily（＝
+      // 悬停行自己的家族）自己比自己，永远相等，over 永远返回 null，
+      // 两种视图的会话拖动从诞生起就没生效过
       const overRow = findParentInGroup(list, item);
       const overFamily = overRow ? overRow.id : item.id;
-      if (overFamily === srcFamily) return null;
-      return { id: overRow ? overRow.id : item.id, pos: dragHalfPos(e, li) };
+      const draggedRow = dragged ? findParentInGroup(list, dragged) : null;
+      const draggedFamily = draggedRow ? draggedRow.id : (dragged ? dragged.id : null);
+      if (!draggedFamily || overFamily === draggedFamily) return null;
+      return { id: overFamily, pos: dragHalfPos(e, li) };
     },
-    commit: (dst, pos) => commitSessionOrder(String(gkey), s.id, dst.id, pos),
+    commit: (dst, pos) => commitSessionOrder(String(gkey), s.id, dst.id, pos, view),
     rerender: rerender || refreshSessionsGrouped,
   });
 }
@@ -7208,6 +7227,7 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     if (act === "cron") return openRightTab("cron");
     if (act === "pipeline") return openRightTab("pipeline");
     if (act === "memory") return openRightTab("memory");
+    if (act === "map") return openRightTab("map");
     if (act === "project") return projectModal();
     if (act === "ext") return openRightTab("ext");
     if (navPending[act]) addNotice(`「${navPending[act]}」开发中，即将上线`);
@@ -8099,7 +8119,8 @@ function cronModal(existing) {
       <label>预授权工具（无人值守运行时自动放行；不勾的会被自动拒绝）</label>
       <div class="cron-tools">${toolRows}</div>
       <p class="dim small">安全说明：定时任务无人值守运行，<b>只读工具本来就放行</b>；
-        写入 / 执行类必须在这里勾选，否则运行时会自动拒绝。建议先只勾必要的。</p>
+        写入 / 执行类必须在这里勾选，否则运行时会自动拒绝。建议先只勾必要的。
+        <b>勾选 run_command 等于允许无人值守执行任意命令</b>——任务文本一旦被注入，预授权就是它的通行证，只在任务内容完全可信时勾选。</p>
       <p class="dim small">运行前提：定时任务只在 <b>SkySheep 运行期间</b>触发（关窗时选「缩到系统托盘」它就继续在后台跑）。
         彻底退出期间错过的任务，会在下次打开应用时补跑一次。想让电脑一开机就守着，
         可在 设置 · 高级 里打开「开机自动启动」。</p>
@@ -8479,7 +8500,8 @@ function pipelineCreateModal() {
       <p class="dim small">节点按依赖自动排序：勾选「依赖前面的节点」，被依赖的全部完成后才会开始。
         最后一个节点勾选依赖它前面的全部节点，就是汇总审查。</p>
       <p class="dim small">安全说明：每个节点无人值守运行，<b>只读工具本来就放行</b>；
-        写入/执行类必须在该节点勾选，否则运行时自动拒绝。启动前请再检查一遍各节点的预授权。</p>
+        写入/执行类必须在该节点勾选，否则运行时自动拒绝。启动前请再检查一遍各节点的预授权。
+        <b>勾选 run_command 等于允许无人值守执行任意命令</b>，只在节点指令完全可信时勾选。</p>
     </div>`;
   const nodesBox = box.querySelector("#pl-nodes");
   const addNodeRow = () => {
@@ -8827,10 +8849,22 @@ let memoryLoaded = false; // 与项目绑定：切项目后由 resetProjectPanel
 let rpMemoryMtime = 0; // 加载时的文件 mtime：保存时带回比对，防覆盖后台重写的 AGENTS.md
 let rpMemoryOrig = ""; // 加载时的原文：重读前判断「有没有未保存的修改」用
 
+// 成功类状态提示的统一收尾：6 秒后自动收起（一次性确认，不必手动清）；
+// 错误保留，留时间读原因，直到下一次操作覆盖。计时器挂在元素自身上，
+// 同一函数管多条状态栏（如子代理页的内置/自定义）时互不干扰
+function autoHideStatus(el, text, ok) {
+  clearTimeout(el._statusTimer);
+  if (text && ok) {
+    el._statusTimer = setTimeout(() => { el.hidden = true; el.textContent = ""; }, 6000);
+  }
+}
+
 function memoryStatus(text, ok = true) {
   const el = document.getElementById("memory-status");
   el.textContent = text;
   el.className = "rp-memory-status" + (ok ? "" : " bad");
+  el.hidden = !text;
+  autoHideStatus(el, text, ok);
 }
 
 async function loadMemoryPanel(force = false) {
@@ -9999,6 +10033,7 @@ async function renderSettings() {
       <div class="mcp-head">
         <span class="dot ${m.connected ? "on" : "off"}"></span>
         <span class="item-name">${escapeHtml(m.name)}</span>
+        ${m.insecure_http ? '<span class="chip chip-warn" title="此服务走 http 明文且配置了鉴权头：凭据可能被中间人截获，建议改用 https 地址">⚠ http 明文携带鉴权头</span>' : ""}
         <span class="${m.connected ? "mcp-ok" : (m.connecting ? "mcp-pending" : "mcp-bad")}">${stateText}</span>
         <button class="btn-ghost mcp-toggle" title="${m.enabled === false ? "重新连接这个服务" : "停用：配置保留，工具从 Agent 移除"}">${m.enabled === false ? "启用" : "停用"}</button>
         <button class="btn-ghost danger mcp-del" title="删除这个 MCP 服务">删除</button>
@@ -10191,6 +10226,7 @@ function providerStatus(text, ok = true) {
   el.textContent = text;
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = false;
+  autoHideStatus(el, text, ok);
 }
 
 function addProviderModal() {
@@ -10360,18 +10396,12 @@ async function pickPath(kind) {
   }
 }
 
-let skillStatusTimer = 0;
 function skillStatus(text, ok = true) {
   const el = document.getElementById("skill-status");
   el.textContent = text;
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = !text;
-  // 成功提示几秒后自动消失（一次性确认，不必手动清）；错误保留，
-  // 留时间读原因，直到下一次操作覆盖它
-  clearTimeout(skillStatusTimer);
-  if (text && ok) {
-    skillStatusTimer = setTimeout(() => { el.hidden = true; el.textContent = ""; }, 6000);
-  }
+  autoHideStatus(el, text, ok);
 }
 
 // 长名单截短：导入几十个技能时不能把 78 个名字全点名一遍，
@@ -10386,6 +10416,7 @@ function mcpStatus(text, ok = true) {
   el.textContent = text;
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = !text;
+  autoHideStatus(el, text, ok);
 }
 
 // 内置常用 MCP 预设：每张卡点「＋ 添加」即写入配置并即时连接、工具立刻可用。
@@ -10839,6 +10870,623 @@ function deleteMcpModal(name) {
 document.getElementById("btn-import-mcp").onclick = () => importMcpModal();
 document.getElementById("btn-add-mcp").onclick = addMcpModal;
 
+// ---------- 记忆地图：项目演化的可视化（时间线 + 主题图谱） ----------
+// 数据来自 map.get（会话/事件/文件足迹/热力/全局记忆/演化摘要一次装配）；
+// 摘要生成走 map.generate（后台任务，完成经 map_updated 事件广播后重拉）。
+// 渲染沿用 mountPipelineGraph 的路数：纯 HTML/SVG 自绘、配色全走主题变量、
+// ResizeObserver 防抖重排；图谱布局是自写的定环初始化力导向（不引 d3）。
+
+const mapState = {
+  projectId: 0,     // 0 = 跟随当前项目（后端解析，切项目自动跟上）
+  range: "90",      // 30 | 90 | 0（全部）
+  view: "timeline", // timeline | graph
+  data: null,       // map.get 载荷
+  fileFilter: null, // 文件足迹 chip 点选后的过滤（完整路径）
+  genBusy: false,   // 摘要生成中（按钮禁用转文案；事件回来后复位）
+};
+let mapProjects = []; // project.list 缓存（项目下拉）
+
+function mapPad(n) { return String(n).padStart(2, "0"); }
+function mapDayKey(ts) {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${mapPad(d.getMonth() + 1)}-${mapPad(d.getDate())}`;
+}
+function mapMonthKey(ts) {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${mapPad(d.getMonth() + 1)}`;
+}
+function mapMonthLabel(key) {
+  const [y, m] = key.split("-");
+  return `${y}年${parseInt(m, 10)}月`;
+}
+// 会话节点按 token 量分档（圆点大小/色深随之分五档，一眼看出投入量）
+function mapTokClass(s) {
+  const t = (s.in_tokens || 0) + (s.out_tokens || 0);
+  return t >= 50000 ? "t4" : t >= 20000 ? "t3" : t >= 5000 ? "t2" : t > 0 ? "t1" : "t0";
+}
+function mapIsFork(title) {
+  return SUB_MARKS.some((mk) => String(title || "").startsWith(mk));
+}
+function mapBasename(p) {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i >= 0 ? p.slice(i + 1) : p;
+}
+
+async function loadMemoryMap(force) {
+  const tl = document.getElementById("map-timeline");
+  try {
+    if (!mapProjects.length || force) {
+      const pl = await request("project.list").catch(() => ({ projects: [] }));
+      mapProjects = pl.projects || [];
+    }
+    const params = {};
+    if (mapState.projectId) params.project_id = mapState.projectId;
+    const days = parseInt(mapState.range, 10) || 0;
+    if (days > 0) params.start_ts = Date.now() / 1000 - days * 86400;
+    mapState.data = await request("map.get", params);
+    renderMapChrome();
+    renderMapView();
+    renderMapAside();
+  } catch (e) {
+    if (tl) tl.innerHTML = `<div class="map-empty dim">${escapeHtml(e.message)}</div>`;
+    document.getElementById("map-aside").classList.add("hidden");
+  }
+}
+
+// 页头控件与项目下拉（数据回来后同步，选择器只发事件不改渲染）
+function renderMapChrome() {
+  const d = mapState.data;
+  const sel = document.getElementById("map-project");
+  sel.innerHTML = '<option value="0">当前项目</option>' + mapProjects.map((p) =>
+    `<option value="${p.id}">${escapeHtml(p.name || "未命名项目")}</option>`).join("");
+  sel.value = String(mapState.projectId || 0);
+  // 跟随当前项目时把实际项目名露出来，用户不用猜「当前」是哪个
+  if (!mapState.projectId && d) sel.options[0].textContent = "当前项目 · " + (d.project.name || "未命名");
+  document.getElementById("map-range").value = mapState.range;
+  document.querySelectorAll("#map-segbar button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === mapState.view);
+  });
+  document.getElementById("map-timeline").classList.toggle("hidden", mapState.view !== "timeline");
+  document.getElementById("map-graph").classList.toggle("hidden", mapState.view !== "graph");
+  document.getElementById("map-aside").classList.toggle("hidden", mapState.view !== "timeline");
+  updateMapGenBtn(d && d.generating);
+  const autoBtn = document.getElementById("map-auto");
+  autoBtn.classList.toggle("on", !!(d && d.config && d.config.auto_digest));
+  autoBtn.title = d && d.config && d.config.auto_digest
+    ? "自动生成演化摘要：已开启（项目累计足量新会话时后台自动总结；点击关闭）"
+    : "自动生成演化摘要：已关闭（点击开启；每次生成都是一次真实模型调用）";
+}
+
+function updateMapGenBtn(busy) {
+  const btn = document.getElementById("map-gen");
+  const on = busy === undefined ? (mapState.genBusy || !!(mapState.data && mapState.data.generating)) : busy;
+  btn.disabled = on;
+  btn.textContent = on ? "⏳ 生成中…" : "✦ 生成演化摘要";
+}
+
+// 时间线：会话/事件/记忆/阶段里程碑按月分组铺开；overview 摘要卡置顶
+function renderMapView() {
+  if (mapState.view === "graph") return renderMapGraph();
+  return renderMapTimeline();
+}
+
+function renderMapTimeline() {
+  const d = mapState.data;
+  const box = document.getElementById("map-timeline");
+  if (!d) { box.innerHTML = ""; return; }
+  const fileOk = mapState.fileFilter
+    ? new Set((d.files.find((f) => f.path === mapState.fileFilter) || {}).session_ids || [])
+    : null;
+  const items = [];
+  (d.sessions || []).forEach((s) => {
+    if (fileOk && !fileOk.has(s.id)) return;
+    items.push({ ts: s.created_at, type: "sess", s });
+  });
+  (d.events || []).forEach((e) => items.push({ ts: e.ts, type: "evt", e }));
+  (d.memories || []).forEach((m) => {
+    // 记忆条目只有日期（本地零点），铺到当天；全局条目标「全局」徽记
+    items.push({ ts: new Date(m.date + "T00:00:00").getTime() / 1000, type: "mem", m });
+  });
+  (d.digests || []).forEach((dg) => {
+    if (dg.kind === "overview") return;
+    items.push({ ts: dg.start_ts, type: "phase", dg });
+  });
+  items.sort((a, b) => a.ts - b.ts);
+  const overview = (d.digests || []).find((dg) => dg.kind === "overview");
+  let html = "";
+  if (overview && overview.summary) {
+    const highs = (overview.highlights || [])
+      .map((h) => `<li>${escapeHtml(h)}</li>`).join("");
+    html += `<details class="map-overview"><summary>✦ ${escapeHtml(overview.title || "项目总览")}` +
+      `<span class="map-dim">${escapeHtml((d.project || {}).name || "")}</span></summary>` +
+      `<div class="map-phase-body"><p>${escapeHtml(overview.summary)}</p>${highs ? `<ul>${highs}</ul>` : ""}</div></details>`;
+  }
+  if (!items.length) {
+    html += `<div class="map-empty dim">${fileOk ? "这个文件的时间窗内没有会话"
+      : "时间窗内还没有会话——回去聊点什么，地图就会长出来"}</div>`;
+  }
+  let curMonth = "";
+  items.forEach((it) => {
+    const mk = mapMonthKey(it.ts);
+    if (mk !== curMonth) {
+      if (curMonth) html += "</div></div>";
+      curMonth = mk;
+      html += `<div class="map-month"><div class="map-month-name">${escapeHtml(mapMonthLabel(mk))}</div><div class="map-month-items">`;
+    }
+    html += mapItemHtml(it);
+  });
+  if (curMonth) html += "</div></div>";
+  box.innerHTML = html;
+  bindMapTimeline(box);
+}
+
+function mapItemHtml(it) {
+  if (it.type === "sess") {
+    const s = it.s;
+    const tags = (s.tags || []).slice(0, 3).map((t) => `<span class="map-tag">${escapeHtml(t)}</span>`).join("");
+    const dd = new Date(it.ts * 1000);
+    return `<div class="map-item map-sess ${mapTokClass(s)}${s.archived ? " archived" : ""}" data-sid="${s.id}"` +
+      ` title="${escapeHtml(s.title)} · ${s.msg_count} 条消息 · 点击打开会话">` +
+      `<span class="map-dot"></span>` +
+      `<span class="map-item-main"><span class="map-item-title">${escapeHtml(s.title || "（未命名）")}` +
+      `${mapIsFork(s.title) ? ' <span class="map-fork">分叉</span>' : ""}${s.archived ? ' <span class="map-dim">已归档</span>' : ""}</span>` +
+      `<span class="map-item-meta">${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())} · ${s.msg_count} 条${tags ? " " + tags : ""}</span>` +
+      `</span></div>`;
+  }
+  if (it.type === "evt") {
+    const mark = { task_created: "＋", task_done: "✔", pipeline: "⛓", cron: "⏰" }[it.e.kind] || "·";
+    const label = { task_created: "新建任务", task_done: "完成任务", pipeline: "流水线", cron: "定时任务" }[it.e.kind] || "";
+    const dd = new Date(it.ts * 1000);
+    return `<div class="map-item map-evt"><span class="map-evt-mark">${mark}</span>` +
+      `<span class="map-item-main"><span class="map-item-title">${escapeHtml(it.e.title)}</span>` +
+      `<span class="map-item-meta">${label} · ${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())}</span></span></div>`;
+  }
+  if (it.type === "mem") {
+    return `<div class="map-item map-mem" title="全局记忆条目（memory.md，跨项目）">` +
+      `<span class="map-evt-mark">📌</span><span class="map-item-main">` +
+      `<span class="map-item-title">${escapeHtml(it.m.text)}</span>` +
+      `<span class="map-item-meta">${escapeHtml(it.m.date)} · 全局记忆</span></span></div>`;
+  }
+  // 阶段里程碑：可展开看摘要与要点
+  const dg = it.dg;
+  const dd = new Date(it.ts * 1000);
+  const highs = (dg.highlights || []).map((h) => `<li>${escapeHtml(h)}</li>`).join("");
+  const topics = (dg.topics || []).map((t) => `<span class="map-tag topic">${escapeHtml(t)}</span>`).join("");
+  return `<details class="map-item map-phase" data-did="${dg.id}"><summary>` +
+    `<span class="map-diamond">◆</span><span class="map-item-main">` +
+    `<span class="map-item-title">${escapeHtml(dg.title)}</span>` +
+    `<span class="map-item-meta">阶段 · 起于 ${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())} · ${ (dg.session_ids || []).length } 个会话</span>` +
+    `</span></summary><div class="map-phase-body"><p>${escapeHtml(dg.summary || "")}</p>` +
+    `${highs ? `<ul>${highs}</ul>` : ""}${topics ? `<div class="map-topics">${topics}</div>` : ""}</div></details>`;
+}
+
+function bindMapTimeline(box) {
+  box.querySelectorAll(".map-sess").forEach((el) => {
+    el.onclick = () => {
+      const sid = el.dataset.sid;
+      const s = (mapState.data.sessions || []).find((x) => x.id === sid);
+      openTabForSession(sid, s ? s.title : "");
+    };
+  });
+  box.querySelectorAll(".map-phase summary").forEach((el) => {
+    // details/summary 原生开合，这里只做「同时只展开一个」的省心处理
+    el.onclick = () => {
+      const me = el.parentElement;
+      if (me.open) return;
+      box.querySelectorAll("details.map-phase[open]").forEach((d) => { if (d !== me) d.open = false; });
+    };
+  });
+}
+
+// 文件足迹 + 热力图（时间线视图的常驻底栏）
+function renderMapAside() {
+  const d = mapState.data;
+  const filesBox = document.getElementById("map-files");
+  const heatBox = document.getElementById("map-heat");
+  const aside = document.getElementById("map-aside");
+  if (!d) { aside.classList.add("hidden"); return; }
+  aside.classList.toggle("hidden", mapState.view !== "timeline");
+  // 文件足迹 chips：basename 为主、次数徽记；title 带完整路径
+  const chips = (d.files || []).map((f) =>
+    `<button class="map-file-chip${mapState.fileFilter === f.path ? " on" : ""}" data-path="${escapeHtml(f.path)}"` +
+    ` title="${escapeHtml(f.path)} · ${f.count} 次改动 · 点击过滤时间线">${escapeHtml(mapBasename(f.path))}<i>${f.count}</i></button>`).join("");
+  filesBox.innerHTML = chips
+    ? `<span class="map-aside-label">文件足迹</span>${chips}${mapState.fileFilter ? '<button class="map-file-clear" data-clear="1">✕ 清除过滤</button>' : ""}`
+    : `<span class="map-aside-label dim">文件足迹：暂无检查点记录的改动</span>`;
+  filesBox.querySelectorAll(".map-file-chip").forEach((b) => {
+    b.onclick = () => {
+      mapState.fileFilter = mapState.fileFilter === b.dataset.path ? null : b.dataset.path;
+      renderMapTimeline();
+      renderMapAside();
+    };
+  });
+  const clearBtn = filesBox.querySelector(".map-file-clear");
+  if (clearBtn) clearBtn.onclick = () => { mapState.fileFilter = null; renderMapTimeline(); renderMapAside(); };
+
+  // 热力图：GitHub 贡献图式（列=周，行=周一..周日），最多铺最近 26 周；
+  // 强度按当日 token 分档，悬停给明细，点击跳时间线对应月份
+  const byDay = new Map((d.days || []).map((x) => [x.day, x]));
+  const WEEKS = 26;
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const start = new Date(end.getTime() - (WEEKS * 7 - 1) * 86400000);
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7)); // 对齐周一
+  let cells = "";
+  for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
+    const dt = new Date(t);
+    const key = mapDayKey(t / 1000);
+    const st = byDay.get(key);
+    const tok = st ? st.tokens : 0;
+    const lv = tok >= 50000 ? "l4" : tok >= 10000 ? "l3" : tok >= 2000 ? "l2" : tok > 0 ? "l1" : "l0";
+    const tip = st ? `${key}：${st.sessions} 个会话 · ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
+      : `${key}：无活动`;
+    cells += `<i class="${lv}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
+  }
+  heatBox.innerHTML = `<span class="map-aside-label">活跃</span><div class="map-heat-grid">${cells}</div>` +
+    `<span class="map-heat-legend">少<i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i>多</span>`;
+  heatBox.querySelectorAll("[data-day]").forEach((el) => {
+    el.onclick = () => {
+      const day = el.dataset.day;
+      mapState.view = "timeline";
+      renderMapChrome();
+      renderMapView();
+      renderMapAside();
+      const target = Array.from(document.querySelectorAll("#map-timeline .map-item"))
+        .find((n) => n.textContent.includes(day.slice(5).replace("-", "-")));
+      if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
+    };
+  });
+}
+
+// ---- 主题图谱：阶段-主题-文件-记忆的关联网络 ----
+// 节点上限与边剪枝：面板就几百像素宽，节点超量按权重截断，边超量保权重高的。
+
+const MAP_GRAPH_NODE_CAP = 44;
+const MAP_GRAPH_EDGE_CAP = 110;
+const MAP_NODE_TYPE = {
+  phase: { color: "var(--dm-c1)", label: "阶段" },
+  topic: { color: "var(--dm-c2)", label: "主题" },
+  file: { color: "var(--dm-c3)", label: "文件" },
+  mem: { color: "var(--dm-c4)", label: "记忆" },
+};
+
+function mapBuildGraphData() {
+  const d = mapState.data;
+  const nodes = [];
+  const phases = (d.digests || []).filter((x) => x.kind === "phase");
+  phases.forEach((dg) => nodes.push({
+    id: "p" + dg.id, type: "phase", label: dg.title, weight: (dg.session_ids || []).length + 2,
+    sessions: dg.session_ids || [], topics: dg.topics || [], start: dg.start_ts, end: dg.end_ts,
+  }));
+  // 主题节点：阶段 topics（归属该阶段的会话）∪ 会话 tags（归属带标签的会话），同名合并
+  const topics = new Map();
+  const bumpTopic = (name, sids) => {
+    const key = String(name).trim();
+    if (!key) return;
+    let t = topics.get(key);
+    if (!t) { t = { id: "t·" + key, type: "topic", label: key, weight: 0, sessions: new Set() }; topics.set(key, t); }
+    (sids || []).forEach((sid) => t.sessions.add(sid));
+    t.weight = t.sessions.size + 1;
+  };
+  phases.forEach((dg) => (dg.topics || []).forEach((tp) => bumpTopic(tp, dg.session_ids)));
+  (d.sessions || []).forEach((s) => (s.tags || []).forEach((tg) => bumpTopic(tg, [s.id])));
+  topics.forEach((t) => nodes.push({ ...t, sessions: [...t.sessions] }));
+  // 文件节点（Top 12）与记忆节点（近 10 条）
+  (d.files || []).slice(0, 12).forEach((f) => nodes.push({
+    id: "f·" + f.path, type: "file", label: mapBasename(f.path), weight: f.count + 1,
+    sessions: f.session_ids || [], path: f.path,
+  }));
+  (d.memories || []).slice(-10).forEach((m, i) => nodes.push({
+    id: "m·" + i, type: "mem", label: m.text.slice(0, 16) + (m.text.length > 16 ? "…" : ""),
+    weight: 1, sessions: [], date: m.date, full: m.text,
+  }));
+  // 超量裁剪：阶段全保，其余按权重留
+  const keep = nodes.filter((n) => n.type === "phase");
+  const rest = nodes.filter((n) => n.type !== "phase").sort((a, b) => b.weight - a.weight);
+  const graphNodes = keep.concat(rest.slice(0, Math.max(0, MAP_GRAPH_NODE_CAP - keep.length)));
+  const byId = new Map(graphNodes.map((n) => [n.id, n]));
+  // 边：阶段–主题（阶段列出该主题）；主题–文件（同一会话既带标签又改过该文件）；
+  // 记忆–阶段（条目日期落在阶段窗口内）。带权重，超量保高权。
+  const edges = [];
+  const addEdge = (a, b, w) => {
+    if (!byId.has(a) || !byId.has(b) || a === b) return;
+    edges.push({ a, b, w });
+  };
+  graphNodes.forEach((n) => {
+    if (n.type !== "phase") return;
+    (n.topics || []).forEach((tp) => addEdge(n.id, "t·" + String(tp).trim(), 2));
+  });
+  graphNodes.forEach((n) => {
+    if (n.type !== "topic" || !n.sessions.length) return;
+    const sset = new Set(n.sessions);
+    graphNodes.forEach((f) => {
+      if (f.type !== "file") return;
+      const overlap = (f.sessions || []).filter((sid) => sset.has(sid)).length;
+      if (overlap > 0) addEdge(n.id, f.id, 1 + overlap);
+    });
+  });
+  graphNodes.forEach((m) => {
+    if (m.type !== "mem") return;
+    let linked = 0;
+    graphNodes.forEach((p) => {
+      if (p.type !== "phase" || linked >= 2) return;
+      if (m.date >= mapDayKey(p.start) && m.date <= mapDayKey(p.end)) { addEdge(m.id, p.id, 1); linked += 1; }
+    });
+  });
+  edges.sort((x, y) => y.w - x.w);
+  return { nodes: graphNodes, edges: edges.slice(0, MAP_GRAPH_EDGE_CAP) };
+}
+
+// 力导向布局：定环初始化（阶段内圈 → 主题中圈 → 文件/记忆外圈，角度按序号
+// 均分，确定性可复现），~90 轮斥力 + 弹簧 + 向心，节点量 ≤44 同步算毫无压力。
+function mapLayoutGraph(nodes, edges, W, H) {
+  const R = [Math.min(W, H) * 0.17, Math.min(W, H) * 0.34, Math.min(W, H) * 0.47];
+  const ring = { phase: 0, topic: 1, file: 2, mem: 2 };
+  const cx = W / 2, cy = H / 2;
+  const counters = { phase: 0, topic: 0, file: 0, mem: 0 };
+  const typeCount = {};
+  nodes.forEach((n) => { typeCount[n.type] = (typeCount[n.type] || 0) + 1; });
+  nodes.forEach((n) => {
+    const r = R[ring[n.type]];
+    const i = counters[n.type]++;
+    const ang = (2 * Math.PI * i) / Math.max(1, typeCount[n.type]) + (ring[n.type] * 0.7);
+    n.x = cx + Math.cos(ang) * r;
+    n.y = cy + Math.sin(ang) * r;
+  });
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const adj = new Map();
+  edges.forEach((e) => {
+    if (!adj.has(e.a)) adj.set(e.a, []);
+    if (!adj.has(e.b)) adj.set(e.b, []);
+    adj.get(e.a).push(e.b);
+    adj.get(e.b).push(e.a);
+  });
+  const REPULSE = 4200, SPRING = 0.012, CENTER = 0.015;
+  for (let step = 0; step < 90; step++) {
+    const fx = new Map(), fy = new Map();
+    nodes.forEach((n) => { fx.set(n.id, 0); fy.set(n.id, 0); });
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) { dx = (i % 3) - 1; dy = (j % 3) - 1; d2 = 2; }
+        const f = REPULSE / d2;
+        const dd = Math.sqrt(d2);
+        fx.set(a.id, fx.get(a.id) + (dx / dd) * f);
+        fy.set(a.id, fy.get(a.id) + (dy / dd) * f);
+        fx.set(b.id, fx.get(b.id) - (dx / dd) * f);
+        fy.set(b.id, fy.get(b.id) - (dy / dd) * f);
+      }
+    }
+    edges.forEach((e) => {
+      const a = byId.get(e.a), b = byId.get(e.b);
+      if (!a || !b) return;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const rest = 110 + 45 * e.w;
+      const dd = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const f = SPRING * (dd - rest);
+      fx.set(a.id, fx.get(a.id) + (dx / dd) * f * dd);
+      fy.set(a.id, fy.get(a.id) + (dy / dd) * f * dd);
+      fx.set(b.id, fx.get(b.id) - (dx / dd) * f * dd);
+      fy.set(b.id, fy.get(b.id) - (dy / dd) * f * dd);
+    });
+    const damp = 1 - step / 100;
+    nodes.forEach((n) => {
+      n.x += Math.max(-14, Math.min(14, fx.get(n.id))) * damp + (cx - n.x) * CENTER;
+      n.y += Math.max(-14, Math.min(14, fy.get(n.id))) * damp + (cy - n.y) * CENTER;
+      n.x = Math.max(30, Math.min(W - 30, n.x));
+      n.y = Math.max(18, Math.min(H - 18, n.y));
+    });
+  }
+  return { byId, adj };
+}
+
+function renderMapGraph() {
+  const d = mapState.data;
+  const box = document.getElementById("map-graph");
+  if (!d) { box.innerHTML = ""; return; }
+  const { nodes, edges } = mapBuildGraphData();
+  if (!nodes.length) {
+    box.innerHTML = '<div class="map-empty dim">还没有可画的内容——先聊出一些会话，或点「生成演化摘要」</div>';
+    return;
+  }
+  mountMapGraph(box, nodes, edges);
+}
+
+function mountMapGraph(box, nodes, edges) {
+  const W = Math.max(box.clientWidth || 0, 260);
+  const H = Math.max(box.clientHeight || 0, 260);
+  const { byId, adj } = mapLayoutGraph(nodes, edges, W, H);
+  let lines = "";
+  edges.forEach((e) => {
+    const a = byId.get(e.a), b = byId.get(e.b);
+    if (!a || !b) return;
+    // --w 驱动 CSS 里的连线不透明度（权重越高越实）
+    lines += `<line class="map-edge" data-a="${e.a}" data-b="${e.b}" style="--w:${Math.min(4, e.w)}"` +
+      ` x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"/>`;
+  });
+  let legend = Object.entries(MAP_NODE_TYPE).map(([k, v]) =>
+    `<span class="map-legend-item"><i style="background:${v.color}"></i>${v.label}</span>`).join("");
+  let boxes = "";
+  nodes.forEach((n) => {
+    boxes += `<div class="map-gnode ty-${n.type}" data-nid="${n.id}"` +
+      ` style="left:${n.x.toFixed(1)}px;top:${n.y.toFixed(1)}px"` +
+      ` title="${escapeHtml(n.label)}（${MAP_NODE_TYPE[n.type].label} · 权重 ${n.weight}）">` +
+      `<span>${escapeHtml(n.label)}</span></div>`;
+  });
+  box.innerHTML = `<div class="map-graph-canvas" style="width:${W}px;height:${H}px">` +
+    `<svg width="${W}" height="${H}">${lines}</svg>${boxes}` +
+    `<div class="map-graph-legend">${legend}</div></div>` +
+    `<div id="map-pop" class="map-pop hidden"></div>`;
+  const svg = box.querySelector("svg");
+  const pop = box.querySelector("#map-pop");
+
+  const closePop = () => {
+    clearTimeout(popTimer);
+    clearTimeout(popHideTimer);
+    popTimer = 0;
+    pop.classList.add("hidden");
+  };
+  // 悬停出浮层：进节点稍候即现（扫过不闪），离开延迟收起——收起前把鼠标
+  // 挪进浮层就取消，浮层里的会话链接照常可点
+  let popTimer = 0, popHideTimer = 0, dragging = false;
+  const showPop = (n) => {
+    clearTimeout(popHideTimer);
+    const sids = (n.sessions || []).slice(0, 12);
+    const sMap = new Map((mapState.data.sessions || []).map((s) => [s.id, s]));
+    const rows = sids.map((sid) => {
+      const s = sMap.get(sid);
+      return s ? `<button class="map-pop-sess" data-sid="${sid}">${escapeHtml(s.title || "（未命名）")}</button>` : "";
+    }).join("");
+    pop.innerHTML = `<b>${escapeHtml(n.label)}</b>` +
+      `<span class="map-dim small">${MAP_NODE_TYPE[n.type].label} · ${sids.length} 个会话${sids.length ? "，点击直达" : ""}</span>` +
+      (rows || (n.full ? `<p class="map-pop-full">${escapeHtml(n.full)}</p>` : "<span class='dim small'>无关联会话</span>"));
+    pop.classList.remove("hidden");
+    const pw = pop.offsetWidth || 200, ph = pop.offsetHeight || 80;
+    pop.style.left = Math.max(4, Math.min(W - pw - 4, n.x - pw / 2)) + "px";
+    pop.style.top = Math.max(4, Math.min(H - ph - 4, n.y + 18)) + "px";
+    pop.querySelectorAll(".map-pop-sess").forEach((b) => {
+      b.onclick = () => {
+        const s = sMap.get(b.dataset.sid);
+        openTabForSession(b.dataset.sid, s ? s.title : "");
+        closePop();
+      };
+    });
+  };
+  pop.addEventListener("mouseenter", () => clearTimeout(popHideTimer));
+  pop.addEventListener("mouseleave", () => {
+    clearTimeout(popTimer);
+    popHideTimer = setTimeout(closePop, 200);
+  });
+  box.querySelector(".map-graph-canvas").addEventListener("click", (e) => {
+    if (e.target === svg || e.target.classList.contains("map-graph-canvas")) closePop();
+  });
+  // 悬停高亮邻域：节点与相邻边加 .hl（相邻查 O(度)）
+  const neighbors = (nid) => {
+    const out = new Set();
+    edges.forEach((e) => {
+      if (e.a === nid) out.add(e.b);
+      if (e.b === nid) out.add(e.a);
+    });
+    return out;
+  };
+  box.querySelectorAll(".map-gnode").forEach((el) => {
+    const nid = el.dataset.nid;
+    el.addEventListener("mouseenter", () => {
+      const nb = neighbors(nid);
+      el.classList.add("hl");
+      box.querySelectorAll(".map-edge").forEach((ln) => {
+        if (ln.dataset.a === nid || ln.dataset.b === nid) ln.classList.add("hl");
+      });
+      box.querySelectorAll(".map-gnode").forEach((o) => {
+        if (nb.has(o.dataset.nid)) o.classList.add("hl-soft");
+      });
+      if (!dragging) {
+        clearTimeout(popTimer);
+        popTimer = setTimeout(() => showPop(byId.get(nid)), 180);
+      }
+    });
+    el.addEventListener("mouseleave", () => {
+      box.querySelectorAll(".hl,.hl-soft").forEach((x) => x.classList.remove("hl", "hl-soft"));
+      clearTimeout(popTimer);
+      popHideTimer = setTimeout(closePop, 300);
+    });
+    // 拖拽：pointer 事件改 x/y，重画该节点与相邻边（布局结果就地更新）。
+    // 拖拽期间抑制悬停浮层（指针被捕获也不会再触发 mouseenter），松手后
+    // 挪开再悬停即可再看。
+    el.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      dragging = true;
+      closePop();
+      el.setPointerCapture(ev.pointerId);
+      const n = byId.get(nid);
+      const move = (m) => {
+        const rect = box.querySelector(".map-graph-canvas").getBoundingClientRect();
+        n.x = Math.max(30, Math.min(W - 30, m.clientX - rect.left));
+        n.y = Math.max(18, Math.min(H - 18, m.clientY - rect.top));
+        el.style.left = n.x + "px";
+        el.style.top = n.y + "px";
+        box.querySelectorAll(`.map-edge[data-a="${nid}"],.map-edge[data-b="${nid}"]`).forEach((ln) => {
+          const o = byId.get(ln.dataset.a === nid ? ln.dataset.b : ln.dataset.a);
+          if (!o) return;
+          if (ln.dataset.a === nid) { ln.setAttribute("x1", n.x); ln.setAttribute("y1", n.y); }
+          else { ln.setAttribute("x2", n.x); ln.setAttribute("y2", n.y); }
+        });
+      };
+      const up = () => {
+        dragging = false;
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", up);
+      };
+      el.addEventListener("pointermove", move);
+      el.addEventListener("pointerup", up);
+    });
+  });
+  // 宽度变化超阈值才整体重排（防 RO 循环），与 mountPipelineGraph 同款门槛
+  let raf = 0;
+  const ro = new ResizeObserver(() => {
+    const w = box.clientWidth;
+    if (!w || Math.abs(w - (+box.dataset.w || 0)) < 24) return;
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      box.dataset.w = String(box.clientWidth);
+      renderMapGraph();
+    });
+  });
+  box.dataset.w = String(W);
+  ro.observe(box);
+}
+
+// 记忆地图的工具条事件（选择器/视图切换/生成按钮/自动开关）
+document.getElementById("map-project").addEventListener("change", (e) => {
+  mapState.projectId = parseInt(e.target.value, 10) || 0;
+  mapState.fileFilter = null;
+  loadMemoryMap();
+});
+document.getElementById("map-range").addEventListener("change", (e) => {
+  mapState.range = e.target.value;
+  loadMemoryMap();
+});
+document.querySelectorAll("#map-segbar button").forEach((b) => {
+  b.onclick = () => {
+    mapState.view = b.dataset.view;
+    renderMapChrome();
+    renderMapView();
+    renderMapAside();
+  };
+});
+document.getElementById("map-gen").addEventListener("click", async () => {
+  if (mapState.genBusy) return;
+  mapState.genBusy = true;
+  updateMapGenBtn();
+  try {
+    const params = {};
+    if (mapState.projectId) params.project_id = mapState.projectId;
+    const r = await request("map.generate", params);
+    if (r && r.started === false) {
+      mapState.genBusy = false;
+      updateMapGenBtn();
+      addNotice("🗺 " + (r.reason || "已有一个摘要在生成中"));
+    }
+  } catch (e) {
+    mapState.genBusy = false;
+    updateMapGenBtn();
+    addNotice("🗺 生成失败：" + e.message);
+  }
+});
+document.getElementById("map-auto").addEventListener("click", async () => {
+  const cur = !!(mapState.data && mapState.data.config && mapState.data.config.auto_digest);
+  try {
+    const r = await request("map.save_config", { auto_digest: !cur });
+    if (mapState.data) mapState.data.config = { auto_digest: !!r.auto_digest };
+    renderMapChrome();
+    addNotice(!cur ? "🗺 已开启自动生成演化摘要" : "🗺 已关闭自动生成演化摘要");
+  } catch (e) {
+    addNotice("🗺 设置失败：" + e.message);
+  }
+});
+
 // ---------- 右侧标签页面板（对标「打开标签页」：辅助对话/审查/终端/浏览器） ----------
 
 const RP_ICONS = {
@@ -10855,6 +11503,8 @@ const RP_ICONS = {
   auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 2.5 5.5 13h5L10 21.5 18.5 11h-5.2z"/></svg>',
   pipeline: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="6" r="2.1"/><circle cx="5.5" cy="18" r="2.1"/><circle cx="18.5" cy="12" r="2.1"/><path d="M7.4 6.9 16.6 11.1M7.4 17.1 16.6 12.9"/></svg>',
   memory: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M9 3.5v17"/><path d="M12.5 8h4M12.5 12h4"/></svg>',
+  // 记忆地图：三颗星连成星座——项目演化「星轨图」的意象
+  map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>',
   ext: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5V8M15 3.5V8"/><path d="M6.5 8h11v2.5a5.5 5.5 0 0 1-5.5 5.5 5.5 5.5 0 0 1-5.5-5.5z"/><path d="M12 16v4.5"/></svg>',
   // 面板开关：箭头指明点击后的动作——收起时 `>`（向右展开）、展开时 `<`（向左收起），
   // 展开态把面板列填色提示"此刻是开着的"
@@ -10877,6 +11527,7 @@ const TAB_META = {
   agenda: { title: "日程" },
   auto: { title: "自动化", sub: "定时任务 · 任务编排" },
   memory: { title: "项目记忆" },
+  map: { title: "记忆地图", sub: "项目演化 · 时间线 · 图谱" },
   ext: { title: "MCP / Skills" },
 };
 // 分段 id → 所属标签。合并前的 ui.json 里存的就是分段 id（todo / ptasks /
@@ -10949,6 +11600,7 @@ const RIGHT_TAB_LOADERS = {
   pipeline: () => loadPipelines(),
   review: () => refreshReview(),
   memory: () => loadMemoryPanel(),
+  map: () => loadMemoryMap(),
   ext: () => openExtPanel(),
   todo: () => loadTodoPanel(),
 };
@@ -12600,7 +13252,7 @@ themeMql.addEventListener("change", () => {
 });
 
 // ---------- 第三方大库按需加载 ----------
-// mermaid 单文件 3.3MB、xterm 双文件约 400KB，此前页面一打开就同步解析，
+// mermaid 单文件 3.3MB、xterm 双文件约 290KB，此前页面一打开就同步解析，
 // 冷启动白屏几百毫秒到秒级，而绝大多数会话一张图不画、底部终端默认关着。
 // 首次用到时才注入 <script>；加载失败由调用方按纯文本兜底。
 const _libLoads = {};
@@ -12847,6 +13499,7 @@ document.getElementById("memory-maintain-now").onclick = async (e) => {
     }
     st.className = "card-status";
     st.hidden = false;
+    autoHideStatus(st, st.textContent, true);
     loadMemoryPage(); // 刷新「上次整理」时间
   } catch (err) {
     st.textContent = "✗ 整理失败：" + err.message;
@@ -13764,6 +14417,7 @@ function speechStatus(text, ok = true) {
   el.textContent = text;
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = !text;
+  autoHideStatus(el, text, ok);
 }
 
 // ---------- 圆桌设置：成员上限 / 超时 / 辩论轮数 / 主席出草稿 ----------
@@ -14012,6 +14666,7 @@ function subagentStatus(text, ok = true, which = "base") {
   el.textContent = text;
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = !text;
+  autoHideStatus(el, text, ok);
 }
 
 function modelOptions(d, selectedProvider, selectedModel) {
@@ -14794,6 +15449,7 @@ function hooksStatus(text, ok = true) {
   el.textContent = text;
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = !text;
+  autoHideStatus(el, text, ok);
 }
 
 // 工具名候选：来自后端实际注册的工具清单，写 match 时不用凭记忆
@@ -15007,6 +15663,7 @@ function advancedStatus(text, ok = true) {
   el.textContent = text;
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = !text;
+  autoHideStatus(el, text, ok);
 }
 
 // 加载时记下的热键：保存后判断是否变了——热键要重启才生效，提示不能撒谎
@@ -15198,9 +15855,13 @@ document.getElementById("btn-feedback").onclick = async () => {
     await request("app.export_diagnostics");
   } catch (e) { /* 诊断包失败不阻塞打开反馈页 */ }
   try {
-    await request("app.open_external", {
+    const opened = await request("app.open_external", {
       target: REPO_PAGE + "/issues/new?template=bug_report.md",
     });
+    // 局域网/远程访问时服务端不代开（审查 P1-3）：链接交回本端浏览器
+    if (opened && opened.remote) {
+      window.open(opened.url, "_blank", "noopener");
+    }
     msg.textContent = "✓ 已生成诊断包并打开反馈页——把诊断包 zip 拖进附件，描述问题即可";
     msg.className = "io-msg ok";
   } catch (e) {

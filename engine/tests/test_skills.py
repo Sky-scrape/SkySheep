@@ -635,3 +635,33 @@ async def test_delete_skill_removes_loaded_side_of_duplicated_name(tmp_path, mon
     result = await backend.delete_skill("dup")
     assert result["scope"] == "project"
     assert not (proj_dir / "dup").exists()
+
+
+def test_install_from_zip_colon_entry_and_random_staging(tmp_path):
+    """2026-09-25 审查 S-10/S-11 回归钉死：
+
+    - zip 里带冒号（NTFS ADS 语义）的条目只能在技能根内落文件，越不过根；
+    - 暂存目录随机命名：安装不再复用/删除已存在的 `.importing-<stem>` 目录——
+      固定名可被本机攻击者预埋 junction，rmtree(ignore_errors=True) 撞联接会
+      静默失败、解压内容随之穿透。
+    """
+    pack = tmp_path / "p.zip"
+    with zipfile.ZipFile(pack, "w") as zf:
+        zf.writestr("p/SKILL.md", "---\nname: p\ndescription: p\n---\n")
+        zf.writestr("p/assets/file:ads.txt", "x")
+    dest = tmp_path / "skills"
+    planted = dest / ".importing-p"
+    planted.mkdir(parents=True)
+    (planted / "junk.txt").write_text("attacker", encoding="utf-8")
+
+    r = install_from_zip(pack, dest, existing=set())
+    assert r["installed"] == ["p"]
+    assert (dest / "p" / "SKILL.md").is_file()
+    assert (planted / "junk.txt").read_text(encoding="utf-8") == "attacker", \
+        "已存在的同名暂存目录不该被动（预埋内容保持原样）"
+    # 冒号条目（无论以文件还是 ADS 形式落盘）都不允许出现在技能根之外
+    assert not (tmp_path / "file:ads.txt").exists()
+    assert not (tmp_path / "file").exists()
+    # 本次安装自建的暂存目录已清理；允许剩下的只有预埋那一个
+    leftovers = set(dest.glob(".importing-*"))
+    assert leftovers <= {planted}

@@ -86,8 +86,11 @@ class ChannelGate(PermissionGate):
         self.waiting: dict[str, PendingPermission] = {}
         # 当前这一轮的发起人（由宿主在跑一轮前写入）。审批决定只认发起人：
         # 群聊里 chat_id 命中名单时所有成员的消息都是 approved 的，不绑定的话
-        # 任何人回一句 allow 就能替群友批准写操作。为空表示宿主没传（退回旧行为）。
+        # 任何人回一句 allow 就能替群友批准写操作。
         self.turn_actor = ""
+        # 本轮发起消息所在的聊天：审批卡回这里，而不是「最近一条入站」的聊天
+        # （审查 P3-15）。
+        self.turn_chat_id = ""
 
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
         if tool.safety == Safety.READONLY:
@@ -169,13 +172,18 @@ class ChannelGate(PermissionGate):
     def submit_latest(self, decision: str, actor: str = "") -> str | None:
         """把决定投给当前唯一的待决策项（渠道串行运行，通常只有一个）。
 
-        返回被决策的 request_id；没有待决策项时返回 None。actor 非空且与
-        发起这一轮的 turn_actor 不一致时同样返回 None（决定不生效），由调用方
-        区分「没有待决策项」与「不是发起人」并给出对应提示。
+        返回被决策的 request_id；没有待决策项时返回 None。actor 与本轮发起人
+        turn_actor 不一致时同样返回 None（决定不生效），由调用方区分「没有
+        待决策项」与「不是发起人」并给出对应提示。
+
+        审查收紧（S-08 + P3-17）：发起人 id 是校验的根本依据——turn_actor
+        为空（宿主没写入）或与回复 actor 不一致一律拒绝。旧逻辑在两侧都为空
+        时退回「投给第一个待决策项」，平台不提供消息者 id 时群聊里任何人都能
+        替发起人批准；现平台（飞书/微信）恒有 id，此收紧只影响失配/缺失场景。
         """
         if not self.waiting:
             return None
-        if actor and self.turn_actor and actor != self.turn_actor:
+        if not self.turn_actor or self.turn_actor != (actor or ""):
             return None
         request_id = next(iter(self.waiting))
         self.submit(request_id, decision)

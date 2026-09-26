@@ -147,3 +147,69 @@ async def test_real_socket_reports_error_for_unknown_method(home):
             # 连接仍可用
             boot = await _rpc(ws, "b1", "boot")
             assert boot.get("ok") is True
+
+
+async def test_real_socket_permission_round_trip(home):
+    """真实 socket 上跑通「权限请求 → respond → 工具执行 → 轮次完成」的完整往返。
+
+    进程内同款流程在 test_server.py 有覆盖；这里是真实网络栈版——PermissionRequest
+    事件与 respond 回包都要经过真实的分帧与排队，任何一处顺序假设写错都会在这里挂。
+    """
+    from skysheep.messages import ToolUseBlock
+
+    script = [
+        [ToolUseBlock(id="t1", name="write_file", input={"path": "out.txt", "content": "hi"})],
+        [TextBlock(text="文件已写入")],
+    ]
+    async with live_server(home, script) as url:
+        async with websockets.connect(url) as ws:
+            await _rpc(ws, "b1", "boot")
+
+            await ws.send(json.dumps({"id": "c1", "method": "chat.send", "params": {"text": "写个文件"}}))
+            request_id = None
+            resolved = None
+            events: list = []
+            while True:
+                frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
+                if "event" not in frame:
+                    if frame.get("id") == "c1":
+                        final = frame
+                        break
+                    continue
+                events.append(frame)
+                if frame["event"] == "permission_request" and request_id is None:
+                    request_id = frame["data"]["request_id"]
+                    await ws.send(json.dumps({
+                        "id": "p1",
+                        "method": "permission.respond",
+                        "params": {"request_id": request_id, "decision": "allow_once"},
+                    }))
+                elif frame["event"] == "permission_resolved":
+                    resolved = frame["data"]
+
+            assert request_id, "真实 socket 上应收到权限请求事件"
+            assert final.get("ok") is True, final
+            assert resolved and resolved.get("decision") == "allow_once", events
+            assert (home / "proj" / "out.txt").read_text(encoding="utf-8") == "hi"
+
+
+async def test_real_socket_rejects_malformed_params_gracefully(home):
+    """畸形参数经真实 socket 不炸服务：缺必填参数报 ok=false；错型被 str() 粗 coercion
+    （app.py 的既有语义，int 会被转成字符串当消息发）。两条路径都不得断开连接。"""
+    script = [[TextBlock(text="收到")], [TextBlock(text="还在")]]
+    async with live_server(home, script) as url:
+        async with websockets.connect(url) as ws:
+            await _rpc(ws, "b1", "boot")
+            # chat.send 缺 text → 报错
+            r1 = await _rpc(ws, "m1", "chat.send", {})
+            assert r1.get("ok") is False, r1
+            # 错型参数 → str() coercion 吞掉，不报错也不炸
+            r2 = await _rpc(ws, "m2", "chat.send", {"text": 12345})
+            assert r2.get("ok") is True, r2
+            # 连接仍可用：正常一轮照常工作
+            ev: list = []
+            r3 = await _rpc(ws, "m3", "chat.send", {"text": "还在吗"}, events=ev)
+            assert r3.get("ok") is True, r3
+            assert "".join(
+                e["data"].get("text", "") for e in ev if e.get("event") == "text_delta"
+            ) == "还在"

@@ -3414,6 +3414,235 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 /* 设置页里的开关行沿用 .toggle-row，无需额外样式 */
 
 /* ============================================================
+ * 记忆地图（右面板标签）：项目演化的可视化
+ * 时间线（按月分组的会话/事件/记忆/阶段里程碑）+ 主题图谱
+ * （阶段-主题-文件-记忆 关联网络，自写力导向）+ 底栏（文件足迹
+ * chips + 活跃热力图）。配色全部走主题槽位，六套主题通吃。
+ * ============================================================ */
+.map-toolbar { gap: 6px; flex-wrap: wrap; }
+.map-select {
+  max-width: 45%;
+  padding: 3px 6px;
+  background: var(--paper-inset);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  font-size: 12px;
+}
+.map-segbar { margin: 6px 10px 0; width: fit-content; }
+
+/* 主体两视图共用的高度骨架：面板内纵向 flex，地图区占满剩余空间 */
+.map-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.map-timeline { height: 100%; overflow-y: auto; padding: 8px 10px 14px; }
+
+.map-empty { padding: 28px 12px; text-align: center; line-height: 1.7; }
+
+/* —— 时间线：月份分节 + 左侧主轴 —— */
+.map-month { margin-bottom: 10px; }
+.map-month-name {
+  font-size: 12px; font-weight: 700; color: var(--text2);
+  padding: 2px 0 6px; letter-spacing: 0.06em;
+}
+.map-month-items {
+  position: relative;
+  margin-left: 7px;
+  padding-left: 12px;
+  border-left: 2px solid var(--line);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.map-item {
+  position: relative;
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: default;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.map-item-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.map-item-title {
+  font-size: 12.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.map-item-meta { font-size: 11px; color: var(--dim); margin-top: 1px; }
+.map-dim { color: var(--dim); font-size: 11px; margin-left: 6px; }
+.map-fork, .map-tag {
+  display: inline-block; margin-left: 4px; padding: 0 5px;
+  font-size: 10px; line-height: 16px; border-radius: 8px;
+  background: var(--paper-inset); color: var(--text2);
+  border: 1px solid var(--line);
+}
+.map-tag.topic { background: transparent; }
+
+/* 会话节点：圆点大小/色深按 token 分档（t0 没消耗 → t4 重投入） */
+.map-sess { cursor: pointer; }
+.map-sess:hover { border-color: var(--blue); background: var(--blue-weak); }
+.map-sess .map-dot {
+  flex: none; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--dm-c2); opacity: 0.55;
+}
+.map-sess.t1 .map-dot { width: 10px; height: 10px; opacity: 0.75; }
+.map-sess.t2 .map-dot { width: 12px; height: 12px; opacity: 0.9; }
+.map-sess.t3 .map-dot { width: 14px; height: 14px; opacity: 1; }
+.map-sess.t4 .map-dot {
+  width: 16px; height: 16px;
+  box-shadow: 0 0 0 3px var(--blue-weak);
+}
+.map-sess.archived { opacity: 0.62; }
+
+/* 事件 / 全局记忆条目：轻量行，不抢会话的视觉重量 */
+.map-evt .map-evt-mark, .map-mem .map-evt-mark {
+  flex: none; width: 18px; text-align: center; font-size: 12px; color: var(--text2);
+}
+.map-mem { border-style: dashed; }
+
+/* 阶段里程碑（可展开）与项目总览卡 */
+details.map-phase, .map-overview {
+  border-color: var(--blue-weak);
+  background: var(--paper-raised);
+}
+details.map-phase summary {
+  display: flex; align-items: center; gap: 8px;
+  cursor: pointer; list-style: none; min-width: 0;
+}
+details.map-phase summary::-webkit-details-marker { display: none; }
+.map-diamond { flex: none; color: var(--dm-c1); font-size: 13px; }
+.map-phase-body { padding: 4px 8px 6px; border-top: 1px dashed var(--line); margin-top: 5px; }
+.map-phase-body p { margin: 4px 0; font-size: 12px; color: var(--text); line-height: 1.6; }
+.map-phase-body ul { margin: 4px 0; padding-left: 18px; font-size: 12px; color: var(--text2); line-height: 1.7; }
+.map-topics { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+.map-overview { margin-bottom: 10px; }
+.map-overview summary {
+  cursor: pointer; font-size: 12.5px; font-weight: 700; color: var(--text);
+  list-style: none;
+}
+.map-overview summary::-webkit-details-marker { display: none; }
+
+/* —— 底栏：文件足迹 chips + 活跃热力图 —— */
+.map-aside {
+  flex: none;
+  border-top: 1px solid var(--line);
+  padding: 6px 10px 8px;
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 108px; overflow-y: auto;
+}
+.map-aside-label { font-size: 11px; font-weight: 700; color: var(--text2); margin-right: 4px; }
+.map-files { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.map-file-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 130px; padding: 1px 7px;
+  font-size: 11px; color: var(--text2);
+  background: var(--paper-inset);
+  border: 1px solid var(--line); border-radius: 9px;
+  cursor: pointer; overflow: hidden;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.map-file-chip span, .map-file-chip { white-space: nowrap; text-overflow: ellipsis; }
+.map-file-chip i { font-style: normal; font-size: 10px; color: var(--dim); }
+.map-file-chip:hover { border-color: var(--blue); color: var(--text); }
+.map-file-chip.on { border-color: var(--blue); color: var(--text); background: var(--blue-weak); }
+.map-file-clear {
+  border: none; background: none; color: var(--dim);
+  font-size: 11px; cursor: pointer; padding: 0 2px;
+}
+.map-file-clear:hover { color: var(--reg); }
+
+.map-heat { display: flex; align-items: center; gap: 8px; }
+.map-heat-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 9px);
+  grid-auto-columns: 9px;
+  gap: 2px;
+  flex: 1;
+  overflow: hidden;
+}
+.map-heat-grid i { border-radius: 2px; background: var(--paper-inset); cursor: pointer; }
+.map-heat-grid i.l1 { background: color-mix(in srgb, var(--dm-c2) 30%, var(--paper-inset)); }
+.map-heat-grid i.l2 { background: color-mix(in srgb, var(--dm-c2) 55%, var(--paper-inset)); }
+.map-heat-grid i.l3 { background: var(--dm-c2); }
+.map-heat-grid i.l4 { background: var(--dm-c1); box-shadow: inset 0 0 0 1px var(--ink-line); }
+.map-heat-legend { display: inline-flex; align-items: center; gap: 2px; font-size: 10px; color: var(--dim); }
+.map-heat-legend i { width: 8px; height: 8px; border-radius: 2px; background: var(--paper-inset); }
+.map-heat-legend i.l1 { background: color-mix(in srgb, var(--dm-c2) 30%, var(--paper-inset)); }
+.map-heat-legend i.l2 { background: color-mix(in srgb, var(--dm-c2) 55%, var(--paper-inset)); }
+.map-heat-legend i.l3 { background: var(--dm-c2); }
+.map-heat-legend i.l4 { background: var(--dm-c1); }
+
+/* —— 主题图谱：SVG 连线 + 绝对定位节点（配色分型，权重定大小） —— */
+.map-graph { height: 100%; }
+.map-graph-canvas { position: relative; overflow: hidden; }
+.map-graph svg { position: absolute; inset: 0; }
+.map-edge {
+  stroke: var(--line2); stroke-width: 1; fill: none;
+  opacity: calc(0.25 + var(--w, 1) * 0.09);
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.map-edge.hl { stroke: var(--blue); opacity: 0.85; stroke-width: 1.6; }
+.map-gnode {
+  position: absolute; transform: translate(-50%, -50%);
+  display: inline-flex; align-items: center;
+  max-width: 150px; padding: 3px 9px;
+  font-size: 11px; color: var(--text);
+  background: var(--card);
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  cursor: grab; user-select: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+.map-gnode span { overflow: hidden; text-overflow: ellipsis; }
+.map-gnode::before {
+  content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%;
+  margin-right: 5px; background: var(--dm-c2);
+}
+.map-gnode.ty-phase { font-weight: 700; border-color: var(--dm-c1); }
+.map-gnode.ty-phase::before { background: var(--dm-c1); }
+.map-gnode.ty-file::before { border-radius: 1px; background: var(--dm-c3); }
+.map-gnode.ty-mem { font-size: 10px; color: var(--text2); border-style: dashed; }
+.map-gnode.ty-mem::before { background: var(--dm-c4); }
+.map-gnode.hl { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-weak); cursor: pointer; }
+.map-gnode.hl-soft { border-color: var(--ink-line); }
+.map-graph-legend {
+  position: absolute; top: 4px; right: 8px;
+  display: flex; gap: 8px; font-size: 10px; color: var(--dim);
+  pointer-events: none;
+}
+.map-legend-item { display: inline-flex; align-items: center; gap: 3px; }
+.map-legend-item i { width: 8px; height: 8px; border-radius: 50%; }
+
+/* 节点点击后的会话浮层 */
+.map-pop {
+  position: absolute; z-index: 5;
+  min-width: 160px; max-width: 240px; max-height: 60%;
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 5px;
+  background: var(--paper-raised); color: var(--text);
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+}
+.map-pop b { font-size: 12px; }
+.map-pop-sess {
+  text-align: left; border: none; background: none;
+  color: var(--blue); font-size: 12px; cursor: pointer;
+  padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.map-pop-sess:hover { text-decoration: underline; }
+.map-pop-full { margin: 0; font-size: 11.5px; color: var(--text2); line-height: 1.6; }
+
+/* 「自动」开关按钮的开启态（rp-mini 基础上附加） */
+#map-auto.on { border-color: var(--blue); color: var(--blue); background: var(--blue-weak); }
+
+/* ============================================================
  * 深色主题「夜墨」（id: night）：data-theme="night" 打在 <html> 上
  * 思路：把纸/墨互换——墨色作底、纸色作字，交互蓝提亮保证对比度；
  * 阴影从「压印」改为纯黑投影。跟随系统时深色默认落到这套。

@@ -336,7 +336,10 @@ def install_from_zip(
         raise SkillInstallError("不是有效的 .zip 文件：" + str(src_path))
 
     dest_root.mkdir(parents=True, exist_ok=True)
-    staging = dest_root / (".importing-" + src_path.stem)
+    # 暂存目录带随机后缀：固定名（.importing-<stem>）可被本机攻击者预埋同名
+    # junction——下面的 rmtree(ignore_errors=True) 撞上联接会静默失败，解压内容
+    # 随之穿透到联接目标。随机名让预埋失效（最坏也只写进我们自建的目录）。
+    staging = dest_root / f".importing-{src_path.stem}-{os.urandom(6).hex()}"
     if staging.exists():
         shutil.rmtree(staging, ignore_errors=True)
     installed: list[str] = []

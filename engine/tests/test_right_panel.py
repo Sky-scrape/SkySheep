@@ -394,3 +394,37 @@ def test_rp_tabs_compress_no_scroll(home):
     assert "if (key === _rpDensityKey) return" in js
     # 错误陷阱忽略该浏览器良性告警（真循环的根因在各自 RO 回调里修）
     assert 'indexOf("ResizeObserver loop") >= 0) return' in js
+
+
+def test_chat_aux_remote_is_stateless(home, monkeypatch):
+    """审查 P1-3 收口：远程调用的辅助对话必须无状态。
+
+    共享 aux_history 是本机侧栏的面板语义——远端借「重复上面的内容」类提问
+    能套出本机用户问过什么，远端的提问也不该写进本机面板。local=False 时
+    用一次性历史：模型只看到 system + 本条消息，共享历史零读写。
+    """
+    from skysheep.models.fake import FakeProvider
+    from skysheep.server import app as server_app
+
+    prov = FakeProvider([[TextBlock(text="远端答案")], [TextBlock(text="本地答案")]])
+    monkeypatch.setattr(server_app, "_client_is_local", lambda ws: False)
+    with make_client(home, [], provider=prov) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "chat.aux", "params": {"text": "远端问题"}})
+        frame = recv_until(ws, "a1")
+        assert frame["ok"] and frame["result"]["text"] == "远端答案"
+        assert frame["result"].get("stateless") is True
+        # 模型只看到 system + 本条消息：读不到任何此前内容
+        assert [m.role for m in prov.calls[0]] == ["system", "user"]
+        # 共享历史零读写
+        backend = client.app.state.backend
+        assert backend.aux_history == []
+
+    # 本机调用语义不变：仍走共享历史（先恢复 _client_is_local 的远端模拟）
+    monkeypatch.undo()
+    with make_client(home, [], provider=prov) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a2", "method": "chat.aux", "params": {"text": "本地问题"}})
+        assert recv_until(ws, "a2")["ok"]
+        backend = client.app.state.backend
+        assert [m.role for m in backend.aux_history] == ["system", "user", "assistant"]

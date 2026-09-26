@@ -140,6 +140,13 @@ class Tool(abc.ABC):
         return self.name + "(" + args.model_dump_json() + ")"
 
 
+# 「改前是目录」的哨兵。read_bytes 读不了目录，旧实现把目录一律记成 None
+# （语义=改前不存在）——回滚时 move_file 的源目录整树丢失、目标目录被连内容
+# 删除。哨兵随检查点 blob 无损持久化，restore() 见到它就重建目录本身，
+# 目录内容由逐文件条目（record_tree）还原。
+DIR_MARKER = b"\x00skysheep-dir-v1\x00"
+
+
 class ChangeRecorder:
     """检查点辅助：收集一轮对话内被写入文件的「改前内容」。
 
@@ -158,7 +165,28 @@ class ChangeRecorder:
         try:
             self.pre[key] = path.read_bytes()
         except OSError:
-            self.pre[key] = None  # 改前不存在 → 回滚时应删除
+            try:
+                is_dir = path.is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                self.pre[key] = DIR_MARKER  # 改前是目录 → 回滚时重建目录本身
+            else:
+                self.pre[key] = None  # 改前不存在 → 回滚时应删除
+
+    def record_tree(self, root: Path) -> None:
+        """目录：逐文件记录改前内容（目录本身的哨兵由调用方按需 record）。
+
+        移动/删除目录时只有文件条目进检查点，回滚才能逐文件还原；空子目录
+        不重建（与 delete_file 的既有行为一致）。
+        """
+        try:
+            children = sorted(root.rglob("*"))
+        except OSError:
+            return
+        for child in children:
+            if child.is_file():
+                self.record(child)
 
     def reset(self) -> None:
         self.pre.clear()

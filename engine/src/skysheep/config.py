@@ -207,6 +207,17 @@ class MemoryMaintenanceConfig(BaseModel):
     interval_hours: int = Field(default=168, ge=1, le=8760)
 
 
+class MemoryMapConfig(BaseModel):
+    """记忆地图：项目演化的可视化（时间线 + 主题图谱）。
+
+    auto_digest 是「自动生成演化摘要」的总开关，默认关——每次生成都是一次
+    真实的模型调用。开启后由记忆整理巡检顺带检查：某项目距上次摘要超过
+    24 小时且新增会话达标时，后台补一次生成（手动按钮不受此开关约束）。
+    """
+
+    auto_digest: bool = False
+
+
 class SkySheepConfig(BaseModel):
     default: str = "deepseek"
     max_iterations: int = Field(default=40, ge=1, le=200)
@@ -238,6 +249,7 @@ class SkySheepConfig(BaseModel):
     # 额外模型调用或不想被打扰的用户；开关在 设置 · 全局记忆。
     memory_digest: bool = True
     memory_maintenance: MemoryMaintenanceConfig = Field(default_factory=MemoryMaintenanceConfig)
+    memory_map: MemoryMapConfig = Field(default_factory=MemoryMapConfig)
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
@@ -381,6 +393,7 @@ def load_config() -> SkySheepConfig:
     server = ServerConfig()
     channels = ChannelsConfig()
     memory_maintenance = MemoryMaintenanceConfig()
+    memory_map = MemoryMapConfig()
     p = config_path()
     if p.exists():
         try:
@@ -418,6 +431,7 @@ def load_config() -> SkySheepConfig:
             ("speech", SpeechConfig, speech),
             ("server", ServerConfig, server),
             ("memory_maintenance", MemoryMaintenanceConfig, memory_maintenance),
+            ("memory_map", MemoryMapConfig, memory_map),
         ):
             section = raw.get(section_name)
             if isinstance(section, dict):
@@ -430,6 +444,8 @@ def load_config() -> SkySheepConfig:
                 speech = cur
             elif section_name == "memory_maintenance":
                 memory_maintenance = cur
+            elif section_name == "memory_map":
+                memory_map = cur
             else:
                 server = cur
         channels = _load_channels(raw.get("channels"))
@@ -480,6 +496,7 @@ def load_config() -> SkySheepConfig:
         daily_token_budget=daily_budget,
         memory_digest=memory_digest,
         memory_maintenance=memory_maintenance,
+        memory_map=memory_map,
         roundtable=roundtable,
         websearch=websearch,
         imagegen=imagegen,
@@ -555,6 +572,19 @@ def set_memory_maintenance_in_config(
     if interval_hours is not None:
         section["interval_hours"] = int(interval_hours)
     raw["memory_maintenance"] = section
+    _write_raw_config(p, raw)
+
+
+def set_memory_map_config(*, auto_digest: bool | None = None) -> None:
+    """写入 config.toml 的 [memory_map] 表（None 表示该项不动）。
+
+    记忆地图的「自动生成演化摘要」开关走这里，与其它设置项同一套读写路径。
+    """
+    p, raw = _read_raw_config()
+    section = dict(raw.get("memory_map") or {})
+    if auto_digest is not None:
+        section["auto_digest"] = bool(auto_digest)
+    raw["memory_map"] = section
     _write_raw_config(p, raw)
 
 

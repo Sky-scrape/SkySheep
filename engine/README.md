@@ -12,7 +12,7 @@ SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置
 | `skysheep.models` | 模型适配层：OpenAI 兼容 / Anthropic 原生 |
 | `skysheep.tools` | 内置工具（文件读写/移动删除、搜索、命令、文档、图片、联网、电脑控制）+ Schema 导出；grep 按探测编码匹配（GB18030 也能搜到），`run_command` 子进程剥密钥类环境变量，画图与联网同一套 SSRF 防护（公网校验 + 连接固定 + 流式限长）|
 | `skysheep.security` | Permission Gate：工具分级、白名单、确认协议（决策值过白名单，认不出来按拒绝）。命令拼接检测按实际 shell 取（Windows 的 `cmd.exe` 单引号不是引号、`%VAR%` 会展开）；工作区信任 `refresh(touched=...)` 只延续用户本次操作涉及的来源 |
-| `skysheep.session` | SQLite 持久化：项目 / 会话 / 消息 / 白名单规则，含 `messages_fts` 全文索引（索引写失败会留痕并在下次启动查漏补齐）|
+| `skysheep.session` | SQLite 持久化：项目 / 会话 / 消息 / 白名单规则 / 演化摘要（`map_digests`，记忆地图用），含 `messages_fts` 全文索引（索引写失败会留痕并在下次启动查漏补齐）|
 | `skysheep.obs` | 结构化日志：既有文本行格式不变，尾部追加 JSON，供按会话检索轮次/工具/权限耗时 |
 | `skysheep.textio` | 文本文件的编码（UTF-8 / GB18030 / BOM）与行尾符探测与安全写回；`write_text_atomic` / `write_bytes_atomic` 供引擎自有状态文件（config.toml、任务簿、mcp.json、ui.json、检查点）原子落盘 |
 | `skysheep.channels` | 聊天机器人渠道：飞书 / 微信遥控端（默认关闭，允许名单为空即拒绝一切；无人值守时写与执行自动拒绝，预授权写/执行类工具会显式告警）|
@@ -90,3 +90,8 @@ uv pip install pyinstaller
 
 产物 `dist/SkySheep/SkySheep.exe`（约 62 MB，onedir）。两个要点：入口用 `desktop.py`；
 前端资源靠 `sys._MEIPASS` 定位（`server/app.py` 的 `_static_dir`）。
+
+安装包用 `tools/installer.iss`（Inno Setup 6+，`ISCC.exe tools\installer.iss`）。静默部署要点：
+安装器默认要求管理员权限，无人值守场景加 `/CURRENTUSER`（落到用户目录），
+例如 `SkySheep-1.9-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR="D:\SkySheep"`；
+卸载（含静默）在应用运行中会被拒绝（退出码非零），请先退出应用。

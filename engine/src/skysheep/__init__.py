@@ -1,3 +1,3 @@
 """SkySheep engine — open-source AI agent workbench kernel."""
 
-__version__ = "1.9"
+__version__ = "2.0"

@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 from ..textio import write_bytes_atomic, write_text_atomic
+from ..tools.base import DIR_MARKER
 
 MAX_CHECKPOINTS = 50  # 每个会话保留的检查点数（按会话分桶淘汰）
 # 字节上限（安全审查 M15）：旧实现只按「条数」淘汰，一轮里改过的文件内容
@@ -302,6 +303,18 @@ class CheckpointStore:
             if c["session_id"] == session_id
         ]
 
+    def list_project_metas(self) -> list[dict]:
+        """全项目检查点元数据（跨会话，时间升序）：记忆地图的「文件足迹」用。
+
+        本 store 按项目绑定根目录（root = 项目指纹目录），启动时 _load_from_disk
+        已把全部 meta 读进 _items——这里直接遍历内存索引，不再扫盘。条数受
+        MAX_CHECKPOINTS_TOTAL 兜底，不会无界。"""
+        return [
+            {"id": c["id"], "session_id": c.get("session_id"),
+             "paths": c["paths"], "ts": c["ts"]}
+            for c in sorted(self._items.values(), key=lambda c: c["ts"])
+        ]
+
     def forget_session(self, session_id: str | None) -> int:
         """清除某会话的全部检查点（内存索引 + 磁盘目录），返回清除条数。
 
@@ -364,13 +377,16 @@ class CheckpointStore:
         for path_s, data in cp["files"].items():
             p = Path(path_s)
             if data is None:
-                # 改前不存在 → 回滚时应删除。目录要连内容一起删（delete_file /
-                # move_file 记的是目录本身，shutil.move 后路径已不存在，只有
-                # 「目标位置是新建目录」这类情况会走到这里）。
+                # 改前不存在 → 回滚时应删除。目录要连内容一起删（move_file 的
+                # 「目标是新建目录」记的是目录本身）。
                 if p.is_dir():
                     shutil.rmtree(p, ignore_errors=True)
                 elif p.exists():
                     p.unlink()
+            elif data == DIR_MARKER:
+                # 改前是目录：重建目录本身即可，内容由逐文件条目还原
+                # （move_file 的源目录/被覆盖的目标目录，审查 A-3 修复）
+                p.mkdir(parents=True, exist_ok=True)
             else:
                 # 原子写：回滚写一半被中断会把文件留在半截状态（安全审查低危项）
                 p.parent.mkdir(parents=True, exist_ok=True)

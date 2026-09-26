@@ -19,8 +19,10 @@ readOnlyHint，凡显式声明 False 的（如 mcp-server-git 的 git_add/git_co
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import shutil
+import socket
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -32,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from ..bgtasks import spawn_bg
 from ..messages import ImageBlock
 from ..tools.base import Safety, Tool, ToolContext, ToolError, truncate_output
+from ..tools.web import _resolve_public_ips
 
 if TYPE_CHECKING:
     # 仅注解用：mcp SDK 导入约 0.4s，且启动期（splash/服务就绪）完全用不到——
@@ -78,6 +81,27 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
         host = parsed.hostname
         if not host:
             return "地址不合法（需要 http:// 主机:端口/路径）：" + str(cfg.url)
+        # 内网防护（审查 P2-10）：preflight 本是一次裸 TCP 探测，此前对任意
+        # 目标都放行——口径与 web_fetch 不一致。现在非回环目标必须解析为公网
+        # 地址（复用 web_fetch 的同一份校验，含 NAT64/6to4 翻译段）；回环地址
+        # 放行——本机 MCP 服务是最常见形态。错误只回可读结论，不带底层异常
+        # 细节，避免内网拓扑经 mcp.status 回显到（持令牌的）远端界面。
+        try:
+            await asyncio.to_thread(_resolve_public_ips, host)
+        except ToolError as e:
+            try:
+                infos = await asyncio.to_thread(
+                    socket.getaddrinfo, host, None, proto=socket.IPPROTO_TCP
+                )
+                loopback = all(
+                    ipaddress.ip_address(info[4][0]).is_loopback for info in infos
+                )
+            except (OSError, ValueError):
+                loopback = False
+            if not loopback:
+                return str(e)
+        except OSError:
+            return f"无法解析主机 {host}：请检查远程地址是否拼写正确"
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         try:
             _, writer = await asyncio.wait_for(
@@ -85,8 +109,11 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
             )
         except TimeoutError:
             return f"连不上 {host}:{port}（{PREFLIGHT_TIMEOUT_S:g} 秒无响应）——检查地址和端口，服务是否已启动"
-        except OSError as e:
-            return f"连不上 {host}:{port}：{e}"
+        except OSError:
+            return (
+                f"连不上 {host}:{port}（连接被拒绝或网络不可达）"
+                "——检查地址与端口是否正确、服务是否已启动"
+            )
         writer.close()
         try:
             await writer.wait_closed()
@@ -406,8 +433,12 @@ class MCPManager:
         self,
         servers: dict[str, MCPServerConfig],
         on_tools_changed: Callable[[str], Awaitable[None]] | None = None,
+        reconnect_gate: Callable[[str], bool] | None = None,
     ) -> None:
         self._configs = dict(servers)
+        # 自动重连前的放行门（backend 注入）：返回 False 的服务器不再自动重连
+        # ——项目级服务器在信任跌落后不该按内存里的旧配置被悄悄拉起（审查 P2-5）
+        self.reconnect_gate = reconnect_gate
         # 连接生命周期归「keeper 任务」独占（见 _connect_one）：anyio 的流上下文
         # 必须在进入它的那个任务里退出，否则取消会打偏。栈/会话都在 keeper 里，
         # 外部只持有引用；关闭 = 置位 stop 事件，由 keeper 自己展开自己的作用域。
@@ -503,6 +534,11 @@ class MCPManager:
         cfg = self._configs.get(name)
         if status is None or cfg is None:
             return  # 服务器已被移除（delete/forget）：没什么可重连的
+        if self.reconnect_gate is not None and not self.reconnect_gate(name):
+            # 信任/放行门拒绝（审查 P2-5）：不重连、不留重试链，状态交还用户
+            status.error = "该项目级服务器的信任已失效，已停止自动重连；重新信任项目后请手动重连"
+            self._gave_up.add(name)
+            return
         status.reconnecting = True
         try:
             while status.attempts < self.MAX_AUTO_RESTARTS and not status.connected:

@@ -54,6 +54,7 @@ from ..config import (
     set_advanced_settings_in_config,
     set_hooks_in_config,
     set_memory_maintenance_in_config,
+    set_memory_map_config,
     set_provider_models_in_config,
     set_subagent_settings_in_config,
     skysheep_home,
@@ -142,9 +143,9 @@ from ..models.probe import probe_context_limit, probe_provider_models
 from ..obs import info as obs_info
 from ..security import leases
 from ..security.gate import RULE_KINDS, HeadlessGate, PermissionGate
-from ..security.trust import WorkspaceTrust, list_trusted, revoke_by_path
+from ..security.trust import STATE_PENDING, WorkspaceTrust, list_trusted, revoke_by_path
 from ..session import SessionStore
-from ..session.store import export_messages_text
+from ..session.store import Project, export_messages_text
 from ..skills import SkillLoader
 from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
@@ -176,11 +177,13 @@ from ..tools.memory import (
     maintenance_due,
     memory_path,
     parse_digest,
+    parse_memory_entries,
     remember_lines,
     render_memory_section,
     save_maintenance_state,
 )
 from ..tools.pipeline import PipelineWriteTool, task_node_fields
+from ..tools.shell import child_environment
 from ..tools.skill import LoadSkillTool
 
 logger = logging.getLogger("skysheep.security")
@@ -761,9 +764,13 @@ class TerminalSlot:
             raise RuntimeError("终端组件不可用（ConPTY 仅支持 Windows）") from e
         try:
             Path(cwd).mkdir(parents=True, exist_ok=True)
+            # 环境剥密钥与 run_command 同一口径（审查 P1-1）：不传 env 的话
+            # ConPTY 子进程整体继承 os.environ，终端里 echo 一下就能读走
+            # *_API_KEY/*_TOKEN，且输出会广播给所有连接。
             self.proc = PtyProcess.spawn(
                 "powershell.exe -NoLogo",
                 cwd=str(cwd),
+                env=child_environment(),
                 dimensions=(max(2, int(rows)), max(10, int(cols))),
             )
         except Exception as e:
@@ -1039,6 +1046,7 @@ class ServerBackend:
         self._default_model_sessions: set[str] = set()  # 适用「新会话默认模型」的会话
         self._digesting: set[str] = set()  # 正在归档提炼记忆的会话
         self._maintaining = False  # 定期整理进行中（全局+项目共用一把，防叠加）
+        self._map_generating: set[int] = set()  # 正在生成演化摘要的项目 id（按项目单飞）
         # 记忆文件的写互斥：归档提炼的追加、定期整理的整稿覆盖、设置页整稿保存
         # 三条写路径共用（整理读旧稿 → 调模型的窗口里可能有人写入，见 _maintain_memory）
         self._memory_io_lock = asyncio.Lock()
@@ -1284,7 +1292,11 @@ class ServerBackend:
             self._mcp_global_path(), self._project_mcp_path_if_trusted()
         )
         self.mcp_configs = mcp_configs
-        self.mcp = MCPManager(mcp_configs, on_tools_changed=self._on_mcp_tools_changed)
+        self.mcp = MCPManager(
+            mcp_configs,
+            on_tools_changed=self._on_mcp_tools_changed,
+            reconnect_gate=self._mcp_reconnect_gate,
+        )
         # MCP 连接放后台：单台服务器连不上（uvx 冷启动拉包、代理没就绪、地址写错）
         # 各自最多烧 CONNECT_TIMEOUT_S，同步等它会把「服务就绪」拖过桌面端的启动
         # 预算，弹「启动失败」页（2026-09-22/23 实测踩过：代理拒连重试 15~19 秒，
@@ -3232,6 +3244,9 @@ class ServerBackend:
         session_id 指定目标会话（多会话并行时前端按标签传入）；缺省用活动会话。
         目标会话不是当前活动会话时先轻量激活（运行中的其他会话不受影响）。
         """
+        # 轮次起点重验工作区信任（审查 P2-4）：会话运行期间项目级配置被外部
+        # 改动（git pull 等）时，趁本轮开始断开项目级 MCP、重发现技能。
+        await self.recheck_trust_before_turn()
         if session_id and (not self.session or self.session.id != session_id):
             await self.activate_session(session_id)
         # 引用排除目标会话自己：引用当前对话没有意义
@@ -4637,14 +4652,35 @@ class ServerBackend:
     )
     AUX_HISTORY_CAP = 31  # system + 15 轮问答
 
-    async def chat_aux(self, text: str, emit: EmitFn) -> dict:
-        """辅助对话：独立于主会话的轻量一问一答（不落库、不带工具、内存历史）。"""
+    async def chat_aux(self, text: str, emit: EmitFn, local: bool = True) -> dict:
+        """辅助对话：独立于主会话的轻量一问一答（不落库、不带工具、内存历史）。
+
+        local=False（局域网/远程调用，审查 P1-3 收口）时使用一次性历史：
+        共享的 aux_history 是本机侧栏的面板语义，远端不该借「重复上面的内容」
+        类提问读出本机用户问过什么，也不该把自己的问答写进本机面板；
+        远端仍可正常提问，只是每次都是无状态的。
+        """
         text = (text or "").strip()
         if not text:
             raise RuntimeError("empty text")
         if self.provider is None:
             detail = self.provider_error or "请先在 设置 · 模型服务 里启用一个模型"
             raise RuntimeError(f"模型服务未配置或不可用：{detail}")
+        if not local:
+            history = [Message.system(
+                self.AUX_SYSTEM.format(cwd=str(self.working_dir or "（未选择项目）"))),
+                Message.user(text),
+            ]
+            parts: list[str] = []
+            async for pe in self.provider.stream(history, []):
+                if isinstance(pe, ProviderTextDelta):
+                    parts.append(pe.text)
+                    await emit({"kind": "aux_delta", "text": pe.text})
+                elif isinstance(pe, ProviderReasoning):
+                    await emit({"kind": "aux_thinking", "text": pe.text})
+                elif isinstance(pe, ProviderDone):
+                    pass
+            return {"text": "".join(parts), "stateless": True}
         if not self.aux_history:
             self.aux_history.append(Message.system(
                 self.AUX_SYSTEM.format(cwd=str(self.working_dir or "（未选择项目）"))))
@@ -5286,6 +5322,27 @@ class ServerBackend:
             return None
         return self.working_dir / ".skysheep" / "skills"
 
+    def _mcp_reconnect_gate(self, name: str) -> bool:
+        """自动重连前的放行门（注入 MCPManager，审查 P2-5）。
+
+        显式 trust.revoke 走 _sync_mcp_changes 的 forget 路径，断线任务会被
+        取消/查无配置，不经过这里；这里防的是另一条缝：会话运行期间项目配置
+        被外部改动导致信任跌成 pending（尚未触发任何配置同步）时，断线的
+        项目级服务器仍会按 manager 内存里的旧配置自动重连。按名字判断它是否
+        来自项目级 mcp.json，是则要求信任仍然有效；全局配置的服务器不受影响。
+        """
+        path = self._mcp_project_path()
+        if path is None or not path.is_file():
+            return True
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            servers = (data or {}).get("mcpServers") or {}
+        except (OSError, ValueError):
+            return True
+        if name not in servers:
+            return True
+        return self._project_mcp_path_if_trusted() is not None
+
     async def trust_status(self) -> dict:
         """当前项目的信任状态（给前端渲染确认横幅）。"""
         return self.trust.state()
@@ -5346,6 +5403,29 @@ class ServerBackend:
         self.skills.discover()
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
+
+    async def recheck_trust_before_turn(self) -> None:
+        """轮次起点重验工作区信任（审查 P2-4）。
+
+        信任只在启动/切项目/信任操作这些「入口」被求值：会话运行期间项目级
+        配置被外部改动（git pull、被注入进程写入）后，已连的项目级 MCP 会
+        保持连接、load_skill 也照读磁盘上的新正文——引擎自身没有重查点。
+        这里趁每轮对话开始补一次：`state()=="pending" 且 changed=True` 恰好
+        表达「曾经信任过、现在配置变了」，此时走与 trust.revoke 同一套差量
+        收口（断项目级 MCP、重发现技能），只影响当前项目。
+        """
+        if self.working_dir is None:
+            return
+        state = self.trust.state()
+        if state.get("state") != STATE_PENDING or not state.get("changed"):
+            return
+        logger.warning(
+            "工作区信任在会话运行期间失效（项目级配置被外部改动），收口项目级 MCP 与技能：%s",
+            self.working_dir,
+        )
+        self._trust = None  # 失效缓存，后续访问按 pending 重算
+        await self._sync_mcp_changes()
+        self._reload_project_skills()
 
     async def _connect_mcp_after_boot(self, cfg_warnings: list[str]) -> None:
         """启动后的后台 MCP 连接：不阻塞「服务就绪」，连完注入注册表并广播状态。
@@ -5411,7 +5491,11 @@ class ServerBackend:
             self._mcp_global_path(), self._project_mcp_path_if_trusted()
         )
         if self.mcp is None:
-            self.mcp = MCPManager(configs, on_tools_changed=self._on_mcp_tools_changed)
+            self.mcp = MCPManager(
+                configs,
+                on_tools_changed=self._on_mcp_tools_changed,
+                reconnect_gate=self._mcp_reconnect_gate,
+            )
         manager = self.mcp
         for name in [n for n in old if n not in configs]:
             await manager.disconnect_server(name)
@@ -5439,7 +5523,11 @@ class ServerBackend:
             self._mcp_global_path(), self._project_mcp_path_if_trusted()
         )
         self.mcp_configs = configs
-        self.mcp = MCPManager(configs, on_tools_changed=self._on_mcp_tools_changed)
+        self.mcp = MCPManager(
+            configs,
+            on_tools_changed=self._on_mcp_tools_changed,
+            reconnect_gate=self._mcp_reconnect_gate,
+        )
         self.mcp_tools = await self.mcp.connect_all()
         self.mcp_warnings = cfg_warnings + [
             f"{name}: {st.error}" for name, st in self.mcp.statuses.items() if st.error
@@ -5458,14 +5546,25 @@ class ServerBackend:
     def _mcp_status_list(manager: MCPManager | None) -> list[dict]:
         if manager is None:
             return []
-        return [
-            {"name": n, "connected": st.connected, "enabled": st.enabled,
-             "error": st.error, "tools": st.tool_names,
-             "connecting": getattr(st, "connecting", False),
-             "reconnecting": getattr(st, "reconnecting", False),
-             "restarts": getattr(st, "restarts", 0)}
-            for n, st in manager.statuses.items()
-        ]
+        configs = getattr(manager, "_configs", {})
+        out = []
+        for n, st in manager.statuses.items():
+            cfg = configs.get(n)
+            # 审查 S-09：http 明文 + 鉴权头 = Bearer 凭据可被中间人截获。
+            # 只给前端一个布尔，headers 内容（含密钥）不下发。
+            insecure = bool(
+                cfg is not None and cfg.headers
+                and str(cfg.url or "").lower().startswith("http://")
+            )
+            out.append({
+                "name": n, "connected": st.connected, "enabled": st.enabled,
+                "error": st.error, "tools": st.tool_names,
+                "connecting": getattr(st, "connecting", False),
+                "reconnecting": getattr(st, "reconnecting", False),
+                "restarts": getattr(st, "restarts", 0),
+                "insecure_http": insecure,
+            })
+        return out
 
     async def import_mcp_servers(
         self,
@@ -6010,17 +6109,21 @@ class ServerBackend:
             raise RuntimeError(f"打开目录失败：{e}") from None
         return {"path": str(target)}
 
-    def open_external(self, target: str) -> dict:
+    def open_external(self, target: str, local: bool = True) -> dict:
         """用系统默认程序打开一个 http(s) 链接（反馈页/下载页/注册页）。
 
         只接受 http(s) URL；目标由前端界面写死或用户在向导里点选，
-        不作为任意跳转接口。
+        不作为任意跳转接口。远端调用（审查 P1-3 收口）不在服务端代开
+        ——那会让持令牌设备在别人桌面上弹任意网页——而是把 URL 原样
+        返回（remote=True），由远端自己的浏览器打开。
         """
         from .. import support
 
         target = str(target or "").strip()
         if not target.startswith(("http://", "https://")):
             raise RuntimeError("只允许打开 http(s) 链接")
+        if not local:
+            return {"url": target, "remote": True}
         try:
             support.open_external(target)
         except Exception as e:  # noqa: BLE001
@@ -6763,6 +6866,7 @@ class ServerBackend:
             await self._maintain_memory("global")
         if due_p:
             await self._maintain_memory("project")
+        await self._map_auto_digest_tick()
 
     async def memory_maintain_now(self) -> dict:
         """手动「立即整理」：无视周期与开关（明确点击即用户意图），仍守阈值与规模。"""
@@ -7911,6 +8015,356 @@ class ServerBackend:
             "interval_hours": st.interval_hours,
         }
 
+    # ---- 记忆地图：项目演化的可视化（时间线 + 主题图谱 + LLM 阶段摘要） ----
+
+    MAP_SESSION_LIMIT = 500          # 时间线单次装载的会话上限（防超大项目撑爆载荷）
+    MAP_FILE_LIMIT = 20              # 文件足迹 Top N
+    MAP_MATERIAL_SESSIONS = 200      # 喂给摘要生成的会话条数上限
+    MAP_MATERIAL_CHARS = 24_000      # 摘要材料的字符预算（超出丢最旧的会话）
+    MAP_AUTO_MIN_SESSIONS = 8        # 自动生成：距上次摘要以来的新增会话数门槛
+    MAP_AUTO_COOLDOWN_S = 24 * 3600  # 自动生成的冷却期
+
+    async def _map_resolve_project(
+        self, project_id: int | None, *, local: bool = True
+    ) -> Project:
+        """解析记忆地图的目标项目：缺省取当前项目；跨项目查看只给本机。
+
+        会话标题/摘要/文件路径是跨项目的枚举面，与 session.search scope=all
+        同一安全口径（远程客户端只看它被绑定到的当前项目）。
+        """
+        pid = int(project_id) if project_id else self._cur_project_id()
+        if pid is None:
+            raise RuntimeError("当前没有项目：先在侧栏「项目」区添加项目，才有演化可看")
+        proj = await self.store.get_project(pid)
+        if proj is None:
+            raise RuntimeError("项目不存在或已被删除")
+        if pid != self._cur_project_id() and not local:
+            raise RuntimeError("查看其他项目的记忆地图只能在本机界面上操作")
+        return proj
+
+    @staticmethod
+    def _map_range(params: dict) -> tuple[float, float]:
+        """解析查询窗口（缺省近 90 天）；非法值夹回合法区间而不是报错。"""
+        now = time.time()
+        try:
+            end = float(params.get("end_ts") or now)
+        except (TypeError, ValueError):
+            end = now
+        try:
+            start = float(params.get("start_ts") or (now - 90 * 86400))
+        except (TypeError, ValueError):
+            start = now - 90 * 86400
+        end = min(max(end, start), now + 86400)  # 未来最多放宽一天（时区误差兜底）
+        return start, end
+
+    def _map_checkpoint_metas(self, proj) -> list[dict]:
+        """目标项目的检查点元数据（文件足迹数据源）。
+
+        当前项目直接用常驻的 store 实例（启动时已加载，零盘扫）；跨项目查看
+        才临时开一个只读实例按该项目的指纹目录加载。远程连接项目没有真实
+        目录，直接给空（它本来也没有检查点）。
+        """
+        if proj.id == self._cur_project_id() and self.checkpoints is not None:
+            return self.checkpoints.list_project_metas()
+        if not proj.root_path or proj.root_path == self.store.REMOTE_PROJECT_PATH:
+            return []
+        try:
+            root = self._checkpoint_root_for(Path(proj.root_path))
+            return CheckpointStore(root).list_project_metas()
+        except (OSError, ValueError):
+            return []
+
+    async def map_get(self, params: dict | None = None, *, local: bool = True) -> dict:
+        """记忆地图载荷：一次装配时间线/热力图/文件足迹/事件/记忆/摘要全部维度。"""
+        params = params or {}
+        proj = await self._map_resolve_project(params.get("project_id"), local=local)
+        start, end = self._map_range(params)
+        sessions = await self.store.map_sessions_with_stats(proj.id, start, end)
+        if len(sessions) > self.MAP_SESSION_LIMIT:
+            sessions = sessions[-self.MAP_SESSION_LIMIT:]  # 保最新（已按时间升序）
+        days = await self.store.map_day_stats(proj.id, start, end)
+        events = await self.store.map_project_events(proj.id, start, end)
+
+        # 文件足迹：检查点 meta 按 path 聚合（count/首末时间/涉及会话），Top N
+        files: dict[str, dict] = {}
+        for cp in self._map_checkpoint_metas(proj):
+            ts = float(cp.get("ts") or 0)
+            if not (start <= ts <= end):
+                continue
+            sid = cp.get("session_id")
+            for path_s in cp.get("paths") or []:
+                ent = files.setdefault(path_s, {
+                    "path": path_s, "count": 0, "first_ts": ts, "last_ts": ts,
+                    "session_ids": [],
+                })
+                ent["count"] += 1
+                ent["first_ts"] = min(ent["first_ts"], ts)
+                ent["last_ts"] = max(ent["last_ts"], ts)
+                if sid and sid not in ent["session_ids"]:
+                    ent["session_ids"].append(sid)
+        top_files = sorted(files.values(), key=lambda f: (-f["count"], f["path"]))
+        for f in top_files:
+            f["session_ids"] = f["session_ids"][:20]
+        top_files = top_files[: self.MAP_FILE_LIMIT]
+
+        # 全局记忆条目（跨项目，前端标「全局」徽记）：日期字符串与窗口的本地
+        # 日期串直接比较，免去逐条转时区
+        try:
+            mem_text = memory_path().read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            mem_text = ""
+        start_day = time.strftime("%Y-%m-%d", time.localtime(start))
+        end_day = time.strftime("%Y-%m-%d", time.localtime(end))
+        memories = [
+            e for e in parse_memory_entries(mem_text, 400)
+            if start_day <= e["date"] <= end_day
+        ][-30:]
+
+        digests = await self.store.list_map_digests(proj.id)
+        pname = proj.name or (Path(proj.root_path).name if proj.root_path else "")
+        return {
+            "project": {
+                "id": proj.id,
+                "name": pname or "未命名项目",
+                "root_path": (proj.root_path if local and proj.root_path
+                              != self.store.REMOTE_PROJECT_PATH else ""),
+                "created_at": proj.created_at,
+            },
+            "range": {"start_ts": start, "end_ts": end},
+            "sessions": sessions,
+            "days": days,
+            "events": events,
+            "files": top_files,
+            "memories": memories,
+            "digests": digests,
+            "generating": proj.id in self._map_generating,
+            "config": {"auto_digest": bool(self.cfg.memory_map.auto_digest)},
+        }
+
+    async def map_generate(self, params: dict | None = None, *, local: bool = True) -> dict:
+        """「生成演化摘要」：解析项目后起后台任务，立即返回（完成经事件广播）。
+
+        按项目单飞：同一项目进行中再点直接让路，不叠加并发模型调用。
+        """
+        params = params or {}
+        proj = await self._map_resolve_project(params.get("project_id"), local=local)
+        if proj.id in self._map_generating:
+            return {"started": False, "reason": "这个项目的摘要在生成中，稍等片刻"}
+        if self.provider is None:
+            raise RuntimeError("还没有可用的模型服务，先在 设置 · 模型服务 配置 API Key")
+        if getattr(self.provider, "demo_mode", False):
+            raise RuntimeError("演示模式没有真实模型，生成不了演化摘要；先在 设置 · 模型服务 配置")
+        spawn_bg(self._map_generate_run(proj.id))
+        return {"started": True, "project_id": proj.id}
+
+    async def _map_generate_run(self, project_id: int) -> None:
+        """生成演化摘要的主体：拼材料 → 调模型 → 宽容解析 → 校验落库 → 广播。
+
+        与 _auto_title/_memory_digest 同一边界：失败不影响主流程，但会通过
+        map_updated 事件把原因带给前端（按钮要能显示失败并可重试）。
+        """
+        self._map_generating.add(project_id)
+        try:
+            sessions = await self.store.map_sessions_with_stats(project_id, 0, time.time() + 1)
+            if not sessions:
+                self._ws_broadcast({
+                    "kind": "map_updated", "project_id": project_id, "ok": False,
+                    "message": "这个项目还没有会话，先聊出一点历史再来生成演化摘要",
+                })
+                return
+            sessions = sessions[-self.MAP_MATERIAL_SESSIONS:]
+            proj = await self.store.get_project(project_id)
+            pname = (proj.name if proj and proj.name else "") or "未命名项目"
+            prompt = self._map_build_material(pname, sessions)
+            parts: list[str] = []
+            async for ev in self.provider.stream([Message.user(prompt)], []):
+                if isinstance(ev, ProviderTextDelta):
+                    parts.append(ev.text)
+                elif isinstance(ev, ProviderDone):
+                    break
+            data = self._parse_map_digest_json("".join(parts))
+            rows = self._map_digest_rows(data, sessions)
+            if not rows:
+                raise ValueError("模型没有给出有效的阶段划分")
+            await self.store.replace_map_digests(project_id, rows)
+            self._ws_broadcast({
+                "kind": "map_updated", "project_id": project_id, "ok": True,
+                "message": "演化摘要已生成：" + (
+                    f"{sum(1 for r in rows if r['kind'] == 'phase')} 个阶段"
+                    if any(r["kind"] == "phase" for r in rows) else "项目总览"
+                ),
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - 生成失败要让前端看到原因
+            logger.warning("map digest generate failed: %s", e)
+            self._ws_broadcast({
+                "kind": "map_updated", "project_id": project_id, "ok": False,
+                "message": f"演化摘要生成失败：{e}",
+            })
+        finally:
+            self._map_generating.discard(project_id)
+
+    @staticmethod
+    def _map_build_material(project_name: str, sessions: list[dict]) -> str:
+        """把会话流水压成摘要生成的材料：每会话一行编号条目 + 可选摘要。
+
+        超出字符预算时丢最旧的会话（近期历史对「当前处于什么阶段」最有用）。
+        编号 [n] 是模型回报阶段覆盖范围的句柄，不把 12 位会话 id 塞进提示词。
+        """
+        lines: list[str] = []
+        used = 0
+        # 从最新往旧收，超出预算即止；输出时恢复时间正序
+        picked: list[str] = []
+        picked_n = 0
+        for s in reversed(sessions):
+            day = time.strftime("%Y-%m-%d", time.localtime(s["created_at"]))
+            bits = [f"[{len(sessions) - picked_n}] {day} 「{(s['title'] or '（未命名）')[:60]}」"]
+            picked_n += 1
+            stats = []
+            if s["msg_count"]:
+                stats.append(f"{s['msg_count']}条消息")
+            if s["in_tokens"] or s["out_tokens"]:
+                stats.append(f"{(s['in_tokens'] + s['out_tokens']) // 1000}k tokens")
+            if s["tags"]:
+                stats.append("标签:" + ",".join(s["tags"][:4]))
+            if stats:
+                bits.append(" ·" + " ·".join(stats))
+            ln = bits[0] + ("".join(" " + b for b in bits[1:]))
+            if s["summary"]:
+                ln += f"\n    摘要：{s['summary'][:160]}"
+            if used + len(ln) > ServerBackend.MAP_MATERIAL_CHARS and picked:
+                break
+            picked.append(ln)
+            used += len(ln) + 1
+        lines = list(reversed(picked))
+        return (
+            f"你是项目演化记录员。下面是项目「{project_name}」在 SkySheep（AI Agent 工作台）"
+            f"里的会话流水（按时间先后，[n] 是会话编号）。\n"
+            "请把它划分成 2-5 个连续的演化阶段（每个阶段覆盖一段连续编号区间），"
+            "并给项目一个一句话总览。\n\n"
+            "只输出 JSON，不要 markdown 代码围栏，不要解释：\n"
+            '{"overview": "不超过120字的项目总览",\n'
+            ' "phases": [{"title": "阶段标题，不超过16字",\n'
+            '   "summary": "这个阶段做了什么、为什么，不超过200字",\n'
+            '   "highlights": ["要点1", "要点2"],\n'
+            '   "topics": ["主题词1", "主题词2"],\n'
+            '   "session_ids": [1, 2, 3]}]}\n'
+            "要求：\n"
+            "- 阶段按时间先后排列；session_ids 用方括号里的编号，"
+            "所有编号都要被覆盖且不重叠\n"
+            "- highlights 最多 5 条、每条不超过 40 字；topics 最多 6 个、每个不超过 12 字\n"
+            "- 用中文；忠实于材料，不要编造没有出现的功能或事件\n\n"
+            "会话流水：\n" + "\n".join(lines)
+        )
+
+    @staticmethod
+    def _parse_map_digest_json(raw: str) -> dict:
+        """宽容解析模型输出：剥代码围栏、掐首尾说明文字，取第一个完整 JSON 对象。"""
+        text = (raw or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+            text = re.sub(r"\s*```\s*$", "", text)
+        i, j = text.find("{"), text.rfind("}")
+        if i < 0 or j <= i:
+            raise ValueError("输出里没有找到 JSON")
+        data = json.loads(text[i:j + 1])
+        if not isinstance(data, dict):
+            raise ValueError("JSON 不是对象")
+        return data
+
+    @staticmethod
+    def _map_digest_rows(data: dict, sessions: list[dict]) -> list[dict]:
+        """校验模型输出并折算成摘要行：编号映射回真实会话、补时间窗、去重叠。
+
+        材料里的 [n] 对应 sessions 的第 n 条（1 起）。模型可能漏盖或重叠：
+        编号已出现的阶段整体丢弃（时间上更晚的胜出没有依据，先到先得即可），
+        编号越界的忽略。阶段时间窗取覆盖会话的 created_at/updated_at 极值。
+        """
+        by_idx = {i + 1: s for i, s in enumerate(sessions)}
+        rows: list[dict] = []
+        covered: set[int] = set()
+
+        def _ints(raw_vals) -> list[int]:
+            out: list[int] = []
+            for v in raw_vals or []:
+                try:
+                    out.append(int(v))
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        overview = str(data.get("overview") or "").strip()
+        phases = data.get("phases") if isinstance(data.get("phases"), list) else []
+        phase_rows: list[dict] = []
+        for ph in phases[:8]:
+            if not isinstance(ph, dict):
+                continue
+            idxs = [n for n in dict.fromkeys(_ints(ph.get("session_ids"))) if n in by_idx]
+            idxs = [n for n in idxs if n not in covered]
+            if not idxs:
+                continue
+            covered.update(idxs)
+            sub = [by_idx[n] for n in idxs]
+            phase_rows.append({
+                "kind": "phase",
+                "title": str(ph.get("title") or "").strip()[:40] or "未命名阶段",
+                "summary": str(ph.get("summary") or "").strip()[:500],
+                "highlights": [str(h).strip()[:100] for h in (ph.get("highlights") or [])[:10]
+                               if str(h).strip()],
+                "topics": [str(t).strip()[:24] for t in (ph.get("topics") or [])[:12]
+                           if str(t).strip()],
+                "session_ids": [by_idx[n]["id"] for n in idxs],
+                "start_ts": min(s["created_at"] for s in sub),
+                "end_ts": max(s["updated_at"] for s in sub),
+            })
+        # 阶段按实际时间窗排序后重排编号顺序（模型偶尔乱序），总览行放最前
+        phase_rows.sort(key=lambda r: r["start_ts"])
+        if overview:
+            all_ids = [r["session_ids"] for r in phase_rows]
+            flat_ids = [sid for ids in all_ids for sid in ids] or [s["id"] for s in sessions]
+            rows.append({
+                "kind": "overview", "title": "项目总览", "summary": overview[:120],
+                "highlights": [], "topics": [],
+                "session_ids": flat_ids[:500],
+                "start_ts": min((r["start_ts"] for r in phase_rows),
+                                default=sessions[0]["created_at"]),
+                "end_ts": max((r["end_ts"] for r in phase_rows),
+                              default=sessions[-1]["updated_at"]),
+            })
+        rows.extend(phase_rows)
+        return rows
+
+    async def map_save_config(self, params: dict) -> dict:
+        """记忆地图设置（自动生成开关）：写 [memory_map] 并热生效。"""
+        auto = params.get("auto_digest")
+        try:
+            set_memory_map_config(auto_digest=None if auto is None else bool(auto))
+        except ConfigError as e:
+            raise RuntimeError(str(e)) from e
+        self.cfg = load_config()
+        return {"auto_digest": bool(self.cfg.memory_map.auto_digest)}
+
+    async def _map_auto_digest_tick(self) -> None:
+        """演化摘要的自动巡检：挂在记忆整理巡检里，不另起循环。
+
+        开关默认关；开启后当前项目「距上次摘要超过冷却期且新增会话达到
+        门槛」时后台补一次（与手动按钮共用单飞锁与失败广播）。
+        """
+        if not self.cfg.memory_map.auto_digest:
+            return
+        if self.provider is None or getattr(self.provider, "demo_mode", False):
+            return
+        pid = self._cur_project_id()
+        if pid is None or pid in self._map_generating:
+            return
+        last = await self.store.latest_map_digest_ts(pid)
+        if time.time() - last < self.MAP_AUTO_COOLDOWN_S:
+            return
+        if await self.store.count_project_sessions_since(pid, last) < self.MAP_AUTO_MIN_SESSIONS:
+            return
+        spawn_bg(self._map_generate_run(pid))
+
     # ---- 联网搜索 / AI 画图：设置页配置（写 config.toml + 热更新工具实例） ----
 
     async def websearch_detail(self) -> dict:
@@ -8463,6 +8917,7 @@ class ServerBackend:
         # 微信的运行态 token 由 channel_save_state 持久化，重建不会丢登录态。
         if self.channels is not None:
             await self.channels.restart()
+        self._refresh_channel_gates()
         out = await self.channel_status()
         if warning:
             out["warning"] = warning
@@ -8537,6 +8992,7 @@ class ServerBackend:
         # 重建渠道使新 token 生效
         if self.channels is not None:
             await self.channels.restart()
+        self._refresh_channel_gates()
         return {"status": "confirmed", "saved": True}
 
     async def channel_weixin_logout(self) -> dict:
@@ -8551,6 +9007,7 @@ class ServerBackend:
         self.cfg = load_config()
         if self.channels is not None:
             await self.channels.restart()
+        self._refresh_channel_gates()
         return await self.channel_status()
 
     def _channel_obj(self, name: str):
@@ -8592,6 +9049,7 @@ class ServerBackend:
         update_config_section("channels", {"platforms": platforms})
         self.cfg = load_config()
         await self.channels.restart()
+        self._refresh_channel_gates()
         return await self.channel_status()
 
     async def channel_disable(self, params: dict) -> dict:
@@ -8605,6 +9063,7 @@ class ServerBackend:
         update_config_section("channels", {"platforms": platforms})
         self.cfg = load_config()
         await self.channels.restart()
+        self._refresh_channel_gates()
         return await self.channel_status()
 
     async def channel_set_timeout(self, params: dict) -> dict:
@@ -8675,10 +9134,13 @@ class ServerBackend:
             allowed=list(section.get("allowed_tools") or []),
             approve_enabled=bool(section.get("approve_enabled", False)),
             approve_timeout=int(self.cfg.channels.approve_timeout),
-            notify=lambda pending: self._notify_channel_approval(channel_name, pending),
             store=self.store,
             project_id=remote_pid,
             working_dir=remote_dir,
+        )
+        # notify 绑定建好的 gate：审批卡优先回本轮发起消息所在的聊天（审查 P3-15）
+        gate.notify = lambda pending, _g=gate: self._notify_channel_approval(
+            channel_name, pending, _g
         )
         recorder = ChangeRecorder()
         rt = SessionRuntime(
@@ -8704,11 +9166,49 @@ class ServerBackend:
         self._channel_names[session_id] = channel_name
         return rt
 
-    async def _notify_channel_approval(self, channel_name: str, pending) -> None:
-        """把审批卡片推到聊天窗口。"""
+    def _refresh_channel_gates(self) -> None:
+        """配置保存/启停后刷新已缓存渠道会话的无人值守门控（审查 P2-11）。
+
+        门控参数（approve_enabled / allowed_tools）是会话首次使用时从配置快照
+        构造的：不刷新的话，改完配置要等新渠道会话（或重启）才生效，窗口期内
+        界面显示与实际放行口径不一致。正在跑的轮次不动（换门会丢掉在等的审批），
+        空闲会话就地换新门；新会话本就走 _get_channel_runtime 重建，不受影响。
+        """
+        for sid, name in list(self._channel_names.items()):
+            rt = self.runtimes.get(sid)
+            if rt is None:
+                continue
+            run_task = getattr(rt, "run_task", None)
+            if run_task is not None and not run_task.done():
+                continue
+            old = self._channel_gates.get(sid)
+            section = dict((self.cfg.channels.platforms or {}).get(name) or {})
+            gate = ChannelGate(
+                allowed=list(section.get("allowed_tools") or []),
+                approve_enabled=bool(section.get("approve_enabled", False)),
+                approve_timeout=int(self.cfg.channels.approve_timeout),
+                store=self.store,
+                project_id=getattr(old, "project_id", None),
+                working_dir=getattr(old, "working_dir", None),
+            )
+            gate.notify = lambda pending, _g=gate, _n=name: self._notify_channel_approval(
+                _n, pending, _g
+            )
+            rt.agent.gate = gate
+            self._channel_gates[sid] = gate
+
+    async def _notify_channel_approval(self, channel_name: str, pending, gate=None) -> None:
+        """把审批卡片推到聊天窗口。
+
+        gate 带 turn_chat_id（本轮发起消息所在的聊天）时优先回它——回信地址
+        若取「最近一条入站消息」，发起轮之后其它名单内聊天来一条消息就会把
+        卡片带偏（审查 P3-15）。
+        """
         if self.channels is None:
             return
-        chat_id = self._channel_last_chat.get(channel_name, "")
+        chat_id = str(getattr(gate, "turn_chat_id", "") or "") or self._channel_last_chat.get(
+            channel_name, ""
+        )
         channel = self.channels.channels.get(channel_name)
         if not chat_id or channel is None:
             return
@@ -8734,11 +9234,14 @@ class ServerBackend:
             logger.warning("推送审批卡片失败：%s", e)
             raise
 
-    async def channel_run(self, session_id: str, text: str, actor: str = "") -> dict:
+    async def channel_run(self, session_id: str, text: str, actor: str = "",
+                          chat_id: str = "") -> dict:
         """跑一轮渠道对话，返回回复文本。不劫持活动会话。
 
         actor 是这一轮的发起人（渠道消息里的 sender 标识）：写进门控后，
         本轮的审批决定只认他，群聊里其他成员的 allow/deny 不生效。
+        chat_id 是发起消息所在的聊天：审批卡回这个聊天，而不是「最近一条
+        入站消息」的聊天（审查 P3-15）。
         """
         if self.provider is None:
             return {"error": "尚未配置可用的模型 API Key"}
@@ -8765,6 +9268,7 @@ class ServerBackend:
         gate = self._channel_gates.get(session_id)
         if gate is not None:
             gate.turn_actor = str(actor or "")
+            gate.turn_chat_id = str(chat_id or "")
         collected: list[str] = []
         think_text = ""
         think_ms = 0
@@ -8829,15 +9333,21 @@ class ServerBackend:
         return (
             f"会话：{title}\n"
             f"模型：{self.provider_name or '未配置'} / {self.provider_model or '-'}\n"
-            f"项目：{self.project.name if self.project else '-'}\n"
+            "项目：远程连接（渠道会话的固定项目）\n"
             f"上下文：{self._context_limit():,} tokens"
         )
 
     async def channel_list_sessions(self) -> list[dict]:
+        """渠道端 /sessions：只列「远程连接」项目的会话（审查 P3-14）。
+
+        会话标题默认由首条消息生成，属于桌面用户的输入内容——桌面当前项目
+        的会话清单不该透给渠道侧（那里只该看到渠道自己的会话）。
+        """
+        remote_pid = await self._remote_project_id()
         rows = (
-            await self.store.list_sessions(self._cur_project_id())
-            if self.project is not None
-            else await self.store.list_quick_sessions()
+            await self.store.list_sessions(remote_pid)
+            if remote_pid is not None
+            else []
         )
         current_ids = set(self._channel_gates.keys())
         return [
@@ -8865,7 +9375,11 @@ class ServerBackend:
         if gate is None or not gate.waiting:
             return {"hit": False}
         expected = gate.turn_actor or ""
-        if expected and str(actor or "") and actor != expected:
+        actor_s = str(actor or "")
+        # 与 gate.submit_latest 同一收紧（审查 S-08 + P3-17）：发起人 id 是
+        # 校验的根本依据，任一侧为空都视为不匹配——「绑定或回复缺 id」不再
+        # 退回旧行为（否则丢失 actor 的消息可替发起人批准）。
+        if not expected or expected != actor_s:
             return {"hit": False, "actor_mismatch": True}
         return {"hit": bool(gate.submit_latest(decision, actor))}
 

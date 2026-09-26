@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  ci:
+  test:
     name: lint & test (windows-latest)
     runs-on: windows-latest
     steps:
@@ -28,6 +28,30 @@ jobs:
         working-directory: engine
         run: uv run ruff check .
 
-      - name: Pytest
+      # 每次提交只跑非 e2e 套件并输出覆盖率（门槛略低于当前基线 81%，2026-09-25 审查上调，
+      # 防止明显回归；有意提升覆盖时同步上调）。
+      - name: Pytest (unit, with coverage)
         working-directory: engine
-        run: uv run pytest -q
+        run: uv run pytest -m "not e2e" -q --cov=skysheep --cov-report=term-missing:skip-covered --cov-fail-under=80.5
+
+  e2e:
+    name: e2e (real socket)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync dependencies
+        working-directory: engine
+        run: uv sync
+
+      # 真实 uvicorn + socket 的端到端单独一层：与单测解耦，互不阻塞
+      - name: Pytest (e2e)
+        working-directory: engine
+        run: uv run pytest -m e2e -q

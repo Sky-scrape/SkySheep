@@ -366,7 +366,7 @@ class ChannelManager:
         busy = asyncio.create_task(self._delayed_busy_notice(channel, msg.chat_id))
         try:
             try:
-                result = await self.host.channel_run(sid, text, actor=msg.actor)
+                result = await self.host.channel_run(sid, text, actor=msg.actor, chat_id=msg.chat_id)
             except Exception as e:  # noqa: BLE001 - 一轮失败要让用户看到原因
                 await self._reply(channel, msg, f"这一轮出错了：{e}")
                 return

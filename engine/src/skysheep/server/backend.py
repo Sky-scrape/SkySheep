@@ -7510,6 +7510,8 @@ class ServerBackend:
         "ui_scale": (70, 120),  # 界面缩放百分比（存 70–120 的整数，100 = 默认大小）
         "notify": (0, 1),  # Windows 系统通知开关（1=开，默认开）
         "pet": (0, 1),  # 对话区宠物「云朵小羊」开关（1=显示，默认显示）
+        # 空白会话的欢迎卡片（1=显示，默认显示）：设置 · 界面与通知 里可关
+        "welcome_card": (0, 1),
         "accept_edits": (0, 2),  # 分级权限模式：0=安全执行 1=自动编辑（写入免确认）2=完全访问
         # 宠物拖放位置（#chat 内布局像素）；上限给足，前端拖拽时已按容器收敛
         "pet_x": (0, 4000),
@@ -8019,6 +8021,7 @@ class ServerBackend:
 
     MAP_SESSION_LIMIT = 500          # 时间线单次装载的会话上限（防超大项目撑爆载荷）
     MAP_FILE_LIMIT = 20              # 文件足迹 Top N
+    MAP_HEAT_WEEKS = 260             # 热力图铺的周数上限（前端按底栏宽度自适应 26~260 周）
     MAP_MATERIAL_SESSIONS = 200      # 喂给摘要生成的会话条数上限
     MAP_MATERIAL_CHARS = 24_000      # 摘要材料的字符预算（超出丢最旧的会话）
     MAP_AUTO_MIN_SESSIONS = 8        # 自动生成：距上次摘要以来的新增会话数门槛
@@ -8044,16 +8047,21 @@ class ServerBackend:
 
     @staticmethod
     def _map_range(params: dict) -> tuple[float, float]:
-        """解析查询窗口（缺省近 90 天）；非法值夹回合法区间而不是报错。"""
+        """解析查询窗口：缺省近 90 天，显式 start_ts=0 表示不限起点（「全部」）；
+        非法值夹回合法区间而不是报错。0 是合法取值，不能走 `or` 缺省（会被吞）。"""
         now = time.time()
         try:
             end = float(params.get("end_ts") or now)
         except (TypeError, ValueError):
             end = now
-        try:
-            start = float(params.get("start_ts") or (now - 90 * 86400))
-        except (TypeError, ValueError):
+        raw_start = params.get("start_ts")
+        if raw_start is None:
             start = now - 90 * 86400
+        else:
+            try:
+                start = max(0.0, float(raw_start))  # 负数夹回 0（同为不限起点）
+            except (TypeError, ValueError):
+                start = now - 90 * 86400
         end = min(max(end, start), now + 86400)  # 未来最多放宽一天（时区误差兜底）
         return start, end
 
@@ -8082,7 +8090,10 @@ class ServerBackend:
         sessions = await self.store.map_sessions_with_stats(proj.id, start, end)
         if len(sessions) > self.MAP_SESSION_LIMIT:
             sessions = sessions[-self.MAP_SESSION_LIMIT:]  # 保最新（已按时间升序）
-        days = await self.store.map_day_stats(proj.id, start, end)
+        # 热力天数与时间线窗口解耦：格子周数随底栏宽度自适应，天数始终备足到
+        # 上限跨度（外加一周对齐富余），否则远端格子因「没查到」画成假「无活动」
+        heat_start = min(start, end - (self.MAP_HEAT_WEEKS * 7 + 7) * 86400)
+        days = await self.store.map_day_stats(proj.id, heat_start, end)
         events = await self.store.map_project_events(proj.id, start, end)
 
         # 文件足迹：检查点 meta 按 path 聚合（count/首末时间/涉及会话），Top N

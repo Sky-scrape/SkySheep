@@ -218,6 +218,60 @@ def test_map_get_returns_sessions_after_chat(home):
         assert r["days"] and r["days"][0]["tokens"] > 0  # 热力图有数
 
 
+async def test_map_get_heat_days_cover_beyond_timeline_window(home):
+    """热力天数与时间线窗口解耦：远超缺省 90 天窗口的旧消耗也要进 days。
+
+    前端热力图周数随底栏宽度自适应（上限 MAP_HEAT_WEEKS 周），天数若仍按
+    时间线的查询窗口取，拉宽后多铺出来的远端周会把「没查到」画成「无活动」。
+    """
+    be = ServerBackend(working_dir=home / "proj")
+    await be.setup()
+    try:
+        s = await be.store.create_session(be.project.id, "很久前的会话")
+        await be.store.add_usage(s.id, "openai", "gpt", 300, 500, 0)
+        old = time.time() - 400 * 86400  # 400 天前，超出时间线缺省窗口一截
+        await be.store._db.execute(
+            "UPDATE usage_log SET ts = ? WHERE session_id = ?", (old, s.id))
+        await be.store._db.commit()
+        r = await be.map_get()
+        assert r["range"]["start_ts"] > old  # 时间线窗口不被撑开（两个窗口解耦）
+        assert any(d["tokens"] == 800 for d in r["days"])  # 旧消耗仍进热力天数
+    finally:
+        await be.shutdown()
+
+
+def test_map_range_start_ts_zero_means_unbounded():
+    """start_ts 显式 0 = 不限起点（「全部」）：不能被 `or` 缺省吞成近 90 天。"""
+    f = ServerBackend._map_range
+    now = time.time()
+    s, e = f({})  # 缺省近 90 天
+    assert abs(e - now) < 5 and abs(s - (now - 90 * 86400)) < 5
+    s, e = f({"start_ts": 0})  # 显式 0 = 全部
+    assert s == 0.0 and abs(e - now) < 5
+    s, _ = f({"start_ts": "abc"})  # 非法值回缺省窗口
+    assert abs(s - (now - 90 * 86400)) < 5
+    s, _ = f({"start_ts": -5})  # 负数夹回 0（同为不限起点）
+    assert s == 0.0
+
+
+async def test_map_get_range_zero_returns_full_history(home):
+    """地图范围选「全部」要能拉回缺省 90 天窗口之外的旧会话。"""
+    be = ServerBackend(working_dir=home / "proj")
+    await be.setup()
+    try:
+        s = await be.store.create_session(be.project.id, "很久前的会话")
+        old = time.time() - 400 * 86400
+        await be.store._db.execute(
+            "UPDATE sessions SET created_at = ? WHERE id = ?", (old, s.id))
+        await be.store._db.commit()
+        r = await be.map_get({"start_ts": 0})
+        assert [x["id"] for x in r["sessions"]] == [s.id]  # 全部：旧会话在
+        r2 = await be.map_get()
+        assert r2["sessions"] == []  # 缺省窗口仍是近 90 天
+    finally:
+        await be.shutdown()
+
+
 def test_map_generate_flow_and_event(home):
     # 脚本组：每轮 chat 各耗一组，第三组才是摘要输出
     provider = FakeProvider([

@@ -691,6 +691,9 @@ async function loadTabHistory(tab) {
   try {
     const info = await request("session.resume", { id: tab.sid });
     renderHistory(tab, info.messages || []);
+    // 空会话也回欢迎页（与 openTabForSession 的 withMessages 路径同一口径）——
+    // 之前漏了这条，侧栏点开旧的空会话就是一片空白（用户报的「有的出现有的不出现」）
+    if (!tab.logEl.children.length) withTab(tab, showWelcome);
   } catch (e) { addNotice("加载会话内容失败: " + e.message); }
 }
 
@@ -869,6 +872,11 @@ async function newSessionFromHighlight() {
 
 function showWelcome() {
   const host = curLog();
+  // 设置 · 界面与通知 关掉欢迎卡后，空白会话保持空白（四个调用点统一从这里出口）
+  if (!welcomeOn) {
+    host.innerHTML = "";
+    return;
+  }
   host.innerHTML = `
     <div class="welcome">
       <div class="w-title"><i class="w-logo" aria-hidden="true"></i>欢迎使用 SkySheep</div>
@@ -5295,6 +5303,7 @@ let currentSessionId = null; // 当前会话（/export、检查点列表用）
 let uiNotifyOn = true;
 let ctrlEnterSend = false; // 发送键：false = Enter 发送（默认），true = Ctrl+Enter 发送
 let uiNotifySound = false; // 提示音（默认关）：任务完成/等确认时合成短音，设置页开关
+let welcomeOn = true; // 空白会话欢迎卡（默认开）：新建/空白会话显示「欢迎使用」，设置 · 界面与通知 可关
 let uiNotifySoundFocus = true; // 仅失焦时提示音（默认开）：前台人已在看，响一声反而吵
 let uiNotifyKindDone = true; // 任务完成通知开关（关掉不弹系统通知、不响提示音）
 let uiNotifyKindPerm = true; // 等待确认通知开关（同上）
@@ -5790,6 +5799,28 @@ if (petToggle) {
     petEl.classList.toggle("hidden", !petOn);
     if (!petOn) { petStopFall(); petBubble.classList.add("hidden"); }
     saveUiPrefs({ pet: petOn ? 1 : 0 });
+  };
+}
+
+// ---------- 空白会话欢迎卡（welcome_card，设置 · 界面与通知） ----------
+function renderWelcomeToggle() {
+  const t = document.getElementById("welcome-card-toggle");
+  if (t) t.checked = welcomeOn;
+}
+const welcomeCardToggle = document.getElementById("welcome-card-toggle");
+if (welcomeCardToggle) {
+  welcomeCardToggle.onchange = () => {
+    welcomeOn = welcomeCardToggle.checked;
+    saveUiPrefs({ welcome_card: welcomeOn ? 1 : 0 });
+    // 活动标签若是空白会话就即时跟着变（在设置页里关也能生效）：开→补欢迎卡，关→清成空白
+    const log = curLog();
+    if (log) {
+      const blankView = !log.children.length || !!log.querySelector(".welcome");
+      if (blankView) {
+        if (welcomeOn) showWelcome();
+        else log.innerHTML = "";
+      }
+    }
   };
 }
 
@@ -10911,6 +10942,11 @@ function mapBasename(p) {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i >= 0 ? p.slice(i + 1) : p;
 }
+// 热力图周数按底栏可用宽度算（格 9px + 缝 2px），26 周起步；上限与后端
+// MAP_HEAT_WEEKS 对齐——拉宽窗口多铺历史，而不是让富余宽度空在中间
+function mapHeatWeeksFor(width) {
+  return Math.max(26, Math.min(260, Math.floor((width + 2) / 11)));
+}
 
 async function loadMemoryMap(force) {
   const tl = document.getElementById("map-timeline");
@@ -10921,8 +10957,13 @@ async function loadMemoryMap(force) {
     }
     const params = {};
     if (mapState.projectId) params.project_id = mapState.projectId;
-    const days = parseInt(mapState.range, 10) || 0;
-    if (days > 0) params.start_ts = Date.now() / 1000 - days * 86400;
+    // 「全部」必须显式发 start_ts=0：不发 = 后端缺省只查近 90 天；
+    // 协议约定 0 = 不限起点（后端按显式 0 识别，不走 or 缺省）
+    if (mapState.range === "0") params.start_ts = 0;
+    else {
+      const days = parseInt(mapState.range, 10);
+      if (days > 0) params.start_ts = Date.now() / 1000 - days * 86400;
+    }
     mapState.data = await request("map.get", params);
     renderMapChrome();
     renderMapView();
@@ -11103,39 +11144,64 @@ function renderMapAside() {
   const clearBtn = filesBox.querySelector(".map-file-clear");
   if (clearBtn) clearBtn.onclick = () => { mapState.fileFilter = null; renderMapTimeline(); renderMapAside(); };
 
-  // 热力图：GitHub 贡献图式（列=周，行=周一..周日），最多铺最近 26 周；
-  // 强度按当日 token 分档，悬停给明细，点击跳时间线对应月份
+  // 热力图：GitHub 贡献图式（列=周，行=周一..周日），周数按底栏实际宽度
+  // 自适应（拉宽窗口多铺历史，富余宽度不空在中间）；强度按当日 token 分档，
+  // 悬停给明细，点击跳时间线对应月份
   const byDay = new Map((d.days || []).map((x) => [x.day, x]));
-  const WEEKS = 26;
-  const now = new Date();
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const start = new Date(end.getTime() - (WEEKS * 7 - 1) * 86400000);
-  start.setDate(start.getDate() - ((start.getDay() + 6) % 7)); // 对齐周一
-  let cells = "";
-  for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
-    const dt = new Date(t);
-    const key = mapDayKey(t / 1000);
-    const st = byDay.get(key);
-    const tok = st ? st.tokens : 0;
-    const lv = tok >= 50000 ? "l4" : tok >= 10000 ? "l3" : tok >= 2000 ? "l2" : tok > 0 ? "l1" : "l0";
-    const tip = st ? `${key}：${st.sessions} 个会话 · ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
-      : `${key}：无活动`;
-    cells += `<i class="${lv}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
+  const paintHeat = (weeks) => {
+    const now = new Date();
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const start = new Date(end.getTime() - (weeks * 7 - 1) * 86400000);
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7)); // 对齐周一
+    let cells = "";
+    for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
+      const key = mapDayKey(t / 1000);
+      const st = byDay.get(key);
+      const tok = st ? st.tokens : 0;
+      const lv = tok >= 50000 ? "l4" : tok >= 10000 ? "l3" : tok >= 2000 ? "l2" : tok > 0 ? "l1" : "l0";
+      const tip = st ? `${key}：${st.sessions} 个会话 · ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
+        : `${key}：无活动`;
+      cells += `<i class="${lv}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
+    }
+    heatBox.innerHTML = `<span class="map-aside-label">活跃</span>` +
+      `<div class="map-heat-grid" data-weeks="${weeks}">${cells}</div>` +
+      `<span class="map-heat-legend">少<i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i>多</span>`;
+    heatBox.querySelectorAll("[data-day]").forEach((el) => {
+      el.onclick = () => {
+        const day = el.dataset.day;
+        mapState.view = "timeline";
+        renderMapChrome();
+        renderMapView();
+        renderMapAside();
+        const target = Array.from(document.querySelectorAll("#map-timeline .map-item"))
+          .find((n) => n.textContent.includes(day.slice(5).replace("-", "-")));
+        if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
+      };
+    });
+  };
+  const prevGrid = heatBox.querySelector(".map-heat-grid");
+  const weeks = prevGrid && aside.clientWidth > 0 ? mapHeatWeeksFor(prevGrid.clientWidth) : 26;
+  paintHeat(weeks);
+  if (!prevGrid && aside.clientWidth > 0) {
+    // 首帧没有旧格可量：先按 26 周铺，再按 flex:1 撑开的实际宽度补铺一次
+    //（网格宽度只随容器走、与格数无关，一轮即稳，不会来回抖）
+    const fit = mapHeatWeeksFor(heatBox.querySelector(".map-heat-grid").clientWidth);
+    if (fit !== weeks) paintHeat(fit);
   }
-  heatBox.innerHTML = `<span class="map-aside-label">活跃</span><div class="map-heat-grid">${cells}</div>` +
-    `<span class="map-heat-legend">少<i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i>多</span>`;
-  heatBox.querySelectorAll("[data-day]").forEach((el) => {
-    el.onclick = () => {
-      const day = el.dataset.day;
-      mapState.view = "timeline";
-      renderMapChrome();
-      renderMapView();
-      renderMapAside();
-      const target = Array.from(document.querySelectorAll("#map-timeline .map-item"))
-        .find((n) => n.textContent.includes(day.slice(5).replace("-", "-")));
-      if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
-    };
-  });
+}
+
+// 底栏宽度变化（拉伸窗口、收展侧栏）后按新宽度重铺热力图；周数没变就不动，
+// RO 初次回调与自身 innerHTML 重建都不会造成空转
+let mapHeatRaf = 0;
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(() => {
+    const grid = document.querySelector("#map-heat .map-heat-grid");
+    if (!mapState.data || !grid) return;
+    const w = document.getElementById("map-heat").clientWidth;
+    if (!w || mapHeatWeeksFor(w) === +(grid.dataset.weeks || 0)) return;
+    cancelAnimationFrame(mapHeatRaf);
+    mapHeatRaf = requestAnimationFrame(renderMapAside);
+  }).observe(document.getElementById("map-heat"));
 }
 
 // ---- 主题图谱：阶段-主题-文件-记忆的关联网络 ----
@@ -13033,6 +13099,8 @@ async function initUiPrefs() {
   // 对话区宠物开关（默认显示）+ 大小（pet_scale，缺省 100%）+ 横向落点
   // （pet_x；纵向有重力，总是落在底部）
   petOn = prefs.pet == null ? true : prefs.pet === 1;
+  welcomeOn = prefs.welcome_card == null ? true : prefs.welcome_card === 1;
+  renderWelcomeToggle();
   renderPetToggle();
   applyPetScale(Number.isFinite(Number(prefs.pet_scale)) ? Number(prefs.pet_scale) : 100);
   if (petEl) {

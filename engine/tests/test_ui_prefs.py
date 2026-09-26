@@ -24,6 +24,54 @@ def test_ui_prefs_roundtrip(home):
     assert frame["result"]["prefs"] == {"sidebar_w": 320, "composer_h": 200}
 
 
+def test_welcome_card_pref_roundtrip_and_default(home):
+    """欢迎卡偏好：默认开（键缺省时不出现在 prefs）、可关、可恢复默认（null 删除）。"""
+    # 默认开：前端读不到键即视为开；这里只验证存储面的「未写入=无键」
+    frame = call_ui(home, "ui.get")
+    assert frame["ok"]
+    assert "welcome_card" not in frame["result"]["prefs"]
+
+    # 关闭
+    frame = call_ui(home, "ui.save", {"prefs": {"welcome_card": 0}})
+    assert frame["ok"]
+    frame = call_ui(home, "ui.get")
+    assert frame["result"]["prefs"]["welcome_card"] == 0
+
+    # 非法值收敛到合法区间
+    frame = call_ui(home, "ui.save", {"prefs": {"welcome_card": 7}})
+    assert frame["ok"]
+    frame = call_ui(home, "ui.get")
+    assert frame["result"]["prefs"]["welcome_card"] == 1
+
+    # 恢复默认（null = 删除该键）
+    frame = call_ui(home, "ui.save", {"prefs": {"welcome_card": None}})
+    assert frame["ok"]
+    frame = call_ui(home, "ui.get")
+    assert "welcome_card" not in frame["result"]["prefs"]
+
+
+def test_welcome_card_wiring_source_contract(home):
+    """源码契约：设置卡、偏好键、showWelcome 出口守卫三处接线都在。"""
+    from pathlib import Path
+
+    static = Path(__file__).resolve().parents[1] / "src" / "skysheep" / "server" / "static"
+    js = (static / "app.js").read_text(encoding="utf-8")
+    html = (static / "index.html").read_text(encoding="utf-8")
+    # 后端键
+    from skysheep.server.backend import ServerBackend
+    assert "welcome_card" in ServerBackend.UI_PREFS_LIMITS
+    # 前端：开关元素、偏好应用、showWelcome 出口守卫
+    assert 'id="welcome-card-toggle"' in html
+    assert 'prefs.welcome_card == null ? true : prefs.welcome_card === 1' in js
+    assert "if (!welcomeOn)" in js
+    # 关闭时开关即时清空当前空白视图
+    assert "if (welcomeOn) showWelcome();" in js
+    # 两条会话打开路径（withMessages / 懒加载）都要有空会话欢迎卡兜底——
+    # 之前漏了懒加载那条，侧栏点开旧的空会话就是一片空白
+    assert js.count('if (!tab.logEl.children.length) withTab(tab, showWelcome);') == 1
+    assert "if (!t.logEl.children.length) withTab(t, showWelcome);" in js
+
+
 def test_ui_prefs_clamped_and_unknown_keys_ignored(home):
     frame = call_ui(home, "ui.save", {"prefs": {"sidebar_w": 9999, "composer_h": 1, "evil": "x"}})
     assert frame["ok"]

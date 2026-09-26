@@ -4879,6 +4879,8 @@ function resetProjectPanels() {
   if (reviewDiff) reviewDiff.classList.add("hidden");
   const preview = document.getElementById("files-preview");
   if (preview) preview.classList.add("hidden");
+  const filesResizer = document.getElementById("files-resizer");
+  if (filesResizer) filesResizer.classList.add("hidden");
   // 浏览器预览若停在本项目的 /preview 相对地址上：切项目后同一路径已是新项目的
   // 文件（或 404），留着只会「看着是旧页面、实际已是别的东西」。收回空态最诚实。
   {
@@ -10942,10 +10944,12 @@ function mapBasename(p) {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i >= 0 ? p.slice(i + 1) : p;
 }
-// 热力图周数按底栏可用宽度算（格 9px + 缝 2px），26 周起步；上限与后端
-// MAP_HEAT_WEEKS 对齐——拉宽窗口多铺历史，而不是让富余宽度空在中间
+// 热力图周数按底栏可用宽度算（格 9px + 缝 2px）：宽就多铺历史、窄就少铺，
+// 能放几列放几列，格子恒完整不裁边。宽 - 2px 是亚像素舍入冗余（clientWidth
+// 取整与设备像素换算可能让内容比可用宽多出零点几像素）；上限与后端
+// MAP_HEAT_WEEKS 对齐
 function mapHeatWeeksFor(width) {
-  return Math.max(26, Math.min(260, Math.floor((width + 2) / 11)));
+  return Math.max(1, Math.min(260, Math.floor((width - 2) / 11)));
 }
 
 async function loadMemoryMap(force) {
@@ -11148,23 +11152,28 @@ function renderMapAside() {
   // 自适应（拉宽窗口多铺历史，富余宽度不空在中间）；强度按当日 token 分档，
   // 悬停给明细，点击跳时间线对应月份
   const byDay = new Map((d.days || []).map((x) => [x.day, x]));
-  const paintHeat = (weeks) => {
+  const paintHeat = (budget) => {   // budget：底栏放得下的总列数（列=周）
     const now = new Date();
     const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const start = new Date(end.getTime() - (weeks * 7 - 1) * 86400000);
-    start.setDate(start.getDate() - ((start.getDay() + 6) % 7)); // 对齐周一
+    // 从当前周的周一开始往前铺 budget 整周：每列恒 7 天，本周没到的几天补
+    // 空格——整图是规矩矩形，既不缺角也不会超宽被裁
+    const start = new Date(end.getTime() - ((end.getDay() + 6) % 7) * 86400000
+      - (budget - 1) * 7 * 86400000);
     let cells = "";
-    for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
+    for (let i = 0; i < budget * 7; i++) {
+      const t = start.getTime() + i * 86400000;
       const key = mapDayKey(t / 1000);
       const st = byDay.get(key);
       const tok = st ? st.tokens : 0;
-      const lv = tok >= 50000 ? "l4" : tok >= 10000 ? "l3" : tok >= 2000 ? "l2" : tok > 0 ? "l1" : "l0";
-      const tip = st ? `${key}：${st.sessions} 个会话 · ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
+      const future = t > end.getTime();
+      const lv = future ? "l0" : tok >= 50000 ? "l4" : tok >= 10000 ? "l3" : tok >= 2000 ? "l2" : tok > 0 ? "l1" : "l0";
+      const tip = future ? `${key}：还没到`
+        : st ? `${key}：${st.sessions} 个会话 · ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
         : `${key}：无活动`;
       cells += `<i class="${lv}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
     }
     heatBox.innerHTML = `<span class="map-aside-label">活跃</span>` +
-      `<div class="map-heat-grid" data-weeks="${weeks}">${cells}</div>` +
+      `<div class="map-heat-grid" data-weeks="${budget}">${cells}</div>` +
       `<span class="map-heat-legend">少<i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i>多</span>`;
     heatBox.querySelectorAll("[data-day]").forEach((el) => {
       el.onclick = () => {
@@ -11180,13 +11189,13 @@ function renderMapAside() {
     });
   };
   const prevGrid = heatBox.querySelector(".map-heat-grid");
-  const weeks = prevGrid && aside.clientWidth > 0 ? mapHeatWeeksFor(prevGrid.clientWidth) : 26;
-  paintHeat(weeks);
+  const budget = prevGrid && aside.clientWidth > 0 ? mapHeatWeeksFor(prevGrid.clientWidth) : 26;
+  paintHeat(budget);
   if (!prevGrid && aside.clientWidth > 0) {
-    // 首帧没有旧格可量：先按 26 周铺，再按 flex:1 撑开的实际宽度补铺一次
+    // 首帧没有旧格可量：先按最小列数铺，再按 flex:1 撑开的实际宽度补铺一次
     //（网格宽度只随容器走、与格数无关，一轮即稳，不会来回抖）
     const fit = mapHeatWeeksFor(heatBox.querySelector(".map-heat-grid").clientWidth);
-    if (fit !== weeks) paintHeat(fit);
+    if (fit !== budget) paintHeat(fit);
   }
 }
 
@@ -11376,10 +11385,10 @@ function mountMapGraph(box, nodes, edges) {
     `<span class="map-legend-item"><i style="background:${v.color}"></i>${v.label}</span>`).join("");
   let boxes = "";
   nodes.forEach((n) => {
+    // 不设 title：原生系统提示与悬停浮层会双份出现，浮层信息更全（类型/会话数/直达）
     boxes += `<div class="map-gnode ty-${n.type}" data-nid="${n.id}"` +
       ` style="left:${n.x.toFixed(1)}px;top:${n.y.toFixed(1)}px"` +
-      ` title="${escapeHtml(n.label)}（${MAP_NODE_TYPE[n.type].label} · 权重 ${n.weight}）">` +
-      `<span>${escapeHtml(n.label)}</span></div>`;
+      `><span>${escapeHtml(n.label)}</span></div>`;
   });
   box.innerHTML = `<div class="map-graph-canvas" style="width:${W}px;height:${H}px">` +
     `<svg width="${W}" height="${H}">${lines}</svg>${boxes}` +
@@ -11394,8 +11403,9 @@ function mountMapGraph(box, nodes, edges) {
     popTimer = 0;
     pop.classList.add("hidden");
   };
-  // 悬停出浮层：进节点稍候即现（扫过不闪），离开延迟收起——收起前把鼠标
-  // 挪进浮层就取消，浮层里的会话链接照常可点
+  // 悬停出浮层：进节点稍候即现（扫过不闪），离开快速收起（留 100ms 余量——
+  // 就靠这点空档把鼠标挪进紧挨着的浮层取消关闭，浮层里的会话链接照常可点；
+  // 再长就有「赖着不走」的卡顿感）
   let popTimer = 0, popHideTimer = 0, dragging = false;
   const showPop = (n) => {
     clearTimeout(popHideTimer);
@@ -11423,7 +11433,7 @@ function mountMapGraph(box, nodes, edges) {
   pop.addEventListener("mouseenter", () => clearTimeout(popHideTimer));
   pop.addEventListener("mouseleave", () => {
     clearTimeout(popTimer);
-    popHideTimer = setTimeout(closePop, 200);
+    popHideTimer = setTimeout(closePop, 100);
   });
   box.querySelector(".map-graph-canvas").addEventListener("click", (e) => {
     if (e.target === svg || e.target.classList.contains("map-graph-canvas")) closePop();
@@ -11456,7 +11466,7 @@ function mountMapGraph(box, nodes, edges) {
     el.addEventListener("mouseleave", () => {
       box.querySelectorAll(".hl,.hl-soft").forEach((x) => x.classList.remove("hl", "hl-soft"));
       clearTimeout(popTimer);
-      popHideTimer = setTimeout(closePop, 300);
+      popHideTimer = setTimeout(closePop, 100);
     });
     // 拖拽：pointer 事件改 x/y，重画该节点与相邻边（布局结果就地更新）。
     // 拖拽期间抑制悬停浮层（指针被捕获也不会再触发 mouseenter），松手后
@@ -11467,10 +11477,16 @@ function mountMapGraph(box, nodes, edges) {
       closePop();
       el.setPointerCapture(ev.pointerId);
       const n = byId.get(nid);
+      const canvas = box.querySelector(".map-graph-canvas");
+      // 记下抓取点相对节点中心的偏移：left/top 锚的是中心（CSS 平移回正），
+      // 不补偏移的话，起手瞬间中心会被直接搬到指针下，节点像自己跳了半个身位
+      const rect0 = canvas.getBoundingClientRect();
+      const offX = ev.clientX - rect0.left - n.x;
+      const offY = ev.clientY - rect0.top - n.y;
       const move = (m) => {
-        const rect = box.querySelector(".map-graph-canvas").getBoundingClientRect();
-        n.x = Math.max(30, Math.min(W - 30, m.clientX - rect.left));
-        n.y = Math.max(18, Math.min(H - 18, m.clientY - rect.top));
+        const rect = canvas.getBoundingClientRect();
+        n.x = Math.max(30, Math.min(W - 30, m.clientX - rect.left - offX));
+        n.y = Math.max(18, Math.min(H - 18, m.clientY - rect.top - offY));
         el.style.left = n.x + "px";
         el.style.top = n.y + "px";
         box.querySelectorAll(`.map-edge[data-a="${nid}"],.map-edge[data-b="${nid}"]`).forEach((ln) => {
@@ -12482,10 +12498,13 @@ function renderFileHead() {
   const meta = fileEdit.encodingText && fileEdit.encodingText !== "UTF-8"
     ? " · " + fileEdit.encodingText + (fileEdit.crlf ? " · CRLF" : "")
     : (fileEdit.crlf ? " · CRLF" : "");
-  document.getElementById("files-preview-title").textContent =
+  const titleText =
     (dirty ? "● " : "") + fileEdit.path + fileEdit.sizeText +
     (fileEdit.isNew ? " · 新文件" : "") + meta +
     (fileEdit.editable ? "" : " · 只读（" + (fileEdit.readonlyWhy || "改了存不回去") + "）");
+  const titleEl = document.getElementById("files-preview-title");
+  titleEl.textContent = titleText;
+  titleEl.title = titleText;  // 标题超长被省略号收起时，悬停可看全文
   const saveBtn = document.getElementById("files-save");
   saveBtn.classList.toggle("hidden", !fileEdit.editable);
   saveBtn.textContent = dirty ? "● 保存" : "保存";
@@ -12535,6 +12554,7 @@ async function openFile(path, opts = {}) {
     const ed = fileEditorBody();
     ed.value = norm;
     wrap.classList.remove("hidden");
+    document.getElementById("files-resizer").classList.remove("hidden");
     wrap.classList.toggle("expanded", fileEdit.editable);
     renderFileHead();
     document.getElementById("files-preview-open").dataset.path = r.path;
@@ -12547,6 +12567,7 @@ async function openFile(path, opts = {}) {
 function closeFileEditor() {
   document.getElementById("files-preview").classList.add("hidden");
   document.getElementById("files-preview").classList.remove("expanded");
+  document.getElementById("files-resizer").classList.add("hidden");
   fileEdit = null;
 }
 
@@ -12614,6 +12635,47 @@ document.getElementById("files-editor").addEventListener("keydown", (e) => {
     e.target.dispatchEvent(new Event("input", { bubbles: true }));
   }
 });
+// 树与预览之间的分隔条：拖动时只移动提示线、松手才落高度——大文本的
+// textarea 每改一px高度都要整块重排，边拖边改会卡成一下一下的跳动。
+// 高度记进 ui.json（files_preview_h），双击恢复默认档（46% / 68%）
+(() => {
+  const bar = document.getElementById("files-resizer");
+  const wrap = document.getElementById("files-preview");
+  if (!bar || !wrap) return;
+  const line = document.createElement("div");
+  line.className = "files-resizer-line";
+  let startY = 0, startH = 0, sectionH = 0, targetH = 0;
+  const move = (e) => {
+    // 预览最少 96px，最多给上面的树和工具条留 140px；线跟指针 1:1
+    targetH = Math.round(Math.max(96, Math.min(sectionH - 140, startH + (startY - e.clientY))));
+    line.style.transform = `translateY(${sectionH - targetH}px)`;
+  };
+  const up = () => {
+    bar.classList.remove("on");
+    bar.removeEventListener("pointermove", move);
+    bar.removeEventListener("pointerup", up);
+    line.remove();
+    if (targetH > 0) {
+      wrap.style.height = targetH + "px";
+      saveUiPrefs({ files_preview_h: targetH });
+    }
+  };
+  bar.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    bar.setPointerCapture(e.pointerId);
+    bar.classList.add("on");
+    startY = e.clientY;
+    startH = targetH = wrap.getBoundingClientRect().height;
+    sectionH = bar.parentElement.getBoundingClientRect().height;
+    bar.parentElement.appendChild(line);
+    bar.addEventListener("pointermove", move);
+    bar.addEventListener("pointerup", up);
+  });
+  bar.addEventListener("dblclick", () => {
+    wrap.style.height = "";
+    saveUiPrefs({ files_preview_h: null });
+  });
+})();
 document.getElementById("files-new").onclick = () => {
   const box = document.createElement("div");
   box.innerHTML =
@@ -13044,6 +13106,9 @@ async function initUiPrefs() {
   // 界面缩放：未存偏好时保持默认 90%（CSS 与初始状态一致）
   const sc = Number(prefs.ui_scale);
   if (Number.isFinite(sc) && sc > 0) applyUiScale(sc);
+  // 文件预览区高度：拖过分隔条后记住；没存过就用 CSS 默认档
+  const fh = Number(prefs.files_preview_h);
+  if (fh >= 96) document.getElementById("files-preview").style.height = fh + "px";
   for (const key of Object.keys(UI_LIMITS)) {
     if (prefs[key] != null) setUiVar(key, prefs[key]);
   }
@@ -15749,6 +15814,9 @@ async function renderAdvancedCfg() {
   q("adv-keep-recent").value = d.compaction_keep_recent;
   // 触发比例以百分数编辑（50–98），存的是 0.5–0.98 的比例
   q("adv-compaction-trigger").value = Math.round((d.compaction_trigger ?? 0.9) * 100);
+  // 自动压缩总开关（老配置没有该字段 = 默认开）
+  q("adv-compaction-auto").checked = d.compaction_auto !== false;
+  syncCompactionInputs();
   q("adv-restrict-workdir").checked = !!d.restrict_to_workdir;
   renderTrustState();
   renderTrustList();
@@ -15796,6 +15864,7 @@ async function saveAdvanced() {
       context_limit_tokens: Number(q("adv-context-limit").value),
       compaction_keep_recent: Number(q("adv-keep-recent").value),
       compaction_trigger: Number(q("adv-compaction-trigger").value) / 100,
+      compaction_auto: q("adv-compaction-auto").checked,
       daily_token_budget: Number(q("adv-daily-budget").value) || 0,
       restrict_to_workdir: q("adv-restrict-workdir").checked,
       autostart: q("adv-autostart").checked,
@@ -15817,11 +15886,21 @@ async function saveAdvanced() {
 }
 document.getElementById("btn-advanced-save").onclick = saveAdvanced;
 
-// 恢复默认：填回默认值并立即保存（40 轮 / 1,000,000 / 保留 8 / 触发 90% / 预算不限）
+// 自动压缩关闭时置灰两个压缩参数：开关管「压不压」，比例/条数只在开着时有意义
+function syncCompactionInputs() {
+  const off = !document.getElementById("adv-compaction-auto").checked;
+  document.getElementById("adv-compaction-trigger").disabled = off;
+  document.getElementById("adv-keep-recent").disabled = off;
+}
+document.getElementById("adv-compaction-auto").onchange = syncCompactionInputs;
+
+// 恢复默认：填回默认值并立即保存（40 轮 / 1,000,000 / 自动压缩开 / 触发 90% / 保留 8 / 预算不限）
 document.getElementById("btn-advanced-reset").onclick = async () => {
   const q = (id) => document.getElementById(id);
   q("adv-max-iterations").value = 40;
   q("adv-context-limit").value = 1000000;
+  q("adv-compaction-auto").checked = true;
+  syncCompactionInputs();
   q("adv-keep-recent").value = 8;
   q("adv-compaction-trigger").value = 90;
   q("adv-daily-budget").value = "";

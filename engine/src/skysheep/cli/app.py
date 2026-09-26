@@ -207,6 +207,7 @@ class ChatApp:
             max_iterations=self.cfg.max_iterations,
             context_limit_tokens=self.cfg.context_limit_tokens,
             compaction_keep_recent=self.cfg.compaction_keep_recent,
+            compaction_auto=self.cfg.compaction_auto,
             hooks=hooks,
         )
         self.agent.set_system(self._compose_system())
@@ -881,6 +882,7 @@ async def run_headless(
             max_iterations=max_iterations or cfg.max_iterations,
             context_limit_tokens=cfg.context_limit_tokens,
             compaction_keep_recent=cfg.compaction_keep_recent,
+            compaction_auto=cfg.compaction_auto,
             hooks=hooks,
         )
         agent.set_system(

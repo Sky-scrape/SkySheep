@@ -223,6 +223,10 @@ class SkySheepConfig(BaseModel):
     max_iterations: int = Field(default=40, ge=1, le=200)
     context_limit_tokens: int = Field(default=1_000_000, ge=4_000)
     compaction_keep_recent: int = Field(default=8, ge=2)
+    # 自动压缩总开关（默认开）：占用达到 compaction_trigger 时自动把旧历史
+    # 换成摘要。关掉后只在手动 /compact 时压缩——想自己完全掌控压缩时机的
+    # 用户用（此时超窗的报错提示里已有 /compact 指引兜底）。
+    compaction_auto: bool = True
     # 压缩触发比例：上下文占用达到上限的这个比例就自动压缩（默认 0.9）。
     # 顶满 100% 才压缩，容易在「快要压缩时」撞上上游 400 拒绝，前面迭代的
     # 费用全部作废；提前留出余量，压缩本身也有更大的操作空间。
@@ -411,6 +415,7 @@ def load_config() -> SkySheepConfig:
             compaction_trigger = min(0.98, max(0.5, float(raw.get("compaction_trigger", 0.9))))
         except (TypeError, ValueError):
             compaction_trigger = 0.9
+        compaction_auto = bool(raw.get("compaction_auto", True))
         sub_enabled = bool(raw.get("subagent_enabled", True))
         sub_iters = _clamp_int(raw, "subagent_max_iterations", 25, 1, 100)
         sub_conc = _clamp_int(raw, "subagent_max_concurrent", 3, 1, 8)
@@ -462,6 +467,7 @@ def load_config() -> SkySheepConfig:
         context_limit = 1_000_000
         keep_recent = 8
         compaction_trigger = 0.9
+        compaction_auto = True
         sub_enabled = True
         sub_iters = 25
         sub_conc = 3
@@ -487,6 +493,7 @@ def load_config() -> SkySheepConfig:
         context_limit_tokens=context_limit,
         compaction_keep_recent=keep_recent,
         compaction_trigger=compaction_trigger,
+        compaction_auto=compaction_auto,
         subagent_enabled=sub_enabled,
         subagent_max_iterations=sub_iters,
         subagent_max_concurrent=max(1, min(8, sub_conc)),
@@ -513,6 +520,7 @@ def set_advanced_settings_in_config(
     context_limit_tokens: int | None = None,
     compaction_keep_recent: int | None = None,
     compaction_trigger: float | None = None,
+    compaction_auto: bool | None = None,
     restrict_to_workdir: bool | None = None,
     computer_control: bool | None = None,
     browser_control: bool | None = None,
@@ -539,6 +547,8 @@ def set_advanced_settings_in_config(
         raw["compaction_keep_recent"] = int(compaction_keep_recent)
     if compaction_trigger is not None:
         raw["compaction_trigger"] = min(0.98, max(0.5, float(compaction_trigger)))
+    if compaction_auto is not None:
+        raw["compaction_auto"] = bool(compaction_auto)
     if restrict_to_workdir is not None:
         raw["restrict_to_workdir"] = bool(restrict_to_workdir)
     if computer_control is not None:

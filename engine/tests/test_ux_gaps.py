@@ -299,22 +299,37 @@ def test_set_advanced_settings_validation(home):
         set_advanced_settings_in_config(compaction_keep_recent=1)
 
 
+def test_compaction_auto_setting_roundtrip(home):
+    """自动压缩总开关：默认开；关掉落盘后读回仍是关；不传 = 不动。"""
+    assert load_config().compaction_auto is True  # 默认（老配置无该字段）
+    set_advanced_settings_in_config(compaction_auto=False)
+    assert load_config().compaction_auto is False
+    # None = 该项不动：别把其它保存路径顺手把开关打开
+    set_advanced_settings_in_config(max_iterations=41)
+    assert load_config().compaction_auto is False
+    set_advanced_settings_in_config(compaction_auto=True)
+    assert load_config().compaction_auto is True
+
+
 def test_advanced_ws_roundtrip_and_hot_effect(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "a1", "method": "advanced.get"})
         d = recv_until(ws, "a1")["result"]
         assert d["max_iterations"] == 40
         assert d["restrict_to_workdir"] is False
+        assert d["compaction_auto"] is True  # 默认开
         assert d["autostart"]["supported"] in (True, False)  # 平台相关，不假设
         assert d["home"] and d["logs_dir"]
 
         ws.send_json({"id": "a2", "method": "advanced.save", "params": {
             "max_iterations": 55, "context_limit_tokens": 96_000,
             "compaction_keep_recent": 10, "restrict_to_workdir": True,
+            "compaction_auto": False,
         }})
         r = recv_until(ws, "a2")["result"]
         assert r["max_iterations"] == 55
         assert r["restrict_to_workdir"] is True
+        assert r["compaction_auto"] is False
         # 热生效：活着的 Agent 立刻拿到新参数
         assert r["context_limit_tokens_effective"] == 96_000
         ws.send_json({"id": "a3", "method": "chat.status"})

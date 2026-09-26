@@ -372,6 +372,7 @@
               <button id="files-refresh" class="rp-mini">刷新</button>
             </div>
             <div id="files-tree" class="files-tree"></div>
+            <div id="files-resizer" class="files-resizer hidden" title="拖动调整预览区高度；双击恢复默认"></div>
             <div id="files-preview" class="files-preview hidden">
               <div class="rp-toolbar">
                 <b id="files-preview-title" class="small"></b>
@@ -943,15 +944,23 @@
                 <input type="number" id="adv-context-limit" min="4000" max="2000000" step="4000">
                 <span class="dim small" id="adv-context-hint"></span>
               </div>
-              <div class="toolcfg-row">
-                <label>压缩保留条数</label>
-                <input type="number" id="adv-keep-recent" min="2" max="100" step="1">
-                <span class="dim small">默认 8。自动压缩历史时，最近这么多条原样保留</span>
-              </div>
+              <label class="toggle-row adv-toggle">
+                <input type="checkbox" id="adv-compaction-auto">
+                <span>自动压缩长对话历史</span>
+              </label>
+              <p class="dim small adv-toggle-desc">
+                长对话占用达到下面设定的比例时，自动把较早的历史替换成摘要接着聊，避免撞上模型上下文上限。
+                关闭后不再自动压缩，仅手动执行 <b>/compact</b> 时压缩（超窗会话将无法继续发消息，直到手动压缩）。
+              </p>
               <div class="toolcfg-row">
                 <label>压缩触发比例</label>
                 <input type="number" id="adv-compaction-trigger" min="50" max="98" step="1">
                 <span class="dim small">默认 90。上下文用到上限的这个比例（%）就自动压缩，留出余量避免顶满时被服务拒绝</span>
+              </div>
+              <div class="toolcfg-row">
+                <label>压缩保留条数</label>
+                <input type="number" id="adv-keep-recent" min="2" max="100" step="1">
+                <span class="dim small">默认 8。自动压缩历史时，最近这么多条原样保留</span>
               </div>
               <div class="toolcfg-row">
                 <label>每日 token 预算</label>

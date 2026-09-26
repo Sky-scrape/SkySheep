@@ -1102,6 +1102,7 @@ class ServerBackend:
                     context_limit_tokens=self._context_limit(),
                     compaction_keep_recent=self.cfg.compaction_keep_recent,
                     compaction_trigger=self.cfg.compaction_trigger,
+                    compaction_auto=self.cfg.compaction_auto,
                     hooks=self.hooks,
                     restrict_to_workdir=self.cfg.restrict_to_workdir,
                     session_id=session_id,
@@ -1316,6 +1317,7 @@ class ServerBackend:
             context_limit_tokens=self._context_limit(),
             compaction_keep_recent=self.cfg.compaction_keep_recent,
             compaction_trigger=self.cfg.compaction_trigger,
+            compaction_auto=self.cfg.compaction_auto,
             hooks=self.hooks,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
         )
@@ -1805,6 +1807,7 @@ class ServerBackend:
                     context_limit_tokens=self._context_limit(),
                     compaction_keep_recent=self.cfg.compaction_keep_recent,
                     compaction_trigger=self.cfg.compaction_trigger,
+                    compaction_auto=self.cfg.compaction_auto,
                     hooks=self.hooks,
                     restrict_to_workdir=self.cfg.restrict_to_workdir,
                     session_id=sid,
@@ -2281,6 +2284,7 @@ class ServerBackend:
                     context_limit_tokens=self._context_limit(),
                     compaction_keep_recent=self.cfg.compaction_keep_recent,
                     compaction_trigger=self.cfg.compaction_trigger,
+                    compaction_auto=self.cfg.compaction_auto,
                     hooks=self.hooks,
                     restrict_to_workdir=self.cfg.restrict_to_workdir,
                     session_id=sid,
@@ -5859,6 +5863,7 @@ class ServerBackend:
             ag.context_limit_tokens = limit
             ag.compaction_keep_recent = self.cfg.compaction_keep_recent
             ag.compaction_trigger = self.cfg.compaction_trigger
+            ag.compaction_auto = self.cfg.compaction_auto
             ag.restrict_to_workdir = self.cfg.restrict_to_workdir
 
     def _startup_status(self) -> dict:
@@ -5986,6 +5991,7 @@ class ServerBackend:
             "context_limit_tokens": self.cfg.context_limit_tokens,
             "compaction_keep_recent": self.cfg.compaction_keep_recent,
             "compaction_trigger": self.cfg.compaction_trigger,
+            "compaction_auto": self.cfg.compaction_auto,
             "restrict_to_workdir": self.cfg.restrict_to_workdir,
             "computer_control": self.cfg.computer_control,
             "browser_control": self.cfg.browser_control,
@@ -6022,6 +6028,8 @@ class ServerBackend:
                 raise RuntimeError("压缩触发比例需要一个数字") from None
         else:
             trigger = None
+        # 自动压缩总开关：不传 = 不动（与其它布尔项同一姿态）
+        compaction_auto = params.get("compaction_auto")
         restrict = params.get("restrict_to_workdir")
         budget = params.get("daily_token_budget")
         if budget is not None and budget != "":
@@ -6037,6 +6045,7 @@ class ServerBackend:
                 context_limit_tokens=ints.get("context_limit_tokens"),
                 compaction_keep_recent=ints.get("compaction_keep_recent"),
                 compaction_trigger=trigger,
+                compaction_auto=None if compaction_auto is None else bool(compaction_auto),
                 restrict_to_workdir=None if restrict is None else bool(restrict),
                 computer_control=(
                     None if params.get("computer_control") is None
@@ -9165,6 +9174,7 @@ class ServerBackend:
                 context_limit_tokens=self._context_limit(),
                 compaction_keep_recent=self.cfg.compaction_keep_recent,
                 compaction_trigger=self.cfg.compaction_trigger,
+                compaction_auto=self.cfg.compaction_auto,
                 hooks=self.hooks,
                 restrict_to_workdir=self.cfg.restrict_to_workdir,
                 session_id=session_id,

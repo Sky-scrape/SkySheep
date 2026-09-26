@@ -1240,7 +1240,21 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .ft-file:hover { background: var(--blue-weak); color: var(--blue); }
 .files-preview {
   flex-shrink: 0; height: 46%; display: flex; flex-direction: column;
-  border-top: 2px solid var(--ink-line); background: var(--paper-sunken);
+  background: var(--paper-sunken);
+}
+/* 树与预览之间的拖动分隔条：上下拖调整预览高度（偏好存 ui.json 的
+   files_preview_h），双击恢复默认档（只读 46% / 可编辑 68%） */
+.files-resizer {
+  flex-shrink: 0; height: 7px; cursor: row-resize; touch-action: none;
+  border-top: 2px solid var(--ink-line);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.files-resizer:hover, .files-resizer.on { background: var(--blue-weak); }
+/* 拖动时的提示线：只跟指针走，松手才把预览区落到位（避开大文本的逐帧重排） */
+#rp-page-files { position: relative; }
+.files-resizer-line {
+  position: absolute; left: 0; right: 0; top: 0; height: 2px;
+  background: var(--blue); pointer-events: none; z-index: 3;
 }
 /* 编辑态加高：改文档需要空间，只读预览维持原高度 */
 .files-preview.expanded { height: 68%; }
@@ -1256,6 +1270,13 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   padding: 8px 12px; white-space: pre; overflow: auto;
 }
 .files-preview textarea[readonly] { color: var(--text2); }
+/* 预览标题可能很长（长路径 + 大小 + 编码/行尾 + 只读原因），flex 项默认
+   min-width:auto 不许收缩，会把整行撑出面板、把右侧按钮顶出去裁掉。
+   标题自己收缩、超长省略号，悬停看全文（JS 同步 title），按钮恒完整 */
+#files-preview-title {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .snippets-list li {
   display: flex; align-items: center; gap: 8px;
   white-space: normal;
@@ -3562,6 +3583,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   grid-auto-columns: 9px;
   gap: 2px;
   flex: 1;
+  min-width: 0; /* flex 项默认 min-width:auto：内容超宽时收不回去，JS 量到的可用宽度会卡在旧格数上，周数只能涨不能缩 */
   overflow: hidden;
 }
 .map-heat-grid i { border-radius: 2px; background: var(--paper-inset); cursor: pointer; }

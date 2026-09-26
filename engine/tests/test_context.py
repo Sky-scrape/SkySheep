@@ -5,7 +5,12 @@ from __future__ import annotations
 from conftest import FakeProvider
 
 from skysheep.core import Agent
-from skysheep.core.context import _safe_recent_start, compact_history, estimate_tokens
+from skysheep.core.context import (
+    _safe_recent_start,
+    compact_history,
+    estimate_tokens,
+    is_compaction_summary,
+)
 from skysheep.messages import Message, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock
 from skysheep.security.gate import PermissionGate
 from skysheep.tools import ToolRegistry, default_tools
@@ -152,3 +157,40 @@ async def test_compaction_trigger_ratio_default_stays_below_limit(tmp_path):
     async for ev in agent.run_turn("hello"):
         events.append(ev)
     assert all(e.kind != "compaction" for e in events)
+
+
+async def test_compaction_auto_off_skips_auto_compaction(tmp_path):
+    """compaction_auto=False（设置里关掉自动压缩）：占用超过触发比例也不压缩，
+    原历史原样保留；同条件下开着（默认）会压——两条对照锁住开关的语义。"""
+    filler = "A" * 200  # 历史约 250 tokens，上限 1000、触发 0.5 → 阈值 500，必超
+
+    def build(provider, **kw):
+        agent = make_agent(
+            provider, tmp_path,
+            context_limit_tokens=1000, compaction_keep_recent=2,
+            compaction_trigger=0.5, **kw,
+        )
+        agent.set_system("sys")
+        for i in range(12):
+            agent.history.append(Message.user(f"第{i}轮 {filler}"))
+            agent.history.append(Message.assistant([TextBlock(text=f"回复{i}")]))
+        return agent
+
+    # 关：整轮不产生压缩事件，历史只多了本轮的一问一答
+    off_provider = FakeProvider([[TextBlock(text="好的，继续。")]])
+    off_agent = build(off_provider, compaction_auto=False)
+    events = [ev async for ev in off_agent.run_turn("继续")]
+    assert all(e.kind != "compaction" for e in events)
+    assert not any(
+        is_compaction_summary(m) for m in off_agent.history
+    )
+    assert len(off_agent.history) == 27  # system + 旧 24 条 + 本轮 user + assistant
+
+    # 开（默认）：同条件触发压缩
+    on_provider = FakeProvider([
+        [TextBlock(text="SUMMARY: 历史摘要。")],
+        [TextBlock(text="好的，继续。")],
+    ])
+    on_agent = build(on_provider)
+    events = [ev async for ev in on_agent.run_turn("继续")]
+    assert any(e.kind == "compaction" for e in events)

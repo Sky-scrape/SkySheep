@@ -238,6 +238,20 @@ def test_adv_card_row_alignment(home):
     assert "gap: 8px" in adv_block, "不写回 gap 会被 16px 版本覆盖，标题列偏 8px"
 
 
+# ---------- ⑨½ 自动压缩开关的前端接线 ----------
+
+def test_compaction_auto_frontend_wired(home):
+    """「运行参数」卡的自动压缩开关：控件、渲染/保存/恢复默认、联动置灰三处都在。"""
+    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
+    assert "compaction_auto" in js  # 渲染读 + 保存写都要带上
+    assert "syncCompactionInputs" in js  # 开关联动置灰比例/条数两个输入框
+    html = open("src/skysheep/server/static/index.html", encoding="utf-8").read()
+    assert 'id="adv-compaction-auto"' in html
+    # 三个压缩控件按「开关 → 比例 → 条数」的顺序成组
+    assert html.index("adv-compaction-auto") < html.index("adv-compaction-trigger") \
+        < html.index("adv-keep-recent")
+
+
 # ---------- ⑩ 用量页图表类型（柱状 / 折线） ----------
 
 def test_usage_chart_pref(home):

@@ -100,6 +100,7 @@ class Agent:
         context_limit_tokens: int = 1_000_000,
         compaction_keep_recent: int = 8,
         compaction_trigger: float = 0.9,
+        compaction_auto: bool = True,
         hooks=None,
         restrict_to_workdir: bool = False,
         session_id: str = "",
@@ -114,6 +115,9 @@ class Agent:
         # 占用达到上限的这个比例就触发压缩（0.9 = 留 10% 余量）：顶满才压缩
         # 容易半路撞上上游 400，见 run_turn 开头的两处检查
         self.compaction_trigger = min(0.98, max(0.5, float(compaction_trigger)))
+        # 自动压缩总开关（默认开）：关闭后循环里两处自动检查全部跳过，只保留
+        # 手动 /compact（backend 直接调 compact_history，不受此开关约束）
+        self.compaction_auto = bool(compaction_auto)
         self.hooks = hooks  # core.hooks.HookRunner | None：工具调用前后用户钩子
         self.restrict_to_workdir = restrict_to_workdir
         # 会话 id：透传给钩子命令的 stdin JSON（多会话场景钩子可区分来源）
@@ -272,12 +276,14 @@ class Agent:
 
         # 0. 上下文压缩：占用达到「上限 × 触发比例」时，先用摘要替换旧历史
         #    （默认 0.9：留出余量，避免顶满上限时才压缩、半路撞上游 400）
-        if self.used_context_tokens() > self.context_limit_tokens * self.compaction_trigger:
+        #    compaction_auto=False（设置里关掉自动压缩）时整段跳过
+        if self.compaction_auto and \
+                self.used_context_tokens() > self.context_limit_tokens * self.compaction_trigger:
             ev = await compact_history(self, keep_recent=self.compaction_keep_recent)
             if ev is not None:
                 yield ev
         # 已尽力压缩仍超限（历史太短/摘要失败）：本轮不再逐迭代重试
-        compaction_stuck = False
+        compaction_stuck = not self.compaction_auto
 
         for iteration in range(1, self.max_iterations + 1):
             iterations = iteration

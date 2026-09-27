@@ -1284,6 +1284,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pypinyin"
+version = "0.55.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b4/a4/784cf98c09e0dc22776b0d7d8a4a5b761218bcae4608c2416ce1e167c8af/pypinyin-0.55.0.tar.gz", hash = "sha256:b5711b3a0c6f76e67408ec6b2e3c4987a3a806b7c528076e7c7b86fcf0eaa66b", size = 839836, upload-time = "2025-07-20T12:01:50.657Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/7b/4cabc76fcc21c3c7d5c671d8783984d30ac9d3bb387c4ba784fca3cdfa3a/pypinyin-0.55.0-py2.py3-none-any.whl", hash = "sha256:d53b1e8ad2cdb815fb2cb604ed3123372f5a28c6f447571244aca36fc62a286f", size = 840203, upload-time = "2025-07-20T12:01:48.535Z" },
+]
+
+[[package]]
 name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1641,7 +1650,7 @@ wheels = [
 
 [[package]]
 name = "skysheep-engine"
-version = "2.0"
+version = "2.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1655,12 +1664,14 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "pydantic" },
     { name = "pypdf" },
+    { name = "pypinyin" },
     { name = "python-docx" },
     { name = "python-pptx" },
     { name = "pywebview" },
     { name = "pywinpty" },
     { name = "rich" },
     { name = "tomli-w" },
+    { name = "uvicorn" },
     { name = "websockets" },
     { name = "winotify" },
 ]
@@ -1687,12 +1698,14 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pypdf", specifier = ">=4.0" },
+    { name = "pypinyin", specifier = ">=0.55.0" },
     { name = "python-docx", specifier = ">=1.1" },
     { name = "python-pptx", specifier = ">=1.0.2" },
     { name = "pywebview", specifier = ">=6.2.1" },
     { name = "pywinpty", specifier = ">=3.0.5" },
     { name = "rich", specifier = ">=13.7" },
     { name = "tomli-w", specifier = ">=1.2.0" },
+    { name = "uvicorn", specifier = ">=0.30" },
     { name = "websockets", specifier = ">=17.1" },
     { name = "winotify", specifier = ">=1.1.0" },
 ]
@@ -1839,8 +1852,8 @@ name = "uvicorn"
 version = "0.52.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version < '3.12' or sys_platform != 'emscripten'" },
-    { name = "h11", marker = "python_full_version < '3.12' or sys_platform != 'emscripten'" },
+    { name = "click" },
+    { name = "h11" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f2/0f/3f86e61397dd33bf2ccf28188c40db6a740658aeebbbf6e7dbc101a1f487/uvicorn-0.52.4.tar.gz", hash = "sha256:73acfee47a0b133c5de13d219492d62d8a31e935f4fe6e41a232451a15379f86", size = 100627, upload-time = "2026-08-19T06:27:41.821Z" }
 wheels = [

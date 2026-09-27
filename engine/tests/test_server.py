@@ -1061,6 +1061,36 @@ def test_skills_install_from_dir_and_delete(home):
         assert not (home / "home" / "skills" / "my-skill").exists()
 
 
+def test_skills_gallery_installed_flag(home):
+    """skills.gallery：打包内官方模板清单 + 已装比对。
+
+    先查清单（全条目 installed=False），再装一个与首个模板同名的临时技能，
+    重新查询后该条目 installed 翻 true——比对按技能名进行（与界面的
+    「已安装」徽标同一口径）。
+    """
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "g1", "method": "skills.gallery"})
+        r = recv_until(ws, "g1")["result"]
+        assert r["count"] >= 1
+        templates = r["templates"]
+        assert all(not t["installed"] for t in templates)
+        assert all(t["source"].startswith("https://") for t in templates)
+
+        # 装一个与首个模板同名的临时技能（scope=global，与场景模板区一键安装同参）
+        target = templates[0]["name"]
+        src = make_skill_dir(home / "outside", target)
+        ws.send_json({"id": "i", "method": "skills.install",
+                      "params": {"source": str(src), "scope": "global"}})
+        assert recv_until(ws, "i")["ok"]
+
+        ws.send_json({"id": "g2", "method": "skills.gallery"})
+        r2 = recv_until(ws, "g2")["result"]
+        match = [t for t in r2["templates"] if t["name"] == target]
+        assert match and match[0]["installed"] is True
+        # 其余模板不受影响
+        assert sum(1 for t in r2["templates"] if t["installed"]) == 1
+
+
 def test_skills_install_project_scope_and_errors(home):
     src = make_skill_dir(home / "outside", "proj-skill")
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:

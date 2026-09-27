@@ -320,6 +320,10 @@ body.ui-anim-off #sb-rail { transition: none !important; }
 }
 .list li:hover { background: var(--blue-weak); }
 .list li.active { background: var(--paper-raised); border-color: var(--ink-line); box-shadow: var(--shadow-sm); font-weight: 700; }
+/* 键盘焦点环：列表行是 li（非 button），全局 button:focus-visible 罩不到。
+   覆盖侧栏会话/项目列表与分组组头（tabindex 由 app.js 的 wireRowKeyboard 补），
+   与 .chat-tab:focus-visible 同一语言：交互蓝 2px，offset 负值贴行内缘（行矮不外溢） */
+.list li:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 #skill-list li, #mcp-list li { display: flex; justify-content: space-between; align-items: center; gap: 6px; cursor: default; }
 #mcp-list li .tools { color: var(--dim); font-size: 11px; }
 #skill-list .toggle { cursor: pointer; flex-shrink: 0; }
@@ -1239,25 +1243,13 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 }
 .ft-file:hover { background: var(--blue-weak); color: var(--blue); }
 .files-preview {
-  flex-shrink: 0; height: 46%; display: flex; flex-direction: column;
-  background: var(--paper-sunken);
-}
-/* 树与预览之间的拖动分隔条：上下拖调整预览高度（偏好存 ui.json 的
-   files_preview_h），双击恢复默认档（只读 46% / 可编辑 68%） */
-.files-resizer {
-  flex-shrink: 0; height: 7px; cursor: row-resize; touch-action: none;
-  border-top: 2px solid var(--ink-line);
-  transition: background var(--dur-fast) var(--ease-out);
-}
-.files-resizer:hover, .files-resizer.on { background: var(--blue-weak); }
-/* 拖动时的提示线：只跟指针走，松手才把预览区落到位（避开大文本的逐帧重排） */
-#rp-page-files { position: relative; }
-.files-resizer-line {
-  position: absolute; left: 0; right: 0; top: 0; height: 2px;
-  background: var(--blue); pointer-events: none; z-index: 3;
+  /* 高度由 --fp-h 驱动：拖树与预览之间的手柄即改这个变量（未设置时只读 46% /
+     可编辑 68% 两档默认）；与 --sb-w / --cp-h / --rp-w 是同一套拖拽尺寸机制 */
+  flex-shrink: 0; height: var(--fp-h, 46%); display: flex; flex-direction: column;
+  border-top: 2px solid var(--ink-line); background: var(--paper-sunken);
 }
 /* 编辑态加高：改文档需要空间，只读预览维持原高度 */
-.files-preview.expanded { height: 68%; }
+.files-preview.expanded { height: var(--fp-h, 68%); }
 .files-preview pre {
   flex: 1; overflow: auto; margin: 0; padding: 8px 12px;
   font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
@@ -1288,6 +1280,8 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   font-size: 11px; letter-spacing: -2px;
 }
 .snippets-list li.dragging { opacity: .45; }
+/* 停用的提示词：整行降透明，~ 候选不再显示（不删除，行上「启」字按钮可恢复） */
+.snippets-list li.off { opacity: .55; }
 #snippets-status { margin: 0 0 4px; }
 /* 编辑弹窗的占位符 chips：点按插到光标处 */
 .sn-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
@@ -2108,6 +2102,47 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   padding: 6px 14px; flex-shrink: 0;
 }
 #settings-topbar h2 { font-size: 16px; letter-spacing: 2px; }
+#settings-topbar { position: relative; }
+
+/* 设置内搜索（页顶常驻）与结果浮层：浮层相对 topbar 定位，点结果跳页并高亮卡片 */
+.settings-search {
+  flex: 0 1 320px; min-width: 140px; max-width: 360px;
+  padding: 4px 10px; font: inherit; font-size: 12px;
+  border: 1px solid var(--ink-line); border-radius: var(--r-md);
+  background: var(--paper-raised); color: var(--text);
+}
+.settings-search:focus { outline: 2px solid var(--blue); outline-offset: -1px; }
+.settings-search-results {
+  position: absolute; top: calc(100% + 4px); left: 90px; z-index: 60;
+  min-width: 300px; max-width: min(480px, calc(100vw - 120px));
+  max-height: 50vh; overflow-y: auto;
+  background: var(--paper-raised); border: 1px solid var(--ink-line);
+  border-radius: var(--r-md); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+  padding: 4px; display: flex; flex-direction: column; gap: 2px;
+}
+.ssr-item {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 6px 10px; border: none; background: transparent; cursor: pointer;
+  border-radius: var(--r-md); font: inherit; text-align: left; color: var(--text);
+}
+.ssr-item:hover { background: var(--paper-sunken); }
+.ssr-empty { padding: 8px 10px; }
+/* 搜索命中的卡片：闪烁两下提示落点 */
+@keyframes ssrFlash { 0%, 100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px var(--blue); } }
+.ssr-flash { animation: ssrFlash 0.8s ease-in-out 2; }
+
+/* 需重启生效统一横条：设置页顶栏右侧，保存了「重启才生效」的设置后出现 */
+.restart-banner {
+  display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0;
+  padding: 3px 10px; font-size: 12px;
+  background: #f7edd8; color: #8a6410; border: 1px solid #d8c08a;
+  border-radius: var(--r-md);
+}
+html[data-theme="night"] .restart-banner,
+html[data-theme="indigo"] .restart-banner,
+html[data-theme="pine"] .restart-banner {
+  background: rgba(176, 141, 87, 0.16); color: #d8bd8e; border-color: rgba(176, 141, 87, 0.4);
+}
 .settings-body {
   flex: 1; overflow-y: auto; padding: 14px 18px;
   display: flex; flex-direction: column; gap: 12px;
@@ -2581,6 +2616,32 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   padding: 7px 10px; border-bottom: 1px solid var(--line);
   font-size: 12.5px; background: var(--paper-sunken);
 }
+/* 场景模板：设置 · 技能总览卡下方的官方技能包网格（自适应列数，
+   窄面板 / 右面板搬移两种宿主宽度下都能铺开） */
+.gallery-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 8px; margin-top: 4px;
+}
+.gallery-item {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--paper-raised);
+}
+.gallery-item .gallery-item-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  min-width: 0;
+}
+.gallery-item .item-name {
+  font-weight: 700; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gallery-item .gallery-desc {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--text2); font-size: 12px; line-height: 1.5;
+}
+.gallery-item .gallery-install { flex-shrink: 0; font-size: 12px; padding: 2px 8px; }
 /* 工具条不吃通用行 hover 底色（.list li:hover 的 --blue-weak 是半透明色，
    一盖上去，滚到工具条底下的首行就透出来，看着像两行重叠）：
    hover 时按回不透明底色，与常态一致 */
@@ -2758,7 +2819,8 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
 .mpc-label { font-weight: 700; font-size: 13px; }
 .mpc-top .chip { margin-left: auto; }
 .mpc-desc { font-size: 12px; color: var(--text2); line-height: 1.5; }
-.mpc-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+/* 底行钉在卡片底部：同行卡片等高，描述行数不同时按钮也不会散落在两个高度上 */
+.mpc-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 2px; }
 .mpc-need { font-size: 11px; color: var(--dim); }
 .mpc-add { margin-left: auto; flex-shrink: 0; font-size: 12px; padding: 4px 11px; }
 .mpc-add[disabled] { opacity: .6; cursor: default; }
@@ -4516,6 +4578,28 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 @media (max-width: 860px) {
   #chat-minimap { display: none; }
   .chat-log { padding-right: 0; }
+}
+
+/* 窄屏：设置页适配——卡片单列全宽，页顶搜索框与「需重启生效」横条允许换行不溢出。
+   放在文件尾部：同特异性下后写的压过前面的基础态（如 restart-banner 的
+   flex-shrink:0、settings-search-results 的 left:90px 都是为桌面单行服务的） */
+@media (max-width: 860px) {
+  /* 页顶一行装不下「标题 + 搜索框 + 重启横条」：允许折行，谁也不被挤出屏幕 */
+  #settings-topbar { flex-wrap: wrap; row-gap: 6px; }
+  /* 搜索框折行后吃满所在行：放开 140px 下限与 360px 上限（基础态为桌面单行设置） */
+  .settings-search { flex: 1 1 170px; min-width: 0; max-width: none; }
+  /* 搜索结果浮层贴搜索框左缘展开：基础态 left:90px + min-width:300px
+     在窄屏会把 300px 面板推出视口右缘 */
+  .settings-search-results { left: 10px; min-width: 0; max-width: calc(100vw - 20px); }
+  /* 重启横条允许收缩与内部换行：文案/按钮/状态逐行排；
+     状态文字可断行（保存结果文案可能很长），不再把横条撑出屏幕 */
+  #restart-banner { flex-shrink: 1; flex-wrap: wrap; min-width: 0; max-width: 100%; row-gap: 2px; }
+  #restart-banner .io-msg { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  /* 设置卡单列全宽：卡占满内容行，内部固定列数的行退成单列
+     （子代理列表行 170px+150px 固定列、用量页 4 列磁贴，窄屏放不下） */
+  .settings-card { width: 100%; min-width: 0; }
+  .subagent-row .skill-main { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+  .usage-tiles { grid-template-columns: 1fr; }
 }
 
 /* ---------- 动效降级：跟随系统「减少动态效果」 ----------

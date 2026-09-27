@@ -1,6 +1,6 @@
 [project]
 name = "skysheep-engine"
-version = "2.0"
+version = "2.1.0"
 description = "SkySheep engine — open-source AI agent workbench kernel (agent loop, tools, providers, permissions, sessions)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "mcp>=2.2.0",
     "fastapi>=0.141.1",
+    "uvicorn>=0.30",  # WS/HTTP 服务核心（cli/app.py 直接 import），此前靠 mcp 传递带入，显式声明防漂移
     "websockets>=17.1",
     "pywebview>=6.2.1",
     "tomli-w>=1.2.0",
@@ -24,9 +25,10 @@ dependencies = [
     "pypdf>=4.0",
     "python-docx>=1.1",
     "openpyxl>=3.1",
-    "pillow>=10.0",  # pypdf 初始化会探测 PIL；测试也用它构造样例图（截图功能已移除）
+    "pillow>=10.0",  # pypdf 初始化会探测 PIL；电脑控制截图（ImageGrab）、文档图片与测试样例图都靠它
     "python-pptx>=1.0.2",
     "pywinpty>=3.0.5",
+    "pypinyin>=0.55.0",
 ]
 
 [project.scripts]

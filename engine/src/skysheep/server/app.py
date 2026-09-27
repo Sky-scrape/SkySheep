@@ -265,18 +265,25 @@ def _static_dir() -> Path:
 
 
 def _no_store_static(app) -> None:
-    """手写静态资源（index.html / app.js / app.css）一律 no-store。
+    """手写静态资源（index.html / app.js / app-tools.js / app.css）一律 no-store。
 
     前端是零构建手写资源，文件名不带指纹，StaticFiles 默认的 ETag 协商在
     WebView 上可能让旧窗口继续用缓存里的 app.js——改了前端却看不到效果，
-    每次都要用户手动强刷。这三个文件加起来不到 500KB 且是本地磁盘读，
-    每次都取最新版远比省这点 IO 划算。
+    每次都要用户手动强刷。这几个文件加起来不到 500KB 且是本地磁盘读，
+    每次都取最新版远比省这点 IO 划算。app-tools.js（工具配置区块，从 app.js
+    拆出）与 app.js 必须同版配套，混用新旧两份会缺函数，更要禁缓存。
 
     刻意不包括 /static/vendor/：那是第三方构建产物（mermaid 单文件 3.3MB）
     且随手写代码一起发版，局域网手机访问时每次重下代价太大——它们靠 ETag
     协商已经足够。
     """
-    no_store = {"/", "/static/index.html", "/static/app.js", "/static/app.css"}
+    no_store = {
+        "/",
+        "/static/index.html",
+        "/static/app.js",
+        "/static/app-tools.js",
+        "/static/app.css",
+    }
 
     @app.middleware("http")
     async def _static_headers(request, call_next):
@@ -646,9 +653,12 @@ def create_app(
         if method == "fs.write":
             return await backend.fs_write(params)
         if method == "snippets.list":
-            # builtin 随响应下发：用户把指令删光时，前端 / 菜单用它兜底
-            return {"snippets": await backend.store.list_snippets(),
-                    "builtin": BUILTIN_SNIPPETS}
+            # builtin 随响应下发：用户把指令删光时，前端 / 菜单用它兜底；
+            # initials 供 ~ 菜单按拼音首字母过滤（后端算好，前端不引拼音库）
+            rows = await backend.store.list_snippets()
+            for r in rows:
+                r["initials"] = backend.snippet_initials(str(r.get("name", "")))
+            return {"snippets": rows, "builtin": BUILTIN_SNIPPETS}
         if method == "snippets.add":
             name = str(params.get("name", "")).strip()
             content = str(params.get("content", "")).strip()
@@ -660,10 +670,17 @@ def create_app(
                 int(params.get("id", 0)),
                 str(params.get("name", "")).strip(),
                 str(params.get("content", "")).strip(),
+                None if "enabled" not in params else bool(params.get("enabled")),
             )
             if not ok:
                 raise RuntimeError("快捷指令不存在")
             return {"updated": True}
+        if method == "snippets.set_enabled":
+            return {"updated": await backend.store.set_snippet_enabled(
+                int(params.get("id", 0)), bool(params.get("enabled"))
+            )}
+        if method == "snippets.polish":
+            return await backend.snippets_polish(params)
         if method == "snippets.delete":
             return {"deleted": await backend.store.delete_snippet(int(params.get("id", 0)))}
         if method == "snippets.used":
@@ -1242,6 +1259,9 @@ def create_app(
             )
         if method == "skills.delete":
             return await backend.delete_skill(str(params.get("name", "")))
+        if method == "skills.gallery":
+            # 纯本地只读（打包内清单 + 已装比对）：与技能清单同级，不进本机专属表
+            return backend.gallery_skills()
         if method == "mcp.import":
             return await backend.import_mcp_servers(
                 snippet=str(params.get("snippet", "")),

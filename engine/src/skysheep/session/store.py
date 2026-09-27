@@ -611,6 +611,13 @@ class SessionStore:
             )
         except Exception:
             pass
+        # 旧库迁移：snippets 补 enabled 列（提示词启用/停用）。旧行全视为启用
+        try:
+            await self._db.execute(
+                "ALTER TABLE snippets ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+            )
+        except Exception:
+            pass
         # 旧库迁移：usage_log 补 cached_tokens 列（提示词缓存命中入账）。旧行补 0
         # （未记录），聚合与费用拆算按 0 处理，行为与升级前一致。
         try:
@@ -2177,11 +2184,30 @@ class SessionStore:
         await self._db.commit()
         return cur.rowcount > 0
 
-    async def update_snippet(self, snippet_id: int, name: str, content: str) -> bool:
+    async def update_snippet(
+        self, snippet_id: int, name: str, content: str, enabled: bool | None = None,
+    ) -> bool:
+        assert self._db
+        if enabled is None:
+            cur = await self._db.execute(
+                "UPDATE snippets SET name = ?, content = ? WHERE id = ?",
+                (name[:40], content[:8000], snippet_id),
+            )
+        else:
+            # 带启用位：编辑弹窗保存时可以顺带改停用状态
+            cur = await self._db.execute(
+                "UPDATE snippets SET name = ?, content = ?, enabled = ? WHERE id = ?",
+                (name[:40], content[:8000], 1 if enabled else 0, snippet_id),
+            )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def set_snippet_enabled(self, snippet_id: int, enabled: bool) -> bool:
+        """只切启用位（列表行上的快捷开关）：停用的提示词不再进 ~ 候选。"""
         assert self._db
         cur = await self._db.execute(
-            "UPDATE snippets SET name = ?, content = ? WHERE id = ?",
-            (name[:40], content[:8000], snippet_id),
+            "UPDATE snippets SET enabled = ? WHERE id = ?",
+            (1 if enabled else 0, snippet_id),
         )
         await self._db.commit()
         return cur.rowcount > 0

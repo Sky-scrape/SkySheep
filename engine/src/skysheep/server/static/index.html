@@ -58,12 +58,11 @@
       </button>
 
       <nav class="side-menu">
-        <button class="nav-item" data-act="todo" title="Agent 拆解出的任务步骤会出现在这里">任务清单</button>
+        <button class="nav-item" data-act="todo" title="任务：Agent 拆解的任务步骤、派出的子代理任务与项目任务都在这里">任务</button>
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
         <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
-        <button class="nav-item" data-act="cron" title="到点让 Agent 自己干活，无人值守">定时任务</button>
-        <button class="nav-item" data-act="pipeline" title="多个任务按依赖顺序自动跑：前面的并行做，最后的汇总审查">任务编排</button>
+        <button class="nav-item" data-act="auto" title="自动化：定时任务（到点自己干活）与任务编排（按依赖顺序自动跑），无人值守">自动化</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
       </nav>
 
@@ -160,25 +159,22 @@
   <aside id="sb-rail" aria-label="侧栏已折叠">
     <button id="rail-expand" class="rail-btn" title="展开侧栏（Ctrl+B）">»</button>
     <!-- 功能导航六件套：与侧栏 .side-menu 同一套动作（openRightTab）；图标为本项目手绘线稿 -->
-    <button class="rail-btn" data-rail-act="todo" title="任务清单：Agent 拆解出的任务步骤会出现在这里">
+    <button class="rail-btn" data-rail-act="todo" title="任务：Agent 拆解的任务步骤、派出的子代理任务与项目任务都在这里" aria-label="任务">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V4"/><path d="m9 13.5 2.2 2.2 4-4.5"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="agenda" title="日程：到点在应用内提醒，跨会话保留">
+    <button class="rail-btn" data-rail-act="agenda" title="日程：到点在应用内提醒，跨会话保留" aria-label="日程">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15.5" rx="2"/><path d="M8 3v4M16 3v4M4 10.5h16"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，自动注入每一轮对话">
+    <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，自动注入每一轮对话" aria-label="项目记忆">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h5.5A3.5 3.5 0 0 1 12 7.5V21a2.5 2.5 0 0 0-2.5-2.5H3Z"/><path d="M21 4h-5.5A3.5 3.5 0 0 0 12 7.5V21a2.5 2.5 0 0 1 2.5-2.5H21Z"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="map" title="记忆地图：项目演化的可视化（时间线 + 主题图谱）">
+    <button class="rail-btn" data-rail-act="map" title="记忆地图：项目演化的可视化（时间线 + 主题图谱）" aria-label="记忆地图">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="cron" title="定时任务：到点让 Agent 自己干活，无人值守">
+    <button class="rail-btn" data-rail-act="auto" title="自动化：定时任务（到点自己干活）与任务编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="pipeline" title="任务编排：多个任务按依赖顺序自动跑，前面的并行做，最后的汇总审查">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="1.5"/><rect x="13" y="13" width="7.5" height="7.5" rx="1.5"/><path d="M7.25 11v3.75a2.5 2.5 0 0 0 2.5 2.5h3.25"/></svg>
-    </button>
-    <button class="rail-btn" data-rail-act="ext" title="MCP / Skills：技能包与 MCP 服务管理">
+    <button class="rail-btn" data-rail-act="ext" title="MCP / Skills：技能包与 MCP 服务管理" aria-label="MCP / Skills">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/></svg>
     </button>
     <div class="rail-sep" aria-hidden="true"></div>
@@ -241,7 +237,7 @@
           <p id="perm-rule" class="perm-rule" hidden></p>
           <div class="perm-actions">
             <button class="btn-primary" data-decision="allow_once">允许一次</button>
-            <button class="btn-ghost" data-decision="allow_always">总是允许（本项目）</button>
+            <button class="btn-ghost" data-decision="allow_always" title="保存到 设置 · 高级 · 本项目白名单，随时可在那里删除">总是允许（本项目）</button>
             <button class="btn-ghost danger" data-decision="deny">拒绝</button>
           </div>
         </div>
@@ -258,7 +254,7 @@
         <footer id="composer">
           <div id="image-tray" class="image-tray hidden"></div>
           <div id="ref-tray" class="ref-tray hidden"></div>
-          <textarea id="input" rows="2" placeholder="描述你的任务… 输入 & 引用对话 · @ 引用文件 · ~ 提示词 · / 命令 · 可粘贴/拖入图片"></textarea>
+          <textarea id="input" rows="2" placeholder="描述你的任务…"></textarea>
           <div id="composer-bar">
             <!-- 功能开关收成小图标：悬停看说明，激活亮主题色（规划蓝 / 圆桌紫 / 写入金） -->
             <button id="mode-switch" class="cp-icon" title="当前：执行模式 · 点击切到规划模式">
@@ -291,7 +287,7 @@
                 <text class="ring-txt" x="12" y="12.4"></text>
               </svg>
             </span>
-            <span id="cp-hint" title="Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
+            <span id="cp-hint" title="& 引用对话 · @ 引用文件 · ~ 提示词 · / 命令 · 可粘贴/拖入图片 · Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
             <!-- 右侧簇整体不拆行：窗口再窄也整簇换行并靠右，「发送」永远在最右 -->
             <span id="cp-right">
               <!-- 连接状态 + 思考强度：贴在模型选择器左侧 -->
@@ -372,7 +368,7 @@
               <button id="files-refresh" class="rp-mini">刷新</button>
             </div>
             <div id="files-tree" class="files-tree"></div>
-            <div id="files-resizer" class="files-resizer hidden" title="拖动调整预览区高度；双击恢复默认"></div>
+            <div id="files-resizer" class="ui-resizer ui-resizer-h hidden" title="拖动调整预览区高度；双击恢复默认"></div>
             <div id="files-preview" class="files-preview hidden">
               <div class="rp-toolbar">
                 <b id="files-preview-title" class="small"></b>
@@ -536,6 +532,7 @@
                 <option value="0">全部</option>
               </select>
               <span class="spacer"></span>
+              <button id="map-feedback" class="rp-mini" title="地图或摘要不对劲？生成诊断包并打开 GitHub 反馈页（诊断包已自动打码）">反馈</button>
               <button id="map-auto" class="rp-mini" title="自动生成演化摘要：开启后项目累计足量新会话时，后台自动总结（每次都是一次真实模型调用）">自动</button>
               <button id="map-gen" class="rp-mini primary" title="用当前模型通读项目会话史，总结演化阶段与主题">✦ 生成演化摘要</button>
             </div>
@@ -564,6 +561,21 @@
     <div id="view-settings" class="view hidden">
       <header id="settings-topbar">
         <h2>设置</h2>
+        <!-- 设置内搜索（M3）：按卡片标题与正文过滤，点结果跳到对应页并高亮那张卡 -->
+        <input id="settings-search" class="settings-search" type="text"
+               placeholder="搜索设置…（如 主题 / 白名单 / 定时任务）" autocomplete="off">
+        <span class="spacer"></span>
+        <!-- 需重启生效统一横条（M4）：LAN / Tailscale / 渠道 / 全局热键等保存后出现，
+             重启按钮共用 app.restart（与原远程控制卡里的按钮同一条接线） -->
+        <span id="restart-banner" class="restart-banner hidden">
+          <span>部分设置需要重启后生效</span>
+          <button id="btn-app-restart" class="btn-ghost">↻ 立即重启 SkySheep</button>
+          <span id="app-restart-msg" class="io-msg"></span>
+          <button id="restart-banner-close" class="rp-mini" title="暂不提醒">✕</button>
+        </span>
+        <!-- 搜索结果浮层必须留在 topbar 内：它 absolute 定位（top:calc(100% + 4px)）
+             依赖 topbar 的 position:relative 作定位祖先，放外面会相对视口落到首屏之下 -->
+        <div id="settings-search-results" class="settings-search-results hidden"></div>
       </header>
 
       <div class="settings-body">
@@ -628,6 +640,18 @@
               <span class="skill-entry-go" title="进入技能页">›</span>
             </div>
           </section>
+          <section class="settings-card" id="gallery-card">
+            <div class="card-head"><h3>场景模板</h3></div>
+            <p class="settings-hint">
+              官方精选的场景技能包：覆盖记账、报错排查、数据报告等常见任务，
+              点「一键安装」装进全局技能目录（所有项目可用），装完立即生效、
+              对话里直接说要做的事就行。
+            </p>
+            <div id="gallery-status" class="card-status" hidden></div>
+            <div id="gallery-grid" class="gallery-grid">
+              <span class="dim small">正在加载场景模板…</span>
+            </div>
+          </section>
           <section class="settings-card">
             <div class="card-head"><h3>联网搜索</h3></div>
             <p class="settings-hint" id="websearch-hint"></p>
@@ -656,25 +680,25 @@
             <h3>内置工具</h3>
             <p class="settings-hint">
               Agent 完成任务时可以调用的工具。<b>只读</b>操作自动放行；<b>写入</b>与<b>高危</b>（执行命令）操作默认会先征得你确认。
-              下面两个总开关<b>默认关闭</b>，打开后对应工具才会出现在列表里（打开即生效）。
+              下面「电脑与浏览器控制」两个开关<b>默认关闭</b>，打开后对应工具才会出现在列表里（打开即生效）。
             </p>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="tool-computer-control">
-              <span>启用电脑控制工具（截屏 / 鼠标 / 键盘 / 剪贴板 / 窗口）</span>
+              <span>电脑控制 —— 给 Agent 看：截屏 / 鼠标 / 键盘 / 剪贴板 / 窗口</span>
             </label>
             <p class="dim small adv-toggle-desc">
-              让 Agent 能「看见并操作」你的桌面：截屏进对话、移动鼠标、输入文字。
+              让 Agent 能「看见并操作」这台电脑：截屏进对话、移动鼠标、输入文字。
               高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，
               有「帮我操作这个软件」这类需求时再打开。
             </p>
             <div id="tool-computer-status" class="card-status" hidden></div>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="tool-browser-control">
-              <span>启用浏览器控制（Agent 打开网页 / 搜索）</span>
+              <span>浏览器控制 —— 给你看：Agent 替你打开网页 / 搜索</span>
             </label>
             <p class="dim small adv-toggle-desc">
-              让 Agent 能用你的默认浏览器打开网址或搜索关键词（比如「帮我打开这个链接」
-              「搜一下最近的新闻给我看」）。页面在你的浏览器里打开，逐次确认，
+              让 Agent 用你的默认浏览器打开网址或搜索关键词（比如「帮我打开这个链接」
+              「搜一下最近的新闻给我看」），页面在你的浏览器里展开，逐次确认、
               可按动作加白名单；<b>默认关闭</b>。Agent 自己读网页内容不受此开关影响（web_fetch）。
             </p>
             <div id="tool-browser-status" class="card-status" hidden></div>
@@ -1013,7 +1037,8 @@
             </label>
             <p class="dim small adv-toggle-desc">
               在任何应用里按这个组合键唤起 SkySheep 并预填剪贴板内容（仅 Windows 桌面版）。
-              形如「修饰键+主键」，主键限 Space、F1–F12 与部分符号键；改完点「保存」并重启应用生效。
+              形如「修饰键+主键」，主键限 Space、F1–F12 与部分符号键；改完点「保存」，
+              页顶出现提醒横条后点「立即重启」即可生效。
             </p>
           </section>
         </section>
@@ -1025,11 +1050,7 @@
               把 SkySheep 接到别的设备上用：手机 / 平板扫同一 Wi-Fi 或经 Tailscale
               跨网络打开完整界面，或在飞书 / 微信里给机器人发消息遥控。
               这些能力<b>默认全部关闭</b>，需要时逐项打开。
-            </p>
-            <p class="settings-hint">
-              改完「手机控制 / 远程访问」后需要重启才能生效：
-              <button id="btn-app-restart" class="btn-ghost">↻ 立即重启 SkySheep</button>
-              <span id="app-restart-msg" class="io-msg"></span>
+              开关类改动保存后，页顶会出现「需要重启生效」提醒横条，点横条上的按钮即可就地重启。
             </p>
           </section>
           <section class="settings-card">
@@ -1060,14 +1081,19 @@
           <section class="settings-card">
             <div class="card-head"><h3>聊天机器人渠道</h3></div>
             <p class="settings-hint">
-              把 <b>飞书 / 微信</b> 接成遥控端：在手机上给机器人发消息，就能让这台电脑上的
-              SkySheep 干活，回复直接回到聊天窗口。渠道<b>默认关闭</b>；启用前必须先把你的账号加入
-              <b>允许名单</b>——没有名单的机器人等于对所有人开放，而知道机器人账号的人都能给它发消息。
-              <b>「允许操作」未开启时，机器人只能读不能写</b>（改文件、跑命令一律自动拒绝）。
-              名单建议只填你个人的 OpenID——填群 chat id 等于群里每个人都能指挥机器人、
-              并对审批操作表态（决定只认发起人）。审批只能单次允许，没有「总是允许」。
-              飞书需自备 App ID / App Secret；微信无需 Token，扫二维码登录即可。
+              把 <b>飞书 / 微信</b> 接成遥控端：手机上给机器人发消息，就能让这台电脑上的 SkySheep
+              干活，回复直接回到聊天窗口。渠道<b>默认关闭</b>；启用前必须先把你的账号加入
+              <b>允许名单</b>——没有名单的机器人等于对所有人开放。
             </p>
+            <details class="rule-check-fold">
+              <summary>安全边界与凭据说明（只读模式 / 群聊风险 / 审批规则 / 凭据要求）</summary>
+              <p class="settings-hint">
+                <b>「允许操作」未开启时，机器人只能读不能写</b>（改文件、跑命令一律自动拒绝）。
+                名单建议只填你个人的 OpenID——填群 chat id 等于群里每个人都能指挥机器人、
+                并对审批操作表态（决定只认发起人）。审批只能单次允许，没有「总是允许」。
+                飞书需自备 App ID / App Secret；微信无需 Token，扫二维码登录即可。
+              </p>
+            </details>
             <div id="channel-panel" class="lan-info"></div>
           </section>
         </section>
@@ -1302,6 +1328,7 @@
               <h3>提示词</h3>
               <span class="head-ops">
                 <button id="btn-snippet-add" class="btn-ghost">＋ 新建</button>
+                <button id="btn-snippets-sort" class="btn-ghost">排序：手动顺序</button>
                 <button id="btn-snippets-import" class="btn-ghost" title="从导出的 JSON 文件合并导入提示词（名称与内容都相同的跳过）">导入</button>
                 <button id="btn-snippets-export" class="btn-ghost" title="导出全部提示词为 JSON（可备份、可分享给别的机器）">导出</button>
                 <button id="btn-snippets-restore" class="btn-ghost" title="把内置示例提示词加回来（同名已存在的跳过）">恢复示例</button>
@@ -1309,9 +1336,14 @@
             </div>
             <p class="settings-hint">
               常用的提示词模板。在输入框输入 <b>~</b> 时会出现在候选最上方，选中即插入到输入框；
-              列表顺序就是候选顺序，按住行首 <b>⋮⋮</b> 拖动可调整。
-              内容里支持占位符：<b>{{clipboard}}</b>（插入时替换为剪贴板文本）、
-              <b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b>（当天日期 / 当前时间 / 当前项目名）。
+              列表顺序就是候选顺序，按住行首 <b>⋮⋮</b> 拖动可调整（「排序」按钮可改成常用优先）；
+              <b>Alt+1..8</b> 直接插入候选前 8 条，<code>~</code> 菜单末尾可把当前输入一键「存为提示词」。
+              过滤支持名称 / 内容 / 拼音首字母（如 <code>xzb</code> 对应「写周报」）。
+              内容里支持占位符：<b>{{clipboard}}</b>（插入时替换为剪贴板文本，剪贴板为空会请你当场填写）、
+              <b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b>（当天日期 / 当前时间 / 当前项目名）、
+              <b>{{字段|默认值}}</b> 填空字段（插入时弹小表单现场填写，留空用默认值）；
+              编辑弹窗里「✨ AI 润色」可让模型帮你把提示词改写得更清晰。
+              行上的「停」字按钮可停用提示词（~ 候选不再显示，不删除）。
               删掉的内置示例可以点「恢复示例」加回来；把提示词删光后，<code>~</code> 菜单仍会附带内置示例兜底。
             </p>
             <p id="snippets-status" class="dim small" hidden></p>
@@ -1445,10 +1477,12 @@
     </div>
   </div>
 </div>
-<script src="/static/vendor/highlight.min.js"></script>
-<script src="/static/vendor/qrcode.min.js"></script>
-<!-- mermaid（3.3MB）与 xterm 双文件按需加载：首次渲染图表 / 首次开终端时
-     才由 app.js 的 loadLib 注入 script，冷启动不再白等这几 MB 的解析 -->
+<!-- mermaid（3.3MB）、xterm、highlight.js、qrcode 全部按需加载：首次渲染图表 /
+     首次开终端 / 首个代码块高亮 / 首次画二维码时，才由 app.js 的 loadLib 注入
+     script——首屏不再同步解析这几百 KB 到几 MB 的库，冷启动更快 -->
 <script src="/static/app.js"></script>
+<!-- 工具配置区块（联网搜索 / AI 画图 / 语音输入 / 圆桌）拆在 app-tools.js：
+     同为普通 script、零构建，先 app.js 后本文件，两文件靠全局函数互调 -->
+<script src="/static/app-tools.js"></script>
 </body>
 </html>

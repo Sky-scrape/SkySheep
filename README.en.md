@@ -27,11 +27,12 @@ The full "Night-ink" dark theme: sidebar + conversation + live right panel + the
 
 ## ✨ Why SkySheep
 
-Most AI desktop clients out there are just chat windows — the model can talk but can't act. SkySheep is a true **Agent workbench**: hand it a task and it reads the files, runs the commands, and writes out the results on its own. For a desktop Agent built for everyday users, safety comes first, so we made three things the default behavior:
+Most AI desktop clients out there are just chat windows — the model can talk but can't act. SkySheep is a true **Agent workbench**: hand it a task and it reads the files, runs the commands, and writes out the results on its own. For a desktop Agent built for everyday users, safety comes first, so we made four things the default behavior:
 
-| Triple safety promise | What it means |
+| Four-fold safety promise | What it means |
 |---|---|
 | 🔐 **Sensitive actions confirmed first** | File writes show a real diff preview and every command passes your eyes one by one; read-only actions run through automatically, no interruptions |
+| 🛡 **Unknown projects ask first** | A repo's bundled `.skysheep/` config (MCP commands, skills) never executes—and never reaches the model—until you confirm you trust it |
 | 📦 **All data stays on your machine** | Sessions, config, and API keys are stored only on your own computer (SQLite) — zero telemetry, zero uploads |
 | ↩️ **One-click undo for mistakes** | Every round of changes is auto-snapshotted to disk; roll back to any round even after a restart |
 
@@ -113,35 +114,39 @@ Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), 
 SkySheep's feature set was built item by item against Claude Code / OpenAI Codex CLI / ZCode (✅ = implemented):
 
 <details>
-<summary><b>Expand the 25-capability comparison table</b></summary>
+<summary><b>Expand the 29-capability comparison table</b></summary>
 
 | Capability | Claude Code | Codex CLI | ZCode | SkySheep |
 |---|---|---|---|---|
 | Agent loop (streaming + tool calls) | ✅ | ✅ | ✅ | ✅ |
 | Multi-model / multi-provider (OpenAI-compatible + Anthropic + local) | — | ✅ | ✅ | ✅ built-in presets + custom relay endpoints + auto model detection |
 | MCP client (stdio/HTTP, Claude Desktop config compatible) | ✅ | ✅ | ✅ | ✅ in-app import / manual entry / templates + one-click built-in presets, hot-applied |
-| Skill packages (SKILL.md, progressive disclosure) | ✅ | — | ✅ | ✅ global/project scopes, install from folder/zip/URL |
+| Skill packages (SKILL.md, progressive disclosure) | ✅ | — | ✅ | ✅ dedicated skills page: global/project scopes, per-project scope limits, full-text preview; import from folder/.zip/GitHub·Gitee URL + "scan this computer" |
 | Sub-agents (background tasks + polling) | ✅ | ✅ | ✅ | ✅ spawn_agent / check_task + custom sub-agents |
 | Project memory (AGENTS.md / CLAUDE.md) | ✅ | ✅ | ✅ | ✅ edited in-app + global auto memory (across projects) |
+| Memory map (project evolution visualization) | — | — | — | ✅ evolution timeline + topic graph + LLM-generated evolution summary (file footprints / activity heatmap / task & memory annotations) |
 | Task lists (todos) | ✅ | ✅ | ✅ | ✅ sidebar panel synced in real time |
 | Plan mode (plan first, then execute) | ✅ | ✅ | ✅ | ✅ dual execute/plan modes + one-click execute-the-plan |
 | Automatic context compaction + manual /compact | ✅ | ✅ | ✅ | ✅ CJK-aware estimation + real-usage floor as a fallback |
-| Permission prompts + project whitelist | ✅ | ✅ | ✅ | ✅ confirmation flow + command-prefix whitelist + tiered permission modes |
+| Permission prompts + project whitelist | ✅ | ✅ | ✅ | ✅ confirmation flow + word-boundary command-prefix whitelist (rejects shell-chaining bypass) + tiered permission modes + workspace trust (repo-bundled MCP/skills require confirmation) |
 | Headless one-shot runs (scripts / CI) | ✅ -p | ✅ exec | ✅ -p | ✅ skysheep run (pre-authorized tools + JSON output + audit) |
 | Ignore files | ✅ | ✅ | ✅ | ✅ .skysheepignore (.gitignore semantics, .env ignored by default) |
 | Slash commands | ✅ | ✅ | ✅ | ✅ /help /new /compact /model /status /todos /export |
 | Message queuing / auto-retry on transient errors | ✅ | ✅ | ✅ | ✅ exponential backoff; in-flight content is never replayed |
-| Web fetch + web search | ✅ | ✅ | ✅ | ✅ web_fetch (SSRF protection) + web_search (Bocha/Tavily/Zhipu) |
-| Document reading + generation | ✅ | — | ✅ | ✅ read_document (PDF/Word/Excel) + write_document (docx/xlsx/csv) |
+| Web fetch + web search | ✅ | ✅ | ✅ | ✅ web_fetch (SSRF protection) + web_search (Bocha/Tavily/Zhipu/self-hosted SearXNG) |
+| Document reading + generation | ✅ | — | ✅ | ✅ read_document (PDF/Word/Excel/PPT) + write_document (docx/xlsx/csv/PPT) |
 | Image input / image generation | ✅ | ✅ | ✅ | ✅ paste/drag-and-drop multimodal input + CogView/Kolors image generation |
 | Computer use | — | — | — | ✅ screenshot/mouse/keyboard/window/clipboard (off by default; confirmation-gated + action whitelist) |
-| Thinking visualization | — | — | — | ✅ ThinkingDelta streaming + collapsible replay |
+| Thinking visualization | — | — | — | ✅ ThinkingDelta streaming + collapsible replay + thinking time |
+| Task time estimates / duration logging | ✅ | — | ✅ | ✅ estimates a range when taking over; actual duration recorded per round and persisted with the message |
 | Checkpoints / undo this round's file changes | ✅ checkpoints | ✅ rollback | ✅ | ✅ persisted to disk; rollbacks survive restarts |
 | Session search / management | ✅ | ✅ | ✅ | ✅ cross-project full-text search + visual backup restore + Markdown/HTML export |
 | Right-side panel (terminal / browser / side chat / review / files / tasks / agenda) | — | — | ✅ | ✅ multiple session tabs in parallel |
 | Hooks (pre/post tool-call hooks) | ✅ | — | ✅ | ✅ [hooks] in config.toml; pre-hooks can block |
-| Light/dark themes / desktop form factor | — | — | ✅ | ✅ Paper-ink / Night-ink / follow system + system tray + launch at startup + installer |
+| Light/dark themes / desktop form factor | — | — | ✅ | ✅ six themes (Paper-ink / Celadon / Persimmon / Night-ink / Indigo / Pine) + follow system + system tray + launch at startup + installer |
 | LAN remote access (continue on your phone) | — | — | — | ✅ token + QR code; listens on localhost only by default |
+| Cross-network remote access (Tailscale) | — | — | — | ✅ reach home from any network; shares the token with LAN; non-tailnet sources rejected outright |
+| Chat bot channels (Feishu / WeChat) | — | — | — | ✅ Feishu (App ID/Secret + WebSocket long connection) + WeChat (QR login); off by default, empty allowlist denies everything, read-only when unattended, optional approval with timeout auto-deny |
 
 </details>
 
@@ -215,9 +220,25 @@ Running into a problem? In the app, go to Settings · About → "💬 Report an 
 
 [CHANGELOG.md](CHANGELOG.md) is the single source of truth for versions and changes.
 
+## 🚫 Non-goals
+
+The roadmap says what comes next; this section says what intentionally won't — written down to avoid relitigating it:
+
+- **Native mobile apps** — the desktop shell is where the permission gate, checkpoints, and the file panel get polished; there is no bandwidth right now for a second, mobile-grade security model.
+- **macOS/Linux (for now)** — Windows is the first-class platform, and pywebview/WebView2, wintheme, and process-tree management get the attention first; the `--browser` mode already provides a cross-platform fallback.
+- **Vector memory / multi-tier context compaction** — the built-in "keep recent messages + LLM summary" compaction and archive-time memory digests already cover current usage; a vector store would grow the install and expand the local sensitive-data surface.
+- **Replacing the built-in grep with ripgrep** — the built-in content search is pure Python with zero external dependencies; binding to an external binary would break the "install and it works" distribution.
+- **A proprietary plugin JS API** — extension points stay on the two open standards, MCP and Skills; the frontend remains zero-build, with no private plugin protocol or build chain to maintain.
+- **An operated skill marketplace** — a curated store needs ongoing review and server investment; skills ship via the in-app "Import" flow (folder / .zip / GitHub·Gitee links) instead.
+
 ## 📄 License
 
 [MIT](LICENSE)
+
+## 💖 Sponsorship
+
+Donations are accepted via the channel listed in [.github/FUNDING.yml](.github/FUNDING.yml) — GitHub Sponsors: [Sky-scrape](https://github.com/sponsors/Sky-scrape).
+The first spending priority is **code-signed distribution**: a signing certificate is a recurring annual cost and the only unfinished item of roadmap milestone M5; signed installers remove the Windows SmartScreen warning (see [docs/smartscreen-说明.md](docs/smartscreen-说明.md)) so everyday users can install with a double-click.
 
 ---
 

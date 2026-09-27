@@ -136,7 +136,7 @@ MAX_SKILL_DESCRIPTION_CHARS = 1000
 # 技能名同样会拼进系统提示词的 Skills 清单（作为 load_skill 的参数），也一并限长。
 MAX_SKILL_NAME_CHARS = 120
 
-# version / 来源标记只进界面展示与广场比对，不进系统提示词，限个合理长度防脏数据即可。
+# version / 来源标记只进界面展示（技能清单与详情），不进系统提示词，限个合理长度防脏数据即可。
 MAX_SKILL_VERSION_CHARS = 32
 
 

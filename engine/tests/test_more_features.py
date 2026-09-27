@@ -134,6 +134,62 @@ def test_snippets_crud_via_ws(home):
         assert not recv_until(ws, "a2")["ok"]
 
 
+def test_snippets_enabled_toggle_and_last_used(home):
+    """启用/停用与最近使用：停用位可切换、insert 使用上报刷新 last_used_at。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "snippets.add", "params": {
+            "name": "帮我修报错", "content": "报错如下"}})
+        sid = recv_until(ws, "a1")["result"]["snippet"]["id"]
+
+        ws.send_json({"id": "l1", "method": "snippets.list", "params": {}})
+        row = [s for s in recv_until(ws, "l1")["result"]["snippets"] if s["id"] == sid][0]
+        assert row["enabled"] == 1
+        # 拼音首字母（名称首字母串，~ 菜单过滤用）：帮我修报错 → bwxbc
+        assert row["initials"] == "bwxbc"
+        assert row["last_used_at"] == 0
+
+        # 插入使用上报：last_used_at 被刷新（>0），used 不回填
+        ws.send_json({"id": "u1", "method": "snippets.used", "params": {"id": sid}})
+        assert recv_until(ws, "u1")["result"]["updated"] is True
+
+        ws.send_json({"id": "e1", "method": "snippets.set_enabled",
+                      "params": {"id": sid, "enabled": False}})
+        assert recv_until(ws, "e1")["result"]["updated"] is True
+        ws.send_json({"id": "l2", "method": "snippets.list", "params": {}})
+        row = [s for s in recv_until(ws, "l2")["result"]["snippets"] if s["id"] == sid][0]
+        assert row["enabled"] == 0 and row["last_used_at"] > 0
+
+        # update 不带 enabled 时不动启用位
+        ws.send_json({"id": "u2", "method": "snippets.update", "params": {
+            "id": sid, "name": "改名", "content": "新内容"}})
+        assert recv_until(ws, "u2")["ok"]
+        ws.send_json({"id": "l3", "method": "snippets.list", "params": {}})
+        row = [s for s in recv_until(ws, "l3")["result"]["snippets"] if s["id"] == sid][0]
+        assert row["enabled"] == 0
+
+
+def test_snippets_polish_with_fake_provider(home):
+    """AI 润色走当前模型一次性调用；结果只回显不落库。"""
+    from test_server import make_client, recv_until
+
+    from skysheep.messages import TextBlock
+    from skysheep.models.fake import FakeProvider
+
+    provider = FakeProvider([[TextBlock(text="改写后的提示词正文")]])
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "p1", "method": "snippets.polish", "params": {
+            "content": "帮我看看这个报错"}})
+        r = recv_until(ws, "p1")
+        assert r["ok"] and r["result"]["content"] == "改写后的提示词正文"
+
+        # 空内容拒绝
+        ws.send_json({"id": "p2", "method": "snippets.polish", "params": {"content": "  "}})
+        assert not recv_until(ws, "p2")["ok"]
+
+
 # ---- 内置示例快捷指令：首启播种 ----
 
 

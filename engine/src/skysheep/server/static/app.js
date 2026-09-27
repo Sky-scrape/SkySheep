@@ -413,13 +413,16 @@ function persistSessionTabs() { /* 由 renderTabs 内联执行（见上），保
 // ---------- 消息导航条（minimap）：右侧一列小圆点，一颗对应一条消息 ----------
 // 平时半透明圆点，当前视口所在消息的那颗拉长成实色亮条，相邻圆点按距离
 // 渐变（近长远短，4 步外回到圆点）；点它平滑跳到对应消息，
-// 悬停提示消息开头文字。消息太多匀不下时等距抽样（一颗代表一段，跳到段首）。
+// 悬停提示消息开头文字。消息太多匀不下时等距抽样（一颗代表一段，跳到段首）：
+// 先按消息数封顶（超过 MINI_MAX_MSGS 条先对消息抽样，rebuild 不再逐条全量测量），
+// 再按可用高度封顶（短视口下圆点更少）。
 // 只在内容可滚动且不止一条消息时出现；随 attachTabLog 绑定当前标签的聊天流。
 const chatMinimap = document.createElement("div");
 chatMinimap.id = "chat-minimap";
 chatMinimap.className = "hidden";
 chatBox.appendChild(chatMinimap);
 const MINI_ITEM_H = 10, MINI_GAP = 4; // 与 app.css 的圆点热区高 / 列间距保持一致
+const MINI_MAX_MSGS = 150; // 消息数上限：超过就先对消息等距抽样，圆点从样本里选代表
 let miniLog = null, miniMut = null, miniRO = null, miniTargets = [], miniTops = [];
 let miniTimer = 0, miniRaf = 0, miniRemap = 0, miniGen = 0;
 
@@ -497,11 +500,24 @@ function miniRebuild() {
   // 容器 rect 只读一次：循环里每条消息各读一次 getBoundingClientRect
   // 会强制布局多次（长会话 rebuild 期间每秒多次全量布局的来源之一）
   const logRect = miniLog.getBoundingClientRect();
+  // 消息数超上限先对消息等距抽样：下面这段逐条测量每条消息各读一次
+  // getBoundingClientRect，几千条消息的会话流式期间每轮 rebuild 全量量一遍太重。
+  // 抽样后每颗圆点仍对准样本里的真实消息（高亮与点击都按它算），末尾留一个
+  // 名额给最后一条消息——点最末一颗、贴底强制高亮都对准真正的结尾；
+  // 不超上限时 pool 就是原数组，行为与逐条测量完全一致。
+  let pool = msgs;
+  if (msgs.length > MINI_MAX_MSGS) {
+    pool = new Array(MINI_MAX_MSGS);
+    const s0 = msgs.length / MINI_MAX_MSGS;
+    for (let i = 0; i < MINI_MAX_MSGS; i++) {
+      pool[i] = i === MINI_MAX_MSGS - 1 ? msgs[msgs.length - 1] : msgs[Math.floor(i * s0)];
+    }
+  }
   // 目标位置相同的连续消息合并成一颗（保留最后一条——滚到底时看到的正是末尾那几条）。
   // 内容只比视口高一点点时，末尾好几条的目标会被一起钳到底部；
   // 不合并就会出现多颗点了没反应、高亮全落最后一颗的死圆点。
   const slots = [];
-  for (const el of msgs) {
+  for (const el of pool) {
     const target = miniScrollTarget(el, logRect);
     const last = slots[slots.length - 1];
     if (last && Math.abs(last.target - target) < 1) last.el = el;
@@ -870,6 +886,47 @@ async function newSessionFromHighlight() {
   startNewTab();
 }
 
+// 内置示例任务：场景模板清单拉不到时的回落（见 showWelcome）
+const WELCOME_SAMPLES = [
+  { label: "🎮 写一个贪吃蛇网页并测试", q: "帮我在这个目录里创建一个贪吃蛇网页游戏，写完自己打开测试一下" },
+  { label: "🗂 总结当前项目结构", q: "看看当前项目的结构，给我一份架构总结" },
+  { label: "🧹 整理当前目录文件", q: "把目录下所有文件按类型整理进子文件夹，并列出你做了什么" },
+];
+
+// 场景模板前 6 条（打包内官方技能清单）：进程内缓存一次，失败不缓存
+// （下次进欢迎页重试），始终回落内置示例
+let welcomeSceneCache = null;
+async function welcomeSceneSamples() {
+  if (welcomeSceneCache) return welcomeSceneCache;
+  try {
+    const r = await request("skills.gallery");
+    const items = (r.templates || []).slice(0, 6);
+    if (items.length) {
+      welcomeSceneCache = items.map((t) => ({
+        label: "🧩 " + (t.display_name || t.name),
+        title: t.description,
+        q: `请使用「${t.name}」技能完成任务：${t.description}`,
+      }));
+    }
+  } catch (e) { /* 加载失败：回落内置示例 */ }
+  return welcomeSceneCache;
+}
+
+function welcomeSamplesHtml(samples) {
+  return samples.map((s) =>
+    `<button class="w-sample" data-q="${escapeHtml(s.q)}" title="${escapeHtml(s.title || s.q)}">${escapeHtml(s.label)}</button>`
+  ).join("");
+}
+
+function bindWelcomeSamples(host) {
+  host.querySelectorAll(".w-sample").forEach((btn) => {
+    btn.onclick = () => {
+      document.getElementById("input").value = btn.dataset.q;
+      send();
+    };
+  });
+}
+
 function showWelcome() {
   const host = curLog();
   // 设置 · 界面与通知 关掉欢迎卡后，空白会话保持空白（四个调用点统一从这里出口）
@@ -881,19 +938,19 @@ function showWelcome() {
     <div class="welcome">
       <div class="w-title"><i class="w-logo" aria-hidden="true"></i>欢迎使用 SkySheep</div>
       <div class="w-sub">一个跑在你电脑上的 AI Agent 工作台。试着给它一个完整任务，比如：</div>
-      <div class="w-samples">
-        <button class="w-sample" data-q="帮我在这个目录里创建一个贪吃蛇网页游戏，写完自己打开测试一下">🎮 写一个贪吃蛇网页并测试</button>
-        <button class="w-sample" data-q="看看当前项目的结构，给我一份架构总结">🗂 总结当前项目结构</button>
-        <button class="w-sample" data-q="把目录下所有文件按类型整理进子文件夹，并列出你做了什么">🧹 整理当前目录文件</button>
-      </div>
+      <div class="w-samples">${welcomeSamplesHtml(WELCOME_SAMPLES)}</div>
       <div class="w-note">写文件、执行命令等敏感操作都会先征求你的确认。</div>
     </div>`;
-  host.querySelectorAll(".w-sample").forEach((btn) => {
-    btn.onclick = () => {
-      document.getElementById("input").value = btn.dataset.q;
-      send();
-    };
-  });
+  bindWelcomeSamples(host);
+  // 示例任务优先用场景模板（A2）：先画内置示例不空等，清单取到前 6 条就原位替换；
+  // 加载失败 / 清单为空时内置示例原地不动（回落）。欢迎卡已被清掉时不再写回。
+  welcomeSceneSamples().then((samples) => {
+    if (!samples) return;
+    const box = host.querySelector(".w-samples");
+    if (!box) return;
+    box.innerHTML = welcomeSamplesHtml(samples);
+    bindWelcomeSamples(host);
+  }).catch(() => {});
 }
 
 function addNotice(text) {
@@ -2409,6 +2466,23 @@ function renderRailSessions(sessions) {
   });
 }
 
+// ---------- 无障碍：侧栏列表行补键盘激活 ----------
+// 会话/项目列表行是 li（非 button，历史结构），键盘用户原本 Tab 不进去。
+// 补 tabindex=0 让 Tab 能走到；Enter/空格触发行上既有的 onclick
+// （el.click() 派发到行本身，激活逻辑只有一份，不复制不改写）。
+// 焦点在行内真正的控件上时不劫持：⋯/✕/＋ 等按钮有原生键盘激活，
+// 内联重命名输入框有自己的按键语义——事件 target 不是行本身就直接放过。
+function wireRowKeyboard(el) {
+  if (!el) return;
+  el.tabIndex = 0;
+  el.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    if (e.target !== el) return;
+    e.preventDefault(); // 空格防页面滚动，Enter 防再触发外层默认行为
+    el.click();
+  });
+}
+
 function renderSessionItem(s, ul) {
   const li = document.createElement("li");
   const tagChips = (s.tags || [])
@@ -2455,6 +2529,7 @@ function renderSessionItem(s, ul) {
     if (currentSessionId !== s.id) addNotice(`已恢复会话 ${s.title || s.id}`);
     if (t && !t.running) t.needHistory = false;
   };
+  wireRowKeyboard(li); // 键盘可达：Enter/空格触发上面的行 onclick（经典与分组视图共用本渲染）
   return li;
 }
 
@@ -2782,6 +2857,7 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
   };
   // 拖动与点击是两套手势：拖组头换位仍走整行 dragstart，不受行点击影响
   if (project) wireGroupDrag(head, key);
+  wireRowKeyboard(head); // 组头也是一行：键盘 Enter/空格同样展开/折叠
   const del = head.querySelector(".pg-del");
   if (del) del.onclick = (e) => { e.stopPropagation(); deleteProjectModal(project); };
   frag.appendChild(head);
@@ -3272,6 +3348,7 @@ async function renderSessionList(query) {
       addNotice(`已打开会话 ${s.title || s.session_id}`);
       refreshSessions();
     };
+    wireRowKeyboard(li); // 搜索结果行同样是 li：键盘也能打开命中的会话
     ul.appendChild(li);
   });
 }
@@ -4264,6 +4341,27 @@ function builtinSnippets() {
   return snippetsCache.length ? [] : builtinSnippetsCache;
 }
 
+// ~ 候选排序：manual = 列表手动顺序（默认）；top = 常用优先（次数多、用得近的在前）。
+// 偏好存 ui.json 的 snippets_sort，只影响候选菜单，设置页列表顺序仍由拖拽决定
+let snippetsSort = "manual";
+
+// ~ 菜单候选池：启用中的用户提示词（按排序偏好）+ 内置示例兜底（无 id，排最后）
+function snippetCandidates() {
+  const users = snippetsCache.filter((s) => s.enabled !== 0);
+  if (snippetsSort === "top") {
+    users.sort((a, b) => (b.use_count || 0) - (a.use_count || 0) ||
+      (b.last_used_at || 0) - (a.last_used_at || 0));
+  }
+  return users.concat(builtinSnippets());
+}
+
+// ~ 过滤匹配：名称 / 内容子串，外加名称的拼音首字母串（如 hwxbc ↔ 帮我修报错）
+function snippetMatch(s, q) {
+  return s.name.toLowerCase().includes(q) ||
+    (s.content || "").toLowerCase().includes(q) ||
+    (s.initials || "").includes(q);
+}
+
 async function loadSnippets() {
   try {
     const r = await request("snippets.list");
@@ -4277,6 +4375,14 @@ function renderSnippets() {
   const ul = document.getElementById("snippets-list");
   const st = document.getElementById("snippets-status");
   ul.innerHTML = "";
+  // 排序开关的档位文案（影响 ~ 候选顺序，不影响下面这份拖拽排的列表）
+  const sortBtn = document.getElementById("btn-snippets-sort");
+  if (sortBtn) {
+    sortBtn.textContent = snippetsSort === "top" ? "排序：常用优先" : "排序：手动顺序";
+    sortBtn.title = snippetsSort === "top"
+      ? "~ 候选当前按使用次数 / 最近使用排序；点击改回列表手动顺序"
+      : "~ 候选当前按列表顺序（行首 ⋮⋮ 拖拽决定）；点击改为常用优先";
+  }
   // 状态行：条数 + 累计使用次数（还没有任何使用记录时省略后半句）
   if (st) {
     if (snippetsCache.length) {
@@ -4292,10 +4398,14 @@ function renderSnippets() {
       '或点「恢复示例」把内置示例加回来；输入 ~ 时可先用内置示例模板。</li>';
     return;
   }
+  const p2 = (n) => String(n).padStart(2, "0");
+  const nowYear = new Date().getFullYear();
   snippetsCache.forEach((s) => {
     const li = document.createElement("li");
     li.draggable = true;
     li.dataset.sid = String(s.id);
+    const enabled = s.enabled !== 0;
+    if (!enabled) li.classList.add("off");
     li.title = "点行编辑；按住行首 ⋮⋮ 拖动调整顺序（列表顺序就是 ~ 候选顺序）";
     const handle = document.createElement("span");
     handle.className = "s-drag";
@@ -4303,18 +4413,31 @@ function renderSnippets() {
     li.appendChild(handle);
     const title = document.createElement("span");
     title.className = "s-title";
-    title.textContent = s.name;
+    title.textContent = s.name + (enabled ? "" : "（已停用）");
     const sub = document.createElement("span");
     sub.className = "s-sub";
+    const lu = s.last_used_at ? new Date(s.last_used_at * 1000) : null;
+    const luText = lu ? ` · 上次 ${lu.getFullYear() === nowYear
+      ? `${p2(lu.getMonth() + 1)}-${p2(lu.getDate())} ${p2(lu.getHours())}:${p2(lu.getMinutes())}`
+      : `${lu.getFullYear()}-${p2(lu.getMonth() + 1)}-${p2(lu.getDate())}`}` : "";
     sub.textContent = (s.content || "").replace(/\s+/g, " ").slice(0, 60) +
-      (s.use_count ? ` · 用过 ${s.use_count} 次` : "");
+      (s.use_count ? ` · 用过 ${s.use_count} 次${luText}` : "");
     li.append(title, sub);
     const ops = document.createElement("span");
     ops.className = "cron-ops";
-    ops.innerHTML = `<button class="cron-op" title="复制模板原文">⧉</button>` +
+    ops.innerHTML = `<button class="cron-op" title="${enabled ? "停用（~ 候选不再显示，可随时再启用）" : "启用（回到 ~ 候选）"}">${enabled ? "停" : "启"}</button>` +
+      `<button class="cron-op" title="复制模板原文">⧉</button>` +
       `<button class="cron-op" title="编辑">✎</button>` +
       `<button class="cron-op danger" title="删除">✕</button>`;
-    const [copy, edit, del] = ops.querySelectorAll("button");
+    const [tog, copy, edit, del] = ops.querySelectorAll("button");
+    tog.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await request("snippets.set_enabled", { id: s.id, enabled: !enabled });
+        s.enabled = enabled ? 0 : 1;
+        renderSnippets();
+      } catch (err) { addNotice("操作失败: " + err.message); }
+    };
     copy.onclick = async (e) => {
       e.stopPropagation();
       await copyTextToClipboard(s.content || "");
@@ -4384,6 +4507,7 @@ function snippetModal(existing, presetContent) {
         <button type="button" class="sn-chip" data-ph="{{date}}">{{date}} 日期</button>
         <button type="button" class="sn-chip" data-ph="{{time}}">{{time}} 时间</button>
         <button type="button" class="sn-chip" data-ph="{{project}}">{{project}} 项目名</button>
+        <button type="button" class="sn-chip" data-ph="{{任务|默认值}}">{{字段|默认值}} 填空（插入时现场填写）</button>
       </div>
     </div>`;
   // 占位符 chips：插到光标处（不替换已有内容）
@@ -4398,6 +4522,26 @@ function snippetModal(existing, presetContent) {
       ta.setSelectionRange(start + ph.length, start + ph.length);
     };
   });
+  // AI 润色：让当前模型把内容改写得更清晰（占位符原样保留）；
+  // 结果只填回编辑框，用户看过、改过、点保存才生效
+  const polish = document.createElement("button");
+  polish.type = "button";
+  polish.className = "sn-chip";
+  polish.title = "让当前模型把内容改写得更清晰结构化，结果填回编辑框，满意再保存";
+  polish.textContent = "✨ AI 润色";
+  polish.onclick = async () => {
+    const text = ta.value.trim();
+    if (!text) { addNotice("先写点内容再润色"); return; }
+    polish.disabled = true;
+    polish.textContent = "润色中…";
+    try {
+      const r = await request("snippets.polish", { content: text });
+      if (r.content) ta.value = r.content;
+    } catch (err) { addNotice("润色失败: " + err.message); }
+    polish.disabled = false;
+    polish.textContent = "✨ AI 润色";
+  };
+  box.querySelector(".sn-chips").appendChild(polish);
   showModal(existing ? "编辑提示词" : "新建提示词", box, async () => {
     const name = box.querySelector("#sn-name").value.trim();
     const content = box.querySelector("#sn-content").value.trim();
@@ -4408,6 +4552,12 @@ function snippetModal(existing, presetContent) {
   }, existing ? "保存" : "创建");
 }
 document.getElementById("btn-snippet-add").onclick = () => snippetModal(null);
+// ~ 候选排序开关：手动顺序（拖拽决定）↔ 常用优先（次数多、用得近的在前）
+document.getElementById("btn-snippets-sort").onclick = () => {
+  snippetsSort = snippetsSort === "top" ? "manual" : "top";
+  saveUiPrefs({ snippets_sort: snippetsSort === "top" ? "top" : null });
+  renderSnippets();
+};
 
 // 消息「存为提示词」入口：用消息文本预填新建弹窗（名称留空，由用户起名）
 function saveAsSnippet(text) {
@@ -4463,13 +4613,59 @@ document.getElementById("btn-snippets-restore").onclick = async () => {
 };
 
 // 插入到输入框：占位符替换（剪贴板不可用时原样保留）
+// 已知占位符之外的 {{...}} 都是「填空字段」：插入时弹小表单当场填写
+// （{{字段|默认值}} 支持默认值），填完才落进输入框
+const SNIPPET_KEY_PH = new Set(["clipboard", "date", "time", "project"]);
+
+function snippetFillFields(content) {
+  const fields = new Map(); // 字段名 -> 默认值（同名只出现一次）
+  const re = /\{\{([^{}|]+)(?:\|([^{}]*))?\}\}/g;
+  let m;
+  while ((m = re.exec(content))) {
+    const key = m[1].trim();
+    if (!key || SNIPPET_KEY_PH.has(key)) continue;
+    if (!fields.has(key)) fields.set(key, m[2] == null ? "" : m[2]);
+  }
+  return fields;
+}
+
+function snippetFillModal(fields) {
+  return new Promise((resolve) => {
+    const box = document.createElement("div");
+    box.innerHTML = '<p class="dim small">这条提示词里有需要现场填写的内容（留空则用默认值）：</p>' +
+      [...fields].map(([k, v]) =>
+        `<label class="small dim" style="display:block;margin-top:6px">${escapeHtml(k)}</label>` +
+        `<input class="modal-input" data-f="${escapeHtml(k)}" style="width:100%" value="${escapeHtml(v)}">`
+      ).join("");
+    showModal("填写提示词", box, () => {
+      const out = new Map();
+      box.querySelectorAll("input[data-f]").forEach((i) => out.set(i.dataset.f, i.value));
+      resolve(out);
+    }, "插入");
+    document.getElementById("modal-cancel").onclick = () => { hideModal(); resolve(null); };
+  });
+}
+
 async function insertSnippet(s) {
   let content = s.content || "";
+  // 剪贴板：读得到直接替换；读不到 / 为空时原位换成填空字段，别让占位符原样溜进消息
   if (content.includes("{{clipboard}}")) {
-    try {
-      const t = await navigator.clipboard.readText();
-      if (t) content = content.split("{{clipboard}}").join(t);
-    } catch (e) { /* 剪贴板不可用：保留占位符 */ }
+    let clip = "";
+    try { clip = (await navigator.clipboard.readText()) || ""; } catch (e) { /* 授权被拒 */ }
+    content = clip ? content.split("{{clipboard}}").join(clip)
+      : content.split("{{clipboard}}").join("{{剪贴板内容}}");
+  }
+  // 填空字段：有就先弹表单；取消 = 不插入
+  const fields = snippetFillFields(content);
+  if (fields.size) {
+    const filled = await snippetFillModal(fields);
+    if (filled == null) return;
+    content = content.replace(/\{\{([^{}|]+)(?:\|([^{}]*))?\}\}/g, (whole, rawName) => {
+      const key = rawName.trim();
+      if (SNIPPET_KEY_PH.has(key)) return whole; // 日期/时间/项目名走下面的同步替换
+      const v = (filled.get(key) || "").trim();
+      return v || (fields.get(key) || "");
+    });
   }
   // 本地占位符：日期 / 时间 / 当前项目名（同步替换）
   if (content.includes("{{date}}") || content.includes("{{time}}") || content.includes("{{project}}")) {
@@ -5020,6 +5216,7 @@ async function refreshProjects(prefetched) {
         addNotice("切换失败: " + e.message);
       }
     };
+    wireRowKeyboard(li); // 项目行键盘可达：Enter/空格同样切换/高亮
     ul.appendChild(li);
   });
   await appendQuickRow(ul);
@@ -5067,6 +5264,7 @@ async function appendQuickRow(ul) {
     refreshProjects();
     refreshSessions();
   };
+  wireRowKeyboard(li); // 快聊行键盘可达
   ul.appendChild(li);
 }
 
@@ -6864,13 +7062,14 @@ function updateInputMenu() {
   const caret = inputEl.selectionStart;
   const before = inputEl.value.slice(0, caret);
   // ~ 唤起提示词菜单（原「快捷指令」，自带内置示例兜底）。
-  // 查询段用 \S*：提示词名是中文，\w 匹配不到 CJK；空格视为结束（收起菜单）
+  // 查询段用 \S*：提示词名是中文，\w 匹配不到 CJK；空格视为结束（收起菜单）。
+  // 过滤面：名称 / 内容子串 + 名称拼音首字母（如 xzb ↔ 写周报）；候选上限 12。
   const tilde = before.match(/^~(\S*)$/);
   if (tilde) {
     const q = tilde[1].toLowerCase();
-    const items = snippetsCache.concat(builtinSnippets())
-      .filter((s) => !q || s.name.toLowerCase().includes(q))
-      .slice(0, 8)
+    const items = snippetCandidates()
+      .filter((s) => !q || snippetMatch(s, q))
+      .slice(0, 12)
       .map((s) => ({
         label: "◆ " + s.name,
         desc: snippetsCache.includes(s) ? "提示词 · 选中即插入" : "内置示例 · 选中即插入",
@@ -6880,8 +7079,20 @@ function updateInputMenu() {
           insertSnippet(s);
         },
       }));
+    // 顺手把写了一半的输入存成模板，不用绕去设置页新建
+    items.push({
+      label: "＋ 存为提示词",
+      desc: "把当前输入框内容保存为新提示词",
+      onPick: () => {
+        const text = inputEl.value.replace(/^~[^\n]*/, "");
+        inputEl.value = text;
+        saveAsSnippet(text);
+        hideInputMenu();
+      },
+    });
+    const sortHint = snippetsSort === "top" ? "常用优先" : "手动顺序（设置页可切换）";
     showInputMenu(items, items.length
-      ? "（回车或点击插入到输入框，~ 后接着输入可过滤）"
+      ? `（回车或点击插入；~ 后接名称/内容/拼音首字母过滤 · 当前：${sortHint}）`
       : "（没有匹配的提示词；在设置 · 提示词里可以新建）");
     return;
   }
@@ -6931,6 +7142,14 @@ inputEl.addEventListener("blur", () => setTimeout(hideInputMenu, 120));
 
 document.getElementById("input").addEventListener("keydown", (e) => {
   const menuOpen = !inputMenu.classList.contains("hidden");
+  // Alt+1..8 直插候选（与 ~ 菜单同一候选池：启用中的提示词按当前排序 + 内置兜底）；
+  // 不抢菜单打开时的 Enter/Tab 语义，数字键也没有 IME 组词冲突
+  if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing &&
+      /^[1-8]$/.test(e.key)) {
+    const cand = snippetCandidates()[Number(e.key) - 1];
+    if (cand) { e.preventDefault(); insertSnippet(cand); }
+    return;
+  }
   if (menuOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
     e.preventDefault();
     moveMenuActive(e.key === "ArrowDown" ? 1 : -1);
@@ -7245,20 +7464,19 @@ function showHelp() {
 
 document.getElementById("btn-help").onclick = () => showHelp();
 
-// ---------- 左栏功能导航（任务清单 / 日程 / 项目记忆 / 定时任务 / MCP·Skills） ----------
+// ---------- 左栏功能导航（任务 / 日程 / 项目记忆 / 记忆地图 / 自动化 / MCP·Skills） ----------
 const navPending = {}; // 已全部上线，保留结构便于扩展
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
   btn.onclick = () => {
     const act = btn.dataset.act;
-    // 窄屏上侧栏是抽屉：点了导航就收回（任务清单等打开的是右侧面板标签，
+    // 窄屏上侧栏是抽屉：点了导航就收回（任务等打开的是右侧面板标签，
     // 不收回的话侧栏（z 更高）正好盖住刚打开的面板）
     document.body.classList.remove("sidebar-open");
-    // 任务清单/日程/定时任务：右侧面板标签（不再用侧栏折叠区）
+    // 任务/日程/自动化：右侧面板标签（不再用侧栏折叠区）
     if (act === "todo") return openRightTab("todo");
     if (act === "agenda") return openRightTab("agenda");
-    if (act === "cron") return openRightTab("cron");
-    if (act === "pipeline") return openRightTab("pipeline");
+    if (act === "auto") return openRightTab("auto"); // 自动化 = 定时任务 + 任务编排（容器标签，默认落定时任务分段）
     if (act === "memory") return openRightTab("memory");
     if (act === "map") return openRightTab("map");
     if (act === "project") return projectModal();
@@ -9102,6 +9320,78 @@ document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
   };
 });
 
+// ---------- 设置内搜索：按卡片标题与正文过滤，点结果跳到对应页并高亮那张卡 ----------
+// 38 张卡片没有分组锚点时找一项要靠翻页；搜索框在页顶常驻，输入即出结果。
+const settingsSearchInput = document.getElementById("settings-search");
+const settingsSearchResults = document.getElementById("settings-search-results");
+
+function settingsCardIndex() {
+  // 现查现用：设置卡片是静态 HTML，38 张的量级不值得建缓存与失效逻辑
+  const items = [];
+  document.querySelectorAll(".settings-page").forEach((pg) => {
+    const pageId = pg.id.replace("settings-page-", "");
+    const nav = document.querySelector(`#settings-nav li[data-target="${pageId}"]`);
+    const pageName = nav ? nav.textContent.trim() : pageId;
+    pg.querySelectorAll(":scope > .settings-card").forEach((card) => {
+      const h3 = card.querySelector("h3");
+      items.push({
+        pageId, pageName, card,
+        title: h3 ? h3.textContent.trim() : "(未命名卡片)",
+        text: card.textContent,
+      });
+    });
+  });
+  return items;
+}
+
+function hideSettingsSearch() {
+  settingsSearchResults.classList.add("hidden");
+}
+
+function runSettingsSearch(qs) {
+  const q = (qs || "").trim().toLowerCase();
+  settingsSearchResults.innerHTML = "";
+  if (!q) { hideSettingsSearch(); return; }
+  const hits = settingsCardIndex().filter((it) =>
+    it.title.toLowerCase().includes(q) || it.text.toLowerCase().includes(q));
+  if (!hits.length) {
+    settingsSearchResults.innerHTML = '<div class="ssr-empty dim small">没有匹配的设置项</div>';
+  }
+  hits.slice(0, 12).forEach((it) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ssr-item";
+    b.innerHTML = `<b>${escapeHtml(it.title)}</b><span class="dim small">${escapeHtml(it.pageName)}</span>`;
+    b.onclick = () => {
+      hideSettingsSearch();
+      settingsSearchInput.value = "";
+      if (settingsOpen) showSettingsPage(it.pageId);
+      else openSettings(it.pageId);
+      // 目标卡滚进可视区并闪烁提示（等页面切换渲染完再滚）
+      setTimeout(() => {
+        it.card.scrollIntoView({ block: "center", behavior: "smooth" });
+        it.card.classList.remove("ssr-flash");
+        void it.card.offsetWidth; // 强制回流以重启动画
+        it.card.classList.add("ssr-flash");
+        setTimeout(() => it.card.classList.remove("ssr-flash"), 1600);
+      }, 60);
+    };
+    settingsSearchResults.appendChild(b);
+  });
+  settingsSearchResults.classList.remove("hidden");
+}
+if (settingsSearchInput) {
+  settingsSearchInput.addEventListener("input", () => runSettingsSearch(settingsSearchInput.value));
+  settingsSearchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { settingsSearchInput.value = ""; hideSettingsSearch(); }
+  });
+  document.addEventListener("click", (e) => {
+    if (e.target !== settingsSearchInput && !settingsSearchResults.contains(e.target)) {
+      hideSettingsSearch();
+    }
+  });
+}
+
 // ---------- 模型服务：列表视图 ----------
 let providerCfg = null;   // 最近一次拉取到的服务清单
 let bootSnap = null;      // 最近一次 boot 快照（模板里要用工作目录等）
@@ -10022,6 +10312,8 @@ async function renderSettings() {
   // 列表渲染抽到 renderSkillList（技能页要重复用）；这里只负责总览摘要
   renderSkillSummary(snap.skills || []);
   if (skillManageOpen) renderSkillList(snap.skills || []);
+  // 场景模板（打包内官方技能清单）：装完/删完技能后 renderSettings 会重跑，模板的已装徽标跟着刷新
+  loadSceneTemplates().catch(() => {});
 
   // —— 内置工具 ——
   const tul = document.getElementById("settings-tool-list");
@@ -10703,8 +10995,11 @@ function batchDeleteSkillsModal(names) {
   }, "全部删除");
 }
 
-document.getElementById("btn-import-skill").onclick = () => importSkillModal();
-document.getElementById("btn-import-skill-2").onclick = () => importSkillModal();
+// 两个视图（总览卡片 / 技能页）各有一组同义按钮：导入动作完全一致，按 ID 合并绑定；
+// 「本机现存」两处行为不同（总览=先进技能页再探测，技能页=再点一次即收起），各自绑定
+document.querySelectorAll("#btn-import-skill, #btn-import-skill-2").forEach((b) => {
+  b.onclick = () => importSkillModal();
+});
 document.getElementById("btn-scan-skill").onclick = () => {
   // 总览卡片的按钮：先进入技能页再拉取，候选始终只在技能页内平铺
   openSkillManage();
@@ -11566,6 +11861,17 @@ document.getElementById("map-auto").addEventListener("click", async () => {
     addNotice(!cur ? "🗺 已开启自动生成演化摘要" : "🗺 已关闭自动生成演化摘要");
   } catch (e) {
     addNotice("🗺 设置失败：" + e.message);
+  }
+});
+// 记忆地图的反馈入口：与 设置 · 关于「反馈问题」共用同一套流程（openFeedbackPage），
+// 这里没有 diag-msg 状态行，结果走通知条
+document.getElementById("map-feedback").addEventListener("click", async () => {
+  addNotice("🗺 正在生成诊断包并打开反馈页…");
+  try {
+    await openFeedbackPage();
+    addNotice("🗺 已生成诊断包并打开反馈页——把诊断包 zip 拖进附件，描述问题即可");
+  } catch (e) {
+    addNotice("🗺 打开反馈页失败：" + e.message + "（可手动访问：" + REPO_PAGE + "/issues）");
   }
 });
 
@@ -12635,47 +12941,10 @@ document.getElementById("files-editor").addEventListener("keydown", (e) => {
     e.target.dispatchEvent(new Event("input", { bubbles: true }));
   }
 });
-// 树与预览之间的分隔条：拖动时只移动提示线、松手才落高度——大文本的
-// textarea 每改一px高度都要整块重排，边拖边改会卡成一下一下的跳动。
-// 高度记进 ui.json（files_preview_h），双击恢复默认档（46% / 68%）
-(() => {
-  const bar = document.getElementById("files-resizer");
-  const wrap = document.getElementById("files-preview");
-  if (!bar || !wrap) return;
-  const line = document.createElement("div");
-  line.className = "files-resizer-line";
-  let startY = 0, startH = 0, sectionH = 0, targetH = 0;
-  const move = (e) => {
-    // 预览最少 96px，最多给上面的树和工具条留 140px；线跟指针 1:1
-    targetH = Math.round(Math.max(96, Math.min(sectionH - 140, startH + (startY - e.clientY))));
-    line.style.transform = `translateY(${sectionH - targetH}px)`;
-  };
-  const up = () => {
-    bar.classList.remove("on");
-    bar.removeEventListener("pointermove", move);
-    bar.removeEventListener("pointerup", up);
-    line.remove();
-    if (targetH > 0) {
-      wrap.style.height = targetH + "px";
-      saveUiPrefs({ files_preview_h: targetH });
-    }
-  };
-  bar.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    bar.setPointerCapture(e.pointerId);
-    bar.classList.add("on");
-    startY = e.clientY;
-    startH = targetH = wrap.getBoundingClientRect().height;
-    sectionH = bar.parentElement.getBoundingClientRect().height;
-    bar.parentElement.appendChild(line);
-    bar.addEventListener("pointermove", move);
-    bar.addEventListener("pointerup", up);
-  });
-  bar.addEventListener("dblclick", () => {
-    wrap.style.height = "";
-    saveUiPrefs({ files_preview_h: null });
-  });
-})();
+// 树与预览之间的分隔条：走 setupResizer 同一套（手柄样式 .ui-resizer-h、
+// 高度存 --fp-h / ui.json 的 files_preview_h），与侧栏、输入区的拖拽手感一致；
+// 双击恢复默认档（只读 46% / 可编辑 68%），恢复由 initUiPrefs 的 UI_LIMITS
+// 通用循环处理，这里不用单写
 document.getElementById("files-new").onclick = () => {
   const box = document.createElement("div");
   box.innerHTML =
@@ -13076,6 +13345,7 @@ const UI_LIMITS = {
   composer_h: { css: "--cp-h", min: 74, max: 520 },
   right_w: { css: "--rp-w", min: 240, max: 720 },
   read_width: { css: "--chat-max-w", min: 680, max: 1400 }, // 阅读行宽：消息卡最大宽度
+  files_preview_h: { css: "--fp-h", min: 96, max: 640 }, // 文件面板预览区高度
 };
 
 function setUiVar(key, val) {
@@ -13106,9 +13376,8 @@ async function initUiPrefs() {
   // 界面缩放：未存偏好时保持默认 90%（CSS 与初始状态一致）
   const sc = Number(prefs.ui_scale);
   if (Number.isFinite(sc) && sc > 0) applyUiScale(sc);
-  // 文件预览区高度：拖过分隔条后记住；没存过就用 CSS 默认档
-  const fh = Number(prefs.files_preview_h);
-  if (fh >= 96) document.getElementById("files-preview").style.height = fh + "px";
+  // ~ 候选排序偏好（manual=列表顺序 / top=常用优先），默认手动
+  snippetsSort = prefs.snippets_sort === "top" ? "top" : "manual";
   for (const key of Object.keys(UI_LIMITS)) {
     if (prefs[key] != null) setUiVar(key, prefs[key]);
   }
@@ -13248,6 +13517,10 @@ setupResizer(document.getElementById("sb-resizer"), "sidebar_w", {
 setupResizer(document.getElementById("cp-resizer"), "composer_h", {
   base: () => document.getElementById("composer").getBoundingClientRect().height / uiScale,
   value: (s, e) => s.base - (e.clientY - s.y) / uiScale, // 向上拖 = 输入区变高
+});
+setupResizer(document.getElementById("files-resizer"), "files_preview_h", {
+  base: () => document.getElementById("files-preview").getBoundingClientRect().height / uiScale,
+  value: (s, e) => s.base - (e.clientY - s.y) / uiScale, // 向上拖 = 预览区变高
 });
 setupResizer(rpResizer, "right_w", {
   base: () => rightPanel.getBoundingClientRect().width / uiScale,
@@ -13414,6 +13687,17 @@ function ensureXterm() {
   if (window.Terminal && window.FitAddon) return Promise.resolve();
   return loadLib("xterm", ["/static/vendor/xterm.js", "/static/vendor/xterm-fit.js"]);
 }
+// highlight.js（代码高亮）与 qrcode（LAN/Tailscale/微信登录二维码）同样按需加载：
+// 此前在 index.html 里同步 <script src>，首屏解析白背几百 KB；绝大多数会话
+// 用不到二维码，纯文本对话也用不到高亮。加载失败由调用方按原文/无码兜底。
+function ensureHighlight() {
+  if (window.hljs) return Promise.resolve();
+  return loadLib("hljs", ["/static/vendor/highlight.min.js"]);
+}
+function ensureQrcode() {
+  if (window.QRCode) return Promise.resolve();
+  return loadLib("qrcode", ["/static/vendor/qrcode.min.js"]);
+}
 
 // ---------- Mermaid：```\mermaid 代码块 → SVG（vendor 本地库，零构建） ----------
 let mermaidThemeCurrent = "default";
@@ -13454,7 +13738,13 @@ async function renderMermaidIn(container) {
 // data-hl 标记防重复。带语言标记且库不认识的语言 → 保持原文（不做自动探测，
 // 避免短片段误判出一身花色）；无语言标记的块交给 hljs 自动探测。
 function highlightCodeIn(container) {
-  if (!window.hljs || !container) return;
+  if (!container) return;
+  if (!window.hljs) {
+    // 库未就绪（懒加载中）：加载完成后把容器里还没高亮的块补一遍。
+    // 最多重试一次（then 里确认 hljs 真的在），失败静默保持原文。
+    ensureHighlight().then(() => { if (window.hljs) highlightCodeIn(container); }).catch(() => {});
+    return;
+  }
   container.querySelectorAll("pre code:not([data-hl])").forEach((el) => {
     el.setAttribute("data-hl", "1");
     const m = /language-([\w+#.-]+)/.exec(el.className);
@@ -13727,12 +14017,17 @@ async function loadLanPanel() {
   if (copyBtn) copyBtn.onclick = () => copyAccessUrl(urls[0] || "", "lan-copy-msg");
   const rotateBtn = document.getElementById("lan-rotate");
   if (rotateBtn) rotateBtn.onclick = () => rotateAccessToken();
-  if (urls.length && st.token && window.QRCode) {
-    try {
-      new QRCode(document.getElementById("lan-qr"), {
-        text: urls[0], width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M,
-      });
-    } catch (e) { /* 二维码失败不影响地址文本 */ }
+  if (urls.length && st.token) {
+    // 二维码库懒加载：就绪后画；期间面板若已重渲染（getElementById 落空）就放弃
+    ensureQrcode().then(() => {
+      const qrBox = document.getElementById("lan-qr");
+      if (!window.QRCode || !qrBox) return;
+      try {
+        new QRCode(qrBox, {
+          text: urls[0], width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M,
+        });
+      } catch (e) { /* 二维码失败不影响地址文本 */ }
+    }).catch(() => { /* 二维码失败不影响地址文本 */ });
   }
 }
 document.getElementById("lan-toggle").addEventListener("change", async (e) => {
@@ -13740,6 +14035,7 @@ document.getElementById("lan-toggle").addEventListener("change", async (e) => {
     const r = e.target.checked ? await request("lan.enable", {}) : await request("lan.disable");
     addNotice(r.note || "局域网访问设置已更新");
     loadLanPanel();
+    needsRestart(); // LAN 开关要重启才生效：页顶横条提醒（可就地重启）
   } catch (err) {
     addNotice("操作失败: " + err.message);
     e.target.checked = !e.target.checked;
@@ -13781,12 +14077,16 @@ async function loadTsPanel() {
   if (copyBtn) copyBtn.onclick = () => copyAccessUrl(urls[0] || "", "ts-copy-msg");
   const rotateBtn = document.getElementById("ts-rotate");
   if (rotateBtn) rotateBtn.onclick = () => rotateAccessToken();
-  if (urls.length && st.token && window.QRCode) {
-    try {
-      new QRCode(document.getElementById("ts-qr"), {
-        text: urls[0], width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M,
-      });
-    } catch (e) { /* 二维码失败不影响地址文本 */ }
+  if (urls.length && st.token) {
+    ensureQrcode().then(() => {
+      const qrBox = document.getElementById("ts-qr");
+      if (!window.QRCode || !qrBox) return;
+      try {
+        new QRCode(qrBox, {
+          text: urls[0], width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M,
+        });
+      } catch (e) { /* 二维码失败不影响地址文本 */ }
+    }).catch(() => { /* 二维码失败不影响地址文本 */ });
   }
 }
 document.getElementById("ts-toggle").addEventListener("change", async (e) => {
@@ -13794,6 +14094,7 @@ document.getElementById("ts-toggle").addEventListener("change", async (e) => {
     const r = e.target.checked ? await request("remote.enable", {}) : await request("remote.disable");
     addNotice(r.note || "远程访问设置已更新");
     loadTsPanel();
+    needsRestart(); // Tailscale 开关要重启才生效
   } catch (err) {
     addNotice("操作失败: " + err.message);
     e.target.checked = !e.target.checked;
@@ -13801,6 +14102,15 @@ document.getElementById("ts-toggle").addEventListener("change", async (e) => {
 });
 
 // ---------- 一键重启：拉起新实例后旧进程优雅退出（LOCAL_ONLY，仅桌面本机可调） ----------
+// 需重启生效统一提醒：改了「重启才生效」的设置（LAN / Tailscale / 全局热键）后调用。
+// 横条常驻到用户重启或手动关掉；渠道启停不在此列（后端会立即重建渠道，热生效）。
+function needsRestart() {
+  const b = document.getElementById("restart-banner");
+  if (b) b.classList.remove("hidden");
+}
+document.getElementById("restart-banner-close").onclick = () => {
+  document.getElementById("restart-banner").classList.add("hidden");
+};
 document.getElementById("btn-app-restart").onclick = async () => {
   if (!confirm("重启 SkySheep？未完成的对话轮会被中断，重启后窗口自动恢复。")) return;
   const msg = document.getElementById("app-restart-msg");
@@ -14032,16 +14342,18 @@ function channelCard(c) {
 function renderQrInto(elId, text) {
   const box = document.getElementById(elId);
   if (!box) return;
-  box.innerHTML = "";
-  if (!window.QRCode) {
-    box.innerHTML = '<div class="channel-hint bad">二维码组件未加载，请刷新页面重试</div>';
-    return;
-  }
-  try {
-    new QRCode(box, { text, width: 168, height: 168, correctLevel: QRCode.CorrectLevel.M });
-  } catch (e) {
-    box.innerHTML = `<div class="channel-hint bad">二维码生成失败：${escapeHtml(e.message)}</div>`;
-  }
+  box.innerHTML = '<div class="channel-hint">二维码组件加载中…</div>';
+  ensureQrcode().then(() => {
+    if (!window.QRCode || !document.getElementById(elId)) return;
+    box.innerHTML = "";
+    try {
+      new QRCode(box, { text, width: 168, height: 168, correctLevel: QRCode.CorrectLevel.M });
+    } catch (e) {
+      box.innerHTML = `<div class="channel-hint bad">二维码生成失败：${escapeHtml(e.message)}</div>`;
+    }
+  }).catch(() => {
+    box.innerHTML = '<div class="channel-hint bad">二维码组件加载失败，请刷新页面重试</div>';
+  });
 }
 
 async function startWeixinLogin() {
@@ -14280,336 +14592,6 @@ async function saveChannel(name, opts = {}) {
     loadChannelPanel();
   }
   return true;
-}
-
-// ---------- 设置 · 联网搜索 / AI 画图 ----------
-// 服务商选择：只保留「自动 / 自定义 / 已配置」三档。
-// 「已配置」不是下拉选项，而是单独一屏列出你已在「模型服务」里配好的服务，
-// 点选即用它的地址与 Key（复用同一套凭据）——搜索 / 画图 / 语音都跑在
-// OpenAI 兼容接口上，没必要再抄一遍地址和 Key。
-//
-// 注意：「已配置」只是查看态，选中某个服务前不改动配置，因此不能从 provider
-// 反推档位（切过去时 provider 还是旧的），要用下面这个显式状态记住。
-const providerUiMode = {};
-
-function providerModeOf(formId, d) {
-  if (providerUiMode[formId]) return providerUiMode[formId];
-  const isSvc = (d.configured_services || []).some((s) => s.name === d.provider);
-  return isSvc ? "configured" : (d.provider === "custom" ? "custom" : "auto");
-}
-
-function providerPicker(d, labels, mode) {
-  const configured = d.configured_services || [];
-  const seg = `
-    <div class="seg-row seg-mini provider-seg">
-      <button type="button" data-mode="auto" class="${mode === "auto" ? "active" : ""}">自动</button>
-      <button type="button" data-mode="custom" class="${mode === "custom" ? "active" : ""}">自定义</button>
-      <button type="button" data-mode="configured" class="${mode === "configured" ? "active" : ""}"
-        ${configured.length ? "" : "disabled title=\"还没有配好的模型服务\""}>已配置</button>
-    </div>`;
-  if (mode !== "configured") return seg;
-  if (!configured.length) {
-    return seg + `<p class="dim small">还没有已配置的模型服务。先去「模型服务」里添加并填入 Key，再回这里选。</p>`;
-  }
-  const items = configured.map((s) => `
-    <button type="button" class="svc-item${s.name === d.provider ? " active" : ""}" data-svc="${escapeHtml(s.name)}">
-      <span class="svc-name">${escapeHtml(s.name)}</span>
-      <span class="svc-meta">${escapeHtml(s.base_url || "")}${s.key_mask ? " · " + escapeHtml(s.key_mask) : ""}</span>
-    </button>`).join("");
-  return seg + `<div class="svc-list">${items}</div>`;
-}
-
-// 「已配置」屏点选一个服务：它本身没有独立表单，直接把 provider 存成服务名
-async function pickConfiguredService(box, saveMethod, extraParams, done) {
-  box.querySelectorAll(".svc-item").forEach((btn) => {
-    btn.onclick = async () => {
-      try {
-        const params = Object.assign({ provider: btn.dataset.svc }, extraParams());
-        await request(saveMethod, params);
-        if (done) done();
-      } catch (e) {
-        addNotice("保存失败: " + e.message);
-      }
-    };
-  });
-}
-
-async function renderWebsearchCfg() {
-  let d;
-  try { d = await request("websearch.get"); } catch (e) { return; }
-  document.getElementById("websearch-hint").textContent = d.config_hint;
-  const form = document.getElementById("websearch-form");
-  // 当前档位：服务商是服务名 → 「已配置」；custom → 自定义；其余（含 auto）→ 自动
-  const mode = providerModeOf("websearch-form", d);
-  const labels = { auto: "自动（优先复用已配置的 Key）", custom: "自定义（自建搜索服务）" };
-  const keyHint = d.key_mask && mode === "custom"
-    ? "已配置（" + d.key_mask + "），留空不修改"
-    : (mode === "custom" ? "可留空（自建 SearXNG 等无需鉴权）" : "粘贴服务商的 API Key");
-  const detail = mode === "custom" ? `
-    <div class="toolcfg-row"><label>API Key</label>
-      <input type="password" data-f="key" autocomplete="new-password" placeholder="${keyHint}">
-    </div>
-    <div class="toolcfg-row"><label>接口地址</label>
-      <input type="text" data-f="base_url" value="${escapeHtml(d.base_url || "")}"
-             placeholder="自建搜索服务地址（如 http://localhost:8080 或 .../search?format=json）">
-    </div>` : "";
-  form.innerHTML = `
-    <div class="toolcfg-row"><label>服务商</label>${providerPicker(d, labels, mode)}</div>
-    ${detail}
-    <div class="toolcfg-row">
-      <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
-        ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + "」"
-        : "○ 未配置：Agent 联网搜索时会给出配置指引"}</span>
-      <span class="spacer"></span>
-      <button class="btn-ghost" data-act="save">保存</button>
-    </div>`;
-  form.querySelectorAll(".provider-seg button").forEach((btn) => {
-    btn.onclick = () => saveSwitch("websearch-form", "websearch.save", btn.dataset.mode);
-  });
-  if (mode === "configured") {
-    pickConfiguredService(form, "websearch.save", () => ({}), () => {
-      addNotice("已选用该服务作搜索服务商");
-      renderWebsearchCfg();
-    });
-  }
-  const saveBtn = form.querySelector('[data-act="save"]');
-  if (saveBtn) saveBtn.onclick = async () => {
-    const params = { provider: form.querySelector('[data-f="provider"]').value };
-    const addr = form.querySelector('[data-f="base_url"]');
-    if (addr) params.base_url = addr.value;
-    const keyEl = form.querySelector('[data-f="key"]');
-    const key = keyEl ? keyEl.value.trim() : "";
-    if (key) params.api_key = key;
-    try {
-      await request("websearch.save", params);
-      addNotice("联网搜索配置已保存并生效");
-      renderWebsearchCfg();
-    } catch (e) {
-      addNotice("保存失败: " + e.message);
-    }
-  };
-}
-
-// 分段切换：自动 / 自定义 / 已配置。切到「已配置」只需重画（不写盘），
-// 切到自动 / 自定义则立即保存，避免用户以为切了却没生效。
-async function saveSwitch(formId, method, mode) {
-  const rerender = () => {
-    if (formId === "websearch-form") renderWebsearchCfg();
-    else if (formId === "imagegen-form") renderImagegenCfg();
-    else if (formId === "speech-form") renderSpeechCfg();
-  };
-  if (mode === "configured") {
-    // 只是查看已配置服务列表：记住档位并重画，不动配置
-    providerUiMode[formId] = "configured";
-    rerender();
-    return;
-  }
-  delete providerUiMode[formId];
-  try {
-    await request(method, { provider: mode === "custom" ? "custom" : "auto" });
-    providerUiMode[formId] = mode;
-    rerender();
-  } catch (e) {
-    addNotice("切换失败: " + e.message);
-  }
-}
-
-async function renderImagegenCfg() {
-  let d;
-  try { d = await request("imagegen.get"); } catch (e) { return; }
-  document.getElementById("imagegen-hint").textContent = d.config_hint;
-  const form = document.getElementById("imagegen-form");
-  const mode = providerModeOf("imagegen-form", d);
-  const labels = { auto: "自动（优先复用已配置的 Key）", custom: "自定义 OpenAI 兼容" };
-  const detail = mode === "custom" ? `
-    <div class="toolcfg-row"><label>接口地址</label>
-      <input type="text" data-f="base_url" value="${escapeHtml(d.base_url || "")}"
-             placeholder="OpenAI 兼容 /images/generations 地址">
-    </div>
-    <div class="toolcfg-row"><label>API Key</label>
-      <input type="password" data-f="key" autocomplete="new-password"
-             placeholder="${d.has_key ? "已配置（" + d.key_mask + "），留空不修改" : "粘贴服务的 API Key"}">
-    </div>
-    <div class="toolcfg-row"><label>模型</label>
-      <input type="text" data-f="model" value="${escapeHtml(d.model || "")}"
-             placeholder="留空用服务商默认模型">
-    </div>` : "";
-  form.innerHTML = `
-    <div class="toolcfg-row"><label>服务商</label>${providerPicker(d, labels, mode)}</div>
-    ${detail}
-    <div class="toolcfg-row">
-      <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
-        ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + " / " + d.resolved_model + "」"
-        : "○ 未配置：配好任一服务的 Key 即可零配置使用"}</span>
-      <span class="spacer"></span>
-      <button class="btn-ghost" data-act="save">保存</button>
-    </div>`;
-  form.querySelectorAll(".provider-seg button").forEach((btn) => {
-    btn.onclick = () => saveSwitch("imagegen-form", "imagegen.save", btn.dataset.mode);
-  });
-  if (mode === "configured") {
-    pickConfiguredService(
-      form, "imagegen.save",
-      () => {
-        const m = form.querySelector('[data-f="model"]');
-        return m && m.value.trim() ? { model: m.value.trim() } : {};
-      },
-      () => { addNotice("已选用该服务作画图服务商"); renderImagegenCfg(); }
-    );
-  }
-  const saveBtn = form.querySelector('[data-act="save"]');
-  if (saveBtn) saveBtn.onclick = async () => {
-    const params = { provider: form.querySelector('[data-f="provider"]').value };
-    for (const f of ["base_url", "model"]) {
-      const el = form.querySelector(`[data-f="${f}"]`);
-      if (el) params[f] = el.value;
-    }
-    const keyEl = form.querySelector('[data-f="key"]');
-    const key = keyEl ? keyEl.value.trim() : "";
-    if (key) params.api_key = key;
-    try {
-      await request("imagegen.save", params);
-      addNotice("AI 画图配置已保存并生效");
-      renderImagegenCfg();
-    } catch (e) {
-      addNotice("保存失败: " + e.message);
-    }
-  };
-}
-
-async function renderSpeechCfg() {
-  let d;
-  try { d = await request("speech.get"); } catch (e) { return; }
-  document.getElementById("speech-hint").textContent = d.config_hint;
-  const form = document.getElementById("speech-form");
-  const mode = providerModeOf("speech-form", d);
-  const labels = { auto: "自动（优先复用已配置的 Key）", custom: "自定义 OpenAI 兼容" };
-  const detail = mode === "custom" ? `
-    <div class="toolcfg-row"><label>接口地址</label>
-      <input type="text" data-f="base_url" value="${escapeHtml(d.base_url || "")}"
-             placeholder="OpenAI 兼容 /audio/transcriptions 地址">
-    </div>
-    <div class="toolcfg-row"><label>API Key</label>
-      <input type="password" data-f="key" autocomplete="new-password"
-             placeholder="${d.has_key ? "已配置（" + d.key_mask + "），留空不修改" : "本地服务可留空；云端服务填对应 Key"}">
-    </div>
-    <div class="toolcfg-row"><label>模型</label>
-      <input type="text" data-f="model" value="${escapeHtml(d.model || "")}"
-             placeholder="留空用服务商默认模型">
-    </div>
-    <div class="toolcfg-row"><label>识别语种</label>
-      <input type="text" data-f="language" value="${escapeHtml(d.language || "")}"
-             placeholder="zh / en / 留空自动判断">
-    </div>` : "";
-  form.innerHTML = `
-    <div class="toolcfg-row"><label>服务商</label>${providerPicker(d, labels, mode)}</div>
-    ${detail}
-    <div class="toolcfg-row">
-      <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
-        ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + " / " + d.resolved_model + "」"
-        : "○ 未配置：麦克风按钮会提示先来这里配置"}</span>
-      <span class="spacer"></span>
-      <button class="btn-ghost" data-act="save">保存</button>
-    </div>`;
-  form.querySelectorAll(".provider-seg button").forEach((btn) => {
-    btn.onclick = () => saveSwitch("speech-form", "speech.save", btn.dataset.mode);
-  });
-  if (mode === "configured") {
-    pickConfiguredService(
-      form, "speech.save",
-      () => {
-        const m = form.querySelector('[data-f="model"]');
-        return m && m.value.trim() ? { model: m.value.trim() } : {};
-      },
-      () => { addNotice("已选用该服务作语音转写服务商"); renderSpeechCfg(); }
-    );
-  }
-  const saveBtn = form.querySelector('[data-act="save"]');
-  if (saveBtn) saveBtn.onclick = async () => {
-    const params = { provider: form.querySelector('[data-f="provider"]').value };
-    for (const f of ["base_url", "model", "language"]) {
-      const el = form.querySelector(`[data-f="${f}"]`);
-      if (el) params[f] = el.value;
-    }
-    const keyEl = form.querySelector('[data-f="key"]');
-    const key = keyEl ? keyEl.value.trim() : "";
-    if (key) params.api_key = key;
-    try {
-      await request("speech.save", params);
-      speechStatus("✓ 已保存，麦克风按钮立即可用", true);
-      renderSpeechCfg();
-    } catch (e) {
-      speechStatus("✗ 保存失败：" + e.message, false);
-    }
-  };
-}
-
-function speechStatus(text, ok = true) {
-  const el = document.getElementById("speech-status");
-  if (!el) return;
-  el.textContent = text;
-  el.className = "card-status " + (ok ? "ok" : "bad");
-  el.hidden = !text;
-  autoHideStatus(el, text, ok);
-}
-
-// ---------- 圆桌设置：成员上限 / 超时 / 辩论轮数 / 主席出草稿 ----------
-async function renderRoundtableCfg() {
-  let d;
-  try { d = await request("roundtable.get"); } catch (e) { return; }
-  document.getElementById("roundtable-hint").textContent = d.config_hint;
-  const form = document.getElementById("roundtable-form");
-  if (!form) return;
-  form.innerHTML = `
-    <div class="toolcfg-row"><label>成员上限</label>
-      <input type="number" data-f="max_members" min="1" max="8" class="num-sm" value="${d.max_members}">
-      <span class="dim small">个（不含主席）</span>
-    </div>
-    <div class="toolcfg-row"><label>单成员超时</label>
-      <input type="number" data-f="member_timeout_s" min="10" class="num-sm" value="${d.member_timeout_s}">
-      <span class="dim small">秒（超过按作答失败处理，不阻断其他成员）</span>
-    </div>
-    <div class="toolcfg-row"><label>辩论修订</label>
-      <select data-f="debate_rounds" class="sel-md">
-        <option value="0">关闭 · 只独立作答</option>
-        <option value="1">1 轮 · 看彼此草稿后修订</option>
-        <option value="2">2 轮 · 修订两次</option>
-      </select>
-    </div>
-    <div class="toolcfg-row"><label>成员历史上下文</label>
-      <input type="number" data-f="member_history_turns" min="0" class="num-sm" value="${d.member_history_turns}">
-      <span class="dim small">轮（0 = 全量；只带最近 N 轮能省不少 token，主席融合始终吃全量）</span>
-    </div>
-    <label class="toggle-row adv-toggle"><input type="checkbox" data-f="chair_answers"
-      ${d.chair_answers ? "checked" : ""}><span>主席出草稿：当前主模型也作为成员先答一份</span></label>
-    <div class="toolcfg-row">
-      <span class="toolcfg-state ${d.configured_services ? "ok" : ""}">${d.configured_services
-        ? `● ${d.configured_services} 个已配置 Key 的服务可作成员`
-        : "○ 还没有已配置 Key 的服务：圆桌成员来自「模型服务」页配好的服务"}</span>
-      <span class="spacer"></span>
-      <button class="btn-ghost" data-act="save">保存</button>
-    </div>`;
-  const sel = form.querySelector('[data-f="debate_rounds"]');
-  sel.value = String(d.debate_rounds || 0);
-  // 输入框的本轮弹层默认值：用户没在弹层里手动改过时，跟随配置
-  if (!localStorage.getItem("skysheep.rt.debate")) rtDebate = d.debate_rounds || 0;
-  if (!localStorage.getItem("skysheep.rt.chair")) rtChair = d.chair_answers !== false;
-  form.querySelector('[data-act="save"]').onclick = async () => {
-    const params = {
-      max_members: Number(form.querySelector('[data-f="max_members"]').value),
-      member_timeout_s: Number(form.querySelector('[data-f="member_timeout_s"]').value),
-      debate_rounds: Number(sel.value),
-      member_history_turns: Number(form.querySelector('[data-f="member_history_turns"]').value),
-      chair_answers: form.querySelector('[data-f="chair_answers"]').checked,
-    };
-    try {
-      await request("roundtable.save", params);
-      addNotice("圆桌设置已保存并生效");
-      renderRoundtableCfg();
-    } catch (e) {
-      addNotice("保存失败: " + e.message);
-    }
-  };
 }
 
 // ---------- 语音输入：麦克风按钮（录音 → 转写 → 填入输入框） ----------
@@ -15103,6 +15085,79 @@ function renderSkillSummary(skills) {
   el.textContent = skills.length
     ? `${skills.length} 个技能 · 本项目生效 ${active} 个 — 点这里查看、设使用范围`
     : "还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能";
+}
+
+// ---------- 设置 · 技能：场景模板（打包内官方技能清单，一键安装） ----------
+// 数据来自后端打包的 gallery_manifest.json（skills.gallery，纯本地只读）；
+// 安装复用既有 skills.install（source 取模板条目、scope 固定 global）。
+// 卡片住在 #skill-list-view 里，但整页会随「MCP / Skills」右面板搬移——
+// 按 id 查找即不受位置影响。
+function galleryStatus(text, ok = true) {
+  const el = document.getElementById("gallery-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "card-status " + (ok ? "ok" : "bad");
+  el.hidden = !text;
+  autoHideStatus(el, text, ok);
+}
+
+async function loadSceneTemplates() {
+  const grid = document.getElementById("gallery-grid");
+  if (!grid) return;
+  let items;
+  try {
+    items = (await request("skills.gallery")).templates || [];
+  } catch (e) {
+    grid.innerHTML = `<span class="dim small">场景模板加载失败：${escapeHtml(e.message)}</span>`;
+    return;
+  }
+  if (!items.length) {
+    grid.innerHTML = '<span class="dim small">暂无场景模板</span>';
+    return;
+  }
+  grid.innerHTML = "";
+  items.forEach((t) => {
+    const label = t.display_name || t.name;
+    const cell = document.createElement("div");
+    cell.className = "gallery-item";
+    cell.innerHTML = `
+      <div class="gallery-item-head">
+        <span class="item-name" title="${escapeHtml(t.name)}">${escapeHtml(label)}</span>
+        ${t.installed
+          ? '<span class="chip chip-blue" title="已装进本机技能目录">已安装</span>'
+          : '<button class="btn-ghost gallery-install" title="装进全局技能目录（所有项目可用）">一键安装</button>'}
+      </div>
+      <div class="item-desc gallery-desc" title="${escapeHtml(t.description)}">${escapeHtml(t.description)}</div>`;
+    if (!t.installed) {
+      cell.querySelector(".gallery-install").onclick = (e) => installSceneTemplate(t, e.currentTarget);
+    }
+    grid.appendChild(cell);
+  });
+}
+
+async function installSceneTemplate(t, btn) {
+  // source 是 GitHub 链接、要走网络导入：按钮禁用 + 状态行提示，防止慢网下重复点击并发安装
+  const label = t.display_name || t.name;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "安装中…";
+  }
+  galleryStatus(`正在安装「${label}」…（从 GitHub 拉取，可能需要几秒）`);
+  try {
+    await request("skills.install", { source: t.source, scope: "global" });
+  } catch (e) {
+    galleryStatus(`✗ 安装「${label}」失败：${e.message}`, false);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "一键安装";
+    }
+    return;
+  }
+  galleryStatus(`✓ 已安装场景模板「${label}」（全局，所有项目可用）`);
+  // 技能清单进快照 + 总览摘要/列表刷新；renderSettings 里会重跑 loadSceneTemplates，
+  // 这一条的「一键安装」按钮随之变成「已安装」徽标
+  boot();
+  await renderSettings();
 }
 
 // 查看技能完整指令（停用的也能看，否则无从判断该不该启用）
@@ -15876,6 +15931,7 @@ async function saveAdvanced() {
     advancedStatus(newHotkey !== oldHotkey
       ? "✓ 已保存；全局唤起热键在重启应用后生效"
       : "✓ 已保存并立即生效");
+    if (newHotkey !== oldHotkey) needsRestart(); // 页顶横条给出就地重启入口
     const st = r.autostart || {};
     if (q("adv-autostart").checked && st.enabled) {
       addNotice("✓ 已设置开机自启；定时任务从此可以无人值守");
@@ -15994,21 +16050,26 @@ document.getElementById("btn-diag").onclick = async () => {
   }
 };
 
-// 反馈问题：诊断包出口——打包脱敏日志后打开 GitHub 反馈页，用户把 zip 拖进附件即可
+// 反馈流程（共享核心）：打包脱敏日志 + 打开 GitHub 反馈页，用户把 zip 拖进附件即可。
+// 设置 · 关于「反馈问题」与 记忆地图工具栏「反馈」两处共用；诊断包失败不阻塞打开反馈页。
+async function openFeedbackPage() {
+  try {
+    await request("app.export_diagnostics");
+  } catch (e) { /* 诊断包失败不阻塞打开反馈页 */ }
+  const opened = await request("app.open_external", {
+    target: REPO_PAGE + "/issues/new?template=bug_report.md",
+  });
+  // 局域网/远程访问时服务端不代开（审查 P1-3）：链接交回本端浏览器
+  if (opened && opened.remote) {
+    window.open(opened.url, "_blank", "noopener");
+  }
+}
+
 document.getElementById("btn-feedback").onclick = async () => {
   const msg = document.getElementById("diag-msg");
   msg.textContent = "正在打包并打开反馈页…";
   try {
-    await request("app.export_diagnostics");
-  } catch (e) { /* 诊断包失败不阻塞打开反馈页 */ }
-  try {
-    const opened = await request("app.open_external", {
-      target: REPO_PAGE + "/issues/new?template=bug_report.md",
-    });
-    // 局域网/远程访问时服务端不代开（审查 P1-3）：链接交回本端浏览器
-    if (opened && opened.remote) {
-      window.open(opened.url, "_blank", "noopener");
-    }
+    await openFeedbackPage();
     msg.textContent = "✓ 已生成诊断包并打开反馈页——把诊断包 zip 拖进附件，描述问题即可";
     msg.className = "io-msg ok";
   } catch (e) {

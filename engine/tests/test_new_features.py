@@ -650,7 +650,7 @@ def test_local_skills_render_inline_not_modal(home):
 
 
 def test_skills_page_has_scope_controls(home):
-    """技能独立页：总览卡片可点进入，页内能设使用范围、预览指令、逛广场。"""
+    """技能独立页：总览卡片可点进入，页内能设使用范围、预览指令。"""
     from skysheep.server.app import STATIC_DIR
 
     js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -725,10 +725,12 @@ def test_static_assets_send_no_store(home):
 
     前端零构建、文件名不带指纹：WebView 沿用缓存里的 app.js 会让我改了前端
     却看不到效果，只能靠用户手动强刷。vendor/ 不在此列（mermaid 单文件 3.3MB，
-    靠 ETag 协商即可，否则局域网手机访问每次重下）。
+    靠 ETag 协商即可，否则局域网手机访问每次重下）。app-tools.js（工具配置
+    区块，从 app.js 拆出）与 app.js 同版配套，同样禁缓存。
     """
     with make_client(home, []) as client:
-        for path in ("/", "/static/app.js", "/static/app.css", "/static/index.html"):
+        for path in ("/", "/static/app.js", "/static/app-tools.js", "/static/app.css",
+                     "/static/index.html"):
             r = client.get(path)
             assert r.status_code == 200, path
             assert "no-store" in r.headers.get("cache-control", ""), path

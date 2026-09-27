@@ -162,7 +162,7 @@ def test_install_update_result_reports_uac_need():
     from skysheep.server.app import STATIC_DIR
 
     backend_src = (Path(__file__).resolve().parents[1] / "src" / "skysheep"
-                   / "server" / "backend.py").read_text(encoding="utf-8")
+                   / "server" / "backend_parts" / "remote.py").read_text(encoding="utf-8")
     assert '"uac": _setup_privilege_override() != "/CURRENTUSER"' in backend_src
     js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert "r.uac" in js and "用户账户控制" in js

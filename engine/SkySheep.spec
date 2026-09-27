@@ -67,6 +67,10 @@ static_datas = [
 ]
 
 datas = static_datas
+# 场景模板清单（skysheep.skills.gallery 运行时按模块同目录读取）：
+# 不在 static/ 收集范围内，单独点名带进包，落位保持包内相对路径不变
+gallery_manifest = src / "skysheep" / "skills" / "gallery_manifest.json"
+datas = datas + [(str(gallery_manifest), str(Path("skysheep") / "skills"))]
 
 a = Analysis(
     [str(project_root / "desktop.py")],

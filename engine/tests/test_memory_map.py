@@ -397,7 +397,6 @@ def test_map_auto_digest_tick_gating(home, monkeypatch):
     """
     import asyncio
 
-    import skysheep.server.backend as backend_mod
 
     provider = FakeProvider([[TextBlock(text=LONG_REPLY)]]).with_default(
         [TextBlock(text=LONG_REPLY)])
@@ -407,7 +406,8 @@ def test_map_auto_digest_tick_gating(home, monkeypatch):
         spawned.append(coro)
         coro.close()  # 接住但不跑：生成流程另有用例
 
-    monkeypatch.setattr(backend_mod, "spawn_bg", fake_spawn)
+    # 拆分后 _map_auto_digest_tick 住在 backend_parts.memory，patch 跟到新模块
+    monkeypatch.setattr("skysheep.server.backend_parts.memory.spawn_bg", fake_spawn)
 
     with make_client(home, [], provider=provider) as client:
         backend = client.app.state.backend

@@ -6,7 +6,7 @@
 # 的 child_environment()；term_data/term_exit 对非 local 连接在 emit 过滤层丢弃。
 from pathlib import Path
 
-from skysheep.server.backend import TerminalSlot
+from skysheep.server.backend_parts.terminal import TerminalSlot
 from skysheep.tools.shell import child_environment
 from skysheep.tools.web import WebFetchArgs
 

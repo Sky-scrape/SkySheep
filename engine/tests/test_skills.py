@@ -555,8 +555,8 @@ def test_skill_name_shape_and_target_containment(tmp_path):
 def test_frontmatter_quoted_values(tmp_path):
     """frontmatter 值允许 YAML 成对引号：第三方技能包大量这种写法。
 
-    此前引号原样进技能名——装出来的目录名、load_skill 参数、清单显示全带
-    引号，与用户在广场里看到的名字对不上。只剥一层且必须首尾配对。
+    此前引号原样进技能名——装出来的目录名、load_skill 参数、技能清单显示
+    全带引号。只剥一层且必须首尾配对。
     """
     d = tmp_path / "quoted"
     d.mkdir()

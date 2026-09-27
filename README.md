@@ -194,14 +194,14 @@ uv pip install pyinstaller
 SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐（✅ = 已实现）：
 
 <details>
-<summary><b>展开 26 项能力对照表</b></summary>
+<summary><b>展开 29 项能力对照表</b></summary>
 
 | 能力 | Claude Code | Codex CLI | ZCode | SkySheep |
 |---|---|---|---|---|
 | Agent 循环（流式 + 工具调用） | ✅ | ✅ | ✅ | ✅ |
 | 多模型 / 多供应商（OpenAI 兼容 + Anthropic + 本地） | — | ✅ | ✅ | ✅ 内置预设 + 自定义中转 + 自动检测模型 |
 | MCP 客户端（stdio/HTTP，Claude Desktop 配置兼容） | ✅ | ✅ | ✅ | ✅ 程序内导入/手填/模板 + 内置常用预设一键添加，热生效 |
-| Skills 技能包（SKILL.md，渐进披露） | ✅ | — | ✅ | ✅ 独立技能页：全局/项目两级、按项目限定使用范围、正文预览、广场搜索安装 |
+| Skills 技能包（SKILL.md，渐进披露） | ✅ | — | ✅ | ✅ 独立技能页：全局/项目两级、按项目限定使用范围、正文预览；文件夹/.zip/GitHub·Gitee 链接导入 + 本机现存扫描导入 |
 | 子代理（后台任务 + 轮询） | ✅ | ✅ | ✅ | ✅ spawn_agent / check_task + 自定义子代理 |
 | 项目记忆（AGENTS.md / CLAUDE.md） | ✅ | ✅ | ✅ | ✅ 界面内编辑 + 全局自动记忆（跨项目） |
 | 记忆地图（项目演化可视化） | — | — | — | ✅ 演化时间线 + 主题图谱 + LLM 演化摘要（文件足迹 / 活跃热力图 / 任务与记忆标注） |
@@ -214,7 +214,7 @@ SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐�
 | Slash 命令 | ✅ | ✅ | ✅ | ✅ /help /new /compact /model /status /todos /export |
 | 消息排队 / 瞬态错误自动重试 | ✅ | ✅ | ✅ | ✅ 指数退避，在途内容不重放 |
 | 联网抓取 + 联网搜索 | ✅ | ✅ | ✅ | ✅ web_fetch（SSRF 防护）+ web_search（博查/Tavily/智谱/自定义 SearXNG） |
-| 文档阅读 + 生成 | ✅ | — | ✅ | ✅ read_document（PDF/Word/Excel）+ write_document（docx/xlsx/csv） |
+| 文档阅读 + 生成 | ✅ | — | ✅ | ✅ read_document（PDF/Word/Excel/PPT）+ write_document（docx/xlsx/csv/PPT） |
 | 图片输入 / 图片生成 | ✅ | ✅ | ✅ | ✅ 粘贴/拖拽多模态 + CogView/Kolors 画图 |
 | 电脑控制（Computer Use） | — | — | — | ✅ screenshot/mouse/keyboard/window/clipboard（默认关，确认制 + 动作白名单，键盘与剪贴板按内容固化、关窗口不整类放行） |
 | 思考过程可视化 | — | — | — | ✅ ThinkingDelta 流式 + 可折叠回看 + 思考耗时 |
@@ -342,9 +342,26 @@ uv run ruff check .  # lint
 
 版本与变更以 [CHANGELOG.md](CHANGELOG.md) 为唯一事实来源。
 
+## 🚫 非目标
+
+路线图说「接下来做什么」，这里说「有意不做」——写下来，省得反复讨论：
+
+- **原生移动 App** —— 桌面壳是权限门、检查点、文件面板这些安全交互的打磨主场，现阶段没有余力再维护一套移动端安全模型。
+- **macOS/Linux（现阶段）** —— Windows 是第一目标平台，先在单一平台上把 pywebview/WebView2、wintheme、进程树管理做扎实；`--browser` 模式已提供跨平台兜底。
+- **向量记忆 / 多级上下文压缩** —— 内置的「保留最近消息 + LLM 摘要」压缩与归档提炼记忆已覆盖当前场景，引入向量库会加大安装体积并扩充本地敏感数据面。
+- **用 ripgrep 替换内置 grep** —— 内置内容搜索是纯 Python 零依赖实现，绑定外部二进制会破坏「安装即可用」的分发形态。
+- **自建插件 JS API** —— 扩展点收敛在 MCP 与 Skills 两个开放标准上；前端保持零构建，不再多养一套私有插件协议与配套构建链。
+- **运营型技能广场** —— 集中运营的技能商店需要持续的内容审核与服务器投入，技能分发走应用内「导入技能」（文件夹 / .zip / GitHub·Gitee 链接）即可。
+
 ## 📄 License
 
 [MIT](LICENSE)
+
+## 💖 赞助
+
+项目接受赞助，渠道见 [.github/FUNDING.yml](.github/FUNDING.yml)（GitHub Sponsors：[Sky-scrape](https://github.com/sponsors/Sky-scrape)）。
+赞助支出第一优先是**代码签名分发**：签名证书是一笔持续的年费开销，也是路线图 M5 唯一尚未完成的一项；
+签好名的安装包可以去掉 Windows SmartScreen 拦截（见 [docs/smartscreen-说明.md](docs/smartscreen-说明.md)），让普通用户双击即装。
 
 ---
 

@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "repo": "https://github.com/Sky-scrape/SkySheep",
+  "skills": [
+    {
+      "dir": "budget-tracker",
+      "name": "budget-tracker",
+      "display_name": "记账与预算表",
+      "description": "把账单记录变成看得懂的收支表——自动分类、月度对比、超支预警，生成可长期维护的记账 xlsx 和下月预算建议。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/budget-tracker"
+    },
+    {
+      "dir": "bug-report",
+      "name": "bug-report",
+      "display_name": "排查报告",
+      "description": "拿到一段报错先复现定位、再修复验证，最后产出一份可留档的排查报告（根因、修复点、防回归建议）。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/bug-report"
+    },
+    {
+      "dir": "code-review",
+      "name": "code-review",
+      "display_name": "代码审查",
+      "description": "对一段代码或一次改动做分级审查——安全、正确性、可维护性逐层过，产出带文件行号的问题清单和修复建议。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/code-review"
+    },
+    {
+      "dir": "contract-review",
+      "name": "contract-review",
+      "display_name": "合同风险审查",
+      "description": "通读合同/协议逐条标注风险——违约责任、付款、知识产权、退出机制等重点条款逐项核查，产出风险清单和谈判要点。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/contract-review"
+    },
+    {
+      "dir": "data-report",
+      "name": "data-report",
+      "display_name": "数据分析报告",
+      "description": "读取 Excel/CSV 数据做一次完整分析——清洗、统计、找结论、配图表，产出一份能直接汇报的数据分析报告。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/data-report"
+    },
+    {
+      "dir": "doc-digest",
+      "name": "doc-digest",
+      "display_name": "长文档速读",
+      "description": "精读长篇 PDF 或 Word 文档，先给含 5 条核心结论的一页速览，再按用户追问逐章展开，所有要点注明页码出处。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/doc-digest"
+    },
+    {
+      "dir": "douyin-script",
+      "name": "douyin-script",
+      "display_name": "短视频口播脚本",
+      "description": "短视频口播脚本三件套——黄金三秒开头、分镜与口播稿、发布文案与话题标签，按账号定位批量产出选题。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/douyin-script"
+    },
+    {
+      "dir": "english-email",
+      "name": "english-email",
+      "display_name": "英文商务邮件",
+      "description": "中译英或润色英文商务邮件，按正式、中性、轻松三种语气各给一版，并解释关键用词选择，让用户明白为什么这样写。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/english-email"
+    },
+    {
+      "dir": "excel-clean",
+      "name": "excel-clean",
+      "display_name": "表格清洗",
+      "description": "读取 Excel 或 CSV 文件，按用户确认的规则完成去重、补空、格式统一、拆分列等清洗，产出干净表格和一段清洗说明。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/excel-clean"
+    },
+    {
+      "dir": "file-tidy",
+      "name": "file-tidy",
+      "display_name": "文件整理",
+      "description": "扫描用户指定的文件夹，提出按类型、日期或项目的分类整理方案，确认后执行移动并生成整理报告，全程先审后动。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/file-tidy"
+    },
+    {
+      "dir": "interview-prep",
+      "name": "interview-prep",
+      "display_name": "面试准备",
+      "description": "拿 JD 和简历做面试准备——预测高频问题、按 STAR 写答案要点、准备反问环节，模拟追问链帮你练到能脱稿。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/interview-prep"
+    },
+    {
+      "dir": "meal-plan",
+      "name": "meal-plan",
+      "display_name": "一周三餐菜谱",
+      "description": "按家庭人数、忌口和厨艺水平排一周七日三餐菜谱，自动汇总分类采购清单，可保存为 xlsx 便于超市照单采购。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/meal-plan"
+    },
+    {
+      "dir": "meeting-notes",
+      "name": "meeting-notes",
+      "display_name": "会议纪要",
+      "description": "把录音转写文本、速记或聊天记录整理成结构化中文会议纪要，含结论、决议与带负责人和截止时间的行动项。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/meeting-notes"
+    },
+    {
+      "dir": "news-brief",
+      "name": "news-brief",
+      "display_name": "行业动态简报",
+      "description": "联网追踪一个行业或话题，产出带信息来源的动态简报——重点、时间线、不同观点，可配定时任务周期自动更新。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/news-brief"
+    },
+    {
+      "dir": "ppt-maker",
+      "name": "ppt-maker",
+      "display_name": "PPT 生成",
+      "description": "从一个主题或一份材料出发，先定大纲再生成 PPT——每页一个观点、要点不超过五行，产出可直接讲的 .pptx。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/ppt-maker"
+    },
+    {
+      "dir": "resume-polish",
+      "name": "resume-polish",
+      "display_name": "简历优化",
+      "description": "读取中文简历与目标岗位 JD，逐条对齐岗位要求给出改写建议，产出重点突出、量化表达的优化版 docx 简历。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/resume-polish"
+    },
+    {
+      "dir": "study-notes",
+      "name": "study-notes",
+      "display_name": "学习笔记",
+      "description": "把教材、文章、视频文稿整理成结构化学习笔记——核心概念、费曼式讲解、自测题三件套，存成 Markdown 方便复习。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/study-notes"
+    },
+    {
+      "dir": "travel-planner",
+      "name": "travel-planner",
+      "display_name": "旅行行程规划",
+      "description": "问清目的地、天数、预算与偏好后检索实时信息，输出按天中文行程表（Markdown 表格）、预算估算，可把行程写入日程。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/travel-planner"
+    },
+    {
+      "dir": "wechat-article",
+      "name": "wechat-article",
+      "display_name": "公众号文章",
+      "description": "按选题沟通、大纲确认、成稿三步写中文公众号文章，开头有钩子、小标题分段、穿插金句、结尾引导互动，交付 Markdown。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/wechat-article"
+    },
+    {
+      "dir": "weekly-report",
+      "name": "weekly-report",
+      "display_name": "工作周报",
+      "description": "汇总本周工作生成结构化中文周报，按本周成果、数据与进展、下周计划、风险与求助四段输出，可保存为 docx。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/weekly-report"
+    }
+  ]
+}

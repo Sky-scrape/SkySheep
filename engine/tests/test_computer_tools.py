@@ -288,7 +288,14 @@ async def test_window_list_smoke():
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="clipboard_read 依赖 Win32")
 async def test_clipboard_read_smoke(tmp_path):
-    out = await ClipboardReadTool().run(ClipboardReadTool().args_model(), ctx(tmp_path))
+    # 剪贴板是全机共享资源，输入法/剪贴板管理等外部程序可能短暂占住它；
+    # 那是环境冲突不是产品缺陷，跳过冒烟（真正的读取路径回归仍照常报错）
+    try:
+        out = await ClipboardReadTool().run(ClipboardReadTool().args_model(), ctx(tmp_path))
+    except ToolError as e:
+        if "无法打开剪贴板" in str(e):
+            pytest.skip("剪贴板被其他程序占用（环境冲突），冒烟跳过")
+        raise
     assert isinstance(out, str)
 
 

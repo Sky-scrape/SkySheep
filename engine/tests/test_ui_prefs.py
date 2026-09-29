@@ -307,7 +307,7 @@ def test_tab_drag_order_protocol(home):
 
     js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    backend = (STATIC_DIR.parent / "backend.py").read_text(encoding="utf-8")
+    backend = (STATIC_DIR.parent / "backend_parts" / "preferences.py").read_text(encoding="utf-8")
 
     # ① 后端：tab_order 进 ui.save 白名单 + 清洗（字符串数组、去重、封顶 200）
     assert 'data.get("tab_order")' in backend

@@ -41,7 +41,9 @@ Chrome / Edge 偶尔会在下载阶段就标记 setup.exe（左下角文件上�
 
 ## 校验安装包（进阶）
 
-发布 Release 时会附带 SHA-256 校验值。PowerShell 里执行：
+发布 Release 时会附带 SHA-256 校验值：Release 正文末尾有一份可读哈希，
+同目录还有同名校验附件 `SkySheep-<版本>-setup.exe.sha256`（应用内更新也按它自动核对安装包）。
+PowerShell 里执行：
 
 ```powershell
 Get-FileHash .\SkySheep-<版本>-setup.exe -Algorithm SHA256

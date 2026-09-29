@@ -49,3 +49,6 @@ nul
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ZCode 工作流运行产物
+.zcode/

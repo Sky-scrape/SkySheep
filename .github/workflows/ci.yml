@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# 套件约 6 分钟：同一分支连续 push 时取消还在跑的旧一轮，不再排队全跑
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: lint & test (windows-latest)
@@ -14,15 +19,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 发布清单 §1「版本号一致」的机械化：pyproject / __init__ / installer.iss /
+      # CHANGELOG 最新发布条目 / README 路线图当前版本，任一处漂移直接红。
+      # 脚本按 __file__ 定位仓库根、不依赖 cwd，从检出根带 engine/ 前缀直接跑
+      - name: Check version consistency
+        run: python engine/tools/check_versions.py
+
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
           enable-cache: true
 
+      # --locked：改了 pyproject 忘更 uv.lock 时在这里直接红，而不是静默重算 lock 掩盖漂移
       - name: Sync dependencies
         working-directory: engine
-        run: uv sync
+        run: uv sync --locked
 
       - name: Ruff check
         working-directory: engine
@@ -49,7 +61,7 @@ jobs:
 
       - name: Sync dependencies
         working-directory: engine
-        run: uv sync
+        run: uv sync --locked
 
       # 真实 uvicorn + socket 的端到端单独一层：与单测解耦，互不阻塞
       - name: Pytest (e2e)

@@ -172,6 +172,90 @@ def test_chat_aux_requires_provider(home):
         assert not frame["ok"] and "模型服务未配置" in frame["error"]
 
 
+# ---------- 辅助对话模型（aux.model.set / aux.model.get） ----------
+
+def call(home, method, params=None):
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "m1", "method": method, "params": params or {}})
+        return recv_until(ws, "m1")
+
+
+def test_aux_model_set_get_clear(home):
+    """set 校验服务名与模型登记；get 回包带主模型标注；空名清除。"""
+    import json
+
+    frame = call(home, "aux.model.set", {"name": "不存在", "model": "m"})
+    assert not frame["ok"]  # 未知服务拒绝
+
+    frame = call(home, "aux.model.set", {"name": "", "model": "m"})
+    assert not frame["ok"]  # 清除时不能只留模型名
+
+    # provider_factory 注入绕过 config，fake 服务不在 cfg.providers 里；
+    # 用真实预设名验证（models 未登记 → 任意模型名放行），与 default_model 同口径
+    frame = call(home, "aux.model.set", {"name": "deepseek", "model": "deepseek-chat"})
+    assert frame["ok"] and frame["result"]["provider"] == "deepseek"
+    assert frame["result"]["label"] == "deepseek / deepseek-chat"
+    prefs = json.loads((home / "home" / "ui.json").read_text(encoding="utf-8"))
+    assert prefs["aux_model_provider"] == "deepseek"
+
+    frame = call(home, "aux.model.get")
+    assert frame["ok"] and frame["result"]["provider"] == "deepseek"
+    assert frame["result"]["model"] == "deepseek-chat"
+    assert "main_provider" in frame["result"]  # 入口徽章画主对话服务 logo 用的
+
+    frame = call(home, "aux.model.set", {"name": ""})
+    assert frame["ok"] and frame["result"]["provider"] == ""
+    prefs = json.loads((home / "home" / "ui.json").read_text(encoding="utf-8"))
+    assert "aux_model_provider" not in prefs
+
+
+def test_aux_model_chat_uses_detached_provider(home):
+    """设了辅助对话专用模型后 chat.aux 照常流式，且不碰主对话的 provider 状态。"""
+    from skysheep.models.fake import FakeProvider
+
+    prov = FakeProvider([[TextBlock(text="专用回答")]])
+    with make_client(home, [], provider=prov) as client, client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None, events=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid, events)
+
+        before = rpc("g1", "aux.model.get")
+        assert before["ok"]
+        assert rpc("s1", "aux.model.set", {"name": "deepseek", "model": "deepseek-chat"})["ok"]
+
+        events = []
+        frame = rpc("a1", "chat.aux", {"text": "侧栏问题"}, events)
+        assert frame["ok"] and frame["result"]["text"] == "专用回答"
+        deltas = "".join(e["data"]["text"] for e in events if e["event"] == "aux_delta")
+        assert "专用回答" in deltas
+        assert len(prov.calls) == 1  # 专用 provider（override 注入的同一实例）接到了这次调用
+
+        # 关键回归点：辅助对话换模型不得碰主对话的状态面（provider_name 等不变）
+        after = rpc("g2", "aux.model.get")
+        assert after["ok"]
+        assert after["result"]["main_label"] == before["result"]["main_label"]
+        assert after["result"]["provider"] == "deepseek"
+
+
+def test_aux_model_wired(home):
+    """前端接线：发送钮上方的徽章入口、弹出菜单容器、装载与切换调用都在。"""
+    from skysheep.server.app import STATIC_DIR
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "aux.model.get" in js and "aux.model.set" in js
+    assert "refreshAuxModel" in js and "pickAuxModel" in js
+    assert "providerAvatar(" in js  # 闭合态只显品牌 logo
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="aux-model-chip"' in html and 'id="aux-model-menu"' in html
+    # 徽章与发送按钮同侧上下排列：同在 aux-row 右侧的 aux-side 纵列里，
+    # 徽章在上、发送在下（DOM 顺序 textarea → 徽章 → 发送）
+    assert 'class="aux-side"' in html
+    i_input = html.index('id="aux-input"')
+    i_chip = html.index('id="aux-model-chip"')
+    i_send = html.index('id="aux-send"')
+    assert i_input < i_chip < i_send
+
+
 def test_aux_history_resets_on_project_switch(home):
     """切项目必须重置辅助对话历史：system 消息里的 cwd 只在历史为空时注入，
     不清掉的话切项目后模型仍以为在上一个目录里。"""
@@ -388,12 +472,12 @@ def test_rp_tabs_compress_no_scroll(home):
     assert 'classList.toggle("rp-cramped", !iconOnly && per < 64)' in js
     assert "ResizeObserver" in js, "拖面板宽度后档位要即时跟上"
     # RO 回调必须 rAF 推迟 + 档位无变化不写 DOM：回调内同步改布局会刷
-    # 「ResizeObserver loop completed」告警，被全局错误横幅接住吓到用户
-    # （与行卡 RO 同一套做法，见 mountPipelineGraph 注释）
+    # 「ResizeObserver loop completed」告警（真循环的根因在各自 RO 回调里修；
+    # 曾兜底的调试错误陷阱 __errdump 已按评审移除，这里只锁根因侧的修法）
     assert "requestAnimationFrame(() => applyRpTabDensity())" in js
     assert "if (key === _rpDensityKey) return" in js
-    # 错误陷阱忽略该浏览器良性告警（真循环的根因在各自 RO 回调里修）
-    assert 'indexOf("ResizeObserver loop") >= 0) return' in js
+    # 调试错误陷阱不得回归（红屏浮层随 2.1.0 误发布过一次）
+    assert "__errdump" not in js and "ERR_TRAP" not in js
 
 
 def test_chat_aux_remote_is_stateless(home, monkeypatch):

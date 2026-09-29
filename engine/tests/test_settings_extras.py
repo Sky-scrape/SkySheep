@@ -9,8 +9,20 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from test_server import make_client, recv_until
+
+# 用例可能从任意 cwd 启动（仓库根 / engine/），源码与静态资源一律按本文件
+# 定位成绝对路径；STATIC_DIR 与 server/app.py:299 及 test_right_panel.py 的
+# 现成用法同源。
+ROOT = Path(__file__).resolve().parents[1]
+STATIC_DIR = ROOT / "src" / "skysheep" / "server" / "static"
+DESKTOP_PY = ROOT / "desktop.py"
+
+
+def read_static(name: str) -> str:
+    return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 
 def call(home, method, params=None):
@@ -73,12 +85,12 @@ def test_ctrl_enter_send_pref(home):
 
 def test_send_key_toggle_wired(home):
     """前端：输入框 keydown 按 ctrlEnterSend 分支；设置页有开关与回填。"""
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
+    js = read_static("app.js")
     i = js.index('document.getElementById("input").addEventListener("keydown"')
     seg = js[i:js.index("btn-new")]
     assert "if (ctrlEnterSend)" in seg and "e.ctrlKey || e.metaKey" in seg
     assert "ctrl_enter_send" in js and "renderSendKeyToggle" in js
-    html = open("src/skysheep/server/static/index.html", encoding="utf-8").read()
+    html = read_static("index.html")
     assert 'id="send-key-toggle"' in html and "用 Ctrl+Enter 发送" in html
 
 
@@ -91,9 +103,8 @@ def test_update_check_pref(home):
 
 
 def test_update_check_toggle_wired(home):
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
-    assert 'id="update-check-toggle"' in open(
-        "src/skysheep/server/static/index.html", encoding="utf-8").read()
+    js = read_static("app.js")
+    assert 'id="update-check-toggle"' in read_static("index.html")
     assert "update_check: updateCheckToggle.checked" in js
 
 
@@ -122,10 +133,10 @@ def test_default_model_set_get_clear(home):
 
 
 def test_default_model_label_and_source_wired(home):
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
+    js = read_static("app.js")
     assert "default_model.get" in js and "default_model.set" in js
     assert "Shift+点击" in js  # 菜单里写明设置手势
-    assert "mm-def" in open("src/skysheep/server/static/app.css", encoding="utf-8").read()
+    assert "mm-def" in read_static("app.css")
 
 
 # ---------- ⑤ 通知提示音 ----------
@@ -133,11 +144,10 @@ def test_default_model_label_and_source_wired(home):
 def test_notify_sound_pref_and_player(home):
     frame = call(home, "ui.save", {"prefs": {"notify_sound": 1}})
     assert frame["result"]["prefs"]["notify_sound"] == 1
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
+    js = read_static("app.js")
     assert "function playNotifySound(" in js
     assert 'maybeNotify("任务完成"' in js and '"perm"' in js  # 等确认走下行音
-    assert 'id="notify-sound-toggle"' in open(
-        "src/skysheep/server/static/index.html", encoding="utf-8").read()
+    assert 'id="notify-sound-toggle"' in read_static("index.html")
 
 
 # ---------- ⑥ 全局热键改键 ----------
@@ -154,7 +164,7 @@ def test_hotkey_pref_and_parser(home):
     assert "hotkey" not in read_ui_json(home)
 
     import importlib.util
-    spec = importlib.util.spec_from_file_location("sk", "desktop.py")
+    spec = importlib.util.spec_from_file_location("sk", str(DESKTOP_PY))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert mod._parse_hotkey("Ctrl+Alt+Space") is not None
@@ -181,9 +191,10 @@ def test_subagent_max_concurrent_roundtrip(home):
 
 
 def test_subagent_concurrent_ui_wired(home):
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
+    js = read_static("app.js")
     assert 'data-f="max_concurrent"' in js
-    assert "set_max_concurrent" in open("src/skysheep/core/subagent.py", encoding="utf-8").read()
+    assert "set_max_concurrent" in (
+        ROOT / "src" / "skysheep" / "core" / "subagent.py").read_text(encoding="utf-8")
 
 
 # ---------- ⑧ 阅读行宽 ----------
@@ -198,20 +209,20 @@ def test_read_width_pref_clamped(home):
 
 
 def test_read_width_css_var_and_ui(home):
-    css = open("src/skysheep/server/static/app.css", encoding="utf-8").read()
+    css = read_static("app.css")
     assert "var(--chat-max-w, 880px)" in css
     assert css.count("max-width: 880px") == 0  # 全部改走变量
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
+    js = read_static("app.js")
     assert 'read_width: { css: "--chat-max-w", min: 680, max: 1400 }' in js
     assert "changeReadWidth" in js
-    html = open("src/skysheep/server/static/index.html", encoding="utf-8").read()
+    html = read_static("index.html")
     assert 'id="readwidth-row"' in html and "阅读行宽" in html
 
 
 # ---------- 启动恢复前端接线 ----------
 
 def test_tab_restore_frontend_wired(home):
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
+    js = read_static("app.js")
     assert "open_tabs" in js and "session_tabs" in js and "session_active" in js
     # renderTabs 末尾的写回：只收有 sid 的标签 + 签名去重
     assert "persistSessionTabs._last" in js
@@ -227,7 +238,7 @@ def test_adv_card_row_alignment(home):
     （24px）不齐；③ `.toggle-row.adv-toggle` 没写回 gap，被后部的
     两端对齐版本（gap: 16px）覆盖，标题列又偏 8px。
     """
-    css = open("src/skysheep/server/static/app.css", encoding="utf-8").read()
+    css = read_static("app.css")
     # ① 热键输入框必须用 .toggle-row input.adv-hotkey（高特异性）定义
     assert ".toggle-row input.adv-hotkey" in css
     # ② 标题列对齐：卡直接子级的信任行 label 与热键行 span 都缩进 24px
@@ -242,10 +253,10 @@ def test_adv_card_row_alignment(home):
 
 def test_compaction_auto_frontend_wired(home):
     """「运行参数」卡的自动压缩开关：控件、渲染/保存/恢复默认、联动置灰三处都在。"""
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
+    js = read_static("app.js")
     assert "compaction_auto" in js  # 渲染读 + 保存写都要带上
     assert "syncCompactionInputs" in js  # 开关联动置灰比例/条数两个输入框
-    html = open("src/skysheep/server/static/index.html", encoding="utf-8").read()
+    html = read_static("index.html")
     assert 'id="adv-compaction-auto"' in html
     # 三个压缩控件按「开关 → 比例 → 条数」的顺序成组
     assert html.index("adv-compaction-auto") < html.index("adv-compaction-trigger") \
@@ -269,9 +280,9 @@ def test_usage_chart_pref(home):
 
 def test_usage_chart_frontend_wired(home):
     """前端：切换控件、折线渲染（SVG polyline + 点 + HTML 日期行）、偏好回填。"""
-    js = open("src/skysheep/server/static/app.js", encoding="utf-8").read()
-    html = open("src/skysheep/server/static/index.html", encoding="utf-8").read()
-    css = open("src/skysheep/server/static/app.css", encoding="utf-8").read()
+    js = read_static("app.js")
+    html = read_static("index.html")
+    css = read_static("app.css")
     assert 'id="usage-chart-tabs"' in html and "柱状" in html and "折线" in html
     assert "usageChartType" in js
     assert "ut-line-svg" in js and "polyline" in js  # 折线 SVG

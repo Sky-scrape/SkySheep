@@ -27,6 +27,8 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+// 两位补零的全局助手：时间戳/日期格式化多处要用（原先十来处各自局部重写）
+function pad2(n) { return String(n).padStart(2, "0"); }
 // ---------- 迷你 Markdown 的块级解析辅助 ----------
 // 表格 / 列表按行扫描：先把整段切成行，再整块替换成 HTML，最后用空行把块级元素
 // 与相邻段落隔开（否则 <table> 会被塞进 <p> 里，浏览器解析出来的结构不可预期）。
@@ -136,7 +138,16 @@ function mdLists(text) {
   return out.join("\n");
 }
 
+// 单条消息 markdown 全套渲染的长度上限：超过就降级为「先 escapeHtml 再换行」的
+// 纯文本渲染（对抗审查 DoS 加固）。128KB 级的长文跑全套结构规则本就吃力，病态
+// 构造更会在流式期间被 80ms tick 反复重放；宁可保读性不保排版。
+const MD_PLAIN_LIMIT = 128 * 1024;
+
 function renderMarkdown(src) {
+  // 超长降级路径同样先 escapeHtml 再做结构替换（换行 → <br>），转义顺序不变
+  if ((src || "").length > MD_PLAIN_LIMIT) {
+    return escapeHtml(src).replace(/\n/g, "<br>");
+  }
   const codeBlocks = [];
   let text = escapeHtml(src || "");
   // 围栏代码块（mermaid 图表：交给 mermaid.run 渲染成 SVG，见 renderMermaidIn；
@@ -174,11 +185,18 @@ function renderMarkdown(src) {
   text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>");
   text = text.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
   // 外链一律 rel="noopener noreferrer"（安全审查低危项）：模型输出里的链接
-  // 打开后，新窗口拿不到 window.opener，也带不走 Referer
-  text = text.replace(
-    /\[([^\]]+)\]\((https?:[^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
-  );
+  // 打开后，新窗口拿不到 window.opener，也带不走 Referer。
+  // 回溯护栏（对抗审查 DoS 项）：旧写法 [^\]]+ 对大量未闭合 `[` 平方级回溯
+  // （实测 200KB 病态文单次全量渲染 30 秒以上，流式期间每 80ms tick 重放一遍）。
+  // 两道防线：① 廉价预检——文本里连 `](` 都没有时整条规则直接跳过（indexOf 线性）；
+  // ② 长度界——链接文本 ≤500、URL ≤2000，单个候选位置的最坏回溯封顶，整体从
+  // 平方级降到线性。转义顺序不动：仍是对 escapeHtml 之后的 text 做结构替换。
+  if (text.includes("](")) {
+    text = text.replace(
+      /\[([^\]]{1,500})\]\((https?:[^)]{1,2000})\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+    );
+  }
   // 段落（代码块此时还是占位符，同样不能再包一层 <p>）
   const parts = text.split(/\n{2,}/).map((p) => {
     const t = p.trim();
@@ -282,6 +300,13 @@ function newTabObj(sid, title) {
   // role=log（隐含 aria-live=polite）：新消息插入时屏幕阅读器播报，流式增量不打断
   logEl.setAttribute("role", "log");
   logEl.setAttribute("aria-label", "对话消息");
+  // 贴底跟随标记：默认跟随；用户上翻（scroll 离开底部 4px 以上）即挂起，
+  // 滚回底部自动恢复。scrollLog 只读这个标记（见其注释）。
+  logEl._followBottom = true;
+  logEl.addEventListener("scroll", () => {
+    logEl._followBottom = logNearBottom(logEl);
+    updateJumpBottom();
+  }, { passive: true });
   return {
     sid: sid || null, title: title || "", logEl, running: false,
     streamingEl: null, streamingText: "", rtCard: null, rtMemberEls: [],
@@ -293,13 +318,49 @@ function newTabObj(sid, title) {
 function tabFor(sid) { return sid ? chatTabs.find((t) => t.sid === sid) || null : null; }
 function curTab() { return routeTab || activeTab; }
 function curLog() { const t = curTab(); return t ? t.logEl : chatBox; }
+// 贴底跟随：用户上翻回看时暂停「新内容拽到底部」，滚回底部自动恢复。
+// 判断必须在「追加内容之前」的滚动位置上记账——scrollLog 都在节点追加/长高之后
+// 才被调用，那时 scrollHeight 已变大，现量必然误判成「已离开底部」、永远不再跟随。
+// scroll 事件只在真实滚动时触发（DOM 追加长高不触发），所以在 scroll 监听里把
+// 「此刻是否贴底」记到流元素上，scrollLog 只看标记。阈值与 renderHistory
+// 分批渲染的贴底判断一致（4px）。
+function logNearBottom(el) {
+  return el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+}
+function curLogEl() {
+  const t = curTab();
+  return (t && t.logEl) || chatBox.querySelector(".chat-log");
+}
+// 「回到底部」浮标只在当前可见的聊天流离开底部时出现
+function updateJumpBottom() {
+  const btn = document.getElementById("jump-bottom");
+  if (!btn) return;
+  const t = curTab();
+  const el = curLogEl();
+  const show = !!el && t === activeTab && el._followBottom === false;
+  btn.hidden = !show;
+  // html 初始态带着 class="hidden"（display:none !important，压过一切）：
+  // 光切 hidden 属性摘不掉这个类，浮标会永远显示不出来，必须同步切类
+  btn.classList.toggle("hidden", !show);
+}
 function scrollLog() {
   const t = curTab();
   if (t && t !== activeTab) return; // 后台标签追加内容不抢滚动
   // 滚动发生在当前标签的 .chat-log 上（#chat 本体 overflow:hidden，滚它无效）
   const el = (t && t.logEl) || chatBox.querySelector(".chat-log");
-  if (el) el.scrollTop = el.scrollHeight;
+  if (!el) return;
+  if (el._followBottom === false) return; // 用户上翻回看：不抢位置（滚回底部自动恢复）
+  el.scrollTop = el.scrollHeight;
+  updateJumpBottom();
 }
+// 强制回到底部并恢复跟随：用户主动发送消息 / 点「回到底部」浮标时用
+function followLogBottom(el) {
+  if (!el) return;
+  el._followBottom = true;
+  el.scrollTop = el.scrollHeight;
+  updateJumpBottom();
+}
+document.getElementById("jump-bottom").onclick = () => followLogBottom(curLogEl());
 function withTab(tab, fn) { routeTab = tab; try { fn(); } finally { routeTab = null; } }
 
 function renderTabs() {
@@ -610,6 +671,7 @@ function attachTabLog(tab) {
     chatBox.appendChild(tab.logEl);
   }
   miniBind(tab.logEl);
+  updateJumpBottom(); // 浮标跟着当前可见的聊天流走
 }
 
 async function activateTab(tab) {
@@ -1059,11 +1121,55 @@ function beginAssistant() {
   t.streamingEl.innerHTML = '<div class="md"><p></p></div>';
   curLog().appendChild(t.streamingEl);
   t.streamingText = "";
+  t._streamBody = null; // 增量渲染状态槽随新气泡重建（见 renderStreamPart）
   t.thinkEl = null;
   t.thinkText = "";
   t.thinkMs = 0;
   t.thinkT0 = 0;
   t.thinkT1 = 0;
+}
+
+// ---------- 流式增量渲染 ----------
+// 流式期间每 80ms 的重渲只对「未定稿尾块」做：已定稿前缀按段落（空行）切块，
+// 且要求块内 ``` 围栏配对，保证每块单独 renderMarkdown 与整文渲染同构
+// （本渲染器里列表/表格/引用块都止于空行，见 mdTables/mdLists）；块一定稿
+// 就只渲染一次、不再动它，单次渲染成本从「全量文本」降到「尾块」，整轮流式
+// 的渲染总开销从 O(n²) 降为线性。光标 ▍ 是独立兄弟元素，不再拼进 HTML。
+// 找最靠后的可定稿切点：[from, cut) 以空行结尾且围栏配对；找不到返回 from。
+function streamSealCut(text, from) {
+  let end = text.length;
+  for (;;) {
+    const idx = text.lastIndexOf("\n\n", end - 1);
+    if (idx < from) return from;
+    const cut = idx + 2;
+    const chunk = text.slice(from, cut);
+    if ((chunk.match(/^[ \t]*```/gm) || []).length % 2 === 0) return cut;
+    // 切点落在未闭合围栏里：回退到围栏开启行之前的空行再试
+    const open = chunk.lastIndexOf("```");
+    if (open < 0) return from;
+    end = from + open;
+  }
+}
+// 把 [sealed, cut) 定稿进容器（st.tail 的前置位置，直接落在 .md 下，与定稿
+// 整文渲染的 DOM 形状一致），再重画尾块。st 是 initStreamBody 的状态槽。
+function renderStreamPart(st, text, sealed, cut) {
+  if (cut > sealed) {
+    st.tail.insertAdjacentHTML("beforebegin", renderMarkdown(text.slice(sealed, cut)));
+  }
+  st.tail.innerHTML = renderMarkdown(text.slice(cut));
+  return cut;
+}
+function initStreamBody(md, withCursor) {
+  md.innerHTML = "";
+  const tail = document.createElement("div");
+  md.appendChild(tail);
+  let cursor = null;
+  if (withCursor) {
+    cursor = document.createElement("p");
+    cursor.textContent = "▍";
+    md.appendChild(cursor);
+  }
+  return { tail, cursor, sealed: 0 };
 }
 
 function appendStream(txt) {
@@ -1076,14 +1182,16 @@ function appendStream(txt) {
     if (sum) sum.textContent = thinkSummary(t.thinkEl, true);
   }
   t.streamingText += txt;
-  // 节流渲染：delta 频率远高于人眼需要，逐条对全量累积文本重跑 markdown
-  // 正则 + 整树 innerHTML 是 O(n²)，长回答越吐越卡（圆桌成员流 80ms 方案，
-  // 这里同样处理）；流结束由 finishAssistant 全量渲染兜底
+  // 节流渲染：delta 频率远高于人眼需要；定稿前缀不再逐 tick 重跑 markdown
+  // （增量方案见上方说明），流结束由 finishAssistant 全量渲染兜底
   if (!t._streamRenderTimer) {
     t._streamRenderTimer = setTimeout(() => {
       t._streamRenderTimer = null;
       if (!t.streamingEl) return;
-      t.streamingEl.firstElementChild.innerHTML = renderMarkdown(t.streamingText) + "<p>▍</p>";
+      if (!t._streamBody) t._streamBody = initStreamBody(t.streamingEl.firstElementChild, true);
+      const text = t.streamingText;
+      t._streamBody.sealed = renderStreamPart(
+        t._streamBody, text, t._streamBody.sealed, streamSealCut(text, t._streamBody.sealed));
       scrollLog();
     }, 80);
   }
@@ -1144,13 +1252,17 @@ function appendThinking(txt) {
   t.thinkText += txt;
   // 元素自持一份摘要数据（见 thinkSummary）：历史恢复清空 tab 状态后仍可展开回看
   el._think = { text: t.thinkText, ms: t.thinkMs || (t.thinkT0 && t.thinkT1 ? t.thinkT1 - t.thinkT0 : 0) };
-  // 节流渲染（同 appendStream）：思考文本往往比正文还长
+  // 节流渲染（同 appendStream 的增量方案）：思考文本往往比正文还长
   if (!t._thinkRenderTimer) {
     t._thinkRenderTimer = setTimeout(() => {
       t._thinkRenderTimer = null;
       if (!t.thinkEl || !t.thinkText) return;
       const body = t.thinkEl.querySelector(".think-body .md");
-      if (body) body.innerHTML = renderMarkdown(t.thinkText);
+      if (!body) return;
+      if (!t._thinkBody) t._thinkBody = initStreamBody(body, false);
+      const text = t.thinkText;
+      t._thinkBody.sealed = renderStreamPart(
+        t._thinkBody, text, t._thinkBody.sealed, streamSealCut(text, t._thinkBody.sealed));
       scrollLog();
     }, 80);
   }
@@ -1158,13 +1270,14 @@ function appendThinking(txt) {
 
 function finishThinking(t) {
   if (!t || !t.thinkEl || !t.thinkText) return;
-  // 补上节流攒下的最后一次渲染，再更新折叠摘要
+  // 补上节流攒下的最后一次渲染（定稿按整文精确重画一次），再更新折叠摘要
   if (t._thinkRenderTimer) {
     clearTimeout(t._thinkRenderTimer);
     t._thinkRenderTimer = null;
     const body = t.thinkEl.querySelector(".think-body .md");
     if (body) body.innerHTML = renderMarkdown(t.thinkText);
   }
+  t._thinkBody = null;
   const folded = t.thinkEl.classList.contains("folded");
   const sum = t.thinkEl.querySelector(".think-sum");
   if (sum && !folded) {
@@ -1203,7 +1316,9 @@ function finishAssistant(rtMeta, seq) {
   t.thinkEl = null;
   t.thinkText = "";
   if (t._streamRenderTimer) { clearTimeout(t._streamRenderTimer); t._streamRenderTimer = null; }
+  // 定稿按整文精确重画一次（覆盖增量渲染的临时结构，光标元素一并移除）
   t.streamingEl.firstElementChild.innerHTML = renderMarkdown(t.streamingText);
+  t._streamBody = null;
   if (rtMeta) {
     addRtBadge(t.streamingEl, rtMeta);
     t.streamingEl._rtMeta = rtMeta; // 重新生成时据此重跑同样的圆桌配置
@@ -1555,15 +1670,7 @@ function finishToolCard(data) {
   if (data.diff) {
     const pre = document.createElement("pre");
     pre.className = "tool-diff";
-    pre.innerHTML = data.diff
-      .split("\n")
-      .map((l) => {
-        const cls = l.startsWith("+") && !l.startsWith("+++") ? "add"
-          : l.startsWith("-") && !l.startsWith("---") ? "del"
-          : l.startsWith("@@") ? "meta" : "";
-        return `<span class="${cls}">${escapeHtml(l) || " "}</span>`;
-      })
-      .join("\n");
+    pre.innerHTML = renderDiffText(data.diff); // 与审查页同一套 diff 行分类
     card.querySelector(".t-body").appendChild(pre);
     card.classList.add("open"); // 有文件变更时自动展开 diff
   }
@@ -2552,6 +2659,21 @@ let sessionOrderPrefs = {};
 // 标签栏页签的拖动序（ui.json 的 tab_order，sid 数组，只记有 sid 的会话标签；
 // 偏好回包后由 initUiPrefs 填充，renderTabs 按它排，空标签始终垫底）
 let tabOrderPrefs = [];
+// 快聊分组的锚点位置（ui.json 的 quick_pos，经典/分组两视图共用）：
+// null=垫底（默认），"top"=最前，{before: 项目id}=插在该项目前。
+// 快聊是伪组（没有项目 id）进不了 project_order，位置单独记；偏好回包后由
+// initUiPrefs 填充，拖动提交时从最终序反推（见 commitProjectOrder）
+let quickPosPref = null;
+
+/** 快聊组/行的插入时机（渲染前算好）：锚点项目不在本次列表（已删除）时回落垫底 */
+function quickAnchor(projects) {
+  if (quickPosPref === "top") return { mode: "top" };
+  if (quickPosPref && typeof quickPosPref === "object" && quickPosPref.before != null
+      && projects.some((p) => String(p.id) === String(quickPosPref.before))) {
+    return { mode: "before", id: quickPosPref.before };
+  }
+  return { mode: "bottom" };
+}
 const lastGroupedListByGroup = new Map(); // 组 key -> 该组本次渲染的会话列表（家族归并要用，渲染前写入）
 const GROUP_PREVIEW = 5; // 每个项目默认露出的会话条数，其余收进「显示更多」
 const SUB_MARK = "└"; // session.fork 生成的分支会话标题前缀（「└ 父标题」），即子会话标记。
@@ -2759,19 +2881,10 @@ async function refreshSessionsGrouped() {
     (activeSid && sidToGroup.get(activeSid)) ||
     (currentKey != null ? String(currentKey) : null);
   lastGroupedHighlightKey = highlightKey; // 「新建会话」的落点＝这里点亮的那一项
-  projects.forEach((p) => {
-    renderProjectGroup(frag, {
-      key: p.id, name: p.name, list: byProject.get(p.id) || [],
-      isCurrent: !!p.is_current, rootPath: p.root_path || "", project: p,
-      isActive: String(p.id) === highlightKey,
-    });
-    byProject.delete(p.id);
-  });
-  const loose = [];
-  byProject.forEach((list, key) => {
-    if (key !== "quick") loose.push(...list);
-  });
-  {
+  // 快聊组按锚点插序（quick_pos）：top=项目组前、before=某项目组前、bottom=
+  // 项目组后（默认）。「其他」兜底组仍固定最末，不参与拖动
+  const anchor = quickAnchor(projects);
+  const renderQuickGroup = () => {
     // 「快聊」分组常驻：不绑定文件夹的对话都在这里（有时候只是想聊一句、
     // 做点小任务，不需要工作目录）。组头 ＋ 一键新建快聊对话。
     renderProjectGroup(frag, {
@@ -2784,7 +2897,22 @@ async function refreshSessionsGrouped() {
         refreshSessionsGrouped();
       },
     });
-  }
+  };
+  if (anchor.mode === "top") renderQuickGroup();
+  projects.forEach((p) => {
+    if (anchor.mode === "before" && String(p.id) === String(anchor.id)) renderQuickGroup();
+    renderProjectGroup(frag, {
+      key: p.id, name: p.name, list: byProject.get(p.id) || [],
+      isCurrent: !!p.is_current, rootPath: p.root_path || "", project: p,
+      isActive: String(p.id) === highlightKey,
+    });
+    byProject.delete(p.id);
+  });
+  if (anchor.mode === "bottom") renderQuickGroup();
+  const loose = [];
+  byProject.forEach((list, key) => {
+    if (key !== "quick") loose.push(...list);
+  });
   if (loose.length) {
     renderProjectGroup(frag, {
       key: "loose", name: "其他", list: loose,
@@ -2855,8 +2983,9 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
     groupedClickGk = String(key);
     refreshSessionsGrouped();
   };
-  // 拖动与点击是两套手势：拖组头换位仍走整行 dragstart，不受行点击影响
-  if (project) wireGroupDrag(head, key);
+  // 拖动与点击是两套手势：拖组头换位仍走整行 dragstart，不受行点击影响。
+  // 快聊是伪组也参与排序（位置记 quick_pos 锚点）；「其他」兜底组固定最末不接
+  if (project || key === "quick") wireGroupDrag(head, key);
   wireRowKeyboard(head); // 组头也是一行：键盘 Enter/空格同样展开/折叠
   const del = head.querySelector(".pg-del");
   if (del) del.onclick = (e) => { e.stopPropagation(); deleteProjectModal(project); };
@@ -3004,11 +3133,19 @@ function clearDragVisual() {
 }
 
 /** 项目新序提交：listId 决定从哪个列表读当前 DOM 序（分组视图从组头、
-    经典视图从项目行），两种视图保存同一份 project_order */
+    经典视图从项目行），两种视图保存同一份 project_order。
+    快聊（quick）一起收集参与排序——它没有项目 id，落库时从最终序反拆：
+    项目序照旧存 project_order，快聊的位置单独存 quick_pos 锚点（top/bottom/
+    {before: 下一行的项目 id}），渲染时按锚点插回（quickAnchor）。「其他」
+    （loose）兜底组不进任何偏好：拖到它上面按垫底处理。 */
 function commitProjectOrder(srcKey, dstKey, pos, listId = "session-list", rowSel = ".pgroup-head", attr = "gkey") {
   const keys = [...document.querySelectorAll(`#${listId} ${rowSel}`)]
     .map((h) => String(h.dataset[attr]))
-    .filter((k) => k !== "quick" && k !== "loose"); // 伪组不进偏好
+    .filter((k) => k && k !== "loose"); // loose 垫底不进序；quick 参与排序
+  if (dstKey === "loose") { // 拖到「其他」上＝放到当前垫底组的后面
+    dstKey = keys[keys.length - 1];
+    pos = "after";
+  }
   const from = keys.indexOf(srcKey);
   let to = keys.indexOf(dstKey);
   if (from < 0 || to < 0 || from === to) return Promise.resolve();
@@ -3016,9 +3153,15 @@ function commitProjectOrder(srcKey, dstKey, pos, listId = "session-list", rowSel
   to = keys.indexOf(dstKey); // 抽走 src 后下标可能前移，重找
   if (pos === "after") to += 1;
   keys.splice(to, 0, srcKey);
-  return request("ui.save", {
-    prefs: { project_order: keys.map((k) => parseInt(k, 10)).filter((n) => n > 0) },
-  }).catch(() => {});
+  const qi = keys.indexOf("quick");
+  const prefs = {
+    project_order: keys.filter((k) => k !== "quick").map((k) => parseInt(k, 10)).filter((n) => n > 0),
+  };
+  if (qi === 0) prefs.quick_pos = "top";
+  else if (qi === keys.length - 1) prefs.quick_pos = "bottom";
+  else prefs.quick_pos = { before: parseInt(keys[qi + 1], 10) }; // quick 与下一行间无 loose，下一行必是项目
+  quickPosPref = prefs.quick_pos; // 本地同步：重渲染（rerender）前锚点已生效
+  return request("ui.save", { prefs }).catch(() => {});
 }
 
 /** 给会话行接上组内拖拽（分组/经典两种视图共用）。同级限制：└/⑂ 子会话跟随父
@@ -4398,7 +4541,7 @@ function renderSnippets() {
       '或点「恢复示例」把内置示例加回来；输入 ~ 时可先用内置示例模板。</li>';
     return;
   }
-  const p2 = (n) => String(n).padStart(2, "0");
+  const p2 = pad2;
   const nowYear = new Date().getFullYear();
   snippetsCache.forEach((s) => {
     const li = document.createElement("li");
@@ -4670,7 +4813,7 @@ async function insertSnippet(s) {
   // 本地占位符：日期 / 时间 / 当前项目名（同步替换）
   if (content.includes("{{date}}") || content.includes("{{time}}") || content.includes("{{project}}")) {
     const now = new Date();
-    const p2 = (n) => String(n).padStart(2, "0");
+    const p2 = pad2;
     content = content.split("{{date}}").join(
       `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())}`);
     content = content.split("{{time}}").join(`${p2(now.getHours())}:${p2(now.getMinutes())}`);
@@ -5070,7 +5213,7 @@ function resetProjectPanels() {
   if (memText) memText.value = "";
   const memStatus = document.getElementById("memory-status");
   if (memStatus) memStatus.textContent = "";
-  if (tasksTimer) { clearTimeout(tasksTimer); tasksTimer = null; }
+  loadTasks._snap = null; // 切项目后强制任务面板下一轮重绘一次
   const reviewDiff = document.getElementById("review-diff");
   if (reviewDiff) reviewDiff.classList.add("hidden");
   const preview = document.getElementById("files-preview");
@@ -5081,10 +5224,11 @@ function resetProjectPanels() {
   // 文件（或 404），留着只会「看着是旧页面、实际已是别的东西」。收回空态最诚实。
   {
     const frame = document.getElementById("browser-frame");
+    const viewport = document.getElementById("browser-viewport");
     const empty = document.getElementById("browser-empty");
-    if (frame && empty && (frame.getAttribute("src") || "").startsWith(location.origin + "/preview")) {
+    if (frame && viewport && empty && (frame.getAttribute("src") || "").startsWith(location.origin + "/preview")) {
       frame.removeAttribute("src");
-      frame.classList.add("hidden");
+      viewport.classList.add("hidden");
       empty.classList.remove("hidden");
       const urlBox = document.getElementById("browser-url");
       if (urlBox) urlBox.value = "";
@@ -5130,14 +5274,27 @@ async function refreshProjects(prefetched) {
   if (sec) sec.classList.toggle("empty", !projects.length);
   if (!projects.length) {
     applySidebarView(); // 会话区的空态文案也跟着变，与项目区同帧
-    await appendQuickRow(ul); // 无项目态：项目区只剩快聊一行（快聊是一等入口）
+    // 无项目态：项目区只剩快聊一行（快聊是一等入口），不用锚点
+    if (await ensureQuickAvailable()) buildQuickRow(ul);
     return;
   }
+  // 快聊行按锚点插序（quick_pos，同分组视图的快聊组）：先完成可用性探测
+  // （首次要发一次请求），建行才是同步的，才能插进下面的 forEach 中间
+  await ensureQuickAvailable();
+  const anchor = quickAnchor(projects);
+  let quickPlaced = false;
+  const placeQuickRow = () => {
+    if (quickPlaced || !classicQuickAvailable) return;
+    quickPlaced = true;
+    buildQuickRow(ul);
+  };
+  if (anchor.mode === "top") placeQuickRow();
   projects.forEach((p) => {
+    if (anchor.mode === "before" && String(p.id) === String(anchor.id)) placeQuickRow();
     const li = document.createElement("li");
     const remote = !p.root_path;
     // 高亮唯一（项目区同时最多一行亮）：看「项目列表」时亮当前项目；看
-    // 「远程连接」列表时亮它；看快聊时亮快聊行（见 appendQuickRow）。
+    // 「远程连接」列表时亮它；看快聊时亮快聊行（见 buildQuickRow）。
     // classicViewGk 由点击决定；is_current 仍用于切换/删除等逻辑判定
     if (remote ? classicViewGk === "remote:" + p.id
                : (p.is_current && classicViewGk == null)) {
@@ -5219,20 +5376,25 @@ async function refreshProjects(prefetched) {
     wireRowKeyboard(li); // 项目行键盘可达：Enter/空格同样切换/高亮
     ul.appendChild(li);
   });
-  await appendQuickRow(ul);
+  placeQuickRow();
 }
 
-/** 项目区末尾的「快聊」行：不绑文件夹的对话在这里当项目陈列，点它高亮并在
-    会话区陈列快聊列表（不改引擎工作项目，同分组视图的快聊组语义）。悬浮＋新建
-    快聊；高亮唯一——看快聊时项目行不亮，回项目列表点项目行。探测只发一次请求：
-    本机桌面端才拿得到跨项目会话列表，远程端记住不可用、不放这行。 */
-async function appendQuickRow(ul) {
+/** 项目区「快聊」行的可用性探测：本机桌面端才拿得到跨项目会话列表，远程端
+    记住不可用、不放这行。探测只发一次请求（结果缓存在 classicQuickAvailable）。 */
+async function ensureQuickAvailable() {
   if (classicQuickAvailable == null) {
     classicQuickAvailable = await request("session.list", { all_projects: 1 })
       .then((r) => Array.isArray(r && r.sessions))
       .catch(() => false);
   }
-  if (!classicQuickAvailable) return;
+  return classicQuickAvailable;
+}
+
+/** 建「快聊」行（同步，调用前先 ensureQuickAvailable）：不绑文件夹的对话在这里
+    当项目陈列，点它高亮并在会话区陈列快聊列表（不改引擎工作项目，同分组视图的
+    快聊组语义）。悬浮＋新建快聊；高亮唯一——看快聊时项目行不亮，回项目列表点
+    项目行。 */
+function buildQuickRow(ul) {
   // 无项目态：会话区只可能是快聊，快聊行直接算选中（未选远程时）；否则跟 classicViewGk 走
   const noProject = !(bootSnap && bootSnap.project_id != null);
   const quickActive = classicViewGk === "quick" || (noProject && classicViewGk == null);
@@ -5240,7 +5402,14 @@ async function appendQuickRow(ul) {
   if (quickActive) li.classList.add("active", "quick-row");
   else li.classList.add("quick-row");
   li.innerHTML = FOLDER_SVG + '<span class="s-title">快聊</span>';
-  li.title = "快聊 —— 不绑定任何文件夹的对话；点击高亮并查看快聊列表，点＋新建";
+  li.title = "快聊 —— 不绑定任何文件夹的对话；点击高亮并查看快聊列表，点＋新建；按住可拖动排序";
+  // 拖动排序：与项目行同一条 wireListDrag 链路。快聊没有项目 id，pid 记
+  // "quick" 伪键，commitProjectOrder 收集时参与排序、落库拆成 quick_pos 锚点
+  li.dataset.pid = "quick";
+  wireListDrag(li, { id: "quick" }, {
+    commit: (dst, pos) => commitProjectOrder("quick", dst.id, pos, "project-list", "li", "pid"),
+    rerender: () => refreshProjects(),
+  });
   const add = document.createElement("button");
   add.className = "p-add";
   add.textContent = "＋";
@@ -5595,7 +5764,7 @@ function renderBell() {
 
 function fmtNotifTime(ts) {
   const d = new Date(ts * 1000);
-  const p = (n) => String(n).padStart(2, "0");
+  const p = pad2;
   const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
   // 跨天的通知带上日期，不然挂机一夜后全是「HH:MM」，分不清是昨天还是上周
   if (d.toDateString() === new Date().toDateString()) return hm;
@@ -6117,6 +6286,9 @@ async function send() {
   clearPendingImages();
   clearPendingRefs();
   hideInputMenu();
+  // 用户主动发送：无论翻到哪儿都回到底部看自己的消息（并恢复自动跟随）
+  const sendLog = curLog();
+  if (sendLog) sendLog._followBottom = true;
   addUser(text, images, refs);
   // 实时用户消息也挂操作（复制/编辑）；seq 未知，编辑走「最后一条用户消息」的后端兜底
   attachMsgOps(curLog().lastElementChild, tab, "user", () => text);
@@ -6409,26 +6581,36 @@ function decorateFinalMessage(el, tab, getText, seq) {
 // 一次同步画完数千条消息（每条还要跑 markdown / mermaid / 代码高亮）会把主线程
 // 占满，切到大会话时就是一段白屏。分批把工作切成多帧，让浏览器有机会先画出首屏。
 // 阀值以下的短会话仍一次画完（不多付一帧的延迟），行为与以前完全一致。
+// 在分批之上再做窗口化：只常驻渲染最近 HISTORY_WINDOW 条，更早的靠聊天流顶部
+// 的「加载更早的消息」按钮按 HISTORY_CHUNK 向前补画——几千条的会话不再把
+// 全部节点留驻内存（对话内查找只覆盖已加载的窗口，这是取舍）。
 const HISTORY_SYNC_LIMIT = 200;
 const HISTORY_CHUNK = 100;
+const HISTORY_WINDOW = 500;
 
 function renderHistory(tab, messages) {
   const all = messages || [];
   // 渲染代际：期间又渲染过同一条聊天流（切标签 / 重进会话）时，旧的批处理作废
   const gen = (tab._historyGen = (tab._historyGen || 0) + 1);
   tab.logEl.innerHTML = "";
+  tab.logEl._followBottom = true; // 重进会话从底部看起，跟随标记一并复位
   tab._toolCards = new Map(); // 在途工具卡随流清空，避免持已分离节点
+  tab._historyAll = all; // 完整消息留在内存里，「加载更早」从这里向前取
+  tab._historyStart = Math.max(0, all.length - HISTORY_WINDOW); // 窗口起点（之前未画）
+  const view = all.slice(tab._historyStart);
+  if (tab._historyStart > 0) addHistoryMoreBtn(tab);
 
-  if (all.length <= HISTORY_SYNC_LIMIT) {
-    paintHistorySlice(tab, all, 0, all.length);
+  if (view.length <= HISTORY_SYNC_LIMIT) {
+    paintHistorySlice(tab, view, 0, view.length);
     finishHistoryRender(tab, true);
     return;
   }
 
   // 先同步画头一段：openTabForSession 会在 renderHistory 返回后马上看
   // children.length 判断是否空会话，零节点会被误当成空会话而错误地弹欢迎页
-  const first = Math.min(HISTORY_CHUNK, all.length);
-  paintHistorySlice(tab, all, 0, first);
+  // （窗口化后 view 至少是最近 500 条里的头一段，同样满足这一点）
+  const first = Math.min(HISTORY_CHUNK, view.length);
+  paintHistorySlice(tab, view, 0, first);
   tab.logEl.scrollTop = tab.logEl.scrollHeight;
   let i = first;
   const step = () => {
@@ -6436,14 +6618,49 @@ function renderHistory(tab, messages) {
     // 追加前先看用户是不是在底部：在底部就继续跟随最新内容，
     // 用户已经往上翻了就不抢他的位置（分批期间尤其重要）
     const atBottom = tab.logEl.scrollTop + tab.logEl.clientHeight >= tab.logEl.scrollHeight - 4;
-    const end = Math.min(i + HISTORY_CHUNK, all.length);
-    paintHistorySlice(tab, all, i, end);
+    const end = Math.min(i + HISTORY_CHUNK, view.length);
+    paintHistorySlice(tab, view, i, end);
     if (atBottom) tab.logEl.scrollTop = tab.logEl.scrollHeight;
     i = end;
-    if (i < all.length) requestAnimationFrame(step);
+    if (i < view.length) requestAnimationFrame(step);
     else finishHistoryRender(tab, atBottom);
   };
   requestAnimationFrame(step);
+}
+
+// 窗口顶部「加载更早的消息」按钮：向前补画一批，画完保持视口停在原内容上
+function addHistoryMoreBtn(tab) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "history-more";
+  btn.textContent = `加载更早的消息（还有 ${tab._historyStart} 条）`;
+  btn.onclick = () => loadEarlierHistory(tab);
+  tab.logEl.appendChild(btn); // 先画按钮再画消息 → 它始终在最顶上
+}
+
+function loadEarlierHistory(tab) {
+  if (!tab || !tab._historyAll || tab._historyStart <= 0) return;
+  const all = tab._historyAll;
+  const start = Math.max(0, tab._historyStart - HISTORY_CHUNK);
+  const log = tab.logEl;
+  const prevHeight = log.scrollHeight, prevTop = log.scrollTop;
+  // addUser/addAssistantDone 一律 appendChild 到流末尾（.chat-log 是纵向 flex，
+  // 追加即在底部）：先记住原内容第一个节点，画完把这批新节点搬到「加载更早」
+  // 按钮之后、原内容之前，才是真正的顶部插入——否则更早的消息会画到新消息下面
+  const btn = log.querySelector(".history-more");
+  const firstOld = btn ? btn.nextSibling : log.firstElementChild;
+  const prevCount = log.children.length;
+  paintHistorySlice(tab, all, start, tab._historyStart);
+  const added = Array.prototype.slice.call(log.children, prevCount);
+  for (const node of added) log.insertBefore(node, firstOld);
+  tab._historyStart = start;
+  // 内容插在顶部：滚动位置按新增高度下移补偿，视口里看到的内容不动
+  log.scrollTop = prevTop + (log.scrollHeight - prevHeight);
+  attachHistoryOps(tab); // 补画进来的用户消息也要挂复制/编辑（attachMsgOps 幂等）
+  if (btn) {
+    if (start <= 0) btn.remove();
+    else btn.textContent = `加载更早的消息（还有 ${start} 条）`;
+  }
 }
 
 // 把 messages[start:end) 画进当前聊天流（调用方负责 withTab 路由与滚动位置）。
@@ -7496,7 +7713,7 @@ let agView = "week";         // week | month | list
 let agAnchor = new Date();   // 当前查看的日期（取其所在周/月）
 let agCache = [];            // schedule.list（含已完成）的缓存
 
-function agPad(n) { return String(n).padStart(2, "0"); }
+function agPad(n) { return pad2(n); }
 // 毫秒时间戳的 "HH:MM"（agHm 收的是秒，周视图内部一律用毫秒）
 function agHmMs(ms) {
   const d = new Date(ms);
@@ -7867,7 +8084,7 @@ function shiftAgenda(dir) {
 
 function fmtAgendaTime(ts) {
   const d = new Date(ts * 1000);
-  const p = (n) => String(n).padStart(2, "0");
+  const p = pad2;
   const now = new Date();
   const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
   const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
@@ -8142,7 +8359,7 @@ function agendaModal(existing, defaultTs, preset) {
   const d = existing ? new Date(existing.start_at * 1000)
     : defaultTs ? new Date(defaultTs * 1000)
     : new Date(Date.now() + 3600000);
-  const p = (n) => String(n).padStart(2, "0");
+  const p = pad2;
   const dtLocal = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
   // 结束时间：默认 1 小时后（新建）、沿用已有值（编辑）或气泡传进来的区间；
   // 没填就是按点事件
@@ -8250,7 +8467,7 @@ function fmtCronSchedule(t) {
 function fmtNextRun(ts) {
   if (!ts) return "未排期";
   const d = new Date(ts * 1000);
-  const p = (n) => String(n).padStart(2, "0");
+  const p = pad2;
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
@@ -11077,9 +11294,23 @@ function importMcpModal(prefill = "") {
     // M10：含 stdio 定义时后端先回命令清单，确认后才写盘——连接即执行本机命令，
     // 必须让人看清楚要跑什么再继续
     if (r.needs_confirm) {
+      // env 透明度（对抗审查联动项；字段契约：env 为「键 → 字符串值」的对象，
+      // 由后端 pending_stdio_commands 下发）：stdio 服务的环境变量能改变目标程序
+      // 的运行时行为（NODE_OPTIONS/PYTHONPATH 等），确认时必须逐键摆出来看。
+      // confirm() 弹的是纯文本：值原样显示才忠实，不做 escapeHtml（纯文本无
+      // 注入面，转义反而会把 & " 显示成实体）；换行压成空格防止借弹窗排版
+      // 伪造文案，超长值只截断「展示」——确认导入的仍是完整值。没有 env 或
+      // env 为空对象时，输出与原来完全一致。
       const lines = (r.pending || []).map((d) => {
         const full = [d.command, ...(d.args || [])].join(" ");
-        return `  ${d.name}: ${full}`;
+        let line = `  ${d.name}: ${full}`;
+        const env = d.env && typeof d.env === "object" && !Array.isArray(d.env) ? d.env : null;
+        const envLines = env ? Object.keys(env).map((k) => {
+          const v = String(env[k] ?? "").replace(/\s+/g, " ").trim();
+          return `      ${k}=${v.length > 200 ? v.slice(0, 200) + "…（已截断）" : v}`;
+        }) : [];
+        if (envLines.length) line += "\n      环境变量：\n" + envLines.join("\n");
+        return line;
       }).join("\n");
       if (!confirm(
         "以下 MCP 服务会在连接时执行本机命令：\n" + lines +
@@ -11214,7 +11445,7 @@ const mapState = {
 };
 let mapProjects = []; // project.list 缓存（项目下拉）
 
-function mapPad(n) { return String(n).padStart(2, "0"); }
+function mapPad(n) { return pad2(n); }
 function mapDayKey(ts) {
   const d = new Date(ts * 1000);
   return `${d.getFullYear()}-${mapPad(d.getMonth() + 1)}-${mapPad(d.getDate())}`;
@@ -11426,22 +11657,32 @@ function renderMapAside() {
   const aside = document.getElementById("map-aside");
   if (!d) { aside.classList.add("hidden"); return; }
   aside.classList.toggle("hidden", mapState.view !== "timeline");
-  // 文件足迹 chips：basename 为主、次数徽记；title 带完整路径
+  // 文件足迹 chips：basename 为主、次数徽记；title 带完整路径。无记录时整行
+  // 收起——一行加粗 label 说「没有」比不显示更抢眼；过滤指向的文件掉出
+  // Top N 后 chip 没了，残留的过滤一并清掉，免得时间线被悄悄过滤成空
   const chips = (d.files || []).map((f) =>
     `<button class="map-file-chip${mapState.fileFilter === f.path ? " on" : ""}" data-path="${escapeHtml(f.path)}"` +
     ` title="${escapeHtml(f.path)} · ${f.count} 次改动 · 点击过滤时间线">${escapeHtml(mapBasename(f.path))}<i>${f.count}</i></button>`).join("");
-  filesBox.innerHTML = chips
-    ? `<span class="map-aside-label">文件足迹</span>${chips}${mapState.fileFilter ? '<button class="map-file-clear" data-clear="1">✕ 清除过滤</button>' : ""}`
-    : `<span class="map-aside-label dim">文件足迹：暂无检查点记录的改动</span>`;
-  filesBox.querySelectorAll(".map-file-chip").forEach((b) => {
-    b.onclick = () => {
-      mapState.fileFilter = mapState.fileFilter === b.dataset.path ? null : b.dataset.path;
+  if (!chips) {
+    if (mapState.fileFilter) {
+      mapState.fileFilter = null;
       renderMapTimeline();
-      renderMapAside();
-    };
-  });
-  const clearBtn = filesBox.querySelector(".map-file-clear");
-  if (clearBtn) clearBtn.onclick = () => { mapState.fileFilter = null; renderMapTimeline(); renderMapAside(); };
+    }
+    filesBox.innerHTML = "";
+    filesBox.classList.add("hidden");
+  } else {
+    filesBox.classList.remove("hidden");
+    filesBox.innerHTML = `<span class="map-aside-label">文件足迹</span>${chips}${mapState.fileFilter ? '<button class="map-file-clear" data-clear="1">✕ 清除过滤</button>' : ""}`;
+    filesBox.querySelectorAll(".map-file-chip").forEach((b) => {
+      b.onclick = () => {
+        mapState.fileFilter = mapState.fileFilter === b.dataset.path ? null : b.dataset.path;
+        renderMapTimeline();
+        renderMapAside();
+      };
+    });
+    const clearBtn = filesBox.querySelector(".map-file-clear");
+    if (clearBtn) clearBtn.onclick = () => { mapState.fileFilter = null; renderMapTimeline(); renderMapAside(); };
+  }
 
   // 热力图：GitHub 贡献图式（列=周，行=周一..周日），周数按底栏实际宽度
   // 自适应（拉宽窗口多铺历史，富余宽度不空在中间）；强度按当日 token 分档，
@@ -11452,11 +11693,25 @@ function renderMapAside() {
     const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     // 从当前周的周一开始往前铺 budget 整周：每列恒 7 天，本周没到的几天补
     // 空格——整图是规矩矩形，既不缺角也不会超宽被裁
-    const start = new Date(end.getTime() - ((end.getDay() + 6) % 7) * 86400000
-      - (budget - 1) * 7 * 86400000);
+    const endWeek = end.getTime() - ((end.getDay() + 6) % 7) * 86400000;
+    let start = endWeek - (budget - 1) * 7 * 86400000;
+    // 项目诞生晚于窗口起点时，起点裁到诞生所在周并收窄列数：不满宽就少铺，
+    // 不拿一排「无活动」的空格凑满底栏（右侧留白比假数据诚实）；data-weeks
+    // 仍记宽度对应的列数，拉伸窗口的防抖比较不受裁剪影响
+    let weeks = budget;
+    const bornTs = Number((d.project || {}).created_at) || 0;
+    if (bornTs > 0) {
+      const b = new Date(bornTs * 1000);
+      const bornWeek = new Date(b.getFullYear(), b.getMonth(), b.getDate()).getTime()
+        - ((b.getDay() + 6) % 7) * 86400000;
+      if (bornWeek > start) {
+        start = Math.min(bornWeek, endWeek);
+        weeks = Math.max(1, Math.round((endWeek - start) / (7 * 86400000)) + 1);
+      }
+    }
     let cells = "";
-    for (let i = 0; i < budget * 7; i++) {
-      const t = start.getTime() + i * 86400000;
+    for (let i = 0; i < weeks * 7; i++) {
+      const t = start + i * 86400000;
       const key = mapDayKey(t / 1000);
       const st = byDay.get(key);
       const tok = st ? st.tokens : 0;
@@ -11991,9 +12246,10 @@ const RIGHT_TAB_LOADERS = {
   map: () => loadMemoryMap(),
   ext: () => openExtPanel(),
   todo: () => loadTodoPanel(),
+  aux: () => refreshAuxModel(), // 模型下拉：每次激活都重拉（主模型换了「跟随」项的标注要跟着变）
 };
 
-/** 按需加载某个视图的数据；未知 id（如 aux 辅助对话，没有远端数据）静默跳过。
+/** 按需加载某个视图的数据；未知 id 静默跳过。
 
     传分段 id（todo / cron…）拉它自己；传容器标签 id（tasks / auto）拉该标签
     当前的分段——initUiPrefs 恢复标签、reloadProjectPanels 重拉打开的标签、
@@ -12584,10 +12840,127 @@ auxInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); auxSend(); }
 });
 
+// —— 辅助对话模型：面板独立的模型选择（跟随主对话或指定服务/模型） ——
+// 后端按 ui.json 偏好在每次 chat.aux 时构建专用 provider，主对话与其余
+// 会话不受影响；这里只负责把选择写进偏好，发送路径不用带模型参数。
+// 入口是发送钮上方右下角的品牌徽章：闭合态只显 logo（跟随主对话就画主对话
+// 服务的 logo，跟的是谁一眼可见），全称挪到悬停提示与菜单行里
+const auxModelChip = document.getElementById("aux-model-chip");
+const auxModelMenu = document.getElementById("aux-model-menu");
+let auxModelRows = []; // config.providers 展开的服务×模型行（与主模型菜单同源）
+let auxModelState = { provider: "", model: "", label: "", main_provider: "", main_label: "" };
+
+// 菜单行里的头像比设置页小一圈；占位 tile 给「没有任何可用服务」的空态
+function auxMiniAvatar(name) {
+  return name ? providerAvatar(name)
+    : '<span class="svc-avatar aux-mm-tile">?</span>';
+}
+
+async function refreshAuxModel() {
+  if (!auxModelChip) return;
+  const [detail, state] = await Promise.all([
+    request("config.providers").catch(() => null),
+    request("aux.model.get").catch(() => null),
+  ]);
+  if (!detail || !state) return; // 拉失败保持原样（初值即「跟随主对话」）
+  auxModelRows = buildModelRows(detail);
+  auxModelState = state;
+  paintAuxChip();
+}
+
+function paintAuxChip() {
+  const eff = auxModelState.provider || auxModelState.main_provider || "";
+  auxModelChip.innerHTML = auxMiniAvatar(eff);
+  auxModelChip.title = auxModelState.provider
+    ? `辅助对话模型：${auxModelState.label}（独立于主对话，点按更换）`
+    : "辅助对话跟随主对话" + (auxModelState.main_label ? `（${auxModelState.main_label}）` : "")
+      + "，点按更换";
+}
+
+function hideAuxModelMenu() {
+  auxModelMenu.classList.add("hidden");
+  auxModelMenu.innerHTML = "";
+}
+
+function buildAuxMenu() {
+  auxModelMenu.innerHTML = "";
+  const follow = document.createElement("button");
+  follow.className = "mm-item" + (auxModelState.provider ? "" : " active");
+  follow.innerHTML = auxMiniAvatar(auxModelState.main_provider) +
+    `<span class="mm-model">跟随主对话</span>` +
+    (auxModelState.main_label ? `<span class="mm-prov">${escapeHtml(auxModelState.main_label)}</span>` : "");
+  follow.title = auxModelState.main_label
+    ? `辅助对话跟随主对话（当前：${auxModelState.main_label}）`
+    : "辅助对话跟随主对话";
+  follow.onclick = () => pickAuxModel(null);
+  auxModelMenu.appendChild(follow);
+  const addRow = (row) => {
+    const on = !!auxModelState.provider &&
+      auxModelState.provider === row.name && auxModelState.model === row.model;
+    const b = document.createElement("button");
+    b.className = "mm-item" + (on ? " active" : "");
+    b.innerHTML = auxMiniAvatar(row.name) +
+      `<span class="mm-model">${on ? "✓ " : ""}${escapeHtml(row.model)}</span>` +
+      `<span class="mm-prov${row.hasKey ? "" : " no-key"}">${row.hasKey ? "" : "⚠ "}${escapeHtml(row.label)}</span>`;
+    b.title = row.hasKey
+      ? `辅助对话使用 ${row.label} / ${row.model}`
+      : `「${row.label}」还没配置 API Key，选用后发消息会失败`;
+    b.onclick = () => pickAuxModel(row);
+    auxModelMenu.appendChild(b);
+  };
+  for (const [label, pred] of [["默认", (r) => r.preset], ["自定义", (r) => !r.preset]]) {
+    const hits = auxModelRows.filter(pred);
+    if (!hits.length) continue;
+    const head = document.createElement("div");
+    head.className = "aux-mm-head";
+    head.textContent = label;
+    auxModelMenu.appendChild(head);
+    hits.forEach(addRow);
+  }
+  if (!auxModelRows.length) {
+    const empty = document.createElement("div");
+    empty.className = "mm-empty";
+    empty.textContent = "还没有可用的模型服务，先到 设置 · 模型服务 添加";
+    auxModelMenu.appendChild(empty);
+  }
+}
+
+async function pickAuxModel(row) {
+  hideAuxModelMenu();
+  try {
+    const r = await request("aux.model.set", row ? { name: row.name, model: row.model } : { name: "" });
+    auxModelState = r;
+    paintAuxChip();
+    addNotice(row ? `✓ 辅助对话将使用「${r.label}」，主对话不变` : "✓ 辅助对话已改回跟随主对话");
+  } catch (err) {
+    addNotice("设置失败: " + err.message);
+  }
+}
+
+auxModelChip.onclick = async (e) => {
+  e.stopPropagation(); // 别让冒泡到 document 的外点关闭立刻把菜单关掉
+  if (!auxModelMenu.classList.contains("hidden")) return hideAuxModelMenu();
+  auxModelMenu.innerHTML = '<div class="mm-empty">加载中…</div>';
+  auxModelMenu.classList.remove("hidden");
+  if (!auxModelRows.length) await refreshAuxModel(); // 首次打开兜底拉一次
+  const chipR = auxModelChip.getBoundingClientRect(); // 物理像素，下同
+  const vh = window.innerHeight / uiScale;
+  auxModelMenu.style.top = "auto";
+  auxModelMenu.style.bottom = (vh - chipR.top / uiScale + 6) + "px"; // 靠底向上弹
+  auxModelMenu.style.left = Math.max(8, chipR.right / uiScale - 250) + "px";
+  buildAuxMenu();
+};
+document.addEventListener("click", (e) => {
+  if (!auxModelMenu.classList.contains("hidden") &&
+      !auxModelMenu.contains(e.target) && !auxModelChip.contains(e.target)) hideAuxModelMenu();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideAuxModelMenu(); });
+window.addEventListener("resize", hideAuxModelMenu);
+
 // —— 审查：本会话的文件改动轮次 + 改前→现在 diff ——
 function fmtClock(ts) {
   const d = new Date(ts * 1000);
-  const p = (n) => String(n).padStart(2, "0");
+  const p = pad2;
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
@@ -12974,12 +13347,23 @@ document.getElementById("files-tree").addEventListener("click", (e) => {
 });
 
 // —— 任务：子代理任务簿（running 优先，支持全部取消） ——
-let tasksTimer = null;
+// loadTasks._snap：上次渲染的任务清单序列化快照。面板由 3s 轮询驱动，
+// 数据无变化时直接跳过整表 innerHTML 重建——重建会打断悬停/选区，
+// 还可能与点击竞争（mousedown 落在旧节点、click 派发前节点已被替换）。
 
 async function loadTasks() {
   const ul = document.getElementById("tasks-list");
   try {
     const tasks = (await request("tasks.list")).tasks || [];
+    // 快照覆盖所有上屏字段：运行中任务的 tokens/耗时在变，失配即照常重绘
+    const snap = JSON.stringify(tasks.map((t) => [
+      t.id, t.status, t.agent_type, t.prompt,
+      t.result ? t.result.slice(0, 300) : "",
+      t.tokens_in || 0, t.tokens_out || 0, t.duration_s || 0, t.error || "",
+    ]));
+    if (snap === loadTasks._snap) return;
+    loadTasks._snap = snap;
+    loadTasks._errSnap = "";
     ul.innerHTML = "";
     if (!tasks.length) {
       ul.innerHTML = '<div class="rp-empty">还没有子代理任务。Agent 拆解出的并行任务会出现在这里。</div>';
@@ -13022,7 +13406,13 @@ async function loadTasks() {
       ul.appendChild(item);
     });
   } catch (e) {
-    ul.innerHTML = `<div class="rp-empty">加载失败：${escapeHtml(e.message)}</div>`;
+    // 失败不留快照：下一轮照常重试；错误文案没变就不重写占位
+    loadTasks._snap = null;
+    const msg = `加载失败：${escapeHtml(e.message)}`;
+    if (loadTasks._errSnap !== msg) {
+      loadTasks._errSnap = msg;
+      ul.innerHTML = `<div class="rp-empty">${msg}</div>`;
+    }
   }
 }
 
@@ -13183,7 +13573,9 @@ document.getElementById("tasks-cancel").onclick = async () => {
   addNotice("已请求取消全部运行中的子任务");
   loadTasks();
 };
-// 面板打开期间轻量轮询（3s），关闭即停
+// 常驻 3s 轮询：面板不可见时跳过请求；可见但数据无变化时 loadTasks 内部
+// 按快照跳过重绘（不做 start/clearInterval 生命周期，避免在面板开合的多处
+// 钩子里接线，也和切页时 loadRightTab("tasks") 的即时刷新互不干扰）
 setInterval(() => {
   if (rightViewVisible("tasks")) loadTasks();
 }, 3000);
@@ -13191,8 +13583,11 @@ setInterval(() => {
 // —— 浏览器：iframe 预览（本地开发服务器 / 可内嵌网页） ——
 const browserUrl = document.getElementById("browser-url");
 const browserFrame = document.getElementById("browser-frame");
+const browserViewport = document.getElementById("browser-viewport");
 const browserEmpty = document.getElementById("browser-empty");
 const browserHint = document.getElementById("browser-hint");
+const browserFitBtn = document.getElementById("browser-fit");
+const browserZoomHud = document.getElementById("browser-zoom-hud");
 
 // 内网/本机地址（开发服务器一般不设 X-Frame-Options，基本都能嵌）；公网站点
 // 大多带 X-Frame-Options / frame-ancestors 拒绝内嵌——只留一片空白，提前说清
@@ -13205,15 +13600,109 @@ function isLocalishUrl(u) {
   } catch (e) { return true; }
 }
 
+// —— 自适应面板宽：跨源页面读不到内容宽度，按固定虚拟视口 1280 排版后整体
+// transform 缩放到面板宽——bilibili 这类带大 min-width 的桌面版式不再横向溢出，
+// 代价是字变小；面板比 1280 还宽就不缩（响应式站点自然铺满，也不放大免得发虚）。
+// 偏好存 ui.json（browser_fit，缺省 = 自适应开）。本地开发服务器的响应式调试
+// 需要真实面板宽度时，点「自适应」钮切回原始大小。
+const BROWSER_FIT_W = 1280;
+// 页面视口高度上限：为铺满面板，视口要拉到 h/scale（窄面板下远超一屏），而跨源
+// 页面读不到内容高度——站点首屏渲染不满这个视口时（bilibili 首页实测约 1100px），
+// 内容会顶着面板顶部、下面留出页面自己的一大片空白。限高到一屏（1080px）并把
+// 整块垂直居中：内容多时在块内滚动，内容不足时空白收敛进块内、四周是面板底色。
+const BROWSER_FIT_MAX_H = 1080;
+// 页面缩放（自适应档）：Ctrl+滚轮悬停浏览器面板时步进，Chrome 同款档位，偏好存
+// ui.json（browser_page_zoom，缺省 100% = 删键）。只接管面板自身区域（工具条/
+// 上下留白/提示条）——跨源 iframe 内容区的滚轮事件父页面收不到，那片区域保持
+// WebView2 原生行为。
+const BROWSER_ZOOM_STOPS = [50, 67, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
+let browserFit = true;
+let browserPageZoom = 1;
+let browserZoomHudTimer = null;
+
+function layoutBrowserFrame() {
+  if (!browserViewport || browserViewport.classList.contains("hidden")) return;
+  if (!browserFit) {
+    browserFrame.style.transform = "none";
+    browserFrame.style.top = "";
+    browserFrame.style.width = "100%";
+    browserFrame.style.height = "100%";
+    return;
+  }
+  // 界面缩放（CSS zoom）下 getBoundingClientRect 是物理像素，除回 uiScale 得布局像素
+  const rect = browserViewport.getBoundingClientRect();
+  const w = rect.width / uiScale, h = rect.height / uiScale;
+  if (!(w > 10) || !(h > 10)) return;
+  const scale = Math.min(1, w / BROWSER_FIT_W) * browserPageZoom;
+  const vh = Math.min(h / scale, BROWSER_FIT_MAX_H);
+  browserFrame.style.width = Math.round(w / scale) + "px";
+  browserFrame.style.height = Math.round(vh) + "px";
+  browserFrame.style.top = Math.max(0, Math.round((h - vh * scale) / 2)) + "px";
+  browserFrame.style.transform = Math.abs(scale - 1) < 0.0005 ? "none" : "scale(" + scale + ")";
+}
+
+function renderBrowserFit() {
+  if (!browserFitBtn) return;
+  browserFitBtn.textContent = browserFit ? "自适应" : "原始";
+  browserFitBtn.title = browserFit
+    ? "整页缩到面板宽并垂直居中，不出横向滚动；悬停面板时 Ctrl+滚轮缩放页面（点一下改回原始大小）"
+    : "原始大小：页面宽于面板会出横向滚动（点一下恢复自适应）";
+}
+
+function stepBrowserPageZoom(dir) {
+  const cur = Math.round(browserPageZoom * 100);
+  let i = BROWSER_ZOOM_STOPS.indexOf(cur);
+  if (i < 0) {
+    // 不在档位上（读回旧偏好等）：先落到不超过当前值的最近档，再按方向步进
+    i = 0;
+    for (let k = 0; k < BROWSER_ZOOM_STOPS.length; k++) {
+      if (BROWSER_ZOOM_STOPS[k] <= cur) i = k;
+      else break;
+    }
+  }
+  applyBrowserPageZoom(BROWSER_ZOOM_STOPS[Math.max(0, Math.min(BROWSER_ZOOM_STOPS.length - 1, i + dir))] / 100);
+}
+
+function applyBrowserPageZoom(z) {
+  browserPageZoom = Math.min(3, Math.max(0.5, z));
+  layoutBrowserFrame();
+  showBrowserZoomHud();
+  // 缺省即 100%：删键而非存 100（与 ui_scale / read_width 同一套约定）
+  const pct = Math.round(browserPageZoom * 100);
+  saveUiPrefs({ browser_page_zoom: pct === 100 ? null : pct });
+}
+
+function showBrowserZoomHud() {
+  if (!browserZoomHud) return;
+  browserZoomHud.textContent = "页面缩放 " + Math.round(browserPageZoom * 100) + "%";
+  browserZoomHud.classList.remove("browser-zoom-hud-off");
+  clearTimeout(browserZoomHudTimer);
+  browserZoomHudTimer = setTimeout(() => browserZoomHud.classList.add("browser-zoom-hud-off"), 900);
+}
+
+if (browserFitBtn) browserFitBtn.onclick = () => {
+  browserFit = !browserFit;
+  renderBrowserFit();
+  layoutBrowserFrame();
+  // 缺省即自适应：删键而非存 1（与 ui_scale / read_width 同一套约定）
+  saveUiPrefs({ browser_fit: browserFit ? null : 0 });
+};
+
+if (window.ResizeObserver && browserViewport) {
+  new ResizeObserver(() => layoutBrowserFrame()).observe(browserViewport);
+}
+
 function browserGo() {
   let u = browserUrl.value.trim();
   if (!u) return;
   if (!/^https?:\/\//i.test(u)) u = "http://" + u;
   browserUrl.value = u;
   browserFrame.src = u;
-  browserFrame.classList.remove("hidden");
+  browserViewport.classList.remove("hidden");
   browserEmpty.classList.add("hidden");
+  // 先定提示条显隐再量尺寸：提示条占一行，量早了居中偏移会按偏高旧值算
   if (browserHint) browserHint.classList.toggle("hidden", isLocalishUrl(u));
+  layoutBrowserFrame();
 }
 document.getElementById("browser-go").onclick = browserGo;
 document.getElementById("browser-reload").onclick = () => {
@@ -13241,6 +13730,8 @@ function applyUiScale(pct) {
   if (label) label.textContent = pct + "%";
   document.getElementById("btn-zoom-out").disabled = pct <= UI_SCALE_MIN;
   document.getElementById("btn-zoom-in").disabled = pct >= UI_SCALE_MAX;
+  // 浏览器面板的自适应缩放按「视口布局像素」算，zoom 变了布局像素就变，跟着重算
+  layoutBrowserFrame();
 }
 
 // 缩放偏好防抖落盘：Ctrl+滚轮一格接一格地滚，不能每格都写一次 ui.json
@@ -13264,10 +13755,21 @@ function changeUiScale(dir) {
 
 // Ctrl+滚轮缩放（桌面惯例）。passive:false 才能 preventDefault 拦下 WebView2
 // 自带的原生缩放——不然 CSS zoom 和浏览器 zoom 叠加，界面忽大忽小。
-let zoomWheelAccum = 0;
+// 浏览器面板（自适应档 + 已加载页面）例外：Ctrl+滚轮只步进页面缩放，
+// 不动全局界面缩放——跨源 iframe 内容区的事件父页面收不到，接管的是面板自身区域。
+let zoomWheelAccum = 0, browserZoomAccum = 0;
 window.addEventListener("wheel", (e) => {
   if (!e.ctrlKey) return;
   e.preventDefault();
+  if (browserFit && browserViewport && !browserViewport.classList.contains("hidden")
+      && e.target && e.target.closest && e.target.closest("#rp-page-browser")) {
+    browserZoomAccum += e.deltaY;
+    if (Math.abs(browserZoomAccum) >= 40) {
+      stepBrowserPageZoom(browserZoomAccum < 0 ? 1 : -1);
+      browserZoomAccum = 0;
+    }
+    return;
+  }
   zoomWheelAccum += e.deltaY;
   if (Math.abs(zoomWheelAccum) >= 40) {
     changeUiScale(zoomWheelAccum < 0 ? 1 : -1);
@@ -13376,6 +13878,12 @@ async function initUiPrefs() {
   // 界面缩放：未存偏好时保持默认 90%（CSS 与初始状态一致）
   const sc = Number(prefs.ui_scale);
   if (Number.isFinite(sc) && sc > 0) applyUiScale(sc);
+  // 浏览器面板自适应（缺省开；存 0 = 上次切到了原始大小）
+  browserFit = prefs.browser_fit !== 0;
+  renderBrowserFit();
+  // 浏览器页面缩放（Ctrl+滚轮步进，缺省 100%）
+  const bpz = Number(prefs.browser_page_zoom);
+  if (Number.isFinite(bpz) && bpz >= 50 && bpz <= 300) browserPageZoom = bpz / 100;
   // ~ 候选排序偏好（manual=列表顺序 / top=常用优先），默认手动
   snippetsSort = prefs.snippets_sort === "top" ? "top" : "manual";
   for (const key of Object.keys(UI_LIMITS)) {
@@ -13428,6 +13936,11 @@ async function initUiPrefs() {
     ? prefs.session_order : {};
   // 标签栏页签的拖动序：sid 数组（渲染前先填好，renderTabs 按它排）
   tabOrderPrefs = Array.isArray(prefs.tab_order) ? prefs.tab_order : [];
+  // 快聊分组的锚点位置（渲染前先填好，refreshSessions/refreshProjects 按它插）
+  quickPosPref = (prefs.quick_pos === "top" || prefs.quick_pos === "bottom")
+    ? prefs.quick_pos
+    : (prefs.quick_pos && typeof prefs.quick_pos === "object" && prefs.quick_pos.before > 0
+      ? { before: prefs.quick_pos.before } : null);
   applySidebarView();
   if (sidebarView === "grouped") refreshSessions();
   // 对话区宠物开关（默认显示）+ 大小（pet_scale，缺省 100%）+ 横向落点
@@ -13666,12 +14179,16 @@ function loadLib(name, srcs) {
   if (!(_libLoads[name] instanceof Promise)) {
     _libLoads[name] = new Promise((resolve, reject) => {
       let i = 0;
+      // 失败不缓存：拒绝态的 Promise 若留在表里，mermaid/高亮/终端/二维码
+      // 在刷新页面前就永久不可用。vendor 文件是本机资源，一次失败多因瞬时
+      // 占用或安装损坏，先清缓存再 reject，下次调用可重新加载。
+      const fail = (err) => { delete _libLoads[name]; reject(err); };
       const next = () => {
-        if (i >= srcs.length) { reject(new Error("库加载失败: " + name)); return; }
+        if (i >= srcs.length) { fail(new Error("库加载失败: " + name)); return; }
         const s = document.createElement("script");
         s.src = srcs[i++];
         s.onload = () => (i < srcs.length ? next() : resolve());
-        s.onerror = () => reject(new Error("库加载失败: " + s.src));
+        s.onerror = () => fail(new Error("库加载失败: " + s.src));
         document.head.appendChild(s);
       };
       next();
@@ -15413,10 +15930,17 @@ function renderUpdatePanel(snap) {
           actions.innerHTML = "";
           return;
         }
-        state.textContent = r.uac
+        // 校验透明度（对抗审查联动项；字段契约：verified 布尔，后端下载时探测
+        // 同名 .sha256 附件并核对，remote.py 已有该字段、无需后端改动）：只有明确
+        // verified === true 才算核对过；false 或旧后端没带这个字段一律按「未核对」
+        // 处理，明确告诉用户，别让人默认装的是核对过的包。
+        const shaOk = r.verified === true;
+        state.textContent = (r.uac
           ? "下载完成。本机是「为所有用户」安装，点「退出并安装」后应用会先退出，"
             + "紧接着系统弹出授权窗口（用户账户控制）——请点「是」，装完自动重新打开。"
-          : "下载完成。点「退出并安装」后应用会自动退出并静默安装，装完自动重新打开。";
+          : "下载完成。点「退出并安装」后应用会自动退出并静默安装，装完自动重新打开。")
+          + (shaOk ? "" : " ⚠ 未能核对安装包校验值（发布页缺 .sha256 校验附件或核对未"
+            + "通过），无法确认安装包未被篡改；谨慎起见可到下载页手动核对 SHA-256 后再装。");
         const b2 = document.createElement("button");
         b2.className = "btn-ghost";
         b2.textContent = "退出并安装";
@@ -16081,7 +16605,7 @@ document.getElementById("btn-feedback").onclick = async () => {
 function fmtBackupTime(ts) {
   // 精确到秒：与备份行（文件名时间戳）同一粒度，列表里两种时间才对得上
   const d = new Date(ts * 1000);
-  const pad = (n) => String(n).padStart(2, "0");
+  const pad = pad2;
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
     `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
@@ -16221,31 +16745,6 @@ document.getElementById("btn-backup-now").onclick = async () => {
     btn.disabled = false;
   }
 };
-
-// __ERR_TRAP_BEGIN（临时错误陷阱，测试后删除）
-(function () {
-  function show(label, detail) {
-    let d = document.getElementById("__errdump");
-    if (!d) {
-      d = document.createElement("pre");
-      d.id = "__errdump";
-      d.style.cssText = "position:fixed;top:0;left:0;z-index:99999;background:#7a1010;color:#fff;font-size:11px;white-space:pre-wrap;max-width:90vw;max-height:45vh;overflow:auto;margin:0;padding:4px 8px;";
-      document.body.appendChild(d);
-    }
-    d.textContent += "== " + label + " ==\n" + detail + "\n\n";
-  }
-  window.addEventListener("error", function (e) {
-    // 「ResizeObserver loop」是浏览器对「RO 回调内改布局」的良性提示
-    // （不是应用错误，拖面板/缩放窗口时随时可能触发）——业界惯例直接忽略，
-    // 否则红屏刷满这条吓人（真循环的根因在各自的 RO 回调里修，见 rp-tabs/行卡）
-    if (String(e.message || "").indexOf("ResizeObserver loop") >= 0) return;
-    show("error", e.message + " @ " + (e.filename || "?") + ":" + e.lineno + ":" + e.colno + "\n" + ((e.error && e.error.stack) || ""));
-  });
-  window.addEventListener("unhandledrejection", function (e) {
-    show("rejection", ((e.reason && (e.reason.stack || e.reason.message)) || String(e.reason)));
-  });
-})();
-// __ERR_TRAP_END
 
 // 面板一次性接线：输入框回车快速添加、「＋ 新建任务」按钮
 wireProjectTasksPanel();

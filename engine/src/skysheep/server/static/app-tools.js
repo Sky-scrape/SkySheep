@@ -56,60 +56,95 @@ async function pickConfiguredService(box, saveMethod, extraParams, done) {
   });
 }
 
-async function renderWebsearchCfg() {
+// 三个「服务商型」配置表单（联网搜索 / AI 画图 / 语音输入）共用同一套骨架：
+// 取当前配置 → 画「服务商三档 + 自定义明细 + 状态行」→ 接三档切换 / 已配置
+// 点选 / 保存。差异只有字段清单与文案，全部经 cfg 传入（render*Cfg 各自给）：
+//   formId / hintId / getMethod / saveMethod —— 表单、提示条与 WS 方法
+//   labels      —— 服务商三档文案（原样传给 providerPicker）
+//   detailHtml  —— 自定义档的明细行 HTML（仅 custom 模式调用）
+//   statusHtml  —— 状态行（.toolcfg-state 整段）
+//   fields      —— 保存时按 data-f 收集的文本字段
+//   pickParams  —— 「已配置」点选服务时附带的参数
+//   pickedNotice / saved / saveFailed —— 点选与保存成功/失败的反馈（通道与文案不同）
+async function renderProviderCfg(cfg) {
   let d;
-  try { d = await request("websearch.get"); } catch (e) { return; }
-  document.getElementById("websearch-hint").textContent = d.config_hint;
-  const form = document.getElementById("websearch-form");
+  try { d = await request(cfg.getMethod); } catch (e) { return; }
+  document.getElementById(cfg.hintId).textContent = d.config_hint;
+  const form = document.getElementById(cfg.formId);
   // 当前档位：服务商是服务名 → 「已配置」；custom → 自定义；其余（含 auto）→ 自动
-  const mode = providerModeOf("websearch-form", d);
+  const mode = providerModeOf(cfg.formId, d);
+  const detail = mode === "custom" ? cfg.detailHtml(d) : "";
+  form.innerHTML = `
+    <div class="toolcfg-row"><label>服务商</label>${providerPicker(d, cfg.labels, mode)}</div>
+    ${detail}
+    <div class="toolcfg-row">
+      ${cfg.statusHtml(d)}
+      <span class="spacer"></span>
+      <button class="btn-ghost" data-act="save">保存</button>
+    </div>`;
+  form.querySelectorAll(".provider-seg button").forEach((btn) => {
+    btn.onclick = () => saveSwitch(cfg.formId, cfg.saveMethod, btn.dataset.mode);
+  });
+  if (mode === "configured") {
+    pickConfiguredService(form, cfg.saveMethod, () => cfg.pickParams(form), () => {
+      addNotice(cfg.pickedNotice);
+      cfg.rerender();
+    });
+  }
+  const saveBtn = form.querySelector('[data-act="save"]');
+  if (saveBtn) saveBtn.onclick = async () => {
+    // provider 回传 get 时的当前值：表单里没有可编辑的 provider 控件，
+    // 档位切换由分段按钮即时保存，这里只负责保存自定义明细字段
+    // （以前读不存在的 [data-f="provider"] 元素，点保存会抛 TypeError——
+    // 后端收到空 provider 会把档位重置回 auto，所以必须回传当前值）
+    const params = { provider: d.provider || "" };
+    for (const f of cfg.fields) {
+      const el = form.querySelector(`[data-f="${f}"]`);
+      if (el) params[f] = el.value;
+    }
+    const keyEl = form.querySelector('[data-f="key"]');
+    const key = keyEl ? keyEl.value.trim() : "";
+    if (key) params.api_key = key;
+    try {
+      await request(cfg.saveMethod, params);
+      cfg.saved();
+      cfg.rerender();
+    } catch (e) {
+      cfg.saveFailed(e);
+    }
+  };
+}
+
+async function renderWebsearchCfg() {
   const labels = { auto: "自动（优先复用已配置的 Key）", custom: "自定义（自建搜索服务）" };
-  const keyHint = d.key_mask && mode === "custom"
-    ? "已配置（" + d.key_mask + "），留空不修改"
-    : (mode === "custom" ? "可留空（自建 SearXNG 等无需鉴权）" : "粘贴服务商的 API Key");
-  const detail = mode === "custom" ? `
+  return renderProviderCfg({
+    formId: "websearch-form", hintId: "websearch-hint",
+    getMethod: "websearch.get", saveMethod: "websearch.save",
+    labels,
+    detailHtml: (d) => {
+      const keyHint = d.key_mask
+        ? "已配置（" + d.key_mask + "），留空不修改"
+        : "可留空（自建 SearXNG 等无需鉴权）";
+      return `
     <div class="toolcfg-row"><label>API Key</label>
       <input type="password" data-f="key" autocomplete="new-password" placeholder="${keyHint}">
     </div>
     <div class="toolcfg-row"><label>接口地址</label>
       <input type="text" data-f="base_url" value="${escapeHtml(d.base_url || "")}"
              placeholder="自建搜索服务地址（如 http://localhost:8080 或 .../search?format=json）">
-    </div>` : "";
-  form.innerHTML = `
-    <div class="toolcfg-row"><label>服务商</label>${providerPicker(d, labels, mode)}</div>
-    ${detail}
-    <div class="toolcfg-row">
+    </div>`;
+    },
+    statusHtml: (d) => `
       <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
         ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + "」"
-        : "○ 未配置：Agent 联网搜索时会给出配置指引"}</span>
-      <span class="spacer"></span>
-      <button class="btn-ghost" data-act="save">保存</button>
-    </div>`;
-  form.querySelectorAll(".provider-seg button").forEach((btn) => {
-    btn.onclick = () => saveSwitch("websearch-form", "websearch.save", btn.dataset.mode);
+        : "○ 未配置：Agent 联网搜索时会给出配置指引"}</span>`,
+    fields: ["base_url"],
+    pickParams: () => ({}),
+    pickedNotice: "已选用该服务作搜索服务商",
+    saved: () => addNotice("联网搜索配置已保存并生效"),
+    saveFailed: (e) => addNotice("保存失败: " + e.message),
+    rerender: renderWebsearchCfg,
   });
-  if (mode === "configured") {
-    pickConfiguredService(form, "websearch.save", () => ({}), () => {
-      addNotice("已选用该服务作搜索服务商");
-      renderWebsearchCfg();
-    });
-  }
-  const saveBtn = form.querySelector('[data-act="save"]');
-  if (saveBtn) saveBtn.onclick = async () => {
-    const params = { provider: form.querySelector('[data-f="provider"]').value };
-    const addr = form.querySelector('[data-f="base_url"]');
-    if (addr) params.base_url = addr.value;
-    const keyEl = form.querySelector('[data-f="key"]');
-    const key = keyEl ? keyEl.value.trim() : "";
-    if (key) params.api_key = key;
-    try {
-      await request("websearch.save", params);
-      addNotice("联网搜索配置已保存并生效");
-      renderWebsearchCfg();
-    } catch (e) {
-      addNotice("保存失败: " + e.message);
-    }
-  };
 }
 
 // 分段切换：自动 / 自定义 / 已配置。切到「已配置」只需重画（不写盘），
@@ -137,13 +172,12 @@ async function saveSwitch(formId, method, mode) {
 }
 
 async function renderImagegenCfg() {
-  let d;
-  try { d = await request("imagegen.get"); } catch (e) { return; }
-  document.getElementById("imagegen-hint").textContent = d.config_hint;
-  const form = document.getElementById("imagegen-form");
-  const mode = providerModeOf("imagegen-form", d);
   const labels = { auto: "自动（优先复用已配置的 Key）", custom: "自定义 OpenAI 兼容" };
-  const detail = mode === "custom" ? `
+  return renderProviderCfg({
+    formId: "imagegen-form", hintId: "imagegen-hint",
+    getMethod: "imagegen.get", saveMethod: "imagegen.save",
+    labels,
+    detailHtml: (d) => `
     <div class="toolcfg-row"><label>接口地址</label>
       <input type="text" data-f="base_url" value="${escapeHtml(d.base_url || "")}"
              placeholder="OpenAI 兼容 /images/generations 地址">
@@ -155,58 +189,30 @@ async function renderImagegenCfg() {
     <div class="toolcfg-row"><label>模型</label>
       <input type="text" data-f="model" value="${escapeHtml(d.model || "")}"
              placeholder="留空用服务商默认模型">
-    </div>` : "";
-  form.innerHTML = `
-    <div class="toolcfg-row"><label>服务商</label>${providerPicker(d, labels, mode)}</div>
-    ${detail}
-    <div class="toolcfg-row">
+    </div>`,
+    statusHtml: (d) => `
       <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
         ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + " / " + d.resolved_model + "」"
-        : "○ 未配置：配好任一服务的 Key 即可零配置使用"}</span>
-      <span class="spacer"></span>
-      <button class="btn-ghost" data-act="save">保存</button>
-    </div>`;
-  form.querySelectorAll(".provider-seg button").forEach((btn) => {
-    btn.onclick = () => saveSwitch("imagegen-form", "imagegen.save", btn.dataset.mode);
+        : "○ 未配置：配好任一服务的 Key 即可零配置使用"}</span>`,
+    fields: ["base_url", "model"],
+    pickParams: (form) => {
+      const m = form.querySelector('[data-f="model"]');
+      return m && m.value.trim() ? { model: m.value.trim() } : {};
+    },
+    pickedNotice: "已选用该服务作画图服务商",
+    saved: () => addNotice("AI 画图配置已保存并生效"),
+    saveFailed: (e) => addNotice("保存失败: " + e.message),
+    rerender: renderImagegenCfg,
   });
-  if (mode === "configured") {
-    pickConfiguredService(
-      form, "imagegen.save",
-      () => {
-        const m = form.querySelector('[data-f="model"]');
-        return m && m.value.trim() ? { model: m.value.trim() } : {};
-      },
-      () => { addNotice("已选用该服务作画图服务商"); renderImagegenCfg(); }
-    );
-  }
-  const saveBtn = form.querySelector('[data-act="save"]');
-  if (saveBtn) saveBtn.onclick = async () => {
-    const params = { provider: form.querySelector('[data-f="provider"]').value };
-    for (const f of ["base_url", "model"]) {
-      const el = form.querySelector(`[data-f="${f}"]`);
-      if (el) params[f] = el.value;
-    }
-    const keyEl = form.querySelector('[data-f="key"]');
-    const key = keyEl ? keyEl.value.trim() : "";
-    if (key) params.api_key = key;
-    try {
-      await request("imagegen.save", params);
-      addNotice("AI 画图配置已保存并生效");
-      renderImagegenCfg();
-    } catch (e) {
-      addNotice("保存失败: " + e.message);
-    }
-  };
 }
 
 async function renderSpeechCfg() {
-  let d;
-  try { d = await request("speech.get"); } catch (e) { return; }
-  document.getElementById("speech-hint").textContent = d.config_hint;
-  const form = document.getElementById("speech-form");
-  const mode = providerModeOf("speech-form", d);
   const labels = { auto: "自动（优先复用已配置的 Key）", custom: "自定义 OpenAI 兼容" };
-  const detail = mode === "custom" ? `
+  return renderProviderCfg({
+    formId: "speech-form", hintId: "speech-hint",
+    getMethod: "speech.get", saveMethod: "speech.save",
+    labels,
+    detailHtml: (d) => `
     <div class="toolcfg-row"><label>接口地址</label>
       <input type="text" data-f="base_url" value="${escapeHtml(d.base_url || "")}"
              placeholder="OpenAI 兼容 /audio/transcriptions 地址">
@@ -222,48 +228,21 @@ async function renderSpeechCfg() {
     <div class="toolcfg-row"><label>识别语种</label>
       <input type="text" data-f="language" value="${escapeHtml(d.language || "")}"
              placeholder="zh / en / 留空自动判断">
-    </div>` : "";
-  form.innerHTML = `
-    <div class="toolcfg-row"><label>服务商</label>${providerPicker(d, labels, mode)}</div>
-    ${detail}
-    <div class="toolcfg-row">
+    </div>`,
+    statusHtml: (d) => `
       <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
         ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + " / " + d.resolved_model + "」"
-        : "○ 未配置：麦克风按钮会提示先来这里配置"}</span>
-      <span class="spacer"></span>
-      <button class="btn-ghost" data-act="save">保存</button>
-    </div>`;
-  form.querySelectorAll(".provider-seg button").forEach((btn) => {
-    btn.onclick = () => saveSwitch("speech-form", "speech.save", btn.dataset.mode);
+        : "○ 未配置：麦克风按钮会提示先来这里配置"}</span>`,
+    fields: ["base_url", "model", "language"],
+    pickParams: (form) => {
+      const m = form.querySelector('[data-f="model"]');
+      return m && m.value.trim() ? { model: m.value.trim() } : {};
+    },
+    pickedNotice: "已选用该服务作语音转写服务商",
+    saved: () => speechStatus("✓ 已保存，麦克风按钮立即可用", true),
+    saveFailed: (e) => speechStatus("✗ 保存失败：" + e.message, false),
+    rerender: renderSpeechCfg,
   });
-  if (mode === "configured") {
-    pickConfiguredService(
-      form, "speech.save",
-      () => {
-        const m = form.querySelector('[data-f="model"]');
-        return m && m.value.trim() ? { model: m.value.trim() } : {};
-      },
-      () => { addNotice("已选用该服务作语音转写服务商"); renderSpeechCfg(); }
-    );
-  }
-  const saveBtn = form.querySelector('[data-act="save"]');
-  if (saveBtn) saveBtn.onclick = async () => {
-    const params = { provider: form.querySelector('[data-f="provider"]').value };
-    for (const f of ["base_url", "model", "language"]) {
-      const el = form.querySelector(`[data-f="${f}"]`);
-      if (el) params[f] = el.value;
-    }
-    const keyEl = form.querySelector('[data-f="key"]');
-    const key = keyEl ? keyEl.value.trim() : "";
-    if (key) params.api_key = key;
-    try {
-      await request("speech.save", params);
-      speechStatus("✓ 已保存，麦克风按钮立即可用", true);
-      renderSpeechCfg();
-    } catch (e) {
-      speechStatus("✗ 保存失败：" + e.message, false);
-    }
-  };
 }
 
 function speechStatus(text, ok = true) {

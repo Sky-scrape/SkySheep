@@ -228,6 +228,8 @@
             <div id="pet-bubble" class="pet-bubble hidden"></div>
             <img id="pet-img" src="/static/cloud-sheep.png" alt="云朵小羊" draggable="false">
           </div>
+          <!-- 「回到底部」浮标：用户上翻回看时出现（新消息不再拽底），点击回底并恢复自动跟随 -->
+          <button id="jump-bottom" class="hidden" title="回到底部" aria-label="回到底部">↓ 回到底部</button>
         </div>
 
         <div id="permission-bar" hidden role="alert">
@@ -339,7 +341,10 @@
             <div id="aux-log"><div class="rp-empty">在这里问点小问题，不会进入主对话，也不会写进会话记录。</div></div>
             <div class="aux-row">
               <textarea id="aux-input" rows="2" placeholder="问点小的…（Enter 发送 / Shift+Enter 换行）"></textarea>
-              <button id="aux-send" class="rp-mini primary">发送</button>
+              <div class="aux-side">
+                <button id="aux-model-chip" class="aux-model-chip" title="辅助对话使用的模型（独立于主对话）"><span class="svc-avatar aux-mm-tile">?</span></button>
+                <button id="aux-send" class="rp-mini primary">发送</button>
+              </div>
             </div>
           </section>
 
@@ -433,12 +438,19 @@
               <input id="browser-url" type="text" placeholder="输入网址，如 http://127.0.0.1:8000">
               <button id="browser-go" class="rp-mini primary">前往</button>
               <button id="browser-reload" class="rp-mini" title="重新加载">⟳</button>
+              <button id="browser-fit" class="rp-mini" title="整页缩到面板宽，不出横向滚动">自适应</button>
             </div>
-            <!-- sandbox（安全审查 D5）：预览的本地文件与主界面同源，不加隔离的话项目里的
-                 HTML/SVG 脚本能带凭据调同源管理接口。不给 allow-same-origin —— 预览内容
-                 运行在独立的不透明源里，脚本可跑但碰不到本应用的 Cookie/DOM/存储。 -->
-            <iframe id="browser-frame" class="hidden" title="浏览器预览"
-                    sandbox="allow-scripts allow-forms allow-popups allow-downloads"></iframe>
+            <!-- 视口容器：自适应模式下 iframe 按 1280 虚拟视口排版后整体 transform 缩放
+                 到面板宽（窄面板里宽版式站点不再横向溢出），容器负责裁掉缩放边缘 -->
+            <div id="browser-viewport" class="rp-browser-viewport hidden">
+              <!-- sandbox（安全审查 D5）：预览的本地文件与主界面同源，不加隔离的话项目里的
+                   HTML/SVG 脚本能带凭据调同源管理接口。不给 allow-same-origin —— 预览内容
+                   运行在独立的不透明源里，脚本可跑但碰不到本应用的 Cookie/DOM/存储。 -->
+              <iframe id="browser-frame" title="浏览器预览"
+                      sandbox="allow-scripts allow-forms allow-popups allow-downloads"></iframe>
+              <!-- 页面缩放 HUD：Ctrl+滚轮步进页面缩放时短暂显示档位，纯提示不挡交互 -->
+              <div id="browser-zoom-hud" class="browser-zoom-hud browser-zoom-hud-off" aria-hidden="true"></div>
+            </div>
             <!-- 外网站点大多拒绝被内嵌（X-Frame-Options / frame-ancestors），iframe 只会一片
                  白，不提前说明用户会以为是坏了。内网/本机地址不提示（由 app.js 按地址切换显隐） -->
             <div id="browser-hint" class="rp-browser-hint dim small hidden">
@@ -1464,6 +1476,7 @@
 </div>
 <div id="session-menu" class="session-menu hidden"></div>
 <div id="model-menu" class="session-menu model-menu hidden"></div>
+<div id="aux-model-menu" class="session-menu model-menu hidden"></div>
 <div id="ref-menu" class="session-menu model-menu hidden" title=""></div>
 <div id="reasoning-menu" class="session-menu model-menu hidden"></div>
 <div id="notif-panel" class="session-menu notif-panel hidden"></div>

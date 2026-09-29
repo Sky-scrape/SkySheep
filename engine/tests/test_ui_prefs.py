@@ -221,11 +221,15 @@ def test_classic_view_lists_quick_chats(home):
     assert "GROUP_PREVIEW" in quick, "组内默认只露几条，其余收进「显示更多」"
     assert "emptyHint" in quick, "空列表给引导提示"
     assert "不接拖动排序" in js, "经典视图的快聊行不能混进当前项目的拖动序"
-    # 项目区的「快聊」行：点击高亮并陈列；悬浮＋走 session.new_task 新建快聊
-    row = js[js.index("async function appendQuickRow("):]
+    # 项目区的「快聊」行：点击高亮并陈列；悬浮＋走 session.new_task 新建快聊；
+    # 行本身接拖动排序（pid 记 "quick" 伪键，commitProjectOrder 拆成 quick_pos 落库）
+    row = js[js.index("function buildQuickRow("):]
     row = row[:row.index("// 删除项目：")]
     assert 'classicViewGk = "quick"' in row, "点快聊行切到快聊列表"
     assert "session.new_task" in row, "行的 ＋ 要能新建快聊对话"
+    assert 'li.dataset.pid = "quick"' in row, "快聊行以 quick 伪键参与项目区拖动序"
+    assert "wireListDrag" in row, "快聊行接拖拽（quick_pos 锚点排序）"
+    assert "quickAnchor" in js and "quickPosPref" in js, "快聊锚点：读取与插序的配套状态"
     # 样式：快聊行沿用项目行布局，选中态高亮
     assert ".quick-row" in css
 
@@ -530,6 +534,76 @@ def test_ui_prefs_left_collapsed_clamped(home):
     assert frame["result"]["prefs"] == {"left_collapsed": 0}
     frame = call_ui(home, "ui.save", {"prefs": {"left_collapsed": None}})
     assert frame["result"]["prefs"] == {}
+
+
+def test_ui_prefs_browser_fit_clamped(home):
+    """浏览器面板自适应（缺省开；存 0 = 上次切到了原始大小）：0/1 直接存，越界收敛，null 删键。"""
+    frame = call_ui(home, "ui.save", {"prefs": {"browser_fit": 0}})
+    assert frame["result"]["prefs"] == {"browser_fit": 0}
+    frame = call_ui(home, "ui.get")
+    assert frame["result"]["prefs"] == {"browser_fit": 0}
+    frame = call_ui(home, "ui.save", {"prefs": {"browser_fit": 9}})
+    assert frame["result"]["prefs"] == {"browser_fit": 1}
+    frame = call_ui(home, "ui.save", {"prefs": {"browser_fit": None}})
+    assert frame["result"]["prefs"] == {}
+
+
+def test_ui_prefs_browser_page_zoom_clamped(home):
+    """浏览器页面缩放（50–300%，Ctrl+滚轮步进；缺省 100%）：合法存、越界收敛、null 删键。"""
+    frame = call_ui(home, "ui.save", {"prefs": {"browser_page_zoom": 125}})
+    assert frame["result"]["prefs"] == {"browser_page_zoom": 125}
+    frame = call_ui(home, "ui.get")
+    assert frame["result"]["prefs"] == {"browser_page_zoom": 125}
+    frame = call_ui(home, "ui.save", {"prefs": {"browser_page_zoom": 999}})
+    assert frame["result"]["prefs"] == {"browser_page_zoom": 300}
+    frame = call_ui(home, "ui.save", {"prefs": {"browser_page_zoom": 10}})
+    assert frame["result"]["prefs"] == {"browser_page_zoom": 50}
+    frame = call_ui(home, "ui.save", {"prefs": {"browser_page_zoom": None}})
+    assert frame["result"]["prefs"] == {}
+
+
+def test_browser_panel_fit_wiring_source_contract(home):
+    """浏览器面板自适应的前端契约：视口容器、1280×1080 虚拟视口、切换钮与偏好应用。
+
+    跨源页面读不到内容宽高，自适应只能按固定虚拟视口排版后整体 transform
+    缩到面板宽；视口高度限一屏（1080px）并垂直居中——铺满面板需要把视口拉到
+    h/scale（窄面板下远超一屏），站点首屏渲染不满时内容会贴顶、下面留出页面
+    自己的一大片空白。显隐切在视口容器上（hidden 留在 iframe 上会让容器占着
+    flex:1，空态和预览各分走一半面板）。
+    """
+    from pathlib import Path
+
+    static = Path(__file__).resolve().parents[1] / "src" / "skysheep" / "server" / "static"
+    js = (static / "app.js").read_text(encoding="utf-8")
+    html = (static / "index.html").read_text(encoding="utf-8")
+    css = (static / "app.css").read_text(encoding="utf-8")
+    from skysheep.server.backend import ServerBackend
+    assert "browser_fit" in ServerBackend.UI_PREFS_LIMITS
+    assert "browser_page_zoom" in ServerBackend.UI_PREFS_LIMITS
+    # 前端三处接线：视口容器与切换钮、缩放逻辑、启动读回偏好
+    assert 'id="browser-viewport"' in html and 'id="browser-fit"' in html
+    assert "BROWSER_FIT_W" in js and "function layoutBrowserFrame(" in js
+    assert "browserFit = prefs.browser_fit !== 0" in js
+    assert 'browserViewport.classList.remove("hidden")' in js, "显隐要切在容器上"
+    # 限高垂直居中：视口高 ≤1080，超出面板的部分上下均分（居中的几何）
+    assert "BROWSER_FIT_MAX_H" in js
+    assert "Math.min(h / scale, BROWSER_FIT_MAX_H)" in js
+    assert "(h - vh * scale) / 2" in js, "限高后要整块垂直居中"
+    assert 'browserFrame.style.top = ""' in js, "原始档要清掉居中偏移"
+    # 页面缩放：Ctrl+滚轮悬停浏览器面板时只步进页面缩放（不打全局界面缩放），
+    # 接管面只可能是面板自身区域（跨源 iframe 内容区的事件父页面收不到）
+    assert "BROWSER_ZOOM_STOPS" in js and "function stepBrowserPageZoom(" in js
+    assert "Math.min(1, w / BROWSER_FIT_W) * browserPageZoom" in js, "页面缩放要进自适应缩放"
+    assert 'e.target.closest("#rp-page-browser")' in js
+    assert 'browserFit && browserViewport && !browserViewport.classList.contains("hidden")' in js, \
+        "原始档/空态不下接管 Ctrl+滚轮"
+    assert 'id="browser-zoom-hud"' in html, "缩放要有 HUD 反馈"
+    # 样式：容器裁掉缩放溢出且不自带白底（留白区露面板底色），iframe 绝对定位
+    assert ".rp-browser-viewport" in css and "overflow: hidden" in css
+    vp_css = css[css.index(".rp-browser-viewport {"):]
+    assert "background" not in vp_css[:vp_css.index("}")], \
+        "视口容器不要白底：限高居中后留白区应是面板底色（深色主题不发白）"
+    assert "transform-origin: 0 0" in css
 
 
 def test_ui_prefs_null_deletes_key(home):
@@ -844,7 +918,9 @@ def test_frontend_workspace_reset_covers_project_bound_state(home):
         assert name in reset_body, f"resetWorkspaceState 漏清 {name}"
     panels = js[js.index("function resetProjectPanels()"):]
     panels_body = panels[:panels.index("\n}\n")]
-    for name in ("filesLoaded", "agCache", "tasksTimer", "resetTermTabs"):
+    # loadTasks._snap：任务面板轮询的序列化快照（切项目后必须失效，强制重绘）；
+    # tasksTimer 曾是死代码（从未赋值）已随轮询快照改造移除
+    for name in ("filesLoaded", "agCache", "loadTasks._snap", "resetTermTabs"):
         assert name in panels_body, f"resetProjectPanels 漏清 {name}"
 
 
@@ -1057,6 +1133,25 @@ def test_project_list_follows_saved_order(home):
         ws.send_json({"id": "pl3", "method": "project.list", "params": {}})
         projects = recv_until(ws, "pl3")["result"]["projects"]
         assert [p["name"] for p in projects] == ["proj", "proj3", "proj2", "proj4", "远程连接"]
+
+
+def test_ui_prefs_quick_pos_roundtrip_and_cleanup(home):
+    """quick_pos（快聊分组锚点）：固定项 top/bottom 直存；before 只收正整数；
+    脏值删键（= 恢复默认垫底）；与 project_order 可同帧提交。"""
+    frame = call_ui(home, "ui.save", {"prefs": {"quick_pos": "top"}})
+    assert frame["result"]["prefs"] == {"quick_pos": "top"}
+    frame = call_ui(home, "ui.save", {"prefs": {"quick_pos": "bottom"}})
+    assert frame["result"]["prefs"] == {"quick_pos": "bottom"}
+    frame = call_ui(home, "ui.save", {"prefs": {"quick_pos": {"before": 7}}})
+    assert frame["result"]["prefs"] == {"quick_pos": {"before": 7}}
+    # 脏值一律删键：非法枚举、锚点非正整数/非整数、结构不对
+    for bad in ("middle", {"before": 0}, {"before": -2}, {"before": "7"},
+                {"after": 7}, {"before": True}, 7, None):
+        frame = call_ui(home, "ui.save", {"prefs": {"quick_pos": bad}})
+        assert frame["result"]["prefs"] == {}, bad
+    # 与 project_order 同帧提交（拖动一次只发一个 ui.save）
+    frame = call_ui(home, "ui.save", {"prefs": {"project_order": [3, 1], "quick_pos": {"before": 1}}})
+    assert frame["result"]["prefs"] == {"project_order": [3, 1], "quick_pos": {"before": 1}}
 
 
 def test_ui_prefs_session_order_roundtrip_and_cleanup(home):

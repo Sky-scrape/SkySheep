@@ -26,6 +26,20 @@
   缩放；偏好记 ui.json（browser_page_zoom）。跨源 iframe 内容区的滚轮事件
   父页面收不到，该手势接管的是面板自身区域（工具条与页面块上下留白）。
 
+### 变更
+
+- **ServerBackend 拆出三个职责 mixin**：按 backend_parts 既有模式把三个职责区
+  整段搬出 `server/backend.py`——偏好与通知（preferences）、MCP 接线（mcp）、
+  会话生命周期（lifecycle），共 52 个方法落为三个独立 mixin，`ServerBackend`
+  改为多继承组装；方法体逐字保留，纯搬迁不改行为。
+- **dispatch() 改表驱动注册表分发**：`server/app.py` 的 dispatch 由约 800 行
+  if-chain 改为 `_WS_METHODS` 注册表（method → handler + local_only），199 个
+  方法全量入表、入口查表统一调用；「本机专属」安全策略收敛为注册表单轨——
+  原先 `LOCAL_ONLY_METHODS` 手写表与分支内十几处「if … and not local: raise」
+  内联判定双轨并存，现一并入表（条件拒绝落 local_gate，专属文案随条目携带），
+  `LOCAL_ONLY_METHODS` 改由注册表派生；分支体逐字迁入 handler，判定与拒绝
+  文案同原文一致，行为保持不变。
+
 ### 修复
 
 - **记忆地图文件足迹空状态仍占一行**：查询窗口内没有检查点记录的文件改动

@@ -5,7 +5,7 @@
 # 一个的保护，或者重构后清单挪了位置，测试立刻红。
 # 新增方法不强制进这份文件；但凡是「远程持令牌客户端不该能调」的方法，
 # 合入前应该把它加进来。
-import re
+import inspect
 from pathlib import Path
 
 import pytest
@@ -57,8 +57,7 @@ def test_local_only_covers_curated_high_risk_methods():
 
 def test_local_only_methods_all_exist_in_dispatch():
     """清单里的方法必须真实存在于 dispatch 分支（防改名单时留下僵尸条目）。"""
-    dispatch_src = Path(server_app.__file__).read_text(encoding="utf-8")
-    methods = set(re.findall(r'method == "([a-z_.]+)"', dispatch_src))
+    methods = set(server_app._WS_METHODS)
     assert methods, "dispatch 源码里解析不到任何方法分支，解析逻辑可能已失效"
     stale = [m for m in server_app.LOCAL_ONLY_METHODS if m not in methods]
     assert not stale, f"LOCAL_ONLY_METHODS 里的方法在 dispatch 中不存在：{stale}"
@@ -102,6 +101,15 @@ def test_inline_guarded_methods_have_local_check(method):
     term.* 的守卫在包住三个分支的外层块里，所以取分支前后各一段窗口做断言；
     有人把守卫挪出窗口或删掉时测试变红，人工确认后再更新窗口口径。
     """
+    # 行为保持重构过渡：已迁入 _WS_METHODS 的方法改按注册表条目断言守卫仍在——
+    # local_only / local_gate 由 dispatch 入口在 not local 时统一执行，local 值
+    # 用法（如 ui.save 对远端剥字段）则逐字留在 handler 源码里。
+    entry = server_app._WS_METHODS.get(method)
+    if entry is not None:
+        assert entry.local_only or entry.local_gate is not None or (
+            "not local" in inspect.getsource(entry.handler)
+        ), f"{method} 的注册表条目与 handler 源码里都找不到 local 守卫"
+        return
     src = Path(server_app.__file__).read_text(encoding="utf-8")
     i = src.find(f'method == "{method}"')
     assert i >= 0, f'dispatch 里找不到方法分支：{method}'

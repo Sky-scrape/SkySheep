@@ -19,6 +19,7 @@ import stat
 import time
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .loader import (  # 与发现逻辑共用同一套 SKILL.md 解析
     MAX_SKILL_NAME_CHARS,
@@ -152,6 +153,30 @@ def _ensure_free(names: list[str], existing: set[str]) -> None:
         )
 
 
+def _enforce_dir_limits(root: Path) -> None:
+    """本地文件夹导入与 zip 同一防线：复制前统计文件数与总体积，超限即拒绝。
+
+    MAX_SKILL_FILES / MAX_UNPACKED_BYTES 此前只在 zip 解压（_safe_members）与
+    下载（download_to）时生效——「防误选整个盘」的注释对本地文件夹导入并不成立，
+    含大资源（数据集、模型文件）的技能文件夹从本地导入可绕开 120MB 上限，
+    同一内容压成 zip 却会被拒。统计在 copytree 之前做，超限直接报错，
+    不落半个技能（overwrite 场景也不至于先删了旧技能再失败）。
+    """
+    files = 0
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        files += len(filenames)
+        if files > MAX_SKILL_FILES:
+            raise SkillInstallError("技能包文件数过多，已中止")
+        for fn in filenames:
+            try:
+                total += os.stat(os.path.join(dirpath, fn)).st_size
+            except OSError:
+                continue  # 读不出大小的条目按 0 计：真要复制时 copytree 自然会报错
+        if total > MAX_UNPACKED_BYTES:
+            raise SkillInstallError("技能包过大，已中止")
+
+
 def install_from_dir(
     src: str | Path,
     dest_root: Path,
@@ -183,6 +208,7 @@ def install_from_dir(
     for root in roots:
         name = _skill_name_of(root)
         target = _skill_target(dest_root, name)
+        _enforce_dir_limits(root)  # 先卡上限再动落点：overwrite 也不先删旧的再失败
         if target.exists():
             if not overwrite:
                 raise SkillInstallError(f"目标已存在：{target}")
@@ -455,15 +481,29 @@ class DownloadError(SkillInstallError):
 
 
 def _host_allowed(url: str) -> str:
-    """校验协议与主机白名单，返回主机名；不通过直接报错。"""
-    scheme = url.split(":", 1)[0].lower()
+    """校验协议与主机白名单，返回主机名；不通过直接报错。
+
+    用 urlparse 正规解析而不是手写字符串切片：手拼的畸形网址（如少一个斜杠的
+    ``https:/github.com/…``）在 ``://`` 切片上会 IndexError，冒到只 except
+    SkillInstallError 的调用方就成了一句没人看得懂的「list index out of range」。
+    解析不出主机名一律抛 SkillInstallError。
+    """
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
     if scheme not in ("http", "https"):
         raise SkillInstallError("网址要以 http:// 或 https:// 开头：" + url)
-    after_scheme = url.split("://", 1)[1]
-    host = after_scheme.split("/", 1)[0].split(":", 1)[0].lower()
+    # 用户信息（user:pass@host）不是本工具面向的输入：沿用旧解析的拒绝口径，
+    # 不因换了更准的解析器就把新形态放进来
+    if parsed.username or parsed.password:
+        raise SkillInstallError("网址不能携带用户信息（@）：" + url)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise SkillInstallError(
+            "网址格式不完整（解析不出主机名，检查是否少写了 /）：" + url
+        )
     if host not in TRUSTED_ZIP_HOSTS:
         raise SkillInstallError(
-            f"只支持 GitHub / Gitee 的下载链接（不支持主机 {host or '空'}）：" + url
+            f"只支持 GitHub / Gitee 的下载链接（不支持主机 {host}）：" + url
         )
     return host
 
@@ -514,10 +554,11 @@ def resolve_url(url: str) -> tuple[list[str], str | None]:
     if url.split("?", 1)[0].lower().endswith(".zip"):
         return [url], None  # 已经是直链
 
-    after_scheme = url.split("://", 1)[1]
-    authority = after_scheme.split("/", 1)[0].lower()
-    rest_path = after_scheme.split("/", 1)
-    segments = [seg for seg in (rest_path[1] if len(rest_path) > 1 else "").split("/") if seg]
+    parsed = urlparse(url)
+    authority = (parsed.hostname or "").lower()
+    # 上面 _host_allowed 已保证 netloc 存在；路径段从 parsed.path 取，
+    # query/fragment 不混进仓库名（如 `…/repo?tab=readme` 里的 repo 不带尾巴）
+    segments = [seg for seg in parsed.path.split("/") if seg]
 
     is_github = authority in ("github.com", "www.github.com")
     if len(segments) < 2:

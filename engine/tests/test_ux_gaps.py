@@ -226,6 +226,33 @@ async def test_read_file_blocked_outside_workdir(tmp_path):
     assert "PRIVATE" in out
 
 
+async def test_glob_results_filtered_outside_workdir(tmp_path):
+    """glob 的 `..` 模式逃逸（审查 P-8）：restrict 开着时，起始目录在界内、
+    匹配落在界外的结果必须被丢弃——同一文件 read_file 会被 resolve_path
+    拒绝，glob 不能成为只读边界上的侧门。"""
+    from skysheep.tools.fs import GlobArgs, GlobTool
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    secret = tmp_path / "secret_key.pem"
+    secret.write_text("PRIVATE KEY", encoding="utf-8")
+
+    restricted = ToolContext(working_dir=proj, restrict_to_workdir=True)
+    tool = GlobTool()
+    # 模式里带 `..`：resolve_path 只闸得住起始目录，越界的是匹配结果
+    assert await tool.run(GlobArgs(pattern="../*.pem"), restricted) == "(no matches)"
+    # 起始目录本身越界仍由 resolve_path 拒绝
+    with pytest.raises(ToolError):
+        await tool.run(GlobArgs(pattern="*.pem", path=".."), restricted)
+    # 界内匹配照常返回
+    (proj / "local.pem").write_text("in", encoding="utf-8")
+    out = await tool.run(GlobArgs(pattern="*.pem"), restricted)
+    assert "local.pem" in out and "secret_key" not in out
+    # 关掉限制后越界可见（旧行为保留：未开开关不改变能力）
+    out_free = await tool.run(GlobArgs(pattern="../*.pem"), ToolContext(working_dir=proj))
+    assert "secret_key.pem" in out_free
+
+
 def test_agent_passes_flags_to_tool_context(tmp_path):
     from pydantic import BaseModel
 
@@ -479,7 +506,14 @@ async def test_backup_now_and_delete(home, tmp_path, monkeypatch):
     from skysheep.session.store import SessionStore
 
     db = tmp_path / "s.db"
-    db.write_bytes(b"x" * 32)  # 占位：备份只 copy2 整个文件，不要求是真库
+    # 备份走 SQLite backup API 一致性快照（安全审查 F3）：源必须是真库，
+    # 坏源回可读错误，不再照单全收拷出垃圾备份
+    import sqlite3 as _sqlite3
+
+    con = _sqlite3.connect(db)
+    con.execute("CREATE TABLE t (x)")
+    con.commit()
+    con.close()
     s = SessionStore(db)
     d = tmp_path / "backups"
     d.mkdir()
@@ -494,7 +528,7 @@ async def test_backup_now_and_delete(home, tmp_path, monkeypatch):
     assert (d / "other.db").exists(), "模式外的文件不是备份，删除/裁剪都不该碰"
 
     # BACKUP_KEEP 裁剪对手动备份同样生效：压到 2 份后，最旧的启动备份被裁掉。
-    # 第二次备份的时间戳钉死，避免与第一次同秒撞名（copy2 会覆盖成同一份）
+    # 第二次备份的时间戳钉死，避免与第一次同秒撞名（同秒重备会覆盖成同一份）
     s.BACKUP_KEEP = 2
     monkeypatch.setattr(
         "skysheep.session.store.time.strftime",
@@ -535,6 +569,129 @@ def test_backup_ws_endpoints(home):
         assert recv_until(ws, "k3")["ok"] is False
         ws.send_json({"id": "k4", "method": "session.create_backup"})
         assert recv_until(ws, "k4")["ok"] is True
+
+
+async def _mk_be(home):
+    from skysheep.server.backend import ServerBackend
+
+    be = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: FakeProvider([[TextBlock(text="答")]]),
+    )
+    await be.setup()
+    return be
+
+
+# ---- 会话库备份：预检（定时任务/流水线/懒创建窗口）与失败兜底 ----
+
+
+async def test_backup_and_restore_blocked_while_unattended_turns_run(home):
+    """备份/恢复预检必须覆盖所有会写库的执行通道（不只 self.runtimes）。
+
+    定时任务与流水线节点用本地 SessionRuntime 跑、不注册进 runtimes（运行
+    窗口分钟级），懒创建窗口还有基底占位 _base_run_task；渠道轮已注册进
+    runtimes，天然被覆盖。预检漏了任何一路，备份就可能拷出撕裂的库文件。
+    """
+    be = await _mk_be(home)
+    try:
+        # 定时任务在跑（_cron_running 是防重触发集，直接置位模拟）
+        be._cron_running.add(1)
+        with pytest.raises(RuntimeError, match="定时任务"):
+            await be.create_session_backup()
+        with pytest.raises(RuntimeError, match="定时任务"):
+            await be.restore_session_backup("whatever.db")
+        be._cron_running.discard(1)
+
+        # 流水线节点在跑
+        be._pipeline_running.add(7)
+        with pytest.raises(RuntimeError, match="流水线"):
+            await be.create_session_backup()
+        be._pipeline_running.discard(7)
+
+        # 懒创建基底占位在飞
+        task = asyncio.create_task(asyncio.sleep(30))
+        be._base_run_task = task
+        try:
+            with pytest.raises(RuntimeError, match="正在启动"):
+                await be.create_session_backup()
+        finally:
+            task.cancel()
+            be._base_run_task = None
+
+        # 无人值守轮结束后照常放行：能真正备出一份
+        r = await be.create_session_backup()
+        assert r["name"] and Path(r["path"]).is_file()
+    finally:
+        # 断言失败也要关后端：aiosqlite 的连接线程非 daemon，不关进程退不出
+        await be.shutdown()
+
+
+async def test_restore_fails_queued_base_requests(home):
+    """恢复清空基底队列时必须逐个落空排队请求，不能只 clear（Future 永不 resolve）。"""
+    from skysheep.server.backend import QueuedTurn
+
+    be = await _mk_be(home)
+    try:
+        r = await be.create_session_backup()  # 先备一份，恢复走成功路径
+
+        async def noop(ev):
+            pass
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        be._base_queue.append(
+            QueuedTurn(text="排在基底的消息", emit=noop, plan_mode=False, fut=fut)
+        )
+        res = await be.restore_session_backup(r["name"])
+        assert res["restored"] == r["name"]
+        assert fut.done() and isinstance(fut.exception(), RuntimeError), \
+            "基底队列的请求必须拿到明确失败，不能永久挂起"
+    finally:
+        # 断言失败也要关后端：aiosqlite 的连接线程非 daemon，不关进程退不出
+        await be.shutdown()
+
+
+async def test_restore_failure_reconnects_store_and_readable_error(home, monkeypatch):
+    """恢复失败回可读错误，且 store 连接被兜回（不能停在「已关」状态）。
+
+    restore 流程先关连接再换文件：半途失败（如坏备份校验不通过）连接可能
+    停在「已关」状态，backend 侧必须兜回，否则之后所有会话功能跟着瘫。
+    """
+    import sqlite3
+
+    be = await _mk_be(home)
+
+    async def failing_restore(name):
+        # 模拟恢复半途失败：连接已关、原库完好（校验失败后的典型盘面）
+        await be.store.close()
+        raise sqlite3.DatabaseError("file is not a database")
+
+    monkeypatch.setattr(be.store, "restore_backup", failing_restore)
+    try:
+        with pytest.raises(RuntimeError, match="恢复失败"):
+            await be.restore_session_backup("x.db")
+        # store 仍可用：后续会话功能照常
+        projects = await be.store.list_projects()
+        assert isinstance(projects, list)
+    finally:
+        # 断言失败也要关后端：aiosqlite 的连接线程非 daemon，不关进程退不出
+        await be.shutdown()
+
+
+async def test_restore_corrupt_backup_readable_error(home):
+    """垃圾字节的「备份」也不能让裸 sqlite3.DatabaseError 直接冒给前端。"""
+    be = await _mk_be(home)
+    d = be.store.backup_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    bad = d / f"{be.store.path.stem}-20990101-000000.db"
+    bad.write_bytes(os.urandom(4096))
+    try:
+        with pytest.raises(RuntimeError) as ei:
+            await be.restore_session_backup(bad.name)
+        assert str(ei.value).strip(), "错误必须可读（带原因），不能是空消息"
+    finally:
+        # 断言失败也要关后端：aiosqlite 的连接线程非 daemon，不关进程退不出
+        await be.shutdown()
 
 
 # ---- 诊断包 / 打开目录 ----

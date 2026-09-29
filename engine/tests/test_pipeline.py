@@ -160,6 +160,54 @@ async def test_pipeline_tool_clear_allowed_tools_and_caps(store):
         await store.update_pipeline_node(node_id, prompt="长" * 10_001)
 
 
+async def test_pipeline_tool_nodes_frozen_while_running(store):
+    """运行中的流水线节点冻结（审查 F-17）：改/增/删/导入节点一律拒绝，停止后可改。
+
+    编排循环每轮从库现读节点建 HeadlessGate——运行期间改 allowed_tools/prompt
+    等于热替换用户启动前审定过的预授权面，必须在工具层挡死并回可读错误。
+    """
+    await store.get_or_create_project("/tmp/pl-frozen")
+    tool = PipelineWriteTool(store, lambda: 1)
+    pipe = await store.add_pipeline(1, "冻结线", nodes=[
+        {"title": "A", "prompt": "做 A"},
+        {"title": "审查", "prompt": "审查", "depends_on": []},
+    ])
+    node_a = pipe["nodes"][0]["id"]
+    cron = await store.add_cron_task(1, "周期任务", "x", "interval", interval_minutes=30)
+
+    # 用户在面板点「启动」→ 状态进入 running（与 automation.py 的启动路径一致）
+    await store.update_pipeline(pipe["id"], status="running")
+
+    for kwargs in (
+        # 换指令 + 挂上执行类预授权：正是要堵的热改面
+        {"action": "update_node", "node_id": node_a, "prompt": "换成恶意指令",
+         "allowed_tools": ["run_command"]},
+        {"action": "add_node", "id": pipe["id"], "title": "后门",
+         "prompt": "偷跑命令", "allowed_tools": ["run_command"]},
+        {"action": "delete_node", "node_id": node_a},
+        {"action": "import_cron", "id": pipe["id"], "cron_id": cron["id"]},
+    ):
+        with pytest.raises(ToolError, match="流水线运行中"):
+            await tool.run(PipelineWriteArgs(**kwargs), None)
+
+    # 库里的节点数据未被改动
+    frozen = await store.get_pipeline_node(node_a)
+    assert frozen["prompt"] == "做 A" and frozen["allowed_tools"] == []
+    assert len((await store.get_pipeline(pipe["id"]))["nodes"]) == 2
+
+    # 停止（离开 running 态）后恢复可改
+    await store.update_pipeline(pipe["id"], status="cancelled")
+    out = await tool.run(PipelineWriteArgs(
+        action="update_node", node_id=node_a, title="A2"), None)
+    assert "node updated" in out
+    out = await tool.run(PipelineWriteArgs(
+        action="add_node", id=pipe["id"], title="追加", prompt="做 B"), None)
+    assert "node added" in out
+    out = await tool.run(PipelineWriteArgs(
+        action="import_cron", id=pipe["id"], cron_id=cron["id"]), None)
+    assert "cron imported" in out
+
+
 def test_pipeline_start_without_runnable_nodes_errors(home):
     """失败且没有可重置节点的流水线：start 给明确指引，而不是静默再收尾一次。"""
     from test_server import make_client, recv_until

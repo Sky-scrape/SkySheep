@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import html as html_mod
+import html.parser
 import ipaddress
 import re
 import socket
@@ -61,13 +61,23 @@ def _safe_charset(name: str | None) -> str:
     """对端声明的 charset 不可信：认不出来的一律回 utf-8。
 
     旧实现直接把它交给 bytes.decode——伪造的 charset（如 "x-nonexistent"）
-    会让 LookupError 穿透成 500（安全审查低危项）。codecs.lookup 先校验。
+    会让 LookupError 穿透成 500（安全审查低危项）。codecs.lookup 先校验；
+    但只查名字不够——base64/hex/zlib_codec/bz2_codec/uu_codec/quopri_codec
+    这类字节变换编解码器 lookup 同样成功，bytes.decode 却只认文本编码，照样
+    抛 LookupError（"'base64' is not a text encoding"），整个抓取报工具错误
+    （审查发现 10）。故再用 CodecInfo._is_text_encoding 挡一道：非文本编码
+    一律回 utf-8（errors="replace" 兜底，页面内容不至于拿不到）。
     """
     if not name:
         return "utf-8"
     try:
-        codecs.lookup(name)
+        info = codecs.lookup(name)
     except (LookupError, ValueError):
+        return "utf-8"
+    # _is_text_encoding 是 CodecInfo 上 3.x 全系存在的私有标志位（文本编码 True、
+    # 字节变换 False，实测 rot_13 也归 False）；万一上游移除，getattr 兜底 True
+    # ——退回「只查名字」的旧口径，不会误伤任何真文本编码。
+    if not getattr(info, "_is_text_encoding", True):
         return "utf-8"
     return name
 
@@ -182,14 +192,150 @@ class _PinnedBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
+# 内容整体丢弃的标签（旧正则实现同一清单）。script/style 是 HTMLParser 的
+# CDATA 元素：其内部只有对应的闭合标签会被当标签解析，其余内容原样走
+# handle_data——正好交给 _skip_depth 整段丢弃。
+_TEXT_DROP_TAGS = frozenset(("script", "style", "noscript", "svg", "head", "iframe"))
+# 结束时补换行的块级标签（与旧正则同一清单）
+_TEXT_BLOCK_TAGS = frozenset(
+    ("p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+     "section", "article", "blockquote", "pre", "table")
+)
+
+
+class _HTMLTextExtractor(html.parser.HTMLParser):
+    """线性时间 HTML → 纯文本（审查 P-6：替代旧的正则实现）。
+
+    旧实现用 ``<tag>.*?</tag>`` 正则剥离 script 等块：对大量未闭合的开标签，
+    每个起点都让惰性 ``.*?`` 扫到串尾，整体呈平方级回溯——256 KB 恶意页面
+    要跑 40+ 秒，2 MB（web_fetch 的响应体上限）按曲线外推约 45 分钟。而
+    web_fetch 是 READONLY 自动放行工具，同步调用发生在事件循环线程上，
+    一次抓取就能把整个引擎（WS 推送、渠道、其他会话）全部卡死。HTMLParser
+    是状态机、线性时间，对任意输入不会退化。
+
+    与旧正则实现的行为对齐（对照测试逐形态钉住，见
+    tests/test_web_fetch_hardening.py）：**每个**标签（含注释、DOCTYPE 等
+    声明）都替换为一个空格分隔——行内标签不黏连（``<td>A</td><td>B</td>``
+    → "A B" 而不是 "AB"）；丢弃名单内标签的**整个块**（内容实体不解码）
+    替换为一个空格；``<br>`` 换行；块级标签闭合换行；实体解码；按行折叠空白。
+
+    三处刻意优于旧正则、对照测试断言为「明确更优」，不得退回：
+    - 属性值里的 ``>`` 不会截断标签（旧正则把 ``<a title="a>b">`` 撕成两半，
+      属性残片 ``b">`` 当正文泄漏）；
+    - 未闭合的丢弃标签使其后的内容一并跳过（浏览器对未闭合 script 的语义
+      也是「其后的都是脚本文本」；旧正则匹配不到闭合标签会把脚本源码、
+      title 元信息当正文吐给模型）——作为容错，丢弃途中遇到 ``<body>`` 视为
+      head 等容器提前结束（浏览器对未闭合 head 同样隐式收口）；
+    - 线性时间，对任意输入不平方级回溯。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._skip_depth = 0  # >0：正处于丢弃名单标签的内部
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if self._skip_depth:
+            if tag == "body":  # 容错：未闭合 head 的页面从 body 起恢复取文
+                self._skip_depth = 0
+                self._chunks.append(" ")  # <body> 标签本身在旧实现里也是一个空格
+            elif tag in _TEXT_DROP_TAGS:
+                self._skip_depth += 1
+            return
+        if tag in _TEXT_DROP_TAGS:
+            self._skip_depth = 1  # 丢弃块的分隔空格由闭合处补（旧实现整块一个空格）
+        elif tag == "br":
+            self._chunks.append("\n")
+        else:
+            # 旧实现把每个标签替换为一个空格：行内/块级开始标签同样补分隔，
+            # 否则 "Hello<p>World" 会黏成 "HelloWorld"（发现 8 的回归点）
+            self._chunks.append(" ")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if self._skip_depth:
+            if tag in _TEXT_DROP_TAGS:
+                self._skip_depth -= 1
+                if not self._skip_depth:
+                    # 整个丢弃块（<script>…</script> 等）在旧实现里替换为
+                    # 恰好一个空格：两侧文本靠它分隔
+                    self._chunks.append(" ")
+            return
+        if tag in _TEXT_BLOCK_TAGS:
+            self._chunks.append("\n")
+        else:
+            self._chunks.append(" ")  # 行内结束标签：与旧实现的「标签→空格」对齐
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self._chunks.append(data)
+
+    # 旧正则的 ``(?s)<[^>]+>`` 对注释 / DOCTYPE / 处理指令 / CDATA 段同样是
+    # 「整段换一个空格」——这四个回调都是「非丢弃上下文里出现 → 补一个空格」。
+    def handle_comment(self, data):
+        if not self._skip_depth:
+            self._chunks.append(" ")
+
+    def handle_decl(self, decl):
+        if not self._skip_depth:
+            self._chunks.append(" ")
+
+    def handle_pi(self, data):
+        if not self._skip_depth:
+            self._chunks.append(" ")
+
+    def unknown_decl(self, data):
+        if not self._skip_depth:
+            self._chunks.append(" ")
+
+    def text(self) -> str:
+        return "".join(self._chunks)
+
+
+def _install_pinned_backend(transport, backend, label: str) -> None:
+    """把自研钉连后端装进 httpx transport（防 DNS rebinding 的关键一步）。
+
+    ``transport._pool`` 是 httpx 的私有字段、``_network_backend`` 是 httpcore
+    连接池的私有字段——都在公开 API 之外，上游升级可能改名。两种失效模式必须
+    区分对待：
+
+    - ``_pool`` 整个没了 → 旧代码会 AttributeError 响亮失败（fail closed），
+      保持这一取向：装不上就拒绝发请求；
+    - 仅 ``_network_backend`` 改名 → 普通属性赋值会**静默**变成死属性，
+      钉连失效后整条 SSRF 防线只剩 getaddrinfo 那一次校验——这种静默退化
+      必须显式 getattr 检查防住（审查 P-17）。
+
+    版本锚点（2026-09，uv.lock 锁定）：httpx 0.28.1 / httpcore 1.0.9；
+    pyproject 对 httpx 只约束 ``>=0.27`` 无上界，升级时先跑
+    tests/test_web_fetch_hardening.py——钉连结构变化会让那里的端到端用例
+    与本检查一起红。
+    """
+    pool = getattr(transport, "_pool", None)
+    if pool is None or not hasattr(pool, "_network_backend"):
+        raise RuntimeError(
+            f"{label}：当前 httpx/httpcore 版本的私有结构已变化，"
+            "DNS 钉连（防 rebinding）无法安装；拒绝在不设防的情况下发请求"
+            "（请按 tools/web.py 的版本锚点注释核对 httpx/httpcore 版本）"
+        )
+    pool._network_backend = backend
+
+
 def html_to_text(html: str) -> str:
-    """极简 HTML → 纯文本：去 script/style/head、块级标签换行、去其余标签、解码实体。"""
-    html = re.sub(r"(?is)<(script|style|noscript|svg|head|iframe)[^>]*>.*?</\1\s*>", " ", html)
-    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?i)</(p|div|li|tr|h[1-6]|section|article|blockquote|pre|table)>", "\n", html)
-    html = re.sub(r"(?s)<[^>]+>", " ", html)
-    text = html_mod.unescape(html)
-    lines = (re.sub(r"[ \t]+", " ", ln).strip() for ln in text.splitlines())
+    """极简 HTML → 纯文本：去 script/style/head、块级标签闭合换行、解码实体。
+
+    与旧正则实现对齐的骨架行为：**每个**标签（含注释/声明）替换为一个空格
+    ——行内标签之间不黏连；丢弃名单内标签的整块内容替换为一个空格；``<br>``
+    与块级标签闭合换行。三处刻意优于旧实现（属性含 >、未闭合 head/script、
+    线性时间），详见 _HTMLTextExtractor 的说明与对照测试。
+
+    用标准库 HTMLParser 线性解析：绝不用回溯型正则处理任意来源的 HTML
+    ——调用方（web_fetch）无法控制页面内容。
+    """
+    parser = _HTMLTextExtractor()
+    parser.feed(html)
+    parser.close()
+    lines = (re.sub(r"[ \t]+", " ", ln).strip() for ln in parser.text().splitlines())
     return "\n".join(ln for ln in lines if ln)
 
 
@@ -242,7 +388,9 @@ class WebFetchTool(Tool):
         """
         transport = httpx.AsyncHTTPTransport(trust_env=False)
         # 把连接固定到已校验的 IP：httpx 建连时不会再做一次 DNS 解析
-        transport._pool._network_backend = _PinnedBackend({parsed.hostname: ips})
+        _install_pinned_backend(
+            transport, _PinnedBackend({parsed.hostname: ips}), "web_fetch"
+        )
         buffer = bytearray()
         truncated = False
         async with httpx.AsyncClient(

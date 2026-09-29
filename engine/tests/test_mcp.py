@@ -73,6 +73,23 @@ def test_invalid_server_entry_reports_warning(tmp_path):
     assert any("bad" in w for w in warnings)
 
 
+def test_non_dict_top_level_config_tolerated(tmp_path):
+    """mcp.json 顶层被手改成数组/字符串/数字（都是合法 JSON）时按空配置处理，
+    不能让 data.get 的 AttributeError 冒出来（发现 37：调用方只 except
+    自己的 MCPInstallError，英文内部错误会直接甩到用户脸上）。"""
+    from skysheep.mcp.installer import load_servers
+
+    p = tmp_path / "mcp.json"
+    for raw in ('["not", "an", "object"]', '"just a string"', "123", "null"):
+        p.write_text(raw, encoding="utf-8")
+        # installer.load_servers：坏掉的配置按空处理，不抛
+        assert load_servers(p) == {}
+    # client.load_mcp_configs：按空配置处理且给出可读告警（启动路径也走这里）
+    configs, warnings = load_mcp_configs(p, None)
+    assert configs == {}
+    assert warnings and "顶层不是 JSON 对象" in warnings[0]
+
+
 class FakeSession:
     def __init__(self, result: CallToolResult) -> None:
         self.result = result
@@ -308,6 +325,66 @@ async def test_unreachable_server_fails_fast_with_readable_error():
     await manager2.shutdown()
 
 
+async def _start_noop_server() -> asyncio.AbstractServer:
+    async def _noop(reader, writer) -> None:
+        writer.close()
+
+    return await asyncio.start_server(_noop, "127.0.0.1", 0)
+
+
+async def test_preflight_probes_pinned_ips(monkeypatch):
+    """预检探测要连「已校验的 IP」，不再按主机名二次解析——校验与探测之间
+    不给 DNS rebinding 留窗口（发现 47）。"""
+    import skysheep.mcp.client as mcp_client
+
+    seen: list[str] = []
+    real_open = asyncio.open_connection
+
+    async def spy_open(host, port, **kw):
+        seen.append(str(host))
+        return await real_open(host, port, **kw)
+
+    monkeypatch.setattr(asyncio, "open_connection", spy_open)
+    # 公网分支：解析结果直接造好。目标主机名无法解析——探测若还按主机名
+    # 再解析一次，就会在 DNS 处失败并返回「连不上」，测试随之变红
+    monkeypatch.setattr(mcp_client, "_resolve_public_ips", lambda host: ["127.0.0.1"])
+
+    server = await _start_noop_server()
+    port = server.sockets[0].getsockname()[1]
+    try:
+        cfg = MCPServerConfig(url=f"http://example.invalid:{port}/mcp")
+        assert await mcp_client._preflight(cfg) is None
+        assert seen == ["127.0.0.1"], "探测必须连已校验的 IP，而不是再解析一次主机名"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_preflight_loopback_still_reaches_local_server():
+    """回环目标（本机 MCP 服务是最常见形态）照常放行：钉到本批解析的地址，
+    逐个尝试直到连上。"""
+    from skysheep.mcp.client import _preflight
+
+    server = await _start_noop_server()
+    port = server.sockets[0].getsockname()[1]
+    try:
+        # IP 字面量形态
+        assert await _preflight(MCPServerConfig(url=f"http://127.0.0.1:{port}/mcp")) is None
+        # 主机名形态（localhost）：回环兜底分支，解析出多个地址时逐个试
+        assert await _preflight(MCPServerConfig(url=f"http://localhost:{port}/mcp")) is None
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_preflight_unreachable_port_reports_readable_error():
+    """探测不到时的报错要可读（与既有 connect_all 的口径一致）。"""
+    from skysheep.mcp.client import _preflight
+
+    msg = await _preflight(MCPServerConfig(url="http://127.0.0.1:1/mcp"))
+    assert msg and "连不上" in msg and "127.0.0.1" in msg
+
+
 async def test_one_bad_server_does_not_break_others():
     """一个服务器连不上，不能影响另一个正常服务器注册工具。"""
     manager = MCPManager({
@@ -373,11 +450,89 @@ def test_pending_stdio_commands_skips_names_that_will_be_skipped(tmp_path):
         "other": normalize_server({"command": "npx", "args": ["-y", "some-mcp"]}),
     }
     assert pending_stdio_commands(servers, path) == [
-        {"name": "other", "command": "npx", "args": ["-y", "some-mcp"]}
+        {"name": "other", "command": "npx", "args": ["-y", "some-mcp"], "env": {}}
     ]
     assert [p["name"] for p in pending_stdio_commands(servers, path, overwrite=True)] == [
         "fetch", "other",
     ]
+
+
+def test_normalize_server_rejects_dangerous_env_keys():
+    """env 夹带可改变运行时行为的变量：拒绝导入，报可读中文错误。
+
+    NODE_OPTIONS/PYTHONPATH 之类能让「确认过的命令行」跑出完全不同的行为，
+    导入环节必须拦下；比对不区分大小写（Windows 环境变量名不区分大小写）。
+    """
+    from skysheep.mcp import MCPInstallError, normalize_server
+
+    for key in (
+        "PATH", "PATHEXT", "NODE_OPTIONS", "PYTHONPATH", "PYTHONHOME",
+        "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
+    ):
+        with pytest.raises(MCPInstallError) as e:
+            normalize_server({"command": "uvx", "env": {key: "C:\\evil"}})
+        assert "env" in str(e.value) and key in str(e.value)
+        assert "不允许" in str(e.value)
+    # 大小写变体同样拦
+    with pytest.raises(MCPInstallError) as e:
+        normalize_server({"command": "uvx", "env": {"Path": "C:\\evil"}})
+    assert "Path" in str(e.value)
+    # 粘贴整份配置的路径同样被拦（parse_snippet 走 normalize_server）
+    from skysheep.mcp import parse_snippet
+
+    with pytest.raises(MCPInstallError):
+        parse_snippet(json.dumps({
+            "mcpServers": {"x": {"command": "uvx", "env": {"PYTHONHOME": "/evil"}}},
+        }))
+
+
+def test_normalize_server_passes_through_normal_env():
+    """普通 env 键不受影响：原样通过校验并保留在配置里。"""
+    from skysheep.mcp import normalize_server
+
+    cfg = normalize_server({
+        "command": "uvx",
+        "env": {"API_KEY": "secret", "LOG_LEVEL": "debug", "MY_PATH-ish": "x"},
+    })
+    assert cfg.env == {"API_KEY": "secret", "LOG_LEVEL": "debug", "MY_PATH-ish": "x"}
+
+
+def test_pending_stdio_commands_includes_env(tmp_path):
+    """确认数据逐项带 env（键值字符串的对象）：普通键透传，无 env 时为空对象。"""
+    from skysheep.mcp import normalize_server, pending_stdio_commands
+
+    path = tmp_path / "mcp.json"
+    servers = {
+        "demo": normalize_server({
+            "command": "node",
+            "args": ["server.js"],
+            "env": {"API_KEY": "k1"},
+        }),
+        "plain": normalize_server({"command": "uvx", "args": ["mcp-server-fetch"]}),
+    }
+    out = pending_stdio_commands(servers, path)
+    assert out[0]["name"] == "demo"
+    assert out[0]["env"] == {"API_KEY": "k1"}
+    assert out[1]["name"] == "plain"
+    assert out[1]["env"] == {}
+
+
+def test_import_confirmation_message_lists_env(tmp_path):
+    """未确认导入的确认文案要带上 env，让人看清完整执行面。"""
+    from skysheep.mcp import MCPInstallError, import_servers, normalize_server
+
+    path = tmp_path / "mcp.json"
+    servers = {
+        "demo": normalize_server({
+            "command": "node",
+            "args": ["server.js"],
+            "env": {"API_KEY": "k1"},
+        }),
+    }
+    with pytest.raises(MCPInstallError) as e:
+        import_servers(servers, path)
+    assert "API_KEY=k1" in str(e.value)
+    assert not path.exists(), "未确认前不得写盘"
 
 
 # ---- M11：keeper 内 initialize/list_tools 挂死必须被收割 ----
@@ -581,6 +736,75 @@ async def test_add_mcp_preset_already_installed_hint(tmp_path, monkeypatch):
     r = await backend.add_mcp_preset("time")
     assert r["skipped"] == ["time"]
     assert "已经添加过" in r["hint"]
+
+
+def test_runtime_probe_off_path_uv(tmp_path, monkeypatch):
+    """探测与解析的三个分支：PATH 命中、官方落点命中、彻底没装。
+
+    uv 官方安装器装到 ~/.local/bin，装完没注销重登时该目录不在 PATH 上，
+    shutil.which 探不到——不能因此误报「未检测到 uv」。
+    """
+    import types
+
+    import skysheep.mcp.presets as presets_mod
+    from skysheep.mcp import resolve_runtime_command
+
+    exe = "uvx.exe" if sys.platform == "win32" else "uvx"
+
+    # PATH 命中：原名返回，mcp.json 里保持可移植的裸名
+    monkeypatch.setattr(
+        presets_mod, "shutil", types.SimpleNamespace(which=lambda _: "C:/fake/uvx")
+    )
+    monkeypatch.setattr(presets_mod, "_UV_FALLBACK_DIRS", ())
+    assert presets_mod.runtime_available("uv", "uvx") is True
+    assert resolve_runtime_command("uvx") == "uvx"
+
+    # PATH 没有、官方落点有：探测不误报，解析出绝对路径
+    monkeypatch.setattr(
+        presets_mod, "shutil", types.SimpleNamespace(which=lambda _: None)
+    )
+    monkeypatch.setattr(presets_mod, "_UV_FALLBACK_DIRS", (tmp_path,))
+    (tmp_path / exe).write_bytes(b"")
+    assert presets_mod.runtime_available("uv", "uvx") is True
+    resolved = resolve_runtime_command("uvx")
+    assert Path(resolved).is_absolute() and Path(resolved).name == exe
+
+    # 彻底没装：探测 False，命令保持原名（启动路径给出既有报错）
+    (tmp_path / exe).unlink()
+    assert presets_mod.runtime_available("uv", "uvx") is False
+    assert resolve_runtime_command("uvx") == "uvx"
+
+
+async def test_add_mcp_preset_resolves_off_path_runtime(tmp_path, monkeypatch):
+    """PATH 缺失但 uv 装在官方落点：添加时把解析出的绝对路径写进 mcp.json。"""
+    import types
+
+    import skysheep.mcp.presets as presets_mod
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setenv("SKYSHEEP_HOME", str(tmp_path / "home"))
+    backend = ServerBackend(working_dir=tmp_path)
+    called: dict = {}
+
+    async def fake_save(name, **kw):
+        called["name"] = name
+        called.update(kw)
+        return {"added": [name], "skipped": [], "mcp": [], "mcp_warnings": []}
+
+    monkeypatch.setattr(backend, "save_mcp_server", fake_save)
+    # 模拟 PATH 缺 ~/.local/bin 的机器：which 永远探不到
+    monkeypatch.setattr(
+        presets_mod, "shutil", types.SimpleNamespace(which=lambda _: None)
+    )
+    bindir = tmp_path / "localbin"
+    bindir.mkdir()
+    monkeypatch.setattr(presets_mod, "_UV_FALLBACK_DIRS", (bindir,))
+    (bindir / ("uvx.exe" if sys.platform == "win32" else "uvx")).write_bytes(b"")
+
+    await backend.add_mcp_preset("git")
+    assert Path(called["command"]) == bindir / (
+        "uvx.exe" if sys.platform == "win32" else "uvx"
+    )
 
 
 def test_mcp_installed_names(tmp_path, monkeypatch):

@@ -24,7 +24,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from .base import ChangeRecorder, Safety, Tool, ToolContext, ToolError, rel_path, resolve_path
-from .web import _resolve_public_ips
+from .web import _install_pinned_backend, _resolve_public_ips
 
 TIMEOUT_S = 60.0
 MAX_IMAGE_BYTES = 8_000_000
@@ -88,7 +88,11 @@ def _pinned_transport(host: str, ips: list[str] | None = None) -> httpx.HTTPTran
     公网校验也照常发生（M9：校验不能随网络层注入一起被跳过）。
     """
     transport = httpx.HTTPTransport(trust_env=False)
-    transport._pool._network_backend = _SyncPinnedBackend({host: ips or _resolve_public_ips(host)})
+    # 与 web_fetch 同一 fail-closed 检查：私有结构变化时响亮失败，
+    # 不允许钉连静默退化成「只剩一次 getaddrinfo 校验」（审查 P-17）
+    _install_pinned_backend(
+        transport, _SyncPinnedBackend({host: ips or _resolve_public_ips(host)}), "generate_image"
+    )
     return transport
 
 

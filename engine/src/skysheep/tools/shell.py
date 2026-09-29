@@ -359,17 +359,29 @@ class RunCommandTool(Tool):
         # kill 再带上进程号（审查 P3-16）：exact 规则按整串相等匹配，不带 id 的
         # "action=kill" 固化一次等于放行「杀本会话任意后台进程」；带上 id 后每次
         # 杀别的进程都要重新确认（与 keyboard 固化当次内容同一处理）。
+        # action 优先于 command（审查 P-9）：run() 先按 action 分派，action≠run 时
+        # command 根本不会被执行。语义文本若仍返回命令文本，白名单与确认弹窗
+        # 展示的是命令、实际执行的却是 read/kill——「确认面板展示的 = 实际执行的」
+        # 被打破。所以 action≠run 一律按动作语义生成，忽略 command。
+        action = str(input_dict.get("action", "") or "run")
+        if action != "run":
+            if action == "kill":
+                rid = str(input_dict.get("id", 0) or 0)
+                if rid:
+                    return f"action=kill id={rid}"
+            return f"action={action}"
         command = str(input_dict.get("command", ""))
         if command.strip():
             return command
-        action = str(input_dict.get("action", "") or "run")
-        if action == "kill":
-            rid = str(input_dict.get("id", 0) or 0)
-            if rid:
-                return f"action=kill id={rid}"
-        return f"action={action}"
+        return "action=run"
 
     async def run(self, args: RunCommandArgs, ctx: ToolContext) -> str:
+        # action 白名单（审查 P-9）：未知 action 若静默落到命令分支，arg_text 给出的
+        # 「action=xxx」与实际执行的命令文本会对不上——展示必须等于执行。
+        if args.action not in ("run", "read", "kill", "list"):
+            raise ToolError(
+                f"未知 action: {args.action}（可选 run / read / kill / list）"
+            )
         if args.action == "read":
             return _bg_read(args.id, args.clear, ctx.session_id)
         if args.action == "kill":

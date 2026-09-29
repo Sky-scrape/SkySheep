@@ -93,9 +93,19 @@ class ChannelGate(PermissionGate):
         self.turn_chat_id = ""
 
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
-        if tool.safety == Safety.READONLY:
+        # 引擎主目录写入守卫先于 READONLY 短路（与主门同口径，第二轮审查
+        # FINDING 2）：memory_write 名义 READONLY 却写全局记忆（注入所有项目
+        # 所有会话的 system prompt），渠道会话不得零确认放行。命中后未开审批
+        # 走下方流程被父类拒绝（fail-closed），开了审批则推聊天卡逐次确认。
+        engine_home_write = self._write_hits_engine_home(tool, input_dict)
+        if tool.safety == Safety.READONLY and not engine_home_write:
             return None
-        if tool.name in self.allowed:
+        if tool.name in self.allowed and not engine_home_write:
+            # 预授权名单放行也要过引擎主目录守卫（审查 P2-7，与主会话门口径
+            # 一致）：config.toml 是凭据本体、全局技能 SKILL.md 会注入所有项目
+            # （含未信任项目）的 system prompt，渠道名单不能成为免确认改写它们
+            # 的通道。命中时不走名单放行，退回下方流程——未开审批即拒绝，
+            # 开了审批则推聊天卡逐次确认。
             return None
 
         # 未开启审批：等价 HeadlessGate——立刻拒绝，不阻塞。

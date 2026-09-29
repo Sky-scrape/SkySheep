@@ -5,7 +5,10 @@ Agent 在对话中学到值得长期记住的事实（用户偏好、常用环�
 写入 ~/.skysheep/memory.md，系统提示词每一轮都注入该文件（限长）。
 
 安全边界：只能写 SkySheep 自己的记忆文件（路径固定、不接受任何路径参数），
-与 schedule_write 写应用自有存储同理，READONLY 免确认。
+没有任意路径写面（safety=READONLY 的含义）；但落点在引擎主目录 ~/.skysheep/
+且该文件会注入所有项目所有会话的 system prompt，权限门把这类固定落点写入
+当「写引擎主目录」逐次确认（security/gate.py 的 _ENGINE_HOME_FIXED_WRITERS，
+第二轮审查 FINDING 2）——memory_write 的每次 append/delete 都要用户确认。
 
 本模块还承载「归档自动记忆」与「定期自动整理」的纯函数部分（backend 调用）：
 digest_transcript / build_digest_prompt / parse_digest 负责归档提炼，
@@ -211,6 +214,14 @@ def remember_lines(lines: list[str]) -> list[str]:
     容量护栏（MAX_MEMORY_FILE_CHARS）由 _write_lines 统一兜底。
     「(自动)」标记：归档提炼是无确认的后台写入，用户在全局记忆页要能
     一眼分辨并清理（手动 memory_write 的条目不带标记）。
+
+    残余面注记（第二轮审查 FINDING 2）：本函数是后台自动归档的落盘入口，
+    **不是工具调用、不经过权限门**——「写引擎主目录需确认」的守卫
+    （security/gate.py 的 _write_targets_engine_home）对它结构性不生效，
+    自动归档仍会无确认写 ~/.skysheep/memory.md。这是有意保留的产品语义
+    （归档提炼在会话结束时自动沉淀记忆），与 memory_write 改为逐次确认
+    无关；落盘内容由提炼提示词约束（不记机密与任务细节），且条目带
+    「(自动)」来源标记供用户识别与清理。
     """
     p = memory_path()
     existing = _read_lines(p)
@@ -351,8 +362,10 @@ class MemoryWriteTool(Tool):
         "当用户说「记住我喜欢…」「以后都用…」，或你发现值得长期记住的信息时用 append；"
         "用户要求忘记某事时用 delete。记忆会自动注入你之后的每一轮对话。"
     )
-    safety = Safety.READONLY  # 只写 SkySheep 自有记忆文件，不需要确认
-    # 只写 SkySheep 自有记忆文件（safety=READONLY 免确认），但对环境有写动作
+    safety = Safety.READONLY  # 只写 SkySheep 自有记忆文件，没有任意路径写面
+    # 落点在引擎主目录（~/.skysheep/memory.md，注入所有会话 system prompt）：
+    # 权限门不因 READONLY 免确认，append/delete 走逐次确认（审查 FINDING 2，
+    # 见 security/gate.py 的 _ENGINE_HOME_FIXED_WRITERS）
     read_only_hint = False
     destructive_hint = False
     idempotent_hint = False

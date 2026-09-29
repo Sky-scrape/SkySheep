@@ -72,14 +72,25 @@ async def probe_provider_models(
             client = AsyncAnthropic(
                 api_key=api_key, base_url=base, timeout=timeout_s, max_retries=0, **extra
             )
-            page = await client.models.list(limit=1000)
         else:
             from openai import AsyncOpenAI
 
             client = AsyncOpenAI(
                 api_key=api_key, base_url=base, timeout=timeout_s, max_retries=0, **extra
             )
-            page = await client.models.list()
+        try:
+            if kind == "anthropic":
+                page = await client.models.list(limit=1000)
+            else:
+                page = await client.models.list()
+        finally:
+            # 客户端持有 httpx 连接池：无论查询成败都确定性关闭，不然设置页
+            # 每点一次「检测可用模型」就泄漏一个客户端直到 GC/进程退出。
+            # 关闭自身的失败不掩盖查询结果（成功路径不受收尾问题影响）
+            try:
+                await client.close()
+            except Exception:
+                pass
     except Exception as e:  # 网络/鉴权/解析错误统一转成可读提示
         raise RuntimeError(_friendly_error(e, base)) from e
 

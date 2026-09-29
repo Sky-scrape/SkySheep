@@ -19,16 +19,36 @@ from skysheep.models.factory import build_provider
 from skysheep.models.openai_compat import OpenAICompatProvider
 
 
+class FakeOpenAIStream:
+    """模拟 openai AsyncStream：async-with 退出即置 closed（与 SDK __aexit__ 一致）。"""
+
+    def __init__(self, chunks=()) -> None:
+        self._chunks = list(chunks)
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
+        return False
+
+    def __aiter__(self):
+        async def _gen():
+            for c in self._chunks:
+                yield c
+
+        return _gen()
+
+    async def close(self):
+        self.closed = True
+
+
 def _empty_openai_client(captured: dict):
     class FakeCompletions:
         async def create(self, **params):
             captured.update(params)
-
-            async def _empty():
-                if False:  # pragma: no cover - 仅供类型
-                    yield None
-
-            return _empty()
+            return FakeOpenAIStream()
 
     class FakeClient:
         class chat:  # noqa: N801
@@ -292,18 +312,16 @@ def test_openai_provider_streams_reasoning_incrementally():
     """reasoning_content 增量逐段产出 ProviderReasoning（不再攒整块）。"""
     from skysheep.models.openai_compat import OpenAICompatProvider
 
+    c1 = SimpleNamespace(usage=None, choices=[SimpleNamespace(
+        delta=SimpleNamespace(reasoning_content="思考A", content=None, tool_calls=None),
+        finish_reason=None)])
+    c2 = SimpleNamespace(usage=None, choices=[SimpleNamespace(
+        delta=SimpleNamespace(reasoning_content=None, content="正文", tool_calls=None),
+        finish_reason="stop")])
+
     class FakeCompletions:
         async def create(self, **params):
-            async def _gen():
-                c1 = SimpleNamespace(usage=None, choices=[SimpleNamespace(
-                    delta=SimpleNamespace(reasoning_content="思考A", content=None, tool_calls=None),
-                    finish_reason=None)])
-                c2 = SimpleNamespace(usage=None, choices=[SimpleNamespace(
-                    delta=SimpleNamespace(reasoning_content=None, content="正文", tool_calls=None),
-                    finish_reason="stop")])
-                for c in (c1, c2):
-                    yield c
-            return _gen()
+            return FakeOpenAIStream([c1, c2])
 
     class FakeClient:
         class chat:  # noqa: N801

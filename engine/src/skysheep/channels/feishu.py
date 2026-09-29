@@ -258,6 +258,13 @@ class FeishuChannel(Channel):
 
     async def stop(self) -> None:
         self._stopping = True
+        if self._task is None and self._proc is None:
+            # 从未启动过：manager 会对所有适配器（含 enabled=False、缺凭据没
+            # 启动成功的）遍历 stop()。此时既没有子进程可收，也没有本进程
+            # 拉起过的 daemon 可停——`event stop --force` 是一条要真拉起
+            # lark-cli 的同步命令（超时 30s），白跑只会拖住应用收尾（桌面壳
+            # 给优雅退出只有 1.5 秒）。
+            return
         await super().stop()
         self._kill_reader()
         await asyncio.to_thread(self._terminate_process)

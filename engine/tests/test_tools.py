@@ -110,6 +110,19 @@ async def test_run_command(tmp_path):
     assert "sky_sheep_test" in out
 
 
+async def test_run_command_rejects_unknown_action(tmp_path):
+    """未知 action 直接报参数错误，不静默落到命令分支（审查 P-9）。
+
+    arg_text 对未知动作返回「action=xxx」，run 若照样执行 command，
+    展示与执行就对不上了。"""
+    tool = RunCommandTool()
+    with pytest.raises(ToolError, match="action"):
+        await tool.run(
+            tool.args_model(action="terminate", id=1, command="echo should_not_run"),
+            ctx(tmp_path),
+        )
+
+
 async def test_run_command_timeout(tmp_path):
     tool = RunCommandTool()
     if __import__("sys").platform == "win32":
@@ -221,6 +234,21 @@ async def test_background_process_scoped_to_owning_session():
 
 
 # ---- 写入端大小上限（reading 端早有截断，写入端此前无限制） ----
+
+
+async def test_write_and_edit_populate_last_diff(tmp_path):
+    """写/编辑完成后 ctx.last_diff 立即可取（审查 P-19）。
+
+    写盘与 diff 在同一次 to_thread 调用里完成，工具返回时 diff 必须已就位
+    ——agent 循环「执行前清空、返回后立即取走」的语义保持。"""
+    w = WriteFileTool()
+    c = ToolContext(working_dir=tmp_path)
+    await w.run(w.args_model(path="a.txt", content="one\ntwo\n"), c)
+    assert "+one" in c.last_diff and "+two" in c.last_diff
+
+    e = EditFileTool()
+    await e.run(e.args_model(path="a.txt", old_string="two", new_string="2"), c)
+    assert "-two" in c.last_diff and "+2" in c.last_diff
 
 
 async def test_write_file_rejects_oversized_content(tmp_path, monkeypatch):

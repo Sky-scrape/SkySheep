@@ -572,18 +572,26 @@ class ScreenshotTool(Tool):
         ctx.images.append(ImageBlock(media_type="image/png", data=base64.b64encode(png).decode()))
 
         shots = skysheep_home() / "screenshots"
-        shots.mkdir(parents=True, exist_ok=True)
         path = shots / f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
+        saved = False
         try:
+            # mkdir 与写副本同一容错级别（审查 P-40）：图像此时已附加进对话，
+            # 副本目录建不出来（权限/杀软/被同名文件占用）不该让整个工具报错，
+            # 与注释「副本保存失败不影响主流程」保持一致。
+            shots.mkdir(parents=True, exist_ok=True)
             path.write_bytes(png)
             _prune_screenshots(shots)
+            saved = True
         except OSError:
             pass  # 副本保存失败不影响主流程
 
         lines = [
             f"截图完成（{args.screen}）: {w}x{h} px，图像已附加在本条消息之后（模型可直接查看）",
-            f"- 副本已保存: {path}",
         ]
+        if saved:
+            lines.append(f"- 副本已保存: {path}")
+        else:
+            lines.append("- 副本保存失败（不影响本次截图）")
         if scale < 1.0:
             lines.append(
                 f"- 注意: 图像已从 {w}x{h} 缩放为 {img.size[0]}x{img.size[1]} 显示"
@@ -682,7 +690,12 @@ class ClipboardWriteTool(Tool):
 
     def arg_text(self, input_dict: dict) -> str:
         text = str(input_dict.get("text", ""))
-        return "clipboard " + (text[:120] + "…" if len(text) > 120 else text)
+        # 完整返回、不截断：exact 规则的 pattern 就建在 arg_text 上（rule_for →
+        # persist_rule）。截断会让「前 120 字符相同、尾部任意」的变体命中同一条
+        # exact 规则免确认，而 run() 写入的是完整内容——规则匹配所用的语义文本
+        # 必须无损还原实际执行面。过长内容在确认卡/事件流的展示截断由展示层
+        # 负责（前端对 rule_pattern 已截断展示），规则存储不受影响。
+        return "clipboard " + text
 
     async def run(self, args: ClipboardWriteArgs, ctx: ToolContext) -> str:
         _require_windows("clipboard_write")

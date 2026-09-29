@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import os
 import shutil
@@ -67,6 +68,22 @@ def make_diff(old: str, new: str, path_label: str) -> str:
     if len(lines) > MAX_DIFF_LINES:
         lines = lines[:MAX_DIFF_LINES] + ["... (diff truncated)"]
     return "\n".join(lines)
+
+
+def _write_and_diff(
+    p: Path, content: str, encoding: str, newline: str, old: str, shown: str
+) -> str:
+    """写盘并在同一线程调用里算完 diff（供 write/edit 经 to_thread 调用）。
+
+    写与 diff 放进**同一次** to_thread：agent 循环在工具返回后立即取走
+    ctx.last_diff（agent.py 执行前清空、执行后取走），两次 await 之间不让出
+    事件循环，写与 diff 之间就不会插入其他任务的操作——「写完立即取走」的
+    语义与串行行为完全一致。difflib 对大量短行重排有近平方的最坏情形，
+    MAX_WRITE_CHARS 允许单次 500 万字符，放事件循环上会把流式输出与其他
+    会话一起卡住数秒（审查 P-19，与 docs.py / search.py 的 to_thread 口径一致）。
+    """
+    write_text_file(p, content, encoding, newline)
+    return make_diff(old, to_lf(content), shown)
 
 
 class ReadFileArgs(BaseModel):
@@ -164,16 +181,19 @@ class WriteFileTool(Tool):
         if self.recorder is not None:
             self.recorder.record(p)  # 检查点：记下覆盖前的原始内容
         # 覆盖已有文件：沿用它的编码与行尾符；新建文件用 UTF-8 + LF。
+        # 编码探测（round-trip 校验）是全文读盘：放线程池，别卡事件循环。
         encoding, newline, old = "utf-8", "\n", ""
         if p.exists():
-            loaded = _load_for_edit(p, shown)
+            loaded = await asyncio.to_thread(_load_for_edit, p, shown)
             encoding, newline = loaded.encoding, loaded.newline
             old = loaded.text
         try:
-            write_text_file(p, args.content, encoding, newline)
+            diff = await asyncio.to_thread(
+                _write_and_diff, p, args.content, encoding, newline, old, shown
+            )
         except OSError as e:
             raise ToolError("cannot write " + shown + ": " + str(e)) from e
-        ctx.last_diff = make_diff(old, to_lf(args.content), shown)
+        ctx.last_diff = diff
         n = len(args.content.splitlines())
         return f"wrote {n} lines ({len(args.content)} chars) to {shown}"
 
@@ -209,7 +229,7 @@ class EditFileTool(Tool):
             raise ToolError("file not found: " + shown)
         if self.recorder is not None:
             self.recorder.record(p)  # 检查点：记下编辑前的原始内容
-        loaded = _load_for_edit(p, shown)
+        loaded = await asyncio.to_thread(_load_for_edit, p, shown)
         content = loaded.text
         if args.old_string not in content:
             raise ToolError("old_string not found in file; read the file first and copy exact text")
@@ -224,10 +244,14 @@ class EditFileTool(Tool):
         new_content = content.replace(args.old_string, args.new_string)
         check_write_size(new_content, shown, previous_len=len(content))
         try:
-            write_text_file(p, new_content, loaded.encoding, loaded.newline)
+            # 写与 diff 同一次 to_thread（见 _write_and_diff：保持「写完立即
+            # 取走 ctx.last_diff」语义，且不让 difflib 卡事件循环）
+            diff = await asyncio.to_thread(
+                _write_and_diff, p, new_content, loaded.encoding, loaded.newline, content, shown
+            )
         except OSError as e:
             raise ToolError("cannot write " + shown + ": " + str(e)) from e
-        ctx.last_diff = make_diff(content, new_content, shown)
+        ctx.last_diff = diff
         replaced = count if args.replace_all else 1
         return f"edited {shown}: {replaced} replacement(s)"
 
@@ -470,6 +494,22 @@ class GlobTool(Tool):
         if not base.is_dir():
             raise ToolError("not a directory: " + rel_path(ctx, base))
         matches = [m for m in base.glob(args.pattern) if m.is_file()]
+        if getattr(ctx, "restrict_to_workdir", False):
+            # 「仅允许访问工作目录」也要罩住 glob 的**结果**：resolve_path 只闸得住
+            # 起始目录，模式里带 `..`（如 ../*.pem）可以列出目录外的文件——同一
+            # 文件用 read_file 会被拒绝，glob 却能探到名字，等于给只读边界开了个
+            # 侧门（审查 P-8）。与 resolve_path 同一包含性口径：越界匹配直接丢弃。
+            # 独立于下面的 ignore 过滤块做——那是 .skysheepignore 业务过滤，
+            # 不是安全边界，不应依赖它是否执行来兜底。
+            root = Path(ctx.working_dir).resolve()
+            within = []
+            for m in matches:
+                try:
+                    m.resolve().relative_to(root)
+                except (OSError, ValueError):
+                    continue  # 解析不出（悬软链接等）或越界：一律不放行
+                within.append(m)
+            matches = within
         matches.sort(key=lambda m: m.stat().st_mtime, reverse=True)
         # 遵循项目忽略文件（.skysheepignore / .gitignore / .env 内建默认）
         try:

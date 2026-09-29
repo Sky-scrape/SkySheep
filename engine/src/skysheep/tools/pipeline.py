@@ -9,7 +9,9 @@ session=在指定已有会话里续跑（带该会话上下文）。定时任务
 
 安全边界：本工具只写数据库（READONLY 免确认），**不能启动**流水线——
 无人值守运行允许预授权哪些写/执行工具必须由用户在「任务编排」面板
-审过节点清单后亲手点「启动」（与 trust.py 不自动执行仓库配置同一姿态）。
+审过节点清单后亲手点「启动」（与 trust.py 不自动执行仓库配置同一姿态）；
+流水线运行期间节点冻结，增删改一律拒绝（编排循环每轮从库现读节点建
+门，热改等于替换用户审定的预授权面）。
 数据存项目库（skysheep.db 的 pipelines / pipeline_nodes 表），按项目隔离。
 """
 
@@ -45,6 +47,7 @@ TOOL_HINT = (
     "节点的 allowed_tools 是无人值守运行时的预授权名单（只读工具本就放行，不用列）；"
     "写入/执行类工具不列就会被自动拒绝。创建的流水线是草稿，"
     "要用户在「任务编排」面板点「启动」后才会运行。"
+    "流水线运行（启动）期间节点不可增删改，要改先让用户在面板上停止。"
     "max_runs 字段随节点类型双义：普通节点是失败自动重试次数（含首次共 max_runs 次），"
     "迭代（loop）节点是最大迭代轮数（2~10）；门/终止固定 1。"
 )
@@ -199,6 +202,7 @@ class PipelineWriteTool(Tool):
         if a.action == "add_node":
             pipe = await self._get_pipe(a.id)
             self._ensure_owned(pipe)
+            self._ensure_editable(pipe)
             spec = PipelineNodeSpec(
                 title=a.title or "", prompt=a.prompt or "",
                 task_id=a.task_id or "", after=[],
@@ -227,6 +231,7 @@ class PipelineWriteTool(Tool):
                 raise ToolError(f"节点 {a.node_id} 不存在")
             pipe = await self._get_pipe(node["pipeline_id"])
             self._ensure_owned(pipe)
+            self._ensure_editable(pipe)
             if node["status"] == "running":
                 raise ToolError("节点正在运行，等它结束再改")
             kw: dict = {}
@@ -256,6 +261,7 @@ class PipelineWriteTool(Tool):
         if node is not None:
             pipe = await self._get_pipe(node["pipeline_id"])
             self._ensure_owned(pipe)
+            self._ensure_editable(pipe)
             if node["status"] == "running":
                 raise ToolError("节点正在运行，不能删除；要中止请先停止整条流水线")
         ok = await self.store.delete_pipeline_node(a.node_id)
@@ -311,6 +317,7 @@ class PipelineWriteTool(Tool):
             raise ToolError(f"定时任务 {a.cron_id} 不存在（或不属于当前项目）")
         pipe = await self._get_pipe(a.id)
         self._ensure_owned(pipe)
+        self._ensure_editable(pipe)
         node = await self.store.add_pipeline_node(
             pipe["id"],
             a.title or f"定时任务：{cron['name']}",
@@ -335,6 +342,18 @@ class PipelineWriteTool(Tool):
         """跨项目不可见不可改（与定时任务的项目归属校验同一姿态）。"""
         if pipe["project_id"] != self._project_id_fn():
             raise ToolError("流水线不存在（或不属于当前项目）")
+
+    @staticmethod
+    def _ensure_editable(pipe: dict) -> None:
+        """运行中的流水线不接受任何节点改动（审查 F-17，保守方案）。
+
+        无人值守节点的预授权清单（allowed_tools）与指令是用户启动前审定
+        的；编排循环每轮从库现读节点建 HeadlessGate，运行期间改/增/删节点
+        会热替换预授权面——「审过才启动」的保证只在启动那一刻成立。要改
+        请先停止整条流水线。
+        """
+        if pipe["status"] == "running":
+            raise ToolError("流水线运行中，请先停止再修改")
 
     async def _validate_deps(self, pipe: dict, node_id: int, depends_on: list[int]) -> None:
         await self.store._check_dep_refs(pipe["id"], depends_on, exclude_id=node_id)

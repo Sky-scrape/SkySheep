@@ -106,6 +106,49 @@ async def test_pretool_allowed_list_passes():
     assert await gate.authorize(_WriteTool(), {}) is None
 
 
+async def test_allowed_list_still_guards_engine_home(home):
+    """渠道预授权名单也要过引擎主目录守卫（审查 P2-7，与主会话门口径一致）。
+
+    渠道配置 allowed_tools 含 write_file 时，写 ~/.skysheep/config.toml（凭据
+    本体）不得因名单免确认：未开审批即拒绝（fail-closed），开了审批推聊天卡
+    逐次确认；名单内、工作目录内的写入照常放行，守卫不扩大打击面。
+    """
+    from skysheep.tools import WriteFileTool
+
+    engine_home = home / "home"  # conftest：SKYSHEEP_HOME 指向 tmp_path/home
+    wd = home / "proj"
+
+    # 未开审批：守卫命中 → 立刻拒绝，不静默放行
+    gate = ChannelGate(allowed=["write_file"], approve_enabled=False, working_dir=wd)
+    pending = await gate.authorize(
+        WriteFileTool(), {"path": str(engine_home / "config.toml"), "content": "x"}
+    )
+    assert pending is not None
+    assert await asyncio.wait_for(pending.wait(), timeout=2) == Decision.DENY
+
+    # 名单内 + 工作目录内：照常放行
+    assert (
+        await gate.authorize(WriteFileTool(), {"path": "a.txt", "content": "x"}) is None
+    )
+
+    # 开审批：推聊天卡逐次确认（卡片真正发出去），而不是静默放行
+    notified = []
+
+    async def notify_and_allow(p):
+        notified.append(p.request_id)
+        gate2.submit(p.request_id, Decision.ALLOW_ONCE)
+
+    gate2 = ChannelGate(
+        allowed=["write_file"], approve_enabled=True, approve_timeout=5,
+        notify=notify_and_allow, working_dir=wd,
+    )
+    pending2 = await gate2.authorize(
+        WriteFileTool(), {"path": str(engine_home / "config.toml"), "content": "x"}
+    )
+    assert notified == [pending2.request_id]
+    assert await asyncio.wait_for(pending2.wait(), timeout=2) == Decision.ALLOW_ONCE
+
+
 async def test_approval_timeout_denies_and_cleans_up():
     """超时必须回 deny（而不是抛 CancelledError），且清空等待表。"""
     notified = []
@@ -496,6 +539,35 @@ async def test_feishu_surfaces_invalid_credentials(tmp_path, home):
     assert "client secret is invalid" in ch.error
     assert "config init" in ch.error  # 带上 CLI 给的处理提示
     await ch.stop()
+
+
+async def test_feishu_stop_never_started_skips_cli_calls(tmp_path, home):
+    """从未启动的渠道 stop() 必须快速返回：manager 对 enabled=False、缺凭据
+    没启动成功的适配器也会遍历 stop()，此时不该白跑 event stop --force
+    （真拉起 lark-cli、超时 30s，而桌面壳给优雅退出只有 1.5 秒）。"""
+    calls = []
+    ch = FeishuChannel(
+        {"app_id": "a", "app_secret": "b", "cli_path": _fake_cli(tmp_path)}, _noop_msg
+    )
+    assert ch.cli, "前提：cli 可执行存在，否则旧实现也会因 cli 为空而跳过 event stop"
+    ch._run_cli = lambda *args, **kwargs: calls.append(list(args)) or (True, {})
+    await ch.stop()
+    assert calls == [], "未启动过不应发起任何 lark-cli 调用"
+    assert ch._stopping is True
+
+
+async def test_feishu_stop_after_start_still_stops_daemon(tmp_path, home):
+    """跑过的渠道 stop() 仍要走完整清理：取消任务并停 daemon（不占长连接）。"""
+    calls = []
+    ch = FeishuChannel(
+        {"app_id": "a", "app_secret": "b", "cli_path": _fake_cli(tmp_path)}, _noop_msg
+    )
+    ch._run_cli = lambda *args, **kwargs: calls.append(list(args)) or (True, {})
+    ch._task = asyncio.ensure_future(asyncio.sleep(3600))
+    await ch.stop()
+    assert any("stop" in " ".join(map(str, a)) for a in calls), "要发 event stop --force"
+    assert ch._task is None
+    assert ch.connected is False
 
 
 def test_feishu_parses_ok_line_with_json_envelope(tmp_path, home):
@@ -896,6 +968,53 @@ async def test_manager_rejects_when_queue_is_full():
     assert "排队的消息太多" in rejected[0]
 
 
+async def test_manager_arrival_during_lock_handover_is_counted_and_acked():
+    """竞态回归：前一轮释放锁、排队者还没被唤醒的空档里到达的消息，也要被
+    计数并收到排队回执。旧实现先查 ``_lock.locked()`` 再抢锁，两步之间撞上
+    这个空档就会绕过回执与 MAX_PENDING_TURNS 上限直接插队。"""
+    import asyncio as _aio
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    release = _aio.Event()   # 按住第一轮（持锁）
+    go = _aio.Event()        # 第一轮说要收尾了
+    parked = _aio.Event()    # 收尾前最后停一拍，留给测试布置第三条
+
+    async def run1(session_id, text, actor="", chat_id=""):
+        host.ran.append(text)
+        await release.wait()
+        go.set()
+        await parked.wait()
+        return {"text": "done"}
+
+    host.channel_run = run1
+    t1 = _aio.create_task(mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="第一条", approved=True,
+    )))
+    await _aio.sleep(0.05)   # 第一条拿到锁、停在断点
+    t2 = _aio.create_task(mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="第二条", approved=True,
+    )))
+    await _aio.sleep(0.05)   # 第二条计数、回执、等锁
+
+    release.set()
+    await go.wait()          # 第一轮已过断点，马上要放锁
+    parked.set()             # 先入队「第一轮恢复」
+    t3 = _aio.create_task(mgr._on_message(ChannelMessage(
+        # 用独立 chat_id，便于单独核对这条消息自己的回执
+        channel="feishu", actor="9", chat_id="chat3", text="第三条", approved=True,
+    )))                      # 再入队第三条首步：恰好落在放锁之后、唤醒第二条之前
+    await _aio.sleep(0.1)
+    await _aio.gather(t1, t2, t3)
+
+    assert set(host.ran) == {"第一条", "第二条", "第三条"}
+    # 关键断言：空档期到达的第三条也必须收到排队回执（旧实现直接静默插队）
+    acks3 = [t for cid, t in ch.out if cid == "chat3"]
+    assert acks3 and "排队" in acks3[0]
+    assert mgr._pending_turns == 0, "全部收尾后计数要归零"
+
+
 async def test_manager_sends_busy_notice_for_slow_turn(monkeypatch):
     """一轮超过阈值没回音要先补一条「还在处理」；快轮不发（不打扰）。"""
     import asyncio as _aio
@@ -937,6 +1056,38 @@ async def test_manager_reports_run_error_back_to_chat():
         channel="feishu", actor="9", chat_id="9", text="你好", approved=True,
     ))
     assert ch.out and "模型未配置" in ch.out[0][1]
+
+
+async def test_manager_route_error_replies_to_approved_source():
+    """路由顶层兜底：宿主调用抛异常不能冒回适配器（飞书会记成读流失败、
+    微信会把本批剩余消息丢掉），已批准来源要收到一句可读错误。"""
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    def boom(name, chat_id):  # note_channel_chat 是同步方法
+        raise RuntimeError("存储打不开")
+
+    host.note_channel_chat = boom
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="你好", approved=True,
+    ))
+    assert ch.out and "出错了" in ch.out[0][1]
+    assert "存储打不开" in ch.out[0][1]
+
+
+async def test_manager_route_error_stays_silent_for_unapproved():
+    """顶层兜底对未批准来源必须保持沉默：回复等于向陌生人确认 bot 是活的。"""
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": []}})
+    from skysheep.channels.base import ChannelMessage
+
+    async def boom(msg):
+        raise RuntimeError("boom")
+
+    mgr.note_seen = boom  # 让未批准分支也抛一次，验证兜底不回话
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="stranger", chat_id="c-x", text="你好", approved=False,
+    ))
+    assert ch.out == []
 
 
 async def test_manager_disabled_channel_is_not_started():
@@ -1504,6 +1655,83 @@ async def test_weixin_poll_advances_cursor_and_checks_allowlist():
     assert captured and captured[0].approved is False
 
 
+async def test_weixin_cursor_not_advanced_until_batch_completes():
+    """批处理被打断时游标不得推进（内存与落盘都不动）：先推进再处理的话，
+    服务器不会重推，从打断那条起的剩余消息就永久丢了。"""
+    captured = []
+    saved = []
+
+    async def on_message(msg):
+        captured.append(msg)
+        if msg.text == "第二条":
+            raise asyncio.CancelledError()  # 模拟收尾时被打断
+
+    async def on_state(state):
+        saved.append(dict(state))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "ret": 0, "get_updates_buf": "cursor-1",
+            "msgs": [
+                {"from_user_id": "userA", "message_type": 1, "context_token": "c1",
+                 "item_list": [{"type": 1, "text_item": {"text": "第一条"}}]},
+                {"from_user_id": "userA", "message_type": 1, "context_token": "c2",
+                 "item_list": [{"type": 1, "text_item": {"text": "第二条"}}]},
+                {"from_user_id": "userA", "message_type": 1, "context_token": "c3",
+                 "item_list": [{"type": 1, "text_item": {"text": "第三条"}}]},
+            ],
+        })
+
+    ch = _wx({"bot_token": "t", "allowed_ids": ["userA"]}, on_message)
+    ch.on_state = on_state
+    ch._transport = _mock_transport(handler)
+    with pytest.raises(asyncio.CancelledError):
+        await ch._poll_once()
+    # 处理到打断那条为止（append 先于 raise）；游标留在旧值、新游标不落盘，
+    # 下一轮服务器会重推本批
+    assert [m.text for m in captured] == ["第一条", "第二条"]
+    assert ch.cursor == ""
+    assert saved == []
+
+
+async def test_weixin_single_bad_message_does_not_lose_rest_of_batch():
+    """批内一条消息处理失败只跳过那一条：剩余消息照常处理，游标照常推进落盘。
+
+    不跳过的话，一条始终解析失败的消息会把游标永久卡在旧值，已处理的消息被
+    反复重推（重复回复刷屏）。"""
+    captured = []
+    saved = []
+
+    async def on_message(msg):
+        captured.append(msg.text)
+        if msg.text == "坏消息":
+            raise RuntimeError("boom")
+
+    async def on_state(state):
+        saved.append(dict(state))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "ret": 0, "get_updates_buf": "cursor-1",
+            "msgs": [
+                {"from_user_id": "userA", "message_type": 1, "context_token": "c1",
+                 "item_list": [{"type": 1, "text_item": {"text": "好一"}}]},
+                {"from_user_id": "userA", "message_type": 1, "context_token": "c2",
+                 "item_list": [{"type": 1, "text_item": {"text": "坏消息"}}]},
+                {"from_user_id": "userA", "message_type": 1, "context_token": "c3",
+                 "item_list": [{"type": 1, "text_item": {"text": "好二"}}]},
+            ],
+        })
+
+    ch = _wx({"bot_token": "t", "allowed_ids": ["userA"]}, on_message)
+    ch.on_state = on_state
+    ch._transport = _mock_transport(handler)
+    await ch._poll_once()
+    assert captured == ["好一", "坏消息", "好二"], "坏消息后面的不能丢"
+    assert ch.cursor == "cursor-1"
+    assert any(s.get("cursor") == "cursor-1" for s in saved)
+
+
 async def test_weixin_send_includes_context_token():
     """回复必须带 context_token，否则消息落不到正确窗口。"""
     bodies = []
@@ -1734,6 +1962,42 @@ async def test_manager_sets_adapter_name_from_registry_key():
     ch = mgr.channels["feishu"]
     assert ch.name == "feishu"
     await mgr.stop()
+
+
+async def test_backend_shutdown_bounds_channels_stop(home):
+    """backend.shutdown 对渠道收尾要设 wait_for 上限：渠道 stop() 最坏可到几十秒
+    （taskkill / proc.wait / event stop 各带超时），而桌面壳只给优雅退出 1.5 秒、
+    更新路径随后 os._exit，不能让渠道清理拖垮整个收尾链。"""
+    import time
+    from types import SimpleNamespace
+
+    from skysheep.server.backend import ServerBackend
+
+    class _SlowChannels:
+        def __init__(self):
+            self.entered = False
+
+        async def stop(self):
+            self.entered = True
+            await asyncio.sleep(60)  # 远超上限的收尾
+
+    be = object.__new__(ServerBackend)  # 只摆 shutdown() 触碰的字段
+    be.session = None
+    be.runtimes = {}
+    be._base_run_task = None
+    be._mcp_connect_task = None
+    be.mcp = None
+    be.tasks = None
+    be.store = None
+    be.term = SimpleNamespace(close_all=lambda: None)
+    slow = _SlowChannels()
+    be.channels = slow
+
+    started = time.monotonic()
+    await asyncio.wait_for(be.shutdown(), timeout=20)
+    elapsed = time.monotonic() - started
+    assert slow.entered, "渠道 stop() 要被调用"
+    assert elapsed < 10, f"channels.stop() 卡住时 shutdown 应在几秒内返回（实测 {elapsed:.1f}s）"
 
 
 def test_channel_sessions_live_in_fixed_remote_project(home):

@@ -21,6 +21,21 @@ from .client import MCPServerConfig
 
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 
+# 危险环境变量：会改变目标程序启动时的运行环境——重定向可执行文件查找路径
+# （PATH / PATHEXT）、往运行时里注入选项或库（NODE_OPTIONS / PYTHONPATH /
+# PYTHONHOME / LD_PRELOAD / DYLD_INSERT_LIBRARIES）。粘贴进来的 MCP 配置若
+# 夹带它们，用户确认的命令行没变、实际跑起来的程序已经被换掉了，导入一律
+# 拒绝。比对不区分大小写（Windows 环境变量名不区分大小写）。
+_DANGEROUS_ENV_KEYS = frozenset({
+    "path",
+    "pathext",
+    "node_options",
+    "pythonpath",
+    "pythonhome",
+    "ld_preload",
+    "dyld_insert_libraries",
+})
+
 
 class MCPInstallError(Exception):
     pass
@@ -66,6 +81,15 @@ def normalize_server(raw: dict) -> MCPServerConfig:
         isinstance(k, str) and isinstance(v, str) for k, v in cfg.env.items()
     ):
         raise MCPInstallError("env 必须是「字符串→字符串」的对象")
+    banned = sorted(
+        k for k in cfg.env if k.strip().lower() in _DANGEROUS_ENV_KEYS
+    )
+    if banned:
+        raise MCPInstallError(
+            "env 含不允许的环境变量：" + "、".join(banned)
+            + "。这些变量会改变目标程序的运行时行为（可执行文件查找路径、"
+            "运行时注入选项等），请从配置里删掉它们后再导入"
+        )
     if cfg.headers and not all(
         isinstance(k, str) and isinstance(v, str) and k.strip()
         for k, v in cfg.headers.items()
@@ -121,6 +145,11 @@ def load_servers(path: Path) -> dict[str, dict]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    # 顶层不是 JSON 对象（手编成数组/字符串等合法 JSON）也按空配置处理：
+    # 直接 data.get 会在 list/str 上 AttributeError，而调用方只 except 自己的
+    # MCPInstallError，用户看到的会是英文内部错误
+    if not isinstance(data, dict):
+        return {}
     servers = data.get("mcpServers")
     if not isinstance(servers, dict):
         return {}
@@ -153,6 +182,8 @@ def pending_stdio_commands(
     """dry-run：这次导入会实际写入的 stdio 服务及其命令行（给前端弹确认框用）。
 
     不写文件、不抛异常。同名且不覆盖的定义本次会被跳过，不算待确认项。
+    每项带 ``env``（字符串→字符串的对象）：env 会改变目标程序的运行时行为，
+    确认时必须与命令行一并展示，不能只让人看 command/args。
     """
     existing = load_servers(path)
     out: list[dict] = []
@@ -165,6 +196,7 @@ def pending_stdio_commands(
             "name": name,
             "command": cfg.command,
             "args": list(cfg.args or []),
+            "env": dict(cfg.env or {}),
         })
     return out
 
@@ -203,10 +235,16 @@ def import_servers(
             n for n in stdio_pending if overwrite or n not in existing
         )
         if pending:
-            lines = [
-                f"- {n}: {servers[n].command} " + " ".join(servers[n].args or [])
-                for n in pending
-            ]
+            lines = []
+            for n in pending:
+                s = servers[n]
+                line = f"- {n}: {s.command} " + " ".join(s.args or [])
+                if s.env:
+                    # env 一样属于「要让人在确认前看清楚」的执行面
+                    line += "（env: " + " ".join(
+                        f"{k}={v}" for k, v in s.env.items()
+                    ) + "）"
+                lines.append(line)
             raise MCPInstallError(
                 "导入的服务会在连接时执行本机命令：" + chr(10) + chr(10).join(lines)
                 + chr(10) + chr(10)

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,23 @@ from .base import (
 
 def _thinking_text(m: Message) -> str:
     return "".join(b.text for b in m.content if isinstance(b, ThinkingBlock))
+
+
+# 严格网关拒收未知参数（stream_options）的可降级信号（审查发现 9）：
+# - 状态码 400/422：OpenAI 系按 400 拒未知参数，Mistral 等严格网关按 422
+#   （"Extra inputs are not permitted"）；只认 400 会在后者上每次对话必失败；
+# - 或错误消息带 unknown/unexpected/unsupported parameter 类字样（openai
+#   官方措辞 "Unrecognized request argument" 一并覆盖）——个别网关的代理层
+#   会在非常规状态码上转述参数错误；
+# - 401/403/429 等鉴权/权限/限流错误与参数无关，即使消息碰巧含上述字样也
+#   永不降级重试（重试同样失败，只会白付一次请求）。
+_UNKNOWN_PARAM_RE = re.compile(
+    r"(unknown|unexpected|unsupported|unrecognized)[^.\n]{0,40}?"
+    r"\b(parameter|argument|field)s?\b",
+    re.IGNORECASE,
+)
+_STATUS_PARAM_REJECTED = (400, 422)
+_STATUS_NEVER_RETRY = (401, 403, 429)
 
 
 def to_openai_messages(messages: list[Message]) -> list[dict]:
@@ -118,6 +136,13 @@ class OpenAICompatProvider(Provider):
             "model": self.model,
             "messages": to_openai_messages(messages),
             "stream": True,
+            # 用量计量：按 OpenAI 规范，流式响应默认不含 usage 块，必须显式
+            # include_usage 服务才在流末附带最终用量——否则 in/out/cached
+            # token 永远记 0（用量统计、每日预算护栏、上下文占用估计都依赖
+            # 它）。DeepSeek/GLM 等无条件回 usage 的服务不受影响；个别拒收
+            # 未知参数的严格网关按 400/422（或错误消息指明参数不认识）降级
+            # 重试，见下方 create 处
+            "stream_options": {"include_usage": True},
         }
         # 思考强度：auto 不传（沿用服务默认），其余档位透传（OpenAI/兼容网关通用参数）；
         # effort 覆盖（自动档实时估档，见 core/effort.py）优先于自身档位
@@ -142,58 +167,79 @@ class OpenAICompatProvider(Provider):
                 for s in tool_schemas
             ]
         try:
-            stream = await self._client.chat.completions.create(**params)
-            tool_acc: dict[int, dict] = {}
-            in_tokens = out_tokens = cached_tokens = 0
-            stop = "end_turn"
-            async for chunk in stream:
-                if chunk.usage:
-                    in_tokens = chunk.usage.prompt_tokens or in_tokens
-                    out_tokens = chunk.usage.completion_tokens or out_tokens
-                    # 缓存命中：OpenAI 系走 prompt_tokens_details.cached_tokens，
-                    # DeepSeek 系走 prompt_cache_hit_tokens；都没有说明该服务不上报
-                    det = getattr(chunk.usage, "prompt_tokens_details", None)
-                    hit = getattr(det, "cached_tokens", None) if det else None
-                    if hit is None:
-                        hit = getattr(chunk.usage, "prompt_cache_hit_tokens", None)
-                    if hit:
-                        cached_tokens = hit
-                if not chunk.choices:
-                    continue
-                choice = chunk.choices[0]
-                delta = choice.delta
-                rc = getattr(delta, "reasoning_content", None) if delta else None
-                if rc:
-                    # 思考内容逐段透出（DeepSeek-R1 / GLM 思考模型），前端实时可折叠展示
-                    yield ProviderReasoning(rc)
-                if delta and delta.content:
-                    yield ProviderTextDelta(delta.content)
-                if delta and delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        acc = tool_acc.setdefault(tc.index, {"id": "", "name": "", "args": ""})
-                        if tc.id:
-                            acc["id"] = tc.id
-                        if tc.function and tc.function.name:
-                            acc["name"] = tc.function.name
-                        if tc.function and tc.function.arguments:
-                            acc["args"] += tc.function.arguments
-                if choice.finish_reason:
-                    stop = "tool_use" if choice.finish_reason == "tool_calls" else "end_turn"
-            for idx in sorted(tool_acc):
-                acc = tool_acc[idx]
-                try:
-                    data = json.loads(acc["args"] or "{}")
-                except json.JSONDecodeError:
-                    data = {"_raw_arguments": acc["args"]}
-                yield ProviderToolUse(
-                    id=acc["id"] or f"call_{idx}", name=acc["name"], input=data
+            try:
+                stream = await self._client.chat.completions.create(**params)
+            except Exception as e:
+                # 严格网关拒收未知参数（stream_options）：仅当确实带了该参数，
+                # 且服务按 400/422 拒绝或错误消息明确指向未知参数时，去掉后
+                # 降级重试一次；401/403/429（鉴权/权限/限流）及其余错误原样上抛
+                status = getattr(e, "status_code", None)
+                if (
+                    "stream_options" not in params
+                    or status in _STATUS_NEVER_RETRY
+                    or not (
+                        status in _STATUS_PARAM_REJECTED
+                        or _UNKNOWN_PARAM_RE.search(str(e))
+                    )
+                ):
+                    raise
+                params.pop("stream_options")
+                stream = await self._client.chat.completions.create(**params)
+            # 与 anthropic_provider 的 async-with 同一模式：取消、异常、正常
+            # 收尾三条路径都确定性关闭流、归还连接，不依赖 AsyncStream 自身
+            # 的 finally（生成器被遗弃时要等 GC 才关）
+            async with stream:
+                tool_acc: dict[int, dict] = {}
+                in_tokens = out_tokens = cached_tokens = 0
+                stop = "end_turn"
+                async for chunk in stream:
+                    if chunk.usage:
+                        in_tokens = chunk.usage.prompt_tokens or in_tokens
+                        out_tokens = chunk.usage.completion_tokens or out_tokens
+                        # 缓存命中：OpenAI 系走 prompt_tokens_details.cached_tokens，
+                        # DeepSeek 系走 prompt_cache_hit_tokens；都没有说明该服务不上报
+                        det = getattr(chunk.usage, "prompt_tokens_details", None)
+                        hit = getattr(det, "cached_tokens", None) if det else None
+                        if hit is None:
+                            hit = getattr(chunk.usage, "prompt_cache_hit_tokens", None)
+                        if hit:
+                            cached_tokens = hit
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+                    rc = getattr(delta, "reasoning_content", None) if delta else None
+                    if rc:
+                        # 思考内容逐段透出（DeepSeek-R1 / GLM 思考模型），前端实时可折叠展示
+                        yield ProviderReasoning(rc)
+                    if delta and delta.content:
+                        yield ProviderTextDelta(delta.content)
+                    if delta and delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            acc = tool_acc.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                            if tc.id:
+                                acc["id"] = tc.id
+                            if tc.function and tc.function.name:
+                                acc["name"] = tc.function.name
+                            if tc.function and tc.function.arguments:
+                                acc["args"] += tc.function.arguments
+                    if choice.finish_reason:
+                        stop = "tool_use" if choice.finish_reason == "tool_calls" else "end_turn"
+                for idx in sorted(tool_acc):
+                    acc = tool_acc[idx]
+                    try:
+                        data = json.loads(acc["args"] or "{}")
+                    except json.JSONDecodeError:
+                        data = {"_raw_arguments": acc["args"]}
+                    yield ProviderToolUse(
+                        id=acc["id"] or f"call_{idx}", name=acc["name"], input=data
+                    )
+                yield ProviderDone(
+                    stop_reason=stop if tool_acc or stop == "end_turn" else "end_turn",
+                    input_tokens=in_tokens,
+                    output_tokens=out_tokens,
+                    cached_tokens=cached_tokens,
                 )
-            yield ProviderDone(
-                stop_reason=stop if tool_acc or stop == "end_turn" else "end_turn",
-                input_tokens=in_tokens,
-                output_tokens=out_tokens,
-                cached_tokens=cached_tokens,
-            )
         except ProviderError:
             raise
         except Exception as e:

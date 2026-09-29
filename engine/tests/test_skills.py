@@ -11,6 +11,8 @@ import pytest
 from skysheep.skills import SCOPE_ALL, SCOPE_NONE, SCOPE_PROJECTS, SkillLoader
 from skysheep.skills.installer import (
     SkillInstallError,
+    _host_allowed,
+    install_from_dir,
     install_from_zip,
     remove_skill,
     resolve_url,
@@ -306,10 +308,64 @@ def test_resolve_url_rejects_bad_links():
         ("https://github.com/u/r/blob/main/README.md", "装不了"),
         ("https://github.com/u", "用户名"),
         ("", "粘贴"),
+        # 手拼的畸形网址：以前在字符串切片上 IndexError（发现 18）
+        ("https:/github.com/u/r", "格式不完整"),
+        ("https:///github.com/u/r", "格式不完整"),
     ]:
         with pytest.raises(SkillInstallError) as ei:
             resolve_url(bad)
         assert why in str(ei.value), (bad, str(ei.value))
+
+
+def test_host_allowed_malformed_urls_raise_install_error():
+    """_host_allowed 解析不出主机名时抛 SkillInstallError 而不是 IndexError：
+    调用方（backend / _strict_opener 的重定向校验）只 except SkillInstallError，
+    裸 IndexError 会变成没人看得懂的「list index out of range」（发现 18）。"""
+    for bad in ("https:/github.com/u/r", "https:///github.com/u/r", "https://"):
+        with pytest.raises(SkillInstallError) as ei:
+            _host_allowed(bad)
+        assert "格式不完整" in str(ei.value), (bad, str(ei.value))
+    # 带用户信息的网址不是本工具面向的输入：沿用旧解析的拒绝口径
+    with pytest.raises(SkillInstallError):
+        _host_allowed("https://user:pass@github.com/u/r")
+    # 正常形态：主机名归一小写后返回
+    assert _host_allowed("https://GitHub.com/u/r") == "github.com"
+    assert _host_allowed("https://github.com:443/u/r") == "github.com"
+
+
+def test_install_from_dir_enforces_zip_limits(tmp_path, monkeypatch):
+    """本地文件夹导入与 zip 同一防线：文件数/体积超上限直接报错，不落半个
+    技能（发现 41：此前上限只在 zip 解压与下载时生效，「防误选整个盘」
+    对本地导入不设防）。"""
+    from skysheep.skills import installer as si
+
+    src = tmp_path / "many"
+    skill = src / "manyskill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: manyskill\ndescription: d\n---\n", encoding="utf-8"
+    )
+    for i in range(3):
+        (skill / f"f{i}.txt").write_text("x", encoding="utf-8")
+
+    # 文件数超上限：把常量临时调小，不真造 2000 个文件
+    monkeypatch.setattr(si, "MAX_SKILL_FILES", 2)
+    with pytest.raises(SkillInstallError, match="文件数过多"):
+        install_from_dir(src, tmp_path / "dest1", existing=set())
+    assert not (tmp_path / "dest1" / "manyskill").exists(), "超限不能落半个技能"
+
+    # 体积超上限
+    monkeypatch.setattr(si, "MAX_SKILL_FILES", 2000)
+    monkeypatch.setattr(si, "MAX_UNPACKED_BYTES", 10)
+    with pytest.raises(SkillInstallError, match="过大"):
+        install_from_dir(src, tmp_path / "dest2", existing=set())
+    assert not (tmp_path / "dest2" / "manyskill").exists(), "超限不能落半个技能"
+
+    # 正常体量照常安装（上限收紧了不该误伤普通技能）
+    monkeypatch.setattr(si, "MAX_UNPACKED_BYTES", 120 * 1024 * 1024)
+    r = install_from_dir(src, tmp_path / "dest3", existing=set())
+    assert r["installed"] == ["manyskill"]
+    assert (tmp_path / "dest3" / "manyskill" / "SKILL.md").is_file()
 
 
 def test_delete_forgets_leftover_state(tmp_path):

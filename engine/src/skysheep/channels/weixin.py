@@ -339,15 +339,29 @@ class WeixinChannel(Channel):
             await asyncio.sleep(2)
             return
 
-        # 游标必须推进：否则会重复收到同一批消息
+        # 游标必须推进：否则会重复收到同一批消息。但推进（内存与持久化一起）
+        # 必须等本批消息处理完之后：先推进再处理时，处理中途被打断或出错，
+        # 从出错那条起的剩余消息就永久丢了——游标已走、服务器不会重推。
+        # 只延后持久化不完整：内存游标先走的话，同进程下一轮仍用新游标跳过
+        # 剩余消息，必须一起延后才能闭环。
         new_cursor = data.get("get_updates_buf")
         advanced = bool(new_cursor) and new_cursor != self.cursor
+
+        for msg in data.get("msgs") or []:
+            try:
+                await self._handle_message(msg)
+            except asyncio.CancelledError:
+                # 打断不算处理完：游标留在旧值，下一轮/重启后服务器会重推本批
+                raise
+            except Exception as e:  # noqa: BLE001 - 单条坏消息不断批：跳过继续，
+                # 避免一条始终解析失败的消息把游标永久卡在旧值、已处理的消息被
+                # 每 3 秒反复重推（重复回复刷屏）。manager._on_message 自带顶层
+                # 兜底，正常到不了这里。
+                logger.warning("weixin 跳过一条无法处理的消息：%s", e)
+
         if advanced:
             self.cursor = str(new_cursor)
             await self._persist_state()
-
-        for msg in data.get("msgs") or []:
-            await self._handle_message(msg)
 
         # 保证每轮有确定的让出点：服务器不 hold 时避免紧密空转饿死事件循环
         if not advanced:

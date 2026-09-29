@@ -210,7 +210,25 @@ class ChannelManager:
     # ---- 入站路由 ----
 
     async def _on_message(self, msg: ChannelMessage) -> None:
-        """适配器收到的每条消息都到这里。"""
+        """适配器收到的每条消息都到这里。
+
+        顶层兜底：路由里任何宿主调用抛异常都不能冒回适配器——飞书会把它记成
+        读流失败，微信的轮询循环会把异常吞掉后丢掉本批剩余消息。这里统一拦下：
+        已批准来源回一句可读错误（走既有 _reply 通道），未批准来源保持沉默
+        （回复等于向陌生人确认这个 bot 是活的）。
+        """
+        try:
+            await self._route_message(msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("渠道 %s 处理入站消息失败", msg.channel)
+            channel = self.channels.get(msg.channel)
+            if channel is not None and msg.approved:
+                await self._reply(channel, msg, f"处理这条消息时出错了：{e}")
+
+    async def _route_message(self, msg: ChannelMessage) -> None:
+        """入站路由的主体：审批应答 → 斜杠命令 → 排队跑一轮。"""
         channel = self.channels.get(msg.channel)
         if channel is None:
             return
@@ -275,27 +293,30 @@ class ChannelManager:
 
         # 普通消息：串行跑一轮，避免多渠道交叉。已在跑时排队并回执，让用户
         # 知道消息没有丢；排队过长直接拒收（每条排队消息都是一整轮的 token）。
-        if self._lock.locked():
-            if self._pending_turns >= MAX_PENDING_TURNS:
-                await self._reply(
-                    channel, msg,
-                    f"排队的消息太多了（前面还有 {self._pending_turns} 条），这条没有执行。"
-                    "等当前这轮结束再发，或发 /stop 中断当前轮。",
-                )
-                return
-            self._pending_turns += 1
-            try:
-                await self._reply(
-                    channel, msg,
-                    f"已收到。前面还有 {self._pending_turns} 条在排队，轮到后会开始处理。",
-                )
-                async with self._lock:
-                    await self._run_prompt(channel, msg, msg.text)
-            finally:
-                self._pending_turns -= 1
+        # 计数无条件先行，不先看 _lock.locked()：先查再抢的两步之间可能正好
+        # 撞上前一轮释放锁、排队者还没被唤醒的空档，locked() 返回 False 会让
+        # 这条消息绕过回执与上限直接插队。_pending_turns 含正在跑的那条
+        # （到达即 +1、收尾才 -1，检查与自增之间没有 await，不会被并发插队），
+        # 所以「我是不是当前唯一的一轮」看计数是否为 1 即可，上限也按
+        # 「1 条在跑 + MAX_PENDING_TURNS 条排队」取。
+        if self._pending_turns >= MAX_PENDING_TURNS + 1:
+            await self._reply(
+                channel, msg,
+                f"排队的消息太多了（前面还有 {self._pending_turns - 1} 条），这条没有执行。"
+                "等当前这轮结束再发，或发 /stop 中断当前轮。",
+            )
             return
-        async with self._lock:
-            await self._run_prompt(channel, msg, msg.text)
+        self._pending_turns += 1
+        try:
+            if self._pending_turns > 1:
+                await self._reply(
+                    channel, msg,
+                    f"已收到。前面还有 {self._pending_turns - 1} 条在排队，轮到后会开始处理。",
+                )
+            async with self._lock:
+                await self._run_prompt(channel, msg, msg.text)
+        finally:
+            self._pending_turns -= 1
 
     async def _reply(self, channel: Channel, msg: ChannelMessage, text: str) -> None:
         await self._send_text(channel, msg.chat_id, text)

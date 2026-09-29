@@ -86,8 +86,16 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
         # 地址（复用 web_fetch 的同一份校验，含 NAT64/6to4 翻译段）；回环地址
         # 放行——本机 MCP 服务是最常见形态。错误只回可读结论，不带底层异常
         # 细节，避免内网拓扑经 mcp.status 回显到（持令牌的）远端界面。
+        #
+        # 校验并把解析结果拿在手里：下面的端口探测直接连已校验的 IP，不再按
+        # 主机名二次解析——「校验」与「探测」之间不给 DNS rebinding 留窗口
+        # （web.py 的 _resolve_public_ips 返回 IP 列表正是给这类复用用的）。
+        # 取舍：SDK（streamable_http_client）的建连阶段仍未钉连——远程地址来自
+        # 用户设置或经 workspace trust 指纹锁定的项目配置，模型不能指定 URL，
+        # 威胁面远小于 web_fetch 抓任意网页；给 SDK 完整钉连要自管 httpx 客户端
+        # 生命周期并挂 web.py 的 _PinnedBackend，见 _connect_one 处的说明。
         try:
-            await asyncio.to_thread(_resolve_public_ips, host)
+            pinned = await asyncio.to_thread(_resolve_public_ips, host)
         except ToolError as e:
             try:
                 infos = await asyncio.to_thread(
@@ -96,20 +104,31 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
                 loopback = all(
                     ipaddress.ip_address(info[4][0]).is_loopback for info in infos
                 )
+                # 回环目标钉到刚解析出的同一批地址（去重保序）
+                pinned = list(dict.fromkeys(info[4][0] for info in infos))
             except (OSError, ValueError):
                 loopback = False
+                pinned = []
             if not loopback:
                 return str(e)
         except OSError:
             return f"无法解析主机 {host}：请检查远程地址是否拼写正确"
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        try:
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=PREFLIGHT_TIMEOUT_S
-            )
-        except TimeoutError:
-            return f"连不上 {host}:{port}（{PREFLIGHT_TIMEOUT_S:g} 秒无响应）——检查地址和端口，服务是否已启动"
-        except OSError:
+        writer = None
+        for ip in pinned:
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(ip, port), timeout=PREFLIGHT_TIMEOUT_S
+                )
+                break
+            except TimeoutError:
+                return (
+                    f"连不上 {host}:{port}（{PREFLIGHT_TIMEOUT_S:g} 秒无响应）"
+                    "——检查地址和端口，服务是否已启动"
+                )
+            except OSError:
+                continue  # 这个已校验地址不通：试下一个（与按主机名连时逐地址尝试同义）
+        if writer is None:
             return (
                 f"连不上 {host}:{port}（连接被拒绝或网络不可达）"
                 "——检查地址与端口是否正确、服务是否已启动"
@@ -188,6 +207,11 @@ def load_mcp_configs(
             continue
         except OSError as e:
             warnings.append(f"{label}配置 {path.name} 读取失败：{e}")
+            continue
+        # 顶层不是 JSON 对象（手编成数组/字符串等合法 JSON）：按空配置处理并
+        # 告警，别让 data.get 的 AttributeError 冒出去炸掉启动/重载
+        if not isinstance(data, dict):
+            warnings.append(f"{label}配置 {path.name} 顶层不是 JSON 对象，已按空配置处理")
             continue
         for name, section in (data.get("mcpServers") or {}).items():
             if not isinstance(section, dict):
@@ -685,6 +709,12 @@ class MCPManager:
                         # 带鉴权的远程 MCP：把配置里的 headers 注入 HTTP 客户端。
                         # streamable_http_client 本身不收 headers（签名只有 url / http_client），
                         # 所以要在 httpx.AsyncClient 上带默认头。
+                        # 注：SDK 建连阶段不做 DNS 钉连（已知取舍，见 _preflight）——
+                        # 预检已把「校验→探测」之间的 rebinding 窗口收掉，这里 SDK
+                        # 内部再解析一次是接受的残余窗口：地址来自用户设置或 trust
+                        # 过的项目配置，不是模型可控输入。要收掉它需始终自管 httpx
+                        # 客户端并挂 web.py 的 _PinnedBackend（含 redirect 逐跳钉连），
+                        # 相对威胁面改动过大，暂不做。
                         extra_headers = _headers_only(cfg)
                         http_client = None
                         if extra_headers:

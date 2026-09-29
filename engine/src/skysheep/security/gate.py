@@ -9,9 +9,9 @@
 - ``always``：整个工具放行；
 - ``prefix``：参数文本按**完整词**前缀命中，且命令类工具额外要求整条命令里没有
   shell 拼接/替换元字符（分隔符 ``;`` ``|`` ``&`` ``<`` ``>``、展开符 ``$`` 与反引号、
-  换行；Windows 的 ``cmd.exe`` 上再加单引号 ``'`` 与 ``%VAR%`` 展开——见
-  ``_has_shell_chain``），``git status; rm -rf /`` 这类拼接命令不会被 ``git status``
-  的前缀规则放行；
+  换行；Windows 的 ``cmd.exe`` 上再加单引号 ``'`` 与 ``%VAR%`` 展开、脱字符 ``^``
+  转义，POSIX 上另拦反斜杠 ``\`` 转义——见 ``_has_shell_chain``），
+  ``git status; rm -rf /`` 这类拼接命令不会被 ``git status`` 的前缀规则放行；
 - ``exact``：与当初批准的那次调用参数完全一致才放行。三类调用走这一类：含 shell 拼接的
   命令（用户批准的就是那一条，不给它顺带放行同前缀的其它命令）、键盘 `type` / `hotkey`
   与 `clipboard_write`（内容本身就是对焦点窗口/剪贴板的任意操作，按动作整类放行等于
@@ -78,11 +78,54 @@ _CODE_EXEC_FLAGS = frozenset({
     "-command", "-encodedcommand", "--eval", "--command",
 })
 
+# 解释器/shell 可执行名（小写）：旗标全文扫描只对以它们开头的命令放开。
+# 这类调用的旗标可以出现在任意位置（`py -3 -X utf8 -c`、
+# `powershell -NoProfile -ExecutionPolicy Bypass -Command` 的旗标都在第 5 词），
+# 只扫前几个词会被用来绕过 prefix/glob 白名单放行任意代码；而 -c/-e 这类词在
+# tar/grep/git 等普通工具里是常见参数，对它们全文扫描会把正常命令大面积
+# 误伤成「只能固化当次参数」。带 .exe 后缀与路径前缀的形态一并识别
+# （两平台都接受这些写法）。
+_INTERPRETER_COMMANDS = frozenset({
+    "python", "python3", "py", "powershell", "pwsh",
+    "node", "deno", "bun", "ruby", "perl",
+    "bash", "sh", "zsh", "fish", "cmd",
+})
+
+
+def _interpreter_invocation(text: str) -> bool:
+    """命令是否以解释器/shell 可执行名开头（带引号、路径前缀、.exe 后缀均可）。"""
+    words = text.split()
+    if not words:
+        return False
+    exe = words[0].lower().strip('"').strip("'")
+    exe = exe.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if exe.endswith(".exe"):
+        exe = exe[: -len(".exe")]
+    return exe in _INTERPRETER_COMMANDS
+
 
 def _has_code_exec_flag(text: str, head: int = 4) -> bool:
-    """命令前几个词里是否出现代码执行旗标（覆盖 `py -3 -c`、
-    `powershell -NoProfile -Command` 这类旗标不在第二词的形态）。"""
-    return any(w.lower() in _CODE_EXEC_FLAGS for w in text.split()[:head])
+    """命令里是否出现「下一参数就是任意代码文本」的解释器旗标。
+
+    解释器/shell 命令（py / python / powershell / node 等，见
+    _INTERPRETER_COMMANDS）对**全文**扫描——旗标可以出现在任意位置，只扫前
+    几个词会被 ``py -3 -X utf8 -c``、``powershell -NoProfile -ExecutionPolicy
+    Bypass -Command`` 这类旗标在第 4/5 词的形态绕过（prefix/glob 白名单与
+    规则提炼会一起失守）；其余命令保持只看前 ``head`` 个词——``-c`` 等旗标词
+    在普通工具（``tar -c``、``grep -c``、``git commit -c``）里是常见参数，
+    全词扫描会误伤正常命令。
+    """
+    words = text.split()
+    limit = len(words) if _interpreter_invocation(text) else head
+    return any(w.lower() in _CODE_EXEC_FLAGS for w in words[:limit])
+
+
+# 固定落点写在引擎主目录（~/.skysheep[-instance]）的工具：没有路径参数，
+# 路径判定（write_path_arg → resolve 后比对）看不到落点，只能点名。
+# memory.md 会注入**所有项目所有会话**的 system prompt，对这类工具 READONLY
+# 分级结构性失真——「写引擎主目录需确认」的守卫必须先于 READONLY 短路生效
+# （第二轮审查 FINDING 2，P2-7 盲区；三门同口径）。
+_ENGINE_HOME_FIXED_WRITERS = frozenset({"memory_write"})
 
 
 def _write_targets_engine_home(working_dir, tool, input_dict: dict) -> bool:
@@ -91,10 +134,14 @@ def _write_targets_engine_home(working_dir, tool, input_dict: dict) -> bool:
     是的话白名单（含整工具 always 规则）不得自动放行：全局技能目录里的
     SKILL.md 会注入**所有项目**（含未信任项目）的 system prompt，config.toml
     更是明文凭据本体——沉淀规则之后模型就能免确认改写它们（审查 P2-7）。
+    固定落点的引擎主目录写入工具（_ENGINE_HOME_FIXED_WRITERS，如 memory_write
+    写 ~/.skysheep/memory.md）没有路径参数可比对，按工具名直接命中。
     判定路径与文件工具同口径（resolve 后比对，symlink 安全）；解析不了
     （无工作目录的相对路径、OSError）返回 False，交给工具层。
     authorize 的规则放行分支与 rule_for 的规则提炼共用本判定。
     """
+    if tool.name in _ENGINE_HOME_FIXED_WRITERS:
+        return True
     path_arg = getattr(tool, "write_path_arg", False)
     if not path_arg:
         return False
@@ -137,13 +184,20 @@ def _has_shell_chain(text: str) -> bool:
       保留跳过行为；但 ``$`` 与反引号在双引号内仍会展开。
     - **``%``**：``cmd.exe`` 会做 ``%VAR%`` 环境变量展开，而变量值里可以带分隔符——
       等于把「参数」变成「命令」，所以 Windows 上 ``%`` 与分隔符同等对待。
-
-    保守实现：不识别反斜杠 / 脱字符转义——POSIX 用 ``\``，cmd.exe 用 ``^``，两套语义
-    不同，任何一处漏判都等于白名单被绕过；宁可让 ``git status; rm -rf /`` 这类命令回退
-    成逐次确认。
+    - **转义符**：POSIX 的 ``\`` 与 cmd.exe 的 ``^`` 都能让「下一字符」失去原语义
+      ——``\'`` 在 bash 里是字面量引号、**不开引号**。判定器若无视它，会把
+      ``git commit -m \' & whoami`` 里的 ``\'`` 当成开引号、跳过后面的 ``&``，
+      而 bash 照样分隔出第二条命令——前缀白名单由此被绕过（审查回归）。这里
+      不完整模拟转义语义，直接把两平台各自的转义符纳入拦截字符集：命中即回退
+      逐次确认。必须分平台：Windows 命令里路径反斜杠极常见不能拦 ``\``；``^``
+      在 Windows 命令里罕见，拦下代价只是多一次确认。两个方向都只造成额外
+      确认，不造成漏判。POSIX 单引号内的 ``\`` 仍是纯字面量、照旧跳过——
+      它改变不了引号状态。
     """
     single = False
     double = False
+    # 转义符在调用时按 _IS_WINDOWS 现取（测试会打桩该模块全局），不做导入期常量
+    escape = "^" if _IS_WINDOWS else "\\"
     for ch in text:
         if ch == '"' and not single:
             double = not double
@@ -155,7 +209,7 @@ def _has_shell_chain(text: str) -> bool:
             continue
         if single:
             continue
-        if ch in _CHAIN_EXPAND_CHARS or (_IS_WINDOWS and ch == "%"):
+        if ch in _CHAIN_EXPAND_CHARS or (_IS_WINDOWS and ch == "%") or ch == escape:
             return True
         if double:
             continue
@@ -167,13 +221,14 @@ def _has_shell_chain(text: str) -> bool:
 def _chain_hint() -> str:
     """确认弹窗/测试器里解释「为什么这条命令没命中前缀规则」时用的字符集说明。
 
-    与 _has_shell_chain 的实际判定保持一致：Windows 上额外包含单引号（cmd 不认它）
-    与环境变量展开；两平台都列出 ``;``（纵深防御，见 _CHAIN_SEP_CHARS）。
+    与 _has_shell_chain 的实际判定保持一致：Windows 上额外包含单引号（cmd 不认它）、
+    环境变量展开与脱字符转义；POSIX 上额外包含反斜杠转义；两平台都列出 ``;``
+    （纵深防御，见 _CHAIN_SEP_CHARS）。
     """
     base = "; | & < > ` $ 或换行"
     if _IS_WINDOWS:
-        return base + "，以及单引号 ' 与 %VAR% 环境变量展开"
-    return base
+        return base + "，以及单引号 ' 与 %VAR% 环境变量展开、脱字符 ^ 转义"
+    return base + "，以及反斜杠 \\ 转义"
 
 
 def _prefix_match(text: str, pattern: str) -> bool:
@@ -504,10 +559,12 @@ class PermissionGate:
             return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
         # 落点在引擎数据目录的写入只固化当次参数（审查 P2-7）：整工具 always
         # 规则即使产出来也会在 authorize 被守卫拦下，只会在白名单页留一条
-        # 永远不生效的死规则误导用户。
-        if getattr(tool, "write_path_arg", None) and _write_targets_engine_home(
-            working_dir, tool, input_dict
-        ):
+        # 永远不生效的死规则误导用户。memory_write 这类固定落点写入
+        # （_ENGINE_HOME_FIXED_WRITERS）同样适用（第二轮审查 FINDING 2）。
+        if (
+            getattr(tool, "write_path_arg", None)
+            or tool.name in _ENGINE_HOME_FIXED_WRITERS
+        ) and _write_targets_engine_home(working_dir, tool, input_dict):
             return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
         return WhitelistRule(tool=tool.name, kind="always")
 
@@ -687,7 +744,15 @@ class PermissionGate:
 
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
         """返回 None 表示放行；返回 PendingPermission 表示需要用户决策。"""
-        if tool.safety == Safety.READONLY:
+        # 引擎主目录写入守卫必须在 READONLY 短路**之前**：memory_write 名义
+        # READONLY 却写 ~/.skysheep/memory.md，而该文件注入所有项目所有会话的
+        # system prompt——短路在前会让 P2-7 守卫对它结构性不可达（第二轮审查
+        # FINDING 2）。命中不在此放行，落到下方逐次确认；规则放行分支同样被
+        # 本守卫拦下（含整工具 always），与 P2-7 口径一致：引擎主目录写入
+        # 永远逐次确认，白名单沉淀不出放行。完全访问档（auto_accept_all）与
+        # 既有 P2-7 守卫同界，不受影响。
+        engine_home_write = self._write_hits_engine_home(tool, input_dict)
+        if tool.safety == Safety.READONLY and not engine_home_write:
             return None
         # 完全访问档：写入与执行都自动放行（白名单之外的全部放开）
         if self.auto_accept_all:
@@ -713,8 +778,9 @@ class PermissionGate:
             # 白名单命中也不放行落进引擎自身数据目录的写入：全局技能会注入
             # 所有项目（含未信任项目）的 system prompt，config.toml 是凭据
             # 本体——沉淀一条整工具规则就等于跨信任边界的自由写入面
-            # （审查 P2-7），与上一条同级，退回逐次确认。
-            and not self._write_hits_engine_home(tool, input_dict)
+            # （审查 P2-7），与上一条同级，退回逐次确认。READONLY 分级的
+            # memory_write 也走到这里（READONLY 短路已被上方守卫跳过）。
+            and not engine_home_write
         ):
             # 命中记账：只记有库 id 的项目级规则（次数 + 最近命中时间，
             # 设置页展示用）。记账失败不影响放行——这只是统计。
@@ -916,9 +982,18 @@ class HeadlessGate(PermissionGate):
         self.allowed = set(allowed or [])
 
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
-        if tool.safety == Safety.READONLY:
+        # 引擎主目录写入守卫先于 READONLY 短路（与主门同口径，第二轮审查
+        # FINDING 2）：memory_write 名义 READONLY 却写全局记忆（注入所有项目
+        # 所有会话的 system prompt），无人值守通道不得零确认放行。
+        engine_home_write = self._write_hits_engine_home(tool, input_dict)
+        if tool.safety == Safety.READONLY and not engine_home_write:
             return None
-        if tool.name in self.allowed:
+        if tool.name in self.allowed and not engine_home_write:
+            # 预授权名单放行也要过引擎主目录守卫（审查 P2-7，与主会话门口径
+            # 一致）：config.toml 是明文凭据本体、全局技能 SKILL.md 会注入所有
+            # 项目（含未信任项目）的 system prompt，无人值守名单不能成为免确认
+            # 改写它们的通道。命中时落父类 authorize——无人值守没有用户可应答，
+            # PendingPermission 随即被 resolve(DENY)，fail-closed。
             return None
         pending = await super().authorize(tool, input_dict)
         if pending is not None:

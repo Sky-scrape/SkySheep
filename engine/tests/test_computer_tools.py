@@ -156,6 +156,33 @@ async def test_keyboard_rule_is_exact_only():
     assert "键盘" in p.note
 
 
+async def test_clipboard_arg_text_lossless_exact():
+    """剪贴板 arg_text 不截断（审查 F16）：exact 规则建在完整文本上。
+
+    回归点：旧实现按 120 字符截断 arg_text，exact 规则的 pattern 建立在截断
+    文本上——前 120 字符相同、尾部任意的变体会命中同一条 exact 规则免确认，
+    而 run() 写入的是完整内容。规则匹配所用的语义文本必须无损还原执行面；
+    过长内容的展示截断由展示层负责，不进规则存储。
+    """
+    tool = ClipboardWriteTool()
+    base = "正常内容" * 40 + "结尾甲"  # >120 字符
+    evil = "正常内容" * 40 + "结尾乙及任意恶意尾巴"
+    assert len(base) > 120
+    assert tool.arg_text({"text": base}) == "clipboard " + base  # 无损，无截断号
+    gate = PermissionGate()
+    rule = PermissionGate.rule_for(tool, {"text": base})
+    assert rule.kind == "exact"
+    assert rule.pattern == "clipboard " + base
+    gate.add_session_rule(rule)
+    # 原文本：命中 exact 放行
+    assert await gate.authorize(tool, {"text": base}) is None
+    # 前缀相同、尾部不同：必须重新询问，不得命中 exact
+    p = await gate.authorize(tool, {"text": evil})
+    assert p is not None
+    # 确认请求的语义文本同样是完整内容（规则与展示同源）
+    assert p.arg_text == "clipboard " + evil
+
+
 # ---- screenshot（monkeypatch 抓屏，不真截） ----
 
 
@@ -193,6 +220,22 @@ async def test_screenshot_failure_is_toolerror(tmp_path, monkeypatch):
     monkeypatch.setattr("skysheep.tools.computer._grab_image", boom)
     with pytest.raises(ToolError, match="截屏失败"):
         await ScreenshotTool().run(ScreenshotTool().args_model(), ctx(tmp_path))
+
+
+async def test_screenshot_copy_dir_failure_does_not_fail_tool(tmp_path, monkeypatch, home):
+    """副本目录建不出来时工具仍须成功（审查 P-40）。
+
+    旧实现 shots.mkdir 在 try 之外：mkdir 一失败，已截图成功并附加进对话的
+    操作被整体报错，与「副本保存失败不影响主流程」的注释相悖。"""
+    _fake_grab(monkeypatch)
+    blocker = home / "home" / "screenshots"
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_bytes(b"not a directory")  # 占住目录名：mkdir 必然失败
+    c = ctx(tmp_path)
+    out = await ScreenshotTool().run(ScreenshotTool().args_model(), c)
+    assert "截图完成" in out
+    assert "副本保存失败" in out
+    assert len(c.images) == 1
 
 
 # ---- agent 级：截图作为 user 消息进入历史与下一次模型调用 ----

@@ -5,7 +5,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from skysheep.security.gate import Decision, PermissionGate, WhitelistRule
+from skysheep.security.gate import (
+    Decision,
+    PermissionGate,
+    WhitelistRule,
+    _has_code_exec_flag,
+)
 from skysheep.tools import EditFileTool, ReadFileTool, RunCommandTool, WriteFileTool
 
 
@@ -193,6 +198,53 @@ async def test_prefix_rule_rejects_windows_quirk_expansions():
     assert await gate.authorize(cmd, {"command": "git status -s"}) is None
 
 
+async def test_escape_char_cannot_defeat_prefix_whitelist(monkeypatch):
+    """转义符不得帮命令骗过引号判定（审查回归：POSIX ``\\`` / Windows ``^``）。
+
+    ``git commit -m \\' & whoami`` 在 bash 里是两条命令——``\\'`` 是转义的字面量
+    引号、引号从未开启，``&`` 照样分隔；旧判定器把它当开引号、跳过后面的
+    ``&``，前缀白名单由此被绕过。修法是分平台把转义符纳入拦截字符集
+    （POSIX 拦 ``\\``、Windows 拦 ``^``），只造成额外确认，不造成漏判。
+    """
+    from skysheep.security import gate as gate_mod
+
+    cmd = RunCommandTool()
+
+    async def blocked(is_windows: bool, command: str) -> bool:
+        monkeypatch.setattr(gate_mod, "_IS_WINDOWS", is_windows)
+        gate = PermissionGate()
+        gate.add_session_rule(
+            WhitelistRule(tool="run_command", kind="prefix", pattern="git commit")
+        )
+        pending = await gate.authorize(cmd, {"command": command})
+        return pending is not None
+
+    # POSIX：\' 与 \" 都是转义的字面量引号，后面的 & 照样分隔命令，必须拦
+    assert await blocked(False, r"git commit -m \' & whoami")
+    assert await blocked(False, r"git commit -m \" & whoami")
+    # Windows：脱字符转义面保守拦下（罕见字符，代价只是多一次确认）
+    assert await blocked(True, "git commit -m ^ & whoami")
+
+
+def test_has_shell_chain_escape_matrix(monkeypatch):
+    """转义符判定的分平台矩阵：各拦各的转义符，不误伤平台惯用形态。"""
+    from skysheep.security import gate as gate_mod
+
+    monkeypatch.setattr(gate_mod, "_IS_WINDOWS", False)
+    assert gate_mod._has_shell_chain(r"echo \' & whoami")
+    assert gate_mod._has_shell_chain(r'echo \" & whoami')
+    # POSIX 单引号内的反斜杠是纯字面量（改变不了引号状态），照旧放行
+    assert not gate_mod._has_shell_chain(r"git commit -m 'a\b'")
+    assert not gate_mod._has_shell_chain("git log --oneline")
+
+    monkeypatch.setattr(gate_mod, "_IS_WINDOWS", True)
+    assert gate_mod._has_shell_chain("echo A ^& ver")
+    # Windows 命令里路径反斜杠极常见：不能拦，否则合法命令全部踢出白名单
+    assert not gate_mod._has_shell_chain(r"dir C:\Windows")
+    # \" 形态经 cmd 实测不分裂（cmd_matrix 探针结论），保持不拦
+    assert not gate_mod._has_shell_chain(r'git commit -m \" & whoami')
+
+
 async def test_prefix_rule_rejects_unicode_and_unc_edge_cases():
     """锁定一批「碰巧拦住」的边界：不锁住就可能被后续改动反向。
 
@@ -222,7 +274,7 @@ async def test_prefix_rule_rejects_unicode_and_unc_edge_cases():
 
 
 async def test_chain_hint_mentions_platform_quirks():
-    """确认弹窗的说明文案与实际判定一致（Windows 上要提到单引号与 %VAR%）。"""
+    """确认弹窗的说明文案与实际判定一致（Windows 上要提到单引号、%VAR% 与脱字符）。"""
     gate = PermissionGate()
     cmd = RunCommandTool()
     gate.add_session_rule(gate.rule_for(cmd, {"command": "git status --short"}))
@@ -230,6 +282,10 @@ async def test_chain_hint_mentions_platform_quirks():
     assert "拼接" in note
     if os.name == "nt":
         assert "%VAR%" in note
+        assert "^" in note
+    else:
+        # POSIX 分支在 Windows 开发机上不执行，但文案口径要与 _chain_hint 一致
+        assert "反斜杠" in note
 
 
 async def test_chained_command_rule_is_exact_only():
@@ -259,6 +315,33 @@ async def test_run_command_action_only_rule_is_action_scoped():
     # 没有被顺带放行：执行新命令（或别的动作）仍需确认
     assert await gate.authorize(cmd, {"command": "", "action": "run"}) is not None
     assert await gate.authorize(cmd, {"command": "rm -rf /"}) is not None
+
+
+async def test_arg_text_shows_what_actually_runs():
+    """action≠run 时语义文本按动作生成、忽略 command（审查 P-9）。
+
+    旧实现只要 command 非空就返回命令文本：`action="kill", command="git status"`
+    会让白名单与确认弹窗都按 "git status" 匹配/展示，run() 实际执行的却是
+    kill——「确认面板展示的 = 实际执行的」被打破；若白名单里已有此前批准的
+    命令前缀规则，这条调用还会静默自动放行。
+    """
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    assert cmd.arg_text({"action": "kill", "id": 3, "command": "git status"}) == "action=kill id=3"
+    assert cmd.arg_text({"action": "read", "id": 1, "command": "x"}) == "action=read"
+    assert cmd.arg_text({"action": "list", "command": "git status"}) == "action=list"
+    # 缺 id 的 kill 照旧落动作名（既有行为：id 缺省按 0 固化，历次调用同一串）
+    assert cmd.arg_text({"action": "kill", "command": "x"}) == "action=kill id=0"
+    # action 显式为 run（或缺省）时命令文本照旧，白名单语义不变
+    assert cmd.arg_text({"action": "run", "command": "git status"}) == "git status"
+    assert cmd.arg_text({"command": "git status"}) == "git status"
+    # 白名单不再被命令文本顶替：已有 "git status" 前缀规则的会话里，
+    # 带 command 的 kill 调用仍需确认，而不是静默放行
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="prefix", pattern="git status"))
+    assert await gate.authorize(cmd, {"command": "git status"}) is None
+    assert await gate.authorize(
+        cmd, {"action": "kill", "id": 3, "command": "git status"}
+    ) is not None
 
 
 async def test_action_prefix_rule_word_boundary():
@@ -699,3 +782,84 @@ async def test_always_rule_for_write_tool_discloses_path_scope(tmp_path):
     pending2.resolve(Decision.ALLOW_ONCE)
     rule = gate2.rule_for(WriteFileTool(), {"path": "a.txt"})
     assert rule.kind == "always"  # write_file 本身仍是整工具规则（显式选择）
+
+
+# ---- 第二轮审查 FINDING 1：解释器旗标全文扫描（head 截断可被绕过） ----
+
+
+def test_code_exec_flag_scan_full_text_for_interpreters():
+    """解释器调用的旗标可以出现在任意位置，head 截断扫描会被绕过（FINDING 1）。
+
+    `py -3 -X utf8 -c` 与 `powershell -NoProfile -ExecutionPolicy Bypass
+    -Command` 的旗标都在第 5 词：旧实现只扫前 4 词，命令无拼接元字符时
+    （分号在双引号内）prefix/glob 白名单双双漏判，任意代码免确认执行。
+    """
+    assert _has_code_exec_flag('py -3 -X utf8 -c "import os;os.system(\'calc\')"')
+    assert _has_code_exec_flag(
+        'powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process calc"'
+    )
+    # 带 .exe 后缀 / 路径前缀 / 引号 / 大写的解释器名同样全文扫描
+    assert _has_code_exec_flag('C:\\Python311\\python.exe -X utf8 -c "x"')
+    assert _has_code_exec_flag('/usr/bin/python3 -c x')
+    assert _has_code_exec_flag('powershell.exe -NoProfile -Command gci')
+    assert _has_code_exec_flag('"C:\\Tools\\py.exe" -3 -X utf8 -c "x"')
+    assert _has_code_exec_flag('PY -3 -X utf8 -c "x"')
+
+
+def test_code_exec_flag_head_truncated_for_non_interpreters():
+    """对照组（不误伤）：非解释器命令保持 head 截断，分类与修复前一致。
+
+    tar/git/grep 的 -c 本就在前 4 词内，修复前后都按旗标处理（点「总是允许」
+    只固化当次参数）——这是 2026-09-25 审查 B-1 起的既有行为；本测试锁的是
+    「修复不改变它们」，以及 head 窗口外的旗标词不因全文扫描新中招。
+    """
+    assert _has_code_exec_flag("tar -c -f x.tar dir")
+    assert _has_code_exec_flag("git commit -c message")
+    assert _has_code_exec_flag("grep -c foo bar")
+    # 非解释器命令、旗标在 head 窗口外：不触发全文扫描（误伤面不扩大）
+    assert not _has_code_exec_flag("robocopy src dst /e /c")
+    assert not _has_code_exec_flag("docker ps -a --format -c")
+    # 无旗标的正常命令不受影响（解释器无旗标调用照旧提炼前缀规则）
+    assert not _has_code_exec_flag("git status --short")
+    assert not _has_code_exec_flag("python manage.py runserver")
+    assert not _has_code_exec_flag("python script.py --flag value")
+
+
+async def test_deep_flag_interpreter_blocked_on_prefix_and_glob():
+    """挂 prefix / glob 规则后，旗标在第 5+ 词的解释器调用必须回退逐次确认。"""
+    evil = 'py -3 -X utf8 -c "import os;os.system(\'calc\')"'
+    ps_evil = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process calc"'
+    cmd = RunCommandTool()
+
+    gate = PermissionGate()
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="prefix", pattern="py -3"))
+    assert await gate.authorize(cmd, {"command": evil}) is not None
+
+    gate2 = PermissionGate()
+    gate2.add_session_rule(WhitelistRule(tool="run_command", kind="glob", pattern="py *"))
+    assert await gate2.authorize(cmd, {"command": evil}) is not None
+    gate2.add_session_rule(
+        WhitelistRule(tool="run_command", kind="glob", pattern="powershell *")
+    )
+    assert await gate2.authorize(cmd, {"command": ps_evil}) is not None
+
+
+def test_rule_for_deep_flag_interpreter_is_exact():
+    """规则提炼同步生效：旗标在深位的解释器调用只固化当次参数，不产前缀规则。"""
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    evil = 'py -3 -X utf8 -c "import os;os.system(\'calc\')"'
+    rule = gate.rule_for(cmd, {"command": evil})
+    assert rule.kind == "exact" and rule.pattern == evil
+    ps_evil = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process calc"'
+    assert gate.rule_for(cmd, {"command": ps_evil}).kind == "exact"
+
+
+async def test_normal_command_exact_rule_still_auto_approves():
+    """对照组：正常命令「总是允许」固化的 exact 规则照常放行同一条命令——
+    修复不得把正常命令变成永远无法放行。"""
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    for command in ("tar -c -f x.tar dir", "git commit -c message", "grep -c foo bar"):
+        gate.add_session_rule(gate.rule_for(cmd, {"command": command}))
+        assert await gate.authorize(cmd, {"command": command}) is None, command

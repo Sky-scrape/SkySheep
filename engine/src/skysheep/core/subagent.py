@@ -114,7 +114,12 @@ class SubagentGate(PermissionGate):
     )
 
     async def authorize(self, tool, input_dict):
-        if tool.safety == Safety.READONLY:
+        # 引擎主目录写入守卫先于 READONLY 短路（与主门/无人值守/渠道门同口径，
+        # 第二轮审查 FINDING 2）：memory_write 名义 READONLY 却写全局记忆
+        # （注入所有项目所有会话的 system prompt），子代理内同样不得零确认放行。
+        # 命中后落父类 authorize → 下方 resolve(DENY)，fail-closed。
+        engine_home_write = self._write_hits_engine_home(tool, input_dict)
+        if tool.safety == Safety.READONLY and not engine_home_write:
             return None
         pending = await super().authorize(tool, input_dict)
         if pending is not None:
@@ -140,7 +145,12 @@ class IsolatedGate(PermissionGate):
     )
 
     async def authorize(self, tool, input_dict):
-        if tool.safety == Safety.READONLY:
+        # 引擎主目录写入守卫先于 READONLY 短路（与主门/无人值守/渠道门同口径，
+        # 第二轮审查 FINDING 2）：memory_write 名义 READONLY 却写全局记忆，
+        # 隔离工作区覆盖不了它（落点固定在 ~/.skysheep，不在 worktree 内）。
+        # 命中后落父类 authorize → 下方 resolve(DENY)，fail-closed。
+        engine_home_write = self._write_hits_engine_home(tool, input_dict)
+        if tool.safety == Safety.READONLY and not engine_home_write:
             return None
         if tool.safety == Safety.WRITE and self._write_target_inside_workdir(tool, input_dict):
             return None

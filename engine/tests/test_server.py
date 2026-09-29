@@ -42,6 +42,52 @@ def recv_until(ws, wanted_id=None, events=None):
             return frame
 
 
+def test_ws_malformed_frames_get_readable_errors(home):
+    """畸形输入有回执：二进制帧 / 非 JSON / 非 JSON 对象各回一条可读错误帧。
+
+    修复前：非 JSON 文本帧被无声丢弃（客户端对着黑洞等回复），二进制帧让
+    receive_text 抛 KeyError 直接断连（客户端只见连接消失，无从排查）。
+    """
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_bytes(b"\x00\x01not-json")
+        r = recv_until(ws)
+        assert r["ok"] is False and "二进制" in r["error"]
+
+        ws.send_text("这不是 JSON{{{")
+        r = recv_until(ws)
+        assert r["ok"] is False and "JSON" in r["error"]
+
+        ws.send_text('"just a string"')
+        r = recv_until(ws)
+        assert r["ok"] is False and "JSON 对象" in r["error"]
+
+        # 三次畸形输入后连接仍然可用：正常请求照常处理
+        ws.send_json({"id": "boot-ok", "method": "boot"})
+        assert recv_until(ws, "boot-ok")["ok"]
+
+
+def test_spawn_bg_logs_task_exceptions(caplog):
+    """spawn_bg 的任务异常要留痕：广播失败/后台收尾失败在日志里可查。"""
+    import asyncio
+    import logging
+
+    from skysheep.bgtasks import spawn_bg
+
+    async def boom():
+        raise ValueError("后台任务炸了")
+
+    async def main():
+        spawn_bg(boom())
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+
+    caplog.set_level(logging.ERROR, logger="skysheep.bg")
+    asyncio.run(main())
+    hits = [r for r in caplog.records if "后台任务炸了" in r.getMessage()]
+    assert hits, "后台任务异常必须打进日志"
+    assert any("boom" in r.getMessage() for r in hits), "日志应带任务来源（协程名）"
+
+
 def test_boot_snapshot(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "b1", "method": "boot"})

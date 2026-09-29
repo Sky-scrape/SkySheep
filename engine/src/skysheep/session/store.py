@@ -9,7 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import sqlite3
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -18,6 +21,7 @@ from pathlib import Path
 import aiosqlite
 
 from ..messages import Message
+from ..textio import sweep_stale_tmp_files
 
 logger = logging.getLogger("skysheep.store")
 
@@ -33,6 +37,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     project_id INTEGER REFERENCES projects(id),
     title TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
+    -- 与 _COLUMN_MIGRATIONS 的补列语句保持一致（列序不必对齐：代码全部按列名读写）。
+    -- 漏掉会让全新安装的库只能靠 ALTER 补列，迁移一旦失败运行时才炸 no such column
+    tags TEXT NOT NULL DEFAULT '',
     pinned INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
     memory_digested INTEGER NOT NULL DEFAULT 0,
@@ -60,7 +67,6 @@ CREATE TABLE IF NOT EXISTS whitelist_rules (
     last_hit_at REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
 CREATE TABLE IF NOT EXISTS pipelines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER REFERENCES projects(id),
@@ -111,7 +117,8 @@ CREATE TABLE IF NOT EXISTS snippets (
     created_at REAL NOT NULL,
     sort_order REAL NOT NULL DEFAULT 0,
     use_count INTEGER NOT NULL DEFAULT 0,
-    last_used_at REAL NOT NULL DEFAULT 0
+    last_used_at REAL NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS cron_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,6 +165,9 @@ CREATE TABLE IF NOT EXISTS channel_sources (
     hits INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (channel, chat_id)
 );
+-- messages 的会话内定位索引：加载/截断都按 (session_id, seq) 走。
+-- 历史上这里还并排建过一个同列重复的 idx_messages_session（写放大与存储双倍），
+-- 已从 SCHEMA 移除，旧库里残留的由 connect() 的迁移 DROP 掉。
 CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE TABLE IF NOT EXISTS project_tasks (
@@ -204,6 +214,35 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     tokenize='trigram'
 );
 """
+
+# 旧库补列清单：(表名, 列定义)。新库由 SCHEMA 的 CREATE TABLE 直接建出全部列
+# （test_store.py 断言 SCHEMA 与本清单逐列一致，两处必须同步维护）；本清单只对
+# 旧库生效——connect() 时用 PRAGMA table_info 预收集已有列，缺哪列才补哪列。
+# 此前是每列一段「try: ALTER ... except Exception: pass」——「列已存在」与
+# disk I/O error / database locked 等真实故障一起被吞（缺列的库拖到运行时
+# INSERT 才报错），且每次启动把全部 ALTER 白重跑一遍。
+_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("sessions", "pinned INTEGER NOT NULL DEFAULT 0"),
+    ("schedules", "remind_before INTEGER NOT NULL DEFAULT 0"),
+    ("schedules", "end_at REAL NOT NULL DEFAULT 0"),
+    ("sessions", "summary TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "tags TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "archived INTEGER NOT NULL DEFAULT 0"),
+    ("sessions", "memory_digested INTEGER NOT NULL DEFAULT 0"),
+    ("pipeline_nodes", "kind TEXT NOT NULL DEFAULT 'run'"),
+    ("pipeline_nodes", "ref_id TEXT NOT NULL DEFAULT ''"),
+    ("pipeline_nodes", "control TEXT NOT NULL DEFAULT ''"),
+    ("pipeline_nodes", "max_runs INTEGER NOT NULL DEFAULT 1"),
+    ("pipeline_nodes", "timeout_s INTEGER NOT NULL DEFAULT 3600"),
+    ("snippets", "sort_order REAL NOT NULL DEFAULT 0"),
+    ("snippets", "use_count INTEGER NOT NULL DEFAULT 0"),
+    ("snippets", "last_used_at REAL NOT NULL DEFAULT 0"),
+    ("snippets", "enabled INTEGER NOT NULL DEFAULT 1"),
+    ("usage_log", "cached_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("whitelist_rules", "enabled INTEGER NOT NULL DEFAULT 1"),
+    ("whitelist_rules", "hit_count INTEGER NOT NULL DEFAULT 0"),
+    ("whitelist_rules", "last_hit_at REAL NOT NULL DEFAULT 0"),
+)
 
 
 @dataclass
@@ -277,6 +316,84 @@ def parse_backup_stamp(stamp: str) -> float | None:
         return None
 
 
+def _snapshot_db(src: Path, target: Path) -> None:
+    """用 SQLite backup API 把库拷成一份一致性快照（同步函数，调用方放线程跑）。
+
+    为什么不用「wal_checkpoint(TRUNCATE) + copy2」：checkpoint 返回后没有任何
+    锁保护拷贝窗口，此期间并发写（cron / 流水线轮）把 WAL 再次涨满触发
+    auto-checkpoint 搬页、主文件被改写，就会拷出撕裂库（571MB 库实测 10 份
+    备份 6 份损坏）。backup API 在一个读事务里逐页复制，读到的始终是同一个
+    一致性快照；WAL 模式下读不阻塞写，备份期间业务写入照常进行。
+    """
+    src_conn = sqlite3.connect(str(src))
+    try:
+        dst_conn = sqlite3.connect(str(target))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
+def _snapshot_or_copy(src: Path, target: Path) -> None:
+    """一致性快照；源库打不开（本身已损坏）时退回裸拷贝留底。
+
+    恢复场景的主库可能本身就是坏的——这时「恢复前」安全副本的意义是
+    不丢现场，拷不动就按字节照搬，不能因为留底失败拦住恢复。
+    """
+    try:
+        _snapshot_db(src, target)
+    except (sqlite3.Error, OSError):
+        shutil.copy2(src, target)
+
+
+def _validate_db_file(path: Path) -> str | None:
+    """打开试读 + PRAGMA quick_check。返回 None 表示可用，否则给可读原因。"""
+    try:
+        conn = sqlite3.connect(str(path))
+    except sqlite3.Error as e:
+        return f"无法打开（{e}）"
+    try:
+        row = conn.execute("PRAGMA quick_check").fetchone()
+    except sqlite3.Error as e:
+        return f"读取失败（{e}）"
+    finally:
+        conn.close()
+    verdict = str(row[0]) if row else ""
+    if verdict == "ok":
+        return None
+    return "quick_check 未通过：" + (verdict or "空结果")
+
+
+def _stage_and_replace(src: Path, main: Path) -> None:
+    """把备份拷到主库同目录临时文件，quick_check 校验通过才原子换上主库。
+
+    校验失败抛 ValueError（backend 对恢复动作识别的异常族），此时主库未被
+    改动；临时文件与打开校验连接产生的 -wal/-shm 侧车文件清理干净。
+    同步函数，调用方放线程跑。临时文件名与 textio 原子写同款 mkstemp 规则，
+    进程中途被杀留下的残留由启动清扫回收（textio.sweep_stale_tmp_files）。
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=str(main.parent), prefix=main.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copy2(src, tmp)
+        problem = _validate_db_file(tmp)
+        if problem is not None:
+            raise ValueError(
+                f"备份文件校验未通过（疑似损坏），当前数据库未改动：{problem}"
+            )
+        os.replace(tmp, main)
+    except BaseException:
+        for p in (tmp, Path(tmp_name + "-wal"), Path(tmp_name + "-shm")):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        raise
+
+
 # usage_stats 的 project_id 哨兵：None 在项目语义里表示快聊（合法过滤目标），
 # 因此「不过滤」用独立哨兵表示，避免与 NULL 项目混淆（安全审查 B14 的过滤参数）。
 _ALL = object()
@@ -302,10 +419,9 @@ class SessionStore:
     async def _rolling_backup(self, existed: bool = True) -> str | None:
         """连接建立后做滚动备份（保留最近 BACKUP_KEEP 份），防止误删无法恢复。
 
-        拷贝与目录清理放线程（同步 copy2 会卡事件循环）；拷之前先
-        wal_checkpoint(TRUNCATE) 把 WAL 收进主文件，保证拷到完整的最新数据
-        （WAL 模式下已提交的数据可能还在 -wal 里，直接拷 .db 会丢尾巴）。
-        频率限制见 BACKUP_MIN_INTERVAL_S：备份时刻按文件名时间戳解析
+        拷贝与目录清理放线程（大库拷贝会卡事件循环）；用 SQLite backup API
+        产生一致性快照（见 _snapshot_db），并发写进行中拷出的也是完整可用
+        的库。频率限制见 BACKUP_MIN_INTERVAL_S：备份时刻按文件名时间戳解析
         （与 list_backups 同口径），窗口内已有备份就只做保留数清理。
         """
         if not existed or not self.path.exists():
@@ -323,10 +439,6 @@ class SessionStore:
             if fresh:
                 self._prune_backups(backups)
                 return None
-            try:
-                await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:  # noqa: BLE001 - checkpoint 失败不拦备份：至多拷到稍旧数据
-                pass
             if self.path.stat().st_size <= 0:
                 return None
             stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -335,9 +447,14 @@ class SessionStore:
             def _copy() -> bool:
                 try:
                     if not target.exists():
-                        shutil.copy2(self.path, target)
+                        _snapshot_db(self.path, target)
                     return True
-                except OSError:
+                except (OSError, sqlite3.Error):
+                    # 失败清掉半成品：残留的空/半截文件会被下次当成「已有备份」跳过
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
                     return False
 
             if await asyncio.to_thread(_copy):
@@ -365,20 +482,29 @@ class SessionStore:
 
         与启动滚动备份的差异：不受 BACKUP_MIN_INTERVAL_S 窗口限制——用户点了
         按钮就是要当前时刻的一份存档；仍按 BACKUP_KEEP 裁剪，总量不会超。
-        拷贝放线程、拷之前 checkpoint 收 WAL，与 _rolling_backup 同口径。
+        快照放线程、走 SQLite backup API 的一致性快照（见 _snapshot_db），
+        与 _rolling_backup 同口径。
         """
         if not self.path.exists() or self.path.stat().st_size <= 0:
             raise RuntimeError("还没有可备份的会话数据")
         d = self.backup_dir()
         d.mkdir(parents=True, exist_ok=True)
-        if self._db is not None:
-            try:
-                await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:  # noqa: BLE001 - checkpoint 失败不拦备份：至多拷到稍旧数据
-                pass
         target = d / f"{self.path.stem}-{time.strftime('%Y%m%d-%H%M%S')}.db"
-        # 同一秒内点第二次：覆盖写，落盘的仍是当前时刻的数据
-        await asyncio.to_thread(shutil.copy2, self.path, target)
+
+        def _produce() -> None:
+            try:
+                # 同一秒内点第二次：覆盖写，落盘的仍是当前时刻的数据
+                if target.exists():
+                    target.unlink()
+                _snapshot_db(self.path, target)
+            except (OSError, sqlite3.Error) as e:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                raise RuntimeError(f"备份失败：{e}") from e
+
+        await asyncio.to_thread(_produce)
         self._prune_backups(sorted(d.glob(self.path.stem + "-*.db")))
         return {"name": target.name, "path": str(target)}
 
@@ -448,6 +574,9 @@ class SessionStore:
         """用某个备份覆盖当前会话库（重启前先给现状留一份备份，可再换回来）。
 
         会关闭再重开数据库连接；调用方（backend）负责随后刷新内存里的会话状态。
+        恢复前把备份拷到主库同目录的临时文件并做 PRAGMA quick_check 校验，
+        校验通过才 os.replace 原子换上——坏备份（撕裂/垃圾字节）直接照单全收
+        会让主库换坏后全部会话功能瘫痪；校验失败时保留原库并回可读错误。
         """
         d = self.backup_dir()
         # 只接受纯文件名：带路径分隔符/上级目录的输入直接拒绝，不做静默归一化
@@ -460,28 +589,37 @@ class SessionStore:
             raise ValueError("备份文件名不合法") from None
         if not src.is_file():
             raise FileNotFoundError("备份不存在：" + name)
-        # 先给"当前"存一份，用户万一恢复错了还能回来
+        # 先给"当前"存一份，用户万一恢复错了还能回来。走一致性快照（backup
+        # API）保证已提交数据完整；主库本身已损坏打不开时退回裸拷贝留底，
+        # 留底失败不拦恢复。
         safety = None
-        if self._db is not None:
-            # 与 _rolling_backup / backup_now 同口径：拷贝前先 checkpoint 收 WAL，
-            # 否则已提交的数据可能还在 -wal 里，安全副本缺最近一段消息——
-            # 恢复失败想退回时退不回「恢复前一刻」
-            try:
-                await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:  # noqa: BLE001 - checkpoint 失败不拦恢复：至多拷到稍旧数据
-                pass
         if self.path.exists() and self.path.stat().st_size > 0:
             stamp = time.strftime("%Y%m%d-%H%M%S")
             safety = d / f"{self.path.stem}-{stamp}{self.SAFETY_TAG}.db"
             try:
-                shutil.copy2(self.path, safety)
-            except OSError:
+                await asyncio.to_thread(_snapshot_or_copy, self.path, safety)
+            except (OSError, sqlite3.Error):
                 safety = None
         if self._db is not None:
             await self._db.close()
             self._db = None
-        # 整库拷贝放线程：库到几百 MB 时同步 copy2 会把事件循环冻住数秒
-        await asyncio.to_thread(shutil.copy2, src, self.path)
+        # 干净关闭后 -wal/-shm 已被 SQLite 自己收走；万一残留（异常关闭），
+        # 换库前必须清掉——旧 WAL 帧套到新主库上等于注入垃圾页
+        for suffix in ("-wal", "-shm"):
+            try:
+                Path(str(self.path) + suffix).unlink()
+            except OSError:
+                pass
+        try:
+            await asyncio.to_thread(_stage_and_replace, src, self.path)
+        except Exception:
+            # 校验没过/替换失败：主库原样未动，把连接恢复回可用状态再报错，
+            # 调用方与后续会话功能不至于悬在一个已关闭的 store 上
+            try:
+                await self.connect()
+            except Exception:  # noqa: BLE001 - 重连失败不掩盖原始错误
+                pass
+            raise
         await self.connect()
         return {
             "restored": src.name,
@@ -490,6 +628,13 @@ class SessionStore:
 
     async def connect(self) -> SessionStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 启动清扫：回收数据目录内 textio 原子写被硬杀/断电留下的 .tmp 残留
+        # （db 与引擎状态文件都在数据目录里；用户项目目录不扫，取舍见
+        # textio.sweep_stale_tmp_files）。卫生措施，失败只记日志不拦启动。
+        try:
+            sweep_stale_tmp_files(self.path.parent)
+        except Exception as e:  # noqa: BLE001 - 清扫绝不能影响启动
+            logger.warning("启动清扫 .tmp 残留失败（不影响使用）：%s", e)
         # 文件是否本就存在：本次新建的库没有可备的内容，跳过备份（与旧版
         # 「连接前备份」对首启的语义一致）
         existed = self.path.exists()
@@ -505,151 +650,44 @@ class SessionStore:
         # 滚动备份要在连接建立、WAL checkpoint 之后做（数据才完整），见 _rolling_backup
         await self._rolling_backup(existed)
         await self._db.executescript(SCHEMA)
-        # 旧库迁移：sessions 补 pinned 列（已存在则忽略）
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：schedules 补 remind_before 列（0.5.0 建的表没有；0 = 到点提醒）
-        try:
-            await self._db.execute(
-                "ALTER TABLE schedules ADD COLUMN remind_before INTEGER NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：schedules 补 end_at 列（可选结束时间；0 = 只记开始时刻，按点事件）
-        try:
-            await self._db.execute(
-                "ALTER TABLE schedules ADD COLUMN end_at REAL NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：sessions 补 summary 列（会话摘要：最近一轮助手回答的开头，侧栏直接看进展）
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：sessions 补 tags 列（用户自定义标签，侧栏可按标签分组）
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT ''"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：sessions 补 archived 列（归档：侧栏默认隐藏，可从归档弹窗恢复）
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：sessions 补 memory_digested 列（归档自动记忆：同会话只提炼一次，
-        # 取消归档再归档不重复花钱）
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN memory_digested INTEGER NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：pipeline_nodes 补 kind / ref_id 列（纳入现有任务：挂接任务簿任务、
-        # 会话续跑；本特性发布前建的表没有这两列）
-        try:
-            await self._db.execute(
-                "ALTER TABLE pipeline_nodes ADD COLUMN kind TEXT NOT NULL DEFAULT 'run'"
-            )
-        except Exception:
-            pass
-        try:
-            await self._db.execute(
-                "ALTER TABLE pipeline_nodes ADD COLUMN ref_id TEXT NOT NULL DEFAULT ''"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：补 control / max_runs 列（控制流：条件门 / 终止 / 迭代 + 失败重试）
-        try:
-            await self._db.execute(
-                "ALTER TABLE pipeline_nodes ADD COLUMN control TEXT NOT NULL DEFAULT ''"
-            )
-        except Exception:
-            pass
-        try:
-            await self._db.execute(
-                "ALTER TABLE pipeline_nodes ADD COLUMN max_runs INTEGER NOT NULL DEFAULT 1"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：补 timeout_s 列（节点超时；0 = 不限时）。
-        # 存量节点补为 3600（1 小时）：与「无人值守不能无限占用并发槽」的新约定一致
-        try:
-            await self._db.execute(
-                "ALTER TABLE pipeline_nodes ADD COLUMN timeout_s INTEGER NOT NULL DEFAULT 3600"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：snippets 补 sort_order / use_count / last_used_at 列（提示词排序
-        # 与使用统计）。旧行 sort_order=0，列表先按它升序、同值再按 created_at 倒序，
-        # 与升级前「最新创建的在最上」的行为一致。
-        try:
-            await self._db.execute(
-                "ALTER TABLE snippets ADD COLUMN sort_order REAL NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        try:
-            await self._db.execute(
-                "ALTER TABLE snippets ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        try:
-            await self._db.execute(
-                "ALTER TABLE snippets ADD COLUMN last_used_at REAL NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：snippets 补 enabled 列（提示词启用/停用）。旧行全视为启用
-        try:
-            await self._db.execute(
-                "ALTER TABLE snippets ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：usage_log 补 cached_tokens 列（提示词缓存命中入账）。旧行补 0
-        # （未记录），聚合与费用拆算按 0 处理，行为与升级前一致。
-        try:
-            await self._db.execute(
-                "ALTER TABLE usage_log ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        # 旧库迁移：whitelist_rules 补 enabled / hit_count / last_hit_at 列
-        # （规则启停开关与命中统计：临时停用不必删配置，命中情况帮用户清理陈旧规则）
-        try:
-            await self._db.execute(
-                "ALTER TABLE whitelist_rules ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
-            )
-        except Exception:
-            pass
-        try:
-            await self._db.execute(
-                "ALTER TABLE whitelist_rules ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
-        try:
-            await self._db.execute(
-                "ALTER TABLE whitelist_rules ADD COLUMN last_hit_at REAL NOT NULL DEFAULT 0"
-            )
-        except Exception:
-            pass
+        await self._migrate_legacy()
         await self._db.commit()
         self._fts_dirty = False  # 索引写失败过 → 下次启动走查漏模式
         await self._setup_fts()
         return self
+
+    async def _migrate_legacy(self) -> None:
+        """旧库迁移：缺列才补列 + 清理历史上的重复索引。
+
+        补列先按 PRAGMA table_info 逐表收集已有列，只对缺失的列发 ALTER；
+        非「列已存在」的故障（disk I/O error / database locked 等）不再静默
+        吞掉，记 warning 暴露出来——缺列的库此前要拖到运行时 INSERT 才报错，
+        很难排查。
+        """
+        assert self._db
+        tables = sorted({table for table, _ in _COLUMN_MIGRATIONS})
+        existing: dict[str, set[str]] = {}
+        for table in tables:
+            cur = await self._db.execute(f"PRAGMA table_info({table})")
+            existing[table] = {row[1] for row in await cur.fetchall()}
+        for table, ddl in _COLUMN_MIGRATIONS:
+            columns = existing.get(table)
+            if not columns:
+                continue  # 表不存在：SCHEMA 刚按最新结构建好，无需补列
+            column = ddl.split(None, 1)[0]
+            if column in columns:
+                continue
+            try:
+                await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+            except Exception as e:  # noqa: BLE001 - 单列失败不拦启动，但要可见
+                logger.warning("旧库迁移失败：%s 补列 %s 未执行（%s）", table, column, e)
+        # messages 一度并存两个定义完全相同的索引（idx_messages_session 与
+        # idx_messages_session_seq），最大的表写放大与存储双倍；SCHEMA 只保留
+        # 后者，旧库的残留在这里清掉。
+        try:
+            await self._db.execute("DROP INDEX IF EXISTS idx_messages_session")
+        except Exception as e:  # noqa: BLE001 - 清理失败不影响功能，但要可见
+            logger.warning("旧库迁移失败：重复索引 idx_messages_session 未清理（%s）", e)
 
     # ---- 全文搜索索引（messages_fts） ----
 
@@ -1641,6 +1679,12 @@ class SessionStore:
         " LEFT JOIN projects p ON p.id = s.project_id"
     )
 
+    # SQL 层硬上限：去重与截断到 limit 在 Python 里做，但行得先取回来——
+    # content 是整条消息 JSON，常见词命中数千行时全量拉回会让内存峰值与该次
+    # 搜索的响应时长一起爆。500 比默认 limit=20 高一个数量级还多（每个会话
+    # 只保留排序最先的命中，够覆盖几百个会话），命中超过它才可能少给结果。
+    SEARCH_SQL_LIMIT = 500
+
     def _scope_condition(self, project_id: int | None, scope: str) -> tuple[str, tuple]:
         # 已归档会话不进搜索结果（归档 = 眼不见；要找就去归档弹窗恢复）
         if scope == "all":
@@ -1666,8 +1710,9 @@ class SessionStore:
                 self.SEARCH_SELECT
                 + " JOIN messages_fts f ON f.rowid = m.id"
                 + f" WHERE {cond} AND messages_fts MATCH ?"
-                " ORDER BY s.pinned DESC, s.updated_at DESC, m.seq",
-                args + (match,),
+                " ORDER BY s.pinned DESC, s.updated_at DESC, m.seq"
+                " LIMIT ?",
+                args + (match, self.SEARCH_SQL_LIMIT),
             )
             return await cur.fetchall()
         except Exception:  # noqa: BLE001 - 索引/语法问题不应对用户显形
@@ -1685,8 +1730,9 @@ class SessionStore:
         cur = await self._db.execute(
             self.SEARCH_SELECT
             + f" WHERE {cond} AND m.content LIKE ? ESCAPE '\\'"
-            " ORDER BY s.pinned DESC, s.updated_at DESC, m.seq",
-            args + (f"%{escaped}%",),
+            " ORDER BY s.pinned DESC, s.updated_at DESC, m.seq"
+            " LIMIT ?",
+            args + (f"%{escaped}%", self.SEARCH_SQL_LIMIT),
         )
         return await cur.fetchall()
 

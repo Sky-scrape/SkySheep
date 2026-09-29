@@ -169,6 +169,20 @@ def test_install_update_result_reports_uac_need():
     assert 'request("app.notify", {' in js  # 退出前的系统通知提醒
 
 
+def test_install_update_result_reports_sha256_verification():
+    """install_update 的结果要带 verified 布尔（是否成功核对 .sha256 附件）：
+    下载完成提示据此区分「已校验/未校验」，附件缺失时不得让用户默认装的是
+    核对过的包（对抗审查 13/15 的字段契约，两端都要锚住）。"""
+    from skysheep.server.app import STATIC_DIR
+
+    backend_src = (Path(__file__).resolve().parents[1] / "src" / "skysheep"
+                   / "server" / "backend_parts" / "remote.py").read_text(encoding="utf-8")
+    assert '"verified": bool(expected)' in backend_src
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "r.verified === true" in js  # 缺字段/false 都按未核对处理
+    assert "未能核对安装包校验值" in js
+
+
 class _FakeWinreg:
     """够 _setup_privilege_override 用的 winreg 桩：按侧别决定键是否存在。"""
 

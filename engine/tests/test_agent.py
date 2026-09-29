@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 from conftest import FakeProvider
+from pydantic import BaseModel
 
 from skysheep.core import Agent
-from skysheep.messages import Message, TextBlock, ToolUseBlock
+from skysheep.messages import ImageBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
+from skysheep.models.anthropic_provider import to_anthropic_messages
+from skysheep.models.openai_compat import to_openai_messages
 from skysheep.security.gate import PermissionGate
 from skysheep.tools import ToolRegistry, default_tools
+from skysheep.tools.base import Safety, Tool, ToolContext
 
 
 def make_agent(provider, tmp_path, store=None, project_id=None, max_iterations=10):
@@ -367,3 +372,203 @@ async def test_provider_without_cache_reports_zero(tmp_path):
 
     assert agent.total_in_tokens == 11
     assert agent.total_cached_tokens == 0
+
+
+# ---- 工具产生的图片按调用归属（回归：并发只读批不再整桶收割共享 ctx.images） ----
+
+
+class _EmptyArgs(BaseModel):
+    pass
+
+
+class _ImageTool(Tool):
+    """往 ctx.images 追加一张图的只读工具（复刻 screenshot 的产出形态）。"""
+
+    safety = Safety.READONLY
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
+    args_model = _EmptyArgs
+
+    def __init__(self, tag: str) -> None:
+        super().__init__()
+        self.name = tag
+        self.description = f"fake screenshot {tag}"
+
+    async def run(self, args, ctx: ToolContext) -> str:
+        await asyncio.sleep(0.01)  # 让同批多个调用真并发
+        ctx.images.append(ImageBlock(media_type="image/png", data=self.name))
+        return f"{self.name} ok"
+
+
+async def test_concurrent_readonly_batch_attributes_images_per_call(tmp_path):
+    """同一批并发只读调用的截图各自带各自的图（发现 34 回归）。
+
+    旧实现收结果时在第一条非错误结果处 `attached = list(ctx.images);
+    ctx.images.clear()`，同批第二张截图被错配到第一个工具名下。
+    """
+    provider = FakeProvider([
+        [
+            ToolUseBlock(id="t1", name="shot_a", input={}),
+            ToolUseBlock(id="t2", name="shot_b", input={}),
+        ],
+        [TextBlock(text="done")],
+    ])
+    agent = make_agent(provider, tmp_path)
+    agent.registry.register(_ImageTool("shot_a"))
+    agent.registry.register(_ImageTool("shot_b"))
+    events = await collect(agent, "拍两张")
+
+    finished = [e for e in events if e.kind == "tool_call_finished"]
+    assert [e.name for e in finished] == ["shot_a", "shot_b"]
+    assert [[b["data"] for b in e.images] for e in finished] == [["shot_a"], ["shot_b"]]
+    # 历史：两条图片 user 消息，各带各的图（模型侧全部可见，不重复不丢失）
+    img_user_msgs = [
+        m for m in agent.history
+        if m.role == "user" and any(isinstance(b, ImageBlock) for b in m.content)
+    ]
+    assert [
+        [b.data for b in m.content if isinstance(b, ImageBlock)] for m in img_user_msgs
+    ] == [["shot_a"], ["shot_b"]]
+
+
+async def test_serial_image_tool_still_attaches(tmp_path):
+    """串行路径对照：单个只读产图工具的图仍附在它自己的结果上。"""
+    provider = FakeProvider([
+        [ToolUseBlock(id="t1", name="shot_a", input={})],
+        [TextBlock(text="done")],
+    ])
+    agent = make_agent(provider, tmp_path)
+    agent.registry.register(_ImageTool("shot_a"))
+    events = await collect(agent, "拍一张")
+
+    finished = [e for e in events if e.kind == "tool_call_finished"][0]
+    assert not finished.is_error
+    assert [b["data"] for b in finished.images] == ["shot_a"]
+
+
+# ---- 并发批产图的历史序列化（发现 7 回归：截图 user 消息不得穿插在 tool_result 之间） ----
+
+
+def _anthropic_orphans(wire: list[dict]) -> list[str]:
+    """anthropic 线格式里的孤儿 tool_result：user(tool_result) 前面不是携带
+    配对 tool_use 的 assistant（违反即 API 400）。"""
+    bad: list[str] = []
+    for idx, m in enumerate(wire):
+        if m["role"] != "user" or not isinstance(m["content"], list):
+            continue
+        for b in m["content"]:
+            tid = b.get("tool_use_id") if isinstance(b, dict) else None
+            if not tid or b.get("type") != "tool_result":
+                continue
+            prev = wire[idx - 1] if idx else None
+            paired = bool(prev) and prev["role"] == "assistant" and any(
+                blk.get("type") == "tool_use" and blk.get("id") == tid
+                for blk in prev["content"]
+            )
+            if not paired:
+                bad.append(tid)
+    return bad
+
+
+def _openai_orphans(wire: list[dict]) -> list[str]:
+    """openai 线格式里的孤儿 tool 消息：向前越过连续 tool 消息后必须紧跟
+    携带配对 tool_calls 的 assistant（违反即 API 400）。"""
+    bad: list[str] = []
+    for idx, m in enumerate(wire):
+        if m["role"] != "tool":
+            continue
+        k = idx - 1
+        while k >= 0 and wire[k]["role"] == "tool":
+            k -= 1
+        calls: list[dict] = []
+        if k >= 0 and wire[k]["role"] == "assistant":
+            calls = wire[k].get("tool_calls") or []
+        if m["tool_call_id"] not in [c["id"] for c in calls]:
+            bad.append(m["tool_call_id"])
+    return bad
+
+
+def _assert_wire_pairs(history: list[Message]) -> None:
+    """两侧序列化都不得有孤儿 tool_result（发现 7 验收断言）。"""
+    assert _anthropic_orphans(to_anthropic_messages(history)) == []
+    assert _openai_orphans(to_openai_messages(history)) == []
+    # 反向：每个 tool_use 的 tool_result 也在（无断头 tool_use）
+    tu_ids = {tu.id for m in history for tu in m.tool_uses}
+    tr_ids = {
+        b.tool_use_id for m in history for b in m.content
+        if isinstance(b, ToolResultBlock)
+    }
+    assert tu_ids == tr_ids
+
+
+async def test_concurrent_batch_screenshots_after_all_tool_results(tmp_path):
+    """并发批产图（发现 7 回归）：截图 user 消息统一落在整批 tool_result 之后，
+    不得穿插在工具结果之间——穿插会把 tool_result 与配对的 assistant(tool_use)
+    隔开，anthropic 与 openai 两侧序列化都出孤儿 tool_result，当轮下一次模型
+    调用两家 API 必 400（协议死局）。"""
+    (tmp_path / "c.txt").write_text("findme", encoding="utf-8")
+    provider = FakeProvider([
+        [
+            ToolUseBlock(id="c1", name="shot_a", input={}),
+            ToolUseBlock(id="c2", name="shot_b", input={}),
+            ToolUseBlock(id="c3", name="grep", input={"pattern": "findme"}),
+        ],
+        [TextBlock(text="done")],
+    ])
+    agent = make_agent(provider, tmp_path)
+    agent.registry.register(_ImageTool("shot_a"))
+    agent.registry.register(_ImageTool("shot_b"))
+    events = await collect(agent, "拍两张再搜一下", auto_respond=None)
+
+    # 历史：assistant 的全部 tool_result 先落齐，截图 user 消息统一在其后
+    roles = [m.role for m in agent.history]
+    assert roles == [
+        "user", "assistant", "tool", "tool", "tool", "user", "user", "assistant",
+    ]
+    img_user_idx = [
+        k for k, m in enumerate(agent.history)
+        if m.role == "user" and any(isinstance(b, ImageBlock) for b in m.content)
+    ]
+    tool_result_idx = [k for k, m in enumerate(agent.history) if m.role == "tool"]
+    assert img_user_idx and min(img_user_idx) > max(tool_result_idx)
+    # 截图归属不乱：每条截图 user 消息仍各带各的图
+    assert [
+        [b.data for b in agent.history[k].content if isinstance(b, ImageBlock)]
+        for k in img_user_idx
+    ] == [["shot_a"], ["shot_b"]]
+
+    # 事件线不受影响：ToolCallFinished 仍按调用即时带各自的图（与历史两条线）
+    finished = [e for e in events if e.kind == "tool_call_finished"]
+    assert [e.name for e in finished] == ["shot_a", "shot_b", "grep"]
+    assert [[b["data"] for b in e.images] for e in finished[:2]] == [["shot_a"], ["shot_b"]]
+    assert finished[2].images == []
+
+    _assert_wire_pairs(agent.history)
+
+
+async def test_mixed_serial_batch_screenshot_after_all_tool_results(tmp_path):
+    """产图只读工具与需确认工具同一条 assistant 消息（串行混批，发现 7 同根）：
+    截图 user 消息同样等全部 tool_result 落齐后才追加，序列化不留孤儿。"""
+    provider = FakeProvider([
+        [
+            ToolUseBlock(id="c1", name="shot_a", input={}),
+            ToolUseBlock(id="c2", name="write_file", input={"path": "d.txt", "content": "x"}),
+        ],
+        [TextBlock(text="done")],
+    ])
+    agent = make_agent(provider, tmp_path)
+    agent.registry.register(_ImageTool("shot_a"))
+    events = await collect(agent, "拍一张再写文件")
+
+    assert (tmp_path / "d.txt").exists()
+    roles = [m.role for m in agent.history]
+    assert roles == ["user", "assistant", "tool", "tool", "user", "assistant"]
+    # 事件线：shot_a 的完成事件仍带自己的图
+    finished = [e for e in events if e.kind == "tool_call_finished"]
+    assert [e.name for e in finished] == ["shot_a", "write_file"]
+    assert [b["data"] for b in finished[0].images] == ["shot_a"]
+    assert finished[1].images == []
+
+    _assert_wire_pairs(agent.history)

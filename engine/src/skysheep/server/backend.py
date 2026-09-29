@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess  # noqa: F401  测试按模块属性 patch Popen
 import sys
 import time
@@ -123,6 +124,7 @@ from ..mcp import (
     preset_by_name,
     presets_public,
     remove_server,
+    resolve_runtime_command,
     save_servers,
 )
 from ..messages import ImageBlock, Message, TextBlock
@@ -132,6 +134,7 @@ from ..models.base import ProviderDone, ProviderTextDelta
 from ..models.factory import build_provider
 from ..models.probe import probe_context_limit, probe_provider_models
 from ..obs import info as obs_info
+from ..obs import warning as obs_warning
 from ..security import leases
 from ..security.gate import RULE_KINDS, PermissionGate
 from ..security.trust import STATE_PENDING, WorkspaceTrust, list_trusted, revoke_by_path
@@ -200,27 +203,31 @@ STREAM_MERGE_MAX_CHARS = 2_000
 # 可不经合并直接发出的高频增量事件类型（其余事件一律先冲刷缓冲，保证顺序）。
 _MERGEABLE_DELTA_KINDS = ("text_delta", "thinking_delta", "roundtable_member_delta")
 
+# 二次取消后收割后台落库的兜底超时（秒）：正常落库毫秒级完成，超时说明库被
+# 锁死等异常，不能拖着整个收尾无限等（排队轮还等着交棒）。
+_PERSIST_HARVEST_TIMEOUT = 10.0
+
 
 class StreamDeltaMerger:
     """把连续的流式增量拼成批量事件，减少 WS 帧数。
 
     设计要点：
-    - **顺序不变**：任何非增量事件（工具调用、权限、用量、轮末…）到达时先冲刷缓冲；
-      不同类型增量（text ↔ thinking）互相切换也各自冲刷，不跨界合并。
-    - **不增加首字延迟**：缓冲为空时首条增量立即发出，之后才进入窗口聚批。
-      首条发出后记下已发长度（``_sent``），flush 只补发之后累积的部分。
+    - **顺序不变**：任何非增量事件（工具调用、权限、用量、轮末…）到达时先冲刷全部
+      缓冲；同一 key 的增量只在各自缓冲里按到达序合并，不跨界合并。
+    - **不增加首字延迟**：某类缓冲为空时首条增量立即发出，之后才进入窗口聚批。
+      首条发出后记下已发长度（``sent``），flush 只补发之后累积的部分。
     - **收尾必冲刷**：``flush()`` 必须在轮末、异常、取消三条路径上都调到，
       否则最后几十毫秒的增量会丢在前端。
-    - ``roundtable_member_delta`` 带 member_index/round，只在同一成员同一轮内合并。
+    - **按 key 分桶**：普通对话只有 (kind,) 一个桶，行为与旧单缓冲一致；
+      圆桌并行成员（member_index/round 各成一桶）交错流式时，A 成员的增量
+      不再把 B 的缓冲整个冲掉——否则并行度放大帧率的场景里合并完全失效。
     """
 
     def __init__(self, emit: EmitFn, *, window_s: float = STREAM_MERGE_S) -> None:
         self._emit = emit
         self._window_s = window_s
-        self._pending: dict | None = None
-        self._key: tuple | None = None
-        self._sent = 0  # 当前缓冲里已经发出去的字符数
-        self._last_emit = 0.0
+        # key -> 缓冲桶 {ev, text, sent, last_emit}；dict 保序，flush 按首到序冲刷
+        self._buckets: dict[tuple, dict] = {}
         self._timer: asyncio.Task | None = None
 
     @staticmethod
@@ -258,56 +265,70 @@ class StreamDeltaMerger:
         except Exception:  # noqa: BLE001 - 客户端断开不影响后续事件
             pass
 
+    @staticmethod
+    def _bucket_tail(bucket: dict) -> str:
+        full = bucket.get("text", "") or ""
+        return full[bucket["sent"]:]
+
+    async def _flush_bucket(self, bucket: dict) -> None:
+        tail = self._bucket_tail(bucket)
+        bucket["sent"] = len(bucket.get("text", "") or "")
+        if tail:
+            await self._emit({**bucket["ev"], "text": tail})
+
     async def send(self, ev: dict) -> None:
         key = self._delta_key(ev)
         if key is None:
-            # 非增量事件：先冲刷，再原样发出（工具/权限/轮末事件绝不能等）
+            # 非增量事件：先冲刷全部缓冲，再原样发出（工具/权限/轮末事件绝不能等）
             await self.flush()
             await self._emit(ev)
             return
 
         now = time.monotonic()
         text = ev.get("text", "") or ""
+        bucket = self._buckets.get(key)
         can_merge = (
-            self._pending is not None
-            and self._key == key
-            and now - self._last_emit < self._window_s
-            and len(self._pending.get("text", "")) < STREAM_MERGE_MAX_CHARS
+            bucket is not None
+            and now - bucket["last_emit"] < self._window_s
+            and len(bucket["text"]) < STREAM_MERGE_MAX_CHARS
         )
         if can_merge:
             # 窗口内且同类型：只累积（这里无 await，与定时器不会交错）
-            self._pending["text"] = self._pending.get("text", "") + text
+            bucket["text"] = bucket["text"] + text
             return
 
-        # 新一段增量的首条（或超过窗口 / 超过上限）：先冲刷旧缓冲，再立即发这条
-        await self.flush()
-        self._pending = dict(ev)
-        self._pending["text"] = text
-        self._key = key
-        self._sent = len(text)
-        self._last_emit = now
-        await self._emit(self._pending)  # 首条立即发：首字延迟与合并前一致
+        # 新一段增量的首条（或超过窗口 / 超过上限）：先补发该 key 旧缓冲的尾巴
+        # （其他 key 的桶不受影响——并行成员各自聚批），再立即发这条。
+        # await 前先摘桶：补尾的 emit 会挂起，旧桶若还挂在 _buckets 里，并发
+        # send() 的同 key 增量会合进这个已标记 sent 的桶、随后随替换整段丢失；
+        # 摘掉后并发增量必走「新段首条立即发」路径，一字不丢（同步合并路径
+        # 上面已 return，不经过这里，桶序不受影响）。
+        if bucket is not None:
+            del self._buckets[key]
+            await self._flush_bucket(bucket)
+        first = dict(ev)
+        first["text"] = text
+        self._buckets[key] = {
+            "ev": first, "text": text, "sent": len(text), "last_emit": now,
+        }
+        await self._emit(first)  # 首条立即发：首字延迟与合并前一致
         self._schedule_flush()  # 预约冲刷，避免尾巴被无限期揨住
 
     async def flush(self) -> None:
-        """补发缓冲里尚未发出的增量；无待发内容时是空操作。"""
+        """补发所有缓冲里尚未发出的增量；无待发内容时是空操作。"""
         timer = self._timer
         if timer is not None:
             self._timer = None
             # 不要取消自己（定时器回调也走 flush）
             if timer is not asyncio.current_task():
                 timer.cancel()
-        pending = self._pending
-        tail = ""
-        if pending is not None:
-            full = pending.get("text", "") or ""
-            tail = full[self._sent:]
-        self._pending = None
-        self._key = None
-        self._sent = 0
-        if pending is None or not tail:
-            return
-        await self._emit({**pending, "text": tail})
+        # 边冲边摘：冲刷要 await emit，若桶留在 _buckets 里（快照循环 + 末尾统一
+        # clear），挂起期间并发 send() 的同 key 增量仍在合并窗口内、会合进已标记
+        # sent 的桶，随后随 clear() 整段丢失且无定时器兜底；先摘掉再冲，并发增量
+        # 看不到旧桶、必走「新段首条立即发」路径，恢复旧单缓冲「await 前先摘除」
+        # 的不变式
+        for key in list(self._buckets.keys()):
+            await self._flush_bucket(self._buckets.pop(key))
 
     async def aclose(self) -> None:
         await self.flush()
@@ -383,6 +404,38 @@ def _unified_diff(before: str, after: str) -> str:
             before.splitlines(), after.splitlines(), fromfile="改前", tofile="改后", lineterm=""
         )
     )
+
+
+def _checkpoint_diff_files(cp: dict) -> list[dict]:
+    """检查点「审查」的逐文件对比（同步函数，调用方用 to_thread 离开事件循环）。
+
+    逐文件读磁盘现状 + difflib 差异计算都是重量级同步活，大检查点回滚/审查
+    直接跑在事件循环上会把整个引擎（所有会话的流式输出）卡住数秒。
+    """
+    files: list[dict] = []
+    for path_s, pre in cp["files"].items():
+        try:
+            cur: bytes | None = Path(path_s).read_bytes()
+        except OSError:
+            cur = None
+        if b"\x00" in (pre or b"") or b"\x00" in (cur or b""):
+            files.append({"path": path_s, "status": "binary", "diff": ""})
+            continue
+        if pre is None and cur is None:
+            status, before, after = "gone", "", ""  # 新建的文件后来又被删了
+        elif pre is None:
+            status, before, after = "created", "", _decode_bytes(cur)
+        elif cur is None:
+            status, before, after = "deleted", _decode_bytes(pre), ""
+        elif pre == cur:
+            status, before, after = "unchanged", _decode_bytes(pre), _decode_bytes(cur)
+        else:
+            status, before, after = "modified", _decode_bytes(pre), _decode_bytes(cur)
+        diff = "" if status in ("unchanged", "gone", "binary") else _unified_diff(before, after)
+        if len(diff) > MAX_DIFF_CHARS:
+            diff = diff[:MAX_DIFF_CHARS] + "\n…（diff 过长，已截断）"
+        files.append({"path": path_s, "status": status, "diff": diff})
+    return files
 
 
 @dataclass
@@ -628,6 +681,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._base_queue: list = []
         self._base_run_task: asyncio.Task | None = None
         self._base_recorder: ChangeRecorder | None = None
+        # 各会话在飞的后台落库任务（sid → persist_task）：二次取消后主轮任务
+        # 可能已结束而落库还在独立任务里跑，delete_session 等的必须是它本身
+        # （等主轮任务等不到它），否则消息插在删除之后留下孤儿行
+        self._persist_tasks: dict[str, asyncio.Task] = {}
         # workspace trust 懒建：拿到 working_dir 后才能算指纹
         self._trust: WorkspaceTrust | None = None
         # 会话运行时池（OrderedDict：访问即移到末尾，最旧的在前面淘汰）
@@ -695,6 +752,27 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     # 会单调上涨——「用一天后变卡」的主因。超出上限从最旧开始回收空闲的；
     # 历史都在 SQLite，下次 activate/send 会带着历史重建。
     MAX_RUNTIMES = 12
+
+    # 交互轮的全局并发上限：跨会话并行不受约束时，一个客户端可以同时拉起
+    # 几十个会话的轮次空烧 token（每日预算护栏只限费用不限并发）。定时任务有
+    # _cron_running 去重、流水线有 PIPELINE_GLOBAL_CAP，交互轮此前没有闸。
+    MAX_INTERACTIVE_TURNS = 4
+
+    def _running_turn_count(self) -> int:
+        """当前真正在跑的交互轮数（含会话懒创建窗口占住基底位的那一轮）。
+
+        定时任务/流水线的轮用本地 runtime（不进 self.runtimes、不占运行位），
+        天然不计入；done 的任务也不计（运行位在轮末释放）。
+        """
+        n = 0
+        for rt in self.runtimes.values():
+            t = rt.run_task
+            if t is not None and not t.done():
+                n += 1
+        b = self._base_run_task
+        if b is not None and not b.done():
+            n += 1
+        return n
 
     def _get_runtime(self, session_id: str) -> SessionRuntime:
         """取（或懒建）一个会话的运行时；新 runtime 自带系统提示词与完整工具集。
@@ -1083,7 +1161,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             pass
         if self.channels is not None:
             try:
-                await self.channels.stop()
+                # 渠道收尾最坏要几十秒（taskkill / proc.wait / lark-cli event stop
+                # 各带超时上限），而桌面壳只给优雅退出 1.5 秒、更新路径随后
+                # os._exit：这里必须给 wait_for 上限，别让渠道清理拖垮整个收尾
+                # 链。截断后剩下的交给子进程自己的超时与进程退出兜底。
+                await asyncio.wait_for(self.channels.stop(), timeout=5.0)
             except Exception:  # noqa: BLE001
                 pass
         for rt in self.runtimes.values():
@@ -1128,6 +1210,22 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.provider_name = name
         self.provider_model = pc.model
         return provider
+
+    def _build_detached_provider(self, name: str, model: str | None) -> Provider:
+        """构建不接管「当前模型」状态的独立 provider（辅助对话专用）。
+
+        _build_provider 会顺带改写 provider_name / provider_model——那是主
+        对话的状态面（底部徽章、model.list 的 current 都读它），辅助对话换
+        模型不能碰；这里按同款校验只构建不登记。"""
+        if self._provider_factory_override is not None:  # 测试/演示注入
+            return self._provider_factory_override()
+        pc = self.cfg.providers[name]
+        if model:
+            pc = pc.model_copy(update={"model": model})
+        try:
+            return build_provider(name, pc)
+        except ConfigError as e:
+            raise RuntimeError(str(e)) from e
 
     # ---- 系统提示词 / 会话 ----
 
@@ -1468,12 +1566,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 轮次起点重验工作区信任（审查 P2-4）：会话运行期间项目级配置被外部
         # 改动（git pull 等）时，趁本轮开始断开项目级 MCP、重发现技能。
         await self.recheck_trust_before_turn()
+        # 钉住目标会话（并发正确性）：send 执行期间有多个 await（激活、用量、
+        # 引用清洗…），期间并发请求可以改写全局活动指针 self.session（另一条
+        # send / session.activate 都会）。之后一律用入口钉住的 target_sid 推导
+        # runtime 与落库，不再从 self.session 二次读取——否则 A 会话的轮会跑到
+        # B 会话的 runtime 里并落库到 B。
+        target_sid = str(session_id) if session_id else (
+            self.session.id if self.session else None
+        )
         if session_id and (not self.session or self.session.id != session_id):
             await self.activate_session(session_id)
         # 引用排除目标会话自己：引用当前对话没有意义
-        clean_refs = self._sanitize_refs(
-            refs, exclude=self.session.id if self.session else None
-        )
+        clean_refs = self._sanitize_refs(refs, exclude=target_sid)
         if self.provider is None:
             raise RuntimeError(
                 "尚未配置可用的模型 API Key——"
@@ -1503,8 +1607,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 在任何 await 之前先占住运行位：否则两条背靠背到达的消息会在
         # new_session() 的挂起点上双双判为空闲、并发执行（撞消息表唯一约束）。
         # 占位判断同时看基底位（会话懒创建窗口）与活动 runtime 位；后来者排队。
+        # 全程用钉住的 target_sid，不重读 self.session（见上）。
         cur = asyncio.current_task()
-        rt_now = self.runtimes.get(self.session.id) if self.session else None
+        rt_now = self.runtimes.get(target_sid) if target_sid else None
         holder = rt_now.run_task if rt_now else self._base_run_task
         if holder is not None and not holder.done() and holder is not cur:
             loop = asyncio.get_running_loop()
@@ -1522,17 +1627,26 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 self._base_queue.append(item)
                 await emit(QueueUpdated(pending=len(self._base_queue)).model_dump())
             return await item.fut
+        # 全局并行轮数上限（评审加固）：单会话排队（上面）不增加全局并发——交棒
+        # 接替的是刚结束的那轮；真正新起一轮的 send 才受这道闸。定时任务/流水线
+        # 用本地 runtime，不进 self.runtimes，不受也不占这额度。
+        if self._running_turn_count() >= self.MAX_INTERACTIVE_TURNS:
+            raise RuntimeError(
+                f"当前并行任务太多（已有 {self.MAX_INTERACTIVE_TURNS} 个会话同时在跑），"
+                "请等部分会话的当前轮结束，或先停止不需要的轮次再发送。"
+            )
         self._base_run_task = cur  # 抢占基底位，掩护随后的懒创建 await 窗口
-        if self.session is None:
+        if target_sid is None:
             await self.new_session()  # 懒创建：第一条消息才落库
-        runtime = self._get_runtime(self.session.id)
+            target_sid = self.session.id if self.session else None
+        runtime = self._get_runtime(target_sid)
         runtime.run_task = cur
         self._base_run_task = None  # 运行位已落到 runtime，基底占位清除
         try:
             return await self._run_turn_pipeline(
                 text, emit, plan_mode, roundtable=roundtable, members_params=members,
                 images=clean_images, runtime=runtime,
-                session_id=self.session.id, wants_title=wants_title,
+                session_id=target_sid, wants_title=wants_title,
                 regenerate=regenerate, compare=compare, refs=clean_refs,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
             )
@@ -1804,21 +1918,29 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             # 让 WS 层返回 ok=false 的诚实错误。
             turn_exc = e
         finally:
-            # 先冲刷流式增量缓冲：取消/异常/正常结束三条路径都要走到，
+            # 先恢复完整工具集（只读注册表只在本轮生效）——同步操作必须放在
+            # finally 里第一个 await 之前：第二次取消（用户连点两次停止，或
+            # 停止与轮末竞态）只能在 await 点投递，同步段不会被跳过。若恢复
+            # 被跳过，runtime 常驻，该会话之后所有轮次都拿着只读注册表跑。
+            if plan_mode and readonly_registry is not None:
+                agent.registry = self._build_full_registry(runtime.recorder)
+            # 再冲刷流式增量缓冲：取消/异常/正常结束三条路径都要走到，
             # 否则最后几十毫秒的正文会丢在前端（用户看到回答缺尾）。
-            # 放在恢复工具集之前，保证 flush 出去的事件仍带本轮 session_id 顺序。
+            # 收尾期的重复取消在此吞掉（首个取消已在上面捕获、语义已定为
+            # stopped；与下方落库 shield 的 uncancel 取向一致），保证后面的
+            # 落库/用量/交棒总是执行，排队中的消息不会永远等不到响应。
             try:
                 await merger.aclose()
-            except Exception:  # noqa: BLE001 - 客户端断开不影响收尾
+            except asyncio.CancelledError:
+                asyncio.current_task().uncancel()
+            except BaseException:  # noqa: BLE001 - 客户端断开不影响收尾
                 pass
-            if plan_mode and readonly_registry is not None:
-                # 恢复完整工具集（只读注册表只在本轮生效）
-                agent.registry = self._build_full_registry(runtime.recorder)
 
         # ---- 收尾必须严格串行：先落库，再交棒给排队轮，否则两条持久化
         # ---- 并发会撞 messages(session_id, seq) 唯一约束。
         # 取消保护：用户点停止时，已产出的消息仍要落库、运行位必须释放；
-        # shield 让落库在后台继续，CancelledError 被捕获后正常走完收尾返回 stopped 结果，
+        # shield 让落库在后台继续，CancelledError 被捕获后先收割后台落库再走
+        # 完收尾返回 stopped 结果（二次取消下「先落库再交棒」同样成立，见下），
         # 避免 send() 抛异常导致 runtime.run_task 悬挂、后续消息误入死队列。
         # 压缩摘要不落库：它是引擎生成的上下文产物，入库会被当成一条 user 消息
         # 回传前端（渲染成假的用户气泡），也会进 FTS 与会话导出；不落库的代价
@@ -1828,11 +1950,59 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if m.id not in pre_ids and not is_compaction_summary(m)
         ]
         _stamp_turn_estimate(new_msgs, turn_estimate, turn_t0)
+        # 落库建成显式任务（shield 的内层）：被停时它在后台继续跑完；登记进
+        # _persist_tasks 供 delete_session 等待（等主轮任务等不到后台落库）。
+        persist_task = asyncio.get_running_loop().create_task(
+            self._persist_turn(sid, new_msgs)
+        )
+        self._persist_tasks[sid] = persist_task
+        persist_task.add_done_callback(
+            lambda t, _sid=sid: self._persist_tasks.pop(_sid, None)
+            if self._persist_tasks.get(_sid) is t else None
+        )
         try:
-            await asyncio.shield(self._persist_turn(sid, new_msgs))
+            await asyncio.shield(persist_task)
         except asyncio.CancelledError:
             stopped = True
             asyncio.current_task().uncancel()
+            # 二次取消（用户连点两次停止）落在这里时，persist_task 已在后台
+            # 独立继续跑。不等它完成就走 _pop_next 交棒，交棒轮自己的落库会
+            # 与这份后台旧落库并发「SELECT MAX(seq)+1 → INSERT」，撞
+            # messages(session_id, seq) 唯一约束——要么交棒轮报 IntegrityError，
+            # 要么被停轮的 INSERT 失败被 shield 回调静默吞掉、消息无声丢失。
+            # 所以必须先收割后台落库、再继续收尾与交棒；截止时间兜底防卡死，
+            # 等待期间再来的取消同样吞掉（语义已定为 stopped）。
+            deadline = time.monotonic() + _PERSIST_HARVEST_TIMEOUT
+            while not persist_task.done() and time.monotonic() < deadline:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(persist_task),
+                        timeout=max(0.05, deadline - time.monotonic()),
+                    )
+                except asyncio.CancelledError:
+                    asyncio.current_task().uncancel()
+                except TimeoutError:
+                    pass  # 到点再看一眼：deadline 兜底，不无限等
+            if not persist_task.done():
+                # 落库卡死（如库被锁）不能拖着收尾无限等：取消后台落库，
+                # 宁可这轮消息不落库也不让排队轮永远起不来
+                persist_task.cancel()
+                obs_warning(
+                    "persist",
+                    f"turn persist harvest timed out, cancelled sid={sid}",
+                    session_id=sid,
+                )
+            elif not persist_task.cancelled():
+                exc = persist_task.exception()
+                if exc is not None:
+                    # 收割异常（不再被 shield 回调静默吞掉）：停止语义下不上抛，
+                    # 只记日志——上抛会把「停止」变成报错；消息仍在 agent 历史，
+                    # 下次正常落库可补上
+                    obs_warning(
+                        "persist",
+                        f"turn persist failed after cancel sid={sid}: {exc!r}",
+                        session_id=sid,
+                    )
 
         # 用量记录：本轮实际消耗的输入/输出 tokens（含缓存命中数，费用按缓存价拆算）
         try:
@@ -2351,7 +2521,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         )
         skills_text = self.skills.render_prompt_section() if self.skills else ""
         mcp_names = {t.name for t in (self.mcp_tools or [])}
-        schemas = agent.registry.schemas()
+        # registry 为 None = runtime 已被 _forget_runtime 释放（切项目/删会话时
+        # 被取消的轮还在收尾）：此时拿不到工具清单，按空表估算，别让收尾炸掉
+        schemas = agent.registry.schemas() if agent.registry is not None else []
         buckets = [
             ("消息", estimate_tokens([m for m in agent.history if m.role != "system"])),
             ("系统工具", estimate_text_tokens(json.dumps(
@@ -2757,7 +2929,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         写同一文件的场景）：有冲突且未 force 时不动磁盘，返回 conflict 结果，
         前端把冲突文件列给用户确认后再带 force=true 重试。
         """
-        cp = self.checkpoints.get(checkpoint_id)
+        # get/restore 都是重量级同步磁盘活（读 blob、全文件哈希比对、原子写回；
+        # 单条上限 256MB），与 save 一样包进线程跑，大检查点不冻结事件循环。
+        # CheckpointConflictError / KeyError 可正常穿过 to_thread 传回。
+        cp = await asyncio.to_thread(self.checkpoints.get, checkpoint_id)
         if cp is None:
             raise RuntimeError(
                 f"检查点 {checkpoint_id} 不存在或已过期（每会话保留最近 50 轮，更早的会被淘汰）"
@@ -2772,7 +2947,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if cp_rt and cp_rt.run_task and not cp_rt.run_task.done():
             raise RuntimeError("该会话正在运行，等当前轮结束再回滚")
         try:
-            files = self.checkpoints.restore(checkpoint_id, force=force)
+            files = await asyncio.to_thread(
+                self.checkpoints.restore, checkpoint_id, force=force
+            )
         except CheckpointConflictError as e:
             return {
                 "conflict": True,
@@ -2809,36 +2986,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     async def checkpoint_diff(self, checkpoint_id: str) -> dict:
         """「审查」标签页：某个检查点里每个文件的 改前快照 vs 磁盘现状 的 unified diff。"""
-        cp = self.checkpoints.get(checkpoint_id)
+        # get（读 blob）与逐文件对比（读磁盘 + difflib）都离环跑，见 restore_checkpoint
+        cp = await asyncio.to_thread(self.checkpoints.get, checkpoint_id)
         if cp is None:
             raise RuntimeError(
                 f"检查点 {checkpoint_id} 不存在或已过期（每会话保留最近 50 轮，更早的会被淘汰）"
             )
         # 同 restore：凭枚举 id 不能读别的项目会话的文件快照（B12）
         await self._check_checkpoint_ownership(cp)
-        files: list[dict] = []
-        for path_s, pre in cp["files"].items():
-            try:
-                cur: bytes | None = Path(path_s).read_bytes()
-            except OSError:
-                cur = None
-            if b"\x00" in (pre or b"") or b"\x00" in (cur or b""):
-                files.append({"path": path_s, "status": "binary", "diff": ""})
-                continue
-            if pre is None and cur is None:
-                status, before, after = "gone", "", ""  # 新建的文件后来又被删了
-            elif pre is None:
-                status, before, after = "created", "", _decode_bytes(cur)
-            elif cur is None:
-                status, before, after = "deleted", _decode_bytes(pre), ""
-            elif pre == cur:
-                status, before, after = "unchanged", _decode_bytes(pre), _decode_bytes(cur)
-            else:
-                status, before, after = "modified", _decode_bytes(pre), _decode_bytes(cur)
-            diff = "" if status in ("unchanged", "gone", "binary") else _unified_diff(before, after)
-            if len(diff) > MAX_DIFF_CHARS:
-                diff = diff[:MAX_DIFF_CHARS] + "\n…（diff 过长，已截断）"
-            files.append({"path": path_s, "status": status, "diff": diff})
+        files = await asyncio.to_thread(_checkpoint_diff_files, cp)
         return {"id": checkpoint_id, "ts": cp["ts"], "files": files}
 
 
@@ -3215,6 +3371,65 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "label": (f"{name} / {model}" if name and model
                       else name if name else ""),
         }
+
+    # ---- 辅助对话模型（设置/清除走 WS：aux.model.set / aux.model.get） ----
+
+    def _aux_model_pref(self) -> tuple[str, str]:
+        """辅助对话的专用模型偏好（ui.json）：(provider, model)，空 = 跟随主对话。
+
+        服务可能已被删除、模型可能已被下架，读取时校验，失效即视为未设置。"""
+        try:
+            prefs = self._read_ui_prefs()
+        except Exception:
+            return "", ""
+        name = str(prefs.get("aux_model_provider") or "").strip()
+        if not name or name not in self.cfg.providers:
+            return "", ""
+        model = str(prefs.get("aux_model_name") or "").strip()
+        pc = self.cfg.providers[name]
+        if model and pc.models and model not in pc.models:
+            model = ""
+        return name, model
+
+    def aux_model_state(self) -> dict:
+        name, model = self._aux_model_pref()
+        return {
+            "provider": name,
+            "model": model,
+            "label": (f"{name} / {model}" if name and model
+                      else name if name else ""),
+            # 跟随主对话时入口徽章画主对话服务的 logo：给服务名而不是让前端
+            # 拆 main_label 字符串；主模型切换后重开面板即刷新
+            "main_provider": self.provider_name or "",
+            "main_label": (f"{self.provider_name} / {self.provider_model}"
+                           if self.provider_name else ""),
+        }
+
+    async def set_aux_model(self, params: dict) -> dict:
+        """设定 / 清除「辅助对话模型」。
+
+        name 传空串 = 清除（辅助对话回到跟随主对话）；name+model = 辅助面板
+        用专用 provider 一问一答，不影响主对话与各会话的 runtime。服务名必须
+        在 config.toml 里存在，模型名必须是该服务已登记的模型（或留空 = 用
+        该服务的默认模型）。"""
+        name = str(params.get("name") or "").strip()
+        model = str(params.get("model") or "").strip()
+        if name:
+            if name not in self.cfg.providers:
+                raise RuntimeError(f"未知服务：{name}")
+            pc = self.cfg.providers[name]
+            if model and pc.models and model not in pc.models:
+                raise RuntimeError(f"服务 {name} 没有登记模型 {model}，先在模型服务里添加")
+        elif model:
+            raise RuntimeError("清除辅助对话模型时不能只留模型名")
+        try:
+            await self._write_ui_prefs({
+                "aux_model_provider": name or None,
+                "aux_model_name": model or None,
+            })
+        except Exception as e:
+            raise RuntimeError(f"写入偏好失败：{e}") from e
+        return self.aux_model_state()
 
     def reasoning_state(self) -> dict:
         """当前思考强度状态：是否支持 + 当前档位 + 各服务自己的档位。"""
@@ -3900,8 +4115,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     async def add_mcp_preset(self, name: str, scope: str = "global") -> dict:
         """一键添加内置预设 MCP 服务：按预设原文写入 mcp.json 并立即连接。
 
-        args 里的 {dir} 占位符替换为当前工作目录；同名已存在时不覆盖
-        （save_mcp_server 用 overwrite=False，走 skipped 通道）。
+        args 里的 {dir} 占位符替换为当前工作目录；command 先经
+        resolve_runtime_command 解析（uv 装在官方默认落点但不在 PATH 时写绝对
+        路径）。同名已存在时不覆盖（save_mcp_server 用 overwrite=False，
+        走 skipped 通道）。
         """
         preset = preset_by_name(name)
         if preset is None:
@@ -3913,7 +4130,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         args = [str(a).replace("{dir}", str(self.working_dir or "")) for a in preset["args"]]
         result = await self.save_mcp_server(
             preset["name"],
-            command=preset["command"],
+            # uv 装在官方默认落点但不在 PATH 时解析成绝对路径，启动不依赖 PATH
+            command=resolve_runtime_command(preset["command"]),
             args=args,
             readonly=preset["readonly"],
             scope=scope,
@@ -4911,6 +5129,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     await asyncio.wait_for(asyncio.shield(task), timeout=10)
                 except Exception:  # noqa: BLE001 - 超时/任务异常都不拦删除本身
                     pass
+        # 二次取消窗口：主轮任务可能已经结束，而被停轮的后台落库还在独立任务
+        # 里跑——这里等的必须是那份后台落库本身（等主任务等不到它），不然消息
+        # 插在删除之后留下孤儿行（FK 未启用，插得进去）。定时任务/流水线的本地
+        # runtime 不在 self.runtimes 里，这份等待不能放在上面的 rt 分支内。
+        pt = self._persist_tasks.get(session_id)
+        if pt is not None and not pt.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(pt), timeout=10)
+            except Exception:  # noqa: BLE001 - 超时/任务异常都不拦删除本身
+                pass
         await self.store.delete_session(session_id)
         # 检查点（改前文件快照）随会话一起清：会话没了，快照不该继续占磁盘
         await asyncio.to_thread(self.checkpoints.forget_session, session_id)
@@ -5054,12 +5282,22 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if (pre_rules or post_rules or stop_rules) else None
         self.checkpoints = CheckpointStore(root=self._checkpoint_root())
 
-        # 旧项目的会话 runtime 全部失效：停任务、释放、清空
+        # 旧项目的会话 runtime 全部失效：停任务、落空排队轮、释放、清空。
+        # 排队轮的 Future 必须逐个落空（与 delete_session 同一口径）：否则那些
+        # 发消息的请求要么等到被取消的轮在旧上下文里交棒空跑一轮后拿到裸
+        # 内部错误，要么在取消落在 pipeline try 之前的窄竞态里永远挂死。
+        # 显式落空给等待方一条可读错误，队列清空也让交棒找不到旧轮次。
         for rt in list(self.runtimes.values()):
+            for item in list(rt.queue):
+                item.fail(RuntimeError("项目已切换，本次请求未执行"))
+            rt.queue.clear()
             t = rt.run_task
             if t and not t.done():
                 t.cancel()
             self._forget_runtime(rt)
+        for item in list(self._base_queue):
+            item.fail(RuntimeError("项目已切换，本次请求未执行"))
+        self._base_queue.clear()
         self.runtimes.clear()
 
         if self._base_agent is not None:
@@ -5358,6 +5596,25 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     # ---- 会话库备份：列出 / 手动备份 / 删除 / 恢复 ----
 
+    def _backup_busy_message(self, action: str) -> str | None:
+        """备份/恢复共用的预检：还有会写库的轮次在跑时返回可读原因（None = 放行）。
+
+        预检不能只扫 self.runtimes：定时任务与流水线节点用本地 SessionRuntime
+        跑、不注册进 runtimes（运行窗口分钟级，比交互轮长得多），懒创建窗口
+        还有基底占位 _base_run_task；渠道轮已注册进 runtimes，天然被覆盖。
+        checkpoint 与 copy 之间若还有并发写，会拷出撕裂的库文件。
+        """
+        if self._base_run_task is not None and not self._base_run_task.done():
+            return f"有会话正在启动，稍候再{action}"
+        for rt in self.runtimes.values():
+            if rt.run_task and not rt.run_task.done():
+                return f"还有会话正在运行，先停止（Esc）或等它结束再{action}"
+        if self._cron_running:
+            return f"有定时任务正在运行，等它结束再{action}"
+        if self._pipeline_running:
+            return f"有流水线节点正在运行，等它结束再{action}"
+        return None
+
     def list_session_backups(self) -> dict:
         """可恢复的会话库备份（含"当前"一项，便于对照时间）。"""
         items = self.store.list_backups()
@@ -5373,11 +5630,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         与恢复同一道防线：有会话在跑时不动手——checkpoint 与 copy 之间若还有
         并发写，可能拷出撕裂的库文件。
         """
-        running = [
-            rt for rt in self.runtimes.values() if rt.run_task and not rt.run_task.done()
-        ]
-        if running:
-            raise RuntimeError("还有会话正在运行，先停止（Esc）或等它结束再备份")
+        busy = self._backup_busy_message("备份")
+        if busy:
+            raise RuntimeError(busy)
         try:
             return await self.store.backup_now()
         except OSError as e:
@@ -5399,20 +5654,33 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         name = str(name or "").strip()
         if not name:
             raise RuntimeError("缺少备份文件名")
-        running = [
-            rt for rt in self.runtimes.values() if rt.run_task and not rt.run_task.done()
-        ]
-        if running:
-            raise RuntimeError("还有会话正在运行，先停止（Esc）或等它结束再恢复")
+        busy = self._backup_busy_message("恢复")
+        if busy:
+            raise RuntimeError(busy)
         try:
             result = await self.store.restore_backup(name)
-        except (OSError, ValueError, FileNotFoundError) as e:
-            raise RuntimeError(f"恢复失败：{e}") from None
+        except (OSError, ValueError, FileNotFoundError, sqlite3.DatabaseError) as e:
+            # 坏备份（撕裂/垃圾字节）报的是 sqlite3.DatabaseError，也要转成可读
+            # 错误（store 侧的恢复校验由 persist 组负责）。失败后把 store 连接
+            # 兜回来：restore 流程先关连接再换文件，半途失败连接可能停在「已关」
+            # 状态，不兜回的话之后所有会话功能都会跟着瘫
+            detail = f"恢复失败：{e}"
+            if getattr(self.store, "_db", None) is None:
+                try:
+                    await self.store.connect()
+                except Exception as re_err:  # noqa: BLE001 - 兜底失败如实附在错误里
+                    detail += f"；会话库重开失败：{re_err}"
+            raise RuntimeError(detail) from None
 
         # 内存状态全部重建：旧 runtime 的历史/消息 seq 都可能与新库不一致
         for rt in list(self.runtimes.values()):
             self._forget_runtime(rt)
         self.runtimes.clear()
+        # 懒创建毫秒级窗口可能仍有请求排在基底队列：预检已过但恢复动作进行中
+        # 插进来的请求必须逐个落空（与 _bind_project 同一口径），只 clear 会让
+        # 那些 Future 永远不 resolve（请求挂死）
+        for item in list(self._base_queue):
+            item.fail(RuntimeError("会话库已恢复，本次请求未执行"))
         self._base_queue.clear()
         self.session = None
         # 项目列表可能也随库回退了（备份里的项目集合是当时的样子）
@@ -5469,6 +5737,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         "pet_scale": (60, 140),
         # 阅读行宽：对话区消息卡最大宽度 px（680–1400；null/缺省 = 主题默认 880）
         "read_width": (680, 1400),
+        # 浏览器面板自适应（1=整页缩到面板宽，缺省；0=原始大小，横向滚动）
+        "browser_fit": (0, 1),
+        # 浏览器页面缩放百分比（50–300，Ctrl+滚轮步进；null/缺省 = 100%）
+        "browser_page_zoom": (50, 300),
         # 当前项目 id（0 = 无项目态）：后端在切项目/删项目/首启建项目时写入，
         # 重启后回到同一个状态；上限给足任意合法 SQLite rowid
         "active_project": (0, 2_147_483_647),
@@ -5564,6 +5836,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in order
         ) and order:
             prefs["project_order"] = order
+        qpos = data.get("quick_pos")
+        if qpos in ("top", "bottom"):
+            prefs["quick_pos"] = qpos
+        elif isinstance(qpos, dict):
+            pid = qpos.get("before")
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                prefs["quick_pos"] = {"before": pid}
         sorder = data.get("session_order")
         if isinstance(sorder, dict) and sorder:
             cleaned_sorder: dict[str, list[str]] = {}
@@ -5596,7 +5875,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if deduped_st:
                 prefs["session_tabs"] = deduped_st[: self.SESSION_TABS_MAX]
         for key in ("session_active", "hotkey", "default_model_name",
-                    "default_model_provider"):
+                    "default_model_provider", "aux_model_name", "aux_model_provider"):
             v = data.get(key)
             if isinstance(v, str) and v:
                 prefs[key] = v
@@ -5713,9 +5992,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """
         current = self._read_ui_prefs()
         for key, val in (prefs or {}).items():
-            known = ("right_tabs", "right_active", "project_order", "session_order",
-                     "tab_order", "session_tabs", "session_active",
+            known = ("right_tabs", "right_active", "project_order", "quick_pos",
+                     "session_order", "tab_order", "session_tabs", "session_active",
                      "hotkey", "default_model_name", "default_model_provider",
+                     "aux_model_name", "aux_model_provider",
                      "notif_log")
             if key not in self.UI_PREFS_LIMITS and key not in known \
                     and key not in self.STRING_PREFS:
@@ -5723,9 +6003,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if val is None:
                 current.pop(key, None)
                 continue
-            if key in ("hotkey", "default_model_name", "default_model_provider"):
-                # 自由字符串键（热键组合串 / 新会话默认模型）：非空收、空串删。
-                # 值域校验在各自消费方（desktop._parse_hotkey / set 时校验服务名）
+            if key in ("hotkey", "default_model_name", "default_model_provider",
+                       "aux_model_name", "aux_model_provider"):
+                # 自由字符串键（热键组合串 / 新会话默认模型 / 辅助对话模型）：
+                # 非空收、空串删。值域校验在各自消费方
+                # （desktop._parse_hotkey / set 时校验服务名）
                 if isinstance(val, str) and val.strip():
                     current[key] = val.strip()
                 else:
@@ -5771,6 +6053,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                         current.pop("project_order", None)
                 else:
                     current.pop("project_order", None)
+                continue
+            if key == "quick_pos":
+                # 快聊分组的锚点位置（经典/分组两视图共用）：固定项 top/bottom，
+                # 或插在某个项目前 {"before": 项目 id}；锚点项目不在了前端回落
+                # bottom（垫底），脏值一律删键（= 恢复默认垫底）
+                if val in ("top", "bottom"):
+                    current["quick_pos"] = val
+                elif isinstance(val, dict) and isinstance(val.get("before"), int) \
+                        and not isinstance(val.get("before"), bool) and val["before"] > 0:
+                    current["quick_pos"] = {"before": val["before"]}
+                else:
+                    current.pop("quick_pos", None)
                 continue
             if key == "session_order":
                 # 分组视图组内会话的拖动序：{ 项目 key: [会话 id, ...] }。项目 key 用

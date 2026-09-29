@@ -53,6 +53,11 @@ from ..tools.base import Safety, Tool, ToolContext, ToolError, ToolRegistry, tru
 from .context import compact_history, estimate_tokens
 from .effort import resolve_auto_effort
 
+# 瞬态错误判定在 core/provider_errors.py（context.py 压缩重试也要用，且不能
+# 反向导入 agent）——这里 re-export 维持 `from .agent import is_transient_error`
+# 的既有导入面（roundtable、测试）。
+from .provider_errors import is_transient_error
+
 MAX_TOOL_PREVIEW = 500
 
 # turn 内模型调用失败自动重试：只针对瞬态错误，且仅在还没吐出任何内容时
@@ -60,18 +65,6 @@ MAX_TOOL_PREVIEW = 500
 # 自动重试行为。
 MAX_STREAM_RETRIES = 3
 RETRY_BASE_DELAY_S = 1.5
-TRANSIENT_MARKERS = (
-    "429", "rate limit", "rate_limit", "too many requests",
-    "timeout", "timed out", "temporarily unavailable", "overloaded", "overloaded_error",
-    "502", "503", "504", "bad gateway", "service unavailable",
-    "connection error", "connection reset", "connection aborted",
-    "connection closed", "eof occurred", "incomplete", "apitimeout",
-)
-
-
-def is_transient_error(e: Exception) -> bool:
-    msg = str(e).lower()
-    return any(marker in msg for marker in TRANSIENT_MARKERS)
 
 
 # 上游因为「提示词超出上下文窗口」而拒绝时的特征串。这类错误重试无用，
@@ -403,6 +396,16 @@ class Agent:
             #    事件仍按原顺序产出，前端观感不变。
             i = 0
             tool_uses = assistant.tool_uses
+            # 截图 user 消息统一延后：先攒住（deferred_screenshots），等本条
+            # assistant 消息的全部 tool_result 落齐后（while 循环结束后）再追加。
+            # 产图工具（screenshot / read_image、MCP 图片内容）的截图若穿插在
+            # tool_result 之间，会把 tool_result 与配对的 assistant(tool_use)
+            # 隔开——Anthropic 的连续 tool_result 合并被含图 user 打断、OpenAI
+            # 的 tool 消息前面不再是 assistant(tool_calls)，当轮下一次模型调用
+            # 两家 API 都 400（协议死局；压缩边界还会把穿插 user 当安全起点，
+            # 见 context._safe_recent_start）。事件线不受影响：ToolCallFinished
+            # 的 images 仍按调用即时产出，事件与历史是两条线。
+            deferred_screenshots: list[list[ImageBlock]] = []
             while i < len(tool_uses):
                 tu = tool_uses[i]
                 tool = self.registry.get(tu.name)
@@ -508,7 +511,7 @@ class Agent:
                         results = await asyncio.gather(*(
                             self._exec_tool(b_tu, b_tool, ctx) for b_tu, b_tool, _ in batch
                         ))
-                        for (b_tu, b_tool, _), (result, is_error, duration_ms, diff) in zip(
+                        for (b_tu, b_tool, _), (result, is_error, duration_ms, diff, b_images) in zip(
                             batch, results, strict=True
                         ):
                             self.history.append(
@@ -516,17 +519,13 @@ class Agent:
                                     b_tu.id, truncate_output(result), is_error=is_error
                                 )
                             )
-                            # 并发批里同样处理图片与清单/日程事件（与串行路径一致）
-                            attached: list[ImageBlock] = []
-                            if not is_error and ctx.images:
-                                attached = list(ctx.images)
-                                ctx.images.clear()
-                                self.history.append(
-                                    Message.user(
-                                        "[screenshot] 上述工具附带以下屏幕截图（模型可直接查看）。",
-                                        images=attached,
-                                    )
-                                )
+                            # 图片按调用取回（_exec_tool 返回本次执行新增的）：
+                            # 并发批共用同一个 ctx，整桶收割会把第二张截图
+                            # 错配到第一个工具名下。user 消息本身延后到整批
+                            # tool_result 落齐后追加（见 while 循环前的注释）
+                            attached: list[ImageBlock] = b_images if not is_error else []
+                            if attached:
+                                deferred_screenshots.append(attached)
                             diff = diff if not is_error else ""
                             yield ToolCallFinished(
                                 tool_call_id=b_tu.id,
@@ -546,7 +545,7 @@ class Agent:
 
                 # 3c. 串行执行（单个只读或需确认/写入/执行的工具）
                 yield ToolCallStarted(tool_call_id=tu.id, name=tu.name, input=tu.input)
-                result, is_error, duration_ms, diff = await self._exec_tool(tu, tool, ctx)
+                result, is_error, duration_ms, diff, images = await self._exec_tool(tu, tool, ctx)
 
                 # 3d. post 钩子：仅通知，不影响工具结果
                 if self.hooks is not None and self.hooks.post_rules:
@@ -562,18 +561,12 @@ class Agent:
                 self.history.append(
                     Message.tool_result(tu.id, truncate_output(result), is_error=is_error)
                 )
-                # 工具产生的图片（screenshot）：作为 user 消息并入历史，模型才能看到；
-                # 同一事件带给前端内联展示
-                attached: list[ImageBlock] = []
-                if not is_error and ctx.images:
-                    attached = list(ctx.images)
-                    ctx.images.clear()
-                    self.history.append(
-                        Message.user(
-                            "[screenshot] 上述工具附带以下屏幕截图（模型可直接查看）。",
-                            images=attached,
-                        )
-                    )
+                # 工具产生的图片（screenshot）：按调用取回（_exec_tool 返回本次
+                # 执行新增的），user 消息延后到本条 assistant 的全部 tool_result
+                # 落齐后追加（见 while 循环前的注释）；同一事件仍带给前端内联展示
+                attached: list[ImageBlock] = images if not is_error else []
+                if attached:
+                    deferred_screenshots.append(attached)
                 diff = diff if not is_error else ""
                 yield ToolCallFinished(
                     tool_call_id=tu.id,
@@ -589,6 +582,17 @@ class Agent:
                 if not is_error and tu.name == "schedule_write":
                     yield ScheduleUpdated()
                 i += 1
+
+            # 本条 assistant 的全部 tool_result 已落齐：此刻才追加截图 user 消息，
+            # 保证 user(tool_result) 前面必是 assistant(tool_use)（协议自洽）
+            for attached in deferred_screenshots:
+                if attached:
+                    self.history.append(
+                        Message.user(
+                            "[screenshot] 上述工具附带以下屏幕截图（模型可直接查看）。",
+                            images=attached,
+                        )
+                    )
 
         if finished_by_error:
             stop_reason = "error"
@@ -615,12 +619,18 @@ class Agent:
 
     async def _exec_tool(
         self, tu: ToolUseBlock, tool: Tool, ctx: ToolContext,
-    ) -> tuple[str, bool, int, str]:
-        """执行单个工具，返回 (结果文本, 是否出错, 耗时ms, diff)。不产出事件、不写历史。
+    ) -> tuple[str, bool, int, str, list[ImageBlock]]:
+        """执行单个工具，返回 (结果文本, 是否出错, 耗时ms, diff, images)。不产出事件、不写历史。
 
         diff 取自 ctx.last_diff（写工具在执行中写入，调用前先清空）：
         按调用取回而不是读工具实例属性——工具实例会被并行任务共享，
         实例属性会把上一个任务的 diff 错配给当前任务。
+
+        images 同理按调用取回：进入时记下 ctx.images 起点，退出时把本次执行
+        新增的摘走返回。只读并发批共用同一个 ctx，事后整桶收割会把第二张
+        截图错配到第一个工具名下；摘取发生在 tool.run 返回后的同步段里，
+        内置产图工具（screenshot / read_image / MCP 图片内容）都在返回前
+        完成追加、中途无让出点，各自新增部分不会被他调用摘走。
 
         写工具执行前经权限门领写租约（并行任务写同一文件的协调，见
         security/leases.py），finally 里归还；租约带出的冲突注记追加进
@@ -628,6 +638,7 @@ class Agent:
         """
         t0 = time.monotonic()
         ctx.last_diff = ""
+        images_before = len(ctx.images)
         lease = None
         if tool.safety != Safety.READONLY:
             try:
@@ -650,4 +661,9 @@ class Agent:
         if note and not is_error:
             result = result + "\n\n" + note
         duration_ms = int((time.monotonic() - t0) * 1000)
-        return result, is_error, duration_ms, ("" if is_error else ctx.last_diff)
+        # 无论成败都把本次新增摘走：失败的调用不把图留给下一个调用冒领
+        # （历史上错误结果的图会一直滞留在 ctx.images，附到之后随便哪次
+        # 成功调用上）。附不附给本条结果由调用方按 is_error 决定。
+        images = list(ctx.images[images_before:])
+        del ctx.images[images_before:]
+        return result, is_error, duration_ms, ("" if is_error else ctx.last_diff), images

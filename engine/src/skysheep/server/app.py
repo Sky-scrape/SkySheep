@@ -75,6 +75,9 @@ LOCAL_ONLY_METHODS = frozenset({
     # 新会话默认模型：与凭据无关但是服务配置面（ui.json 写入不算敏感，
     # 但远程改它会改变后续会话的服务选择，仍收敛为本机操作）
     "default_model.set",
+    # 辅助对话模型：同 default_model.set 的口径（改的是辅助面板的服务选择，
+    # chat.aux 每次调用按它构建 provider；远端只能用本机设定的值，不能改）
+    "aux.model.set",
     # 定时任务：allowed_tools 可预授权 run_command 等危险工具
     "cron.add", "cron.update", "cron.run_now",
     # 任务编排：无人值守节点同样按 allowed_tools 预授权危险工具
@@ -731,6 +734,10 @@ def create_app(
             text = str(params.get("text", ""))
             # 远端调用走一次性历史：不读本机共享面板历史、也不写入（审查 P1-3 收口）
             return await backend.chat_aux(text, emit, local=local)
+        if method == "aux.model.get":
+            return backend.aux_model_state()
+        if method == "aux.model.set":
+            return await backend.set_aux_model(params)
         if method == "aux.clear":
             return backend.aux_clear()
         if method == "session.search":
@@ -1397,10 +1404,26 @@ def create_app(
         backend.ws_emitters.append(emit)
         try:
             while True:
-                raw = await ws.receive_text()
+                # 用通用 receive 判别帧类型：receive_text 对二进制帧取 message["text"]
+                # 会抛 KeyError 直接断连——客户端只见连接消失，无从排查。
+                message = await ws.receive()
+                if message["type"] != "websocket.receive":
+                    break  # disconnect 等控制消息：退出循环，finally 摘除 emitter
+                if message.get("bytes") is not None:
+                    # 二进制帧不属于本协议：回一条可读错误帧而不是无声断连
+                    await send({"ok": False,
+                                "error": "不支持二进制帧：请发送 JSON 文本帧"})
+                    continue
+                raw = message.get("text") or ""
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
+                    # 畸形文本帧：此前无声丢弃，客户端对着黑洞等回复；给个回执
+                    await send({"ok": False, "error": "请求不是有效的 JSON 文本"})
+                    continue
+                if not isinstance(msg, dict):
+                    # 合法 JSON 但不是对象（裸字符串/数字/数组）：同样给回执
+                    await send({"ok": False, "error": "请求必须是 JSON 对象"})
                     continue
                 mid = msg.get("id")
                 method = str(msg.get("method", ""))

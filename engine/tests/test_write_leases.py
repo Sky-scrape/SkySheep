@@ -155,7 +155,7 @@ async def test_exec_tool_appends_conflict_note_and_releases(tmp_path, monkeypatc
     tu = ToolUseBlock(id="t1", name="write_file",
                       input={"path": "shared.txt", "content": "B 的内容"})
     ctx = ToolContext(working_dir=tmp_path, session_id="sB")
-    result, is_error, _ms, _diff = await agent._exec_tool(
+    result, is_error, _ms, _diff, _images = await agent._exec_tool(
         tu, agent.registry.get("write_file"), ctx
     )
     assert is_error is False
@@ -172,7 +172,7 @@ async def test_exec_tool_readonly_never_claims(tmp_path):
     (tmp_path / "r.txt").write_text("hi", encoding="utf-8")
     tu = ToolUseBlock(id="t2", name="read_file", input={"path": "r.txt"})
     ctx = ToolContext(working_dir=tmp_path, session_id="s1")
-    result, is_error, _ms, _diff = await agent._exec_tool(
+    result, is_error, _ms, _diff, _images = await agent._exec_tool(
         tu, agent.registry.get("read_file"), ctx
     )
     assert is_error is False and "hi" in result
@@ -187,7 +187,7 @@ async def test_exec_tool_tool_error_still_releases(tmp_path):
     ctx = ToolContext(working_dir=tmp_path, session_id="s1")
     from skysheep.tools import EditFileTool
 
-    result, is_error, _ms, _diff = await agent._exec_tool(
+    result, is_error, _ms, _diff, _images = await agent._exec_tool(
         tu, EditFileTool(), ctx
     )
     assert is_error is True

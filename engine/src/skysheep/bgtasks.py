@@ -13,18 +13,39 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Coroutine
 from typing import Any
 
 # 未结束的后台任务集合：持有强引用，任务结束时自动移除
 _BG_TASKS: set[asyncio.Task] = set()
 
+logger = logging.getLogger("skysheep.bg")
+
+
+def _on_bg_done(task: asyncio.Task) -> None:
+    """登记表移除 + 异常留痕。
+
+    fire-and-forget 的任务异常没人检索（Task 对象会吞住它直到被 GC），
+    表现为「广播失败、后台收尾失败」在日志里无影无踪。这里在回收引用时
+    顺带把异常打进日志（取消不算异常——用户停止是正常路径）。
+    """
+    _BG_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        coro = getattr(task, "get_coro", lambda: None)()
+        origin = getattr(coro, "__qualname__", "") or repr(coro)
+        logger.error("后台任务异常（%s）：%s: %s", origin, type(exc).__name__, exc,
+                     exc_info=exc)
+
 
 def spawn_bg(coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
     """创建后台任务并持强引用，直到它结束（结束即从登记表移除）。"""
     task = asyncio.get_running_loop().create_task(coro)
     _BG_TASKS.add(task)
-    task.add_done_callback(_BG_TASKS.discard)
+    task.add_done_callback(_on_bg_done)
     return task
 
 

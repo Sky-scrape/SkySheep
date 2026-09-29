@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from . import instance
 
@@ -380,6 +380,36 @@ def _clamp_int(raw: dict, key: str, default: int, lo: int, hi: int | None = None
     return max(lo, val)
 
 
+def _validation_error_text(e: ValidationError) -> str:
+    """把 pydantic 校验错误压成「字段: 原因」的短句（最多三条）。"""
+    parts = []
+    for err in e.errors()[:3]:
+        loc = ".".join(str(p) for p in err.get("loc", ()))
+        msg = str(err.get("msg", ""))
+        parts.append(f"{loc} {msg}" if loc else msg)
+    return "；".join(parts) or str(e)
+
+
+def _build_section_model(model_cls: type[BaseModel], data: dict, label: str):
+    """把 config.toml 小节灌进 pydantic 模型；值类型写错转带中文指引的 ConfigError。
+
+    M13 的口径是「手改 config.toml 不炸启动」：顶层标量有 _clamp_int 一类夹取，
+    走 model_cls(**...) 的小节此前没有同款保护——已知字段的值类型写错（如
+    models = "x"，应为数组）会以裸 ValidationError 炸穿 load_config()，调用方
+    的 except ConfigError 接不住，用户只能看到一屏英文堆栈。这里统一转成点名
+    小节与字段的 ConfigError；未知键依旧忽略（与 pydantic 默认一致，向前兼容
+    旧文件）。
+    """
+    filtered = {k: v for k, v in data.items() if k in model_cls.model_fields}
+    try:
+        return model_cls(**filtered)
+    except ValidationError as e:
+        raise ConfigError(
+            f"config.toml 的 [{label}] 小节有误（{_validation_error_text(e)}）；"
+            "请修正对应字段的值类型，或删除该小节恢复默认"
+        ) from e
+
+
 def load_config() -> SkySheepConfig:
     """读取 config.toml 并与预设合并（文件条目按字段覆盖预设）。
 
@@ -427,9 +457,7 @@ def load_config() -> SkySheepConfig:
         disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
         rt_raw = raw.get("roundtable")
         if isinstance(rt_raw, dict):
-            roundtable = RoundtableConfig(
-                **{k: v for k, v in rt_raw.items() if k in RoundtableConfig.model_fields}
-            )
+            roundtable = _build_section_model(RoundtableConfig, rt_raw, "roundtable")
         for section_name, model_cls, cur in (
             ("websearch", WebSearchConfig, websearch),
             ("imagegen", ImageGenConfig, imagegen),
@@ -440,7 +468,7 @@ def load_config() -> SkySheepConfig:
         ):
             section = raw.get(section_name)
             if isinstance(section, dict):
-                cur = model_cls(**{k: v for k, v in section.items() if k in model_cls.model_fields})
+                cur = _build_section_model(model_cls, section, section_name)
             if section_name == "websearch":
                 websearch = cur
             elif section_name == "imagegen":
@@ -460,9 +488,9 @@ def load_config() -> SkySheepConfig:
             if name in merged:
                 data = merged[name].model_dump()
                 data.update({k: v for k, v in section.items() if v is not None})
-                merged[name] = ProviderConfig(**data)
+                merged[name] = _build_section_model(ProviderConfig, data, f"providers.{name}")
             else:
-                merged[name] = ProviderConfig(**section)
+                merged[name] = _build_section_model(ProviderConfig, section, f"providers.{name}")
     else:
         context_limit = 1_000_000
         keep_recent = 8
@@ -487,31 +515,38 @@ def load_config() -> SkySheepConfig:
     # default 必须落在可用列表里：被删掉或写错名字都不能让启动时的 provider 构建炸掉
     if default not in merged:
         default = "deepseek" if "deepseek" in merged else next(iter(merged), default)
-    return SkySheepConfig(
-        default=default,
-        max_iterations=max_iterations,
-        context_limit_tokens=context_limit,
-        compaction_keep_recent=keep_recent,
-        compaction_trigger=compaction_trigger,
-        compaction_auto=compaction_auto,
-        subagent_enabled=sub_enabled,
-        subagent_max_iterations=sub_iters,
-        subagent_max_concurrent=max(1, min(8, sub_conc)),
-        restrict_to_workdir=restrict_workdir,
-        computer_control=computer_control,
-        browser_control=browser_control,
-        daily_token_budget=daily_budget,
-        memory_digest=memory_digest,
-        memory_maintenance=memory_maintenance,
-        memory_map=memory_map,
-        roundtable=roundtable,
-        websearch=websearch,
-        imagegen=imagegen,
-        speech=speech,
-        server=server,
-        channels=channels,
-        providers=merged,
-    )
+    try:
+        return SkySheepConfig(
+            default=default,
+            max_iterations=max_iterations,
+            context_limit_tokens=context_limit,
+            compaction_keep_recent=keep_recent,
+            compaction_trigger=compaction_trigger,
+            compaction_auto=compaction_auto,
+            subagent_enabled=sub_enabled,
+            subagent_max_iterations=sub_iters,
+            subagent_max_concurrent=max(1, min(8, sub_conc)),
+            restrict_to_workdir=restrict_workdir,
+            computer_control=computer_control,
+            browser_control=browser_control,
+            daily_token_budget=daily_budget,
+            memory_digest=memory_digest,
+            memory_maintenance=memory_maintenance,
+            memory_map=memory_map,
+            roundtable=roundtable,
+            websearch=websearch,
+            imagegen=imagegen,
+            speech=speech,
+            server=server,
+            channels=channels,
+            providers=merged,
+        )
+    except ValidationError as e:
+        # 顶层字段大多已被夹取/归一，这里是兜底（如 default 写成了数字漏过归一）
+        raise ConfigError(
+            f"config.toml 顶层字段有误（{_validation_error_text(e)}）；"
+            "请修正或删除对应行恢复默认"
+        ) from e
 
 
 def set_advanced_settings_in_config(
@@ -935,15 +970,20 @@ def enabled_models_of(name: str) -> list[str]:
 
 def set_provider_models_in_config(name: str, models: list[str]) -> None:
     """整体写入某服务的已启用模型列表（model 字段不动，由保存/设默认负责）。"""
+    cleaned = [str(m) for m in models]
+    if not cleaned:
+        # 空列表不能落盘：下面的不变量修复（当前模型被删时换到列表第一个）
+        # 会取 [0] 踩空 IndexError。与设置页口径一致：至少保留一个启用的模型。
+        raise ConfigError("至少保留一个启用的模型；先添加新的，再删除旧的")
     p, raw = _read_raw_config()
     providers = raw.setdefault("providers", {})
     if name in PRESETS and name not in providers:
         providers[name] = {}
     section = providers.setdefault(name, {})
-    section["models"] = [str(m) for m in models]
+    section["models"] = cleaned
     # 保持「当前模型 ∈ 已启用列表」的不变量：当前模型被删时换到列表第一个
-    if section.get("model") and section["model"] not in section["models"]:
-        section["model"] = section["models"][0]
+    if section.get("model") and section["model"] not in cleaned:
+        section["model"] = cleaned[0]
     _write_raw_config(p, raw)
 
 

@@ -212,3 +212,287 @@ async def test_fts_write_failure_is_recorded_and_repaired(tmp_path, monkeypatch)
     hits2 = await store2.search_messages(proj.id, "搜不到")
     assert any("搜不到" in (h.get("snippet") or "") for h in hits2), hits2
     await store2.close()
+
+
+# ---- 搜索的 SQL 层硬上限（性能：命中行不再全量拉回内存） ----
+
+
+async def test_search_messages_first_hit_per_session_across_many_rows(store):
+    """大量命中行下结果仍正确：每会话取最先命中、按 limit 截断。"""
+    proj = await store.get_or_create_project("/tmp/demo-search-limit")
+    sessions = [await store.create_session(proj.id, f"s{i}") for i in range(5)]
+    for sess in sessions:
+        for i in range(20):
+            await store.append_message(sess.id, Message.user(f"针目标词 第{i}条"))
+    results = await store.search_messages(proj.id, "针目标词", limit=3)
+    assert len(results) == 3
+    assert len({r["session_id"] for r in results}) == 3
+    assert all("针目标词" in r["snippet"] for r in results)
+
+
+async def test_search_queries_capped_at_sql_level(store, monkeypatch):
+    """FTS 与 LIKE 两条查询都带 SQL 层 LIMIT（取回前截行，防大库内存峰值）。"""
+    executed: list[tuple[str, tuple]] = []
+    real_execute = store._db.execute
+
+    async def spy(sql, *args, **kwargs):
+        executed.append((sql, tuple(args[0]) if args else ()))
+        return await real_execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(store._db, "execute", spy)
+    proj = await store.get_or_create_project("/tmp/demo-search-sqlcap")
+    sess = await store.create_session(proj.id, "s")
+    await store.append_message(sess.id, Message.user("searchable needle text here"))
+    assert await store.search_messages(proj.id, "searchable needle", limit=5)
+    fts_params = [q for sql, q in executed if "messages_fts MATCH" in sql]
+    assert fts_params, "FTS 查询应被执行"
+    assert fts_params[0][-1] == store.SEARCH_SQL_LIMIT
+
+    executed.clear()
+    store.fts_ready = False  # 强制走 LIKE 兜底
+    assert await store.search_messages(proj.id, "needle", limit=5)
+    like_params = [q for sql, q in executed if "LIKE ?" in sql]
+    assert like_params, "LIKE 查询应被执行"
+    assert like_params[0][-1] == store.SEARCH_SQL_LIMIT
+
+
+# ---- 旧库迁移：缺列才补列、重复索引清理、真实故障不再静默吞 ----
+
+
+async def test_connect_drops_legacy_duplicate_index(tmp_path):
+    """旧库里同列重复的 idx_messages_session 在 connect 时清理，正式索引保留。"""
+    from skysheep.session.store import SessionStore
+
+    s = await SessionStore(tmp_path / "legacy.db").connect()
+    await s._db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq)"
+    )
+    await s._db.commit()
+    await s.close()
+
+    s2 = await SessionStore(tmp_path / "legacy.db").connect()
+    try:
+        cur = await s2._db.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        names = {r[0] for r in await cur.fetchall()}
+        assert "idx_messages_session_seq" in names
+        assert "idx_messages_session" not in names
+    finally:
+        await s2.close()
+
+
+async def test_connect_restores_dropped_column(tmp_path):
+    """旧库缺列（用 DROP COLUMN 模拟升级前旧库）在 connect 时补回默认值。"""
+    from skysheep.session.store import SessionStore
+
+    s = await SessionStore(tmp_path / "oldcol.db").connect()
+    await s._db.execute("ALTER TABLE snippets DROP COLUMN enabled")
+    await s._db.commit()
+    await s.close()
+
+    s2 = await SessionStore(tmp_path / "oldcol.db").connect()
+    try:
+        cur = await s2._db.execute("PRAGMA table_info(snippets)")
+        cols = {r[1] for r in await cur.fetchall()}
+        assert "enabled" in cols
+    finally:
+        await s2.close()
+
+
+async def test_migrate_logs_real_failures(store, monkeypatch, caplog):
+    """非「列已存在」的迁移故障记 warning，不再静默吞掉。"""
+    import logging
+
+    # 先制造真实缺列，否则预检后没有 ALTER 可发
+    await store._db.execute("ALTER TABLE snippets DROP COLUMN enabled")
+    await store._db.commit()
+
+    real_execute = store._db.execute
+
+    async def flaky(sql, *args, **kwargs):
+        if isinstance(sql, str) and sql.startswith("ALTER TABLE"):
+            raise RuntimeError("disk I/O error")
+        return await real_execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(store._db, "execute", flaky)
+    with caplog.at_level(logging.WARNING, logger="skysheep.store"):
+        await store._migrate_legacy()
+    assert any("旧库迁移失败" in r.getMessage() for r in caplog.records)
+
+
+# ---- F18：全新库 schema 直连即含全部迁移列（不再依赖 ALTER 补列） ----
+
+
+async def test_fresh_schema_contains_all_migration_columns(tmp_path):
+    """SCHEMA 与 _COLUMN_MIGRATIONS 必须逐列一致：sessions.tags（及
+    snippets.enabled）曾只在迁移清单里，全新安装全靠 ALTER 补列——迁移一旦
+    失败（仅记 warning），set_tags/list_all_tags 等运行时才炸 no such column。"""
+    import sqlite3
+
+    from skysheep.session.store import _COLUMN_MIGRATIONS, SCHEMA
+
+    con = sqlite3.connect(":memory:")
+    try:
+        con.executescript(SCHEMA)
+        for table, ddl in _COLUMN_MIGRATIONS:
+            column = ddl.split(None, 1)[0]
+            cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+            assert column in cols, f"SCHEMA 缺列 {table}.{column}"
+        # tags 列定义与迁移补列语句一致：TEXT NOT NULL DEFAULT ''
+        info = {r[1]: r for r in con.execute("PRAGMA table_info(sessions)")}
+        tags = info["tags"]
+        assert (tags[2], tags[3], tags[4]) == ("TEXT", 1, "''")
+    finally:
+        con.close()
+
+    # 运行时链路：全新库直连后标签读写可用（不再依赖迁移补列）
+    s = await SessionStore(tmp_path / "fresh.db").connect()
+    try:
+        sess = await s.create_session(None, title="t")
+        await s.set_tags(sess.id, ["a", "b"])
+        assert (await s.get_session(sess.id)).tags == "a,b"
+        assert [x["tag"] for x in await s.list_all_tags(None)] == ["a", "b"]
+    finally:
+        await s.close()
+
+
+# ---- F3：备份走 SQLite backup API 一致性快照；恢复先校验再原子换库 ----
+
+
+async def test_restore_backup_roundtrip_and_safety_copy(tmp_path, monkeypatch):
+    """恢复走通：换回旧备份后消息回退到备份时刻，当前库先留「恢复前」安全副本。"""
+    monkeypatch.setattr(SessionStore, "BACKUP_MIN_INTERVAL_S", 20 * 3600)
+    from pathlib import Path
+
+    db = tmp_path / "app.db"
+    s = await SessionStore(db).connect()
+    try:
+        p = await s.get_or_create_project("/tmp/restore-proj")
+        sess = await s.create_session(p.id, title="t")
+        await s.append_message(sess.id, Message.user("第一轮"))
+        result = await s.backup_now()
+        await s.append_message(sess.id, Message.user("第二轮"))
+
+        done = await s.restore_backup(result["name"])
+        assert done["restored"] == result["name"]
+        assert done["safety_copy"], "恢复前要给当前库留安全副本"
+        assert Path(done["safety_copy"]).exists()
+        msgs = await s.load_messages(sess.id)
+        assert [m.text for m in msgs] == ["第一轮"], "恢复后应回到备份时刻的消息状态"
+    finally:
+        await s.close()
+
+
+async def test_restore_backup_rejects_bad_backup_and_keeps_main_db(tmp_path):
+    """坏备份（撕裂/垃圾字节）恢复被拒且回可读错误，主库原样完好可用。
+
+    旧实现仅校验文件名后 copy2 照单全收，主库换坏后 DatabaseError 使全部
+    会话功能瘫痪。"""
+    from pathlib import Path
+
+    import pytest
+
+    db = tmp_path / "app.db"
+    s = await SessionStore(db).connect()
+    try:
+        p = await s.get_or_create_project("/tmp/restore-bad")
+        sess = await s.create_session(p.id, title="t")
+        await s.append_message(sess.id, Message.user("不能丢的消息"))
+        good = await s.backup_now()
+
+        # ① 撕裂备份：把备份文件截掉一半（模拟拷到一半的半截库）
+        torn = s.backup_dir() / "app-torn.db"
+        data = Path(good["path"]).read_bytes()
+        torn.write_bytes(data[: len(data) // 2])
+        # ② 垃圾字节备份
+        garbage = s.backup_dir() / "app-garbage.db"
+        garbage.write_bytes(b"definitely not a database" * 100)
+
+        for bad in (torn.name, garbage.name):
+            with pytest.raises(ValueError) as ei:
+                await s.restore_backup(bad)
+            assert "校验未通过" in str(ei.value)
+            # 主库完好：消息还能读，store 连接仍可用
+            assert [m.text for m in await s.load_messages(sess.id)] == ["不能丢的消息"]
+
+        # 恢复动作留下的「恢复前」安全副本在场（人工救回的入口）
+        assert any("恢复前" in f.name for f in s.backup_dir().glob("*.db"))
+    finally:
+        await s.close()
+
+
+async def test_backup_now_is_consistent_snapshot_under_concurrent_writes(
+    tmp_path, monkeypatch
+):
+    """备份走 SQLite backup API：并发写进行中拷出的也是一致性快照。
+
+    旧实现 wal_checkpoint(TRUNCATE) 后无锁 copy2，拷贝窗口内并发写触发
+    auto-checkpoint 搬页会拷出撕裂库。同时锚定备份路径不再用 shutil.copy2。
+    """
+    import asyncio
+    import sqlite3
+
+    import skysheep.session.store as store_mod
+
+    db = tmp_path / "app.db"
+    s = await SessionStore(db).connect()
+    try:
+        p = await s.get_or_create_project("/tmp/backup-proj")
+        sess = await s.create_session(p.id, title="t")
+        await s.append_message(sess.id, Message.user("第一轮"))
+
+        copy2_calls = []
+        real_copy2 = store_mod.shutil.copy2
+
+        def spy_copy2(*a, **kw):
+            copy2_calls.append(a[0])
+            return real_copy2(*a, **kw)
+
+        monkeypatch.setattr(store_mod.shutil, "copy2", spy_copy2)
+
+        stop = asyncio.Event()
+
+        async def writer():
+            i = 0
+            while not stop.is_set():
+                await s.append_message(sess.id, Message.user(f"并发写 {i}"))
+                i += 1
+
+        wt = asyncio.create_task(writer())
+        await asyncio.sleep(0.01)  # 让并发写先落几条
+        result = await s.backup_now()
+        stop.set()
+        await wt
+
+        assert not copy2_calls, "备份快照不该走 copy2（应走 SQLite backup API）"
+        con = sqlite3.connect(result["path"])
+        try:
+            assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            n = con.execute("SELECT count(*) FROM messages").fetchone()[0]
+            assert n >= 1, "备份至少包含开始备份前已提交的消息"
+        finally:
+            con.close()
+    finally:
+        await s.close()
+
+
+# ---- F20：启动清扫接线（connect 回收数据目录内 mkstemp 模式的 .tmp 残留） ----
+
+
+async def test_connect_sweeps_stale_tmp_files(tmp_path):
+    import os
+    import time as _time
+
+    db = tmp_path / "app.db"
+    stale = tmp_path / "ui.json.ab12cd9_.tmp"
+    stale.write_bytes(b"leftover")
+    old = _time.time() - 3600
+    os.utime(stale, (old, old))
+    keep = tmp_path / "笔记.tmp"
+    keep.write_bytes(b"user file")
+
+    s = await SessionStore(db).connect()
+    try:
+        assert not stale.exists(), "connect 应回收 mkstemp 模式的 .tmp 残留"
+        assert keep.exists(), "非 mkstemp 模式的用户文件不能动"
+    finally:
+        await s.close()

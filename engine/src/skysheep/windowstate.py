@@ -36,7 +36,8 @@ def save_state(geometry: dict, home: Path | None = None) -> bool:
     try:
         from .textio import write_text_atomic
 
-        write_text_atomic(state_path(home), json.dumps(geometry, ensure_ascii=False))
+        # 窗口几何丢了走默认布局即可，不为了它做落盘同步（调用点都在退出路径上）
+        write_text_atomic(state_path(home), json.dumps(geometry, ensure_ascii=False), sync=False)
         return True
     except OSError:
         return False

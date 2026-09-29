@@ -102,6 +102,73 @@ async def test_roundtable_members_are_merged_per_member_and_round():
     assert by_member == {0: "ab", 1: "c"}
 
 
+async def test_interleaved_roundtable_members_merge_independently():
+    """并行成员**交错**流式：各成员独立聚批，不互相冲掉缓冲（分桶回归）。
+
+    圆桌成员经 asyncio.gather 并行作答、共享同一个 emit；修复前的单缓冲实现里，
+    成员 B 的每条增量都会把成员 A 的缓冲整个冲掉立即原样发出——交错场景下
+    几乎每条 delta 都是一帧，合并窗口恰好在其最该起作用的场景失效。
+    """
+    events, emit, _ = collector()
+    m = StreamDeltaMerger(emit, window_s=10.0)
+
+    async def member(i: int) -> None:
+        for c in "abcdef":
+            await m.send({"kind": "roundtable_member_delta",
+                          "member_index": i, "round": 0, "text": c})
+            await asyncio.sleep(0)  # 两个成员交错到达
+
+    await asyncio.gather(member(0), member(1))
+    await m.aclose()
+
+    by_member: dict[int, str] = {}
+    for e in events:
+        if e.get("kind") == "roundtable_member_delta":
+            by_member[e["member_index"]] = by_member.get(e["member_index"], "") + e["text"]
+    assert by_member == {0: "abcdef", 1: "abcdef"}, "内容必须一字不差"
+    assert len(events) <= 6, f"交错流式应各自聚批，而不是每条增量一帧：{len(events)} 帧"
+
+
+async def test_concurrent_delta_during_suspended_flush_is_not_lost():
+    """flush 的 emit 挂起期间并发合入的增量不得丢失（冲刷并发窗口回归）。
+
+    圆桌成员经 asyncio.gather 并行共享同一个 merger：一个任务触发 flush（非增量
+    事件先冲刷 / 定时器到点），补发尾巴的 emit 挂起期间，另一任务 send() 了同 key
+    增量且仍在合并窗口内。修法（快照循环 + 末尾统一 clear）会让这段增量合进已标记
+    sent 的桶、随 clear() 整段丢失且无定时器兜底；正确做法是冲刷前先摘桶，让并发
+    增量走「新段首条立即发」路径。
+    """
+    events: list[dict] = []
+    release = asyncio.Event()
+
+    async def emit(ev: dict) -> None:
+        events.append(dict(ev))
+        if ev.get("text") == "B2":  # 只挂起补发尾巴的那次 emit，制造并发窗口
+            await release.wait()
+
+    m = StreamDeltaMerger(emit, window_s=10.0)  # 窗口放大：B3 落入时必判「可合并」
+
+    await m.send({"kind": "text_delta", "text": "B1"})  # 首条立即发
+    await m.send({"kind": "text_delta", "text": "B2"})  # 合入未发尾巴
+    assert [e["text"] for e in events] == ["B1"]
+
+    flush_task = asyncio.create_task(m.flush())
+    for _ in range(100):  # 让 flush 跑到补发 B2 的 emit 挂起点（emit 先记账再挂起）
+        if len(events) >= 2:
+            break
+        await asyncio.sleep(0)
+    assert [e["text"] for e in events] == ["B1", "B2"], "flush 应已挂起在补发尾巴上"
+
+    # 并发窗口：flush 挂起期间另一任务合入同 key 增量
+    await m.send({"kind": "text_delta", "text": "B3"})
+    release.set()
+    await flush_task
+    await m.aclose()
+
+    joined = "".join(e.get("text", "") for e in events if e.get("kind") == "text_delta")
+    assert joined == "B1B2B3", f"挂起的 flush 不得吞掉并发合入的增量：{joined!r}"
+
+
 async def test_extra_fields_survive_merge():
     """合并不能丢掉事件上的其余字段（session_id 是前端路由的依据）。"""
     events, emit, _ = collector()

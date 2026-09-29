@@ -25,6 +25,7 @@ import codecs
 import os
 import stat
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -144,7 +145,21 @@ def encode_text(text: str, encoding: str, newline: str) -> bytes:
     return prepared.encode(encoding)
 
 
-def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
+def _fsync_before_replace(f, sync: bool) -> None:
+    """rename 前把数据钉到盘上（数据安全审查：断电时 rename 先于数据落盘）。
+
+    close() 只保证数据进了 OS 页缓存；没有 fsync 时 os.replace 的元数据提交
+    可能先于数据落盘（NTFS write-behind / ext4 delayed allocation 都会出现），
+    断电后留下空文件或旧内容。可丢失的文件（desktop.pid、窗口几何）传
+    sync=False 跳过，省一次磁盘同步。
+    """
+    if not sync:
+        return
+    f.flush()
+    os.fsync(f.fileno())
+
+
+def write_text_atomic(path: Path, text: str, encoding: str = "utf-8", *, sync: bool = True) -> None:
     """原子写「引擎自己的」状态文件（config.toml / 任务簿 / mcp.json / ui.json）。
 
     与 write_text_file 的分工：那个面向用户文件（要保留原编码与行尾符），这个
@@ -152,6 +167,9 @@ def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
     os.replace」：直接覆盖写在写一半时的中间态会暴露给并发读者，进程被杀还会
     留下半个文件——对 JSON 而言就是整个配置/任务簿读不出来（安全审查 M13）。
     同目录保证同一卷，rename 才是原子语义。
+
+    sync=True（默认）在 rename 前 flush + fsync，断电不丢内容；丢了也不碍事
+    的文件（desktop.pid、窗口几何）传 sync=False。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -160,6 +178,7 @@ def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(text.encode(encoding))
+            _fsync_before_replace(f, sync)
         os.replace(tmp_name, path)
     except BaseException:
         try:
@@ -169,12 +188,13 @@ def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
         raise
 
 
-def write_bytes_atomic(path: Path, data: bytes) -> None:
+def write_bytes_atomic(path: Path, data: bytes, *, sync: bool = True) -> None:
     """原子写字节内容（检查点回滚、图片落盘这类二进制写用）。
 
     与 write_text_atomic 同款：先写同目录临时文件再 os.replace，写一半被
     中断时目标仍是旧内容（安全审查低危项：检查点 restore 此前是直接
-    write_bytes，回滚到一半崩溃会留下半截文件）。
+    write_bytes，回滚到一半崩溃会留下半截文件）。sync 语义同上，默认在
+    rename 前 fsync 落盘。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -183,6 +203,7 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            _fsync_before_replace(f, sync)
         os.replace(tmp_name, path)
     except BaseException:
         try:
@@ -200,6 +221,11 @@ def write_text_file(path: Path, text: str, encoding: str, newline: str) -> None:
     回滚、编辑器自动重载），进程被杀时还会留下半个文件；同目录保证同一卷，
     rename 才是原子语义——要么旧内容，要么新内容。临时文件名唯一，两个
     并行写同一目标时各自落各自的临时文件，不会互相覆盖半成品。
+
+    rename 前 flush + fsync（与 write_text_atomic 同一标准）：close() 只把
+    数据送进 OS 页缓存，没有 fsync 时 os.replace 的元数据提交可能先于数据
+    落盘，断电后留下空文件或旧内容。调用面全是用户编辑的文本文件，量级小，
+    不提供跳过开关。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     data = encode_text(text, encoding, newline)
@@ -207,6 +233,7 @@ def write_text_file(path: Path, text: str, encoding: str, newline: str) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            _fsync_before_replace(f, sync=True)
         if os.name != "nt":
             # POSIX：mkstemp 建出的文件是 0600，替换后会带着这个权限位。
             # 覆盖已有文件时保留原权限位；新建文件还原成普通 umask 语义。
@@ -225,3 +252,65 @@ def write_text_file(path: Path, text: str, encoding: str, newline: str) -> None:
         except OSError:
             pass
         raise
+
+
+# ---- 启动清扫：硬杀/断电留下的原子写临时文件 ----
+#
+# 上面三处原子写（write_text_file / write_text_atomic / write_bytes_atomic）
+# 的临时文件只在 except BaseException 里清理——进程被 taskkill /F 或断电时
+# 走不到，盘面会残留 `名字.xxxxxxxx.tmp`（验证实测：杀进程五轮两类路径都中）。
+# 残留无任何机制回收，长期堆在数据目录里。mkstemp 的命名规则是固定的
+# （prefix + 8 个 [a-z0-9_] 随机字符 + ".tmp"），引擎数据目录内可以据此
+# 严格识别并回收；用户项目目录不扫——用户自己的构建/编辑器也会产生 .tmp，
+# 与 textio 的残留无法可靠区分，宁可不动（该取舍由调用方保证：清扫只对
+# 引擎数据目录 ~/.skysheep 调用，见 SessionStore.connect）。
+
+# tempfile._RandomNameSequence 的字符集（小写字母 + 数字 + 下划线，固定 8 位）
+_TMP_RANDOM_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def is_textio_tmp_name(name: str) -> bool:
+    """文件名是否符合 textio 原子写临时文件的 mkstemp 命名规则。
+
+    只认「.tmp 结尾、去尾后最后一段恰为 8 个 [a-z0-9_] 字符」的名字：
+    用户自己叫 ``笔记.tmp``、``backup.bak2024.tmp`` 的文件都不会命中，
+    避免误删。
+    """
+    if not name.endswith(".tmp") or len(name) <= 4 + 9:
+        return False
+    head, sep, tail = name[:-4].rpartition(".")
+    if not sep or len(tail) != 8:
+        return False
+    return all(c in _TMP_RANDOM_CHARS for c in tail)
+
+
+def sweep_stale_tmp_files(home: Path, *, max_age_s: float = 60.0) -> list[str]:
+    """清扫引擎数据目录内 textio 原子写残留的 .tmp 临时文件，返回已删路径。
+
+    只扫传入的 home（引擎数据目录）内递归；**用户项目目录不扫**——
+    write_text_file 的临时文件落在用户文件旁边，与用户自己的 .tmp 无法
+    区分，误删用户文件比残留几个临时文件严重得多。
+
+    max_age_s 只删足够老的残留：启动瞬间其他组件可能正有一笔原子写在途，
+    误删会让随后的 os.replace 落空；60 秒内的临时文件留给下次启动处理。
+    home 不存在（首次启动）时直接返回空。
+    """
+    removed: list[str] = []
+    try:
+        candidates = list(home.rglob("*.tmp"))
+    except OSError:
+        return removed
+    now = time.time()
+    for p in candidates:
+        try:
+            if p.is_symlink() or not p.is_file():
+                continue
+            if not is_textio_tmp_name(p.name):
+                continue
+            if now - p.stat().st_mtime < max_age_s:
+                continue
+            p.unlink()
+            removed.append(str(p))
+        except OSError:
+            continue  # 单个文件删不掉（被占用等）：留给下次启动
+    return removed

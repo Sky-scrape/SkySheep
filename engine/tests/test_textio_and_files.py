@@ -623,6 +623,58 @@ def test_write_text_atomic_keeps_old_content_on_failure(tmp_path):
     assert leftovers == [], leftovers
 
 
+def _install_fsync_spy(monkeypatch) -> list[str]:
+    """记录 fsync 与 os.replace 的调用顺序（包装真实调用，不改行为）。"""
+    import os as _os
+
+    events: list[str] = []
+    real_fsync, real_replace = _os.fsync, _os.replace
+
+    def fake_fsync(fd):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    def fake_replace(src, dst):
+        events.append("replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(_os, "fsync", fake_fsync)
+    monkeypatch.setattr(_os, "replace", fake_replace)
+    return events
+
+
+def test_write_text_atomic_fsyncs_before_replace(tmp_path, monkeypatch):
+    """关键状态文件默认在 rename 前 fsync：断电时元数据提交不会先于数据落盘。"""
+    from skysheep.textio import write_text_atomic
+
+    events = _install_fsync_spy(monkeypatch)
+    write_text_atomic(tmp_path / "config.toml", "a = 1\n")
+    assert events == ["fsync", "replace"], events
+    assert (tmp_path / "config.toml").read_text(encoding="utf-8") == "a = 1\n"
+
+
+def test_write_bytes_atomic_fsyncs_before_replace(tmp_path, monkeypatch):
+    """字节版同款：fsync 在 os.replace 之前。"""
+    from skysheep.textio import write_bytes_atomic
+
+    events = _install_fsync_spy(monkeypatch)
+    write_bytes_atomic(tmp_path / "blob.bin", b"\x00\x01")
+    assert events == ["fsync", "replace"], events
+    assert (tmp_path / "blob.bin").read_bytes() == b"\x00\x01"
+
+
+def test_atomic_writes_can_skip_fsync(tmp_path, monkeypatch):
+    """可丢失文件（desktop.pid、窗口几何）传 sync=False 跳过落盘同步。"""
+    from skysheep.textio import write_bytes_atomic, write_text_atomic
+
+    events = _install_fsync_spy(monkeypatch)
+    write_text_atomic(tmp_path / "desktop.pid", "123 0.0", sync=False)
+    write_bytes_atomic(tmp_path / "state.bin", b"x", sync=False)
+    assert events == ["replace", "replace"], events
+    assert (tmp_path / "desktop.pid").read_text(encoding="utf-8") == "123 0.0"
+    assert (tmp_path / "state.bin").read_bytes() == b"x"
+
+
 def test_config_writes_are_atomic_and_clamped(home):
     """config.toml：越界/非数字值夹回合法区间；写入后文件完整可解析。"""
     import tomllib
@@ -724,3 +776,176 @@ def test_grep_matches_gbk_file(tmp_path):
     (tmp_path / "blob.dat").write_bytes(b"\x00\x01\x00")
     out3 = asyncio.run(GrepTool().run(GrepArgs(pattern="密钥"), ctx))
     assert "blob.dat" not in out3
+
+
+# ---------------------------------------------------------------- F19/F20/F4
+
+
+def test_write_text_file_fsyncs_before_replace(tmp_path, monkeypatch):
+    """write_text_file 在 rename 前 flush + fsync（断电不留空文件/旧内容，
+    与 write_text_atomic 同一标准）。"""
+    import os as _os
+
+    import skysheep.textio as textio
+
+    calls = []
+    real_fsync = _os.fsync
+
+    def spy_fsync(fd):
+        calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(textio.os, "fsync", spy_fsync)
+    p = tmp_path / "doc.txt"
+    textio.write_text_file(p, "内容\n", "utf-8", "\n")
+    assert calls, "写用户文件必须 fsync 后再 replace"
+    assert p.read_text(encoding="utf-8") == "内容\n"
+
+
+def test_is_textio_tmp_name_matches_mkstemp_rule():
+    from skysheep.textio import is_textio_tmp_name
+
+    # mkstemp 规则：prefix + 8 位 [a-z0-9_] + ".tmp"
+    assert is_textio_tmp_name("config.toml.ab12cd9_.tmp")
+    assert is_textio_tmp_name("meta.json.q1w2e3r4.tmp")
+    assert is_textio_tmp_name("doc.txt.0a1b2c3d.tmp")
+    # 用户自己的命名习惯不应命中
+    assert not is_textio_tmp_name("笔记.tmp")
+    assert not is_textio_tmp_name("backup.bak2024.tmp")  # 后段不是 8 位
+    assert not is_textio_tmp_name("archive.TMP")  # 大写后缀不是 mkstemp 产物
+    assert not is_textio_tmp_name("data.20240101.old.tmp")
+
+
+def test_sweep_stale_tmp_files_scope_and_age(tmp_path):
+    """清扫只收「引擎目录内 + mkstemp 命名 + 足够老」的 .tmp；递归覆盖子目录。"""
+    import os
+    import time
+    from pathlib import Path
+
+    from skysheep.textio import sweep_stale_tmp_files
+
+    home = tmp_path / "home"
+    nested = home / "backups" / "checkpoints" / "fp"
+    nested.mkdir(parents=True)
+    old = time.time() - 3600
+
+    stale_root = home / "config.toml.ab12cd9_.tmp"
+    stale_root.write_bytes(b"x")
+    stale_nested = nested / "meta.json.q1w2e3r4.tmp"
+    stale_nested.write_bytes(b"x")
+    for p in (stale_root, stale_nested):
+        os.utime(p, (old, old))
+
+    fresh = home / "ui.json.zz9z9z9z.tmp"  # 刚写的在途原子写：不动
+    fresh.write_bytes(b"x")
+    keep_tmp = home / "笔记.tmp"  # 用户命名习惯：不匹配 mkstemp 规则
+    keep_tmp.write_bytes(b"x")
+    keep_db = home / "skysheep.db"
+    keep_db.write_bytes(b"x")
+
+    removed = sweep_stale_tmp_files(home)
+    assert set(map(Path, removed)) == {stale_root, stale_nested}
+    assert fresh.exists(), "60 秒内的在途原子写不能误删"
+    assert keep_tmp.exists() and keep_db.exists()
+
+    # 目录不存在（首次启动）：空返回，不抛
+    assert sweep_stale_tmp_files(tmp_path / "nope") == []
+
+
+def test_checkpoint_meta_records_per_file_sizes(tmp_path, monkeypatch):
+    """meta 增加按文件字节数（sizes）；blob 落盘走 write_bytes_atomic（fsync）。"""
+    import json
+    from pathlib import Path
+
+    import skysheep.core.checkpoints as ckpt
+
+    root = tmp_path / "cps"
+    store = CheckpointStore(root=root)
+    f = tmp_path / "doc.txt"
+    f.write_text("old", encoding="utf-8")
+
+    seen = []
+    real = ckpt.write_bytes_atomic
+
+    def spy(path, data, **kw):
+        seen.append(Path(path).name)
+        real(path, data, **kw)
+
+    monkeypatch.setattr(ckpt, "write_bytes_atomic", spy)
+    cp = store.save("s1", {str(f): b"x" * 1024})
+    assert seen == ["0.bin"], "blob 要走 write_bytes_atomic（fsync）落盘"
+
+    meta = json.loads(
+        (root / "s1" / cp["id"] / "meta.json").read_text(encoding="utf-8"))
+    assert meta["sizes"] == {str(f): 1024}
+    reloaded = CheckpointStore(root=root)
+    assert reloaded._items[cp["id"]]["sizes"] == {str(f): 1024}
+
+
+def test_checkpoint_truncated_blob_rejects_restore(tmp_path):
+    """断电盘面「meta 完好、blob 截断」：回滚整体拒绝，用户文件一字不动。"""
+    from skysheep.core.checkpoints import CheckpointCorruptError
+
+    root = tmp_path / "cps"
+    store = CheckpointStore(root=root)
+    f = tmp_path / "doc.txt"
+    f.write_text("before", encoding="utf-8")
+    cp = store.save("s1", {str(f): b"x" * 1024})
+    cp_dir = root / "s1" / cp["id"]
+    blob = next(b for b in cp_dir.iterdir() if b.suffix == ".bin")
+    blob.write_bytes(blob.read_bytes()[:12])  # 模拟断电截断
+    f.write_text("用户后来的内容", encoding="utf-8")
+
+    reloaded = CheckpointStore(root=root)  # 模拟重启后从盘面重建
+    with pytest.raises(CheckpointCorruptError):
+        reloaded.restore(cp["id"])
+    with pytest.raises(CheckpointCorruptError):
+        reloaded.restore(cp["id"], force=True)  # force 也救不了坏内容
+    assert f.read_text(encoding="utf-8") == "用户后来的内容", (
+        "半截 blob 绝不能写回用户文件")
+
+
+def test_checkpoint_zeroed_blob_rejects_restore(tmp_path):
+    """blob 被清零（断电另一种盘面）：拒绝回滚，不把用户文件清空。"""
+    from skysheep.core.checkpoints import CheckpointCorruptError
+
+    root = tmp_path / "cps"
+    store = CheckpointStore(root=root)
+    f = tmp_path / "doc.txt"
+    f.write_text("before", encoding="utf-8")
+    cp = store.save("s1", {str(f): b"x" * 1024})
+    cp_dir = root / "s1" / cp["id"]
+    blob = next(b for b in cp_dir.iterdir() if b.suffix == ".bin")
+    blob.write_bytes(b"")
+    f.write_text("用户后来的内容", encoding="utf-8")
+
+    reloaded = CheckpointStore(root=root)
+    with pytest.raises(CheckpointCorruptError):
+        reloaded.restore(cp["id"], force=True)
+    assert f.read_text(encoding="utf-8") == "用户后来的内容", (
+        "零字节 blob 绝不能把用户文件清空")
+
+
+def test_checkpoint_legacy_meta_without_sizes_still_restores(tmp_path):
+    """向后兼容：旧 meta 没有 sizes 字段时不做长度校验，保持旧行为放行。"""
+    import json
+
+    root = tmp_path / "cps"
+    store = CheckpointStore(root)
+    p = tmp_path / "legacy.txt"
+    p.write_text("旧", encoding="utf-8")
+    cp = store.save("s1", {str(p): b"before"})
+
+    # 手工抹掉 meta 里的 sizes，模拟升级前旧版写下的快照；blob 截断也放行
+    cp_dir = store._cp_dir(store._items[cp["id"]])
+    meta_path = cp_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("sizes", None)
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    blob = next(b for b in cp_dir.iterdir() if b.suffix == ".bin")
+    blob.write_bytes(blob.read_bytes()[:3])
+
+    reloaded = CheckpointStore(root)
+    p.write_text("现", encoding="utf-8")
+    reloaded.restore(cp["id"], force=True)  # 不抛 CorruptError：旧 meta 不校验
+    assert p.read_text(encoding="utf-8") == "bef"

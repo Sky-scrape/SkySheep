@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
 from test_server import make_client, recv_until  # helpers（home fixture 在 conftest.py）
 
 from skysheep.messages import TextBlock, ToolUseBlock
+from skysheep.models.base import ProviderDone, ProviderTextDelta
 from skysheep.models.fake import FakeProvider
+from skysheep.server.backend import ServerBackend
+
+
+class SlowStreamProvider:
+    """每轮输出前先睡一会儿，制造「运行中 + 排队」窗口。"""
+
+    model = "slow-1"
+
+    async def stream(self, messages, tools, effort=None):
+        yield ProviderTextDelta("处理中…")
+        await asyncio.sleep(0.25)
+        yield ProviderDone(input_tokens=5, output_tokens=5)
 
 
 def test_switch_project_moves_engine_to_new_dir(home):
@@ -128,3 +144,48 @@ def test_switch_project_rejects_bad_path_and_running_task(home):
         assert done["ok"]
         ws.send_json({"id": "sw", "method": "project.switch", "params": {"path": str(proj2)}})
         assert recv_until(ws, "sw")["ok"]
+
+
+async def test_switch_project_fails_queued_turns_readably(home):
+    """切项目时后台会话的排队轮被逐个落空：拿到可读错误，runtime 全部释放。
+
+    守卫只看活动会话（这是既有设计），后台会话有运行中/排队轮时照样进入
+    _bind_project——排队轮的 Future 必须显式落空（与 delete_session 同一口径），
+    否则要么等交棒轮在旧上下文里空跑一轮后拿到裸内部错误，要么在取消落在
+    pipeline try 之前的窄竞态里永远挂死。
+    """
+    proj2 = home / "proj2-drain"
+    proj2.mkdir()
+    be = ServerBackend(working_dir=home / "proj", provider_factory=SlowStreamProvider)
+    await be.setup()
+
+    async def noop(ev):
+        pass
+
+    sid_a = (await be.new_session())["id"]
+    sid_b = (await be.new_session())["id"]  # 后台会话：跑一轮 + 排一轮
+    t_run = asyncio.create_task(be.send("后台轮", noop, session_id=sid_b))
+    for _ in range(200):
+        rt = be.runtimes.get(sid_b)
+        if rt and rt.run_task:
+            break
+        await asyncio.sleep(0.01)
+    t_queued = asyncio.create_task(be.send("排队轮", noop, session_id=sid_b))
+    for _ in range(200):
+        if be.runtimes[sid_b].queue:
+            break
+        await asyncio.sleep(0.01)
+    assert be.runtimes[sid_b].queue, "前置条件：排队轮已在队列里"
+    # 用户此刻点回会话 A 的标签：B 变成后台会话（守卫只看活动会话）
+    await be.activate_session(sid_a)
+
+    r = await be.switch_project(str(proj2))  # 守卫只看活动会话 → 放行
+    assert r["switched"]
+
+    with pytest.raises(RuntimeError, match="项目已切换"):
+        await t_queued
+    r_run = await t_run
+    assert r_run["stopped"] is True
+    assert not be.runtimes, "旧项目 runtime 应全部清空"
+    assert not be._base_queue, "基底队列应清空"
+    await be.shutdown()

@@ -29,7 +29,7 @@ MUST_BE_LOCAL = (
     "app.export_diagnostics", "project.switch", "project.delete", "session.restore_backup",
     "lan.enable", "remote.enable", "lan.rotate_token",
     "advanced.save", "hooks.save", "memory.save",
-    "subagent.save", "default_model.set",
+    "subagent.save", "default_model.set", "aux.model.set",
     # 本机体验/信息面（审查 P1-3 收口）
     "app.notify", "fs.open", "term.close", "memory.get", "model.switch",
 )

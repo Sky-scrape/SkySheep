@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -98,6 +99,22 @@ class CheckpointConflictError(Exception):
         self.conflicts = list(conflicts)
 
 
+class CheckpointCorruptError(Exception):
+    """检查点内容已损坏（如断电留下的截断/清零 blob），拒绝回滚。
+
+    携带损坏文件列表。回滚被整体拒绝而不是只跳过坏文件：把半截/空内容
+    静默写回用户文件等于毁数据，其余文件「成功回滚」的假象还会让用户
+    以为整条检查点完好。
+    """
+
+    def __init__(self, files: list[str]) -> None:
+        super().__init__(
+            "检查点数据已损坏，已拒绝回滚（用户文件未被改动），"
+            "请改用其他备份：" + "、".join(files)
+        )
+        self.files = list(files)
+
+
 class CheckpointStore:
     """checkpoint_id -> {id, session_id, files, paths, ts}，容量上限 FIFO。
 
@@ -109,6 +126,16 @@ class CheckpointStore:
         self._root = Path(root) if root else None
         self._items: dict[str, dict] = {}
         self._seq = 0
+        # get/restore 会被调用方放到工作线程跑（重量级磁盘活，不能冻结事件
+        # 循环），_hydrate/_release 对 cp["files"] 的懒加载/释放必须原子，
+        # 否则并发 get 的 _release 会抽掉并发 restore 刚加载的内容。
+        # 过去这些调用都串行在事件循环上，这把锁只是保住同等语义。
+        # 内存索引（_items/_seq）与 blob 落盘共用一把可重入锁：get/restore 的
+        # 「懒加载→签名比对→写回→释放」要原子；save/forget_session/list_* 的
+        # 「改 _items、迭代 _items」也必须与它们互斥——否则并行收尾的 save 在
+        # 另一线程 _prune/迭代时撞 dictionary changed size，list_for 的调用方
+        # 直接报错。用 RLock 防将来出现锁内调用同族入口的嵌套。
+        self._io_lock = threading.RLock()
         if self._root is not None:
             self._load_from_disk()
 
@@ -146,6 +173,16 @@ class CheckpointStore:
                                     bytes_total += (cp_dir / str(blob)).stat().st_size
                                 except OSError:
                                     pass
+                    # 按文件字节校验数据（新版 meta 才有）：旧 meta 没有该字段
+                    # 就不校验（保持旧行为）；单个坏值只放弃该文件，不连坐整条
+                    sizes: dict[str, int] = {}
+                    sizes_raw = meta.get("sizes")
+                    if isinstance(sizes_raw, dict):
+                        for k, v in sizes_raw.items():
+                            try:
+                                sizes[str(k)] = int(v)
+                            except (TypeError, ValueError):
+                                continue
                     cp = {
                         "id": str(meta["id"]),
                         "session_id": meta.get("session_id"),
@@ -155,6 +192,7 @@ class CheckpointStore:
                         # 保存时刻的内容签名（旧版 meta 没有该字段 → 空表 =
                         # 跳过脏检查，回滚保持旧行为）
                         "sigs": {str(k): v for k, v in (meta.get("sigs") or {}).items()},
+                        "sizes": sizes,
                         "bytes": bytes_total,
                         "files": None,  # 懒加载：get/restore 时才读 blob
                     }
@@ -171,20 +209,38 @@ class CheckpointStore:
 
         blob 读不到（被外部清理/局部丢失）的路径直接剔除：绝不能按「改前
         不存在」处理——那会让回滚把用户现存的文件删掉。恢复不了就少恢复
-        一个文件，不制造破坏。"""
+        一个文件，不制造破坏。
+
+        blob 读到了但长度与 meta 记录的按文件字节数不符（断电常见盘面：
+        meta.json 最后原子写完好、裸写的 blob 却是截断/清零的半成品），
+        内容本身已不可信——剔除并记入 cp['corrupt']，restore 据此拒绝整条
+        回滚（绝不把半截/空内容写回用户文件）。旧 meta 没有 sizes 字段的
+        路径不校验，保持旧行为。"""
         if cp.get("files") is not None or not self._root:
             return
         files: dict[str, bytes | None] = {}
+        corrupt: list[str] = []
         cp_dir = self._cp_dir(cp)
+        sizes = cp.get("sizes") or {}
         for path_s, blob in (cp.get("blobs") or {}).items():
             if blob is None:
                 files[path_s] = None  # 改前确实不存在（落库时就是 None）
                 continue
             try:
-                files[path_s] = (cp_dir / str(blob)).read_bytes()
+                data = (cp_dir / str(blob)).read_bytes()
             except OSError:
                 continue  # blob 丢了：这个路径回滚不了，也别碰它
+            expected = sizes.get(path_s)
+            if expected is not None and len(data) != expected:
+                corrupt.append(path_s)
+                continue
+            files[path_s] = data
         cp["files"] = files
+        # 检测是确定性的（同一盘面重读结果相同），重建即可
+        if corrupt:
+            cp["corrupt"] = sorted(set(corrupt))
+        else:
+            cp.pop("corrupt", None)
 
     def _release(self, cp: dict) -> None:
         """用后释放：磁盘模式下内容已落 blob，内存里的副本可以丢弃，
@@ -195,17 +251,25 @@ class CheckpointStore:
             cp["files"] = None
 
     def _persist(self, cp: dict) -> bool:
-        """把检查点写进磁盘目录；返回是否写成功（失败时内存副本不能丢）。"""
+        """把检查点写进磁盘目录；返回是否写成功（失败时内存副本不能丢）。
+
+        blob 走 write_bytes_atomic（fsync）：断电后最要命的盘面是「meta.json
+        完好（最后写、原子换）而某个 blob 是截断/清零的半成品」——那会让
+        回滚把坏内容静默写回用户文件。每个 blob 先原子落稳，meta.json 最后
+        写并记录按文件字节数（sizes），_hydrate/restore 据此校验。
+        """
         cp_dir = self._cp_dir(cp)
         try:
             cp_dir.mkdir(parents=True, exist_ok=True)
             blobs: dict[str, str | None] = {}
+            sizes: dict[str, int] = {}
             for i, (path_s, data) in enumerate(cp["files"].items()):
                 if data is None:
                     blobs[path_s] = None
                 else:
                     blob_name = f"{i}.bin"
-                    (cp_dir / blob_name).write_bytes(data)
+                    write_bytes_atomic(cp_dir / blob_name, data)
+                    sizes[path_s] = len(data)
                     blobs[path_s] = blob_name
             meta = {
                 "id": cp["id"],
@@ -216,9 +280,12 @@ class CheckpointStore:
                 "sigs": cp.get("sigs") or {},
                 # 字节量随 meta 持久化：重启后全库字节上限（淘汰）才有数可依
                 "bytes": int(cp.get("bytes") or 0),
+                # 按文件字节数：blob 截断/清零时回滚前能识别出来（数据安全）
+                "sizes": sizes,
             }
             write_text_atomic(cp_dir / "meta.json", json.dumps(meta, ensure_ascii=False))
             cp["blobs"] = blobs
+            cp["sizes"] = sizes
             return True
         except OSError:
             return False
@@ -274,34 +341,36 @@ class CheckpointStore:
         kept, skipped = _limit_pre(pre)
         if not kept:
             return None
-        self._seq += 1
-        cp = {
-            "id": f"cp{self._seq}",
-            "session_id": session_id,
-            "files": dict(kept),
-            "paths": sorted(kept),
-            "ts": time.time(),
-            "blobs": {},
-            "sigs": {path_s: _state_sig(path_s) for path_s in sorted(kept)},
-            "bytes": sum(len(v) for v in kept.values() if v is not None),
-        }
-        self._items[cp["id"]] = cp
-        if self._root is not None:
-            # 落盘成功才释放内存副本；写失败（磁盘满等）时内存是唯一副本，
-            # 丢了这条检查点就只剩一个空壳 id，回滚时静默无效
-            if self._persist(cp):
-                self._release(cp)  # 内容已落 blob：内存只留索引，回滚时再懒加载
-        self._prune()
+        with self._io_lock:  # _seq/_items/_prune 与并行的 get/restore/forget/list 互斥
+            self._seq += 1
+            cp = {
+                "id": f"cp{self._seq}",
+                "session_id": session_id,
+                "files": dict(kept),
+                "paths": sorted(kept),
+                "ts": time.time(),
+                "blobs": {},
+                "sigs": {path_s: _state_sig(path_s) for path_s in sorted(kept)},
+                "bytes": sum(len(v) for v in kept.values() if v is not None),
+            }
+            self._items[cp["id"]] = cp
+            if self._root is not None:
+                # 落盘成功才释放内存副本；写失败（磁盘满等）时内存是唯一副本，
+                # 丢了这条检查点就只剩一个空壳 id，回滚时静默无效
+                if self._persist(cp):
+                    self._release(cp)  # 内容已落 blob：内存只留索引，回滚时再懒加载
+            self._prune()
         return {
             "id": cp["id"], "paths": cp["paths"], "ts": cp["ts"], "skipped": skipped,
         }
 
     def list_for(self, session_id: str | None) -> list[dict]:
-        return [
-            {"id": c["id"], "paths": c["paths"], "ts": c["ts"]}
-            for c in sorted(self._items.values(), key=lambda c: c["ts"])
-            if c["session_id"] == session_id
-        ]
+        with self._io_lock:  # 迭代 _items 期间不得有并发增删
+            return [
+                {"id": c["id"], "paths": c["paths"], "ts": c["ts"]}
+                for c in sorted(self._items.values(), key=lambda c: c["ts"])
+                if c["session_id"] == session_id
+            ]
 
     def list_project_metas(self) -> list[dict]:
         """全项目检查点元数据（跨会话，时间升序）：记忆地图的「文件足迹」用。
@@ -309,11 +378,12 @@ class CheckpointStore:
         本 store 按项目绑定根目录（root = 项目指纹目录），启动时 _load_from_disk
         已把全部 meta 读进 _items——这里直接遍历内存索引，不再扫盘。条数受
         MAX_CHECKPOINTS_TOTAL 兜底，不会无界。"""
-        return [
-            {"id": c["id"], "session_id": c.get("session_id"),
-             "paths": c["paths"], "ts": c["ts"]}
-            for c in sorted(self._items.values(), key=lambda c: c["ts"])
-        ]
+        with self._io_lock:  # 迭代 _items 期间不得有并发增删
+            return [
+                {"id": c["id"], "session_id": c.get("session_id"),
+                 "paths": c["paths"], "ts": c["ts"]}
+                for c in sorted(self._items.values(), key=lambda c: c["ts"])
+            ]
 
     def forget_session(self, session_id: str | None) -> int:
         """清除某会话的全部检查点（内存索引 + 磁盘目录），返回清除条数。
@@ -322,12 +392,13 @@ class CheckpointStore:
         再留——靠条数淘汰慢慢蒸发太慢，还占磁盘。只清当前 store 根目录
         （本项目绑定）下能找到的；会话在其他项目绑定期间留下的检查点
         归那次绑定的根目录管，由删项目时的整目录清理兜底。"""
-        victims = [k for k, cp in self._items.items()
-                   if cp.get("session_id") == session_id]
-        for k in victims:
-            cp = self._items.pop(k, None)
-            if cp is not None and self._root is not None:
-                shutil.rmtree(self._cp_dir(cp), ignore_errors=True)
+        with self._io_lock:  # 枚举+弹出 _items 与并行的 save/get/restore/list 互斥
+            victims = [k for k, cp in self._items.items()
+                       if cp.get("session_id") == session_id]
+            for k in victims:
+                cp = self._items.pop(k, None)
+                if cp is not None and self._root is not None:
+                    shutil.rmtree(self._cp_dir(cp), ignore_errors=True)
         return len(victims)
 
     def get(self, checkpoint_id: str) -> dict | None:
@@ -338,15 +409,16 @@ class CheckpointStore:
         cp = self._items.get(checkpoint_id)
         if cp is None:
             return None
-        self._hydrate(cp)
-        out = {
-            "id": cp["id"],
-            "session_id": cp["session_id"],
-            "files": cp["files"],
-            "paths": cp["paths"],
-            "ts": cp["ts"],
-        }
-        self._release(cp)
+        with self._io_lock:  # 懒加载→取内容→释放 必须原子（调用方在线程里跑）
+            self._hydrate(cp)
+            out = {
+                "id": cp["id"],
+                "session_id": cp["session_id"],
+                "files": cp["files"],
+                "paths": cp["paths"],
+                "ts": cp["ts"],
+            }
+            self._release(cp)
         return out
 
     def restore(self, checkpoint_id: str, force: bool = False) -> list[str]:
@@ -358,39 +430,50 @@ class CheckpointStore:
         请用户确认后以 force=True 重试。旧版快照（meta 里没存签名）不做检查，
         保持原有行为。
 
+        内容损坏的检查点（blob 长度与 meta 记录不符，如断电留下的截断/清零
+        blob）无论 force 与否都抛 CheckpointCorruptError 整条拒绝——把半截
+        内容写回用户文件等于静默毁数据，用户文件保持原样。
+
         返回受影响的文件路径；检查点不存在抛 KeyError。
         """
         cp = self._items.get(checkpoint_id)
         if cp is None:
             raise KeyError("checkpoint not found: " + checkpoint_id)
-        self._hydrate(cp)
-        sigs = cp.get("sigs") or {}
-        if sigs and not force:
-            conflicts = sorted(
-                path_s for path_s, expected in sigs.items()
-                if _state_sig(path_s) != expected
-            )
-            if conflicts:
+        with self._io_lock:  # 懒加载→签名比对→写回→释放 必须原子（调用方在线程里跑）
+            self._hydrate(cp)
+            # 损坏检查在一切写盘之前：blob 长度对不上 = 内容已损毁（断电半成品），
+            # 整条拒绝，绝不把半截/空内容写回用户文件
+            corrupt = cp.get("corrupt") or []
+            if corrupt:
                 self._release(cp)
-                raise CheckpointConflictError(conflicts)
-        restored: list[str] = []
-        for path_s, data in cp["files"].items():
-            p = Path(path_s)
-            if data is None:
-                # 改前不存在 → 回滚时应删除。目录要连内容一起删（move_file 的
-                # 「目标是新建目录」记的是目录本身）。
-                if p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
-                elif p.exists():
-                    p.unlink()
-            elif data == DIR_MARKER:
-                # 改前是目录：重建目录本身即可，内容由逐文件条目还原
-                # （move_file 的源目录/被覆盖的目标目录，审查 A-3 修复）
-                p.mkdir(parents=True, exist_ok=True)
-            else:
-                # 原子写：回滚写一半被中断会把文件留在半截状态（安全审查低危项）
-                p.parent.mkdir(parents=True, exist_ok=True)
-                write_bytes_atomic(p, data)
-            restored.append(path_s)
-        self._release(cp)
+                raise CheckpointCorruptError(corrupt)
+            sigs = cp.get("sigs") or {}
+            if sigs and not force:
+                conflicts = sorted(
+                    path_s for path_s, expected in sigs.items()
+                    if _state_sig(path_s) != expected
+                )
+                if conflicts:
+                    self._release(cp)
+                    raise CheckpointConflictError(conflicts)
+            restored: list[str] = []
+            for path_s, data in cp["files"].items():
+                p = Path(path_s)
+                if data is None:
+                    # 改前不存在 → 回滚时应删除。目录要连内容一起删（move_file 的
+                    # 「目标是新建目录」记的是目录本身）。
+                    if p.is_dir():
+                        shutil.rmtree(p, ignore_errors=True)
+                    elif p.exists():
+                        p.unlink()
+                elif data == DIR_MARKER:
+                    # 改前是目录：重建目录本身即可，内容由逐文件条目还原
+                    # （move_file 的源目录/被覆盖的目标目录，审查 A-3 修复）
+                    p.mkdir(parents=True, exist_ok=True)
+                else:
+                    # 原子写：回滚写一半被中断会把文件留在半截状态（安全审查低危项）
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    write_bytes_atomic(p, data)
+                restored.append(path_s)
+            self._release(cp)
         return restored

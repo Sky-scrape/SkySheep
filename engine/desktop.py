@@ -327,7 +327,8 @@ def _write_pid_record() -> None:
         created = _process_start_time(pid) or 0.0
         from skysheep.textio import write_text_atomic  # noqa: PLC0415  引擎导入尽量后置
 
-        write_text_atomic(_pid_path(), f"{pid} {created:.3f}")
+        # pid 记录丢了无碍（后来者按读不到处理），不值得为它做落盘同步
+        write_text_atomic(_pid_path(), f"{pid} {created:.3f}", sync=False)
     except OSError:
         pass
 

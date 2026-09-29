@@ -281,6 +281,18 @@ class ChatApp:
 
     # ---- 主循环 ----
 
+    async def _persist_new_messages(self, n_before: int) -> None:
+        """把 history[n_before:] 增量落库（正常结束与打断共用的轮末收尾）。
+
+        打断会把工具循环截断在中间：先补齐「有 tool_use 无 tool_result」的
+        断口再落库，否则 /resume 与重启从库重载出的历史不满足协议
+        （对照 agent.run_turn 轮首的 repair_dangling_tool_uses）。
+        """
+        self.agent.repair_dangling_tool_uses()
+        for m in self.agent.history[n_before:]:
+            await self.store.append_message(self.session.id, m)
+        await self.store.touch(self.session.id)
+
     async def run(self) -> None:
         while True:
             try:
@@ -301,24 +313,29 @@ class ChatApp:
                 await self.store.set_title(self.session.id, self.session.title)
 
             n_before = len(self.agent.history)
-            interrupted = False
             try:
                 async for ev in self.agent.run_turn(text):
                     self.renderer.handle(ev)
                     if ev.kind == "permission_request":
                         decision = await self._ask_permission(ev)
                         self.agent.respond_permission(ev.request_id, decision)
-            except KeyboardInterrupt:
-                interrupted = True
+            except (KeyboardInterrupt, asyncio.CancelledError) as e:
+                # Ctrl-C 有两条到达路径，都必须接住：Python 3.11+ 的 asyncio.run
+                # 会在轮中把第一次 Ctrl-C 投递为 CancelledError（KeyboardInterrupt
+                # 只在 Runner 外层抛，Windows 上尤其如此），只接 KeyboardInterrupt
+                # 会让打断分支不可达——异常穿透出去整个 REPL 直接退出。
+                if isinstance(e, asyncio.CancelledError):
+                    # 主任务吞掉这次取消后还要继续跑 REPL：退掉取消计数，
+                    # 与 backend 轮次收尾对取消的处理取向一致
+                    task = asyncio.current_task()
+                    if task is not None:
+                        task.uncancel()
                 self.renderer.close()
                 self.console.print("\n[yellow]⏹ 已打断[/]")
-            if interrupted:
-                await self.store.touch(self.session.id)
-                continue
-            # 持久化本轮新增消息
-            for m in self.agent.history[n_before:]:
-                await self.store.append_message(self.session.id, m)
-            await self.store.touch(self.session.id)
+            # 持久化本轮新增消息：打断的一轮也要落——用户消息在 run_turn 开头
+            # 就进了内存 history，不落库的话 /resume 与重启从库重载后这一轮即
+            # 丢失（对照 GUI 取消路径的 shield 落库）
+            await self._persist_new_messages(n_before)
         self.renderer.close()
         await self.store.close()
 

@@ -62,3 +62,71 @@ def test_providers_detail_exposes_label(home):
         assert got["zhipu"]["label"] == "智谱"
         assert got["mimo"]["label"] == "小米 Mimo"
         assert got["deepseek"]["is_preset"] is True
+
+
+# ---- 手改 config.toml 不炸启动（M13 口径延伸到小节模型构造） ----
+
+
+def test_load_config_wraps_wrong_value_types_as_config_error(home):
+    """小节已知字段的值类型写错：报带小节名的 ConfigError，不再裸抛 ValidationError。"""
+    import pytest
+
+    from skysheep.config import ConfigError, config_path
+
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('[providers.deepseek]\nmodels = "deepseek-chat"\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as ei:
+        load_config()
+    assert "[providers.deepseek]" in str(ei.value)
+
+    # 已过滤未知键的小节（roundtable）同样要套住值类型错误
+    p.write_text('[roundtable]\nmax_members = "abc"\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as ei:
+        load_config()
+    assert "[roundtable]" in str(ei.value)
+
+    p.write_text("[memory_maintenance]\ninterval_hours = \"abc\"\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as ei:
+        load_config()
+    assert "[memory_maintenance]" in str(ei.value)
+
+
+def test_load_config_still_ignores_unknown_keys(home):
+    """未知键依旧忽略（向前兼容旧文件），正常配置不受影响。"""
+    from skysheep.config import config_path
+
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        '[providers.deepseek]\nsome_future_field = 1\nmodels = ["deepseek-chat"]\n'
+        '[server]\nanother_future_flag = true\n',
+        encoding="utf-8",
+    )
+    cfg = load_config()
+    assert cfg.providers["deepseek"].models == ["deepseek-chat"]
+    assert cfg.server.lan is False
+
+
+def test_set_provider_models_rejects_empty_list(home):
+    """空模型列表显式报 ConfigError（不变量修复路径取 [0] 曾踩空 IndexError）。"""
+    import pytest
+
+    from skysheep.config import ConfigError, set_provider_models_in_config
+
+    with pytest.raises(ConfigError, match="至少保留一个启用的模型"):
+        set_provider_models_in_config("customprov", [])
+
+    # 正常写入：models 落盘，当前模型被删时换到列表第一个（不变量保持）
+    from skysheep.config import config_path
+
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('[providers.customprov]\nkind = "openai"\nmodel = "m1"\n', encoding="utf-8")
+    set_provider_models_in_config("customprov", ["m2", "m3"])
+    import tomllib
+
+    raw = tomllib.loads(p.read_text(encoding="utf-8"))
+    section = raw["providers"]["customprov"]
+    assert section["models"] == ["m2", "m3"]
+    assert section["model"] == "m2", "当前模型被删后应换到已启用列表第一个"

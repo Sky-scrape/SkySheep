@@ -18,7 +18,13 @@ from .installer import (
     save_servers,
     validate_name,
 )
-from .presets import MCP_PRESETS, MCPPreset, preset_by_name, presets_public
+from .presets import (
+    MCP_PRESETS,
+    MCPPreset,
+    preset_by_name,
+    presets_public,
+    resolve_runtime_command,
+)
 
 __all__ = [
     "MCPManager",
@@ -41,4 +47,5 @@ __all__ = [
     "MCPPreset",
     "preset_by_name",
     "presets_public",
+    "resolve_runtime_command",
 ]

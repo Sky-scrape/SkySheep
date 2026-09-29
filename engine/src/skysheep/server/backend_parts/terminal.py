@@ -292,7 +292,18 @@ class TerminalPanelMixin:
         text = (text or "").strip()
         if not text:
             raise RuntimeError("empty text")
-        if self.provider is None:
+        # 辅助对话可设专用模型（ui.json 偏好，aux.model.set）：有则按次构建
+        # 独立 provider，不碰主对话的 provider 状态；没设就跟随主对话
+        provider = self.provider
+        aux_name, aux_model = self._aux_model_pref()
+        if aux_name:
+            try:
+                provider = self._build_detached_provider(aux_name, aux_model or None)
+            except Exception as e:
+                raise RuntimeError(
+                    f"辅助对话模型不可用（{aux_name} / {aux_model or '默认'}）：{e}"
+                ) from e
+        if provider is None:
             detail = self.provider_error or "请先在 设置 · 模型服务 里启用一个模型"
             raise RuntimeError(f"模型服务未配置或不可用：{detail}")
         if not local:
@@ -301,7 +312,7 @@ class TerminalPanelMixin:
                 Message.user(text),
             ]
             parts: list[str] = []
-            async for pe in self.provider.stream(history, []):
+            async for pe in provider.stream(history, []):
                 if isinstance(pe, ProviderTextDelta):
                     parts.append(pe.text)
                     await emit({"kind": "aux_delta", "text": pe.text})
@@ -317,7 +328,7 @@ class TerminalPanelMixin:
         parts: list[str] = []
         think_parts: list[str] = []
         try:
-            async for pe in self.provider.stream(list(self.aux_history), []):
+            async for pe in provider.stream(list(self.aux_history), []):
                 if isinstance(pe, ProviderTextDelta):
                     parts.append(pe.text)
                     await emit({"kind": "aux_delta", "text": pe.text})

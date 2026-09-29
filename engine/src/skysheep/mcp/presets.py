@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+from pathlib import Path
 from typing import TypedDict
 
 
@@ -26,7 +28,7 @@ class MCPPreset(TypedDict):
     args: list[str]
     readonly: bool  # True → 工具自动放行（纯只读/纯推理，无副作用）；
                     # 服务器自带的 read_only_hint=False 工具仍会逐次确认
-    runtime: str   # need 运行时对应的可执行探测名（shutil.which 探测是否存在）
+    runtime: str   # need 运行时对应的可执行探测名（探测逻辑见 runtime_available）
 
 
 MCP_PRESETS: list[MCPPreset] = [
@@ -120,13 +122,43 @@ def preset_by_name(name: str) -> MCPPreset | None:
     return None
 
 
+# uv 的已知安装落点：官方安装脚本装到 ~/.local/bin，cargo 安装在 ~/.cargo/bin。
+# 装完没注销重登的机器这两个目录往往不在 PATH 上，shutil.which 会漏探，
+# 误报「未检测到 uv」。对 npx / cua-driver 只是多两次必然落空的 stat，无害。
+_UV_FALLBACK_DIRS = (
+    Path.home() / ".local" / "bin",
+    Path.home() / ".cargo" / "bin",
+)
+
+
+def _fallback_paths(command: str) -> tuple[Path, ...]:
+    name = command + (".exe" if os.name == "nt" else "")
+    return tuple(d / name for d in _UV_FALLBACK_DIRS)
+
+
+def resolve_runtime_command(command: str) -> str:
+    """预设命令的可执行形式：PATH 命中原名返回（mcp.json 里保持可移植的裸名）；
+    PATH 探不到但已装在官方默认落点（uv 装完没重登时常见）则返回绝对路径，
+    启动不再依赖 PATH；都没有就原名返回，由启动路径给出既有报错。"""
+    if shutil.which(command):
+        return command
+    for p in _fallback_paths(command):
+        if p.is_file():
+            return str(p)
+    return command
+
+
 def runtime_available(need: str, command: str) -> bool:
     """本机是否具备这个预设依赖的运行时（shutil.which 探一次，毫秒级）。
 
     探测结果随 boot 快照带给前端：缺运行时的预设卡直接置灰、写明缺什么，
-    而不是让用户点「添加」之后才收到「启动命令不存在」。
+    而不是让用户点「添加」之后才收到「启动命令不存在」。PATH 探不到时再按
+    uv 的已知安装落点回探一次——装完没注销重登的机器 which 会漏，
+    文件其实就在 ~/.local/bin。
     """
-    return bool(shutil.which(command))
+    return bool(shutil.which(command)) or any(
+        p.is_file() for p in _fallback_paths(command)
+    )
 
 
 # 前端展示用的安全视图：只给元数据，不给 command/args（本机路径等细节前端用不到，

@@ -8528,6 +8528,7 @@ const auxModelChip = document.getElementById("aux-model-chip");
 const auxModelMenu = document.getElementById("aux-model-menu");
 let auxModelRows = []; // config.providers 展开的服务×模型行（与主模型菜单同源）
 let auxModelState = { provider: "", model: "", label: "", main_provider: "", main_label: "" };
+let auxMenuTab = "preset"; // 面板页签：preset=默认（内置预设）、custom=自定义（用户新增），与主模型菜单同口径
 
 // 菜单行里的头像比设置页小一圈；占位 tile 给「没有任何可用服务」的空态
 function auxMiniAvatar(name) {
@@ -8562,17 +8563,8 @@ function hideAuxModelMenu() {
 }
 
 function buildAuxMenu() {
-  auxModelMenu.innerHTML = "";
-  const follow = document.createElement("button");
-  follow.className = "mm-item" + (auxModelState.provider ? "" : " active");
-  follow.innerHTML = auxMiniAvatar(auxModelState.main_provider) +
-    `<span class="mm-model">跟随主对话</span>` +
-    (auxModelState.main_label ? `<span class="mm-prov">${escapeHtml(auxModelState.main_label)}</span>` : "");
-  follow.title = auxModelState.main_label
-    ? `辅助对话跟随主对话（当前：${auxModelState.main_label}）`
-    : "辅助对话跟随主对话";
-  follow.onclick = () => pickAuxModel(null);
-  auxModelMenu.appendChild(follow);
+  // 与主模型菜单同款：页签（默认/自定义）+ 行列表 + 管理入口。「跟随主对话」
+  // 不属于任何页签，固定在页签上方——这是辅助面板独有的一行
   const addRow = (row) => {
     const on = !!auxModelState.provider &&
       auxModelState.provider === row.name && auxModelState.model === row.model;
@@ -8585,23 +8577,70 @@ function buildAuxMenu() {
       ? `辅助对话使用 ${row.label} / ${row.model}`
       : `「${row.label}」还没配置 API Key，选用后发消息会失败`;
     b.onclick = () => pickAuxModel(row);
-    auxModelMenu.appendChild(b);
+    return b;
   };
-  for (const [label, pred] of [["默认", (r) => r.preset], ["自定义", (r) => !r.preset]]) {
-    const hits = auxModelRows.filter(pred);
-    if (!hits.length) continue;
-    const head = document.createElement("div");
-    head.className = "aux-mm-head";
-    head.textContent = label;
-    auxModelMenu.appendChild(head);
-    hits.forEach(addRow);
-  }
-  if (!auxModelRows.length) {
-    const empty = document.createElement("div");
-    empty.className = "mm-empty";
-    empty.textContent = "还没有可用的模型服务，先到 设置 · 模型服务 添加";
-    auxModelMenu.appendChild(empty);
-  }
+  const groups = [
+    {
+      tab: "preset", label: "默认", rows: auxModelRows.filter((r) => r.preset),
+      empty: "内置服务都已停用，可在管理页恢复",
+    },
+    {
+      tab: "custom", label: "自定义", rows: auxModelRows.filter((r) => !r.preset),
+      empty: "还没有自定义服务，点下方「管理模型服务」添加",
+    },
+  ];
+  const paint = () => {
+    auxModelMenu.innerHTML = "";
+    const follow = document.createElement("button");
+    follow.className = "mm-item" + (auxModelState.provider ? "" : " active");
+    follow.innerHTML = auxMiniAvatar(auxModelState.main_provider) +
+      `<span class="mm-model">跟随主对话</span>` +
+      (auxModelState.main_label ? `<span class="mm-prov">${escapeHtml(auxModelState.main_label)}</span>` : "");
+    follow.title = auxModelState.main_label
+      ? `辅助对话跟随主对话（当前：${auxModelState.main_label}）`
+      : "辅助对话跟随主对话";
+    follow.onclick = () => pickAuxModel(null);
+    auxModelMenu.appendChild(follow);
+    const seg = document.createElement("div");
+    seg.className = "seg-row seg-mini mm-seg";
+    for (const g of groups) {
+      const t = document.createElement("button");
+      t.textContent = g.label;
+      t.classList.toggle("active", auxMenuTab === g.tab);
+      t.onclick = (ev) => {
+        ev.stopPropagation(); // 别让冒泡到 document 的 click 把菜单关掉
+        if (auxMenuTab === g.tab) return;
+        auxMenuTab = g.tab;
+        paint();
+      };
+      seg.appendChild(t);
+    }
+    auxModelMenu.appendChild(seg);
+    const cur = groups.find((g) => g.tab === auxMenuTab) || groups[0];
+    if (!cur.rows.length) {
+      const hint = document.createElement("div");
+      hint.className = "mm-empty";
+      hint.textContent = cur.empty;
+      auxModelMenu.appendChild(hint);
+    }
+    cur.rows.forEach((row) => auxModelMenu.appendChild(addRow(row)));
+    const manage = document.createElement("button");
+    manage.className = "mm-manage";
+    manage.textContent = "⚙ 管理模型服务…";
+    manage.title = "到设置里添加服务、启用/停用模型、配置 API Key";
+    manage.onclick = () => {
+      hideAuxModelMenu();
+      openSettings("providers");
+    };
+    auxModelMenu.appendChild(manage);
+    // 内容替换后按实际宽度重新定位：贴着徽章上方，右缘对齐徽章（不够放时往左收）
+    const chipR = auxModelChip.getBoundingClientRect(); // 物理像素，下同
+    const mw = auxModelMenu.offsetWidth; // 布局像素，无需换算
+    auxModelMenu.style.bottom = (window.innerHeight / uiScale - chipR.top / uiScale + 6) + "px";
+    auxModelMenu.style.left =
+      Math.max(8, Math.min(chipR.right / uiScale - mw, window.innerWidth / uiScale - mw - 8)) + "px";
+  };
+  paint();
 }
 
 async function pickAuxModel(row) {

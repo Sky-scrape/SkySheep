@@ -182,3 +182,24 @@ def test_install_update_notice_reports_sha_verification():
     # 严格相等才放行「已核对」：undefined/false 都落到警告分支
     assert "r.verified === true" in seg
     assert "未能核对安装包校验值" in seg
+
+
+# ---------- 辅助对话模型面板：与主模型菜单同款的页签（默认/自定义）+ 管理入口 ----------
+
+def test_aux_model_menu_tabbed_like_main_menu():
+    """辅助对话的模型面板升级为主模型菜单同款：页签切换（默认/自定义）、
+    自定义页签空态指引、「⚙ 管理模型服务…」底栏；旧的分组小标题写法下线。"""
+    js = read_app_bundle()
+    i = js.index("function buildAuxMenu(")
+    seg = js[i:js.index("async function pickAuxModel")]
+    # 页签状态与主菜单同口径的分段控件
+    assert 'let auxMenuTab = "preset"' in js
+    assert 'tab: "preset", label: "默认"' in seg
+    assert 'tab: "custom", label: "自定义"' in seg
+    assert "seg-row seg-mini mm-seg" in seg
+    # 自定义页签空态指到管理入口；管理入口进 设置·模型服务
+    assert "还没有自定义服务" in seg
+    assert "管理模型服务" in seg
+    assert 'openSettings("providers")' in seg
+    # 旧的分组小标题（aux-mm-head）不再使用
+    assert "aux-mm-head" not in js

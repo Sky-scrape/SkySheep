@@ -2,7 +2,7 @@
 
 [![SkySheep](docs/images/banner.png)](https://sky-scrape.github.io/SkySheep/)
 
-**An open-source AI Agent workbench that runs on your computer — it can see, it can act, and it asks you before every step.**
+**An open-source desktop AI Agent workbench — reads and writes files, runs commands, operates your computer, and confirms every step with you first.**
 
 [![CI](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg)](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows--first-blue)
@@ -15,109 +15,80 @@
 
 </div>
 
-SkySheep is more than a chat window: it can read and write your files, run commands, operate your computer, and work on a schedule. Every sensitive action — writing files, running commands, moving the mouse — **pops up a confirmation card asking for your consent first**; every round of file changes is automatically snapshotted, so you can undo any of it with one click, anytime.
+SkySheep is an open-source AI Agent workbench that runs entirely on your machine: a Python asyncio engine, a pywebview desktop shell, and a zero-build frontend. Hand it a task and it reads and writes files, runs commands, searches the web, operates your computer, and carries multi-step work through on its own. Sessions, configuration, and API keys never leave your machine; sensitive actions such as file writes and command execution pop up a confirmation card by default, and every round of file changes is automatically snapshotted for one-click rollback.
 
 <div align="center">
 
 ![SkySheep main window](docs/images/right-panel.png)
 
-The full "Night-ink" dark theme: sidebar + conversation + live right panel + the desktop pet sheep
+*The full "Night-ink" dark theme: sidebar, conversation area, live right panel, and the desktop pet*
 
 </div>
 
-## ✨ Why SkySheep
+## ✨ Highlights
 
-Most AI desktop clients out there are just chat windows — the model can talk but can't act. SkySheep is a true **Agent workbench**: hand it a task and it reads the files, runs the commands, and writes out the results on its own. For a desktop Agent built for everyday users, safety comes first, so we made four things the default behavior:
+**Roundtable multi-model — one question, several models answering together**
 
-| Four-fold safety promise | What it means |
-|---|---|
-| 🔐 **Sensitive actions confirmed first** | File writes show a real diff preview and every command passes your eyes one by one; read-only actions run through automatically, no interruptions |
-| 🛡 **Unknown projects ask first** | A repo's bundled `.skysheep/` config (MCP commands, skills) never executes—and never reaches the model—until you confirm you trust it |
-| 📦 **All data stays on your machine** | Sessions, config, and API keys are stored only on your own computer (SQLite) — zero telemetry, zero uploads |
-| ↩️ **One-click undo for mistakes** | Every round of changes is auto-snapshotted to disk; roll back to any round even after a restart |
+Member models answer independently in parallel; the chairman (the main conversation model) fuses all drafts into one final answer.
 
-On top of that sits a complete Agent capability stack:
+- 🎭 **Role presets**: five member roles — critic, fact-checker, concision, pragmatist, and more — balancing sharpness and coverage
+- 💬 **Debate rounds**: members see each other's drafts and revise before the fusion; A/B mode keeps every member's original answer
+- 📜 **Draft retention**: every draft is persisted with the session for later review, quoting, and follow-ups; seven token-control mechanisms (duplicate-draft dedupe, light member context, per-draft and total budget caps, and more) keep the bill in check
 
-- 🔌 **Multi-provider models**: Zhipu / DeepSeek / Kimi / OpenRouter / SiliconFlow / native Anthropic, one-click setup; local models via [Ollama](https://ollama.com) (no key required); custom relay endpoints + automatic model detection
-- 🧩 **MCP and skill extensions**: MCP client (stdio/HTTP, Claude Desktop config compatible + one-click add for common presets); [Skill packages](skills-gallery/) (global/project scopes, install from a folder, a .zip, or a GitHub / Gitee URL + "scan this computer" to pick up skills already installed by Claude Code and other tools; a dedicated skills page with per-project scope, search, and bulk delete)
-- 🖱️ **Computer control**: screenshots straight into the conversation; mouse / keyboard / window / clipboard (off by default; confirmation-gated, with an action-level whitelist)
-- ⏰ **Scheduled tasks and agenda**: recurring tasks, due-time reminders, weekly calendar view; continue the chat from your phone over LAN (token + QR code)
-- 👥 **Roundtable multi-model**: several models answer independently in parallel, and a chairman model merges them into one better answer — with debate rounds (members see each other's drafts and revise), member role presets (critic / fact-checker / concision / pragmatist), a token-saver trio (light member context, duplicate-draft dedupe, fusion budget), and every draft kept on the message for later review
-- 🔗 **Task pipelines**: chain tasks by dependency — upstream nodes run in parallel, downstream starts automatically, a review node closes the loop; per-node timeouts, auto-retry with the last failure reason, PASS/FAIL gates, and the same unattended permission gating as scheduled tasks
-- 📄 **Document I/O**: reads PDF / Word / Excel, writes Word / Excel / CSV
-- 🀄 **Chinese-first**: the UI, built-in help, and prompt templates are all designed for Chinese-language scenarios
+**Task pipelines — chain tasks by dependency and let them run in the background**
 
-## 🖼 Interface Tour
+Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts automatically as dependencies land, through to the closing summary.
+
+- ⚙️ **Dependency scheduling**: declare `all` / `any` dependencies and conditional branches; concurrency limits and per-node timeouts are configurable
+- 🔁 **Failure resilience**: auto-retry with the last failure reason attached; resumed sessions re-queue with backoff — nothing hangs, nothing is lost
+- 📥 **Output passing**: node output is summarized and injected downstream, with full text written to disk for reference; scheduled tasks, sub-agent tasks, and existing sessions can all join as nodes
+
+## 🧩 Features
+
+**Models & conversation**
+
+- Ten built-in provider presets (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / Zhipu / Kimi / Qwen / Xiaomi MiMo) + custom relay endpoints; local inference services auto-detected; one-click model listing and context-window detection
+- Reasoning effort auto-tuned per task; thinking process streamed live and replayable in a collapsible view
+- Automatic context compaction (CJK-aware estimation, adjustable trigger ratio, manual `/compact` supported)
+- Daily token budget guardrails; usage dashboard by session / provider / model with cost estimation
+- Auxiliary chat can run its own model without touching the main conversation
+- Prompt library (pinyin-initial filtering, AI polish, import/export); `~` prompts, `/` commands, `@` file references, `&` conversation references; voice input
+
+**Task execution**
+
+- 24 built-in tools: file read/write with precise editing, command execution (with background process management), regex search, web fetch and search (multiple providers), PDF / Word / Excel / PPT / CSV I/O, image understanding, AI image generation
+- Computer control: screenshot, mouse, keyboard, window, clipboard (off by default; enable in settings)
+- Sub-agents: six built-in roles + custom roles (tool scope / model / reasoning effort configurable); parallel background execution with queuing; isolated spawns on a dedicated git worktree that auto-commits to its own branch
+- Execute / plan dual mode with a live-synced task list; task duration estimates and actual-time logging
+- Per-round checkpoints — undo this round's file changes with one click; rollbacks survive restarts
+
+**Automation & memory**
+
+- Scheduled tasks (recurring, with pre-authorized tool lists) and agenda reminders (weekly / monthly calendar, advance reminders)
+- Project memory edited in-app; global auto memory; archive-time memory distillation; scheduled memory tidy-up (originals backed up first)
+- Memory map: project evolution timeline, topic association graph, LLM-generated evolution summary
+- Hooks: pre tool-call (can block) / post / task-finished, with a tester and a recent-runs panel
+- `skysheep run` headless one-shot execution: pre-authorized tool list, JSON output, script-friendly
+
+**Extensions & connectivity**
+
+- MCP client: stdio / Streamable HTTP, Claude Desktop config compatible, seven built-in presets, bounded auto-reconnect
+- Skill packages: global / project scopes; import from a folder, a .zip, or a GitHub/Gitee URL; scan-and-import skills already on this machine; twenty official scenario templates bundled
+- Remote access: LAN token + QR code opens the full UI on your phone; Tailscale supported for cross-network access
+- Chat channels: Feishu (WebSocket long connection) / WeChat (QR login); read-only by default, optional approval cards with timeout auto-deny
+- Desktop form factor: six themes + follow-system, system tray, launch at startup, window geometry memory, global hotkey, desktop pet; multiple session tabs and a ten-tab right panel (terminal / browser / review / files / tasks / agenda / automation / project memory / memory map / MCP·Skills)
+- Session management: full-text search (Chinese-aware), session branching, pin / archive / tags, Markdown / HTML export, rolling backups with visual restore
+
+## 🖼 Screenshots
 
 | Model provider settings | Agenda weekly view | Usage dashboard |
 |:---:|:---:|:---:|
 | ![Model provider settings](docs/images/providers.png) | ![Agenda weekly view](docs/images/agenda.png) | ![Usage dashboard](docs/images/usage.png) |
-| Light "paper-ink" theme — paste an API key and connect to any provider | Dark "night-ink" theme — scheduled tasks land on the weekly calendar and fire on time | Token stats and cost estimates in real time — no more mystery bills |
+| Paste an API key into a built-in preset to connect | Scheduled tasks and reminders land on the calendar and fire on time | Token usage and cost estimates, per session |
 
-## 🚀 Quick Start
+## 🆚 Benchmarked Against Mainstream Agents
 
-**Option 1: Download the installer (recommended for everyday users)**
-
-Download `SkySheep-<version>-setup.exe` from [Releases](https://github.com/Sky-scrape/SkySheep/releases/latest) and double-click to install. If Windows SmartScreen blocks the first launch, click "More info → Run anyway" (standard treatment for unsigned programs; see the [SmartScreen walkthrough](docs/smartscreen-说明.md)).
-
-**Option 2: Run from source (developers)**
-
-```bash
-cd SkySheep/engine
-uv sync                          # Install dependencies (Python >= 3.11)
-
-uv run skysheep app              # 🖥 Desktop app (native window; --browser for a browser)
-uv run skysheep app <project-dir>  # Open a specific project directory
-uv run skysheep chat             # Terminal mode
-uv run skysheep run "task"       # One-shot headless run (JSON output supported)
-```
-
-No API key on first launch? The setup wizard walks you through three steps (pick a provider → paste the key → go), and auto-detects a local Ollama install; you can also click "Demo mode" first to watch a round of real tool calls. Every provider offers a free or low-cost tier — for users in China, Zhipu or DeepSeek is the recommended starting point. Key-free demo:
-
-```bash
-uv run python examples/demo.py   # FakeProvider multi-step coding task (write → crash → fix → re-test)
-```
-
-In the desktop app: type `~` to bring up the prompt-template menu (built-in examples included, manage your own under Settings · Prompts), `/` for the command menu, `@` to reference project files/folders, "Add file" to attach files from anywhere on disk, `Ctrl+F` to search within a conversation, `Ctrl+Shift+F` to search across sessions, and `Ctrl+Alt+Space` to summon the window globally. New here? Click the "?" in the top bar for built-in help.
-
-<details>
-<summary><b>📦 Double-click launch / packaging</b> (expand)</summary>
-
-```bash
-cd engine
-.venv\Scripts\python.exe tools\install_shortcut.py        # Start-menu/desktop shortcuts (source build)
-.venv\Scripts\python.exe tools\install_shortcut.py --exe  # Point at the packaged SkySheep.exe
-uv pip install pyinstaller
-.venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec   # Output: dist/SkySheep/SkySheep.exe
-```
-
-Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), then run `ISCC.exe tools\installer.iss`; the output lands in `installer/`.
-
-</details>
-
-### 🛡 Safety mechanisms
-
-- Read-only tools (read/grep/glob/list/web_fetch/web_search/read_document) run without confirmation
-- File writes, image generation, and command execution prompt for confirmation by default: `Allow once / Always allow for this project / Deny`; the permission button in the composer cycles three modes — **Safe execution** (confirm everything) → **Auto-edit** (auto-approves writes inside the working directory only) → **Full access** (writes and commands run without prompts, shown in warning red); relaxation modes can only be switched from the local UI, never over LAN/remote
-- The command whitelist matches by **full word prefix**, and commands carrying shell chaining/substitution (`;` `&&` `|` redirection, command substitution, newlines — plus single quotes and `%VAR%` expansion on Windows, both of which really split off a second command in cmd.exe) never match a prefix rule and always re-confirm; rules persist per project and can be viewed/deleted in settings
-- The action-level whitelist only covers revocable, intent-matched actions: `window close` (matches by title substring; closing is irreversible) and `clipboard_write` (the content is the payload) are never allowed as whole tools — only the exact confirmed action is remembered
-- **Workspace trust**: a project's `.skysheep/` (`mcp.json` and `skills/`) is repo-distributed data; on first open you are asked whether to trust it — until confirmed, its commands don't run and its skills never enter the system prompt; trust is keyed to the project path in your home directory, and any config change requires re-confirmation (guarding against "commit a harmless config first, push a malicious one later"); the global config is unaffected
-- `web_fetch` only allows public http(s): requests resolving to non-public IPs are rejected outright (SSRF protection), the resolved IPs are pinned as the connection target (anti-DNS-rebinding), redirects are re-checked hop by hop, and the response body is streamed with a hard stop past 2 MB
-- Write tools cap the content accepted per call (they error out instead of truncating); MCP tool descriptions are length-capped so a project-level server can't crowd the context window or smuggle in injection text
-- Checkpoints are persisted per project (last 50 rounds kept), with one-click "undo this round's changes" right in the conversation; changes made by run_command are not tracked
-- Session data is backed up automatically on a rolling basis (20 copies kept), restorable visually under Settings · About
-- The system prompt ships with a built-in **prompt-injection defense**: web/document content is treated as data, and instructions embedded in it are never executed directly
-- Unattended scenarios such as scheduled tasks can only call pre-authorized tools; all other writes/executions are rejected automatically
-- All user data lives in `~/.skysheep/`; exported diagnostic bundles automatically redact all secrets
-
-> **⏰ Requirements for scheduled tasks and agenda reminders**: scheduled tasks and agenda reminders are triggered by the app's internal loop, so they **only work while SkySheep is running**: choose "Minimize to system tray" when closing the window to keep it running in the background; tasks that come due while the app has fully exited are caught up on the next launch; to have it on duty from boot, enable "Launch at startup" under Settings · Advanced.
-
-## 🆚 Feature Panorama: Benchmarked Against Mainstream Agents
-
-SkySheep's feature set was built item by item against Claude Code / OpenAI Codex CLI / ZCode (✅ = implemented):
-
-<details>
-<summary><b>Expand the 29-capability comparison table</b></summary>
+SkySheep's feature set was built item by item against Claude Code / OpenAI Codex CLI / ZCode (✅ = implemented). The CLIs are stronger in terminal ecosystem and CI integration; SkySheep provides a full desktop GUI built for everyday users: Chinese-first, roundtable multi-model, task pipelines, computer control, and remote & chat channels. The current release is **Windows-first**; macOS/Linux are on the roadmap (the `--browser` mode provides a cross-platform fallback).
 
 | Capability | Claude Code | Codex CLI | ZCode | SkySheep |
 |---|---|---|---|---|
@@ -151,9 +122,64 @@ SkySheep's feature set was built item by item against Claude Code / OpenAI Codex
 | Cross-network remote access (Tailscale) | — | — | — | ✅ reach home from any network; shares the token with LAN; non-tailnet sources rejected outright |
 | Chat bot channels (Feishu / WeChat) | — | — | — | ✅ Feishu (App ID/Secret + WebSocket long connection) + WeChat (QR login); off by default, empty allowlist denies everything, read-only when unattended, optional approval with timeout auto-deny |
 
+## 🚀 Installation & Running
+
+**Installer (recommended for everyday users)**
+
+Download `SkySheep-<version>-setup.exe` from [Releases](https://github.com/Sky-scrape/SkySheep/releases/latest) and double-click to install. If Windows SmartScreen blocks the first launch, click "More info → Run anyway" (standard treatment for unsigned programs; see the [SmartScreen walkthrough](docs/smartscreen-说明.md)).
+
+**Run from source (developers)**
+
+```bash
+cd SkySheep/engine
+uv sync                          # Install dependencies (Python >= 3.11)
+uv run skysheep app              # Desktop app (--browser opens in a browser)
+uv run skysheep chat             # Terminal session
+uv run skysheep run "task"       # One-shot headless run (JSON output supported)
+```
+
+**Initial setup**
+
+A first-launch wizard connects a provider in three steps (pick a service → paste the key → go) and auto-detects local inference services; without an API key you can enter demo mode and watch a full round of real tool calls.
+
+<details>
+<summary><b>📦 Double-click launch / packaging</b> (expand)</summary>
+
+```bash
+cd engine
+.venv\Scripts\python.exe tools\install_shortcut.py        # Start-menu/desktop shortcuts (source build)
+.venv\Scripts\python.exe tools\install_shortcut.py --exe  # Point at the packaged SkySheep.exe
+uv pip install pyinstaller
+.venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec   # Output: dist/SkySheep/SkySheep.exe
+```
+
+Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), then run `ISCC.exe tools\installer.iss`; the output lands in `installer/`.
+
 </details>
 
-Where they differ: the big three CLIs are stronger in terminal ecosystem (plugin markets, CI integration); SkySheep puts "safe for everyday desktop users" first — confirmation-gated permissions, purely local storage, no crash without an API key, one-click checkpoint rollback, and computer control tucked away by default. The current release is **Windows-first** (pywebview/WebView2); macOS/Linux are on the roadmap (the `--browser` mode already provides a cross-platform fallback).
+> **📦 Multiple instances**: source builds run under a `dev` identity by default, with data in `~/.skysheep-dev/` — isolated from the installed app's `~/.skysheep/` and safe to run side by side; the `SKYSHEEP_INSTANCE` environment variable spawns further independent instances.
+
+> **⏰ Scheduled tasks require the app to be running**: scheduled tasks and agenda reminders fire from the app's internal loop. Choose "Minimize to system tray" when closing to keep them running in the background; tasks that come due while fully exited are caught up on the next launch. Enable "Launch at startup" under Settings → Advanced for always-on duty.
+
+## 🔒 Security
+
+Security is the default behavior, no configuration required:
+
+- **Confirmation-gated permissions**: read-only actions run through automatically; file writes (with a diff preview) and command execution prompt for confirmation one by one. Three permission modes — Safe execution / Auto-edit (auto-approves writes inside the working directory only) / Full access; relaxed modes can only be switched from the local UI
+- **Command whitelist**: matches by full word prefix; commands carrying shell chaining or interpreter flags never match a rule and always re-confirm; rules persist per project, managed in settings
+- **Workspace trust & network protection**: a project's bundled MCP and skill configs require explicit trust before use; web fetch is restricted to public http(s) with SSRF protection and aborts oversized responses
+- **Local data & rollback**: sessions, config, and keys stay on your machine with zero telemetry; file changes are snapshotted per round and reversible; the session database rolls automatic backups; exported diagnostic bundles are redacted automatically
+
+<details>
+<summary><b>Fine-grained mechanisms</b> (expand)</summary>
+
+- Four whitelist rule kinds (whole tool / word prefix / exact arguments / glob); interpreter `-c / -e / --eval` flags are full-text scanned so they can't smuggle a command past a prefix rule
+- Computer control converges per action: the action whitelist only remembers the exact confirmed action — closing windows / writing the clipboard is never allowed as a whole tool
+- `web_fetch` pins resolved IPs as the connection target (anti-DNS-rebinding) and re-checks redirects hop by hop
+- Checkpoints: 50 rounds per session, 500 per project; session backups keep 20 copies, restorable visually
+- MCP tool descriptions are length-capped against context crowding and injected instructions; the system prompt ships with a prompt-injection defense — web / document content is treated as data
+
+</details>
 
 ## 🏗 Architecture
 
@@ -180,77 +206,41 @@ Where they differ: the big three CLIs are stronger in terminal ecosystem (plugin
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Design keynote: **event-stream driven** — the entire agent run is modeled as `AgentEvent`s, and the CLI, GUI, and WebSocket server all consume the same engine API; sensitive operations go through the `PermissionGate`, which emits a `PermissionRequest` event and suspends; once the frontend decides, execution resumes.
+Design keynote: **event-stream driven** — the entire agent run is modeled as `AgentEvent`s, and the CLI, GUI, and WebSocket server all consume the same engine API; sensitive operations go through the `PermissionGate`, which emits a confirmation event and suspends until the frontend decides.
 
-Auditability: all project source (the Python engine and the frontend trio) ships as readable, unobfuscated code; the mermaid/xterm bundles under `server/static/vendor/` are upstream minified build artifacts of third-party libraries (versions pinned, never modified) — published assets, not project source. Built-in tools export standard MCP annotations (readOnlyHint / destructiveHint / idempotentHint / openWorldHint) for MCP hosts.
+Auditability: all project source (the Python engine and the frontend trio) ships as readable, unobfuscated code; the mermaid/xterm bundles under `static/vendor/` are upstream build artifacts of third-party libraries (versions pinned, never modified).
 
-## 🤝 Development
+## 🤝 Development & Contributing
 
 ```bash
 cd engine
-uv run pytest        # Full test suite (incl. real MCP stdio integration + end-to-end WebSocket protocol tests)
+uv run pytest        # Full test suite (-m "not e2e" skips the real-socket tests)
 uv run ruff check .  # lint
 ```
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) (environment setup, coding conventions, PR self-check checklist). To report a security vulnerability, use the private channel in [SECURITY.md](SECURITY.md) — please don't open a public issue. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for the code of conduct.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md). To report a security vulnerability, use the private channel in [SECURITY.md](SECURITY.md) — please don't open a public issue. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for the code of conduct.
 
-Running into a problem? In the app, go to Settings · About → "💬 Report an issue" to auto-package a redacted diagnostic bundle and open the feedback page.
+Running into a problem? In the app, go to Settings → About → "💬 Report an issue" to auto-package a redacted diagnostic bundle and open the feedback page.
 
-## 🗺 Roadmap
+## 🗺 Roadmap & Non-goals
 
-- **M1-M4 (✅)**: engine core → extension ecosystem (MCP/Skills/sub-agents) → desktop app → feature-parity pass
-- **M5 (✅ shipped)**: open-source release — repo live at [github.com/Sky-scrape/SkySheep](https://github.com/Sky-scrape/SkySheep):
-  CI ✅, community docs ✅, installer scripts ✅, update check ✅,
-  SmartScreen guide ✅, website page (`index.html`, live on GitHub Pages) ✅; remaining: code-signed distribution
-- **M6 (✅ 0.8.0)**: usability hardening for everyday users (see the [CHANGELOG](CHANGELOG.md) for details)
-- **v1.0 (✅)**: first stable release — browser control, phone control (in-app toggle),
-  instant title-bar theme sync, keyless activation paths (registration guide / demo mode / one-click Ollama),
-  daily token budget guardrails, prompt-injection defense, feedback loop (diagnostic bundle + one-click report),
-  crash sentinel with friendly messaging, and the full website + open-source kit
-- **v1.2 (✅)**: real terminal (multi-tab PowerShell via ConPTY + xterm.js), bot
-  channels (Telegram / WeChat QR login), task time estimates, voice input, session archive & tags,
-  cross-session references, live sub-agent streaming with true cancellation, round-table multi-turn
-  debate, three-layer hardening from an external security review, safe non-UTF-8 text I/O (GBK etc.),
-  PPTX read/write, and provider presets expanded to 10 vendors
-- **v1.3 (✅)**: task pipelines (chain tasks by dependency — parallel dev work feeds an automatic review stage), archive-time memory digest (distills long-term user memory when a session is archived), roundtable token saver trio (light member context / duplicate-draft dedupe / member role presets) plus robustness fixes, installer static-asset hardening
-- **v1.4 (✅)**: "quick commands" renamed to "prompts" with a `~` trigger (split from `/` slash commands), three-mode permission button (safe execution / auto-edit / full access), built-in example prompts seeded as editable records on first boot, Skill Market grown to 20 official Chinese skills, prompt-dialog fix
-- **v1.5 (✅)**: root fix for the launcher "double-click does nothing" hang chain (non-blocking focus / stale-instance takeover / window-creation watchdog) plus a persistent WebView2 profile, drag-to-reorder projects & sessions (shared by grouped and classic views, fork families stay together), thinking & elapsed time persisted with messages (survives refresh; surfaced in exports and Telegram / WeChat channels), cua computer-driver preset, and two performance passes (Anthropic cache breakpoints / SQLite WAL / runtime-pool LRU / on-demand history images / merged terminal output / lazy mermaid·xterm)
-- **v1.6 (✅)**: multi-instance support (source tree runs a `dev` identity isolated from the installed app), structured logging (per-session turn / tool / permission timings), bounded auto-reconnect for MCP (no replay of the failed call), shell-chaining detection per actual shell (plugs the cmd.exe single-quote & `%VAR%` bypasses), full MCP annotations on all 31 built-in tools (listed in the M8ven Trust Index), merged streaming deltas, chunked long-history rendering, and a real-socket end-to-end test layer
-- **v1.7 (✅)**: projects may be deleted down to zero — the no-project state (quick chat) is now a first-class, reboot-persistent mode (current project recorded backend-side in ui.json), a permanent quick-chat section in the classic view, schedule time spans, a per-project task list, six built-in sub-agents all editable, one-click in-app update for the installed build, one-click context-window detection for model services, default context limit raised to 1M tokens, plus a batch of fixes (quick-chat session ops, channel first-config deadlock, WeChat QR rendering)
-- **v1.8 (✅)**: isolated sub-agent spawns on a dedicated git worktree & branch (writes never touch the main workspace; engine auto-commits, merging stays under the main session's control) and write leases for parallel tasks (same-project sessions coordinate file writes, conflicts are annotated); the chat channel switches from Telegram to Feishu (official SDK, remote chats pinned to a dedicated project); eight Settings → Advanced additions (hook tester / recent-run panel / enable toggles for hooks & whitelist rules / whitelist hit stats / stop hooks / compaction trigger ratio / restore-default run params / trusted-projects list); the second security-review pass fixed 2 high + 16 medium findings (skill-name path traversal, post-compaction persistence slicing, and more); plus a UI polish batch (prompt page sort/stats/import-export, renamable & draggable session tabs)
-- **v1.9 (✅)**: five audit batches (session operations, memory & information management, skill management, MCP management/usage, and the right panel's 12 tabs) + two root-cause fixes for WeChat QR login + desktop start/exit lifecycle cleanup (no more false "last exit was abnormal" reports) + a root-cause fix for the in-app one-click updater (the update helper's command string was mangled by argument escaping — updates never actually installed since 1.8; works from this build on); plus a UX consistency batch: every "new session" click creates one, archiving closes its tab, a fixed-size archive dialog with bulk select, the skills page fills the viewport, and the right panel's 12 tabs merge into 9 ("任务/Tasks" = subagent tasks · session checklist · project tasks, "自动化/Automation" = cron jobs · pipelines, switched via a segmented bar) — Skill Market fully retired front to back, install skills via "Import"
-- **v2.0 (✅)**: the memory map — visualize each project's evolution (a session "star-orbit" timeline + an association graph over stage/topic/file/memory nodes + LLM-generated evolution summaries, with file-footprint and activity-heatmap gauges); eight prompt (~ menu) enhancements (fill-in placeholders, pinyin-initial filtering, frequently-used-first ordering, AI polish, and more); auto-compaction can be toggled with a customizable trigger ratio; and the three-layer closure of an external security review (terminal environment redaction with output no longer pushed to remote clients, writes into the engine's data directory always re-confirmed, full CSP on the main document, three web_fetch hardenings, and more)
-- **v2.1.0 (✅)**: focused on "subtraction and course-correction", adding no new agent capabilities — the sidebar's seven entries merge into six ("Tasks" and "Automation" compound tabs), computer control and browser control merge into one switch group, and the composer sheds informational clutter; in-settings search (filter all 38 cards by title & body, jump straight to the card), a scenario-template center (one-click install of the bundled official skills), and a unified "restart required" banner with a one-click restart button; versioning moves to three-segment semver, with a new "Non-goals" section plus a UI terminology glossary and a release checklist, website feature cards 11 → 16, and the English README aligned with the Chinese one
-- **v2.2.0 (✅ current release)**: two rounds of project-wide review hardening (adversarial
-  review with independent verification — 69 findings landed: permission-gate semantic gaps, concurrency
-  teardown invariants, the backup/restore chain, model-menu rendering, update-chain alignment, and more)
-  plus three structural refactors (ServerBackend responsibility mixins, a table-driven dispatch registry
-  with a single-track "local-only" policy, and a zero-build partition split of app.js); the aux-chat panel
-  can now run its own model (tabbed model picker, fixed-size scrolling menus), alongside browser-panel
-  fit-to-width & page zoom and a uv-detection fallback for MCP presets
-- **Next up**: macOS/Linux support, system-level scheduling, defense-in-depth against prompt injection
+- ✅ **Shipped**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors (current release **v2.2.0**; see [CHANGELOG.md](CHANGELOG.md) for the full history)
+- 🚧 **Next up**: macOS / Linux support · system-level scheduling · defense-in-depth against prompt injection · code-signed distribution
 
-[CHANGELOG.md](CHANGELOG.md) is the single source of truth for versions and changes.
+**Non-goals**:
 
-## 🚫 Non-goals
+- **Native mobile apps** — the desktop shell is where permission gates, checkpoints, and the file panel get polished; there is no bandwidth right now for a second, mobile-grade security model.
+- **macOS/Linux (for now)** — Windows gets the desktop experience polished first; the `--browser` mode already provides a cross-platform fallback.
+- **Vector memory / multi-tier context compaction** — the built-in compaction and archive-time memory digests already cover current usage; not worth growing the install size.
+- **Replacing the built-in search with ripgrep** — pure-Python, zero-dependency "install and it works" distribution stays.
+- **A proprietary plugin JS API** — extension points stay on the two open standards, MCP and Skills; the frontend remains zero-build.
+- **An operated skill marketplace** — skills ship via the in-app import flow (folder / .zip / links); no curated store to moderate.
 
-The roadmap says what comes next; this section says what intentionally won't — written down to avoid relitigating it:
+## 📄 License & Sponsorship
 
-- **Native mobile apps** — the desktop shell is where the permission gate, checkpoints, and the file panel get polished; there is no bandwidth right now for a second, mobile-grade security model.
-- **macOS/Linux (for now)** — Windows is the first-class platform, and pywebview/WebView2, wintheme, and process-tree management get the attention first; the `--browser` mode already provides a cross-platform fallback.
-- **Vector memory / multi-tier context compaction** — the built-in "keep recent messages + LLM summary" compaction and archive-time memory digests already cover current usage; a vector store would grow the install and expand the local sensitive-data surface.
-- **Replacing the built-in grep with ripgrep** — the built-in content search is pure Python with zero external dependencies; binding to an external binary would break the "install and it works" distribution.
-- **A proprietary plugin JS API** — extension points stay on the two open standards, MCP and Skills; the frontend remains zero-build, with no private plugin protocol or build chain to maintain.
-- **An operated skill marketplace** — a curated store needs ongoing review and server investment; skills ship via the in-app "Import" flow (folder / .zip / GitHub·Gitee links) instead.
+Released under the [MIT](LICENSE) license.
 
-## 📄 License
-
-[MIT](LICENSE)
-
-## 💖 Sponsorship
-
-Donations are accepted via the channel listed in [.github/FUNDING.yml](.github/FUNDING.yml) — GitHub Sponsors: [Sky-scrape](https://github.com/sponsors/Sky-scrape).
-The first spending priority is **code-signed distribution**: a signing certificate is a recurring annual cost and the only unfinished item of roadmap milestone M5; signed installers remove the Windows SmartScreen warning (see [docs/smartscreen-说明.md](docs/smartscreen-说明.md)) so everyday users can install with a double-click.
+Donations are accepted via the channel listed in [.github/FUNDING.yml](.github/FUNDING.yml) — GitHub Sponsors: [Sky-scrape](https://github.com/sponsors/Sky-scrape). The first spending priority is **code-signed distribution**: signed installers remove the Windows SmartScreen warning (see [docs/smartscreen-说明.md](docs/smartscreen-说明.md)) so everyday users can install with a double-click.
 
 ---
 

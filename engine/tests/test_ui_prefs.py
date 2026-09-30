@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from conftest import read_app_bundle
 from test_server import make_client, recv_until
 
 
@@ -55,7 +56,7 @@ def test_welcome_card_wiring_source_contract(home):
     from pathlib import Path
 
     static = Path(__file__).resolve().parents[1] / "src" / "skysheep" / "server" / "static"
-    js = (static / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     html = (static / "index.html").read_text(encoding="utf-8")
     # 后端键
     from skysheep.server.backend import ServerBackend
@@ -116,7 +117,7 @@ def test_agenda_time_span_ui(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
 
     modal = js[js.index("function agendaModal("):]
@@ -149,7 +150,7 @@ def test_agenda_week_drag_select_ui(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
 
     # 拖动走 pointer 事件 + 指针捕获（鼠标移出网格也不丢）
@@ -201,7 +202,7 @@ def test_classic_view_lists_quick_chats(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     # 经典视图渲染函数拿得到快聊数据（服务端单独下发，不混进「当前项目」）
     body = js[js.index("async function refreshSessions("):]
@@ -246,7 +247,7 @@ def test_tab_rename_protocol(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
 
     # ① 入口：双击 + 右键菜单
@@ -305,7 +306,7 @@ def test_tab_drag_order_protocol(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     backend = (STATIC_DIR.parent / "backend_parts" / "preferences.py").read_text(encoding="utf-8")
 
@@ -352,9 +353,7 @@ def test_tab_takes_over_blank_placeholder(home):
          会早退，这些记账不做就永远停在「新会话」）；
       ④ 「新建会话」点击即新建（原则统一后不再复用未用过的标签）。
     """
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
 
     # ① 空标签的判定：无 sid 且没在跑（跑着的正懒创建会话，抢走会劫持运行）
     assert "function isBlankTab(" in js
@@ -407,9 +406,7 @@ def test_session_updated_broadcast_does_not_spawn_tabs(home):
     （用户报的「左侧标签消失，上方标签没跟着消失」）。带 archived 标记的
     广播现在把标签一并 closeTab 收掉。
     """
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     routing = js[js.index("function handleEvent("):]
     routing = routing[:routing.index("switch (kind)")]
     assert 'kind !== "session_updated"' in routing, \
@@ -435,7 +432,7 @@ def test_archive_modal_fixed_size_and_bulk_ops(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     assert ".modal-box:has(.archive-wrap)" in css, "归档弹窗要有固定尺寸规则"
     fixed = css[css.index(".modal-box:has(.archive-wrap)"):]
@@ -467,7 +464,7 @@ def test_sidebar_no_project_state_and_empty_text(home):
 
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
 
     # 1. 添加项目钮两种视图共用（session-add-project），位置随视图搬移：
     #    经典视图在「项目」标题行右端（第一条横线右方），分组视图回「会话」行。
@@ -574,7 +571,7 @@ def test_browser_panel_fit_wiring_source_contract(home):
     from pathlib import Path
 
     static = Path(__file__).resolve().parents[1] / "src" / "skysheep" / "server" / "static"
-    js = (static / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     html = (static / "index.html").read_text(encoding="utf-8")
     css = (static / "app.css").read_text(encoding="utf-8")
     from skysheep.server.backend import ServerBackend
@@ -752,7 +749,7 @@ def test_frontend_project_switch_is_in_page(home):
 
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     # 去掉注释再断言：注释里会提到这些被废弃的做法（讲清为什么不能那么做）
     code = _strip_js_comments(js)
 
@@ -785,7 +782,7 @@ def test_grouped_view_fold_all_button_protocol(home):
 
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
 
     assert 'id="btn-fold-all"' in html
     assert ".head-ops" in css and ".fold-all.expand" in css
@@ -803,9 +800,7 @@ def test_grouped_head_click_highlight_protocol(home):
     展开）后高亮先借给那个组，再点会话/切标签时交回。单值状态保证同一时刻
     最多一个组头亮；点的组若已不存在自动落回，不整列无高亮。
     """
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     # 单值状态：最多一个组头亮
     assert "let groupedClickGk = null;" in js
     # 点组头（折叠/展开）时把高亮收给点的那个组
@@ -836,9 +831,7 @@ def test_close_tab_only_closes_tab(home):
     关掉后会话仍在侧栏，删除只能显式走侧栏 ⋯ →「删除会话」（或底部批量
     「清理空会话」）。
     """
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     close = js[js.index("function closeTab("):]
     close = close[:close.index("\n}\n")]
     assert "session.delete" not in close, "关标签不得顺带删会话"
@@ -860,9 +853,7 @@ def test_new_session_follows_sidebar_highlight(home):
     快聊=建快聊、其他项目=先切过去、远程/其他=提示不建。此前恒在当前项目
     建并跳回当前项目视图（「点了 A，新会话却跑去反代」）。
     """
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     # 高亮来源与组头渲染同一份：分组视图渲染时记下 highlightKey
     assert "let lastGroupedHighlightKey = null;" in js
     body = js[js.index("async function refreshSessionsGrouped("):]
@@ -905,9 +896,7 @@ def _strip_js_comments(src: str) -> str:
 
 def test_frontend_workspace_reset_covers_project_bound_state(home):
     """切换后旧项目的状态必须被清干净（漏清比加载屏更糟：会显示错的数据）。"""
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     reset = js[js.index("function resetWorkspaceState()"):]
     reset_body = reset[:reset.index("\n}\n")]
     for name in (
@@ -934,9 +923,7 @@ def test_right_tab_restore_loads_data_on_startup(home):
       ② initUiPrefs 恢复标签时逐个 loadRightTab；
       ③ 收起/展开与切项目重拉也走同一条路。
     """
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
 
     # ① 一张表覆盖所有需要拉数据的标签（含日程，正是漏掉的那个）
     table = js[js.index("const RIGHT_TAB_LOADERS = {"):]
@@ -980,7 +967,7 @@ def test_right_panel_merged_tabs_keep_every_view_reachable(home):
     from skysheep.server.app import STATIC_DIR
     from skysheep.server.backend import ServerBackend
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
     # ① 菜单里只剩 10 格（含记忆地图），合并掉的四个不再作为标签出现
@@ -1051,7 +1038,7 @@ def test_roundtable_menu_opens_on_left_and_keeps_actions_reachable(home):
     from skysheep.server.app import STATIC_DIR
 
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
 
     rt_rule = css[css.index(".rt-menu {"):]
     rt_rule = rt_rule[:rt_rule.index("}")]
@@ -1183,9 +1170,7 @@ def test_remote_project_fixed_entry(home):
     点击改为打开名下最近的会话，且不显示删除钮；分组视图组内会话直接打开
     （renderProjectGroup 的 rootPath && !isCurrent 分支天然跳过，不切工作目录）。
     """
-    from skysheep.server.app import STATIC_DIR
-
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     # 经典视图：root_path 为空即固定项目；不切项目、不显示删除钮
     assert "const remote = !p.root_path;" in js
     assert 'if (remote) li.classList.add("remote-fixed")' in js

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from conftest import read_app_bundle
 from test_server import make_client, recv_until  # noqa: F401
 
 from skysheep.config import (
@@ -621,7 +622,7 @@ def test_local_skills_render_inline_not_modal(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
@@ -653,7 +654,7 @@ def test_skills_page_has_scope_controls(home):
     """技能独立页：总览卡片可点进入，页内能设使用范围、预览指令。"""
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
     # 总览 / 独立页两个视图都在，且有返回入口

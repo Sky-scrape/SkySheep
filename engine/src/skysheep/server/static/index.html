@@ -1493,6 +1493,12 @@
 <!-- mermaid（3.3MB）、xterm、highlight.js、qrcode 全部按需加载：首次渲染图表 /
      首次开终端 / 首个代码块高亮 / 首次画二维码时，才由 app.js 的 loadLib 注入
      script——首屏不再同步解析这几百 KB 到几 MB 的库，冷启动更快 -->
+<script src="/static/app-projects.js"></script>
+<script src="/static/app-schedule.js"></script>
+<script src="/static/app-providers.js"></script>
+<script src="/static/app-whitelist.js"></script>
+<script src="/static/app-skills.js"></script>
+<script src="/static/app-memmap.js"></script>
 <script src="/static/app.js"></script>
 <!-- 工具配置区块（联网搜索 / AI 画图 / 语音输入 / 圆桌）拆在 app-tools.js：
      同为普通 script、零构建，先 app.js 后本文件，两文件靠全局函数互调 -->

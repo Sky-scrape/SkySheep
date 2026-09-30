@@ -17,6 +17,7 @@ _client_is_local（TestClient 的 scope client 固定为 testclient，无法从�
 from __future__ import annotations
 
 import pytest
+from conftest import read_app_bundle
 from starlette.websockets import WebSocketDisconnect
 from test_server import make_client, recv_until  # noqa: F401
 
@@ -555,7 +556,7 @@ def test_static_responses_forbid_framing(home):
 
 def test_markdown_external_links_use_noopener(home):
     """模型输出里的外链带 rel="noopener noreferrer"（新窗口拿不到 opener）。"""
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     i = js.index("function renderMarkdown(")
     seg = js[i:i + 4000]
     assert 'rel="noopener noreferrer"' in seg

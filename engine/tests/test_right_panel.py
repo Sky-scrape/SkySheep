@@ -8,6 +8,7 @@ import sys
 import time
 
 import pytest
+from conftest import read_app_bundle
 from test_server import make_client, recv_until
 
 from skysheep.messages import TextBlock, ToolUseBlock
@@ -241,7 +242,7 @@ def test_aux_model_wired(home):
     """前端接线：发送钮上方的徽章入口、弹出菜单容器、装载与切换调用都在。"""
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     assert "aux.model.get" in js and "aux.model.set" in js
     assert "refreshAuxModel" in js and "pickAuxModel" in js
     assert "providerAvatar(" in js  # 闭合态只显品牌 logo
@@ -453,7 +454,7 @@ def test_rp_tabs_compress_no_scroll(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     # CSS：容器不再横向滚动；标签可压缩、文字截断；两档降级类存在
     tabs_block = css.split("#rp-tabs {")[1].split("}")[0]

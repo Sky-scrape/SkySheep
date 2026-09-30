@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from conftest import read_app_bundle
+
 # 用例可能从任意 cwd 启动（仓库根 / engine/），静态资源一律按本文件定位成
 # 绝对路径；与 server/app.py:299 及 test_settings_extras.py 的写法同源。
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +25,7 @@ def read_static(name: str) -> str:
 # ---------- 评审 F3：调试错误陷阱（__errdump 红屏浮层）不在线上代码里 ----------
 
 def test_err_trap_removed():
-    js = read_static("app.js")
+    js = read_app_bundle()
     assert "__errdump" not in js, "调试红屏浮层（__errdump）又被加回来了"
     assert "ERR_TRAP" not in js
 
@@ -31,7 +33,7 @@ def test_err_trap_removed():
 # ---------- 评审 F23：流式输出不再无条件拽底 + 「回到底部」浮标 ----------
 
 def test_stream_scroll_follows_bottom_only():
-    js = read_static("app.js")
+    js = read_app_bundle()
     # scrollLog 尊重贴底跟随标记（上翻回看时不抢滚动位置）
     assert "function logNearBottom" in js
     assert "_followBottom === false" in js
@@ -52,7 +54,7 @@ def test_stream_scroll_follows_bottom_only():
 # ---------- 评审 F24：任务面板 3s 轮询按快照跳过无变化重绘 ----------
 
 def test_tasks_poll_snapshot_guard():
-    js = read_static("app.js")
+    js = read_app_bundle()
     assert "loadTasks._snap" in js, "任务面板轮询缺少序列化快照对比"
     # 失实的「关闭即停」注释不复存在（定时器常驻，靠可见性跳过 + 快照跳过重绘）
     assert "关闭即停" not in js
@@ -65,7 +67,7 @@ def test_tasks_poll_snapshot_guard():
 # ---------- 评审 F30：流式渲染增量化（定稿前缀只渲染一次） ----------
 
 def test_stream_render_is_incremental():
-    js = read_static("app.js")
+    js = read_app_bundle()
     assert "function streamSealCut" in js, "缺少定稿切点计算（空行 + 围栏配对）"
     assert "function initStreamBody" in js
     assert "function renderStreamPart" in js
@@ -80,7 +82,7 @@ def test_stream_render_is_incremental():
 # ---------- 评审 F42：vendor 库一次加载失败后仍可重试 ----------
 
 def test_loadlib_failure_not_cached_forever():
-    js = read_static("app.js")
+    js = read_app_bundle()
     assert "delete _libLoads[name]" in js, \
         "loadLib 失败必须清缓存，否则 mermaid/高亮/终端/二维码 刷新前永久不可用"
 
@@ -88,7 +90,7 @@ def test_loadlib_failure_not_cached_forever():
 # ---------- 评审 F43：diff 行分类与两位补零去重；三表单共用骨架 ----------
 
 def test_diff_and_pad2_deduplicated():
-    js = read_static("app.js")
+    js = read_app_bundle()
     # 补零实现全局只有 pad2 一处；diff 行分类只有 renderDiffText 一处
     assert js.count("padStart(2") == 1
     assert js.count('startsWith("+++")') == 1
@@ -110,7 +112,7 @@ def test_diff_and_pad2_deduplicated():
 # ---------- 评审 F49：历史窗口化（保留首段同步画） ----------
 
 def test_history_windowing_keeps_first_sync_paint():
-    js = read_static("app.js")
+    js = read_app_bundle()
     assert "HISTORY_WINDOW" in js, "缺少历史窗口常驻上限"
     assert "加载更早的消息" in js and "function loadEarlierHistory" in js
     # 首段同步画约束：openTabForSession 返回后立刻看 children.length 判空会话，
@@ -130,7 +132,7 @@ def test_history_windowing_keeps_first_sync_paint():
 def test_markdown_link_rule_anti_backtracking():
     r"""旧写法 [^\]]+ 对大量未闭合 `[` 平方级回溯（Node 实测 200KB 病态文单次
     全量渲染 30 秒以上，流式期间每 80ms tick 重放一遍），必须加护栏。"""
-    js = read_static("app.js")
+    js = read_app_bundle()
     i = js.index("function renderMarkdown(")
     seg = js[i:i + 4600]
     # 旧的无界写法必须消失（平方级回溯的根源）
@@ -155,7 +157,7 @@ def test_markdown_link_rule_anti_backtracking():
 def test_mcp_import_confirm_shows_env():
     r"""stdio 服务的环境变量可改变目标程序运行时行为（NODE_OPTIONS 等），
     确认框必须逐键可见；没有 env 时输出与原来完全一致。"""
-    js = read_static("app.js")
+    js = read_app_bundle()
     # 锚定到 MCP 导入确认块（app.js 里 needs_confirm 有多处，别抓错）
     i = js.rindex("if (r.needs_confirm)", 0, js.index("以下 MCP 服务会在连接时执行本机命令"))
     seg = js[i:i + 1800]
@@ -174,7 +176,7 @@ def test_install_update_notice_reports_sha_verification():
     """install_update 响应带 verified 布尔（是否成功核对 .sha256 附件），
     前端必须展示；只有明确 true 才算核对过——false 或旧后端缺字段一律按
     「未核对」处理。"""
-    js = read_static("app.js")
+    js = read_app_bundle()
     i = js.index('request("app.install_update")')
     seg = js[i:i + 1600]
     # 严格相等才放行「已核对」：undefined/false 都落到警告分支

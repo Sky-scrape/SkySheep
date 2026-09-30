@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import read_app_bundle
 from test_server import make_client, recv_until  # home fixture 在 conftest.py
 
 import skysheep.server.app as server_app
@@ -159,12 +160,10 @@ def test_update_helper_batch_actually_runs_and_logs_exit_code(tmp_path):
 def test_install_update_result_reports_uac_need():
     """install_update 的结果要带 uac 标记：本机是「所有用户」安装时，
     前端必须在应用退出前就把「留意授权窗口」讲清楚（退出后提示就看不见了）。"""
-    from skysheep.server.app import STATIC_DIR
-
     backend_src = (Path(__file__).resolve().parents[1] / "src" / "skysheep"
                    / "server" / "backend_parts" / "remote.py").read_text(encoding="utf-8")
     assert '"uac": _setup_privilege_override() != "/CURRENTUSER"' in backend_src
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     assert "r.uac" in js and "用户账户控制" in js
     assert 'request("app.notify", {' in js  # 退出前的系统通知提醒
 
@@ -173,12 +172,10 @@ def test_install_update_result_reports_sha256_verification():
     """install_update 的结果要带 verified 布尔（是否成功核对 .sha256 附件）：
     下载完成提示据此区分「已校验/未校验」，附件缺失时不得让用户默认装的是
     核对过的包（对抗审查 13/15 的字段契约，两端都要锚住）。"""
-    from skysheep.server.app import STATIC_DIR
-
     backend_src = (Path(__file__).resolve().parents[1] / "src" / "skysheep"
                    / "server" / "backend_parts" / "remote.py").read_text(encoding="utf-8")
     assert '"verified": bool(expected)' in backend_src
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    js = read_app_bundle()
     assert "r.verified === true" in js  # 缺字段/false 都按未核对处理
     assert "未能核对安装包校验值" in js
 

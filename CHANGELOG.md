@@ -39,6 +39,15 @@
   内联判定双轨并存，现一并入表（条件拒绝落 local_gate，专属文案随条目携带），
   `LOCAL_ONLY_METHODS` 改由注册表派生；分支体逐字迁入 handler，判定与拒绝
   文案同原文一致，行为保持不变。
+- **app.js 按 header 分区目录拆出 6 个普通 script 分区文件**：照 app.js 头部
+  「目录」注释的分区边界，把六个整段区块整体搬出单文件，落为六个零构建
+  分区文件（与既有 `app-tools.js` 同为普通 script、不引入 ES modules）——
+  项目列表 `app-projects.js`、日程/定时任务/任务编排流水线 `app-schedule.js`、
+  设置·模型服务 `app-providers.js`、设置·白名单 `app-whitelist.js`、
+  技能与 MCP `app-skills.js`、记忆地图 `app-memmap.js`；分区文件只放声明
+  与纯数据常量、零加载期执行，按钮接线留在 app.js 原位，跨文件互调靠
+  全局函数；`index.html` 按上述顺序引入，app.js 仍为主文件最后加载；
+  区块逐字搬迁，纯搬迁不改行为。
 
 ### 修复
 

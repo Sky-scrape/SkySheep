@@ -212,7 +212,13 @@ def _no_store_static(app) -> None:
         "/",
         "/static/index.html",
         "/static/app.js",
+        "/static/app-memmap.js",
+        "/static/app-projects.js",
+        "/static/app-providers.js",
+        "/static/app-schedule.js",
+        "/static/app-skills.js",
         "/static/app-tools.js",
+        "/static/app-whitelist.js",
         "/static/app.css",
     }
 

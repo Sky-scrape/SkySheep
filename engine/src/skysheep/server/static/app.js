@@ -4036,11 +4036,11 @@ async function toggleModelMenu(e) {
   const addRow = (row) => {
     const b = document.createElement("button");
     b.className = "mm-item" + (row.active ? " active" : "");
-    b.innerHTML =
+    b.innerHTML = providerAvatar(row.name) +
       `<span class="mm-model">${row.active ? "✓ " : ""}${escapeHtml(row.model)}</span>` +
-      `<span class="mm-prov${row.hasKey ? "" : " no-key"}">${row.hasKey ? "" : "⚠ "}${escapeHtml(row.label)}</span>` +
       (defaultModelPref.provider === row.name && defaultModelPref.model === row.model
-        ? `<span class="mm-def" title="新会话将默认使用这个模型">★ 新会话默认</span>` : "");
+        ? `<span class="mm-def" title="新会话将默认使用这个模型">★ 新会话默认</span>` : "") +
+      `<span class="mm-prov${row.hasKey ? "" : " no-key"}">${row.hasKey ? "" : "⚠ "}${escapeHtml(row.label)}</span>`;
     b.title = row.hasKey
       ? `切换到 ${row.label} / ${row.model}（点击）；Shift+点击 设为新会话默认`
       : `「${row.label}」还没配置 API Key，切换过去会失败`;

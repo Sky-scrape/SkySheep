@@ -216,3 +216,18 @@ def test_model_menus_rows_scrollable():
     i = css.index(".model-menu .mm-list")
     seg = css[i:i + 200]
     assert "height: min(" in seg and "overflow-y: auto" in seg
+
+
+# ---------- 模型菜单行样式统一：logo + 名称 + 厂家徽章右贴 ----------
+
+def test_model_menu_rows_logo_and_right_badge():
+    """两处菜单行统一「logo + 模型名 + 厂家徽章」：主菜单行也带服务 logo；
+    徽章右贴行尾（mm-item 占满菜单宽 + mm-model flex:1 顶开），★ 标记在徽章左侧。"""
+    js = read_app_bundle()
+    i = js.index("async function toggleModelMenu")
+    seg = js[i:js.index("modelChip.style.cursor")]
+    assert "providerAvatar(row.name)" in seg, "主菜单行也应带服务 logo"
+    assert seg.index("mm-def") < seg.index("mm-prov"), "★ 新会话默认标记应在厂家徽章左侧（徽章最右）"
+    css = read_static("app.css")
+    item_seg = css[css.index(".model-menu .mm-item {"):]
+    assert "width: 100%" in item_seg[:120], "mm-item 须占满菜单宽，徽章才右贴"

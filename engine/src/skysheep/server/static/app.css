@@ -1691,9 +1691,12 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .session-menu button.danger { color: var(--reg); }
 .session-menu button.danger:hover { background: rgba(143, 29, 29, .08); }
 
-/* 顶栏模型切换菜单：模型名（等宽）+ 行尾服务名徽章，当前项打 ✓ */
+/* 顶栏模型切换菜单（主/辅两处共用）：行 = logo + 模型名（等宽）+ 行尾服务名徽章，当前项打 ✓ */
 .model-menu { width: 340px; padding: 4px; } /* 宽度固定：不随行内容在 250–340px 间伸缩 */
-.model-menu .mm-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; }
+.model-menu .mm-item {
+  display: flex; width: 100%; box-sizing: border-box; /* 占满菜单宽：mm-model 的 flex:1 才能把徽章推到行尾 */
+  align-items: center; gap: 8px; padding: 7px 10px;
+}
 .model-menu .mm-item.active { background: var(--blue-weak); }
 .model-menu .mm-item .mm-model {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

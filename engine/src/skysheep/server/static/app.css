@@ -1692,7 +1692,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .session-menu button.danger:hover { background: rgba(143, 29, 29, .08); }
 
 /* 顶栏模型切换菜单：模型名（等宽）+ 行尾服务名徽章，当前项打 ✓ */
-.model-menu { min-width: 250px; max-width: 340px; padding: 4px; }
+.model-menu { width: 340px; padding: 4px; } /* 宽度固定：不随行内容在 250–340px 间伸缩 */
 .model-menu .mm-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; }
 .model-menu .mm-item.active { background: var(--blue-weak); }
 .model-menu .mm-item .mm-model {

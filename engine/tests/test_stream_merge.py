@@ -226,3 +226,36 @@ async def test_long_stream_collapses_frame_count_without_loss():
     assert text_of("text_delta") == "".join(chunks), "合并不得丢字"
     # 单条上限 2000 字符：1000×7=7000 字符无论如何都远少于 1000 帧
     assert len(events) <= 10, f"合并后帧数过多：{len(events)}"
+
+
+async def test_flush_survives_nested_flush_from_concurrent_finish():
+    """flush 挂起期间并发到达的「非增量」事件会触发嵌套 flush（圆桌并行成员的
+    结束事件正是这个形态）：嵌套把某个桶冲掉后，外层循环再遇到同一 key 不得
+    pop 出 KeyError——分桶改造在 Python 3.11 的 CI 上首次暴露（3.12 的任务调度
+    恰好错开未复现）。"""
+    events: list[dict] = []
+    nested_sent = False
+
+    async def emit(ev: dict) -> None:
+        nonlocal nested_sent
+        events.append(dict(ev))
+        # 补尾巴的 emit（成员 0 的 A2）挂起点上同步再 send 一个非增量事件，
+        # 复刻「另一成员的结束事件在冲刷挂起期间到达」的嵌套 flush
+        if ev.get("text") == "A2" and not nested_sent:
+            nested_sent = True
+            await m.send({"kind": "turn_finished"})
+
+    m = StreamDeltaMerger(emit, window_s=10.0)  # 窗口放大：第二条同 key 必判「可合并」
+    # 成员 0 与成员 2 各留一段未冲尾巴（首条已立即发，尾巴在桶里）
+    await m.send({"kind": "roundtable_member_delta", "member_index": 0, "round": 0, "text": "A1"})
+    await m.send({"kind": "roundtable_member_delta", "member_index": 0, "round": 0, "text": "A2"})
+    await m.send({"kind": "roundtable_member_delta", "member_index": 2, "round": 0, "text": "C1"})
+    await m.send({"kind": "roundtable_member_delta", "member_index": 2, "round": 0, "text": "C2"})
+    assert [(e["member_index"], e["text"]) for e in events] == [(0, "A1"), (2, "C1")]
+
+    await m.flush()  # 修复前：外层循环 pop 成员 2 的桶时 KeyError
+
+    deltas = [(e["member_index"], e["text"]) for e in events if e["kind"] == "roundtable_member_delta"]
+    assert deltas == [(0, "A1"), (2, "C1"), (0, "A2"), (2, "C2")], f"尾巴不得丢失或重复：{deltas!r}"
+    assert any(e["kind"] == "turn_finished" for e in events)
+    await m.aclose()  # 幂等收尾

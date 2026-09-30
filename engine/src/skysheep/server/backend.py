@@ -316,9 +316,15 @@ class StreamDeltaMerger:
         # clear），挂起期间并发 send() 的同 key 增量仍在合并窗口内、会合进已标记
         # sent 的桶，随后随 clear() 整段丢失且无定时器兜底；先摘掉再冲，并发增量
         # 看不到旧桶、必走「新段首条立即发」路径，恢复旧单缓冲「await 前先摘除」
-        # 的不变式
+        # 的不变式。
+        # pop 带默认值容忍嵌套 flush：圆桌并行成员的「结束」事件在本冲刷挂起期间
+        # 到达时，会经 send() 的非增量路径触发嵌套 flush 把某个桶先冲掉——外层
+        # 快照里该 key 的桶已不在（内容已由嵌套冲刷发出，不丢不重），跳过即可。
+        # 分桶改造后在 Python 3.11 的 CI 上首次暴露（3.12 的任务调度恰好错开）。
         for key in list(self._buckets.keys()):
-            await self._flush_bucket(self._buckets.pop(key))
+            bucket = self._buckets.pop(key, None)
+            if bucket is not None:
+                await self._flush_bucket(bucket)
 
     async def aclose(self) -> None:
         await self.flush()

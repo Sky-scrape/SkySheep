@@ -112,12 +112,12 @@ SkySheep's feature set was built item by item against Claude Code / OpenAI Codex
 | Image input (multimodal) | ✅ | ✅ | ✅ | ✅ paste/drag-and-drop multimodal |
 | Image generation | — | — | — | ✅ CogView/Kolors image generation |
 | Computer use | — | — | — | ✅ screenshot/mouse/keyboard/window/clipboard (off by default; confirmation-gated + action whitelist) |
-| Thinking visualization | ✅ | — | — | ✅ ThinkingDelta streaming + collapsible replay + thinking time |
+| Thinking visualization | ✅ | ✅ reasoning summaries | — | ✅ ThinkingDelta streaming + collapsible replay + thinking time |
 | Task time estimates / duration logging | — | — | ✅ | ✅ estimates a range when taking over; actual duration recorded per round and persisted with the message |
-| Checkpoints / undo this round's file changes | ✅ checkpoints | ✅ rollback | ✅ | ✅ persisted to disk; rollbacks survive restarts |
+| Checkpoints / undo this round's file changes | ✅ checkpoints | — | ✅ | ✅ persisted to disk; rollbacks survive restarts |
 | Session search / management | ✅ | ✅ | ✅ | ✅ cross-project full-text search + visual backup restore + Markdown/HTML export |
 | Right-side panel (terminal / browser / side chat / review / files / tasks / agenda) | — | — | ✅ | ✅ multiple session tabs in parallel |
-| Hooks (pre/post tool-call hooks) | ✅ | — | ✅ | ✅ [hooks] in config.toml; pre-hooks can block |
+| Hooks (pre/post tool-call hooks) | ✅ | ✅ PreToolUse etc. | ✅ | ✅ [hooks] in config.toml; pre-hooks can block |
 | Light/dark themes / desktop form factor | ✅ terminal themes | ✅ syntax themes | ✅ | ✅ six themes (Paper-ink / Celadon / Persimmon / Night-ink / Indigo / Pine) + follow system + system tray + launch at startup + installer |
 | LAN remote access (continue on your phone) | — | — | — | ✅ token + QR code; listens on localhost only by default |
 | Cross-network remote access (Tailscale) | — | — | — | ✅ reach home from any network; shares the token with LAN; non-tailnet sources rejected outright |

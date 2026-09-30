@@ -95,12 +95,12 @@ SkySheep's feature set was built item by item against Claude Code / OpenAI Codex
 | Agent loop (streaming + tool calls) | ✅ | ✅ | ✅ | ✅ |
 | Multi-model / multi-provider (OpenAI-compatible + Anthropic + local) | — | ✅ | ✅ | ✅ built-in presets + custom relay endpoints + auto model detection |
 | MCP client (stdio/HTTP, Claude Desktop config compatible) | ✅ | ✅ | ✅ | ✅ in-app import / manual entry / templates + one-click built-in presets, hot-applied |
-| Skill packages (SKILL.md, progressive disclosure) | ✅ | — | ✅ | ✅ dedicated skills page: global/project scopes, per-project scope limits, full-text preview; import from folder/.zip/GitHub·Gitee URL + "scan this computer" |
+| Skill packages (SKILL.md, progressive disclosure) | ✅ | ✅ | ✅ | ✅ dedicated skills page: global/project scopes, per-project scope limits, full-text preview; import from folder/.zip/GitHub·Gitee URL + "scan this computer" |
 | Sub-agents (background tasks + polling) | ✅ | ✅ | ✅ | ✅ spawn_agent / check_task + custom sub-agents |
 | Project memory (AGENTS.md / CLAUDE.md) | ✅ | ✅ | ✅ | ✅ edited in-app + global auto memory (across projects) |
 | Memory map (project evolution visualization) | — | — | — | ✅ evolution timeline + topic graph + LLM-generated evolution summary (file footprints / activity heatmap / task & memory annotations) |
 | Task lists (todos) | ✅ | ✅ | ✅ | ✅ sidebar panel synced in real time |
-| Plan mode (plan first, then execute) | ✅ | ✅ | ✅ | ✅ dual execute/plan modes + one-click execute-the-plan |
+| Plan mode (plan first, then execute) | ✅ | — | ✅ | ✅ dual execute/plan modes + one-click execute-the-plan |
 | Automatic context compaction + manual /compact | ✅ | ✅ | ✅ | ✅ CJK-aware estimation + real-usage floor as a fallback |
 | Permission prompts + project whitelist | ✅ | ✅ | ✅ | ✅ confirmation flow + word-boundary command-prefix whitelist (rejects shell-chaining bypass) + tiered permission modes + workspace trust (repo-bundled MCP/skills require confirmation) |
 | Headless one-shot runs (scripts / CI) | ✅ -p | ✅ exec | ✅ -p | ✅ skysheep run (pre-authorized tools + JSON output + audit) |
@@ -109,18 +109,21 @@ SkySheep's feature set was built item by item against Claude Code / OpenAI Codex
 | Message queuing / auto-retry on transient errors | ✅ | ✅ | ✅ | ✅ exponential backoff; in-flight content is never replayed |
 | Web fetch + web search | ✅ | ✅ | ✅ | ✅ web_fetch (SSRF protection) + web_search (Bocha/Tavily/Zhipu/self-hosted SearXNG) |
 | Document reading + generation | ✅ | — | ✅ | ✅ read_document (PDF/Word/Excel/PPT) + write_document (docx/xlsx/csv/PPT) |
-| Image input / image generation | ✅ | ✅ | ✅ | ✅ paste/drag-and-drop multimodal input + CogView/Kolors image generation |
+| Image input (multimodal) | ✅ | ✅ | ✅ | ✅ paste/drag-and-drop multimodal |
+| Image generation | — | — | — | ✅ CogView/Kolors image generation |
 | Computer use | — | — | — | ✅ screenshot/mouse/keyboard/window/clipboard (off by default; confirmation-gated + action whitelist) |
-| Thinking visualization | — | — | — | ✅ ThinkingDelta streaming + collapsible replay + thinking time |
-| Task time estimates / duration logging | ✅ | — | ✅ | ✅ estimates a range when taking over; actual duration recorded per round and persisted with the message |
+| Thinking visualization | ✅ | — | — | ✅ ThinkingDelta streaming + collapsible replay + thinking time |
+| Task time estimates / duration logging | — | — | ✅ | ✅ estimates a range when taking over; actual duration recorded per round and persisted with the message |
 | Checkpoints / undo this round's file changes | ✅ checkpoints | ✅ rollback | ✅ | ✅ persisted to disk; rollbacks survive restarts |
 | Session search / management | ✅ | ✅ | ✅ | ✅ cross-project full-text search + visual backup restore + Markdown/HTML export |
 | Right-side panel (terminal / browser / side chat / review / files / tasks / agenda) | — | — | ✅ | ✅ multiple session tabs in parallel |
 | Hooks (pre/post tool-call hooks) | ✅ | — | ✅ | ✅ [hooks] in config.toml; pre-hooks can block |
-| Light/dark themes / desktop form factor | — | — | ✅ | ✅ six themes (Paper-ink / Celadon / Persimmon / Night-ink / Indigo / Pine) + follow system + system tray + launch at startup + installer |
+| Light/dark themes / desktop form factor | ✅ terminal themes | ✅ syntax themes | ✅ | ✅ six themes (Paper-ink / Celadon / Persimmon / Night-ink / Indigo / Pine) + follow system + system tray + launch at startup + installer |
 | LAN remote access (continue on your phone) | — | — | — | ✅ token + QR code; listens on localhost only by default |
 | Cross-network remote access (Tailscale) | — | — | — | ✅ reach home from any network; shares the token with LAN; non-tailnet sources rejected outright |
 | Chat bot channels (Feishu / WeChat) | — | — | — | ✅ Feishu (App ID/Secret + WebSocket long connection) + WeChat (QR login); off by default, empty allowlist denies everything, read-only when unattended, optional approval with timeout auto-deny |
+
+> Competitor columns reflect **first-party, built-in features per each vendor's official docs as of 2026-09** (extensions, plugins, and cloud companions not counted); these products evolve quickly — defer to the official docs.
 
 ## 🚀 Installation & Running
 

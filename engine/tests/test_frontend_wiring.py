@@ -203,3 +203,16 @@ def test_aux_model_menu_tabbed_like_main_menu():
     assert 'openSettings("providers")' in seg
     # 旧的分组小标题（aux-mm-head）不再使用
     assert "aux-mm-head" not in js
+
+
+# ---------- 模型菜单限高滚动：主菜单与辅助面板的行列表包进 .mm-list ----------
+
+def test_model_menus_rows_scrollable():
+    """两处模型菜单（顶栏主菜单 + 辅助对话面板）的行列表都包进 .mm-list
+    限高滚动容器，页签/跟随行/管理入口不随列表滚走；CSS 侧给 max-height。"""
+    js = read_app_bundle()
+    assert js.count('className = "mm-list"') == 2, "主菜单与辅助面板应各有一个 .mm-list 容器"
+    css = read_static("app.css")
+    i = css.index(".model-menu .mm-list")
+    seg = css[i:i + 200]
+    assert "max-height" in seg and "overflow-y: auto" in seg

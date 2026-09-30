@@ -4075,7 +4075,7 @@ async function toggleModelMenu(e) {
         addNotice("切换失败: " + err.message);
       }
     };
-    modelMenu.appendChild(b);
+    return b; // 挂载交给 paint 的 .mm-list 容器统一处理
   };
   // 整页重画（页签 + 当前列表 + 管理入口），切页时数据已在手，无需重新请求
   const paint = () => {
@@ -4096,13 +4096,16 @@ async function toggleModelMenu(e) {
     }
     modelMenu.appendChild(seg);
     const cur = groups.find((g) => g.tab === modelMenuTab) || groups[0];
+    const list = document.createElement("div");
+    list.className = "mm-list"; // 限高滚动容器：页签与管理入口固定，行多了列表内滚
     if (!cur.rows.length) {
       const hint = document.createElement("div");
       hint.className = "mm-empty";
       hint.textContent = cur.empty;
-      modelMenu.appendChild(hint);
+      list.appendChild(hint);
     }
-    cur.rows.forEach(addRow);
+    cur.rows.forEach((row) => list.appendChild(addRow(row)));
+    modelMenu.appendChild(list);
     const manage = document.createElement("button");
     manage.className = "mm-manage";
     manage.textContent = "⚙ 管理模型服务…";
@@ -8617,13 +8620,16 @@ function buildAuxMenu() {
     }
     auxModelMenu.appendChild(seg);
     const cur = groups.find((g) => g.tab === auxMenuTab) || groups[0];
+    const list = document.createElement("div");
+    list.className = "mm-list"; // 限高滚动容器：跟随行/页签/管理入口固定，行多了列表内滚
     if (!cur.rows.length) {
       const hint = document.createElement("div");
       hint.className = "mm-empty";
       hint.textContent = cur.empty;
-      auxModelMenu.appendChild(hint);
+      list.appendChild(hint);
     }
-    cur.rows.forEach((row) => auxModelMenu.appendChild(addRow(row)));
+    cur.rows.forEach((row) => list.appendChild(addRow(row)));
+    auxModelMenu.appendChild(list);
     const manage = document.createElement("button");
     manage.className = "mm-manage";
     manage.textContent = "⚙ 管理模型服务…";

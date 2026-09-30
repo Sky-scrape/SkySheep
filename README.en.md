@@ -224,7 +224,7 @@ Running into a problem? In the app, go to Settings → About → "💬 Report an
 
 ## 🗺 Roadmap & Non-goals
 
-- ✅ **Shipped**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors (current release **v2.2.0**; see [CHANGELOG.md](CHANGELOG.md) for the full history)
+- ✅ current release **v2.2.0**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors (full history in [CHANGELOG.md](CHANGELOG.md))
 - 🚧 **Next up**: macOS / Linux support · system-level scheduling · defense-in-depth against prompt injection · code-signed distribution
 
 **Non-goals**:

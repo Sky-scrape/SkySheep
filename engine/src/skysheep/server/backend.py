@@ -120,7 +120,7 @@ from ..messages import system_text as history_system_text
 from ..models import Provider
 from ..models.base import ProviderDone, ProviderTextDelta
 from ..models.factory import build_provider
-from ..models.probe import probe_context_limit, probe_provider_models
+from ..models.probe import _is_local, probe_context_limit, probe_provider_models
 from ..obs import info as obs_info
 from ..obs import warning as obs_warning
 from ..security import leases
@@ -706,6 +706,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._reminder_task: asyncio.Task | None = None
         self._cron_task: asyncio.Task | None = None
         self._cron_running: set[int] = set()  # 正在跑的定时任务 id（防重复触发）
+        # schtasks 执行入口的注入点（测试替换成假 runner，绝不真建系统计划任务）
+        self._schtasks_runner = None
         self._pipeline_task: asyncio.Task | None = None
         self._pipeline_running: set[int] = set()  # 正在跑的编排节点 id（并发约束）
         self._pipeline_node_tasks: dict[int, asyncio.Task] = {}  # 节点句柄（停止流水线用）
@@ -1227,16 +1229,42 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     # ---- 系统提示词 / 会话 ----
 
-    def compose_system(self) -> str:
-        return self.compose_system_for(self.working_dir)
+    def _memory_retrieval_query(self, text: str, agent: Agent) -> str:
+        """记忆检索化（第一期）的查询串：本轮用户消息 + 最近几条对话摘要。
 
-    def compose_system_for(self, workdir: Path | None) -> str:
+        截断只为控查询体积（词元化是 O(len)），不改变相关性的来源构成；重新
+        生成轮 text 为空串，查询自然落在历史末尾被重跑的那条用户消息上。
+        system/tool 消息不是对话语义的来源，跳过；拿不到任何内容返回空串，
+        render_memory_section 按约定整块注入。
+        """
+        parts = [text.strip()] if text.strip() else []
+        recent: list[str] = []
+        for m in reversed(agent.history):
+            if m.role not in ("user", "assistant"):
+                continue
+            t = (m.text or "").strip()
+            if not t:
+                continue
+            recent.append(t[:300])
+            if len(recent) >= 3:
+                break
+        parts.extend(reversed(recent))
+        return "\n".join(parts)[:4000]
+
+    def compose_system(self, memory_query: str = "") -> str:
+        return self.compose_system_for(self.working_dir, memory_query=memory_query)
+
+    def compose_system_for(self, workdir: Path | None, memory_query: str = "") -> str:
         """无人值守跨项目运行（定时任务/流水线节点）按目标目录组装系统提示词。
 
         工作目录与项目约定（AGENTS.md）必须取目标目录的——否则提示词里写着
         A 目录、实际却在 B 目录干活，Agent 会找错地方；技能段沿用当前装载的
         SkillLoader（按目录重挂载过重），全局记忆本就跨项目。
         workdir 为 None 是无项目态：提示词里说明没有工作目录，快聊不可读写文件。
+        memory_query 是记忆检索化（第一期）的查询串（「本轮用户消息 + 最近对话
+        摘要」，见 _memory_retrieval_query）：记忆超过 MEMORY_RETRIEVAL_THRESHOLD
+        时只注入相关条目；空串表示拿不到本轮查询（轮外的 set_system 场景），
+        render_memory_section 按约定整块注入、行为与检索化之前一致。
         """
         instr_file, instr_text = (
             load_project_instructions(workdir) if workdir is not None else (None, "")
@@ -1245,7 +1273,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             build_system_prompt(workdir)
             + self.skills.render_prompt_section()
             + render_instructions_section(instr_file, instr_text)
-            + render_memory_section()
+            + render_memory_section(query_text=memory_query)
         )
 
     async def fork_session(self, params: dict) -> dict:
@@ -1701,6 +1729,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 [t for t in agent.registry.all() if t.safety == Safety.READONLY]
             )
             agent.registry = readonly_registry
+        # 记忆检索化（第一期）：轮首用「本轮用户消息 + 最近对话摘要」作查询重组
+        # 系统提示词——超过 MEMORY_RETRIEVAL_THRESHOLD 的记忆只注入相关条目
+        # （tools/memory.py 的 render_memory_section）；不超过阈值（或全部 0 分）
+        # 时组装结果与原先逐字节一致，这里的 set_system 只是刷新同文本的
+        # system 消息（system 从不落库，本就每处实时生成，见 _reload_agent_history）。
+        memory_query = self._memory_retrieval_query(text, agent)
+        if memory_query:
+            agent.set_system(self.compose_system(memory_query=memory_query))
         # 「& 引用对话」：把被引用会话的记录拼在消息最前面注入本轮上下文
         #（与 PLAN_MODE_PREFIX 同一套做法，随用户消息一起持久化）
         if refs:
@@ -5156,7 +5192,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if resolved.get("api_key"):
             headers["Authorization"] = "Bearer " + resolved["api_key"]
         try:
-            async with httpx.AsyncClient(timeout=120, trust_env=True) as client:
+            # 本地地址不走系统代理（与 models/probe.py 的「本地直连」约定同口径）：
+            # Windows 上 httpx 默认 trust_env=True 会读注册表里的 WinINET 系统代理，
+            # 系统代理进程没在跑时，发往 127.0.0.1 本地转写服务的请求会被转给代理
+            # 然后连不上。远端维持默认（信任环境代理，用户可能需要经代理出网）。
+            async with httpx.AsyncClient(timeout=120, trust_env=not _is_local(base)) as client:
                 resp = await client.post(
                     base + "/audio/transcriptions", headers=headers, files=files, data=data
                 )

@@ -1835,6 +1835,56 @@ def test_speech_transcribe_via_local_stub(home, monkeypatch):
     assert b"name=\"file\"" in seen["body_head"] and b"whisper-1" in seen["body_head"]
 
 
+def test_speech_transcribe_local_base_bypasses_system_proxy(home, monkeypatch):
+    """本地 ASR 服务不走系统代理：环境代理指向死端口也必须直连成功。
+
+    Windows 上 httpx trust_env=True 会读注册表里的 WinINET 系统代理（实测
+    开发机出现过 ProxyEnable=1 而代理进程已退出的状态），把发往 127.0.0.1
+    的请求转给死代理就「All connection attempts failed」。这里用指向死端口
+    的环境代理确定性模拟该环境；本地地址必须绕开代理直连（远端行为不变）。
+    """
+    import base64
+    import http.server
+    import json as _json
+    import threading
+
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+
+    class Stub(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            # 读完请求体再应答：Windows 上带着未读数据关 socket 会发 RST，客户端收不到响应
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            payload = _json.dumps({"text": "本地直连"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):  # noqa: A003
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    wav = base64.b64encode(b"RIFF-fake-audio").decode()
+    try:
+        with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+            ws.send_json({"id": "px1", "method": "speech.save",
+                          "params": {"provider": "custom",
+                                     "base_url": f"http://127.0.0.1:{port}",
+                                     "model": "whisper-1", "api_key": "sk-stub"}})
+            assert recv_until(ws, "px1")["ok"]
+            ws.send_json({"id": "px2", "method": "speech.transcribe",
+                          "params": {"audio": wav, "mime": "audio/wav"}})
+            r = recv_until(ws, "px2")["result"]
+            assert r["text"] == "本地直连"
+    finally:
+        srv.shutdown()
+
+
 def test_settings_provider_lists_configured_services(home, monkeypatch):
     """搜索 / 画图 / 语音的「服务商」下拉要带上已配置的模型服务，可直接复用其地址与 Key。"""
     monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))

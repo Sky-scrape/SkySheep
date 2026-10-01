@@ -2,7 +2,9 @@
 
 AGENTS.md 是项目级、手动编辑的项目约定；本工具补的是「跨项目的用户记忆」：
 Agent 在对话中学到值得长期记住的事实（用户偏好、常用环境、背景信息）时自己
-写入 ~/.skysheep/memory.md，系统提示词每一轮都注入该文件（限长）。
+写入 ~/.skysheep/memory.md，系统提示词每一轮都注入该文件（限长）；
+超过 MEMORY_RETRIEVAL_THRESHOLD 的超长记忆按本轮相关性选取注入
+（split_memory_entries / select_relevant / render_memory_section）。
 
 安全边界：只能写 SkySheep 自己的记忆文件（路径固定、不接受任何路径参数），
 没有任意路径写面（safety=READONLY 的含义）；但落点在引擎主目录 ~/.skysheep/
@@ -33,6 +35,16 @@ MemoryAction = Literal["append", "list", "delete"]
 
 MAX_MEMORY_CHARS = 4000          # 注入系统提示词的上限
 MAX_MEMORY_FILE_CHARS = 200_000  # 文件本身的上限（防无限膨胀）
+
+# ---- 记忆检索化（第一期）：超长记忆从「整块注入」变「按相关性选取注入」 ----
+
+# 整块注入 / 检索注入的分界（字符）：不超过它走原来的整块路径，行为与检索化
+# 之前完全一致；超过且本轮拿得到查询才切条目按相关性选取。本期做成模块常量、
+# 不做设置页；将来配置化走「新增设置页四件套」模式（backend 读写方法走
+# config.py 的 _read_raw_config/_write_raw_config + app.py 分支 + index.html
+# 卡片 + app.js 回调，参照 hooks.* 的「保存后热生效」做法）。
+MEMORY_RETRIEVAL_THRESHOLD = 1600
+MEMORY_SELECT_MAX_ENTRIES = 30   # 检索注入的条目数上限（总量另受 MAX_MEMORY_CHARS 预算约束）
 
 # ---- 归档自动提炼（判定标准与 memory_write 一致：偏好/环境/背景，勿记任务细节与机密） ----
 
@@ -79,26 +91,152 @@ def load_memory_text() -> str:
         return ""
 
 
-def render_memory_section() -> str:
+_ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+# 列表行：- * + • 或 1. 1、 1) 开头（后面要有内容），与 parse_digest 认得的
+# 列表符号同一族；memory.md 的标准条目（「- [日期] 内容」）命中第一支
+_LIST_MARKER_RE = re.compile(r"\s*(?:[-*+•]|\d{1,3}[.、)）])\s+\S")
+
+
+def _relevance_tokens(text: str) -> set[str]:
+    """检索用词元集：ASCII 词（含数字/下划线，转小写）+ CJK 二元组，覆盖中英混排。
+
+    零依赖的刻意取舍：不引分词库，中文按二元组近似「含这些字」的匹配（对
+    短条目的相关性排序够用）；孤立的单字母 ASCII 词（「a」「I」类噪声）丢弃，
+    纯数字串保留（版本号 3 / 11 有区分度）；孤立的长度 1 汉字串退化为该字，
+    否则单字查询永远无法命中。
+    """
+    tokens: set[str] = set()
+    for w in _ASCII_TOKEN_RE.findall(text):
+        w = w.lower()
+        if len(w) >= 2 or w.isdigit():
+            tokens.add(w)
+    for run in _CJK_RUN_RE.findall(text):
+        if len(run) == 1:
+            tokens.add(run)
+        else:
+            tokens.update(run[i:i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
+def split_memory_entries(text: str) -> list[str]:
+    """把记忆文本按条目（列表项/段落）切分，逐条保留原文：不改写、不清洗。
+
+    切分规则（memory.md 的实际形态是「每条一行」的列表，段落只是兜底）：
+    - 空行是分隔符，不进入任何条目；
+    - 列表行（_LIST_MARKER_RE）与标题行（# 开头）各自成条目；
+    - 其余非空行并入当前条目（缩进续行归所属列表项，连续非空行合成段落）。
+    每个条目是原文行按 \\n 原样拼接——列表符号、日期前缀、缩进、标点都保持
+    原样；选中的条目要原文注入，任何「顺手清洗」都会破坏这条约束。
+    """
+    entries: list[str] = []
+    cur: list[str] = []
+
+    def _flush() -> None:
+        nonlocal cur
+        if cur:
+            entries.append("\n".join(cur))
+            cur = []
+
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s:
+            _flush()
+        elif _LIST_MARKER_RE.match(ln) or s.startswith("#"):
+            _flush()
+            cur = [ln]
+        elif cur:
+            cur.append(ln)
+        else:
+            cur = [ln]
+    _flush()
+    return entries
+
+
+def select_relevant(
+    entries: list[str], query_text: str, limit: int = MEMORY_SELECT_MAX_ENTRIES,
+) -> list[int]:
+    """零依赖相关性选取：返回得分 > 0 的条目下标，按分数降序（同分按下标序）。
+
+    评分 = 查询词元（_relevance_tokens：ASCII 词 + CJK 二元组）在条目词元里
+    的命中数。0 分条目不返回——注入与查询毫无交集的内容纯属占预算；调用方
+    拿到空列表时按约定兜底整块注入（宁多勿漏：相关性与覆盖率之间以
+    「不丢上下文」优先）。
+    """
+    if limit <= 0 or not entries:
+        return []
+    query = _relevance_tokens(query_text)
+    if not query:
+        return []
+    scored: list[tuple[int, int]] = []
+    for i, entry in enumerate(entries):
+        hits = len(query & _relevance_tokens(entry))
+        if hits > 0:
+            scored.append((-hits, i))
+    scored.sort()
+    return [i for _, i in scored[:limit]]
+
+
+def render_memory_section(query_text: str = "") -> str:
     """系统提示词的记忆段落；无记忆时返回空串。
 
-    发生截断时给模型一行说明：它看到的不是全部，更早的条目可用 memory_write
-    的 list 动作查看——静默截断会让模型把「没注入」当成「不存在」。
+    记忆检索化（第一期）：文本不超过 MEMORY_RETRIEVAL_THRESHOLD 时整块注入，
+    带不带 query_text 结果逐字节一致（老行为）；超过阈值且给了 query_text
+    （backend 轮首用「本轮用户消息 + 最近对话摘要」拼出）时切条目按相关性
+    选取注入，并附一行说明告诉模型「这只是子集、完整记忆怎么看」。拿不到
+    查询、切不出条目或全部得分为 0 时都退回整块注入——宁多勿漏。
+
+    发生（整块路径的）截断时给模型一行说明：它看到的不是全部，更早的条目可用
+    memory_write 的 list 动作查看——静默截断会让模型把「没注入」当成「不存在」。
     """
     p = memory_path()
     try:
         raw = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    text = inject_text(raw).strip()
-    if not text:
-        return ""
-    if len(raw) > MAX_MEMORY_CHARS:
-        text = (
-            "（记忆条数超出单轮注入上限，以下只是最近的条目；"
-            "更早的可用 memory_write 的 list 动作查看）\n" + text
-        )
-    return f"\n# User memory（跨项目的用户记忆，管理用 memory_write）\n{text}\n"
+    header = "\n# User memory（跨项目的用户记忆，管理用 memory_write）\n"
+
+    def whole_block() -> str:
+        # 与检索化之前的实现逐字节一致（含「截尾后全空白返回空串」的旧行为）
+        text = inject_text(raw).strip()
+        if not text:
+            return ""
+        if len(raw) > MAX_MEMORY_CHARS:
+            text = (
+                "（记忆条数超出单轮注入上限，以下只是最近的条目；"
+                "更早的可用 memory_write 的 list 动作查看）\n" + text
+            )
+        return f"{header}{text}\n"
+
+    query = query_text.strip()
+    entries = (
+        split_memory_entries(raw)
+        if query and len(raw) > MEMORY_RETRIEVAL_THRESHOLD else []
+    )
+    if not entries:
+        return whole_block()  # 无查询 / 切不出条目：整块兜底
+    idx = select_relevant(entries, query, MEMORY_SELECT_MAX_ENTRIES)
+    if not idx:
+        return whole_block()  # 全部 0 分：整块兜底
+    # 占预算按相关性从高到低，注入按原文顺序（旧→新）保持记忆连贯；
+    # 条目原文逐字进入提示词，只有总量仍受 MAX_MEMORY_CHARS 约束
+    budget = MAX_MEMORY_CHARS
+    chosen: list[int] = []
+    for i in idx:
+        cost = len(entries[i]) + 1
+        if chosen and cost > budget:
+            continue  # 装不下的让位给后面更小的条目；首条必选（保非空）
+        chosen.append(i)
+        budget -= cost
+    if not chosen:
+        return whole_block()
+    chosen.sort()
+    body = inject_text("\n".join(entries[i] for i in chosen))  # 单条超长的极端兜底
+    note = (
+        f"（共 {len(entries)} 条记忆，已按相关性注入 {len(chosen)} 条；"
+        "完整记忆在 memory.md，可用 memory_write 的 list 动作或「设置 · 全局记忆」查看）"
+    )
+    return f"{header}{note}\n{body}\n"
 
 
 def digest_transcript(messages) -> str:

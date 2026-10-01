@@ -514,6 +514,18 @@ async def _h_cron_run_now(backend: ServerBackend, params: dict, emit, local: boo
     return await backend.cron_run_now(params)
 
 
+async def _h_cron_schtask_export(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.cron_schtask_export(params)
+
+
+async def _h_cron_schtask_remove(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.cron_schtask_remove(params)
+
+
+async def _h_cron_schtask_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.cron_schtask_status(params)
+
+
 def _gate_session_search(params: dict) -> str | None:
     scope = "all" if str(params.get("scope", "project")) == "all" else "project"
     if scope == "all":
@@ -892,6 +904,10 @@ async def _h_pipeline_get(backend: ServerBackend, params: dict, emit, local: boo
 
 async def _h_pipeline_create(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.pipeline_create(params)
+
+
+async def _h_pipeline_update(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.pipeline_update(params)
 
 
 async def _h_pipeline_start(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -1530,6 +1546,9 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "cron.update": _WsMethod(_h_cron_update, local_only=True),
     "cron.delete": _WsMethod(_h_cron_delete),
     "cron.run_now": _WsMethod(_h_cron_run_now, local_only=True),
+    "cron.schtask_export": _WsMethod(_h_cron_schtask_export, local_only=True),
+    "cron.schtask_remove": _WsMethod(_h_cron_schtask_remove, local_only=True),
+    "cron.schtask_status": _WsMethod(_h_cron_schtask_status),
     "session.search": _WsMethod(_h_session_search, local_gate=_gate_session_search),
     "session.list": _WsMethod(_h_session_list, local_gate=_gate_session_list),
     "session.new": _WsMethod(_h_session_new),
@@ -1592,6 +1611,7 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "pipeline.list": _WsMethod(_h_pipeline_list),
     "pipeline.get": _WsMethod(_h_pipeline_get),
     "pipeline.create": _WsMethod(_h_pipeline_create, local_only=True),
+    "pipeline.update": _WsMethod(_h_pipeline_update, local_only=True),
     "pipeline.start": _WsMethod(_h_pipeline_start, local_only=True),
     "pipeline.cancel": _WsMethod(_h_pipeline_cancel, local_only=True),
     "pipeline.delete": _WsMethod(_h_pipeline_delete, local_only=True),

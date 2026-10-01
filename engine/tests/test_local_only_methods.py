@@ -20,7 +20,9 @@ MUST_BE_LOCAL = (
     "websearch.save", "imagegen.save", "speech.save", "settings.export", "settings.import",
     # 无人值守执行面（渠道/定时/流水线的 allowed_tools 预授权）
     "cron.add", "cron.update", "cron.run_now",
-    "pipeline.create", "pipeline.start", "pipeline.import", "pipeline.add_task",
+    # 系统级：注册/删除 Windows 计划任务（schtasks）只能本机做
+    "cron.schtask_export", "cron.schtask_remove",
+    "pipeline.create", "pipeline.update", "pipeline.start", "pipeline.import", "pipeline.add_task",
     # 技能与 MCP（prompt 注入 / stdio 命令）
     "skills.install", "skills.toggle", "skills.delete",
     "mcp.import", "mcp.save_server", "mcp.delete", "mcp.reconnect",

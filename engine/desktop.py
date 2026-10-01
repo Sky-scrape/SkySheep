@@ -1538,6 +1538,14 @@ def _launch() -> int:
 
 
 def main() -> int:
+    # 打包 exe 的命令行入口：`SkySheep.exe cron run <task_id>` 直接执行定时任务
+    # 后退出（Windows 任务计划程序导出的 /TR 就是它）。必须在单实例互斥体之前
+    # 分流：计划任务要在应用未运行时也能跑，更不能把已在运行的桌面窗口聚上来。
+    if len(sys.argv) > 1 and sys.argv[1] == "cron":
+        from skysheep.cli.app import main as cli_main
+
+        cli_main(sys.argv[1:])
+        return 0
     _rotate_log()
     _ensure_streams()
     _setup_logging()

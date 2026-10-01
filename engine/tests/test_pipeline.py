@@ -1160,3 +1160,217 @@ async def test_pipeline_usage_aggregation(store):
 
     u = await store.pipeline_usage(pipe["id"])
     assert u["in_tokens"] == 150 and u["out_tokens"] == 30
+
+
+# ---- 节点终态推送（notify_channel）：开关持久化 / 语义 / 与收尾推送去重 ----
+
+
+async def test_pipeline_notify_channel_persist_default_off(store):
+    """开关随流水线行持久化：默认关（防打扰），可改可关。"""
+    project = await store.get_or_create_project("/tmp/pl-push-store")
+    pipe = await store.add_pipeline(project.id, "推送线",
+                                    nodes=[{"title": "A", "prompt": "a"}])
+    assert pipe["notify_channel"] is False, "默认必须关（防打扰）"
+    up = await store.update_pipeline(pipe["id"], notify_channel=1)
+    assert up["notify_channel"] is True
+    assert (await store.get_pipeline(pipe["id"]))["notify_channel"] is True
+    assert (await store.update_pipeline(pipe["id"], notify_channel=0))["notify_channel"] is False
+
+
+async def test_pipeline_notify_channel_legacy_db_migration(tmp_path):
+    """旧库没有 notify_channel 列：connect 补列，既有流水线默认关、可再打开。"""
+    import sqlite3
+
+    from skysheep.session.store import SessionStore
+
+    db = tmp_path / "legacy-pl.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE pipelines ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " project_id INTEGER,"
+        " name TEXT NOT NULL,"
+        " status TEXT NOT NULL DEFAULT 'draft',"
+        " concurrency INTEGER NOT NULL DEFAULT 2,"
+        " created_at REAL NOT NULL,"
+        " finished_at REAL NOT NULL DEFAULT 0)"
+    )
+    con.execute(
+        "INSERT INTO pipelines (project_id, name, status, concurrency, created_at)"
+        " VALUES (1, '旧线', 'draft', 2, 0)"
+    )
+    con.commit()
+    con.close()
+
+    s = await SessionStore(db).connect()
+    try:
+        pipes = await s.list_pipelines()
+        assert len(pipes) == 1 and pipes[0]["name"] == "旧线"
+        assert pipes[0]["notify_channel"] is False, "迁移进来的旧流水线默认关"
+        up = await s.update_pipeline(pipes[0]["id"], notify_channel=1)
+        assert up["notify_channel"] is True
+    finally:
+        await s.close()
+
+
+def test_pipeline_update_ws_and_duplicate_carries_switch(home):
+    """pipeline.update 改推送开关；复制为草稿时开关随行复制。"""
+    from test_server import make_client, recv_until
+
+    provider = FakeProvider([[TextBlock(text="A 完成")]])
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "pipeline.create", "params": {
+            "name": "开关线", "nodes": [{"title": "A", "prompt": "做 A"}],
+        }})
+        pipe = recv_until(ws, "c1")["result"]["pipeline"]
+        assert pipe["notify_channel"] is False, "创建不传开关 = 默认关"
+
+        ws.send_json({"id": "u1", "method": "pipeline.update",
+                      "params": {"id": pipe["id"], "notify_channel": True}})
+        r = recv_until(ws, "u1")
+        assert r["ok"], r.get("error")
+        assert r["result"]["pipeline"]["notify_channel"] is True
+
+        ws.send_json({"id": "d1", "method": "pipeline.duplicate",
+                      "params": {"id": pipe["id"]}})
+        dup = recv_until(ws, "d1")["result"]["pipeline"]
+        assert dup["notify_channel"] is True, "副本保留推送开关"
+
+        # 空更新明确报错（与 cron.update 同款收敛）
+        ws.send_json({"id": "u2", "method": "pipeline.update",
+                      "params": {"id": pipe["id"]}})
+        bad = recv_until(ws, "u2")
+        assert not bad["ok"] and "字段" in bad["error"]
+
+
+class _PushRecorder:
+    """渠道替身 + 绑定（与 test_cron 的 _bind_channel 同一套）。"""
+
+    def __init__(self):
+        from test_cron import _FakeChannel
+
+        self.channel = _FakeChannel(allowed=("owner-1",))
+
+    def bind(self, client):
+        client.app.state.backend.channels.channels["feishu"] = self.channel
+
+    def texts(self):
+        return [text for _chat, text in self.channel.sent]
+
+
+class _RoutedProvider(FakeProvider):
+    """按 prompt 内容路由脚本：并行节点的产出与调度顺序无关（断言确定性）。
+
+    命中 routes 里的关键词 → 返回对应文本；未命中 → 空产出（节点按失败收尾）。
+    """
+
+    ROUTES: dict[str, str] = {}
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        last = messages[-1].text if messages else ""
+        hit = next((v for k, v in self.ROUTES.items() if k in last), "")
+        self.scripted = [[TextBlock(text=hit)]] if hit else [[]]
+        async for pe in super().stream(messages, tool_schemas, effort):
+            yield pe
+
+
+def _wait_for(pred, timeout: float = 8.0) -> bool:
+    import time as _time
+
+    end = _time.time() + timeout
+    while _time.time() < end:
+        if pred():
+            return True
+        _time.sleep(0.02)
+    return False
+
+
+def test_pipeline_node_push_switch_on_terminal_and_finish_dedup(home):
+    """开关开：每个节点到终态推一条紧凑行；最后一个节点让位给收尾推送（不推两遍）。"""
+    from test_server import make_client, recv_until
+
+    # 两个并行节点 + 依赖它们的汇总节点：A/B 各推一条，汇总完成即流水线收尾
+    provider = _RoutedProvider([])
+    provider.ROUTES = {"做 A": "A 的产出", "做 B": "B 的产出", "汇总": "汇总完成"}
+    rec = _PushRecorder()
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        rec.bind(client)
+        ws.send_json({"id": "c1", "method": "pipeline.create", "params": {
+            "name": "推送线", "notify_channel": True,
+            "nodes": [
+                {"title": "功能A", "prompt": "做 A"},
+                {"title": "功能B", "prompt": "做 B"},
+                {"title": "汇总", "prompt": "汇总", "after": [0, 1]},
+            ],
+        }})
+        pipe = recv_until(ws, "c1")["result"]["pipeline"]
+        assert pipe["notify_channel"] is True
+        ws.send_json({"id": "s1", "method": "pipeline.start", "params": {"id": pipe["id"]}})
+        recv_until(ws, "s1")
+        assert _wait_for(lambda: len(rec.texts()) >= 3), f"应推 3 条，实际 {rec.texts()}"
+
+        node_lines = [t for t in rec.texts() if t.startswith("⚙️")]
+        finish_lines = [t for t in rec.texts() if t.startswith(("✅ 流水线", "⚠️ 流水线"))]
+        assert len(node_lines) == 2, f"只有 A/B 两个节点推节点行，实际 {node_lines}"
+        assert any("功能A" in t and "✅" in t and "A 的产出" in t for t in node_lines)
+        assert any("功能B" in t for t in node_lines)
+        assert any("耗时" in t for t in node_lines), "紧凑行带耗时"
+        assert len(finish_lines) == 1, "整体收尾推送维持原行为（一条汇总）"
+        # 汇总节点完成 = 流水线收尾：不再推第三个节点行（去重）
+        assert not any("「汇总」" in t for t in node_lines)
+
+
+def test_pipeline_node_push_silent_when_switch_off_except_failure(home):
+    """开关关：成功/依赖级联一字不发；节点自己执行失败必推（失败要让人知道）。"""
+    from test_server import make_client, recv_until
+
+    # 会失败：空产出 → 无重试余量 → error（必推）；会成功 依赖它 → 级联失败（开关关不推）
+    provider = _RoutedProvider([])
+    rec = _PushRecorder()
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        rec.bind(client)
+        ws.send_json({"id": "c1", "method": "pipeline.create", "params": {
+            "name": "静默线",
+            "nodes": [
+                {"title": "会失败", "prompt": "干活"},
+                {"title": "会成功", "prompt": "也干活", "after": [0]},
+            ],
+        }})
+        pipe = recv_until(ws, "c1")["result"]["pipeline"]
+        ws.send_json({"id": "s1", "method": "pipeline.start", "params": {"id": pipe["id"]}})
+        recv_until(ws, "s1")
+        assert _wait_for(lambda: len(rec.texts()) >= 2), f"应推 2 条，实际 {rec.texts()}"
+
+        node_lines = [t for t in rec.texts() if t.startswith("⚙️")]
+        assert len(node_lines) == 1, f"开关关时只有执行失败推节点行，实际 {rec.texts()}"
+        assert "会失败" in node_lines[0] and "❌" in node_lines[0], "失败必推且标明节点"
+        finish = [t for t in rec.texts() if t.startswith(("✅ 流水线", "⚠️ 流水线"))]
+        assert any("未成功" in t for t in finish), "收尾推送维持原行为（有失败的汇总）"
+
+
+def test_pipeline_node_push_single_node_switch_on_dedup_finish_only(home):
+    """单节点流水线 + 开关开：节点完成即收尾，只推收尾汇总一条（去重生效）。"""
+    from test_server import make_client, recv_until
+
+    provider = FakeProvider([[TextBlock(text="一步到位")]])
+    rec = _PushRecorder()
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        rec.bind(client)
+        ws.send_json({"id": "c1", "method": "pipeline.create", "params": {
+            "name": "单发线", "notify_channel": True,
+            "nodes": [{"title": "唯一节点", "prompt": "干活"}],
+        }})
+        pipe = recv_until(ws, "c1")["result"]["pipeline"]
+        ws.send_json({"id": "s1", "method": "pipeline.start", "params": {"id": pipe["id"]}})
+        recv_until(ws, "s1")
+        assert _wait_for(lambda: len(rec.texts()) >= 1)
+        import time as _time
+
+        _time.sleep(0.4)  # 留出重复推送的窗口
+        assert len(rec.texts()) == 1, f"同一件事只推一遍，实际 {rec.texts()}"
+        assert "单发线" in rec.texts()[0] and "共 1 个节点" in rec.texts()[0], \
+            "保留的是整体收尾推送（维持原行为）"

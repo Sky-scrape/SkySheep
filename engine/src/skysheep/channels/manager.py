@@ -90,6 +90,26 @@ def _usage_note(result: dict) -> str:
     return note
 
 
+def build_channels(config: dict, on_message) -> dict[str, Channel]:
+    """按配置构建适配器实例（不启动收消息的后台任务）。
+
+    ChannelManager.restart 与一次性 CLI 进程（skysheep cron run 的只发不收
+    渠道）共用这份装配：注册键写回实例、坏配置段跳过，两处口径一致。
+    """
+    out: dict[str, Channel] = {}
+    for name, cls in ADAPTERS.items():
+        section = config.get(name) or {}
+        if not isinstance(section, dict):
+            continue
+        channel = cls(section, on_message)
+        # 注册键就是该渠道的唯一真名：把它写回实例，让适配器内部（事件里的
+        # channel 字段、会话绑定）与字典键一定一致。不这样做时，若适配器的
+        # name 属性与注册键对不上，会话与审批会静默串到另一个平台上去。
+        channel.name = name
+        out[name] = channel
+    return out
+
+
 class ChannelManager:
     def __init__(self, host, config_provider) -> None:
         """config_provider 返回 {平台名: {...配置...}}；每次 restart 时重新读取，
@@ -111,15 +131,7 @@ class ChannelManager:
         """按最新配置重建渠道（设置页保存后调用；应用启动时也走这里）。"""
         await self.stop()
         cfg = self.config_provider() or {}
-        for name, cls in ADAPTERS.items():
-            section = cfg.get(name) or {}
-            if not isinstance(section, dict):
-                continue
-            channel = cls(section, self._on_message)
-            # 注册键就是该渠道的唯一真名：把它写回实例，让适配器内部（事件里的
-            # channel 字段、会话绑定）与字典键一定一致。不这样做时，若适配器的
-            # name 属性与注册键对不上，会话与审批会静默串到另一个平台上去。
-            channel.name = name
+        for name, channel in build_channels(cfg, self._on_message).items():
             # 适配器可把运行时状态（微信的 bot_token / 游标）交回宿主持久化
             channel.on_state = self._make_state_sink(name)
             self.channels[name] = channel

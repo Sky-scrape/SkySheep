@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS pipelines (
     name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'draft',
     concurrency INTEGER NOT NULL DEFAULT 2,
+    notify_channel INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     finished_at REAL NOT NULL DEFAULT 0
 );
@@ -244,6 +245,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("whitelist_rules", "hit_count INTEGER NOT NULL DEFAULT 0"),
     ("whitelist_rules", "last_hit_at REAL NOT NULL DEFAULT 0"),
     ("cron_tasks", "notify_channel INTEGER NOT NULL DEFAULT 0"),
+    ("pipelines", "notify_channel INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -2391,6 +2393,7 @@ class SessionStore:
             "name": r["name"],
             "status": r["status"],
             "concurrency": r["concurrency"],
+            "notify_channel": bool(r["notify_channel"]),
             "created_at": r["created_at"],
             "finished_at": r["finished_at"],
         }
@@ -2471,6 +2474,7 @@ class SessionStore:
         name: str,
         nodes: list[dict] | None = None,
         concurrency: int = 2,
+        notify_channel: bool = False,
     ) -> dict:
         """建流水线（草稿态）+ 一次性落全部节点。
 
@@ -2487,9 +2491,10 @@ class SessionStore:
             self._validate_node_text(n.get("title") or "", n.get("prompt") or "")
         now = time.time()
         cur = await self._db.execute(
-            "INSERT INTO pipelines (project_id, name, status, concurrency, created_at)"
-            " VALUES (?, ?, 'draft', ?, ?)",
-            (project_id, name, max(1, min(4, int(concurrency or 2))), now),
+            "INSERT INTO pipelines (project_id, name, status, concurrency, notify_channel, created_at)"
+            " VALUES (?, ?, 'draft', ?, ?, ?)",
+            (project_id, name, max(1, min(4, int(concurrency or 2))),
+             1 if notify_channel else 0, now),
         )
         pid = cur.lastrowid
         ids: list[int] = []
@@ -2653,13 +2658,15 @@ class SessionStore:
 
     async def update_pipeline(self, pipeline_id: int, **kw) -> dict | None:
         assert self._db
-        allowed = ("name", "status", "concurrency", "finished_at")
+        allowed = ("name", "status", "concurrency", "finished_at", "notify_channel")
         fields, args = [], []
         for k, v in kw.items():
             if k not in allowed:
                 continue
             if k == "concurrency":
                 v = max(1, min(4, int(v or 2)))
+            elif k == "notify_channel":
+                v = 1 if v else 0
             fields.append(f"{k} = ?")
             args.append(v)
         if not fields:

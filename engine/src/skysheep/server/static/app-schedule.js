@@ -797,6 +797,7 @@ async function loadCron() {
     ops.innerHTML =
       `<button class="cron-op" data-op="run" title="立即运行一次">▶</button>` +
       `<button class="cron-op" data-op="pipeline" title="纳入任务编排（复制成流水线节点）">⛓</button>` +
+      `<button class="cron-op" data-op="schtask" title="系统计划任务：状态查询中…">…</button>` +
       `<button class="cron-op" data-op="toggle" title="${t.enabled ? "暂停" : "启用"}">${t.enabled ? "⏸" : "▶"}</button>` +
       `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
     ops.querySelector('[data-op="run"]').onclick = async (e) => {
@@ -825,6 +826,40 @@ async function loadCron() {
       catch (err) { addNotice("删除失败: " + err.message); }
       await loadCron();
     };
+    // 系统计划任务（Windows 任务计划程序集成）：导出 / 移除 / 已导出状态
+    const schBtn = ops.querySelector('[data-op="schtask"]');
+    schBtn.onclick = async (e) => {
+      e.stopPropagation();
+      if (schBtn.dataset.exported === "1") {
+        if (!(await confirmModal("移除系统计划任务",
+          `<p>确定移除系统计划任务 <b>SkySheep-${t.id}</b> 吗？</p>` +
+          `<p class="dim small">移除后到点不再独立执行；SkySheep 运行期间的调度不受影响。</p>`,
+          "移除"))) return;
+        try {
+          const r = await request("cron.schtask_remove", { id: t.id });
+          addNotice(r.removed ? `已移除系统计划任务 ${r.task_name}` : (r.notice || "移除失败"));
+        } catch (err) { addNotice("移除失败: " + err.message); }
+      } else {
+        if (!(await confirmModal("导出为系统计划任务",
+          `<p>将在 Windows 任务计划程序创建 <b>SkySheep-${t.id}</b>，按「${escapeHtml(fmtCronSchedule(t))}」到点用命令行独立执行，<b>SkySheep 应用不需要打开</b>。</p>` +
+          `<p class="dim small">结果照常写回这个列表；开了「完成后推送到聊天渠道」的照样推送。应用内停用任务后，系统计划任务到点也会跳过执行。</p>`,
+          "导出"))) return;
+        try {
+          const r = await request("cron.schtask_export", { id: t.id });
+          addNotice(r.exported ? `已导出为系统计划任务 ${r.task_name}，到点独立执行` : (r.notice || "导出失败"));
+        } catch (err) { addNotice("导出失败: " + err.message); }
+      }
+      await loadCron();
+    };
+    // 已导出状态现查现显（schtasks /Query 只读）；非 Windows / 查询不可用时藏掉按钮
+    request("cron.schtask_status", { id: t.id }).then((r) => {
+      if (!r.supported) { schBtn.style.display = "none"; return; }
+      schBtn.dataset.exported = r.exported ? "1" : "0";
+      schBtn.textContent = r.exported ? "⊟" : "⊞";
+      schBtn.title = r.exported
+        ? "已导出为系统计划任务（点击移除）"
+        : "导出为系统计划任务（应用关闭时也能到点运行）";
+    }).catch(() => { schBtn.style.display = "none"; });
     li.appendChild(ops);
     li.onclick = () => cronModal(t);
     ul.appendChild(li);
@@ -886,7 +921,8 @@ function cronModal(existing) {
         <b>勾选 run_command 等于允许无人值守执行任意命令</b>——任务文本一旦被注入，预授权就是它的通行证，只在任务内容完全可信时勾选。</p>
       <p class="dim small">运行前提：定时任务只在 <b>SkySheep 运行期间</b>触发（关窗时选「缩到系统托盘」它就继续在后台跑）。
         彻底退出期间错过的任务，会在下次打开应用时补跑一次。想让电脑一开机就守着，
-        可在 设置 · 高级 里打开「开机自动启动」。</p>
+        可在 设置 · 高级 里打开「开机自动启动」；想让应用彻底关闭也照常到点跑，
+        可在任务卡片上点「⊞」导出为系统计划任务（Windows）。</p>
     </div>`;
   // 与任务列表里的卡片一致：频率切换时显隐对应字段
   const syncType = () => {
@@ -1175,10 +1211,24 @@ function pipelineModal(p) {
         <span class="spacer"></span>
         <button class="rp-mini" data-op="export">⇩ 导出 JSON</button>
       </div>
+      <label class="cron-notify"><input id="pl-notify" type="checkbox"${p.notify_channel ? " checked" : ""}> 节点完成后推送到聊天渠道</label>
+      <p class="dim small">每个节点到终态都会推一条紧凑进度（失败必推）；整条流水线收尾时照常再推一条汇总。渠道在 设置 · 聊天机器人渠道 里配置。</p>
       <div id="pl-graph-wrap" class="pl-graph-wrap"></div>
       ${rows || '<div class="dim small">（没有节点）</div>'}
       <p class="dim small">要改节点/指令：删除后重建（Agent 对话里说一句也能帮你重排）。</p>
     </div>`;
+  // 推送开关：改完即存（pipeline.update），热生效
+  box.querySelector("#pl-notify").onchange = async (e) => {
+    try {
+      await request("pipeline.update", { id: p.id, notify_channel: e.target.checked });
+      addNotice(e.target.checked
+        ? "已开启节点推送：每个节点到终态都会在聊天渠道收到进度"
+        : "已关闭节点推送");
+    } catch (err) {
+      addNotice("保存失败: " + err.message);
+      e.target.checked = !e.target.checked;
+    }
+  };
   // 用量汇总 + 导出：现拉一次详情（列表接口不带用量，避免每次刷新都聚合）
   request("pipeline.get", { id: p.id }).then((r) => {
     const u = r.usage || {};
@@ -1258,6 +1308,7 @@ function pipelineCreateModal() {
       <input id="pl-name" class="modal-input" type="text" placeholder="例如：登录模块开发">
       <label>同时运行的节点数（1~4）</label>
       <input id="pl-conc" class="modal-input" type="number" min="1" max="4" value="2">
+      <label class="cron-notify"><input id="pl-notify-create" type="checkbox"> 节点完成后推送到聊天渠道</label>
       <div id="pl-nodes"></div>
       <button id="pl-add-node" class="rp-mini" type="button">＋ 添加节点</button>
       <p class="dim small">节点按依赖自动排序：勾选「依赖前面的节点」，被依赖的全部完成后才会开始。
@@ -1358,7 +1409,8 @@ function pipelineCreateModal() {
       return { title: title || `节点 ${i + 1}`, prompt, after, dep_mode, allowed_tools, control, max_runs,
         timeout_s: timeoutMin * 60 };
     });
-    await request("pipeline.create", { name: name || "未命名流水线", concurrency, nodes });
+    await request("pipeline.create", { name: name || "未命名流水线", concurrency, nodes,
+      notify_channel: box.querySelector("#pl-notify-create").checked });
     await loadPipelines();
     addNotice("流水线已创建（草稿）。检查各节点的预授权后点 ▶ 启动。");
   }, "创建");

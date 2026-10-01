@@ -3,6 +3,8 @@
 用法：
     skysheep chat [目录] [-p provider] [-s session_id]
     skysheep app [目录] [--port N] [--browser]
+    skysheep run <任务> [--allow-tool ...]
+    skysheep cron run <task_id>   # 立即执行一个定时任务后退出（系统计划任务入口）
     skysheep config init|path
     skysheep sessions
     skysheep models
@@ -46,9 +48,11 @@ from ..models.factory import build_provider
 from ..models.probe import OLLAMA_BASE, probe_ollama
 from ..security.gate import Decision, HeadlessGate
 from ..security.trust import WorkspaceTrust
+from ..server.backend_parts._shared import SessionRuntime
+from ..server.backend_parts.automation import run_cron_task_core
 from ..session import SessionStore, export_messages_text
 from ..skills import SkillLoader
-from ..tools import ToolRegistry, default_tools
+from ..tools import ChangeRecorder, ToolRegistry, default_tools
 from ..tools.memory import render_memory_section
 from ..tools.skill import LoadSkillTool
 from .render import Renderer
@@ -803,6 +807,55 @@ def _app_cmd(args) -> None:
 # ---- headless 一次性运行（对标 claude -p / codex exec / gemini -p） ----
 
 
+async def _assemble_headless_engine(store, working_dir: Path, cfg, provider_obj, trusted: bool):
+    """CLI 无人值守入口（skysheep run / cron run）共用的引擎装配。
+
+    技能发现 → MCP 连接 → 子代理任务簿 → 工具注册表 → 钩子，与后端
+    _build_full_registry 同一能力面。返回 (skills, mcp, tasks, registry, hooks)；
+    mcp / tasks 由调用方在 finally 里收尾（shutdown / cancel_all）。
+    """
+    skills = SkillLoader(
+        global_dir=skysheep_home() / "skills",
+        project_dir=(working_dir / ".skysheep" / "skills") if trusted else None,
+        state_path=working_dir / ".skysheep" / "skills.json",
+        scope_path=skysheep_home() / "skills-scope.json",
+        project_root=working_dir,
+    )
+    skills.discover()
+
+    mcp_configs, _mcp_config_warnings = load_mcp_configs(
+        skysheep_home() / "mcp.json",
+        (working_dir / ".skysheep" / "mcp.json") if trusted else None,
+    )
+    mcp = MCPManager(mcp_configs)
+    mcp_tools = await mcp.connect_all()
+
+    tasks = TaskManager(
+        provider_factory=lambda: provider_obj,
+        working_dir=working_dir,
+        max_iterations=cfg.subagent_max_iterations,
+    )
+    registry = ToolRegistry(default_tools(
+        store=store,
+        websearch=resolve_websearch(cfg),
+        imagegen=resolve_imagegen(cfg),
+        computer_control=cfg.computer_control,
+        browser_control=cfg.browser_control,
+    ))
+    registry.register(LoadSkillTool(skills))
+    registry.register(SpawnAgentTool(tasks))
+    registry.register(CheckTaskTool(tasks))
+    for t in mcp_tools:
+        registry.register(t)
+
+    raw_cfg = load_raw_config()
+    pre_rules, post_rules, stop_rules = hooks_from_config(raw_cfg)
+    hooks = HookRunner(pre_rules, post_rules, working_dir=working_dir,
+                       stop_rules=stop_rules) \
+        if (pre_rules or post_rules or stop_rules) else None
+    return skills, mcp, tasks, registry, hooks
+
+
 async def run_headless(
     prompt: str,
     directory: str = ".",
@@ -851,45 +904,8 @@ async def run_headless(
             WorkspaceTrust(skysheep_home(), working_dir).grant()
             trusted = True
 
-        skills = SkillLoader(
-            global_dir=skysheep_home() / "skills",
-            project_dir=(working_dir / ".skysheep" / "skills") if trusted else None,
-            state_path=working_dir / ".skysheep" / "skills.json",
-            scope_path=skysheep_home() / "skills-scope.json",
-            project_root=working_dir,
-        )
-        skills.discover()
-
-        mcp_configs, _mcp_config_warnings = load_mcp_configs(
-            skysheep_home() / "mcp.json",
-            (working_dir / ".skysheep" / "mcp.json") if trusted else None,
-        )
-        mcp = MCPManager(mcp_configs)
-        mcp_tools = await mcp.connect_all()
-
-        tasks = TaskManager(
-            provider_factory=lambda: provider_obj,
-            working_dir=working_dir,
-            max_iterations=cfg.subagent_max_iterations,
-        )
-        registry = ToolRegistry(default_tools(
-            store=store,
-            websearch=resolve_websearch(cfg),
-            imagegen=resolve_imagegen(cfg),
-            computer_control=cfg.computer_control,
-            browser_control=cfg.browser_control,
-        ))
-        registry.register(LoadSkillTool(skills))
-        registry.register(SpawnAgentTool(tasks))
-        registry.register(CheckTaskTool(tasks))
-        for t in mcp_tools:
-            registry.register(t)
-
-        raw_cfg = load_raw_config()
-        pre_rules, post_rules, stop_rules = hooks_from_config(raw_cfg)
-        hooks = HookRunner(pre_rules, post_rules, working_dir=working_dir,
-                           stop_rules=stop_rules) \
-            if (pre_rules or post_rules or stop_rules) else None
+        skills, mcp, tasks, registry, hooks = await _assemble_headless_engine(
+            store, working_dir, cfg, provider_obj, trusted)
 
         agent = Agent(
             provider=provider_obj,
@@ -986,6 +1002,142 @@ def _run_cmd(args) -> None:
         raise SystemExit(1)
 
 
+def _build_sendonly_channels(cfg):
+    """一次性进程的渠道管理器：只构建适配器实例（能 send_text），不 start()。
+
+    `skysheep cron run` 是短进程，只发终态摘要、不收消息——不启动收消息的
+    长连接（lark-cli WebSocket），也就不与桌面端同时在线的机器人抢事件。
+    渠道装配复用 ChannelManager 同一份 build_channels，口径一致。
+    """
+    from ..channels.manager import ChannelManager, build_channels
+
+    mgr = ChannelManager(None, lambda: {})  # host 仅收消息路由用；只发不收
+    mgr.channels = build_channels(dict(cfg.channels.platforms or {}), lambda _msg: None)
+    return mgr
+
+
+async def _cron_run_async(task_id: int, provider_name: str | None) -> int:
+    """`skysheep cron run <task_id>` 的主体：引导引擎、执行该任务、回写、退出。
+
+    供 Windows 任务计划程序导出的系统计划任务调用（应用不开着也能到点跑）。
+    执行/结果回写/下次排期/notify_channel 推送全部走
+    automation.run_cron_task_core（与后端扫描循环同一条路径）；这里的差异只有
+    CLI 自己的引擎装配（对标 run_headless）与只发不收的渠道实例。
+    工作目录按任务归属项目从库里解析（计划任务的进程 cwd 不可靠），SKYSHEEP_HOME
+    照常生效。返回进程退出码：完成 0 / 失败 1。
+    """
+    cfg = load_config()
+    name = provider_name or cfg.default
+    if name not in cfg.providers:
+        raise SystemExit(
+            "unknown provider: {}; available: {}".format(name, ", ".join(cfg.providers))
+        )
+    try:
+        provider_obj = build_provider(name, cfg.providers[name])
+    except ConfigError as e:
+        raise SystemExit(str(e) + "\nhint: skysheep config init 后填入 API Key") from e
+
+    store = await SessionStore(db_path()).connect()
+    mcp = None
+    tasks = None
+    try:
+        task = await store.get_cron_task(task_id)
+        if task is None:
+            raise SystemExit(f"定时任务不存在: {task_id}")
+        proj = await store.get_project(int(task.get("project_id") or 0))
+        if proj is None or not Path(proj.root_path).is_dir():
+            raise SystemExit("任务所属的项目目录已不存在，无法执行")
+        working_dir = Path(proj.root_path)
+
+        # 信任口径与 run_headless 一致：有过信任记录才启用项目自带的 mcp/技能
+        trusted = WorkspaceTrust(skysheep_home(), working_dir).is_trusted()
+        skills, mcp, tasks, registry, hooks = await _assemble_headless_engine(
+            store, working_dir, cfg, provider_obj, trusted)
+        channels = _build_sendonly_channels(cfg)
+
+        async def execute(t: dict):
+            # 与后端 _execute_cron_turn 同构：独立会话 + HeadlessGate + 一轮
+            sess = await store.create_session(t["project_id"], title=f"⏰ {t['name']}")
+            sid = sess.id
+            gate = HeadlessGate(allowed=t["allowed_tools"], store=store,
+                                project_id=t["project_id"], working_dir=working_dir)
+            agent = Agent(
+                provider=provider_obj,
+                registry=registry,
+                gate=gate,
+                working_dir=working_dir,
+                max_iterations=cfg.max_iterations,
+                context_limit_tokens=cfg.context_limit_tokens,
+                compaction_keep_recent=cfg.compaction_keep_recent,
+                compaction_trigger=cfg.compaction_trigger,
+                compaction_auto=cfg.compaction_auto,
+                hooks=hooks,
+                restrict_to_workdir=cfg.restrict_to_workdir,
+                session_id=sid,
+            )
+            agent.set_system(
+                build_system_prompt(working_dir)
+                + skills.render_prompt_section()
+                + render_memory_section()
+            )
+            runtime = SessionRuntime(sid=sid, agent=agent, recorder=ChangeRecorder())
+            n_before = len(agent.history)
+            error = None
+            stop_reason = "error"
+            async for ev in agent.run_turn(t["prompt"]):
+                if isinstance(ev, ErrorEvent):
+                    error = ev.message
+                elif isinstance(ev, TurnFinished):
+                    stop_reason = ev.stop_reason
+            # 消息落库（run_headless 同款）：异常结束的一轮也要可审计
+            for m in agent.history[n_before:]:
+                await store.append_message(sid, m)
+            await store.touch(sid)
+            try:
+                await store.add_usage(
+                    sid, name, getattr(provider_obj, "model", ""),
+                    agent.total_in_tokens, agent.total_out_tokens,
+                    agent.total_cached_tokens,
+                )
+            except Exception:  # noqa: BLE001 - 用量记录失败不影响执行
+                pass
+            if error is not None or stop_reason not in ("end_turn", "max_iterations"):
+                # 异常结束按失败收尾：run_cron_task_core 回写错误状态、渠道必推
+                raise RuntimeError(error or f"轮次异常结束（{stop_reason}）")
+            return runtime, sid, False
+
+        final = await run_cron_task_core(
+            store, task_id, force=False, execute=execute,
+            broadcast=lambda t: print(f"⏰ {t['name']}：{t['last_status']}"),
+            notify=None,  # 无桌面：不打 toast，渠道推送照常
+            channels=channels,
+            running=None,  # 单次进程，无需在跑去重集合
+        )
+        if final is None:
+            # 任务不存在已在上面拦；剩下就是「已停用」——尊重开关，不算失败
+            print("任务已停用，跳过执行")
+            return 0
+        status = final.get("last_status")
+        if status == "error":
+            print("✗ " + (final.get("last_result") or "执行失败"))
+            return 1
+        print(f"✅ {final['name']}：" + ("完成（无产出）" if status == "empty" else "完成"))
+        if final.get("last_result"):
+            print(final["last_result"])
+        return 0
+    finally:
+        if mcp is not None:
+            await mcp.shutdown()
+        if tasks is not None:
+            tasks.cancel_all()
+        await store.close()
+
+
+def _cron_cmd(args) -> None:
+    exit_code = asyncio.run(_cron_run_async(args.task_id, args.provider))
+    raise SystemExit(exit_code)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="skysheep", description="SkySheep — open-source AI agent workbench"
@@ -1027,6 +1179,16 @@ def main(argv: list[str] | None = None) -> None:
     p_cfg = sub.add_parser("config", help="config operations")
     p_cfg.add_argument("action", choices=["init", "path"], help="init: create template; path: show path")
 
+    p_cron = sub.add_parser(
+        "cron", help="定时任务运维（供系统计划任务 / 脚本调用，不启动应用）"
+    )
+    cron_sub = p_cron.add_subparsers(dest="cron_cmd", required=True)
+    p_cron_run = cron_sub.add_parser(
+        "run", help="立即执行一个定时任务后退出（Windows 任务计划程序导出的入口）"
+    )
+    p_cron_run.add_argument("task_id", type=int, help="定时任务 id（应用内任务列表 / cron.list 可查）")
+    p_cron_run.add_argument("-p", "--provider", default=None, help="provider name from config")
+
     sub.add_parser("sessions", help="list recent sessions")
     sub.add_parser("models", help="list configured providers and local (Ollama) models")
 
@@ -1047,6 +1209,8 @@ def main(argv: list[str] | None = None) -> None:
                 print("created: " + str(p))
             except ConfigError as e:
                 print(str(e))
+    elif args.cmd == "cron":
+        _cron_cmd(args)
     elif args.cmd == "sessions":
         asyncio.run(_sessions_cmd())
     elif args.cmd == "models":

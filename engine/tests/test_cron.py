@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time as _time
 
+import pytest
+
 from skysheep.messages import TextBlock, ToolUseBlock
 
 # ---- store：CRUD + next_run ----
@@ -346,3 +348,167 @@ def test_cron_push_failure_does_not_affect_task_result(home, caplog):
                 if "定时任务摘要推送" in rec.getMessage()]
         assert hits, "推送失败要留日志（skysheep.security）"
         assert all(rec.levelno >= logging.WARNING for rec in hits)
+
+
+# ---- 导出到 Windows 任务计划程序（schtasks；runner 一律注入，绝不真建系统任务） ----
+
+
+@pytest.mark.parametrize("wd,day", list(enumerate(
+    ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"])))
+def test_schtasks_weekly_weekday_mapping_including_monday(wd, day):
+    """weekly 全星期映射：weekday=0（周一）必须按 /SC WEEKLY /D MON 导出。
+
+    `weekday or -1` 的真值坑会把 0 误判成无效、周一任务降级成 daily（每天执行，
+    7 倍频次）；store.compute_next_run 对 weekday=0 用 `is not None` 正确按周一
+    算，两端口径必须一致。
+    """
+    from skysheep.server.backend_parts.automation import AutomationMixin
+
+    args = AutomationMixin._schtasks_create_args(
+        f"SkySheep-{wd}", "exe", wd,
+        {"schedule_type": "weekly", "weekday": wd, "time_of_day": "07:30"})
+    i = args.index("/SC")
+    assert args[i:i + 6] == ["/SC", "WEEKLY", "/D", day, "/ST", "07:30"]
+
+
+def test_schtasks_create_args_schedule_mapping():
+    """任务行 → /SC 参数映射：间隔型 MINUTE /MO n、定点型 DAILY /ST、weekly WEEKLY /D。"""
+    from skysheep.server.backend_parts.automation import AutomationMixin
+
+    mk = AutomationMixin._schtasks_create_args
+    entry = r"C:\venv\Scripts\skysheep.exe"
+
+    a = mk("SkySheep-7", entry, 7,
+           {"schedule_type": "interval", "interval_minutes": 45})
+    assert a[:4] == ["/Create", "/F", "/TN", "SkySheep-7"]
+    i = a.index("/SC")
+    assert a[i:i + 4] == ["/SC", "MINUTE", "/MO", "45"], "间隔型 → /SC MINUTE /MO n"
+    assert a[-2] == "/TR"
+    assert a[-1] == f'"{entry}" cron run 7', "/TR 要带内引号包住可执行入口（路径可含空格）"
+
+    d = mk("SkySheep-8", entry, 8,
+           {"schedule_type": "daily", "time_of_day": "09:05"})
+    i = d.index("/SC")
+    assert d[i:i + 4] == ["/SC", "DAILY", "/ST", "09:05"], "定点型 → /SC DAILY /ST hh:mm"
+
+    w = mk("SkySheep-9", entry, 9,
+           {"schedule_type": "weekly", "weekday": 2, "time_of_day": "10:00"})
+    i = w.index("/SC")
+    assert w[i:i + 6] == ["/SC", "WEEKLY", "/D", "WED", "/ST", "10:00"], "weekday 2=周三"
+
+    # weekly 但 weekday 无效：宽松回退 daily（与 compute_next_run 口径一致，不炸）
+    w2 = mk("SkySheep-10", entry, 10, {"schedule_type": "weekly", "weekday": -1,
+                                       "time_of_day": "08:00"})
+    i = w2.index("/SC")
+    assert w2[i:i + 4] == ["/SC", "DAILY", "/ST", "08:00"]
+
+
+def test_cron_schtask_export_remove_status_via_ws(home):
+    """导出/移除/状态走注入的 runner：命令构造正确，绝不真的调系统 schtasks。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, [[TextBlock(text="结果")]]) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "ca", "method": "cron.add", "params": {
+            "name": "导出我", "prompt": "干活",
+            "schedule_type": "interval", "interval_minutes": 20,
+        }})
+        task = recv_until(ws, "ca")["result"]
+
+        calls: list[list[str]] = []
+
+        async def fake_runner(*args):
+            calls.append(list(args))
+            return 0, "SUCCESS"
+
+        client.app.state.backend._schtasks_runner = fake_runner
+
+        ws.send_json({"id": "ex", "method": "cron.schtask_export",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "ex")
+        assert r["ok"], r.get("error")
+        assert r["result"]["exported"] is True
+        assert r["result"]["task_name"] == f"SkySheep-{task['id']}"
+
+        assert len(calls) == 1 and calls[0][0] == "/Create"
+        assert f"/TN SkySheep-{task['id']}" in " ".join(calls[0])
+        i = calls[0].index("/SC")
+        assert calls[0][i:i + 4] == ["/SC", "MINUTE", "/MO", "20"]
+        tr = calls[0][calls[0].index("/TR") + 1]
+        assert tr.startswith('"') and tr.endswith(f"cron run {task['id']}"), \
+            "TR 入口 + cron run 参数（内引号包入口）"
+
+        # 状态查询（只读）：退出码 0 → 已导出
+        ws.send_json({"id": "st", "method": "cron.schtask_status",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "st")
+        assert r["ok"] and r["result"]["supported"] is True
+        assert r["result"]["exported"] is True
+        assert calls[-1][0] == "/Query" and f"SkySheep-{task['id']}" in calls[-1]
+
+        # 移除
+        ws.send_json({"id": "rm", "method": "cron.schtask_remove",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "rm")
+        assert r["ok"] and r["result"]["removed"] is True
+        assert calls[-1][0] == "/Delete" and calls[-1][-1] == "/F"
+        assert f"SkySheep-{task['id']}" in calls[-1]
+
+
+def test_cron_schtask_degrades_with_notice_not_error(home, monkeypatch):
+    """schtasks 失败 / 入口缺失 / 非 Windows 一律 notice 降级，不报错崩。"""
+    from test_server import make_client, recv_until
+
+    from skysheep.server.backend_parts import automation
+
+    with make_client(home, []) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "ca", "method": "cron.add", "params": {
+            "name": "降级", "prompt": "干活",
+            "schedule_type": "daily", "time_of_day": "09:00",
+        }})
+        task = recv_until(ws, "ca")["result"]
+
+        calls: list[list[str]] = []
+
+        async def failing_runner(*args):
+            calls.append(list(args))
+            return 1, "ERROR: 拒绝访问。"
+
+        client.app.state.backend._schtasks_runner = failing_runner
+
+        ws.send_json({"id": "ex", "method": "cron.schtask_export",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "ex")
+        assert r["ok"], "失败也要给 ok 响应（notice 降级），不是 error 帧"
+        assert r["result"]["exported"] is False
+        assert "失败" in r["result"]["notice"] and "拒绝访问" in r["result"]["notice"]
+
+        # 状态查询：非 0 退出码 = 未导出（不是错误）
+        ws.send_json({"id": "st", "method": "cron.schtask_status",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "st")
+        assert r["ok"] and r["result"]["exported"] is False
+
+        # 入口缺失：notice 降级，runner 不被调用
+        before = len(calls)
+        monkeypatch.setattr(automation.AutomationMixin, "_cron_task_entry",
+                            staticmethod(lambda: (None, "没有 skysheep.exe")))
+        ws.send_json({"id": "ex2", "method": "cron.schtask_export",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "ex2")
+        assert r["ok"] and r["result"]["exported"] is False
+        assert "skysheep.exe" in r["result"]["notice"]
+        assert len(calls) == before, "入口缺失时不得发起 schtasks"
+
+        # 非 Windows：方法直接 notice / supported=false 降级
+        monkeypatch.setattr(automation.sys, "platform", "linux")
+        ws.send_json({"id": "ex3", "method": "cron.schtask_export",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "ex3")
+        assert r["ok"] and r["result"]["exported"] is False
+        assert "Windows" in r["result"]["notice"]
+        ws.send_json({"id": "st2", "method": "cron.schtask_status",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "st2")
+        assert r["ok"] and r["result"]["supported"] is False

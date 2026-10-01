@@ -413,3 +413,39 @@ def test_ensure_url_protocol_noop_without_freeze(monkeypatch):
     monkeypatch.setattr(winreg, "CreateKey", fail_create)
     monkeypatch.delenv("SKYSHEEP_INSTANCE", raising=False)
     desktop._ensure_url_protocol()  # 不抛错即通过（早退，没碰 winreg）
+
+
+def test_main_dispatches_cron_argv_to_cli(monkeypatch, isolated_home):
+    """打包 exe 的 `SkySheep.exe cron run <id>` 在单实例互斥体之前转交 cli.main。
+
+    计划任务导出的入口就是它：应用未运行时也要能执行，更不能把已在运行的
+    桌面窗口聚焦上来（互斥体路径一步都不许碰）。
+    """
+    monkeypatch.setattr(desktop, "_rotate_log", lambda: None)
+    monkeypatch.setattr(desktop, "_ensure_streams", lambda: None)
+    monkeypatch.setattr(desktop, "_setup_logging", lambda: None)
+    monkeypatch.setattr(desktop, "_log", lambda msg: None)
+
+    calls = []
+
+    def fake_cli_main(argv):
+        calls.append(list(argv))
+        return 0
+
+    import skysheep.cli.app as cli_app
+
+    monkeypatch.setattr(cli_app, "main", fake_cli_main)
+    monkeypatch.setattr(desktop.sys, "argv", ["SkySheep.exe", "cron", "run", "7"])
+    assert desktop.main() == 0
+    assert calls == [["cron", "run", "7"]], "argv[1:] 原样转交（argparse 再解析）"
+
+    # 非 cron 启动不转交：照常走桌面壳启动链（全链打桩，不碰真实互斥体与弹窗）
+    launched: list[int] = []
+    monkeypatch.setattr(desktop, "_acquire_single_instance", lambda: True)
+    monkeypatch.setattr(desktop, "_write_pid_record", lambda: None)
+    monkeypatch.setattr(desktop, "_launch", lambda: launched.append(1) or 0)
+    monkeypatch.setattr(desktop.sys, "argv", ["SkySheep.exe"])
+    calls.clear()
+    assert desktop.main() == 0
+    assert calls == [], "非 cron 启动不得转交 cli"
+    assert launched == [1], "非 cron 启动照常进桌面壳"

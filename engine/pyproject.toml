@@ -57,12 +57,23 @@ packages = ["src/skysheep"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# evals 是行为级评测基线（engine/evals/，fake provider 驱动真实 Agent 循环的
+# 回归场景）。放进 testpaths 让 `uv run pytest -m eval` 不带路径参数就能跑；
+# 默认集靠 addopts 预置 `-m "not eval"` 排除——evals 在收集期即被剔除，
+# `uv run pytest` / `--collect-only` 的用例集与数量跟从前完全一致，不带路径的
+# -m 覆盖 addopts 的 -m（argparse 后者胜），所以两条约定命令都按文档工作：
+#   uv run pytest            # 默认集，不含 evals（数量同改动前）
+#   uv run pytest -m eval    # 只跑评测基线
+# 已知交互：显式 `-m "not e2e"` 会覆盖 addopts、连 evals 一起跑（评测不联网、
+# 不碰真实 home、进程内秒级，跑上无害）；要双排除写 `-m "not e2e and not eval"`。
+testpaths = ["tests", "evals"]
+addopts = '-m "not eval"'
 # 测试分层：默认全跑；用 `-m "not e2e"` 跳过真实网络栈用例（需要本机端口），
 # 用 `-m e2e` 只跑它们。slow 留给将来需要长时运行的用例。
 markers = [
     "e2e: 起真实服务/真实 socket 的端到端用例（比进程内用例慢）",
     "slow: 耗时明显、不适合每次提交都跑的用例",
+    "eval: 行为级评测基线（engine/evals/，回归场景断言事件流与工具调用序列）",
 ]
 # 单用例超时保护：挂死的 async 用例（比如等一个永远不会来的事件）会拖死整个 CI。
 # thread 法对不配合的 C 级等待也能强杀；120s 覆盖最慢的 e2e/覆盖率场景绰绰有余。

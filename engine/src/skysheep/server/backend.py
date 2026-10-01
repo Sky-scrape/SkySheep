@@ -129,7 +129,7 @@ from ..security.trust import STATE_PENDING, WorkspaceTrust, list_trusted, revoke
 from ..session import SessionStore
 from ..session.store import export_messages_text
 from ..skills import SkillLoader
-from ..skills.gallery import bundled_dir_for, load_gallery_manifest
+from ..skills.gallery import bundled_dir_for, bundled_update_available, load_gallery_manifest
 from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
     SkillInstallError,
@@ -3502,19 +3502,38 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         gallery_manifest.json，不联网、不动技能目录；installed 按技能名
         与当前清单（skills.all()）比对得出，前端据此标「已安装」或给
         一键安装按钮。安装走既有 skills.install（scope=global），这里不管。
+
+        已装的条目再与打包内副本做内容比对（skills.gallery.
+        bundled_update_available：相对路径 + 逐文件字节哈希），有差异即
+        update_available——官方更新了模板、或本地技能被改过时提示「可更新」，
+        更新动作复用 skills.install（overwrite=true，包内副本覆盖）。
         """
-        installed = {s.name for s in self.skills.all()}
+        installed_by_name = {s.name: s for s in self.skills.all()}
         entries = load_gallery_manifest()
-        templates = [
-            {
-                "name": str(s.get("name", "")),
+        templates = []
+        for s in entries:
+            name = str(s.get("name", ""))
+            skill = installed_by_name.get(name)
+            update_available = False
+            update_hint = ""
+            if skill is not None:
+                update_available = bundled_update_available(
+                    str(s.get("source", "")), skill.path.parent
+                )
+                if update_available:
+                    update_hint = (
+                        "更新会用随应用内置的模板副本覆盖本地已装技能"
+                        "（无需联网，本地改动会被替换）"
+                    )
+            templates.append({
+                "name": name,
                 "description": str(s.get("description", "")),
                 "source": str(s.get("source", "")),
                 "dir": str(s.get("dir", "")),
-                "installed": str(s.get("name", "")) in installed,
-            }
-            for s in entries
-        ]
+                "installed": skill is not None,
+                "update_available": update_available,
+                "update_hint": update_hint,
+            })
         return {"templates": templates, "count": len(templates)}
 
     async def delete_skill(self, name: str) -> dict:

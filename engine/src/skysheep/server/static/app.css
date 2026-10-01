@@ -2668,6 +2668,10 @@ html[data-theme="pine"] .restart-banner {
   display: flex; align-items: center; justify-content: space-between; gap: 6px;
   min-width: 0;
 }
+/* 右侧徽章 + 按钮组：已安装/可更新徽章与更新按钮贴成一团，不随 space-between 摊开 */
+.gallery-item .gallery-item-ops {
+  display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+}
 .gallery-item .item-name {
   font-weight: 700; font-size: 13px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

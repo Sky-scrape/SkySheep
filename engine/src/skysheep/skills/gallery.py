@@ -11,6 +11,7 @@ description / source）。与已下线的技能广场不同：这里没有任何
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -69,3 +70,62 @@ def bundled_dir_for(source: str) -> Path | None:
             return candidate
         return None  # 清单命中但包内没有/不完整：直接回落在线下载
     return None
+
+
+# ---- 可更新检测：已装技能 vs 打包内副本的内容比对 ----
+#
+# 场景模板已随包内置（2.3.0 起）后，官方更新模板、用户装的是旧版本（或本地改过
+# 技能文件）时，应能提示「可更新」。判定口径：相对路径集合 + 逐文件内容一致才算
+# 没有更新；任一差异（多了/少了文件、SKILL.md 或资源内容不同）即 update_available。
+# 这里故意读原始字节做哈希而不是走 textio 解码：比对的正是字节级差异——
+# 解码再编码会把编码/行尾差异抹掉，反而漏报；SKILL.md 与资源文件一视同仁。
+
+
+def _dir_hashes(root: Path) -> dict[str, str]:
+    """目录内全部文件的「相对路径 → 内容哈希」表（含 SKILL.md 与隐藏文件）。
+
+    单个文件读不出来（被占用/权限）不拖垮整体：按占位值计，两边不一致照样
+    能被这条表区分出来。
+    """
+    out: dict[str, str] = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        try:
+            digest = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            digest = "<unreadable>"
+        out[rel] = digest
+    return out
+
+
+def bundled_differs(installed_dir: Path, bundled_dir: Path) -> bool:
+    """已装技能目录与包内副本逐文件比对：有差异返回 True。
+
+    目录存在性由调用方先验（bundled_update_available 已查 installed_dir
+    存在、bundled_dir_for 已查包内 SKILL.md）；遍历过程抛 OSError（遍历中
+    读不了）按「无法比对」处理返回 False，不凭空催更新。
+    """
+    try:
+        return _dir_hashes(installed_dir) != _dir_hashes(bundled_dir)
+    except OSError:
+        return False
+
+
+def bundled_update_available(source: str, installed_dir: Path | None) -> bool:
+    """官方场景模板的「可更新」判定：包内有副本且与已装目录内容不一致。
+
+    installed_dir 是已装技能的目录（Skill.path 的父目录）。包内没有副本
+    （bundled_dir_for 为 None，源码/wheel 运行态或非官方来源）或已装目录
+    不存在时返回 False：没有可比对的基准就不报可更新，不凭清单空口催。
+    """
+    bundled = bundled_dir_for(source)
+    if bundled is None or not installed_dir:
+        return False
+    try:
+        if not Path(installed_dir).is_dir():
+            return False
+    except OSError:
+        return False
+    return bundled_differs(Path(installed_dir), bundled)

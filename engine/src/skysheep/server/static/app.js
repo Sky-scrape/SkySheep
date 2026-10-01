@@ -11394,16 +11394,30 @@ async function loadSceneTemplates() {
     const label = t.display_name || t.name;
     const cell = document.createElement("div");
     cell.className = "gallery-item";
+    // 右侧徽章 + 按钮：已安装与可更新可以同时出现（装过但与内置副本有差异），
+    // 包进 .gallery-item-ops 整体右贴，避免 space-between 把徽章摊开
+    const ops = [];
+    if (t.installed) {
+      ops.push('<span class="chip chip-blue" title="已装进本机技能目录">已安装</span>');
+    }
+    if (t.update_available) {
+      const hint = t.update_hint || "与随应用内置的模板副本有差异";
+      ops.push(`<span class="chip chip-warn" title="${escapeHtml(hint)}">可更新</span>`);
+      ops.push(`<button class="btn-ghost gallery-install" title="${escapeHtml(hint)}">更新</button>`);
+    } else if (!t.installed) {
+      ops.push('<button class="btn-ghost gallery-install" title="装进全局技能目录（所有项目可用）">一键安装</button>');
+    }
     cell.innerHTML = `
       <div class="gallery-item-head">
         <span class="item-name" title="${escapeHtml(t.name)}">${escapeHtml(label)}</span>
-        ${t.installed
-          ? '<span class="chip chip-blue" title="已装进本机技能目录">已安装</span>'
-          : '<button class="btn-ghost gallery-install" title="装进全局技能目录（所有项目可用）">一键安装</button>'}
+        <span class="gallery-item-ops">${ops.join("")}</span>
       </div>
       <div class="item-desc gallery-desc" title="${escapeHtml(t.description)}">${escapeHtml(t.description)}</div>`;
-    if (!t.installed) {
-      cell.querySelector(".gallery-install").onclick = (e) => installSceneTemplate(t, e.currentTarget);
+    const btn = cell.querySelector(".gallery-install");
+    if (btn) {
+      btn.onclick = (e) => (t.update_available
+        ? updateSceneTemplate(t, e.currentTarget)
+        : installSceneTemplate(t, e.currentTarget));
     }
     grid.appendChild(cell);
   });
@@ -11430,6 +11444,38 @@ async function installSceneTemplate(t, btn) {
   galleryStatus(`✓ 已安装场景模板「${label}」（全局，所有项目可用）`);
   // 技能清单进快照 + 总览摘要/列表刷新；renderSettings 里会重跑 loadSceneTemplates，
   // 这一条的「一键安装」按钮随之变成「已安装」徽标
+  boot();
+  await renderSettings();
+}
+
+// 更新已装的场景模板：确认后复用既有 skills.install（overwrite=true），
+// 后端对官方来源自动优先包内副本（bundled_dir_for），离线覆盖、装完立即生效
+async function updateSceneTemplate(t, btn) {
+  const label = t.display_name || t.name;
+  const hint = t.update_hint || "更新会用随应用内置的模板副本覆盖本地已装技能（本地改动会被替换）";
+  const ok = await confirmModal(
+    "更新场景模板",
+    `<p>「${escapeHtml(label)}」与随应用内置的模板副本有差异。${escapeHtml(hint)}。</p>`,
+    "更新"
+  );
+  if (!ok) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "更新中…";
+  }
+  galleryStatus(`正在更新「${label}」…（从包内副本覆盖，无需联网）`);
+  try {
+    await request("skills.install", { source: t.source, scope: "global", overwrite: true });
+  } catch (e) {
+    galleryStatus(`✗ 更新「${label}」失败：${e.message}`, false);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "更新";
+    }
+    return;
+  }
+  galleryStatus(`✓ 已更新场景模板「${label}」（全局，所有项目可用）`);
+  // 技能清单进快照 + renderSettings 重跑 loadSceneTemplates，「可更新」徽标随之消失
   boot();
   await renderSettings();
 }

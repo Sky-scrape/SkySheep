@@ -30,6 +30,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from .. import obs
+from ..sanitize import scan_injection_patterns, untrusted_frame
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 
 MAX_REDIRECTS = 5
@@ -496,9 +497,22 @@ class WebFetchTool(Tool):
             host=parsed_final.hostname, path=parsed_final.path[:200],
             query_len=len(parsed_final.query), status=status, bytes=len(body),
         )
-        return f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" + truncate_output(
-            text + note, args.max_chars
-        )
+        # 提示注入纵深防御（第一期「框起来 + 标记」，不拦截）：抓取到的文本是
+        # 不可信外部内容，包进明确边界行交还模型；命中经典注入形态时在输出尾部
+        # 附一行提示、留一条结构化日志供「这一轮为什么…」检索。只标记不拦截：
+        # 抓取内容一字不改、照常返回，是否照做仍由模型与用户在权限门下决定。
+        hits = scan_injection_patterns(text)
+        if hits:
+            # 只记形态名与定位信息，不落正文（obs 约定：只记标识与度量）
+            obs.warning(
+                "web_fetch_injection_hint", "抓取内容命中疑似指令注入形态",
+                host=parsed_final.hostname, path=parsed_final.path[:200],
+                patterns=hits,
+            )
+        framed = untrusted_frame(current, truncate_output(text + note, args.max_chars))
+        if hits:
+            framed += "\n\n⚠ 检测到疑似指令注入形态：" + "、".join(hits)
+        return f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" + framed
 
 
 # ---- web_search：联网搜索（先搜到链接，再用 web_fetch 读全文） ----

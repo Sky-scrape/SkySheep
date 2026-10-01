@@ -67,3 +67,33 @@ jobs:
       - name: Pytest (e2e)
         working-directory: engine
         run: uv run pytest -m e2e -q
+
+  # 依赖漏洞扫描：从 uv.lock 导出全部运行时依赖（不含 dev 组、不含本包）交 pip-audit 审。
+  # 跑 windows-latest 与本地核验环境一致（lock 是全平台通用锁，pywinpty/pywin32 等
+  # Windows 专属依赖在别的平台装不出来）；不改 pyproject.toml / uv.lock，导出是纯读。
+  audit:
+    name: pip-audit (locked deps)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      # --no-emit-project：本包 skysheep-engine 不在 PyPI 上，带着 -e . 时
+      # pip-audit --strict 必红（本地实测：skysheep-engine: Dependency not found on PyPI）
+      - name: Export locked deps (runtime only)
+        working-directory: engine
+        run: uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements-audit.txt
+
+      # --strict：任何告警都算失败。CVE-2026-101918（pyjwt 2.14.0 → 修复版 2.15.0，
+      # 经 mcp 传入的传递依赖）在引入本 job 时锁文件里还没有修复版本，而约定不动
+      # pyproject/uv.lock，故先定点 ignore；其余任何已知漏洞照常红。pyjwt 升到
+      # >= 2.15.0 后把 --ignore-vuln 一并删掉。
+      - name: pip-audit
+        working-directory: engine
+        run: uvx pip-audit -r requirements-audit.txt --strict --ignore-vuln CVE-2026-101918

@@ -704,6 +704,10 @@ async function activateTab(tab) {
   }
   if (tab.usage) setContextUsage(tab.usage.tokens, tab.usage.limit, tab);
   else setContextUsage(0, 0, tab); // 该标签还没发过消息：清掉读数并隐藏环，避免残留上一标签的数值
+  // 路由指针跟着活动标签走：下面的权限卡恢复要靠 showPermission 里的
+  // routeTab 分支判断，残留的上一个事件路由（常指向别的后台标签）会把
+  // 恢复误判成「后台会话的确认请求」，卡片弹不出来。后续事件到达时会照常覆盖。
+  routeTab = tab;
   if (tab.needsPerm && tab.permData) showPermission(tab.permData);
   // 会话变了，右侧面板里「跟会话绑定」的页跟着换数据：审查页取的是后端当前
   // 会话的检查点、任务清单取的是当前会话的 todo——不重拉就会拿上一个会话的
@@ -2137,7 +2141,10 @@ function handleEvent(kind, data) {
       showPermission(data); // 通知统一在 showPermission 里发（活动/后台各一份）
       break;
     case "permission_resolved":
-      hidePermission();
+      // 只收起「这一张」卡：多标签同时各挂一张确认卡时，后台标签的 resolved
+      // 不该把活动标签正在显示的另一张真卡也藏掉（藏掉后 permRequest 已 null，
+      // 真卡按钮会静默失效，只能靠切标签恢复）
+      if (!data.request_id || data.request_id === permRequest) hidePermission();
       if (routeTab) {
         routeTab.needsPerm = false;
         routeTab.permData = null;
@@ -2322,6 +2329,14 @@ function showPermission(data) {
     renderTabs();
     return;
   }
+  // 活动标签的卡同样要标到标签上：切走再切回时 activateTab 靠 needsPerm/permData
+  // 恢复显示。旧实现只写全局单例 permRequest，切一下标签卡片就永久丢失——
+  // 而后端那一轮还挂在等决策上，会话看起来像假死。
+  if (routeTab) {
+    routeTab.needsPerm = true;
+    routeTab.permData = data;
+    renderTabs();
+  }
   permRequest = data.request_id;
   maybeNotify("需要你确认", `${data.tool_name} 正在等待你的决定`, "perm",
     { sid: routeTab && routeTab.sid });
@@ -2371,7 +2386,25 @@ function hidePermission() {
 document.querySelectorAll("#permission-bar [data-decision]").forEach((btn) => {
   btn.onclick = () => {
     if (!permRequest) return;
-    request("permission.respond", { request_id: permRequest, decision: btn.dataset.decision });
+    const rid = permRequest;
+    request("permission.respond", { request_id: rid, decision: btn.dataset.decision })
+      .then((res) => {
+        if (res && res.delivered === false) {
+          // 决策没有送达（那一轮已被停止，request_id 已失效）：收起死卡并明说，
+          // 别让用户对着永远无响应的卡反复点（后端停止时已补发清卡事件，
+          // 这里是「事件丢了/竞态」的兜底）
+          for (const t of chatTabs) {
+            if (t.permData && t.permData.request_id === rid) {
+              t.needsPerm = false;
+              t.permData = null;
+            }
+          }
+          hidePermission();
+          renderTabs();
+          addNotice("该权限请求已失效：对应的轮次已停止，无需再确认。");
+        }
+      })
+      .catch(() => {});
   };
 });
 

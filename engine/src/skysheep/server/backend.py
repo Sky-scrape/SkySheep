@@ -104,6 +104,7 @@ from ..events import (
     AssistantMessage,
     ErrorEvent,
     NoticeEvent,
+    PermissionResolved,
     QueueUpdated,
     TaskEstimate,
     TurnFinished,
@@ -128,7 +129,7 @@ from ..security.trust import STATE_PENDING, WorkspaceTrust, list_trusted, revoke
 from ..session import SessionStore
 from ..session.store import export_messages_text
 from ..skills import SkillLoader
-from ..skills.gallery import load_gallery_manifest
+from ..skills.gallery import bundled_dir_for, load_gallery_manifest
 from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
     SkillInstallError,
@@ -1760,6 +1761,21 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             # 被跳过，runtime 常驻，该会话之后所有轮次都拿着只读注册表跑。
             if plan_mode and readonly_registry is not None:
                 agent.registry = self._build_full_registry(runtime.recorder)
+            # 轮被取消/异常中止时，未决权限的决策永远不会到来（CancelledError
+            # 从 pending.wait() 穿透，agent 侧不再产出 resolved 事件）：这里补发
+            # 带 cancelled 语义的 resolved，让前端把可能残留的确认卡收掉——否则
+            # 卡上按钮的投递只会静默拿到 delivered=false，切标签还会把死卡重新
+            # 弹出。正常结束路径 _perm_pending 已空（决策路径各自发过 resolved），
+            # 一条不发；emit_ev 会顺带摘掉对应条目，故用快照遍历、只清一次。
+            for rid in list(_perm_pending):
+                try:
+                    await emit_ev(
+                        PermissionResolved(request_id=rid, decision="cancelled").model_dump()
+                    )
+                except asyncio.CancelledError:
+                    asyncio.current_task().uncancel()
+                except Exception:  # noqa: BLE001 - 客户端断开不影响收尾
+                    pass
             # 再冲刷流式增量缓冲：取消/异常/正常结束三条路径都要走到，
             # 否则最后几十毫秒的正文会丢在前端（用户看到回答缺尾）。
             # 收尾期的重复取消在此吞掉（首个取消已在上面捕获、语义已定为
@@ -3423,9 +3439,20 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         existing = {s.name for s in self.skills.all()}
         try:
             if str(source).strip().lower().startswith(("http://", "https://")):
-                result = await asyncio.to_thread(
-                    install_from_url, source, root, existing=existing, overwrite=overwrite
-                )
+                # 官方场景模板优先用打包内副本：装一个模板在线要直连下载整仓
+                # 归档（无缓存复用），中文网络环境经常失败——包内副本离线秒装；
+                # bundled_dir_for 返回 None（非官方来源 / 包内没有或坏副本）才
+                # 回落在线下载，兼作更新回退
+                bundled = bundled_dir_for(str(source))
+                if bundled is not None:
+                    result = await asyncio.to_thread(
+                        install_skill, str(bundled), root,
+                        existing=existing, overwrite=overwrite,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        install_from_url, source, root, existing=existing, overwrite=overwrite
+                    )
             else:
                 result = await asyncio.to_thread(
                     install_skill, source, root, existing=existing, overwrite=overwrite

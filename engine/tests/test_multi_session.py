@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from conftest import FakeProvider
 
+from skysheep.messages import TextBlock, ToolUseBlock
 from skysheep.models.base import ProviderDone, ProviderTextDelta
 from skysheep.server.backend import ServerBackend
 
@@ -116,6 +118,50 @@ async def test_cancel_and_stop_only_target_session(home):
     r_a, r_b = task_a.result(), task_b.result()
     assert r_a["stopped"] is True and r_a["session_id"] == sid_a
     assert r_b["stopped"] is False and r_b["session_id"] == sid_b
+    await be.shutdown()
+
+
+async def test_cancel_with_pending_permission_emits_cancelled_resolved(home):
+    """停止挂在权限确认上的轮：收尾补发 decision=cancelled 的 permission_resolved。
+
+    旧实现的取消路径不发任何权限事件（CancelledError 从 pending.wait() 穿透，
+    agent 侧的 resolved 产不出来），前端确认卡残留、按钮投递静默拿到
+    delivered=false，切标签还会把死卡重新弹出来（2026-10 审查项 5 场景 B）。
+    """
+    def factory():
+        return FakeProvider([
+            [ToolUseBlock(id="t1", name="write_file",
+                          input={"path": "a.txt", "content": "hi"})],
+            [TextBlock(text="done")],
+        ])
+
+    be = ServerBackend(working_dir=home / "proj", provider_factory=factory)
+    await be.setup()
+    evs = []
+
+    async def emit(ev):
+        evs.append(ev)
+
+    task = asyncio.create_task(be.send("建个文件", emit))
+    # 等权限请求出来：轮此刻挂在 pending.wait() 上等决策
+    for _ in range(300):
+        if any(e.get("kind") == "permission_request" for e in evs):
+            break
+        await asyncio.sleep(0.01)
+    req = next(e for e in evs if e.get("kind") == "permission_request")
+    rid = req["request_id"]
+    assert be.cancel_run(be.session.id) is True
+    r = await task
+    assert r["stopped"] is True
+    kinds = [e.get("kind") for e in evs]
+    assert "turn_finished" not in kinds, "被取消的轮不应产出 turn_finished"
+    resolved = [e for e in evs if e.get("kind") == "permission_resolved"]
+    assert len(resolved) == 1 and resolved[0]["request_id"] == rid
+    assert resolved[0]["decision"] == "cancelled"
+    # 与 app.py 的 delivered 契约对齐：残留 request_id 再投递必须返回 False
+    assert be.respond_permission(rid, "deny") is False
+    # 决策从未执行：文件不存在
+    assert not (home / "proj" / "a.txt").exists()
     await be.shutdown()
 
 

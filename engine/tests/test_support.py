@@ -2,8 +2,8 @@
 #
 # 诊断包是要发给外部开发者的，config.toml 里的明文凭据（provider api_key、
 # server.token、渠道 app_secret/bot_token）一旦进包就等同泄露。这里锁三件事：
-# 打码按键名包含匹配且覆盖渠道凭据、诊断包内不含会话库与全局记忆、
-# open_external 只放行 http(s)。
+# 打码按键名包含匹配且覆盖渠道凭据、proxy 值里的 userinfo 凭据一并抹掉、
+# 诊断包内不含会话库与全局记忆、open_external 只放行 http(s)。
 import zipfile
 
 import pytest
@@ -22,6 +22,9 @@ def fake_home(tmp_path):
             "kind = \"openai\"",
             "api_key = \"sk-SUPER-SECRET\"",
             "model = \"gpt-x\"",
+            # 代理地址按惯例可带 Basic Auth userinfo（键名 proxy 不含密钥词，
+            # 整行保留会把凭据随诊断包带出去——回归 2026-10 审查项）
+            "proxy = \"http://alice:proxyPw-SECRET@proxy.corp:8080\"",
             "",
             "[server]",
             "token = \"lan-token-SECRET\"",
@@ -60,6 +63,54 @@ def test_redact_masks_all_secret_key_shapes(fake_home):
     assert 'allowed_ids = ["u1"]' in redacted
 
 
+def test_redact_masks_proxy_userinfo(tmp_path):
+    """proxy 值里的 userinfo 凭据打码：保留 scheme+host:port，凭据换 ***。"""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("\n".join([
+        "[providers.a]",
+        "proxy = \"http://alice:s3cretPw@proxy.corp:8080\"",
+        "[providers.b]",
+        "proxy = \"socks5://bob:hunter2@[2001:db8::1]:1080\"",
+        "[providers.c]",
+        "proxy = \"http://solo@proxy.corp:8080\"",
+        "[providers.d]",
+        "proxy = \"http://proxy.corp:8080\"",
+        "[providers.e]",
+        "proxy = \"\"",
+    ]), encoding="utf-8")
+    redacted = support._redact_toml(cfg)
+    for leak in ("alice", "s3cretPw", "bob", "hunter2", "solo"):
+        assert leak not in redacted, leak
+    assert 'proxy = "http://***:***@proxy.corp:8080"' in redacted
+    # IPv6 字面量重建时带回方括号
+    assert 'proxy = "socks5://***:***@[2001:db8::1]:1080"' in redacted
+    # 只有用户名没有密码：userinfo 整体换 ***
+    assert 'proxy = "http://***@proxy.corp:8080"' in redacted
+    # 不带 userinfo 的代理与空值原样保留
+    assert 'proxy = "http://proxy.corp:8080"' in redacted
+    assert 'proxy = ""' in redacted
+
+
+def test_redact_proxy_unparseable_shapes_redact_whole_value(tmp_path):
+    """解析不出 userinfo / 形状可疑的 proxy 值整值打码（宁枉勿纵）。"""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("\n".join([
+        "[providers.x]",
+        "proxy = \"http://u:p@host:notaport\"",          # 端口非法，urlsplit 取值即抛
+        "[providers.y]",
+        "proxy = \"alice:s3cret@proxy.corp:8080\"",      # 无 scheme，@ 不落在 netloc
+        "[providers.z]",
+        "proxy = \"http://u:p@h:1\" # 手改的尾注释",     # 值形状不规整又含 @
+        "[providers.w]",
+        "proxy = 123",                                    # 非字符串值，无从藏凭据
+    ]), encoding="utf-8")
+    redacted = support._redact_toml(cfg)
+    assert "s3cret" not in redacted
+    assert 'proxy = "***已打码***"' in redacted
+    assert redacted.count('proxy = "***已打码***"') == 3
+    assert 'proxy = 123' in redacted
+
+
 def test_diagnostic_zip_contains_no_secrets(fake_home, tmp_path):
     """诊断包内容审计：配置打码、不打包会话库与记忆正文、环境信息在场。"""
     out = support.build_diagnostic_zip(fake_home, dest_dir=tmp_path)
@@ -68,8 +119,11 @@ def test_diagnostic_zip_contains_no_secrets(fake_home, tmp_path):
         config = zf.read("config.redacted.toml").decode("utf-8")
         assert "SkySheep" in zf.read("env.txt").decode("utf-8")
         listing = zf.read("files.txt").decode("utf-8")
-    for secret in ("sk-SUPER-SECRET", "lan-token-SECRET", "feishu-SECRET", "weixin-SECRET"):
+    for secret in ("sk-SUPER-SECRET", "lan-token-SECRET", "feishu-SECRET", "weixin-SECRET",
+                   "proxyPw-SECRET"):
         assert secret not in config, secret
+    # proxy 只抹 userinfo，scheme+host:port 保留可排障
+    assert 'proxy = "http://***:***@proxy.corp:8080"' in config
     assert "config.redacted.toml" in names
     assert "env.txt" in names
     # 会话库与记忆正文不进包（少一份泄漏面）

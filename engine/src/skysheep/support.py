@@ -17,6 +17,7 @@ import sys
 import time
 import zipfile
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 # 调用系统默认程序打开时，允许"直接启动"的扩展名。
 # 其余一律退化成"在文件管理器里定位"——工作目录里放个 .exe/.bat/.ps1 很正常，
@@ -133,8 +134,61 @@ SECRET_KEYS = (
 )
 
 
+def _strip_url_credentials(value: str) -> str:
+    """抹掉 URL userinfo 里的凭据（http://user:pass@h:1 → http://***:***@h:1）。
+
+    保留 scheme + host:port 便于排障（代理通不通、指向哪台机器都还看得出来）。
+    含 @ 却解析不出 userinfo、端口非法等形状可疑的情形整值打码——诊断包
+    宁枉勿纵。IPv6 字面量（socks5://u:p@[::1]:1080）带回方括号重建。
+    """
+    if "@" not in value:
+        return value
+    try:
+        parts = urlsplit(value)
+        _port = parts.port  # 端口非法（如 http://h:notaport）在取值时才抛 ValueError
+    except ValueError:
+        return "***已打码***"
+    if "@" not in (parts.netloc or "") or not (parts.username or parts.password):
+        return "***已打码***"  # @ 落在 path 上或 userinfo 为空：形状不明，别赌
+    userinfo = "***:***" if parts.username and parts.password else "***"
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"  # IPv6 字面量被 urlsplit 去掉了方括号
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit(parts._replace(netloc=f"{userinfo}@{host}"))
+
+
+def _redact_proxy_line(line: str) -> str:
+    """proxy 行：值是规整的带引号字符串就只抹 userinfo 凭据，其余原样保留。
+
+    值形状不规整（尾注释、手改过的 TOML）却又含 @ 时整值打码——宁枉勿纵。
+    """
+    stripped = line.strip()
+    name, sep, raw = stripped.partition("=")
+    if not sep:
+        return line
+    name = name.strip()
+    value = raw.strip()
+    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+        inner = _strip_url_credentials(value[1:-1])
+        if inner == value[1:-1]:
+            return line
+        indent = line[: len(line) - len(line.lstrip())]
+        return f'{indent}{name} = "{inner}"'
+    if "@" in value:
+        indent = line[: len(line) - len(line.lstrip())]
+        return f'{indent}{name} = "***已打码***"'
+    return line
+
+
 def _redact_toml(path: Path) -> str:
-    """读取 config.toml 并把含密钥的行打码（保结构、不留值）。"""
+    """读取 config.toml 并把含密钥的行打码（保结构、不留值）。
+
+    proxy 值按 URL 处理而非整行抹掉：代理地址常按惯例写成
+    http://user:pass@proxy:8080（键名 proxy 不含任何密钥词，整行保留会把
+    Basic Auth 凭据随诊断包带出去），只抹 userinfo、留 scheme+host:port。
+    """
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as e:
@@ -149,6 +203,9 @@ def _redact_toml(path: Path) -> str:
                 name = stripped.split("=", 1)[0].strip()
                 has_value = stripped.split("=", 1)[1].strip().strip('"') != ""
                 out.append(f'{indent}{name} = ' + ('"***已打码***"' if has_value else '""'))
+                continue
+            if "proxy" in key:
+                out.append(_redact_proxy_line(line))
                 continue
         out.append(line)
     return "\n".join(out)

@@ -705,6 +705,49 @@ async def test_cancel_single_task(tmp_path):
     assert tasks.cancel_task("ghost") is False
 
 
+async def test_finalize_if_unfinished_backstops_broken_cancel(tmp_path):
+    """done_callback 兜底条件放宽（纵深防御，审查项 3）：终态未落 + 任务被
+    取消 → 补齐终态，等待者不永久挂。
+
+    旧条件（status=="running"）只兜「还没开跑就被取消」；收尾中途再被取消时
+    status 已是 cancelled、done_event 未置，旧条件接不住。生产入口有防重入 +
+    Task 取消合并使该窗口不可达（复核实测），故以单元形态直接验证兜底契约
+    本身，不硬造不可达的竞态；清理 shield 的同理不做竞态注入测试，其正常
+    路径透明性由上方既有取消用例覆盖。
+    """
+    import contextlib
+
+    from skysheep.core.subagent import TaskManager, TaskRecord
+
+    tasks = TaskManager(provider_factory=SlowProvider, working_dir=tmp_path)
+    rec = TaskRecord(task_id="t-x", agent_type="explore", prompt="p")
+    rec.status = "cancelled"  # 收尾已置态，但 _on_terminal 未走到（done_event 未置）
+    rec.error = "用户取消"
+
+    async def _never():
+        await asyncio.sleep(3600)
+
+    handle = asyncio.create_task(_never())
+    await asyncio.sleep(0)  # 让任务真正起跑
+    handle.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await handle
+    assert handle.cancelled()
+
+    tasks._finalize_if_unfinished(rec, handle)
+    assert rec.status == "cancelled"
+    assert rec.error == "用户取消"
+    assert rec.finished_at > 0
+    assert rec.done_event.is_set(), "等待者必须被唤醒，不能永久挂"
+
+    # 终态已落的记录不被重复兜底（幂等）
+    done_rec = TaskRecord(task_id="t-y", agent_type="explore", prompt="p")
+    done_rec.status = "done"
+    done_rec.done_event.set()
+    tasks._finalize_if_unfinished(done_rec, handle)
+    assert done_rec.finished_at == 0.0
+
+
 def test_subagent_all_policy_excludes_computer_tools(tmp_path):
     """tools="all" 不含电脑控制七件套；勾选模式仍可显式点名。"""
     from types import SimpleNamespace
@@ -950,3 +993,63 @@ async def test_run_subagent_role_prompt_override(tmp_path):
     system_text = agent.history[0].to_plain()
     assert "自定义角色词" in system_text
     assert "联网调研员" not in system_text
+
+
+# ---- 任务簿快照截断回归：活动任务不因终态记录过多从列表消失 ----
+# 旧实现先把 running/queued 排到头部、再 recs[-limit:] 取尾部——终态一多，
+# 被截掉的恰是活动任务：UI 任务面板（tasks.list 每 3 秒轮询）看不见运行中/
+# 排队的任务，也拿不到 task_id（单任务取消/详情/纳入流水线的唯一入口；
+# 「取消全部」走 cancel_all 遍历任务簿，不经 list_tasks，不受影响）。
+
+
+def _book_task(task_id: str, status: str, created_at: float):
+    from skysheep.core.subagent import TaskRecord
+
+    rec = TaskRecord(task_id=task_id, agent_type="explore", prompt="任务 " + task_id)
+    rec.status = status
+    rec.created_at = created_at
+    if status == "done":
+        rec.result = "ok"
+    return rec
+
+
+async def test_list_tasks_keeps_active_when_terminal_exceeds_limit(tmp_path):
+    """终态记录超 limit：running/queued 全量在列，终态只挤掉最旧的。"""
+    from skysheep.core.subagent import TaskManager
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]),
+        working_dir=tmp_path,
+    )
+    # 35 条终态 + 5 条运行中（跨会话累积后终态 > 默认 limit=30 即触发）
+    for i in range(35):
+        tasks._tasks[f"done{i:02d}"] = _book_task(f"done{i:02d}", "done", created_at=i)
+    for i in range(5):
+        tasks._tasks[f"run{i}"] = _book_task(f"run{i}", "running", created_at=100 + i)
+
+    out = tasks.list_tasks(limit=30)
+    assert len(out) == 30
+    # 5 个活动任务一个不少（旧实现返回里 0 条 running）
+    active = [r for r in out if r["status"] in ("running", "queued")]
+    assert {r["id"] for r in active} == {f"run{i}" for i in range(5)}
+    # 终态保最新 25 条，且新→旧展示（整体反转序与旧实现一致）
+    done_ids = [r["id"] for r in out if r["status"] == "done"]
+    assert done_ids == [f"done{i:02d}" for i in range(34, 9, -1)]
+    # 活动任务排在返回列表尾部、新→旧（拼接后整体反转的既有展示序）
+    assert [r["id"] for r in out[-5:]] == [f"run{i}" for i in range(4, -1, -1)]
+
+
+async def test_list_tasks_under_limit_returns_all_as_before(tmp_path):
+    """未超名额时行为与旧实现完全一致：全部返回、终态在前新→旧。"""
+    from skysheep.core.subagent import TaskManager
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]),
+        working_dir=tmp_path,
+    )
+    tasks._tasks["d0"] = _book_task("d0", "done", created_at=1)
+    tasks._tasks["d1"] = _book_task("d1", "done", created_at=2)
+    tasks._tasks["q0"] = _book_task("q0", "queued", created_at=3)
+
+    out = tasks.list_tasks(limit=30)
+    assert [r["id"] for r in out] == ["d1", "d0", "q0"]

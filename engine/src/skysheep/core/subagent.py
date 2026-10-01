@@ -597,7 +597,15 @@ class TaskManager:
         self._promote_queued()
 
     def _finalize_if_unfinished(self, rec: TaskRecord, task) -> None:
-        if rec.status == "running" and task.cancelled():
+        """done_callback 兜底：任务以取消收场却没走完收尾 → 补齐终态与补位。
+
+        条件用 done_event 而非 status=="running"（纵深防御）：旧条件只兜
+        「还没开跑就被取消」；收尾中途再被取消时 status 已是 cancelled，
+        但 _on_terminal（置 done_event/唤醒等待者/排队补位）没走到——等待者
+        会永远挂。生产入口有防重入 + Task 取消合并，这条通道理论上不可达，
+        兜底放宽后即便发生也能被这里接住。
+        """
+        if not rec.done_event.is_set() and task.cancelled():
             rec.status = "cancelled"
             rec.error = "用户取消"
             self._on_terminal(rec)
@@ -837,7 +845,15 @@ class TaskManager:
         except asyncio.CancelledError:
             rec.status = "cancelled"
             rec.error = "用户取消"
-            await self._cleanup_isolated(rec)
+            # 清理是收尾里唯一的 await 点：shield 挡住理论上可能的二次取消
+            # （生产入口有防重入 + Task 取消合并，正常到不了这里），保证
+            # worktree 收拾（提交部分改动/移除注册）不被半途打断。即便 shield
+            # 被取消，清理也已作为独立任务继续在后台跑完；外层取消吞掉后
+            # 照走下方 _note_for_next_turn/_on_terminal，收尾不断。
+            try:
+                await asyncio.shield(self._cleanup_isolated(rec))
+            except asyncio.CancelledError:
+                pass
         except Exception as e:
             rec.status = "error"
             rec.error = str(e)
@@ -861,7 +877,13 @@ class TaskManager:
             pass
 
     def list_tasks(self, limit: int = 30, session_id: str | None = None) -> list[dict]:
-        """任务簿快照：running/queued 在前，其余按创建序倒序（新任务先看到）。
+        """任务簿快照：活动任务（running/queued）全量保留，终态按创建序倒序（新任务先看到）。
+
+        终态记录一多，旧的 `recs[-limit:]` 尾部截断丢掉的恰是排序特意排在
+        头部的活动任务——运行中/排队的任务从 UI 任务面板凭空消失，也拿不到
+        task_id（单任务取消/详情/纳入流水线都以列表行的 id 为唯一来源）。
+        现改为活动任务整体保留（自己超名额时保最新），终态从最新往旧补足
+        剩余名额。
 
         session_id 给出时只返回该会话的任务（安全审查 B13：远程客户端只能
         看到自己正在交互的会话，不能枚举其他会话的 prompt/result）；
@@ -872,8 +894,15 @@ class TaskManager:
             if session_id is None or r.session_id == session_id
         ]
         recs.sort(key=lambda r: (r.status not in ("running", "queued"),))
+        active = [r for r in recs if r.status in ("running", "queued")]
+        terminal = [r for r in recs if r.status not in ("running", "queued")]
+        if len(active) > limit:
+            # 活动任务自己就超名额：保最新的 limit 条（与旧实现的取新姿态一致）
+            keep = active[len(active) - limit:]
+        else:
+            keep = active + terminal[max(0, len(terminal) - (limit - len(active))):]
         out = []
-        for r in recs[-limit:][::-1]:
+        for r in reversed(keep):
             out.append({
                 "id": r.id,
                 "agent_type": r.agent_type,

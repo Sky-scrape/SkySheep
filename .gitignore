@@ -39,6 +39,9 @@ installer/
 # 开发期调试占位（非产品代码，不入库）
 engine/tools/render_ref.py
 
+# pip-audit 本地核验导出产物（CI audit job 之外手动核验用，随用随生成）
+engine/requirements-audit.txt
+
 # 临时/隔离运行目录（SKYSHEEP_HOME 指向的临时 home、截图与验证用工作目录）
 .tmp-*/
 

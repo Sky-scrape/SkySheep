@@ -84,8 +84,7 @@ PE 子系统为 GUI，会以基础解释器的 `pythonw.exe` 运行）：
 打包成不依赖 Python 环境的独立程序：
 
 ```bash
-uv pip install pyinstaller
-.venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec
+.venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec   # PyInstaller 已随 uv sync 入册
 ```
 
 产物 `dist/SkySheep/SkySheep.exe`（约 62 MB，onedir）。两个要点：入口用 `desktop.py`；

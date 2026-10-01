@@ -41,6 +41,11 @@ dev = [
     "pytest-cov>=7.0",
     "pytest-timeout>=2.3",
     "ruff>=0.6",
+    # 打包链路（SkySheep.spec → dist/SkySheep/SkySheep.exe）。入册 dev 组后
+    # uv.lock 锁定其版本与传递依赖，uv sync / uv run 不再按 lock 修剪它——
+    # 旧流程靠发布清单人肉 `uv pip install pyinstaller` 补装，忘了就 altgraph
+    # 被修剪、打包当天才炸（AGENTS.md 旧 ⚠️ 记载的坑）。
+    "pyinstaller>=6.10",
 ]
 
 [build-system]

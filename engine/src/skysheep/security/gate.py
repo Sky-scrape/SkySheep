@@ -91,17 +91,34 @@ _INTERPRETER_COMMANDS = frozenset({
     "bash", "sh", "zsh", "fish", "cmd",
 })
 
+# 「第二词之后仍是任意执行/任意文件面」的入口命令（小写）：两词前缀提炼不出
+# 有边界的前缀——`docker run` 之后的参数可挂载宿主盘、跑任意镜像（任意代码），
+# `docker exec/compose/build` 各自都是任意执行面；`ssh host` 之后即任意远程
+# 命令；`scp 本地 目标` 第三词起可任意外传/拉取。与解释器调用（python -c）
+# 同语义：没有安全前缀可提炼，改成 exact 只放行用户当时批准的这一条。
+# 规则提炼（rule_for）与匹配（_matches_core 对历史遗留前缀规则 fail-closed）
+# 共用同一份。kubectl 刻意不入清单：它提炼出的是动词级前缀（`kubectl get
+# pods` → "kubectl get"，放行面 = 同一动词的任意参数），比 docker/ssh 的
+# 「第二词之后即任意执行面」窄，保留两词前缀（apply/exec 等动词仍有变更面，
+# 靠逐次确认兜底——产品拍板的取舍）。带 .exe 后缀与路径前缀的形态一并识别。
+_PREFIX_UNSAFE_COMMANDS = frozenset({"docker", "ssh", "scp"})
+
+
+def _norm_exe_name(word: str) -> str:
+    """可执行名归一：小写、去引号、去路径前缀、去 .exe 后缀（两平台写法都认）。"""
+    exe = word.lower().strip('"').strip("'")
+    exe = exe.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if exe.endswith(".exe"):
+        exe = exe[: -len(".exe")]
+    return exe
+
 
 def _interpreter_invocation(text: str) -> bool:
     """命令是否以解释器/shell 可执行名开头（带引号、路径前缀、.exe 后缀均可）。"""
     words = text.split()
     if not words:
         return False
-    exe = words[0].lower().strip('"').strip("'")
-    exe = exe.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-    if exe.endswith(".exe"):
-        exe = exe[: -len(".exe")]
-    return exe in _INTERPRETER_COMMANDS
+    return _norm_exe_name(words[0]) in _INTERPRETER_COMMANDS
 
 
 def _has_code_exec_flag(text: str, head: int = 4) -> bool:
@@ -243,6 +260,17 @@ def _prefix_match(text: str, pattern: str) -> bool:
     return rest[:1] in ("", " ", "\t")
 
 
+def _is_arbitrary_exec_prefix(pattern: str) -> bool:
+    """前缀规则的首词是否属于「第二词之后即任意执行面」的入口命令。
+
+    用于匹配侧 fail-closed：提炼侧已不再为 docker/ssh/scp 产两词前缀，
+    历史遗留的这类前缀规则一并失效（与 delete_file 的 always 规则失效同一
+    口径），命中判定回落逐次确认。
+    """
+    words = pattern.split()
+    return bool(words) and _norm_exe_name(words[0]) in _PREFIX_UNSAFE_COMMANDS
+
+
 class Decision:
     ALLOW_ONCE = "allow_once"
     ALLOW_ALWAYS = "allow_always"
@@ -300,6 +328,10 @@ class WhitelistRule:
             if tool_name == _RUN_COMMAND and (
                 _has_shell_chain(arg_text) or _has_code_exec_flag(arg_text)
             ):
+                return False
+            # 历史遗留的 docker/ssh/scp 两词前缀规则不再命中（审查项 12）：
+            # 第二词之后即任意执行/任意文件面，存量规则一并失效、回落逐次确认
+            if tool_name == _RUN_COMMAND and _is_arbitrary_exec_prefix(self.pattern):
                 return False
             return _prefix_match(arg_text, self.pattern)
         if self.kind == "exact":
@@ -520,7 +552,10 @@ class PermissionGate:
         - run_command：简单命令取前两个词做前缀（如 "git status" / "npm run"），前缀规则
           本身会拒绝带 shell 拼接的整条命令；带拼接的命令、以及「下一参数是任意代码」
           的解释器调用（python -c / powershell -Command 等）没有安全前缀可提炼，改成
-          ``exact`` 只放行用户当时批准的这一条；
+          ``exact`` 只放行用户当时批准的这一条；「第二词之后仍是任意执行/任意文件面」
+          的入口命令（docker/ssh/scp，见 _PREFIX_UNSAFE_COMMANDS）同语义只固化
+          ``exact``——``docker run`` 之后的参数可挂载宿主盘，``ssh host`` 之后即任意
+          远程命令；
         - 动作型工具（鼠标/窗口/浏览器）：按动作词生成前缀规则；
         - 键盘（type / hotkey）与剪贴板写入：不按动作放行，只固化这一次的内容/键位；
         - window 的 close：只固化这一个标题（按子串匹配，整类放行等于允许关掉任意应用）；
@@ -537,6 +572,11 @@ class PermissionGate:
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
             words = arg_text.split()
             if _has_code_exec_flag(arg_text):
+                return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+            # 「第二词之后仍是任意执行/任意文件面」的入口命令（docker/ssh/scp，
+            # 见 _PREFIX_UNSAFE_COMMANDS 的清单与 kubectl 取舍注释）：与解释器
+            # 调用同语义，没有安全前缀可提炼，只固化用户当时批准的这一条。
+            if words and _norm_exe_name(words[0]) in _PREFIX_UNSAFE_COMMANDS:
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
             # 取前两个词作为前缀，如 "git status" / "npm run"，避免把整条命令固化
             prefix = " ".join(words[:2]) if words else arg_text
@@ -646,8 +686,9 @@ class PermissionGate:
         move_file(overwrite=true) 碰到「目标已存在的目录」时会先 shutil.rmtree
         整棵子树再移进去（tools/fs.py）。而 move_file 是 WRITE 级，「自动允许写入」
         档下只要源和目标都在工作目录内就免确认——等于绕开了 delete_file
-        （DANGEROUS，永不自动放行）的强制确认。检查点也兜不住：recorder 只记
-        源与目标两项，被 rmtree 掉的目录内容不在其中。
+        （DANGEROUS，永不自动放行）的强制确认。检查点能回滚被 rmtree 的子树
+        （A-3 修复后 recorder 逐文件记录源与落点两棵树），但「免确认静默删除」
+        本身仍须拦：逐次确认给用户叫停的机会。
 
         这里按 fs.py 的同一套语义还原落点（目标已存在且是目录 → 移进去保留原名），
         只在「源是目录 + 落点也是已存在目录」时返回 True。判定不了（路径解不出、
@@ -741,6 +782,42 @@ class PermissionGate:
         if not paths:
             return None
         return await hub.claim(paths, owner=owner)
+
+    def needs_confirm(self, tool: Tool, input_dict: dict) -> bool:
+        """authorize 是否会对这次调用要求用户确认（纯判定，无副作用）。
+
+        供 Agent 的并发只读批收集在**收集期**预检批内候选：名义 READONLY 但
+        落点在引擎主目录的工具（_ENGINE_HOME_FIXED_WRITERS，如 memory_write）
+        的逐次确认守卫在 authorize 里位于 READONLY 短路**之前**，批收集若只看
+        safety 分级就会把它们收进并发批零确认直达执行（安全审查：并发只读批
+        绕门）。预检命中即断批回退串行路径，真正的 authorize（创建
+        PendingPermission、触发 on_request）仍只在那里调一次——预检若走真
+        authorize，回退串行会对同一次调用二次触发确认回调。
+
+        只对 READONLY 候选有意义（批收集先做 safety 判定才问这里）；子类门
+        （HeadlessGate / ChannelGate / SubagentGate / IsolatedGate）对 READONLY
+        的放行口径与本判定一致（READONLY 短路均只让引擎主目录守卫之外的调用
+        过去），预检命中回退串行后由各自 authorize 给出最终结论。
+        与 authorize 的各自动放行分支同序同条件，改 authorize 时必须同步改
+        这里；一致性由 tests/test_gate_home_guard.py 的对照用例钉住。
+        """
+        if tool.safety == Safety.READONLY and not self._write_hits_engine_home(tool, input_dict):
+            return False
+        if self.auto_accept_all:
+            return False
+        if (
+            self.auto_accept_write
+            and tool.safety == Safety.WRITE
+            and self._write_target_inside_workdir(tool, input_dict)
+            and not self._write_is_actually_delete(tool, input_dict)
+        ):
+            return False
+        rule = self._matching_rule(tool, tool.arg_text(input_dict))
+        return not (
+            rule is not None
+            and not self._write_is_actually_delete(tool, input_dict)
+            and not self._write_hits_engine_home(tool, input_dict)
+        )
 
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
         """返回 None 表示放行；返回 PendingPermission 表示需要用户决策。"""
@@ -988,7 +1065,16 @@ class HeadlessGate(PermissionGate):
         engine_home_write = self._write_hits_engine_home(tool, input_dict)
         if tool.safety == Safety.READONLY and not engine_home_write:
             return None
-        if tool.name in self.allowed and not engine_home_write:
+        if (
+            tool.name in self.allowed
+            and not engine_home_write
+            # 名单放行也要过「名义是移动、实为递归删除」守卫（审查 A-1/A-2 与
+            # 主门口径对齐）：move_file(overwrite=true) 覆盖已有目录等效
+            # delete_file（DANGEROUS，永不自动放行）的删除面，无人值守名单
+            # 不得成为免确认通道。命中时落父类 authorize——无人值守没有用户
+            # 可应答，PendingPermission 随即被 resolve(DENY)，fail-closed。
+            and not self._write_is_actually_delete(tool, input_dict)
+        ):
             # 预授权名单放行也要过引擎主目录守卫（审查 P2-7，与主会话门口径
             # 一致）：config.toml 是明文凭据本体、全局技能 SKILL.md 会注入所有
             # 项目（含未信任项目）的 system prompt，无人值守名单不能成为免确认

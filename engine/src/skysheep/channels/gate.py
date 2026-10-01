@@ -100,11 +100,19 @@ class ChannelGate(PermissionGate):
         engine_home_write = self._write_hits_engine_home(tool, input_dict)
         if tool.safety == Safety.READONLY and not engine_home_write:
             return None
-        if tool.name in self.allowed and not engine_home_write:
+        if (
+            tool.name in self.allowed
+            and not engine_home_write
+            # 名单放行也要过「名义是移动、实为递归删除」守卫（审查 A-1/A-2 与
+            # 主门口径对齐）：move_file(overwrite=true) 覆盖已有目录等效
+            # delete_file（DANGEROUS，永不自动放行）的删除面。命中时不走名单
+            # 放行，退回下方流程——未开审批即拒绝，开了审批则推聊天卡逐次确认。
+            and not self._write_is_actually_delete(tool, input_dict)
+        ):
             # 预授权名单放行也要过引擎主目录守卫（审查 P2-7，与主会话门口径
-            # 一致）：config.toml 是凭据本体、全局技能 SKILL.md 会注入所有项目
-            # （含未信任项目）的 system prompt，渠道名单不能成为免确认改写它们
-            # 的通道。命中时不走名单放行，退回下方流程——未开审批即拒绝，
+            # 一致）：config.toml 是凭据本体、全局技能 SKILL.md 会注入所有
+            # 项目（含未信任项目）的 system prompt，渠道名单不能成为免确认
+            # 改写它们的通道。命中时不走名单放行，退回下方流程——未开审批即拒绝，
             # 开了审批则推聊天卡逐次确认。
             return None
 

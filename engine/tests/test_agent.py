@@ -572,3 +572,80 @@ async def test_mixed_serial_batch_screenshot_after_all_tool_results(tmp_path):
     assert finished[1].images == []
 
     _assert_wire_pairs(agent.history)
+
+
+# ---- 并发只读批的收集期门预检（安全审查回归：只读批绕门） ----
+# memory_write 名义 READONLY 却写 ~/.skysheep/memory.md（注入所有会话的
+# system prompt），权限门对它有先于 READONLY 短路的逐次确认守卫。旧实现
+# 批收集只看 safety 分级：模型一轮先发真只读工具（read_file）再紧跟
+# memory_write，后者被收进并发批零确认直达执行，守卫被整段架空。
+
+
+def _batch_with_memory_write_provider() -> FakeProvider:
+    return FakeProvider([
+        [
+            ToolUseBlock(id="t1", name="read_file", input={"path": "c.txt"}),
+            ToolUseBlock(
+                id="t2", name="memory_write",
+                input={"action": "append", "content": "INJECTED-BY-BATCH"},
+            ),
+        ],
+        [TextBlock(text="done")],
+    ])
+
+
+async def test_batch_member_memory_write_breaks_batch_and_asks(home):
+    """真只读工具后紧跟 memory_write：后者必须断批走串行确认，不得零确认执行。"""
+    (home / "proj" / "c.txt").write_text("hello", encoding="utf-8")
+    agent = make_agent(_batch_with_memory_write_provider(), home / "proj")
+    events = await collect(agent, "读完顺便记住一件事", auto_respond="deny")
+
+    kinds = [e.kind for e in events]
+    # memory_write 不能被收进并发批：必须弹确认（旧实现 permission_request 数为 0）
+    assert kinds.count("permission_request") == 1
+    req = [e for e in events if e.kind == "permission_request"][0]
+    assert req.tool_name == "memory_write"
+    # 拒绝后全局记忆不落盘（SKYSHEEP_HOME 已由 home 夹具隔离）
+    assert not (home / "home" / "memory.md").exists()
+    finished = {e.tool_call_id: e for e in events if e.kind == "tool_call_finished"}
+    assert finished["t2"].is_error
+    assert "denied" in finished["t2"].preview.lower()
+    # 同批的真只读工具不受影响：照常执行、无错误
+    assert not finished["t1"].is_error
+    assert (home / "proj" / "c.txt").read_text(encoding="utf-8") == "hello"
+    # 轮次正常收尾
+    assert events[-1].kind == "turn_finished"
+
+
+async def test_batch_member_memory_write_confirm_then_allow(home):
+    """确认后允许：串行路径照常写入全局记忆（修复只恢复门，不砍功能）。"""
+    agent = make_agent(_batch_with_memory_write_provider(), home / "proj")
+    events = await collect(agent, "读完顺便记住一件事", auto_respond="allow_once")
+
+    memory_file = home / "home" / "memory.md"
+    assert memory_file.exists()
+    assert "INJECTED-BY-BATCH" in memory_file.read_text(encoding="utf-8")
+    finished = {e.tool_call_id: e for e in events if e.kind == "tool_call_finished"}
+    assert not finished["t2"].is_error
+    assert events[-1].kind == "turn_finished"
+
+
+async def test_pure_readonly_batch_still_concurrent(home):
+    """守卫不扩大打击面：全真只读的批仍免确认并发（事件顺序不乱、无确认）。"""
+    (home / "proj" / "c.txt").write_text("findme", encoding="utf-8")
+    provider = FakeProvider([
+        [
+            ToolUseBlock(id="t1", name="read_file", input={"path": "c.txt"}),
+            ToolUseBlock(id="t2", name="grep", input={"pattern": "findme"}),
+        ],
+        [TextBlock(text="done")],
+    ])
+    agent = make_agent(provider, home / "proj")
+    events = await collect(agent, "都看看", auto_respond=None)
+
+    kinds = [e.kind for e in events]
+    assert "permission_request" not in kinds
+    finished = [e for e in events if e.kind == "tool_call_finished"]
+    assert [e.name for e in finished] == ["read_file", "grep"]
+    assert all(not e.is_error for e in finished)
+    assert events[-1].kind == "turn_finished"

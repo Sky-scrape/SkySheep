@@ -497,6 +497,14 @@ class Agent:
                         t2 = self.registry.get(tu2.name)
                         if t2 is None or t2.safety != Safety.READONLY:
                             break
+                        # 批内成员也要过门预检：名义 READONLY 但落点在引擎主目录
+                        # 的工具（如 memory_write 写全局记忆）在权限门里有先于
+                        # READONLY 短路的逐次确认守卫，只看 safety 分级收批会让
+                        # 它零确认直达执行（安全审查：并发只读批绕门）。预检命中
+                        # 即断批回退串行路径，走真正的 authorize；纯判定不触发
+                        # 确认回调，串行路径不会重复弹窗。
+                        if self.gate.needs_confirm(t2, tu2.input):
+                            break
                         # pre 钩子存在时不并发（每个调用都可能被阻断，语义复杂化）
                         if self.hooks is not None and self.hooks.has_pre:
                             break

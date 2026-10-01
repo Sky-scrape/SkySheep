@@ -216,3 +216,64 @@ async def test_other_readonly_tools_still_auto_allowed(home, gate):
     assert await channel.authorize(ReadFileTool(), {"path": "a.txt"}) is None
     assert await SubagentGate().authorize(ReadFileTool(), {"path": "a.txt"}) is None
     assert await IsolatedGate().authorize(ReadFileTool(), {"path": "a.txt"}) is None
+
+
+# ---- 并发只读批的收集期预检（安全审查：只读批绕门回归） ----
+# Agent 的并发批收集只看 safety 分级就会把 memory_write 收进批零确认执行，
+# authorize 里的引擎主目录守卫被整段架空。收集期改问纯判定谓词
+# gate.needs_confirm（不创建 PendingPermission、不触发 on_request），命中即
+# 断批回退串行走真 authorize。这里钉两件事：谓词对 FINDING 2 各门口径的
+# 判定正确；谓词与 authorize 的结论一致（防两处漂移）。
+
+
+async def test_needs_confirm_flags_memory_write_not_plain_readonly(gate):
+    """memory_write（名义 READONLY、落点引擎主目录）必须命中预检；真只读不命中。"""
+    assert gate.needs_confirm(MemoryWriteTool(), _memory_input()) is True
+    assert gate.needs_confirm(MemoryWriteTool(), {"action": "list"}) is True
+    assert gate.needs_confirm(ReadFileTool(), {"path": "a.txt"}) is False
+
+
+async def test_needs_confirm_auto_accept_all_clears_memory_write(gate):
+    """完全访问档与 authorize 同界：auto_accept_all 连引擎主目录写入也放行。"""
+    gate.auto_accept_all = True
+    assert gate.needs_confirm(MemoryWriteTool(), _memory_input()) is False
+
+
+async def test_needs_confirm_whitelist_cannot_clear_memory_write(gate):
+    """白名单（含整工具 always）沉淀不出 memory_write 放行，预检同样命中。"""
+    gate.session_rules.append(WhitelistRule(tool="memory_write", kind="always"))
+    assert gate.needs_confirm(MemoryWriteTool(), _memory_input()) is True
+
+
+async def test_needs_confirm_agrees_with_authorize_for_readonly_candidates(home, engine_home):
+    """预检谓词与 authorize 对 READONLY 候选的结论一致（并发批的实际判定域）。
+
+    各门 × 各档位 × {真只读, 名义只读写主目录}：needs_confirm 为 False 当且
+    仅当 authorize 返回 None。两处口径一旦漂移，批路径就会多拦（体验回退）
+    或漏放（安全回退），这组对照把它们钉死。
+    """
+    candidates = [
+        (ReadFileTool(), {"path": "a.txt"}),
+        (MemoryWriteTool(), _memory_input()),
+    ]
+    gates = []
+    base = PermissionGate(working_dir=home / "proj")
+    gates.append(base)
+    all_access = PermissionGate(working_dir=home / "proj")
+    all_access.auto_accept_all = True
+    gates.append(all_access)
+    auto_write = PermissionGate(working_dir=home / "proj")
+    auto_write.auto_accept_write = True
+    gates.append(auto_write)
+    gates.append(HeadlessGate(allowed=["memory_write"], working_dir=home / "proj"))
+    gates.append(ChannelGate(allowed=["memory_write"], working_dir=home / "proj"))
+    gates.append(SubagentGate())
+    gates.append(IsolatedGate())
+
+    for g in gates:
+        for tool, inp in candidates:
+            pending = await g.authorize(tool, inp)
+            expected = pending is not None
+            assert g.needs_confirm(tool, inp) == expected, (type(g).__name__, tool.name)
+            if pending is not None:
+                pending.resolve(Decision.DENY)

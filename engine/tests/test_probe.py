@@ -2,6 +2,9 @@
 
 对应评审发现：probe_provider_models 构造的 AsyncOpenAI/AsyncAnthropic
 客户端从不关闭，设置页每点一次「检测可用模型」就泄漏一个客户端。
+后半部分（2026-10 审查项 10）：probe_context_limit 的 Anthropic 短路 /
+Ollama / openai 兼容分支与 probe_ollama——此前探测主体零执行（现有用例
+全是 monkeypatch 替身），用 MockTransport 打真实实现，不打真实网络。
 """
 
 from __future__ import annotations
@@ -10,10 +13,15 @@ import asyncio
 from types import SimpleNamespace
 
 import anthropic
+import httpx
 import openai
 import pytest
 
-from skysheep.models.probe import probe_provider_models
+from skysheep.models.probe import (
+    probe_context_limit,
+    probe_ollama,
+    probe_provider_models,
+)
 
 # 桩可按用例注入的故障（每个用例先经 fake_sdk 夹具清零）
 _STATE: dict = {"list_error": None, "close_error": None}
@@ -111,3 +119,145 @@ def test_probe_local_base_url_keeps_direct_client(fake_sdk):
                 await http_client.aclose()
 
     asyncio.new_event_loop().run_until_complete(go())
+
+
+# ---- probe_context_limit / probe_ollama：探测主体（2026-10 审查项 10） ----
+
+
+def _mock_async_httpx(monkeypatch, handler):
+    """给 probe 内部自建的 httpx.AsyncClient 注入 MockTransport（其余参数原样）。"""
+    real_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs.pop("transport", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+async def test_probe_context_limit_anthropic_short_circuits_without_network():
+    """Anthropic 的 models 接口不带窗口字段：短路返回提示，不发任何请求。"""
+    r = await probe_context_limit(kind="anthropic", api_key="k", model="claude-x")
+    assert r["limit"] is None
+    assert "Anthropic" in r["note"] and "200K" in r["note"]
+
+
+async def test_probe_context_limit_ollama_top_level_field(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/show"
+        return httpx.Response(200, json={"context_length": 8192})
+
+    _mock_async_httpx(monkeypatch, handler)
+    r = await probe_context_limit(kind="ollama", model="qwen2")
+    assert r["limit"] == 8192 and "8,192" in r["note"] and "qwen2" in r["note"]
+
+
+async def test_probe_context_limit_ollama_model_info_fallback(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"model_info": {"qwen2.context_length": 4096}})
+
+    _mock_async_httpx(monkeypatch, handler)
+    r = await probe_context_limit(kind="ollama", model="qwen2")
+    assert r["limit"] == 4096
+
+
+async def test_probe_context_limit_ollama_no_window_info(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"license": "llama"})
+
+    _mock_async_httpx(monkeypatch, handler)
+    r = await probe_context_limit(kind="ollama", model="qwen2")
+    assert r["limit"] is None and "没有返回" in r["note"]
+
+
+async def test_probe_context_limit_ollama_http_error_is_readable(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    _mock_async_httpx(monkeypatch, handler)
+    with pytest.raises(RuntimeError, match="服务返回错误 500"):
+        await probe_context_limit(kind="ollama", model="qwen2")
+
+
+async def test_probe_context_limit_openai_finds_window_field(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/models")
+        assert request.headers["Authorization"] == "Bearer sk-test"
+        return httpx.Response(200, json={"data": [
+            {"id": "other", "context_length": 1},
+            {"id": "m1", "context_length": 32768},
+        ]})
+
+    _mock_async_httpx(monkeypatch, handler)
+    r = await probe_context_limit(
+        kind="openai", api_key="sk-test", base_url="https://api.example.com/v1",
+        model="m1",
+    )
+    assert r["limit"] == 32768 and "32,768" in r["note"] and "m1" in r["note"]
+
+
+async def test_probe_context_limit_openai_openrouter_nested_field(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "deep", "top_provider": {"context_length": 65536}},
+        ]})
+
+    _mock_async_httpx(monkeypatch, handler)
+    # 不给 model 且列表只有一条：自动取唯一条目
+    r = await probe_context_limit(
+        kind="openai", api_key="k", base_url="https://openrouter.ai/api/v1",
+    )
+    assert r["limit"] == 65536
+
+
+async def test_probe_context_limit_openai_target_missing_and_no_field(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "other", "context_length": 1}, {"id": "another", "context_length": 2},
+        ]})
+
+    _mock_async_httpx(monkeypatch, handler)
+    base = dict(kind="openai", api_key="k", base_url="https://api.example.com/v1")
+    r = await probe_context_limit(model="ghost", **base)
+    assert r["limit"] is None and "ghost" in r["note"]
+    # 列表多条且未指定模型：不乱猜
+    r = await probe_context_limit(**base)
+    assert r["limit"] is None and "模型 ID" in r["note"]
+
+
+async def test_probe_context_limit_openai_nonstandard_body(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list"})  # 没有 data 字段
+
+    _mock_async_httpx(monkeypatch, handler)
+    r = await probe_context_limit(
+        kind="openai", api_key="k", base_url="https://api.example.com/v1", model="m",
+    )
+    assert r["limit"] is None and "标准格式" in r["note"]
+
+
+async def test_probe_ollama_returns_names_and_filters_empty(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/tags"
+        return httpx.Response(200, json={"models": [
+            {"name": "qwen2:7b"}, {"name": ""}, {}, {"name": "llama3"},
+        ]})
+
+    _mock_async_httpx(monkeypatch, handler)
+    assert await probe_ollama() == ["qwen2:7b", "llama3"]
+
+
+async def test_probe_ollama_quiet_when_service_down(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    _mock_async_httpx(monkeypatch, handler)
+    assert await probe_ollama() == []
+
+
+async def test_probe_ollama_quiet_on_bad_json(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>not json</html>")
+
+    _mock_async_httpx(monkeypatch, handler)
+    assert await probe_ollama() == []

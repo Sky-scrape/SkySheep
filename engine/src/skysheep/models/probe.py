@@ -172,8 +172,13 @@ async def probe_context_limit(
 
     if kind == "ollama":
         url = (base.rstrip("/") if base else OLLAMA_BASE) + "/api/show"
-        kw = _client_kwargs(base or OLLAMA_BASE, timeout_s)
-        async with httpx.AsyncClient(timeout=timeout_s, **kw) as client:
+        # 注意不能把 _client_kwargs() 直接摊给裸 httpx 客户端：它返回的
+        # http_client= 是 AsyncOpenAI/AsyncAnthropic 的 SDK 参数，httpx 自己
+        # 不认（本地探测此前在此 TypeError 崩掉）。这里按同一意图直写：
+        # 本地地址 trust_env=False 直连，远端走系统默认（信任环境代理）。
+        async with httpx.AsyncClient(
+            timeout=timeout_s, trust_env=not _is_local(base or OLLAMA_BASE)
+        ) as client:
             try:
                 resp = await client.post(url, json={"model": model})
                 resp.raise_for_status()
@@ -200,7 +205,10 @@ async def probe_context_limit(
     # openai 兼容：GET {base}/models，在模型条目里找窗口字段
     url = (base or "https://api.openai.com/v1").rstrip("/") + "/models"
     headers = {"Authorization": "Bearer " + (api_key or "")} if api_key else {}
-    async with httpx.AsyncClient(timeout=timeout_s, **_client_kwargs(base, timeout_s)) as client:
+    # 同 ollama 分支：本地地址直连；LM Studio 这类本地服务此前同样 TypeError 崩
+    async with httpx.AsyncClient(
+        timeout=timeout_s, trust_env=not _is_local(base)
+    ) as client:
         try:
             resp = await client.get(url, headers=headers)
             resp.raise_for_status()

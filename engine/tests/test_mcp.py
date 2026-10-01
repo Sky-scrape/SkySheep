@@ -101,12 +101,13 @@ class FakeSession:
 
 
 class FakeManager:
-    """只实现 MCPTool 需要的那部分契约（会话解析 + 断线上报）。"""
+    """只实现 MCPTool 需要的那部分契约（会话解析 + 断线上报 + 放弃判定）。"""
 
     def __init__(self, session=None) -> None:
         self.session = session
         self.failures: list[str] = []
         self.reconnect_requests: list[str] = []
+        self.gave_up_servers: set[str] = set()
 
     def session_for(self, name):
         return self.session
@@ -118,6 +119,9 @@ class FakeManager:
 
     def request_reconnect(self, name):
         self.reconnect_requests.append(name)
+
+    def gave_up(self, name):
+        return name in self.gave_up_servers
 
 
 class ExplodingSession:
@@ -972,6 +976,66 @@ async def test_successful_reconnect_resets_failure_cap():
     assert "srv" in mgr._restart_tasks
     await mgr.shutdown()
     assert mgr.statuses["srv"].connected is False
+
+
+async def test_mcp_tool_error_copy_tracks_gave_up_state():
+    """回归：已放弃自动重连的服务器，报错不再宣称「正在尝试重连」。
+
+    重试达 MAX_AUTO_RESTARTS 上限与重连门拒绝两条路径最终都落进 _gave_up，
+    此后 request_reconnect 直接 return——重连链已不存在，再说「正在尝试
+    重连」会让用户空等一次不会发生的重连（2026-10 审查项 13）。
+    """
+    mgr = MCPManager({"srv": MCPServerConfig(command="definitely-not-a-real-cmd-xyz")})
+    mgr.RESTART_BASE_DELAY_S = 0.01
+    mgr.RESTART_MAX_DELAY_S = 0.02
+    tool = MCPTool(
+        manager=mgr, server_name="srv", tool_name="add", description="",
+        input_schema={"type": "object"}, readonly=True,
+    )
+    ctx = ToolContext(working_dir=Path("."))
+    mgr.statuses["srv"].connected = False
+
+    # 对照：普通断线（还没放弃）保持现文案——「正在尝试重连」此时属实
+    try:
+        await tool.run(tool.args_model(), ctx)
+        raise AssertionError("should raise")
+    except ToolError as e:
+        assert "正在尝试重连" in str(e)
+
+    # 已放弃：文案如实说已停手，不再出现「正在尝试重连」
+    mgr._gave_up.add("srv")
+    try:
+        await tool.run(tool.args_model(), ctx)
+        raise AssertionError("should raise")
+    except ToolError as e:
+        assert "已停止自动重连，请在设置 · MCP 里手动重连" in str(e)
+        assert "正在尝试重连" not in str(e)
+    await mgr.shutdown()
+    assert not mgr._restart_tasks
+
+
+async def test_reconnect_gate_rejection_reports_stopped_reconnect():
+    """重连门拒绝（项目信任失效）同样落进放弃集合：工具报错文案如实指向手动重连。"""
+    mgr = MCPManager(
+        {"srv": MCPServerConfig(command="definitely-not-a-real-cmd-xyz")},
+        reconnect_gate=lambda name: False,
+    )
+    mgr.request_reconnect("srv")
+    await asyncio.wait_for(mgr._restart_tasks["srv"], 10)
+    assert "srv" in mgr._gave_up
+    assert mgr.gave_up("srv")
+    assert "已停止自动重连" in (mgr.statuses["srv"].error or "")
+    tool = MCPTool(
+        manager=mgr, server_name="srv", tool_name="add", description="",
+        input_schema={"type": "object"}, readonly=True,
+    )
+    try:
+        await tool.run(tool.args_model(), ToolContext(working_dir=Path(".")))
+        raise AssertionError("should raise")
+    except ToolError as e:
+        assert "已停止自动重连，请在设置 · MCP 里手动重连" in str(e)
+        assert "正在尝试重连" not in str(e)
+    await mgr.shutdown()
 
 
 async def test_manager_note_call_failure_marks_disconnected_and_schedules():

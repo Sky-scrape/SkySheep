@@ -33,6 +33,11 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from ..bgtasks import spawn_bg
 from ..messages import ImageBlock
+from ..sanitize import (
+    EMPTY_DESCRIPTION_PLACEHOLDER,
+    MAX_PROMPT_DESCRIPTION_CHARS,
+    sanitize_description,
+)
 from ..tools.base import Safety, Tool, ToolContext, ToolError, truncate_output
 from ..tools.web import _resolve_public_ips
 
@@ -249,37 +254,19 @@ def _extract_text(result: CallToolResult) -> str:
 
 # MCP 工具的 description 会原样拼进模型可见的工具列表（系统提示词层）。协议本身
 # 不限制长度与内容，而服务器（包括打开项目就自动连接的项目级服务器）可以在这里
-# 夹带 prompt injection payload——过长描述会挤占上下文、也更容易藏指令。这里做
-# 长度截断与换行归一，属于协议层的通用缓解，不针对某个具体服务器。
-MAX_MCP_DESCRIPTION_CHARS = 1000
+# 夹带 prompt injection payload——过长描述会挤占上下文、也更容易藏指令。长度截断
+# 与换行归一属于协议层的通用缓解，不针对某个具体服务器；实现与技能描述共用
+# 一份（sanitize.sanitize_description），防止将来发现新绕过时改一漏一。
+MAX_MCP_DESCRIPTION_CHARS = MAX_PROMPT_DESCRIPTION_CHARS
 
 
 def _sanitize_description(text: str) -> str:
-    """工具描述的展示清理：限长 + 压掉多余空白行。
+    """工具描述的展示清理：限长 + 压掉多余空白行（共享实现见 sanitize 模块）。
 
-    只做形状约束（长度、空白），不尝试识别「恶意指令」——那种判断不适合放在按
-    长度/格式的过滤里，会既漏又误伤；真正的边界是 connection 的可信来源（见
-    workspace trust）。截断会附一句提示，便于用户看出描述不全。
+    空文本回退为占位符（工具目录里不留空串）；截断会附一句提示，便于用户
+    看出描述不全。
     """
-    raw = (text or "").strip()
-    if not raw:
-        return "(no description)"
-    # 连续空行压成一个，避免用大量空行把注入内容推到看不见的位置
-    lines = [ln.rstrip() for ln in raw.splitlines()]
-    out: list[str] = []
-    blanks = 0
-    for ln in lines:
-        if not ln:
-            blanks += 1
-            if blanks > 1:
-                continue
-        else:
-            blanks = 0
-        out.append(ln)
-    text_out = "\n".join(out).strip()
-    if len(text_out) > MAX_MCP_DESCRIPTION_CHARS:
-        text_out = text_out[:MAX_MCP_DESCRIPTION_CHARS] + " …（描述过长已截断）"
-    return text_out
+    return sanitize_description(text, empty_fallback=EMPTY_DESCRIPTION_PLACEHOLDER)
 
 
 def _effective_readonly(server_readonly: bool, tool_name: str, annotations: object) -> bool:
@@ -354,6 +341,13 @@ class MCPTool(Tool):
             # 服务器当前不可用（未连上 / 正在重连）：告知实情并触发一次重连预约，
             # 不要在这里同步重连——那是启动路径，会把工具调用卡到连接超时。
             self._manager.request_reconnect(self._server)
+            if self._manager.gave_up(self._server):
+                # 已放弃自动重连（连续失败达上限 / 重连门拒绝）：重连链已不存在，
+                # 再说「正在尝试重连」只会让用户空等——如实指向设置页手动重连
+                raise ToolError(
+                    f"MCP 服务器「{self._server}」当前未连接，无法调用 {self._raw_name}。"
+                    "（已停止自动重连，请在设置 · MCP 里手动重连）"
+                )
             raise ToolError(
                 f"MCP 服务器「{self._server}」当前未连接，无法调用 {self._raw_name}。"
                 "（正在尝试重连；也可在设置 · MCP 里手动重连）"
@@ -489,6 +483,14 @@ class MCPManager:
         if not self.statuses.get(name, MCPServerStatus(name)).connected:
             return None
         return self._sessions.get(name)
+
+    def gave_up(self, name: str) -> bool:
+        """该服务器是否已放弃自动重连（重试达上限 / 重连门拒绝）。
+
+        供 MCPTool 组织报错文案：此时再说「正在尝试重连」会误导用户空等
+        一次不会发生的重连。
+        """
+        return name in self._gave_up
 
     def tools_for(self, name: str) -> list[Tool]:
         """该服务器当前注册的工具包装（连接后才有；工具列表变化时更新）。"""

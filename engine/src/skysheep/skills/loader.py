@@ -33,6 +33,11 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from ..sanitize import (
+    EMPTY_DESCRIPTION_PLACEHOLDER,
+    MAX_PROMPT_DESCRIPTION_CHARS,
+    sanitize_description,
+)
 from ..textio import write_text_atomic
 
 # 范围模式：所有项目 / 仅指定项目 / 任何项目都不用
@@ -129,9 +134,10 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 # 技能 description 会直接拼进系统提示词的 Skills 清单（见 render_prompt_section）。
 # 技能包（尤其从第三方仓库装的）里的 frontmatter 由外部内容决定，
 # 超长描述会挤占上下文，也能用大量空白把注入内容推到看不见的位置——与 MCP 工具
-# 描述同一类风险，所以用同一套限长与压空白处理（见 mcp/client._sanitize_description）。
+# 描述同一类风险，两边共用同一实现（sanitize.sanitize_description），限长与压空白
+# 的规则改动只改一处、两个入口同时生效。
 # 正文另有 load_skill 的 20000 字符上限，不受这里影响。
-MAX_SKILL_DESCRIPTION_CHARS = 1000
+MAX_SKILL_DESCRIPTION_CHARS = MAX_PROMPT_DESCRIPTION_CHARS
 
 # 技能名同样会拼进系统提示词的 Skills 清单（作为 load_skill 的参数），也一并限长。
 MAX_SKILL_NAME_CHARS = 120
@@ -154,30 +160,14 @@ def _sanitize_name(name: str) -> str:
 
 
 def _sanitize_description(text: str) -> str:
-    """技能描述的展示清理：限长 + 压掉多余空白行。
+    """技能描述的展示清理：限长 + 压掉多余空白行（共享实现见 sanitize 模块）。
 
     只做形状约束（长度、空白），不尝试识别「恶意指令」——那种判断不适合放在按
     长度/格式的过滤里，会既漏又误伤；真正的边界是技能来源是否可信。
+    空文本回退为空串：不在加载层制造占位文本，渲染层（render_prompt_section）
+    再用 EMPTY_DESCRIPTION_PLACEHOLDER 兜底。
     """
-    raw = (text or "").strip()
-    if not raw:
-        return ""
-    # 连续空行压成一个，避免用大量空行把内容推到看不见的位置
-    lines = [ln.rstrip() for ln in raw.splitlines()]
-    out: list[str] = []
-    blanks = 0
-    for ln in lines:
-        if not ln:
-            blanks += 1
-            if blanks > 1:
-                continue
-        else:
-            blanks = 0
-        out.append(ln)
-    text_out = "\n".join(out).strip()
-    if len(text_out) > MAX_SKILL_DESCRIPTION_CHARS:
-        text_out = text_out[:MAX_SKILL_DESCRIPTION_CHARS] + " …（描述过长已截断）"
-    return text_out
+    return sanitize_description(text)
 
 
 def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
@@ -480,5 +470,5 @@ class SkillLoader:
         for s in skills:
             # 名称/描述在加载时已做限长与压空白（见 _sanitize_name/_sanitize_description），
             # 一行一条，不让外部 frontmatter 撑破清单排版
-            lines.append("- {}: {}".format(s.name, s.description or "(no description)"))
+            lines.append(f"- {s.name}: {s.description or EMPTY_DESCRIPTION_PLACEHOLDER}")
         return "\n".join(lines) + "\n"

@@ -51,7 +51,7 @@ SkySheep 是跑在本机的开源 AI Agent 工作台：Python asyncio 引擎 + p
 
 - 内置 10 家模型服务预设（Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / 智谱 / Kimi / Qwen / 小米 Mimo）+ 自定义中转；本地推理服务自动检测；模型列表与上下文窗口一键探测
 - 思考强度按任务自动调档；思考过程流式展示、可折叠回看
-- 上下文自动压缩（CJK 感知估算，触发比例可调，支持手动 `/compact`）
+- 上下文自动压缩（CJK 感知估算，触发比例可调；手动 `/compact` 在桌面端输入框可用，CLI 里没有这个命令）
 - 每日 Token 预算护栏；用量仪表盘按会话 / 服务 / 模型统计，支持费用估算
 - 辅助对话可独立设定模型，不占用主会话
 - 提示词库（拼音首字母过滤、AI 润色、导入导出）；`~` 提示词、`/` 命令、`@` 文件引用、`&` 对话引用；语音输入
@@ -75,7 +75,7 @@ SkySheep 是跑在本机的开源 AI Agent 工作台：Python asyncio 引擎 + p
 **扩展与连接**
 
 - MCP 客户端：stdio / Streamable HTTP 双传输，兼容 Claude Desktop 配置，内置七个常用预设，断线自动重连
-- Skills 技能包：全局 / 项目两级作用域；文件夹 / .zip / GitHub·Gitee 链接导入；扫描导入本机已有技能；二十个官方场景模板随包内置
+- Skills 技能包：全局 / 项目两级作用域；文件夹 / .zip / GitHub·Gitee 链接导入；扫描导入本机已有技能；二十个官方场景模板随包内置，一键安装用包内副本、离线可用
 - 远程访问：局域网令牌 + 二维码，手机可打开完整界面；支持 Tailscale 跨网络连回
 - 聊天渠道：飞书（WebSocket 长连接）/ 微信（扫码登录）；默认只读，可开启审批卡片与超时拒绝
 - 桌面形态：六套主题 + 跟随系统、系统托盘、开机自启、窗口几何记忆、全局热键、桌面宠物；多会话标签与右侧十页签面板（终端 / 浏览器 / 审查 / 文件 / 任务 / 日程 / 自动化 / 项目记忆 / 记忆地图 / MCP·技能）
@@ -103,11 +103,11 @@ SkySheep 的功能集对照 Claude Code / OpenAI Codex CLI / ZCode 逐项补齐�
 | 记忆地图（项目演化可视化） | — | — | — | ✅ 演化时间线 + 主题图谱 + LLM 演化摘要（文件足迹 / 活跃热力图 / 任务与记忆标注） |
 | 任务清单（todo） | ✅ | ✅ | ✅ | ✅ 侧栏面板实时同步 |
 | 规划模式（先出计划再执行） | ✅ | — | ✅ | ✅ 执行/规划双模式 + 一键按计划执行 |
-| 上下文自动压缩 + 手动 /compact | ✅ | ✅ | ✅ | ✅ CJK 感知估算 + 真实用量下限兜底 |
+| 上下文自动压缩 + 手动 /compact | ✅ | ✅ | ✅ | ✅ CJK 感知估算 + 真实用量下限兜底（手动 /compact 仅桌面端输入框） |
 | 权限确认 + 项目白名单 | ✅ | ✅ | ✅ | ✅ 确认制 + 词边界命令前缀白名单（拒绝 shell 拼接绕过）+ 分级权限模式 + 工作区信任（项目自带 MCP/技能需先确认） |
 | Headless 一次性运行（脚本 / CI） | ✅ -p | ✅ exec | ✅ -p | ✅ skysheep run（预授权 + JSON 输出 + 审计） |
 | 忽略文件 | ✅ | ✅ | ✅ | ✅ .skysheepignore（.gitignore 语义，.env 内建忽略） |
-| Slash 命令 | ✅ | ✅ | ✅ | ✅ /help /new /compact /model /status /todos /export |
+| Slash 命令 | ✅ | ✅ | ✅ | ✅ /help /new /model /export（CLI 与桌面端）；/compact /status /todos（仅桌面端输入框，CLI 命令全集见 /help） |
 | 消息排队 / 瞬态错误自动重试 | ✅ | ✅ | ✅ | ✅ 指数退避，在途内容不重放 |
 | 联网抓取 + 联网搜索 | ✅ | ✅ | ✅ | ✅ web_fetch（SSRF 防护）+ web_search（博查/Tavily/智谱/自定义 SearXNG） |
 | 文档阅读 + 生成 | ✅ | — | ✅ | ✅ read_document（PDF/Word/Excel/PPT）+ write_document（docx/xlsx/csv/PPT） |
@@ -154,8 +154,7 @@ uv run skysheep run "任务"       # 无头一次性运行（支持 JSON 输出�
 cd engine
 .venv\Scripts\python.exe tools\install_shortcut.py        # 开始菜单/桌面快捷方式（源码版）
 .venv\Scripts\python.exe tools\install_shortcut.py --exe  # 指向打包好的 SkySheep.exe
-uv pip install pyinstaller
-.venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec   # 产物 dist/SkySheep/SkySheep.exe
+.venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec   # 产物 dist/SkySheep/SkySheep.exe（PyInstaller 随 uv sync 入册安装）
 ```
 
 单文件安装包：安装 [Inno Setup 6](https://jrsoftware.org/isdl.php) 后执行 `ISCC.exe tools\installer.iss`，产物在 `installer/`。

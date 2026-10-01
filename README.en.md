@@ -49,7 +49,7 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 
 - Ten built-in provider presets (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / Zhipu / Kimi / Qwen / Xiaomi MiMo) + custom relay endpoints; local inference services auto-detected; one-click model listing and context-window detection
 - Reasoning effort auto-tuned per task; thinking process streamed live and replayable in a collapsible view
-- Automatic context compaction (CJK-aware estimation, adjustable trigger ratio, manual `/compact` supported)
+- Automatic context compaction (CJK-aware estimation, adjustable trigger ratio; manual `/compact` from the desktop input box — the CLI has no such command)
 - Daily token budget guardrails; usage dashboard by session / provider / model with cost estimation
 - Auxiliary chat can run its own model without touching the main conversation
 - Prompt library (pinyin-initial filtering, AI polish, import/export); `~` prompts, `/` commands, `@` file references, `&` conversation references; voice input
@@ -73,7 +73,7 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 **Extensions & connectivity**
 
 - MCP client: stdio / Streamable HTTP, Claude Desktop config compatible, seven built-in presets, bounded auto-reconnect
-- Skill packages: global / project scopes; import from a folder, a .zip, or a GitHub/Gitee URL; scan-and-import skills already on this machine; twenty official scenario templates bundled
+- Skill packages: global / project scopes; import from a folder, a .zip, or a GitHub/Gitee URL; scan-and-import skills already on this machine; twenty official scenario templates bundled — one-click install uses the in-app copy and works offline
 - Remote access: LAN token + QR code opens the full UI on your phone; Tailscale supported for cross-network access
 - Chat channels: Feishu (WebSocket long connection) / WeChat (QR login); read-only by default, optional approval cards with timeout auto-deny
 - Desktop form factor: six themes + follow-system, system tray, launch at startup, window geometry memory, global hotkey, desktop pet; multiple session tabs and a ten-tab right panel (terminal / browser / review / files / tasks / agenda / automation / project memory / memory map / MCP·Skills)
@@ -101,11 +101,11 @@ SkySheep's feature set was built item by item against Claude Code / OpenAI Codex
 | Memory map (project evolution visualization) | — | — | — | ✅ evolution timeline + topic graph + LLM-generated evolution summary (file footprints / activity heatmap / task & memory annotations) |
 | Task lists (todos) | ✅ | ✅ | ✅ | ✅ sidebar panel synced in real time |
 | Plan mode (plan first, then execute) | ✅ | — | ✅ | ✅ dual execute/plan modes + one-click execute-the-plan |
-| Automatic context compaction + manual /compact | ✅ | ✅ | ✅ | ✅ CJK-aware estimation + real-usage floor as a fallback |
+| Automatic context compaction + manual /compact | ✅ | ✅ | ✅ | ✅ CJK-aware estimation + real-usage floor as a fallback (manual /compact from the desktop input box only) |
 | Permission prompts + project whitelist | ✅ | ✅ | ✅ | ✅ confirmation flow + word-boundary command-prefix whitelist (rejects shell-chaining bypass) + tiered permission modes + workspace trust (repo-bundled MCP/skills require confirmation) |
 | Headless one-shot runs (scripts / CI) | ✅ -p | ✅ exec | ✅ -p | ✅ skysheep run (pre-authorized tools + JSON output + audit) |
 | Ignore files | ✅ | ✅ | ✅ | ✅ .skysheepignore (.gitignore semantics, .env ignored by default) |
-| Slash commands | ✅ | ✅ | ✅ | ✅ /help /new /compact /model /status /todos /export |
+| Slash commands | ✅ | ✅ | ✅ | ✅ /help /new /model /export (CLI & desktop); /compact /status /todos (desktop input box only — see /help for the full CLI set) |
 | Message queuing / auto-retry on transient errors | ✅ | ✅ | ✅ | ✅ exponential backoff; in-flight content is never replayed |
 | Web fetch + web search | ✅ | ✅ | ✅ | ✅ web_fetch (SSRF protection) + web_search (Bocha/Tavily/Zhipu/self-hosted SearXNG) |
 | Document reading + generation | ✅ | — | ✅ | ✅ read_document (PDF/Word/Excel/PPT) + write_document (docx/xlsx/csv/PPT) |

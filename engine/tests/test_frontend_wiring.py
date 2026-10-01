@@ -231,3 +231,21 @@ def test_model_menu_rows_logo_and_right_badge():
     css = read_static("app.css")
     item_seg = css[css.index(".model-menu .mm-item {"):]
     assert "width: 100%" in item_seg[:120], "mm-item 须占满菜单宽，徽章才右贴"
+
+
+# ---------- 定时任务终态推送：cronModal 的「完成后推送到聊天渠道」开关接线 ----------
+
+def test_cron_modal_channel_notify_toggle():
+    """创建/编辑定时任务的弹窗要有推送开关：默认关（防打扰）、勾选值随
+    cron.add / cron.update 的 params 回传（notify_channel）。"""
+    js = read_app_bundle()
+    assert 'id="cron-notify"' in js, "cronModal 缺少推送开关控件"
+    assert "完成后推送到聊天渠道" in js, "开关文案缺失"
+    # 默认对象显式 false：新建任务默认不推送（防打扰）
+    assert "notify_channel: false" in js
+    # 勾选态跟随已有任务：t.notify_channel 为真才 checked
+    assert "t.notify_channel ? \" checked\"" in js
+    # 保存回调把勾选值回传后端
+    assert "notify_channel: box.querySelector(\"#cron-notify\").checked" in js
+    css = read_static("app.css")
+    assert ".cron-fields label.cron-notify" in css, "开关行样式缺失"

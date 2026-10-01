@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from ...bgtasks import spawn_bg
+from ...channels.manager import _fmt_dur
 from ...core import Agent
 from ...security.gate import HeadlessGate
 from ...tools import ChangeRecorder
@@ -211,7 +212,8 @@ class AutomationMixin:
         wd = int(params.get("weekday") or -1)
         tools = [str(t).strip() for t in (params.get("allowed_tools") or []) if str(t).strip()]
         task = await self.store.add_cron_task(
-            self.project.id, name, prompt, stype, interval, tod, wd, tools
+            self.project.id, name, prompt, stype, interval, tod, wd, tools,
+            notify_channel=bool(params.get("notify_channel")),
         )
         task = await self.store.update_cron_task(
             task["id"], next_run_at=self.store.compute_next_run(task)
@@ -245,6 +247,8 @@ class AutomationMixin:
             kw["allowed_tools"] = [str(t).strip() for t in params["allowed_tools"] if str(t).strip()]
         if params.get("enabled") is not None:
             kw["enabled"] = 1 if bool(params["enabled"]) else 0
+        if params.get("notify_channel") is not None:
+            kw["notify_channel"] = 1 if bool(params["notify_channel"]) else 0
         # 调度/启用变化后重算下次运行时间
         if any(k in kw for k in ("schedule_type", "interval_minutes", "time_of_day",
                                  "weekday", "enabled")) and "next_run_at" not in kw:
@@ -311,6 +315,7 @@ class AutomationMixin:
             return
         if not force:
             self._cron_running.add(task_id)
+        started_at = time.time()  # 终态推送要报耗时（成功与失败两条路都要用）
         try:
             if self.provider is None:
                 raise RuntimeError("尚未配置可用的模型 API Key")
@@ -382,6 +387,8 @@ class AutomationMixin:
             else:
                 await self.notify({"title": f"⏰ 定时任务异常：{task['name']}",
                                    "body": "本轮被中断或没有结果"})
+            # 终态推送（成功/异常同开关）：fire-and-forget，失败只记日志
+            self._spawn_cron_push(task, status, time.time() - started_at)
         except Exception as e:  # noqa: BLE001 - 任务失败也要回写状态
             try:
                 task = await self.store.update_cron_task(
@@ -399,10 +406,87 @@ class AutomationMixin:
                 self._broadcast_cron(task)
                 await self.notify({"title": f"⏰ 定时任务失败：{task['name']}",
                                    "body": str(e)[:160]})
+                # 失败告警与成功摘要同一开关：推送失败不碰上面的状态回写
+                self._spawn_cron_push(task, "error", time.time() - started_at)
             except Exception:
                 pass
         finally:
             self._cron_running.discard(task_id)
+
+    # ---- 定时任务终态推送（渠道出站通知） ----
+    # 开关 notify_channel 存在任务行里（默认关，防打扰）；推送目标与失败语义
+    # 同流水线收尾推送（_channel_push_pipeline）。这是引擎→用户的出站通知，
+    # 不是工具调用，不走权限门；但摘要只取任务行既有字段，绝不读文件或工具
+    # 输出全文——聊天渠道不该成为敏感内容外发口。
+
+    CRON_PUSH_RESULT_CHARS = 500  # 结果摘要的推送上限（任务行本身只存 200 字）
+
+    def _cron_push_targets(self) -> list:
+        """渠道推送目标：启用、配置齐全且允许名单非空的渠道。
+
+        allowed_ids 是主人的准入标识，名单为空的渠道拒发一切，这里同样不推
+        （渠道未启用/未绑定 = 静默跳过，不报错）。渠道管理器未就绪时无目标。
+        """
+        mgr = self.channels
+        if mgr is None:
+            return []
+        return [
+            channel for channel in list(mgr.channels.values())
+            if channel.enabled and channel.configured() and channel.allowed_ids
+        ]
+
+    def _cron_push_body(self, task: dict, status: str, duration_s: float) -> str:
+        """终态摘要文案：任务名 / 状态 / 耗时 / 完成时间 / 结果摘要（≤500 字截断）。"""
+        name = task.get("name") or "未命名任务"
+        result = (task.get("last_result") or "").strip()
+        limit = self.CRON_PUSH_RESULT_CHARS
+        if len(result) > limit:
+            result = result[:limit] + "…（已截断）"
+        if status == "error":
+            head = "失败"
+        elif status == "empty":
+            head = "完成（无产出）"
+        else:
+            head = "成功"
+        lines = [
+            f"⏰ 定时任务「{name}」{head}",
+            f"状态：{'❌' if status == 'error' else '✅'} {head}",
+            f"耗时：{_fmt_dur(duration_s)}",
+            "完成时间：" + time.strftime("%Y-%m-%d %H:%M", time.localtime()),
+        ]
+        if result:
+            lines.append(f"结果：{result}")
+        elif status != "empty":
+            lines.append("结果：（无）")
+        return "\n".join(lines)
+
+    async def _channel_push_cron(self, task: dict, status: str, duration_s: float) -> None:
+        """把定时任务终态摘要推到聊天渠道（纯推送，不需要回复）。
+
+        逐渠道逐 chat_id 发送，单个失败只记日志继续；渠道管理器不可用或没有
+        目标渠道时静默返回。
+        """
+        body = self._cron_push_body(task, status, duration_s)
+        for channel in self._cron_push_targets():
+            for chat_id in sorted(channel.allowed_ids):
+                try:
+                    await channel.send_text(chat_id, body)
+                except Exception as e:  # noqa: BLE001 - 推送失败只记日志
+                    logger.warning("定时任务摘要推送 %s(%s) 失败：%s",
+                                   channel.name, chat_id, e)
+
+    def _spawn_cron_push(self, task: dict, status: str, duration_s: float) -> None:
+        """终态推送的 fire-and-forget 入口：绝不阻塞任务收尾、绝不影响任务结果。
+
+        开关关（默认）直接跳过；推送全程在后台任务里跑，异常由 spawn_bg 的
+        收尾钩子记日志（skysheep.bg）。
+        """
+        if not task.get("notify_channel"):
+            return
+        try:
+            spawn_bg(self._channel_push_cron(task, status, duration_s))
+        except RuntimeError:
+            pass  # 无事件循环（如纯测试环境）
 
     # ---- 任务编排（pipelines）：按依赖顺序自动跑的无人值守节点 ----
     # 与定时任务同一套执行底座（独立会话 + HeadlessGate 白名单 + 完整工具集），

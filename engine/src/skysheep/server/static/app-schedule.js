@@ -836,7 +836,7 @@ function cronModal(existing) {
   const box = document.createElement("div");
   const t = existing || { name: "", prompt: "", schedule_type: "interval",
                           interval_minutes: 60, time_of_day: "09:00", weekday: 0,
-                          allowed_tools: [], enabled: true };
+                          allowed_tools: [], enabled: true, notify_channel: false };
   const days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
   const allowed = new Set(t.allowed_tools || []);
   // 工具勾选表：从最近一次 boot 快照取工具清单（含权限级别），让用户勾而不是背工具名
@@ -878,6 +878,9 @@ function cronModal(existing) {
       </div>
       <label>预授权工具（无人值守运行时自动放行；不勾的会被自动拒绝）</label>
       <div class="cron-tools">${toolRows}</div>
+      <label class="cron-notify"><input id="cron-notify" type="checkbox"${t.notify_channel ? " checked" : ""}> 完成后推送到聊天渠道</label>
+      <p class="dim small">任务跑完（成功或失败）会在飞书/微信渠道收到一条摘要：状态、耗时与结果节选；
+        渠道未启用或没有绑定聊天时静默跳过。渠道在 设置 · 聊天机器人渠道 里配置。</p>
       <p class="dim small">安全说明：定时任务无人值守运行，<b>只读工具本来就放行</b>；
         写入 / 执行类必须在这里勾选，否则运行时会自动拒绝。建议先只勾必要的。
         <b>勾选 run_command 等于允许无人值守执行任意命令</b>——任务文本一旦被注入，预授权就是它的通行证，只在任务内容完全可信时勾选。</p>
@@ -911,6 +914,7 @@ function cronModal(existing) {
       time_of_day: box.querySelector("#cron-time").value || "09:00",
       weekday: Number(box.querySelector("#cron-weekday").value) || 0,
       allowed_tools: picked,
+      notify_channel: box.querySelector("#cron-notify").checked,
     };
     if (isEdit) await request("cron.update", { id: existing.id, ...params });
     else await request("cron.add", params);

@@ -1062,6 +1062,15 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .cron-fields { display: flex; flex-direction: column; gap: 4px; }
 .cron-fields label { font-size: 12px; font-weight: 700; color: var(--text2); margin-top: 8px; }
 .cron-fields label:first-child { margin-top: 0; }
+/* 「完成后推送到聊天渠道」开关行：是勾选控件不是字段标题，按日程弹窗的
+   agenda-remind 同款排布（flex + 可点击勾选框），压掉上面的字段标题加粗 */
+.cron-fields label.cron-notify {
+  display: flex; align-items: center; gap: 6px;
+  font-weight: 400; color: var(--text); cursor: pointer; margin-top: 10px;
+}
+.cron-fields label.cron-notify input {
+  width: 16px; height: 16px; accent-color: var(--blue); cursor: pointer; flex: none;
+}
 /* 弹窗填空框统一规格（定时任务 cron-fields / 日程 agenda-fields 共用）：
    同高、同内边距，提示词/选中值从同一条线起笔。select 关掉原生外观——
    它的文字缩进随部件状态（可用/禁用）漂移，与 input 永远对不齐；箭头自绘

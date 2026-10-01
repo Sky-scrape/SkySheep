@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS cron_tasks (
     weekday INTEGER NOT NULL DEFAULT -1,
     allowed_tools TEXT NOT NULL DEFAULT '[]',
     enabled INTEGER NOT NULL DEFAULT 1,
+    notify_channel INTEGER NOT NULL DEFAULT 0,
     last_run_at REAL NOT NULL DEFAULT 0,
     last_status TEXT NOT NULL DEFAULT '',
     last_result TEXT NOT NULL DEFAULT '',
@@ -242,6 +243,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("whitelist_rules", "enabled INTEGER NOT NULL DEFAULT 1"),
     ("whitelist_rules", "hit_count INTEGER NOT NULL DEFAULT 0"),
     ("whitelist_rules", "last_hit_at REAL NOT NULL DEFAULT 0"),
+    ("cron_tasks", "notify_channel INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -2297,6 +2299,7 @@ class SessionStore:
             "weekday": r["weekday"],
             "allowed_tools": [t for t in (r["allowed_tools"] or "").split(",") if t],
             "enabled": bool(r["enabled"]),
+            "notify_channel": bool(r["notify_channel"]),
             "last_run_at": r["last_run_at"],
             "last_status": r["last_status"],
             "last_result": r["last_result"],
@@ -2314,16 +2317,17 @@ class SessionStore:
         time_of_day: str = "",
         weekday: int = -1,
         allowed_tools: list[str] | None = None,
+        notify_channel: bool = False,
     ) -> dict:
         assert self._db
         tools = ",".join(allowed_tools or [])
         now = time.time()
         cur = await self._db.execute(
             "INSERT INTO cron_tasks (project_id, name, prompt, schedule_type, interval_minutes,"
-            " time_of_day, weekday, allowed_tools, created_at, next_run_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " time_of_day, weekday, allowed_tools, notify_channel, created_at, next_run_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (project_id, name, prompt, schedule_type, interval_minutes, time_of_day,
-             weekday, tools, now, 0.0),
+             weekday, tools, 1 if notify_channel else 0, now, 0.0),
         )
         await self._db.commit()
         return await self.get_cron_task(cur.lastrowid)
@@ -2331,7 +2335,7 @@ class SessionStore:
     async def update_cron_task(self, task_id: int, **kw) -> dict | None:
         assert self._db
         allowed = ("name", "prompt", "schedule_type", "interval_minutes", "time_of_day",
-                   "weekday", "allowed_tools", "enabled", "next_run_at",
+                   "weekday", "allowed_tools", "enabled", "notify_channel", "next_run_at",
                    "last_run_at", "last_status", "last_result")
         fields, args = [], []
         for k, v in kw.items():

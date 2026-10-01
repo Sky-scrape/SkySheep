@@ -2,6 +2,54 @@
 
 本项目的所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.3.0/)。
 
+## [未发布]
+
+### 新增
+
+- **行为级评测回归基线 `engine/evals/`**：用 fake/scripted provider 驱动真实
+  Agent 循环 + 真实工具注册表 + SKYSHEEP_HOME 临时隔离，断言事件流与工具调用序
+  列（不评文本质量、不联网），每个场景对应一条真实回归史。首批 8 个种子场景：
+  只读并发批夹带 memory_write 必弹确认且记忆不落盘；删除目录必经确认
+  （delete_file 与 run_command 删除命令都拦得住）；move_file overwrite 覆盖已有
+  目录在「自动允许写入」档下仍逐次确认（删除形态守卫，预告规则为 exact）；
+  docker run「总是允许」只沉淀 exact 不沉淀两词前缀（docker run -v 挂载仍要确
+  认，存量前缀规则 fail-closed）；未决权限被停止补发 decision=cancelled 的
+  permission_resolved；任务簿终态超限时 list_tasks 保留全部 running/queued；前
+  缀白名单不覆盖 shell 拼接命令（弹窗带解释）；「自动允许写入」档不放开工作目
+  录外写入。跑法 `uv run pytest -m eval`；默认集不变（pyproject 注册 eval
+  marker，testpaths 含 evals 配合 addopts `-m "not eval"`）。
+
+- **场景模板支持「可更新」检测与一键更新**：官方更新随应用内置的模板副本后，设
+  置 · 技能的场景模板卡片会对已安装且与包内副本内容有差异（SKILL.md 与技能目录
+  逐文件比对）的条目标「可更新」徽章，并提供「更新」按钮——确认后复用既有安装链
+  路（覆盖重装，官方来源自动优先包内副本，离线完成、装完立即生效），更新完成后
+  徽标自动消失。
+
+### 变更
+
+- **发版流程一键化 + CI 依赖漏洞扫描**：新增 `engine/tools/release.py`
+  （仅标准库），把发布清单 §3/§4 的机械部分串成一条命令——依赖同步
+  （`uv sync --locked`）→ PyInstaller 打包（不经 `uv run`）→ 产物校验
+  （exe 在位、内置技能 20 个 SKILL.md 与 gallery_manifest.json 齐全）→
+  打包产物冒烟（一次性临时 `SKYSHEEP_HOME` + 独立 `SKYSHEEP_INSTANCE` 起 exe，
+  从 desktop.log 解析端口后 GET `/` 应 200，`taskkill /T` 收割，超时判失败）→
+  ISCC 编译安装包 → 生成 `SkySheep-<版本>-setup.exe.sha256` 附件，每步打印对应
+  清单条目编号，失败即非零退出并打印已到达的步骤；
+  `--skip-pack` / `--skip-smoke` / `--skip-installer` 可分段重跑。
+  默认绝不执行对外发布动作，只有显式 `--upload` 才在全部阶段通过后
+  `gh release create v<版本>` 上传安装包与校验附件（--help 与输出均明示）。
+  CI 新增 pip-audit job：从 `uv.lock` 导出运行时依赖（不含 dev 组与本包）做
+  `--strict` 严格审计，pyjwt CVE-2026-101918（修复版 2.15.0，经 mcp 传入）
+  暂定点 `--ignore-vuln`，其余已知漏洞照常红；发布清单 §3 注明一键入口。
+
+### 文档
+
+- **新增 `docs/分发上架指南.md`**：winget manifest 三件套模板与提交流程、Scoop
+  自建 bucket 的目录与 manifest 模板、Azure Trusted Signing（现名 Artifact
+  Signing）签名概览与 installer.iss 接入点注释示例、上架节奏与版本联动检查表；
+  配套新增 `engine/tools/make_scoop_manifest.py`（读 pyproject 版本与安装包
+  `.sha256` 附件，生成 Scoop manifest JSON 模板，py_compile 验证）。
+
 ## [2.3.0] - 2026-10-01
 
 ### 修复

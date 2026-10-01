@@ -145,3 +145,25 @@ async def test_no_headers_sent_when_not_configured(header_server):
         await manager.shutdown()
     assert _HeaderRecorder.seen
     assert "Authorization" not in _HeaderRecorder.seen[0]
+
+
+async def test_local_server_bypasses_system_proxy(header_server, monkeypatch):
+    """本机 MCP 服务器不走系统代理：环境代理指向死端口也必须直连成功。
+
+    Windows 上 httpx trust_env=True 会读注册表里的 WinINET 系统代理（实测
+    开发机出现过 ProxyEnable=1 而代理进程已退出的状态），把发往 127.0.0.1
+    的请求转给死代理就「All connection attempts failed」。这里用指向死端口
+    的环境代理确定性模拟该环境；本地地址必须绕开代理直连（远端行为不变）。
+    """
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    cfg = MCPServerConfig(
+        url=header_server, headers={"Authorization": "Bearer local-token"}
+    )
+    manager = MCPManager({"local": cfg})
+    try:
+        await manager.connect_all()
+    finally:
+        await manager.shutdown()
+    assert _HeaderRecorder.seen, "本地服务器应当收到请求（代理不能插手本地地址）"
+    assert _HeaderRecorder.seen[0].get("Authorization") == "Bearer local-token"

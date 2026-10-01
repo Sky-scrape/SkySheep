@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from ..bgtasks import spawn_bg
 from ..messages import ImageBlock
+from ..models.probe import _is_local
 from ..sanitize import (
     EMPTY_DESCRIPTION_PLACEHOLDER,
     MAX_PROMPT_DESCRIPTION_CHARS,
@@ -718,12 +719,21 @@ class MCPManager:
                         # 客户端并挂 web.py 的 _PinnedBackend（含 redirect 逐跳钉连），
                         # 相对威胁面改动过大，暂不做。
                         extra_headers = _headers_only(cfg)
+                        # 本地地址不走系统代理（与 models/probe.py 的「本地直连」约定
+                        # 同口径）：Windows 上 httpx 默认 trust_env=True 会读注册表里
+                        # 的 WinINET 系统代理，系统代理进程没在跑时，发往 127.0.0.1
+                        # 的请求会被转给代理然后连不上——本地 MCP 服务器必须直连；
+                        # 远端维持默认（信任环境代理）。带鉴权头时本来就自管客户端，
+                        # 这里把「本地地址」也并进自管条件。
+                        local_url = _is_local(cfg.url)
                         http_client = None
-                        if extra_headers:
-                            import httpx  # 局部导入：无鉴权场景不必碰 httpx
+                        if extra_headers or local_url:
+                            import httpx  # 局部导入：远端无鉴权场景不必碰 httpx
 
                             http_client = httpx.AsyncClient(
-                                headers=extra_headers, timeout=CONNECT_TIMEOUT_S
+                                headers=extra_headers,
+                                timeout=CONNECT_TIMEOUT_S,
+                                trust_env=not local_url,
                             )
                             await stack.enter_async_context(http_client)
                         read, write = await stack.enter_async_context(

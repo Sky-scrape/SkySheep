@@ -7572,7 +7572,7 @@ function showSettingsPage(target) {
   if (target === "skills") loadToolControl();
   if (target === "subagents") renderSubagentCfg().catch(() => {});
   if (target === "advanced") { renderAdvancedCfg().catch(() => {}); renderHooksCfg(); }
-  if (target === "about") loadBackups().catch(() => {});
+  if (target === "about") { loadBackups().catch(() => {}); renderRetentionCfg().catch(() => {}); }
 }
 document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
   li.onclick = () => {
@@ -12646,3 +12646,89 @@ document.getElementById("btn-backup-now").onclick = async () => {
 
 // 面板一次性接线：输入框回车快速添加、「＋ 新建任务」按钮
 wireProjectTasksPanel();
+
+// ---------- 设置 · 关于：数据管理（截图副本 / 隔离区 / 子代理报告的保留策略） ----------
+function retentionStatus(text, ok = true) {
+  const el = document.getElementById("retention-status");
+  el.textContent = text;
+  el.className = "card-status " + (ok ? "ok" : "bad");
+  el.hidden = !text;
+  autoHideStatus(el, text, ok);
+}
+
+// 字节数 → 人读大小（B/KB/MB/GB）；只有这一处用，不值得进公共工具
+function retentionBytes(n) {
+  const units = ["B", "KB", "MB", "GB"];
+  let v = Number(n) || 0, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (i ? v.toFixed(1).replace(/\.0$/, "") : String(v)) + " " + units[i];
+}
+
+async function renderRetentionCfg() {
+  let d;
+  try { d = await request("retention.status"); } catch (e) {
+    retentionStatus("加载失败：" + e.message, false);
+    return;
+  }
+  const q = (id) => document.getElementById(id);
+  q("retention-screenshots").value = d.days.screenshots;
+  q("retention-quarantine").value = d.days.quarantine;
+  q("retention-reports").value = d.days.reports;
+  // 每类当前占用随行展示；天数填 0（该类关闭清理）的行点一句说明
+  const u = d.usage || {};
+  q("retention-usage-screenshots").textContent = u.screenshots
+    ? `当前 ${u.screenshots.files} 个文件，共 ${retentionBytes(u.screenshots.bytes)}`
+    : "";
+  q("retention-usage-quarantine").textContent = u.quarantine
+    ? `当前 ${u.quarantine.files} 个文件，共 ${retentionBytes(u.quarantine.bytes)}`
+    : "";
+  q("retention-usage-reports").textContent = u.reports
+    ? `当前 ${u.reports.files} 个文件，共 ${retentionBytes(u.reports.bytes)}`
+    : "";
+  const note = q("retention-usage-note");
+  const closed = ["screenshots", "quarantine", "reports"].filter((k) => !(d.days[k] > 0));
+  const labels = { screenshots: "截图副本", quarantine: "隔离区", reports: "子代理报告" };
+  if (closed.length === 3) {
+    note.textContent = "三类都已关闭自动清理（天数为 0），文件会一直累积；只跑上面的「立即清理」。";
+    note.hidden = false;
+  } else if (closed.length) {
+    note.textContent = `已关闭自动清理：${closed.map((k) => labels[k]).join("、")}（天数为 0）。`;
+    note.hidden = false;
+  } else {
+    note.textContent = d.last_sweep_date ? `上次自动清理：${d.last_sweep_date}。` : "";
+    note.hidden = !d.last_sweep_date;
+  }
+  retentionStatus("");
+}
+
+async function saveRetention() {
+  const q = (id) => document.getElementById(id);
+  try {
+    await request("retention.save", {
+      screenshots_days: Number(q("retention-screenshots").value),
+      quarantine_days: Number(q("retention-quarantine").value),
+      reports_days: Number(q("retention-reports").value),
+    });
+    await renderRetentionCfg();
+    retentionStatus("✓ 已保存并立即生效");
+  } catch (e) {
+    retentionStatus("✗ 保存失败：" + e.message, false);
+  }
+}
+document.getElementById("btn-retention-save").onclick = saveRetention;
+
+document.getElementById("btn-retention-sweep").onclick = async () => {
+  const btn = document.getElementById("btn-retention-sweep");
+  btn.disabled = true;
+  try {
+    const r = await request("retention.sweep");
+    await renderRetentionCfg();
+    retentionStatus(r.ran
+      ? `✓ 已清理 ${r.deleted} 个文件，释放 ${retentionBytes(r.bytes)}`
+      : "今天已经自动清理过了");
+  } catch (e) {
+    retentionStatus("✗ 清理失败：" + e.message, false);
+  } finally {
+    btn.disabled = false;
+  }
+};

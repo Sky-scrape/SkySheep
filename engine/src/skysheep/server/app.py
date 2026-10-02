@@ -1092,6 +1092,20 @@ async def _h_advanced_save(backend: ServerBackend, params: dict, emit, local: bo
     return await backend.save_advanced_settings(params)
 
 
+async def _h_retention_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 数据保留策略回读：各类保留天数与目录占用（只读度量面，不含敏感内容）
+    return await backend.retention_status()
+
+
+async def _h_retention_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.retention_save(params)
+
+
+async def _h_retention_sweep(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 立即清理删的是数据目录已知目录里的过期文件，属本机维护动作
+    return await backend.retention_sweep_now()
+
+
 async def _h_hooks_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.hooks_settings()
 
@@ -1725,6 +1739,17 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "map.save_config": _WsMethod(_h_map_save_config),
     "advanced.get": _WsMethod(_h_advanced_get),
     "advanced.save": _WsMethod(_h_advanced_save, local_only=True),
+    # 数据保留策略（只进不出目录的治理）：状态各端可看；改保留天数与立即清理
+    # 是删文件的动作面，与 advanced.save 同姿态仅本机
+    "retention.status": _WsMethod(_h_retention_status),
+    "retention.save": _WsMethod(
+        _h_retention_save, local_only=True,
+        local_error="数据保留设置只能在桌面端本机修改",
+    ),
+    "retention.sweep": _WsMethod(
+        _h_retention_sweep, local_only=True,
+        local_error="立即清理只能在桌面端本机执行",
+    ),
     "hooks.get": _WsMethod(_h_hooks_get),
     "hooks.save": _WsMethod(_h_hooks_save, local_only=True),
     "hooks.test": _WsMethod(_h_hooks_test, local_only=True, local_error="钩子测试只能在本机界面上操作"),
@@ -1892,6 +1917,7 @@ def create_app(
         backend.start_pipeline_loop()
         backend.start_memory_maintenance_loop()
         backend.start_daily_report_loop()
+        backend.start_retention_loop()
         import logging
 
         logging.getLogger("skysheep").info(
@@ -1903,6 +1929,7 @@ def create_app(
         backend.stop_reminder_loop()
         backend.stop_memory_maintenance_loop()
         backend.stop_daily_report_loop()
+        backend.stop_retention_loop()
         # crash.flag 的清除在 backend.shutdown() 开头做：收尾链最后一环最容易
         # 被截断（桌面壳 1.5s 上限、程序内更新的 os._exit），清在末尾等于没清
         await backend.shutdown()

@@ -1489,6 +1489,39 @@
               <span id="diag-msg" class="io-msg"></span>
             </div>
           </section>
+          <section class="settings-card" id="retention-card">
+            <div class="card-head">
+              <h3>数据管理</h3>
+              <span class="head-ops">
+                <button id="btn-retention-save" class="btn-ghost">保存</button>
+                <button id="btn-retention-sweep" class="btn-ghost" title="按下面的保留天数马上清理一次过期文件（不计入每日自动清理）">立即清理</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              截图副本、隔离区文件、子代理报告只会随使用不断新增。默认按 <b>30 天</b>保留，
+              过期文件在应用启动后与每天自动清理一次；填 <b>0</b> 表示该类不再自动清理。
+              清理只动这些目录里 SkySheep 自己写入的文件，会话记录、备份与日志不受影响。
+            </p>
+            <div id="retention-status" class="card-status" hidden></div>
+            <div class="toolcfg-form">
+              <div class="toolcfg-row">
+                <label>截图副本保留</label>
+                <input type="number" id="retention-screenshots" min="0" max="3650" step="1">
+                <span class="dim small" id="retention-usage-screenshots"></span>
+              </div>
+              <div class="toolcfg-row">
+                <label>隔离区保留</label>
+                <input type="number" id="retention-quarantine" min="0" max="3650" step="1">
+                <span class="dim small" id="retention-usage-quarantine"></span>
+              </div>
+              <div class="toolcfg-row">
+                <label>子代理报告保留</label>
+                <input type="number" id="retention-reports" min="0" max="3650" step="1">
+                <span class="dim small" id="retention-usage-reports"></span>
+              </div>
+            </div>
+            <p id="retention-usage-note" class="dim small" hidden></p>
+          </section>
           <section class="settings-card">
             <div class="card-head">
               <h3>会话库备份</h3>

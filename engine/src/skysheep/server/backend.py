@@ -159,6 +159,7 @@ from .backend_parts.channels import (
     ChannelsMixin,
     _channel_allowed_tools_warning,  # noqa: F401  测试从本模块引用
 )
+from .backend_parts.data_retention import RetentionMixin
 from .backend_parts.lifecycle import LifecycleMixin
 from .backend_parts.mcp import McpMixin
 from .backend_parts.memory import MemoryMixin
@@ -732,7 +733,7 @@ EXPORT_HTML_TEMPLATE = """<!DOCTYPE html>
 
 class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    TerminalPanelMixin, RemoteMixin,
-                   LifecycleMixin, McpMixin, PreferencesMixin):
+                   LifecycleMixin, McpMixin, PreferencesMixin, RetentionMixin):
     def __init__(
         self,
         working_dir: str | Path = ".",

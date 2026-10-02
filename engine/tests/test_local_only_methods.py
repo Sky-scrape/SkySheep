@@ -35,6 +35,8 @@ MUST_BE_LOCAL = (
     "app.export_diagnostics", "project.switch", "project.delete", "session.restore_backup",
     "lan.enable", "remote.enable", "lan.rotate_token",
     "advanced.save", "hooks.save", "memory.save",
+    # 数据保留策略：改保留天数与立即清理会删数据目录里的文件，只能本机触发
+    "retention.save", "retention.sweep",
     "subagent.save", "default_model.set", "aux.model.set",
     # 本机体验/信息面（审查 P1-3 收口）
     "app.notify", "fs.open", "term.close", "memory.get", "model.switch",

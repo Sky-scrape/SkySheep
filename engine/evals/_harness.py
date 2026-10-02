@@ -20,20 +20,25 @@ from skysheep.tools import ToolRegistry, default_tools
 __all__ = ["finished", "make_agent", "requests", "resolved", "run_eval_turn"]
 
 
-def make_agent(provider, project_dir: Path, *, gate: PermissionGate | None = None) -> Agent:
+def make_agent(provider, project_dir: Path, *, gate: PermissionGate | None = None,
+               tools=None, **agent_kw) -> Agent:
     """组装评测用 Agent：真实工具注册表 + 真实权限门（与 backend 的装配同构，
     见 server/backend.py 的 PermissionGate(store=..., working_dir=...)）。
 
     需要调档位（auto_accept_write 等）时自建 gate 传入，与产品一致的改法是
-    构造后直接设属性。
+    构造后直接设属性。tools 传入时替换默认注册表的工具清单（默认仍是一整套
+    default_tools()）；个别场景要换装测试后门版工具（如 web_fetch 的本机桩
+    形态）时用它，其余工具保持与产品装配一致。agent_kw 透传 Agent 其余构造
+    参数（如 context_limit_tokens / compaction_*，供压缩边界场景调参）。
     """
     if gate is None:
         gate = PermissionGate(working_dir=project_dir)
     return Agent(
         provider=provider,
-        registry=ToolRegistry(default_tools()),
+        registry=ToolRegistry(tools if tools is not None else default_tools()),
         gate=gate,
         working_dir=project_dir,
+        **agent_kw,
     )
 
 

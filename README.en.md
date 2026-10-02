@@ -48,15 +48,15 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 **Models & conversation**
 
 - Ten built-in provider presets (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / Zhipu / Kimi / Qwen / Xiaomi MiMo) + custom relay endpoints; local inference services auto-detected; one-click model listing and context-window detection
-- Reasoning effort auto-tuned per task; thinking process streamed live and replayable in a collapsible view
+- Reasoning effort auto-tuned per task; thinking process streamed live and replayable in a collapsible view; a per-session turn-diagnostics panel in the review page breaks down each round's time (tool counts & slowest tool / permission waits / tokens)
 - Automatic context compaction (CJK-aware estimation, adjustable trigger ratio; manual `/compact` from the desktop input box — the CLI has no such command)
-- Daily token budget guardrails; usage dashboard by session / provider / model with cost estimation
+- Daily token budget guardrails; a channel alert is pushed when usage crosses the 80% / 100% tiers (at most one per tier per day; alerts follow the channels — with no chat / Webhook channel enabled there is no alert, and the in-app guardrail still applies); usage dashboard by session / provider / model with cost estimation
 - Auxiliary chat can run its own model without touching the main conversation
 - Prompt library (pinyin-initial filtering, AI polish, import/export); `~` prompts, `/` commands, `@` file references, `&` conversation references; voice input
 
 **Task execution**
 
-- 24 built-in tools: file read/write with precise editing, command execution (with background process management), regex search, web fetch and search (multiple providers), PDF / Word / Excel / PPT / CSV I/O, image understanding, AI image generation
+- 24 built-in tools: file read/write with precise editing, command execution (with background process management), regex search, web fetch and search (multiple providers), PDF / Word / Excel / PPT / CSV I/O, image understanding, AI image generation; web fetch ships injection defense — external content is wrapped in an explicit boundary frame declaring that instructions inside it are not yours, and a suspected-injection hint is appended when known injection patterns are detected
 - Computer control: screenshot, mouse, keyboard, window, clipboard (off by default; enable in settings)
 - Sub-agents: six built-in roles + custom roles (tool scope / model / reasoning effort configurable); parallel background execution with queuing; isolated spawns on a dedicated git worktree that auto-commits to its own branch
 - Execute / plan dual mode with a live-synced task list; task duration estimates and actual-time logging
@@ -64,8 +64,8 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 
 **Automation & memory**
 
-- Scheduled tasks (recurring, with pre-authorized tool lists) and agenda reminders (weekly / monthly calendar, advance reminders)
-- Project memory edited in-app; global auto memory; archive-time memory distillation; scheduled memory tidy-up (originals backed up first)
+- Scheduled tasks (recurring, with pre-authorized tool lists) and agenda reminders (weekly / monthly calendar, advance reminders); task and pipeline final states plus a daily run digest can be pushed to Feishu / WeChat / a generic Webhook, tasks can be exported as Windows scheduled tasks (they fire even when the app is closed), and the automation panel's "Today" card summarizes the day's runs
+- Project memory edited in-app; global auto memory; archive-time memory distillation; scheduled memory tidy-up (originals backed up first); oversized global memory is injected by per-turn relevance (embedding-similarity ranking via a local Ollama when installed, rule scoring otherwise), and noteworthy facts from each round land as pending-review candidates that only reach memory after you adopt them
 - Memory map: project evolution timeline, topic association graph, LLM-generated evolution summary
 - Hooks: pre tool-call (can block) / post / task-finished, with a tester and a recent-runs panel
 - `skysheep run` headless one-shot execution: pre-authorized tool list, JSON output, script-friendly
@@ -73,9 +73,9 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 **Extensions & connectivity**
 
 - MCP client: stdio / Streamable HTTP, Claude Desktop config compatible, seven built-in presets, bounded auto-reconnect
-- Skill packages: global / project scopes; import from a folder, a .zip, or a GitHub/Gitee URL; scan-and-import skills already on this machine; twenty official scenario templates bundled — one-click install uses the in-app copy and works offline
+- Skill packages: global / project scopes; import from a folder, a .zip, or a GitHub/Gitee URL; scan-and-import skills already on this machine; twenty official scenario templates bundled — one-click install uses the in-app copy and works offline; /save-skill turns the current session's approach into a skill draft in one command
 - Remote access: LAN token + QR code opens the full UI on your phone; Tailscale supported for cross-network access
-- Chat channels: Feishu (WebSocket long connection) / WeChat (QR login); read-only by default, optional approval cards with timeout auto-deny
+- Chat channels: Feishu (WebSocket long connection) / WeChat (QR login); read-only by default, optional approval cards with timeout auto-deny. Generic Webhook channel: outbound-only pushes (optional HMAC signature verification), no inbound allowlist concept
 - Desktop form factor: six themes + follow-system, system tray, launch at startup, window geometry memory, global hotkey, desktop pet; multiple session tabs and a ten-tab right panel (terminal / browser / review / files / tasks / agenda / automation / project memory / memory map / MCP·Skills)
 - Session management: full-text search (Chinese-aware), session branching, pin / archive / tags, Markdown / HTML export, rolling backups with visual restore
 
@@ -156,13 +156,13 @@ uv pip install pyinstaller
 .venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec   # Output: dist/SkySheep/SkySheep.exe
 ```
 
-Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), then run `ISCC.exe tools\installer.iss`; the output lands in `installer/`.
+Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), then run `ISCC.exe tools\installer.iss`; the output lands in `installer/`. Or run `python tools/release.py` for a one-command package → verify → smoke-test → installer chain (build-only by default; `--upload` performs the release upload).
 
 </details>
 
 > **📦 Multiple instances**: source builds run under a `dev` identity by default, with data in `~/.skysheep-dev/` — isolated from the installed app's `~/.skysheep/` and safe to run side by side; the `SKYSHEEP_INSTANCE` environment variable spawns further independent instances.
 
-> **⏰ Scheduled tasks require the app to be running**: scheduled tasks and agenda reminders fire from the app's internal loop. Choose "Minimize to system tray" when closing to keep them running in the background; tasks that come due while fully exited are caught up on the next launch. Enable "Launch at startup" under Settings → Advanced for always-on duty.
+> **⏰ Scheduled tasks require the app to be running**: scheduled tasks and agenda reminders fire from the app's internal loop. Choose "Minimize to system tray" when closing to keep them running in the background; tasks that come due while fully exited are caught up on the next launch. Enable "Launch at startup" under Settings → Advanced for always-on duty. Need a task to fire even when the app is fully closed? Export it as a Windows scheduled task from the task card ("⊞" button; registered via `schtasks` as "SkySheep-<task id>" and run standalone as `skysheep cron run <task id>`).
 
 ## 🔒 Security
 
@@ -176,7 +176,7 @@ Security is the default behavior, no configuration required:
 <details>
 <summary><b>Fine-grained mechanisms</b> (expand)</summary>
 
-- Four whitelist rule kinds (whole tool / word prefix / exact arguments / glob); interpreter `-c / -e / --eval` flags are full-text scanned so they can't smuggle a command past a prefix rule
+- Four whitelist rule kinds (whole tool / word prefix / exact arguments / glob); interpreter `-c / -e / --eval` flags are full-text scanned so they can't smuggle a command past a prefix rule; legacy rules that no longer match after the 2.3.0 tightening are badged "stale" in the settings page (hover for the reason) for easy per-rule cleanup
 - Computer control converges per action: the action whitelist only remembers the exact confirmed action — closing windows / writing the clipboard is never allowed as a whole tool
 - `web_fetch` pins resolved IPs as the connection target (anti-DNS-rebinding) and re-checks redirects hop by hop
 - Checkpoints: 50 rounds per session, 500 per project; session backups keep 20 copies, restorable visually
@@ -217,7 +217,7 @@ Auditability: all project source (the Python engine and the frontend trio) ships
 
 ```bash
 cd engine
-uv run pytest        # Full test suite (-m "not e2e" skips the real-socket tests)
+uv run pytest        # Full test suite (-m "not e2e" skips the real-socket tests; -m eval runs the 30-scenario behavioral eval baseline)
 uv run ruff check .  # lint
 ```
 

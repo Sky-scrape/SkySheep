@@ -19,10 +19,14 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import datetime
+import hashlib
 import html.parser
 import ipaddress
+import json
 import re
 import socket
+from pathlib import Path
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpcore
@@ -30,7 +34,9 @@ import httpx
 from pydantic import BaseModel, Field
 
 from .. import obs
+from ..instance import data_home
 from ..sanitize import scan_injection_patterns, untrusted_frame
+from ..textio import write_text_atomic
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 
 MAX_REDIRECTS = 5
@@ -340,6 +346,158 @@ def html_to_text(html: str) -> str:
     return "\n".join(ln for ln in lines if ln)
 
 
+# ---- 提示注入纵深防御（第二期）：隔离区模式 + 站点信任评级 ----
+# 一期（sanitize.untrusted_frame / scan_injection_patterns，「框起来 + 标记」）
+# 保持并继续生效；二期只加两件事，全部只影响提示文案与日志，不改变放行行为。
+
+# 隔离区模式开关（默认关）。将来配置化路径：config.py 增加安全配置项
+# （形如 security.web_fetch_quarantine 的布尔项），经设置页读写后热生效并注入
+# 此处；现阶段以模块常量承载，测试可直接翻转（monkeypatch），行为面与配置化后
+# 完全一致。开启后 web_fetch 抓取正文不再整体进上下文：全文原子落盘隔离文件，
+# 模型拿到的是来源、信任级、前 N 字符摘录与隔离文件路径——要全文须用文件读取
+# 工具读取该路径（走权限门确认并留痕），注入内容不再随抓取静淌进上下文。
+QUARANTINE_ENABLED = False
+# 隔离区模式下返回给模型的正文摘录长度（字符）；全文在隔离文件里按需获取。
+QUARANTINE_EXCERPT_CHARS = 600
+# 站点信誉存储文件名（SKYSHEEP_HOME 下）：手动标记 + 注入命中自动计数。
+REPUTATION_FILENAME = "web_reputation.json"
+
+# 手动标记取值（信誉存储 JSON 里的 manual 字段）
+MARK_GOOD = "good"
+MARK_SUSPICIOUS = "suspicious"
+# 信任级展示文案（untrusted_frame 头部与结构化日志用）
+TRUST_GOOD = "已知良好"
+TRUST_SUSPICIOUS = "已知可疑"
+TRUST_UNKNOWN = "未知"
+
+
+def _norm_host(host: str | None) -> str:
+    return (host or "").strip().lower()
+
+
+class SiteReputation:
+    """站点信任评级存储：手动标记（已知良好/已知可疑）+ 自动计数（注入命中次数）。
+
+    落 SKYSHEEP_HOME 下单个 JSON（引擎自有状态文件，textio.write_text_atomic
+    原子写）；损坏（非 JSON / 结构不对 / 读不了）时兜底重建为空表并留一条
+    warning 日志——评级只是标注，绝不能因为它让抓取失败。
+
+    信任级判定（只影响提示文案与日志，不改变任何放行行为）：手动标记优先
+    （已知良好 / 已知可疑），否则按自动计数给「曾报注入 N 次」，零命中为
+    「未知」。每次 web_fetch 命中 scan_injection_patterns 记一次数。
+    """
+
+    VERSION = 1
+
+    def __init__(self, path: Path | None = None) -> None:
+        # path=None：首次使用时才按 SKYSHEEP_HOME 解析（导入期不吃环境变量，
+        # 测试隔离友好）；显式传 path 供单元测试定点检查。
+        self._path = path
+        self._data: dict | None = None  # 惰性加载；None = 尚未读过盘
+
+    # ---- 存取 ----
+
+    def _file(self) -> Path:
+        if self._path is None:
+            self._path = data_home() / REPUTATION_FILENAME
+        return self._path
+
+    def _load(self) -> dict:
+        if self._data is not None:
+            return self._data
+        path = self._file()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            self._data = {"version": self.VERSION, "hosts": {}}
+            return self._data  # 还没有任何信誉记录：空表起家，不算损坏
+        except (OSError, ValueError):
+            raw = None
+        if not (isinstance(raw, dict) and isinstance(raw.get("hosts"), dict)):
+            # 走到这里必然是「文件存在但读不出合法结构」（坏 JSON / 结构不对；
+            # 文件不存在已在上面提前返回）→ 告警并重建为空表
+            obs.warning(
+                "web_reputation_rebuild", "站点信誉存储损坏，已重建为空表",
+                path=str(path),
+            )
+            raw = {"version": self.VERSION, "hosts": {}}
+            self._data = self._normalize(raw)
+            try:
+                self._save()
+            except OSError:
+                pass  # 重建都写不进去也只能放弃：评级绝不能拖垮抓取
+            return self._data
+        self._data = self._normalize(raw)
+        return self._data
+
+    @staticmethod
+    def _normalize(data: dict) -> dict:
+        """逐条归一：坏条目按空处理，不让单个坏 host 拖垮整表。"""
+        hosts: dict = {}
+        for host, entry in (data.get("hosts") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            manual = entry.get("manual")
+            hits = entry.get("injection_hits")
+            hosts[_norm_host(host)] = {
+                "manual": manual if manual in (MARK_GOOD, MARK_SUSPICIOUS) else None,
+                "injection_hits": hits if isinstance(hits, int) and hits >= 0 else 0,
+            }
+        return {"version": data.get("version") or SiteReputation.VERSION, "hosts": hosts}
+
+    def _save(self) -> None:
+        write_text_atomic(
+            self._file(), json.dumps(self._data, ensure_ascii=False, indent=2) + "\n"
+        )
+
+    # ---- 查询与登记 ----
+
+    def label(self, host: str | None) -> str:
+        """站点信任级文案：已知良好 / 已知可疑 / 曾报注入 N 次 / 未知。"""
+        entry = self._load()["hosts"].get(_norm_host(host))
+        if not entry:
+            return TRUST_UNKNOWN
+        if entry["manual"] == MARK_GOOD:
+            return TRUST_GOOD
+        if entry["manual"] == MARK_SUSPICIOUS:
+            return TRUST_SUSPICIOUS
+        hits = entry["injection_hits"]
+        return f"曾报注入 {hits} 次" if hits > 0 else TRUST_UNKNOWN
+
+    def record_hit(self, host: str | None) -> int:
+        """记一次注入命中（每次抓取命中 +1，与命中形态数无关），返回累计次数。"""
+        entry = self._load()["hosts"].setdefault(
+            _norm_host(host), {"manual": None, "injection_hits": 0}
+        )
+        entry["injection_hits"] += 1
+        try:
+            self._save()
+        except OSError as e:
+            # 计数写丢了只损失标注精度，不影响本次抓取结果
+            obs.warning("web_reputation_save_failed", "站点信誉计数写盘失败", err=str(e))
+        return entry["injection_hits"]
+
+    def set_manual(self, host: str | None, mark: str | None) -> None:
+        """手动标记站点：'good' / 'suspicious' / None（清除标记，保留自动计数）。
+
+        手动标记优先于自动计数；将来设置页/WS 方法暴露时直接调这里。
+        """
+        if mark not in (None, MARK_GOOD, MARK_SUSPICIOUS):
+            raise ValueError(f"未知的手动标记: {mark!r}")
+        data = self._load()
+        key = _norm_host(host)
+        entry = data["hosts"].get(key)
+        if entry is None:
+            if mark is None:
+                return  # 无标记可清：不落地空条目
+            entry = {"manual": None, "injection_hits": 0}
+            data["hosts"][key] = entry
+        entry["manual"] = mark
+        if mark is None and not entry["injection_hits"]:
+            data["hosts"].pop(key, None)  # 清完什么都不剩：不留空壳
+        self._save()
+
+
 class WebFetchTool(Tool):
     name = "web_fetch"
     description = (
@@ -359,6 +517,8 @@ class WebFetchTool(Tool):
     def __init__(self, allow_private_hosts: bool = False) -> None:
         # 仅测试注入：允许访问内网（本地 HTTP 桩）
         self.allow_private_hosts = allow_private_hosts
+        # 站点信任评级（二期）：手动标记 + 注入命中自动计数；路径首次使用时才解析
+        self.reputation = SiteReputation()
 
     def _pin(self, host: str) -> list[str]:
         """解析并校验主机，返回可直接建连的 IP 列表。
@@ -501,18 +661,67 @@ class WebFetchTool(Tool):
         # 不可信外部内容，包进明确边界行交还模型；命中经典注入形态时在输出尾部
         # 附一行提示、留一条结构化日志供「这一轮为什么…」检索。只标记不拦截：
         # 抓取内容一字不改、照常返回，是否照做仍由模型与用户在权限门下决定。
+        # 二期在此基础上加：命中自动计入站点信誉（两态都记），隔离区模式开启时
+        # 正文落盘隔离文件、只回摘录与路径（见 _quarantined_reply）。
         hits = scan_injection_patterns(text)
+        host = parsed_final.hostname or ""
+        if hits:
+            self.reputation.record_hit(host)  # 自动计数：只影响标注，不影响放行
+        trust_label = ""
+        if hits or QUARANTINE_ENABLED:
+            trust_label = self.reputation.label(host)
         if hits:
             # 只记形态名与定位信息，不落正文（obs 约定：只记标识与度量）
             obs.warning(
                 "web_fetch_injection_hint", "抓取内容命中疑似指令注入形态",
                 host=parsed_final.hostname, path=parsed_final.path[:200],
-                patterns=hits,
+                patterns=hits, trust=trust_label,
+            )
+        if QUARANTINE_ENABLED:
+            return self._quarantined_reply(
+                current, ctype, text + note, hits, trust_label, args.max_chars
             )
         framed = untrusted_frame(current, truncate_output(text + note, args.max_chars))
         if hits:
             framed += "\n\n⚠ 检测到疑似指令注入形态：" + "、".join(hits)
         return f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" + framed
+
+    def _quarantined_reply(
+        self, current: str, ctype: str, body_text: str, hits: list[str],
+        trust_label: str, max_chars: int,
+    ) -> str:
+        """隔离区模式的 web_fetch 回包：全文落盘，模型只见摘录 + 路径。
+
+        抓取正文不再整体进上下文：sha256 按内容哈希命名，原子写入
+        SKYSHEEP_HOME/quarantine/<日期>/；回给模型的是边界框包住的来源、信任级
+        与前 N 字符摘录，以及「要全文用文件读取工具获取（走权限门留痕）」的提示。
+        落盘失败必须报错而不是退回全文——隔离模式下把正文整段吐回上下文等于
+        没隔离。
+        """
+        digest = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
+        qdir = data_home() / "quarantine" / datetime.date.today().isoformat()
+        qpath = qdir / f"{digest}.txt"
+        try:
+            write_text_atomic(qpath, body_text)
+        except OSError as e:
+            raise ToolError(f"web_fetch：正文隔离落盘失败（{e}），已放弃本次抓取") from e
+        obs.info(
+            "web_fetch_quarantine", "正文已隔离落盘，仅摘录进上下文",
+            host=urlparse(current).hostname, chars=len(body_text),
+            file=str(qpath),
+        )
+        excerpt = body_text[: min(QUARANTINE_EXCERPT_CHARS, max_chars)]
+        framed = untrusted_frame(current, excerpt, trust=trust_label or TRUST_UNKNOWN)
+        out = f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" + framed
+        tail = (
+            f"\n\n（隔离区：正文共 {len(body_text)} 字符，上方仅前 {len(excerpt)} 字符摘录，"
+            "其余部分未进入上下文。\n"
+            f"全文已存入隔离文件：{qpath}\n"
+            "需要全文时，用文件读取工具读取上述路径获取（读取会经权限门确认并留痕）。）"
+        )
+        if hits:
+            tail += "\n\n⚠ 检测到疑似指令注入形态：" + "、".join(hits)
+        return out + tail
 
 
 # ---- web_search：联网搜索（先搜到链接，再用 web_fetch 读全文） ----

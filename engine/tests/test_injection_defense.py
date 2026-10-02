@@ -177,8 +177,12 @@ def test_web_fetch_output_is_framed_normal_chinese_page_no_hint(tmp_path):
     assert _HINT_MARK not in out, "正常内容零误报"
 
 
-def test_web_fetch_hits_are_marked_at_tail_and_logged(tmp_path, caplog):
-    """注入形态命中：尾部附一行提示、正文照常返回、obs 留一条结构化日志。"""
+def test_web_fetch_hits_are_marked_at_tail_and_logged(home, caplog):
+    """注入形态命中：尾部附一行提示、正文照常返回、obs 留一条结构化日志。
+
+    home 夹具（隔离 SKYSHEEP_HOME）必须有：二期起命中会写入站点信誉存储，
+    不能让它落到真实 ~/.skysheep。
+    """
     handler = type(
         "_Inject",
         (_PageHandler,),
@@ -194,7 +198,7 @@ def test_web_fetch_hits_are_marked_at_tail_and_logged(tmp_path, caplog):
     srv = _serve(handler)
     try:
         with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
-            out = _fetch(f"http://127.0.0.1:{srv.server_address[1]}", "/inject", tmp_path)
+            out = _fetch(f"http://127.0.0.1:{srv.server_address[1]}", "/inject", home)
     finally:
         srv.shutdown()
     assert "Article body." in out, "命中只标记不拦截：内容仍完整返回"

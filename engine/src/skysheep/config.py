@@ -6,6 +6,8 @@ Key 解析顺序：config 中的 api_key → 环境变量（env_key 或 <PROVIDE
 
 from __future__ import annotations
 
+import copy
+import logging
 import os
 import re
 import tomllib
@@ -14,7 +16,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import instance
+from . import instance, secure_store
+
+logger = logging.getLogger("skysheep.config")
 
 
 class ConfigError(Exception):
@@ -218,6 +222,20 @@ class MemoryMapConfig(BaseModel):
     auto_digest: bool = False
 
 
+class RetentionConfig(BaseModel):
+    """数据保留策略：只进不出目录的过期清理（设置 · 关于 · 数据管理）。
+
+    天数按类别各自设置，``0 = 该类关闭自动清理``；上限 3650（约 10 年，
+    防手滑写天文数字）。清理对象与默认值见
+    ``server/backend_parts/data_retention.py``（截图副本 / 隔离区 /
+    子代理报告各 30 天；备份与日志有自己的滚动保留，不归这管）。
+    """
+
+    screenshots_days: int = Field(default=30, ge=0, le=3650)
+    quarantine_days: int = Field(default=30, ge=0, le=3650)
+    reports_days: int = Field(default=30, ge=0, le=3650)
+
+
 class SkySheepConfig(BaseModel):
     default: str = "deepseek"
     max_iterations: int = Field(default=40, ge=1, le=200)
@@ -254,6 +272,7 @@ class SkySheepConfig(BaseModel):
     memory_digest: bool = True
     memory_maintenance: MemoryMaintenanceConfig = Field(default_factory=MemoryMaintenanceConfig)
     memory_map: MemoryMapConfig = Field(default_factory=MemoryMapConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
@@ -428,6 +447,7 @@ def load_config() -> SkySheepConfig:
     channels = ChannelsConfig()
     memory_maintenance = MemoryMaintenanceConfig()
     memory_map = MemoryMapConfig()
+    retention = RetentionConfig()
     p = config_path()
     if p.exists():
         try:
@@ -435,6 +455,11 @@ def load_config() -> SkySheepConfig:
                 raw = tomllib.load(f)
         except Exception as e:
             raise ConfigError(f"failed to parse {p}: {e}") from e
+        # 先做一次性明文→加密迁移（对刚解析、还没解密的 raw 判断，配置已是
+        # 加密形态时零写盘），再就地解密 dpapi: 前缀的凭据值——值要送进
+        # Provider，解不开必须置空，绝不让密文本体被当成 Key 用
+        _migrate_plaintext_secrets(p, raw)
+        _decrypt_secret_values(raw, keep_on_failure=False)
         default = raw.get("default", default)
         # 手改配置越界/写成非数字时夹回合法区间（区间与下方 SkySheepConfig 的
         # Field 约束一致），别让启动炸在 pydantic 校验上——安全审查 M13
@@ -465,6 +490,7 @@ def load_config() -> SkySheepConfig:
             ("server", ServerConfig, server),
             ("memory_maintenance", MemoryMaintenanceConfig, memory_maintenance),
             ("memory_map", MemoryMapConfig, memory_map),
+            ("retention", RetentionConfig, retention),
         ):
             section = raw.get(section_name)
             if isinstance(section, dict):
@@ -479,6 +505,8 @@ def load_config() -> SkySheepConfig:
                 memory_maintenance = cur
             elif section_name == "memory_map":
                 memory_map = cur
+            elif section_name == "retention":
+                retention = cur
             else:
                 server = cur
         channels = _load_channels(raw.get("channels"))
@@ -533,6 +561,7 @@ def load_config() -> SkySheepConfig:
             memory_digest=memory_digest,
             memory_maintenance=memory_maintenance,
             memory_map=memory_map,
+            retention=retention,
             roundtable=roundtable,
             websearch=websearch,
             imagegen=imagegen,
@@ -633,6 +662,41 @@ def set_memory_map_config(*, auto_digest: bool | None = None) -> None:
     _write_raw_config(p, raw)
 
 
+def set_retention_in_config(
+    *,
+    screenshots_days: int | None = None,
+    quarantine_days: int | None = None,
+    reports_days: int | None = None,
+) -> None:
+    """写入 config.toml 的 [retention] 表（None 表示该项不动）。
+
+    设置 · 关于 · 数据管理的三个保留天数走这里，与其它设置项同一套读写路径。
+    0 = 该类关闭自动清理；越界值在写入前就报错（用户填错要看得见，不静默夹取）。
+    """
+    for name, value in (
+        ("截图副本", screenshots_days),
+        ("隔离区", quarantine_days),
+        ("子代理报告", reports_days),
+    ):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3650:
+            raise ConfigError(f"{name}的保留天数要在 0–3650 之间（0 = 关闭该类清理）")
+    p, raw = _read_raw_config()
+    section = dict(raw.get("retention") or {})
+    if screenshots_days is not None:
+        section["screenshots_days"] = int(screenshots_days)
+    if quarantine_days is not None:
+        section["quarantine_days"] = int(quarantine_days)
+    if reports_days is not None:
+        section["reports_days"] = int(reports_days)
+    if section:
+        raw["retention"] = section
+    else:
+        raw.pop("retention", None)
+    _write_raw_config(p, raw)
+
+
 def set_hooks_in_config(
     *,
     pre: list[dict] | None = None,
@@ -724,8 +788,117 @@ def resolve_api_key(name: str, cfg: ProviderConfig) -> str | None:
     return os.environ.get(env_name)
 
 
+def _iter_secret_fields(raw: dict):
+    """按加密字段清单遍历原始配置，产出 (所属 dict, 字段名, 定位标签)。
+
+    清单常量在 :mod:`skysheep.secure_store`（providers.*.api_key、
+    websearch/imagegen/speech 的 api_key、server.token、
+    channels.platforms.* 的凭据类字段）。手改 TOML 写出的怪形状
+    （小节不是 dict 等）一律跳过，绝不让读取崩掉。
+    """
+    providers = raw.get("providers")
+    if isinstance(providers, dict):
+        for name, section in providers.items():
+            if isinstance(section, dict):
+                for field in secure_store.PROVIDER_SECRET_FIELDS:
+                    if field in section:
+                        yield section, field, f"providers.{name}.{field}"
+    for name, fields in secure_store.SECRET_SECTION_FIELDS.items():
+        section = raw.get(name)
+        if isinstance(section, dict):
+            for field in fields:
+                if field in section:
+                    yield section, field, f"{name}.{field}"
+    channels = raw.get("channels")
+    if isinstance(channels, dict):
+        platforms = channels.get("platforms")
+        if isinstance(platforms, dict):
+            for pname, entry in platforms.items():
+                if not isinstance(entry, dict):
+                    continue
+                for key in list(entry):
+                    if secure_store.is_channel_secret_key(key):
+                        yield entry, key, f"channels.platforms.{pname}.{key}"
+
+
+def _decrypt_secret_values(raw: dict, *, keep_on_failure: bool) -> None:
+    """就地解密 raw 里 ``dpapi:`` 前缀的凭据值，调用方拿到的一律是明文。
+
+    解不开（跨机器/跨账户迁移、密文损坏）时记日志并按 keep_on_failure 分：
+    - True（_read_raw_config，读改写路径）：保留 ``dpapi:`` 原值——后续写盘
+      原样透传（写侧对已加密值幂等），不因这台机器解不开就抹掉密文，
+      文件换回原机器/原账户还能解开；
+    - False（load_config，值要送进 Provider）：置空字符串——绝不让密文本体
+      被当成 Key 静默用错，resolve_api_key 据此回落到环境变量。
+    """
+    for section, key, label in _iter_secret_fields(raw):
+        value = section.get(key)
+        if not isinstance(value, str) or not secure_store.is_encrypted(value):
+            continue
+        plain = secure_store.decrypt_value(value)
+        if plain is None:
+            logger.warning(
+                "config.toml 的 %s 解不开（跨机器/账户迁移或密文损坏），按未配置处理",
+                label,
+            )
+            if not keep_on_failure:
+                section[key] = ""
+            continue
+        section[key] = plain
+
+
+def _encrypt_secret_values(raw: dict) -> None:
+    """就地把清单内字段的明文值换成 ``dpapi:`` 密文。
+
+    secure_store.encrypt_value 在非 Windows / DPAPI 不可用 / 加密失败时原样
+    返回明文并记日志，这里不需要再按平台分支；空值与已加密值幂等直通。
+    """
+    for section, key, _ in _iter_secret_fields(raw):
+        value = section.get(key)
+        if isinstance(value, str) and value and not secure_store.is_encrypted(value):
+            section[key] = secure_store.encrypt_value(value)
+
+
+# 模块级 run-once 语义：本次进程只在首次读到明文凭据时尝试一次迁移，
+# 成败都置位——写失败只记日志，下次启动（新进程）再试，避免每次读配置
+# 都重试写盘。测试可用 config._migration_attempted = False 复位。
+_migration_attempted = False
+
+
+def _migrate_plaintext_secrets(p: Path, raw: dict) -> None:
+    """一次性迁移：清单内字段还是明文时，整份配置原子写回加密版（仅 Windows）。
+
+    收在 config 模块内部，挂在两条读路径上（load_config / _read_raw_config），
+    用户不改任何设置、下次启动也会被迁移。**必须先于 _decrypt_secret_values
+    调用**：明文判断依据是刚解析出的盘面值，解密后内存里全是明文，顺序反了
+    已加密的配置也会被误判成待迁移、每次首读都重写一遍。没有明文凭据时不写盘；
+    _write_raw_config 内部加密后走原子写，写失败旧文件保持完整。
+    """
+    global _migration_attempted
+    if _migration_attempted or not secure_store.dpapi_available():
+        return
+    has_plain = any(
+        isinstance(section.get(key), str)
+        and section[key]
+        and not secure_store.is_encrypted(section[key])
+        for section, key, _ in _iter_secret_fields(raw)
+    )
+    if not has_plain:
+        return
+    _migration_attempted = True
+    try:
+        _write_raw_config(p, raw)
+        logger.info("config.toml 的明文凭据已迁移为 DPAPI 加密（dpapi: 前缀）")
+    except Exception as e:  # noqa: BLE001 - 迁移失败不阻塞启动，下次启动重试
+        logger.warning("凭据加密迁移写盘失败（保持明文，下次启动重试）：%s", e)
+
+
 def _read_raw_config() -> tuple[Path, dict]:
-    """读取 config.toml 原始数据（含目录边界校验）。"""
+    """读取 config.toml 原始数据（含目录边界校验）。
+
+    ``dpapi:`` 前缀的加密凭据解密成明文后返回（调用方零改动）；解不开的
+    值保留原样透传（见 _decrypt_secret_values），并做一次性明文→加密迁移。
+    """
     # 目录边界校验：配置写入只允许发生在 SkySheep 主目录内
     # （防 SKYSHEEP_HOME 环境变量被指向任意位置后在此写文件）
     home = skysheep_home().resolve()
@@ -740,6 +913,10 @@ def _read_raw_config() -> tuple[Path, dict]:
                 raw = tomllib.load(f)
         except Exception as e:
             raise ConfigError(f"failed to parse {p}: {e}") from e
+        # 迁移必须先于解密：has_plain 要看「盘面上」还是不是明文，
+        # 解密后内存里全是明文，顺序反了每次首读都会重写一遍
+        _migrate_plaintext_secrets(p, raw)
+        _decrypt_secret_values(raw, keep_on_failure=True)
     return p, raw
 
 
@@ -748,8 +925,12 @@ def _write_raw_config(p: Path, raw: dict) -> None:
 
     from .textio import write_text_atomic
 
+    # 深拷贝后再加密落盘：不就地改调用方手里的 raw——update_config_section
+    # 会把 section 原样返回给后端，返回值里出现密文会打扰调用方
+    out = copy.deepcopy(raw)
+    _encrypt_secret_values(out)
     # 原子写（安全审查 M13）：写一半被中断时旧配置仍然完整，不会留下截断的 TOML
-    write_text_atomic(p, tomli_w.dumps(raw))
+    write_text_atomic(p, tomli_w.dumps(out))
 
 
 def update_provider_in_config(

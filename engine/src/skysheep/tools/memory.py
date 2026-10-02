@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from ..textio import write_text_atomic
 from .base import Safety, Tool, ToolContext, ToolError
+from .memory_embed import select_relevant_auto
 
 MemoryAction = Literal["append", "list", "delete"]
 
@@ -185,6 +186,8 @@ def render_memory_section(query_text: str = "") -> str:
     （backend 轮首用「本轮用户消息 + 最近对话摘要」拼出）时切条目按相关性
     选取注入，并附一行说明告诉模型「这只是子集、完整记忆怎么看」。拿不到
     查询、切不出条目或全部得分为 0 时都退回整块注入——宁多勿漏。
+    二期增强：本机有 Ollama 时相关性由嵌入余弦排序（tools/memory_embed.py），
+    不可用回落一期规则评分，其余行为不变。
 
     发生（整块路径的）截断时给模型一行说明：它看到的不是全部，更早的条目可用
     memory_write 的 list 动作查看——静默截断会让模型把「没注入」当成「不存在」。
@@ -215,7 +218,9 @@ def render_memory_section(query_text: str = "") -> str:
     )
     if not entries:
         return whole_block()  # 无查询 / 切不出条目：整块兜底
-    idx = select_relevant(entries, query, MEMORY_SELECT_MAX_ENTRIES)
+    # 记忆检索化（二期）：本机有 Ollama 时按嵌入余弦排序，不可用即回落一期
+    # 规则评分（tools/memory_embed.py；回落零成本，行为与一期逐字节一致）
+    idx = select_relevant_auto(entries, query, MEMORY_SELECT_MAX_ENTRIES)
     if not idx:
         return whole_block()  # 全部 0 分：整块兜底
     # 占预算按相关性从高到低，注入按原文顺序（旧→新）保持记忆连贯；

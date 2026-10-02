@@ -42,6 +42,26 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _no_local_embeddings(monkeypatch):
+    """测试默认把本机嵌入标记成「不可用」（记忆二期的检索增强）。
+
+    装了 Ollama 的开发机上，嵌入余弦排序会合法地选出与规则评分不同的子集，
+    检索路径的既有断言（一、二期都是）就会随机器翻车——套件必须与「这台机器
+    有没有 Ollama」解耦：默认按不可用回落规则评分，零网络探测。嵌入路径自己
+    的用例（test_memory_embed.py）显式重置 memory_embed 模块状态再 mock HTTP。
+    """
+    import time as _time
+
+    from skysheep.tools import memory_embed
+
+    monkeypatch.setattr(
+        memory_embed, "_state",
+        {"available": False, "checked_at": _time.monotonic()},
+    )
+    monkeypatch.setattr(memory_embed, "_vec_cache", {})
+
+
 @pytest.fixture
 async def store(tmp_path):
     s = await SessionStore(tmp_path / "test.db").connect()

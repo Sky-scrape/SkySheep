@@ -45,6 +45,16 @@ from ...tools.memory import (
     remember_lines,
     save_maintenance_state,
 )
+from ...tools.memory_distill import (
+    add_candidates,
+    adopt_candidate,
+    build_distill_prompt,
+    distill_enabled,
+    ignore_candidate,
+    load_distill_state,
+    parse_distill_output,
+    set_distill_enabled,
+)
 
 logger = logging.getLogger("skysheep.security")
 memory_log = logging.getLogger("skysheep.memory")
@@ -112,6 +122,92 @@ class MemoryMixin:
         """提炼稿解析落盘：走记忆写锁，避免与定期整理/设置页保存交错写 memory.md。"""
         async with self._memory_io_lock:
             return remember_lines(parse_digest("".join(parts)))
+
+    # ---- 轮次自动沉淀（记忆二期）：候选制、默认关、失败静默、不打扰 ----
+
+    def schedule_turn_distill(self, session_id: str, new_msgs: list | None = None) -> None:
+        """轮次收尾挂点（记忆二期）：开关开时后台抽候选进待审列表。
+
+        接线：backend._run_turn_pipeline 的轮末收尾段（_auto_title 的 spawn_bg
+        旁，server/backend.py）加一行 ``self.schedule_turn_distill(sid, new_msgs)``；
+        new_msgs 传轮末落库用的同一份「本轮新增消息」列表。与 _schedule_memory_digest
+        同一套边界：spawn_bg + 失败静默 + 按会话单飞，绝不影响主流程。
+        """
+        if not distill_enabled():
+            return  # 沉淀总闸默认关（引擎自有状态文件 memory-distill.json，非 config）
+        if self.provider is None or getattr(self.provider, "demo_mode", False):
+            return  # 无模型 / 演示模式不消耗脚本组
+        if getattr(self, "_distilling", None) is None:
+            # 惰性初始化：不碰 backend.__init__（backend.py 由接线阶段统一改动）
+            self._distilling = set()  # 正在轮次沉淀候选的会话
+        if session_id in self._distilling:
+            return
+        self._distilling.add(session_id)
+        try:
+            spawn_bg(self._turn_distill(session_id, new_msgs))
+        except RuntimeError:
+            self._distilling.discard(session_id)  # 无事件循环（如纯测试环境）
+
+    async def _turn_distill(self, sid: str, new_msgs: list | None = None) -> None:
+        """轮次收尾后用当前模型抽「值得长期记住的事实/偏好」候选（≤3 条/轮）。
+
+        候选制「不打扰」：只进待审列表（tools/memory_distill.py 的状态文件），
+        不写 memory.md、不刷系统提示词、不广播事件；采纳/忽略由用户在记忆页
+        决定（memory_candidate_adopt / memory_candidate_ignore）。与归档提炼
+        同一静默边界：任何失败只记日志。
+        """
+        try:
+            msgs = new_msgs if new_msgs is not None else await self.store.load_messages(sid)
+            transcript = digest_transcript(msgs)
+            if not transcript:
+                return  # 寒暄/过短轮次不值得抽候选（与归档提炼同一阈值）
+            parts: list[str] = []
+            async for ev in self.provider.stream(
+                [Message.user(build_distill_prompt(transcript))], []
+            ):
+                if isinstance(ev, ProviderTextDelta):
+                    parts.append(ev.text)
+                elif isinstance(ev, ProviderDone):
+                    break
+            cands = parse_distill_output("".join(parts))
+            if not cands:
+                return
+            async with self._memory_io_lock:
+                # 持锁：add_candidates 读 memory.md 做去重比对、写待审状态文件，
+                # 与采纳路径的 memory.md 追加共用一把锁（防止读比对的竞态窗口）
+                add_candidates(cands, context=transcript, session_id=sid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            memory_log.warning("turn memory distill failed: %s", e)
+        finally:
+            d = getattr(self, "_distilling", None)
+            if d is not None:
+                d.discard(sid)
+
+    async def memory_distill_save(self, enabled: bool) -> dict:
+        """沉淀总闸（记忆页开关，接线阶段包成 WS 方法）：写状态文件，热生效。"""
+        return {"enabled": set_distill_enabled(bool(enabled))}
+
+    async def memory_candidates(self) -> dict:
+        """待审列表（记忆页候选区数据源，接线阶段包成 WS 方法）。"""
+        st = load_distill_state()
+        return {"enabled": st["enabled"], "pending": st["pending"]}
+
+    async def memory_candidate_adopt(self, candidate_id: str) -> dict:
+        """采纳候选：进 memory.md（remember_lines 追加），刷新系统提示词。"""
+        async with self._memory_io_lock:
+            res = adopt_candidate(candidate_id)
+        if res.get("adopted"):
+            # 采纳写入了新记忆：与 memory_save 一样立刻对所有会话生效
+            for ag in self._for_each_agent():
+                ag.set_system(self.compose_system())
+        return res
+
+    async def memory_candidate_ignore(self, candidate_id: str) -> dict:
+        """忽略候选：直接丢弃并记入已忽略名单（同一事实不再被提回来）。"""
+        async with self._memory_io_lock:
+            return ignore_candidate(candidate_id)
 
     # ---- 定期自动整理：按周期用模型合并去重全局/项目记忆（纯函数在 tools/memory.py） ----
 

@@ -27,6 +27,7 @@ from . import commands
 from .base import Channel, ChannelMessage, ChannelStatus
 from .feishu import FeishuChannel
 from .gate import AMBIGUOUS_ACK_WORDS, parse_decision
+from .webhook import WebhookChannel
 from .weixin import WeixinChannel
 
 logger = logging.getLogger("skysheep.channels")
@@ -35,6 +36,7 @@ logger = logging.getLogger("skysheep.channels")
 ADAPTERS: dict[str, type[Channel]] = {
     "feishu": FeishuChannel,
     "weixin": WeixinChannel,
+    "webhook": WebhookChannel,
 }
 
 # 上限：发现来源只用于首次配置时认领 chat_id，留最近若干条即可

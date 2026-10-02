@@ -73,7 +73,7 @@ class ChannelsMixin:
         """该平台的凭据是否齐全（未启用、未配置的渠道也要能正确判定）。
 
         各平台凭据形状不同：飞书是 app_id + app_secret 两个字段，微信是扫码换来的
-        bot_token（运行态而非手填），其余历史平台用单个 token。
+        bot_token（运行态而非手填），webhook 是推送地址 URL，其余历史平台用单个 token。
         """
         if name == "weixin":
             return bool(str(section.get("bot_token", "")).strip())
@@ -82,6 +82,8 @@ class ChannelsMixin:
                 str(section.get("app_id", "")).strip()
                 and str(section.get("app_secret", "")).strip()
             )
+        if name == "webhook":
+            return bool(str(section.get("url", "")).strip())
         return bool(str(section.get("token", "")).strip())
 
     async def channel_status(self) -> dict:
@@ -132,6 +134,9 @@ class ChannelsMixin:
             # 飞书：凭据是两个字段，界面要分别回显“已保存”而不是只认一个 token
             item["has_app_id"] = bool(str(section.get("app_id", "")).strip())
             item["has_app_secret"] = bool(str(section.get("app_secret", "")).strip())
+            # Webhook：推送地址与签名密钥同样只回显“已保存”
+            item["has_url"] = bool(str(section.get("url", "")).strip())
+            item["has_secret"] = bool(str(section.get("secret", "")).strip())
             # 预授权名单（只读回显 + 危险工具告警）：配置里手写的 run_command
             # 等于「无人值守任意命令」，界面上必须看得见（安全审查低危项）
             allowed_tools = [str(x) for x in (section.get("allowed_tools") or [])]
@@ -178,6 +183,12 @@ class ChannelsMixin:
         # 飞书依赖外部 lark-cli；允许显式指定路径（留空即用 PATH 查找）
         if params.get("cli_path") is not None:
             section["cli_path"] = str(params["cli_path"]).strip()
+        # 通用 Webhook 的推送地址与签名密钥：与凭据同一待遇，只在显式传入时覆盖，
+        # 保存其它字段（如允许名单）不会把它们清掉
+        if params.get("url") is not None:
+            section["url"] = str(params["url"]).strip()
+        if params.get("secret") is not None:
+            section["secret"] = str(params["secret"]).strip()
         if params.get("allowed_ids") is not None:
             section["allowed_ids"] = _normalize_id_list(params["allowed_ids"])
         if params.get("approve_enabled") is not None:
@@ -318,6 +329,9 @@ class ChannelsMixin:
                 raise RuntimeError("飞书还没填 App ID，先填好再启用")
             if not str(section.get("app_secret", "")).strip():
                 raise RuntimeError("飞书还没填 App Secret，先填好再启用")
+        elif name == "webhook":
+            if not str(section.get("url", "")).strip():
+                raise RuntimeError("Webhook 还没填推送地址（URL），先填好再启用")
         elif not str(section.get("token", "")).strip():
             raise RuntimeError(f"「{name}」还没填凭据，先填好再启用")
         # 注意：这里**不能**再要求允许名单非空。chat id 只能由运行中的机器人
@@ -355,16 +369,22 @@ class ChannelsMixin:
         return await self.channel_status()
 
     async def channel_test(self, params: dict) -> dict:
-        """试发一条消息，验证 token 与 chat_id 是否都对。"""
+        """试发一条消息，验证 token 与 chat_id 是否都对。
+
+        纯出站渠道（webhook）没有 chat_id 概念：不填也放行，直接对配置的
+        URL 试发一条。
+        """
         name = str(params.get("name", "")).strip()
         chat_id = str(params.get("chat_id", "")).strip()
-        if not name or not chat_id:
+        if not name:
             raise RuntimeError("需要平台名与 chat_id")
         if self.channels is None:
             raise RuntimeError("渠道管理器尚未就绪")
         channel = self.channels.channels.get(name)
         if channel is None:
             raise RuntimeError(f"平台「{name}」还没启用")
+        if not chat_id and not getattr(channel, "pure_outbound", False):
+            raise RuntimeError("需要平台名与 chat_id")
         ok = await channel.send_text(chat_id, "🐑 SkySheep 测试消息：这条能收到，说明配置通了。")
         return {"ok": ok, "error": channel.error}
 

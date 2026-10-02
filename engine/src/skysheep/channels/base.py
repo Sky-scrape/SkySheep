@@ -58,6 +58,12 @@ class Channel(abc.ABC):
 
     name: str = ""
 
+    # 纯出站渠道（如通用 webhook）：只有「发」没有「收」。它没有入站来源，
+    # base.allowed_ids 的「空 = 拒绝一切」准入闸门对它不适用——enabled +
+    # configured 即可推送，allowed_ids 留空代表广播。推送目标的统一口径在
+    # server/backend_parts/automation.py 的 _cron_push_targets_of / push_text_to_targets。
+    pure_outbound: bool = False
+
     def __init__(self, config: dict, on_message) -> None:
         self.config = dict(config or {})
         # on_message 由 ChannelManager 注入：async (ChannelMessage) -> None

@@ -19,6 +19,16 @@ from ...security.gate import HeadlessGate
 from ...tools import ChangeRecorder
 from ...tools.pipeline import task_node_fields
 from ._shared import SessionRuntime
+from .daily_report import (
+    load_state as load_daily_report_state,
+)
+from .daily_report import (
+    parse_hhmm,
+    run_daily_report_pass,
+)
+from .daily_report import (
+    save_state as save_daily_report_state,
+)
 
 logger = logging.getLogger("skysheep.security")
 
@@ -30,31 +40,45 @@ CronGate = HeadlessGate
 
 
 def _cron_push_targets_of(mgr) -> list:
-    """渠道推送目标：启用、配置齐全且允许名单非空的渠道。
+    """渠道推送目标：启用且配置齐全的渠道。
 
-    allowed_ids 是主人的准入标识，名单为空的渠道拒发一切，这里同样不推
-    （渠道未启用/未绑定 = 静默跳过，不报错）。渠道管理器未就绪时无目标。
+    聊天渠道还要求允许名单非空（allowed_ids 是主人的准入标识，名单为空的
+    渠道拒发一切）；纯出站渠道（webhook）没有入站名单语义，enabled +
+    configured 即为目标，allowed_ids 留空代表广播。渠道未启用/未配置 =
+    静默跳过，不报错。渠道管理器未就绪时无目标。
     """
     if mgr is None:
         return []
     return [
         channel for channel in list(mgr.channels.values())
-        if channel.enabled and channel.configured() and channel.allowed_ids
+        if channel.enabled and channel.configured()
+        and (getattr(channel, "pure_outbound", False) or channel.allowed_ids)
     ]
 
 
-async def push_text_to_targets(mgr, body: str, *, what: str = "定时任务摘要") -> None:
-    """把一段文本推给所有目标渠道（纯推送，不需要回复）。
+async def push_text_to_targets(mgr, body: str, *, what: str = "定时任务摘要") -> int:
+    """把一段文本推给所有目标渠道（纯推送，不需要回复）。返回成功送达的次数。
 
-    逐渠道逐 chat_id 发送，单个失败只记日志继续；渠道管理器不可用或没有
-    目标渠道时静默返回。
+    聊天渠道逐 chat_id 发送；纯出站渠道（webhook）没有 chat_id 维度，
+    整段发一次。单个失败只记日志继续；渠道管理器不可用或没有目标渠道时
+    静默返回 0。
     """
+    delivered = 0
     for channel in _cron_push_targets_of(mgr):
+        if getattr(channel, "pure_outbound", False):
+            try:
+                if await channel.send_text("", body):
+                    delivered += 1
+            except Exception as e:  # noqa: BLE001 - 推送失败只记日志
+                logger.warning("%s推送 %s 失败：%s", what, channel.name, e)
+            continue
         for chat_id in sorted(channel.allowed_ids):
             try:
-                await channel.send_text(chat_id, body)
+                if await channel.send_text(chat_id, body):
+                    delivered += 1
             except Exception as e:  # noqa: BLE001 - 推送失败只记日志
                 logger.warning("%s推送 %s(%s) 失败：%s", what, channel.name, chat_id, e)
+    return delivered
 
 
 def _fire_cron_push(mgr, task: dict, status: str, duration_s: float, body: str) -> None:
@@ -1333,9 +1357,10 @@ class AutomationMixin:
     ) -> None:
         """流水线收尾时向聊天渠道推一条摘要（纯推送，不需要回复）。
 
-        推送目标是渠道配置里的允许名单（allowed_ids）——它们本来就是主人的
-        准入标识；名单为空的渠道拒发一切，这里同样不推。发送失败静默记日志，
-        不影响桌面端通知与流水线状态。
+        推送目标复用 push_text_to_targets 的统一口径：聊天渠道要求允许名单
+        非空（allowed_ids 本来就是主人的准入标识），纯出站渠道（webhook）
+        enabled + configured 即推。发送失败静默记日志，不影响桌面端通知与
+        流水线状态。
         """
         mgr = self.channels
         if mgr is None:
@@ -1347,14 +1372,7 @@ class AutomationMixin:
             body += f"，{failed} 个未成功"
         if skipped:
             body += f"，{len(skipped)} 个被跳过"
-        for name, channel in list(mgr.channels.items()):
-            if not channel.enabled or not channel.configured():
-                continue
-            for chat_id in sorted(channel.allowed_ids):
-                try:
-                    await channel.send_text(chat_id, body)
-                except Exception as e:  # noqa: BLE001 - 推送失败只记日志
-                    logger.warning("流水线摘要推送 %s(%s) 失败：%s", name, chat_id, e)
+        await push_text_to_targets(mgr, body, what="流水线摘要推送")
 
     async def _maybe_finish_pipeline(self, pipe: dict) -> None:
         """全部节点到终态时给流水线收尾：done/skipped 视为成功（skipped 是条件门
@@ -1824,3 +1842,49 @@ class AutomationMixin:
                     frontier.append(n["id"])
         out.sort(key=lambda n: n["seq"])
         return out
+
+    # ---- 每日运行日报（每天一条的终态汇总推送） ----
+    # 状态与汇总主体在 backend_parts/daily_report.py；这里只挂扫描循环与
+    # 设置读写。循环要由应用启动处显式 start（与 cron / 流水线循环同款），
+    # 接线阶段在 app 启动处调用 start_daily_report_loop 即生效。
+
+    DAILY_REPORT_INTERVAL = 60.0  # 秒：每轮只读一次状态文件判断是否到点，开销可忽略
+
+    def start_daily_report_loop(self) -> None:
+        self._daily_report_task = asyncio.create_task(self._daily_report_loop())
+
+    def stop_daily_report_loop(self) -> None:
+        if getattr(self, "_daily_report_task", None):
+            self._daily_report_task.cancel()
+            self._daily_report_task = None
+
+    async def _daily_report_loop(self) -> None:
+        """周期检查是否到日报时刻：到点推一次并记日期，单轮失败不终止循环。"""
+        while True:
+            try:
+                await run_daily_report_pass(self.store, self.channels)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # 单轮失败不终止循环（与 cron / 流水线扫描循环同一姿态）
+            await asyncio.sleep(self.DAILY_REPORT_INTERVAL)
+
+    async def daily_report_status(self) -> dict:
+        """日报设置回读（设置页渲染用；WS 方法由接线阶段挂 dispatch）。"""
+        return load_daily_report_state()
+
+    async def daily_report_save(self, params: dict) -> dict:
+        """保存日报设置：enabled 开关与推送时刻（HH:MM），原子写状态文件。
+
+        时刻不合法直接报错（不静默回落默认值——用户填错要看得见）。
+        """
+        state = load_daily_report_state()
+        if params.get("enabled") is not None:
+            state["enabled"] = bool(params["enabled"])
+        if params.get("time") is not None:
+            raw = str(params["time"]).strip()
+            if parse_hhmm(raw) is None:
+                raise RuntimeError("推送时间格式应为 HH:MM（24 小时制，如 09:00）")
+            state["time"] = raw
+        save_daily_report_state(state)
+        return await self.daily_report_status()

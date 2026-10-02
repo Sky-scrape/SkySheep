@@ -747,6 +747,51 @@ function agendaModal(existing, defaultTs, preset) {
   }, isEdit ? "保存" : "添加");
 }
 
+// ---------- 每日运行日报：当天定时任务 / 任务编排终态的定时汇总（automation.daily_report_*） ----------
+// 开关默认关；每天到设定时刻经已启用的渠道（聊天渠道 / Webhook）推一次，
+// 应用没开着错过时刻则开机后补发当天一份，送达失败当天不重试（取舍见引擎侧
+// daily_report.py 的模块注释）。行常驻自动化页两个分段之下，方法不可用时保持隐藏。
+
+async function loadDailyReportRow() {
+  const row = document.getElementById("daily-report-row");
+  if (!row) return;
+  let st;
+  try {
+    st = await request("automation.daily_report_status");
+  } catch (e) {
+    return; // 旧后端 / 远端被拒：维持初始 hidden，不报错打扰
+  }
+  const tgl = document.getElementById("daily-report-toggle");
+  const t = document.getElementById("daily-report-time");
+  if (tgl) tgl.checked = !!st.enabled;
+  if (t) t.value = st.time || "09:00";
+  row.classList.remove("hidden");
+  bindDailyReportRow(); // 幂等重绑：重复 load 不叠加行为
+}
+
+// 即改即存（与归档提炼开关同一交互）；失败按后台真实值回拨
+async function saveDailyReportRow(patch) {
+  try {
+    const r = await request("automation.daily_report_save", patch);
+    const tgl = document.getElementById("daily-report-toggle");
+    const t = document.getElementById("daily-report-time");
+    if (tgl) tgl.checked = !!r.enabled;
+    if (t) t.value = r.time || "09:00";
+    return r;
+  } catch (e) {
+    addNotice("日报设置保存失败: " + e.message);
+    await loadDailyReportRow();
+    return null;
+  }
+}
+
+function bindDailyReportRow() {
+  const tgl = document.getElementById("daily-report-toggle");
+  if (tgl) tgl.onchange = () => saveDailyReportRow({ enabled: tgl.checked });
+  const t = document.getElementById("daily-report-time");
+  if (t) t.onchange = () => saveDailyReportRow({ time: t.value });
+}
+
 // ---------- 定时任务：无人值守的周期 Agent 任务（cron.list/add/update/delete/run_now） ----------
 
 function fmtCronSchedule(t) {
@@ -764,6 +809,7 @@ function fmtNextRun(ts) {
 }
 
 async function loadCron() {
+  loadDailyReportRow(); // 日报开关行与定时任务同源（automation 家族），顺手刷新
   // 工具勾选表要用 boot 快照里的工具清单（含权限级别），别让用户手打工具名
   if (!bootSnap || !bootSnap.tools) {
     try { bootSnap = await request("boot"); } catch (e) { /* 取不到就退化提示 */ }
@@ -1085,6 +1131,7 @@ function mountPipelineGraph(el, nodes, opts = {}) {
 }
 
 async function loadPipelines() {
+  loadDailyReportRow(); // 日报汇总口径含流水线终态：任务编排分段打开时同样刷新
   if (!bootSnap || !bootSnap.tools) {
     try { bootSnap = await request("boot"); } catch (e) { /* 取不到就退化提示 */ }
   }

@@ -1935,6 +1935,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     self._auto_title(sid, first_user, first_reply)
                 )
 
+        # 记忆二期：轮次收尾后抽「值得长期记住」的候选（开关默认关；
+        # spawn_bg + 失败静默 + 按会话单飞都在方法内，绝不影响主流程）
+        self.schedule_turn_distill(sid, new_msgs)
+
         # 本轮改动了文件 → 存检查点（落盘 + 内存索引）；结果里带给前端做「撤销本轮改动」
         checkpoint = await asyncio.to_thread(
             self.checkpoints.save, sid, dict(runtime.recorder.pre)

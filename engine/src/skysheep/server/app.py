@@ -290,7 +290,7 @@ def _first_paint_attrs(prefs: dict) -> str:
 
 
 # ---- WS 方法注册表（表驱动分发的唯一事实来源） ----
-# 全部 199 个 WS 方法的分支体自 dispatch 的 if-chain 逐字迁入 handler；
+# 全部 209 个 WS 方法的分支体自 dispatch 的 if-chain 逐字迁入 handler；
 # local_only / local_gate 的判定与拒绝文案，同原 LOCAL_ONLY_METHODS 表与原内联
 # 「if … and not local: raise」逐字一致。
 
@@ -954,6 +954,15 @@ async def _h_pipeline_import(backend: ServerBackend, params: dict, emit, local: 
     return await backend.pipeline_import(params)
 
 
+async def _h_automation_report_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 每日运行日报的设置回读：只有开关 / 时刻 / 上次已发日期，不含敏感面
+    return await backend.daily_report_status()
+
+
+async def _h_automation_report_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.daily_report_save(params)
+
+
 async def _h_ui_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.get_ui_prefs()
 
@@ -1020,6 +1029,26 @@ async def _h_memory_maintain_now(backend: ServerBackend, params: dict, emit, loc
 async def _h_memory_digest_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 归档自动记忆总闸：只切一个布尔开关，不写敏感配置，远程可调
     return await backend.memory_digest_save(bool(params.get("enabled", True)))
+
+
+async def _h_memory_candidates(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 轮次沉淀的待审候选：条目带上下文摘录与会话归属（对话内容的枚举面），
+    # 与 memory.get 同一姿态——本机专属
+    return await backend.memory_candidates()
+
+
+async def _h_memory_candidate_adopt(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.memory_candidate_adopt(str(params.get("candidate_id", "")))
+
+
+async def _h_memory_candidate_ignore(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.memory_candidate_ignore(str(params.get("candidate_id", "")))
+
+
+async def _h_memory_distill_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 轮次沉淀总闸：只切一个布尔开关（引擎自有状态文件），与 memory.digest_save
+    # 同一姿态，远程可调
+    return await backend.memory_distill_save(bool(params.get("enabled", False)))
 
 
 async def _h_map_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -1623,6 +1652,13 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "pipeline.duplicate": _WsMethod(_h_pipeline_duplicate, local_only=True),
     "pipeline.export": _WsMethod(_h_pipeline_export),
     "pipeline.import": _WsMethod(_h_pipeline_import, local_only=True),
+    # 每日运行日报（无人值守三期）：状态只读各端可看；开启属无人值守推送面，
+    # 与 cron.add 同一姿态仅本机
+    "automation.daily_report_status": _WsMethod(_h_automation_report_status),
+    "automation.daily_report_save": _WsMethod(
+        _h_automation_report_save, local_only=True,
+        local_error="运行日报的设置只能在桌面端本机修改",
+    ),
     "ui.get": _WsMethod(_h_ui_get),
     "trust.status": _WsMethod(_h_trust_status),
     "trust.list": _WsMethod(_h_trust_list, local_only=True, local_error="信任清单只能在本机界面上查看"),
@@ -1635,6 +1671,21 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "memory.maintain_save": _WsMethod(_h_memory_maintain_save),
     "memory.maintain_now": _WsMethod(_h_memory_maintain_now),
     "memory.digest_save": _WsMethod(_h_memory_digest_save),
+    # 轮次记忆沉淀（记忆二期）：候选条目带对话摘录与会话归属，本机专属；
+    # 开关只切布尔，与 memory.digest_save 同姿态
+    "memory.candidates": _WsMethod(
+        _h_memory_candidates, local_only=True,
+        local_error="记忆候选列表只能在本机界面上查看",
+    ),
+    "memory.candidate_adopt": _WsMethod(
+        _h_memory_candidate_adopt, local_only=True,
+        local_error="记忆候选的采纳与忽略只能在本机界面上操作",
+    ),
+    "memory.candidate_ignore": _WsMethod(
+        _h_memory_candidate_ignore, local_only=True,
+        local_error="记忆候选的采纳与忽略只能在本机界面上操作",
+    ),
+    "memory.distill_save": _WsMethod(_h_memory_distill_save),
     "map.get": _WsMethod(_h_map_get),
     "map.generate": _WsMethod(_h_map_generate),
     "map.save_config": _WsMethod(_h_map_save_config),
@@ -1804,6 +1855,7 @@ def create_app(
         backend.start_cron_loop()
         backend.start_pipeline_loop()
         backend.start_memory_maintenance_loop()
+        backend.start_daily_report_loop()
         import logging
 
         logging.getLogger("skysheep").info(
@@ -1814,6 +1866,7 @@ def create_app(
         backend.stop_pipeline_loop()
         backend.stop_reminder_loop()
         backend.stop_memory_maintenance_loop()
+        backend.stop_daily_report_loop()
         # crash.flag 的清除在 backend.shutdown() 开头做：收尾链最后一环最容易
         # 被截断（桌面壳 1.5s 上限、程序内更新的 os._exit），清在末尾等于没清
         await backend.shutdown()

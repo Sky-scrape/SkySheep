@@ -513,6 +513,20 @@
               </div>
               <ul id="pipeline-list" class="list pipeline-list rp-page-list"></ul>
             </div>
+
+            <!-- 每日运行日报：两个分段共用的开关行（汇总当天定时任务 + 任务编排的终态）。
+                 状态来自 automation.daily_report_status，app-schedule.js 的 loadDailyReportRow 渲染；
+                 方法不可用（旧后端）时保持初始 hidden。 -->
+            <div id="daily-report-row" class="rp-daily hidden">
+              <label class="toggle-row check-row"
+                     title="开启后每天到设定时刻，把当天定时任务与任务编排的终态汇总成一条中文日报，经已启用的聊天渠道 / Webhook 推送一次；应用没开着错过时刻，开机后补发当天一份（送达失败当天不重试，次日照常）">
+                <input type="checkbox" id="daily-report-toggle">
+                <span>每日运行日报</span>
+              </label>
+              <input type="time" id="daily-report-time" value="09:00"
+                     title="每天到这个时刻推送日报（24 小时制）">
+              <span class="dim small">到点把当天定时任务 / 任务编排的终态汇总成一条，经已启用的渠道推送</span>
+            </div>
           </section>
 
           <section id="rp-page-memory" class="rp-page hidden">
@@ -552,6 +566,14 @@
               <button data-view="timeline" class="active">时间线</button>
               <button data-view="graph">图谱</button>
             </div>
+            <!-- 轮次记忆沉淀的待审候选（memory.candidates）：有候选才展开成显眼入口，
+                 空列表且未开沉淀时整块隐藏（app-memmap.js 的 loadMemoryCandidates 渲染） -->
+            <details id="map-distill" class="map-distill hidden">
+              <summary title="每轮对话收尾后，当前模型挑出的「值得长期记住」信息；采纳后写入全局记忆，忽略不再提出">
+                <span id="map-distill-title">记忆候选</span>
+              </summary>
+              <div id="map-distill-body" class="map-distill-body"></div>
+            </details>
             <div id="map-body" class="map-body">
               <div id="map-timeline" class="map-timeline"></div>
               <div id="map-graph" class="map-graph hidden"></div>
@@ -1097,6 +1119,8 @@
               把 <b>飞书 / 微信</b> 接成遥控端：手机上给机器人发消息，就能让这台电脑上的 SkySheep
               干活，回复直接回到聊天窗口。渠道<b>默认关闭</b>；启用前必须先把你的账号加入
               <b>允许名单</b>——没有名单的机器人等于对所有人开放。
+              <b>Webhook</b> 是纯出站的推送目标：只把定时任务摘要、任务编排终态、每日运行日报等
+              出站消息 POST 到你配置的地址，不收消息。
             </p>
             <details class="rule-check-fold">
               <summary>安全边界与凭据说明（只读模式 / 群聊风险 / 审批规则 / 凭据要求）</summary>
@@ -1104,7 +1128,8 @@
                 <b>「允许操作」未开启时，机器人只能读不能写</b>（改文件、跑命令一律自动拒绝）。
                 名单建议只填你个人的 OpenID——填群 chat id 等于群里每个人都能指挥机器人、
                 并对审批操作表态（决定只认发起人）。审批只能单次允许，没有「总是允许」。
-                飞书需自备 App ID / App Secret；微信无需 Token，扫二维码登录即可。
+                飞书需自备 App ID / App Secret；微信无需 Token，扫二维码登录即可；
+                Webhook 无入站、不需要名单，可选配签名密钥供接收方验源。
               </p>
             </details>
             <div id="channel-panel" class="lan-info"></div>

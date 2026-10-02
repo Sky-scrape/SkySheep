@@ -55,6 +55,9 @@ function mapHeatWeeksFor(width) {
 
 async function loadMemoryMap(force) {
   const tl = document.getElementById("map-timeline");
+  // 记忆候选是全局的（不随项目/时间窗过滤），与地图载荷并行各拉各的；
+  // 地图挂了（如还没有项目）也不影响候选区
+  loadMemoryCandidates();
   try {
     if (!mapProjects.length || force) {
       const pl = await request("project.list").catch(() => ({ projects: [] }));
@@ -77,6 +80,90 @@ async function loadMemoryMap(force) {
     if (tl) tl.innerHTML = `<div class="map-empty dim">${escapeHtml(e.message)}</div>`;
     document.getElementById("map-aside").classList.add("hidden");
   }
+}
+
+// ---------- 轮次记忆沉淀：待审候选（memory.candidates / candidate_adopt / candidate_ignore） ----------
+// 候选制「不打扰」：模型每轮挑出的候选先进待审列表，用户在这里采纳（写入全局记忆）
+// 或忽略（不再提出）；开关默认关。入口放记忆地图：空列表且未开沉淀时整块隐藏。
+
+let distillState = { enabled: false, pending: [] };
+
+async function loadMemoryCandidates() {
+  const box = document.getElementById("map-distill");
+  if (!box) return;
+  let r;
+  try {
+    r = await request("memory.candidates");
+  } catch (e) {
+    box.classList.add("hidden"); // 方法不可用（旧后端/远端被拒）：入口不出现
+    return;
+  }
+  distillState = { enabled: !!r.enabled, pending: r.pending || [] };
+  renderMemoryCandidates();
+}
+
+function renderMemoryCandidates() {
+  const box = document.getElementById("map-distill");
+  const body = document.getElementById("map-distill-body");
+  if (!box || !body) return;
+  const n = distillState.pending.length;
+  // 空列表折叠不显眼：没开沉淀且没有候选时整块藏掉；有候选才默认展开
+  if (!n && !distillState.enabled) {
+    box.classList.add("hidden");
+    return;
+  }
+  const wasHidden = box.classList.contains("hidden");
+  box.classList.remove("hidden");
+  // 有候选且刚从隐藏态出来才自动展开；用户已展开着就保持（清空到 0 条时
+  // 不强收——开关行在里面，收起来会藏掉用户刚点过的开关）
+  if (n) box.open = wasHidden || box.open;
+  const title = document.getElementById("map-distill-title");
+  if (title) title.textContent = n ? `记忆候选 · ${n} 条待审` : "记忆候选 · 暂无待审";
+  const tgl = `<label class="toggle-row check-row map-distill-toggle"
+    title="开启后每轮对话收尾，用当前模型挑出「值得长期记住」的候选（每轮至多 3 条，失败静默），采纳后才写入全局记忆。额外消耗一次模型调用；寒暄、过短的轮次不会触发。">
+    <input type="checkbox" id="map-distill-toggle"${distillState.enabled ? " checked" : ""}>
+    <span>轮次自动沉淀</span></label>`;
+  const rows = distillState.pending.map((c) =>
+    `<div class="map-distill-item" data-cid="${escapeHtml(c.id)}">
+       <span class="map-distill-text" title="${escapeHtml(c.context || "（无上下文摘录）")}">${escapeHtml(c.text)}</span>
+       <span class="map-distill-ops">
+         <button class="rp-mini" data-op="adopt" title="写入全局记忆（与既有记忆重复会自动跳过）">采纳</button>
+         <button class="rp-mini" data-op="ignore" title="丢弃这条，同类信息之后不再被提出">忽略</button>
+       </span>
+     </div>`).join("");
+  body.innerHTML = tgl + (rows ||
+    '<div class="dim small map-distill-empty">没有待审候选。开启沉淀后，对话里值得长期记住的信息会出现在这里，由你决定记不记。</div>');
+  const t = document.getElementById("map-distill-toggle");
+  if (t) t.onchange = async (e) => {
+    const el = e.target;
+    try {
+      const r = await request("memory.distill_save", { enabled: el.checked });
+      distillState.enabled = !!r.enabled;
+      el.checked = distillState.enabled; // 以落库值为准
+    } catch (err) {
+      el.checked = !el.checked; // 失败回拨
+      addNotice("保存失败: " + err.message);
+      return;
+    }
+    renderMemoryCandidates();
+  };
+  body.querySelectorAll(".map-distill-item").forEach((el) => {
+    const cid = el.dataset.cid;
+    el.querySelector('[data-op="adopt"]').onclick = async () => {
+      try {
+        const r = await request("memory.candidate_adopt", { candidate_id: cid });
+        addNotice(r.adopted ? "已写入全局记忆，之后所有会话立即生效"
+          : (r.reason || "没有采纳：记忆里已有相同内容"));
+      } catch (err) { addNotice("采纳失败: " + err.message); }
+      loadMemoryCandidates();
+    };
+    el.querySelector('[data-op="ignore"]').onclick = async () => {
+      try {
+        await request("memory.candidate_ignore", { candidate_id: cid });
+      } catch (err) { addNotice("忽略失败: " + err.message); }
+      loadMemoryCandidates();
+    };
+  });
 }
 
 // 页头控件与项目下拉（数据回来后同步，选择器只发事件不改渲染）

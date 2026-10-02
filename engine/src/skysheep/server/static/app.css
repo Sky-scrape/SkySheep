@@ -3339,6 +3339,19 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
   font-size: 12px; border-bottom: 1px solid var(--line);
 }
 .rp-maintain-row input { width: 14px; height: 14px; }
+/* 每日运行日报开关行：自动化页两个分段共用，常驻分段视图之下 */
+.rp-daily {
+  flex-shrink: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 10px; margin: 0; font-size: 12px;
+  border-top: 1px solid var(--line);
+}
+.rp-daily .toggle-row { justify-content: flex-start; gap: 8px; }
+#daily-report-time {
+  border: 1px solid var(--line2); border-radius: 6px;
+  background: var(--paper-raised); color: var(--text);
+  font: inherit; font-size: 12px; padding: 2px 6px; cursor: pointer;
+}
+#daily-report-time:focus { outline: none; border-color: var(--blue); }
 /* rp-mini 的外观已并入「盖章按钮」共享块（见文件顶部），这里不再重复定义 */
 .rp-empty { margin: auto; max-width: 320px; text-align: center; color: var(--dim); font-size: 12.5px; line-height: 1.9; padding: 20px; }
 
@@ -3694,6 +3707,30 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   list-style: none;
 }
 .map-overview summary::-webkit-details-marker { display: none; }
+
+/* —— 轮次记忆沉淀的待审候选（记忆二期接线）：折叠入口 + 候选条目行 ——
+   空列表且未开沉淀时整块 hidden（JS 控制），有候选才默认展开成显眼入口 */
+.map-distill {
+  flex-shrink: 0; margin: 6px 10px 0;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--paper-inset);
+  font-size: 12px;
+}
+.map-distill summary {
+  cursor: pointer; padding: 5px 10px;
+  font-weight: 700; color: var(--text2);
+  list-style: none; user-select: none;
+}
+.map-distill summary::-webkit-details-marker { display: none; }
+.map-distill summary::before { content: "▸ "; color: var(--dim); }
+.map-distill[open] summary::before { content: "▾ "; }
+.map-distill-body { padding: 2px 10px 8px; display: flex; flex-direction: column; gap: 6px; }
+.map-distill-toggle { justify-content: flex-start; gap: 8px; font-weight: 400; }
+.map-distill-item { display: flex; align-items: flex-start; gap: 8px; }
+.map-distill-text { flex: 1; min-width: 0; line-height: 1.6; color: var(--text); word-break: break-word; }
+.map-distill-ops { display: flex; gap: 4px; flex-shrink: 0; }
+.map-distill-ops .rp-mini { padding: 2px 8px; font-size: 11px; }
+.map-distill-empty { padding: 2px 0 4px; }
 
 /* —— 底栏：文件足迹 chips + 活跃热力图 —— */
 .map-aside {

@@ -10452,8 +10452,9 @@ if (toolBrowserToggle) {
 
 // ---------- 设置 · 聊天机器人渠道（Bot Channel） ----------
 // 渠道是「受限遥控端」：能对话与审批，但不能改降低防护的开关（后端 dispatch 层也拦，
-// 这里不提供入口）。默认关闭，启用前必须填允许名单。
-const CHANNEL_LABEL = { feishu: "飞书", weixin: "微信" };
+// 这里不提供入口）。默认关闭；聊天渠道（飞书/微信）启用前必须把账号加入允许名单，
+// webhook 纯出站没有名单门槛（填了 URL 即为推送目标）。
+const CHANNEL_LABEL = { feishu: "飞书", weixin: "微信", webhook: "Webhook" };
 // 微信的凭据来自扫码（不是手填 Token），且会失效需重登
 let wxLoginQrcode = "";
 let wxLoginTimer = null;
@@ -10529,17 +10530,24 @@ function weixinLoginBlock(c) {
 
 function channelCard(c) {
   const label = CHANNEL_LABEL[c.name] || c.name;
+  const isWebhook = c.name === "webhook";
   // 状态做成一枚小徽标：已关闭 / 运行中 / 已启用但没跑起来。
   // 适配器报 extra.connected === false 时（飞书长连接的“任务在跑、连接未建立”
   // 这种中间态），不能只说「运行中」——那就又变成用户看不到原因的状态。
+  // webhook 是纯出站：没有后台轮询，「运行」恒为假，启用即就绪，不套聊天渠道的
+  // 「已启用但未运行」文案（那会让用户以为它坏了）。
   const connDown = c.extra && c.extra.connected === false;
-  const badge = c.running
+  const badge = isWebhook
+    ? (c.enabled
+      ? '<span class="channel-badge on">已启用 · 纯出站推送</span>'
+      : '<span class="channel-badge">已关闭</span>')
+    : (c.running
     ? (connDown
       ? `<span class="channel-badge warn">已启用但未连上</span>`
       : `<span class="channel-badge on">运行中</span>`)
     : (c.enabled
       ? `<span class="channel-badge warn">已启用但未运行</span>`
-      : `<span class="channel-badge">已关闭</span>`);
+      : `<span class="channel-badge">已关闭</span>`));
   const err = c.error
     ? `<div class="channel-hint bad">⚠ ${escapeHtml(c.error)}</div>`
     : "";
@@ -10553,9 +10561,17 @@ function channelCard(c) {
      </div>`
   ).join("");
   const ids = (c.allowed_ids || []).join("\n");
-  // 凭据区按平台分流：飞书是手填 App ID + App Secret，微信是扫码登录
+  // 凭据区按平台分流：飞书是手填 App ID + App Secret，微信是扫码登录，
+  // webhook 是推送地址 + 可选签名密钥（纯出站，没有入站凭据）
   const credBlock = c.name === "weixin"
     ? weixinLoginBlock(c)
+    : isWebhook
+    ? `<div class="channel-field">推送地址 URL</div>
+       <input class="channel-input channel-url" data-name="${c.name}" type="text"
+         placeholder="${c.has_url ? "已保存（留空则不修改）" : "https://example.com/hook"}">
+       <div class="channel-field">签名密钥（可选）</div>
+       <input class="channel-input channel-secret" data-name="${c.name}" type="password"
+         placeholder="${c.has_secret ? "已保存（留空则不修改）" : "留空不签名；填写后发送时附带 HMAC-SHA256 签名头供接收方验源"}">`
     : `<div class="channel-field">App ID</div>
        <input class="channel-input channel-appid" data-name="${c.name}" type="text"
          placeholder="${c.has_app_id ? "已保存（留空则不修改）" : "cli_xxxxxxxxxxxxxxxx"}">
@@ -10563,9 +10579,12 @@ function channelCard(c) {
        <input class="channel-input channel-appsecret" data-name="${c.name}" type="password"
          placeholder="${c.has_app_secret ? "已保存（留空则不修改）" : "从开发者后台复制 App Secret"}">`;
   // 首次配置的顺序指引：启用不需要先填名单（机器人跑起来才能发现来源），
-  // 但名单为空时它对一切消息保持沉默，所以要提示用户「启用 → 发消息 → 回来认领」
-  const needClaim = c.enabled && !(c.allowed_ids || []).length;
-  const hint = c.name === "weixin"
+  // 但名单为空时它对一切消息保持沉默，所以要提示用户「启用 → 发消息 → 回来认领」。
+  // webhook 没有入站，名单语义反转（留空 = 广播），不存在「认领」步骤
+  const needClaim = c.enabled && !isWebhook && !(c.allowed_ids || []).length;
+  const hint = isWebhook
+    ? "纯出站推送：填好 URL 并启用后，定时任务摘要、任务编排终态、每日运行日报等出站消息会以 JSON POST 到这个地址；发送失败只记日志，不重试。"
+    : c.name === "weixin"
     ? (needClaim
       ? "已启用但名单还是空的：现在给机器人发一句话，下方出现「见过的来源」后点「加入允许名单」，它才会开始回复。"
       : "登录后给机器人发一句话，然后点上方「加入允许名单」，就能拿到你的 OpenID。")
@@ -10586,7 +10605,9 @@ function channelCard(c) {
     ${err}
     ${needClaim ? '<div class="channel-hint bad">⚠ 名单还是空的：现在机器人对一切消息保持沉默。先给它发一句话，再回来点「加入允许名单」。</div>' : ""}
     ${credBlock}
-    <div class="channel-field">允许名单（每行一个 ${idLabel}；<b>空名单 = 拒绝一切</b>）</div>
+    ${isWebhook
+      ? '<div class="channel-hint">无需允许名单：webhook 不收消息，没有准入名单的概念——启用且填好 URL 即为推送目标（名单留空即广播）。</div>'
+      : `<div class="channel-field">允许名单（每行一个 ${idLabel}；<b>空名单 = 拒绝一切</b>）</div>
     <textarea class="channel-ids" data-name="${c.name}" rows="3"
       placeholder="${idPlaceholder}">${escapeHtml(ids)}</textarea>
     ${seen}
@@ -10600,10 +10621,10 @@ function channelCard(c) {
       : ""}
     ${(c.allowed_tools || []).length
       ? `<div class="channel-hint">预授权：${escapeHtml((c.allowed_tools || []).join("、"))}</div>`
-      : ""}
+      : ""}`}
     <div class="channel-ops">
       <button class="btn-ghost channel-save" data-name="${c.name}">保存</button>
-      <button class="btn-ghost channel-test" data-name="${c.name}">发测试消息</button>
+      <button class="btn-ghost channel-test" data-name="${c.name}">${isWebhook ? "发送测试推送" : "发测试消息"}</button>
     </div>
     <div class="channel-hint">${hint}</div>
   </div>`;
@@ -10793,6 +10814,15 @@ function bindChannelEvents() {
   document.querySelectorAll(".channel-test").forEach((btn) => {
     btn.onclick = async () => {
       const name = btn.dataset.name;
+      // webhook 是纯出站：没有 chat_id 概念，直接对配置的 URL 试发一条
+      if (name === "webhook") {
+        try {
+          const r = await request("channel.test", { name });
+          channelMsg(r.ok ? "测试推送已发出，去接收端看看"
+            : ("发送失败: " + (r.error || "未知原因")), r.ok ? "ok" : "bad");
+        } catch (e) { channelMsg("发送失败: " + e.message, "bad"); }
+        return;
+      }
       const ta = document.querySelector(`.channel-ids[data-name="${name}"]`);
       const first = (ta?.value || "").split("\n").map((s) => s.trim()).filter(Boolean)[0];
       if (!first) { channelMsg("先在允许名单里填一个 chat id", "bad"); return; }
@@ -10816,14 +10846,16 @@ function bindChannelEvents() {
         e.target.checked = false;
         return;
       }
-      // 名单是否为空按用户眼前输入框里的值算（重渲染后就取不到了）
+      // 名单是否为空按用户眼前输入框里的值算（重渲染后就取不到了）；
+      // webhook 没有入站名单语义，空名单即广播，不算「还没配完」
       const idsEl = document.querySelector(`.channel-ids[data-name="${name}"]`);
-      const idsEmpty = !(idsEl?.value || "").trim();
+      const idsEmpty = name !== "webhook" && !(idsEl?.value || "").trim();
       try {
         if (e.target.checked) {
           await request("channel.enable", { name });
           channelMsg(`「${label}」已启用` + (idsEmpty
-            ? "。名单还是空的：先在聊天窗口给它发一句话，再回来点「加入允许名单」" : ""), "ok");
+            ? "。名单还是空的：先在聊天窗口给它发一句话，再回来点「加入允许名单」"
+            : (name === "webhook" ? "。到点的汇总推送会发往配置的 URL" : "")), "ok");
         } else {
           await request("channel.disable", { name });
           channelMsg(`「${label}」已关闭`, "ok");
@@ -10841,6 +10873,8 @@ async function saveChannel(name, opts = {}) {
   const tokenEl = document.querySelector(`.channel-token[data-name="${name}"]`);
   const appIdEl = document.querySelector(`.channel-appid[data-name="${name}"]`);
   const appSecretEl = document.querySelector(`.channel-appsecret[data-name="${name}"]`);
+  const urlEl = document.querySelector(`.channel-url[data-name="${name}"]`);
+  const secretEl = document.querySelector(`.channel-secret[data-name="${name}"]`);
   const idsEl = document.querySelector(`.channel-ids[data-name="${name}"]`);
   const approveEl = document.querySelector(`.channel-approve[data-name="${name}"]`);
   const payload = {
@@ -10852,6 +10886,9 @@ async function saveChannel(name, opts = {}) {
   if (tokenEl && tokenEl.value.trim()) payload.token = tokenEl.value.trim();
   if (appIdEl && appIdEl.value.trim()) payload.app_id = appIdEl.value.trim();
   if (appSecretEl && appSecretEl.value.trim()) payload.app_secret = appSecretEl.value.trim();
+  // webhook 的推送地址与签名密钥同一待遇：留空 = 不修改（空名单语义不受影响）
+  if (urlEl && urlEl.value.trim()) payload.url = urlEl.value.trim();
+  if (secretEl && secretEl.value.trim()) payload.secret = secretEl.value.trim();
   try {
     await request("channel.save", payload);
   } catch (e) {

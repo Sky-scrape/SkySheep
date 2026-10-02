@@ -4,6 +4,8 @@
 
 ## [未发布]
 
+## [2.4.0] - 2026-10-02
+
 ### 新增
 
 - **行为级评测回归基线 `engine/evals/`**：用 fake/scripted provider 驱动真实

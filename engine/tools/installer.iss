@@ -16,7 +16,7 @@
 ; 卸载（含静默）：应用运行中会被拒绝（退出码非零），请先退出应用。
 
 #define MyAppName "SkySheep"
-#define MyAppVersion "2.3.0"
+#define MyAppVersion "2.4.0"
 #define MyAppPublisher "SkySheep contributors"
 #define MyAppURL "https://github.com/Sky-scrape/SkySheep"
 #define MyAppExeName "SkySheep.exe"

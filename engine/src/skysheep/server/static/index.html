@@ -363,6 +363,12 @@
               </div>
               <div id="review-diff-body"></div>
             </div>
+            <div class="rp-toolbar diag-toolbar">
+              <span class="dim small">轮次诊断：本会话每轮跑了多久、慢在哪（读自结构化日志，旧会话可能没有记录）。</span>
+              <span class="spacer"></span>
+              <button id="review-diag-refresh" class="rp-mini">刷新</button>
+            </div>
+            <div id="review-diag" class="review-diag"></div>
           </section>
 
           <section id="rp-page-files" class="rp-page hidden">
@@ -490,6 +496,24 @@
           <!-- 自动化：原「定时任务 / 任务编排」两个标签合成一个——
                两者都是「不用盯着、到点或按依赖自己跑」的配置页，分段切换 -->
           <section id="rp-page-auto" class="rp-page hidden">
+            <!-- 今日运行：无人值守能力的「看得见」（automation.run_center_summary 只读聚合）。
+                 四行摘要 + 可展开的今日执行明细；方法不可用（旧后端）时保持初始 hidden，
+                 app-schedule.js 的 loadRunCenter 渲染。 -->
+            <div id="run-center-card" class="rp-runcard hidden">
+              <div class="rp-runcard-head">
+                <span class="rp-runcard-title">今日运行</span>
+                <span class="spacer"></span>
+                <button id="run-center-detail-btn" class="rp-mini"
+                        title="展开 / 收起今天的执行明细">明细 ▾</button>
+              </div>
+              <ul id="run-center-lines">
+                <li id="run-center-line-tasks">今日任务 —</li>
+                <li id="run-center-line-usage">token —</li>
+                <li id="run-center-line-next">下次调度 —</li>
+                <li id="run-center-line-report">日报 —</li>
+              </ul>
+              <div id="run-center-detail" class="hidden"></div>
+            </div>
             <div class="rp-segs seg-row seg-mini" id="rp-segs-auto" data-tab="auto">
               <button data-view="cron" class="active" title="到点让 Agent 自己干活，无人值守">定时任务</button>
               <button data-view="pipeline" title="多个任务按依赖顺序自动跑：前面的并行做，最后的汇总审查">任务编排</button>
@@ -853,6 +877,7 @@
                 <button id="btn-rule-add" class="btn-ghost">＋ 添加规则</button>
                 <button id="btn-rules-export" class="btn-ghost" title="导出本项目的白名单规则为 JSON（可在其它项目导入）">导出</button>
                 <button id="btn-rules-import" class="btn-ghost" title="粘贴导出的 JSON，把规则合并进本项目">导入</button>
+                <button id="btn-rules-refresh" class="btn-ghost" title="重新读取本项目的白名单规则">刷新</button>
                 <button id="btn-rules-clear" class="btn-ghost danger" title="清空本项目的全部白名单规则（可撤销）">清空</button>
               </span>
             </div>

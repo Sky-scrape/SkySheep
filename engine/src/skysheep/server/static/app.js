@@ -6834,6 +6834,7 @@ const SLASH_COMMANDS = [
   { cmd: "/status", desc: "查看模型、上下文占用、工具数" },
   { cmd: "/todos", desc: "查看当前任务清单" },
   { cmd: "/export", desc: "导出当前会话为 Markdown" },
+  { cmd: "/save-skill", desc: "把本次会话的做法存成技能草稿" },
 ];
 
 async function execSlash(cmd) {
@@ -6896,6 +6897,9 @@ async function execSlash(cmd) {
       request("session.export", { id: currentSessionId, fmt: "html" })
         .then((r) => downloadText(r.filename, r.html))
         .catch(() => {}); // HTML 版失败不打扰（MD 版已成功）
+      break;
+    case "/save-skill":
+      saveSkillDraftModal();
       break;
   }
 }
@@ -7699,6 +7703,12 @@ document.getElementById("btn-rules-clear").onclick = async () => {
       },
     });
   }, "清空");
+};
+
+document.getElementById("btn-rules-refresh").onclick = async () => {
+  // 手动重读（renderSettings 会重新拉 whitelist.list）：另一端或 CLI 刚改过规则时用
+  await renderSettings();
+  showRulesStatus("已刷新白名单", null);
 };
 
 document.getElementById("btn-rules-export").onclick = async () => {
@@ -8734,6 +8744,7 @@ async function refreshReview() {
   const list = document.getElementById("review-list");
   document.getElementById("review-diff").classList.add("hidden");
   list.classList.remove("hidden");
+  refreshTurnDiag(); // 轮次诊断跟审查列表同进退：切会话/自动刷新时一起重拉
   let cps = [];
   try {
     cps = (await request("checkpoint.list")).checkpoints || [];
@@ -8824,6 +8835,53 @@ async function showReviewDiff(cpId) {
 }
 document.getElementById("review-refresh").onclick = refreshReview;
 document.getElementById("review-diff-close").onclick = refreshReview;
+
+// —— 轮次诊断：本会话最近 N 轮的耗时拆解（回答「这一轮为什么慢」）——
+//
+// 数据来自引擎轮末写进桌面日志的结构化行（obs.py，ev=turn）；后端
+// diagnostics.turn_breakdown 负责读文件与按会话过滤，这里只管摆出来。
+// 旧会话/升级前的轮次没有记录，空态要把这一点讲清楚，别让用户以为坏了。
+
+function fmtMs(ms) {
+  if (ms == null || isNaN(ms)) return "—";
+  if (ms >= 60000) return (ms / 60000).toFixed(1) + "min";
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + "s";
+  return ms + "ms";
+}
+
+async function refreshTurnDiag() {
+  const box = document.getElementById("review-diag");
+  let r;
+  try {
+    r = await request("diagnostics.turn_breakdown", { session_id: currentSessionId, limit: 20 });
+  } catch (e) {
+    box.innerHTML = `<div class="rp-empty">轮次诊断加载失败：${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  const turns = r.turns || [];
+  if (!turns.length) {
+    box.innerHTML = '<div class="rp-empty">还没有轮次耗时记录。引擎从每轮结束时开始把耗时拆解写进结构化日志（旧会话与升级前跑过的轮次没有）；跑一轮对话后再点「刷新」。</div>';
+    return;
+  }
+  box.innerHTML = "";
+  [...turns].reverse().forEach((t) => {
+    const row = document.createElement("div");
+    row.className = "diag-row";
+    const tool = t.tool_calls != null
+      ? `工具 ${t.tool_calls} 次` + (t.slowest_tool ? ` · 最慢 ${t.slowest_tool} ${fmtMs(t.slowest_tool_ms)}` : "")
+      : "工具 —";
+    const perm = t.permission_waits ? `权限等 ${fmtMs(t.permission_ms)}` : "权限无等待";
+    const tok = (t.in_tokens != null || t.out_tokens != null)
+      ? `token ${t.in_tokens ?? "—"}/${t.out_tokens ?? "—"}`
+      : "token —";
+    row.innerHTML = `<b>${t.ts ? fmtClock(t.ts) : "时间未知"}</b>` +
+      `<span class="diag-dur">总 ${fmtMs(t.duration_ms)}</span>` +
+      `<span>${escapeHtml(tool)}</span><span>${perm}</span><span>${tok}</span>` +
+      (t.error ? `<span class="diag-err">${escapeHtml(t.error)}</span>` : "");
+    box.appendChild(row);
+  });
+}
+document.getElementById("review-diag-refresh").onclick = refreshTurnDiag;
 
 // —— 文件树：工作区只读浏览 + 文件预览 ——
 let filesLoaded = false;

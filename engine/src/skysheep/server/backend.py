@@ -20,7 +20,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from .. import __version__
@@ -122,13 +122,15 @@ from ..models.base import ProviderDone, ProviderTextDelta
 from ..models.factory import build_provider
 from ..models.probe import _is_local, probe_context_limit, probe_provider_models
 from ..obs import info as obs_info
+from ..obs import parse_structured
 from ..obs import warning as obs_warning
 from ..security import leases
-from ..security.gate import RULE_KINDS, PermissionGate
+from ..security.gate import _RUN_COMMAND, RULE_KINDS, PermissionGate, _is_arbitrary_exec_prefix
 from ..security.trust import STATE_PENDING, WorkspaceTrust, list_trusted, revoke_by_path
 from ..session import SessionStore
 from ..session.store import export_messages_text
 from ..skills import SkillLoader
+from ..skills.draft import build_skill_draft, save_skill_draft
 from ..skills.gallery import bundled_dir_for, bundled_update_available, load_gallery_manifest
 from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
@@ -433,6 +435,84 @@ def _checkpoint_diff_files(cp: dict) -> list[dict]:
             diff = diff[:MAX_DIFF_CHARS] + "\n…（diff 过长，已截断）"
         files.append({"path": path_s, "status": status, "diff": diff})
     return files
+
+
+# ---- 轮次诊断（审查页）：从桌面日志的结构化行里取回每轮耗时拆解 ----
+
+# diagnostics.turn_breakdown 的 limit 缺省与上限（上限挡住误传的大数，
+# 避免一次拖回整本日志的历史轮次）
+TURN_LOG_LIMIT_DEFAULT = 20
+TURN_LOG_LIMIT_MAX = 200
+
+# 桌面日志行首的时间戳（desktop.py _setup_logging 的 %(asctime)s 默认格式：
+# 「2026-09-21 19:30:01,123」本地时间）。ev=turn 的 JSON 里没有时间字段，
+# 时间只能从行首取。
+_LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(?:,(\d{3}))?")
+
+
+def _log_line_ts(line: str) -> float | None:
+    """行首 asctime → epoch 秒（本地时区，与写入侧同一口径）；解析不了返回 None。"""
+    m = _LOG_TS_RE.match(line)
+    if m is None:
+        return None
+    try:
+        base = datetime.strptime(m.group(1) + " " + m.group(2), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return base.timestamp() + (int(m.group(3)) / 1000 if m.group(3) else 0)
+
+
+def _turn_int(fields: dict, key: str) -> int | None:
+    """结构化字段 → int；缺失或类型不对返回 None（旧日志行/手改日志都容忍）。"""
+    v = fields.get(key)
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return None
+
+
+def _turn_row(line: str, fields: dict) -> dict:
+    """一条 ev=turn 日志行 → 前端一行的诊断数据。字段缺失一律 None。"""
+    stopped = fields.get("stopped")
+    return {
+        "ts": _log_line_ts(line),
+        "duration_ms": _turn_int(fields, "duration_ms"),
+        "tool_calls": _turn_int(fields, "tool_calls"),
+        "tool_ms": _turn_int(fields, "tool_ms"),
+        "tool_errors": _turn_int(fields, "tool_errors"),
+        "slowest_tool": str(fields["slowest_tool"]) if fields.get("slowest_tool") else None,
+        "slowest_tool_ms": _turn_int(fields, "slowest_tool_ms"),
+        "permission_waits": _turn_int(fields, "permission_waits"),
+        "permission_ms": _turn_int(fields, "permission_ms"),
+        "in_tokens": _turn_int(fields, "in_tokens"),
+        "out_tokens": _turn_int(fields, "out_tokens"),
+        "stopped": bool(stopped) if stopped is not None else None,
+        "error": str(fields["error"]) if fields.get("error") else None,
+    }
+
+
+def _load_turn_rows(log_path: Path, sid: str) -> list[dict]:
+    """读日志文件 → 过滤出目标会话的 ev=turn 行（同步函数，调用方 to_thread）。
+
+    只读当前 desktop.log，不追轮转旧文件（desktop.log.*）；文本走 textio
+    读（编码安全），解析不了的行直接跳过。
+    """
+    try:
+        text = read_text_file(log_path).text
+    except OSError:
+        return []
+    rows: list[dict] = []
+    for line in text.splitlines():
+        fields = parse_structured(line)
+        if not fields or fields.get("ev") != "turn":
+            continue
+        if fields.get("session_id") != sid:
+            continue
+        rows.append(_turn_row(line, fields))
+    return rows
 
 
 @dataclass
@@ -1644,17 +1724,25 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 本轮工具/权限的耗时统计（给轮末结构化日志用）。
         # 从事件流里数而不是侵入 agent 循环：事件本就带 duration_ms，
         # 这里只做累加，不在热路径上加任何计算。
+        # slowest_tool(_ms) 记本轮最慢的一次工具调用——「这轮为什么慢」最常
+        # 是某一个慢工具，只有一个总数看不出是谁。
         turn_stats: dict[str, int] = {
             "tool_calls": 0, "tool_ms": 0, "tool_errors": 0,
             "permission_waits": 0, "permission_ms": 0,
+            "slowest_tool": "", "slowest_tool_ms": 0,
         }
         _perm_pending: dict[str, float] = {}
 
         async def emit_ev(ev: dict) -> None:
             kind = ev.get("kind")
             if kind == "tool_call_finished":
+                _ms = int(ev.get("duration_ms") or 0)
                 turn_stats["tool_calls"] += 1
-                turn_stats["tool_ms"] += int(ev.get("duration_ms") or 0)
+                turn_stats["tool_ms"] += _ms
+                # 首次调用先占位（0ms 的瞬时工具也要有名字），之后严格更慢的才替换
+                if turn_stats["slowest_tool"] == "" or _ms > turn_stats["slowest_tool_ms"]:
+                    turn_stats["slowest_tool_ms"] = _ms
+                    turn_stats["slowest_tool"] = str(ev.get("name") or "")
                 if ev.get("is_error"):
                     turn_stats["tool_errors"] += 1
             elif kind == "permission_request":
@@ -1901,9 +1989,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             )
         except Exception:
             pass
+        # 预算告警：越线档位经渠道推一条（内部不抛、推送 spawn_bg 不阻塞收尾）
+        await self._check_budget_alerts()
 
         # 结构化耗时记录：回答「这轮为什么慢」
-        # （总耗时 / 工具次数与总耗时 / 权限等待——这三项最容易看出卡在哪一段）。
+        # （总耗时 / 工具次数与最慢工具 / 权限等待——这几项最容易看出卡在哪一段）。
         try:
             obs_info(
                 "turn",
@@ -1915,6 +2005,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 tool_calls=turn_stats["tool_calls"] or None,
                 tool_ms=turn_stats["tool_ms"] or None,
                 tool_errors=turn_stats["tool_errors"] or None,
+                slowest_tool=turn_stats["slowest_tool"] or None,
+                slowest_tool_ms=turn_stats["slowest_tool_ms"] or None,
                 permission_waits=turn_stats["permission_waits"] or None,
                 permission_ms=turn_stats["permission_ms"] or None,
                 in_tokens=agent.total_in_tokens - tin0 or None,
@@ -2252,6 +2344,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     )
             except Exception:  # noqa: BLE001 - 记账失败不影响本轮结果
                 pass
+            # 预算告警：圆桌烧的真金白银也要触发越线提醒（内部不抛）
+            await self._check_budget_alerts()
 
         if compare:
             # A/B 对比：每个成员的回答单独成一条消息（带归属徽标），不融合
@@ -2889,6 +2983,28 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         files = await asyncio.to_thread(_checkpoint_diff_files, cp)
         return {"id": checkpoint_id, "ts": cp["ts"], "files": files}
 
+    # ---- 轮次诊断（审查页：「这一轮为什么慢」的 UI 兑现） ----
+
+    async def turn_breakdown(self, session_id: str = "", limit: int = TURN_LOG_LIMIT_DEFAULT) -> dict:
+        """从桌面日志的结构化行里取回本会话最近 N 轮的耗时拆解。
+
+        数据源是 obs.py 轮末记的 ``ev=turn`` 行（~/.skysheep/logs/desktop.log）：
+        只读当前文件、不追轮转旧文件；日志文件不存在（如 CLI 模式没接文件日志）
+        返回空列表而不是报错。字段缺失容忍——旧版本日志行没有 slowest_tool 等
+        字段时相应位置就是 null。
+        """
+        sid = str(session_id or "").strip() or (self.session.id if self.session else "")
+        try:
+            n = int(limit)
+        except (TypeError, ValueError):
+            n = TURN_LOG_LIMIT_DEFAULT
+        n = max(1, min(n, TURN_LOG_LIMIT_MAX))
+        log_path = skysheep_home() / "logs" / "desktop.log"
+        turns: list[dict] = []
+        if log_path.exists():
+            turns = await asyncio.to_thread(_load_turn_rows, log_path, sid)
+        return {"session_id": sid, "limit": n, "turns": turns[-n:]}
+
 
     # ---- 分级权限模式（对标 Codex / Claude Code：confirm / accept_edits / full_access） ----
 
@@ -3088,6 +3204,35 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return {"mode": self.permission_mode()}
 
     # ---- 白名单（设置页）：手动添加 / 清空 / 测试 / 导入导出 ----
+
+    async def list_whitelist_rules(self) -> list[dict]:
+        """项目白名单规则列表（whitelist.list），每条带 stale 失效标记。
+
+        stale 判定与 gate 匹配侧 fail-closed 同源（security/gate.py 的
+        _is_arbitrary_exec_prefix）：2.3.0 安全收紧后，历史遗留的 docker/ssh/scp
+        两词前缀规则不再命中、回落逐次确认——列表里把这类「留着也不会再放行」
+        的规则亮出来，提示用户清理。不在这里造第二套判定。
+        """
+        rules = (
+            await self.store.list_rules(self.project.id)
+            if self.project is not None
+            else []
+        )
+        return [self._stale_fields(r) for r in rules]
+
+    @staticmethod
+    def _stale_fields(rule: dict) -> dict:
+        """就地补 stale / stale_reason 字段（设置页失效徽章的数据源）。"""
+        stale = (
+            rule.get("tool") == _RUN_COMMAND
+            and rule.get("kind") == "prefix"
+            and _is_arbitrary_exec_prefix(rule.get("pattern") or "")
+        )
+        rule["stale"] = stale
+        rule["stale_reason"] = (
+            "安全收紧（2.3.0）：该类前缀已回落逐次确认，规则不再命中" if stale else ""
+        )
+        return rule
 
     @staticmethod
     def _validate_whitelist_rule(tool: str, kind: str, pattern: str) -> tuple[str, str, str]:
@@ -3604,6 +3749,70 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             ag.set_system(self.compose_system())
         if scope == "project":
             # 删掉项目技能也是用户自己的改动；来源限定在项目技能目录
+            self.trust.refresh(touched=self._project_skills_dir())
+        result["scope"] = scope
+        return result
+
+    # ---- 技能：会话存为草稿（/save-skill） ----
+
+    def _skill_safety_lookup(self) -> Callable[[str], str]:
+        """工具名 → safety 分级的查询函数（草稿生成的分类依据）。
+
+        查不到的名字（MCP 服务器未连接 / 注册表构建失败）一律按写入/执行类
+        保守处理：宁可把一条只读调用列进注意事项，也不把写操作漏成「无风险」。
+        """
+        try:
+            registry = self._build_full_registry()
+        except Exception:  # noqa: BLE001  启动早期 cfg 未就绪等；退化为全保守
+            registry = None
+
+        def safety_of(tool_name: str) -> str:
+            tool = registry.get(tool_name) if registry is not None else None
+            return tool.safety.value if tool is not None else Safety.WRITE.value
+
+        return safety_of
+
+    async def save_skill_from_session(self, session_id: str = "") -> dict:
+        """把一个会话的做法整理成技能草稿（skills.save_from_session）。
+
+        不调模型：生成逻辑在 skills/draft.py，从 SessionStore 的持久化消息
+        机械提取（目标 = 首条用户消息、步骤 = 实际发生过的工具调用按轮次排列，
+        只读与写入/执行分开）。返回的 name / description / 正文都会先过前端
+        编辑框，用户改完确认才经 skills.save_draft 落盘。
+        """
+        sid = session_id or (self.session.id if self.session else "")
+        if not sid:
+            raise RuntimeError("当前没有活动会话，先聊出一轮任务再保存技能草稿")
+        sess = await self._get_owned_session(sid)
+        msgs = await self.store.load_messages(sid)
+        draft = build_skill_draft(
+            msgs,
+            safety_of=self._skill_safety_lookup(),
+            project_root=self.working_dir,
+        )
+        draft["session_title"] = sess.title or ""
+        return draft
+
+    async def save_skill_draft(self, name: str, content: str, scope: str = "global") -> dict:
+        """保存技能草稿（skills.save_draft）：与技能安装同一套落点防线。
+
+        名字形状（_validate_skill_name）与落点包含性（_skill_target）都过一遍，
+        文件经 textio 原子写进技能目录；重名不覆盖。写完立即重新发现并重建
+        系统提示词，新技能马上出现在清单里（与 install_skill 的收尾一致）；
+        项目级保存同样同步工作区信任指纹，避免刚存完就回到「待确认」。
+        """
+        root = self._skill_root(scope)
+        existing = {s.name for s in self.skills.all()}
+        try:
+            result = await asyncio.to_thread(
+                save_skill_draft, root, name, content, existing=existing
+            )
+        except SkillInstallError as e:
+            raise RuntimeError(str(e)) from e
+        self.skills.discover()
+        for ag in self._for_each_agent():
+            ag.set_system(self.compose_system())
+        if scope == "project":
             self.trust.refresh(touched=self._project_skills_dir())
         result["scope"] = scope
         return result

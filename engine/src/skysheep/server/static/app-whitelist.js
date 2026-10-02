@@ -222,12 +222,14 @@ async function renderSettings() {
     toolDl.innerHTML = [...names].sort()
       .map((n) => `<option value="${escapeHtml(n)}"></option>`).join("");
   }
-  // 摘要：规则总数 + 整工具放行数量（后者是风险最直观的信号）
+  // 摘要：规则总数 + 整工具放行数量（后者是风险最直观的信号）+ 失效条数
   const summaryEl = document.getElementById("rules-summary");
   const wholeCount = (rules || []).filter((r) => r.kind === "always").length;
+  const staleCount = (rules || []).filter((r) => r.stale).length;
   if (rules && rules.length) {
     summaryEl.textContent = `共 ${rules.length} 条规则`
-      + (wholeCount ? `；其中 ${wholeCount} 条为「整个工具」放行` : "");
+      + (wholeCount ? `；其中 ${wholeCount} 条为「整个工具」放行` : "")
+      + (staleCount ? `，${staleCount} 条已失效（悬停徽章查看原因）` : "");
     summaryEl.classList.toggle("risk", wholeCount > 0);
     summaryEl.hidden = false;
   } else {
@@ -255,8 +257,14 @@ async function renderSettings() {
       ? `<span class="rule-age" title="白名单放行累计 ${r.hit_count} 次，最近一次 ${fmtRuleAge(r.last_hit_at)}">命中 ${r.hit_count} 次</span>`
       : "";
     const enabled = r.enabled !== false;
+    // 2.3.0 收紧后不再命中的历史遗留规则（后端 whitelist.list 打 stale 标记，
+    // 判定与 gate 匹配侧同源）：徽章悬停显示原因——留着也不会再放行，建议删除
+    const stale = r.stale
+      ? `<span class="chip chip-warn rule-stale" title="${escapeHtml(r.stale_reason || "该规则已不再命中")}">已失效</span>`
+      : "";
     li.innerHTML = `<span class="dot ${risky ? "warn" : "on"}"${risky ? ' title="整工具放行（写 / 高危）"' : ""}></span>
       <span class="rule-text${enabled ? "" : " rule-off"}" title="${escapeHtml(tip)}">${escapeHtml(r.tool)} · ${escapeHtml(kind)}${escapeHtml(extra)} ${escapeHtml(r.pattern || "(全部)")}${origin ? ` <span class="rule-origin">· ${escapeHtml(origin)}</span>` : ""}${enabled ? "" : ' <span class="rule-origin">· 已停用</span>'}</span>
+      ${stale}
       ${hits}
       ${age ? `<span class="rule-age">${escapeHtml(age)}</span>` : ""}
       <label class="rule-toggle" title="${enabled ? "停用后保留配置，不再参与放行" : "重新启用这条规则"}">

@@ -28,7 +28,7 @@ MUST_BE_LOCAL = (
     "cron.schtask_export", "cron.schtask_remove",
     "pipeline.create", "pipeline.update", "pipeline.start", "pipeline.import", "pipeline.add_task",
     # 技能与 MCP（prompt 注入 / stdio 命令）
-    "skills.install", "skills.toggle", "skills.delete",
+    "skills.install", "skills.toggle", "skills.delete", "skills.save_draft",
     "mcp.import", "mcp.save_server", "mcp.delete", "mcp.reconnect",
     # 信任（放宽向）与系统级
     "app.install_update", "app.apply_update", "app.restart",

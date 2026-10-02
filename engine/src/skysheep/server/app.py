@@ -858,6 +858,21 @@ async def _h_checkpoint_diff(backend: ServerBackend, params: dict, emit, local: 
     return await backend.checkpoint_diff(str(params.get("id", "")))
 
 
+async def _h_diagnostics_turn_breakdown(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 审查页「轮次诊断」：读结构化日志里的每轮耗时拆解（只读，不碰引擎状态）
+    if not local:
+        # 远程只看当前活动会话（安全审查 B13 同款收窄）：诊断行含时间/耗时/
+        # 工具名/token，凭传入 sid 能翻别会话的日志，还能借 turns 空/非空
+        # 探测某 id 是否在本机日志里出现过。活动指针为 None 时取空串——
+        # 日志行都带真实 session_id，空串匹配不到任何行（探测面为零）
+        sid = backend.session.id if backend.session else ""
+        return await backend.turn_breakdown(sid, params.get("limit", 20))
+    return await backend.turn_breakdown(
+        str(params.get("session_id") or ""),
+        params.get("limit", 20),
+    )
+
+
 async def _h_term_spawn(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     tid = str(params.get("term_id", "") or "")
     rows = int(params.get("rows", 24) or 24)
@@ -961,6 +976,11 @@ async def _h_automation_report_status(backend: ServerBackend, params: dict, emit
 
 async def _h_automation_report_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.daily_report_save(params)
+
+
+async def _h_run_center_summary(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 今日运行总览（只读聚合）：明细已按当前项目过滤（B14 同款），远端与本地同视图
+    return await backend.run_center_summary()
 
 
 async def _h_ui_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -1473,6 +1493,20 @@ async def _h_skills_gallery(backend: ServerBackend, params: dict, emit, local: b
     return backend.gallery_skills()
 
 
+async def _h_skills_save_from_session(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 只读生成（读会话消息 → 返回草稿文本）：写盘发生在 skills.save_draft
+    return await backend.save_skill_from_session(str(params.get("id", "")))
+
+
+async def _h_skills_save_draft(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 落盘写 SKILL.md：与 skills.install 同级（技能正文进 system prompt），仅本机
+    return await backend.save_skill_draft(
+        str(params.get("name", "")),
+        str(params.get("content", "")),
+        scope=str(params.get("scope", "global")),
+    )
+
+
 async def _h_mcp_import(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.import_mcp_servers(
         snippet=str(params.get("snippet", "")),
@@ -1535,11 +1569,8 @@ async def _h_tools_list(backend: ServerBackend, params: dict, emit, local: bool)
 
 
 async def _h_whitelist_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    rules = (
-        await backend.store.list_rules(backend.project.id)
-        if backend.project is not None else []
-    )
-    return {"rules": rules}
+    # 走 backend：除库字段外还给每条规则带 stale / stale_reason（失效徽章）
+    return {"rules": await backend.list_whitelist_rules()}
 
 
 _WS_METHODS: dict[str, _WsMethod] = {
@@ -1628,6 +1659,7 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "checkpoint.list": _WsMethod(_h_checkpoint_list),
     "checkpoint.restore": _WsMethod(_h_checkpoint_restore),
     "checkpoint.diff": _WsMethod(_h_checkpoint_diff),
+    "diagnostics.turn_breakdown": _WsMethod(_h_diagnostics_turn_breakdown),
     # 终端是常驻 shell（用户手敲命令，不进权限门，见 TerminalManager 注释），
     # 所以它只在“用户就在这台机器面前”时成立。局域网模式下持有令牌的设备
     # 也能连 WS，若允许它调用这里，令牌就等于 shell 访问权限。
@@ -1659,6 +1691,8 @@ _WS_METHODS: dict[str, _WsMethod] = {
         _h_automation_report_save, local_only=True,
         local_error="运行日报的设置只能在桌面端本机修改",
     ),
+    # 今日运行总览：只读聚合，明细已按当前项目过滤，各端同视图可看
+    "automation.run_center_summary": _WsMethod(_h_run_center_summary),
     "ui.get": _WsMethod(_h_ui_get),
     "trust.status": _WsMethod(_h_trust_status),
     "trust.list": _WsMethod(_h_trust_list, local_only=True, local_error="信任清单只能在本机界面上查看"),
@@ -1800,6 +1834,8 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "skills.install": _WsMethod(_h_skills_install, local_only=True),
     "skills.delete": _WsMethod(_h_skills_delete, local_only=True),
     "skills.gallery": _WsMethod(_h_skills_gallery),
+    "skills.save_from_session": _WsMethod(_h_skills_save_from_session),
+    "skills.save_draft": _WsMethod(_h_skills_save_draft, local_only=True),
     "mcp.import": _WsMethod(_h_mcp_import, local_only=True),
     "mcp.save_server": _WsMethod(_h_mcp_save_server, local_only=True),
     "mcp.delete": _WsMethod(_h_mcp_delete, local_only=True),

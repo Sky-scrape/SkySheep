@@ -294,6 +294,68 @@ function batchDeleteSkillsModal(names) {
   }, "全部删除");
 }
 
+// /save-skill：把一次成功会话的做法一键存成技能草稿。
+// 后端不调模型、从会话消息机械生成草稿，这里只负责让用户改完再保存；
+// 保存走 skills.save_draft（与技能安装同一套落点校验），成功后技能立即生效。
+// （放在本机候选区之后：上面的面板走「就地平铺不弹窗」的既有约定，这里是真弹窗）
+async function saveSkillDraftModal() {
+  if (!currentSessionId) {
+    addNotice("当前还没有会话可保存：先发一条消息、跑完一轮任务再试。");
+    return;
+  }
+  let d;
+  try {
+    d = await request("skills.save_from_session", { id: currentSessionId });
+  } catch (e) {
+    addNotice("生成技能草稿失败: " + e.message);
+    return;
+  }
+  const box = document.createElement("div");
+  box.innerHTML = `
+    <p class="dim small">已从当前会话机械提炼出草稿（不调模型）：目标取首条消息、
+    步骤取实际用过的工具。${d.turn_count ? `共 ${d.turn_count} 轮有工具调用。` : "本会话没有工具调用，步骤要你自己补。"}
+    下面各项都可以改，保存后立即生效，可在「MCP / Skills」页继续管理。</p>
+    <div class="form-grid">
+      <label>技能名（同时是技能目录名，不能含 / \\ : 等路径字符）
+        <input data-f="name" value="${escapeHtml(d.name)}" autocomplete="off">
+      </label>
+      <label class="wide">描述（一句话，会显示在技能清单里）
+        <input data-f="description" value="${escapeHtml(d.description)}" autocomplete="off">
+      </label>
+      <label class="wide">正文（给模型的操作指令；小节：目标 / 步骤 / 注意事项 / 适用边界）
+        <textarea data-f="body" rows="14">${escapeHtml(d.body)}</textarea>
+      </label>
+      <label>保存到哪里
+        <select data-f="scope">
+          <option value="global">全局（所有项目都能用）</option>
+          <option value="project">仅本项目</option>
+        </select>
+      </label>
+      <div class="form-status"></div>
+    </div>`;
+  const nameInput = box.querySelector('[data-f="name"]');
+  showModal("把会话存为技能草稿", box, async () => {
+    const name = nameInput.value.trim();
+    if (!name) throw new Error("技能名不能为空");
+    const description = box.querySelector('[data-f="description"]').value.trim();
+    const body = box.querySelector('[data-f="body"]').value.trim();
+    // frontmatter 在前端拼装：name / description 分别来自上面两个字段，
+    // 保证保存名与 frontmatter 一致（后端也会再校验一遍）
+    const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}\n`;
+    const r = await request("skills.save_draft", {
+      name,
+      content,
+      scope: box.querySelector('select[data-f="scope"]').value,
+    });
+    await renderSettings();
+    boot();
+    const where = r.scope === "project" ? "仅本项目" : "全局";
+    addNotice(`✓ 已保存技能「${r.name}」（${where}），去「MCP / Skills」页查看。`);
+  }, "保存草稿");
+  nameInput.focus();
+  nameInput.select();
+}
+
 // ---------- MCP：导入 / 手动添加 / 删除 ----------
 
 // 导入 MCP：粘贴配置片段（或选一个 .json 文件）

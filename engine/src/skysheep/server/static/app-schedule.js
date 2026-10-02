@@ -792,6 +792,102 @@ function bindDailyReportRow() {
   if (t) t.onchange = () => saveDailyReportRow({ time: t.value });
 }
 
+// ---------- 今日运行总览（automation.run_center_summary，只读聚合） ----------
+// 四行摘要（今日任务 / token 与预算 / 下次调度 / 日报状态）+ 可展开的今日执行
+// 明细。明细已按当前项目过滤；预算未设或前置版本（配置层无预算字段）时后端
+// 回 null，该行只显示用量。方法不可用（旧后端）保持初始 hidden，不报错打扰
+// ——同日报开关行的姿态。
+
+let runCenterOpen = false;  // 明细展开状态：cron/pipeline 事件高频重拉时不打断查看
+let runCenterData = null;   // 最近一次聚合结果（展开/收起就地重画用，不重发请求）
+
+async function loadRunCenter() {
+  const card = document.getElementById("run-center-card");
+  if (!card) return;
+  let d;
+  try {
+    d = await request("automation.run_center_summary", {});
+  } catch (e) {
+    return; // 旧后端 / 远端被拒：维持初始 hidden，不报错打扰
+  }
+  runCenterData = d || {};
+  renderRunCenter(runCenterData);
+}
+
+// 状态 → 单字符标记与颜色分组（对齐流水线面板的语义：跳过不算失败、用户停止不算失败）
+function runCenterMark(status) {
+  if (status === "error") return { m: "✗", cls: "bad" };
+  if (status === "cancelled") return { m: "⏹", cls: "" };
+  if (status === "skipped") return { m: "⏭", cls: "" };
+  if (status === "done" || status === "ok" || status === "empty") return { m: "✓", cls: "ok" };
+  return { m: "·", cls: "" };
+}
+
+function renderRunCenter(d) {
+  const card = document.getElementById("run-center-card");
+  if (!card || !d) return;
+  card.classList.remove("hidden");
+  const q = (id) => document.getElementById(id);
+  const cron = d.cron || {}, pipe = d.pipeline || {};
+  const cItems = cron.items || [], pItems = pipe.items || [];
+  // 四行摘要（字段缺失容忍：一律 || 兜底，旧后端少字段也不缺行）
+  q("run-center-line-tasks").textContent =
+    `今日任务 ${cron.total || 0} 成功 ${cron.ok || 0} 失败 ${cron.error || 0}` +
+    (pipe.total ? ` · 流水线节点 ${pipe.total} 个（未成功 ${pipe.error || 0}）` : "");
+  const usage = d.usage || {};
+  let usageTxt = `今日 token ${usageFmtTokens(usage.today || 0)}`;
+  if (usage.budget != null && usage.remaining != null) {
+    usageTxt += ` · 预算剩 ${usageFmtTokens(usage.remaining)} / ${usageFmtTokens(usage.budget)}`;
+  }
+  q("run-center-line-usage").textContent = usageTxt;
+  q("run-center-line-next").textContent = "下次调度 " + fmtNextRun(d.next_run_at || 0);
+  const report = d.daily_report || {};
+  q("run-center-line-report").textContent =
+    report.enabled ? `日报 开（每天 ${report.time || "09:00"}）` : "日报 关";
+  // 明细：定时任务与流水线节点合并按时间倒序；今天没有任何记录给一句话空态
+  const det = q("run-center-detail");
+  if (!cItems.length && !pItems.length) {
+    det.innerHTML = '<div class="dim small" style="padding:4px 0 2px">今天还没有定时任务或流水线的运行记录。</div>';
+  } else {
+    const hm = (ts) => {
+      const x = new Date((ts || 0) * 1000);
+      return `${pad2(x.getHours())}:${pad2(x.getMinutes())}`;
+    };
+    const rows = [
+      ...cItems.map((it) => ({
+        at: it.at,
+        mark: runCenterMark(it.status),
+        head: it.name || "未命名任务",
+        detail: it.result || "",
+      })),
+      ...pItems.map((it) => ({
+        at: it.at,
+        mark: runCenterMark(it.status),
+        head: `${it.pipeline || "流水线"} · ${it.title || "未命名节点"}`,
+        detail: it.result || "",
+      })),
+    ].sort((a, b) => (b.at || 0) - (a.at || 0));
+    det.innerHTML =
+      `<ul class="rc-list">` +
+      rows.map((r) =>
+        `<li><span class="rc-mark ${r.mark.cls}">${r.mark.m}</span>` +
+        `<span class="rc-time">${hm(r.at)}</span>` +
+        `<span class="rc-txt">${escapeHtml(r.head)}` +
+        (r.detail ? `<span class="dim"> — ${escapeHtml(r.detail)}</span>` : "") +
+        `</span></li>`).join("") +
+      `</ul>`;
+  }
+  det.classList.toggle("hidden", !runCenterOpen);
+  const btn = q("run-center-detail-btn");
+  if (btn) {
+    btn.textContent = runCenterOpen ? "明细 ▴" : "明细 ▾";
+    btn.onclick = () => {  // 幂等重绑：重复 load 不叠加行为（同 bindDailyReportRow）
+      runCenterOpen = !runCenterOpen;
+      renderRunCenter(runCenterData);
+    };
+  }
+}
+
 // ---------- 定时任务：无人值守的周期 Agent 任务（cron.list/add/update/delete/run_now） ----------
 
 function fmtCronSchedule(t) {
@@ -810,6 +906,7 @@ function fmtNextRun(ts) {
 
 async function loadCron() {
   loadDailyReportRow(); // 日报开关行与定时任务同源（automation 家族），顺手刷新
+  loadRunCenter();      // 今日运行总览：定时任务跑完写回任务行，卡片跟着刷新
   // 工具勾选表要用 boot 快照里的工具清单（含权限级别），别让用户手打工具名
   if (!bootSnap || !bootSnap.tools) {
     try { bootSnap = await request("boot"); } catch (e) { /* 取不到就退化提示 */ }
@@ -1132,6 +1229,7 @@ function mountPipelineGraph(el, nodes, opts = {}) {
 
 async function loadPipelines() {
   loadDailyReportRow(); // 日报汇总口径含流水线终态：任务编排分段打开时同样刷新
+  loadRunCenter();      // 今日运行总览：流水线节点到终态写回节点行，卡片跟着刷新
   if (!bootSnap || !bootSnap.tools) {
     try { bootSnap = await request("boot"); } catch (e) { /* 取不到就退化提示 */ }
   }

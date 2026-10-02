@@ -19,6 +19,30 @@ from ...security.gate import HeadlessGate
 from ...tools import ChangeRecorder
 from ...tools.pipeline import task_node_fields
 from ._shared import SessionRuntime
+from .budget_alert import (
+    alert_body as budget_alert_body,
+)
+from .budget_alert import (
+    default_state as budget_alert_default_state,
+)
+from .budget_alert import (
+    due_tiers as budget_due_tiers,
+)
+from .budget_alert import (
+    load_state as load_budget_alert_state,
+)
+from .budget_alert import (
+    save_state as save_budget_alert_state,
+)
+from .budget_alert import (
+    today_str as budget_alert_today,
+)
+from .daily_report import (
+    _clip as clip_line,
+)
+from .daily_report import (
+    _day_bounds as today_bounds,
+)
 from .daily_report import (
     load_state as load_daily_report_state,
 )
@@ -317,6 +341,8 @@ class AutomationMixin:
             model or self.provider_model,
             in_tokens, out_tokens, cached_tokens,
         )
+        # 后台分身也在烧每日预算：落库后顺带检查告警（内部不抛，失败只记日志）
+        await self._check_budget_alerts()
 
     # ---- 到点提醒循环 ----
 
@@ -592,6 +618,55 @@ class AutomationMixin:
         """终态推送的 fire-and-forget 入口（见模块级 _fire_cron_push）。"""
         _fire_cron_push(self.channels, task, status, duration_s,
                         self._cron_push_body(task, status, duration_s))
+
+    # ---- 每日预算告警推送（用量越线 → 渠道提醒，一天一档一条） ----
+    # 复用 _cron_push_targets 的目标口径（含 Webhook 广播语义）。前提：告警
+    # 跟着渠道走——没有启用且配置齐全的目标就等于不告警，护栏照常在本应用
+    # 内生效；这是引擎→用户的出站通知，不走权限门（同终态推送的定性）。
+
+    async def _check_budget_alerts(self) -> None:
+        """用量落库后检查是否越线要告警：永不抛（记账收尾不受告警影响）。
+
+        预算未设（0）或渠道无目标时静默跳过——跳过不记档位，当天中途启用
+        渠道后越线仍会告警。防重发状态 budget-alert-state.json 的认领段
+        （读 → 算 → 写）全程无 await，事件循环内天然串行，并发轮次不会
+        双发；状态写不进（磁盘满/文件被锁）只记日志、本轮不推——档位没
+        记下，硬推会让之后每轮重复告警。推送本体 spawn_bg 不阻塞轮次，
+        失败由 spawn_bg 收尾钩子记日志。
+        """
+        try:
+            budget = int(getattr(self.cfg, "daily_token_budget", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if budget <= 0 or not self._cron_push_targets():
+            return
+        try:
+            used = await self.store.usage_today()
+        except Exception:  # noqa: BLE001 - 用量读不到就不告警，不影响轮次
+            return
+        # ---- 认领段（无 await）：同日同档最多一条 ----
+        today = budget_alert_today()
+        state = load_budget_alert_state(today=today)  # 日期对不上即跨天重置
+        due = budget_due_tiers(used, budget, state["sent"])
+        if not due:
+            return
+        fresh = budget_alert_default_state()
+        fresh["date"] = today
+        fresh["sent"] = sorted({*state["sent"], *due})
+        try:
+            save_budget_alert_state(fresh)
+        except Exception as e:  # noqa: BLE001 - 写盘失败（write_text_atomic 的 OSError 面）
+            # 只记日志不推：本方法承诺永不抛，主调用点挂在 send() 收尾段且无
+            # 兜底，异常上抛会腰斩检查点保存、队列交棒与运行位释放
+            logger.warning("预算告警状态写盘失败，本轮不推送：%s", e)
+            return
+        # ---- 推送段（fire-and-forget）----
+        for tier in due:
+            body = budget_alert_body(tier, used, budget)
+            try:
+                spawn_bg(push_text_to_targets(self.channels, body, what="预算告警"))
+            except RuntimeError:
+                pass  # 无事件循环（如纯测试环境）
 
     # ---- 导出到 Windows 任务计划程序（应用不开着也能到点跑） ----
     # 原理：schtasks 注册一条 `SkySheep-<taskid>` 系统计划任务，到点由系统直接拉起
@@ -1888,3 +1963,97 @@ class AutomationMixin:
             state["time"] = raw
         save_daily_report_state(state)
         return await self.daily_report_status()
+
+    # ---- 今日运行总览（只读聚合）：无人值守能力从「配好了」变成「看得见」 ----
+    # 数据全在库里：cron_tasks 的 last_run_at/last_status/last_result（每任务只留
+    # 最后一次）、流水线节点的终态行、usage_log 当日聚合、日报状态文件与每日预算
+    # 字段。取窗与日报同源（本地时区今天，_day_bounds 口径一致）；明细含任务名与
+    # 结果摘要，属内容面，按 B14 项目过滤——只聚合当前项目，不跨项目下发。
+
+    RUN_CENTER_RESULT_CHARS = 100  # 明细里「一句话结果」的截断上限
+
+    async def run_center_summary(self) -> dict:
+        """聚合「今日运行」总览（只读，不改任何状态）。
+
+        返回：cron（今日定时任务计数 + 明细）、pipeline（今日流水线节点计数 +
+        明细）、usage（今日 token / 预算剩余）、next_run_at（下次调度，0 = 无
+        排期）、daily_report（日报开关状态）。字段缺失容忍：行缺键按缺省值算；
+        预算字段在配置层不存在（前置版本未带 daily_token_budget）或未设（0）
+        时按 None 返回，前端隐藏预算段。
+        """
+        start, end = today_bounds(time.time())
+        pid = self._cur_project_id()
+        # 无项目态没有可归属的项目：明细为空，全局数字（token/预算/日报）照常
+        cron_rows = await self.store.list_cron_tasks(pid) if pid is not None else []
+        cron_items: list[dict] = []
+        cron_ok = cron_bad = 0
+        next_run_at = 0.0
+        for t in cron_rows:
+            nr = float(t.get("next_run_at") or 0)
+            if t.get("enabled") and nr > 0 and (next_run_at == 0 or nr < next_run_at):
+                next_run_at = nr
+            ran_at = float(t.get("last_run_at") or 0)
+            if not start <= ran_at < end:
+                continue
+            status = str(t.get("last_status") or "")
+            # 计数口径与日报一致：ok/empty 算成功，error 算失败，其他只进明细
+            if status == "error":
+                cron_bad += 1
+            elif status in ("ok", "empty"):
+                cron_ok += 1
+            cron_items.append({
+                "id": t.get("id"),
+                "name": t.get("name") or "未命名任务",
+                "at": ran_at,
+                "status": status,
+                "result": clip_line(t.get("last_result"), self.RUN_CENTER_RESULT_CHARS),
+            })
+        cron_items.sort(key=lambda x: x["at"], reverse=True)
+
+        pipe_rows = await self.store.list_pipelines(pid) if pid is not None else []
+        pipe_items: list[dict] = []
+        pipe_ok = pipe_bad = 0
+        for p in pipe_rows:
+            for n in p.get("nodes") or []:
+                status = str(n.get("status") or "")
+                if status not in ("done", "error", "cancelled", "skipped"):
+                    continue  # 等待/运行中的节点还没有「结果」可看
+                fin = float(n.get("finished_at") or 0)
+                if not start <= fin < end:
+                    continue
+                if status in ("done", "skipped"):
+                    pipe_ok += 1
+                else:
+                    pipe_bad += 1
+                pipe_items.append({
+                    "pipeline": p.get("name") or "未命名流水线",
+                    "title": n.get("title") or "未命名节点",
+                    "at": fin,
+                    "status": status,
+                    "result": clip_line(
+                        n.get("result") or n.get("last_error"),
+                        self.RUN_CENTER_RESULT_CHARS,
+                    ),
+                })
+        pipe_items.sort(key=lambda x: x["at"], reverse=True)
+
+        try:
+            used = int(await self.store.usage_today())
+        except Exception:  # noqa: BLE001 - 用量读不到按 0 展示，总览不能整卡崩
+            used = 0
+        # 预算字段缺失（前置版本）/未设（0）→ None：UI 隐藏预算段
+        try:
+            budget = max(0, int(getattr(self.cfg, "daily_token_budget", None) or 0))
+        except (TypeError, ValueError):
+            budget = 0
+        remaining = max(0, budget - used) if budget > 0 else None
+        return {
+            "date": time.strftime("%Y-%m-%d"),
+            "cron": {"total": len(cron_items), "ok": cron_ok, "error": cron_bad,
+                     "items": cron_items},
+            "pipeline": {"total": len(pipe_items), "ok": pipe_ok, "error": pipe_bad,
+                         "items": pipe_items},
+            "usage": {"today": used, "budget": budget or None, "remaining": remaining},
+            "next_run_at": next_run_at,
+            "daily_report": load_daily_report_state(),
+        }

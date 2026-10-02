@@ -53,6 +53,7 @@ def test_local_only_covers_config_and_rce_surface():
         "cron.add", "cron.update", "cron.run_now",  # A7：预授权工具 + 无人值守
         "settings.export", "settings.import",      # A8/A15：明文 Key 打包
         "skills.install", "skills.delete",         # A10：技能正文进 system prompt
+        "skills.save_draft",                       # A10 同类：会话存为技能草稿也落 SKILL.md
         "lan.enable", "remote.enable",             # A11
         "config.add_provider",                     # A12
         "memory.save",                             # A14：持久注入

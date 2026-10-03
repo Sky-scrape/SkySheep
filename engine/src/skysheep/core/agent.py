@@ -133,6 +133,9 @@ class Agent:
         # 零拷贝）。正常并入历史后置 None；被取消时由 run_turn 的 finally
         # 兜底落库（见 _persist_partial_stream_text）
         self._stream_text_parts: list[str] | None = None
+        # _turn_events 内部把 provider 故障吞成 ErrorEvent 后正常收尾，异常到
+        # 不了 run_turn 的 except——这里留标记让兜底标注选「未完成」而非「已停止」
+        self._turn_error_interrupted = False
 
     # ---- 状态管理 ----
 
@@ -247,20 +250,35 @@ class Agent:
         # append_user=False：重新生成——用户消息已在历史末尾，直接重跑这一轮
         if append_user:
             self.history.append(Message.user(user_text, images=images))
+        # 中断标注：用户停止（CancelledError/生成器被关闭）与故障中断（其他
+        # 异常）语义不同——兜底落库的尾部标注要区分开，别把故障轮也写成
+        # 用户主动「已停止」
+        interrupt_note = "…（已停止）"
         try:
             async for ev in self._turn_events():
                 yield ev
+        except GeneratorExit:
+            raise
+        except Exception:
+            interrupt_note = "…（未完成）"
+            raise
         finally:
             # 流式中途被取消（CancelledError 穿透，或生成器在 yield 处被关闭）
             # 时，用户已经看到的部分正文还没并入历史——先兜底落库（同步操作，
             # GeneratorExit 路径下 finally 里不允许 await），否则重启后这轮
             # 「无声消失」；正常结束/已并入历史时这里是 no-op。
-            self._persist_partial_stream_text()
+            note = interrupt_note
+            if self._turn_error_interrupted:
+                # _turn_events 吞掉的故障（转 ErrorEvent 后正常收尾）到不了上面
+                # 的 except——按错误标记选「未完成」，用完即清
+                note = "…（未完成）"
+                self._turn_error_interrupted = False
+            self._persist_partial_stream_text(note)
             # 轮次结束（正常/取消/异常）后未决权限不再有意义：清掉，避免
             # 「取消后残留可再成功投递决策」（安全审查 M12）
             self.clear_pending()
 
-    def _persist_partial_stream_text(self) -> None:
+    def _persist_partial_stream_text(self, note: str = "…（已停止）") -> None:
         """把流式中途被打断的已合并正文兜底并入历史（取消收尾）。
 
         取消可能落在两处：CancelledError 从生成器内部的 await 点穿透（直接
@@ -269,9 +287,10 @@ class Agent:
         不允许 await）。两条路都只能做同步操作，所以流式期间把 text_parts
         的引用登记在 self._stream_text_parts 上（零拷贝），这里统一收割。
 
-        尾部追加「…（已停止）」让用户与下一轮的模型都知道这段话被截断；
-        不带 thinking 块——部分思考没有有效签名，原样回传上游可能 400，
-        且用户看到并期待保留的是正文。已正常并入历史时登记为 None，no-op。
+        尾部追加 note（用户停止「已停止」/ 故障中断「未完成」，由 run_turn
+        按 except 分流传入）让用户与下一轮的模型都知道这段话被截断；不带
+        thinking 块——部分思考没有有效签名，原样回传上游可能 400，且用户
+        看到并期待保留的是正文。已正常并入历史时登记为 None，no-op。
         """
         parts = self._stream_text_parts
         self._stream_text_parts = None
@@ -281,7 +300,7 @@ class Agent:
         if not text.strip():
             return
         self.history.append(
-            Message.assistant([TextBlock(text=text + "\n\n…（已停止）")])
+            Message.assistant([TextBlock(text=text + "\n\n" + note)])
         )
 
     async def _turn_events(self) -> AsyncIterator[AgentEvent]:
@@ -380,6 +399,8 @@ class Agent:
                     got_content = bool(text_parts or reasoning_parts or blocks)
                     if got_content or attempt > MAX_STREAM_RETRIES or not is_transient_error(e):
                         finished_by_error = True
+                        # 故障中断：run_turn 的 finally 据此把兜底标注选成「未完成」
+                        self._turn_error_interrupted = True
                         if is_context_overflow(e):
                             yield ErrorEvent(
                                 message=(

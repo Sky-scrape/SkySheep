@@ -17,6 +17,7 @@ from __future__ import annotations
 from conftest import FakeProvider, SlowTextProvider
 
 from skysheep.messages import TextBlock
+from skysheep.models.base import Provider, ProviderTextDelta
 from skysheep.server.backend import ServerBackend
 
 SUMMARY_MARK = "earlier-conversation-summary"
@@ -163,5 +164,51 @@ async def test_cancelled_turn_persists_partial_answer(home):
             assert hist[-1].text == partial
         finally:
             await be2.shutdown()
+    finally:
+        await be.shutdown()
+
+
+class BoomMidStreamProvider(Provider):
+    """吐若干正文后抛 RuntimeError：模拟流式中途的 provider 故障（非用户停止）。"""
+
+    name = "fake"
+    model = "fake-boom"
+
+    def __init__(self, text: str, chunk: int = 8) -> None:
+        super().__init__()
+        self.text = text
+        self.chunk = chunk
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        for i in range(0, len(self.text), self.chunk):
+            yield ProviderTextDelta(self.text[i : i + self.chunk])
+        raise RuntimeError("模拟 provider 故障")
+
+
+async def test_error_turn_persists_partial_answer_with_incomplete_note(home):
+    """流式中途故障（非用户停止）：已见正文落库并标「未完成」而非「已停止」。
+
+    兜底落库的标注要与中断原因一致：故障轮写成用户主动「已停止」会误导
+    ——用户与下一轮的模型都会以为是自己停的（复核员披露的语义偏差）。
+    """
+    be = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: BoomMidStreamProvider("故障前的正文" * 50),
+    )
+    await be.setup()
+
+    async def emit(ev):
+        return None
+
+    try:
+        try:
+            await be.send("写点什么", emit)
+        except RuntimeError:
+            pass  # 异常可能被 backend 吞成 ErrorEvent，也可能直接冒出，两种都合法
+        sid = be.session.id
+        db = await be.store.load_messages(sid)
+        assert [m.role for m in db] == ["user", "assistant"]
+        assert db[1].text.endswith("…（未完成）")
+        assert not db[1].text.endswith("…（已停止）")
     finally:
         await be.shutdown()

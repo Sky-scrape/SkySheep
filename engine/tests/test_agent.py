@@ -6,7 +6,7 @@ import asyncio
 import json
 
 import pytest
-from conftest import FakeProvider
+from conftest import FakeProvider, SlowTextProvider
 from pydantic import BaseModel
 
 from skysheep.core import Agent
@@ -250,6 +250,80 @@ async def test_repair_is_noop_when_history_is_consistent(tmp_path):
     before = list(agent.history)
     assert agent.repair_dangling_tool_uses() == []
     assert agent.history == before
+
+
+# ---- 流式中途取消：已见部分正文要落库（发现 2）----
+
+
+async def test_cancel_mid_stream_keeps_partial_text(tmp_path):
+    """任务级取消（CancelledError 从生成器内部穿透）：已见前缀落库并带停止标注。
+
+    旧缺陷：正文合并在流式循环之后（core/agent.py 的「助手消息并入历史」），
+    取消发生在循环中途时 text_parts 随生成器一起丢弃——前端已渲染 400 字，
+    落库却一条 assistant 都没有，重启后这轮无声消失。
+    """
+    provider = SlowTextProvider("内容段落" * 2000)
+    agent = make_agent(provider, tmp_path)
+    got: list[str] = []
+
+    async def consume():
+        async for ev in agent.run_turn("写一篇很长的文章"):
+            if ev.kind == "text_delta":
+                got.append(ev.text)
+                if sum(map(len, got)) >= 400:
+                    asyncio.current_task().cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.create_task(consume())
+
+    seen = "".join(got)
+    assert len(seen) >= 400, "用例需要已收到部分正文"
+    # 历史：user + 部分 assistant（正文与已见前缀一致，尾部带停止标注）
+    assert [m.role for m in agent.history] == ["user", "assistant"]
+    partial = agent.history[-1].text
+    assert partial.startswith(seen), "落库正文应是已见前缀（不缺口、不重复）"
+    assert partial.endswith("…（已停止）")
+    # 历史自洽：下一轮照常能跑，模型上下文里能看到上一轮被截断的正文
+    agent.provider = FakeProvider([[TextBlock(text="好的，接着来。")]])
+    await collect(agent, "继续", auto_respond=None)
+    assert agent.history[-1].text == "好的，接着来。"
+    assert any(
+        m.role == "assistant" and "…（已停止）" in m.text
+        for m in agent.provider.calls[0]
+    )
+
+
+async def test_generator_close_mid_stream_keeps_partial_text(tmp_path):
+    """取消的另一种形态：消费方中途关闭生成器（GeneratorExit 路径，finally 里
+    不允许 await）——部分正文同样要兜底落库。"""
+    provider = SlowTextProvider("内容段落" * 2000)
+    agent = make_agent(provider, tmp_path)
+    got: list[str] = []
+    agen = agent.run_turn("写一篇很长的文章")
+    async for ev in agen:
+        if ev.kind == "text_delta":
+            got.append(ev.text)
+            if sum(map(len, got)) >= 400:
+                break
+    await agen.aclose()
+
+    seen = "".join(got)
+    assert len(seen) >= 400, "用例需要已收到部分正文"
+    assert [m.role for m in agent.history] == ["user", "assistant"]
+    partial = agent.history[-1].text
+    assert partial.startswith(seen)
+    assert partial.endswith("…（已停止）")
+
+
+async def test_cancel_before_any_text_leaves_no_empty_assistant(tmp_path):
+    """一个正文都没吐就停止：不得落一条空的/纯标注的 assistant 消息。"""
+    provider = SlowTextProvider("内容段落" * 2000)
+    agent = make_agent(provider, tmp_path)
+    agen = agent.run_turn("写一篇很长的文章")
+    first = await agen.__anext__()  # 消费到轮首事件即停（正文增量还没开始）
+    assert first.kind == "turn_started"
+    await agen.aclose()
+    assert [m.role for m in agent.history] == ["user"]
 
 
 async def test_max_iterations_emits_notice(tmp_path):

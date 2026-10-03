@@ -2,15 +2,39 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
 import pytest
 
+from skysheep.models.base import Provider, ProviderDone, ProviderTextDelta
 from skysheep.models.fake import FakeProvider  # noqa: F401  (re-exported for tests)
 from skysheep.session.store import SessionStore
 
-__all__ = ["FakeProvider", "store", "home", "read_app_bundle"]
+__all__ = ["FakeProvider", "SlowTextProvider", "store", "home", "read_app_bundle"]
+
+
+class SlowTextProvider(Provider):
+    """节流假模型：把一段长文按小块慢慢吐（块间让出事件循环），
+    供「流式中途取消」类测试在输出中途插手（点停止 / break / cancel）。"""
+
+    name = "fake"
+    model = "fake-slow"
+
+    def __init__(self, text: str, chunk: int = 8, delay_s: float = 0.005) -> None:
+        super().__init__()
+        self.text = text
+        self.chunk = chunk
+        self.delay_s = delay_s
+        self.calls: list[list] = []
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.calls.append(list(messages))
+        for i in range(0, len(self.text), self.chunk):
+            yield ProviderTextDelta(self.text[i : i + self.chunk])
+            await asyncio.sleep(self.delay_s)
+        yield ProviderDone(stop_reason="end_turn", input_tokens=11, output_tokens=7)
 
 # 用例可能从任意 cwd 启动（仓库根 / engine/），静态资源一律按本文件定位成
 # 绝对路径；与 server/app.py:299 及 test_settings_extras.py 的写法同源。

@@ -3214,11 +3214,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         两词前缀规则不再命中、回落逐次确认——列表里把这类「留着也不会再放行」
         的规则亮出来，提示用户清理。不在这里造第二套判定。
         """
-        rules = (
-            await self.store.list_rules(self.project.id)
-            if self.project is not None
-            else []
-        )
+        return await self._enriched_rules()
+
+    async def _enriched_rules(self) -> list[dict]:
+        """规则列表回读的唯一出口：凡回传 rules 的读路径（whitelist.list /
+        whitelist.add / whitelist.enable / whitelist.import）都走这里，
+        字段集才一致——add 回传同条规则与随后 list 完全相同。
+        """
+        if self.project is None:
+            return []
+        rules = await self.store.list_rules(self.project.id)
         return [self._stale_fields(r) for r in rules]
 
     @staticmethod
@@ -3264,7 +3269,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise RuntimeError("已存在完全相同的规则")
         await self.store.add_rule(self.project.id, tool, kind, pattern)
         await self.gate.load_project_rules()
-        return {"rules": await self.store.list_rules(self.project.id)}
+        # 回传与 whitelist.list 同一富化：stale 标记随写即回，字段集两处一致
+        return {"rules": await self._enriched_rules()}
 
     async def clear_whitelist_rules(self, kind: str = "") -> dict:
         """清空项目白名单（kind 为空 = 全部；收紧动作，远端也放行）。
@@ -3300,7 +3306,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         await self.store.set_rule_enabled(rule_id, self.project.id, bool(enabled))
         await self.gate.load_project_rules()
         return {"id": rule_id, "enabled": bool(enabled),
-                "rules": await self.store.list_rules(self.project.id)}
+                "rules": await self._enriched_rules()}
 
     def check_whitelist_rule(self, tool: str, text: str) -> dict:
         """规则测试器：当前规则会让这条调用直接放行、还是弹确认。"""
@@ -3352,7 +3358,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return {
             "added": added,
             "skipped": skipped,
-            "rules": await self.store.list_rules(self.project.id),
+            "rules": await self._enriched_rules(),
         }
 
     # ---- 模型/配置操作 ----

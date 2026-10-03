@@ -7,13 +7,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import httpx
 import pytest
 
 from skysheep.channels.manager import ChannelManager, build_channels
@@ -150,6 +153,77 @@ async def test_pure_outbound_lifecycle_has_no_background_task():
     assert ch.running is False
     await ch.stop()
     assert ch._client is None
+
+
+# ---- 失败日志与关闭时序（回归：异常空消息不能只剩「失败：」；stop 等在途收尾） ----
+
+
+class _EmptyMessageErrorTransport(httpx.AsyncBaseTransport):
+    """抛 str() 为空的异常：真实场景里 TimeoutError()、连接池已关都长这样。"""
+
+    async def handle_async_request(self, request):
+        raise TimeoutError()
+
+
+class _SlowTransport(httpx.AsyncBaseTransport):
+    """卡到放行才返回：模拟一个确定性的在途请求。"""
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.finished = 0
+
+    async def handle_async_request(self, request):
+        self.started.set()
+        await self.release.wait()
+        self.finished += 1
+        return httpx.Response(200)
+
+
+async def test_empty_exception_message_still_names_exception_type(caplog):
+    """异常 str() 为空时，日志与 error 都不能只剩「失败：」，必须带异常类型。"""
+    ch = WebhookChannel({"enabled": True, "url": "http://example.com/hook"}, lambda _m: None)
+    ch._transport = _EmptyMessageErrorTransport()
+    with caplog.at_level(logging.WARNING, logger="skysheep.channels.webhook"):
+        assert await ch.send_text("", "x") is False
+    line = [r for r in caplog.records if r.name == "skysheep.channels.webhook"][-1]
+    assert "失败：" in line.getMessage()
+    assert "TimeoutError" in line.getMessage()
+    assert "TimeoutError" in ch.error
+
+
+async def test_stop_waits_for_inflight_request():
+    """stop() 先等在途推送落地再关连接，不把在途请求从脚下抽走。"""
+    tr = _SlowTransport()
+    ch = WebhookChannel({"enabled": True, "url": "http://example.com/hook"}, lambda _m: None)
+    ch._transport = tr
+    send = asyncio.create_task(ch.send_text("", "在途"))
+    await asyncio.wait_for(tr.started.wait(), 2)
+    stop = asyncio.create_task(ch.stop())
+    await asyncio.sleep(0.05)
+    assert not stop.done()  # 在途没落地，stop 必须还在等
+    assert not send.done()
+    tr.release.set()
+    assert (await send) is True  # 在途请求完整走完，未被连接关闭打断
+    await asyncio.wait_for(stop, 2)
+    assert ch._client is None
+
+
+async def test_stop_gives_up_waiting_after_bounded_timeout():
+    """在途卡过上限：stop 有界放弃照旧关闭，绝不无限挂住（timeout_s=0.2 → ~1.2s）。"""
+    tr = _SlowTransport()
+    ch = WebhookChannel(
+        {"enabled": True, "url": "http://example.com/hook", "timeout_s": 0.2},
+        lambda _m: None,
+    )
+    ch._transport = tr
+    send = asyncio.create_task(ch.send_text("", "卡住"))
+    await asyncio.wait_for(tr.started.wait(), 2)
+    await asyncio.wait_for(ch.stop(), 10)
+    assert ch._client is None
+    assert not send.done()  # 放弃等待不取消在途，由它自己按超时收场
+    tr.release.set()
+    await asyncio.wait_for(send, 2)
 
 
 # ---- manager 装配 ----

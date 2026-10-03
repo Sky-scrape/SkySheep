@@ -27,10 +27,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 # 结构化行的标记：出现在消息尾部，便于从文本日志里切出 JSON
 STRUCT_TAG = " |json| "
+
+# 滚动文件日志的落点与轮转参数：与 desktop.py（LOG_MAX_BYTES / .1 备份）同款
+FILE_LOG_NAME = Path("logs") / "desktop.log"
+LOG_MAX_BYTES = 1_000_000
 
 _logger = logging.getLogger("skysheep.obs")
 
@@ -52,6 +59,41 @@ def info(ev: str, message: str, **fields) -> None:
 
 def warning(ev: str, message: str, **fields) -> None:
     _log(logging.WARNING, ev, message, **fields)
+
+
+def setup_file_logging(max_bytes: int = LOG_MAX_BYTES) -> Path | None:
+    """把引擎日志接到滚动文件 ``~/.skysheep/logs/desktop.log``（``skysheep app`` 入口用）。
+
+    打包入口 desktop.py 在引擎导入前自己接过一份（启动期日志也要留痕，那边
+    不能依赖引擎模块）；源码直接 ``skysheep app`` 时没人接，desktop.log 永不
+    生成，轮次诊断（backend.turn_breakdown 读该文件的 ``ev=turn`` 行）就恒空。
+    本函数给 CLI 入口补上同一落点：路径、1MB 滚动保留一个 ``.1``、行格式
+    三处一致。幂等（同路径已接过——含 desktop 入口先接的情形——不重复加，
+    否则一行日志落两遍）；失败静默返回 None，日志落不了盘不能挡启动。
+    只挂文件 handler，不碰控制台：``skysheep chat`` 等 REPL 场景的终端输出不受影响。
+    """
+    try:
+        from .config import skysheep_home
+
+        path = skysheep_home() / FILE_LOG_NAME
+        target = os.path.abspath(str(path))
+        root = logging.getLogger()
+        for h in root.handlers:
+            base = getattr(h, "baseFilename", None)
+            if base and os.path.abspath(base) == target:
+                return path  # 已接过（本入口或 desktop 入口）：不叠加
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            path, maxBytes=max(1, int(max_bytes)), backupCount=1, encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        root.addHandler(handler)
+        root.setLevel(logging.INFO)
+        return path
+    except OSError:
+        return None
 
 
 class span:

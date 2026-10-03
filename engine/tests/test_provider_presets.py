@@ -130,3 +130,51 @@ def test_set_provider_models_rejects_empty_list(home):
     section = raw["providers"]["customprov"]
     assert section["models"] == ["m2", "m3"]
     assert section["model"] == "m2", "当前模型被删后应换到已启用列表第一个"
+
+
+# ---- fake（演示模式）不需要 API Key ----
+
+
+def test_build_provider_fake_needs_no_api_key(home, monkeypatch):
+    """kind="fake" 豁免 API Key 检查：演示模式是脚本化回放，key 参数根本不会用。
+
+    曾被「还没有配置 API Key」误挡（首启向导选演示模式的用户被要求填 Key）。
+    非 fake 服务缺 Key 仍要报错——豁免只属于 fake，不许顺手放大。
+    """
+    import pytest
+
+    from skysheep.config import ConfigError, ProviderConfig
+    from skysheep.models.factory import build_provider
+
+    monkeypatch.delenv("FAKE_API_KEY", raising=False)
+    provider = build_provider("fake", ProviderConfig(kind="fake", model="demo"))
+    assert provider.demo_mode is True
+    assert provider.name == "demo"
+
+    # 非 fake：缺 Key 的报错行为保持不变
+    monkeypatch.delenv("PROVTEST_API_KEY", raising=False)
+    with pytest.raises(ConfigError, match="还没有配置 API Key"):
+        build_provider("provtest", ProviderConfig(kind="openai", model="m1"))
+
+
+async def test_run_headless_fake_without_api_key(home, monkeypatch):
+    """skysheep run 配 kind=fake（config 无任何 Key）：rc 路径正常跑完不 SystemExit。
+
+    对应用户验收 repro：default="fake" + [providers.fake]（无 api_key）→
+    修复前 rc=2 报「还没有配置 API Key」，修复后 headless 一轮正常结束。
+    """
+    from skysheep.cli.app import run_headless
+    from skysheep.config import _read_raw_config, _write_raw_config
+
+    monkeypatch.delenv("FAKE_API_KEY", raising=False)
+    p, raw = _read_raw_config()
+    raw["default"] = "fake"
+    raw.setdefault("providers", {})["fake"] = {"kind": "fake", "model": "demo"}
+    _write_raw_config(p, raw)
+
+    result = await run_headless(
+        "总结", directory=str(home / "proj"), provider="fake", output="json",
+    )
+    assert result["provider"] == "fake"
+    assert result["stop_reason"] == "end_turn"
+    assert result["reply"], "演示模式应产出内置脚本文案"

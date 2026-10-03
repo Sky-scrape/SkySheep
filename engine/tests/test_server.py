@@ -912,6 +912,49 @@ def test_settings_whitelist_check_export_import(home, monkeypatch):
         assert r["added"] == 1 and r["skipped"] == 2 and len(r["rules"]) == 2
 
 
+def test_settings_whitelist_add_returns_stale_fields_like_list(home, monkeypatch):
+    """add / enable / import 回传的规则与 whitelist.list 字段集完全一致。
+
+    stale/stale_reason 由同一 _stale_fields 富化（backend 的 _enriched_rules
+    唯一回读出口）：add 一条「docker run」两词前缀（2.3.0 收紧后不再命中），
+    回传当场就带失效标记，且与随后 list 的同条规则整条相等——不是字段子集。
+    """
+    monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "whitelist.add",
+                      "params": {"tool": "run_command", "kind": "prefix", "pattern": "docker run"}})
+        add = recv_until(ws, "a1")["result"]["rules"][0]
+        assert add["stale"] is True and add["stale_reason"]
+
+        ws.send_json({"id": "l1", "method": "whitelist.list"})
+        listed = next(r for r in recv_until(ws, "l1")["result"]["rules"]
+                      if r["id"] == add["id"])
+        assert add == listed  # 整条相等：两处读取路径字段集一致
+
+        # 非 stale 类规则同样带键（stale=False、原因空串），字段集不缺
+        ws.send_json({"id": "a2", "method": "whitelist.add",
+                      "params": {"tool": "run_command", "kind": "prefix", "pattern": "git status"}})
+        g = next(r for r in recv_until(ws, "a2")["result"]["rules"]
+                 if r["pattern"] == "git status")
+        assert g["stale"] is False and g["stale_reason"] == ""
+        assert set(g) == set(add)
+
+        # enable / import 回传同口径
+        ws.send_json({"id": "d1", "method": "whitelist.enable",
+                      "params": {"id": add["id"], "enabled": False}})
+        d = next(r for r in recv_until(ws, "d1")["result"]["rules"]
+                 if r["id"] == add["id"])
+        assert d["stale"] is True and d["stale_reason"] == add["stale_reason"]
+
+        ws.send_json({"id": "i1", "method": "whitelist.import",
+                      "params": {"rules": [
+                          {"tool": "run_command", "kind": "prefix", "pattern": "ssh lab"},
+                      ]}})
+        i = next(r for r in recv_until(ws, "i1")["result"]["rules"]
+                 if r["pattern"] == "ssh lab")
+        assert i["stale"] is True and i["stale_reason"]
+
+
 def test_project_instructions_roundtrip(home):
     """侧栏「项目记忆」：空项目返回 None 路径；保存后落盘 AGENTS.md 并可读回。"""
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:

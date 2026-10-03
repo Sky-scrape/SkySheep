@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from conftest import FakeProvider
+from conftest import FakeProvider, SlowTextProvider
 
 from skysheep.messages import TextBlock
 from skysheep.server.backend import ServerBackend
@@ -113,5 +113,55 @@ async def test_empty_session_reload_has_system(home):
         await be.resume_session(sid)
         hist = be.runtimes[sid].agent.history
         assert [m.role for m in hist] == ["system"]
+    finally:
+        await be.shutdown()
+
+
+async def test_cancelled_turn_persists_partial_answer(home):
+    """流式中途点停止：已见前缀正文落库并带停止标注，重启重放不无声消失。
+
+    轮末落库靠 agent.history 里「本轮新增」的消息（按 id 挑），而旧实现的
+    正文合并在流式循环之后——取消落在循环中途时 assistant 消息根本没进
+    history，落库只剩 user，重启后这轮的回答整段消失。
+    """
+    be = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: SlowTextProvider("内容段落" * 2000),
+    )
+    await be.setup()
+    got: list[str] = []
+
+    async def emit(ev):
+        if ev.get("kind") == "text_delta":
+            got.append(ev["text"])
+            if sum(map(len, got)) >= 400:
+                be.cancel_run()  # 用户点「停止」
+
+    try:
+        res = await be.send("写一篇很长的文章", emit)
+        assert res["stopped"] is True
+        sid = be.session.id
+        db = await be.store.load_messages(sid)
+        # 旧缺陷：这里只有 ["user"]，已见 400 字不落库
+        assert [m.role for m in db] == ["user", "assistant"]
+        seen = "".join(got)
+        assert len(seen) >= 400
+        partial = db[1].text
+        assert partial.startswith(seen), "落库正文应是已见前缀（不缺口、不重复）"
+        assert partial.endswith("…（已停止）")
+
+        # 重启视角：新建 backend 重载同一会话，部分回答仍在历史里
+        be2 = ServerBackend(
+            working_dir=home / "proj",
+            provider_factory=lambda: FakeProvider([[TextBlock(text="继续")]]),
+        )
+        await be2.setup()
+        try:
+            await be2.resume_session(sid)
+            hist = be2.runtimes[sid].agent.history
+            assert [m.role for m in hist] == ["system", "user", "assistant"]
+            assert hist[-1].text == partial
+        finally:
+            await be2.shutdown()
     finally:
         await be.shutdown()

@@ -23,6 +23,7 @@ dispatch 层仅限本机调用），不是模型可指定的参数；本适配�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -70,6 +71,10 @@ class WebhookChannel(Channel):
             self.timeout_s = DEFAULT_TIMEOUT_S
         self._client: httpx.AsyncClient | None = None
         self._transport: httpx.AsyncBaseTransport | None = None  # 测试注入点
+        # 在途推送计数：stop() 要等它们落地再关连接（见 stop 注释）。
+        self._inflight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()  # 初始没有在途请求
 
     def configured(self) -> bool:
         return bool(self.url)
@@ -82,6 +87,18 @@ class WebhookChannel(Channel):
 
     async def stop(self) -> None:
         await super().stop()
+        # 关连接前先等在途推送落地（有界）：直接 aclose 会把还在飞的请求从脚
+        # 下抽掉，让它们以一条空原因的失败收场（连接池已关时 httpcore 抛的
+        # 就是 str() 为空的异常）。上限取 timeout_s + 1：httpx 的连接/读写超
+        # 时都按 timeout_s 逐段约束，正常在途最迟也就这么久；万一卡过上限，
+        # 放弃等待照旧关闭，在途请求各自的失败路径仍会记下带类型的异常。
+        if self._inflight:
+            try:
+                await asyncio.wait_for(self._idle.wait(), timeout=self.timeout_s + 1.0)
+            except TimeoutError:  # 3.11+ 与 asyncio.TimeoutError 同一异常
+                logger.warning(
+                    "webhook 渠道关闭：在途推送 %d 个超时未归，照旧关闭", self._inflight
+                )
         if self._client is not None:
             await self._client.aclose()
             self._client = None
@@ -125,18 +142,29 @@ class WebhookChannel(Channel):
         headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
         if self.secret:
             headers[SIGNATURE_HEADER] = self._sign(self.secret, body)
+        self._inflight += 1
+        if self._inflight == 1:
+            self._idle.clear()
         try:
-            resp = await self._http().post(self.url, content=body, headers=headers)
-        except Exception as e:  # noqa: BLE001 - 不可达/超时/坏 URL 都算发送失败
-            self.error = f"推送失败：{e}"
-            logger.warning("webhook 推送 %s 失败：%s", _host_of(self.url), e)
-            return False
-        if not (200 <= resp.status_code < 300):
-            self.error = f"推送未确认：HTTP {resp.status_code}"
-            logger.warning("webhook 推送 %s 失败：%s", _host_of(self.url), self.error)
-            return False
-        self.error = ""
-        return True
+            try:
+                resp = await self._http().post(self.url, content=body, headers=headers)
+            except Exception as e:  # noqa: BLE001 - 不可达/超时/坏 URL 都算发送失败
+                # str(e) 可能为空（TimeoutError()、连接池已关的空消息异常），
+                # 空时退回 repr：原因里始终带异常类型，不让日志只剩「失败：」。
+                reason = str(e).strip() or repr(e)
+                self.error = f"推送失败：{reason}"
+                logger.warning("webhook 推送 %s 失败：%s", _host_of(self.url), reason)
+                return False
+            if not (200 <= resp.status_code < 300):
+                self.error = f"推送未确认：HTTP {resp.status_code}"
+                logger.warning("webhook 推送 %s 失败：%s", _host_of(self.url), self.error)
+                return False
+            self.error = ""
+            return True
+        finally:
+            self._inflight -= 1
+            if self._inflight == 0:
+                self._idle.set()
 
     def status(self):
         st = super().status()

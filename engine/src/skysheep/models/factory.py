@@ -10,6 +10,16 @@ from .openai_compat import OpenAICompatProvider
 
 
 def build_provider(name: str, cfg: ProviderConfig) -> Provider:
+    if cfg.kind == "fake":
+        # 首启向导的「演示模式」：脚本化回放，不访问任何网络服务，天然不需要
+        # API Key——必须先于 Key 检查分支，否则没配 Key 的用户会被下面的
+        # 「还没有配置 API Key」文案挡在演示模式外（fake 的 key 参数根本不会用）。
+        # demo_mode 标记供后端跳过标题生成之类的附加模型调用。
+        provider: Provider = FakeProvider(list(DEMO_SCRIPT)).with_default(DEMO_DEFAULT_REPLY)
+        provider.name = "demo"
+        provider.model = "演示模式"
+        provider.demo_mode = True
+        return provider
     key = resolve_api_key(name, cfg)
     if key is None:
         # 这段文案直接进前端横幅/报错条：面向的是普通用户，指路设置页而不是配置文件
@@ -17,14 +27,6 @@ def build_provider(name: str, cfg: ProviderConfig) -> Provider:
             f"模型服务「{name}」还没有配置 API Key——"
             "打开 ⚙ 设置 · 模型服务，选一个服务粘贴 Key 即可"
         )
-    if cfg.kind == "fake":
-        # 首启向导的「演示模式」：脚本化回放，不访问任何网络服务。
-        # demo_mode 标记供后端跳过标题生成之类的附加模型调用。
-        provider: Provider = FakeProvider(list(DEMO_SCRIPT)).with_default(DEMO_DEFAULT_REPLY)
-        provider.name = "demo"
-        provider.model = "演示模式"
-        provider.demo_mode = True
-        return provider
     if cfg.kind == "anthropic":
         provider: Provider = AnthropicProvider(
             name=name, model=cfg.model, api_key=key, base_url=cfg.base_url, max_tokens=cfg.max_tokens,

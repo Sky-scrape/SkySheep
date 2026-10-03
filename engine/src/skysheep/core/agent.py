@@ -129,6 +129,10 @@ class Agent:
         # 全量 token 估算的指纹缓存（见 used_context_tokens）
         self._ctx_cache_fp: tuple | None = None
         self._ctx_cache = 0
+        # 流式中已合并、尚未并入历史的正文增量（text_parts 的同一个列表引用，
+        # 零拷贝）。正常并入历史后置 None；被取消时由 run_turn 的 finally
+        # 兜底落库（见 _persist_partial_stream_text）
+        self._stream_text_parts: list[str] | None = None
 
     # ---- 状态管理 ----
 
@@ -247,9 +251,38 @@ class Agent:
             async for ev in self._turn_events():
                 yield ev
         finally:
+            # 流式中途被取消（CancelledError 穿透，或生成器在 yield 处被关闭）
+            # 时，用户已经看到的部分正文还没并入历史——先兜底落库（同步操作，
+            # GeneratorExit 路径下 finally 里不允许 await），否则重启后这轮
+            # 「无声消失」；正常结束/已并入历史时这里是 no-op。
+            self._persist_partial_stream_text()
             # 轮次结束（正常/取消/异常）后未决权限不再有意义：清掉，避免
             # 「取消后残留可再成功投递决策」（安全审查 M12）
             self.clear_pending()
+
+    def _persist_partial_stream_text(self) -> None:
+        """把流式中途被打断的已合并正文兜底并入历史（取消收尾）。
+
+        取消可能落在两处：CancelledError 从生成器内部的 await 点穿透（直接
+        走到 run_turn 的 finally），或消费者放弃迭代后生成器被 aclose——
+        GeneratorExit 在 yield 处抛出（同样经过 run_turn 的 finally，且那里
+        不允许 await）。两条路都只能做同步操作，所以流式期间把 text_parts
+        的引用登记在 self._stream_text_parts 上（零拷贝），这里统一收割。
+
+        尾部追加「…（已停止）」让用户与下一轮的模型都知道这段话被截断；
+        不带 thinking 块——部分思考没有有效签名，原样回传上游可能 400，
+        且用户看到并期待保留的是正文。已正常并入历史时登记为 None，no-op。
+        """
+        parts = self._stream_text_parts
+        self._stream_text_parts = None
+        if not parts:
+            return
+        text = "".join(parts)
+        if not text.strip():
+            return
+        self.history.append(
+            Message.assistant([TextBlock(text=text + "\n\n…（已停止）")])
+        )
 
     async def _turn_events(self) -> AsyncIterator[AgentEvent]:
         ctx = ToolContext(
@@ -305,6 +338,9 @@ class Agent:
             for attempt in range(1, MAX_STREAM_RETRIES + 2):
                 blocks, text_parts, reasoning_parts, reasoning_sig = [], [], [], ""
                 think_t0 = think_t1 = None
+                # 登记引用（不是拷贝）：流式期间 text_parts 里的增量即收尾
+                # 兜底要收割的内容，取消时 _persist_partial_stream_text 靠它落库
+                self._stream_text_parts = text_parts
                 try:
                     # 自动档：每次调用前按当前上下文实时估档（简单任务降、调试设计升），
                     # 其余档位不覆盖、沿用用户所选（见 core/effort.py）
@@ -385,6 +421,9 @@ class Agent:
             if is_final:
                 assistant.duration_ms = int((time.monotonic() - turn_t0) * 1000)
             self.history.append(assistant)
+            # 正文已并入历史：清掉流式登记，取消兜底不再重复落库（含下面
+            # yield 处被 GeneratorExit 打断的情况——消息在打断前已入库）
+            self._stream_text_parts = None
             yield AssistantMessage(message=assistant.model_dump())
 
             if is_final:

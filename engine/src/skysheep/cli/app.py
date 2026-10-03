@@ -694,6 +694,12 @@ def _show_on_first_paint(window) -> None:
 
 def _app_cmd(args) -> None:
     """桌面模式：本地服务 + pywebview 原生窗口（浏览器兜底）。"""
+    from ..obs import setup_file_logging
+
+    # 源码入口也要接桌面日志：desktop.py 只在打包入口接线，`skysheep app` 直启
+    # 不接的话 logs/desktop.log 永不生成，「轮次诊断」（diagnostics.turn_breakdown
+    # 读该文件的 ev=turn 行）就恒空。只落文件不碰控制台，幂等可重复调用。
+    setup_file_logging()
     import time
     import webbrowser
 

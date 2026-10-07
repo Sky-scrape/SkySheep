@@ -49,9 +49,31 @@ def spawn_bg(coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
     return task
 
 
+async def drain_bg_tasks(timeout: float = 30.0) -> int:
+    """有界等待全部在册后台任务落地，返回放弃等待的数量（超时未归者取消）。
+
+    一次性进程（`skysheep cron run`，Windows 计划任务拉起的无人值守入口）
+    的退出前收尾用：fire-and-forget 的终态推送若不等它落地，asyncio.run
+    收尾会统一取消在途任务——CancelledError 是 BaseException，渠道适配器
+    的 ``except Exception`` 接不住，_on_bg_done 对取消又静默返回，推送就
+    丢了且无任何日志。退出前有界等一轮，正常推送都能落地；超时未归的
+    放弃（记日志并取消），不让坏端点把进程退出拖死。
+    """
+    pending = [t for t in list(_BG_TASKS) if not t.done()]
+    if not pending:
+        return 0
+    _done, late = await asyncio.wait(pending, timeout=timeout)
+    for t in late:
+        coro = getattr(t.get_coro(), "__qualname__", "") or repr(t)
+        logger.warning("退出收尾：后台任务 %s 超过 %s 秒未落地，放弃等待并取消",
+                       coro, timeout)
+        t.cancel()
+    return len(late)
+
+
 def pending_count() -> int:
     """当前登记在册的后台任务数（测试与诊断用）。"""
     return len(_BG_TASKS)
 
 
-__all__ = ["pending_count", "spawn_bg"]
+__all__ = ["drain_bg_tasks", "pending_count", "spawn_bg"]

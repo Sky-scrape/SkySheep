@@ -384,11 +384,18 @@ class PermissionGate:
         project_id: int | None = None,
         session_rules: list[WhitelistRule] | None = None,
         working_dir: Path | None = None,
+        extra_confirm: Callable[[Tool, dict], bool] | None = None,
     ) -> None:
         self.store = store
         self.project_id = project_id
         self.session_rules: list[WhitelistRule] = list(session_rules or [])
         self.working_dir = Path(working_dir).resolve() if working_dir else None
+        # Mods（实验性）的收紧查询：返回 True = 该调用必须逐次确认，命中即跳过
+        # 下方全部自动放行分支（READONLY 短路 / 两档提前放行 / 白名单）。**该接口
+        # 没有「返回 False 来放行」的语义**——False / None / 异常一律按「不干预」
+        # 处理，门走原逻辑；Mod 对权限门只能收紧，绝不放行（plan-mods §5.2）。
+        # 默认 None：不挂 mods 的所有既有构造点行为逐分支不变。
+        self.extra_confirm = extra_confirm
         # 分级权限模式（对标 Codex Auto-Edit / Claude Code acceptEdits）：
         # True 时「写入」类工具自动放行，但只限**工作目录内**的目标文件与
         # 能确认落点的工具；目标路径在工作目录外、或无法确认落点（MCP 写工具、
@@ -783,6 +790,20 @@ class PermissionGate:
             return None
         return await hub.claim(paths, owner=owner)
 
+    def _extra_confirm_required(self, tool: Tool, input_dict: dict) -> bool:
+        """Mods 收紧声明是否命中本次调用（只收紧：True = 强制逐次确认）。
+
+        查询异常按「不干预」（回落门原行为）；命中时 authorize/needs_confirm
+        会跳过全部自动放行分支。与命中说明（describe_confirm）两读都发生在
+        authorize 的同步段内（之间无 await），多 Agent 并发不会错配文案。
+        """
+        if self.extra_confirm is None:
+            return False
+        try:
+            return bool(self.extra_confirm(tool, input_dict))
+        except Exception:  # noqa: BLE001 - 查询失败按不干预，绝不影响门原判定
+            return False
+
     def needs_confirm(self, tool: Tool, input_dict: dict) -> bool:
         """authorize 是否会对这次调用要求用户确认（纯判定，无副作用）。
 
@@ -794,13 +815,20 @@ class PermissionGate:
         PendingPermission、触发 on_request）仍只在那里调一次——预检若走真
         authorize，回退串行会对同一次调用二次触发确认回调。
 
+        Mods 收紧声明（extra_confirm）命中时这里必须返回 True：与 authorize
+        的「命中即跳过 READONLY 短路」同位（在 READONLY 预检之前），否则名义
+        READONLY 且被 Mod 要求确认的调用会被收进并发批绕过逐次确认。
+
         只对 READONLY 候选有意义（批收集先做 safety 判定才问这里）；子类门
         （HeadlessGate / ChannelGate / SubagentGate / IsolatedGate）对 READONLY
         的放行口径与本判定一致（READONLY 短路均只让引擎主目录守卫之外的调用
-        过去），预检命中回退串行后由各自 authorize 给出最终结论。
+        过去），预检命中回退串行后由各自 authorize 给出最终结论。子类门不挂
+        mods（构造点不传 extra_confirm），此处对它们恒为 False。
         与 authorize 的各自动放行分支同序同条件，改 authorize 时必须同步改
         这里；一致性由 tests/test_gate_home_guard.py 的对照用例钉住。
         """
+        if self._extra_confirm_required(tool, input_dict):
+            return True
         if tool.safety == Safety.READONLY and not self._write_hits_engine_home(tool, input_dict):
             return False
         if self.auto_accept_all:
@@ -821,6 +849,10 @@ class PermissionGate:
 
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
         """返回 None 表示放行；返回 PendingPermission 表示需要用户决策。"""
+        # Mods 收紧声明（require_confirm_tools）命中即跳过下方全部自动放行分支，
+        # 落到 pending 创建：即使 READONLY 短路 / 完全访问档 / 自动允许写入档 /
+        # 白名单本会放行，被 Mod 点名的工具一律回落逐次确认——只收紧，不放行。
+        extra_required = self._extra_confirm_required(tool, input_dict)
         # 引擎主目录写入守卫必须在 READONLY 短路**之前**：memory_write 名义
         # READONLY 却写 ~/.skysheep/memory.md，而该文件注入所有项目所有会话的
         # system prompt——短路在前会让 P2-7 守卫对它结构性不可达（第二轮审查
@@ -829,10 +861,10 @@ class PermissionGate:
         # 永远逐次确认，白名单沉淀不出放行。完全访问档（auto_accept_all）与
         # 既有 P2-7 守卫同界，不受影响。
         engine_home_write = self._write_hits_engine_home(tool, input_dict)
-        if tool.safety == Safety.READONLY and not engine_home_write:
+        if tool.safety == Safety.READONLY and not engine_home_write and not extra_required:
             return None
         # 完全访问档：写入与执行都自动放行（白名单之外的全部放开）
-        if self.auto_accept_all:
+        if self.auto_accept_all and not extra_required:
             return None
         # 自动允许写入档：只放行 WRITE 级，且目标必须确认在工作目录内；
         # 高危（执行命令）、目录外写入、以及「名义上是移动实为删目录」仍逐次确认
@@ -841,6 +873,7 @@ class PermissionGate:
             and tool.safety == Safety.WRITE
             and self._write_target_inside_workdir(tool, input_dict)
             and not self._write_is_actually_delete(tool, input_dict)
+            and not extra_required
         ):
             return None
         arg_text = tool.arg_text(input_dict)
@@ -858,6 +891,9 @@ class PermissionGate:
             # （审查 P2-7），与上一条同级，退回逐次确认。READONLY 分级的
             # memory_write 也走到这里（READONLY 短路已被上方守卫跳过）。
             and not engine_home_write
+            # Mods 收紧声明命中时白名单同样放不了行（前面档位分支已被跳过，
+            # 这里是最后一条提前放行路径，必须同守）
+            and not extra_required
         ):
             # 命中记账：只记有库 id 的项目级规则（次数 + 最近命中时间，
             # 设置页展示用）。记账失败不影响放行——这只是统计。
@@ -878,6 +914,17 @@ class PermissionGate:
             diff=self._preview_diff(tool, input_dict),
             always_rule=self.rule_for(tool, input_dict, self.working_dir),
         )
+        if extra_required:
+            # 用户看得见为什么多了一次确认：点名是哪个 Mod 要求的（描述查询与
+            # 命中判定同在 authorize 的同步段内，多 Agent 并发不会错配）
+            describe = getattr(getattr(self.extra_confirm, "__self__", None),
+                               "describe_confirm", None)
+            mod_line = (
+                f"Mods 收紧声明命中：{describe(tool.name)} 要求该工具逐次确认"
+                if describe is not None
+                else "Mods 收紧声明命中：该工具被要求逐次确认（设置 · Mods 扩展 可查看）"
+            )
+            pending.note = (pending.note + "\n" if pending.note else "") + mod_line
         if (
             pending.always_rule is not None
             and pending.always_rule.kind == "always"

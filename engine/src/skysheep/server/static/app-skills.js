@@ -50,6 +50,7 @@ function renderMcpPresets(snap) {
   if (!box) return;
   const presets = snap.mcp_presets || [];
   const installed = new Set(snap.mcp_installed || []);
+  const mcpByName = new Map((snap.mcp || []).map((m) => [m.name, m]));
   box.innerHTML = "";
   if (!presets.length) return;
   const head = document.createElement("div");
@@ -57,7 +58,7 @@ function renderMcpPresets(snap) {
   head.textContent = "常用预设 · 点「＋ 添加」一键接入";
   box.appendChild(head);
   presets.forEach((p) => {
-    const needMap = { uv: "需 uv（随 SkySheep 自带）", node: "需 Node.js", local: "需先安装本机程序" };
+    const needMap = { uv: "需 uv（用于 uvx 拉取）", node: "需 Node.js", local: "需先安装本机程序" };
     // available 是后端启动时对本机运行时（npx/uvx/独立程序）的探测结果：
     // 缺运行时的卡直接置灰并说明缺什么，而不是点了添加才收到「启动命令不存在」
     const missing = p.available === false;
@@ -65,17 +66,26 @@ function renderMcpPresets(snap) {
       ? { uv: "未检测到 uv", node: "未检测到 Node.js", local: "未检测到本机程序" }[p.need]
       : (needMap[p.need] || "需 Node.js");
     const has = installed.has(p.name);
+    // 已添加的预设：顶部给实时连接状态小标（从 snap.mcp 取），替代旧式整卡变淡
+    const st = has ? mcpByName.get(p.name) : null;
+    const statusChip = !has
+      ? ""
+      : (!st || st.enabled === false)
+        ? '<span class="chip">已停用</span>'
+        : (st.connected
+          ? '<span class="chip safe-mark">已连接</span>'
+          : '<span class="chip chip-warn">未连接</span>');
     const card = document.createElement("div");
     card.className = "mcp-preset-card" + (has ? " added" : "") + (missing ? " unavailable" : "");
     card.innerHTML = `
       <div class="mpc-top">
         <span class="mpc-label">${escapeHtml(p.label)}</span>
-        ${p.readonly ? '<span class="chip safe-mark">只读</span>' : ""}
+        <span class="mpc-chips">${p.readonly ? '<span class="chip safe-mark">只读</span>' : ""}${statusChip}</span>
       </div>
       <div class="mpc-desc" title="${escapeHtml(p.desc)}">${escapeHtml(p.desc)}</div>
       <div class="mpc-foot">
         <span class="mpc-need" title="${escapeHtml(p.desc)}">${escapeHtml(need)}</span>
-        <button type="button" class="btn-ghost mpc-add"${has || missing ? " disabled" : ""}>${has ? "✓ 已添加" : (missing ? "缺运行时" : "＋ 添加")}</button>
+        <button type="button" class="btn-ghost mpc-add"${has || missing ? " disabled" : ""}>${has ? "已添加" : (missing ? "缺运行时" : "＋ 添加")}</button>
       </div>`;
     const btn = card.querySelector(".mpc-add");
     if (!has && !missing) {

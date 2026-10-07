@@ -22,6 +22,7 @@ from ..events import (
     AgentEvent,
     AssistantMessage,
     ErrorEvent,
+    ModUI,
     NoticeEvent,
     PermissionRequest,
     PermissionResolved,
@@ -95,6 +96,7 @@ class Agent:
         compaction_trigger: float = 0.9,
         compaction_auto: bool = True,
         hooks=None,
+        mods=None,
         restrict_to_workdir: bool = False,
         session_id: str = "",
     ) -> None:
@@ -112,6 +114,11 @@ class Agent:
         # 手动 /compact（backend 直接调 compact_history，不受此开关约束）
         self.compaction_auto = bool(compaction_auto)
         self.hooks = hooks  # core.hooks.HookRunner | None：工具调用前后用户钩子
+        # core.mods.ModManager | None：Mods 扩展（实验性）。挂基础 Agent、
+        # 会话 Agent 与团队成员 Agent——子代理/无人值守/渠道派生的构造点不传，
+        # 天然不挂（ mods 的 JS handler 全在权限门之后，且对门只能收紧；见
+        # core/mods.py）
+        self.mods = mods
         self.restrict_to_workdir = restrict_to_workdir
         # 会话 id：透传给钩子命令的 stdin JSON（多会话场景钩子可区分来源）
         self.session_id = session_id
@@ -313,6 +320,57 @@ class Agent:
         iterations = 0
         stop_reason = "max_iterations"  # 正常结束时在 break 前改为 end_turn
 
+        # ModUI（Mods 扩展的声明式展示片段）每轮上限：超出丢弃并发一次 Notice。
+        # 计数在 Agent 循环（run_turn 局部），ModManager 不计数（plan-mods §3）。
+        mod_ui_budget = 50
+        mod_ui_overflow = {"warned": False}
+
+        def _take_mod_ui(widgets: list[dict]) -> list[AgentEvent]:
+            nonlocal mod_ui_budget
+            out: list[AgentEvent] = []
+            if not widgets:
+                return out
+            if mod_ui_budget <= 0:
+                if not mod_ui_overflow["warned"]:
+                    mod_ui_overflow["warned"] = True
+                    out.append(NoticeEvent(message="Mods 片段已达本轮上限（50 条），其余已省略"))
+                return out
+            take = widgets[:mod_ui_budget]
+            mod_ui_budget -= len(take)
+            if len(take) < len(widgets) and not mod_ui_overflow["warned"]:
+                mod_ui_overflow["warned"] = True
+                out.append(NoticeEvent(message="Mods 片段已达本轮上限（50 条），其余已省略"))
+            out.extend(
+                ModUI(
+                    mod_id=str(w.get("mod_id", "")),
+                    session_id=self.session_id,
+                    slot=str(w.get("slot", "stream")),
+                    widget={k: v for k, v in w.items() if k not in ("mod_id",)},
+                )
+                for w in take
+            )
+            return out
+
+        def _mod_deny_parts(tu: ToolUseBlock, note: str) -> tuple[Message, AgentEvent, AgentEvent]:
+            """Mod 否决/拦截的工具调用按「用户拒绝」同一形态落历史与事件流
+            （与 514-528 的 deny 分支同构）：deny tool_result 进历史 + 工具卡
+            Started/Finished（is_error），模型知道这次调用被挡了、为何被挡。"""
+            return (
+                Message.tool_result(tu.id, note, is_error=True),
+                ToolCallStarted(tool_call_id=tu.id, name=tu.name, input=tu.input),
+                ToolCallFinished(
+                    tool_call_id=tu.id, name=tu.name,
+                    preview=truncate_output(note, MAX_TOOL_PREVIEW),
+                    is_error=True, duration_ms=0,
+                ),
+            )
+
+        def _mod_notices(errors: list[str]) -> list[NoticeEvent]:
+            """Mod 超时类错误要即时可见（结果已丢弃）；解析类错误进设置页记录即可。"""
+            return [
+                NoticeEvent(message=f"[mods] {e}") for e in errors if "超时" in e
+            ]
+
         # 本轮墙钟耗时：轮末盖在最后一条助手消息上（前端刷新后仍能显示「用时 X」）。
         # 用 monotonic 而非 time.time：系统时间被 NTP 校准/手动调整时不受影响。
         turn_t0 = time.monotonic()
@@ -333,6 +391,13 @@ class Agent:
         for iteration in range(1, self.max_iterations + 1):
             iterations = iteration
             yield TurnStarted(iteration=iteration)
+            # 3a5. Mod 迭代开始（迭代级，非回合级：一次提交会触发多次）——仅 ui
+            if self.mods is not None:
+                it_verdict = await self.mods.on_iteration_start(self.session_id, iteration)
+                for ev in _mod_notices(it_verdict.get("errors") or []):
+                    yield ev
+                for ev in _take_mod_ui(it_verdict.get("ui") or []):
+                    yield ev
 
             # turn 内压缩复查：单轮内工具结果可膨胀数十 k token，只在开头
             # 查一次会半路爆窗（上游 400 拒绝，前面迭代烧掉的费用全部作废）。
@@ -481,10 +546,54 @@ class Agent:
                     i += 1
                     continue
 
+                # 3a0. Mod 收紧声明（declarative.deny_tools）：authorize 之前的
+                # 纯 Python 查询，命中即拒绝——比门更早的收紧，不创建 pending、
+                # 不弹确认卡，与 514-528 的 deny 分支同构落历史与事件
+                if self.mods is not None:
+                    mod_deny_reason = self.mods.declarative_deny(tu.name, tu.input)
+                    if mod_deny_reason:
+                        deny_msg, deny_started, deny_finished = _mod_deny_parts(
+                            tu, mod_deny_reason
+                        )
+                        self.history.append(deny_msg)
+                        yield deny_started
+                        yield deny_finished
+                        i += 1
+                        continue
+
                 # 3a. 权限确认（READONLY 或白名单命中时 authorize 返回 None）
                 pending = await self.gate.authorize(tool, tu.input)
                 if pending is not None:
                     self._pending[pending.request_id] = pending
+                    # Mod 权限请求挂点（门后）：附加信息 / 否决（替用户提前拒绝，
+                    # 收紧向）。否决必先摘 pending——与下方 finally 同款，不摘则
+                    # 残留 request_id 可被 respond_permission 迟到投递「成功」
+                    # （安全审查 M12），且不发 PermissionRequest（前端无卡可清）
+                    perm_mod_verdict = (
+                        await self.mods.on_permission_request(
+                            tu.name, tu.input, pending.safety.value,
+                            pending.detail, self.session_id,
+                        )
+                        if self.mods is not None else None
+                    )
+                    if perm_mod_verdict is not None:
+                        for ev in _mod_notices(perm_mod_verdict.get("errors") or []):
+                            yield ev
+                        if perm_mod_verdict.get("denied"):
+                            # 否决路径不下发 perm 槽位 ModUI：本请求不发
+                            # PermissionRequest（前端无卡），perm 片段进了前端
+                            # 暂存桶就无人消费，会残留到同会话下一张权限卡上
+                            self._pending.pop(pending.request_id, None)
+                            deny_msg, deny_started, deny_finished = _mod_deny_parts(
+                                tu, perm_mod_verdict.get("deny_note") or "denied by mod"
+                            )
+                            self.history.append(deny_msg)
+                            yield deny_started
+                            yield deny_finished
+                            i += 1
+                            continue
+                        for ev in _take_mod_ui(perm_mod_verdict.get("ui") or []):
+                            yield ev
                     # 预告「总是允许」将写入的规则：与落库共用同一个对象，
                     # 确认弹窗显示的范围就是之后实际生效的范围
                     always_rule = pending.always_rule or self.gate.rule_for(
@@ -499,6 +608,7 @@ class Agent:
                         note=pending.note,
                         rule_kind=always_rule.kind,
                         rule_pattern=always_rule.pattern,
+                        mod_note=(perm_mod_verdict or {}).get("note", ""),
                     )
                     try:
                         decision = await pending.wait()
@@ -548,6 +658,28 @@ class Agent:
                         i += 1
                         continue
 
+                # 3b2. Mod 工具调用前（门后，hooks 已拦截则不达）：deny / note / ui。
+                # 没有任何 modify 能力——tu.input 从这里往后的全部路径都不再有写点
+                if self.mods is not None:
+                    pre_verdict = await self.mods.on_tool_pre(
+                        tu.name, tu.input, self.session_id, self.used_context_tokens()
+                    )
+                    for ev in _mod_notices(pre_verdict.get("errors") or []):
+                        yield ev
+                    for ev in _take_mod_ui(pre_verdict.get("ui") or []):
+                        yield ev
+                    if pre_verdict.get("deny"):
+                        deny_msg, deny_started, deny_finished = _mod_deny_parts(
+                            tu, pre_verdict["deny"]
+                        )
+                        self.history.append(deny_msg)
+                        yield deny_started
+                        yield deny_finished
+                        i += 1
+                        continue
+                    if pre_verdict.get("note"):
+                        yield NoticeEvent(message=pre_verdict["note"])
+
                 # 并发窗口：从这里起收集连续的免确认只读工具一起跑
                 if tool.safety == Safety.READONLY:
                     batch: list[tuple[ToolUseBlock, Tool, dict]] = [(tu, tool, {})]
@@ -567,6 +699,13 @@ class Agent:
                             break
                         # pre 钩子存在时不并发（每个调用都可能被阻断，语义复杂化）
                         if self.hooks is not None and self.hooks.has_pre:
+                            break
+                        # Mods 挂点存在时也不并发：toolPre 要逐个观察/拦截
+                        # READONLY 成员，declarative（deny/require_confirm）要
+                        # 逐个判定；命中即断批回退串行路径（plan-mods 挂点 3）
+                        if self.mods is not None and (
+                            await self.mods.has_tool_pre() or self.mods.has_declarative
+                        ):
                             break
                         batch.append((tu2, t2, {}))
                         j += 1
@@ -608,6 +747,22 @@ class Agent:
                                 yield TodoUpdated(items=list(b_tool.items))
                             if not is_error and b_tu.name == "schedule_write":
                                 yield ScheduleUpdated()
+                            # 3d2. Mod 工具调用后（并发批收割点）：只观察，不能改
+                            # 结果与历史（落笔在上面已完成）
+                            if self.mods is not None:
+                                post_verdict = await self.mods.on_tool_post(
+                                    b_tu.name, b_tu.input,
+                                    truncate_output(result, MAX_TOOL_PREVIEW),
+                                    is_error, duration_ms,
+                                    self.session_id, self.used_context_tokens(),
+                                    self.context_limit_tokens,
+                                )
+                                for ev in _mod_notices(post_verdict.get("errors") or []):
+                                    yield ev
+                                for note in post_verdict.get("notes") or []:
+                                    yield NoticeEvent(message=note)
+                                for ev in _take_mod_ui(post_verdict.get("ui") or []):
+                                    yield ev
                         i = j
                         continue
 
@@ -625,6 +780,21 @@ class Agent:
                             yield NoticeEvent(message=note)
                     except Exception:  # noqa: BLE001 - post 钩子失败不阻断主流程
                         pass
+
+                # 3d2. Mod 工具调用后（串行收割点）：只观察（note / ui）
+                if self.mods is not None:
+                    post_verdict = await self.mods.on_tool_post(
+                        tu.name, tu.input, truncate_output(result, MAX_TOOL_PREVIEW),
+                        is_error, duration_ms,
+                        self.session_id, self.used_context_tokens(),
+                        self.context_limit_tokens,
+                    )
+                    for ev in _mod_notices(post_verdict.get("errors") or []):
+                        yield ev
+                    for note in post_verdict.get("notes") or []:
+                        yield NoticeEvent(message=note)
+                    for ev in _take_mod_ui(post_verdict.get("ui") or []):
+                        yield ev
 
                 self.history.append(
                     Message.tool_result(tu.id, truncate_output(result), is_error=is_error)
@@ -680,6 +850,17 @@ class Agent:
                     yield NoticeEvent(message=note)
             except Exception:  # noqa: BLE001 - stop 钩子失败不影响本轮收尾
                 pass
+        # 3e. Mod 回合结束（stop_reason ∈ {end_turn, max_iterations, error}；
+        # 取消路径到不了这里，无需排除）。仅观察 + ui，不阻塞收尾。
+        if self.mods is not None:
+            stop_verdict = await self.mods.on_turn_stop(
+                stop_reason, iterations, self.session_id, self.used_context_tokens(),
+                self.context_limit_tokens,
+            )
+            for ev in _mod_notices(stop_verdict.get("errors") or []):
+                yield ev
+            for ev in _take_mod_ui(stop_verdict.get("ui") or []):
+                yield ev
         yield TurnFinished(
             stop_reason=stop_reason, iterations=iterations,
             duration_ms=int((time.monotonic() - turn_t0) * 1000),

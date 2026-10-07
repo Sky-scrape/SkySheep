@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ...config import skysheep_home
@@ -92,10 +92,18 @@ def today_str(now: float) -> str:
 
 
 def _day_bounds(now: float) -> tuple[float, float]:
-    """本地时区「今天」的 [当天零点, 次日零点) epoch 区间。"""
+    """本地时区「今天」的 [当天零点, 次日零点) epoch 区间。
+
+    终点必须按日历推「次日本地零点」（datetime + timedelta(days=1) 再取
+    timestamp），不能用固定 86400 秒外推：DST 切换日本地天长是 23/25 小时，
+    固定外推会让窗口提前/错后 1 小时收口——日报与运行总览的当天终态漏计
+    或重复计。端点零点落在本地钟面上，交由平台按当地规则取对应该时刻的
+    epoch（datetime.timestamp 的语义）。
+    """
     dt = datetime.fromtimestamp(now)
     start = datetime(dt.year, dt.month, dt.day).timestamp()
-    return start, start + 86400.0
+    end = (datetime(dt.year, dt.month, dt.day) + timedelta(days=1)).timestamp()
+    return start, end
 
 
 def report_time_passed(state: dict, now: float) -> bool:

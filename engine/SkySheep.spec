@@ -95,6 +95,26 @@ if gallery_root.is_dir():
         and not any(part.startswith(".") for part in p.relative_to(gallery_root).parts)
     ]
 
+# 官方示例 Mod（README「随包内置」的实物）：从仓库根 mods-gallery/ 逐文件收进
+# 包内 skysheep/mods/gallery/<dir>/，Mods 设置页官方示例区一键安装走打包内副本
+# （core/mods.bundled_gallery_dir），无网络依赖。收集防线与 skills-gallery 同款。
+mods_gallery_root = project_root.parent / "mods-gallery"
+if mods_gallery_root.is_dir():
+    datas = datas + [
+        (
+            str(p),
+            str(
+                Path("skysheep")
+                / "mods"
+                / "gallery"
+                / p.relative_to(mods_gallery_root).parent
+            ),
+        )
+        for p in sorted(mods_gallery_root.rglob("*"))
+        if p.is_file()
+        and not any(part.startswith(".") for part in p.relative_to(mods_gallery_root).parts)
+    ]
+
 a = Analysis(
     [str(project_root / "desktop.py")],
     pathex=[str(src)],

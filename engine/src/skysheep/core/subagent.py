@@ -574,7 +574,7 @@ class TaskManager:
     def _launch(self, rec: TaskRecord) -> None:
         rec.status = "running"
         rec.started_at = time.time()
-        task = asyncio_create(self._run_background(rec))
+        task = asyncio.get_running_loop().create_task(self._run_background(rec))
         rec.asyncio_task = task
         # 任务还没来得及开跑就被取消时，协程收尾不会执行——在这里兜底落终态
         task.add_done_callback(lambda t: self._finalize_if_unfinished(rec, t))
@@ -961,6 +961,13 @@ class TaskManager:
             return None
         return rec
 
+    def _cancel_record(self, rec: TaskRecord) -> None:
+        """取消终态的唯一出口：摘出排队、落 cancelled、走 _on_terminal 收尾。"""
+        self._queue = [r for r in self._queue if r.id != rec.id]
+        rec.status = "cancelled"
+        rec.error = "用户取消"
+        self._on_terminal(rec)
+
     def cancel_task(self, task_id: str, session_id: str | None = None) -> bool:
         """取消单个任务：排队的直接落终态，运行中的真取消（同 cancel_all 语义）。"""
         rec = self._tasks.get(task_id)
@@ -969,19 +976,14 @@ class TaskManager:
         if session_id is not None and rec.session_id != session_id:
             return False
         if rec.status == "queued":
-            self._queue = [r for r in self._queue if r.id != rec.id]
-            rec.status = "cancelled"
-            rec.error = "用户取消"
-            self._on_terminal(rec)
+            self._cancel_record(rec)
             return True
         t = rec.asyncio_task
         if t is not None and not t.done():
             t.cancel()
         else:
             # 没有句柄（如同步任务）：只能标状态
-            rec.status = "cancelled"
-            rec.error = "用户取消"
-            self._on_terminal(rec)
+            self._cancel_record(rec)
         return True
 
     def cancel_all(self, session_id: str | None = None) -> None:
@@ -993,10 +995,7 @@ class TaskManager:
         for rec in list(self._tasks.values()):
             if rec.status == "queued":
                 if session_id is None or rec.session_id == session_id:
-                    self._queue = [r for r in self._queue if r.id != rec.id]
-                    rec.status = "cancelled"
-                    rec.error = "用户取消"
-                    self._on_terminal(rec)
+                    self._cancel_record(rec)
                 continue
             if rec.status != "running":
                 continue
@@ -1007,13 +1006,7 @@ class TaskManager:
                 t.cancel()  # _run_background 收尾：已耗 token 入账 + 标 cancelled + 广播
             else:
                 # 没有句柄（如同步任务）：只能标状态
-                rec.status = "cancelled"
-                rec.error = "用户取消"
-                self._on_terminal(rec)
-
-
-def asyncio_create(coro: Awaitable) -> object:
-    return asyncio.get_running_loop().create_task(coro)
+                self._cancel_record(rec)
 
 
 # ---- 给主 Agent 用的工具 ----

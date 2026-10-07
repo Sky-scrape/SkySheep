@@ -32,7 +32,6 @@ BUILTIN_DISPLAY = {
     "writer": "Writer",
     "planner": "Planner",
 }
-TOOL_POLICY_ALL = "all"
 TOOL_POLICY_READONLY = "readonly"
 
 

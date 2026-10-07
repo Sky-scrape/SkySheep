@@ -862,7 +862,6 @@ def _read_clipboard_text() -> str:
 # 少量符号键，避开字母数字——全局抢字母键会让人无法正常打字）。
 # 偏好存 ui.json 的 hotkey 键（"Ctrl+Alt+Space" 形式的组合串），由设置页写入。
 _HOTKEY_MODS = {"Ctrl": 0x0002, "Alt": 0x0001, "Shift": 0x0004, "Win": 0x0008}
-_HOTKEY_MOD_ORDER = ("Ctrl", "Alt", "Shift", "Win")
 _HOTKEY_VKS = {
     "Space": 0x20, "`": 0xC0, ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD,
     ".": 0xBE, "/": 0xBF, "[": 0xDB, "]": 0xDD, "\\": 0xDC, "'": 0xDE,

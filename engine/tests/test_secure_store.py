@@ -75,6 +75,32 @@ def test_corrupt_ciphertext_returns_none():
     assert secure_store.decrypt_value("dpapi:" + garbage) is None
 
 
+@DPAPI
+def test_decrypt_frees_both_output_blobs(monkeypatch):
+    """CryptUnprotectData 的两个输出块（数据 + 描述串）都必须 LocalFree。
+
+    ppszDataDescr 是系统 LocalAlloc 的输出串，调用方负责释放——漏掉就是
+    每次解密泄漏一小块堆内存（decrypt_value 挂在配置读取热路径上，桌面
+    长驻进程缓慢累积）。
+    """
+    enc = secure_store.encrypt_value("sk-leak-check")  # 加密路径的释放不计入
+    kernel32 = secure_store._kernel32
+    assert kernel32 is not None, "前提：DPAPI 已可用、DLL 已加载"
+    real_free = kernel32.LocalFree
+    freed = []
+
+    def counting_free(ptr):
+        freed.append(ptr)
+        return real_free(ptr)
+
+    monkeypatch.setattr(kernel32, "LocalFree", counting_free)
+    assert secure_store.decrypt_value(enc) == "sk-leak-check"
+    assert len(freed) == 2, (
+        f"成功解密要 LocalFree 两个输出块（数据 + 描述串），实际释放 {len(freed)} 个"
+    )
+    assert all(freed), "释放的指针不应为 NULL"
+
+
 def test_channel_secret_key_selection():
     hit = ("app_secret", "secret", "bot_token", "ilink_bot_token", "token", "password")
     miss = ("app_id", "url", "base_url", "cursor", "allowed_ids", "allowed_tools",

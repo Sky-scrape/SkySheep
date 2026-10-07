@@ -29,6 +29,7 @@ dependencies = [
     "python-pptx>=1.0.2",
     "pywinpty>=3.0.5",
     "pypinyin>=0.55.0",
+    "python-quickjs-ng>=0.15",
 ]
 
 [project.scripts]

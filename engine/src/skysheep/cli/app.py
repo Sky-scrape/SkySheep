@@ -25,6 +25,7 @@ from prompt_toolkit.history import FileHistory
 from rich.console import Console
 
 from .. import __version__
+from ..bgtasks import drain_bg_tasks
 from ..bootpages import error_html, splash_html
 from ..config import (
     ConfigError,
@@ -559,6 +560,21 @@ def _wait_port(port: int, timeout_s: float = 60.0) -> bool:
     return False
 
 
+def _startup_banner(text: str) -> None:
+    """启动横幅打印（服务已启动 / 局域网 / Tailscale 三句）：纯装饰。
+
+    控制台句柄失效时（双击 .pyw 的分离进程没分配控制台、或启动瞬间控制台窗口
+    被关掉），rich 的 LegacyWindowsTerm 走 WriteConsoleW 会报 ``OSError 22``——
+    此时服务其实已经起来了、窗口还没开，这句提示若致命就会把启动炸成
+    「启动失败」弹窗、留下一个无窗后端占着端口（2026-10-05 实测踩坑）。
+    打印失败一律静默跳过。
+    """
+    try:
+        console.print(text)
+    except Exception:  # noqa: BLE001 - 装饰性打印，任何原因失败都不致命
+        pass
+
+
 def _start_backend(args):
     """create_app + uvicorn 后台线程 + 等端口就绪。返回 (server, url)。"""
     import socket
@@ -603,14 +619,14 @@ def _start_backend(args):
     # 桌面窗口/浏览器兜底一律加载本机回环地址：0.0.0.0 只是绑定地址不是可访问地址，
     # 且守卫对回环永远免令牌，本机界面不受局域网/远程访问开关影响
     url = f"http://127.0.0.1:{port}/"
-    console.print(f"[bold cyan]SkySheep[/] 服务已启动: {url}")
+    _startup_banner(f"[bold cyan]SkySheep[/] 服务已启动: {url}")
     if cfg.server.lan:
-        console.print(
+        _startup_banner(
             "[yellow]局域网访问已开启：其他设备请用 "
             f"http://<本机IP>:{port}/?token=你的令牌 访问（令牌见 设置 · 手机控制）[/]"
         )
     if cfg.server.tailscale:
-        console.print(
+        _startup_banner(
             "[yellow]远程访问已开启（Tailscale）：手机登录同一 Tailscale 账号后，"
             f"在任意网络用 http://<电脑的Tailscale地址>:{port}/?token=你的令牌 访问"
             "（地址与二维码见 设置 · 手机控制）[/]"
@@ -1022,6 +1038,11 @@ def _build_sendonly_channels(cfg):
     return mgr
 
 
+# 退出前等在途终态推送落地的上限（秒）：webhook 单发默认 10s 超时、
+# 飞书走 lark-cli 子进程，正常推送远用不满；坏端点最多拖 30s 必退出
+CRON_PUSH_DRAIN_TIMEOUT_S = 30.0
+
+
 async def _cron_run_async(task_id: int, provider_name: str | None) -> int:
     """`skysheep cron run <task_id>` 的主体：引导引擎、执行该任务、回写、退出。
 
@@ -1132,6 +1153,12 @@ async def _cron_run_async(task_id: int, provider_name: str | None) -> int:
             print(final["last_result"])
         return 0
     finally:
+        # 终态推送是 fire-and-forget（spawn_bg），而本进程是无人值守推送的
+        # 唯一出口：不等落地，asyncio.run 收尾会统一取消在途任务——
+        # CancelledError 渠道层接不住、bg 收尾对取消不记日志，推送会静默
+        # 丢失且无痕。退出前有界等一轮让在途推送落地（常驻后端无此问题，
+        # 事件循环不退出）；超时未归的由 drain 记日志并取消。
+        await drain_bg_tasks(timeout=CRON_PUSH_DRAIN_TIMEOUT_S)
         if mcp is not None:
             await mcp.shutdown()
         if tasks is not None:

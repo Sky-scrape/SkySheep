@@ -155,3 +155,45 @@ def test_cron_run_cli_pushes_summary_to_channel(home, cron_task, monkeypatch):
     assert ch.sent, "开了开关的定时任务应推送终态摘要"
     _chat_id, text = ch.sent[0]
     assert "每日汇总" in text and "成功" in text
+
+
+def test_cron_run_cli_waits_for_inflight_push_before_exit(home, cron_task, monkeypatch):
+    """退出前有界等在途推送落地：慢推送不再被 asyncio.run 收尾取消而静默丢失。
+
+    终态推送是 fire-and-forget（spawn_bg），而本进程是无人值守推送的唯一
+    出口：不等落地，asyncio.run 收尾会统一取消在途任务——CancelledError
+    是 BaseException，渠道层 except Exception 接不住，bg 收尾对取消又不记
+    日志，真实网络推送必丢且无痕。修复后 main() 返回前推送已落地（本用例
+    不做任何退出后轮询）。
+    """
+    from test_cron import _FakeChannel
+
+    import skysheep.cli.app as cli_app
+
+    class _SlowChannel(_FakeChannel):
+        async def send_text(self, chat_id, text):
+            await asyncio.sleep(0.2)  # 模拟真实 DNS+TLS+POST 的在途窗口
+            return await super().send_text(chat_id, text)
+
+    class _Mgr:
+        def __init__(self, channel):
+            self.channels = {"feishu": channel}
+
+    ch = _SlowChannel()
+
+    async def enable():
+        store = await SessionStore(db_path()).connect()
+        try:
+            await store.update_cron_task(cron_task["id"], notify_channel=1)
+        finally:
+            await store.close()
+
+    asyncio.run(enable())
+    monkeypatch.setattr(cli_app, "_build_sendonly_channels", lambda cfg: _Mgr(ch))
+    _patch_provider(monkeypatch, FakeProvider([[TextBlock(text="慢推送：完成")]]))
+
+    with pytest.raises(SystemExit) as ei:
+        cli_app.main(["cron", "run", str(cron_task["id"])])
+    assert ei.value.code == 0
+    assert ch.sent, "main() 返回前在途推送必须已落地（退出前有界等待）"
+    assert "每日汇总" in ch.sent[0][1]

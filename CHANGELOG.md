@@ -4,6 +4,144 @@
 
 ## [未发布]
 
+### 新增
+
+- **Mods 扩展（实验性）**：用户/第三方编写的 JS 事件处理扩展，挂进引擎事件流——工具调用前
+  （观察/拦截）、工具调用后（观察）、权限请求（附加信息/否决=收紧）、迭代与回合生命周期（观察）。
+  安全底线：Mod 对权限门**只能收紧（拒绝/要求确认）、永不放行**——全部 JS 处理函数都在权限门
+  之后执行；门之前/门内只有 declarative 静态收紧表（`deny_tools` 门前拒绝、`require_confirm_tools`
+  把白名单/自动放行档降级为逐次确认，经 `PermissionGate.extra_confirm`，该接口没有「返回 False
+  来放行」的语义）；handler 返回经动作白名单解析，合法键只有 `{deny, note, ui}`，`allow`/
+  `modifyInput` 等闭集外键一律丢弃并计错误（无 modify、无 allow）；Mod 代码运行在引擎侧
+  quickjs 沙箱（每 Mod 独立 runtime + 单线程执行器、16MB 内存上限、单次执行 200ms 看门狗、
+  连续超时 3 次进程内自动停用），**无任何文件/网络/进程 API**，唯一注入面是 `sky.state`
+  （引擎代存的会话分键持久状态，原子写）与 `sky.now()`。覆盖面收窄：只挂桌面会话 Agent，
+  无人值守（定时/编排/headless）与子代理构造点不传——HeadlessGate 的自动拒语义不被触碰。
+  界面：设置新增「Mods 扩展（实验性）」页（清单/启停/安装/删除/查看说明/最近执行，
+  文案中文），输入区新增 Mod 状态托盘、权限卡新增带 `[Mod·<id>]` 来源前缀的 Mod 说明区，
+  消息流支持五种声明式小部件（stat/badge/progress/timeline/text，固定渲染器，Mod 不能自由
+  绘制界面）；新增 WS 方法 mods.list / mods.get / mods.get_template / mods.official（只读）与
+  mods.install / mods.confirm_install（两段安装确认，未确认不落盘）/ mods.install_official /
+  mods.delete / mods.toggle / mods.set_enabled / mods.save_draft / mods.test（全部仅本机）。
+  无人值守与子代理不挂载 ModUI 与 mod_note。
+- **官方示例 Mod 两个**（随包内置、设置页一键安装、离线可装）：`token-weather`（上下文天气，
+  对位 Claude Code Mods 的 Token Weather——把上下文占用做成天气式状态条）与 `blast-radius`
+  （高危命令影响面，对位 Blast Radius——`run_command` 一律逐次确认 + 确认卡影响面说明，
+  只收紧不放行）；两者同为 Mod 编写参考实现，仓库根 `mods-gallery/` 打包进应用。
+- **「让 Agent 创建 Mod」入口**：设置页「生成提示词」按钮把内置提示词模板（Mod API v1 规格 +
+  安全边界）填入输入框由用户发送；Agent 产出代码经「保存为草稿（mods.save_draft 落
+  `<项目>/.skysheep/mods-drafts/`）→ 人工安装确认」两道人工动作才生效。
+- **实验性 Claude Code Mods 兼容面**（子集、显式声明）：清单文件名认 `mod.json` 与 CC 的
+  `mods.json` 别名；入口导出呈 CC 风格（具名导出 `onToolCall` / `hooks` 对象）时按映射表桥接
+  为内部 handler；CC 更宽的 permissions 档位一律收敛为 `tighten` 并在清单回显，绝不映射为
+  放行。明确不支持：文件系统 / 网络 / 子进程 API、界面自由绘制、完整兼容承诺。
+- 新依赖 `python-quickjs-ng>=0.15`（uv 锁定 0.15.1.1）：quickjs-ng 引擎的解释器级沙箱绑定，
+  abi3 wheel 覆盖 CPython 3.10–3.14，无宿主注入即天然无 IO，与「Mod 默认没有任何任意
+  文件/网络/进程能力」同构；运行时探测失败时进入降级态——已装 Mod 照常展示、declarative
+  收紧声明照常生效（纯 Python），仅 JS 处理函数不执行并在设置页标明「JS 运行时不可用」。
+- **团队模式（一期 · 用户总管 MVP）**：与圆桌并列的多模型分工协作——总管派工、队员执行、
+  验收交付，概念与验收口径见 `docs/团队模式设计.md`。一期为用户总管形态：用户本人当总管，
+  每条消息就是一道总管指令直达团队频道（可在频道 @队员请其代拟《分工方案》草稿，修改
+  确认后用 `team.task_add` 落板），队员 = provider/model + 成员名 + 一句话人设，按工单分
+  「执行型（带工具干活）/ 顾问型（只出意见）」。
+  新增 `core/team.py`（TeamChannel 团队频道 / TeamTask+TeamBoard 工单板 / TeamOrchestrator
+  编排循环）与工单状态机（待办→进行中→待验收→完成，验收不合格打回重做 redo+1）；
+  `events.py` 注册五个团队事件 TeamStarted / TeamMessageDelta / TeamMessage /
+  TeamTaskUpdated / TeamFinished（TeamMessageDelta 进 `_MERGEABLE_DELTA_KINDS` 按
+  member_index 分桶合并）；WS 新增 `team.*` 方法与会话级活动团队状态（团队进行中该会话
+  的后续消息进频道而非普通回合）；`config.toml` 新增 `[team]` 配置段（max_members /
+  member_timeout_s / max_rounds / redo_limit）。安全模型零放松：执行型队员的工具调用照走
+  各自 PermissionGate，权限确认只认用户，频道消息纯文本任何情况下不直接执行。
+- **团队模式（二期 · AI 总管闭环）**：`director_mode` 二选一（默认 `"user"`，一期行为不变）——
+  `"ai"` 时指定一个已配 Key 的模型担任总管（`chat.send` 增 `director_mode` 与 `director` 的
+  provider/model 参数；TeamStarted 增 `director_mode` / `director_provider` / `director_model`
+  字段，用户总管下为空串，一期 meta/回放不受影响）。总管是指定模型的 Agent 实例（独立
+  history、总管系统提示词），只挂七个内部团队工具——team_assign 派单 / team_accept 验收 /
+  team_reject 打回 / team_reassign 改派 / team_drop 放弃 / team_open_huddle 开小会 /
+  team_deliver 交付，全部 safety=READONLY：只改工单板内存态、不触工作区、不经权限门确认、
+  不发权限事件；总管不兼任队员、不领工单、不能自验收（accept 只认队员名下工单），频道消息
+  纯文本无副作用、板面操作只能经工具发生。自动循环：用户一句话目标 → 总管轮（拆解、经
+  派单工具建单上板）→ 编排器按依赖派发、逐个唤醒成员（复用一期唤醒与权限路径）→ 轮毕
+  报告置待验收 → 唤醒总管逐单验收（accept 通过，reject 打回附理由、工单回进行中 redo+1
+  重派）→ 全部完成产出《交付说明》经 team_deliver 收口 → `TeamFinished(status="done")`，
+  会话恢复普通回合。用户三权：插话（消息照进频道并以最高优先级注入总管下一轮，总管空闲时
+  尽快唤醒）、接管（新增 `team.takeover` WS 方法：切回用户总管、干净取消在飞总管轮，工单板
+  与频道保留；收队语义照旧）、收队。「小会」由 team_open_huddle 发起（单一争议 + 2~3 名
+  相关队员），编排器复用 `run_roundtable`（成员=相关队员的 provider、主席=总管、辩论 1 轮，
+  emit 全部换成内部收集——严禁向前端泄漏任何 Roundtable* 事件），队员意见以 TeamMessage
+  进频道、最终裁定以 msg_kind="ruling" 进频道。防失控上限全部生效且可用测试触发：
+  max_rounds 全局轮次上限（总管轮、成员唤醒轮与小会合计计入）；redo 超限不再接受打回，
+  改为向总管注入强制裁定指令、三选一经工具落板（改派他人重做 / 降级顾问型重派 / 砍掉记
+  未尽事项；依赖已失败的卡死待办工单同渠道处置）；`[team]` 新增 `stall_limit`（默认 2，
+  下限 1）：成员连续 N 轮发言无新工具结果即停止自动唤醒、移交总管处置；单条频道消息 2000
+  字限长与成员单轮超时隔离（一期已有）；token 预算越线 `finish("budget_exhausted")` 强制
+  交付（预算检查经构造注入的 callable，后端接既有每日预算/护栏路径）。总管发言流式沿用
+  TeamMessageDelta（member_index=-1 表示总管，合并器 (member_index, seq) 分桶天然兼容）；
+  总管与小会主席的用量按圆桌主席样式单独入账（director_info，不挂在任何队员名下）。
+- **团队模式（三期 · 团队模板与频道消息全量回放）**：建队配置可存成**团队模板**
+  （`~/.skysheep/teams.json`，仿 `subagents.json` 同姿态：路径随 `SKYSHEEP_HOME`
+  可注入、坏文件容错回空、textio 原子写）——字段 name（唯一键）/ director_mode
+  （user | ai）/ director（provider/model，用户总管下可空）/ members（provider、
+  model、成员名、一句话人设）/ created_at；模板名仿 skills 的校验精神：非空、
+  限长 60、禁路径分隔符与冒号、禁 `.`/`..` 一类目录引用；同名保存即覆盖原条目
+  （新名追加）。新增 WS 方法 team.template_list（读）与 team.template_save /
+  team.template_remove（仅本机）；前端建队浮层「从模板创建」、团队卡「另存为模板」。
+  频道消息全量落库：`session/store.py` 新增第 15 张表 team_messages（team_id /
+  session_id / seq / from_member / to_member / msg_kind / task_ref / text /
+  created_at，附 (team_id, seq) 索引）——编排器经构造注入的 message_sink 在每条
+  频道消息定稿后逐条写入（best-effort 旁路：sink 异常只记日志不拖垮协作；未注入
+  不落库，单测不受影响），建队分配唯一 team_id（uuid）随快照进 meta；会话删除
+  不级联删频道史（落库的意义就是收队后仍能回放）。新增 WS 方法 team.log 按
+  team_id 回放全部频道消息，会话归属 fail-closed（与既有 team.* 同姿态：活动
+  团队直接比对会话 id、历史团队按落库行 session_id 归属判定，拿别会话的 id
+  刺探直接拒绝；查无记录回空列表）；前端团队卡历史回放两级容错：meta 带
+  team_id 先拉全量回放，拉不到退回既有的截断 meta。设置页新增「团队」配置卡
+  （严格走四处：backend 读写走 config 的 _read_raw_config/_write_raw_config +
+  dispatch 分支 teamcfg.get/save + index.html 卡片 + app.js 渲染与保存回调），
+  键 max_members（1~8）/ member_timeout_s（≥10）/ max_rounds（≥1）/ redo_limit
+  （0~5）/ stall_limit（≥1，二期防失控上限首次开放界面调参）；保存 clamp 后
+  update_config_section("team",…) 热生效并回传新状态——此后新建的团队取新值，
+  进行中团队沿用建队时的值。
+
+### 变更
+
+- ModUI 片段事件与权限卡 `mod_note` 字段加入事件流契约（`events.py`）：`ModUI` 不进流式
+  增量合并集合（全量状态帧非增量，冲刷语义自动保持顺序），每轮上限 50 条由 Agent 循环
+  计数，超出丢弃并提示一次。
+
+### 修复
+
+- **团队成员的并行写协调不再失效**：成员 Agent 此前构造时不带会话 id，写文件领租约的
+  owner 是空串，被写租约枢纽按「无归属」放行——多会话各带团队时，成员对其他会话正持有
+  的路径直接接管写入，不等待、无冲突注记。现在 `TeamOrchestrator` 接收并透传本会话 id，
+  队员写与主会话共用同一租约归属。
+- **用户钩子与 Mods 拦截对团队成员生效**：成员 Agent 此前不挂 HookRunner 与 ModManager，
+  pre_tool_use 钩子（写盘前最后一道人工闸门）与 Mod 的工具前拦截对队员一律不生效； Mods
+  /hooks 热更新也不达成员。现在建队时注入、热更时同步推给各团队成员。
+- **团队「交付」补上触发路径**：`done` 终态此前没有任何入口——工单全部完成后用户只能
+  「收队」（结果恒为已收队）或等轮次耗尽强制交付。新增 `team.deliver` WS 方法（用户确认
+  交付，产出《交付说明》，未完成工单记未尽事项）与团队卡的「交付」按钮。
+- **桌面启动不再被装饰性横幅打印炸掉**：后端起身后会往控制台打三句横幅（服务
+  已启动 / 局域网 / Tailscale 提示）；以「没有可用控制台句柄」的方式启动（双击
+  .pyw 的分离进程、或启动瞬间控制台窗口被关闭）时，rich 的 WriteConsoleW 报
+  `OSError 22` 把启动炸成「启动失败」弹窗——服务其实在跑、窗口却永远打不开，
+  还会留下一个无窗后端占着端口。现在三句横幅改为打印失败即静默跳过（纯装饰
+  不致命）。
+- **活跃热力图改月历式：4 行 28 格起步、随用随长、竖向滚动**（记忆地图底栏）：
+  原贡献图式（行=周内天、列=周）在窄底栏里只能铺出几列孤格或短短一条，观感差。
+  改为列=周一..周日恒 7 列、行=周（旧的在上、新的在下），起步 4 行 28 格，随项目
+  使用周数往下长（上限与后端 MAP_HEAT_WEEKS 对齐）；行数超过可视高度后竖向滚动
+  看历史，默认停在最新一周；宽度恒定不随面板伸缩。同期修复：① 当天有会话但没
+  消耗也点亮最低档——格子深浅此前只看 token，`N 个会话 · 0 tokens` 的天与完全
+  无活动同色；② 空格/未到的天淡化融入底色（图例首位同步）；③ 最高档不再单独
+  用主题强调色（绿阶里突然插一格蓝像另一类事件），改为文字色加深 dm-c2，六主题
+  同 hue 单调变深；④ 窗口内完全没有活动时热力图整块收起，文件足迹与热力图都空
+  时整个底栏收起；⑤ 未来天照铺成淡格（整块恒为完整 7×N 方阵，不再缺角）+ 今日
+  格描边；⑥ 月历右侧新增同窗口汇总（近 N 周 · 会话 · tokens · 活跃天，前端从
+  days 聚合，不动后端），填住底栏右侧空白；⑦ 汇总改弹性一行四项均匀铺开：
+  拉宽面板时空白被信息用掉（不再全堆在图例和汇总之间），收窄到装不下时整块
+  换行占满整行，不再把首行挤到溢出（出横向滚动条、汇总被裁掉）。
+
 ## [2.4.1] - 2026-10-03
 
 ### 新增

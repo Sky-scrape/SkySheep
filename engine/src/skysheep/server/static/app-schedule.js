@@ -946,8 +946,10 @@ async function loadCron() {
     ops.querySelector('[data-op="run"]').onclick = async (e) => {
       e.stopPropagation();
       try {
-        await request("cron.run_now", { id: t.id });
-        addNotice(`已开始运行「${t.name}」，结果会写回列表`);
+        const r = await request("cron.run_now", { id: t.id });
+        addNotice(r && r.started === false
+          ? (r.notice || `「${t.name}」正在运行中，本次未重复触发`)
+          : `已开始运行「${t.name}」，结果会写回列表`);
       } catch (err) { addNotice("运行失败: " + err.message); }
     };
     ops.querySelector('[data-op="pipeline"]').onclick = async (e) => {
@@ -1224,6 +1226,11 @@ function mountPipelineGraph(el, nodes, opts = {}) {
     });
   });
   el.dataset.w = String(W);
+  // 同一元素重复挂载前先摘掉旧 observer（重排递归重挂、列表刷新重渲染都会
+  // 再进本函数）：旧实现每次 new 一个且从不 disconnect，observer 在元素上
+  // 无上界累积，之后每次拖宽全部回调、成倍全量重渲染
+  if (el._plRO) el._plRO.disconnect();
+  el._plRO = ro;
   ro.observe(el);
 }
 

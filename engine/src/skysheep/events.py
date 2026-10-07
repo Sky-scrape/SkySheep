@@ -101,6 +101,9 @@ class PermissionRequest(Event):
     note: str = ""    # 额外说明：例如白名单前缀为何没命中的命令（shell 拼接）
     rule_kind: str = ""     # 选「总是允许」将写入的规则类型（always/prefix/exact/glob）
     rule_pattern: str = ""  # 对应参数；空 = 整个工具（与 gate.rule_for 的产物一致）
+    # Mod（实验性）的附加说明：带「[Mod·<id>]」来源前缀，前端独立样式区渲染，
+    # 不与引擎自产的 note 混排（第三方文本不上无标识的确认卡）
+    mod_note: str = ""
 
 
 class PermissionResolved(Event):
@@ -192,6 +195,83 @@ class RoundtableMemberFinished(Event):
     output_tokens: int = 0
 
 
+class ModUI(Event):
+    """Mod（实验性）产出的声明式展示片段。
+
+    Mod 的 JS 永不进前端——这里是引擎侧 Mod 产出、由固定渲染器落地的词表片段：
+    widget 形状见 core/mods.py 的 WIDGET_SLOTS（stat/badge/progress/timeline/text）。
+    不进 StreamDeltaMerger 的可合并增量集合：全量状态帧非增量，非增量事件到达
+    自动先冲刷缓冲，顺序语义免费获得；每轮上限 50 条由 Agent 循环计数。
+    """
+
+    kind: Literal["mod_ui"] = "mod_ui"
+    mod_id: str = ""
+    session_id: str = ""
+    slot: str = "stream"  # tray / stream / perm
+    widget: dict = Field(default_factory=dict)
+
+
+class TeamStarted(Event):
+    """团队开工：组队完成，名册与总管形态就绪（与圆桌并列的第二种多模型协作，docs/团队模式设计.md）。"""
+
+    kind: Literal["team_started"] = "team_started"
+    roster: list[dict] = Field(default_factory=list)  # [{index, name, provider, model, persona}]
+    director_mode: str = "user"  # user（用户总管）/ ai（AI 总管，二期）
+    # AI 总管标识（二期）：指定担任总管的 provider/model。用户总管模式下为空串
+    # （一期形状不变：前端按空值回退「用户总管」渲染，一期 meta/回放不受影响）
+    director_provider: str = ""
+    director_model: str = ""
+
+
+class TeamMessageDelta(Event):
+    """团队成员发言增量（流式）。
+
+    可合并增量：消费端须把它登记进 server/backend.py 的 _MERGEABLE_DELTA_KINDS，
+    并按 member_index 分桶合并（沿圆桌 roundtable_member_delta 的分桶先例）。
+    member_index = -1 表示 AI 总管（二期）：合并器按 (member_index, seq) 分桶，
+    负数键天然兼容；前端据此把总管发言与队员发言分流渲染。
+    """
+
+    kind: Literal["team_message_delta"] = "team_message_delta"
+    member_index: int = 0  # 名册位次；-1 = AI 总管（二期）
+    seq: int = 0  # 所属频道消息编号（定稿见 TeamMessage）
+    text: str = ""
+
+
+class TeamMessage(Event):
+    """团队频道消息定稿（全员共享消息簿，seq 单调递增）。"""
+
+    kind: Literal["team_message"] = "team_message"
+    seq: int = 0
+    from_member: str = "system"  # 成员名 / director / user / system
+    to_member: str = "all"  # all（广播）/ 成员名（@定向）/ director
+    # 消息类别。不叫 kind：基类 Event.kind 是事件判别字段（Literal["team_message"]），
+    # 子类再声明 kind 会把它覆盖掉，毁掉整条按 kind 分发的事件链。
+    msg_kind: str = "system"  # assign / report / ask / help / object / ruling / system
+    task_ref: str = ""  # 关联工单编号（可空）
+    text: str = ""
+
+
+class TeamTaskUpdated(Event):
+    """工单板变化：派工、状态流转、打回计数（状态机见 docs/团队模式设计.md §5）。"""
+
+    kind: Literal["team_task_updated"] = "team_task_updated"
+    task_id: str = ""
+    title: str = ""
+    assignee: str = ""
+    type: str = "exec"  # exec（执行型，带工具）/ advisor（顾问型，只出意见）——工单级属性
+    status: str = "pending"  # pending / in_progress / review / done / error（待办/进行中/待验收/完成/失败）
+    redo: int = 0  # 被打回次数
+
+
+class TeamFinished(Event):
+    """团队终态：交付或终止，summary 携带《交付说明》。"""
+
+    kind: Literal["team_finished"] = "team_finished"
+    status: str = "done"  # done / aborted / rounds_exhausted / budget_exhausted（预算越线强制交付，二期）
+    summary: str = ""
+
+
 AgentEvent = (
     TurnStarted
     | TextDelta
@@ -213,4 +293,10 @@ AgentEvent = (
     | RoundtableStarted
     | RoundtableMemberDelta
     | RoundtableMemberFinished
+    | ModUI
+    | TeamStarted
+    | TeamMessageDelta
+    | TeamMessage
+    | TeamTaskUpdated
+    | TeamFinished
 )

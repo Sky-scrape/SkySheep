@@ -738,6 +738,15 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 /* 确认弹窗里的额外说明（如「为什么这条命令没命中白名单前缀」）：与正文区分，
    不能抢过待确认命令本身的注意力。 */
 .perm-note { margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--dim); }
+/* Mod（实验性）的附加说明：独立样式区 + 引擎侧强制 [Mod·<id>] 来源前缀——
+   第三方文本不上无标识的确认卡，视觉上与引擎自产的 perm-note 区分开 */
+.perm-mod-note {
+  margin-top: 8px; padding: 6px 9px;
+  font-size: 12px; line-height: 1.6; color: var(--text2); white-space: pre-wrap;
+  background: var(--blue-weak);
+  border: 1px dashed var(--line2); border-left: 3px solid var(--blue);
+  border-radius: var(--r-sm); word-break: break-word;
+}
 /* 「总是允许」将写入的规则范围：点按钮前把放行边界说清楚 */
 .perm-rule {
   margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--gold);
@@ -1805,19 +1814,22 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 #mode-switch.plan { background: var(--blue); color: var(--paper-raised); }
 #mode-switch.plan:hover { background: var(--blue-deep); }
 
-/* 圆桌 = 图标 + 窄选成员箭头拼成一个整体 */
-#rt-group { display: inline-flex; align-items: center; flex-shrink: 0; }
-#rt-switch { border-radius: var(--r-md) 0 0 var(--r-md); }
+/* 圆桌 / 团队 = 图标 + 窄选成员箭头拼成一个整体（两种协作模式入口并列） */
+#rt-group, #team-group { display: inline-flex; align-items: center; flex-shrink: 0; }
+#rt-switch, #team-switch { border-radius: var(--r-md) 0 0 var(--r-md); }
 #rt-switch.on { background: var(--ai); color: var(--paper-raised); }
 #rt-switch.on:hover { background: var(--ai); filter: brightness(1.1); }
-#rt-pick {
+/* 团队激活用绿色：协作开工进行中的语感，与圆桌紫 / 规划蓝 / 写入金区分 */
+#team-switch.on { background: var(--down); color: var(--paper-raised); }
+#team-switch.on:hover { background: var(--down); filter: brightness(1.1); }
+#rt-pick, #team-pick {
   flex-shrink: 0; width: 17px; height: 30px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--dim); background: transparent;
   border: none; border-radius: 0 var(--r-md) var(--r-md) 0; cursor: pointer;
 }
-#rt-pick:hover { background: var(--paper-sunken); color: var(--text); }
-#rt-pick svg { width: 11px; height: 11px; }
+#rt-pick:hover, #team-pick:hover { background: var(--paper-sunken); color: var(--text); }
+#rt-pick svg, #team-pick svg { width: 11px; height: 11px; }
 
 #accept-switch.on { background: var(--gold); color: var(--paper-raised); }
 #accept-switch.on:hover { background: var(--gold); filter: brightness(1.06); }
@@ -1931,6 +1943,53 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   border: 1px solid var(--line); background: var(--card); color: var(--text);
 }
 
+/* 团队浮层：勾选后展开的 成员名 / 一句话人设 两个小输入框（比圆桌浮层宽一档） */
+.team-menu {
+  width: 420px;
+}
+.team-menu .rt-menu-item { flex-wrap: wrap; }
+.team-menu .mi-extra {
+  display: flex; gap: 4px; width: 100%; padding: 3px 0 1px 22px;
+}
+.team-menu .mi-extra.hidden { display: none; }
+.team-menu .mi-extra input {
+  flex: 1; min-width: 0; font-size: 11.5px; padding: 2px 6px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--text);
+}
+.team-menu .mi-extra input:focus { outline: 1.5px solid var(--blue); outline-offset: 0; }
+
+/* 团队浮层顶部：总管形态区（二期 AI 总管）——我当总管（默认）/ AI 总管，
+   选 AI 才展开模型单选列表（只列已配 Key 的服务，与成员列表同皮） */
+.team-menu .tm-director {
+  padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px dashed var(--line);
+}
+.team-menu .tm-dir-modes { display: flex; align-items: center; gap: 14px; padding: 0 4px 4px; }
+.team-menu .tm-dir-mode {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text); cursor: pointer; white-space: nowrap;
+}
+.team-menu .tm-dir-mode input { accent-color: var(--ai); margin: 0; }
+.team-menu .tm-dir-opts {
+  max-height: 180px; overflow-y: auto;
+  border: 1px dashed var(--line2); border-radius: var(--r-sm); padding: 4px 6px;
+}
+.team-menu .tm-dir-opts.hidden { display: none; }
+.team-menu .tm-dir-opts .rt-menu-tip { padding: 2px 4px 4px; }
+.team-menu .tm-dir-opts .rt-menu-item { padding: 4px 6px; border-radius: var(--r-sm); }
+
+/* 团队浮层顶部：从模板创建（三期）——全局模板册下拉，选中回填下方表单 */
+.team-menu .tm-template {
+  padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px dashed var(--line);
+}
+.team-menu .tm-template .rt-menu-tip { padding-bottom: 2px; }
+.team-menu .tm-tpl-sel {
+  width: 100%; font-size: 12px; padding: 3px 6px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--text);
+}
+.team-menu .tm-tpl-sel:focus { outline: 1.5px solid var(--blue); outline-offset: 0; }
+
 /* 圆桌卡片：成员草稿并列 + 融合进度 */
 .roundtable {
   align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
@@ -2014,6 +2073,236 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   font-size: 11px; font-weight: 700; border-radius: var(--r-sm);
   cursor: default;
 }
+
+/* ---------- 团队卡：名册 + 工单板 + 频道时间线（聊天流内的协作台） ----------
+   与圆桌卡同底同框（--paper-sunken + 硬描边），内部三区纵向排布；
+   活动期间保持展开，终态（交付/收队/中断）自动折叠让出空间。 */
+.teamcard {
+  align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
+  background: var(--paper-sunken); border: 1.5px solid var(--line2);
+  border-radius: var(--r-md); padding: 8px 10px; box-shadow: var(--shadow-sm);
+}
+.teamcard .tc-head { display: flex; align-items: center; gap: 8px; padding: 2px 4px 8px; cursor: pointer; }
+.teamcard .tc-title { color: var(--ai); font-weight: 800; font-size: 13px; flex-shrink: 0; }
+.teamcard .tc-sub { color: var(--dim); font-size: 12px; flex: 1; min-width: 0; }
+.teamcard .tc-status {
+  flex-shrink: 0; font-size: 11px; font-weight: 700;
+  border: 1px solid currentColor; border-radius: 999px; padding: 0 8px; line-height: 1.8;
+  color: var(--blue);
+}
+.teamcard .tc-status[data-status="done"] { color: var(--down); }
+.teamcard .tc-status[data-status="aborted"] { color: var(--dim); }
+.teamcard .tc-status[data-status="rounds_exhausted"] { color: var(--gold); }
+.teamcard .tc-status[data-status="interrupted"] { color: var(--reg); }
+.teamcard .tc-status[data-status="budget_exhausted"] { color: var(--reg); }
+.teamcard .tc-fold {
+  flex-shrink: 0; font-size: 11.5px; color: var(--dim);
+  padding: 2px 8px; border-radius: var(--r-sm);
+}
+.teamcard .tc-fold:hover { background: var(--paper-inset); color: var(--text); }
+.teamcard.folded .tc-body { display: none; }
+
+/* 名册：头像 + 成员名（+ 模型 / 人设），尾部挂「用户总管」标识 */
+.tc-avatar {
+  width: 16px; height: 16px; flex-shrink: 0; object-fit: contain;
+  background: var(--paper-raised); border: 1px solid var(--line);
+  border-radius: var(--r-xs); padding: 1px;
+}
+.teamcard .tc-roster {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 4px 4px 8px; border-bottom: 1px dashed var(--line);
+}
+.teamcard .tc-roster-label { font-size: 11px; color: var(--dim); flex-shrink: 0; }
+.teamcard .tc-m {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
+  font-size: 12px; color: var(--text); padding: 1px 7px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 999px;
+}
+.teamcard .tc-m-name { font-weight: 700; flex-shrink: 0; }
+.teamcard .tc-m-model {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.teamcard .tc-m-persona {
+  font-size: 10.5px; color: var(--dim); max-width: 180px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.teamcard .tc-director {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 700; color: var(--gold);
+  border: 1px dashed currentColor; border-radius: 999px; padding: 0 8px; line-height: 1.8;
+}
+/* AI 总管徽标（二期）：实线紫框，与用户总管的虚线金框区分 */
+.teamcard .tc-director.is-ai {
+  color: var(--ai); border-style: solid;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 工单板：登记表单 + 工单行（状态色随左侧徽标，redo 计数红字） */
+.teamcard .tc-board { padding: 8px 2px 2px; }
+.teamcard .tc-board-head { font-size: 11px; font-weight: 700; color: var(--dim); padding: 0 4px 5px; }
+.teamcard .tc-board-list { display: flex; flex-direction: column; gap: 4px; }
+.teamcard .tc-task {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 12px; padding: 5px 8px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.teamcard .tc-task .tt-id { font-family: var(--font-mono); font-size: 11px; color: var(--dim); flex-shrink: 0; }
+.teamcard .tc-task .tt-title { font-weight: 700; color: var(--text); min-width: 0; word-break: break-word; }
+.teamcard .tc-task .tt-assignee { color: var(--text2); flex-shrink: 0; }
+.teamcard .tc-task .tt-type { font-size: 10.5px; color: var(--ai); flex-shrink: 0; }
+.teamcard .tc-task .tt-status {
+  font-size: 10.5px; color: var(--dim); flex-shrink: 0;
+  border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; line-height: 1.7;
+}
+.teamcard .tc-task.st-in_progress .tt-status { color: var(--blue); }
+.teamcard .tc-task.st-review .tt-status { color: var(--gold); }
+.teamcard .tc-task.st-done .tt-status { color: var(--down); }
+.teamcard .tc-task.st-error .tt-status { color: var(--reg); }
+.teamcard .tc-task .tt-redo { font-size: 10.5px; color: var(--reg); flex-shrink: 0; }
+.teamcard .tc-task .tt-deps { font-size: 10.5px; color: var(--dim); flex-shrink: 0; }
+.teamcard .tc-task .tt-ops { display: inline-flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.teamcard .tc-task .tt-op {
+  font-size: 11px; color: var(--blue); padding: 1px 8px;
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+}
+.teamcard .tc-task .tt-op:hover { background: var(--blue-weak); }
+.teamcard .tc-task .tt-op:disabled { color: var(--dim); cursor: default; }
+.teamcard .tc-task .tt-op:disabled:hover { background: transparent; }
+/* 打回理由行内输入框（不用弹窗：pywebview 下 prompt 不可靠） */
+.teamcard .tt-reject-box {
+  display: flex; gap: 4px; width: 100%; padding-top: 3px;
+}
+.teamcard .tt-reject-box input {
+  flex: 1; min-width: 0; font-size: 12px; padding: 2px 6px;
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--text);
+}
+.teamcard .tc-task-form {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  margin-top: 6px; padding: 6px;
+  border: 1px dashed var(--line2); border-radius: var(--r-sm);
+}
+.teamcard .tc-task-form input,
+.teamcard .tc-task-form select {
+  font-size: 12px; padding: 3px 6px; min-width: 0;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--text);
+}
+.teamcard .tc-task-form .tf-title { flex: 2 1 120px; }
+.teamcard .tc-task-form .tf-accept { flex: 3 1 140px; }
+.teamcard .tc-task-form .tf-add {
+  font-size: 12px; color: var(--blue); padding: 3px 10px; flex-shrink: 0;
+  border: 1px solid var(--line2); border-radius: var(--r-sm); background: var(--paper-raised);
+}
+.teamcard .tc-task-form .tf-add:hover { background: var(--blue-weak); }
+.teamcard .tc-task-form .tf-add:disabled { color: var(--dim); }
+
+/* 频道时间线：按成员着色的消息流（流式行虚线框），用户消息整行高亮 */
+.teamcard .tc-channel {
+  margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line);
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 320px; overflow-y: auto;
+}
+.teamcard .tc-msg {
+  padding: 5px 8px; font-size: 12.5px; line-height: 1.55; min-width: 0;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.teamcard .tc-msg.streaming { border-style: dashed; }
+.teamcard .tc-msg.hl-user { border-color: var(--blue); background: var(--blue-weak); }
+/* 总管行（二期）：金描边 + 淡金底，行首「总管」徽标——AI 总管发言与总管口吻
+   的派工消息共用（from=director 的行统一处理） */
+.teamcard .tc-msg.hl-director {
+  border-color: color-mix(in srgb, var(--gold) 45%, var(--line));
+  background: color-mix(in srgb, var(--gold) 8%, transparent);
+}
+/* 裁定行高亮：紫描边 + 淡紫底（总管验收裁定、强制裁定与小会收口共用 ruling） */
+.teamcard .tc-msg.hl-ruling {
+  border-color: color-mix(in srgb, var(--ai) 45%, var(--line));
+  background: color-mix(in srgb, var(--ai) 8%, transparent);
+}
+/* 小会系统注记（「总管就「…」召开小会」/「（小会未能…」）：虚线可辨 */
+.teamcard .tc-msg.huddle {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--ai) 35%, var(--line));
+}
+.teamcard .tc-m-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 2px; }
+.teamcard .tc-m-from {
+  font-weight: 700; font-size: 12px; color: var(--text);
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.teamcard .tc-m-from.is-user { color: var(--blue); }
+.teamcard .tc-m-from.is-director { color: var(--gold); }
+.teamcard .tc-m-to { font-size: 11px; color: var(--dim); flex-shrink: 0; }
+.teamcard .tc-m-kind {
+  font-size: 10px; color: var(--dim); flex-shrink: 0;
+  border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; line-height: 1.6;
+}
+.teamcard .tc-m-kind.k-assign { color: var(--gold); border-color: currentColor; }
+.teamcard .tc-m-kind.k-ruling { color: var(--ai); border-color: currentColor; }
+.teamcard .tc-m-kind.k-object { color: var(--reg); border-color: currentColor; }
+.teamcard .tc-m-kind.k-help { color: var(--gold); border-color: currentColor; }
+/* 「总管」徽标（二期）：实底金，与右侧细描边的消息类别徽标区分 */
+.teamcard .tc-m-badge {
+  flex-shrink: 0; font-size: 10px; font-weight: 700;
+  color: var(--on-accent); background: var(--gold);
+  border-radius: 999px; padding: 0 7px; line-height: 1.7;
+}
+.teamcard .tc-m-ref { font-family: var(--font-mono); font-size: 10.5px; color: var(--dim); flex-shrink: 0; }
+.teamcard .tc-m-text { color: var(--text); word-break: break-word; white-space: pre-wrap; }
+
+/* 终态：《交付/收队说明》 + 底部收队按钮（终态后一并隐藏） */
+.teamcard .tc-summary {
+  margin-top: 8px; padding: 6px 8px;
+  background: var(--paper-raised); border: 1px solid var(--line2); border-radius: var(--r-sm);
+}
+.teamcard .tc-summary-title { font-size: 12px; font-weight: 800; color: var(--ai); margin-bottom: 3px; }
+.teamcard .tc-summary-text {
+  font-family: inherit; font-size: 12px; line-height: 1.6; color: var(--text2);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 220px; overflow-y: auto; margin: 0;
+}
+.teamcard .tc-foot { display: flex; justify-content: flex-end; padding: 8px 2px 0; }
+/* 存为模板（三期）：中性描边的次要动作，钉在 foot 左缘（margin-right:auto），
+   交付/收队仍在右缘；终态后不隐藏——收队的团队正是模板的好素材 */
+.teamcard .tc-savetpl {
+  margin-right: auto;
+  font-size: 12px; color: var(--text2);
+  border: 1px solid var(--line2); border-radius: var(--r-sm); padding: 3px 10px;
+}
+.teamcard .tc-savetpl:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-weak); }
+.teamcard .tc-deliver {
+  margin-right: 8px;
+  font-size: 12px; font-weight: 700; color: var(--ok);
+  border: 1.5px solid var(--ok); border-radius: var(--r-sm); padding: 3px 14px;
+}
+.teamcard .tc-deliver:hover { background: var(--ok); color: var(--on-accent); }
+.teamcard .tc-deliver:disabled { color: var(--dim); border-color: var(--line2); }
+.teamcard .tc-deliver:disabled:hover { background: transparent; color: var(--dim); }
+.teamcard .tc-stop {
+  font-size: 12px; font-weight: 700; color: var(--reg);
+  border: 1.5px solid var(--reg); border-radius: var(--r-sm); padding: 3px 14px;
+}
+.teamcard .tc-stop:hover { background: var(--reg); color: var(--on-accent); }
+.teamcard .tc-stop:disabled { color: var(--dim); border-color: var(--line2); }
+/* 接管按钮（二期 AI 总管专属）：金描边，仅 ai 模式活动期可见（JS 控制 hidden） */
+.teamcard .tc-takeover {
+  margin-right: 8px;
+  font-size: 12px; font-weight: 700; color: var(--gold);
+  border: 1.5px solid var(--gold); border-radius: var(--r-sm); padding: 3px 14px;
+}
+.teamcard .tc-takeover:hover { background: var(--gold); color: var(--on-accent); }
+.teamcard .tc-takeover:disabled { color: var(--dim); border-color: var(--line2); }
+.teamcard .tc-takeover:disabled:hover { background: transparent; color: var(--dim); }
+.teamcard .tc-takeover[hidden] { display: none; }
+.teamcard .tc-stop:disabled:hover { background: transparent; color: var(--dim); }
+.teamcard.ended .tc-deliver,
+.teamcard.ended .tc-stop,
+.teamcard.ended .tc-takeover,
+.teamcard.ended .tc-task-form,
+.teamcard.ended .tt-ops { display: none; }
+
+/* 团队纪要徽标：金底，与圆桌紫徽标区分 */
+.rt-badge.team-badge { background: var(--gold); }
 
 /* 上下文容量环形仪表（输入栏工具条，语音输入右侧）：
    环=已占用比例（stroke-dashoffset 由 setContextUsage 驱动），环内数字=百分比，
@@ -2848,6 +3137,14 @@ html[data-theme="pine"] .restart-banner {
 .mcp-head .mcp-del { margin-left: 0; }
 li.mcp-disabled .item-name,
 li.mcp-disabled .mcp-tools { opacity: .5; }
+/* 连接失败的 MCP 行标红提醒，方便一眼看到问题服务 */
+li.mcp-failed { background: color-mix(in srgb, var(--reg) 8%, transparent); border-left: 3px solid var(--reg); }
+li.mcp-failed .mcp-bad { font-weight: 700; }
+.mcp-reconnect {
+  flex-shrink: 0; font-size: 12px; padding: 4px 10px;
+  color: var(--blue); border-color: var(--blue);
+}
+.mcp-reconnect:hover { background: color-mix(in srgb, var(--blue) 12%, transparent); }
 
 /* 设置页：内置常用 MCP 预设（一键添加卡片区） */
 .mcp-preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-bottom: 14px; }
@@ -2860,13 +3157,14 @@ li.mcp-disabled .mcp-tools { opacity: .5; }
   background: var(--card); border: 1px solid var(--line2); border-radius: var(--r-sm);
   padding: 11px 13px;
 }
-.mcp-preset-card.added { opacity: .72; }
+.mcp-preset-card.added { border-color: var(--down); }
+.mcp-preset-card.added .mpc-add { color: var(--down); opacity: .8; }
 /* 缺运行时的预设卡：置灰 + 文案说明缺什么，添加按钮不可点 */
 .mcp-preset-card.unavailable { opacity: .55; }
 .mcp-preset-card.unavailable .mpc-need { color: var(--reg); }
-.mpc-top { display: flex; align-items: center; gap: 8px; }
+.mpc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .mpc-label { font-weight: 700; font-size: 13px; }
-.mpc-top .chip { margin-left: auto; }
+.mpc-chips { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
 .mpc-desc { font-size: 12px; color: var(--text2); line-height: 1.5; }
 /* 底行钉在卡片底部：同行卡片等高，描述行数不同时按钮也不会散落在两个高度上 */
 .mpc-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 2px; }
@@ -3770,9 +4068,10 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   border-top: 1px solid var(--line);
   padding: 6px 10px 8px;
   display: flex; flex-direction: column; gap: 6px;
-  max-height: 108px; overflow-y: auto;
+  max-height: 168px; overflow-y: auto; /* 月历式热力图 4 行可视 + 文件足迹行 */
+  overflow-x: hidden; /* 纵向滚动容器不派生横向滚动条；宽度适配靠 .map-heat 换行 */
 }
-.map-aside-label { font-size: 11px; font-weight: 700; color: var(--text2); margin-right: 4px; }
+.map-aside-label { font-size: 11px; font-weight: 700; color: var(--text2); margin-right: 4px; white-space: nowrap; flex: none; }
 .map-files { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .map-file-chip {
   display: inline-flex; align-items: center; gap: 4px;
@@ -3793,28 +4092,61 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 }
 .map-file-clear:hover { color: var(--reg); }
 
-.map-heat { display: flex; align-items: center; gap: 8px; }
+/* 换行兑底：面板收窄到首行装不下汇总时，汇总整块落到第二行占满整行，
+   而不是把首行挤到溢出（出横向滚动条、汇总被裁掉） */
+.map-heat { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 月历式：列=周一..周日恒 7 列，行=周（旧的在上、新的在下）。起步 4 行
+   28 格，行数随项目使用周数往下长，超出可视高度竖向滚动（默认停在最新
+   一周）；宽度恒定不随面板伸缩 */
+.map-heat-scroll {
+  flex: none;
+  width: 100px;        /* 7×12px 格 + 6×2px 缝 + 4px 竖滚动条 */
+  max-height: 55px;    /* 可视 4 行（4×12px + 3×2px 缝 + 1px 冗余） */
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line2) transparent;
+}
+.map-heat-scroll::-webkit-scrollbar { width: 4px; }
+.map-heat-scroll::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 2px; }
+.map-heat-scroll::-webkit-scrollbar-track { background: transparent; }
 .map-heat-grid {
   display: grid;
-  grid-auto-flow: column;
-  grid-template-rows: repeat(7, 9px);
-  grid-auto-columns: 9px;
+  grid-template-columns: repeat(7, 12px);
+  grid-auto-rows: 12px;
   gap: 2px;
-  flex: 1;
-  min-width: 0; /* flex 项默认 min-width:auto：内容超宽时收不回去，JS 量到的可用宽度会卡在旧格数上，周数只能涨不能缩 */
-  overflow: hidden;
+  width: max-content; /* 恒 7 列宽，行数往下长 */
 }
 .map-heat-grid i { border-radius: 2px; background: var(--paper-inset); cursor: pointer; }
+/* 空格/还没到的天淡化融入底色：一排「无活动」不再是一排实心方块（有活动
+   的天反而被兑下去）。l0 同时用于图例首位，两处同步淡 */
+.map-heat-grid i.l0, .map-heat-legend i.l0 {
+  background: color-mix(in srgb, var(--paper-inset) 45%, var(--card));
+}
+/* 今日格描边：月历块里一眼看出「现在」在哪 */
+.map-heat-grid i.today { box-shadow: inset 0 0 0 1px var(--text2); }
 .map-heat-grid i.l1 { background: color-mix(in srgb, var(--dm-c2) 30%, var(--paper-inset)); }
 .map-heat-grid i.l2 { background: color-mix(in srgb, var(--dm-c2) 55%, var(--paper-inset)); }
 .map-heat-grid i.l3 { background: var(--dm-c2); }
-.map-heat-grid i.l4 { background: var(--dm-c1); box-shadow: inset 0 0 0 1px var(--ink-line); }
-.map-heat-legend { display: inline-flex; align-items: center; gap: 2px; font-size: 10px; color: var(--dim); }
+/* 最高档不再单用另一个色相（--dm-c1 是主题强调色、常是蓝色，绿阶里突然
+   插一格蓝看着像另一类事件）：用主题文字色加深 dm-c2，色阶同 hue 单调变
+   深，六主题通吃 */
+.map-heat-grid i.l4 { background: color-mix(in srgb, var(--dm-c2) 72%, var(--text)); box-shadow: inset 0 0 0 1px var(--ink-line); }
+.map-heat-legend { display: inline-flex; align-items: center; gap: 2px; font-size: 10px; color: var(--dim); flex: none; }
 .map-heat-legend i { width: 8px; height: 8px; border-radius: 2px; background: var(--paper-inset); }
 .map-heat-legend i.l1 { background: color-mix(in srgb, var(--dm-c2) 30%, var(--paper-inset)); }
 .map-heat-legend i.l2 { background: color-mix(in srgb, var(--dm-c2) 55%, var(--paper-inset)); }
 .map-heat-legend i.l3 { background: var(--dm-c2); }
-.map-heat-legend i.l4 { background: var(--dm-c1); }
+.map-heat-legend i.l4 { background: color-mix(in srgb, var(--dm-c2) 72%, var(--text)); }
+/* 右侧汇总：与热力同一窗口的会话/消耗/活跃天。弹性吃掉月历右侧的剩余
+   宽度、四项均匀铺开——拉宽面板时空白被信息用掉（不再全堆在图例和汇总
+   之间）；收窄时因 min-width 装不下而整块换行占满整行（配合上行的 wrap） */
+.map-heat-stats {
+  flex: 1 1 auto; min-width: 220px;
+  display: flex; align-items: center; justify-content: space-evenly;
+  font-size: 11px; color: var(--dim); white-space: nowrap;
+}
+.map-heat-stats b { font-weight: 700; color: var(--text2); font-variant-numeric: tabular-nums; }
 
 /* —— 主题图谱：SVG 连线 + 绝对定位节点（配色分型，权重定大小） —— */
 .map-graph { height: 100%; }
@@ -4770,3 +5102,94 @@ details.map-phase summary::-webkit-details-marker { display: none; }
     scroll-behavior: auto !important;
   }
 }
+
+/* ============================================================
+ * Mods 扩展（实验性）：状态托盘 / 消息流片段 / 设置页
+ * 全部消费主题变量，不写死色值（六主题自动适配）。
+ * ============================================================ */
+
+/* 输入区右侧的状态托盘（token-weather 式常驻状态条，随会话标签走） */
+#mod-tray { display: inline-flex; align-items: center; }
+.mod-tray-chip {
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 2px 8px; font-size: 11.5px; font-weight: 700; line-height: 1.5;
+  border: 1px solid var(--line2); border-radius: 999px;
+  background: var(--paper-raised); color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+.mod-tray-chip.mod-lv-ok { color: var(--down); border-color: var(--down); }
+.mod-tray-chip.mod-lv-warn { color: var(--gold); border-color: var(--gold); }
+.mod-tray-chip.mod-lv-storm { color: var(--up); border-color: var(--up); }
+
+/* 消息流内的 Mod 片段卡（badge / progress / timeline 的宿主） */
+.mod-fragment {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 8px;
+  margin: 4px auto 4px 0; max-width: min(92%, 640px);
+  padding: 5px 10px;
+  border: 1px dashed var(--line2); border-left: 3px solid var(--blue);
+  border-radius: var(--r-sm); background: var(--paper-raised);
+  font-size: 12px; line-height: 1.55;
+}
+.mod-frag-src {
+  flex-shrink: 0; padding: 1px 6px;
+  font-size: 10.5px; font-weight: 700; color: var(--blue);
+  border: 1px solid var(--line2); border-radius: 999px; background: var(--paper-sunken);
+}
+.mod-frag-text { color: var(--text2); word-break: break-word; min-width: 0; }
+.mod-progress {
+  flex: 1 1 120px; max-width: 220px; height: 8px; align-self: center;
+  background: var(--paper-inset); border-radius: 999px; overflow: hidden;
+}
+.mod-progress-bar { display: block; height: 100%; background: var(--blue); border-radius: 999px; }
+.mod-timeline { list-style: none; margin: 0; padding: 0; flex-basis: 100%; }
+.mod-timeline li { display: flex; gap: 8px; padding: 1.5px 0; }
+.mod-tl-t { flex-shrink: 0; min-width: 64px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.mod-tl-text { color: var(--text2); word-break: break-word; }
+
+/* 设置 · Mods 扩展：清单行（复用 settings-skill-list 的列表节奏） */
+li.mod-row {
+  align-items: flex-start; padding: 10px 12px; cursor: default;
+}
+.mod-row .hook-enable { flex-shrink: 0; margin-top: 2px; cursor: pointer; }
+.mod-row .mod-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mod-row .item-name { font-weight: 700; font-size: 13px; }
+.mod-row .item-desc { color: var(--text2); font-size: 12px; line-height: 1.5; }
+.mod-row .head-ops { flex-shrink: 0; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.mod-decl {
+  align-self: flex-start; padding: 1px 7px; margin-right: 4px;
+  font-size: 11px; font-weight: 700; color: var(--gold);
+  border: 1px solid var(--gold); border-radius: 999px;
+}
+.mod-err { color: var(--reg); }
+.mod-recent { font-variant-numeric: tabular-nums; }
+
+/* 设置页通用：卡片内要点 / 步骤列表（继承 settings-hint 色调，只做列表排版） */
+.settings-hint.hint-points, .settings-hint.hint-steps {
+  margin: 0 0 10px; padding-left: 18px;
+}
+.settings-hint.hint-points li, .settings-hint.hint-steps li {
+  margin: 2px 0; line-height: 1.6;
+}
+.settings-hint.hint-steps {
+  counter-reset: mod-step;
+  list-style: none; padding-left: 0;
+}
+.settings-hint.hint-steps li {
+  position: relative; padding-left: 24px;
+}
+.settings-hint.hint-steps li::before {
+  content: counter(mod-step); counter-increment: mod-step;
+  position: absolute; left: 0; top: 1px;
+  width: 16px; height: 16px; line-height: 16px; text-align: center;
+  font-size: 10.5px; font-weight: 700; color: var(--text2);
+  background: var(--paper-sunken); border: 1px solid var(--line); border-radius: 50%;
+}
+
+/* Mod 详情弹层：README 预览与最近执行记录 */
+.mod-detail-cap { margin: 12px 0 6px; font-size: 12.5px; color: var(--dim); }
+.mod-readme {
+  max-height: 220px; overflow: auto; padding: 8px 10px;
+  background: var(--paper-sunken); border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-size: 12px; line-height: 1.6; color: var(--text2); white-space: pre-wrap; word-break: break-word;
+}
+.mod-recent-list li { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }

@@ -14,7 +14,6 @@ from pathlib import Path
 
 from ...bgtasks import spawn_bg
 from ...channels.manager import _fmt_dur
-from ...core import Agent
 from ...security.gate import HeadlessGate
 from ...tools import ChangeRecorder
 from ...tools.pipeline import task_node_fields
@@ -178,7 +177,11 @@ async def run_cron_task_core(
     if not task["enabled"] and not force:
         return None
     added = False
-    if running is not None and not force:
+    # 登记与 force 解耦：强制运行（cron.run_now / 连点）也进在跑集合，扫描
+    # 循环才能看见它——否则强制运行在飞期间任务仍是 due 状态，下一轮扫描
+    # 必然并发二次派跑（双倍 token / 推送翻倍 / 回写互相覆盖）。「已在跑不
+    # 重复触发」仍由上面的 running 判定承担，方向相反但口径一致。
+    if running is not None:
         running.add(task_id)
         added = True
     started_at = time.time()  # 终态推送要报耗时（成功与失败两条路都要用）
@@ -192,18 +195,23 @@ async def run_cron_task_core(
                 break
         status = "ok" if (not stopped and last_text) else (
             "error" if stopped else "empty")
+        # 不回写 enabled 旧快照：update_cron_task 对传入的键一律覆盖，把执行
+        # 开始前的快照写回会把执行期间用户的停用悄悄撤销（跑完即「复活」）。
         task = await store.update_cron_task(
             task_id,
             last_run_at=time.time(),
             last_status=status,
             last_result=last_text,
-            enabled=task["enabled"],
         )
-        # 下次运行时间：interval 基于本次完成时刻；daily/weekly 基于当前时刻
-        task = await store.update_cron_task(
-            task_id,
-            next_run_at=store.compute_next_run({**task, "last_run_at": task["last_run_at"]}),
-        )
+        # 下次运行时间：interval 基于本次完成时刻；daily/weekly 基于当前时刻。
+        # 执行期间可能已被停用（enabled=False 且 next_run_at=0）：与错误路径
+        # 同口径，停用就不重排，尊重停用而不是把任务再排回队列。
+        if task["enabled"]:
+            task = await store.update_cron_task(
+                task_id,
+                next_run_at=store.compute_next_run(
+                    {**task, "last_run_at": task["last_run_at"]}),
+            )
         if broadcast is not None:
             broadcast(task)
         if notify is not None:
@@ -434,7 +442,12 @@ class AutomationMixin:
             raise RuntimeError("schedule_type 只支持 interval / daily / weekly")
         interval = max(1, int(params.get("interval_minutes") or 1))
         tod = str(params.get("time_of_day") or "")
-        wd = int(params.get("weekday") or -1)
+        # weekday=0（周一）是合法值：必须按 `is not None` 判缺失，`or -1` 会把
+        # 0 误判成缺失存成 -1——应用内相位跑偏（compute_next_run 对 wd<0 一律
+        # +7 天），导出侧更会因 weekday 无效拒绝 WEEKLY。前端星期下拉
+        # value 0..6（0=周一），默认选中周一，创建「每周一」任务传的就是 0。
+        raw_wd = params.get("weekday")
+        wd = int(raw_wd) if raw_wd is not None else -1
         tools = [str(t).strip() for t in (params.get("allowed_tools") or []) if str(t).strip()]
         task = await self.store.add_cron_task(
             self.project.id, name, prompt, stype, interval, tod, wd, tools,
@@ -499,7 +512,12 @@ class AutomationMixin:
         if task is None:
             raise RuntimeError("任务不存在: " + str(tid))
         self._check_cron_ownership(task)
-        await self._run_cron_task(tid, force=True)
+        row = await self._run_cron_task(tid, force=True)
+        if row is None:
+            # 上面已确认任务存在，core 只在「已在跑」（被去重集合挡下）时返回
+            # None：如实回报，不再谎报 started:true——前端照 notice 提示用户
+            return {"started": False, "id": tid,
+                    "notice": "该任务正在运行中，本次未重复触发"}
         return {"started": True, "id": tid}
 
     def _check_cron_ownership(self, task: dict) -> None:
@@ -519,6 +537,8 @@ class AutomationMixin:
         （会话/白名单/工作目录全部错位）。目录已不存在时回退当前项目，
         任务本身的错误由运行结果体现；无项目态（当前项目已删空）时返回
         (None, None)，由调用方把任务标成「所属项目已不存在」。
+        流水线节点的归属上下文同款（原 _pipeline_execution_context 与本方法
+        逐字同构，已并入共用，入参是流水线行）。
         """
         pid = task.get("project_id")
         if pid is not None and pid != self._cur_project_id():
@@ -529,14 +549,16 @@ class AutomationMixin:
             return None, None
         return self.project.id, self.working_dir
 
-    async def _run_cron_task(self, task_id: int, force: bool = False) -> None:
+    async def _run_cron_task(self, task_id: int, force: bool = False) -> dict | None:
         """跑一个定时任务：独立会话 + headless 门控；结果写回任务行并广播。
 
         执行/回写/推送的主体在模块级 run_cron_task_core：CLI 的
         `skysheep cron run <task_id>`（Windows 任务计划程序导出的入口）与
         后端扫描循环共用同一条路径，这里的差异只有建会话跑轮的方式。
+        返回 core 的收尾任务行（None = 没有执行，如已在跑）：
+        cron_run_now 靠它区分「已触发」与「已在跑」。
         """
-        await run_cron_task_core(
+        return await run_cron_task_core(
             self.store, task_id, force=force,
             execute=self._execute_cron_turn,
             broadcast=self._broadcast_cron,
@@ -567,19 +589,12 @@ class AutomationMixin:
         recorder = ChangeRecorder()
         runtime = SessionRuntime(
             sid=sid,
-            agent=Agent(
+            agent=self._build_agent(
                 provider=self.provider,
-                registry=self._build_full_registry(recorder),
                 gate=gate,
                 working_dir=cron_workdir,
-                max_iterations=self.cfg.max_iterations,
-                context_limit_tokens=self._context_limit(),
-                compaction_keep_recent=self.cfg.compaction_keep_recent,
-                compaction_trigger=self.cfg.compaction_trigger,
-                compaction_auto=self.cfg.compaction_auto,
-                hooks=self.hooks,
-                restrict_to_workdir=self.cfg.restrict_to_workdir,
                 session_id=sid,
+                recorder=recorder,
             ),
             recorder=recorder,
         )
@@ -716,9 +731,11 @@ class AutomationMixin:
         """schtasks /Create 参数：按任务行映射调度开关。
 
         interval → /SC MINUTE /MO n；daily → /SC DAILY /ST hh:mm；
-        weekly → /SC WEEKLY /D <三日缩写> /ST hh:mm（weekday 缺失时按 daily 处理，
-        与 compute_next_run 对无效 weekday 的宽松口径一致）。/TR 是
-        `"<entry>" cron run <task_id>`：入口带空格也要整体加内引号，
+        weekly → /SC WEEKLY /D <三日缩写> /ST hh:mm。weekly 的无效 weekday
+        走 DAILY 只是本纯映射函数的兜底分支：schtasks 表达不出「+7 天」的
+        相位，真按 DAILY 导出会把频次放大 7 倍——所以导出入口
+        （cron_schtask_export）对这种行先拒绝并提示修正，不会落到这里。
+        /TR 是 `"<entry>" cron run <task_id>`：入口带空格也要整体加内引号，
         schtasks 才能把带参命令完整存进任务。
         """
         args = ["/Create", "/F", "/TN", task_name]
@@ -770,6 +787,16 @@ class AutomationMixin:
         if entry is None:
             return {"exported": False, "task_name": self.SCHTASK_TASK_PREFIX + str(tid),
                     "notice": problem}
+        # weekly 但 weekday 无效（如旧版 `or -1` 写坏的存量行）：schtasks 表达
+        # 不出「+7 天」的相位，静默降级 DAILY 会把频次放大 7 倍（无人值守下
+        # 副作用同步放大）——拒绝导出并提示修正，应用内调度不受影响。
+        if str(task.get("schedule_type") or "") == "weekly":
+            raw_wd = task.get("weekday")
+            wd = int(raw_wd) if raw_wd is not None else -1
+            if not 0 <= wd <= 6:
+                return {"exported": False, "task_name": self.SCHTASK_TASK_PREFIX + str(tid),
+                        "notice": "每周任务没有选择有效的星期几，无法导出为系统计划任务："
+                                  "请在任务设置里选好星期几后再导出"}
         task_name = self.SCHTASK_TASK_PREFIX + str(tid)
         rc, out = await self._schtasks()(
             *self._schtasks_create_args(task_name, entry, tid, task))
@@ -1082,19 +1109,6 @@ class AutomationMixin:
             "body": f"终止节点「{node['title']}」条件满足，后续节点已停止。",
         })
 
-    async def _pipeline_execution_context(self, pipe: dict) -> tuple[int | None, Path | None]:
-        """流水线归属项目的执行上下文（对标 _cron_execution_context）。
-
-        无项目态（流水线所属项目已删空）返回 (None, None)，调用方报错终止。"""
-        pid = pipe.get("project_id")
-        if pid is not None and pid != self._cur_project_id():
-            proj = await self.store.get_project(pid)
-            if proj is not None and Path(proj.root_path).is_dir():
-                return pid, Path(proj.root_path)
-        if self.project is None:
-            return None, None
-        return self.project.id, self.working_dir
-
     @staticmethod
     def _node_result_file(node_id: int) -> str:
         """节点产出全文的落盘路径（相对流水线所属项目的工作目录）。
@@ -1169,7 +1183,7 @@ class AutomationMixin:
         try:
             if self.provider is None:
                 raise RuntimeError("尚未配置可用的模型 API Key")
-            run_pid, run_workdir = await self._pipeline_execution_context(pipe)
+            run_pid, run_workdir = await self._cron_execution_context(pipe)
             if run_pid is None or run_workdir is None:
                 raise RuntimeError("流水线所属的项目已不存在，无法继续执行")
             prev_error = node.get("last_error") or ""  # 重试上下文要取更新前的快照
@@ -1219,19 +1233,12 @@ class AutomationMixin:
             recorder = ChangeRecorder()
             runtime = SessionRuntime(
                 sid=sid,
-                agent=Agent(
+                agent=self._build_agent(
                     provider=self.provider,
-                    registry=self._build_full_registry(recorder),
                     gate=gate,
                     working_dir=run_workdir,
-                    max_iterations=self.cfg.max_iterations,
-                    context_limit_tokens=self._context_limit(),
-                    compaction_keep_recent=self.cfg.compaction_keep_recent,
-                    compaction_trigger=self.cfg.compaction_trigger,
-                    compaction_auto=self.cfg.compaction_auto,
-                    hooks=self.hooks,
-                    restrict_to_workdir=self.cfg.restrict_to_workdir,
                     session_id=sid,
+                    recorder=recorder,
                 ),
                 recorder=recorder,
             )

@@ -1,0 +1,12 @@
+{
+  "id": "token-weather",
+  "name": "上下文天气",
+  "version": "1.0.0",
+  "description": "把上下文占用做成天气式的常驻状态条：晴 → 多云 → 风暴，该压缩历史时看得见。",
+  "author": "SkySheep",
+  "entry": "main.js",
+  "api": 1,
+  "hooks": ["tool_post", "turn_stop"],
+  "permissions": "observe",
+  "cc_mods": { "compatible": true, "upstream": "https://claude.com/claude-code-mods/token-weather" }
+}

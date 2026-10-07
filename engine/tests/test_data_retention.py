@@ -105,6 +105,25 @@ def test_sweep_quarantine_only_touches_dated_subdirs(home):
     assert res["quarantine"]["deleted"] == 1
 
 
+def test_sweep_prunes_emptied_date_dir_shells(home):
+    """清空的日期目录壳一并撤掉（含历史遗留空壳），非空与非日期目录不动。"""
+    q = home / "home" / "quarantine"
+    old_hit = write(q / "2026-08-20" / "aaa.txt", b"q" * 50)
+    write(q / "2026-10-01" / "bbb.txt")  # 未过期文件，所在日期目录必须保留
+    legacy_shell = q / "2026-07-01"  # 之前轮次清空后留下的空壳
+    legacy_shell.mkdir(parents=True)
+    foreign_dir = write(q / "自己建的" / "c.txt")
+    age_file(old_hit, 40)
+
+    res = sweep_all(FULL_DAYS, [])
+
+    assert not (q / "2026-08-20").exists(), "被清空的日期目录壳应一并撤掉"
+    assert not legacy_shell.exists(), "历史遗留的空日期壳也应撤掉"
+    assert (q / "2026-10-01").exists(), "还有未过期文件的日期目录不动"
+    assert foreign_dir.exists(), "非日期名字的子目录即使空了也不碰"
+    assert res["quarantine"]["deleted"] == 1
+
+
 async def test_sweep_reports_across_known_projects(home, store):
     proj_a = home / "projA"
     proj_b = home / "projB"
@@ -123,6 +142,39 @@ async def test_sweep_reports_across_known_projects(home, store):
     assert old_report.exists() is False, "已知项目的过期报告应被清理"
     assert fresh_report.exists() and unknown_report.exists(), "新报告与未知项目目录不碰"
     assert res["reports"]["deleted"] == 1
+
+
+async def test_reports_roots_skip_remote_sentinel_project(home, store):
+    """「远程连接」哨兵项目（//skysheep-remote）不进报告清理根清单。
+
+    哨兵只作 projects 表唯一键、不是真实目录；``//host`` 形态在 Windows 上按
+    UNC 解析，``is_dir()`` 会对主机名做网络名称解析（实测可达数秒），拖住
+    设置页回包与每日巡检。
+    """
+    await store.ensure_remote_project()
+    await store.get_or_create_project(str(home / "projA"))
+    projects = await store.list_projects()
+    assert any(p.root_path == store.REMOTE_PROJECT_PATH for p in projects), "前置：哨兵已落库"
+
+    roots = dr.category_roots(dr._CATEGORY_BY_KEY["reports"], projects)
+
+    assert len(roots) == 1, "哨兵项目不得进入清理根清单"
+    assert "projA" in str(roots[0]), "真实项目的清理根保留"
+
+
+def test_reports_roots_skip_unc_form_roots(home):
+    """UNC/网络形态的项目根（``//host``、``\\\\host``）一律不进清理根清单。"""
+
+    class _P:
+        def __init__(self, root_path):
+            self.root_path = root_path
+
+    roots = dr.category_roots(
+        dr._CATEGORY_BY_KEY["reports"],
+        [_P("//skysheep-remote"), _P("\\\\nas\\share\\proj"), _P("D:\\work\\proj")],
+    )
+    assert len(roots) == 1, f"只有本机盘符路径进清单，实际 {roots}"
+    assert "proj" in str(roots[0])
 
 
 def test_zero_days_disables_category(home):
@@ -321,6 +373,17 @@ def test_ws_retention_save_partial_days_ok(home):
     assert frame["result"]["days"] == DEFAULT_DAYS | {"quarantine": 14}
 
 
+def test_ws_retention_save_empty_string_keeps_value(home):
+    """空串 = 「不动该项」：清空输入框保存不得把该类天数折成 0（关闭清理）。"""
+    frame = call(home, "retention.save", {"screenshots_days": 7, "quarantine_days": 14})
+    assert frame["ok"]
+
+    frame = call(home, "retention.save", {"screenshots_days": "", "quarantine_days": ""})
+    assert frame["ok"], "空串走「不动该项」宽容分支，不该报错"
+    assert frame["result"]["days"] == {"screenshots": 7, "quarantine": 14, "reports": 30}
+    assert load_config().retention.screenshots_days == 7, "空串保存不得落盘成 0"
+
+
 def test_ws_retention_sweep_now(home):
     shots = home / "home" / "screenshots"
     old = write(shots / "20260901_090000_aaa.png", b"o" * 77)
@@ -362,10 +425,13 @@ def test_retention_card_wired():
     assert 'request("retention.sweep")' in js
     assert 'document.getElementById("btn-retention-save").onclick = saveRetention' in js
     assert 'document.getElementById("btn-retention-sweep").onclick' in js
-    # 回调把三个天数字段都回传后端
-    assert "screenshots_days: Number(q(\"retention-screenshots\").value)" in js
-    assert "quarantine_days: Number(q(\"retention-quarantine\").value)" in js
-    assert "reports_days: Number(q(\"retention-reports\").value)" in js
+    # 回调把三个天数字段都回传后端；空输入传 null 走后端「不动该项」分支，
+    # 不经 Number() 折成 0（0 = 关闭该类清理，手滑清空不该变成永久关闭）
+    assert 'screenshots_days: days("retention-screenshots")' in js
+    assert 'quarantine_days: days("retention-quarantine")' in js
+    assert 'reports_days: days("retention-reports")' in js
+    assert 'raw === "" ? null : Number(raw)' in js
+    assert 'Number(q("retention-screenshots").value)' not in js
     # 「立即清理」回报清理量；切到关于页时拉一次状态
     assert "已清理" in js and "retentionBytes" in js
     assert "renderRetentionCfg().catch" in js

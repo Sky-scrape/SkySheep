@@ -53,7 +53,6 @@ THEME_PALETTE = {
 # 旧版两档值与六套主题同义；ui.json 存的是主题 id；
 # "auto"（存为 null）与未知值跟随系统深浅（深 → night / 浅 → paper）
 LEGACY_MODES = {"light": "paper", "dark": "night"}
-LIGHT_THEME_IDS = {"paper", "celadon", "kaki", "light"}
 DARK_THEME_IDS = {"night", "indigo", "pine", "dark"}
 
 # 前端主题切换的回写点：apply_theme WS 方法设置，桌面壳的看板线程轮询

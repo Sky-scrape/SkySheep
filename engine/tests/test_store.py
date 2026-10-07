@@ -496,3 +496,69 @@ async def test_connect_sweeps_stale_tmp_files(tmp_path):
         assert keep.exists(), "非 mkstemp 模式的用户文件不能动"
     finally:
         await s.close()
+
+
+# ---- 团队频道消息落库（team_messages，三期） ----
+
+
+async def test_team_messages_roundtrip(store):
+    """频道消息逐条落库、按 team_id 归组、seq 升序回放；team_id 是唯一归组键
+    （不同团队互不可见），session_id 只作归属注记不参与查询。"""
+    await store.add_team_message(
+        "team-a", seq=1, from_member="user", to_member="all",
+        msg_kind="ruling", text="开工", session_id="sess-1", created_at=100.0,
+    )
+    await store.add_team_message(
+        "team-a", seq=3, from_member="小研", to_member="director",
+        msg_kind="report", task_ref="T1", text="做完了", session_id="sess-1",
+    )
+    await store.add_team_message(
+        "team-a", seq=2, from_member="director", to_member="小研",
+        msg_kind="assign", task_ref="T1", text="派工",
+    )
+    await store.add_team_message(
+        "team-b", seq=1, from_member="user", to_member="all", text="另一队",
+    )
+
+    rows = await store.list_team_messages("team-a")
+    assert [r["seq"] for r in rows] == [1, 2, 3]  # 写入乱序，读出按 seq 升序
+    assert rows[0]["from_member"] == "user" and rows[0]["text"] == "开工"
+    assert rows[1]["task_ref"] == "T1" and rows[1]["msg_kind"] == "assign"
+    assert rows[0]["created_at"] == 100.0 and rows[1]["created_at"] > 0  # 缺省取当下
+    assert all(r["team_id"] == "team-a" for r in rows)
+    assert await store.list_team_messages("no-such-team") == []
+
+
+async def test_team_messages_table_in_schema(store):
+    """team_messages 随 connect() 建表（第 15 张业务表），旧库升级路径由
+    CREATE TABLE IF NOT EXISTS 直接补齐——手动建一个没有此表的旧库再 connect
+    也能查。"""
+    import sqlite3
+
+    assert store._db is not None
+    cur = await store._db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )
+    tables = {r[0] for r in await cur.fetchall()}
+    assert "team_messages" in tables
+
+    # 模拟旧库（没有 team_messages）：connect 后补建，写入读取照常。
+    # sessions 用旧版本就有的原始列形状（project_id 是建表列、不在补列清单，
+    # idx_sessions_project 靠它建）——缺新表才是要验证的升级场景
+    old_db = store.path.parent / "legacy.db"
+    con = sqlite3.connect(old_db)
+    con.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id INTEGER,"
+        " title TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,"
+        " updated_at REAL NOT NULL)"
+    )
+    con.commit()
+    con.close()
+    from skysheep.session.store import SessionStore
+
+    s = await SessionStore(old_db).connect()
+    try:
+        await s.add_team_message("team-x", seq=1, from_member="user", to_member="all")
+        assert len(await s.list_team_messages("team-x")) == 1
+    finally:
+        await s.close()

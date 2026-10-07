@@ -100,6 +100,18 @@ from ..core.subagent_store import (
     SubagentStore,
     validate_subagent_name,
 )
+from ..core.team import (
+    ChannelMessage,
+    DirectorSpec,
+    TeamError,
+    TeamMemberSpec,
+    TeamMessageSink,
+    TeamOrchestrator,
+    TeamTemplate,
+    TeamTemplateDirector,
+    TeamTemplateMember,
+    TeamTemplateStore,
+)
 from ..events import (
     AssistantMessage,
     ErrorEvent,
@@ -118,7 +130,6 @@ from ..mcp import (
 from ..messages import ImageBlock, Message, TextBlock
 from ..messages import system_text as history_system_text
 from ..models import Provider
-from ..models.base import ProviderDone, ProviderTextDelta
 from ..models.factory import build_provider
 from ..models.probe import _is_local, probe_context_limit, probe_provider_models
 from ..obs import info as obs_info
@@ -140,7 +151,7 @@ from ..skills.installer import (
     scan_computer_skills,
 )
 from ..skills.installer import install as install_skill
-from ..textio import encode_text, read_text_file, write_text_file
+from ..textio import encode_text, read_text_file, write_text_atomic, write_text_file
 from ..tools import (
     COMPUTER_TOOL_NAMES,
     ChangeRecorder,
@@ -151,9 +162,10 @@ from ..tools import (
 from ..tools.memory import (
     render_memory_section,
 )
+from ..tools.memory_embed import schedule_warmup
 from ..tools.pipeline import PipelineWriteTool
 from ..tools.skill import LoadSkillTool
-from .backend_parts._shared import EmitFn, SessionRuntime
+from .backend_parts._shared import EmitFn, SessionRuntime, collect_stream_text
 from .backend_parts.automation import AutomationMixin
 from .backend_parts.channels import (
     ChannelsMixin,
@@ -163,6 +175,7 @@ from .backend_parts.data_retention import RetentionMixin
 from .backend_parts.lifecycle import LifecycleMixin
 from .backend_parts.mcp import McpMixin
 from .backend_parts.memory import MemoryMixin
+from .backend_parts.mods import ModsMixin
 from .backend_parts.preferences import PreferencesMixin
 from .backend_parts.remote import (  # noqa: F401  部分名字供 app.py / 测试从本模块引用
     _SETUP_APPID,
@@ -195,7 +208,9 @@ STREAM_MERGE_S = 0.04
 STREAM_MERGE_MAX_CHARS = 2_000
 
 # 可不经合并直接发出的高频增量事件类型（其余事件一律先冲刷缓冲，保证顺序）。
-_MERGEABLE_DELTA_KINDS = ("text_delta", "thinking_delta", "roundtable_member_delta")
+_MERGEABLE_DELTA_KINDS = (
+    "text_delta", "thinking_delta", "roundtable_member_delta", "team_message_delta",
+)
 
 # 二次取消后收割后台落库的兜底超时（秒）：正常落库毫秒级完成，超时说明库被
 # 锁死等异常，不能拖着整个收尾无限等（排队轮还等着交棒）。
@@ -231,6 +246,11 @@ class StreamDeltaMerger:
             return None
         if kind == "roundtable_member_delta":
             return (kind, ev.get("member_index"), ev.get("round"))
+        if kind == "team_message_delta":
+            # 团队成员发言增量：member_index + seq 双键分桶——同一成员跨消息的
+            # 增量绝不互并（不同频道消息并成一帧会串消息），同一条消息内的
+            # 连续增量照常聚批
+            return (kind, ev.get("member_index"), ev.get("seq"))
         return (kind,)
 
     def _schedule_flush(self) -> None:
@@ -531,6 +551,11 @@ class QueuedTurn:
     compare: bool = False  # 圆桌 A/B 对比模式（不融合）
     debate_rounds: int | None = None  # 本轮辩论修订轮数（None=用配置值）
     chair_answers: bool | None = None  # 本轮主席是否出草稿（None=用配置值）
+    team: bool = False  # 团队轮（用户总管）：消息进团队频道，唤醒被点名成员
+    # AI 总管（二期）：建队轮生效——director_mode="ai" 时 director 指定担任
+    # 总管的 {provider, model}；仅建队路径消费，后续轮忽略
+    director_mode: str = "user"
+    director: dict | None = None
 
     def resolve(self, result: dict) -> None:
         if not self.fut.done():
@@ -687,6 +712,50 @@ def _html_escape(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# 团队轮 assistant 气泡里成员报告摘录的长度（全文在频道卡片与 meta 的 messages 里）
+TEAM_DIGEST_EXCERPT_CHARS = 300
+
+
+def _team_digest(orch: TeamOrchestrator, result: dict) -> str:
+    """团队轮的 assistant 气泡文本：本轮被唤醒成员的纪要（+ 终态说明）。
+
+    成员发言的正文由 TeamMessage 事件直播、随 meta 的 messages 回放；气泡只
+    承载「这轮谁应答了、结果如何」的纪要，终态时附《交付说明》全文。AI 总管
+    模式下总管发言同样直播进频道，气泡按推进情况给一句话纪要。
+    """
+    lines: list[str] = []
+    for w in result.get("woke") or []:
+        name, status = str(w.get("member", "")), str(w.get("status", ""))
+        seq = int(w.get("seq") or 0)
+        if status == "done" and seq:
+            report = next((m.text for m in orch.channel.messages if m.seq == seq), "")
+            excerpt = report[:TEAM_DIGEST_EXCERPT_CHARS]
+            if len(report) > TEAM_DIGEST_EXCERPT_CHARS:
+                excerpt += f"…（全文见频道 #{seq}）"
+            lines.append(f"【{name}】{excerpt}")
+        elif status == "error":
+            lines.append(f"【{name}】本轮失败（{w.get('error') or '未知原因'}）")
+        elif status == "cancelled":
+            lines.append(f"【{name}】已停止（已产出的部分已定稿进频道）")
+        elif status == "skipped":
+            # 轮次耗尽/预算越线在前一名成员轮上触发收队后，剩余点名不再唤醒
+            lines.append(f"【{name}】未唤醒（{w.get('error') or '团队已进入终态'}）")
+    if not lines:
+        if orch.director_mode == "ai":
+            # inject_user_message 的返回没有 woke 键（区别于自动循环的空唤醒）
+            injected = "woke" not in result
+            lines.append(
+                "（插话已进入团队频道：总管推进中，将在下一轮优先处理。）" if injected
+                else "（总管已处理本轮消息：过程与分工见团队频道。）"
+            )
+        else:
+            lines.append("（消息已进入团队频道；未被点名的队员会在下次被唤醒时看到。）")
+    finished = result.get("finished")
+    if finished:
+        lines.append(str(finished.get("summary") or ""))
+    return "\n\n".join(line for line in lines if line)
+
+
 # 会话导出 HTML 模板：自包含单文件（无外部资源），纸墨配色与桌面端一致
 EXPORT_HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -733,13 +802,15 @@ EXPORT_HTML_TEMPLATE = """<!DOCTYPE html>
 
 class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    TerminalPanelMixin, RemoteMixin,
-                   LifecycleMixin, McpMixin, PreferencesMixin, RetentionMixin):
+                   LifecycleMixin, McpMixin, ModsMixin, PreferencesMixin,
+                   RetentionMixin):
     def __init__(
         self,
         working_dir: str | Path = ".",
         provider_name: str | None = None,
         provider_factory: Callable[[], Provider] | None = None,
         store: SessionStore | None = None,
+        team_state_path: Path | None = None,
     ) -> None:
         # 启动目录只作首启建项目用；真正的工作目录在 setup/_bind_project 里
         # 按记住的当前项目确定（无项目态是合法状态，working_dir 可为 None）
@@ -776,13 +847,31 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.skills: SkillLoader | None = None
         self.tasks: TaskManager | None = None
         self.subagent_store = SubagentStore(skysheep_home() / "subagents.json")
+        # 团队模板（三期）：~/.skysheep/teams.json，与 subagents.json 同姿态
+        # （路径随 SKYSHEEP_HOME，测试隔离；坏文件容错在 store 内部）
+        self.team_templates = TeamTemplateStore(skysheep_home() / "teams.json")
         self.instructions_file: str | None = None
         self.instructions_text: str = ""
         self.mcp_warnings: list[str] = []
         self.checkpoints = CheckpointStore()
         self.hooks: HookRunner | None = None
+        # Mods 扩展（实验性，core/mods.py）：setup/_bind_project 里经 _reload_mods
+        # 重建并挂到 Agent 与权限门上；无已装 Mod 时为 None（零开销直通）
+        self.mods = None
+        self._pending_mod_install: dict | None = None  # 两段安装的待确认项
         self.term = TerminalManager()
         self.aux_history: list[Message] = []
+        # 团队（用户总管 MVP）：会话级活动团队（sid → 编排器，内存态，不跨进程）；
+        # 活动登记落 team_active.json（沿子代理任务簿先例：state_path 可注入、
+        # textio 原子写、重启时一律标「已中断」不自动恢复）。
+        # 默认指向 SKYSHEEP_HOME（测试经 home 夹具隔离），也可显式注入临时路径。
+        if team_state_path is not None:
+            self._team_state_path: Path | None = team_state_path
+        else:
+            self._team_state_path = skysheep_home() / "team_active.json"
+        self._teams: dict[str, TeamOrchestrator] = {}
+        self._teams_interrupted: dict[str, dict] = {}
+        self._load_team_state()
         self.ws_emitters: list = []  # 在线 WS 连接的 emit 函数（提醒/日程广播用）
         self._reminder_task: asyncio.Task | None = None
         self._cron_task: asyncio.Task | None = None
@@ -855,6 +944,40 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             n += 1
         return n
 
+    def _build_agent(
+        self,
+        *,
+        provider: Provider,
+        gate: PermissionGate,
+        working_dir: Path | None,
+        session_id: str = "",
+        mods=None,
+        recorder: ChangeRecorder | None = None,
+    ) -> Agent:
+        """Agent 构造的单一入口：基底/会话/定时任务/流水线/渠道五处共用。
+
+        配置 kwarg（迭代上限、上下文上限、压缩三件套、钩子、工作区限制）
+        五处构造点完全一致，收敛在这里——加一个 Agent 配置项只改这一处；
+        provider/gate/working_dir 各不相同由调用方传。mods 只挂桌面侧的
+        基底与会话 Agent（无人值守/渠道派生不传，天然不挂，见 core/agent.py）；
+        session_id 透传给钩子命令的 stdin JSON。
+        """
+        return Agent(
+            provider=provider,
+            registry=self._build_full_registry(recorder),
+            gate=gate,
+            working_dir=working_dir,
+            max_iterations=self.cfg.max_iterations,
+            context_limit_tokens=self._context_limit(),
+            compaction_keep_recent=self.cfg.compaction_keep_recent,
+            compaction_trigger=self.cfg.compaction_trigger,
+            compaction_auto=self.cfg.compaction_auto,
+            hooks=self.hooks,
+            mods=mods,
+            restrict_to_workdir=self.cfg.restrict_to_workdir,
+            session_id=session_id,
+        )
+
     def _get_runtime(self, session_id: str) -> SessionRuntime:
         """取（或懒建）一个会话的运行时；新 runtime 自带系统提示词与完整工具集。
 
@@ -868,19 +991,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             recorder = ChangeRecorder()
             rt = SessionRuntime(
                 sid=session_id,
-                agent=Agent(
+                agent=self._build_agent(
                     provider=self._runtime_provider(session_id),
-                    registry=self._build_full_registry(recorder),
                     gate=self.gate,
                     working_dir=self.working_dir,
-                    max_iterations=self.cfg.max_iterations,
-                    context_limit_tokens=self._context_limit(),
-                    compaction_keep_recent=self.cfg.compaction_keep_recent,
-                    compaction_trigger=self.cfg.compaction_trigger,
-                    compaction_auto=self.cfg.compaction_auto,
-                    hooks=self.hooks,
-                    restrict_to_workdir=self.cfg.restrict_to_workdir,
                     session_id=session_id,
+                    mods=self.mods,
+                    recorder=recorder,
                 ),
                 recorder=recorder,
             )
@@ -1014,6 +1131,23 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         for rt in self.runtimes.values():
             yield rt.agent
 
+    def respond_permission(self, request_id: str, decision: str) -> bool:
+        """权限决策路由：普通 runtime agents + 各会话团队的成员 agents。
+
+        覆盖 TerminalPanelMixin 的同名方法（本类定义优先于 mixin）。成员 Agent
+        不并进 _for_each_agent——那是全局状态刷新（模型/注册表/系统词）的枚举面，
+        把成员刷成主会话系统词会毁掉成员人设；权限路由单独并入（设计 §6：确认
+        只认用户）。决策值仍过 Agent.respond_permission 的 normalize 白名单，
+        乱码一律按 deny，与主 Agent 同一 fail-closed 语义。
+        """
+        for ag in self._for_each_agent():
+            if ag.respond_permission(request_id, decision):
+                return True
+        for orch in self._teams.values():
+            if orch.respond_permission(request_id, decision):
+                return True
+        return False
+
     # ---- 生命周期 ----
 
     async def setup(self) -> None:
@@ -1045,6 +1179,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "任务编排：%d 个节点因上次退出被中断，已标记待重跑", _interrupted
             )
         self.subagent_store.load()
+        # 团队模板册同款启动装载：不 load 的话 template_list 恒回空、
+        # template_remove 对磁盘已有模板误报「找不到」，此后任意一次
+        # template_save 会以仅含新模板的内存册整体覆盖 teams.json——已存
+        # 模板被静默清光（upsert→save 是全量覆盖落盘）
+        self.team_templates.load()
+        # Mods 暂存目录清扫：install 与 confirm 之间重启遗留的 .importing-*
+        # （只启动期调一次，运行期可能正有未确认的安装预览占着 staging）
+        self.sweep_mod_staging()
         # 「远程连接」固定项目：启动即建（飞书/微信等渠道对话的归属），
         # 与是否配置渠道无关——侧栏里它是一个常驻分组
         await self.store.ensure_remote_project()
@@ -1083,18 +1225,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             self._connect_mcp_after_boot(list(mcp_config_warnings))
         )
 
-        self._base_agent = Agent(
+        self._base_agent = self._build_agent(
             provider=self.provider,
-            registry=self._build_full_registry(),
             gate=self.gate,
             working_dir=self.working_dir,
-            max_iterations=self.cfg.max_iterations,
-            context_limit_tokens=self._context_limit(),
-            compaction_keep_recent=self.cfg.compaction_keep_recent,
-            compaction_trigger=self.cfg.compaction_trigger,
-            compaction_auto=self.cfg.compaction_auto,
-            hooks=self.hooks,
-            restrict_to_workdir=self.cfg.restrict_to_workdir,
+            mods=self.mods,
         )
         # 后台查一次新版本：几秒超时、失败完全静默，结果随 boot 快照到前端
         self._update_task = asyncio.create_task(self._check_update_quietly())
@@ -1262,6 +1397,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             await self.mcp.shutdown()
         if self.tasks:
             self.tasks.cancel_all()
+        if self.mods is not None:
+            self.mods.close()  # 收掉每个 Mod 的沙箱执行线程（quickjs runtime 不可并发）
         if self.store and self._store_override is None:
             await self.store.close()
 
@@ -1483,7 +1620,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    compare: bool = False,
                    refs: list[str] | None = None,
                    debate_rounds: int | None = None,
-                   chair_answers: bool | None = None) -> dict:
+                   chair_answers: bool | None = None,
+                   team: bool = False,
+                   director_mode: str = "user",
+                   director: dict | None = None) -> dict:
         """跑一轮对话；过程事件通过 emit 推送；结束后持久化新消息。
 
         Agent 正在工作时再次 send 不再报错，而是**排队**：等当前轮结束后
@@ -1503,12 +1643,23 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         images 为用户消息携带的图片附件 [{media_type, data(base64)}]，
         只在普通轮生效（圆桌轮是纯文本协作，忽略图片）。
 
+        team=True 时本轮走「团队」流程：该会话没有活动团队则先建队
+        （成员来自 members 参数，缺省自动解析，上限 cfg.team.max_members），
+        随后消息作为总管指令进团队频道、被 @ 点名的成员逐个唤醒。团队进行中的
+        会话，后续消息自动路由进团队（即便没带 team 标志）；team 与 roundtable
+        同轮互斥。director_mode="ai"（二期）建队时指定 AI 总管：director 为
+        担任总管的 {provider, model}，用户消息经 run_auto_turn 驱动自动闭环
+        （拆解 → 派工 → 验收 → 交付）；缺省 "user" 保持一期用户总管行为。
+
         refs 为「& 引用对话」选中的会话 id 列表：每轮最多 REF_MAX_SESSIONS
         个，会话记录会被注入本轮上下文（见 _build_refs_context）。
 
         session_id 指定目标会话（多会话并行时前端按标签传入）；缺省用活动会话。
         目标会话不是当前活动会话时先轻量激活（运行中的其他会话不受影响）。
         """
+        # 团队与圆桌同轮互斥（设计 §13.4）：前端开关联动互斥，后端双参数同给报参数错
+        if team and roundtable:
+            raise RuntimeError("「团队」与「圆桌」不能同时开启：同一条消息只能选一种协作模式。")
         # 轮次起点重验工作区信任（审查 P2-4）：会话运行期间项目级配置被外部
         # 改动（git pull 等）时，趁本轮开始断开项目级 MCP、重发现技能。
         await self.recheck_trust_before_turn()
@@ -1522,6 +1673,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         )
         if session_id and (not self.session or self.session.id != session_id):
             await self.activate_session(session_id)
+        # 会话级活动团队：进行中的团队把该会话的后续消息全部吸进团队频道
+        #（设计 §3——团队进行中不再进普通回合），即便前端没带 team 标志。
+        active_team = target_sid is not None and target_sid in self._teams
+        if active_team and roundtable:
+            raise RuntimeError(
+                "当前会话有进行中的团队，消息会进入团队频道；请先收队再使用圆桌。"
+            )
+        team_bound = team or active_team
         # 引用排除目标会话自己：引用当前对话没有意义
         clean_refs = self._sanitize_refs(refs, exclude=target_sid)
         if self.provider is None:
@@ -1543,7 +1702,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 图片附件：当前服务声明"不支持图片输入"时提前给可读提示，
         # 而不是把图片塞给纯文本模型，换回一句上游报错（用户不知道是模型选错了）。
         clean_images = self._sanitize_images(images)
-        if clean_images and not self._supports_vision():
+        # 团队轮是纯文本协作，图片本就不会发给队员（编排器会发 Notice 并忽略），
+        # 不因主模型不支持图片拦人
+        if clean_images and not self._supports_vision() and not team_bound:
             name = self.provider_name or "当前服务"
             raise RuntimeError(
                 f"「{name} / {self.provider_model}」不支持图片输入，图片发不出去。\n"
@@ -1565,6 +1726,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 images=self._sanitize_images(images),
                 refs=clean_refs, compare=compare,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
+                team=team, director_mode=director_mode, director=director,
             )
             if rt_now is not None:
                 rt_now.queue.append(item)
@@ -1595,6 +1757,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 session_id=target_sid, wants_title=wants_title,
                 regenerate=regenerate, compare=compare, refs=clean_refs,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
+                team=team, director_mode=director_mode, director=director,
             )
         except asyncio.CancelledError:
             # 用户在 turn 真正开始前点了停止：无产出，返回诚实的 stopped 结果，
@@ -1609,6 +1772,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "session_id": runtime.sid,
                 "plan_mode": plan_mode,
                 "roundtable": False,
+                "team": None,
                 "context_tokens": runtime.agent.used_context_tokens(),
                 "context_limit": runtime.agent.context_limit_tokens,
                 "context_detail": self._context_detail(runtime.agent),
@@ -1640,13 +1804,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "给下面的对话起一个不超过12个字的中文标题，概括主题。"
                 "只输出标题本身，不要引号、句号或任何解释。\n\n" + seed
             )
-            parts: list[str] = []
-            async for ev in self.provider.stream([Message.user(prompt)], []):
-                if isinstance(ev, ProviderTextDelta):
-                    parts.append(ev.text)
-                elif isinstance(ev, ProviderDone):
-                    break
-            raw = "".join(parts).strip()
+            raw = (await collect_stream_text(self.provider, prompt)).strip()
             title = raw.splitlines()[0].strip(' \t"“”「」』【】。，；：')[:24] if raw else ""
             if not title or title == cur_title:
                 return
@@ -1704,6 +1862,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         refs: list[str] | None = None,
         debate_rounds: int | None = None,
         chair_answers: bool | None = None,
+        team: bool = False,
+        director_mode: str = "user",
+        director: dict | None = None,
     ) -> dict:
         """真正执行一轮对话（含持久化、规划模式切换、检查点保存）。
 
@@ -1825,18 +1986,32 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # system 消息（system 从不落库，本就每处实时生成，见 _reload_agent_history）。
         memory_query = self._memory_retrieval_query(text, agent)
         if memory_query:
-            agent.set_system(self.compose_system(memory_query=memory_query))
+            # 嵌入是增强，绝不能阻塞事件循环（memory_embed 的性能不变量）：
+            # 检索分支可能同步探测 / 嵌入 Ollama 向量，整体丢 worker 线程组装
+            # （墙钟预算在 memory_embed 内部约束，慢 Ollama 也只拖慢本轮几秒），
+            # 同时后台预热词条向量——暖齐后轮首只剩查询向量一次请求
+            schedule_warmup()
+            agent.set_system(await asyncio.to_thread(
+                self.compose_system, memory_query=memory_query,
+            ))
+        # 团队轮例外含自动路由轮：引擎前缀一律不拼——频道消息保持用户原文
+        #（§13.5 一律进频道、不做意图识别）——按 team_bound 判，不按本轮
+        # flag 判（活动团队把没带标志的消息也吸进频道，前缀漏进频道文本会
+        # 误导队员）。团队期间攒下的注记等收队/交付后的下一普通轮照常注入。
+        team_bound = team or sid in self._teams
         # 「& 引用对话」：把被引用会话的记录拼在消息最前面注入本轮上下文
-        #（与 PLAN_MODE_PREFIX 同一套做法，随用户消息一起持久化）
-        if refs:
+        #（与 PLAN_MODE_PREFIX 同一套做法，随用户消息一起持久化）。
+        if refs and not team_bound:
             refs_ctx = await self._build_refs_context(refs)
             if refs_ctx:
                 text = refs_ctx + text
-        if plan_mode:
+        if plan_mode and not team_bound:
             text = PLAN_MODE_PREFIX + text
         # 自上一轮以来结束、还没人取报告的后台子代理任务 → 注入一条系统提示，
-        # 主 Agent 开轮就知道「有任务做完了」，不用用户来催（后台模式闭环）
-        if self.tasks:
+        # 主 Agent 开轮就知道「有任务做完了」，不用用户来催（后台模式闭环）。
+        # 团队轮不注入：那是主会话轮次的词汇，暂缓到团队结束后的下一普通轮
+        # （注记留在簿子里不取走，收队/交付后 _teams 移出，自然轮到它）。
+        if self.tasks and not team_bound:
             bg_note = self.tasks.pop_turn_note(sid)
             if bg_note:
                 text = bg_note + text
@@ -1852,12 +2027,32 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         turn_t0 = time.monotonic()
         stopped = False
         rt_meta: dict | None = None
+        tm_meta: dict | None = None
         tin0, tout0 = agent.total_in_tokens, agent.total_out_tokens
         tcached0 = agent.total_cached_tokens
         runtime.run_task = asyncio.current_task()
         turn_exc: BaseException | None = None
         try:
-            if roundtable:
+            if team or sid in self._teams:
+                if roundtable:
+                    # 排队轮重验团队/圆桌同轮互斥（send() 的守卫只在入队时刻
+                    # 判定）：消息在「建队轮已开跑、_teams 尚未登记」的窗口入队
+                    # 时 roundtable=true 被接受，交棒到这里团队已在板——不重验
+                    # 的话圆桌标志会被本分支静默吞掉（0 个圆桌事件、无任何报
+                    # 错）。与不入队即被拒的口径对齐，显式报错交还调用方。
+                    raise RuntimeError(
+                        "当前会话有进行中的团队，消息会进入团队频道；请先收队再使用圆桌。"
+                    )
+                # 团队轮：进行中的团队把消息吸进频道（即便 flag 未带），team=true
+                # 且无活动团队则先建队。取消在编排器内收敛成「半截发言定稿进频道」
+                # 后原样上抛，由外层 except 收口为 stopped。
+                tm_meta = await self._team_body(
+                    text, emit_ev, members_params, agent=agent, sid=sid,
+                    images=images, allow_create=team, recorder=runtime.recorder,
+                    plan_mode=plan_mode,
+                    director_mode=director_mode, director=director,
+                )
+            elif roundtable:
                 rt_meta = await self._roundtable_body(
                     text, emit_ev, members_params, agent=agent, compare=compare,
                     sid=sid, images=images,
@@ -2003,6 +2198,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 duration_ms=int((time.monotonic() - turn_t0) * 1000),
                 stopped=stopped or None,
                 roundtable=bool(rt_meta) or None,
+                team=bool(tm_meta) or None,
                 tool_calls=turn_stats["tool_calls"] or None,
                 tool_ms=turn_stats["tool_ms"] or None,
                 tool_errors=turn_stats["tool_errors"] or None,
@@ -2068,6 +2264,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "session_id": sid,
             "plan_mode": plan_mode,
             "roundtable": rt_meta,
+            "team": tm_meta,
             "context_tokens": agent.used_context_tokens(),
             "context_limit": agent.context_limit_tokens,
             "context_detail": self._context_detail(agent),
@@ -2100,7 +2297,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 roundtable=item.roundtable, members_params=item.members,
                 images=item.images, runtime=runtime, refs=item.refs,
                 compare=item.compare, debate_rounds=item.debate_rounds,
-                chair_answers=item.chair_answers,
+                chair_answers=item.chair_answers, team=item.team,
+                director_mode=item.director_mode, director=item.director,
             ))
         except Exception as e:  # noqa: BLE001 - 错误要送回等待中的请求
             item.fail(e)
@@ -2479,6 +2677,729 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             update_config_section("roundtable", updates)
             self.cfg = load_config()
         return self.roundtable_detail()
+
+    # ---- 团队：用户总管的多模型分工协作（一期 MVP，docs/团队模式设计.md） ----
+    # 与圆桌并列的第二种多模型协作。活动团队是会话级状态（_teams：sid → 编排器，
+    # 内存态）：团队进行中该会话的消息全部进团队频道（用户总管逐个唤醒被点名
+    # 成员；AI 总管经 run_auto_turn 驱动自动闭环），工单板只由用户经
+    # team.get / team.task_add / team.task_update / team.takeover / team.stop
+    # / team.deliver 触达。三期另开三面：频道消息逐条落库（message_sink →
+    # team_messages 表，team.log 按 team_id 回放）、建队模板（teams.json，
+    # team.template_list/save/remove）、设置页配置卡（teamcfg.get/save）。
+
+    def _load_team_state(self) -> None:
+        """重启恢复：上次进程退出时还活动的团队一律标「已中断」（沿任务簿先例）。
+
+        团队的运行时（成员 Agent / 频道 / 工单板）只在内存，不跨进程恢复；
+        这里只恢复「曾有个团队」的事实供 team.get 展示，状态文件当场清账。
+        """
+        if self._team_state_path is None or not self._team_state_path.exists():
+            return
+        try:
+            data = json.loads(read_text_file(self._team_state_path).text)
+        except (OSError, ValueError):
+            return  # 坏文件按没有活动团队处理（write_text_atomic 保证不会有半个文件）
+        for item in (data or {}).get("teams") or []:
+            if not isinstance(item, dict) or not item.get("session_id"):
+                continue
+            rec = dict(item)
+            rec["status"] = "interrupted"
+            rec["interrupt_reason"] = "应用重启，团队已中断"
+            self._teams_interrupted[str(item["session_id"])] = rec
+        if self._teams_interrupted:
+            self._persist_team_state()  # 已中断的不会再恢复：登记当场清账
+
+    def _persist_team_state(self) -> None:
+        """活动团队登记落盘（textio 原子写；失败不拖垮团队本身）。"""
+        if self._team_state_path is None:
+            return
+        data = {"teams": [
+            {"session_id": sid,
+             "roster": [m.name for m in orch.roster],
+             "director_mode": orch.director_mode}
+            for sid, orch in self._teams.items()
+        ]}
+        try:
+            write_text_atomic(
+                self._team_state_path,
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            )
+        except OSError:
+            pass
+
+    def _teams_interrupt_all(self, reason: str) -> None:
+        """把所有活动团队就地标中断（项目切换：旧项目 runtime 全部失效，团队一并失效）。"""
+        for sid, orch in self._teams.items():
+            self._teams_interrupted[sid] = {
+                "session_id": sid,
+                "roster": [m.name for m in orch.roster],
+                "director_mode": orch.director_mode,
+                "status": "interrupted",
+                "interrupt_reason": reason,
+            }
+        self._teams.clear()
+        self._persist_team_state()
+
+    def _resolve_team_members(self, members_params: list | None) -> list[TeamMemberSpec]:
+        """解析团队队员：显式列表优先（可带 name / persona）；缺省沿圆桌的自动解析。
+
+        显式成员与圆桌同名同模型去重；单个成员构建失败（缺 Key/未知服务）不阻断，
+        入册为错误成员、唤醒时按失败隔离呈现（与圆桌错误卡片同姿态）。缺省路径
+        chair_answers=False：团队没有主席模型，当前主模型不参与过滤。
+        """
+        specs: list[TeamMemberSpec] = []
+        if members_params:
+            seen: set[tuple[str, str]] = set()
+            for m in members_params:
+                name = str((m or {}).get("provider", "")).strip()
+                if not name:
+                    continue
+                model = str((m or {}).get("model", "") or "").strip()
+                key = (name, model)
+                if key in seen:
+                    continue
+                seen.add(key)
+                spec = TeamMemberSpec(
+                    name=str((m or {}).get("name", "") or "").strip(),
+                    provider_name=name,
+                    model=model,
+                    persona=str((m or {}).get("persona", "") or "").strip(),
+                )
+                try:
+                    provider = self._build_member_provider(name, model)
+                    spec.provider = provider
+                    if not spec.model:
+                        spec.model = getattr(provider, "model", "")
+                except Exception as e:  # noqa: BLE001 - 构建失败降级为错误成员
+                    spec.build_error = str(e)[:200]
+                specs.append(spec)
+        else:
+            for ms in self._resolve_members(None, chair_answers=False):
+                specs.append(TeamMemberSpec(
+                    provider_name=ms.provider_name, model=ms.model,
+                    provider=ms.provider, build_error=ms.build_error,
+                ))
+        return specs
+
+    def _team_budget_check(self) -> Callable[[], bool]:
+        """团队的预算越线判定钩子（二期）：接既有每日 token 预算护栏路径。
+
+        与 send() 入口的护栏同口径：cfg.daily_token_budget > 0 且当日
+        usage_log 汇总（store.usage_today）已达上限即「越线」；演示模式不产生
+        真实费用，豁免同既有判定。读不到用量按未越线放行——坏掉的仪表不该
+        停掉团队，费用护栏由宿主其余路径兜底（编排器对钩子异常同样按未越线
+        处理，这里不吞第二次）。异步实现：usage_today 是 async，编排器的
+        _budget_over 对 awaitable 返回值照常等待。
+        """
+
+        async def check() -> bool:
+            budget = int(self.cfg.daily_token_budget or 0)
+            if budget <= 0:
+                return False
+            if getattr(self.provider, "demo_mode", False):
+                return False
+            used_today = await self.store.usage_today()
+            return used_today >= budget
+
+        return check
+
+    def _team_message_sink(self, sid: str) -> TeamMessageSink:
+        """团队频道消息落库钩子（三期）：接到当前项目库的 team_messages 表。
+
+        编排器在每条频道消息定稿后回调（team.py 的 _persist_message，含被
+        停止的取消收尾路径）；每会话一个闭包，session_id 在建队时定死。store
+        在回调时才取（晚绑定：测试经 _store_override 注入的实例、setup 的
+        重建都能取到当前那一个）。落库是 best-effort 旁路：失败记 obs 警告
+        不外溢（编排器对 sink 异常同样只记日志）——不能让落库问题拖垮团队
+        轮；被用户停止取消打断的那次按容忍丢失处理（CancelledError 原样
+        上抛，不吞取消）。
+        """
+
+        async def sink(team_id: str, msg: ChannelMessage) -> None:
+            store = self.store
+            if store is None:
+                return
+            try:
+                await store.add_team_message(
+                    team_id, seq=msg.seq, from_member=msg.from_member,
+                    to_member=msg.to_member, msg_kind=msg.msg_kind,
+                    task_ref=msg.task_ref, text=msg.text,
+                    session_id=sid, created_at=msg.ts,
+                )
+            except Exception as e:  # noqa: BLE001 - 落库失败不拖垮团队轮
+                obs_warning(
+                    "team", "team message persist failed",
+                    session_id=sid, team_id=team_id, seq=msg.seq,
+                    error=str(e)[:200],
+                )
+
+        return sink
+
+    async def _team_create(
+        self, sid: str, emit: EmitFn, members_params: list | None, recorder: ChangeRecorder,
+        director_mode: str = "user", director_params: dict | None = None,
+    ) -> TeamOrchestrator:
+        """为本会话建队（chat.send team=true 且无活动团队）：发 TeamStarted 并登记。
+
+        emit 是编排器形状的事件回调（收 pydantic 事件，_team_body 传入的
+        team_emit 已带用量归属）。成员 Agent 的工具表用本会话同款全量注册表
+        （改动记录进同一 recorder，队员写的文件照常进会话检查点）；权限门注入
+        会话既有门，编排器经 TeamMemberGate 只加「来自队员」来源标注、判定零改变。
+        成员 Agent 另透传本会话 id（写租约归属）与用户钩子 / Mods 拦截——
+        对队员与主会话同款生效，都只能收紧。
+
+        director_mode="ai"（二期）：director_params 指定担任总管的
+        {provider, model}，用 _build_member_provider 独立实例化（缺 Key 等
+        构建失败降级 provider=None + build_error，不阻断建队——首个总管轮
+        触达时按失败隔离发注记，团队保持活动等插话重试/接管/收队）；总管
+        未指定（provider 名为空）按 fail-closed 在建队期报 TeamError。预算
+        越线判定注入 _team_budget_check（越线强制交付 budget_exhausted）。
+        频道消息落库（三期）注入 _team_message_sink：每条定稿消息进项目库
+        team_messages 表，team_id 进快照随 meta 落库（team.log 凭它回放）。
+        """
+        director: DirectorSpec | None = None
+        if director_mode == "ai":
+            d_provider = str((director_params or {}).get("provider", "") or "").strip()
+            d_model = str((director_params or {}).get("model", "") or "").strip()
+            if not d_provider:
+                raise TeamError(
+                    'director_mode="ai" 需要指定担任总管的模型服务（director.provider）'
+                )
+            director = DirectorSpec(provider_name=d_provider, model=d_model)
+            try:
+                provider = self._build_member_provider(d_provider, d_model)
+                director.provider = provider
+                if not director.model:
+                    director.model = getattr(provider, "model", "")
+            except Exception as e:  # noqa: BLE001 - 构建失败降级，不阻断建队
+                director.build_error = str(e)[:200]
+        specs = self._resolve_team_members(members_params)
+        orch = TeamOrchestrator(
+            emit=emit,
+            working_dir=self.working_dir,
+            registry=self._build_full_registry(recorder),
+            gate=self.gate,
+            cfg=self.cfg.team,
+            max_iterations=self.cfg.subagent_max_iterations,
+            restrict_to_workdir=self.cfg.restrict_to_workdir,
+            session_id=sid,
+            hooks=self.hooks,
+            mods=self.mods,
+            director_mode=director_mode,
+            director=director,
+            budget_check=self._team_budget_check(),
+            # 频道消息逐条落库（三期）：收队/重启后仍可按 team_id 回放全量
+            message_sink=self._team_message_sink(sid),
+        )
+        await orch.create_team(specs)  # TeamStarted 在这里发出；超上限截断发 Notice
+        self._teams[sid] = orch
+        self._teams_interrupted.pop(sid, None)
+        self._persist_team_state()
+        return orch
+
+    @staticmethod
+    def _team_meta(orch: TeamOrchestrator) -> dict:
+        """assistant 消息的团队 meta：{"mode": "team", "team": {…}}，仿 roundtable meta。
+
+        Message 的元数据槽只有 roundtable 一个（messages.py 未设通用 meta 字段），
+        团队摘要搭这个槽随会话落库/下发，前端按 mode == "team" 与圆桌卡分流。
+        team 块自带建队分配的 team_id（三期）：前端回放全量频道消息
+        （team.log）就凭 meta 里这个 id，收队/重启后仍然可用。
+        """
+        return {"mode": "team", "team": orch.snapshot()["team"]}
+
+    async def _team_body(
+        self, text: str, emit: EmitFn, members_params: list | None,
+        agent: Agent, sid: str, images: list[ImageBlock] | None = None,
+        allow_create: bool = False, recorder: ChangeRecorder | None = None,
+        plan_mode: bool = False,
+        director_mode: str = "user", director: dict | None = None,
+    ) -> dict:
+        """团队轮主体：用户消息进团队频道 → 总管推进（成员唤醒 / 自动闭环）。
+
+        - 该会话已有活动团队：消息按「@成员名」定向 / 广播进频道；
+        - 没有活动团队且 allow_create：先建队（TeamStarted）再进频道。
+
+        总管形态（二期）：user（默认）走一期用户总管——被 @ 点名的成员逐个
+        唤醒；ai 走自动闭环——消息经 run_auto_turn 驱动总管（拆解 → 派工 →
+        验收 → 交付）至空闲或终态；循环推进中（loop_running，渠道入站等不占
+        运行位的消息源会撞上）改走 inject_user_message：只进频道并排进总管
+        下一轮的最高优先级段，不重复驱动循环（在飞轮任务负责推进）。
+
+        规划模式对团队轮同样生效（plan_mode 本轮值）：激活时成员一律按只读
+        工具表唤醒（即使名下有执行型工单，set_plan_mode 现筛只读表），并发
+        Notice 说明——「本轮不执行任何写操作」的用户契约不因协作模式破例。
+
+        成员/总管发言以 TeamMessageDelta 流式下发（StreamDeltaMerger 按
+        member_index + seq 分桶合并，member_index=-1 即总管），定稿
+        TeamMessage；转发的工具调用 / 权限请求等过程事件是非增量，merger
+        自动先冲刷缓冲再发出，顺序与普通轮一致。取消语义：编排器把半截发言
+        shield 定稿进频道后原样上抛，这里补齐用量入账与 meta 落库再交还外层
+        收口为 stopped。
+
+        返回随轮次结果回传前端的团队元数据（同时作为 assistant 消息 meta 落库）。
+        """
+        orch = self._teams.get(sid)
+
+        async def emit_ev(ev) -> None:
+            await emit(ev.model_dump())
+
+        # 用量按事件流归属：usage 事件先于其定稿 TeamMessage 到达，攒到定稿时
+        # 记到名下（MemberTurnResult 的用量不随返回值交给宿主，事件流是逐成员
+        # 归属的唯一来源）。总管轮与小会主席的 usage 先于 from="director" 的
+        # 定稿到达——冲进 director_acc，行键 provider/model 取 director_info
+        # （_flush_team_usage），不与队员混账。极端取消时序下剩余用量挂给最后
+        # 定稿的归属方，不凭空丢账。
+        usage_acc: dict[str, list[int]] = {}  # 成员名 -> [input, output]
+        director_acc = [0, 0]  # 总管（AI 模式）累计 [input, output]
+        pending_usage: list = []
+
+        async def team_emit(ev) -> None:
+            if ev.kind == "usage":
+                pending_usage.append(ev)
+            elif ev.kind == "team_message" and ev.from_member == "director":
+                if orch is not None and orch.director_mode == "ai":
+                    # 总管轮与小会主席的 usage 先于 from="director" 的定稿到达
+                    # ——冲进 director_acc，行键 provider/model 取 director_info
+                    # （_flush_team_usage），不与队员混账。仅在 AI 总管模式生效：
+                    # user 模式的 director 消息是系统代发的派工/验收话术（没有
+                    # 总管模型），不冲账——窗口内的成员用量留给成员自己的定稿或
+                    # 轮末 _flush_team_usage 按最后归属结算，不结出 provider=""
+                    # /model="" 的幽灵总管账、成员名下不丢账。
+                    for u in pending_usage:
+                        director_acc[0] += int(u.input_tokens)
+                        director_acc[1] += int(u.output_tokens)
+                    pending_usage.clear()
+            elif (ev.kind == "team_message"
+                  and ev.from_member not in ("user", "system", "director")):
+                bucket = usage_acc.setdefault(ev.from_member, [0, 0])
+                for u in pending_usage:
+                    bucket[0] += int(u.input_tokens)
+                    bucket[1] += int(u.output_tokens)
+                pending_usage.clear()
+            elif (ev.kind == "team_message" and ev.from_member == "system"
+                  and pending_usage and orch is not None and orch.director_mode == "ai"):
+                # 小会融合失败只有 from=system 的注记收尾（没有裁定定稿冲账）：
+                # 此时未冲账的用量只可能是小会主席的——成员/总管轮的用量都随
+                # 各自定稿消息冲账。主动结算进总管账，别让轮末兜底把主席的
+                # token 记到队尾成员头上（与 _director_usage/snapshot 失协）。
+                for u in pending_usage:
+                    director_acc[0] += int(u.input_tokens)
+                    director_acc[1] += int(u.output_tokens)
+                pending_usage.clear()
+            await emit_ev(ev)
+
+        t0 = time.monotonic()
+
+        def _ms() -> int:
+            return int((time.monotonic() - t0) * 1000)
+
+        await emit_ev(TurnStarted(iteration=1))
+        # 规划模式对团队轮同样生效（一期评审遗留）：本轮值同步给编排器（建队
+        # 路径在下方建完再同步），激活时并发 Notice 说明只读执行——每轮都发，
+        # 团队进行中切换规划模式的行为对用户始终可见。
+        if orch is not None:
+            orch.set_plan_mode(plan_mode)
+        if plan_mode:
+            await emit_ev(NoticeEvent(
+                message="规划模式已开启：本轮队员以只读方式执行（不写文件、不运行命令），"
+                        "只做调研与汇报；需要队员动手请切回执行模式后再发消息。"
+            ))
+        # 用户消息先入主历史（与圆桌同姿态）：团队期间的问题不丢，收队恢复
+        # 普通回合后后续轮仍有上下文；图片随消息保留（队员不看图）。
+        agent.history.append(Message.user(text, images))
+
+        try:
+            if orch is None:
+                if not allow_create:
+                    # 理论不可达（pipeline 入口保证 team 或活动团队至少一个成立）
+                    raise RuntimeError("当前会话没有进行中的团队")
+                orch = await self._team_create(
+                    sid, team_emit, members_params, recorder or ChangeRecorder(),
+                    director_mode=director_mode, director_params=director,
+                )
+                orch.set_plan_mode(plan_mode)
+            else:
+                # 逐轮重绑发射链（仅空闲轮）：编排器只在建队轮拿到过 emit，
+                # 第二条消息起事件与用量会流进建队轮早已收尾的旧闭包——前端因
+                # 同连接碰巧可见，usage_log 的归属却静默丢失。本轮要驱动编排器
+                # （唤醒/自动循环），事件与用量就必须挂本轮的 team_emit。
+                # 插话路径例外（loop_running=True，在飞轮正持有发射链）：重绑
+                # 会把在飞轮的用量挪进本轮早已冲刷完的账本——保持不重绑。
+                if not orch.loop_running:
+                    orch._emit = team_emit
+            if orch.director_mode == "ai":
+                if orch.loop_running:
+                    # 循环推进中的插话：只进频道并排进总管下一轮（最高优先级段），
+                    # 不重复驱动循环。若 inject 返回时循环恰好已收束（竞态窗口），
+                    # 插话留在待注入清单里，随本会话下一条消息一并处理
+                    result = await orch.inject_user_message(text, images=images)
+                else:
+                    result = await orch.run_auto_turn(text, images=images)
+            else:
+                result = await orch.handle_user_message(text, images=images)
+        except asyncio.CancelledError:
+            # 用户停止：半截发言已在编排器里 shield 定稿进频道（seq 复用无空洞）。
+            # 这里把已花费的用量入账、meta 与纪要落进主历史，再上抛交给 pipeline
+            # 的 stopped 收尾（冲刷合并缓冲 + 落库）。
+            await self._flush_team_usage(
+                sid, orch, usage_acc, pending_usage, director_acc=director_acc,
+            )
+            if orch is not None:
+                stopped_msg = Message.assistant([TextBlock(
+                    text="（本轮已停止：正在发言的队员已把已产出的部分定稿进团队频道。）",
+                )])
+                stopped_msg.roundtable = self._team_meta(orch)
+                agent.history.append(stopped_msg)
+                for ev in (
+                    AssistantMessage(message=stopped_msg.model_dump()),
+                    TurnFinished(stop_reason="cancelled", iterations=1, duration_ms=_ms()),
+                ):
+                    try:
+                        await emit_ev(ev)
+                    except asyncio.CancelledError:
+                        pass  # 收尾帧发不出就算了：历史与落库不丢
+            raise
+        except TeamError:
+            # 参数/状态非法（如解析不出任何队员）：与圆桌同姿态补 TurnFinished(error)
+            # 让前端轮次状态收口，错误原文上抛给 WS 层。若团队已在轮中进终态
+            # （轮次耗尽/预算越线等），用量照常结算、活动登记照常摘除——否则
+            # 已收队的团队永远挂在 _teams 里，该会话此后每条消息都报「当前
+            # 没有进行中的团队」，只能手动收队解困。
+            await self._flush_team_usage(
+                sid, orch, usage_acc, pending_usage, director_acc=director_acc,
+            )
+            if orch is not None and orch.finished is not None:
+                self._teams.pop(sid, None)
+                self._teams_interrupted.pop(sid, None)
+                self._persist_team_state()
+            await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_ms()))
+            raise
+
+        await self._flush_team_usage(
+            sid, orch, usage_acc, pending_usage, director_acc=director_acc,
+        )
+        finished = result.get("finished")
+        if finished is not None:
+            # 终态（交付确认 / 收队 / 轮次耗尽）：团队关闭，会话恢复普通回合
+            self._teams.pop(sid, None)
+            self._teams_interrupted.pop(sid, None)
+            self._persist_team_state()
+
+        meta = self._team_meta(orch)
+        digest = Message.assistant([TextBlock(text=_team_digest(orch, result))])
+        digest.roundtable = meta
+        agent.history.append(digest)
+        await emit_ev(AssistantMessage(message=digest.model_dump()))
+        await emit_ev(TurnFinished(stop_reason="end_turn", iterations=1, duration_ms=_ms()))
+        return meta
+
+    async def _flush_team_usage(
+        self, sid: str | None, orch: TeamOrchestrator | None,
+        usage_acc: dict[str, list[int]], pending_usage: list,
+        director_acc: list[int] | None = None,
+    ) -> None:
+        """团队轮的用量入账 usage_log（归属当前会话，仿圆桌 usage_rows）。
+
+        逐成员各一行；AI 总管模式另结一行挂总管名下（provider/model 取
+        director_info，不挂在任何队员名下——总管轮与小会主席的用量经
+        team_emit 的 from="director" 分支攒进 director_acc）。
+        """
+        if orch is None or not sid:
+            return
+        if pending_usage:
+            bucket: list[int] | None = None
+            if usage_acc:
+                last = next(reversed(usage_acc))
+                bucket = usage_acc[last]
+            elif director_acc is not None and orch.director_mode == "ai":
+                # AI 模式下还没有任何成员定稿过：剩余用量多半是被取消的总管轮的
+                bucket = director_acc
+            if bucket is not None:
+                for u in pending_usage:
+                    bucket[0] += int(u.input_tokens)
+                    bucket[1] += int(u.output_tokens)
+                pending_usage.clear()
+        rows = [
+            (spec.provider_name, spec.model, acc[0], acc[1])
+            for spec in orch.roster
+            if (acc := usage_acc.get(spec.name)) and (acc[0] or acc[1])
+        ]
+        if director_acc is not None and (director_acc[0] or director_acc[1]):
+            info = orch.director_info()
+            rows.append((info["provider"], info["model"], director_acc[0], director_acc[1]))
+        if not rows:
+            return
+        try:
+            for provider, model, tin, tout in rows:
+                await self.store.add_usage(sid, provider, model, tin, tout, 0)
+        except Exception:  # noqa: BLE001 - 记账失败不影响本轮结果
+            pass
+        # 团队烧的真金白银也要触发越线提醒（内部不抛）
+        await self._check_budget_alerts()
+
+    def _team_for(self, params: dict) -> tuple[str, TeamOrchestrator]:
+        """按 params.session_id（缺省活动会话）取活动团队；没有就报参数错。"""
+        sid = str(params.get("session_id") or "") or (self.session.id if self.session else "")
+        orch = self._teams.get(sid)
+        if orch is None:
+            raise TeamError("当前会话没有进行中的团队")
+        return sid, orch
+
+    async def _cancel_team_turn_and_settle(self, sid: str) -> None:
+        """取消该会话正在跑的轮，并等它把取消收尾跑完（team.stop / team.deliver 专用）。
+
+        时序前提（一期评审遗留）：被取消成员轮的半截发言要 shield 定稿进频道、
+        team_message 帧要先于 team_finished 到达、终态 snapshot 不能缺这条发言
+        ——所以先「取消 + 等收尾」（定稿 / 合并缓冲冲刷 / 落库都落地），再走
+        finish() 生成快照，不靠前端幂等兜底。等待期间的再次取消吞掉（收队语义
+        已定，与 pipeline 收尾的取向一致）；兜底超时不无限等——收队不能被卡死
+        的轮拖住，超时记警告后照常收队。
+        """
+        rt = self.runtimes.get(sid)
+        task = rt.run_task if rt else None
+        if task is None or task.done():
+            return
+        self.cancel_run(sid)  # 上面的 done 检查保证这里必是活任务
+        deadline = time.monotonic() + _PERSIST_HARVEST_TIMEOUT
+        while not task.done() and time.monotonic() < deadline:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=max(0.05, deadline - time.monotonic()),
+                )
+            except asyncio.CancelledError:
+                asyncio.current_task().uncancel()  # 收队请求被再次取消：吞掉继续等
+            except TimeoutError:
+                pass  # 到点再看一眼：deadline 兜底，不无限等
+            except Exception:  # noqa: BLE001 - 被取消轮自身的错误在它的调用链上处理
+                pass
+        if not task.done():
+            obs_warning(
+                "team",
+                f"cancelled turn did not settle in time before team finish, sid={sid}",
+                session_id=sid,
+            )
+
+    def team_get(self, params: dict) -> dict:
+        """team.get：团队快照（名册 / 工单 / 频道尾部）。
+
+        无活动团队时返回空态；该会话有「已中断」记录（重启/切项目前留过团队）
+        时附带 interrupted 记录供前端提示。
+        """
+        sid = str(params.get("session_id") or "") or (self.session.id if self.session else "")
+        orch = self._teams.get(sid)
+        if orch is not None:
+            return {"active": True, "session_id": sid, "team": orch.snapshot()["team"]}
+        out: dict = {"active": False, "session_id": sid, "team": None}
+        if sid in self._teams_interrupted:
+            out["interrupted"] = self._teams_interrupted[sid]
+        return out
+
+    async def team_task_add(self, params: dict) -> dict:
+        """team.task_add：登记工单（待办）。指派对象必须在名册内，依赖必须存在。"""
+        _, orch = self._team_for(params)
+        deps = params.get("deps")
+        task = await orch.task_add(
+            str(params.get("title", "")),
+            str(params.get("assignee", "")),
+            type=str(params.get("type") or "exec"),
+            accept=str(params.get("accept", "") or ""),
+            deps=[str(d) for d in deps] if isinstance(deps, list) else None,
+        )
+        return {"task": task}
+
+    async def team_task_update(self, params: dict) -> dict:
+        """team.task_update：工单状态流转（板只由用户变更，成员不自行改板）。
+
+        待办→进行中→待验收→完成；待验收→进行中视为打回（redo+1，超上限拒绝）；
+        status="error" 走失败收尾（用户放弃，待办/进行中/待验收均可）。置为
+        进行中（派工/重派/打回重做）后代发一条 director 的 assign 频道消息，
+        让被派队员在频道里看到派工。
+        """
+        _, orch = self._team_for(params)
+        status = str(params.get("status", ""))
+        task = await orch.task_update(str(params.get("task_id", "")), status)
+        assign_msg = None
+        if status == "in_progress":
+            assign_msg = await orch.notify_assign(
+                str(task["id"]), note=str(params.get("note", "") or "")
+            )
+        return {"task": task, "assign_message": assign_msg}
+
+    async def team_stop(self, params: dict) -> dict:
+        """team.stop：收队（立即终止）——TeamFinished(aborted) + 未尽事项。
+
+        正在跑的成员轮先取消并**等收尾完成**（半截发言 shield 定稿进频道、
+        team_message 帧先于 team_finished 到达，快照不缺这条发言，见
+        _cancel_team_turn_and_settle）；收队后该会话恢复普通回合。
+        """
+        sid, orch = self._team_for(params)
+        await self._cancel_team_turn_and_settle(sid)
+        result = await orch.stop(reason=str(params.get("reason", "") or ""))
+        self._teams.pop(sid, None)
+        self._persist_team_state()
+        return {
+            "status": result["status"],
+            "summary": result["summary"],
+            "session_id": sid,
+            "team": result["snapshot"]["team"],
+        }
+
+    async def team_deliver(self, params: dict) -> dict:
+        """team.deliver：交付（用户确认）——TeamFinished(done) + 《交付说明》。
+
+        设计 §3 的停机条件「总管宣布交付」，一期总管是用户本人：这是全部
+        工单完成后团队唯一的正常终态路径（收队恒为 aborted，轮次耗尽是
+        强制交付）。未完成的工单不拦——按《交付说明》记未尽事项；正在跑的
+        成员轮先取消并等收尾完成（同收队的时序前提，见
+        _cancel_team_turn_and_settle），交付后该会话恢复普通回合。
+        """
+        sid, orch = self._team_for(params)
+        await self._cancel_team_turn_and_settle(sid)
+        result = await orch.finish(status="done")
+        self._teams.pop(sid, None)
+        self._persist_team_state()
+        return {
+            "status": result["status"],
+            "summary": result["summary"],
+            "session_id": sid,
+            "team": result["snapshot"]["team"],
+        }
+
+    async def team_takeover(self, params: dict) -> dict:
+        """team.takeover：用户接管（二期 AI 总管）——切回用户总管模式。
+
+        正在推进的自动闭环（总管轮/成员唤醒轮）先取消并**等收尾完成**（半截
+        发言 shield 定稿进频道、team_message 帧先于后续帧到达，快照不缺这条
+        发言，见 _cancel_team_turn_and_settle）；随后编排器切 director_mode
+        ="user"：未消费的插话与待开小会作废、停滞标记清零，工单板与团队频道
+        原样保留，成员 Agent（独立 history）全部复用——此后 handle_user_message
+        照常（一期行为）。
+        """
+        sid, orch = self._team_for(params)
+        await self._cancel_team_turn_and_settle(sid)
+        result = await orch.takeover()
+        self._persist_team_state()  # director_mode 变了：活动登记同步落盘
+        return {
+            "director_mode": result["director_mode"],
+            "session_id": sid,
+            "team": result["snapshot"]["team"],
+        }
+
+    # ---- 团队设置（设置 · 团队）：读回当前值 → 编辑 → 保存后热生效 ----
+
+    def team_config_detail(self) -> dict:
+        """设置页团队卡片的数据（三期，仿 roundtable_detail）。"""
+        t = self.cfg.team
+        return {
+            "max_members": t.max_members,
+            "member_timeout_s": t.member_timeout_s,
+            "max_rounds": t.max_rounds,
+            "redo_limit": t.redo_limit,
+            "stall_limit": t.stall_limit,
+            "config_hint": (
+                "团队让多个模型分工协作：总管拆解目标、登记工单，队员按工单真实"
+                "读写文件、运行命令（照常走权限确认），完成后交付。成员来自「模型"
+                "服务」里已配好 Key 的服务，在输入框的团队面板勾选并写一句话人设；"
+                "下面的上限用于防止自动循环失控。改动对之后新建的团队生效，进行中"
+                "的团队沿用建队时的值。"
+            ),
+        }
+
+    async def team_config_save(self, params: dict) -> dict:
+        """保存团队设置（写 config.toml 的 [team] 段）并回传新状态（clamp 仿
+        roundtable_save）。热生效指此后新建的团队取新值；进行中团队的轮次
+        上限等在建队时已取值，不回改。"""
+        updates: dict = {}
+        if params.get("max_members") is not None:
+            updates["max_members"] = max(1, min(8, int(params["max_members"])))
+        if params.get("member_timeout_s") is not None:
+            updates["member_timeout_s"] = max(10, int(params["member_timeout_s"]))
+        if params.get("max_rounds") is not None:
+            updates["max_rounds"] = max(1, int(params["max_rounds"]))
+        if params.get("redo_limit") is not None:
+            updates["redo_limit"] = max(0, min(5, int(params["redo_limit"])))
+        if params.get("stall_limit") is not None:
+            updates["stall_limit"] = max(1, int(params["stall_limit"]))
+        if updates:
+            update_config_section("team", updates)
+            self.cfg = load_config()
+        return self.team_config_detail()
+
+    # ---- 团队模板（三期）：把一次建队配置存成可复用的具名条目 ----
+    # 全局册（与会话无关，teams.json 单文件）：前端建队浮层「从模板创建」、
+    # 团队卡「另存为模板」。名字/总管形态的校验在 TeamTemplateStore.upsert，
+    # TeamError 原文回 WS 调用方。
+
+    def team_template_list(self) -> dict:
+        """team.template_list：全部模板（按保存顺序；member 字段见契约）。"""
+        return {"templates": self.team_templates.list()}
+
+    async def team_template_save(self, params: dict) -> dict:
+        """team.template_save：保存模板。name 是唯一键——同名覆盖原条目
+        （位置不变、内容换新，created_at 刷新为本次保存时刻），新名追加。
+        成员行只存 (provider, model, name, persona) 标识，不校验服务存在性
+        （应用模板时走 chat.send 既有解析路径，缺 Key 照常降级错误成员）。"""
+        raw_members = params.get("members")
+        members = [
+            TeamTemplateMember(
+                provider=str((m or {}).get("provider", "") or "").strip(),
+                model=str((m or {}).get("model", "") or "").strip(),
+                name=str((m or {}).get("name", "") or "").strip(),
+                persona=str((m or {}).get("persona", "") or "").strip(),
+            )
+            for m in (raw_members if isinstance(raw_members, list) else [])
+            if isinstance(m, dict)
+        ]
+        raw_director = params.get("director")
+        template = TeamTemplate(
+            name=str(params.get("name", "") or ""),
+            director_mode=str(params.get("director_mode") or "user"),
+            director=TeamTemplateDirector(
+                provider=str((raw_director or {}).get("provider", "") or "").strip(),
+                model=str((raw_director or {}).get("model", "") or "").strip(),
+            ),
+            members=members,
+            created_at=time.time(),  # 宿主盖戳（模板册自身不感知时钟）
+        )
+        self.team_templates.upsert(template)
+        return {"template": template.model_dump()}
+
+    async def team_template_remove(self, params: dict) -> dict:
+        """team.template_remove：按名删模板（名字精确匹配；不存在报 TeamError）。"""
+        name = str(params.get("name", "") or "").strip()
+        self.team_templates.remove(name)
+        return {"name": name}
+
+    # ---- 频道回放（三期）：收队/重启后按 team_id 拉全量频道消息 ----
+
+    async def team_log(self, params: dict) -> dict:
+        """team.log：按 team_id 回放某团队的全部频道消息（team_messages 表）。
+
+        会话归属一致性校验（一致性校验，安全收敛在 WS 入口——非本机调用的
+        session_id 已在 app.py 收敛到该连接绑定的活动会话，本方法按服务端侧
+        认定的 sid 比对，请求原值不参与）：活动团队直接比对 sid → orch.team_id；
+        团队已收队/应用重启后凭 assistant meta 里的 team.team_id 回放，按库内
+        落库行的 session_id 归属判定（落库行由 _team_message_sink 戳上建队
+        会话）。两证皆无（旧版本团队没落过库 / 未知 id）不拒绝——回空列表，
+        前端退回截断 meta；空结果没有可泄露的内容。行字段与列序即
+        store.list_team_messages。
+        """
+        sid = str(params.get("session_id") or "") or (self.session.id if self.session else "")
+        team_id = str(params.get("team_id", "") or "").strip()
+        if not team_id:
+            raise TeamError("缺少 team_id：请从团队 meta 的 team.team_id 取回放主轴")
+        orch = self._teams.get(sid)
+        active_hit = orch is not None and bool(orch.team_id) and orch.team_id == team_id
+        rows = (
+            await self.store.list_team_messages(team_id) if self.store is not None else []
+        )
+        owned = bool(sid) and any(r.get("session_id") == sid for r in rows)
+        foreign = any(r.get("session_id") and r.get("session_id") != sid for r in rows)
+        if not active_hit and not owned and foreign:
+            raise TeamError("team_id 不属于当前会话：不能回放其他会话的团队频道")
+        return {"team_id": team_id, "session_id": sid, "messages": rows}
 
     # ---- Slash 命令支撑（/compact /status /todos，前端输入 / 唤出菜单） ----
 
@@ -3094,20 +4015,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "{{...}} 形式的占位符必须原样保留、一个都不能删改。"
             "只输出改写后的提示词正文，不要任何解释或代码块围栏。\n\n---\n\n" + text
         )
-        parts: list[str] = []
-        # 整段限时：模型挂住时不能让前端「✨ AI 润色」永远停在「润色中…」。
-        # 超时转成可读错误走普通失败路径（TimeoutError 是 asyncio.timeout 的取消信号，
-        # 不在这里拦截会让 async for 的清理也跟着丢）。
         try:
+            # 整段限时：模型挂住时不能让前端「✨ AI 润色」永远停在「润色中…」。
+            # 超时转成可读错误走普通失败路径（TimeoutError 是 asyncio.timeout 的取消信号，
+            # 不在这里拦截会让 async for 的清理也跟着丢）。
             async with asyncio.timeout(60):
-                async for ev in self.provider.stream([Message.user(prompt)], []):
-                    if isinstance(ev, ProviderTextDelta):
-                        parts.append(ev.text)
-                    elif isinstance(ev, ProviderDone):
-                        break
+                out = (await collect_stream_text(self.provider, prompt)).strip()
         except TimeoutError:
             raise RuntimeError("润色超时：模型 60 秒没有返回内容，请稍后重试") from None
-        out = "".join(parts).strip()
         # 宽容剥壳：模型偶尔无视「不要围栏」的叮嘱
         if out.startswith("```"):
             out = out.split("\n", 1)[-1]
@@ -3209,10 +4124,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     async def list_whitelist_rules(self) -> list[dict]:
         """项目白名单规则列表（whitelist.list），每条带 stale 失效标记。
 
-        stale 判定与 gate 匹配侧 fail-closed 同源（security/gate.py 的
-        _is_arbitrary_exec_prefix）：2.3.0 安全收紧后，历史遗留的 docker/ssh/scp
-        两词前缀规则不再命中、回落逐次确认——列表里把这类「留着也不会再放行」
-        的规则亮出来，提示用户清理。不在这里造第二套判定。
+        stale 判定与 gate 匹配侧 fail-closed 同源，不造第二套判定：
+        2.3.0 收紧后 docker/ssh/scp 两词前缀规则不再命中（_is_arbitrary_exec_prefix）；
+        更早的审查 S-12 起 delete_file 整工具 always 规则也不再认（gate 的
+        _matches_core）——列表把这类「留着也不会再放行」的规则亮出来，提示清理。
         """
         return await self._enriched_rules()
 
@@ -3234,10 +4149,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             and rule.get("kind") == "prefix"
             and _is_arbitrary_exec_prefix(rule.get("pattern") or "")
         )
+        reason = "安全收紧（2.3.0）：该类前缀已回落逐次确认，规则不再命中" if stale else ""
+        if not stale and rule.get("tool") == "delete_file" and rule.get("kind") == "always":
+            # 与 gate 匹配侧同口径（gate._matches_core 对 delete_file 的整工具
+            # 规则一律不认，审查 S-12）：这类存量死规则留着也不会再放行，
+            # 亮出来提示清理——放行删除面请按具体路径固化 exact 规则
+            stale = True
+            reason = ("安全收紧（审查 S-12）：delete_file 不再整工具放行，规则不再命中；"
+                      "请按具体路径固化 exact 规则")
         rule["stale"] = stale
-        rule["stale_reason"] = (
-            "安全收紧（2.3.0）：该类前缀已回落逐次确认，规则不再命中" if stale else ""
-        )
+        rule["stale_reason"] = reason
         return rule
 
     @staticmethod
@@ -4135,6 +5056,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             self._base_agent.hooks = self.hooks
         for ag in self._for_each_agent():
             ag.hooks = self.hooks
+        # 团队成员 Agent 的钩子同步热更（成员不在 _for_each_agent，构造时
+        # 注入的 HookRunner 不跟着刷新就会对队员悄悄失效）
+        for orch in self._teams.values():
+            for ag in orch.agents():
+                ag.hooks = self.hooks
 
     def advanced_settings(self) -> dict:
 
@@ -4865,6 +5791,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         prev_full = self.gate.auto_accept_all if self.gate else False
         self.gate = PermissionGate(store=self.store, project_id=self._cur_project_id(),
                                    working_dir=self.working_dir)
+        # Mods 收紧查询接到新门上（切项目 = 换门；运行期改动由 _reload_mods 兜住）
+        if self.mods is not None:
+            self.gate.extra_confirm = self.mods.extra_confirm
         self.gate.auto_accept_write = prev_accept
         self.gate.auto_accept_all = prev_full
         await self.gate.load_project_rules()
@@ -4909,8 +5838,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.hooks = HookRunner(pre_rules, post_rules, working_dir=target,
                                 stop_rules=stop_rules) \
             if (pre_rules or post_rules or stop_rules) else None
+        # Mods 与钩子同位重建：工作目录变了，草稿落点/收紧声明语境随之刷新；
+        # Agent 构造点（setup 的 base agent、_get_runtime）在之后读 self.mods
+        self._reload_mods()
         self.checkpoints = CheckpointStore(root=self._checkpoint_root())
 
+        # 旧项目的活动团队一并失效：成员 Agent 挂着旧项目的工具表与权限门，
+        # 不能让切项目后的消息继续路由进旧团队（登记转「已中断」供 team.get 展示）
+        if self._teams:
+            self._teams_interrupt_all("项目已切换，团队已中断")
         # 旧项目的会话 runtime 全部失效：停任务、落空排队轮、释放、清空。
         # 排队轮的 Future 必须逐个落空（与 delete_session 同一口径）：否则那些
         # 发消息的请求要么等到被取消的轮在旧上下文里交棒空跑一轮后拿到裸

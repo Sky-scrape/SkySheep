@@ -440,24 +440,9 @@ def _drafts_others(
     total_char_budget: int | None = None,
 ) -> str:
     """辩论轮：给 self_index 成员看的其他成员草稿分节文本（先近重去重再压总量）。"""
-    entries: list[tuple[int, str]] = []
-    others: list[MemberResult] = []
-    for r in results:
-        if r.index == self_index:
-            continue
-        others.append(r)
-        if r.status == "done" and r.text.strip():
-            entries.append((r.index, clip_draft(r.text.strip())))
-        else:
-            entries.append((r.index, f"（该成员作答失败：{r.error or '未知错误'}）"))
-    bodies = dedupe_similar_bodies(entries)
-    if total_char_budget is not None:
-        bodies = clip_drafts_total(bodies, total_char_budget)
-    sections = [
-        f"### 成员{r.index + 1}（{r.label}）\n{body}"
-        for r, body in zip(others, bodies, strict=True)
-    ]
-    return "\n\n".join(sections)
+    return drafts_section(
+        [r for r in results if r.index != self_index], total_char_budget,
+    )
 
 
 def drafts_section(

@@ -92,6 +92,27 @@ def test_draft_generalizes_project_paths():
     assert "D:\\work\\demo" not in draft["description"]
 
 
+def test_draft_description_generalizes_before_truncation():
+    """描述与 goal 同序：先泛化后截断。
+
+    首行超过 100 字符且项目根绝对路径横跨截断点时，若先按上限截断再泛化，
+    根路径会被腰斩、泛化匹配不到完整根路径——半截绝对路径（如 D:\\very\\se）
+    泄进 frontmatter 的 description，随 SKILL.md 落盘进技能清单与系统提示词。
+    """
+    root = "D:\\very\\secret\\project_root_dir"
+    filler = "请帮我整理这个项目的输出文件并按月份汇总"
+    # 项目根从第 90 字符起：旧的「先截断」会把根腰斩成 D:\very\se（前 10 字符）
+    first = (filler * 5)[:90] + root + " 下的所有文件"
+    assert len(first) > 100 and first[90:100] == root[:10]
+    msgs = [Message.user(first), Message.assistant([TextBlock(text="好的")])]
+    draft = build_skill_draft(msgs, project_root=root)
+    assert "D:" not in draft["description"], f"描述泄漏了绝对路径片段：{draft['description']}"
+    assert "<项目>" in draft["description"], "项目根必须先泛化成占位符，截断才不会把它腰斩"
+    assert draft["description"].endswith("…"), "泛化后仍超长才截断，截断要带省略号"
+    # 正文 goal 的既有口径不受影响：完整泛化
+    assert root not in draft["body"] and "<项目>" in draft["body"]
+
+
 def test_draft_without_tool_calls_is_honest():
     msgs = [Message.user("解释一下什么是闭包"), Message.assistant([TextBlock(text="闭包是…")])]
     draft = build_skill_draft(msgs)

@@ -12,6 +12,8 @@
 本模块按 ``[retention]`` 配置的天数清理过期文件（默认 30 天，0 = 该类关闭）：
 只删这三类**已知目录**里引擎自己写入形状的文件（截图 .png、隔离区日期子目录
 下的 .txt、报告 .md），不递归、不碰目录外任何东西；目录不存在静默跳过。
+隔离区被清空的日期目录壳一并撤掉（``os.rmdir`` 只对空目录成功），空壳不随
+使用天数累积。
 备份（BACKUP_KEEP 滚动）与日志（轮转）各有自己的保留机制，不归这里管。
 
 状态（上次清理日期）存引擎自有状态文件 ``<数据目录>/retention.json``（原子写），
@@ -24,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -37,6 +40,7 @@ from ...config import (
 )
 from ...instance import data_home
 from ...obs import info as obs_info
+from ...session.store import SessionStore
 from ...textio import write_text_atomic
 
 STATE_FILE = "retention.json"
@@ -74,13 +78,33 @@ CATEGORIES = (
 _CATEGORY_BY_KEY = {c.key: c for c in CATEGORIES}
 
 
+def _is_local_project_root(root_path: str) -> bool:
+    """项目根是不是本机真实目录：哨兵项目与 UNC/网络形态的根都不算。
+
+    「远程连接」哨兵项目（``//skysheep-remote``，只作 projects 表唯一键，不是
+    真实目录）与一切 ``//host`` / ``\\\\host`` 形态的网络根，拼出的清理路径在
+    Windows 上按 UNC 解析——``is_dir()`` 会对该主机名做网络名称解析（实测可达
+    数秒），拖住设置页回包与每日巡检。该目录永远不存在，列入清单只有开销
+    没有收益，组装清理根时直接跳过。
+    """
+    rp = str(root_path or "")
+    if rp == SessionStore.REMOTE_PROJECT_PATH:
+        return False
+    return not rp.startswith(("//", "\\\\"))
+
+
 def category_roots(cat: RetentionCategory, projects: list) -> list[Path]:
-    """一类的清理根目录。报告按项目落盘，逐个已知项目取 ``.skysheep/reports``。"""
+    """一类的清理根目录。报告按项目落盘，逐个已知项目取 ``.skysheep/reports``
+    （哨兵项目等非本机根跳过，见 :func:`_is_local_project_root`）。"""
     if cat.key == "screenshots":
         return [skysheep_home() / "screenshots"]
     if cat.key == "quarantine":
         return [data_home() / "quarantine"]
-    return [Path(p.root_path) / ".skysheep" / "reports" for p in projects]
+    return [
+        Path(p.root_path) / ".skysheep" / "reports"
+        for p in projects
+        if _is_local_project_root(p.root_path)
+    ]
 
 
 def _iter_target_files(root: Path, cat: RetentionCategory):
@@ -119,6 +143,27 @@ def _name_match(name: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatch(name, pat) for pat in patterns)
 
 
+def _prune_empty_date_dirs(root: Path, cat: RetentionCategory) -> None:
+    """清完文件后撤掉空的日期目录壳（隔离区按天建 ``YYYY-MM-DD`` 子目录，
+    只删文件会留下空壳随使用天数无限累积）。只对子目录名白名单内的目录尝试
+    ``os.rmdir``——只有真空了才会成功，非空 / 被占用 / 用户自建的目录一律不动。
+    """
+    if cat.depth != 2 or cat.subdir_re is None:
+        return
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for sub in entries:
+        if not cat.subdir_re.match(sub.name):
+            continue
+        try:
+            if sub.is_dir() and not any(sub.iterdir()):
+                os.rmdir(sub)
+        except OSError:
+            continue
+
+
 def sweep_all(days: dict[str, int], projects: list, *, now: float | None = None) -> dict:
     """按各类保留天数清一轮，返回 ``{类别 key: 结果}``（只对启动了的类别动手）。"""
     n = time.time() if now is None else float(now)
@@ -144,6 +189,8 @@ def sweep_all(days: dict[str, int], projects: list, *, now: float | None = None)
                         continue  # 被占用（杀软扫描中很常见）就留给下一轮
                     res["deleted"] += 1
                     res["bytes"] += st.st_size
+                # 清完把空的日期目录壳一并撤掉（只删文件会让空壳无限累积）
+                _prune_empty_date_dirs(root, cat)
         out[cat.key] = res
     return out
 

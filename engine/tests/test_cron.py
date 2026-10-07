@@ -137,6 +137,105 @@ def test_cron_run_now_headless_gate(home):
         assert lst2[0]["last_result"] == "结果二"
 
 
+def test_cron_add_weekly_weekday_monday_is_kept(home):
+    """weekday=0（周一）是合法值：cron_add 不得用 `or -1` 把 0 吞成缺失。
+
+    前端「每周一」选项传的就是 0（app-schedule.js 的星期下拉 value 0..6）；
+    被吞成 -1 入库后 store.compute_next_run 对 wd<0 一律「当前时刻+7 天」，
+    周任务失去星期锚点、退化成创建时刻附近的漂移调度。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "ca", "method": "cron.add", "params": {
+            "name": "每周一报告", "prompt": "汇总进展",
+            "schedule_type": "weekly", "time_of_day": "09:00", "weekday": 0}})
+        r = recv_until(ws, "ca")
+        assert r["ok"], r.get("error")
+        task = r["result"]
+        assert task["weekday"] == 0, "周一（0）被 `or -1` 误判成缺失入库了"
+        assert task["next_run_at"] > _time.time()
+        lt = _time.localtime(task["next_run_at"])
+        assert lt.tm_wday == 0, f"下次运行应锚在周一，实际 {_time.strftime('%a', lt)}"
+        assert (lt.tm_hour, lt.tm_min) == (9, 0), "下次运行应锚在 09:00"
+
+
+async def test_cron_force_run_registers_in_running_and_dedups(store):
+    """force（立即运行）同样登记进 running 去重集合：force-vs-force、
+    force-vs-scan 都不得并发双跑——不登记的话，双击「立即运行」的第二个
+    请求与强制运行在飞期间到点的扫描循环都会再派一轮（双份无人值守执行）。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from skysheep.messages import Message
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    project = await store.get_or_create_project("/tmp/cron-force-dedup")
+    t = await store.add_cron_task(project.id, "力跑", "干活", "interval",
+                                  interval_minutes=10)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = {"n": 0}
+
+    async def execute(task):
+        calls["n"] += 1
+        entered.set()
+        await release.wait()  # 第一轮 force 执行中，卡住以便并发插手
+        return SimpleNamespace(agent=SimpleNamespace(history=[
+            Message.assistant([TextBlock(text="完成")])])), "sid", False
+
+    running: set = set()
+
+    async def one_force():
+        return await run_cron_task_core(
+            store, t["id"], force=True, execute=execute,
+            broadcast=None, notify=None, channels=None, running=running)
+
+    first = asyncio.get_running_loop().create_task(one_force())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    assert t["id"] in running, "force 运行期间必须登记进 running 去重集合"
+    # 并发的第二个 force（双击按钮 / 扫描循环）被去重挡下，不触发新一轮
+    assert await one_force() is None
+    assert calls["n"] == 1
+    release.set()
+    final = await first
+    assert final is not None and final["id"] == t["id"]
+    assert t["id"] not in running, "收尾后要从 running 集合摘除"
+    assert calls["n"] == 1, "全程只有一轮执行"
+
+
+def test_cron_run_now_reports_already_running(home, monkeypatch):
+    """cron.run_now 撞上去重集合时如实回报 started:false + notice，
+    不再谎报 started:true（前端照 notice 提示「正在运行中」）。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, [[TextBlock(text="结果")]]) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "ca", "method": "cron.add", "params": {
+            "name": "占用中", "prompt": "干活",
+            "schedule_type": "interval", "interval_minutes": 30}})
+        task = recv_until(ws, "ca")["result"]
+
+        backend = client.app.state.backend
+        # 预先把任务占进在跑集合（模拟另一处触发的执行在飞）
+        backend._cron_running.add(task["id"])
+        try:
+            ws.send_json({"id": "rn", "method": "cron.run_now",
+                          "params": {"id": task["id"]}})
+            r = recv_until(ws, "rn")
+            assert r["ok"], r.get("error")
+            assert r["result"]["started"] is False
+            assert "正在运行" in r["result"]["notice"]
+        finally:
+            backend._cron_running.discard(task["id"])
+
+        # 集合释放后照常触发
+        ws.send_json({"id": "rn2", "method": "cron.run_now",
+                      "params": {"id": task["id"]}})
+        r2 = recv_until(ws, "rn2")
+        assert r2["ok"] and r2["result"]["started"] is True
+
+
 # ---- 终态推送：跑完后经渠道 manager 推摘要（开+绑定才发；失败不碰任务结果） ----
 
 
@@ -512,3 +611,90 @@ def test_cron_schtask_degrades_with_notice_not_error(home, monkeypatch):
                       "params": {"id": task["id"]}})
         r = recv_until(ws, "st2")
         assert r["ok"] and r["result"]["supported"] is False
+
+
+def test_cron_schtask_export_refuses_weekly_without_weekday(home):
+    """weekly 但 weekday 无效（旧版 `or -1` 写坏的存量行）：拒绝导出并提示修正。
+
+    schtasks 表达不出 compute_next_run 对无效 weekday 的「+7 天」相位，
+    静默降级 DAILY 会把频次放大 7 倍（无人值守下副作用同步放大）；
+    选好星期后照常导出 WEEKLY。
+    """
+    from test_server import make_client, recv_until
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "ca", "method": "cron.add", "params": {
+            "name": "没有星期", "prompt": "干活",
+            "schedule_type": "weekly", "time_of_day": "09:00"}})
+        task = recv_until(ws, "ca")["result"]
+        assert task["weekday"] == -1, "未提供 weekday 保持 -1（存量脏行等价形态）"
+
+        calls: list[list[str]] = []
+
+        async def fake_runner(*args):
+            calls.append(list(args))
+            return 0, "SUCCESS"
+
+        client.app.state.backend._schtasks_runner = fake_runner
+
+        ws.send_json({"id": "ex", "method": "cron.schtask_export",
+                      "params": {"id": task["id"]}})
+        r = recv_until(ws, "ex")
+        assert r["ok"], r.get("error")
+        assert r["result"]["exported"] is False
+        assert "星期" in r["result"]["notice"], "提示要指明缺有效星期几"
+        assert calls == [], "拒绝导出时不得发起 schtasks（不静默放大成 DAILY）"
+
+        # 修正 weekday 后照常导出 WEEKLY
+        ws.send_json({"id": "cm", "method": "cron.update", "params": {
+            "id": task["id"], "weekday": 0}})
+        assert recv_until(ws, "cm")["result"]["weekday"] == 0
+        ws.send_json({"id": "ex2", "method": "cron.schtask_export",
+                      "params": {"id": task["id"]}})
+        r2 = recv_until(ws, "ex2")
+        assert r2["ok"] and r2["result"]["exported"] is True
+        assert len(calls) == 1
+        i = calls[0].index("/SC")
+        assert calls[0][i:i + 4] == ["/SC", "WEEKLY", "/D", "MON"]
+
+
+async def test_cron_core_success_keeps_disable_during_run(store):
+    """执行期间被停用的任务：成功收尾不得用旧快照复活 enabled，也不重排下次运行。
+
+    成功路径若把执行开始前的 enabled 快照写回（update_cron_task 对传入键一律
+    覆盖），执行期间用户的停用会在跑完后被静默撤销（复活并重排下次运行）；
+    须与错误路径的 `if task["enabled"]` 口径一致。
+    """
+    from types import SimpleNamespace
+
+    from skysheep.messages import Message
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    project = await store.get_or_create_project("/tmp/cron-disable-during-run")
+    t = await store.add_cron_task(project.id, "长任务", "干活", "interval",
+                                  interval_minutes=30)
+
+    def _runtime(text: str):
+        return SimpleNamespace(agent=SimpleNamespace(history=[
+            Message.assistant([TextBlock(text=text)])])), "sid", False
+
+    async def execute(task):
+        # 执行期间用户停用（cron.update 停用同款：enabled=0 且 next_run_at=0）
+        await store.update_cron_task(task["id"], enabled=0, next_run_at=0)
+        return _runtime("完成")
+
+    final = await run_cron_task_core(store, t["id"], execute=execute)
+    assert final["last_status"] == "ok"
+    assert final["enabled"] is False, "执行期间的停用不得被执行前快照复活"
+    assert final["next_run_at"] == 0, "停用后不得重排下次运行（与错误路径同口径）"
+
+    # 对照：未停用的任务成功收尾照常重排，开关不受收尾影响
+    t2 = await store.add_cron_task(project.id, "正常任务", "干活", "interval",
+                                   interval_minutes=30)
+
+    async def execute_ok(task):
+        return _runtime("完成")
+
+    final2 = await run_cron_task_core(store, t2["id"], execute=execute_ok)
+    assert final2["enabled"] is True
+    assert final2["next_run_at"] > _time.time() - 5, "启用任务成功后照常重排"

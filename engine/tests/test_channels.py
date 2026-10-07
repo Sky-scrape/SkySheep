@@ -1317,6 +1317,93 @@ def test_channel_save_does_not_wipe_token_when_omitted(client, home):
         assert fs["allowed_ids"] == ["999"]
 
 
+def _write_channels_config_with_bad_ciphertext():
+    """造一份「本机解不开的 dpapi: 密文」渠道配置（跨机器/账户迁移后的盘面）。
+
+    密文是随手编的 base64：任何机器都解不开，decrypt_value 按设计返回 None，
+    读改写路径（_read_raw_config，keep_on_failure=True）必须原样保留。
+    """
+    from skysheep.config import config_path
+    from skysheep.textio import write_text_atomic
+
+    secret = "dpapi:" + base64.b64encode(b"ciphertext-from-another-machine").decode("ascii")
+    token = "dpapi:" + base64.b64encode(b"token-from-another-machine").decode("ascii")
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(p, (
+        "[channels]\n"
+        "[channels.platforms.feishu]\nenabled = true\n"
+        "app_id = \"cli_x\"\n"
+        f"app_secret = \"{secret}\"\n"
+        "allowed_ids = [\"1\"]\n"
+        "[channels.platforms.weixin]\n"
+        f"bot_token = \"{token}\"\n"
+        "cursor = \"cur-1\"\n"
+    ))
+    return secret, token
+
+
+def test_channel_user_ops_preserve_undecryptable_ciphertext(client, home):
+    """渠道界面写路径不得把本机解不开的 dpapi: 密文抹成空串。
+
+    config.py 对读改写路径的承诺（keep_on_failure=True）：密文原值保留，
+    文件换回原机器/原账户还能解开。渠道写路径的 platforms 基底必须取
+    _read_raw_config 的原值形态——用 load_config() 的置空视图当基底的话，
+    改名单、启停、退出登录这类无关操作就会整表覆盖、静默不可逆地丢密文。
+    """
+    from skysheep.config import config_path
+
+    secret, token = _write_channels_config_with_bad_ciphertext()
+    with client.websocket_connect("/ws") as ws:
+        # 保存允许名单（不传凭据）
+        frame = _ws_call(ws, "c1", "channel.save", {"name": "feishu", "allowed_ids": "999"})
+        assert frame["ok"] is True
+        text = config_path().read_text(encoding="utf-8")
+        assert secret in text, "保存名单不得抹掉本机解不开的密文"
+        assert token in text, "保存飞书不得连带抹掉其他平台的密文"
+
+        # 启用 / 停用（开关落盘）
+        assert _ws_call(ws, "c2", "channel.enable", {"name": "feishu"})["ok"] is True
+        assert _ws_call(ws, "c3", "channel.disable", {"name": "feishu"})["ok"] is True
+        text = config_path().read_text(encoding="utf-8")
+        assert secret in text and token in text, "启停落盘不得抹掉密文"
+
+        # 微信退出登录：只清微信自己的登录态，飞书密文原样保留
+        assert _ws_call(ws, "c4", "channel.weixin_logout")["ok"] is True
+        text = config_path().read_text(encoding="utf-8")
+        assert secret in text, "退出微信不得连带抹掉其他平台的密文"
+        assert token not in text and "cursor" not in text, "退出微信要清掉微信自己的登录态"
+
+
+def test_channel_save_state_preserves_undecryptable_ciphertext(home):
+    """微信游标推进（适配器自动落盘，无需用户操作）不得抹掉任何密文。"""
+    import asyncio
+
+    from skysheep.config import config_path
+    from skysheep.models.fake import FakeProvider
+    from skysheep.server.backend import ServerBackend
+
+    secret, token = _write_channels_config_with_bad_ciphertext()
+
+    async def scenario():
+        be = ServerBackend(
+            working_dir=home / "proj",
+            provider_name="fake",
+            provider_factory=lambda: FakeProvider([]),
+        )
+        await be.setup()
+        try:
+            await be.channel_save_state("weixin", {"cursor": "cur-2"})
+        finally:
+            await be.shutdown()
+
+    asyncio.run(scenario())
+    text = config_path().read_text(encoding="utf-8")
+    assert "cur-2" in text, "游标要落盘"
+    assert secret in text, "游标推进不得抹掉其他平台解不开的密文"
+    assert token in text, "游标推进不得抹掉微信自己的 bot_token 密文"
+
+
 def test_channel_save_applies_allowlist_to_running_adapter(client, home):
     """保存名单必须重建适配器（热生效）：适配器拿的是构造时那份配置，
     不重建的话「加入允许名单」后机器人仍用启动时的旧名单判断，
@@ -1989,6 +2076,7 @@ async def test_backend_shutdown_bounds_channels_stop(home):
     be.mcp = None
     be.tasks = None
     be.store = None
+    be.mods = None  # Mods 沙箱收尾也在 shutdown 链上（Mods 扩展接线后新增的字段）
     be.term = SimpleNamespace(close_all=lambda: None)
     slow = _SlowChannels()
     be.channels = slow

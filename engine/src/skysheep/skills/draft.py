@@ -157,9 +157,12 @@ def build_skill_draft(
         (m.text.strip() for m in messages if m.role == "user" and m.text.strip()), ""
     )
     name = suggest_name(first_user)
-    description = _generalize_path(
-        _first_line(first_user)[:_DESCRIPTION_MAX], project_root
-    )
+    # 先泛化再截断（与下方 goal 同序）：项目根必须先变成「<项目>」占位符
+    # 再按上限截断——顺序反了的话，超长首行会把根路径腰斩在截断点，
+    # 泛化匹配不到完整根路径，半截绝对路径泄进 frontmatter 与技能清单
+    description = _generalize_path(_first_line(first_user), project_root)
+    if len(description) > _DESCRIPTION_MAX:
+        description = description[:_DESCRIPTION_MAX] + "…"
     goal = _generalize_path(first_user, project_root)
     if len(goal) > _GOAL_MAX:
         goal = goal[:_GOAL_MAX] + "…（原文过长已截断）"

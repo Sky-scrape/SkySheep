@@ -30,6 +30,9 @@ MUST_BE_LOCAL = (
     # 技能与 MCP（prompt 注入 / stdio 命令）
     "skills.install", "skills.toggle", "skills.delete", "skills.save_draft",
     "mcp.import", "mcp.save_server", "mcp.delete", "mcp.reconnect",
+    # Mods（实验性）：第三方代码 + 收紧权限门的能力面，绝不能被远程客户端安装/改动
+    "mods.install", "mods.confirm_install", "mods.install_official", "mods.delete",
+    "mods.toggle", "mods.set_enabled", "mods.save_draft", "mods.test",
     # 信任（放宽向）与系统级
     "app.install_update", "app.apply_update", "app.restart",
     "app.export_diagnostics", "project.switch", "project.delete", "session.restore_backup",

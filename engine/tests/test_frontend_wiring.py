@@ -249,3 +249,31 @@ def test_cron_modal_channel_notify_toggle():
     assert "notify_channel: box.querySelector(\"#cron-notify\").checked" in js
     css = read_static("app.css")
     assert ".cron-fields label.cron-notify" in css, "开关行样式缺失"
+
+
+# ---------- Mods：存草稿入口（「让 Agent 创建 Mod」闭环的前端半边） ----------
+
+def test_mod_save_draft_entry_wired():
+    """Mods 设置页要有「存为草稿」入口：按钮接线 mods.save_draft（Agent 没有这个
+    工具面，粘贴保存由人完成）；提示语不得再引导「让它保存为草稿」。"""
+    js = read_app_bundle()
+    assert 'getElementById("btn-mod-save-draft").onclick' in js, "缺「存为草稿」按钮接线"
+    assert 'request("mods.save_draft"' in js, "存草稿弹窗必须走 mods.save_draft"
+    html = read_static("index.html")
+    assert 'id="btn-mod-save-draft"' in html, "设置页缺「存为草稿」按钮"
+    # 误导性口径（Agent 能自己存草稿）不许回归
+    assert "让它保存为草稿" not in js
+    assert "Agent 保存为草稿后" not in html
+
+
+def test_mods_status_bar_not_cleared_by_render():
+    """Mods 确认条不许被 renderModsCfg 收尾清空（源码契约）。
+
+    本页操作（行内启停/删除/一键安装/总开关/确认安装）都是「先 modsStatus(提示)
+    再 renderModsCfg()」：渲染尾部一旦 modsStatus("") 清状态条，刚显示的
+    成功/失败提示就被压成两次本地往返的残影——autoHideStatus 的 6 秒驻留与
+    「错误保留到下一次操作」全被架空（截图验收实测确认条不可见）。此后若要在
+    渲染路径清状态条，必须先解决与操作提示的覆盖关系，不许直接加回。
+    """
+    js = read_app_bundle()
+    assert 'modsStatus("")' not in js, "renderModsCfg 尾部清状态条会冲掉操作确认提示"

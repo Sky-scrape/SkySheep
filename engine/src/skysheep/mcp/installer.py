@@ -171,11 +171,6 @@ def parse_file(path: str | Path) -> dict[str, MCPServerConfig]:
         raise MCPInstallError(f"{p.name}：{e}") from e
 
 
-def _existing_names(path: Path) -> set[str]:
-    """已配置的服务名集合（给确认逻辑判断哪些 stdio 定义会真的写进去）。"""
-    return set(load_servers(path))
-
-
 def pending_stdio_commands(
     servers: dict[str, MCPServerConfig], path: Path, *, overwrite: bool = False
 ) -> list[dict]:

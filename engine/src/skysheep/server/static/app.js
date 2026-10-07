@@ -310,6 +310,7 @@ function newTabObj(sid, title) {
   return {
     sid: sid || null, title: title || "", logEl, running: false,
     streamingEl: null, streamingText: "", rtCard: null, rtMemberEls: [],
+    teamCard: null, // 团队进行中的团队卡（team_started 建立，事件实时驱动更新）
     lastAssistantText: "", usage: null, needsPerm: false, permData: null,
     needHistory: false, eta: null, etaEl: null,
     thinkMs: 0, thinkT0: 0,
@@ -417,6 +418,8 @@ function renderTabs() {
     if (t.sid) wireTabDrag(el, t);
     bar.appendChild(el);
   });
+  // Mods 状态托盘（实验性）：stat 片段随会话标签走，跨会话不串
+  renderModTray();
   // 标签栏尾部的 ＋ 新建：浏览器式页签的固定收尾。与侧栏「新建会话」/ Ctrl+N
   // 同一个动作（newSessionFromHighlight：落在侧栏高亮的项目/快聊里），
   // 只是把入口放到用户视线所在的标签栏上
@@ -715,6 +718,9 @@ async function activateTab(tab) {
   // activate / resume 与这两个请求同一条 WS 按序到达，后端看到的已是新会话。
   if (rightTabs.includes("review")) loadRightTab("review");
   if (rightTabs.includes("tasks")) loadRightTab(rightView.tasks);
+  // 会话级活动团队状态对齐：其他窗口收的队、重启后的「已中断」标注，
+  // 都靠 team.get 落到团队卡上（内存快照，顺带补齐历史里缺的卡）
+  if (tab.sid) refreshTeamState(tab);
   petPrevRunning = !!tab.running;
   petRefresh();
   refreshSessions();
@@ -1599,6 +1605,752 @@ function buildRtReplayCard(meta) {
   return card;
 }
 
+// ---------- 团队卡片：名册 + 工单板 + 频道时间线（聊天流内的协作台） ----------
+// 一期用户总管：卡在 team_started 时建立并保持展开，随团队事件实时更新；
+// 终态（交付/收队/轮次耗尽）后自动折叠。结构仿圆桌卡，但内容分三区：
+// 名册（头像+成员名+人设）、工单板（登记/派工/验收）、频道时间线（流式）。
+
+// 厂商头像：static/logos/ 下按服务名取（zhipu 只有 png，其余 svg）；没有同名文件就摘掉
+function tcAvatar(provider) {
+  const img = document.createElement("img");
+  img.className = "tc-avatar";
+  const p = String(provider || "").toLowerCase();
+  img.src = "/static/logos/" + (p === "zhipu" ? "zhipu.png" : p + ".svg");
+  img.alt = "";
+  img.loading = "lazy";
+  img.onerror = () => img.remove();
+  return img;
+}
+
+function tcEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text !== undefined && text !== "") el.textContent = text;
+  return el;
+}
+
+function buildTeamCard(roster, directorMode, director) {
+  const card = document.createElement("div");
+  card.className = "teamcard";
+  // 总管标识（二期 AI 总管）：null = 用户总管；{provider, model} = AI 总管，
+  // 由 team_started 事件 / 团队快照 director 块喂入（updateTeamCard 每次刷新）
+  card._director = (directorMode || "user") === "ai"
+    ? { provider: (director && director.provider) || "", model: (director && director.model) || "" }
+    : null;
+  const head = tcEl("div", "tc-head");
+  const sub = tcEl("span", "tc-sub", "组建中…");
+  const status = tcEl("span", "tc-status", "进行中");
+  const fold = tcEl("button", "tc-fold", "折叠");
+  head.append(tcEl("span", "tc-title", "🧩 团队"), sub, status, fold);
+  const toggleFold = () => {
+    const folded = card.classList.toggle("folded");
+    fold.textContent = folded ? "展开" : "折叠";
+  };
+  fold.onclick = (e) => { e.stopPropagation(); toggleFold(); };
+  head.onclick = (e) => { if (e.target !== fold) toggleFold(); };
+  const body = tcEl("div", "tc-body");
+  const rosterEl = tcEl("div", "tc-roster");
+  const boardList = tcEl("div", "tc-board-list");
+  const taskForm = buildTaskForm(card);
+  const boardEl = tcEl("div", "tc-board");
+  boardEl.append(tcEl("div", "tc-board-head", "工单板"), boardList, taskForm);
+  const channelEl = tcEl("div", "tc-channel");
+  const deliverBtn = tcEl("button", "tc-deliver", "交付");
+  deliverBtn.title = "确认交付：产出《交付说明》并关闭团队（未完成的工单会记为未尽事项），本会话恢复普通对话";
+  deliverBtn.onclick = async () => {
+    if (!confirm("交付会结束团队并产出《交付说明》（未完成的工单记为未尽事项），本会话恢复普通对话。确定交付？")) return;
+    const t = curTab();
+    deliverBtn.disabled = true;
+    deliverBtn.textContent = "交付中…";
+    try {
+      const r = await request("team.deliver", { session_id: t.sid });
+      // 终态一般已由 team_finished 事件落到卡上；这里用返回快照兜底对齐
+      if (r && r.team) updateTeamCard(card, r.team);
+      tcFinish(card, (r && r.status) || "done", (r && r.summary) || "");
+    } catch (e) {
+      addNotice("交付失败: " + e.message);
+      deliverBtn.disabled = false;
+      deliverBtn.textContent = "交付";
+    }
+  };
+  const stopBtn = tcEl("button", "tc-stop", "收队");
+  stopBtn.title = "立即终止团队：正在发言的队员会把已产出的部分定稿进频道，随后产出《收队说明》";
+  stopBtn.onclick = async () => {
+    if (!confirm("收队会立即终止团队：正在发言的队员会把已产出的部分定稿进频道，随后产出《收队说明》，本会话恢复普通对话。确定收队？")) return;
+    const t = curTab();
+    stopBtn.disabled = true;
+    stopBtn.textContent = "收队中…";
+    try {
+      const r = await request("team.stop", { session_id: t.sid });
+      // 终态一般已由 team_finished 事件落到卡上；这里用返回快照兜底对齐
+      if (r && r.team) updateTeamCard(card, r.team);
+      tcFinish(card, (r && r.status) || "aborted", (r && r.summary) || "");
+    } catch (e) {
+      addNotice("收队失败: " + e.message);
+      stopBtn.disabled = false;
+      stopBtn.textContent = "收队";
+    }
+  };
+  // 接管（二期 AI 总管专属）：切回用户总管模式，正在推进的自动循环干净取消，
+  // 工单板与团队频道保留；用户总管模式/终态后隐藏（tcUpdateRoster 同步显隐）
+  const takeoverBtn = tcEl("button", "tc-takeover", "接管");
+  takeoverBtn.hidden = true;
+  takeoverBtn.title = "接管：切回用户总管模式，正在推进的自动循环会被取消（正在发言的成员会把已产出的部分定稿进频道），工单板与团队频道保留";
+  takeoverBtn.onclick = async () => {
+    if (!confirm("接管会切回用户总管模式：正在推进的自动循环会被取消（正在发言的成员会把已产出的部分定稿进频道），工单板与团队频道保留，此后由你直接指挥。确定接管？")) return;
+    const t = curTab();
+    takeoverBtn.disabled = true;
+    takeoverBtn.textContent = "接管中…";
+    try {
+      const r = await request("team.takeover", { session_id: t.sid });
+      if (r && r.team) updateTeamCard(card, r.team);
+      addNotice("已接管：已切换为用户总管模式，工单板与团队频道保留，此后每条消息都由你直接指挥。");
+    } catch (e) {
+      addNotice("接管失败: " + e.message);
+      takeoverBtn.disabled = false;
+      takeoverBtn.textContent = "接管";
+    }
+  };
+  // 存为模板（三期）：把当前名册与总管形态存成建队模板，之后建队可一键填入。
+  // 终态后仍可用（收队的团队正是模板的好素材），所以不进 ended 隐藏清单
+  const saveTplBtn = tcEl("button", "tc-savetpl", "存为模板");
+  saveTplBtn.title = "把当前名册与总管形态存成建队模板：之后在输入框的团队面板里「从模板创建」一键填入";
+  saveTplBtn.onclick = () => tcSaveTemplateModal(card);
+  const foot = tcEl("div", "tc-foot");
+  foot.append(saveTplBtn, takeoverBtn, deliverBtn, stopBtn);
+  body.append(rosterEl, boardEl, channelEl, foot);
+  card.append(head, body);
+  card._ui = { sub, status, fold, rosterEl, boardList, taskForm, channelEl, deliverBtn, stopBtn, takeoverBtn };
+  card._roster = [];
+  tcUpdateRoster(card, roster || [], directorMode || "user");
+  return card;
+}
+
+// 工单登记小表单：登记后是「待办」，要开工在工单行上点「派工」
+function buildTaskForm(card) {
+  const form = tcEl("div", "tc-task-form");
+  const assignee = document.createElement("select");
+  assignee.className = "tf-assignee";
+  assignee.title = "指派队员（必须在团队名册中）";
+  const title = document.createElement("input");
+  title.type = "text";
+  title.className = "tf-title";
+  title.placeholder = "工单标题";
+  const type = document.createElement("select");
+  type.className = "tf-type";
+  type.title = "工单类型：执行型带工具干活，顾问型只出意见（工单级属性）";
+  [["exec", "执行型"], ["advisor", "顾问型"]].forEach(([v, t]) => {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    type.appendChild(o);
+  });
+  const accept = document.createElement("input");
+  accept.type = "text";
+  accept.className = "tf-accept";
+  accept.placeholder = "验收标准（可选）";
+  const add = tcEl("button", "tf-add", "登记工单");
+  add.type = "button";
+  add.onclick = async () => {
+    const t = curTab();
+    const text = title.value.trim();
+    if (!text) { addNotice("工单标题不能为空"); return; }
+    if (!assignee.value) { addNotice("还没有可指派的队员"); return; }
+    add.disabled = true;
+    try {
+      const r = await request("team.task_add", {
+        session_id: t.sid,
+        title: text,
+        assignee: assignee.value,
+        type: type.value,
+        accept: accept.value.trim(),
+      });
+      tcUpsertTask(card, r.task);
+      title.value = "";
+      accept.value = "";
+    } catch (e) {
+      addNotice("登记工单失败: " + e.message);
+    } finally {
+      add.disabled = false;
+    }
+  };
+  form.append(assignee, title, type, accept, add);
+  return form;
+}
+
+// 工单行操作按钮（状态机：待办→进行中→待验收→完成；待验收打回→进行中 redo+1；
+// 失败的工单可重新派工；待办可直接标记失败——依赖链卡死时的手工出口，
+// 失败工单记入未尽事项）。派工/打回都会由后端代发一条总管派工消息进频道。
+const TEAM_TASK_OPS = {
+  pending: [
+    ["in_progress", "派工", "把工单派给队员：派工指令进频道，队员被点名后开工（依赖工单需先完成）"],
+    ["error", "标记失败", "放弃这张待办工单：记为失败并进未尽事项（依赖它的工单会由总管强制裁定）"],
+  ],
+  in_progress: [["review", "转待验收", "队员已交报告且你认为完成时，把工单转入待验收"]],
+  review: [
+    ["done", "通过", "验收通过，工单完成"],
+    ["in_progress", "打回", "验收不合格，打回重做（打回次数 +1，附理由转给队员）"],
+  ],
+  error: [["in_progress", "重新派工", "失败收尾的工单重新派发"]],
+};
+
+function buildTaskRow(card, task) {
+  const row = tcEl("div", "tc-task st-" + (task.status || "pending"));
+  row.dataset.task = task.id;
+  row._task = task; // 事件更新时补齐 deps/accept 等事件里没有的字段
+  row.appendChild(tcEl("span", "tt-id", task.id));
+  const title = tcEl("span", "tt-title", task.title);
+  if (task.accept) title.title = `验收标准：${task.accept}`;
+  row.appendChild(title);
+  row.appendChild(tcEl("span", "tt-assignee", "@" + task.assignee));
+  row.appendChild(tcEl("span", "tt-type", task.type === "advisor" ? "顾问型" : "执行型"));
+  row.appendChild(tcEl("span", "tt-status", TEAM_TASK_STATUS_LABEL[task.status] || task.status));
+  if (task.redo) row.appendChild(tcEl("span", "tt-redo", `打回 ${task.redo} 次`));
+  if ((task.deps || []).length) {
+    const dep = tcEl("span", "tt-deps", "依赖 " + task.deps.join("、"));
+    dep.title = "依赖工单全部完成后才能派发";
+    row.appendChild(dep);
+  }
+  const ops = tcEl("span", "tt-ops");
+  (TEAM_TASK_OPS[task.status] || []).forEach(([next, label, tip]) => {
+    const b = tcEl("button", "tt-op", label);
+    b.type = "button";
+    b.title = tip;
+    b.onclick = () => tcTaskTransition(card, task, next, b);
+    ops.appendChild(b);
+  });
+  if (ops.children.length) row.appendChild(ops);
+  return row;
+}
+
+// 工单状态流转：打回时在行内展开理由输入框（不用弹窗——pywebview 下 prompt 不可靠）
+function tcTaskTransition(card, task, next, btn) {
+  const t = curTab();
+  if (next === "in_progress" && task.status === "review") {
+    const board = card._ui.boardList;
+    const row = board.querySelector(`[data-task="${task.id}"]`);
+    if (row && row.querySelector(".tt-reject-box")) return; // 已在填理由，别叠一层
+    const box = tcEl("div", "tt-reject-box");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "打回理由（会连同派工指令转给队员）";
+    const yes = tcEl("button", "tt-op", "确认打回");
+    yes.type = "button";
+    const no = tcEl("button", "tt-op", "取消");
+    no.type = "button";
+    const submit = () => {
+      const reason = input.value.trim();
+      box.remove();
+      tcTaskUpdateRequest(card, task, "in_progress", reason, btn);
+    };
+    yes.onclick = submit;
+    no.onclick = () => box.remove();
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") submit();
+      if (ev.key === "Escape") box.remove();
+      ev.stopPropagation();
+    });
+    box.append(input, yes, no);
+    row.appendChild(box);
+    input.focus();
+    return;
+  }
+  tcTaskUpdateRequest(card, task, next, "", btn);
+}
+
+async function tcTaskUpdateRequest(card, task, status, note, btn) {
+  const t = curTab();
+  if (btn) btn.disabled = true;
+  try {
+    const r = await request("team.task_update", {
+      session_id: t.sid, task_id: task.id, status,
+      note: note || undefined,
+    });
+    tcUpsertTask(card, r.task);
+    // 派工/重派/打回重做都代发一条总管派工消息：返回里带就先上屏（事件到达时幂等覆盖）
+    if (r.assign_message) tcUpsertMsg(card, r.assign_message);
+  } catch (e) {
+    addNotice("工单状态更新失败: " + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
+function tcUpsertTask(card, task) {
+  if (!card || !card._ui) return;
+  const board = card._ui.boardList;
+  const fresh = buildTaskRow(card, task);
+  const old = board.querySelector(`[data-task="${task.id}"]`);
+  if (old) {
+    old.replaceWith(fresh);
+    return;
+  }
+  // 新工单按编号有序插入（id 是 T<n>）
+  const n = Number(String(task.id || "").replace(/\D/g, "")) || 0;
+  let anchor = null;
+  for (const r of board.children) {
+    if ((Number(String(r.dataset.task || "").replace(/\D/g, "")) || 0) > n) { anchor = r; break; }
+  }
+  board.insertBefore(fresh, anchor);
+}
+
+function tcUpdateRoster(card, roster, directorMode) {
+  card._roster = roster || [];
+  const box = card._ui.rosterEl;
+  box.innerHTML = "";
+  box.appendChild(tcEl("span", "tc-roster-label", "名册"));
+  (roster || []).forEach((m) => {
+    const item = tcEl("span", "tc-m");
+    item.appendChild(tcAvatar(m.provider));
+    item.appendChild(tcEl("span", "tc-m-name", m.name));
+    item.appendChild(tcEl("span", "tc-m-model", `${m.provider}/${m.model}`));
+    if (m.persona) {
+      const per = tcEl("span", "tc-m-persona", m.persona);
+      per.title = `成员人设：${m.persona}`;
+      item.appendChild(per);
+    }
+    box.appendChild(item);
+  });
+  // 尾部总管标识（二期）：AI 总管显示 provider/model，用户总管照旧一期文案
+  const dir = card._director;
+  if (dir) {
+    const d = tcEl("span", "tc-director is-ai",
+      `AI 总管 · ${dir.provider || "?"}/${dir.model || "默认"}`);
+    d.title = "AI 总管自动推进团队循环（拆解、派工、验收、交付）；你随时插话，或点下方「接管」亲自指挥";
+    box.appendChild(d);
+  } else {
+    const dirEl = tcEl("span", "tc-director", TEAM_DIRECTOR_LABEL[directorMode] || "用户总管");
+    dirEl.title = "你本人就是总管：每条消息都是一道总管指令，派工/验收在工单板上操作";
+    box.appendChild(dirEl);
+  }
+  tcSyncTakeover(card, directorMode);
+  // 工单表单的指派下拉同步名册
+  const sel = card._ui.taskForm.querySelector(".tf-assignee");
+  sel.innerHTML = "";
+  (roster || []).forEach((m) => {
+    const o = document.createElement("option");
+    o.value = m.name;
+    o.textContent = m.name;
+    sel.appendChild(o);
+  });
+}
+
+// 接管按钮显隐同步：仅 AI 总管模式且未终态时可见（用户总管/终态后藏起）
+function tcSyncTakeover(card, directorMode) {
+  const btn = card._ui && card._ui.takeoverBtn;
+  if (!btn) return;
+  const on = (directorMode || "user") === "ai" && !card._finished;
+  btn.hidden = !on;
+  if (on) { btn.disabled = false; btn.textContent = "接管"; }
+}
+
+// 「存为模板」弹窗（三期）：把这张团队卡的名册与总管形态存成建队模板。
+// 名字是唯一键——同名覆盖原条目（位置不变、内容换新），弹窗里实时提示会覆盖；
+// 名字不合法（空/超长/带路径分隔符）由后端 TeamError 原文回显在弹窗行内
+async function tcSaveTemplateModal(card) {
+  const roster = (card._roster || []).map((m) => ({
+    provider: m.provider || "", model: m.model || "",
+    name: m.name || "", persona: m.persona || "",
+  }));
+  const director = card._director
+    ? { provider: card._director.provider || "", model: card._director.model || "" }
+    : { provider: "", model: "" };
+  const dirLabel = card._director
+    ? `AI 总管（${escapeHtml(director.provider || "?")}/${escapeHtml(director.model || "默认")}）`
+    : "用户总管（你本人）";
+  // 先拉一次模板册：重名提示要用（拉不到就不提示覆盖，保存仍可用）
+  let existing = [];
+  try {
+    existing = ((await request("team.template_list")).templates || []).map((t) => t.name);
+  } catch (e) { /* 模板册读不到：照常打开弹窗，覆盖与否交给保存结果 */ }
+  const box = document.createElement("div");
+  box.className = "form-grid";
+  const memberLabel = roster.map((m) => escapeHtml(m.name || `${m.provider}/${m.model}`)).join("、");
+  box.innerHTML = `
+    <label class="wide">模板名（同名会覆盖旧模板）
+      <input data-f="name" maxlength="60" autocomplete="off" placeholder="如：调研三人组、代码评审小队">
+    </label>
+    <p class="dim small" data-f="overwrite" hidden></p>
+    <p class="dim small">保存内容：${roster.length} 名成员（${memberLabel || "空名册"}）· ${dirLabel}。
+      之后建队时在团队面板「从模板创建」一键填入；成员只记服务与模型标识，不校验 Key 是否还在。</p>`;
+  const nameInput = box.querySelector('[data-f="name"]');
+  const overwriteTip = box.querySelector('[data-f="overwrite"]');
+  const syncOverwrite = () => {
+    const name = nameInput.value.trim();
+    const covered = existing.includes(name);
+    overwriteTip.textContent = covered ? `⚠ 已有同名模板「${name}」，保存将覆盖它（位置不变、内容换新）` : "";
+    overwriteTip.hidden = !covered;
+  };
+  nameInput.addEventListener("input", syncOverwrite);
+  showModal("把这支团队存为模板", box, async () => {
+    const name = nameInput.value.trim();
+    if (!name) throw new Error("请先给模板起个名字");
+    const r = await request("team.template_save", {
+      name,
+      director_mode: card._director ? "ai" : "user",
+      director,
+      members: roster,
+    });
+    const savedName = (r && r.template && r.template.name) || name;
+    addNotice(existing.includes(savedName)
+      ? `已保存模板「${savedName}」（覆盖了同名旧模板）`
+      : `已保存模板「${savedName}」`);
+  }, "保存模板");
+  nameInput.focus();
+}
+
+function tcSetSub(card, team) {
+  const tasks = team.tasks || [];
+  card._ui.sub.textContent =
+    `${(team.roster || []).length} 名队员 · 已用 ${team.rounds_used || 0}` +
+    `${team.max_rounds ? `/${team.max_rounds}` : ""} 轮` +
+    (tasks.length ? ` · 工单 ${tasks.length} 张` : " · 尚无工单");
+}
+
+function tcSetStatus(card, status) {
+  const el = card._ui.status;
+  el.textContent = TEAM_STATUS_LABEL[status] || status || "进行中";
+  el.dataset.status = status || "active";
+}
+
+// 终态收口：停用交付/收队/表单/行内按钮，展示《交付/收队说明》，自动折叠让出空间
+function tcFinish(card, status, summary) {
+  card._finished = true;
+  tcSetStatus(card, status);
+  card.classList.add("ended");
+  if (summary) {
+    const old = card.querySelector(".tc-summary");
+    if (old) old.remove();
+    const sum = tcEl("div", "tc-summary");
+    sum.appendChild(tcEl("div", "tc-summary-title",
+      status === "aborted" ? "《收队说明》" : "《交付说明》"));
+    sum.appendChild(tcEl("pre", "tc-summary-text", summary));
+    card._ui.channelEl.after(sum);
+  }
+  if (!card.classList.contains("folded")) {
+    card.classList.add("folded");
+    card._ui.fold.textContent = "展开";
+  }
+}
+
+// 频道消息行：from ∈ 成员名|user|director|system；to 非 all 时显示「→ @xx」；
+// 用户消息（总管指令）整行高亮；AI 总管发言（含总管口吻的派工消息）行首挂
+// 「总管」徽标 + 金底行样式；msg_kind=ruling 的裁定整行紫底；小会系统注记
+// 虚线可辨。频道消息是纯文本，一律 textContent 不走 markdown。
+function buildMsgRow(card, seq, from, to, kind, taskRef, text) {
+  const row = tcEl("div", "tc-msg");
+  row.dataset.seq = String(seq);
+  const headEl = tcEl("div", "tc-m-head");
+  const member = (card._roster || []).find((x) => x.name === from);
+  if (member) headEl.appendChild(tcAvatar(member.provider));
+  const nameMap = { user: "我（总管）", director: "总管", system: "系统" };
+  const fromCls = from === "user" ? " is-user" : from === "director" ? " is-director" : "";
+  headEl.appendChild(tcEl("span", "tc-m-from" + fromCls, member ? member.name : (nameMap[from] || from)));
+  if (to && to !== "all") {
+    headEl.appendChild(tcEl("span", "tc-m-to", to === "director" ? "→ @总管" : "→ @" + to));
+  }
+  if (from === "user") {
+    headEl.appendChild(tcEl("span", "tc-m-kind", "总管指令"));
+    row.classList.add("hl-user");
+  } else {
+    if (from === "director") {
+      headEl.appendChild(tcEl("span", "tc-m-badge", "总管"));
+      row.classList.add("hl-director");
+    }
+    if (kind && kind !== "system") {
+      headEl.appendChild(tcEl("span", "tc-m-kind k-" + kind, TEAM_MSG_KIND_LABEL[kind] || kind));
+    }
+  }
+  // 裁定行高亮只上非用户行：后端把用户消息也以 ruling 类别入簿（from="user"，
+  // 一期样式是蓝底「总管指令」，不叠加紫底）；紫底给总管验收裁定与小会收口
+  if (kind === "ruling" && from !== "user") row.classList.add("hl-ruling");
+  if (from === "system" && tcIsHuddleNote(text)) row.classList.add("huddle");
+  if (taskRef) headEl.appendChild(tcEl("span", "tc-m-ref", "#" + taskRef));
+  row.appendChild(headEl);
+  row.appendChild(tcEl("div", "tc-m-text", text || ""));
+  return row;
+}
+
+// 小会系统注记辨识（设计 §4.3）：后端没有专门字段，靠注记文案匹配——
+// 开场「总管就「…」召开小会：…」、失败「（小会未能…」；文案变了只会降级
+// 成普通系统消息，不会渲染出错
+function tcIsHuddleNote(text) {
+  const s = String(text || "");
+  return s.includes("召开小会") || s.startsWith("（小会");
+}
+
+// 定稿消息（事件 TeamMessage 与 team.get 快照 messages 共用；快照键名是 from/to）。
+// 按 seq upsert：已有流式半成品行整行替换（定稿 text 是全文，覆盖最稳），按 seq 有序插入。
+function tcUpsertMsg(card, m) {
+  if (!card || !card._ui) return;
+  const channel = card._ui.channelEl;
+  const from = m.from_member !== undefined ? m.from_member : m.from;
+  const to = m.to_member !== undefined ? m.to_member : m.to;
+  const seq = m.seq;
+  const old = channel.querySelector(`[data-seq="${seq}"]`);
+  if (old) old.remove();
+  const row = buildMsgRow(card, seq, from, to, m.msg_kind, m.task_ref, m.text);
+  let anchor = null;
+  for (const r of channel.children) {
+    if (Number(r.dataset.seq) > seq) { anchor = r; break; }
+  }
+  channel.insertBefore(row, anchor);
+  // 近底部才自动滚：用户上翻回看时频道不抢滚动位置
+  if (channel.scrollHeight - channel.scrollTop - channel.clientHeight < 80) {
+    channel.scrollTop = channel.scrollHeight;
+  }
+}
+
+// 发言流式增量：按 (member_index, seq) 找（或建）半成品行，追加文本；
+// member_index=-1 是 AI 总管（二期）——以 from="director" 建行，徽标/行样式
+// 与定稿后的总管消息一致，定稿整行替换（按 seq upsert）
+function tcOpenStreamRow(card, data) {
+  const channel = card._ui.channelEl;
+  let row = channel.querySelector(`[data-seq="${data.seq}"]`);
+  if (!row) {
+    const isDirector = data.member_index === -1;
+    const member = isDirector ? null : (card._roster || [])[data.member_index] || null;
+    row = buildMsgRow(card, data.seq,
+      isDirector ? "director" : (member ? member.name : `队员${(data.member_index || 0) + 1}`),
+      "", "", "", "");
+    row.classList.add("streaming");
+    let anchor = null;
+    for (const r of channel.children) {
+      if (Number(r.dataset.seq) > data.seq) { anchor = r; break; }
+    }
+    channel.insertBefore(row, anchor);
+  }
+  row.querySelector(".tc-m-text").textContent += data.text || "";
+  if (channel.scrollHeight - channel.scrollTop - channel.clientHeight < 80) {
+    channel.scrollTop = channel.scrollHeight;
+  }
+}
+
+// 用一份团队快照全量对齐卡片（team.get 刷新 / meta 回放 / stop·takeover 返回值共用）
+function updateTeamCard(card, team) {
+  // 总管标识（二期）：ai 模式快照带 director 块；user 模式无块（一期键集），
+  // 一期 meta/回放走这里得 null，照旧渲染「用户总管」
+  card._director = (team.director_mode || "user") === "ai"
+    ? {
+        provider: (team.director && team.director.provider) || "",
+        model: (team.director && team.director.model) || "",
+      }
+    : null;
+  tcUpdateRoster(card, team.roster || [], team.director_mode || "user");
+  tcSetSub(card, team);
+  const status = team.status || "active";
+  tcSetStatus(card, status);
+  const board = card._ui.boardList;
+  board.innerHTML = "";
+  (team.tasks || []).forEach((task) => board.appendChild(buildTaskRow(card, task)));
+  (team.messages || []).forEach((m) => tcUpsertMsg(card, m));
+  if (status !== "active") card.classList.add("ended");
+}
+
+// 流里最后一张团队卡（历史回放/接管查找用）
+function lastTeamCard(t) {
+  const cards = t.logEl.querySelectorAll(".teamcard");
+  return cards.length ? cards[cards.length - 1] : null;
+}
+
+// team_started：建卡（同一个团队不会重复发 team_started；已有未终态卡时只对齐一次）
+function beginTeam(data) {
+  const t = curTab();
+  if (!t) return;
+  // 总管字段（二期）：user 模式 provider/model 为空串，按用户总管渲染
+  const director = tcDirectorOfEvent(data);
+  const prev = (t.teamCard && t.teamCard.isConnected) ? t.teamCard : lastTeamCard(t);
+  if (prev && !prev.classList.contains("ended")) {
+    t.teamCard = prev;
+    prev._director = director;
+    tcUpdateRoster(prev, data.roster || [], data.director_mode || "user");
+    tcSetStatus(prev, "active");
+    return;
+  }
+  const card = buildTeamCard(data.roster || [], data.director_mode || "user", director);
+  tcSetStatus(card, "active");
+  t.teamCard = card;
+  curLog().appendChild(card);
+  scrollLog();
+}
+
+// team_started 事件的总管标识（ai 模式才带 provider/model；user 模式空串 → null）
+function tcDirectorOfEvent(data) {
+  if ((data.director_mode || "user") !== "ai") return null;
+  return { provider: data.director_provider || "", model: data.director_model || "" };
+}
+
+function teamMemberDelta(data) {
+  const t = curTab();
+  const card = (t && t.teamCard && t.teamCard.isConnected) ? t.teamCard : null;
+  if (!card) return; // 流式增量是瞬态：定稿与快照刷新会兜底
+  tcOpenStreamRow(card, data);
+}
+
+function teamMsgFinal(data) {
+  const t = curTab();
+  const card = (t && t.teamCard && t.teamCard.isConnected) ? t.teamCard : null;
+  if (!card) {
+    if (t && t.sid) refreshTeamState(t); // 半路进来的标签：拉快照把卡补上
+    return;
+  }
+  tcUpsertMsg(card, data);
+}
+
+// team_task_updated 事件里没有 deps/accept：与行上记住的旧数据合并后再重画
+function teamTaskUpdated(data) {
+  const t = curTab();
+  const card = (t && t.teamCard && t.teamCard.isConnected) ? t.teamCard : null;
+  if (!card) return;
+  const row = card._ui.boardList.querySelector(`[data-task="${data.task_id}"]`);
+  const prev = (row && row._task) || {};
+  tcUpsertTask(card, Object.assign({}, prev, {
+    id: data.task_id, title: data.title, assignee: data.assignee,
+    type: data.type, status: data.status, redo: data.redo,
+  }));
+}
+
+function teamFinished(data) {
+  const t = curTab();
+  const card = (t && t.teamCard && t.teamCard.isConnected) ? t.teamCard : lastTeamCard(t);
+  if (!card) return;
+  t.teamCard = card;
+  tcFinish(card, data.status, data.summary || "");
+}
+
+// ---------- 会话级活动团队状态：切标签 / 加载历史时向引擎对齐 ----------
+// 团队是会话级状态，本窗口的事件只覆盖实时轮；其他窗口的收队、应用重启后的
+// 「已中断」标注，都要靠 team.get 对齐（内存快照，代价可忽略）。
+async function refreshTeamState(tab) {
+  if (!tab || !tab.sid || tab._teamRefreshing) return;
+  tab._teamRefreshing = true;
+  try {
+    const r = await request("team.get", { session_id: tab.sid });
+    withTab(tab, () => applyTeamSnapshot(r));
+  } catch (e) { /* 引擎暂无团队方法（旧后端 / 连接断开）：静默跳过 */ }
+  finally { tab._teamRefreshing = false; }
+}
+
+function applyTeamSnapshot(r) {
+  const t = curTab();
+  if (!t) return;
+  if (r && r.active && r.team) {
+    applyTeamMeta(t, r.team);
+    return;
+  }
+  // 重启/切项目前的团队一律「已中断」，不自动恢复（沿子代理任务簿先例）：
+  // 流里有未终态的团队卡就把它标成中断，没有就提示一次
+  if (r && r.interrupted) {
+    const card = lastTeamCard(t);
+    if (card && !card.classList.contains("ended")) {
+      tcFinish(card, "interrupted", "");
+    } else if (!card && !t._teamInterruptedNoticed) {
+      t._teamInterruptedNoticed = true;
+      addNotice(`⚠️ ${r.interrupted.interrupt_reason || "应用重启，团队已中断"}：本会话恢复普通对话，如需继续请重新组建团队。`);
+    }
+  }
+}
+
+// 把一份团队快照落到当前聊天流：卡在流中就刷新；否则建一张（插在纪要气泡前）
+function applyTeamMeta(t, team) {
+  let card = (t.teamCard && t.teamCard.isConnected) ? t.teamCard : lastTeamCard(t);
+  const active = (team.status || "active") === "active";
+  if (!card || (card.classList.contains("ended") && active)) {
+    // 前一张卡已终态而团队仍在活动（重新建队）：另起一张新卡
+    const fresh = buildTeamCard(team.roster || [], team.director_mode || "user",
+      tcDirectorOfSnapshot(team));
+    t.teamCard = fresh;
+    const last = t.logEl.lastElementChild;
+    // assistant_message 事件先于 chat.send 返回到达：纪要气泡已在流尾，卡插在它前面
+    if (last && last.classList.contains("msg") && last.classList.contains("assistant")) {
+      t.logEl.insertBefore(fresh, last);
+    } else {
+      t.logEl.appendChild(fresh);
+    }
+    card = fresh;
+  } else {
+    t.teamCard = card;
+  }
+  updateTeamCard(card, team);
+}
+
+// 历史回放：从持久化的 meta 重建团队卡（默认折叠；同一团队跨多轮刷新同一张卡）。
+// meta 兼容二期 director 块（ai 模式新增）；一期 meta 无块照旧渲染「用户总管」
+function buildTeamReplayCard(meta) {
+  const team = meta.team || {};
+  const card = buildTeamCard(team.roster || [], team.director_mode || "user",
+    tcDirectorOfSnapshot(team));
+  card.classList.add("folded");
+  card._ui.fold.textContent = "展开";
+  updateTeamCard(card, team);
+  if ((team.status || "active") !== "active") card.classList.add("ended");
+  return card;
+}
+
+// 团队快照 meta 的总管标识（ai 模式带 director 块；一期 meta 无块 → null）
+function tcDirectorOfSnapshot(team) {
+  if ((team.director_mode || "user") !== "ai") return null;
+  const d = team.director || {};
+  return { provider: d.provider || "", model: d.model || "" };
+}
+
+// 三期回放增强：meta 里的频道是截断尾部（条数与单条长度都有上限），有 team_id
+// 就拉 team.log 全量回放，把完整时间线叠画到卡上（tcUpsertMsg 按 seq 幂等覆盖，
+// 行键 from_member/to_member 与快照 from/to 两种写法都认）。
+// 两级容错：team_id 缺失 / 请求失败（他人会话的 id / 旧后端 / 连接断开）/
+// 库内零记录（旧版本团队没落过库）都静默退回截断 meta 渲染——回放是锦上添花，
+// 不能让它炸掉历史渲染。同一团队在长历史里跨多轮 meta 共用一张卡（或终态后
+// 重建卡），teamLogCache 按 team_id 只拉一次，后到的卡直接复用已拉的行。
+const teamLogCache = new Map(); // team_id -> rows[]（成功响应才缓存；空数组也算结果）
+const TEAM_LOG_CACHE_MAX = 40;
+
+function tcFetchFullLog(tab, card, team) {
+  if (!card || !card._ui) return;
+  const teamId = String((team || {}).team_id || "");
+  if (!teamId) return; // 旧 meta 没落过 team_id：截断 meta 就是全部家底
+  if (card._logTeamId === teamId) {
+    // 这张卡已经拉过/正在拉同一队：在途就等结果落地；已入缓存就把全量行
+    // 再叠一遍——后来画的截断 meta 可能刚覆盖了同 seq 的行
+    if (teamLogCache.has(teamId)) tcApplyLogRows(card, teamLogCache.get(teamId));
+    return;
+  }
+  card._logTeamId = teamId; // 同一张卡只发一次请求（跨多轮 meta 重复调用来去重）
+  if (teamLogCache.has(teamId)) {
+    tcApplyLogRows(card, teamLogCache.get(teamId));
+    return;
+  }
+  request("team.log", { team_id: teamId })
+    .then((r) => {
+      const rows = (r && r.messages) || [];
+      teamLogCache.set(teamId, rows);
+      if (teamLogCache.size > TEAM_LOG_CACHE_MAX) {
+        teamLogCache.delete(teamLogCache.keys().next().value); // 淘汰最早入册的
+      }
+      tcApplyLogRows(card, rows);
+    })
+    .catch(() => { /* 拉不到：保持截断 meta 渲染，下次重建卡再试 */ });
+}
+
+function tcApplyLogRows(card, rows) {
+  if (!rows || !rows.length) return;
+  rows.forEach((m) => tcUpsertMsg(card, m));
+}
+
+// 团队纪要徽标：标记这条回答是团队协作的纪要（队员发言全文见团队卡的频道时间线）
+function addTeamBadge(el, meta) {
+  const team = meta.team || {};
+  const roster = team.roster || [];
+  const badge = document.createElement("div");
+  badge.className = "rt-badge team-badge";
+  badge.title = roster.map((m) => `${m.name}（${m.provider}/${m.model}）`).join("\n") +
+    (team.director_mode === "ai" && team.director
+      ? `\nAI 总管（${team.director.provider}/${team.director.model}）` : "");
+  badge.textContent =
+    `🧩 团队纪要 · ${roster.length} 名队员` +
+    (team.director_mode === "ai" ? " · AI 总管" : "") +
+    ` · ${TEAM_STATUS_LABEL[team.status] || "进行中"}`;
+  el.prepend(badge);
+}
+
 let curSpawnCard = null; // 运行中的 spawn_agent 卡片：接收 subagent_event 直播
 
 function addToolCard(data) {
@@ -2132,6 +2884,11 @@ function handleEvent(kind, data) {
     case "roundtable_started": beginRoundtable(data.members || [], data.rounds || 1); break;
     case "roundtable_member_delta": rtMemberDelta(data); break;
     case "roundtable_member_finished": rtMemberFinished(data); break;
+    case "team_started": beginTeam(data); break;
+    case "team_message_delta": teamMemberDelta(data); break;
+    case "team_message": teamMsgFinal(data); break;
+    case "team_task_updated": teamTaskUpdated(data); break;
+    case "team_finished": teamFinished(data); break;
     case "tool_call_started": addToolCard(data); break;
     case "tool_call_finished": finishToolCard(data); break;
     case "subagent_spawned": onSubagentSpawned(data); break;
@@ -2169,6 +2926,12 @@ function handleEvent(kind, data) {
       if (settingsOpen || rightTabs.includes("ext")) {
         renderSettings().catch(() => {});
       }
+      break;
+    }
+    case "mod_ui": onModUi(data); break;
+    case "mods_updated": {
+      // Mods 安装/启停/删除后的广播（notify_mods_updated）：设置页开着就重绘清单
+      if (settingsOpen) renderModsCfg().catch(() => {});
       break;
     }
     case "schedule_reminder":
@@ -2357,6 +3120,17 @@ function showPermission(data) {
     noteEl.textContent = data.note || "";
     noteEl.hidden = !data.note;
   }
+  // Mod（实验性）的附加说明与 perm 片段：强制 [Mod·<id>] 来源前缀（引擎侧已带）、
+  // 独立样式区渲染——第三方文本不上无标识的安全确认卡
+  const modNoteEl = document.getElementById("perm-mod-note");
+  if (modNoteEl) {
+    const lines = [];
+    if (data.mod_note) lines.push(escapeHtml(data.mod_note));
+    const sidLines = pendingPermModLines.get(data.session_id || "");
+    if (sidLines && sidLines.length) lines.push(sidLines.join("<br>"));
+    modNoteEl.innerHTML = lines.join("<br>");
+    modNoteEl.hidden = !lines.length;
+  }
   // 「总是允许」将写入的规则范围（由 gate.rule_for 生成后随事件下发）：
   // 点按钮前就能看到它会放行多大范围，而不是事后到设置里才发现
   const ruleEl = document.getElementById("perm-rule");
@@ -2379,6 +3153,9 @@ function showPermission(data) {
 
 function hidePermission() {
   permRequest = null;
+  pendingPermModLines.clear(); // 确认卡收起：上一张卡的 Mod 片段不留到下一张
+  const modNoteEl = document.getElementById("perm-mod-note");
+  if (modNoteEl) { modNoteEl.hidden = true; modNoteEl.innerHTML = ""; }
   document.getElementById("permission-bar").hidden = true;
   petRefresh();
 }
@@ -3315,12 +4092,6 @@ async function archiveSession(s) {
   refreshSessions();
 }
 
-function exportSession(s) {
-  return request("session.export", { id: s.id })
-    .then((r) => downloadText(r.filename, r.markdown))
-    .catch((e) => addNotice("导出失败: " + e.message));
-}
-
 // —— 归档弹窗：查看已归档会话，恢复或彻底删除（删除需二次确认） ——
 async function openArchiveModal() {
   const r = await request("session.list_archived");
@@ -3926,10 +4697,6 @@ function setModelChip(text) {
 // ---------- 思考强度：顶栏控件（自动 / 低 / 中 / 高）----------
 // 只对声明支持的服务显示；档位存 config.toml 的 provider 字段，切换立即对下一轮生效。
 let reasoningState = { supported: false, effort: "auto", labels: {}, efforts: [] };
-
-function setReasoningChip(text) {
-  document.getElementById("reasoning-chip").textContent = text;
-}
 
 function renderReasoningChip(state) {
   reasoningState = state || { supported: false, effort: "auto", labels: {}, efforts: [] };
@@ -5144,6 +5911,8 @@ const rtRoleLabel = (id) => (RT_ROLES.find((r) => r[0] === id) || RT_ROLES[0])[1
 function setRtOn(on) {
   rtOn = on;
   document.getElementById("rt-switch").classList.toggle("on", on);
+  // 同一条消息只能选一种协作模式：开圆桌自动关团队（后端双开报参数错）
+  if (on) setTeamOn(false);
 }
 
 function updateRtHint() {
@@ -5273,16 +6042,336 @@ async function showRtMenu(e) {
 document.getElementById("rt-switch").onclick = () => setRtOn(!rtOn);
 document.getElementById("rt-pick").onclick = showRtMenu;
 
-/** 成员选择浮层定位：底边贴在输入栏上沿，左缘与圆桌按钮对齐。
+// ---------- 团队：多模型分工协作，用户以总管身份派工、验收、交付 ----------
+// 与圆桌并列的第二种协作模式（docs/团队模式设计.md）：圆桌是会诊，团队是开工。
+// 开关是一次性的（发送后复位）；团队本体是会话级状态——建队后消息自动进团队
+// 频道（后端路由），直到交付/收队。团队卡在聊天流中保持展开，跨多轮持续更新。
+let teamOn = false;
+let teamMembers = (() => {
+  try { return JSON.parse(localStorage.getItem("skysheep.team.members") || "null"); }
+  catch { return null; }
+})();
+// 总管形态（二期 AI 总管）：null / {mode:"user"} = 我当总管（一期行为）；
+// {mode:"ai", provider, model} = 指定一个已配 Key 的模型服务担任总管，随建队轮发后端
+let teamDirector = (() => {
+  try { return JSON.parse(localStorage.getItem("skysheep.team.director") || "null"); }
+  catch { return null; }
+})();
+const teamDirectorIsAi = () =>
+  !!(teamDirector && teamDirector.mode === "ai" && String(teamDirector.provider || "").trim());
+
+// 团队状态徽标 / 工单状态 / 频道消息类别的唯一中文叫法（与 docs/界面术语表 §12 对齐）
+const TEAM_STATUS_LABEL = {
+  active: "进行中", done: "已交付", aborted: "已收队",
+  rounds_exhausted: "轮次耗尽", interrupted: "已中断",
+  budget_exhausted: "预算耗尽",
+};
+const TEAM_TASK_STATUS_LABEL = {
+  pending: "待办", in_progress: "进行中", review: "待验收",
+  done: "完成", error: "失败",
+};
+const TEAM_MSG_KIND_LABEL = {
+  assign: "派工", report: "汇报", ask: "请示", help: "求助",
+  object: "异议", ruling: "裁定", system: "系统",
+};
+const TEAM_DIRECTOR_LABEL = { user: "用户总管", ai: "AI 总管" };
+
+function setTeamOn(on) {
+  teamOn = on;
+  document.getElementById("team-switch").classList.toggle("on", on);
+  // 同一条消息只能选一种协作模式：开团队自动关圆桌（后端双开报参数错）
+  if (on) setRtOn(false);
+  // 规划模式与团队联动（后端同款语义）：规划模式开着开团队不拦——本轮队员
+  // 一律只读执行（只调研、不写文件、不跑命令），这里说明降级，避免「以为
+  // 队员会动手改文件」的误期待
+  if (on && workMode === "plan") {
+    addNotice("规划模式开着：本轮团队队员将以只读方式执行（不写文件、不跑命令）；需要队员动手请先切回执行模式。");
+  }
+}
+
+function updateTeamHint() {
+  const btn = document.getElementById("team-switch");
+  const n = teamMembers ? teamMembers.length : 0;
+  if (teamDirectorIsAi()) {
+    const who = `AI 总管（${teamDirector.provider}/${teamDirector.model || "服务默认模型"}）`;
+    btn.title = `团队（${n ? `已指定 ${n} 名队员` : "队员自动挑选"} · ${who}）：` +
+      "AI 总管自动拆解、派工、验收、交付；你随时插话，或点团队卡上的「接管」亲自指挥";
+  } else {
+    btn.title = (n
+      ? `团队（已指定 ${n} 个成员）：开启后组建团队，你的消息作为总管指令进入团队频道`
+      : "团队：自动挑选已配置 Key 的模型组建团队，你以总管身份派工、验收、交付（点 ▾ 可指定成员与总管）");
+  }
+}
+updateTeamHint();
+
+// 团队成员选择浮层：与圆桌浮层同皮，勾选后展开 成员名 + 一句话人设 两个小输入框；
+// 顶部是总管形态区（二期）：我当总管（默认）/ AI 总管 + 担任总管的模型单选
+async function showTeamMenu(e) {
+  e.stopPropagation(); // 别让随后冒泡到 document 的 click 立刻把菜单关掉
+  const menu = document.getElementById("team-menu");
+  if (!menu.classList.contains("hidden")) return menu.classList.add("hidden");
+  menu.innerHTML = '<div class="rt-menu-tip">加载中…</div>';
+  menu.classList.remove("hidden");
+  positionRtMenu(menu, "team-switch");
+  const cfg = await request("config.providers").catch(() => null);
+  if (!cfg || menu.classList.contains("hidden")) return;
+  menu.innerHTML = "";
+  // 模板区（三期）：「从模板创建」——选中后回填下面的总管形态与成员勾选。
+  // 模板册是全局的（team.template_list）；拉不到（旧后端/断线）整块不出现，
+  // 浮层照常手选，建队流程不受影响
+  let templates = [];
+  try { templates = ((await request("team.template_list")).templates) || []; } catch (e) {}
+  if (templates.length && !menu.classList.contains("hidden")) {
+    const tplBox = document.createElement("div");
+    tplBox.className = "tm-template";
+    tplBox.appendChild(tcEl("div", "rt-menu-tip", "从模板创建："));
+    const sel = document.createElement("select");
+    sel.className = "tm-tpl-sel";
+    sel.title = "选中模板后自动勾选成员、填好成员名与人设，并切好总管形态；确认前可随意微调";
+    sel.innerHTML = '<option value="">— 选择模板 —</option>' +
+      templates.map((t, i) => `<option value="${i}">${escapeHtml(t.name)}</option>`).join("");
+    sel.onchange = () => {
+      const tpl = templates[Number(sel.value)];
+      if (tpl) applyTeamTemplate(menu, tpl);
+    };
+    tplBox.appendChild(sel);
+    menu.appendChild(tplBox);
+  }
+  // 总管形态区：单选「我当总管 / AI 总管」；选 AI 才展开模型单选列表
+  // （只列已配置 Key 的服务——总管缺 Key 跑不了，后端也会 fail-closed 拒建）
+  const dirBox = document.createElement("div");
+  dirBox.className = "tm-director";
+  dirBox.appendChild(tcEl("div", "rt-menu-tip", "总管："));
+  const dirModes = document.createElement("div");
+  dirModes.className = "tm-dir-modes";
+  const savedAi = teamDirectorIsAi() ? teamDirector : null;
+  const mkDirMode = (value, label, checked) => {
+    const lab = document.createElement("label");
+    lab.className = "tm-dir-mode";
+    lab.title = value === "ai"
+      ? "AI 总管：自动拆解、派工、验收、交付；你随时插话或接管"
+      : "我当总管：你的每条消息都是一道总管指令，派工/验收由你在团队卡上操作";
+    const rb = document.createElement("input");
+    rb.type = "radio";
+    rb.name = "tm-dir-mode";
+    rb.value = value;
+    rb.checked = checked;
+    lab.append(rb, tcEl("span", "", label));
+    return lab;
+  };
+  const rbUser = mkDirMode("user", "我当总管（默认）", !savedAi);
+  const rbAi = mkDirMode("ai", "AI 总管", !!savedAi);
+  dirModes.append(rbUser, rbAi);
+  dirBox.appendChild(dirModes);
+  const dirOpts = document.createElement("div");
+  dirOpts.className = "tm-dir-opts" + (savedAi ? "" : " hidden");
+  dirOpts.appendChild(tcEl("div", "rt-menu-tip", "选择担任总管的模型（需已配置 Key）："));
+  const dirList = document.createElement("div");
+  dirList.className = "rt-menu-list";
+  let dirEntries = 0;
+  Object.entries(cfg.providers || {}).forEach(([name, p]) => {
+    if (!p.key_mask) return;
+    (p.models || []).forEach((m) => {
+      dirEntries += 1;
+      const key = name + "/" + m;
+      const lab = document.createElement("label");
+      lab.className = "rt-menu-item";
+      lab.innerHTML =
+        `<input type="radio" name="tm-dir-model" value="${escapeHtml(key)}"` +
+        `${savedAi && savedAi.provider === name && savedAi.model === m ? " checked" : ""}>` +
+        `<span class="mi-cmd">${escapeHtml(name)}</span>` +
+        `<span class="mi-model">${escapeHtml(m)}</span>`;
+      dirList.appendChild(lab);
+    });
+  });
+  if (!dirEntries) {
+    dirList.innerHTML = '<div class="rt-menu-tip">还没有已配置 Key 的模型——先到「设置 · 模型服务」配置 API Key。</div>';
+  }
+  dirOpts.appendChild(dirList);
+  dirBox.appendChild(dirOpts);
+  rbAi.querySelector("input").addEventListener("change", () => {
+    dirOpts.classList.toggle("hidden", !rbAi.querySelector("input").checked);
+  });
+  rbUser.querySelector("input").addEventListener("change", () => {
+    dirOpts.classList.toggle("hidden", rbUser.querySelector("input").checked);
+  });
+  menu.appendChild(dirBox);
+  const tip = document.createElement("div");
+  tip.className = "rt-menu-tip";
+  tip.textContent = "选择团队成员（不选 = 自动挑选已配置 Key 的模型）：";
+  menu.appendChild(tip);
+  const list = document.createElement("div");
+  list.className = "rt-menu-list";
+  const selected = new Map((teamMembers || []).map((m) => [m.provider + "/" + m.model, m]));
+  let entries = 0;
+  Object.entries(cfg.providers || {}).forEach(([name, p]) => {
+    // 只列已配置 Key 的服务：缺 Key 的服务选了也跑不了，列出来只是噪声
+    if (!p.key_mask) return;
+    (p.models || []).forEach((m) => {
+      entries += 1;
+      const key = name + "/" + m;
+      const saved = selected.get(key) || {};
+      const label = document.createElement("label");
+      label.className = "rt-menu-item";
+      label.innerHTML =
+        `<input type="checkbox" value="${escapeHtml(key)}" ${selected.has(key) ? "checked" : ""}>` +
+        `<span class="mi-cmd">${escapeHtml(name)}</span>` +
+        `<span class="mi-model">${escapeHtml(m)}</span>`;
+      const cb = label.querySelector("input");
+      // 成员名（缺省沿服务名）+ 人设（写进该成员系统提示词）：勾选后才展开
+      const extra = document.createElement("span");
+      extra.className = "mi-extra" + (cb.checked ? "" : " hidden");
+      const nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "mi-name";
+      nameInput.placeholder = `成员名（默认 ${name}）`;
+      nameInput.value = saved.name || "";
+      nameInput.title = "成员名：团队频道与工单指派都用它称呼这位队员";
+      const personaInput = document.createElement("input");
+      personaInput.type = "text";
+      personaInput.className = "mi-persona";
+      personaInput.placeholder = "一句话人设（可选）";
+      personaInput.value = saved.persona || "";
+      personaInput.title = "人设会写进这位队员的系统提示词，例如「资深行业分析师，先列证据再下结论」";
+      extra.append(nameInput, personaInput);
+      // 在输入框里点击/输入不能触发 label 的勾选切换，也不能把浮层点没
+      extra.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); });
+      extra.addEventListener("keydown", (ev) => ev.stopPropagation());
+      cb.addEventListener("change", () => extra.classList.toggle("hidden", !cb.checked));
+      label.appendChild(extra);
+      label._nameInput = nameInput;
+      label._personaInput = personaInput;
+      list.appendChild(label);
+    });
+  });
+  if (!entries) {
+    list.innerHTML = '<div class="rt-menu-tip">还没有已配置 Key 的模型——先到「设置 · 模型服务」配置 API Key，再回来挑选队员。</div>';
+  }
+  menu.appendChild(list);
+  const actions = document.createElement("div");
+  actions.className = "rt-menu-actions";
+  const clear = document.createElement("button");
+  clear.className = "link-btn";
+  clear.textContent = "恢复自动";
+  clear.onclick = () => list.querySelectorAll("input:checked").forEach((i) => (i.checked = false));
+  const ok = document.createElement("button");
+  ok.className = "btn-primary";
+  ok.textContent = "确定";
+  ok.onclick = () => {
+    // 总管形态先落库：选 AI 必须已挑模型（否则留着浮层让用户补选）
+    const dirMode = dirBox.querySelector('input[name="tm-dir-mode"]:checked');
+    if (dirMode && dirMode.value === "ai") {
+      const pick = dirBox.querySelector('input[name="tm-dir-model"]:checked');
+      if (!pick) { addNotice("已选 AI 总管：请先挑选担任总管的模型服务"); return; }
+      const di = pick.value.indexOf("/");
+      teamDirector = { mode: "ai", provider: pick.value.slice(0, di), model: pick.value.slice(di + 1) };
+    } else {
+      teamDirector = { mode: "user" };
+    }
+    try { localStorage.setItem("skysheep.team.director", JSON.stringify(teamDirector)); } catch {}
+    const picked = [...list.querySelectorAll("input:checked")].map((i) => {
+      const idx = i.value.indexOf("/");
+      const item = { provider: i.value.slice(0, idx), model: i.value.slice(idx + 1) };
+      const row = i.closest(".rt-menu-item");
+      const name = (row._nameInput.value || "").trim();
+      const persona = (row._personaInput.value || "").trim();
+      if (name) item.name = name;
+      if (persona) item.persona = persona;
+      return item;
+    });
+    teamMembers = picked.length ? picked : null;
+    try { localStorage.setItem("skysheep.team.members", JSON.stringify(teamMembers)); } catch {}
+    updateTeamHint();
+    menu.classList.add("hidden");
+  };
+  actions.append(clear, ok);
+  menu.appendChild(actions);
+}
+document.getElementById("team-switch").onclick = () => setTeamOn(!teamOn);
+document.getElementById("team-pick").onclick = showTeamMenu;
+
+// 模板回填（三期）：清掉当前勾选 → 按模板勾成员、填成员名与人设 → 切总管形态。
+// 成员按 provider/model 对上已配置服务；对不上的跳过并计数提示——服务没配 Key
+// 或模型已下架的条目硬勾上也跑不了（后端照常降级），不能让用户以为填上了。
+// 只回填表单，不落 localStorage：用户点「确定」才按既有路径存本轮值
+function applyTeamTemplate(menu, tpl) {
+  const dirOpts = menu.querySelector(".tm-dir-opts");
+  const rbUser = menu.querySelector('input[name="tm-dir-mode"][value="user"]');
+  const rbAi = menu.querySelector('input[name="tm-dir-mode"][value="ai"]');
+  const cbs = [...menu.querySelectorAll("label.rt-menu-item input[type=\"checkbox\"]")];
+  // 成员区先全清：模板定义整支团队，而不是往现有勾选上叠加
+  cbs.forEach((cb) => {
+    cb.checked = false;
+    const extra = cb.closest(".rt-menu-item").querySelector(".mi-extra");
+    if (extra) extra.classList.add("hidden");
+  });
+  const want = new Map();
+  (tpl.members || []).forEach((m) => {
+    const key = `${m.provider || ""}/${m.model || ""}`;
+    if (key !== "/") want.set(key, m);
+  });
+  let hit = 0;
+  cbs.forEach((cb) => {
+    const m = want.get(cb.value);
+    if (!m) return;
+    cb.checked = true;
+    const label = cb.closest(".rt-menu-item");
+    if (label._nameInput) label._nameInput.value = m.name || "";
+    if (label._personaInput) label._personaInput.value = m.persona || "";
+    const extra = label.querySelector(".mi-extra");
+    if (extra) extra.classList.remove("hidden");
+    hit += 1;
+  });
+  const miss = (tpl.members || []).length - hit;
+  // 总管形态：模板指定 AI 总管（带服务名）才切 AI；user 模式/空块回到「我当总管」
+  const d = tpl.director || {};
+  const wantAi = (tpl.director_mode || "user") === "ai" && String(d.provider || "").trim() !== "";
+  let dirRadio = null;
+  if (wantAi) {
+    if (rbAi) rbAi.checked = true;
+    if (rbUser) rbUser.checked = false;
+    if (dirOpts) dirOpts.classList.remove("hidden");
+    // 精确对到 provider+model；模型名空（服务默认）或已改名时退到同服务第一个
+    menu.querySelectorAll('input[name="tm-dir-model"]').forEach((r) => {
+      const i = r.value.indexOf("/");
+      if (r.value.slice(0, i) !== d.provider) return;
+      if (!dirRadio) dirRadio = r; // 同服务第一个：兜底候选
+      if (d.model && r.value.slice(i + 1) === d.model) dirRadio = r;
+    });
+    if (dirRadio) dirRadio.checked = true;
+  } else {
+    if (rbUser) rbUser.checked = true;
+    if (rbAi) rbAi.checked = false;
+    if (dirOpts) dirOpts.classList.add("hidden");
+  }
+  const bits = [(tpl.members || []).length
+    ? `模板「${tpl.name}」已填入 ${hit} 名成员`
+    : `模板「${tpl.name}」是空名册，只回填了总管形态`];
+  if (miss) bits.push(`${miss} 名成员不在已配置服务中，已跳过`);
+  if (wantAi) {
+    if (dirRadio) {
+      if (!d.model || dirRadio.value !== `${d.provider}/${d.model}`) {
+        bits.push("模板总管的模型已不在该服务列表，改选了同服务第一个可用模型");
+      }
+    } else {
+      bits.push("模板指定的总管服务未配置 Key，请在上方手动挑一个总管模型");
+    }
+  }
+  addNotice(bits.join("；"));
+}
+
+/** 成员选择浮层定位：底边贴在输入栏上沿，左缘与触发按钮对齐。
  *
  *  用按钮的实时位置算（而不是写死 left），这样界面缩放、窗口宽度、
- *  输入栏高度变化都不会错位；再向容器内收敛，窄窗口下不会溢出或被裁切。 */
-function positionRtMenu(menu) {
+ *  输入栏高度变化都不会错位；再向容器内收敛，窄窗口下不会溢出或被裁切。
+ *  anchorId 缺省为圆桌开关（团队浮层传自己的开关 id）。 */
+function positionRtMenu(menu, anchorId) {
   const composer = document.getElementById("composer");
   const host = document.getElementById("chat-main");
   if (!composer || !host) return;
   const hostRect = host.getBoundingClientRect();
-  const anchor = document.getElementById("rt-switch") || document.getElementById("rt-group");
+  const anchor = document.getElementById(anchorId || "rt-switch")
+    || document.getElementById("rt-group");
   menu.style.bottom = (composer.offsetHeight + 8) + "px";
   if (!anchor) return;
   // getBoundingClientRect 是物理像素，除以 uiScale 换算成布局坐标
@@ -5296,6 +6385,11 @@ document.addEventListener("click", (e) => {
   const menu = document.getElementById("rt-menu");
   if (!menu.classList.contains("hidden") && !menu.contains(e.target) &&
       e.target.id !== "rt-pick") menu.classList.add("hidden");
+  const teamMenu = document.getElementById("team-menu");
+  if (teamMenu && !teamMenu.classList.contains("hidden") &&
+      !teamMenu.contains(e.target) && e.target.id !== "team-pick") {
+    teamMenu.classList.add("hidden");
+  }
 });
 
 let currentSessionId = null; // 当前会话（/export、检查点列表用）
@@ -5937,14 +7031,20 @@ async function send() {
   }
   try {
     const rtThisTurn = rtOn;
+    const teamThisTurn = teamOn;
     let compareThisTurn = false;
     if (rtThisTurn) {
       const cb = document.getElementById("rt-compare");
       compareThisTurn = !!(cb && cb.checked);
     }
-    const membersThisTurn = rtThisTurn ? rtMembers : null;
+    // 圆桌与团队同用 members 字段（互斥开关保证同轮只有一个生效）
+    const membersThisTurn = rtThisTurn ? rtMembers : (teamThisTurn ? teamMembers : null);
+    // 总管形态（二期）：建队轮才消费——AI 总管随 team=true 带上 provider/model；
+    // 用户总管（默认）不传参，后端按一期行为建队
+    const dirAiThisTurn = teamThisTurn && teamDirectorIsAi();
     // 圆桌是一次性开关：发送后复位
     setRtOn(false);
+    setTeamOn(false);
     // 辩论轮数 / 主席出草稿：弹层里的本轮值优先于配置（config 作默认值）
     const r = await request("chat.send", {
       text,
@@ -5952,7 +7052,12 @@ async function send() {
       wants_title: tab.firstSend === true,
       plan_mode: workMode === "plan",
       roundtable: rtThisTurn,
+      team: teamThisTurn || undefined,
       members: membersThisTurn || undefined,
+      director_mode: dirAiThisTurn ? "ai" : undefined,
+      director: dirAiThisTurn
+        ? { provider: String(teamDirector.provider).trim(), model: String(teamDirector.model || "").trim() }
+        : undefined,
       compare: compareThisTurn || undefined,
       debate_rounds: rtThisTurn ? rtDebate : undefined,
       chair_answers: rtThisTurn ? rtChair : undefined,
@@ -5971,6 +7076,9 @@ async function send() {
       tab.title = (sessionMeta[r.session_id] || {}).title || text.slice(0, 20);
       renderTabs();
     }
+    // 团队轮：返回值带本轮结束时的团队快照（建队/收队/轮次计数在这里对齐；
+    // 进行中的消息与工单已由实时事件驱动，upsert 幂等）
+    if (r.team && r.team.team) applyTeamMeta(tab, r.team.team);
     if (r.plan_mode && tab.lastAssistantText.trim()) addPlanActions(tab.lastAssistantText);
     if (r.checkpoint) addCheckpointBar(r.checkpoint);
   } catch (e) {
@@ -6107,8 +7215,9 @@ function addAssistantDone(text, rtMeta, tab, seq, thinking, thinkingMs, duration
   }
   d.innerHTML = `<div class="md">${renderMarkdown(text || "")}</div>`;
   if (rtMeta) {
-    d._rtMeta = rtMeta; // 重新生成时据此重跑同样的圆桌配置
-    if (rtMeta.members) addRtBadge(d, rtMeta);
+    d._rtMeta = rtMeta; // 重新生成时据此重跑同样的协作配置
+    if (rtMeta.mode === "team") addTeamBadge(d, rtMeta);
+    else if (rtMeta.members) addRtBadge(d, rtMeta);
   }
   curLog().appendChild(d);
   renderMermaidIn(d);
@@ -6311,6 +7420,23 @@ function paintHistorySlice(tab, messages, start, end) {
           curLog().appendChild(rtCard);
           renderMermaidIn(rtCard);
           highlightCodeIn(rtCard);
+        } else if (m.roundtable && m.roundtable.mode === "team" && m.roundtable.team) {
+          // 团队纪要：团队跨多轮持续，同一团队的每一轮都带 meta——未终态的卡
+          // 就地刷新快照（工单/频道/轮次取最新），终态后（或换队）才另起一张。
+          // 有 team_id 时异步拉 team.log 把截断频道补成全量（三期，失败静默）
+          const prev = (tab._lastTeamCard && tab._lastTeamCard.isConnected)
+            ? tab._lastTeamCard : null;
+          if (prev && !prev.classList.contains("ended")) {
+            updateTeamCard(prev, m.roundtable.team);
+            tcFetchFullLog(tab, prev, m.roundtable.team);
+          } else {
+            const tc = buildTeamReplayCard(m.roundtable);
+            tab._lastTeamCard = tc;
+            curLog().appendChild(tc);
+            renderMermaidIn(tc);
+            highlightCodeIn(tc);
+            tcFetchFullLog(tab, tc, m.roundtable.team);
+          }
         }
         addAssistantDone(
           m.text, m.roundtable, tab, m.seq, m.thinking,
@@ -6362,7 +7488,9 @@ async function msgRegenerate(tab, el, seq) {
   const rtMeta = el && el._rtMeta;
   try {
     await request("session.truncate", { id: tab.sid, mode: "regen", seq: seq || undefined });
-    // 清掉这条回答对应的旧圆桌卡（历史回放里卡片紧挨在消息前面）
+    // 清掉这条回答对应的旧圆桌卡（历史回放里卡片紧挨在消息前面）。
+    // 团队卡不在此列：它不紧挨纪要气泡（中间隔着频道消息），且团队可能仍在
+    // 进行中——卡留在原地继续接事件，重新生成的轮次照常更新它。
     const prevEl = el && el.previousElementSibling;
     if (prevEl && prevEl.classList && prevEl.classList.contains("roundtable")) prevEl.remove();
     let drop = false;
@@ -7569,9 +8697,10 @@ function showSettingsPage(target) {
   if (target === "memory") loadMemoryPage();
   if (target === "snippets") loadSnippets();
   if (target === "remote") { loadLanPanel(); loadTsPanel(); loadChannelPanel(); }
-  if (target === "skills") loadToolControl();
+  if (target === "skills") { loadToolControl(); renderTeamCfg().catch(() => {}); }
   if (target === "subagents") renderSubagentCfg().catch(() => {});
   if (target === "advanced") { renderAdvancedCfg().catch(() => {}); renderHooksCfg(); }
+  if (target === "mods") renderModsCfg().catch(() => {});
   if (target === "about") { loadBackups().catch(() => {}); renderRetentionCfg().catch(() => {}); }
 }
 document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
@@ -7781,19 +8910,8 @@ bindLocalSkillToolbar();
 document.getElementById("btn-import-mcp").onclick = () => importMcpModal();
 document.getElementById("btn-add-mcp").onclick = addMcpModal;
 
-// 底栏宽度变化（拉伸窗口、收展侧栏）后按新宽度重铺热力图；周数没变就不动，
-// RO 初次回调与自身 innerHTML 重建都不会造成空转
-let mapHeatRaf = 0;
-if (typeof ResizeObserver === "function") {
-  new ResizeObserver(() => {
-    const grid = document.querySelector("#map-heat .map-heat-grid");
-    if (!mapState.data || !grid) return;
-    const w = document.getElementById("map-heat").clientWidth;
-    if (!w || mapHeatWeeksFor(w) === +(grid.dataset.weeks || 0)) return;
-    cancelAnimationFrame(mapHeatRaf);
-    mapHeatRaf = requestAnimationFrame(renderMapAside);
-  }).observe(document.getElementById("map-heat"));
-}
+// 热力图不再按底栏宽度自适应（固定可视 4 周起步 + 横向滚动，列数随项目
+// 周龄增长），按宽度重铺的 ResizeObserver 已随宽度优先方案移除
 
 // 记忆地图的工具条事件（选择器/视图切换/生成按钮/自动开关）
 document.getElementById("map-project").addEventListener("change", (e) => {
@@ -11093,6 +12211,79 @@ if (voiceBtn) {
   };
 }
 
+// ---------- 设置 · 团队：五道防失控上限（与圆桌卡同款：读回当前值 → 编辑 → 保存热生效） ----------
+// 热生效语义（后端契约）：改动只对之后新建的团队生效，进行中团队沿用建队时的值；
+// 数值越界由后端 clamp（保存后回传的是 clamp 过的新状态，直接照它回显）
+async function renderTeamCfg() {
+  let d;
+  try { d = await request("teamcfg.get"); } catch (e) { return; }
+  const hint = document.getElementById("team-hint");
+  const form = document.getElementById("team-form");
+  if (!form) return;
+  if (hint) hint.textContent = d.config_hint || "";
+  form.innerHTML = `
+    <div class="toolcfg-row"><label>队员上限</label>
+      <input type="number" data-f="max_members" min="1" max="8" class="num-sm" value="${d.max_members}">
+      <span class="dim small">个（1-8；自动挑选队员时也不会超出）</span>
+    </div>
+    <div class="toolcfg-row"><label>单成员超时</label>
+      <input type="number" data-f="member_timeout_s" min="10" class="num-sm" value="${d.member_timeout_s}">
+      <span class="dim small">秒（单个队员发言/干活超过此时长按失败收尾，不拖垮整队）</span>
+    </div>
+    <div class="toolcfg-row"><label>全局轮次上限</label>
+      <input type="number" data-f="max_rounds" min="1" class="num-sm" value="${d.max_rounds}">
+      <span class="dim small">轮（总管轮/成员轮/小会合计，防自动循环失控；到达即强制交付）</span>
+    </div>
+    <div class="toolcfg-row"><label>打回上限</label>
+      <input type="number" data-f="redo_limit" min="0" max="5" class="num-sm" value="${d.redo_limit}">
+      <span class="dim small">次（同一工单打回超过此数，总管必须强制裁定：改派/降级顾问/砍掉）</span>
+    </div>
+    <div class="toolcfg-row"><label>停滞唤醒</label>
+      <input type="number" data-f="stall_limit" min="1" class="num-sm" value="${d.stall_limit}">
+      <span class="dim small">轮（成员连续空转达到此数，自动停止并移交总管处置）</span>
+    </div>
+    <div class="toolcfg-row">
+      <span class="toolcfg-state">● 保存后对<b>之后新建的团队</b>生效，进行中的团队沿用建队时的值</span>
+      <span class="spacer"></span>
+      <button class="btn-ghost" data-act="save">保存</button>
+    </div>`;
+  form.querySelector('[data-act="save"]').onclick = async () => {
+    // 清空/非数字的字段传 null = 该键不改（后端只处理非 None 的键；
+    // 注意 Number("") 是 0，必须先拦空串，否则清空的字段会被存成 clamp 后的最小值）
+    const num = (f) => {
+      const raw = String(form.querySelector(`[data-f="${f}"]`).value).trim();
+      if (!raw) return null;
+      const v = Number(raw);
+      return Number.isFinite(v) ? v : null;
+    };
+    try {
+      const r = await request("teamcfg.save", {
+        max_members: num("max_members"),
+        member_timeout_s: num("member_timeout_s"),
+        max_rounds: num("max_rounds"),
+        redo_limit: num("redo_limit"),
+        stall_limit: num("stall_limit"),
+      });
+      teamCfgStatus("✓ 已保存并生效：队员上限 " + r.max_members + " · 单成员超时 " +
+        r.member_timeout_s + " 秒 · 轮次上限 " + r.max_rounds + " · 打回上限 " +
+        r.redo_limit + " · 停滞唤醒 " + r.stall_limit +
+        "（对之后新建的团队生效）", true);
+      renderTeamCfg(); // 回显 clamp 后的值：界面与 config.toml 保持一致
+    } catch (e) {
+      teamCfgStatus("✗ 保存失败：" + e.message, false);
+    }
+  };
+}
+
+function teamCfgStatus(text, ok) {
+  const el = document.getElementById("team-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "card-status " + (ok ? "ok" : "bad");
+  el.hidden = !text;
+  autoHideStatus(el, text, ok);
+}
+
 // ---------- 设置 · 子代理（独立页：基础设置 + 自定义子代理 + 内置子代理） ----------
 async function renderSubagentCfg() {
   let d;
@@ -12703,11 +13894,17 @@ async function renderRetentionCfg() {
 
 async function saveRetention() {
   const q = (id) => document.getElementById(id);
+  // 清空的输入框传 null（后端按「不动该项」处理），绝不折成 0——
+  // 0 的语义是「关闭该类自动清理」，手滑清空不该变成永久关闭
+  const days = (id) => {
+    const raw = q(id).value.trim();
+    return raw === "" ? null : Number(raw);
+  };
   try {
     await request("retention.save", {
-      screenshots_days: Number(q("retention-screenshots").value),
-      quarantine_days: Number(q("retention-quarantine").value),
-      reports_days: Number(q("retention-reports").value),
+      screenshots_days: days("retention-screenshots"),
+      quarantine_days: days("retention-quarantine"),
+      reports_days: days("retention-reports"),
     });
     await renderRetentionCfg();
     retentionStatus("✓ 已保存并立即生效");
@@ -12730,5 +13927,424 @@ document.getElementById("btn-retention-sweep").onclick = async () => {
     retentionStatus("✗ 清理失败：" + e.message, false);
   } finally {
     btn.disabled = false;
+  }
+};
+
+// ---------- Mods 扩展（实验性）：事件片段 + 设置页 ----------
+// Mod 的 JS 永不进前端：这里只渲染引擎侧产出的声明式词表片段
+// （stat/badge/progress/timeline/text 五种，未知 kind 引擎侧已丢弃）。
+
+// 权限卡的 Mod 片段暂存：permission_request 事件之前到达的 slot=perm 片段
+// 由 showPermission 消费，hidePermission 清空（第三方文本带 [Mod·<id>] 前缀展示）。
+// 按会话分桶：两个会话同时挂着待确认卡时，A 会话的 Mod 片段不能串到 B 的卡上
+// （第三方文本上错安全确认卡，比不上卡更糟）。
+let pendingPermModLines = new Map();
+
+/** tray 片段随会话标签渲染：t.modTray 挂在标签对象上，跨会话不串。 */
+function renderModTray() {
+  const el = document.getElementById("mod-tray");
+  if (!el) return;
+  const tray = activeTab && activeTab.modTray;
+  if (!tray || !tray.text) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = `<span class="mod-tray-chip mod-lv-${escapeHtml(tray.level || "ok")}"` +
+    ` title="${escapeHtml(tray.text)}">${escapeHtml(tray.text)}</span>`;
+  el.classList.remove("hidden");
+}
+
+/** 消息流内的 Mod 片段卡：badge / progress / timeline 三种形态。 */
+function addModFragment(modId, w) {
+  const t = routeTab || activeTab;
+  if (!t || !t.logEl) return;
+  const div = document.createElement("div");
+  div.className = "mod-fragment";
+  const cap = `<span class="mod-frag-src" title="由 Mod「${escapeHtml(modId)}」产出">Mod·${escapeHtml(modId)}</span>`;
+  if (w.kind === "progress") {
+    const val = Math.max(0, Math.min(100, Number(w.value) || 0));
+    div.innerHTML = `${cap}<span class="mod-progress"><span class="mod-progress-bar" style="width:${val}%"></span></span>` +
+      `<span class="mod-frag-text">${escapeHtml(w.text || "")}</span>`;
+  } else if (w.kind === "timeline" && Array.isArray(w.items)) {
+    div.innerHTML = `${cap}<ul class="mod-timeline">` +
+      w.items.map((it) =>
+        `<li><span class="mod-tl-t">${escapeHtml(it.t || "")}</span>` +
+        `<span class="mod-tl-text">${escapeHtml(it.text || "")}</span></li>`).join("") +
+      "</ul>";
+  } else {
+    // badge / text / 其它落在 stream 的兜底：一行文本
+    div.innerHTML = `${cap}<span class="mod-frag-text">${escapeHtml(w.text || "")}</span>`;
+  }
+  t.logEl.appendChild(div);
+  scrollLog();
+}
+
+/** mod_ui 事件入口：按 slot 分流（tray 状态条 / perm 确认卡 / stream 消息流）。 */
+function onModUi(data) {
+  const w = data.widget || {};
+  if (data.slot === "tray") {
+    const t = tabFor(data.session_id) || routeTab || activeTab;
+    if (t) t.modTray = { text: w.text || "", level: w.level || "ok" };
+    renderModTray();
+    return;
+  }
+  if (data.slot === "perm") {
+    // permission_request 事件稍后到达：先暂存进本会话的桶，showPermission 渲染
+    const sid = data.session_id || "";
+    if (!pendingPermModLines.has(sid)) pendingPermModLines.set(sid, []);
+    pendingPermModLines.get(sid).push(
+      `<span class="mod-frag-src">Mod·${escapeHtml(data.mod_id || "")}</span>` +
+      `<span class="mod-frag-text">${escapeHtml(w.text || w.badge || "")}</span>`);
+    return;
+  }
+  addModFragment(data.mod_id || "", w);
+}
+
+// ---- 设置 · Mods 扩展 ----
+
+let modsState = { mods: [], enabled: false, runtime_available: true, runtime_version: "" };
+
+function modsStatus(text, ok = true) {
+  const el = document.getElementById("mods-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "card-status " + (ok ? "ok" : "bad");
+  el.hidden = !text;
+  autoHideStatus(el, text, ok);
+}
+
+const MOD_HOOK_LABELS = {
+  tool_pre: "工具调用前", tool_post: "工具调用后", permission_request: "权限请求",
+  iteration_start: "迭代开始", turn_stop: "回合结束",
+};
+
+// 执行状态 → [界面文案, chip 样式]：列表「最近：」行与详情弹窗共用同一份映射
+const MOD_STATUS_META = {
+  ok: ["✓ 正常", "safe-mark"], timeout: ["⏱ 超时", "write-mark"],
+  error: ["✗ 出错", "danger-mark"], dropped: ["⨯ 已丢弃", "danger-mark"],
+};
+
+async function renderModsCfg() {
+  try {
+    const [d, off] = await Promise.all([
+      request("mods.list"),
+      request("mods.official").catch(() => ({ mods: [], bundled: false })),
+    ]);
+    modsState = {
+      mods: d.mods || [], enabled: !!d.enabled,
+      runtime_available: d.runtime_available !== false,
+      runtime_version: d.runtime_version || "",
+      official: off.mods || [], bundled: !!off.bundled,
+    };
+    const tg = document.getElementById("mods-toggle");
+    if (tg) tg.checked = modsState.enabled;
+    // 安装位置不再由后端下发（mods.list 是远程可读方法，不回本机绝对路径），
+    // 固定文案在 index.html 的 mods-root-hint 里
+    const rt = document.getElementById("mods-runtime-status");
+    if (rt) {
+      if (modsState.runtime_available) {
+        rt.textContent = modsState.runtime_version
+          ? `JS 沙箱运行时就绪（quickjs ${modsState.runtime_version}）`
+          : "JS 沙箱运行时就绪";
+        rt.className = "card-status ok";
+        rt.hidden = false;
+      } else {
+        rt.textContent = "JS 运行时不可用：Mod 的 JS 处理函数不会执行（清单与收紧声明仍生效）。";
+        rt.className = "card-status bad";
+        rt.hidden = false;
+      }
+    }
+    renderModsList(modsState.mods);
+    renderOfficialMods(modsState.official);
+    // 注意：这里不能像 hooks/advanced/retention 页那样以 Status("") 收尾——
+    // 本页的操作（行内启停/删除/一键安装/总开关/确认安装）都是
+    // 「先 modsStatus(提示) 再 renderModsCfg()」，渲染尾部清空会把刚显示的
+    // 成功/失败确认条压成两次本地往返的残影（autoHideStatus 的 6 秒驻留与
+    // 「错误保留到下一次操作」全被架空）。残留的「加载失败」按错误驻留设计
+    // 保留，由下一次操作覆盖
+  } catch (e) {
+    modsStatus("加载失败：" + e.message, false);
+  }
+}
+
+function renderModsList(mods) {
+  const ul = document.getElementById("mods-list");
+  if (!ul) return;
+  if (!mods.length) {
+    ul.innerHTML = '<li class="dim small">还没有安装任何 Mod。装官方示例试试，或点右上角「＋ 安装 Mod」。</li>';
+    return;
+  }
+  ul.innerHTML = "";
+  mods.forEach((m) => {
+    const li = document.createElement("li");
+    li.className = "mod-row";
+    const hooks = (m.hooks || []).map((h) => MOD_HOOK_LABELS[h] || h).join(" / ");
+    const decl = [];
+    if (m.declarative && (m.declarative.deny_tools || []).length) {
+      decl.push(`<span class="mod-decl">拒执行：${escapeHtml(m.declarative.deny_tools.join("、"))}</span>`);
+    }
+    if (m.declarative && (m.declarative.require_confirm_tools || []).length) {
+      decl.push(`<span class="mod-decl">强制确认：${escapeHtml(m.declarative.require_confirm_tools.join("、"))}</span>`);
+    }
+    const flags = [];
+    if (m.load_error) {
+      flags.push(`<span class="chip danger-mark" title="${escapeHtml(m.load_error)}">装载失败</span>`);
+    }
+    if (m.auto_deactivated) {
+      flags.push('<span class="chip danger-mark" title="连续超时 3 次，本进程内已停用；重启应用后恢复">超时自动停用</span>');
+    }
+    if (m.cc_mods) {
+      flags.push('<span class="chip safe-mark" title="实验性兼容 Claude Code Mods 的清单与入口形状（子集）">CC 兼容 · 实验性</span>');
+    }
+    if (Number(m.errors) > 0) {
+      // 运行期被丢弃/出错的动作数（本进程内）：解析丢弃的明细在「说明」的最近执行里（dropped 行）
+      flags.push(`<span class="chip danger-mark" title="本进程内出错/被丢弃的动作累计 ${m.errors} 次；明细见「说明」的最近执行">错误 ${m.errors}</span>`);
+    }
+        li.innerHTML = `
+      <label class="hook-enable" title="停用后保留安装，不再执行；重新勾选即恢复">
+        <input type="checkbox" class="mod-enabled" ${m.enabled ? "checked" : ""}>启用
+      </label>
+      <span class="mod-main">
+        <span class="item-name">${escapeHtml(m.name)} <span class="dim small">v${escapeHtml(m.version || "")} · ${escapeHtml(m.source || "")}</span></span>
+        <span class="item-desc">${escapeHtml(m.description || "")}</span>
+        <span class="dim small">${escapeHtml(hooks || "（未声明 hook）")} · ${m.permissions === "tighten" ? "收紧档（可拒绝/要求确认）" : "观察档（仅观察与提示）"}</span>
+        ${decl.join(" ")}
+        ${m.load_error ? `<span class="dim small mod-err">${escapeHtml(m.load_error)}</span>` : ""}
+      </span>
+      <span class="head-ops">${flags.join(" ")}
+        <button class="btn-ghost rp-mini mod-detail">说明</button>
+        <button class="btn-ghost rp-mini mod-del" title="删除这个 Mod">✕</button>
+      </span>`;
+    li.querySelector(".mod-enabled").onchange = async (e) => {
+      try {
+        await request("mods.toggle", { id: m.id, enabled: e.target.checked });
+        modsStatus(`✓ ${m.name} 已${e.target.checked ? "启用" : "停用"}（立即生效）`);
+      } catch (err) {
+        modsStatus("✗ " + err.message, false);
+      }
+      renderModsCfg().catch(() => {});
+    };
+    li.querySelector(".mod-detail").onclick = () => showModDetail(m.id);
+    li.querySelector(".mod-del").onclick = async () => {
+      if (!(await confirmModal(`删除 Mod「${m.name}」？`, "<p>其运行状态也会一并删除。</p>"))) return;
+      try {
+        await request("mods.delete", { id: m.id });
+        modsStatus(`✓ 已删除 ${m.name}`);
+      } catch (err) {
+        modsStatus("✗ " + err.message, false);
+      }
+      renderModsCfg().catch(() => {});
+    };
+    ul.appendChild(li);
+  });
+}
+
+async function showModDetail(modId) {
+  try {
+    const d = await request("mods.get", { id: modId });
+    const m = d.mod || {};
+    const recent = d.recent || [];
+    const box = document.createElement("div");
+    box.innerHTML = `
+      <p class="dim small">${escapeHtml(m.description || "")}</p>
+      <p class="dim small">版本 ${escapeHtml(m.version || "")} · ${escapeHtml(m.source || "")} ·
+        ${m.permissions === "tighten" ? "收紧档" : "观察档"} ·
+        挂点：${escapeHtml((m.hooks || []).map((h) => MOD_HOOK_LABELS[h] || h).join(" / ") || "无")}</p>
+      <h4 class="mod-detail-cap">说明（README）</h4>
+      <pre class="mod-readme">${escapeHtml(d.readme || "（没有 README.md）")}</pre>
+      <h4 class="mod-detail-cap">最近执行（${recent.length}/24）</h4>
+      <ul class="list mod-recent-list">${recent.length ? recent.slice().reverse().map((r) => {
+        const pair = MOD_STATUS_META[r.status] || [r.status || "?", ""];
+        const when = new Date((r.time || 0) * 1000).toLocaleTimeString();
+        return `<li><span class="chip ${pair[1]}">${pair[0]}</span>` +
+          `<span class="dim small">${escapeHtml(MOD_HOOK_LABELS[r.hook] || r.hook || "")} · ${when} · ${Number(r.duration_ms) || 0}ms</span>` +
+          (r.output ? `<span class="mod-frag-text" title="${escapeHtml(r.output)}">${escapeHtml(r.output)}</span>` : "") + "</li>";
+      }).join("") : '<li class="dim small">还没有执行记录。</li>'}</ul>`;
+    showModal(`Mod · ${m.name || modId}`, box, async () => {}, "关闭");
+  } catch (e) {
+    modsStatus("✗ " + e.message, false);
+  }
+}
+
+function renderOfficialMods(entries) {
+  const grid = document.getElementById("mods-official-grid");
+  if (!grid) return;
+  if (!entries.length) {
+    grid.innerHTML = '<span class="dim small">本机没有官方示例清单（随应用安装包内置）。</span>';
+    return;
+  }
+  grid.innerHTML = "";
+  entries.forEach((m) => {
+    const card = document.createElement("div");
+    card.className = "gallery-item";
+    card.innerHTML = `
+      <span class="item-name">${escapeHtml(m.name || m.id)}</span>
+      <span class="item-desc">${escapeHtml(m.description || "")}</span>
+      <button class="btn-ghost" ${m.installed ? "disabled" : ""}>${m.installed ? "已安装" : "一键安装"}</button>`;
+    const btn = card.querySelector("button");
+    if (!m.installed) {
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          await request("mods.install_official", { id: m.id });
+          modsStatus(`✓ 已安装官方示例 ${m.name || m.id}（立即生效）`);
+        } catch (e) {
+          modsStatus("✗ " + e.message, false);
+        }
+        renderModsCfg().catch(() => {});
+      };
+    }
+    grid.appendChild(card);
+  });
+}
+
+// 「＋ 安装 Mod」：两段式——先拿内容预览，确认后才落盘（照技能导入的手感）
+document.getElementById("btn-mod-install").onclick = () => {
+  const box = document.createElement("div");
+  const canPick = typeof nativePickerAvailable === "function" && nativePickerAvailable();
+  box.innerHTML = `
+    <p class="dim small">安装来源：一个 Mod 文件夹（含 <code>mod.json</code>）或 .zip 压缩包。
+    安装前会先展示清单与入口内容预览，<b>你确认后才会写入</b>。也认 Claude Code Mods 的
+    <code>mods.json</code> 清单（实验性兼容，能力收敛到 SkySheep 子集）。</p>
+    <div class="form-grid">
+      <label class="wide">Mod 文件夹 / .zip 路径
+        <span class="model-line">
+          <input data-f="source" placeholder="${canPick ? "点右边按钮选择，或直接粘贴路径" : "把 Mod 文件夹或 .zip 的完整路径粘贴到这里"}" autocomplete="off">
+          <button class="btn-ghost browse" type="button">选择…</button>
+        </span>
+      </label>
+      <div class="form-status"></div>
+    </div>`;
+  const input = box.querySelector('input[data-f="source"]');
+  const status = box.querySelector(".form-status");
+  const browse = box.querySelector(".browse");
+  if (!canPick) browse.title = "当前是浏览器模式，请手动粘贴路径";
+  browse.onclick = async () => {
+    const r = await pickPath("dir");
+    if (r.paths && r.paths.length) { input.value = r.paths[0]; return; }
+    // 文件夹选择框打不开（浏览器模式等）再试 zip；用户主动取消就到此为止
+    if (r.error) {
+      const z = await pickPath("skill_zip");
+      if (z.paths && z.paths.length) { input.value = z.paths[0]; return; }
+      status.textContent = "打不开系统选择框，请手动粘贴路径";
+      status.className = "form-status bad";
+    }
+  };
+  showModal("安装 Mod（实验性）", box, async () => {
+    const source = input.value.trim();
+    if (!source) throw new Error("请选择或粘贴 Mod 路径");
+    status.textContent = "正在读取并校验…";
+    status.className = "form-status";
+    const p = await request("mods.install", { source });
+    // 第二步：预览确认（真正的落盘确认在这里）。showModal 没有 onCancel 回调，
+    // 不能用「外层 await 内层 Promise」的套法——点「取消」内层 Promise 永不
+    // settle，外层 onOk 就挂在半路。确认动作直接放进内层 onOk：
+    // 取消 = 只关弹层不动盘；出错 = 行内报错、弹层留在原地可重试。
+    const prev = document.createElement("div");
+    const declText = [];
+    if (p.declarative) {
+      (p.declarative.deny_tools || []).forEach((x) => declText.push("拒执行 " + x));
+      (p.declarative.require_confirm_tools || []).forEach((x) => declText.push("强制确认 " + x));
+    }
+    prev.innerHTML = `
+      <p><b>${escapeHtml(p.name || "")}</b> <span class="dim small">v${escapeHtml(p.version || "")} · id: ${escapeHtml(p.id)}</span></p>
+      <p class="dim small">${escapeHtml(p.description || "")}</p>
+      <p class="dim small">挂点：${escapeHtml((p.hooks || []).join(" / ") || "无")} ·
+        ${p.permissions === "tighten" ? "收紧档" : "观察档"} · ${Number(p.files) || 0} 个文件 · ${Number(p.bytes) || 0} 字节</p>
+      ${declText.length ? `<p class="dim small">收紧声明：${escapeHtml(declText.join("；"))}</p>` : ""}
+      ${p.cc_mods ? '<p class="dim small">声明了实验性 CC Mods 兼容。</p>' : ""}
+      <h4 class="mod-detail-cap">main.js 开头</h4>
+      <pre class="mod-readme">${escapeHtml(p.entry_head || "")}</pre>`;
+    showModal(`确认安装「${p.name || p.id}」`, prev, async () => {
+      await request("mods.confirm_install", { install_token: p.install_token });
+      modsStatus(`✓ 已安装 ${p.name || p.id}（立即生效）`);
+      renderModsCfg().catch(() => {});
+    }, "安装");
+  });
+};
+
+// 总开关
+document.getElementById("mods-toggle").onchange = async (e) => {
+  try {
+    await request("mods.set_enabled", { enabled: e.target.checked });
+    modsStatus(`✓ Mods 已${e.target.checked ? "启用" : "关闭"}（立即生效）`);
+  } catch (err) {
+    modsStatus("✗ " + err.message, false);
+  }
+  renderModsCfg().catch(() => {});
+};
+
+document.getElementById("btn-mods-refresh").onclick = () => renderModsCfg().catch(() => {});
+
+// 「存为草稿」：把 Agent 回答里的 mod.json / main.js（README.md 可选）粘贴进来，
+// 走 mods.save_draft 落到 <项目>/.skysheep/mods-drafts/<id>/。Agent 侧没有保存草稿
+// 的工具面（save_draft 是本机专属 WS 方法，不进 Agent 工具清单），这一步由人完成；
+// 草稿不进 Mods 根、不会生效，还要点「＋ 安装 Mod」选草稿目录确认安装（两道人工动作）。
+document.getElementById("btn-mod-save-draft").onclick = () => {
+  const box = document.createElement("div");
+  box.innerHTML = `
+    <p class="dim small">把 Agent 回答里的两段代码粘贴到这里：清单 <code>mod.json</code>（会校验
+    字段白名单与 id）与入口 <code>main.js</code>（README.md 可选）。保存为草稿<b>不会安装</b>——
+    保存后点「＋ 安装 Mod」，选择下面返回的草稿目录，预览确认后才落盘生效。</p>
+    <div class="form-grid">
+      <label class="wide">mod.json（清单 JSON）
+        <textarea data-f="manifest" rows="8" placeholder='{
+  "id": "my-mod", "name": "我的 Mod", "version": "1.0.0",
+  "hooks": ["tool_pre"], "permissions": "observe"
+}'></textarea>
+      </label>
+      <label class="wide">main.js（入口 JS，单文件 ≤128KB）
+        <textarea data-f="main_js" rows="10" placeholder="export default { toolPre(p) { return {} } }"></textarea>
+      </label>
+      <label class="wide">README.md（可选）
+        <textarea data-f="readme" rows="3"></textarea>
+      </label>
+      <div class="form-status"></div>
+    </div>`;
+  const status = box.querySelector(".form-status");
+  showModal("保存 Mod 草稿（实验性）", box, async () => {
+    const manifest = box.querySelector('[data-f="manifest"]').value.trim();
+    const mainJs = box.querySelector('[data-f="main_js"]').value;
+    const readme = box.querySelector('[data-f="readme"]').value;
+    if (!manifest) throw new Error("请粘贴 mod.json 清单内容");
+    if (!mainJs.trim()) throw new Error("请粘贴 main.js 入口内容");
+    // 目录 id 直接取清单里的 id 字段（后端要求两者一致，不让用户填两遍）
+    let manifestObj;
+    try { manifestObj = JSON.parse(manifest); } catch (e) {
+      throw new Error("mod.json 不是有效 JSON：" + e.message);
+    }
+    const modId = String((manifestObj && manifestObj.id) || "").trim();
+    if (!modId) throw new Error("清单里要有 id 字段（它同时是草稿目录名）");
+    status.textContent = "正在校验并保存…";
+    status.className = "form-status";
+    const r = await request("mods.save_draft", { id: modId, manifest: manifestObj, main_js: mainJs, readme });
+    status.textContent = `✓ 已保存草稿「${r.name}」`;
+    status.className = "form-status ok";
+    // 草稿路径回显给「＋ 安装 Mod」用（本机专属方法，回本机路径没有泄露面）
+    modsStatus(`✓ 已保存草稿「${r.name}」到 ${r.path}——点「＋ 安装 Mod」选这个目录完成安装`);
+  }, "保存草稿");
+};
+
+// 「让 AI 帮我写一个 Mod」：模板填入输入框由用户发送；草稿安装仍是两道人工动作
+document.getElementById("btn-mod-template").onclick = async () => {
+  try {
+    const d = await request("mods.get_template");
+    const text = d.template || "";
+    const hint = document.getElementById("mods-draft-hint");
+    if (settingsOpen) backToChat();
+    inputEl.value = text;
+    autoGrowInput();
+    inputEl.focus();
+    inputEl.setSelectionRange(text.length, text.length);
+    if (hint) {
+      hint.textContent = "提示词已填入输入框：补一句你的需求再发送。Agent 给出代码后，回到本页点" +
+        "「存为草稿」把 mod.json 与 main.js 粘贴保存（Agent 自己保存不了草稿），再点「＋ 安装 Mod」确认安装。";
+      hint.className = "card-status ok";
+      hint.hidden = false;
+      autoHideStatus(hint, hint.textContent, true);
+    }
+  } catch (e) {
+    addNotice("获取模板失败：" + e.message);
   }
 };

@@ -2028,3 +2028,246 @@ def test_extract_context_limit_fields():
     assert x({"max_tokens": 8192}) is None                     # 输出上限不是窗口
     assert x({"context_length": 0}) is None
     assert x({}) is None
+
+
+# ---- Mods 扩展（实验性）：协议层 ----
+
+
+def _write_mod(home, mod_id, main_js, manifest=None):
+    """在隔离 home 的 Mods 根写一个最小 Mod。"""
+    from skysheep.core.mods import mods_root
+
+    mod_dir = mods_root() / mod_id
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {"id": mod_id, "name": mod_id, "version": "1.0.0",
+                "hooks": ["tool_pre"], "permissions": "observe",
+                **(manifest or {})}
+    manifest["id"] = mod_id
+    (mod_dir / "mod.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (mod_dir / "main.js").write_text(main_js, encoding="utf-8")
+    return mod_dir
+
+
+def test_mods_list_get_template_readonly(home):
+    """mods.list / mods.get / mods.get_template / mods.official：只读各端可看。"""
+    _write_mod(home, "srv-mod", "export default { toolPre(p){ return {} } }")
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "m1", "method": "mods.list"})
+        r = recv_until(ws, "m1")
+        assert r["ok"]
+        ids = [m["id"] for m in r["result"]["mods"]]
+        assert "srv-mod" in ids
+        assert "runtime_available" in r["result"]
+        # 只读方法远程可调：不携带本机绝对路径（不给局域网令牌客户端暴露主目录结构）
+        assert "root" not in r["result"]
+
+        ws.send_json({"id": "m2", "method": "mods.get", "params": {"id": "srv-mod"}})
+        r = recv_until(ws, "m2")
+        assert r["ok"] and r["result"]["mod"]["id"] == "srv-mod"
+        assert "manifest" in r["result"]
+        assert "path" not in r["result"]
+
+        ws.send_json({"id": "m3", "method": "mods.get", "params": {"id": "nope"}})
+        assert recv_until(ws, "m3")["ok"] is False
+
+        ws.send_json({"id": "m4", "method": "mods.get_template"})
+        r = recv_until(ws, "m4")
+        assert r["ok"] and "mod.json" in r["result"]["template"]
+
+        ws.send_json({"id": "m5", "method": "mods.official"})
+        r = recv_until(ws, "m5")
+        assert r["ok"] and isinstance(r["result"]["mods"], list)
+
+
+def test_mods_install_two_phase_without_confirm_no_disk(home):
+    """两段安装：mods.install 只回预览 + token，未确认不落盘；坏 token 拒绝。"""
+    _write_mod(home, "placeholder", "export default {}")  # 确保 mods 根存在
+    mod_src = home / "proj" / "incoming"
+    mod_src.mkdir()
+    (mod_src / "mod.json").write_text(json.dumps({
+        "id": "incoming-mod", "name": " incoming ", "hooks": ["tool_pre"],
+        "permissions": "observe",
+    }), encoding="utf-8")
+    (mod_src / "main.js").write_text("export default {}", encoding="utf-8")
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "i1", "method": "mods.install",
+                      "params": {"source": str(mod_src)}})
+        r = recv_until(ws, "i1")
+        assert r["ok"] and r["result"]["needs_confirm"] is True
+        token = r["result"]["install_token"]
+        assert r["result"]["id"] == "incoming-mod"
+        from skysheep.core.mods import mods_root
+        assert not (mods_root() / "incoming-mod").exists(), "确认前不得落盘"
+
+        ws.send_json({"id": "i2", "method": "mods.confirm_install",
+                      "params": {"install_token": "wrong-token"}})
+        assert recv_until(ws, "i2")["ok"] is False
+        assert not (mods_root() / "incoming-mod").exists()
+
+        ws.send_json({"id": "i3", "method": "mods.confirm_install",
+                      "params": {"install_token": token}})
+        r = recv_until(ws, "i3")
+        assert r["ok"] and r["result"]["installed"] == "incoming-mod"
+        assert (mods_root() / "incoming-mod" / "main.js").is_file()
+
+        # 确认后进启用名单并热生效
+        ws.send_json({"id": "m9", "method": "mods.list"})
+        r = recv_until(ws, "m9")
+        entry = {m["id"]: m for m in r["result"]["mods"]}["incoming-mod"]
+        assert entry["enabled"] is True
+
+
+def _make_mod_src(home, name: str):
+    src = home / "proj" / name
+    src.mkdir()
+    (src / "mod.json").write_text(json.dumps({
+        "id": name, "name": name, "hooks": [], "permissions": "observe",
+    }), encoding="utf-8")
+    (src / "main.js").write_text("export default {}", encoding="utf-8")
+    return src
+
+
+def _staging_dirs() -> list:
+    from skysheep.core.mods import mods_root
+
+    return sorted(p for p in mods_root().iterdir() if p.name.startswith(".importing-"))
+
+
+def test_mods_install_overwrite_cleans_old_staging(home):
+    """新预览覆盖旧待确认项：被覆盖项的 .importing-* 暂存目录即时清掉。
+
+    修复前 _pending_mod_install 直接覆盖，旧 staging 再没有任何清理路径，永久遗留。
+    """
+    _write_mod(home, "placeholder", "export default {}")  # 确保 mods 根存在
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "mods.install",
+                      "params": {"source": str(_make_mod_src(home, "mod-a"))}})
+        assert recv_until(ws, "a1")["ok"]
+        staging1 = _staging_dirs()
+        assert len(staging1) == 1
+
+        ws.send_json({"id": "a2", "method": "mods.install",
+                      "params": {"source": str(_make_mod_src(home, "mod-b"))}})
+        assert recv_until(ws, "a2")["ok"]
+        staging2 = _staging_dirs()
+        assert len(staging2) == 1, "旧暂存应被清理，只剩新预览的 staging"
+        assert staging2[0] != staging1[0]
+
+
+def test_mods_staging_swept_on_startup(home):
+    """install 与 confirm 之间进程重启：无人认领的 .importing-* 由启动清扫兜底。
+
+    待确认项只存内存，重启即失；修复前磁盘上的 staging 永久遗留（load_all 因
+    「.」前缀跳过不影响清单，纯磁盘垃圾）。
+    """
+    from skysheep.core.mods import mods_root
+
+    root = mods_root()
+    root.mkdir(parents=True, exist_ok=True)
+    leftover = root / ".importing-deadbeef0000"
+    leftover.mkdir()
+    (leftover / "mod.json").write_text("{}", encoding="utf-8")
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "s1", "method": "mods.list"})
+        assert recv_until(ws, "s1")["ok"]
+        assert not leftover.exists()
+        assert _staging_dirs() == []
+
+
+def test_mods_toggle_and_set_enabled_hot_reload(home):
+    """mods.toggle / mods.set_enabled：改 config 后 _reload_mods 生效。"""
+    _write_mod(home, "toggle-mod", "export default { toolPre(p){ return {} } }")
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "t0", "method": "mods.set_enabled", "params": {"enabled": True}})
+        assert recv_until(ws, "t0")["ok"]
+        backend = client.app.state.backend
+        assert backend.mods is not None and backend.mods.enabled
+
+        ws.send_json({"id": "t1", "method": "mods.toggle",
+                      "params": {"id": "toggle-mod", "enabled": True}})
+        r = recv_until(ws, "t1")
+        assert r["ok"] and r["result"]["enabled"] is True
+        assert "toggle-mod" in backend.mods.enabled_ids
+        # 推到 Agent 上（热生效）
+        assert backend._base_agent.mods is backend.mods
+
+        ws.send_json({"id": "t2", "method": "mods.toggle",
+                      "params": {"id": "toggle-mod", "enabled": False}})
+        assert recv_until(ws, "t2")["ok"]
+        assert "toggle-mod" not in backend.mods.enabled_ids
+
+        ws.send_json({"id": "t3", "method": "mods.toggle",
+                      "params": {"id": "ghost", "enabled": True}})
+        assert recv_until(ws, "t3")["ok"] is False
+
+
+def test_mods_test_runner(home):
+    """mods.test 测试器：示例 payload 实跑 handler，回完整结果（不记执行记录）。"""
+    _write_mod(home, "test-mod",
+               "export default { toolPre(p){ return {note: 'seen ' + p.tool,"
+               " ui: [{kind: 'badge', slot: 'stream', text: 'T'}]} } }")
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "x1", "method": "mods.test",
+                      "params": {"id": "test-mod", "hook": "tool_pre",
+                                 "tool": "write_file"}})
+        r = recv_until(ws, "x1")
+        assert r["ok"]
+        res = r["result"]
+        assert res["error"] == ""
+        assert res["result"]["note"] == "seen write_file"
+        assert res["result"]["ui"][0]["text"] == "T"
+        recent_before = None
+        ws.send_json({"id": "x2", "method": "mods.get", "params": {"id": "test-mod"}})
+        recent_before = recv_until(ws, "x2")["result"]["recent"]
+        assert recent_before == [], "测试器不记执行记录"
+
+
+def test_mods_test_runner_deny_matches_live_permissions(home):
+    """mods.test 与实跑同口径：observe 档的 deny 如实报「无效 + 丢弃原因」，
+    tighten 档才报有效——测试器不得把实跑必被丢弃的动作误导成生效。"""
+    _write_mod(home, "observe-deny",
+               "export default { permissionRequest(p){ return {deny: 'no'} } }",
+               {"hooks": ["permission_request"], "permissions": "observe"})
+    _write_mod(home, "tighten-deny",
+               "export default { permissionRequest(p){ return {deny: 'no'} } }",
+               {"hooks": ["permission_request"], "permissions": "tighten"})
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "y1", "method": "mods.test",
+                      "params": {"id": "observe-deny", "hook": "permission_request"}})
+        r = recv_until(ws, "y1")
+        assert r["ok"] and r["result"]["error"] == ""
+        assert r["result"]["result"]["deny"] is None, "observe 档 deny 必须报无效"
+        assert any("observe 档不允许 deny" in e for e in r["result"]["parse_errors"])
+
+        ws.send_json({"id": "y2", "method": "mods.test",
+                      "params": {"id": "tighten-deny", "hook": "permission_request"}})
+        r2 = recv_until(ws, "y2")
+        assert r2["ok"]
+        assert r2["result"]["result"]["deny"] == "no"
+        assert r2["result"]["parse_errors"] == []
+
+
+def test_mods_save_draft_writes_project_draft(home):
+    """mods.save_draft：草稿落 <项目>/.skysheep/mods-drafts/<id>/，不进 Mods 根。"""
+    manifest = {"id": "draft-mod", "name": "草稿", "hooks": ["tool_pre"],
+                "permissions": "observe"}
+    from skysheep.core.mods import mods_root
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "d1", "method": "mods.save_draft", "params": {
+            "id": "draft-mod", "manifest": manifest,
+            "main_js": "export default { toolPre(p){ return {} } }",
+            "readme": "# 草稿",
+        }})
+        r = recv_until(ws, "d1")
+        assert r["ok"] and r["result"]["saved"] == "draft-mod"
+        draft = home / "proj" / ".skysheep" / "mods-drafts" / "draft-mod"
+        assert (draft / "main.js").is_file()
+        assert (draft / "mod.json").is_file()
+        assert not (mods_root() / "draft-mod").exists()
+
+        # id 不一致拒存
+        ws.send_json({"id": "d2", "method": "mods.save_draft", "params": {
+            "id": "other", "manifest": manifest, "main_js": "export default {}"}})
+        assert recv_until(ws, "d2")["ok"] is False

@@ -41,7 +41,7 @@ class ReadImageArgs(BaseModel):
     path: str = Field(description="图片文件路径（相对当前工作目录或绝对路径）")
 
 
-def _sniff_media_type(data: bytes, suffix: str) -> str | None:
+def _sniff_media_type(data: bytes) -> str | None:
     """按文件头判断真实类型，避免把 .png 后缀的非图片当图片送去 API。
 
     只用魔数、不引依赖：这是「是不是图片」这种廉价判断，不值得为它装一个库。
@@ -57,7 +57,7 @@ def _sniff_media_type(data: bytes, suffix: str) -> str | None:
     return None
 
 
-def _shrink(data: bytes, media_type: str) -> tuple[bytes, bool]:
+def _shrink(data: bytes) -> tuple[bytes, bool]:
     """超过宽度上限时等比缩小并重编码；Pillow 不可用或解码失败时原样返回。"""
     try:
         from PIL import Image  # noqa: PLC0415 - 可选依赖，缺失时退化为原图
@@ -80,7 +80,7 @@ def _shrink(data: bytes, media_type: str) -> tuple[bytes, bool]:
 
 def _prepare_image(data: bytes) -> tuple[bytes, str, bool]:
     """缩放（需要时）+ base64 编码，供 to_thread 调用。返回 (最终字节, base64, 是否缩放)。"""
-    shrunk_data, shrunk = _shrink(data, "")
+    shrunk_data, shrunk = _shrink(data)
     return shrunk_data, base64.b64encode(shrunk_data).decode(), shrunk
 
 
@@ -129,7 +129,7 @@ class ReadImageTool(Tool):
             data = p.read_bytes()
         except OSError as e:
             raise ToolError("cannot read " + shown + ": " + str(e)) from e
-        media_type = _sniff_media_type(data, suffix)
+        media_type = _sniff_media_type(data)
         if media_type is None:
             raise ToolError(
                 f"{shown} 的内容不是有效图片（后缀是 {suffix}，但缺少对应文件头）。"

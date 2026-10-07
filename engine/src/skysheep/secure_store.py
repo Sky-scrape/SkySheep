@@ -223,6 +223,11 @@ def decrypt_value(value: str) -> str | None:
             data = ctypes.string_at(out.pbData, out.cbData)
         finally:
             kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+            # ppszDataDescr 也是系统 LocalAlloc 的输出串（调用方负责释放）：
+            # 漏掉就是每次解密泄漏一小块堆内存，decrypt_value 挂在配置读取
+            # 热路径上，桌面长驻进程会缓慢累积。descr 为 NULL 时 LocalFree
+            # 忽略入参原样返回，无需分支。
+            kernel32.LocalFree(ctypes.cast(descr, ctypes.c_void_p))
         return data.decode("utf-8")
     except Exception as e:  # noqa: BLE001 - 解不开按未配置处理，不炸配置读取
         logger.warning(

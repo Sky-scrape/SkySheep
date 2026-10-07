@@ -18,7 +18,6 @@ from urllib.parse import unquote, urljoin
 import httpx
 
 RELEASES_LATEST = "https://github.com/Sky-scrape/SkySheep/releases/latest"
-RELEASES_PAGE = "https://github.com/Sky-scrape/SkySheep/releases"
 DOWNLOAD_BASE = "https://github.com/Sky-scrape/SkySheep/releases/download"
 TIMEOUT_S = 6.0
 SETUP_ASSET_SUFFIX = "-setup.exe"

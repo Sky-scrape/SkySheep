@@ -23,8 +23,6 @@ from ...config import (
 )
 from ...core.checkpoints import CheckpointStore
 from ...core.prompt import MAX_INSTRUCTIONS_CHARS
-from ...messages import Message
-from ...models.base import ProviderDone, ProviderTextDelta
 from ...session.store import Project
 from ...textio import write_text_atomic
 from ...tools.memory import (
@@ -55,6 +53,8 @@ from ...tools.memory_distill import (
     parse_distill_output,
     set_distill_enabled,
 )
+from ...tools.memory_embed import schedule_warmup
+from ._shared import collect_stream_text
 
 logger = logging.getLogger("skysheep.security")
 memory_log = logging.getLogger("skysheep.memory")
@@ -91,15 +91,10 @@ class MemoryMixin:
             transcript = digest_transcript(await self.store.load_messages(sid))
             if not transcript:
                 return  # 寒暄/单条短问答，不值得提炼
-            parts: list[str] = []
-            async for ev in self.provider.stream(
-                [Message.user(build_digest_prompt(transcript))], []
-            ):
-                if isinstance(ev, ProviderTextDelta):
-                    parts.append(ev.text)
-                elif isinstance(ev, ProviderDone):
-                    break
-            added = await self._remember_digest_entries(parts)
+            digest_text = await collect_stream_text(
+                self.provider, build_digest_prompt(transcript)
+            )
+            added = await self._remember_digest_entries(digest_text)
             # 提炼跑完（无论有没有提出新条目）就标记：模型调用已经花过钱，
             # 取消归档再归档不应再来一遍；上面任何一步抛错则不标记，下次可重试
             await self.store.mark_session_memory_digested(sid)
@@ -118,10 +113,10 @@ class MemoryMixin:
         finally:
             self._digesting.discard(sid)
 
-    async def _remember_digest_entries(self, parts: list[str]) -> list[str]:
+    async def _remember_digest_entries(self, text: str) -> list[str]:
         """提炼稿解析落盘：走记忆写锁，避免与定期整理/设置页保存交错写 memory.md。"""
         async with self._memory_io_lock:
-            return remember_lines(parse_digest("".join(parts)))
+            return remember_lines(parse_digest(text))
 
     # ---- 轮次自动沉淀（记忆二期）：候选制、默认关、失败静默、不打扰 ----
 
@@ -161,15 +156,10 @@ class MemoryMixin:
             transcript = digest_transcript(msgs)
             if not transcript:
                 return  # 寒暄/过短轮次不值得抽候选（与归档提炼同一阈值）
-            parts: list[str] = []
-            async for ev in self.provider.stream(
-                [Message.user(build_distill_prompt(transcript))], []
-            ):
-                if isinstance(ev, ProviderTextDelta):
-                    parts.append(ev.text)
-                elif isinstance(ev, ProviderDone):
-                    break
-            cands = parse_distill_output("".join(parts))
+            distill_text = await collect_stream_text(
+                self.provider, build_distill_prompt(transcript)
+            )
+            cands = parse_distill_output(distill_text)
             if not cands:
                 return
             async with self._memory_io_lock:
@@ -299,15 +289,10 @@ class MemoryMixin:
             return "skipped"  # 还没到值得整理的规模，也不消耗「上次整理时间」
         self._maintaining = True
         try:
-            parts: list[str] = []
-            async for ev in self.provider.stream(
-                [Message.user(build_maintain_prompt(scope, old_text))], []
-            ):
-                if isinstance(ev, ProviderTextDelta):
-                    parts.append(ev.text)
-                elif isinstance(ev, ProviderDone):
-                    break
-            new_text = clean_maintained_text("".join(parts), old_text, max_chars)
+            maintained = await collect_stream_text(
+                self.provider, build_maintain_prompt(scope, old_text)
+            )
+            new_text = clean_maintained_text(maintained, old_text, max_chars)
             if new_text is None:
                 return "unchanged"  # 输出为空/与原文一致/超长失控/结构破坏：一律不动原文件
             async with self._memory_io_lock:
@@ -330,6 +315,8 @@ class MemoryMixin:
                     return "skipped"
             if scope == "project":
                 self.instructions_text = new_text
+            else:
+                schedule_warmup()  # memory.md 被重写：后台预热嵌入检索的词条向量
             for ag in self._for_each_agent():
                 ag.set_system(self.compose_system())
             state = load_maintenance_state()
@@ -477,6 +464,7 @@ class MemoryMixin:
                     )
             # 原子写（textio 同族）：写一半被杀不能留下半截记忆文件
             write_text_atomic(p, full)
+        schedule_warmup()  # 记忆被改写：后台预热嵌入检索的词条向量（memory_embed）
         # 记忆注入系统提示词：保存后立刻对当前所有会话生效
         for ag in self._for_each_agent():
             ag.set_system(self.compose_system())
@@ -688,13 +676,8 @@ class MemoryMixin:
             proj = await self.store.get_project(project_id)
             pname = (proj.name if proj and proj.name else "") or "未命名项目"
             prompt = self._map_build_material(pname, sessions)
-            parts: list[str] = []
-            async for ev in self.provider.stream([Message.user(prompt)], []):
-                if isinstance(ev, ProviderTextDelta):
-                    parts.append(ev.text)
-                elif isinstance(ev, ProviderDone):
-                    break
-            data = self._parse_map_digest_json("".join(parts))
+            digest_text = await collect_stream_text(self.provider, prompt)
+            data = self._parse_map_digest_json(digest_text)
             rows = self._map_digest_rows(data, sessions)
             if not rows:
                 raise ValueError("模型没有给出有效的阶段划分")

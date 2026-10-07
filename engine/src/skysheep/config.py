@@ -113,6 +113,24 @@ class RoundtableConfig(BaseModel):
     member_history_turns: int = Field(default=0, ge=0)
 
 
+class TeamConfig(BaseModel):
+    """团队功能：多模型分工协作（一期 · 用户总管 MVP，docs/团队模式设计.md）。
+
+    与圆桌并列的第二种多模型协作：总管拆解目标 → 派工单 → 队员执行 → 验收交付。
+    一期总管固定为用户本人，二期起可指定 AI 总管（chat.send 的 director_mode）；
+    设置页配置卡三期补（届时读写走 update_config_section）。
+    """
+
+    max_members: int = Field(default=3, ge=1, le=8)  # 队员上限（不含总管）
+    # 单成员单轮超时：队员干真活（读写文件/跑命令），比圆桌的 180 长
+    member_timeout_s: int = Field(default=300, ge=10)
+    max_rounds: int = Field(default=40, ge=1)  # 全局轮次上限（总管轮与成员轮合计计入；小会一场计 1）
+    redo_limit: int = Field(default=2, ge=0, le=5)  # 单工单打回上限（超限拒绝再打回）
+    # 停滞上限（二期，设计 §9）：队员连续 N 轮发言无新工具结果 → 停止自动唤醒，
+    # 强制移交总管处置（改派/放弃）。1 起步：0 等于没有这道边界
+    stall_limit: int = Field(default=2, ge=1)
+
+
 class WebSearchConfig(BaseModel):
     """联网搜索（web_search 工具）的服务商配置。
 
@@ -274,6 +292,7 @@ class SkySheepConfig(BaseModel):
     memory_map: MemoryMapConfig = Field(default_factory=MemoryMapConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
+    team: TeamConfig = Field(default_factory=TeamConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
@@ -440,6 +459,7 @@ def load_config() -> SkySheepConfig:
     max_iterations = 40
     disabled: list[str] = []
     roundtable = RoundtableConfig()
+    team = TeamConfig()
     websearch = WebSearchConfig()
     imagegen = ImageGenConfig()
     speech = SpeechConfig()
@@ -483,6 +503,9 @@ def load_config() -> SkySheepConfig:
         rt_raw = raw.get("roundtable")
         if isinstance(rt_raw, dict):
             roundtable = _build_section_model(RoundtableConfig, rt_raw, "roundtable")
+        team_raw = raw.get("team")
+        if isinstance(team_raw, dict):
+            team = _build_section_model(TeamConfig, team_raw, "team")
         for section_name, model_cls, cur in (
             ("websearch", WebSearchConfig, websearch),
             ("imagegen", ImageGenConfig, imagegen),
@@ -563,6 +586,7 @@ def load_config() -> SkySheepConfig:
             memory_map=memory_map,
             retention=retention,
             roundtable=roundtable,
+            team=team,
             websearch=websearch,
             imagegen=imagegen,
             speech=speech,
@@ -725,6 +749,45 @@ def set_hooks_in_config(
         raw.pop("hooks", None)
     else:
         raw["hooks"] = hooks
+    _write_raw_config(p, raw)
+
+
+def set_mods_in_config(
+    *,
+    enabled: bool | None = None,
+    enabled_mods: list[str] | None = None,
+) -> None:
+    """写入 config.toml 的 [mods] 表（None 表示该项不动）。
+
+    Mods 扩展（实验性）的设置页走这里，与其它设置项同一套读写路径
+    （_read_raw_config / _write_raw_config，不手拼 TOML）。enabled_mods 每项
+    是 Mod id 字符串，去重保序；两组全空时删掉整张表——留空表会让用户以为
+    配置还在生效（与 hooks 同一惯例）。坏条目中文报错，不静默清洗。
+    """
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError("Mods 总开关只能是 true / false")
+    cleaned: list[str] | None = None
+    if enabled_mods is not None:
+        if not isinstance(enabled_mods, list):
+            raise ConfigError("启用 Mods 的名单必须是字符串数组")
+        cleaned = []
+        for i, item in enumerate(enabled_mods, start=1):
+            text = str(item or "").strip()
+            if not text:
+                raise ConfigError(f"启用 Mods 名单第 {i} 项是空的")
+            if text not in cleaned:
+                cleaned.append(text)
+    p, raw = _read_raw_config()
+    section = dict(raw.get("mods") or {})
+    if enabled is not None:
+        section["enabled"] = enabled
+    if cleaned is not None:
+        section["enabled_mods"] = cleaned
+    # 两组全空删整表：总开关关着且没有任何启用项 = 用户已回到默认状态
+    if not section.get("enabled") and not section.get("enabled_mods"):
+        raw.pop("mods", None)
+    else:
+        raw["mods"] = section
     _write_raw_config(p, raw)
 
 

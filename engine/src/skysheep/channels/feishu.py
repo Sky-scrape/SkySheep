@@ -62,9 +62,6 @@ CLI_NAMES = ("lark-cli", "lark-cli.exe")
 # 单条消息长度上限。飞书文本上限 150 KB，这里取一个远低于上限、手机上也便于阅读的值。
 MAX_TEXT = 4000
 
-# 拉起的子进程把 stdout 一行一行吐出来；单行上限给足，避免大卡片事件被截断。
-_MAX_LINE = 1024 * 1024
-
 # 等 ready 标记的最长时间。CLI 建连要先向飞书换地址再握长连接，给它留足时间。
 READY_TIMEOUT = 60.0
 
@@ -455,7 +452,6 @@ class FeishuChannel(Channel):
         事件流则直接把事件对象逐行吐出，两种形状都兼容。
         """
         if obj.get("ok") is False:
-            obj.get("error") or {}
             self.error = self._err_text(obj)
             logger.warning("feishu 事件流报告错误：%s", self.error)
             return

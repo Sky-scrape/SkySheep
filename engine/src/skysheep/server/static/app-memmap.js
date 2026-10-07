@@ -49,9 +49,9 @@ function mapBasename(p) {
 // 能放几列放几列，格子恒完整不裁边。宽 - 2px 是亚像素舍入冗余（clientWidth
 // 取整与设备像素换算可能让内容比可用宽多出零点几像素）；上限与后端
 // MAP_HEAT_WEEKS 对齐
-function mapHeatWeeksFor(width) {
-  return Math.max(1, Math.min(260, Math.floor((width - 2) / 11)));
-}
+// 热力图列数不再随宽度伸缩（固定可视 4 周起步 + 横向滚动），按宽度算周数的
+// mapHeatWeeksFor / mapHeatAvailWidth 与 app.js 里按宽度重铺的 ResizeObserver
+// 已随宽度优先方案移除
 
 async function loadMemoryMap(force) {
   const tl = document.getElementById("map-timeline");
@@ -346,69 +346,107 @@ function renderMapAside() {
     if (clearBtn) clearBtn.onclick = () => { mapState.fileFilter = null; renderMapTimeline(); renderMapAside(); };
   }
 
-  // 热力图：GitHub 贡献图式（列=周，行=周一..周日），周数按底栏实际宽度
-  // 自适应（拉宽窗口多铺历史，富余宽度不空在中间）；强度按当日 token 分档，
-  // 悬停给明细，点击跳时间线对应月份
+  // 热力图：月历式（列=周一..周日，行=周，旧的在上、新的在下）。起步恒
+  // 4 行 28 格，随项目使用周数往下长（上限与后端 MAP_HEAT_WEEKS 对齐）；
+  // 行数超过可视高度后竖向滚动、默认停在最新一周，宽度恒定不随面板伸缩。
+  // 强度按当日 token 分档、当天有会话但没消耗也点亮最低档（只看 token 会
+  // 把「聊过但没花 token」画成和无活动一样的空色）；悬停给明细，点击跳
+  // 时间线对应月份
   const byDay = new Map((d.days || []).map((x) => [x.day, x]));
-  const paintHeat = (budget) => {   // budget：底栏放得下的总列数（列=周）
-    const now = new Date();
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    // 从当前周的周一开始往前铺 budget 整周：每列恒 7 天，本周没到的几天补
-    // 空格——整图是规矩矩形，既不缺角也不会超宽被裁
-    const endWeek = end.getTime() - ((end.getDay() + 6) % 7) * 86400000;
-    let start = endWeek - (budget - 1) * 7 * 86400000;
-    // 项目诞生晚于窗口起点时，起点裁到诞生所在周并收窄列数：不满宽就少铺，
-    // 不拿一排「无活动」的空格凑满底栏（右侧留白比假数据诚实）；data-weeks
-    // 仍记宽度对应的列数，拉伸窗口的防抖比较不受裁剪影响
-    let weeks = budget;
+  const bornWeekTs = (() => {
     const bornTs = Number((d.project || {}).created_at) || 0;
-    if (bornTs > 0) {
-      const b = new Date(bornTs * 1000);
-      const bornWeek = new Date(b.getFullYear(), b.getMonth(), b.getDate()).getTime()
-        - ((b.getDay() + 6) % 7) * 86400000;
-      if (bornWeek > start) {
-        start = Math.min(bornWeek, endWeek);
-        weeks = Math.max(1, Math.round((endWeek - start) / (7 * 86400000)) + 1);
-      }
-    }
+    if (bornTs <= 0) return 0;
+    const b = new Date(bornTs * 1000);
+    return new Date(b.getFullYear(), b.getMonth(), b.getDate()).getTime()
+      - ((b.getDay() + 6) % 7) * 86400000;
+  })();
+  const end = new Date();
+  const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  const endWeek = endDay.getTime() - ((endDay.getDay() + 6) % 7) * 86400000;
+  // 总行数：项目诞生所在周至今的周数，起步至少 4 行（28 格），上限 260
+  const MAP_HEAT_MIN_WEEKS = 4;
+  // token 数展示：万位以上用「万」，千位用 k，与悬停明细同一口径
+  const mapFmtTok = (n) => n >= 10000
+    ? (Math.round(n / 1000) / 10).toFixed(1).replace(/\.0$/, "") + " 万"
+    : n >= 1000 ? Math.round(n / 1000) + "k" : String(n);
+  let weeks = MAP_HEAT_MIN_WEEKS;
+  if (bornWeekTs > 0) {
+    weeks = Math.max(MAP_HEAT_MIN_WEEKS,
+      Math.min(260, Math.round((endWeek - bornWeekTs) / (7 * 86400000)) + 1));
+  }
+  {
+    // 窗口止于本周、往前铺满 weeks 整行：项目还新时窗口会往前越过诞生周，
+    // 那几天就是「无活动」淡格——28 格起步的含义
+    const start = endWeek - (weeks - 1) * 7 * 86400000;
     let cells = "";
+    let hasActivity = false;
+    let sumSess = 0;
+    let sumTok = 0;
+    let activeDays = 0;
     for (let i = 0; i < weeks * 7; i++) {
       const t = start + i * 86400000;
       const key = mapDayKey(t / 1000);
       const st = byDay.get(key);
       const tok = st ? st.tokens : 0;
-      const future = t > end.getTime();
-      const lv = future ? "l0" : tok >= 50000 ? "l4" : tok >= 10000 ? "l3" : tok >= 2000 ? "l2" : tok > 0 ? "l1" : "l0";
+      const future = t > endDay.getTime();
+      const isToday = t === endDay.getTime();
+      // 档位：token 优先；有会话但 0 token 也算活跃（最低档），与
+      // 「完全无活动」区分开——悬停提示本就分开写，颜色不再说谎。
+      // 未来天照铺成淡格（悬停仍是「还没到」）：整块恒是完整的 7×N 方阵，
+      // 不再透出底色让人以为渲染缺了一角
+      const lv = future ? "l0"
+        : tok >= 50000 ? "l4" : tok >= 10000 ? "l3" : tok >= 2000 ? "l2"
+        : tok > 0 ? "l1" : (st && st.sessions > 0) ? "l1" : "l0";
+      if (!future && (tok > 0 || (st && st.sessions > 0))) hasActivity = true;
+      if (!future && st) {
+        sumSess += st.sessions;
+        sumTok += st.tokens;
+        if (st.sessions > 0 || st.tokens > 0) activeDays++;
+      }
       const tip = future ? `${key}：还没到`
         : st ? `${key}：${st.sessions} 个会话 · ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
         : `${key}：无活动`;
-      cells += `<i class="${lv}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
+      cells += `<i class="${lv}${isToday ? " today" : ""}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
     }
-    heatBox.innerHTML = `<span class="map-aside-label">活跃</span>` +
-      `<div class="map-heat-grid" data-weeks="${budget}">${cells}</div>` +
-      `<span class="map-heat-legend">少<i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i>多</span>`;
-    heatBox.querySelectorAll("[data-day]").forEach((el) => {
-      el.onclick = () => {
-        const day = el.dataset.day;
-        mapState.view = "timeline";
-        renderMapChrome();
-        renderMapView();
-        renderMapAside();
-        const target = Array.from(document.querySelectorAll("#map-timeline .map-item"))
-          .find((n) => n.textContent.includes(day.slice(5).replace("-", "-")));
-        if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
-      };
-    });
-  };
-  const prevGrid = heatBox.querySelector(".map-heat-grid");
-  const budget = prevGrid && aside.clientWidth > 0 ? mapHeatWeeksFor(prevGrid.clientWidth) : 26;
-  paintHeat(budget);
-  if (!prevGrid && aside.clientWidth > 0) {
-    // 首帧没有旧格可量：先按最小列数铺，再按 flex:1 撑开的实际宽度补铺一次
-    //（网格宽度只随容器走、与格数无关，一轮即稳，不会来回抖）
-    const fit = mapHeatWeeksFor(heatBox.querySelector(".map-heat-grid").clientWidth);
-    if (fit !== budget) paintHeat(fit);
+    // 空态：整个窗口（含未来天）没有任何活动记录——一排空格子加图例不
+    // 说明任何信息，整块收起，底栏只剩文件足迹（或全部收起）。注意不要
+    // return：末尾还有「底栏整体收起」的汇合判断要走
+    if (!hasActivity) {
+      heatBox.innerHTML = "";
+      heatBox.classList.add("hidden");
+    } else {
+      heatBox.classList.remove("hidden");
+      heatBox.innerHTML = `<span class="map-aside-label">活跃</span>` +
+        `<div class="map-heat-scroll"><div class="map-heat-grid">${cells}</div></div>` +
+        `<span class="map-heat-legend">少<i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i>多</span>` +
+        `<span class="map-heat-stats">` +
+          `<span><b>${sumSess}</b> 会话</span>` +
+          `<span><b>${mapFmtTok(sumTok)}</b> tokens</span>` +
+          `<span>活跃 <b>${activeDays}</b> 天</span>` +
+          `<span>近 <b>${weeks}</b> 周</span>` +
+        `</span>`;
+      // 默认停在最新一周：行数超出可视高度时滚到最底；行数少时不滚
+      const scroller = heatBox.querySelector(".map-heat-scroll");
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      heatBox.querySelectorAll("[data-day]").forEach((el) => {
+        el.onclick = () => {
+          const day = el.dataset.day;
+          mapState.view = "timeline";
+          renderMapChrome();
+          renderMapView();
+          renderMapAside();
+          const target = Array.from(document.querySelectorAll("#map-timeline .map-item"))
+            .find((n) => n.textContent.includes(day.slice(5).replace("-", "-")));
+          if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
+        };
+      });
+    }
   }
+  // 文件足迹与热力图都空时，底栏只剩一条带边框的空白行——整条收起，
+  // 时间线不留无信息的尾巴
+  const asideEmpty = filesBox.classList.contains("hidden")
+    && heatBox.classList.contains("hidden");
+  aside.classList.toggle("hidden", asideEmpty || mapState.view !== "timeline");
 }
 
 // ---- 主题图谱：阶段-主题-文件-记忆的关联网络 ----

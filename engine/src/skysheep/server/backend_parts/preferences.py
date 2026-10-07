@@ -77,15 +77,11 @@ class PreferencesMixin:
     # 会话标签恢复：session.tabs 存 sid 数组（与 tab_order 同款上限），
     # session.active 存激活的 sid。都在前端写（标签开/关/切换时），
     # snapshot() 读出来校验归属后下发给前端恢复。
-    SESSION_TABS_KEY = "session_tabs"
     SESSION_ACTIVE_KEY = "session_active"
     SESSION_TABS_MAX = 200
-    # 应用内通知中心的持久化日志（notif_log）：错过提醒要扛得住进程重启
-    NOTIF_LOG_MAX = 60
     # 新会话默认模型（ui.json 的 default_model）：provider 键用字符串白名单校验
     # （只能是已配置的服务名），模型名随 provider 一起存进 value（"name::model"）
     DEFAULT_MODEL_PROVIDER_KEY = "default_model_provider"
-    DEFAULT_MODEL_VALUE_SEP = "::"
 
     def _ui_prefs_path(self) -> Path:
         return skysheep_home() / "ui.json"
@@ -445,6 +441,16 @@ class PreferencesMixin:
                 continue
             lo, hi = self.UI_PREFS_LIMITS[key]
             current[key] = int(min(hi, max(lo, round(val))))
-        # 原子写（M13 同族）：ui.json 写一半会让启动读偏好直接失败
-        write_text_atomic(self._ui_prefs_path(), json.dumps(current, ensure_ascii=False))
+        # 原子写（M13 同族）：ui.json 写一半会让启动读偏好直接失败。
+        # 合并结果与盘上内容语义一致（JSON 解析后相等，键序无关）时跳过落盘：
+        # 偏好保存是高频路径（拖拽/切签/通知日志、启动落 active_project 都会走
+        # 这里），同值重写只会搅动 mtime，让「这个文件最近被谁动过」类排查失真。
+        # 损坏/读不到按「有变化」处理，照常原子写覆盖
+        path = self._ui_prefs_path()
+        try:
+            unchanged = json.loads(path.read_text(encoding="utf-8")) == current
+        except (OSError, ValueError):
+            unchanged = False
+        if not unchanged:
+            write_text_atomic(path, json.dumps(current, ensure_ascii=False))
         return {"prefs": self._frontend_prefs(current)}

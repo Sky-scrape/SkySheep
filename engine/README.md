@@ -9,10 +9,11 @@ SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置
 | `skysheep.messages` | 跨 Provider 归一化的消息/内容块模型 |
 | `skysheep.events` | Agent 运行过程的统一事件流 |
 | `skysheep.core` | Agent 核心循环（流式、工具调用、权限交互协议），附任务耗时预估（`estimate.py`）与思考强度自动估档（`effort.py`）；检查点带字节限额，取消轮次会修复断裂的 tool_use 历史 |
+| `skysheep.core.team` | 团队多模型协作（一期用户总管 MVP + 二期 AI 总管闭环 + 三期模板与全量回放）：TeamChannel 频道 / TeamTask+TeamBoard 工单板 / TeamOrchestrator 编排循环——用户总管：每条消息即一道总管指令，队员唤醒执行、验收交付；AI 总管：指定模型任总管（独立 history、只挂内部团队工具）自动推进拆解→派工→收报→验收→交付，用户保留插话/接管/收队，「小会」复用 run_roundtable；防失控上限（全局轮次 / redo 超限强制裁定 / 停滞移交 / 预算越线强制交付）；安全零放松（执行型队员照走 PermissionGate）；三期沉淀：团队模板（`~/.skysheep/teams.json`，name 唯一键、同名覆盖）与频道消息全量落库（`message_sink` 逐条定稿落 `team_messages` 表、建队分配唯一 `team_id` 随快照进 meta，`team.log` 凭它回放） |
 | `skysheep.models` | 模型适配层：OpenAI 兼容 / Anthropic 原生 |
 | `skysheep.tools` | 内置工具（文件读写/移动删除、搜索、命令、文档、图片、联网、电脑控制）+ Schema 导出；grep 按探测编码匹配（GB18030 也能搜到），`run_command` 子进程剥密钥类环境变量，画图与联网同一套 SSRF 防护（公网校验 + 连接固定 + 流式限长）|
 | `skysheep.security` | Permission Gate：工具分级、白名单、确认协议（决策值过白名单，认不出来按拒绝）。命令拼接检测按实际 shell 取（Windows 的 `cmd.exe` 单引号不是引号、`%VAR%` 会展开）；工作区信任 `refresh(touched=...)` 只延续用户本次操作涉及的来源 |
-| `skysheep.session` | SQLite 持久化：项目 / 会话 / 消息 / 白名单规则 / 演化摘要（`map_digests`，记忆地图用），含 `messages_fts` 全文索引（索引写失败会留痕并在下次启动查漏补齐）|
+| `skysheep.session` | SQLite 持久化：项目 / 会话 / 消息 / 白名单规则 / 演化摘要（`map_digests`，记忆地图用）/ 团队频道消息（`team_messages`，按 `team_id` 全量回放），含 `messages_fts` 全文索引（索引写失败会留痕并在下次启动查漏补齐）|
 | `skysheep.obs` | 结构化日志：既有文本行格式不变，尾部追加 JSON，供按会话检索轮次/工具/权限耗时 |
 | `skysheep.textio` | 文本文件的编码（UTF-8 / GB18030 / BOM）与行尾符探测与安全写回；`write_text_atomic` / `write_bytes_atomic` 供引擎自有状态文件（config.toml、任务簿、mcp.json、ui.json、检查点）原子落盘 |
 | `skysheep.channels` | 聊天机器人渠道：飞书 / 微信遥控端（默认关闭，允许名单为空即拒绝一切；无人值守时写与执行自动拒绝，预授权写/执行类工具会显式告警）|

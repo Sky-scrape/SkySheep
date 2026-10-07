@@ -1374,3 +1374,22 @@ def test_pipeline_node_push_single_node_switch_on_dedup_finish_only(home):
         assert len(rec.texts()) == 1, f"同一件事只推一遍，实际 {rec.texts()}"
         assert "单发线" in rec.texts()[0] and "共 1 个节点" in rec.texts()[0], \
             "保留的是整体收尾推送（维持原行为）"
+
+
+# ---------- 前端接线（源码锚点，零构建、无 JS 运行时测试） ----------
+
+
+def test_frontend_pipeline_graph_observer_rebinds_not_accumulates():
+    """流水线依赖图（mountPipelineGraph）挂载前先摘旧 ResizeObserver。
+
+    旧实现每次挂载 new 一个 observer 且从不 disconnect，重排回调又递归重挂——
+    observer 在同一元素上无上界累积，之后每次拖宽面板全部回调、成倍全量重渲染。
+    修复后 observer 存到元素上（el._plRO），重复挂载前先 disconnect 旧的。"""
+    from conftest import read_app_bundle
+
+    js = read_app_bundle()
+    i = js.index("function mountPipelineGraph")
+    seg = js[i:js.index("async function loadPipelines", i)]
+    assert "el._plRO" in seg, "observer 没有存到元素上（跨挂载去重的钩子缺失）"
+    assert "el._plRO.disconnect()" in seg, "重复挂载前没有摘掉旧 observer"
+    assert "el._plRO = ro" in seg, "新 observer 没有登记回元素"

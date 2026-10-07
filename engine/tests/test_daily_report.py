@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC
 
 import pytest
 
@@ -285,3 +286,50 @@ async def test_daily_report_pass_via_default_push_path(store, home, monkeypatch)
     assert out["sent"] is True
     assert len(seen) == 1 and "运行日报" in seen[0][1]
     assert load_state()["last_sent_date"] == dr.today_str(_day_window()[0] + 3600)
+
+
+def test_day_bounds_end_at_next_local_midnight_across_dst(monkeypatch):
+    """DST 回拨日本地天长 25 小时：窗口终点是次日本地零点，不按固定 86400 秒提前收口。
+
+    本地时区在测试里换不了（Windows 没有 tzset），用分片固定偏移的 datetime
+    替身模拟「-4 → -5」的秋季回拨：回拨日 23:30 的终态必须落在当天窗口内
+    （固定 86400 外推的窗口提前 1 小时收口，会把它漏给明天）；无切换日照常
+    24 小时。日报与运行总览（run_center_summary 经 today_bounds）共用取窗。
+    """
+    from datetime import datetime
+
+    utc = UTC
+    flip = datetime(2026, 11, 1, 6, 0, tzinfo=utc).timestamp()  # 02:00 EDT→01:00 EST
+
+    def offset_at(ts: float) -> int:
+        return -4 * 3600 if ts < flip else -5 * 3600
+
+    class _FakeDT(datetime):
+        @classmethod
+        def fromtimestamp(cls, ts, tz=None):
+            base = datetime.fromtimestamp(ts + offset_at(ts), tz=utc)
+            return cls(base.year, base.month, base.day, base.hour, base.minute)
+
+        def timestamp(self):
+            naive = datetime.timestamp(self.replace(tzinfo=utc))  # 基类实现，防自递归
+            for off in (-4 * 3600, -5 * 3600):
+                ts = naive - off
+                if _FakeDT.fromtimestamp(ts) == self:
+                    return ts
+            raise ValueError(f"无法把本地时间映射回 epoch：{self}")
+
+    monkeypatch.setattr(dr, "datetime", _FakeDT)
+
+    # 回拨日（本地 2026-11-01）当地正午 = 17:00 UTC（-5）
+    noon = datetime(2026, 11, 1, 17, 0, tzinfo=utc).timestamp()
+    start, end = dr._day_bounds(noon)
+    assert end - start == 25 * 3600, "回拨日本地天长 25 小时，窗口到次日本地零点"
+    # 当天本地 23:30（EST = 次日 04:30 UTC）：固定 86400 外推的窗口已提前收口
+    late_evening = datetime(2026, 11, 2, 4, 30, tzinfo=utc).timestamp()
+    assert start <= late_evening < end, "回拨日 23:30 的终态属于当天窗口"
+    assert late_evening > start + 86400.0, "（回归对照）固定 86400 秒外推确实漏掉它"
+
+    # 对照：无切换日照常 24 小时窗口
+    mid = datetime(2026, 11, 15, 17, 0, tzinfo=utc).timestamp()
+    s2, e2 = dr._day_bounds(mid)
+    assert e2 - s2 == 24 * 3600

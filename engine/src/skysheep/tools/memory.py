@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from ..textio import write_text_atomic
 from .base import Safety, Tool, ToolContext, ToolError
-from .memory_embed import select_relevant_auto
+from .memory_embed import schedule_warmup, select_relevant_auto
 
 MemoryAction = Literal["append", "list", "delete"]
 
@@ -326,6 +326,9 @@ def _write_lines(p: Path, lines: list[str]) -> None:
         write_text_atomic(p, "\n".join(lines) + ("\n" if lines else ""))
     except OSError as e:
         raise ToolError(f"cannot write memory file: {e}") from e
+    # 记忆变了：后台预热嵌入检索的词条向量缓存（memory_embed；fire-and-forget，
+    # 无事件循环时是空操作）——缓存暖齐后轮首检索只剩查询向量一次请求
+    schedule_warmup()
 
 
 _MEMORY_LINE_RE = re.compile(r"^-\s*\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$")

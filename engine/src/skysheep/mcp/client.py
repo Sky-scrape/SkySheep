@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     # 仅注解用：mcp SDK 导入约 0.4s，且启动期（splash/服务就绪）完全用不到——
     # 只有真正连接 MCP 服务器时才需要，运行时导入点见 _extract_text / connect
     from mcp import ClientSession
-    from mcp.types import CallToolResult
+    from mcp.types import CallToolResult, ListToolsResult
 
 MAX_MCP_OUTPUT_CHARS = 30_000
 CONNECT_TIMEOUT_S = 20.0        # 单个服务器的连接上限；超时视为失败而不是无限等待
@@ -601,6 +601,26 @@ class MCPManager:
 
     # ---- 按服务器的连接管理（backend 配置差量同步用） ----
 
+    async def _connect_with_deadline(self, name: str, cfg: MCPServerConfig) -> list[Tool]:
+        """限时连一台服务器：connecting 旗标只亮期间，超时/异常写进 status.error。
+
+        connect_server（单台显式连接）与 connect_all 的并发包装（connect_limited）
+        走的都是这一段「旗标 + CONNECT_TIMEOUT_S 限时 + 失败落 status + finally
+        复位」的收尾，此前两处各写一遍，提取在这里收敛。
+        """
+        status = self.statuses[name]
+        status.connecting = True
+        try:
+            async with asyncio.timeout(CONNECT_TIMEOUT_S):
+                return await self._connect_one(name, cfg)
+        except TimeoutError:
+            status.error = f"连接超时（{CONNECT_TIMEOUT_S:g} 秒无响应）：地址或启动命令可能不对"
+        except Exception as e:
+            status.error = _friendly_error(e)
+        finally:
+            status.connecting = False
+        return []
+
     async def connect_server(self, name: str, cfg: MCPServerConfig) -> list[Tool]:
         """连接（或按新配置重连）一台服务器，返回它的工具。
 
@@ -617,17 +637,7 @@ class MCPManager:
         if not cfg.enabled:
             await self.disconnect_server(name)
             return []
-        status.connecting = True
-        try:
-            async with asyncio.timeout(CONNECT_TIMEOUT_S):
-                return await self._connect_one(name, cfg)
-        except TimeoutError:
-            status.error = f"连接超时（{CONNECT_TIMEOUT_S:g} 秒无响应）：地址或启动命令可能不对"
-        except Exception as e:
-            status.error = _friendly_error(e)
-        finally:
-            status.connecting = False
-        return []
+        return await self._connect_with_deadline(name, cfg)
 
     async def disconnect_server(self, name: str) -> None:
         """断开一台服务器并停掉它的重连链（配置保留）。"""
@@ -784,22 +794,30 @@ class MCPManager:
         status.connected = True
         status.enabled = True
         status.tool_names = [t.name for t in listing.tools]
-        tools: list[Tool] = []
-        for t in listing.tools:
-            tools.append(
-                MCPTool(
-                    manager=self,
-                    server_name=name,
-                    tool_name=t.name,
-                    description=t.description or "",
-                    input_schema=t.input_schema,
-                    # 服务器级授权被工具自身注解收窄：声明了会改环境（hint=False）
-                    # 的工具回到逐次确认，其余沿用服务器级 readonly
-                    readonly=_effective_readonly(cfg.readonly, t.name, t.annotations),
-                    call_timeout=cfg.timeout,
-                    annotations=t.annotations,
-                )
+        return self._wrap_tools(name, cfg, listing)
+
+    def _wrap_tools(self, name: str, cfg: MCPServerConfig, listing: ListToolsResult) -> list[Tool]:
+        """把工具清单包成 MCPTool 列表，挂到本服务器的注册表并返回。
+
+        首连（_connect_one）与 tools/list_changed 刷新（_refresh_tool_list）两条
+        路径产出的工具必须逐字段一致（readonly 收窄、注解透传、每服务器超时），
+        此前两处各写一遍容易改一漏一——权限口径分叉就出在这里。
+        """
+        tools = [
+            MCPTool(
+                manager=self,
+                server_name=name,
+                tool_name=t.name,
+                description=t.description or "",
+                input_schema=t.input_schema,
+                # 服务器级授权被工具自身注解收窄：声明了会改环境（hint=False）
+                # 的工具回到逐次确认，其余沿用服务器级 readonly
+                readonly=_effective_readonly(cfg.readonly, t.name, t.annotations),
+                call_timeout=cfg.timeout,
+                annotations=t.annotations,
             )
+            for t in listing.tools
+        ]
         self._tools[name] = tools
         return tools
 
@@ -832,20 +850,7 @@ class MCPManager:
         if cfg is None:
             return
         status.tool_names = [t.name for t in listing.tools]
-        tools = [
-            MCPTool(
-                manager=self,
-                server_name=name,
-                tool_name=t.name,
-                description=t.description or "",
-                input_schema=t.input_schema,
-                readonly=_effective_readonly(cfg.readonly, t.name, t.annotations),
-                call_timeout=cfg.timeout,
-                annotations=t.annotations,
-            )
-            for t in listing.tools
-        ]
-        self._tools[name] = tools
+        self._wrap_tools(name, cfg, listing)
         if self.on_tools_changed is not None:
             try:
                 await self.on_tools_changed(name)
@@ -870,19 +875,7 @@ class MCPManager:
         async def connect_limited(name: str, cfg: MCPServerConfig) -> list[Tool]:
             if not cfg.enabled:
                 return []
-            self.statuses[name].connecting = True
-            try:
-                async with asyncio.timeout(CONNECT_TIMEOUT_S):
-                    return await self._connect_one(name, cfg)
-            except TimeoutError:
-                self.statuses[name].error = (
-                    f"连接超时（{CONNECT_TIMEOUT_S:g} 秒无响应）：地址或启动命令可能不对"
-                )
-            except Exception as e:
-                self.statuses[name].error = _friendly_error(e)
-            finally:
-                self.statuses[name].connecting = False
-            return []
+            return await self._connect_with_deadline(name, cfg)
 
         results = await asyncio.gather(
             *(connect_limited(n, c) for n, c in self._configs.items())

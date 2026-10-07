@@ -140,8 +140,12 @@ def _acc_text(acc: dict) -> str:
     return _decode(data)
 
 
-def _fg_kill(proc: subprocess.Popen) -> None:
-    """前台超时收尾：Windows 树杀（cmd /c 的子进程一并结束），POSIX 直接杀。"""
+def _tree_kill(proc: subprocess.Popen) -> None:
+    """Windows 树杀（cmd /c 起的子进程一并结束，与终端面板同款实现），POSIX 直接杀。
+
+    双层兜底：树杀失败（进程已退出/权限不足等）退回直接杀，再失败就放弃——
+    调用方都在收尾路径上，终止失败不能打断主流程。前台超时与后台 kill 共用。
+    """
     try:
         if IS_WINDOWS:
             subprocess.run(  # noqa: S603 - exe 固定为 taskkill
@@ -178,7 +182,7 @@ def _run_sync(argv: list[str], cwd: str, timeout_s: int):
         proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _fg_kill(proc)
+        _tree_kill(proc)  # 超时树杀：cmd /c 的子进程一并结束
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -279,20 +283,7 @@ def _bg_kill(bid: int, sid: str = "") -> str:
     proc = st["proc"]
     if proc.poll() is not None:
         return f"后台进程 {bid} 早已退出（exit code: {proc.returncode}）"
-    try:
-        if IS_WINDOWS:
-            # 树杀：cmd /c 起的子进程要一并结束（与终端面板同款实现）
-            subprocess.run(  # noqa: S603 - exe 固定为 taskkill
-                [_windows_exe("taskkill.exe"), "/PID", str(proc.pid), "/T", "/F"],
-                capture_output=True, timeout=5,
-            )
-        else:
-            proc.kill()
-    except Exception:  # noqa: BLE001
-        try:
-            proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
+    _tree_kill(proc)
     return f"后台进程 {bid} 已终止（{st['command'][:120]}）"
 
 

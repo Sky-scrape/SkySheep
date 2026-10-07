@@ -134,6 +134,7 @@
           <li data-target="ui">界面与通知</li>
           <li class="nav-cap" aria-hidden="true">安全</li>
           <li data-target="advanced">高级</li>
+          <li data-target="mods">Mods 扩展（实验性）</li>
           <li class="nav-cap" aria-hidden="true">信息</li>
           <li data-target="usage">用量</li>
           <li data-target="about">关于</li>
@@ -236,6 +237,7 @@
           <div class="perm-head">🔒 需要确认：<b id="perm-tool"></b></div>
           <pre id="perm-args"></pre>
           <p id="perm-note" class="perm-note" hidden></p>
+          <p id="perm-mod-note" class="perm-mod-note" hidden></p>
           <p id="perm-rule" class="perm-rule" hidden></p>
           <div class="perm-actions">
             <button class="btn-primary" data-decision="allow_once">允许一次</button>
@@ -249,6 +251,9 @@
 
         <!-- 圆桌成员选择浮层 -->
         <div id="rt-menu" class="rt-menu hidden"></div>
+
+        <!-- 团队成员选择浮层（复用圆桌浮层皮：成员名/人设输入勾选后展开） -->
+        <div id="team-menu" class="rt-menu team-menu hidden"></div>
 
         <!-- 拖动调整输入区高度（双击恢复默认） -->
         <div id="cp-resizer" class="ui-resizer ui-resizer-h" title="拖动调整输入区高度 · 双击恢复默认"></div>
@@ -267,6 +272,14 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.7-3.4 2.9-5.2 5.5-5.2s4.8 1.8 5.5 5.2"/><circle cx="17" cy="9.5" r="2.5"/><path d="M15.7 14.6c2.5.3 4.3 1.9 4.8 4.4"/></svg>
               </button>
               <button id="rt-pick" class="cp-caret" title="选择圆桌成员">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
+              </button>
+            </span>
+            <span id="team-group">
+              <button id="team-switch" class="cp-icon" title="团队：开启后组建团队，你的消息作为总管指令进入团队频道">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="6.5" r="2.6"/><path d="M7.5 19c.6-3 2.3-4.6 4.5-4.6s3.9 1.6 4.5 4.6"/><circle cx="4.8" cy="10.2" r="2.2"/><path d="M1.8 19c.5-2.6 1.7-4 3.3-4"/><circle cx="19.2" cy="10.2" r="2.2"/><path d="M22.2 19c-.5-2.6-1.7-4-3.3-4"/></svg>
+              </button>
+              <button id="team-pick" class="cp-caret" title="选择团队成员与总管（我当总管 / AI 总管）">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
               </button>
             </span>
@@ -292,6 +305,8 @@
             <span id="cp-hint" title="& 引用对话 · @ 引用文件 · ~ 提示词 · / 命令 · 可粘贴/拖入图片 · Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
             <!-- 右侧簇整体不拆行：窗口再窄也整簇换行并靠右，「发送」永远在最右 -->
             <span id="cp-right">
+              <!-- Mods 状态托盘（实验性）：Mod 产出的 stat 片段随会话标签渲染 -->
+              <span id="mod-tray" class="hidden"></span>
               <!-- 连接状态 + 思考强度：贴在模型选择器左侧 -->
               <span id="conn-status" class="dot off" title="与本地引擎的连接状态" role="status"></span>
               <span id="status-text" class="dim small" role="status">连接中…</span>
@@ -686,10 +701,11 @@
             </div>
             <p class="settings-hint">
               技能是写给 Agent 看的「操作手册」：启用后相关用法会进入系统提示词，Agent 会在合适的任务里自动套用。
-              点右上角「导入技能」：可以选本机的技能文件夹或 .zip 压缩包，也可以直接粘贴
-              <b>GitHub / Gitee 仓库链接</b>在线安装；「本机现存」则在下方列出 Claude Code
-              等工具已装在本机的技能，勾选即可导入，装完立即生效。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>「＋ 导入技能」：选本机技能文件夹 / .zip 包，或粘贴 <b>GitHub / Gitee 仓库链接</b>在线安装。</li>
+              <li>「本机现存」：列出 Claude Code 等工具已装在本机的技能，勾选即可导入，装完立即生效。</li>
+            </ul>
             <div id="skill-summary" class="skill-entry">
               <span class="skill-entry-main">
                 <span class="item-name">管理与安装</span>
@@ -702,10 +718,11 @@
             <div class="card-head"><h3>场景模板</h3></div>
             <p class="settings-hint">
               官方精选的场景技能包：覆盖记账、报错排查、数据报告等常见任务。
-              模板已随应用内置，点「一键安装」从包内副本装进全局技能目录
-              （所有项目可用），无需联网、装完立即生效，对话里直接说要做的事就行。
-              官方更新模板后，已安装的条目会标「可更新」，点「更新」用内置副本覆盖本地技能。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>模板已随应用内置，点「一键安装」从包内副本装进全局技能目录（所有项目可用），无需联网、装完立即生效。</li>
+              <li>官方更新后，已安装条目会标「可更新」，点「更新」用内置副本覆盖本地技能。</li>
+            </ul>
             <div id="gallery-status" class="card-status" hidden></div>
             <div id="gallery-grid" class="gallery-grid">
               <span class="dim small">正在加载场景模板…</span>
@@ -736,6 +753,12 @@
             <div id="roundtable-form" class="toolcfg-form"></div>
           </section>
           <section class="settings-card">
+            <div class="card-head"><h3>团队</h3></div>
+            <p class="settings-hint" id="team-hint"></p>
+            <div id="team-status" class="card-status" hidden></div>
+            <div id="team-form" class="toolcfg-form"></div>
+          </section>
+          <section class="settings-card">
             <h3>内置工具</h3>
             <p class="settings-hint">
               Agent 完成任务时可以调用的工具。<b>只读</b>操作自动放行；<b>写入</b>与<b>高危</b>（执行命令）操作默认会先征得你确认。
@@ -747,8 +770,7 @@
             </label>
             <p class="dim small adv-toggle-desc">
               让 Agent 能「看见并操作」这台电脑：截屏进对话、移动鼠标、输入文字。
-              高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，
-              有「帮我操作这个软件」这类需求时再打开。
+              高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，有「帮我操作这个软件」这类需求时再打开。
             </p>
             <div id="tool-computer-status" class="card-status" hidden></div>
             <label class="toggle-row adv-toggle">
@@ -756,9 +778,8 @@
               <span>浏览器控制 —— 给你看：Agent 替你打开网页 / 搜索</span>
             </label>
             <p class="dim small adv-toggle-desc">
-              让 Agent 用你的默认浏览器打开网址或搜索关键词（比如「帮我打开这个链接」
-              「搜一下最近的新闻给我看」），页面在你的浏览器里展开，逐次确认、
-              可按动作加白名单；<b>默认关闭</b>。Agent 自己读网页内容不受此开关影响（web_fetch）。
+              让 Agent 用你的默认浏览器打开网址或搜索关键词（比如「帮我打开这个链接」「搜一下最近的新闻给我看」），
+              页面在你的浏览器里展开，逐次确认、可按动作加白名单；<b>默认关闭</b>。Agent 自己读网页内容不受此开关影响（web_fetch）。
             </p>
             <div id="tool-browser-status" class="card-status" hidden></div>
             <details id="tool-list-fold" class="market-fold">
@@ -820,8 +841,11 @@
             </div>
             <p class="settings-hint">
               子代理是 Agent 派出去的「分身」：调研、后台跑任务可以并行做，不挤占主对话。
-              关闭后 Agent 只用主对话逐步处理；开启后还可限制每个分身最多干多少轮。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>关闭后 Agent 只用主对话逐步处理。</li>
+              <li>开启后还可限制每个分身最多干多少轮。</li>
+            </ul>
             <div id="subagent-status" class="card-status" hidden></div>
             <div id="subagent-form" class="toolcfg-form"></div>
           </section>
@@ -832,9 +856,10 @@
               <button id="btn-subagent-add" class="btn-ghost">＋ 新建子代理</button>
             </div>
             <p class="settings-hint">
-              给特定任务定制「分身」：起个名字、写清楚它负责什么、给它专项指令，再挑一套工具和模型。
-              保存后 Agent 在合适的任务里会自动派它出场（对话里也可以点名让它用）。
-              注意：无论给多少工具，子代理里的写入 / 执行操作仍会被自动拒绝——需要确认的操作由主 Agent 来做。
+              给特定任务定制「分身」：起名、写清职责、给专项指令，再挑一套工具和模型。保存后 Agent 在合适任务里会自动派它出场（也可点名调用）。
+            </p>
+            <p class="settings-hint">
+              注意：无论给多少工具，子代理里的<b>写入 / 执行操作仍会被自动拒绝</b>——需要确认的操作由主 Agent 来做。
             </p>
             <div id="custom-subagent-status" class="card-status" hidden></div>
             <ul id="custom-subagent-list" class="list custom-subagent-list"></ul>
@@ -883,9 +908,11 @@
             </div>
             <p class="settings-hint">
               你在对话中选择「总是允许」时保存的规则；删除后对应操作会重新询问。
-              命令的前缀规则不命中带 shell 拼接的命令（如 <code>git status; rm -rf /</code>）；
-              键盘 / 鼠标 / 关窗口的「总是允许」只固化那一次的内容或动作。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>命令的前缀规则<b>不命中带 shell 拼接的命令</b>（如 <code>git status; rm -rf /</code>）。</li>
+              <li>键盘 / 鼠标 / 关窗口的「总是允许」只固化那一次的内容或动作。</li>
+            </ul>
             <div id="rule-add-form" class="rule-add-form hidden">
               <div class="rule-add-row">
                 <label>工具</label>
@@ -938,20 +965,21 @@
               <button id="btn-hooks-save" class="btn-ghost">保存</button>
             </div>
             <p class="settings-hint">
-              在 Agent 每次调用工具的前 / 后自动跑一条你自己的命令。典型用途：写入前先跑
-              格式检查、跑完命令弹个提醒、把关键操作记进自己的日志。
-              <b>前钩子可以阻挡这次调用</b>：退出码 2（或输出 {"decision":"block"}）就拦下，
-              标准错误会作为原因告诉 Agent。例如 match 填 <code>write_file</code>、
-              命令填 <code>python check.py</code>：脚本退出码为 2 时，这次写入就会被拦下。
-              「任务完成」钩子在一轮以最终回答结束时触发，适合「干完活通知我」。
+              在 Agent 每次调用工具的<b>前 / 后</b>自动跑一条你自己的命令，也可在<b>任务完成</b>时触发。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>典型用途：写入前先跑格式检查、跑完命令弹个提醒、把关键操作记进自己的日志。</li>
+              <li><b>前钩子可以阻挡这次调用</b>：退出码 2（或输出 <code>{"decision":"block"}</code>）就拦下，标准错误会作为原因告诉 Agent。例如 match 填 <code>write_file</code>、命令填 <code>python check.py</code>：脚本退出码为 2 时，这次写入就会被拦下。</li>
+              <li>「任务完成」钩子在一轮以最终回答结束时触发，适合「干完活通知我」。</li>
+            </ul>
             <p class="settings-hint">
               命令会把一份 JSON 从标准输入交给你的程序：
               <code>{"tool": "write_file", "input": {...}, "working_dir": "...", "session_id": "..."}</code>。
-              命令来自你自己的配置，等价于你手敲，<b>不经过权限确认</b>——请只填可信的命令。
-              每条钩子可用开关临时停用（配置保留）；钩子自身故障（非 0 非 2 退出码）
-              不影响任务，但会记进下方「最近执行」。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>命令来自你自己的配置，等价于你手敲，<b>不经过权限确认</b>——请只填可信的命令。</li>
+              <li>每条钩子可用开关临时停用（配置保留）；钩子自身故障（非 0 非 2 退出码）不影响任务，但会记进下方「最近执行」。</li>
+            </ul>
             <div id="hooks-status" class="card-status" hidden></div>
             <div class="hooks-group">
               <div class="hooks-head">
@@ -1064,13 +1092,9 @@
               <span>仅允许 Agent 访问当前工作目录</span>
             </label>
             <p class="dim small adv-toggle-desc">
-              开启后，读写工作目录以外的文件会被直接拒绝（包括 <b>@</b> 引用的外部文件）。
-              只读工具平时是自动放行的，这个开关给"只看这一个项目"上把锁。
-            </p>
-            <p class="dim small adv-toggle-desc">
-              关闭时（默认），只读工具（读文件 / 列目录 / 搜索）可以不经确认读取磁盘上
-              任何位置——包括 <b>~/.ssh</b> 下的私钥、浏览器数据。如果 Agent 会被诱导
-              读入外来的网页或文件内容，建议开启这个开关。
+              开启后，读写工作目录以外的文件会被直接拒绝（包括 <b>@</b> 引用的外部文件）——给「只看这一个项目」上把锁。
+              关闭时（默认），只读工具可以不经确认读取磁盘任何位置，包括 <b>~/.ssh</b> 下的私钥、浏览器数据；
+              如果 Agent 会被诱导读入外来内容，建议开启。
             </p>
             <div class="toolcfg-row">
               <label>工作区信任</label>
@@ -1103,15 +1127,82 @@
           </section>
         </section>
 
+        <section class="settings-page hidden" id="settings-page-mods">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>Mods 扩展（实验性）</h3>
+              <label class="toggle-row"><input type="checkbox" id="mods-toggle"><span>启用 Mods</span></label>
+            </div>
+            <p class="settings-hint">
+              Mod 是<b>第三方编写的事件处理扩展</b>：挂在工具调用前后、权限请求与回合生命周期上，
+              做观察、提示或<b>收紧</b>（拒绝 / 要求确认）。
+            </p>
+            <ul class="settings-hint hint-points">
+              <li><b>安全底线</b>：对权限门<b>只能收紧、永不放行</b>，也不能修改工具参数。</li>
+              <li>代码跑在引擎侧沙箱，无文件 / 网络 / 进程能力。</li>
+              <li>界面里的 Mod 片段是固定渲染器画的声明式小部件，Mod 无法自由绘制界面。</li>
+            </ul>
+            <div id="mods-runtime-status" class="card-status" hidden></div>
+            <div id="mods-status" class="card-status" hidden></div>
+          </section>
+
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>已安装的 Mod</h3>
+              <span class="head-ops">
+                <button id="btn-mod-install" class="btn-ghost">＋ 安装 Mod</button>
+                <button id="btn-mods-refresh" class="btn-ghost" title="重新读取 Mods 清单">刷新</button>
+              </span>
+            </div>
+            <p class="settings-hint" id="mods-root-hint">
+              安装位置在本机用户目录的 <code>.skysheep\mods\</code>；安装来源是本机文件夹（含 mod.json）
+              或 .zip 压缩包。安装前会先展示内容预览，确认后才落盘。
+            </p>
+            <ul id="mods-list" class="list settings-skill-list"></ul>
+          </section>
+
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>让 AI 帮我写一个 Mod</h3>
+              <span class="head-ops">
+                <button id="btn-mod-save-draft" class="btn-ghost">存为草稿…</button>
+                <button id="btn-mod-template" class="btn-ghost">生成提示词</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              点「生成提示词」把编写规格填进输入框，补一句想要的效果后发给 Agent；拿到代码后：
+            </p>
+            <ol class="settings-hint hint-steps">
+              <li>点<b>「存为草稿」</b>把代码粘进来保存（或自己复制建目录）；</li>
+              <li>点<b>「＋ 安装 Mod」</b>确认后才会生效。</li>
+            </ol>
+            <div id="mods-draft-hint" class="card-status" hidden></div>
+          </section>
+
+          <section class="settings-card">
+            <div class="card-head"><h3>官方示例</h3></div>
+            <p class="settings-hint">
+              随应用内置的两个示例 Mod（离线可装）：<b>上下文天气</b>把上下文占用做成天气式状态条；
+              <b>高危命令影响面</b>让高危命令一律逐次确认并附影响面说明（只收紧、不放行）。
+              它们同样是「Mod 怎么写」的参考实现。
+            </p>
+            <div id="mods-official-grid" class="gallery-grid">
+              <span class="dim small">正在加载官方示例…</span>
+            </div>
+          </section>
+        </section>
+
         <section class="settings-page hidden" id="settings-page-remote">
           <section class="settings-card">
             <h3>远程控制</h3>
             <p class="settings-hint">
-              把 SkySheep 接到别的设备上用：手机 / 平板扫同一 Wi-Fi 或经 Tailscale
-              跨网络打开完整界面，或在飞书 / 微信里给机器人发消息遥控。
-              这些能力<b>默认全部关闭</b>，需要时逐项打开。
-              开关类改动保存后，页顶会出现「需要重启生效」提醒横条，点横条上的按钮即可就地重启。
+              把 SkySheep 接到别的设备上用：手机 / 平板扫同一 Wi-Fi 或经 Tailscale 跨网络打开完整界面，
+              或在飞书 / 微信里给机器人发消息遥控。
             </p>
+            <ul class="settings-hint hint-points">
+              <li><b>默认全部关闭</b>，需要时逐项打开。</li>
+              <li>开关类改动保存后，页顶会出现「需要重启生效」提醒横条，点横条按钮即可就地重启。</li>
+            </ul>
           </section>
           <section class="settings-card">
             <div class="card-head"><h3>手机控制</h3>
@@ -1119,10 +1210,12 @@
             </div>
             <p class="settings-hint">
               用手机遥控这台电脑上的 SkySheep：开启后（<b>重启 SkySheep 生效</b>），同一 Wi-Fi 下的
-              手机 / 平板扫码或输入地址，即可打开<b>完整界面</b>——继续聊天、批准确认、看任务进度，
-              电脑端同步可见。服务将对局域网开放，令牌即密码；地址是 <b>http 明文传输</b>，
-              请勿在公共网络使用；关闭后恢复仅本机访问。
+              手机 / 平板扫码或输入地址，即可打开<b>完整界面</b>——继续聊天、批准确认、看任务进度，电脑端同步可见。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>服务对<b>局域网</b>开放，令牌即密码；地址是 <b>http 明文传输</b>，请勿在公共网络使用。</li>
+              <li>关闭后恢复仅本机访问。</li>
+            </ul>
             <div id="lan-info" class="lan-info"></div>
           </section>
           <section class="settings-card">
@@ -1132,21 +1225,24 @@
             <p class="settings-hint">
               不在同一 Wi-Fi（手机开流量也行）也能连回家里的 SkySheep：电脑和手机都安装
               Tailscale（tailscale.com）并登录<b>同一账号</b>，这里开启后（<b>重启 SkySheep 生效</b>），
-              手机在任意网络打开电脑的 Tailscale 地址，就能用完整界面继续聊、批准确认、看任务进度。
-              链路经 Tailscale 端到端加密，访问令牌与「手机控制」共用；未装 Tailscale 的设备
-              （包括同一 Wi-Fi 下的）反而连不进来。
+              手机在任意网络打开电脑的 Tailscale 地址就能用完整界面。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>链路经 Tailscale <b>端到端加密</b>，访问令牌与「手机控制」共用。</li>
+              <li>未装 Tailscale 的设备（含同一 Wi-Fi 下的）反而连不进来。</li>
+            </ul>
             <div id="ts-info" class="lan-info"></div>
           </section>
           <section class="settings-card">
             <div class="card-head"><h3>聊天机器人渠道</h3></div>
             <p class="settings-hint">
-              把 <b>飞书 / 微信</b> 接成遥控端：手机上给机器人发消息，就能让这台电脑上的 SkySheep
-              干活，回复直接回到聊天窗口。渠道<b>默认关闭</b>；启用前必须先把你的账号加入
-              <b>允许名单</b>——没有名单的机器人等于对所有人开放。
-              <b>Webhook</b> 是纯出站的推送目标：只把定时任务摘要、任务编排终态、每日运行日报等
-              出站消息 POST 到你配置的地址，不收消息。
+              把 <b>飞书 / 微信</b> 接成遥控端：手机上给机器人发消息，就能让这台电脑上的 SkySheep 干活，
+              回复直接回到聊天窗口。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>渠道<b>默认关闭</b>；启用前必须先把你的账号加入<b>允许名单</b>——没有名单的机器人等于对所有人开放。</li>
+              <li><b>Webhook</b> 是纯出站的推送目标：只把定时任务摘要、任务编排终态、每日运行日报等出站消息 POST 到你配置的地址，不收消息。</li>
+            </ul>
             <details class="rule-check-fold">
               <summary>安全边界与凭据说明（只读模式 / 群聊风险 / 审批规则 / 凭据要求）</summary>
               <p class="settings-hint">
@@ -1169,10 +1265,12 @@
             </div>
             <p class="settings-hint">
               跨项目生效的用户记忆：Agent 对话中说「记住我喜欢…」时会自动写进来（格式为
-              <b>- [日期] 内容</b> 的列表），每一轮对话都会注入。这里可以直接查看、修改；
-              保存后对所有会话立即生效。与之相对，「项目记忆」只对当前项目生效，
-              在对话窗口右侧面板的「记忆」页签里查看和编辑。
+              <b>- [日期] 内容</b> 的列表），每一轮对话都会注入。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>这里可以直接查看、修改；保存后对所有会话立即生效。</li>
+              <li>「项目记忆」只对当前项目生效，在对话窗口右侧面板的「记忆」页签里查看和编辑。</li>
+            </ul>
             <div id="memory-global-status" class="card-status" hidden></div>
             <textarea id="memory-text" class="memory-text" rows="14"
                       placeholder="Agent 还没有记住任何东西。也可以在这里手动添加，例如：&#10;- [2026-09-15] 沟通偏好直接给结论，不用铺垫"></textarea>
@@ -1182,18 +1280,20 @@
           <section class="settings-card">
             <h3>自动记忆与整理</h3>
             <p class="settings-hint">
-              <b>归档提炼</b>：归档会话时，后台用当前模型通读这段对话，把值得长期记住的信息
-              （偏好、常用环境、做事约定；不含一次性任务细节与机密）自动提炼进上面的全局记忆，
-              最多 8 条、与已有记忆重复的自动跳过，提炼完成会通知你记住了什么。
-              额外消耗一次模型调用；寒暄、单条短问答不会触发。
+              <b>归档提炼</b>：归档会话时，后台用当前模型通读这段对话，把值得长期记住的信息（偏好、常用环境、做事约定；不含一次性任务细节与机密）自动提炼进上面的全局记忆。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>最多 8 条、与已有记忆重复的自动跳过，提炼完成会通知你记住了什么。</li>
+              <li>额外消耗一次模型调用；寒暄、单条短问答不会触发。</li>
+            </ul>
             <p class="settings-hint">
-              <b>定期整理</b>：按周期用当前模型通读记忆，合并重复、相似或过时的条目，
-              让记忆越用越精炼而不是越攒越长。整理前自动备份原件（同目录带时间戳，保留最近 5 份），
-              整理完成后会通知你。全局记忆不足 400 字时自动跳过、不花模型调用；
-              项目记忆（AGENTS.md）的整理开关在右侧面板的「项目记忆」页签最上方。
-              开关与周期即改即存、热生效，不用单独点保存。
+              <b>定期整理</b>：按周期用当前模型通读记忆，合并重复、相似或过时的条目，让记忆越用越精炼而不是越攒越长。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>整理前自动备份原件（同目录带时间戳，保留最近 5 份），完成后会通知你。</li>
+              <li>全局记忆不足 400 字时自动跳过、不花模型调用；项目记忆（AGENTS.md）的整理开关在右侧面板的「项目记忆」页签最上方。</li>
+              <li>开关与周期即改即存、热生效，不用单独点保存。</li>
+            </ul>
             <label class="toggle-row check-row">
               <input type="checkbox" id="memory-digest-toggle">
               <span>归档会话时自动总结记忆</span>
@@ -1224,10 +1324,12 @@
           <section class="settings-card">
             <h3>主题</h3>
             <p class="settings-hint">
-              六套配色共用同一张「纸面」，按喜好挑即可；「跟随系统」按 Windows 的深浅色
-              自动落到下面选的浅色 / 深色主题（默认纸墨 / 夜墨），选中具体主题则不再随系统切换。
-              标题栏颜色会一起变。
+              六套配色共用同一张「纸面」，按喜好挑即可；标题栏颜色会一起变。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>「跟随系统」：按 Windows 深浅色自动落到下面选的浅色 / 深色主题（默认纸墨 / 夜墨）。</li>
+              <li>选中具体主题后不再随系统切换。</li>
+            </ul>
             <div id="theme-grid" class="theme-grid">
               <button class="theme-card" data-theme-pref="auto" type="button">
                 <span class="theme-swatch"><i style="background:#e8dfc7"></i><i style="background:#1257c4"></i><i style="background:#171410"></i></span>
@@ -1398,17 +1500,14 @@
               </span>
             </div>
             <p class="settings-hint">
-              常用的提示词模板。在输入框输入 <b>~</b> 时会出现在候选最上方，选中即插入到输入框；
-              列表顺序就是候选顺序，按住行首 <b>⋮⋮</b> 拖动可调整（「排序」按钮可改成常用优先）；
-              <b>Alt+1..8</b> 直接插入候选前 8 条，<code>~</code> 菜单末尾可把当前输入一键「存为提示词」。
-              过滤支持名称 / 内容 / 拼音首字母（如 <code>xzb</code> 对应「写周报」）。
-              内容里支持占位符：<b>{{clipboard}}</b>（插入时替换为剪贴板文本，剪贴板为空会请你当场填写）、
-              <b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b>（当天日期 / 当前时间 / 当前项目名）、
-              <b>{{字段|默认值}}</b> 填空字段（插入时弹小表单现场填写，留空用默认值）；
-              编辑弹窗里「✨ AI 润色」可让模型帮你把提示词改写得更清晰。
-              行上的「停」字按钮可停用提示词（~ 候选不再显示，不删除）。
-              删掉的内置示例可以点「恢复示例」加回来；把提示词删光后，<code>~</code> 菜单仍会附带内置示例兜底。
+              常用的提示词模板，输入 <b>~</b> 即弹出候选、选中插入；列表顺序就是候选顺序。
             </p>
+            <ul class="settings-hint hint-points">
+              <li><b>候选与插入</b>：行首 <b>⋮⋮</b> 拖动调顺序（「排序」按钮可改常用优先）；<b>Alt+1..8</b> 直接插入前 8 条；<code>~</code> 菜单末尾可把当前输入一键「存为提示词」。</li>
+              <li><b>过滤</b>：按名称 / 内容 / 拼音首字母（如 <code>xzb</code> 对应「写周报」）。</li>
+              <li><b>占位符</b>：<b>{{clipboard}}</b> 插入时替换为剪贴板文本（为空会请你现场填）；<b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b> 取当天日期 / 当前时间 / 当前项目名；<b>{{字段|默认值}}</b> 弹小表单现场填，留空用默认值。</li>
+              <li><b>编辑与维护</b>：编辑弹窗「✨ AI 润色」让模型改写得更清晰；行上「停」字按钮停用（<code>~</code> 候选不再显示，不删除）；内置示例可点「恢复示例」加回，删光后 <code>~</code> 菜单仍带内置示例兜底。</li>
+            </ul>
             <p id="snippets-status" class="dim small" hidden></p>
             <ul id="snippets-list" class="list snippets-list"></ul>
           </section>
@@ -1422,8 +1521,8 @@
             </div>
             <p class="settings-hint">
               记录每轮对话实际消耗的 tokens。想看费用：在各服务的编辑页填「每百万 tokens 单价」
-              （输入价 / 输出价，单位：元），保存后这里会显示估算费用；对提示词缓存打折的服务
-              （如 DeepSeek）再填上「缓存命中价」，费用会按命中部分拆算。
+              （输入价 / 输出价，单位：元），保存后这里会显示估算费用；
+              对提示词缓存打折的服务（如 DeepSeek）再填上「缓存命中价」，费用会按命中部分拆算。
             </p>
             <div id="usage-tiles" class="usage-tiles"></div>
             <p id="usage-budget" class="dim small" hidden></p>
@@ -1498,10 +1597,12 @@
               </span>
             </div>
             <p class="settings-hint">
-              截图副本、隔离区文件、子代理报告只会随使用不断新增。默认按 <b>30 天</b>保留，
-              过期文件在应用启动后与每天自动清理一次；填 <b>0</b> 表示该类不再自动清理。
-              清理只动这些目录里 SkySheep 自己写入的文件，会话记录、备份与日志不受影响。
+              截图副本、隔离区文件、子代理报告只会随使用不断新增。默认按 <b>30 天</b>保留，过期文件在应用启动后与每天自动清理一次。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>填 <b>0</b> 表示该类不再自动清理。</li>
+              <li>清理只动这些目录里 SkySheep 自己写入的文件；会话记录、备份与日志不受影响。</li>
+            </ul>
             <div id="retention-status" class="card-status" hidden></div>
             <div class="toolcfg-form">
               <div class="toolcfg-row">
@@ -1532,11 +1633,12 @@
               </span>
             </div>
             <p class="settings-hint">
-              每次启动前都会给会话数据库留一份备份（保留最近 20 份）；误删会话、或数据不对劲时，
-              在这里挑一个较早的版本恢复即可。要做大操作前也可以点「立即备份」手动留一份。
-              下方默认只列最近几份，点「展开」看全部。
-              <b>恢复会用备份整体替换当前数据</b>，替换前系统会先把现状另存一份，随时能换回来。
+              每次启动前都会给会话数据库留一份备份（保留最近 20 份）；误删会话或数据不对劲时，在这里挑一个较早的版本恢复。下方默认只列最近几份，点「展开」看全部。
             </p>
+            <ul class="settings-hint hint-points">
+              <li>要做大操作前，可以点「立即备份」手动留一份。</li>
+              <li><b>恢复会用备份整体替换当前数据</b>；替换前系统会先把现状另存一份，随时能换回来。</li>
+            </ul>
             <div id="backup-status" class="card-status" hidden></div>
             <ul id="backup-list" class="list"></ul>
           </section>
@@ -1545,6 +1647,8 @@
             <p class="settings-hint">
               把模型服务（含 API Key）、MCP 配置、界面偏好、全局记忆、自定义子代理与技能启用范围
               打包成一个 zip，在另一台电脑上导入即可完成迁移。会话记录不包含在内。
+            </p>
+            <p class="settings-hint">
               <b>zip 内是明文 API Key，请妥善保管，不要发到公开场合。</b>
             </p>
             <div id="about-io" class="io-row">

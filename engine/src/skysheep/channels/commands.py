@@ -48,8 +48,6 @@ _ALIASES = {
     "帮助": "help",
 }
 
-COMMANDS = tuple(sorted(set(_ALIASES.values())))
-
 
 def parse(text: str) -> Command:
     """把一条入站文本解析成命令或普通消息。

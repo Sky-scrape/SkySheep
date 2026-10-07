@@ -196,6 +196,23 @@ CREATE TABLE IF NOT EXISTS map_digests (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_map_digests_project ON map_digests(project_id, start_ts);
+-- 团队频道消息全量落库（三期）：编排器每条频道消息定稿经钩子写入一行，
+-- team.log 按 team_id 拉全量回放。不外键引用 sessions（team_id 是编排器
+-- 建队时分配的 uuid，不是既有表主键），session_id 只作归属注记；会话删除
+-- 不级联删频道史——落库的意义就是收队后仍能按 team_id 回放全程。
+CREATE TABLE IF NOT EXISTS team_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    seq INTEGER NOT NULL DEFAULT 0,
+    from_member TEXT NOT NULL DEFAULT '',
+    to_member TEXT NOT NULL DEFAULT 'all',
+    msg_kind TEXT NOT NULL DEFAULT 'system',
+    task_ref TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_team_messages_team ON team_messages(team_id, seq);
 """
 
 # 全文搜索索引：messages 的 FTS5 虚表（trigram 分词）。
@@ -1165,6 +1182,55 @@ class SessionStore:
         events.sort(key=lambda e: e["ts"])
         return events
 
+    # ---- 团队频道消息（team_messages，三期） ----
+
+    @staticmethod
+    def _team_message_row(row) -> dict:
+        return {
+            "id": row["id"],
+            "team_id": row["team_id"],
+            "session_id": row["session_id"],
+            "seq": row["seq"],
+            "from_member": row["from_member"],
+            "to_member": row["to_member"],
+            "msg_kind": row["msg_kind"],
+            "task_ref": row["task_ref"],
+            "text": row["text"],
+            "created_at": row["created_at"],
+        }
+
+    async def add_team_message(
+        self, team_id: str, seq: int, from_member: str, to_member: str,
+        msg_kind: str = "system", task_ref: str = "", text: str = "",
+        session_id: str = "", created_at: float | None = None,
+    ) -> int:
+        """团队频道消息落库一行（三期）：编排器的持久化钩子逐条定稿时调用。
+
+        team_id 是查询主轴（team.log 按它拉全量回放）；session_id 作归属
+        注记，删除会话不级联删频道史（见 SCHEMA 内注释）。返回行 id。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "INSERT INTO team_messages (team_id, session_id, seq, from_member,"
+            " to_member, msg_kind, task_ref, text, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (team_id, session_id, int(seq), from_member, to_member,
+             msg_kind, task_ref, text,
+             time.time() if created_at is None else float(created_at)),
+        )
+        await self._db.commit()
+        return cur.lastrowid
+
+    async def list_team_messages(self, team_id: str) -> list[dict]:
+        """某团队的全部频道消息，seq 升序（team.log 回放；id 作稳定次级键）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM team_messages WHERE team_id = ? ORDER BY seq ASC, id ASC",
+            (team_id,),
+        )
+        rows = await cur.fetchall()
+        return [self._team_message_row(r) for r in rows]
+
     # ---- sessions ----
 
     async def create_session(self, project_id: int | None, title: str = "") -> Session:
@@ -1905,11 +1971,6 @@ class SessionStore:
         )
         row = await cur.fetchone()
         return row["channel"] if row else None
-
-    async def clear_channel_binding(self, channel: str) -> None:
-        assert self._db
-        await self._db.execute("DELETE FROM channel_bindings WHERE channel = ?", (channel,))
-        await self._db.commit()
 
     async def record_channel_source(self, channel: str, chat_id: str, actor: str = "") -> None:
         """记一个「见过的来源」，供桌面端认领 chat_id。

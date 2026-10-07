@@ -129,6 +129,77 @@ async def test_interleaved_roundtable_members_merge_independently():
     assert len(events) <= 6, f"交错流式应各自聚批，而不是每条增量一帧：{len(events)} 帧"
 
 
+async def test_team_deltas_split_by_member_and_seq():
+    """团队成员增量的合并键是 (member_index, seq)：同成员跨消息不互并（分桶回归）。
+
+    成员连续两次发言是两条频道消息（seq 递增，中间隔着定稿 TeamMessage）：
+    若只按 member_index 分桶，第一条消息的尾巴会并进第二条的帧里串消息。
+    """
+    events, emit, _ = collector()
+    m = StreamDeltaMerger(emit, window_s=10.0)
+
+    await m.send({"kind": "team_message_delta", "member_index": 0, "seq": 1, "text": "甲"})
+    await m.send({"kind": "team_message_delta", "member_index": 0, "seq": 1, "text": "乙"})
+    await m.send({"kind": "team_message", "seq": 1})  # 第一条定稿（非增量：先冲刷）
+    await m.send({"kind": "team_message_delta", "member_index": 0, "seq": 2, "text": "丙"})
+    await m.aclose()
+
+    by_seq: dict[int, str] = {}
+    for e in events:
+        if e.get("kind") == "team_message_delta":
+            by_seq[e["seq"]] = by_seq.get(e["seq"], "") + e["text"]
+    assert by_seq == {1: "甲乙", 2: "丙"}
+
+
+async def test_team_delta_interleaves_with_process_events_in_order():
+    """成员增量与转发的过程事件交错时顺序保持：非增量事件到达即冲刷缓冲。
+
+    队员直播的工具调用（tool_call_started 等）是非增量，必须插在原本的位置，
+    不能被聚批推迟到发言尾巴之后（普通轮的顺序语义对团队轮一致）。
+    """
+    events, emit, _ = collector()
+    m = StreamDeltaMerger(emit, window_s=10.0)
+
+    await m.send({"kind": "team_message_delta", "member_index": 0, "seq": 1, "text": "正在"})
+    await m.send({"kind": "tool_call_started", "name": "list_dir"})
+    await m.send({"kind": "team_message_delta", "member_index": 0, "seq": 1, "text": "查看目录"})
+    await m.send({"kind": "team_message", "seq": 1})
+    await m.aclose()
+
+    kinds = [e["kind"] for e in events]
+    assert kinds == [
+        "team_message_delta", "tool_call_started", "team_message_delta", "team_message",
+    ]
+    deltas = "".join(e["text"] for e in events if e["kind"] == "team_message_delta")
+    assert deltas == "正在查看目录"
+
+
+async def test_parallel_team_members_merge_independently():
+    """不同成员并行流式：按 (member_index, seq) 各自聚批，不互相冲掉缓冲。
+
+    队员按名册序逐个唤醒（非并行），但取消收尾、权限等待恢复等时序下
+    不同成员的增量仍可能交错共享同一个 emit——对齐圆桌并行成员的分桶回归。
+    """
+    events, emit, _ = collector()
+    m = StreamDeltaMerger(emit, window_s=10.0)
+
+    async def member(i: int) -> None:
+        for c in "abcdef":
+            await m.send({"kind": "team_message_delta",
+                          "member_index": i, "seq": i + 1, "text": c})
+            await asyncio.sleep(0)  # 两个成员交错到达
+
+    await asyncio.gather(member(0), member(1))
+    await m.aclose()
+
+    by_member: dict[int, str] = {}
+    for e in events:
+        if e.get("kind") == "team_message_delta":
+            by_member[e["member_index"]] = by_member.get(e["member_index"], "") + e["text"]
+    assert by_member == {0: "abcdef", 1: "abcdef"}, "内容必须一字不差"
+    assert len(events) <= 6, f"交错流式应各自聚批，而不是每条增量一帧：{len(events)} 帧"
+
+
 async def test_concurrent_delta_during_suspended_flush_is_not_lost():
     """flush 的 emit 挂起期间并发合入的增量不得丢失（冲刷并发窗口回归）。
 

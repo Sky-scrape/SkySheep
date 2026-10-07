@@ -12,8 +12,7 @@ import logging
 from pathlib import Path
 
 from ...channels import ChannelGate
-from ...config import load_config, update_config_section
-from ...core import Agent
+from ...config import _read_raw_config, load_config, update_config_section
 from ...tools import ChangeRecorder
 from ._shared import SessionRuntime
 
@@ -50,6 +49,23 @@ def _channel_allowed_tools_warning(allowed) -> str:
         "渠道会话在无人值守时也会直接执行、不再逐次确认。"
         "只在你完全信任该渠道的允许名单成员时这样做。"
     )
+
+
+def _raw_platforms_base() -> dict:
+    """渠道写路径的 platforms 基底：取 _read_raw_config 的原值形态，不用解密视图。
+
+    load_config() 的解密视图会把「本机解不开」的 dpapi: 密文置空（值要送进
+    适配器，绝不能把密文当凭据用）；但写路径若也拿它当基底，改名单、启停、
+    推游标这类无关保存就会经 update_config_section 整表覆盖 platforms，把
+    解不开的密文抹成空串——文件换回原机器/原账户再也解不开，违背
+    keep_on_failure=True 的设计承诺。基底必须取 keep_on_failure=True 的
+    raw：解得开的已是明文（写盘时重新加密），解不开的原样透传（写侧对已
+    加密值幂等），本次要改的字段再逐个合并进去。
+    """
+    _, raw = _read_raw_config()
+    channels = raw.get("channels")
+    platforms = channels.get("platforms") if isinstance(channels, dict) else None
+    return dict(platforms) if isinstance(platforms, dict) else {}
 
 
 
@@ -170,7 +186,8 @@ class ChannelsMixin:
         name = str(params.get("name", "")).strip()
         if not name:
             raise RuntimeError("缺少平台名 name")
-        platforms = dict(self.cfg.channels.platforms or {})
+        # 基底取原值形态（见 _raw_platforms_base）：解不开的密文不能被这次保存抹掉
+        platforms = _raw_platforms_base()
         section = dict(platforms.get(name) or {})
         if params.get("token") is not None:
             section["token"] = str(params["token"]).strip()
@@ -225,8 +242,9 @@ class ChannelsMixin:
         if not isinstance(state, dict):
             return
         try:
-            fresh = load_config()
-            platforms = dict(fresh.channels.platforms or {})
+            # 基底取原值形态（见 _raw_platforms_base）：游标推进这类自动落盘
+            # 不得把其他平台本机解不开的密文一并抹掉
+            platforms = _raw_platforms_base()
             section = dict(platforms.get(name) or {})
             for key in ("bot_token", "base_url", "cursor"):
                 if key in state and state[key] is not None:
@@ -290,8 +308,9 @@ class ChannelsMixin:
 
     async def channel_weixin_logout(self) -> dict:
         """清除微信登录态（用户主动退出或 token 失效后重登）。"""
-        fresh = load_config()
-        platforms = dict(fresh.channels.platforms or {})
+        # 基底取原值形态（见 _raw_platforms_base）：退出微信只清微信自己的
+        # 登录态，其他平台解不开的密文不能被连带抹掉
+        platforms = _raw_platforms_base()
         section = dict(platforms.get("weixin") or {})
         section.pop("bot_token", None)
         section.pop("cursor", None)
@@ -319,7 +338,8 @@ class ChannelsMixin:
         name = str(params.get("name", "")).strip()
         if not name:
             raise RuntimeError("缺少平台名 name")
-        platforms = dict(self.cfg.channels.platforms or {})
+        # 基底取原值形态（见 _raw_platforms_base）：启用开关的落盘不得抹掉密文
+        platforms = _raw_platforms_base()
         section = dict(platforms.get(name) or {})
         if name == "weixin":
             if not str(section.get("bot_token", "")).strip():
@@ -352,7 +372,8 @@ class ChannelsMixin:
         name = str(params.get("name", "")).strip()
         if not name:
             raise RuntimeError("缺少平台名 name")
-        platforms = dict(self.cfg.channels.platforms or {})
+        # 基底取原值形态（见 _raw_platforms_base）：停用开关的落盘不得抹掉密文
+        platforms = _raw_platforms_base()
         section = dict(platforms.get(name) or {})
         section["enabled"] = False
         platforms[name] = section
@@ -447,19 +468,12 @@ class ChannelsMixin:
         recorder = ChangeRecorder()
         rt = SessionRuntime(
             sid=session_id,
-            agent=Agent(
+            agent=self._build_agent(
                 provider=self.provider,
-                registry=self._build_full_registry(recorder),
                 gate=gate,
                 working_dir=remote_dir,
-                max_iterations=self.cfg.max_iterations,
-                context_limit_tokens=self._context_limit(),
-                compaction_keep_recent=self.cfg.compaction_keep_recent,
-                compaction_trigger=self.cfg.compaction_trigger,
-                compaction_auto=self.cfg.compaction_auto,
-                hooks=self.hooks,
-                restrict_to_workdir=self.cfg.restrict_to_workdir,
                 session_id=session_id,
+                recorder=recorder,
             ),
             recorder=recorder,
         )

@@ -343,9 +343,17 @@ async function renderSettings() {
   const mul = document.getElementById("settings-mcp-list");
   mul.innerHTML = "";
   renderMcpPresets(snap);
-  (snap.mcp || []).forEach((m) => {
+  // 按连接状态排序：失败/未连接置顶并标红，其次已连接，再连接中，最后已停用
+  const mcpStatusRank = (m) => {
+    if (m.enabled === false) return 3;
+    if (m.connected) return 1;
+    if (m.connecting) return 2;
+    return 0;
+  };
+  [...(snap.mcp || [])].sort((a, b) => mcpStatusRank(a) - mcpStatusRank(b)).forEach((m) => {
     const li = document.createElement("li");
     if (m.enabled === false) li.classList.add("mcp-disabled");
+    else if (!m.connected && !m.connecting) li.classList.add("mcp-failed");
     const toolChips = (m.tools || [])
       .map((t) => `<span class="chip">${escapeHtml(t)}</span>`)
       .join("");
@@ -363,10 +371,27 @@ async function renderSettings() {
         ${m.insecure_http ? '<span class="chip chip-warn" title="此服务走 http 明文且配置了鉴权头：凭据可能被中间人截获，建议改用 https 地址">⚠ http 明文携带鉴权头</span>' : ""}
         <span class="${m.connected ? "mcp-ok" : (m.connecting ? "mcp-pending" : "mcp-bad")}">${stateText}</span>
         <button class="btn-ghost mcp-toggle" title="${m.enabled === false ? "重新连接这个服务" : "停用：配置保留，工具从 Agent 移除"}">${m.enabled === false ? "启用" : "停用"}</button>
+        ${m.enabled !== false && !m.connected && !m.connecting ? '<button class="btn-ghost mcp-reconnect" title="重连：重建全部 MCP 连接，处理连接失败的服务器">重连</button>' : ""}
         <button class="btn-ghost danger mcp-del" title="删除这个 MCP 服务">删除</button>
       </div>
       ${toolChips ? `<div class="mcp-tools">${toolChips}</div>` : ""}`;
     li.querySelector(".mcp-del").onclick = () => deleteMcpModal(m.name);
+    const rcBtn = li.querySelector(".mcp-reconnect");
+    if (rcBtn) {
+      rcBtn.onclick = async () => {
+        rcBtn.disabled = true;
+        rcBtn.textContent = "重连中…";
+        try {
+          const r = await request("mcp.reconnect", {});
+          const bad = (r.mcp_warnings || []).length > 0;
+          mcpStatus(bad ? "已重连，但仍有服务未连上，详见列表" : "✓ 已重连", !bad);
+        } catch (e) {
+          mcpStatus("重连失败：" + e.message, false);
+        }
+        await renderSettings();
+        boot();
+      };
+    }
     li.querySelector(".mcp-toggle").onclick = async () => {
       const enable = m.enabled === false;
       try {

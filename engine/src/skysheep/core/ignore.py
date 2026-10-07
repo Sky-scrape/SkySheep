@@ -117,6 +117,3 @@ class IgnoreRules:
             if rule.hit("/".join(parts[:i]), is_dir=True):
                 return True
         return False
-
-    def filter_paths(self, paths: list[str]) -> list[str]:
-        return [p for p in paths if not self.matches(p)]

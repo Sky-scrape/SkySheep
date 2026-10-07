@@ -653,6 +653,45 @@ def test_ui_prefs_corrupt_file_tolerated(home):
     assert frame["result"]["prefs"] == {"sidebar_w": 280}
 
 
+def test_ui_prefs_same_content_save_skips_rewrite(home, monkeypatch):
+    """同内容保存不落盘：偏好保存是高频路径（拖拽/切签/通知日志、启动落
+    active_project 都走 _write_ui_prefs），合并结果与盘上语义一致（JSON 解析后
+    相等，键序无关）时跳过原子写——同值重写只会搅动 mtime，让「这个文件最近
+    被谁动过」类排查失真（真机曾观察到 ui.json 内容未变、mtime 被推进）。
+    值真的变了照常落盘；跨进程启动的同值写入（_bind_project 落 active_project）
+    同样被拦下。
+    """
+    from pathlib import Path
+
+    from skysheep.server.backend_parts import preferences
+
+    frame = call_ui(home, "ui.save", {"prefs": {"sidebar_w": 320}})
+    assert frame["result"]["prefs"] == {"sidebar_w": 320}
+
+    calls: list[str] = []
+    real = preferences.write_text_atomic
+
+    def _spy(path, text, **kwargs):
+        calls.append(Path(path).name)
+        return real(path, text, **kwargs)
+
+    monkeypatch.setattr(preferences, "write_text_atomic", _spy)
+
+    # 新开一个后端（新一次「启动落 active_project」）+ 同值重发：两者都不得再写。
+    # 注意盘上键序可能与合并序不同（读取按 UI_PREFS_LIMITS 序、合并按插入序），
+    # 比较必须语义相等而非逐字节
+    frame = call_ui(home, "ui.save", {"prefs": {"sidebar_w": 320}})
+    assert frame["ok"] and frame["result"]["prefs"] == {"sidebar_w": 320}
+    assert "ui.json" not in calls, "同内容保存/启动同值落 active_project 不应重写 ui.json"
+
+    # 值变了必须照常落盘
+    frame = call_ui(home, "ui.save", {"prefs": {"sidebar_w": 400}})
+    assert frame["result"]["prefs"] == {"sidebar_w": 400}
+    assert "ui.json" in calls
+    frame = call_ui(home, "ui.get")
+    assert frame["result"]["prefs"] == {"sidebar_w": 400}
+
+
 # ---------- 首帧外观注入：切换项目是整页 reload，首帧必须已是上次的外观 ----------
 
 

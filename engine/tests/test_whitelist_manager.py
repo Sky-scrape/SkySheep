@@ -30,6 +30,8 @@ def read_static(name: str) -> str:
 
 
 STALE_REASON = "安全收紧（2.3.0）：该类前缀已回落逐次确认，规则不再命中"
+S12_REASON = ("安全收紧（审查 S-12）：delete_file 不再整工具放行，规则不再命中；"
+              "请按具体路径固化 exact 规则")
 
 
 # ---------- store 层：删除的项目归属（安全审查 B11 的存量行为，回归锁定） ----------
@@ -72,6 +74,18 @@ def test_stale_marker_hits_legacy_entry_exec_prefixes():
         assert rule["stale_reason"] == STALE_REASON, pattern
 
 
+def test_stale_marker_hits_legacy_delete_file_always():
+    """delete_file 整工具 always 规则 = 存量死规则（审查 S-12 收紧）：stale=True。
+
+    gate 匹配侧对 delete_file 的 always 一律不认（gate._matches_core 无条件
+    return False），管家漏标的话设置页把它们当活规则展示、计入「整个工具」
+    放行的风险摘要——标出来提示清理，或按具体路径固化 exact 规则。"""
+    rule = ServerBackend._stale_fields(
+        {"tool": "delete_file", "kind": "always", "pattern": ""})
+    assert rule["stale"] is True
+    assert rule["stale_reason"] == S12_REASON
+
+
 def test_stale_marker_skips_normal_rules():
     """git status 前缀、exact / always 类型、非 run_command 工具、空 pattern：不标。"""
     cases = [
@@ -79,6 +93,8 @@ def test_stale_marker_skips_normal_rules():
         {"tool": "run_command", "kind": "prefix", "pattern": "kubectl get pods"},
         {"tool": "run_command", "kind": "exact", "pattern": "docker run"},  # exact 不标
         {"tool": "run_command", "kind": "always", "pattern": ""},
+        {"tool": "write_file", "kind": "always", "pattern": ""},  # delete_file 以外的整工具放行仍有效
+        {"tool": "delete_file", "kind": "exact", "pattern": "out/tmp.log"},  # 按路径固化的活规则不标
         {"tool": "browser", "kind": "prefix", "pattern": "open https://x"},  # 工具不符不标
         {"tool": "run_command", "kind": "prefix", "pattern": ""},  # 空 pattern 不标
     ]
@@ -103,6 +119,7 @@ def test_ws_whitelist_list_stale_and_remove(home, monkeypatch):
             await store.add_rule(project.id, "run_command", "prefix", "docker run")
             await store.add_rule(project.id, "run_command", "prefix", "git status")
             await store.add_rule(project.id, "run_command", "exact", "docker run --rm x")
+            await store.add_rule(project.id, "delete_file", "always", "")
         finally:
             await store.close()
         # 同 test_server.test_settings_whitelist_remove：把种子项目记成当前项目
@@ -115,7 +132,7 @@ def test_ws_whitelist_list_stale_and_remove(home, monkeypatch):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "l1", "method": "whitelist.list"})
         rules = recv_until(ws, "l1")["result"]["rules"]
-        assert len(rules) == 3
+        assert len(rules) == 4
         # 列表条目仍带基础字段（id/tool/kind/pattern/created_at）
         assert all({"id", "tool", "kind", "pattern", "created_at"} <= set(r) for r in rules)
         by = {(r["kind"], r["pattern"]): r for r in rules}
@@ -124,6 +141,10 @@ def test_ws_whitelist_list_stale_and_remove(home, monkeypatch):
         assert by[("prefix", "docker run")]["stale_reason"] == STALE_REASON
         assert by[("prefix", "git status")]["stale"] is False
         assert by[("exact", "docker run --rm x")]["stale"] is False
+        # delete_file 整工具 always → 存量死规则（S-12），同样标失效
+        assert by[("always", "")]["stale"] is True
+        assert by[("always", "")]["tool"] == "delete_file"
+        assert by[("always", "")]["stale_reason"] == S12_REASON
 
         # 失效规则也能照常删除；删完列表不再含它
         stale_id = by[("prefix", "docker run")]["id"]
@@ -131,8 +152,8 @@ def test_ws_whitelist_list_stale_and_remove(home, monkeypatch):
         assert recv_until(ws, "d1")["ok"]
         ws.send_json({"id": "l2", "method": "whitelist.list"})
         rest = recv_until(ws, "l2")["result"]["rules"]
-        assert len(rest) == 2 and all(r["id"] != stale_id for r in rest)
-        assert all(r["stale"] is False for r in rest)
+        assert len(rest) == 3 and all(r["id"] != stale_id for r in rest)
+        assert all(r["stale"] is False for r in rest if r["tool"] != "delete_file")
 
 
 # ---------- 前端接线（源码锚点，test_frontend_wiring 模式） ----------

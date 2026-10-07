@@ -339,6 +339,19 @@ async def _h_chat_send(backend: ServerBackend, params: dict, emit, local: bool) 
     # 圆桌本轮覆盖值：只在客户端显式传了才覆盖 config（None=用配置值）
     raw_debate = params.get("debate_rounds")
     raw_chair = params.get("chair_answers")
+    # AI 总管（二期，建队轮生效）：director_mode 只认 "ai"/"user"（其余按缺省
+    # 用户总管处理，与 chat.send 其他错型参数「coercion 吞掉不炸」同一姿态）；
+    # director 为 {provider, model}，provider 为空视同未指定
+    director_mode = "ai" if params.get("director_mode") == "ai" else "user"
+    raw_director = params.get("director")
+    director = None
+    if isinstance(raw_director, dict):
+        d_provider = str(raw_director.get("provider", "") or "").strip()
+        if d_provider:
+            director = {
+                "provider": d_provider,
+                "model": str(raw_director.get("model", "") or "").strip(),
+            }
     return await backend.send(
         text,
         emit,
@@ -357,6 +370,9 @@ async def _h_chat_send(backend: ServerBackend, params: dict, emit, local: bool) 
             else None
         ),
         chair_answers=raw_chair if isinstance(raw_chair, bool) else None,
+        team=bool(params.get("team", False)),
+        director_mode=director_mode,
+        director=director,
     )
 
 
@@ -1214,6 +1230,75 @@ async def _h_roundtable_save(backend: ServerBackend, params: dict, emit, local: 
     return await backend.roundtable_save(params)
 
 
+# 团队：工单板只由用户经这些方法触达，聊天仍走 chat.send（会话级活动团队
+# 会把消息吸进频道；AI 总管模式经 director_mode/director 建队并自动闭环）。
+# 参数错误（无活动团队 / 指派对象不在名册 / 状态机不许可 / redo 超限）按
+# TeamError 原文回给调用方。
+def _team_scoped_params(backend: ServerBackend, params: dict, local: bool) -> dict:
+    """非本机连接把 session_id 收敛到其绑定的活动会话（沿 tasks.* 既有口径）。
+
+    团队快照、工单板、收队/交付/接管与频道回放只对「该连接正在交互的会话」
+    生效——team.* 的归属校验不能信任调用方断言的 sid（sid 可经 session.list
+    枚举）：断言他人 sid 读他人团队快照与全量频道文本、加单/改态他人工单板、
+    越权交付乃至收队他人团队，在入口即被收敛拒绝。返回新 dict，不改调用方的
+    参数对象；本机调用不受影响（前端显式传 sid 的既有用法照旧）。
+    """
+    if not local and backend.session is not None:
+        params = {**params, "session_id": backend.session.id}
+    return params
+
+
+async def _h_team_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.team_get(_team_scoped_params(backend, params, local))
+
+
+async def _h_team_task_add(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_task_add(_team_scoped_params(backend, params, local))
+
+
+async def _h_team_task_update(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_task_update(_team_scoped_params(backend, params, local))
+
+
+async def _h_team_stop(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_stop(_team_scoped_params(backend, params, local))
+
+
+async def _h_team_deliver(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_deliver(_team_scoped_params(backend, params, local))
+
+
+async def _h_team_takeover(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_takeover(_team_scoped_params(backend, params, local))
+
+
+# 三期：频道回放（收队/重启后按 meta 里的 team_id 拉全量，归属校验在 backend）、
+# 建队模板（全局册：读各端可看，写仅本机——与子代理定义同姿态）、设置页配置卡
+# （仿 roundtable.get/save：读写均各端可用，改动只影响之后新建的团队）。
+async def _h_team_log(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_log(_team_scoped_params(backend, params, local))
+
+
+async def _h_team_template_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.team_template_list()
+
+
+async def _h_team_template_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_template_save(params)
+
+
+async def _h_team_template_remove(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_template_remove(params)
+
+
+async def _h_teamcfg_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.team_config_detail()
+
+
+async def _h_teamcfg_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_config_save(params)
+
+
 async def _h_imagegen_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.imagegen_detail()
 
@@ -1521,6 +1606,63 @@ async def _h_skills_save_draft(backend: ServerBackend, params: dict, emit, local
     )
 
 
+# ---- Mods 扩展（实验性）----
+# 只读方法（list/get/get_template/official）各端可看；全部写方法（安装/启停/删除/
+# 草稿/测试器）与本机执行面同级——Mod 是第三方代码且能收紧权限门行为，绝不能被
+# 远程持令牌客户端安装或改动。
+
+async def _h_mods_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.list_mods()
+
+
+async def _h_mods_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.get_mod(str(params.get("id", "")))
+
+
+async def _h_mods_get_template(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.mod_template()
+
+
+async def _h_mods_official(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.official_mods()
+
+
+async def _h_mods_install(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.install_mod(str(params.get("source", "")))
+
+
+async def _h_mods_confirm_install(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.confirm_install_mod(str(params.get("install_token", "")))
+
+
+async def _h_mods_install_official(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.install_official_mod(str(params.get("id", "")))
+
+
+async def _h_mods_delete(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.delete_mod(str(params.get("id", "")))
+
+
+async def _h_mods_toggle(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.toggle_mod(
+        str(params.get("id", "")), bool(params.get("enabled", True))
+    )
+
+
+async def _h_mods_set_enabled(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.set_mods_enabled(bool(params.get("enabled", False)))
+
+
+async def _h_mods_save_draft(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 草稿写进 <项目>/.skysheep/mods-drafts/：安装仍要两段人工确认
+    return await backend.save_mod_draft(params)
+
+
+async def _h_mods_test(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 实跑一个 handler（不记执行记录）：本机专属，与 hooks.test 同姿态
+    return await backend.test_mod(params)
+
+
 async def _h_mcp_import(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.import_mcp_servers(
         snippet=str(params.get("snippet", "")),
@@ -1776,6 +1918,26 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "websearch.save": _WsMethod(_h_websearch_save, local_only=True),
     "roundtable.get": _WsMethod(_h_roundtable_get),
     "roundtable.save": _WsMethod(_h_roundtable_save),
+    # 团队：team.get 供团队卡与刷新；工单板只由用户改；交付（用户确认的正常
+    # 终态）、收队（立即终止，含正在跑的成员轮）与接管（AI 总管 → 用户总管，
+    # 二期）。聊天入口仍是 chat.send（team 标志；AI 总管经 director_mode/director）。
+    # 非 local 调用的 session_id 一律收敛到该连接绑定的活动会话（_team_scoped_params，
+    # 断言他人 sid 读写/收队他人团队在入口即拒）。三期另开三面：team.log 回放
+    # 全量频道消息（读，一致性校验在 backend）；team.template_* 建队模板（读各
+    # 端可看、写仅本机，与子代理定义同姿态）；teamcfg.get/save 设置页配置卡
+    # （仿 roundtable.get/save）
+    "team.get": _WsMethod(_h_team_get),
+    "team.task_add": _WsMethod(_h_team_task_add),
+    "team.task_update": _WsMethod(_h_team_task_update),
+    "team.stop": _WsMethod(_h_team_stop),
+    "team.deliver": _WsMethod(_h_team_deliver),
+    "team.takeover": _WsMethod(_h_team_takeover),
+    "team.log": _WsMethod(_h_team_log),
+    "team.template_list": _WsMethod(_h_team_template_list),
+    "team.template_save": _WsMethod(_h_team_template_save, local_only=True),
+    "team.template_remove": _WsMethod(_h_team_template_remove, local_only=True),
+    "teamcfg.get": _WsMethod(_h_teamcfg_get),
+    "teamcfg.save": _WsMethod(_h_teamcfg_save),
     "imagegen.get": _WsMethod(_h_imagegen_get),
     "imagegen.save": _WsMethod(_h_imagegen_save, local_only=True),
     "speech.get": _WsMethod(_h_speech_get),
@@ -1861,6 +2023,21 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "skills.gallery": _WsMethod(_h_skills_gallery),
     "skills.save_from_session": _WsMethod(_h_skills_save_from_session),
     "skills.save_draft": _WsMethod(_h_skills_save_draft, local_only=True),
+    # Mods 扩展（实验性）：写方法全部仅本机（第三方代码 + 收紧权限门的能力面）
+    "mods.list": _WsMethod(_h_mods_list),
+    "mods.get": _WsMethod(_h_mods_get),
+    "mods.get_template": _WsMethod(_h_mods_get_template),
+    "mods.official": _WsMethod(_h_mods_official),
+    "mods.install": _WsMethod(_h_mods_install, local_only=True),
+    "mods.confirm_install": _WsMethod(_h_mods_confirm_install, local_only=True),
+    "mods.install_official": _WsMethod(_h_mods_install_official, local_only=True),
+    "mods.delete": _WsMethod(_h_mods_delete, local_only=True),
+    "mods.toggle": _WsMethod(_h_mods_toggle, local_only=True),
+    "mods.set_enabled": _WsMethod(_h_mods_set_enabled, local_only=True),
+    "mods.save_draft": _WsMethod(_h_mods_save_draft, local_only=True),
+    "mods.test": _WsMethod(
+        _h_mods_test, local_only=True, local_error="Mod 测试器只能在本机界面上操作",
+    ),
     "mcp.import": _WsMethod(_h_mcp_import, local_only=True),
     "mcp.save_server": _WsMethod(_h_mcp_save_server, local_only=True),
     "mcp.delete": _WsMethod(_h_mcp_delete, local_only=True),

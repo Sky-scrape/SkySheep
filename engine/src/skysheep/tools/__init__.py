@@ -8,6 +8,7 @@ from .base import (
     truncate_output,
 )
 from .browser import BrowserTool
+from .browser_cdp import WebPageTool
 from .computer import (
     ClipboardReadTool,
     ClipboardWriteTool,
@@ -61,10 +62,10 @@ def default_tools(
     websearch / imagegen 传入 config.resolve_*() 的解析结果（provider/api_key 等），
     为 None 时对应工具仍注册，调用时会给出配置指引（不阻塞其他工具）。
     computer_control=True 时才注册电脑控制七件套（screenshot / window_list / clipboard /
-    mouse / keyboard / window），browser_control=True 时才注册 browser 工具。两者形参
-    默认都是 False——与 config.computer_control / browser_control 的默认值同一口径
-    （安全审查 M16：旧默认值是 True，现有调用方都显式传值所以没成 bug，但新调用方
-    漏传就会静默打开截屏/键鼠/剪贴板；默认值应该站在安全的那一边）。需要时在
+    mouse / keyboard / window），browser_control=True 时才注册 browser 工具与 web_page
+    页内自动化工具。两者形参默认都是 False——与 config.computer_control / browser_control
+    的默认值同一口径（安全审查 M16：旧默认值是 True，现有调用方都显式传值所以没成 bug，
+    但新调用方漏传就会静默打开截屏/键鼠/剪贴板；默认值应该站在安全的那一边）。需要时在
     设置 · 远程控制 里打开，服务层与 CLI 都按 cfg 显式传值，热生效。
     """
     tools = [
@@ -99,6 +100,7 @@ def default_tools(
         ]
     if browser_control:
         tools.append(BrowserTool())
+        tools.append(WebPageTool())
     if store is not None:
         tools.append(ScheduleWriteTool(store))
     return tools
@@ -114,6 +116,7 @@ __all__ = [
     "ChangeRecorder",
     "default_tools",
     "BrowserTool",
+    "WebPageTool",
     "ReadFileTool",
     "ReadImageTool",
     "WriteFileTool",

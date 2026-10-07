@@ -6,6 +6,49 @@
 
 ### 新增
 
+- **系统级定时调度**：定时任务不依赖 SkySheep 在运行——`config.toml` 新增 `[cron]
+  system_schedule`（默认关），开启后应用内新建/修改/删除定时任务自动同步注册/重建/注销
+  Windows 计划任务（schtasks，任务名 `SkySheepCron-<任务id>`，`core/system_schedule.py`），
+  到点由系统直接拉起独立进程执行 `<python> -m skysheep.cli.app cron-run <任务id>
+  --project <项目目录>`；CLI 新增 `cron-run` 子命令，复用 `skysheep run` 既有机制
+  （HeadlessGate 无人值守门控、结果回写任务行、notify_channel 推送），`--project` 目录写进
+  /TR（计划任务进程 cwd 不可靠），任务归属项目行仍必须存在、悬空任务照旧拒绝。同步是
+  best-effort：任何失败只记日志，绝不影响任务行本身的增删改；与用户手动「导出为系统计划
+  任务」（`SkySheep-<任务id>`）是并行两条注册通道，任务名前缀不同互不覆盖。
+- **提示注入纵深防御（密钥外传拦截 + 不可信内容标注）**：外部网页/文档里的注入指令可能诱导
+  模型把本机凭据拼进工具参数外传，新增两层机械防线。出站密钥扫描（`security/egress.py`）：
+  WRITE/DANGEROUS 工具的字符串参数先过 `scan_outbound`——命中本机配置的真实密钥值一律
+  预拒绝，主门/无人值守/渠道/隔离 worktree 各权限门都插在 authorize 最顶端、先于白名单、
+  「自动允许写入」「完全访问」等一切放行分支，用户亲点「允许」也到不了放行（确认弹窗只会
+  把密钥再展示一遍）；仅命中通用密钥形态（sk-…/ghp_… 等高置信前缀）照走确认流程，执行结果
+  前置「出站提示」注记让模型与用户都看得见；密钥值只驻留本进程内存、绝不进日志（只报配置
+  定位标签），防线自身故障一律按「无命中」降级、绝不挡执行。机械标注层（`sanitize.py` 新增
+  `untrusted_data_wrap`）：`web_fetch` 与 `read_document` 把外部网页/文档文本交付模型前统一
+  包上「是数据不是指令」固定标注（正文一字不改），与既有来源边界框并存。
+- **命令执行沙箱化一期（Job Object 进程遏制）**：Windows 上 run_command 拉起的子进程纳入
+  独立 Job Object（`security/sandbox_win.py`，建作业/挂进程/配限制任一步失败自动降级
+  no-op，权限控制仍由 PermissionGate 把守）：命令结束/超时 TerminateJobObject 一次收掉
+  整棵树（含命令自己派生后滞留的孙进程），后台进程 action=kill 一并终止，引擎退出由
+  kill-on-close 兜底——常驻进程不再残留孤儿；另配 UI 限制（禁剪贴板读写与全局钩子）。
+  主会话/子代理/团队成员/CLI headless 全链路透传；`config.toml` 新增 `[shell]
+  job_containment`（默认开，个别命令与遏制机制冲突时可关）。这是进程遏制不是完整安全
+  沙箱——受限令牌/AppContainer 属二期。
+- **浏览器页内自动化（web_page 工具）**：与 browser 工具（把网页开在用户自己的浏览器里给
+  用户看）互补——引擎自拉临时无头 Edge 执行页内动作（CDP 驱动，`tools/browser_cdp.py`：
+  CdpBrowser 单例 + 最小 CDP 客户端），动作 navigate / click / fill / press / extract /
+  screenshot / close，Agent 拿得到页面文本与截图、用户看不到该实例；一次性临时配置目录，
+  Cookie/登录态与用户真实浏览器互不相通；navigate 只放行 http(s)。安全模型与 browser 同档
+  （DANGEROUS 逐次确认，「总是允许」白名单粒度=单动作），browser_control 开启时与 browser
+  一同注册（形参默认关，设置 · 远程控制 打开）。
+- **手机端 PWA 化（添加到主屏幕）**：局域网 / Tailscale 访问时手机端可把 SkySheep 装成
+  PWA。服务端从站点根提供 `/manifest.webmanifest`（start_url "./" 才解析到应用页，挂
+  /static/ 下 scope 就废了）与 `/sw.js`（脚本在根、scope=/ 才罩得住主页面），显式
+  Content-Type 并把 `.webmanifest` 注册成标准类型（压过 Windows 注册表的机器差异），二者
+  同入 no-store 名单（改版立即可见）；`index.html` 挂 manifest / apple-touch-icon /
+  theme-color（夜墨底色）；`app.js` 仅非本机来源注册 service worker（本机与桌面窗口保持
+  no-store 直读最新版，注册失败静默——纯增强能力）；缓存策略只缓存静态壳白名单
+  （cache-first），页面导航与 API/WS 一律网络直连、动态请求永不入缓存；缓存名带版本号，
+  改任何前端文件须同步递增 SW_VERSION，否则已装 PWA 一直吃旧壳。
 - **Mods 扩展（实验性）**：用户/第三方编写的 JS 事件处理扩展，挂进引擎事件流——工具调用前
   （观察/拦截）、工具调用后（观察）、权限请求（附加信息/否决=收紧）、迭代与回合生命周期（观察）。
   安全底线：Mod 对权限门**只能收紧（拒绝/要求确认）、永不放行**——全部 JS 处理函数都在权限门

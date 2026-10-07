@@ -93,6 +93,12 @@ class ChannelGate(PermissionGate):
         self.turn_chat_id = ""
 
     async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
+        # 出站密钥防线先于名单放行（_egress_pre_deny 对 READONLY 内部短路）：
+        # 渠道是无人值守通道，注入最需要防的路径——预授权名单不能成为已知
+        # 密钥外传的免确认通道，开不开审批都一样拦。
+        blocked = self._egress_pre_deny(tool, input_dict)
+        if blocked is not None:
+            return blocked
         # 引擎主目录写入守卫先于 READONLY 短路（与主门同口径，第二轮审查
         # FINDING 2）：memory_write 名义 READONLY 却写全局记忆（注入所有项目
         # 所有会话的 system prompt），渠道会话不得零确认放行。命中后未开审批

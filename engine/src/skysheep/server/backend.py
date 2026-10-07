@@ -976,6 +976,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             mods=mods,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
             session_id=session_id,
+            job_containment=self.cfg.shell.job_containment,
         )
 
     def _get_runtime(self, session_id: str) -> SessionRuntime:
@@ -2883,6 +2884,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             max_iterations=self.cfg.subagent_max_iterations,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
             session_id=sid,
+            job_containment=self.cfg.shell.job_containment,
             hooks=self.hooks,
             mods=self.mods,
             director_mode=director_mode,
@@ -4938,6 +4940,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             ag.compaction_trigger = self.cfg.compaction_trigger
             ag.compaction_auto = self.cfg.compaction_auto
             ag.restrict_to_workdir = self.cfg.restrict_to_workdir
+            ag.job_containment = self.cfg.shell.job_containment
 
     def _startup_status(self) -> dict:
         from .. import startup
@@ -5824,6 +5827,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             usage_recorder=self._record_subagent_usage,
             event_emitter=self._ws_broadcast,
             state_path=skysheep_home() / "subagent_tasks.json",
+            job_containment=self.cfg.shell.job_containment,
         )
 
         # 项目级 mcp.json 指向新目录 → 差量接入新目录的服务器；顺带用新技能/子代理重建完整注册表。

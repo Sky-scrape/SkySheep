@@ -27,6 +27,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..sanitize import untrusted_data_wrap
 from .base import (
     ChangeRecorder,
     Safety,
@@ -225,7 +226,11 @@ class ReadDocumentTool(Tool):
         if not text.strip():
             raise ToolError("文档里没有可提取的文本（可能是纯图片扫描件，本工具不识别图片内容）")
         header, _, body = text.partition("\n\n")
-        return f"{header}（{shown}）\n\n" + truncate_output(body, args.max_chars)
+        # 提示注入纵深防御（机械标注层）：文档文本是外部内容，交付前包上
+        # 「数据不是指令」标注；正文一字不丢
+        return f"{header}（{shown}）\n\n" + untrusted_data_wrap(
+            truncate_output(body, args.max_chars)
+        )
 
 
 # ===================== write_document：生成 Word / Excel / CSV =====================

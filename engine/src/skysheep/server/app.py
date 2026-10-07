@@ -16,6 +16,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import mimetypes
 import socket
 import sys
 import time
@@ -220,6 +221,10 @@ def _no_store_static(app) -> None:
         "/static/app-tools.js",
         "/static/app-whitelist.js",
         "/static/app.css",
+        # PWA 两个入口文件同属「手写、无指纹、改版要立即可见」：sw.js 不禁缓存
+        # 的话，浏览器按启发式缓存旧副本，前端改版后 PWA 用户迟迟拿不到新 SW
+        "/manifest.webmanifest",
+        "/sw.js",
     }
 
     @app.middleware("http")
@@ -231,6 +236,13 @@ def _no_store_static(app) -> None:
 
 
 STATIC_DIR = _static_dir()
+
+# PWA 清单的 Content-Type：.webmanifest 是否被识别取决于 Python 内置表与
+# Windows 注册表（后者因机器而异，可能给成 text/plain），StaticFiles 按它
+# 猜类型——显式注册成标准类型，/static/ 下的直连与显式路由返回一致。
+# 先 init 再 add_type：注册要压过注册表里可能存在的错误映射。
+mimetypes.init()
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 
 def _is_hidden_static_path(path: str) -> bool:
@@ -2190,6 +2202,30 @@ def create_app(
         if attrs:
             page = page.replace('<html lang="zh-CN">', f'<html lang="zh-CN" {attrs}>', 1)
         return HTMLResponse(page)
+
+    # ---- PWA：手机端「添加到主屏幕」（局域网 / Tailscale 访问） ----
+    # 两个文件本体都在 static/ 下，但必须从站点根提供：
+    #   · /manifest.webmanifest —— start_url "./" 相对 manifest URL 解析，
+    #     挂在 /static/ 下会解析到 /static/（那不是应用页面），PWA scope 就废了；
+    #   · /sw.js —— 脚本在站点根时默认 scope 是 /，罩得住主页面；
+    #     挂在 /static/ 下 scope 只有 /static/，主页面不受控，SW 等于白装。
+    # Content-Type 显式指定，不依赖 mimetypes 对这两类扩展名的机器差异。
+    @app.get("/manifest.webmanifest")
+    async def pwa_manifest() -> FileResponse:
+        return FileResponse(
+            STATIC_DIR / "manifest.webmanifest",
+            media_type="application/manifest+json",
+        )
+
+    @app.get("/sw.js")
+    async def service_worker() -> FileResponse:
+        # Service-Worker-Allowed：脚本已在根路径、默认 scope 即 /，此头只是
+        # 把约定写明，防未来有人把脚本挪回子路径后 scope 静默收窄
+        return FileResponse(
+            STATIC_DIR / "sw.js",
+            headers={"Service-Worker-Allowed": "/"},
+            media_type="text/javascript",
+        )
 
     # 静态资源禁缓存：前端零构建、文件名无指纹，否则用户永远卡在旧 app.js
     _no_store_static(app)

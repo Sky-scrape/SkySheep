@@ -1,0 +1,25 @@
+{
+  "name": "SkySheep AI 工作台",
+  "short_name": "SkySheep",
+  "description": "开源桌面 AI Agent 工作台的局域网 / Tailscale 手机端界面",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#171410",
+  "theme_color": "#171410",
+  "icons": [
+    {
+      "src": "/static/skysheep-line-white.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/skysheep-line-white.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

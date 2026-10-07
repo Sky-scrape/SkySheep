@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ...bgtasks import spawn_bg
 from ...channels.manager import _fmt_dur
+from ...core import system_schedule
 from ...security.gate import HeadlessGate
 from ...tools import ChangeRecorder
 from ...tools.pipeline import task_node_fields
@@ -457,6 +458,7 @@ class AutomationMixin:
             task["id"], next_run_at=self.store.compute_next_run(task)
         )
         self._broadcast_cron(task)
+        await self._sync_system_schedule(task)
         return task
 
     async def cron_update(self, params: dict) -> dict:
@@ -495,6 +497,7 @@ class AutomationMixin:
             kw["next_run_at"] = self.store.compute_next_run(merged) if enabled else 0
         task = await self.store.update_cron_task(tid, **kw)
         self._broadcast_cron(task)
+        await self._sync_system_schedule(task)
         return task
 
     async def cron_delete(self, params: dict) -> dict:
@@ -504,6 +507,8 @@ class AutomationMixin:
             # 归属校验（安全审查 B8）：凭枚举到的 task_id 不能删别的项目的任务
             self._check_cron_ownership(task)
         ok = await self.store.delete_cron_task(tid)
+        if ok:
+            await self._sync_system_schedule(task, deleted=True)
         return {"deleted": ok, "id": tid}
 
     async def cron_run_now(self, params: dict) -> dict:
@@ -833,6 +838,50 @@ class AutomationMixin:
         task_name = self.SCHTASK_TASK_PREFIX + str(tid)
         rc, _out = await self._schtasks()("/Query", "/TN", task_name)
         return {"supported": True, "exported": rc == 0, "task_name": task_name}
+
+    # ---- 系统级定时调度挂钩（[cron] system_schedule = true 时自动同步） ----
+    # 与上面用户手动「导出为系统计划任务」并行的自动通道：cron.add /
+    # cron.update / cron.delete 成功后按当前任务行把 SkySheepCron-<任务id>
+    # 计划任务注册（/F 覆盖重建）或注销（core/system_schedule.py），到点由
+    # 系统拉起 `python -m skysheep.cli.app cron-run <任务id>` 独立执行。
+    # 同步是 best-effort：任何失败只记日志，绝不影响任务行本身的增删改。
+
+    async def _sync_system_schedule(self, task: dict | None, *, deleted: bool = False) -> None:
+        """按任务行同步系统计划任务：启用 → 注册/重建；停用或已删除 → 注销。"""
+        try:
+            cfg = self.cfg
+            if cfg is None or not bool(
+                getattr(getattr(cfg, "cron", None), "system_schedule", False)
+            ):
+                return
+            if sys.platform != "win32":
+                return
+            tid = int((task or {}).get("id") or 0)
+            if tid <= 0:
+                return
+            if deleted or not task.get("enabled"):
+                ok, out = await asyncio.to_thread(system_schedule.unregister, tid)
+                if not ok:
+                    # 任务从未注册过也会走到这里（schtasks 报不存在），降为日志
+                    logger.info("注销系统计划任务未成功（任务 %s）：%s",
+                                tid, (out or "").strip()[:160])
+                return
+            entry, problem = system_schedule.default_engine_python()
+            if entry is None:
+                logger.info("跳过注册系统计划任务（任务 %s）：%s", tid, problem)
+                return
+            proj = await self.store.get_project(int(task.get("project_id") or 0))
+            if proj is None or not Path(proj.root_path).is_dir():
+                logger.warning("项目目录不可用，跳过注册系统计划任务（任务 %s）", tid)
+                return
+            ok, out = await asyncio.to_thread(
+                system_schedule.register, tid, task, proj.root_path, entry)
+            if not ok:
+                logger.warning("注册系统计划任务失败（任务 %s）：%s",
+                               tid, (out or "").strip()[:160])
+        except Exception as e:  # noqa: BLE001 - 同步失败不影响任务增删改
+            logger.warning("系统计划任务同步失败（任务 %s）：%s",
+                           (task or {}).get("id"), e)
 
     # ---- 任务编排（pipelines）：按依赖顺序自动跑的无人值守节点 ----
     # 与定时任务同一套执行底座（独立会话 + HeadlessGate 白名单 + 完整工具集），

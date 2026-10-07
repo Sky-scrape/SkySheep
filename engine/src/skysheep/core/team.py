@@ -803,6 +803,7 @@ class TeamOrchestrator:
         max_iterations: int = 25,
         restrict_to_workdir: bool = False,
         session_id: str = "",
+        job_containment: bool = True,
         hooks=None,
         mods=None,
         director: DirectorSpec | None = None,
@@ -820,6 +821,7 @@ class TeamOrchestrator:
         self._gate = gate
         self._max_iterations = max(1, int(max_iterations))
         self._restrict_to_workdir = bool(restrict_to_workdir)
+        self._job_containment = bool(job_containment)
         self._session_id = session_id
         self._hooks = hooks
         self._mods = mods
@@ -1271,6 +1273,7 @@ class TeamOrchestrator:
                 # 会话归属：claim_write 的租约 owner 用它（空串会被并行写
                 # 协调按「无归属」放行）；用户钩子与 Mod 拦截照主会话生效
                 session_id=self._session_id,
+                job_containment=self._job_containment,
                 hooks=self._hooks,
                 mods=self._mods,
             )

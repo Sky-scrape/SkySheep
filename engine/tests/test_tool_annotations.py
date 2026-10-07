@@ -48,9 +48,11 @@ DEFAULT_TOOLS = [
     "keyboard",
     "window",
     "browser",
+    "web_page",
 ]
 
-# 电脑控制七件套 + 浏览器控制：形参默认关（安全审查 M16），要显式打开才注册
+# 电脑控制七件套 + 浏览器控制（browser + web_page 页内自动化）：形参默认关
+# （安全审查 M16），要显式打开才注册
 CONTROL_TOOLS = [
     "screenshot",
     "window_list",
@@ -60,6 +62,7 @@ CONTROL_TOOLS = [
     "keyboard",
     "window",
     "browser",
+    "web_page",
 ]
 
 # server 端按需装配、不在 default_tools() 默认集里的工具
@@ -142,6 +145,7 @@ def test_every_tool_declares_four_boolean_hints(name):
         ("run_command", False, True, False, True),
         ("web_fetch", True, False, True, True),
         ("browser", False, False, False, True),
+        ("web_page", False, True, False, True),
         ("mouse", False, True, False, False),
         ("memory_write", False, False, False, False),
         ("clipboard_read", True, False, True, False),

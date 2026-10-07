@@ -99,6 +99,7 @@ class Agent:
         mods=None,
         restrict_to_workdir: bool = False,
         session_id: str = "",
+        job_containment: bool = True,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -120,6 +121,9 @@ class Agent:
         # core/mods.py）
         self.mods = mods
         self.restrict_to_workdir = restrict_to_workdir
+        # 命令执行沙箱化一期：run_command 子进程纳入 Job Object 进程遏制
+        # （security/sandbox_win.py，仅 Windows，失败自动降级）。默认开。
+        self.job_containment = job_containment
         # 会话 id：透传给钩子命令的 stdin JSON（多会话场景钩子可区分来源）
         self.session_id = session_id
         self.history: list[Message] = []
@@ -316,6 +320,7 @@ class Agent:
             supports_vision=getattr(self.provider, "supports_vision", True),
             restrict_to_workdir=self.restrict_to_workdir,
             session_id=self.session_id,
+            job_containment=self.job_containment,
         )
         iterations = 0
         stop_reason = "max_iterations"  # 正常结束时在 break 前改为 end_turn
@@ -884,10 +889,16 @@ class Agent:
         写工具执行前经权限门领写租约（并行任务写同一文件的协调，见
         security/leases.py），finally 里归还；租约带出的冲突注记追加进
         结果文本，模型与用户都看得到这次并行写入。
+
+        出站密钥防线（security/egress.py）：执行前经权限门取一句前置注记，
+        仅通用密钥形态命中时非空，拼在结果最前（已知密钥值在 authorize 已
+        预拒绝，到不了执行）；READONLY 由 egress_note 内部短路，故障按空串
+        降级，不兜异常也不挡执行。
         """
         t0 = time.monotonic()
         ctx.last_diff = ""
         images_before = len(ctx.images)
+        egress_note = self.gate.egress_note(tool, tu.input)
         lease = None
         if tool.safety != Safety.READONLY:
             try:
@@ -907,6 +918,8 @@ class Agent:
                 is_error = True
         finally:
             note = lease.release() if lease is not None else ""
+        if egress_note:
+            result = egress_note + "\n\n" + result
         if note and not is_error:
             result = result + "\n\n" + note
         duration_ms = int((time.monotonic() - t0) * 1000)

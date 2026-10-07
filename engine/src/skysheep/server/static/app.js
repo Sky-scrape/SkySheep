@@ -14348,3 +14348,19 @@ document.getElementById("btn-mod-template").onclick = async () => {
     addNotice("获取模板失败：" + e.message);
   }
 };
+
+// ---------- PWA：手机端「添加到主屏幕」（局域网 / Tailscale 访问时） ----------
+// 只在非本机来源注册 service worker：桌面窗口与本机浏览器都走 127.0.0.1 /
+// localhost，保持静态资源 no-store 直读最新版的行为不被 SW 缓存层插足；
+// 手机端经 SW 缓存静态壳加速二次打开（缓存策略见 static/sw.js：白名单
+// cache-first，导航与 API/WS 一律网络直连）。注册失败静默：PWA 是增强能力，
+// 不影响正常使用（纯 http 的局域网地址不是安全上下文，SW 本就不可用）。
+(function () {
+  var host = location.hostname;
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" ||
+      host === "[::1]" || host === "") return;
+  if (!("serviceWorker" in navigator)) return;
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("/sw.js").catch(function () {});
+  });
+})();

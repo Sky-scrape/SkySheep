@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SkySheep</title>
   <link rel="icon" href="/static/skysheep.ico">
+  <!-- PWA（手机端添加到主屏幕）：manifest 由站点根提供（start_url="./" 才解析到 /）；
+       theme_color 取夜墨底色，与 app.css 的 [data-theme="night"] --bg 一致 -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#171410">
+  <!-- iOS 不认 manifest 图标，单独给 apple-touch-icon：白线小羊在 iOS 把透明
+       合成为黑底时可见（墨线款会隐没） -->
+  <link rel="apple-touch-icon" href="/static/skysheep-line-white.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <style>
   /* 底色兜底：写在 app.css 之前，样式表还没到位时也不会露 WebView 白底。
      与各主题 app.css 里的 --bg 保持一致（纸墨=默认 html 底色），改主题色要一起改。 */

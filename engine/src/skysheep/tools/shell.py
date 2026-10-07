@@ -11,7 +11,11 @@
 - 超时树杀并返回超时前已产生的输出（模型能据此诊断，不再盲猜）；
 - background=true 立即返回进程号，输出由后台读线程持续收入缓冲，
   之后用 action=read 增量读取、action=kill 结束（树杀）、action=list 列出；
-  三者都按启动会话做归属过滤，并行会话读/杀不到彼此的进程。
+  三者都按启动会话做归属过滤，并行会话读/杀不到彼此的进程；
+- 子进程纳入 Job Object 进程遏制（一期沙箱化，security/sandbox_win.py，
+  仅 Windows、失败自动降级）：命令结束/超时 TerminateJobObject 一次收掉
+  整棵树，后台常驻进程引擎退出由 kill-on-close 兜底防孤儿；
+  配置 [shell] job_containment 可关。
 """
 
 from __future__ import annotations
@@ -25,6 +29,14 @@ import time
 
 from pydantic import BaseModel, Field
 
+from ..security.sandbox_win import (
+    ContainmentJob,
+    apply_ui_restrictions,
+    assign_process,
+    close_job,
+    create_containment_job,
+    terminate_job,
+)
 from .base import Safety, Tool, ToolContext, ToolError, require_working_dir, truncate_output
 
 DEFAULT_TIMEOUT_S = 120
@@ -140,6 +152,31 @@ def _acc_text(acc: dict) -> str:
     return _decode(data)
 
 
+def _contain_job(proc: subprocess.Popen) -> ContainmentJob:
+    """把已启动的子进程纳入独立 Job Object（一期沙箱化，security/sandbox_win.py）。
+
+    建作业 → 挂进程 → 配 UI 限制（禁剪贴板读/写与全局钩子）。遏制不是命令
+    执行的前置条件：任何一步失败都降级为 no-op（sandbox_win 不抛），命令
+    照常运行，权限控制仍由 PermissionGate 把守；降级时返回 inactive 的
+    ContainmentJob，reason 带可读原因。
+    """
+    job = create_containment_job()
+    if not job.active:
+        return job
+    proc_handle = getattr(proc, "_handle", None)
+    if not proc_handle:
+        close_job(job)
+        return ContainmentJob(None, "取不到子进程句柄，遏制未生效")
+    if not assign_process(job, proc_handle):
+        close_job(job)
+        return ContainmentJob(
+            None, "AssignProcessToJobObject 失败（引擎可能在不支持嵌套的作业内），遏制未生效"
+        )
+    # UI 限制配不上只少一层（无剪贴板/钩子限制），进程遏制语义保留，不算降级
+    apply_ui_restrictions(job)
+    return job
+
+
 def _tree_kill(proc: subprocess.Popen) -> None:
     """Windows 树杀（cmd /c 起的子进程一并结束，与终端面板同款实现），POSIX 直接杀。
 
@@ -161,7 +198,7 @@ def _tree_kill(proc: subprocess.Popen) -> None:
             pass
 
 
-def _run_sync(argv: list[str], cwd: str, timeout_s: int):
+def _run_sync(argv: list[str], cwd: str, timeout_s: int, job_containment: bool = True):
     """前台执行：输出限量收集，超时树杀。返回 (status, stdout, stderr, returncode)。
 
     status: ok | timeout。超时也带回已产生的输出（模型才能据此诊断，不盲猜）。
@@ -169,6 +206,8 @@ def _run_sync(argv: list[str], cwd: str, timeout_s: int):
     proc = subprocess.Popen(
         argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_child_env(),
     )
+    # 进程遏制（一期沙箱化）：子进程创建后立即入本次调用的 job（失败自动降级 no-op）
+    job = _contain_job(proc) if job_containment else None
     out_acc: dict = {"head": b"", "tail": b"", "capped": False}
     err_acc: dict = {"head": b"", "tail": b"", "capped": False}
     readers = [
@@ -187,6 +226,11 @@ def _run_sync(argv: list[str], cwd: str, timeout_s: int):
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             pass
+    # 遏制收尾：正常结束/超时都 TerminateJobObject——命令自己派生后滞留的
+    # 孙进程一并结束（作业已空时是 no-op），随后关句柄。terminate 放在读线程
+    # join 之前：树死干净管道才到 EOF，join 不会被滞留孙进程拖满超时。
+    terminate_job(job)
+    close_job(job)
     for t in readers:
         t.join(timeout=5)
     return ("timeout" if timed_out else "ok",
@@ -227,15 +271,19 @@ def _popen_bg(argv: list[str], cwd: str):
     return proc
 
 
-def _bg_start(argv: list[str], cwd: str, owner: str = "") -> dict:
+def _bg_start(argv: list[str], cwd: str, owner: str = "",
+              job_containment: bool = True) -> dict:
     proc = _popen_bg(argv, cwd)
+    # 常驻进程同样入 job（遏制失败自动降级 no-op）：action=kill 时一并终止，
+    # 引擎退出由 kill-on-close 兜底（句柄随进程关闭，作业成员全被杀）
+    job = _contain_job(proc) if job_containment else None
     bid = _BG_NEXT_ID[0]
     _BG_NEXT_ID[0] += 1
     buf = {"out": ""}
     threading.Thread(target=_pump, args=(proc.stdout, buf), daemon=True).start()
     threading.Thread(target=_pump, args=(proc.stderr, buf), daemon=True).start()
     _BG[bid] = {
-        "proc": proc, "command": argv[-1], "buf": buf,
+        "proc": proc, "job": job, "command": argv[-1], "buf": buf,
         "started": time.time(), "owner": owner,
     }
     return {"pid": bid, "os_pid": proc.pid}
@@ -282,8 +330,12 @@ def _bg_kill(bid: int, sid: str = "") -> str:
         return f"后台进程 {bid} 不存在（可能已结束并被清理）"
     proc = st["proc"]
     if proc.poll() is not None:
+        close_job(st.get("job"))  # 已退出才走到这：顺手释放作业句柄
         return f"后台进程 {bid} 早已退出（exit code: {proc.returncode}）"
     _tree_kill(proc)
+    # 遏制收尾：树杀可能漏网的进程由 TerminateJobObject 一次收掉，再关句柄
+    terminate_job(st.get("job"))
+    close_job(st.get("job"))
     return f"后台进程 {bid} 已终止（{st['command'][:120]}）"
 
 
@@ -300,11 +352,13 @@ def _bg_list(sid: str = "") -> str:
 
 
 def _bg_gc() -> None:
-    """清理已退出超过 30 分钟的后台记录（缓冲随记录一起丢弃）。"""
+    """清理已退出超过 30 分钟的后台记录（缓冲与作业句柄随记录一起丢弃）。"""
     now = time.time()
     for bid in [b for b, s in _BG.items()
                 if s["proc"].poll() is not None and now - s["started"] > 1800]:
-        _BG.pop(bid, None)
+        st = _BG.pop(bid, None)
+        if st is not None:
+            close_job(st.get("job"))
 
 
 class RunCommandArgs(BaseModel):
@@ -385,7 +439,9 @@ class RunCommandTool(Tool):
         _bg_gc()
         argv = _shell_argv(args.command)  # 参数列表形式（shell=False），与前台路径一致
         if args.background:
-            info = await asyncio.to_thread(_bg_start, argv, str(workdir), ctx.session_id)
+            info = await asyncio.to_thread(
+                _bg_start, argv, str(workdir), ctx.session_id, ctx.job_containment
+            )
             return (
                 f"后台进程已启动: id={info['pid']}（系统 PID {info['os_pid']}）\n"
                 f"命令: {args.command}\n"
@@ -394,7 +450,7 @@ class RunCommandTool(Tool):
             )
 
         status, out, err, code = await asyncio.to_thread(
-            _run_sync, argv, str(workdir), args.timeout_s
+            _run_sync, argv, str(workdir), args.timeout_s, ctx.job_containment
         )
         if status == "timeout":
             parts = [f"command timed out after {args.timeout_s}s（进程树已终止，以下是超时前的输出）"]

@@ -35,7 +35,11 @@ from pydantic import BaseModel, Field
 
 from .. import obs
 from ..instance import data_home
-from ..sanitize import scan_injection_patterns, untrusted_frame
+from ..sanitize import (
+    UNTRUSTED_DATA_NOTE,
+    scan_injection_patterns,
+    untrusted_frame,
+)
 from ..textio import write_text_atomic
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 
@@ -684,7 +688,10 @@ class WebFetchTool(Tool):
         framed = untrusted_frame(current, truncate_output(text + note, args.max_chars))
         if hits:
             framed += "\n\n⚠ 检测到疑似指令注入形态：" + "、".join(hits)
-        return f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" + framed
+        # 提示注入纵深防御（机械标注层）：元信息行之后、边界框之前压一遍
+        # 「数据不是指令」——标注是工具自己的话，在边界框之外；正文一字不丢
+        return f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" \
+            + UNTRUSTED_DATA_NOTE + "\n\n" + framed
 
     def _quarantined_reply(
         self, current: str, ctype: str, body_text: str, hits: list[str],
@@ -712,7 +719,8 @@ class WebFetchTool(Tool):
         )
         excerpt = body_text[: min(QUARANTINE_EXCERPT_CHARS, max_chars)]
         framed = untrusted_frame(current, excerpt, trust=trust_label or TRUST_UNKNOWN)
-        out = f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" + framed
+        out = f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" \
+            + UNTRUSTED_DATA_NOTE + "\n\n" + framed
         tail = (
             f"\n\n（隔离区：正文共 {len(body_text)} 字符，上方仅前 {len(excerpt)} 字符摘录，"
             "其余部分未进入上下文。\n"

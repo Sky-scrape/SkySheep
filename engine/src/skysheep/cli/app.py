@@ -214,6 +214,7 @@ class ChatApp:
             compaction_keep_recent=self.cfg.compaction_keep_recent,
             compaction_auto=self.cfg.compaction_auto,
             hooks=hooks,
+            job_containment=self.cfg.shell.job_containment,
         )
         self.agent.set_system(self._compose_system())
 
@@ -939,6 +940,7 @@ async def run_headless(
             compaction_keep_recent=cfg.compaction_keep_recent,
             compaction_auto=cfg.compaction_auto,
             hooks=hooks,
+            job_containment=cfg.shell.job_containment,
         )
         agent.set_system(
             build_system_prompt(working_dir)
@@ -1043,15 +1045,20 @@ def _build_sendonly_channels(cfg):
 CRON_PUSH_DRAIN_TIMEOUT_S = 30.0
 
 
-async def _cron_run_async(task_id: int, provider_name: str | None) -> int:
-    """`skysheep cron run <task_id>` 的主体：引导引擎、执行该任务、回写、退出。
+async def _cron_run_async(
+    task_id: int, provider_name: str | None, project_dir: str | None = None
+) -> int:
+    """`skysheep cron run <task_id>` / `skysheep cron-run <task_id>` 的主体：
+    引导引擎、执行该任务、回写、退出。
 
-    供 Windows 任务计划程序导出的系统计划任务调用（应用不开着也能到点跑）。
-    执行/结果回写/下次排期/notify_channel 推送全部走
+    供 Windows 任务计划程序导出/自动注册的系统计划任务调用（应用不开着也能
+    到点跑）。执行/结果回写/下次排期/notify_channel 推送全部走
     automation.run_cron_task_core（与后端扫描循环同一条路径）；这里的差异只有
     CLI 自己的引擎装配（对标 run_headless）与只发不收的渠道实例。
-    工作目录按任务归属项目从库里解析（计划任务的进程 cwd 不可靠），SKYSHEEP_HOME
-    照常生效。返回进程退出码：完成 0 / 失败 1。
+    工作目录按任务归属项目从库里解析（计划任务的进程 cwd 不可靠）；
+    project_dir 显式给出时优先（系统级定时调度注册的 /TR 里写死的目录），
+    但任务归属项目行仍必须存在且目录可解析，悬空任务照旧拒绝执行。
+    SKYSHEEP_HOME 照常生效。返回进程退出码：完成 0 / 失败 1。
     """
     cfg = load_config()
     name = provider_name or cfg.default
@@ -1075,6 +1082,13 @@ async def _cron_run_async(task_id: int, provider_name: str | None) -> int:
         if proj is None or not Path(proj.root_path).is_dir():
             raise SystemExit("任务所属的项目目录已不存在，无法执行")
         working_dir = Path(proj.root_path)
+        if project_dir:
+            # 系统计划任务的 /TR 里写死了注册时的项目目录：计划任务进程的
+            # cwd 不可靠，显式目录优先于库里的记录（两者正常情况下一致）
+            explicit = Path(project_dir).expanduser()
+            if not explicit.is_dir():
+                raise SystemExit("指定的项目目录不存在: " + str(project_dir))
+            working_dir = explicit.resolve()
 
         # 信任口径与 run_headless 一致：有过信任记录才启用项目自带的 mcp/技能
         trusted = WorkspaceTrust(skysheep_home(), working_dir).is_trusted()
@@ -1101,6 +1115,7 @@ async def _cron_run_async(task_id: int, provider_name: str | None) -> int:
                 hooks=hooks,
                 restrict_to_workdir=cfg.restrict_to_workdir,
                 session_id=sid,
+                job_containment=cfg.shell.job_containment,
             )
             agent.set_system(
                 build_system_prompt(working_dir)
@@ -1167,7 +1182,11 @@ async def _cron_run_async(task_id: int, provider_name: str | None) -> int:
 
 
 def _cron_cmd(args) -> None:
-    exit_code = asyncio.run(_cron_run_async(args.task_id, args.provider))
+    exit_code = asyncio.run(_cron_run_async(
+        args.task_id,
+        getattr(args, "provider", None),
+        project_dir=getattr(args, "project", None),
+    ))
     raise SystemExit(exit_code)
 
 
@@ -1222,6 +1241,16 @@ def main(argv: list[str] | None = None) -> None:
     p_cron_run.add_argument("task_id", type=int, help="定时任务 id（应用内任务列表 / cron.list 可查）")
     p_cron_run.add_argument("-p", "--provider", default=None, help="provider name from config")
 
+    p_cronrun = sub.add_parser(
+        "cron-run",
+        help="立即执行一个定时任务后退出（系统级定时调度入口，任务计划程序到点拉起）",
+    )
+    p_cronrun.add_argument("task_id", type=int, help="定时任务 id（应用内任务列表 / cron.list 可查）")
+    p_cronrun.add_argument(
+        "--project", default=None,
+        help="项目目录（注册系统计划任务时写入，缺省按任务归属项目从库里解析）",
+    )
+
     sub.add_parser("sessions", help="list recent sessions")
     sub.add_parser("models", help="list configured providers and local (Ollama) models")
 
@@ -1243,6 +1272,8 @@ def main(argv: list[str] | None = None) -> None:
             except ConfigError as e:
                 print(str(e))
     elif args.cmd == "cron":
+        _cron_cmd(args)
+    elif args.cmd == "cron-run":
         _cron_cmd(args)
     elif args.cmd == "sessions":
         asyncio.run(_sessions_cmd())

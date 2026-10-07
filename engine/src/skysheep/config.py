@@ -131,6 +131,19 @@ class TeamConfig(BaseModel):
     stall_limit: int = Field(default=2, ge=1)
 
 
+class CronConfig(BaseModel):
+    """定时任务（cron_tasks）的全局行为。
+
+    system_schedule：系统级定时调度总开关（默认关）。开启后，应用内新建/
+    修改/删除定时任务会同步注册/重建/注销对应的 Windows 计划任务
+    （schtasks，任务名 `SkySheepCron-<任务id>`，见 core/system_schedule.py），
+    到点由系统直接拉起 `python -m skysheep.cli.app cron-run <任务id>` 独立
+    执行，不依赖 SkySheep 在运行；关闭（默认）时定时任务照旧只在应用内调度。
+    """
+
+    system_schedule: bool = False
+
+
 class WebSearchConfig(BaseModel):
     """联网搜索（web_search 工具）的服务商配置。
 
@@ -254,6 +267,19 @@ class RetentionConfig(BaseModel):
     reports_days: int = Field(default=30, ge=0, le=3650)
 
 
+class ShellConfig(BaseModel):
+    """命令执行（run_command）的一期沙箱配置。
+
+    job_containment：Windows 上把 run_command 拉起的子进程纳入 Job Object
+    进程遏制（security/sandbox_win.py）——命令结束/超时一次终止整棵树，
+    引擎退出由 kill-on-close 兜底，后台常驻进程不再残留孤儿。默认开；
+    个别命令与遏制机制冲突时可设 false 退回旧行为。这是进程遏制，
+    不是完整安全沙箱（受限令牌/AppContainer 属二期）。
+    """
+
+    job_containment: bool = True
+
+
 class SkySheepConfig(BaseModel):
     default: str = "deepseek"
     max_iterations: int = Field(default=40, ge=1, le=200)
@@ -293,11 +319,13 @@ class SkySheepConfig(BaseModel):
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
+    cron: CronConfig = Field(default_factory=CronConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    shell: ShellConfig = Field(default_factory=ShellConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
 
@@ -460,6 +488,7 @@ def load_config() -> SkySheepConfig:
     disabled: list[str] = []
     roundtable = RoundtableConfig()
     team = TeamConfig()
+    cron = CronConfig()
     websearch = WebSearchConfig()
     imagegen = ImageGenConfig()
     speech = SpeechConfig()
@@ -468,6 +497,7 @@ def load_config() -> SkySheepConfig:
     memory_maintenance = MemoryMaintenanceConfig()
     memory_map = MemoryMapConfig()
     retention = RetentionConfig()
+    shell = ShellConfig()
     p = config_path()
     if p.exists():
         try:
@@ -506,6 +536,9 @@ def load_config() -> SkySheepConfig:
         team_raw = raw.get("team")
         if isinstance(team_raw, dict):
             team = _build_section_model(TeamConfig, team_raw, "team")
+        cron_raw = raw.get("cron")
+        if isinstance(cron_raw, dict):
+            cron = _build_section_model(CronConfig, cron_raw, "cron")
         for section_name, model_cls, cur in (
             ("websearch", WebSearchConfig, websearch),
             ("imagegen", ImageGenConfig, imagegen),
@@ -514,6 +547,7 @@ def load_config() -> SkySheepConfig:
             ("memory_maintenance", MemoryMaintenanceConfig, memory_maintenance),
             ("memory_map", MemoryMapConfig, memory_map),
             ("retention", RetentionConfig, retention),
+            ("shell", ShellConfig, shell),
         ):
             section = raw.get(section_name)
             if isinstance(section, dict):
@@ -530,6 +564,8 @@ def load_config() -> SkySheepConfig:
                 memory_map = cur
             elif section_name == "retention":
                 retention = cur
+            elif section_name == "shell":
+                shell = cur
             else:
                 server = cur
         channels = _load_channels(raw.get("channels"))
@@ -587,11 +623,13 @@ def load_config() -> SkySheepConfig:
             retention=retention,
             roundtable=roundtable,
             team=team,
+            cron=cron,
             websearch=websearch,
             imagegen=imagegen,
             speech=speech,
             server=server,
             channels=channels,
+            shell=shell,
             providers=merged,
         )
     except ValidationError as e:

@@ -123,7 +123,9 @@ class SubagentGate(PermissionGate):
             return None
         pending = await super().authorize(tool, input_dict)
         if pending is not None:
-            pending.deny_note = self.DENY_NOTE
+            # 出站密钥防线的预拒绝自带「为什么被拦」的中文说明（比通用文案
+            # 更可行动），保留；其余情况与原行为一致，覆写为子代理通用文案。
+            pending.deny_note = pending.deny_note or self.DENY_NOTE
             pending.resolve(Decision.DENY)
         return pending
 
@@ -145,6 +147,13 @@ class IsolatedGate(PermissionGate):
     )
 
     async def authorize(self, tool, input_dict):
+        # 出站密钥防线先于「工作区内写入自动放行」（_egress_pre_deny 对
+        # READONLY 内部短路）：工作区隔离是「用户确认」的替代，但它替代的
+        # 是误操作的代价，不覆盖「把本机密钥写出去」——已知密钥值命中一律
+        # 预拒绝，隔离档也不例外。
+        blocked = self._egress_pre_deny(tool, input_dict)
+        if blocked is not None:
+            return blocked
         # 引擎主目录写入守卫先于 READONLY 短路（与主门/无人值守/渠道门同口径，
         # 第二轮审查 FINDING 2）：memory_write 名义 READONLY 却写全局记忆，
         # 隔离工作区覆盖不了它（落点固定在 ~/.skysheep，不在 worktree 内）。
@@ -156,7 +165,7 @@ class IsolatedGate(PermissionGate):
             return None
         pending = await super().authorize(tool, input_dict)
         if pending is not None:
-            pending.deny_note = self.DENY_NOTE
+            pending.deny_note = pending.deny_note or self.DENY_NOTE
             pending.resolve(Decision.DENY)
         return pending
 
@@ -196,6 +205,7 @@ async def run_subagent(
     system_extra: str = "",
     role_prompt: str | None = None,
     restrict_to_workdir: bool = False,
+    job_containment: bool = True,
     on_event: Callable[[object], Awaitable[None]] | None = None,
     gate: PermissionGate | None = None,
 ) -> tuple[str, Agent]:
@@ -217,6 +227,7 @@ async def run_subagent(
         working_dir=working_dir,
         max_iterations=max_iterations,
         restrict_to_workdir=restrict_to_workdir,
+        job_containment=job_containment,
     )
     role = BUILTIN_ROLE_PROMPTS.get(agent_type, "") if role_prompt is None else role_prompt
     # task 型额外拿了写工具，但子代理内必被拒绝：提前说死，省模型白试一轮
@@ -320,6 +331,7 @@ class TaskManager:
         usage_recorder: Callable[..., object] | None = None,
         event_emitter: Callable[[dict], None] | None = None,
         state_path: Path | None = None,
+        job_containment: bool = True,
     ) -> None:
         self._provider_factory = provider_factory
         self._working_dir = working_dir
@@ -337,6 +349,8 @@ class TaskManager:
         self._queue: list[TaskRecord] = []  # 并发满员时排队的后台任务（先进先出）
         self._turn_notes: dict[str, list[str]] = {}  # 会话 → 待注入下一轮的完成提示
         self._restrict_to_workdir = False
+        # 命令执行沙箱化一期：子代理任务的命令执行照主配置纳入进程遏制（默认开）
+        self._job_containment = bool(job_containment)
         self._load_state()
 
     def set_max_iterations(self, value: int) -> None:
@@ -732,6 +746,7 @@ class TaskManager:
                 role_prompt=plan.role_prompt if plan is not None else None,
                 extra_tools=extra,
                 restrict_to_workdir=True if rec.isolated else self._restrict_to_workdir,
+                job_containment=self._job_containment,
                 on_event=self._make_forwarder(rec),
                 gate=IsolatedGate(working_dir=workdir) if rec.isolated else None,
             )

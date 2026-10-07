@@ -60,6 +60,7 @@ class ToolContext:
         supports_vision: bool = True,
         restrict_to_workdir: bool = False,
         session_id: str = "",
+        job_containment: bool = True,
     ) -> None:
         self.working_dir = working_dir
         self.aborted = aborted or asyncio.Event()
@@ -68,6 +69,9 @@ class ToolContext:
         self.supports_vision = supports_vision
         # 只允许访问工作目录内的路径（设置里可开；默认关，保持"能做任意文件活"的能力）
         self.restrict_to_workdir = restrict_to_workdir
+        # 命令执行沙箱化一期：run_command 子进程纳入 Job Object 进程遏制
+        # （security/sandbox_win.py，仅 Windows，失败自动降级）。默认开。
+        self.job_containment = job_containment
         # 本次工具调用所属的会话：子代理派生（用量/任务簿归属）、后台进程
         # 注册表（读写归属校验）都从 ctx 取，不再依赖任何全局「当前会话」指针
         # ——并行会话各跑各的轮时，全局指针会被后来者覆盖导致串台。

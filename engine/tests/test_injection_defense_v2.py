@@ -1,7 +1,8 @@
 """提示注入纵深防御第二期：隔离区模式（默认关）+ 站点信任评级。
 
-- tools/web.py 的 QUARANTINE_ENABLED 开关：关闭时 web_fetch 输出与一期逐字节
-  一致；开启时正文落盘隔离文件（SKYSHEEP_HOME/quarantine/<日期>/<内容哈希>.txt，
+- tools/web.py 的 QUARANTINE_ENABLED 开关：关闭时 web_fetch 输出与一期（含
+  sanitize.UNTRUSTED_DATA_NOTE 机械标注行）逐字节一致；开启时正文落盘隔离文件
+  （SKYSHEEP_HOME/quarantine/<日期>/<内容哈希>.txt，
   textio 原子写），模型只拿到来源、信任级、前 N 字符摘录与文件路径；
 - sanitize.untrusted_frame 的 trust 可选参数：头部带信任级，不传则与一期一致；
 - SiteReputation：手动标记（已知良好/已知可疑）+ 注入命中自动计数，落
@@ -24,7 +25,11 @@ from pathlib import Path
 
 from skysheep import obs
 from skysheep.instance import data_home
-from skysheep.sanitize import scan_injection_patterns, untrusted_frame
+from skysheep.sanitize import (
+    UNTRUSTED_DATA_NOTE,
+    scan_injection_patterns,
+    untrusted_frame,
+)
 from skysheep.tools import web as webmod
 from skysheep.tools.base import ToolContext
 from skysheep.tools.web import (
@@ -100,7 +105,8 @@ _INJECT_PAGE = (
 
 
 def test_switch_off_output_byte_identical_clean_page(home):
-    """开关关（默认）+ 正常页面：输出与一期拼装逐字节一致，且不落任何文件。"""
+    """开关关（默认）+ 正常页面：输出与一期拼装（含机械标注层的固定标注行）
+    逐字节一致，且不落任何文件。"""
     handler = type("_Clean", (_PageHandler,), {
         "log_message": lambda self, *a: None, "page": _CLEAN_PAGE,
     })
@@ -110,9 +116,11 @@ def test_switch_off_output_byte_identical_clean_page(home):
         out = _fetch(f"http://127.0.0.1:{srv.server_address[1]}", "/cn", home)
     finally:
         srv.shutdown()
-    expected = f"[{url}] (text/html)\n\n" + untrusted_frame(url, webmod.html_to_text(
-        _CLEAN_PAGE.decode()))
-    assert out == expected, "开关关：输出必须与一期逐字节一致"
+    expected = (
+        f"[{url}] (text/html)\n\n" + UNTRUSTED_DATA_NOTE + "\n\n"
+        + untrusted_frame(url, webmod.html_to_text(_CLEAN_PAGE.decode()))
+    )
+    assert out == expected, "开关关：输出必须与一期（加机械标注行）逐字节一致"
     assert "信任级" not in out
     # 干净页 + 开关关：隔离区与信誉存储都不该有痕迹
     assert not (data_home() / "quarantine").exists()
@@ -135,10 +143,11 @@ def test_switch_off_output_byte_identical_with_hits(home):
     hits = scan_injection_patterns(text)
     assert hits, "桩页必须命中注入形态（用例前提）"
     expected = (
-        f"[{url}] (text/html)\n\n" + untrusted_frame(url, text)
+        f"[{url}] (text/html)\n\n" + UNTRUSTED_DATA_NOTE + "\n\n"
+        + untrusted_frame(url, text)
         + "\n\n" + _HINT_MARK + "、".join(hits)
     )
-    assert out == expected, "开关关：命中时输出也必须与一期逐字节一致"
+    assert out == expected, "开关关：命中时输出也必须与一期（加机械标注行）逐字节一致"
     assert "信任级" not in out
     assert (data_home() / "quarantine").exists() is False
     data = json.loads((data_home() / REPUTATION_FILENAME).read_text(encoding="utf-8"))

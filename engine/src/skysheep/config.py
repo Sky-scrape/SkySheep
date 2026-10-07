@@ -302,6 +302,17 @@ class ShellConfig(BaseModel):
     sandbox_level: str = "job"
 
 
+class SearchConfig(BaseModel):
+    """内容搜索（grep 工具）的可选加速。
+
+    use_ripgrep：检测到本机 rg（ripgrep）且搜索模式为纯 ASCII 时自动用 rg
+    提速大仓库搜索；关闭或 rg 不可用（含 rg 执行失败）一律回退内置纯
+    Python 实现，缺省语义零变化。默认开。
+    """
+
+    use_ripgrep: bool = True
+
+
 class SkySheepConfig(BaseModel):
     default: str = "deepseek"
     max_iterations: int = Field(default=40, ge=1, le=200)
@@ -348,6 +359,7 @@ class SkySheepConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
 
@@ -520,6 +532,7 @@ def load_config() -> SkySheepConfig:
     memory_map = MemoryMapConfig()
     retention = RetentionConfig()
     shell = ShellConfig()
+    search = SearchConfig()
     p = config_path()
     if p.exists():
         try:
@@ -570,6 +583,7 @@ def load_config() -> SkySheepConfig:
             ("memory_map", MemoryMapConfig, memory_map),
             ("retention", RetentionConfig, retention),
             ("shell", ShellConfig, shell),
+            ("search", SearchConfig, search),
         ):
             section = raw.get(section_name)
             if isinstance(section, dict):
@@ -588,6 +602,8 @@ def load_config() -> SkySheepConfig:
                 retention = cur
             elif section_name == "shell":
                 shell = cur
+            elif section_name == "search":
+                search = cur
             else:
                 server = cur
         channels = _load_channels(raw.get("channels"))
@@ -652,6 +668,7 @@ def load_config() -> SkySheepConfig:
             server=server,
             channels=channels,
             shell=shell,
+            search=search,
             providers=merged,
         )
     except ValidationError as e:
@@ -677,13 +694,16 @@ def set_advanced_settings_in_config(
     system_schedule: bool | None = None,
     job_containment: bool | None = None,
     sandbox_level: str | None = None,
+    use_ripgrep: bool | None = None,
 ) -> None:
-    """写入「高级」设置（config.toml 顶层与 [cron] / [shell] 段；None 表示该项不动）。
+    """写入「高级」设置（config.toml 顶层与 [cron] / [shell] / [search] 段；None 表示该项不动）。
 
     system_schedule / job_containment / sandbox_level 是设置 · 高级页
     「安全与后台」卡的三个开关（定时调度总开关、命令沙箱遏制、沙箱级别），
     分别落 [cron] 与 [shell] 段；非法的 sandbox_level 在入口报错（读取侧
-    对未知值按 "job" 处理，见 ShellConfig）。
+    对未知值按 "job" 处理，见 ShellConfig）。use_ripgrep 是内容搜索的
+    ripgrep 可选加速开关，落 [search] 段（目前只有配置写入通道，设置页
+    暂无对应控件）。
     """
     if max_iterations is not None and not 1 <= int(max_iterations) <= 200:
         raise ConfigError("主循环最大轮数要在 1–200 之间")
@@ -718,16 +738,19 @@ def set_advanced_settings_in_config(
         raw["daily_token_budget"] = max(0, int(daily_token_budget))
     if memory_digest is not None:
         raw["memory_digest"] = bool(memory_digest)
-    # [cron] / [shell] 段：照 [retention] 的姿态按需建段、空段删除，
+    # [cron] / [shell] / [search] 段：照 [retention] 的姿态按需建段、空段删除，
     # 不整体重写用户没碰的键
     cron_sec = dict(raw.get("cron") or {})
     shell_sec = dict(raw.get("shell") or {})
+    search_sec = dict(raw.get("search") or {})
     if system_schedule is not None:
         cron_sec["system_schedule"] = bool(system_schedule)
     if job_containment is not None:
         shell_sec["job_containment"] = bool(job_containment)
     if sandbox_level is not None:
         shell_sec["sandbox_level"] = str(sandbox_level)
+    if use_ripgrep is not None:
+        search_sec["use_ripgrep"] = bool(use_ripgrep)
     if cron_sec:
         raw["cron"] = cron_sec
     else:
@@ -736,6 +759,10 @@ def set_advanced_settings_in_config(
         raw["shell"] = shell_sec
     else:
         raw.pop("shell", None)
+    if search_sec:
+        raw["search"] = search_sec
+    else:
+        raw.pop("search", None)
     _write_raw_config(p, raw)
 
 

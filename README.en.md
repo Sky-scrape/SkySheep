@@ -228,14 +228,14 @@ Running into a problem? In the app, go to Settings → About → "💬 Report an
 ## 🗺 Roadmap & Non-goals
 
 - ✅ current release **v2.4.1**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors (full history in [CHANGELOG.md](CHANGELOG.md))
-- 🚧 **Next up**: macOS / Linux support · system-level scheduling (register with Windows Task Scheduler, fire the engine on schedule and exit — removing the "app must be running" prerequisite) · defense-in-depth against prompt injection (tool egress filtering and untrusted-content labeling) · code-signed distribution · optional ripgrep acceleration (speeds up large-repo search when a local rg is present; the built-in pure-Python search remains the default) · command execution sandboxing (restricted tokens / AppContainer first, closing the OS-level gap) · in-page browser automation (click / fill / extract inside pages, complementing computer control) · mobile PWA (the LAN / Tailscale web UI installable to the home screen)
+- 🚧 **Next up**: macOS / Linux support · system-level scheduling (register with Windows Task Scheduler, fire the engine on schedule and exit — removing the "app must be running" prerequisite) · defense-in-depth against prompt injection (tool egress filtering and untrusted-content labeling) · code-signed distribution · command execution sandboxing (restricted tokens / AppContainer first, closing the OS-level gap) · in-page browser automation (click / fill / extract inside pages, complementing computer control) · mobile PWA (the LAN / Tailscale web UI installable to the home screen)
 
 **Non-goals**:
 
 - **Native mobile apps** — the desktop shell is where permission gates, checkpoints, and the file panel get polished; there is no bandwidth right now for a second, mobile-grade security model. The web PWA is not affected (see roadmap).
 - **macOS/Linux (for now)** — Windows gets the desktop experience polished first; the `--browser` mode already provides a cross-platform fallback.
 - **Vector memory / multi-tier context compaction** — the built-in compaction and archive-time memory digests already cover current usage; not worth growing the install size.
-- **Replacing the built-in search with ripgrep** — pure-Python, zero-dependency "install and it works" distribution stays; no bundled binary, but an installed rg may optionally accelerate search (see roadmap).
+- **Replacing the built-in search with ripgrep** — pure-Python, zero-dependency "install and it works" distribution stays; no bundled binary, but an installed rg may optionally accelerate search (implemented: ASCII-pattern search is accelerated automatically when a local rg is present; the built-in search remains the default).
 - **A proprietary plugin JS API** — extension points stay on the two open standards, MCP and Skills; the frontend remains zero-build.
 - **An operated skill marketplace** — skills ship via the in-app import flow (folder / .zip / links); no curated store to moderate.
 

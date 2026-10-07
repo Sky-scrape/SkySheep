@@ -101,6 +101,7 @@ class Agent:
         session_id: str = "",
         job_containment: bool = True,
         sandbox_level: str = "job",
+        use_ripgrep: bool = True,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -128,6 +129,9 @@ class Agent:
         # 沙箱化二期："restricted" = 受限令牌 + Job Object 叠加（详见
         # ShellConfig.sandbox_level），任一步失败自动降回 job-only。
         self.sandbox_level = sandbox_level
+        # 内容搜索（grep）可选加速：检测到本机 rg 且模式为纯 ASCII 时用
+        # ripgrep 扫描，不可用/失败自动回退内置实现。默认开。
+        self.use_ripgrep = use_ripgrep
         # 会话 id：透传给钩子命令的 stdin JSON（多会话场景钩子可区分来源）
         self.session_id = session_id
         self.history: list[Message] = []
@@ -326,6 +330,7 @@ class Agent:
             session_id=self.session_id,
             job_containment=self.job_containment,
             sandbox_level=self.sandbox_level,
+            use_ripgrep=self.use_ripgrep,
         )
         iterations = 0
         stop_reason = "max_iterations"  # 正常结束时在 break 前改为 end_turn

@@ -216,6 +216,7 @@ class ChatApp:
             hooks=hooks,
             job_containment=self.cfg.shell.job_containment,
             sandbox_level=self.cfg.shell.sandbox_level,
+            use_ripgrep=self.cfg.search.use_ripgrep,
         )
         self.agent.set_system(self._compose_system())
 
@@ -948,6 +949,7 @@ async def run_headless(
             hooks=hooks,
             job_containment=cfg.shell.job_containment,
             sandbox_level=cfg.shell.sandbox_level,
+            use_ripgrep=cfg.search.use_ripgrep,
         )
         agent.set_system(
             build_system_prompt(working_dir)
@@ -1124,6 +1126,7 @@ async def _cron_run_async(
                 session_id=sid,
                 job_containment=cfg.shell.job_containment,
                 sandbox_level=cfg.shell.sandbox_level,
+                use_ripgrep=cfg.search.use_ripgrep,
             )
             agent.set_system(
                 build_system_prompt(working_dir)

@@ -805,6 +805,7 @@ class TeamOrchestrator:
         session_id: str = "",
         job_containment: bool = True,
         sandbox_level: str = "job",
+        use_ripgrep: bool = True,
         hooks=None,
         mods=None,
         director: DirectorSpec | None = None,
@@ -825,6 +826,8 @@ class TeamOrchestrator:
         self._job_containment = bool(job_containment)
         # 二期：沙箱档位随主配置透传给队员 Agent（"restricted" = 叠加受限令牌）
         self._sandbox_level = sandbox_level
+        # 内容搜索（grep）可选加速：随主配置透传（rg 不可用/失败自动回退内置）
+        self._use_ripgrep = bool(use_ripgrep)
         self._session_id = session_id
         self._hooks = hooks
         self._mods = mods
@@ -1278,6 +1281,7 @@ class TeamOrchestrator:
                 session_id=self._session_id,
                 job_containment=self._job_containment,
                 sandbox_level=self._sandbox_level,
+                use_ripgrep=self._use_ripgrep,
                 hooks=self._hooks,
                 mods=self._mods,
             )

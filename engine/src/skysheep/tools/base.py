@@ -62,6 +62,7 @@ class ToolContext:
         session_id: str = "",
         job_containment: bool = True,
         sandbox_level: str = "job",
+        use_ripgrep: bool = True,
     ) -> None:
         self.working_dir = working_dir
         self.aborted = aborted or asyncio.Event()
@@ -78,6 +79,9 @@ class ToolContext:
         # 任一步失败自动降回 job-only 并附「受限令牌未生效」注记）。默认
         # "job"（一期现状）；其他取值一律按 "job" 处理。
         self.sandbox_level = sandbox_level
+        # 内容搜索（grep）可选加速：检测到本机 rg（ripgrep）且模式为纯 ASCII
+        # 时用 rg 扫描；不可用或失败自动回退内置纯 Python 实现。默认开。
+        self.use_ripgrep = use_ripgrep
         # 本次工具调用所属的会话：子代理派生（用量/任务簿归属）、后台进程
         # 注册表（读写归属校验）都从 ctx 取，不再依赖任何全局「当前会话」指针
         # ——并行会话各跑各的轮时，全局指针会被后来者覆盖导致串台。

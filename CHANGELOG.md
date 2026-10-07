@@ -6,6 +6,10 @@
 
 ### 新增
 
+- **内容搜索 ripgrep 可选加速**：检测到本机 rg 且搜索模式为纯 ASCII 时自动用 ripgrep 提速
+  大仓库搜索，尊重 .skysheepignore/.gitignore/.env 与既有跳过目录，结果格式与
+  200/20/2MB 上限同内置实现；模式含非 ASCII（如中文）或 rg 失败/超时自动回退内置纯
+  Python 实现，`[search] use_ripgrep = false` 可关闭。
 - **系统级定时调度**：定时任务不依赖 SkySheep 在运行——`config.toml` 新增 `[cron]
   system_schedule`（默认关），开启后应用内新建/修改/删除定时任务自动同步注册/重建/注销
   Windows 计划任务（schtasks，任务名 `SkySheepCron-<任务id>`，`core/system_schedule.py`），

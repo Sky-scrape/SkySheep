@@ -978,6 +978,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             session_id=session_id,
             job_containment=self.cfg.shell.job_containment,
             sandbox_level=self.cfg.shell.sandbox_level,
+            use_ripgrep=self.cfg.search.use_ripgrep,
         )
 
     def _get_runtime(self, session_id: str) -> SessionRuntime:
@@ -2887,6 +2888,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             session_id=sid,
             job_containment=self.cfg.shell.job_containment,
             sandbox_level=self.cfg.shell.sandbox_level,
+            use_ripgrep=self.cfg.search.use_ripgrep,
             hooks=self.hooks,
             mods=self.mods,
             director_mode=director_mode,
@@ -5161,6 +5163,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     None if params.get("sandbox_level") is None
                     else str(params.get("sandbox_level"))
                 ),
+                use_ripgrep=(
+                    None if params.get("use_ripgrep") is None
+                    else bool(params.get("use_ripgrep"))
+                ),
             )
         except ConfigError as e:
             raise RuntimeError(str(e)) from e
@@ -5853,6 +5859,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             state_path=skysheep_home() / "subagent_tasks.json",
             job_containment=self.cfg.shell.job_containment,
             sandbox_level=self.cfg.shell.sandbox_level,
+            use_ripgrep=self.cfg.search.use_ripgrep,
         )
 
         # 项目级 mcp.json 指向新目录 → 差量接入新目录的服务器；顺带用新技能/子代理重建完整注册表。

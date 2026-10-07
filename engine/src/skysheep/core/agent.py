@@ -100,6 +100,7 @@ class Agent:
         restrict_to_workdir: bool = False,
         session_id: str = "",
         job_containment: bool = True,
+        sandbox_level: str = "job",
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -124,6 +125,9 @@ class Agent:
         # 命令执行沙箱化一期：run_command 子进程纳入 Job Object 进程遏制
         # （security/sandbox_win.py，仅 Windows，失败自动降级）。默认开。
         self.job_containment = job_containment
+        # 沙箱化二期："restricted" = 受限令牌 + Job Object 叠加（详见
+        # ShellConfig.sandbox_level），任一步失败自动降回 job-only。
+        self.sandbox_level = sandbox_level
         # 会话 id：透传给钩子命令的 stdin JSON（多会话场景钩子可区分来源）
         self.session_id = session_id
         self.history: list[Message] = []
@@ -321,6 +325,7 @@ class Agent:
             restrict_to_workdir=self.restrict_to_workdir,
             session_id=self.session_id,
             job_containment=self.job_containment,
+            sandbox_level=self.sandbox_level,
         )
         iterations = 0
         stop_reason = "max_iterations"  # 正常结束时在 break 前改为 end_turn

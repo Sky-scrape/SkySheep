@@ -1104,6 +1104,36 @@
               关闭时（默认），只读工具可以不经确认读取磁盘任何位置，包括 <b>~/.ssh</b> 下的私钥、浏览器数据；
               如果 Agent 会被诱导读入外来内容，建议开启。
             </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="adv-system-schedule">
+              <span>系统级定时调度</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              关闭时（默认），定时任务仅在应用运行期间生效——SkySheep 没开着就不到点执行。
+              开启后，应用内新建 / 修改的定时任务会同步注册进 Windows 任务计划程序，
+              到点由系统拉起引擎独立执行，不依赖 SkySheep 在运行。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="adv-job-containment">
+              <span>命令沙箱遏制</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              执行命令时把拉起的子进程（含整棵进程树）纳入 Job Object 进程遏制：
+              命令结束或超时一次终止整棵树，应用退出时残留进程一并回收。<b>默认开启</b>；
+              个别命令与遏制机制冲突时可关闭退回旧行为。
+            </p>
+            <div class="toolcfg-row">
+              <label for="adv-sandbox-level">沙箱级别</label>
+              <select id="adv-sandbox-level">
+                <option value="job">job —— 仅进程遏制</option>
+                <option value="restricted">restricted —— 受限令牌</option>
+              </select>
+            </div>
+            <p class="dim small adv-toggle-desc">
+              job：仅进程遏制（默认）。restricted：在遏制之上叠加受限令牌——剥离特权 + 低完整性，
+              部分需要特权的命令会失败，写用户目录 / 项目文件的命令也可能失败（这是限制的一部分，不是故障）。
+              仅 Windows 且「命令沙箱遏制」开启时生效；受限令牌不可用时自动退回 job 并在结果里注明。
+            </p>
             <div class="toolcfg-row">
               <label>工作区信任</label>
               <span id="adv-trust-state" class="dim small">读取中…</span>

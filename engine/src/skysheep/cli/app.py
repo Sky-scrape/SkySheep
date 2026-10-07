@@ -215,6 +215,7 @@ class ChatApp:
             compaction_auto=self.cfg.compaction_auto,
             hooks=hooks,
             job_containment=self.cfg.shell.job_containment,
+            sandbox_level=self.cfg.shell.sandbox_level,
         )
         self.agent.set_system(self._compose_system())
 
@@ -946,6 +947,7 @@ async def run_headless(
             compaction_auto=cfg.compaction_auto,
             hooks=hooks,
             job_containment=cfg.shell.job_containment,
+            sandbox_level=cfg.shell.sandbox_level,
         )
         agent.set_system(
             build_system_prompt(working_dir)
@@ -1121,6 +1123,7 @@ async def _cron_run_async(
                 restrict_to_workdir=cfg.restrict_to_workdir,
                 session_id=sid,
                 job_containment=cfg.shell.job_containment,
+                sandbox_level=cfg.shell.sandbox_level,
             )
             agent.set_system(
                 build_system_prompt(working_dir)

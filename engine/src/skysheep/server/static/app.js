@@ -13521,6 +13521,12 @@ async function renderAdvancedCfg() {
   q("adv-compaction-auto").checked = d.compaction_auto !== false;
   syncCompactionInputs();
   q("adv-restrict-workdir").checked = !!d.restrict_to_workdir;
+  // 「安全与后台」：定时调度总开关与命令沙箱。读取点都在各自执行路径上按
+  // 当前配置取值，保存后即热生效，无需重启
+  q("adv-system-schedule").checked = !!d.system_schedule;
+  q("adv-job-containment").checked = d.job_containment !== false;
+  q("adv-sandbox-level").value = d.sandbox_level === "restricted" ? "restricted" : "job";
+  syncSandboxLevel();
   renderTrustState();
   renderTrustList();
   q("adv-daily-budget").value = d.daily_token_budget || "";
@@ -13570,6 +13576,9 @@ async function saveAdvanced() {
       compaction_auto: q("adv-compaction-auto").checked,
       daily_token_budget: Number(q("adv-daily-budget").value) || 0,
       restrict_to_workdir: q("adv-restrict-workdir").checked,
+      system_schedule: q("adv-system-schedule").checked,
+      job_containment: q("adv-job-containment").checked,
+      sandbox_level: q("adv-sandbox-level").value,
       autostart: q("adv-autostart").checked,
       hotkey: newHotkey,
     });
@@ -13597,6 +13606,13 @@ function syncCompactionInputs() {
   document.getElementById("adv-keep-recent").disabled = off;
 }
 document.getElementById("adv-compaction-auto").onchange = syncCompactionInputs;
+
+// 沙箱遏制关闭时置灰级别下拉：总开关关 = 完全不沙箱，级别不会把遏制复活
+function syncSandboxLevel() {
+  const off = !document.getElementById("adv-job-containment").checked;
+  document.getElementById("adv-sandbox-level").disabled = off;
+}
+document.getElementById("adv-job-containment").onchange = syncSandboxLevel;
 
 // 恢复默认：填回默认值并立即保存（40 轮 / 1,000,000 / 自动压缩开 / 触发 90% / 保留 8 / 预算不限）
 document.getElementById("btn-advanced-reset").onclick = async () => {

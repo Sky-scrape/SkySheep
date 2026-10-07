@@ -34,6 +34,24 @@
   主会话/子代理/团队成员/CLI headless 全链路透传；`config.toml` 新增 `[shell]
   job_containment`（默认开，个别命令与遏制机制冲突时可关）。这是进程遏制不是完整安全
   沙箱——受限令牌/AppContainer 属二期。
+- **命令执行沙箱二期（受限令牌，opt-in）**：`[shell] sandbox_level="restricted"` 时在
+  Job Object 进程遏制之上叠加受限令牌——剥离全部特权（DISABLE_MAX_PRIVILEGE）+ 低完整性
+  （S-1-16-4096），子进程以「无任何特权、低完整性」的令牌直启（`security/sandbox_win.py`，
+  纯标准库 ctypes，零新依赖）；前台与后台（background=true）两条路径同样生效，主会话/
+  子代理/团队成员/CLI headless 全链路透传。**令牌启动需引擎以管理员（提权）运行**（需持有
+  SeAssignPrimaryTokenPrivilege）：普通用户态引擎令牌构造照常、启动被系统拒绝，自动降回
+  job-only；非 Windows 或令牌任一步失败同样降级。降级一律如实记录——obs 日志 + 命令结果
+  尾部「受限令牌未生效：…」注记（fail-visible，绝不静默、绝不因此拒绝执行，权限门照常）。
+  如实边界：低完整性子进程写不了中完整性对象，用户目录/项目文件默认中完整性，**写文件的
+  命令（安装、构建产物落盘等）会失败**——这是限制的一部分，不是故障；读与网络出站不受限，
+  它不是 AppContainer、不提供路径级隔离。`job_containment` 关闭时档位一并关闭（总开关
+  优先），其他取值按 `"job"` 处理（安全方向回退，不报错）。
+- **「设置 · 高级」新增「安全与后台」三项开关**：系统级定时调度总开关（`[cron]
+  system_schedule`）、命令沙箱遏制（`[shell] job_containment`）与沙箱级别
+  （`[shell] sandbox_level`：job / restricted）——此前只能手改 `config.toml` 的三项现在
+  设置页直达，保存即热生效（读取点都在各自执行路径上按当前配置取值，无需重启）；
+  遏制关闭时级别下拉置灰（总开关关 = 不沙箱，档位不会把它复活）；非法档位在保存入口
+  拒绝（读取侧未知值按 job 处理）。
 - **浏览器页内自动化（web_page 工具）**：与 browser 工具（把网页开在用户自己的浏览器里给
   用户看）互补——引擎自拉临时无头 Edge 执行页内动作（CDP 驱动，`tools/browser_cdp.py`：
   CdpBrowser 单例 + 最小 CDP 客户端），动作 navigate / click / fill / press / extract /
@@ -185,6 +203,11 @@
   days 聚合，不动后端），填住底栏右侧空白；⑦ 汇总改弹性一行四项均匀铺开：
   拉宽面板时空白被信息用掉（不再全堆在图例和汇总之间），收窄到装不下时整块
   换行占满整行，不再把首行挤到溢出（出横向滚动条、汇总被裁掉）。
+- **飞书渠道子进程事件流测试改为事件驱动等待，消除 CI 偶发失败**：`FeishuChannel`
+  新增 `wait_ready()` 就绪信号（`_ready_evt` 与 `connected` 翻真同拍置位、每轮重连先清，
+  等到的总是最新一轮的就绪），两条拉真实子进程的事件流用例从「固定 sleep 猜子进程
+  什么时候拉起来」改为等就绪信号 + 等回调事件——CI 慢机上两次 spawn（config init +
+  event consume）+ 逐行追踪的耗时是本地的数倍，有界盲等必然间歇性等不到。
 
 ## [2.4.1] - 2026-10-03
 

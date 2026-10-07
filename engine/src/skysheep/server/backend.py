@@ -977,6 +977,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
             session_id=session_id,
             job_containment=self.cfg.shell.job_containment,
+            sandbox_level=self.cfg.shell.sandbox_level,
         )
 
     def _get_runtime(self, session_id: str) -> SessionRuntime:
@@ -2885,6 +2886,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
             session_id=sid,
             job_containment=self.cfg.shell.job_containment,
+            sandbox_level=self.cfg.shell.sandbox_level,
             hooks=self.hooks,
             mods=self.mods,
             director_mode=director_mode,
@@ -4941,6 +4943,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             ag.compaction_auto = self.cfg.compaction_auto
             ag.restrict_to_workdir = self.cfg.restrict_to_workdir
             ag.job_containment = self.cfg.shell.job_containment
+            # 沙箱级别与遏制同一条热更通道（run_command 每次执行时从工具
+            # 上下文取值；Agent 未带该属性的旧构造点赋值也无害）
+            ag.sandbox_level = self.cfg.shell.sandbox_level
 
     def _startup_status(self) -> dict:
         from .. import startup
@@ -5077,6 +5082,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "computer_control": self.cfg.computer_control,
             "browser_control": self.cfg.browser_control,
             "daily_token_budget": self.cfg.daily_token_budget,
+            # 「安全与后台」的三项：定时调度总开关与命令沙箱（读取点都在各自
+            # 执行路径上按当前配置取值，改完即热生效，无需重启）
+            "system_schedule": self.cfg.cron.system_schedule,
+            "job_containment": self.cfg.shell.job_containment,
+            "sandbox_level": self.cfg.shell.sandbox_level,
             "context_limit_tokens_effective": self._context_limit(),
             "current_provider": self.provider_name,
             "current_provider_context_limit": (
@@ -5137,6 +5147,20 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     else bool(params.get("browser_control"))
                 ),
                 daily_token_budget=budget,
+                # 「安全与后台」三项：不传 = 不动（与其它布尔项同一姿态）；
+                # 读取点在执行路径上按配置取值，self.cfg 重载后即热生效
+                system_schedule=(
+                    None if params.get("system_schedule") is None
+                    else bool(params.get("system_schedule"))
+                ),
+                job_containment=(
+                    None if params.get("job_containment") is None
+                    else bool(params.get("job_containment"))
+                ),
+                sandbox_level=(
+                    None if params.get("sandbox_level") is None
+                    else str(params.get("sandbox_level"))
+                ),
             )
         except ConfigError as e:
             raise RuntimeError(str(e)) from e
@@ -5828,6 +5852,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             event_emitter=self._ws_broadcast,
             state_path=skysheep_home() / "subagent_tasks.json",
             job_containment=self.cfg.shell.job_containment,
+            sandbox_level=self.cfg.shell.sandbox_level,
         )
 
         # 项目级 mcp.json 指向新目录 → 差量接入新目录的服务器；顺带用新技能/子代理重建完整注册表。

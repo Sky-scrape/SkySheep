@@ -381,6 +381,18 @@ def _event(**kw):
     return ev
 
 
+def _feishu_diag(ch) -> str:
+    """断言失败时的现场快照：错误原因、子进程与后台任务状态，直接进断言消息。"""
+    proc = ch._proc
+    proc_state = "none" if proc is None else (
+        "alive" if proc.poll() is None else f"exited({proc.returncode})"
+    )
+    return (
+        f"诊断：error={ch.error!r} connected={ch.connected} proc={proc_state} "
+        f"running={ch.running}"
+    )
+
+
 def _channel(**cfg):
     """构造飞书渠道。键缺省即代表「配置里没有这个字段」，而不是用默认值填上。"""
     from skysheep.channels.feishu import FeishuChannel
@@ -434,13 +446,21 @@ def test_feishu_group_requires_mention():
 
 
 async def test_feishu_reads_event_stream_from_subprocess(tmp_path, home):
-    """端到端：起假 CLI → 等 ready → 读 NDJSON → 交给 on_message。"""
+    """端到端：起假 CLI → 等就绪 → 读 NDJSON → 交给 on_message。
+
+    等待全部事件驱动：就绪用渠道注入的就绪信号（wait_ready），消息用回调里置的
+    Event。旧写法是「for 80 次 × 0.1s 盯 got」的一次性盲等，CI 慢机上两次子进程
+    spawn + 逐行追踪可超过 8s；且 ready 标记走 stderr 子线程、事件走 stdout 泵
+    线程，两者没有先后保证，测试可能先看到消息、connected 还没翻真就断言。
+    """
     from skysheep.channels.feishu import FeishuChannel
 
     got = []
+    msg_evt = asyncio.Event()
 
     async def on_msg(m):
         got.append(m)
+        msg_evt.set()
 
     cli = _fake_cli(tmp_path, events=[_event(content="看下项目结构")])
     ch = FeishuChannel(
@@ -450,13 +470,12 @@ async def test_feishu_reads_event_stream_from_subprocess(tmp_path, home):
     )
     try:
         await ch.start()
-        for _ in range(80):
-            if got:
-                break
-            await asyncio.sleep(0.1)
+        assert await asyncio.wait_for(ch.wait_ready(timeout=30), timeout=35), \
+            _feishu_diag(ch)
+        await asyncio.wait_for(msg_evt.wait(), timeout=30)
         assert ch.connected is True
         assert ch.error == ""
-        assert len(got) == 1
+        assert len(got) == 1, _feishu_diag(ch)
         m = got[0]
         assert m.channel == "feishu"
         assert m.actor == "ou_sender"
@@ -469,13 +488,18 @@ async def test_feishu_reads_event_stream_from_subprocess(tmp_path, home):
 
 
 async def test_feishu_marks_unapproved_source(tmp_path, home):
-    """名单外来源仍会构造出消息，但 approved=False —— 安全性由消息层强制。"""
+    """名单外来源仍会构造出消息，但 approved=False —— 安全性由消息层强制。
+
+    等待事件驱动（同 test_feishu_reads_event_stream_from_subprocess 的理由）。
+    """
     from skysheep.channels.feishu import FeishuChannel
 
     got = []
+    msg_evt = asyncio.Event()
 
     async def on_msg(m):
         got.append(m)
+        msg_evt.set()
 
     cli = _fake_cli(tmp_path, events=[_event(sender_id="ou_stranger", chat_id="oc_s")])
     ch = FeishuChannel(
@@ -485,11 +509,11 @@ async def test_feishu_marks_unapproved_source(tmp_path, home):
     )
     try:
         await ch.start()
-        for _ in range(80):
-            if got:
-                break
-            await asyncio.sleep(0.1)
-        assert len(got) == 1 and got[0].approved is False
+        assert await asyncio.wait_for(ch.wait_ready(timeout=30), timeout=35), \
+            _feishu_diag(ch)
+        await asyncio.wait_for(msg_evt.wait(), timeout=30)
+        assert len(got) == 1, _feishu_diag(ch)
+        assert got[0].approved is False
     finally:
         await ch.stop()
 
@@ -1080,7 +1104,10 @@ async def test_manager_route_error_stays_silent_for_unapproved():
     mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": []}})
     from skysheep.channels.base import ChannelMessage
 
-    async def boom(msg):
+    def boom(msg):
+        # note_seen 是同步方法（manager 路由层同步调用）；写 async 会造出
+        # 从未 await 的协程（CI 曾报 RuntimeWarning），且异常根本抛不出来，
+        # 这条「未批准来源不回话」的兜底就没人验证了。
         raise RuntimeError("boom")
 
     mgr.note_seen = boom  # 让未批准分支也抛一次，验证兜底不回话

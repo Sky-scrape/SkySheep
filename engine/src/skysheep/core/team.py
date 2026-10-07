@@ -804,6 +804,7 @@ class TeamOrchestrator:
         restrict_to_workdir: bool = False,
         session_id: str = "",
         job_containment: bool = True,
+        sandbox_level: str = "job",
         hooks=None,
         mods=None,
         director: DirectorSpec | None = None,
@@ -822,6 +823,8 @@ class TeamOrchestrator:
         self._max_iterations = max(1, int(max_iterations))
         self._restrict_to_workdir = bool(restrict_to_workdir)
         self._job_containment = bool(job_containment)
+        # 二期：沙箱档位随主配置透传给队员 Agent（"restricted" = 叠加受限令牌）
+        self._sandbox_level = sandbox_level
         self._session_id = session_id
         self._hooks = hooks
         self._mods = mods
@@ -1274,6 +1277,7 @@ class TeamOrchestrator:
                 # 协调按「无归属」放行）；用户钩子与 Mod 拦截照主会话生效
                 session_id=self._session_id,
                 job_containment=self._job_containment,
+                sandbox_level=self._sandbox_level,
                 hooks=self._hooks,
                 mods=self._mods,
             )

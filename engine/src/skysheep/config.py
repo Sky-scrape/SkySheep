@@ -273,16 +273,33 @@ class RetentionConfig(BaseModel):
 
 
 class ShellConfig(BaseModel):
-    """命令执行（run_command）的一期沙箱配置。
+    """命令执行（run_command）的沙箱配置。
 
     job_containment：Windows 上把 run_command 拉起的子进程纳入 Job Object
     进程遏制（security/sandbox_win.py）——命令结束/超时一次终止整棵树，
     引擎退出由 kill-on-close 兜底，后台常驻进程不再残留孤儿。默认开；
     个别命令与遏制机制冲突时可设 false 退回旧行为。这是进程遏制，
-    不是完整安全沙箱（受限令牌/AppContainer 属二期）。
+    不是完整安全沙箱。
+
+    sandbox_level：沙箱档位（二期），只在 Windows 且 job_containment 开启时
+    生效（总开关关闭 = 不沙箱，另开档位不会把它复活）：
+
+    - ``"job"``（默认）：一期现状，只做 Job Object 进程遏制；
+    - ``"restricted"``：在 Job Object 之上叠加受限令牌——剥离全部特权
+      （DISABLE_MAX_PRIVILEGE）+ 低完整性（S-1-16-4096）。**仅当引擎以
+      管理员（提权）运行时可用**：令牌启动需持有 SeAssignPrimaryToken-
+      Privilege，普通用户态引擎会自动降回 job-only 并附「受限令牌未生效」
+      注记（真机实测）。代价：低完整性子进程写不了中完整性对象，而用户
+      目录/项目文件默认就是中完整性，**写文件的命令（安装、构建产物落盘
+      等）会失败**——这是限制的一部分，不是故障。构建/安装类命令多的人
+      留在默认档。非 Windows 或令牌任一步失败同样自动降回 job-only，
+      记日志并附注记。
+
+    其他取值按 ``"job"`` 处理（安全方向回退，不报错）。
     """
 
     job_containment: bool = True
+    sandbox_level: str = "job"
 
 
 class SkySheepConfig(BaseModel):
@@ -657,8 +674,17 @@ def set_advanced_settings_in_config(
     browser_control: bool | None = None,
     daily_token_budget: int | None = None,
     memory_digest: bool | None = None,
+    system_schedule: bool | None = None,
+    job_containment: bool | None = None,
+    sandbox_level: str | None = None,
 ) -> None:
-    """写入「高级」设置（config.toml 顶层；None 表示该项不动）。"""
+    """写入「高级」设置（config.toml 顶层与 [cron] / [shell] 段；None 表示该项不动）。
+
+    system_schedule / job_containment / sandbox_level 是设置 · 高级页
+    「安全与后台」卡的三个开关（定时调度总开关、命令沙箱遏制、沙箱级别），
+    分别落 [cron] 与 [shell] 段；非法的 sandbox_level 在入口报错（读取侧
+    对未知值按 "job" 处理，见 ShellConfig）。
+    """
     if max_iterations is not None and not 1 <= int(max_iterations) <= 200:
         raise ConfigError("主循环最大轮数要在 1–200 之间")
     if context_limit_tokens is not None and not 4_000 <= int(context_limit_tokens) <= 2_000_000:
@@ -669,6 +695,8 @@ def set_advanced_settings_in_config(
         raise ConfigError("压缩触发比例要在 0.5–0.98 之间")
     if daily_token_budget is not None and int(daily_token_budget) > 100_000_000:
         raise ConfigError("每日 token 预算过大，请填写 0（不限制）到 1 亿之间的整数")
+    if sandbox_level is not None and sandbox_level not in ("job", "restricted"):
+        raise ConfigError("沙箱级别只能是 job（仅进程遏制）或 restricted（受限令牌）")
     p, raw = _read_raw_config()
     if max_iterations is not None:
         raw["max_iterations"] = int(max_iterations)
@@ -690,6 +718,24 @@ def set_advanced_settings_in_config(
         raw["daily_token_budget"] = max(0, int(daily_token_budget))
     if memory_digest is not None:
         raw["memory_digest"] = bool(memory_digest)
+    # [cron] / [shell] 段：照 [retention] 的姿态按需建段、空段删除，
+    # 不整体重写用户没碰的键
+    cron_sec = dict(raw.get("cron") or {})
+    shell_sec = dict(raw.get("shell") or {})
+    if system_schedule is not None:
+        cron_sec["system_schedule"] = bool(system_schedule)
+    if job_containment is not None:
+        shell_sec["job_containment"] = bool(job_containment)
+    if sandbox_level is not None:
+        shell_sec["sandbox_level"] = str(sandbox_level)
+    if cron_sec:
+        raw["cron"] = cron_sec
+    else:
+        raw.pop("cron", None)
+    if shell_sec:
+        raw["shell"] = shell_sec
+    else:
+        raw.pop("shell", None)
     _write_raw_config(p, raw)
 
 

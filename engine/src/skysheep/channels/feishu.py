@@ -106,6 +106,11 @@ class FeishuChannel(Channel):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping = False
         self.connected = False          # 子进程是否已 ready（真的在收事件）
+        # 就绪信号：与 connected 翻真同拍置位（见 _consume_once）。供调用方/测试
+        # 事件驱动地等就绪，替代「固定 sleep 猜子进程什么时候拉起来」——CI 慢机上
+        # 两次 spawn（config init + event consume）+ 逐行追踪的耗时是本地的数倍，
+        # 有界盲等必然间歇性等不到。
+        self._ready_evt = asyncio.Event()
         self._seen_ids: dict[str, float] = {}
         self._dedup_sweep = 0
         self._cli_version = ""
@@ -326,8 +331,25 @@ class FeishuChannel(Channel):
                 return
             await asyncio.sleep(delay)
 
+    async def wait_ready(self, timeout: float = 30.0) -> bool:
+        """等子进程就绪（connected 翻真）。事件驱动，返回 False 即超时未就绪。
+
+        就绪信号的置位排在 ``self.connected = True`` 之后（同一同步块内），所以
+        本方法返回 True 时 connected 必然已是 True——等待方不会撞进「消息已到、
+        connected 还没翻」的中间态。每轮重连在 _consume_once 入口先清信号，
+        等到的总是最新一轮的就绪。
+        """
+        evt = self._ready_evt
+        if not evt.is_set():
+            try:
+                await asyncio.wait_for(evt.wait(), timeout)
+            except TimeoutError:
+                return False
+        return self.connected
+
     async def _consume_once(self) -> None:
         """一次完整的「起子进程 → 读事件流 → 子进程退出」。"""
+        self._ready_evt.clear()  # 新一轮重连：就绪信号只代表本轮
         if not await asyncio.to_thread(self._sync_cli_credentials):
             # 凭据不对就别反复重连了：报错停在这，等用户改配置
             raise RuntimeError(self.error or "飞书凭据不可用")
@@ -374,6 +396,7 @@ class FeishuChannel(Channel):
             ) from None
         self.connected = True
         self.error = ""
+        self._ready_evt.set()  # 先翻 connected 再置信号：等到的方一定看到真值
 
         # 等子进程自己退出（被 stop 时由 _terminate_process 结束）
         while proc.poll() is None:

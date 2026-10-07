@@ -206,6 +206,7 @@ async def run_subagent(
     role_prompt: str | None = None,
     restrict_to_workdir: bool = False,
     job_containment: bool = True,
+    sandbox_level: str = "job",
     on_event: Callable[[object], Awaitable[None]] | None = None,
     gate: PermissionGate | None = None,
 ) -> tuple[str, Agent]:
@@ -228,6 +229,7 @@ async def run_subagent(
         max_iterations=max_iterations,
         restrict_to_workdir=restrict_to_workdir,
         job_containment=job_containment,
+        sandbox_level=sandbox_level,
     )
     role = BUILTIN_ROLE_PROMPTS.get(agent_type, "") if role_prompt is None else role_prompt
     # task 型额外拿了写工具，但子代理内必被拒绝：提前说死，省模型白试一轮
@@ -332,6 +334,7 @@ class TaskManager:
         event_emitter: Callable[[dict], None] | None = None,
         state_path: Path | None = None,
         job_containment: bool = True,
+        sandbox_level: str = "job",
     ) -> None:
         self._provider_factory = provider_factory
         self._working_dir = working_dir
@@ -351,6 +354,8 @@ class TaskManager:
         self._restrict_to_workdir = False
         # 命令执行沙箱化一期：子代理任务的命令执行照主配置纳入进程遏制（默认开）
         self._job_containment = bool(job_containment)
+        # 二期：沙箱档位随主配置透传给子代理（"restricted" = 叠加受限令牌）
+        self._sandbox_level = sandbox_level
         self._load_state()
 
     def set_max_iterations(self, value: int) -> None:
@@ -747,6 +752,7 @@ class TaskManager:
                 extra_tools=extra,
                 restrict_to_workdir=True if rec.isolated else self._restrict_to_workdir,
                 job_containment=self._job_containment,
+                sandbox_level=self._sandbox_level,
                 on_event=self._make_forwarder(rec),
                 gate=IsolatedGate(working_dir=workdir) if rec.isolated else None,
             )

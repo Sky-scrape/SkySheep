@@ -61,6 +61,7 @@ class ToolContext:
         restrict_to_workdir: bool = False,
         session_id: str = "",
         job_containment: bool = True,
+        sandbox_level: str = "job",
     ) -> None:
         self.working_dir = working_dir
         self.aborted = aborted or asyncio.Event()
@@ -72,6 +73,11 @@ class ToolContext:
         # 命令执行沙箱化一期：run_command 子进程纳入 Job Object 进程遏制
         # （security/sandbox_win.py，仅 Windows，失败自动降级）。默认开。
         self.job_containment = job_containment
+        # 命令执行沙箱化二期："restricted" = 在 Job Object 之上叠加受限令牌
+        # （特权全剥 + 低完整性，仅 Windows 且 job_containment 开启时生效，
+        # 任一步失败自动降回 job-only 并附「受限令牌未生效」注记）。默认
+        # "job"（一期现状）；其他取值一律按 "job" 处理。
+        self.sandbox_level = sandbox_level
         # 本次工具调用所属的会话：子代理派生（用量/任务簿归属）、后台进程
         # 注册表（读写归属校验）都从 ctx 取，不再依赖任何全局「当前会话」指针
         # ——并行会话各跑各的轮时，全局指针会被后来者覆盖导致串台。

@@ -16,6 +16,14 @@
   仅 Windows、失败自动降级）：命令结束/超时 TerminateJobObject 一次收掉
   整棵树，后台常驻进程引擎退出由 kill-on-close 兜底防孤儿；
   配置 [shell] job_containment 可关。
+- 沙箱二期（[shell] sandbox_level="restricted" 时 opt-in）：在 Job Object
+  之上叠加受限令牌——特权全剥 + 低完整性（CreateProcessAsUserW 直启，
+  能限制什么、不能限制什么如实见 security/sandbox_win.py 模块说明），
+  前台与 background=true 两条路径同样生效；**令牌启动需引擎以管理员
+  （提权）运行**，普通用户态引擎/非 Windows/任一步失败自动降回
+  job-only，记 obs.warning 并在结果尾部附「受限令牌未生效」注记
+  （fail-visible，绝不静默、绝不因此拒绝执行）；job_containment 关闭时
+  档位一并关闭（总开关优先）。
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ import time
 from pydantic import BaseModel, Field
 
 from .. import obs
+from ..security import sandbox_win
 from ..security.sandbox_win import (
     ContainmentJob,
     apply_ui_restrictions,
@@ -190,6 +199,97 @@ def _contain_job(proc: subprocess.Popen) -> ContainmentJob:
     return job
 
 
+class _ProcProxy:
+    """受限令牌路径的进程包装（sandbox_win.CreateProcessW 直启，非 Popen）。
+
+    只实现本模块用到的 subprocess.Popen 子集：pid / poll / wait / kill /
+    returncode / stdout / stderr / _handle（入 Job Object 要用）。stdout、
+    stderr 在构造时从 spawn 返回的父侧读端 fd 打开；进程句柄的释放走
+    close（含 __del__ 兜底），与 ContainmentJob 同一套收尾纪律。
+    """
+
+    def __init__(self, proc_handle: int, pid: int, out_fd: int, err_fd: int) -> None:
+        self._handle = proc_handle
+        self.pid = pid
+        self.returncode: int | None = None
+        self.stdout = os.fdopen(out_fd, "rb")
+        self.stderr = os.fdopen(err_fd, "rb")
+
+    def poll(self) -> int | None:
+        if self.returncode is None:
+            code = sandbox_win.process_exit_code(self._handle)
+            if code is not None:
+                self.returncode = code
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        """等进程退出；超时抛 subprocess.TimeoutExpired（对齐 Popen.wait，
+        _run_sync 的超时分支靠这个异常触发树杀）。"""
+        if self.returncode is None:
+            ms = 0xFFFFFFFF if timeout is None else max(0, int(timeout * 1000))
+            if sandbox_win.wait_process(self._handle, ms) != sandbox_win.WAIT_OBJECT_0:
+                raise subprocess.TimeoutExpired("", timeout)
+            self.poll()
+        return self.returncode
+
+    def kill(self) -> None:
+        """TerminateProcess 兜底（树杀另走 _tree_kill 的 taskkill /T）。"""
+        sandbox_win.terminate_process(self._handle)
+
+    def close(self) -> None:
+        """释放进程句柄与输出读端（收尾路径显式调用）。幂等。"""
+        for f in (self.stdout, self.stderr):
+            try:
+                if f is not None and not f.closed:
+                    f.close()
+            except Exception:  # noqa: BLE001 - 收尾不抛
+                pass
+        if self._handle:
+            sandbox_win.close_process_handle(self._handle)
+            self._handle = 0
+
+    def __del__(self) -> None:
+        # 兜底收尾（与 ContainmentJob.__del__ 同一纪律）：调用方异常路径
+        # 漏掉 close 时防句柄/读端泄漏。解释器退出阶段 os 可能已拆除，
+        # 全程吞异常。
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001  终结器里绝不抛
+            pass
+
+
+def _spawn_restricted(
+    argv: list[str], cwd: str, creationflags: int = 0
+) -> tuple[_ProcProxy | None, ContainmentJob | None, str]:
+    """受限令牌路径：spawn（sandbox_win）+ 入 Job Object，一期同一套遏制。
+
+    返回 (proc, job, note)：
+
+    - 受限令牌构造/启动失败 → (None, None, "受限令牌未生效：<原因>")，
+      调用方整体降级回普通 Popen 路径，命令照常执行；
+    - 启动成功但 Job Object 降级 → (proxy, inactive_job, 一期同款原因)；
+    - 全部生效 → (proxy, active_job, "")。
+
+    降级一律记 obs.warning（fail-visible），绝不静默、绝不因此拒绝执行
+    （权限门照常）。
+    """
+    spawned = sandbox_win.spawn_with_restricted_token(
+        argv, cwd, child_environment(), creationflags
+    )
+    if not spawned.ok:
+        obs.warning(
+            "restricted_token_degraded",
+            "受限令牌未生效：命令将按 job-only 沙箱运行（权限确认照常）",
+            reason=spawned.reason,
+        )
+        return None, None, f"受限令牌未生效：{spawned.reason}"
+    proc = _ProcProxy(spawned.proc_handle, spawned.pid, spawned.stdout_fd, spawned.stderr_fd)
+    # 入 job：与 Popen 路径同一套（_contain_job 只依赖 proc._handle）
+    job = _contain_job(proc)
+    note = "" if job.active else ("进程遏制未生效：" + (job.reason or "原因不明"))
+    return proc, job, note
+
+
 def _tree_kill(proc: subprocess.Popen) -> None:
     """Windows 树杀（cmd /c 起的子进程一并结束，与终端面板同款实现），POSIX 直接杀。
 
@@ -211,20 +311,46 @@ def _tree_kill(proc: subprocess.Popen) -> None:
             pass
 
 
-def _run_sync(argv: list[str], cwd: str, timeout_s: int, job_containment: bool = True):
+def _run_sync(
+    argv: list[str], cwd: str, timeout_s: int,
+    job_containment: bool = True, sandbox_level: str = "job",
+):
     """前台执行：输出限量收集，超时树杀。返回 (status, stdout, stderr, returncode)。
 
     status: ok | timeout。超时也带回已产生的输出（模型才能据此诊断，不盲猜）。
-    返回值第 5 位是遏制降级说明（正常生效为空串），供结果尾部注记。
-    job_containment=False（用户在配置里主动关闭）不算降级，说明为空串——
-    主动关闭不是故障，不该在每条命令的结果里告警。
+    返回值第 5 位是沙箱降级说明（正常生效为空串），供结果尾部注记：
+    Job Object 降级是一期同款「进程遏制未生效：…」；[shell]
+    sandbox_level="restricted" 时受限令牌任一步失败降回 job-only，说明为
+    「受限令牌未生效：…」。job_containment=False（用户在配置里主动关闭）
+    不算降级，说明为空串——主动关闭不是故障，不该在每条命令的结果里告警。
     """
-    proc = subprocess.Popen(
-        argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_child_env(),
-    )
-    # 进程遏制（一期沙箱化）：子进程创建后立即入本次调用的 job（失败自动降级
-    # no-op，降级带 obs 日志）
-    job = _contain_job(proc) if job_containment else ContainmentJob(None, "")
+    proc = None
+    job: ContainmentJob | None = None
+    notes: list[str] = []
+    if sandbox_level == "restricted" and job_containment:
+        # 二期：先试受限令牌路径（失败自动降级并带注记，绝不拒绝执行）
+        try:
+            proc, job, note = _spawn_restricted(argv, cwd)
+        except Exception as e:  # noqa: BLE001 - 受限路径任何意外都降级
+            proc = job = None
+            note = f"受限令牌未生效：{e}"
+            obs.warning(
+                "restricted_token_degraded",
+                "受限令牌未生效：命令将按 job-only 沙箱运行（权限确认照常）",
+                reason=str(e),
+            )
+        if note:
+            notes.append(note)
+    if proc is None:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=_child_env(),
+        )
+        # 进程遏制（一期沙箱化）：子进程创建后立即入本次调用的 job（失败自动
+        # 降级 no-op，降级带 obs 日志）
+        job = _contain_job(proc) if job_containment else ContainmentJob(None, "")
+        if not job.active and job_containment:
+            notes.append("进程遏制未生效：" + (job.reason or "原因不明"))
     out_acc: dict = {"head": b"", "tail": b"", "capped": False}
     err_acc: dict = {"head": b"", "tail": b"", "capped": False}
     readers = [
@@ -249,15 +375,18 @@ def _run_sync(argv: list[str], cwd: str, timeout_s: int, job_containment: bool =
         # 异常时若跳过 terminate/close，泄漏的作业句柄既收不掉残留进程、也会
         # 把 KILL_ON_JOB_CLOSE 钉到引擎退出。terminate 放在读线程 join 之前：
         # 树死干净管道才到 EOF，join 不会被滞留孙进程拖满超时。
+        # 收尾顺序与一期保持一致：先树杀（上方超时分支）/ terminate，后 close；
+        # 受限令牌路径的进程句柄与读端在此一并释放（Popen 路径无此资源）。
         terminate_job(job)
         close_job(job)
+        if isinstance(proc, _ProcProxy):
+            proc.close()
     for t in readers:
         if t.is_alive():
             t.join(timeout=5)
     return ("timeout" if timed_out else "ok",
             _acc_text(out_acc), _acc_text(err_acc), proc.returncode,
-            "" if (job.active or not job_containment)
-            else (job.reason or "进程遏制未生效"))
+            "；".join(notes))
 
 
 def _pump(pipe, buf: dict) -> None:
@@ -295,11 +424,33 @@ def _popen_bg(argv: list[str], cwd: str):
 
 
 def _bg_start(argv: list[str], cwd: str, owner: str = "",
-              job_containment: bool = True) -> dict:
-    proc = _popen_bg(argv, cwd)
-    # 常驻进程同样入 job（遏制失败自动降级 no-op）：action=kill 时一并终止，
-    # 引擎退出由 kill-on-close 兜底（句柄随进程关闭，作业成员全被杀）
-    job = _contain_job(proc) if job_containment else ContainmentJob(None, "")
+              job_containment: bool = True, sandbox_level: str = "job") -> dict:
+    notes: list[str] = []
+    proc = None
+    job: ContainmentJob | None = None
+    if sandbox_level == "restricted" and job_containment:
+        # 二期：后台常驻进程同样先试受限令牌路径（失败降级并带注记）
+        try:
+            proc, job, note = _spawn_restricted(
+                argv, cwd, subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        except Exception as e:  # noqa: BLE001 - 受限路径任何意外都降级
+            proc = job = None
+            note = f"受限令牌未生效：{e}"
+            obs.warning(
+                "restricted_token_degraded",
+                "受限令牌未生效：命令将按 job-only 沙箱运行（权限确认照常）",
+                reason=str(e),
+            )
+        if note:
+            notes.append(note)
+    if proc is None:
+        proc = _popen_bg(argv, cwd)
+        # 常驻进程同样入 job（遏制失败自动降级 no-op）：action=kill 时一并终止，
+        # 引擎退出由 kill-on-close 兜底（句柄随进程关闭，作业成员全被杀）
+        job = _contain_job(proc) if job_containment else ContainmentJob(None, "")
+        if not job.active and job_containment:
+            notes.append("进程遏制未生效：" + (job.reason or "原因不明"))
     bid = _BG_NEXT_ID[0]
     _BG_NEXT_ID[0] += 1
     buf = {"out": ""}
@@ -316,12 +467,14 @@ def _bg_start(argv: list[str], cwd: str, owner: str = "",
     except Exception:
         _BG.pop(bid, None)
         _tree_kill(proc)
+        # 收尾顺序与一期一致：先树杀 / terminate，后 close
         terminate_job(job)
         close_job(job)
+        if isinstance(proc, _ProcProxy):
+            proc.close()
         raise
     return {"pid": bid, "os_pid": proc.pid,
-            "containment_note": "" if (job.active or not job_containment)
-            else (job.reason or "进程遏制未生效")}
+            "containment_note": "；".join(notes)}
 
 
 def _bg_owned(bid: int, st: dict, sid: str) -> bool:
@@ -366,11 +519,16 @@ def _bg_kill(bid: int, sid: str = "") -> str:
     proc = st["proc"]
     if proc.poll() is not None:
         close_job(st.get("job"))  # 已退出才走到这：顺手释放作业句柄
+        if isinstance(proc, _ProcProxy):
+            proc.close()  # 受限令牌路径：进程句柄与读端一并释放
         return f"后台进程 {bid} 早已退出（exit code: {proc.returncode}）"
     _tree_kill(proc)
     # 遏制收尾：树杀可能漏网的进程由 TerminateJobObject 一次收掉，再关句柄
+    # （顺序与一期一致：先树杀 / terminate，后 close）
     terminate_job(st.get("job"))
     close_job(st.get("job"))
+    if isinstance(proc, _ProcProxy):
+        proc.close()
     return f"后台进程 {bid} 已终止（{st['command'][:120]}）"
 
 
@@ -394,6 +552,8 @@ def _bg_gc() -> None:
         st = _BG.pop(bid, None)
         if st is not None:
             close_job(st.get("job"))
+            if isinstance(st["proc"], _ProcProxy):
+                st["proc"].close()  # 受限令牌路径：句柄/读端随记录释放
 
 
 class RunCommandArgs(BaseModel):
@@ -475,7 +635,8 @@ class RunCommandTool(Tool):
         argv = _shell_argv(args.command)  # 参数列表形式（shell=False），与前台路径一致
         if args.background:
             info = await asyncio.to_thread(
-                _bg_start, argv, str(workdir), ctx.session_id, ctx.job_containment
+                _bg_start, argv, str(workdir), ctx.session_id, ctx.job_containment,
+                ctx.sandbox_level,
             )
             text = (
                 f"后台进程已启动: id={info['pid']}（系统 PID {info['os_pid']}）\n"
@@ -484,13 +645,14 @@ class RunCommandTool(Tool):
                 f"action=\"kill\" 结束。"
             )
             if info.get("containment_note"):
-                # 遏制降级如实呈现（安全审查残留发现）：用户与模型都该知道
-                # 本次进程没有进作业笼子，事后也能据此审计
-                text += "\n⚠️ 本次进程遏制未生效：" + info["containment_note"]
+                # 沙箱降级如实呈现（安全审查残留发现）：用户与模型都该知道
+                # 本次哪层沙箱没有生效（进程遏制 / 受限令牌），事后也能据此审计
+                text += "\n⚠️ " + info["containment_note"]
             return text
 
         status, out, err, code, containment_note = await asyncio.to_thread(
-            _run_sync, argv, str(workdir), args.timeout_s, ctx.job_containment
+            _run_sync, argv, str(workdir), args.timeout_s, ctx.job_containment,
+            ctx.sandbox_level,
         )
         if status == "timeout":
             parts = [f"command timed out after {args.timeout_s}s（进程树已终止，以下是超时前的输出）"]
@@ -502,7 +664,9 @@ class RunCommandTool(Tool):
                 parts.append("(没有任何输出——命令可能在等待交互输入，"
                              "考虑用 background=true 后台运行再读输出)")
             if containment_note:
-                parts.append("⚠️ 本次进程遏制未生效：" + containment_note)
+                # 沙箱降级注记自带全文（一期「进程遏制未生效：…」/ 二期
+                # 「受限令牌未生效：…」），此处只补警示符
+                parts.append("⚠️ " + containment_note)
             raise ToolError("\n".join(parts))
 
         parts = [f"exit code: {code}"]
@@ -511,5 +675,5 @@ class RunCommandTool(Tool):
         if err.strip():
             parts.append("--- stderr ---\n" + err.rstrip())
         if containment_note:
-            parts.append("⚠️ 本次进程遏制未生效：" + containment_note)
+            parts.append("⚠️ " + containment_note)
         return truncate_output("\n".join(parts))

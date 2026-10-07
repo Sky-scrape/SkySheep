@@ -228,14 +228,14 @@ Running into a problem? In the app, go to Settings → About → "💬 Report an
 ## 🗺 Roadmap & Non-goals
 
 - ✅ current release **v2.4.1**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors (full history in [CHANGELOG.md](CHANGELOG.md))
-- 🚧 **Next up**: macOS / Linux support · system-level scheduling · defense-in-depth against prompt injection · code-signed distribution
+- 🚧 **Next up**: macOS / Linux support · system-level scheduling · defense-in-depth against prompt injection · code-signed distribution · optional ripgrep acceleration (speeds up large-repo search when a local rg is present; the built-in pure-Python search remains the default)
 
 **Non-goals**:
 
 - **Native mobile apps** — the desktop shell is where permission gates, checkpoints, and the file panel get polished; there is no bandwidth right now for a second, mobile-grade security model.
 - **macOS/Linux (for now)** — Windows gets the desktop experience polished first; the `--browser` mode already provides a cross-platform fallback.
 - **Vector memory / multi-tier context compaction** — the built-in compaction and archive-time memory digests already cover current usage; not worth growing the install size.
-- **Replacing the built-in search with ripgrep** — pure-Python, zero-dependency "install and it works" distribution stays.
+- **Replacing the built-in search with ripgrep** — pure-Python, zero-dependency "install and it works" distribution stays; no bundled binary, but an installed rg may optionally accelerate search (see roadmap).
 - **A proprietary plugin JS API** — extension points stay on the two open standards, MCP and Skills; the frontend remains zero-build.
 - **An operated skill marketplace** — skills ship via the in-app import flow (folder / .zip / links); no curated store to moderate.
 

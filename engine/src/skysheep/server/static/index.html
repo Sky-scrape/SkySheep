@@ -278,6 +278,7 @@
             <span id="rt-group">
               <button id="rt-switch" class="cp-icon" title="圆桌：开启后本条消息由多个模型共同思考，融合成更好的答案">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.7-3.4 2.9-5.2 5.5-5.2s4.8 1.8 5.5 5.2"/><circle cx="17" cy="9.5" r="2.5"/><path d="M15.7 14.6c2.5.3 4.3 1.9 4.8 4.4"/></svg>
+                <span class="cp-state" hidden></span>
               </button>
               <button id="rt-pick" class="cp-caret" title="选择圆桌成员">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
@@ -286,6 +287,7 @@
             <span id="team-group">
               <button id="team-switch" class="cp-icon" title="团队：开启后组建团队，你的消息作为总管指令进入团队频道">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="6.5" r="2.6"/><path d="M7.5 19c.6-3 2.3-4.6 4.5-4.6s3.9 1.6 4.5 4.6"/><circle cx="4.8" cy="10.2" r="2.2"/><path d="M1.8 19c.5-2.6 1.7-4 3.3-4"/><circle cx="19.2" cy="10.2" r="2.2"/><path d="M22.2 19c-.5-2.6-1.7-4-3.3-4"/></svg>
+                <span class="cp-state" hidden></span>
               </button>
               <button id="team-pick" class="cp-caret" title="选择团队成员与总管（我当总管 / AI 总管）">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
@@ -310,7 +312,7 @@
                 <text class="ring-txt" x="12" y="12.4"></text>
               </svg>
             </span>
-            <span id="cp-hint" title="& 引用对话 · @ 引用文件 · ~ 提示词 · / 命令 · 可粘贴/拖入图片 · Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
+            <span id="cp-hint" title="& 引用对话 · @ 引用文件 · ~ 提示词 · / 命令 · 可粘贴/拖入图片 · Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+Tab 切换标签 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
             <!-- 右侧簇整体不拆行：窗口再窄也整簇换行并靠右，「发送」永远在最右 -->
             <span id="cp-right">
               <!-- Mods 状态托盘（实验性）：Mod 产出的 stat 片段随会话标签渲染 -->
@@ -1540,12 +1542,15 @@
             <p class="settings-hint">
               常用的提示词模板，输入 <b>~</b> 即弹出候选、选中插入；列表顺序就是候选顺序。
             </p>
-            <ul class="settings-hint hint-points">
-              <li><b>候选与插入</b>：行首 <b>⋮⋮</b> 拖动调顺序（「排序」按钮可改常用优先）；<b>Alt+1..8</b> 直接插入前 8 条；<code>~</code> 菜单末尾可把当前输入一键「存为提示词」。</li>
-              <li><b>过滤</b>：按名称 / 内容 / 拼音首字母（如 <code>xzb</code> 对应「写周报」）。</li>
-              <li><b>占位符</b>：<b>{{clipboard}}</b> 插入时替换为剪贴板文本（为空会请你现场填）；<b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b> 取当天日期 / 当前时间 / 当前项目名；<b>{{字段|默认值}}</b> 弹小表单现场填，留空用默认值。</li>
-              <li><b>编辑与维护</b>：编辑弹窗「✨ AI 润色」让模型改写得更清晰；行上「停」字按钮停用（<code>~</code> 候选不再显示，不删除）；内置示例可点「恢复示例」加回，删光后 <code>~</code> 菜单仍带内置示例兜底。</li>
-            </ul>
+            <details class="hint-details">
+              <summary>使用说明（快捷键 / 过滤 / 占位符）</summary>
+              <ul class="settings-hint hint-points">
+                <li><b>候选与插入</b>：行首 <b>⋮⋮</b> 拖动调顺序（「排序」按钮可改常用优先）；<b>Alt+1..8</b> 直接插入前 8 条（行首序号即快捷键位）；<code>~</code> 菜单末尾可把当前输入一键「存为提示词」。</li>
+                <li><b>过滤</b>：按名称 / 内容 / 拼音首字母（如 <code>xzb</code> 对应「写周报」）。</li>
+                <li><b>占位符</b>：<b>{{clipboard}}</b> 插入时替换为剪贴板文本（为空会请你现场填）；<b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b> 取当天日期 / 当前时间 / 当前项目名；<b>{{字段|默认值}}</b> 弹小表单现场填，留空用默认值。</li>
+                <li><b>编辑与维护</b>：编辑弹窗「✨ AI 润色」让模型改写得更清晰；行上 <b>⏸</b> 按钮停用（<code>~</code> 候选不再显示，不删除）；内置示例可点「恢复示例」加回，删光后 <code>~</code> 菜单仍带内置示例兜底。</li>
+              </ul>
+            </details>
             <p id="snippets-status" class="dim small" hidden></p>
             <ul id="snippets-list" class="list snippets-list"></ul>
           </section>

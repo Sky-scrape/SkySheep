@@ -75,7 +75,7 @@ async def test_empty_session_count_matches_cleanup_scope(store, tmp_path):
 
     assert await store.count_empty_sessions(None) == 1, "置顶/归档的空会话不该计入角标"
     removed = await store.delete_empty_sessions(None, keep_id=full.id)
-    assert removed == 1
+    assert removed == [p1.id], "返回被删的会话 id 清单（前端收标签用）"
     assert await store.get_session(p1.id) is None
     assert await store.get_session(p2.id) is not None, "置顶的空会话不被清理"
     assert await store.get_session(p3.id) is not None, "归档的空会话不被清理"

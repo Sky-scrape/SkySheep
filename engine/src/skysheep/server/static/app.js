@@ -414,10 +414,22 @@ function renderTabs() {
       e.stopPropagation();
       closeTab(t);
     };
+    // 中键关闭：浏览器标签的肌肉记忆手势（auxclick 只认主键盘之外的键）
+    el.onauxclick = (e) => {
+      if (e.button === 1) { e.preventDefault(); closeTab(t); }
+    };
     t.el = el; // 右键菜单/改名要找回这张标签的 DOM（renderTabs 每次重建，随渲染刷新）
     if (t.sid) wireTabDrag(el, t);
     bar.appendChild(el);
   });
+  // 标签溢出（可横滚）时保证激活标签落在可视区：启动恢复/接管后台会话后
+  // 激活的往往是最边上那张，不滚进来用户看不到当前会话是哪个。
+  // 顺手把溢出态挂在 bar 上：CSS 据此画右缘渐隐，暗示右边还有
+  const overflowing = bar.scrollWidth > bar.clientWidth;
+  bar.classList.toggle("has-overflow", overflowing);
+  if (activeTab && activeTab.el && overflowing) {
+    activeTab.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
   // Mods 状态托盘（实验性）：stat 片段随会话标签走，跨会话不串
   renderModTray();
   // 标签栏尾部的 ＋ 新建：浏览器式页签的固定收尾。与侧栏「新建会话」/ Ctrl+N
@@ -452,6 +464,18 @@ function renderTabs() {
       const next = e.key === "ArrowRight" ? (idx + 1) % tabs.length : (idx - 1 + tabs.length) % tabs.length;
       tabs[next].focus();
       tabs[next].click();
+    });
+    // 溢出时有细滚动条，滚轮也直接横滚——标签栏不比抢一次鼠标位移的精度
+    bar.addEventListener("wheel", (e) => {
+      if (e.deltaY && bar.scrollWidth > bar.clientWidth) {
+        bar.scrollLeft += e.deltaY;
+        e.preventDefault();
+      }
+    }, { passive: false });
+    // 双击空白处新建标签：浏览器页签的惯例手势（点在标签/＋上时不触发——
+    // 它们自己消费 dblclick/onclick，冒泡上来时 target 不是 bar）
+    bar.addEventListener("dblclick", (e) => {
+      if (e.target === bar) newSessionFromHighlight();
     });
   }
   // 启动恢复：把当前标签集合与激活态写回 ui.json（下次启动回到同一现场）。
@@ -795,6 +819,26 @@ function wireTabDrag(el, t) {
     commit: (dst) => commitTabOrder(t.sid, dst.id, dst.pos),
     rerender: renderTabs,
   });
+  // 拖拽到标签栏左右边缘自动横滚：标签溢出后，屏外的目标标签也够得着。
+  // HTML5 拖拽中鼠标静止不重复触发 dragover，方向变量 + rAF 循环持续滚
+  const bar = document.getElementById("chat-tabs");
+  if (bar._dragScrollBound) return;
+  bar._dragScrollBound = true;
+  let dir = 0, raf = 0;
+  const step = () => {
+    if (!dir) { raf = 0; return; }
+    bar.scrollLeft += dir * 10;
+    raf = requestAnimationFrame(step);
+  };
+  bar.addEventListener("dragover", (e) => {
+    const r = bar.getBoundingClientRect();
+    dir = e.clientX < r.left + 28 ? -1 : e.clientX > r.right - 28 ? 1 : 0;
+    if (dir && !raf) raf = requestAnimationFrame(step);
+  });
+  const stop = () => { dir = 0; if (raf) { cancelAnimationFrame(raf); raf = 0; } };
+  bar.addEventListener("dragend", stop);
+  bar.addEventListener("drop", stop);
+  bar.addEventListener("dragleave", (e) => { if (!bar.contains(e.relatedTarget)) stop(); });
 }
 
 function dragHalfPosX(e, el) {
@@ -853,6 +897,14 @@ function closeTab(tab) {
 }
 
 let creatingTab = false; // 防连点：session.new 在途时再点新建不再叠请求
+
+// 批量收标签：删会话/清理空会话后，把这些会话打开着的页签一并收掉——
+// 只更新侧栏不收标签的话，上方会残留点不开的死标签（会话已不存在）
+function closeTabsForSids(sids) {
+  const set = new Set(sids || []);
+  if (!set.size) return;
+  chatTabs.filter((t) => t.sid && set.has(t.sid)).forEach((t) => closeTab(t));
+}
 
 /** 新建会话标签。
  *
@@ -3321,6 +3373,7 @@ function renderSessionExtras({ empty_count = 0, archived_count = 0 } = {}) {
       footer.innerHTML = `<button class="link-btn">🧹 清理 ${empty_count} 个空会话</button>`;
       footer.querySelector(".link-btn").onclick = async () => {
         const r = await request("session.cleanup_empty");
+        closeTabsForSids(r.removed_ids); // 被清掉的会话若开着标签，一并收掉
         addNotice(`已清理 ${r.removed} 个空会话`);
         refreshSessions();
       };
@@ -4165,13 +4218,16 @@ async function openArchiveModal() {
     }
     armedBatch = false;
     let ok = 0;
+    const deadIds = [];
     for (const el of rows) {
       try {
         await request("session.delete", { id: el.dataset.sid });
         ok += 1;
+        deadIds.push(el.dataset.sid);
         el.remove();
       } catch (e) { addNotice("删除失败: " + e.message); }
     }
+    closeTabsForSids(deadIds); // 删掉的会话若开着标签，一并收掉
     if (ok) addNotice(`已删除 ${ok} 个会话`);
     syncBulk();
     closeIfEmpty();
@@ -4205,6 +4261,7 @@ async function openArchiveModal() {
       if (!armed) { armed = true; del.textContent = "确认删除"; return; }
       try { await request("session.delete", { id: s.id }); }
       catch (e) { addNotice("删除失败: " + e.message); return; }
+      closeTabsForSids([s.id]); // 删掉的会话若开着标签，一并收掉
       addNotice(`已删除「${s.title || "(未命名)"}」`);
       row.remove();
       syncBulk();
@@ -5346,6 +5403,10 @@ function renderSnippets() {
   }
   const p2 = pad2;
   const nowYear = new Date().getFullYear();
+  // Alt+1..8 直插的是候选前 8 条：序号按 snippetCandidates 的真实顺序算
+  //（常用优先模式下 ≠ 列表顺序），停用项不在候选里不标
+  const hotIdx = new Map();
+  snippetCandidates().slice(0, 8).forEach((s, i) => hotIdx.set(s.id, i + 1));
   snippetsCache.forEach((s) => {
     const li = document.createElement("li");
     li.draggable = true;
@@ -5357,6 +5418,13 @@ function renderSnippets() {
     handle.className = "s-drag";
     handle.textContent = "⋮⋮";
     li.appendChild(handle);
+    if (enabled && hotIdx.has(s.id)) {
+      const rank = document.createElement("span");
+      rank.className = "s-rank";
+      rank.textContent = hotIdx.get(s.id);
+      rank.title = `Alt+${hotIdx.get(s.id)} 可直接插入这条`;
+      li.appendChild(rank);
+    }
     const title = document.createElement("span");
     title.className = "s-title";
     title.textContent = s.name + (enabled ? "" : "（已停用）");
@@ -5368,10 +5436,11 @@ function renderSnippets() {
       : `${lu.getFullYear()}-${p2(lu.getMonth() + 1)}-${p2(lu.getDate())}`}` : "";
     sub.textContent = (s.content || "").replace(/\s+/g, " ").slice(0, 60) +
       (s.use_count ? ` · 用过 ${s.use_count} 次${luText}` : "");
+    sub.title = (s.content || "").replace(/\s+/g, " ") || "（空模板）"; // 预览截断了，悬停看全文
     li.append(title, sub);
     const ops = document.createElement("span");
     ops.className = "cron-ops";
-    ops.innerHTML = `<button class="cron-op" title="${enabled ? "停用（~ 候选不再显示，可随时再启用）" : "启用（回到 ~ 候选）"}">${enabled ? "停" : "启"}</button>` +
+    ops.innerHTML = `<button class="cron-op" title="${enabled ? "停用（~ 候选不再显示，可随时再启用）" : "启用（回到 ~ 候选）"}"><i class="${enabled ? "ic-pause" : "ic-play"}"></i></button>` +
       `<button class="cron-op" title="复制模板原文">⧉</button>` +
       `<button class="cron-op" title="编辑">✎</button>` +
       `<button class="cron-op danger" title="删除">✕</button>`;
@@ -5393,6 +5462,9 @@ function renderSnippets() {
     edit.onclick = (e) => { e.stopPropagation(); snippetModal(s); };
     del.onclick = async (e) => {
       e.stopPropagation();
+      // 提示词是用户攒的资产，✕ 又紧挨着编辑/复制，删错就没了——问一声
+      if (!(await confirmModal("删除提示词",
+        `<p>删除「${escapeHtml(s.name)}」？删除后不可恢复。</p>`, "删除"))) return;
       try { await request("snippets.delete", { id: s.id }); }
       catch (err) { addNotice("删除失败: " + err.message); }
       await loadSnippets(); // 失败也重拉一次，列表与后端保持一致
@@ -5909,18 +5981,27 @@ const RT_ROLES = [
 const rtRoleLabel = (id) => (RT_ROLES.find((r) => r[0] === id) || RT_ROLES[0])[1];
 
 function setRtOn(on) {
+  const wasTeam = teamOn;
   rtOn = on;
   document.getElementById("rt-switch").classList.toggle("on", on);
   // 同一条消息只能选一种协作模式：开圆桌自动关团队（后端双开报参数错）
   if (on) setTeamOn(false);
+  if (on && wasTeam) addNotice("已切换到圆桌，团队已关闭（同一条消息只能选一种协作模式）");
+  updateRtHint();
 }
 
+// 激活态在图标旁展开状态徽记（cp-state）：发送前一眼确认本条的协作模式与
+// 成员数，不用悬停翻 title；关闭时隐藏文字恢复纯图标
 function updateRtHint() {
   const btn = document.getElementById("rt-switch");
   const n = rtMembers ? rtMembers.length : 0;
   btn.title = (n
     ? `圆桌（已指定 ${n} 个成员）：本条消息由多个模型并行思考，融合成更好的答案`
     : "圆桌：自动挑选已配置 Key 的模型共同思考，融合成更好的答案（点 ▾ 可指定成员）");
+  const state = btn.querySelector(".cp-state");
+  if (!state) return;
+  state.hidden = !rtOn;
+  state.textContent = rtOn ? (n ? `圆桌·${n}` : "圆桌·自动") : "";
 }
 updateRtHint();
 
@@ -6077,18 +6158,22 @@ const TEAM_MSG_KIND_LABEL = {
 const TEAM_DIRECTOR_LABEL = { user: "用户总管", ai: "AI 总管" };
 
 function setTeamOn(on) {
+  const wasRt = rtOn;
   teamOn = on;
   document.getElementById("team-switch").classList.toggle("on", on);
   // 同一条消息只能选一种协作模式：开团队自动关圆桌（后端双开报参数错）
   if (on) setRtOn(false);
+  if (on && wasRt) addNotice("已切换到团队，圆桌已关闭（同一条消息只能选一种协作模式）");
   // 规划模式与团队联动（后端同款语义）：规划模式开着开团队不拦——本轮队员
   // 一律只读执行（只调研、不写文件、不跑命令），这里说明降级，避免「以为
   // 队员会动手改文件」的误期待
   if (on && workMode === "plan") {
     addNotice("规划模式开着：本轮团队队员将以只读方式执行（不写文件、不跑命令）；需要队员动手请先切回执行模式。");
   }
+  updateTeamHint();
 }
 
+// 激活态状态徽记：AI 总管是关键模式切换必须可见，优先显示；其余按队员数
 function updateTeamHint() {
   const btn = document.getElementById("team-switch");
   const n = teamMembers ? teamMembers.length : 0;
@@ -6101,6 +6186,12 @@ function updateTeamHint() {
       ? `团队（已指定 ${n} 个成员）：开启后组建团队，你的消息作为总管指令进入团队频道`
       : "团队：自动挑选已配置 Key 的模型组建团队，你以总管身份派工、验收、交付（点 ▾ 可指定成员与总管）");
   }
+  const state = btn.querySelector(".cp-state");
+  if (!state) return;
+  state.hidden = !teamOn;
+  state.textContent = !teamOn ? ""
+    : teamDirectorIsAi() ? "团队·AI总管"
+    : n ? `团队·${n}人` : "团队·自动";
 }
 updateTeamHint();
 
@@ -7972,7 +8063,7 @@ async function execSlash(cmd) {
         "\n提示：输入 @ 可以引用项目里的文件（支持文件夹）；项目外的文件用输入框左侧的文件按钮选。\n" +
         "快捷键：\n" +
         "Ctrl+N 新建会话 · Ctrl+F 在本对话里查找 · Ctrl+Shift+F 搜索会话（可跨项目）\n" +
-        "Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Esc 停止运行 · Enter 发送 · Shift+Enter 换行\n" +
+        "Ctrl+K 切换模型 · Ctrl+W 关闭标签 · Ctrl+Tab 切换标签 · Esc 停止运行 · Enter 发送 · Shift+Enter 换行\n" +
         "Ctrl+Alt+Space 全局热键（唤起窗口并预填剪贴板）\n" +
         "更多说明点右上角「？」看帮助。");
       break;
@@ -8234,7 +8325,23 @@ window.addEventListener("keydown", (e) => {
     if (!typing && activeTab) closeTab(activeTab);
     return;
   }
+  // Ctrl+Tab / Ctrl+Shift+Tab 在会话标签间循环切换（按展示序，即拖拽后的顺序）
+  if (k === "Tab" && (e.ctrlKey || e.metaKey) && !settingsOpen) {
+    e.preventDefault();
+    cycleTab(e.shiftKey ? -1 : 1);
+    return;
+  }
 });
+
+// 标签循环切换：方向 +1 下一个 / -1 上一个，到头绕回。按 DOM 序找（renderTabs
+// 每次按展示序重建，DOM 序就是用户看到的顺序），再映射回 chatTabs 对象激活
+function cycleTab(dir) {
+  const els = [...document.querySelectorAll('#chat-tabs [role="tab"]')];
+  if (els.length < 2) return;
+  const idx = els.findIndex((el) => el.classList.contains("active"));
+  const t = chatTabs.find((x) => x.el === els[(idx + dir + els.length) % els.length]);
+  if (t) activateTab(t);
+}
 
 function modalOpen() {
   return !document.getElementById("modal").classList.contains("hidden");
@@ -10930,26 +11037,53 @@ async function initUiPrefs() {
 }
 
 function setupResizer(el, key, compute) {
-  let start = null;
+  // 拖拽修复（2026-10-07）：此前 move/up 直接挂 window、且不处理 pointercancel——
+  // WebView2 下偶发的 cancel/丢 up 会让 start 残留，之后不按键移动鼠标也持续改布局
+  // （表现为「拖完边界后鼠标飘、界面跟着指针跑」）。现改为指针捕获 + 异常收尾兜底：
+  // ① down 即 setPointerCapture：拖出窗口/扫过浮层也持续收到 move，up 一定送达；
+  // ② pointercancel / lostpointercapture 强制收尾，start 不残留；
+  // ③ move 且 e.buttons===0 视为 up 已丢，按松手处理；
+  // ④ move 经 rAF 合成每帧一次布局写入（预览区高度变化会带动文件树整块重排，
+  //    逐事件直写会掉帧，手感像手柄「追着鼠标飘」），lastApplied 供异常收尾按现状落盘。
+  let start = null, lastApplied = null, pendingE = null, rafId = 0;
+  const clearViz = () => {
+    el.classList.remove("active");
+    document.body.classList.remove("resizing", "resizing-x", "resizing-y");
+  };
+  // e 为空 = 异常收尾（cancel/丢捕获）：拿不到终点坐标，按已应用的最新值落盘
+  const finish = (e) => {
+    if (!start || (e && e.pointerId !== start.pointerId)) return;
+    const v = e ? clampUi(key, compute.value(start, e)) : lastApplied;
+    start = null; lastApplied = null; pendingE = null;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    clearViz();
+    if (v != null) saveUiPrefs({ [key]: v });
+  };
   el.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || start) return; // 已在拖动（触屏第二指）不重复接管
     e.preventDefault();
-    start = { x: e.clientX, y: e.clientY, base: compute.base() };
+    start = { x: e.clientX, y: e.clientY, base: compute.base(), pointerId: e.pointerId };
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
     el.classList.add("active");
     document.body.classList.add("resizing", key === "sidebar_w" ? "resizing-x" : "resizing-y");
   });
-  window.addEventListener("pointermove", (e) => {
-    if (!start) return;
-    setUiVar(key, clampUi(key, compute.value(start, e)));
+  el.addEventListener("pointermove", (e) => {
+    if (!start || e.pointerId !== start.pointerId) return;
+    if (!e.buttons) { finish(e); return; } // 无按键的 move = up 被宿主吞了，就地收尾
+    pendingE = e;
+    if (!rafId) rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      if (!start || !pendingE) { pendingE = null; return; }
+      const v = clampUi(key, compute.value(start, pendingE));
+      pendingE = null;
+      lastApplied = v;
+      setUiVar(key, v);
+    });
   });
-  window.addEventListener("pointerup", (e) => {
-    if (!start) return;
-    const v = clampUi(key, compute.value(start, e));
-    start = null;
-    el.classList.remove("active");
-    document.body.classList.remove("resizing", "resizing-x", "resizing-y");
-    saveUiPrefs({ [key]: v });
-  });
+  el.addEventListener("pointerup", finish);
+  el.addEventListener("pointercancel", () => finish(null));
+  // 正常 up 后捕获自动释放也会触发本事件，此时 start 已空，天然幂等
+  el.addEventListener("lostpointercapture", () => { if (start) finish(null); });
   el.addEventListener("dblclick", () => {
     setUiVar(key, null);
     saveUiPrefs({ [key]: null });
@@ -11440,9 +11574,8 @@ async function rotateAccessToken() {
 // 端口）固化进 start_url，端口随机时桌面一重启手机图标就打不开。0 = 恢复随机。
 function lanPortSettingHtml(st) {
   return `
-    <div class="lan-note">服务端口：<input id="lan-port" type="number" min="0" max="65535"
-      value="${st.port ? Number(st.port) : ""}" placeholder="随机"
-      style="width:90px;margin:0 6px"> <button id="lan-port-save" class="btn-ghost">保存</button>
+    <div class="lan-note">服务端口：<input id="lan-port" class="lan-port-input" type="number" min="0" max="65535"
+      value="${st.port ? Number(st.port) : ""}" placeholder="随机"> <button id="lan-port-save" class="btn-ghost">保存</button>
       <span class="dim small">0 = 每次启动随机。要安装 PWA（添加到主屏幕）或长期使用固定地址，
       先固定端口——否则重启 SkySheep 后手机图标打开的就是旧地址（连接失败）。保存后重启生效。</span></div>`;
 }

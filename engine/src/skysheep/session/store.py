@@ -1603,28 +1603,27 @@ class SessionStore:
         row = await cur.fetchone()
         return int(row[0])
 
-    async def delete_empty_sessions(self, project_id: int | None, keep_id: str | None = None) -> int:
-        """删除空会话（保留 keep_id 指定的当前会话与置顶会话），返回删除数量。
+    async def delete_empty_sessions(self, project_id: int | None, keep_id: str | None = None) -> list[str]:
+        """删除空会话（保留 keep_id 指定的当前会话与置顶会话），返回被删的会话 id 列表。
 
-        归档的空会话不动：用户特意归档收起来的东西，不该被清理顺手删掉。"""
+        归档的空会话不动：用户特意归档收起来的东西，不该被清理顺手删掉。
+        返回清单而不只是计数：前端要把这些会话打开着的标签一并收掉。"""
         assert self._db
         keep = keep_id or ""
-        if project_id is None:
-            cur = await self._db.execute(
-                "DELETE FROM sessions WHERE project_id IS NULL AND pinned = 0"
-                " AND archived = 0"
-                " AND id NOT IN (SELECT DISTINCT session_id FROM messages) AND id != ?",
-                (keep,),
-            )
-        else:
-            cur = await self._db.execute(
-                "DELETE FROM sessions WHERE project_id = ? AND pinned = 0"
-                " AND archived = 0"
-                " AND id NOT IN (SELECT DISTINCT session_id FROM messages) AND id != ?",
-                (project_id, keep),
-            )
-        await self._db.commit()
-        return cur.rowcount or 0
+        proj_clause = "project_id = ?" if project_id is not None else "project_id IS NULL"
+        params = (project_id, keep) if project_id is not None else (keep,)
+        cur = await self._db.execute(
+            f"SELECT id FROM sessions WHERE {proj_clause} AND pinned = 0"
+            " AND archived = 0"
+            " AND id NOT IN (SELECT DISTINCT session_id FROM messages) AND id != ?",
+            params,
+        )
+        ids = [r["id"] for r in await cur.fetchall()]
+        if ids:
+            marks = ",".join("?" * len(ids))
+            await self._db.execute(f"DELETE FROM sessions WHERE id IN ({marks})", ids)
+            await self._db.commit()
+        return ids
 
     async def move_session(self, session_id: str, project_id: int | None) -> None:
         """把会话移动到另一个项目（project_id 为 NULL 表示移入快聊）。"""

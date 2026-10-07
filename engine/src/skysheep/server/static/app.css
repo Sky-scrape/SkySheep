@@ -463,11 +463,25 @@ select option[value=""] { color: var(--dim); font-style: italic; }
    沉一格，激活页签抬升成带描边与硬阴影的卡纸胶囊。 */
 #chat-tabs {
   display: flex; align-items: center; gap: 3px;
-  min-width: fit-content; /* 至少包住内容：页签宽随名称走，不被顶栏 flex 竞争压扁 */
-  max-width: 62%;         /* 顶栏右侧还有用量与按钮排，空间不足时整条收缩 */
+  /* 不能给 min-width: fit-content：min-width 在 CSS 里赢过 max-width，标签一多
+     62% 上限就被顶穿、整条栏撑出顶栏。单标签不被压扁由 .chat-tab 的
+     min-width: 76px 兜底；超宽部分横向滚动（滚轮也可直接横滚，见 renderTabs） */
+  min-width: 0;
+  max-width: 72%;         /* 顶栏右侧还有用量与按钮排，空间不足时整条收缩 */
   flex: 0 1 auto;
   overflow-x: auto; overflow-y: hidden;
-  scrollbar-width: none; /* 横向溢出时才出现滚动，平时无滚动条 */
+  scrollbar-width: thin; scrollbar-color: var(--line2) transparent;
+}
+/* 溢出时给一条细横向滚动条（平时不出现）：全局滚动条 10px 太高会挤 30px 顶栏 */
+#chat-tabs::-webkit-scrollbar { height: 5px; }
+#chat-tabs::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 3px; border: none; }
+#chat-tabs::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+#chat-tabs::-webkit-scrollbar-track { background: transparent; }
+/* 溢出时的右缘渐隐：内容在右边淡出 = 「右边还有」的直觉暗示，滚到底也只是
+   渐隐区露出顶栏底色（renderTabs 量宽后把溢出态挂在 .has-overflow 上） */
+#chat-tabs.has-overflow {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
 }
 #chat-tabs.hidden { display: none; }
 .chat-tab {
@@ -1065,9 +1079,21 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .cron-op {
   background: none; border: none; color: var(--dim); cursor: pointer;
   font-size: 12px; padding: 2px 3px; border-radius: var(--r-xs);
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .cron-op:hover:not(.danger) { color: var(--blue); }
 .cron-op.danger:hover { color: var(--reg); }
+/* 停用/启用的自绘图形：⏸/▷ 字符在 Windows 上落符号字体、基线与 ⧉✎✕ 不齐，
+   CSS 画的双竖条/三角形恒与本行文字对齐，颜色经 currentColor 跟随悬停 */
+.cron-op .ic-pause {
+  display: block; width: 7px; height: 9px;
+  border-left: 2.5px solid currentColor; border-right: 2.5px solid currentColor;
+}
+.cron-op .ic-play {
+  display: block; width: 0; height: 0; margin-left: 1px;
+  border-left: 8px solid currentColor;
+  border-top: 4.5px solid transparent; border-bottom: 4.5px solid transparent;
+}
 .cron-fields { display: flex; flex-direction: column; gap: 4px; }
 .cron-fields label { font-size: 12px; font-weight: 700; color: var(--text2); margin-top: 8px; }
 .cron-fields label:first-child { margin-top: 0; }
@@ -1326,6 +1352,22 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .snippets-list li.dragging { opacity: .45; }
 /* 停用的提示词：整行降透明，~ 候选不再显示（不删除，行上「启」字按钮可恢复） */
 .snippets-list li.off { opacity: .55; }
+/* Alt+1..8 快捷键位徽记：候选前 8 条按真实候选顺序标号（常用优先模式下 ≠ 列表顺序） */
+.snippets-list li .s-rank {
+  flex-shrink: 0; min-width: 14px; height: 14px; padding: 0 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--paper-inset); color: var(--dim);
+  border: 1px solid var(--line); border-radius: 7px;
+  font-size: 10px; font-weight: 700; cursor: default;
+}
+/* 设置页的帮助折叠块：一句话常驻，细节默认收起（summary 沿用 settings-hint 基调） */
+.hint-details { margin: 2px 0 6px; }
+.hint-details summary {
+  cursor: pointer; user-select: none;
+  font-size: 12.5px; color: var(--dim); width: fit-content;
+}
+.hint-details summary:hover { color: var(--text); }
+.hint-details[open] summary { margin-bottom: 4px; }
 #snippets-status { margin: 0 0 4px; }
 /* 编辑弹窗的占位符 chips：点按插到光标处 */
 .sn-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
@@ -1822,6 +1864,10 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 /* 团队激活用绿色：协作开工进行中的语感，与圆桌紫 / 规划蓝 / 写入金区分 */
 #team-switch.on { background: var(--down); color: var(--paper-raised); }
 #team-switch.on:hover { background: var(--down); filter: brightness(1.1); }
+/* 激活态展开状态徽记（cp-state）：图标旁显「圆桌·N / 团队·AI总管」等短文字，
+   按钮从固定 34px 放开为自适应；未激活不显示文字、宽度不变 */
+#rt-switch.on, #team-switch.on { width: auto; padding: 0 9px; gap: 4px; }
+.cp-state { font-size: 11px; font-weight: 700; white-space: nowrap; }
 #rt-pick, #team-pick {
   flex-shrink: 0; width: 17px; height: 30px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
@@ -1897,23 +1943,29 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   z-index: 150; padding: 8px;
 }
 .rt-menu-tip { font-size: 12px; color: var(--dim); padding: 2px 4px 6px; }
-.rt-menu-list { display: flex; flex-direction: column; gap: 1px; }
+.rt-menu-list { display: flex; flex-direction: column; gap: 2px; }
 .rt-menu-item {
-  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  display: flex; align-items: center; gap: 8px; padding: 7px 8px;
   border-radius: var(--r-sm); cursor: pointer; font-size: 12.5px; color: var(--text);
+  transition: background var(--dur-fast) var(--ease-out);
 }
 .rt-menu-item:hover { background: var(--blue-weak); }
-.rt-menu-item input { accent-color: var(--ai); }
+/* 勾选成员的持久选中态：谁在圆桌里 / 谁在团队里，扫一眼行底色就知道 */
+.rt-menu-item:has(input:checked) { background: var(--blue-weak); }
+.rt-menu-item input {
+  accent-color: var(--ai); width: 14px; height: 14px; flex-shrink: 0; margin: 0;
+}
 .rt-menu-item .mi-cmd { font-weight: 600; flex-shrink: 0; }
 .rt-menu-item .mi-model {
   font-family: var(--font-mono); font-size: 11.5px; color: var(--text2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .rt-menu-item .mi-role {
-  margin-left: auto; flex-shrink: 0; font-size: 11px; padding: 1px 2px;
+  margin-left: auto; flex-shrink: 0; font-size: 11px; padding: 3px 4px;
   border: 1px solid var(--line); border-radius: var(--r-sm);
   background: var(--card); color: var(--text); width: 72px;
 }
+.rt-menu-item .mi-role:focus { outline: 1.5px solid var(--blue); outline-offset: 0; }
 .rt-menu-actions {
   display: flex; justify-content: flex-end; align-items: center; gap: 10px;
   padding-top: 8px; margin-top: 6px; border-top: 1px solid var(--line);
@@ -1937,11 +1989,12 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   font-size: 12px; color: var(--text); cursor: pointer;
 }
 .rt-menu-row .rt-menu-row-label { flex-shrink: 0; color: var(--dim); }
-.rt-menu-row input[type="checkbox"] { accent-color: var(--ai); }
+.rt-menu-row input[type="checkbox"] { accent-color: var(--ai); width: 14px; height: 14px; margin: 0; }
 .rt-menu-row select {
-  font-size: 12px; padding: 2px 4px; border-radius: var(--r-sm);
+  font-size: 12px; padding: 3px 6px; border-radius: var(--r-sm);
   border: 1px solid var(--line); background: var(--card); color: var(--text);
 }
+.rt-menu-row select:focus { outline: 1.5px solid var(--blue); outline-offset: 0; }
 
 /* 团队浮层：勾选后展开的 成员名 / 一句话人设 两个小输入框（比圆桌浮层宽一档） */
 .team-menu {
@@ -1969,10 +2022,10 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 12px; color: var(--text); cursor: pointer; white-space: nowrap;
 }
-.team-menu .tm-dir-mode input { accent-color: var(--ai); margin: 0; }
+.team-menu .tm-dir-mode input { accent-color: var(--ai); margin: 0; width: 14px; height: 14px; }
 .team-menu .tm-dir-opts {
   max-height: 180px; overflow-y: auto;
-  border: 1px dashed var(--line2); border-radius: var(--r-sm); padding: 4px 6px;
+  border: 1px dashed var(--line); border-radius: var(--r-sm); padding: 4px 6px;
 }
 .team-menu .tm-dir-opts.hidden { display: none; }
 .team-menu .tm-dir-opts .rt-menu-tip { padding: 2px 4px 4px; }
@@ -2609,6 +2662,16 @@ html[data-theme="pine"] .restart-banner {
   font-size: 19px; font-weight: 400; line-height: 1; padding: 0;
 }
 .svc-row:hover .svc-go { color: var(--text2); }
+/* 行尾删除入口：与箭头同款尺寸，平时淡出、悬停行才显（误触面小），悬停变红 */
+.svc-del {
+  flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: none; color: var(--line2);
+  font-size: 13px; line-height: 1; padding: 0;
+  opacity: 0; transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.svc-row:hover .svc-del { opacity: 1; }
+.svc-del:hover { color: var(--reg); }
 
 /* 模型服务：详情视图 */
 .detail-head {
@@ -4706,6 +4769,20 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 }
 .qr-box img, .qr-box canvas { display: block; }
 .lan-note { font-size: 12.5px; color: var(--dim); line-height: 1.6; }
+/* 端口输入框对齐「盖章按钮」语言：纸面底 + 墨线描边 + 圆角，聚焦上浮；
+   显式定高与旁边「保存」按钮（btn-ghost 实测 34px）一样高——number input
+   的行盒比 button 高，靠 padding 对不齐 */
+.lan-port-input {
+  width: 90px; height: 34px; margin: 0 6px; padding: 0 8px;
+  background: var(--paper-raised); color: var(--text);
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-xs);
+  font: inherit; font-size: 13px; box-shadow: var(--shadow-sm);
+  vertical-align: middle;
+  transition: transform var(--dur-fast), box-shadow var(--dur-fast);
+}
+.lan-port-input:focus {
+  outline: none; transform: translate(-1px, -1px); box-shadow: var(--shadow-md);
+}
 
 /* ---------- 设置页：聊天机器人渠道 ----------
    渠道卡片是纵向表单：一行行往下排，行内再横排控件。

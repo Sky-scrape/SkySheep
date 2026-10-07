@@ -71,9 +71,15 @@ function providerRow([name, p]) {
       <span class="svc-name">${escapeHtml(providerLabel(name, p))}<span class="svc-key${p.has_key ? "" : " svc-warn"}">· ${escapeHtml(keyState)}</span>${badges}</span>
       <span class="svc-sub">${escapeHtml(p.kind)} · ${escapeHtml(p.model || "未设置模型")}</span>
     </span>
+    <button class="svc-del" type="button" title="${p.is_preset ? "停用该服务（可恢复）" : "删除该服务"}">✕</button>
     <button class="svc-go" type="button" title="进入配置">›</button>`;
   // 整行可点：进该服务的配置页
   row.onclick = () => openProviderDetail(name);
+  // 行上直接给删除入口：此前只有详情页底部有，列表页找不到删服务的门
+  row.querySelector(".svc-del").onclick = (e) => {
+    e.stopPropagation(); // 别触发整行的进详情
+    deleteProviderModal(name, p.is_preset);
+  };
   return row;
 }
 

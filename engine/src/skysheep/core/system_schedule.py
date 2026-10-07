@@ -196,10 +196,15 @@ def default_engine_python() -> tuple[str | None, str]:
 
 
 def _run_schtasks(args: list[str]) -> tuple[bool, str]:
-    """调一次 schtasks，返回 (退出码是否为 0, 合并输出)。"""
+    """调一次 schtasks，返回 (退出码是否为 0, 合并输出)。
+
+    GUI 进程（无控制台）拉起控制台子进程时 Windows 会给它新开终端窗口
+    （Win11 默认是 Windows Terminal）——启动对账/导出每次都闪窗；带
+    CREATE_NO_WINDOW 抑制（POSIX 无此参数，不传）。"""
     try:
         proc = subprocess.run(
-            ["schtasks", *args], capture_output=True, timeout=SCHTASK_TIMEOUT_S
+            ["schtasks", *args], capture_output=True, timeout=SCHTASK_TIMEOUT_S,
+            **({"creationflags": 0x08000000} if sys.platform == "win32" else {}),  # noqa: S603 - exe 固定 schtasks
         )
     except FileNotFoundError as e:
         return False, f"schtasks 不可用：{e}"

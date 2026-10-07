@@ -129,7 +129,7 @@ async def test_empty_session_helpers(store):
     # 计数口径与 delete_empty_sessions 一致（置顶/归档的不算）：只数 e1/e2
     assert await store.count_empty_sessions(p.id) == 2
     removed = await store.delete_empty_sessions(p.id, keep_id=e1.id)
-    assert removed == 1  # 只删掉 e2（e1 是当前会话、置顶会话、含内容的都保留）
+    assert removed == [e2.id]  # 只删掉 e2（e1 是当前会话、置顶会话、含内容的都保留）
     assert await store.get_session(e2.id) is None
     assert await store.get_session(e1.id) is not None
     assert await store.get_session(with_msg.id) is not None

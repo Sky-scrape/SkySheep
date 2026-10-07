@@ -741,11 +741,15 @@ class AutomationMixin:
         return self._schtasks_run_default
 
     async def _schtasks_run_default(self, *args: str) -> tuple[int, str]:
-        """真实 runner：调系统 schtasks，返回 (退出码, 合并输出)。"""
+        """真实 runner：调系统 schtasks，返回 (退出码, 合并输出)。
+
+        带 CREATE_NO_WINDOW：GUI 进程（无控制台）拉起 schtasks 会让 Windows
+        新开一个终端窗口（Win11 默认 Windows Terminal），启动对账时必现闪窗。"""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "schtasks", *args,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                **({"creationflags": 0x08000000} if sys.platform == "win32" else {}),
             )
         except (OSError, FileNotFoundError) as e:
             return 1, f"schtasks 不可用：{e}"

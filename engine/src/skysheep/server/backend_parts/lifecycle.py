@@ -62,10 +62,11 @@ class LifecycleMixin:
     async def cleanup_empty_sessions(self) -> dict:
         """删除本项目下没有任何消息的空会话（保留当前会话与置顶会话）。
 
-        无项目态清的是快聊的空会话（delete_empty_sessions(None) 的口径）。"""
+        无项目态清的是快聊的空会话（delete_empty_sessions(None) 的口径）。
+        removed_ids 带回被删的会话 id：前端把打开着的对应标签一并收掉。"""
         keep = self.session.id if self.session else None
-        removed = await self.store.delete_empty_sessions(self._cur_project_id(), keep_id=keep)
-        return {"removed": removed}
+        removed_ids = await self.store.delete_empty_sessions(self._cur_project_id(), keep_id=keep)
+        return {"removed": len(removed_ids), "removed_ids": removed_ids}
 
     async def _get_owned_session(self, session_id: str):
         """取属于当前项目的会话；不存在或属于其他项目一律报错。

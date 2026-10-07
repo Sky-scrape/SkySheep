@@ -206,6 +206,11 @@ class ServerConfig(BaseModel):
     lan: bool = False
     tailscale: bool = False
     token: str = ""
+    # 固定服务端口（0 = 每次启动随机选空闲端口，默认）。已安装的 PWA 在安装时
+    # 把首次的 origin（含端口）固化进 start_url：端口随机时桌面一重启地址就变，
+    # 手机图标打开即死链——要装 PWA / 长期使用固定地址，先在这里固定端口
+    # （设置 · 手机控制，或启动参数 --port，参数优先于配置）。
+    port: int = Field(default=0, ge=0, le=65535)
 
 
 class ChannelsConfig(BaseModel):

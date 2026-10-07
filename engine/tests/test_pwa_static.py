@@ -13,6 +13,8 @@ from pathlib import Path
 from conftest import read_app_bundle
 from fastapi.testclient import TestClient
 
+import skysheep.server.app as server_app
+from skysheep.config import update_config_section
 from skysheep.models.fake import FakeProvider
 from skysheep.server import create_app
 from skysheep.server.app import STATIC_DIR
@@ -166,3 +168,38 @@ def test_index_page_and_frontend_carry_pwa_wiring(home):
         r2 = client.get("/static/app.js")
         assert r2.status_code == 200
         assert 'serviceWorker.register("/sw.js")' in r2.text
+
+
+# ---- 残留发现回归：缓存键永不含查询串 + stale-while-revalidate 自愈 ----
+
+
+def test_sw_never_caches_whitelist_urls_with_query_string():
+    """白名单命中但带查询串的请求直接放行不缓存：缓存键按完整 URL（含查询
+    串）写，一旦静态文件 URL 携带令牌就会把敏感参数持久化进磁盘缓存。"""
+    src = _static("sw.js")
+    assert "if (url.search) return;" in src, "带查询串的白名单请求必须放行不缓存"
+
+
+def test_sw_uses_stale_while_revalidate():
+    """命中缓存后仍后台拉新写回：SW_VERSION 漏递增时下一轮打开也能拿到新壳，
+    不再无限期吃旧文件（机制上消除「永不再验证」）。"""
+    src = _static("sw.js")
+    assert "stale-while-revalidate" in src
+    m = re.search(
+        r"const cached = await cache\.match\(req\);\s*if \(cached\) \{(.*?)return cached;",
+        src, re.S,
+    )
+    assert m, "命中缓存分支里必须有后台再验证"
+    assert "fetch(req)" in m.group(1) and "cache.put(req" in m.group(1)
+
+
+def test_forbidden_page_covers_standalone_token_dead_end(home, monkeypatch):
+    """standalone PWA 没有地址栏：403 页必须给出「先用手机浏览器带 token
+    验证再回来」的可执行指引，不能只教用户「在地址后加 ?token」。"""
+    update_config_section("server", {"lan": True, "token": "tok-123"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    with _client(home) as client:
+        r = client.get("/")
+        assert r.status_code == 403
+        assert "手机浏览器" in r.text, "必须有 standalone 下可执行的自救路径"
+        assert "正在运行" in r.text, "离线打开失败也要有说明"

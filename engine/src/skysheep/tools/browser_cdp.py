@@ -9,17 +9,23 @@ extract / screenshot / close），Agent 能拿到页面文本与截图，用户�
 - 启动 ``msedge --headless=new --remote-debugging-port=0 --user-data-dir=<临时目录>``
   （msedge 找 PATH，再退到 Program Files 固定位置），从 stderr 解析
   「DevTools listening on ws://…」拿调试地址；进程与临时目录在 close 动作或
-  解释器退出时清理。单例：多个动作共用同一实例（DANGEROUS 工具不走并发批，
-  无需加锁防双启动）；
+  解释器退出时清理。单例：多个动作共用同一实例——启动路径持 asyncio.Lock
+  串行化（检查实例与赋值单例之间隔着秒级挂起的 start()，并行会话共享同一
+  事件循环，不加锁会双启动 Edge、后完成者覆盖单例导致进程与临时目录泄漏）；
 - 最小 CDP 客户端：websockets 连浏览器级调试端点，按自增 id 发 JSON-RPC 命令、
   收同 id 响应（事件帧与迟到响应跳过）；Target.attachToTarget(flatten) 挂到
   页面 target 后用 sessionId 路由页面级命令；
 - 安全模型与 browser / mouse 同档：DANGEROUS 逐次确认，arg_text 首词是 action，
-  「总是允许」的前缀白名单粒度即单动作（参照 tools/browser.py）。
+  「总是允许」按动作前缀沉淀（gate._ACTION_PREFIX_TOOLS）；fill 例外——要
+  填入的文本是对页面的任意写入面，「总是允许」只固化当次的选择器与内容
+  （gate._EXACT_ACTION_TOOLS，与 keyboard 同一先例），arg_text 里内容可见。
 
-说明：navigate 只放行 http(s)（与 browser.validate_url 同一策略，文案按本工具
-的动作名重写）；本工具不做 web_fetch 那套仅公网 SSRF 防线——页面内容会回给
-模型，等价于「用户确认过的带内访问」，是否访问内网由确认卡上的 URL 把关。
+SSRF 防线（与 web_fetch 同级）：页面内容会回给模型、页面开在用户看不见的
+无头实例里——与 web_fetch 同属「引擎侧拉取」，不能沿用 browser 工具「开在
+用户自己浏览器里」的免 SSRF 取舍。navigate 前校验目标主机必须解析到公网；
+导航完成后复核最终地址（重定向目标用户在确认卡上看不到），落在非公网即
+弹回空白页并拒绝返回——AGENTS.md 的「仅公网、逐跳校验」是本项目联网能力
+的底线，本工具是它的延伸而非例外。
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from ..config import skysheep_home
 from ..messages import ImageBlock
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 from .computer import _prune_screenshots
+from .web import _resolve_public_ips
 
 # ---- 定位 msedge ----
 
@@ -337,6 +344,7 @@ class CdpBrowser:
 
 
 _BROWSER: CdpBrowser | None = None
+_BROWSER_LOCK = asyncio.Lock()  # 串行化「检查 + start + 赋值」的启动路径
 _ATEXIT_REGISTERED = False
 
 
@@ -350,30 +358,37 @@ def _atexit_close() -> None:
 async def get_browser() -> CdpBrowser:
     """单例入口：实例活着就复用；死了 / 没有就重新拉起。
 
-    不加 asyncio.Lock：web_page 是 DANGEROUS 工具，权限门不会把它放进并发批，
-    引擎路径上不存在双启动竞争。
+    启动路径持锁：检查实例与赋值单例之间隔着 ``await b.start()``（等 stderr
+    出现 DevTools 地址，秒级挂起）。web_page 虽是 DANGEROUS 不进单轮并发批，
+    但并行会话 / 定时任务共享同一事件循环，两个协程可以同时走到 start()——
+    不互斥会双启动 Edge，后完成者覆盖单例，先完成者实例（msedge 进程 +
+    skysheep-edge-* 临时配置目录）两条清理路径都不可达，永久泄漏。锁只在
+    启动路径持有，动作执行不经过它。
     """
     global _BROWSER, _ATEXIT_REGISTERED
-    if _BROWSER is not None:
-        if _BROWSER.is_alive():
-            return _BROWSER
-        await _BROWSER.aclose()
-        _BROWSER = None
-    b = CdpBrowser()
-    await b.start()
-    _BROWSER = b
-    if not _ATEXIT_REGISTERED:
-        atexit.register(_atexit_close)
-        _ATEXIT_REGISTERED = True
-    return b
+    async with _BROWSER_LOCK:
+        if _BROWSER is not None:
+            if _BROWSER.is_alive():
+                return _BROWSER
+            await _BROWSER.aclose()
+            _BROWSER = None
+        b = CdpBrowser()
+        await b.start()
+        _BROWSER = b
+        if not _ATEXIT_REGISTERED:
+            atexit.register(_atexit_close)
+            _ATEXIT_REGISTERED = True
+        return b
 
 
 async def close_browser() -> None:
-    """关闭并清理无头浏览器实例（web_page close 动作）。"""
+    """关闭并清理无头浏览器实例（web_page close 动作）。与 get_browser 同锁：
+    避免与并发启动路径交错出「刚启动就被换血」或双实例窗口。"""
     global _BROWSER
-    b, _BROWSER = _BROWSER, None
-    if b is not None:
-        await b.aclose()
+    async with _BROWSER_LOCK:
+        b, _BROWSER = _BROWSER, None
+        if b is not None:
+            await b.aclose()
 
 
 # ---- 页面级动作（动作 → CDP 命令的映射都在这里，测试逐一断言） ----
@@ -393,6 +408,29 @@ def _check_url(raw: str) -> str:
             "本地文件请直接用 read_file / read_document 读取，不需要开浏览器。"
         )
     return url
+
+
+def _assert_public_target(url: str) -> None:
+    """navigate 目标主机必须解析到公网（与 web_fetch 同级 SSRF 防线）。
+
+    web_page 的页面内容会回给模型、页面开在用户看不见的无头实例里，与
+    web_fetch 同属引擎侧拉取：内网字面量地址、解析出内网/回环/链路本地
+    IP 的域名一律拒绝（复用 web.py 的 _resolve_public_ips，同一套「全部
+    解析结果都必须公网」口径）。非网页地址（about:blank 等）不校验。
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return
+    host = (parsed.hostname or "").strip()
+    if not host:
+        return
+    try:
+        _resolve_public_ips(host)
+    except ToolError:
+        raise ToolError(
+            f"web_page 拒绝非公网地址（{host}）：内网/回环/链路本地地址不允许"
+            "访问。如需操作内网页面，请直接在自己的浏览器里打开。"
+        ) from None
 
 
 def _js_find_center(selector: str) -> str:
@@ -493,6 +531,18 @@ async def cdp_navigate(conn: CdpConnection, session_id: str, url: str) -> str:
         pass  # 标题/最终地址拿不到不影响「已导航」这个结论
     title = str(info.get("title", "")).strip()
     final_url = str(info.get("url", "")).strip() or url
+    # 重定向复核（web_fetch「逐跳校验」的等价物）：确认卡只展示首跳 URL，
+    # 302/JS 跳走的目标用户看不到——最终地址落在非公网（云 metadata、内网
+    # 管理页）时拒绝返回，并把页面弹回空白，内容不进模型上下文、浏览器
+    # 也不留在内网页面给后续 extract 留口
+    try:
+        await asyncio.to_thread(_assert_public_target, final_url)
+    except ToolError:
+        try:
+            await conn.send("Page.navigate", {"url": "about:blank"}, session_id=session_id)
+        except ToolError:
+            pass  # 弹回失败不掩盖原拒绝原因
+        raise
     out = f"已导航到 {final_url}，页面标题「{title or '（无标题）'}」"
     if not done:
         out += (
@@ -640,8 +690,16 @@ class WebPageTool(Tool):
     args_model = WebPageArgs
 
     def arg_text(self, input_dict: dict) -> str:
-        # 首词是 action：「总是允许」的前缀白名单粒度即单动作（参照 tools/browser.py）
+        # 首词是 action：「总是允许」按动作前缀沉淀（gate._ACTION_PREFIX_TOOLS）。
+        # fill 的内容必须可见（确认卡只展示 arg_text）——要填入的文本是对页面
+        # 的任意写入面，规则也被 _EXACT_ACTION_TOOLS 固化成当次参数，看不
+        # 见内容的确认等于盲批（安全审查残留发现）。navigate 补显目标主机：
+        # URL 过长被截断时（含 userinfo@ 伪装形态），真实主机名必须可见。
         action = str(input_dict.get("action", ""))
+        if action == "fill":
+            sel = str(input_dict.get("selector") or "")
+            txt = str(input_dict.get("text") or "")
+            return f"fill {sel} ｜填入: {txt[:80]}".strip()
         target = (
             input_dict.get("url")
             or input_dict.get("selector")
@@ -649,12 +707,20 @@ class WebPageTool(Tool):
             or input_dict.get("text")
             or ""
         )
-        return f"{action} {str(target)[:80]}".strip()
+        text = f"{action} {str(target)[:80]}".strip()
+        if action == "navigate":
+            host = (urlparse(str(input_dict.get("url") or "")).hostname or "").strip()
+            if host:
+                text += f" ｜目标主机: {host}"
+        return text
 
     async def run(self, args: WebPageArgs, ctx: ToolContext) -> str:
         url = ""
         if args.action == "navigate":
             url = _check_url(args.url)
+            # SSRF 前置校验（与 web_fetch 同级，见模块说明）：目标主机必须
+            # 解析到公网。getaddrinfo 是阻塞调用，丢线程池防卡事件循环。
+            await asyncio.to_thread(_assert_public_target, url)
         if args.action in ("click", "fill") and not args.selector.strip():
             raise ToolError(f"{args.action} 动作需要提供 selector 参数（CSS 选择器）。")
         # extract 不强制 selector：不带就是整页文本

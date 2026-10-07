@@ -272,6 +272,39 @@ def _is_arbitrary_exec_prefix(pattern: str) -> bool:
     return bool(words) and _norm_exe_name(words[0]) in _PREFIX_UNSAFE_COMMANDS
 
 
+# 出站扫描收集参数字符串的规模上限：防大参数（长文件内容、大 JSON、深嵌套）
+# 拖慢授权路径。上限外的值按「未扫描」处理——防线只许漏、不许瘫（漏掉的
+# 代价由权限门与用户确认兜底，瘫掉的代价是整个工具面）。
+_EGRESS_MAX_DEPTH = 6
+_EGRESS_MAX_STRINGS = 64
+
+
+def _collect_param_strings(value: object, depth: int = 0, out: list[str] | None = None) -> list[str]:
+    """递归收集工具参数里的字符串值（含 dict / list 嵌套）。
+
+    MCP 工具的 permissive 参数模型不约束形态，已知密钥藏进嵌套对象同样要
+    扫到；带深度与总量上限防超大参数拖慢授权。
+    """
+    if out is None:
+        out = []
+    if len(out) >= _EGRESS_MAX_STRINGS or depth > _EGRESS_MAX_DEPTH:
+        return out
+    if isinstance(value, str):
+        if value:
+            out.append(value)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _collect_param_strings(v, depth + 1, out)
+            if len(out) >= _EGRESS_MAX_STRINGS:
+                break
+    elif isinstance(value, (list, tuple, set)):
+        for v in value:
+            _collect_param_strings(v, depth + 1, out)
+            if len(out) >= _EGRESS_MAX_STRINGS:
+                break
+    return out
+
+
 class Decision:
     ALLOW_ONCE = "allow_once"
     ALLOW_ALWAYS = "allow_always"
@@ -524,8 +557,11 @@ class PermissionGate:
         return bool(words) and words[0] in actions
 
     # 动作型工具：arg_text 首词是动作（click / scroll / activate / open / search …），
-    # 白名单按动作前缀生成，粒度到动作级（如只放行 click、只放行 activate）
-    _ACTION_PREFIX_TOOLS = ("mouse", "window", "browser")
+    # 白名单按动作前缀生成，粒度到动作级（如只放行 click、只放行 activate）。
+    # web_page（页内自动化）也在内：arg_text 首词是 action——此前缺席导致任意
+    # 一次「总是允许」都沉淀成整工具 always 规则（审查残留发现），与工具自身
+    # 「粒度即单动作」的声明相悖，一并收敛。
+    _ACTION_PREFIX_TOOLS = ("mouse", "window", "browser", "web_page")
     # 例外 ①：键盘注入的「内容」就是对当前焦点窗口的任意操作（文本可以是任何命令），
     # 按动作词放行 type / hotkey 等于放行任意输入——改成固化用户当时批准的那一条。
     # delete_file 同理（例外 ③）：整工具放行等于把 DANGEROUS 级删除面沉淀成永久
@@ -534,7 +570,10 @@ class PermissionGate:
     # 例外 ②：动作名相同但后果不可逆/匹配模糊的动作，也不按动作整类放行。
     # window 的 close 按标题**子串**匹配：放行一次 close 等于允许关掉任何标题含该
     # 子串的窗口（子串很容易误中整个应用），所以只固化当时那个标题。
-    _EXACT_ACTION_TOOLS = {"window": ("close",)}
+    # web_page 的 fill 同理（例外 ②）：要填入的文本是对页面的任意写入面（内网
+    # 表单 / 发帖 / 配置提交），按动作放行 fill 等于允许向任意表单提交任意内容
+    # ——固化当次的选择器与内容（与 keyboard 同一先例）。
+    _EXACT_ACTION_TOOLS = {"window": ("close",), "web_page": ("fill",)}
     _EXACT_HINTS = {
         "keyboard": (
             "键盘输入/按键只固化「总是允许」时的那一次内容：内容或键位不同会重新询问。"
@@ -547,6 +586,12 @@ class PermissionGate:
         "delete_file": (
             "删除不提供整工具放行：「总是允许」只固化这一次的路径与参数，"
             "删别的文件/目录会重新询问。（DANGEROUS 级的删除面不沉淀成永久规则）"
+        ),
+        "web_page": (
+            "web_page 的 fill 只固化「总是允许」时的那一次选择器与内容：内容或选择器"
+            "不同会重新询问。（填入文本是对页面的任意写入面，按动作整类放行等于"
+            "允许向任意表单提交任意内容；navigate 等其他动作仍按动作前缀沉淀，"
+            "目标网址的公网校验不受白名单影响）"
         ),
     }
 
@@ -850,23 +895,30 @@ class PermissionGate:
 
     # ---- 出站密钥防线（提示注入纵深防御，security/egress.py） ----
     #
-    # WRITE/DANGEROUS 工具的字符串参数先过 egress.scan_outbound：
-    # - 命中**已知密钥值**（本机配置里的真实凭据）→ 预拒绝（PendingPermission
-    #   直接 resolve(DENY) + deny_note）。这一步位于 authorize 最顶端、先于
-    #   一切放行分支：白名单、「自动允许写入」「完全访问」两档、Mods 收紧后
-    #   的确认、乃至用户亲点「允许」都到不了放行——参数里是真实凭据，确认
-    #   弹窗只会把它再展示一遍，拦截是唯一正确动作；
+    # WRITE/DANGEROUS 工具与 READONLY+open_world 工具（web_fetch / web_search
+    # 这类会把参数发往模型指定外部站点的开放网络工具）的字符串参数先过
+    # egress.scan_outbound：
+    # - 命中**已知密钥值**（本机配置/mcp.json 里的真实凭据）→ 预拒绝
+    #   （PendingPermission 直接 resolve(DENY) + deny_note）。这一步位于
+    #   authorize 最顶端、先于一切放行分支：白名单、「自动允许写入」「完全
+    #   访问」两档、Mods 收紧后的确认、乃至用户亲点「允许」都到不了放行——
+    #   参数里是真实凭据，确认弹窗只会把它再展示一遍，拦截是唯一正确动作；
     # - 仅命中**通用密钥形态**（sk-… / ghp_… 等前缀）→ 照常走确认/白名单
     #   流程，agent 循环执行前经 egress_note() 取一句前置注记拼进结果。
-    # READONLY 工具不扫（控制误伤）。防线自身故障（配置读不了等）按「无命中」
-    # 降级，绝不挡执行——见 egress.py 的模块说明。
+    # READONLY 工具里只有 open_world=True 的开放网络通道入扫（web_fetch 的
+    # url / web_search 的 query 与写参数同样是出站通道，且这类工具自动放行
+    # 零确认——恰是注入最想借道的外传面）；其余 READONLY 不扫（控制误伤）。
+    # 防线自身故障（配置读不了等）按「无命中」降级，绝不挡执行——见
+    # egress.py 的模块说明。
 
     def _egress_scan(self, tool: Tool, input_dict: dict) -> dict | None:
-        """DANGEROUS/WRITE 工具字符串参数的出站扫描；READONLY / 无字符串参数
-        / 扫描故障返回 None（= 未扫描，按无命中处理）。"""
-        if tool.safety == Safety.READONLY:
+        """出站扫描：WRITE/DANGEROUS 全量；READONLY 仅限 open_world=True 的
+        开放网络工具（web_fetch.url / web_search.query 这类参数会原样发往
+        模型指定的外部站点）。其余 / 无字符串参数 / 扫描故障返回 None
+        （= 未扫描，按无命中处理）。"""
+        if tool.safety == Safety.READONLY and not getattr(tool, "open_world_hint", False):
             return None
-        texts = [v for v in input_dict.values() if isinstance(v, str) and v]
+        texts = _collect_param_strings(input_dict)
         if not texts:
             return None
         try:
@@ -913,10 +965,10 @@ class PermissionGate:
 
     def egress_note(self, tool: Tool, input_dict: dict) -> str:
         """仅命中通用密钥形态时的结果前置注记（已知密钥值在 authorize 已拦截，
-        能走到执行的只剩通用形态）。agent 循环在执行 WRITE/DANGEROUS 工具前
-        取用，拼在工具结果最前面；READONLY 不扫，无命中返回空串。注记是提示
-        不是闸门：任何异常按「无注记」处理。"""
-        if tool.safety == Safety.READONLY:
+        能走到执行的只剩通用形态）。agent 循环在执行工具前取用，拼在工具结果
+        最前面；非 WRITE/DANGEROUS 且非开放网络的 READONLY 不扫，无命中返回
+        空串。注记是提示不是闸门：任何异常按「无注记」处理。"""
+        if tool.safety == Safety.READONLY and not getattr(tool, "open_world_hint", False):
             return ""
         scan = self._egress_scan(tool, input_dict)
         if scan is None or not scan["ok"] or not scan["hits"]:
@@ -935,11 +987,9 @@ class PermissionGate:
 
         authorize 与各子类门（无人值守 / 渠道 / 隔离 worktree）的提前放行分支
         共用本判定——这些分支不落 authorize，不在这里过一道就等于名单/工作区
-        档位绕过了防线；无人值守通道恰是注入最需要防的路径。READONLY 在
-        _egress_scan 内部短路。
+        档位绕过了防线；无人值守通道恰是注入最需要防的路径。READONLY 的短路
+        在 _egress_scan 内部（仅放行非开放网络工具）。
         """
-        if tool.safety == Safety.READONLY:
-            return None
         scan = self._egress_scan(tool, input_dict)
         if scan is not None and not scan["ok"]:
             return self._egress_denied(tool, input_dict, scan)

@@ -9,12 +9,14 @@
  * 浏览器直接走网络——动态请求永不入缓存。WebSocket 握手本就不经过 SW 的
  * fetch 事件，与「网络直连」天然一致。
  *
- * 失效方式：改了任何前端文件，必须同步递增 SW_VERSION（缓存名带版本号，
- * activate 时旧缓存整体删除），否则已安装的 PWA 一直吃旧壳。
+ * 失效方式（双保险）：改了任何前端文件，正常流程递增 SW_VERSION（缓存名带
+ * 版本号，activate 时旧缓存整体删除）；即便漏递增，fetch 走 stale-while-
+ * revalidate——先回缓存、后台拉新写回，下一次打开就能拿到新壳，不会无限期
+ * 吃旧文件。
  */
 "use strict";
 
-const SW_VERSION = "skysheep-shell-v1";
+const SW_VERSION = "skysheep-shell-v2";
 const CACHE_NAME = "skysheep-shell-" + SW_VERSION;
 
 // 缓存白名单：手写静态壳 + vendor 第三方库，一个不多。全部是确定的文件路径，
@@ -71,13 +73,24 @@ self.addEventListener("fetch", function (event) {
   if (req.mode === "navigate") return;
   // 白名单之外（/ws、/health、/preview、/manifest…）一律放行，绝不缓存动态请求
   if (SHELL_URLS.indexOf(url.pathname) === -1) return;
+  // 白名单文件带查询串的请求直接放行不缓存：缓存键按完整 URL（含查询串），
+  // 一旦有调用方把令牌拼进静态文件 URL，敏感参数就会被持久化进磁盘缓存——
+  // 「白名单缓存键永不含参数」由机制保证，不靠调用方约定
+  if (url.search) return;
   event.respondWith((async function () {
-    const cached = await caches.match(req, { cacheName: CACHE_NAME });
-    if (cached) return cached;
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(req);
+    if (cached) {
+      // stale-while-revalidate：先回缓存，后台拉新写回——SW_VERSION 漏递增
+      // 时下一轮打开也能拿到新壳，不再无限期吃旧文件
+      fetch(req).then(function (resp) {
+        if (resp && resp.ok) cache.put(req, resp.clone());
+      }).catch(function () {});
+      return cached;
+    }
     try {
       const resp = await fetch(req);
       if (resp && resp.ok) {
-        const cache = await caches.open(CACHE_NAME);
         cache.put(req, resp.clone());
       }
       return resp;

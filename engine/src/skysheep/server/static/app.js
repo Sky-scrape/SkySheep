@@ -11436,6 +11436,36 @@ async function rotateAccessToken() {
   }
 }
 
+// 固定服务端口（PWA / 固定地址的前提）：已安装的 PWA 把安装时的地址（含
+// 端口）固化进 start_url，端口随机时桌面一重启手机图标就打不开。0 = 恢复随机。
+function lanPortSettingHtml(st) {
+  return `
+    <div class="lan-note">服务端口：<input id="lan-port" type="number" min="0" max="65535"
+      value="${st.port ? Number(st.port) : ""}" placeholder="随机"
+      style="width:90px;margin:0 6px"> <button id="lan-port-save" class="btn-ghost">保存</button>
+      <span class="dim small">0 = 每次启动随机。要安装 PWA（添加到主屏幕）或长期使用固定地址，
+      先固定端口——否则重启 SkySheep 后手机图标打开的就是旧地址（连接失败）。保存后重启生效。</span></div>`;
+}
+
+async function saveLanPort() {
+  const input = document.getElementById("lan-port");
+  if (!input) return;
+  const raw = input.value.trim();
+  try {
+    const r = await request("lan.set_port", { port: Number(raw) || 0 });
+    addNotice(r.note || "端口设置已保存");
+    loadLanPanel();
+    loadTsPanel();
+  } catch (e) {
+    addNotice("操作失败: " + e.message);
+  }
+}
+
+function wireLanPortSetting() {
+  const btn = document.getElementById("lan-port-save");
+  if (btn) btn.onclick = saveLanPort;
+}
+
 async function loadLanPanel() {
   let st;
   try { st = await request("lan.status"); } catch (e) { return; }
@@ -11444,7 +11474,8 @@ async function loadLanPanel() {
   toggle.checked = !!st.enabled;
   const urls = (st.ips || []).map((ip) => `http://${ip}:${location.port}/?token=${st.token || "你的令牌"}`);
   if (!st.enabled) {
-    info.innerHTML = `<div class="lan-note">${escapeHtml(st.note || "")}</div>`;
+    info.innerHTML = `<div class="lan-note">${escapeHtml(st.note || "")}</div>` + lanPortSettingHtml(st);
+    wireLanPortSetting();
     return;
   }
   info.innerHTML = `
@@ -11457,12 +11488,15 @@ async function loadLanPanel() {
         （聊天 / 批准确认 / 看任务进度）。二维码含访问令牌，<b>请勿截图外传</b>；地址是 http 明文传输，
         只建议在可信网络使用——跨网络或不可信 Wi-Fi 请用「远程访问（Tailscale）」，链路端到端加密。<br>
         手机连不上时先看 Windows 防火墙：首次弹出的授权要点「允许」，错过的话在防火墙设置里放行 SkySheep。<br>
+        ${st.port ? "" : "⚠️ 当前端口随机：<b>装 PWA 前先在下方固定端口</b>，否则重启后手机图标打开的是旧地址。<br>"}
         <button id="lan-copy" class="btn-ghost" style="margin-top:6px">⧉ 复制地址</button>
         <button id="lan-rotate" class="btn-ghost" style="margin-top:6px">⟳ 重新生成令牌</button>
         <span id="lan-copy-msg" class="io-msg"></span>
       </div>
     </div>
+    ${lanPortSettingHtml(st)}
     ${tokenFailureNote(st.token_failures)}`;
+  wireLanPortSetting();
   const copyBtn = document.getElementById("lan-copy");
   if (copyBtn) copyBtn.onclick = () => copyAccessUrl(urls[0] || "", "lan-copy-msg");
   const rotateBtn = document.getElementById("lan-rotate");
@@ -11517,6 +11551,7 @@ async function loadTsPanel() {
       <div id="ts-qr" class="qr-box"></div>
       <div class="lan-note">手机扫码直达。二维码含访问令牌，<b>请勿截图外传</b>；
         只有你 Tailscale 账号里的设备能连进来，同一 Wi-Fi 下的陌生设备反而进不来。<br>
+        ${st.port ? "" : "⚠️ 当前端口随机：装 PWA（添加到主屏幕）前先在「局域网访问」卡片固定服务端口，否则重启后手机图标打开的是旧地址。<br>"}
         <button id="ts-copy" class="btn-ghost" style="margin-top:6px">⧉ 复制地址</button>
         <button id="ts-rotate" class="btn-ghost" style="margin-top:6px">⟳ 重新生成令牌</button>
         <span id="ts-copy-msg" class="io-msg"></span>
@@ -14351,15 +14386,22 @@ document.getElementById("btn-mod-template").onclick = async () => {
 
 // ---------- PWA：手机端「添加到主屏幕」（局域网 / Tailscale 访问时） ----------
 // 只在非本机来源注册 service worker：桌面窗口与本机浏览器都走 127.0.0.1 /
-// localhost，保持静态资源 no-store 直读最新版的行为不被 SW 缓存层插足；
-// 手机端经 SW 缓存静态壳加速二次打开（缓存策略见 static/sw.js：白名单
-// cache-first，导航与 API/WS 一律网络直连）。注册失败静默：PWA 是增强能力，
-// 不影响正常使用（纯 http 的局域网地址不是安全上下文，SW 本就不可用）。
+// localhost，保持静态资源 no-store 直读最新版的行为不被 SW 缓存层插足。
+// 平台约束（如实定位，不是配置问题）：官方分发的手机地址都是 http 明文，
+// 不是安全上下文，navigator.serviceWorker 根本不存在——SW 缓存与 Android 的
+// PWA 安装在无 HTTPS 前置（如 tailscale serve / 反向代理）时不可用，手机端
+// 实际所得是 iOS 主屏图标 + manifest 主题色。注册失败静默：PWA 是增强能力，
+// 不影响正常使用；控制台留一句可查的说明，避免「装了 PWA 就有缓存加速」的
+// 错误预期。
 (function () {
   var host = location.hostname;
   if (host === "localhost" || host === "127.0.0.1" || host === "::1" ||
       host === "[::1]" || host === "") return;
-  if (!("serviceWorker" in navigator)) return;
+  if (!("serviceWorker" in navigator)) {
+    console.info("SkySheep：当前地址不是安全上下文（HTTPS），Service Worker 缓存与 PWA 安装不可用；" +
+      "手机端可用 iOS 主屏图标。需要缓存加速请用 HTTPS 前置（如 tailscale serve）。");
+    return;
+  }
   window.addEventListener("load", function () {
     navigator.serviceWorker.register("/sw.js").catch(function () {});
   });

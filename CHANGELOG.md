@@ -29,7 +29,8 @@
   独立 Job Object（`security/sandbox_win.py`，建作业/挂进程/配限制任一步失败自动降级
   no-op，权限控制仍由 PermissionGate 把守）：命令结束/超时 TerminateJobObject 一次收掉
   整棵树（含命令自己派生后滞留的孙进程），后台进程 action=kill 一并终止，引擎退出由
-  kill-on-close 兜底——常驻进程不再残留孤儿；另配 UI 限制（禁剪贴板读写与全局钩子）。
+  kill-on-close 兜底——常驻进程不再残留孤儿；另配 UI 限制（禁剪贴板读写；
+  钩子限制需 UILIMIT_HANDLES、会切断 stdout 管道，一期不做）。
   主会话/子代理/团队成员/CLI headless 全链路透传；`config.toml` 新增 `[shell]
   job_containment`（默认开，个别命令与遏制机制冲突时可关）。这是进程遏制不是完整安全
   沙箱——受限令牌/AppContainer 属二期。

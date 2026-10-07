@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -394,6 +395,10 @@ class AutomationMixin:
 
     def start_cron_loop(self) -> None:
         self._cron_task = asyncio.create_task(self._cron_loop())
+        # 启动对账只在真实进程跑：pytest 下夹具隔离的是 SKYSHEEP_HOME，管不住
+        # 机器级的任务计划程序——schtasks /Query / /Delete 绝不能在测试里冒出来
+        if "PYTEST_CURRENT_TEST" not in os.environ:
+            spawn_bg(self._reconcile_system_schedule())
 
     def stop_cron_loop(self) -> None:
         if getattr(self, "_cron_task", None):
@@ -442,7 +447,18 @@ class AutomationMixin:
         if stype not in ("interval", "daily", "weekly"):
             raise RuntimeError("schedule_type 只支持 interval / daily / weekly")
         interval = max(1, int(params.get("interval_minutes") or 1))
-        tod = str(params.get("time_of_day") or "")
+        # 入口侧校验（安全审查残留发现）：interval 超出 schtasks 可表达范围、
+        # time_of_day 不是 HH:MM 的垃圾值以前原样入库——系统级注册静默失败、
+        # compute_next_run 静默 +24h，任务行却显示一切正常。在入口明示拒绝。
+        problem = system_schedule.validate_interval_minutes(interval)
+        if problem:
+            raise RuntimeError(problem)
+        tod = str(params.get("time_of_day") or "").strip()
+        if tod:
+            try:
+                tod = system_schedule.normalize_time_of_day(tod)
+            except ValueError as e:
+                raise RuntimeError(str(e)) from None
         # weekday=0（周一）是合法值：必须按 `is not None` 判缺失，`or -1` 会把
         # 0 误判成缺失存成 -1——应用内相位跑偏（compute_next_run 对 wd<0 一律
         # +7 天），导出侧更会因 weekday 无效拒绝 WEEKLY。前端星期下拉
@@ -458,7 +474,9 @@ class AutomationMixin:
             task["id"], next_run_at=self.store.compute_next_run(task)
         )
         self._broadcast_cron(task)
-        await self._sync_system_schedule(task)
+        sync = await self._sync_system_schedule(task)
+        if sync is not None:
+            task["schtask_sync"] = sync
         return task
 
     async def cron_update(self, params: dict) -> dict:
@@ -478,9 +496,19 @@ class AutomationMixin:
                 raise RuntimeError("schedule_type 只支持 interval / daily / weekly")
             kw["schedule_type"] = stype
         if params.get("interval_minutes") is not None:
-            kw["interval_minutes"] = max(1, int(params["interval_minutes"]))
+            interval = max(1, int(params["interval_minutes"]))
+            problem = system_schedule.validate_interval_minutes(interval)
+            if problem:
+                raise RuntimeError(problem)
+            kw["interval_minutes"] = interval
         if params.get("time_of_day") is not None:
-            kw["time_of_day"] = str(params["time_of_day"])
+            tod = str(params["time_of_day"]).strip()
+            if tod:
+                try:
+                    tod = system_schedule.normalize_time_of_day(tod)
+                except ValueError as e:
+                    raise RuntimeError(str(e)) from None
+            kw["time_of_day"] = tod
         if params.get("weekday") is not None:
             kw["weekday"] = int(params["weekday"])
         if params.get("allowed_tools") is not None:
@@ -497,7 +525,9 @@ class AutomationMixin:
             kw["next_run_at"] = self.store.compute_next_run(merged) if enabled else 0
         task = await self.store.update_cron_task(tid, **kw)
         self._broadcast_cron(task)
-        await self._sync_system_schedule(task)
+        sync = await self._sync_system_schedule(task)
+        if sync is not None:
+            task["schtask_sync"] = sync
         return task
 
     async def cron_delete(self, params: dict) -> dict:
@@ -508,7 +538,8 @@ class AutomationMixin:
             self._check_cron_ownership(task)
         ok = await self.store.delete_cron_task(tid)
         if ok:
-            await self._sync_system_schedule(task, deleted=True)
+            sync = await self._sync_system_schedule(task, deleted=True)
+            return {"deleted": ok, "id": tid, "schtask_sync": sync}
         return {"deleted": ok, "id": tid}
 
     async def cron_run_now(self, params: dict) -> dict:
@@ -844,44 +875,94 @@ class AutomationMixin:
     # cron.update / cron.delete 成功后按当前任务行把 SkySheepCron-<任务id>
     # 计划任务注册（/F 覆盖重建）或注销（core/system_schedule.py），到点由
     # 系统拉起 `python -m skysheep.cli.app cron-run <任务id>` 独立执行。
-    # 同步是 best-effort：任何失败只记日志，绝不影响任务行本身的增删改。
+    # 同步是 best-effort：失败绝不影响任务行本身的增删改，但结果（成功与否、
+    # 失败原因）回传给调用方——静默失败会让「无人值守覆盖」形同虚设，用户
+    # 以为有覆盖实际什么都没注册。
+    # 注销不受开关限制：开关只在「注册」方向做门。先注册成功、后关开关/改参
+    # 失败的场景里，若注销也被开关拦下，残留的旧注册会按旧节奏反复拉起
+    # cron-run（任务行没了就 SystemExit），且没有任何自愈路径。
 
-    async def _sync_system_schedule(self, task: dict | None, *, deleted: bool = False) -> None:
-        """按任务行同步系统计划任务：启用 → 注册/重建；停用或已删除 → 注销。"""
+    async def _sync_system_schedule(self, task: dict | None, *, deleted: bool = False) -> dict | None:
+        """按任务行同步系统计划任务：启用 → 注册/重建；停用或已删除 → 注销。
+
+        返回同步结果（``{"registered": bool, "notice": str}``，registered=False
+        时 notice 带可读原因）供 WS 响应呈现；本次没有同步动作（非 Windows /
+        无有效任务行 / 开关关闭且无注销需求）返回 None。
+        """
         try:
             cfg = self.cfg
-            if cfg is None or not bool(
-                getattr(getattr(cfg, "cron", None), "system_schedule", False)
-            ):
-                return
+            if cfg is None:
+                return None
             if sys.platform != "win32":
-                return
+                return None
             tid = int((task or {}).get("id") or 0)
             if tid <= 0:
-                return
+                return None
             if deleted or not task.get("enabled"):
                 ok, out = await asyncio.to_thread(system_schedule.unregister, tid)
                 if not ok:
                     # 任务从未注册过也会走到这里（schtasks 报不存在），降为日志
                     logger.info("注销系统计划任务未成功（任务 %s）：%s",
                                 tid, (out or "").strip()[:160])
-                return
+                    return {"registered": False,
+                            "notice": f"注销旧系统计划任务未成功：{(out or '').strip()[:160]}"}
+                return {"registered": False, "notice": ""}
+            if not bool(getattr(getattr(cfg, "cron", None), "system_schedule", False)):
+                return None
             entry, problem = system_schedule.default_engine_python()
             if entry is None:
                 logger.info("跳过注册系统计划任务（任务 %s）：%s", tid, problem)
-                return
+                return {"registered": False, "notice": problem}
             proj = await self.store.get_project(int(task.get("project_id") or 0))
             if proj is None or not Path(proj.root_path).is_dir():
                 logger.warning("项目目录不可用，跳过注册系统计划任务（任务 %s）", tid)
-                return
+                return {"registered": False, "notice": "项目目录不可用，无法注册系统计划任务"}
             ok, out = await asyncio.to_thread(
                 system_schedule.register, tid, task, proj.root_path, entry)
             if not ok:
-                logger.warning("注册系统计划任务失败（任务 %s）：%s",
-                               tid, (out or "").strip()[:160])
+                reason = (out or "").strip()[:160] or "schtasks 注册失败"
+                logger.warning("注册系统计划任务失败（任务 %s）：%s", tid, reason)
+                # /F 覆盖重建失败 = 旧注册还在按旧参数触发（如把 daily 改成
+                # 每周后注册失败，旧的每天节奏会照跑、无人值守频次放大）——
+                # 先把旧注册一并注销：宁可退回「仅应用内调度」（fail-closed），
+                # 也不留一条与任务行不符的无人值守执行面
+                uok, _uout = await asyncio.to_thread(system_schedule.unregister, tid)
+                if uok:
+                    logger.info("注册失败已注销旧注册（任务 %s），系统级覆盖暂停", tid)
+                return {"registered": False, "notice": reason}
+            return {"registered": True, "notice": ""}
         except Exception as e:  # noqa: BLE001 - 同步失败不影响任务增删改
             logger.warning("系统计划任务同步失败（任务 %s）：%s",
                            (task or {}).get("id"), e)
+            return {"registered": False, "notice": f"系统计划任务同步异常：{e}"}
+
+    async def _reconcile_system_schedule(self) -> None:
+        """启动对账（安全审查残留发现）：系统里已注册的 SkySheepCron-* 与任务
+        行对不上的（任务已删 / 已停用）一律注销；开关已关闭时全量清扫——注册
+        通道关闭后残留的旧注册没有别的路径能清掉，会按旧节奏反复拉起 cron-run
+        （任务行没了就 SystemExit 的必败进程）。best-effort：schtasks 不可用
+        只记日志，不拖慢启动。"""
+        try:
+            cfg = self.cfg
+            if cfg is None or sys.platform != "win32":
+                return
+            ids = await asyncio.to_thread(system_schedule.list_scheduled_ids)
+            if not ids:
+                return
+            if bool(getattr(getattr(cfg, "cron", None), "system_schedule", False)):
+                rows = await self.store.list_cron_tasks(None)
+                keep = {int(r["id"]) for r in rows if r.get("enabled")}
+            else:
+                keep = set()  # 开关已关：全量清扫，系统级注册一个不留
+            for tid in [i for i in ids if i not in keep]:
+                ok, out = await asyncio.to_thread(system_schedule.unregister, tid)
+                if ok:
+                    logger.info("启动对账：已注销残留的系统计划任务（任务 %s）", tid)
+                else:
+                    logger.info("启动对账：注销系统计划任务未成功（任务 %s）：%s",
+                                tid, (out or "").strip()[:120])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("系统计划任务启动对账失败：%s", e)
 
     # ---- 任务编排（pipelines）：按依赖顺序自动跑的无人值守节点 ----
     # 与定时任务同一套执行底座（独立会话 + HeadlessGate 白名单 + 完整工具集），

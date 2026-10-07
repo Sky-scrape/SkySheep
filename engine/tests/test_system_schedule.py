@@ -288,3 +288,169 @@ def test_backend_auto_sync_off_by_default(home, monkeypatch):
             "schedule_type": "daily", "time_of_day": "10:00"}})
         r = recv_until(ws, "ca")
         assert r["ok"], r.get("error")
+
+
+# ---- 残留发现回归：映射边界 / 入口校验 / 同步结果回传 / 启动对账 ----
+
+
+@pytest.mark.parametrize(
+    "spec, expect",
+    [
+        # 整天倍数：/SC DAILY /MO n（每 n 天，schtasks 原生 1-365）
+        (_spec(interval_minutes=1440), ["/SC", "DAILY", "/MO", "1"]),
+        (_spec(interval_minutes=2880), ["/SC", "DAILY", "/MO", "2"]),
+        (_spec(interval_minutes=10080), ["/SC", "DAILY", "/MO", "7"]),
+        # HOURLY 边界：23 小时仍是 HOURLY；24 小时（1440）必须落到 DAILY
+        (_spec(interval_minutes=1380), ["/SC", "HOURLY", "/MO", "23"]),
+    ],
+)
+def test_build_schtasks_args_interval_at_day_scale(spec, expect):
+    """≥1 天的 interval 曾映射成 HOURLY /MO 24+（越界必被 schtasks 拒，
+    静默失败）：现在映射成可表达的 DAILY /MO n。"""
+    args = system_schedule.build_schtasks_args(7, spec, PROJ, PY)
+    i = args.index("/SC")
+    assert args[i:i + len(expect)] == expect
+
+
+@pytest.mark.parametrize("minutes", [1441, 1500, 1440 * 366])
+def test_build_schtasks_args_rejects_unexpressible_interval(minutes):
+    """映射不出的间隔（如 1441 分钟）明示拒绝，不送进 schtasks 静默吃闭门羹。"""
+    with pytest.raises(ValueError) as ei:
+        system_schedule.build_schtasks_args(
+            1, _spec(interval_minutes=minutes), PROJ, PY)
+    assert "可表达" in str(ei.value)
+
+
+def test_validate_interval_minutes_boundaries():
+    assert system_schedule.validate_interval_minutes(60) is None
+    assert system_schedule.validate_interval_minutes(1439) is None
+    assert system_schedule.validate_interval_minutes(1440) is None
+    assert system_schedule.validate_interval_minutes(525600) is None  # 365 天
+    assert system_schedule.validate_interval_minutes(1441) is not None
+    assert system_schedule.validate_interval_minutes(0) is not None
+
+
+def test_normalize_time_of_day_rejects_garbage():
+    """垃圾 time_of_day 曾一路进 /ST 被 schtasks 拒（静默失败）：规整层拒绝。"""
+    assert system_schedule.normalize_time_of_day("9:05") == "09:05"
+    assert system_schedule.normalize_time_of_day("09:05") == "09:05"
+    for bad in ("not-a-time", "25:00", "09:60", "", "9时5分"):
+        with pytest.raises(ValueError):
+            system_schedule.normalize_time_of_day(bad)
+    # daily / weekly 分支消费 time_of_day，垃圾值在映射层就抛
+    with pytest.raises(ValueError):
+        system_schedule.build_schtasks_args(
+            1, _spec(schedule_type="daily", time_of_day="not-a-time"), PROJ, PY)
+
+
+def test_list_scheduled_ids_parses_query(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kw):
+        calls.append(list(argv))
+        out = ('"SkySheepCron-3","2026/10/07 09:00:00","就绪"\n'
+               '"GoogleUpdateTaskMachine","2026/10/07 08:00:00","就绪"\n'
+               '"SkySheepCron-12","2026/10/08 10:00:00","就绪"\n').encode()
+        return _Done(0, out)
+
+    monkeypatch.setattr(system_schedule.subprocess, "run", fake_run)
+    assert system_schedule.list_scheduled_ids() == [3, 12], "只取本前缀的数字后缀"
+    assert calls[0][:2] == ["schtasks", "/Query"]
+
+    monkeypatch.setattr(system_schedule.subprocess, "run",
+                        lambda *a, **k: _Done(1, b"ERROR"))
+    assert system_schedule.list_scheduled_ids() == [], "查询失败按空表降级"
+
+
+def test_backend_sync_failure_surfaces_in_response(home, monkeypatch):
+    """注册失败：任务行照常保存，但响应带回 schtask_sync（registered=False
+    + 原因）——失败不能再只进日志。"""
+    from test_server import make_client, recv_until
+
+    monkeypatch.setattr(
+        system_schedule, "register",
+        lambda *a, **k: (False, "ERROR: Invalid value for /MO option."))
+
+    with make_client(home, [[]]) as client, client.websocket_connect("/ws") as ws:
+        client.app.state.backend.cfg.cron.system_schedule = True
+        ws.send_json({"id": "cs", "method": "cron.add", "params": {
+            "name": "同步失败", "prompt": "干活",
+            "schedule_type": "interval", "interval_minutes": 15}})
+        task = recv_until(ws, "cs")["result"]
+        sync = task["schtask_sync"]
+        assert sync["registered"] is False
+        assert "/MO" in sync["notice"]
+
+
+def test_backend_register_failure_unregisters_stale(home, monkeypatch):
+    """更新后注册失败：旧注册一并注销（不留按旧节奏反复拉起的无人值守任务）。"""
+    from test_server import make_client, recv_until
+
+    reg, unreg = _wire_fakes(monkeypatch)
+
+    def failing_register(*a, **k):
+        return False, "schtasks 临时故障"
+
+    monkeypatch.setattr(system_schedule, "register", failing_register)
+
+    with make_client(home, [[]]) as client, client.websocket_connect("/ws") as ws:
+        client.app.state.backend.cfg.cron.system_schedule = True
+        ws.send_json({"id": "cf", "method": "cron.add", "params": {
+            "name": "降级", "prompt": "干活",
+            "schedule_type": "interval", "interval_minutes": 15}})
+        task = recv_until(ws, "cf")["result"]
+        assert task["schtask_sync"]["registered"] is False
+        assert unreg == [task["id"]], "注册失败必须把旧注册一并注销（fail-closed）"
+
+
+def test_backend_rejects_unexpressible_interval_and_bad_tod(home):
+    """入口校验：越界 interval / 垃圾 time_of_day 在 cron.add 就明示拒绝。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, [[]]) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "cron.add", "params": {
+            "name": "越界间隔", "prompt": "干活",
+            "schedule_type": "interval", "interval_minutes": 1441}})
+        r = recv_until(ws, "c1")
+        assert not r["ok"], "1441 分钟映射不出，必须拒绝"
+        assert "1441" in r["error"]
+
+        ws.send_json({"id": "c2", "method": "cron.add", "params": {
+            "name": "垃圾时刻", "prompt": "干活",
+            "schedule_type": "daily", "time_of_day": "not-a-time"}})
+        r2 = recv_until(ws, "c2")
+        assert not r2["ok"] and "HH:MM" in r2["error"]
+
+
+async def test_reconcile_unregisters_stale_and_sweeps_when_switch_off(monkeypatch):
+    """启动对账：开关开=注销「任务行已删/已停用」的残留注册；开关关=全量清扫。"""
+    from skysheep.config import SkySheepConfig
+    from skysheep.server.backend_parts.automation import AutomationMixin
+
+    unregister_calls: list[int] = []
+    monkeypatch.setattr(system_schedule, "list_scheduled_ids", lambda: [1, 2, 3])
+    monkeypatch.setattr(
+        system_schedule, "unregister",
+        lambda tid: (unregister_calls.append(tid), (True, "SUCCESS"))[1])
+
+    class _StubStore:
+        async def list_cron_tasks(self, project_id=None):
+            return [{"id": 2, "enabled": True}, {"id": 4, "enabled": False}]
+
+    class _StubBackend:
+        cfg = None
+        store = None
+        _reconcile_system_schedule = AutomationMixin._reconcile_system_schedule
+
+    backend = _StubBackend()
+    backend.cfg = SkySheepConfig()
+    backend.store = _StubStore()
+
+    backend.cfg.cron.system_schedule = True
+    await backend._reconcile_system_schedule()
+    assert sorted(unregister_calls) == [1, 3], "已删(1)/停用(4 无注册)之外：3 无任务行也注销；2 保留"
+
+    unregister_calls.clear()
+    backend.cfg.cron.system_schedule = False
+    await backend._reconcile_system_schedule()
+    assert sorted(unregister_calls) == [1, 2, 3], "开关关闭：全量清扫"

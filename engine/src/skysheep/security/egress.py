@@ -19,10 +19,22 @@ API Key、渠道 token 等）拼进命令、文件写入等工具参数里外传
 - 已知值缓存带 TTL：设置页热更新密钥后最迟一个周期内生效；测试用
   reset_cache() 复位。密钥值只驻留本进程内存，绝不进日志（obs 约定：
   fields 只放标识与度量，命中只报配置定位标签如 providers.openai.api_key）。
+
+一期边界（如实记录，不是完备防线）：
+- 只匹配**明文直传**：URL 编码、base64、分段拼接等变形外传按构造漏过——
+  不做解码猜测（解码形态空间不可枚举，误报与性能都不可控）。这道闸失效时
+  仍有权限门与用户确认兜底；对注入最强的防护始终是「外部内容按数据交付」。
+- 通用形态命中只注记不拦：sk-… 等前缀在文档示例、测试夹具里大量出现，
+  据此硬拦的误报面不可接受；已知值（本机配置里的真实凭据）命中才硬拦。
+- 已知值覆盖 config.toml（providers / websearch / imagegen / speech /
+  server.token / 渠道凭据）与 ~/.skysheep/mcp.json（远程 MCP 鉴权头、
+  stdio 服务器的凭据类 env）；项目级 .skysheep/mcp.json 不在此收集（它经
+  workspace trust 门控，属另一条信任边界）。
 """
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any
@@ -62,35 +74,89 @@ def _section_get(section: Any, key: str) -> Any:
     return getattr(section, key, None)
 
 
+def _add_secret(value: Any, label: str, table: dict[str, str]) -> None:
+    """把一个候选密钥值收进表：非字符串、短值、密文形态（dpapi: 前缀）不收。"""
+    if not isinstance(value, str):
+        return
+    v = value.strip()
+    if len(v) < MIN_SECRET_VALUE_CHARS:
+        return
+    if v.startswith(secure_store.DPAPI_PREFIX):
+        return  # 密文形态不该出现在已解密的配置里；真出现也不当密钥用
+    table.setdefault(v, label)
+
+
+# MCP stdio 服务器 env 里按键名子串识别的凭据类变量：只按键名收，PATH /
+# HOME 这类普通环境变量的**值**绝不能收——已知值按子串命中，把路径收进表
+# 会把引用该路径的正常命令误拦成「密钥外传」。
+_MCP_ENV_SECRET_SUBSTRINGS: tuple[str, ...] = (
+    "secret", "token", "key", "password", "passwd", "credential", "private",
+)
+# 远程 MCP 鉴权头里公认的非凭据头（值是内容协商信息，不是密钥）
+_MCP_HEADER_PLAIN_NAMES = frozenset({"content-type", "accept", "user-agent"})
+
+
+def _mcp_secret_map() -> dict[str, str]:
+    """mcp.json 里远程 MCP 鉴权头与 stdio 服务器凭据类 env 的收集（value→标签）。
+
+    mcp.json 明文 JSON 落盘且 read_file 默认可达（~/.skysheep/mcp.json），是
+    与 config.toml 同级的真实凭据源，必须纳入同一道防线。文件读不了 / 解析
+    失败按空表降级（防线只许降级、不许打瘫）。项目级 .skysheep/mcp.json 不
+    在此收集：它随仓库分发、经 workspace trust 门控，属另一条信任边界。
+    """
+    out: dict[str, str] = {}
+    try:
+        from ..config import skysheep_home  # noqa: PLC0415  延迟导入防环
+
+        raw = (skysheep_home() / "mcp.json").read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001  读不了 = 无已知密钥，防线降级
+        return out
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict):
+        return out
+    for name, section in servers.items():
+        if not isinstance(section, dict):
+            continue
+        headers = section.get("headers")
+        if isinstance(headers, dict):
+            for hk, hv in headers.items():
+                if str(hk).strip().lower() in _MCP_HEADER_PLAIN_NAMES:
+                    continue
+                _add_secret(hv, f"mcp.{name}.headers.{hk}", out)
+        env = section.get("env")
+        if isinstance(env, dict):
+            for ek, ev in env.items():
+                low = str(ek).strip().lower()
+                if any(s in low for s in _MCP_ENV_SECRET_SUBSTRINGS):
+                    _add_secret(ev, f"mcp.{name}.env.{ek}", out)
+    return out
+
+
 def _secret_map(config: Any) -> dict[str, str]:
     """collect_secrets 的带标签本体：value -> 配置定位标签。
 
-    覆盖清单（与 secure_store 的加密字段清单同源，刻意不含 server.token /
-    env_key —— 前者不在本期范围，后者是环境变量**名**不是值）：
+    覆盖清单（与 secure_store 的加密字段清单同源；env_key 是环境变量**名**
+    不是值，不收）：
     - providers.<名>.api_key
     - websearch / imagegen / speech 的 api_key
+    - server.token（局域网 / Tailscale 访问令牌：本机引擎全部 HTTP/WS 接口
+      的凭据，暴露面最大的凭据之一，不收等于防线上开口）
     - channels.platforms.<平台> 内凭据类字段（按键名子串识别）
     """
     out: dict[str, str] = {}
 
-    def _add(value: Any, label: str) -> None:
-        if not isinstance(value, str):
-            return
-        v = value.strip()
-        if len(v) < MIN_SECRET_VALUE_CHARS:
-            return
-        if v.startswith(secure_store.DPAPI_PREFIX):
-            return  # 密文形态不该出现在已解密的配置里；真出现也不当密钥用
-        out.setdefault(v, label)
-
     providers = getattr(config, "providers", None)
     if isinstance(providers, dict):
         for name, section in providers.items():
-            _add(_section_get(section, "api_key"), f"providers.{name}.api_key")
+            _add_secret(_section_get(section, "api_key"), f"providers.{name}.api_key", out)
     for section_name in ("websearch", "imagegen", "speech"):
         section = getattr(config, section_name, None)
         if section is not None:
-            _add(_section_get(section, "api_key"), f"{section_name}.api_key")
+            _add_secret(_section_get(section, "api_key"), f"{section_name}.api_key", out)
+    server = getattr(config, "server", None)
+    if server is not None:
+        _add_secret(_section_get(server, "token"), "server.token", out)
     channels = getattr(config, "channels", None)
     platforms = getattr(channels, "platforms", None) if channels is not None else None
     if isinstance(platforms, dict):
@@ -99,7 +165,7 @@ def _secret_map(config: Any) -> dict[str, str]:
                 continue
             for key, value in entry.items():
                 if secure_store.is_channel_secret_key(key):
-                    _add(value, f"channels.platforms.{pname}.{key}")
+                    _add_secret(value, f"channels.platforms.{pname}.{key}", out)
     return out
 
 
@@ -107,9 +173,13 @@ def collect_secrets(config: Any) -> list[str]:
     """从配置收集已知密钥值（只收值，去重、剔短值与密文形态）。
 
     config 是 load_config() 产出的 SkySheepConfig（字段访问做了 pydantic
-    模型 / 原始 dict 的双形态兼容）。清单见 _secret_map。
+    模型 / 原始 dict 的双形态兼容）。清单见 _secret_map；mcp.json 的 MCP
+    鉴权头 / 凭据类 env（_mcp_secret_map）一并并入，与权限门运行时用的
+    已知密钥表同源。
     """
-    return list(_secret_map(config))
+    merged = _secret_map(config)
+    merged.update(_mcp_secret_map())
+    return list(merged)
 
 
 def reset_cache() -> None:
@@ -136,6 +206,9 @@ def _known_map() -> dict[str, str]:
         m = _secret_map(load_config())
     except Exception:  # noqa: BLE001  读不了配置 = 无已知密钥，防线降级
         m = {}
+    # mcp.json（远程 MCP 鉴权头 / stdio 凭据 env）与 config.toml 同一道防线；
+    # _mcp_secret_map 自身吞掉一切异常，读不了按空表合并
+    m.update(_mcp_secret_map())
     _cache = m
     _cache_at = now
     return m

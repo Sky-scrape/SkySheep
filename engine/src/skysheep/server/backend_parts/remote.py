@@ -190,6 +190,8 @@ class RemoteMixin:
             "token": server.token if include_token else "",
             "has_token": bool(server.token),
             "ips": self._lan_ips(),
+            # 配置里的固定端口（0 = 每次启动随机）：前端据此提示「装 PWA 前先固定端口」
+            "port": int(getattr(server, "port", 0) or 0),
             "token_failures": self.token_failure_summary(),
             "note": "" if server.lan else "局域网访问当前关闭：服务只监听本机 127.0.0.1。",
         }
@@ -209,6 +211,30 @@ class RemoteMixin:
                     "首次弹出的「是否允许访问网络」要点允许；已错过的话在防火墙设置里"
                     "放行 SkySheep 后再试。",
         }
+
+    async def lan_set_port(self, params: dict) -> dict:
+        """固定服务端口（0 = 恢复随机）：PWA 的 start_url 在安装时把 origin
+        （含端口）固化下来，端口随机则桌面重启后手机图标打开即死链。
+
+        写入配置后重启 SkySheep 生效（服务已按旧端口绑定，运行中无法换口）；
+        配 0 恢复随机时如实提示固定地址将失效。
+        """
+        try:
+            port = int(params.get("port"))
+        except (TypeError, ValueError):
+            raise RuntimeError("端口必须是 0-65535 的整数（0 = 每次启动随机）") from None
+        if not 0 <= port <= 65535:
+            raise RuntimeError("端口必须是 0-65535 的整数（0 = 每次启动随机）")
+        update_config_section("server", {"port": port})
+        self.cfg = load_config()
+        note = (
+            "已固定服务端口，重启 SkySheep 后生效。装 PWA（添加到主屏幕）前"
+            "请先完成重启，再扫码安装。"
+            if port
+            else "已恢复随机端口，重启 SkySheep 后生效：已安装的 PWA 与固定"
+                 "地址在重启后会失效。"
+        )
+        return {**await self.lan_status(), "note": note}
 
     async def lan_rotate_token(self) -> dict:
         """重新生成访问令牌，立即生效（守卫每次请求都读最新配置，不用重启）。
@@ -268,6 +294,8 @@ class RemoteMixin:
             "token": server.token if include_token else "",
             "has_token": bool(server.token),
             "ips": self._tailscale_ips(),
+            # 固定端口（0 = 随机）：前端据此提示「装 PWA 前先固定端口」
+            "port": int(getattr(server, "port", 0) or 0),
             "token_failures": self.token_failure_summary(),
             "note": "" if server.tailscale else "远程访问当前关闭。",
         }

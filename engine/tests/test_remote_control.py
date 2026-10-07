@@ -248,3 +248,36 @@ async def test_channel_submit_decision_reports_actor_mismatch(home, monkeypatch)
         assert res["hit"] is True
         pending = await asyncio.wait_for(task, timeout=5)
         assert await pending.wait() == Decision.ALLOW_ONCE
+
+
+# ---- 5. 固定服务端口（lan.set_port）：PWA 的 start_url 固化 origin 含端口 ----
+
+
+def test_lan_set_port_roundtrip_and_validation(home, monkeypatch):
+    """固定端口写入配置并读回；非法值明示拒绝；方法在 LOCAL_ONLY 表里。"""
+    from skysheep.config import load_config
+
+    assert load_config().server.port == 0, "默认随机端口"
+    assert "lan.set_port" in LOCAL_ONLY_METHODS, "改端口是本机设置动作"
+
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: True)
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "p1", "method": "lan.set_port", "params": {"port": 8765}})
+        frame = recv_until(ws, "p1")
+        assert frame["ok"], frame.get("error")
+        assert frame["result"]["port"] == 8765
+        assert load_config().server.port == 8765, "配置持久化（重启后按它绑定）"
+
+        ws.send_json({"id": "p2", "method": "lan.set_port", "params": {"port": 70000}})
+        r = recv_until(ws, "p2")
+        assert not r["ok"] and "0-65535" in r["error"]
+
+        ws.send_json({"id": "p3", "method": "lan.set_port", "params": {"port": "abc"}})
+        r = recv_until(ws, "p3")
+        assert not r["ok"]
+
+        ws.send_json({"id": "p4", "method": "lan.set_port", "params": {"port": 0}})
+        frame = recv_until(ws, "p4")
+        assert frame["ok"] and frame["result"]["port"] == 0, "0 = 恢复随机"
+        assert load_config().server.port == 0

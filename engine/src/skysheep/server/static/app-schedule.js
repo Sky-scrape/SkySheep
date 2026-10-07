@@ -1046,7 +1046,7 @@ function cronModal(existing) {
       </select>
       <div id="cron-interval-wrap">
         <label>间隔（分钟）</label>
-        <input id="cron-interval" class="modal-input" type="number" min="1" step="5" value="${t.interval_minutes}">
+        <input id="cron-interval" class="modal-input" type="number" min="1" max="525600" step="5" value="${t.interval_minutes}">
       </div>
       <div id="cron-time-wrap" class="hidden">
         <label>时间（HH:MM）</label>
@@ -1097,10 +1097,20 @@ function cronModal(existing) {
       allowed_tools: picked,
       notify_channel: box.querySelector("#cron-notify").checked,
     };
-    if (isEdit) await request("cron.update", { id: existing.id, ...params });
-    else await request("cron.add", params);
+    let r;
+    if (isEdit) r = await request("cron.update", { id: existing.id, ...params });
+    else r = await request("cron.add", params);
     await loadCron();
-    addNotice(isEdit ? "定时任务已更新" : "定时任务已创建，到点自动运行");
+    // 系统级定时调度的同步结果如实呈现（后端带回 schtask_sync）：注册失败
+    // 时应用内调度不受影响，但「应用彻底关闭也照常跑」的覆盖没有生效，
+    // 不能让成功文案把它盖过去
+    const sync = r && r.schtask_sync;
+    if (sync && sync.registered === false && sync.notice) {
+      addNotice("定时任务已保存，但系统计划任务同步失败：" + sync.notice +
+        "（应用内调度不受影响；应用关闭期间的自动运行覆盖未生效）");
+    } else {
+      addNotice(isEdit ? "定时任务已更新" : "定时任务已创建，到点自动运行");
+    }
   }, isEdit ? "保存" : "创建");
 }
 

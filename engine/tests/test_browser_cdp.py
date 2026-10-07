@@ -178,13 +178,24 @@ class StubBrowser:
         pass
 
 
-async def _run_tool(monkeypatch, tmp_path, transport, *, ctx=None, **kw):
+async def _run_tool(monkeypatch, tmp_path, transport, *, ctx=None, blocked_hosts=(), **kw):
+    """跑一次 WebPageTool.run：单例与 websockets 都已替身。
+
+    SSRF 公网校验换成可控假守卫（默认全放行、不触 DNS），blocked_hosts 里
+    的主机按「非公网」拒绝——真实解析逻辑由带 literal IP 的专项用例覆盖。
+    """
     stub = StubBrowser(transport)
 
     async def _get_browser():
         return stub
 
+    def _fake_resolve(host):
+        if str(host).lower() in {h.lower() for h in blocked_hosts}:
+            raise ToolError(f"web_fetch 拒绝非公网地址（{host} → 192.0.2.1）")
+        return ["203.0.113.9"]
+
     monkeypatch.setattr(cdp, "get_browser", _get_browser)
+    monkeypatch.setattr(cdp, "_resolve_public_ips", _fake_resolve)
     ctx = ctx or _ctx(tmp_path)
     out = await WebPageTool().run(WebPageTool.args_model(**kw), ctx)
     return out, stub, ctx
@@ -730,12 +741,25 @@ def test_web_page_annotations_and_safety():
 
 def test_arg_text_first_word_is_action():
     tool = WebPageTool()
+    # navigate 附显目标主机：URL 过长被截断（或 userinfo@ 伪装形态）时，
+    # 确认卡上真实主机名仍可见
     assert (
         tool.arg_text({"action": "navigate", "url": "https://example.com/page"})
-        == "navigate https://example.com/page"
+        == "navigate https://example.com/page ｜目标主机: example.com"
     )
     assert tool.arg_text({"action": "click", "selector": "#submit-btn"}).startswith("click ")
     assert tool.arg_text({"action": "screenshot"}).split()[0] == "screenshot"
+
+
+def test_arg_text_fill_shows_content():
+    """fill 的确认语义文本必须包含要填入的内容：内容是任意写入面，
+    确认卡只显示 arg_text，看不见内容的确认等于盲批。"""
+    tool = WebPageTool()
+    text = tool.arg_text({"action": "fill", "selector": "#pwd", "text": "secret-token-123"})
+    assert text.startswith("fill #pwd"), "首词仍是动作（前缀规则生成依赖它）"
+    assert "secret-token-123" in text, "填入内容必须可见"
+    long = tool.arg_text({"action": "fill", "selector": "#pwd", "text": "A" * 200})
+    assert "AAAAA" in long, "长内容截断展示（前 80 字符可见即可）"
 
 
 def test_registered_like_browser_tool():
@@ -743,3 +767,170 @@ def test_registered_like_browser_tool():
     assert {"browser", "web_page"} <= names_on
     names_off = {t.name for t in default_tools()}
     assert "web_page" not in names_off and "browser" not in names_off
+
+
+# ---- SSRF 防线（与 web_fetch 同级）：navigate 前置校验 + 重定向复核 ----
+
+
+async def test_navigate_rejects_private_target_before_browser(tmp_path, monkeypatch):
+    """内网字面量地址：前置校验直接拒绝，不碰浏览器。"""
+    t = FakeTransport()
+    with pytest.raises(ToolError) as ei:
+        await _run_tool(
+            monkeypatch, tmp_path, t,
+            action="navigate", url="http://127.0.0.1:8080/admin",
+            blocked_hosts=["127.0.0.1"],
+        )
+    assert "非公网" in str(ei.value)
+    assert t.sent == [], "被拒的导航不得发任何 CDP 命令"
+
+
+async def test_navigate_rejects_host_resolving_private(tmp_path, monkeypatch):
+    """域名解析出内网 IP：同样拒绝（假守卫按主机名拦截）。"""
+    t = FakeTransport()
+    with pytest.raises(ToolError) as ei:
+        await _run_tool(
+            monkeypatch, tmp_path, t,
+            action="navigate", url="https://intranet.example/",
+            blocked_hosts=["intranet.example"],
+        )
+    assert "非公网" in str(ei.value)
+    assert t.sent == []
+
+
+async def test_navigate_redirect_to_private_bounces_to_blank(tmp_path, monkeypatch):
+    """重定向落在非公网（确认卡只展示首跳）：拒绝返回、弹回空白页。"""
+    t = FakeTransport({
+        "Page.navigate": {},
+        "Runtime.evaluate": [
+            {"result": {"type": "string", "value": "complete"}},
+            {
+                "result": {
+                    "type": "string",
+                    "value": json.dumps({
+                        "title": "metadata",
+                        "url": "http://169.254.169.254/latest/meta-data/",
+                    }),
+                }
+            },
+        ],
+    })
+    with pytest.raises(ToolError) as ei:
+        await _run_tool(
+            monkeypatch, tmp_path, t,
+            action="navigate", url="https://trusted.example/redirect",
+            blocked_hosts=["169.254.169.254"],
+        )
+    assert "非公网" in str(ei.value)
+    navs = [m for m in t.sent if m["method"] == "Page.navigate"]
+    assert navs[0]["params"]["url"] == "https://trusted.example/redirect"
+    assert navs[-1]["params"]["url"] == "about:blank", "最终地址必须弹回空白页"
+
+
+async def test_navigate_public_target_still_works(tmp_path, monkeypatch):
+    """公网目标不受 SSRF 防线影响（守卫全放行路径）。"""
+    t = FakeTransport({
+        "Page.navigate": {},
+        "Runtime.evaluate": [
+            {"result": {"type": "string", "value": "complete"}},
+            {
+                "result": {
+                    "type": "string",
+                    "value": json.dumps({"title": "OK", "url": "https://example.com/"}),
+                }
+            },
+        ],
+    })
+    out, _stub, _ctx = await _run_tool(
+        monkeypatch, tmp_path, t, action="navigate", url="https://example.com"
+    )
+    assert "已导航" in out
+
+
+# ---- get_browser 启动路径互斥（跨会话并发不双启动） ----
+
+
+async def test_get_browser_concurrent_start_starts_once(monkeypatch):
+    """两个协程同时进启动窗口：只有一个 start() 落地、双方拿到同一实例。
+
+    真实 start() 在检查与赋值之间有秒级挂起（等 stderr 出调试地址）——这里
+    用假 start 人为放大窗口。不加锁时两次 start 都会执行、后完成者覆盖单例。
+    """
+    started: list[CdpBrowser] = []
+    released = asyncio.Event()
+
+    class _AliveProc:
+        """最小假进程：is_alive() 需要 proc 非空且 returncode 为 None。"""
+        returncode = None
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        async def wait(self):
+            return 0
+
+    class SlowStartBrowser(CdpBrowser):
+        async def start(self):
+            started.append(self)
+            await released.wait()  # 挂起：等第二个协程也走进启动窗口
+            self.proc = _AliveProc()
+            self.ws_url = "ws://127.0.0.1:9222/devtools/browser/guid-x"
+            self.profile_dir = "unused"
+
+    monkeypatch.setattr(cdp, "CdpBrowser", SlowStartBrowser)
+
+    async def grab():
+        return await cdp.get_browser()
+
+    task_a = asyncio.create_task(grab())
+    await asyncio.sleep(0.05)  # 让 A 先进 start 的挂起点
+    task_b = asyncio.create_task(grab())
+    await asyncio.sleep(0.05)
+    assert len(started) == 1, "锁内串行：B 必须等 A 完成，不会同时进 start"
+    released.set()
+    a, b = await asyncio.gather(task_a, task_b)
+    assert a is b, "两个协程必须拿到同一实例（不双启动、不覆盖单例）"
+    assert len(started) == 1
+
+
+# ---- 白名单粒度（gate 层）：web_page 按动作前缀、fill 固化当次参数 ----
+
+
+def test_rule_for_web_page_is_action_prefix_not_always():
+    """「总是允许」粒度回归：web_page 任一动作都不得沉淀整工具 always 规则
+    （此前缺席 _ACTION_PREFIX_TOOLS，一次允许=整工具永久放行）。"""
+    from skysheep.security.gate import PermissionGate
+
+    tool = WebPageTool()
+    for action, args in (
+        ("navigate", {"action": "navigate", "url": "https://example.com/"}),
+        ("close", {"action": "close"}),
+        ("extract", {"action": "extract", "selector": ""}),
+        ("click", {"action": "click", "selector": "#go"}),
+    ):
+        rule = PermissionGate.rule_for(tool, args, None)
+        assert rule.tool == "web_page" and rule.kind == "prefix", (action, rule)
+        assert rule.pattern == action
+        assert rule.matches("web_page", action), "同动作命中"
+    # 前缀是完整词：extract 不命中 extractx（_prefix_match 语义）
+    always = [r for r in (PermissionGate.rule_for(tool, args, None) for args in
+                          ({"action": "navigate", "url": "https://x.example/"},))
+              if r.kind == "always"]
+    assert always == []
+
+
+def test_rule_for_web_page_fill_is_exact():
+    """fill 的「总是允许」只固化当次选择器与内容（keyboard 同一先例），
+    不同内容必须重新询问。"""
+    from skysheep.security.gate import PermissionGate
+
+    tool = WebPageTool()
+    args = {"action": "fill", "selector": "#pwd", "text": "hunter2"}
+    rule = PermissionGate.rule_for(tool, args, None)
+    assert rule.kind == "exact"
+    assert rule.matches("web_page", tool.arg_text(args))
+    other = {"action": "fill", "selector": "#pwd", "text": "different"}
+    assert not rule.matches("web_page", tool.arg_text(other)), "内容不同不得命中"

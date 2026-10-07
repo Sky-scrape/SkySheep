@@ -110,14 +110,30 @@ def test_frame_wraps_with_boundary_lines_and_keeps_body_verbatim():
     assert framed.startswith(_FRAME_BEGIN + "（来源：https://example.com/doc）")
     lines = framed.split("\n")
     assert lines[1] == _DISCLAIMER, "第二行必须是免责声明"
-    assert framed.endswith(f"{body}\n{_FRAME_END} ───"), "正文必须一字不改地保留"
-    assert body in framed
+    # 闭合行带每次随机的唯一标识（nonce）与正文字符数：正文里伪造的「外部
+    # 内容结束」行不再与真闭合行逐字节相同，模型/日志可机械判别
+    assert re.fullmatch(
+        re.escape(_FRAME_END) + r" [0-9a-f]{8}｜正文共 " + str(len(body)) + r" 字符 ───",
+        lines[-1],
+    ), f"闭合行必须是「边界 + nonce + 字符数」形态，实际是：{lines[-1]!r}"
+    assert body in framed, "正文必须一字不改地保留"
+    assert framed.endswith(f"{body}\n{lines[-1]}")
+
+
+def test_frame_nonce_differs_per_call():
+    """两次抓取的 nonce 必须不同：nonce 可预知的话伪造边界重新不可判别。"""
+    a = untrusted_frame("https://example.com/a", "x")
+    b = untrusted_frame("https://example.com/b", "x")
+    na = re.search(r"外部内容结束 ([0-9a-f]{8})｜", a).group(1)
+    nb = re.search(r"外部内容结束 ([0-9a-f]{8})｜", b).group(1)
+    assert na != nb
+    assert na in a.split("\n")[2], "头部声明行含同一标识"
 
 
 def test_frame_keeps_multiline_body_and_single_line_source():
     body = "a\nb\nc"
     framed = untrusted_frame("http://host\npath", body)
-    assert framed.count("\n") == 5, "来源压成单行：总行数 = 头1 + 声明1 + 正文2 + 尾1"
+    assert framed.count("\n") == 6, "来源压成单行：总行数 = 头1 + 声明1 + nonce声明1 + 正文2 + 尾1"
     assert "来源：http://host path）" in framed
     assert f"{body}\n{_FRAME_END}" in framed
 

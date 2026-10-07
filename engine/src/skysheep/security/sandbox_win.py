@@ -22,12 +22,12 @@ Token）/ AppContainer 级别的真沙箱属二期，本模块不做假实现。
 - AssignProcessToJobObject 把子进程句柄挂进作业（Windows 8+ 支持嵌套作业，
   引擎自身已在某个作业里时同样可用）；
 - :func:`apply_ui_restrictions` 配 JobObjectBasicUIRestrictions：禁剪贴板
-  读 / 写与全局钩子（READCLIPBOARD / WRITECLIPBOARD / HOOKS），防子进程
-  偷读剪贴板或装键盘钩子。刻意**不设** UILIMIT_HANDLES——那会连引擎传给
-  子进程的标准输出管道句柄一起禁掉，命令输出直接断流。个别 Windows 构建
-  拒绝 HOOKS 位（实测 Windows 11 26100 对 0x10000 报 ERROR_INVALID_PARAMETER，
-  其余 UI 位均可用），此时回退只设剪贴板读 / 写限制——有真实效果的子集，
-  不是静默装作全配上了。
+  读 / 写（READCLIPBOARD / WRITECLIPBOARD）。钩子限制（防子进程装键盘 /
+  鼠标钩子）实际由 UILIMIT_HANDLES 承担（Win32 文明文：作业外线程装不了
+  钩子的前提是 HANDLES 限制生效），而禁 HANDLES 会连引擎传给子进程的
+  标准输出管道句柄一起禁掉、命令输出直接断流——一期**不做**钩子限制，
+  此处不做假实现；确需时二期以 UserHandleGrantAccess 对管道句柄逐一
+  授权后再启用 HANDLES 位。
 
 降级策略：非 Windows、kernel32 不可用、任何 API 调用失败，一律降级为
 no-op（``ContainmentJob.active == False``，:attr:`ContainmentJob.reason`
@@ -63,9 +63,13 @@ JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 
 # JOBOBJECT_BASIC_UI_RESTRICTIONS.UIRestrictionsClass
+# 只用有真实效果的剪贴板两位。注意 Win32 里**不存在** HOOKS 位（合法位只有
+# 0x1-0x80：HANDLES/READCLIPBOARD/WRITECLIPBOARD/SYSTEMPARAMETERS/
+# DISPLAYSETTINGS/GLOBALATOMS/DESKTOP/EXITWINDOWS，微软文档成员表明文）；
+# 钩子限制实际由 UILIMIT_HANDLES 承担（对 stdout 管道致命，一期不做）。
+# 任何「禁全局钩子」的位掩码宣称在本模块都是假实现，不做。
 JOB_OBJECT_UILIMIT_READCLIPBOARD = 0x00000002
 JOB_OBJECT_UILIMIT_WRITECLIPBOARD = 0x00000004
-JOB_OBJECT_UILIMIT_HOOKS = 0x00010000
 
 # CreateJobObjectW 失败时可能返回的两种值：NULL（ctypes c_void_p restype 转 None）
 # 与 INVALID_HANDLE_VALUE（按指针宽度回读的 -1）
@@ -138,12 +142,14 @@ def build_extended_limits(
 
 
 def build_ui_restrictions() -> _JOBOBJECT_BASIC_UI_RESTRICTIONS:
-    """构造 JOBOBJECT_BASIC_UI_RESTRICTIONS：禁剪贴板读/写与全局钩子。"""
+    """构造 JOBOBJECT_BASIC_UI_RESTRICTIONS：禁剪贴板读/写。
+
+    刻意不含 UILIMIT_HANDLES（钩子限制的实际承担者）：禁了 HANDLES 连引擎
+    传给子进程的标准输出管道一起禁，命令输出直接断流——一期不做钩子限制。
+    """
     ui = _JOBOBJECT_BASIC_UI_RESTRICTIONS()
     ui.UIRestrictionsClass = (
-        JOB_OBJECT_UILIMIT_READCLIPBOARD
-        | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
-        | JOB_OBJECT_UILIMIT_HOOKS
+        JOB_OBJECT_UILIMIT_READCLIPBOARD | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
     )
     return ui
 
@@ -199,6 +205,22 @@ class ContainmentJob:
     @property
     def active(self) -> bool:
         return self.handle is not None
+
+    def __del__(self) -> None:
+        # 兜底收尾（调用方异常路径漏掉 close_job 时防句柄泄漏）：对象失去引用
+        # 意味着调用方已无法再对它 terminate，此时关闭句柄触发的 KILL_ON_JOB_CLOSE
+        # 整树终止正是本模块定义的清理语义，不会误杀仍被管理的进程。
+        # close_job 的既有路径都先 terminate 再 close，与此兜底语义一致。
+        handle = getattr(self, "handle", None)
+        if not handle:
+            return
+        try:
+            k32 = _kernel32()
+            if k32 is not None:
+                k32.CloseHandle(handle)
+        except Exception:  # noqa: BLE001  终结器里绝不抛
+            pass
+        self.handle = None
 
     def __repr__(self) -> str:
         state = f"handle={self.handle:#x}" if self.active else f"degraded({self.reason})"
@@ -265,13 +287,11 @@ def assign_process(job: ContainmentJob | None, proc_handle: int) -> bool:
 
 
 def apply_ui_restrictions(job: ContainmentJob | None) -> bool:
-    """配 BASIC_UI_RESTRICTIONS：作业内进程禁读/写剪贴板、禁装全局钩子。
+    """配 BASIC_UI_RESTRICTIONS：作业内进程禁读/写剪贴板。
 
-    只影响挂进作业之后的进程，引擎自身不受影响。个别 Windows 构建对 HOOKS
-    位返回 ERROR_INVALID_PARAMETER（实测 Windows 11 26100 如此，其余 UI 位
-    均可用）——此时回退只设剪贴板读 / 写限制并返回 True：回退是**有真实
-    效果的子集**，不是静默装作全配上了；进程遏制语义不受影响。
-    返回 False = 限制完全没配上（降级 / 调用失败），不抛。
+    只影响挂进作业之后的进程，引擎自身不受影响。一期不含钩子限制（它实际
+    由 UILIMIT_HANDLES 承担，会切断 stdout 管道——见模块说明，不做假实现）。
+    返回 False = 限制没配上（降级 / 调用失败），不抛。
     """
     if job is None or not job.active:
         return False
@@ -279,24 +299,13 @@ def apply_ui_restrictions(job: ContainmentJob | None) -> bool:
     if k32 is None:
         return False
     try:
-        full = build_ui_restrictions()
-        if k32.SetInformationJobObject(
-            job.handle,
-            JobObjectBasicUIRestrictions,
-            ctypes.byref(full),
-            ctypes.sizeof(full),
-        ):
-            return True
-        # 回退：跳过被拒的 HOOKS 位，只设剪贴板读 / 写（限制仍是真实的）
-        clipboard = _JOBOBJECT_BASIC_UI_RESTRICTIONS(
-            JOB_OBJECT_UILIMIT_READCLIPBOARD | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
-        )
+        ui = build_ui_restrictions()
         return bool(
             k32.SetInformationJobObject(
                 job.handle,
                 JobObjectBasicUIRestrictions,
-                ctypes.byref(clipboard),
-                ctypes.sizeof(clipboard),
+                ctypes.byref(ui),
+                ctypes.sizeof(ui),
             )
         )
     except Exception:  # noqa: BLE001

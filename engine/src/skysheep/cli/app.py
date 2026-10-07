@@ -592,6 +592,11 @@ def _start_backend(args):
     # 随机端口时把预绑定 socket 直接交给 uvicorn：先 close 再让 uvicorn 重 bind
     # 有个小窗口会被别的进程抢走（抢走后白等 60s 才判「启动失败」），占住不放没这个问题
     port = getattr(args, "port", 0) or 0
+    if not port:
+        # 配置里的固定端口（[server] port）：已安装的 PWA 把安装时的 origin
+        # （含端口）固化进 start_url，端口随机则桌面重启后手机图标打开即死链。
+        # 启动参数 --port 优先于配置；都没配仍是随机空闲端口。
+        port = int(getattr(cfg.server, "port", 0) or 0)
     sockets = None
     if not port:
         s = socket.socket()

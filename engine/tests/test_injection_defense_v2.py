@@ -42,6 +42,16 @@ from skysheep.tools.web import (
 
 _FRAME_BEGIN = "─── 外部内容开始"
 _FRAME_END = "─── 外部内容结束"
+# 闭合行与头部声明里的 nonce（sanitize.untrusted_frame 防伪造边界）：逐字节
+# 比对前先归一化，nonce 每次随机、两次拼装必不相同
+_NONCE_RE = re.compile(r"外部内容结束 [0-9a-f]{8}｜正文共 \d+ 字符")
+_NONCE_HEAD_RE = re.compile(r"唯一标识 [0-9a-f]{8}")
+
+
+def _norm_nonce(s: str) -> str:
+    """把闭合行/头部声明里的 nonce 归一化成占位符，供逐字节比对。"""
+    s = _NONCE_RE.sub("外部内容结束 <NONCE>｜正文共 <N> 字符", s)
+    return _NONCE_HEAD_RE.sub("唯一标识 <NONCE>", s)
 _HINT_MARK = "⚠ 检测到疑似指令注入形态："
 
 
@@ -74,7 +84,10 @@ def _fetch(base, path, working_dir):
 
 
 def test_frame_trust_label_in_header_only_when_passed():
-    """不传 trust：头部与一期逐字节一致；传了：头部追加「｜信任级：…」。"""
+    """不传 trust：头部一致；传了：头部追加「｜信任级：…」。闭合行带每次
+    随机的 nonce 与字符数（伪造边界可机械判别）；除 nonce 外结构不动。"""
+    import re as _re
+
     body = "正文"
     plain = untrusted_frame("https://example.com/doc", body)
     assert plain.startswith(_FRAME_BEGIN + "（来源：https://example.com/doc）───")
@@ -82,11 +95,16 @@ def test_frame_trust_label_in_header_only_when_passed():
     assert trusted.startswith(
         _FRAME_BEGIN + "（来源：https://example.com/doc｜信任级：已知良好）───"
     )
-    # 两个头除信任级片段外逐字节相同（其余结构不动）
-    assert trusted.replace("｜信任级：已知良好", "", 1) == plain
+    # 两个头除信任级片段外逐字节相同；闭合行 nonce 各自随机（把 trusted 的
+    # nonce 换成 plain 的后应与 plain 逐字节一致）
+    n_plain = _re.search(r"外部内容结束 ([0-9a-f]{8})", plain).group(1)
+    n_trusted = _re.search(r"外部内容结束 ([0-9a-f]{8})", trusted).group(1)
+    assert n_plain != n_trusted
+    assert trusted.replace("｜信任级：已知良好", "").replace(n_trusted, n_plain) == plain
     # 信任级压成单行（边界行必须保持一行）
     multiline = untrusted_frame("s", body, trust="曾报注入\n3 次")
     assert "曾报注入 3 次" in multiline.split("\n")[0]
+    assert _re.search(r"外部内容结束 [0-9a-f]{8}｜正文共 2 字符 ───", multiline)
 
 
 # ---- 开关关：与一期逐字节一致 ----
@@ -120,7 +138,9 @@ def test_switch_off_output_byte_identical_clean_page(home):
         f"[{url}] (text/html)\n\n" + UNTRUSTED_DATA_NOTE + "\n\n"
         + untrusted_frame(url, webmod.html_to_text(_CLEAN_PAGE.decode()))
     )
-    assert out == expected, "开关关：输出必须与一期（加机械标注行）逐字节一致"
+    # 闭合行/头部声明 nonce 每次随机：除 nonce 外逐字节一致（web_fetch 的拼装路径未变）
+    assert _norm_nonce(out) == _norm_nonce(expected), \
+        "开关关：输出必须与一期（加机械标注行）逐字节一致"
     assert "信任级" not in out
     # 干净页 + 开关关：隔离区与信誉存储都不该有痕迹
     assert not (data_home() / "quarantine").exists()
@@ -147,7 +167,9 @@ def test_switch_off_output_byte_identical_with_hits(home):
         + untrusted_frame(url, text)
         + "\n\n" + _HINT_MARK + "、".join(hits)
     )
-    assert out == expected, "开关关：命中时输出也必须与一期（加机械标注行）逐字节一致"
+    # 闭合行/头部声明 nonce 每次随机：除 nonce 外逐字节一致（同上面的 clean_page 用例）
+    assert _norm_nonce(out) == _norm_nonce(expected), \
+        "开关关：命中时输出也必须与一期（加机械标注行）逐字节一致"
     assert "信任级" not in out
     assert (data_home() / "quarantine").exists() is False
     data = json.loads((data_home() / REPUTATION_FILENAME).read_text(encoding="utf-8"))

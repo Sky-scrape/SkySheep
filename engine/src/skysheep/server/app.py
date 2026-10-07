@@ -1202,6 +1202,12 @@ async def _h_lan_rotate_token(backend: ServerBackend, params: dict, emit, local:
     return await backend.lan_rotate_token()
 
 
+async def _h_lan_set_port(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 固定服务端口（PWA 的 start_url 在安装时固化 origin 含端口）：改配置类
+    # 设置，LOCAL_ONLY 已拦远程
+    return await backend.lan_set_port(params)
+
+
 async def _h_remote_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.remote_status(include_token=local)
 
@@ -1772,7 +1778,7 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "cron.list": _WsMethod(_h_cron_list),
     "cron.add": _WsMethod(_h_cron_add, local_only=True),
     "cron.update": _WsMethod(_h_cron_update, local_only=True),
-    "cron.delete": _WsMethod(_h_cron_delete),
+    "cron.delete": _WsMethod(_h_cron_delete, local_only=True),
     "cron.run_now": _WsMethod(_h_cron_run_now, local_only=True),
     "cron.schtask_export": _WsMethod(_h_cron_schtask_export, local_only=True),
     "cron.schtask_remove": _WsMethod(_h_cron_schtask_remove, local_only=True),
@@ -1920,6 +1926,7 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "lan.enable": _WsMethod(_h_lan_enable, local_only=True),
     "lan.disable": _WsMethod(_h_lan_disable),
     "lan.rotate_token": _WsMethod(_h_lan_rotate_token, local_only=True),
+    "lan.set_port": _WsMethod(_h_lan_set_port, local_only=True),
     "remote.status": _WsMethod(_h_remote_status),
     "remote.enable": _WsMethod(_h_remote_enable, local_only=True),
     "remote.disable": _WsMethod(_h_remote_disable),
@@ -2138,7 +2145,11 @@ def create_app(
         'display:flex;align-items:center;justify-content:center;height:100vh;margin:0">'
         "<div style='text-align:center'><h1>🐑 SkySheep</h1>"
         "<p>需要访问令牌：请在地址后加 <code>?token=你的令牌</code></p>"
-        "<p style='opacity:.6'>令牌在桌面端 设置 · 手机控制 里查看</p></div></body></html>"
+        "<p style='opacity:.6'>令牌在桌面端 设置 · 手机控制 里查看</p>"
+        "<p style='opacity:.6'>从主屏幕图标（独立窗口）打开时没有地址栏："
+        "请先用手机浏览器打开带 token 的地址完成验证，再回到本应用。</p>"
+        "<p style='opacity:.6'>若打开一直失败，确认电脑端 SkySheep 正在运行"
+        "（离线时浏览器只会显示打不开，与令牌无关）。</p></div></body></html>"
     )
 
     @app.middleware("http")

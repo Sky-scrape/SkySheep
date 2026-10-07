@@ -29,6 +29,7 @@ import time
 
 from pydantic import BaseModel, Field
 
+from .. import obs
 from ..security.sandbox_win import (
     ContainmentJob,
     apply_ui_restrictions,
@@ -155,24 +156,36 @@ def _acc_text(acc: dict) -> str:
 def _contain_job(proc: subprocess.Popen) -> ContainmentJob:
     """把已启动的子进程纳入独立 Job Object（一期沙箱化，security/sandbox_win.py）。
 
-    建作业 → 挂进程 → 配 UI 限制（禁剪贴板读/写与全局钩子）。遏制不是命令
-    执行的前置条件：任何一步失败都降级为 no-op（sandbox_win 不抛），命令
-    照常运行，权限控制仍由 PermissionGate 把守；降级时返回 inactive 的
-    ContainmentJob，reason 带可读原因。
+    建作业 → 挂进程 → 配 UI 限制（禁剪贴板读/写）。遏制不是命令执行的
+    前置条件：任何一步失败都降级为 no-op（sandbox_win 不抛），命令照常
+    运行，权限控制仍由 PermissionGate 把守；降级时返回 inactive 的
+    ContainmentJob，reason 带可读原因，并记一条 obs 日志（降级不是静默
+    放行：事后要能审计某次执行当时有没有遏制）。
     """
     job = create_containment_job()
     if not job.active:
+        obs.warning(
+            "job_containment_degraded",
+            "进程遏制未生效：命令将在无遏制下运行（权限确认照常）",
+            reason=job.reason,
+        )
         return job
     proc_handle = getattr(proc, "_handle", None)
     if not proc_handle:
         close_job(job)
-        return ContainmentJob(None, "取不到子进程句柄，遏制未生效")
+        job = ContainmentJob(None, "取不到子进程句柄，遏制未生效")
+        obs.warning("job_containment_degraded", "进程遏制未生效：命令将在无遏制下运行",
+                    reason=job.reason)
+        return job
     if not assign_process(job, proc_handle):
         close_job(job)
-        return ContainmentJob(
+        job = ContainmentJob(
             None, "AssignProcessToJobObject 失败（引擎可能在不支持嵌套的作业内），遏制未生效"
         )
-    # UI 限制配不上只少一层（无剪贴板/钩子限制），进程遏制语义保留，不算降级
+        obs.warning("job_containment_degraded", "进程遏制未生效：命令将在无遏制下运行",
+                    reason=job.reason)
+        return job
+    # UI 限制配不上只少一层（无剪贴板限制），进程遏制语义保留，不算降级
     apply_ui_restrictions(job)
     return job
 
@@ -202,39 +215,49 @@ def _run_sync(argv: list[str], cwd: str, timeout_s: int, job_containment: bool =
     """前台执行：输出限量收集，超时树杀。返回 (status, stdout, stderr, returncode)。
 
     status: ok | timeout。超时也带回已产生的输出（模型才能据此诊断，不盲猜）。
+    返回值第 5 位是遏制降级说明（正常生效为空串），供结果尾部注记。
+    job_containment=False（用户在配置里主动关闭）不算降级，说明为空串——
+    主动关闭不是故障，不该在每条命令的结果里告警。
     """
     proc = subprocess.Popen(
         argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_child_env(),
     )
-    # 进程遏制（一期沙箱化）：子进程创建后立即入本次调用的 job（失败自动降级 no-op）
-    job = _contain_job(proc) if job_containment else None
+    # 进程遏制（一期沙箱化）：子进程创建后立即入本次调用的 job（失败自动降级
+    # no-op，降级带 obs 日志）
+    job = _contain_job(proc) if job_containment else ContainmentJob(None, "")
     out_acc: dict = {"head": b"", "tail": b"", "capped": False}
     err_acc: dict = {"head": b"", "tail": b"", "capped": False}
     readers = [
         threading.Thread(target=_collect, args=(proc.stdout, out_acc), daemon=True),
         threading.Thread(target=_collect, args=(proc.stderr, err_acc), daemon=True),
     ]
-    for t in readers:
-        t.start()
     timed_out = False
     try:
-        proc.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _tree_kill(proc)  # 超时树杀：cmd /c 的子进程一并结束
+        for t in readers:
+            t.start()
         try:
-            proc.wait(timeout=10)
+            proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            pass
-    # 遏制收尾：正常结束/超时都 TerminateJobObject——命令自己派生后滞留的
-    # 孙进程一并结束（作业已空时是 no-op），随后关句柄。terminate 放在读线程
-    # join 之前：树死干净管道才到 EOF，join 不会被滞留孙进程拖满超时。
-    terminate_job(job)
-    close_job(job)
+            timed_out = True
+            _tree_kill(proc)  # 超时树杀：cmd /c 的子进程一并结束
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        # 遏制收尾必须在 finally：读线程启动失败（线程耗尽）或 wait 抛出罕见
+        # 异常时若跳过 terminate/close，泄漏的作业句柄既收不掉残留进程、也会
+        # 把 KILL_ON_JOB_CLOSE 钉到引擎退出。terminate 放在读线程 join 之前：
+        # 树死干净管道才到 EOF，join 不会被滞留孙进程拖满超时。
+        terminate_job(job)
+        close_job(job)
     for t in readers:
-        t.join(timeout=5)
+        if t.is_alive():
+            t.join(timeout=5)
     return ("timeout" if timed_out else "ok",
-            _acc_text(out_acc), _acc_text(err_acc), proc.returncode)
+            _acc_text(out_acc), _acc_text(err_acc), proc.returncode,
+            "" if (job.active or not job_containment)
+            else (job.reason or "进程遏制未生效"))
 
 
 def _pump(pipe, buf: dict) -> None:
@@ -276,17 +299,29 @@ def _bg_start(argv: list[str], cwd: str, owner: str = "",
     proc = _popen_bg(argv, cwd)
     # 常驻进程同样入 job（遏制失败自动降级 no-op）：action=kill 时一并终止，
     # 引擎退出由 kill-on-close 兜底（句柄随进程关闭，作业成员全被杀）
-    job = _contain_job(proc) if job_containment else None
+    job = _contain_job(proc) if job_containment else ContainmentJob(None, "")
     bid = _BG_NEXT_ID[0]
     _BG_NEXT_ID[0] += 1
     buf = {"out": ""}
-    threading.Thread(target=_pump, args=(proc.stdout, buf), daemon=True).start()
-    threading.Thread(target=_pump, args=(proc.stderr, buf), daemon=True).start()
+    # 先登记再启动读线程：pump 线程 start 失败（线程耗尽）时进程/作业仍留在
+    # _BG 里，read/kill/GC 路径都还够得着——先起线程后登记的话，start 一抛
+    # 进程就成了读不到也杀不掉的孤儿
     _BG[bid] = {
         "proc": proc, "job": job, "command": argv[-1], "buf": buf,
         "started": time.time(), "owner": owner,
     }
-    return {"pid": bid, "os_pid": proc.pid}
+    try:
+        threading.Thread(target=_pump, args=(proc.stdout, buf), daemon=True).start()
+        threading.Thread(target=_pump, args=(proc.stderr, buf), daemon=True).start()
+    except Exception:
+        _BG.pop(bid, None)
+        _tree_kill(proc)
+        terminate_job(job)
+        close_job(job)
+        raise
+    return {"pid": bid, "os_pid": proc.pid,
+            "containment_note": "" if (job.active or not job_containment)
+            else (job.reason or "进程遏制未生效")}
 
 
 def _bg_owned(bid: int, st: dict, sid: str) -> bool:
@@ -442,14 +477,19 @@ class RunCommandTool(Tool):
             info = await asyncio.to_thread(
                 _bg_start, argv, str(workdir), ctx.session_id, ctx.job_containment
             )
-            return (
+            text = (
                 f"后台进程已启动: id={info['pid']}（系统 PID {info['os_pid']}）\n"
                 f"命令: {args.command}\n"
                 f"用 run_command(action=\"read\", id={info['pid']}) 查看输出，"
                 f"action=\"kill\" 结束。"
             )
+            if info.get("containment_note"):
+                # 遏制降级如实呈现（安全审查残留发现）：用户与模型都该知道
+                # 本次进程没有进作业笼子，事后也能据此审计
+                text += "\n⚠️ 本次进程遏制未生效：" + info["containment_note"]
+            return text
 
-        status, out, err, code = await asyncio.to_thread(
+        status, out, err, code, containment_note = await asyncio.to_thread(
             _run_sync, argv, str(workdir), args.timeout_s, ctx.job_containment
         )
         if status == "timeout":
@@ -461,6 +501,8 @@ class RunCommandTool(Tool):
             if not out.strip() and not err.strip():
                 parts.append("(没有任何输出——命令可能在等待交互输入，"
                              "考虑用 background=true 后台运行再读输出)")
+            if containment_note:
+                parts.append("⚠️ 本次进程遏制未生效：" + containment_note)
             raise ToolError("\n".join(parts))
 
         parts = [f"exit code: {code}"]
@@ -468,4 +510,6 @@ class RunCommandTool(Tool):
             parts.append("--- stdout ---\n" + out.rstrip())
         if err.strip():
             parts.append("--- stderr ---\n" + err.rstrip())
+        if containment_note:
+            parts.append("⚠️ 本次进程遏制未生效：" + containment_note)
         return truncate_output("\n".join(parts))

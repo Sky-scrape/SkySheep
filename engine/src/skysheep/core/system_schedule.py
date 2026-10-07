@@ -19,6 +19,7 @@ automation.py），按任务行把 `SkySheepCron-<任务id>` 注册进 Windows �
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 
@@ -29,9 +30,56 @@ SCHTASK_TIMEOUT_S = 30
 # 任务行 weekday 0=周一..6=周日（与 compute_next_run / 前端一致）→ schtasks /D 三字母
 WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
+# schtasks 参数边界（本机 `schtasks /Create /?` 帮助原文）：MINUTE 1-1439、
+# HOURLY 1-23、DAILY /MO 1-365（每 n 天）。越界值 schtasks 直接拒绝——注册
+# 静默失败会让「无人值守覆盖」形同虚设（任务行显示正常、系统里什么都没
+# 注册），映射与入口两侧都必须按这里能表达的范围拦。
+MAX_MINUTE_INTERVAL = 1439
+MAX_INTERVAL_HOURS = 23
+MAX_INTERVAL_DAYS = 365
+
 
 def schtask_name(task_id: int) -> str:
     return SCHTASK_NAME_PREFIX + str(int(task_id))
+
+
+def validate_interval_minutes(minutes: int) -> str | None:
+    """interval 分钟数映射不成 schtasks 参数时返回可读原因，可表达返回 None。
+
+    可表达范围：1-1439 分钟（/SC MINUTE）、60 的倍数且 ≤23 小时（/SC HOURLY）、
+    1440 的整倍数且 ≤365 天（/SC DAILY /MO n，每 n 天）。
+    """
+    m = int(minutes)
+    if m < 1:
+        return "间隔分钟数必须 ≥ 1"
+    if m % 60 == 0 and m // 60 <= MAX_INTERVAL_HOURS:
+        return None
+    if m <= MAX_MINUTE_INTERVAL:
+        return None
+    if m % 1440 == 0 and m // 1440 <= MAX_INTERVAL_DAYS:
+        return None
+    return (
+        f"间隔 {m} 分钟映射不成 Windows 计划任务的可表达粒度"
+        f"（分钟 1-{MAX_MINUTE_INTERVAL}、整小时 1-{MAX_INTERVAL_HOURS} 小时、"
+        f"整天 1-{MAX_INTERVAL_DAYS} 天），注册必被 schtasks 拒绝：请调整间隔"
+    )
+
+
+def normalize_time_of_day(raw: str) -> str:
+    """time_of_day 规整成 schtasks /ST 要求的 HH:MM（24 小时制）；非法抛 ValueError。
+
+    垃圾值若放行会一路进 /ST 被 schtasks 拒——注册静默失败，任务行却显示正常。
+    """
+    tod = str(raw or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", tod)
+    if not m:
+        raise ValueError(
+            f"time_of_day 必须是 HH:MM（24 小时制），收到的是「{tod or '(空)'}」"
+        )
+    h, mi = int(m.group(1)), int(m.group(2))
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        raise ValueError(f"time_of_day 超出 24 小时制范围：「{tod}」")
+    return f"{h:02d}:{mi:02d}"
 
 
 def build_schtasks_args(
@@ -43,11 +91,16 @@ def build_schtasks_args(
     schedule_type（interval / daily / weekly）、interval_minutes、
     time_of_day（"HH:MM"）、weekday（0=周一..6=周日）。
 
-    - interval：60 的整数倍 → /SC HOURLY /MO n；其余 → /SC MINUTE /MO n
-      （schtasks 的分钟/小时粒度足够覆盖应用内 interval 语义）
+    - interval：60 的整数倍且 ≤23 小时 → /SC HOURLY /MO n；1440 的整倍数
+      （≥1 天）→ /SC DAILY /MO n（每 n 天，schtasks 原生支持 1-365）；其余
+      ≤1439 分钟 → /SC MINUTE /MO n；再往外映射不出可表达参数，抛 ValueError
+      ——MINUTE /MO 上限 1439、HOURLY /MO 上限 23（schtasks 帮助明文），越界
+      值注册必被拒绝，宁可在映射层明示也不留静默失败
     - daily：/SC DAILY /ST <time_of_day>（缺省 09:00，与手动导出同口径）
     - weekly：/SC WEEKLY /D <三字母> /ST <time_of_day>；weekday 无效时抛
       ValueError——无人值守下静默降级 DAILY 会把频次放大 7 倍，调用方应先拦
+    - time_of_day 只在 daily / weekly 分支消费，非法值（非 HH:MM）抛
+      ValueError，不让垃圾值一路进 /ST 再被 schtasks 拒
     - /TR 是 `"<python>" -m skysheep.cli.app cron-run <id> --project "<dir>"`：
       解释器与项目目录带空格都靠内引号整体保护，schtasks 才能把带参命令
       完整存进任务
@@ -58,8 +111,13 @@ def build_schtasks_args(
     tod = str(cron_spec.get("time_of_day") or "09:00")
     if stype == "interval":
         minutes = max(1, int(cron_spec.get("interval_minutes") or 1))
-        if minutes % 60 == 0:
+        problem = validate_interval_minutes(minutes)
+        if problem:
+            raise ValueError(problem)
+        if minutes % 60 == 0 and minutes // 60 <= MAX_INTERVAL_HOURS:
             args += ["/SC", "HOURLY", "/MO", str(minutes // 60)]
+        elif minutes % 1440 == 0:
+            args += ["/SC", "DAILY", "/MO", str(minutes // 1440)]
         else:
             args += ["/SC", "MINUTE", "/MO", str(minutes)]
     elif stype == "weekly":
@@ -70,9 +128,9 @@ def build_schtasks_args(
                 "每周任务没有有效的星期几（weekday 0=周一..6=周日），"
                 "无法注册为系统计划任务：请先在任务设置里选好星期几"
             )
-        args += ["/SC", "WEEKLY", "/D", WEEKDAYS[wd], "/ST", tod]
+        args += ["/SC", "WEEKLY", "/D", WEEKDAYS[wd], "/ST", normalize_time_of_day(tod)]
     else:  # daily（未知类型按 daily 兜底，与应用内 daily 语义最接近）
-        args += ["/SC", "DAILY", "/ST", tod]
+        args += ["/SC", "DAILY", "/ST", normalize_time_of_day(tod)]
     tr = (f'"{engine_python}" -m skysheep.cli.app cron-run {int(task_id)}'
           f' --project "{project_dir}"')
     args += ["/TR", tr]
@@ -100,6 +158,27 @@ def unregister(task_id: int) -> tuple[bool, str]:
     不影响任务行本身的删除。
     """
     return _run_schtasks(["/Delete", "/TN", schtask_name(task_id), "/F"])
+
+
+def list_scheduled_ids() -> list[int]:
+    """枚举本机已注册的 SkySheepCron-* 计划任务 id（启动对账用，best-effort）。
+
+    `schtasks /Query /FO CSV /NH` 每行首个带引号字段是任务名（不随系统语言
+    变化）。schtasks 不可用 / 超时 / 输出解析不出一律返回空表——对账只做
+    注销（fail-safe 方向），漏掉一枚残留注册的代价远小于把启动流程打瘫。
+    """
+    ok, out = _run_schtasks(["/Query", "/FO", "CSV", "/NH"])
+    if not ok:
+        return []
+    ids: list[int] = []
+    for line in out.splitlines():
+        m = re.match(r'"([^"]+)"', line.strip())
+        if not m or not m.group(1).startswith(SCHTASK_NAME_PREFIX):
+            continue
+        suffix = m.group(1)[len(SCHTASK_NAME_PREFIX):]
+        if suffix.isdigit():
+            ids.append(int(suffix))
+    return ids
 
 
 def default_engine_python() -> tuple[str | None, str]:

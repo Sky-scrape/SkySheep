@@ -6,6 +6,17 @@
 
 ### 修复
 
+- **输入框高度拖不动（重启后）根治**：boot 期布局未定时，长占位符按错误
+  宽度折行，`autoGrowInput` 把 textarea 内联高度顶到 6 行帽值——composer
+  高度 = max(--cp-h, 内容)，内容高度压过 `--cp-h` 后**往下拖完全无响应**，
+  直到切换会话（restoreComposerState 重跑 autoGrow）才被纠正。三处修复：
+  ① composer 宽度 ResizeObserver——宽度一变即重算（侧栏/面板/分屏拖宽、
+  折叠、窗口缩放全覆盖）；② initUiPrefs 收尾重算——宽度/缩放/面板就位后
+  纠正 boot 期错误测量；③ 拖拽中清空 textarea 内联高度——`--cp-h` 全程
+  主导，往下可一路缩到下限（打字事件重新触发 autoGrow，打字高度逻辑
+  不受影响）；双击恢复默认重算内容高度。分屏列同款（手柄 afterApply +
+  列 composer 宽度观察器）；sw.js 缓存版本递增。
+
 - **场景模板与欢迎页示例显示中文名**：`skills.gallery` 透传清单里的
   `display_name`（2.5.0 漏带该字段，欢迎页示例与设置页场景模板卡只能显示
   budget-tracker 一类原始 ID，显示不出「记账与预算表」等中文名；前端取数

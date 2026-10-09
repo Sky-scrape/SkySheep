@@ -1363,8 +1363,22 @@ async function openSplitPane(sid, title) {
     setupResizer(col.querySelector(".split-cp-resizer"), "split_composer_h", {
       base: () => col.querySelector(".split-composer").getBoundingClientRect().height / uiScale,
       value: (s, e) => s.base - (e.clientY - s.y) / uiScale, // 向上拖 = 输入区变高
+    }, (v) => {
+      if (v == null) autoGrowInput(input);
+      else input.style.height = "";
     });
     autoGrowInput(input);
+    // 列 composer 宽度观察器：与主栏同款（boot 期错误折行的高度在这里纠正）
+    let _splitCpW = 0;
+    new ResizeObserver((entries) => {
+      for (const en of entries) {
+        const w = Math.round(en.contentRect.width);
+        if (w && w !== _splitCpW) {
+          _splitCpW = w;
+          autoGrowInput(input);
+        }
+      }
+    }).observe(col.querySelector(".split-composer"));
     syncSplitBarToggles(pane);
     // 权限三档：读回这一栏会话的档位（每栏独立，点击循环只写本栏）
     const acceptBtn = col.querySelector('[data-role="accept"]');
@@ -9527,6 +9541,23 @@ function autoGrowInput(el) {
 inputEl.addEventListener("input", autoGrowInput);
 autoGrowInput();
 
+// 输入区宽度变化 → 重跑 autoGrow（2026-10-09）：boot 期布局未定时，长占位符
+// 按错误宽度折行会把 textarea 内联高度顶到 6 行帽值——内容高度从此压过
+// --cp-h（composer 高度 = max(--cp-h, 内容)），拖动手柄往下调完全无响应，
+// 直到切换会话触发 restoreComposerState 才被纠正。观察宽度而非高度：
+// autoGrow 只写高度不会自触发，无回环；侧栏/右面板/分屏拖宽、折叠、
+// 窗口缩放等一切宽度变化都自动覆盖。
+let _composerW = 0;
+new ResizeObserver((entries) => {
+  for (const en of entries) {
+    const w = Math.round(en.contentRect.width);
+    if (w && w !== _composerW) {
+      _composerW = w;
+      autoGrowInput();
+    }
+  }
+}).observe(document.getElementById("composer"));
+
 // ---------- 「& 引用对话」：输入 & 唤起会话选择器，选中的对话随消息发给后端注入上下文 ----------
 const refMenu = document.getElementById("ref-menu");
 const refTray = document.getElementById("ref-tray");
@@ -12891,9 +12922,15 @@ async function initUiPrefs() {
   applyLeftCollapsed();
   void document.body.offsetWidth; // 强制回流：让折叠态在禁过渡下立即定型
   requestAnimationFrame(() => document.body.classList.remove("ui-anim-off"));
+  // 宽度/缩放/面板全部就位后再算一次：boot 早期按未稳宽度测出的折行高度
+  // （textarea 内联 6 行帽值）在这里被纠正，--cp-h 恢复主导（见 composer
+  // 宽度观察器处的注释）
+  autoGrowInput();
 }
 
-function setupResizer(el, key, compute) {
+function setupResizer(el, key, compute, afterApply) {
+  // afterApply：每次拖拽改写布局变量后调用（composer 类手柄用它重跑
+  // autoGrowInput——内容高度压过 --cp-h 时，不重算的话往小拖会无响应）
   // 拖拽修复（2026-10-07）：此前 move/up 直接挂 window、且不处理 pointercancel——
   // WebView2 下偶发的 cancel/丢 up 会让 start 残留，之后不按键移动鼠标也持续改布局
   // （表现为「拖完边界后鼠标飘、界面跟着指针跑」）。现改为指针捕获 + 异常收尾兜底：
@@ -12936,6 +12973,7 @@ function setupResizer(el, key, compute) {
       pendingE = null;
       lastApplied = v;
       setUiVar(key, v);
+      if (afterApply) afterApply(v);
     });
   });
   el.addEventListener("pointerup", finish);
@@ -12945,6 +12983,7 @@ function setupResizer(el, key, compute) {
   el.addEventListener("dblclick", () => {
     setUiVar(key, null);
     saveUiPrefs({ [key]: null });
+    if (afterApply) afterApply(null);
   });
 }
 
@@ -12955,6 +12994,13 @@ setupResizer(document.getElementById("sb-resizer"), "sidebar_w", {
 setupResizer(document.getElementById("cp-resizer"), "composer_h", {
   base: () => document.getElementById("composer").getBoundingClientRect().height / uiScale,
   value: (s, e) => s.base - (e.clientY - s.y) / uiScale, // 向上拖 = 输入区变高
+}, (v) => {
+  // 拖拽中清掉 textarea 内联高度：boot 期错误折行或此前的 6 行帽值残留在
+  // 内联高度里时，内容高度会压过 --cp-h，往下拖到内容高度就卡死；清掉后
+  // --cp-h 全程主导，可一路缩到下限。输入事件会重新触发 autoGrow，打字
+  // 高度逻辑不受影响；双击恢复默认（v=null）时内容高度重新主导，重算。
+  if (v == null) autoGrowInput();
+  else inputEl.style.height = "";
 });
 setupResizer(document.getElementById("files-resizer"), "files_preview_h", {
   base: () => document.getElementById("files-preview").getBoundingClientRect().height / uiScale,

@@ -227,7 +227,7 @@ Running into a problem? In the app, go to Settings → About → "💬 Report an
 
 ## 🗺 Roadmap & Non-goals
 
-- ✅ current release **v2.4.1**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors (full history in [CHANGELOG.md](CHANGELOG.md))
+- ✅ current release **v2.5.0**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors → session split view & adversarial review (full history in [CHANGELOG.md](CHANGELOG.md))
 - 🚧 **Next up**: macOS / Linux support · system-level scheduling (register with Windows Task Scheduler, fire the engine on schedule and exit — removing the "app must be running" prerequisite) · defense-in-depth against prompt injection (tool egress filtering and untrusted-content labeling) · code-signed distribution · command execution sandboxing (restricted tokens / AppContainer first, closing the OS-level gap) · in-page browser automation (click / fill / extract inside pages, complementing computer control) · mobile PWA (the LAN / Tailscale web UI installable to the home screen)
 
 **Non-goals**:

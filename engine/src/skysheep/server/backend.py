@@ -5628,6 +5628,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     )
             templates.append({
                 "name": name,
+                # 中文名随清单透传（欢迎页示例与场景模板卡用 display_name 展示，
+                # 缺失时前端回退 name）：2.5.0 曾漏带此字段，界面上只能显示
+                # budget-tracker 一类原始 ID
+                "display_name": str(s.get("display_name", "")),
                 "description": str(s.get("description", "")),
                 "source": str(s.get("source", "")),
                 "dir": str(s.get("dir", "")),

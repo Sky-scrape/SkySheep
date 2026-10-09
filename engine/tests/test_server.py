@@ -1695,6 +1695,12 @@ def test_skills_gallery_installed_flag(home):
         templates = r["templates"]
         assert all(not t["installed"] for t in templates)
         assert all(t["source"].startswith("https://") for t in templates)
+        # display_name 随清单透传（欢迎页示例与场景模板卡的中文名）：2.5.0 曾漏带
+        # 此字段导致界面只能显示原始 ID
+        assert all(t["display_name"] for t in templates)
+        first = templates[0]
+        assert first["name"] == "budget-tracker"
+        assert first["display_name"] == "记账与预算表"
 
         # 装一个与首个模板同名的临时技能（scope=global，与场景模板区一键安装同参）
         target = templates[0]["name"]

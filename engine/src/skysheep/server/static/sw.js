@@ -16,7 +16,7 @@
  */
 "use strict";
 
-const SW_VERSION = "skysheep-shell-v13";
+const SW_VERSION = "skysheep-shell-v17";
 const CACHE_NAME = "skysheep-shell-" + SW_VERSION;
 
 // 缓存白名单：手写静态壳 + vendor 第三方库，一个不多。全部是确定的文件路径，

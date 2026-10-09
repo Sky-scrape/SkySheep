@@ -1191,7 +1191,7 @@ async function openSplitPane(sid, title) {
     '<div class="chat-log split-log"></div>' +
     (readonly
       ? '<div class="split-readonly">该会话属于其他项目：分屏只读查看。在侧栏切到该项目后打开，即可继续对话。</div>'
-      : '<div class="ui-resizer ui-resizer-h split-cp-resizer" title="拖动调整输入区高度（与主栏同步） · 双击恢复默认"></div>' +
+      : '<div class="ui-resizer ui-resizer-h split-cp-resizer" title="拖动调整输入区高度 · 双击恢复默认"></div>' +
     '<div class="split-composer">' +
     '<div class="image-tray split-image-tray hidden"></div>' +
     '<div class="ref-tray split-ref-tray hidden"></div>' +
@@ -1358,9 +1358,9 @@ async function openSplitPane(sid, title) {
     input.addEventListener("blur", () => setTimeout(() => { if (menuFace === pane) hideInputMenu(); }, 120));
     bindComposerPaste(input, pane);
     bindComposerDrop(col.querySelector(".split-composer"), pane);
-    // 列输入区高度手柄：写同一个 composer_h（--cp-h 主栏与各列共享），拖哪边
-    // 两栏一起变，底对齐的设计不会被拖散；双击恢复默认走 setupResizer 内建
-    setupResizer(col.querySelector(".split-cp-resizer"), "composer_h", {
+    // 列输入区高度手柄：写分屏自己的 split_composer_h（--split-cp-h），与主栏
+    // 各调各的；双击恢复默认走 setupResizer 内建
+    setupResizer(col.querySelector(".split-cp-resizer"), "split_composer_h", {
       base: () => col.querySelector(".split-composer").getBoundingClientRect().height / uiScale,
       value: (s, e) => s.base - (e.clientY - s.y) / uiScale, // 向上拖 = 输入区变高
     });
@@ -9519,7 +9519,10 @@ function autoGrowInput(el) {
     parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + 3); // +上下边框
   el.style.height = "auto";
   el.style.height = Math.min(el.scrollHeight, cap) + "px";
-  el.style.overflowY = el.scrollHeight > cap + 1 ? "auto" : "hidden";
+  // 溢出永远 auto（此前内容 ≤ 上限时写 hidden）：--cp-h 比内容矮时 flex 会把
+  // 输入框压得比 autoGrow 给的高度还小，hidden 会让超出的文字既看不见也滚不了；
+  // auto 在装得下时不显示滚动条，被压缩时立刻可滚
+  el.style.overflowY = "auto";
 }
 inputEl.addEventListener("input", autoGrowInput);
 autoGrowInput();
@@ -12730,6 +12733,7 @@ if (rwRow) {
 const UI_LIMITS = {
   sidebar_w: { css: "--sb-w", min: 200, max: 460 },
   composer_h: { css: "--cp-h", min: 74, max: 520 },
+  split_composer_h: { css: "--split-cp-h", min: 74, max: 520 }, // 分屏列输入区高（独立于主栏）
   right_w: { css: "--rp-w", min: 240, max: 720 },
   read_width: { css: "--chat-max-w", min: 680, max: 1400 }, // 阅读行宽：消息卡最大宽度
   files_preview_h: { css: "--fp-h", min: 96, max: 640 }, // 文件面板预览区高度

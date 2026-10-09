@@ -26,6 +26,10 @@ class PreferencesMixin:
     UI_PREFS_LIMITS = {
         "sidebar_w": (200, 460),
         "composer_h": (74, 520),
+        # 分屏列输入区高（独立于主栏 composer_h；null/缺省 = 74）
+        "split_composer_h": (74, 520),
+        # 分屏宽度（此前漏登记，ui.save 把它当未知键丢弃，宽度从不持久化）
+        "split_w": (300, 1100),
         "right_w": (240, 720),
         "right_collapsed": (0, 1),  # 右侧面板是否收起（1=收起，标签列表保留）
         "left_collapsed": (0, 1),  # 左侧栏是否折叠（1=折叠，折叠钮/Ctrl+B 切换）

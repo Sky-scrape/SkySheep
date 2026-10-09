@@ -476,7 +476,8 @@ select option[value=""] { color: var(--dim); font-style: italic; }
    那些是全局单例开关，不随分屏复制 */
 .split-composer {
   display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
-  min-height: var(--cp-h, 74px);
+  /* 独立于主栏的 --split-cp-h：两边各自拖各自的（--cp-h 只管主栏） */
+  min-height: var(--split-cp-h, 74px);
   padding: 8px 16px;
   background: var(--card); border-top: 2px solid var(--ink-line);
 }
@@ -484,6 +485,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   flex: 1; min-width: 0; resize: none; min-height: 40px;
   /* 字体与内边距必须与主栏 #input 完全一致：两行的初始高度、autoGrow 按样式
      算出的显式高度、占位字号才不会一栏矮一截（此前 13px/9px 双双跑偏） */
+  overflow-y: auto; /* 被 --split-cp-h/flex 压矮时内容仍可滚 */
   background: var(--paper-raised); color: var(--text);
   border: 1.5px solid var(--ink-line); border-radius: var(--r-md);
   padding: 8px 11px; font: inherit; box-shadow: var(--shadow-sm);
@@ -1022,7 +1024,9 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 @media (max-width: 860px) { .msg .msg-ops { opacity: 1; } }
 #input {
   flex: 1 1 auto; resize: none; min-height: 40px;
-  /* 高度由 app.js 的 autoGrowInput 随内容驱动（6 行封顶）；拖了 --cp-h 时靠 flex-grow 填满 */
+  /* 高度由 app.js 的 autoGrowInput 随内容驱动（6 行封顶）；拖了 --cp-h 时靠 flex-grow 填满。
+     overflow-y 恒为 auto：被 --cp-h/flex 压矮时内容仍可滚（autoGrow 的 inline style 同步此值） */
+  overflow-y: auto;
   background: var(--paper-raised); color: var(--text);
   border: 1.5px solid var(--ink-line); border-radius: var(--r-md);
   padding: 8px 11px; font: inherit; box-shadow: var(--shadow-sm);
@@ -1303,7 +1307,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 
 /* 定时任务的预授权工具勾选表：两列密排，只读项灰显（本来就放行） */
 .cron-tools {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr));
   gap: 2px 10px; max-height: 190px; overflow-y: auto;
   background: var(--paper-sunken); border: 1.5px solid var(--line2);
   border-radius: var(--r-sm); padding: 7px 9px; margin-top: 2px;
@@ -1410,7 +1414,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .pl-tools { font-size: 12px; }
 .pl-tools summary { cursor: pointer; color: var(--text2); }
 .pl-tools-list {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr));
   gap: 2px 10px; max-height: 170px; overflow-y: auto; margin-top: 6px;
   background: var(--paper-sunken); border: 1.5px solid var(--line2);
   border-radius: var(--r-sm); padding: 7px 9px;
@@ -2922,6 +2926,7 @@ html[data-theme="pine"] .restart-banner {
 /* 设置页：卡片头（标题 + 操作按钮）——分隔线放在容器上，保持整行贯通 */
 .card-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap; /* 窄容器（右侧看板搬入设置卡片）放不下时按钮组换行，不裁边 */
   border-bottom: 1px solid var(--line); padding-bottom: 6px; margin-bottom: 6px;
 }
 .card-head h3 { margin: 0; border-bottom: none; padding-bottom: 0; }
@@ -3364,7 +3369,7 @@ html[data-theme="pine"] .restart-banner {
 /* 场景模板：设置 · 技能总览卡下方的官方技能包网格（自适应列数，
    窄面板 / 右面板搬移两种宿主宽度下都能铺开） */
 .gallery-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr));
   gap: 8px; margin-top: 4px;
 }
 .gallery-item {
@@ -3558,7 +3563,7 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
 .mcp-reconnect:hover { background: color-mix(in srgb, var(--blue) 12%, transparent); }
 
 /* 设置页：内置常用 MCP 预设（一键添加卡片区） */
-.mcp-preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.mcp-preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr)); gap: 10px; margin-bottom: 14px; }
 .mcp-preset-head {
   grid-column: 1 / -1; font-size: 12px; font-weight: 700; color: var(--dim);
   letter-spacing: .02em; margin-bottom: -2px;
@@ -3584,7 +3589,11 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
 .mpc-add[disabled] { opacity: .6; cursor: default; }
 
 /* 设置页：卡片头右侧多个按钮（MCP 页：导入配置 + 手动添加） */
-.card-head .head-ops { display: flex; gap: 8px; flex-shrink: 0; }
+/* 按钮组可收缩换行：窄容器里折到标题下一行并右对齐（宽屏一行放得下时不变） */
+.card-head .head-ops {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto;
+  justify-content: flex-end; min-width: 0;
+}
 
 /* 导入弹窗：路径输入 + 「选择…」按钮并排；JSON 多行输入框 */
 .form-grid .model-line { display: flex; gap: 7px; }
@@ -3639,7 +3648,7 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
    坑：.form-grid label 是 flex column 且特异性更高，会把 .tool-pick 压成
    「框在上、名字在下」的两行错位——这里用双类选择器夺回，固定框在名字左边 */
 .tool-pick-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr));
   gap: 4px 10px; margin-top: 5px;
 }
 .tool-pick-grid .tool-pick {

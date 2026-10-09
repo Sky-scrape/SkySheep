@@ -3811,6 +3811,11 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
 
 /* 侧栏「项目」分组：标题行带行尾操作按钮 + 文件夹列表（对标 Obsidian 项目列表布局） */
 .sec-head { display: flex; align-items: center; justify-content: space-between; }
+/* 标题字钉在左缘（蓝条右侧同一列）：polish 给 .section h3 加的 ::before 竖条
+   插队成 flex 第一项后，sec-head 的 space-between 会把中间的标题字居中——
+   右端按钮组宽度随视图/区块各不相同，「项目」「会话」两个字就各漂各的
+   （实测三种标题三个位置）。auto 右边距把标题字推回蓝条旁、按钮组仍在最右。 */
+.sec-head > span:first-child { margin-right: auto; }
 .sec-ops {
   border: 0; background: none; cursor: pointer; font: inherit;
   font-size: 14px; font-weight: 700; line-height: 1;
@@ -3823,14 +3828,17 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
 .project-list li { display: flex; align-items: center; gap: 7px; }
 .project-list .p-ico { width: 15px; height: 15px; flex-shrink: 0; color: var(--text2); }
 .project-list li.active .p-ico { color: var(--blue); }
+/* 激活项目名同分组组头的蓝字（与 quick-row.active 同款），两视图观感一致 */
+.project-list li.active .s-title { color: var(--blue); }
 /* s-title 吸收行内余量：✕/＋ 悬浮按钮永远钉在行最右（否则跟着名称挤在左边） */
-.project-list li .s-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 项目行悬浮＋（新建对话）：手感同 .p-del，配色走主色；与分组视图组头的＋同一行为 */
+.project-list li .s-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+/* 项目行悬浮＋（新建对话）：手感同 .p-del，配色走主色；与分组视图组头的＋同一行为。
+   常显（与分组组头的＋同款）：悬停才现会让「新建对话」入口难以发现 */
 .project-list li .p-add {
   flex-shrink: 0; border: none; background: none; cursor: pointer;
   color: var(--dim); font-size: 13px; line-height: 1; font-weight: 700;
   padding: 2px 7px; border-radius: var(--r-xs);
-  opacity: 0; transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+  opacity: .55; transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
 }
 .project-list li:hover .p-add,
 .project-list li .p-add:focus { opacity: 1; }
@@ -3873,11 +3881,13 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
 #session-list.by-project li:not(.pgroup-head):not(.pgroup-more):not(.empty-hint) {
   margin-left: 15px;
 }
+/* 组头与经典视图项目行同一套规格（13px/亮字/15px 图标/7px 间距）：两种视图
+   切换时行观感连贯，不再一边偏小偏灰一边正常 */
 #session-list li.pgroup-head {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 12px; font-weight: 700; color: var(--text2);
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; font-weight: 700; color: var(--text);
 }
-#session-list li.pgroup-head .p-ico { width: 14px; height: 14px; flex: 0 0 auto; }
+#session-list li.pgroup-head .p-ico { width: 15px; height: 15px; flex: 0 0 auto; }
 #session-list li.pgroup-head .pg-name {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }

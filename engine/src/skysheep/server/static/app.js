@@ -278,9 +278,19 @@ function request(method, params = {}) {
   });
 }
 
+let wsConnOn = false; // 当前连接状态镜像：分屏列在连接建立后才创建，创建时要按现状落初始值
+
 function setConn(on) {
-  document.getElementById("conn-status").className = "dot " + (on ? "on" : "off");
-  document.getElementById("status-text").textContent = on ? "已连接" : "重连中…";
+  wsConnOn = on;
+  // 文字已删，只留圆点：连接状态走 title 悬停说明（断线时悬停可见「重连中…」）
+  const dot = document.getElementById("conn-status");
+  dot.className = "dot " + (on ? "on" : "off");
+  dot.title = on ? "已连接" : "重连中…";
+  // 分屏列的连接镜像：点两下变灰（.dot.on/off 的样式对类名生效）
+  document.querySelectorAll("#split-pane .split-conn").forEach((el) => {
+    el.className = "dot split-conn " + (on ? "on" : "off");
+    el.title = on ? "已连接" : "重连中…";
+  });
 }
 
 // ---------- 聊天渲染 ----------
@@ -346,7 +356,9 @@ function updateJumpBottom() {
 }
 function scrollLog() {
   const t = curTab();
-  if (t && t !== activeTab) return; // 后台标签追加内容不抢滚动
+  // 分屏列是屏上可见的独立对话面：内容进列、不占主栏，照常跟随滚动；
+  // 只有后台标签（看不见的页签）追加内容才不抢滚动
+  if (t && t !== activeTab && !splitPanes.includes(t)) return;
   // 滚动发生在当前标签的 .chat-log 上（#chat 本体 overflow:hidden，滚它无效）
   const el = (t && t.logEl) || chatBox.querySelector(".chat-log");
   if (!el) return;
@@ -701,19 +713,136 @@ function attachTabLog(tab) {
   updateJumpBottom(); // 浮标跟着当前可见的聊天流走
 }
 
+// ---------- 主栏输入区状态按会话记忆 ----------
+// mode（规划/执行）、rtOn/teamOn（一次性开关）、draft（草稿）、当前生效模型与
+// 视觉能力、图片托盘与 & 引用，全部随会话存取——切标签不串状态（A 标签开的
+// 规划模式、贴的图、写的草稿都不会随 B 发出去）。键是会话 sid；空标签共用
+// "" 键，懒创建/接管时随标签换绑迁移。
+const composerBySid = new Map();
+// 引擎全局生效模型的镜像（boot 快照 / 全局切换时更新）：空标签没有会话私有
+// 模型，徽章永远按它画。curProviderName 在主栏会话级切换时会被改写成该会话
+// 的私有模型——空标签若从 cur 继承，显示的就不是实际发送所用模型（引擎全局）
+let globalProviderName = "", globalModelName = "", globalSupportsVision = true;
+
+function composerState(sid) {
+  const key = sid || "";
+  let st = composerBySid.get(key);
+  if (!st) {
+    // 新条目 = 默认态：模式与一次性开关不继承当前值（A 标签开的规划模式
+    // 不能串到没去过的会话）；模型三件套继承当前全局显示（无覆盖的会话
+    // 本来就跟随全局，model_get 落地后校正为会话生效值）
+    st = {
+      mode: "execute", rtOn: false, teamOn: false, draft: "",
+      providerName: curProviderName, modelName: curModelName,
+      supportsVision: curSupportsVision, images: [], refs: [],
+    };
+    composerBySid.set(key, st);
+  }
+  return st;
+}
+
+/** 切入前调用：把输入区当前状态写回旧会话的条目。 */
+function saveComposerState(sid) {
+  const st = composerState(sid);
+  st.mode = workMode;
+  st.rtOn = rtOn;
+  st.teamOn = teamOn;
+  st.advOn = advOn;
+  st.draft = inputEl.value;
+  // 模型三件套只随会话条目记：空标签没有会话私有模型（显示跟随引擎全局，
+  // 由全局镜像维护），把 cur 写回 "" 条目会把上个会话的私有模型串进去
+  if (sid) {
+    st.providerName = curProviderName;
+    st.modelName = curModelName;
+    st.supportsVision = curSupportsVision;
+  }
+  st.images = pendingImages;
+  st.refs = pendingRefs;
+}
+
+/** 切入后调用：按新会话的条目恢复输入区（无条目 = 默认态）。
+    顺序硬规定：先写 mode 再恢复 rt/team——setTeamOn 的「规划模式开着」
+    提示按 workMode 当前值判定，顺序反了会在恢复时弹误报；silent 压掉
+    互斥/联动的三处 notice（恢复不是用户操作，不该弹提示）。 */
+function restoreComposerState(sid) {
+  const st = composerState(sid);
+  setWorkMode(st.mode || "execute");
+  setRtOn(!!st.rtOn, true);
+  setTeamOn(!!st.teamOn, true);
+  setAdvOn(!!st.advOn, true);
+  if (sid) {
+    curProviderName = st.providerName || "";
+    curModelName = st.modelName || "";
+    curSupportsVision = st.supportsVision !== false;
+  } else {
+    // 空标签：模型三件套取引擎全局镜像，不读 "" 条目——条目里可能是上个
+    // 会话的私有模型（会话级切换只改 cur，引擎全局并没变），显示会串值
+    curProviderName = globalProviderName;
+    curModelName = globalModelName;
+    curSupportsVision = globalSupportsVision;
+  }
+  pendingImages = Array.isArray(st.images) ? st.images : [];
+  pendingRefs = Array.isArray(st.refs) ? st.refs : [];
+  renderImageTray();
+  renderRefTray();
+  inputEl.value = st.draft || "";
+  autoGrowInput(); // 草稿回填后重算输入框高度，否则残留上一会话内容的高度
+  if (curProviderName) {
+    setModelChip(curModelName ? `${curProviderName}/${curModelName}` : curProviderName);
+  }
+}
+
+/** 空标签认领会话（懒创建/接管）："" 条目随标签换绑迁移到新 sid。 */
+function migrateComposerSid(oldSid, newSid) {
+  const prev = composerBySid.get(oldSid || "");
+  if (!prev) return;
+  const nk = newSid || "";
+  if (!composerBySid.has(nk)) composerBySid.set(nk, prev);
+  composerBySid.delete(oldSid || "");
+}
+
+// 按当前活动会话刷新模型徽章与会话生效模型缓存（切标签/懒创建认领共用）。
+// 竞态防护：闭包捕获 tab，落地前 activeTab 已变（或回包 session_id 对不上）
+// 就丢弃——快速连切标签时慢回包不会把别的会话的模型画到当前栏。
+function refreshActiveSessionBadges(tab) {
+  if (!tab || !tab.sid) return;
+  const t = tab;
+  request("session.model_get", { id: t.sid }).then((r) => {
+    if (!r || activeTab !== t || (r.session_id && r.session_id !== t.sid)) return;
+    const st = composerState(t.sid);
+    st.providerName = r.name || "";
+    st.modelName = r.model || "";
+    st.supportsVision = r.supports_vision !== false;
+    curProviderName = st.providerName;
+    curModelName = st.modelName;
+    curSupportsVision = st.supportsVision;
+    setModelChip(st.modelName ? `${st.providerName}/${st.modelName}` : st.providerName);
+  }).catch(() => {});
+  refreshReasoning();
+}
+
 async function activateTab(tab) {
   if (!tab) return;
+  focusMainPane(); // 切回主栏面：所有列变灰（没有列时是空操作）
   // 切标签/点会话：分组视图里「点组头」借走的高亮到此交回活动会话所在组
   // （没借过就不动，也不多画一下；早退路径补一次重画）
   if (groupedClickGk != null) {
     groupedClickGk = null;
     if (tab === activeTab) refreshSessions();
   }
-  if (tab === activeTab) { attachTabLog(tab); return; }
+  if (tab === activeTab) {
+    attachTabLog(tab);
+    // 已是活动标签也可能欠着历史：needHistory 被旁路设上后若只走这条早退，
+    // 历史永远不来，用户盯着一面空墙。补拉一次再退（loadTabHistory 会消费标记）
+    if (tab.needHistory && tab.sid && !tab.running) await loadTabHistory(tab);
+    return;
+  }
   // 查找高亮挂在旧标签的 DOM 上：切标签先收掉，避免 mark 残留计数错乱
   if (findHits.length || !document.getElementById("find-bar").classList.contains("hidden")) {
     closeFindBar();
   }
+  // 会话记忆：切入前把输入区状态写回旧会话条目（必须在 activeTab 换指前读旧值）
+  if (activeTab && activeTab !== tab) saveComposerState(activeTab.sid);
   activeTab = tab;
   attachTabLog(tab);
   renderTabs();
@@ -722,6 +851,10 @@ async function activateTab(tab) {
   // 侧栏会话行选中态跟着活动标签走（与分组视图组头高亮同一来源）：
   // 否则从侧栏点开 A 会话再切到快聊标签，组头高亮动了、行高亮还留在 A
   activeSessionSid = tab.sid || null;
+  restoreComposerState(tab.sid);
+  // 模型/思考徽章按会话刷新（session.model_get / session.reasoning_get，
+  // 带竞态校验；空标签保持全局口径不请求）
+  refreshActiveSessionBadges(tab);
   // 后台标签从未渲染过历史（事件创建的）→ 拉一次历史；否则轻量激活。
   // 两种情形互斥：正在跑的标签不能去拉历史（会把流式内容盖掉），只做轻量激活。
   if (tab.needHistory && tab.sid && !tab.running) {
@@ -745,12 +878,17 @@ async function activateTab(tab) {
   // 会话级活动团队状态对齐：其他窗口收的队、重启后的「已中断」标注，
   // 都靠 team.get 落到团队卡上（内存快照，顺带补齐历史里缺的卡）
   if (tab.sid) refreshTeamState(tab);
+  refreshAcceptChip(); // 盾牌显示活动会话自己的档位（每会话独立）
   petPrevRunning = !!tab.running;
   petRefresh();
   refreshSessions();
 }
 
 function openTabForSession(sid, title, opts = {}) {
+  // 同一会话只在一个面上打开：主栏要开它就把开着的那一列收掉（侧栏点行、
+  // 通知跳转、列头 🔒 等路径都汇在这里）。不收的话事件按 tabFor 优先全进
+  // 标签，列的运行点/输入锁再也没有事件来复位
+  if (sid) closeSplitPanesForSids(new Set([sid]), { restore: false }); // 会话正要开进主栏，无须搬回
   let t = tabFor(sid);
   let adopted = false;
   if (!t) {
@@ -761,10 +899,14 @@ function openTabForSession(sid, title, opts = {}) {
     // 与 handleEvent 里「懒创建会话直接认领」是同一套做法。
     const blank = (activeTab && isBlankTab(activeTab)) ? activeTab : chatTabs.find(isBlankTab);
     if (blank) {
+      // 接管前先把空标签上的实时输入区状态写回 "" 条目，再随换绑迁移——
+      // 不写回的话，刚敲的草稿会被条目里的旧值顶掉
+      if (blank === activeTab) saveComposerState("");
       t = blank;
       t.sid = sid;
       t.title = title || "";
       t.titleFixed = false; // 空标签上预命名的名字随标签换绑丢弃：它现在代表另一个会话
+      migrateComposerSid("", sid); // 空标签的输入区状态条目随换绑迁移到新会话
       adopted = true;
     } else {
       t = newTabObj(sid, title);
@@ -783,6 +925,8 @@ function openTabForSession(sid, title, opts = {}) {
     if (adopted && t === activeTab) {
       attachTabLog(t);
       currentSessionId = t.sid;
+      restoreComposerState(t.sid); // activateTab 早退了：输入区状态在这里恢复
+      refreshActiveSessionBadges(t);
       renderTabs();
     }
     activateTab(t);
@@ -814,6 +958,7 @@ async function loadTabHistory(tab) {
 /** 给页签接上水平拖拽。item 用 sid 当 id（空标签无 sid，不接拖——垫底占位）。 */
 function wireTabDrag(el, t) {
   wireListDrag(el, { id: t.sid }, {
+    tag: "tab", // 对话区的落点只认标签拖拽（侧栏会话行的拖拽不变形）
     // 落点按水平中线分左右：拖到页签左半=插到它前面，右半=后面
     over: (e) => ({ id: t.sid, pos: dragHalfPosX(e, el) }),
     commit: (dst) => commitTabOrder(t.sid, dst.id, dst.pos),
@@ -839,6 +984,62 @@ function wireTabDrag(el, t) {
   bar.addEventListener("dragend", stop);
   bar.addEventListener("drop", stop);
   bar.addEventListener("dragleave", (e) => { if (!bar.contains(e.relatedTarget)) stop(); });
+}
+
+// 标签 / 侧栏会话行 拖进对话区：松手 = 这一会话转分屏打开（拖拽排序语义只在
+// 各自列表内，出了列表就是「搬进分屏」）。分组头等其他拖拽不带标记，不会误触。
+const chatDropZone = document.getElementById("chat");
+if (chatDropZone && !chatDropZone._tabSplitBound) {
+  chatDropZone._tabSplitBound = true;
+  const isSplitDrag = () => {
+    const st = wireListDrag.active;
+    return !!(st && (st.tag === "tab" || st.tag === "session") && st.item && st.item.id);
+  };
+  chatDropZone.addEventListener("dragover", (e) => {
+    if (!isSplitDrag()) return;
+    e.preventDefault(); // 允许作为落点
+    e.dataTransfer.dropEffect = "move";
+    chatDropZone.classList.add("tab-drop-hint");
+  });
+  chatDropZone.addEventListener("dragleave", (e) => {
+    if (!chatDropZone.contains(e.relatedTarget)) chatDropZone.classList.remove("tab-drop-hint");
+  });
+  chatDropZone.addEventListener("drop", async (e) => {
+    if (!isSplitDrag()) return;
+    e.preventDefault();
+    chatDropZone.classList.remove("tab-drop-hint");
+    const st = wireListDrag.active;
+    const sid = String(st.item.id);
+    st.over = null; // 落在对话区：dragend 不再走列表排序提交
+    const t = chatTabs.find((x) => x.sid === sid);
+    const title = (t && t.title) || st.item.name
+      || (sessionMeta[sid] || {}).title || "会话";
+    // 跨项目会话（分组视图/「看其他项目」视图拖出）：先切到它的项目再开列，
+    // 否则列里的会话会被当前项目归属校验拒掉（发送/换模型全被拒，等于废列）。
+    // 标签拖出（tag "tab"）没有 project_id，必然属于当前项目，直通。
+    const dpid = st.item.project_id;
+    if (dpid != null && !(bootSnap && String(bootSnap.project_id) === String(dpid))) {
+      const dprojs = ((await request("project.list").catch(() => null)) || {}).projects || [];
+      const dtp = dprojs.find((p) => String(p.id) === String(dpid));
+      if (dtp && dtp.root_path && !dtp.is_current) {
+        try {
+          await request("project.switch", { path: dtp.root_path });
+          await applyWorkspaceData(await fetchWorkspaceData());
+        } catch (err) {
+          addNotice("切换到该项目失败：" + err.message);
+          return;
+        }
+      }
+    }
+    openSplitPane(sid, title).catch(() => {});
+  });
+}
+
+// 主栏参与焦点态：点对话区/标签栏/输入栏/权限条即把焦点交回主栏（各列变灰）；
+// 切标签（含 Ctrl+Tab 键盘切换）走 activateTab 里的同一入口
+for (const mainFaceId of ["chat", "chat-tabs", "composer", "permission-bar"]) {
+  const mainFace = document.getElementById(mainFaceId);
+  if (mainFace) mainFace.addEventListener("pointerdown", focusMainPane);
 }
 
 function dragHalfPosX(e, el) {
@@ -877,6 +1078,9 @@ function closeTab(tab) {
   tab.logEl.remove();
   chatTabs.splice(idx, 1);
   if (activeTab === tab) {
+    // 关标签先把实时输入区状态写回该会话条目：会话还在侧栏，随时点回来，
+    // 重开时按记忆恢复（含关标签前刚敲的草稿）
+    saveComposerState(tab.sid);
     activeTab = null;
     hidePermission();
     const next = chatTabs[idx] || chatTabs[idx - 1] || null;
@@ -889,6 +1093,8 @@ function closeTab(tab) {
       currentSessionId = null;
       activeSessionSid = null;
       groupedClickGk = null;
+      restoreComposerState(null); // 不过 activateTab：直接恢复输入区/托盘/徽章默认态
+      refreshReasoning(); // 空标签回到全局口径的思考档位
       showWelcome();
       renderTabs();
       refreshSessions(); // 侧栏组头高亮回落引擎当前项目（欢迎页无会话可跟）
@@ -904,6 +1110,645 @@ function closeTabsForSids(sids) {
   const set = new Set(sids || []);
   if (!set.size) return;
   chatTabs.filter((t) => t.sid && set.has(t.sid)).forEach((t) => closeTab(t));
+  closeSplitPanesForSids(set, { restore: false }); // 删会话/清理空会话：会话已不存在，不搬回
+}
+
+// —— 分屏：主聊天流右侧并排展示其他会话（对照看 / 独立对话） ——
+// #split-pane 绝对定位铺在 #chat-main 右侧全高（topbar 下沿到界面底缘），
+// 列输入框与主输入框底对齐；列对象同时是渲染伪 tab：补齐流式渲染需要的
+// 字段（appendStream/工具卡等都经 curTab() 路由，事件带 sid 时 handleEvent
+// 会把 routeTab 指到列上）。分屏会话在后台跑，不影响主栏当前会话。
+const splitPaneEl = document.getElementById("split-pane");
+const chatMainEl = document.getElementById("chat-main");
+const splitPanes = []; // { sid, title, el, logEl, running, needsPerm, ...流式渲染字段 }
+const SPLIT_MAX = 2;   // 最多两列：三栏再挤输入区就没法看了
+
+// 分屏区顶部对齐顶栏下沿：top:44px 是 CSS 兜底，真实高度在这里按 topbar
+// 实测同步（界面缩放/窗口变化后 topbar 高度会漂）；顶栏尺寸变化时重算
+function syncSplitTop() {
+  const tb = document.getElementById("topbar");
+  if (tb && splitPanes.length) {
+    splitPaneEl.style.top = (tb.offsetTop + tb.offsetHeight) + "px";
+    const rz = document.getElementById("split-resizer");
+    if (rz) rz.style.top = (tb.offsetTop + tb.offsetHeight) + "px";
+    // 宽度自愈：可分宽度随 侧栏/右面板/窗口 实时变，存下的旧宽度可能已经越界
+    // （比如右面板开着时拖出的宽，换个大屏又把主区盖住）——每次同步顺带把
+    // --split-w 收回合法区间；未存偏好时（CSS 46% 兜底，永远合法）不动
+    const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--split-w"));
+    if (Number.isFinite(cur) && cur > 0) {
+      const v = clampUi("split_w", cur);
+      if (v !== Math.round(cur)) setUiVar("split_w", v);
+    }
+  }
+}
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(syncSplitTop).observe(document.getElementById("topbar"));
+  // 侧栏/右面板宽一块，可分宽度就窄一块：它们变了也要重算（RO 对 display 切换同样触发）
+  new ResizeObserver(syncSplitTop).observe(document.getElementById("sidebar"));
+  new ResizeObserver(syncSplitTop).observe(document.getElementById("right-panel"));
+}
+window.addEventListener("resize", syncSplitTop);
+
+async function openSplitPane(sid, title) {
+  // 同一会话只在一个面上打开（事件按 tabFor 优先路由进标签，列的运行点/
+  // 输入锁再也没有事件来复位）：主栏开着同会话的标签就先收掉再开列——
+  // 「在分屏打开」的语义 = 把会话从主栏搬进分屏。运行中的标签随关闭一并停止轮次
+  // （与手动关标签同一语义），提示里说明。
+  const conflict = tabFor(sid);
+  if (conflict) {
+    const wasRunning = conflict.running;
+    closeTab(conflict);
+    addNotice(wasRunning
+      ? "已从主栏搬进分屏：原标签已关闭，运行中的轮次一并停止"
+      : "已从主栏搬进分屏：原标签已关闭");
+  }
+  const exist = splitPanes.find((p) => p.sid === sid);
+  if (exist) closeSplitPane(exist, { restore: false }); // 已开着这一栏：关掉重开 = 拉最新快照
+  if (splitPanes.length >= SPLIT_MAX) {
+    addNotice(`分屏最多同时开 ${SPLIT_MAX} 列，先关掉一列再试`);
+    return;
+  }
+  let info;
+  try {
+    info = await request("session.peek_messages", { id: sid });
+  } catch (e) {
+    addNotice("打开分屏失败: " + e.message);
+    return;
+  }
+  // interactive=false 只会出现在远程客户端（PWA/局域网）：跨项目会话的
+  // runtime 绑定会话所属项目干活，本机分屏列一律可交互（完整会话）；远程
+  // 对跨项目会话连 peek 都被拒，这道降级只是后端边界的前端兜底
+  const readonly = info && info.interactive === false;
+  const col = document.createElement("section");
+  col.className = "split-col";
+  // 输入区与主 composer 同构（工具条 + 大输入框 + 操作行）。行为分两类：
+  // 闪电/圆桌/团队 = 每列独立的发送参数（chat.send 直接收），真实可用；
+  // 盾牌/文件/语音/▾/模型/连接 = 全局单例状态，镜像显示、点击提示去主栏
+  col.innerHTML =
+    '<div class="split-head"><span class="split-title"></span>' +
+    '<button class="split-refresh" title="重新拉取这个会话的最新消息">⟳</button>' +
+    '<button class="split-close" title="关闭这一栏">✕</button></div>' +
+    '<div class="chat-log split-log"></div>' +
+    (readonly
+      ? '<div class="split-readonly">该会话属于其他项目：分屏只读查看。在侧栏切到该项目后打开，即可继续对话。</div>'
+      : '<div class="ui-resizer ui-resizer-h split-cp-resizer" title="拖动调整输入区高度（与主栏同步） · 双击恢复默认"></div>' +
+    '<div class="split-composer">' +
+    '<div class="image-tray split-image-tray hidden"></div>' +
+    '<div class="ref-tray split-ref-tray hidden"></div>' +
+    '<textarea class="split-input" rows="2" placeholder="描述你的任务…（Enter 发送 / Shift+Enter 换行）"></textarea>' +
+    '<div class="composer-bar split-bar">' +
+    '<button class="cp-icon" data-role="plan" title="规划模式（每栏独立）：本栏消息只调研、不改动文件">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.8 13.2h5.7L10.2 22l8.9-11.6h-5.6L13 2z"/></svg></button>' +
+    '<button class="cp-icon" data-role="coop" title="协作（每栏独立）：圆桌 / 团队 / 对抗，点击选择">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.7-3.4 2.9-5.2 5.5-5.2s4.8 1.8 5.5 5.2"/><circle cx="17" cy="9.5" r="2.5"/><path d="M15.7 14.6c2.5.3 4.3 1.9 4.8 4.4"/></svg>' +
+    '<span class="cp-state" hidden></span>' +
+    '</button>' +
+    '<button class="cp-icon" data-role="accept" title="权限三档（每栏独立）：安全执行 / 自动编辑 / 完全访问">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></button>' +
+    '<button class="cp-icon" data-role="file" title="添加文件：选择文件以「@路径」引用进这一栏的输入框（项目外文件也可以）">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7l-4-4z"/><path d="M14 3v4h4"/><path d="M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg></button>' +
+    '<button class="cp-icon" data-role="voice" title="语音输入：点击开始录音，再点一下结束并转成文字（转入这一栏的输入框）">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21M8.5 21h7"/></svg></button>' +
+    '<span class="ctx-ring split-ctx-ring hidden" title="本会话上下文占用（悬停看明细）">' +
+    '<svg viewBox="0 0 24 24"><circle class="ring-track" cx="12" cy="12" r="9"></circle>' +
+    '<circle class="ring-val" cx="12" cy="12" r="9"></circle>' +
+    '<text class="ring-txt" x="12" y="12.4"></text></svg></span>' +
+    '<span class="spacer"></span>' +
+    '<span class="dot split-conn on" title="与本地引擎的连接状态"></span>' +
+    '<button class="split-reasoning chip chip-reasoning hidden" data-role="reasoning" title="">' +
+    '<svg class="chip-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>' +
+    '<span class="chip-txt"></span></button>' +
+    '<button class="split-model" data-role="model" title="这一栏使用的模型（点击更换，只影响本栏）">' +
+    '<svg class="sm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="10" y="10" width="4" height="4"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>' +
+    '<span class="sm-txt"></span></button>' +
+    '<button class="split-send btn-primary" title="发送（Enter）">' +
+    '<svg class="send-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 15 22 11 13 2 9Z"/><path d="M22 2 11 13"/></svg>' +
+    '<span class="send-txt">发送</span></button></div></div>');
+  col.querySelector(".split-title").textContent = info.title || "(未命名)";
+  // 连接镜像按当前状态落：setConn 只在状态变化时广播，连接已建立后才开的列
+  // 不能停在灰点态
+  const connDot = col.querySelector(".split-conn");
+  if (connDot) {
+    connDot.className = "dot split-conn " + (wsConnOn ? "on" : "off");
+    connDot.title = wsConnOn ? "已连接" : "重连中…";
+  }
+  splitPaneEl.appendChild(col);
+  splitPaneEl.classList.remove("hidden");
+  chatMainEl.classList.add("has-split"); // composer 等底部件让出右侧宽度（CSS）
+  syncSplitTop();
+  // 列对象同时是渲染伪 tab：补齐流式渲染需要的字段（appendStream/工具卡等
+  // 都经 curTab() 路由，事件带 sid 时 handleEvent 会把 routeTab 指到列上）。
+  // 字段口径对齐 newTabObj：缺 lastAssistantText 的话，无流式正文的轮在
+  // queue_updated 收尾时会 `.trim()` 抛 TypeError，中断该次事件后续处理
+  const pane = {
+    sid, title: info.title || "(未命名)", el: col,
+    logEl: col.querySelector(".split-log"),
+    running: false, needsPerm: false, permData: null,
+    // 跨项目只读列：历史渲染据此不挂会改会话的操作（消息级编辑/重发/分叉/
+    // 回退/重新生成、圆桌「引用追问」）——列上没有输入框，点了要么抛错要么
+    // 换来一句误导性的「session not found」
+    readonly: readonly,
+    streamingEl: null, streamingText: "", thinkText: "", thinkEl: null,
+    lastAssistantText: "", _toolCards: new Map(),
+    // 列是完整会话：附件/引用/权限三档/上下文明细都在列上（与主栏标签各自独立）
+    images: [], refs: [], acceptMode: null, ctxDetail: null,
+  };
+  // 贴底跟随：与主栏标签同一套（用户上翻挂起、滚回底部恢复）——列没有这套
+  // 监听的话，流式长回答只会在列里往下长高，视口不动
+  pane.logEl._followBottom = true;
+  pane.logEl.addEventListener("scroll", () => {
+    pane.logEl._followBottom = logNearBottom(pane.logEl);
+  }, { passive: true });
+  splitPanes.push(pane);
+  const reload = () => renderHistory(pane, info.messages || []);
+  col.querySelector(".split-close").onclick = () => closeSplitPane(pane);
+  col.querySelector(".split-refresh").onclick = async () => {
+    // 运行中不刷新：renderHistory 会清空日志，而流式增量还写进已被摘除的
+    // 旧流式节点——本轮回答在列里不可见（主栏 loadTabHistory 同一守卫）
+    if (pane.running) { addNotice("这一栏正在运行，等当前轮结束再刷新"); return; }
+    try {
+      const fresh = await request("session.peek_messages", { id: sid });
+      pane.title = fresh.title || pane.title;
+      col.querySelector(".split-title").textContent = pane.title;
+      renderHistory(pane, fresh.messages || []);
+    } catch (e) { addNotice("刷新分屏失败: " + e.message); }
+  };
+  reload();
+  if (!pane.logEl.children.length) {
+    pane.logEl.innerHTML = '<div class="rp-empty">这个会话还没有消息。</div>';
+  }
+  // 焦点态：点击哪列哪列正常亮度，其他列变灰（主栏恒正常）
+  col.addEventListener("click", () => focusSplitPane(pane));
+  focusSplitPane(pane);
+  // 独立发送：chat.send 带 session_id 定向到这一栏的会话（后端已支持），
+  // 流式事件带同一 sid，handleEvent 路由回这一列。
+  // 闪电/圆桌/团队是每列独立的发送参数，随发送带上
+  const input = col.querySelector(".split-input");
+  const sendBtn = col.querySelector(".split-send");
+  const doSend = async () => {
+    const text = input.value.trim();
+    const images = pane.images.slice();
+    const refs = pane.refs.slice();
+    if ((!text && !images.length) || pane.running) return;
+    // 视觉能力按本列生效模型判（与主栏同一道提前拦截）
+    if (images.length && pane.model && pane.model.supports_vision === false) {
+      addNotice(`这一栏生效的模型「${pane.model.name}」不支持图片输入，请先在栏上换成多模态模型`);
+      return;
+    }
+    input.value = "";
+    autoGrowInput(input);
+    clearPendingImages(pane);
+    clearPendingRefs(pane);
+    hideInputMenu();
+    if (refFace === pane) closeRefMenu();
+    pane.running = true;
+    paintSplitHead(pane);
+    withTab(pane, () => addUser(text, images, refs));
+    const params = { text, session_id: sid };
+    if (images.length) params.images = images;
+    if (refs.length) params.refs = refs;
+    if (pane.planMode) params.plan_mode = true;
+    // 圆桌/团队/对抗是一次性开关（与主栏同语义）：发送即消费，失败也不回滚——
+    // 不复位的话下一条消息会静默再带上 roundtable/team/adversarial=true
+    const rtThisTurn = !!pane.rtOn;
+    const teamThisTurn = !!pane.teamOn;
+    const advThisTurn = !!pane.advOn;
+    if (rtThisTurn) params.roundtable = true;
+    if (teamThisTurn) params.team = true;
+    if (advThisTurn) {
+      params.adversarial = true;
+      const advMembers = advMembersPayload(); // 列内也用主栏指定的角色模型
+      if (advMembers) params.members = advMembers;
+    }
+    pane.rtOn = pane.teamOn = pane.advOn = false;
+    syncSplitBarToggles(pane);
+    try {
+      const r = await request("chat.send", params);
+      // 上下文徽标以本列发送响应为准：回包 session_id 与列会话一致才落
+      if (r && (!r.session_id || r.session_id === sid)) {
+        paintSplitCtx(pane, r.context_tokens, r.context_limit);
+        if (r.context_detail) setContextDetail(r.context_detail, pane);
+        // 列内改了文件也要有「撤销本轮改动」条（主栏 send 同款）；检查点条
+        // 画进本列日志，回包对不上会话就不落
+        if (r.checkpoint) addCheckpointBar(r.checkpoint, pane);
+        // 列内规划轮同样给「按此计划执行」（addPlanActions 按列分派回这一栏）
+        if (r.plan_mode && (pane.lastAssistantText || "").trim()) {
+          addPlanActions(pane.lastAssistantText, pane);
+        }
+      }
+    } catch (e) {
+      pane.running = false;
+      paintSplitHead(pane);
+      addNotice("发送失败: " + e.message);
+    } finally {
+      // 兜底复位：事件路由异常时列的运行态不能永久卡死（蓝点常亮 + 输入锁死）。
+      // 正常路径轮末 queue_updated(pending=0) 已复位，这里是双保险
+      if (splitPanes.includes(pane) && pane.running) {
+        pane.running = false;
+        paintSplitHead(pane);
+      }
+    }
+  };
+  if (!readonly) {
+    pane.send = doSend; // 列内「按此计划执行」等入口从外部触发这一栏的发送
+    sendBtn.onclick = doSend;
+    // 列输入框与主输入框同一套键语义（发送键偏好 / ~ @ / & 菜单 / 菜单键盘导航）
+    input.addEventListener("keydown", (e) => composerKeydown(e, pane));
+    input.addEventListener("input", () => { updateInputMenu(pane); autoGrowInput(input); });
+    input.addEventListener("blur", () => setTimeout(() => { if (menuFace === pane) hideInputMenu(); }, 120));
+    bindComposerPaste(input, pane);
+    bindComposerDrop(col.querySelector(".split-composer"), pane);
+    // 列输入区高度手柄：写同一个 composer_h（--cp-h 主栏与各列共享），拖哪边
+    // 两栏一起变，底对齐的设计不会被拖散；双击恢复默认走 setupResizer 内建
+    setupResizer(col.querySelector(".split-cp-resizer"), "composer_h", {
+      base: () => col.querySelector(".split-composer").getBoundingClientRect().height / uiScale,
+      value: (s, e) => s.base - (e.clientY - s.y) / uiScale, // 向上拖 = 输入区变高
+    });
+    autoGrowInput(input);
+    syncSplitBarToggles(pane);
+    // 权限三档：读回这一栏会话的档位（每栏独立，点击循环只写本栏）
+    const acceptBtn = col.querySelector('[data-role="accept"]');
+    request("session.accept_get", { id: sid }).then((g) => {
+      pane.acceptMode = g.mode;
+      paintAcceptIcon(acceptBtn, g.mode);
+    }).catch(() => {});
+    // 上下文环：悬停/点按看明细（与主栏同一只弹层，按面取数）
+    const ring = col.querySelector(".split-ctx-ring");
+    if (ring) {
+      ring.addEventListener("mouseenter", () => openCtxPop(pane));
+      ring.addEventListener("mouseleave", () => closeCtxPop());
+      ring.addEventListener("click", () => {
+        if (ctxPop.classList.contains("hidden")) openCtxPop(pane); else closeCtxPop(true);
+      });
+    }
+  }
+  // 工具条分派：plan/rt/team 每列独立开关（互斥同主栏），其余为全局单例或
+  // 主栏专属，镜像显示 + 引导去主栏
+  col.querySelectorAll("[data-role]").forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const role = btn.dataset.role;
+      if (role === "plan") {
+        pane.planMode = !pane.planMode;
+        btn.classList.toggle("plan", pane.planMode);
+        if (pane.planMode) { pane.rtOn = pane.teamOn = pane.advOn = false; syncSplitBarToggles(pane); }
+      } else if (role === "coop") {
+        showSplitCoopMenu(pane, btn);
+      } else if (role === "model") {
+        pickSplitModel(pane, btn);
+      } else if (role === "reasoning") {
+        toggleReasoningMenu(e, btn, pane.sid); // 会话级思考强度：菜单锚定列徽章
+      } else if (role === "file") {
+        await attachSplitFiles(pane);
+      } else if (role === "accept") {
+        await cycleSplitAccept(pane, btn);
+      } else if (role === "voice") {
+        // 语音输入按面：录转的文字落进这一栏的输入框（同一支麦克风，谁点归谁）
+        if (voiceBusy) {
+          if (voiceRecorder && voiceRecorder.state === "recording") voiceStop();
+          else addNotice("正在识别上一条录音，稍等一下…");
+        } else voiceStart(pane);
+      } else {
+        // 剩余镜像入口各给一句如实提示（不再统一一句模糊话）
+        addNotice("这是全局设置/主栏功能，请到主栏操作");
+      }
+    };
+  });
+  // 模型显示：会话级覆盖优先（session.model_get 兜底返回全局）；只读列没有
+  // 这些操作入口，不浪费请求
+  if (!readonly) {
+    request("session.model_get", { id: sid }).then((r) => {
+      if (r && r.name) paintSplitModel(pane, r);
+    }).catch(() => {});
+    // 思考强度徽章：按该会话生效档位拉取（session.reasoning_get；不支持则保持隐藏）
+    paintSplitReasoning(pane);
+    // 上下文徽标辅路：有落库历史的会话即有读数（无 runtime 时后端按落库消息
+    // 估算，重启/淘汰后打开旧会话立刻能看到占用）；空会话/查无此会话后端
+    // 显式报错——维持隐藏空态，发送后由 chat.send 响应落精确值
+    request("chat.status", { session_id: sid }).then((r) => {
+      if (r && r.session_id === sid && splitPanes.includes(pane)) {
+        paintSplitCtx(pane, r.context_tokens, r.context_limit);
+      }
+    }).catch(() => { /* 空会话/查无此会话：空态是常态，保持隐藏 */ });
+  }
+}
+
+// 列内思考强度徽章：按会话拉生效档位并画到徽章上（列已关闭就不落）
+async function paintSplitReasoning(pane) {
+  const el = pane.el.querySelector(".split-reasoning");
+  if (!el || !pane.sid) return;
+  const r = await request("session.reasoning_get", { id: pane.sid }).catch(() => null);
+  if (!r || !el.isConnected) return;
+  renderReasoningChip(el, {
+    supported: r.supported, effort: r.effort, labels: r.labels, efforts: r.efforts,
+  });
+}
+
+// 列内上下文占用徽标：有数据才显示（空态 = 默认态，发送后才有读数）
+function paintSplitCtx(pane, tokens, limit) {
+  const el = pane.el.querySelector(".split-ctx-ring");
+  if (!el) return;
+  pane.usage = limit ? { tokens, limit } : null;
+  if (!limit) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  const pct = Math.min(100, Math.round((100 * tokens) / limit));
+  const C = 2 * Math.PI * 9; // 环半径 r=9（viewBox 24），与主栏 ctx-ring 同款
+  el.querySelector(".ring-val").style.strokeDashoffset = String(C * (1 - pct / 100));
+  el.querySelector(".ring-txt").textContent = String(pct);
+  el.classList.toggle("warn", pct >= 70 && pct < 90);
+  el.classList.toggle("bad", pct >= 90);
+}
+
+// 分屏列的权限三档：循环切换，只写这一栏的会话（session.accept_set，
+// 本机专属）；引擎默认档与其他会话不受影响
+async function cycleSplitAccept(pane, btn) {
+  const order = ["confirm", "accept_edits", "full_access"];
+  let cur = pane.acceptMode;
+  if (!cur) {
+    try {
+      const g = await request("session.accept_get", { id: pane.sid });
+      cur = g.mode;
+    } catch (e) { addNotice("读取权限档位失败: " + e.message); return; }
+  }
+  const next = order[(order.indexOf(cur || "confirm") + 1) % order.length];
+  try {
+    const r = await request("session.accept_set", { id: pane.sid, mode: next });
+    pane.acceptMode = r.mode;
+    paintAcceptIcon(btn, r.mode);
+    addNotice((ACCEPT_NOTICE[r.mode] || ACCEPT_NOTICE.confirm) + "（仅这一栏）");
+  } catch (e) {
+    addNotice("切换失败: " + e.message);
+  }
+}
+
+// 列内 @ 引用：选文件后以「@路径」插进这一栏的输入框（与主栏同语义——
+// 发送后由 Agent 自己读文件），项目外的文件也可以
+async function attachSplitFiles(pane) {
+  const r = await pickPath("file").catch(() => ({ error: "no-picker" }));
+  if (r.error) { addNotice("打开文件选择框失败：" + (r.error === "no-picker" ? "未安装文件选择组件" : r.error)); return; }
+  const paths = (r.paths || []).filter(Boolean);
+  if (!paths.length) return;
+  const input = pane.el.querySelector(".split-input");
+  input.value = (input.value ? input.value + " " : "") + paths.map((p) => "@" + p).join(" ");
+  input.focus();
+  addNotice(`已引用 ${paths.length} 个文件（将随这一栏的消息一起发送）`);
+}
+
+// 列的模型显示与选择：会话级覆盖（session.model_switch），只影响这一栏
+function paintSplitModel(pane, m) {
+  pane.model = m;
+  const el = pane.el.querySelector(".split-model");
+  if (el) {
+    // 与主栏 setModelChip 同一拼接格式（provider/model，无空格），两栏显示一致
+    (el.querySelector(".sm-txt") || el).textContent =
+      m.model ? `${m.name}/${m.model}` : m.name;
+    el.title = m.overridden
+      ? "这一栏独立使用的模型（点击更换）"
+      : "跟随全局模型（点击为这一栏单独指定）";
+  }
+}
+
+// 列工具条开关的视觉同步（.plan 蓝 / .on 紫/绿，与主栏同款）
+function syncSplitBarToggles(pane) {
+  const q = (role) => pane.el.querySelector(`[data-role="${role}"]`);
+  const plan = q("plan"), coop = q("coop");
+  if (plan) plan.classList.toggle("plan", !!pane.planMode);
+  if (coop) {
+    coop.classList.toggle("on", !!(pane.rtOn || pane.teamOn || pane.advOn));
+    coop.classList.toggle("coop-rt", !!pane.rtOn && !pane.teamOn && !pane.advOn);
+    coop.classList.toggle("coop-team", !!pane.teamOn && !pane.advOn);
+    coop.classList.toggle("coop-adv", !!pane.advOn);
+    const st = coop.querySelector(".cp-state");
+    if (st) {
+      st.hidden = !pane.rtOn && !pane.teamOn && !pane.advOn;
+      st.textContent = pane.rtOn ? "圆桌" : pane.teamOn ? "团队" : pane.advOn ? "对抗" : "";
+    }
+    coop.title = pane.rtOn ? "圆桌（每栏独立）：本栏消息由多个模型共同思考。点击可换模式"
+      : pane.teamOn ? "团队（每栏独立）：本栏消息组建团队协作。点击可换模式"
+      : pane.advOn ? "对抗（每栏独立）：本栏消息做对抗性审查。点击可换模式"
+      : "协作（每栏独立）：圆桌 / 团队 / 对抗，点击选择";
+  }
+}
+
+// 列内协作统一菜单：圆桌 / 团队 / 对抗 / 关闭 多选一，写这一栏自己的开关
+// （pane.rtOn/pane.teamOn/pane.advOn 随本栏发送带上）；成员/总管指定仍到主栏
+function showSplitCoopMenu(pane, btn) {
+  const old = pane.el.querySelector(".coop-menu");
+  if (old) { old.remove(); return; }
+  const menu = document.createElement("div");
+  menu.className = "rt-menu coop-menu";
+  const tip = document.createElement("div");
+  tip.className = "rt-menu-tip";
+  tip.textContent = "协作模式（本栏，发送后复位）：";
+  menu.appendChild(tip);
+  const modes = [
+    { key: "off", label: "不用协作", active: !pane.rtOn && !pane.teamOn && !pane.advOn },
+    { key: "rt", label: "圆桌", active: pane.rtOn },
+    { key: "team", label: "团队", active: pane.teamOn },
+    { key: "adv", label: "对抗", active: pane.advOn },
+  ];
+  for (const m of modes) {
+    const b = document.createElement("button");
+    b.className = "coop-mode-item" + (m.active ? " active" : "");
+    b.innerHTML = `<span class="coop-mode-check">${m.active ? "✓" : ""}</span>` +
+      `<span class="coop-mode-body"><span class="coop-mode-label">${m.label}</span></span>`;
+    b.onclick = () => {
+      if (m.key === "rt") { pane.rtOn = !pane.rtOn; if (pane.rtOn) { pane.teamOn = pane.advOn = false; } }
+      else if (m.key === "team") { pane.teamOn = !pane.teamOn; if (pane.teamOn) { pane.rtOn = pane.advOn = false; } }
+      else if (m.key === "adv") { pane.advOn = !pane.advOn; if (pane.advOn) { pane.rtOn = pane.teamOn = false; } }
+      else { pane.rtOn = pane.teamOn = pane.advOn = false; }
+      syncSplitBarToggles(pane);
+      menu.remove();
+    };
+    menu.appendChild(b);
+  }
+  const sep = document.createElement("div");
+  sep.className = "coop-sep";
+  menu.appendChild(sep);
+  const hint = document.createElement("div");
+  hint.className = "rt-menu-tip";
+  hint.textContent = "指定成员/总管：把会话切到主栏后操作";
+  menu.appendChild(hint);
+  pane.el.appendChild(menu);
+  // fixed 定位贴着按钮向上展开，横向收敛在窗口内（rect 是物理像素，除回 uiScale）
+  const r = btn.getBoundingClientRect();
+  menu.style.position = "fixed";
+  menu.style.top = "auto";
+  menu.style.bottom = (window.innerHeight / uiScale - r.top / uiScale + 6) + "px";
+  menu.style.left = Math.max(8, Math.min(r.left / uiScale, window.innerWidth / uiScale - 300)) + "px";
+  menu.style.right = "auto";
+  const close = (e) => {
+    if (!menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener("click", close, true);
+    }
+  };
+  document.addEventListener("click", close, true);
+}
+
+// 分屏列的模型选择菜单：复用模型菜单样式，确认走 session.model_switch
+let splitModelRows = [];
+async function pickSplitModel(pane, anchor) {
+  const menu = document.getElementById("split-model-menu");
+  if (!menu.classList.contains("hidden")) { menu.classList.add("hidden"); return; }
+  menu.innerHTML = '<div class="mm-empty">加载中…</div>';
+  menu.classList.remove("hidden");
+  const detail = await request("config.providers").catch(() => null);
+  if (!detail || menu.classList.contains("hidden")) return;
+  const cur = await request("session.model_get", { id: pane.sid }).catch(() => null);
+  splitModelRows = buildModelRows(detail);
+  menu.innerHTML = "";
+  const addRow = (row) => {
+    const on = cur && cur.overridden && cur.name === row.name && cur.model === row.model;
+    const b = document.createElement("button");
+    b.className = "mm-item" + (on ? " active" : "");
+    b.innerHTML = auxMiniAvatar(row.name) +
+      `<span class="mm-model">${on ? "✓ " : ""}${escapeHtml(row.model)}</span>` +
+      `<span class="mm-prov${row.hasKey ? "" : " no-key"}">${row.hasKey ? "" : "⚠ "}${escapeHtml(row.label)}</span>`;
+    b.title = row.hasKey
+      ? `这一栏使用 ${row.label} / ${row.model}（只影响本栏）`
+      : `「${row.label}」还没配置 API Key`;
+    b.onclick = async () => {
+      menu.classList.add("hidden");
+      try {
+        const r = await request("session.model_switch", { id: pane.sid, name: row.name, model: row.model });
+        paintSplitModel(pane, { name: r.provider, model: r.model, overridden: true });
+        addNotice(`✓ 这一栏将使用「${r.provider} / ${r.model}」，主栏不变`);
+      } catch (err) { addNotice("切换失败: " + err.message); }
+    };
+    menu.appendChild(b);
+  };
+  const rows = splitModelRows;
+  for (const [label, pred] of [["默认", (r) => r.preset], ["自定义", (r) => !r.preset]]) {
+    const hits = rows.filter(pred);
+    if (!hits.length) continue;
+    // 分组小标题：无样式的裸 div（旧的分组头类已废弃下线，见
+    // test_frontend_wiring 的整库禁用断言；它本就没有任何 CSS 规则）
+    const head = document.createElement("div");
+    head.textContent = label;
+    menu.appendChild(head);
+    hits.forEach(addRow);
+  }
+  if (!rows.length) menu.innerHTML = '<div class="mm-empty">还没有可用的模型服务</div>';
+  const r = anchor.getBoundingClientRect();
+  const vh = window.innerHeight / uiScale;
+  menu.style.top = "auto";
+  menu.style.bottom = (vh - r.top / uiScale + 6) + "px";
+  menu.style.left = Math.max(8, r.right / uiScale - 250) + "px";
+}
+document.addEventListener("click", (e) => {
+  const menu = document.getElementById("split-model-menu");
+  if (menu && !menu.classList.contains("hidden") &&
+      !menu.contains(e.target) && !e.target.closest('[data-role="model"]')) menu.classList.add("hidden");
+});
+
+// 分屏列头状态：运行中蓝点 + 等确认金标
+function paintSplitHead(pane) {
+  const head = pane.el.querySelector(".split-head");
+  let dot = head.querySelector(".split-run");
+  if (pane.running && !dot) {
+    dot = document.createElement("span");
+    dot.className = "split-run";
+    dot.title = "这一栏的会话正在运行";
+    head.insertBefore(dot, head.querySelector(".split-title"));
+  } else if (!pane.running && dot) {
+    dot.remove();
+  }
+  let lock = head.querySelector(".split-perm");
+  if (pane.needsPerm && !lock) {
+    lock = document.createElement("span");
+    lock.className = "split-perm";
+    lock.textContent = "🔒";
+    lock.title = "这一栏的会话在等待确认——点击到主栏打开并处理";
+    // 确认面板是主栏单例：把会话提升到主栏（正常激活路径）才能点允许/拒绝。
+    // 待确认数据此刻挂在列对象上（permission_request 路由进列时 showPermission
+    // 写的是 pane.permData），必须一并转移到目标标签——新标签的 permData 初始
+    // 是 null，activateTab 只认 tab.permData 恢复卡，不带过去就是断头：轮次
+    // 在权限门上无限等待、确认条永远弹不出来
+    lock.onclick = () => {
+      const perm = pane.permData;
+      const t = tabFor(pane.sid);
+      if (t) {
+        if (perm && !t.permData) { t.needsPerm = true; t.permData = perm; }
+        activateTab(t); // activateTab 在 tab.needsPerm && tab.permData 时恢复卡
+      } else {
+        const nt = openTabForSession(pane.sid, pane.title);
+        if (perm && nt && !nt.permData) {
+          nt.needsPerm = true;
+          nt.permData = perm;
+          showPermission(perm); // activateTab 的恢复点已过：这里显式挂卡
+        }
+      }
+    };
+    head.insertBefore(lock, head.querySelector(".split-title"));
+  } else if (!pane.needsPerm && lock) {
+    lock.remove();
+  }
+}
+
+// 焦点态（主栏与各列统一）：最近点击的「面」正常显示，其余一律降饱和变灰——
+// 点列时主栏也变灰；点回主栏（对话区/输入栏/切标签）时各列变灰，一眼可辨
+// 输入将去往哪个面
+function focusSplitPane(pane) {
+  if (!pane.el || !pane.el.isConnected) return; // 列已摘除（关列的点击冒泡到列头僵尸监听）：不得再上灰
+  if (!splitPanes.some((q) => q.el && q.el.isConnected)) return; // 已无任何活列：同样不上灰
+  chatMainEl.classList.add("main-dimmed");
+  splitPanes.forEach((p) => {
+    p.el.classList.toggle("dimmed", p !== pane);
+    p.el.classList.toggle("focused", p === pane);
+  });
+}
+
+function focusMainPane() {
+  if (!splitPanes.length) return; // 没有列就没有焦点之分
+  chatMainEl.classList.remove("main-dimmed");
+  splitPanes.forEach((p) => {
+    p.el.classList.remove("focused");
+    p.el.classList.add("dimmed");
+  });
+}
+
+function closeSplitPane(pane, opts = {}) {
+  if (refFace === pane) closeRefMenu();
+  if (menuFace === pane) hideInputMenu();
+  if (ctxPopFace === pane) closeCtxPop(true);
+  pane.el.remove();
+  const i = splitPanes.indexOf(pane);
+  if (i >= 0) splitPanes.splice(i, 1);
+  if (!splitPanes.length) {
+    splitPaneEl.classList.add("hidden");
+    chatMainEl.classList.remove("has-split");
+    chatMainEl.classList.remove("main-dimmed"); // 列全关：主栏焦点态一并撤
+    if (opts.restore !== false) restoreMainAfterSplit(pane); // 空墙不留给用户
+  } else if (!splitPanes.some((p) => p.el.classList.contains("focused"))) {
+    focusMainPane(); // 关掉的是聚焦列：焦点回落主栏，其余列变灰
+  }
+}
+
+function closeSplitPanesForSids(sidSet, opts = {}) {
+  splitPanes.filter((p) => sidSet.has(p.sid)).forEach((p) => closeSplitPane(p, opts));
+}
+
+/** 关掉最后一列分屏时，主栏不能留一堵空墙。
+ *
+ *  分屏的语义是「把会话从主栏搬进分屏」（openSplitPane 会先收掉主栏冲突标签），
+ *  那么关掉最后一列就应把会话搬回主栏——否则主栏常停在空会话/空白标签上，
+ *  主栏当前有内容（消息/欢迎卡/提示）时不搬，不抢已有会话的焦点；跨项目只读
+ *  列与运行中的列不搬。（另注：用户当时报的「关了分屏主栏还是灰」是独立 bug——
+ *  关列的点击冒泡到已摘除列的聚焦监听，把 main-dimmed 重新加了回去；已在
+ *  focusSplitPane 加活列守卫，CSS 侧再以 :not(:has(.split-col)) 兜底。）
+ */
+function restoreMainAfterSplit(pane) {
+  if (pane.readonly || pane.running) return;
+  const t = activeTab;
+  if (!t || t.running) return;
+  // 空不空看「真内容」：搬家提示这类 .msg.notice 是过程性通知，不算内容——
+  // 否则 openSplitPane 留下的「已从主栏搬进分屏」会顶掉搬回，主栏照样空墙
+  const kids = t.logEl ? [...t.logEl.children] : [];
+  const real = kids.filter((el) => !el.classList.contains("notice"));
+  if (real.length) return;
+  kids.forEach((el) => { if (el.classList.contains("notice")) el.remove(); }); // 会话回来了，搬家提示作废
+  openTabForSession(pane.sid, pane.title); // 搬回：接管空标签或新开标签并激活
 }
 
 /** 新建会话标签。
@@ -922,12 +1767,18 @@ async function startNewTab(persist = true) {
   // 新建会话＝回到当前项目语境：「点组头」借来的高亮交回（新会话激活后跟它走）
   groupedClickGk = null;
   const blank = () => {
+    // 新建前把旧活动标签的输入区状态写回它的条目：草稿/贴图/开关随会话记忆，
+    // 不写回就被空标签的默认态顶掉，切回旧会话全部丢失（与 activateTab /
+    // closeTab 同一口径）
+    if (activeTab) saveComposerState(activeTab.sid);
     const t = newTabObj(null, "");
     chatTabs.push(t);
     activeTab = t;
     attachTabLog(t);
     currentSessionId = null;
     activeSessionSid = null;
+    restoreComposerState(null); // 不过 activateTab：输入区恢复默认态（空标签口径）
+    refreshReasoning(); // 空标签：思考徽章回到全局口径
     clearTodoPanel();
     showWelcome();
     renderTabs();
@@ -939,12 +1790,17 @@ async function startNewTab(persist = true) {
   creatingTab = true;
   try {
     const s = await request("session.new", {});
+    // 换指前写回旧活动标签（await 期间用户可能又敲了字——必须在 activeTab
+    // 换指前读旧值，与 activateTab 同一口径）
+    if (activeTab) saveComposerState(activeTab.sid);
     const t = newTabObj(s.id, s.title || "");
     chatTabs.push(t);
     activeTab = t;
     attachTabLog(t);
     currentSessionId = s.id;
     activeSessionSid = s.id;
+    restoreComposerState(s.id); // 不过 activateTab：新会话从默认态开始
+    refreshActiveSessionBadges(t); // 默认模型会话的徽章与会话生效模型对齐
     clearTodoPanel();
     showWelcome();
     renderTabs();
@@ -987,6 +1843,22 @@ async function newSessionFromHighlight() {
   }
   if (litKey && String(litKey).startsWith("remote:")) { // 经典视图点亮的远程行
     addNotice("「远程连接」的对话来自飞书/微信渠道，不能在这里新建");
+    return;
+  }
+  if (litKey && String(litKey).startsWith("proj:")) { // 经典视图点亮的「看其他项目」行
+    const pid = String(litKey).slice("proj:".length);
+    const pprojects = ((await request("project.list").catch(() => null)) || {}).projects || [];
+    const tp = pprojects.find((p) => String(p.id) === pid);
+    if (tp && !tp.is_current && tp.root_path) {
+      try {
+        await request("project.switch", { path: tp.root_path });
+        await applyWorkspaceData(await fetchWorkspaceData());
+      } catch (e) {
+        addNotice("切换到该项目失败：" + e.message);
+        return;
+      }
+    }
+    startNewTab(); // 切换成功（或本就是当前项目）后照常新建；失败路径上面已 return
     return;
   }
   const projects = ((await request("project.list").catch(() => null)) || {}).projects || [];
@@ -1382,19 +2254,28 @@ function finishAssistant(rtMeta, seq) {
   t.streamingEl.firstElementChild.innerHTML = renderMarkdown(t.streamingText);
   t._streamBody = null;
   if (rtMeta) {
-    addRtBadge(t.streamingEl, rtMeta);
-    t.streamingEl._rtMeta = rtMeta; // 重新生成时据此重跑同样的圆桌配置
-    // 融合结论已就位：自动折叠成员草稿卡（此前一直展开，占着大块空白）；标题栏随时可展开回看
-    const rtEls = t.rtMemberEls || [];
-    const allSettled = rtEls.length &&
-      rtEls.every((x) => x.card.classList.contains("ok") || x.card.classList.contains("err")
-        || x.card.classList.contains("skipped"));
-    if (rtMeta.members && allSettled && t.rtCard && !t.rtCard.classList.contains("folded")) {
-      t.rtCard.classList.add("folded");
-      const foldBtn = t.rtCard.querySelector(".rt-fold");
-      if (foldBtn) foldBtn.textContent = "展开";
-      const sub = t.rtCard.querySelector(".rt-sub");
-      if (sub) sub.textContent = `${rtEls.length} 个模型 · 已折叠 · 点击标题栏展开查看各成员草稿`;
+    if (rtMeta.mode === "adversarial") {
+      // 对抗报告：徽标 + 折叠上方的问题清单卡（报告已流进本气泡）
+      addAdvBadge(t.streamingEl, rtMeta);
+      t.streamingEl._rtMeta = rtMeta; // 重新生成时据此重跑同样的对抗配置
+      if (t.advCard && t.advCard.isConnected && !t.advCard.classList.contains("folded") && t.advFold) {
+        t.advFold();
+      }
+    } else {
+      addRtBadge(t.streamingEl, rtMeta);
+      t.streamingEl._rtMeta = rtMeta; // 重新生成时据此重跑同样的圆桌配置
+      // 融合结论已就位：自动折叠成员草稿卡（此前一直展开，占着大块空白）；标题栏随时可展开回看
+      const rtEls = t.rtMemberEls || [];
+      const allSettled = rtEls.length &&
+        rtEls.every((x) => x.card.classList.contains("ok") || x.card.classList.contains("err")
+          || x.card.classList.contains("skipped"));
+      if (rtMeta.members && allSettled && t.rtCard && !t.rtCard.classList.contains("folded")) {
+        t.rtCard.classList.add("folded");
+        const foldBtn = t.rtCard.querySelector(".rt-fold");
+        if (foldBtn) foldBtn.textContent = "展开";
+        const sub = t.rtCard.querySelector(".rt-sub");
+        if (sub) sub.textContent = `${rtEls.length} 个模型 · 已折叠 · 点击标题栏展开查看各成员草稿`;
+      }
     }
   }
   t.lastAssistantText = t.streamingText;
@@ -1440,17 +2321,26 @@ function fmtTokens(n) {
   return n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n);
 }
 
-// 引用成员草稿追问：把草稿以引用块形式填进输入框（截断防超长）
-function quoteRoundtableDraft(provider, model, text) {
+// 引用成员草稿追问：把草稿以引用块形式填进输入框（截断防超长）。
+// tab 给出时按发起面分流：分屏列的成员卡回填该列输入框（焦点也留在列里），
+// 不再固定写主栏——列里点「引用追问」后内容串去主栏，顺手一发送就发错会话
+function quoteRoundtableDraft(provider, model, text, tab) {
   const raw = (text || "").trim();
   if (!raw) { addNotice("这份草稿还没有内容"); return; }
   const clipped = raw.length > 1500 ? raw.slice(0, 1500) + "\n…（草稿过长，已截断）" : raw;
   const quoted = clipped.split("\n").map((line) => "> " + line).join("\n");
-  const input = document.getElementById("input");
+  const pane = tab && splitPanes.includes(tab) ? tab : null;
+  const input = pane ? pane.el.querySelector(".split-input") : document.getElementById("input");
+  if (!input) {
+    // 只读列没有输入框（跨项目列等）：给可读提示，不静默抛错——实时圆桌卡
+    // 也走这条路径，光靠挂按钮时不挂不住所有来源
+    addNotice("这一栏是只读列（会话属于其他项目），不能在这里追问");
+    return;
+  }
   const existing = input.value.trim();
   input.value = `【引用圆桌成员 ${provider}/${model} 的草稿】\n${quoted}\n\n我的追问：`
     + (existing ? "\n" + existing : "");
-  autoGrowInput();
+  if (!pane) autoGrowInput(); // 主栏输入框随内容长高；列输入框是固定两行
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
 }
@@ -1532,7 +2422,7 @@ function beginRoundtable(members, rounds) {
     u.tokens = 0;
     u.quoteBtn.onclick = (e) => {
       e.stopPropagation();
-      quoteRoundtableDraft(m.provider, m.model, u.text);
+      quoteRoundtableDraft(m.provider, m.model, u.text, t);
     };
     return u;
   });
@@ -1625,8 +2515,9 @@ function rtMemberFinished(data) {
   }
 }
 
-// 历史回放：从持久化的元数据重建圆桌卡片（默认折叠，可展开回看草稿）
-function buildRtReplayCard(meta) {
+// 历史回放：从持久化的元数据重建圆桌卡片（默认折叠，可展开回看草稿）。
+// tab 供「引用追问」按发起面回填对应输入框（分屏列里回放的历史卡也要回列）
+function buildRtReplayCard(meta, tab) {
   const members = meta.members || [];
   const { card, grid, sub } = buildRtCardShell(
     members, `${members.length} 个模型 · 已折叠 · 点击展开查看各成员草稿`
@@ -1645,16 +2536,259 @@ function buildRtReplayCard(meta) {
     if (draft.trim()) {
       u.body.innerHTML = renderMarkdown(draft);
       u.foot.hidden = false;
-      u.quoteBtn.onclick = (e) => {
-        e.stopPropagation();
-        quoteRoundtableDraft(m.provider, m.model, draft);
-      };
+      if (tab && tab.readonly) {
+        u.quoteBtn.remove(); // 只读列没有输入框可回填，不挂「引用追问」
+      } else {
+        u.quoteBtn.onclick = (e) => {
+          e.stopPropagation();
+          quoteRoundtableDraft(m.provider, m.model, draft, tab);
+        };
+      }
     } else {
       u.body.innerHTML = `<p class="dim">✗ ${escapeHtml(m.error || "作答失败")}</p>`;
     }
     grid.appendChild(u.card);
   });
   return card;
+}
+
+// ---------- 对抗卡片：四角色流水线进度 + 问题清单（聊天流内的审查台） ----------
+// adversarial_started 建卡并保持展开，随阶段/问题/裁决事件实时更新；
+// adversarial_finished 后折叠（终审报告流进下方回答气泡，清单可展开回看）。
+const ADV_PHASES = [
+  { key: "finder", label: "发现" },
+  { key: "investigator", label: "调查" },
+  { key: "advisor", label: "建议" },
+  { key: "judge", label: "裁判" },
+];
+const ADV_SEVERITY_LABEL = { critical: "致命", high: "高", medium: "中", low: "低" };
+const ADV_VERDICT_LABEL = { confirmed: "成立", refuted: "已推翻", partial: "部分成立", pending: "待定" };
+const advRoleLabel = (role) =>
+  ({ finder: "发现者", investigator: "调查者", advisor: "建议者", judge: "裁判" })[role] || role || "";
+
+function advRolesTitle(roles) {
+  return (roles || [])
+    .filter((r) => r && r.role)
+    .map((r) => `${advRoleLabel(r.role)}：${r.provider}${r.model ? "/" + r.model : ""}`)
+    .join("\n");
+}
+
+// 一行候选问题（实时与回放共用）：编号 + 严重度 + 类别 + 位置 + 裁决徽记
+function advFindingRow(f, opts = {}) {
+  const row = document.createElement("div");
+  row.className = "adv-finding";
+  row.dataset.findingId = f.finding_id || f.id || "";
+  const sev = f.severity || f.effective_severity || "medium";
+  const sevLabel = ADV_SEVERITY_LABEL[sev] || sev;
+  const verdict = f.verdict || "";
+  const vLabel = verdict ? (ADV_VERDICT_LABEL[verdict] || verdict) : "";
+  row.innerHTML =
+    `<div class="adv-f-head">` +
+    `<span class="adv-f-id">${escapeHtml(f.finding_id || f.id || "")}</span>` +
+    `<span class="adv-f-sev sev-${escapeHtml(sev)}">${escapeHtml(sevLabel)}</span>` +
+    `<span class="adv-f-cat">${escapeHtml(f.category || "")}</span>` +
+    `<span class="adv-f-loc" title="${escapeHtml(f.location || "")}">${escapeHtml(f.location || "")}</span>` +
+    (vLabel ? `<span class="adv-f-verdict verdict-${escapeHtml(verdict)}">${escapeHtml(vLabel)}</span>` : "<span class=\"adv-f-verdict\" hidden></span>") +
+    `</div>` +
+    `<div class="adv-f-desc md"></div>` +
+    (opts.replay && f.reason ? `<div class="adv-f-reason dim"></div>` : "") +
+    (opts.replay && f.solution ? `<div class="adv-f-fix"></div>` : "");
+  row.querySelector(".adv-f-desc").innerHTML = renderMarkdown(f.description || "");
+  if (f.reason) row.title = f.reason;
+  if (opts.replay && f.reason) {
+    row.querySelector(".adv-f-reason").innerHTML = "裁决依据：" + renderMarkdown(f.reason);
+  }
+  if (opts.replay && f.solution) {
+    row.querySelector(".adv-f-fix").innerHTML = "🛠 " + renderMarkdown(f.solution);
+  }
+  return row;
+}
+
+function beginAdversarial(roles) {
+  const t = curTab();
+  const card = document.createElement("div");
+  card.className = "adversarial";
+  const head = document.createElement("div");
+  head.className = "rt-head";
+  const title = document.createElement("span");
+  title.className = "rt-title";
+  title.textContent = "⚔ 对抗审查";
+  const sub = document.createElement("span");
+  sub.className = "rt-sub";
+  const fold = document.createElement("button");
+  fold.className = "rt-fold";
+  fold.textContent = "折叠";
+  const toggleFold = () => {
+    const folded = card.classList.toggle("folded");
+    fold.textContent = folded ? "展开" : "折叠";
+    sub.textContent = folded
+      ? `${(t.advFindingEls || []).length} 条候选问题 · 已折叠 · 点击展开查看清单`
+      : (t.advSubText || "");
+  };
+  fold.onclick = (e) => { e.stopPropagation(); toggleFold(); };
+  head.onclick = (e) => { if (e.target !== fold) toggleFold(); };
+  head.append(title, sub, fold);
+  const steps = document.createElement("div");
+  steps.className = "adv-phases";
+  const stepEls = {};
+  for (const p of ADV_PHASES) {
+    const s = document.createElement("span");
+    s.className = "adv-phase";
+    s.dataset.phase = p.key;
+    s.textContent = p.label;
+    steps.appendChild(s);
+    stepEls[p.key] = s;
+  }
+  const list = document.createElement("div");
+  list.className = "adv-findings";
+  card.append(head, steps, list);
+  if (roles && roles.length) card.title = advRolesTitle(roles);
+  t.advCard = card;
+  t.advSub = sub;
+  t.advSubText = "四角色流水线审查进行中…";
+  sub.textContent = t.advSubText;
+  t.advPhaseEls = stepEls;
+  t.advFindingEls = [];
+  t.advFindingsBox = list;
+  t.advFold = toggleFold;
+  curLog().appendChild(card);
+  scrollLog();
+}
+
+function advSetPhase(phase, note) {
+  const t = curTab();
+  if (!t || !t.advCard) return;
+  const order = ADV_PHASES.map((p) => p.key);
+  const idx = order.indexOf(phase);
+  order.forEach((k, i) => {
+    const el = t.advPhaseEls[k];
+    if (!el) return;
+    el.classList.toggle("done", idx >= 0 && i < idx);
+    el.classList.toggle("active", i === idx);
+  });
+  if (note) {
+    t.advSubText = note;
+    if (!t.advCard.classList.contains("folded")) t.advSub.textContent = note;
+  }
+}
+
+function advAddFinding(data) {
+  const t = curTab();
+  if (!t || !t.advCard) return;
+  const row = advFindingRow(data);
+  t.advFindingsBox.appendChild(row);
+  t.advFindingEls.push(row);
+}
+
+function advApplyVerdict(data) {
+  const t = curTab();
+  if (!t || !t.advCard) return;
+  const row = (t.advFindingEls || []).find((r) => r.dataset.findingId === data.finding_id);
+  if (!row) return;
+  const v = row.querySelector(".adv-f-verdict");
+  if (!v) return;
+  v.hidden = false;
+  v.textContent = ADV_VERDICT_LABEL[data.verdict] || data.verdict || "";
+  v.className = "adv-f-verdict verdict-" + (data.verdict || "pending");
+  if (data.reason) row.title = data.reason;
+}
+
+function advFinished(data) {
+  const t = curTab();
+  if (!t || !t.advCard) return;
+  for (const k in t.advPhaseEls) {
+    t.advPhaseEls[k].classList.remove("active");
+    t.advPhaseEls[k].classList.add("done");
+  }
+  const status = data.status || "done";
+  t.advCard.classList.add(status === "done" ? "ok" : status === "cancelled" ? "cancelled" : "err");
+  const st = status === "done" ? ("✓ " + (data.summary || "审查完成"))
+    : status === "cancelled" ? "已中止（已得结论保留）"
+    : "✗ " + (data.summary || "审查未完成");
+  t.advSubText = st;
+  if (!t.advCard.classList.contains("folded")) t.advSub.textContent = st;
+  // 终审报告随后流进下方回答气泡：稍候自动折叠清单（可随时展开回看）
+  if (status === "done") {
+    setTimeout(() => {
+      if (t.advCard && t.advCard.isConnected && !t.advCard.classList.contains("folded")) t.advFold();
+    }, 600);
+  }
+}
+
+// 历史回放：从消息的 adversarial 元数据重建对抗卡（默认折叠，与圆桌回放卡同姿态）
+function buildAdvReplayCard(meta) {
+  const findings = meta.findings || [];
+  const card = document.createElement("div");
+  card.className = "adversarial folded " +
+    (meta.status === "error" ? "err" : meta.status === "cancelled" ? "cancelled" : "ok");
+  const head = document.createElement("div");
+  head.className = "rt-head";
+  const title = document.createElement("span");
+  title.className = "rt-title";
+  title.textContent = "⚔ 对抗审查";
+  const s = meta.stats || {};
+  const sumBits = [];
+  if (s.total) {
+    sumBits.push(`${s.total} 条候选`);
+    if (s.confirmed) sumBits.push(`成立 ${s.confirmed}`);
+    if (s.partial) sumBits.push(`部分 ${s.partial}`);
+    if (s.refuted) sumBits.push(`推翻 ${s.refuted}`);
+  }
+  const sub = document.createElement("span");
+  sub.className = "rt-sub";
+  const subText = sumBits.length ? sumBits.join(" · ") : "未发现候选问题";
+  const fold = document.createElement("button");
+  fold.className = "rt-fold";
+  fold.textContent = "展开";
+  const toggleFold = () => {
+    const folded = card.classList.toggle("folded");
+    fold.textContent = folded ? "展开" : "折叠";
+    sub.textContent = folded
+      ? `${findings.length} 条候选问题 · 已折叠 · 点击展开查看清单`
+      : subText;
+  };
+  fold.onclick = (e) => { e.stopPropagation(); toggleFold(); };
+  head.onclick = (e) => { if (e.target !== fold) toggleFold(); };
+  head.append(title, sub, fold);
+  const steps = document.createElement("div");
+  steps.className = "adv-phases";
+  for (const p of ADV_PHASES) {
+    const el = document.createElement("span");
+    el.className = "adv-phase done";
+    el.textContent = p.label;
+    steps.appendChild(el);
+  }
+  const list = document.createElement("div");
+  list.className = "adv-findings";
+  findings.forEach((f) => list.appendChild(advFindingRow(f, { replay: true })));
+  card.append(head, steps, list);
+  if (meta.roles && meta.roles.length) card.title = advRolesTitle(meta.roles);
+  sub.textContent = `${findings.length} 条候选问题 · 已折叠 · 点击展开查看清单`;
+  return card;
+}
+
+// 对抗徽标：标记这条报告是四角色流水线审查的产出（悬停看角色名册）
+function addAdvBadge(el, meta) {
+  const s = meta.stats || {};
+  const badge = document.createElement("div");
+  badge.className = "rt-badge adv-badge";
+  badge.title = (advRolesTitle(meta.roles) || "对抗审查") +
+    (meta.degraded ? "\n（终审未完成，报告由复核后的中间结果拼成）" : "");
+  const parts = ["⚔ 对抗审查"];
+  if (s.total) {
+    const bits = [];
+    if (s.confirmed) bits.push(`成立 ${s.confirmed}`);
+    if (s.partial) bits.push(`部分 ${s.partial}`);
+    if (s.refuted) bits.push(`推翻 ${s.refuted}`);
+    if (s.pending) bits.push(`待定 ${s.pending}`);
+    parts.push(`${s.total} 条候选` + (bits.length ? `（${bits.join(" · ")}）` : ""));
+  } else {
+    parts.push("未发现候选问题");
+  }
+  if (meta.status === "cancelled") parts.push("已中止");
+  else if (meta.status === "error") parts.push("未完成");
+  badge.textContent = parts.join(" · ");
+  el.prepend(badge);
 }
 
 // ---------- 团队卡片：名册 + 工单板 + 频道时间线（聊天流内的协作台） ----------
@@ -2570,8 +3704,9 @@ function fmtCtxPct(p) {
   if (p > 0) return p.toFixed(1) + "%";
   return "0%";
 }
+let ctxPopFace = null; // 弹层当前服务哪一面（null = 主栏环）
 function renderCtxPop() {
-  const d = activeTab && activeTab.ctxDetail;
+  const d = ctxPopFace ? ctxPopFace.ctxDetail : (activeTab && activeTab.ctxDetail);
   if (!d) return false;
   const pct = d.limit ? Math.min(100, (100 * d.tokens) / d.limit) : 0;
   const barCls = pct >= 90 ? " bad" : pct >= 70 ? " warn" : "";
@@ -2591,7 +3726,8 @@ function renderCtxPop() {
   return true;
 }
 function placeCtxPop() {
-  const r = ctxRingEl.getBoundingClientRect();
+  const ringEl = ctxPopFace ? ctxPopFace.el.querySelector(".split-ctx-ring") : ctxRingEl;
+  const r = ringEl.getBoundingClientRect();
   if (!r.width && !r.height) {
     // 环此刻不可见（启动读数未到/切标签清零中）：无处可贴，收起弹层
     ctxPop.classList.add("hidden");
@@ -2619,22 +3755,23 @@ function placeCtxPop() {
 }
 let ctxPopHideTimer = null;
 let ctxPopOpen = false;
-function openCtxPop() {
+function openCtxPop(face) {
   clearTimeout(ctxPopHideTimer);
+  ctxPopFace = face || null;
   ctxPopOpen = true;
   if (renderCtxPop()) { ctxPop.classList.remove("hidden"); placeCtxPop(); return; }
   // 还没有明细数据（本轮尚未发过消息也没拉过状态）：拉一次，回来时仍悬停着就补弹
-  request("chat.status").then((st) => {
+  request("chat.status", ctxPopFace ? { session_id: ctxPopFace.sid } : {}).then((st) => {
     if (st && st.context_detail) {
-      setContextDetail(st.context_detail, activeTab);
+      setContextDetail(st.context_detail, ctxPopFace || activeTab);
       if (ctxPopOpen && renderCtxPop()) { ctxPop.classList.remove("hidden"); placeCtxPop(); }
     }
   }).catch(() => {});
 }
 function closeCtxPop(now = false) {
   clearTimeout(ctxPopHideTimer);
-  if (now) { ctxPopOpen = false; ctxPop.classList.add("hidden"); return; }
-  ctxPopHideTimer = setTimeout(() => { ctxPopOpen = false; ctxPop.classList.add("hidden"); }, 150);
+  if (now) { ctxPopOpen = false; ctxPopFace = null; ctxPop.classList.add("hidden"); return; }
+  ctxPopHideTimer = setTimeout(() => { ctxPopOpen = false; ctxPopFace = null; ctxPop.classList.add("hidden"); }, 150);
 }
 if (ctxRingEl && ctxPop) {
   ctxRingEl.addEventListener("mouseenter", openCtxPop);
@@ -2655,6 +3792,7 @@ function setContextDetail(detail, tab) {
   if (!t || !detail) return;
   t.ctxDetail = detail;
   if (t === activeTab && ctxPopOpen && renderCtxPop()) placeCtxPop();
+  if (t === ctxPopFace && ctxPopOpen && renderCtxPop()) placeCtxPop();
 }
 
 // 任务清单面板（todo_write 工具驱动；渲染进右侧面板「任务清单」标签）
@@ -2809,7 +3947,10 @@ function setRunning(on, tab) {
   // 排队机制下发送永远可用：运行中点击 = 排队，按钮文案如实反馈
   const sendBtn = document.getElementById("btn-send");
   sendBtn.disabled = false;
-  sendBtn.textContent = on ? "排队" : "发送";
+  // 文案写进 .send-txt（挤压档按钮翻成纯图标，svg 常驻不能被 textContent 清掉）；
+  // 图标态下「发送/排队」的区别靠 title 悬停说明
+  (sendBtn.querySelector(".send-txt") || sendBtn).textContent = on ? "排队" : "发送";
+  sendBtn.title = on ? "运行中：点击排队追加一条消息（Enter）" : "发送（Enter）";
   document.getElementById("btn-stop").hidden = !on;
   renderTabs();
   // 宠物：开始干活换蹦跶动画；一轮跑完撒个花
@@ -2878,7 +4019,9 @@ function updateEtaChip(t) {
 
 function tickEtaChips() {
   let live = false;
-  for (const t of chatTabs) {
+  // 分屏列也是渲染面（task_estimate 会路由进列）：不遍历到它，列里的
+  // 「已 X 秒」永远停在 0
+  for (const t of [...chatTabs, ...splitPanes]) {
     if (t.eta && !t.eta.done) { updateEtaChip(t); live = true; }
   }
   if (!live && etaTimer) { clearInterval(etaTimer); etaTimer = null; }
@@ -2902,16 +4045,25 @@ function handleEvent(kind, data) {
   if (data && data.session_id && kind !== "session_updated") {
     routeTab = tabFor(data.session_id);
     if (!routeTab) {
-      // 无绑定会话的运行中标签：说明这是它懒创建的会话，直接认领，避免重复建标签
-      const adopt = chatTabs.find((t) => !t.sid && t.running);
-      if (adopt) {
-        adopt.sid = data.session_id;
-        currentSessionId = data.session_id;
-        routeTab = adopt;
-        renderTabs();
+      // 分屏列优先：该会话在分屏里跑（独立输入发出的），流式增量直接进列，
+      // 不走下面的「后台开标签」——分屏会话不该因此在标签栏冒出一个标签
+      const pane = splitPanes.find((p) => p.sid === data.session_id);
+      if (pane) {
+        routeTab = pane;
       } else {
-        routeTab = openTabForSession(data.session_id, "", { background: true });
-        refreshSessions();
+        // 无绑定会话的运行中标签：说明这是它懒创建的会话，直接认领，避免重复建标签
+        const adopt = chatTabs.find((t) => !t.sid && t.running);
+        if (adopt) {
+          adopt.sid = data.session_id;
+          currentSessionId = data.session_id;
+          migrateComposerSid("", data.session_id); // 空标签的输入区状态条目随认领迁移
+          if (adopt === activeTab) refreshActiveSessionBadges(adopt);
+          routeTab = adopt;
+          renderTabs();
+        } else {
+          routeTab = openTabForSession(data.session_id, "", { background: true });
+          refreshSessions();
+        }
       }
     }
   } else {
@@ -2921,9 +4073,9 @@ function handleEvent(kind, data) {
     case "thinking_delta": appendThinking(data.text); break;
     case "text_delta": appendStream(data.text); break;
     case "assistant_message": {
-      // 有流式元素（普通轮/主席融合）→ 收尾；无流式元素（对比模式的成员回答）→ 直接渲染完整气泡
+      // 有流式元素（普通轮/主席融合/对抗报告）→ 收尾；无流式元素（对比模式的成员回答）→ 直接渲染完整气泡
       const t = curTab();
-      const meta = data.message && data.message.roundtable;
+      const meta = data.message && (data.message.roundtable || data.message.adversarial);
       const seq = data.message && data.message.seq;
       if (t && t.streamingEl) {
         finishAssistant(meta, seq);
@@ -2936,6 +4088,11 @@ function handleEvent(kind, data) {
     case "roundtable_started": beginRoundtable(data.members || [], data.rounds || 1); break;
     case "roundtable_member_delta": rtMemberDelta(data); break;
     case "roundtable_member_finished": rtMemberFinished(data); break;
+    case "adversarial_started": beginAdversarial(data.roles || []); break;
+    case "adversarial_phase": advSetPhase(data.phase, data.note || ""); break;
+    case "adversarial_finding_proposed": advAddFinding(data); break;
+    case "adversarial_verdict": advApplyVerdict(data); break;
+    case "adversarial_finished": advFinished(data); break;
     case "team_started": beginTeam(data); break;
     case "team_message_delta": teamMemberDelta(data); break;
     case "team_message": teamMsgFinal(data); break;
@@ -2993,15 +4150,19 @@ function handleEvent(kind, data) {
     case "session_updated": {
       if (data.session_id) {
         if (data.deleted) {
-          // 其他窗口删了这个会话：摘掉本地缓存与打开的标签，列表随之刷新
+          // 其他窗口删了这个会话：摘掉本地缓存与打开的标签/分屏列，列表随之刷新
+          //（分屏列不收的话会残留成死列：⟳ 与发送对着已删会话只会报错）
           delete sessionMeta[data.session_id];
+          closeSplitPanesForSids(new Set([data.session_id]));
           const dead = tabFor(data.session_id);
           if (dead) closeTab(dead);
         } else {
           if (data.archived === true) {
-            // 归档：侧栏行消失，上方标签一并收掉（与删除同一处置，但会话没删——
-            // 归档弹窗里恢复后重新点开即可）。收标签走 closeTab，标签集合与
-            // ui.json 的恢复列表由 renderTabs 同步写回，重启不会把归档标签还原。
+            // 归档：侧栏行消失，上方标签与分屏列一并收掉（与删除同一处置，但
+            // 会话没删——归档弹窗里恢复后重新点开即可）。收标签走 closeTab，
+            // 标签集合与 ui.json 的恢复列表由 renderTabs 同步写回，重启不会把
+            // 归档标签还原。
+            closeSplitPanesForSids(new Set([data.session_id]));
             const t = tabFor(data.session_id);
             if (t) closeTab(t);
           }
@@ -3086,7 +4247,9 @@ function handleEvent(kind, data) {
       if (!(data.pending > 0)) {
         finishEta(routeTab); // 预估条定格（错误/中断路径没有 turn_finished，这里兜底）
         const doneTab = routeTab;
-        if (doneTab && doneTab.lastAssistantText.trim()) {
+        // `|| ""` 兜底：伪 tab（分屏列）理论上都有初值，这里再防一手
+        // undefined——trim 抛错会中断这次事件的后续处理
+        if (doneTab && (doneTab.lastAssistantText || "").trim()) {
           maybeNotify("任务完成", "本轮任务已结束，回来看看结果", "done",
             { sid: doneTab.sid });
         }
@@ -3127,6 +4290,28 @@ function handleEvent(kind, data) {
         if (last) attachMsgOps(last, routeTab, "user");
       }
       break; // 通知在 queue_updated（pending=0，队列清空）时发，避免多轮排队连响
+    }
+  }
+  // 分屏列的路由后状态同步：列头运行点/确认徽记跟着事件走。
+  // permission_request 主栏口径的全局确认条照弹（showPermission），列头另挂
+  // 🔒 提示这一栏在等确认；确认面板是主栏单例，点列头 🔒 带着待确认数据去
+  // 主栏处理。运行点只认 queue_updated（后端的运行状态唯一事实源）：
+  // assistant_message 每个中间轮（含工具调用轮）都会发、task_finished 是后台
+  // 子代理任务终态——拿它们当轮末信号会把蓝点在回合中途熄灭；running 标志
+  // 已由上面 setRunning 按 queue_updated 维护，这里只补画列头（setRunning 对
+  // 非活动标签提前 return，不会自己调 paintSplitHead）
+  if (splitPanes.includes(routeTab)) {
+    const pane = routeTab;
+    if (kind === "queue_updated") {
+      paintSplitHead(pane);
+    } else if (kind === "permission_request") {
+      pane.needsPerm = true;
+      pane.permData = data; // 列头 🔒 点击时转移到主栏标签恢复确认卡
+      paintSplitHead(pane);
+    } else if (kind === "permission_resolved") {
+      pane.needsPerm = false;
+      pane.permData = null;
+      paintSplitHead(pane);
     }
   }
 }
@@ -3268,7 +4453,13 @@ async function refreshSessions(prefetched) {
   // 不随标签切换自动进退——高亮与陈列都只由「点哪行」决定
   if (classicViewGk === "quick") {
     // 无快聊对话时不摆空态提示（入口就在项目区的「快聊」行上，不必再教一遍）
-    renderPlainList(ul, Array.isArray(quick_sessions) ? quick_sessions : [], "quick", "");
+    const qlist = Array.isArray(quick_sessions) ? quick_sessions : [];
+    const qOrdered = orderedSessionList(qlist, classicViewGk);
+    lastGroupedListByGroup.set(classicViewGk, qOrdered); // 拖拽排序的家族归并数据源（commitSessionOrder 读）
+    renderPlainList(ul, qOrdered, "quick", "");
+    // 与 proj 视图同一套拖拽：列表内重排（序存 quick 键）、拖出进对话区=分屏
+    // （快聊属固定项目、无 root_path，drop 侧不会触发切换，本机分屏列全可交互）
+    wirePlainListDrag(ul, qOrdered, classicViewGk);
     const footer = document.getElementById("session-footer");
     if (footer) { // 页脚统计是当前项目的，特殊列表下不展示也不残留
       footer.classList.add("hidden");
@@ -3282,8 +4473,61 @@ async function refreshSessions(prefetched) {
     const rid = classicViewGk.slice("remote:".length);
     const all = await request("session.list", { all_projects: 1 }).catch(() => null);
     const rlist = ((all && all.sessions) || []).filter((s) => String(s.project_id) === rid);
-    renderPlainList(ul, rlist, classicViewGk,
+    const rOrdered = orderedSessionList(rlist, classicViewGk);
+    lastGroupedListByGroup.set(classicViewGk, rOrdered); // 拖拽排序的家族归并数据源（commitSessionOrder 读）
+    renderPlainList(ul, rOrdered, classicViewGk,
       "还没有渠道对话——在飞书/微信里给机器人发条消息就会出现在这里");
+    // 与 proj 视图同一套拖拽：列表内重排（序存 remote:<id> 键）、拖出进对话区
+    // =分屏（渠道会话属固定项目、无 root_path，drop 侧不触发切换，本机列全可交互）
+    wirePlainListDrag(ul, rOrdered, classicViewGk);
+    const footer = document.getElementById("session-footer");
+    if (footer) {
+      footer.classList.add("hidden");
+      footer.innerHTML = "";
+    }
+    renderRailSessions(sessions);
+    return;
+  }
+  if (classicViewGk && classicViewGk.startsWith("proj:")) {
+    // 「看其他项目」列表（点项目区其他项目行进入）：跨项目拉取后按项目过滤；
+    // 行点击＝先切工作项目再打开（后端要求会话在其项目内激活，同分组视图
+    // 跨项目行点击的流程）
+    const pid = classicViewGk.slice("proj:".length);
+    const all = await request("session.list", { all_projects: 1 }).catch(() => null);
+    const plist = ((all && all.sessions) || []).filter((s) => String(s.project_id) === pid);
+    const projs = ((await request("project.list").catch(() => null)) || {}).projects || [];
+    const target = projs.find((p) => String(p.id) === pid);
+    ul.innerHTML = "";
+    if (!plist.length) {
+      ul.innerHTML = '<li class="empty-hint">这个项目还没有对话</li>';
+    } else {
+      const ordered = orderedSessionList(plist, classicViewGk);
+      lastGroupedListByGroup.set(classicViewGk, ordered); // 拖拽排序的家族归并数据源（commitSessionOrder 读）
+      ordered.forEach((s) => {
+        const li = renderSessionItem(s, ul);
+        // 与经典/分组视图同一套拖拽：列表内重排（序存 proj:<id> 键）、
+        // 拖出列表进对话区 = 转分屏打开（跨项目由 drop 侧先切项目再开列）
+        wireSessionDrag(li, s, ordered, classicViewGk, () => refreshSessions(), "classic");
+        if (target && target.root_path && !target.is_current) {
+          li.title = "属于项目「" + (target.name || "") + "」—— 点击切换过去并打开";
+          li.onclick = async () => {
+            // 先记住目标会话再切项目：切完的列表重画会照它恢复选中高亮
+            activeSessionSid = s.id;
+            try {
+              await request("project.switch", { path: target.root_path });
+              await applyWorkspaceData(await fetchWorkspaceData());
+            } catch (e) {
+              addNotice("切换到该项目失败：" + e.message);
+              return;
+            }
+            openTabForSession(s.id, s.title);
+            clearTodoPanel();
+            addNotice("已打开会话 " + (s.title || s.id));
+          };
+        }
+        ul.appendChild(li);
+      });
+    }
     const footer = document.getElementById("session-footer");
     if (footer) {
       footer.classList.add("hidden");
@@ -3907,7 +5151,7 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
 function wireListDrag(el, item, opts) {
   el.draggable = true;
   el.addEventListener("dragstart", (e) => {
-    wireListDrag.active = { item, over: null };
+    wireListDrag.active = { item, over: null, tag: opts.tag || null };
     el.classList.add("dragging", "sess-dragging");
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(item.id ?? "")); // Firefox：不 setData 不起拖
@@ -4034,6 +5278,7 @@ function commitProjectOrder(srcKey, dstKey, pos, listId = "session-list", rowSel
     .pgroup-head 去收集，经典视图里一个都找不到，拖动永远空转 */
 function wireSessionDrag(li, s, list, gkey, rerender, view = "grouped") {
   wireListDrag(li, s, {
+    tag: "session", // 对话区的落点认这个标记：会话行拖进对话区 = 转分屏打开
     over: (e, item, dragged) => {
       // 同级判定：拖到子行上重定向到父；同家族块不响应。
       // 注意三个来源别搞混：item＝被悬停的行（本闭包绑定的会话），
@@ -4050,6 +5295,16 @@ function wireSessionDrag(li, s, list, gkey, rerender, view = "grouped") {
     },
     commit: (dst, pos) => commitSessionOrder(String(gkey), s.id, dst.id, pos, view),
     rerender: rerender || refreshSessionsGrouped,
+  });
+}
+
+/** 快聊 / 远程连接列表（renderPlainList 渲染）的拖拽接线：按 sid 找回行元素，
+    套上与会话行同一套 wireSessionDrag（列表内重排 + 拖出进对话区=分屏）。
+    renderPlainList 的行结构对这里透明——没有 data-sid 的行（空态提示等）自然跳过。 */
+function wirePlainListDrag(ul, ordered, gkey) {
+  ordered.forEach((s) => {
+    const li = ul.querySelector('li[data-sid="' + String(s.id) + '"]');
+    if (li) wireSessionDrag(li, s, ordered, gkey, () => refreshSessions(), "classic");
   });
 }
 
@@ -4370,6 +5625,9 @@ function svgIcon(name) {
     trash: '<path d="M2.5 4h11M6.5 4V2.8h3V4M4.2 4l.6 9h6.4l.6-9"/><path d="M6.6 6.5v4.5M9.4 6.5v4.5"/>',
     archive: '<path d="M2.5 2.8h11v2.4h-11z"/><path d="M3.6 5.2v7.1a.8.8 0 0 0 .8.8h7.2a.8.8 0 0 0 .8-.8V5.2"/><path d="M6.3 8.1h3.4"/>',
     tag: '<path d="M2.5 3.5h4.4l6.6 6.6-4.4 4.4-6.6-6.6z"/><circle cx="5.8" cy="5.8" r="1"/>',
+    folder: '<path d="M1.8 4.2a.9.9 0 0 1 .9-.9h3.4l1.5 1.7h5.7a.9.9 0 0 1 .9.9v6a.9.9 0 0 1-.9.9H2.7a.9.9 0 0 1-.9-.9z"/>',
+    copy: '<rect x="5.4" y="5.4" width="8" height="8" rx="1"/><path d="M10.6 5.4V3.6a1 1 0 0 0-1-1H3.6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h1.8"/>',
+    split: '<rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M8 2.8v10.4"/>',
   };
   return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"' +
     ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + P[name] + "</svg>";
@@ -4402,6 +5660,43 @@ function showSessionMenu(s, li, pos) {
       },
     },
     { icon: "rename", label: "重命名", act: () => startInlineRename(s, li) },
+    {
+      icon: "split",
+      label: "在分屏打开",
+      act: () => openSplitPane(s.id, s.title),
+    },
+    // 定位/复制类：快聊（default）/远程连接（remote-control）/项目会话
+    // 都有真实工作目录，这两项对所有会话开放
+    ...([
+      {
+        icon: "folder",
+        label: "在资源管理器中打开",
+        act: async () => {
+          try { await request("session.reveal", { id: s.id }); }
+          catch (e) { addNotice(e.message); }
+        },
+      },
+      {
+        icon: "copy",
+        label: "复制项目路径",
+        act: async () => {
+          try {
+            const r = await request("session.project_path", { id: s.id });
+            if (!r.path) { addNotice("这个会话没有工作目录"); return; }
+            await copyTextToClipboard(r.path);
+            addNotice("已复制工作目录路径");
+          } catch (e) { addNotice(e.message); }
+        },
+      },
+    ]),
+    {
+      icon: "copy",
+      label: "复制会话 ID",
+      act: async () => {
+        await copyTextToClipboard(s.id);
+        addNotice("已复制会话 ID");
+      },
+    },
     { icon: "trash", label: "删除会话", danger: true, act: () => deleteSessionModal(s) },
   ];
   items.forEach((it) => {
@@ -4715,6 +6010,7 @@ function deleteSessionModal(s) {
     const r = await request("session.delete", { id: s.id });
     const deadTab = tabFor(s.id);
     if (deadTab) closeTab(deadTab);
+    closeSplitPanesForSids(new Set([s.id])); // 开着分屏的也一并收掉
     if (r.switched_to) {
       addNotice(`已删除会话「${name}」，已切换到「${r.switched_to.title || "(未命名)"}」`);
     } else if (r.new_active) {
@@ -4748,47 +6044,109 @@ function downloadDataZip(filename, b64) {
 }
 
 function setModelChip(text) {
-  document.getElementById("model-chip").textContent = text;
+  const chip = document.getElementById("model-chip");
+  (chip.querySelector(".mc-txt") || chip).textContent = text;
 }
 
 // ---------- 思考强度：顶栏控件（自动 / 低 / 中 / 高）----------
-// 只对声明支持的服务显示；档位存 config.toml 的 provider 字段，切换立即对下一轮生效。
+// 档位按会话生效（session.reasoning_get/set，本机专属）；空标签（无会话）
+// 回全局口径（model.reasoning / model.set_reasoning）。
 let reasoningState = { supported: false, effort: "auto", labels: {}, efforts: [] };
+const reasoningChipEl = document.getElementById("reasoning-chip");
 
-function renderReasoningChip(state) {
-  reasoningState = state || { supported: false, effort: "auto", labels: {}, efforts: [] };
-  const chip = document.getElementById("reasoning-chip");
-  const supported = !!reasoningState.supported;
-  chip.classList.toggle("hidden", !supported);
+/** 把思考强度状态画到目标徽章上（主栏 chip 与分屏列徽章共用一套视觉）；
+    不支持思考的服务隐藏徽章。目标是主栏 chip 时顺带更新全局缓存。 */
+function renderReasoningChip(targetEl, state) {
+  const st = state || { supported: false, effort: "auto", labels: {}, efforts: [] };
+  if (targetEl === reasoningChipEl) reasoningState = st;
+  const supported = !!st.supported;
+  targetEl.classList.toggle("hidden", !supported);
   if (!supported) return;
-  const label = (reasoningState.labels || {})[reasoningState.effort] || reasoningState.effort;
-  // 徽章只显示档位（不再拼「思考」前缀）；完整语义走 title 悬停提示
-  chip.textContent = label;
-  chip.title = reasoningState.effort === "auto"
+  const label = (st.labels || {})[st.effort] || st.effort;
+  // 徽章只显示档位（不再拼「思考」前缀）；完整语义走 title 悬停提示。
+  // 档位写进 .chip-txt：挤压档整个徽章翻成纯图标（图标是常驻 DOM，不能被清掉）
+  (targetEl.querySelector(".chip-txt") || targetEl).textContent = label;
+  targetEl.title = st.effort === "auto"
     ? "当前思考强度：自动 · 每轮按任务复杂度实时调整（简单更快更省、复杂加深）· 点击调整"
     : `当前思考强度：${label} · 点击调整（自动 / 低 / 中 / 高）`;
-  chip.classList.toggle("weak", reasoningState.effort === "auto");
+  targetEl.classList.toggle("weak", st.effort === "auto");
 }
 
 async function refreshReasoning() {
+  // 活动标签有会话：按会话生效档位刷（三段解析在后端）；空标签：全局口径。
+  // 竞态防护：闭包捕获 tab，落地前已切走就丢弃（照抄 loadTabHistory 的先消费模式）
+  const tab = activeTab;
+  if (tab && tab.sid) {
+    const r = await request("session.reasoning_get", { id: tab.sid }).catch(() => null);
+    if (r) {
+      if (activeTab !== tab || (r.session_id && r.session_id !== tab.sid)) return;
+      renderReasoningChip(reasoningChipEl, {
+        supported: r.supported, effort: r.effort, labels: r.labels, efforts: r.efforts,
+      });
+      return;
+    }
+    // 读不到就回退全局口径（远程端 session.reasoning_get 是本机专属——
+    // 不回退的话远程端徽章永远隐藏）；本地读不到也说明该会话没有会话级口径
+  }
   const r = await request("model.reasoning").catch(() => null);
-  if (r) renderReasoningChip(r.reasoning);
+  if (r && activeTab === tab) renderReasoningChip(reasoningChipEl, r.reasoning);
 }
 
 const reasoningMenu = document.getElementById("reasoning-menu");
+let reasoningAnchorEl = null; // 菜单当前锚点（主栏 chip 或分屏列徽章）
+let reasoningSid = "";        // 菜单作用的会话 sid（空 = 全局口径）
 
 function hideReasoningMenu() {
   reasoningMenu.classList.add("hidden");
+  reasoningAnchorEl = null;
+  reasoningSid = "";
 }
 
-async function toggleReasoningMenu(e) {
+/** 打开思考强度菜单。anchor：定位与外点关闭豁免的锚点元素；sid：作用会话
+    （主栏传 activeTab.sid，分屏列传 pane.sid；空 = 全局口径）。 */
+async function toggleReasoningMenu(e, anchor, sid) {
   if (e) e.stopPropagation();
   if (!reasoningMenu.classList.contains("hidden")) return hideReasoningMenu();
-  const chip = document.getElementById("reasoning-chip");
-  const r = chip.getBoundingClientRect();
+  reasoningAnchorEl = anchor || reasoningChipEl;
+  reasoningSid = sid || "";
+  const rect = reasoningAnchorEl.getBoundingClientRect();
+  reasoningMenu.innerHTML = '<div class="rt-menu-tip">加载中…</div>';
+  reasoningMenu.classList.remove("hidden");
+  // 徽章住在屏幕底部的输入区工具条里：向上弹（uiScale 换算与模型菜单同套）
+  reasoningMenu.style.top = "auto";
+  reasoningMenu.style.bottom = (window.innerHeight / uiScale - rect.top / uiScale + 6) + "px";
+  reasoningMenu.style.left = Math.max(8, rect.left / uiScale) + "px";
+  // 会话级：开菜单先拉该会话生效档位（不依赖主栏缓存）；全局：用缓存
+  let st = reasoningState;
+  if (reasoningSid) {
+    const r = await request("session.reasoning_get", { id: reasoningSid }).catch(() => null);
+    if (!r) {
+      // 读不到（远程端该方法本机专属等）：给可读提示并自动收起，不把菜单
+      // 永远停在「加载中…」
+      reasoningMenu.innerHTML =
+        '<div class="rt-menu-tip">无法读取该会话的思考档位（按会话调整仅限本机界面）</div>';
+      setTimeout(() => {
+        // 只收起还停在这条提示上的菜单：期间用户重开菜单不误伤
+        if (!reasoningMenu.classList.contains("hidden") &&
+            reasoningMenu.firstElementChild &&
+            reasoningMenu.firstElementChild.classList.contains("rt-menu-tip")) {
+          hideReasoningMenu();
+        }
+      }, 2600);
+      return;
+    }
+    if (reasoningMenu.classList.contains("hidden")) return;
+    st = { supported: r.supported, effort: r.effort, labels: r.labels, efforts: r.efforts };
+  }
   reasoningMenu.innerHTML = "";
-  const efforts = reasoningState.efforts && reasoningState.efforts.length
-    ? reasoningState.efforts : ["auto", "low", "medium", "high"];
+  if (!st.supported) {
+    const tip = document.createElement("div");
+    tip.className = "rt-menu-tip";
+    tip.textContent = "当前模型不支持调整思考强度";
+    reasoningMenu.appendChild(tip);
+    return;
+  }
+  const efforts = st.efforts && st.efforts.length ? st.efforts : ["auto", "low", "medium", "high"];
   const desc = {
     auto: "按任务复杂度实时调整",
     low: "更快、更省，适合简单问答与格式整理",
@@ -4797,35 +6155,56 @@ async function toggleReasoningMenu(e) {
   };
   efforts.forEach((eff) => {
     const b = document.createElement("button");
-    b.className = "rp-mini" + (eff === reasoningState.effort ? " primary" : "");
+    b.className = "rp-mini" + (eff === st.effort ? " primary" : "");
     b.style.display = "block";
     b.style.width = "100%";
-    b.textContent = `${(reasoningState.labels || {})[eff] || eff} · ${desc[eff] || ""}`;
+    b.textContent = `${(st.labels || {})[eff] || eff} · ${desc[eff] || ""}`;
     b.onclick = async () => {
+      const anchorEl = reasoningAnchorEl;
+      const targetSid = reasoningSid;
+      // 落地竞态防护（照模型菜单先例）：开菜单后切过标签/关过列就作废——
+      // 旧 sid 会把档位设到另一个会话上，还会把旧会话的档位画进当前会话的
+      // 徽章。Ctrl+Tab 等键盘切标签不产生外点点击，菜单会带着旧 sid 存活，
+      // 这里在落地一刻校验锚点与会话仍然匹配。主栏 chip 要求活动会话仍是
+      // 发起时的那个；列徽章要求那一列还开着且锚点仍在列上。
+      const anchorValid = !!anchorEl && anchorEl.isConnected && (!targetSid ||
+        splitPanes.some((p) => p.sid === targetSid && p.el.contains(anchorEl)) ||
+        (activeTab && activeTab.sid === targetSid && anchorEl === reasoningChipEl));
       hideReasoningMenu();
+      if (!anchorValid) {
+        addNotice("会话已切换，请重新打开思考强度菜单再选");
+        return;
+      }
       try {
-        const res = await request("model.set_reasoning", { effort: eff });
-        renderReasoningChip(res.reasoning);
-        const label = (res.reasoning.labels || {})[eff] || eff;
-        addNotice(`思考强度已设为「${label}」，下一轮对话生效`);
+        if (targetSid) {
+          const res = await request("session.reasoning_set", { id: targetSid, effort: eff });
+          // 落地校验：只刷发起菜单的那个徽章（主栏 chip 顺带更新缓存）
+          renderReasoningChip(anchorEl, {
+            supported: res.supported, effort: res.effort, labels: res.labels, efforts: res.efforts,
+          });
+          const label = (res.labels || {})[eff] || eff;
+          addNotice(`思考强度已设为「${label}」，本会话下一轮对话生效`);
+        } else {
+          const res = await request("model.set_reasoning", { effort: eff });
+          renderReasoningChip(anchorEl, res.reasoning);
+          const label = (res.reasoning.labels || {})[eff] || eff;
+          addNotice(`思考强度已设为「${label}」，下一轮对话生效`);
+        }
       } catch (err) {
         addNotice("设置失败: " + err.message);
       }
     };
     reasoningMenu.appendChild(b);
   });
-  reasoningMenu.classList.remove("hidden");
-  // 徽章在屏幕底部的输入区工具条里：向上弹（顺带补上与模型菜单同一套 uiScale 换算）
-  reasoningMenu.style.top = "auto";
-  reasoningMenu.style.bottom = (window.innerHeight / uiScale - r.top / uiScale + 6) + "px";
-  reasoningMenu.style.left = Math.max(8, r.left / uiScale) + "px";
 }
 
-document.getElementById("reasoning-chip").onclick = toggleReasoningMenu;
+reasoningChipEl.onclick = (e) =>
+  toggleReasoningMenu(e, reasoningChipEl, activeTab && activeTab.sid);
 document.addEventListener("click", (e) => {
+  // 外点关闭只豁免当前锚点（主栏 chip 或分屏列徽章，随菜单存引用比对）
   if (!reasoningMenu.classList.contains("hidden") &&
       !reasoningMenu.contains(e.target) &&
-      e.target.id !== "reasoning-chip") hideReasoningMenu();
+      !(reasoningAnchorEl && reasoningAnchorEl.contains(e.target))) hideReasoningMenu();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") hideReasoningMenu();
@@ -4846,15 +6225,18 @@ function hideModelMenu() {
   modelMenu.innerHTML = "";
 }
 
-function buildModelRows(detail) {
+function buildModelRows(detail, cur) {
   // 已启用的服务 × 各自已启用的模型 = 可切换清单（disabled 名单里的不会出现在 detail.providers）
+  // cur：会话当前生效模型 {name, model}（主栏按会话标 ✓）；不传按全局 config 标
   const rows = [];
   for (const [name, p] of Object.entries(detail.providers)) {
     for (const m of p.models || []) {
       rows.push({
         name, model: m, hasKey: p.has_key,
         label: p.label || name, // 界面显示名（预设如「智谱」「小米 Mimo」）
-        active: p.is_active && m === (p.active_model || p.model),
+        active: cur
+          ? name === cur.name && m === (cur.model || p.active_model || p.model)
+          : p.is_active && m === (p.active_model || p.model),
         preset: !!p.is_preset, // 内置预设归「默认」，用户新增的归「自定义」
       });
     }
@@ -4878,7 +6260,15 @@ async function toggleModelMenu(e) {
   if (!detail || modelMenu.classList.contains("hidden")) return; // 请求失败或期间已被关掉
   // 新会话默认模型（★ 行标记用）：拉取失败不阻塞菜单
   defaultModelPref = await request("default_model.get").catch(() => defaultModelPref) || defaultModelPref;
-  const rows = buildModelRows(detail);
+  // 会话生效模型：主栏开着会话时按会话标 ✓（三段解析在后端，含默认模型会话）；
+  // 空标签按全局 config 标。开菜单到落地都认 tabAtOpen，切换标签后菜单作废
+  const tabAtOpen = activeTab;
+  let sessCur = null;
+  if (tabAtOpen && tabAtOpen.sid) {
+    const cg = await request("session.model_get", { id: tabAtOpen.sid }).catch(() => null);
+    if (cg && activeTab === tabAtOpen && cg.session_id === tabAtOpen.sid) sessCur = cg;
+  }
+  const rows = buildModelRows(detail, sessCur);
   // 两页：内置预设 = 默认，用户新增 = 自定义（页签沿用侧栏搜索范围的分段控件样式）
   const groups = [
     {
@@ -4899,7 +6289,7 @@ async function toggleModelMenu(e) {
         ? `<span class="mm-def" title="新会话将默认使用这个模型">★ 新会话默认</span>` : "") +
       `<span class="mm-prov${row.hasKey ? "" : " no-key"}">${row.hasKey ? "" : "⚠ "}${escapeHtml(row.label)}</span>`;
     b.title = row.hasKey
-      ? `切换到 ${row.label} / ${row.model}（点击）；Shift+点击 设为新会话默认`
+      ? `切换到 ${row.label} / ${row.model}（点击${sessCur ? "，只影响当前会话" : ""}）；Shift+点击 设为新会话默认`
       : `「${row.label}」还没配置 API Key，切换过去会失败`;
     b.onclick = async (ev) => {
       // Shift+点击：把这一行设为「新会话默认模型」（不改当前对话）
@@ -4915,11 +6305,28 @@ async function toggleModelMenu(e) {
         return;
       }
       hideModelMenu();
+      // 落地竞态防护：开菜单后切过标签就作废，模型换到错会话比不切更糟
+      if (activeTab !== tabAtOpen) {
+        addNotice("标签已切换，请重新打开模型菜单再选");
+        return;
+      }
       try {
-        const r = await request("model.switch", { name: row.name, model: row.model });
+        // 主栏有会话：切换记在该会话上（session.model_switch，本机专属），
+        // 其余会话与全局不动；空标签：全局切换
+        const sid = tabAtOpen ? tabAtOpen.sid : "";
+        const r = sid
+          ? await request("session.model_switch", { id: sid, name: row.name, model: row.model })
+          : await request("model.switch", { name: row.name, model: row.model });
         curProviderName = r.provider;
         curModelName = r.model;
         if (r.supports_vision !== undefined) curSupportsVision = r.supports_vision !== false;
+        if (!sid) {
+          // 全局切换：空标签徽章的全局镜像一并刷新（会话级切换不动全局）
+          globalProviderName = r.provider;
+          globalModelName = r.model;
+          globalSupportsVision = curSupportsVision;
+        }
+        if (sid) saveComposerState(sid); // 会话生效模型写回状态条目
         hideBanner();
         setModelChip(`${r.provider}/${r.model}`);
         addNotice(`✓ 已切换到「${r.provider} / ${r.model}」，当前对话立即生效`);
@@ -5664,7 +7071,9 @@ function snippetFillModal(fields) {
   });
 }
 
-async function insertSnippet(s) {
+let snippetFace = null; // 插入目标面（菜单唤起的那一面）
+async function insertSnippet(s, face) {
+  snippetFace = face || null;
   let content = s.content || "";
   // 剪贴板：读得到直接替换；读不到 / 为空时原位换成填空字段，别让占位符原样溜进消息
   if (content.includes("{{clipboard}}")) {
@@ -5694,11 +7103,11 @@ async function insertSnippet(s) {
     content = content.split("{{time}}").join(`${p2(now.getHours())}:${p2(now.getMinutes())}`);
     content = content.split("{{project}}").join(currentProjectName() || "当前项目");
   }
-  const input = document.getElementById("input");
+  const input = faceInputEl(snippetFace);
   input.value = (input.value ? input.value + "\n" : "") + content;
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
-  autoGrowInput();
+  autoGrowInput(input);
   hideInputMenu();
   // 使用统计（设置页展示「用过 N 次」）；内置兜底项没有 id，不上报；失败无碍
   if (s.id) request("snippets.used", { id: s.id }).catch(() => {});
@@ -5760,7 +7169,11 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
   curProviderName = snap.provider || "";
   curModelName = snap.model || "";
   curSupportsVision = snap.supports_vision !== false; // 贴图前的前置提示用
-  refreshReasoning(); // 思考强度控件按当前服务的支持情况显示
+  // 空标签徽章的全局镜像同源刷新（boot / 切项目都走这里）
+  globalProviderName = curProviderName;
+  globalModelName = curModelName;
+  globalSupportsVision = curSupportsVision;
+  refreshReasoning(); // 思考徽章按当前口径显示（活动会话取会话级，空标签取全局）
   sessionMeta = {};
   (snap.sessions || []).forEach((s) => { sessionMeta[s.id] = { title: s.title }; });
   if (snap.session) {
@@ -5980,45 +7393,203 @@ const RT_ROLES = [
 ];
 const rtRoleLabel = (id) => (RT_ROLES.find((r) => r[0] === id) || RT_ROLES[0])[1];
 
-function setRtOn(on) {
-  const wasTeam = teamOn;
-  rtOn = on;
-  document.getElementById("rt-switch").classList.toggle("on", on);
-  // 同一条消息只能选一种协作模式：开圆桌自动关团队（后端双开报参数错）
-  if (on) setTeamOn(false);
-  if (on && wasTeam) addNotice("已切换到圆桌，团队已关闭（同一条消息只能选一种协作模式）");
-  updateRtHint();
-}
-
-// 激活态在图标旁展开状态徽记（cp-state）：发送前一眼确认本条的协作模式与
-// 成员数，不用悬停翻 title；关闭时隐藏文字恢复纯图标
-function updateRtHint() {
-  const btn = document.getElementById("rt-switch");
+// 协作单按钮统一画笔：圆桌 / 团队共用一个入口——徽记显示当前模式与成员数，
+// 配色随模式（圆桌紫 / 团队绿），关闭时恢复纯图标。setRtOn/setTeamOn/两处
+// 成员确定回包都经它刷新。
+function updateCoopHint() {
+  const btn = document.getElementById("coop-switch");
+  if (!btn) return;
   const n = rtMembers ? rtMembers.length : 0;
-  btn.title = (n
-    ? `圆桌（已指定 ${n} 个成员）：本条消息由多个模型并行思考，融合成更好的答案`
-    : "圆桌：自动挑选已配置 Key 的模型共同思考，融合成更好的答案（点 ▾ 可指定成员）");
+  const tn = teamMembers ? teamMembers.length : 0;
+  const an = advRolesPicked();
+  btn.classList.toggle("on", rtOn || teamOn || advOn);
+  btn.classList.toggle("coop-rt", rtOn && !teamOn && !advOn);
+  btn.classList.toggle("coop-team", teamOn && !advOn);
+  btn.classList.toggle("coop-adv", advOn);
+  if (rtOn) {
+    btn.title = (n
+      ? `圆桌（已指定 ${n} 个成员）：本条消息由多个模型并行思考，融合成更好的答案`
+      : "圆桌：自动挑选已配置 Key 的模型共同思考，融合成更好的答案（点击可换模式或指定成员）");
+  } else if (teamOn) {
+    if (teamDirectorIsAi()) {
+      const who = `AI 总管（${teamDirector.provider}/${teamDirector.model || "服务默认模型"}）`;
+      btn.title = `团队（${tn ? `已指定 ${tn} 名队员` : "队员自动挑选"} · ${who}）：` +
+        "AI 总管自动拆解、派工、验收、交付；你随时插话，或点团队卡上的「接管」亲自指挥";
+    } else {
+      btn.title = (tn
+        ? `团队（已指定 ${tn} 个成员）：开启后组建团队，你的消息作为总管指令进入团队频道`
+        : "团队：自动挑选已配置 Key 的模型组建团队，你以总管身份派工、验收、交付（点击可换模式或指定成员）");
+    }
+  } else if (advOn) {
+    btn.title = (an
+      ? `对抗（${an} 个角色已指定模型）：发现者找问题 → 调查者核实 → 建议者给方案，裁判出终审报告`
+      : "对抗：自动挑选已配置 Key 的模型做对抗性审查——找问题、核实真伪、给方案、终审报告（点击可换模式或指定角色模型）");
+  } else {
+    btn.title = "协作：圆桌 / 团队 / 对抗（点击选择模式与成员）";
+  }
   const state = btn.querySelector(".cp-state");
   if (!state) return;
-  state.hidden = !rtOn;
-  state.textContent = rtOn ? (n ? `圆桌·${n}` : "圆桌·自动") : "";
+  state.hidden = !rtOn && !teamOn && !advOn;
+  state.textContent = rtOn ? (n ? `圆桌·${n}` : "圆桌·自动")
+    : teamOn ? (teamDirectorIsAi() ? "团队·AI总管" : tn ? `团队·${tn}人` : "团队·自动")
+    : advOn ? (an ? `对抗·指定${an}` : "对抗·自动")
+    : "";
 }
-updateRtHint();
 
-async function showRtMenu(e) {
+function setRtOn(on, silent = false) {
+  const wasTeam = teamOn;
+  rtOn = on;
+  // 同一条消息只能选一种协作模式：开圆桌自动关团队/对抗（后端多开报参数错）
+  if (on) setTeamOn(false, silent);
+  if (on) setAdvOn(false, silent);
+  if (!silent && on && wasTeam) addNotice("已切换到圆桌，团队已关闭（同一条消息只能选一种协作模式）");
+  updateCoopHint();
+}
+
+// ---------- 协作统一菜单：圆桌 / 团队 / 关闭 一个入口 ----------
+// 菜单保持单列模式清单；点「圆桌」「团队」即生效，并在本弹层右方放出对应的
+// 设置弹层（rt-menu / team-menu，锚在菜单右侧，放不下自动换到左侧）。
+// coopRenderGuard：程序性重建菜单（innerHTML 清空再画）会让被点的按钮瞬间
+// 脱离 DOM，外点关闭监听会误判「点在菜单外」把菜单关掉——重建期间跳过关闭。
+let coopRenderGuard = false;
+
+function showCoopMenu(e) {
   e.stopPropagation(); // 别让随后冒泡到 document 的 click 立刻把菜单关掉
-  const menu = document.getElementById("rt-menu");
-  if (!menu.classList.contains("hidden")) return menu.classList.add("hidden");
+  const menu = document.getElementById("coop-menu");
+  if (!menu.classList.contains("hidden")) {
+    menu.classList.add("hidden");
+    closeRtTeamPopups();
+    return;
+  }
+  renderCoopMenuItems(menu);
+  positionRtMenu(menu, "coop-switch");
+  menu.classList.remove("hidden");
+}
+
+function renderCoopMenuItems(menu) {
+  const closeMenu = () => { menu.classList.add("hidden"); closeRtTeamPopups(); };
+  menu.innerHTML = "";
+  const active = rtOn ? "rt" : teamOn ? "team" : advOn ? "adv" : "off";
+  const tip = document.createElement("div");
+  tip.className = "rt-menu-tip";
+  tip.textContent = "协作模式（本条消息生效，发送后复位）：";
+  menu.appendChild(tip);
+  const n = rtMembers ? rtMembers.length : 0;
+  const tn = teamMembers ? teamMembers.length : 0;
+  const an = advRolesPicked();
+  const modes = [
+    {
+      key: "off", active: active === "off",
+      label: "不用协作", desc: "普通单模型对话",
+    },
+    {
+      key: "rt", active: active === "rt",
+      label: rtOn && n ? `圆桌 · ${n} 个成员` : "圆桌",
+      desc: "多个模型并行思考，融合成更好的答案",
+    },
+    {
+      key: "team", active: active === "team",
+      label: teamOn ? (teamDirectorIsAi() ? "团队 · AI 总管" : tn ? `团队 · ${tn} 名队员` : "团队 · 自动")
+        : "团队",
+      desc: "组建团队，你的消息作为总管指令进入团队频道",
+    },
+    {
+      key: "adv", active: active === "adv",
+      label: advOn && an ? `对抗 · 指定 ${an} 个角色` : "对抗",
+      desc: "对抗性审查：找问题 → 核实 → 给方案 → 终审报告",
+    },
+  ];
+  for (const m of modes) {
+    const b = document.createElement("button");
+    b.className = "coop-mode-item" + (m.active ? " active" : "");
+    b.innerHTML = `<span class="coop-mode-check">${m.active ? "✓" : ""}</span>` +
+      `<span class="coop-mode-body">` +
+      `<span class="coop-mode-label">${escapeHtml(m.label)}</span>` +
+      `<span class="coop-mode-desc">${escapeHtml(m.desc)}</span>` +
+      `</span>`;
+    b.title = m.active ? "再点一次收起" : "点击启用，并在右侧放出设置";
+    b.onclick = () => {
+      if (m.active) { closeMenu(); return; }
+      coopRenderGuard = true;
+      if (m.key === "rt") { setRtOn(true); openSettingsBeside("rt"); }
+      else if (m.key === "team") { setTeamOn(true); openSettingsBeside("team"); }
+      else if (m.key === "adv") { setAdvOn(true); openSettingsBeside("adv"); }
+      else { setRtOn(false, true); setTeamOn(false, true); setAdvOn(false, true); closeRtTeamPopups(); }
+      renderCoopMenuItems(menu);
+      positionRtMenu(menu, "coop-switch");
+      setTimeout(() => { coopRenderGuard = false; }, 0);
+    };
+    menu.appendChild(b);
+  }
+}
+
+// 设置弹层贴在协作菜单右侧放出（放不下换到左侧）；确定后连协作菜单一起收起
+function closeRtTeamPopups() {
+  for (const id of ["rt-menu", "team-menu", "adv-menu"]) {
+    const m = document.getElementById(id);
+    if (m) m.classList.add("hidden");
+  }
+}
+
+function openSettingsBeside(kind) {
+  closeRtTeamPopups();
+  const menu = document.getElementById(
+    kind === "rt" ? "rt-menu" : kind === "team" ? "team-menu" : "adv-menu"
+  );
+  const coopMenu = document.getElementById("coop-menu");
   menu.innerHTML = '<div class="rt-menu-tip">加载中…</div>';
   menu.classList.remove("hidden");
-  positionRtMenu(menu);
+  positionMenuBeside(menu, coopMenu);
+  const closeMenu = () => { menu.classList.add("hidden"); coopMenu.classList.add("hidden"); };
+  const fill = kind === "rt" ? buildRtSettingsInto
+    : kind === "team" ? buildTeamSettingsInto : buildAdvSettingsInto;
+  fill(menu, closeMenu)
+    .then(() => { if (!menu.classList.contains("hidden")) positionMenuBeside(menu, coopMenu); })
+    .catch(() => {});
+}
+
+// 把弹层锚在参照物（协作菜单）右侧：同一 bottom 对齐，横向放不下换到左侧；
+// 两侧都放不下（右侧面板一开聊天区就窄了，协作菜单 350 + 团队浮层 420 经常
+// 超宽）就升到参照物正上方竖排——直接钳边会让弹层整块压在协作菜单上互相遮挡
+function positionMenuBeside(menu, ref) {
+  const composer = document.getElementById("composer");
+  const host = document.getElementById("chat-main");
+  if (!composer || !host || !ref) return;
+  const hostRect = host.getBoundingClientRect();
+  const refRect = ref.getBoundingClientRect();
+  const menuW = menu.offsetWidth || 360;
+  const hostW = hostRect.width / uiScale;
+  const refLeft = (refRect.left - hostRect.left) / uiScale;
+  const refRight = (refRect.right - hostRect.left) / uiScale;
+  const gap = 8, margin = 8;
+  let left = refRight + gap; // 首选：参照物右缘外 8px
+  let fits = left + menuW <= hostW - margin;
+  if (!fits) {
+    left = refLeft - menuW - gap; // 次选：参照物左缘外 8px
+    fits = left >= margin;
+  }
+  let bottom = composer.offsetHeight + gap;
+  if (!fits) {
+    // 兜底：竖排——升到参照物上方，左缘对齐参照物（右溢出时钳边也仍在
+    // 参照物上方，竖向已错开，不会互相遮挡）
+    const refH = refRect.height / uiScale;
+    bottom = composer.offsetHeight + refH + gap;
+    left = refLeft;
+  }
+  menu.style.top = "auto";
+  menu.style.bottom = Math.round(bottom) + "px";
+  menu.style.left = Math.round(Math.max(margin, Math.min(left, Math.max(margin, hostW - menuW - margin)))) + "px";
+}
+
+async function buildRtSettingsInto(box, closeMenu) {
+  box.innerHTML = '<div class="rt-menu-tip">加载中…</div>';
   const cfg = await request("config.providers").catch(() => null);
-  if (!cfg || menu.classList.contains("hidden")) return;
-  menu.innerHTML = "";
+  if (!cfg || !box.isConnected || box.classList.contains("hidden")) return;
+  box.innerHTML = "";
   const tip = document.createElement("div");
   tip.className = "rt-menu-tip";
   tip.textContent = "选择圆桌成员（不选 = 自动挑选已配置 Key 的模型）：";
-  menu.appendChild(tip);
+  box.appendChild(tip);
   const list = document.createElement("div");
   list.className = "rt-menu-list";
   const selected = new Set((rtMembers || []).map((m) => m.provider + "/" + m.model));
@@ -6061,7 +7632,7 @@ async function showRtMenu(e) {
   if (!entries) {
     list.innerHTML = '<div class="rt-menu-tip">还没有已配置 Key 的模型——先到「设置 · 模型服务」配置 API Key，再回来挑选成员。</div>';
   }
-  menu.appendChild(list);
+  box.appendChild(list);
   // 辩论修订 / 主席出草稿：本轮生效（也随 localStorage 记住选择）
   const extra = document.createElement("div");
   extra.className = "rt-menu-extra";
@@ -6095,7 +7666,7 @@ async function showRtMenu(e) {
   cmpRow.innerHTML = `<input type="checkbox" id="rt-compare">` +
     "<span>对比模式（不融合，保留各自回答）</span>";
   extra.append(debRow, chairRow, cmpRow);
-  menu.appendChild(extra);
+  box.appendChild(extra);
   const actions = document.createElement("div");
   actions.className = "rt-menu-actions";
   const clear = document.createElement("button");
@@ -6114,14 +7685,110 @@ async function showRtMenu(e) {
     });
     rtMembers = picked.length ? picked : null;
     try { localStorage.setItem("skysheep.rt.members", JSON.stringify(rtMembers)); } catch {}
-    updateRtHint();
-    menu.classList.add("hidden");
+    updateCoopHint();
+    closeMenu();
   };
   actions.append(clear, ok);
-  menu.appendChild(actions);
+  box.appendChild(actions);
 }
-document.getElementById("rt-switch").onclick = () => setRtOn(!rtOn);
-document.getElementById("rt-pick").onclick = showRtMenu;
+
+// 对抗设置弹层：发现/调查/建议三个角色逐行指定模型（下拉，留空 = 自动挑选，
+// 同一模型可身兼数角）；裁判固定用当前主模型。改动即存（localStorage），确定收起。
+async function buildAdvSettingsInto(box, closeMenu) {
+  box.innerHTML = '<div class="rt-menu-tip">加载中…</div>';
+  const cfg = await request("config.providers").catch(() => null);
+  if (!cfg || !box.isConnected || box.classList.contains("hidden")) return;
+  box.innerHTML = "";
+  const tip = document.createElement("div");
+  tip.className = "rt-menu-tip";
+  tip.textContent = "为每个角色指定模型（留空 = 自动挑选）：";
+  box.appendChild(tip);
+  // 流水线示意：前三个角色由下面指定的模型担任，裁判固定是当前主模型
+  const flow = document.createElement("div");
+  flow.className = "adv-flow";
+  flow.innerHTML =
+    '<span class="adv-flow-step">发现</span><span class="adv-flow-sep">→</span>' +
+    '<span class="adv-flow-step">调查</span><span class="adv-flow-sep">→</span>' +
+    '<span class="adv-flow-step">建议</span><span class="adv-flow-sep">→</span>' +
+    '<span class="adv-flow-step adv-flow-judge" title="裁判由当前主模型担任，无需选择">裁判 · 主模型</span>';
+  box.appendChild(flow);
+  // 只列已配置 Key 的模型：缺 Key 的服务选了也跑不了，列出来只是噪声
+  const options = [];
+  Object.entries(cfg.providers || {}).forEach(([name, p]) => {
+    if (!p.key_mask) return;
+    (p.models || []).forEach((m) => options.push(name + "/" + m));
+  });
+  const ROLE_DEFS = [
+    { key: "finder", label: "发现者", desc: "穷举找问题" },
+    { key: "investigator", label: "调查者", desc: "逐条验证真伪" },
+    { key: "advisor", label: "建议者", desc: "给修复方案" },
+  ];
+  const list = document.createElement("div");
+  list.className = "adv-role-list";
+  const saveAdvRoles = () => {
+    try { localStorage.setItem("skysheep.adv.roles", JSON.stringify(advRoles)); } catch {}
+    updateCoopHint();
+  };
+  for (const def of ROLE_DEFS) {
+    const row = document.createElement("div");
+    row.className = "adv-role-row";
+    const chip = document.createElement("span");
+    chip.className = "adv-role-label";
+    chip.textContent = def.label;
+    const desc = document.createElement("span");
+    desc.className = "adv-role-desc";
+    desc.textContent = def.desc;
+    const sel = document.createElement("select");
+    sel.className = "adv-role-select";
+    sel.title = `${def.label}用什么模型（留空 = 自动挑选已配置 Key 的服务）`;
+    const optAuto = document.createElement("option");
+    optAuto.value = "";
+    optAuto.textContent = "自动";
+    sel.appendChild(optAuto);
+    for (const key of options) {
+      const opt = document.createElement("option");
+      opt.value = key;
+      opt.textContent = key;
+      sel.appendChild(opt);
+    }
+    sel.value = String(advRoles[def.key] || "");
+    if (sel.selectedIndex === -1) sel.value = ""; // 已存模型被删 Key 后回落自动
+    sel.onchange = () => { advRoles[def.key] = sel.value; saveAdvRoles(); };
+    row.append(chip, desc, sel);
+    list.appendChild(row);
+  }
+  box.appendChild(list);
+  if (!options.length) {
+    const none = document.createElement("div");
+    none.className = "rt-menu-tip";
+    none.textContent = "还没有已配置 Key 的模型——先到「设置 · 模型服务」配置 API Key，或留空自动挑选。";
+    box.appendChild(none);
+  }
+  const judgeRow = document.createElement("div");
+  judgeRow.className = "adv-judge-row";
+  judgeRow.innerHTML =
+    '<span class="adv-flow-step adv-flow-judge">裁判 · 当前主模型</span>' +
+    '<span class="adv-role-desc">终审报告由它产出，无需选择</span>';
+  box.appendChild(judgeRow);
+  const actions = document.createElement("div");
+  actions.className = "rt-menu-actions";
+  const clear = document.createElement("button");
+  clear.className = "link-btn";
+  clear.textContent = "恢复自动";
+  clear.onclick = () => {
+    for (const def of ROLE_DEFS) advRoles[def.key] = "";
+    saveAdvRoles();
+    list.querySelectorAll(".adv-role-select").forEach((s) => { s.value = ""; });
+  };
+  const ok = document.createElement("button");
+  ok.className = "btn-primary";
+  ok.textContent = "确定";
+  ok.onclick = closeMenu; // 选择即存：确定只收起（连协作菜单一起）
+  actions.append(clear, ok);
+  box.appendChild(actions);
+}
+
+document.getElementById("coop-switch").onclick = showCoopMenu;
 
 // ---------- 团队：多模型分工协作，用户以总管身份派工、验收、交付 ----------
 // 与圆桌并列的第二种协作模式（docs/团队模式设计.md）：圆桌是会诊，团队是开工。
@@ -6157,62 +7824,92 @@ const TEAM_MSG_KIND_LABEL = {
 };
 const TEAM_DIRECTOR_LABEL = { user: "用户总管", ai: "AI 总管" };
 
-function setTeamOn(on) {
+// ---------- 对抗：四角色流水线审查（与圆桌/团队并列的第三种协作模式） ----------
+// 发现者穷举问题 → 调查者逐条对抗验证 → 建议者给修复方案 → 裁判（当前主模型）
+// 终审报告。开关是一次性的（发送后复位）；发现/调查/建议三个角色在弹层里
+// 逐角色指定模型（留空 = 自动挑选，同一模型可身兼数角），裁判固定用当前主模型。
+let advOn = false;
+let advRoles = (() => {
+  // 旧版勾选列表（skysheep.adv.members，按勾选顺序映射角色）一次性迁移成
+  // 逐角色指定；迁移后旧键不再读取
+  try {
+    const saved = JSON.parse(localStorage.getItem("skysheep.adv.roles") || "null");
+    if (saved && typeof saved === "object") return saved;
+  } catch { /* 损坏则走迁移 */ }
+  try {
+    const legacy = JSON.parse(localStorage.getItem("skysheep.adv.members") || "null");
+    if (Array.isArray(legacy) && legacy.length) {
+      const roles = {};
+      ["finder", "investigator", "advisor"].forEach((r, i) => {
+        const m = legacy[i];
+        if (m && m.provider) roles[r] = m.provider + "/" + (m.model || "");
+      });
+      try { localStorage.setItem("skysheep.adv.roles", JSON.stringify(roles)); } catch {}
+      return roles;
+    }
+  } catch { /* 旧键也没有：全自动 */ }
+  return {};
+})();
+// 显式指定的角色数（按钮徽记用）
+const advRolesPicked = () =>
+  ["finder", "investigator", "advisor"].filter((r) => String(advRoles[r] || "").trim()).length;
+// 显式指定 → members 载荷（条目带 role 键，后端按角色直取）；全空 = 自动（不带 members）
+function advMembersPayload() {
+  const picked = advRolesPicked();
+  if (!picked.length) return undefined;
+  return picked.map((r) => {
+    const v = String(advRoles[r]).trim();
+    const idx = v.indexOf("/");
+    return { provider: v.slice(0, idx), model: v.slice(idx + 1), role: r };
+  });
+}
+
+updateCoopHint(); // 启动时把协作按钮画到当前档（无模式 = 纯图标）
+
+function setTeamOn(on, silent = false) {
   const wasRt = rtOn;
   teamOn = on;
-  document.getElementById("team-switch").classList.toggle("on", on);
-  // 同一条消息只能选一种协作模式：开团队自动关圆桌（后端双开报参数错）
-  if (on) setRtOn(false);
-  if (on && wasRt) addNotice("已切换到团队，圆桌已关闭（同一条消息只能选一种协作模式）");
+  // 同一条消息只能选一种协作模式：开团队自动关圆桌/对抗（后端多开报参数错）
+  if (on) setRtOn(false, silent);
+  if (on) setAdvOn(false, silent);
+  if (!silent && on && wasRt) addNotice("已切换到团队，圆桌已关闭（同一条消息只能选一种协作模式）");
   // 规划模式与团队联动（后端同款语义）：规划模式开着开团队不拦——本轮队员
   // 一律只读执行（只调研、不写文件、不跑命令），这里说明降级，避免「以为
-  // 队员会动手改文件」的误期待
-  if (on && workMode === "plan") {
+  // 队员会动手改文件」的误期待（silent=切标签恢复，不是用户操作，不弹）
+  if (!silent && on && workMode === "plan") {
     addNotice("规划模式开着：本轮团队队员将以只读方式执行（不写文件、不跑命令）；需要队员动手请先切回执行模式。");
   }
-  updateTeamHint();
+  updateCoopHint();
+}
+
+function setAdvOn(on, silent = false) {
+  const wasRt = rtOn;
+  const wasTeam = teamOn;
+  advOn = on;
+  // 同一条消息只能选一种协作模式：开对抗自动关圆桌/团队（后端多开报参数错）
+  if (on) setRtOn(false, silent);
+  if (on) setTeamOn(false, silent);
+  if (!silent && on && (wasRt || wasTeam)) {
+    addNotice("已切换到对抗，原协作模式已关闭（同一条消息只能选一种协作模式）");
+  }
+  updateCoopHint();
 }
 
 // 激活态状态徽记：AI 总管是关键模式切换必须可见，优先显示；其余按队员数
-function updateTeamHint() {
-  const btn = document.getElementById("team-switch");
-  const n = teamMembers ? teamMembers.length : 0;
-  if (teamDirectorIsAi()) {
-    const who = `AI 总管（${teamDirector.provider}/${teamDirector.model || "服务默认模型"}）`;
-    btn.title = `团队（${n ? `已指定 ${n} 名队员` : "队员自动挑选"} · ${who}）：` +
-      "AI 总管自动拆解、派工、验收、交付；你随时插话，或点团队卡上的「接管」亲自指挥";
-  } else {
-    btn.title = (n
-      ? `团队（已指定 ${n} 个成员）：开启后组建团队，你的消息作为总管指令进入团队频道`
-      : "团队：自动挑选已配置 Key 的模型组建团队，你以总管身份派工、验收、交付（点 ▾ 可指定成员与总管）");
-  }
-  const state = btn.querySelector(".cp-state");
-  if (!state) return;
-  state.hidden = !teamOn;
-  state.textContent = !teamOn ? ""
-    : teamDirectorIsAi() ? "团队·AI总管"
-    : n ? `团队·${n}人` : "团队·自动";
-}
-updateTeamHint();
 
 // 团队成员选择浮层：与圆桌浮层同皮，勾选后展开 成员名 + 一句话人设 两个小输入框；
 // 顶部是总管形态区（二期）：我当总管（默认）/ AI 总管 + 担任总管的模型单选
-async function showTeamMenu(e) {
-  e.stopPropagation(); // 别让随后冒泡到 document 的 click 立刻把菜单关掉
-  const menu = document.getElementById("team-menu");
-  if (!menu.classList.contains("hidden")) return menu.classList.add("hidden");
-  menu.innerHTML = '<div class="rt-menu-tip">加载中…</div>';
-  menu.classList.remove("hidden");
-  positionRtMenu(menu, "team-switch");
+async function buildTeamSettingsInto(box, closeMenu) {
+  box.innerHTML = '<div class="rt-menu-tip">加载中…</div>';
   const cfg = await request("config.providers").catch(() => null);
-  if (!cfg || menu.classList.contains("hidden")) return;
-  menu.innerHTML = "";
+  if (!cfg || !box.isConnected || box.classList.contains("hidden")) return;
+  box.innerHTML = "";
   // 模板区（三期）：「从模板创建」——选中后回填下面的总管形态与成员勾选。
   // 模板册是全局的（team.template_list）；拉不到（旧后端/断线）整块不出现，
   // 浮层照常手选，建队流程不受影响
   let templates = [];
   try { templates = ((await request("team.template_list")).templates) || []; } catch (e) {}
-  if (templates.length && !menu.classList.contains("hidden")) {
+  if (templates.length && !box.classList.contains("hidden")) {
     const tplBox = document.createElement("div");
     tplBox.className = "tm-template";
     tplBox.appendChild(tcEl("div", "rt-menu-tip", "从模板创建："));
@@ -6226,7 +7923,7 @@ async function showTeamMenu(e) {
       if (tpl) applyTeamTemplate(menu, tpl);
     };
     tplBox.appendChild(sel);
-    menu.appendChild(tplBox);
+    box.appendChild(tplBox);
   }
   // 总管形态区：单选「我当总管 / AI 总管」；选 AI 才展开模型单选列表
   // （只列已配置 Key 的服务——总管缺 Key 跑不了，后端也会 fail-closed 拒建）
@@ -6286,11 +7983,11 @@ async function showTeamMenu(e) {
   rbUser.querySelector("input").addEventListener("change", () => {
     dirOpts.classList.toggle("hidden", rbUser.querySelector("input").checked);
   });
-  menu.appendChild(dirBox);
+  box.appendChild(dirBox);
   const tip = document.createElement("div");
   tip.className = "rt-menu-tip";
   tip.textContent = "选择团队成员（不选 = 自动挑选已配置 Key 的模型）：";
-  menu.appendChild(tip);
+  box.appendChild(tip);
   const list = document.createElement("div");
   list.className = "rt-menu-list";
   const selected = new Map((teamMembers || []).map((m) => [m.provider + "/" + m.model, m]));
@@ -6338,7 +8035,7 @@ async function showTeamMenu(e) {
   if (!entries) {
     list.innerHTML = '<div class="rt-menu-tip">还没有已配置 Key 的模型——先到「设置 · 模型服务」配置 API Key，再回来挑选队员。</div>';
   }
-  menu.appendChild(list);
+  box.appendChild(list);
   const actions = document.createElement("div");
   actions.className = "rt-menu-actions";
   const clear = document.createElement("button");
@@ -6372,14 +8069,13 @@ async function showTeamMenu(e) {
     });
     teamMembers = picked.length ? picked : null;
     try { localStorage.setItem("skysheep.team.members", JSON.stringify(teamMembers)); } catch {}
-    updateTeamHint();
-    menu.classList.add("hidden");
+    updateCoopHint();
+    closeMenu();
   };
   actions.append(clear, ok);
-  menu.appendChild(actions);
+  box.appendChild(actions);
 }
-document.getElementById("team-switch").onclick = () => setTeamOn(!teamOn);
-document.getElementById("team-pick").onclick = showTeamMenu;
+
 
 // 模板回填（三期）：清掉当前勾选 → 按模板勾成员、填成员名与人设 → 切总管形态。
 // 成员按 provider/model 对上已配置服务；对不上的跳过并计数提示——服务没配 Key
@@ -6461,8 +8157,8 @@ function positionRtMenu(menu, anchorId) {
   const host = document.getElementById("chat-main");
   if (!composer || !host) return;
   const hostRect = host.getBoundingClientRect();
-  const anchor = document.getElementById(anchorId || "rt-switch")
-    || document.getElementById("rt-group");
+  const anchor = document.getElementById(anchorId || "coop-switch")
+    || document.getElementById("coop-group");
   menu.style.bottom = (composer.offsetHeight + 8) + "px";
   if (!anchor) return;
   // getBoundingClientRect 是物理像素，除以 uiScale 换算成布局坐标
@@ -6473,13 +8169,20 @@ function positionRtMenu(menu, anchorId) {
   menu.style.left = Math.round(Math.max(8, Math.min(rawLeft, maxLeft))) + "px";
 }
 document.addEventListener("click", (e) => {
-  const menu = document.getElementById("rt-menu");
-  if (!menu.classList.contains("hidden") && !menu.contains(e.target) &&
-      e.target.id !== "rt-pick") menu.classList.add("hidden");
-  const teamMenu = document.getElementById("team-menu");
-  if (teamMenu && !teamMenu.classList.contains("hidden") &&
-      !teamMenu.contains(e.target) && e.target.id !== "team-pick") {
-    teamMenu.classList.add("hidden");
+  if (coopRenderGuard) return; // 程序性重建期间不算「点在外面」
+  const inCoop = !!(e.target.closest && e.target.closest("#coop-group"));
+  const coopMenu = document.getElementById("coop-menu");
+  const clickInSettings = !!(e.target.closest && e.target.closest("#rt-menu, #team-menu, #adv-menu"));
+  if (coopMenu && !coopMenu.classList.contains("hidden") &&
+      !coopMenu.contains(e.target) && !inCoop && !clickInSettings) {
+    coopMenu.classList.add("hidden");
+  }
+  for (const id of ["rt-menu", "team-menu", "adv-menu"]) {
+    const m = document.getElementById(id);
+    if (m && !m.classList.contains("hidden") &&
+        !m.contains(e.target) && !inCoop && !clickInSettings) {
+      m.classList.add("hidden");
+    }
   }
 });
 
@@ -7086,9 +8789,11 @@ async function send() {
     try {
       const s = await request("session.new", preNamed ? { title: preNamed } : {});
       tab.sid = s.id;
+      migrateComposerSid("", s.id); // 空标签的输入区状态条目随懒创建迁移到新会话
       tab.title = tab.title || text.slice(0, 20) || "新会话";
       currentSessionId = s.id;
       activeSessionSid = s.id;
+      refreshAcceptChip(); // 懒创建落库后盾牌切到新会话档位（继承引擎默认）
       if (tab.logEl.querySelector(".welcome")) tab.logEl.innerHTML = ""; // 清掉欢迎页
       renderTabs();
       refreshSessions(); // 侧栏立即出现新会话行（启动欢迎页首发消息的懒创建路径）
@@ -7123,19 +8828,26 @@ async function send() {
   try {
     const rtThisTurn = rtOn;
     const teamThisTurn = teamOn;
+    const advThisTurn = advOn;
     let compareThisTurn = false;
     if (rtThisTurn) {
       const cb = document.getElementById("rt-compare");
       compareThisTurn = !!(cb && cb.checked);
     }
-    // 圆桌与团队同用 members 字段（互斥开关保证同轮只有一个生效）
-    const membersThisTurn = rtThisTurn ? rtMembers : (teamThisTurn ? teamMembers : null);
+    // 圆桌/团队同用 members 字段，对抗用带 role 键的角色指定（互斥开关保证同轮只有一个生效）
+    const membersThisTurn = rtThisTurn ? rtMembers
+      : teamThisTurn ? teamMembers
+      : advThisTurn ? advMembersPayload() : null;
     // 总管形态（二期）：建队轮才消费——AI 总管随 team=true 带上 provider/model；
     // 用户总管（默认）不传参，后端按一期行为建队
     const dirAiThisTurn = teamThisTurn && teamDirectorIsAi();
-    // 圆桌是一次性开关：发送后复位
+    // 协作都是一次性开关：发送后复位
     setRtOn(false);
     setTeamOn(false);
+    setAdvOn(false);
+    // 发送消费掉了草稿与一次性开关：同步清该会话的状态条目，
+    // 不然切走再切回来，旧草稿/开关会原样复活
+    saveComposerState(tab.sid);
     // 辩论轮数 / 主席出草稿：弹层里的本轮值优先于配置（config 作默认值）
     const r = await request("chat.send", {
       text,
@@ -7144,6 +8856,7 @@ async function send() {
       plan_mode: workMode === "plan",
       roundtable: rtThisTurn,
       team: teamThisTurn || undefined,
+      adversarial: advThisTurn || undefined,
       members: membersThisTurn || undefined,
       director_mode: dirAiThisTurn ? "ai" : undefined,
       director: dirAiThisTurn
@@ -7170,8 +8883,8 @@ async function send() {
     // 团队轮：返回值带本轮结束时的团队快照（建队/收队/轮次计数在这里对齐；
     // 进行中的消息与工单已由实时事件驱动，upsert 幂等）
     if (r.team && r.team.team) applyTeamMeta(tab, r.team.team);
-    if (r.plan_mode && tab.lastAssistantText.trim()) addPlanActions(tab.lastAssistantText);
-    if (r.checkpoint) addCheckpointBar(r.checkpoint);
+    if (r.plan_mode && (tab.lastAssistantText || "").trim()) addPlanActions(tab.lastAssistantText, tab);
+    if (r.checkpoint) addCheckpointBar(r.checkpoint, tab);
   } catch (e) {
     addNotice("出错: " + e.message);
     finishEta(tab);
@@ -7185,29 +8898,38 @@ const IMAGE_MAX_BYTES = 4 * 1024 * 1024;
 const IMAGE_MAX_COUNT = 4;
 let pendingImages = []; // [{ media_type, data(base64) }]
 
-function renderImageTray() {
-  const tray = document.getElementById("image-tray");
-  tray.classList.toggle("hidden", !pendingImages.length);
+// 面参数（pane）：null = 主栏；分屏列传自己的 pane（状态与托盘都在列上），
+// 主栏与各列的粘贴/拖图/托盘预览互不串
+function faceImageTray(pane) {
+  return pane ? pane.el.querySelector(".split-image-tray") : document.getElementById("image-tray");
+}
+function renderImageTray(pane) {
+  const list = pane ? pane.images : pendingImages;
+  const tray = faceImageTray(pane);
+  if (!tray) return;
+  tray.classList.toggle("hidden", !list.length);
   tray.innerHTML = "";
-  pendingImages.forEach((im, i) => {
+  list.forEach((im, i) => {
     const cell = document.createElement("div");
     cell.className = "image-thumb";
     cell.innerHTML = `<img src="data:${im.media_type};base64,${im.data}" alt="附件${i + 1}">` +
       `<button class="thumb-del" title="移除">✕</button>`;
     cell.querySelector(".thumb-del").onclick = () => {
-      pendingImages.splice(i, 1);
-      renderImageTray();
+      list.splice(i, 1);
+      renderImageTray(pane);
     };
     tray.appendChild(cell);
   });
 }
 
-function clearPendingImages() {
-  pendingImages = [];
-  renderImageTray();
+function clearPendingImages(pane) {
+  if (pane) pane.images = [];
+  else pendingImages = [];
+  renderImageTray(pane);
 }
 
-function addPendingImageFile(file) {
+function addPendingImageFile(file, pane) {
+  const list = pane ? pane.images : pendingImages;
   if (!IMAGE_TYPES[file.type]) {
     addNotice("仅支持 PNG / JPEG / WebP / GIF 图片");
     return;
@@ -7216,7 +8938,7 @@ function addPendingImageFile(file) {
     addNotice(`图片太大（${(file.size / 1048576).toFixed(1)}MB），最大 4MB`);
     return;
   }
-  if (pendingImages.length >= IMAGE_MAX_COUNT) {
+  if (list.length >= IMAGE_MAX_COUNT) {
     addNotice("一条消息最多带 4 张图片");
     return;
   }
@@ -7225,39 +8947,46 @@ function addPendingImageFile(file) {
     const url = String(reader.result || "");
     const m = /^data:([^;]+);base64,(.+)$/.exec(url);
     if (!m) return;
-    pendingImages.push({ media_type: m[1], data: m[2] });
-    renderImageTray();
+    list.push({ media_type: m[1], data: m[2] });
+    renderImageTray(pane);
   };
   reader.readAsDataURL(file);
 }
 
 const composerInput = document.getElementById("input");
-composerInput.addEventListener("paste", (e) => {
-  for (const item of e.clipboardData?.items || []) {
-    if (item.kind === "file" && item.type.startsWith("image/")) {
-      const f = item.getAsFile();
-      if (f) {
-        e.preventDefault();
-        addPendingImageFile(f);
+function bindComposerPaste(input, pane) {
+  input.addEventListener("paste", (e) => {
+    for (const item of e.clipboardData?.items || []) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const f = item.getAsFile();
+        if (f) {
+          e.preventDefault();
+          addPendingImageFile(f, pane);
+        }
       }
     }
-  }
-});
-const composerEl = document.getElementById("composer");
-["dragover", "drop"].forEach((evt) => {
-  composerEl.addEventListener(evt, (e) => {
-    e.preventDefault();
-    if (evt !== "drop") return;
-    const dropped = [...(e.dataTransfer?.files || [])];
-    if (!dropped.length) return;
-    // 图片进附件托盘；其他文件转 @ 引用（浏览器 Drop 事件只给文件名不给路径，
-    // 故按文件名匹配项目文件索引，命中即插入 @项目内相对路径）
-    dropped.filter((f) => f.type.startsWith("image/")).forEach((f) => addPendingImageFile(f));
-    const others = dropped.filter((f) => !f.type.startsWith("image/"));
-    if (others.length) attachDroppedAsMentions(others);
   });
-});
-async function attachDroppedAsMentions(files) {
+}
+bindComposerPaste(composerInput, null);
+function bindComposerDrop(el, pane) {
+  ["dragover", "drop"].forEach((evt) => {
+    el.addEventListener(evt, (e) => {
+      e.preventDefault();
+      if (evt !== "drop") return;
+      const dropped = [...(e.dataTransfer?.files || [])];
+      if (!dropped.length) return;
+      // 图片进附件托盘；其他文件转 @ 引用（浏览器 Drop 事件只给文件名不给路径，
+      // 故按文件名匹配项目文件索引，命中即插入 @项目内相对路径）
+      dropped.filter((f) => f.type.startsWith("image/")).forEach((f) => addPendingImageFile(f, pane));
+      const others = dropped.filter((f) => !f.type.startsWith("image/"));
+      if (others.length) attachDroppedAsMentions(others, pane);
+    });
+  });
+}
+const composerEl = document.getElementById("composer");
+bindComposerDrop(composerEl, null);
+async function attachDroppedAsMentions(files, pane) {
+  const el = faceInputEl(pane);
   const index = await updateFileIndex();
   for (const f of files) {
     const name = f.name.toLowerCase();
@@ -7266,9 +8995,9 @@ async function attachDroppedAsMentions(files) {
       return lp === name || lp.endsWith("/" + name);
     });
     if (hits.length === 1) {
-      const cur = inputEl.value;
+      const cur = el.value;
       const sep = cur && !/\s$/.test(cur) ? " " : "";
-      inputEl.value = cur + sep + "@" + hits[0] + " ";
+      el.value = cur + sep + "@" + hits[0] + " ";
     } else if (hits.length > 1) {
       addNotice(`「${f.name}」在项目里有 ${hits.length} 个同名文件，请输入 @ 手动选择要引用哪一个`);
     } else {
@@ -7276,8 +9005,8 @@ async function attachDroppedAsMentions(files) {
         "请点输入框左侧的「添加文件」按钮选它（支持项目外的文件与多选）。");
     }
   }
-  autoGrowInput();
-  inputEl.focus();
+  autoGrowInput(el);
+  el.focus();
 }
 
 // 历史消息渲染：会话恢复/后台标签首次激活时用
@@ -7308,6 +9037,7 @@ function addAssistantDone(text, rtMeta, tab, seq, thinking, thinkingMs, duration
   if (rtMeta) {
     d._rtMeta = rtMeta; // 重新生成时据此重跑同样的协作配置
     if (rtMeta.mode === "team") addTeamBadge(d, rtMeta);
+    else if (rtMeta.mode === "adversarial") addAdvBadge(d, rtMeta);
     else if (rtMeta.members) addRtBadge(d, rtMeta);
   }
   curLog().appendChild(d);
@@ -7349,6 +9079,9 @@ const MSG_OPS_ICONS = {
 function attachMsgOps(el, tab, kind, getText) {
   if (el.querySelector(".msg-ops")) return;
   const seq = el.dataset.seq ? Number(el.dataset.seq) : null;
+  // 跨项目只读分屏列：只留复制类操作——编辑/重发、分叉、回退、重新生成都会
+  // 触达会话（后端归属校验虽兜得住，报的却是误导性的「session not found」）
+  const ro = !!(tab && tab.readonly);
   const ops = document.createElement("span");
   ops.className = "msg-ops";
   ops.addEventListener("click", (e) => e.stopPropagation());
@@ -7370,16 +9103,18 @@ function attachMsgOps(el, tab, kind, getText) {
     mk("copy", "复制这条消息", async () => {
       await copyTextToClipboard((getText && getText()) || el.textContent.trim());
     });
-    mk("edit", "编辑这条消息并重新发送", () => msgEditResend(tab, el, seq));
+    if (!ro) mk("edit", "编辑这条消息并重新发送", () => msgEditResend(tab, el, seq));
     mk("snip", "存为提示词（存进设置 · 提示词，输入 ~ 可调用）",
       () => saveAsSnippet((getText && getText()) || el.textContent.trim()));
   } else {
     mk("copy", "复制整条回答（Markdown 原文）", async () => {
       await copyTextToClipboard(getText());
     });
-    mk("fork", "从这里分叉出新会话（不影响本会话）", () => msgFork(tab, seq));
-    mk("rollback", "回退到提问前（删除这条回答及之后的内容）", () => msgRollback(tab, el, seq));
-    mk("regen", "重新生成这条回答", () => msgRegenerate(tab, el, seq));
+    if (!ro) {
+      mk("fork", "从这里分叉出新会话（不影响本会话）", () => msgFork(tab, seq));
+      mk("rollback", "回退到提问前（删除这条回答及之后的内容）", () => msgRollback(tab, el, seq));
+      mk("regen", "重新生成这条回答", () => msgRegenerate(tab, el, seq));
+    }
   }
   el.appendChild(ops);
 }
@@ -7505,9 +9240,16 @@ function paintHistorySlice(tab, messages, start, end) {
         addUser(m.text, m.images);
         el = curLog().lastElementChild;
       } else if (m.role === "assistant") {
+        // 对抗报告消息：先重建问题清单卡（默认折叠），再放报告本体
+        if (m.adversarial && ((m.adversarial.findings || []).length || m.adversarial.stats)) {
+          const advCard = buildAdvReplayCard(m.adversarial);
+          curLog().appendChild(advCard);
+          renderMermaidIn(advCard);
+          highlightCodeIn(advCard);
+        }
         // 圆桌融合消息：先重建成员草稿卡（默认折叠），再放回答本体
         if (m.roundtable && m.roundtable.mode === "roundtable" && (m.roundtable.members || []).length) {
-          const rtCard = buildRtReplayCard(m.roundtable);
+          const rtCard = buildRtReplayCard(m.roundtable, tab);
           curLog().appendChild(rtCard);
           renderMermaidIn(rtCard);
           highlightCodeIn(rtCard);
@@ -7530,7 +9272,7 @@ function paintHistorySlice(tab, messages, start, end) {
           }
         }
         addAssistantDone(
-          m.text, m.roundtable, tab, m.seq, m.thinking,
+          m.text, m.roundtable || m.adversarial, tab, m.seq, m.thinking,
           m.thinking_ms, m.duration_ms, m.estimate,
         );
         el = curLog().lastElementChild;
@@ -7566,8 +9308,12 @@ async function msgEditResend(tab, el, seq) {
       if (node === el) drop = true;
       if (drop) node.remove();
     });
-    document.getElementById("input").value = r.text || el.textContent.trim();
-    document.getElementById("input").focus();
+    // 回填按发起面分流：截断的是这一栏的会话，编辑文本也必须回到这一栏的
+    // 输入框——固定写主栏的话，回车就把截自列会话的内容发进主栏会话（串会话）
+    const pane = splitPanes.includes(tab) ? tab : null;
+    const input = pane ? pane.el.querySelector(".split-input") : document.getElementById("input");
+    input.value = r.text || el.textContent.trim();
+    input.focus();
     addNotice("已回退这条消息，编辑后直接发送");
   } catch (e) {
     addNotice("回退失败: " + e.message);
@@ -7579,11 +9325,14 @@ async function msgRegenerate(tab, el, seq) {
   const rtMeta = el && el._rtMeta;
   try {
     await request("session.truncate", { id: tab.sid, mode: "regen", seq: seq || undefined });
-    // 清掉这条回答对应的旧圆桌卡（历史回放里卡片紧挨在消息前面）。
+    // 清掉这条回答对应的旧圆桌/对抗卡（历史回放里卡片紧挨在消息前面）。
     // 团队卡不在此列：它不紧挨纪要气泡（中间隔着频道消息），且团队可能仍在
     // 进行中——卡留在原地继续接事件，重新生成的轮次照常更新它。
     const prevEl = el && el.previousElementSibling;
-    if (prevEl && prevEl.classList && prevEl.classList.contains("roundtable")) prevEl.remove();
+    if (prevEl && prevEl.classList &&
+        (prevEl.classList.contains("roundtable") || prevEl.classList.contains("adversarial"))) {
+      prevEl.remove();
+    }
     let drop = false;
     [...tab.logEl.children].forEach((node) => {
       // 与 msgRollback 同一语义：旧回答及之后的内容都要从 DOM 移除
@@ -7594,10 +9343,18 @@ async function msgRegenerate(tab, el, seq) {
     setRunning(true, tab);
     const params = {
       text: "", session_id: tab.sid, regenerate: true,
-      plan_mode: workMode === "plan",
+      // 规划开关按发起面取：列内重新生成读该列自己的 planMode（每栏独立），
+      // 主栏读工具条的全局值——读错的话列开着规划却按执行模式重跑
+      plan_mode: splitPanes.includes(tab) ? !!tab.planMode : workMode === "plan",
     };
     // 圆桌回答的重新生成：沿用原配置重跑同样的圆桌（成员/融合或对比/辩论轮数）
-    if (rtMeta && (rtMeta.members || []).length) {
+    if (rtMeta && rtMeta.mode === "adversarial") {
+      // 对抗报告的重新生成：按原角色名册逐角色重跑（裁判仍用当前主模型）
+      params.adversarial = true;
+      params.members = (rtMeta.roles || [])
+        .filter((r) => r.role !== "judge" && r.provider)
+        .map((r) => ({ provider: r.provider, model: r.model, role: r.role }));
+    } else if (rtMeta && (rtMeta.members || []).length) {
       params.roundtable = true;
       params.members = rtMeta.members.map((m) => {
         const item = { provider: m.provider, model: m.model };
@@ -7665,7 +9422,19 @@ async function restoreCheckpoint(id) {
 }
 
 // 检查点条：本轮改动过文件时出现，可一键回滚到改前状态
-function addCheckpointBar(cp) {
+// 轮次产物（检查点条 / 规划执行按钮）的落点：优先画进本轮所属面板的日志
+// （tab.logEl），没有面板语境才落当前视图。多会话并行（分屏的核心场景）时
+// chat.send 的响应返回前可能有任何面板的事件到达改写 routeTab，withTab 的
+// finally 也会把它复位——按 curLog() 落会插进别人的聊天流、点击还触发别栏
+// 的发送；归属面明确的东西必须跟着面板走。落点不是当前可见视图时不调
+// scrollLog（后台内容不抢滚动，scrollLog 也只滚当前视图）。
+function appendToTurnLog(node, tab) {
+  const host = (tab && tab.logEl) || curLog();
+  host.appendChild(node);
+  if (host === curLog()) scrollLog();
+}
+
+function addCheckpointBar(cp, tab) {
   const bar = document.createElement("div");
   bar.className = "checkpoint-bar";
   const label = document.createElement("span");
@@ -7697,12 +9466,13 @@ function addCheckpointBar(cp) {
     }
   };
   bar.append(label, files, btn);
-  curLog().appendChild(bar);
-  scrollLog();
+  appendToTurnLog(bar, tab);
 }
 
-// 规划模式结果：在计划下方放「按此计划执行」按钮
-function addPlanActions(plan) {
+// 规划模式结果：在计划下方放「按此计划执行」按钮。
+// tab 按发起面分派：列内规划轮的执行按钮把计划回填这一栏的输入框并发送
+// （模式与输入都是每栏独立的），主栏照旧走全局工具条与主输入框
+function addPlanActions(plan, tab) {
   const bar = document.createElement("div");
   bar.className = "msg plan-actions";
   const btn = document.createElement("button");
@@ -7710,7 +9480,16 @@ function addPlanActions(plan) {
   btn.textContent = "▶ 按此计划执行";
   btn.onclick = () => {
     bar.remove();
+    if (tab && splitPanes.includes(tab)) {
+      tab.planMode = false; // 批准计划 = 回到执行模式（该列自己的开关）
+      syncSplitBarToggles(tab);
+      const input = tab.el.querySelector(".split-input");
+      input.value = "请严格按以下计划执行：\n\n" + plan;
+      if (tab.send) tab.send();
+      return;
+    }
     setWorkMode("execute"); // 批准计划 = 回到执行模式
+    saveComposerState(activeTab && activeTab.sid); // 模式切换写回当前会话条目
     document.getElementById("input").value =
       "请严格按以下计划执行：\n\n" + plan;
     send();
@@ -7720,8 +9499,7 @@ function addPlanActions(plan) {
   hint.textContent = " 满意就一键交给 Agent 执行；或继续补充需求。";
   bar.appendChild(btn);
   bar.appendChild(hint);
-  curLog().appendChild(bar);
-  scrollLog();
+  appendToTurnLog(bar, tab);
 }
 
 document.getElementById("btn-send").onclick = send;
@@ -7733,14 +9511,15 @@ const inputEl = document.getElementById("input");
 
 // 输入框随内容自动增高：最多 6 行，超出内部滚动；拖了 --cp-h 时输入区仍由 flex-grow 填满
 const INPUT_MAX_LINES = 6;
-function autoGrowInput() {
-  const cs = getComputedStyle(inputEl);
+function autoGrowInput(el) {
+  el = el || inputEl;
+  const cs = getComputedStyle(el);
   const lh = parseFloat(cs.lineHeight) || 21;
   const cap = Math.ceil(lh * INPUT_MAX_LINES +
     parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + 3); // +上下边框
-  inputEl.style.height = "auto";
-  inputEl.style.height = Math.min(inputEl.scrollHeight, cap) + "px";
-  inputEl.style.overflowY = inputEl.scrollHeight > cap + 1 ? "auto" : "hidden";
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, cap) + "px";
+  el.style.overflowY = el.scrollHeight > cap + 1 ? "auto" : "hidden";
 }
 inputEl.addEventListener("input", autoGrowInput);
 autoGrowInput();
@@ -7748,16 +9527,30 @@ autoGrowInput();
 // ---------- 「& 引用对话」：输入 & 唤起会话选择器，选中的对话随消息发给后端注入上下文 ----------
 const refMenu = document.getElementById("ref-menu");
 const refTray = document.getElementById("ref-tray");
-let pendingRefs = [];   // 已选引用 [{ id, title }]，随下一条消息发送
+let pendingRefs = [];   // 已选引用 [{ id, title }]，随下一条消息发送（主栏；列的在 pane.refs）
 let refCandidates = []; // 弹层候选（session.list，已排除当前会话）
 let refMatches = [];    // 按 & 后的查询串过滤后的候选
 let refPick = 0;        // 键盘高亮行
 let refLoaded = false;  // 候选已拉取（弹层开着时继续输入只做本地过滤）
+let refFace = null;     // 引用菜单当前服务哪一面（null = 主栏，否则是分屏 pane）
+// 面参数（pane）：null = 主栏；& 菜单/托盘都落在焦点所在的那一面
+function faceInputEl(pane) {
+  return pane ? pane.el.querySelector(".split-input") : inputEl;
+}
+function faceRefTray(pane) {
+  return pane ? pane.el.querySelector(".split-ref-tray") : refTray;
+}
+function faceRefs(pane) {
+  return pane ? pane.refs : pendingRefs;
+}
 
-function renderRefTray() {
-  refTray.classList.toggle("hidden", !pendingRefs.length);
-  refTray.innerHTML = "";
-  pendingRefs.forEach((r, i) => {
+function renderRefTray(pane) {
+  const tray = faceRefTray(pane);
+  const list = faceRefs(pane);
+  if (!tray) return;
+  tray.classList.toggle("hidden", !list.length);
+  tray.innerHTML = "";
+  list.forEach((r, i) => {
     const chip = document.createElement("span");
     chip.className = "ref-chip";
     chip.title = "引用对话的内容会随这条消息一起给 Agent";
@@ -7766,12 +9559,16 @@ function renderRefTray() {
     del.className = "ref-chip-del";
     del.textContent = "✕";
     del.title = "移除引用";
-    del.onclick = () => { pendingRefs.splice(i, 1); renderRefTray(); };
+    del.onclick = () => { list.splice(i, 1); renderRefTray(pane); };
     chip.appendChild(del);
     refTray.appendChild(chip);
   });
 }
-function clearPendingRefs() { pendingRefs = []; renderRefTray(); }
+function clearPendingRefs(pane) {
+  if (pane) pane.refs = [];
+  else pendingRefs = [];
+  renderRefTray(pane);
+}
 
 // ---------- 选中回答片段 → 引用进输入框 ----------
 // 在聊天流里选中一段文字后，选区旁浮出「❝ 引用」按钮；点击把选中内容以
@@ -7851,9 +9648,10 @@ chatBox.addEventListener("scroll", hideSelQuoteBtn, true);
 window.addEventListener("resize", hideSelQuoteBtn);
 
 // 光标前是否有未完成的 &token（& 需在行首或空白后，token 内不含空白与 &）
-function refTokenAt() {
-  const pos = inputEl.selectionStart ?? inputEl.value.length;
-  const m = inputEl.value.slice(0, pos).match(/(?:^|\s)&([^&\s]*)$/);
+function refTokenAt(pane) {
+  const el = faceInputEl(pane);
+  const pos = el.selectionStart ?? el.value.length;
+  const m = el.value.slice(0, pos).match(/(?:^|\s)&([^&\s]*)$/);
   return m ? { start: pos - m[1].length - 1, query: m[1].toLowerCase() } : null;
 }
 
@@ -7864,11 +9662,11 @@ function closeRefMenu() {
   refCandidates = [];
 }
 
-function positionRefMenu() {
-  const r = inputEl.getBoundingClientRect(); // 物理像素；弹层带 zoom，除回 uiScale
+function positionRefMenu(pane) {
+  const r = faceInputEl(pane).getBoundingClientRect(); // 物理像素；弹层带 zoom，除回 uiScale
   refMenu.style.top = "auto";
   refMenu.style.bottom = (window.innerHeight / uiScale - r.top / uiScale + 6) + "px";
-  refMenu.style.left = (r.left / uiScale) + "px";
+  refMenu.style.left = Math.min(r.left / uiScale, window.innerWidth / uiScale - 340) + "px";
 }
 
 function highlightRefPick() {
@@ -7878,7 +9676,7 @@ function highlightRefPick() {
 }
 
 function paintRefMenu() {
-  const tok = refTokenAt();
+  const tok = refTokenAt(refFace);
   const q = tok ? tok.query : "";
   refMatches = refCandidates.filter((s) => (s.title || "").toLowerCase().includes(q));
   refPick = 0;
@@ -7903,47 +9701,57 @@ function paintRefMenu() {
   highlightRefPick();
 }
 
-async function ensureRefMenu() {
+async function ensureRefMenu(pane) {
+  refFace = pane || null;
   if (!refLoaded) {
     try {
       const r = await request("session.list");
-      const cur = activeTab && activeTab.sid;
+      const cur = pane ? pane.sid : (activeTab && activeTab.sid);
       refCandidates = (r.sessions || []).filter((s) => s.id !== cur);
     } catch {
       refCandidates = [];
     }
     refLoaded = true;
   }
-  positionRefMenu();
+  positionRefMenu(pane);
   refMenu.classList.remove("hidden");
   paintRefMenu();
 }
 
 function pickRef(s) {
-  if (!pendingRefs.some((r) => r.id === s.id)) {
-    pendingRefs.push({ id: s.id, title: s.title || "未命名会话" });
-    renderRefTray();
+  const list = faceRefs(refFace);
+  if (!list.some((r) => r.id === s.id)) {
+    list.push({ id: s.id, title: s.title || "未命名会话" });
+    renderRefTray(refFace);
   }
-  const tok = refTokenAt();
+  const el = faceInputEl(refFace);
+  const tok = refTokenAt(refFace);
   if (tok) {
-    const pos = inputEl.selectionStart ?? inputEl.value.length;
-    inputEl.value = inputEl.value.slice(0, tok.start) + inputEl.value.slice(pos);
-    inputEl.setSelectionRange(tok.start, tok.start);
-    autoGrowInput();
+    const pos = el.selectionStart ?? el.value.length;
+    el.value = el.value.slice(0, tok.start) + el.value.slice(pos);
+    el.setSelectionRange(tok.start, tok.start);
+    autoGrowInput(el);
   }
   closeRefMenu();
-  inputEl.focus();
+  el.focus();
 }
 
-inputEl.addEventListener("input", () => {
-  if (refTokenAt()) ensureRefMenu();
-  else closeRefMenu();
-});
+// 输入时唤起/收起引用菜单：主栏与分屏列的输入框都走这一句
+function wireRefInput(el, pane) {
+  el.addEventListener("input", () => {
+    if (refTokenAt(pane)) ensureRefMenu(pane);
+    else if (refFace === (pane || null)) closeRefMenu();
+  });
+  el.addEventListener("blur", () => {
+    setTimeout(() => { if (refFace === (pane || null)) closeRefMenu(); }, 120);
+  });
+}
+wireRefInput(inputEl, null);
 
 // 键盘劫持挂在 document 捕获阶段：同一元素的监听按注册顺序执行，
 // 捕获阶段才能抢在既有「Enter 发送」监听之前把引用态下的按键吃掉
 document.addEventListener("keydown", (e) => {
-  if (refMenu.classList.contains("hidden") || e.target !== inputEl) return;
+  if (refMenu.classList.contains("hidden") || e.target !== faceInputEl(refFace)) return;
   if (e.key === "Escape" && !e.isComposing) {
     closeRefMenu();
     e.preventDefault(); e.stopPropagation();
@@ -7961,7 +9769,7 @@ document.addEventListener("keydown", (e) => {
 
 document.addEventListener("click", (e) => {
   if (!refMenu.classList.contains("hidden") &&
-      !refMenu.contains(e.target) && e.target !== inputEl) closeRefMenu();
+      !refMenu.contains(e.target) && e.target !== faceInputEl(refFace)) closeRefMenu();
 });
 window.addEventListener("resize", closeRefMenu);
 
@@ -8010,9 +9818,12 @@ function hideInputMenu() {
   inputMenu.innerHTML = "";
   menuItems = [];
 }
-function showInputMenu(items, emptyHint) {
+let menuFace = null; // 输入菜单当前服务哪一面（null = 主栏）
+function showInputMenu(items, emptyHint, face) {
+  face = face === undefined ? menuFace : face;
   menuItems = items;
   menuActive = 0;
+  menuFace = face || null;
   if (!items.length) {
     inputMenu.innerHTML = `<div class="menu-empty">${escapeHtml(emptyHint || "（无匹配项）")}</div>`;
   } else {
@@ -8025,15 +9836,33 @@ function showInputMenu(items, emptyHint) {
       el.onclick = () => pickMenuItem(+el.dataset.i);
     });
   }
-  const composer = document.getElementById("composer");
-  inputMenu.style.bottom = (composer.offsetHeight + 8) + "px";
+  if (face) {
+    // 分屏列：菜单脱离 #composer 的 absolute 定位语境，改按列输入框视口锚定
+    const r = faceInputEl(face).getBoundingClientRect();
+    const col = face.el.getBoundingClientRect();
+    inputMenu.style.position = "fixed";
+    inputMenu.style.top = "auto";
+    inputMenu.style.bottom = (window.innerHeight / uiScale - r.top / uiScale + 6) + "px";
+    inputMenu.style.left = (col.left / uiScale + 8) + "px";
+    inputMenu.style.right = "auto";
+    inputMenu.style.width = Math.max(280, Math.min(520, col.width / uiScale - 16)) + "px";
+  } else {
+    inputMenu.style.position = "";
+    inputMenu.style.top = "";
+    inputMenu.style.width = "";
+    const composer = document.getElementById("composer");
+    inputMenu.style.bottom = (composer.offsetHeight + 8) + "px";
+    inputMenu.style.left = "";
+    inputMenu.style.right = "";
+  }
   inputMenu.classList.remove("hidden");
 }
 function pickMenuItem(i) {
   const it = menuItems[i];
+  const face = menuFace;
   hideInputMenu();
   if (it) it.onPick();
-  inputEl.focus();
+  faceInputEl(face).focus();
 }
 function moveMenuActive(delta) {
   if (!menuItems.length) return;
@@ -8056,7 +9885,9 @@ const SLASH_COMMANDS = [
   { cmd: "/save-skill", desc: "把本次会话的做法存成技能草稿" },
 ];
 
-async function execSlash(cmd) {
+async function execSlash(cmd, face) {
+  // 会话级命令按面取会话：列里敲 /export 导出的是这一栏的会话
+  const slashSid = face ? face.sid : currentSessionId;
   switch (cmd) {
     case "/help":
       addNotice("可用命令：\n" + SLASH_COMMANDS.map((c) => `${c.cmd} — ${c.desc}`).join("\n") +
@@ -8072,6 +9903,7 @@ async function execSlash(cmd) {
       break;
     }
     case "/compact": {
+      if (face) { addNotice("/compact 作用于主栏当前会话；要压缩这一栏的上下文，请把会话切到主栏后操作"); break; }
       if (activeTab && activeTab.running) { addNotice("当前轮还没结束，结束后再压缩。"); break; }
       const r = await request("chat.compact").catch((e) => { addNotice("压缩失败: " + e.message); return null; });
       if (!r) break;
@@ -8109,11 +9941,11 @@ async function execSlash(cmd) {
       break;
     }
     case "/export":
-      if (!currentSessionId) { addNotice("当前还没有会话可导出。"); break; }
-      request("session.export", { id: currentSessionId })
+      if (!slashSid) { addNotice("当前还没有会话可导出。"); break; }
+      request("session.export", { id: slashSid })
         .then((r) => downloadText(r.filename, r.markdown))
         .catch((e) => addNotice("导出失败: " + e.message));
-      request("session.export", { id: currentSessionId, fmt: "html" })
+      request("session.export", { id: slashSid, fmt: "html" })
         .then((r) => downloadText(r.filename, r.html))
         .catch(() => {}); // HTML 版失败不打扰（MD 版已成功）
       break;
@@ -8130,9 +9962,12 @@ async function updateFileIndex() {
   return fileIndex.files;
 }
 
-function updateInputMenu() {
-  const caret = inputEl.selectionStart;
-  const before = inputEl.value.slice(0, caret);
+function updateInputMenu(face) {
+  const el = faceInputEl(face);
+  menuFace = face || null;
+
+  const caret = el.selectionStart;
+  const before = el.value.slice(0, caret);
   // ~ 唤起提示词菜单（原「快捷指令」，自带内置示例兜底）。
   // 查询段用 \S*：提示词名是中文，\w 匹配不到 CJK；空格视为结束（收起菜单）。
   // 过滤面：名称 / 内容子串 + 名称拼音首字母（如 xzb ↔ 写周报）；候选上限 12。
@@ -8147,8 +9982,8 @@ function updateInputMenu() {
         desc: snippetsCache.includes(s) ? "提示词 · 选中即插入" : "内置示例 · 选中即插入",
         onPick: () => {
           // ~ 查询串只是唤起器，不属于消息内容：插入前把它从输入框里去掉
-          inputEl.value = inputEl.value.replace(/^~[^\n]*/, "");
-          insertSnippet(s);
+          el.value = el.value.replace(/^~[^\n]*/, "");
+          insertSnippet(s, face);
         },
       }));
     // 顺手把写了一半的输入存成模板，不用绕去设置页新建
@@ -8156,8 +9991,8 @@ function updateInputMenu() {
       label: "＋ 存为提示词",
       desc: "把当前输入框内容保存为新提示词",
       onPick: () => {
-        const text = inputEl.value.replace(/^~[^\n]*/, "");
-        inputEl.value = text;
+        const text = el.value.replace(/^~[^\n]*/, "");
+        el.value = text;
         saveAsSnippet(text);
         hideInputMenu();
       },
@@ -8175,7 +10010,7 @@ function updateInputMenu() {
       .map((c) => ({
         label: c.cmd,
         desc: c.desc,
-        onPick: () => { inputEl.value = ""; autoGrowInput(); execSlash(c.cmd); },
+        onPick: () => { el.value = ""; autoGrowInput(el); execSlash(c.cmd, face); },
       }));
     showInputMenu(items, "（没有匹配的命令，回车仍会作为消息发送）");
     return;
@@ -8183,7 +10018,7 @@ function updateInputMenu() {
   const at = before.match(/@([^\s@\\/]*)$/);
   if (at) {
     updateFileIndex().then((files) => {
-      if (!/@([^\s@\\/]*)$/.test(inputEl.value.slice(0, inputEl.selectionStart))) return;
+      if (!/@([^\s@\\/]*)$/.test(el.value.slice(0, el.selectionStart))) return;
       const q = at[1].toLowerCase();
       const starts = [], contains = [];
       for (const f of files) {
@@ -8199,8 +10034,8 @@ function updateInputMenu() {
         return {
           label: isDir ? "📁 " + f : f, path: true,
           onPick: () => {
-            inputEl.setRangeText("@" + f + " ", range[0], range[1], "end");
-            autoGrowInput();
+            el.setRangeText("@" + f + " ", range[0], range[1], "end");
+            autoGrowInput(el);
           },
         };
       }), "（项目里没有匹配的文件）");
@@ -8209,17 +10044,18 @@ function updateInputMenu() {
   }
   hideInputMenu();
 }
-inputEl.addEventListener("input", updateInputMenu);
+inputEl.addEventListener("input", () => updateInputMenu(null));
 inputEl.addEventListener("blur", () => setTimeout(hideInputMenu, 120));
 
-document.getElementById("input").addEventListener("keydown", (e) => {
+function composerKeydown(e, face) {
+  const el = faceInputEl(face);
   const menuOpen = !inputMenu.classList.contains("hidden");
   // Alt+1..8 直插候选（与 ~ 菜单同一候选池：启用中的提示词按当前排序 + 内置兜底）；
   // 不抢菜单打开时的 Enter/Tab 语义，数字键也没有 IME 组词冲突
   if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing &&
       /^[1-8]$/.test(e.key)) {
     const cand = snippetCandidates()[Number(e.key) - 1];
-    if (cand) { e.preventDefault(); insertSnippet(cand); }
+    if (cand) { e.preventDefault(); insertSnippet(cand, face); }
     return;
   }
   if (menuOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
@@ -8236,8 +10072,8 @@ document.getElementById("input").addEventListener("keydown", (e) => {
   // 输入历史召回：空输入 ↑ 进入回看；历史态内 ↑↓ 无条件导航（点击/编辑已退出历史态后，
   // 方向键恢复原生光标行为），↓ 走到底还原草稿，Esc 直接还原
   // isComposing：输入法选词过程（拼音候选上屏前的回车/方向键）不能被这里劫持
-  if (!menuOpen && !e.isComposing && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    if (e.key === "ArrowUp" && (inputEl.value === "" || histActive())) {
+  if (!face && !menuOpen && !e.isComposing && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (e.key === "ArrowUp" && (el.value === "" || histActive())) {
       e.preventDefault();
       recallHistory(-1);
       return;
@@ -8250,7 +10086,7 @@ document.getElementById("input").addEventListener("keydown", (e) => {
     if (e.key === "Escape" && histActive()) {
       e.preventDefault();
       inputHistory.idx = inputHistory.list.length;
-      inputEl.value = inputHistory.draft;
+      el.value = inputHistory.draft;
       autoGrowInput();
       return;
     }
@@ -8259,20 +10095,29 @@ document.getElementById("input").addEventListener("keydown", (e) => {
     // 发送键可配（ui.json 的 ctrl_enter_send）：默认 Enter 发送 / Shift+Enter 换行；
     // 开启后 Ctrl+Enter 发送 / Enter 一律换行（不再吞 Shift 语义）。
     if (ctrlEnterSend) {
-      if (e.ctrlKey || e.metaKey) { e.preventDefault(); send(); }
+      if (e.ctrlKey || e.metaKey) { e.preventDefault(); if (face) face.send(); else send(); }
       return; // 其余组合（含裸 Enter）交给浏览器换行
     }
-    if (!e.shiftKey) { e.preventDefault(); send(); }
+    if (!e.shiftKey) { e.preventDefault(); if (face) face.send(); else send(); }
   }
-});
+}
+document.getElementById("input").addEventListener("keydown", (e) => composerKeydown(e, null));
 document.getElementById("btn-new").onclick = () => newSessionFromHighlight();
 window.addEventListener("keydown", (e) => {
   if (!e.ctrlKey && !e.metaKey) {
-    // Esc 停止运行（设置页/弹窗打开时不劫持——它们有自己的 Esc 语义）
-    if (e.key === "Escape" && !settingsOpen && !modalOpen() && routeTab && routeTab.running) {
-      e.preventDefault();
-      const sid = routeTab.sid;
-      if (sid) request("stop", { session_id: sid }).catch(() => {});
+    // Esc 停止运行（设置页/弹窗打开时不劫持——它们有自己的 Esc 语义）。
+    // 停谁按键盘焦点定，不按 routeTab：那是事件路由的残留指针，分屏列在跑
+    // 时它常指向那一列、人却在主栏——按残留停会停错会话，且列里没有停止
+    // 按钮无从纠正。焦点在分屏列内停那一列，否则停主栏活动标签。
+    if (e.key === "Escape" && !settingsOpen && !modalOpen()) {
+      const ae = document.activeElement;
+      const colEl = ae && ae.closest ? ae.closest(".split-col") : null;
+      const pane = colEl ? splitPanes.find((p) => p.el === colEl) : null;
+      const target = pane || activeTab;
+      if (target && target.running) {
+        e.preventDefault();
+        if (target.sid) request("stop", { session_id: target.sid }).catch(() => {});
+      }
     }
     return;
   }
@@ -10888,6 +12733,7 @@ const UI_LIMITS = {
   right_w: { css: "--rp-w", min: 240, max: 720 },
   read_width: { css: "--chat-max-w", min: 680, max: 1400 }, // 阅读行宽：消息卡最大宽度
   files_preview_h: { css: "--fp-h", min: 96, max: 640 }, // 文件面板预览区高度
+  split_w: { css: "--split-w", min: 300, max: 1100 }, // 分屏宽度（未存偏好时走 CSS 的 46%）
 };
 
 function setUiVar(key, val) {
@@ -10903,7 +12749,13 @@ function clampUi(key, v) {
   const dynMax = key === "sidebar_w" ? window.innerWidth / uiScale - 420
     : key === "right_w"
       ? (window.innerWidth - document.getElementById("sidebar").getBoundingClientRect().width) / uiScale - 380
-      : window.innerHeight / uiScale - 240;
+      // 分屏锚在 chat-main（侧栏与右面板之间）：上限必须扣掉两侧实占宽度，
+      // 只留 420px 主区——否则右面板开着时能拖到比分屏可用的地方还宽，盖住主会话
+      : key === "split_w"
+        ? (window.innerWidth
+            - document.getElementById("sidebar").getBoundingClientRect().width
+            - rightPanel.getBoundingClientRect().width) / uiScale - 420
+        : window.innerHeight / uiScale - 240;
   const max = Math.max(lim.min, Math.min(lim.max, dynMax));
   return Math.round(Math.min(max, Math.max(lim.min, v)));
 }
@@ -10957,7 +12809,8 @@ async function initUiPrefs() {
     }
   }
   // 分级权限模式（0=安全执行 1=自动编辑 2=完全访问；后端 setup 已把档位应用到 gate，这里只同步界面）
-  renderAcceptSwitch(prefs.accept_edits === 2 ? "full_access" : prefs.accept_edits === 1 ? "accept_edits" : "confirm");
+  engineAcceptMode = prefs.accept_edits === 2 ? "full_access" : prefs.accept_edits === 1 ? "accept_edits" : "confirm";
+  renderAcceptSwitch(engineAcceptMode);
   // 主题（auto | 主题 id，默认 auto 跟随系统；旧版 light/dark 映射到纸墨/夜墨）。
   // auto 的深浅落点也在这里回填（要在 applyThemeMode 之前，首帧解析用得上）
   themeAutoLight = THEMES[prefs.theme_auto_light] ? prefs.theme_auto_light : "paper";
@@ -11065,7 +12918,8 @@ function setupResizer(el, key, compute) {
     start = { x: e.clientX, y: e.clientY, base: compute.base(), pointerId: e.pointerId };
     try { el.setPointerCapture(e.pointerId); } catch (_) {}
     el.classList.add("active");
-    document.body.classList.add("resizing", key === "sidebar_w" ? "resizing-x" : "resizing-y");
+    document.body.classList.add("resizing",
+      (key === "sidebar_w" || key === "split_w") ? "resizing-x" : "resizing-y");
   });
   el.addEventListener("pointermove", (e) => {
     if (!start || e.pointerId !== start.pointerId) return;
@@ -11105,6 +12959,15 @@ setupResizer(document.getElementById("files-resizer"), "files_preview_h", {
 setupResizer(rpResizer, "right_w", {
   base: () => rightPanel.getBoundingClientRect().width / uiScale,
   value: (s, e) => s.base - (e.clientX - s.x) / uiScale, // 向左拖 = 面板变宽
+});
+setupResizer(document.getElementById("split-resizer"), "split_w", {
+  base: () => {
+    const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--split-w"));
+    return Number.isFinite(v) && v > 0
+      ? v
+      : document.getElementById("split-pane").getBoundingClientRect().width / uiScale;
+  },
+  value: (s, e) => s.base + (s.x - e.clientX) / uiScale, // 向左拖 = 分屏变宽
 });
 
 // ============================================================
@@ -12259,18 +14122,25 @@ let voiceChunks = [];
 let voiceTimer = null;
 let voiceSeconds = 0;
 let voiceBusy = false;
+let voiceFace = null; // 这次录音服务哪一面（null = 主栏，否则是分屏 pane）
 
+function voiceMicEl(face) {
+  return face ? face.el.querySelector('[data-role="voice"]') : voiceBtn;
+}
 function voiceReset(keepBusy = false) {
   if (voiceTimer) { clearInterval(voiceTimer); voiceTimer = null; }
   voiceSeconds = 0;
   if (!keepBusy) voiceBusy = false;
-  if (voiceBtn) {
-    voiceBtn.classList.remove("recording", "busy");
-    voiceBtn.title = "语音输入：点击开始录音，再点一下结束并转成文字";
+  const btn = voiceMicEl(voiceFace);
+  if (btn) {
+    btn.classList.remove("recording", "busy");
+    btn.title = "语音输入：点击开始录音，再点一下结束并转成文字";
   }
+  voiceFace = null;
 }
 
-async function voiceStart() {
+async function voiceStart(face) {
+  voiceFace = face || null;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     addNotice("当前环境不支持录音（需要较新的浏览器内核）");
     return;
@@ -12309,11 +14179,12 @@ async function voiceStart() {
   voiceRecorder.start();
   voiceSeconds = 0;
   voiceBusy = true;
-  voiceBtn.classList.add("recording");
-  voiceBtn.title = "正在录音：点击结束并转成文字";
+  const mic = voiceMicEl(voiceFace);
+  if (mic) mic.classList.add("recording");
+  if (mic) mic.title = "正在录音：点击结束并转成文字";
   const tick = () => {
     voiceSeconds += 1;
-    voiceBtn.title = `正在录音 ${voiceSeconds}s：点击结束并转成文字`;
+    if (mic) mic.title = `正在录音 ${voiceSeconds}s：点击结束并转成文字`;
     if (voiceSeconds >= 120) voiceStop(); // 兜底上限，防止忘停
   };
   voiceTimer = setInterval(tick, 1000);
@@ -12334,9 +14205,10 @@ async function voiceUpload(mime) {
   }
   const blob = new Blob(voiceChunks, { type: mime || "audio/webm" });
   voiceChunks = [];
-  voiceBtn.classList.remove("recording");
-  voiceBtn.classList.add("busy");
-  voiceBtn.title = "正在识别…";
+  const micEl = voiceMicEl(voiceFace);
+  if (micEl) micEl.classList.remove("recording");
+  if (micEl) micEl.classList.add("busy");
+  if (micEl) micEl.title = "正在识别…";
   try {
     const buf = await blob.arrayBuffer();
     let bin = "";
@@ -12347,13 +14219,14 @@ async function voiceUpload(mime) {
     }
     const audio = btoa(bin);
     const r = await request("speech.transcribe", { audio, mime: blob.type });
-    const input = document.getElementById("input");
+    const input = faceInputEl(voiceFace);
     const text = (r.text || "").trim();
     if (text) {
       input.value = input.value ? input.value.replace(/\s*$/, " ") + text : text;
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
       input.dispatchEvent(new Event("input"));
+      autoGrowInput(input);
       addNotice("已转成文字（" + r.provider + "）");
     } else {
       addNotice("没有识别到文字，再试一次");
@@ -13321,7 +15194,9 @@ initUiPrefs();
 // 点击循环切换：安全执行（写入/执行都征询）→ 自动编辑（工作目录内写入放行，命令仍征询）
 // → 完全访问（写入与命令都不再征询）→ 回到安全执行。档位存 ui.json 的 accept_edits
 // （0/1/2），自动编辑只对工作目录内的写入生效（目录外仍逐次确认）。
-let acceptMode = "confirm"; // 当前档位，与后端 permission.mode 同步
+let acceptMode = "confirm"; // 主栏盾牌当前显示的档位（活动会话的档位或引擎默认）
+let engineAcceptMode = "confirm"; // 引擎默认档（ui.json 的 accept_edits；新会话的起点）
+const sessionAcceptCache = new Map(); // sid → 权限档位（会话级三档）
 const ACCEPT_ICONS = {
   confirm: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   accept_edits: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 4.5l4 4L8.5 19.5l-5 1.2 1.2-5L15.5 4.5z"/><path d="M13.5 6.5l4 4"/></svg>',
@@ -13337,22 +15212,55 @@ const ACCEPT_NOTICE = {
   accept_edits: "✎ 已切到自动编辑模式：工作目录内的文件写入不再逐次确认，目录外写入与执行命令仍会征询",
   full_access: "🔓 已切到完全访问模式：写入与命令执行都不再逐次确认，请确保当前任务可信",
 };
+function paintAcceptIcon(btn, mode) {
+  if (!btn) return;
+  const m = ACCEPT_ICONS[mode] ? mode : "confirm";
+  btn.innerHTML = ACCEPT_ICONS[m];
+  btn.title = ACCEPT_TITLE[m];
+  btn.classList.toggle("on", m === "accept_edits");
+  btn.classList.toggle("full", m === "full_access");
+  return m;
+}
 function renderAcceptSwitch(mode) {
   const b = document.getElementById("accept-switch");
   if (!b) return;
-  acceptMode = ACCEPT_ICONS[mode] ? mode : "confirm";
-  b.innerHTML = ACCEPT_ICONS[acceptMode];
-  b.title = ACCEPT_TITLE[acceptMode];
-  b.classList.toggle("on", acceptMode === "accept_edits");
-  b.classList.toggle("full", acceptMode === "full_access");
+  acceptMode = paintAcceptIcon(b, mode);
+}
+// 主栏盾牌显示的是「活动会话」的档位（每会话独立）；空标签显示引擎默认档
+// （也是新会话的起点）。切标签即刷新，调档只写当前会话/引擎默认，不串别的会话。
+async function refreshAcceptChip() {
+  const sid = activeTab && activeTab.sid;
+  const btn = document.getElementById("accept-switch");
+  if (!sid) { paintAcceptIcon(btn, engineAcceptMode); acceptMode = engineAcceptMode; return; }
+  try {
+    const r = await request("session.accept_get", { id: sid });
+    sessionAcceptCache.set(sid, r.mode);
+    acceptMode = paintAcceptIcon(btn, r.mode);
+  } catch (e) { /* 读不到保持现状（切标签时会再试） */ }
 }
 document.getElementById("accept-switch").onclick = async () => {
   const order = ["confirm", "accept_edits", "full_access"];
-  const next = order[(order.indexOf(acceptMode) + 1) % order.length];
+  const sid = activeTab && activeTab.sid;
+  let cur = sid ? sessionAcceptCache.get(sid) : acceptMode;
+  if (sid && !cur) {
+    try {
+      const g = await request("session.accept_get", { id: sid });
+      cur = g.mode;
+      sessionAcceptCache.set(sid, cur);
+    } catch (e) { addNotice("读取权限档位失败: " + e.message); return; }
+  }
+  const next = order[(order.indexOf(cur || "confirm") + 1) % order.length];
   try {
-    const r = await request("permission.set_mode", { mode: next });
-    renderAcceptSwitch(r.mode);
-    addNotice(ACCEPT_NOTICE[r.mode] || ACCEPT_NOTICE.confirm);
+    if (sid) {
+      const r = await request("session.accept_set", { id: sid, mode: next });
+      sessionAcceptCache.set(sid, r.mode);
+    } else {
+      const r = await request("permission.set_mode", { mode: next });
+      engineAcceptMode = r.mode;
+    }
+    paintAcceptIcon(document.getElementById("accept-switch"), next);
+    acceptMode = next;
+    addNotice(ACCEPT_NOTICE[next] || ACCEPT_NOTICE.confirm);
   } catch (e) {
     addNotice("切换失败: " + e.message);
   }

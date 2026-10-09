@@ -383,13 +383,22 @@ async def _h_chat_send(backend: ServerBackend, params: dict, emit, local: bool) 
         ),
         chair_answers=raw_chair if isinstance(raw_chair, bool) else None,
         team=bool(params.get("team", False)),
+        adversarial=bool(params.get("adversarial", False)),
         director_mode=director_mode,
         director=director,
+        local=local,
     )
 
 
 async def _h_chat_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return backend.status()
+    # session_id 可选：给出时查那个会话的 runtime（分屏列的上下文徽标辅路），
+    # 查无/已淘汰由后端显式报错，不静默回退当前会话。
+    # 远程来源不开放按任意 sid 查询：runtime 状态含 todo 全文与上下文明细，
+    # 收敛到该客户端正在交互的会话（与 tasks.list 的远端口径同源，安全审查 B 族）
+    sid = str(params.get("session_id", "") or "") if isinstance(params, dict) else ""
+    if sid and not local:
+        sid = backend.session.id if backend.session else ""
+    return await backend.status(session_id=sid or None)
 
 
 async def _h_chat_compact(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -420,9 +429,12 @@ async def _h_permission_set_mode(backend: ServerBackend, params: dict, emit, loc
 
 
 async def _h_stop(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return {"cancelled": backend.cancel_run(
-        str(params["session_id"]) if params.get("session_id") else None
-    )}
+    sid = str(params["session_id"]) if params.get("session_id") else ""
+    # 远程连接只能停止自己正在交互的会话；连接尚未绑定会话时不能把空 sid
+    # 解释成后端当前活动会话，否则拿到令牌的客户端可停止本机其他会话。
+    if not local and not sid:
+        return {"cancelled": False}
+    return {"cancelled": backend.cancel_run(sid or None)}
 
 
 async def _h_tasks_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -636,11 +648,11 @@ async def _h_session_new_task(backend: ServerBackend, params: dict, emit, local:
 
 
 async def _h_session_truncate(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.truncate_session(params)
+    return await backend.truncate_session(params, local=local)
 
 
 async def _h_session_fork(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.fork_session(params)
+    return await backend.fork_session(params, local=local)
 
 
 async def _h_session_activate(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -652,12 +664,57 @@ async def _h_session_resume(backend: ServerBackend, params: dict, emit, local: b
 
 
 async def _h_session_image(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    # 历史图片按需拉取（boot/历史只下占位，见 _msg_brief）
-    return await backend.session_image(params)
+    # 历史图片按需拉取（boot/历史只下占位，见 _msg_brief）；本机跨项目放行
+    return await backend.session_image(params, local=local)
 
 
 async def _h_session_delete(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.delete_session(str(params.get("id", "")))
+
+
+async def _h_session_project_path(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.session_project_path(str(params.get("id", "")))
+
+
+async def _h_session_peek(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.peek_session_messages(str(params.get("id", "")), local=local)
+
+
+async def _h_session_model_switch(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.session_model_switch(
+        str(params.get("id", "")),
+        str(params.get("name", "")),
+        str(params.get("model", "")),
+    )
+
+
+async def _h_session_model_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.session_model_get(str(params.get("id", "")))
+
+
+async def _h_session_reasoning_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 先取 id 再做任何 await：空参/未知 id 立即报错（本机专属方法整表空参回归的快速失败路径）
+    sid = str(params.get("id", "") or "")
+    return await backend.session_reasoning_get(sid)
+
+
+async def _h_session_reasoning_set(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    sid = str(params.get("id", "") or "")
+    return await backend.session_reasoning_set(sid, str(params.get("effort", "auto")))
+
+
+async def _h_session_reveal(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.reveal_session_project(str(params.get("id", "")))
+
+
+async def _h_session_accept_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.session_accept_get(str(params.get("id", "")))
+
+
+async def _h_session_accept_set(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.session_accept_set(
+        str(params.get("id", "")), str(params.get("mode", "confirm"))
+    )
 
 
 async def _h_session_export(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -1248,6 +1305,16 @@ async def _h_roundtable_save(backend: ServerBackend, params: dict, emit, local: 
     return await backend.roundtable_save(params)
 
 
+# 对抗：设置页配置卡（仿 roundtable.get/save：读写均各端可用，改动只影响
+# 之后发起的对抗轮）；对抗轮本体走 chat.send 的 adversarial 标志。
+async def _h_adversarial_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.adversarial_detail()
+
+
+async def _h_adversarial_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.adversarial_save(params)
+
+
 # 团队：工单板只由用户经这些方法触达，聊天仍走 chat.send（会话级活动团队
 # 会把消息吸进频道；AI 总管模式经 director_mode/director 建队并自动闭环）。
 # 参数错误（无活动团队 / 指派对象不在名册 / 状态机不许可 / redo 超限）按
@@ -1793,6 +1860,17 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "session.resume": _WsMethod(_h_session_resume),
     "session.image": _WsMethod(_h_session_image),
     "session.delete": _WsMethod(_h_session_delete),
+    "session.project_path": _WsMethod(_h_session_project_path, local_only=True),
+    "session.reveal": _WsMethod(_h_session_reveal, local_only=True),
+    "session.peek_messages": _WsMethod(_h_session_peek),
+    "session.model_switch": _WsMethod(_h_session_model_switch, local_only=True),
+    "session.model_get": _WsMethod(_h_session_model_get, local_only=True),
+    # 会话级思考强度（本机专属）：读不建 runtime，写换会话私有 provider
+    # 会话级权限三档（本机专属）：只动该会话私有门，引擎默认档不受影响
+    "session.accept_get": _WsMethod(_h_session_accept_get, local_only=True),
+    "session.accept_set": _WsMethod(_h_session_accept_set, local_only=True),
+    "session.reasoning_get": _WsMethod(_h_session_reasoning_get, local_only=True),
+    "session.reasoning_set": _WsMethod(_h_session_reasoning_set, local_only=True),
     "session.export": _WsMethod(_h_session_export),
     "session.cleanup_empty": _WsMethod(_h_session_cleanup_empty),
     "session.rename": _WsMethod(_h_session_rename),
@@ -1937,6 +2015,8 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "websearch.save": _WsMethod(_h_websearch_save, local_only=True),
     "roundtable.get": _WsMethod(_h_roundtable_get),
     "roundtable.save": _WsMethod(_h_roundtable_save),
+    "adversarial.get": _WsMethod(_h_adversarial_get),
+    "adversarial.save": _WsMethod(_h_adversarial_save),
     # 团队：team.get 供团队卡与刷新；工单板只由用户改；交付（用户确认的正常
     # 终态）、收队（立即终止，含正在跑的成员轮）与接管（AI 总管 → 用户总管，
     # 二期）。聊天入口仍是 chat.send（team 标志；AI 总管经 director_mode/director）。
@@ -2352,6 +2432,7 @@ def create_app(
         # 子代理直播 / 任务终态事件只推给它正在看的会话（安全审查 B15），
         # 本机前端不过滤（多标签由前端自行路由）。
         conn_state = {"session": None}
+        remote_permissions: dict[str, str] = {}
 
         async def send(obj: dict) -> None:
             async with lock:
@@ -2360,19 +2441,22 @@ def create_app(
         async def emit(ev: dict) -> None:
             if not client_is_local:
                 k = ev.get("kind")
-                if k == "turn_started" and ev.get("session_id"):
-                    # 轮次事件只发给发起连接：据此自动绑定（兼容首条消息懒建会话、
-                    # 客户端还没拿到 session_id 的情况）
-                    conn_state["session"] = ev["session_id"]
+                if ev.get("session_id"):
+                    if conn_state["session"] != ev["session_id"]:
+                        return  # 所有会话事件（含用户消息/工具/权限）按连接归属过滤
                 elif k in ("subagent_spawned", "subagent_event", "task_finished"):
-                    sid = ev.get("session_id") or ""
-                    if not sid or conn_state["session"] != sid:
-                        return  # 不是这个客户端正在交互的会话：不推送
+                    return  # 缺少归属的子代理事件不能向远端推送
                 elif k in ("term_data", "term_exit"):
                     # 终端输出只属于本机终端面板：spawn/input 仅本机（app.py:664），
                     # 输出里可能含用户亲手回显的环境变量等敏感值，远端一律不推送
                     # （审查 P1-1）。
                     return
+            if not client_is_local:
+                rid = str(ev.get("request_id") or "")
+                if ev.get("kind") == "permission_request" and rid:
+                    remote_permissions[rid] = str(ev.get("session_id") or "")
+                elif ev.get("kind") == "permission_resolved":
+                    remote_permissions.pop(rid, None)
             await send({"event": ev.get("kind", ""), "data": ev})
 
         backend.ws_emitters.append(emit)
@@ -2403,13 +2487,55 @@ def create_app(
                 method = str(msg.get("method", ""))
                 params = msg.get("params") or {}
 
-                # 消息发出时先登记目标会话（后续广播事件据此隔离）
-                if method == "chat.send" and params.get("session_id"):
-                    conn_state["session"] = str(params["session_id"])
-
                 async def process(mid=mid, method=method, params=params):
+                    request_bound = False
+
+                    async def request_emit(ev: dict) -> None:
+                        nonlocal request_bound
+                        # 只由本请求实际开始运行时发出的会话事件绑定连接，
+                        # 广播与被拒绝的请求均不能改变订阅。预估先于 turn_started，
+                        # 也要接收；已绑定连接发送到另一个会话时同样更新一次。
+                        if (not client_is_local and method == "chat.send"
+                                and not request_bound and ev.get("session_id")):
+                            conn_state["session"] = ev["session_id"]
+                            request_bound = True
+                        await emit(ev)
+
                     try:
-                        result = await dispatch(method, params, emit, local=client_is_local)
+                        if not isinstance(params, dict):
+                            raise RuntimeError("params 必须是 JSON 对象")
+                        if method == "permission.respond" and not client_is_local:
+                            rid = str(params.get("request_id") or "")
+                            # 远程只能回答本连接实际收到、且属于本连接会话的确认。
+                            # 不能把「未登记」的 request_id 与未绑定会话的 None
+                            # 误判成相等（空映射 + 空会话曾形成旁路）。
+                            if (
+                                not rid
+                                or rid not in remote_permissions
+                                or remote_permissions[rid] != conn_state["session"]
+                            ):
+                                await send({"id": mid, "ok": True, "result": {"delivered": False}})
+                                return
+                        if method == "chat.send" and params.get("session_id"):
+                            sid = str(params["session_id"])
+                            await backend._get_owned_session(sid, local=client_is_local)
+                        # stop 的 session_id 不能由远程调用方断言：只接受该连接已经
+                        # 通过 turn_started / session 操作绑定的会话。未绑定时注入空串，
+                        # 由 _h_stop 返回 cancelled=false，绝不回退到 backend.session。
+                        dispatch_params = params
+                        if method == "stop" and not client_is_local:
+                            dispatch_params = {
+                                **params,
+                                "session_id": conn_state["session"] or "",
+                            }
+                        # 后端需要 request_emit 才能在首个会话事件时绑定远程
+                        # 会话，但广播排除发送方时要识别它实际对应的连接 emitter。
+                        # 给包装函数挂稳定身份，避免把发送方自己的 user_message
+                        # 再广播回来（request_emit 与 emit 本来不是同一个对象）。
+                        request_emit._source_emit = emit
+                        result = await dispatch(
+                            method, dispatch_params, request_emit, local=client_is_local
+                        )
                         # 跟踪连接当前交互的会话（B15 的事件隔离用）
                         if method == "session.delete":
                             # 删除后后端已自动切走：跟随 new_active（可能为 None）。

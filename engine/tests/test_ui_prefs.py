@@ -208,7 +208,8 @@ def test_classic_view_lists_quick_chats(home):
     body = js[js.index("async function refreshSessions("):]
     body = body[:body.index("// 空会话清理入口")]
     assert "quick_sessions" in body
-    assert 'renderPlainList(ul, Array.isArray(quick_sessions) ? quick_sessions : [], "quick"' in body
+    assert "const qlist = Array.isArray(quick_sessions) ? quick_sessions : [];" in body
+    assert 'renderPlainList(ul, qOrdered, "quick", "")' in body
     # 字段缺失（远程客户端）时不渲染那个永远为空的列表
     assert "Array.isArray(quick_sessions)" in body
     # 「远程连接」列一下：跨项目拉取后按项目过滤（项目行点击后切换）
@@ -941,7 +942,7 @@ def test_frontend_workspace_reset_covers_project_bound_state(home):
     for name in (
         "chatTabs", "activeTab", "sessionMeta", "currentSessionId",
         "sessionSearchActive", "fileIndex", "providerCfg", "bootSnap",
-        "resetProjectPanels",
+        "resetProjectPanels", "splitPanes",
     ):
         assert name in reset_body, f"resetWorkspaceState 漏清 {name}"
     panels = js[js.index("function resetProjectPanels()"):]
@@ -950,6 +951,81 @@ def test_frontend_workspace_reset_covers_project_bound_state(home):
     # tasksTimer 曾是死代码（从未赋值）已随轮询快照改造移除
     for name in ("filesLoaded", "agCache", "loadTasks._snap", "resetTermTabs"):
         assert name in panels_body, f"resetProjectPanels 漏清 {name}"
+
+
+def test_split_pane_state_invariants(home):
+    """分屏列的状态不变量（回归锁，防「列状态没人复位」类缺陷回归）：
+      ① 同一会话只在一个面上打开——openSplitPane 遇主栏已开的同会话标签
+         先收标签再开列（「在分屏打开」= 搬进分屏），
+         openTabForSession 把开着的那一列收掉（事件按 tabFor 优先路由进标签，
+         双开后列的运行点/输入锁再也没事件来复位）；
+      ② 列头 🔒 点击把 pane.permData 转移给主栏标签并挂卡（新标签的 permData
+         初始为 null，不带过去确认条永远弹不出来，轮次挂在权限门上）；
+      ③ 列头运行点只由 queue_updated 驱动重画——assistant_message 每个中间轮
+         （含工具调用轮）都发、task_finished 是后台子代理任务终态，拿它们当
+         轮末信号蓝点会中途熄灭；
+      ④ 列对象补齐 lastAssistantText 初值（伪 tab 字段口径对齐 newTabObj，
+         缺了它无流式正文的轮在收尾时 .trim() 抛 TypeError）；
+      ⑤ 轮次产物（检查点条/规划执行按钮）落本轮所属面板的日志，不按 routeTab
+         落——多会话并行时响应返回前任何面板的事件都可能改写 routeTab，落错
+         面板的执行按钮点击还会触发别栏发送；
+      ⑥ 跨项目只读列不挂会改会话的操作（消息级编辑/重发/分叉/回退/重新生成、
+         圆桌「引用追问」），列上没有输入框，点了要么抛错要么换来误导性的
+         「session not found」。"""
+    js = read_app_bundle()
+    open_fn = js[js.index("async function openSplitPane("):]
+    open_fn = open_fn[:open_fn.index("\n}\n")]
+    assert "tabFor(sid)" in open_fn and "closeTab(conflict)" in open_fn, \
+        "openSplitPane 遇主栏已开的同会话标签：自动收标签后开列（搬进分屏）"
+    open_tab = js[js.index("function openTabForSession("):]
+    open_tab = open_tab[:open_tab.index("\n}\n")]
+    assert "closeSplitPanesForSids" in open_tab, "主栏打开会话要收掉同会话的分屏列"
+
+    head = js[js.index("function paintSplitHead("):]
+    head = head[:head.index("\nfunction ")]
+    assert "nt.permData = perm" in head and "showPermission(perm)" in head, \
+        "列头 🔒 点击必须把待确认数据带到主栏标签恢复确认卡"
+
+    sync = js[js.index("if (splitPanes.includes(routeTab)) {"):]
+    sync = sync[:sync.index("\n}")]
+    assert 'kind === "queue_updated"' in sync, "列头运行点由 queue_updated 驱动重画"
+    assert 'kind === "assistant_message"' not in sync, \
+        "assistant_message 是中间轮信号，不当轮末用"
+    assert 'kind === "task_finished"' not in sync, \
+        "task_finished 是后台子代理任务终态，不当轮末用"
+    assert "pane.permData = null" in sync, "确认解决后列上的待确认数据一并清掉"
+
+    pane_lit = js[js.index("const pane = {"):]
+    pane_lit = pane_lit[:pane_lit.index("};")]
+    assert "lastAssistantText" in pane_lit, "列对象缺 lastAssistantText 会在轮末抛 TypeError"
+    assert "readonly:" in pane_lit, "列对象要带 readonly 标记（只读降级的判断依据）"
+
+    # ⑤ 轮次产物落点跟面板走（send 主栏/列与 doSend 列内都传 tab）
+    turn = js[js.index("function appendToTurnLog("):]
+    turn = turn[:turn.index("\n}\n")]
+    assert "tab.logEl" in turn, "轮次产物优先落所属面板的日志"
+    assert "host === curLog()" in turn, "落点不是当前视图时不抢滚动"
+    plan = js[js.index("function addPlanActions("):]
+    plan = plan[:plan.index("\nfunction ")]
+    assert "appendToTurnLog(bar, tab)" in plan, "规划执行按钮要落传入面板的日志"
+    ckpt = js[js.index("function addCheckpointBar("):]
+    ckpt = ckpt[:ckpt.index("\nfunction ")]
+    assert "appendToTurnLog(bar, tab)" in ckpt, "检查点条要落传入面板的日志"
+    send_fn = js[js.index("async function send("):]
+    send_fn = send_fn[:send_fn.index("\n}\n")]
+    assert "addCheckpointBar(r.checkpoint, tab)" in send_fn, "主栏检查点条也要带面板语境"
+
+    # ⑥ 只读列的交互面收敛
+    ops = js[js.index("function attachMsgOps("):]
+    ops = ops[:ops.index("\nfunction ")]
+    assert "tab.readonly" in ops, "只读列的消息操作要在挂载点收敛"
+    assert ops.count("if (!ro)") == 2, "编辑/重发与分叉/回退/重新生成在只读列不挂"
+    replay = js[js.index("function buildRtReplayCard("):]
+    replay = replay[:replay.index("\nfunction ")]
+    assert "u.quoteBtn.remove()" in replay, "只读列的圆桌回放卡不挂「引用追问」"
+    quote = js[js.index("function quoteRoundtableDraft("):]
+    quote = quote[:quote.index("\nfunction ")]
+    assert "if (!input)" in quote, "引用追问对取不到输入框要有可读兜底（实时卡路径）"
 
 
 def test_right_tab_restore_loads_data_on_startup(home):
@@ -1091,10 +1167,10 @@ def test_roundtable_menu_opens_on_left_and_keeps_actions_reachable(home):
     assert "bottom:" in act
     # 定位是实时算的，且做容器内收敛
     assert "function positionRtMenu(" in js
-    assert "positionRtMenu(menu)" in js
+    assert "positionRtMenu(menu, \"coop-switch\")" in js
     body = js[js.index("function positionRtMenu("):]
     body = body[:body.index("\n}\n")]
-    assert "rt-switch" in body and "chat-main" in body
+    assert "coop-switch" in body and "chat-main" in body
     assert "uiScale" in body, "物理像素要换算回布局坐标"
     assert "Math.min" in body and "Math.max" in body, "要有容器内收敛"
 
@@ -1215,10 +1291,14 @@ def test_remote_project_fixed_entry(home):
     assert 'if (remote) li.classList.add("remote-fixed")' in js
     assert "「远程连接」还没有对话" in js, "没有对话时给出去渠道发一条的提示"
     assert "openTabForSession(list[0].id" in js, "点击打开名下最近的会话"
-    # 点击处理里固定项目走打开分支，而不是 switchProject（锚在 refreshProjects 区域内）
+    # 点击处理里固定项目只陈列其会话，而不是切换引擎工作目录（锚在 refreshProjects 区域内）
     seg = js[js.index("async function refreshProjects("):]
     seg = seg[:seg.index("function deleteProjectModal(")]
-    assert "if (remote) {" in seg and "switchProject(p.root_path)" in seg
+    remote_branch = seg[seg.index("if (remote) {"):]
+    remote_branch = remote_branch[:remote_branch.index("if (p.is_current)")]
+    assert "classicViewGk = \"remote:\" + p.id" in remote_branch
+    assert "refreshSessions()" in remote_branch
+    assert "switchProject(p.root_path)" not in remote_branch
     # 删除钮只在非固定项目上创建（固定项目不提供删除）
     assert "if (!remote) {" in seg
     # 分组视图：组头 ✕ 同样只对真实项目（有 rootPath）渲染

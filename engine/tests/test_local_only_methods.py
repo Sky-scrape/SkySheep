@@ -43,6 +43,13 @@ MUST_BE_LOCAL = (
     "subagent.save", "default_model.set", "aux.model.set",
     # 本机体验/信息面（审查 P1-3 收口）
     "app.notify", "fs.open", "term.close", "memory.get", "model.switch",
+    # 会话的项目目录面：路径回传是枚举面、reveal 在本机桌面弹资源管理器
+    "session.project_path", "session.reveal",
+    # 会话级模型覆盖与思考强度（分屏列/主栏的会话级模型菜单与档位菜单）：
+    # 换会话私有 provider、读写会话档位，同面的本机体验操作
+    "session.model_switch", "session.model_get",
+    "session.reasoning_get", "session.reasoning_set",
+    "session.accept_get", "session.accept_set",
 )
 
 # 不在集合里、但方法体内有散点本机检查/远端降级的例外（审查专项 2 逐一核实过）。

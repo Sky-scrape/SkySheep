@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 
 from ...channels import ChannelGate
 from ...config import _read_raw_config, load_config, update_config_section
@@ -444,14 +443,16 @@ class ChannelsMixin:
 
         与 _get_runtime 的差别只在 gate——渠道的权限姿态必须由渠道决定：
         默认门控会产出 PermissionRequest 并无限期等前端，渠道场景下没有前端。
-        工作目录与白名单归属都走「远程连接」项目（渠道对话与桌面工作目录无关；
-        文件/命令类工具本就在 ChannelGate 允许清单默认拒绝之列）。
+        工作目录与白名单归属都走「远程连接」项目（工作目录＝数据目录下的
+        remote-control 文件夹，不再借用用户主目录；文件/命令类工具本就在
+        ChannelGate 允许清单默认拒绝之列）。
         """
         rt = self.runtimes.get(session_id)
         if rt is not None:
             return rt
         remote_pid = await self._remote_project_id()
-        remote_dir = Path.home()
+        # 渠道会话的真实工作目录：数据目录 remote-control 文件夹（原为用户主目录）。
+        remote_dir = self._remote_workdir()
         section = dict((self.cfg.channels.platforms or {}).get(channel_name) or {})
         gate = ChannelGate(
             allowed=list(section.get("allowed_tools") or []),
@@ -651,6 +652,7 @@ class ChannelsMixin:
             f"会话：{title}\n"
             f"模型：{self.provider_name or '未配置'} / {self.provider_model or '-'}\n"
             "项目：远程连接（渠道会话的固定项目）\n"
+            f"工作目录：{self._remote_workdir()}\n"
             f"上下文：{self._context_limit():,} tokens"
         )
 

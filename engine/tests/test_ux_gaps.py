@@ -174,6 +174,50 @@ def test_send_rejects_images_for_text_only_model(home):
     assert "不支持图片输入" in frame["error"]
 
 
+def test_send_images_gate_follows_session_model(home):
+    """贴图闸门按会话生效服务判（三段解析：覆盖 → 默认模型 → 全局），不按
+    引擎全局记账——会话级换过模型的列，两个方向都不能误判：全局不支持/
+    覆盖支持被误拒（文案还报成没在用的全局服务名）；全局支持/覆盖不支持
+    放行给上游换一句报错。"""
+    from skysheep.config import add_provider_to_config, update_provider_in_config
+
+    add_provider_to_config("vis-on", kind="openai", base_url="http://x",
+                           model="vis-1", api_key="k-on")
+    add_provider_to_config("vis-off", kind="openai", base_url="http://x",
+                           model="novis-1", api_key="k-off")
+    update_provider_in_config("vis-off", supports_vision=False)
+    with make_client(home, [[TextBlock(text="收到图")]]) as client, \
+            client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        # 方向一：全局切到不支持看图的服务，会话覆盖到支持的服务 → 放行
+        sw = rpc("sw", "model.switch", {"name": "vis-off"})
+        assert sw["ok"], sw.get("error")
+        ov = rpc("ov", "session.model_switch",
+                 {"id": s1, "name": "vis-on", "model": "vis-1"})
+        assert ov["ok"], ov.get("error")
+        assert ov["result"]["supports_vision"] is True
+        c1 = rpc("c1", "chat.send", {"text": "看这张", "session_id": s1,
+                                     "images": [{"media_type": "image/png", "data": "aGk="}]})
+        assert c1["ok"], c1.get("error")
+
+        # 方向二：全局支持（fake），会话覆盖到不支持的服务 → 拒绝，
+        # 文案报会话生效的覆盖服务（不是没在用的全局服务名）
+        ws.send_json({"id": "n2", "method": "session.new"})
+        s2 = recv_until(ws, "n2")["result"]["id"]
+        ov2 = rpc("ov2", "session.model_switch",
+                  {"id": s2, "name": "vis-off", "model": "novis-1"})
+        assert ov2["ok"], ov2.get("error")
+        c2 = rpc("c2", "chat.send", {"text": "看这张", "session_id": s2,
+                                     "images": [{"media_type": "image/png", "data": "aGk="}]})
+        assert c2["ok"] is False
+        assert "vis-off" in c2["error"] and "不支持图片输入" in c2["error"]
+
+
 def test_boot_snapshot_reports_vision_and_limit(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "b1", "method": "boot"})

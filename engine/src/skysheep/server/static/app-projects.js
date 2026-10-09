@@ -64,7 +64,9 @@ async function switchProject(path) {
  *  而过反而像界面在抖（用户报的「切换项目时页面闪烁」主要来源之一）。 */
 function setSwitchBusy(on) {
   const list = document.getElementById("project-list");
-  const text = document.getElementById("status-text");
+  // 提示位挂主栏中部的快捷键提示槽（status-text 已删，连接态只留圆点）：
+  // 临时置换文字、切完还原，与原先同一套一次性置换手法
+  const text = document.getElementById("cp-hint");
   if (on) {
     clearTimeout(switchBusyTimer);
     switchBusyTimer = setTimeout(() => {
@@ -107,6 +109,10 @@ function resetWorkspaceState() {
   sessionMeta = {};
   currentSessionId = null;
   chatBox.querySelectorAll(":scope > .chat-log").forEach((el) => el.remove());
+  // —— 分屏列：列里的会话属于旧项目，残留只会对着死会话报错（发送/换模型
+  // 都被当前项目归属校验拒）——整列收掉，#split-pane 与 has-split 让位随
+  // closeSplitPane 一并复原
+  [...splitPanes].forEach((p) => closeSplitPane(p, { restore: false })); // 切项目：旧项目会话不搬回
 
   // —— 运行态 / 权限 / 用量 ——
   hidePermission();
@@ -246,7 +252,8 @@ async function refreshProjects(prefetched) {
     // 「远程连接」列表时亮它；看快聊时亮快聊行（见 buildQuickRow）。
     // classicViewGk 由点击决定；is_current 仍用于切换/删除等逻辑判定
     if (remote ? classicViewGk === "remote:" + p.id
-               : (p.is_current && classicViewGk == null)) {
+               : (classicViewGk === "proj:" + p.id
+                  || (p.is_current && classicViewGk == null))) {
       li.classList.add("active");
     }
     li.innerHTML = FOLDER_SVG + `<span class="s-title">${escapeHtml(p.name)}</span>`;
@@ -254,7 +261,10 @@ async function refreshProjects(prefetched) {
     // 它名下是飞书/微信等渠道的对话——点它陈列这组对话，不切工作目录
     li.title = remote
       ? "远程连接 —— 飞书/微信等渠道的对话都归在这里（固定项目，不可切换）；点击查看它的对话"
-      : p.root_path + (p.is_current ? "（当前项目）" : "—— 点击切换到这个项目");
+      : p.root_path + (p.is_current ? "（当前项目）"
+        : classicViewGk === "proj:" + p.id
+          ? "（正在查看该项目的对话）—— 再次点击返回当前项目列表"
+          : "—— 点击查看这个项目的对话（右侧对话界面不切换）");
     if (remote) li.classList.add("remote-fixed");
     // 拖动排序：与分组视图共用 project_order（project.list 已按它返回）
     wireListDrag(li, { id: String(p.id) }, {
@@ -315,12 +325,14 @@ async function refreshProjects(prefetched) {
         }
         return;
       }
-      // 其他项目：切换过去（切完即成为当前项目、高亮它）
-      try {
-        await switchProject(p.root_path);
-      } catch (e) {
-        addNotice("切换失败: " + e.message);
-      }
+      // 其他项目：不切换工作项目（右侧对话界面保持不动），只把它高亮并在
+      // 会话区陈列该项目的对话（同快聊/远程行的视图模式）。真正的切换发生
+      // 在点该项目列表里的某条对话、或行上的＋（切过去并新建）时。
+      // 再次点击已查看的项目行：回到当前项目的会话列表
+      if (classicViewGk === "proj:" + p.id) classicViewGk = null;
+      else classicViewGk = "proj:" + p.id;
+      refreshProjects();
+      refreshSessions();
     };
     wireRowKeyboard(li); // 项目行键盘可达：Enter/空格同样切换/高亮
     ul.appendChild(li);

@@ -85,11 +85,15 @@ def test_ctrl_enter_send_pref(home):
 
 
 def test_send_key_toggle_wired(home):
-    """前端：输入框 keydown 按 ctrlEnterSend 分支；设置页有开关与回填。"""
+    """前端：输入框 keydown 按 ctrlEnterSend 分支（主栏与分屏列共用
+    composerKeydown）；设置页有开关与回填。"""
     js = read_app_bundle()
-    i = js.index('document.getElementById("input").addEventListener("keydown"')
+    i = js.index("function composerKeydown(e, face)")
     seg = js[i:js.index("btn-new")]
     assert "if (ctrlEnterSend)" in seg and "e.ctrlKey || e.metaKey" in seg
+    # 主栏与分屏列都挂同一套键语义：face.send 分派到列自己的发送
+    assert "composerKeydown(e, null)" in js and "composerKeydown(e, pane)" in js
+    assert "if (face) face.send(); else send();" in seg
     assert "ctrl_enter_send" in js and "renderSendKeyToggle" in js
     html = read_static("index.html")
     assert 'id="send-key-toggle"' in html and "用 Ctrl+Enter 发送" in html

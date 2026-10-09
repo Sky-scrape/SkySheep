@@ -425,6 +425,7 @@ async function renderSettings() {
   renderImagegenCfg().catch(() => {});
   renderSpeechCfg().catch(() => {});
   renderRoundtableCfg().catch(() => {});
+  renderAdversarialCfg().catch(() => {});
   renderSubagentCfg().catch(() => {});
 
   // —— 数据与隐私 ——

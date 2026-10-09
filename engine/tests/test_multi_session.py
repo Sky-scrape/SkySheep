@@ -70,8 +70,11 @@ async def test_parallel_sessions_run_concurrently(home):
     await be.shutdown()
 
 
-async def test_send_with_session_id_activates_target(home):
-    """chat.send 显式带 session_id 时切到目标会话；两个会话上下文独立。"""
+async def test_send_with_session_id_keeps_active_pointer(home):
+    """chat.send 显式带 session_id（分屏列定向发送）时目标会话照常执行，
+    但不劫持「当前会话」指针：审查页/任务清单/上下文浮层都按引擎当前会话
+    取数，指针被列带走后它们会读错会话，ui.json 的活动会话也不被覆写
+    （否则下次启动恢复到列会话）。两个会话上下文仍各自独立。"""
     be = await _mk(home)
     evs = []
 
@@ -83,13 +86,83 @@ async def test_send_with_session_id_activates_target(home):
     sid_b = (await be.new_session())["id"]
     await be.send("在 B 里", emit)
     assert be.session.id == sid_b
-    # 显式切回 A 再发：事件必须带 A 的 session_id，且 A 的历史独立
+    # 定向发回 A：事件带 A 的 session_id、A 的历史独立，但活动指针留在主栏的 B
     evs.clear()
     await be.send("再回 A", emit, session_id=sid_a)
-    assert be.session.id == sid_a
+    assert be.session.id == sid_b, "定向发送不得把活动会话指针带去目标会话"
     assert evs and evs[0].get("session_id") == sid_a
     assert len(be.runtimes[sid_a].agent.history) > 2, "A 的上下文应包含它的三轮消息"
     assert be.runtimes[sid_b].agent.history != be.runtimes[sid_a].agent.history
+    # ui.json 的「上次激活会话」不被定向发送覆写成 A
+    assert be._read_ui_prefs().get(be.SESSION_ACTIVE_KEY) != sid_a
+    await be.shutdown()
+
+
+async def test_model_switch_lazy_runtime_reloads_history(home):
+    """runtime 不在内存（重启 / LRU 淘汰）时 session_model_switch 会懒建：
+    必须照 resume_session 同款补拉历史——懒建后 runtime 已在内存，activate
+    的重载分支永不触发，不补的话该会话之后所有轮次都在空上下文上跑（静默
+    丢全部历史）。session_reasoning_set 同款。"""
+    provider = FakeProvider([[TextBlock(text="回应一")], [TextBlock(text="回应二")],
+                             [TextBlock(text="回应三")], [TextBlock(text="回应四")]])
+    be = ServerBackend(working_dir=home / "proj", provider_factory=lambda: provider)
+    await be.setup()
+    evs = []
+
+    async def emit(ev):
+        evs.append(ev)
+
+    sid = (await be.new_session())["id"]
+    await be.send("暗号 XYZZY", emit)
+    assert len(be.runtimes[sid].agent.history) >= 2
+    # 模拟重启 / LRU 淘汰：runtime 从内存消失（历史都在 SQLite）
+    be.runtimes.pop(sid)
+
+    # 会话级换模型懒建 runtime：历史必须跟着补上
+    await be.session_model_switch(sid, "deepseek", "deepseek-chat")
+    roles = [m.role for m in be.runtimes[sid].agent.history]
+    assert "user" in roles and "assistant" in roles, "懒建后历史为空：后续轮次会在空上下文上跑"
+    # 懒建（带历史）的 runtime 上继续对话：第二轮的消息叠在第一轮之后
+    await be.send("第二问", emit, session_id=sid)
+    roles = [m.role for m in be.runtimes[sid].agent.history]
+    assert roles.count("user") == 2 and roles.count("assistant") == 2
+
+    # 思考档位懒建同款：runtime 重建后历史必须补上；能力校验拒绝的路径
+    # （服务不支持思考）不许留下没装历史的空壳 runtime
+    be.runtimes.pop(sid)
+    try:
+        await be.session_reasoning_set(sid, "high")
+        roles = [m.role for m in be.runtimes[sid].agent.history]
+        assert "user" in roles, "思考档位懒建的 runtime 历史为空"
+    except RuntimeError:
+        assert sid not in be.runtimes, "能力校验拒绝后不得留下空壳 runtime"
+    await be.shutdown()
+
+
+async def test_cleanup_empty_sessions_clears_memory_tables(home):
+    """清理空会话的内存态随删清干净（与 delete_session 同一口径）：
+    会话级模型覆盖 / 思考档位 / 默认模型快照 / 手动命名标记不残留，
+    空会话预建的 runtime 一并回收。"""
+    provider = FakeProvider([[TextBlock(text="好")]])
+    provider.supports_reasoning = True
+    be = ServerBackend(working_dir=home / "proj", provider_factory=lambda: provider)
+    await be.setup()
+    # 当前会话（cleanup 的 keep）：留一个有内容的对照
+    keep = (await be.new_session())["id"]
+    # 空会话（只落库、不切指针、不建 runtime，归属当前项目——cleanup 按项目清）：
+    # 设过会话级覆盖与档位，model_switch 会懒建 runtime
+    s = await be.store.create_session(be._cur_project_id())
+    sid = s.id
+    await be.session_model_switch(sid, "deepseek", "deepseek-chat")
+    await be.session_reasoning_set(sid, "high")
+    assert sid in be._session_models and sid in be._session_efforts
+    assert sid in be.runtimes
+    r = await be.cleanup_empty_sessions()
+    assert sid in r["removed_ids"] and keep not in r["removed_ids"]
+    assert sid not in be._session_models, "会话级模型覆盖随清理残留"
+    assert sid not in be._session_efforts, "会话级思考档位随清理残留"
+    assert sid not in getattr(be, "_default_model_sessions", {}), "默认模型快照随清理残留"
+    assert sid not in be.runtimes, "空会话的 runtime 随清理残留"
     await be.shutdown()
 
 

@@ -464,6 +464,72 @@ model = "m4"
     assert "还没有配置 API Key" in specs3[0].build_error
 
 
+async def test_roundtable_chair_follows_session_model(home, monkeypatch):
+    """圆桌主席按本轮会话解析（三段：覆盖 → 默认模型 → 全局），不按引擎全局
+    记账——会话级换过模型的列/标签跑圆桌，主席必须是会话自己的模型：runtime
+    挂的 detached provider 做融合、成员剔除按它的 (服务, 模型) 键、轮末 meta
+    与用量也记它名下。修复前四处全用全局记账：融合由「界面上根本没显示的
+    全局模型」做了，会话自己的模型反而以成员身份重复出场。"""
+    be = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: FakeProvider([[TextBlock(text="好")]]),
+    )
+    await be.setup()
+    sid = (await be.new_session())["id"]
+    await be.session_model_switch(sid, "deepseek", "deepseek-chat")
+    rt = be.runtimes[sid]
+    assert be._session_effective_model(sid) == ("deepseek", "deepseek-chat")
+
+    captured = {}
+
+    class _Spec:
+        def __init__(self, name, model):
+            self.provider_name, self.model, self.role = name, model, ""
+
+    class _Result:
+        def __init__(self, name, model):
+            self.spec = _Spec(name, model)
+            self.status, self.error, self.text = "done", "", "草稿"
+            self.input_tokens = self.output_tokens = 0
+
+    class _Outcome:
+        members = [_Result("p2", "m2")]
+        status = "done"
+        fused_text = "融合结果"
+        error = ""
+
+    async def fake_run_roundtable(**kwargs):
+        captured.update(kwargs)
+        return _Outcome()
+
+    monkeypatch.setattr("skysheep.server.backend.run_roundtable", fake_run_roundtable)
+
+    evs = []
+
+    async def emit(ev):
+        evs.append(ev)
+
+    meta = await be._roundtable_body(
+        "问题", emit,
+        # 第一个显式成员与主席同 (服务, 模型) → 按新键被剔除（修复前按全局键
+        # 比对不命中，会话模型以成员身份重复出场）；zhipu 无 Key 构建失败 →
+        # 降级为错误卡片，仍占成员位（保证成员非空能开桌）
+        [{"provider": "deepseek", "model": "deepseek-chat"},
+         {"provider": "zhipu", "model": "zhipu-chat"}],
+        agent=rt.agent, sid=sid, chair_answers=True,
+    )
+    # 主席是会话自己的模型：实例取 runtime 挂的 provider，名字/模型按三段解析
+    assert captured["chair"] is rt.agent.provider
+    assert captured["chair_provider"] == "deepseek"
+    assert captured["chair_model"] == "deepseek-chat"
+    # 主席插在队首、与主席同键的显式成员被剔除（zhipu 错误卡保留在成员位）
+    assert [(m.provider_name, m.model) for m in captured["members"]] == \
+        [("deepseek", "deepseek-chat"), ("zhipu", "zhipu-chat")]
+    # 轮末 meta 记的也是会话生效模型（历史回放卡与统计口径据此渲染）
+    assert meta["chair"] == {"provider": "deepseek", "model": "deepseek-chat"}
+    await be.shutdown()
+
+
 def test_roundtable_without_members_errors_cleanly(home):
     # 无显式成员且没有其他可用 provider（ollama 预设自带占位 Key，这里禁掉）
     # → 默认策略选不到成员，应给出明确错误而不是空跑

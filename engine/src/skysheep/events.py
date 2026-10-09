@@ -272,6 +272,54 @@ class TeamFinished(Event):
     summary: str = ""
 
 
+class AdversarialStarted(Event):
+    """对抗轮开始：四角色流水线就绪（core/adversarial.py，docs/对抗模式设计.md）。
+
+    与圆桌（会诊融合）、团队（分工协作）并列的第三种多模型协作形态。
+    roles 形如 [{role, provider, model}]，role 取 finder / investigator /
+    advisor / judge（缺省裁判为当前主模型，同圆桌主席）。
+    """
+
+    kind: Literal["adversarial_started"] = "adversarial_started"
+    roles: list[dict] = Field(default_factory=list)
+
+
+class AdversarialPhase(Event):
+    """对抗阶段切换：finder → investigator → advisor → judge。"""
+
+    kind: Literal["adversarial_phase"] = "adversarial_phase"
+    phase: str = "finder"
+    note: str = ""  # 人类可读的进度说明（如「12 条候选问题待验证」）
+
+
+class AdversarialFindingProposed(Event):
+    """发现者提出一条候选问题（召回优先；裁决见 AdversarialVerdict）。"""
+
+    kind: Literal["adversarial_finding_proposed"] = "adversarial_finding_proposed"
+    finding_id: str = ""
+    category: str = ""
+    severity: str = ""
+    location: str = ""
+    description: str = ""
+
+
+class AdversarialVerdict(Event):
+    """调查员对一条候选问题的裁决（对抗验证，防守方复核）。"""
+
+    kind: Literal["adversarial_verdict"] = "adversarial_verdict"
+    finding_id: str = ""
+    verdict: str = ""  # confirmed / refuted / partial
+    reason: str = ""
+
+
+class AdversarialFinished(Event):
+    """对抗终态：status=done 时 summary 携带裁决统计。"""
+
+    kind: Literal["adversarial_finished"] = "adversarial_finished"
+    status: str = "done"  # done / error / cancelled
+    summary: str = ""
+
+
 AgentEvent = (
     TurnStarted
     | TextDelta
@@ -299,4 +347,9 @@ AgentEvent = (
     | TeamMessage
     | TeamTaskUpdated
     | TeamFinished
+    | AdversarialStarted
+    | AdversarialPhase
+    | AdversarialFindingProposed
+    | AdversarialVerdict
+    | AdversarialFinished
 )

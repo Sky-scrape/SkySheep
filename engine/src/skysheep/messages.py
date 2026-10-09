@@ -76,6 +76,9 @@ class Message(BaseModel):
     # 圆桌轮元数据（仅 assistant 消息携带）：成员列表、主席、模式等。
     # 只随消息持久化/回传前端，Provider 序列化线上 payload 时不涉及此字段。
     roundtable: dict | None = None
+    # 对抗轮元数据（仅 assistant 消息携带）：四角色名册、裁决统计、问题清单。
+    # 持久化/回传语义与 roundtable 同（Provider 线上 payload 不涉及）。
+    adversarial: dict | None = None
     # 消息在会话内的序号（store 落库时回填；前端消息级操作用）。不入线上 payload。
     seq: int | None = None
     # 本轮的实测耗时（毫秒，仅轮末 assistant 消息携带）。

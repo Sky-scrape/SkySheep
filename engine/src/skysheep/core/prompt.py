@@ -201,10 +201,11 @@ the language the director used.
 """
 
 
-# 无项目态的系统提示词补丁：告诉模型当前是快聊（没有工作目录），
-# 文件/命令类工具会拒绝执行，别白试也别装作能读写。
+# 无项目态的系统提示词补丁（兜底路径：引擎没开项目且会话缺归属记录）。
+# 快聊/远程连接有固定工作目录（数据目录 default / remote-control），
+# 不落这里；只有真正 working_dir 为 None 的会话才会看到这段说明。
 NO_PROJECT_NOTE = """
-# No working directory (quick chat)
+# No working directory (no project open)
 - The user has NOT opened any project: there is no working directory in this
   conversation, and file/command tools (read_file, write_file, edit_file,
   list_dir, glob, grep, run_command, read_document, write_document,
@@ -219,9 +220,12 @@ NO_PROJECT_NOTE = """
 
 
 def build_system_prompt(working_dir: Path | None) -> str:
-    """工作目录为 None 表示无项目态（快聊）：补一段说明而不是编造一个目录。"""
+    """工作目录为 None 表示无项目态（兜底）：补一段说明而不是编造一个目录。
+
+    快聊/远程连接有固定工作目录，不会落到 None 分支。
+    """
     text = PROMPT_TEMPLATE.format(
-        workdir=("(none - no project is open; quick chat only)" if working_dir is None
+        workdir=("(none - no project is open)" if working_dir is None
                  else str(working_dir)),
         osname=f"{platform.system()} {platform.release()}",
         date=date.today().isoformat(),

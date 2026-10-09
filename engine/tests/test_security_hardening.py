@@ -177,8 +177,11 @@ async def test_store_get_session_for_project(store):
     assert await store.get_session_for_project("nope", pa.id) is None
 
 
-def test_cross_project_session_ops_denied(home):
-    """跨项目会话操作全链路拒绝：activate/chat.send/export/元数据/删除/移动。"""
+def test_cross_project_session_ops_denied(home, monkeypatch):
+    """跨项目会话操作的全链路边界：管理面（activate/export/元数据/删除/移动）
+    本机跨项目也拒绝；交互面（chat.send）本机跨项目放行——分屏列是完整会话，
+    runtime 绑定会话所属项目干活（正向覆盖见 test_peek_cross_project）；
+    远程客户端一律拒绝（安全审查 B 族，报错不区分存在/无权）。"""
     from skysheep.messages import TextBlock
 
     (home / "proj2").mkdir()
@@ -195,7 +198,7 @@ def test_cross_project_session_ops_denied(home):
                       "params": {"path": str(home / "proj")}})
         assert recv_until(ws, "sw2")["ok"]
 
-        # 从项目 A 操作 B 的会话：全部拒绝（B1/B3/B4/B6/B7/B10）
+        # 从项目 A 管理 B 的会话：全部拒绝（B1/B3/B4/B6/B7/B10）
         cases = [
             ("session.activate", {"id": sid_b}),
             ("session.resume", {"id": sid_b}),
@@ -206,7 +209,6 @@ def test_cross_project_session_ops_denied(home):
             ("session.tags", {"id": sid_b, "tags": ["偷打标签"]}),
             ("session.move", {"id": sid_b, "project_id": None}),
             ("session.delete", {"id": sid_b}),
-            ("chat.send", {"text": "hi", "session_id": sid_b}),
         ]
         for i, (method, params) in enumerate(cases):
             ws.send_json({"id": f"c{i}", "method": method, "params": params})
@@ -220,6 +222,28 @@ def test_cross_project_session_ops_denied(home):
         assert recv_until(ws, "sw3")["ok"]
         ws.send_json({"id": "a1", "method": "session.activate", "params": {"id": sid_b}})
         assert recv_until(ws, "a1")["ok"]
+        # 切回项目 A 再收摊：让下面的远端后端从 A 启动（active_project 持久化
+        # 在 ui.json，最后停在哪启动就在哪），sid_b 对它才是跨项目会话
+        ws.send_json({"id": "sw4", "method": "project.switch",
+                      "params": {"path": str(home / "proj")}})
+        assert recv_until(ws, "sw4")["ok"]
+
+    # 远程客户端：跨项目交互与管理一律拒绝（B 族边界不随本机放开而放宽）
+    from skysheep.server import app as server_app_module
+
+    monkeypatch.setattr(server_app_module, "_client_is_local", lambda ws: False)
+    with make_client(home, script) as client, client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        for i, (method, params) in enumerate([
+            ("chat.send", {"text": "hi", "session_id": sid_b}),
+            ("session.delete", {"id": sid_b}),
+        ]):
+            frame = rpc(f"r{i}", method, params)
+            assert frame["ok"] is False, method
+            assert "not found" in frame["error"], method
 
 
 def test_refs_drop_foreign_project_sessions(home):
@@ -433,6 +457,84 @@ async def test_subagent_events_carry_session_id(tmp_path):
     fins = [e for e in seen if e["kind"] == "task_finished"]
     assert subs and all(e["session_id"] == "sess-x" for e in subs)
     assert fins and all(e["session_id"] == "sess-x" for e in fins)
+
+
+def test_remote_stop_cannot_cancel_foreign_or_unbound_session(home, monkeypatch):
+    """远程 stop 只能停止该连接已经绑定的会话，不能信任调用方提交的 sid。"""
+    from skysheep.messages import TextBlock
+
+    # 第一个连接模拟本机；第二个连接模拟远程客户端。
+    calls = {"n": 0}
+
+    def fake_local(client):
+        calls["n"] += 1
+        return calls["n"] == 1
+
+    monkeypatch.setattr(server_app, "_client_is_local", fake_local)
+    with make_client(home, [[TextBlock(text="完成")]]) as client, \
+         client.websocket_connect("/ws"), \
+         client.websocket_connect("/ws") as ws_remote:
+        backend = client.app.state.backend
+        cancelled: list[str | None] = []
+
+        def fake_cancel(session_id=None):
+            cancelled.append(session_id)
+            return True
+
+        backend.cancel_run = fake_cancel
+        ws_remote.send_json({"id": "u0", "method": "stop", "params": {}})
+        assert recv_until(ws_remote, "u0")["result"] == {"cancelled": False}
+        assert cancelled == []
+
+        # 远程调用方即使伪造另一个 sid，也只能被收敛到尚未绑定的空目标。
+        ws_remote.send_json({"id": "u1", "method": "stop",
+                             "params": {"session_id": "foreign-session"}})
+        assert recv_until(ws_remote, "u1")["result"] == {"cancelled": False}
+        assert cancelled == []
+
+        # 通过远程自身发起一轮后，才能绑定它自己的 session；测试只验证绑定口径，
+        # 不让 FakeProvider 的完成事件影响 stop 的授权断言。
+        ws_remote.send_json({"id": "c1", "method": "chat.send", "params": {"text": "远程会话"}})
+        frame = recv_until(ws_remote, "c1")
+        assert frame["ok"]
+        sid = frame["result"]["session_id"]
+        ws_remote.send_json({"id": "u2", "method": "stop",
+                             "params": {"session_id": "foreign-session"}})
+        assert recv_until(ws_remote, "u2")["result"] == {"cancelled": True}
+        assert cancelled == [sid]
+
+
+def test_remote_rejected_send_does_not_subscribe_to_foreign_events(home, monkeypatch):
+    """发送被拒绝时不能改变连接订阅；用户消息与权限事件也不得泄露。"""
+    monkeypatch.setattr(server_app, "_client_is_local", lambda client: False)
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+        ws.send_json({"id": "bad", "method": "chat.send",
+                      "params": {"text": "x", "session_id": "foreign-session"}})
+        assert not recv_until(ws, "bad")["ok"]
+
+        async def broadcast():
+            for kind in ("user_message", "text_delta", "permission_request", "subagent_event"):
+                for emitter in list(backend.ws_emitters):
+                    await emitter({"kind": kind, "session_id": "foreign-session",
+                                   "text": "secret", "request_id": "secret-permission"})
+
+        client.portal.call(broadcast)
+        events = []
+        ws.send_json({"id": "barrier", "method": "boot"})
+        assert recv_until(ws, "barrier", events)["ok"]
+        assert not events
+        delivered = []
+        monkeypatch.setattr(backend, "respond_permission",
+                            lambda rid, decision: delivered.append(rid) or True)
+        ws.send_json({"id": "p", "method": "permission.respond",
+                      "params": {"request_id": "secret-permission", "decision": "allow_once"}})
+        assert recv_until(ws, "p")["result"] == {"delivered": False}
+        assert delivered == []
+        ws.send_json({"id": "malformed", "method": "chat.send", "params": ["bad"]})
+        assert "params" in recv_until(ws, "malformed")["error"]
+        ws.send_json({"id": "alive", "method": "boot"})
+        assert recv_until(ws, "alive")["ok"]
 
 
 def test_subagent_live_events_isolated_for_remote(home, monkeypatch):

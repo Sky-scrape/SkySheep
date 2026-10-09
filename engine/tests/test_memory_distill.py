@@ -227,44 +227,56 @@ async def test_turn_distill_extracts_candidates(home, state_file, mem_file):
     """轮次收尾抽取：走 provider、候选带上下文与时间进待审列表，不动 memory.md。"""
     prov = FakeProvider([[TextBlock(text=DISTILL_REPLY)]])
     be = await _mk_backend(home, prov)
-    await be._turn_distill("sid-1", _turn_msgs())
+    try:
+        await be._turn_distill("sid-1", _turn_msgs())
 
-    assert len(prov.calls) == 1
-    assert "对话记录" in prov.calls[0][0].text  # 喂给模型的是提炼稿
-    pending = list_candidates()
-    assert [e["text"] for e in pending] == [
-        "用户团队用 uv 管理 Python 依赖", "用户项目都放在 D 盘",
-    ]
-    assert all(e["session_id"] == "sid-1" and e["context"] and e["ts"] for e in pending)
-    assert not mem_file.exists()  # 候选制：不写 memory.md、不打扰
-    # 直调 _turn_distill 没经过 schedule（单飞标记在那里惰性建）：有则必须已释放
-    assert getattr(be, "_distilling", set()) == set()
+        assert len(prov.calls) == 1
+        assert "对话记录" in prov.calls[0][0].text  # 喂给模型的是提炼稿
+        pending = list_candidates()
+        assert [e["text"] for e in pending] == [
+            "用户团队用 uv 管理 Python 依赖", "用户项目都放在 D 盘",
+        ]
+        assert all(e["session_id"] == "sid-1" and e["context"] and e["ts"] for e in pending)
+        assert not mem_file.exists()  # 候选制：不写 memory.md、不打扰
+        # 直调 _turn_distill 没经过 schedule（单飞标记在那里惰性建）：有则必须已释放
+        assert getattr(be, "_distilling", set()) == set()
+    finally:
+        await be.shutdown()
 
 
 async def test_turn_distill_skips_short_turns_and_failures(home, state_file, mem_file):
     """过短轮次不调模型；无候选不写状态；provider 异常静默不上抛。"""
     prov = FakeProvider([[TextBlock(text="好的")]])
     be = await _mk_backend(home, prov)
-    await be._turn_distill(
-        "sid-1", [Message.user("你好"), Message.assistant([TextBlock(text="好的")])]
-    )
-    assert prov.calls == []  # 寒暄轮连模型都不调
-    assert not state_file.exists()
+    be2 = None
+    be3 = None
+    try:
+        await be._turn_distill(
+            "sid-1", [Message.user("你好"), Message.assistant([TextBlock(text="好的")])]
+        )
+        assert prov.calls == []  # 寒暄轮连模型都不调
+        assert not state_file.exists()
 
-    be2 = await _mk_backend(home, FakeProvider([[TextBlock(text="无")]]))
-    await be2._turn_distill("sid-2", _turn_msgs())
-    assert len(be2.provider.calls) == 1  # 调了模型
-    assert not state_file.exists()  # 没有候选：待审列表不动
+        be2 = await _mk_backend(home, FakeProvider([[TextBlock(text="无")]]))
+        await be2._turn_distill("sid-2", _turn_msgs())
+        assert len(be2.provider.calls) == 1  # 调了模型
+        assert not state_file.exists()  # 没有候选：待审列表不动
 
-    class _Boom:
-        async def stream(self, messages, tool_schemas, effort=None):
-            raise RuntimeError("网络炸了")
-            yield  # pragma: no cover（使本函数成为异步生成器）
+        class _Boom:
+            async def stream(self, messages, tool_schemas, effort=None):
+                raise RuntimeError("网络炸了")
+                yield  # pragma: no cover（使本函数成为异步生成器）
 
-    be3 = await _mk_backend(home, FakeProvider([]))
-    be3.provider = _Boom()
-    await be3._turn_distill("sid-3", _turn_msgs())  # 异常被吞，不上抛
-    assert not state_file.exists()
+        be3 = await _mk_backend(home, FakeProvider([]))
+        be3.provider = _Boom()
+        await be3._turn_distill("sid-3", _turn_msgs())  # 异常被吞，不上抛
+        assert not state_file.exists()
+    finally:
+        await be.shutdown()
+        if be2 is not None:
+            await be2.shutdown()
+        if be3 is not None:
+            await be3.shutdown()
 
 
 async def test_schedule_turn_distill_gating(home, state_file, monkeypatch):
@@ -277,56 +289,60 @@ async def test_schedule_turn_distill_gating(home, state_file, monkeypatch):
     )
     prov = FakeProvider([[TextBlock(text=DISTILL_REPLY)]])
     be = await _mk_backend(home, prov)
+    try:
+        # 默认关：什么都不发生
+        be.schedule_turn_distill("sid-1", _turn_msgs())
+        assert spawned == [] and prov.calls == []
 
-    # 默认关：什么都不发生
-    be.schedule_turn_distill("sid-1", _turn_msgs())
-    assert spawned == [] and prov.calls == []
+        # 演示模式：开了也不触发（不消耗脚本组）
+        set_distill_enabled(True)
+        prov.demo_mode = True
+        be.schedule_turn_distill("sid-1", _turn_msgs())
+        assert spawned == []
+        prov.demo_mode = False
 
-    # 演示模式：开了也不触发（不消耗脚本组）
-    set_distill_enabled(True)
-    prov.demo_mode = True
-    be.schedule_turn_distill("sid-1", _turn_msgs())
-    assert spawned == []
-    prov.demo_mode = False
+        # 开启：spawn_bg 派发，单飞标记挂上；同会话进行中再派发 → 让路
+        be.schedule_turn_distill("sid-1", _turn_msgs())
+        assert len(spawned) == 1
+        assert "sid-1" in be._distilling
+        be.schedule_turn_distill("sid-1", _turn_msgs())
+        assert len(spawned) == 1
 
-    # 开启：spawn_bg 派发，单飞标记挂上；同会话进行中再派发 → 让路
-    be.schedule_turn_distill("sid-1", _turn_msgs())
-    assert len(spawned) == 1
-    assert "sid-1" in be._distilling
-    be.schedule_turn_distill("sid-1", _turn_msgs())
-    assert len(spawned) == 1
+        # 无事件循环环境（RuntimeError）→ 标记回滚，不悬挂
+        def _no_loop(coro):
+            coro.close()
+            raise RuntimeError("no running loop")
 
-    # 无事件循环环境（RuntimeError）→ 标记回滚，不悬挂
-    def _no_loop(coro):
-        coro.close()
-        raise RuntimeError("no running loop")
+        monkeypatch.setattr(mem_mod, "spawn_bg", _no_loop)
+        be.schedule_turn_distill("sid-2", _turn_msgs())
+        assert "sid-2" not in be._distilling
 
-    monkeypatch.setattr(mem_mod, "spawn_bg", _no_loop)
-    be.schedule_turn_distill("sid-2", _turn_msgs())
-    assert "sid-2" not in be._distilling
-
-    # 派发的协程照常跑完：候选落待审、标记释放
-    await spawned[0]
-    assert [e["text"] for e in list_candidates()] == [
-        "用户团队用 uv 管理 Python 依赖", "用户项目都放在 D 盘",
-    ]
-    assert be._distilling == set()
+        # 派发的协程照常跑完：候选落待审、标记释放
+        await spawned[0]
+        assert [e["text"] for e in list_candidates()] == [
+            "用户团队用 uv 管理 Python 依赖", "用户项目都放在 D 盘",
+        ]
+        assert be._distilling == set()
+    finally:
+        await be.shutdown()
 
 
 async def test_memory_candidate_wrappers(home, state_file, mem_file):
     """接线面：开关读写、候选列表、采纳刷新系统提示词、忽略走包装器。"""
     be = await _mk_backend(home, FakeProvider([[TextBlock(text=DISTILL_REPLY)]]))
+    try:
+        assert (await be.memory_distill_save(True))["enabled"] is True
+        assert await be.memory_candidates() == {"enabled": True, "pending": []}
 
-    assert (await be.memory_distill_save(True))["enabled"] is True
-    assert await be.memory_candidates() == {"enabled": True, "pending": []}
+        await be._turn_distill("sid-1", _turn_msgs())
+        pending = (await be.memory_candidates())["pending"]
+        assert len(pending) == 2
 
-    await be._turn_distill("sid-1", _turn_msgs())
-    pending = (await be.memory_candidates())["pending"]
-    assert len(pending) == 2
-
-    res = await be.memory_candidate_adopt(pending[0]["id"])
-    assert res["adopted"] is True
-    assert "用户团队用 uv 管理 Python 依赖" in be.compose_system()  # 采纳后立刻生效
-    res = await be.memory_candidate_ignore(pending[1]["id"])
-    assert res["ignored"] is True
-    assert (await be.memory_candidates())["pending"] == []
+        res = await be.memory_candidate_adopt(pending[0]["id"])
+        assert res["adopted"] is True
+        assert "用户团队用 uv 管理 Python 依赖" in be.compose_system()  # 采纳后立刻生效
+        res = await be.memory_candidate_ignore(pending[1]["id"])
+        assert res["ignored"] is True
+        assert (await be.memory_candidates())["pending"] == []
+    finally:
+        await be.shutdown()

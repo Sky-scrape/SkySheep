@@ -10,6 +10,7 @@ SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置
 | `skysheep.events` | Agent 运行过程的统一事件流 |
 | `skysheep.core` | Agent 核心循环（流式、工具调用、权限交互协议），附任务耗时预估（`estimate.py`）与思考强度自动估档（`effort.py`）；检查点带字节限额，取消轮次会修复断裂的 tool_use 历史 |
 | `skysheep.core.team` | 团队多模型协作（一期用户总管 MVP + 二期 AI 总管闭环 + 三期模板与全量回放）：TeamChannel 频道 / TeamTask+TeamBoard 工单板 / TeamOrchestrator 编排循环——用户总管：每条消息即一道总管指令，队员唤醒执行、验收交付；AI 总管：指定模型任总管（独立 history、只挂内部团队工具）自动推进拆解→派工→收报→验收→交付，用户保留插话/接管/收队，「小会」复用 run_roundtable；防失控上限（全局轮次 / redo 超限强制裁定 / 停滞移交 / 预算越线强制交付）；安全零放松（执行型队员照走 PermissionGate）；三期沉淀：团队模板（`~/.skysheep/teams.json`，name 唯一键、同名覆盖）与频道消息全量落库（`message_sink` 逐条定稿落 `team_messages` 表、建队分配唯一 `team_id` 随快照进 meta，`team.log` 凭它回放） |
+| `skysheep.core.adversarial` | 对抗：多模型对抗性审查（docs/对抗模式设计.md）——四角色流水线：发现者穷举问题（宁滥勿缺）→ 调查者逐条对抗验证（confirmed/refuted/partial）→ 建议者给修复方案 → 裁判（当前主模型）流式终审报告；不对称激励 + 阶段间上下文隔离让误报被流水线物理过滤；纯文本协作（不传工具表、不经权限门），单阶段失败隔离降级（调查失败标待定/建议失败留空/裁判失败拼兜底报告），取消保留已产出内容，角色可由同一模型承担 |
 | `skysheep.models` | 模型适配层：OpenAI 兼容 / Anthropic 原生 |
 | `skysheep.tools` | 内置工具（文件读写/移动删除、搜索、命令、文档、图片、联网、电脑控制）+ Schema 导出；grep 按探测编码匹配（GB18030 也能搜到），`run_command` 子进程剥密钥类环境变量，画图与联网同一套 SSRF 防护（公网校验 + 连接固定 + 流式限长）|
 | `skysheep.security` | Permission Gate：工具分级、白名单、确认协议（决策值过白名单，认不出来按拒绝）。命令拼接检测按实际 shell 取（Windows 的 `cmd.exe` 单引号不是引号、`%VAR%` 会展开）；工作区信任 `refresh(touched=...)` 只延续用户本次操作涉及的来源 |

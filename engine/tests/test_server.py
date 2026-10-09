@@ -1111,6 +1111,537 @@ def test_cleanup_empty_sessions(home):
         assert info["empty_count"] == 0
 
 
+def test_session_project_path_and_reveal(home, monkeypatch):
+    """会话右键的「在资源管理器中打开 / 复制项目路径」：项目会话定位到工作目录，
+    快聊（任务）会话没有目录——查询返回空串、打开报可读错误。"""
+    opened = []
+    monkeypatch.setattr(
+        "skysheep.support.open_folder",
+        lambda p: opened.append(str(p)),
+    )
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n", "method": "session.new"})
+        sid = recv_until(ws, "n")["result"]["id"]
+        r = rpc("p1", "session.project_path", {"id": sid})
+        assert r["ok"] and r["result"]["path"] == str((home / "proj").resolve())
+
+        r = rpc("rv", "session.reveal", {"id": sid})
+        assert r["ok"] and opened == [str((home / "proj").resolve())]
+
+        # 任务会话（不绑项目）：查询空串、打开报可读错误
+        r = rpc("t", "session.new_task")
+        task_sid = r["result"]["id"]
+        r = rpc("p2", "session.project_path", {"id": task_sid})
+        assert r["ok"] and r["result"]["path"] == ""
+        r = rpc("rv2", "session.reveal", {"id": task_sid})
+        assert not r["ok"] and "没有工作目录" in r["error"]
+
+
+def test_peek_session_messages_is_readonly(home):
+    """分屏的只读快照：返回消息但不动引擎当前会话——resume 别的会话后再 peek
+    第三个，当前会话必须仍是原来那个（分屏看别的会话不能动主栏）。"""
+    with make_client(home, [[TextBlock(text="回应")]]) as client, client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        ws.send_json({"id": "c1", "method": "chat.send", "params": {"text": "主栏对话"}})
+        recv_until(ws, "c1")
+        ws.send_json({"id": "n2", "method": "session.new_task"})
+        s2 = recv_until(ws, "n2")["result"]["id"]
+
+        r = rpc("pk", "session.peek_messages", {"id": s2})
+        assert r["ok"] and r["result"]["id"] == s2
+        assert r["result"]["messages"] == []  # 任务会话还没消息
+
+        r = rpc("pk2", "session.peek_messages", {"id": s1})
+        assert r["ok"] and r["result"]["id"] == s1
+        roles = [m["role"] for m in r["result"]["messages"]]
+        assert roles == ["user", "assistant"]
+
+        # 关键语义：peek 之后引擎当前会话没有被动过
+        r = rpc("b", "boot")
+        assert r["result"]["session"]["id"] == s1
+
+
+def test_peek_cross_project(home, monkeypatch):
+    """分屏把跨项目会话当完整会话：本机 peek 回 interactive=True，发送/换模型
+    放行，runtime 绑定会话所属项目（自己的工作目录与权限门），且主栏切项目
+    不掀掉这一列；远程客户端保持当前项目归属校验（安全边界 B 族不放宽），
+    跨项目列仍按 interactive=False 只读。"""
+    from skysheep.server import app as server_app
+
+    proj_b = home / "proj-b"
+    proj_b.mkdir(exist_ok=True)
+    with make_client(home, [[TextBlock(text="回应")]]) as client, client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        # 引擎先停在默认项目；在项目 B 下建一个有消息的会话。
+        # 等 project.switch 自己的回复再发后续请求：dispatch 每个请求独立并发
+        # 派发，boot 回复不构成 switch 完成的屏障——不等的话 session.new 会
+        # 建在旧项目下（偶发翻车的竞态，真实前端等的就是 switch 回执）。
+        ws.send_json({"id": "sw", "method": "project.switch", "params": {"path": str(proj_b)}})
+        swr = recv_until(ws, "sw")
+        assert swr["ok"], swr.get("error")
+        assert rpc("sw2", "boot")["ok"]
+        ws.send_json({"id": "n", "method": "session.new"})
+        sid_b = recv_until(ws, "n")["result"]["id"]
+        ws.send_json({"id": "c", "method": "chat.send", "params": {"text": "B 项目的会话"}})
+        recv_until(ws, "c")
+        # 切回默认项目（引擎当前项目 ≠ 会话所属项目），同样等切换回执
+        ws.send_json({"id": "sw0", "method": "project.switch", "params": {"path": str(home / "proj")}})
+        sw0 = recv_until(ws, "sw0")
+        assert sw0["ok"], sw0.get("error")
+
+        r = rpc("pk", "session.peek_messages", {"id": sid_b})
+        assert r["ok"] and r["result"]["id"] == sid_b
+        assert [m["role"] for m in r["result"]["messages"]] == ["user", "assistant"]
+        # 本机跨项目可交互：分屏列是一个完整的会话
+        assert r["result"]["interactive"] is True
+        # 项目路径查询同理（本机专属方法，跨项目可定位）
+        r = rpc("pp", "session.project_path", {"id": sid_b})
+        assert r["ok"] and r["result"]["path"] == str(proj_b.resolve())
+
+        # 跨项目发送放行：runtime 绑定会话所属项目——自己的工作目录、自己的
+        # 权限门（白名单/工作目录边界按 B 项目），不再挂在引擎当前项目下
+        r = rpc("cs", "chat.send", {"text": "跨项目发送", "session_id": sid_b})
+        assert r["ok"], r.get("error")
+        rt = backend.runtimes.get(sid_b)
+        assert rt is not None and rt.ctx is not None and rt.ctx.own
+        assert rt.agent.working_dir == proj_b.resolve()
+        assert rt.ctx.gate is not backend.gate
+        assert str(rt.ctx.gate.working_dir) == str(proj_b.resolve())
+        # 定向发送的既有不变量：不劫持引擎「当前会话」指针
+        assert backend.session is None or backend.session.id != sid_b
+
+        # 跨项目换模型同样放行
+        r = rpc("ms", "session.model_switch",
+                {"id": sid_b, "name": "deepseek", "model": "deepseek-chat"})
+        assert r["ok"], r.get("error")
+
+        # 主栏切走再切回：跨项目列的 runtime 存活（绑定它自己的项目，
+        # 不随主栏切换失效）；回 到 B 后它仍是自己的上下文
+        ws.send_json({"id": "sw1", "method": "project.switch", "params": {"path": str(proj_b)}})
+        assert recv_until(ws, "sw1")["ok"]
+        assert backend.runtimes.get(sid_b) is rt
+        ws.send_json({"id": "sw2", "method": "project.switch", "params": {"path": str(home / "proj")}})
+        assert recv_until(ws, "sw2")["ok"]
+        assert backend.runtimes.get(sid_b) is rt
+
+        # 同项目会话 interactive=True 且走引擎上下文（回归锁：标记不许一刀切）
+        ws.send_json({"id": "n2", "method": "session.new"})
+        sid_a = recv_until(ws, "n2")["result"]["id"]
+        r = rpc("pk2", "session.peek_messages", {"id": sid_a})
+        assert r["ok"] and r["result"]["interactive"] is True
+        rt_a = backend.runtimes.get(sid_a)
+        assert rt_a is not None and rt_a.ctx is not None and not rt_a.ctx.own
+        assert rt_a.agent.working_dir == backend.working_dir
+
+    # 远程客户端（模拟非本机来源）：跨项目会话整体不可见——历史内容是枚举面，
+    # B 族边界不放宽，peek 与交互面一律按「session not found」拒绝
+    monkeypatch.setattr(server_app, "_client_is_local", lambda ws: False)
+    with make_client(home, [[TextBlock(text="回应")]]) as client, client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        r = rpc("pk3", "session.peek_messages", {"id": sid_b})
+        assert not r["ok"] and "session not found" in r["error"]
+        r = rpc("cs2", "chat.send", {"text": "远程跨项目发送", "session_id": sid_b})
+        assert not r["ok"] and "session not found" in r["error"]
+
+
+def test_session_model_switch_is_per_session(home):
+    """分屏的会话级模型覆盖：切某会话的模型只记在该会话上，全局与其余会话不变。"""
+    with make_client(home, [[TextBlock(text="回应")]]) as client, client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        ws.send_json({"id": "n2", "method": "session.new"})
+        s2 = recv_until(ws, "n2")["result"]["id"]
+
+        # 未覆盖：跟随全局（fake 注入），overridden=False
+        r = rpc("g0", "session.model_get", {"id": s1})
+        assert r["ok"] and r["result"]["overridden"] is False
+
+        # 未知服务拒绝；已知服务切换成功并记覆盖
+        r = rpc("bad", "session.model_switch", {"id": s1, "name": "不存在"})
+        assert not r["ok"]
+        r = rpc("sw", "session.model_switch",
+                {"id": s1, "name": "deepseek", "model": "deepseek-chat"})
+        assert r["ok"] and r["result"]["provider"] == "deepseek"
+
+        r = rpc("g1", "session.model_get", {"id": s1})
+        assert r["ok"] and r["result"]["overridden"] is True
+        assert r["result"]["name"] == "deepseek"
+        # 另一个会话不受影响：仍跟随全局
+        r = rpc("g2", "session.model_get", {"id": s2})
+        assert r["ok"] and r["result"]["overridden"] is False
+
+        # 远程面：model_switch 是本机专属（注册表 local_only），远程调不到——
+        # 这里只锁本机路径的行为，远端拒绝由 test_local_only_methods 整表覆盖
+
+
+# ---- 会话级思考强度 / 全局切换的会话分派 / chat.status 按会话查询 ----
+
+
+def test_session_reasoning_per_session(home):
+    """会话级思考强度：三段解析各一支（会话级覆盖 / 默认模型会话 / 全局）。
+
+    set 只落会话档位，绝不静默更换会话模型（set 前后 model_get 一致是回归锁）；
+    回包带 session_id / supports_vision / efforts / labels；空参与未知 id 快速报错。"""
+    provider = FakeProvider([])
+    provider.supports_reasoning = True  # 注入 fake 声明能力：可用性以 provider 实例为准
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        # 腿1：会话级模型覆盖（deepseek 预设声明支持思考）
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        r = rpc("sw", "session.model_switch",
+                {"id": s1, "name": "deepseek", "model": "deepseek-chat"})
+        assert r["ok"], r.get("error")
+        assert r["result"]["supports_vision"] is True
+        assert r["result"]["context_limit"] > 0
+
+        g = rpc("g1", "session.reasoning_get", {"id": s1})
+        assert g["ok"], g.get("error")
+        st = g["result"]
+        assert st["session_id"] == s1
+        assert st["efforts"] == ["auto", "low", "medium", "high"]
+        assert st["labels"]["auto"] == "自动"
+        assert st["supported"] is True and st["overridden"] is False
+        assert st["effort"] == "auto"
+
+        m = rpc("m1", "session.model_get", {"id": s1})
+        assert m["result"]["session_id"] == s1
+        assert (m["result"]["name"], m["result"]["model"]) == ("deepseek", "deepseek-chat")
+        assert m["result"]["overridden"] is True
+        assert m["result"]["supports_vision"] is True
+
+        s = rpc("s1", "session.reasoning_set", {"id": s1, "effort": "high"})
+        assert s["ok"], s.get("error")
+        assert s["result"]["session_id"] == s1
+        assert s["result"]["effort"] == "high" and s["result"]["overridden"] is True
+
+        g2 = rpc("g2", "session.reasoning_get", {"id": s1})
+        assert g2["result"]["effort"] == "high" and g2["result"]["overridden"] is True
+
+        # 「set 静默换模型」回归锁：设档位后模型必须原样
+        m2 = rpc("m2", "session.model_get", {"id": s1})
+        assert (m2["result"]["name"], m2["result"]["model"]) == ("deepseek", "deepseek-chat")
+
+        # 非法档位拒绝
+        bad = rpc("b1", "session.reasoning_set", {"id": s1, "effort": "extreme"})
+        assert not bad["ok"]
+
+        # 腿2：默认模型会话（先 default_model.set 再 session.new）
+        dm = rpc("dm", "default_model.set", {"name": "deepseek", "model": "deepseek-chat"})
+        assert dm["ok"], dm.get("error")
+        ws.send_json({"id": "n2", "method": "session.new"})
+        s2 = recv_until(ws, "n2")["result"]["id"]
+        g3 = rpc("g3", "session.reasoning_get", {"id": s2})
+        st3 = g3["result"]
+        assert st3["session_id"] == s2
+        assert st3["supported"] is True and st3["overridden"] is False
+        m3 = rpc("m3", "session.model_get", {"id": s2})
+        assert m3["result"]["name"] == "deepseek" and m3["result"]["overridden"] is False
+
+        # 腿3：全局（普通会话跟随全局注入的 provider）。
+        # 不断言 effort 读数：注入 factory 返回同一个 fake 实例，腿1 set 的档位
+        # 落在共享对象上（真实构建下 detached 副本各自独立，无此串扰）；
+        # 腿3 要锁的是「无会话级覆盖」——overridden=False 即三段解析落全局腿
+        ws.send_json({"id": "n3", "method": "session.new"})
+        s3 = recv_until(ws, "n3")["result"]["id"]
+        g4 = rpc("g4", "session.reasoning_get", {"id": s3})
+        assert g4["result"]["supported"] is True
+        assert g4["result"]["overridden"] is False
+
+        # 空参 / 未知 id 快速失败（不得挂死等待）
+        emp = rpc("e1", "session.reasoning_get", {})
+        assert not emp["ok"] and "session not found" in emp["error"]
+        emp2 = rpc("e2", "session.reasoning_set", {})
+        assert not emp2["ok"]
+        unk = rpc("e3", "session.reasoning_get", {"id": "no-such-session"})
+        assert not unk["ok"] and "session not found" in unk["error"]
+
+
+def test_default_model_new_session_keeps_global_provider(home):
+    """回归锁（行为修复）：设了「新会话默认模型」后新建会话，预建 runtime
+    不得改写「当前使用服务」的全局记账（provider_name / provider_model）——
+    set_default_model 的语义是「已存在的会话（含当前对话）不受影响」。"""
+    from fastapi.testclient import TestClient
+
+    from skysheep.server import create_app
+
+    provider = FakeProvider([])
+    app = create_app(
+        working_dir=home / "proj", provider_name="fake",
+        provider_factory=lambda: provider,
+    )
+    backend = app.state.backend
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        assert backend.provider_name == "fake"
+        r = rpc("dm", "default_model.set", {"name": "deepseek", "model": "deepseek-chat"})
+        assert r["ok"], r.get("error")
+        before = (backend.provider_name, backend.provider_model)
+        r = rpc("n1", "session.new", {})
+        assert r["ok"]
+        # 修复前：默认模型腿走 _build_provider，这里会被改写成 deepseek
+        assert (backend.provider_name, backend.provider_model) == before
+
+
+def test_model_switch_keeps_session_overrides(home):
+    """全局切模型的会话分派（blocking②）：模型私有会话（覆盖 ∪ 默认模型
+    会话）完全跳过；档位私有会话模型跟新全局且档位重放；无覆盖会话刷新上限。"""
+    from skysheep.config import add_provider_to_config, update_provider_in_config
+
+    # 能构建成功的自定义服务（假 Key 即可构建，OpenAI 兼容客户端构造不连网），
+    # 带独立的上下文上限：全局切换后是否刷上限以此值探针
+    add_provider_to_config("ctx-probe", kind="openai", base_url="http://x",
+                           model="probe-1", api_key="k-probe")
+    update_provider_in_config("ctx-probe", context_limit=123_456)
+
+    provider = FakeProvider([])
+    provider.supports_reasoning = True
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        # s1：模型私有（会话级覆盖 deepseek）
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        r = rpc("sw", "session.model_switch",
+                {"id": s1, "name": "deepseek", "model": "deepseek-chat"})
+        assert r["ok"], r.get("error")
+        # s3：档位私有（只调过档位，模型跟全局）。用 session.new_task 落库——
+        # 它只落库不建 runtime 也不打「新会话默认模型」标记；session.new 建的
+        # 会话带创建时刻的默认模型快照，设了偏好后三段解析就落第二腿
+        nt = rpc("nt", "session.new_task", {})
+        s3 = nt["result"]["id"]
+        rs = rpc("rs", "session.reasoning_set", {"id": s3, "effort": "high"})
+        assert rs["ok"], rs.get("error")
+        # s2：模型私有（默认模型会话）
+        dm = rpc("dm", "default_model.set", {"name": "deepseek", "model": "deepseek-chat"})
+        assert dm["ok"], dm.get("error")
+        ws.send_json({"id": "n2", "method": "session.new"})
+        s2 = recv_until(ws, "n2")["result"]["id"]
+
+        # 全局切到 ctx-probe
+        r = rpc("gw", "model.switch", {"name": "ctx-probe", "model": "probe-1"})
+        assert r["ok"], r.get("error")
+
+        # s1：覆盖原样保留，上限不被刷成新服务的 123456
+        m1 = rpc("m1", "session.model_get", {"id": s1})
+        assert m1["result"]["overridden"] is True
+        assert (m1["result"]["name"], m1["result"]["model"]) == ("deepseek", "deepseek-chat")
+        assert backend.runtimes[s1].agent.context_limit_tokens != 123_456
+
+        # s2：默认模型腿解析（不跟全局切走）
+        m2 = rpc("m2", "session.model_get", {"id": s2})
+        assert m2["result"]["name"] == "deepseek" and m2["result"]["overridden"] is False
+        assert backend.runtimes[s2].agent.context_limit_tokens != 123_456
+
+        # s3：模型跟新全局（overridden=False 且新服务生效），档位重放，
+        # 上限刷新为新服务的
+        m3 = rpc("m3", "session.model_get", {"id": s3})
+        assert m3["result"]["name"] == "ctx-probe" and m3["result"]["overridden"] is False
+        g3 = rpc("g3", "session.reasoning_get", {"id": s3})
+        assert g3["result"]["overridden"] is True and g3["result"]["effort"] == "high"
+        assert backend.runtimes[s3].agent.context_limit_tokens == 123_456
+
+
+def test_default_model_not_retroactive(home):
+    """「新会话默认模型」不追溯：先建会话、后设偏好，该会话仍跟随全局——
+    模型解析与 runtime 实际挂的 provider 一致，全局切换也追得上；偏好生效
+    后新建的会话才用偏好模型（创建时刻快照）。修复前 session.new 无条件打标
+    + 读时重验偏好，「先建会话、后设偏好」的会话被追溯成默认模型会话：
+    徽章显示偏好模型、runtime 还挂着全局 provider（显示 X 实际用 Y），且
+    全局 model.switch 对它静默失效。"""
+    from skysheep.config import add_provider_to_config
+    from skysheep.server import create_app
+
+    # 全局服务与偏好服务分开（走真实构建，不注入 factory：detached 副本与
+    # 全局 provider 对象身份可断言，两个服务的名字也能互相区分）
+    add_provider_to_config("dm-glob", kind="openai", base_url="http://x",
+                           model="glob-1", api_key="k-glob")
+    add_provider_to_config("dm-probe", kind="openai", base_url="http://x",
+                           model="probe-1", api_key="k-dm")
+    app = create_app(working_dir=home / "proj", provider_name="dm-glob")
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        # 偏好在会话创建之后才设置
+        dm = rpc("dm", "default_model.set", {"name": "dm-probe", "model": "probe-1"})
+        assert dm["ok"], dm.get("error")
+
+        # s1 不被追溯：解析落全局腿，runtime 挂的就是全局共享对象
+        m1 = rpc("m1", "session.model_get", {"id": s1})
+        assert m1["ok"], m1.get("error")
+        assert m1["result"]["overridden"] is False
+        assert m1["result"]["name"] == "dm-glob"
+        assert backend.runtimes[s1].agent.provider is backend.provider
+
+        # 偏好生效后新建的会话才带创建时刻的快照（detached 私有 provider）
+        ws.send_json({"id": "n2", "method": "session.new"})
+        s2 = recv_until(ws, "n2")["result"]["id"]
+        m2 = rpc("m2", "session.model_get", {"id": s2})
+        assert (m2["result"]["name"], m2["result"]["model"]) == ("dm-probe", "probe-1")
+        assert m2["result"]["overridden"] is False
+        assert backend.runtimes[s2].agent.provider is not backend.provider
+
+        # 全局切换（重建全局对象）追得上 s1（不再被当私有会话跳过），
+        # 追不上 s2（保持创建时刻的快照模型）
+        gw = rpc("gw", "model.switch", {"name": "dm-glob"})
+        assert gw["ok"], gw.get("error")
+        m1b = rpc("m1b", "session.model_get", {"id": s1})
+        assert m1b["result"]["name"] == "dm-glob"
+        assert backend.runtimes[s1].agent.provider is backend.provider
+        m2b = rpc("m2b", "session.model_get", {"id": s2})
+        assert (m2b["result"]["name"], m2b["result"]["model"]) == ("dm-probe", "probe-1")
+        assert backend.runtimes[s2].agent.provider is not backend.provider
+
+
+def test_reasoning_effort_survives_model_switch(home):
+    """热切模型后的档位迁移：新服务支持思考则重放，不支持则清除且不报错。
+
+    走真实构建（不注入 provider 工厂）：重放/清除按新服务的 supports_reasoning
+    分派，注入 fake 分不出这条分支。"""
+    from fastapi.testclient import TestClient
+
+    from skysheep.config import add_provider_to_config, update_provider_in_config
+    from skysheep.server import create_app
+
+    add_provider_to_config("rs-on", kind="openai", base_url="http://x",
+                           model="on-1", api_key="k-on")
+    add_provider_to_config("rs-off", kind="openai", base_url="http://x",
+                           model="off-1", api_key="k-off")
+    update_provider_in_config("rs-off", supports_reasoning=False)
+
+    app = create_app(working_dir=home / "proj", provider_name="rs-on")
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        # 清除腿：rs-on 上设档位，切到不支持思考的 rs-off → 档位清除
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        rs = rpc("rs", "session.reasoning_set", {"id": s1, "effort": "high"})
+        assert rs["ok"], rs.get("error")
+        sw = rpc("sw", "session.model_switch", {"id": s1, "name": "rs-off", "model": "off-1"})
+        assert sw["ok"], sw.get("error")
+        g = rpc("g1", "session.reasoning_get", {"id": s1})
+        assert g["ok"], g.get("error")
+        assert g["result"]["supported"] is False
+        assert g["result"]["overridden"] is False
+        assert g["result"]["effort"] == "auto"
+
+        # 重放腿：档位先设，切到（重新构建的）支持思考的服务 → 档位重放
+        ws.send_json({"id": "n2", "method": "session.new"})
+        s2 = recv_until(ws, "n2")["result"]["id"]
+        rs2 = rpc("rs2", "session.reasoning_set", {"id": s2, "effort": "low"})
+        assert rs2["ok"], rs2.get("error")
+        sw2 = rpc("sw2", "session.model_switch", {"id": s2, "name": "rs-on", "model": "on-1"})
+        assert sw2["ok"], sw2.get("error")
+        g2 = rpc("g2", "session.reasoning_get", {"id": s2})
+        assert g2["result"]["supported"] is True
+        assert g2["result"]["overridden"] is True
+        assert g2["result"]["effort"] == "low"
+
+
+def test_chat_status_by_session(home):
+    """chat.status 按会话查询：命中回被查会话的占用（session_id=被查 sid）；
+    没建过 runtime / 不存在的会话显式报错，不静默回退当前会话。"""
+    with make_client(home, [[TextBlock(text="回应")]]) as client, \
+            client.websocket_connect("/ws") as ws:
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        c1 = rpc("c1", "chat.send", {"text": "你好"})
+        assert c1["ok"], c1.get("error")
+
+        st = rpc("st", "chat.status", {"session_id": s1})
+        assert st["ok"], st.get("error")
+        assert st["result"]["session_id"] == s1
+        assert st["result"]["context_limit"] > 0
+        assert "context_tokens" in st["result"]
+
+        # 只落库、没建过 runtime 的会话（session.new_task）：显式报错
+        nt = rpc("nt", "session.new_task", {})
+        tid = nt["result"]["id"]
+        st2 = rpc("st2", "chat.status", {"session_id": tid})
+        assert not st2["ok"] and "没有正在运行的上下文" in st2["error"]
+
+
+def test_chat_status_remote_scoped_to_bound_session(home, monkeypatch):
+    """chat.status 带 session_id 是本机分屏的辅路面：远程客户端带任意 sid 查询
+    一律收敛到它正在交互的会话——runtime 状态含 todo 全文与上下文明细，不向
+    远程放开按会话 id 的任意读（与 tasks.list 的远端收敛同口径，安全审查 B 族）。"""
+    from skysheep.server import app as server_app
+
+    monkeypatch.setattr(server_app, "_client_is_local", lambda ws: False)
+    with make_client(home, [[TextBlock(text="回应")]]) as client, \
+            client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        c1 = rpc("c1", "chat.send", {"text": "你好"})
+        assert c1["ok"], c1.get("error")
+        # conn_state 已绑定 s1（chat.send 的定向/轮首绑定）；再造一个只有库记录
+        # 的会话（session.new_task 不改绑定），远程拿它当 sid 查询
+        nt = rpc("nt", "session.new_task", {})
+        s2 = nt["result"]["id"]
+
+        st = rpc("st", "chat.status", {"session_id": s2})
+        assert st["ok"], st.get("error")
+        # 收敛到绑定会话：回包是 s1 的状态，不是被查的 s2（也不报 s2 存活与否）
+        assert st["result"]["session_id"] == s1
+        assert backend.session and backend.session.id == s1
+
+        # 乱造的 sid 同样收敛到绑定会话（不区分「存在与否」，不给枚举探测信号）
+        st3 = rpc("st3", "chat.status", {"session_id": "no-such-session"})
+        assert st3["ok"] and st3["result"]["session_id"] == s1
+
+
 # ---- 设置页：技能导入 / 删除 ----
 
 
@@ -2271,3 +2802,55 @@ def test_mods_save_draft_writes_project_draft(home):
         ws.send_json({"id": "d2", "method": "mods.save_draft", "params": {
             "id": "other", "manifest": manifest, "main_js": "export default {}"}})
         assert recv_until(ws, "d2")["ok"] is False
+
+
+def test_session_accept_tier_per_session(home, monkeypatch):
+    """会话级权限三档：session.accept_set 只动该会话的私有门——A 会话切完全
+    访问，B 会话与引擎默认档不动；runtime 被回收重建后档位重放；远程客户端
+    调用被 local_only 拦下（降防护的开关不向远程开放）。"""
+    from skysheep.server import app as server_app
+
+    with make_client(home, [[TextBlock(text="回应")]]) as client, client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        ws.send_json({"id": "n2", "method": "session.new"})
+        s2 = recv_until(ws, "n2")["result"]["id"]
+
+        # 未覆盖：跟随引擎默认（confirm），overridden=False
+        r = rpc("g1", "session.accept_get", {"id": s1})
+        assert r["ok"] and r["result"]["mode"] == "confirm" and r["result"]["overridden"] is False
+
+        # s1 切完全访问：只动它自己——s2 与引擎默认档纹丝不动
+        r = rpc("set1", "session.accept_set", {"id": s1, "mode": "full_access"})
+        assert r["ok"] and r["result"]["mode"] == "full_access"
+        r = rpc("g1b", "session.accept_get", {"id": s1})
+        assert r["ok"] and r["result"]["mode"] == "full_access" and r["result"]["overridden"] is True
+        assert backend.runtimes[s1].agent.gate.auto_accept_all is True
+        assert backend.runtimes[s1].agent.gate is not backend.gate
+        r = rpc("g2", "session.accept_get", {"id": s2})
+        assert r["ok"] and r["result"]["mode"] == "confirm"
+        assert backend.gate.auto_accept_all is False
+
+        # 未知档位拒绝
+        r = rpc("bad", "session.accept_set", {"id": s1, "mode": "yolo"})
+        assert not r["ok"]
+
+        # runtime 回收重建后档位重放（_runtime_gate 私有门上恢复）
+        backend.runtimes.pop(s1)
+        r = rpc("act", "session.activate", {"id": s1})
+        assert r["ok"]
+        assert backend.runtimes[s1].agent.gate.auto_accept_all is True
+
+    # 远程客户端：local_only 拦下
+    monkeypatch.setattr(server_app, "_client_is_local", lambda ws: False)
+    with make_client(home, [[TextBlock(text="回应")]]) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "q", "method": "session.accept_set",
+                      "params": {"id": "whatever", "mode": "full_access"}})
+        r = recv_until(ws, "q")
+        assert r["ok"] is False and "本机" in r["error"]

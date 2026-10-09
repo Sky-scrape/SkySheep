@@ -25,9 +25,15 @@ class LifecycleMixin:
         self.session = await self.store.create_session(self._cur_project_id(), title)
         if title:
             self._manually_named.add(self.session.id)
-        # 标记为「新会话」：若设了新会话默认模型，首次建 runtime 时用专用 provider
-        self._default_model_sessions.add(self.session.id)
-        self._get_runtime(self.session.id)  # 预建 runtime（自带系统提示词）
+        # 标记为「新会话」：创建时刻若设了新会话默认模型，把当时的 (服务, 模型)
+        # 快照记到该会话名下——首次建 runtime 用专用 provider，三段解析也按同一
+        # 份快照回读。此前是无条件把 id 加进集合并在读时重验「偏好当前有效」：
+        # 「先建会话、后设/改偏好」的会话会被追溯成默认模型会话（徽章显示偏好
+        # 模型、runtime 却还挂着全局 provider——正是「显示 X、实际用 Y」）。
+        pref = self._default_model_pref()
+        if pref[0]:
+            self._default_model_sessions[self.session.id] = pref
+        await self._get_runtime(self.session.id)  # 预建 runtime（自带系统提示词）
         return {"id": self.session.id, "title": self.session.title, "summary": ""}
 
     async def create_task_chat(self) -> dict:
@@ -66,22 +72,97 @@ class LifecycleMixin:
         removed_ids 带回被删的会话 id：前端把打开着的对应标签一并收掉。"""
         keep = self.session.id if self.session else None
         removed_ids = await self.store.delete_empty_sessions(self._cur_project_id(), keep_id=keep)
+        # 内存态随删清干净（与 delete_session 同一口径）：会话级模型覆盖/思考
+        # 档位/手动命名/默认模型快照逐个摘除；空会话的 runtime（new_session
+        # 预建）也一并回收——不在跑、没排队才摘，别把正要发首条消息的会话掀了
+        for sid in removed_ids:
+            self._session_models.pop(sid, None)
+            self._session_efforts.pop(sid, None)
+            self._session_accepts.pop(sid, None)
+            self._manually_named.discard(sid)
+            self._default_model_sessions.pop(sid, None)
+            rt = self.runtimes.get(sid)
+            if rt is not None and (rt.run_task is None or rt.run_task.done()) and not rt.queue:
+                self.runtimes.pop(sid, None)
+                self._forget_runtime(rt)
         return {"removed": len(removed_ids), "removed_ids": removed_ids}
 
-    async def _get_owned_session(self, session_id: str):
-        """取属于当前项目的会话；不存在或属于其他项目一律报错。
+    async def _ready_runtime_for_send(self, session_id: str, local: bool = True) -> None:
+        """定向发送（chat.send 带 session_id）前的目标会话就位：归属校验 +
+        建 runtime + 补历史，但不切换活动指针、不写「上次激活会话」偏好。
 
-        安全边界（安全审查 B 族）：store.get_session 只按 id 查询，所有
-        按会话 id 的远程操作（chat.send/refs/export/delete/元数据…）必须
-        先过这里，否则别的项目的会话会被挂进当前项目的工作目录与权限门下。
-        报错不区分「不存在/无权」，避免给枚举探测提供区分信号。
+        与 activate_session 的差异只在指针两步：分屏列的定向发送不能劫持
+        引擎的「当前会话」——审查页/任务清单/上下文浮层都按当前会话取数，
+        指针被列带走后它们会读错会话，ui.json 被覆写还会让下次启动恢复到
+        列会话。历史照旧要补：懒建的 runtime 是空壳，不补这轮就在空上下文跑。
+
+        local=False（远程客户端）保持当前项目归属校验；本机（默认）跨项目
+        会话放行——runtime 会绑定会话所属项目干活（_project_ctx_for），
+        分屏列是一个完整的会话，不再有跨项目只读的例外。"""
+        await self._get_owned_session(session_id, local=local)
+        if session_id not in self.runtimes:
+            rt = await self._get_runtime(session_id)
+            await self._reload_agent_history(rt.agent, session_id)
+
+    async def session_project_path(self, session_id: str) -> dict:
+        """查询会话关联的项目根目录（本机专属、按 id 直查）。
+
+        快聊/任务会话虽然在引擎内部使用数据目录下的隔离工作目录，但它们
+        没有关联项目，不能把该内部目录冒充成「项目路径」暴露给用户；右键
+        菜单也据此隐藏复制路径/资源管理器入口。远程连接固定项目仍返回
+        其公开的远程项目工作目录。
+        """
+        sess = await self.store.get_session(session_id)
+        if sess is None:
+            raise RuntimeError("session not found: " + session_id)
+        if sess.project_id is None:
+            return {"path": ""}
+        proj = await self.store.get_project(sess.project_id)
+        if proj is None or not proj.root_path:
+            return {"path": ""}
+        if proj.root_path == self.store.REMOTE_PROJECT_PATH:
+            return {"path": str(self._remote_workdir())}
+        return {"path": proj.root_path}
+
+    async def reveal_session_project(self, session_id: str) -> dict:
+        """在系统文件管理器里打开会话关联的公开项目目录。"""
+        from ... import support
+
+        info = await self.session_project_path(session_id)
+        if not info["path"]:
+            raise RuntimeError("这个会话没有工作目录，无从打开")
+        try:
+            support.open_folder(info["path"])
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"打开目录失败：{e}") from None
+        return info
+
+    async def _get_owned_session(self, session_id: str, *, local: bool = False):
+        """取有资格操作的会话；不存在或无资格一律报错。
+
+        local=False（默认，远程客户端）：属于当前项目才放行——安全边界
+        （安全审查 B 族）：store.get_session 只按 id 查询，所有按会话 id 的
+        远程操作（chat.send/refs/export/delete/元数据…）必须先过这里，
+        否则别的项目的会话会被挂进当前项目的工作目录与权限门下。报错不
+        区分「不存在/无权」，避免给枚举探测提供区分信号。
+
+        local=True（本机界面）：按 id 直查放行任意已知会话，包括其他项目
+        的——分屏列把跨项目会话当完整会话对话，runtime 绑定会话所属项目
+        干活（_project_ctx_for），不再借道当前项目的工作目录与权限门；
+        远程边界（B 族）不放宽。
 
         快聊会话（project_id IS NULL）不属于任何项目，却出现在侧栏的常驻
         「快聊」分组里，用户理应能像普通会话一样点开与删除：只按当前项目
         校验会让它们全部报「session not found」（列表看得见、点不动）。
         这里显式承认快聊的开放归属——它不带任何项目上下文，挂进当前项目的
-        工作目录不构成跨项目越权；其他项目的会话仍然照旧拒绝。
+        工作目录不构成跨项目越权；远程连接项目的会话同理（渠道会话的
+        runtime 自带 ChannelGate，不走这里的默认门控）。
         """
+        if local:
+            sess = await self.store.get_session(session_id)
+            if sess is None:
+                raise RuntimeError("session not found: " + session_id)
+            return sess
         pid = self.project.id if self.project is not None else None
         sess = await self.store.get_session_for_project(session_id, pid)
         if sess is None:
@@ -99,12 +180,14 @@ class LifecycleMixin:
             raise RuntimeError("session not found: " + session_id)
         return sess
 
-    async def truncate_session(self, params: dict) -> dict:
+    async def truncate_session(self, params: dict, local: bool = True) -> dict:
         """消息级回退：为「重新生成 / 编辑重发」截断历史。
 
         mode=regen  ：删掉锚点（默认最后一条 user）之后的所有消息，保留用户消息；
         mode=edit   ：连锚点消息一起删（随后用户编辑后重发）。
         会话正在运行时拒绝（避免与进行中的 turn 互相踩踏）。
+        local=True（本机，默认）跨项目会话放行——分屏列的消息级操作是
+        「完整会话」的一部分；远程仍按当前项目归属校验。
         """
         sid = str(params.get("id", "") or (self.session.id if self.session else ""))
         if not sid:
@@ -112,7 +195,7 @@ class LifecycleMixin:
         rt = self.runtimes.get(sid)
         if rt and rt.run_task and not rt.run_task.done():
             raise RuntimeError("该会话正在运行，等当前轮结束再操作")
-        await self._get_owned_session(sid)
+        await self._get_owned_session(sid, local=local)
 
         seq = params.get("seq")
         mode = str(params.get("mode", "regen"))
@@ -156,11 +239,11 @@ class LifecycleMixin:
         except Exception:
             pass
         if session_id not in self.runtimes:
-            rt = self._get_runtime(session_id)
+            rt = await self._get_runtime(session_id)
             await self._reload_agent_history(rt.agent, session_id)
         return {"id": sess.id, "title": sess.title}
 
-    async def session_image(self, params: dict) -> dict:
+    async def session_image(self, params: dict, local: bool = True) -> dict:
         """按 (会话, seq, 图片序号) 取一张历史图片的 base64。
 
         历史消息里的图片只下发占位（见 _msg_brief），前端滚到可见时才来取——
@@ -169,7 +252,8 @@ class LifecycleMixin:
         sid = str(params.get("session_id", "") or "")
         seq = int(params.get("seq", 0) or 0)
         index = int(params.get("index", 0) or 0)
-        await self._get_owned_session(sid)  # 归属校验：跨项目会话按不存在拒绝
+        # 归属校验：本机跨项目放行（分屏列渲染历史图片）；远程按当前项目拒绝
+        await self._get_owned_session(sid, local=local)
         m = await self.store.get_message_at(sid, seq)
         if m is None:
             raise RuntimeError("消息不存在")
@@ -195,6 +279,9 @@ class LifecycleMixin:
         # 先停掉该会话正在跑的 turn，再清理 runtime，最后删数据
         self.cancel_run(session_id)
         rt = self.runtimes.pop(session_id, None)
+        self._session_models.pop(session_id, None)  # 会话级模型覆盖随删除清掉
+        self._session_efforts.pop(session_id, None)  # 会话级思考档位同款清理
+        self._session_accepts.pop(session_id, None)  # 会话级权限档位同款清理
         was_active = self.session is not None and self.session.id == session_id
         if rt is not None:
             # 排队中的轮次随 runtime 一起消失，Future 必须逐个落空：
@@ -230,7 +317,7 @@ class LifecycleMixin:
         # 检查点（改前文件快照）随会话一起清：会话没了，快照不该继续占磁盘
         await asyncio.to_thread(self.checkpoints.forget_session, session_id)
         self._manually_named.discard(session_id)
-        self._default_model_sessions.discard(session_id)
+        self._default_model_sessions.pop(session_id, None)
         switched = await self._switch_after_removal() if was_active else None
         # 广播给其它连接（另一窗口 / 手机端）：删掉的会话从列表与标签里消失
         self._ws_broadcast({"kind": "session_updated",

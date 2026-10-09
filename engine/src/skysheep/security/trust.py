@@ -165,8 +165,9 @@ def describe_sources(project_root: Path) -> list[dict]:
 class WorkspaceTrust:
     """按项目记忆的信任状态。每打开一个项目建一个实例。
 
-    ``project_root=None`` 是无项目态（快聊）：没有项目就没有项目级配置，
-    无可信任之物，state 恒为 clean，变更操作一律 no-op。
+    ``project_root=None`` 是无项目态（引擎没开项目的兜底；快聊/远程连接
+    的会话无项目记录，也归此类）：没有项目级配置，无可信任之物，state 恒
+    为 clean，变更操作一律 no-op。
     """
 
     def __init__(self, home: Path | str, project_root: Path | str | None) -> None:

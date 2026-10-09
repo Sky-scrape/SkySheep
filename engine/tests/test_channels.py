@@ -2102,6 +2102,7 @@ async def test_backend_shutdown_bounds_channels_stop(home):
     be._mcp_connect_task = None
     be.mcp = None
     be.tasks = None
+    be._project_tasks = {}  # 跨项目分屏列的私有子代理管理器（shutdown 一并收）
     be.store = None
     be.mods = None  # Mods 沙箱收尾也在 shutdown 链上（Mods 扩展接线后新增的字段）
     be.term = SimpleNamespace(close_all=lambda: None)

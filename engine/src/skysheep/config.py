@@ -131,6 +131,19 @@ class TeamConfig(BaseModel):
     stall_limit: int = Field(default=2, ge=1)
 
 
+class AdversarialConfig(BaseModel):
+    """对抗功能：四角色流水线审查（docs/对抗模式设计.md）。
+
+    与圆桌（并行作答融合）、团队（分工协作）并列的第三种多模型协作：
+    发现者穷尽扫描 → 调查员对抗验证 → 建议者给修复方案 → 裁判终审报告。
+    不对称激励（发现者宁滥勿缺、调查员力求推翻）让噪音在流水线里被物理
+    过滤，不靠提示词自律；纯文本协作，全程不传工具表、不经权限门。
+    """
+
+    max_findings: int = Field(default=20, ge=1, le=100)  # 单场候选问题上限（超出截断并提示）
+    role_timeout_s: int = Field(default=300, ge=10)  # 单角色单次调用超时（裁判自动加倍）
+
+
 class CronConfig(BaseModel):
     """定时任务（cron_tasks）的全局行为。
 
@@ -352,6 +365,7 @@ class SkySheepConfig(BaseModel):
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
+    adversarial: AdversarialConfig = Field(default_factory=AdversarialConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
@@ -522,6 +536,7 @@ def load_config() -> SkySheepConfig:
     disabled: list[str] = []
     roundtable = RoundtableConfig()
     team = TeamConfig()
+    adversarial = AdversarialConfig()
     cron = CronConfig()
     websearch = WebSearchConfig()
     imagegen = ImageGenConfig()
@@ -571,6 +586,9 @@ def load_config() -> SkySheepConfig:
         team_raw = raw.get("team")
         if isinstance(team_raw, dict):
             team = _build_section_model(TeamConfig, team_raw, "team")
+        adv_raw = raw.get("adversarial")
+        if isinstance(adv_raw, dict):
+            adversarial = _build_section_model(AdversarialConfig, adv_raw, "adversarial")
         cron_raw = raw.get("cron")
         if isinstance(cron_raw, dict):
             cron = _build_section_model(CronConfig, cron_raw, "cron")
@@ -661,6 +679,7 @@ def load_config() -> SkySheepConfig:
             retention=retention,
             roundtable=roundtable,
             team=team,
+            adversarial=adversarial,
             cron=cron,
             websearch=websearch,
             imagegen=imagegen,

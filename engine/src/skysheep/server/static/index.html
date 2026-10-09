@@ -257,11 +257,17 @@
         <!-- 输入浮层：/ 命令菜单 与 @ 文件提及 共用 -->
         <div id="input-menu" class="input-menu hidden"></div>
 
-        <!-- 圆桌成员选择浮层 -->
+        <!-- 协作模式统一菜单（单列模式清单） -->
+        <div id="coop-menu" class="rt-menu coop-menu hidden"></div>
+
+        <!-- 圆桌设置弹层（点「圆桌」后在协作菜单右方放出） -->
         <div id="rt-menu" class="rt-menu hidden"></div>
 
-        <!-- 团队成员选择浮层（复用圆桌浮层皮：成员名/人设输入勾选后展开） -->
+        <!-- 团队设置弹层（点「团队」后在协作菜单右方放出） -->
         <div id="team-menu" class="rt-menu team-menu hidden"></div>
+
+        <!-- 对抗设置弹层（点「对抗」后在协作菜单右方放出） -->
+        <div id="adv-menu" class="rt-menu adv-menu hidden"></div>
 
         <!-- 拖动调整输入区高度（双击恢复默认） -->
         <div id="cp-resizer" class="ui-resizer ui-resizer-h" title="拖动调整输入区高度 · 双击恢复默认"></div>
@@ -275,22 +281,12 @@
             <button id="mode-switch" class="cp-icon" title="当前：执行模式 · 点击切到规划模式">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.8 13.2h5.7L10.2 22l8.9-11.6h-5.6L13 2z"/></svg>
             </button>
-            <span id="rt-group">
-              <button id="rt-switch" class="cp-icon" title="圆桌：开启后本条消息由多个模型共同思考，融合成更好的答案">
+            <!-- 协作模式（圆桌 / 团队）：一个入口，点开统一菜单选模式与成员设置。
+                 激活亮主题色（圆桌紫 / 团队绿），徽记显示当前模式与成员数 -->
+            <span id="coop-group">
+              <button id="coop-switch" class="cp-icon" title="协作：圆桌 / 团队（点击选择模式与成员）">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.7-3.4 2.9-5.2 5.5-5.2s4.8 1.8 5.5 5.2"/><circle cx="17" cy="9.5" r="2.5"/><path d="M15.7 14.6c2.5.3 4.3 1.9 4.8 4.4"/></svg>
                 <span class="cp-state" hidden></span>
-              </button>
-              <button id="rt-pick" class="cp-caret" title="选择圆桌成员">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
-              </button>
-            </span>
-            <span id="team-group">
-              <button id="team-switch" class="cp-icon" title="团队：开启后组建团队，你的消息作为总管指令进入团队频道">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="6.5" r="2.6"/><path d="M7.5 19c.6-3 2.3-4.6 4.5-4.6s3.9 1.6 4.5 4.6"/><circle cx="4.8" cy="10.2" r="2.2"/><path d="M1.8 19c.5-2.6 1.7-4 3.3-4"/><circle cx="19.2" cy="10.2" r="2.2"/><path d="M22.2 19c-.5-2.6-1.7-4-3.3-4"/></svg>
-                <span class="cp-state" hidden></span>
-              </button>
-              <button id="team-pick" class="cp-caret" title="选择团队成员与总管（我当总管 / AI 总管）">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
               </button>
             </span>
             <button id="accept-switch" class="cp-icon" title="当前：安全执行 · 每次写入/执行都会征询。点击切到「自动编辑」（工作目录内写入放行）">
@@ -318,18 +314,35 @@
               <!-- Mods 状态托盘（实验性）：Mod 产出的 stat 片段随会话标签渲染 -->
               <span id="mod-tray" class="hidden"></span>
               <!-- 连接状态 + 思考强度：贴在模型选择器左侧 -->
-              <span id="conn-status" class="dot off" title="与本地引擎的连接状态" role="status"></span>
-              <span id="status-text" class="dim small" role="status">连接中…</span>
-              <button id="reasoning-chip" class="chip chip-reasoning hidden"
-                      title="调整模型的思考强度（自动 / 低 / 中 / 高）"></button>
-              <!-- 模型选择器：参考 Cherry Studio 布局，放在发送按钮左侧（点击弹已启用模型菜单） -->
-              <span id="model-chip"></span>
-              <button id="btn-send" class="btn-primary">发送</button>
+            <span id="conn-status" class="dot off" title="与本地引擎的连接状态" role="status"></span>
+            <button id="reasoning-chip" class="chip chip-reasoning hidden"
+                    title="调整模型的思考强度（自动 / 低 / 中 / 高）">
+              <svg class="chip-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+              <span class="chip-txt"></span>
+            </button>
+            <!-- 模型选择器：参考 Cherry Studio 布局，放在发送按钮左侧（点击弹已启用模型菜单）。
+                 图标/文字双态：常规宽度只显模型名，挤压档只显图标（容器查询见 app.css） -->
+            <span id="model-chip">
+              <svg class="mc-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="10" y="10" width="4" height="4"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+              <span class="mc-txt"></span>
+            </span>
+            <button id="btn-send" class="btn-primary" title="发送（Enter）">
+              <svg class="send-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 15 22 11 13 2 9Z"/><path d="M22 2 11 13"/></svg>
+              <span class="send-txt">发送</span>
+            </button>
             </span>
           </div>
           <!-- 上下文容量详情弹层：环形仪表悬停/点按展开（fixed 定位，坐标由 JS 贴着环算） -->
           <div id="ctx-pop" class="ctx-pop hidden"></div>
         </footer>
+
+        <!-- 分屏：右键会话「在分屏打开」后，绝对定位铺在对话区右侧（顶栏下沿
+             到界面底缘，含 composer 高度带——列输入框与主输入框底对齐）；
+             最多两列，列内容由 JS 动态创建，#chat-main.has-split 时显示 -->
+        <div id="split-resizer" title="拖动调整分屏宽度"></div>
+        <div id="split-pane" class="hidden"></div>
+        <!-- 分屏列的模型选择菜单（session.model_switch：只换该列会话的模型） -->
+        <div id="split-model-menu" class="session-menu model-menu hidden"></div>
 
         <!-- 底部终端停靠面板：多标签各自独立执行（后端按 term_id 区分进程），
              顶栏按钮或 Ctrl+` 开关；标签条仿桌面 IDE：＋ 新建、✕ 关闭标签 / 收起面板 -->
@@ -767,6 +780,12 @@
             <p class="settings-hint" id="team-hint"></p>
             <div id="team-status" class="card-status" hidden></div>
             <div id="team-form" class="toolcfg-form"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>对抗</h3></div>
+            <p class="settings-hint" id="adversarial-hint"></p>
+            <div id="adversarial-status" class="card-status" hidden></div>
+            <div id="adversarial-form" class="toolcfg-form"></div>
           </section>
           <section class="settings-card">
             <h3>内置工具</h3>

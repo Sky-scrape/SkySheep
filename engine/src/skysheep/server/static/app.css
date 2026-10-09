@@ -405,6 +405,127 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 /* 右侧常驻留白给导航条让位：常驻不增减，内容不会因导航条出现/消失左右横跳 */
 .chat-log { padding-right: 80px; }
 
+/* ---------- 分屏：主聊天流右侧并排展示其他会话（右键「在分屏打开」） ----------
+   #split-pane 挂在 #chat-main 下、绝对定位铺右侧全高（topbar 下沿 → 界面底缘，
+   含 composer 高度带）——列输入框因此能与主输入框底对齐；分屏开启时 composer
+   等底部件让出右侧宽度（margin-right）。列是独立对话：chat.send 带 session_id
+   定向发送，流式事件按 sid 路由回所在列（withTab 路由 + 轻量伪 tab）。 */
+#split-pane {
+  position: absolute; top: 44px; right: 0; bottom: 0;
+  width: var(--split-w, 46%); z-index: 4;
+  display: flex; align-items: stretch;
+  border-left: 2px solid var(--ink-line);
+  background: var(--bg);
+}
+#split-pane.hidden { display: none; }
+/* 标签拖进对话区的落点提示：主区描一圈蓝线，暗示「松手 = 搬进分屏」 */
+#chat.tab-drop-hint { box-shadow: inset 0 0 0 2px var(--blue); }
+.split-col {
+  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+  border-left: 1px solid var(--line);
+}
+.split-col:first-child { border-left: none; }
+.split-head {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  padding: 5px 10px; border-bottom: 1px solid var(--line);
+  background: var(--paper-inset);
+}
+.split-title {
+  flex: 1; min-width: 0; font-size: 12px; font-weight: 700; color: var(--text2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.split-close, .split-refresh {
+  border: none; background: none; color: var(--dim); cursor: pointer;
+  font-size: 12px; padding: 0 3px; flex-shrink: 0; line-height: 1;
+}
+.split-close:hover { color: var(--reg); }
+.split-refresh:hover { color: var(--blue); }
+.split-log { flex: 1; min-height: 0; padding: 0 18px; }
+#chat-main.has-split #chat,
+#chat-main.has-split #composer,
+#chat-main.has-split #permission-bar,
+#chat-main.has-split #cp-resizer { margin-right: var(--split-w, 46%); }
+/* 分屏宽度拖手：贴在分屏左缘的竖向命中区（#chat-main.has-split 时显示） */
+#split-resizer {
+  position: absolute; top: 44px; bottom: 0;
+  right: var(--split-w, 46%); width: 9px; margin-right: -4px;
+  cursor: col-resize; z-index: 6; display: none;
+}
+#chat-main.has-split #split-resizer { display: block; }
+#split-resizer:hover, #split-resizer.active { background: var(--blue-weak); opacity: .6; }
+/* 焦点态：点击哪列哪列正常亮度，其余列变灰——一眼看出输入将去往哪一栏 */
+.split-col { transition: filter var(--dur-fast) var(--ease-out), opacity var(--dur-fast) var(--ease-out); }
+.split-col.dimmed { filter: grayscale(.7); opacity: .55; }
+.split-col.focused .split-head { background: var(--blue-weak); }
+/* 主栏参与焦点态：点列时主栏这层面整体降饱和（与列的 .dimmed 同一语言）；
+   点回主栏（focusMainPane）即恢复、各列变灰 */
+#chat-main.main-dimmed #chat,
+#chat-main.main-dimmed #chat-tabs,
+#chat-main.main-dimmed #permission-bar,
+#chat-main.main-dimmed footer#composer,
+#chat-main.main-dimmed #cp-resizer { filter: grayscale(.7); opacity: .55; }
+/* 兜底：主栏里已没有任何分屏列时，main-dimmed 一律视为泄漏、不给视觉效果——
+   类名就算被漏网路径（如关列事件冒泡到已摘除列再聚焦）加回来，也灰不了 */
+#chat-main.main-dimmed:not(:has(.split-col)) #chat,
+#chat-main.main-dimmed:not(:has(.split-col)) #chat-tabs,
+#chat-main.main-dimmed:not(:has(.split-col)) #permission-bar,
+#chat-main.main-dimmed:not(:has(.split-col)) footer#composer,
+#chat-main.main-dimmed:not(:has(.split-col)) #cp-resizer { filter: none; opacity: 1; }
+/* 列的独立输入区：与主 composer 同构——大输入框在上、操作行在下（右下角
+   发送），同底色同顶边线同 min-height 变量（--cp-h）；没有工具条图标行，
+   那些是全局单例开关，不随分屏复制 */
+.split-composer {
+  display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
+  min-height: var(--cp-h, 74px);
+  padding: 8px 16px;
+  background: var(--card); border-top: 2px solid var(--ink-line);
+}
+.split-input {
+  flex: 1; min-width: 0; resize: none; min-height: 40px;
+  /* 字体与内边距必须与主栏 #input 完全一致：两行的初始高度、autoGrow 按样式
+     算出的显式高度、占位字号才不会一栏矮一截（此前 13px/9px 双双跑偏） */
+  background: var(--paper-raised); color: var(--text);
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-md);
+  padding: 8px 11px; font: inherit; box-shadow: var(--shadow-sm);
+}
+.split-input:focus { outline: none; transform: translate(-1px, -1px); box-shadow: var(--shadow-md); }
+.split-cp-row { display: flex; align-items: center; gap: 8px; }
+.split-send { flex-shrink: 0; }
+/* 分屏列工具条：与主 composer 的图标行同款（cp-icon 直接复用）；
+   协作按钮的状态配色与主栏一致（规划蓝 / 圆桌紫 / 团队绿） */
+.split-bar { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
+.split-bar .coop-mode-item { padding: 6px 8px; }
+.split-bar .cp-icon.plan { background: var(--blue); color: var(--paper-raised); }
+.split-bar .cp-icon.on {
+  background: var(--ai); color: var(--paper-raised);
+  width: auto; padding: 0 9px; gap: 4px;
+}
+/* 列协作按钮：团队激活用绿（与主栏同语义），圆桌保持紫 */
+.split-bar .cp-icon.on[data-role="coop"].coop-team { background: var(--down); }
+/* 模型胶囊（.split-model）：与主栏 #model-chip 同一套样式（见下方共享规则），
+   这里不再单写裸文本样式 */
+/* 列头状态：运行中蓝点（同主标签的 tab-dot 脉冲）、等确认金标锁 */
+.split-run {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--blue); animation: tab-pulse 1.2s ease-in-out infinite;
+}
+.split-perm { font-size: 11px; flex-shrink: 0; cursor: pointer; }
+/* 分屏开启时主栏变窄：宠物/回底浮标/minimap 留白同步收敛；顶栏要盖住分屏
+   顶部一条（split-pane z-index 4 从 topbar 底开始，仍低于浮层 150） */
+#topbar { position: relative; z-index: 5; }
+#chat-main.has-split #chat-pet, #chat-main.has-split #jump-bottom { display: none; }
+#chat-main.has-split .chat-log { padding-right: 18px; }
+/* 消息导航条挂 #chat 全宽 right:8px、z-index:5 压过分屏列（z-index:4）：
+   不隐藏的话它浮在最右列内容上，圆点点了滚的还是主栏聊天流 */
+#chat-main.has-split #chat-minimap { display: none; }
+/* 跨项目会话的只读列：不渲染输入区，只给一句如实说明（配色全走主题变量，
+   六套主题自动适配） */
+.split-readonly {
+  flex-shrink: 0; padding: 10px 14px;
+  background: var(--paper-inset); border-top: 2px solid var(--ink-line);
+  color: var(--dim); font-size: 12px; line-height: 1.6;
+}
+
 /* ---------- 消息导航条（minimap）：右侧一列小圆点，一颗对应一条消息 ----------
    当前视口所在消息的那颗拉长成实色亮条，相邻圆点按距离渐变（近长远短，
    4 步外回到圆点），宽度由 --mini-w 驱动、transition 负责平滑；
@@ -499,10 +620,12 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   color: var(--text); font-weight: 700;
   box-shadow: var(--shadow-sm); /* 卡纸浮起：硬阴影同项目语言 */
 }
-.chat-tab .tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 标题撑满剩余宽度：关闭 ✕ 固定钉在标签右缘，不随标题长短贴在字后 */
+.chat-tab .tab-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 标签上的行内改名框：与侧栏会话行的 .rename-inline 同一语言，只按标签高度
    （顶栏 30px）收紧内边距与字号；min-width 让空名时也有可点的落点 */
 .chat-tab .rename-inline {
+  flex: 1 1 auto; /* 顶替 .tab-title 的槽位：改名时 ✕ 也钉在标签右缘 */
   min-width: 60px; max-width: 170px;
   background: var(--card); color: var(--text);
   border: 1.5px solid var(--blue); border-radius: var(--r-xs);
@@ -1856,26 +1979,26 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 #mode-switch.plan { background: var(--blue); color: var(--paper-raised); }
 #mode-switch.plan:hover { background: var(--blue-deep); }
 
-/* 圆桌 / 团队 = 图标 + 窄选成员箭头拼成一个整体（两种协作模式入口并列） */
-#rt-group, #team-group { display: inline-flex; align-items: center; flex-shrink: 0; }
-#rt-switch, #team-switch { border-radius: var(--r-md) 0 0 var(--r-md); }
-#rt-switch.on { background: var(--ai); color: var(--paper-raised); }
-#rt-switch.on:hover { background: var(--ai); filter: brightness(1.1); }
-/* 团队激活用绿色：协作开工进行中的语感，与圆桌紫 / 规划蓝 / 写入金区分 */
-#team-switch.on { background: var(--down); color: var(--paper-raised); }
-#team-switch.on:hover { background: var(--down); filter: brightness(1.1); }
+/* 协作（圆桌 / 团队）：一个入口，点开统一菜单选模式与成员设置；
+   激活亮模式色（圆桌紫 / 团队绿），未激活恢复纯图标 */
+#coop-group { display: inline-flex; align-items: center; flex-shrink: 0; }
+#coop-switch { border-radius: var(--r-md); }
+#coop-switch.coop-rt { background: var(--ai); color: var(--paper-raised); }
+#coop-switch.coop-rt:hover { background: var(--ai); filter: brightness(1.1); }
+#coop-switch.coop-team { background: var(--down); color: var(--paper-raised); }
+#coop-switch.coop-team:hover { background: var(--down); filter: brightness(1.1); }
 /* 激活态展开状态徽记（cp-state）：图标旁显「圆桌·N / 团队·AI总管」等短文字，
    按钮从固定 34px 放开为自适应；未激活不显示文字、宽度不变 */
-#rt-switch.on, #team-switch.on { width: auto; padding: 0 9px; gap: 4px; }
+#coop-switch.on { width: auto; padding: 0 9px; gap: 4px; }
 .cp-state { font-size: 11px; font-weight: 700; white-space: nowrap; }
-#rt-pick, #team-pick {
-  flex-shrink: 0; width: 17px; height: 30px; padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  color: var(--dim); background: transparent;
-  border: none; border-radius: 0 var(--r-md) var(--r-md) 0; cursor: pointer;
-}
-#rt-pick:hover, #team-pick:hover { background: var(--paper-sunken); color: var(--text); }
-#rt-pick svg, #team-pick svg { width: 11px; height: 11px; }
+
+/* 双态徽记（图标/文字）：常规宽度只显文字；挤压档（下方容器查询）翻成纯图标。
+   图标常驻 DOM 而不是临时拼，切档零 JS 不发抖；JS 文案一律写进各自的 *-txt */
+#btn-send .send-ico, .split-send .send-ico,
+#model-chip .mc-ico, .split-model .sm-ico,
+#reasoning-chip .chip-ico, .split-reasoning .chip-ico { display: none; }
+.send-ico, .mc-ico, .sm-ico { width: 15px; height: 15px; }
+.chip-ico { width: 13px; height: 13px; }
 
 #accept-switch.on { background: var(--gold); color: var(--paper-raised); }
 #accept-switch.on:hover { background: var(--gold); filter: brightness(1.06); }
@@ -1903,23 +2026,23 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 }
 @media (max-width: 1280px) { #cp-hint { visibility: hidden; } }
 
-/* 模型选择器胶囊：贴在发送左侧，右侧 chevron 提示可点（菜单逻辑复用顶栏时代的 #model-chip） */
-#composer-bar #model-chip {
+/* 模型选择器胶囊：贴在发送左侧，右侧 chevron 提示可点；主栏（#model-chip）与
+   分屏列（.split-model）共用同一套，视觉不分层 */
+#composer-bar #model-chip, .split-model {
   display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 5px 10px; font-size: 12px; font-weight: 700; color: var(--text2);
+  padding: 5px 10px; font-size: 12px; font-weight: 700; color: var(--text2); cursor: pointer;
   font-variant-numeric: var(--num);
   background: var(--paper-raised); border: 1px solid var(--line2); border-radius: var(--r-md);
 }
-#composer-bar #model-chip::after {
+#composer-bar #model-chip::after, .split-model::after {
   content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; vertical-align: 2px;
   border-right: 1.5px solid var(--dim); border-bottom: 1.5px solid var(--dim);
   transform: rotate(45deg);
 }
-#composer-bar #model-chip:hover { background: var(--paper-sunken); color: var(--text); }
+#composer-bar #model-chip:hover, .split-model:hover { background: var(--paper-sunken); color: var(--text); }
 
-/* 连接状态 + 思考强度徽章：贴在模型选择器左侧，不参与压缩换行 */
+/* 连接状态圆点 + 思考强度徽章：贴在模型选择器左侧，不参与压缩换行 */
 #composer-bar #conn-status,
-#composer-bar #status-text,
 #composer-bar #reasoning-chip { flex-shrink: 0; }
 
 /* 右侧簇（连接/思考/模型/发送）整体不拆行：窄屏时整簇掉到第二行并靠右，
@@ -1930,6 +2053,71 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   flex-shrink: 0; margin-left: auto;
 }
 #cp-right #btn-send { flex-shrink: 0; margin-left: 2px; }
+
+/* ---------- 挤压降级：功能行高度永远一行 ----------
+   flex-wrap 收死不换行；容器查询按「输入栏自身宽度」分级收缩——分屏把主栏挤窄时
+   视口媒体查询无感，只有容器查询判得准。cbar（主栏）三档：
+   ≤700px 撤快捷键提示（#cp-right 的 margin-left:auto 兜底推右）；≤540px 撤一切
+   文字——状态文字 / 协作徽记 / 思考档位 / 模型名 / 发送 全部转纯图标（悬停仍有
+   title，发送/排队的区别也在 title）；≤390px 上下文环与 Mod 托盘让位。
+   sbar（分屏列）无提示文字，两档：≤560px 转纯图标、≤400px 上下文环让位。
+   中间档先让模型名自己省略号收缩扛挤压。@supports 兜底：容器查询不可用就
+   维持旧的整簇换行行为。 */
+@supports (container-type: inline-size) {
+  #composer-bar { flex-wrap: nowrap; container: cbar / inline-size; }
+  .split-bar { flex-wrap: nowrap; container: sbar / inline-size; }
+  /* 兜底：任何未预料的状态下工具行也不许越界画进邻列（阴影在自身 padding 内，不受影响） */
+  #composer-bar, .split-bar { overflow: hidden; }
+  #cp-right { flex-shrink: 1; min-width: 0; }
+  /* 28px = 图标态胶囊的底线：再挤宁可溢出裁边也不能把图标裁残 */
+  #composer-bar #model-chip, .split-bar .split-model { flex-shrink: 1; min-width: 28px; }
+
+  @container cbar (max-width: 700px) {
+    #composer-bar #cp-hint { display: none; }
+  }
+  @container cbar (max-width: 540px) {
+    #composer-bar .cp-state { display: none; }
+    #btn-send .send-ico, #model-chip .mc-ico, #reasoning-chip .chip-ico { display: inline-block; }
+    #btn-send .send-txt, #model-chip .mc-txt, #reasoning-chip .chip-txt { display: none; }
+    #btn-send {
+      width: 34px; height: 30px; padding: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    #composer-bar #model-chip { padding: 5px 7px; }
+    #reasoning-chip { padding: 2px 5px; }
+  }
+  @container cbar (max-width: 390px) {
+    /* !important：环的基础规则（display:inline-flex）在本块之后，同优先级会反杀 */
+    #ctx-ring, #mod-tray { display: none !important; }
+    /* 极窄档：间距与图标再收一号，保住最右的发送；胶囊只留图标，箭头裁边就撤 */
+    #composer-bar { gap: 4px; }
+    #composer-bar .cp-icon { width: 32px; }
+    #btn-send { width: 30px; }
+    #composer-bar #model-chip { padding: 5px; }
+    #composer-bar #model-chip::after { display: none; }
+  }
+  @container sbar (max-width: 560px) {
+    .split-bar .cp-state { display: none; }
+    .split-send .send-ico, .split-model .sm-ico, .split-reasoning .chip-ico { display: inline-block; }
+    .split-send .send-txt, .split-model .sm-txt, .split-reasoning .chip-txt { display: none; }
+    .split-send {
+      width: 34px; height: 30px; padding: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .split-model { padding: 2px 5px; }
+    .split-reasoning { padding: 2px 5px; }
+  }
+  @container sbar (max-width: 400px) {
+    .split-ctx-ring { display: none !important; }
+    .split-bar { gap: 4px; }
+    .split-bar .cp-icon { width: 32px; }
+    .split-send { width: 30px; }
+  }
+  /* 极窄档（三列小窗）：思考/模型徽章整个让位，保住最右的发送与连接圆点 */
+  @container sbar (max-width: 360px) {
+    .split-reasoning, .split-model { display: none; }
+  }
+}
 
 /* 成员选择浮层：与圆桌按钮左对齐、向上展开。
    此前贴的是右上角（right:18px），既远离触发按钮，又会被主区右缘裁切。 */
@@ -1974,6 +2162,39 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   background: var(--card);
   padding-bottom: 8px; margin-bottom: -8px;
 }
+
+/* 协作统一菜单（#coop-menu / 列内动态菜单）：模式单选 + 设置入口。
+   条目两行式：模式名一行、一句话说明缩进其下——说明跟着模式名左对齐，
+   不再被 margin-left:auto 推到右缘后随长短参差漂移 */
+.coop-mode-item {
+  display: flex; align-items: flex-start; gap: 8px; width: 100%;
+  padding: 8px 10px; border: none; background: none; cursor: pointer;
+  border-radius: var(--r-sm); text-align: left; color: var(--text); font: inherit;
+}
+.coop-mode-item:hover { background: var(--paper-sunken); }
+.coop-mode-item.active { background: var(--blue-weak); }
+.coop-mode-check {
+  width: 14px; flex-shrink: 0; color: var(--blue); font-weight: 700;
+  font-size: 12.5px; line-height: 18px;
+}
+.coop-mode-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.coop-mode-label { font-size: 12.5px; line-height: 18px; font-weight: 600; }
+.coop-mode-desc { font-size: 11.5px; line-height: 1.45; color: var(--dim); }
+.coop-mode-item.active .coop-mode-label { color: var(--blue); }
+/* 选中模式行右侧的就地设置入口：点它进对应设置面板（圆桌 → 成员与辩论，团队 → 队员与总管） */
+.coop-row-settings {
+  margin-left: 6px; flex-shrink: 0; white-space: nowrap;
+  color: var(--blue); background: var(--blue-weak);
+  border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 700;
+}
+.coop-row-settings:hover { background: var(--blue); color: var(--paper-raised); }
+.coop-sep { height: 1px; background: var(--line); margin: 5px 4px; }
+.coop-entry {
+  display: block; width: 100%; text-align: left; padding: 7px 9px;
+  border: none; background: none; cursor: pointer; border-radius: var(--r-sm);
+  color: var(--text); font: inherit; font-size: 12.5px;
+}
+.coop-entry:hover { background: var(--paper-sunken); color: var(--blue); }
 .rt-menu-actions .btn-primary { padding: 5px 14px; font-size: 12px; }
 /* 操作行只放按钮：不许收缩换行（此前「恢复自动」「确定」被长文案挤成竖排字） */
 .rt-menu-actions .link-btn,
@@ -2357,32 +2578,159 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 /* 团队纪要徽标：金底，与圆桌紫徽标区分 */
 .rt-badge.team-badge { background: var(--gold); }
 
+/* ---------- 对抗卡：四角色流水线进度 + 问题清单（聊天流内的审查台） ----------
+   与圆桌/团队卡同底同框；阶段步进条 + 问题行清单。主色用 --up（红，
+   对抗的进攻方意象），与圆桌紫 / 团队金区分。 */
+.adversarial {
+  align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
+  background: var(--paper-sunken); border: 1.5px solid var(--line2);
+  border-radius: var(--r-md); padding: 8px 10px; box-shadow: var(--shadow-sm);
+}
+.adversarial .rt-head { display: flex; align-items: center; gap: 8px; padding: 2px 4px 8px; cursor: pointer; }
+.adversarial .rt-title { color: var(--up); font-weight: 800; font-size: 13px; flex-shrink: 0; }
+.adversarial .rt-sub { color: var(--dim); font-size: 12px; flex: 1; min-width: 0; }
+.adversarial .rt-fold {
+  flex-shrink: 0; font-size: 11.5px; color: var(--dim);
+  padding: 2px 8px; border-radius: var(--r-sm);
+}
+.adversarial .rt-fold:hover { background: var(--paper-inset); color: var(--text); }
+.adversarial.folded .adv-phases,
+.adversarial.folded .adv-findings { display: none; }
+.adversarial.err .rt-title { color: var(--reg); }
+.adversarial.cancelled .rt-title { color: var(--dim); }
+/* 阶段步进条：发现 → 调查 → 建议 → 裁判 */
+.adversarial .adv-phases {
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 2px 8px; flex-wrap: wrap;
+}
+.adversarial .adv-phase {
+  font-size: 11px; color: var(--dim);
+  border: 1px solid var(--line2); border-radius: 999px;
+  padding: 1px 9px; line-height: 1.7; white-space: nowrap;
+}
+.adversarial .adv-phase.active {
+  color: var(--up); border-color: var(--up); font-weight: 700;
+}
+.adversarial .adv-phase.done { color: var(--down); border-color: var(--down); }
+.adversarial .adv-phase + .adv-phase::before { content: none; }
+/* 问题清单行 */
+.adversarial .adv-findings { display: flex; flex-direction: column; gap: 6px; }
+.adv-finding {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 6px 9px; min-width: 0;
+}
+.adv-finding .adv-f-head {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 3px;
+}
+.adv-finding .adv-f-id {
+  font-family: var(--font-mono); font-size: 11px; color: var(--dim); flex-shrink: 0;
+}
+.adv-finding .adv-f-sev {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 700;
+  border-radius: 999px; padding: 0 7px; line-height: 1.7;
+}
+.adv-finding .adv-f-sev.sev-critical { background: var(--up); color: var(--paper-raised); }
+.adv-finding .adv-f-sev.sev-high { background: var(--gold); color: var(--paper-raised); }
+.adv-finding .adv-f-sev.sev-medium { border: 1px solid var(--blue); color: var(--blue); }
+.adv-finding .adv-f-sev.sev-low { border: 1px solid var(--line2); color: var(--dim); }
+.adv-finding .adv-f-cat { flex-shrink: 0; font-size: 11px; color: var(--dim); }
+.adv-finding .adv-f-loc {
+  flex: 1; min-width: 0; font-size: 11px; color: var(--dim);
+  font-family: var(--font-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.adv-finding .adv-f-verdict {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 700;
+  border-radius: 999px; padding: 0 7px; line-height: 1.7;
+}
+.adv-finding .adv-f-verdict.verdict-confirmed { background: var(--up); color: var(--paper-raised); }
+.adv-finding .adv-f-verdict.verdict-refuted { border: 1px solid var(--down); color: var(--down); }
+.adv-finding .adv-f-verdict.verdict-partial { background: var(--gold); color: var(--paper-raised); }
+.adv-finding .adv-f-verdict.verdict-pending { border: 1px dashed var(--line2); color: var(--dim); }
+.adv-finding .adv-f-desc { font-size: 12.5px; line-height: 1.55; }
+.adv-finding .adv-f-desc p { margin: 0; }
+.adv-finding .adv-f-reason, .adv-finding .adv-f-fix {
+  font-size: 12px; line-height: 1.55; margin-top: 4px;
+}
+.adv-finding .adv-f-reason p, .adv-finding .adv-f-fix p { margin: 0; }
+.adv-finding .adv-f-fix { color: var(--down); }
+/* 对抗徽标：贴在终审报告气泡顶部，红底与圆桌紫 / 团队金区分 */
+.rt-badge.adv-badge { background: var(--up); }
+
+/* 协作单按钮的对抗配色（红，进攻方意象） */
+#coop-switch.coop-adv { background: var(--up); color: var(--paper-raised); }
+#coop-switch.coop-adv:hover { background: var(--up); filter: brightness(1.1); }
+.split-bar .cp-icon.on[data-role="coop"].coop-adv { background: var(--up); }
+
+/* 对抗设置弹层：流水线示意 + 逐角色指定行（每行 角色徽记 + 职责 + 模型下拉） */
+.adv-flow {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 0 4px 8px; border-bottom: 1px solid var(--line); margin-bottom: 6px;
+}
+.adv-flow .adv-flow-step {
+  font-size: 11px; color: var(--up);
+  border: 1px solid var(--up); border-radius: 999px;
+  padding: 1px 9px; line-height: 1.7; white-space: nowrap;
+}
+/* 裁判 chip（流水线示意与裁判行共用）：虚线灰——它是固定角色，不与三个
+  可指派角色抢视觉权重 */
+.adv-flow-step.adv-flow-judge {
+  color: var(--dim); border-style: dashed; border-color: var(--line2);
+}
+.adv-flow .adv-flow-sep { color: var(--dim); font-size: 10px; }
+.adv-role-list { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; }
+.adv-role-row { display: flex; align-items: center; gap: 8px; padding: 2px 4px; min-width: 0; }
+.adv-role-row .adv-role-label {
+  flex-shrink: 0; font-size: 11px; font-weight: 700; color: var(--up);
+  border: 1px solid var(--up); border-radius: 999px;
+  padding: 0 9px; line-height: 1.8; white-space: nowrap;
+}
+/* 职责说明（角色行与裁判行共用）：小一号灰字、单行省略，与角色徽记同排 */
+.adv-role-desc {
+  flex: 1; min-width: 0; font-size: 11.5px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.adv-role-select {
+  flex-shrink: 0; width: 178px; max-width: 52%;
+  font-size: 12px; font-family: var(--font-mono);
+  padding: 3px 6px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--paper-raised); color: var(--text);
+}
+.adv-role-select:focus { outline: 1.5px solid var(--blue); outline-offset: 0; }
+.adv-judge-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px 2px; border-top: 1px solid var(--line);
+}
+.adv-judge-row .adv-flow-step { flex-shrink: 0; white-space: nowrap; }
+
 /* 上下文容量环形仪表（输入栏工具条，语音输入右侧）：
    环=已占用比例（stroke-dashoffset 由 setContextUsage 驱动），环内数字=百分比，
    ≥70% 转金、≥90% 转红；悬停/点按展开构成明细弹层 */
-#ctx-ring {
+#ctx-ring, .split-ctx-ring {
   display: inline-flex; flex-shrink: 0; cursor: pointer;
   align-self: center;
 }
-#ctx-ring.hidden { display: none; }
-#ctx-ring svg { width: 22px; height: 22px; display: block; }
-#ctx-ring:hover .ring-txt { fill: var(--text); }
-#ctx-ring .ring-track { fill: none; stroke: var(--paper-sunken); stroke-width: 2.6; }
-#ctx-ring .ring-val {
+#ctx-ring.hidden, .split-ctx-ring.hidden { display: none; }
+#ctx-ring svg, .split-ctx-ring svg { width: 22px; height: 22px; display: block; }
+#ctx-ring:hover .ring-txt, .split-ctx-ring:hover .ring-txt { fill: var(--text); }
+#ctx-ring .ring-track, .split-ctx-ring .ring-track {
+  fill: none; stroke: var(--paper-sunken); stroke-width: 2.6;
+}
+#ctx-ring .ring-val, .split-ctx-ring .ring-val {
   fill: none; stroke: var(--blue); stroke-width: 2.6; stroke-linecap: round;
   stroke-dasharray: 56.55; /* 2πr，r=9 */
   transform: rotate(-90deg); transform-origin: center;
   transition: stroke-dashoffset .3s ease, stroke .2s ease;
 }
-#ctx-ring .ring-txt {
+#ctx-ring .ring-txt, .split-ctx-ring .ring-txt {
   font-family: var(--font-mono); font-size: 7.5px; font-weight: 700;
   fill: var(--text2); text-anchor: middle; dominant-baseline: central;
   transition: fill .15s ease;
 }
-#ctx-ring.warn .ring-val { stroke: var(--gold); }
-#ctx-ring.warn .ring-txt { fill: var(--gold); }
-#ctx-ring.bad .ring-val { stroke: var(--reg); }
-#ctx-ring.bad .ring-txt { fill: var(--reg); }
+#ctx-ring.warn .ring-val, .split-ctx-ring.warn .ring-val { stroke: var(--gold); }
+#ctx-ring.warn .ring-txt, .split-ctx-ring.warn .ring-txt { fill: var(--gold); }
+#ctx-ring.bad .ring-val, .split-ctx-ring.bad .ring-val { stroke: var(--reg); }
+#ctx-ring.bad .ring-txt, .split-ctx-ring.bad .ring-txt { fill: var(--reg); }
 
 /* 上下文容量详情弹层：贴着环形仪表向上展开（fixed 定位，坐标由 placeCtxPop 计算）。
    构成分桶按占用降序排列，彩点与右缘百分比对齐；底部一行是会话累计的缓存命中率 */
@@ -5270,3 +5618,462 @@ li.mod-row {
   font-size: 12px; line-height: 1.6; color: var(--text2); white-space: pre-wrap; word-break: break-word;
 }
 .mod-recent-list li { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+
+/* ============================================================
+ * UI polish pass · 2026-10
+ * 在既有「纸墨」语言上补足层级、节奏与交互反馈；不改变 DOM/协议。
+ * ============================================================ */
+
+/* 主区与侧栏：把「结构边界」和「内容表面」拉开一档，长时间工作不糊成一整块 */
+#sidebar {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--card) 92%, var(--paper-raised)) 0%, var(--card) 42%, var(--paper-sunken) 100%);
+  padding: 14px 11px 12px;
+  gap: 12px;
+}
+.brand-row {
+  min-height: 34px;
+  padding: 0 2px 8px;
+  border-bottom: 1px solid var(--line2);
+}
+.brand-text b { letter-spacing: 2.4px; }
+.nav-new {
+  min-height: 40px;
+  background: linear-gradient(135deg, var(--paper-raised), var(--paper-sunken));
+}
+.side-menu {
+  gap: 3px;
+  padding: 2px 0 6px;
+  border-bottom: 1px dashed var(--line2);
+}
+.nav-item {
+  position: relative;
+  min-height: 34px;
+  padding: 7px 9px 7px 31px;
+}
+.nav-item::before {
+  content: "";
+  position: absolute;
+  left: 11px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  opacity: .55;
+  transform: rotate(45deg);
+}
+.nav-item:hover::before, .nav-item.active::before {
+  background: currentColor;
+  opacity: .9;
+}
+.section h3 {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  letter-spacing: 2.2px;
+}
+.section h3::before {
+  content: "";
+  width: 3px;
+  height: 13px;
+  margin-right: 7px;
+  background: var(--blue);
+  border-radius: 2px;
+}
+#project-list, #session-list {
+  padding: 2px 1px;
+}
+#project-list li, #session-list li {
+  border-radius: var(--r-md);
+}
+#project-list li.active, #session-list li.active {
+  box-shadow: inset 3px 0 0 var(--blue), var(--shadow-sm);
+}
+#side-bottom {
+  margin-top: auto;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line2);
+}
+
+/* 顶栏：页签与工具按钮拥有同一条「纸片」基线 */
+#topbar {
+  min-height: 46px;
+  padding: 7px 14px;
+  background: color-mix(in srgb, var(--card) 94%, var(--paper-raised));
+  box-shadow: 0 3px 0 color-mix(in srgb, var(--ink-line) 12%, transparent);
+}
+#chat-tabs { gap: 5px; }
+.chat-tab {
+  min-height: 30px;
+  padding: 4px 9px 4px 11px;
+  border-radius: var(--r-md);
+}
+.chat-tab.active {
+  border-color: var(--blue);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--blue) 30%, transparent);
+}
+.tb-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+}
+
+/* 聊天区：留白负责安静，消息卡负责信息密度 */
+#chat {
+  padding: 18px clamp(16px, 3vw, 32px) 14px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg) 88%, var(--card)) 0%, transparent 24%);
+}
+.chat-log {
+  gap: 12px;
+  padding-right: clamp(56px, 6vw, 80px);
+  padding-bottom: 8px;
+}
+.welcome {
+  position: relative;
+  width: min(680px, 100%);
+  margin-top: clamp(4vh, 7vh, 9vh);
+  padding: 24px 26px 20px;
+  border-color: var(--ink-line);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--blue) 28%, transparent), var(--shadow-lg);
+  overflow: hidden;
+}
+.welcome::before {
+  content: "准备开始";
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 5px 10px;
+  color: var(--blue);
+  background: var(--blue-weak);
+  border-left: 1px solid var(--line2);
+  border-bottom: 1px solid var(--line2);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+.w-title {
+  font-size: clamp(19px, 2vw, 22px);
+  letter-spacing: .8px;
+  margin-bottom: 10px;
+}
+.w-sub { max-width: 54em; margin-bottom: 16px; }
+.w-samples { gap: 9px; }
+.w-sample {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 9px 13px;
+}
+.msg.assistant .md {
+  border-left: 3px solid var(--blue);
+  padding: 13px 17px;
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--blue) 16%, transparent), var(--shadow-sm);
+}
+.user-bubble {
+  border-color: color-mix(in srgb, var(--ink-line) 80%, var(--blue));
+}
+
+/* 输入区：把最重要的动作做成清晰的「工作台底座」 */
+#composer {
+  gap: 8px;
+  padding: 10px 14px 12px;
+  background: linear-gradient(180deg, var(--card), color-mix(in srgb, var(--card) 88%, var(--paper-sunken)));
+  border-top: 2px solid var(--ink-line);
+  box-shadow: 0 -6px 18px color-mix(in srgb, var(--ink-line) 10%, transparent);
+}
+#input {
+  min-height: 46px;
+  padding: 11px 13px;
+  border-radius: var(--r-lg);
+  border-color: var(--line2);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--paper-raised) 70%, transparent), var(--shadow-sm);
+}
+#input:hover { border-color: var(--blue); }
+#input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px var(--blue-weak), var(--shadow-md);
+}
+#composer-bar {
+  min-height: 30px;
+  gap: 5px;
+}
+.cp-icon {
+  width: 32px;
+  height: 30px;
+  border: 1px solid transparent;
+}
+.cp-icon:hover { border-color: var(--line2); }
+#cp-right {
+  gap: 7px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line2);
+}
+#composer-bar #model-chip, .split-model {
+  border-color: var(--blue);
+  background: var(--blue-weak);
+  color: var(--text);
+}
+#btn-send {
+  min-width: 92px;
+  min-height: 32px;
+  letter-spacing: 1px;
+}
+
+/* 列表/设置卡：统一圆角、悬浮位移和焦点语义 */
+.settings-body { padding: 18px 22px; gap: 14px; }
+.settings-card {
+  border-radius: var(--r-lg);
+  padding: 14px 16px;
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--ink-line) 12%, transparent), var(--shadow-sm);
+}
+.settings-card h3 { font-size: 15.5px; }
+.settings-card:focus-within { border-color: color-mix(in srgb, var(--blue) 70%, var(--line2)); }
+
+/* 右面板与弹层：让工具区看起来像同一套工作台而不是第二个应用 */
+#right-panel {
+  box-shadow: -6px 0 20px color-mix(in srgb, var(--ink-line) 12%, transparent);
+}
+.rp-tab { min-height: 42px; }
+.rp-page { background: linear-gradient(180deg, color-mix(in srgb, var(--card) 96%, var(--paper-raised)), var(--card)); }
+
+/* ============================================================
+ * 点击后出现的 UI · interaction states
+ * 所有浮层统一「纸片 + 墨线 + 阴影」；打开时有方向感，
+ * 重点控件保留清晰的选中/危险/禁用语义，不改变交互逻辑。
+ * ============================================================ */
+
+@keyframes ui-pop-in {
+  from { opacity: 0; transform: translateY(5px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes ui-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 通用浮层：菜单、通知和模型选择都使用同一张「浮起的纸」 */
+.session-menu,
+.input-menu,
+.rt-menu {
+  border: 1.5px solid var(--ink-line);
+  background: color-mix(in srgb, var(--card) 96%, var(--paper-raised));
+  box-shadow: 4px 5px 0 color-mix(in srgb, var(--ink-line) 14%, transparent), var(--shadow-lg);
+  animation: ui-pop-in var(--dur-fast) var(--ease-out);
+  transform-origin: var(--pop-origin, bottom left);
+}
+.session-menu.hidden,
+.input-menu.hidden,
+.rt-menu.hidden,
+.ctx-pop.hidden { display: none; }
+
+/* 菜单顶部与底部的安全边距，避免最后一项贴边；滚动条不抢内容宽度 */
+.session-menu,
+.input-menu,
+.rt-menu {
+  scrollbar-gutter: stable;
+}
+.session-menu button,
+.input-menu button,
+.rt-menu button,
+.rt-menu label {
+  min-height: 34px;
+}
+.session-menu button:focus-visible,
+.input-menu button:focus-visible,
+.rt-menu button:focus-visible,
+.rt-menu input:focus-visible,
+.rt-menu select:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+.session-menu button[aria-current="true"],
+.session-menu button[aria-selected="true"],
+.input-menu button[aria-current="true"],
+.input-menu button[aria-selected="true"] {
+  background: var(--blue-weak);
+  color: var(--blue);
+  font-weight: 700;
+}
+
+/* 会话菜单：危险操作与普通操作之间有明确的分组感 */
+#session-menu {
+  padding: 4px;
+  gap: 2px;
+}
+#session-menu > button {
+  border: 0;
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+}
+#session-menu > button:last-child { border-top: 1px solid var(--line); margin-top: 2px; }
+#session-menu > button.danger:last-child { border-top-color: color-mix(in srgb, var(--reg) 28%, var(--line)); }
+
+/* 模型/辅助模型/引用菜单：标题或列表很多时仍保持可扫读 */
+.model-menu {
+  padding: 6px;
+  border-radius: var(--r-lg);
+}
+.model-menu .mm-list {
+  padding: 2px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.model-menu .mm-item {
+  min-height: 38px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast), transform var(--dur-fast);
+}
+.model-menu .mm-item:hover { transform: translateX(2px); }
+.model-menu .mm-item.active {
+  border-left: 3px solid var(--blue);
+  padding-left: 7px;
+}
+.model-menu .mm-manage {
+  border-radius: var(--r-sm);
+  margin-top: 5px;
+}
+
+/* 通知中心：头部固定、未读项用左侧颜色带提示，不用整块强烈底色 */
+.notif-panel {
+  border-radius: var(--r-lg);
+  /* 保留原有 max-height + 内部滚动；通知多时不能被圆角装饰截断。 */
+  overflow: auto;
+  padding: 4px;
+}
+.notif-head {
+  margin: -4px -4px 4px;
+  padding: 10px 12px;
+  background: linear-gradient(135deg, var(--paper-raised), var(--paper-sunken));
+}
+.notif-item {
+  border: 0;
+  border-radius: var(--r-sm);
+  margin: 2px 0;
+  padding: 9px 8px;
+  transition: background var(--dur-fast), transform var(--dur-fast);
+}
+.notif-item.jumpable:hover { transform: translateX(2px); }
+.notif-item.kind-done { border-left: 3px solid var(--blue); }
+.notif-item.kind-perm { border-left: 3px solid var(--gold); }
+.notif-item.kind-error { border-left: 3px solid var(--reg); }
+
+/* 协作菜单：让「模式选择」和「成员配置」在打开后仍有清楚的区块边界 */
+.coop-menu,
+.adv-menu,
+.team-menu { border-radius: var(--r-lg); }
+.coop-mode-item,
+.coop-entry { min-height: 42px; }
+.coop-mode-item.active {
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+.coop-row-settings { align-self: center; }
+.team-menu .tm-director,
+.team-menu .tm-template,
+.rt-menu-extra {
+  background: color-mix(in srgb, var(--paper-sunken) 42%, transparent);
+  border-radius: var(--r-sm);
+  padding: 8px;
+}
+.team-menu .tm-director,
+.team-menu .tm-template { margin-bottom: 8px; }
+.rt-menu-actions {
+  margin-left: -2px;
+  margin-right: -2px;
+  border-radius: var(--r-sm);
+}
+
+/* 上下文容量、权限条和任务状态：打开/出现时强调「下一步动作」 */
+.ctx-pop {
+  border-radius: var(--r-lg);
+  box-shadow: 4px 5px 0 color-mix(in srgb, var(--ink-line) 14%, transparent), var(--shadow-lg);
+}
+#permission-bar {
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--gold) 22%, transparent), var(--shadow-sm);
+}
+
+/* 通用弹窗：遮罩更柔和，弹窗本体不再像浏览器默认对话框 */
+.overlay {
+  background: color-mix(in srgb, var(--ink-line) 52%, transparent);
+  backdrop-filter: blur(2px);
+  animation: ui-modal-in var(--dur-fast) var(--ease-out);
+}
+.modal-box {
+  position: relative;
+  border-radius: var(--r-lg);
+  padding: 22px 24px 20px;
+  box-shadow: 5px 6px 0 color-mix(in srgb, var(--ink-line) 18%, transparent), var(--shadow-lg);
+  animation: ui-modal-in var(--dur-fast) var(--ease-out);
+}
+.modal-box::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 4px;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  background: var(--blue);
+}
+.modal-box h3 { padding-top: 2px; }
+.modal-ops {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* 点击展开型内容的静态隐藏状态：避免 hidden 被通用 display 规则意外覆盖 */
+[hidden], .hidden { display: none !important; }
+
+/* 窄窗口：优先保住输入框和发送动作，隐藏装饰而不隐藏功能 */
+@media (max-width: 860px) {
+  #chat { padding: 12px 10px 10px; }
+  .chat-log { padding-right: 0; gap: 10px; }
+  .welcome { margin-top: 3vh; padding: 20px 16px 16px; }
+  #composer { padding: 8px 9px 10px; }
+  #cp-right { padding-left: 4px; }
+  #btn-send { min-width: 78px; }
+}
+@media (max-width: 520px) {
+  #topbar { padding: 6px 8px; }
+  #chat-tabs { max-width: calc(100% - 150px); }
+  .welcome { width: 100%; }
+  .w-title { font-size: 18px; }
+  .w-sub { font-size: 13px; }
+  .msg.user { max-width: 88%; }
+  .msg.assistant .md { padding: 11px 13px; }
+
+  /* 点击菜单不应在手机上被固定宽度推出屏幕；JS 的定位仍负责锚点，
+     这里仅限制可视宽度并让长文案进入内部滚动。 */
+  #session-menu,
+  #model-menu,
+  #aux-model-menu,
+  #ref-menu,
+  #reasoning-menu,
+  #notif-panel {
+    width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
+  }
+  .model-menu .mm-list { max-height: min(48vh, 300px); }
+  .rt-menu,
+  .input-menu { max-width: calc(100vw - 20px); }
+  .rt-menu { left: 10px; right: 10px; width: auto; }
+  .team-menu { width: auto; }
+  .rt-menu-item .mi-role { width: 64px; }
+  .rt-menu-actions { gap: 6px; flex-wrap: wrap; }
+  .modal-box { width: calc(100vw - 24px); padding: 20px 16px 16px; }
+}
+
+/* 本区块位于新增交互态样式之后，确保系统的「减少动态效果」偏好覆盖新动画。 */
+@media (prefers-reduced-motion: reduce) {
+  .session-menu,
+  .input-menu,
+  .rt-menu,
+  .overlay,
+  .modal-box {
+    animation: none !important;
+  }
+}

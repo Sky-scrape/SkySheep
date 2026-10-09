@@ -87,6 +87,26 @@ def test_only_unreleased_fails(tmp_path):
     assert "CHANGELOG" in "\n".join(lines)
 
 
+@pytest.mark.parametrize("version", ["2.4", "02.4.1", "2.04.1", "2.4.01"])
+def test_non_three_part_or_leading_zero_versions_fail_closed(tmp_path, version):
+    root = _make_repo(tmp_path)
+    (root / "engine" / "pyproject.toml").write_text(
+        f'[project]\nname = "fake"\nversion = "{version}"\n', encoding="utf-8"
+    )
+    ok, lines = cv.check(root)
+    assert ok is False
+    assert "三段式 semver" in "\n".join(lines)
+
+
+@pytest.mark.parametrize("line", [
+    "- **v12.3.4（✅ 当前版本）**：条目",
+    "- **v12.3.4 (✅ current release)**: item",
+])
+def test_readme_version_parser_does_not_accept_embedded_version(line):
+    assert cv._VERSION_RE.search(line).group(1) == "12.3.4"
+    assert cv._VERSION_RE.search("release-212.3.4") is None
+
+
 @pytest.mark.parametrize("which", ["zh", "en"])
 def test_missing_readme_marker_fails(tmp_path, which):
     root = _make_repo(

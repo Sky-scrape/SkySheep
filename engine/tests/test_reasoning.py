@@ -236,6 +236,100 @@ def test_set_reasoning_applies_to_current_provider(home):
         assert recv_until(ws, "r2")["result"]["reasoning"]["effort"] == "medium"
 
 
+def test_set_reasoning_skips_private_sessions(home):
+    """全局调档不对模型/档位私有的会话施为（blocking② 第三条腿的协议锁）：
+    覆盖腿与档位腿的会话挂着各自的 detached provider——对象不被换、档位不被
+    改；无覆盖会话与基底照旧跟全局换档。走真实构建（factory 注入会返回同一
+    实例，分不出对象身份）。"""
+    from fastapi.testclient import TestClient
+    from test_server import recv_until
+
+    from skysheep.config import add_provider_to_config
+    from skysheep.server import create_app
+
+    add_provider_to_config("skp-on", kind="openai", base_url="http://x",
+                           model="skp-1", api_key="k-skp")
+    app = create_app(working_dir=home / "proj", provider_name="skp-on")
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        # 覆盖腿：s1 会话级换模型（detached 实例，档位按服务配置 = auto）
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        sw = rpc("sw", "session.model_switch",
+                 {"id": s1, "name": "skp-on", "model": "skp-1"})
+        assert sw["ok"], sw.get("error")
+        # 档位腿：s3 只调过档位（session.new_task 不打默认模型标记）
+        nt = rpc("nt", "session.new_task", {})
+        s3 = nt["result"]["id"]
+        rs = rpc("rs", "session.reasoning_set", {"id": s3, "effort": "high"})
+        assert rs["ok"], rs.get("error")
+        # 跟全局腿：s4 无任何覆盖
+        ws.send_json({"id": "n4", "method": "session.new"})
+        s4 = recv_until(ws, "n4")["result"]["id"]
+
+        # 全局调到 medium
+        ok = rpc("s1", "model.set_reasoning", {"effort": "medium"})
+        assert ok["ok"], ok.get("error")
+
+        # 覆盖腿：对象不换、档位不被全局调档改动
+        p1 = backend.runtimes[s1].agent.provider
+        assert p1 is not backend.provider
+        assert getattr(p1, "reasoning_effort", "auto") == "auto"
+        # 档位腿：对象不换、会话档位保持 high
+        p3 = backend.runtimes[s3].agent.provider
+        assert p3 is not backend.provider
+        assert getattr(p3, "reasoning_effort", "auto") == "high"
+        # 跟全局腿：与基底一样共享全局 provider，档位跟着变
+        assert backend.runtimes[s4].agent.provider is backend.provider
+        assert backend.provider.reasoning_effort == "medium"
+
+
+def test_effort_rebuild_replays_privately(home):
+    """runtime 淘汰重建后的档位恢复：会话私有档位重放到 detached 私有副本上，
+    绝不落到共享的全局 provider（修复前全局对象被原地调档，所有无覆盖会话
+    ——含此后新建的——一起被改档，跨会话串档）。"""
+    from fastapi.testclient import TestClient
+    from test_server import recv_until
+
+    from skysheep.config import add_provider_to_config
+    from skysheep.server import create_app
+
+    add_provider_to_config("reb-on", kind="openai", base_url="http://x",
+                           model="reb-1", api_key="k-reb")
+    app = create_app(working_dir=home / "proj", provider_name="reb-on")
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+
+        def rpc(mid, method, params=None):
+            ws.send_json({"id": mid, "method": method, "params": params or {}})
+            return recv_until(ws, mid)
+
+        ws.send_json({"id": "n1", "method": "session.new"})
+        s1 = recv_until(ws, "n1")["result"]["id"]
+        rs = rpc("rs", "session.reasoning_set", {"id": s1, "effort": "high"})
+        assert rs["ok"], rs.get("error")
+        assert backend.provider.reasoning_effort == "auto"  # 设置时就不动全局
+
+        # LRU 淘汰：把池上限压到 1，新建会话把 s1 挤出去
+        backend.MAX_RUNTIMES = 1
+        ws.send_json({"id": "n2", "method": "session.new"})
+        recv_until(ws, "n2")
+        assert s1 not in backend.runtimes
+
+        # 重新激活 s1：runtime 重建 + 档位恢复
+        act = rpc("act", "session.activate", {"id": s1})
+        assert act["ok"], act.get("error")
+        p1 = backend.runtimes[s1].agent.provider
+        assert getattr(p1, "reasoning_effort", "auto") == "high", "重建后档位没恢复"
+        assert p1 is not backend.provider, "档位回放到了共享的全局 provider 上（跨会话串档）"
+        assert backend.provider.reasoning_effort == "auto", "全局档位被会话私有档位污染"
+
+
 def test_config_save_provider_toggles_reasoning(home):
     """设置页开关：保存 supports_reasoning=false 后详情与状态都反映为关闭。"""
     from test_server import make_client, recv_until

@@ -8,13 +8,15 @@
 
 阶段与发布清单条目的对应（每步开头都会打印）：
 
-    1  uv sync --locked                        §3-1
-    2  PyInstaller 打包（不经 uv run）          §3-2
-    3  产物校验（exe / 内置技能 / manifest）     §3-3
-    4  冒烟（临时 SKYSHEEP_HOME 起 exe）        §3-3
-    5  ISCC 编译安装包                          §3-4
-    6  安装包 sha256 附件                       §4-5
-    7  gh release create 上传                   §4-2/§4-3（仅 --upload）
+    1  完整版本一致性预检                      §1
+    2  uv sync --locked                        §3-1
+    3  lint / unit / e2e / eval 质量门          §2
+    4  PyInstaller 打包（不经 uv run）          §3-2
+    5  产物校验（exe / 内置技能 / manifest）     §3-3
+    6  冒烟（临时 SKYSHEEP_HOME 起 exe）        §3-3
+    7  ISCC 编译安装包                          §3-4
+    8  安装包 sha256 附件                       §4-5
+    9  gh release create 上传                   §4-2/§4-3（仅 --upload）
 
 安全取向：
 - ``--upload`` 不给就绝不碰 gh；给了也在全部本地阶段通过后才执行，且
@@ -102,7 +104,10 @@ def pyproject_version() -> str:
     m = _PYPROJECT_VERSION_RE.search(text)
     if not m:
         raise RuntimeError('engine/pyproject.toml 里解析不出 version = "x.y.z"')
-    return m.group(1)
+    version = m.group(1)
+    if not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
+        raise RuntimeError(f"版本号必须是三段式 semver（x.y.z）：{version}")
+    return version
 
 
 def _installer_exe(version: str) -> Path:
@@ -134,6 +139,21 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
 
 
 # ---------- 各阶段实现 ----------
+
+
+def step_versions() -> None:
+    """复用 CI 的完整版本一致性门禁，在任何构建操作前 fail closed。"""
+    _run([sys.executable, str(_ENGINE_DIR / "tools" / "check_versions.py")], cwd=_REPO_ROOT)
+
+
+def step_quality() -> None:
+    """本地发布同样执行 lint、单测、真实 socket 与行为评测，不依赖之前的 CI。"""
+    python = _ENGINE_DIR / ".venv" / "Scripts" / "python.exe"
+    if not python.is_file():
+        raise RuntimeError(f"找不到项目解释器：{python}")
+    _run([str(python), "-m", "ruff", "check", "."], cwd=_ENGINE_DIR)
+    for marker in ("not e2e and not eval", "e2e", "eval"):
+        _run([str(python), "-m", "pytest", "-q", "-m", marker], cwd=_ENGINE_DIR)
 
 
 def step_sync() -> None:
@@ -328,6 +348,28 @@ def step_upload(allow: bool) -> None:
     missing = [str(p) for p in (exe, sha) if not p.is_file()]
     if missing:
         raise RuntimeError("缺上传资产：" + ", ".join(missing))
+    expected = _sha256(exe)
+    recorded = _read_text(sha, "安装包 SHA256 附件").split()
+    if recorded != [expected, exe.name]:
+        raise RuntimeError("安装包与 SHA256 附件不匹配，拒绝上传")
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("PATH 上找不到 git，无法校验发布提交")
+    def git_output(*args: str) -> str:
+        proc = subprocess.run(
+            [git, *args], cwd=str(_REPO_ROOT), env=_child_env(),
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        if proc.returncode:
+            raise RuntimeError(f"发布 Git 预检失败（{' '.join(args)}）：{proc.stderr.strip()}")
+        return proc.stdout.strip()
+
+    if git_output("status", "--porcelain", "--untracked-files=normal"):
+        raise RuntimeError("工作树有未提交修改，拒绝上传；先审阅并提交发布代码")
+    head = git_output("rev-parse", "HEAD")
+    tagged = git_output("rev-parse", "--verify", f"refs/tags/v{version}^{{commit}}")
+    if tagged != head:
+        raise RuntimeError(f"v{version} 标签未指向 HEAD，拒绝上传")
     gh = shutil.which("gh")
     if not gh:
         raise RuntimeError("PATH 上找不到 gh（GitHub CLI）；不装也能完成其余全部本地阶段")
@@ -341,13 +383,15 @@ def step_upload(allow: bool) -> None:
             f"v{version}",
             str(exe),
             str(sha),
+            "--verify-tag",
             "--title",
             f"SkySheep v{version}",
             "--notes",
             f"SkySheep v{version}，变更内容见仓库 CHANGELOG.md 对应条目。"
             "（发布清单 §4：Release 正文请把 CHANGELOG 条目的手动换行并回长句后编辑，"
             "并在末尾贴一份可读 sha256 哈希。）",
-        ]
+        ],
+        cwd=_REPO_ROOT,
     )
 
 
@@ -364,7 +408,9 @@ class Step:
 
 def build_steps(args: argparse.Namespace) -> list[Step]:
     return [
+        Step("§1", "完整版本一致性预检", step_versions),
         Step("§3-1", "依赖同步 uv sync --locked", step_sync),
+        Step("§2", "发布质量门（lint / unit / e2e / eval）", step_quality),
         Step("§3-2", "PyInstaller 打包（不经 uv run）", step_pack, "skip_pack"),
         Step("§3-3", "产物校验（exe / 内置技能 / manifest）", step_verify_artifacts),
         Step("§3-3", "冒烟（临时 SKYSHEEP_HOME 起 exe，GET / 应 200）", step_smoke, "skip_smoke"),
@@ -384,7 +430,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog=(
             "默认绝不执行任何对外发布动作；只有显式 --upload 才会在全部阶段通过后\n"
             "调用 gh release create v<版本> 上传安装包与 .sha256（发布清单 §4-2/§4-3）。\n"
-            "阶段对应清单条目：1=§3-1 2=§3-2 3=§3-3 4=§3-3 5=§3-4 6=§4-5 7=上传（仅 --upload）。\n"
+            "阶段对应清单条目：1=§1 2=§3-1 3=§2 4=§3-2 5=§3-3 6=§3-3 7=§3-4 8=§4-5 9=上传（仅 --upload）。\n"
             "失败即非零退出，并打印已到达的步骤。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -409,7 +455,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="全部阶段通过后 gh release create 上传安装包+sha256（§4）；不给则绝不发布",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.upload and (args.skip_pack or args.skip_smoke or args.skip_installer):
+        parser.error("--upload 不允许与任何 --skip-* 同用，发布资产必须经过本次完整构建与验证")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

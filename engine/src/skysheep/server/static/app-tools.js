@@ -312,3 +312,41 @@ async function renderRoundtableCfg() {
     }
   };
 }
+
+// ---------- 对抗设置：单场问题上限 / 单角色超时 ----------
+async function renderAdversarialCfg() {
+  let d;
+  try { d = await request("adversarial.get"); } catch (e) { return; }
+  document.getElementById("adversarial-hint").textContent = d.config_hint;
+  const form = document.getElementById("adversarial-form");
+  if (!form) return;
+  form.innerHTML = `
+    <div class="toolcfg-row"><label>单场问题上限</label>
+      <input type="number" data-f="max_findings" min="1" max="100" class="num-sm" value="${d.max_findings}">
+      <span class="dim small">条（发现者超出按序截断并提示）</span>
+    </div>
+    <div class="toolcfg-row"><label>单角色超时</label>
+      <input type="number" data-f="role_timeout_s" min="10" class="num-sm" value="${d.role_timeout_s}">
+      <span class="dim small">秒（裁判阶段自动加倍；单角色失败不拖垮其余阶段）</span>
+    </div>
+    <div class="toolcfg-row">
+      <span class="toolcfg-state ${d.configured_services ? "ok" : ""}">${d.configured_services
+        ? `● ${d.configured_services} 个已配置 Key 的服务可作角色`
+        : "○ 还没有已配置 Key 的服务：对抗角色来自「模型服务」页配好的服务"}</span>
+      <span class="spacer"></span>
+      <button class="btn-ghost" data-act="save">保存</button>
+    </div>`;
+  form.querySelector('[data-act="save"]').onclick = async () => {
+    const params = {
+      max_findings: Number(form.querySelector('[data-f="max_findings"]').value),
+      role_timeout_s: Number(form.querySelector('[data-f="role_timeout_s"]').value),
+    };
+    try {
+      await request("adversarial.save", params);
+      addNotice("对抗设置已保存并生效");
+      renderAdversarialCfg();
+    } catch (e) {
+      addNotice("保存失败: " + e.message);
+    }
+  };
+}

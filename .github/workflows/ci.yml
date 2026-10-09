@@ -44,7 +44,7 @@ jobs:
       # 防止明显回归；有意提升覆盖时同步上调）。
       - name: Pytest (unit, with coverage)
         working-directory: engine
-        run: uv run pytest -m "not e2e" -q --cov=skysheep --cov-report=term-missing:skip-covered --cov-fail-under=80.5
+        run: uv run pytest -m "not e2e and not eval" -q --cov=skysheep --cov-report=term-missing:skip-covered --cov-fail-under=80.5
 
   e2e:
     name: e2e (real socket)

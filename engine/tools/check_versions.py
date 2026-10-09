@@ -23,11 +23,14 @@ from pathlib import Path
 # 脚本位于 <repo>/engine/tools/：parents[0]=tools、parents[1]=engine、parents[2]=仓库根
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# 路线图条目形如「**v2.1.0（✅ 当前版本）**」「**v2.1.0 (✅ current release)**」
-_VERSION_RE = re.compile(r"v?(\d+(?:\.\d+){1,2})")
+# 项目版本按三段式 semver 统一：路线图条目形如
+# 「**v2.1.0（✅ 当前版本）**」「**v2.1.0 (✅ current release)**」。
+# 与 release.py 一样拒绝 2.1、前导零等会造成资产名/更新地址歧义的写法。
+_SEMVER = r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+_VERSION_RE = re.compile(rf"(?<![\w.-])v?({_SEMVER})(?![\w.-])")
 # CHANGELOG 发布条目标题「## [2.1.0] - 2026-09-27」；[未发布] 不是版本形态，自然被跳过
 _CHANGELOG_HEADING_RE = re.compile(r"(?m)^## \[([^\]]+)\]")
-_RELEASE_NAME_RE = re.compile(r"^\d+(?:\.\d+){1,2}$")
+_RELEASE_NAME_RE = re.compile(rf"^{_SEMVER}$")
 
 
 def _extract(text: str, pattern: re.Pattern[str], label: str, hint: str) -> str:
@@ -49,7 +52,7 @@ def _read(root: Path, rel: Path, label: str) -> str:
 def read_versions(root: Path | None = None) -> dict[str, str]:
     """从仓库根 ``root`` 读取五处版本号，返回 ``{来源: 版本}``；读不到/解析不出抛 ``ValueError``。"""
     root = root or _REPO_ROOT
-    return {
+    versions = {
         "engine/pyproject.toml": _extract(
             _read(root, Path("engine/pyproject.toml"), "engine/pyproject.toml"),
             re.compile(r'(?m)^version\s*=\s*"([^"]+)"'),
@@ -86,6 +89,12 @@ def read_versions(root: Path | None = None) -> dict[str, str]:
             "README.en.md",
         ),
     }
+    invalid = {label: value for label, value in versions.items()
+               if not re.fullmatch(_SEMVER, value)}
+    if invalid:
+        details = ", ".join(f"{label}={value}" for label, value in invalid.items())
+        raise ValueError(f"版本号必须是三段式 semver（x.y.z）：{details}")
+    return versions
 
 
 def _latest_changelog_release(text: str) -> str:

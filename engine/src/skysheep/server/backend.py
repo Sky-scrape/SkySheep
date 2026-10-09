@@ -55,6 +55,19 @@ from ..config import (
     update_provider_in_config,
 )
 from ..core import Agent, build_system_prompt
+from ..core.adversarial import (
+    AdversarialOutcome,
+    run_adversarial,
+)
+from ..core.adversarial import (
+    findings_meta as adversarial_findings_meta,
+)
+from ..core.adversarial import (
+    stats as adversarial_stats,
+)
+from ..core.adversarial import (
+    usage_rows as adversarial_usage_rows,
+)
 from ..core.checkpoints import CheckpointConflictError, CheckpointStore
 from ..core.context import (
     compact_history,
@@ -165,7 +178,7 @@ from ..tools.memory import (
 from ..tools.memory_embed import schedule_warmup
 from ..tools.pipeline import PipelineWriteTool
 from ..tools.skill import LoadSkillTool
-from .backend_parts._shared import EmitFn, SessionRuntime, collect_stream_text
+from .backend_parts._shared import EmitFn, ProjectCtx, SessionRuntime, collect_stream_text
 from .backend_parts.automation import AutomationMixin
 from .backend_parts.channels import (
     ChannelsMixin,
@@ -546,6 +559,7 @@ class QueuedTurn:
     fut: asyncio.Future = field(repr=False)
     roundtable: bool = False
     members: list | None = None  # 圆桌成员 [{provider, model}]，None=默认策略
+    adversarial: bool = False  # 对抗轮：四角色流水线审查（发现→调查→建议→裁判）
     images: list[ImageBlock] = field(default_factory=list)  # 本轮图片附件（圆桌轮不发给成员，仅随消息保留）
     refs: list[str] = field(default_factory=list)  # 本轮引用的会话 id（& 引用对话）
     compare: bool = False  # 圆桌 A/B 对比模式（不融合）
@@ -855,12 +869,29 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.mcp_warnings: list[str] = []
         self.checkpoints = CheckpointStore()
         self.hooks: HookRunner | None = None
+        # 跨项目分屏列的私有项目上下文缓存（_own_ctx 构建）：每个目标项目一份
+        # 子代理管理器与检查点库，按 normcase 工作目录为键；进程内常驻，数量
+        # 以用户添加的项目数为上界。引擎当前项目的仍走 self.tasks/self.checkpoints。
+        self._project_tasks: dict[str, TaskManager] = {}
+        self._project_checkpoints: dict[str, CheckpointStore] = {}
         # Mods 扩展（实验性，core/mods.py）：setup/_bind_project 里经 _reload_mods
         # 重建并挂到 Agent 与权限门上；无已装 Mod 时为 None（零开销直通）
         self.mods = None
         self._pending_mod_install: dict | None = None  # 两段安装的待确认项
         self.term = TerminalManager()
         self.aux_history: list[Message] = []
+        # 会话级模型覆盖（分屏独立对话）：sid → (服务名, 模型名)。有记录的会话
+        # runtime 用覆盖模型（_runtime_provider 首建时、session.model_switch 热切），
+        # 未记录的跟随全局；session.model_switch 写、delete_session 清
+        self._session_models: dict[str, tuple[str, str]] = {}
+        # 会话级权限三档覆盖（分屏/主栏按会话独立调档）：sid → 0/1/2。
+        # 引擎档（self.gate + ui.json 的 accept_edits）只是新会话的默认值；
+        # 有覆盖的会话 runtime 用自己的门（_runtime_gate 私有实例），重建重放。
+        self._session_accepts: dict[str, int] = {}
+        # 会话级思考强度档位：sid → effort（内存态，沿 _session_models 先例）。
+        # 有记录的会话 runtime 挂独立 provider 并带该档位（session.reasoning_set
+        # 写、热切模型后重放或清除、runtime 重建时恢复），未记录的跟随服务配置
+        self._session_efforts: dict[str, str] = {}
         # 团队（用户总管 MVP）：会话级活动团队（sid → 编排器，内存态，不跨进程）；
         # 活动登记落 team_active.json（沿子代理任务簿先例：state_path 可注入、
         # textio 原子写、重启时一律标「已中断」不自动恢复）。
@@ -886,7 +917,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._pipeline_busy_until: dict[int, float] = {}
         self._titling: set[str] = set()  # 正在自动生成标题的会话
         self._manually_named: set[str] = set()  # 用户手改过名字的会话（自动标题让路）
-        self._default_model_sessions: set[str] = set()  # 适用「新会话默认模型」的会话
+        # 适用「新会话默认模型」的会话 → 创建时刻的 (服务, 模型) 快照：
+        # 只在创建时偏好已生效才记，三段解析与 runtime 实际挂的 provider 都按
+        # 同一份快照回读（读时再验偏好会把「先建会话、后设偏好」的会话追溯成
+        # 默认模型会话——徽章显示偏好模型、runtime 却还挂着全局 provider）
+        self._default_model_sessions: dict[str, tuple[str, str]] = {}
         self._digesting: set[str] = set()  # 正在归档提炼记忆的会话
         self._maintaining = False  # 定期整理进行中（全局+项目共用一把，防叠加）
         self._map_generating: set[int] = set()  # 正在生成演化摘要的项目 id（按项目单飞）
@@ -953,6 +988,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         session_id: str = "",
         mods=None,
         recorder: ChangeRecorder | None = None,
+        ctx: ProjectCtx | None = None,
     ) -> Agent:
         """Agent 构造的单一入口：基底/会话/定时任务/流水线/渠道五处共用。
 
@@ -960,11 +996,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         五处构造点完全一致，收敛在这里——加一个 Agent 配置项只改这一处；
         provider/gate/working_dir 各不相同由调用方传。mods 只挂桌面侧的
         基底与会话 Agent（无人值守/渠道派生不传，天然不挂，见 core/agent.py）；
-        session_id 透传给钩子命令的 stdin JSON。
+        session_id 透传给钩子命令的 stdin JSON。ctx 传入时会话 runtime 的
+        工具注册表按该项目上下文装配（子代理/流水线绑定会话所属项目）。
         """
         return Agent(
             provider=provider,
-            registry=self._build_full_registry(recorder),
+            registry=self._build_full_registry(recorder, ctx=ctx),
             gate=gate,
             working_dir=working_dir,
             max_iterations=self.cfg.max_iterations,
@@ -981,30 +1018,215 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             use_ripgrep=self.cfg.search.use_ripgrep,
         )
 
-    def _get_runtime(self, session_id: str) -> SessionRuntime:
+    # ---- 会话的项目上下文（跨项目分屏列的 per-runtime 绑定） ----
+
+    async def _runtime_gate(self, project_id: int | None,
+                            workdir: Path | None, session_id: str) -> PermissionGate:
+        """会话 runtime 的私有权限门：白名单按项目、工作目录边界跟着走，
+        三档先取引擎默认（ui.json 的 accept_edits），再叠会话级覆盖
+        （session.accept_set 写入 _session_accepts，runtime 重建后在此重放）。
+
+        不再与引擎共享同一实例——三档按会话独立后，共享实例会把一个会话的
+        调档泄漏给所有会话（与思考档位「换私有副本」同一道理）。"""
+        gate = PermissionGate(store=self.store, project_id=project_id, working_dir=workdir)
+        gate.auto_accept_write = self.gate.auto_accept_write if self.gate else False
+        gate.auto_accept_all = self.gate.auto_accept_all if self.gate else False
+        if self.mods is not None:
+            gate.extra_confirm = self.mods.extra_confirm
+        await gate.load_project_rules()
+        saved = self._session_accepts.get(session_id)
+        if saved in (0, 1, 2):
+            gate.auto_accept_write = saved in (1, 2)
+            gate.auto_accept_all = saved == 2
+        return gate
+
+    def _fixed_workdir(self, name: str) -> Path:
+        """快聊 / 远程连接的固定工作目录：数据目录（skysheep_home()）下的真实文件夹。
+
+        取用时 ensure 一次（exist_ok 幂等）：启动建过之后用户中途删掉也能自愈；
+        建不出来（只读介质等）不抛错——路径照常返回，会话仍可用，文件工具
+        真正读写时才报错。
+        """
+        d = skysheep_home() / name
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return d
+
+    def _quick_workdir(self) -> Path:
+        """快聊会话的工作目录：数据目录下的 default 文件夹。"""
+        return self._fixed_workdir("default")
+
+    def _remote_workdir(self) -> Path:
+        """远程连接（渠道）会话的工作目录：数据目录下的 remote-control 文件夹。"""
+        return self._fixed_workdir("remote-control")
+
+    async def _session_project(self, session_id: str) -> tuple[int | None, Path | None]:
+        """会话所属项目 (project_id, 工作目录)。
+
+        工作目录解析口径：快聊（无项目）→ 数据目录 default 文件夹；远程连接
+        项目 → 数据目录 remote-control 文件夹（两类会话都有真实、稳定的工作
+        目录，不再借用引擎当前目录）；项目记录缺失 → 回退引擎当前工作目录；
+        目录已消失 → 可读报错而不是静默换目录干活——那等于让对话在错误的
+        项目里改文件。
+        """
+        sess = await self.store.get_session(session_id)
+        if sess is None:
+            return None, self.working_dir
+        if sess.project_id is None:
+            # 快聊：数据目录 default 文件夹（真实、稳定的工作目录）
+            return None, self._quick_workdir()
+        proj = await self.store.get_project(sess.project_id)
+        if proj is None or not proj.root_path:
+            return sess.project_id, self.working_dir
+        if proj.root_path == self.store.REMOTE_PROJECT_PATH:
+            # 远程连接（渠道）会话：数据目录 remote-control 文件夹
+            return sess.project_id, self._remote_workdir()
+        p = Path(proj.root_path)
+        if not p.is_dir():
+            raise RuntimeError(
+                f"该会话所属项目的目录已不存在（{proj.root_path}），无法在这里继续对话"
+            )
+        return sess.project_id, p
+
+    def _tasks_for_workdir(self, workdir: Path) -> TaskManager:
+        """目标项目的子代理管理器（懒建缓存）：工作目录与停启都独立于引擎
+        当前项目——跨项目列派生的子代理必须在会话所属项目里干活。"""
+        key = os.path.normcase(str(workdir))
+        tm = self._project_tasks.get(key)
+        if tm is None:
+            tm = TaskManager(
+                provider_factory=lambda: self.provider,
+                working_dir=workdir,
+                max_iterations=self.cfg.subagent_max_iterations,
+                store=self.subagent_store,
+                provider_resolver=self._subagent_provider,
+                registry_resolver=self._subagent_registry,
+                max_concurrent=self.cfg.subagent_max_concurrent,
+                usage_recorder=self._record_subagent_usage,
+                event_emitter=self._ws_broadcast,
+                state_path=skysheep_home() / "subagent_tasks.json",
+                job_containment=self.cfg.shell.job_containment,
+                sandbox_level=self.cfg.shell.sandbox_level,
+                use_ripgrep=self.cfg.search.use_ripgrep,
+            )
+            self._project_tasks[key] = tm
+        return tm
+
+    def _checkpoint_store_for_root(self, workdir: Path) -> CheckpointStore:
+        """目标项目的检查点库（按工作目录指纹隔离，进程内缓存单例）。"""
+        key = os.path.normcase(str(workdir))
+        store = self._project_checkpoints.get(key)
+        if store is None:
+            store = CheckpointStore(root=self._checkpoint_root_for(workdir))
+            self._project_checkpoints[key] = store
+        return store
+
+    def _hooks_for_workdir(self, workdir: Path) -> HookRunner | None:
+        """目标项目的钩子（同一份配置、换工作目录执行，与 _bind_project 同款）。"""
+        raw_cfg = load_raw_config()
+        pre_rules, post_rules, stop_rules = hooks_from_config(raw_cfg)
+        if not (pre_rules or post_rules or stop_rules):
+            return None
+        return HookRunner(pre_rules, post_rules, working_dir=workdir,
+                          stop_rules=stop_rules)
+
+    async def _own_ctx(self, project_id: int | None, workdir: Path,
+                       session_id: str) -> ProjectCtx:
+        """为「会话所属项目 ≠ 引擎当前项目」的会话构建私有项目上下文。
+
+        权限门按该项目建（白名单按项目隔离、工作目录边界跟着走，与定时任务
+        的 CronGate 同口径）；界面级的安全档位偏好跨项目保持（_bind_project
+        同一款）。技能与 MCP 仍是引擎级单例（compose_system_for 的既有取舍，
+        已知限制：跨项目列用的是当前装载的技能段与当前项目的 MCP 服务）。
+        """
+        return ProjectCtx(
+            workdir=workdir,
+            project_id=project_id,
+            gate=await self._runtime_gate(project_id, workdir, session_id),
+            checkpoints=self._checkpoint_store_for_root(workdir),
+            tasks=self._tasks_for_workdir(workdir),
+            hooks=self._hooks_for_workdir(workdir),
+            own=True,
+        )
+
+    async def _project_ctx_for(self, session_id: str) -> ProjectCtx:
+        """会话 runtime 应绑定的项目上下文：归属当前项目（或开放归属）走
+        引擎单例；真正的跨项目会话建私有上下文——这是「分屏列当完整会话」
+        的地基：fs/命令工具经 ctx.working_dir 解析、权限走 ctx.gate。"""
+        project_id, workdir = await self._session_project(session_id)
+        cur = self.working_dir
+        same = (workdir is None and cur is None) or (
+            workdir is not None and cur is not None
+            and os.path.normcase(str(workdir)) == os.path.normcase(str(cur))
+        )
+        if same:
+            # 归属当前项目/快聊/远程连接：检查点/子代理/钩子仍用引擎实时单例，
+            # 权限门也按会话私有（三档按会话独立的地基）
+            return ProjectCtx(
+                workdir=self.working_dir,
+                project_id=self._cur_project_id(),
+                gate=await self._runtime_gate(self._cur_project_id(), self.working_dir, session_id),
+                checkpoints=self.checkpoints,
+                tasks=self.tasks,
+                hooks=self.hooks,
+                own=False,
+            )
+        return await self._own_ctx(project_id, workdir, session_id)
+
+    async def _get_runtime(self, session_id: str) -> SessionRuntime:
         """取（或懒建）一个会话的运行时；新 runtime 自带系统提示词与完整工具集。
 
         LRU 淘汰：访问即移到末尾；超限后从最旧开始找「空闲」的回收
         （见 _evictable_runtime）——只回收空闲的，宁可超限也不丢运行状态。
+        runtime 按会话所属项目绑定上下文（_project_ctx_for）：跨项目分屏列
+        的会话在自己的项目里干活，不挂在引擎当前项目下。
         """
         rt = self.runtimes.get(session_id)
         if rt is not None:
             self.runtimes.move_to_end(session_id)
         else:
+            ctx = await self._project_ctx_for(session_id)
             recorder = ChangeRecorder()
             rt = SessionRuntime(
                 sid=session_id,
                 agent=self._build_agent(
                     provider=self._runtime_provider(session_id),
-                    gate=self.gate,
-                    working_dir=self.working_dir,
+                    gate=ctx.gate,
+                    working_dir=ctx.workdir,
                     session_id=session_id,
                     mods=self.mods,
                     recorder=recorder,
+                    ctx=ctx,
                 ),
                 recorder=recorder,
+                ctx=ctx,
             )
-            rt.agent.set_system(self.compose_system())
+            rt.agent.set_system(
+                self.compose_system_for(ctx.workdir) if ctx.own else self.compose_system()
+            )
+            # 会话级思考档位恢复：runtime 被淘汰重建后，把档位重新挂回
+            # （重建的）provider。恢复前重验能力：新 provider 不支持思考则
+            # 跳过并清除该条目（不报错——能力以当前生效服务为准）。
+            # 档位是会话私有状态：无覆盖会话重建出的 provider 可能仍是全局
+            # 共享对象（_runtime_provider 的全局腿），直接在共享对象上调档会
+            # 把所有会话一起改掉——先换 detached 私有副本再回放（与
+            # session_reasoning_set 同款处理）。
+            saved_effort = self._session_efforts.get(session_id)
+            if saved_effort is not None:
+                if getattr(rt.agent.provider, "supports_reasoning", False):
+                    if rt.agent.provider is self.provider:
+                        name, model = self._session_effective_model(session_id)
+                        try:
+                            rt.agent.provider = self._build_detached_provider(name, model or None)
+                        except Exception:  # noqa: BLE001 - 私有化失败宁可弃档位也不能污染全局
+                            self._session_efforts.pop(session_id, None)
+                            saved_effort = None
+                    if saved_effort is not None:
+                        rt.agent.provider.set_reasoning_effort(saved_effort)
+                else:
+                    self._session_efforts.pop(session_id, None)
             self.runtimes[session_id] = rt
         while len(self.runtimes) > self.MAX_RUNTIMES:
             victim = self._evictable_runtime()
@@ -1029,24 +1251,54 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return name, model
 
     def _runtime_provider(self, session_id: str):
-        """会话的起始 provider：设了「新会话默认模型」的新会话用专用实例，
-        其余跟随全局。基底会话（懒创建窗口）与已存在 runtime 的老会话都走全局。
-
-        判断「新会话」的口径：session_tabs 恢复/切项目重拉的老会话在 setup 时
-        已建 runtime 或经 resume 建过；这里只在**首次建 runtime** 时生效，
-        所以不会覆盖用户在会话中途手动 model.switch 的结果（switch 会直接
-        改全局 provider 并同步所有 agent）。
-        """
-        name, model = self._default_model_pref()
-        if not name:
+        """会话的起始 provider：会话级覆盖（分屏独立选的模型）优先，其次新会话
+        默认模型，最后跟随全局。覆盖模型不可用（服务被删等）时回退全局，
+        不让发消息失败。"""
+        override = self._session_models.get(session_id)
+        if override:
+            try:
+                return self._build_detached_provider(override[0], override[1] or None)
+            except Exception:  # noqa: BLE001
+                self._session_models.pop(session_id, None)  # 覆盖失效即清除
+        # 「新会话默认模型」腿只看创建时刻的快照（new_session() 记下）：偏好
+        # 后来被清除/更改也不影响已存在的会话（set_default_model 的文档语义）
+        baked = getattr(self, "_default_model_sessions", {}).get(session_id)
+        if not baked:
             return self.provider
-        # 只对新建的会话生效：懒创建的会话在 new_session() 里打标记
-        if session_id not in getattr(self, "_default_model_sessions", set()):
-            return self.provider
+        # detached 构建：不改写 provider_name / provider_model（「当前使用服务」
+        # 的全局记账）。此前这条腿走 _build_provider，每次新会话预建 runtime 都把
+        # 记账改指默认服务、provider 对象却还是旧服务——与 set_default_model
+        # 「已存在的会话（含当前对话）不受影响」的文档语义相悖，也让三段解析的
+        # 全局腿（self.provider_name）失真。改用 detached 后，全局记账只在
+        # 真全局切换（model.switch）时变化。
         try:
-            return self._build_provider(name, model or None)
+            return self._build_detached_provider(baked[0], baked[1] or None)
         except Exception:
             return self.provider  # 预设被删/停用时回退全局，不让发消息失败
+
+    def _session_effective_model(self, session_id: str) -> tuple[str, str]:
+        """会话当前生效的 (服务名, 模型名)，三段解析的单处实现：
+
+        1. 会话级模型覆盖（分屏独立选的模型）；
+        2. 「新会话默认模型」会话（创建时刻的 (服务, 模型) 快照）；
+        3. 全局记账（provider_name / provider_model）。
+
+        回退口径与 _runtime_provider 逐字一致：覆盖指向的服务已不存在即清除
+        覆盖并落往下一段；默认模型快照里的服务已不存在同样清除并落往下段。
+        全局腿可靠的前提是 _runtime_provider 全程 detached 构建（见上）。"""
+        override = self._session_models.get(session_id)
+        if override:
+            if override[0] in self.cfg.providers:
+                return override
+            self._session_models.pop(session_id, None)  # 覆盖失效即清除
+        # 默认模型腿按创建时刻的快照回读（与 _runtime_provider 同源）；快照里的
+        # 服务已不存在（被删/停用）即清除标记、回落全局
+        baked = getattr(self, "_default_model_sessions", {}).get(session_id)
+        if baked:
+            if baked[0] in self.cfg.providers:
+                return baked
+            self._default_model_sessions.pop(session_id, None)
+        return self.provider_name or "", self.provider_model or ""
 
     def _evictable_runtime(self) -> SessionRuntime | None:
         """最旧的空闲 runtime：非当前会话、没在跑的轮、没排队消息、
@@ -1134,6 +1386,22 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         for rt in self.runtimes.values():
             yield rt.agent
 
+    def _refresh_system_prompts(self) -> None:
+        """全局刷新系统提示词（技能/项目说明等变更后）：走 _for_each_agent
+        这一既有接缝；跨项目分屏列（own=True）的 runtime 按它绑定的项目目录
+        组装——cwd 与项目约定必须留在会话自己的项目里；其余（含基底）与
+        旧写法一致用 compose_system()。"""
+        own_workdirs = {
+            id(rt.agent): rt.ctx.workdir
+            for rt in self.runtimes.values()
+            if rt.ctx is not None and rt.ctx.own
+        }
+        for ag in self._for_each_agent():
+            if id(ag) in own_workdirs:
+                ag.set_system(self.compose_system_for(own_workdirs[id(ag)]))
+            else:
+                ag.set_system(self.compose_system())
+
     def respond_permission(self, request_id: str, decision: str) -> bool:
         """权限决策路由：普通 runtime agents + 各会话团队的成员 agents。
 
@@ -1193,6 +1461,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 「远程连接」固定项目：启动即建（飞书/微信等渠道对话的归属），
         # 与是否配置渠道无关——侧栏里它是一个常驻分组
         await self.store.ensure_remote_project()
+        # 快聊 / 远程连接的固定工作目录：数据目录下真实文件夹（default /
+        # remote-control），启动即建——两类会话从此有稳定的工作目录
+        self._quick_workdir()
+        self._remote_workdir()
         # connect_mcp=False：启动不在这里同步连 MCP，统一交给下面的后台任务
         await self._bind_project(target, connect_mcp=False)
         # 分级权限模式：上次会话选的档位（0=安全执行 1=自动编辑 2=完全访问）重启后保持
@@ -1330,11 +1602,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             return None
 
 
-    def _build_full_registry(self, recorder: ChangeRecorder | None = None) -> ToolRegistry:
+    def _build_full_registry(
+        self, recorder: ChangeRecorder | None = None, ctx: ProjectCtx | None = None
+    ) -> ToolRegistry:
         """完整工具集：内置（write/edit/画图挂检查点记录器）+ 日程 + 技能 + 子代理 + MCP。
 
         子代理可在设置页整体关闭：关掉后 spawn_agent / check_task / wait_task
         不注册，模型看不到这些工具（配置里 subagent_enabled = false）。
+
+        ctx 传入且 own=True（跨项目分屏列的会话 runtime）时，子代理与流水线
+        绑定会话所属项目——子代理跑在该项目的工作目录、流水线落该项目，
+        而不是引擎当前项目。技能/MCP 仍是引擎级单例（compose_system_for 的
+        定时任务先例：按目录重挂技能过重，跨项目列沿用当前装载的技能段）。
         """
         registry = ToolRegistry(default_tools(
             recorder=recorder or self._recorder,
@@ -1345,17 +1624,28 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             browser_control=self.cfg.browser_control,
         ))
         registry.register(LoadSkillTool(self.skills))
-        # 无项目态不注册子代理/编排：子代理要工作目录、流水线绑定项目，
-        # 没项目时给了模型也只会空转；切回项目后重建注册表自动恢复
-        if self.cfg.subagent_enabled and self.project is not None:
-            registry.register(SpawnAgentTool(self.tasks))
-            registry.register(CheckTaskTool(self.tasks))
-            registry.register(WaitTaskTool(self.tasks))
-        # 任务编排：Agent 可以排流水线（草稿），启动与否由用户在面板决定
-        if self.project is not None:
-            registry.register(PipelineWriteTool(
-                self.store, lambda: self.project.id, lambda: self.tasks,
-            ))
+        if ctx is not None and ctx.own:
+            # 跨项目列：绑定会话所属项目（ctx.tasks/project_id 在 _own_ctx 已定）
+            if self.cfg.subagent_enabled and ctx.project_id is not None and ctx.tasks is not None:
+                registry.register(SpawnAgentTool(ctx.tasks))
+                registry.register(CheckTaskTool(ctx.tasks))
+                registry.register(WaitTaskTool(ctx.tasks))
+            if ctx.project_id is not None:
+                registry.register(PipelineWriteTool(
+                    self.store, lambda: ctx.project_id, lambda: ctx.tasks,
+                ))
+        else:
+            # 无项目态不注册子代理/编排：子代理要工作目录、流水线绑定项目，
+            # 没项目时给了模型也只会空转；切回项目后重建注册表自动恢复
+            if self.cfg.subagent_enabled and self.project is not None:
+                registry.register(SpawnAgentTool(self.tasks))
+                registry.register(CheckTaskTool(self.tasks))
+                registry.register(WaitTaskTool(self.tasks))
+            # 任务编排：Agent 可以排流水线（草稿），启动与否由用户在面板决定
+            if self.project is not None:
+                registry.register(PipelineWriteTool(
+                    self.store, lambda: self.project.id, lambda: self.tasks,
+                ))
         for t in self.mcp_tools:
             registry.register(t)
         return registry
@@ -1366,7 +1656,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             return  # 启动早期（MCP connect_all 触发工具变更回调时）基础 Agent 还没建
         self._base_agent.registry = self._build_full_registry()
         for rt in self.runtimes.values():
-            rt.agent.registry = self._build_full_registry(rt.recorder)
+            rt.agent.registry = self._build_full_registry(rt.recorder, ctx=rt.ctx)
 
     async def shutdown(self) -> None:
         # 崩溃哨兵在收尾一进来就清：这里是一切退出路径（uvicorn lifespan、
@@ -1400,6 +1690,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             await self.mcp.shutdown()
         if self.tasks:
             self.tasks.cancel_all()
+        # 跨项目分屏列私有的子代理管理器一并收掉（引擎退出不区分主栏项目）
+        for tm in self._project_tasks.values():
+            tm.cancel_all()
         if self.mods is not None:
             self.mods.close()  # 收掉每个 Mod 的沙箱执行线程（quickjs runtime 不可并发）
         if self.store and self._store_override is None:
@@ -1481,7 +1774,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         工作目录与项目约定（AGENTS.md）必须取目标目录的——否则提示词里写着
         A 目录、实际却在 B 目录干活，Agent 会找错地方；技能段沿用当前装载的
         SkillLoader（按目录重挂载过重），全局记忆本就跨项目。
-        workdir 为 None 是无项目态：提示词里说明没有工作目录，快聊不可读写文件。
+        workdir 为 None 是无项目态（兜底：引擎没开项目且会话缺归属记录），
+        提示词里说明没有工作目录、文件工具会拒绝。快聊/远程连接固定在数据
+        目录 default / remote-control 文件夹，不落 None 分支，文件工具可用。
         memory_query 是记忆检索化（第一期）的查询串（「本轮用户消息 + 最近对话
         摘要」，见 _memory_retrieval_query）：记忆超过 MEMORY_RETRIEVAL_THRESHOLD
         时只注入相关条目；空串表示拿不到本轮查询（轮外的 set_system 场景），
@@ -1497,18 +1792,26 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             + render_memory_section(query_text=memory_query)
         )
 
-    async def fork_session(self, params: dict) -> dict:
-        """从某条消息分叉出新会话：复制 seq <= 锚点 的消息（缺省全部）。"""
+    async def fork_session(self, params: dict, local: bool = True) -> dict:
+        """从某条消息分叉出新会话：复制 seq <= 锚点 的消息（缺省全部）。
+
+        local=True（本机，默认）跨项目会话放行；分叉的新会话落回源会话
+        所属的项目——跨项目分屏列的分叉不能把别家项目的对话复制进当前
+        项目（快聊/当前项目会话保持既有口径）。"""
         sid = str(params.get("id", "") or (self.session.id if self.session else ""))
-        sess = await self._get_owned_session(sid)
+        sess = await self._get_owned_session(sid, local=local)
         # 与 truncate 同一守卫：轮末才批量落库，运行中分叉会复制到不完整的历史
         rt = self.runtimes.get(sid)
         if rt and rt.run_task and not rt.run_task.done():
             raise RuntimeError("该会话正在运行，等当前轮结束再分叉")
         seq = int(params["seq"]) if params.get("seq") is not None else (
             await self.store.max_seq(sid) or 0)
+        cur_pid = self._cur_project_id()
+        fork_pid = sess.project_id if (
+            sess.project_id is not None and sess.project_id != cur_pid
+        ) else cur_pid
         new_sess = await self.store.create_session(
-            self._cur_project_id(), title=(f"└ {sess.title or '分叉'}")[:40]
+            fork_pid, title=(f"└ {sess.title or '分叉'}")[:40]
         )
         n = await self.store.copy_messages_between(sid, new_sess.id, seq)
         await self.store.touch(new_sess.id)
@@ -1527,10 +1830,192 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             await self._write_ui_prefs({self.SESSION_ACTIVE_KEY: session_id})
         except Exception:
             pass
-        rt = self._get_runtime(session_id)
+        rt = await self._get_runtime(session_id)
         msgs = await self._reload_agent_history(rt.agent, session_id)
         return {
             "id": sess.id, "title": sess.title, "summary": sess.summary,
+            "messages": [_msg_brief(m) for m in msgs if m.role in ("user", "assistant")],
+        }
+
+    async def session_model_switch(self, session_id: str, name: str, model: str) -> dict:
+        """按会话切换模型（分屏独立对话）：只影响该会话 runtime 的 provider，
+        不动全局——别的会话（含主栏）保持自己的模型。
+
+        会话还没建 runtime 时先懒建（保证覆盖立即落在 agent 上）；覆盖记进
+        _session_models，runtime 被淘汰重建后由 _runtime_provider 恢复。
+
+        本机专属（WS 层 local_only）：跨项目分屏列换模型放行，runtime 绑定
+        会话所属项目干活（_project_ctx_for）。"""
+        await self._get_owned_session(session_id, local=True)
+        name = str(name or "").strip()
+        model = str(model or "").strip()
+        if name not in self.cfg.providers:
+            raise RuntimeError(f"未知服务：{name}")
+        pc = self.cfg.providers[name]
+        if model and pc.models and model not in pc.models:
+            raise RuntimeError(f"服务 {name} 没有登记模型 {model}，先在模型服务里添加")
+        existed = session_id in self.runtimes
+        rt = await self._get_runtime(session_id)
+        if not existed:
+            # 懒建的是空壳 runtime（只有系统提示词）：照 resume_session 同款补拉
+            # 历史。不补的话 runtime 已在内存，activate_session 的「不在 runtimes
+            # 才重载」分支永不触发，此后该会话所有轮次都在空上下文上跑（重启或
+            # LRU 淘汰后在分屏列换模型即触发——静默丢全部历史）。
+            await self._reload_agent_history(rt.agent, session_id)
+        rt.agent.provider = self._build_detached_provider(name, model or None)
+        pc_eff = self.cfg.providers.get(name)
+        rt.agent.context_limit_tokens = (
+            pc_eff.effective_context_limit(self.cfg.context_limit_tokens)
+            if pc_eff else self.cfg.context_limit_tokens
+        )
+        self._session_models[session_id] = (name, model)
+        # 已存档位随热切迁移：新 provider 支持思考则重放；不支持则清除
+        # （build_provider 已按新服务 config 设初值，两条路径命运一致）
+        saved_effort = self._session_efforts.get(session_id)
+        if saved_effort is not None:
+            if getattr(rt.agent.provider, "supports_reasoning", False):
+                rt.agent.provider.set_reasoning_effort(saved_effort)
+            else:
+                self._session_efforts.pop(session_id, None)
+        return {
+            "session_id": session_id,
+            "provider": name,
+            "model": model or pc.model,
+            "supports_vision": True if pc_eff is None else bool(pc_eff.supports_vision),
+            "context_limit": rt.agent.context_limit_tokens,
+        }
+
+    def session_model_get(self, session_id: str) -> dict:
+        """会话当前生效的模型：有覆盖给覆盖，否则按三段解析（覆盖 → 新会话
+        默认模型 → 全局）；supports_vision 随生效服务给（前端不再自行推导）。"""
+        override = self._session_models.get(session_id)
+        if override:
+            name, model = override
+            overridden = True
+        else:
+            name, model = self._session_effective_model(session_id)
+            overridden = False
+        pc = self.cfg.providers.get(name)
+        return {
+            "session_id": session_id,
+            "name": name,
+            "model": model or (pc.model if pc is not None else ""),
+            "overridden": overridden,
+            "supports_vision": True if pc is None else bool(pc.supports_vision),
+        }
+
+    async def session_reasoning_get(self, session_id: str) -> dict:
+        """会话当前生效的思考强度：不建 runtime，按三段解析出的服务读档位。
+
+        有 runtime 读其 provider 实例（含热调未落盘的档位），无则读服务配置。
+        overridden 表示该会话有会话级档位覆盖（session.reasoning_set 写入）。"""
+        sess = await self.store.get_session(session_id)
+        if sess is None:
+            raise RuntimeError("session not found: " + session_id)
+        rt = self.runtimes.get(session_id)
+        name, _model = self._session_effective_model(session_id)
+        pc = self.cfg.providers.get(name)
+        if rt is not None:
+            supported = bool(getattr(rt.agent.provider, "supports_reasoning", False))
+            effort = getattr(rt.agent.provider, "reasoning_effort", "auto")
+        elif pc is not None:
+            supported = bool(pc.supports_reasoning)
+            effort = pc.reasoning_effort
+        else:
+            supported, effort = False, "auto"
+        return {
+            "session_id": session_id,
+            "supported": supported,
+            "effort": self._session_efforts.get(session_id, effort),
+            "efforts": list(REASONING_EFFORTS),
+            "labels": dict(REASONING_EFFORT_LABELS),
+            "overridden": session_id in self._session_efforts,
+        }
+
+    async def session_reasoning_set(self, session_id: str, effort: str) -> dict:
+        """按会话设置思考强度：不动全局、绝不静默更换会话模型。
+
+        按三段解析出的 (服务, 模型) 用 detached 副本建独立 provider 挂回该
+        会话 runtime（还没建就懒建，保证立即生效）——无覆盖会话的 agent
+        原本与全局共享同一个 provider 对象，直接在共享对象上调档会把所有
+        会话一起改掉，所以这里必须换成会话私有副本。能力校验 fail-closed
+        （与 model.set_reasoning 同口径）；记入 _session_efforts，runtime
+        重建后由 _get_runtime 恢复。"""
+        sess = await self.store.get_session(session_id)
+        if sess is None:
+            raise RuntimeError("session not found: " + session_id)
+        effort = str(effort or "auto").strip().lower()
+        if effort not in REASONING_EFFORTS:
+            raise RuntimeError("思考强度只支持 " + " / ".join(REASONING_EFFORTS))
+        name, model = self._session_effective_model(session_id)
+        if not name:
+            raise RuntimeError("当前没有可用的模型服务，先在模型服务里配置")
+        pc = self.cfg.providers.get(name)
+        existed = session_id in self.runtimes
+        rt = await self._get_runtime(session_id)
+        if not existed:
+            # 懒建的是空壳 runtime：先补历史再校验（同 session_model_switch）。
+            # 校验不过就把刚建的空壳回收——留着的话 activate_session 的重载
+            # 分支不再触发，空壳会吃掉该会话之后的全部历史。
+            await self._reload_agent_history(rt.agent, session_id)
+        # 能力校验 fail-closed（与 model.set_reasoning 同口径）：配置里没有的
+        # 服务（测试注入等）按 provider 实例判。校验不过就不动 runtime 的
+        # provider——先换副本再发现不支持，会白白把共享 provider 私有化
+        if pc is not None:
+            supports = bool(pc.supports_reasoning)
+        else:
+            supports = bool(getattr(rt.agent.provider, "supports_reasoning", False))
+        if not supports:
+            if not existed:
+                self.runtimes.pop(session_id, None)
+                self._forget_runtime(rt)
+            raise RuntimeError(f"「{name}」不支持调整思考强度（未声明该能力）")
+        rt.agent.provider = self._build_detached_provider(name, model or None)
+        rt.agent.provider.set_reasoning_effort(effort)
+        pc_eff = pc if pc is not None else None
+        rt.agent.context_limit_tokens = (
+            pc_eff.effective_context_limit(self.cfg.context_limit_tokens)
+            if pc_eff else self.cfg.context_limit_tokens
+        )
+        self._session_efforts[session_id] = effort
+        return {
+            "session_id": session_id,
+            "supported": True,
+            "effort": effort,
+            "efforts": list(REASONING_EFFORTS),
+            "labels": dict(REASONING_EFFORT_LABELS),
+            "overridden": True,
+        }
+
+    async def peek_session_messages(self, session_id: str, local: bool = True) -> dict:
+        """只读历史快照（分屏查看用）：与 resume_session 同款回包，但不切引擎
+        的当前会话、不建 runtime、不写 ui 偏好——分屏看另一个会话不能动主栏。
+
+        归属口径：本机界面（local=True）按 id 直查、跨项目可读——分屏的入口
+        是侧栏各项目分组下的会话行，右键时引擎可能停在另一个项目上，按当前
+        项目校验会把别的项目的会话误报「不存在」；远程仍走 _get_owned_session
+        的当前项目口径（历史内容是枚举面，不向远程放开跨项目）。"""
+        if local:
+            sess = await self.store.get_session(session_id)
+            if sess is None:
+                raise RuntimeError("session not found: " + session_id)
+        else:
+            sess = await self._get_owned_session(session_id)
+        # 会话能否在分屏列里交互（发送/换模型）：本机一律可交互——分屏列是
+        # 完整的会话，跨项目 runtime 绑定会话所属项目干活（_project_ctx_for）；
+        # 远程客户端保持旧口径：只放开当前项目与快聊/远程连接这些开放归属，
+        # 跨项目的列仍按 interactive=False 只读（chat.send/model_switch 的
+        # local=False 归属校验是这道边界的后端兜底）。
+        cur_pid = self._cur_project_id()
+        interactive = bool(local) or (
+            sess.project_id is None
+            or sess.project_id == cur_pid
+            or sess.project_id == await self._remote_project_id()
+        )
+        msgs = await self.store.load_messages(session_id)
+        return {
+            "id": sess.id, "title": sess.title, "summary": sess.summary,
+            "interactive": interactive,
             "messages": [_msg_brief(m) for m in msgs if m.role in ("user", "assistant")],
         }
 
@@ -1583,18 +2068,21 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         except Exception:  # noqa: BLE001 - 校准样本拿不到不该挡住发消息
             return []
 
-    async def _build_refs_context(self, refs: list[str]) -> str:
+    async def _build_refs_context(self, refs: list[str], project_id: int | None = None) -> str:
         """把被引用会话的记录拼成注入本轮的上下文块。
 
-        会话不存在、不属于当前项目或没有可读消息时静默跳过；超长的保留尾部
+        会话不存在、不属于目标项目或没有可读消息时静默跳过；超长的保留尾部
         （最近的对话与当前任务最相关），并标注省略。格式与 /export 的导出文本
         一致。归属校验（安全审查 B2）：引用列表由客户端提交，不校验会把
-        别的项目的历史注入当前 Agent 上下文。
+        别的项目的历史注入当前 Agent 上下文。目标项目取「本轮会话所属项目」
+        （runtime 的项目上下文）：跨项目分屏列引用它自己项目的对话照常可用，
+        引用别的项目仍然剔除。
         """
+        target_pid = project_id if project_id is not None else self._cur_project_id()
         blocks: list[str] = []
         for rid in refs:
-            if await self.store.get_session_for_project(rid, self._cur_project_id()) is None:
-                continue  # 不属于本项目的会话：当作不存在，不注入
+            if await self.store.get_session_for_project(rid, target_pid) is None:
+                continue  # 不属于目标项目的会话：当作不存在，不注入
             title = await self.store.get_session_title(rid)
             try:
                 msgs = await self.store.load_messages(rid)
@@ -1625,9 +2113,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    debate_rounds: int | None = None,
                    chair_answers: bool | None = None,
                    team: bool = False,
+                   adversarial: bool = False,
                    director_mode: str = "user",
-                   director: dict | None = None) -> dict:
+                   director: dict | None = None,
+                   local: bool = True) -> dict:
         """跑一轮对话；过程事件通过 emit 推送；结束后持久化新消息。
+
+        local=True（本机，默认）跨项目会话放行——分屏列是完整会话，runtime
+        绑定会话所属项目；远程客户端（False）仍按当前项目归属校验（B 族）。
 
         Agent 正在工作时再次 send 不再报错，而是**排队**：等当前轮结束后
         自动依次执行（对标 Claude Code 的消息队列），fut 在该轮真正跑完时
@@ -1654,15 +2147,25 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         担任总管的 {provider, model}，用户消息经 run_auto_turn 驱动自动闭环
         （拆解 → 派工 → 验收 → 交付）；缺省 "user" 保持一期用户总管行为。
 
+        adversarial=True 时本轮走「对抗」流程：四角色流水线审查——发现者穷举
+        问题 → 调查者逐条对抗验证 → 建议者给修复方案 → 裁判（当前主模型）
+        终审报告。members 按序承担发现/调查/建议三个角色（不足时复用同一个）；
+        与 team/roundtable 三者同轮互斥。
+
         refs 为「& 引用对话」选中的会话 id 列表：每轮最多 REF_MAX_SESSIONS
         个，会话记录会被注入本轮上下文（见 _build_refs_context）。
 
         session_id 指定目标会话（多会话并行时前端按标签传入）；缺省用活动会话。
-        目标会话不是当前活动会话时先轻量激活（运行中的其他会话不受影响）。
+        目标会话不是当前活动会话时先就位它的 runtime（校验 + 补历史，见
+        _ready_runtime_for_send）——不切换活动指针：定向发送（分屏列）不能
+        劫持「当前会话」，伴生面板的取数口径不被带走。
         """
-        # 团队与圆桌同轮互斥（设计 §13.4）：前端开关联动互斥，后端双参数同给报参数错
-        if team and roundtable:
-            raise RuntimeError("「团队」与「圆桌」不能同时开启：同一条消息只能选一种协作模式。")
+        # 团队/圆桌/对抗同轮互斥（设计 §13.4；对抗同规则）：前端开关联动互斥，
+        # 后端多参数同给报参数错
+        if sum(bool(m) for m in (team, roundtable, adversarial)) > 1:
+            raise RuntimeError(
+                "「团队」「圆桌」「对抗」不能同时开启：同一条消息只能选一种协作模式。"
+            )
         # 轮次起点重验工作区信任（审查 P2-4）：会话运行期间项目级配置被外部
         # 改动（git pull 等）时，趁本轮开始断开项目级 MCP、重发现技能。
         await self.recheck_trust_before_turn()
@@ -1675,13 +2178,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             self.session.id if self.session else None
         )
         if session_id and (not self.session or self.session.id != session_id):
-            await self.activate_session(session_id)
+            # 目标会话就位（归属校验 + 建 runtime + 补历史）但不动活动指针：
+            # 定向发送不劫持「当前会话」，主栏伴生面板（审查/任务清单/上下文
+            # 浮层）读到的仍是主栏会话，ui.json 的活动会话也不被覆写
+            await self._ready_runtime_for_send(session_id, local=local)
         # 会话级活动团队：进行中的团队把该会话的后续消息全部吸进团队频道
         #（设计 §3——团队进行中不再进普通回合），即便前端没带 team 标志。
         active_team = target_sid is not None and target_sid in self._teams
-        if active_team and roundtable:
+        if active_team and (roundtable or adversarial):
+            mode_name = "圆桌" if roundtable else "对抗"
             raise RuntimeError(
-                "当前会话有进行中的团队，消息会进入团队频道；请先收队再使用圆桌。"
+                f"当前会话有进行中的团队，消息会进入团队频道；请先收队再使用{mode_name}。"
             )
         team_bound = team or active_team
         # 引用排除目标会话自己：引用当前对话没有意义
@@ -1702,18 +2209,28 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     "如需继续，请在 设置 · 高级 里调高或关闭「每日 token 预算」"
                     "（明天自动重置）。"
                 )
-        # 图片附件：当前服务声明"不支持图片输入"时提前给可读提示，
+        # 图片附件：本轮实际生效的服务声明"不支持图片输入"时提前给可读提示，
         # 而不是把图片塞给纯文本模型，换回一句上游报错（用户不知道是模型选错了）。
+        # 按目标会话解析（三段：覆盖 → 新会话默认 → 全局）——会话级换过模型的
+        # 分屏列/标签，判的是它自己的服务；拿全局记账判会双向误判（全局不支持/
+        # 覆盖支持被误拒、全局支持/覆盖不支持放行给上游报错），错误文案也会报成
+        # 没在用的服务名。
         clean_images = self._sanitize_images(images)
         # 团队轮是纯文本协作，图片本就不会发给队员（编排器会发 Notice 并忽略），
         # 不因主模型不支持图片拦人
-        if clean_images and not self._supports_vision() and not team_bound:
-            name = self.provider_name or "当前服务"
-            raise RuntimeError(
-                f"「{name} / {self.provider_model}」不支持图片输入，图片发不出去。\n"
-                "请在输入框的模型选择器里换一个多模态模型（如 GLM-4V、Kimi、GPT-4o 等），"
-                "或在 设置 · 模型服务 里把该服务的「支持图片输入」打开。"
+        if clean_images and not team_bound:
+            eff_name, eff_model = (
+                self._session_effective_model(target_sid) if target_sid
+                else (self.provider_name or "", self.provider_model or "")
             )
+            pc_eff = self.cfg.providers.get(eff_name) if eff_name else None
+            # 未配置的服务（测试注入等）按支持处理，不拦人（与 _supports_vision 同口径）
+            if pc_eff is not None and not pc_eff.supports_vision:
+                raise RuntimeError(
+                    f"「{eff_name} / {eff_model or pc_eff.model}」不支持图片输入，图片发不出去。\n"
+                    "请在输入框的模型选择器里换一个多模态模型（如 GLM-4V、Kimi、GPT-4o 等），"
+                    "或在 设置 · 模型服务 里把该服务的「支持图片输入」打开。"
+                )
         # 在任何 await 之前先占住运行位：否则两条背靠背到达的消息会在
         # new_session() 的挂起点上双双判为空闲、并发执行（撞消息表唯一约束）。
         # 占位判断同时看基底位（会话懒创建窗口）与活动 runtime 位；后来者排队。
@@ -1729,7 +2246,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 images=self._sanitize_images(images),
                 refs=clean_refs, compare=compare,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
-                team=team, director_mode=director_mode, director=director,
+                team=team, adversarial=adversarial,
+                director_mode=director_mode, director=director,
             )
             if rt_now is not None:
                 rt_now.queue.append(item)
@@ -1750,7 +2268,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if target_sid is None:
             await self.new_session()  # 懒创建：第一条消息才落库
             target_sid = self.session.id if self.session else None
-        runtime = self._get_runtime(target_sid)
+        runtime = await self._get_runtime(target_sid)
         runtime.run_task = cur
         self._base_run_task = None  # 运行位已落到 runtime，基底占位清除
         try:
@@ -1760,7 +2278,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 session_id=target_sid, wants_title=wants_title,
                 regenerate=regenerate, compare=compare, refs=clean_refs,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
-                team=team, director_mode=director_mode, director=director,
+                team=team, adversarial=adversarial,
+                director_mode=director_mode, director=director,
             )
         except asyncio.CancelledError:
             # 用户在 turn 真正开始前点了停止：无产出，返回诚实的 stopped 结果，
@@ -1775,6 +2294,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "session_id": runtime.sid,
                 "plan_mode": plan_mode,
                 "roundtable": False,
+                "adversarial": False,
                 "team": None,
                 "context_tokens": runtime.agent.used_context_tokens(),
                 "context_limit": runtime.agent.context_limit_tokens,
@@ -1837,7 +2357,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """
         msgs = await self.store.load_messages(sid)
         agent.load_history(msgs)
-        agent.set_system(system if system is not None else self.compose_system())
+        if system is None:
+            # 跨项目分屏列的 runtime 绑定会话所属项目：系统提示词按它自己的
+            # 工作目录组装（cwd 与项目约定对齐）；其余走 compose_system()
+            # 既有接缝（输出等价）。
+            rt = self.runtimes.get(sid)
+            if rt is not None and rt.ctx is not None and rt.ctx.own:
+                system = self.compose_system_for(rt.ctx.workdir)
+            else:
+                system = self.compose_system()
+        agent.set_system(system)
         return msgs
 
     async def _persist_turn(self, sid: str, new_msgs: list) -> None:
@@ -1866,6 +2395,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         debate_rounds: int | None = None,
         chair_answers: bool | None = None,
         team: bool = False,
+        adversarial: bool = False,
         director_mode: str = "user",
         director: dict | None = None,
     ) -> dict:
@@ -1877,7 +2407,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if runtime is None:
             if self.session is None:
                 await self.new_session()  # 懒创建：第一条消息才落库
-            runtime = self._get_runtime(self.session.id)
+            runtime = await self._get_runtime(self.session.id)
         sid = session_id or runtime.sid
         agent = runtime.agent
 
@@ -1926,7 +2456,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 手机端此前既看不到用户消息也没有任何「有人发了话」的来源。发起连接的
         # 前端已在 send() 里本地渲染过气泡，按对象身份排除，避免重复渲染。
         # 重新生成（text 为空串）不广播。
-        others = [w for w in list(self.ws_emitters) if w is not emit]
+        # chat.send 在 WS 层用 request_emit 包一层以便懒绑定远程会话；包装器
+        # 仍代表同一条连接。优先取它挂载的稳定源 emitter，否则普通内部调用
+        # 仍按传入的 emit 身份排除发送方。
+        source_emit = getattr(emit, "_source_emit", emit)
+        others = [w for w in list(self.ws_emitters) if w is not source_emit]
         if others and (text or images):
             u_ev = {
                 "kind": "user_message", "session_id": sid, "text": text,
@@ -1957,7 +2491,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 text,
                 history=agent.history,
                 images=len(images or []),
-                members=len(members_params or []) if roundtable else 0,
+                members=len(members_params or []) if (roundtable or adversarial) else 0,
                 debate_rounds=(debate_rounds or 0) if roundtable else 0,
                 recent=await self._recent_turn_seconds(),
             )
@@ -1994,9 +2528,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             # （墙钟预算在 memory_embed 内部约束，慢 Ollama 也只拖慢本轮几秒），
             # 同时后台预热词条向量——暖齐后轮首只剩查询向量一次请求
             schedule_warmup()
-            agent.set_system(await asyncio.to_thread(
-                self.compose_system, memory_query=memory_query,
-            ))
+            if runtime.ctx is not None and runtime.ctx.own:
+                # 跨项目分屏列的会话按它自己的工作目录组装
+                agent.set_system(await asyncio.to_thread(
+                    self.compose_system_for, runtime.ctx.workdir,
+                    memory_query=memory_query,
+                ))
+            else:
+                agent.set_system(await asyncio.to_thread(
+                    self.compose_system, memory_query=memory_query,
+                ))
         # 团队轮例外含自动路由轮：引擎前缀一律不拼——频道消息保持用户原文
         #（§13.5 一律进频道、不做意图识别）——按 team_bound 判，不按本轮
         # flag 判（活动团队把没带标志的消息也吸进频道，前缀漏进频道文本会
@@ -2005,7 +2546,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 「& 引用对话」：把被引用会话的记录拼在消息最前面注入本轮上下文
         #（与 PLAN_MODE_PREFIX 同一套做法，随用户消息一起持久化）。
         if refs and not team_bound:
-            refs_ctx = await self._build_refs_context(refs)
+            refs_ctx = await self._build_refs_context(
+                refs, runtime.ctx.project_id if runtime.ctx is not None else None,
+            )
             if refs_ctx:
                 text = refs_ctx + text
         if plan_mode and not team_bound:
@@ -2031,20 +2574,21 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         stopped = False
         rt_meta: dict | None = None
         tm_meta: dict | None = None
+        adv_meta: dict | None = None
         tin0, tout0 = agent.total_in_tokens, agent.total_out_tokens
         tcached0 = agent.total_cached_tokens
         runtime.run_task = asyncio.current_task()
         turn_exc: BaseException | None = None
         try:
             if team or sid in self._teams:
-                if roundtable:
-                    # 排队轮重验团队/圆桌同轮互斥（send() 的守卫只在入队时刻
-                    # 判定）：消息在「建队轮已开跑、_teams 尚未登记」的窗口入队
-                    # 时 roundtable=true 被接受，交棒到这里团队已在板——不重验
-                    # 的话圆桌标志会被本分支静默吞掉（0 个圆桌事件、无任何报
-                    # 错）。与不入队即被拒的口径对齐，显式报错交还调用方。
+                if roundtable or adversarial:
+                    # 排队轮重验团队/圆桌/对抗同轮互斥（send() 的守卫只在入队
+                    # 时刻判定）：消息在「建队轮已开跑、_teams 尚未登记」的窗口
+                    # 入队时 roundtable/adversarial=true 被接受，交棒到这里团队
+                    # 已在板——不重验的话协作标志会被本分支静默吞掉（0 个事件、
+                    # 无任何报错）。与不入队即被拒的口径对齐，显式报错交还调用方。
                     raise RuntimeError(
-                        "当前会话有进行中的团队，消息会进入团队频道；请先收队再使用圆桌。"
+                        "当前会话有进行中的团队，消息会进入团队频道；请先收队再使用协作模式。"
                     )
                 # 团队轮：进行中的团队把消息吸进频道（即便 flag 未带），team=true
                 # 且无活动团队则先建队。取消在编排器内收敛成「半截发言定稿进频道」
@@ -2065,6 +2609,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 # 圆桌的取消在引擎层收敛（保留已产出的部分文本），这里同步停止位
                 if (rt_meta or {}).get("status") == "cancelled":
                     stopped = True
+            elif adversarial:
+                adv_meta = await self._adversarial_body(
+                    text, emit_ev, members_params, agent=agent, sid=sid,
+                    images=images, regenerate=regenerate,
+                )
+                # 对抗的取消同样在引擎层收敛（已裁决结论与部分报告文本保留）
+                if (adv_meta or {}).get("status") == "cancelled":
+                    stopped = True
             else:
                 async for ev in agent.run_turn(text, images=images, append_user=not regenerate):
                     await emit_ev(ev.model_dump())
@@ -2083,7 +2635,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             # 停止与轮末竞态）只能在 await 点投递，同步段不会被跳过。若恢复
             # 被跳过，runtime 常驻，该会话之后所有轮次都拿着只读注册表跑。
             if plan_mode and readonly_registry is not None:
-                agent.registry = self._build_full_registry(runtime.recorder)
+                agent.registry = self._build_full_registry(runtime.recorder, ctx=runtime.ctx)
             # 轮被取消/异常中止时，未决权限的决策永远不会到来（CancelledError
             # 从 pending.wait() 穿透，agent 侧不再产出 resolved 事件）：这里补发
             # 带 cancelled 语义的 resolved，让前端把可能残留的确认卡收掉——否则
@@ -2201,6 +2753,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 duration_ms=int((time.monotonic() - turn_t0) * 1000),
                 stopped=stopped or None,
                 roundtable=bool(rt_meta) or None,
+                adversarial=bool(adv_meta) or None,
                 team=bool(tm_meta) or None,
                 tool_calls=turn_stats["tool_calls"] or None,
                 tool_ms=turn_stats["tool_ms"] or None,
@@ -2231,9 +2784,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # spawn_bg + 失败静默 + 按会话单飞都在方法内，绝不影响主流程）
         self.schedule_turn_distill(sid, new_msgs)
 
-        # 本轮改动了文件 → 存检查点（落盘 + 内存索引）；结果里带给前端做「撤销本轮改动」
+        # 本轮改动了文件 → 存检查点（落盘 + 内存索引）；结果里带给前端做「撤销本轮改动」。
+        # 检查点库按会话所属项目取（跨项目分屏列的快照落它自己项目的目录树，
+        # 不与引擎当前项目混放——与 _bind_project 的「检查点跟项目走」同口径）。
+        ckpt_store = runtime.ctx.checkpoints if runtime.ctx is not None and runtime.ctx.own \
+            else self.checkpoints
         checkpoint = await asyncio.to_thread(
-            self.checkpoints.save, sid, dict(runtime.recorder.pre)
+            ckpt_store.save, sid, dict(runtime.recorder.pre)
         )
         runtime.recorder.reset()
 
@@ -2267,6 +2824,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "session_id": sid,
             "plan_mode": plan_mode,
             "roundtable": rt_meta,
+            "adversarial": adv_meta,
             "team": tm_meta,
             "context_tokens": agent.used_context_tokens(),
             "context_limit": agent.context_limit_tokens,
@@ -2301,6 +2859,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 images=item.images, runtime=runtime, refs=item.refs,
                 compare=item.compare, debate_rounds=item.debate_rounds,
                 chair_answers=item.chair_answers, team=item.team,
+                adversarial=item.adversarial,
                 director_mode=item.director_mode, director=item.director,
             ))
         except Exception as e:  # noqa: BLE001 - 错误要送回等待中的请求
@@ -2343,6 +2902,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     def _resolve_members(
         self, members_params: list | None, chair_answers: bool | None = None,
+        chair_key: tuple[str, str] | None = None,
     ) -> list[MemberSpec]:
         """解析圆桌成员：显式列表优先；缺省时取所有已配置 Key 的服务的当前模型。
 
@@ -2350,6 +2910,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         - 去重（同名同模型只留一个）；上限 cfg.roundtable.max_members（不含主席）；
         - chair_answers 为 None 时用配置值；为 True 时跳过与主席重复的成员
           （主席会被单独插到队列最前）；
+        - chair_key 是主席的 (服务, 模型) 去重键：缺省按全局记账（团队等
+          非会话轮），圆桌轮按本轮会话解析传入（见 _roundtable_body）；
         - 单个成员构建失败（缺 Key/未知服务）不阻断，作答时以错误卡片呈现。
         """
         specs: list[MemberSpec] = []
@@ -2359,7 +2921,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             self.cfg.roundtable.chair_answers if chair_answers is None
             else bool(chair_answers)
         )
-        chair_key = (self.provider_name, self.provider_model)
+        if chair_key is None:
+            chair_key = (self.provider_name, self.provider_model)
 
         def _add(name: str, model: str, role: str = "") -> None:
             key = (name, model)
@@ -2425,6 +2988,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         cfg = self.cfg.roundtable
         debate = cfg.debate_rounds if debate_rounds is None else max(0, min(int(debate_rounds), 2))
         chair_in = cfg.chair_answers if chair_answers is None else bool(chair_answers)
+        # 主席按本轮会话解析：会话级模型覆盖/默认模型会话的 runtime 挂的是
+        # detached provider，全局记账（self.provider*）跟它无关——拿全局当主席，
+        # 融合就由「界面上根本没显示的模型」做了，会话自己的模型反而以成员身份
+        # 重复出场，轮末 meta 与用量也记错名下。三段解析与 runtime 挂的
+        # provider 同源（见 _runtime_provider），这里按它取主席实例与 (服务, 模型)。
+        chair = agent.provider if agent.provider is not None else self.provider
+        if sid:
+            chair_name, chair_model = self._session_effective_model(sid)
+        else:
+            chair_name, chair_model = self.provider_name or "", self.provider_model or ""
 
         async def emit_ev(ev) -> None:
             await emit(ev.model_dump())
@@ -2464,7 +3037,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if ev is not None:
                 await emit_ev(ev)
 
-        members = self._resolve_members(members_params, chair_in)
+        members = self._resolve_members(members_params, chair_in, chair_key=(chair_name, chair_model))
         # 面板选了超过上限的成员会被静默截断，明确告知而不是让用户猜
         if members_params:
             wanted = len({
@@ -2485,9 +3058,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             )
         if chair_in:
             members.insert(0, MemberSpec(
-                provider_name=self.provider_name,
-                model=self.provider_model,
-                provider=self.provider,
+                provider_name=chair_name,
+                model=chair_model,
+                provider=chair,
             ))
 
         # 成员/主席都不看图片（纯文本协作），历史里的图片块单独剥离；
@@ -2497,7 +3070,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         system = history_system_text(agent.history) or self.compose_system()
         outcome: RoundtableOutcome = await run_roundtable(
             members=members,
-            chair=self.provider,
+            chair=chair,
             system_text=system,
             history=member_history,
             user_text=question,
@@ -2505,8 +3078,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             emit=emit_ev,
             debate_rounds=debate,
             fuse=not compare,
-            chair_provider=self.provider_name or "",
-            chair_model=self.provider_model or "",
+            chair_provider=chair_name or "",
+            chair_model=chair_model or "",
             chair_context_tokens=agent.context_limit_tokens,
             member_history_turns=cfg.member_history_turns,
         )
@@ -2526,7 +3099,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
         meta = {
             "mode": "compare" if compare else "roundtable",
-            "chair": {"provider": self.provider_name, "model": self.provider_model},
+            "chair": {"provider": chair_name, "model": chair_model},
             "chair_answers": chair_in,
             "debate_rounds": debate,
             "rounds": 1 + debate,
@@ -2680,6 +3253,268 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             update_config_section("roundtable", updates)
             self.cfg = load_config()
         return self.roundtable_detail()
+
+    # ---- 对抗：四角色流水线审查（docs/对抗模式设计.md） ----
+    # 与圆桌（会诊融合）、团队（分工协作）并列的第三种多模型协作。角色解析：
+    # members 条目可带 role="finder"/"investigator"/"advisor" 逐角色显式指定
+    # 模型（弹层三个下拉），同一模型可身兼数角（「同一 AI 自我对抗」的路径）；
+    # 未指定的角色回退按序自动映射（缺省取所有已配置 Key 的服务）。裁判缺省用
+    # 当前主模型（同圆桌主席）。编排本体在 core/adversarial.py，这里只做装配与落库。
+
+    async def _adversarial_body(
+        self, text: str, emit: EmitFn, members_params: list | None,
+        agent: Agent | None = None, sid: str | None = None,
+        images: list[ImageBlock] | None = None, regenerate: bool = False,
+    ) -> dict:
+        """对抗轮主体：发现 → 调查 → 建议 → 裁判 → 报告并入主历史。
+
+        返回随轮次结果回传前端的对抗元数据（角色名册、裁决统计、问题清单）。
+        历史追加 user(被审内容) + assistant(最终报告)；中间产物（问题、裁决、
+        方案）随报告消息的 adversarial 元数据持久化，历史回放时对抗卡可展开
+        回看。取消语义与圆桌对齐：user 消息先入历史，中途点停止内容不丢；
+        裁判中途取消时已流出的部分报告文本照样落库。
+        """
+        if agent is None:
+            agent = self.agent
+        if self.provider is None:
+            raise RuntimeError("对抗需要当前主模型可用；请先在模型下拉中选择一个已配置 Key 的服务")
+
+        cfg = self.cfg.adversarial
+        # 裁判按本轮会话解析（同 _roundtable_body 的主席口径）：会话级换过模型
+        # 的标签/分屏列，终审必须由会话自己的模型做，而不是全局记账的模型
+        judge = agent.provider if agent.provider is not None else self.provider
+        if sid:
+            judge_name, judge_model = self._session_effective_model(sid)
+        else:
+            judge_name, judge_model = self.provider_name or "", self.provider_model or ""
+
+        async def emit_ev(ev) -> None:
+            await emit(ev.model_dump())
+
+        adv_t0 = time.monotonic()
+
+        def _adv_ms() -> int:
+            return int((time.monotonic() - adv_t0) * 1000)
+
+        await emit_ev(TurnStarted(iteration=1))
+
+        # 对抗是纯文本协作：图片不发给角色模型，但要让用户知道，不静默丢弃
+        if images:
+            await emit_ev(NoticeEvent(
+                message=f"对抗轮为纯文本协作：本轮的 {len(images)} 张图片不会发给角色模型"
+                        "（已随消息保留）；需要模型看图请关闭对抗后重发。"
+            ))
+
+        # 用户消息先入历史（与普通轮一致）：中途停止问题也能落库，不丢上下文。
+        # 重新生成时提问已在历史末尾（session.truncate 已删掉旧回答），不再重复追加。
+        if regenerate:
+            question = text
+            for m in reversed(agent.history):
+                if m.role == "user" and m.text.strip():
+                    question = m.text
+                    break
+        else:
+            question = text
+            agent.history.append(Message.user(text, images))
+
+        # 上下文压缩护栏：四个角色都吃会话上下文，超限先压缩（同圆桌）
+        if agent.used_context_tokens() > agent.context_limit_tokens:
+            ev = await compact_history(agent, keep_recent=self.cfg.compaction_keep_recent)
+            if ev is not None:
+                await emit_ev(ev)
+
+        # 角色解析：members 条目可带 role="finder"/"investigator"/"advisor"
+        # 显式指定该角色的模型（弹层逐角色下拉）；带角色的条目直接构建、不参与
+        # 去重（同一模型可身兼数角正是常态），其余角色回退到自动策略——无角色
+        # 条目按序映射（chair 不回避：裁判与角色同服务是正常形态，不剔除）。
+        explicit: dict[str, tuple[str, str]] = {}
+        auto_params: list = []
+        for m in members_params or []:
+            entry = m if isinstance(m, dict) else {}
+            role_key = str(entry.get("role", "") or "").strip()
+            name = str(entry.get("provider", "") or "").strip()
+            if role_key in ("finder", "investigator", "advisor") and name \
+                    and role_key not in explicit:
+                explicit[role_key] = (name, str(entry.get("model", "") or "").strip())
+            elif name:
+                auto_params.append(entry)
+
+        def _explicit_spec(name: str, model: str) -> MemberSpec:
+            try:
+                provider = self._build_member_provider(name, model)
+                return MemberSpec(
+                    provider_name=name,
+                    model=model or getattr(provider, "model", ""),
+                    provider=provider,
+                )
+            except Exception as e:  # noqa: BLE001 - 构建失败降级为错误角色卡
+                return MemberSpec(provider_name=name, model=model, build_error=str(e)[:200])
+
+        # 自动序列：未带 members（纯自动）或带普通条目时才解析；三个角色全部
+        # 显式指定时不白建 Provider
+        specs_auto = (
+            self._resolve_members(
+                auto_params, False, chair_key=(judge_name, judge_model),
+            )
+            if (members_params is None or auto_params) else []
+        )
+
+        # 未显式指定的角色按 固定角色顺序 从自动序列依次取（游标递进）：全不指定
+        # 时等价于旧的 0/1/2 取模复用（自动服务不足时同一模型身兼数角）；
+        # 部分指定时剩余角色也按序补位，不会跳号。
+        auto_cursor = 0
+
+        def _role_spec(role: str) -> MemberSpec:
+            nonlocal auto_cursor
+            if role in explicit:
+                return _explicit_spec(*explicit[role])
+            if not specs_auto:
+                return MemberSpec(
+                    provider_name="", model="",
+                    build_error="未指定模型且没有已配置 Key 的服务",
+                )
+            spec = specs_auto[auto_cursor % len(specs_auto)]
+            auto_cursor += 1
+            return spec
+
+        finder = _role_spec("finder")
+        investigator = _role_spec("investigator")
+        advisor = _role_spec("advisor")
+        if all(s.provider is None for s in (finder, investigator, advisor)):
+            await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_adv_ms()))
+            raise RuntimeError(
+                "对抗没有可用角色：请先在「设置 · 模型服务」配置 API Key，"
+                "或在对抗面板为角色指定模型"
+            )
+
+        # 角色都不看图片（纯文本协作），历史里的图片块单独剥离；
+        # history[:-1] 排除刚追加的本次提问（由 run_adversarial 自己拼在末尾）。
+        # 角色消息不接会话系统提示词：角色系统提示词自足（core/adversarial.py
+        # 的 _phase_messages），dialogue() 会把 history 里的 system 剥掉。
+        role_history = _strip_image_blocks(agent.history[:-1])
+
+        outcome: AdversarialOutcome = await run_adversarial(
+            finder=finder,
+            investigator=investigator,
+            advisor=advisor,
+            judge=judge,
+            judge_provider=judge_name or "",
+            judge_model=judge_model or "",
+            history=role_history,
+            user_text=question,
+            timeout_s=cfg.role_timeout_s,
+            emit=emit_ev,
+            max_findings=cfg.max_findings,
+        )
+
+        meta = {
+            "mode": "adversarial",
+            "judge": {"provider": judge_name, "model": judge_model},
+            "roles": [
+                {"role": "finder", "provider": finder.provider_name, "model": finder.model},
+                {"role": "investigator", "provider": investigator.provider_name, "model": investigator.model},
+                {"role": "advisor", "provider": advisor.provider_name, "model": advisor.model},
+                {"role": "judge", "provider": judge_name, "model": judge_model},
+            ],
+            "stats": adversarial_stats(outcome),
+            "findings": adversarial_findings_meta(outcome),
+            "status": outcome.status,
+            "error": outcome.error,
+        }
+
+        # 用量入账：对抗不走 agent.run_turn，agent.total_* 不会动。按角色逐条
+        # 写 usage_log（裁判记当前主模型名下），统计页与预算护栏才看得见真实成本。
+        if sid:
+            try:
+                for row in adversarial_usage_rows(outcome):
+                    await self.store.add_usage(
+                        sid, row["provider"], row["model"],
+                        row["input_tokens"], row["output_tokens"],
+                        row.get("cached_tokens", 0),
+                    )
+            except Exception:  # noqa: BLE001 - 记账失败不影响本轮结果
+                pass
+            await self._check_budget_alerts()
+
+        report = outcome.report
+        if not report.strip() and outcome.findings:
+            # 裁判失败/取消且没流出任何报告文本，但问题清单在：用中间结果拼一份
+            # 如实的兜底报告（不再调模型）——已花的钱与已得的裁决不随刷新消失。
+            s = adversarial_stats(outcome)
+            lines = ["## 对抗审查报告（终审未完成，以下为复核后的中间结果）\n"]
+            for f in outcome.findings:
+                verdict = {
+                    "confirmed": "成立", "refuted": "已推翻",
+                    "partial": "部分成立", "pending": "待定",
+                }.get(f.verdict, f.verdict)
+                lines.append(
+                    f"- **{f.finding_id}**（{verdict}）[{f.effective_severity}] "
+                    f"{f.category} @ {f.location or '未标注'}：{f.effective_description}"
+                )
+                if f.solution:
+                    lines.append(f"  - 修复方案：{f.solution}")
+            lines.append(
+                f"\n共 {s['total']} 条候选：成立 {s['confirmed']}、部分成立 "
+                f"{s['partial']}、推翻 {s['refuted']}、待定 {s['pending']}。"
+            )
+            report = "\n".join(lines)
+            meta["degraded"] = True
+
+        if report.strip():
+            assistant = Message.assistant([TextBlock(text=report)])
+            assistant.adversarial = meta
+            agent.history.append(assistant)
+            await emit_ev(AssistantMessage(message=assistant.model_dump()))
+
+        if outcome.status == "cancelled":
+            # 用户中途停止：已流出的部分报告已落库；TurnFinished 由 pipeline
+            # 的 stopped 结果收尾。
+            await emit_ev(TurnFinished(
+                stop_reason="cancelled", iterations=1, duration_ms=_adv_ms(),
+            ))
+            return meta
+
+        if outcome.status == "error" and not report.strip():
+            # 发现者失败且没有任何可保留的产出：如实报错收尾
+            await emit_ev(TurnFinished(
+                stop_reason="error", iterations=1, duration_ms=_adv_ms(),
+            ))
+            return meta
+
+        await emit_ev(TurnFinished(
+            stop_reason="end_turn", iterations=1, duration_ms=_adv_ms(),
+        ))
+        return meta
+
+    # ---- 对抗设置（设置 · 对抗）：读回当前值 → 编辑 → 保存后热生效 ----
+
+    def adversarial_detail(self) -> dict:
+        """设置页对抗卡片的数据。"""
+        adv = self.cfg.adversarial
+        return {
+            "max_findings": adv.max_findings,
+            "role_timeout_s": adv.role_timeout_s,
+            "configured_services": len(self._configured_services()),
+            "config_hint": (
+                "对抗让多个模型以攻防立场接力审查：发现者穷尽式找问题（宁滥勿缺），"
+                "调查者逐条对抗验证（力求推翻误报），建议者给代码级修复方案，裁判"
+                "（当前主模型）过滤噪音并产出终审报告。成员按勾选顺序承担前三个"
+                "角色，不足时自动复用同一个模型——单一模型也能自我对抗。全程纯"
+                "文本协作，不调用工具、不写文件。成本约为「角色数 + 1」次调用。"
+            ),
+        }
+
+    async def adversarial_save(self, params: dict) -> dict:
+        """保存对抗设置并热生效（写 config.toml 的 [adversarial] 段）。"""
+        updates: dict = {}
+        if params.get("max_findings") is not None:
+            updates["max_findings"] = max(1, min(100, int(params["max_findings"])))
+        if params.get("role_timeout_s") is not None:
+            updates["role_timeout_s"] = max(10, int(params["role_timeout_s"]))
+        if updates:
+            update_config_section("adversarial", updates)
+            self.cfg = load_config()
+        return self.adversarial_detail()
 
     # ---- 团队：用户总管的多模型分工协作（一期 MVP，docs/团队模式设计.md） ----
     # 与圆桌并列的第二种多模型协作。活动团队是会话级状态（_teams：sid → 编排器，
@@ -3462,24 +4297,76 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return {"tokens": total, "limit": agent.context_limit_tokens,
                 "rows": rows, "cache_rate": rate}
 
-    def status(self) -> dict:
-        """/status：模型、上下文占用、工具数、任务清单一览。"""
-        todo_tool = self.agent.registry.get("todo_write")
+    async def status(self, session_id: str | None = None) -> dict:
+        """/status：模型、上下文占用、工具数、任务清单一览。
+
+        session_id 给出时查那个会话的 runtime（分屏列辅路：peek 不建 runtime）。
+        无 runtime（重启 / LRU 淘汰后）不直接报错：会话在库时按落库消息估算
+        占用回给上下文徽标——否则打开旧会话的列要等该列发过一条消息才有读数；
+        估算口径与 agent.used_context_tokens 的估算半边一致。会话不在库仍显式
+        报错，绝不静默回退当前会话（前端据此保持徽标空态）。"""
+        if session_id:
+            rt = self.runtimes.get(session_id)
+            if rt is None:
+                est = await self._estimate_session_context(session_id)
+                if est is None:
+                    raise RuntimeError(
+                        f"该会话没有正在运行的上下文（可能已被回收）：{session_id}")
+                tokens, history_n = est
+                return {
+                    "version": __version__,
+                    "working_dir": str(self.working_dir or ""),
+                    "provider": self.provider_name,
+                    "model": self.provider_model,
+                    "provider_error": self.provider_error,
+                    "session_id": session_id,
+                    "context_tokens": tokens,
+                    "context_limit": self._context_limit(),
+                    # 明细桶（系统提示词/工具/技能分摊）离线还原不了：给 None，
+                    # 前端容量弹层按无明细处理，环读数本身不受影响
+                    "context_detail": None,
+                    "history_messages": history_n,
+                    "tool_count": len(self.agent.registry),
+                    "queued": 0,
+                    "todos": [],
+                }
+            agent, sid, queued = rt.agent, session_id, len(rt.queue)
+        else:
+            agent = self.agent
+            sid = self.session.id if self.session else None
+            queued = len(self.queue)
+        todo_tool = agent.registry.get("todo_write")
         return {
             "version": __version__,
             "working_dir": str(self.working_dir or ""),
             "provider": self.provider_name,
             "model": self.provider_model,
             "provider_error": self.provider_error,
-            "session_id": self.session.id if self.session else None,
-            "context_tokens": self.agent.used_context_tokens(),
-            "context_limit": self.agent.context_limit_tokens,
-            "context_detail": self._context_detail(self.agent),
-            "history_messages": len(self.agent.history),
-            "tool_count": len(self.agent.registry),
-            "queued": len(self.queue),
+            "session_id": sid,
+            "context_tokens": agent.used_context_tokens(),
+            "context_limit": agent.context_limit_tokens,
+            "context_detail": self._context_detail(agent),
+            "history_messages": len(agent.history),
+            "tool_count": len(agent.registry),
+            "queued": queued,
             "todos": list(getattr(todo_tool, "items", []) or []),
         }
+
+    async def _estimate_session_context(self, session_id: str) -> tuple[int, int] | None:
+        """无 runtime 会话的上下文占用估算（分屏列徽标辅路）。
+
+        会话不在库、或没有任何落库消息（刚建的空会话 / 任务壳会话）返回 None，
+        由调用方维持显式报错的空态契约；有历史则按落库消息以 estimate_tokens
+        估算（与 agent.used_context_tokens 的估算半边同口径），返回 (tokens, 条数)。"""
+        if self.store is None:
+            return None
+        session = await self.store.get_session(session_id)
+        if session is None:
+            return None
+        msgs = await self.store.load_messages(session_id)
+        if not msgs:
+            return None
+        return estimate_tokens(msgs), len(msgs)
 
     async def tasks_list(self, params: dict | None = None, *, session_id: str | None = None) -> dict:
         """任务簿列表；session_id 给出时只返回该会话的任务（远程客户端隔离，B13）。"""
@@ -3953,6 +4840,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         v = value if value in (0, 1, 2) else 0
         self.gate.auto_accept_write = v in (1, 2)
         self.gate.auto_accept_all = v == 2
+        self._sync_default_accept_to_runtimes()
 
     async def _seed_builtin_snippets(self) -> None:
         """首启把内置示例快捷指令落成真实记录：设置页里可见、可编辑、可删除。
@@ -4098,6 +4986,21 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             added += 1
         return {"added": added, "skipped": skipped}
 
+    def _sync_default_accept_to_runtimes(self) -> None:
+        """引擎默认档变化后，同步到「没有会话级覆盖」的 runtime 私有门。
+
+        默认档（permission.set_mode / ui.json 的 accept_edits）是所有未覆盖
+        会话的当前值；只有 session.accept_set 显式覆盖过的会话才脱离默认
+        （那正是「按会话独立」的语义）。runtime 的门在 _runtime_gate 里是
+        私有副本，不随 self.gate 原地变，所以默认档变化要在这里显式追平。"""
+        for sid, rt in self.runtimes.items():
+            if sid in self._session_accepts:
+                continue
+            g = rt.agent.gate
+            if g is not None and g is not self.gate:
+                g.auto_accept_write = self.gate.auto_accept_write
+                g.auto_accept_all = self.gate.auto_accept_all
+
     async def set_permission_mode(self, mode: str) -> dict:
         """confirm = 安全执行，写入/命令都确认（默认）；accept_edits = 自动编辑，
         工作目录内写入自动放行、命令仍确认；full_access = 完全访问，写入与命令
@@ -4123,7 +5026,52 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             self.gate.auto_accept_all,
             self.working_dir,
         )
+        self._sync_default_accept_to_runtimes()
         return {"mode": self.permission_mode()}
+
+    def _accept_mode_of(self, session_id: str) -> str:
+        """会话当前生效的权限三档：会话级覆盖优先，未覆盖回引擎默认。"""
+        saved = self._session_accepts.get(session_id)
+        if saved in (0, 1, 2):
+            return {0: "confirm", 1: "accept_edits", 2: "full_access"}[saved]
+        return self.permission_mode()
+
+    async def session_accept_get(self, session_id: str) -> dict:
+        """会话当前生效的权限三档（主栏/分屏盾牌按面显示用）。
+
+        会话级覆盖（session.accept_set）优先；未覆盖回引擎默认档
+        （ui.json 的 accept_edits）。本机专属（local_only）——降防护的
+        开关不向远程开放，与 permission.set_mode 同一面。"""
+        await self._get_owned_session(session_id, local=True)
+        return {
+            "session_id": session_id,
+            "mode": self._accept_mode_of(session_id),
+            "overridden": session_id in self._session_accepts,
+            "engine_mode": self.permission_mode(),
+        }
+
+    async def session_accept_set(self, session_id: str, mode: str) -> dict:
+        """按会话设置权限三档：只影响该会话 runtime 的门，不动引擎默认——
+        别的会话（含主栏）保持自己的档位。runtime 已建则热调其私有门；
+        还没建只记覆盖，_runtime_gate 在建门时重放。会话删除随清理，
+        引擎默认档（permission.set_mode）仍是新会话的起点。
+
+        本机专属（local_only）：放宽档只由本机用户切换（安全审查根因一，
+        与 permission.set_mode 同一收口）；调档记日志，事后可追溯。"""
+        if mode not in ("confirm", "accept_edits", "full_access"):
+            raise RuntimeError("权限模式只支持 confirm / accept_edits / full_access")
+        await self._get_owned_session(session_id, local=True)
+        v = {"confirm": 0, "accept_edits": 1, "full_access": 2}[mode]
+        self._session_accepts[session_id] = v
+        rt = self.runtimes.get(session_id)
+        if rt is not None and rt.agent.gate is not None:
+            rt.agent.gate.auto_accept_write = v in (1, 2)
+            rt.agent.gate.auto_accept_all = v == 2
+        logger.info(
+            "会话 %s 权限档位切换为 %s（自动允许写入=%s，完全访问=%s，工作目录：%s）",
+            session_id, mode, v in (1, 2), v == 2, self.working_dir,
+        )
+        return {"session_id": session_id, "mode": mode}
 
     # ---- 白名单（设置页）：手动添加 / 清空 / 测试 / 导入导出 ----
 
@@ -4290,14 +5238,44 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     # ---- 模型/配置操作 ----
 
+    def _model_private_sessions(self) -> set[str]:
+        """模型身份私有的会话：会话级模型覆盖 ∪ 生效的「新会话默认模型」会话。
+
+        这些会话的模型不跟全局（全局切换 model.switch 对它们完全跳过）；
+        「只覆盖档位」的会话（_session_efforts 有、这里没有）不在此列——
+        它们的模型跟全局，切换时档位随迁。"""
+        sids = set(self._session_models)
+        # 默认模型会话按创建时刻的快照记（不随偏好现状翻转）
+        sids |= set(getattr(self, "_default_model_sessions", {}))
+        return sids
+
     async def switch_model(self, name: str, model: str | None = None) -> dict:
         self.provider = self._build_provider(name, model)
         self.provider_error = None
-        for ag in self._for_each_agent():
-            ag.provider = self.provider
-        # 换服务/换模型 = 换上下文窗口：上限与视觉能力都跟着新的服务走
         limit = self._context_limit()
-        for ag in self._for_each_agent():
+        private = self._model_private_sessions()
+        # 单一循环按 sid 分派（避免两处循环口径漂移）：
+        # - 模型身份私有（覆盖 ∪ 默认模型会话）→ 完全跳过，模型与上限都不动；
+        # - 只覆盖档位 → 模型跟新全局：建 detached 副本并把已存档位重放
+        #   （新服务不支持思考则清除档位，provider 回归共享全局对象）；
+        # - 无覆盖（含基底）→ 共享全局 provider，上限刷新
+        pairs: list[tuple[str | None, Agent]] = [(None, self._base_agent)]
+        pairs.extend((rt.sid, rt.agent) for rt in self.runtimes.values())
+        for sid, ag in pairs:
+            if sid is not None and sid in private:
+                continue
+            saved_effort = self._session_efforts.get(sid) if sid is not None else None
+            if saved_effort is not None:
+                prov = self._build_detached_provider(name, model)
+                if getattr(prov, "supports_reasoning", False):
+                    prov.set_reasoning_effort(saved_effort)
+                    ag.provider = prov
+                else:
+                    self._session_efforts.pop(sid, None)
+                    ag.provider = self.provider
+            else:
+                ag.provider = self.provider
+            # 换服务/换模型 = 换上下文窗口：上限与视觉能力都跟着新的服务走
             ag.context_limit_tokens = limit
         return {
             "provider": name, "model": self.provider_model,
@@ -4445,8 +5423,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if is_current and self.provider is not None:
             # 不重建整个 provider（避免丢 Key/连接），直接改档位即可生效
             self.provider.set_reasoning_effort(effort)
-            for ag in self._for_each_agent():
-                ag.provider = self.provider
+            # 会话已私有（模型身份或档位任一）的会话不施全局档位：它们挂的
+            # 不是共享的 provider 对象，各自档位走 session.reasoning_set 面。
+            # 基底（无会话）与无覆盖会话照旧共享全局 provider，直接换档。
+            private = self._model_private_sessions() | set(self._session_efforts)
+            self._base_agent.provider = self.provider
+            for rt in self.runtimes.values():
+                if rt.sid in private:
+                    continue
+                rt.agent.provider = self.provider
         return {"provider": target, "reasoning": self.reasoning_state()}
 
     async def add_provider_model(self, name: str, model: str) -> dict:
@@ -4505,8 +5490,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if not self.skills.set_enabled(name, enabled):
             raise RuntimeError("skill not found: " + name)
         self.skills.discover()
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_system_prompts()
         return {"name": name, "enabled": enabled}
 
     async def set_skill_scope(
@@ -4518,8 +5502,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         except KeyError as e:
             raise RuntimeError(str(e).strip("'\"")) from e
         self.skills.discover()  # 重新套用范围（set_scope 只改了内存里的当前实例）
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_system_prompts()
         return {"name": name, **result}
 
     def skill_body(self, name: str) -> dict:
@@ -4580,8 +5563,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise RuntimeError(str(e)) from e
         # 重新发现 + 重建系统提示词：新技能马上出现在清单里
         self.skills.discover()
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_system_prompts()
         # 用户在界面上主动装技能：已信任的项目同步指纹，避免刚装完就回到「待确认」。
         # 指明本次动的来源（项目技能目录）：别的来源若也被改过（git pull 塞进来的
         # 项目级 mcp.json 等），不跟着一起洗白（安全审查低危项）
@@ -4679,8 +5661,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 同名技能重新安装后会莫名“装上了却是停用”，用户很难自己定位。
         self.skills.forget(name)
         self.skills.discover()
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_system_prompts()
         if scope == "project":
             # 删掉项目技能也是用户自己的改动；来源限定在项目技能目录
             self.trust.refresh(touched=self._project_skills_dir())
@@ -4744,8 +5725,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         except SkillInstallError as e:
             raise RuntimeError(str(e)) from e
         self.skills.discover()
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_system_prompts()
         if scope == "project":
             self.trust.refresh(touched=self._project_skills_dir())
         result["scope"] = scope
@@ -4861,8 +5841,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """按当前信任状态重新发现技能，并把系统提示词刷到所有 agent。"""
         self.skills.project_dir = self._project_skills_dir_if_trusted()
         self.skills.discover()
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_system_prompts()
 
     async def recheck_trust_before_turn(self) -> None:
         """轮次起点重验工作区信任（审查 P2-4）。
@@ -5880,15 +6859,35 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.checkpoints = CheckpointStore(root=self._checkpoint_root())
 
         # 旧项目的活动团队一并失效：成员 Agent 挂着旧项目的工具表与权限门，
-        # 不能让切项目后的消息继续路由进旧团队（登记转「已中断」供 team.get 展示）
+        # 不能让切项目后的消息继续路由进旧团队（登记转「已中断」供 team.get 展示）。
+        # 跨项目分屏列的团队除外：成员挂的是会话所属项目的工具表与权限门
+        # （_own_ctx），不随主栏切换失效。
         if self._teams:
-            self._teams_interrupt_all("项目已切换，团队已中断")
+            for sid in [
+                sid for sid in list(self._teams)
+                if not ((rt := self.runtimes.get(sid)) is not None
+                        and rt.ctx is not None and rt.ctx.own)
+            ]:
+                orch = self._teams.pop(sid)
+                self._teams_interrupted[sid] = {
+                    "session_id": sid,
+                    "roster": [m.name for m in orch.roster],
+                    "director_mode": orch.director_mode,
+                    "status": "interrupted",
+                    "interrupt_reason": "项目已切换，团队已中断",
+                }
+            if self._teams or self._teams_interrupted:
+                self._persist_team_state()
         # 旧项目的会话 runtime 全部失效：停任务、落空排队轮、释放、清空。
         # 排队轮的 Future 必须逐个落空（与 delete_session 同一口径）：否则那些
         # 发消息的请求要么等到被取消的轮在旧上下文里交棒空跑一轮后拿到裸
         # 内部错误，要么在取消落在 pipeline try 之前的窄竞态里永远挂死。
         # 显式落空给等待方一条可读错误，队列清空也让交棒找不到旧轮次。
+        # 跨项目分屏列的 runtime 除外：它绑定会话所属项目（自己的 gate/钩子/
+        # 检查点/子代理），主栏切项目不动它——这正是分屏并排看两个项目的意义。
         for rt in list(self.runtimes.values()):
+            if rt.ctx is not None and rt.ctx.own:
+                continue
             for item in list(rt.queue):
                 item.fail(RuntimeError("项目已切换，本次请求未执行"))
             rt.queue.clear()
@@ -5896,18 +6895,22 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if t and not t.done():
                 t.cancel()
             self._forget_runtime(rt)
+            self.runtimes.pop(rt.sid, None)
         for item in list(self._base_queue):
             item.fail(RuntimeError("项目已切换，本次请求未执行"))
         self._base_queue.clear()
-        self.runtimes.clear()
 
         if self._base_agent is not None:
             self._base_agent.working_dir = target
             self._base_agent.hooks = self.hooks
-            for ag in self._for_each_agent():
-                ag.working_dir = target
-            for ag in self._for_each_agent():
-                ag.set_system(self.compose_system())
+            self._base_agent.set_system(self.compose_system())
+            # 幸存的 runtime 只剩跨项目列：工作目录与系统提示词留在会话自己的
+            # 项目里，不跟随主栏切换
+            for rt in self.runtimes.values():
+                if rt.ctx is not None and rt.ctx.own:
+                    continue
+                rt.agent.working_dir = target
+                rt.agent.set_system(self.compose_system())
 
         # 记住当前项目（无项目态记 0）：重启后回到同一个状态
         await self._write_ui_prefs({"active_project": self._cur_project_id() or 0})
@@ -6185,8 +7188,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         except (OSError, UnicodeEncodeError) as e:
             raise RuntimeError(f"写入失败: {e}") from None
         self.instructions_text = text
-        for ag in self._for_each_agent():
-            ag.set_system(self.compose_system())
+        self._refresh_system_prompts()
         try:
             mtime = round(path.stat().st_mtime, 3)
         except OSError:

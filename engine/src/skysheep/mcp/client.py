@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import re
 import shutil
 import socket
 from collections.abc import Awaitable, Callable
@@ -50,10 +51,41 @@ if TYPE_CHECKING:
 
 MAX_MCP_OUTPUT_CHARS = 30_000
 CONNECT_TIMEOUT_S = 20.0        # 单个服务器的连接上限；超时视为失败而不是无限等待
+PACKAGE_RUNNER_CONNECT_TIMEOUT_S = 180.0  # 下载型命令（npx/uvx）的连接上限（见下）
 PREFLIGHT_TIMEOUT_S = 3.0       # 连之前先探一次端口：地址写错时秒回，不用等 SDK 超时
 CALL_TIMEOUT_S = 120.0          # 单次工具调用上限：SDK 默认无限等，一个挂死的服务器
                                 # 会把整轮对话（含权限门之后的执行栈）停在原地
 CLOSE_GRACE_S = 5.0             # 关连接的宽限：keeper 没在期限内退完就取消它
+
+# 首连要现场拉包的启动命令（npx/uvx 一族）：第一次运行要从 npm/pypi 下载整棵
+# 依赖树，常规 20 秒连接超时经常不够；超时收割子进程会把 npx 杀在半路，留下
+# 装了一半的 _npx 缓存（npm 缓存无原子性也不校验，坏缓存此后每次启动原样重放、
+# 秒崩——真实死因 ERR_MODULE_NOT_FOUND 藏在子进程 stderr 里，界面只见 TaskGroup
+# 聚合错误）。对这类命令把连接预算放宽到 PACKAGE_RUNNER_CONNECT_TIMEOUT_S，
+# 让下载跑完；已缓存的命令一两秒就连上，预算只是上限，不增加正常等待。
+PACKAGE_RUNNER_COMMANDS = frozenset({"npx", "uvx", "bunx", "pnpx", "pipx", "uv"})
+
+
+def _is_package_runner(command: str | None) -> bool:
+    """启动命令是否为会现场拉包的运行器（npx/uvx 一族）。
+
+    Windows 上 npx 实际是 npx.cmd，用户也可能填完整路径——按文件名（去扩展名）
+    判断，不按整串。
+    """
+    if not command:
+        return False
+    base = Path(command).name.strip()
+    base = re.sub(r"\.(cmd|bat|exe)$", "", base, flags=re.IGNORECASE)
+    return base.lower() in PACKAGE_RUNNER_COMMANDS
+
+
+def _connect_budget(cfg: MCPServerConfig) -> float:
+    """这台服务器的连接预算：下载型命令放宽，其余用常规值。"""
+    return (
+        PACKAGE_RUNNER_CONNECT_TIMEOUT_S
+        if _is_package_runner(cfg.command)
+        else CONNECT_TIMEOUT_S
+    )
 
 
 def _friendly_error(e: Exception) -> str:
@@ -65,6 +97,16 @@ def _friendly_error(e: Exception) -> str:
         return (
             "鉴权失败（401/403）：检查配置里 headers 的凭证是否有效"
             "——托管服务的 token 常会过期，更新后重新连接即可"
+        )
+    if "taskgroup" in low and "sub-exception" in low:
+        # anyio TaskGroup 的聚合错误：stdio 子进程启动即崩时，真实原因（如
+        # ERR_MODULE_NOT_FOUND）在子进程 stderr 里，SDK 只抛这个没有信息量的壳。
+        # 最常见成因是 npx 首装被超时打断留下损坏缓存（旧版本超时收紧时遗留）。
+        return (
+            "子进程启动后立即退出：先确认启动命令能在终端直接运行。"
+            "npx/uvx 类服务多半是首次下载被打断留下了损坏缓存——"
+            "删掉对应缓存目录再重连（npx：%LOCALAPPDATA%\\npm-cache\\_npx；"
+            "uvx：终端跑 uv cache clean）"
         )
     if "filenotfound" in low or "no such file" in low:
         return f"启动命令不存在：{text}"
@@ -605,16 +647,25 @@ class MCPManager:
         """限时连一台服务器：connecting 旗标只亮期间，超时/异常写进 status.error。
 
         connect_server（单台显式连接）与 connect_all 的并发包装（connect_limited）
-        走的都是这一段「旗标 + CONNECT_TIMEOUT_S 限时 + 失败落 status + finally
+        走的都是这一段「旗标 + 连接预算限时 + 失败落 status + finally
         复位」的收尾，此前两处各写一遍，提取在这里收敛。
         """
         status = self.statuses[name]
         status.connecting = True
+        budget = _connect_budget(cfg)
         try:
-            async with asyncio.timeout(CONNECT_TIMEOUT_S):
-                return await self._connect_one(name, cfg)
+            async with asyncio.timeout(budget):
+                return await self._connect_one(name, cfg, connect_timeout=budget)
         except TimeoutError:
-            status.error = f"连接超时（{CONNECT_TIMEOUT_S:g} 秒无响应）：地址或启动命令可能不对"
+            status.error = (
+                f"连接超时（{budget:g} 秒无响应）：地址或启动命令可能不对"
+                + (
+                    "——npx/uvx 首次运行要现场下载依赖，网络慢时先在终端手动跑一次"
+                    "启动命令把缓存烧热，再回来重连"
+                    if _is_package_runner(cfg.command)
+                    else ""
+                )
+            )
         except Exception as e:
             status.error = _friendly_error(e)
         finally:
@@ -676,8 +727,14 @@ class MCPManager:
             except asyncio.CancelledError:
                 pass
 
-    async def _connect_one(self, name: str, cfg: MCPServerConfig) -> list[Tool]:
+    async def _connect_one(
+        self, name: str, cfg: MCPServerConfig, connect_timeout: float | None = None
+    ) -> list[Tool]:
         """连一个服务器并返回它的工具；失败时把错误写进 status 并返回空。
+
+        connect_timeout 缺省按配置自动取（下载型命令 npx/uvx 放宽，见
+        _connect_budget）；keeper 内 initialize/list_tools 的独立超时同源，
+        两者一致才不会出现「外层还没到、内层先把 initialize 掐了」的错位。
 
         连接的打开/关闭都发生在专门拉起的 keeper 任务里：stdio / streamable HTTP
         的传输上下文基于 anyio，cancel scope 必须在进入它的那个任务里退出，
@@ -754,10 +811,12 @@ class MCPManager:
                     ))
                     # M11：initialize/list_tools 各带独立超时。挂死的服务器会停在这两
                     # 个 await 上，对 stop 事件无响应——不设独立超时的话，调用方
-                    # CONNECT_TIMEOUT_S 到点返回后，半开的连接与子进程就没人收了
-                    async with asyncio.timeout(CONNECT_TIMEOUT_S):
+                    # 连接预算到点返回后，半开的连接与子进程就没人收了。
+                    # 预算按服务器取（下载型命令放宽，同调用方外层一致）。
+                    budget = connect_timeout or _connect_budget(cfg)
+                    async with asyncio.timeout(budget):
                         await session.initialize()
-                    async with asyncio.timeout(CONNECT_TIMEOUT_S):
+                    async with asyncio.timeout(budget):
                         listing = await session.list_tools()
                     self._stacks[name] = stack
                     outcome["session"] = session

@@ -11,10 +11,15 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 
 from skysheep.mcp.client import (
+    CONNECT_TIMEOUT_S,
+    PACKAGE_RUNNER_CONNECT_TIMEOUT_S,
     MCPManager,
     MCPServerConfig,
     MCPServerStatus,
     MCPTool,
+    _connect_budget,
+    _friendly_error,
+    _is_package_runner,
     load_mcp_configs,
 )
 from skysheep.tools.base import Safety, ToolContext, ToolError
@@ -1332,3 +1337,38 @@ def test_mcp_status_list_flags_insecure_http_with_headers():
     assert by_name["tls"]["insecure_http"] is False
     assert by_name["no-headers"]["insecure_http"] is False
     assert all("headers" not in r for r in rows), "鉴权头内容不得进前端载荷"
+
+
+# ---------- 下载型命令的连接预算（npx/uvx 首装放宽，防 npx 坏缓存） ----------
+# 背景：npx/uvx 首次运行要现场下载依赖树，常规 20 秒连接超时经常不够；超时
+# 收割子进程会把 npx 杀在半路，留下装了一半的 _npx 缓存，此后每次启动原样
+# 重放、秒崩（真实死因藏在子进程 stderr，界面只见 TaskGroup 聚合错误）。
+
+
+def test_is_package_runner_matches_command_name():
+    assert _is_package_runner("npx")
+    assert _is_package_runner("npx.cmd")
+    assert _is_package_runner("UVX")
+    assert _is_package_runner("uvx.exe")
+    assert _is_package_runner(r"C:\Program Files\nodejs\npx.CMD")
+    assert _is_package_runner("uv") and _is_package_runner("bunx") and _is_package_runner("pipx")
+    assert not _is_package_runner("python")
+    assert not _is_package_runner("node")
+    assert not _is_package_runner("")
+    assert not _is_package_runner(None)
+    # 去扩展名只对文件名生效：目录恰好在 npx 目录里不等于命令是 npx
+    assert not _is_package_runner(r"C:\tools\npx\runner.exe")
+
+
+def test_connect_budget_extends_for_package_runners():
+    npx_cfg = MCPServerConfig(command="npx", args=["-y", "@modelcontextprotocol/server-memory"])
+    uvx_cfg = MCPServerConfig(command="uvx", args=["mcp-server-fetch"])
+    py_cfg = MCPServerConfig(command="python", args=["-m", "some_server"])
+    assert _connect_budget(npx_cfg) == PACKAGE_RUNNER_CONNECT_TIMEOUT_S
+    assert _connect_budget(uvx_cfg) == PACKAGE_RUNNER_CONNECT_TIMEOUT_S
+    assert _connect_budget(py_cfg) == CONNECT_TIMEOUT_S
+
+
+def test_friendly_error_translates_taskgroup_shell():
+    msg = _friendly_error(Exception("unhandled errors in a TaskGroup (1 sub-exception)"))
+    assert "子进程" in msg and "缓存" in msg

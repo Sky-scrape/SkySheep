@@ -14,8 +14,10 @@
  *
  *  维护约定：仍是单文件零构建（无工具链约束）；顶层 function 声明会挂到
  *  window（HTML 内联事件依赖这一点），顶层 let/const 不会——新增跨分区
- *  共享的状态时注意。若未来体量逼着拆分，按上面的分区边界整体搬移，
- *  搬前先给前端补冒烟测试（当前前端无自动化测试，拆分属高危操作）。
+ *  共享的状态时注意。部分分区已按上述边界拆为 app-<区名>.js 普通 script
+ *  （projects / schedule / providers / whitelist / skills / memmap / tools），
+ *  本文件为主文件；跨文件共享的顶层名不得重复（重名 function 会被后加载者
+ *  静默覆盖，守卫见 tests/test_frontend_wiring.py 的跨文件重名扫描用例）。
  * ─────────────────────────────────────────────────────────────────────── */
 
 // ---------- 迷你 Markdown 渲染（先转义再渲染，安全） ----------
@@ -10862,7 +10864,7 @@ function showSettingsPage(target) {
   document.querySelectorAll(".settings-page").forEach((pg) =>
     pg.classList.toggle("hidden", pg.id !== "settings-page-" + target)
   );
-  if (target === "runs") loadRunCenter();
+  if (target === "runs") loadRunsPage();
   if (target === "usage") loadUsage();
   if (target === "memory") loadMemoryPage();
   if (target === "snippets") loadSnippets();
@@ -15102,7 +15104,7 @@ function fmtRunTime(ts) {
   return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
-async function loadRunCenter() {
+async function loadRunsPage() {
   const listBox = document.getElementById("runs-list");
   const permBox = document.getElementById("perm-queue-box");
   if (!listBox) return;
@@ -15176,7 +15178,7 @@ async function loadRunCenter() {
   listBox.querySelectorAll(".run-cancel").forEach((btn) => {
     btn.onclick = async () => {
       btn.disabled = true;
-      try { await request("runs.cancel", { run_id: btn.dataset.id }); await loadRunCenter(); }
+      try { await request("runs.cancel", { run_id: btn.dataset.id }); await loadRunsPage(); }
       catch (e) { addNotice("停止失败: " + e.message); btn.disabled = false; }
     };
   });
@@ -15210,7 +15212,7 @@ async function loadRunCenter() {
     };
   });
 }
-document.getElementById("runs-refresh").onclick = () => loadRunCenter();
+document.getElementById("runs-refresh").onclick = () => loadRunsPage();
 
 // ---------- 设置 · 高级：运行参数 / 目录限制 / 开机自启 ----------
 function advancedStatus(text, ok = true) {

@@ -277,3 +277,73 @@ def test_mods_status_bar_not_cleared_by_render():
     """
     js = read_app_bundle()
     assert 'modsStatus("")' not in js, "renderModsCfg 尾部清状态条会冲掉操作确认提示"
+
+
+# ---------- 跨文件顶层声明重名扫描（普通 script 共享全局词法作用域） ----------
+
+# 手写前端拆为多个普通 script 后，跨文件顶层名必须全局唯一：
+#   - 同名 let/const 在拼接后直接 SyntaxError（node --check 整包可抓，
+#     但 pytest 里没有 node，所以这里一并扫描）；
+#   - 同名 function 是**后加载者静默覆盖**（拼接级无错）——loadRunCenter 曾在
+#     app-schedule.js（自动化页「今日运行」卡片版）与 app.js（设置·运行中心页版）
+#     各有一份，app.js 后加载把卡片版顶掉，「今日运行」卡片从此不渲染。
+# 扫描只认第 0 列开始的声明行：模板串内部与块注释里的伪声明必然带缩进，天然排除。
+# 本清单以 index.html 的 script 标签为单一事实来源，新增分区文件自动并入。
+
+def _bundle_js_files() -> list[str]:
+    import re
+    html = read_static("index.html")
+    return re.findall(r'src="/static/(app[^"]*\.js)"', html)
+
+
+def _top_level_decls(src: str) -> list[str]:
+    import re
+    decl = re.compile(
+        r'^(?:async\s+)?function\s+([\w$]+)|^(?:let|const|var)\s+([\w$]+)|^class\s+([\w$]+)')
+    out: list[str] = []
+    for line in src.splitlines():
+        m = decl.match(line)
+        if m:
+            out.append(m.group(1) or m.group(2) or m.group(3))
+    return out
+
+
+def test_no_cross_file_top_level_name_collisions():
+    """手写前端各文件（app.js + app-*.js）的顶层声明不得跨文件重名。
+
+    重名 function 会被后加载文件静默覆盖，本用例就是为它兜底（见上方注释的
+    loadRunCenter 实例）。发现重名时不要再加一份——把其中一个改名或合并。
+    """
+    seen: dict[str, str] = {}
+    dups: list[str] = []
+    for name in _bundle_js_files():
+        path = STATIC_DIR / name
+        if not path.is_file():
+            continue
+        for decl_name in _top_level_decls(path.read_text(encoding="utf-8")):
+            prev = seen.get(decl_name)
+            if prev is not None and prev != name:
+                dups.append(f"{decl_name}（{prev} 与 {name}）")
+            else:
+                seen[decl_name] = name
+    assert not dups, (
+        "跨文件顶层重名（后加载者会静默覆盖前者，且让行内跳转/调试指错文件）：\n  "
+        + "\n  ".join(sorted(dups)))
+
+
+def test_run_center_names_stay_distinct():
+    """运行中心两处入口的名字护栏（2026-10-10 修复的重名事故回归）。
+
+    - 自动化页「今日运行」卡片：app-schedule.js 的 loadRunCenter（index.html
+      注释与 test_run_center 均锚定此名）；
+    - 设置·运行中心页：app.js 的 loadRunsPage（刻意与卡片版错开）。
+    二者若再被改成同名，上面的通用扫描也会先拦下；本用例把意图写死，
+    防止未来有人「顺手统一命名」把事故带回来。
+    """
+    sched = read_static("app-schedule.js")
+    appjs = read_static("app.js")
+    assert "async function loadRunCenter()" in sched, "卡片版定义名不许改"
+    assert 'request("automation.run_center_summary", {})' in sched
+    assert "function loadRunCenter" not in appjs, (
+        "app.js 不许再定义 loadRunCenter（会覆盖 app-schedule.js 的卡片版）——运行中心页请用 loadRunsPage")
+    assert "function loadRunsPage()" in appjs, "设置·运行中心页的加载函数名应为 loadRunsPage"

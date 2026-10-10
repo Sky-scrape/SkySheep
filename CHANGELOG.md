@@ -147,6 +147,19 @@
   `static/app-advanced.js`（与既有分区同为零构建普通 script，index.html 于
   app.js 之前引入，按钮接线留 app.js 原位）；跨文件顶层重名由既有守卫测试（test_frontend_wiring 按 index.html 顺序自动纳入新文件）覆盖。
 
+- **单体文件继续按职责分区拆分（第五轮，本轮收口）**：backend.py 拆出
+  `ProjectDataMixin`（`server/backend_parts/project_data.py`）——项目任务清单
+  （右侧「任务清单」页签的增删改查）、会话导出（md / html 单文件与导出辅助簇
+  `_fmt_export_dur` / `_export_*_html` / `_html_escape` / `EXPORT_HTML_TEMPLATE`）、
+  项目记忆读写（AGENTS.md，8 个方法 + 3 组辅助）搬入，方法体逐字保留
+  （6829 行；`test_turn_timing.py` 的导出辅助导入改打新模块命名空间）；app.js
+  拆出设置·关于页整块（更新检查 / 打开目录与诊断 / 反馈入口 / 会话库备份恢复 /
+  数据管理 / 存储清理，约 400 行）落为 `static/app-about.js`、Mods 扩展整块
+  （事件片段渲染 + 设置页，约 270 行）落为 `static/app-mods.js`；至此 app.js
+  15859 行 -> 15203 行，手写前端共 12 个分区文件，index.html 依序引入，按钮
+  接线全部留 app.js 原位。两处均补跨文件重名守卫覆盖（按 index.html 顺序
+  自动纳入新文件）。
+
 
 ### 降级说明
 

@@ -14,12 +14,14 @@ import json
 
 from skysheep.messages import Message, TextBlock, ThinkingBlock
 from skysheep.server.backend import (
+    _msg_brief,
+    _stamp_turn_estimate,
+)
+from skysheep.server.backend_parts.project_data import (
     _export_body_text,
     _export_eta_html,
     _export_thinking_html,
     _fmt_export_dur,
-    _msg_brief,
-    _stamp_turn_estimate,
 )
 from skysheep.session.store import SessionStore, _message_duration_seconds
 

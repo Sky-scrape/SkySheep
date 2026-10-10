@@ -105,18 +105,18 @@ class LifecycleMixin:
             await self._reload_agent_history(rt.agent, session_id)
 
     async def session_project_path(self, session_id: str) -> dict:
-        """查询会话关联的项目根目录（本机专属、按 id 直查）。
+        """查询会话关联的工作目录（本机专属、按 id 直查）。
 
-        快聊/任务会话虽然在引擎内部使用数据目录下的隔离工作目录，但它们
-        没有关联项目，不能把该内部目录冒充成「项目路径」暴露给用户；右键
-        菜单也据此隐藏复制路径/资源管理器入口。远程连接固定项目仍返回
-        其公开的远程项目工作目录。
+        快聊/任务会话没有关联项目，但工作路径是真实固定的：数据目录下的
+        fast-talk 专用文件夹（引擎也在这里干活），如实返回——右键的
+        「在资源管理器中打开 / 复制项目路径」对快聊照常可用。远程连接
+        固定项目返回其公开的远程项目工作目录。
         """
         sess = await self.store.get_session(session_id)
         if sess is None:
             raise RuntimeError("session not found: " + session_id)
         if sess.project_id is None:
-            return {"path": ""}
+            return {"path": str(self._quick_workdir())}
         proj = await self.store.get_project(sess.project_id)
         if proj is None or not proj.root_path:
             return {"path": ""}
@@ -173,7 +173,8 @@ class LifecycleMixin:
             # 「远程连接」项目的会话同理开放归属：渠道对话在侧栏可见可点，
             # 但它不属于任何桌面工作目录，挂进当前项目的门控不构成跨项目越权
             # （渠道会话的 runtime 自带 ChannelGate，不走这里的默认门控）。
-            remote = await self._remote_project_id()
+            # ensure=False：项目不存在（已删除）时不重建，直接走 not found
+            remote = await self._remote_project_id(ensure=False)
             if remote is not None:
                 sess = await self.store.get_session_for_project(session_id, remote)
         if sess is None:

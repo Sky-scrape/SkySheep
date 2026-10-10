@@ -13,6 +13,7 @@ let availListCollapsed = false; // 检测到的模型列表是否收起（上百
 let detailOpen = false;   // 是否正停在某个服务的配置页
 let detailName = "";
 let providerTab = "preset"; // 列表页签：preset=默认（内置预设）、custom=自定义（用户新增）
+let providerHealthCache = {};  // 服务名 → 健康状态（model.providers_health 拉取）
 
 const AVATAR_COLORS = ["#1257c4", "#8a6410", "#0f6b3a", "#8f1d1d", "#4f35a8", "#0e6b6b"];
 
@@ -57,6 +58,15 @@ function avatarColor(name) {
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
 
+function providerHealthDot(name) {
+  // 健康状态灯：最近一次测试/运行错误的结果（内存态，重启清零）
+  const h = (providerHealthCache[name] || {}).level;
+  if (!h || h === "unknown") return "";
+  const meta = { ok: ["●", "ph-ok"], warn: ["▲", "ph-warn"], down: ["●", "ph-down"] }[h];
+  if (!meta) return "";
+  return `<span class="ph-dot ${meta[1]}" title="健康状态：${h}">${meta[0]}</span>`;
+}
+
 function providerRow([name, p]) {
   const row = document.createElement("div");
   row.className = "svc-row" + (p.is_active ? " cur" : "");
@@ -64,7 +74,8 @@ function providerRow([name, p]) {
   const keyState = p.has_key ? "Key 已配置" + (p.key_from_env ? "（环境变量）" : "") : "未配置 Key";
   const badges =
     (p.is_active ? '<span class="chip chip-blue">使用中</span>' : "") +
-    (p.is_default ? '<span class="chip">★ 默认</span>' : "");
+    (p.is_default ? '<span class="chip">★ 默认</span>' : "") +
+    providerHealthDot(name);
   row.innerHTML = `
     ${providerAvatar(name)}
     <span class="svc-main">
@@ -288,6 +299,15 @@ function renderProviderDetail(name) {
     </div>
 
     <div class="sec-title-row">
+      <h4 class="sec-title">连接测试</h4>
+      <button class="btn-ghost test-conn" type="button" title="做一次最小真实调用，验证 Key、地址与模型真的可用；同时探测模型是否在服务列表、上下文窗口多大">🔌 测试连接</button>
+    </div>
+    <div class="flat-panel">
+      <div class="panel-note" id="test-conn-note">还没有测试：点右上角「测试连接」。检测的是「能不能真的对话」，比模型列表更严格。</div>
+      <div id="test-conn-detail" class="field-tip hidden"></div>
+    </div>
+
+    <div class="sec-title-row">
       <h4 class="sec-title">可用模型</h4>
       <button class="btn-ghost fetch" type="button" title="用上面填的地址和 Key 检测连接并拉取模型列表；地址或 Key 不对时在这里给出原因">⬇ 检测并获取模型</button>
     </div>
@@ -433,6 +453,59 @@ function renderProviderDetail(name) {
       note("✗ " + e.message, false);
     }
   };
+
+  // 连接测试：最小真实调用（1 token 非流式），比列表检测更严格。
+  // 结果同步进健康缓存，列表行的状态灯随之更新。
+  const runTest = async () => {
+    const btn = q(".test-conn");
+    const noteEl = document.getElementById("test-conn-note");
+    const detailEl = document.getElementById("test-conn-detail");
+    const params = {
+      name,
+      kind: q("select[data-f='kind']").value,
+      base_url: q('input[data-f="base_url"]').value.trim(),
+      api_key: q('input[data-f="api_key"]').value.trim(),
+      model: (p2activeModel() || "").trim(),
+    };
+    btn.disabled = true;
+    noteEl.textContent = "测试中…正在向该服务发起一次最小对话调用（几秒内完成）";
+    noteEl.className = "panel-note";
+    detailEl.classList.add("hidden");
+    try {
+      const r = await request("model.test", params);
+      if (r.ok) {
+        const parts = [`✓ 连接正常（${r.latency_ms} ms）`];
+        if (r.model_listed === true) parts.push("模型在服务列表中");
+        else if (r.model_listed === false) parts.push("⚠ 模型不在 /models 列表（部分服务不提供列表，可忽略）");
+        if (r.context_limit) parts.push(`上下文窗口 ${r.context_limit.toLocaleString()} tokens`);
+        noteEl.textContent = parts.join(" · ");
+        noteEl.className = "panel-note ok";
+        providerHealthCache[name] = { level: "ok" };
+      } else {
+        noteEl.textContent = `✗ ${r.title || "连接失败"}${r.error ? "：" + r.error : ""}`;
+        noteEl.className = "panel-note bad";
+        if (r.advice) {
+          detailEl.textContent = "建议：" + r.advice;
+          detailEl.classList.remove("hidden");
+        }
+        providerHealthCache[name] = { level: "down" };
+      }
+      renderProviderList(); // 状态灯刷新
+    } catch (e) {
+      noteEl.textContent = "✗ " + e.message;
+      noteEl.className = "panel-note bad";
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  // 当前编辑中的模型名：优先已启用列表的当前项，退回配置里的 model
+  const p2activeModel = () => {
+    const cur = providerCfg.providers[name];
+    if (!cur) return "";
+    if (cur.is_active && cur.active_model) return cur.active_model;
+    return cur.model || "";
+  };
+  q(".test-conn").onclick = () => runTest();
 
   // 检测连接 / 拉取模型是同一个动作：向该服务查询可用模型列表，顺带验证地址与 Key
   const probeFill = async () => {

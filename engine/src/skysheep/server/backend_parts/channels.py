@@ -413,27 +413,28 @@ class ChannelsMixin:
     async def channel_ensure_session(self, channel_name: str) -> str:
         """取（或建）某个渠道绑定的会话。不切活动会话指针——渠道与桌面可并行。
 
-        渠道会话固定归到「远程连接」项目（不落当前项目或快聊）：渠道对话的
-        工作目录与桌面项目无关。绑定指向的会话必须属于该项目：会话可能被
-        桌面端移到别的项目或删除，此时并到下方的自愈路径重开一个，而不是把
-        别的项目的会话挂进渠道的工作目录与门控下（归属校验，同 B 族）。
+        渠道会话归属「产生它时桌面所在的项目」（用户在渠道里操作的就是桌面
+        当时的项目，对话应归到那个项目名下）：跟随当前项目——桌面切了项目，
+        渠道下一条消息会在新项目下开新会话（旧会话留在原项目可查）；无项目
+        态落快聊。绑定指向的会话必须属于当前项目：项目切换/会话删除都会走
+        到下方的自愈路径重开，而不是把别的项目的会话挂进渠道的门控下
+        （归属校验，同 B 族）。工作目录随归属（真实项目→项目目录）。
         """
-        remote_pid = await self._remote_project_id()
+        target_pid = self._cur_project_id()
         bound = await self.store.get_channel_binding(channel_name)
-        if bound and await self.store.get_session_for_project(bound, remote_pid) is not None:
+        if bound and await self.store.get_session_for_project(bound, target_pid) is not None:
             # 绑定存在但 runtime 可能不在：重启后首次使用、或该会话被桌面端切走时。
             # 这里必须补建，否则 channel_run 会因「会话不存在」直接失败。
             await self._get_channel_runtime(bound, channel_name)
             return bound
-        sess = await self.store.create_session(remote_pid, title=f"🤖 {channel_name}")
+        sess = await self.store.create_session(target_pid, title=f"🤖 {channel_name}")
         await self.store.set_channel_binding(channel_name, sess.id)
         await self._get_channel_runtime(sess.id, channel_name)
         return sess.id
 
     async def channel_new_session(self, channel_name: str) -> str:
-        """给渠道开一个新会话（/new），旧的保留可查。固定挂在「远程连接」项目下。"""
-        remote_pid = await self._remote_project_id()
-        sess = await self.store.create_session(remote_pid, title=f"🤖 {channel_name}")
+        """给渠道开一个新会话（/new），旧的保留可查。归当前项目（无项目态落快聊）。"""
+        sess = await self.store.create_session(self._cur_project_id(), title=f"🤖 {channel_name}")
         await self.store.set_channel_binding(channel_name, sess.id)
         await self._get_channel_runtime(sess.id, channel_name)
         return sess.id
@@ -443,24 +444,24 @@ class ChannelsMixin:
 
         与 _get_runtime 的差别只在 gate——渠道的权限姿态必须由渠道决定：
         默认门控会产出 PermissionRequest 并无限期等前端，渠道场景下没有前端。
-        工作目录与白名单归属都走「远程连接」项目（工作目录＝数据目录下的
-        remote-control 文件夹，不再借用用户主目录；文件/命令类工具本就在
-        ChannelGate 允许清单默认拒绝之列）。
+        工作目录随会话归属（_session_project）：归真实项目就在项目目录里干活，
+        旧「远程连接」会话仍在数据目录 remote-control 文件夹、快聊在 default。
+        门控姿态不随项目变：只读 + 渠道 allowed_tools 放行，写/执行走聊天
+        审批或拒绝；项目白名单不随渠道会话生效（无人值守口径，写操作必须
+        经聊天窗口逐次确认或渠道级预授权）。
         """
         rt = self.runtimes.get(session_id)
         if rt is not None:
             return rt
-        remote_pid = await self._remote_project_id()
-        # 渠道会话的真实工作目录：数据目录 remote-control 文件夹（原为用户主目录）。
-        remote_dir = self._remote_workdir()
+        project_id, workdir = await self._session_project(session_id)
         section = dict((self.cfg.channels.platforms or {}).get(channel_name) or {})
         gate = ChannelGate(
             allowed=list(section.get("allowed_tools") or []),
             approve_enabled=bool(section.get("approve_enabled", False)),
             approve_timeout=int(self.cfg.channels.approve_timeout),
             store=self.store,
-            project_id=remote_pid,
-            working_dir=remote_dir,
+            project_id=project_id,
+            working_dir=workdir,
         )
         # notify 绑定建好的 gate：审批卡优先回本轮发起消息所在的聊天（审查 P3-15）
         gate.notify = lambda pending, _g=gate: self._notify_channel_approval(
@@ -472,7 +473,7 @@ class ChannelsMixin:
             agent=self._build_agent(
                 provider=self.provider,
                 gate=gate,
-                working_dir=remote_dir,
+                working_dir=workdir,
                 session_id=session_id,
                 recorder=recorder,
             ),
@@ -575,12 +576,11 @@ class ChannelsMixin:
                     channel_name = ""
             if not channel_name:
                 return {"error": "这个会话已不是渠道会话了，发送 /new 开一个新的"}
-            # 自愈前先验归属：会话被移到别的项目后不能挂回渠道执行（同 B 族）。
-            # 渠道会话的归属项目是「远程连接」，不再随当前项目走。
-            if await self.store.get_session_for_project(
-                session_id, await self._remote_project_id()
-            ) is None:
-                return {"error": "这个会话已不在「远程连接」项目里，发送 /new 开一个新的"}
+            # 自愈前先确认会话还在（可能被删）：归属不再按固定项目检查——
+            # 渠道会话归「产生它时所在的项目」，会话自身携带归属，runtime
+            # 与门控都按它解析（_get_channel_runtime）。
+            if await self.store.get_session(session_id) is None:
+                return {"error": "这个会话已不存在，发送 /new 开一个新的"}
             rt = await self._get_channel_runtime(session_id, channel_name)
         # 本轮发起人写进门控：审批决定只认他（见 ChannelGate.submit_latest）。
         gate = self._channel_gates.get(session_id)
@@ -648,26 +648,35 @@ class ChannelsMixin:
         """给 /status 命令用的简短状态。"""
         sess = await self.store.get_session(session_id)
         title = (sess.title if sess else "") or "（无标题）"
+        if sess is not None and sess.project_id is None:
+            proj_name, workdir = "快聊", self._quick_workdir()
+        elif sess is not None:
+            proj = await self.store.get_project(sess.project_id)
+            proj_name = f"「{proj.name}」" if proj else "未知项目"
+            _, workdir = await self._session_project(session_id)
+        else:
+            proj_name, workdir = "未知项目", None
         return (
             f"会话：{title}\n"
             f"模型：{self.provider_name or '未配置'} / {self.provider_model or '-'}\n"
-            "项目：远程连接（渠道会话的固定项目）\n"
-            f"工作目录：{self._remote_workdir()}\n"
+            f"项目：{proj_name}（渠道会话归产生它的项目）\n"
+            f"工作目录：{workdir if workdir is not None else '无'}\n"
             f"上下文：{self._context_limit():,} tokens"
         )
 
     async def channel_list_sessions(self) -> list[dict]:
-        """渠道端 /sessions：只列「远程连接」项目的会话（审查 P3-14）。
+        """渠道端 /sessions：只列渠道自己建的会话（审查 P3-14）。
 
-        会话标题默认由首条消息生成，属于桌面用户的输入内容——桌面当前项目
-        的会话清单不该透给渠道侧（那里只该看到渠道自己的会话）。
+        渠道会话归产生它的项目、散在各项目下，不再有一个专属项目可查；
+        按创建时的 🤖 标题前缀识别（渠道会话标题自动生成不覆盖它，
+        _auto_title 只在 wants_title 时跑，渠道路径不触发）。桌面用户自己的
+        会话清单依然不透给渠道侧。
         """
-        remote_pid = await self._remote_project_id()
-        rows = (
-            await self.store.list_sessions(remote_pid)
-            if remote_pid is not None
-            else []
-        )
+        rows = [
+            s
+            for s in await self.store.list_sessions()  # 全量后按前缀过滤，量级可控
+            if (s.title or "").startswith("🤖")
+        ]
         current_ids = set(self._channel_gates.keys())
         return [
             {

@@ -748,6 +748,9 @@ class TeamMemberGate:
     async def authorize(self, tool, input_dict):
         pending = await self._inner.authorize(tool, input_dict)
         if pending is not None:
+            # 固定字段（origin）与 note 前缀双通道：origin 给前端结构化渲染，
+            # note 前缀保证 CLI/渠道/回放等纯文本面也能看到来源
+            pending.origin = pending.origin or self._member
             prefix = f"来自队员『{self._member}』"
             pending.note = f"{prefix}：{pending.note}" if pending.note else f"{prefix}的权限请求"
         return pending

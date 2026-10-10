@@ -27,6 +27,7 @@ from ...mcp import (
     resolve_runtime_command,
     save_servers,
 )
+from ..audit import record_audit
 
 logger = logging.getLogger("skysheep.security")
 
@@ -181,9 +182,20 @@ class McpMixin:
             cfg = configs.get(n)
             # 审查 S-09：http 明文 + 鉴权头 = Bearer 凭据可被中间人截获。
             # 只给前端一个布尔，headers 内容（含密钥）不下发。
+            # 2026-10 放宽：纯 http 但无鉴权头也给低级警告——连接内容可被
+            # 窃听/篡改的风险仍在，只是不如带凭据的严重（前端 chip 分级显示）。
+            plain_http = bool(
+                cfg is not None and not cfg.headers
+                and str(cfg.url or "").lower().startswith("http://")
+            )
             insecure = bool(
                 cfg is not None and cfg.headers
                 and str(cfg.url or "").lower().startswith("http://")
+            )
+            # 本机地址（localhost/127.0.0.1）不走网络，不给明文警告
+            url_host = str(cfg.url or "").lower() if cfg is not None else ""
+            local_http = any(
+                h in url_host for h in ("localhost", "127.0.0.1", "[::1]")
             )
             out.append({
                 "name": n, "connected": st.connected, "enabled": st.enabled,
@@ -192,6 +204,10 @@ class McpMixin:
                 "reconnecting": getattr(st, "reconnecting", False),
                 "restarts": getattr(st, "restarts", 0),
                 "insecure_http": insecure,
+                "plain_http": plain_http and not local_http,
+                # 供应链溯源（只读展示；可能来自用户手编的 mcp.json，按普通文本看）
+                "installed_from": str(getattr(cfg, "installed_from", "") or ""),
+                "installed_at": str(getattr(cfg, "installed_at", "") or ""),
             })
         return out
 
@@ -217,6 +233,15 @@ class McpMixin:
             servers = parse_file(path)
         else:
             raise RuntimeError("请粘贴 MCP 配置，或指定一个 .json 文件路径")
+        # 溯源标记：粘贴/文件导入路径，写入前给每个服务补上来源与时间；
+        # 用户配置里已带的不覆盖（尊重手写信息）
+        from datetime import datetime
+
+        _now = datetime.now().isoformat(timespec="seconds")
+        for cfg_raw in servers.values():
+            if isinstance(cfg_raw, dict) and not cfg_raw.get("installed_at"):
+                cfg_raw["installed_from"] = str(cfg_raw.get("installed_from") or "import")
+                cfg_raw["installed_at"] = _now
         target = self._mcp_global_path() if scope == "global" else self._mcp_project_path()
         if target is None:
             raise RuntimeError("项目级 MCP 配置需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。")
@@ -231,6 +256,12 @@ class McpMixin:
 
         if reconnect and result["added"]:
             await self._sync_mcp_changes()
+        if result["added"]:
+            record_audit(
+                skysheep_home(), kind="mcp", action="install", scope=scope,
+                name="、".join(result["added"]),
+                detail=f"导入 {len(result['added'])} 个服务（粘贴/文件）",
+            )
         result["needs_confirm"] = False
         result["scope"] = scope
         result["mcp"] = self._mcp_status_list(self.mcp)
@@ -260,8 +291,12 @@ class McpMixin:
         timeout: float = 0.0,
         scope: str = "global",
         overwrite: bool = True,
+        installed_from: str = "",
     ) -> dict:
-        """手工填写一个 MCP 服务（分字段表单），存进 mcp.json。"""
+        """手工填写一个 MCP 服务（分字段表单），存进 mcp.json。
+
+        installed_from：供应链溯源（manual/preset/import），预设添加时传 preset。
+        """
         raw: dict = {}
         if command.strip():
             raw["command"] = command.strip()
@@ -280,20 +315,33 @@ class McpMixin:
             raw["readonly"] = True
         if timeout and timeout > 0:
             raw["timeout"] = timeout
+        # 溯源标记：手动表单 = manual（预设传入 preset）；已有同名配置时保留
+        # 原 provenance（只是改参数保存，不是重新引入），首次写入才记时间与来源
+        from datetime import datetime
+
         try:
-            cfg = normalize_server(raw)
             target = self._mcp_global_path() if scope == "global" else self._mcp_project_path()
             if target is None:
                 raise RuntimeError(
                     "项目级 MCP 配置需要先打开一个项目——先在侧栏「项目」区点 ＋ 添加项目。"
                 )
+            prior = None
+            try:
+                prior = load_servers(target).get(name.strip()) if target.exists() else None
+            except Exception:  # noqa: BLE001 - 读不出来按首次添加处理
+                prior = None
+            if isinstance(prior, dict) and prior.get("installed_at"):
+                raw["installed_from"] = str(prior.get("installed_from") or "")
+                raw["installed_at"] = str(prior.get("installed_at") or "")
+            else:
+                raw["installed_from"] = installed_from or "manual"
+                raw["installed_at"] = datetime.now().isoformat(timespec="seconds")
             # 表单没有「停用」字段：覆盖一个已停用的同名服务时保留停用状态，
             # 否则只是改个参数保存，服务就被顺手重新启用并拉起（stdio 等于
             # 立即执行本机命令），超出用户这次操作表达的意思
-            prior = load_servers(target).get(name.strip())
             if isinstance(prior, dict) and prior.get("enabled") is False:
                 raw["enabled"] = False
-                cfg = normalize_server(raw)
+            cfg = normalize_server(raw)
             # 分字段表单：用户看着 command/args 输入框亲手填的，保存动作本身
             # 就是明确意图（M10 的确认只针对粘贴/导入这种「命令不可见」的路径）
             result = import_servers(
@@ -301,6 +349,12 @@ class McpMixin:
             )
         except MCPInstallError as e:
             raise RuntimeError(str(e)) from e
+        if result["added"]:
+            record_audit(
+                skysheep_home(), kind="mcp", action="install", scope=scope,
+                name=name.strip(),
+                detail=("预设添加" if installed_from == "preset" else "表单保存"),
+            )
         if result["added"]:
             await self._sync_mcp_changes()
         result["scope"] = scope
@@ -351,6 +405,7 @@ class McpMixin:
             readonly=preset["readonly"],
             scope=scope,
             overwrite=False,
+            installed_from="preset",
         )
         result["preset"] = preset["name"]
         if result.get("skipped"):
@@ -388,6 +443,11 @@ class McpMixin:
             except MCPInstallError:
                 raise RuntimeError(str(e)) from e
         await self._sync_mcp_changes()
+        record_audit(
+            skysheep_home(), kind="mcp", action="remove",
+            scope="project" if path == project_path else "global",
+            name=name,
+        )
         result["scope"] = "project" if path == project_path else "global"
         result["mcp"] = self._mcp_status_list(self.mcp)
         return result
@@ -419,6 +479,11 @@ class McpMixin:
         if hit is None:
             raise RuntimeError(f"找不到 MCP 服务：{name}")
         await self._sync_mcp_changes()
+        record_audit(
+            skysheep_home(), kind="mcp", action="enable" if enabled else "disable",
+            scope="project" if hit == project_path else "global",
+            name=name,
+        )
         result: dict = {
             "name": name,
             "enabled": enabled,

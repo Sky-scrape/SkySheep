@@ -17,6 +17,7 @@ import shutil
 import subprocess  # noqa: F401  测试按模块属性 patch Popen
 import sys
 import time
+import zipfile
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -97,6 +98,9 @@ from ..core.roundtable import (
     run_roundtable,
     usage_rows,
 )
+from ..core.runs import (
+    RunCenter,
+)
 from ..core.subagent import (
     BUILTIN_ROLE_PROMPTS,
     CheckTaskTool,
@@ -143,6 +147,7 @@ from ..mcp import (
 from ..messages import ImageBlock, Message, TextBlock
 from ..messages import system_text as history_system_text
 from ..models import Provider
+from ..models.diagnostics import HealthRegistry, test_connection
 from ..models.factory import build_provider
 from ..models.probe import _is_local, probe_context_limit, probe_provider_models
 from ..obs import info as obs_info
@@ -159,11 +164,13 @@ from ..skills.gallery import bundled_dir_for, bundled_update_available, load_gal
 from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
     SkillInstallError,
+    _scan_skills_in_dir,
     install_from_url,
     remove_skill,
     scan_computer_skills,
 )
 from ..skills.installer import install as install_skill
+from ..skills.loader import _load_skill_from_dir
 from ..textio import encode_text, read_text_file, write_text_atomic, write_text_file
 from ..tools import (
     COMPUTER_TOOL_NAMES,
@@ -178,6 +185,7 @@ from ..tools.memory import (
 from ..tools.memory_embed import schedule_warmup
 from ..tools.pipeline import PipelineWriteTool
 from ..tools.skill import LoadSkillTool
+from .audit import record_audit
 from .backend_parts._shared import EmitFn, ProjectCtx, SessionRuntime, collect_stream_text
 from .backend_parts.automation import AutomationMixin
 from .backend_parts.channels import (
@@ -570,6 +578,8 @@ class QueuedTurn:
     # 总管的 {provider, model}；仅建队路径消费，后续轮忽略
     director_mode: str = "user"
     director: dict | None = None
+    # 本机/远程客户端（入队时随发送固定）：决定引用注入的项目归属口径
+    local: bool = True
 
     def resolve(self, result: dict) -> None:
         if not self.fut.done():
@@ -940,9 +950,22 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 访问令牌的失败节流与留痕：设置页展示「有谁在试你的门」，节流让连错
         # 变得不划算。都是内存态，重启即清空（真实排查看桌面日志）。
         self.token_throttle = TokenThrottle()
+        # 运行中心：全产品可观测运行（主轮/子代理任务）统一登记 + 崩溃恢复。
+        # 快照落 ~/.skysheep/runs.json（write_text_atomic），启动装载把上次
+        # 在跑的记为 interrupted（见 core/runs.py）。
+        self.runs = RunCenter(skysheep_home() / "runs.json")
+        # 供应商健康登记：agent 循环上报成功/失败，设置页状态灯读它
+        self.provider_health = HealthRegistry()
+        self._run_seq = 0  # 运行 id 自增（turn-<n>）
         self._text_meta_cache: dict[str, tuple[int, str, str]] = {}
         self._token_failures: list[dict] = []  # 最近 TOKEN_FAILURE_LOG_MAX 条 {ts, ip, where}
         self._token_failure_total = 0  # 自启动以来的失败总数（留痕列表只留最近几条）
+        # 最近成功的远程访问（HTTP/WS 验令牌通过）：只留最近的，重启清零。
+        # 与失败留痕对称，设置页展示「最近访问」；只记 ip/时间/渠道，不记令牌。
+        self._access_log: list[dict] = []  # {ts, ip, where}
+        # 在线 WS 连接登记：与 ws_emitters 平行维护（广播仍走 emitters，零侵入），
+        # 条目 {emit, ip, origin, connected_at, ua, kick}。仅内存态。
+        self.ws_connections: list[dict] = []
         # 一键重启的两个钩子，由宿主注入（见 cli/app.py._start_backend 与 desktop.py）：
         # request_shutdown 让 uvicorn 优雅退出（走完 lifespan 收尾）；restart_hook
         # 是桌面专属——关窗口/托盘收尾，不注入时服务停了窗口还在（浏览器模式够用）。
@@ -999,7 +1022,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         session_id 透传给钩子命令的 stdin JSON。ctx 传入时会话 runtime 的
         工具注册表按该项目上下文装配（子代理/流水线绑定会话所属项目）。
         """
-        return Agent(
+        agent = Agent(
             provider=provider,
             registry=self._build_full_registry(recorder, ctx=ctx),
             gate=gate,
@@ -1017,6 +1040,25 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             sandbox_level=self.cfg.shell.sandbox_level,
             use_ripgrep=self.cfg.search.use_ripgrep,
         )
+        agent.on_provider_ok = self._provider_on_ok
+        agent.on_provider_error = self._provider_on_error
+        return agent
+
+    def _provider_on_ok(self, name: str) -> None:
+        """Agent 循环上报「模型调用成功」：健康灯转绿（延迟拿不到精确值，记 0）。"""
+        if name:
+            try:
+                self.provider_health.record_ok(name)
+            except Exception:  # noqa: BLE001 - 健康灯不影响主流程
+                pass
+
+    def _provider_on_error(self, name: str, diag) -> None:
+        """Agent 循环上报「模型调用失败」：健康灯按分类转黄/红。"""
+        if name:
+            try:
+                self.provider_health.record_error(name, diag)
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- 会话的项目上下文（跨项目分屏列的 per-runtime 绑定） ----
 
@@ -1055,8 +1097,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return d
 
     def _quick_workdir(self) -> Path:
-        """快聊会话的工作目录：数据目录下的 default 文件夹。"""
-        return self._fixed_workdir("default")
+        """快聊会话的工作目录：数据目录下专用的 fast-talk 文件夹。
+
+        不与 default 混用（用户指定）：快聊的文件操作全部落在自己的隔离目录里，
+        与其他默认目录互不干扰。"""
+        return self._fixed_workdir("fast-talk")
 
     def _remote_workdir(self) -> Path:
         """远程连接（渠道）会话的工作目录：数据目录下的 remote-control 文件夹。"""
@@ -1065,7 +1110,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     async def _session_project(self, session_id: str) -> tuple[int | None, Path | None]:
         """会话所属项目 (project_id, 工作目录)。
 
-        工作目录解析口径：快聊（无项目）→ 数据目录 default 文件夹；远程连接
+        工作目录解析口径：快聊（无项目）→ 数据目录 fast-talk 专用文件夹；远程连接
         项目 → 数据目录 remote-control 文件夹（两类会话都有真实、稳定的工作
         目录，不再借用引擎当前目录）；项目记录缺失 → 回退引擎当前工作目录；
         目录已消失 → 可读报错而不是静默换目录干活——那等于让对话在错误的
@@ -1075,7 +1120,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if sess is None:
             return None, self.working_dir
         if sess.project_id is None:
-            # 快聊：数据目录 default 文件夹（真实、稳定的工作目录）
+            # 快聊：数据目录 fast-talk 专用文件夹（真实、稳定、独立于 default）
             return None, self._quick_workdir()
         proj = await self.store.get_project(sess.project_id)
         if proj is None or not proj.root_path:
@@ -1111,6 +1156,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 sandbox_level=self.cfg.shell.sandbox_level,
                 use_ripgrep=self.cfg.search.use_ripgrep,
             )
+            tm.run_center = self.runs
             self._project_tasks[key] = tm
         return tm
 
@@ -1458,10 +1504,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # Mods 暂存目录清扫：install 与 confirm 之间重启遗留的 .importing-*
         # （只启动期调一次，运行期可能正有未确认的安装预览占着 staging）
         self.sweep_mod_staging()
-        # 「远程连接」固定项目：启动即建（飞书/微信等渠道对话的归属），
-        # 与是否配置渠道无关——侧栏里它是一个常驻分组
-        await self.store.ensure_remote_project()
-        # 快聊 / 远程连接的固定工作目录：数据目录下真实文件夹（default /
+        # 「远程连接」固定项目不再启动即建：没有渠道会话时侧栏不出现这个分组，
+        # 删除后也不再复活；渠道真正收到消息时经 _remote_project_id 幂等重建
+        # 快聊 / 远程连接的固定工作目录：数据目录下真实文件夹（fast-talk /
         # remote-control），启动即建——两类会话从此有稳定的工作目录
         self._quick_workdir()
         self._remote_workdir()
@@ -1535,21 +1580,22 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """当前项目 id；无项目态返回 None（快聊/无项目语义）。"""
         return self.project.id if self.project is not None else None
 
-    async def _remote_project_id(self) -> int:
+    async def _remote_project_id(self, ensure: bool = True) -> int | None:
         """「远程连接」固定项目的 id（幂等创建 + 实例内缓存）。
 
         渠道（飞书/微信）会话的归属项目：与桌面工作目录无关，见
-        store.ensure_remote_project。缓存失效不需处理——该项目拒绝删除。
-        """
-        if self._remote_project_id_cache is None:
-            proj = await self.store.ensure_remote_project()
-            self._remote_project_id_cache = proj.id
-        return self._remote_project_id_cache
-
-    async def _reject_remote_project(self, project_id: int, action: str) -> None:
-        """固定项目「远程连接」不可删除/切换的统一拦截。"""
-        if project_id == await self._remote_project_id():
-            raise RuntimeError(f"「远程连接」是固定项目（飞书/微信对话的归属），不能{action}")
+        store.ensure_remote_project。ensure=False 用于归属比对类的只读查询
+        （_get_owned_session / 分屏 interactive 判定）：项目不存在时不创建、
+        返回 None——没有项目就没有渠道会话，比对自然不命中。缓存失效：
+        项目被删除时在 delete_project 里重置，下次渠道使用经 ensure 重建。"""
+        if self._remote_project_id_cache is not None:
+            return self._remote_project_id_cache
+        proj = (await self.store.ensure_remote_project()) if ensure \
+            else await self.store.get_remote_project()
+        if proj is None:
+            return None
+        self._remote_project_id_cache = proj.id
+        return proj.id
 
     def is_remote_project(self, project) -> bool:
         """按哨兵路径判断是否「远程连接」固定项目（同步，project.list 等渲染用）。"""
@@ -1776,7 +1822,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         SkillLoader（按目录重挂载过重），全局记忆本就跨项目。
         workdir 为 None 是无项目态（兜底：引擎没开项目且会话缺归属记录），
         提示词里说明没有工作目录、文件工具会拒绝。快聊/远程连接固定在数据
-        目录 default / remote-control 文件夹，不落 None 分支，文件工具可用。
+        目录 fast-talk / remote-control 文件夹（快聊不与 default 混用），
+        不落 None 分支，文件工具可用。
         memory_query 是记忆检索化（第一期）的查询串（「本轮用户消息 + 最近对话
         摘要」，见 _memory_retrieval_query）：记忆超过 MEMORY_RETRIEVAL_THRESHOLD
         时只注入相关条目；空串表示拿不到本轮查询（轮外的 set_system 场景），
@@ -2010,7 +2057,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         interactive = bool(local) or (
             sess.project_id is None
             or sess.project_id == cur_pid
-            or sess.project_id == await self._remote_project_id()
+            or sess.project_id == await self._remote_project_id(ensure=False)
         )
         msgs = await self.store.load_messages(session_id)
         return {
@@ -2068,21 +2115,31 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         except Exception:  # noqa: BLE001 - 校准样本拿不到不该挡住发消息
             return []
 
-    async def _build_refs_context(self, refs: list[str], project_id: int | None = None) -> str:
+    async def _build_refs_context(
+        self, refs: list[str], project_id: int | None = None, local: bool = True,
+    ) -> str:
         """把被引用会话的记录拼成注入本轮的上下文块。
 
-        会话不存在、不属于目标项目或没有可读消息时静默跳过；超长的保留尾部
-        （最近的对话与当前任务最相关），并标注省略。格式与 /export 的导出文本
-        一致。归属校验（安全审查 B2）：引用列表由客户端提交，不校验会把
-        别的项目的历史注入当前 Agent 上下文。目标项目取「本轮会话所属项目」
-        （runtime 的项目上下文）：跨项目分屏列引用它自己项目的对话照常可用，
-        引用别的项目仍然剔除。
+        会话不存在、没有可读消息时静默跳过；超长的保留尾部（最近的对话与当前
+        任务最相关），并标注省略。格式与 /export 的导出文本一致。
+
+        项目归属（安全审查 B2）：引用列表由客户端提交，必须校验归属，否则远程
+        客户端拿到别的项目的 session_id 就能把他人历史注入自己项目的上下文。
+        本机桌面端（local=True）已放开跨项目引用：注入时标注来源项目，提醒
+        其中提到的路径属于另一工作目录；远程客户端（local=False）仍按「本轮
+        会话所属项目」严格剔除。目标项目取 runtime 的项目上下文：跨项目分屏
+        列引用它自己项目的对话照常可用。快聊会话（project_id 为 NULL）在
+        本机两端都可被引用，来源标注为「快聊」。
         """
         target_pid = project_id if project_id is not None else self._cur_project_id()
         blocks: list[str] = []
         for rid in refs:
-            if await self.store.get_session_for_project(rid, target_pid) is None:
-                continue  # 不属于目标项目的会话：当作不存在，不注入
+            if local:
+                sess = await self.store.get_session(rid)
+            else:
+                sess = await self.store.get_session_for_project(rid, target_pid)
+            if sess is None:
+                continue  # 不存在（远程端含：不属于目标项目的会话）：当作不存在，不注入
             title = await self.store.get_session_title(rid)
             try:
                 msgs = await self.store.load_messages(rid)
@@ -2093,7 +2150,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 continue
             if len(text) > self.REF_MAX_CHARS:
                 text = "（前文过长，此处省略——以下是对话的最近部分）\n" + text[-self.REF_MAX_CHARS:]
-            blocks.append(f"──── 引用对话「{title or '未命名会话'}」 ────\n{text}")
+            head = f"──── 引用对话「{title or '未命名会话'}」"
+            if local and sess.project_id != target_pid:
+                src = "快聊"
+                if sess.project_id is not None:
+                    proj = await self.store.get_project(sess.project_id)
+                    src = f"项目「{proj.name}」" if proj else "其他项目"
+                head += (
+                    f"（来自{src}；其中提到的文件路径与约定属于另一工作目录，"
+                    "仅供背景参考，不要据此操作当前项目之外的文件）"
+                )
+            blocks.append(head + f" ────\n{text}")
         if not blocks:
             return ""
         return (
@@ -2248,6 +2315,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
                 team=team, adversarial=adversarial,
                 director_mode=director_mode, director=director,
+                local=local,
             )
             if rt_now is not None:
                 rt_now.queue.append(item)
@@ -2280,6 +2348,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
                 team=team, adversarial=adversarial,
                 director_mode=director_mode, director=director,
+                local=local,
             )
         except asyncio.CancelledError:
             # 用户在 turn 真正开始前点了停止：无产出，返回诚实的 stopped 结果，
@@ -2300,7 +2369,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "context_limit": runtime.agent.context_limit_tokens,
                 "context_detail": self._context_detail(runtime.agent),
             }
-        except BaseException:
+        except BaseException as e:
+            # 备用模型自动切换（可选配置 fallback_model）：主模型失败时切到
+            # 备用服务，用户下一轮直接用新模型；本轮错误照常上抛。
+            if isinstance(e, Exception) and not isinstance(e, asyncio.CancelledError):
+                try:
+                    from ..models.diagnostics import diagnose_error as _diag
+                    d = _diag(e)
+                    if d.category in ("auth", "balance", "server", "model_missing"):
+                        await self._switch_to_fallback(reason=d.title)
+                except Exception:  # noqa: BLE001 - 切换失败不打断原异常
+                    pass
             # pipeline 启动阶段就抛出（还没走到它自己的标志管理）时把位让出来，
             # 否则后续所有消息都会误入永远无人消费的队列。
             if runtime.run_task is asyncio.current_task():
@@ -2398,11 +2477,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         adversarial: bool = False,
         director_mode: str = "user",
         director: dict | None = None,
+        local: bool = True,
     ) -> dict:
         """真正执行一轮对话（含持久化、规划模式切换、检查点保存）。
 
         多会话并行：全程使用 runtime 内的 agent/queue/recorder，
         不碰 self.agent 等活动会话指针；事件发出时注入 session_id 供前端路由。
+        local 标记客户端端别（本机桌面/远程）：决定引用注入的项目归属口径
+        （见 _build_refs_context）。
         """
         if runtime is None:
             if self.session is None:
@@ -2410,6 +2492,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             runtime = await self._get_runtime(self.session.id)
         sid = session_id or runtime.sid
         agent = runtime.agent
+        # 单轮 token 上限（单轮护栏）：估算本轮请求体积（历史 + 本条消息），
+        # 超上限直接拒绝——每日预算防线的前置，避免「一轮就烧掉全天额度」。
+        # 0 = 不限制；演示模式同样豁免。估算偏保守（消息文本按 1/3 折算）。
+        if self.cfg.turn_token_budget > 0 and not getattr(self.provider, "demo_mode", False):
+            est_turn = estimate_tokens(list(agent.history)) + len(text or "") // 3
+            if est_turn > self.cfg.turn_token_budget:
+                raise RuntimeError(
+                    f"本轮请求约 {est_turn:,} tokens，超过单轮上限 "
+                    f"{self.cfg.turn_token_budget:,}。\n"
+                    "可在输入框执行 /compact 压缩历史，或在 设置 · 高级 里"
+                    "调高「单轮 token 上限」（0 = 不限制）。"
+                )
 
         # 流式增量合并：emit_ev 下发给前端前先过一层缓冲，把连续的同类型增量
         # （text_delta / thinking_delta / roundtable_member_delta）拼成批量帧。
@@ -2430,6 +2524,24 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
         async def emit_ev(ev: dict) -> None:
             kind = ev.get("kind")
+            # 运行中心状态跟踪（best-effort：登记不存在时 update 内部 no-op）
+            if kind == "tool_call_started":
+                self.runs.update(run_id, state="tool_running",
+                                 detail="正在执行 " + str(ev.get("name") or ""))
+            elif kind == "tool_call_finished":
+                self.runs.update(run_id, state="thinking")
+            elif kind == "permission_request":
+                self.runs.update(run_id, state="waiting_permission",
+                                 detail="等待确认：" + str(ev.get("tool_name") or ""))
+            elif kind == "permission_resolved":
+                self.runs.update(run_id, state="thinking")
+            elif kind == "notice" and "自动重试" in str(ev.get("message") or ""):
+                self.runs.update(run_id, state="retrying",
+                                 detail=str(ev.get("message") or "")[:200])
+            elif kind == "error":
+                self.runs.update(
+                    run_id, state="failed", error=str(ev.get("message") or "")[:300],
+                    detail="")
             if kind == "tool_call_finished":
                 _ms = int(ev.get("duration_ms") or 0)
                 turn_stats["tool_calls"] += 1
@@ -2548,6 +2660,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if refs and not team_bound:
             refs_ctx = await self._build_refs_context(
                 refs, runtime.ctx.project_id if runtime.ctx is not None else None,
+                local=local,
             )
             if refs_ctx:
                 text = refs_ctx + text
@@ -2578,6 +2691,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         tin0, tout0 = agent.total_in_tokens, agent.total_out_tokens
         tcached0 = agent.total_cached_tokens
         runtime.run_task = asyncio.current_task()
+        # 运行中心登记：这轮作为一条可观测运行进全局列表（状态随事件更新，
+        # 终态在 finally 收口）。id 按会话维自增，重试沿用同一 id。
+        self._run_seq += 1
+        run_id = f"turn-{self._run_seq}"
+        run_retry_text = "" if regenerate else text
+        self.runs.register(
+            run_id, "turn", sid,
+            title=(sess_title or (text[:40] if text else "[图片]")),
+            state="thinking" if not roundtable else "thinking",
+            retry_text=run_retry_text,
+        )
         turn_exc: BaseException | None = None
         try:
             if team or sid in self._teams:
@@ -2731,6 +2855,27 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                         session_id=sid,
                     )
 
+        # 运行中心终态收口：取消 → cancelled；异常 → failed（带可重试标记）；
+        # 正常 → completed。团队/圆桌/对抗轮也按同一口径（meta.status 已带取消）。
+        run_final_state = "completed"
+        if stopped:
+            run_final_state = "cancelled"
+        elif turn_exc is not None:
+            run_final_state = "failed"
+        elif "cancelled" in (
+            (tm_meta or {}).get("status"),
+            (rt_meta or {}).get("status"),
+            (adv_meta or {}).get("status"),
+        ):
+            run_final_state = "cancelled"
+        elif turn_stats["tool_errors"] and not turn_stats["tool_calls"]:
+            run_final_state = "failed"
+        self.runs.update(
+            run_id, state=run_final_state,
+            error=(type(turn_exc).__name__ + ": " + str(turn_exc)[:200]) if turn_exc else None,
+            tools_used=turn_stats["tool_calls"],
+        )
+
         # 用量记录：本轮实际消耗的输入/输出 tokens（含缓存命中数，费用按缓存价拆算）
         try:
             await self.store.add_usage(
@@ -2861,6 +3006,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 chair_answers=item.chair_answers, team=item.team,
                 adversarial=item.adversarial,
                 director_mode=item.director_mode, director=item.director,
+                local=item.local,
             ))
         except Exception as e:  # noqa: BLE001 - 错误要送回等待中的请求
             item.fail(e)
@@ -5491,6 +5637,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise RuntimeError("skill not found: " + name)
         self.skills.discover()
         self._refresh_system_prompts()
+        record_audit(
+            skysheep_home(), kind="skill", action="enable" if enabled else "disable",
+            name=name,
+        )
         return {"name": name, "enabled": enabled}
 
     async def set_skill_scope(
@@ -5529,6 +5679,81 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise RuntimeError("scope 只能是 global 或 project: " + str(scope))
         return skysheep_home() / "skills"
 
+    async def preview_skill_install(self, source: str, scope: str = "global",
+                                    overwrite: bool = False) -> dict:
+        """装前预览：解析来源但不落盘，返回将要安装的技能清单（名称/描述/文件数）。
+
+        网址来源会真的下载（不做预览就无法给出有意义的清单；下载本身已被
+        域名白名单 + DNS 校验限制住），本地来源零写入。技能正文不返回——
+        预览只给「装什么」的判断依据，内容审查靠装后的 skill.body 预览。
+        """
+        import tempfile
+
+        source = str(source or "").strip()
+        if not source:
+            raise RuntimeError("缺少来源：本地路径或网址")
+        existing = {s.name for s in self.skills.all()}
+        is_url = source.lower().startswith(("http://", "https://"))
+        official = False
+        tmp_zip: Path | None = None
+        staged_tmp: Path | None = None
+        try:
+            if is_url:
+                bundled = bundled_dir_for(source)
+                if bundled is not None:
+                    staged, official = bundled, True
+                else:
+                    from ..skills.installer import download_to
+                    try:
+                        tmp_zip = await asyncio.to_thread(download_to, source)
+                    except SkillInstallError as e:
+                        raise RuntimeError(str(e)) from e
+                    staged_tmp = Path(tempfile.mkdtemp(prefix="skysheep-skill-preview-"))
+                    with zipfile.ZipFile(tmp_zip) as zf:
+                        zf.extractall(staged_tmp)
+                    staged = staged_tmp
+            else:
+                staged = Path(source).expanduser()
+            if not staged.exists():
+                raise RuntimeError("路径不存在：" + source)
+            roots = _scan_skills_in_dir(staged)
+            if not roots:
+                raise RuntimeError(
+                    f"在「{staged.name}」里没找到技能：技能包必须是含 SKILL.md 的文件夹"
+                )
+            items = []
+            for r in roots[:20]:  # 上限防烂包撑爆返回值
+                sk = _load_skill_from_dir(r, "global")
+                if sk is None:
+                    continue
+                file_count = sum(1 for f in r.rglob("*") if f.is_file())
+                items.append({
+                    "name": sk.name,
+                    "description": sk.description[:160],
+                    "version": sk.version,
+                    "files": file_count,
+                })
+            if not items:
+                raise RuntimeError("技能包里没有可识别的 SKILL.md")
+            clashes = [it["name"] for it in items if it["name"] in existing]
+            return {
+                "items": items,
+                "count": len(items),
+                "official": official,
+                "scope": scope,
+                "overwrite": overwrite,
+                "clashes": clashes,
+                "needs_overwrite": bool(clashes and not overwrite),
+            }
+        finally:
+            if tmp_zip is not None:
+                try:
+                    tmp_zip.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if staged_tmp is not None:
+                shutil.rmtree(staged_tmp, ignore_errors=True)
+
     async def install_skill(self, source: str, scope: str = "global", overwrite: bool = False) -> dict:
         """把技能装进技能目录，装完立即生效（无需重启）。
 
@@ -5539,6 +5764,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """
         root = self._skill_root(scope)
         existing = {s.name for s in self.skills.all()}
+        bundled: Path | None = None
         try:
             if str(source).strip().lower().startswith(("http://", "https://")):
                 # 官方场景模板优先用打包内副本：装一个模板在线要直连下载整仓
@@ -5569,6 +5795,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 项目级 mcp.json 等），不跟着一起洗白（安全审查低危项）
         if scope == "project":
             self.trust.refresh(touched=self._project_skills_dir())
+        installed_names = result.get("installed") or []
+        if installed_names:
+            record_audit(
+                skysheep_home(), kind="skill",
+                action="update" if overwrite else "install", scope=scope,
+                name="、".join(str(n) for n in installed_names),
+                detail=(
+                    f"网址安装（{str(source)[:120]}）"
+                    if str(source).strip().lower().startswith(("http://", "https://"))
+                    else ("官方模板" if bundled is not None else "本机导入")
+                ),
+            )
         result["scope"] = scope
         result["skills"] = [
             {
@@ -5576,6 +5814,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "source": s.source, "enabled": s.enabled,
                 "scope": s.scope, "scope_projects": list(s.scope_projects),
                 "version": s.version,
+                "origin": dict(s.origin),
                 "applies": self.skills.applies(s.name),
             }
             for s in self.skills.all()
@@ -5669,6 +5908,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if scope == "project":
             # 删掉项目技能也是用户自己的改动；来源限定在项目技能目录
             self.trust.refresh(touched=self._project_skills_dir())
+        record_audit(skysheep_home(), kind="skill", action="remove", scope=scope, name=name)
         result["scope"] = scope
         return result
 
@@ -6067,6 +6307,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "computer_control": self.cfg.computer_control,
             "browser_control": self.cfg.browser_control,
             "daily_token_budget": self.cfg.daily_token_budget,
+            "turn_token_budget": self.cfg.turn_token_budget,
+            "fallback_model": self.cfg.fallback_model,
             # 「安全与后台」的三项：定时调度总开关与命令沙箱（读取点都在各自
             # 执行路径上按当前配置取值，改完即热生效，无需重启）
             "system_schedule": self.cfg.cron.system_schedule,
@@ -6115,6 +6357,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 raise RuntimeError("每日 token 预算需要一个整数") from None
         else:
             budget = None
+        turn_budget = params.get("turn_token_budget")
+        if turn_budget is not None and turn_budget != "":
+            try:
+                turn_budget = int(turn_budget)
+            except (TypeError, ValueError):
+                raise RuntimeError("单轮 token 上限需要一个整数") from None
+        else:
+            turn_budget = None
+        fallback = params.get("fallback_model")
+        if fallback is not None:
+            fallback = str(fallback).strip()
         try:
             set_advanced_settings_in_config(
                 max_iterations=ints.get("max_iterations"),
@@ -6132,6 +6385,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     else bool(params.get("browser_control"))
                 ),
                 daily_token_budget=budget,
+                turn_token_budget=turn_budget,
+                fallback_model=None if fallback is None else fallback,
                 # 「安全与后台」三项：不传 = 不动（与其它布尔项同一姿态）；
                 # 读取点在执行路径上按配置取值，self.cfg 重载后即热生效
                 system_schedule=(
@@ -6773,6 +7028,97 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "reasoning": self.reasoning_state(),
         }
 
+    # ---- 模型诊断（models/diagnostics.py）：测试连接 / 健康状态 / 备用模型 ----
+
+    async def model_test_connection(self, params: dict) -> dict:
+        """测试连接：对指定服务做一次最小真实调用（非流式 1 token）。
+
+        与 probe_models 同一套取值口径：界面改了还没保存的地址/Key 优先，
+        没传的部分回落到已保存配置（含环境变量里的 Key）。结果含分类诊断
+        （category/title/advice）与能力探测（模型是否在列表、上下文窗口）。
+        """
+        name = str(params.get("name", "") or "")
+        pc = self.cfg.providers.get(name) if name else None
+        kind = str(params.get("kind", "") or "").strip() or (pc.kind if pc else "openai")
+        base_url = str(params.get("base_url", "") or "").strip() or (
+            (pc.base_url or "") if pc else "")
+        model = str(params.get("model", "") or "").strip() or (pc.model if pc else "")
+        api_key = str(params.get("api_key", "") or "").strip()
+        if not api_key and pc is not None:
+            api_key = resolve_api_key(name, pc) or ""
+        r = await test_connection(
+            kind=kind, base_url=base_url or None, api_key=api_key or None, model=model,
+        )
+        out = {
+            "ok": r.ok,
+            "latency_ms": r.latency_ms,
+            "model_listed": r.model_listed,
+            "context_limit": r.context_limit,
+            "model": r.model,
+            "error": r.error,
+            "category": r.category,
+            "title": r.title,
+            "advice": r.advice,
+        }
+        # 测试结果同步进健康登记：设置页状态灯立即反映
+        try:
+            if name:
+                if r.ok:
+                    self.provider_health.record_ok(name, r.latency_ms)
+                else:
+                    from ..models.diagnostics import ProviderHealth
+                    self.provider_health.set(ProviderHealth(
+                        name=name,
+                        level="down",
+                        category=r.category or "unknown",
+                        title=r.title or "连接失败",
+                        advice=r.advice or "",
+                        error=r.error[:200],
+                        latency_ms=r.latency_ms,
+                        checked_at=r.tested_at,
+                    ))
+        except Exception:  # noqa: BLE001 - 健康灯失败不影响测试结果
+            pass
+        return out
+
+    def providers_health(self) -> dict:
+        """全部模型服务的健康状态快照（设置页状态灯 / 运行中心用）。"""
+        names = list(self.cfg.providers.keys())
+        return {
+            "providers": self.provider_health.snapshot(names),
+            "current": self.provider_name,
+            "provider_error": self.provider_error,
+        }
+
+    def _fallback_target(self) -> tuple[str, str] | None:
+        """解析备用模型配置 "provider:model"；无效或指向当前服务时返回 None。"""
+        raw = (self.cfg.fallback_model or "").strip()
+        if not raw or ":" not in raw:
+            return None
+        fname, _, fmodel = raw.partition(":")
+        fname, fmodel = fname.strip(), fmodel.strip()
+        pc = self.cfg.providers.get(fname)
+        if pc is None or pc.kind == "fake" or fname == self.provider_name:
+            return None
+        return (fname, fmodel or pc.model)
+
+    async def _switch_to_fallback(self, reason: str) -> bool:
+        """主模型持续失败时自动切到备用模型。成功返回 True（并发安全：
+        provider_name 比对在事件循环内同步段完成，不会双切）。"""
+        target = self._fallback_target()
+        if target is None:
+            return False
+        fname, fmodel = target
+        if self.provider_name == fname and self.provider_model == fmodel:
+            return False
+        try:
+            await self.switch_model(fname, model=fmodel or None)
+        except Exception as e:  # noqa: BLE001 - 备用切换失败只记录，不打断错误路径
+            obs_warning("provider", f"fallback switch failed: {e}")
+            return False
+        obs_info("provider", f"switched to fallback {fname}:{fmodel}",
+                 reason=reason[:120])
+        return True
 
     # ---- 工作项目切换（应用内设定工作目录，对标 Claude Code /add-dir 等） ----
 
@@ -6844,6 +7190,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             sandbox_level=self.cfg.shell.sandbox_level,
             use_ripgrep=self.cfg.search.use_ripgrep,
         )
+        self.tasks.run_center = self.runs
 
         # 项目级 mcp.json 指向新目录 → 差量接入新目录的服务器；顺带用新技能/子代理重建完整注册表。
         # 启动路径（connect_mcp=False）跳过：连接统一走 setup 的后台任务，避免同步等待与双重连接
@@ -6964,8 +7311,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         删除是真实的删除：当前项目删掉后**不再重建一条同目录的新记录**——
         还有别的项目就切到最近的一个，一个都不剩就进入无项目态（列表为空，
         快聊照常可用）。无项目态也是合法状态，重启后保持。
-        「远程连接」是固定项目（渠道会话的归属），拒绝删除。"""
-        await self._reject_remote_project(project_id, "删除")
+        「远程连接」也可删除：删掉后渠道再用时经 ensure_remote_project
+        自动重建（下方重置实例内缓存，避免渠道会话挂到已删除的项目 id 上）。"""
         is_current = self.project is not None and project_id == self.project.id
         if is_current and self._run_task and not self._run_task.done():
             raise RuntimeError("当前有任务正在运行，请先停止再删除项目")
@@ -6973,6 +7320,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         removed = await self.store.delete_project(project_id)
         if not removed:
             raise RuntimeError("项目不存在，可能已被删除")
+        if proj is not None and self.is_remote_project(proj):
+            self._remote_project_id_cache = None  # 渠道再用时经 ensure 重建
         # 该项目的检查点目录（改前文件快照）一并清掉：项目没了，留着它的
         # 完整文件快照只会占磁盘——且对应 store 已被替换，永远不会再被淘汰
         if proj is not None and proj.root_path:
@@ -7481,6 +7830,133 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "included": included,
         }
 
+    async def export_full_data(self, params: dict) -> dict:
+        """一键完整导出：配置 + 会话数据库快照 + 技能目录 + 记忆，打包落盘并定位。
+
+        与 settings.export 的区别：这是「整机迁移包」——含会话库快照与技能正文，
+        数据目录里导出（exports/），不 base64 回传（体量可能几百 MB）。
+        include_secrets=False（默认）时 config.toml 用打码版；True 时原样（含
+        明文/密文 Key，导入后可直接用）。数据库快照用 backup API，不直接拷
+        使用中的库文件。
+        """
+        import zipfile
+        from datetime import datetime as _dt
+
+        from .. import support
+
+        busy = self._backup_busy_message("导出")
+        if busy:
+            raise RuntimeError(busy)
+        home = skysheep_home()
+        include_secrets = bool(params.get("include_secrets", False))
+        out_dir = home / "exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        target = out_dir / f"skysheep-full-{_dt.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        included: list[str] = []
+
+        # 数据库快照：拷到临时文件再入包（直接读使用中的库文件会拿到撕裂状态）
+        db_tmp = out_dir / f".export-tmp-{_dt.now().strftime('%H%M%S%f')}.db"
+        try:
+            from ..session.store import _snapshot_or_copy
+
+            await asyncio.to_thread(_snapshot_or_copy, self.store.path, db_tmp)
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(db_tmp, "skysheep.db")
+                included.append("skysheep.db")
+                # 配置文件：config.toml 按开关决定打码版或原样
+                for name in self.SETTINGS_EXPORT_FILES:
+                    p = home / name
+                    if not p.is_file():
+                        continue
+                    if name == "config.toml" and not include_secrets:
+                        zf.writestr(name, support._redact_toml(p))
+                    else:
+                        zf.write(p, name)
+                    included.append(name)
+                # 技能正文（全局技能目录整个打包；数量上限已由安装层限制）
+                skills = home / "skills"
+                if skills.is_dir():
+                    count = 0
+                    for f in sorted(skills.rglob("*")):
+                        if f.is_file() and ".backups" not in f.parts:
+                            zf.write(f, f"skills/{f.relative_to(skills).as_posix()}")
+                            count += 1
+                    if count:
+                        included.append(f"skills/（{count} 个文件）")
+                zf.writestr("README.txt", (
+                    "SkySheep 完整数据导出\n"
+                    f"导出时间：{_dt.now().isoformat(timespec='seconds')}\n"
+                    f"包含：{'、'.join(included)}\n"
+                    + ("config.toml 已打码（不含 API Key）。\n" if not include_secrets
+                       else "⚠ config.toml 为原样（含 API Key），请妥善保管本文件。\n")
+                    + "\n恢复方式：关闭 SkySheep 后，把 skysheep.db 放回数据目录，\n"
+                    "config.toml 等文件按需覆盖；或参考官方文档的迁移说明。\n"
+                ))
+        except Exception as e:  # noqa: BLE001
+            target.unlink(missing_ok=True)
+            raise RuntimeError(f"导出失败：{e}") from None
+        finally:
+            db_tmp.unlink(missing_ok=True)
+        try:
+            support.reveal(target)
+        except Exception:  # noqa: BLE001 - 打不开文件夹不是失败
+            pass
+        return {
+            "path": str(target),
+            "size": target.stat().st_size,
+            "included": included,
+            "include_secrets": include_secrets,
+        }
+
+    async def settings_preview_import(self, params: dict) -> dict:
+        """导入前预览：只解析 zip 不落盘，列出将要覆盖的文件与关键提示。
+
+        返回 items（文件名/大小/是否含 API Key 特征）、unknown（不在白名单的
+        文件）、contains_secrets（config.toml 里是否有 key/token 行）。前端拿到
+        清单让用户确认后再调 settings.import 真正写入。
+        """
+        import base64
+        import io
+        import zipfile
+
+        raw = str(params.get("b64", "") or "")
+        if not raw:
+            raise RuntimeError("缺少 zip 内容（b64）")
+        try:
+            data = base64.b64decode(raw, validate=True)
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except Exception as e:
+            raise RuntimeError(f"zip 解析失败: {e}") from None
+        items, unknown = [], []
+        contains_secrets = False
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename
+            if name not in self.SETTINGS_EXPORT_FILES:
+                unknown.append(name)
+                continue
+            entry: dict = {"name": name, "size": info.file_size}
+            if name == "config.toml":
+                try:
+                    text = zf.read(name).decode("utf-8", errors="replace")
+                    contains_secrets = any(
+                        marker in text for marker in ("api_key", "token", "secret")
+                    )
+                    entry["has_secrets"] = contains_secrets
+                except Exception:  # noqa: BLE001
+                    pass
+            items.append(entry)
+        return {
+            "items": items,
+            "unknown": unknown,
+            "contains_secrets": contains_secrets,
+            "note": (
+                "包里包含 API Key / 令牌等敏感内容，导入后会覆盖本机当前配置。"
+                if contains_secrets else "将恢复上列文件到本机数据目录（覆盖同名文件）。"
+            ),
+        }
+
     async def settings_import(self, params: dict) -> dict:
         """从导出的 zip 恢复设置（base64 上传）。覆盖同名文件，缺失的跳过。
 
@@ -7627,6 +8103,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     "source": s.source, "enabled": s.enabled,
                     "scope": s.scope, "scope_projects": list(s.scope_projects),
                     "applies": self.skills.applies(s.name),
+                    "version": s.version,
+                    "origin": dict(s.origin),
                 }
                 for s in self.skills.all()
             ],

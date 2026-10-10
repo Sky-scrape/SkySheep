@@ -210,6 +210,12 @@ class MCPServerConfig(BaseModel):
     timeout: float | None = None
     # false=停用：保留配置（env/headers 不用重填）但启动/重连一律跳过
     enabled: bool = True
+    # ---- 供应链溯源（可选，展示用）----
+    # 这两项由 SkySheep 在添加/导入时写入 mcp.json：记录「从哪来」与「什么时候装」。
+    # 保持可选与宽容：Claude Desktop 等外部工具手编的 mcp.json 没有这两项也能正常
+    # 加载；未知字段被 pydantic 默认行为忽略，不会报错。
+    installed_from: str = ""   # manual（手动表单）| preset（官方预设）| import（粘贴/文件导入）
+    installed_at: str = ""    # ISO 时间串
 
     @property
     def transport(self) -> str:

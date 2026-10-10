@@ -400,6 +400,16 @@ class PendingPermission:
     # 预拒绝时直接给模型的落库文案（子代理门用它说死「别重试，写进报告」；
     # 空 = 主循环默认的 "User denied this operation."）
     deny_note: str = ""
+    # 发起方标注（确认卡「发起方」行）：主会话为空串；团队队员由 TeamMemberGate
+    # 填成员名；渠道门填渠道名（其确认卡走聊天窗口，桌面字段仅备用）。
+    origin: str = ""
+    # 影响范围（authorize 收尾时计算，人类可读短语）：工作目录内/外的具体路径、
+    # 引擎数据目录、本机全局（命令与电脑控制）、公网。解析不出给空串。
+    scope: str = ""
+    # 改动是否可经「撤销本轮改动」回滚：checkpoint 追踪的落盘工具为 True；
+    # 命令、电脑控制、联网类为 False。revert_note 是给用户看的边界说明。
+    reversible: bool = False
+    revert_note: str = ""
 
     def resolve(self, decision: str) -> None:
         if not self._future.done():
@@ -757,6 +767,57 @@ class PermissionGate:
         """authorize 侧入口：见模块级 _write_targets_engine_home。"""
         return _write_targets_engine_home(self.working_dir, tool, input_dict)
 
+    # ---- 确认卡固定字段：影响范围 + 可回滚性（与卡上其余字段同一事实源，
+    # 全部在 authorize 收尾时计算一次，前端不再自行猜测） ----
+
+    # 改动进检查点（可经「撤销本轮改动」回滚）的工具清单：与 tools/fs.py、
+    # docs.py、imagegen.py 里 recorder.record() 的落点一致（run_command 等命令
+    # 改动不追踪，也因此在界面上标为「不可回滚」）。
+    _CHECKPOINTED_TOOLS = frozenset({
+        "write_file", "edit_file", "write_document", "generate_image",
+        "move_file", "make_dir", "delete_file",
+    })
+
+    def _classify_scope(self, tool: Tool, input_dict: dict) -> str:
+        """把这次调用的影响面归类成人类可读短语（确认卡「范围」行）。
+
+        分类优先级：引擎数据目录 > 路径类（目录内/外）> 本机全局（命令、
+        电脑控制、剪贴板）> 公网。解不出给空串（前端不渲染该行）。
+        """
+        name = tool.name
+        if name in _ENGINE_HOME_FIXED_WRITERS or _write_targets_engine_home(
+            self.working_dir, tool, input_dict
+        ):
+            return "引擎数据目录（~/.skysheep）"
+        if getattr(tool, "write_path_arg", False):
+            field = getattr(tool, "write_target_arg", "path") or "path"
+            raw = str(input_dict.get(field, "") or "").strip()
+            if not raw:
+                raw = "images/（自动命名）" if name == "generate_image" else ""
+            if raw:
+                return f"路径 {raw}（工作目录内）" if self._path_inside_workdir(raw) \
+                    else f"路径 {raw}（工作目录外）"
+            return "工作目录内"
+        if name in ("run_command",):
+            return "本机全局（执行命令）"
+        if name in ("mouse", "keyboard", "window", "screenshot", "window_list",
+                    "clipboard_read", "clipboard_write"):
+            return "本机全局（电脑控制）"
+        if name in ("browser", "web_page", "web_fetch", "web_search"):
+            return "公网"
+        return ""
+
+    def _classify_reversible(self, tool: Tool) -> tuple[bool, str]:
+        """这次操作的改动能否经「撤销本轮改动」回滚。
+
+        判定只认 checkpoint 追踪清单（_CHECKPOINTED_TOOLS），不猜；
+        返回 (可回滚, 边界说明)。命令与电脑控制类的改动不进检查点，
+        如实标为不可回滚。
+        """
+        if tool.name in self._CHECKPOINTED_TOOLS:
+            return True, "改动已进检查点，可用「撤销本轮改动」恢复"
+        return False, ""
+
     def _write_target_inside_workdir(self, tool: Tool, input_dict: dict) -> bool:
         """「自动允许写入」档的适用范围判断：只放行能确认落在工作目录内的写入。
 
@@ -1066,6 +1127,13 @@ class PermissionGate:
             diff=self._preview_diff(tool, input_dict),
             always_rule=self.rule_for(tool, input_dict, self.working_dir),
         )
+        # 确认卡固定字段：影响范围 + 可回滚性（与 diff/规则预告同一事实源，
+        # authorize 一次算齐，前端不自行猜测）。失败不阻塞确认流程。
+        try:
+            pending.scope = self._classify_scope(tool, input_dict)
+            pending.reversible, pending.revert_note = self._classify_reversible(tool)
+        except Exception:  # noqa: BLE001 - 分类失败只丢展示行，不拦确认
+            pass
         if extra_required:
             # 用户看得见为什么多了一次确认：点名是哪个 Mod 要求的（描述查询与
             # 命中判定同在 authorize 的同步段内，多 Agent 并发不会错配）

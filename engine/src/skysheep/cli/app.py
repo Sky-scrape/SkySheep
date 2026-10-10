@@ -247,7 +247,10 @@ class ChatApp:
     def _make_gate(self):
         from ..security.gate import PermissionGate
 
-        return PermissionGate(store=self.store, project_id=self.project.id)
+        return PermissionGate(
+            store=self.store, project_id=self.project.id,
+            working_dir=self.working_dir,
+        )
 
     def _build_provider(self, name: str):
         if name not in self.cfg.providers:

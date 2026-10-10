@@ -167,13 +167,38 @@ function importSkillModal(prefill = "") {
     const url = urlInput.value.trim();
     if (source && url) throw new Error("两种方式选一种：本地路径 或 网址，别都填");
     if (!source && !url) throw new Error("请选择/粘贴技能路径，或粘贴要安装的网址");
+    const scope = box.querySelector('select[data-f="scope"]').value;
+    // 两段式：先预览将要安装的技能清单，确认后才真正落盘（供应链防线）。
+    // 预览失败（下载不到/没有 SKILL.md）直接把错误抛回弹窗。
+    let preview;
+    try {
+      status.textContent = "正在解析技能包…";
+      status.className = "form-status";
+      preview = await request("skills.preview_install", { source: url || source, scope });
+    } catch (e) {
+      status.textContent = "";
+      throw e;
+    }
+    status.textContent = "";
+    const list = preview.items.map((it) =>
+      `• ${escapeHtml(it.name)}${it.version ? `（v${escapeHtml(it.version)}）` : ""}：${escapeHtml(it.description || "无描述")}，${it.files} 个文件`
+    ).join("\n");
+    const officialNote = preview.official ? "\n（官方场景模板，来自打包内副本）" : "";
+    const clashNote = preview.needs_overwrite
+      ? `\n\n⚠ 已存在同名技能：${escapeHtml(nameList(preview.clashes))}。确认后将覆盖（旧目录会先备份）。`
+      : "";
+    const ok = confirm(
+      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${officialNote}${clashNote}\n\n技能内容来自外部包，会进入系统提示词。确认安装？`
+    );
+    if (!ok) return;
     if (url) {
       status.textContent = "正在下载技能包，请稍候…";
       status.className = "form-status";
     }
     const r = await request("skills.install", {
       source: url || source,
-      scope: box.querySelector('select[data-f="scope"]').value,
+      scope,
+      overwrite: preview.needs_overwrite ? true : undefined,
     });
     await renderSettings();
     boot();

@@ -986,15 +986,82 @@ function wireTabDrag(el, t) {
   bar.addEventListener("dragleave", (e) => { if (!bar.contains(e.relatedTarget)) stop(); });
 }
 
-// 标签 / 侧栏会话行 拖进对话区：松手 = 这一会话转分屏打开（拖拽排序语义只在
-// 各自列表内，出了列表就是「搬进分屏」）。分组头等其他拖拽不带标记，不会误触。
+// 标签 / 侧栏会话行 拖进对话区：拖到消息区（#chat）松手 = 这一会话转分屏打开
+// （拖拽排序语义只在各自列表内，出了列表就是「搬进分屏」）；拖到输入栏上 =
+// 「引用该对话」——挂进那一栏的引用托盘随下一条消息注入上下文。三个落点
+// 各挂各的树：#chat 只含消息区，#composer（主栏输入栏）与 #split-pane（分屏列）
+// 都是 #chat-main 的孩子、不在 #chat 子树里，事件不会冒泡过去，必须各自接线。
+// 分组头等其他拖拽不带标记，不会误触。
 const chatDropZone = document.getElementById("chat");
+// 落点命中的输入栏："main"=主栏，pane 对象=分屏列，undefined=不在任何输入栏。
+// #composer 与 #split-pane 都在 #chat-main 下，#chat 的拖放监听够不到它们，
+// 三处各自的监听用本函数统一判定落点
+function composerFaceAt(x, y) {
+  const c = document.getElementById("composer");
+  if (c) {
+    const r = c.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return "main";
+  }
+  for (const p of splitPanes) {
+    const el = p.el && p.el.querySelector(".split-composer");
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return p;
+  }
+  return undefined;
+}
+/** 拖拽引用是否放行：本机桌面端已放开跨项目引用（后端对 local 发送注入
+    并标注来源项目；快聊↔项目同样放开），用一次 session.list all_projects
+    探测区分端别。远程端拿不到跨项目列表（local_gate 直接拒），后端仍按
+    归属剔除引用——退回工作项目比对拦截，避免挂上发送时被静默丢弃的引用片。 */
+async function refQuoteAllowed(item) {
+  const all = await request("session.list", { all_projects: 1 }).catch(() => null);
+  if (all !== null) return true; // 本机桌面端：任意会话可互相引用
+  return String(item.project_id == null ? "" : item.project_id)
+    === String(bootSnap && bootSnap.project_id != null ? bootSnap.project_id : "");
+}
+const isSplitDrag = () => {
+  const st = wireListDrag.active;
+  return !!(st && (st.tag === "tab" || st.tag === "session") && st.item && st.item.id);
+};
+// 拖拽中的会话标题（页签改名过的优先，其次行名/快照元数据）
+function dragSessionTitle(sid, st) {
+  const t = chatTabs.find((x) => x.sid === sid);
+  return (t && t.title) || (st && st.item.name)
+    || (sessionMeta[sid] || {}).title || "会话";
+}
+// 拖拽引用的公共落点：远程端项目边界拦截 + 挂进那一栏的引用托盘
+function dropQuoteRef(face) {
+  const st = wireListDrag.active;
+  const sid = String(st.item.id);
+  const title = dragSessionTitle(sid, st);
+  refQuoteAllowed(st.item).then((allowed) => {
+    if (!allowed) {
+      addNotice(face === "main"
+        ? `「${title}」与当前对话不属于同一项目，不能引用`
+        : `「${title}」与这一列的对话不属于同一项目，不能引用`);
+      return;
+    }
+    addSessionRef(sid, title, face === "main" ? null : face);
+  });
+}
+/** 拖拽悬停时点亮落点所在的输入栏（引用落点提示）。 */
+function syncRefHint(e) {
+  clearRefDropHint();
+  const face = composerFaceAt(e.clientX, e.clientY);
+  if (face === undefined) return null;
+  const el = face === "main"
+    ? document.getElementById("composer")
+    : face.el && face.el.querySelector(".split-composer");
+  if (el) el.classList.add("ref-drop-hint");
+  return face;
+}
+function clearRefDropHint() {
+  document.querySelectorAll("#composer.ref-drop-hint, .split-composer.ref-drop-hint")
+    .forEach((el) => el.classList.remove("ref-drop-hint"));
+}
 if (chatDropZone && !chatDropZone._tabSplitBound) {
   chatDropZone._tabSplitBound = true;
-  const isSplitDrag = () => {
-    const st = wireListDrag.active;
-    return !!(st && (st.tag === "tab" || st.tag === "session") && st.item && st.item.id);
-  };
   chatDropZone.addEventListener("dragover", (e) => {
     if (!isSplitDrag()) return;
     e.preventDefault(); // 允许作为落点
@@ -1011,9 +1078,7 @@ if (chatDropZone && !chatDropZone._tabSplitBound) {
     const st = wireListDrag.active;
     const sid = String(st.item.id);
     st.over = null; // 落在对话区：dragend 不再走列表排序提交
-    const t = chatTabs.find((x) => x.sid === sid);
-    const title = (t && t.title) || st.item.name
-      || (sessionMeta[sid] || {}).title || "会话";
+    const title = dragSessionTitle(sid, st);
     // 跨项目会话（分组视图/「看其他项目」视图拖出）：先切到它的项目再开列，
     // 否则列里的会话会被当前项目归属校验拒掉（发送/换模型全被拒，等于废列）。
     // 标签拖出（tag "tab"）没有 project_id，必然属于当前项目，直通。
@@ -1032,6 +1097,57 @@ if (chatDropZone && !chatDropZone._tabSplitBound) {
       }
     }
     openSplitPane(sid, title).catch(() => {});
+  });
+}
+
+// 主栏输入栏：拖会话到输入栏 = 引用该对话，挂进主栏的引用托盘。
+// dragover 必须 preventDefault：不然 text/plain 数据（会话 id）会按浏览器
+// 默认行为直接插进 textarea，还顺带触发 input 监听里的 autoGrowInput 报错
+const composerDropZone = document.getElementById("composer");
+if (composerDropZone && !composerDropZone._refDropBound) {
+  composerDropZone._refDropBound = true;
+  composerDropZone.addEventListener("dragover", (e) => {
+    if (!isSplitDrag()) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    syncRefHint(e);
+  });
+  composerDropZone.addEventListener("dragleave", (e) => {
+    if (!composerDropZone.contains(e.relatedTarget)) clearRefDropHint();
+  });
+  composerDropZone.addEventListener("drop", (e) => {
+    if (!isSplitDrag()) return;
+    e.preventDefault();
+    clearRefDropHint();
+    const st = wireListDrag.active;
+    st.over = null; // 落在对话区：dragend 不再走列表排序提交
+    dropQuoteRef("main");
+  });
+}
+
+// 分屏列（#split-pane 同样在 #chat-main 下）：拖会话进列输入栏 = 引用进那一列
+// 的引用托盘；列的消息区不是落点（不 preventDefault，浏览器不响应）
+const splitDropZone = document.getElementById("split-pane");
+if (splitDropZone && !splitDropZone._refDropBound) {
+  splitDropZone._refDropBound = true;
+  splitDropZone.addEventListener("dragover", (e) => {
+    if (!isSplitDrag() || composerFaceAt(e.clientX, e.clientY) === undefined) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    syncRefHint(e);
+  });
+  splitDropZone.addEventListener("dragleave", (e) => {
+    if (!splitDropZone.contains(e.relatedTarget)) clearRefDropHint();
+  });
+  splitDropZone.addEventListener("drop", (e) => {
+    if (!isSplitDrag()) return;
+    const face = composerFaceAt(e.clientX, e.clientY);
+    if (face === undefined || face === "main") return; // 主栏有自己的落点监听
+    e.preventDefault();
+    clearRefDropHint();
+    const st = wireListDrag.active;
+    st.over = null;
+    dropQuoteRef(face);
   });
 }
 
@@ -4356,6 +4472,32 @@ function showPermission(data) {
     { sid: routeTab && routeTab.sid });
   document.getElementById("perm-tool").textContent =
     `${data.tool_name} · ${SAFETY_LABELS[data.safety] || data.safety}`;
+  // 固定字段行：发起方 / 影响范围 / 可撤销性。后端没给的字段整行隐藏，
+  // 旧版本引擎（无这些字段）的卡退化为原有版式，不出空槽位。
+  const metaEl = document.getElementById("perm-meta");
+  const originEl = document.getElementById("perm-origin");
+  const scopeEl = document.getElementById("perm-scope");
+  const revertEl = document.getElementById("perm-revert");
+  let metaShown = false;
+  if (originEl) {
+    originEl.textContent = data.origin ? `发起方：${data.origin}` : "";
+    originEl.hidden = !data.origin;
+    if (data.origin) metaShown = true;
+  }
+  if (scopeEl) {
+    scopeEl.textContent = data.scope ? `范围：${data.scope}` : "";
+    scopeEl.hidden = !data.scope;
+    if (data.scope) metaShown = true;
+  }
+  if (revertEl) {
+    revertEl.textContent = data.reversible
+      ? (data.revert_note || "可撤销：可用「撤销本轮改动」恢复")
+      : (data.revert_note || "不可自动回滚");
+    revertEl.className = "perm-meta-item " + (data.reversible ? "perm-revert-ok" : "perm-revert-no");
+    revertEl.hidden = false;
+    metaShown = true;
+  }
+  if (metaEl) metaEl.hidden = !metaShown;
   const argsEl = document.getElementById("perm-args");
   const noteEl = document.getElementById("perm-note");
   if (data.diff) {
@@ -4630,6 +4772,7 @@ function renderSessionExtras({ empty_count = 0, archived_count = 0 } = {}) {
       footer.classList.remove("hidden");
       footer.innerHTML = `<button class="link-btn">🧹 清理 ${empty_count} 个空会话</button>`;
       footer.querySelector(".link-btn").onclick = async () => {
+        if (!confirm(`将删除 ${empty_count} 个没有任何消息的空会话，删除后无法恢复。\n\n确定继续？`)) return;
         const r = await request("session.cleanup_empty");
         closeTabsForSids(r.removed_ids); // 被清掉的会话若开着标签，一并收掉
         addNotice(`已清理 ${r.removed} 个空会话`);
@@ -5059,8 +5202,10 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
   head.dataset.gkey = key; // 折叠全部/展开全部要靠它找回各组的状态
   head.innerHTML = FOLDER_SVG +
     `<span class="pg-name">${escapeHtml(name)}</span>` +
-    // 「远程连接」固定项目（无真实目录）不提供删除
-    (project && rootPath
+    // 「远程连接」也可从列表移除（渠道再用时自动重建）；「其他」兜底组
+    // （project=null 且非快聊）仍不提供新建：那些会话本属某项目，
+    // 只是项目被移除后成了孤儿，新建无意义
+    (project
       ? `<button class="pg-del" title="${isCurrent ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目"}">✕</button>` : "") +
     // 兜底组「其他」（project=null 且非快聊）不提供新建：那些会话本属某项目，
     // 只是项目被移除后成了孤儿，新建无意义
@@ -5391,20 +5536,28 @@ function commitSessionOrder(gkey, srcId, dstId, pos, view = "grouped") {
   return request("ui.save", { prefs: { session_order: sessionOrderPrefs } }).catch(() => {});
 }
 
-// 「引用此会话」：挂进输入框的引用托盘，随下一条消息把该会话内容注入上下文
-function quoteThisSession(s) {
-  if (activeTab && activeTab.sid === s.id) {
+// 「引用此会话」：挂进输入框的引用托盘，随下一条消息把该会话内容注入上下文。
+// 主栏与分屏列共用一条通路（pane 空 = 主栏）：右键菜单与拖拽入输入栏都汇到这里
+function addSessionRef(sid, title, pane) {
+  const cur = pane ? pane.sid : (activeTab && activeTab.sid);
+  if (cur === sid) {
     addNotice("这就是当前正在对话的会话，直接提问即可");
-    return;
+    return false;
   }
-  if (pendingRefs.some((r) => r.id === s.id)) {
+  const list = faceRefs(pane);
+  if (list.some((r) => r.id === sid)) {
     addNotice("已引用该会话");
-    return;
+    return false;
   }
-  pendingRefs.push({ id: s.id, title: s.title || "未命名会话" });
-  renderRefTray();
-  inputEl.focus();
-  addNotice(`已引用「${s.title || "未命名会话"}」，随下一条消息发给 Agent`);
+  list.push({ id: sid, title: title || "未命名会话" });
+  renderRefTray(pane);
+  if (!pane) inputEl.focus();
+  addNotice(`已引用「${title || "未命名会话"}」，随下一条消息发给 Agent`);
+  return true;
+}
+
+function quoteThisSession(s) {
+  addSessionRef(s.id, s.title, null);
 }
 
 // 归档当前会话：侧栏列表、搜索、启动续聊三处同时隐藏，可在归档弹窗恢复
@@ -5629,6 +5782,39 @@ async function renderSessionList(query) {
 // ---------- 会话操作菜单（⋯ 按钮或右键唤出） ----------
 const menuEl = document.getElementById("session-menu");
 
+/** 弹层落点：默认在指针下方展开；下方放不下（会被视口底缘裁掉）就整体翻到
+    指针上方；上下都放不下（指针贴边或菜单比视口还高）才贴向较近的一缘，
+    并限高内部滚动兕底。此前两处调用各自写死估高（-240/-140）往下钳：估高
+    远小于会话菜单实高（十几项），侧栏底部右键仍然裁掉后半截——改为展开后
+    量实际尺寸再定位。pos 与 window 尺寸是物理像素，菜单自带 zoom 定位在
+    缩放布局坐标系，结论算完再除回 uiScale 落 style。 */
+function placeMenuAt(menu, pos) {
+  menu.style.bottom = "auto";
+  menu.style.right = "auto";
+  menu.style.maxHeight = ""; // 上一次「比视口还高」留下的限高要先撤掉再量
+  menu.style.overflowY = "";
+  const m = 8; // 视口边缘安全距离（物理像素）
+  // 量布局尺寸而非 getBoundingClientRect：浮层有 ui-pop-in 入场动画（scale/translate），
+  // 开菜单第一帧的 rect 是动画中间态，向上翻时会差出几像素；offset* 是不受
+  // transform 影响的布局盒（已含 zoom），× uiScale 还原成物理像素
+  const hPhys = menu.offsetHeight * uiScale, wPhys = menu.offsetWidth * uiScale;
+  let topPhys;
+  if (pos.y + hPhys <= window.innerHeight - m) {
+    topPhys = pos.y; // 下方放得下：向下展开
+  } else if (pos.y - hPhys >= m) {
+    topPhys = pos.y - hPhys; // 上方放得下：向上翻
+  } else {
+    // 上下都放不下：限高内部滚动，菜单贴向指针较近的一缘
+    const avail = window.innerHeight - 2 * m;
+    menu.style.maxHeight = avail / uiScale + "px";
+    menu.style.overflowY = "auto";
+    topPhys = pos.y > window.innerHeight / 2 ? window.innerHeight - m - avail : m;
+  }
+  const xPhys = Math.max(m, Math.min(pos.x, window.innerWidth - m - wPhys));
+  menu.style.top = topPhys / uiScale + "px";
+  menu.style.left = xPhys / uiScale + "px";
+}
+
 // 线条风小图标（stroke 继承文字色，与界面线稿风格一致）
 function svgIcon(name) {
   const P = {
@@ -5679,7 +5865,7 @@ function showSessionMenu(s, li, pos) {
       label: "在分屏打开",
       act: () => openSplitPane(s.id, s.title),
     },
-    // 定位/复制类：快聊（default）/远程连接（remote-control）/项目会话
+    // 定位/复制类：快聊（fast-talk 专用文件夹）/远程连接（remote-control）/项目会话
     // 都有真实工作目录，这两项对所有会话开放
     ...([
       {
@@ -5724,9 +5910,7 @@ function showSessionMenu(s, li, pos) {
     menuEl.appendChild(b);
   });
   menuEl.classList.remove("hidden");
-  // pos 与 window 尺寸是物理像素，菜单定位在缩放布局坐标系，先除回 uiScale
-  menuEl.style.top = Math.min(pos.y / uiScale, window.innerHeight / uiScale - 240) + "px";
-  menuEl.style.left = Math.max(8, Math.min(pos.x / uiScale, window.innerWidth / uiScale - 190)) + "px";
+  placeMenuAt(menuEl, pos);
 }
 document.addEventListener("click", (e) => {
   if (!menuEl.contains(e.target)) menuEl.classList.add("hidden");
@@ -5754,9 +5938,8 @@ function showTabMenu(t, pos) {
     menuEl.appendChild(b);
   });
   menuEl.classList.remove("hidden");
-  // 与 showSessionMenu 同一套缩放坐标换算
-  menuEl.style.top = Math.min(pos.y / uiScale, window.innerHeight / uiScale - 140) + "px";
-  menuEl.style.left = Math.max(8, Math.min(pos.x / uiScale, window.innerWidth / uiScale - 190)) + "px";
+  // 与 showSessionMenu 同一套「量实际尺寸、可向上翻」的落点
+  placeMenuAt(menuEl, pos);
 }
 
 /** 标签改名：就地把标题换成输入框（Enter 保存 / Esc 取消 / 失焦保存）。
@@ -9538,7 +9721,7 @@ function autoGrowInput(el) {
   // auto 在装得下时不显示滚动条，被压缩时立刻可滚
   el.style.overflowY = "auto";
 }
-inputEl.addEventListener("input", autoGrowInput);
+inputEl.addEventListener("input", () => autoGrowInput()); // 直接传函数引用会把事件对象当 el 传进去
 autoGrowInput();
 
 // 输入区宽度变化 → 重跑 autoGrow（2026-10-09）：boot 期布局未定时，长占位符
@@ -9595,7 +9778,7 @@ function renderRefTray(pane) {
     del.title = "移除引用";
     del.onclick = () => { list.splice(i, 1); renderRefTray(pane); };
     chip.appendChild(del);
-    refTray.appendChild(chip);
+    tray.appendChild(chip); // 追加到目标栏自己的托盘（此前误写全局 refTray，分屏列的引用片一直挂到主栏去）
   });
 }
 function clearPendingRefs(pane) {
@@ -9914,7 +10097,7 @@ const SLASH_COMMANDS = [
   { cmd: "/compact", desc: "压缩上下文：旧历史替换为摘要，释放窗口空间" },
   { cmd: "/model", desc: "打开设置 · 模型服务" },
   { cmd: "/status", desc: "查看模型、上下文占用、工具数" },
-  { cmd: "/todos", desc: "查看当前任务清单" },
+  { cmd: "/todos", desc: "查看当前步骤清单" },
   { cmd: "/export", desc: "导出当前会话为 Markdown" },
   { cmd: "/save-skill", desc: "把本次会话的做法存成技能草稿" },
 ];
@@ -9967,11 +10150,11 @@ async function execSlash(cmd, face) {
       const r = await request("chat.status").catch(() => null);
       if (!r) break;
       if (!r.todos.length) {
-        addNotice("当前没有任务清单。给 Agent 一个多步任务，它会用 todo_write 维护步骤。");
+        addNotice("当前没有步骤清单。给 Agent 一个多步任务，它会用 todo_write 维护步骤。");
         break;
       }
       const icon = { pending: "○", in_progress: "◐", completed: "●" };
-      addNotice("任务清单：\n" + r.todos.map((t) => `${icon[t.status] || "○"} ${t.content}`).join("\n"));
+      addNotice("步骤清单：\n" + r.todos.map((t) => `${icon[t.status] || "○"} ${t.content}`).join("\n"));
       break;
     }
     case "/export":
@@ -10679,6 +10862,7 @@ function showSettingsPage(target) {
   document.querySelectorAll(".settings-page").forEach((pg) =>
     pg.classList.toggle("hidden", pg.id !== "settings-page-" + target)
   );
+  if (target === "runs") loadRunCenter();
   if (target === "usage") loadUsage();
   if (target === "memory") loadMemoryPage();
   if (target === "snippets") loadSnippets();
@@ -10687,7 +10871,7 @@ function showSettingsPage(target) {
   if (target === "subagents") renderSubagentCfg().catch(() => {});
   if (target === "advanced") { renderAdvancedCfg().catch(() => {}); renderHooksCfg(); }
   if (target === "mods") renderModsCfg().catch(() => {});
-  if (target === "about") { loadBackups().catch(() => {}); renderRetentionCfg().catch(() => {}); }
+  if (target === "about") { loadBackups().catch(() => {}); renderRetentionCfg().catch(() => {}); renderStorageCard().catch(() => {}); }
 }
 document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
   li.onclick = () => {
@@ -10985,19 +11169,19 @@ const RP_ICONS = {
 };
 // 面板标签：原先 12 个平铺在「＋」菜单里，其中三个「任务…」和两个自动化页
 // 挤在一起看着像同一件事的多个入口。现在合并成两个带分段的标签：
-//   任务   = 子代理任务 / 任务清单 / 项目任务
-//   自动化 = 定时任务 / 任务编排
+//   任务   = 子代理 / 步骤 / 事项（分段短名；完整语义见 docs/界面术语表.md）
+//   自动化 = 定时 / 编排
 // 合并的只是「菜单里占几格」：各分段仍是原来的 DOM、原来的渲染与加载函数，
-// 侧栏与窄栏的入口（任务清单 / 项目任务 / 定时任务 / 任务编排）点进去直接
+// 侧栏与窄栏的入口（步骤 / 事项 / 定时 / 编排）点进去直接
 // 落在对应分段，不因为合并就多一步点击。
 const TAB_META = {
   aux: { title: "辅助对话" },
   review: { title: "审查" },
   browser: { title: "浏览器" },
   files: { title: "文件" },
-  tasks: { title: "任务", sub: "子代理任务 · 任务清单 · 项目任务" },
+  tasks: { title: "任务", sub: "子代理 · 步骤 · 事项" },
   agenda: { title: "日程" },
-  auto: { title: "自动化", sub: "定时任务 · 任务编排" },
+  auto: { title: "自动化", sub: "定时 · 编排" },
   memory: { title: "项目记忆" },
   map: { title: "记忆地图", sub: "项目演化 · 时间线 · 图谱" },
   ext: { title: "MCP / Skills" },
@@ -12285,7 +12469,7 @@ async function loadTasks() {
     loadTasks._errSnap = "";
     ul.innerHTML = "";
     if (!tasks.length) {
-      ul.innerHTML = '<div class="rp-empty">还没有子代理任务。Agent 拆解出的并行任务会出现在这里。</div>';
+      ul.innerHTML = '<div class="rp-empty">还没有子代理任务。Agent 派出的后台并行任务会出现在这里。</div>';
       return;
     }
     tasks.forEach((t) => {
@@ -12308,7 +12492,7 @@ async function loadTasks() {
         (tk ? `<span class="task-tokens">≈${fmtTokens(tk)}</span>` : "") + dur +
         `<span class="task-status">${escapeHtml(st)}</span>` +
         (live ? `<button class="cron-op" data-op="cancel" title="取消此任务">✕</button>` : "") +
-        `<button class="cron-op" data-op="pipeline" title="纳入任务编排（挂接为流水线节点）">⛓</button></div>` +
+        `<button class="cron-op" data-op="pipeline" title="纳入编排（挂接为流水线节点）">⛓</button></div>` +
         `<div class="task-prompt">${escapeHtml(t.prompt)}</div>` +
         (t.result ? `<div class="task-result">${escapeHtml(t.result.slice(0, 300))}</div>` : "");
       item.querySelector('[data-op="pipeline"]').onclick = async (e) => {
@@ -13470,6 +13654,44 @@ function tokenFailureNote(failures) {
     "。不是你的操作的话，说明有人在试你的令牌——建议重新生成令牌。</div>";
 }
 
+// 已连接设备 + 最近访问（lan / ts 共用）：本机连接不列（没意义），
+// 远程连接带「断开」按钮（lan.kick，仅本机可用）
+function connectionsNote(conns) {
+  const remote = (conns || []).filter((c) => c.origin !== "local");
+  if (!remote.length) return "";
+  const rows = remote.map((c) => {
+    const where = c.origin === "tailscale" ? "远程（Tailscale）" : "局域网";
+    const ua = c.ua ? `　${escapeHtml(c.ua.split(")")[0] + ")")}` : "";
+    return `<div class="lan-note">· ${escapeHtml(c.ip)}（${where}，连于 ${new Date(c.connected_at * 1000).toLocaleString()}）${ua}
+      <button class="btn-ghost" data-kick="${escapeHtml(c.id)}" title="断开这台设备的连接">断开</button></div>`;
+  }).join("");
+  return `<div class="lan-note"><b>已连接设备（${remote.length}）</b></div>${rows}`;
+}
+
+function wireKickButtons() {
+  document.querySelectorAll("[data-kick]").forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm("断开这台设备的连接？对方页面会断开，重新打开地址即可重连。")) return;
+      try {
+        const r = await request("lan.kick", { connection_id: btn.dataset.kick });
+        addNotice(`已断开 ${r.kicked} 个连接`);
+        loadLanPanel();
+        loadTsPanel();
+      } catch (e) {
+        addNotice("操作失败: " + e.message);
+      }
+    };
+  });
+}
+
+function recentAccessNote(access) {
+  if (!access || !access.total) return "";
+  const rows = (access.recent || []).map((f) =>
+    `<div class="lan-note">· ${escapeHtml(f.ip || "")}（${f.where === "ws" ? "应用连接" : "页面访问"}，${new Date(f.ts * 1000).toLocaleString()}）</div>`
+  ).join("");
+  return `<div class="lan-note"><b>最近访问（自启动以来 ${access.total} 次）</b></div>${rows}`;
+}
+
 // 重新生成访问令牌：立即生效，旧地址/二维码/已登录的手机全部作废
 async function rotateAccessToken() {
   if (!confirm("重新生成访问令牌？所有已发出的地址和二维码立即作废，手机需要用新地址重新打开。")) return;
@@ -13541,8 +13763,11 @@ async function loadLanPanel() {
       </div>
     </div>
     ${lanPortSettingHtml(st)}
+    ${connectionsNote(st.connections)}
+    ${recentAccessNote(st.recent_access)}
     ${tokenFailureNote(st.token_failures)}`;
   wireLanPortSetting();
+  wireKickButtons();
   const copyBtn = document.getElementById("lan-copy");
   if (copyBtn) copyBtn.onclick = () => copyAccessUrl(urls[0] || "", "lan-copy-msg");
   const rotateBtn = document.getElementById("lan-rotate");
@@ -13561,6 +13786,12 @@ async function loadLanPanel() {
   }
 }
 document.getElementById("lan-toggle").addEventListener("change", async (e) => {
+  if (e.target.checked && !confirm(
+    "开启局域网访问？\n\n" +
+    "开启后，同一 Wi-Fi 下的设备凭令牌即可访问本机 SkySheep（完整界面与文件读写能力），" +
+    "地址为 http 明文传输，令牌会出现在地址栏与二维码里。\n\n" +
+    "只建议在可信网络使用；跨网络或不可信 Wi-Fi 请改用「远程访问（Tailscale）」。\n\n确定开启？"
+  )) { e.target.checked = false; return; }
   try {
     const r = e.target.checked ? await request("lan.enable", {}) : await request("lan.disable");
     addNotice(r.note || "局域网访问设置已更新");
@@ -13603,7 +13834,10 @@ async function loadTsPanel() {
         <span id="ts-copy-msg" class="io-msg"></span>
       </div>
     </div>
+    ${connectionsNote(st.connections)}
+    ${recentAccessNote(st.recent_access)}
     ${tokenFailureNote(st.token_failures)}`;
+  wireKickButtons();
   const copyBtn = document.getElementById("ts-copy");
   if (copyBtn) copyBtn.onclick = () => copyAccessUrl(urls[0] || "", "ts-copy-msg");
   const rotateBtn = document.getElementById("ts-rotate");
@@ -13621,6 +13855,11 @@ async function loadTsPanel() {
   }
 }
 document.getElementById("ts-toggle").addEventListener("change", async (e) => {
+  if (e.target.checked && !confirm(
+    "开启远程访问（Tailscale）？\n\n" +
+    "开启后，登录同一 Tailscale 账号的设备可在任意网络访问本机 SkySheep；" +
+    "链路端到端加密，比局域网 http 明文更安全，但令牌仍是唯一门锁。\n\n确定开启？"
+  )) { e.target.checked = false; return; }
   try {
     const r = e.target.checked ? await request("remote.enable", {}) : await request("remote.disable");
     addNotice(r.note || "远程访问设置已更新");
@@ -13840,7 +14079,7 @@ function channelCard(c) {
   // webhook 没有入站，名单语义反转（留空 = 广播），不存在「认领」步骤
   const needClaim = c.enabled && !isWebhook && !(c.allowed_ids || []).length;
   const hint = isWebhook
-    ? "纯出站推送：填好 URL 并启用后，定时任务摘要、任务编排终态、每日运行日报等出站消息会以 JSON POST 到这个地址；发送失败只记日志，不重试。"
+    ? "纯出站推送：填好 URL 并启用后，定时与编排的运行摘要、每日运行日报等出站消息会以 JSON POST 到这个地址；发送失败只记日志，不重试。"
     : c.name === "weixin"
     ? (needClaim
       ? "已启用但名单还是空的：现在给机器人发一句话，下方出现「见过的来源」后点「加入允许名单」，它才会开始回复。"
@@ -14969,11 +15208,20 @@ function renderSkillList(skills) {
     const st = skillState(s);
     const li = document.createElement("li");
     li.className = "skill-row";
+    // 来源/版本 chip（可被包作者伪造，仅作参考展示）：本机导入/网址安装 + 时间
+    const origin = s.origin || {};
+    const srcKind = origin.source === "url" ? "网址安装"
+      : (origin.source === "zip" ? "zip 导入" : (origin.source === "folder" ? "本机导入" : ""));
+    const srcTitle = origin.origin_url ? `来源：${origin.origin_url}（可被包作者伪造，仅作参考）` : "安装来源信息（可被包作者伪造，仅作参考）";
+    const metaChips =
+      (s.version ? `<span class="chip" title="技能自报版本（frontmatter）">v${escapeHtml(s.version)}</span>` : "") +
+      (srcKind ? `<span class="chip" title="${escapeHtml(srcTitle)}">${srcKind}${origin.installed_at ? " · " + escapeHtml(String(origin.installed_at).slice(0, 10)) : ""}</span>` : "");
     li.innerHTML =
       `<div class="skill-top">
         <input type="checkbox" class="skill-pick" data-name="${escapeHtml(s.name)}" title="勾选以批量删除">
         <button class="skill-name" type="button" title="查看 SKILL.md 完整指令">${escapeHtml(s.name)}</button>
         <span class="chip">${s.source === "project" ? "本项目" : "全局"}</span>
+        ${metaChips}
         <span class="chip ${st.cls}">${st.label}</span>
         <span class="skill-del-cell"></span>
       </div>
@@ -15584,6 +15832,152 @@ document.getElementById("hook-test-kind").onchange = (e) => {
   document.getElementById("hook-test-input-row").style.display = isStop ? "none" : "";
 };
 
+// ---------- 设置 · 运行中心：全局运行列表 + 权限队列 ----------
+// 按会话 id 打开主栏标签：从运行中心/权限队列跳转用。侧栏列表里找得到就复用
+// 它的数据；找不到（如分屏列独有的会话）直接用 id 打开（历史会懒加载）。
+async function activateSessionById(sid) {
+  if (!sid) return;
+  const li = document.querySelector(`#session-list li[data-sid="${CSS.escape(sid)}"]`);
+  if (li) { li.click(); return; }
+  openTabForSession(sid, "");
+}
+const RUN_STATE_META = {
+  queued:        { label: "排队中",   cls: "run-st-wait" },
+  thinking:      { label: "正在思考", cls: "run-st-run" },
+  tool_running:  { label: "正在执行工具", cls: "run-st-run" },
+  waiting_permission: { label: "等待确认", cls: "run-st-perm" },
+  retrying:      { label: "重试中",  cls: "run-st-warn" },
+  cancelled:     { label: "已取消",  cls: "run-st-dead" },
+  failed:        { label: "失败",    cls: "run-st-bad" },
+  completed:     { label: "已完成",  cls: "run-st-ok" },
+  partial:       { label: "部分完成", cls: "run-st-warn" },
+  interrupted:   { label: "已中断（应用重启）", cls: "run-st-bad" },
+};
+
+function runStateChip(state) {
+  const meta = RUN_STATE_META[state] || { label: state, cls: "" };
+  return `<span class="run-state ${meta.cls}">${escapeHtml(meta.label)}</span>`;
+}
+
+function fmtRunTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
+async function loadRunCenter() {
+  const listBox = document.getElementById("runs-list");
+  const permBox = document.getElementById("perm-queue-box");
+  if (!listBox) return;
+  let runs = [], pending = [];
+  try {
+    const [r, pq] = await Promise.all([
+      request("runs.list", { limit: 100 }),
+      request("permission.queue", {}),
+    ]);
+    runs = r.runs || [];
+    pending = pq.pending || [];
+  } catch (e) {
+    listBox.innerHTML = `<p class="empty-hint">加载失败：${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  // 权限请求队列（跨会话）：等待确认的运行置顶可见
+  if (pending.length) {
+    permBox.innerHTML = `
+      <h4>等待确认（${pending.length}）</h4>
+      ${pending.map((p) => `
+        <div class="run-row run-perm-row">
+          <span class="run-state run-st-perm">等待确认</span>
+          <span class="run-title">${escapeHtml(p.tool_name || "工具调用")}</span>
+          <span class="run-sub">${escapeHtml(p.detail || "")}</span>
+          <button class="btn-ghost run-goto" data-sid="${escapeHtml(p.session_id || "")}">去处理</button>
+        </div>`).join("")}`;
+    permBox.querySelectorAll(".run-goto").forEach((btn) => {
+      btn.onclick = () => {
+        const sid = btn.dataset.sid;
+        activateSessionById(sid).catch(() => {});
+      };
+    });
+  } else {
+    permBox.innerHTML = "";
+  }
+  if (!runs.length) {
+    listBox.innerHTML = '<p class="empty-hint">还没有运行记录。发一条消息、或派一个后台子代理任务后，这里会显示它的状态。</p>';
+    return;
+  }
+  listBox.innerHTML = runs.map((r) => {
+    const kindChip = r.kind === "subagent"
+      ? '<span class="chip">子代理</span>'
+      : '<span class="chip">主对话</span>';
+    const active = r.running;
+    const actions = [];
+    if (active) {
+      actions.push(`<button class="btn-ghost run-cancel" data-id="${escapeHtml(r.id)}">停止</button>`);
+    } else if (r.state === "failed" || r.state === "interrupted") {
+      if (r.retryable && r.retry_text) {
+        actions.push(`<button class="btn-ghost run-retry" data-id="${escapeHtml(r.id)}">重发</button>`);
+      }
+    }
+    if (r.session_id) {
+      actions.push(`<button class="btn-ghost run-goto" data-sid="${escapeHtml(r.session_id)}">打开会话</button>`);
+    }
+    if (r.error) {
+      actions.push(`<button class="btn-ghost run-copy" data-err="${escapeHtml(r.error)}">复制错误</button>`);
+    }
+    return `
+      <div class="run-row" data-id="${escapeHtml(r.id)}">
+        <div class="run-main">
+          ${runStateChip(r.state)}
+          <span class="run-title">${escapeHtml(r.title || r.id)}</span>
+          ${kindChip}
+        </div>
+        <div class="run-sub">${escapeHtml(r.detail || "")}${r.error ? ` · <span class="run-err">${escapeHtml(r.error)}</span>` : ""}</div>
+        <div class="run-meta">${fmtRunTime(r.created_at)}${r.tools_used ? ` · 工具 ${r.tools_used} 次` : ""}${r.retries ? ` · 重试 ${r.retries} 次` : ""}</div>
+        <div class="run-ops">${actions.join("")}</div>
+      </div>`;
+  }).join("");
+  listBox.querySelectorAll(".run-cancel").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try { await request("runs.cancel", { run_id: btn.dataset.id }); await loadRunCenter(); }
+      catch (e) { addNotice("停止失败: " + e.message); btn.disabled = false; }
+    };
+  });
+  listBox.querySelectorAll(".run-retry").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const r = await request("runs.retry", { run_id: btn.dataset.id });
+        // 重发 = 把原文在同会话再发一次：切到该会话、填进输入框、走正常发送
+        if (r.session_id) await activateSessionById(r.session_id).catch(() => {});
+        if (r.text) {
+          const input = document.getElementById("input");
+          input.value = r.text;
+          input.dispatchEvent(new Event("input"));
+          await send();
+        }
+        backToChat();
+      } catch (e) { addNotice("重发失败: " + e.message); btn.disabled = false; }
+    };
+  });
+  listBox.querySelectorAll(".run-copy").forEach((btn) => {
+    btn.onclick = async () => {
+      try { await navigator.clipboard.writeText(btn.dataset.err); btn.textContent = "已复制"; }
+      catch { addNotice("复制失败，请手动选中错误文本"); }
+    };
+  });
+  listBox.querySelectorAll(".run-goto").forEach((btn) => {
+    btn.onclick = () => {
+      const sid = btn.dataset.sid;
+      activateSessionById(sid).then(backToChat).catch(() => {});
+    };
+  });
+}
+document.getElementById("runs-refresh").onclick = () => loadRunCenter();
+
 // ---------- 设置 · 高级：运行参数 / 目录限制 / 开机自启 ----------
 function advancedStatus(text, ok = true) {
   const el = document.getElementById("advanced-status");
@@ -15621,6 +16015,8 @@ async function renderAdvancedCfg() {
   renderTrustState();
   renderTrustList();
   q("adv-daily-budget").value = d.daily_token_budget || "";
+  q("adv-turn-budget").value = d.turn_token_budget || "";
+  q("adv-fallback-model").value = d.fallback_model || "";
   // 全局唤起热键（仅 Windows 桌面版生效；其它平台置灰提示）
   const hk = q("adv-hotkey");
   advancedLoadedHotkey = d.hotkey || "";
@@ -15666,6 +16062,8 @@ async function saveAdvanced() {
       compaction_trigger: Number(q("adv-compaction-trigger").value) / 100,
       compaction_auto: q("adv-compaction-auto").checked,
       daily_token_budget: Number(q("adv-daily-budget").value) || 0,
+      turn_token_budget: Number(q("adv-turn-budget").value) || 0,
+      fallback_model: (q("adv-fallback-model").value || "").trim(),
       restrict_to_workdir: q("adv-restrict-workdir").checked,
       system_schedule: q("adv-system-schedule").checked,
       job_containment: q("adv-job-containment").checked,
@@ -15715,6 +16113,8 @@ document.getElementById("btn-advanced-reset").onclick = async () => {
   q("adv-keep-recent").value = 8;
   q("adv-compaction-trigger").value = 90;
   q("adv-daily-budget").value = "";
+  q("adv-turn-budget").value = "";
+  q("adv-fallback-model").value = "";
   await saveAdvanced();
 };
 
@@ -15865,7 +16265,7 @@ function backupRowHtml(b) {
       <span class="dim small">${meta}</span>
       <span class="spacer"></span>
       ${b.current ? "" : `<button class="btn-ghost" data-restore="${escapeHtml(b.name)}" ` +
-        `data-when="${escapeHtml(when)}">恢复到此版本</button>` +
+        `data-when="${escapeHtml(when)}" data-size="${b.size || 0}">恢复到此版本</button>` +
         `<button class="btn-ghost danger" data-del="${escapeHtml(b.name)}" ` +
         `data-when="${escapeHtml(when)}" title="删除这份备份（不影响当前会话数据）">删除</button>`}
     </li>`;
@@ -15899,7 +16299,7 @@ async function loadBackups() {
   ul.className = "list" + (backupsExpanded ? " expanded" : "");
   ul.innerHTML = rows.join("") || '<li class="dim small">还没有备份（应用下次启动时会自动生成一份）</li>';
   ul.querySelectorAll("[data-restore]").forEach((btn) => {
-    btn.onclick = () => restoreBackupConfirm(btn.dataset.restore, btn.dataset.when, btn);
+    btn.onclick = () => restoreBackupConfirm(btn.dataset.restore, btn.dataset.when, btn, Number(btn.dataset.size || 0));
   });
   ul.querySelectorAll("[data-del]").forEach((btn) => {
     btn.onclick = () => deleteBackupConfirm(btn.dataset.del, btn.dataset.when, btn);
@@ -15915,9 +16315,10 @@ async function loadBackups() {
   bs.hidden = false;
 }
 
-function restoreBackupConfirm(name, when, btn) {
+function restoreBackupConfirm(name, when, btn, size = 0) {
   const box = document.createElement("div");
-  box.innerHTML = `<p>要用 <b>${escapeHtml(when || name)}</b> 这份备份覆盖当前会话数据吗？</p>
+  const sizeTxt = size > 0 ? `（${(size / 1024).toFixed(0)} KB）` : "";
+  box.innerHTML = `<p>要用 <b>${escapeHtml(when || name)}</b>${sizeTxt} 这份备份覆盖当前会话数据吗？</p>
     <p class="dim small">备份文件：${escapeHtml(name)}<br>
     当前数据会先自动另存为一份「恢复前」备份，所以还能再换回来；
     恢复后需要刷新界面（会话列表会回到那个时间点的样子）。</p>`;
@@ -16071,6 +16472,79 @@ document.getElementById("btn-retention-sweep").onclick = async () => {
     btn.disabled = false;
   }
 };
+
+// ---------- 设置 · 关于：存储占用与表级清理 ----------
+function storageStatus(text, ok = true) {
+  const el = document.getElementById("storage-status");
+  el.textContent = text;
+  el.className = "card-status " + (ok ? "ok" : "bad");
+  el.hidden = !text;
+  autoHideStatus(el, text, ok);
+}
+
+async function renderStorageCard() {
+  const list = document.getElementById("storage-overview");
+  let d;
+  try { d = await request("storage.usage"); } catch (e) {
+    list.innerHTML = `<li class="empty-hint">加载失败：${escapeHtml(e.message)}</li>`;
+    return;
+  }
+  const rows = [
+    `<li class="dim">会话数据库：<b>${retentionBytes(d.db_bytes)}</b>　备份目录：${retentionBytes(d.backups_bytes)}　日志：${retentionBytes(d.logs_bytes)}</li>`,
+  ];
+  for (const t of d.tables || []) {
+    if (t.rows <= 0) continue; // 空表不占行：少即是多
+    rows.push(
+      `<li>${escapeHtml(t.label)}：<b>${t.rows}</b> 条` +
+      ` <button class="btn-ghost" data-clean-table="${escapeHtml(t.table)}" title="删除 30 天前的记录">清理 30 天前</button>` +
+      ` <button class="btn-ghost" data-clean-all="${escapeHtml(t.table)}" title="清空整表（不可恢复）">清空</button></li>`
+    );
+  }
+  if (rows.length === 1) rows.push(`<li class="empty-hint">没有可清理的账本数据</li>`);
+  rows.push(`<li><button id="btn-storage-vacuum" class="btn-ghost" title="整理数据库文件，释放已删数据占用的空间（大库会花几秒）">整理数据库（VACUUM）</button></li>`);
+  list.innerHTML = rows.join("");
+
+  list.querySelectorAll("[data-clean-table]").forEach((btn) => {
+    btn.onclick = () => cleanTable(btn.dataset.cleanTable, 30, btn);
+  });
+  list.querySelectorAll("[data-clean-all]").forEach((btn) => {
+    btn.onclick = () => cleanTable(btn.dataset.cleanAll, 0, btn);
+  });
+  const vb = document.getElementById("btn-storage-vacuum");
+  if (vb) vb.onclick = async () => {
+    vb.disabled = true;
+    try {
+      const r = await request("storage.cleanup", { targets: [], vacuum: true });
+      await renderStorageCard();
+      storageStatus(r.freed_bytes > 0
+        ? `✓ 已整理数据库，释放 ${retentionBytes(r.freed_bytes)}`
+        : "✓ 数据库已整理");
+    } catch (e) {
+      storageStatus("✗ 整理失败：" + e.message, false);
+    } finally { vb.disabled = false; }
+  };
+}
+
+async function cleanTable(table, days, btn) {
+  const label = btn.closest("li").textContent.split("：")[0];
+  const what = days > 0 ? `删除「${label}」中 30 天前的记录` : `清空「${label}」（全部记录，不可恢复）`;
+  if (!confirm(`${what}？\n\n清理后无法恢复，确定继续？`)) return;
+  btn.disabled = true;
+  try {
+    const r = await request("storage.cleanup", {
+      targets: [{ table, days }],
+      vacuum: false,
+    });
+    await renderStorageCard();
+    const n = r.deleted[table] || 0;
+    storageStatus(n > 0 ? `✓ 已删除 ${n} 条记录` : "没有符合条件的记录");
+  } catch (e) {
+    storageStatus("✗ 清理失败：" + e.message, false);
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("btn-storage-refresh").onclick = () => renderStorageCard().catch(() => {});
 
 // ---------- Mods 扩展（实验性）：事件片段 + 设置页 ----------
 // Mod 的 JS 永不进前端：这里只渲染引擎侧产出的声明式词表片段

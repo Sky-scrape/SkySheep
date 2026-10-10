@@ -490,6 +490,8 @@ async def test_member_exec_readonly_auto_allowed_and_write_confirmed(tmp_path):
         await asyncio.sleep(0.01)
     request = next(e for e in events if e.kind == "permission_request")
     assert request.note.startswith("来自队员『小研』")
+    # 固定字段：origin 带成员名，前端确认卡「发起方」行直接用它
+    assert request.origin == "小研"
     # 乱码决策 → normalize 白名单 fail-closed 按 deny：文件绝不落盘，轮继续到报告
     assert orch.respond_permission(request.request_id, "garbage-decision") is True
     result = await task
@@ -515,6 +517,7 @@ async def test_member_gate_delegates_and_only_annotates(tmp_path):
     pending = await gated.authorize(WriteFileTool(), {"path": "a.txt", "content": "x"})
     assert pending is not None
     assert pending.note.startswith("来自队员『小研』")
+    assert pending.origin == "小研"
     pending.resolve("deny")
 
 

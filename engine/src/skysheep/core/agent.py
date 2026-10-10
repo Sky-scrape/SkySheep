@@ -44,6 +44,7 @@ from ..models.base import (
     ProviderTextDelta,
     ProviderToolUse,
 )
+from ..models.diagnostics import diagnose_error
 from ..security.gate import (
     Decision,
     PendingPermission,
@@ -148,6 +149,16 @@ class Agent:
         # 全量 token 估算的指纹缓存（见 used_context_tokens）
         self._ctx_cache_fp: tuple | None = None
         self._ctx_cache = 0
+        # 轮摘要统计（TurnFinished 带出）：工具次数/总耗时、模型重试次数。
+        # 逐轮重置由 _turn_events 开头负责。
+        self._turn_tools_used = 0
+        self._turn_tools_total_ms = 0
+        self._turn_model_retries = 0
+        # 供应商健康上报钩子（ServerBackend 注入）：
+        # on_provider_ok(name, latency_ms) / on_provider_error(name, ErrorDiagnosis)
+        # Agent 不关心存不存在，None 时直接跳过。
+        self.on_provider_ok = None
+        self.on_provider_error = None
         # 流式中已合并、尚未并入历史的正文增量（text_parts 的同一个列表引用，
         # 零拷贝）。正常并入历史后置 None；被取消时由 run_turn 的 finally
         # 兜底落库（见 _persist_partial_stream_text）
@@ -474,6 +485,11 @@ class Agent:
                                 yield Usage(
                                     input_tokens=pe.input_tokens, output_tokens=pe.output_tokens
                                 )
+                    if self.on_provider_ok is not None:
+                        try:
+                            self.on_provider_ok(getattr(self.provider, "name", ""))
+                        except Exception:  # noqa: BLE001 - 健康上报不拖垮主流程
+                            pass
                     break  # 本轮调用正常完成
                 except Exception as e:
                     got_content = bool(text_parts or reasoning_parts or blocks)
@@ -487,12 +503,35 @@ class Agent:
                                     f"{e}\n\n当前模型的上下文已满。可以在输入框执行 /compact "
                                     "压缩历史，或在设置 · 模型服务里把该服务的「上下文上限」"
                                     "调成模型真实的窗口大小。"
-                                )
+                                ),
+                                category="context_overflow",
+                                diag_title="对话长度超过模型上下文窗口",
+                                diag_advice=(
+                                    "在输入框执行 /compact 压缩历史；或在 设置 · 模型服务 里"
+                                    "核对该服务的「上下文上限」是否与模型真实窗口一致。"
+                                ),
                             )
                         else:
-                            yield ErrorEvent(message=str(e))
+                            diag = diagnose_error(e)
+                            # 供应商健康上报：错误分类进运行中心的健康灯
+                            if self.on_provider_error is not None:
+                                try:
+                                    self.on_provider_error(
+                                        getattr(self.provider, "name", ""), diag)
+                                except Exception:  # noqa: BLE001 - 健康上报不拖垮主流程
+                                    pass
+                            advice_block = (
+                                f"\n\n【诊断】{diag.title}\n{diag.advice}"
+                            )
+                            yield ErrorEvent(
+                                message=str(e) + advice_block,
+                                category=diag.category,
+                                diag_title=diag.title,
+                                diag_advice=diag.advice,
+                            )
                         break
                     delay = min(RETRY_BASE_DELAY_S * (2 ** (attempt - 1)), 10.0)
+                    self._turn_model_retries = attempt
                     yield NoticeEvent(
                         message=(
                             f"模型调用失败（{str(e)[:160]}），"
@@ -623,6 +662,10 @@ class Agent:
                         note=pending.note,
                         rule_kind=always_rule.kind,
                         rule_pattern=always_rule.pattern,
+                        origin=pending.origin,
+                        scope=pending.scope,
+                        reversible=pending.reversible,
+                        revert_note=pending.revert_note,
                         mod_note=(perm_mod_verdict or {}).get("note", ""),
                     )
                     try:
@@ -736,6 +779,8 @@ class Agent:
                         for (b_tu, b_tool, _), (result, is_error, duration_ms, diff, b_images) in zip(
                             batch, results, strict=True
                         ):
+                            self._turn_tools_used += 1
+                            self._turn_tools_total_ms += duration_ms
                             self.history.append(
                                 Message.tool_result(
                                     b_tu.id, truncate_output(result), is_error=is_error
@@ -784,6 +829,8 @@ class Agent:
                 # 3c. 串行执行（单个只读或需确认/写入/执行的工具）
                 yield ToolCallStarted(tool_call_id=tu.id, name=tu.name, input=tu.input)
                 result, is_error, duration_ms, diff, images = await self._exec_tool(tu, tool, ctx)
+                self._turn_tools_used += 1
+                self._turn_tools_total_ms += duration_ms
 
                 # 3d. post 钩子：仅通知，不影响工具结果
                 if self.hooks is not None and self.hooks.post_rules:
@@ -879,6 +926,9 @@ class Agent:
         yield TurnFinished(
             stop_reason=stop_reason, iterations=iterations,
             duration_ms=int((time.monotonic() - turn_t0) * 1000),
+            tools_used=self._turn_tools_used,
+            tools_total_ms=self._turn_tools_total_ms,
+            model_retries=self._turn_model_retries,
         )
 
     async def _exec_tool(

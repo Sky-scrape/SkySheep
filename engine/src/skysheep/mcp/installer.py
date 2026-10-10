@@ -60,7 +60,10 @@ def normalize_server(raw: dict) -> MCPServerConfig:
     """把一段用户给的 JSON（或表单字段）变成校验过的 MCPServerConfig。"""
     if not isinstance(raw, dict):
         raise MCPInstallError("服务定义必须是一个 JSON 对象")
-    known = {"command", "args", "env", "url", "headers", "readonly", "timeout", "enabled"}
+    known = {
+        "command", "args", "env", "url", "headers", "readonly", "timeout",
+        "enabled", "installed_from", "installed_at",
+    }
     section = {k: v for k, v in raw.items() if k in known}
     if not section:
         raise MCPInstallError(

@@ -25,6 +25,11 @@ MANIFEST_PATH = Path(__file__).parent / "gallery_manifest.json"
 # bundled_dir_for 返回 None → 安装回落在线下载，行为与旧版一致。
 GALLERY_BUNDLE_DIR = Path(__file__).parent / "gallery"
 
+# 安装来源标记文件名（skills/installer.py 落盘）。可更新比对时排除：
+# 它是安装元数据不是技能内容，包内副本永远没有，不能算「本地有改动」。
+# 延后导入会成环（installer 依赖 loader），这里用常量同源维护。
+SOURCE_MARK_NAME = ".source.json"
+
 
 def load_gallery_manifest() -> list[dict]:
     """读打包内的场景模板清单，返回条目数组（读取/解析失败返回空列表）。
@@ -84,12 +89,14 @@ def bundled_dir_for(source: str) -> Path | None:
 def _dir_hashes(root: Path) -> dict[str, str]:
     """目录内全部文件的「相对路径 → 内容哈希」表（含 SKILL.md 与隐藏文件）。
 
+    排除安装来源标记 .source.json：它是安装器落的元数据而非技能内容，
+    包内副本永远没有这份文件，不算进「本地有改动」。
     单个文件读不出来（被占用/权限）不拖垮整体：按占位值计，两边不一致照样
     能被这条表区分出来。
     """
     out: dict[str, str] = {}
     for p in sorted(root.rglob("*")):
-        if not p.is_file():
+        if not p.is_file() or p.name == SOURCE_MARK_NAME:
             continue
         rel = p.relative_to(root).as_posix()
         try:

@@ -93,6 +93,8 @@ class TokenThrottle:
 
 # 令牌验证失败的留痕上限：设置页只需要「最近谁在敲门」，总次数单独计数。
 TOKEN_FAILURE_LOG_MAX = 20
+ACCESS_LOG_MAX = 50  # 成功访问留痕条数上限（与失败留痕分开）
+ACCESS_LOG_DEDUP_S = 300  # 同一 IP 的成功访问去重窗口（秒）：HTTP 请求太密，按窗口折叠
 
 # Tailscale 分配的虚拟网段（IPv4 CGNAT 100.64.0.0/10 + 其 IPv6 ULA）。远程访问模式
 # 靠它区分「tailnet 里的设备」与「物理局域网里的陌生设备」：后者连 IP 段都进不来。
@@ -170,6 +172,63 @@ class RemoteMixin:
         self._token_failures.append({"ts": time.time(), "ip": ip, "where": where})
         del self._token_failures[:-TOKEN_FAILURE_LOG_MAX]
 
+    def note_auth_success(self, ip: str, where: str) -> None:
+        """留痕一次成功的令牌验证（远程来源访问）：与失败留痕对称，设置页展示。
+
+        HTTP 守卫每个请求都会走到这里（静态资源也带 cookie），同一 IP 在
+        去重窗口内只记一条，避免访问日志被一个在线设备刷爆。
+        """
+        now = time.time()
+        for f in reversed(self._access_log[-30:]):
+            if f.get("ip") == ip and now - float(f.get("ts", 0) or 0) < ACCESS_LOG_DEDUP_S:
+                return
+        self._access_log.append({"ts": now, "ip": ip, "where": where})
+        del self._access_log[:-ACCESS_LOG_MAX]
+
+    def access_summary(self) -> dict:
+        """成功访问概览：最近几条（ip / 时间 / 渠道），最近在前。"""
+        recent = [
+            {"ip": str(f.get("ip", "")), "ts": float(f.get("ts", 0) or 0),
+             "where": str(f.get("where", ""))}
+            for f in self._access_log[-8:]
+        ]
+        return {"total": len(self._access_log), "recent": list(reversed(recent))}
+
+    def connections_summary(self) -> list[dict]:
+        """在线 WS 连接概览（不含 emit 引用，不下发任何敏感值）。"""
+        out: list[dict] = []
+        for conn in list(self.ws_connections):
+            out.append({
+                "ip": str(conn.get("ip", "")),
+                "origin": str(conn.get("origin", "")),
+                "connected_at": float(conn.get("connected_at", 0) or 0),
+                "ua": str(conn.get("ua", ""))[:120],
+                "id": str(conn.get("id", "")),
+            })
+        return out
+
+    async def lan_kick(self, params: dict) -> dict:
+        """断开指定的远程 WS 连接（本机专属）：close(4409)，客户端会重连但需重新验令牌。
+
+        connection_id 为空时断开全部远程（非本机回环）连接——本机窗口不断。
+        踢下线不改变监听绑定：真正的「彻底关闭」还是 lan.disable / remote.disable。
+        """
+        target = str(params.get("connection_id") or "").strip()
+        kicked = 0
+        for conn in list(self.ws_connections):
+            if conn.get("origin") == "local":
+                continue  # 本机窗口不踢：用户踢的是「外面连进来的」
+            if target and conn.get("id") != target:
+                continue
+            kick = conn.get("kick")
+            if callable(kick):
+                try:
+                    await kick()
+                    kicked += 1
+                except Exception:  # noqa: BLE001 - 已断开/握手未完成的连接直接算
+                    pass
+        return {"kicked": kicked, "connections": self.connections_summary()}
+
     def token_failure_summary(self) -> dict:
         """给设置页的失败概览：总次数 + 最近几条（ip / 时间）。"""
         recent = [
@@ -193,6 +252,8 @@ class RemoteMixin:
             # 配置里的固定端口（0 = 每次启动随机）：前端据此提示「装 PWA 前先固定端口」
             "port": int(getattr(server, "port", 0) or 0),
             "token_failures": self.token_failure_summary(),
+            "recent_access": self.access_summary(),
+            "connections": self.connections_summary(),
             "note": "" if server.lan else "局域网访问当前关闭：服务只监听本机 127.0.0.1。",
         }
 
@@ -297,6 +358,8 @@ class RemoteMixin:
             # 固定端口（0 = 随机）：前端据此提示「装 PWA 前先固定端口」
             "port": int(getattr(server, "port", 0) or 0),
             "token_failures": self.token_failure_summary(),
+            "recent_access": self.access_summary(),
+            "connections": self.connections_summary(),
             "note": "" if server.tailscale else "远程访问当前关闭。",
         }
 

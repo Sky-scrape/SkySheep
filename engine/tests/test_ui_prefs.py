@@ -1214,8 +1214,8 @@ def test_project_list_follows_saved_order(home):
         ws.send_json({"id": "pl1", "method": "project.list", "params": {}})
         projects = recv_until(ws, "pl1")["result"]["projects"]
         # 无保存序：默认 created_at DESC → proj3, proj2, proj；
-        # 固定项目「远程连接」启动时最早创建，垫底
-        assert [p["name"] for p in projects] == ["proj3", "proj2", "proj", "远程连接"]
+        # 「远程连接」不再启动即建：没有渠道会话时不在列表里（要用时才出现）
+        assert [p["name"] for p in projects] == ["proj3", "proj2", "proj"]
         ids = {p["name"]: p["id"] for p in projects}
 
         # 保存拖动后的顺序：proj 排最前，其余跟随
@@ -1225,7 +1225,7 @@ def test_project_list_follows_saved_order(home):
 
         ws.send_json({"id": "pl2", "method": "project.list", "params": {}})
         projects = recv_until(ws, "pl2")["result"]["projects"]
-        assert [p["name"] for p in projects] == ["proj", "proj3", "proj2", "远程连接"]
+        assert [p["name"] for p in projects] == ["proj", "proj3", "proj2"]
 
         # 名单外的新项目（proj4）不被旧偏好藏掉：追加在已排序尾部
         proj4 = home / "proj4"
@@ -1234,7 +1234,8 @@ def test_project_list_follows_saved_order(home):
         assert recv_until(ws, "sw4")["ok"]
         ws.send_json({"id": "pl3", "method": "project.list", "params": {}})
         projects = recv_until(ws, "pl3")["result"]["projects"]
-        assert [p["name"] for p in projects] == ["proj", "proj3", "proj2", "proj4", "远程连接"]
+        # 名单外的新项目追加在已排序尾部；「远程连接」未使用不出现
+        assert [p["name"] for p in projects] == ["proj", "proj3", "proj2", "proj4"]
 
 
 def test_ui_prefs_quick_pos_roundtrip_and_cleanup(home):
@@ -1282,8 +1283,9 @@ def test_remote_project_fixed_entry(home):
     """「远程连接」固定项目的前端退化：无真实目录（root_path 报空）的行不切项目。
 
     后端把它的 root_path 统一报空（哨兵记录，不指向磁盘）：经典视图的项目行
-    点击改为打开名下最近的会话，且不显示删除钮；分组视图组内会话直接打开
+    点击改为打开名下最近的会话；分组视图组内会话直接打开
     （renderProjectGroup 的 rootPath && !isCurrent 分支天然跳过，不切工作目录）。
+    删除钮对所有项目渲染：远程连接可从列表移除，渠道再用时自动重建。
     """
     js = read_app_bundle()
     # 经典视图：root_path 为空即固定项目；不切项目、不显示删除钮
@@ -1299,12 +1301,13 @@ def test_remote_project_fixed_entry(home):
     assert "classicViewGk = \"remote:\" + p.id" in remote_branch
     assert "refreshSessions()" in remote_branch
     assert "switchProject(p.root_path)" not in remote_branch
-    # 删除钮只在非固定项目上创建（固定项目不提供删除）
-    assert "if (!remote) {" in seg
-    # 分组视图：组头 ✕ 同样只对真实项目（有 rootPath）渲染
+    # 删除钮对所有项目渲染（远程连接也可移除，渠道再用时自动重建）
+    assert 'del.className = "p-del"' in seg
+    assert "渠道再用时会自动重建" in seg
+    # 分组视图：组头 ✕ 对所有带 project 的组渲染（远程连接组同样可移除）
     grp = js[js.index("function renderProjectGroup("):]
     grp = grp[:grp.index("head.onclick")]
-    assert "(project && rootPath" in grp, "固定项目（rootPath 空）不渲染 ✕"
+    assert '(project\n      ? `<button class="pg-del"' in grp, "远程连接组同样渲染 ✕"
 
 
 def test_ui_prefs_notify_kinds_and_sound_focus(home):

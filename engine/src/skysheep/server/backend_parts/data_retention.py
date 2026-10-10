@@ -394,3 +394,83 @@ class RetentionMixin:
     async def retention_sweep_now(self) -> dict:
         """「立即清理」：忽略当天防重马上清一轮，回报清理量与最新占用。"""
         return await run_retention_pass(self.store, self.cfg, force=True)
+
+    # ---- 存储占用与表级清理（设置 · 数据管理） ----
+
+    async def storage_usage(self) -> dict:
+        """数据占用总览：数据库文件、各可清理表行数、备份/日志目录体量。
+
+        只读，各端可查（远程打码路径的惯例不适用——这里不返回本机绝对路径）。
+        """
+        home = skysheep_home()
+        db_bytes = 0
+        if self.store is not None:
+            db_bytes = await asyncio.to_thread(self.store.db_size)
+        tables = await self.store.table_counts() if self.store is not None else {}
+        labels = {t: label for t, _c, label in self.store.CLEANABLE_TABLES} \
+            if self.store is not None else {}
+
+        def _dir_size(p) -> int:
+            total = 0
+            try:
+                for f in p.rglob("*"):
+                    if f.is_file():
+                        try:
+                            total += f.stat().st_size
+                        except OSError:
+                            continue
+            except OSError:
+                pass
+            return total
+
+        backups_bytes = await asyncio.to_thread(_dir_size, home / "backups") \
+            if (home / "backups").exists() else 0
+        logs_bytes = await asyncio.to_thread(_dir_size, home / "logs") \
+            if (home / "logs").exists() else 0
+        return {
+            "db_bytes": db_bytes,
+            "backups_bytes": backups_bytes,
+            "logs_bytes": logs_bytes,
+            "tables": [
+                {"table": t, "label": labels.get(t, t), "rows": rows}
+                for t, rows in tables.items()
+            ],
+        }
+
+    async def storage_cleanup(self, params: dict) -> dict:
+        """表级清理：targets = [{"table": 名, "days": 天数，0=全清}]，可选 vacuum。
+
+        与备份/恢复同一道防线：有会话/任务在跑时不动数据库（DELETE 与 VACUUM
+        都可能长时间持锁）。删除只限 store 层的可清理表白名单。
+        """
+        busy = self._backup_busy_message("清理")
+        if busy:
+            raise RuntimeError(busy)
+        raw_targets = params.get("targets")
+        if raw_targets is None and not params.get("vacuum"):
+            raise RuntimeError("缺少要清理的目标（targets）")
+        if raw_targets is None:
+            raw_targets = []
+        if not isinstance(raw_targets, list):
+            raise RuntimeError("清理目标格式不对：需要 [{\"table\", \"days\"}] 数组")
+        targets = [t for t in raw_targets if isinstance(t, dict)]
+        if not targets and not params.get("vacuum"):
+            raise RuntimeError("清理目标格式不对：需要 [{\"table\", \"days\"}] 数组")
+        try:
+            deleted = await self.store.cleanup_tables(targets)
+            freed = 0
+            if params.get("vacuum"):
+                before = await asyncio.to_thread(self.store.db_size)
+                await self.store.vacuum()
+                after = await asyncio.to_thread(self.store.db_size)
+                freed = max(0, before - after)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"清理失败：{e}") from None
+        result = {
+            "deleted": deleted,
+            "total_deleted": sum(deleted.values()),
+            "vacuumed": bool(params.get("vacuum")),
+            "freed_bytes": freed,
+        }
+        result.update(await self.storage_usage())
+        return result

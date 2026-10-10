@@ -939,7 +939,7 @@ async function loadCron() {
     ops.className = "cron-ops";
     ops.innerHTML =
       `<button class="cron-op" data-op="run" title="立即运行一次">▶</button>` +
-      `<button class="cron-op" data-op="pipeline" title="纳入任务编排（复制成流水线节点）">⛓</button>` +
+      `<button class="cron-op" data-op="pipeline" title="纳入编排（复制成流水线节点）">⛓</button>` +
       `<button class="cron-op" data-op="schtask" title="系统计划任务：状态查询中…">…</button>` +
       `<button class="cron-op" data-op="toggle" title="${t.enabled ? "暂停" : "启用"}">${t.enabled ? "⏸" : "▶"}</button>` +
       `<button class="cron-op danger" data-op="del" title="删除">✕</button>`;
@@ -1459,7 +1459,7 @@ function pipelineModal(p) {
       await loadPipelines();
     };
   }
-  showModal(`任务编排 · ${p.name}`, box, onOk, okLabel);
+  showModal(`编排 · ${p.name}`, box, onOk, okLabel);
 }
 
 function pipelineCreateModal() {
@@ -1716,7 +1716,7 @@ async function pipelineImportModal(preset) {
   });
   renderSrc();
 
-  showModal("导入到任务编排", box, async () => {
+  showModal("导入到编排", box, async () => {
     const s = curSource();
     if (s === "file") {
       // 从导出 JSON 恢复整条流水线（草稿态，启动仍由用户在面板确认预授权）

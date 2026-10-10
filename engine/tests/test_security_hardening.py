@@ -246,8 +246,10 @@ def test_cross_project_session_ops_denied(home, monkeypatch):
             assert "not found" in frame["error"], method
 
 
-def test_refs_drop_foreign_project_sessions(home):
-    """& 引用：同项目会话照常注入，其他项目的会话静默剔除（B2）。"""
+def test_refs_cross_project_local_injected_remote_filtered(home, monkeypatch):
+    """& 引用的项目归属（B2）：本机桌面端已放开跨项目——同项目/跨项目会话都
+    注入，跨项目的带来源标注（提醒路径属于另一工作目录）；远程客户端仍严格
+    剔除其他项目的会话，B 族边界不随本机放开而放宽。"""
     from skysheep.messages import TextBlock
 
     (home / "proj2").mkdir()
@@ -269,17 +271,41 @@ def test_refs_drop_foreign_project_sessions(home):
                       "params": {"path": str(home / "proj")}})
         assert recv_until(ws, "sw2")["ok"]
 
-        # 新会话同时引用 A/B 两个会话：只有 A 的被注入
+        # 新会话同时引用 A/B 两个会话：本机端都注入，跨项目的带来源标注
+        # （显式建会话 + 定向发送：不带 session_id 会打进当时的活动会话）
+        ws.send_json({"id": "n1", "method": "session.new", "params": {}})
+        sid_new = recv_until(ws, "n1")["result"]["id"]
         ws.send_json({"id": "t3", "method": "chat.send",
-                      "params": {"text": "看看引用", "refs": [sid_a, sid_b]}})
+                      "params": {"text": "看看引用", "session_id": sid_new,
+                                 "refs": [sid_a, sid_b]}})
         frame = recv_until(ws, "t3")
         assert frame["ok"]
-        sid_new = frame["result"]["session_id"]
+        assert frame["result"]["session_id"] == sid_new
         ws.send_json({"id": "e1", "method": "session.export",
                       "params": {"id": sid_new, "fmt": "md"}})
         md = recv_until(ws, "e1")["result"]["markdown"]
         assert "pineapple-secret" in md       # 同项目引用正常生效
-        assert "foreign-secret-xyz" not in md  # 跨项目引用被剔除
+        assert "foreign-secret-xyz" in md     # 本机跨项目引用已放开：照常注入
+        assert "项目「proj2」" in md            # 跨项目引用带来源标注
+        assert "仅供背景参考" in md            # 标注提醒路径属于另一工作目录
+
+    # 远程客户端：跨项目引用仍被剔除（B2 硬边界，不随本机放开而放宽）
+    monkeypatch.setattr(server_app, "_client_is_local", lambda client: False)
+    script_remote = [[TextBlock(text="远程引用已处理")]]
+    with make_client(home, script_remote) as client, client.websocket_connect("/ws") as ws:
+        # 远程端不能 project.switch（本机门禁）：在启动项目（A）里新建会话做定向引用
+        ws.send_json({"id": "n2", "method": "session.new", "params": {}})
+        sid_r = recv_until(ws, "n2")["result"]["id"]
+        ws.send_json({"id": "t4", "method": "chat.send",
+                      "params": {"text": "远程看看引用", "session_id": sid_r,
+                                 "refs": [sid_a, sid_b]}})
+        frame = recv_until(ws, "t4")
+        assert frame["ok"]
+        ws.send_json({"id": "e2", "method": "session.export",
+                      "params": {"id": sid_r, "fmt": "md"}})
+        md = recv_until(ws, "e2")["result"]["markdown"]
+        assert "pineapple-secret" in md        # 同项目引用照常
+        assert "foreign-secret-xyz" not in md  # 跨项目引用仍被剔除
 
 
 def test_cron_cross_project_denied(home):

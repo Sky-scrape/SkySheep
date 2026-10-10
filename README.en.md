@@ -86,44 +86,19 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 | ![Model provider settings](docs/images/providers.png) | ![Agenda weekly view](docs/images/agenda.png) | ![Usage dashboard](docs/images/usage.png) |
 | Paste an API key into a built-in preset to connect | Scheduled tasks and reminders land on the calendar and fire on time | Token usage and cost estimates, per session |
 
-## 🆚 Benchmarked Against Mainstream Agents
+## 🧭 Positioning
 
-SkySheep's feature set was built item by item against Claude Code / OpenAI Codex CLI / ZCode (✅ = implemented). The CLIs are stronger in terminal ecosystem and CI integration; SkySheep provides a full desktop GUI built for everyday users: Chinese-first, roundtable multi-model, task pipelines, computer control, and remote & chat channels. The current release is **Windows-first**; macOS/Linux are on the roadmap (the `--browser` mode provides a cross-platform fallback).
-
-| Capability | Claude Code | Codex CLI | ZCode | SkySheep |
-|---|---|---|---|---|
-| Agent loop (streaming + tool calls) | ✅ | ✅ | ✅ | ✅ |
-| Multi-model / multi-provider (OpenAI-compatible + Anthropic + local) | — | ✅ | ✅ | ✅ built-in presets + custom relay endpoints + auto model detection |
-| MCP client (stdio/HTTP, Claude Desktop config compatible) | ✅ | ✅ | ✅ | ✅ in-app import / manual entry / templates + one-click built-in presets, hot-applied |
-| Skill packages (SKILL.md, progressive disclosure) | ✅ | ✅ | ✅ | ✅ dedicated skills page: global/project scopes, per-project scope limits, full-text preview; import from folder/.zip/GitHub·Gitee URL + "scan this computer" |
-| Sub-agents (background tasks + polling) | ✅ | ✅ | ✅ | ✅ spawn_agent / check_task + custom sub-agents |
-| Project memory (AGENTS.md / CLAUDE.md) | ✅ | ✅ | ✅ | ✅ edited in-app + global auto memory (across projects) |
-| Memory map (project evolution visualization) | — | — | — | ✅ evolution timeline + topic graph + LLM-generated evolution summary (file footprints / activity heatmap / task & memory annotations) |
-| Task lists (todos) | ✅ | ✅ | ✅ | ✅ sidebar panel synced in real time |
-| Plan mode (plan first, then execute) | ✅ | — | ✅ | ✅ dual execute/plan modes + one-click execute-the-plan |
-| Automatic context compaction + manual /compact | ✅ | ✅ | ✅ | ✅ CJK-aware estimation + real-usage floor as a fallback (manual /compact from the desktop input box only) |
-| Permission prompts + project whitelist | ✅ | ✅ | ✅ | ✅ confirmation flow + word-boundary command-prefix whitelist (rejects shell-chaining bypass) + tiered permission modes + workspace trust (repo-bundled MCP/skills require confirmation) |
-| Headless one-shot runs (scripts / CI) | ✅ -p | ✅ exec | ✅ -p | ✅ skysheep run (pre-authorized tools + JSON output + audit) |
-| Ignore files | ✅ | ✅ | ✅ | ✅ .skysheepignore (.gitignore semantics, .env ignored by default) |
-| Slash commands | ✅ | ✅ | ✅ | ✅ /help /new /model /export (CLI & desktop); /compact /status /todos (desktop input box only — see /help for the full CLI set) |
-| Message queuing / auto-retry on transient errors | ✅ | ✅ | ✅ | ✅ exponential backoff; in-flight content is never replayed |
-| Web fetch + web search | ✅ | ✅ | ✅ | ✅ web_fetch (SSRF protection) + web_search (Bocha/Tavily/Zhipu/self-hosted SearXNG) |
-| Document reading + generation | ✅ | — | ✅ | ✅ read_document (PDF/Word/Excel/PPT) + write_document (docx/xlsx/csv/PPT) |
-| Image input (multimodal) | ✅ | ✅ | ✅ | ✅ paste/drag-and-drop multimodal |
-| Image generation | — | — | — | ✅ CogView/Kolors image generation |
-| Computer use | — | — | — | ✅ screenshot/mouse/keyboard/window/clipboard (off by default; confirmation-gated + action whitelist) |
-| Thinking visualization | ✅ | ✅ reasoning summaries | — | ✅ ThinkingDelta streaming + collapsible replay + thinking time |
-| Task time estimates / duration logging | — | — | ✅ | ✅ estimates a range when taking over; actual duration recorded per round and persisted with the message |
-| Checkpoints / undo this round's file changes | ✅ checkpoints | — | ✅ | ✅ persisted to disk; rollbacks survive restarts |
-| Session search / management | ✅ | ✅ | ✅ | ✅ cross-project full-text search + visual backup restore + Markdown/HTML export |
-| Right-side panel (terminal / browser / side chat / review / files / tasks / agenda) | — | — | ✅ | ✅ multiple session tabs in parallel |
-| Hooks (pre/post tool-call hooks) | ✅ | ✅ PreToolUse etc. | ✅ | ✅ [hooks] in config.toml; pre-hooks can block |
-| Light/dark themes / desktop form factor | ✅ terminal themes | ✅ syntax themes | ✅ | ✅ six themes (Paper-ink / Celadon / Persimmon / Night-ink / Indigo / Pine) + follow system + system tray + launch at startup + installer |
-| LAN remote access (continue on your phone) | — | — | — | ✅ token + QR code; listens on localhost only by default |
-| Cross-network remote access (Tailscale) | — | — | — | ✅ reach home from any network; shares the token with LAN; non-tailnet sources rejected outright |
-| Chat bot channels (Feishu / WeChat) | — | — | — | ✅ Feishu (App ID/Secret + WebSocket long connection) + WeChat (QR login); off by default, empty allowlist denies everything, read-only when unattended, optional approval with timeout auto-deny |
-
-> Competitor columns reflect **first-party, built-in features per each vendor's official docs as of 2026-09** (extensions, plugins, and cloud companions not counted); these products evolve quickly — defer to the official docs.
+SkySheep is a desktop AI Agent workbench built for everyday users: a full graphical
+interface, Chinese-first, ready to use out of the box. Compared with mainstream
+terminal agents (Claude Code, OpenAI Codex CLI, etc.), the difference is not a
+checkbox-by-checkbox feature list but the product form — terminal tools excel at
+scripting and CI integration, while SkySheep excels at visual collaboration
+(roundtable / team / adversarial multi-model modes), computer control, unattended
+automation (scheduled and dependency-ordered runs), and remote & chat-channel
+reach. See the feature list above for the full set and
+[CHANGELOG.md](CHANGELOG.md) for the version-by-version history.
+The current release is **Windows-first**; macOS/Linux are on the roadmap (the
+`--browser` mode provides a cross-platform fallback).
 
 ## 🚀 Installation & Running
 
@@ -228,11 +203,11 @@ Running into a problem? In the app, go to Settings → About → "💬 Report an
 ## 🗺 Roadmap & Non-goals
 
 - ✅ current release **v2.5.0**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors → session split view & adversarial review (full history in [CHANGELOG.md](CHANGELOG.md))
-- 🚧 **Next up**: macOS / Linux support · system-level scheduling (register with Windows Task Scheduler, fire the engine on schedule and exit — removing the "app must be running" prerequisite) · defense-in-depth against prompt injection (tool egress filtering and untrusted-content labeling) · code-signed distribution · command execution sandboxing (restricted tokens / AppContainer first, closing the OS-level gap) · in-page browser automation (click / fill / extract inside pages, complementing computer control) · mobile PWA (the LAN / Tailscale web UI installable to the home screen)
+- 🚧 **Next up**: macOS / Linux support · code-signed distribution (until then, see [docs/smartscreen-说明.md](docs/smartscreen-说明.md) for the SmartScreen workaround for unsigned installers)
 
 **Non-goals**:
 
-- **Native mobile apps** — the desktop shell is where permission gates, checkpoints, and the file panel get polished; there is no bandwidth right now for a second, mobile-grade security model. The web PWA is not affected (see roadmap).
+- **Native mobile apps** — the desktop shell is where permission gates, checkpoints, and the file panel get polished; there is no bandwidth right now for a second, mobile-grade security model. The web PWA shipped in 2.5.0 (add to home screen).
 - **macOS/Linux (for now)** — Windows gets the desktop experience polished first; the `--browser` mode already provides a cross-platform fallback.
 - **Vector memory / multi-tier context compaction** — the built-in compaction and archive-time memory digests already cover current usage; not worth growing the install size.
 - **Replacing the built-in search with ripgrep** — pure-Python, zero-dependency "install and it works" distribution stays; no bundled binary, but an installed rg may optionally accelerate search (implemented: ASCII-pattern search is accelerated automatically when a local rg is present; the built-in search remains the default).

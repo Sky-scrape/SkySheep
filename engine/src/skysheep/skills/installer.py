@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -21,12 +22,15 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ..textio import write_text_atomic
 from .loader import (  # 与发现逻辑共用同一套 SKILL.md 解析
     MAX_SKILL_NAME_CHARS,
     _load_skill_from_dir,
 )
 
 SKILL_FILE = "SKILL.md"
+SOURCE_FILE = ".source.json"   # 安装来源标记（与 Mod 体系同名的文件、同一类用途）
+SKILL_BACKUP_KEEP = 10          # 覆盖安装时旧目录的滚动备份份数（按同名旧份裁剪）
 MAX_SKILL_FILES = 2_000          # 单个技能包的文件数上限（防误选整个盘）
 MAX_UNPACKED_BYTES = 120 * 1024 * 1024
 
@@ -177,16 +181,87 @@ def _enforce_dir_limits(root: Path) -> None:
             raise SkillInstallError("技能包过大，已中止")
 
 
+def _now_iso() -> str:
+    """本地时间的 ISO 字符串（秒级即可，只用于展示）。"""
+    from datetime import datetime
+
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def write_source_mark(target: Path, *, kind: str, url: str = "", label: str = "") -> None:
+    """在装好的技能目录里落一份来源标记 .source.json。
+
+    与 Mod 体系（backend_parts/mods.py）的 .source.json 同一模式：随技能目录
+    生灭，目录被删标记自然消失，不需要额外清理。展示层要把它当外部内容看：
+    包作者可以自己带一份同名文件伪造来源，界面只作参考不作凭据。
+    """
+    meta: dict[str, str] = {"source": kind, "installed_at": _now_iso()}
+    if url:
+        meta["origin_url"] = url
+    if label:
+        meta["origin_label"] = label
+    try:
+        write_text_atomic(target / SOURCE_FILE, json.dumps(meta, ensure_ascii=False))
+    except OSError:
+        pass  # 标记写不进去不构成安装失败：技能本体已落盘，来源展示缺失可接受
+
+
+def read_source_mark(skill_dir: Path) -> dict[str, str]:
+    """读来源标记（loader 发现技能时用）。缺失/坏损一律回空字典，不拖垮发现。"""
+    try:
+        data = json.loads((skill_dir / SOURCE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in ("source", "origin_url", "origin_label", "installed_at"):
+        val = data.get(key)
+        if isinstance(val, str) and val:
+            out[key] = " ".join(val.split())[:200]
+    return out
+
+
+def _backup_existing(target: Path) -> None:
+    """覆盖安装前把旧目录整体搬进备份目录（滚动保留 SKILL_BACKUP_KEEP 份）。
+
+    备份落点取 dest_root 的兄弟目录 backups/skills（全局技能即
+    ~/.skysheep/backups/skills，项目技能在项目 .skysheep 下），不塞进
+    dest_root 本身——那里会被 discover() 当技能目录扫。
+    搬运失败不中止安装：旧目录仍在原位，随后的 rmtree_force 会删掉它，
+    只是少了这份备份（覆盖安装本来就是用户显式点过的操作）。
+    """
+    if not target.exists():
+        return
+    backup_dir = target.parent.parent / "backups" / "skills"
+    stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        dest = backup_dir / f"{target.name}-{stamp}"
+        try:
+            target.replace(dest)
+        except OSError:
+            shutil.move(str(target), str(dest))  # 跨盘 replace 不行时退回 move
+        olds = sorted(backup_dir.glob(f"{target.name}-*"))
+        for old in olds[: max(0, len(olds) - SKILL_BACKUP_KEEP)]:
+            rmtree_force(old)
+    except OSError:
+        pass
+
+
 def install_from_dir(
     src: str | Path,
     dest_root: Path,
     *,
     existing: set[str],
     overwrite: bool = False,
+    origin_label: str = "",
+    origin_url: str = "",
 ) -> dict:
     """把本机文件夹里的技能包复制到 dest_root。
 
-    overwrite=True 供「更新/重装」用：同名技能整目录替换，而不是报错。
+    overwrite=True 供「更新/重装」用：同名技能整目录替换（旧目录先进备份），
+    而不是报错。装完在每个技能目录里写 .source.json 来源标记。
     """
     src_path = Path(src).expanduser()
     if not src_path.exists():
@@ -212,8 +287,13 @@ def install_from_dir(
         if target.exists():
             if not overwrite:
                 raise SkillInstallError(f"目标已存在：{target}")
+            _backup_existing(target)
             rmtree_force(target)
         shutil.copytree(root, target)
+        write_source_mark(
+            target, kind="folder", url=origin_url,
+            label=origin_label or str(src_path.name),
+        )
         installed.append(name)
     return {"installed": installed, "count": len(installed), "dest": str(dest_root)}
 
@@ -347,13 +427,16 @@ def install_from_zip(
     existing: set[str],
     only_under: str | None = None,
     overwrite: bool = False,
+    origin_label: str = "",
+    origin_url: str = "",
 ) -> dict:
     """把 .zip 技能包解压到 dest_root（先解到暂存目录再改名，失败不留半个技能）。
 
     only_under：只安装压缩包里这个子目录下的技能（给「从 GitHub 链接装仓库里
     某个 skills/xxx 子目录」用）。压缩包外层通常套着一层 repo-main 之类的目录，
     所以这里按「路径里包含这段连续目录」来匹配，不锚定开头。
-    overwrite=True 供「更新/重装」用：同名技能整目录替换，而不是报错。
+    overwrite=True 供「更新/重装」用：同名技能整目录替换（旧目录先进备份），
+    而不是报错。装完在每个技能目录里写 .source.json 来源标记。
     """
     src_path = Path(src).expanduser()
     if not src_path.is_file():
@@ -390,8 +473,10 @@ def install_from_zip(
             if target.exists():
                 if not overwrite:
                     raise SkillInstallError(f"目标已存在：{target}")
+                _backup_existing(target)
                 rmtree_force(target)
             root.replace(target)
+            write_source_mark(target, kind="zip", url=origin_url, label=origin_label)
             installed.append(name)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -404,12 +489,17 @@ def install(
     *,
     existing: set[str],
     overwrite: bool = False,
+    origin_label: str = "",
+    origin_url: str = "",
 ) -> dict:
-    """按来源类型分派：.zip 解压，其余按文件夹处理。"""
+    """按来源类型分派：.zip 解压，其余按文件夹处理（来源元数据透传）。"""
     src_path = Path(src).expanduser()
     if src_path.is_file() and src_path.suffix.lower() == ".zip":
         return install_from_zip(src_path, dest_root, existing=existing, overwrite=overwrite)
-    return install_from_dir(src_path, dest_root, existing=existing, overwrite=overwrite)
+    return install_from_dir(
+        src_path, dest_root, existing=existing, overwrite=overwrite,
+        origin_label=origin_label, origin_url=origin_url,
+    )
 
 
 def rmtree_force(path: Path) -> None:
@@ -648,7 +738,10 @@ def install_from_url(
     existing: set[str],
     overwrite: bool = False,
 ) -> dict:
-    """下载并安装。分支没写明时依次试候选地址，404 换下一个。"""
+    """下载并安装。分支没写明时依次试候选地址，404 换下一个。
+
+    来源 url 记进每个技能目录的 .source.json（install_from_zip 落盘收尾写）。
+    """
     candidates, only_under = resolve_url(url)
     last: DownloadError | None = None
     for candidate in candidates:
@@ -662,7 +755,7 @@ def install_from_url(
         try:
             return install_from_zip(
                 tmp, dest_root, existing=existing, only_under=only_under,
-                overwrite=overwrite,
+                overwrite=overwrite, origin_url=url, origin_label="网址安装",
             )
         finally:
             tmp.unlink(missing_ok=True)

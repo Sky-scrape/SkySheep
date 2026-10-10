@@ -1113,7 +1113,10 @@ def test_cleanup_empty_sessions(home):
 
 def test_session_project_path_and_reveal(home, monkeypatch):
     """会话右键的「在资源管理器中打开 / 复制项目路径」：项目会话定位到工作目录，
-    快聊（任务）会话没有目录——查询返回空串、打开报可读错误。"""
+    快聊（任务）会话定位到数据目录下专用的 fast-talk 文件夹（引擎也在那里
+    干活，如实暴露，不与 default 混用）。"""
+    from skysheep.config import skysheep_home
+
     opened = []
     monkeypatch.setattr(
         "skysheep.support.open_folder",
@@ -1132,13 +1135,14 @@ def test_session_project_path_and_reveal(home, monkeypatch):
         r = rpc("rv", "session.reveal", {"id": sid})
         assert r["ok"] and opened == [str((home / "proj").resolve())]
 
-        # 任务会话（不绑项目）：查询空串、打开报可读错误
+        # 快聊/任务会话（不绑项目）：固定工作目录 = 数据目录下 fast-talk 专用文件夹
         r = rpc("t", "session.new_task")
         task_sid = r["result"]["id"]
         r = rpc("p2", "session.project_path", {"id": task_sid})
-        assert r["ok"] and r["result"]["path"] == ""
+        fast_talk = str((skysheep_home() / "fast-talk").resolve())
+        assert r["ok"] and r["result"]["path"] == fast_talk
         r = rpc("rv2", "session.reveal", {"id": task_sid})
-        assert not r["ok"] and "没有工作目录" in r["error"]
+        assert r["ok"] and opened[-1] == fast_talk
 
 
 def test_peek_session_messages_is_readonly(home):

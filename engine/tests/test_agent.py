@@ -19,7 +19,8 @@ from skysheep.tools.base import Safety, Tool, ToolContext
 
 
 def make_agent(provider, tmp_path, store=None, project_id=None, max_iterations=10):
-    gate = PermissionGate(store=store, project_id=project_id)
+    # gate 与 Agent 同一工作目录（与后端构造一致）：范围分类、写入边界判定都依赖它
+    gate = PermissionGate(store=store, project_id=project_id, working_dir=tmp_path)
     registry = ToolRegistry(default_tools())
     return Agent(
         provider=provider,
@@ -157,6 +158,57 @@ async def test_permission_request_previews_always_rule(tmp_path):
             agent.respond_permission(ev.request_id, "allow_always")
     assert previews == [("always", "")]
     assert (tmp_path / "x.txt").exists()
+
+
+async def test_permission_request_carries_fixed_fields(tmp_path):
+    """确认卡固定字段随事件下发：发起方（主会话为空）/ 影响范围 / 可回滚。"""
+    provider = FakeProvider(
+        [
+            [ToolUseBlock(id="t1", name="write_file", input={"path": "x.txt", "content": "1"})],
+            [ToolUseBlock(id="t2", name="run_command", input={"command": "echo hi"})],
+            [TextBlock(text="done")],
+        ]
+    )
+    agent = make_agent(provider, tmp_path)
+    fixed: list[dict] = []
+    async for ev in agent.run_turn("write then run"):
+        if ev.kind == "permission_request":
+            fixed.append({
+                "tool": ev.tool_name, "origin": ev.origin,
+                "scope": ev.scope, "reversible": ev.reversible,
+                "revert": ev.revert_note,
+            })
+            agent.respond_permission(ev.request_id, "allow_once")
+    assert len(fixed) == 2
+    write, run = fixed
+    # 写文件：主会话发起（origin 空）、范围内路径、改动进检查点可回滚
+    assert write["tool"] == "write_file"
+    assert write["origin"] == ""
+    assert "工作目录内" in write["scope"] and "x.txt" in write["scope"]
+    assert write["reversible"] is True
+    assert "撤销本轮改动" in write["revert"]
+    # 命令：范围标为本机全局，不进检查点、不可自动回滚
+    assert run["tool"] == "run_command"
+    assert "本机全局" in run["scope"]
+    assert run["reversible"] is False
+    assert run["revert"] == ""
+
+
+async def test_permission_request_scope_flags_outside_workdir(tmp_path):
+    """工作目录外的写入在范围行如实标注「工作目录外」。"""
+    provider = FakeProvider(
+        [
+            [ToolUseBlock(id="t1", name="write_file", input={"path": "../outside.txt", "content": "1"})],
+            [TextBlock(text="done")],
+        ]
+    )
+    agent = make_agent(provider, tmp_path)
+    async for ev in agent.run_turn("write outside"):
+        if ev.kind == "permission_request":
+            assert "工作目录外" in ev.scope
+            agent.respond_permission(ev.request_id, "deny")
+            return
+    pytest.fail("应产生权限请求")
 
 
 async def test_unknown_tool_reported_as_error(tmp_path):

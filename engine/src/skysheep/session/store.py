@@ -265,6 +265,12 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("pipelines", "notify_channel INTEGER NOT NULL DEFAULT 0"),
 )
 
+# 数据库结构版本：SCHEMA 或 _COLUMN_MIGRATIONS 每次变更时 +1。
+# 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
+# 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
+# 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
+SCHEMA_VERSION = 1
+
 
 @dataclass
 class Project:
@@ -668,14 +674,50 @@ class SessionStore:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA busy_timeout=5000")
+        # 降级防护：库里版本号比程序新，说明这个库被更新版本的 SkySheep 打开过。
+        # 旧程序没有对应列的语义认知，继续写可能破约束/写坏数据，明确拒绝。
+        cur = await self._db.execute("PRAGMA user_version")
+        db_version = int((await cur.fetchone())[0])
+        if db_version > SCHEMA_VERSION:
+            await self._db.close()
+            self._db = None
+            raise RuntimeError(
+                f"会话数据库由更新版本的 SkySheep 创建（库版本 {db_version} > "
+                f"当前程序支持 {SCHEMA_VERSION}），降级打开可能损坏数据。"
+                "请升级 SkySheep，或用备份文件恢复（设置 → 数据管理 → 备份与恢复）。"
+            )
         # 滚动备份要在连接建立、WAL checkpoint 之后做（数据才完整），见 _rolling_backup
         await self._rolling_backup(existed)
         await self._db.executescript(SCHEMA)
         await self._migrate_legacy()
+        if db_version < SCHEMA_VERSION:
+            if existed:
+                # 版本升格前先留一份 pre-migrate 备份：迁移不可逆（补列只进不退），
+                # 万一新版本有问题，用户还能拿这份回到旧版程序。全新库（existed=False）
+                # 没有可迁的旧数据，不备份。备份失败不拦启动（滚动备份已在上面做过
+                # 一次），只是少了这层额外保障。
+                try:
+                    await self._pre_migrate_backup()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("迁移前备份失败（不影响启动）：%s", e)
+            await self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self._db.commit()
         self._fts_dirty = False  # 索引写失败过 → 下次启动走查漏模式
         await self._setup_fts()
         return self
+
+    async def _pre_migrate_backup(self) -> None:
+        """schema 版本升格前把当前库快照一份到 backups/pre-migrate-<版本>.db。
+
+        与滚动备份同目录、同 backup API 一致性快照，不占 BACKUP_KEEP 名额
+        （按文件名前缀区分，restore_backup 只认主前缀，不会被误恢复成主库）。
+        """
+        backup_dir = self.backup_dir()
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        target = backup_dir / f"pre-migrate-v{SCHEMA_VERSION}-{self.path.stem}.db"
+        if target.exists():
+            target.unlink()
+        await asyncio.to_thread(_snapshot_or_copy, self.path, target)
 
     async def _migrate_legacy(self) -> None:
         """旧库迁移：缺列才补列 + 清理历史上的重复索引。
@@ -822,13 +864,12 @@ class SessionStore:
     # 唯一键（幂等创建/识别都用它）。不指向磁盘上任何位置，永远不会被 switch。
     REMOTE_PROJECT_PATH = "//skysheep-remote"
 
-    async def ensure_remote_project(self) -> Project:
-        """取（或建）固定的「远程连接」项目：飞书/微信等渠道的对话都归到它名下。
+    async def get_remote_project(self) -> Project | None:
+        """只读查询固定的「远程连接」项目：不存在返回 None（不创建）。
 
         渠道对话与桌面上的工作目录无关（工作目录是远程设备的），不落到当前
-        项目或快聊里；项目本身不可切换、不可删除（backend/app.py 层拦截）。
-        幂等：按哨兵路径唯一键查建，多渠道并发调用也只建一条。
-        """
+        项目或快聊里。项目本身不可切换（哨兵路径不是真实目录）；可从列表
+        删除——渠道再用时经 ensure_remote_project 幂等重建。"""
         assert self._db
         cur = await self._db.execute(
             "SELECT * FROM projects WHERE root_path = ?", (self.REMOTE_PROJECT_PATH,)
@@ -836,16 +877,23 @@ class SessionStore:
         row = await cur.fetchone()
         if row:
             return Project(row["id"], row["root_path"], row["name"], row["created_at"])
+        return None
+
+    async def ensure_remote_project(self) -> Project:
+        """取（或建）固定的「远程连接」项目：飞书/微信等渠道的对话都归到它名下。
+
+        渠道对话与桌面上的工作目录无关（工作目录是远程设备的），不落到当前
+        项目或快聊里。启动不再无条件建：删除后侧栏不再出现，渠道再用时
+        经本方法幂等重建（多渠道并发调用也只建一条）。"""
+        proj = await self.get_remote_project()
+        if proj:
+            return proj
         await self._db.execute(
             "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
             (self.REMOTE_PROJECT_PATH, "远程连接", time.time()),
         )
         await self._db.commit()
-        cur = await self._db.execute(
-            "SELECT * FROM projects WHERE root_path = ?", (self.REMOTE_PROJECT_PATH,)
-        )
-        row = await cur.fetchone()
-        return Project(row["id"], row["root_path"], row["name"], row["created_at"])
+        return await self.get_remote_project()
 
     async def get_or_create_project(self, root_path: str, name: str = "") -> Project:
         assert self._db
@@ -2158,6 +2206,78 @@ class SessionStore:
             (session_id, provider, model, time.time(), in_tokens, out_tokens, max(0, cached_tokens)),
         )
         await self._db.commit()
+
+    # ---- 存储占用与表级清理（设置 · 数据管理） ----
+
+    # 可清理表清单：(表名, 时间列, 界面标签)。只收「只进不出」的账本类数据——
+    # 会话/项目/设置类数据走各自专门的删除路径，不在这里一刀切。
+    CLEANABLE_TABLES: tuple[tuple[str, str, str], ...] = (
+        ("usage_log", "ts", "用量记录（token 消耗历史）"),
+        ("team_messages", "created_at", "团队频道消息"),
+        ("channel_sources", "last_seen", "远程连接来源记录"),
+        ("map_digests", "start_ts", "项目地图摘要"),
+    )
+
+    async def table_counts(self) -> dict[str, int]:
+        """各可清理表 + 核心表的行数快照（设置页展示用）。"""
+        assert self._db
+        out: dict[str, int] = {}
+        for table, _col, _label in self.CLEANABLE_TABLES:
+            try:
+                cur = await self._db.execute(f"SELECT COUNT(*) FROM {table}")
+                out[table] = int((await cur.fetchone())[0])
+            except Exception:  # noqa: BLE001 - 单表查不出来不影响其他
+                out[table] = -1
+        return out
+
+    async def cleanup_tables(self, targets: list[dict]) -> dict:
+        """按表清理过期行：targets = [{"table": 名, "days": 天数或 0=全清}]。
+
+        days > 0 时删该时间列早于 cutoff 的行；days = 0 时清空整表。
+        只接受 CLEANABLE_TABLES 里的表白名单（防参数拼出任意 DELETE）；
+        删除后由调用方决定是否 VACUUM（本方法不主动 VACUUM，避免误碰
+        WAL 与大库长时间锁）。返回每表的删除行数。
+        """
+        assert self._db
+        allowed = {name: col for name, col, _ in self.CLEANABLE_TABLES}
+        deleted: dict[str, int] = {}
+        for item in targets:
+            table = str(item.get("table") or "")
+            col = allowed.get(table)
+            if col is None:
+                continue
+            try:
+                days = int(item.get("days") or 0)
+            except (TypeError, ValueError):
+                days = 0
+            if days > 0:
+                cutoff = time.time() - days * 86400
+                cur = await self._db.execute(
+                    f"DELETE FROM {table} WHERE {col} < ?", (cutoff,)
+                )
+            else:
+                cur = await self._db.execute(f"DELETE FROM {table}")
+            deleted[table] = int(cur.rowcount or 0)
+        await self._db.commit()
+        return deleted
+
+    async def vacuum(self) -> None:
+        """整理数据库文件，释放已删数据占用的空间（VACUUM）。
+
+        整库重写，大库会慢且临时需要约两倍磁盘空间；调用方应在无任务运行时
+        触发（backend 层用 _backup_busy_message 预检）。WAL 模式下执行后
+        自动回落到 WAL 模式，不需额外处理。
+        """
+        assert self._db
+        await self._db.execute("VACUUM")
+        await self._db.commit()
+
+    def db_size(self) -> int:
+        """主库文件字节数（不含 WAL/SHM；不存在时 0）。"""
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return 0
 
     async def usage_stats(self, days: int = 14, *, project_id: int | None | object = _ALL) -> dict:
         """按天聚合 + 按会话聚合 + 按服务×模型聚合（近 N 天）。日期用本地时区。

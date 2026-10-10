@@ -356,6 +356,12 @@ class SkySheepConfig(BaseModel):
     # 每日 token 预算护栏：当天累计输入+输出超过该值后拒绝发送新消息（0 = 不限制）。
     # 面向"怕烧钱"的普通用户；用量统计（usage_log）是现成的数据源。
     daily_token_budget: int = Field(default=0, ge=0)
+    # 单轮 token 上限：单次请求的估算体积（历史+新消息）超过即拒绝发送（0 = 不限制）。
+    # 是每日预算的前置防线：防「一轮就烧掉全天额度」。估算偏保守。
+    turn_token_budget: int = Field(default=0, ge=0)
+    # 备用模型：主模型调用持续失败时自动切换的「服务名:模型名」（空 = 不启用）。
+    # 格式 "provider:model"，如 "zhipu:glm-5.3"。仅对 openai/anthropic 真实服务生效。
+    fallback_model: str = ""
     # 归档自动记忆：会话归档后后台用当前模型提炼持久事实写进用户记忆
     # （memory.md），默认开。这是「越用越懂你」的正向能力，总闸给在意
     # 额外模型调用或不想被打扰的用户；开关在 设置 · 全局记忆。
@@ -578,6 +584,8 @@ def load_config() -> SkySheepConfig:
         computer_control = bool(raw.get("computer_control", False))
         browser_control = bool(raw.get("browser_control", False))
         daily_budget = _clamp_int(raw, "daily_token_budget", 0, 0)
+        turn_budget = _clamp_int(raw, "turn_token_budget", 0, 0)
+        fallback_model = str(raw.get("fallback_model", "") or "")
         memory_digest = bool(raw.get("memory_digest", True))
         disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
         rt_raw = raw.get("roundtable")
@@ -646,6 +654,8 @@ def load_config() -> SkySheepConfig:
         computer_control = False
         browser_control = False
         daily_budget = 0
+        turn_budget = 0
+        fallback_model = ""
         memory_digest = True
     for name in disabled:
         merged.pop(name, None)
@@ -673,6 +683,8 @@ def load_config() -> SkySheepConfig:
             computer_control=computer_control,
             browser_control=browser_control,
             daily_token_budget=daily_budget,
+            turn_token_budget=turn_budget,
+            fallback_model=fallback_model,
             memory_digest=memory_digest,
             memory_maintenance=memory_maintenance,
             memory_map=memory_map,
@@ -709,6 +721,8 @@ def set_advanced_settings_in_config(
     computer_control: bool | None = None,
     browser_control: bool | None = None,
     daily_token_budget: int | None = None,
+    turn_token_budget: int | None = None,
+    fallback_model: str | None = None,
     memory_digest: bool | None = None,
     system_schedule: bool | None = None,
     job_containment: bool | None = None,
@@ -734,6 +748,12 @@ def set_advanced_settings_in_config(
         raise ConfigError("压缩触发比例要在 0.5–0.98 之间")
     if daily_token_budget is not None and int(daily_token_budget) > 100_000_000:
         raise ConfigError("每日 token 预算过大，请填写 0（不限制）到 1 亿之间的整数")
+    if turn_token_budget is not None and int(turn_token_budget) > 10_000_000:
+        raise ConfigError("单轮 token 上限过大，请填写 0（不限制）到 1000 万之间的整数")
+    if fallback_model is not None:
+        fallback_model = str(fallback_model).strip()
+        if fallback_model and ":" not in fallback_model:
+            raise ConfigError('备用模型格式应为「服务名:模型名」，如 "zhipu:glm-5.3"')
     if sandbox_level is not None and sandbox_level not in ("job", "restricted"):
         raise ConfigError("沙箱级别只能是 job（仅进程遏制）或 restricted（受限令牌）")
     p, raw = _read_raw_config()
@@ -755,6 +775,13 @@ def set_advanced_settings_in_config(
         raw["browser_control"] = bool(browser_control)
     if daily_token_budget is not None:
         raw["daily_token_budget"] = max(0, int(daily_token_budget))
+    if turn_token_budget is not None:
+        raw["turn_token_budget"] = max(0, int(turn_token_budget))
+    if fallback_model is not None:
+        if fallback_model:
+            raw["fallback_model"] = fallback_model
+        else:
+            raw.pop("fallback_model", None)
     if memory_digest is not None:
         raw["memory_digest"] = bool(memory_digest)
     # [cron] / [shell] / [search] 段：照 [retention] 的姿态按需建段、空段删除，

@@ -101,6 +101,20 @@ class PermissionRequest(Event):
     note: str = ""    # 额外说明：例如白名单前缀为何没命中的命令（shell 拼接）
     rule_kind: str = ""     # 选「总是允许」将写入的规则类型（always/prefix/exact/glob）
     rule_pattern: str = ""  # 对应参数；空 = 整个工具（与 gate.rule_for 的产物一致）
+    # 发起方：这条权限请求是谁触发的（主会话为空串；团队队员是成员名；
+    # 渠道是渠道名——桌面确认卡目前只会收到主会话与团队队员的请求，
+    # 字段留全量词汇供前端与回放使用）。前端固定展示「发起方」行。
+    origin: str = ""
+    # 影响范围（gate 侧解析出的人类可读短语）：工作目录内路径 / 工作目录外路径 /
+    # 引擎数据目录 / 本机全局（命令、电脑控制）/ 公网。空 = 无法归类，前端不渲染该行。
+    scope: str = ""
+    # 可否通过「撤销本轮改动」回滚：checkpoint 追踪的落盘工具且 diff/影响预览
+    # 已生成时为 True；run_command、电脑控制、渠道与外发类一律 False。
+    # 前端固定展示「可撤销 / 不可撤销」行，不做内部猜测。
+    reversible: bool = False
+    # 回滚边界说明（reversible=True 时才有意义）：「改动进检查点，可用『撤销本轮改动』恢复」
+    # 等；reversible=False 时为空。
+    revert_note: str = ""
     # Mod（实验性）的附加说明：带「[Mod·<id>]」来源前缀，前端独立样式区渲染，
     # 不与引擎自产的 note 混排（第三方文本不上无标识的确认卡）
     mod_note: str = ""
@@ -125,6 +139,11 @@ class TurnFinished(Event):
     # 本轮实测耗时（毫秒）：前端据此把「已用时」芯片定格成引擎真实值，
     # 而不是前端自己从收到预估事件那一刻起的本地计时（两者会有偏差）。
     duration_ms: int = 0
+    # 轮摘要（运行中心/用量展示用）：工具调用次数与总耗时、重试次数。
+    # 一轮里逐工具的明细在 tool_call_finished 事件上，这里只给聚合值。
+    tools_used: int = 0
+    tools_total_ms: int = 0
+    model_retries: int = 0
 
 
 class CompactionEvent(Event):
@@ -139,6 +158,11 @@ class CompactionEvent(Event):
 class ErrorEvent(Event):
     kind: Literal["error"] = "error"
     message: str = ""
+    # 诊断信息（models/diagnostics.diagnose_error 的产出）：前端渲染错误卡时
+    # 直接用，避免各自再猜原因；空串 = 无分类（引擎构造的错误）。
+    category: str = ""
+    diag_title: str = ""
+    diag_advice: str = ""
 
 
 class NoticeEvent(Event):

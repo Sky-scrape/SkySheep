@@ -66,11 +66,11 @@
       </button>
 
       <nav class="side-menu">
-        <button class="nav-item" data-act="todo" title="任务：Agent 拆解的任务步骤、派出的子代理任务与项目任务都在这里">任务</button>
+        <button class="nav-item" data-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里">任务</button>
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
         <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
-        <button class="nav-item" data-act="auto" title="自动化：定时任务（到点自己干活）与任务编排（按依赖顺序自动跑），无人值守">自动化</button>
+        <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
       </nav>
 
@@ -144,6 +144,7 @@
           <li data-target="advanced">高级</li>
           <li data-target="mods">Mods 扩展（实验性）</li>
           <li class="nav-cap" aria-hidden="true">信息</li>
+          <li data-target="runs">运行中心</li>
           <li data-target="usage">用量</li>
           <li data-target="about">关于</li>
         </ul>
@@ -168,7 +169,7 @@
   <aside id="sb-rail" aria-label="侧栏已折叠">
     <button id="rail-expand" class="rail-btn" title="展开侧栏（Ctrl+B）">»</button>
     <!-- 功能导航六件套：与侧栏 .side-menu 同一套动作（openRightTab）；图标为本项目手绘线稿 -->
-    <button class="rail-btn" data-rail-act="todo" title="任务：Agent 拆解的任务步骤、派出的子代理任务与项目任务都在这里" aria-label="任务">
+    <button class="rail-btn" data-rail-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里" aria-label="任务">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V4"/><path d="m9 13.5 2.2 2.2 4-4.5"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="agenda" title="日程：到点在应用内提醒，跨会话保留" aria-label="日程">
@@ -180,7 +181,7 @@
     <button class="rail-btn" data-rail-act="map" title="记忆地图：项目演化的可视化（时间线 + 主题图谱）" aria-label="记忆地图">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="auto" title="自动化：定时任务（到点自己干活）与任务编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
+    <button class="rail-btn" data-rail-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="ext" title="MCP / Skills：技能包与 MCP 服务管理" aria-label="MCP / Skills">
@@ -243,6 +244,11 @@
 
         <div id="permission-bar" hidden role="alert">
           <div class="perm-head">🔒 需要确认：<b id="perm-tool"></b></div>
+          <div id="perm-meta" class="perm-meta" hidden>
+            <span id="perm-origin" class="perm-meta-item" hidden></span>
+            <span id="perm-scope" class="perm-meta-item" hidden></span>
+            <span id="perm-revert" class="perm-meta-item" hidden></span>
+          </div>
           <pre id="perm-args"></pre>
           <p id="perm-note" class="perm-note" hidden></p>
           <p id="perm-mod-note" class="perm-mod-note" hidden></p>
@@ -437,14 +443,14 @@
                侧栏与窄栏的「任务清单 / 项目任务」入口点进来直接落在对应分段 -->
           <section id="rp-page-tasks" class="rp-page hidden">
             <div class="rp-segs seg-row seg-mini" id="rp-segs-tasks" data-tab="tasks">
-              <button data-view="tasks" class="active" title="Agent 派出去的子代理任务（后台并行）">子代理任务</button>
-              <button data-view="todo" title="Agent 为本会话拆解的任务步骤">任务清单</button>
-              <button data-view="ptasks" title="这个项目要做的事，自己加、做完勾掉">项目任务</button>
+              <button data-view="tasks" class="active" title="Agent 派出去的后台并行任务">子代理</button>
+              <button data-view="todo" title="Agent 为本会话拆解的执行步骤">步骤</button>
+              <button data-view="ptasks" title="这个项目要做的事，自己加、做完勾掉">事项</button>
             </div>
 
             <div class="rp-seg-view" id="rp-view-tasks">
               <div class="rp-toolbar">
-                <span class="dim small">Agent 拆解出的子代理任务（后台并行）</span>
+                <span class="dim small">Agent 派出的后台并行任务。</span>
                 <span class="spacer"></span>
                 <button id="tasks-cancel" class="rp-mini danger">全部取消</button>
                 <button id="tasks-refresh" class="rp-mini">刷新</button>
@@ -457,13 +463,13 @@
                 <span class="dim small">Agent 拆解的任务步骤会实时同步到这里。</span>
               </div>
               <ul id="todo-list" class="list todo-list rp-page-list"></ul>
-              <div id="todo-empty" class="rp-empty">当前还没有任务清单 —— 给 Agent 一个多步骤任务，它拆解后的步骤会出现在这里。</div>
+              <div id="todo-empty" class="rp-empty">当前还没有步骤清单 —— 给 Agent 一个多步任务，它拆解后的执行步骤会出现在这里。</div>
             </div>
 
             <div class="rp-seg-view hidden" id="rp-view-ptasks">
               <div class="ag-topbar">
                 <div class="ag-heading">
-                  <b>项目任务</b>
+                  <b>事项</b>
                   <span class="dim small" id="ptasks-project"></span>
                 </div>
                 <button id="btn-ptask-add" class="rp-mini primary">＋ 新建任务</button>
@@ -553,8 +559,8 @@
               <div id="run-center-detail" class="hidden"></div>
             </div>
             <div class="rp-segs seg-row seg-mini" id="rp-segs-auto" data-tab="auto">
-              <button data-view="cron" class="active" title="到点让 Agent 自己干活，无人值守">定时任务</button>
-              <button data-view="pipeline" title="多个任务按依赖顺序自动跑：前面的并行做，最后的汇总审查">任务编排</button>
+              <button data-view="cron" class="active" title="到点让 Agent 自己干活，无人值守">定时</button>
+              <button data-view="pipeline" title="多个任务按依赖顺序自动跑：前面的并行做，最后的汇总审查">编排</button>
             </div>
 
             <div class="rp-seg-view" id="rp-view-cron">
@@ -587,7 +593,7 @@
               </label>
               <input type="time" id="daily-report-time" value="09:00"
                      title="每天到这个时刻推送日报（24 小时制）">
-              <span class="dim small">到点把当天定时任务 / 任务编排的终态汇总成一条，经已启用的渠道推送</span>
+              <span class="dim small">到点把当天「定时 / 编排」的运行终态汇总成一条，经已启用的渠道推送</span>
             </div>
           </section>
 
@@ -1108,6 +1114,16 @@
                 <input type="number" id="adv-daily-budget" min="0" step="10000" placeholder="0">
                 <span class="dim small">0 = 不限制。当天累计用量达到上限后不再发送新消息，明天自动重置</span>
               </div>
+              <div class="toolcfg-row">
+                <label>单轮 token 上限</label>
+                <input type="number" id="adv-turn-budget" min="0" step="10000" placeholder="0">
+                <span class="dim small">0 = 不限制。单次请求（含历史）超过上限直接拒绝，防止一轮就烧掉全天预算</span>
+              </div>
+              <div class="toolcfg-row">
+                <label>备用模型</label>
+                <input type="text" id="adv-fallback-model" placeholder="如 zhipu:glm-5.3（留空 = 不启用）">
+                <span class="dim small">主模型失败（鉴权/余额/服务异常）时自动切换到这个「服务:模型」</span>
+              </div>
             </div>
           </section>
 
@@ -1300,7 +1316,7 @@
             </p>
             <ul class="settings-hint hint-points">
               <li>渠道<b>默认关闭</b>；启用前必须先把你的账号加入<b>允许名单</b>——没有名单的机器人等于对所有人开放。</li>
-              <li><b>Webhook</b> 是纯出站的推送目标：只把定时任务摘要、任务编排终态、每日运行日报等出站消息 POST 到你配置的地址，不收消息。</li>
+              <li><b>Webhook</b> 是纯出站的推送目标：只把定时与编排的运行摘要、每日运行日报等出站消息 POST 到你配置的地址，不收消息。</li>
             </ul>
             <details class="rule-check-fold">
               <summary>安全边界与凭据说明（只读模式 / 群聊风险 / 审批规则 / 凭据要求）</summary>
@@ -1575,6 +1591,23 @@
           </section>
         </section>
 
+        <section class="settings-page hidden" id="settings-page-runs">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>运行中心</h3>
+              <div class="usage-head-right">
+                <button id="runs-refresh" class="btn-ghost">刷新</button>
+              </div>
+            </div>
+            <p class="settings-hint">
+              所有 Agent 正在跑与跑过的事：主对话轮、后台子代理任务。
+              等待确认的运行可以直接进入对应会话处理；失败或被应用重启打断的运行可以一键重发。
+            </p>
+            <div id="perm-queue-box"></div>
+            <div id="runs-list"></div>
+          </section>
+        </section>
+
         <section class="settings-page hidden" id="settings-page-usage">
           <section class="settings-card">
             <div class="card-head">
@@ -1685,6 +1718,19 @@
             </div>
             <p id="retention-usage-note" class="dim small" hidden></p>
           </section>
+          <section class="settings-card" id="storage-card">
+            <div class="card-head">
+              <h3>存储占用与清理</h3>
+              <span class="head-ops">
+                <button id="btn-storage-refresh" class="btn-ghost">刷新</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              会话数据库与备份、日志的占用概览。用量记录、团队频道消息等账本类数据只增不减，可以在这里按保留天数清理，并整理数据库释放空间。
+            </p>
+            <div id="storage-status" class="card-status" hidden></div>
+            <ul id="storage-overview" class="list"></ul>
+          </section>
           <section class="settings-card">
             <div class="card-head">
               <h3>会话库备份</h3>
@@ -1717,6 +1763,17 @@
               <button id="btn-settings-export" class="btn-ghost" title="导出的 zip 内含明文 API Key，请妥善保管">⬇ 导出设置（zip）</button>
               <button id="btn-settings-import" class="btn-ghost">⬆ 导入设置</button>
               <span class="io-msg"></span>
+            </div>
+            <p class="settings-hint" style="margin-top:10px">
+              换机迁移还需要会话记录与技能文件时，用下面的完整导出：含会话数据库快照、技能目录与打码配置，
+              打包后存到数据目录 exports\ 文件夹。
+            </p>
+            <div class="io-row">
+              <button id="btn-export-full" class="btn-ghost" title="包含会话数据库快照与技能文件；config 默认打码，可勾选含 Key">📦 完整导出（含会话）</button>
+              <label class="dim small" style="display:flex;align-items:center;gap:4px">
+                <input type="checkbox" id="chk-export-secrets"> 包含 API Key（明文）
+              </label>
+              <span id="export-full-msg" class="io-msg"></span>
             </div>
           </section>
         </section>

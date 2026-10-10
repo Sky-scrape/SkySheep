@@ -2116,12 +2116,13 @@ async def test_backend_shutdown_bounds_channels_stop(home):
     assert elapsed < 10, f"channels.stop() 卡住时 shutdown 应在几秒内返回（实测 {elapsed:.1f}s）"
 
 
-def test_channel_sessions_live_in_fixed_remote_project(home):
-    """渠道会话固定归到「远程连接」项目：不随当前项目走、项目不可删、归属校验放行。
+def test_channel_sessions_follow_current_project(home):
+    """渠道会话归「产生它时桌面所在的项目」：不建「远程连接」固定项目。
 
-    「远程连接」是哨兵项目（无真实目录）：channel_ensure_session / channel_new_session
-    建的会话都挂它名下；桌面端按 id 打开（_get_owned_session）时要像快聊一样放行，
-    否则侧栏里看得见点不动；project.delete 必须拒绝删除这个固定项目。
+    渠道是桌面项目的遥控端，对话应归到当时操作的项目下：启动不建固定项目；
+    channel_ensure_session / channel_new_session 按当前项目建会话；桌面切了
+    项目后下一条消息在新项目下开新会话（旧会话留在原项目可查）；渠道会话
+    的 runtime 工作目录随归属（真实项目→项目目录），门控仍是渠道姿态。
     """
     import asyncio
 
@@ -2138,41 +2139,45 @@ def test_channel_sessions_live_in_fixed_remote_project(home):
         )
         await be.setup()
         try:
-            # 启动目录会自动登记为当前项目：渠道会话仍归「远程连接」，不落当前项目
-            assert be.project is not None
+            # 启动不再建「远程连接」固定项目
+            assert all(p.root_path != SessionStore.REMOTE_PROJECT_PATH
+                       for p in await be.store.list_projects())
+
+            # 渠道会话归产生它时所在的项目（当前项目）
             sid = await be.channel_ensure_session("feishu")
             sess = await be.store.get_session(sid)
-            remote = await be.store.ensure_remote_project()
-            assert sess.project_id == remote.id, "渠道会话必须挂在「远程连接」下"
-            assert sess.project_id != be.project.id, "不能挂在桌面当前项目下"
+            assert sess.project_id == be.project.id, "渠道会话必须挂在当前项目下"
 
-            # 幂等：重复 ensure 只有一条「远程连接」记录
-            again = await be.store.ensure_remote_project()
-            assert again.id == remote.id
-            all_projects = await be.store.list_projects()
-            assert sum(1 for p in all_projects if p.root_path == SessionStore.REMOTE_PROJECT_PATH) == 1
-
-            # 渠道 /new 也归「远程连接」，即使桌面正开着别的（当前）项目
+            # 渠道 /new 同样归当前项目
             new_sid = await be.channel_new_session("feishu")
-            new_sess = await be.store.get_session(new_sid)
-            assert new_sess.project_id == remote.id
+            assert (await be.store.get_session(new_sid)).project_id == be.project.id
             assert new_sid != sid
 
-            # 桌面端按 id 打开渠道会话（当前项目是启动目录，会话属于远程项目）：放行
+            # 渠道会话的工作目录随归属：真实项目→项目目录
+            pid, workdir = await be._session_project(sid)
+            assert pid == be.project.id
+            assert str(workdir) == str(be.working_dir)
+
+            # 桌面端按 id 打开渠道会话：放行（归属就是当前项目）
             owned = await be._get_owned_session(sid)
             assert owned.id == sid
 
-            # 固定项目不可删除
-            try:
-                await be.delete_project(remote.id)
-                raise AssertionError("删除「远程连接」应当被拒绝")
-            except RuntimeError as e:
-                assert "远程连接" in str(e)
+            # 桌面切到另一个项目后，下一条渠道消息在新项目下开新会话：
+            # 旧会话留在原项目可查，绑定指向新会话
+            (home / "proj2").mkdir()
+            await be.switch_project(str(home / "proj2"))
+            sid2 = await be.channel_ensure_session("feishu")
+            sess2 = await be.store.get_session(sid2)
+            assert sess2.project_id == be.project.id != sess.project_id
+            assert sid2 != sid
+            # 绑定指向新会话；旧会话仍在原项目
+            assert await be.store.get_channel_binding("feishu") == sid2
+            assert (await be.store.get_session(sid)).project_id == sess.project_id
 
-            # 渠道自愈的归属校验认「远程连接」：runtime 丢了也能补建并跑通
+            # 渠道自愈：runtime 丢了也能补建并跑通（新项目的会话）
             be.runtimes.clear()
             be._channel_names.clear()
-            result = await be.channel_run(new_sid, "你好")
+            result = await be.channel_run(sid2, "你好")
             assert "error" not in result, result
         finally:
             await be.shutdown()

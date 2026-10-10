@@ -39,7 +39,7 @@ uv run skysheep chat   # 终端 REPL
 - 新功能必须带测试，统一放在 `engine/tests/`，与现有用例保持同一风格；
 - 修 bug 时先补一个能复现问题的用例，再修；
 - **测试绝不指向真实用户数据**：用户数据只存在于 `~/.skysheep/`，测试一律使用临时目录；
-- 全量测试目前有 314 个用例，CI（windows-latest）必须全绿。
+- 全量测试目前约 2,300 个用例（含 e2e 标记用例；`-m "not e2e"` 跳过真实 socket 用例），CI（windows-latest）必须全绿。
 
 ## 安全红线
 

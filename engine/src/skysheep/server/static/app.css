@@ -420,6 +420,12 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 #split-pane.hidden { display: none; }
 /* 标签拖进对话区的落点提示：主区描一圈蓝线，暗示「松手 = 搬进分屏」 */
 #chat.tab-drop-hint { box-shadow: inset 0 0 0 2px var(--blue); }
+/* 拖会话到输入栏 = 引用该对话：目标输入栏亮引用落点（区别于整片对话区的分屏提示） */
+#composer.ref-drop-hint,
+.split-composer.ref-drop-hint {
+  box-shadow: inset 0 0 0 2px var(--blue);
+  background: var(--blue-weak);
+}
 .split-col {
   flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
   border-left: 1px solid var(--line);
@@ -874,6 +880,17 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 }
 .perm-head { margin-bottom: 8px; font-size: 14px; }
 .perm-head b { color: var(--gold); }
+/* 固定字段行（发起方 / 范围 / 可撤销）：确认卡上“先看清楚再点”的元信息区。
+   后端没给的字段整行隐藏；旧版本引擎不下发这些字段时整块不出。 */
+.perm-meta {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 8px;
+  font-size: 12px; line-height: 1.6; color: var(--text2);
+}
+.perm-meta[hidden] { display: none; }
+.perm-meta-item { white-space: nowrap; }
+#perm-origin { font-weight: 600; }
+.perm-revert-ok { color: var(--dim); }
+.perm-revert-no { color: var(--gold); font-weight: 600; }
 /* 确认弹窗里的额外说明（如「为什么这条命令没命中白名单前缀」）：与正文区分，
    不能抢过待确认命令本身的注意力。 */
 .perm-note { margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--dim); }
@@ -5920,10 +5937,13 @@ li.mod-row {
   font-weight: 700;
 }
 
-/* 会话菜单：危险操作与普通操作之间有明确的分组感 */
+/* 会话菜单：危险操作与普通操作之间有明确的分组感。
+   scrollbar-gutter 回退为 auto：菜单项恰好放满、自身不滚动（overflow hidden），
+   共享规则给可滚动菜单预留的稳定滚动条槽在这里只会成为右侧一条空白。 */
 #session-menu {
   padding: 4px;
   gap: 2px;
+  scrollbar-gutter: auto;
 }
 #session-menu > button {
   border: 0;
@@ -6096,3 +6116,45 @@ li.mod-row {
     animation: none !important;
   }
 }
+
+
+/* ---------- 运行中心（设置 · 运行中心） ---------- */
+.run-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "main ops"
+    "sub ops"
+    "meta ops";
+  gap: 2px 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--line-1, rgba(128, 128, 128, 0.18));
+}
+.run-row:last-child { border-bottom: none; }
+.run-perm-row { background: var(--warn-bg, rgba(214, 158, 46, 0.08)); border-radius: 8px; padding: 10px; }
+.run-main { grid-area: main; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.run-title { font-weight: 600; }
+.run-sub { grid-area: sub; color: var(--text-dim, #888); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70ch; }
+.run-err { color: var(--bad, #b3403a); }
+.run-meta { grid-area: meta; color: var(--text-dim, #888); font-size: 12px; }
+.run-ops { grid-area: ops; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.run-state {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.run-st-run  { color: var(--accent, #1257c4); border-color: currentColor; }
+.run-st-wait { color: var(--warn, #b07d10); border-color: currentColor; }
+.run-st-warn { color: var(--warn, #b07d10); border-color: currentColor; background: var(--warn-bg, rgba(214, 158, 46, 0.1)); }
+.run-st-ok   { color: var(--ok, #2c7a4b); border-color: currentColor; }
+.run-st-bad  { color: var(--bad, #b3403a); border-color: currentColor; }
+.run-st-dead { color: var(--text-dim, #888); border-color: currentColor; }
+
+/* ---------- 模型服务健康灯（列表行） ---------- */
+.ph-dot { font-size: 11px; margin-left: 2px; }
+.ph-ok   { color: var(--ok, #2c7a4b); }
+.ph-warn { color: var(--warn, #b07d10); }
+.ph-down { color: var(--bad, #b3403a); }

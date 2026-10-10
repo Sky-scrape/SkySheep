@@ -260,7 +260,7 @@ async function refreshProjects(prefetched) {
     // 「远程连接」固定项目：无真实目录（root_path 报空），不可切换/删除，
     // 它名下是飞书/微信等渠道的对话——点它陈列这组对话，不切工作目录
     li.title = remote
-      ? "远程连接 —— 飞书/微信等渠道的对话都归在这里（固定项目，不可切换）；点击查看它的对话"
+      ? "远程连接 —— 飞书/微信等渠道的对话都归在这里（不可切换）；点击查看它的对话，渠道再用时会自动重建"
       : p.root_path + (p.is_current ? "（当前项目）"
         : classicViewGk === "proj:" + p.id
           ? "（正在查看该项目的对话）—— 再次点击返回当前项目列表"
@@ -273,12 +273,14 @@ async function refreshProjects(prefetched) {
     });
     li.dataset.pid = p.id; // commitProjectOrder 从 DOM 收集当前序
     // 移除按钮：当前项目也能删（清空会话与记录后用同一目录重置重新开始）；
-    // 远程连接是固定项目，不提供删除
-    if (!remote) {
+    // 远程连接同样可移除——渠道再用时会自动重建，不丢自动恢复能力
+    {
       const del = document.createElement("button");
       del.className = "p-del";
       del.textContent = "✕";
-      del.title = p.is_current ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目";
+      del.title = remote
+        ? "从列表中移除「远程连接」（其中的渠道对话会一并删除；渠道再用时自动重建）"
+        : p.is_current ? "重置这个项目（清空会话与记录）" : "从列表中移除这个项目";
       del.onclick = (e) => {
         e.stopPropagation();
         deleteProjectModal(p);

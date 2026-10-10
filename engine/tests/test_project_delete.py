@@ -126,9 +126,10 @@ def test_delete_current_project_switches_clears_and_unknown_id(home):
         assert r2["ok"] and r2["result"]["was_current"] is True
         assert r2["result"]["switched_to"] is None
         ws.send_json({"id": "pl4", "method": "project.list", "params": {}})
-        # 真实项目全删光：只剩固定项目「远程连接」（无真实目录，非当前）
+        # 真实项目全删光：进入无项目态（快聊），列表为空。
+        # 「远程连接」不再启动即建（懒建：渠道收到消息时才建），此处无渠道会话 → 无该行
         rest4 = recv_until(ws, "pl4")["result"]["projects"]
-        assert [p["name"] for p in rest4] == ["远程连接"]
+        assert [p["name"] for p in rest4] == []
         assert all(p["root_path"] == "" and not p["is_current"] for p in rest4)
         prefs = json.loads((home / "home" / "ui.json").read_text(encoding="utf-8"))
         assert prefs.get("active_project") == 0

@@ -281,3 +281,77 @@ def test_lan_set_port_roundtrip_and_validation(home, monkeypatch):
         frame = recv_until(ws, "p4")
         assert frame["ok"] and frame["result"]["port"] == 0, "0 = 恢复随机"
         assert load_config().server.port == 0
+
+
+# ---- 5. 成功访问留痕、连接登记与踢下线 ----
+
+
+def test_successful_remote_access_logged(home, monkeypatch):
+    """成功验令牌要留痕进 lan_status（最近访问），同 IP 去重不刷屏。"""
+    update_config_section("server", {"lan": True, "token": "tok-abc"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    with make_client(home, []) as client:
+        be = client.app.state.backend
+        # 连续两次成功访问：去重窗口内只记一条
+        assert client.get("/", params={"token": "tok-abc"}).status_code == 200
+        assert client.get("/", params={"token": "tok-abc"}).status_code == 200
+        summary = be.access_summary()
+        assert summary["total"] == 1
+        assert summary["recent"][0]["ip"] and summary["recent"][0]["where"] == "http"
+
+
+def test_note_auth_success_dedup_window():
+    """去重窗口按 IP 隔离：不同 IP 各记一条，同 IP 窗口内折叠。"""
+    from skysheep.server.backend_parts.remote import ACCESS_LOG_DEDUP_S  # noqa: F401
+
+    be = ServerBackend.__new__(ServerBackend)
+    be._access_log = []
+    be.note_auth_success("10.0.0.1", "http")
+    be.note_auth_success("10.0.0.1", "http")  # 去重
+    be.note_auth_success("10.0.0.2", "http")  # 不同 IP
+    assert be.access_summary()["total"] == 2
+
+
+def test_connections_registry_and_kick(home, monkeypatch):
+    """WS 连接登记：连上后能查到；kick 只踢远程、不踢本机。"""
+    update_config_section("server", {"lan": True, "token": "tok-k"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: True)
+    with make_client(home, []) as client, client.websocket_connect(
+        "/ws?token=tok-k"
+    ) as ws:
+        ws.send_json({"id": "ping", "method": "boot"})
+        recv_until(ws, "ping")
+        be = client.app.state.backend
+        conns = be.connections_summary()
+        assert len(conns) == 1
+        assert conns[0]["origin"] == "other"  # 模拟的远程来源
+        assert conns[0]["id"]
+
+        # kick 逻辑直测（不碰真实连接）：本机来源不踢、远程来源被踢
+        import asyncio as _aio
+
+        kicked: list[str] = []
+
+        async def make_kick(name):
+            async def _k():
+                kicked.append(name)
+            return _k
+
+        be.ws_connections.append({
+            "id": "c-local", "emit": None, "ip": "127.0.0.1", "origin": "local",
+            "connected_at": 0, "ua": "", "kick": _aio.run(make_kick("local")),
+        })
+        be.ws_connections.append({
+            "id": "c-remote", "emit": None, "ip": "10.0.0.9", "origin": "other",
+            "connected_at": 0, "ua": "", "kick": _aio.run(make_kick("remote")),
+        })
+        r = _aio.run(be.lan_kick({"connection_id": "c-remote"}))
+        assert r["kicked"] == 1 and kicked == ["remote"]  # 本机那条没动
+        r2 = _aio.run(be.lan_kick({"connection_id": "c-local"}))
+        assert r2["kicked"] == 0  # 指名踢本机也不踢
+
+
+def test_lan_kick_is_local_only():
+    assert "lan.kick" in LOCAL_ONLY_METHODS
+    assert "lan.connections" not in LOCAL_ONLY_METHODS

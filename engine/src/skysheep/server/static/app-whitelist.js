@@ -202,6 +202,13 @@ async function renderSettings() {
     request("boot"),
   ]);
   bootSnap = snap;
+  // 健康状态缓存（测试连接/运行错误的结果）：失败不阻塞设置渲染
+  request("model.providers_health", {}).then((h) => {
+    const next = {};
+    (h.providers || []).forEach((x) => { next[x.name] = x; });
+    providerHealthCache = next;
+    if (typeof renderProviderList === "function" && !detailOpen) renderProviderList();
+  }).catch(() => {});
 
   // —— 模型服务：列表视图 / 详情视图 ——
   providerCfg = cfg;
@@ -364,11 +371,18 @@ async function renderSettings() {
       : (m.connected
         ? `已连接 · ${m.tools.length} 个工具`
         : (m.connecting ? "连接中…" : escapeHtml(m.error || "未连接")));
+    // 来源标记（可被手编 mcp.json 伪造，仅作参考展示）：预设/导入/手动 + 安装时间
+    const srcLabels = { preset: "预设添加", import: "导入", manual: "手动添加" };
+    const srcTxt = m.installed_from
+      ? `${srcLabels[m.installed_from] || escapeHtml(m.installed_from)}${m.installed_at ? " · " + escapeHtml(String(m.installed_at).replace("T", " ").slice(0, 16)) : ""}`
+      : "";
     li.innerHTML = `
       <div class="mcp-head">
         <span class="dot ${m.connected ? "on" : "off"}"></span>
         <span class="item-name">${escapeHtml(m.name)}</span>
         ${m.insecure_http ? '<span class="chip chip-warn" title="此服务走 http 明文且配置了鉴权头：凭据可能被中间人截获，建议改用 https 地址">⚠ http 明文携带鉴权头</span>' : ""}
+        ${!m.insecure_http && m.plain_http ? '<span class="chip" title="此服务走 http 明文（无鉴权头）：流量可被同网络设备窃听/篡改，本机地址除外">http 明文</span>' : ""}
+        ${srcTxt ? `<span class="chip" title="安装来源信息（写入 mcp.json，可被手编文件伪造，仅作参考）">${srcTxt}</span>` : ""}
         <span class="${m.connected ? "mcp-ok" : (m.connecting ? "mcp-pending" : "mcp-bad")}">${stateText}</span>
         <button class="btn-ghost mcp-toggle" title="${m.enabled === false ? "重新连接这个服务" : "停用：配置保留，工具从 Agent 移除"}">${m.enabled === false ? "启用" : "停用"}</button>
         ${m.enabled !== false && !m.connected && !m.connecting ? '<button class="btn-ghost mcp-reconnect" title="重连：重建全部 MCP 连接，处理连接失败的服务器">重连</button>' : ""}
@@ -461,7 +475,8 @@ async function renderSettings() {
       inp.onchange = async () => {
         const f = inp.files[0];
         if (!f) return;
-        ioMsg.textContent = "导入中…";
+        ioMsg.textContent = "解析中…";
+        ioMsg.className = "io-msg";
         try {
           const b64 = await new Promise((res, rej) => {
             const fr = new FileReader();
@@ -469,6 +484,19 @@ async function renderSettings() {
             fr.onerror = () => rej(new Error("读取文件失败"));
             fr.readAsDataURL(f);
           });
+          // 两段式：先预览将恢复哪些文件（含敏感内容提示），确认后再写入
+          const pv = await request("settings.preview_import", { b64 });
+          const lines = pv.items.map((it) =>
+            `• ${it.name}（${retentionBytes(it.size)}）${it.has_secrets ? "  ⚠ 含 Key/令牌" : ""}`
+          ).join("\n");
+          const unknownNote = pv.unknown.length
+            ? `\n\n将跳过（不在恢复清单）：${pv.unknown.join("、")}`
+            : "";
+          const ok = confirm(
+            `将要恢复 ${pv.items.length} 个文件，覆盖本机当前配置：\n\n${lines}${unknownNote}\n\n${pv.note}\n\n确定导入？`
+          );
+          if (!ok) { ioMsg.textContent = "已取消导入"; ioMsg.className = "io-msg"; return; }
+          ioMsg.textContent = "导入中…";
           const r = await request("settings.import", { b64 });
           ioMsg.textContent = "✓ 已恢复：" + (r.restored || []).join("、") +
             (r.skipped && r.skipped.length ? "（跳过：" + r.skipped.join("、") + "）" : "") +
@@ -481,6 +509,30 @@ async function renderSettings() {
         }
       };
       inp.click();
+    };
+
+    // 完整导出（含会话库快照与技能文件）：落数据目录 exports/ 后自动定位
+    const fullBtn = document.getElementById("btn-export-full");
+    const fullMsg = document.getElementById("export-full-msg");
+    const secretsChk = document.getElementById("chk-export-secrets");
+    if (fullBtn) fullBtn.onclick = async () => {
+      const withSecrets = !!(secretsChk && secretsChk.checked);
+      if (withSecrets && !confirm(
+        "导出包里将包含明文 API Key（可直接导入使用，也意味着泄露风险）。\n\n确定继续？"
+      )) return;
+      fullBtn.disabled = true;
+      fullMsg.textContent = "打包中（大库可能要一会儿）…";
+      fullMsg.className = "io-msg";
+      try {
+        const r = await request("data.export_full", { include_secrets: withSecrets });
+        fullMsg.textContent = `✓ 已导出 ${(r.included || []).length} 项（${Math.round((r.size || 0) / 1024 / 1024 * 10) / 10} MB），已打开所在文件夹`;
+        fullMsg.className = "io-msg ok";
+      } catch (e) {
+        fullMsg.textContent = "✗ " + e.message;
+        fullMsg.className = "io-msg bad";
+      } finally {
+        fullBtn.disabled = false;
+      }
     };
   }
 }

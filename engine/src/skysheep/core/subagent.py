@@ -359,6 +359,9 @@ class TaskManager:
         self._job_containment = bool(job_containment)
         # 二期：沙箱档位随主配置透传给子代理（"restricted" = 叠加受限令牌）
         self._sandbox_level = sandbox_level
+        # 运行中心（可选注入）：后台任务同步登记进全局运行列表，状态机随任务
+        # 状态走（queued/running → queued/tool_running；终态一一对应）。None = 不登记。
+        self.run_center = None
         # 内容搜索（grep）可选加速：随主配置透传（rg 不可用/失败自动回退内置）
         self._use_ripgrep = bool(use_ripgrep)
         self._load_state()
@@ -470,7 +473,43 @@ class TaskManager:
         task_id = uuid.uuid4().hex[:10]
         rec = TaskRecord(task_id, agent_type, prompt, session_id=session_id)
         self._tasks[task_id] = rec
+        self._run_register(rec)
         return rec
+
+    # ---- 运行中心登记（best-effort，全部异常吞掉） ----
+
+    def _run_register(self, rec: TaskRecord) -> None:
+        if self.run_center is None:
+            return
+        try:
+            self.run_center.register(
+                "subagent-" + rec.id, "subagent", rec.session_id or "",
+                title=f"{rec.agent_type}：{rec.prompt[:40]}",
+                state="queued", retry_text=rec.prompt or "",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _run_sync_state(self, rec: TaskRecord) -> None:
+        """把任务记录状态镜像进运行中心（running → tool_running）。"""
+        if self.run_center is None:
+            return
+        try:
+            state_map = {
+                "queued": "queued",
+                "running": "tool_running",
+                "done": "completed",
+                "cancelled": "cancelled",
+                "error": "failed",
+            }
+            st = state_map.get(rec.status)
+            if st:
+                self.run_center.update(
+                    "subagent-" + rec.id, state=st,
+                    error=(rec.error or "")[:300] if rec.status == "error" else None,
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _running_count(self) -> int:
         return sum(1 for r in self._tasks.values() if r.status == "running")
@@ -541,6 +580,7 @@ class TaskManager:
         rec = self._new_record(agent_type, prompt, session_id=session_id)
         rec.status = "running"
         rec.started_at = time.time()
+        self._run_sync_state(rec)
         self.announce(rec, background=False)
         try:
             result, _ = await self._run_one(rec)
@@ -598,6 +638,7 @@ class TaskManager:
     def _launch(self, rec: TaskRecord) -> None:
         rec.status = "running"
         rec.started_at = time.time()
+        self._run_sync_state(rec)
         task = asyncio.get_running_loop().create_task(self._run_background(rec))
         rec.asyncio_task = task
         # 任务还没来得及开跑就被取消时，协程收尾不会执行——在这里兜底落终态
@@ -613,6 +654,7 @@ class TaskManager:
 
     def _on_terminal(self, rec: TaskRecord) -> None:
         """所有终态的唯一出口：计时、唤醒等待者、落盘、广播、队列补位。"""
+        self._run_sync_state(rec)
         if not rec.finished_at:
             rec.finished_at = time.time()
         rec.done_event.set()

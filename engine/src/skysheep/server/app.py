@@ -1191,6 +1191,16 @@ async def _h_retention_sweep(backend: ServerBackend, params: dict, emit, local: 
     return await backend.retention_sweep_now()
 
 
+async def _h_storage_usage(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 存储占用度量（数据库大小/表行数/备份与日志体量）：只读，不含路径与内容
+    return await backend.storage_usage()
+
+
+async def _h_storage_cleanup(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 表级清理 + VACUUM：删行且可能长时间锁库，仅本机
+    return await backend.storage_cleanup(params)
+
+
 async def _h_hooks_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.hooks_settings()
 
@@ -1252,6 +1262,16 @@ async def _h_lan_enable(backend: ServerBackend, params: dict, emit, local: bool)
 
 async def _h_lan_disable(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.lan_disable()
+
+
+async def _h_lan_connections(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 在线连接概览（ip/来源/时间/UA）：只读，不含 emit 引用与任何令牌值
+    return {"connections": backend.connections_summary()}
+
+
+async def _h_lan_kick(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 踢远程连接下线：仅本机可操作（踢的是别人，不能远程互相踢）
+    return await backend.lan_kick(params)
 
 
 async def _h_lan_rotate_token(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -1416,6 +1436,15 @@ async def _h_settings_import(backend: ServerBackend, params: dict, emit, local: 
     return await backend.settings_import(params)
 
 
+async def _h_settings_preview_import(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.settings_preview_import(params)
+
+
+async def _h_data_export_full(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 完整导出：含会话库快照与技能正文，落本机数据目录，仅本机可触发
+    return await backend.export_full_data(params)
+
+
 async def _h_channel_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.channel_status()
 
@@ -1523,6 +1552,109 @@ async def _h_config_set_provider_enabled(backend: ServerBackend, params: dict, e
     return await backend.set_provider_enabled(
         str(params.get("name", "")), bool(params.get("enabled", True))
     )
+
+
+async def _h_runs_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 远程客户端只能看自己正在交互的会话的运行（运行条目含原文首段与错误摘要，
+    # 与 tasks.list 同一隔离口径 B13）
+    only = backend.session.id if (not local and backend.session) else None
+    return backend.runs.list_runs(
+        session_id=only,
+        include_terminal=bool(params.get("include_terminal", True)),
+        limit=min(200, max(1, int(params.get("limit", 100)))),
+    ) and {"runs": backend.runs.list_runs(
+        session_id=only,
+        include_terminal=bool(params.get("include_terminal", True)),
+        limit=min(200, max(1, int(params.get("limit", 100)))),
+    )} or {"runs": []}
+
+
+async def _h_runs_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    run = backend.runs.get(str(params.get("run_id", "") or ""))
+    if run is None:
+        raise RuntimeError("unknown run_id: " + str(params.get("run_id", "")))
+    if not local and backend.session and run.session_id != backend.session.id:
+        raise RuntimeError("该运行不属于当前会话")
+    return {"run": run.to_dict()}
+
+
+async def _h_runs_cancel(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    run_id = str(params.get("run_id", "") or "")
+    run = backend.runs.get(run_id)
+    if run is None:
+        raise RuntimeError("unknown run_id: " + run_id)
+    if not local and backend.session and run.session_id != backend.session.id:
+        raise RuntimeError("该运行不属于当前会话")
+    # 主轮运行：真取消 = 停掉该会话正在跑的 task；子代理：转任务簿取消
+    cancelled = False
+    if run.kind == "turn" and run.state in ("queued", "thinking", "tool_running",
+                                            "waiting_permission", "retrying"):
+        cancelled = backend.cancel_run(run.session_id or None)
+    elif run.kind == "subagent":
+        tid = run_id.removeprefix("subagent-")
+        if backend.tasks is not None:
+            try:
+                cancelled = backend.tasks.cancel_task(tid, session_id=run.session_id or None)
+            except Exception:
+                cancelled = False
+    if cancelled:
+        backend.runs.cancel(run_id)
+    return {"cancelled": bool(cancelled), "run_id": run_id}
+
+
+async def _h_runs_retry(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """失败/中断运行的一键重发：把原文再发一次（同会话）。
+
+    语义是「从这里继续」而不是快照回放：引擎不保存完整运行现场，重发等价于
+    用户把同一句话再发一遍——对中断的主轮与失败的子代理（后端暂不支持重跑
+    子代理，这里仅主轮）都是诚实可行的恢复方式。
+    """
+    run_id = str(params.get("run_id", "") or "")
+    run = backend.runs.retryable_run(run_id)
+    if run is None:
+        raise RuntimeError("该运行不可重发（只有失败/中断且带原文的运行支持）")
+    if not local and backend.session and run.session_id != backend.session.id:
+        raise RuntimeError("该运行不属于当前会话")
+    # 复用 runs.cancel 已有语义（turn 的重发交给前端走 chat.send；这里只回传参数）
+    return {"ok": True, "run_id": run_id, "session_id": run.session_id,
+            "text": run.retry_text}
+
+
+async def _h_model_test(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.model_test_connection(params)
+
+
+async def _h_model_providers_health(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.providers_health()
+
+
+async def _h_permission_queue(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """当前所有未决权限请求队列（跨会话聚合，运行中心「等待确认」分区用）。
+
+    只回最小字段：request_id / session_id / tool_name / detail / safety。
+    决策仍走 permission.respond。"""
+    out: list[dict] = []
+    for rt in backend.runtimes.values():
+        ag = rt.agent
+        for rid, pending in getattr(ag, "_pending", {}).items():
+            out.append({
+                "request_id": rid,
+                "session_id": rt.sid,
+                "tool_name": getattr(pending, "tool_name", "") or "",
+                "detail": (getattr(pending, "detail", "") or "")[:200],
+                "safety": getattr(getattr(pending, "safety", None), "value", ""),
+            })
+    base = getattr(backend, "_base_agent", None)
+    if base is not None:
+        for rid, pending in getattr(base, "_pending", {}).items():
+            out.append({
+                "request_id": rid,
+                "session_id": "",
+                "tool_name": getattr(pending, "tool_name", "") or "",
+                "detail": (getattr(pending, "detail", "") or "")[:200],
+                "safety": getattr(getattr(pending, "safety", None), "value", ""),
+            })
+    return {"pending": out}
 
 
 async def _h_config_probe_models(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -1644,6 +1776,18 @@ async def _h_skills_toggle(backend: ServerBackend, params: dict, emit, local: bo
     )
 
 
+async def _h_extension_audit_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """扩展变更审计：最近 N 条（最近在前）。只读，远程也可查自己的可见部分。"""
+    from ..config import skysheep_home
+    from .audit import read_audit
+
+    try:
+        limit = int(params.get("limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    return {"items": read_audit(skysheep_home(), limit=limit or 200)}
+
+
 async def _h_skills_scope(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     raw = params.get("projects")
     return await backend.set_skill_scope(
@@ -1663,6 +1807,13 @@ async def _h_skills_scan_local(backend: ServerBackend, params: dict, emit, local
 
 async def _h_skills_install(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.install_skill(
+        str(params.get("source", "")), str(params.get("scope", "global")),
+        overwrite=bool(params.get("overwrite", False)),
+    )
+
+
+async def _h_skills_preview_install(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.preview_skill_install(
         str(params.get("source", "")), str(params.get("scope", "global")),
         overwrite=bool(params.get("overwrite", False)),
     )
@@ -1988,6 +2139,11 @@ _WS_METHODS: dict[str, _WsMethod] = {
         _h_retention_sweep, local_only=True,
         local_error="立即清理只能在桌面端本机执行",
     ),
+    "storage.usage": _WsMethod(_h_storage_usage),
+    "storage.cleanup": _WsMethod(
+        _h_storage_cleanup, local_only=True,
+        local_error="存储清理只能在桌面端本机执行",
+    ),
     "hooks.get": _WsMethod(_h_hooks_get),
     "hooks.save": _WsMethod(_h_hooks_save, local_only=True),
     "hooks.test": _WsMethod(_h_hooks_test, local_only=True, local_error="钩子测试只能在本机界面上操作"),
@@ -2004,6 +2160,11 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "lan.enable": _WsMethod(_h_lan_enable, local_only=True),
     "lan.disable": _WsMethod(_h_lan_disable),
     "lan.rotate_token": _WsMethod(_h_lan_rotate_token, local_only=True),
+    "lan.connections": _WsMethod(_h_lan_connections),
+    "lan.kick": _WsMethod(
+        _h_lan_kick, local_only=True,
+        local_error="断开远程连接只能在本机界面上操作",
+    ),
     "lan.set_port": _WsMethod(_h_lan_set_port, local_only=True),
     "remote.status": _WsMethod(_h_remote_status),
     "remote.enable": _WsMethod(_h_remote_enable, local_only=True),
@@ -2047,6 +2208,8 @@ _WS_METHODS: dict[str, _WsMethod] = {
     ),
     "settings.export": _WsMethod(_h_settings_export, local_only=True),
     "settings.import": _WsMethod(_h_settings_import, local_only=True),
+    "settings.preview_import": _WsMethod(_h_settings_preview_import, local_only=True),
+    "data.export_full": _WsMethod(_h_data_export_full, local_only=True),
     # 聊天软件渠道：写配置/启停属降低防护的操作，与开局域网同一姿态——仅本机可改。
     # 远端（局域网/ tailnet）能看状态，但不能改，否则一个被扫码链接挟持的手机
     # 就能把 Agent 接给任意聊天账号。
@@ -2093,6 +2256,13 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "config.delete_provider": _WsMethod(_h_config_delete_provider, local_only=True),
     "config.restore_provider": _WsMethod(_h_config_restore_provider, local_only=True),
     "config.set_provider_enabled": _WsMethod(_h_config_set_provider_enabled, local_only=True),
+    "runs.list": _WsMethod(_h_runs_list),
+    "runs.get": _WsMethod(_h_runs_get),
+    "runs.cancel": _WsMethod(_h_runs_cancel),
+    "runs.retry": _WsMethod(_h_runs_retry),
+    "model.test": _WsMethod(_h_model_test, local_only=True),
+    "model.providers_health": _WsMethod(_h_model_providers_health),
+    "permission.queue": _WsMethod(_h_permission_queue),
     "config.probe_models": _WsMethod(_h_config_probe_models, local_only=True),
     "config.probe_context": _WsMethod(_h_config_probe_context, local_only=True),
     "subagent.get": _WsMethod(_h_subagent_get),
@@ -2114,10 +2284,12 @@ _WS_METHODS: dict[str, _WsMethod] = {
         local_error="白名单导入只能在本机界面上操作",
     ),
     "skills.toggle": _WsMethod(_h_skills_toggle, local_only=True),
+    "extension.audit.list": _WsMethod(_h_extension_audit_list),
     "skills.scope": _WsMethod(_h_skills_scope, local_only=True),
     "skills.body": _WsMethod(_h_skills_body),
     "skills.scan_local": _WsMethod(_h_skills_scan_local),
     "skills.install": _WsMethod(_h_skills_install, local_only=True),
+    "skills.preview_install": _WsMethod(_h_skills_preview_install, local_only=True),
     "skills.delete": _WsMethod(_h_skills_delete, local_only=True),
     "skills.gallery": _WsMethod(_h_skills_gallery),
     "skills.save_from_session": _WsMethod(_h_skills_save_from_session),
@@ -2266,6 +2438,7 @@ def create_app(
         )
         if supplied and hmac.compare_digest(supplied, token):
             backend.token_throttle.note_success(ip)
+            backend.note_auth_success(ip, "http")
             response = await call_next(request)
             if request.query_params.get("token"):
                 # 首次带 token 访问成功后种 cookie，静态资源等后续请求免拼参数
@@ -2406,8 +2579,9 @@ def create_app(
         # 本机（回环）永远免令牌，与 HTTP 守卫同一规则；tailnet 来源必须验令牌；
         # 远程来源需要令牌而令牌为空时同样 fail closed（不能退化成无鉴权放行）
         needs_token = origin != "local" and (lan or (ts and origin == "tailscale"))
+        client_ip = str(ws.client[0]) if ws.client else ""
         if needs_token:
-            ip = str(ws.client[0]) if ws.client else ""
+            ip = client_ip
             token = (cfg.server.token if cfg is not None else "") or ""
             supplied = ""
             if token and not backend.token_throttle.blocked(ip):
@@ -2424,6 +2598,7 @@ def create_app(
                 await ws.close(code=4401)
                 return
             backend.token_throttle.note_success(ip)
+            backend.note_auth_success(ip, "ws")
         await ws.accept()
         lock = asyncio.Lock()
         # 客户端来源决定部分方法是否可用（远端不允许切换降低防护的开关）
@@ -2460,6 +2635,27 @@ def create_app(
             await send({"event": ev.get("kind", ""), "data": ev})
 
         backend.ws_emitters.append(emit)
+        # 连接登记（与 emitters 平行）：供设置页「已连接设备」与 lan.kick 使用。
+        # kick 回调只作用于本连接：close(4409) 后客户端会按重连策略重试，
+        # 但重连要重新验令牌（轮换过的旧令牌自然进不来）。
+        _conn_id = f"c{len(backend.ws_connections) + 1}-{int(time.time())}"
+
+        async def _kick() -> None:
+            try:
+                await ws.close(code=4409)
+            except Exception:  # noqa: BLE001
+                pass
+
+        _conn_entry = {
+            "id": _conn_id,
+            "emit": emit,
+            "ip": client_ip,
+            "origin": origin,
+            "connected_at": time.time(),
+            "ua": str(ws.headers.get("user-agent", ""))[:200],
+            "kick": _kick,
+        }
+        backend.ws_connections.append(_conn_entry)
         try:
             while True:
                 # 用通用 receive 判别帧类型：receive_text 对二进制帧取 message["text"]
@@ -2560,6 +2756,10 @@ def create_app(
         finally:
             try:
                 backend.ws_emitters.remove(emit)
+            except ValueError:
+                pass
+            try:
+                backend.ws_connections.remove(_conn_entry)
             except ValueError:
                 pass
 

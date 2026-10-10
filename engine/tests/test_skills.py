@@ -721,3 +721,84 @@ def test_install_from_zip_colon_entry_and_random_staging(tmp_path):
     # 本次安装自建的暂存目录已清理；允许剩下的只有预埋那一个
     leftovers = set(dest.glob(".importing-*"))
     assert leftovers <= {planted}
+
+
+# ------------------------------------------------------- 来源标记与更新备份
+
+
+def _make_pack(tmp_path: Path, name: str = "src-skill", desc: str = "来源标记测试") -> Path:
+    src = tmp_path / name
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {desc}\n---\n正文\n", encoding="utf-8"
+    )
+    return src
+
+
+def test_install_writes_source_mark(tmp_path):
+    from skysheep.skills.installer import read_source_mark
+
+    dest = tmp_path / "skills"
+    install_from_dir(_make_pack(tmp_path), dest, existing=set())
+    mark = read_source_mark(dest / "src-skill")
+    assert mark["source"] == "folder"
+    assert mark["installed_at"]  # ISO 时间串非空
+    assert mark["origin_label"] == "src-skill"  # 缺省用源目录名
+
+
+def test_install_zip_and_url_mark(tmp_path):
+    from skysheep.skills.installer import read_source_mark
+
+    pack = tmp_path / "p.zip"
+    with zipfile.ZipFile(pack, "w") as zf:
+        zf.writestr("p/SKILL.md", "---\nname: p\ndescription: p\n---\n")
+    dest = tmp_path / "skills"
+    install_from_zip(pack, dest, existing=set(), origin_url="https://github.com/u/r")
+    mark = read_source_mark(dest / "p")
+    assert mark["source"] == "zip"
+    assert mark["origin_url"] == "https://github.com/u/r"
+
+
+def test_read_source_mark_tolerates_missing_and_bad(tmp_path):
+    from skysheep.skills.installer import read_source_mark
+
+    assert read_source_mark(tmp_path) == {}  # 目录不存在
+    d = tmp_path / "s"
+    d.mkdir()
+    (d / ".source.json").write_text("not json", encoding="utf-8")
+    assert read_source_mark(d) == {}  # 坏损回空不抛
+
+
+def test_loader_exposes_origin(tmp_path):
+    dest = tmp_path / "skills"
+    install_from_dir(_make_pack(tmp_path), dest, existing=set())
+    loader = SkillLoader(global_dir=dest)
+    skills = loader.discover()
+    s = next(x for x in skills if x.name == "src-skill")
+    assert s.origin.get("source") == "folder"
+
+
+def test_overwrite_backs_up_old_dir(tmp_path):
+    dest = tmp_path / "skills"
+    install_from_dir(_make_pack(tmp_path, desc="v1"), dest, existing=set())
+    # v2 内容变化后覆盖安装
+    install_from_dir(_make_pack(tmp_path, desc="v2"), dest,
+                     existing={"src-skill"}, overwrite=True)
+    backups = list((dest.parent / "backups" / "skills").glob("src-skill-*"))
+    assert len(backups) == 1, "覆盖前旧目录应整体搬进备份目录"
+    assert (dest / "src-skill" / "SKILL.md").is_file()
+    # 备份目录不在技能根内：不会被 discover 当成技能
+    loader = SkillLoader(global_dir=dest)
+    assert not any(x.name.startswith("backups") for x in loader.discover())
+
+
+def test_overwrite_backup_rolling_keep(tmp_path):
+    from skysheep.skills.installer import SKILL_BACKUP_KEEP
+
+    dest = tmp_path / "skills"
+    install_from_dir(_make_pack(tmp_path, desc="v0"), dest, existing=set())
+    for i in range(1, SKILL_BACKUP_KEEP + 2):
+        install_from_dir(_make_pack(tmp_path, desc=f"v{i}"), dest,
+                         existing={"src-skill"}, overwrite=True)
+    backups = list((dest.parent / "backups" / "skills").glob("src-skill-*"))
+    assert len(backups) == SKILL_BACKUP_KEEP, "滚动备份应只保留最近 N 份"

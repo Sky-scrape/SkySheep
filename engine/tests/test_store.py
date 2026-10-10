@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from skysheep.messages import Message, ToolUseBlock
 from skysheep.session.store import SessionStore
 
@@ -560,5 +562,89 @@ async def test_team_messages_table_in_schema(store):
     try:
         await s.add_team_message("team-x", seq=1, from_member="user", to_member="all")
         assert len(await s.list_team_messages("team-x")) == 1
+    finally:
+        await s.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_version_written_and_pre_migrate_backup(tmp_path):
+    """新库写入 user_version；旧版本号库升格时落 pre-migrate 备份。"""
+    import aiosqlite
+
+    from skysheep.session.store import SCHEMA_VERSION, SessionStore
+
+    db = tmp_path / "fresh.db"
+    s = await SessionStore(db).connect()
+    async with aiosqlite.connect(db) as con:
+        v = (await (await con.execute("PRAGMA user_version")).fetchone())[0]
+    assert v == SCHEMA_VERSION
+    await s.close()
+
+    # 模拟「上次由更老程序写的库」（版本号低）：重连应升格并留 pre-migrate 备份
+    async with aiosqlite.connect(db) as con:
+        await con.execute("PRAGMA user_version = 0")
+        await con.commit()
+    s2 = await SessionStore(db).connect()
+    pre = list((tmp_path / "backups").glob(f"pre-migrate-v{SCHEMA_VERSION}-*.db"))
+    assert len(pre) == 1 and pre[0].stat().st_size > 0
+    await s2.close()
+
+    # 备份不在滚动备份命名空间里：list_backups 不出现 pre-migrate
+    s3 = await SessionStore(db).connect()
+    names = [b["name"] for b in s3.list_backups()]
+    assert not any("pre-migrate" in n for n in names)
+    await s3.close()
+
+
+@pytest.mark.asyncio
+async def test_rejects_future_schema_version(tmp_path):
+    """库版本比程序新（降级场景）：拒绝打开并给出可读提示。"""
+    import aiosqlite
+
+    from skysheep.session.store import SCHEMA_VERSION, SessionStore
+
+    db = tmp_path / "future.db"
+    s = await SessionStore(db).connect()
+    await s.close()
+    async with aiosqlite.connect(db) as con:
+        await con.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 10}")
+        await con.commit()
+    with pytest.raises(RuntimeError, match="更新版本"):
+        await SessionStore(db).connect()
+
+
+@pytest.mark.asyncio
+async def test_table_counts_and_cleanup(tmp_path):
+    """表级清理：按时间删、全清、白名单限制。"""
+    import time as _time
+
+    from skysheep.session.store import SessionStore
+
+    s = await SessionStore(tmp_path / "clean.db").connect()
+    try:
+        # usage_log：一半新一半旧
+        await s.add_usage("s1", "p", "m", 10, 5)
+        old = _time.time() - 40 * 86400
+        await s._db.execute(
+            "INSERT INTO usage_log (session_id, provider, model, ts, in_tokens, out_tokens, cached_tokens)"
+            " VALUES ('old', 'p', 'm', ?, 1, 1, 0)",
+            (old,),
+        )
+        await s._db.commit()
+        counts = await s.table_counts()
+        assert counts["usage_log"] == 2
+
+        # 30 天窗口：只删旧行
+        deleted = await s.cleanup_tables([{"table": "usage_log", "days": 30}])
+        assert deleted == {"usage_log": 1}
+        # 全清
+        deleted = await s.cleanup_tables([{"table": "usage_log", "days": 0}])
+        assert deleted == {"usage_log": 1}
+        # 白名单外（messages）被忽略
+        assert await s.cleanup_tables([{"table": "messages", "days": 0}]) == {}
+        # 未知表被忽略
+        assert await s.cleanup_tables([{"table": "sqlite_master; DROP", "days": 0}]) == {}
+        await s.vacuum()  # 不抛即可
+        assert s.db_size() > 0
     finally:
         await s.close()

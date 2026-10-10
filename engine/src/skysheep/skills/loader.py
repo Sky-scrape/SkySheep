@@ -58,6 +58,9 @@ class Skill(BaseModel):
     scope_projects: list[str] = []
     # 技能版本（frontmatter 的 version 字段，可选）：随技能清单透出，界面可展示
     version: str = ""
+    # 安装来源标记（.source.json，installer 落盘；缺失为空 dict）。只进界面展示，
+    # 不进系统提示词。来源信息可被包作者伪造，展示时当参考不作凭据。
+    origin: dict[str, str] = {}
 
 
 def _norm_path(p: str | Path) -> str:
@@ -190,11 +193,15 @@ def _load_skill_from_dir(skill_dir: Path, source: str) -> Skill | None:
     if not description and body:
         description = body.splitlines()[0][:120]
     version = " ".join((meta.get("version") or "").split())[:MAX_SKILL_VERSION_CHARS]
+    # 来源标记延后导入：installer 模块级 import loader，这里再顶层 import 会成环
+    from .installer import read_source_mark
+
     return Skill(
         name=_sanitize_name(name),
         description=_sanitize_description(description or ""),
         path=md, source=source,
         version=version,
+        origin=read_source_mark(skill_dir),
     )
 
 

@@ -79,3 +79,72 @@ def test_settings_import_never_enables_accept_edits(home):
         assert recv_until(ws, "m1")["result"]["mode"] == "confirm"
     saved = json.loads((home_dir / "ui.json").read_text(encoding="utf-8"))
     assert "accept_edits" not in saved and saved.get("sidebar_w") == 300
+
+
+def test_settings_preview_import_lists_and_flags(home):
+    """预览：列出白名单文件、跳过清单外文件、标记敏感内容；不落盘。"""
+    from test_server import make_client, recv_until
+
+    from skysheep.config import skysheep_home
+
+    home_dir = skysheep_home()
+    home_dir.mkdir(parents=True, exist_ok=True)
+    payload = _zip_b64({
+        "config.toml": b"[providers.x]\napi_key = 'secret'\n",
+        "memory.md": b"# memory\n",
+        "evil.exe": b"MZ...",
+    })
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "p1", "method": "settings.preview_import",
+                      "params": {"b64": payload}})
+        pv = recv_until(ws, "p1")["result"]
+        names = {it["name"] for it in pv["items"]}
+        assert names == {"config.toml", "memory.md"}
+        assert pv["unknown"] == ["evil.exe"]
+        assert pv["contains_secrets"] is True
+        assert next(it for it in pv["items"] if it["name"] == "config.toml")["has_secrets"] is True
+        # 预览不落盘
+        assert not (home_dir / "config.toml").exists()
+        assert not (home_dir / "memory.md").exists()
+
+        # 坏 zip 拒绝
+        ws.send_json({"id": "p2", "method": "settings.preview_import",
+                      "params": {"b64": "!!!bad"}})
+        frame = recv_until(ws, "p2")
+        assert not frame["ok"] and "zip 解析失败" in frame["error"]
+
+
+def test_export_full_data_zip(home):
+    """完整导出：含数据库快照与技能文件；默认打码 config，include_secrets 原样。"""
+    import zipfile
+
+    from test_server import make_client, recv_until
+
+    from skysheep.config import skysheep_home
+
+    home_dir = skysheep_home()
+    home_dir.mkdir(parents=True, exist_ok=True)
+    (home_dir / "config.toml").write_text(
+        "[providers.deepseek]\napi_key = 'sk-secret-value'\n", encoding="utf-8"
+    )
+    sk = home_dir / "skills" / "demo"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text("---\nname: demo\ndescription: x\n---\n", encoding="utf-8")
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "f1", "method": "data.export_full", "params": {}})
+        r = recv_until(ws, "f1")["result"]
+        assert any("skysheep.db" in str(i) for i in r["included"])
+        assert r["include_secrets"] is False
+        z = zipfile.ZipFile(r["path"])
+        cfg = z.read("config.toml").decode("utf-8")
+        assert "sk-secret-value" not in cfg and "***" in cfg  # 打码
+        assert "skills/demo/SKILL.md" in z.namelist()
+        assert "README.txt" in z.namelist()
+
+        ws.send_json({"id": "f2", "method": "data.export_full",
+                      "params": {"include_secrets": True}})
+        r2 = recv_until(ws, "f2")["result"]
+        cfg2 = zipfile.ZipFile(r2["path"]).read("config.toml").decode("utf-8")
+        assert "sk-secret-value" in cfg2

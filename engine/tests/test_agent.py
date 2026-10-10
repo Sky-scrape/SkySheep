@@ -775,3 +775,62 @@ async def test_pure_readonly_batch_still_concurrent(home):
     assert [e.name for e in finished] == ["read_file", "grep"]
     assert all(not e.is_error for e in finished)
     assert events[-1].kind == "turn_finished"
+
+
+async def test_two_write_tools_queue_permissions_in_order(tmp_path):
+    """同一轮两个写工具：权限卡依序排队（1→2），每张卡只对应一个工具，全链顺序不乱。"""
+    provider = FakeProvider([
+        [
+            ToolUseBlock(id="t1", name="write_file", input={"path": "a.txt", "content": "A"}),
+            ToolUseBlock(id="t2", name="write_file", input={"path": "b.txt", "content": "B"}),
+        ],
+        [TextBlock(text="都写完")],
+    ])
+    agent = make_agent(provider, tmp_path)
+    events = await collect(agent, "写两个文件", auto_respond="allow_once")
+
+    reqs = [e for e in events if e.kind == "permission_request"]
+    assert len(reqs) == 2, "两个写工具必须各弹一张确认卡"
+    assert reqs[0].request_id != reqs[1].request_id
+    assert reqs[0].input.get("path") == "a.txt"
+    assert reqs[1].input.get("path") == "b.txt"
+    # 顺序契约：卡1 resolved 之后才出现卡2（同一轮内依序排队，不并行弹）
+    kinds = [e.kind for e in events]
+    i1_res = next(i for i, e in enumerate(events)
+                 if e.kind == "permission_resolved" and e.request_id == reqs[0].request_id)
+    i2_req = next(i for i, e in enumerate(events)
+                  if e.kind == "permission_request" and e.request_id == reqs[1].request_id)
+    assert i1_res < i2_req, f"排队顺序错乱：{kinds}"
+    # 两个文件都真实写入
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "A"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "B"
+    assert events[-1].stop_reason == "end_turn"
+
+
+async def test_deny_first_allow_second_still_processes_queue(tmp_path):
+    """排队中的第一张卡被拒：第二个工具照常弹卡并放行（拒绝不吞后续排队）。"""
+    provider = FakeProvider([
+        [
+            ToolUseBlock(id="t1", name="write_file", input={"path": "a.txt", "content": "A"}),
+            ToolUseBlock(id="t2", name="write_file", input={"path": "b.txt", "content": "B"}),
+        ],
+        [TextBlock(text="处理完毕")],
+    ])
+    agent = make_agent(provider, tmp_path)
+    decisions = ["deny", "allow_once"]
+    events = []
+
+    async def run():
+        async for ev in agent.run_turn("写两个文件"):
+            events.append(ev)
+            if ev.kind == "permission_request":
+                agent.respond_permission(ev.request_id, decisions.pop(0))
+    await run()
+
+    reqs = [e for e in events if e.kind == "permission_request"]
+    assert len(reqs) == 2, "第二张卡不应因第一张被拒而消失"
+    assert not (tmp_path / "a.txt").exists(), "被拒的写不得发生"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "B"
+    # 被拒工具留下 is_error 结果，后续工具正常
+    finished = {e.tool_call_id: e for e in events if e.kind == "tool_call_finished"}
+    assert finished["t1"].is_error and not finished["t2"].is_error

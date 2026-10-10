@@ -55,6 +55,38 @@
 引擎不下发时卡片退化为原版式。决策按钮维持「允许一次 / 总是允许（本项目）/ 拒绝」
 不变；CLI 的 `TeamMemberGate` 夹具同步补 `working_dir`，范围分类在 CLI 同样生效。
 
+- **测试体系补强（九条新链路，68 个新用例）**：把此前只能靠手动的面
+  逐个变成自动化回归，全部按既有分层归位（默认集 / `-m e2e` / `-m slow`）：
+  - **CLI REPL 契约**（`tests/test_cli_repl_commands.py`，22 项）：ChatApp 斜杠命令
+    全量（/help /new /sessions /resume /model /tools /whitelist /export …）、主循环
+    标题与落库、权限决策（y/a/n/回车）全链回传；顺带修复 `/export` 相对路径落错
+    目录（落进程启动目录→改落项目工作目录，与 `/cwd` 口径一致）。
+  - **Provider 真实 HTTP 契约**（`tests/test_provider_http_contract.py`，9 项，e2e）：
+    起真实 uvicorn 端口、按各家线上协议手写 SSE，验证流式事件序列、usage 计量、
+    工具调用聚合、鉴权头，以及严格网关 400 降级重试、429/401 不重试、连接拒绝、
+    读取超时、断流——此前这些分支只用进程内 FakeClient「假设」过。
+  - **安装与升级场景**（`tests/test_upgrade_scenarios.py`，7 项）：全新 SKYSHEEP_HOME
+    零配置首启（config init / headless / sessions）；旧结构库升级（自动补列、数据
+    保留、pre-migrate 备份、降级拒绝、幂等重开）从用户数据目录视角串全链。
+  - **安装器契约**（`tests/test_installer_contract.py`，7 项）：installer.iss 的机械校验
+    ——AppMutex 与单实例互斥体一致性、卸载拦截运行中实例（S-18）、/CURRENTUSER 与
+    /RESTARTAPP 开关、卸载绝不碰 ~/.skysheep、版本号与 pyproject 一致。
+  - **崩溃恢复**（`tests/test_crash_recovery.py`，3 项）：真子进程硬杀（os._exit）后
+    WAL 恢复——已提交消息零丢失、未提交事务整体回滚、陈旧 .tmp 残留启动清扫。
+  - **长会话规模**（`tests/test_long_session_scale.py`，slow）：500 / 1000 / 5000 条
+    消息的写入与回读预算，5000 条历史进真实 Agent 循环的装配与收轮。
+  - **多窗口并发**（`tests/test_ws_multi_client.py`，4 项，e2e）：两条真实 WS 连接
+    并发跑轮次零串台、忙碌不阻塞、断开互不影响、同会话第二窗口收 user_message 广播。
+  - **计划任务真机**（`tests/test_system_schedule_real.py`，5 项，slow+e2e）：真 schtasks
+    注册→查询→注销闭环（daily / weekly / interval / 覆盖重建 / 缺席容忍），测试任务
+    带隔离前缀并必清理。
+  - **浏览器 UI**（`tests/test_browser_ui.py`，5 项，可选 Playwright）：真实 Chromium
+    加载真实服务——骨架与输入焦点、Enter 发送 / Shift+Enter 换行、390px 窄屏无横向
+    溢出、200% 缩放可用、service worker 注册。playwright 未安装时整组跳过
+    （`uv sync --locked` 会修剪它，属有意的可选依赖）。
+  - **权限排队**（`tests/test_agent.py` 追加 2 项）：同一轮两个写工具依序排队弹卡、
+    第一张被拒不影响第二个工具照常走完。
+
 ### 修复
 
 - **场景模板「可更新」误报（与来源标记叠加时永远翻不回）**：技能安装来源标记

@@ -1782,6 +1782,10 @@ class SessionStore:
                     "project_id": r["project_id"],
                     "project_name": r["project_name"] or "快聊",
                     "project_path": r["project_path"] or "",
+                    # 命中消息的定位锚：前端打开会话后按 seq 滚到这条并闪高亮
+                    # （旧前端忽略这两个字段不报错，向后兼容）
+                    "seq": r["seq"],
+                    "role": r["role"],
                 }
             )
             if len(results) >= limit:
@@ -1790,7 +1794,8 @@ class SessionStore:
 
     SEARCH_SELECT = (
         "SELECT m.session_id, s.title, s.updated_at, m.content, s.project_id,"
-        "       p.name AS project_name, p.root_path AS project_path"
+        "       p.name AS project_name, p.root_path AS project_path,"
+        "       m.seq AS seq, m.role AS role"
         " FROM messages m"
         " JOIN sessions s ON s.id = m.session_id"
         " LEFT JOIN projects p ON p.id = s.project_id"

@@ -74,6 +74,17 @@ class Provider(abc.ABC):
     def __init__(self) -> None:
         self.reasoning_effort: str = "auto"
 
+    async def aclose(self) -> None:
+        """释放自有连接池（httpx AsyncClient 等）。
+
+        默认空实现——FakeProvider 及注入的 client 没有自建资源。
+        子类实现了 _client 自有连接时（openai_compat / anthropic_provider）
+        重写此方法；调用方（backend._forget_runtime）只对「会话私有副本」
+        调用——共享的全局 provider 与注入的 client 不属于释放范围。
+        实现须幂等、不抛（best-effort：释放失败不该影响调用方）。
+        """
+        return None
+
     def set_reasoning_effort(self, effort: str) -> str:
         """设置思考强度档位（auto/low/medium/high），返回实际生效值。"""
         effort = (str(effort or "auto")).strip().lower()

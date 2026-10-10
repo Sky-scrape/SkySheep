@@ -586,6 +586,22 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 @keyframes swapfade { from { opacity: .25; } to { opacity: 1; } }
 .swap-in { animation: swapfade .18s ease-out; }
 
+/* 会话搜索跳转到命中消息：目标消息闪一下底（与设置搜索的 .ssr-flash 同一手势），
+   命中词本身用 <mark class="search-hit-mark"> 黄底标出，数秒后自动清除。 */
+@keyframes msgHitFlash {
+  0%, 100% { box-shadow: none; }
+  25% { box-shadow: 0 0 0 3px var(--blue); }
+  70% { box-shadow: 0 0 0 3px rgba(0, 0, 0, 0); }
+}
+.msg-hit-flash { animation: msgHitFlash 0.9s ease-in-out 2; border-radius: var(--r-md); }
+mark.search-hit-mark {
+  background: #ffe58f; color: inherit; border-radius: 2px;
+  padding: 0 1px; animation: rise var(--dur-fast) ease-out both;
+}
+[data-theme="night"] mark.search-hit-mark,
+[data-theme="indigo"] mark.search-hit-mark,
+[data-theme="pine"] mark.search-hit-mark { background: #7a6320; color: #ffe9a8; }
+
 /* ---------- 会话标签条（顶栏内，浏览器式页签，常驻） ----------
    悬浮胶囊形态（用户在「压线截断」「开窗立柱」之后拍板的定稿）：页签整条
    浮在顶栏墨线上方，不与线相交，墨线从头到尾连续；非激活页签透明，悬停

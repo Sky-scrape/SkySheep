@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -65,6 +66,16 @@ REPORT_EXCERPT_CHARS = 1200
 TASK_BOOK_KEEP = 50
 # 后台任务排队上限（并发满员后还能收下多少个排队任务）
 TASK_QUEUE_KEEP = 20
+# reports 目录子代理报告的滚动清理配额（数量 / 总字节）：与 team 报告同款策略
+# （core/team.py 的 TEAM_REPORT_KEEP_*）。子代理报告此前只有「按天」保留
+# （data_retention 的 reports_days），在活跃日一天内可无限累积；超配额按 mtime
+# 从旧到新删。只动本模块写入的子代理形状（<10位hex>-<类型>.md），
+# 不碰 team-*.md（各有各的配额）。
+REPORT_KEEP_FILES = 200
+REPORT_KEEP_TOTAL_BYTES = 20 * 1024 * 1024
+# 本模块报告的文件名形状：<10位hex任务id>-<子代理名>.md（见 _new_record 的
+# uuid 截断与 subagent_store 的名称校验）。只删匹配此形状的文件。
+_REPORT_NAME_RE = re.compile(r"^[0-9a-f]{10}-[A-Za-z0-9][A-Za-z0-9_-]{0,39}\.md$")
 
 # 内置型的角色提示词（追加在 SUBAGENT_PROMPT 之后）。task/explore 不用额外说明。
 BUILTIN_ROLE_PROMPTS = {
@@ -659,8 +670,33 @@ class TaskManager:
             rec.finished_at = time.time()
         rec.done_event.set()
         self._persist()
+        self._trim_tasks()
         self._notify_finished(rec)
         self._promote_queued()
+
+    def _trim_tasks(self) -> None:
+        """内存任务簿裁剪：活动任务全保留，终态记录只留最新 TASK_BOOK_KEEP 条。
+
+        落盘文件一直按这个上限滚动，但内存里的 dict 从不裁剪——长跑几天的
+        桌面应用每次派发都往 dict 里加一条（result 可达数千字符），从不释放，
+        这是除 runtime 池之外另一处慢性膨胀。与落盘同一口径：更旧的终态任务
+        本就不会展示（list_tasks 默认只给 30 条），裁剪不损可见性。
+        """
+        if len(self._tasks) <= TASK_BOOK_KEEP * 2:
+            return
+        active_ids = {
+            tid for tid, rec in self._tasks.items()
+            if rec.status in ("running", "queued")
+        }
+        terminal = sorted(
+            (rec for rec in self._tasks.values()
+             if rec.status not in ("running", "queued")),
+            key=lambda r: r.created_at,
+        )
+        keep = active_ids | {r.id for r in terminal[-TASK_BOOK_KEEP:]}
+        for tid in list(self._tasks):
+            if tid not in keep:
+                del self._tasks[tid]
 
     def _finalize_if_unfinished(self, rec: TaskRecord, task) -> None:
         """done_callback 兜底：任务以取消收场却没走完收尾 → 补齐终态与补位。
@@ -838,8 +874,40 @@ class TaskManager:
             path = rdir / f"{rec.id}-{rec.agent_type}.md"
             path.write_text(result, encoding="utf-8")
             rec.report_path = str(path)
+            self._prune_reports(rdir)
         except OSError:
             rec.report_path = ""  # 落盘失败退回整份内联投递
+
+    @staticmethod
+    def _prune_reports(rdir: Path) -> None:
+        """子代理报告的滚动清理：文件数或总字节超配额时按 mtime 从旧到新删。
+
+        只动本模块写入的形状（``<10位hex>-<类型>.md``）：team 频道报告是
+        ``team-*.md`` 命名，不碰（它有自己的配额）；用户自己的 .md 也不碰。
+        best-effort——探测/删除失败只放弃本轮清理，不阻断落盘。
+        """
+        try:
+            stats = sorted(
+                (
+                    (p, p.stat())
+                    for p in rdir.glob("*.md")
+                    if p.is_file() and _REPORT_NAME_RE.match(p.name)
+                ),
+                key=lambda kv: kv[1].st_mtime,
+            )
+        except OSError:
+            return
+        total = sum(st.st_size for _, st in stats)
+        remaining = len(stats)
+        for path, st in stats:
+            if remaining <= REPORT_KEEP_FILES and total <= REPORT_KEEP_TOTAL_BYTES:
+                break
+            try:
+                path.unlink()
+            except OSError:
+                pass  # 删不掉（被占用等）：留下，下轮落盘时再试
+            total -= st.st_size
+            remaining -= 1
 
     def _isolated_note(self, rec: TaskRecord) -> str:
         """隔离任务的收尾说明：分支 / 提交 / 工作区位置与合并、清理指引。"""

@@ -120,13 +120,38 @@ class OpenAICompatProvider(Provider):
         # SDK 内置重试降为 1（与 anthropic_provider 同因）：上层有自己的重试编排，
         # SDK 再各自叠 2 次会把持续性限流的最坏等待翻倍
         kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 1}
+        self._owned_http: object | None = None
         if proxy:
             kw["http_client"] = httpx.AsyncClient(proxy=proxy, timeout=300.0, trust_env=False)
+            self._owned_http = kw["http_client"]
         # SDK 延迟到建客户端时才导入：openai 包导入约 0.77s，而启动期（splash/服务）
         # 用不到它——只有真正发起对话时才需要。顶层导入曾把桌面首帧拖慢约 1/3。
         from openai import AsyncOpenAI  # noqa: PLC0415  启动性能：见上注释
 
         self._client = client or AsyncOpenAI(**kw)
+        # 资源所有权：注入的 client（测试/复用）不归本实例管；自建的才关。
+        # 代理自建的 http_client 也是本实例的责任（即便 client 是注入的）
+        self._owns_client = client is None
+
+    async def aclose(self) -> None:
+        """释放自建的 httpx 连接池（会话私有 provider 被回收时调用）。
+
+        只关自建资源：注入的 client 属于外部（可能是共享对象）不碰；
+        代理自建的 http_client 无论 client 是否注入都归本实例释放。
+        best-effort：关不掉（已关/异常）不影响调用方。
+        """
+        if self._owns_client:
+            try:
+                await self._client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        http = self._owned_http
+        if http is not None:
+            try:
+                await http.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            self._owned_http = None
 
     async def stream(
         self, messages: list[Message], tool_schemas: list[dict],

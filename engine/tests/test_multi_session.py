@@ -554,3 +554,56 @@ def test_ws_activate_and_resume_messages(home):
         ws.send_json({"id": "a1", "method": "session.activate", "params": {"id": sid}})
         ra = recv_until(ws, "a1")["result"]
         assert ra["id"] == sid
+
+
+# ---- runtime 回收时的 provider 连接释放（httpx 连接池不随 LRU 淘汰泄漏） ----
+
+
+class TrackedProvider:
+    """记录 aclose 调用的假 provider（替代 FakeProvider 走同样的慢流）。"""
+
+    model = "tracked-1"
+
+    def __init__(self) -> None:
+        self.closed = 0
+
+    async def stream(self, messages, tools, effort=None):
+        yield ProviderTextDelta("好")
+        yield ProviderDone(input_tokens=1, output_tokens=1)
+
+    async def aclose(self):
+        self.closed += 1
+
+
+async def test_forget_runtime_closes_private_provider(home):
+    """LRU 淘汰的会话：它挂着的 detached provider（会话私有副本）必须被关。
+
+    回归点：此前 _forget_runtime 只摘 registry，provider 自建的 httpx 连接池
+    随 LRU 淘汰无限积累（长跑一天的桌面应用最重）。共享的全局 provider 不关。
+    """
+    private = TrackedProvider()
+    be = ServerBackend(working_dir=home / "proj", provider_factory=TrackedProvider)
+    await be.setup()
+    await be.new_session()
+    # 给会话私有装配一个「会关」的 provider（模拟档位/模型覆盖后的 detached 副本）
+    rt = await be._get_runtime(be.session.id)
+    rt.agent.provider = private
+    be.MAX_RUNTIMES = 1
+    # 新会话把旧 runtime 挤出去
+    await be.new_session()
+    sid2 = be.session.id
+    await be._get_runtime(sid2)  # 新 runtime 把旧会话挤出 LRU 池
+    # 等后台 aclose 落地（spawn_bg 是异步的）
+    for _ in range(100):
+        if private.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert private.closed == 1, "被淘汰 runtime 的私有 provider 未被释放"
+
+    # 共享全局 provider（基底/无覆盖会话）不归单会话管：不放它头上
+    be.provider = be.runtime_provider_probe = TrackedProvider()  # type: ignore[attr-defined]
+    base = await be._get_runtime(sid2)
+    base.agent.provider = be.provider
+    be._forget_runtime(base)
+    await asyncio.sleep(0.05)
+    assert be.provider.closed == 0, "全局共享 provider 不得被 runtime 回收关掉"

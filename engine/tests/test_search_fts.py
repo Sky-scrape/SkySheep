@@ -246,6 +246,8 @@ async def test_search_result_fields(store):
     assert set(r) == {
         "session_id", "title", "snippet", "updated_at",
         "project_id", "project_name", "project_path",
+        # 命中消息定位锚（前端打开会话后跳到该条消息）：seq + role
+        "seq", "role",
     }
 
 

@@ -1487,9 +1487,11 @@ async function openSplitPane(sid, title) {
       else input.style.height = "";
     });
     autoGrowInput(input);
-    // 列 composer 宽度观察器：与主栏同款（boot 期错误折行的高度在这里纠正）
+    // 列 composer 宽度观察器：与主栏同款（boot 期错误折行的高度在这里纠正）。
+    // 存到 pane 上，关列时统一断开——匿名 RO 拿不到引用，列摘除后观察器仍
+    // 挂着旧节点，反复开关列会在浏览器里持续积累（内存慢性泄漏）
     let _splitCpW = 0;
-    new ResizeObserver((entries) => {
+    pane._cpRO = new ResizeObserver((entries) => {
       for (const en of entries) {
         const w = Math.round(en.contentRect.width);
         if (w && w !== _splitCpW) {
@@ -1497,7 +1499,8 @@ async function openSplitPane(sid, title) {
           autoGrowInput(input);
         }
       }
-    }).observe(col.querySelector(".split-composer"));
+    });
+    pane._cpRO.observe(col.querySelector(".split-composer"));
     syncSplitBarToggles(pane);
     // 权限三档：读回这一栏会话的档位（每栏独立，点击循环只写本栏）
     const acceptBtn = col.querySelector('[data-role="accept"]');
@@ -1845,6 +1848,32 @@ function closeSplitPane(pane, opts = {}) {
   if (refFace === pane) closeRefMenu();
   if (menuFace === pane) hideInputMenu();
   if (ctxPopFace === pane) closeCtxPop(true);
+  // 正在录音且录的就是这一栏：列都要没了，录音必须收尾并丢弃，
+  // 否则录音计时器与麦克风轨道继续挂着、转写文本还会往已摘除的输入框写
+  if (voiceFace === pane) voiceReset();
+  // 观察器断开 + 大字段释放：列关掉后这些对象没人再用，但引用仍活在某些
+  // 闭包/观察器/标签字典里——反复开关列会持续积累（长会话里 _historyAll
+  // 持着整会话消息引用，最重）。
+  if (pane._cpRO) { pane._cpRO.disconnect(); pane._cpRO = null; }
+  pane._historyGen = (pane._historyGen || 0) + 1; // 在途的分批渲染 rAF 作废
+  pane._historyAll = null;
+  pane._historyStart = 0;
+  pane._jumpSeqGen = (pane._jumpSeqGen || 0) + 1; // 在途的搜索跳转轮询作废
+  if (pane._toolCards) pane._toolCards.clear();
+  pane.images.length = 0;
+  pane.refs.length = 0;
+  pane.streamingEl = null;
+  // logEl 对象保留（路由/收尾路径可能还拿着它，置 null 会炸出 TypeError）
+  // 但清空子节点：消息 DOM 是内存大头，摘除后由 GC 回收
+  if (pane.logEl) {
+    // 图片懒加载观察器显式注销：IntersectionObserver 对已摘除节点不再回调，
+    // 但显式 unobserve 能不让浏览器持着这批 img 的引用（大图会话更重）
+    pane.logEl.querySelectorAll("img").forEach((img) => {
+      try { _lazyImgs.unobserve(img); } catch (e) { /* 已注销 */ }
+    });
+    pane.logEl.textContent = "";
+  }
+  if (routeTab === pane) routeTab = null; // 残留路由指针清理（否则下一条 addNotice 会写进死列）
   pane.el.remove();
   const i = splitPanes.indexOf(pane);
   if (i >= 0) splitPanes.splice(i, 1);
@@ -5758,7 +5787,12 @@ async function renderSessionList(query) {
       // 搜索跨全部项目，标出来自哪个项目，否则一堆同名标题分不清
       `<span class="s-project dim small" title="${escapeHtml(s.project_path || "")}">📁 ${escapeHtml(s.project_name || "")}</span>` +
       `<span class="s-snippet">${highlightSnippet(s.snippet, query)}</span>`;
-    li.title = "点击打开这个会话";
+    li.title = s.seq != null
+      ? "点击打开这个会话并跳到命中消息"
+      : "点击打开这个会话";
+    // 命中消息的 seq（旧后端不返回时为 undefined）：只在「这条结果本身是消息命中」
+    // 时启用跳转。仅标题命中（无 seq）保持原行为只打开会话。
+    const hitSeq = s.seq != null ? Number(s.seq) : null;
     li.onclick = async () => {
       // 跨项目命中：先切工作项目再打开，否则会话在当前项目列表里找不到
       if (s.project_path &&
@@ -5772,14 +5806,120 @@ async function renderSessionList(query) {
         }
       }
       searchEl.value = "";
-      openTabForSession(s.session_id, s.title);
+      const t = openTabForSession(s.session_id, s.title);
       clearTodoPanel();
       addNotice(`已打开会话 ${s.title || s.session_id}`);
       refreshSessions();
+      // 命中消息跳转：等历史加载完再定位。openTabForSession 的 loadTabHistory
+      // 是异步的（标签已激活但消息可能还没画完），所以轮询等待目标 seq 出现，
+      // 超时静默放弃（跳转失败不该挡着会话打开）。
+      if (hitSeq != null) jumpToMessageSeq(t, hitSeq, { query });
     };
     wireRowKeyboard(li); // 搜索结果行同样是 li：键盘也能打开命中的会话
     ul.appendChild(li);
   });
+}
+
+/** 搜索结果 → 跳到命中消息：滚动到目标 seq 的消息并闪烁高亮。
+ *
+ * 窗口化渲染（只常驻最近 HISTORY_WINDOW 条）后，命中可能落在未加载的
+ * 更早区间：先看当前已画节点，没有就按批「加载更早的消息」向前补画，
+ * 直到目标出现或到底（补画上线防止极端会话里长循环）。消息画出来后
+ * 再滚进视口居中并加 .msg-hit-flash 闪一下，用户立刻看得到落点。
+ *
+ * 轮询等待历史：openTabForSession 内部的历史拉取是异步的，调用时节点
+ * 可能还没画完；jumpSeq.wait 以 60ms 间隔重试，至多 MJUMP_WAIT ms。
+ * 同一标签并发跳转时后一次覆盖前一次（_jumpSeqGen 代际作废旧轮询）。
+ */
+const MESSAGE_JUMP_WAIT_MS = 4000;
+const MESSAGE_JUMP_FLASH_MS = 1800;
+const MESSAGE_JUMP_MAX_PRELOAD_ROUNDS = 60; // 每轮 HISTORY_CHUNK 条，上限 6000 条
+
+function jumpToMessageSeq(tab, seq, opts = {}) {
+  if (!tab || seq == null) return;
+  const gen = (tab._jumpSeqGen = (tab._jumpSeqGen || 0) + 1);
+  const t0 = Date.now();
+  tab._jumpPreloadRounds = 0; // 本次跳转的补画轮数配额
+  const attempt = () => {
+    if (!tab._jumpSeqGen || tab._jumpSeqGen !== gen) return; // 已被更新跳转取代
+    if (!tab.logEl) return;
+    const el = tab.logEl.querySelector(`.msg[data-seq="${seq}"]`);
+    if (el) { paintJumpTarget(tab, el, opts); return; }
+    // 没画到：可能 (a) 历史还在异步拉取，(b) 命中在窗口外（更早区间）。
+    // (b) 有「加载更早」按钮时点它补一批；(a) 没有按钮就再等等。
+    // 轮数配额防极端会话里无限补画（每轮 HISTORY_CHUNK 条）。
+    const more = tab.logEl.querySelector(".history-more");
+    if (more && tab._historyStart > 0) {
+      tab._jumpPreloadRounds += 1;
+      if (tab._jumpPreloadRounds <= MESSAGE_JUMP_MAX_PRELOAD_ROUNDS) {
+        loadEarlierHistory(tab);
+        setTimeout(attempt, 0); // loadEarlierHistory 是同步补画，下一拍就能找到
+        return;
+      }
+    }
+    if (Date.now() - t0 < MESSAGE_JUMP_WAIT_MS) {
+      setTimeout(attempt, 60);
+    }
+  };
+  setTimeout(attempt, 30);
+}
+
+function paintJumpTarget(tab, el, opts) {
+  if (!el || !el.isConnected) return;
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.remove("msg-hit-flash");
+  void el.offsetWidth; // 强制回流以重启动画
+  el.classList.add("msg-hit-flash");
+  setTimeout(() => el.classList.remove("msg-hit-flash"), MESSAGE_JUMP_FLASH_MS);
+  // 命中词在消息里就顺手帮用户标上（对话内查找的同一效果，不占查找条）
+  const q = String((opts || {}).query || "").trim();
+  if (q.length >= 1 && q.length <= 80) showSearchHitInMessage(el, q);
+}
+
+/** 在单条消息里把搜索词包成临时高亮（仅视觉，不作 DOM 结构改动以外的事情）。
+ * 与对话内查找（Ctrl+F）不同：只处理一条消息、 5s 后自动清除；不碰 pre/code。*/
+function showSearchHitInMessage(msg, query) {
+  const q = query.toLowerCase();
+  const walker = document.createTreeWalker(msg, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.nodeValue || !node.nodeValue.toLowerCase().includes(q)) return NodeFilter.FILTER_REJECT;
+      const p = node.parentNode;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      const tag = p.nodeName.toLowerCase();
+      if (tag === "pre" || tag === "code" || tag === "script" || tag === "style") return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const targets = [];
+  while (walker.nextNode()) targets.push(walker.currentNode);
+  const marks = [];
+  targets.forEach((node) => {
+    const text = node.nodeValue;
+    const low = text.toLowerCase();
+    const frag = document.createDocumentFragment();
+    let i = 0;
+    for (;;) {
+      const p = low.indexOf(q, i);
+      if (p < 0) { frag.appendChild(document.createTextNode(text.slice(i))); break; }
+      if (p > i) frag.appendChild(document.createTextNode(text.slice(i, p)));
+      const mark = document.createElement("mark");
+      mark.className = "search-hit-mark";
+      mark.textContent = text.slice(p, p + query.length);
+      marks.push(mark);
+      frag.appendChild(mark);
+      i = p + query.length;
+    }
+    node.parentNode.replaceChild(frag, node);
+  });
+  if (!marks.length) return;
+  setTimeout(() => {
+    marks.forEach((m) => {
+      const parent = m.parentNode;
+      if (!parent) return;
+      parent.replaceChild(document.createTextNode(m.textContent), m);
+      parent.normalize();
+    });
+  }, MESSAGE_JUMP_FLASH_MS + 2200);
 }
 
 // ---------- 会话操作菜单（⋯ 按钮或右键唤出） ----------
@@ -9424,6 +9564,26 @@ function loadEarlierHistory(tab) {
   // 内容插在顶部：滚动位置按新增高度下移补偿，视口里看到的内容不动
   log.scrollTop = prevTop + (log.scrollHeight - prevHeight);
   attachHistoryOps(tab); // 补画进来的用户消息也要挂复制/编辑（attachMsgOps 幂等）
+  // 对话内查找开着且搜过词：补画进来的消息也纳入命中（否则用户点了「加载更早」
+  // 也搜不到刚加载的内容，与查找条的“仅已加载”备注对不上）。这里不重走
+  // paintFindHit 的 scrollIntoView——用户正在看的是刚补画的更早内容，
+  // 跳回第一条命中会把他拽走；只更新计数与高亮态。
+  const findBar = document.getElementById("find-bar");
+  if (tab === activeTab && findBar && !findBar.classList.contains("hidden")) {
+    const inp = document.getElementById("find-input");
+    const q = inp ? inp.value.trim() : "";
+    if (q) {
+      const keep = findIdx;
+      runFind(q);
+      findIdx = findHits.length ? Math.min(Math.max(0, keep), findHits.length - 1) : -1;
+      const count = document.getElementById("find-count");
+      if (count) {
+        findHits.forEach((m, i) => m.classList.toggle("cur", i === findIdx));
+        count.textContent = (findHits.length ? `${findIdx + 1}/${findHits.length}` : "0/0")
+          + findCoverageNote(tab);
+      }
+    }
+  }
   if (btn) {
     if (start <= 0) btn.remove();
     else btn.textContent = `加载更早的消息（还有 ${start} 条）`;
@@ -10508,11 +10668,19 @@ function runFind(query) {
   paintFindHit();
 }
 
+/** 查找覆盖范围备注：窗口化后只搜到已画出的消息。更早区间未加载时
+ * 在计数旁注明（含条数），引导用户用顶部「加载更早的消息」。 */
+function findCoverageNote(tab) {
+  if (!tab || !tab._historyStart) return "";
+  return `（仅已加载；还有 ${tab._historyStart} 条更早消息，用顶部按钮加载后可继续搜）`;
+}
+
 function paintFindHit() {
   const { count } = findEls();
   findHits.forEach((m, i) => m.classList.toggle("cur", i === findIdx));
-  if (!findHits.length) { count.textContent = "0/0"; return; }
-  count.textContent = `${findIdx + 1}/${findHits.length}`;
+  const note = findCoverageNote(activeTab);
+  if (!findHits.length) { count.textContent = "0/0" + note; return; }
+  count.textContent = `${findIdx + 1}/${findHits.length}` + note;
   const cur = findHits[findIdx];
   cur.scrollIntoView({ block: "center", behavior: "smooth" });
 }
@@ -10888,8 +11056,18 @@ document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
 const settingsSearchInput = document.getElementById("settings-search");
 const settingsSearchResults = document.getElementById("settings-search-results");
 
+// 卡片索引缓存：索引项持有 card 元素引用与全量正文（textContent）。设置卡片是
+// 静态 HTML（除非设置页被重渲染，内容不変），每键全量重扫 48 张卡（读 textContent）
+// 纯属浪费——首次构建后缓存复用；失效靠 renderSettings 后主动清除（见
+// invalidateSettingsCardIndex）。
+let _settingsCardIndexCache = null;
+
+function invalidateSettingsCardIndex() {
+  _settingsCardIndexCache = null;
+}
+
 function settingsCardIndex() {
-  // 现查现用：设置卡片是静态 HTML，38 张的量级不值得建缓存与失效逻辑
+  if (_settingsCardIndexCache) return _settingsCardIndexCache;
   const items = [];
   document.querySelectorAll(".settings-page").forEach((pg) => {
     const pageId = pg.id.replace("settings-page-", "");
@@ -10900,10 +11078,12 @@ function settingsCardIndex() {
       items.push({
         pageId, pageName, card,
         title: h3 ? h3.textContent.trim() : "(未命名卡片)",
-        text: card.textContent,
+        // 预小写全量正文：搜索时不再每键逐卡转小写（重复工作）
+        text: (card.textContent || "").toLowerCase(),
       });
     });
   });
+  _settingsCardIndexCache = items;
   return items;
 }
 
@@ -10916,7 +11096,7 @@ function runSettingsSearch(qs) {
   settingsSearchResults.innerHTML = "";
   if (!q) { hideSettingsSearch(); return; }
   const hits = settingsCardIndex().filter((it) =>
-    it.title.toLowerCase().includes(q) || it.text.toLowerCase().includes(q));
+    it.title.toLowerCase().includes(q) || it.text.includes(q));
   if (!hits.length) {
     settingsSearchResults.innerHTML = '<div class="ssr-empty dim small">没有匹配的设置项</div>';
   }
@@ -10944,7 +11124,17 @@ function runSettingsSearch(qs) {
   settingsSearchResults.classList.remove("hidden");
 }
 if (settingsSearchInput) {
-  settingsSearchInput.addEventListener("input", () => runSettingsSearch(settingsSearchInput.value));
+  // 输入防抖：每次击键都全量过滤与重建结果列表，连续输入时逐键删建 DOM 全属浪费
+  // （与侧栏搜索/对话内查找同一配方）；索引本身已在 settingsCardIndex 里缓存。
+  let settingsSearchTimer = null;
+  settingsSearchInput.addEventListener("input", () => {
+    clearTimeout(settingsSearchTimer);
+    settingsSearchTimer = setTimeout(
+      () => runSettingsSearch(settingsSearchInput.value), 120);
+  });
+  // 聚焦即重建索引：设置页开着时另一端/对话中可能刚改过内容（如白名单新增），
+  // 索引缓存可能过时；一次聚焦重建一次，输入突发期间全部命中缓存。
+  settingsSearchInput.addEventListener("focus", () => invalidateSettingsCardIndex());
   settingsSearchInput.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { settingsSearchInput.value = ""; hideSettingsSearch(); }
   });

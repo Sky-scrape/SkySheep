@@ -46,21 +46,24 @@ MAX_DOC_BYTES = 50_000_000  # 50MB：文档类文件的超上限基本是拿错�
 SUPPORTED = (".pdf", ".docx", ".xlsx", ".pptx")
 
 
-def extract_document_text(p: Path, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+def extract_document_text(
+    p: Path, max_chars: int = DEFAULT_MAX_CHARS, start_page: int = 1
+) -> str:
     """按扩展名提取文档文本（PDF/DOCX/XLSX），工具与文件树预览共用。
 
     同步函数（CPU 解析），调用方自行放线程池；失败抛 ToolError（中文可读）。
+    start_page 仅 PDF / PPT 有效（其余格式忽略），用于大文档续读。
     """
     suffix = p.suffix.lower()
     if suffix not in SUPPORTED:
         raise ToolError(f"只支持 {' / '.join(SUPPORTED)} 文档：{suffix or '(无扩展名)'}")
     try:
         if suffix == ".pdf":
-            return _extract_pdf(p, max_chars)
+            return _extract_pdf(p, max_chars, start_page)
         if suffix == ".docx":
             return _extract_docx(p)
         if suffix == ".pptx":
-            return _extract_pptx(p)
+            return _extract_pptx(p, start_page)
         return _extract_xlsx(p, max_chars)
     except ToolError:
         raise
@@ -78,17 +81,28 @@ class ReadDocumentArgs(BaseModel):
     max_chars: int = Field(
         default=DEFAULT_MAX_CHARS, ge=500, le=200_000, description="返回文本的最大字符数"
     )
+    start_page: int = Field(
+        default=1, ge=1,
+        description=(
+            "从第几页开始读（PDF / PPT 有效，默认 1）。超长文档先读一截，"
+            "看到「从第 N 页继续」提示后，用更大的 start_page 接着读剩下的部分。"
+        ),
+    )
 
 
-def _extract_pdf(p: Path, max_chars: int) -> str:
+def _extract_pdf(p: Path, max_chars: int, start_page: int = 1) -> str:
     from pypdf import PdfReader
 
     reader = PdfReader(str(p))
     if reader.is_encrypted:
         raise ToolError("PDF 已加密，请先解密后再发给我")
+    total_pages = len(reader.pages)
+    first = max(1, min(start_page, total_pages))
     parts: list[str] = []
     total = 0
     for i, page in enumerate(reader.pages, start=1):
+        if i < first:
+            continue
         try:
             text = (page.extract_text() or "").strip()
         except Exception as e:  # noqa: BLE001 - 单页损坏不拖垮整个文档
@@ -96,10 +110,13 @@ def _extract_pdf(p: Path, max_chars: int) -> str:
         parts.append(f"--- 第 {i} 页 ---\n{text}")
         total += len(text) + 20
         if total > max_chars * 2:  # 提取层面提前收手，避免超长 PDF 白耗时
-            parts.append(f"(已达 {max_chars * 2} 字符上限，后面 {len(reader.pages) - i} 页省略)")
+            remaining = total_pages - i
+            parts.append(f"(已达 {max_chars * 2} 字符上限，后面 {remaining} 页省略——"
+                         f"可调大 max_chars，或用 start_page={i + 1} 从下一页继续)")
             break
     text = "\n\n".join(parts)
-    return f"[PDF 共 {len(reader.pages)} 页]\n\n" + text
+    start_note = f"（从第 {first} 页开始）" if first > 1 else ""
+    return f"[PDF 共 {total_pages} 页{start_note}]\n\n" + text
 
 
 def _extract_docx(p: Path) -> str:
@@ -132,18 +149,23 @@ def _extract_docx(p: Path) -> str:
     return f"[Word 文档]\n\n{text}"
 
 
-def _extract_pptx(p: Path) -> str:
+def _extract_pptx(p: Path, start_page: int = 1) -> str:
     """抽取 PPT 文本：每页标出页码、标题、正文层级与备注。
 
     包含备注：演示稿的要点往往写在备注里，只读正文会漏掉一半信息。
     图层形状的位置不保证与阅读顺序一致（pptx 是绝对定位的），所以只能按
     「形状在 XML 里的顺序」输出；表格按行展开为 | 分隔。
+    start_page > 1 时从该页开始（大演示稿续读）。
     """
     from pptx import Presentation
 
     prs = Presentation(str(p))
+    total_slides = len(prs.slides)
+    first = max(1, min(start_page, total_slides))
     parts: list[str] = []
     for i, slide in enumerate(prs.slides, start=1):
+        if i < first:
+            continue
         lines: list[str] = []
         for shape in slide.shapes:
             if shape.has_table:
@@ -167,7 +189,8 @@ def _extract_pptx(p: Path) -> str:
                 notes = "\n[备注] " + note_text.replace("\n", " / ")
         body = "\n".join(lines) if lines else "(本页无文本，可能只有图片)"
         parts.append(f"--- 第 {i} 页 ---\n{body}{notes}")
-    return f"[PPT 演示文稿，共 {len(prs.slides)} 页]\n\n" + "\n\n".join(parts)
+    start_note = f"（从第 {first} 页开始）" if first > 1 else ""
+    return f"[PPT 演示文稿，共 {total_slides} 页{start_note}]\n\n" + "\n\n".join(parts)
 
 
 def _extract_xlsx(p: Path, max_chars: int) -> str:
@@ -196,6 +219,8 @@ class ReadDocumentTool(Tool):
         "读取 PDF / Word(.docx) / Excel(.xlsx) / PPT(.pptx) 文档的文本内容（PDF 按页、"
         "Word 含表格、Excel 按工作表逐行、PPT 按页含备注）。"
         "纯文本文件请用 read_file。用户让你「看/读/总结某个文档」时用它。"
+        "超长 PDF / PPT 被截断时，用更大的 start_page 从断点继续读；"
+        "PDF 的 max_chars 可调大（至多 20 万字符）。"
     )
     safety = Safety.READONLY
     read_only_hint = True
@@ -221,7 +246,9 @@ class ReadDocumentTool(Tool):
         except OSError as e:
             raise ToolError("cannot read " + shown + ": " + str(e)) from e
 
-        text = await asyncio.to_thread(extract_document_text, p, args.max_chars)
+        text = await asyncio.to_thread(
+            extract_document_text, p, args.max_chars, args.start_page
+        )
 
         if not text.strip():
             raise ToolError("文档里没有可提取的文本（可能是纯图片扫描件，本工具不识别图片内容）")

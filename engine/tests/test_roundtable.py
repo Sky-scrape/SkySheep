@@ -1157,3 +1157,90 @@ async def test_dedupe_keeps_short_drafts_untouched():
 
     bodies = dedupe_similar_bodies([(0, "是的"), (1, "是的")])
     assert bodies == ["是的", "是的"]
+
+
+# ---------- 本轮临时成员 provider 随轮释放（httpx 连接池不随每轮泄漏） ----------
+
+
+def test_roundtable_releases_member_providers(home):
+    """圆桌成员每轮新建 provider：轮结束（含取消）后必须释放，主席不释。"""
+
+    class TrackedProvider(Provider):
+        name, model = "tracked", "t1"
+
+        def __init__(self, text: str, *, hang: bool = False) -> None:
+            super().__init__()
+            self._text = text
+            self._hang = hang
+            self.closed = 0
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            yield ProviderTextDelta(self._text)
+            if self._hang:
+                await asyncio.sleep(30)
+            yield ProviderDone(stop_reason="end_turn", input_tokens=3, output_tokens=3)
+
+        async def aclose(self):
+            self.closed += 1
+
+    chair = TrackedProvider("融合答案")
+    m1 = TrackedProvider("成员A草稿")
+    m2 = TrackedProvider("成员B草稿")
+    with make_rt_client(home, [chair, m1, m2]) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "chat.send", "params": {
+            "text": "问题", "roundtable": True,
+            "members": [{"provider": "fa", "model": "ma"}, {"provider": "fb", "model": "mb"}],
+        }})
+        frame = recv_until(ws, "c1")
+        assert frame["ok"]
+        # 等后台释放任务落地（spawn_bg 已挂到本轮 run_task 完成回调之后）
+        import time as _time
+        for _ in range(200):
+            if m1.closed and m2.closed:
+                break
+            _time.sleep(0.02)
+    assert m1.closed == 1 and m2.closed == 1, "成员 provider 未随轮释放"
+    assert chair.closed == 0, "主席是常驻对象，不得被轮末清理关掉"
+
+
+def test_roundtable_releases_member_providers_on_cancel(home):
+    """取消路径同样释放：挂住的成员轮被停止后 provider 也要关。"""
+
+    class TrackedHang(Provider):
+        name, model = "tracked-hang", "t2"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = 0
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            yield ProviderTextDelta("半截")
+            await asyncio.sleep(60)
+            yield ProviderDone()  # pragma: no cover
+
+        async def aclose(self):
+            self.closed += 1
+
+    member = TrackedHang()
+    chair_script = FakeProvider([[TextBlock(text="主席")], [TextBlock(text="融合")]])
+    with make_rt_client(home, [chair_script, member]) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "chat.send", "params": {
+            "text": "问题", "roundtable": True,
+            "members": [{"provider": "fa", "model": "ma"}],
+        }})
+        # 等成员开始产出再停止
+        while True:
+            frame = ws.receive_json()
+            if frame.get("event") == "roundtable_member_delta":
+                break
+        ws.send_json({"id": "s1", "method": "stop", "params": {}})
+        out = recv_until(ws, "c1")
+        assert out["ok"] and out["result"]["stopped"] is True
+        import time as _time
+        for _ in range(200):
+            if member.closed:
+                break
+            _time.sleep(0.02)
+    assert member.closed == 1, "取消路径未释放成员 provider"

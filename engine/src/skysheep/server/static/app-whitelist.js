@@ -196,6 +196,8 @@ const ruleCheckRun = async () => {
 };
 
 async function renderSettings() {
+  // 设置卡内容即将刷新：作废搜索索引缓存（下次搜索重建，保证搜到新内容）
+  if (typeof invalidateSettingsCardIndex === "function") invalidateSettingsCardIndex();
   const cfg = await request("config.providers");
   const [{ rules }, snap] = await Promise.all([
     request("whitelist.list"),

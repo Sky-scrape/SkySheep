@@ -70,6 +70,13 @@ _PAGE_READY_TIMEOUT = 15.0   # navigate 后等 document.readyState=complete 的�
 _POLL_INTERVAL = 0.15        # readyState 轮询间隔
 _WS_MAX_SIZE = 64 * 1024 * 1024  # 截图 base64 可能远超 websockets 默认 1MB
 
+# 闲置自动回收：无头 Edge 是常驻单例（进程 + 临时配置目录），但「上一次动作后
+# 隔很久才来下一次」是常态——不回收的话 msedge 进程与 skysheep-edge-* 目录
+# 会一直挂到应用退出（用内存与磁盘换一个大概率不再复用的实例）。闲置超过
+# 阀值且没有动作在跑时自动关闭；下一次动作 get_browser 会重新拉起。
+_BROWSER_IDLE_CLOSE_S = 300.0
+_IDLE_CHECK_INTERVAL_S = 30.0  # 看门狗检查间隔（测试可收紧）
+
 
 def find_edge() -> str:
     """定位 msedge.exe：先 PATH，再 Program Files 固定位置；找不到给可读报错。"""
@@ -346,6 +353,64 @@ class CdpBrowser:
 _BROWSER: CdpBrowser | None = None
 _BROWSER_LOCK = asyncio.Lock()  # 串行化「检查 + start + 赋值」的启动路径
 _ATEXIT_REGISTERED = False
+_IDLE_TASK: asyncio.Task | None = None  # 闲置回收看门狗（单例存活期间唯一一条）
+
+
+def _note_browser_activity() -> None:
+    """记下「刚才有动作」：闲置看门狗按这个时间戳判是否回收。"""
+    global _BROWSER_LAST_USED
+    _BROWSER_LAST_USED = time.monotonic()
+
+
+_BROWSER_LAST_USED = 0.0
+
+
+async def _idle_watchdog() -> None:
+    """闲置看门狗：定期检查单例，超过 _BROWSER_IDLE_CLOSE_S 没动作就收掉。
+
+    只在实例存在时跑（拉起时启动，关闭时取消）；自己拿锁与 get_browser /
+    close_browser 互斥——回收时刻恰有动作进来，动作路径会先拿锁重建实例，
+    看门狗拿锁后发现闲置时间已被刷新就跳过。
+    任务自身异常/取消静默（看门狗死了不该影响工具使用），退出前自关单例。
+    """
+    global _BROWSER
+    try:
+        while True:
+            await asyncio.sleep(_IDLE_CHECK_INTERVAL_S)
+            async with _BROWSER_LOCK:
+                if _BROWSER is None:
+                    return  # 已被 close 动作关掉
+                idle = time.monotonic() - _BROWSER_LAST_USED
+                if idle >= _BROWSER_IDLE_CLOSE_S:
+                    b, _BROWSER = _BROWSER, None  # type: ignore[assignment]
+                    try:
+                        await b.aclose()  # type: ignore[union-attr]
+                    except Exception:  # noqa: BLE001 - 清理路径不在看门狗里抛
+                        pass
+                    return
+                if not _BROWSER.is_alive():
+                    # 进程自己死了（没有动作的窗口里）：收掉残留实例（临时目录）
+                    b, _BROWSER = _BROWSER, None  # type: ignore[assignment]
+                    try:
+                        await b.aclose()  # type: ignore[union-attr]
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - 看门狗静默退出，不影响后续按需拉起
+        return
+
+
+def _ensure_idle_watchdog() -> None:
+    """拉实例后启动（或重拉）闲置看门狗；需要事件循环上下文。"""
+    global _IDLE_TASK
+    if _IDLE_TASK is not None and not _IDLE_TASK.done():
+        return
+    try:
+        _IDLE_TASK = asyncio.get_running_loop().create_task(_idle_watchdog())
+    except RuntimeError:
+        _IDLE_TASK = None  # 无运行中的事件循环（测试同步路径）：不启动
 
 
 def _atexit_close() -> None:
@@ -369,12 +434,16 @@ async def get_browser() -> CdpBrowser:
     async with _BROWSER_LOCK:
         if _BROWSER is not None:
             if _BROWSER.is_alive():
+                _note_browser_activity()  # 复用也算一次「使用」：闲置计时器归零
+                _ensure_idle_watchdog()
                 return _BROWSER
             await _BROWSER.aclose()
             _BROWSER = None
         b = CdpBrowser()
         await b.start()
         _BROWSER = b
+        _note_browser_activity()
+        _ensure_idle_watchdog()
         if not _ATEXIT_REGISTERED:
             atexit.register(_atexit_close)
             _ATEXIT_REGISTERED = True
@@ -384,11 +453,14 @@ async def get_browser() -> CdpBrowser:
 async def close_browser() -> None:
     """关闭并清理无头浏览器实例（web_page close 动作）。与 get_browser 同锁：
     避免与并发启动路径交错出「刚启动就被换血」或双实例窗口。"""
-    global _BROWSER
+    global _BROWSER, _IDLE_TASK
     async with _BROWSER_LOCK:
         b, _BROWSER = _BROWSER, None
         if b is not None:
             await b.aclose()
+    if _IDLE_TASK is not None and not _IDLE_TASK.done():
+        _IDLE_TASK.cancel()  # 显式关掉：看门狗不再等下一轮才发现实例没了
+        _IDLE_TASK = None
 
 
 # ---- 页面级动作（动作 → CDP 命令的映射都在这里，测试逐一断言） ----
@@ -754,6 +826,7 @@ class WebPageTool(Tool):
             ) from None
         finally:
             await browser.detach(session_id)
+            _note_browser_activity()  # 动作完成后刷新闲置计时（含报错路径）
 
     async def _dispatch(
         self,

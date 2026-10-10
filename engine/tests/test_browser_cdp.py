@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from collections import deque
 from pathlib import Path
 
@@ -23,6 +24,12 @@ from skysheep.config import skysheep_home
 from skysheep.tools import default_tools
 from skysheep.tools.base import Safety, ToolContext, ToolError
 from skysheep.tools.browser_cdp import CdpBrowser, CdpConnection, WebPageTool
+
+
+def monkeypatch_idle(module, *, idle_close_s: float) -> None:
+    """收紧闲置回收的时序参数（测试里不真等 5 分钟）。"""
+    module._BROWSER_IDLE_CLOSE_S = idle_close_s
+    module._IDLE_CHECK_INTERVAL_S = min(0.05, idle_close_s / 2)
 
 DEVTOOLS_LINE = (
     b"[9260:12356:1007/101500.123:INFO:content_main.cc(123)] "
@@ -39,10 +46,20 @@ async def _reset_singleton(monkeypatch):
     """单例是模块级状态：每个用例都从干净状态出发，跑完把残留实例收干净。
 
     部分用例会用假进程走真 start()（真建临时配置目录），不收尾就会每次跑测试
-    泄漏一个 skysheep-edge-* 临时目录。
+    泄漏一个 skysheep-edge-* 临时目录。闲置看门狗（_IDLE_TASK）同样要取消——
+    看门狗会在测试结束后继续跑，污染后续用例的模块状态。
     """
     monkeypatch.setattr(cdp, "_BROWSER", None)
+    monkeypatch.setattr(cdp, "_IDLE_TASK", None)
+    monkeypatch.setattr(cdp, "_BROWSER_LAST_USED", 0.0)
     yield
+    if cdp._IDLE_TASK is not None and not cdp._IDLE_TASK.done():
+        cdp._IDLE_TASK.cancel()
+        try:
+            await cdp._IDLE_TASK
+        except (asyncio.CancelledError, Exception):
+            pass
+    cdp._IDLE_TASK = None
     b, cdp._BROWSER = cdp._BROWSER, None
     if b is not None:
         await b.aclose()
@@ -478,6 +495,83 @@ async def test_close_browser_shuts_singleton_down():
     await cdp.close_browser()
     assert closed == [True]
     assert cdp._BROWSER is None
+
+
+# ---- 闲置自动回收：看门狗把「很久没有动作」的单例收掉（进程 + 临时目录） ----
+
+
+async def test_idle_watchdog_closes_browser_after_idle():
+    """超过闲置阀值后看门狗自动收掉单例（下一次动作会重新拉起）。"""
+    closed = []
+
+    class Stub:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        async def aclose(self):
+            closed.append(True)
+            self.alive = False
+
+    monkeypatch_idle(cdp, idle_close_s=0.02)
+    cdp._BROWSER_LAST_USED = time.monotonic() - 1.0  # 已闲置
+    cdp._BROWSER = Stub()
+    task = asyncio.get_running_loop().create_task(cdp._idle_watchdog())
+    await asyncio.sleep(0.15)
+    assert closed == [True], "闲置超阀值后单例未被回收"
+    assert cdp._BROWSER is None
+    assert task.done()
+
+
+async def test_idle_watchdog_keeps_active_browser():
+    """闲置未超阀值：看门狗不得动实例。"""
+    closed = []
+
+    class Stub:
+        def is_alive(self):
+            return True
+
+        async def aclose(self):
+            closed.append(True)
+
+    monkeypatch_idle(cdp, idle_close_s=60.0)
+    cdp._BROWSER_LAST_USED = time.monotonic()  # 刚用过
+    cdp._BROWSER = Stub()
+    task = asyncio.get_running_loop().create_task(cdp._idle_watchdog())
+    await asyncio.sleep(0.15)
+    assert closed == [] and cdp._BROWSER is not None
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def test_idle_watchdog_reaps_dead_process():
+    """进程自己死了（没有动作的窗口）：看门狗收残留实例（临时目录）。"""
+    closed = []
+
+    class DeadStub:
+        def is_alive(self):
+            return False
+
+        async def aclose(self):
+            closed.append(True)
+
+    monkeypatch_idle(cdp, idle_close_s=60.0)
+    cdp._BROWSER_LAST_USED = time.monotonic()
+    cdp._BROWSER = DeadStub()
+    task = asyncio.get_running_loop().create_task(cdp._idle_watchdog())
+    await asyncio.sleep(0.15)
+    assert closed == [True] and cdp._BROWSER is None
+    assert task.done()
+
+
+def test_note_browser_activity_updates_timestamp():
+    cdp._BROWSER_LAST_USED = 0.0
+    cdp._note_browser_activity()
+    assert cdp._BROWSER_LAST_USED > 0.0
 
 
 # ---- web_page 动作 → CDP 命令映射（走 WebPageTool.run 全链路） ----

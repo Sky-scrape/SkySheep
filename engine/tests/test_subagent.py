@@ -605,6 +605,45 @@ async def test_long_report_written_to_file_and_excerpted(tmp_path):
     assert next(iter(tasks2._tasks.values())).report_path == ""
 
 
+async def test_report_rolling_quota(tmp_path, monkeypatch):
+    """子代理报告目录的滚动配额：超条数时按 mtime 从旧到新删；
+    只动本模块形状（<hex>-<类型>.md），team-*.md 与用户自己的 .md 不碰。"""
+    import os
+
+    from skysheep.core import subagent as sub_mod
+    from skysheep.core.subagent import TaskManager
+
+    monkeypatch.setattr(sub_mod, "REPORT_KEEP_FILES", 3)
+    monkeypatch.setattr(sub_mod, "REPORT_KEEP_TOTAL_BYTES", 10 ** 9)
+    rdir = tmp_path / ".skysheep" / "reports"
+    rdir.mkdir(parents=True)
+    # 预置 5 份旧报告（本模块形状）+ 1 份 team 报告 + 1 份用户文件
+    for i in range(5):
+        p = rdir / f"{format(i, '010x')}-explore.md"
+        p.write_text("旧报告" * 50, encoding="utf-8")
+        os.utime(p, (1000 + i, 1000 + i))  # mtime 递增：0 最旧
+    (rdir / "team-0001-小明.md").write_text("频道报告", encoding="utf-8")
+    os.utime(rdir / "team-0001-小明.md", (1000, 1000))
+    (rdir / "我的笔记.md").write_text("用户文件", encoding="utf-8")
+    os.utime(rdir / "我的笔记.md", (1000, 1000))
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="长" * 5000)]]),
+        working_dir=tmp_path,
+    )
+    delivered = await tasks.run_sync("explore", "写报告")
+    assert ".skysheep" in delivered  # 写盘成功
+
+    names = sorted(p.name for p in rdir.glob("*.md"))
+    hex_reports = [n for n in names if n.endswith("-explore.md")]
+    assert len(hex_reports) == 3, names  # 5 旧 + 1 新，删到只剩配额
+    assert "team-0001-小明.md" in names, "team 报告不得被子代理配额波及"
+    assert "我的笔记.md" in names, "用户自己的 .md 不得被删"
+    # 最旧的两份被删（mtime 1000/1001）
+    assert not (rdir / f"{format(0, '010x')}-explore.md").exists()
+    assert not (rdir / f"{format(1, '010x')}-explore.md").exists()
+
+
 def test_task_book_persists_and_marks_interrupted(tmp_path):
     """任务簿持久化：终态记录重启后仍可查；running 重启即标中断，不留假运行。"""
     from skysheep.core.subagent import TaskManager
@@ -1053,3 +1092,54 @@ async def test_list_tasks_under_limit_returns_all_as_before(tmp_path):
 
     out = tasks.list_tasks(limit=30)
     assert [r["id"] for r in out] == ["d1", "d0", "q0"]
+
+
+def test_task_book_memory_trim(tmp_path):
+    """内存任务簿裁剪：终态记录超上限时按创建时间淘汰最旧，活动任务不丢。
+
+    回归点：落盘文件一直按 TASK_BOOK_KEEP 滚动，内存 dict 却从不裁剪——
+    长跑应用的慢性膨胀源（result 可达数千字符/条）。
+    """
+    from skysheep.core import subagent as sub_mod
+    from skysheep.core.subagent import TaskManager
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([]),
+        working_dir=tmp_path,
+    )
+    # 制造 2 倍上限以上的终态记录 + 一条活动任务
+    for i in range(sub_mod.TASK_BOOK_KEEP * 2 + 10):
+        rec = tasks._new_record("explore", f"任务{i}")
+        rec.status = "done"
+        rec.result = "x" * 100
+        rec.finished_at = float(i + 1)
+        rec.created_at = float(i + 1)
+    active = tasks._new_record("explore", "还在跑")
+    active.status = "running"
+
+    tasks._trim_tasks()
+    assert len(tasks._tasks) <= sub_mod.TASK_BOOK_KEEP + 1
+    assert active.id in tasks._tasks, "活动任务不得被裁剪"
+    # 最新的终态保留、最旧的被丢
+    assert any(r.result == "x" * 100 for r in tasks._tasks.values())
+    assert not any(r.prompt == "任务0" for r in tasks._tasks.values())
+
+    # 不超过阈值（2 倍）时不动作（避免频繁排序）
+    small = TaskManager(provider_factory=lambda: FakeProvider([]), working_dir=tmp_path)
+    for i in range(5):
+        r = small._new_record("explore", f"t{i}")
+        r.status = "done"
+    before = len(small._tasks)
+    small._trim_tasks()
+    assert len(small._tasks) == before
+
+
+def test_report_name_shape_guard():
+    """报告配额只碰 <hex>-<类型>.md 形状（防以后改成 glob *.md 把用户文件删了）。"""
+    from skysheep.core.subagent import _REPORT_NAME_RE
+
+    assert _REPORT_NAME_RE.match("a1b2c3d4e5-explore.md")
+    assert _REPORT_NAME_RE.match("0123456789-task.md")
+    assert not _REPORT_NAME_RE.match("team-0001-小明.md")
+    assert not _REPORT_NAME_RE.match("我的笔记.md")
+    assert not _REPORT_NAME_RE.match("a1b2c3d4e5-explore.txt")

@@ -1306,9 +1306,66 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     def _recorder(self, v: ChangeRecorder) -> None:
         self._base_recorder = v
 
-    @staticmethod
-    def _forget_runtime(rt: SessionRuntime) -> None:
-        """runtime 已从字典摘除后调用：释放它引用的全局资源（防泄漏）。"""
+    def _release_turn_providers(self, provs, keep=()) -> None:
+        """释放「本轮临时构建」的成员 provider（圆桌/对抗/团队成员）。
+
+        这些 provider 每轮由 _build_member_provider 新建（各自带 httpx 连接池），
+        轮结束就没人再用了。跳过 keep 里的常驻对象（如圆桌主席、主 Agent 的
+        provider——它们是会话/全局对象，不归本轮管）与全局共享 provider。
+        释放挂到「当前任务完成之后」（当前任务即本轮的 run_task）：正常路径下
+        成员流已收束，二次取消的窄竞态窗口里也保证不倒在途流一把（关 httpx
+        会把在飞请求变噪音异常，等轮任务全落地再关最稳）。
+        """
+        kept = {id(p) for p in keep if p is not None}
+        kept.add(id(self.provider))
+        try:
+            cur = asyncio.current_task()
+        except RuntimeError:
+            cur = None
+        seen: set[int] = set(kept)
+        for p in provs:
+            if p is None or id(p) in seen:
+                continue  # 同一实例可身兼数角（对抗自动补位）：只关一次
+            seen.add(id(p))
+            self._close_provider_after(p, cur)
+
+    def _close_provider_after(self, prov, run_task=None) -> None:
+        """释放被弃用的会话私有 provider 的连接池（httpx AsyncClient）。
+
+        只处理「会话私有副本」：全局共享 provider（self.provider）不归单会话
+        管——还挂着别的会话、甚至可能有在途流，换了也不能关。测试注入的假
+        provider 继承基类的空 aclose，调了也无害。
+        时序：会话还有未收尾的轮次（如删会话时先 cancel 后回收）时，把关闭
+        挂到该任务完成之后——在途流被客户端关闭会让收尾拿到奇怪的异常；
+        轮次落地后再关，两者互不打扰。关闭走后台任务，失败无感。
+        """
+        if prov is None or prov is self.provider:
+            return
+        aclose = getattr(prov, "aclose", None)
+        if not callable(aclose):
+            return
+
+        def _fire() -> None:
+            try:
+                spawn_bg(aclose())
+            except RuntimeError:
+                pass  # 无运行中的事件循环（同步测试路径）：跳过释放
+
+        if run_task is not None and not run_task.done():
+            run_task.add_done_callback(lambda _t: _fire())
+        else:
+            _fire()
+
+    def _forget_runtime(self, rt: SessionRuntime) -> None:
+        """runtime 已从字典摘除后调用：释放它引用的全局资源（防泄漏）。
+
+        provider 只放会话私有副本：runtime 常驻的 detached provider（会话级
+        模型覆盖/档位回放/默认模型快照）各自建了 httpx 连接池，不随 runtime
+        回收就把连接一直挂到进程退出；LRU 淘汰反复发生就是慢性积累。
+        """
+        self._close_provider_after(
+            getattr(rt.agent, "provider", None), getattr(rt, "run_task", None)
+        )
         if getattr(rt.agent, "registry", None) is not None:
             rt.agent.registry = None
 
@@ -3100,21 +3157,27 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         member_history = _strip_image_blocks(agent.history[:-1])
 
         system = history_system_text(agent.history) or self.compose_system()
-        outcome: RoundtableOutcome = await run_roundtable(
-            members=members,
-            chair=chair,
-            system_text=system,
-            history=member_history,
-            user_text=question,
-            timeout_s=cfg.member_timeout_s,
-            emit=emit_ev,
-            debate_rounds=debate,
-            fuse=not compare,
-            chair_provider=chair_name or "",
-            chair_model=chair_model or "",
-            chair_context_tokens=agent.context_limit_tokens,
-            member_history_turns=cfg.member_history_turns,
-        )
+        try:
+            outcome: RoundtableOutcome = await run_roundtable(
+                members=members,
+                chair=chair,
+                system_text=system,
+                history=member_history,
+                user_text=question,
+                timeout_s=cfg.member_timeout_s,
+                emit=emit_ev,
+                debate_rounds=debate,
+                fuse=not compare,
+                chair_provider=chair_name or "",
+                chair_model=chair_model or "",
+                chair_context_tokens=agent.context_limit_tokens,
+                member_history_turns=cfg.member_history_turns,
+            )
+        finally:
+            # 本轮为成员临时构建的 provider（httpx 连接池）随轮结束释放：
+            # 成员列表每轮重建（_resolve_members），不释放就是每轮泄漏一条
+            # 连接池。主席 provider 是常驻对象（agent.provider / 全局），保留。
+            self._release_turn_providers([s.provider for s in members], keep=(chair,))
 
         def member_meta(r) -> dict:
             return {
@@ -3425,19 +3488,26 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 的 _phase_messages），dialogue() 会把 history 里的 system 剥掉。
         role_history = _strip_image_blocks(agent.history[:-1])
 
-        outcome: AdversarialOutcome = await run_adversarial(
-            finder=finder,
-            investigator=investigator,
-            advisor=advisor,
-            judge=judge,
-            judge_provider=judge_name or "",
-            judge_model=judge_model or "",
-            history=role_history,
-            user_text=question,
-            timeout_s=cfg.role_timeout_s,
-            emit=emit_ev,
-            max_findings=cfg.max_findings,
-        )
+        try:
+            outcome: AdversarialOutcome = await run_adversarial(
+                finder=finder,
+                investigator=investigator,
+                advisor=advisor,
+                judge=judge,
+                judge_provider=judge_name or "",
+                judge_model=judge_model or "",
+                history=role_history,
+                user_text=question,
+                timeout_s=cfg.role_timeout_s,
+                emit=emit_ev,
+                max_findings=cfg.max_findings,
+            )
+        finally:
+            # 角色临时 provider 随轮释放（同圆桌：裁判是用主 Agent 的常驻实例）
+            self._release_turn_providers(
+                [finder.provider, investigator.provider, advisor.provider],
+                keep=(judge,),
+            )
 
         meta = {
             "mode": "adversarial",
@@ -3597,9 +3667,31 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         except OSError:
             pass
 
+    def _release_team_providers(self, orch) -> None:
+        """释放团队持有的成员 provider（httpx 连接池）。
+
+        队员 provider 在建队时构建一次、跨整个团队生命周期常驻（成员 Agent
+        复用同一实例），团队关闭时必须释放，否则每开一队泄漏一批连接池。
+        AI 总管的 provider 同理（DirectorSpec.provider）。主持/常驻对象（如
+        team.takeover 后 AI 总管转顾问）仍按本方法统一释放——团队已关，无处
+        再用。
+        """
+        if orch is None:
+            return
+        provs = []
+        for spec in getattr(orch, "roster", []) or []:
+            provs.append(getattr(spec, "provider", None))
+        director = getattr(orch, "_director", None)
+        if director is not None:
+            provs.append(getattr(director, "provider", None))
+        for ag in orch.agents():
+            provs.append(getattr(ag, "provider", None))
+        self._release_turn_providers(provs)
+
     def _teams_interrupt_all(self, reason: str) -> None:
         """把所有活动团队就地标中断（项目切换：旧项目 runtime 全部失效，团队一并失效）。"""
         for sid, orch in self._teams.items():
+            self._release_team_providers(orch)
             self._teams_interrupted[sid] = {
                 "session_id": sid,
                 "roster": [m.name for m in orch.roster],
@@ -3943,7 +4035,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 sid, orch, usage_acc, pending_usage, director_acc=director_acc,
             )
             if orch is not None and orch.finished is not None:
-                self._teams.pop(sid, None)
+                if self._teams.pop(sid, None) is not None:
+                    self._release_team_providers(orch)
                 self._teams_interrupted.pop(sid, None)
                 self._persist_team_state()
             await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_ms()))
@@ -3955,7 +4048,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         finished = result.get("finished")
         if finished is not None:
             # 终态（交付确认 / 收队 / 轮次耗尽）：团队关闭，会话恢复普通回合
-            self._teams.pop(sid, None)
+            if self._teams.pop(sid, None) is not None:
+                self._release_team_providers(orch)
             self._teams_interrupted.pop(sid, None)
             self._persist_team_state()
 
@@ -4110,7 +4204,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         sid, orch = self._team_for(params)
         await self._cancel_team_turn_and_settle(sid)
         result = await orch.stop(reason=str(params.get("reason", "") or ""))
-        self._teams.pop(sid, None)
+        if self._teams.pop(sid, None) is not None:
+            self._release_team_providers(orch)
         self._persist_team_state()
         return {
             "status": result["status"],
@@ -4131,7 +4226,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         sid, orch = self._team_for(params)
         await self._cancel_team_turn_and_settle(sid)
         result = await orch.finish(status="done")
-        self._teams.pop(sid, None)
+        if self._teams.pop(sid, None) is not None:
+            self._release_team_providers(orch)
         self._persist_team_state()
         return {
             "status": result["status"],
@@ -6315,6 +6411,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                         and rt.ctx is not None and rt.ctx.own)
             ]:
                 orch = self._teams.pop(sid)
+                self._release_team_providers(orch)
                 self._teams_interrupted[sid] = {
                     "session_id": sid,
                     "roster": [m.name for m in orch.roster],

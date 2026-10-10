@@ -123,6 +123,76 @@ async def test_read_document_rejects_unsupported(tmp_path):
         await ReadDocumentTool().run(ReadDocumentArgs(path=str(p)), make_ctx(tmp_path))
 
 
+async def test_read_document_pdf_start_page(tmp_path):
+    """大 PDF 续读：start_page 跳过前面的页，标题带「从第 N 页开始」。"""
+    from skysheep.tools.docs import _extract_pdf
+    p = tmp_path / "multi.pdf"
+    p.write_bytes(_multi_page_pdf(["PAGE-ALPHA-CONTENT", "PAGE-BETA-CONTENT", "PAGE-GAMMA-CONTENT"]))
+    # 全读：三页都在
+    full = _extract_pdf(p, 20_000)
+    assert "PAGE-ALPHA-CONTENT" in full and "PAGE-GAMMA-CONTENT" in full
+    # 从第 2 页续读：第一页不再出现，标题注明起点
+    part = _extract_pdf(p, 20_000, start_page=2)
+    assert "PAGE-ALPHA-CONTENT" not in part
+    assert "PAGE-BETA-CONTENT" in part and "PAGE-GAMMA-CONTENT" in part
+    assert "从第 2 页开始" in part and "共 3 页" in part
+    # 越界：start_page 超总页数时钳到最后一页（不报错也不空返）
+    beyond = _extract_pdf(p, 20_000, start_page=99)
+    assert "PAGE-GAMMA-CONTENT" in beyond
+
+
+async def test_read_document_pdf_truncation_suggests_start_page(tmp_path):
+    """截断提示带 start_page 建议值（模型照提示就能续读）。"""
+    from skysheep.tools.docs import _extract_pdf
+    p = tmp_path / "long.pdf"
+    p.write_bytes(_multi_page_pdf(["LONG-CONTENT " * 60] * 4))
+    out = _extract_pdf(p, 500)  # max_chars=500：每页约 780 字，第二页即超限
+    assert "start_page=" in out, out
+
+
+def _multi_page_pdf(pages: list[str]) -> bytes:
+    """构造含多页（每页一行文字）的最小合法 PDF。"""
+    contents = []
+    for text in pages:
+        stream = f"BT /F1 18 Tf 72 720 Td ({text}) Tj ET".encode("latin-1")
+        contents.append(stream)
+    n = len(pages)
+    # 对象：1 Catalog, 2 Pages, 3..2+n 各 Page, 下一批 Contents, 最后 Font
+    page_obj_ids = [3 + i for i in range(n)]
+    content_obj_ids = [3 + n + i for i in range(n)]
+    font_id = 3 + 2 * n
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        ("<< /Type /Pages /Kids [" + " ".join(f"{i} 0 R" for i in page_obj_ids)
+         + f"] /Count {n} >>").encode(),
+    ]
+    for i in range(n):
+        objs.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Contents {content_obj_ids[i]} 0 R /Resources << /Font << /F1 {font_id} 0 R >> >> >>".encode()
+        )
+    for stream in contents:
+        objs.append(
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+        )
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_pos = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_pos}\n%%EOF"
+    ).encode()
+    return out
+
+
 # ---- web_search ----
 
 

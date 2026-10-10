@@ -133,6 +133,7 @@ class AnthropicProvider(Provider):
         # 不重放」判断，还会发通知事件），SDK 再各自叠 2 次会把持续性限流的
         # 最坏等待翻倍，界面长时间卡在「第 1/3 次重试」上
         kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 1}
+        self._owned_http: object | None = None
         if proxy:
             # anthropic SDK 同样接受 http_client；不同 SDK 版本绑定 httpx 或 httpx2
             try:
@@ -140,9 +141,31 @@ class AnthropicProvider(Provider):
             except ImportError:
                 import httpx as _httpx
             kw["http_client"] = _httpx.AsyncClient(proxy=proxy, timeout=300.0, trust_env=False)
+            self._owned_http = kw["http_client"]
         from anthropic import AsyncAnthropic  # noqa: PLC0415  启动性能：见 TYPE_CHECKING 处注释
 
         self._client = client or AsyncAnthropic(**kw)
+        # 资源所有权：注入的 client 不归本实例管；自建的才关
+        self._owns_client = client is None
+
+    async def aclose(self) -> None:
+        """释放自建的 httpx 连接池（会话私有 provider 被回收时调用）。
+
+        只关自建资源：注入的 client 属于外部（可能是共享对象）不碰。
+        best-effort：关不掉不影响调用方。
+        """
+        if self._owns_client:
+            try:
+                await self._client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        http = self._owned_http
+        if http is not None:
+            try:
+                await http.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            self._owned_http = None
 
     async def stream(
         self, messages: list[Message], tool_schemas: list[dict],

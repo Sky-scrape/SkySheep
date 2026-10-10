@@ -347,3 +347,47 @@ def test_run_center_names_stay_distinct():
     assert "function loadRunCenter" not in appjs, (
         "app.js 不许再定义 loadRunCenter（会覆盖 app-schedule.js 的卡片版）——运行中心页请用 loadRunsPage")
     assert "function loadRunsPage()" in appjs, "设置·运行中心页的加载函数名应为 loadRunsPage"
+
+
+# ---------- 长会话性能：搜索跳转 / 查找覆盖备注 / 设置搜索缓存（2026-10-11） ----------
+
+def test_search_hit_jump_wiring():
+    """搜索命中跳转到具体消息的接线护栏：拿到 seq → 打开会话 → 定位 + 闪高亮。"""
+    js = read_app_bundle()
+    # 点击搜索结果时带上命中 seq；只对「消息命中」（有 seq）启用跳转
+    assert "jumpToMessageSeq(t, hitSeq, { query })" in js
+    assert "const hitSeq = s.seq != null ? Number(s.seq) : null" in js
+    # 目标消息闪高亮 + 命中词标注
+    assert "msg-hit-flash" in js and "search-hit-mark" in js
+    # 窗口外命中自动补画（每批 100 条、上限 60 批）
+    assert "MESSAGE_JUMP_MAX_PRELOAD_ROUNDS" in js
+    assert "loadEarlierHistory(tab)" in js
+    # 「加载更早」后查找自动纳入新内容
+    assert "findCoverageNote" in js
+    css = read_static("app.css")
+    assert "@keyframes msgHitFlash" in css
+    assert "mark.search-hit-mark" in css
+
+
+def test_settings_search_cache_wiring():
+    """设置内搜索：索引缓存 + 失效 + 防抖三件套（防回退成每键全量扫描）。"""
+    js = read_app_bundle()
+    assert "_settingsCardIndexCache" in js
+    assert "function invalidateSettingsCardIndex" in js
+    # renderSettings 刷新后主动失效（app-whitelist.js）
+    wl = read_static("app-whitelist.js")
+    assert "invalidateSettingsCardIndex" in wl
+    # 输入防抖
+    assert "settingsSearchTimer" in js
+
+
+def test_split_pane_close_releases_memory():
+    """分屏列关闭时的资源释放（观察器断开 / 大字段清空 / 录音收尾）。"""
+    js = read_app_bundle()
+    i = js.index("function closeSplitPane(")
+    seg = js[i:i + 3200]
+    assert "pane._cpRO.disconnect()" in seg
+    assert "pane._historyAll = null" in seg
+    assert "pane._jumpSeqGen" in seg
+    assert "if (voiceFace === pane) voiceReset()" in seg
+    assert "routeTab = null" in seg

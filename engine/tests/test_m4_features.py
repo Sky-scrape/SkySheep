@@ -420,6 +420,9 @@ def test_session_search_via_ws(home):
         assert len(r["results"]) == 1
         assert r["results"][0]["session_id"] == sid
         assert "量子" in r["results"][0]["snippet"]
+        # 命中消息定位锚：搜索跳转靠这两个字段找到目标消息并滚过去
+        assert isinstance(r["results"][0]["seq"], int) and r["results"][0]["seq"] >= 1
+        assert r["results"][0]["role"] in ("user", "assistant")
 
         # 会话列表带摘要：最近一轮助手回答的开头
         ws.send_json({"id": "sl", "method": "session.list", "params": {}})

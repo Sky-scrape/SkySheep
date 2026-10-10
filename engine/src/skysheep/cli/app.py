@@ -456,7 +456,11 @@ class ChatApp:
         elif cmd == "/cwd":
             self.console.print(str(self.working_dir))
         elif cmd == "/export":
-            path = Path(arg) if arg else self.working_dir / "skysheep-session.md"
+            # 相对路径相对项目工作目录解析（/cwd 显示的那个）：用户在 REPL
+            # 里看到的目录与 /cwd 一致，导出文件不应落在进程启动目录里
+            path = Path(arg) if arg else Path("skysheep-session.md")
+            if not path.is_absolute():
+                path = self.working_dir / path
             path.write_text(export_messages_text(self.agent.history), encoding="utf-8")
             self.console.print(f"[green]exported to {path}[/]")
         else:

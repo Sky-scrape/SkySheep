@@ -629,7 +629,7 @@ def test_probe_models_wiring(home, monkeypatch):
             raise RuntimeError("需要先填写 API Key 才能检测可用模型")
         return ["aaa-model", "bbb-model", "ccc-model"]
 
-    monkeypatch.setattr("skysheep.server.backend.probe_provider_models", fake_probe)
+    monkeypatch.setattr("skysheep.server.backend_parts.providers.probe_provider_models", fake_probe)
 
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         # 内置 ollama 自带 api_key="ollama"，应能直接检测
@@ -2540,7 +2540,7 @@ def test_probe_context_wiring(home, monkeypatch):
         calls.append({"kind": kind, "base_url": base_url, "model": model})
         return {"limit": 131072, "note": "检测到上下文窗口 131,072 tokens"}
 
-    monkeypatch.setattr("skysheep.server.backend.probe_context_limit", fake_probe)
+    monkeypatch.setattr("skysheep.server.backend_parts.providers.probe_context_limit", fake_probe)
 
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "c1", "method": "config.probe_context", "params": {"name": "deepseek"}})

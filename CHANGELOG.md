@@ -138,6 +138,15 @@
   技能指令预览，14 个声明）搬入 `app-skills.js`（与其既有的技能导入/删除同域，
   16223 行）。两处仍为零构建普通 script、按钮接线留主文件原位、纯搬迁不改行为。
 
+- **单体文件继续按职责分区拆分（第四轮）**：backend.py 拆出 `ProvidersMixin`
+  （`server/backend_parts/providers.py`）——模型服务管理与诊断整段（设置页服务
+  清单 / 增删改与启停 / 模型与上下文探针 / 服务保存 / 测试连接与健康状态 /
+  备用模型，13 个方法；`_mask_key` 随同区落位）搬入，方法体逐字保留
+  （7130 行）；app.js 拆出设置·高级页整块（Hooks 钩子面板 + 运行参数 / 目录限制 /
+  开机自启 / 信任项目清单，约 378 行）落为新的分区文件
+  `static/app-advanced.js`（与既有分区同为零构建普通 script，index.html 于
+  app.js 之前引入，按钮接线留 app.js 原位）；跨文件顶层重名由既有守卫测试（test_frontend_wiring 按 index.html 顺序自动纳入新文件）覆盖。
+
 
 ### 降级说明
 

@@ -3,7 +3,7 @@
 与「预算护栏」的分工：护栏（backend.send 开头的超限拒绝）是硬闸，到 100%
 拦下新消息；告警是软提醒——80% 档提前打招呼、100% 档解释为什么被拦。
 **前提：告警跟着渠道走**——没有启用且配置齐全的推送目标（聊天渠道 /
-Webhook）就等于不告警，护栏照常在本应用内生效（见 README 功能列表）。
+Webhook）就等于不告警，护栏照常在本应用内生效（见 README 功能总览）。
 
 防重发状态存引擎自有状态文件 ``~/.skysheep/budget-alert-state.json``
 （``textio.write_text_atomic`` 原子写），不走 config.toml：只有「日期 +

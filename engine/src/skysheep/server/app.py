@@ -22,6 +22,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -43,6 +44,28 @@ def _client_is_local(client) -> bool:
     来源分类（回环 / tailnet 网段 / 其它）统一走 client_origin，与 HTTP 守卫一致。
     """
     return client_origin(client) == "local"
+
+
+# 当前请求所属连接正在交互的会话（由 ws_endpoint 在每个请求分发前设置）。
+# 远程查询/操作一律以它为授权依据，不读全局 backend.session——后者会被
+# 另一个连接或本机窗口切走，导致远程连接的边界随全局状态漂移（安全审查
+# B 族：runs/tasks 查询曾因此可跨会话读取）。本机连接不受限（多标签由前端路由）。
+_CONN_SESSION: ContextVar[str | None] = ContextVar("skysheep_conn_session", default=None)
+
+
+def _conn_session() -> str | None:
+    return _CONN_SESSION.get()
+
+
+def _remote_scope(local: bool) -> str | None:
+    """远程请求的会话作用域：未绑定会话时返回空串（调用方据此 fail closed）。
+
+    返回 None 表示不限制（本机）。返回空串表示「远程但尚未绑定会话」——
+    此时不能回退到全局活动会话，否则拿令牌的客户端能读到本机当前会话。
+    """
+    if local:
+        return None
+    return _conn_session() or ""
 
 
 _OWN_HOST_NAMES: frozenset[str] | None = None
@@ -394,10 +417,13 @@ async def _h_chat_status(backend: ServerBackend, params: dict, emit, local: bool
     # session_id 可选：给出时查那个会话的 runtime（分屏列的上下文徽标辅路），
     # 查无/已淘汰由后端显式报错，不静默回退当前会话。
     # 远程来源不开放按任意 sid 查询：runtime 状态含 todo 全文与上下文明细，
-    # 收敛到该客户端正在交互的会话（与 tasks.list 的远端口径同源，安全审查 B 族）
+    # 收敛到该客户端连接正在交互的会话（与 tasks.list 的远端口径同源，B 族）。
     sid = str(params.get("session_id", "") or "") if isinstance(params, dict) else ""
-    if sid and not local:
-        sid = backend.session.id if backend.session else ""
+    only = _remote_scope(local)
+    if only is not None:
+        if not only:
+            raise RuntimeError("尚未绑定会话：请先打开一个会话再查询状态")
+        sid = only
     return await backend.status(session_id=sid or None)
 
 
@@ -439,23 +465,32 @@ async def _h_stop(backend: ServerBackend, params: dict, emit, local: bool) -> di
 
 async def _h_tasks_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 远程客户端只能看自己正在交互的会话的子代理任务（安全审查 B13：
-    # 任务详情含 prompt/result，本机任务簿保持全局视图不变）
-    only = backend.session.id if (not local and backend.session) else None
+    # 任务详情含 prompt/result，本机任务簿保持全局视图不变）。作用域取
+    # 连接级会话，不读全局 backend.session；未绑定时 fail closed 返回空。
+    only = _remote_scope(local)
+    if only == "":
+        return {"tasks": []}
     return await backend.tasks_list(params, session_id=only)
 
 
 async def _h_tasks_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    only = backend.session.id if (not local and backend.session) else None
+    only = _remote_scope(local)
+    if only == "":
+        raise RuntimeError("尚未绑定会话：请先打开一个会话再查看任务")
     return await backend.tasks_get(params, session_id=only)
 
 
 async def _h_tasks_cancel_all(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    only = backend.session.id if (not local and backend.session) else None
+    only = _remote_scope(local)
+    if only == "":
+        return {"cancelled": False}
     return await backend.tasks_cancel_all(session_id=only)
 
 
 async def _h_tasks_cancel(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    only = backend.session.id if (not local and backend.session) else None
+    only = _remote_scope(local)
+    if only == "":
+        return {"cancelled": False}
     return await backend.tasks_cancel(params, session_id=only)
 
 
@@ -1234,6 +1269,11 @@ async def _h_app_apply_update(backend: ServerBackend, params: dict, emit, local:
     return await backend.apply_update()
 
 
+async def _h_app_dismiss_update_failure(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 「上次更新未完成」提示的用户确认：只清 marker，不影响当前运行版本
+    return await backend.dismiss_update_failure()
+
+
 async def _h_app_restart(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 重启等于在本机拉起新进程：LOCAL_ONLY_METHODS 已把远程拦下
     return await backend.app_restart()
@@ -1445,6 +1485,16 @@ async def _h_data_export_full(backend: ServerBackend, params: dict, emit, local:
     return await backend.export_full_data(params)
 
 
+async def _h_data_preview_import_full(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 完整导入前预览：解析导出包（含会话库 quick_check 与版本校验），仅本机
+    return await backend.preview_import_full(params)
+
+
+async def _h_data_import_full(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 完整导入：会话库 + 配置 + 技能整体恢复，失败自动回滚，仅本机可触发
+    return await backend.import_full_data(params)
+
+
 async def _h_channel_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.channel_status()
 
@@ -1556,24 +1606,26 @@ async def _h_config_set_provider_enabled(backend: ServerBackend, params: dict, e
 
 async def _h_runs_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 远程客户端只能看自己正在交互的会话的运行（运行条目含原文首段与错误摘要，
-    # 与 tasks.list 同一隔离口径 B13）
-    only = backend.session.id if (not local and backend.session) else None
-    return backend.runs.list_runs(
-        session_id=only,
-        include_terminal=bool(params.get("include_terminal", True)),
-        limit=min(200, max(1, int(params.get("limit", 100)))),
-    ) and {"runs": backend.runs.list_runs(
-        session_id=only,
-        include_terminal=bool(params.get("include_terminal", True)),
-        limit=min(200, max(1, int(params.get("limit", 100)))),
-    )} or {"runs": []}
+    # 与 tasks.list 同一隔离口径 B13）。作用域取连接级会话（_remote_scope），
+    # 不读全局 backend.session——后者会被别的连接/本机窗口切走。
+    only = _remote_scope(local)
+    if only == "":
+        return {"runs": []}  # 远程尚未绑定会话：fail closed，不回退到全局活动会话
+    include_terminal = bool(params.get("include_terminal", True))
+    limit = min(200, max(1, int(params.get("limit", 100))))
+    # 只查一次：旧实现把 list_runs 在布尔与三元里各调一遍，非空列表时会
+    # 重复 I/O，两次快照还可能不一致。
+    return {"runs": backend.runs.list_runs(
+        session_id=only or None, include_terminal=include_terminal, limit=limit,
+    )}
 
 
 async def _h_runs_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     run = backend.runs.get(str(params.get("run_id", "") or ""))
     if run is None:
         raise RuntimeError("unknown run_id: " + str(params.get("run_id", "")))
-    if not local and backend.session and run.session_id != backend.session.id:
+    only = _remote_scope(local)
+    if only is not None and (not only or run.session_id != only):
         raise RuntimeError("该运行不属于当前会话")
     return {"run": run.to_dict()}
 
@@ -1583,7 +1635,8 @@ async def _h_runs_cancel(backend: ServerBackend, params: dict, emit, local: bool
     run = backend.runs.get(run_id)
     if run is None:
         raise RuntimeError("unknown run_id: " + run_id)
-    if not local and backend.session and run.session_id != backend.session.id:
+    only = _remote_scope(local)
+    if only is not None and (not only or run.session_id != only):
         raise RuntimeError("该运行不属于当前会话")
     # 主轮运行：真取消 = 停掉该会话正在跑的 task；子代理：转任务簿取消
     cancelled = False
@@ -1603,20 +1656,41 @@ async def _h_runs_cancel(backend: ServerBackend, params: dict, emit, local: bool
 
 
 async def _h_runs_retry(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    """失败/中断运行的一键重发：把原文再发一次（同会话）。
+    """失败/中断运行的一键重发/重跑：把原文再发一次（同会话）。
 
     语义是「从这里继续」而不是快照回放：引擎不保存完整运行现场，重发等价于
-    用户把同一句话再发一遍——对中断的主轮与失败的子代理（后端暂不支持重跑
-    子代理，这里仅主轮）都是诚实可行的恢复方式。
+    用户把同一句话再发一遍——对中断的主轮与失败的子代理都是诚实可行的恢复
+    方式。子代理运行则按原 agent_type / prompt / isolated 真正重新派生一个
+    同型任务（不是把 prompt 当普通消息重发）；主轮仍回传原文交给前端走
+    chat.send。
     """
     run_id = str(params.get("run_id", "") or "")
     run = backend.runs.retryable_run(run_id)
     if run is None:
         raise RuntimeError("该运行不可重发（只有失败/中断且带原文的运行支持）")
-    if not local and backend.session and run.session_id != backend.session.id:
+    only = _remote_scope(local)
+    if only is not None and (not only or run.session_id != only):
         raise RuntimeError("该运行不属于当前会话")
+    if run.kind == "subagent":
+        # 真正重跑子代理：按原 agent_type + prompt（+ 隔离标志）重新派生。
+        # 任务簿可能已把旧记录裁剪（KEEP 50），run 记录里保留了最小重跑信息。
+        if backend.tasks is None:
+            raise RuntimeError("子代理未启用，无法重跑")
+        agent_type = run.agent_type or "task"
+        prompt = run.retry_text or ""
+        if not prompt:
+            raise RuntimeError("该子代理运行没有可重跑的原文")
+        try:
+            new_id = backend.tasks.start_background(
+                agent_type, prompt, session_id=run.session_id or "",
+                isolated=bool(run.isolated),
+            )
+        except Exception as e:
+            raise RuntimeError(f"重跑子代理失败：{e}") from e
+        return {"ok": True, "kind": "subagent", "run_id": run_id,
+                "task_id": new_id, "session_id": run.session_id}
     # 复用 runs.cancel 已有语义（turn 的重发交给前端走 chat.send；这里只回传参数）
-    return {"ok": True, "run_id": run_id, "session_id": run.session_id,
+    return {"ok": True, "kind": "turn", "run_id": run_id, "session_id": run.session_id,
             "text": run.retry_text}
 
 
@@ -1624,36 +1698,60 @@ async def _h_model_test(backend: ServerBackend, params: dict, emit, local: bool)
     return await backend.model_test_connection(params)
 
 
+async def _h_model_probe_capabilities(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.model_probe_capabilities(params)
+
+
 async def _h_model_providers_health(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.providers_health()
 
 
 async def _h_permission_queue(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    """当前所有未决权限请求队列（跨会话聚合，运行中心「等待确认」分区用）。
+    """当前未决权限请求队列（本机跨会话聚合，运行中心「等待确认」分区用）。
 
-    只回最小字段：request_id / session_id / tool_name / detail / safety。
-    决策仍走 permission.respond。"""
+    返回与 permission_request 事件同构的字段（request_id / session_id / tool_name /
+    detail / safety / origin / scope / reversible / revert_note / diff / note /
+    rule_kind / rule_pattern），前端断线重连或刷新后可据此重建确认卡——
+    后端那一轮还挂在等决策上，卡片丢了等于「假死」（安全审查 M12 同源问题）。
+    决策仍走 permission.respond。
+
+    远程连接只能看到自己绑定会话的未决请求：队列里含工具名、影响面与文件
+    diff，跨会话聚合会泄露其他会话在做什么（B 族）。
+    """
+
+    def _drain(pending_map: dict, sid: str = "") -> list[dict]:
+        out: list[dict] = []
+        for rid, pending in pending_map.items():
+            rule = getattr(pending, "always_rule", None)
+            out.append({
+                "request_id": rid,
+                "session_id": sid,
+                "tool_name": getattr(pending, "tool_name", "") or "",
+                "detail": (getattr(pending, "detail", "") or "")[:200],
+                "safety": getattr(getattr(pending, "safety", None), "value", ""),
+                "origin": getattr(pending, "origin", "") or "",
+                "scope": getattr(pending, "scope", "") or "",
+                "reversible": bool(getattr(pending, "reversible", False)),
+                "revert_note": getattr(pending, "revert_note", "") or "",
+                "diff": getattr(pending, "diff", "") or "",
+                "note": getattr(pending, "note", "") or "",
+                "rule_kind": getattr(rule, "kind", "") or "",
+                "rule_pattern": getattr(rule, "pattern", "") or "",
+            })
+        return out
+
+    only = _remote_scope(local)
+    if only == "":
+        return {"pending": []}  # 远程尚未绑定会话：不回退到全局跨会话聚合
     out: list[dict] = []
     for rt in backend.runtimes.values():
-        ag = rt.agent
-        for rid, pending in getattr(ag, "_pending", {}).items():
-            out.append({
-                "request_id": rid,
-                "session_id": rt.sid,
-                "tool_name": getattr(pending, "tool_name", "") or "",
-                "detail": (getattr(pending, "detail", "") or "")[:200],
-                "safety": getattr(getattr(pending, "safety", None), "value", ""),
-            })
+        if only is not None and rt.sid != only:
+            continue
+        out.extend(_drain(getattr(rt.agent, "_pending", {}) or {}, rt.sid))
     base = getattr(backend, "_base_agent", None)
-    if base is not None:
-        for rid, pending in getattr(base, "_pending", {}).items():
-            out.append({
-                "request_id": rid,
-                "session_id": "",
-                "tool_name": getattr(pending, "tool_name", "") or "",
-                "detail": (getattr(pending, "detail", "") or "")[:200],
-                "safety": getattr(getattr(pending, "safety", None), "value", ""),
-            })
+    if base is not None and only is None:
+        # 基础 agent 不属于具体会话：只向本机公开（远程需要明确的会话归属）
+        out.extend(_drain(getattr(base, "_pending", {}) or {}))
     return {"pending": out}
 
 
@@ -2152,6 +2250,7 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "app.check_update": _WsMethod(_h_app_check_update),
     "app.install_update": _WsMethod(_h_app_install_update, local_only=True),
     "app.apply_update": _WsMethod(_h_app_apply_update, local_only=True),
+    "app.dismiss_update_failure": _WsMethod(_h_app_dismiss_update_failure, local_only=True),
     "app.restart": _WsMethod(_h_app_restart, local_only=True),
     "app.open_path": _WsMethod(_h_app_open_path),
     "app.open_external": _WsMethod(_h_app_open_external),
@@ -2210,6 +2309,8 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "settings.import": _WsMethod(_h_settings_import, local_only=True),
     "settings.preview_import": _WsMethod(_h_settings_preview_import, local_only=True),
     "data.export_full": _WsMethod(_h_data_export_full, local_only=True),
+    "data.preview_import_full": _WsMethod(_h_data_preview_import_full, local_only=True),
+    "data.import_full": _WsMethod(_h_data_import_full, local_only=True),
     # 聊天软件渠道：写配置/启停属降低防护的操作，与开局域网同一姿态——仅本机可改。
     # 远端（局域网/ tailnet）能看状态，但不能改，否则一个被扫码链接挟持的手机
     # 就能把 Agent 接给任意聊天账号。
@@ -2261,6 +2362,7 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "runs.cancel": _WsMethod(_h_runs_cancel),
     "runs.retry": _WsMethod(_h_runs_retry),
     "model.test": _WsMethod(_h_model_test, local_only=True),
+    "model.probe_capabilities": _WsMethod(_h_model_probe_capabilities, local_only=True),
     "model.providers_health": _WsMethod(_h_model_providers_health),
     "permission.queue": _WsMethod(_h_permission_queue),
     "config.probe_models": _WsMethod(_h_config_probe_models, local_only=True),
@@ -2608,10 +2710,18 @@ def create_app(
         # 本机前端不过滤（多标签由前端自行路由）。
         conn_state = {"session": None}
         remote_permissions: dict[str, str] = {}
+        # 本连接握手时使用的令牌世代：令牌轮换后旧世代连接会被主动关闭
+        # （见 backend.token_generation / _revoke_stale_ws）。
+        conn_gen = backend.token_generation
 
         async def send(obj: dict) -> None:
             async with lock:
-                await ws.send_text(json.dumps(obj, ensure_ascii=False, default=str))
+                try:
+                    await ws.send_text(json.dumps(obj, ensure_ascii=False, default=str))
+                except (RuntimeError, WebSocketDisconnect):
+                    # 连接已被关闭（如令牌轮换后的 kick 与并发请求赛跑）：
+                    # 不能再发帧，但也不能把异常冒泡成后台任务异常。
+                    pass
 
         async def emit(ev: dict) -> None:
             if not client_is_local:
@@ -2654,6 +2764,8 @@ def create_app(
             "connected_at": time.time(),
             "ua": str(ws.headers.get("user-agent", ""))[:200],
             "kick": _kick,
+            "local": bool(client_is_local),
+            "token_generation": conn_gen,
         }
         backend.ws_connections.append(_conn_entry)
         try:
@@ -2685,7 +2797,13 @@ def create_app(
 
                 async def process(mid=mid, method=method, params=params):
                     request_bound = False
-
+                    # 令牌已轮换：本连接基于旧令牌建立，不再接受任何 RPC。
+                    # 仅靠 kick 的主动关闭不够稳（关闭是异步的，可能落在本次
+                    # 请求之后），在分发前再拦一道。
+                    if not client_is_local and conn_gen != backend.token_generation:
+                        await send({"id": mid, "ok": False,
+                                    "error": "访问令牌已轮换，请用新地址重新连接"})
+                        return
                     async def request_emit(ev: dict) -> None:
                         nonlocal request_bound
                         # 只由本请求实际开始运行时发出的会话事件绑定连接，
@@ -2729,9 +2847,18 @@ def create_app(
                         # 给包装函数挂稳定身份，避免把发送方自己的 user_message
                         # 再广播回来（request_emit 与 emit 本来不是同一个对象）。
                         request_emit._source_emit = emit
-                        result = await dispatch(
-                            method, dispatch_params, request_emit, local=client_is_local
+                        # 把本连接当前绑定的会话作为请求级作用域：远程查询
+                        # （runs/tasks/status/permission.queue）以它为授权依据，
+                        # 不读全局 backend.session（会被其他连接/本机窗口切走）。
+                        _scope_token = _CONN_SESSION.set(
+                            None if client_is_local else (conn_state["session"] or "")
                         )
+                        try:
+                            result = await dispatch(
+                                method, dispatch_params, request_emit, local=client_is_local
+                            )
+                        finally:
+                            _CONN_SESSION.reset(_scope_token)
                         # 跟踪连接当前交互的会话（B15 的事件隔离用）
                         if method == "session.delete":
                             # 删除后后端已自动切走：跟随 new_active（可能为 None）。

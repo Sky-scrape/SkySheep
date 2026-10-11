@@ -6,6 +6,7 @@
         "dir"        选任意文件夹（工作项目切换用）
         "skill_dir"  选技能文件夹
         "skill_zip"  选技能压缩包（.zip）
+        "zip"        选完整导出包（.zip，数据管理 · 完整导入用）
         "json"       选 MCP 配置文件（.json）
         "file"       选任意文件（可多选；拖拽进窗口拿不到真实路径，靠它兜底）
 
@@ -62,6 +63,8 @@ class FilePicker:
                 )
             elif kind == "skill_zip":
                 picked = self._window.create_file_dialog(open_file, file_types=("技能包 (*.zip)",))
+            elif kind == "zip":
+                picked = self._window.create_file_dialog(open_file, file_types=("完整导出包 (*.zip)",))
             elif kind == "json":
                 picked = self._window.create_file_dialog(open_file, file_types=("JSON 配置 (*.json)",))
             else:

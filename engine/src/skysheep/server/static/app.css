@@ -143,6 +143,12 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .btn-primary:hover:not(:disabled) { background: var(--blue-deep); transform: translate(-1px, -1px); box-shadow: var(--shadow-md); }
 .btn-primary:active:not(:disabled) { transform: translate(1px, 1px); box-shadow: none; }
 .btn-primary:disabled { background: var(--paper-inset); color: var(--dim); border-color: var(--line2); box-shadow: none; cursor: not-allowed; transform: none; }
+/* 危险主按钮（确认删除 / 清理等破坏性操作）：同 .btn-primary 的形状，改危险色 */
+.btn-danger {
+  background: var(--reg) !important; color: #fff !important;
+  border-color: var(--ink-line) !important;
+}
+.btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-ghost, .rp-mini {
   background: var(--paper-raised); color: var(--text); border: 1.5px solid var(--ink-line);
   border-radius: var(--r-xs); font-weight: 700;
@@ -3514,6 +3520,10 @@ html[data-theme="pine"] .restart-banner {
 .skill-ops .skill-scope:hover { border-color: var(--blue); }
 .skill-ops .skill-toggle { font-size: 12px; padding: 4px 10px; }
 .chip-warn { color: var(--gold); border-color: var(--gold); }
+.chip-bad { color: var(--bad); border-color: var(--bad); }
+/* 模型服务详情：连接测试一行的多按钮组 + 能力探测结果芯片行 */
+.conn-actions { display: flex; gap: 6px; align-items: center; }
+.cap-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
 /* 「指定项目」的勾选面板：占满整行 */
 .scope-picker {
   width: 100%; padding: 9px 11px;
@@ -6075,6 +6085,8 @@ li.mod-row {
   background: var(--blue);
 }
 .modal-box h3 { padding-top: 2px; }
+/* 确认弹窗正文：保留换行与段落，行距放宽便于阅读 */
+.confirm-text { white-space: pre-wrap; line-height: 1.75; margin: 2px 0 4px; }
 .modal-ops {
   padding-top: 12px;
   border-top: 1px solid var(--line);

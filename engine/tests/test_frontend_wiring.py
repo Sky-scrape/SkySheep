@@ -184,6 +184,34 @@ def test_install_update_notice_reports_sha_verification():
     assert "未能核对安装包校验值" in seg
 
 
+# ---------- 更新可信度：渠道切换接线 + 更新失败/成功现场展示 ----------
+
+def test_update_channel_switch_wired_to_prefs():
+    """关于页的渠道下拉必须落到 ui 偏好 update_channel（后端 STRING_PREFS 白名单），
+    切换后立即重查一次（新渠道不等下次启动生效）。"""
+    js = read_app_bundle()
+    assert 'update_channel: updateChannelSel.value' in js
+    i = js.index('const updateChannelSel = document.getElementById("update-channel")')
+    seg = js[i:i + 900]
+    assert 'saveUiPrefs({ update_channel: updateChannelSel.value })' in seg
+    assert 'btn-check-update' in seg, "切渠道后要触发立即重查"
+
+
+def test_update_failure_scene_rendered_with_dismiss():
+    """boot 快照带 update_failure 时，关于页要亮出现场（目标版本 / 备份目录 /
+    日志指引）并提供「知道了」确认（调 app.dismiss_update_failure）；
+    update_success 则一次性展示「更新完成」。"""
+    js = read_app_bundle()
+    assert "snap.update_failure" in js
+    assert "snap.update_success" in js
+    i = js.index("function renderUpdatePanel(")
+    seg = js[i:i + 3600]
+    assert "上次更新未完成" in seg
+    assert 'request("app.dismiss_update_failure")' in seg
+    assert "logs/update-setup.log" in seg
+    assert "上次更新完成" in seg
+
+
 # ---------- 辅助对话模型面板：与主模型菜单同款的页签（默认/自定义）+ 管理入口 ----------
 
 def test_aux_model_menu_tabbed_like_main_menu():
@@ -391,3 +419,47 @@ def test_split_pane_close_releases_memory():
     assert "pane._jumpSeqGen" in seg
     assert "if (voiceFace === pane) voiceReset()" in seg
     assert "routeTab = null" in seg
+
+
+# ---------- 确认弹窗统一走应用内主题化弹层，不再用原生 confirm() ----------
+
+def test_no_native_confirm_in_frontend():
+    """前端不得再出现原生 confirm()：它不受主题变量控制、不跟随深浅色，
+    在桌面壳里看起来是外来的系统弹窗（与其余界面不搭）。统一走 confirmModal()。"""
+    import re
+
+    for name in ("app.js", "app-about.js", "app-schedule.js", "app-skills.js",
+                 "app-whitelist.js", "app-advanced.js", "app-mods.js",
+                 "app-memmap.js", "app-projects.js", "app-providers.js",
+                 "app-tools.js"):
+        path = STATIC_DIR / name
+        if not path.is_file():
+            continue
+        src = path.read_text(encoding="utf-8")
+        # 排除注释行里的 confirm 提及，只查真实调用
+        hits = [
+            (i, line) for i, line in enumerate(src.split("\n"), 1)
+            if re.search(r"(?<![A-Za-z_.])confirm\s*\(", line)
+            and not line.lstrip().startswith("//")
+            and not line.lstrip().startswith("*")   # 块注释行
+            and "confirmModal" not in line
+        ]
+        assert not hits, f"{name} 仍有原生 confirm() 调用：{hits}"
+
+
+def test_confirm_modal_definition_is_single_and_themed():
+    """confirmModal 只有一个定义（重复定义会互相覆盖），且走 .overlay/.modal-box。"""
+    js = read_app_bundle()
+    assert js.count("function confirmModal(") == 1, "confirmModal 出现了重复定义"
+    i = js.index("function confirmModal(")
+    body = js[i:i + 2600]
+    assert "showModal(" in body, "确认弹窗必须复用主题化弹层"
+    assert "btn-danger" in body, "破坏性确认需支持危险色按钮"
+    # 两种调用形式都要支持：HTML 正文与纯文本 + opts
+    assert "optsStyle" in body
+
+
+def test_danger_button_style_exists():
+    css = read_static("app.css")
+    assert ".btn-danger" in css and "var(--reg)" in css, "危险按钮样式缺失"
+    assert ".confirm-text" in css, "确认弹窗正文样式缺失"

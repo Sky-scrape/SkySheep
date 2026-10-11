@@ -260,17 +260,32 @@ async def run_subagent(
         + (system_extra or "")
     )
     final_text = ""
+    failed = False
     async for ev in agent.run_turn(prompt):
         if on_event is not None:
             try:
                 await on_event(ev)
             except Exception:
                 pass  # 直播失败不影响子代理本身
+        if ev.kind == "error":
+            # 子代理内 Provider 故障被 Agent 吞成 ErrorEvent：不能当成正常产出，
+            # 否则任务会被记为 done、运行中心显示“已完成”，重跑入口也拿不到
+            failed = True
         if ev.kind == "assistant_message":
             content = ev.message.get("content", [])
             final_text = "".join(
                 b.get("text", "") for b in content if b.get("type") == "text"
             )
+    if failed:
+        # 子代理内 Provider 故障被 Agent 吞成 ErrorEvent：不能当成正常产出，
+        # 否则任务会被记为 done、运行中心显示“已完成”，重跑入口也拿不到。
+        # 已有部分正文时一并带回，不丢用户已经看到的内容。
+        partial = final_text.strip()
+        detail = (
+            "; ".join(m.to_plain()[:300] for m in agent.history[-2:]) if not partial
+            else "已产出部分正文（保留在错误信息里）：" + partial[:2000]
+        )
+        raise SubagentRunError("子代理执行失败（模型调用出错）：" + detail)
     if not final_text:
         final_text = "(subagent produced no text; tool results were: {})".format(
             "; ".join(m.to_plain()[:500] for m in agent.history[-3:])
@@ -315,6 +330,10 @@ class TaskRecord:
 
 class SubagentLimitError(Exception):
     """后台子代理并发达到上限。"""
+
+
+class SubagentRunError(Exception):
+    """子代理运行以引擎级错误收尾（模型调用失败且无有效产出）。"""
 
 
 # 转发给前端直播的事件种类：过程（工具调用）与产出（文本流/最终消息）。
@@ -480,9 +499,20 @@ class TaskManager:
             return self._extra_research
         return None
 
-    def _new_record(self, agent_type: str, prompt: str, session_id: str = "") -> TaskRecord:
+    def _new_record(self, agent_type: str, prompt: str, session_id: str = "",
+                    isolated: bool = False) -> TaskRecord:
         task_id = uuid.uuid4().hex[:10]
         rec = TaskRecord(task_id, agent_type, prompt, session_id=session_id)
+        if isolated:
+            # 隔离元数据必须在登记 Run 之前定下来：_run_register 会把 rec.isolated
+            # 写进运行记录，重跑（runs.retry）从运行记录读该字段。旧实现先登记
+            # 后设 rec.isolated，导致运行记录里是 False，重跑会把隔离任务
+            # 降级成普通任务。
+            rec.isolated = True
+            rec.worktree_dir = str(
+                self._working_dir / ".skysheep" / "worktrees" / rec.id
+            ) if self._working_dir is not None else ""
+            rec.branch = f"skysheep/task-{rec.id}"
         self._tasks[task_id] = rec
         self._run_register(rec)
         return rec
@@ -497,6 +527,7 @@ class TaskManager:
                 "subagent-" + rec.id, "subagent", rec.session_id or "",
                 title=f"{rec.agent_type}：{rec.prompt[:40]}",
                 state="queued", retry_text=rec.prompt or "",
+                agent_type=rec.agent_type, isolated=rec.isolated,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -606,6 +637,12 @@ class TaskManager:
             rec.error = "用户取消"
             self._on_terminal(rec)
             raise
+        except SubagentRunError as e:
+            # 模型调用出错：落 error 终态（而不是 done），运行中心同步为 failed
+            rec.status = "error"
+            rec.error = str(e)[:2000]
+            self._on_terminal(rec)
+            raise
         except Exception as e:
             rec.status = "error"
             rec.error = str(e)
@@ -621,15 +658,13 @@ class TaskManager:
     def start_background(
         self, agent_type: str, prompt: str, session_id: str = "", isolated: bool = False,
     ) -> str:
-        rec = self._new_record(agent_type, prompt, session_id=session_id)
-        if isolated:
-            if self._working_dir is None:
-                raise SubagentLimitError("没有工作目录，无法隔离派生")
-            rec.isolated = True
-            rec.worktree_dir = str(
-                self._working_dir / ".skysheep" / "worktrees" / rec.id
-            )
-            rec.branch = f"skysheep/task-{rec.id}"
+        if isolated and self._working_dir is None:
+            raise SubagentLimitError("没有工作目录，无法隔离派生")
+        rec = self._new_record(agent_type, prompt, session_id=session_id, isolated=isolated)
+        if isolated and not self.can_isolate():
+            # 与旧行为一致：非 git 仓库在派生时就 fail fast，但此时已建好
+            # 隔离元数据（可在运行记录里如实体现）
+            raise SubagentLimitError("当前工作目录不是 git 仓库，无法隔离派生")
         if self._running_count() >= self._max_concurrent:
             # 并发满员不再直接报错：收进队列，空位出来按序自动开跑
             if len(self._queue) >= TASK_QUEUE_KEEP:
@@ -991,6 +1026,10 @@ class TaskManager:
                 await asyncio.shield(self._cleanup_isolated(rec))
             except asyncio.CancelledError:
                 pass
+        except SubagentRunError as e:
+            # 模型调用出错：子代理结果不是成功产出，落 error 终态而不是 done
+            rec.status = "error"
+            rec.error = str(e)[:2000]
         except Exception as e:
             rec.status = "error"
             rec.error = str(e)
@@ -1238,6 +1277,10 @@ class SpawnAgentTool(Tool):
                 args.agent_type, args.prompt, session_id=ctx.session_id
             )
         except SubagentLimitError as e:
+            raise ToolError(str(e)) from e
+        except SubagentRunError as e:
+            # 同步派生的子代理以模型错误收尾：以工具错误形式回报主轮，
+            # 而不是把错误当成正常报告返回（否则主 Agent 会把失败当成功继续）
             raise ToolError(str(e)) from e
         return result
 

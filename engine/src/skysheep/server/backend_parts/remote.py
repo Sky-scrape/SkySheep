@@ -11,12 +11,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
 import logging
 import os
 import re
 import secrets
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -25,15 +27,23 @@ from pathlib import Path
 
 from ... import __version__
 from ...bgtasks import spawn_bg
-from ...config import load_config, update_config_section
+from ...config import db_path, load_config, skysheep_home, update_config_section
+from ...core.uptodate import CHANNELS as UPDATE_CHANNELS
 from ...core.uptodate import fetch_latest_release as check_latest_release
 from ...core.uptodate import is_newer_version
+from ...textio import write_text_atomic
 
 logger = logging.getLogger("skysheep.security")
 
 # 用户自定义局域网令牌的最小长度：默认令牌是 secrets.token_urlsafe(16)（22 字符），
 # 这里只挡住明显过弱的自定义值，不强制复杂度（令牌要方便输入与扫码）。
 MIN_LAN_TOKEN_CHARS = 12
+
+# 应用内更新的「更新中」标记与备份（更新可信度落地，详见 docs/版本支持与更新渠道.md）：
+# apply_update 启动安装器前写下 marker，新版本下次启动对账——对上清标记（成功），
+# 对不上亮「上次更新未完成」现场（失败）。更新前先备份关键用户数据，防极端失败路径。
+UPDATE_MARKER_NAME = "update-pending.json"
+PREUPDATE_BACKUP_KEEP = 3  # preupdate-* 备份滚动保留份数
 
 
 class TokenThrottle:
@@ -157,7 +167,7 @@ class RemoteMixin:
         except Exception:
             pass
         try:
-            info = await check_latest_release()
+            info = await check_latest_release(channel=self._update_channel())
             if is_newer_version(info["version"], __version__):
                 self.update_info = info
         except Exception:  # noqa: BLE001 - 离线/仓库不存在：完全静默
@@ -307,13 +317,41 @@ class RemoteMixin:
         token = secrets.token_urlsafe(16)
         update_config_section("server", {"token": token})
         self.cfg = load_config()
+        # 世代 +1 并断开旧世代远程连接：只阻止新连接不够——旧令牌已经建立的
+        # WebSocket 仍可继续发 RPC（实际缺口）。
+        self.token_generation += 1
+        revoked = self.revoke_remote_connections()
         # 只清失败计数，已生效的封锁保留（见 reset_failures 的说明）
         self.token_throttle.reset_failures(keep_blocks=True)
         return {
             **await self.lan_status(),
             "note": "已生成新令牌并立即生效：之前的地址与二维码作废，"
-                    "手机需要用下方新地址重新打开。",
+                    "已建立的远程连接已断开，手机需要用下方新地址重新打开。",
+            "revoked_connections": revoked,
         }
+
+    def revoke_remote_connections(self) -> int:
+        """断开所有远程（非本机）WS 连接，返回断开数。本机窗口不受影响。
+
+        用于令牌轮换与关闭远程访问：让「旧令牌/旧开关状态」不再能继续
+        通过已建立的连接发 RPC。关闭动作是同步的（kick 内部 create_task），
+        不阻塞调用方。
+        """
+        count = 0
+        for entry in list(self.ws_connections):
+            if entry.get("local"):
+                continue  # 本机窗口/本机浏览器不被自己踢
+            kick = entry.get("kick")
+            if kick is None:
+                continue
+            try:
+                result = kick()
+                if asyncio.iscoroutine(result):
+                    spawn_bg(result)
+                count += 1
+            except Exception:  # noqa: BLE001 - 断开失败不阻断轮换/关闭
+                logger.warning("断开远程连接失败", exc_info=True)
+        return count
 
     @staticmethod
     def _check_lan_token(token: str) -> None:
@@ -338,9 +376,15 @@ class RemoteMixin:
     async def lan_disable(self) -> dict:
         update_config_section("server", {"lan": False})
         self.cfg = load_config()
+        # 关闭局域网访问：除了写配置（重启后不再监听），还要立即断开已建立的
+        # 远程连接——否则“已关闭”只是不再接受新连接，现有手机端照常可用。
+        revoked = 0
+        if not self.cfg.server.tailscale:
+            revoked = self.revoke_remote_connections()
         return {
             **await self.lan_status(),
-            "note": "已关闭局域网访问：重启 SkySheep 后恢复仅本机监听。",
+            "note": "已关闭局域网访问：已建立的远程连接已断开，重启 SkySheep 后恢复仅本机监听。",
+            "revoked_connections": revoked,
         }
 
     # ---- 远程访问（Tailscale）：手机不在同一网络也能连回这台电脑 ----
@@ -380,9 +424,14 @@ class RemoteMixin:
     async def remote_disable(self) -> dict:
         update_config_section("server", {"tailscale": False})
         self.cfg = load_config()
+        # 同 lan_disable：关闭远程访问时立即断开已建立的远程连接
+        revoked = 0
+        if not self.cfg.server.lan:
+            revoked = self.revoke_remote_connections()
         return {
             **await self.remote_status(),
-            "note": "已关闭远程访问：重启 SkySheep 后恢复仅本机监听。",
+            "note": "已关闭远程访问：已建立的远程连接已断开，重启 SkySheep 后恢复仅本机监听。",
+            "revoked_connections": revoked,
         }
 
     # ---- 一键重启：拉起等价的新进程，再请求当前进程优雅退出 ----
@@ -501,21 +550,35 @@ class RemoteMixin:
 
     # ---- 更新检查（设置 · 关于可手动触发；启动时后台已查过一次） ----
 
-    async def check_update(self) -> dict:
+    def _update_channel(self) -> str:
+        """更新渠道（ui.json 偏好 update_channel）：stable（默认）/ beta。
+
+        渠道只决定从哪个固定更新源取版本号（core/uptodate.py），不改变
+        下载后的校验链路——两条渠道都过 .sha256 / MZ / 体积上限三道。
+        """
         try:
-            info = await check_latest_release()
+            ch = str(self._read_ui_prefs().get("update_channel") or "")
+        except Exception:  # noqa: BLE001 - 偏好读不到不拦更新
+            ch = ""
+        return ch if ch in UPDATE_CHANNELS else "stable"
+
+    async def check_update(self) -> dict:
+        channel = self._update_channel()
+        try:
+            info = await check_latest_release(channel=channel)
         except Exception as e:  # noqa: BLE001 - 手动检查要把失败原因说清楚
             self.update_error = str(e)
             self.update_info = None
             return {"available": False, "current": __version__, "frozen": self._is_frozen,
-                    "error": str(e)}
+                    "channel": channel, "error": str(e)}
         self.update_error = None
         if is_newer_version(info["version"], __version__):
             self.update_info = info
-            return {"available": True, "current": __version__, "frozen": self._is_frozen, **info}
+            return {"available": True, "current": __version__, "frozen": self._is_frozen,
+                    "channel": channel, **info}
         self.update_info = None
         return {"available": False, "current": __version__, "frozen": self._is_frozen,
-                "latest": info["version"]}
+                "channel": channel, "latest": info["version"]}
 
     async def install_update(self) -> dict:
         """应用内一键更新（仅安装版）：下载最新版安装包到临时目录。
@@ -525,7 +588,7 @@ class RemoteMixin:
         """
         if not self._is_frozen:
             raise RuntimeError("源码版不支持应用内更新：请在仓库里执行 git pull 后重启")
-        info = await check_latest_release()
+        info = await check_latest_release(channel=self._update_channel())
         if not is_newer_version(info["version"], __version__):
             return {"update_available": False, "current": __version__, "latest": info["version"]}
         # setup_url 是按发布约定拼的（releases/download/<tag>/SkySheep-<版本>-setup.exe），
@@ -538,6 +601,9 @@ class RemoteMixin:
         expected = await asyncio.to_thread(_fetch_setup_sha256, url)
         try:
             await asyncio.to_thread(_download_setup, url, dest, expected)
+        except UpdateChecksumError as e:
+            # 发布方未提供可用校验和：fail closed，引导用户手动下载并自行核对
+            raise RuntimeError(str(e)) from e
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 raise RuntimeError(
@@ -561,6 +627,12 @@ class RemoteMixin:
         pending = self._pending_update or ""
         if not pending or not Path(pending).is_file():
             raise RuntimeError("还没有下载好的更新包，请先执行「下载更新」")
+        # 启动安装器前先备份用户数据、落「更新中」标记：安装器的退出码只进
+        # update-setup.log，marker 才是下次启动对账「装没装成」的依据。
+        m = re.match(r"^SkySheep-(.+)-setup\.exe$", Path(pending).name)
+        target_version = m.group(1) if m else ""
+        backup_dir, backup_failures = _backup_user_data()
+        _write_update_marker(pending, target_version, backup_dir, backup_failures)
         log_path = _prepare_update_log(pending)
         override = _setup_privilege_override()
         script = _write_update_helper(pending, log_path, override)
@@ -591,6 +663,53 @@ class RemoteMixin:
         return {"quitting": True, "installer": pending, "log": str(log_path) if log_path else "",
                 "uac": override != "/CURRENTUSER"}
 
+    # ---- 更新结果对账（更新可信度）：marker 在 apply_update 落盘，下次启动结算 ----
+
+    def consume_update_marker(self) -> None:
+        """启动时结算上次应用内更新的结果（成功清标记，失败亮现场）。
+
+        marker 的 target_version 与当前 __version__ 对上 = 新版本已经跑起来，
+        更新闭环成功，清掉标记并记一条 update_success；对不上 = 安装没成
+        （UAC 被取消、单实例互斥没让位、磁盘满……），保留标记并组装
+        update_failure 现场（目标版本 / 备份目录 / 安装日志路径），随 boot
+        快照交前端展示，用户「知道了」后才清（dismiss_update_failure）。
+        """
+        try:
+            data = json.loads(_update_marker_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        target = str(data.get("target_version") or "")
+        if target and target == __version__:
+            try:
+                _update_marker_path().unlink()
+            except OSError:
+                pass
+            self.update_success = {"from": str(data.get("from_version") or ""),
+                                   "to": target}
+            logger.info("应用内更新完成：%s -> %s", data.get("from_version"), target)
+            return
+        self.update_failure = {
+            "from": str(data.get("from_version") or ""),
+            "target": target,
+            "ts": float(data.get("ts") or 0.0),
+            "backup_dir": str(data.get("backup_dir") or ""),
+            "backup_failures": list(data.get("backup_failures") or []),
+            "log": str(Path.home() / ".skysheep" / "logs" / "update-setup.log"),
+        }
+        logger.warning("检测到未完成的更新：目标 v%s，当前 v%s（标记保留，等用户确认）",
+                       target, __version__)
+
+    async def dismiss_update_failure(self) -> dict:
+        """用户确认「上次更新未完成」提示：清掉 marker，不再每次启动重复提醒。"""
+        try:
+            _update_marker_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+        self.update_failure = None
+        return {"ok": True}
+
     # ---- 主题：标题栏联动（前端把解析后的主题回传给桌面壳） ----
 
     async def apply_theme(self, params: dict) -> dict:
@@ -618,14 +737,31 @@ class RemoteMixin:
 MAX_SETUP_BYTES = 300 << 20
 
 
-def _download_setup(url: str, dest: Path, expected_sha256: str = "") -> None:
+class UpdateChecksumError(RuntimeError):
+    """发布方未提供可用校验和：默认拒绝自动下载（fail closed）。"""
+
+
+def _download_setup(
+    url: str, dest: Path, expected_sha256: str = "",
+    allow_unverified: bool = False,
+) -> None:
     """把安装包下载到 dest（.part 暂存、完成后改名）。同步阻塞，须在线程里跑。
 
     follow_redirects 必开：browser_download_url 会 302 到 objects.githubusercontent.com。
     trust_env=False 与 web_fetch 同口径：不让环境变量里的代理/netrc 插手更新链。
+
+    校验策略：expected_sha256 非空时必须匹配；为空（发布方未提供 .sha256 或
+    拉取失败）默认拒绝安装——MZ 头 + 体积上限只能防半截文件，不能证明内容
+    没被替换。allow_unverified=True 时才退回这两道（仅供明确接受该风险的用户，
+    以及只测体积/头部防线的单元用例）。
     """
     import httpx
 
+    if not expected_sha256 and not allow_unverified:
+        raise UpdateChecksumError(
+            "发布方未提供 .sha256 校验和，无法验证安装包完整性，已拒绝自动安装；"
+            "请到 GitHub Releases 手动下载并核对校验和。"
+        )
     part = dest.with_suffix(dest.suffix + ".part")
     try:
         with httpx.Client(timeout=60.0, follow_redirects=True, trust_env=False) as client:
@@ -645,7 +781,7 @@ def _download_setup(url: str, dest: Path, expected_sha256: str = "") -> None:
         with open(part, "rb") as f:
             if f.read(2) != b"MZ":
                 raise RuntimeError("下载的内容不是 Windows 安装包（头部校验失败）")
-        # 发布方附带了 .sha256 就按它校验；没附带时上面两道（MZ 头 + 体积上限）兜底
+        # 发布方附带的 .sha256 必校（上面的入口已保证非空）
         if expected_sha256 and digest.hexdigest().lower() != expected_sha256.lower():
             raise RuntimeError("安装包校验和不匹配，已丢弃（下载可能被篡改）")
         part.replace(dest)
@@ -691,6 +827,97 @@ def _update_dir() -> Path:
         except OSError:
             continue
     return Path(tempfile.mkdtemp(prefix="skysheep-update-"))
+
+
+# ---- 更新前备份与「更新中」标记（更新可信度：失败可发现、数据可回退） ----
+
+
+def _backup_user_data() -> tuple[Path | None, list[str]]:
+    """静默安装前把关键用户数据备份到 `~/.skysheep/backups/preupdate-<版本>-<时间>`。
+
+    安装器只动程序目录，用户数据不参与更新——备份防的是「更新失败后被迫
+    卸载重装 / 手动清理」这类极端路径下的误伤。config/mcp/ui 是小文件直拷；
+    会话库必须走 SQLite backup API（WAL 里可能有未落盘页，直接复制文件会
+    缺尾巴）。
+
+    返回 (备份目录或 None, 失败项列表)。失败不再只记日志：apply_update 会把
+    失败项带进 marker 与返回，让用户知道备份不完整（旧实现只记日志，界面仍
+    显示「已备份」，恢复时会发现缺文件）。
+    """
+    failures: list[str] = []
+    home = skysheep_home()
+    bdir = home / "backups" / f"preupdate-{__version__}-{time.strftime('%Y%m%d-%H%M%S')}"
+    try:
+        bdir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None, ["backups/"]
+    for name in ("config.toml", "mcp.json", "ui.json"):
+        src = home / name
+        if src.is_file():
+            try:
+                shutil.copy2(src, bdir / src.name)
+            except OSError:
+                failures.append(name)
+                logger.warning("更新前备份 %s 失败", src.name, exc_info=True)
+    try:
+        src_db = db_path()
+        if src_db.is_file():
+            src_conn = sqlite3.connect(src_db)
+            dst_conn = sqlite3.connect(bdir / "skysheep.db")
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                src_conn.close()
+                dst_conn.close()
+    except Exception:  # noqa: BLE001 - 备份失败不阻断更新，但如实回报
+        failures.append("skysheep.db")
+        logger.warning("更新前备份会话库失败", exc_info=True)
+    _prune_preupdate_backups(home / "backups")
+    return bdir, failures
+
+
+def _prune_preupdate_backups(backups_dir: Path, keep: int = PREUPDATE_BACKUP_KEEP) -> None:
+    """preupdate-* 目录滚动保留最近 keep 份（按目录修改时间），失败静默。"""
+    try:
+        dirs = sorted((d for d in backups_dir.glob("preupdate-*") if d.is_dir()),
+                      key=lambda d: d.stat().st_mtime, reverse=True)
+        for old in dirs[keep:]:
+            shutil.rmtree(old, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def _update_marker_path() -> Path:
+    return skysheep_home() / UPDATE_MARKER_NAME
+
+
+def _write_update_marker(
+    pending: str, target_version: str, backup_dir: Path | None,
+    backup_failures: list[str] | None = None,
+) -> bool:
+    """apply_update 启动安装器前落「更新中」标记（原子写，见 consume_update_marker）。
+
+    标记的生死就是更新的成败信号：新版本下次启动按 target_version 对账。
+    写不出（磁盘满 / 目录只读）只记日志不阻断更新——失败检测是增量能力，
+    不能反过来卡住更新本体。backup_failures 记下未备份成功的数据项，
+    下次启动的失败提示与恢复指引据此如实告知（不再笼统说「已备份」）。
+    """
+    data = {
+        "from_version": __version__,
+        "target_version": target_version,
+        "installer": Path(pending).name,
+        "backup_dir": str(backup_dir) if backup_dir else "",
+        "backup_failures": list(backup_failures or []),
+        "ts": time.time(),
+    }
+    try:
+        write_text_atomic(_update_marker_path(),
+                          json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        return True
+    except OSError:
+        logger.warning("更新标记写不进盘（%s），失败检测本次不可用",
+                       UPDATE_MARKER_NAME, exc_info=True)
+        return False
 
 
 _SETUP_APPID = "{7C1B6E9A-52C4-4B7D-9A34-A1B2C3D4E5F6}"  # 与 tools/installer.iss 的 AppId 保持一致

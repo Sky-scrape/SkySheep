@@ -494,8 +494,9 @@ async function renderSettings() {
           const unknownNote = pv.unknown.length
             ? `\n\n将跳过（不在恢复清单）：${pv.unknown.join("、")}`
             : "";
-          const ok = confirm(
-            `将要恢复 ${pv.items.length} 个文件，覆盖本机当前配置：\n\n${lines}${unknownNote}\n\n${pv.note}\n\n确定导入？`
+          const ok = await confirmModal(
+            `将要恢复 ${pv.items.length} 个文件，覆盖本机当前配置：\n\n${lines}${unknownNote}\n\n${pv.note}\n\n确定导入？`,
+            { title: "导入设置", okLabel: "导入", danger: true }
           );
           if (!ok) { ioMsg.textContent = "已取消导入"; ioMsg.className = "io-msg"; return; }
           ioMsg.textContent = "导入中…";
@@ -519,9 +520,10 @@ async function renderSettings() {
     const secretsChk = document.getElementById("chk-export-secrets");
     if (fullBtn) fullBtn.onclick = async () => {
       const withSecrets = !!(secretsChk && secretsChk.checked);
-      if (withSecrets && !confirm(
-        "导出包里将包含明文 API Key（可直接导入使用，也意味着泄露风险）。\n\n确定继续？"
-      )) return;
+      if (withSecrets && !(await confirmModal(
+        "导出包里将包含明文 API Key（可直接导入使用，也意味着泄露风险）。\n\n确定继续？",
+        { title: "导出含密钥", okLabel: "继续导出", danger: true }
+      ))) return;
       fullBtn.disabled = true;
       fullMsg.textContent = "打包中（大库可能要一会儿）…";
       fullMsg.className = "io-msg";
@@ -536,7 +538,101 @@ async function renderSettings() {
         fullBtn.disabled = false;
       }
     };
+
+    // 完整导入（从导出包恢复会话库 + 配置 + 技能）：选包 → 预览确认 → 恢复。
+    // 失败自动回滚是后端语义，前端只需把预览清单和风险说清楚
+    const importFullBtn = document.getElementById("btn-import-full");
+    const importFullMsg = document.getElementById("import-full-msg");
+    if (importFullBtn) importFullBtn.onclick = () => importFullModal(importFullMsg);
   }
+}
+
+// 从完整导出包恢复：弹窗选包（原生选择框 + 手动粘贴路径兑底）→
+// data.preview_import_full 列出将恢复的内容与校验结果 → confirm → data.import_full
+async function importFullModal(msg) {
+  const canPick = nativePickerAvailable();
+  const box = document.createElement("div");
+  box.innerHTML = `
+    <p class="dim small">选中本机导出的完整导出包（.zip，默认在数据目录 exports\ 文件夹）。
+    恢复会用包里的会话库<b>整体替换</b>当前会话数据（替换前自动留「恢复前」副本），
+    配置文件覆盖同名项，技能按名字合并（同名覆盖、多出的保留）。</p>
+    <div class="form-grid">
+      <label class="wide">导出包路径
+        <span class="model-line">
+          <input data-f="path" placeholder="${canPick ? "点右边按钮选择，或直接粘贴路径" : "把导出包 .zip 的完整路径粘贴到这里"}" autocomplete="off">
+          <button class="btn-ghost browse" type="button">选择…</button>
+        </span>
+      </label>
+      <div class="form-status"></div>
+    </div>`;
+  const input = box.querySelector('input[data-f="path"]');
+  const status = box.querySelector(".form-status");
+  const browse = box.querySelector(".browse");
+  if (!canPick) browse.title = "当前是浏览器模式，请手动粘贴路径";
+  browse.onclick = async () => {
+    const r = await pickPath("zip");
+    if (r.error && !(r.paths && r.paths.length)) {
+      status.textContent = "打不开系统选择框，请手动粘贴路径（" + r.error + "）";
+      status.className = "form-status bad";
+      input.focus();
+      return;
+    }
+    if (!r.paths || !r.paths.length) return; // 用户取消
+    input.value = r.paths[0];
+    status.textContent = "已选择：" + r.paths[0];
+    status.className = "form-status ok";
+  };
+  showModal("从完整导出包恢复", box, async () => {
+    const path = input.value.trim();
+    if (!path) throw new Error("请先选择或粘贴导出包路径");
+    let pv;
+    try {
+      status.textContent = "正在解析导出包…";
+      status.className = "form-status";
+      pv = await request("data.preview_import_full", { path });
+    } catch (e) {
+      status.textContent = "";
+      throw e;
+    }
+    if (pv.db && pv.db.ok === false) {
+      // 预览阶段就校验出坏库/新版库：直接拦下，不给确认入口
+      throw new Error(pv.db.reason || "导出包里的会话库校验未通过");
+    }
+    status.textContent = "";
+    const lines = (pv.items || []).map((it) =>
+      `• ${it.name === "skysheep.db" ? "会话数据库" : it.name}（${retentionBytes(it.size)}）`
+    ).join("\n");
+    const skillsNote = pv.skills_count
+      ? `\n• 技能 ${pv.skills_count} 个：${(pv.skills || []).slice(0, 8).join("、")}` +
+        (pv.skills_count > 8 ? ` 等 ${pv.skills_count} 个` : "")
+      : "";
+    const unknownNote = (pv.unknown || []).length
+      ? `\n\n将跳过（不在恢复清单）：${pv.unknown.slice(0, 6).join("、")}`
+      : "";
+    const ok = await confirmModal(
+      `将从导出包恢复以下内容：\n\n${lines}${skillsNote}${unknownNote}\n\n${pv.note || ""}\n\n当前会话数据会先自动另存一份「恢复前」备份。确定恢复？`,
+      { title: "恢复完整数据", okLabel: "恢复", danger: true }
+    );
+    if (!ok) return;
+    if (msg) { msg.textContent = "恢复中（大库可能要一会儿）…"; msg.className = "io-msg"; }
+    const r = await request("data.import_full", { path });
+    if (msg) {
+      const bits = [];
+      if (r.db_restored) bits.push("会话库");
+      if ((r.config_restored || []).length) bits.push(`配置 ${r.config_restored.length} 项`);
+      if ((r.skills_installed || []).length) {
+        bits.push(`技能 ${r.skills_installed.length} 个` +
+          ((r.skills_overwritten || []).length ? `（覆盖同名 ${(r.skills_overwritten).length} 个）` : ""));
+      }
+      msg.textContent = "✓ 已恢复：" + (bits.join("、") || "无内容") +
+        (r.safety_copy ? "；恢复前的数据已另存一份" : "") +
+        ((r.warnings || []).length ? "；⚠ " + r.warnings.join("；") : "");
+      msg.className = "io-msg" + ((r.warnings || []).length ? " bad" : " ok");
+    }
+    addNotice("✓ 已从导出包恢复" + (r.db_restored ? "（含会话数据）" : ""));
+    await boot();
+    await loadBackups();
+  });
 }
 
 async function saveProvider(row, name, setDefault, kind) {

@@ -57,6 +57,11 @@ STATE_LABELS = {
 
 KEEP_TERMINAL = 200  # 终态记录保留条数（超出裁剪最旧的）
 
+# 允许一键重发/重跑的状态：只有「真的没跑完」的运行才该被恢复。
+# completed / partial 不在此列——旧实现只看 retryable 布尔与原文，
+# 已成功的运行也能被重发接口接受，写入类任务会重复产生副作用。
+RETRYABLE_STATES = frozenset({FAILED, INTERRUPTED})
+
 
 @dataclass
 class Run:
@@ -73,9 +78,12 @@ class Run:
     updated_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     # 恢复所需的最小信息：原文与模式（team/roundtable/adversarial 一期不进重发，
-    # 只重发纯文本）
+    # 只重发纯文本）；subagent 运行额外记 agent_type / isolated，供失败/中断后
+    # 一键重跑（重新派生同型任务）使用。
     retry_text: str = ""
     retryable: bool = False
+    agent_type: str = ""  # 子代理型（task/explore/...）；主轮为空
+    isolated: bool = False  # 隔离 worktree 派生；主轮为 False
     tools_used: int = 0
     retries: int = 0
 
@@ -92,9 +100,20 @@ class RunCenter:
     def __init__(self, path: Path | None = None) -> None:
         self._runs: dict[str, Run] = {}
         self._order: list[str] = []  # 创建序，旧→新
+        self._id_seq = 0  # 同一毫秒内的并发自增（见 allocate_id）
         self.path = path
         if path is not None:
             self._load()
+
+    def allocate_id(self, kind: str) -> str:
+        """跨重启唯一的运行 id。
+
+        旧实现用进程内自增 `turn-<n>`：每次启动都从 `turn-1` 重来，重启后
+        新运行会把磁盘上同名旧记录覆盖掉（历史丢失、列表出现重复 id）。
+        这里带上毫秒时间戳，进程重启、快照丢失都不会撞上旧 id。
+        """
+        self._id_seq += 1
+        return f"{kind}-{int(time.time() * 1000)}-{self._id_seq}"
 
     # ---- 持久化 ----
 
@@ -123,13 +142,15 @@ class RunCenter:
                     finished_at=item.get("finished_at"),
                     retry_text=str(item.get("retry_text", "")),
                     retryable=bool(item.get("retryable", False)),
+                    agent_type=str(item.get("agent_type", "")),
+                    isolated=bool(item.get("isolated", False)),
                     tools_used=int(item.get("tools_used", 0)),
                     retries=int(item.get("retries", 0)),
                 )
             except Exception:  # noqa: BLE001
                 continue
-            if not r.id:
-                continue
+            if not r.id or r.id in self._runs:
+                continue  # 快照里本不该有重复 id；有也只认第一条，避免列表重复
             if r.state in RUNNING_STATES:
                 # 上次没退出干净：标记为「应用重启导致的中断」，可一键重发
                 r.state = INTERRUPTED
@@ -173,14 +194,23 @@ class RunCenter:
     # ---- 登记 ----
 
     def register(self, run_id: str, kind: str, session_id: str, title: str = "",
-                 state: str = QUEUED, retry_text: str = "") -> Run:
+                 state: str = QUEUED, retry_text: str = "",
+                 agent_type: str = "", isolated: bool = False) -> Run:
         run = Run(
             id=run_id, kind=kind, session_id=session_id, title=title,
             state=state, retry_text=retry_text,
             retryable=bool(retry_text),
+            agent_type=agent_type, isolated=isolated,
         )
+        # 同 id 重复登记：保留原创建位置，只替换内容并清掉 _order 里的重复项。
+        # 旧实现直接覆盖字典又追加 _order，列表里会出现两个相同 id（一个是
+        # 幽灵条目），裁剪与展示都会错位。
         self._runs[run_id] = run
-        self._order.append(run_id)
+        if self._order.count(run_id) > 1:
+            while self._order.count(run_id) > 1:
+                self._order.remove(run_id)
+        if run_id not in self._order:
+            self._order.append(run_id)
         self.save()
         return run
 
@@ -251,7 +281,14 @@ class RunCenter:
                 if rid in self._runs and self._runs[rid].state == INTERRUPTED]
 
     def retryable_run(self, run_id: str) -> Run | None:
+        """可重发/重跑的运行：必须是失败或中断，且带原文。
+
+        状态约束由后端强制，不能只靠前端隐藏按钮——否则已完成的运行也能被
+        runs.retry 接受并重放，写入类任务会重复产生副作用。
+        """
         r = self._runs.get(run_id)
-        if r is not None and r.retryable and r.retry_text:
-            return r
-        return None
+        if r is None or not r.retry_text or not r.retryable:
+            return None
+        if r.state not in RETRYABLE_STATES:
+            return None
+        return r

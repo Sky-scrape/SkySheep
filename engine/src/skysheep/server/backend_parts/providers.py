@@ -25,7 +25,7 @@ from ...config import (
     skysheep_home,
     update_provider_in_config,
 )
-from ...models.diagnostics import test_connection
+from ...models.diagnostics import probe_capabilities, test_connection
 from ...models.probe import probe_context_limit, probe_provider_models
 from ...obs import info as obs_info
 from ...obs import warning as obs_warning
@@ -356,6 +356,41 @@ class ProvidersMixin:
         except Exception:  # noqa: BLE001 - 健康灯失败不影响测试结果
             pass
         return out
+
+    async def model_probe_capabilities(self, params: dict) -> dict:
+        """能力探测：对流式 / 工具调用 / 图片输入 / 思考强度各发一次最小真实调用。
+
+        与 model_test_connection 同一套取值口径（界面改了还没保存的值优先）。
+        结果不进健康登记——能力探测不评判连通性，健康灯只归「测试连接」管。
+        """
+        name = str(params.get("name", "") or "")
+        pc = self.cfg.providers.get(name) if name else None
+        kind = str(params.get("kind", "") or "").strip() or (pc.kind if pc else "openai")
+        base_url = str(params.get("base_url", "") or "").strip() or (
+            (pc.base_url or "") if pc else "")
+        model = str(params.get("model", "") or "").strip() or (pc.model if pc else "")
+        api_key = str(params.get("api_key", "") or "").strip()
+        if not api_key and pc is not None:
+            api_key = resolve_api_key(name, pc) or ""
+        if kind not in ("openai", "anthropic"):
+            # fake 等演示协议没有真实接口：三态都是「没测成」，不报错
+            item = {"supported": None,
+                    "note": "该服务类型没有真实接口，无法探测能力（仅 openai / anthropic 协议可探测）"}
+            return {"kind": kind, "model": model, "latency_ms": 0,
+                    "streaming": dict(item), "tools": dict(item),
+                    "vision": dict(item), "reasoning": dict(item),
+                    "summary": "该服务类型不支持能力探测。"}
+        if not api_key:
+            # 无 Key 的探测注定全灭，且会裸打到默认接口：提前返回可读结果
+            item = {"supported": None,
+                    "note": "该服务还没配 API Key，无法探测；先在上方填 Key 再试"}
+            return {"kind": kind, "model": model, "latency_ms": 0,
+                    "streaming": dict(item), "tools": dict(item),
+                    "vision": dict(item), "reasoning": dict(item),
+                    "summary": "还没配 API Key：先填 Key 并保存，再点「能力探测」。"}
+        return await probe_capabilities(
+            kind=kind, base_url=base_url or None, api_key=api_key or None, model=model,
+        )
 
     def providers_health(self) -> dict:
         """全部模型服务的健康状态快照（设置页状态灯 / 运行中心用）。"""

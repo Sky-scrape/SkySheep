@@ -19,12 +19,24 @@ class FakeProvider(Provider):
 
     def __init__(self, scripted: list[list]) -> None:
         super().__init__()
-        self.scripted = list(scripted)
+        # 脚本项归一化：允许写单个内容块（TextBlock 等）而不必包成 [块] 列表。
+        # 旧实现要求「列表的列表」，写了裸块会在 stream 里对非可迭代对象
+        # 迭代抛 AttributeError/TypeError，被 Agent 吞成 ErrorEvent——表现为
+        # 「假模型莫名报错」，还会被旧的运行终态收口记成 completed。
+        self.scripted = [self._as_blocks(g) for g in scripted]
         self.scripted_default: list = []
         self.calls: list[list[Message]] = []
 
+    @staticmethod
+    def _as_blocks(group) -> list:
+        if group is None:
+            return []
+        if isinstance(group, str):
+            return [TextBlock(text=group)]
+        return list(group) if isinstance(group, (list, tuple)) else [group]
+
     def with_default(self, blocks: list) -> FakeProvider:
-        self.scripted_default = blocks
+        self.scripted_default = self._as_blocks(blocks)
         return self
 
     async def stream(

@@ -455,18 +455,30 @@ class LifecycleMixin:
                     detail += f"；会话库重开失败：{re_err}"
             raise RuntimeError(detail) from None
 
-        # 内存状态全部重建：旧 runtime 的历史/消息 seq 都可能与新库不一致
+        rebuilt = await self._rebuild_after_db_replace(reason="会话库已恢复")
+        return {
+            "restored": result["restored"],
+            "safety_copy": result["safety_copy"],
+            "session": rebuilt["session"],
+            "projects": rebuilt["projects"],
+        }
+
+    async def _rebuild_after_db_replace(self, *, reason: str) -> dict:
+        """会话库文件被整体替换（备份恢复 / 完整导入）后重建内存状态。
+
+        与恢复/导入共用：旧 runtime 的历史/消息 seq 都可能与新库不一致，全部
+        作废重建；基底队列里预检已过但替换动作进行中插进来的请求逐个落空
+        （与 _bind_project 同一口径，只 clear 会让那些 Future 永远不 resolve）；
+        项目列表可能也随库回退了（备份/导入包里的项目集合是当时的样子）。
+        返回 {"session", "projects"}。
+        """
         for rt in list(self.runtimes.values()):
             self._forget_runtime(rt)
         self.runtimes.clear()
-        # 懒创建毫秒级窗口可能仍有请求排在基底队列：预检已过但恢复动作进行中
-        # 插进来的请求必须逐个落空（与 _bind_project 同一口径），只 clear 会让
-        # 那些 Future 永远不 resolve（请求挂死）
         for item in list(self._base_queue):
-            item.fail(RuntimeError("会话库已恢复，本次请求未执行"))
+            item.fail(RuntimeError(f"{reason}，本次请求未执行"))
         self._base_queue.clear()
         self.session = None
-        # 项目列表可能也随库回退了（备份里的项目集合是当时的样子）
         projects = await self.store.list_projects()
         cur = next(
             (p for p in projects if str(p.root_path).lower() == str(self.working_dir).lower()),
@@ -478,8 +490,6 @@ class LifecycleMixin:
         info = await self.open_initial_session()
         self._base_agent.load_history([Message.system(self.compose_system())])
         return {
-            "restored": result["restored"],
-            "safety_copy": result["safety_copy"],
             "session": info,
             "projects": [{"id": p.id, "name": p.name, "path": p.root_path} for p in projects],
         }

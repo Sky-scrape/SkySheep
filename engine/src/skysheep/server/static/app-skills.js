@@ -189,8 +189,9 @@ function importSkillModal(prefill = "") {
     const clashNote = preview.needs_overwrite
       ? `\n\n⚠ 已存在同名技能：${escapeHtml(nameList(preview.clashes))}。确认后将覆盖（旧目录会先备份）。`
       : "";
-    const ok = confirm(
-      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${officialNote}${clashNote}\n\n技能内容来自外部包，会进入系统提示词。确认安装？`
+    const ok = await confirmModal(
+      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${officialNote}${clashNote}\n\n技能内容来自外部包，会进入系统提示词。确认安装？`,
+      { title: "安装技能", okLabel: "安装" }
     );
     if (!ok) return;
     if (url) {
@@ -474,10 +475,11 @@ function importMcpModal(prefill = "") {
         if (envLines.length) line += "\n      环境变量：\n" + envLines.join("\n");
         return line;
       }).join("\n");
-      if (!confirm(
+      if (!(await confirmModal(
         "以下 MCP 服务会在连接时执行本机命令：\n" + lines +
-        "\n\n请确认它们来自可信来源（继续 = 允许在本机运行上述程序）。"
-      )) return;
+        "\n\n请确认它们来自可信来源（继续 = 允许在本机运行上述程序）。",
+        { title: "确认运行本机命令", okLabel: "允许运行", danger: true }
+      ))) return;
       r = await request("mcp.import", { ...baseParams, confirmed: true });
     }
     await renderSettings();

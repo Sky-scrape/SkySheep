@@ -166,6 +166,10 @@ class Agent:
         # _turn_events 内部把 provider 故障吞成 ErrorEvent 后正常收尾，异常到
         # 不了 run_turn 的 except——这里留标记让兜底标注选「未完成」而非「已停止」
         self._turn_error_interrupted = False
+        # 上一轮是否以引擎级错误收尾（Provider 异常被吞成 ErrorEvent /
+        # TurnFinished stop_reason=error）。运行中心与子代理据此把本轮判为
+        # 失败，而不是因为外层协程正常返回就当成 completed。
+        self.last_turn_failed = False
 
     # ---- 状态管理 ----
 
@@ -402,6 +406,7 @@ class Agent:
         turn_t0 = time.monotonic()
 
         finished_by_error = False
+        self.last_turn_failed = False
 
         # 0. 上下文压缩：占用达到「上限 × 触发比例」时，先用摘要替换旧历史
         #    （默认 0.9：留出余量，避免顶满上限时才压缩、半路撞上游 400）
@@ -520,8 +525,14 @@ class Agent:
                                         getattr(self.provider, "name", ""), diag)
                                 except Exception:  # noqa: BLE001 - 健康上报不拖垮主流程
                                     pass
+                            # 「是否已重试」要明说：重试过的失败与第一次就失败，
+                            # 用户要判断的问题不同（偶发 vs 配置错）
+                            retry_line = (
+                                f"本轮已自动重试 {self._turn_model_retries} 次仍失败。\n"
+                                if self._turn_model_retries > 0 else ""
+                            )
                             advice_block = (
-                                f"\n\n【诊断】{diag.title}\n{diag.advice}"
+                                f"\n\n【诊断】{diag.title}\n{retry_line}{diag.advice}"
                             )
                             yield ErrorEvent(
                                 message=str(e) + advice_block,
@@ -896,6 +907,7 @@ class Agent:
 
         if finished_by_error:
             stop_reason = "error"
+            self.last_turn_failed = True
         if stop_reason == "max_iterations":
             # 到顶不是「说完了」：明确给出停止原因（安全审查 M12——旧实现静默断头，
             # 前端看起来像回答被截断，用户与模型都不知道还能继续）

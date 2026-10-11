@@ -13,10 +13,19 @@
     3  lint / unit / e2e / eval 质量门          §2
     4  PyInstaller 打包（不经 uv run）          §3-2
     5  产物校验（exe / 内置技能 / manifest）     §3-3
-    6  冒烟（临时 SKYSHEEP_HOME 起 exe）        §3-3
-    7  ISCC 编译安装包                          §3-4
-    8  安装包 sha256 附件                       §4-5
-    9  gh release create 上传                   §4-2/§4-3（仅 --upload）
+    6  signtool 签名打包产物（未配置证书自动跳过）§3-4
+    7  冒烟（临时 SKYSHEEP_HOME 起 exe）        §3-3
+    8  ISCC 编译安装包                          §3-4
+    9  signtool 签名安装包（未配置证书自动跳过）  §3-4
+   10  安装包 sha256 附件                       §4-5
+   11  gh release create 上传                   §4-2/§4-3（仅 --upload）
+
+代码签名（可选但强烈推荐）：配置 SKYSHEEP_SIGN_PFX（+ 可选 SKYSHEEP_SIGN_PFX_PASSWORD）
+或 SKYSHEEP_SIGN_CERT_SHA1（按指纹取「当前用户\\个人」证书存储）即自动签名，
+signtool 用 SKYSHEEP_SIGNTOOL 指定或自动枚举 Windows Kits；时间戳默认
+DigiCert（SKYSHEEP_SIGN_TIMESTAMP_URL 可换）。签名失败即中止发布；未配置时
+打印跳过说明继续（发布保持未签名，SmartScreen 拦截见 docs/smartscreen-说明.md）。
+签名必须带时间戳（/tr），否则证书过期后已发布安装包的签名会失效。
 
 安全取向：
 - ``--upload`` 不给就绝不碰 gh；给了也在全部本地阶段通过后才执行，且
@@ -147,12 +156,21 @@ def step_versions() -> None:
 
 
 def step_quality() -> None:
-    """本地发布同样执行 lint、单测、真实 socket 与行为评测，不依赖之前的 CI。"""
+    """本地发布同样执行 lint、单测（含覆盖率门槛）、真实 socket 与行为评测。
+
+    与 CI 同一口径：单测带 --cov-fail-under=80.5，避免本地发布走一套更松的
+    质量门；不依赖之前的 CI 结果。
+    """
     python = _ENGINE_DIR / ".venv" / "Scripts" / "python.exe"
     if not python.is_file():
         raise RuntimeError(f"找不到项目解释器：{python}")
     _run([str(python), "-m", "ruff", "check", "."], cwd=_ENGINE_DIR)
-    for marker in ("not e2e and not eval", "e2e", "eval"):
+    _run([
+        str(python), "-m", "pytest", "-q", "-m", "not e2e and not eval",
+        "--cov=skysheep", "--cov-report=term-missing:skip-covered",
+        "--cov-fail-under=80.5",
+    ], cwd=_ENGINE_DIR)
+    for marker in ("e2e", "eval"):
         _run([str(python), "-m", "pytest", "-q", "-m", marker], cwd=_ENGINE_DIR)
 
 
@@ -191,6 +209,89 @@ def step_verify_artifacts() -> None:
     if not manifest.is_file():
         raise RuntimeError(f"缺场景模板清单 {manifest}")
     print(f"  exe、内置技能（{count} 个 SKILL.md）、gallery_manifest.json 均在位")
+
+
+# ---------- 代码签名（可选：配置了证书环境变量才签，失败即中止） ----------
+
+
+def _find_signtool() -> Path | None:
+    """定位 signtool.exe：SKYSHEEP_SIGNTOOL 环境变量优先，否则枚举 Windows Kits
+    取版本号最高、同版本 x64 优先的那份。找不到返回 None（调用方按未配置/报错分叉）。"""
+    override = os.environ.get("SKYSHEEP_SIGNTOOL", "").strip()
+    if override:
+        p = Path(override)
+        return p if p.is_file() else None
+    candidates: list[Path] = []
+    for root in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")):
+        if not root:
+            continue
+        kits = Path(root) / "Windows Kits" / "10" / "bin"
+        if kits.is_dir():
+            candidates.extend(kits.glob("*/*/signtool.exe"))
+
+    def rank(p: Path) -> tuple:
+        ver = next((s for s in p.parts if re.fullmatch(r"\d+(\.\d+)+", s)), "")
+        nums = tuple(int(x) for x in ver.split(".")) if ver else ()
+        return (nums, 1 if p.parent.name.lower() == "x64" else 0)
+
+    return max(candidates, key=rank) if candidates else None
+
+
+def _sign_config() -> tuple[Path, list[str]] | None:
+    """读签名环境变量，返回 (signtool 路径, sign 参数)；未配置证书返回 None。
+
+    PFX（SKYSHEEP_SIGN_PFX + 可选 SKYSHEEP_SIGN_PFX_PASSWORD）优先，其次按
+    指纹取证书存储（SKYSHEEP_SIGN_CERT_SHA1）。配置了证书却找不到 signtool
+    直接报错——发布者明确表达了签名意图，静默跳过会让未签名包带「已按流程
+    发布」的错觉出门。
+    """
+    pfx = os.environ.get("SKYSHEEP_SIGN_PFX", "").strip()
+    sha1 = os.environ.get("SKYSHEEP_SIGN_CERT_SHA1", "").strip()
+    if not pfx and not sha1:
+        return None
+    ts = os.environ.get("SKYSHEEP_SIGN_TIMESTAMP_URL", "").strip() or \
+        "http://timestamp.digicert.com"
+    # /fd /td 都用 SHA256（兼容模式才是 SHA1，会被新版 Windows 拒绝）；/tr 时间戳
+    # 让签名在证书过期后仍可验证——没时间戳的签名到期即死，对分发出去的旧包无解
+    args = ["/fd", "SHA256", "/td", "SHA256", "/tr", ts]
+    if pfx:
+        args += ["/f", str(Path(pfx).resolve())]
+        pw = os.environ.get("SKYSHEEP_SIGN_PFX_PASSWORD", "")
+        if pw:
+            args += ["/p", pw]
+    else:
+        args += ["/sha1", sha1]
+    tool = _find_signtool()
+    if tool is None:
+        raise RuntimeError(
+            "已配置签名证书但找不到 signtool.exe：装 Windows SDK，"
+            "或用 SKYSHEEP_SIGNTOOL 指到可执行文件"
+        )
+    return tool, args
+
+
+def _sign_file(target: Path, tool: Path, args: list[str]) -> None:
+    """对 exe 做 Authenticode 签名并回验；任一步失败即中止发布。
+
+    重签会替换旧签名（signtool 语义），换证书重发不需要先解除签名。签完
+    用 verify /pa 回验：这步的产出必须是「可验证的签名」，不是「退出码 0」。
+    """
+    print(f"  目标：{target.name}")
+    _run([str(tool), "sign", *args, str(target)])
+    _run([str(tool), "verify", "/pa", str(target)])
+    print(f"  签名与回验通过：{target.name}")
+
+
+def step_sign_app() -> None:
+    """签名 PyInstaller 产物（可选）：先签内层 exe，安装器才会带着有效签名。"""
+    if not _DIST_EXE.is_file():
+        raise RuntimeError(f"缺打包产物 {_DIST_EXE}")
+    cfg = _sign_config()
+    if cfg is None:
+        print("  未配置代码签名（SKYSHEEP_SIGN_PFX / SKYSHEEP_SIGN_CERT_SHA1），跳过——"
+              "安装包保持未签名，首装会遇到 SmartScreen 拦截（docs/smartscreen-说明.md）")
+        return
+    _sign_file(_DIST_EXE, *cfg)
 
 
 def _read_log(log_path: Path) -> str:
@@ -311,6 +412,18 @@ def step_installer() -> None:
     print(f"  产物：{exe}")
 
 
+def step_sign_installer() -> None:
+    """签名安装包（可选）：SmartScreen 信任与应用内更新提示的最后一块。"""
+    exe = _installer_exe(pyproject_version())
+    if not exe.is_file():
+        raise RuntimeError(f"缺安装包 {exe}（先完成 ISCC 阶段）")
+    cfg = _sign_config()
+    if cfg is None:
+        print("  未配置代码签名，跳过安装包签名")
+        return
+    _sign_file(exe, *cfg)
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -348,6 +461,13 @@ def step_upload(allow: bool) -> None:
     missing = [str(p) for p in (exe, sha) if not p.is_file()]
     if missing:
         raise RuntimeError("缺上传资产：" + ", ".join(missing))
+    tool = _find_signtool()
+    if tool is not None:
+        proc = subprocess.run([str(tool), "verify", "/pa", str(exe)],
+                              capture_output=True, check=False)  # noqa: S603
+        if proc.returncode != 0:
+            print("  警告：安装包未签名（signtool verify 未通过）——未签名包会触发 "
+                  "SmartScreen 拦截；本机没有签名证书时这是已知取舍，确认是有意发布再继续")
     expected = _sha256(exe)
     recorded = _read_text(sha, "安装包 SHA256 附件").split()
     if recorded != [expected, exe.name]:
@@ -413,8 +533,10 @@ def build_steps(args: argparse.Namespace) -> list[Step]:
         Step("§2", "发布质量门（lint / unit / e2e / eval）", step_quality),
         Step("§3-2", "PyInstaller 打包（不经 uv run）", step_pack, "skip_pack"),
         Step("§3-3", "产物校验（exe / 内置技能 / manifest）", step_verify_artifacts),
+        Step("§3-4", "signtool 签名打包产物（未配置证书自动跳过）", step_sign_app),
         Step("§3-3", "冒烟（临时 SKYSHEEP_HOME 起 exe，GET / 应 200）", step_smoke, "skip_smoke"),
         Step("§3-4", "ISCC 编译安装包", step_installer, "skip_installer"),
+        Step("§3-4", "signtool 签名安装包（未配置证书自动跳过）", step_sign_installer, "skip_installer"),
         Step("§4-5", "安装包 sha256 附件", step_sha256, "skip_installer"),
         Step("§4-2/§4-3", "gh release create 上传（仅 --upload）", lambda: step_upload(args.upload)),
     ]
@@ -425,12 +547,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="release.py",
         description=(
             "SkySheep 一键发版脚本：发布清单 §3/§4 的机械化"
-            "（依赖同步→打包→产物校验→冒烟→ISCC 安装包→sha256）"
+            "（依赖同步→打包→产物校验→签名→冒烟→ISCC 安装包→签名→sha256）"
         ),
         epilog=(
             "默认绝不执行任何对外发布动作；只有显式 --upload 才会在全部阶段通过后\n"
             "调用 gh release create v<版本> 上传安装包与 .sha256（发布清单 §4-2/§4-3）。\n"
-            "阶段对应清单条目：1=§1 2=§3-1 3=§2 4=§3-2 5=§3-3 6=§3-3 7=§3-4 8=§4-5 9=上传（仅 --upload）。\n"
+            "代码签名：配置 SKYSHEEP_SIGN_PFX（+可选 SKYSHEEP_SIGN_PFX_PASSWORD）或\n"
+            "SKYSHEEP_SIGN_CERT_SHA1 即自动签名，未配置则自动跳过并提示。\n"
+            "阶段对应清单条目：1=§1 2=§3-1 3=§2 4=§3-2 5=§3-3 6=签名 7=§3-3 8=§3-4 "
+            "9=签名 10=§4-5 11=上传（仅 --upload）。\n"
             "失败即非零退出，并打印已到达的步骤。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

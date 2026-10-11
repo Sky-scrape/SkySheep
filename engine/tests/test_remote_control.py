@@ -355,3 +355,129 @@ def test_connections_registry_and_kick(home, monkeypatch):
 def test_lan_kick_is_local_only():
     assert "lan.kick" in LOCAL_ONLY_METHODS
     assert "lan.connections" not in LOCAL_ONLY_METHODS
+
+
+def _send(ws, mid, method, params=None):
+    ws.send_json({"id": mid, "method": method, "params": params or {}})
+    return ws
+
+
+# ---- 6. 连接级会话隔离（本轮修复：查询不再依赖全局 backend.session） ----
+#
+# 旧实现 runs/tasks/chat.status 用全局 backend.session 过滤、permission.queue
+# 完全跨会话聚合：连接 A 可读到连接 B 的运行原文与权限详情。这里用两条真实
+# WS 连接（都模拟远程来源）复现并钉住修复后的行为。
+
+
+def test_remote_runs_are_scoped_to_connection_session(home, monkeypatch):
+    """远程连接 A 不能读取连接 B 会话的运行记录（连接级授权，非全局活动会话）。"""
+    update_config_section("server", {"lan": True, "token": "tok-iso"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: False)
+    with make_client(home, []) as client:
+        with client.websocket_connect("/ws?token=tok-iso") as a, \
+                client.websocket_connect("/ws?token=tok-iso") as b:
+            sid_a = recv_until(_send(a, "n1", "session.new"), "n1")["result"]["id"]
+            sid_b = recv_until(_send(b, "n2", "session.new"), "n2")["result"]["id"]
+            assert sid_a != sid_b
+            be = client.app.state.backend
+            # 造一条属于会话 B 的可重发运行
+            be.runs.register("subagent-probeB", "subagent", sid_b,
+                             retry_text="仅会话B原文", agent_type="task")
+            be.runs.update("subagent-probeB", state="interrupted")
+            # A 读取：必须拒绝（不属于当前连接会话）
+            r = recv_until(_send(a, "g1", "runs.get", {"run_id": "subagent-probeB"}), "g1")
+            assert r["ok"] is False and "不属于当前会话" in r["error"], r
+            # A 的列表里不得出现 B 的运行
+            rl = recv_until(_send(a, "l1", "runs.list", {}), "l1")["result"]["runs"]
+            assert all(x["session_id"] != sid_b for x in rl), rl
+            # B 自己能读到
+            rb = recv_until(_send(b, "g2", "runs.get", {"run_id": "subagent-probeB"}), "g2")
+            assert rb["ok"] is True
+
+
+def test_remote_runs_fail_closed_before_binding(home, monkeypatch):
+    """远程连接尚未绑定会话时：runs.list 返回空、runs.get 拒绝（不回退全局活动会话）。"""
+    update_config_section("server", {"lan": True, "token": "tok-fc"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: False)
+    with make_client(home, []) as client:
+        be = client.app.state.backend
+        be.runs.register("turn-any", "turn", "some-other-session", retry_text="x")
+        with client.websocket_connect("/ws?token=tok-fc") as ws:
+            rl = recv_until(_send(ws, "l1", "runs.list", {}), "l1")
+            assert rl["ok"] is True and rl["result"]["runs"] == []
+            rg = recv_until(_send(ws, "g1", "runs.get", {"run_id": "turn-any"}), "g1")
+            assert rg["ok"] is False
+
+
+def test_remote_permission_queue_scoped_to_connection(home, monkeypatch):
+    """远程权限队列只含本连接会话的未决请求（不泄露其他会话的工具名与 diff）。"""
+    from skysheep.security.gate import PendingPermission, Safety
+
+    class _DummyFuture:
+        def done(self) -> bool:
+            return False
+
+    update_config_section("server", {"lan": True, "token": "tok-pq"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: False)
+    with make_client(home, []) as client:
+        with client.websocket_connect("/ws?token=tok-pq") as a, \
+                client.websocket_connect("/ws?token=tok-pq") as b:
+            recv_until(_send(a, "n1", "session.new"), "n1")
+            sid_b = recv_until(_send(b, "n2", "session.new"), "n2")["result"]["id"]
+            be = client.app.state.backend
+            rt_b = be.runtimes[sid_b]
+            rt_b.agent._pending["probe-perm-B"] = PendingPermission(
+                request_id="probe-perm-B", tool_name="write_file",
+                arg_text="write_file path=b.txt", safety=Safety.WRITE,
+                detail="会话B私有详情", diff="会话B私有diff",
+                _future=_DummyFuture(),
+            )
+            try:
+                q = recv_until(_send(a, "q1", "permission.queue"), "q1")["result"]["pending"]
+                assert all(x["request_id"] != "probe-perm-B" for x in q), q
+                # B 自己能看见
+                qb = recv_until(_send(b, "q2", "permission.queue"), "q2")["result"]["pending"]
+                assert any(x["request_id"] == "probe-perm-B" for x in qb)
+            finally:
+                rt_b.agent._pending.pop("probe-perm-B", None)
+
+
+def test_remote_permission_respond_rejects_other_session_request(home, monkeypatch):
+    """远程连接不能回答其他会话的权限请求（连接级接收登记校验）。"""
+    update_config_section("server", {"lan": True, "token": "tok-pr"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: False)
+    with make_client(home, []) as client:
+        with client.websocket_connect("/ws?token=tok-pr") as a:
+            recv_until(_send(a, "n1", "session.new"), "n1")
+            r = recv_until(_send(a, "p1", "permission.respond",
+                                 {"request_id": "never-seen", "decision": "allow_once"}), "p1")
+            assert r["ok"] is True and r["result"]["delivered"] is False, r
+
+
+def test_rotate_token_revokes_existing_remote_ws(home, monkeypatch):
+    """令牌轮换：已建立的远程连接立即失效（不能继续发 RPC）。
+
+    旧令牌只能阻止新连接；已建立连接照常发 RPC 是实际缺口。轮换后旧连接
+    要么被 kick 断开，要么 RPC 被拒绝——两种都算已失效。
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    update_config_section("server", {"lan": True, "token": "tok-old"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: False)
+    with make_client(home, []) as client:
+        with client.websocket_connect("/ws?token=tok-old") as ws:
+            assert recv_until(_send(ws, "b1", "boot"), "b1")["ok"] is True
+            be = client.app.state.backend
+            client.portal.call(be.lan_rotate_token)
+            revoked = False
+            try:
+                r = recv_until(_send(ws, "b2", "boot"), "b2")
+                revoked = (r.get("ok") is False) and ("轮换" in r.get("error", ""))
+            except WebSocketDisconnect:
+                revoked = True  # kick 已把连接关闭
+            assert revoked, "轮换后旧连接必须失效"

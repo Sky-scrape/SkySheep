@@ -104,6 +104,29 @@ class MidStreamFailProvider(FakeProvider):
         raise RuntimeError("429 rate limited mid-stream")
 
 
+class AlwaysFailProvider(FakeProvider):
+    async def stream(self, messages, tool_schemas, effort=None):
+        raise RuntimeError("Error code: 429 - rate limit exceeded, please retry")
+        yield  # noqa: B901 不可达；仅为把函数变成异步生成器（与 Provider 协议一致）
+
+
+async def test_error_after_retries_mentions_retry_count(tmp_path, monkeypatch):
+    """重试耗尽后的报错要明说「已重试几次」：重试过的失败与第一次就失败，
+    用户要判断的问题不同（偶发 vs 配置错）。"""
+    monkeypatch.setattr("skysheep.core.agent.RETRY_BASE_DELAY_S", 0.0)
+    monkeypatch.setattr("skysheep.core.agent.MAX_STREAM_RETRIES", 1)
+    provider = AlwaysFailProvider([[TextBlock(text="x")]])
+    agent = make_agent(provider, tmp_path)
+    events = await collect(agent, "hi")
+    kinds = [e.kind for e in events]
+    assert kinds.count("notice") == 1, "重试提示照旧发一次"
+    errs = [e for e in events if e.kind == "error"]
+    assert errs, "最终应报错收尾"
+    assert "已自动重试 1 次" in errs[0].message
+    assert errs[0].diag_title
+    assert errs[0].diag_advice
+
+
 async def test_midstream_failure_does_not_replay(tmp_path):
     provider = MidStreamFailProvider([[TextBlock(text="x")]])
     agent = make_agent(provider, tmp_path)

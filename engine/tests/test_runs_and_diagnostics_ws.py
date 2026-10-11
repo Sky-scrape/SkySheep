@@ -87,6 +87,19 @@ def test_model_test_with_fake_provider(home):
         assert r["result"]["ok"] is False  # fake 服务测不出真实连通
 
 
+def test_model_probe_capabilities_with_fake_provider(home):
+    """能力探测对 fake 服务：没有真实接口与 Key，四项都是「没测成」，不报错。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        r = _rpc(ws, "m2", "model.probe_capabilities", {"name": "fake"})
+        assert r["ok"] is True
+        res = r["result"]
+        for key in ("streaming", "tools", "vision", "reasoning"):
+            assert res[key]["supported"] is None
+            assert res[key]["note"]
+        assert res["summary"]
+        assert res["latency_ms"] == 0
+
+
 def test_advanced_turn_budget_roundtrip(home):
     """单轮上限 / 备用模型进高级设置读写（config.toml）。"""
     set_advanced_settings_in_config(

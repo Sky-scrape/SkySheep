@@ -420,6 +420,32 @@ def _atexit_close() -> None:
         _BROWSER = None
 
 
+def sweep_orphan_browser_profiles(tempdir: str | None = None) -> int:
+    """启动清扫：删掉上次强杀/崩溃遗留的 skysheep-edge-* 临时配置目录。
+
+    无头 Edge 的单例实例在正常退出（atexit / close 动作 / 闲置回收）时会自己
+    清理临时目录；但崩溃 / 结束进程树时 atexit 不执行，目录残留在系统 TEMP。
+    启动时扫一遍：进程已死（目录无锁）的删掉，进程仍活着（rmtree 失败）的
+    跳过——不杀进程，只清目录，误删正在使用的实例的风险为零。
+    返回实际删掉的目录数（测试与日志用）。
+    """
+    root = Path(tempdir or tempfile.gettempdir())
+    removed = 0
+    try:
+        candidates = list(root.glob("skysheep-edge-*"))
+    except OSError:
+        return 0
+    for d in candidates:
+        if not d.is_dir():
+            continue
+        try:
+            shutil.rmtree(d)
+            removed += 1
+        except OSError:
+            continue  # 目录被占用（对应 msedge 进程还活着）：留给看门狗/下次启动
+    return removed
+
+
 async def get_browser() -> CdpBrowser:
     """单例入口：实例活着就复用；死了 / 没有就重新拉起。
 

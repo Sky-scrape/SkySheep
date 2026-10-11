@@ -104,7 +104,9 @@ ADVICE: dict[str, tuple[str, str]] = {
     "rate_limit": (
         "触发限流（请求过于频繁或配额用尽）",
         "稍等片刻再试（应用会自动重试几次）；持续出现时在服务商控制台"
-        "查看速率与配额档位，或更换其他已配置的模型服务。",
+        "查看速率与配额档位，或更换其他已配置的模型服务。"
+        "这类失败请求一般不计费（以账单为准）；也可在 设置 · 高级 里配置"
+        "「备用模型」，故障时自动接管。",
     ),
     "balance": (
         "账户余额不足或配额已用完",
@@ -118,7 +120,8 @@ ADVICE: dict[str, tuple[str, str]] = {
     "model_missing": (
         "模型名不存在或不可用",
         "在 设置 · 模型服务 里点「检测并获取模型」确认模型 ID 的准确拼写；"
-        "确认当前账号有该模型的访问权限（部分模型需要申请）。",
+        "确认当前账号有该模型的访问权限（部分模型需要申请）。"
+        "也可先切换到其他可用模型服务继续工作。",
     ),
     "network": (
         "网络连接失败",
@@ -128,7 +131,9 @@ ADVICE: dict[str, tuple[str, str]] = {
     "server": (
         "模型服务暂时不可用",
         "上游服务正在异常或过载，通常稍等即恢复；持续出现时到服务商状态页确认，"
-        "或先切换到其他已配置的模型服务。",
+        "或先切换到其他已配置的模型服务。"
+        "这类失败请求一般不计费（以账单为准）；也可在 设置 · 高级 里配置"
+        "「备用模型」，故障时自动接管。",
     ),
     "invalid_request": (
         "请求参数不被该服务接受",
@@ -351,6 +356,303 @@ async def test_connection(
         result.title = diag.title
         result.advice = diag.advice
         return result
+
+
+# ---- 能力探测（流式 / 工具调用 / 图片输入 / 思考强度） ----
+
+# 「测试连接」只回答能不能对话；这里对四项能力各发一次最小真实调用，
+# 回答「这个模型能干什么」。由用户点按钮触发（每次都会产生少量真实计费），
+# 不自动跑。四项彼此独立：单项失败不影响其他项；结果三态——True 支持 /
+# False 明确不支持（服务拒绝且报错点名该能力）/ None 没测成（鉴权、网络等
+# 与能力无关的失败），None 不参与结论，只如实说明原因。
+
+# 1×1 透明 PNG（最小合法图片）：视觉探测用它，几十字节、各家都按 1 个
+# 图片 token 计，把探测成本压到最低
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z/D/PwAG/gL+DHWJ3gAAAABJRU5ErkJggg=="
+)
+
+# 服务拒绝请求时，报错文本里点名了哪项能力才算「明确不支持」；
+# 没点名的 400 可能是别的原因（温度、其他参数），宁可不判
+_FEATURE_MARKERS: dict[str, tuple[str, ...]] = {
+    "streaming": ("stream",),
+    "tools": ("tool", "function"),
+    "vision": ("image", "vision", "media", "multimodal"),
+    "reasoning": ("reason", "think", "effort", "budget"),
+}
+
+_CAP_LABELS: dict[str, str] = {
+    "streaming": "流式输出",
+    "tools": "工具调用",
+    "vision": "图片输入",
+    "reasoning": "思考强度",
+}
+
+
+@dataclass
+class CapabilityItem:
+    """一项能力的探测结果：supported 三态 + 给人看的说明。"""
+
+    supported: bool | None = None
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        return {"supported": self.supported, "note": self.note}
+
+
+def _cap_item_from_error(e: Exception, feature: str,
+                         markers: tuple[str, ...]) -> CapabilityItem:
+    """把探测调用的失败分类成三态结论。永不抛异常。"""
+    text = str(e)
+    low = text.lower()
+    diag = diagnose_error(e)
+    first = (text.splitlines()[0][:140] if text else type(e).__name__)
+    if diag.category == "invalid_request" and any(m in low for m in markers):
+        return CapabilityItem(False, f"该服务明确拒绝了{feature}（不支持）：{first}")
+    if diag.category in ("auth", "network", "server", "rate_limit", "balance"):
+        return CapabilityItem(None, f"没测成：{diag.title}（{first}）")
+    if diag.category == "invalid_request":
+        return CapabilityItem(None, f"服务拒绝了请求但报错未点名{feature}，无法判定：{first}")
+    return CapabilityItem(None, f"没测成：{first}")
+
+
+def capability_summary(items: dict[str, CapabilityItem]) -> str:
+    """把四项探测拼成一句「这个模型适合干什么」的结论。
+
+    只陈述测出来的事实，不猜没测的部分：False 决定「不适合什么」，
+    True 汇总「能干什么」，None 不进结论；全部没测成时兜底提醒。
+    """
+    yes = [lbl for k, lbl in _CAP_LABELS.items()
+           if items.get(k) is not None and items[k].supported]
+    no = [k for k in _CAP_LABELS
+          if items.get(k) is not None and items[k].supported is False]
+    parts: list[str] = []
+    if yes:
+        parts.append("支持：" + "、".join(yes) + "。")
+    if "tools" in no:
+        parts.append("不支持工具调用：无法使用内置工具与自动化任务，只适合纯对话。")
+    if "vision" in no:
+        parts.append("不支持图片输入：涉及图片的任务请换模型。")
+    if "streaming" in no:
+        parts.append("不支持流式输出：回答将整段出现，不能逐字显示。")
+    if "reasoning" in no:
+        parts.append("不支持思考强度参数：请在该服务上关闭「提供思考强度调节」开关。")
+    if not parts:
+        return "各项能力都未测出结论，建议检查地址与 Key 后再试。"
+    return "".join(parts)
+
+
+def _cap_client(kind: str, base_url: str | None, api_key: str | None,
+                timeout_s: float, transport: object | None):
+    """构造探测用的 SDK 客户端（一次构建、四项共用，用完统一关闭）。
+
+    transport 仅供测试注入（httpx.MockTransport）；本地地址不走系统代理，
+    与 probe.py 同一套直连规则。
+    """
+    import httpx
+
+    from .probe import _is_local
+
+    extra: dict = {}
+    if transport is not None:
+        extra["http_client"] = httpx.AsyncClient(transport=transport, timeout=timeout_s)
+    elif base_url and _is_local(base_url):
+        extra["http_client"] = httpx.AsyncClient(trust_env=False, timeout=timeout_s)
+    if kind == "anthropic":
+        from anthropic import AsyncAnthropic
+
+        return AsyncAnthropic(api_key=api_key or "", base_url=base_url or None,
+                              timeout=timeout_s, max_retries=0, **extra)
+    from openai import AsyncOpenAI
+
+    return AsyncOpenAI(api_key=api_key or "", base_url=base_url or None,
+                       timeout=timeout_s, max_retries=0, **extra)
+
+
+async def _probe_openai(client, model: str) -> dict[str, CapabilityItem]:
+    """openai 兼容协议的四项探测。"""
+    m = model or "gpt-4o-mini"
+    out: dict[str, CapabilityItem] = {}
+
+    # 流式：max_tokens=1 的 stream 调用，收到增量即支持
+    try:
+        stream = await client.chat.completions.create(
+            model=m, max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}], stream=True,
+        )
+        async for _ in stream:
+            pass
+        out["streaming"] = CapabilityItem(True, "流式请求成功返回了增量")
+    except Exception as e:  # noqa: BLE001
+        out["streaming"] = _cap_item_from_error(e, "流式输出", _FEATURE_MARKERS["streaming"])
+
+    # 工具调用：带一个最小工具定义，看模型是否真的发起 tool_calls
+    try:
+        resp = await client.chat.completions.create(
+            model=m, max_tokens=100,
+            messages=[{"role": "user", "content": "请调用 get_weather 工具查询北京天气"}],
+            tools=[{"type": "function", "function": {
+                "name": "get_weather", "description": "查询一个城市的当前天气",
+                "parameters": {"type": "object",
+                               "properties": {"city": {"type": "string",
+                                                        "description": "城市名"}},
+                               "required": ["city"]}}}],
+        )
+        choice = (resp.choices or [None])[0]
+        called = bool(choice and getattr(choice.message, "tool_calls", None))
+        if called:
+            out["tools"] = CapabilityItem(True, "模型发起了工具调用")
+        else:
+            out["tools"] = CapabilityItem(
+                None, "调用成功但模型没有发起工具调用，无法确认支持")
+    except Exception as e:  # noqa: BLE001
+        out["tools"] = _cap_item_from_error(e, "工具调用", _FEATURE_MARKERS["tools"])
+
+    # 图片输入：1×1 PNG 的 data URL
+    try:
+        resp = await client.chat.completions.create(
+            model=m, max_tokens=10,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "用两个字回复：收到"},
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/png;base64," + _TINY_PNG_B64}},
+            ]}],
+        )
+        _ = resp.choices
+        out["vision"] = CapabilityItem(True, "服务接受了图片输入")
+    except Exception as e:  # noqa: BLE001
+        out["vision"] = _cap_item_from_error(e, "图片输入", _FEATURE_MARKERS["vision"])
+
+    # 思考强度：带 reasoning_effort 参数，接受即算支持（是否真实生效以模型为准）
+    try:
+        resp = await client.chat.completions.create(
+            model=m, max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body={"reasoning_effort": "low"},
+        )
+        _ = resp.choices
+        out["reasoning"] = CapabilityItem(
+            True, "服务接受了 reasoning_effort 参数（是否真实生效以模型为准）")
+    except Exception as e:  # noqa: BLE001
+        out["reasoning"] = _cap_item_from_error(e, "思考强度", _FEATURE_MARKERS["reasoning"])
+    return out
+
+
+async def _probe_anthropic(client, model: str) -> dict[str, CapabilityItem]:
+    """anthropic 协议的四项探测。"""
+    m = model or "claude-3-haiku-20240307"
+    out: dict[str, CapabilityItem] = {}
+
+    try:
+        async with client.messages.stream(
+            model=m, max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        ) as stream:
+            await stream.get_final_message()
+        out["streaming"] = CapabilityItem(True, "流式请求成功返回了增量")
+    except Exception as e:  # noqa: BLE001
+        out["streaming"] = _cap_item_from_error(e, "流式输出", _FEATURE_MARKERS["streaming"])
+
+    try:
+        resp = await client.messages.create(
+            model=m, max_tokens=300,
+            messages=[{"role": "user", "content": "请调用 get_weather 工具查询北京天气"}],
+            tools=[{"name": "get_weather", "description": "查询一个城市的当前天气",
+                    "input_schema": {"type": "object",
+                                     "properties": {"city": {"type": "string",
+                                                              "description": "城市名"}},
+                                     "required": ["city"]}}],
+        )
+        used = resp.stop_reason == "tool_use" or any(
+            getattr(b, "type", "") == "tool_use" for b in resp.content)
+        if used:
+            out["tools"] = CapabilityItem(True, "模型发起了工具调用")
+        else:
+            out["tools"] = CapabilityItem(
+                None, "调用成功但模型没有发起工具调用，无法确认支持")
+    except Exception as e:  # noqa: BLE001
+        out["tools"] = _cap_item_from_error(e, "工具调用", _FEATURE_MARKERS["tools"])
+
+    try:
+        resp = await client.messages.create(
+            model=m, max_tokens=10,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "用两个字回复：收到"},
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": "image/png",
+                                             "data": _TINY_PNG_B64}},
+            ]}],
+        )
+        _ = resp.content
+        out["vision"] = CapabilityItem(True, "服务接受了图片输入")
+    except Exception as e:  # noqa: BLE001
+        out["vision"] = _cap_item_from_error(e, "图片输入", _FEATURE_MARKERS["vision"])
+
+    try:
+        # max_tokens 必须大于 thinking.budget_tokens（anthropic 的硬性规则）
+        resp = await client.messages.create(
+            model=m, max_tokens=1200,
+            messages=[{"role": "user", "content": "hi"}],
+            thinking={"type": "enabled", "budget_tokens": 1024},
+        )
+        _ = resp.content
+        out["reasoning"] = CapabilityItem(True, "服务接受了 thinking 参数（扩展思考）")
+    except Exception as e:  # noqa: BLE001
+        out["reasoning"] = _cap_item_from_error(e, "思考强度", _FEATURE_MARKERS["reasoning"])
+    return out
+
+
+async def probe_capabilities(
+    *,
+    kind: str = "openai",
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model: str = "",
+    timeout_s: float = 20.0,
+    transport: object | None = None,
+) -> dict:
+    """对四项能力各做一次最小真实调用，返回每项三态结论与总结。
+
+    返回：{"kind","model","latency_ms","streaming","tools","vision",
+    "reasoning","summary"}，四个能力项各为 {"supported": bool|None,
+    "note": str}。本函数不抛异常（SDK 层错误都转成各项的 None + note），
+    未知协议除外。
+    """
+    if kind not in ("openai", "anthropic"):
+        raise RuntimeError("未知的协议类型: " + str(kind))
+    t0 = time.monotonic()
+    try:
+        client = _cap_client(kind, (base_url or "").strip() or None, api_key,
+                             timeout_s, transport)
+    except Exception as e:  # noqa: BLE001 - SDK 构造失败（如无 Key）也返回结构化结果
+        diag = diagnose_error(e)
+        item = {"supported": None,
+                "note": f"没测成：{diag.title}（{str(e).splitlines()[0][:140]}）"}
+        return {"kind": kind, "model": (model or "").strip(), "latency_ms": 0,
+                "streaming": dict(item), "tools": dict(item),
+                "vision": dict(item), "reasoning": dict(item),
+                "summary": "各项能力都未测出结论，建议先点「测试连接」确认能对话后再探测。"}
+    try:
+        if kind == "anthropic":
+            items = await _probe_anthropic(client, (model or "").strip())
+        else:
+            items = await _probe_openai(client, (model or "").strip())
+    finally:
+        # 客户端持有连接池：无论成败确定性关闭（与 probe/test_connection 同纪律）
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "kind": kind,
+        "model": (model or "").strip(),
+        "latency_ms": int((time.monotonic() - t0) * 1000),
+        "streaming": items["streaming"].to_dict(),
+        "tools": items["tools"].to_dict(),
+        "vision": items["vision"].to_dict(),
+        "reasoning": items["reasoning"].to_dict(),
+        "summary": capability_summary(items),
+    }
 
 
 # ---- 供应商健康状态 ----

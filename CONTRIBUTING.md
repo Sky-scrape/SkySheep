@@ -4,7 +4,7 @@
 
 ## 环境搭建
 
-Windows 是第一目标平台，以下步骤以 Windows 为准，macOS/Linux 作为兜底路径保留。
+Windows 是唯一受支持的目标平台，以下步骤以 Windows 为准。macOS / Linux 上引擎与网页界面（`--browser`）可以跑，但桌面壳、凭据加密（DPAPI）、Windows 沙箱、窗口与进程管理、`schtasks` 定时导出等能力不承诺可用，也不作为开发与验收目标（见 README 的「路线图与非目标」）。
 
 1. 安装 [uv](https://docs.astral.sh/uv/)（项目要求 Python >= 3.11，uv 会自动管理解释器）；
 2. 克隆仓库并同步依赖：

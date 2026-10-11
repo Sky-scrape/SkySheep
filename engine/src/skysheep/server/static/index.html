@@ -472,14 +472,14 @@
                   <b>事项</b>
                   <span class="dim small" id="ptasks-project"></span>
                 </div>
-                <button id="btn-ptask-add" class="rp-mini primary">＋ 新建任务</button>
+                <button id="btn-ptask-add" class="rp-mini primary">＋ 新建事项</button>
               </div>
               <div class="rp-toolbar">
                 <input id="ptask-input" class="ptask-input" type="text" maxlength="200"
-                       placeholder="写一个要做的任务，回车快速添加；完成后点前面的方框勾掉">
+                       placeholder="写一个要做的事项，回车快速添加；完成后点前面的方框勾掉">
               </div>
               <ul id="ptask-list" class="list ptask-list rp-page-list"></ul>
-              <div id="ptask-empty" class="rp-empty">这个项目还没有任务。把要做的事一条条加进来，做完勾掉；删项目时会一起清掉。</div>
+              <div id="ptask-empty" class="rp-empty">这个项目还没有事项。把要做的事一条条加进来，做完勾掉；删项目时会一起清掉。</div>
             </div>
           </section>
 
@@ -1668,6 +1668,17 @@
               <input type="checkbox" id="update-check-toggle" checked>
               <span>启动时自动检查更新</span>
             </label>
+            <div class="toolcfg-row">
+              <label for="update-channel">更新渠道</label>
+              <select id="update-channel">
+                <option value="stable">稳定版（推荐）</option>
+                <option value="beta">测试版 —— 含预发布，尝鲜用</option>
+              </select>
+            </div>
+            <p class="dim small adv-toggle-desc">
+              稳定版只推送正式版；测试版会提前收到预发布版本，稳定性可能打折扣。
+              两个渠道的安装包都会做校验和核对，更新前自动备份会话与配置。
+            </p>
             <div id="about-info" class="about"></div>
             <div id="about-update" class="about-update"></div>
           </section>
@@ -1776,6 +1787,14 @@
                 <input type="checkbox" id="chk-export-secrets"> 包含 API Key（明文）
               </label>
               <span id="export-full-msg" class="io-msg"></span>
+            </div>
+            <p class="settings-hint" style="margin-top:6px">
+              在另一台电脑（或本机重装）恢复：点下面的按钮选中导出的 zip，预览确认后自动恢复
+              会话库、配置与技能。替换前自动留「恢复前」副本，导入失败自动回滚，不会留下半成品。
+            </p>
+            <div class="io-row">
+              <button id="btn-import-full" class="btn-ghost" title="从完整导出包恢复会话、配置与技能；仅本机可用">⬆ 从导出包恢复…</button>
+              <span id="import-full-msg" class="io-msg"></span>
             </div>
           </section>
         </section>

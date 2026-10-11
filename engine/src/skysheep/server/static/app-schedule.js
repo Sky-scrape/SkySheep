@@ -1316,7 +1316,8 @@ async function loadPipelines() {
     };
     ops.querySelector('[data-op="del"]').onclick = async (e) => {
       e.stopPropagation();
-      if (!confirm(`删除流水线「${p.name}」？运行中的节点也会停止，记录不可恢复。`)) return;
+      if (!(await confirmModal(`删除流水线「${p.name}」？运行中的节点也会停止，记录不可恢复。`,
+        { title: "删除流水线", okLabel: "删除", danger: true }))) return;
       try { await request("pipeline.delete", { id: p.id }); }
       catch (err) { addNotice("删除失败: " + err.message); }
       await loadPipelines();
@@ -1430,7 +1431,8 @@ function pipelineModal(p) {
         if (r.needs_confirm) {
           // done 节点重跑：下游产出基于旧结果，明确问一句再级联
           const names = (r.downstream || []).join("、");
-          if (!confirm(`下游 ${r.downstream.length} 个节点（${names}）的产出基于它的旧结果。\n一并重跑这些下游吗？（取消 = 仅重跑本节点，下游保持旧产出）`)) return;
+          if (!(await confirmModal(`下游 ${r.downstream.length} 个节点（${names}）的产出基于它的旧结果。\n\n一并重跑这些下游吗？\n\n取消 = 仅重跑本节点，下游保持旧产出`,
+            { title: "级联重跑", okLabel: "一并重跑" }))) return;
           await request("pipeline.node_rerun", { id: Number(btn.dataset.rerun), cascade: true });
           addNotice("节点与全部下游已重新排队，依赖满足后自动运行");
         } else {

@@ -230,7 +230,10 @@ function connect() {
     pendingReplies.forEach((p) => { if (!p.sent && p.send) p.send(); });
     // 曾连上过又断开 → 现在恢复了：断线期间面板里的数据（日程/任务/文件树…）
     // 可能已经变了，整体重拉一遍；首次连接不刷（boot/initUiPrefs 自己会拉）
-    if (wsEverConnected) reloadProjectPanels();
+    if (wsEverConnected) {
+      reloadProjectPanels();
+      restorePendingPermissions(); // 重连后补回未决的权限确认卡
+    }
     wsEverConnected = true;
   };
   ws.onclose = () => {
@@ -3006,7 +3009,8 @@ function buildTeamCard(roster, directorMode, director) {
   const deliverBtn = tcEl("button", "tc-deliver", "交付");
   deliverBtn.title = "确认交付：产出《交付说明》并关闭团队（未完成的工单会记为未尽事项），本会话恢复普通对话";
   deliverBtn.onclick = async () => {
-    if (!confirm("交付会结束团队并产出《交付说明》（未完成的工单记为未尽事项），本会话恢复普通对话。确定交付？")) return;
+    if (!(await confirmModal("交付会结束团队并产出《交付说明》（未完成的工单记为未尽事项），本会话恢复普通对话。确定交付？",
+      { title: "确认交付", okLabel: "交付" }))) return;
     const t = curTab();
     deliverBtn.disabled = true;
     deliverBtn.textContent = "交付中…";
@@ -3024,7 +3028,8 @@ function buildTeamCard(roster, directorMode, director) {
   const stopBtn = tcEl("button", "tc-stop", "收队");
   stopBtn.title = "立即终止团队：正在发言的队员会把已产出的部分定稿进频道，随后产出《收队说明》";
   stopBtn.onclick = async () => {
-    if (!confirm("收队会立即终止团队：正在发言的队员会把已产出的部分定稿进频道，随后产出《收队说明》，本会话恢复普通对话。确定收队？")) return;
+    if (!(await confirmModal("收队会立即终止团队：正在发言的队员会把已产出的部分定稿进频道，随后产出《收队说明》，本会话恢复普通对话。确定收队？",
+      { title: "确认收队", okLabel: "收队", danger: true }))) return;
     const t = curTab();
     stopBtn.disabled = true;
     stopBtn.textContent = "收队中…";
@@ -3045,7 +3050,8 @@ function buildTeamCard(roster, directorMode, director) {
   takeoverBtn.hidden = true;
   takeoverBtn.title = "接管：切回用户总管模式，正在推进的自动循环会被取消（正在发言的成员会把已产出的部分定稿进频道），工单板与团队频道保留";
   takeoverBtn.onclick = async () => {
-    if (!confirm("接管会切回用户总管模式：正在推进的自动循环会被取消（正在发言的成员会把已产出的部分定稿进频道），工单板与团队频道保留，此后由你直接指挥。确定接管？")) return;
+    if (!(await confirmModal("接管会切回用户总管模式：正在推进的自动循环会被取消（正在发言的成员会把已产出的部分定稿进频道），工单板与团队频道保留，此后由你直接指挥。确定接管？",
+      { title: "确认接管", okLabel: "接管" }))) return;
     const t = curTab();
     takeoverBtn.disabled = true;
     takeoverBtn.textContent = "接管中…";
@@ -4481,6 +4487,32 @@ function handleEvent(kind, data) {
 // 工具安全级展示名：权限条/勾选表等面向用户的界面统一用它，不露内部枚举值
 const SAFETY_LABELS = { readonly: "只读", write: "写入", dangerous: "高危" };
 
+// 断线重连 / 页面刷新后，后端可能还挂着未决的权限请求（那一轮仍在等决策），
+// 但确认卡随事件流已丢——补拉 permission.queue 重建当前会话的卡，避免
+// 「后端在等、前端看不到」的假死（安全审查 M12 同源问题：残留卡可被迟到
+// 投递，丢卡同样危险）。只恢复**活动会话**的请求；后台会话的确认卡由标签
+// 徽记与运行中心「等待确认」分区承接，恢复时不动它们。
+let restoredPermReq = null; // 已恢复过的 request_id：同一张卡只重建一次
+
+async function restorePendingPermissions() {
+  let pending = [];
+  try {
+    const r = await request("permission.queue", {});
+    pending = (r && r.pending) || [];
+  } catch (e) {
+    return; // 拉不到（后端旧版/断线）就维持现状
+  }
+  if (!pending.length) { restoredPermReq = null; return; }
+  const sid = activeTab && activeTab.sid;
+  const mine = pending.find((p) => !sid || String(p.session_id) === String(sid));
+  if (!mine) return;
+  if (restoredPermReq === mine.request_id) return; // 已在屏上 / 已恢复过
+  restoredPermReq = mine.request_id;
+  // detail 为空时 showPermission 会回退到 JSON.stringify(input)；恢复数据没有
+  // input 字段，给个空对象避免渲染出 "undefined"
+  showPermission({ ...mine, input: mine.detail ? undefined : {}, session_id: mine.session_id || sid });
+}
+
 function showPermission(data) {
   if (routeTab && routeTab !== activeTab) {
     // 后台会话的确认请求：标到标签上，切过去再展示
@@ -4804,7 +4836,8 @@ function renderSessionExtras({ empty_count = 0, archived_count = 0 } = {}) {
       footer.classList.remove("hidden");
       footer.innerHTML = `<button class="link-btn">🧹 清理 ${empty_count} 个空会话</button>`;
       footer.querySelector(".link-btn").onclick = async () => {
-        if (!confirm(`将删除 ${empty_count} 个没有任何消息的空会话，删除后无法恢复。\n\n确定继续？`)) return;
+        if (!(await confirmModal(`将删除 ${empty_count} 个没有任何消息的空会话，删除后无法恢复。`,
+          { title: "清理空会话", okLabel: "清理", danger: true }))) return;
         const r = await request("session.cleanup_empty");
         closeTabsForSids(r.removed_ids); // 被清掉的会话若开着标签，一并收掉
         addNotice(`已清理 ${r.removed} 个空会话`);
@@ -6284,6 +6317,7 @@ function hideModal() {
   }
   modalTriggerEl = null;
 }
+
 document.getElementById("modal-cancel").onclick = hideModal;
 // Esc = 点「取消」：走 cancel 按钮的当前语义（首启向导的跳过会记 onboarded 标记），
 // 不做隐藏弹层之外的事；菜单/查找条有自己的 Esc 分支，互不影响。
@@ -7553,10 +7587,24 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
   if (snap.update) {
     pushNotice(`🆕 新版本 v${snap.update.version} 可用`, "设置 · 关于 里可前往下载");
   }
+  // 上次应用内更新的结果对账：成功报一次喜，失败带着现场提醒（设置 · 关于可「知道了」）
+  if (snap.update_success) {
+    const s = snap.update_success;
+    pushNotice(`✓ 更新完成${s.from ? `：v${s.from} → ` : ""}v${s.to}`,
+      "会话与设置数据不受影响，更新前已自动备份");
+  }
+  if (snap.update_failure) {
+    const f = snap.update_failure;
+    pushNotice(`⚠ 上次更新未完成${f.target ? `（目标 v${f.target}）` : ""}`,
+      "应用仍运行原版本，更新前数据已备份；设置 · 关于 里有现场与处理指引");
+  }
   if (snap.crashed_last_run) {
     pushNotice("⚠ 上次 SkySheep 未正常关闭（可能崩溃或被强杀）",
       "会话数据有滚动备份，一般无碍；如遇异常可到 设置 · 关于 导出诊断包反馈");
   }
+  // 首次加载（刷新页面）时后端可能正挂着未决的权限请求：事件流里的确认卡
+  // 已经丢了，补拉一次把当前会话的卡重建出来（重连路径在 ws.onopen 里也调）
+  restorePendingPermissions();
   // 窄屏 = 大概率是从手机/平板连进来的遥控端（桌面窗口不会这么窄）
   if (!window.__phoneHintShown && window.innerWidth <= 860) {
     window.__phoneHintShown = true;
@@ -8762,6 +8810,19 @@ if (updateCheckToggle) {
   };
 }
 
+// 更新渠道（关于页）：stable 只收正式版，beta 提前收预发布；切换后立即按新渠道重查
+const updateChannelSel = document.getElementById("update-channel");
+if (updateChannelSel) {
+  updateChannelSel.onchange = () => {
+    saveUiPrefs({ update_channel: updateChannelSel.value });
+    addNotice(updateChannelSel.value === "beta"
+      ? "已切换到测试版渠道：预发布版本会提前推送，稳定性可能不如正式版"
+      : "已切换到稳定版渠道：只推送正式版本");
+    const btn = document.getElementById("btn-check-update");
+    if (btn) btn.click(); // 立即按新渠道查一次，不等下次启动
+  };
+}
+
 function renderSendKeyToggle() {
   const t = document.getElementById("send-key-toggle");
   if (t) t.checked = ctrlEnterSend;
@@ -9770,10 +9831,11 @@ async function restoreCheckpoint(id) {
   let r = await request("checkpoint.restore", { id });
   if (r.conflict) {
     const names = (r.files || []).map(fileName).join("、");
-    const ok = confirm(
+    const ok = await confirmModal(
       `以下 ${(r.files || []).length} 个文件在保存该检查点之后又被修改过` +
       `（可能是其他并行任务写入）：\n${names}\n\n` +
-      "强制恢复会用当时的旧内容覆盖这些改动，确定吗？"
+      "强制恢复会用当时的旧内容覆盖这些改动，确定吗？",
+      { title: "强制恢复检查点", okLabel: "强制恢复", danger: true }
     );
     if (!ok) throw new Error("已取消：文件有后续改动，未恢复");
     r = await request("checkpoint.restore", { id, force: true });
@@ -12487,15 +12549,63 @@ function renderFileHead() {
 }
 
 // 有未保存修改时的放弃确认：确定 → true（走 onOk），取消 → false
-/** 通用确认弹窗：确定 → true，取消/Esc → false。用于「重读丢修改」「全部取消」
- *  这类破坏性操作的两击确认（showModal 的 onOk 抛错路径不适合纯询问）。 */
-function confirmModal(title, html, okText = "确定") {
+/** 应用内确认弹窗：确定 → true，取消 / Esc / 点遮罩 → false。
+ *
+ *  两种调用形式（同一实现，避免同名函数互相覆盖）：
+ *    confirmModal(标题, "HTML 正文", "确定文案")            —— 正文需自带转义
+ *    confirmModal("纯文本正文", { title, okLabel, danger }) —— 纯文本自动转义
+ *
+ *  原生 confirm() 用的是浏览器 / WebView 自带对话框，不受主题变量控制、不跟随
+ *  六套主题，在桌面壳里像一个外来的系统弹窗；破坏性操作改用本弹层。
+ *  danger=true 时确定按钮走危险色，且默认焦点落在「取消」，避免误按回车确认。
+ */
+function confirmModal(arg1, arg2, arg3) {
+  const optsStyle = arg2 && typeof arg2 === "object";
+  const title = optsStyle ? (arg2.title || "请确认") : String(arg1 ?? "");
+  const okText = optsStyle ? (arg2.okLabel || "确定") : (arg3 || "确定");
+  const danger = optsStyle ? !!arg2.danger : false;
   return new Promise((resolve) => {
     const box = document.createElement("div");
-    box.innerHTML = html;
+    if (optsStyle) {
+      const p = document.createElement("p");
+      p.className = "confirm-text";
+      p.textContent = String(arg1 ?? "");   // 纯文本：自动转义 + 保留换行
+      box.appendChild(p);
+    } else {
+      box.innerHTML = String(arg2 ?? "");   // HTML 正文（调用方自行转义）
+    }
+
+    const modalEl = document.getElementById("modal");
+    const okBtn = document.getElementById("modal-ok");
     const cancelBtn = document.getElementById("modal-cancel");
-    cancelBtn.onclick = () => { hideModal(); resolve(false); };
-    showModal(title, box, () => resolve(true), okText);
+    const prevCancel = cancelBtn.onclick;
+
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+
+    // 取消 / Esc：Esc 在全局 handler 里转成 modal-cancel.click()
+    cancelBtn.onclick = () => { settle(false); hideModal(); };
+    showModal(title, box, () => settle(true), okText);
+    if (danger) okBtn.classList.add("btn-danger");
+
+    // 点遮罩 = 取消（基础弹窗本来不支持，这里为确认框补上）
+    const onBackdrop = (ev) => {
+      if (ev.target === modalEl) { settle(false); hideModal(); }
+    };
+    modalEl.addEventListener("click", onBackdrop);
+
+    const cleanup = () => {
+      modalEl.removeEventListener("click", onBackdrop);
+      okBtn.classList.remove("btn-danger");
+      cancelBtn.onclick = prevCancel;
+      obs.disconnect();
+    };
+    const obs = new MutationObserver(() => {
+      if (modalEl.classList.contains("hidden")) { settle(false); cleanup(); }
+    });
+    obs.observe(modalEl, { attributes: true, attributeFilter: ["class"] });
+
+    if (danger) setTimeout(() => { if (modalOpen()) cancelBtn.focus(); }, 0);
   });
 }
 
@@ -13864,7 +13974,8 @@ function connectionsNote(conns) {
 function wireKickButtons() {
   document.querySelectorAll("[data-kick]").forEach((btn) => {
     btn.onclick = async () => {
-      if (!confirm("断开这台设备的连接？对方页面会断开，重新打开地址即可重连。")) return;
+      if (!(await confirmModal("断开这台设备的连接？对方页面会断开，重新打开地址即可重连。",
+        { title: "断开设备", okLabel: "断开", danger: true }))) return;
       try {
         const r = await request("lan.kick", { connection_id: btn.dataset.kick });
         addNotice(`已断开 ${r.kicked} 个连接`);
@@ -13887,7 +13998,8 @@ function recentAccessNote(access) {
 
 // 重新生成访问令牌：立即生效，旧地址/二维码/已登录的手机全部作废
 async function rotateAccessToken() {
-  if (!confirm("重新生成访问令牌？所有已发出的地址和二维码立即作废，手机需要用新地址重新打开。")) return;
+  if (!(await confirmModal("重新生成访问令牌？所有已发出的地址和二维码立即作废，手机需要用新地址重新打开。",
+    { title: "重新生成令牌", okLabel: "重新生成", danger: true }))) return;
   try {
     const r = await request("lan.rotate_token", {});
     addNotice(r.note || "令牌已更换");
@@ -13915,6 +14027,9 @@ async function saveLanPort() {
   try {
     const r = await request("lan.set_port", { port: Number(raw) || 0 });
     addNotice(r.note || "端口设置已保存");
+    // 固定端口与开关一样需要重启才生效：不给统一的重启横条，用户会以为
+    // 已立即生效（对 PWA 用户尤其误导，旧地址在重启前依然有效）
+    needsRestart();
     loadLanPanel();
     loadTsPanel();
   } catch (e) {
@@ -13929,7 +14044,13 @@ function wireLanPortSetting() {
 
 async function loadLanPanel() {
   let st;
-  try { st = await request("lan.status"); } catch (e) { return; }
+  try { st = await request("lan.status"); } catch (e) {
+    // 读取失败不能再静默 return：用户会以为远程功能是关闭的，或看着空白
+    // 无从判断是断线、权限拒绝还是后端故障。在卡片内显式报错。
+    const info = document.getElementById("lan-info");
+    if (info) info.innerHTML = `<div class="lan-note">加载远程状态失败：${escapeHtml(e.message)}。请检查连接后点「刷新」。</div>`;
+    return;
+  }
   const info = document.getElementById("lan-info");
   const toggle = document.getElementById("lan-toggle");
   toggle.checked = !!st.enabled;
@@ -13979,12 +14100,13 @@ async function loadLanPanel() {
   }
 }
 document.getElementById("lan-toggle").addEventListener("change", async (e) => {
-  if (e.target.checked && !confirm(
+  if (e.target.checked && !(await confirmModal(
     "开启局域网访问？\n\n" +
     "开启后，同一 Wi-Fi 下的设备凭令牌即可访问本机 SkySheep（完整界面与文件读写能力），" +
     "地址为 http 明文传输，令牌会出现在地址栏与二维码里。\n\n" +
-    "只建议在可信网络使用；跨网络或不可信 Wi-Fi 请改用「远程访问（Tailscale）」。\n\n确定开启？"
-  )) { e.target.checked = false; return; }
+    "只建议在可信网络使用；跨网络或不可信 Wi-Fi 请改用「远程访问（Tailscale）」。\n\n确定开启？",
+    { title: "开启局域网访问", okLabel: "开启", danger: true }
+  ))) { e.target.checked = false; return; }
   try {
     const r = e.target.checked ? await request("lan.enable", {}) : await request("lan.disable");
     addNotice(r.note || "局域网访问设置已更新");
@@ -13999,7 +14121,12 @@ document.getElementById("lan-toggle").addEventListener("change", async (e) => {
 // ---------- 设置 · 远程访问（Tailscale）：不在同一网络也能连回家 ----------
 async function loadTsPanel() {
   let st;
-  try { st = await request("remote.status"); } catch (e) { return; }
+  try { st = await request("remote.status"); } catch (e) {
+    // 同 loadLanPanel：读取失败要可见，不静默留旧内容/空白
+    const info = document.getElementById("ts-info");
+    if (info) info.innerHTML = `<div class="lan-note">加载远程状态失败：${escapeHtml(e.message)}。请检查连接后点「刷新」。</div>`;
+    return;
+  }
   const info = document.getElementById("ts-info");
   const toggle = document.getElementById("ts-toggle");
   toggle.checked = !!st.enabled;
@@ -14048,11 +14175,12 @@ async function loadTsPanel() {
   }
 }
 document.getElementById("ts-toggle").addEventListener("change", async (e) => {
-  if (e.target.checked && !confirm(
+  if (e.target.checked && !(await confirmModal(
     "开启远程访问（Tailscale）？\n\n" +
     "开启后，登录同一 Tailscale 账号的设备可在任意网络访问本机 SkySheep；" +
-    "链路端到端加密，比局域网 http 明文更安全，但令牌仍是唯一门锁。\n\n确定开启？"
-  )) { e.target.checked = false; return; }
+    "链路端到端加密，比局域网 http 明文更安全，但令牌仍是唯一门锁。\n\n确定开启？",
+    { title: "开启远程访问", okLabel: "开启", danger: true }
+  ))) { e.target.checked = false; return; }
   try {
     const r = e.target.checked ? await request("remote.enable", {}) : await request("remote.disable");
     addNotice(r.note || "远程访问设置已更新");
@@ -14075,7 +14203,8 @@ document.getElementById("restart-banner-close").onclick = () => {
   document.getElementById("restart-banner").classList.add("hidden");
 };
 document.getElementById("btn-app-restart").onclick = async () => {
-  if (!confirm("重启 SkySheep？未完成的对话轮会被中断，重启后窗口自动恢复。")) return;
+  if (!(await confirmModal("重启 SkySheep？未完成的对话轮会被中断，重启后窗口自动恢复。",
+    { title: "重启应用", okLabel: "重启" }))) return;
   const msg = document.getElementById("app-restart-msg");
   try {
     await request("app.restart", {});
@@ -14467,7 +14596,8 @@ function bindChannelEvents() {
 
   const wxLogout = document.querySelector(".channel-wx-logout");
   if (wxLogout) wxLogout.onclick = async () => {
-    if (!confirm("退出登录后需要重新扫码才能使用微信渠道，继续吗？")) return;
+    if (!(await confirmModal("退出登录后需要重新扫码才能使用微信渠道，继续吗？",
+      { title: "退出微信登录", okLabel: "退出登录", danger: true }))) return;
     try {
       await request("channel.weixin_logout");
       channelMsg("已退出微信登录", "ok");
@@ -15035,7 +15165,8 @@ async function loadRunsPage() {
       actions.push(`<button class="btn-ghost run-cancel" data-id="${escapeHtml(r.id)}">停止</button>`);
     } else if (r.state === "failed" || r.state === "interrupted") {
       if (r.retryable && r.retry_text) {
-        actions.push(`<button class="btn-ghost run-retry" data-id="${escapeHtml(r.id)}">重发</button>`);
+        const label = r.kind === "subagent" ? "重跑" : "重发";
+        actions.push(`<button class="btn-ghost run-retry" data-id="${escapeHtml(r.id)}">${label}</button>`);
       }
     }
     if (r.session_id) {
@@ -15068,6 +15199,12 @@ async function loadRunsPage() {
       btn.disabled = true;
       try {
         const r = await request("runs.retry", { run_id: btn.dataset.id });
+        if (r.kind === "subagent") {
+          // 子代理重跑 = 后端按原 agent_type/prompt 重新派生任务，直接刷新列表
+          addNotice(`已按原任务重新派发子代理${r.task_id ? `（${r.task_id}）` : ""}`);
+          await loadRunsPage();
+          return;
+        }
         // 重发 = 把原文在同会话再发一次：切到该会话、填进输入框、走正常发送
         if (r.session_id) await activateSessionById(r.session_id).catch(() => {});
         if (r.text) {
@@ -15192,7 +15329,7 @@ document.getElementById("btn-backup-now").onclick = async () => {
   }
 };
 
-// 面板一次性接线：输入框回车快速添加、「＋ 新建任务」按钮
+// 面板一次性接线：输入框回车快速添加、「＋ 新建事项」按钮
 wireProjectTasksPanel();
 
 document.getElementById("btn-retention-save").onclick = saveRetention;

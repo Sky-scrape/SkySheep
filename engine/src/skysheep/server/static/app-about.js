@@ -7,6 +7,12 @@
 // ---------- 设置 · 关于：更新检查 ----------
 const REPO_PAGE = "https://github.com/Sky-scrape/SkySheep";
 const RELEASES_PAGE = REPO_PAGE + "/releases";
+// 更新渠道偏好缓存（stable/beta）：loadBackups 的 ui.get 回填，渲染状态行时用；
+// 未回填前按空串渲染，不显示渠道字样（不猜）
+let updateChannelPref = "";
+function channelLabel() {
+  return updateChannelPref === "beta" ? "测试版渠道" : "稳定版渠道";
+}
 function renderUpdatePanel(snap) {
   const box = document.getElementById("about-update");
   if (!box) return;
@@ -14,14 +20,40 @@ function renderUpdatePanel(snap) {
   const frozen = !!snap.frozen; // 安装版=可在应用内静默更新；源码版提示 git pull
   const edition = frozen ? "安装版" : "源码版"; // 排障时的关键信息，随版本号一起亮出来
   const upd = snap.update || null;
-  box.innerHTML = `
+  // 上次更新的结果对账（后端启动时结算）：失败亮现场直到「知道了」，成功提示一次
+  const fail = snap.update_failure || null;
+  const failHtml = fail ? `
+    <div class="card-status bad upd-fail" id="upd-fail">
+      ⚠ 上次更新未完成${fail.target ? `（目标 v${escapeHtml(fail.target)}）` : ""}：当前仍运行 v${escapeHtml(cur)}。
+      更新前的用户数据备份在${fail.backup_dir
+        ? ` <span class="copyable-path">${escapeHtml(fail.backup_dir)}</span>`
+        : "（未生成）"}；安装详情见 logs/update-setup.log。
+      可到 <a href="${RELEASES_PAGE}" target="_blank">Releases 页</a> 手动下载安装包重新安装。
+      <button class="btn-ghost" id="btn-upd-fail-dismiss">知道了</button>
+    </div>` : "";
+  const okHtml = snap.update_success
+    ? `<div class="card-status ok">✓ 上次更新完成：v${escapeHtml(snap.update_success.from || "?")} → v${escapeHtml(snap.update_success.to)}</div>`
+    : "";
+  box.innerHTML = failHtml + okHtml + `
     <button class="btn-ghost" id="btn-check-update">检查更新</button>
     <span class="upd-state ${upd ? "new" : ""}" id="upd-state">${
       upd
-        ? `🆕 发现新版本 v${escapeHtml(upd.version)}（当前 v${escapeHtml(cur)} · ${edition}）`
-        : `当前版本 v${escapeHtml(cur)} · ${edition}`
+        ? `🆕 发现新版本 v${escapeHtml(upd.version)}（当前 v${escapeHtml(cur)} · ${edition}${updateChannelPref ? ` · ${channelLabel()}` : ""}）`
+        : `当前版本 v${escapeHtml(cur)} · ${edition}${updateChannelPref ? ` · ${channelLabel()}` : ""}`
     }</span>
     <span id="upd-actions"></span>`;
+  const failBtn = box.querySelector("#btn-upd-fail-dismiss");
+  if (failBtn) failBtn.onclick = async () => {
+    try {
+      await request("app.dismiss_update_failure");
+    } catch (e) {
+      addNotice("操作失败：" + e.message);
+      return;
+    }
+    const card = box.querySelector("#upd-fail");
+    if (card) card.remove();
+    addNotice("已收起未完成更新的提醒；数据备份目录仍在，需要时可手动回退");
+  };
   const state = box.querySelector("#upd-state");
   const actions = box.querySelector("#upd-actions");
 
@@ -99,14 +131,15 @@ function renderUpdatePanel(snap) {
     actions.innerHTML = "";
     try {
       const r = await request("app.check_update");
+      if (r.channel === "beta" || r.channel === "stable") updateChannelPref = r.channel;
       if (r.available) {
-        state.innerHTML = `🆕 发现新版本 v${escapeHtml(r.version)}（当前 v${escapeHtml(r.current)} · ${edition}）`;
+        state.innerHTML = `🆕 发现新版本 v${escapeHtml(r.version)}（当前 v${escapeHtml(r.current)} · ${edition} · ${channelLabel()}）`;
         state.className = "upd-state new";
         setUpdButtons(r.version);
       } else if (r.error) {
         state.textContent = "检查失败：" + r.error;
       } else {
-        state.textContent = `已是最新版本（v${escapeHtml(r.current)} · ${edition}）`;
+        state.textContent = `已是最新版本（v${escapeHtml(r.current)} · ${edition} · ${channelLabel()}）`;
       }
     } catch (e) {
       state.textContent = "检查失败：" + e.message;
@@ -178,10 +211,13 @@ function backupRowHtml(b) {
 }
 
 async function loadBackups() {
-  // 自动检查更新开关：进关于页时从偏好回填（保存即生效，下次启动不再请求）
+  // 自动检查更新开关 + 更新渠道：进关于页时从偏好回填（保存即生效）
   request("ui.get").then((ui) => {
     const t = document.getElementById("update-check-toggle");
     if (t) t.checked = !ui || ui.prefs.update_check == null ? true : ui.prefs.update_check === 1;
+    const sel = document.getElementById("update-channel");
+    updateChannelPref = (ui && ui.prefs.update_channel) || "stable";
+    if (sel) sel.value = updateChannelPref;
   }).catch(() => {});
   const ul = document.getElementById("backup-list");
   let d;
@@ -389,7 +425,8 @@ async function renderStorageCard() {
 async function cleanTable(table, days, btn) {
   const label = btn.closest("li").textContent.split("：")[0];
   const what = days > 0 ? `删除「${label}」中 30 天前的记录` : `清空「${label}」（全部记录，不可恢复）`;
-  if (!confirm(`${what}？\n\n清理后无法恢复，确定继续？`)) return;
+  if (!(await confirmModal(`${what}？\n\n清理后无法恢复，确定继续？`,
+      { title: "确认清理", okLabel: "清理", danger: true }))) return;
   btn.disabled = true;
   try {
     const r = await request("storage.cleanup", {

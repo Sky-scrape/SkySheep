@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from skysheep.core.runs import (
@@ -19,7 +20,9 @@ from skysheep.core.runs import (
 from skysheep.models.diagnostics import (
     ADVICE,
     HealthRegistry,
+    capability_summary,
     diagnose_error,
+    probe_capabilities,
     test_connection,
 )
 
@@ -108,6 +111,139 @@ def test_health_registry_flow():
 
     reg.record_ok("zhipu")  # 恢复
     assert reg.get("zhipu").level == "ok"
+
+
+# ---- 能力探测（不联网：本地无效端口 / MockTransport） ----
+
+
+@pytest.mark.asyncio
+async def test_probe_capabilities_down_service_all_none():
+    """连不上的服务：四项都是「没测成」（None），不判不支持也不报错。"""
+    r = await probe_capabilities(
+        kind="openai",
+        base_url="http://127.0.0.1:9",  # discard 端口，连接必然失败
+        api_key="sk-x",
+        model="m",
+        timeout_s=2.0,
+    )
+    for key in ("streaming", "tools", "vision", "reasoning"):
+        assert r[key]["supported"] is None
+        assert r[key]["note"]
+    assert r["summary"]
+    assert r["kind"] == "openai"
+
+
+def _openai_transport(handler):
+    """用 MockTransport 拦截 openai SDK 的 HTTP 调用（协议序列与真实线上一致）。"""
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_probe_capabilities_openai_all_supported():
+    """openai 兼容协议全支持路径：流式 SSE / tool_calls / 图片 / reasoning_effort。"""
+    seen_params: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:  # noqa: F821
+        body = json.loads(request.content.decode() or "{}")
+        seen_params.update({"stream": body.get("stream"), "tools": bool(body.get("tools")),
+                            "content": body.get("messages", [{}])[0].get("content")})
+        if body.get("stream"):
+            # 最小 SSE 流：一帧 role + [DONE]
+            text = (
+                'data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m",'
+                '"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+                'data: [DONE]\n\n'
+            )
+            return httpx.Response(200, text=text,
+                                  headers={"content-type": "text/event-stream"})
+        if body.get("tools"):
+            tool_args = '{"city": "北京"}'
+            message = {"role": "assistant", "content": None,
+                       "tool_calls": [{"id": "t1", "type": "function",
+                                       "function": {"name": "get_weather",
+                                                    "arguments": tool_args}}]}
+            return httpx.Response(200, json={
+                "id": "c", "object": "chat.completion", "created": 1, "model": "m",
+                "choices": [{"index": 0, "message": message,
+                             "finish_reason": "tool_calls"}],
+            })
+        content = body.get("messages", [{}])[0].get("content")
+        if isinstance(content, list):
+            return httpx.Response(200, json={
+                "id": "c", "object": "chat.completion", "created": 1, "model": "m",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "收到"},
+                             "finish_reason": "stop"}],
+            })
+        # 其余（reasoning_effort 探测）：接受即成功
+        return httpx.Response(200, json={
+            "id": "c", "object": "chat.completion", "created": 1, "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}],
+        })
+
+    r = await probe_capabilities(
+        kind="openai", base_url="https://mock.test/v1", api_key="sk-x", model="m1",
+        transport=_openai_transport(handler),
+    )
+    assert r["streaming"]["supported"] is True
+    assert r["tools"]["supported"] is True
+    assert r["vision"]["supported"] is True
+    assert r["reasoning"]["supported"] is True
+    assert "支持：" in r["summary"]
+    assert isinstance(seen_params, dict)
+
+
+@pytest.mark.asyncio
+async def test_probe_capabilities_openai_feature_rejected():
+    """服务点名拒绝某项能力：判 False 并给出该能力的结论；其他项互不影响。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode() or "{}")
+        if body.get("stream"):
+            return httpx.Response(400, json={
+                "error": {"message": "this model does not support streaming output"}})
+        if body.get("tools"):
+            return httpx.Response(400, json={
+                "error": {"message": "tool calling is not supported by this model"}})
+        content = body.get("messages", [{}])[0].get("content")
+        if isinstance(content, list) and any(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in content):
+            return httpx.Response(400, json={
+                "error": {"message": "image input is not supported by this model"}})
+        return httpx.Response(200, json={
+            "id": "c", "object": "chat.completion", "created": 1, "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}],
+        })
+
+    r = await probe_capabilities(
+        kind="openai", base_url="https://mock.test/v1", api_key="sk-x", model="m1",
+        transport=httpx.MockTransport(handler),
+    )
+    assert r["streaming"]["supported"] is False
+    assert r["tools"]["supported"] is False
+    assert r["vision"]["supported"] is False
+    # reasoning 探测的请求不带特殊标记，走成功分支
+    assert r["reasoning"]["supported"] is True
+    assert "只适合纯对话" in r["summary"]
+    assert "不支持图片输入" in r["summary"]
+
+
+def test_capability_summary_all_none():
+    """全部没测成时给兑底提醒，不空结论。"""
+    from skysheep.models.diagnostics import CapabilityItem
+
+    items = {k: CapabilityItem(None, "") for k in
+             ("streaming", "tools", "vision", "reasoning")}
+    s = capability_summary(items)
+    assert "未测出" in s
+
+
+def test_probe_capabilities_unknown_kind_raises():
+    import asyncio
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(probe_capabilities(kind="fake", api_key="x", model="m"))
 
 
 # ---- 运行中心 ----

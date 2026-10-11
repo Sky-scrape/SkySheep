@@ -826,6 +826,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._memory_io_lock = asyncio.Lock()
         self.update_info: dict | None = None  # {"version","url","notes"}：发现的新版本
         self.update_error: str | None = None  # 手动检查时的失败原因（进设置 · 关于）
+        # 更新结果对账（更新可信度）：consume_update_marker 在启动时结算，
+        # success = 上次更新闭环成功（提示一次），failure = 装没成（亮现场直到确认）
+        self.update_success: dict | None = None
+        self.update_failure: dict | None = None
         self._pending_update: str | None = None  # 已下载待安装的更新包路径
         self._is_frozen: bool = bool(getattr(sys, "frozen", False))  # 安装版=True，源码版=False
         self.channels: ChannelManager | None = None  # 聊天软件渠道（Bot Channel）
@@ -836,13 +840,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 访问令牌的失败节流与留痕：设置页展示「有谁在试你的门」，节流让连错
         # 变得不划算。都是内存态，重启即清空（真实排查看桌面日志）。
         self.token_throttle = TokenThrottle()
+        # 令牌世代：每次轮换 +1。WS 连接在握手时记下当时世代，轮换后旧世代
+        # 连接会被主动关闭（旧令牌只能阻止新连接，已建立的连接照常发 RPC
+        # 是实际缺口）。非远程连接（本机）不受影响。
+        self.token_generation = 0
         # 运行中心：全产品可观测运行（主轮/子代理任务）统一登记 + 崩溃恢复。
         # 快照落 ~/.skysheep/runs.json（write_text_atomic），启动装载把上次
         # 在跑的记为 interrupted（见 core/runs.py）。
         self.runs = RunCenter(skysheep_home() / "runs.json")
         # 供应商健康登记：agent 循环上报成功/失败，设置页状态灯读它
         self.provider_health = HealthRegistry()
-        self._run_seq = 0  # 运行 id 自增（turn-<n>）
+        self._run_seq = 0  # 已弃用：运行 id 改由 RunCenter.allocate_id 跨重启唯一生成
         self._text_meta_cache: dict[str, tuple[int, str, str]] = {}
         self._token_failures: list[dict] = []  # 最近 TOKEN_FAILURE_LOG_MAX 条 {ts, ip, where}
         self._token_failure_total = 0  # 自启动以来的失败总数（留痕列表只留最近几条）
@@ -1447,6 +1455,23 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # Mods 暂存目录清扫：install 与 confirm 之间重启遗留的 .importing-*
         # （只启动期调一次，运行期可能正有未确认的安装预览占着 staging）
         self.sweep_mod_staging()
+        # 无头浏览器残留清扫：上次强杀/崩溃时 atexit 不执行，skysheep-edge-*
+        # 临时配置目录残留在系统 TEMP——只在「上次未正常关闭」时扫（正常退出
+        # 已由 atexit 清理，不用多此一举；crash.flag 在 lifespan 启动时会被重写，
+        # 必须用 setup 之前读好的 crashed_last_run 判断）。进程还活着的目录
+        # rmtree 失败自然跳过，误删正在使用的实例风险为零；测试环境
+        # （SKYSHEEP_HOME 隔离）通常没有 crash.flag，不会触发。
+        try:
+            if getattr(self, "crashed_last_run", False):
+                from ..tools.browser_cdp import sweep_orphan_browser_profiles
+
+                removed = sweep_orphan_browser_profiles()
+                if removed:
+                    logging.getLogger("skysheep").info(
+                        "启动清扫：清理 %d 个无头浏览器残留目录", removed
+                    )
+        except Exception:  # noqa: BLE001 - 清扫失败不影响启动
+            pass
         # 「远程连接」固定项目不再启动即建：没有渠道会话时侧栏不出现这个分组，
         # 删除后也不再复活；渠道真正收到消息时经 _remote_project_id 幂等重建
         # 快聊 / 远程连接的固定工作目录：数据目录下真实文件夹（fast-talk /
@@ -1494,6 +1519,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             working_dir=self.working_dir,
             mods=self.mods,
         )
+        # 上次应用内更新的结果对账（成功清标记 / 失败亮现场），要赶在 boot
+        # 快照组装前结算完，前端首帧就能看到结果
+        self.consume_update_marker()
         # 后台查一次新版本：几秒超时、失败完全静默，结果随 boot 快照到前端
         self._update_task = asyncio.create_task(self._check_update_quietly())
         await self.open_initial_session()
@@ -2464,6 +2492,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "slowest_tool": "", "slowest_tool_ms": 0,
         }
         _perm_pending: dict[str, float] = {}
+        # 本轮失败证据：Agent 会把 Provider 异常吞成 ErrorEvent 后正常收尾，
+        # 外层看不到 Python 异常。只靠 turn_exc 判定终态会把失败轮写成
+        # completed（运行中心显示“已完成”但错误摘要还在）。这里显式收集
+        # 致命失败信号：ErrorEvent 与 TurnFinished(stop_reason="error")。
+        turn_fail: dict[str, str] = {}
 
         async def emit_ev(ev: dict) -> None:
             kind = ev.get("kind")
@@ -2482,9 +2515,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 self.runs.update(run_id, state="retrying",
                                  detail=str(ev.get("message") or "")[:200])
             elif kind == "error":
+                # 本轮出现引擎级错误：记下来供终态收口判定（不在这里直接定终态，
+                # 因为团队/圆桌降级等路径可能随后仍有可用产出）
+                turn_fail.setdefault("error", str(ev.get("message") or "")[:300])
                 self.runs.update(
                     run_id, state="failed", error=str(ev.get("message") or "")[:300],
                     detail="")
+            elif kind == "turn_finished":
+                if str(ev.get("stop_reason") or "") == "error":
+                    turn_fail.setdefault("stop_reason", "error")
             if kind == "tool_call_finished":
                 _ms = int(ev.get("duration_ms") or 0)
                 turn_stats["tool_calls"] += 1
@@ -2635,9 +2674,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         tcached0 = agent.total_cached_tokens
         runtime.run_task = asyncio.current_task()
         # 运行中心登记：这轮作为一条可观测运行进全局列表（状态随事件更新，
-        # 终态在 finally 收口）。id 按会话维自增，重试沿用同一 id。
-        self._run_seq += 1
-        run_id = f"turn-{self._run_seq}"
+        # 终态在 finally 收口）。id 由 RunCenter 分配，带时间戳，跨重启不重复
+        # （旧实现用进程内自增 turn-<n>，重启后从 turn-1 重来，会覆盖旧记录）。
+        run_id = self.runs.allocate_id("turn")
         run_retry_text = "" if regenerate else text
         self.runs.register(
             run_id, "turn", sid,
@@ -2799,7 +2838,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     )
 
         # 运行中心终态收口：取消 → cancelled；异常 → failed（带可重试标记）；
+        # 引擎级错误（ErrorEvent / TurnFinished stop_reason=error）→ failed；
         # 正常 → completed。团队/圆桌/对抗轮也按同一口径（meta.status 已带取消）。
+        # 只有“真的没跑完”的运行才允许重发（RETRYABLE_STATES 另在 retryable_run 强校验）。
         run_final_state = "completed"
         if stopped:
             run_final_state = "cancelled"
@@ -2811,11 +2852,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             (adv_meta or {}).get("status"),
         ):
             run_final_state = "cancelled"
+        elif turn_fail:
+            # Agent 已把 Provider 异常吞成 ErrorEvent：外层无异常但本轮确实失败
+            run_final_state = "failed"
         elif turn_stats["tool_errors"] and not turn_stats["tool_calls"]:
             run_final_state = "failed"
+        run_error = (
+            (type(turn_exc).__name__ + ": " + str(turn_exc)[:200]) if turn_exc
+            else (turn_fail.get("error") or None)
+        )
         self.runs.update(
             run_id, state=run_final_state,
-            error=(type(turn_exc).__name__ + ": " + str(turn_exc)[:200]) if turn_exc else None,
+            error=run_error,
             tools_used=turn_stats["tool_calls"],
         )
 
@@ -6556,6 +6604,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 「跟随系统」的深浅落点（浅/深各一个具体主题；缺省 = 纸墨 / 夜墨）
         "theme_auto_light": THEME_AUTO_LIGHT,
         "theme_auto_dark": THEME_AUTO_DARK,
+        # 更新渠道：stable=稳定版（/releases/latest，默认）、beta=测试版（releases.atom，
+        # 含预发布）。值域与 core/uptodate.py 的 CHANNELS 保持一致
+        "update_channel": ("stable", "beta"),
     }
 
     @staticmethod
@@ -6667,8 +6718,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     f"包含：{'、'.join(included)}\n"
                     + ("config.toml 已打码（不含 API Key）。\n" if not include_secrets
                        else "⚠ config.toml 为原样（含 API Key），请妥善保管本文件。\n")
-                    + "\n恢复方式：关闭 SkySheep 后，把 skysheep.db 放回数据目录，\n"
-                    "config.toml 等文件按需覆盖；或参考官方文档的迁移说明。\n"
+                    + "\n恢复方式：在目标电脑的 SkySheep 里打开 设置 → 关于，\n"
+                    "点「从导出包恢复…」选中本文件即可；会自动校验并保留恢复前副本。\n"
                 ))
         except Exception as e:  # noqa: BLE001
             target.unlink(missing_ok=True)
@@ -6736,8 +6787,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         }
 
     async def settings_import(self, params: dict) -> dict:
-        """从导出的 zip 恢复设置（base64 上传）。覆盖同名文件，缺失的跳过。
+        """从导出的 zip 恢复设置（base64 上传）。全有或全无：失败自动回滚。
 
+        先整体校验（config.toml 必须是合法 TOML、ui.json 必须是合法 JSON），
+        再写入；写入阶段任一文件失败，或写完后 config.toml 仍加载失败，
+        都按导入前快照把本批文件整体还原——不留「导入了一半」的中间态。
         返回恢复清单；config.toml 恢复后由前端 boot() 重载生效。
         """
         import base64
@@ -6752,26 +6806,81 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             zf = zipfile.ZipFile(io.BytesIO(data))
         except Exception as e:
             raise RuntimeError(f"zip 解析失败: {e}") from None
-        restored, skipped = [], []
+        # 白名单过滤（skills-manifest.json 等暂不自动恢复，避免覆盖现有技能状态）
+        pending: dict[str, bytes] = {}
+        skipped: list[str] = []
         for name in zf.namelist():
             if name not in self.SETTINGS_EXPORT_FILES:
-                continue  # skills-manifest.json 等：暂不自动恢复，避免覆盖现有技能状态
+                skipped.append(name)
+                continue
+            pending[name] = zf.read(name)
+        # 写入前整体校验：内容不合法的包一个字节都不落盘。
+        # config.toml 用 tomllib 按真实加载口径解析；ui.json 先做与
+        # _strip_accept_edits_from_ui_export 相同的解析（不是 dict 的内容照旧
+        # 拒绝写入——旧实现「保留原行为」在回滚语义下会变成静默不写入，
+        # 不如 upfront 说清楚）。
+        if "config.toml" in pending:
             try:
-                target = skysheep_home() / name
+                import tomllib
+
+                tomllib.loads(pending["config.toml"].decode("utf-8"))
+            except Exception as e:
+                raise RuntimeError(f"包里的 config.toml 不是合法 TOML，已取消导入：{e}") from None
+        if "ui.json" in pending:
+            try:
+                parsed = json.loads(pending["ui.json"].decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as e:
+                raise RuntimeError(f"包里的 ui.json 不是合法 JSON，已取消导入：{e}") from None
+            if not isinstance(parsed, dict):
+                raise RuntimeError("包里的 ui.json 内容不是 JSON 对象，已取消导入")
+        # 导入前快照：原文件字节（不存在记 None），失败时按它整体还原
+        home = skysheep_home()
+        snapshot: dict[str, bytes | None] = {}
+        for name in pending:
+            p = home / name
+            try:
+                snapshot[name] = p.read_bytes() if p.is_file() else None
+            except OSError:
+                snapshot[name] = None
+
+        def _rollback() -> None:
+            """把本批文件还原到导入前状态；还原失败只记日志（尽力而为）。"""
+            for name, old in snapshot.items():
+                p = home / name
+                try:
+                    if old is None:
+                        p.unlink(missing_ok=True)  # 导入前不存在：删掉新写的
+                    else:
+                        p.write_bytes(old)
+                except OSError:
+                    logger.warning("设置导入回滚 %s 失败", name, exc_info=True)
+
+        restored: list[str] = []
+        for name, blob in pending.items():
+            target = home / name
+            try:
                 if name == "ui.json":
                     # 「自动允许写入」属于降低防护的开关，只能由本机用户主动切换：
                     # 导入包里带来的该字段一律不生效（换机/别人给的包不应该顺手放宽写入）
-                    self._strip_accept_edits_from_ui_export(target, zf.read(name))
+                    self._strip_accept_edits_from_ui_export(target, blob)
                 else:
-                    target.write_bytes(zf.read(name))
-                restored.append(name)
-            except OSError:
-                skipped.append(name)
+                    target.write_bytes(blob)
+            except OSError as e:
+                _rollback()
+                raise RuntimeError(f"写入 {name} 失败，已回滚本次导入（未改动任何文件）：{e}") from None
+            restored.append(name)
         if "config.toml" in restored:
             try:
                 self.cfg = load_config()
             except Exception as e:
-                raise RuntimeError(f"配置已写入但加载失败，请检查 config.toml：{e}") from None
+                # 校验已挡住绝大多数坏配置；走到这里（如本机路径相关的加载错误）
+                # 同样整体还原，不让坏 config.toml 留在盘上
+                _rollback()
+                try:
+                    self.cfg = load_config()
+                except Exception:  # noqa: BLE001 - 还原后仍加载失败：保持错误信息聚焦
+                    pass
+                raise RuntimeError(f"配置恢复后加载失败，已回滚本次导入：{e}") from None
         if "ui.json" in restored:
             # 导入后同步内存里的档位（否则要等重启才与文件一致）
             self._apply_gate_accept_pref(self._read_ui_prefs().get("accept_edits", 0))
@@ -6789,6 +6898,473 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if data.pop("accept_edits", None) is not None:
             logger.info("导入的 ui.json 里带着 accept_edits，已丢弃（该开关只能在本机切换）")
         target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    # ---- 完整导出包的导入（与 export_full_data 配对；仅本机） ----
+
+    # 导入包里除配置与技能外还认识的顶层文件：读了不报错，但不需要恢复
+    FULL_IMPORT_KNOWN_TOP = ("skysheep.db", "README.txt", "skills-manifest.json")
+
+    @staticmethod
+    def _full_import_zip_path(params: dict) -> Path:
+        """取参数里的导出包路径：必须是已存在的 .zip 本机文件。"""
+        raw = str(params.get("path", "") or "").strip().strip('"')
+        if not raw:
+            raise RuntimeError("缺少导出包路径（path）")
+        path = Path(raw).expanduser()
+        if not path.is_file():
+            raise RuntimeError(f"找不到导出包：{raw}")
+        if path.suffix.lower() != ".zip":
+            raise RuntimeError("请选择完整导出生成的 .zip 文件")
+        return path
+
+    @staticmethod
+    def _validate_staged_db(db_file: Path) -> int:
+        """导入前校验暂存库：quick_check + 版本降级防护，返回库版本号。
+
+        与 connect() 的降级守卫同一口径，但提前到替换主库**之前**——否则新版
+        库换上去后 connect 拒开，主库已被换掉、store 停在断开状态，只能靠
+        安全副本手工救回。先验后换，坏库根本不进主库位置。
+        """
+        import sqlite3
+
+        from ..session.store import SCHEMA_VERSION
+        try:
+            conn = sqlite3.connect(db_file)
+        except sqlite3.Error as e:
+            raise RuntimeError(f"导出包里的会话库打不开：{e}") from None
+        try:
+            row = conn.execute("PRAGMA quick_check").fetchone()
+            check = str(row[0]) if row else ""
+            if check != "ok":
+                raise RuntimeError(f"导出包里的会话库自检未通过（{check}），已取消导入")
+            ver = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        except sqlite3.DatabaseError as e:
+            raise RuntimeError(f"导出包里的会话库不是有效的 SQLite 库：{e}") from None
+        finally:
+            conn.close()
+        if ver > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"导出包的会话库由更新版本的 SkySheep 创建（库版本 {ver} > "
+                f"当前程序支持 {SCHEMA_VERSION}）。请先升级本机 SkySheep 再导入，"
+                "或改用只含配置的「导入设置」。"
+            )
+        return ver
+
+    def _stage_full_import(self, zf, dest: Path) -> tuple[list[str], list[str]]:
+        """把导出包安全解包到 dest：白名单顶层名 + 逐段防路径逃逸。
+
+        返回 (staged, unknown)：staged 是已解包的包内相对路径（/ 分隔），
+        unknown 是不在白名单里的条目（不解包，原样回报给用户）。技能只解
+        skills/<名>/… 两层以上形状；skills 根下的散文件不认识就不收。
+        """
+        staged: list[str] = []
+        unknown: list[str] = []
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.replace("\\", "/")
+            parts = name.split("/")
+            # 每一段都不得是空/点/点点/含盘符或流分隔符（冒号）——zip slip 的
+            # 两套常见变形（绝对路径、上级引用）都在这里被挡住
+            if any(p in ("", ".", "..") or ":" in p for p in parts):
+                unknown.append(info.filename)
+                continue
+            top, rest = parts[0], parts[1:]
+            if top in self.FULL_IMPORT_KNOWN_TOP and not rest:
+                pass  # 单文件条目
+            elif top in self.SETTINGS_EXPORT_FILES and not rest:
+                pass
+            elif top == "skills" and len(parts) >= 3:
+                pass  # skills/<技能名>/<文件…>
+            else:
+                unknown.append(info.filename)
+                continue
+            target = dest / "/".join(parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with zf.open(info) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            except OSError:
+                unknown.append(info.filename)
+                continue
+            staged.append(name)
+        return staged, unknown
+
+    @staticmethod
+    def _snapshot_config_files(staged: dict[str, bytes]) -> dict[str, bytes | None]:
+        """在任何写入之前把全部目标文件的现状读成快照（名字 → 原字节或 None）。
+
+        旧实现把建快照和写入放在同一个循环里、且只在函数正常返回时才把快照
+        交给调用方：第二个文件写入失败时，第一个已写入文件的快照丢了，回滚
+        拿到空字典，声称「已回滚」却留下半写状态。现在快照先行、无条件可用。
+        """
+        home = skysheep_home()
+        snapshot: dict[str, bytes | None] = {}
+        for name in sorted(staged):
+            p = home / name
+            try:
+                snapshot[name] = p.read_bytes() if p.is_file() else None
+            except OSError:
+                snapshot[name] = None
+        return snapshot
+
+    @staticmethod
+    def _restore_config_files_from(
+        staged: dict[str, bytes],
+        snapshot: dict[str, bytes | None] | None = None,
+    ) -> list[str]:
+        """把暂存的配置文件写入数据目录，返回已恢复清单。
+
+        snapshot 由调用方提前调 _snapshot_config_files 建好（回滚靠它）；
+        不传时内部补建一次（仅供单独调用这个 helper 的场景）。
+        """
+        home = skysheep_home()
+        if snapshot is None:
+            snapshot = ServerBackend._snapshot_config_files(staged)
+        restored: list[str] = []
+        for name in sorted(staged):
+            p = home / name
+            if name == "ui.json":
+                # 与 settings.import 同一防护：accept_edits 只能在本机切换
+                ServerBackend._strip_accept_edits_from_ui_export(p, staged[name])
+            else:
+                p.write_bytes(staged[name])
+            restored.append(name)
+        return restored
+
+    @staticmethod
+    def _rollback_config_files(snapshot: dict[str, bytes | None]) -> list[str]:
+        """按快照把本批配置文件还原到导入前状态；返回未能还原的名字。
+
+        尽力而为，但不再静默：调用方拿这个列表决定错误文案，有残留就如实
+        告知用户（旧实现只记日志后照样声称「已回滚」）。
+        """
+        home = skysheep_home()
+        failed: list[str] = []
+        for name, old in snapshot.items():
+            p = home / name
+            try:
+                if old is None:
+                    p.unlink(missing_ok=True)
+                else:
+                    p.write_bytes(old)
+            except OSError:
+                failed.append(name)
+                logger.warning("完整导入回滚 %s 失败", name, exc_info=True)
+        return failed
+
+    async def _replace_store_db(self, staged_db: Path) -> Path | None:
+        """用暂存库整体替换当前会话库，返回替换前的安全副本路径（可能为 None）。
+
+        关库 → 清 WAL/SHM 残留 → 原子换文件 → 重开。替换前的现状先快照到
+        backups/（恢复前标签，界面可辨认），失败路径靠它回滚。
+        """
+        from ..session.store import _snapshot_or_copy
+
+        store = self.store
+        safety = None
+        if store.path.exists() and store.path.stat().st_size > 0:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            safety = store.backup_dir() / f"{store.path.stem}-{stamp}{store.SAFETY_TAG}.db"
+            store.backup_dir().mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(_snapshot_or_copy, store.path, safety)
+        if store._db is not None:
+            await store._db.close()
+            store._db = None
+        for suffix in ("-wal", "-shm"):
+            try:
+                Path(str(store.path) + suffix).unlink()
+            except OSError:
+                pass
+        await asyncio.to_thread(os.replace, staged_db, store.path)
+        await store.connect()
+        return safety
+
+    async def _undo_store_db_replace(self, safety: Path | None, *, had_db: bool) -> None:
+        """把主库回滚到替换前状态：有安全副本就换回去，全新目录则删掉新库。"""
+        store = self.store
+        if store._db is not None:
+            try:
+                await store._db.close()
+            except Exception:  # noqa: BLE001 - 回滚路径上的关闭失败不掩盖原错误
+                pass
+            store._db = None
+        for suffix in ("-wal", "-shm"):
+            try:
+                Path(str(store.path) + suffix).unlink()
+            except OSError:
+                pass
+        try:
+            if safety is not None and safety.is_file():
+                await asyncio.to_thread(os.replace, safety, store.path)
+            elif not had_db:
+                store.path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("会话库回滚失败，请从备份目录手工恢复：%s", safety, exc_info=True)
+        try:
+            await store.connect()
+        except Exception:  # noqa: BLE001 - 重连失败如实附在日志，原错误继续向上抛
+            logger.exception("会话库回滚后重开失败")
+
+    async def preview_import_full(self, params: dict) -> dict:
+        """完整导入前预览：解析导出包但不落盘，列出将恢复的内容与校验结果。
+
+        会话库在这里就做 quick_check + 版本校验——问题包在预览阶段就被拦下，
+        不等用户确认后才报错。返回 items（配置/库文件清单）、skills_count、
+        db（大小/版本/校验结果）、contains_secrets、unknown。
+        """
+        import tempfile
+        import zipfile
+
+        path = self._full_import_zip_path(params)
+        try:
+            zf = zipfile.ZipFile(path)
+        except Exception as e:
+            raise RuntimeError(f"打不开导出包（不是合法 zip？）：{e}") from None
+        with zf:
+            names = [i.filename.replace("\\", "/") for i in zf.infolist() if not i.is_dir()]
+            has_db = "skysheep.db" in names
+            cfg_files = [n for n in self.SETTINGS_EXPORT_FILES if n in names]
+            skills_files = [n for n in names
+                            if n.startswith("skills/") and len(n.split("/")) >= 3]
+            known_top = set(self.FULL_IMPORT_KNOWN_TOP) | set(self.SETTINGS_EXPORT_FILES)
+            unknown = [n for n in names
+                       if n.split("/")[0] not in known_top and not n.startswith("skills/")]
+            contains_secrets = False
+            if "config.toml" in cfg_files:
+                try:
+                    text = zf.read("config.toml").decode("utf-8", errors="replace")
+                    contains_secrets = any(m in text for m in ("api_key", "token", "secret"))
+                except Exception:  # noqa: BLE001 - 读不出来留到导入阶段报错
+                    pass
+            db_info: dict | None = None
+            if has_db:
+                # 解包到临时文件再校验（quick_check 需要真实文件；zip 里的库
+                # 可能几百 MB，不整读进内存）
+                with tempfile.TemporaryDirectory(prefix="skysheep-import-preview-") as td:
+                    staged_db = Path(td) / "skysheep.db"
+                    with zf.open("skysheep.db") as src, open(staged_db, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    size = staged_db.stat().st_size
+                    try:
+                        ver = self._validate_staged_db(staged_db)
+                        db_info = {"size": size, "version": ver, "ok": True, "reason": ""}
+                    except RuntimeError as e:
+                        db_info = {"size": size, "version": None, "ok": False, "reason": str(e)}
+            items = []
+            if has_db:
+                items.append({"name": "skysheep.db", "size": zf.getinfo("skysheep.db").file_size,
+                              "kind": "db"})
+            items.extend({"name": n, "size": zf.getinfo(n).file_size, "kind": "config"}
+                         for n in cfg_files)
+        skills_names = sorted({n.split("/")[1] for n in skills_files})
+        return {
+            "path": str(path),
+            "items": items,
+            "skills": skills_names,
+            "skills_count": len(skills_names),
+            "db": db_info,
+            "contains_secrets": contains_secrets,
+            "unknown": unknown,
+            "note": (
+                "将用包里的会话库整体替换当前会话数据（替换前自动留「恢复前」副本）；"
+                "配置文件覆盖同名项；技能按名字合并恢复（同名覆盖、多出的保留）。"
+                if has_db else
+                "包里没有会话库，只恢复配置与技能。"
+            ) + (" ⚠ 包里含 API Key / 令牌。" if contains_secrets else ""),
+        }
+
+    async def import_full_data(self, params: dict) -> dict:
+        """从完整导出包恢复：会话库 + 配置 + 技能，全有或全无，失败自动回滚。
+
+        与 export_full_data 配对，跨机迁移的第二步。顺序：安全解包 → 校验库
+        → 换库（替换前留安全副本）→ 恢复配置 → 合并技能 → 热重载（配置 /
+        技能 / MCP / 子代理）→ 重建会话内存状态。任何一步失败都把已动的
+        部分（库 + 配置）还原到导入前，不留中间态。
+        """
+        import zipfile
+
+        busy = self._backup_busy_message("导入")
+        if busy:
+            raise RuntimeError(busy)
+        path = self._full_import_zip_path(params)
+        home = skysheep_home()
+        out_dir = home / "exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # datetime.strftime 才支持 %f（time.strftime 在 Windows 上没有该指令）
+        from datetime import datetime as _dt
+
+        stage = out_dir / f".import-tmp-{_dt.now().strftime('%Y%m%d-%H%M%S%f')}"
+        stage.mkdir(parents=True)
+        store = self.store
+        had_db = store.path.exists() and store.path.stat().st_size > 0
+        safety: Path | None = None
+        cfg_restored: list[str] = []
+        cfg_snapshot: dict[str, bytes | None] = {}
+        db_replaced = False
+        skills_installed: list[str] = []
+        skills_overwritten: list[str] = []
+        skills_backup: dict[str, Path] = {}
+        skills_root = home / "skills"
+        skills_backup_root = stage / ".skill-backup"
+
+        async def _undo_all(residual: list[str]) -> list[str]:
+            """按逆序整体回滚：技能 → 配置 → 库。返回未能还原的名字清单。
+
+            旧实现只在配置/热重载两处分别回滚，技能复制不在回滚面内；且回滚
+            失败只记日志后照样声称「已回滚」。现在统一收口并回报残留。
+            """
+            failed: list[str] = []
+            for name in reversed(skills_installed):
+                dst = skills_root / name
+                backup = skills_backup.get(name)
+                try:
+                    if backup is not None and backup.is_dir():
+                        # 原本就存在的技能：先删新内容再放回备份
+                        shutil.rmtree(dst, ignore_errors=True)
+                        shutil.copytree(backup, dst, dirs_exist_ok=True)
+                    else:
+                        # 原本不存在：删掉新增目录
+                        shutil.rmtree(dst, ignore_errors=True)
+                except OSError:
+                    failed.append("skills/" + name)
+            if cfg_snapshot:
+                failed.extend(ServerBackend._rollback_config_files(cfg_snapshot))
+            if db_replaced:
+                await self._undo_store_db_replace(safety, had_db=had_db)
+            failed.extend(residual)
+            return failed
+
+        try:
+            try:
+                zf = zipfile.ZipFile(path)
+            except Exception as e:
+                raise RuntimeError(f"打不开导出包（不是合法 zip？）：{e}") from None
+            with zf:
+                staged, unknown = self._stage_full_import(zf, stage)
+            if not staged:
+                raise RuntimeError("包里没有可恢复的内容（既没有会话库、配置，也没有技能）")
+            staged_db = stage / "skysheep.db"
+            if staged_db.is_file():
+                self._validate_staged_db(staged_db)  # 新版库 / 坏库在这里被拦下
+
+            # 1) 换库（替换前自动留「恢复前」安全副本）
+            if staged_db.is_file():
+                try:
+                    safety = await self._replace_store_db(staged_db)
+                    db_replaced = True
+                except Exception as e:
+                    await self._undo_store_db_replace(safety, had_db=had_db)
+                    raise RuntimeError(f"会话库恢复失败，已回滚：{e}") from None
+
+            # 2) 配置文件（内存快照先行，失败按它还原）
+            staged_cfg = {n: (stage / n).read_bytes()
+                          for n in self.SETTINGS_EXPORT_FILES if (stage / n).is_file()}
+            if staged_cfg:
+                # 先校验再建快照再写入：任何一步失败时快照已完整，回滚可用；
+                # 校验不通过时尚未写盘，连回滚都不需要（旧实现是边写边校验，
+                # 第二项写失败时才手忙脚乱回滚）。
+                try:
+                    if "config.toml" in staged_cfg:
+                        import tomllib
+
+                        tomllib.loads(staged_cfg["config.toml"].decode("utf-8"))
+                    if "ui.json" in staged_cfg:
+                        parsed_ui = json.loads(staged_cfg["ui.json"].decode("utf-8"))
+                        if not isinstance(parsed_ui, dict):
+                            raise ValueError("ui.json 不是 JSON 对象")
+                except Exception as e:
+                    raise RuntimeError(
+                        f"导入包配置校验不通过，未写入任何文件（本机数据未改动）：{e}"
+                    ) from None
+                cfg_snapshot = self._snapshot_config_files(staged_cfg)
+                try:
+                    cfg_restored = self._restore_config_files_from(staged_cfg, cfg_snapshot)
+                except Exception as e:
+                    failed = await _undo_all([])
+                    raise RuntimeError(
+                        "配置恢复失败，已回滚"
+                        + (f"（残留未还原：{'、'.join(failed)}）" if failed else "")
+                        + f"：{e}"
+                    ) from None
+
+            # 3) 技能合并恢复：同名覆盖、包里没有的保留；目录名先过安装器
+            # 同款校验（挡 ..、分隔符、盘符），再逐棵复制。技能也在回滚面内：
+            # 记下每个目标目录的导入前状态（不存在 = None），失败时整体撤销。
+            staged_skills = stage / "skills"
+            if staged_skills.is_dir():
+                from ..skills.installer import _skill_target
+
+                skills_root.mkdir(parents=True, exist_ok=True)
+                try:
+                    for src_dir in sorted(p for p in staged_skills.iterdir() if p.is_dir()):
+                        try:
+                            dst = _skill_target(skills_root, src_dir.name)
+                        except SkillInstallError as e:
+                            raise RuntimeError(
+                                f"包里的技能名不合法（{src_dir.name}）：{e}"
+                            ) from None
+                        if dst.is_dir():
+                            # 原本就存在的技能先完整备份，回滚时整体换回（不能只
+                            # 删新增文件——copytree(dirs_exist_ok=True) 是合并写入）
+                            skills_overwritten.append(src_dir.name)
+                            backup = skills_backup_root / src_dir.name
+                            backup.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copytree(dst, backup, dirs_exist_ok=True)
+                            skills_backup[src_dir.name] = backup
+                        shutil.copytree(src_dir, dst, dirs_exist_ok=True)
+                        skills_installed.append(src_dir.name)
+                except Exception as e:
+                    failed = await _undo_all([])
+                    raise RuntimeError(
+                        "技能恢复失败，已回滚"
+                        + (f"（残留未还原：{'、'.join(failed)}）" if failed else "")
+                        + f"：{e}"
+                    ) from None
+
+            # 4) 热重载：配置 → 档位 → 技能/系统提示词 → 子代理 → MCP。
+            # config 加载失败说明本机路径等环境与包不兼容，同样整体回滚
+            try:
+                self.cfg = load_config()
+            except Exception as e:
+                failed = await _undo_all([])
+                raise RuntimeError(
+                    "导入后配置加载失败（本机环境与导出包可能不兼容），已回滚"
+                    + (f"（残留未还原：{'、'.join(failed)}）" if failed else "")
+                    + f"：{e}"
+                ) from None
+            if "ui.json" in cfg_restored:
+                self._apply_gate_accept_pref(self._read_ui_prefs().get("accept_edits", 0))
+            if skills_installed:
+                self.skills.discover()
+                self._refresh_system_prompts()
+            if "subagents.json" in cfg_restored:
+                try:
+                    self.subagent_store.load()
+                except Exception as e:  # noqa: BLE001 - 子代理清单读不进来不拦导入
+                    logger.warning("导入后重建子代理清单失败：%s", e)
+            mcp_warnings: list[str] = []
+            if "mcp.json" in cfg_restored:
+                try:
+                    await self._sync_mcp_changes()
+                except Exception as e:  # noqa: BLE001 - MCP 重连失败提示重试/重启，不回滚
+                    mcp_warnings.append(f"MCP 配置已恢复但重连失败（重启应用后生效）：{e}")
+
+            # 5) 会话内存状态按新库重建（与备份恢复同一套）
+            rebuilt = await self._rebuild_after_db_replace(reason="会话库已从导出包恢复")
+            return {
+                "db_restored": db_replaced,
+                "config_restored": cfg_restored,
+                "skills_installed": skills_installed,
+                "skills_overwritten": skills_overwritten,
+                "unknown": unknown,
+                "safety_copy": str(safety) if safety else "",
+                "session": rebuilt["session"],
+                "projects": rebuilt["projects"],
+                "warnings": mcp_warnings,
+            }
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
 
     async def snapshot(self, local: bool = True) -> dict:
         """首屏快照。local=False（局域网 / Tailscale 远端）时打码本机信息。
@@ -6917,6 +7493,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "crashed_last_run": bool(getattr(self, "crashed_last_run", False)),
             "subagent": self.subagent_settings(),
             "update": self.update_info,
+            "update_success": self.update_success,
+            "update_failure": self.update_failure,
             "tools": [
                 {"name": t.name, "safety": t.safety.value, "description": t.description}
                 for t in self._base_agent.registry.all()

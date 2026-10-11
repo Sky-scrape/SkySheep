@@ -95,8 +95,9 @@ def test_download_setup_enforces_size_cap(tmp_path, monkeypatch):
     _mock_httpx(monkeypatch, handler)
     monkeypatch.setattr(remote_mod, "MAX_SETUP_BYTES", 1024)
     dest = tmp_path / "setup.exe"
+    # allow_unverified：本用例只验体积防线，绕过「缺 checksum 即拒装」的前置门
     with pytest.raises(RuntimeError, match="上限"):
-        remote_mod._download_setup(SETUP_URL, dest, "")
+        remote_mod._download_setup(SETUP_URL, dest, "", allow_unverified=True)
     assert not dest.exists()
     assert not (tmp_path / "setup.exe.part").exists()
 
@@ -108,7 +109,8 @@ def test_download_setup_rejects_non_pe_header(tmp_path, monkeypatch):
     _mock_httpx(monkeypatch, handler)
     dest = tmp_path / "setup.exe"
     with pytest.raises(RuntimeError, match="头部校验失败"):
-        remote_mod._download_setup(SETUP_URL, dest, "")  # 无 .sha256 时 MZ 头兜底
+        # 显式放行未校验（只验 MZ 头兜底这一层）
+        remote_mod._download_setup(SETUP_URL, dest, "", allow_unverified=True)
     assert not dest.exists()
 
 
@@ -118,7 +120,7 @@ def test_download_setup_propagates_404_as_status_error(tmp_path, monkeypatch):
 
     _mock_httpx(monkeypatch, handler)
     with pytest.raises(httpx.HTTPStatusError):
-        remote_mod._download_setup(SETUP_URL, tmp_path / "setup.exe", "")
+        remote_mod._download_setup(SETUP_URL, tmp_path / "setup.exe", "", allow_unverified=True)
     # 404 的「人话」包装在 install_update 层（下面有端到端用例）
 
 
@@ -162,7 +164,7 @@ def test_fetch_sha256_empty_on_404_garbage_and_network_error(monkeypatch):
 async def _setup_frozen_backend(tmp_path, monkeypatch, handler, version="9.9.9"):
     _mock_httpx(monkeypatch, handler)
 
-    async def fake_release():
+    async def fake_release(channel: str = "stable"):  # 新签名：渠道由 remote 层传入
         return {"version": version, "setup_url": SETUP_URL, "notes": ""}
 
     monkeypatch.setattr(remote_mod, "check_latest_release", fake_release)
@@ -190,7 +192,12 @@ async def test_install_update_downloads_verifies_and_pends(tmp_path, monkeypatch
     await be.shutdown()
 
 
-async def test_install_update_without_checksum_reports_unverified(tmp_path, monkeypatch):
+async def test_install_update_without_checksum_refuses_to_install(tmp_path, monkeypatch):
+    """发布方未提供 .sha256：默认拒绝自动安装（fail closed），引导手动下载核对。
+
+    旧行为是「有则必校、无则只靠 MZ 头 + 体积上限放行」——那两道只能防半截
+    文件，不能证明内容未被替换。现在缺校验和直接拒绝，不再降级安装。
+    """
     payload = _payload()
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -199,9 +206,9 @@ async def test_install_update_without_checksum_reports_unverified(tmp_path, monk
         return httpx.Response(200, content=payload)
 
     be = await _setup_frozen_backend(tmp_path, monkeypatch, handler)
-    r = await be.install_update()
-    assert r["update_available"] is True and r["verified"] is False
-    assert Path(r["path"]).read_bytes() == payload  # MZ 头 + 体积上限两道兜底后放行
+    with pytest.raises(RuntimeError, match="校验和"):
+        await be.install_update()
+    assert not be._pending_update, "缺校验和时不得留下待安装包"
     await be.shutdown()
 
 

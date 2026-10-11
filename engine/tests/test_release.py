@@ -67,3 +67,32 @@ def test_upload_rejects_stale_sha_before_external_tools(monkeypatch, tmp_path):
     )
     with pytest.raises(RuntimeError, match="不匹配"):
         release.step_upload(True)
+
+
+def test_quality_gate_matches_ci_coverage_threshold():
+    """发布质量门与 CI 同口径：单测带覆盖率门槛，不再跑一套更松的门禁。"""
+    import inspect
+
+    src = inspect.getsource(release.step_quality)
+    assert "--cov-fail-under=80.5" in src, "本地发布必须与 CI 同覆盖率门槛"
+    assert "--cov=skysheep" in src
+    # 三个标记都要跑到：单测（含覆盖率）+ e2e + eval
+    assert '"not e2e and not eval"' in src
+    assert '"e2e"' in src and '"eval"' in src
+
+
+def test_ci_workflow_has_release_candidate_job():
+    """CI 必须存在发布候选门禁：冻结包构建 + 隔离冒烟 + 安装包编译。
+
+    只跑源码单测的 CI 不能证明发布包可构建、可启动；这条钉住发布候选 job
+    不被误删，也保证它默认只在手动触发/打 tag 时跑（不拖慢每次 push）。
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    ci = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "package:" in ci, "缺少发布候选 job"
+    assert "pyinstaller.exe --noconfirm --clean SkySheep.spec" in ci
+    assert "ISCC.exe" in ci
+    assert "SKYSHEEP_HOME" in ci, "冻结包冒烟必须用隔离 home"
+    assert "workflow_dispatch" in ci
+    # 每个 job 都要有超时保护（防止 teardown 挂起拖死流水线）
+    assert ci.count("timeout-minutes:") >= 4

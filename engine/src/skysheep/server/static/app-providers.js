@@ -202,14 +202,14 @@ function renderProviderDetail(name) {
     <h4 class="sec-title">基本信息</h4>
     <div class="flat-panel">
       <div class="field">
-        <label>供应商类型</label>
+        <label>服务类型</label>
         <select data-f="kind">
           <option value="openai">openai（OpenAI 兼容协议）</option>
           <option value="anthropic">anthropic（Anthropic 原生协议）</option>
         </select>
       </div>
       <div class="field">
-        <label>供应商名称</label>
+        <label>服务名称</label>
         <input data-f="name" value="${escapeHtml(name)}" disabled title="名称是配置文件里的标识，暂不支持修改">
       </div>
       <div class="field">
@@ -300,11 +300,17 @@ function renderProviderDetail(name) {
 
     <div class="sec-title-row">
       <h4 class="sec-title">连接测试</h4>
-      <button class="btn-ghost test-conn" type="button" title="做一次最小真实调用，验证 Key、地址与模型真的可用；同时探测模型是否在服务列表、上下文窗口多大">🔌 测试连接</button>
+      <span class="conn-actions">
+        <button class="btn-ghost test-conn" type="button" title="做一次最小真实调用，验证 Key、地址与模型真的可用；同时探测模型是否在服务列表、上下文窗口多大">🔌 测试连接</button>
+        <button class="btn-ghost cap-probe" type="button" title="对流式输出、工具调用、图片输入、思考强度各发一次最小真实调用（会产生少量真实计费），测完给出「这个模型适合干什么」的结论">🧪 能力探测</button>
+        <button class="btn-ghost copy-diag" type="button" hidden title="把最近一次测试与探测结果整理成脱敏文本并复制，方便发反馈或留档">📋 复制诊断</button>
+      </span>
     </div>
     <div class="flat-panel">
       <div class="panel-note" id="test-conn-note">还没有测试：点右上角「测试连接」。检测的是「能不能真的对话」，比模型列表更严格。</div>
       <div id="test-conn-detail" class="field-tip hidden"></div>
+      <div id="cap-chips" class="cap-chip-row hidden"></div>
+      <div id="cap-summary" class="field-tip" hidden></div>
     </div>
 
     <div class="sec-title-row">
@@ -454,6 +460,10 @@ function renderProviderDetail(name) {
     }
   };
 
+  // 最近一次测试/探测结果存闭包：供「复制诊断」拼报告；进详情重新开始
+  let lastTest = null;
+  let lastCaps = null;
+
   // 连接测试：最小真实调用（1 token 非流式），比列表检测更严格。
   // 结果同步进健康缓存，列表行的状态灯随之更新。
   const runTest = async () => {
@@ -473,6 +483,8 @@ function renderProviderDetail(name) {
     detailEl.classList.add("hidden");
     try {
       const r = await request("model.test", params);
+      lastTest = r;
+      document.querySelector(".copy-diag").hidden = false;
       if (r.ok) {
         const parts = [`✓ 连接正常（${r.latency_ms} ms）`];
         if (r.model_listed === true) parts.push("模型在服务列表中");
@@ -506,6 +518,103 @@ function renderProviderDetail(name) {
     return cur.model || "";
   };
   q(".test-conn").onclick = () => runTest();
+
+  // 能力探测：流式 / 工具调用 / 图片输入 / 思考强度各一次最小真实调用。
+  // 与「测试连接」分开：这项会产生少量真实计费，由用户点按钮明确触发。
+  const runCapProbe = async () => {
+    const btn = q(".cap-probe");
+    const noteEl = document.getElementById("test-conn-note");
+    const chipsEl = document.getElementById("cap-chips");
+    const sumEl = document.getElementById("cap-summary");
+    const params = {
+      name,
+      kind: q("select[data-f='kind']").value,
+      base_url: q('input[data-f="base_url"]').value.trim(),
+      api_key: q('input[data-f="api_key"]').value.trim(),
+      model: (p2activeModel() || "").trim(),
+    };
+    btn.disabled = true;
+    noteEl.textContent = "探测中…正在对四项能力各发一次最小调用（流式 / 工具 / 图片 / 思考强度），会产生少量真实计费";
+    noteEl.className = "panel-note";
+    chipsEl.classList.add("hidden");
+    sumEl.classList.add("hidden");
+    try {
+      const r = await request("model.probe_capabilities", params);
+      lastCaps = r;
+      const items = [
+        ["流式输出", r.streaming], ["工具调用", r.tools],
+        ["图片输入", r.vision], ["思考强度", r.reasoning],
+      ];
+      chipsEl.innerHTML = items.map(([label, it]) => {
+        const mark = it.supported === true ? "✓" : it.supported === false ? "✗" : "—";
+        const cls = it.supported === true ? "chip-blue" : it.supported === false ? "chip-bad" : "chip-warn";
+        return `<span class="chip ${cls}" title="${escapeHtml(it.note || "")}">${label} ${mark}</span>`;
+      }).join("") + `<span class="chip" title="探测总耗时（四次最小调用合计）">${r.latency_ms} ms</span>`;
+      chipsEl.classList.remove("hidden");
+      sumEl.textContent = r.summary || "";
+      sumEl.classList.remove("hidden");
+      document.querySelector(".copy-diag").hidden = false;
+      noteEl.textContent = "探测完成：悬停每个标记看具体说明。测出「不支持」的项建议按结论调整对应开关。";
+      noteEl.className = "panel-note";
+    } catch (e) {
+      noteEl.textContent = "✗ " + e.message;
+      noteEl.className = "panel-note bad";
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  q(".cap-probe").onclick = () => runCapProbe();
+
+  // 脱敏规则：Key 前缀、Bearer 头、URL 里的 token 参数；诊断报告要能直接发出去
+  const maskSensitive = (s) => String(s || "")
+    .replace(/sk-[A-Za-z0-9_-]{6,}/g, "sk-***")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, "Bearer ***")
+    .replace(/([?&](?:key|api_key|apikey|token|access_token)=)[^&\s]*/gi, "$1***");
+
+  const buildDiagReport = () => {
+    const kind = q("select[data-f='kind']").value;
+    const baseUrl = maskSensitive(q('input[data-f="base_url"]').value.trim());
+    const lines = ["SkySheep 模型诊断报告"];
+    lines.push(`服务：${name} · 协议 ${kind} · 地址 ${baseUrl || "（默认接口）"}`);
+    lines.push(`模型：${(p2activeModel() || "").trim() || "（未填）"}`);
+    if (lastTest) {
+      if (lastTest.ok) {
+        const parts = [`连接正常（${lastTest.latency_ms} ms）`];
+        if (lastTest.model_listed === true) parts.push("模型在服务列表中");
+        if (lastTest.context_limit) {
+          parts.push(`上下文窗口 ${lastTest.context_limit.toLocaleString()} tokens`);
+        }
+        lines.push("测试连接：✓ " + parts.join(" · "));
+      } else {
+        lines.push(`测试连接：✗ ${lastTest.title || "连接失败"}`
+          + (lastTest.error ? "：" + maskSensitive(lastTest.error) : ""));
+        if (lastTest.category) lines.push(`失败类别：${lastTest.category}`);
+        if (lastTest.advice) lines.push(`建议：${lastTest.advice}`);
+      }
+    }
+    if (lastCaps) {
+      const items = [
+        ["流式输出", lastCaps.streaming], ["工具调用", lastCaps.tools],
+        ["图片输入", lastCaps.vision], ["思考强度", lastCaps.reasoning],
+      ];
+      lines.push("能力探测：" + items.map(([label, it]) =>
+        `${label} ${it.supported === true ? "✓" : it.supported === false ? "✗" : "未确认"}`
+        + (it.note ? `（${maskSensitive(it.note)}）` : "")).join("；"));
+      if (lastCaps.summary) lines.push("结论：" + lastCaps.summary);
+    }
+    lines.push(`生成时间：${new Date().toLocaleString()}`);
+    lines.push("（API Key 与令牌已脱敏，可放心分享）");
+    return lines.join("\n");
+  };
+
+  q(".copy-diag").onclick = async () => {
+    try {
+      await copyTextToClipboard(buildDiagReport());
+      note("诊断报告已复制（Key 已脱敏，可放心分享）", true);
+    } catch (e) {
+      note("复制失败：" + e.message, false);
+    }
+  };
 
   // 检测连接 / 拉取模型是同一个动作：向该服务查询可用模型列表，顺带验证地址与 Key
   const probeFill = async () => {

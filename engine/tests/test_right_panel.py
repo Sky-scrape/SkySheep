@@ -446,32 +446,44 @@ def test_ui_prefs_right_panel_keys(home):
         assert stored["right_active"] == "memory"
 
 
-def test_rp_tabs_compress_no_scroll(home):
-    """标签条压缩呈现：不横向滚动，标签均分宽度、逐级降级（藏图标/藏非激活关闭钮）。
+def test_rp_tabs_compress_then_scroll(home):
+    """标签条压缩呈现：先均分收缩、藏图标留字，压到放不下转横向滚动。
 
-    标签一多以前靠 overflow-x: auto 出滚动条——滚动条占面板高度且难拖；
-    改为均分 + 省略号 + title 提示，降级档位由 JS 渲染后按均分宽度判定。
+    均分 + 省略号 + title 提示保证标签再多也不挤成糊；旧设计的终档是
+    「整格只剩图标」（关闭钮悬浮右上角），实际用起来要逐个猜，已废除——
+    不足 64px/个就不再压缩，标签回到自然宽度、整条栏横向滑动查看。
+    档位由 JS 渲染后按均分宽度判定。
     """
     from skysheep.server.app import STATIC_DIR
 
     js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    # CSS：容器不再横向滚动；标签可压缩、文字截断；两档降级类存在
+    # CSS：容器开横向滚动（平时均分不会溢出、无滚动条）；标签可压缩、文字截断
     tabs_block = css.split("#rp-tabs {")[1].split("}")[0]
-    assert "overflow-x: auto" not in tabs_block, "标签条不得再横向滚动"
+    assert "overflow-x: auto" in tabs_block, "压到放不下时标签条要能横向滚动"
     tab_block = css.split(".rp-tab {")[1].split("}")[0]
     assert "flex: 1 1 0" in tab_block and "min-width: 0" in tab_block
     span_rule = css.split(".rp-tab > span:not(.rp-x) {")[1].split("}")[0]
     assert "text-overflow: ellipsis" in span_rule
-    assert "#rp-tabs.rp-tight" in css and "#rp-tabs.rp-cramped" in css
-    assert "#rp-tabs.rp-icon" in css, "更挤时有只显图标的档位"
+    assert "#rp-tabs.rp-tight" in css, "不足 92px/个时藏图标留字"
+    assert "#rp-tabs.rp-scroll" in css, "压到放不下转横向滚动"
+    assert "rp-cramped" not in css and "rp-icon" not in css, "紧凑档/图标档已废除"
+    # 滚动档：标签回到自然宽度，不再被压扁
+    scroll_rule = css.split("#rp-tabs.rp-scroll .rp-tab {")[1].split("}")[0]
+    assert "flex: 0 0 auto" in scroll_rule
     # JS：档位判定抽成 applyRpTabDensity，渲染与容器宽度变化（ResizeObserver）共用；
-    # 图标档与其它两档互斥（整格只剩图标时 tight/cramped 规则无意义）
+    # 两档互斥（滚动档标签有自然宽度，tight 的藏图标规则无意义）
     assert "function applyRpTabDensity(" in js
-    assert 'classList.toggle("rp-icon", iconOnly)' in js
-    assert 'classList.toggle("rp-tight", !iconOnly && per < 92)' in js
-    assert 'classList.toggle("rp-cramped", !iconOnly && per < 64)' in js
+    assert 'classList.toggle("rp-scroll", key === "scroll")' in js
+    assert 'classList.toggle("rp-tight", key === "tight")' in js
+    assert "iconOnly" not in js and '"cramped"' not in js, "图标档/紧凑档判定已删"
     assert "ResizeObserver" in js, "拖面板宽度后档位要即时跟上"
+    # 溢出时保证激活标签可见（scrollIntoView 同 #chat-tabs）
+    assert 'scrollIntoView({ block: "nearest", inline: "nearest" })' in js
+    # 「＋」钮在标签栏最左、常驻可见：横滚档粘在可视区左缘，不随标签滚出画面
+    assert "rpTabs.prepend(addBtn)" in js, "＋ 要插在所有标签之前（行首）"
+    add_rule = css.split(".rp-add {")[1].split("}")[0]
+    assert "position: sticky" in add_rule and "left: 0" in add_rule
     # RO 回调必须 rAF 推迟 + 档位无变化不写 DOM：回调内同步改布局会刷
     # 「ResizeObserver loop completed」告警（真循环的根因在各自 RO 回调里修；
     # 曾兜底的调试错误陷阱 __errdump 已按评审移除，这里只锁根因侧的修法）

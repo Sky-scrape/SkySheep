@@ -21,6 +21,14 @@
  *  静默覆盖，守卫见 tests/test_frontend_wiring.py 的跨文件重名扫描用例）。
  * ─────────────────────────────────────────────────────────────────────── */
 
+// ---------- 历史导航兜底（本应用只有一个页面） ----------
+// 触屏边滑 / 鼠标侧键的后退手势会把窗口带回启动动画页——那是一张没有脚本的
+// 静态页（bootpages.splash_html），回去了就没人再导航回来，窗口永远停在
+// 「正在启动」。这里压一个同地址哨兵并逐次补压：后退/前进手势被原地吞掉，
+// 永远走不出本页（desktop.py 另有看守兜底，覆盖本脚本尚未执行的空窗）。
+history.pushState(null, "", location.href);
+addEventListener("popstate", () => history.pushState(null, "", location.href));
+
 // ---------- 迷你 Markdown 渲染（先转义再渲染，安全） ----------
 function escapeHtml(s) {
   return s
@@ -11551,24 +11559,31 @@ function renderRightPanel() {
     b.onclick = () => activateRightTab(id);
     rpTabs.appendChild(b);
   });
-  // 行尾「＋」：唤出标签小菜单（不弹窗）
+  // 行首「＋」：唤出标签小菜单（不弹窗）。放在最左＋粘住左缘——横滚时不会被
+  // 标签挤出画面，也不压在完整标签的关闭钮上（右缘方案会盖住半截标签的 ✕）
   const addBtn = document.createElement("button");
   addBtn.className = "rp-add";
   addBtn.title = "打开其它标签";
   addBtn.textContent = "＋";
   addBtn.onclick = (e) => { e.stopPropagation(); toggleTabsMenu(addBtn); };
-  rpTabs.appendChild(addBtn);
-  // 压缩降级档位：均分宽度不足时逐级降级，保证标签再多也不出横向滚动
-  // （容器 overflow 已 hidden，这里是视觉降级）；判定抽成 applyRpTabDensity，
+  rpTabs.prepend(addBtn);
+  // 压缩档位：均分宽度不足时先藏图标留字，再窄就不再挤、转横向滚动
+  // （滚动档标签回到自然宽度）；判定抽成 applyRpTabDensity，
   // 容器宽度变化时由 ResizeObserver 走同一条路
   applyRpTabDensity();
+  // 横滚档保证激活标签落在可视区：启动恢复/打开新标签后它可能在滚动区外
+  const overflowing = rpTabs.scrollWidth > rpTabs.clientWidth;
+  if (rightActive && overflowing) {
+    const activeEl = rpTabs.querySelector(`.rp-tab[data-tab-id="${rightActive}"]`);
+    if (activeEl) activeEl.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
   document.querySelectorAll("#rp-body .rp-page").forEach((p) => p.classList.add("hidden"));
   if (rightActive && !rightCollapsed) document.getElementById("rp-page-" + rightActive).classList.remove("hidden");
   applyRightSubView(rightActive); // 合并标签里该露哪一段（收起时也刷，展开即正确）
 }
 
-/** 标签栏压缩档位：按均分到每个标签的宽度逐级降级（CSS 规则见 app.css 的
-    rp-tight / rp-cramped / rp-icon）。renderRightPanel 与容器宽度变化
+/** 标签栏压缩档位：按均分到每个标签的宽度降级（CSS 规则见 app.css 的
+    rp-tight / rp-scroll）。renderRightPanel 与容器宽度变化
     （ResizeObserver）都调它——拖面板宽度、缩放窗口后档位即时跟上。
     档位无变化时不动 DOM：RO 回调里每次写 class 会重新触发尺寸观察，
     形成「ResizeObserver loop completed」告警循环。 */
@@ -11577,15 +11592,14 @@ function applyRpTabDensity() {
   const tabCount = rightTabs.length;
   const avail = rpTabs.clientWidth - 34; // 扣「＋」钮与内边距
   const per = tabCount > 0 ? avail / tabCount : 999;
-  // 图标档（不足 56px/个：四字中文标签已只能露一两个字）与其它两档互斥：
-  // 整格只剩图标，文字藏起后 tight / cramped 的规则没有意义
-  const iconOnly = per < 56;
-  const key = iconOnly ? "icon" : per < 64 ? "cramped" : per < 92 ? "tight" : "";
+  // 两档互斥：不足 92px/个先藏图标留字；不足 64px/个（四字标签只剩两三个字）
+  // 不再硬挤——转横向滚动档，标签回到自然宽度。滚动条出现/消失会把 per 往
+  // 远离阈值的方向推（出现变挤、消失变宽），单阈值不会在边界上反复横跳
+  const key = per < 64 ? "scroll" : per < 92 ? "tight" : "";
   if (key === _rpDensityKey) return; // 档位未变：不写 DOM，断掉 RO 循环
   _rpDensityKey = key;
-  rpTabs.classList.toggle("rp-icon", iconOnly);
-  rpTabs.classList.toggle("rp-tight", !iconOnly && per < 92);
-  rpTabs.classList.toggle("rp-cramped", !iconOnly && per < 64);
+  rpTabs.classList.toggle("rp-scroll", key === "scroll");
+  rpTabs.classList.toggle("rp-tight", key === "tight");
 }
 // 容器宽度变化（拖面板 / 窗口缩放）时重算档位：此前只在重渲染时算一次，
 // 拖窄后文字挤着也不降级、拖宽后仍卡在紧凑档。

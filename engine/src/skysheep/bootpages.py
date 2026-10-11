@@ -89,6 +89,7 @@ def splash_html(static_dir: Path, theme: str = "paper", dark: bool | None = None
     return (
         '<!doctype html><html><head><meta charset="utf-8"><style>'
         "html,body{margin:0;height:100%;background:" + pal["bg"] + ";overflow:hidden;"
+        'overscroll-behavior:none;'  # 触屏/触控板边缘滑动不触发历史导航手势
         'font-family:"Microsoft YaHei UI","Microsoft YaHei",sans-serif;user-select:none}'
         ".wrap{height:100%;box-sizing:border-box;margin:14px;display:flex;"
         "flex-direction:column;align-items:center;justify-content:center;gap:20px;"
@@ -112,7 +113,15 @@ def splash_html(static_dir: Path, theme: str = "paper", dark: bool | None = None
         + '<span class="wordmark">SkySheep</span></div>'
         '<div class="dots"><span></span><span></span><span></span></div>'
         '<div class="sub">正在启动 · 引擎准备中，首次启动可能需要几秒</div>'
-        "</div></body></html>"
+        "</div>"
+        # 自愈脚本：本页没有任何导航能力，万一被后退手势/意外导航带回来，靠它
+        # 每 0.4s 向程序要一次应用地址（desktop._splash_target_url，服务就绪前
+        # 返回空串），拿到就跳回——「卡在启动页」从此在物理上不成立
+        "<script>(function(){function p(){try{var a=window.pywebview&&window.pywebview.api;"
+        "if(a&&a.get_target_url){a.get_target_url().then(function(u){"
+        "if(u){location.replace(u);}}).catch(function(){});}}catch(e){}"
+        "setTimeout(p,400);}p();})();</script>"
+        "</body></html>"
     )
 
 

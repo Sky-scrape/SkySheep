@@ -76,7 +76,13 @@
     linear-gradient(168deg, #efe6cf 0%, var(--bg) 52%, #ddd2b6 100%);
 }
 
-html, body { height: 100%; overflow: hidden; } /* 页面本身不滚动：滚动只发生在内部面板 */
+html, body {
+  height: 100%; overflow: hidden; /* 页面本身不滚动：滚动只发生在内部面板 */
+  /* 禁掉 Chromium 的历史滑动导航手势（触屏/触控板边缘滑）：桌面壳只有一页，
+     滑动只可能滑回启动动画页卡死。WebView2 开关（IsSwipeNavigationEnabled）
+     之外的内容级开关，双保险 */
+  overscroll-behavior: none;
+}
 /* 极早期兜底（body 还没画出来、app.css 还没到时）：露出的也是纸色而不是 WebView 白底 */
 html { background: var(--bg); }
 body {
@@ -4011,14 +4017,20 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
   background: var(--card); border-left: 2px solid var(--ink-line);
 }
 
-/* 标签头：标签一多不再横向滚动（滚动条挤占面板高度且难拖），改为压缩呈现——
-   全部标签均分剩余宽度，文字截断加省略号；悬停/激活时完整标题在 title 提示里。
-   太窄时逐级降级（判定见 app.js 的 applyRpTabDensity）：① 藏图标留文字
-   ② 藏非激活标签的关闭钮（激活的关闭钮保留）③ 更挤时反过来——整格只剩图标代表 */
+/* 标签头：标签一多先压缩呈现——全部标签均分剩余宽度，文字截断加省略号；
+   悬停/激活时完整标题在 title 提示里。太窄时降级（判定见 app.js 的
+   applyRpTabDensity）：先藏图标留文字；再窄就不再挤，整条标签栏横向滚动
+   （标签回到自然宽度，激活标签滚入可视区），行首「＋」粘在可视区左缘常驻。
+   滚动条压细同 #chat-tabs */
 #rp-tabs {
   display: flex; align-items: stretch; flex-shrink: 0;
-  border-bottom: 2px solid var(--ink-line); padding: 0 6px; overflow: hidden;
+  border-bottom: 2px solid var(--ink-line); padding: 0 6px;
+  overflow-x: auto; overflow-y: hidden;
 }
+#rp-tabs::-webkit-scrollbar { height: 5px; }
+#rp-tabs::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 3px; border: none; }
+#rp-tabs::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+#rp-tabs::-webkit-scrollbar-track { background: transparent; }
 .rp-tab {
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   flex: 1 1 0; min-width: 0; /* 均分宽度，允许被压到极窄 */
@@ -4027,7 +4039,13 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
   transition: color var(--dur-fast), background var(--dur-fast);
 }
 .rp-tab svg { width: 15px; height: 15px; flex-shrink: 0; }
+/* 关闭 ✕ 钉在标签右缘、图标+标题仍居中：::before 是「17px 配平 + 弹性」占位——
+   基准 17px 抵掉右侧 ✕ 的格子（两侧各 17px 格 + 5px 间距），剩余空间由它和
+   标题 span 对半分，✕ 因此贴住右缘、字组保持居中；✕ 悬停只改透明度、一直
+   占位，悬停显形时字组不位移 */
+.rp-tab::before { content: ""; flex: 1 1 17px; min-width: 0; }
 .rp-tab > span:not(.rp-x) {
+  flex: 1 1 auto; text-align: left; /* 抵掉 button 的 UA 居中：span 被撑大后文字会二次居中右偏 */
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .rp-tab:hover { background: var(--blue-weak); color: var(--text); }
@@ -4039,24 +4057,22 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
   flex-shrink: 0;
 }
 .rp-tab:hover .rp-x { opacity: 1; }
-/* 降级 1：容器里标签太多（均分后不足 92px/个）时藏图标、只留字；
+/* 挤（不足 92px/个）先藏图标、只留字；
    用容器查询的宽度区间近似：#rp-tabs 加 .rp-tight 类由 JS 在渲染后判定 */
 #rp-tabs.rp-tight .rp-tab svg { display: none; }
 #rp-tabs.rp-tight .rp-tab { padding: 8px 3px; }
-/* 降级 2：更挤（不足 64px/个）时非激活标签的关闭钮隐藏（激活的仍悬停可点） */
-#rp-tabs.rp-cramped .rp-tab:not(.active) .rp-x { display: none; }
-/* 降级 3：极端（不足 56px/个）时反过来用图标代表——藏起文字、整格只剩图标
-   （图标本就每标签不同，比挤成一两个字的文字更好认）；格子太窄放不下并排的
-   ✕，关闭钮改为悬停时浮在格子右上角（与其它两档互斥，见 applyRpTabDensity） */
-#rp-tabs.rp-icon .rp-tab { position: relative; padding: 8px 2px; }
-#rp-tabs.rp-icon .rp-tab > span:not(.rp-x) { display: none; }
-#rp-tabs.rp-icon .rp-tab .rp-x {
-  position: absolute; top: 1px; right: 1px; width: 14px; height: 14px;
-  font-size: 10px; background: var(--card); border-radius: 50%;
-}
+/* 再窄（不足 64px/个，四字标签只剩两三个字）就不再硬挤：标签回到自然宽度，
+   整条栏横向滑动查看（容器 overflow-x 常开，平时均分不会溢出、无滚动条）。
+   配平占位一并撤掉：自然宽度下没有可分的剩余空间，字组靠左、✕ 靠右
+   （空 ::before 的固有尺寸贡献 browsers 各有解释，留着反而漂移） */
+#rp-tabs.rp-scroll .rp-tab { flex: 0 0 auto; }
+#rp-tabs.rp-scroll .rp-tab::before { display: none; }
 .rp-tab .rp-x:hover { background: rgba(143, 29, 29, .12); color: var(--reg); }
 .rp-add {
-  margin-left: auto; align-self: center; width: 22px; height: 22px; flex-shrink: 0;
+  align-self: center; width: 22px; height: 22px; flex-shrink: 0;
+  /* 常驻可见：放在标签栏最左，横滚档里粘在可视区左缘、不随标签滚出画面；
+     垫卡片底色让被压住的标签从底下滚过（不滚动时就待在行首自然位） */
+  position: sticky; left: 0; background: var(--card);
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--dim); font-size: 15px; font-weight: 700; border-radius: var(--r-xs);
   transition: background var(--dur-fast), color var(--dur-fast);
@@ -4143,6 +4159,14 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
 .rc-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* rp-mini 的外观已并入「盖章按钮」共享块（见文件顶部），这里不再重复定义 */
 .rp-empty { margin: auto; max-width: 320px; text-align: center; color: var(--dim); font-size: 12.5px; line-height: 1.9; padding: 20px; }
+/* 「子代理」的空状态渲染在 flex:1 的列表容器内部，margin:auto 即可双向居中；
+   「步骤 / 事项」的空状态是列表的兄弟节点，两不管就会沉底——让空状态自己
+   占满剩余空间并内部居中，同时把没内容的列表（:empty）连 padding 一起让位，
+   提示才能在工具栏以下的整片区域居中、与「子代理」一致；加载失败的错误行
+   会让列表非空，不受 :empty 影响（.hidden 的 !important 也仍然生效） */
+#todo-empty, #ptask-empty { flex: 1; display: flex; align-items: center; justify-content: center; }
+#rp-view-todo > #todo-list:empty,
+#rp-view-ptasks > #ptask-list:empty { flex: 0; padding-top: 0; padding-bottom: 0; }
 
 /* —— 终端（纸墨配色：内凹纸面 + 墨色正文，蓝=命令、红=错误） —— */
 /* 终端宿主：xterm.js 挂在绝对定位的全尺寸容器里（fit 插件据此算行列数） */

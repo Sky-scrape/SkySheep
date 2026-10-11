@@ -45,8 +45,51 @@ STARTUP_WATCHDOG_SECONDS = 30.0
 PROCESS_TERMINATE = 0x0001
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
+# 系统注入的后退/前进（触屏边滑、鼠标侧键、部分键盘）以 WM_APPCOMMAND 到达主
+# 窗口，WebView2 会把它当成历史导航执行——桌面壳只有一页，就地吞掉。pywebview
+# 已经关掉 WebView2 的直接操作边滑（IsSwipeNavigationEnabled=False），这里堵的
+# 是绕过它的系统注入路径。
+_WM_APPCOMMAND = 0x0319
+_APPCOMMAND_BROWSER_BACKWARD = 1
+_APPCOMMAND_BROWSER_FORWARD = 2
+_GWLP_WNDPROC = -4
+_NAV_HOOKS: list = []  # 持有回调与旧窗口过程引用：局部量被 GC 会让窗口过程悬空崩溃
+
 _MUTEX_HANDLE = None
 _LAUNCH_T0 = time.monotonic()  # 启动计时基准：日志里记录"窗口多久后可见"
+
+
+def _install_no_history_nav(hwnd: int) -> None:
+    """子类化主窗口过程，吞掉 APPCOMMAND 后退/前进。失败不致命：还有 app.js 的
+    历史哨兵、启动页自愈与导航看守三层兜底。"""
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    wnd_proc_type = ctypes.WINFUNCTYPE(
+        ctypes.c_ssize_t, ctypes.c_ssize_t, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t
+    )
+    user32.GetWindowLongPtrW.argtypes = [ctypes.c_ssize_t, ctypes.c_int]
+    user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetWindowLongPtrW.argtypes = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_ssize_t]
+    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.CallWindowProcW.argtypes = [
+        ctypes.c_ssize_t, ctypes.c_ssize_t, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t,
+    ]
+    user32.CallWindowProcW.restype = ctypes.c_ssize_t
+
+    old: list[int] = []
+
+    def _proc(h, msg, wparam, lparam):
+        if msg == _WM_APPCOMMAND:
+            cmd = (lparam >> 16) & 0xFFF
+            if cmd in (_APPCOMMAND_BROWSER_BACKWARD, _APPCOMMAND_BROWSER_FORWARD):
+                return 0  # 吞掉：不转交原窗口过程
+        return user32.CallWindowProcW(old[0], h, msg, wparam, lparam)
+
+    new_proc = wnd_proc_type(_proc)
+    old.append(user32.GetWindowLongPtrW(hwnd, _GWLP_WNDPROC))
+    user32.SetWindowLongPtrW(hwnd, _GWLP_WNDPROC, new_proc)
+    _NAV_HOOKS.extend([new_proc, old])
 
 
 def instance_name() -> str | None:
@@ -1093,6 +1136,42 @@ def _run_windowed() -> int:
 
     static = static_dir()
     picker = FilePicker()
+
+    # 边滑手势KillSwitch落地确认：pywebview 在 on_webview_ready 里已设
+    # IsSwipeNavigationEnabled=False，这里包一层并写日志回读验证——若 WebView2
+    # 运行时不支持该开关或设置未生效，日志会直接暴露，而不是静默失灵。
+    # 同时挂导航闸门（NavigationStarting）：应用加载后取消一切不在应用地址上的
+    # 文档导航——手势滑回启动页的那次导航被就地取消，窗口原地不动。
+    try:
+        from webview.platforms import edgechromium as _ec
+
+        _orig_on_webview_ready = _ec.EdgeChrome.on_webview_ready
+
+        def _on_webview_ready_with_swipe_kill(self, sender, args):
+            _orig_on_webview_ready(self, sender, args)
+            try:
+                s = sender.CoreWebView2.Settings
+                before = s.IsSwipeNavigationEnabled
+                s.IsSwipeNavigationEnabled = False
+                _log(f"[swipe] IsSwipeNavigationEnabled {before} → {s.IsSwipeNavigationEnabled}")
+            except Exception as exc:  # noqa: BLE001
+                _log(f"[swipe] 边滑开关设置失败: {exc!r}")
+
+            def _on_nav_start(_, nav_args):
+                if not nav_gate["open"]:
+                    return  # 启动页阶段：about:blank 的加载放行
+                uri = str(nav_args.Uri or "")
+                if uri.startswith(str(nav_gate["prefix"])):
+                    return  # 应用自身的加载/刷新放行
+                nav_args.Cancel = True
+                _log(f"已拦截离站导航: {uri[:80] or '空地址'}")
+
+            sender.CoreWebView2.NavigationStarting += _on_nav_start
+
+        _ec.EdgeChrome.on_webview_ready = _on_webview_ready_with_swipe_kill
+    except Exception as exc:  # noqa: BLE001
+        _log(f"[swipe] 边滑开关挂载失败: {exc!r}")
+
     # 提前初始化 GUI 库并取屏幕列表：默认开窗位置用主屏（不指定位置时 WinForms
     # 的 CenterScreen 在 DPI 缩放下会把窗口推向右下）；恢复窗口几何时的屏幕
     # 边界校验也用它。initialize() 只导入平台模块，start() 里再调用走模块缓存，
@@ -1130,6 +1209,20 @@ def _run_windowed() -> int:
     # 主题尽量提前定下来：窗口底色 / 启动页 / 标题栏用同一份解析结果——
     # 「跟随系统」深色下若启动页还是纸色而标题栏已变深，首屏几秒很割裂
     wintheme.set_theme_mode(wintheme.read_ui_theme())
+
+    # 启动页自愈桥：splash 是 html= 的无导航静态页，被后退手势/意外导航带回来
+    # 后没有任何办法自己回到应用页。暴露 get_target_url 给它轮询——服务就绪前
+    # 返回空串，就绪后返回应用地址，启动页拿到即 location.replace 跳回。
+    splash_nav: dict[str, str] = {"url": ""}
+
+    def _splash_target_url() -> str:
+        return splash_nav["url"]
+
+    # 导航闸门：应用加载完成后取消一切不在应用地址上的文档导航（后退手势滑回
+    # 启动页的那次导航会被直接取消，页面原地不动）。open 在应用地址确定后才置
+    # True——启动页自身的加载（about:blank）不经过这道闸。
+    nav_gate: dict[str, object] = {"open": False, "prefix": ""}
+
     window = webview.create_window(
         app_title(),
         html=splash_html(static, theme=wintheme.current_theme_mode()),
@@ -1158,6 +1251,7 @@ def _run_windowed() -> int:
     _show_on_first_paint(window)
     _start_launch_watchdog(window)
     picker.attach(window)
+    window.expose(_splash_target_url)  # 启动页自愈轮询的数据源（见 splash_nav）
     wintheme.hook_caption_theme(window)  # 标题栏染成纸墨主题色（老系统自动跳过）
     wintheme.allow_microphone(window)  # 放行麦克风（语音输入用；WebView2 默认静默拒绝）
     # 看板线程提前到启动期就在跑（原先在引擎加载完成后才启动）：启动期也每秒
@@ -1439,6 +1533,11 @@ def _run_windowed() -> int:
         except Exception:
             pass
         try:
+            if window.native is not None:
+                _install_no_history_nav(int(window.native.Handle.ToInt64()))
+        except Exception:
+            pass  # 吞不掉系统注入就降级：还有 app.js 哨兵、启动页自愈与导航看守
+        try:
             # 第一次真正加载引擎（重导入，约 2.4s）发生在动画已经可见之后
             from skysheep.cli.app import run_desktop_backend
 
@@ -1451,14 +1550,62 @@ def _run_windowed() -> int:
             except Exception:
                 pass
             return
+        # 服务就绪即登记地址：启动页自愈轮询拿到它才会跳回应用页（早于 load_url，
+        # 就算切页失败/被手势打断，启动页每 0.4s 的轮询也会兜住）；同时打开导航
+        # 闸门——此后一切不在应用地址上的文档导航都会被就地取消。
+        splash_nav["url"] = url
+        nav_gate["prefix"] = url.rstrip("/") + "/"
+        nav_gate["open"] = True
         # 动画至少停留片刻，热启动时避免一闪而过
         _time.sleep(max(0.0, 0.8 - (_time.monotonic() - shown_at)))
         # 先登记再切页：切页失败（窗口被提前关掉）时外层收尾仍能停到服务
         running["server"] = server
         try:
             window.load_url(url)
-        except Exception:  # noqa: BLE001  窗口被用户提前关掉：无处可切，静默收场
-            pass
+        except Exception as exc:  # noqa: BLE001  窗口被用户提前关掉：无处可切，静默收场
+            _log(f"切到应用页失败（启动页自愈与导航看监会接管）: {exc!r}")
+
+        # 历史导航看守：后退手势/意外导航仍可能把窗口带回启动动画页或空白页。
+        # 应用页里 app.js 的哨兵吞掉页面内的后退，这里是最后一道网：窗口不在
+        # 应用地址就切回来。注意取址必须用 evaluate_js 读页面真实 location.href
+        # ——pywebview 的 get_current_url 返回的是 SourceChanged 缓存的 self.url，
+        # 跨文档导航（如手势滑回启动页）下会说谎。切回优先用页面内 JS 跳转
+        # （绕开可能无响应的 load_url），低频轮询（2s 一次），窗口关闭即退出；
+        # 连续两次不在应用页才切，防抖。
+        def _guard_navigation() -> None:
+            prefix = url.rstrip("/") + "/"
+            strikes = 0
+            errors = 0
+            polls = 0
+            while not state["quitting"]:
+                _time.sleep(2.0)
+                polls += 1
+                try:
+                    cur = window.evaluate_js("location.href") or ""
+                except Exception:
+                    errors += 1
+                    if errors >= 30:
+                        _log("导航看守连续取址失败，退出（窗口可能已销毁）")
+                        return
+                    continue
+                errors = 0
+                if cur.startswith(prefix):
+                    strikes = 0
+                    continue
+                strikes += 1
+                if strikes < 2:
+                    continue
+                strikes = 0
+                _log(f"窗口被导航离应用页（{cur[:80] or '空地址'}），自动切回")
+                try:
+                    window.evaluate_js(f"location.replace('{url}')")
+                except Exception:
+                    try:
+                        window.load_url(url)
+                    except Exception:
+                        return  # 窗口已关
+
+        threading.Thread(target=_guard_navigation, name="skysheep-nav-guard", daemon=True).start()
 
         # 一键重启的桌面收尾钩子：走与托盘「退出」相同的路径（置 quitting、
         # 提前停服务、WM_CLOSE 回 GUI 线程关窗），保证窗口几何保存与托盘清理

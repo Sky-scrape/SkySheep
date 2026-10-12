@@ -4,13 +4,14 @@
 
     python engine/tools/release.py                 # 本地全流程：依赖→打包→校验→冒烟→安装包→sha256
     python engine/tools/release.py --skip-pack     # 复用已有 dist，重做产物校验/冒烟/安装包
+    python engine/tools/release.py --skip-quality  # CI 用：质量门已由 test job 覆盖，只跑产物链
     python engine/tools/release.py --upload        # 全部阶段通过后 gh release create 上传（默认绝不传）
 
 阶段与发布清单条目的对应（每步开头都会打印）：
 
     1  完整版本一致性预检                      §1
     2  uv sync --locked                        §3-1
-    3  lint / unit / e2e / eval 质量门          §2
+    3  lint / unit / e2e / eval 质量门          §2（--skip-quality 可跳过）
     4  PyInstaller 打包（不经 uv run）          §3-2
     5  产物校验（exe / 内置技能 / manifest）     §3-3
     6  signtool 签名打包产物（未配置证书自动跳过）§3-4
@@ -26,6 +27,10 @@ signtool 用 SKYSHEEP_SIGNTOOL 指定或自动枚举 Windows Kits；时间戳默
 DigiCert（SKYSHEEP_SIGN_TIMESTAMP_URL 可换）。签名失败即中止发布；未配置时
 打印跳过说明继续（发布保持未签名，SmartScreen 拦截见 docs/smartscreen-说明.md）。
 签名必须带时间戳（/tr），否则证书过期后已发布安装包的签名会失效。
+
+ISCC 位置：默认按发布清单 §3-4 的本机安装位找（``D:\\Inno Setup 7\\``），找不到再探
+Program Files 下的 Inno Setup 6/7；``SKYSHEEP_ISCC`` 可直接指定 iscc.exe 路径
+（CI 上 choco 装的 Inno Setup 走这条）。
 
 安全取向：
 - ``--upload`` 不给就绝不碰 gh；给了也在全部本地阶段通过后才执行，且
@@ -64,8 +69,15 @@ _DIST_DIR = _ENGINE_DIR / "dist" / "SkySheep"
 _DIST_EXE = _DIST_DIR / "SkySheep.exe"
 _INTERNAL_SKILLS = _DIST_DIR / "_internal" / "skysheep" / "skills"
 _INSTALLER_DIR = _ENGINE_DIR / "installer"
-# 本机 ISCC 安装位（发布清单 §3-4 的固定路径；没有它时用 --skip-installer 跳过安装包两步）
-_ISCC = Path(r"D:\Inno Setup 7\ISCC.exe")
+# ISCC 候选位：发布清单 §3-4 的本机安装位优先，其次 Program Files 下常见的
+# Inno Setup 6/7（CI 上 choco 装的就是这些位）；SKYSHEEP_ISCC 覆盖（见 iscc_path）
+_ISCC_CANDIDATES = (
+    Path(r"D:\Inno Setup 7\ISCC.exe"),
+    Path(r"C:\Program Files (x86)\Inno Setup 7\ISCC.exe"),
+    Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"),
+    Path(r"C:\Program Files\Inno Setup 7\ISCC.exe"),
+    Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
+)
 
 # skills-gallery/ 官方种子技能包数量（AGENTS.md：20 个中文场景技能）
 _GALLERY_SKILL_COUNT = 20
@@ -121,6 +133,21 @@ def pyproject_version() -> str:
 
 def _installer_exe(version: str) -> Path:
     return _INSTALLER_DIR / f"SkySheep-{version}-setup.exe"
+
+
+def iscc_path() -> Path | None:
+    """ISCC 可执行文件位置；找不到返回 None。
+
+    ``SKYSHEEP_ISCC`` 优先：给了就原样返回（存不存在交给调用方判——写错的路径要原样
+    报出来，而不是默默回退到另一个安装位、用别的编译器出一份包）。
+    """
+    override = os.environ.get("SKYSHEEP_ISCC")
+    if override:
+        return Path(override)
+    for candidate in _ISCC_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _child_env() -> dict[str, str]:
@@ -403,9 +430,16 @@ def step_installer() -> None:
             f"版本号漂移（发布清单 §1）：installer.iss 的 MyAppVersion={m.group(1)}，"
             f"pyproject 的 version={version}。先对齐版本号再打包，否则安装包文件名就是错的"
         )
-    if not _ISCC.is_file():
-        raise RuntimeError(f"找不到 ISCC：{_ISCC}（本机未装 Inno Setup？可用 --skip-installer 跳过）")
-    _run([str(_ISCC), "tools/installer.iss"], cwd=_ENGINE_DIR)
+    iscc = iscc_path()
+    if iscc is None or not iscc.is_file():
+        # 候选位文案先落在普通字符串里：3.11 的 f-string 表达式内不允许反斜杠
+        fallback = r"候选位都没有（D:\Inno Setup 7\、Program Files 下的 Inno Setup 6/7）"
+        where = iscc if iscc is not None else fallback
+        raise RuntimeError(
+            f"找不到 ISCC：{where}"
+            "；装了 Inno Setup？可用 SKYSHEEP_ISCC 指定 iscc.exe 路径，--skip-installer 可跳过安装包两步"
+        )
+    _run([str(iscc), "tools/installer.iss"], cwd=_ENGINE_DIR)
     exe = _installer_exe(version)
     if not exe.is_file():
         raise RuntimeError(f"ISCC 已跑完但缺产物 {exe}")
@@ -530,7 +564,7 @@ def build_steps(args: argparse.Namespace) -> list[Step]:
     return [
         Step("§1", "完整版本一致性预检", step_versions),
         Step("§3-1", "依赖同步 uv sync --locked", step_sync),
-        Step("§2", "发布质量门（lint / unit / e2e / eval）", step_quality),
+        Step("§2", "发布质量门（lint / unit / e2e / eval）", step_quality, "skip_quality"),
         Step("§3-2", "PyInstaller 打包（不经 uv run）", step_pack, "skip_pack"),
         Step("§3-3", "产物校验（exe / 内置技能 / manifest）", step_verify_artifacts),
         Step("§3-4", "signtool 签名打包产物（未配置证书自动跳过）", step_sign_app),
@@ -571,6 +605,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="跳过打包产物冒烟（§3-3 的冒烟条；会短暂弹出应用窗口并自动收割）",
     )
     parser.add_argument(
+        "--skip-quality",
+        action="store_true",
+        help="跳过发布质量门（§2 lint/unit/e2e/eval）；CI 里该门由 test job 覆盖，不必重跑一遍",
+    )
+    parser.add_argument(
         "--skip-installer",
         action="store_true",
         help="跳过 ISCC 安装包与 sha256 附件两步（§3-4/§4-5）",
@@ -581,7 +620,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="全部阶段通过后 gh release create 上传安装包+sha256（§4）；不给则绝不发布",
     )
     args = parser.parse_args(argv)
-    if args.upload and (args.skip_pack or args.skip_smoke or args.skip_installer):
+    if args.upload and (args.skip_quality or args.skip_pack or args.skip_smoke or args.skip_installer):
         parser.error("--upload 不允许与任何 --skip-* 同用，发布资产必须经过本次完整构建与验证")
     return args
 

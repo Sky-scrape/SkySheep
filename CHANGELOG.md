@@ -11,6 +11,20 @@
   的 `og:url` / `og:image` / `canonical` 与两份 README 的官网链接同步换到新域名，分享卡片与
   搜索结果不再指向旧地址。站点内部链接本就是相对路径，落地页正文零改动。
 
+### 修复
+
+- **CI 发布候选门禁从未真正跑通过**（`ci.yml` 的 `package` job：2026-10-11 引入、
+  v2.5.1 首次执行即红，且因只在 tag / 手动触发时运行而一直没被发现）：手写的
+  PowerShell 冒烟里 `$home` 撞上 PowerShell 只读变量 `$HOME`（名字不区分大小写），
+  脚本第 2 行即中止——冻结包从未被启动过；即便绕过这行，它传给冻结包的
+  `--browser --port 8791` 也被 `desktop.py` 忽略（冻结入口只特判 `cron` 子命令），
+  而按写死端口 GET 的判据既过不去也不可靠（实测该端口被无关进程占用时同样返回 200，
+  会假绿）。改为在 CI 直接调用 `engine/tools/release.py --skip-quality`：打包→产物
+  校验→隔离冒烟→ISCC→sha256 走本地每次发版都验证过的同一条路径，冒烟的隔离口径与
+  端口解析只保留一份实现。`release.py` 相应新增 `--skip-quality`（CI 的 test job 已
+  覆盖 §2 质量门，避免重跑）与 `SKYSHEEP_ISCC`（安装包编译器位置可显式指定，CI 上
+  choco 装的 Inno Setup 由它喂入；找不到时仍按本机安装位与 Program Files 候选位探测）。
+
 ## [2.5.1] - 2026-10-12
 
 ### 新增

@@ -178,10 +178,28 @@ jobs:
         working-directory: engine
         run: uv sync --locked
 
-      # 安装包编译器：release.py 自己找 ISCC（本机固定位 → Program Files 候选位），
-      # CI 上把 choco 装出来的实际路径显式喂给它，免得把「只有 CI 才有的路径」埋进脚本。
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
+      # 安装包编译器：必须与本地发布同大版本（Inno Setup 7）。choco 的 innosetup 停在
+      # 6.7.x，而 installer.iss 的 [Languages] 引用 compiler:Languages\ChineseSimplified.isl，
+      # 简体中文消息文件在 6 的官方包里不随编译器分发——编译会以 "Couldn't open include file"
+      # 失败（2026-10-12 首次真正跑到这一步时才暴露，见 CHANGELOG「CI 发布候选门禁」条）。
+      # 这里装官方 7.1.0（GitHub release 资产，URL 钉住版本），并把同 tag 的官方中文消息
+      # 文件显式摆到编译器的 Languages 下：不赌安装包带没带（本机 IS7 里那份与该 tag 的
+      # 文件 sha256 一致，都是 "Inno Setup 6.5.0+" 格式）。
+      - name: Install Inno Setup 7
+        shell: pwsh
+        run: |
+          $tag = "is-7_1_0"
+          $setup = Join-Path $env:RUNNER_TEMP "innosetup-7.1.0-x64.exe"
+          Invoke-WebRequest -Uri "https://github.com/jrsoftware/issrc/releases/download/$tag/innosetup-7.1.0-x64.exe" -OutFile $setup
+          $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          if ($p.ExitCode -notin 0, 3010) { throw "Inno Setup 安装失败，退出码 $($p.ExitCode)" }
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe", "C:\Program Files\Inno Setup*\ISCC.exe" | Select-Object -First 1
+          if (-not $iscc) { throw "装完 Inno Setup 却没找到 ISCC.exe" }
+          $lang = Join-Path (Split-Path $iscc.FullName -Parent) "Languages"
+          New-Item -ItemType Directory -Force -Path $lang | Out-Null
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/$tag/Files/Languages/ChineseSimplified.isl" -OutFile (Join-Path $lang "ChineseSimplified.isl")
+          "SKYSHEEP_ISCC=$($iscc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
+          Write-Output "ISCC: $($iscc.FullName)（中文消息文件已就位：$lang）"
 
       # §2 质量门已由本 workflow 的 test job 覆盖：--skip-quality 只跳它，
       # 打包→产物校验→隔离冒烟→ISCC 安装包→sha256 全部照跑；不给 --upload，绝不发布。
@@ -189,11 +207,7 @@ jobs:
         working-directory: engine
         shell: pwsh
         run: |
-          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe", "C:\Program Files\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $iscc) { throw "装了 Inno Setup 却没找到 ISCC.exe" }
-          $env:SKYSHEEP_ISCC = $iscc.FullName
-          Write-Output "ISCC: $($iscc.FullName)"
+          Write-Output "SKYSHEEP_ISCC=$env:SKYSHEEP_ISCC"
           .venv\Scripts\python.exe tools\release.py --skip-quality
 
       - name: Upload release artifacts

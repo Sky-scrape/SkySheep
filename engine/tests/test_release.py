@@ -122,6 +122,7 @@ def test_ci_workflow_has_release_candidate_job():
     assert "package:" in ci, "缺少发布候选 job"
     assert "python.exe tools\\release.py --skip-quality" in ci, "发布候选必须复用 release.py 流水线"
     assert "SKYSHEEP_ISCC" in ci, "CI 上必须显式喂 ISCC 位置，别依赖只有本机才有的固定路径"
+    assert "ChineseSimplified.isl" in ci, "installer.iss 要的中文消息文件必须在 CI 上就位（IS6 不带它）"
     assert "workflow_dispatch" in ci
     # 每个 job 都要有超时保护（防止 teardown 挂起拖死流水线）
     assert ci.count("timeout-minutes:") >= 4

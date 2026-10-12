@@ -24,6 +24,12 @@
   端口解析只保留一份实现。`release.py` 相应新增 `--skip-quality`（CI 的 test job 已
   覆盖 §2 质量门，避免重跑）与 `SKYSHEEP_ISCC`（安装包编译器位置可显式指定，CI 上
   choco 装的 Inno Setup 由它喂入；找不到时仍按本机安装位与 Program Files 候选位探测）。
+  修好冒烟后第一次真正跑到安装包编译，又暴露第二个从未验证过的暗雷：`installer.iss`
+  的 `[Languages]` 引用 `compiler:Languages\ChineseSimplified.isl`，而简体中文消息文件
+  在 Inno Setup 6 的官方包里不随编译器分发（本机 IS7 自带，是 "Inno Setup 6.5.0+"
+  格式的官方文件）——CI 因此改装与本地同大版本的官方 Inno Setup 7（GitHub release
+  资产，版本钉住），并把同 tag 的官方中文消息文件显式摆到编译器 `Languages` 下
+  （与本机那份 sha256 一致，不再赌安装包带没带）。
 
 ## [2.5.1] - 2026-10-12
 

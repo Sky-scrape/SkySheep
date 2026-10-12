@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<title>SkySheep —— 本地 AI 工作台，每一步先经你确认</title>
-<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。读写文件、执行命令、操作电脑，敏感操作默认逐次确认，改动按轮快照可回滚，数据全部留在本机。">
+<title>SkySheep —— 多模型协作的本地 AI 工作台</title>
+<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。圆桌、团队、对抗三种多模型协作模式，读写文件、执行命令、操作电脑；敏感操作默认逐次确认，改动按轮快照可回滚，数据留在本机。">
 <meta name="theme-color" content="#e8dfc7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#171410" media="(prefers-color-scheme: dark)">
-<meta property="og:title" content="SkySheep —— 本地 AI 工作台">
-<meta property="og:description" content="让多个 AI 模型在你的电脑上安全地工作。敏感操作默认确认，改动可回滚，数据不出本机。">
+<meta property="og:title" content="SkySheep —— 多模型协作的本地 AI 工作台">
+<meta property="og:description" content="圆桌、团队、对抗三种多模型协作模式，跑在你自己的电脑上。敏感操作默认确认，改动可回滚，数据不出本机。">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://sheepsky.com/">
 <meta property="og:image" content="https://sheepsky.com/docs/images/social-preview.png">
@@ -958,8 +958,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     </a>
     <nav class="nav" aria-label="主导航">
       <a href="#scenes">能干什么</a>
-      <a href="#safety">安全</a>
       <a href="#collab">多模型</a>
+      <a href="#safety">安全</a>
       <a href="#shots">界面</a>
       <a href="#start">上手</a>
       <a href="#faq">常见问题</a>
@@ -988,14 +988,15 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <p class="eyebrow"><span class="dot"></span>Windows 桌面应用 · 开源 MIT · v2.5.1</p>
-        <h1>它替你动手，<br>但<span class="mark"><span>每一步先问你</span></span></h1>
+        <h1>它替你动手，<br><span class="mark"><span>多个模型一起想</span></span></h1>
         <p class="hero-lede">
           跑在本机的开源 AI Agent 工作台。给它一个任务，它会自己读写文件、执行命令、
-          联网检索、操作电脑——而<strong>写文件与跑命令默认逐次弹卡确认</strong>，
-          每轮文件改动自动快照、随时撤销。
+          联网检索、操作电脑；要紧的事可以让<strong>多个模型一起做</strong>——
+          圆桌并行作答后融合，团队按角色分工，对抗专门挑错。
         </p>
         <p class="hero-lede">
-          会话、配置、密钥全部留在你自己的电脑上。
+          会话、配置、密钥全部留在你自己的电脑上；写文件与跑命令默认逐次弹卡确认，
+          每轮文件改动自动快照、随时撤销。
         </p>
         <div class="hero-actions">
           <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">
@@ -1004,7 +1005,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
               <path d="M12 3v13M6.5 11l5.5 5.5L17.5 11M4 20.5h16"/>
             </svg>
           </a>
-          <a class="btn btn-ghost btn-lg" href="#safety">先看它怎么管权限</a>
+          <a class="btn btn-ghost btn-lg" href="#collab">先看多模型怎么协作</a>
         </div>
         <p class="hero-note">
           <span>
@@ -1041,7 +1042,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="wrap facts-grid">
       <div class="fact"><b>24</b><span>内置工具：文件、命令、检索、文档、图像</span></div>
       <div class="fact"><b>10+</b><span>模型服务预设，也可接本地推理服务</span></div>
-      <div class="fact"><b>3</b><span>档权限模式，默认逐次确认每次写入</span></div>
+      <div class="fact"><b>3</b><span>种多模型协作模式：圆桌 / 团队 / 对抗</span></div>
       <div class="fact"><b>20</b><span>个官方场景技能包，开箱即装</span></div>
     </div>
   </section>
@@ -1097,104 +1098,6 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           <p>手机浏览器打开完整界面，确认卡照常逐条弹；飞书 / 微信里发消息派活，收日报与终态通知。</p>
           <p class="scene-quote">出门前派个活，路上用手机把确认卡点完</p>
         </article>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ 安全 ============ -->
-  <section class="section" id="safety">
-    <div class="wrap">
-      <div class="section-head rise">
-        <span class="section-label">Safety by default</span>
-        <h2>让 Agent 替你动手，前提是出了事兜得住</h2>
-        <p>安全是默认行为，不需要先配置一轮。</p>
-      </div>
-
-      <div class="safety-grid">
-        <div class="rise">
-          <ul class="safety-points">
-            <li>
-              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
-              <div>
-                <b>每一步先确认</b>
-                <p>只读操作自动放行；写文件（附 diff 预览）与执行命令默认逐次弹卡确认。三档权限模式可调，放宽档仅限本机界面切换。</p>
-              </div>
-            </li>
-            <li>
-              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
-              <div>
-                <b>命令白名单按实际 shell 判定</b>
-                <p>按完整词前缀匹配；含 shell 拼接或解释器旗标的命令不命中规则、一律重新确认。规则按项目持久化，设置页可管理。</p>
-              </div>
-            </li>
-            <li>
-              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
-              <div>
-                <b>改动可回滚</b>
-                <p>文件改动按轮快照，一键撤销本轮改动，重启后仍可回滚；每会话保留 50 轮，全项目兜底 500 条。</p>
-              </div>
-            </li>
-            <li>
-              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
-              <div>
-                <b>数据不出本机</b>
-                <p>会话、配置、密钥存于本机，无遥测。网页抓取仅允许公网 http(s)、具备 SSRF 防护；外部网页内容按数据处理，不当作指令执行。</p>
-              </div>
-            </li>
-            <li>
-              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
-              <div>
-                <b>出错了有得救</b>
-                <p>会话库自动滚动备份可可视化恢复；项目自带的 MCP 与技能配置需先确认信任；诊断包导出自动打码密钥。</p>
-              </div>
-            </li>
-          </ul>
-        </div>
-
-        <div class="rise">
-          <div class="demo-stage">
-            <p class="demo-label">确认卡片长这样</p>
-            <div class="card-confirm">
-              <div class="card-confirm-head">
-                <span class="badge">写入</span>
-                <span>Agent 想修改这个文件</span>
-                <span class="path">src/config.py</span>
-              </div>
-              <div class="diff" role="img" aria-label="变更预览：新增两行、删除一行">
-                <div class="diff-row"><span class="sign"> </span>TIMEOUT = 30</div>
-                <div class="diff-row diff-del"><span class="sign">-</span>RETRY = 1</div>
-                <div class="diff-row diff-add"><span class="sign">+</span>RETRY = 3</div>
-                <div class="diff-row diff-add"><span class="sign">+</span>BACKOFF = 1.5</div>
-              </div>
-              <div class="card-confirm-actions">
-                <span class="chip-btn is-primary">允许这次</span>
-                <span class="chip-btn">总是允许</span>
-                <span class="chip-btn">拒绝</span>
-              </div>
-            </div>
-            <p class="demo-caption">
-              示意图，按钮不可点击。真实界面里三个选项逐次出现，选择结果会写进本轮记录，随时可查。
-            </p>
-          </div>
-
-          <div class="tiers">
-            <div class="tier is-default">
-              <span class="tag">默认</span>
-              <b>安全执行</b>
-              <p>写入与执行逐次确认，只读自动放行。</p>
-            </div>
-            <div class="tier">
-              <span class="tag">可调</span>
-              <b>自动编辑</b>
-              <p>工作目录内的写入自动放行，命令仍需确认。</p>
-            </div>
-            <div class="tier">
-              <span class="tag">谨慎</span>
-              <b>完全访问</b>
-              <p>不再逐次打断，仅建议在受控项目里使用。</p>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   </section>
@@ -1303,6 +1206,104 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     </div>
   </section>
 
+  <!-- ============ 安全 ============ -->
+  <section class="section" id="safety">
+    <div class="wrap">
+      <div class="section-head rise">
+        <span class="section-label">Safety by default</span>
+        <h2>让 Agent 替你动手，前提是出了事兜得住</h2>
+        <p>安全是默认行为，不需要先配置一轮。</p>
+      </div>
+
+      <div class="safety-grid">
+        <div class="rise">
+          <ul class="safety-points">
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>每一步先确认</b>
+                <p>只读操作自动放行；写文件（附 diff 预览）与执行命令默认逐次弹卡确认。三档权限模式可调，放宽档仅限本机界面切换。</p>
+              </div>
+            </li>
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>命令白名单按实际 shell 判定</b>
+                <p>按完整词前缀匹配；含 shell 拼接或解释器旗标的命令不命中规则、一律重新确认。规则按项目持久化，设置页可管理。</p>
+              </div>
+            </li>
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>改动可回滚</b>
+                <p>文件改动按轮快照，一键撤销本轮改动，重启后仍可回滚；每会话保留 50 轮，全项目兜底 500 条。</p>
+              </div>
+            </li>
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>数据不出本机</b>
+                <p>会话、配置、密钥存于本机，无遥测。网页抓取仅允许公网 http(s)、具备 SSRF 防护；外部网页内容按数据处理，不当作指令执行。</p>
+              </div>
+            </li>
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>出错了有得救</b>
+                <p>会话库自动滚动备份可可视化恢复；项目自带的 MCP 与技能配置需先确认信任；诊断包导出自动打码密钥。</p>
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <div class="rise">
+          <div class="demo-stage">
+            <p class="demo-label">确认卡片长这样</p>
+            <div class="card-confirm">
+              <div class="card-confirm-head">
+                <span class="badge">写入</span>
+                <span>Agent 想修改这个文件</span>
+                <span class="path">src/config.py</span>
+              </div>
+              <div class="diff" role="img" aria-label="变更预览：新增两行、删除一行">
+                <div class="diff-row"><span class="sign"> </span>TIMEOUT = 30</div>
+                <div class="diff-row diff-del"><span class="sign">-</span>RETRY = 1</div>
+                <div class="diff-row diff-add"><span class="sign">+</span>RETRY = 3</div>
+                <div class="diff-row diff-add"><span class="sign">+</span>BACKOFF = 1.5</div>
+              </div>
+              <div class="card-confirm-actions">
+                <span class="chip-btn is-primary">允许这次</span>
+                <span class="chip-btn">总是允许</span>
+                <span class="chip-btn">拒绝</span>
+              </div>
+            </div>
+            <p class="demo-caption">
+              示意图，按钮不可点击。真实界面里三个选项逐次出现，选择结果会写进本轮记录，随时可查。
+            </p>
+          </div>
+
+          <div class="tiers">
+            <div class="tier is-default">
+              <span class="tag">默认</span>
+              <b>安全执行</b>
+              <p>写入与执行逐次确认，只读自动放行。</p>
+            </div>
+            <div class="tier">
+              <span class="tag">可调</span>
+              <b>自动编辑</b>
+              <p>工作目录内的写入自动放行，命令仍需确认。</p>
+            </div>
+            <div class="tier">
+              <span class="tag">谨慎</span>
+              <b>完全访问</b>
+              <p>不再逐次打断，仅建议在受控项目里使用。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============ 界面 ============ -->
   <section class="section" id="shots">
     <div class="wrap">
@@ -1405,6 +1406,14 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         </details>
 
         <details>
+          <summary>多模型协作会不会很贵、很慢？<span class="marker" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>会比单模型贵一些，这是实话。所以三条控制线都在：圆桌有雷同草稿去重、成员用轻上下文等七项机制压 Token；团队有全局轮次上限，Token 预算越线强制交付；成员模型可以各自指定——便宜模型跑成员，强模型当主席或总管。</p>
+            <p>速度上，圆桌的成员阶段并行作答，团队按工单并发；对抗是四角色接力，本来就是串行换来更彻底的审查。</p>
+          </div>
+        </details>
+
+        <details>
           <summary>定时任务需要应用一直开着吗？<span class="marker" aria-hidden="true">+</span></summary>
           <div class="answer">
             <p>默认是的。定时任务与日程提醒由应用内循环触发，所以关窗时选择「缩到系统托盘」才会继续后台运行；彻底退出期间到点的任务会在下次启动补跑。</p>
@@ -1452,7 +1461,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="wrap">
       <img class="sheep-sm" src="docs/images/cloud-sheep-web.webp" alt="" width="84" height="84" aria-hidden="true" loading="lazy">
       <h2>云朵小羊与你同在</h2>
-      <p>给你的电脑请一个愿意先问一句再动手的助手。开源、可审计、数据留在本机。</p>
+      <p>让多个模型一起把活干完，动手前照样先问你。开源、可审计、数据留在本机。</p>
       <div class="cta-actions">
         <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">下载 SkySheep</a>
         <a class="btn btn-ghost btn-lg" href="https://github.com/sky-scrape/SkySheep" target="_blank" rel="noopener">
@@ -1474,7 +1483,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           <b>SkySheep</b>
         </div>
         <p class="footer-about">
-          开源 Windows 桌面 AI Agent 工作台。多模型协作、权限由你掌握、改动可回滚，数据留在本机。
+          开源 Windows 桌面 AI Agent 工作台。三种多模型协作模式，权限由你掌握，改动可回滚，数据留在本机。
         </p>
       </div>
       <div class="footer-col">

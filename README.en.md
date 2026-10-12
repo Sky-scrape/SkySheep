@@ -2,7 +2,7 @@
 
 [![SkySheep](docs/images/banner.png)](https://sheepsky.com/)
 
-**An open-source desktop AI Agent workbench — reads and writes files, runs commands, operates your computer, and confirms every step with you first.**
+**An open-source desktop AI Agent workbench — roundtable, team, and adversarial multi-model collaboration over files, commands, and your computer.**
 
 [![CI](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg)](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows--first-blue)
@@ -15,7 +15,7 @@
 
 </div>
 
-SkySheep is an open-source AI Agent workbench that runs entirely on your machine: a Python asyncio engine, a pywebview desktop shell, and a zero-build frontend. Hand it a task and it reads and writes files, runs commands, searches the web, operates your computer, and carries multi-step work through on its own. Sessions, configuration, and API keys never leave your machine; sensitive actions such as file writes and command execution pop up a confirmation card by default, and every round of file changes is automatically snapshotted for one-click rollback.
+SkySheep is an open-source AI Agent workbench that runs entirely on your machine: a Python asyncio engine, a pywebview desktop shell, and a zero-build frontend. Hand it a task and it reads and writes files, runs commands, searches the web, operates your computer, and carries multi-step work through on its own. For the work that matters, you can put several models on it — roundtable answers in parallel and fuses the drafts, team mode splits the job by roles, adversarial review hunts for what's wrong — all three toggled right in the UI. Sensitive actions such as file writes and command execution still pop up a confirmation card by default, every round of file changes is automatically snapshotted for one-click rollback, and sessions, configuration, and API keys never leave your machine.
 
 <div align="center">
 
@@ -40,6 +40,18 @@ Instead of a feature checklist, here are the jobs it actually takes on:
 **Operate the computer for you** — screenshot, mouse, keyboard, windows, clipboard (off by default; enable in settings). Built for repetitive UI chores like clicking "export" across a row of apps.
 
 **Stay in control while away from the desk** — open the full UI from your phone's browser with confirmation cards intact; dispatch work and receive daily digests and completion notices over Feishu / WeChat.
+
+## 👥 Three ways to put several models on one task
+
+Multi-model here doesn't mean opening three windows and asking the same question. It means models take different parts of one task. All three modes toggle in the UI — no command-line plumbing — and only one can be active per turn, so they never fight each other.
+
+**Roundtable — one question, several models answering.** Members answer independently in parallel; the chairman (your main conversation model) fuses every draft into a single final answer, so sharp criticism and safe conclusions both survive. Members can wear identity presets (critic, fact-checker, minimalist, pragmatist, and more), an optional debate round lets them read each other's drafts and revise once, and every draft is stored with the session for later review, citation, and follow-up. Seven mechanisms — deduplicating near-identical drafts, light context for members, and more — keep the token bill down.
+
+**Team — work split by role, tracked on a task board.** One big task becomes a set of tickets; each teammate has its own role, model, and tool scope, reports in the team channel, and gets accepted or sent back for rework. There are two kinds of director: you (every message you send is an instruction) or an AI director (pick a model as director and it drives decompose → dispatch → collect → accept → deliver on its own, while you keep the right to interrupt, take over, and call it off). When a few members need to hash something out, a "small meeting" runs a roundtable inside the channel without derailing the main line. Runaway guards include a global round cap, forced adjudication when rework loops exceed the limit, hand-off to the director when a member stalls, and forced delivery when the token budget is crossed.
+
+**Adversarial — a review pipeline built to find fault.** It doesn't aim for a pretty answer; it aims to dig problems out. Four roles relay in sequence — discover, investigate, recommend, judge — each seeing only its own slice. Finding a problem pays better than nodding along (asymmetric incentives), stage contexts are isolated from each other, and if one stage fails the pipeline degrades to a usable conclusion instead of collapsing. Fits plan reviews, code reviews, and contract risk — cases where you'd rather offend than agree.
+
+Two boundaries worth stating: roundtable and team go through their own permission gates, so sensitive actions still ask for confirmation; adversarial review is pure text reasoning and does not pass the permission gate. Multi-model really is more expensive than a single model — the controls already exist: the roundtable's seven token mechanisms, the team's global round cap and forced delivery on budget overrun, plus per-member model choice (cheap models as members, a strong model as chairman or director).
 
 ## 🔒 Why you can trust it with real work
 
@@ -68,10 +80,10 @@ An agent that edits files and runs commands must be survivable when things go wr
 
 The difference from terminal agents like Claude Code or OpenAI Codex CLI is not a feature-by-feature checklist but the product form — terminal tools excel at scripting and CI integration; SkySheep excels at being **visible, controllable, and reachable**:
 
+- **Multi-model as a native experience**: roundtable / team / adversarial modes toggle right in the UI — no command-line plumbing (see [the section above](#-three-ways-to-put-several-models-on-one-task))
 - **Visible**: a full graphical interface, Chinese-first — conversation, confirmation cards, diff previews, file changes, terminal output, and review diagnostics all live in the UI instead of a scrolling terminal log
 - **Controllable**: permission gates, checkpoint rollback, workspace trust, and the command whitelist are all graphical — which file changed, who started it, and whether it can be undone, visible at a glance
 - **Reachable**: work continues while you're away — scheduled tasks and dependency pipelines run on their own, pushing daily digests and completion notices to Feishu / WeChat / a Webhook; the full UI opens in your phone's browser with remote approval cards
-- **Multi-model as a native experience**: roundtable / team / adversarial modes toggle right in the UI — no command-line plumbing
 
 Conversely, if what you want is scripting inside CI or a pure keyboard-driven workflow, terminal agents remain the better fit; SkySheep ships `skysheep run` headless mode and a terminal REPL as complements.
 

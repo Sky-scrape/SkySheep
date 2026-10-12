@@ -193,7 +193,10 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/jrsoftware/issrc/releases/download/$tag/innosetup-7.1.0-x64.exe" -OutFile $setup
           $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
           if ($p.ExitCode -notin 0, 3010) { throw "Inno Setup 安装失败，退出码 $($p.ExitCode)" }
-          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe", "C:\Program Files\Inno Setup*\ISCC.exe" | Select-Object -First 1
+          # 注意：runner 镜像自带 Inno Setup 6（C:\Program Files (x86)\Inno Setup 6），
+          # 通配必须把 7 写在 6 前面，否则按字母序 6 先命中、装了 7 也用不上
+          # （首跑即中招：门禁有一次就是拿 IS6 编译的）。都没找到才报错。
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup 7\ISCC.exe", "C:\Program Files\Inno Setup 7\ISCC.exe", "C:\Program Files (x86)\Inno Setup 6\ISCC.exe", "C:\Program Files\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $iscc) { throw "装完 Inno Setup 却没找到 ISCC.exe" }
           $lang = Join-Path (Split-Path $iscc.FullName -Parent) "Languages"
           New-Item -ItemType Directory -Force -Path $lang | Out-Null

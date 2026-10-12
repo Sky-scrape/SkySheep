@@ -2,6 +2,15 @@
 
 本项目的所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.3.0/)。
 
+## [未发布]
+
+### 变更
+
+- **官网迁到自定义域名 `sheepsky.com`**：仓库根新增 `CNAME` 文件（GitHub Pages 据此把站点从
+  `sky-scrape.github.io/SkySheep/` 301 到新域名，旧地址自动跳转，部署方式不变）；`index.html`
+  的 `og:url` / `og:image` / `canonical` 与两份 README 的官网链接同步换到新域名，分享卡片与
+  搜索结果不再指向旧地址。站点内部链接本就是相对路径，落地页正文零改动。
+
 ## [2.5.1] - 2026-10-12
 
 ### 新增

@@ -1,6 +1,6 @@
 <div align="center">
 
-[![SkySheep](docs/images/banner.png)](https://sky-scrape.github.io/SkySheep/)
+[![SkySheep](docs/images/banner.png)](https://sheepsky.com/)
 
 **开源桌面 AI Agent 工作台 —— 读写文件、执行命令、操作电脑，每一步先经你确认**
 
@@ -11,7 +11,7 @@
 [![English](https://img.shields.io/badge/docs-English-red)](README.en.md)
 [![M8ven Verified](https://m8ven.ai/badge/mcp/sky-scrape/skysheep?variant=verified)](https://m8ven.ai/mcp/sky-scrape/skysheep)
 
-[🌐 官网](https://sky-scrape.github.io/SkySheep/) · [⬇️ 下载安装包](https://github.com/Sky-scrape/SkySheep/releases/latest) · [📖 English Docs](README.en.md)
+[🌐 官网](https://sheepsky.com/) · [⬇️ 下载安装包](https://github.com/Sky-scrape/SkySheep/releases/latest) · [📖 English Docs](README.en.md)
 
 </div>
 

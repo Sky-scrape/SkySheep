@@ -1,6 +1,6 @@
 <div align="center">
 
-[![SkySheep](docs/images/banner.png)](https://sky-scrape.github.io/SkySheep/)
+[![SkySheep](docs/images/banner.png)](https://sheepsky.com/)
 
 **An open-source desktop AI Agent workbench — reads and writes files, runs commands, operates your computer, and confirms every step with you first.**
 
@@ -11,7 +11,7 @@
 [![中文](https://img.shields.io/badge/docs-中文-red)](README.md)
 [![M8ven Verified](https://m8ven.ai/badge/mcp/sky-scrape/skysheep?variant=verified)](https://m8ven.ai/mcp/sky-scrape/skysheep)
 
-[🌐 Website](https://sky-scrape.github.io/SkySheep/) · [⬇️ Download](https://github.com/Sky-scrape/SkySheep/releases/latest) · [📖 中文文档](README.md)
+[🌐 Website](https://sheepsky.com/) · [⬇️ Download](https://github.com/Sky-scrape/SkySheep/releases/latest) · [📖 中文文档](README.md)
 
 </div>
 

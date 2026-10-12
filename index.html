@@ -14,8 +14,8 @@
 <meta property="og:url" content="https://sheepsky.com/">
 <meta property="og:image" content="https://sheepsky.com/docs/images/social-preview.png">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="icon" type="image/webp" href="docs/images/cloud-sheep-web.webp">
-<link rel="apple-touch-icon" href="docs/images/cloud-sheep-web.webp">
+<link rel="icon" type="image/png" href="docs/images/skysheep-icon.png">
+<link rel="apple-touch-icon" href="docs/images/skysheep-icon.png">
 <link rel="canonical" href="https://sheepsky.com/">
 <script>
 /* 首帧定调：在 CSS 到达前先读出主题，避免深色偏好下闪一帧纸白 */
@@ -190,11 +190,21 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .brand:hover { color: var(--text); }
 .brand-mark {
-  width: 38px; height: 38px;
+  width: 38px; height: 38px; flex-shrink: 0;
+  box-sizing: border-box;
   border: 2px solid var(--ink-line); border-radius: 10px;
   background: var(--raised);
-  object-fit: contain; padding: 2px;
+  padding: 4px;
   box-shadow: var(--shadow-sm);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+/* 程序 logo：云朵小羊墨线（与桌面端侧栏同源资产），线条色随主题 */
+.brand-mark::before {
+  content: "";
+  width: 100%; height: 100%;
+  background: var(--text);
+  -webkit-mask: url("docs/images/skysheep-logo-line.png") center / contain no-repeat;
+  mask: url("docs/images/skysheep-logo-line.png") center / contain no-repeat;
 }
 .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
 .brand-text b { font-size: 18px; letter-spacing: -.02em; }
@@ -807,10 +817,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   border-bottom: 1px solid var(--line2);
 }
 .footer-brand { display: flex; align-items: center; gap: 11px; margin-bottom: 16px; }
-.footer-brand img {
+.footer-brand .brand-mark {
   width: 34px; height: 34px;
   border: 2px solid var(--ink-line); border-radius: 9px;
-  background: var(--raised); padding: 2px; object-fit: contain;
+  background: var(--raised); padding: 3px;
+  box-sizing: border-box;
 }
 .footer-brand b { font-size: 17px; font-weight: 800; letter-spacing: -.02em; }
 .footer-about { font-size: 14px; line-height: 1.8; color: var(--text2); max-width: 30em; }
@@ -939,7 +950,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 <header class="masthead">
   <div class="wrap masthead-inner">
     <a class="brand" href="#top" aria-label="SkySheep 首页">
-      <img class="brand-mark" src="docs/images/cloud-sheep-web.webp" alt="" width="38" height="38">
+      <span class="brand-mark" aria-hidden="true"></span>
       <span class="brand-text">
         <b>SkySheep</b>
         <span>Local AI Workbench</span>
@@ -1459,7 +1470,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="footer-grid">
       <div class="footer-brand-col">
         <div class="footer-brand">
-          <img src="docs/images/cloud-sheep-web.webp" alt="" width="34" height="34" loading="lazy">
+          <span class="brand-mark" aria-hidden="true"></span>
           <b>SkySheep</b>
         </div>
         <p class="footer-about">

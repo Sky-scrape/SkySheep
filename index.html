@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SkySheep — 跑在你电脑上的 AI Agent 工作台</title>
-<meta name="description" content="SkySheep 是开源（MIT）的桌面 AI Agent 工作台：圆桌多模型共同作答、任务排成流水线自动接力；能读文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键回滚，数据不出本机。">
+<meta name="description" content="SkySheep 是开源（MIT）的桌面 AI Agent 工作台：圆桌 / 团队 / 对抗三种多模型协作、任务排成流水线自动接力；能读文件、操作电脑、定时干活；每个敏感操作先征求你的同意，改错了随时一键回滚，数据不出本机。">
 <meta property="og:title" content="SkySheep — 跑在你电脑上的 AI Agent 工作台">
-<meta property="og:description" content="开源桌面 AI Agent：圆桌多模型 + 任务编排 + 三档权限。敢让它动手，也随时能后悔。Windows · MIT · 数据不出本机。">
+<meta property="og:description" content="开源桌面 AI Agent：圆桌 / 团队 / 对抗多模型协作 + 任务编排 + 三档权限。敢让它动手，也随时能后悔。Windows · MIT · 数据不出本机。">
 <!-- og:image 协议要求绝对 URL：相对路径多数站外抓取器（X/Twitter、微信、Slack 等）不解析，分享卡会空白 -->
 <meta property="og:image" content="https://sky-scrape.github.io/SkySheep/docs/images/right-panel.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -633,8 +633,8 @@ footer a:hover{color:var(--accent)}
   <section id="signature" class="band">
     <div class="sec-head reveal">
       <span class="kicker">☁️ 招牌能力</span>
-      <h2>两件别的客户端做不到的事</h2>
-      <p>不是把聊天窗口搬上桌面，而是给模型装上「群体智慧」和「自动流水线」。</p>
+      <h2>别的客户端做不到的事</h2>
+      <p>不是把聊天窗口搬上桌面，而是给模型装上「多模型协作」与「自动流水线」。</p>
     </div>
     <div class="sig-grid">
       <div class="sig reveal">
@@ -645,6 +645,26 @@ footer a:hover{color:var(--accent)}
           <li><b>成员身份预设</b>：批评者 / 事实核查员 / 简洁派 / 实干者，答案权衡锋利与全面</li>
           <li><b>省 token 三件套</b>：成员轻上下文 + 雷同草稿去重 + 融合预算收敛，圆桌≠账单翻倍</li>
           <li><b>草稿全留存</b>：每份草稿随消息落库，回看、引用、追问；也支持 A/B 对比</li>
+        </ul>
+      </div>
+      <div class="sig reveal">
+        <span class="sig-badge">🧑‍🤝‍🧑 团队</span>
+        <h3>一个总管派工，几个队员分工干</h3>
+        <p class="sig-lead">总管把目标拆成工单、指派队员执行、逐条验收交付——几个模型像一个小团队那样协作。</p>
+        <ul>
+          <li><b>工单板跟进度</b>：待办 → 进行中 → 待验收 → 完成，不合格可打回重做</li>
+          <li><b>团队频道</b>：成员发言、@ 定向点名，用户随时插话或接管</li>
+          <li><b>总管可选人可交 AI</b>：自己当总管派工，或让模型自动拆解派工闭环</li>
+        </ul>
+      </div>
+      <div class="sig reveal">
+        <span class="sig-badge">⚔️ 对抗审查</span>
+        <h3>让几个模型专门挑错</h3>
+        <p class="sig-lead">发现 → 调查 → 建议 → 裁判四角色流水线接力，用不对称激励逼出真问题，产出终审审查报告。</p>
+        <ul>
+          <li><b>宁滥勿缺地找</b>：发现者穷举疑点，调查者逐条对抗验证</li>
+          <li><b>阶段上下文隔离</b>：各角色互不看结论，减少附和与确认偏差</li>
+          <li><b>一票终审</b>：裁判汇总成立 / 已推翻 / 部分成立，给出可读报告</li>
         </ul>
       </div>
       <div class="sig reveal">
@@ -748,6 +768,31 @@ footer a:hover{color:var(--accent)}
           <div class="ico">🈶</div>
           <h3>中文优先</h3>
           <p>界面、帮助、提示词（输入 ~ 即插即用）全为中文场景设计。</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ico">🎛️</div>
+          <h3>运行中心</h3>
+          <p>所有任务集中一处：排队、取消、失败一键重发、崩溃后自动标记中断；权限请求统一排队，等确认的运行不再散落各处。</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ico">🚀</div>
+          <h3>首启向导 · 免 Key 上手</h3>
+          <p>第一次打开三步走：选服务 → 填 Key → 开始用；没有 Key 也能先跑「演示模式」，本机装了 Ollama 还能一键启用本地模型。</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ico">🩺</div>
+          <h3>模型诊断与能力探测</h3>
+          <p>「测试连接」一次最小真实调用验通；「能力探测」逐项查流式、工具调用、图片输入与思考强度，一键复制脱敏诊断报告；报错给分类原因与建议，主模型挂了自动切备用。</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ico">📱</div>
+          <h3>手机远程遥控</h3>
+          <p>同一 Wi-Fi 扫码即连，装 Tailscale 跨网络也能连回家；已连接设备一目了然、可一键断开，令牌轮换旧连接立即失效，开启前先弹风险确认。</p>
+        </div>
+        <div class="feat reveal">
+          <div class="ico">🗄️</div>
+          <h3>数据自己管</h3>
+          <p>会话库、技能、配置一键导出打包（默认脱敏，换机迁移不丢会话）；按天数清理或清空单表并回收空间；打开过新版后回退旧版会明确拒绝，防降级写坏。</p>
         </div>
       </div>
     </div>

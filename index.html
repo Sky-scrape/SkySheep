@@ -1,630 +1,1608 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f5f8fc">
-  <title>SkySheep 云朵小羊 — 让 AI 在你的电脑上，把事情做完</title>
-  <meta name="description" content="SkySheep 是开源的 Windows 桌面 AI Agent 工作台。读写文件、处理文档、执行命令，让多个模型分工协作。敏感操作默认先确认，文件改动可回滚；自选模型，会话与配置保存在本机。">
-  <meta property="og:title" content="SkySheep — 让 AI 在你的电脑上，把事情做完">
-  <meta property="og:description" content="不止回答问题，更能动手完成任务。开源 Windows 桌面工作台，多模型协作，权限由你掌握。">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://sky-scrape.github.io/SkySheep/">
-  <meta property="og:image" content="https://sky-scrape.github.io/SkySheep/docs/images/social-preview.png">
-  <meta name="twitter:card" content="summary_large_image">
-  <link rel="icon" type="image/webp" href="docs/images/cloud-sheep-web.webp">
-  <script>
-    (() => {
-      // 首帧前定主题：localStorage 优先；没有保存过就跟随系统深浅。
-      let saved = null;
-      try { saved = localStorage.getItem('ss-theme'); } catch (_) {}
-      if (saved !== 'light' && saved !== 'dark') {
-        saved = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      }
-      document.documentElement.dataset.theme = saved;
-    })();
-  </script>
-  <style>
-    :root {
-      color-scheme: light;
-      --paper:#f5f8fc; --surface:#fff; --ink:#142d49; --muted:#526578;
-      --blue:#2864ec; --blue-hover:#194fd0; --blue-soft:#e8efff;
-      --mint:#bfece2; --mint-ink:#22695d; --line:#dce5f0; --sky:#dce7fc;
-      --nav:rgba(245,248,252,.92); --shadow:0 24px 70px rgba(32,64,107,.12);
-      --display:"Segoe UI Variable Display","Segoe UI","DengXian","Microsoft YaHei",sans-serif;
-      --body:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-      --mono:"Cascadia Code",Consolas,monospace;
-    }
-    :root[data-theme="dark"] {
-      color-scheme:dark;
-      --paper:#101c2c; --surface:#17273b; --ink:#edf3ff; --muted:#a9bbd1;
-      --blue:#8aafff; --blue-hover:#adc7ff; --blue-soft:#213959;
-      --mint:#284d48; --mint-ink:#a6e3d5; --line:#304258; --sky:#213959;
-      --nav:rgba(16,28,44,.93); --shadow:0 24px 70px rgba(0,0,0,.28);
-    }
-    /* 脚本不可用时的兜底：没有显式主题就跟随系统深浅 */
-    @media (prefers-color-scheme:dark) {
-      :root:not([data-theme]) {
-        color-scheme:dark;
-        --paper:#101c2c; --surface:#17273b; --ink:#edf3ff; --muted:#a9bbd1;
-        --blue:#8aafff; --blue-hover:#adc7ff; --blue-soft:#213959;
-        --mint:#284d48; --mint-ink:#a6e3d5; --line:#304258; --sky:#213959;
-        --nav:rgba(16,28,44,.93); --shadow:0 24px 70px rgba(0,0,0,.28);
-      }
-    }
-    * { box-sizing:border-box; }
-    html { scroll-behavior:smooth; scroll-padding-top:100px; }
-    body { margin:0; background:var(--paper); color:var(--ink); font-family:var(--body); line-height:1.7; -webkit-font-smoothing:antialiased; }
-    button,a { -webkit-tap-highlight-color:transparent; }
-    button { font:inherit; cursor:pointer; }
-    a { color:inherit; text-decoration:none; }
-    img { display:block; max-width:100%; }
-    button,summary,a { touch-action:manipulation; }
-    button:focus-visible,a:focus-visible,summary:focus-visible { outline:3px solid var(--blue); outline-offset:5px; }
-    ::selection { background:var(--mint); color:var(--ink); }
-    h1,h2,h3,p,figure { margin:0; }
-    h1,h2,h3 { font-family:var(--display); text-wrap:balance; }
-    .wrap { width:min(1180px,calc(100% - 80px)); margin-inline:auto; }
-    .icon { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; }
-    .icon-defs { position:absolute; width:0; height:0; overflow:hidden; }
-    .skip { position:fixed; top:12px; left:12px; z-index:100; padding:10px 18px; background:var(--surface); transform:translateY(-150%); border:1px solid var(--blue); }
-    .skip:focus { transform:none; }
-    .eyebrow { display:flex; align-items:center; gap:9px; color:var(--blue); font-size:12px; font-weight:700; letter-spacing:.1em; margin-bottom:17px; }
-    .eyebrow::before { content:""; width:20px; height:2px; background:currentColor; }
-    .section { padding:100px 0; }
-    .section-head { display:flex; justify-content:space-between; align-items:flex-end; gap:48px; margin-bottom:40px; }
-    .section-head h2,.section-title { font-size:clamp(28px,3.4vw,42px); line-height:1.35; letter-spacing:-.035em; font-weight:700; }
-    .section-head > p { color:var(--muted); max-width:350px; font-size:15px; }
-    .text-link { display:inline-flex; align-items:center; gap:8px; font-size:14px; font-weight:600; color:var(--blue); }
-    .text-link:hover { text-decoration:underline; text-underline-offset:5px; }
-    .button { display:inline-flex; justify-content:center; align-items:center; gap:10px; min-height:48px; padding:12px 22px; border:1px solid transparent; border-radius:10px; font-size:14px; font-weight:600; transition:background .2s,transform .2s; }
-    .button:hover { transform:translateY(-2px); }
-    .button-primary { background:var(--blue); color:var(--surface); }
-    .button-primary:hover { background:var(--blue-hover); }
-    .button-secondary { border-color:var(--line); background:var(--surface); }
-    .button-secondary:hover { border-color:var(--blue); }
-    .brand { display:inline-flex; align-items:center; gap:10px; flex-shrink:0; }
-    .brand img { width:38px; height:38px; object-fit:contain; }
-    .brand-name { font-family:var(--display); font-size:22px; font-weight:750; letter-spacing:-.7px; line-height:1.1; }
-    .brand-name small { display:block; font-family:var(--body); font-size:10px; font-weight:500; letter-spacing:.18em; margin-top:5px; color:var(--muted); }
-    .site-header { position:sticky; top:0; z-index:30; background:var(--nav); backdrop-filter:blur(18px); border-bottom:1px solid var(--line); }
-    .nav-bar { height:80px; display:flex; align-items:center; gap:28px; }
-    .nav-links { display:flex; align-items:center; gap:28px; margin-left:auto; }
-    .nav-links a { color:var(--muted); font-size:13px; font-weight:600; }
-    .nav-links a:hover { color:var(--blue); }
-    .nav-actions { display:flex; align-items:center; gap:12px; }
-    .nav-actions .button { min-height:38px; padding:8px 16px; font-size:12px; border-radius:8px; }
-    .icon-button { display:grid; place-items:center; width:38px; height:38px; border-radius:8px; color:var(--muted); background:transparent; border:1px solid var(--line); }
-    .icon-button:hover { color:var(--blue); background:var(--blue-soft); }
-    .menu-button { display:none; }
-    .hero { padding:66px 0 0; position:relative; }
-    .hero-top { display:grid; grid-template-columns:1.2fr .8fr; align-items:center; gap:72px; margin-bottom:50px; }
-    .release-link { display:inline-flex; align-items:center; gap:10px; font-size:12px; color:var(--muted); margin-bottom:22px; }
-    .release-link span { font-family:var(--mono); color:var(--blue); background:var(--blue-soft); padding:3px 8px; border-radius:5px; font-size:11px; }
-    .release-link .icon { width:14px; height:14px; }
-    h1 { font-size:clamp(38px,4.6vw,64px); line-height:1.23; letter-spacing:-.045em; font-weight:750; }
-    h1 em { font-style:normal; color:var(--blue); }
-    .hero-copy { max-width:520px; margin-top:22px; color:var(--muted); font-size:16px; line-height:1.85; }
-    .hero-actions { display:flex; gap:12px; margin-top:28px; flex-wrap:wrap; }
-    .hero-meta { display:flex; gap:17px; align-items:center; flex-wrap:wrap; font-size:11px; color:var(--muted); margin-top:18px; }
-    .hero-meta span { display:inline-flex; align-items:center; gap:5px; }
-    .hero-meta .icon { width:13px; height:13px; }
-    .mission { position:relative; margin-top:30px; padding:28px; background:var(--surface); border:1px solid var(--line); border-radius:18px; box-shadow:0 12px 30px rgba(32,64,107,.05); transform:rotate(2deg); }
-    .mission-label { display:flex; align-items:center; gap:7px; font-size:11px; color:var(--muted); }
-    .status-dot { width:7px; height:7px; border-radius:50%; background:#46a48e; display:inline-block; flex-shrink:0; }
-    .mission-prompt { font-size:17px; font-weight:600; line-height:1.7; margin:24px 0; max-width:250px; }
-    .mission-list { display:grid; gap:10px; margin:0; padding:18px 0 0; list-style:none; border-top:1px solid var(--line); }
-    .mission-list li { display:flex; align-items:center; gap:9px; font-size:12px; color:var(--muted); }
-    .mission-list .icon { width:15px; height:15px; color:#358b76; }
-    .mission-list li:last-child .icon { color:var(--blue); }
-    .mission-note { position:absolute; bottom:-16px; right:24px; font-size:10px; letter-spacing:.05em; padding:6px 12px; background:var(--mint); color:var(--mint-ink); border-radius:6px; transform:rotate(-4deg); }
-    .mission-sheep { position:absolute; width:116px; height:116px; object-fit:contain; right:-12px; top:-64px; transform:rotate(-6deg); }
-    .desktop-stage { position:relative; padding:22px 22px 0; background:var(--sky); border:1px solid var(--line); border-radius:20px 20px 0 0; }
-    .stage-top { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 4px 18px; font-size:11px; color:var(--muted); }
-    .stage-name { display:flex; align-items:center; gap:7px; }
-    .stage-top .icon { width:15px; height:15px; }
-    .stage-note { font-family:var(--mono); font-size:10px; }
-    .screenshot-button { display:block; width:100%; padding:0; border:0; border-radius:10px 10px 0 0; background:#16161e; overflow:hidden; box-shadow:var(--shadow); cursor:zoom-in; }
-    .screenshot-button img { width:100%; height:auto; aspect-ratio:16 / 9; object-fit:cover; object-position:top; }
-    .preview-bar { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:20px 0; border-bottom:1px solid var(--line); }
-    .preview-tabs { display:flex; gap:5px; }
-    .preview-tabs button { display:inline-flex; align-items:center; gap:7px; padding:9px 13px; background:transparent; border:1px solid transparent; border-radius:7px; font-size:12px; color:var(--muted); }
-    .preview-tabs .icon { width:15px; height:15px; }
-    .preview-tabs button[aria-selected="true"] { background:var(--surface); color:var(--blue); border-color:var(--line); }
-    .preview-caption { font-size:11px; color:var(--muted); }
-    .proof-strip { display:flex; align-items:center; gap:36px; padding:25px 0; border-bottom:1px solid var(--line); }
-    .proof-strip > p { font-size:11px; color:var(--muted); flex-shrink:0; }
-    .model-list { display:flex; flex-wrap:wrap; gap:18px 26px; font-family:var(--display); font-weight:650; font-size:15px; color:var(--muted); align-items:center; }
-    .model-list span:last-child { font:11px var(--body); }
-    .scene-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px; }
-    .scene { padding:27px; border:1px solid var(--line); border-radius:14px; background:var(--surface); }
-    .scene-icon { width:40px; height:40px; border-radius:10px; background:var(--blue-soft); color:var(--blue); display:grid; place-items:center; margin-bottom:24px; }
-    .scene:nth-child(2) .scene-icon { background:var(--mint); color:var(--mint-ink); }
-    .scene h3 { font-size:20px; margin-bottom:12px; }
-    .scene p { color:var(--muted); font-size:13px; min-height:66px; }
-    .prompt { margin-top:24px; padding:16px; background:var(--paper); border:1px solid var(--line); border-radius:8px; font-size:12px; line-height:1.9; }
-    .prompt::before { content:"试着这样说"; display:block; color:var(--muted); font-size:10px; margin-bottom:8px; }
-    .scene-output { display:flex; align-items:center; gap:6px; margin-top:15px; font-size:10px; color:var(--muted); }
-    .scene-output .icon { width:13px; height:13px; }
-    .collab-section { background:var(--surface); border-block:1px solid var(--line); }
-    .collab-layout { display:grid; grid-template-columns:.85fr 1.15fr; gap:60px; align-items:start; }
-    .collab-intro > p { color:var(--muted); font-size:14px; margin-top:18px; }
-    .collab-tabs { display:grid; gap:10px; margin-top:28px; }
-    .collab-tab { display:flex; gap:14px; text-align:left; padding:17px 18px; background:transparent; border:1px solid transparent; border-radius:10px; color:var(--ink); align-items:center; }
-    .collab-tab > .icon { width:24px; height:24px; color:var(--muted); }
-    .collab-tab strong { display:block; font-size:14px; }
-    .collab-tab small { display:block; font-size:11px; color:var(--muted); margin-top:2px; }
-    .collab-tab[aria-selected="true"] { background:var(--paper); border-color:var(--line); }
-    .collab-tab[aria-selected="true"] > .icon { color:var(--blue); }
-    .collab-tab .tab-arrow { margin-left:auto; width:17px; height:17px; opacity:0; }
-    .collab-tab[aria-selected="true"] .tab-arrow { opacity:1; }
-    [hidden] { display:none !important; }
-    .collab-panel { background:var(--paper); border:1px solid var(--line); border-radius:16px; padding:28px; min-height:450px; }
-    .panel-label { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:25px; font-size:11px; color:var(--muted); }
-    .demo-label { font-size:10px; border:1px solid var(--line); border-radius:4px; padding:2px 7px; color:var(--muted); white-space:nowrap; }
-    .collab-question { padding:14px 16px; background:var(--surface); border:1px solid var(--line); border-radius:8px; font-size:13px; font-weight:600; }
-    .parallel { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; position:relative; margin-top:33px; }
-    .parallel::before { content:""; position:absolute; top:-18px; height:18px; width:68%; left:16%; border:1px solid var(--line); border-bottom:0; }
-    .model-node { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:15px 10px; text-align:center; }
-    .model-node b { display:block; color:var(--blue); font-size:12px; margin-bottom:6px; }
-    .model-node span { font-size:10px; color:var(--muted); }
-    .flow-arrow { text-align:center; color:var(--muted); margin:10px 0; font-size:18px; }
-    .merge-node { display:flex; align-items:center; justify-content:center; gap:12px; padding:15px; background:var(--mint); color:var(--mint-ink); border-radius:8px; }
-    .merge-node b { font-size:13px; }
-    .merge-node small { font-size:10px; }
-    .panel-description { margin-top:25px; padding-top:19px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
-    .director { display:flex; align-items:center; justify-content:space-between; border:1px solid var(--line); background:var(--surface); padding:12px 15px; border-radius:8px; margin-bottom:18px; font-size:12px; }
-    .director span { font-size:10px; color:var(--mint-ink); background:var(--mint); padding:3px 7px; border-radius:4px; }
-    .workboard { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
-    .board-column > p { color:var(--muted); font-size:10px; margin:0 0 8px 3px; }
-    .work-order { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 10px; min-height:109px; }
-    .work-order b { font-size:12px; display:block; }
-    .work-order small { display:block; color:var(--muted); font-size:10px; margin-top:12px; }
-    .work-order.complete { border-color:var(--mint); }
-    .team-channel { padding:13px 15px; border:1px solid var(--line); border-radius:8px; font-size:11px; margin-top:18px; color:var(--muted); }
-    .team-channel b { color:var(--ink); margin-right:9px; }
-    .review-steps { display:grid; gap:10px; margin-top:17px; }
-    .review-step { display:grid; grid-template-columns:26px 54px 1fr; gap:9px; align-items:center; padding:11px 13px; border:1px solid var(--line); border-radius:8px; background:var(--surface); font-size:11px; }
-    .review-step > span { display:grid; place-items:center; width:23px; height:23px; background:var(--blue-soft); color:var(--blue); font:11px var(--mono); border-radius:5px; }
-    .review-step small { color:var(--muted); font-size:10px; }
-    .review-step:last-child { background:var(--mint); color:var(--mint-ink); border-color:var(--mint); }
-    .review-step:last-child small { color:var(--mint-ink); }
-    .safety-layout { display:grid; grid-template-columns:1fr 1fr; gap:70px; align-items:center; }
-    .safety-copy > p { margin-top:18px; font-size:14px; color:var(--muted); }
-    .safety-items { display:grid; gap:22px; margin-top:30px; }
-    .safety-item { display:flex; gap:14px; }
-    .safety-item > .icon { margin-top:4px; color:var(--blue); }
-    .safety-item h3 { font-size:15px; margin-bottom:4px; }
-    .safety-item p { font-size:12px; color:var(--muted); }
-    .permission-demo { background:#152b45; color:#edf3ff; border-radius:16px; padding:26px; box-shadow:var(--shadow); }
-    .permission-demo .panel-label { color:#b1c2d5; }
-    .permission-demo .demo-label { color:#b1c2d5; border-color:#40556d; }
-    .permission-title { display:flex; align-items:center; gap:10px; font-size:16px; font-weight:600; margin-top:5px; }
-    .permission-title .icon { color:#9fbfff; }
-    .permission-sub { font-size:11px; color:#b1c2d5; margin:12px 0 20px; }
-    .diff { background:#0e2035; border:1px solid #30465f; border-radius:8px; overflow:hidden; }
-    .diff-file { padding:10px 14px; font:10px var(--mono); color:#b1c2d5; border-bottom:1px solid #30465f; }
-    .diff-lines { padding:16px 14px; font:12px/2 var(--mono); }
-    .diff-lines span { display:block; }
-    .diff-lines .removed { color:#f4aaaa; }
-    .diff-lines .added { color:#a6e3d5; }
-    .permission-scope { display:flex; gap:15px; font-size:10px; color:#b1c2d5; margin-top:15px; }
-    .permission-actions { display:flex; gap:10px; margin-top:25px; }
-    .permission-actions button { border:1px solid #45617e; border-radius:7px; color:#edf3ff; background:transparent; padding:9px 17px; font-size:11px; }
-    .permission-actions .allow { background:#bfece2; border-color:#bfece2; color:#184c43; }
-    .permission-status { color:#b1c2d5; font-size:11px; min-height:38px; margin-top:15px; }
-    .permission-status.result { color:#a6e3d5; }
-    .privacy-note { margin-top:18px; font-size:10px; color:var(--muted); }
-    .automation { padding:44px; border:1px solid var(--line); border-radius:16px; background:var(--surface); display:grid; grid-template-columns:.85fr 1.15fr; gap:50px; align-items:center; }
-    .automation p { margin:17px 0 20px; color:var(--muted); font-size:13px; }
-    .automation h2 { font-size:29px; line-height:1.4; }
-    .pipeline { display:flex; align-items:center; gap:12px; }
-    .pipeline-node { flex:1; text-align:center; border:1px solid var(--line); background:var(--paper); border-radius:9px; padding:17px 9px; min-width:0; }
-    .pipeline-node .icon { display:block; margin:0 auto 10px; color:var(--blue); }
-    .pipeline-node b { display:block; font-size:12px; }
-    .pipeline-node small { font-size:10px; color:var(--muted); }
-    .pipeline > .icon { width:14px; height:14px; color:var(--muted); }
-    .pipeline-node:last-child { background:var(--mint); border-color:var(--mint); }
-    .pipeline-node:last-child .icon { color:var(--mint-ink); }
-    .pipeline-foot { margin:17px 0 0 !important; font-size:10px !important; text-align:center; }
-    .capability-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:28px; }
-    .capability { padding:0 0 0 20px; border-left:1px solid var(--line); }
-    .capability > .icon { width:24px; height:24px; margin-bottom:19px; color:var(--blue); }
-    .capability h3 { font-size:16px; margin-bottom:10px; }
-    .capability p { font-size:12px; color:var(--muted); }
-    .capability-tag { display:block; margin-top:14px; font:9px var(--mono); color:var(--muted); }
-    .download-section { padding-top:0; }
-    .download-box { border:1px solid var(--line); border-radius:20px; background:var(--sky); overflow:hidden; }
-    .download-main { padding:54px; display:grid; grid-template-columns:1.15fr .85fr; gap:55px; align-items:center; }
-    .download-main .section-title { max-width:510px; }
-    .download-main p { margin-top:16px; font-size:14px; color:var(--muted); }
-    .download-actions { display:flex; gap:18px; align-items:center; flex-wrap:wrap; margin-top:25px; }
-    .download-version { font:11px var(--mono); color:var(--muted); }
-    .setup-steps { margin:0; padding:0; list-style:none; display:grid; gap:22px; }
-    .setup-steps li { display:flex; gap:15px; }
-    .setup-number { display:grid; place-items:center; height:30px; width:30px; background:var(--surface); border:1px solid var(--line); border-radius:50%; font:11px var(--mono); flex-shrink:0; }
-    .setup-steps b { display:block; font-size:13px; }
-    .setup-steps small { display:block; font-size:11px; color:var(--muted); margin-top:3px; }
-    .download-bottom { padding:16px 54px; border-top:1px solid var(--line); font-size:11px; color:var(--muted); display:flex; justify-content:space-between; gap:24px; }
-    .download-bottom a { color:var(--blue); text-decoration:underline; text-underline-offset:3px; }
-    .faq-layout { display:grid; grid-template-columns:.65fr 1.35fr; gap:85px; }
-    .faq-intro p { margin:18px 0; font-size:13px; color:var(--muted); }
-    .faq-list details { border-bottom:1px solid var(--line); }
-    .faq-list details:first-child { border-top:1px solid var(--line); }
-    .faq-list summary { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:20px 0; font-size:14px; font-weight:600; cursor:pointer; list-style:none; }
-    .faq-list summary::-webkit-details-marker { display:none; }
-    .faq-list summary::after { content:"+"; font:20px var(--mono); color:var(--muted); }
-    .faq-list details[open] summary::after { content:"−"; }
-    .faq-list details > p { font-size:12px; color:var(--muted); padding:0 30px 22px 0; }
-    .faq-list a { color:var(--blue); text-decoration:underline; text-underline-offset:3px; }
-    .source-block { margin:0 0 24px; padding:17px; border:1px solid var(--line); border-radius:8px; background:var(--surface); }
-    .source-top { display:flex; align-items:center; justify-content:space-between; gap:15px; margin-bottom:13px; font-size:11px; color:var(--muted); }
-    .copy-button { padding:4px 9px; border:1px solid var(--line); border-radius:5px; background:var(--paper); color:var(--blue); font-size:10px; }
-    pre { font:11px/1.9 var(--mono); margin:0; overflow:auto; }
-    .copy-status { min-height:18px; margin-top:8px; font-size:10px; color:var(--muted); }
-    .site-footer { border-top:1px solid var(--line); padding:35px 0 25px; }
-    .footer-top { display:flex; justify-content:space-between; align-items:center; gap:30px; }
-    .footer-links { display:flex; flex-wrap:wrap; gap:24px; font-size:12px; color:var(--muted); }
-    .footer-links a:hover { color:var(--blue); }
-    .footer-bottom { display:flex; justify-content:space-between; gap:20px; margin-top:30px; font-size:10px; color:var(--muted); }
-    .image-dialog { width:min(1400px,95vw); max-height:94vh; background:#101c2c; color:#edf3ff; border:1px solid #40556d; border-radius:12px; padding:12px; box-shadow:var(--shadow); }
-    .image-dialog::backdrop { background:rgba(9,20,35,.85); backdrop-filter:blur(6px); }
-    .dialog-bar { display:flex; align-items:center; justify-content:space-between; font-size:12px; padding:3px 5px 12px; gap:20px; }
-    .dialog-bar button { color:#edf3ff; border-color:#40556d; }
-    .image-dialog img { width:100%; height:auto; }
-    @media (min-width:1600px) { .hero-top { margin-bottom:58px; } }
-    @media (max-width:1000px) {
-      .wrap { width:calc(100% - 48px); }
-      .nav-bar { gap:18px; } .nav-links { gap:18px; }
-      .hero-top { gap:42px; } h1 { font-size:48px; }
-      .hero-copy { font-size:14px; } .mission { padding:23px; }
-      .collab-layout,.safety-layout { gap:35px; }
-      .scene { padding:22px; }
-      .automation { padding:32px; gap:25px; }
-      .pipeline { gap:7px; } .pipeline-node b { font-size:11px; }
-      .download-main { padding:40px; gap:35px; } .download-bottom { padding-inline:40px; }
-      .faq-layout { gap:50px; }
-    }
-    @media (max-width:760px) {
-      html { scroll-padding-top:86px; }
-      .wrap { width:calc(100% - 40px); }
-      .section { padding:65px 0; }
-      .nav-bar { height:68px; gap:12px; }
-      .brand-name { font-size:20px; } .brand img { width:32px; height:32px; }
-      .nav-actions { margin-left:auto; gap:8px; }
-      .nav-actions > .button { display:none; }
-      .menu-button { display:grid; }
-      .nav-links { display:none; position:absolute; top:68px; left:0; right:0; padding:22px; background:var(--surface); border-bottom:1px solid var(--line); margin:0; box-shadow:var(--shadow); }
-      .nav-links.open { display:flex; flex-wrap:wrap; gap:15px 24px; }
-      .nav-links a { padding:7px 0; }
-      .hero { padding-top:42px; }
-      .hero-top { grid-template-columns:1fr; gap:0; margin-bottom:34px; }
-      h1 { font-size:clamp(35px,7vw,52px); }
-      .hero-copy { max-width:500px; font-size:14px; }
-      .mission { margin:52px 4px 10px; transform:rotate(1deg); padding:21px; }
-      .mission-sheep { width:90px; height:90px; top:-42px; right:0; }
-      .mission-prompt { margin:14px 0; font-size:15px; max-width:75%; }
-      .mission-list { gap:8px; padding-top:13px; }
-      .mission-list li { font-size:11px; }
-      .mission-note { right:17px; }
-      .desktop-stage { padding:12px 12px 0; border-radius:12px 12px 0 0; }
-      .stage-top { margin:0 0 10px; font-size:10px; } .stage-note { display:none; }
-      .preview-bar { display:block; padding:12px 0; }
-      .preview-tabs { gap:1px; justify-content:space-between; }
-      .preview-tabs button { padding:8px 10px; font-size:11px; }
-      .preview-caption { margin-top:12px; font-size:10px; }
-      .proof-strip { display:block; padding:21px 0; }
-      .model-list { margin-top:12px; font-size:13px; gap:12px 21px; }
-      .section-head { display:block; margin-bottom:28px; }
-      .section-head > p { margin-top:16px; max-width:500px; font-size:13px; }
-      .scene-grid { grid-template-columns:1fr; gap:14px; }
-      .scene { padding:25px; } .scene-icon { margin-bottom:15px; } .scene p { min-height:0; } .prompt { margin-top:18px; }
-      .collab-layout,.safety-layout,.automation,.download-main,.faq-layout { grid-template-columns:1fr; gap:32px; }
-      .collab-tabs { grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin-top:22px; }
-      .collab-tab { display:block; padding:14px 10px; text-align:center; border-color:var(--line); }
-      .collab-tab > .icon { margin-bottom:5px; width:20px; height:20px; }
-      .collab-tab small { font-size:9px; } .collab-tab .tab-arrow { display:none; }
-      .collab-tab[aria-selected="true"] { background:var(--blue-soft); border-color:var(--blue); }
-      .collab-panel { padding:22px; min-height:430px; }
-      .model-node { padding:14px 6px; } .model-node span { font-size:9px; }
-      .permission-demo { padding:22px; }
-      .automation { padding:28px 23px; }
-      .automation h2 { font-size:27px; }
-      .pipeline { gap:7px; } .pipeline-node { padding:15px 5px; } .pipeline-node small { font-size:9px; }
-      .capability-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:30px 20px; }
-      .capability { padding-left:15px; } .capability h3 { font-size:15px; }
-      .download-section { padding-top:0; }
-      .download-main { padding:30px 25px; } .download-main .section-title { font-size:30px; }
-      .download-bottom { display:block; padding:18px 25px; } .download-bottom > span { display:block; margin-top:8px; }
-      .setup-steps { gap:18px; }
-      .footer-top { align-items:flex-start; flex-direction:column; gap:23px; }
-      .footer-links { gap:15px 22px; }
-      .footer-bottom { flex-direction:column; gap:6px; margin-top:23px; }
-    }
-    @media (prefers-reduced-motion:reduce) {
-      html { scroll-behavior:auto; }
-      *,*::before,*::after { transition:none !important; animation:none !important; }
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>SkySheep —— 本地 AI 工作台，每一步先经你确认</title>
+<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。读写文件、执行命令、操作电脑，敏感操作默认逐次确认，改动按轮快照可回滚，数据全部留在本机。">
+<meta name="theme-color" content="#e8dfc7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171410" media="(prefers-color-scheme: dark)">
+<meta property="og:title" content="SkySheep —— 本地 AI 工作台">
+<meta property="og:description" content="让多个 AI 模型在你的电脑上安全地工作。敏感操作默认确认，改动可回滚，数据不出本机。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://sky-scrape.github.io/SkySheep/">
+<meta property="og:image" content="https://sky-scrape.github.io/SkySheep/docs/images/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/webp" href="docs/images/cloud-sheep-web.webp">
+<link rel="apple-touch-icon" href="docs/images/cloud-sheep-web.webp">
+<link rel="canonical" href="https://sky-scrape.github.io/SkySheep/">
+<script>
+/* 首帧定调：在 CSS 到达前先读出主题，避免深色偏好下闪一帧纸白 */
+(() => {
+  let saved = null;
+  try { saved = localStorage.getItem('ss-theme'); } catch (_) {}
+  if (saved !== 'light' && saved !== 'dark') {
+    saved = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  const root = document.documentElement;
+  root.dataset.theme = saved;
+  root.style.background = saved === 'dark' ? '#171410' : '#e8dfc7';
+})();
+</script>
+<style>
+/* ============================================================
+ * SkySheep 官网 —— 「纸墨」设计语言
+ * 与桌面应用同一套血统：暖纸底 + 硬墨描边 + 铅字压印投影 + 半调网点。
+ * 色值取自 app.css 的 paper / night 两组变量，官网与产品观感一致。
+ * 单文件、零依赖、零外部字体，GitHub Pages 根目录直接发布。
+ * ============================================================ */
+
+/* ---------- 纸墨（浅） ---------- */
+:root {
+  color-scheme: light;
+  --bg: #e8dfc7;
+  --card: #f4ecd8;
+  --raised: #fbf5e6;
+  --sunken: #ece3cb;
+  --inset: #e2d9bf;
+  --text: #1d1a16;
+  --text2: #4a4336;
+  --dim: #6a6252;
+  --line: #d8cdb0;
+  --line2: #c0b394;
+  --ink-line: #1d1a16;
+  --blue: #1257c4;
+  --blue-deep: #0e429b;
+  --blue-weak: rgba(18, 87, 196, .08);
+  --gold: #8a6410;
+  --mark: #f2dd9a;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #4f35a8;
+  --on-accent: #f4ecd8;
+  --frame: #2b261e;
+  --frame-text: #c9bda0;
+  --r-xs: 2px; --r-sm: 4px; --r-md: 6px; --r-lg: 8px;
+  --shadow-sm: 2px 2px 0 rgba(29, 26, 22, .13);
+  --shadow-md: 3px 3px 0 rgba(29, 26, 22, .17);
+  --shadow-lg: 5px 5px 0 rgba(29, 26, 22, .22), 0 12px 32px rgba(29, 26, 22, .16);
+  --lat: 2px, -2px, 3px, 2px, 1px, 2px, 2px, -3px, -2px, 4px, 2px, -2px, 3px, 1px, -2px, 3px, 2px, 2px, 2px, -3px, 3px, -2px, 1px, -2px, 0px, 2px, -1px, 2px, -1px, 1px, -2px, 0px, 2px;
+  --dur-fast: 120ms; --dur-base: 180ms; --dur-slow: 320ms;
+  --ease-out: cubic-bezier(.2, .9, .3, 1);
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Courier New", monospace;
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(29, 26, 22, .055) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #efe6cf 0%, var(--bg) 52%, #ddd2b6 100%);
+}
+
+/* ---------- 夜墨（深） ---------- */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #171410;
+  --card: #211d17;
+  --raised: #2b261e;
+  --sunken: #1b1813;
+  --inset: #332d23;
+  --text: #f4ecd8;
+  --text2: #d3c8ad;
+  --dim: #a89d84;
+  --line: #3b3428;
+  --line2: #574c3a;
+  --ink-line: #f4ecd8;
+  --blue: #5b93ee;
+  --blue-deep: #4077d6;
+  --blue-weak: rgba(91, 147, 238, .14);
+  --gold: #cfa64f;
+  --mark: #6b5520;
+  --up: #e26255;
+  --down: #46b276;
+  --ai: #a48cf0;
+  --on-accent: #171410;
+  --frame: #0d0b08;
+  --frame-text: #a89d84;
+  --shadow-sm: 2px 2px 0 rgba(0, 0, 0, .45);
+  --shadow-md: 3px 3px 0 rgba(0, 0, 0, .5);
+  --shadow-lg: 5px 5px 0 rgba(0, 0, 0, .55), 0 12px 32px rgba(0, 0, 0, .5);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(244, 236, 216, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #201c16 0%, var(--bg) 52%, #100e0a 100%);
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 92px;
+  -webkit-text-size-adjust: 100%;
+}
+/* 窄屏页眉换成两行（品牌 + 可横滑导航），锚点跳转要留出更高的偏移 */
+@media (max-width: 820px) {
+  html { scroll-padding-top: 128px; }
+}
+
+body {
+  font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  background: var(--body-bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+::selection { background: var(--mark); color: var(--text); }
+[data-theme="dark"] ::selection { background: rgba(91, 147, 238, .34); color: var(--text); }
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+  border-radius: var(--r-xs);
+}
+
+a { color: var(--blue); text-decoration: none; transition: color var(--dur-fast) var(--ease-out); }
+a:hover { color: var(--blue-deep); }
+
+img { max-width: 100%; display: block; }
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+
+/* 可访问性跳转链接 */
+.skip-link {
+  position: absolute; top: -100px; left: 16px; z-index: 999;
+  background: var(--blue); color: var(--on-accent);
+  padding: 10px 18px; border-radius: var(--r-sm); font-weight: 700;
+  transition: top var(--dur-base) var(--ease-out);
+}
+.skip-link:focus { top: 14px; color: var(--on-accent); }
+
+.wrap { width: min(1160px, 100% - 48px); margin-inline: auto; }
+.wrap-narrow { width: min(860px, 100% - 48px); margin-inline: auto; }
+
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* ============================================================
+ * 页眉
+ * ============================================================ */
+.masthead {
+  position: sticky; top: 0; z-index: 100;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-bottom: 2px solid var(--ink-line);
+}
+@supports not (background: color-mix(in srgb, red 50%, blue)) {
+  .masthead { background: var(--bg); }
+}
+/* 不支持毛玻璃时（或用户请求减少透明度）退回不透明底，避免正文透出logo */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .masthead { background: var(--bg); }
+}
+.masthead-inner {
+  display: flex; align-items: center; gap: 28px;
+  height: 72px;
+}
+.brand {
+  display: flex; align-items: center; gap: 11px;
+  font-weight: 800; font-size: 19px; letter-spacing: -.02em;
+  color: var(--text); flex-shrink: 0;
+}
+.brand:hover { color: var(--text); }
+.brand-mark {
+  width: 38px; height: 38px;
+  border: 2px solid var(--ink-line); border-radius: 10px;
+  background: var(--raised);
+  object-fit: contain; padding: 2px;
+  box-shadow: var(--shadow-sm);
+}
+.brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+.brand-text b { font-size: 18px; letter-spacing: -.02em; }
+.brand-text span {
+  font-size: 10px; font-weight: 700; letter-spacing: .14em;
+  color: var(--dim); text-transform: uppercase;
+}
+
+.nav {
+  display: flex; align-items: center; gap: 30px;
+  margin-left: auto;
+}
+.nav a {
+  position: relative;
+  font-size: 14px; font-weight: 600; color: var(--text2);
+  padding: 6px 0;
+}
+.nav a::after {
+  content: ""; position: absolute; left: 0; right: 100%; bottom: 0;
+  height: 2px; background: var(--blue);
+  transition: right var(--dur-base) var(--ease-out);
+}
+.nav a:hover { color: var(--blue); }
+.nav a:hover::after { right: 0; }
+
+.masthead-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+/* 主题开关 */
+.theme-toggle {
+  width: 38px; height: 38px; flex-shrink: 0;
+  display: grid; place-items: center;
+  border: 2px solid var(--ink-line); border-radius: var(--r-md);
+  background: var(--raised); color: var(--text);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+.theme-toggle:hover { background: var(--sunken); }
+.theme-toggle:active { transform: translate(2px, 2px); box-shadow: none; }
+.theme-toggle svg { width: 17px; height: 17px; }
+.theme-toggle .icon-moon { display: none; }
+[data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+[data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+
+/* ============================================================
+ * 按钮
+ * ============================================================ */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 12px 24px;
+  font-size: 15px; font-weight: 700;
+  border-radius: var(--r-md);
+  border: 2px solid var(--ink-line);
+  white-space: nowrap;
+  transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.btn-primary {
+  background: var(--blue); color: var(--on-accent);
+  box-shadow: var(--shadow-md);
+}
+.btn-primary:hover { background: var(--blue-deep); color: var(--on-accent); }
+.btn-ghost {
+  background: var(--raised); color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+.btn-ghost:hover { background: var(--sunken); color: var(--text); }
+.btn:active { transform: translate(3px, 3px); box-shadow: none; }
+.btn-sm { padding: 9px 18px; font-size: 14px; }
+.btn-lg { padding: 15px 32px; font-size: 16px; }
+
+/* ============================================================
+ * 首屏
+ * ============================================================ */
+.hero { padding: 76px 0 88px; position: relative; }
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.06fr);
+  gap: 62px;
+  align-items: center;
+}
+
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-size: 12px; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text2);
+  border: 2px solid var(--ink-line); border-radius: 999px;
+  background: var(--raised);
+  padding: 7px 16px 7px 13px;
+  margin-bottom: 26px;
+  box-shadow: var(--shadow-sm);
+}
+.eyebrow .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--down);
+  flex-shrink: 0;
+}
+
+.hero h1 {
+  font-size: clamp(2.6rem, 1.1rem + 4.2vw, 4.1rem);
+  font-weight: 800;
+  line-height: 1.13;
+  letter-spacing: -.035em;
+  margin-bottom: 24px;
+  text-wrap: balance;
+}
+/* 荧光笔：垫在文字下方，不能走 z-index:-1（会落到 <h1> 不透明背景之后而看不见） */
+.hero h1 .mark { position: relative; display: inline-block; white-space: nowrap; }
+.hero h1 .mark::before {
+  content: ""; position: absolute; z-index: 0;
+  left: -.09em; right: -.09em; top: .09em; bottom: .01em;
+  background: var(--mark);
+  border-radius: var(--r-xs);
+  transform: rotate(-.7deg);
+}
+.hero h1 .mark > span { position: relative; z-index: 1; }
+.hero h1 em { font-style: normal; color: var(--blue); }
+
+.hero-lede {
+  font-size: 17.5px; line-height: 1.85;
+  color: var(--text2);
+  max-width: 33em;
+  margin-bottom: 18px;
+}
+.hero-lede strong { color: var(--text); font-weight: 700; }
+
+.hero-actions {
+  display: flex; flex-wrap: wrap; gap: 14px;
+  margin: 30px 0 22px;
+}
+.hero-note {
+  display: flex; flex-wrap: wrap; gap: 8px 20px;
+  font-size: 13.5px; color: var(--dim);
+}
+.hero-note span { display: inline-flex; align-items: center; gap: 7px; }
+.hero-note svg { width: 15px; height: 15px; color: var(--down); flex-shrink: 0; }
+
+/* 首屏视觉：产品截图 + 小羊 */
+.hero-visual { position: relative; }
+.hero-shot {
+  position: relative; z-index: 2;
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: var(--card);
+  box-shadow: var(--shadow-lg);
+}
+.hero-shot img { width: 100%; height: auto; }
+.hero-sheep {
+  position: absolute; z-index: 3;
+  width: clamp(84px, 13vw, 132px); height: auto;
+  right: -22px; bottom: -34px;
+  filter: drop-shadow(4px 5px 0 rgba(29, 26, 22, .16));
+  animation: bob 5.5s ease-in-out infinite;
+}
+[data-theme="dark"] .hero-sheep { filter: drop-shadow(4px 5px 0 rgba(0, 0, 0, .5)); }
+@keyframes bob {
+  0%, 100% { transform: translateY(0) rotate(-1.5deg); }
+  50% { transform: translateY(-11px) rotate(1.5deg); }
+}
+
+/* 窗口外框（真实截图统一加壳） */
+.window {
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: var(--card);
+  box-shadow: var(--shadow-lg);
+}
+.window-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px;
+  background: var(--frame); color: var(--frame-text);
+  font-size: 12px; font-weight: 600;
+  letter-spacing: .02em;
+}
+.window-dots { display: flex; gap: 5px; flex-shrink: 0; }
+.window-dots i { width: 9px; height: 9px; border-radius: 50%; background: currentColor; opacity: .45; }
+.window-title { flex: 1; text-align: center; opacity: .85; }
+.window-spacer { width: 39px; flex-shrink: 0; }
+.window img { width: 100%; height: auto; }
+
+/* ============================================================
+ * 事实条
+ * ============================================================ */
+.facts {
+  border-top: 2px solid var(--ink-line);
+  border-bottom: 2px solid var(--ink-line);
+  background: var(--card);
+}
+.facts-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+}
+.fact {
+  padding: 30px 26px;
+  border-right: 1px solid var(--line);
+}
+.fact:last-child { border-right: none; }
+.fact b {
+  display: block;
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: 30px; font-weight: 700; line-height: 1.15;
+  letter-spacing: -.02em;
+  margin-bottom: 6px;
+}
+.fact span { font-size: 13.5px; color: var(--dim); line-height: 1.5; display: block; }
+
+/* ============================================================
+ * 版块骨架
+ * ============================================================ */
+.section { padding: 92px 0; }
+.section + .section { border-top: 1px solid var(--line2); }
+
+.section-head { margin-bottom: 52px; max-width: 44em; }
+.section-head.center { margin-inline: auto; text-align: center; }
+.section-label {
+  display: block;
+  font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+  letter-spacing: .18em; text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 14px;
+}
+.section-head h2 {
+  font-size: clamp(1.75rem, 1rem + 2.1vw, 2.5rem);
+  font-weight: 800; line-height: 1.24; letter-spacing: -.028em;
+  margin-bottom: 16px;
+  text-wrap: balance;
+}
+.section-head p {
+  font-size: 16.5px; line-height: 1.85; color: var(--text2);
+}
+
+/* ============================================================
+ * 场景卡
+ * ============================================================ */
+.scenes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 22px;
+}
+.scene {
+  display: flex; flex-direction: column;
+  padding: 28px 26px 30px;
+  background: var(--card);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+}
+.scene:hover { transform: translate(-2px, -2px); box-shadow: var(--shadow-lg); }
+.scene-no {
+  font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+  letter-spacing: .1em; color: var(--dim);
+  margin-bottom: 14px;
+}
+.scene h3 {
+  font-size: 19px; font-weight: 800; letter-spacing: -.015em;
+  margin-bottom: 12px;
+}
+.scene p { font-size: 15px; line-height: 1.8; color: var(--text2); }
+.scene-quote {
+  margin: 16px 0 0;
+  padding: 13px 16px;
+  background: var(--sunken);
+  border-left: 3px solid var(--blue);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: 14px; line-height: 1.7; color: var(--text2);
+}
+.scene-quote::before { content: "「"; color: var(--dim); }
+.scene-quote::after { content: "」"; color: var(--dim); }
+.scene p:last-child { margin-top: auto; padding-top: 16px; }
+
+/* ============================================================
+ * 安全：确认演示
+ * ============================================================ */
+.safety-grid {
+  display: grid;
+  grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr);
+  gap: 58px;
+  align-items: start;
+}
+.safety-points { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.safety-points li {
+  display: grid; grid-template-columns: 30px 1fr; gap: 14px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.safety-points li:last-child { border-bottom: none; }
+.safety-points .tick {
+  width: 24px; height: 24px; margin-top: 4px;
+  display: grid; place-items: center;
+  border: 2px solid var(--ink-line); border-radius: var(--r-sm);
+  background: var(--down); color: var(--card);
+}
+[data-theme="dark"] .safety-points .tick { color: var(--bg); }
+.safety-points .tick svg { width: 13px; height: 13px; }
+.safety-points b { display: block; font-size: 16px; font-weight: 800; margin-bottom: 4px; letter-spacing: -.01em; }
+.safety-points p { font-size: 14.5px; line-height: 1.75; color: var(--text2); }
+
+/* 确认卡演示 */
+.demo-stage {
+  background: var(--sunken);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  padding: 24px;
+  box-shadow: var(--shadow-md);
+}
+.demo-label {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  letter-spacing: .14em; text-transform: uppercase;
+  color: var(--dim); margin-bottom: 14px;
+}
+.card-confirm {
+  background: var(--raised);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-md);
+  padding: 18px 20px 20px;
+  box-shadow: var(--shadow-md);
+}
+.card-confirm-head {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; font-weight: 700; color: var(--text2);
+  padding-bottom: 13px; margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.card-confirm-head .badge {
+  font-family: var(--font-mono); font-size: 11px;
+  padding: 2px 8px; border-radius: var(--r-xs);
+  background: var(--up); color: var(--card);
+}
+[data-theme="dark"] .card-confirm-head .badge { color: var(--bg); }
+.card-confirm-head .path { font-family: var(--font-mono); font-size: 12px; color: var(--dim); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.diff {
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.9;
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  overflow: hidden; margin-bottom: 16px;
+  background: var(--card);
+}
+.diff-row { display: flex; padding: 0 12px; white-space: pre; }
+.diff-row .sign { width: 16px; flex-shrink: 0; opacity: .7; }
+.diff-add { background: rgba(15, 107, 58, .1); }
+.diff-del { background: rgba(194, 38, 29, .1); }
+[data-theme="dark"] .diff-add { background: rgba(70, 178, 118, .14); }
+[data-theme="dark"] .diff-del { background: rgba(226, 98, 85, .13); }
+
+.card-confirm-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.chip-btn {
+  padding: 8px 16px; font-size: 13.5px; font-weight: 700;
+  border: 2px solid var(--ink-line); border-radius: var(--r-sm);
+  background: var(--raised); color: var(--text);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.chip-btn:hover { background: var(--sunken); }
+.chip-btn:active { transform: translate(2px, 2px); box-shadow: none; }
+.chip-btn.is-primary { background: var(--blue); color: var(--on-accent); }
+.chip-btn.is-primary:hover { background: var(--blue-deep); }
+
+.demo-caption {
+  margin-top: 18px; font-size: 13px; line-height: 1.7; color: var(--dim);
+}
+
+/* 权限三档 */
+.tiers {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  margin-top: 44px;
+}
+.tier {
+  padding: 22px 22px 24px;
+  background: var(--card);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+.tier b { display: block; font-size: 15.5px; font-weight: 800; margin-bottom: 7px; }
+.tier p { font-size: 13.5px; line-height: 1.7; color: var(--text2); }
+.tier .tag {
+  display: inline-block; font-family: var(--font-mono);
+  font-size: 11px; font-weight: 700; letter-spacing: .08em;
+  padding: 2px 8px; border-radius: var(--r-xs); margin-bottom: 11px;
+  background: var(--sunken); color: var(--dim);
+  border: 1px solid var(--line2);
+}
+.tier.is-default { background: var(--raised); }
+.tier.is-default .tag { background: var(--blue); color: var(--on-accent); border-color: var(--ink-line); }
+
+/* ============================================================
+ * 三种协作形态
+ * ============================================================ */
+.tabs {
+  display: flex; gap: 0; flex-wrap: wrap;
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-md);
+  background: var(--raised);
+  padding: 5px;
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 34px;
+  box-shadow: var(--shadow-sm);
+}
+.tab {
+  padding: 10px 22px;
+  font-size: 14.5px; font-weight: 700;
+  border-radius: var(--r-sm);
+  color: var(--text2);
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.tab:hover { color: var(--text); background: var(--sunken); }
+.tab[aria-selected="true"] { background: var(--blue); color: var(--on-accent); }
+.tab[aria-selected="true"]:hover { background: var(--blue); color: var(--on-accent); }
+
+.tabpanel[hidden] { display: none; }
+.panel-grid {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 46px; align-items: start;
+}
+.panel-copy h3 {
+  font-size: 23px; font-weight: 800; letter-spacing: -.02em;
+  margin-bottom: 14px;
+}
+.panel-copy > p { font-size: 15.5px; line-height: 1.85; color: var(--text2); }
+.panel-role {
+  margin-top: 26px; padding: 20px 22px;
+  background: var(--card);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+.panel-role h4 {
+  font-size: 12px; font-weight: 700; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--gold); margin-bottom: 12px;
+}
+.panel-role ol { list-style: none; counter-reset: r; }
+.panel-role li {
+  counter-increment: r;
+  position: relative;
+  padding: 7px 0 7px 34px;
+  font-size: 14.5px; line-height: 1.72; color: var(--text2);
+}
+.panel-role li::before {
+  content: counter(r, decimal-leading-zero);
+  position: absolute; left: 0; top: 9px;
+  font-family: var(--font-mono); font-size: 11.5px; font-weight: 700;
+  color: var(--dim);
+}
+.panel-role li b { color: var(--text); font-weight: 700; }
+
+/* 流式示意图 */
+.flow {
+  background: var(--sunken);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  padding: 22px;
+  box-shadow: var(--shadow-md);
+}
+.flow-label {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  letter-spacing: .14em; text-transform: uppercase;
+  color: var(--dim); margin-bottom: 16px;
+}
+.flow-lanes { display: flex; flex-direction: column; gap: 12px; }
+.lane {
+  display: grid; grid-template-columns: 96px 1fr; gap: 14px; align-items: center;
+}
+.lane-name {
+  font-size: 12.5px; font-weight: 700; color: var(--text2);
+  text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lane-track {
+  height: 30px; border-radius: var(--r-sm);
+  border: 2px solid var(--ink-line);
+  background: var(--card);
+  display: flex; align-items: center; padding: 0 12px;
+  font-size: 12px; font-weight: 600; color: var(--text2);
+}
+.lane-track.is-member { background: var(--raised); }
+.lane-track.is-chain { background: repeating-linear-gradient(115deg, var(--card) 0 9px, var(--sunken) 9px 18px); }
+.flow-out {
+  margin-top: 18px; padding: 15px 17px;
+  background: var(--blue); color: var(--on-accent);
+  border: 2px solid var(--ink-line); border-radius: var(--r-sm);
+  font-size: 14px; font-weight: 700;
+  box-shadow: var(--shadow-sm);
+}
+.flow-note { margin-top: 15px; font-size: 12.5px; line-height: 1.7; color: var(--dim); }
+
+/* ============================================================
+ * 界面画廊
+ * ============================================================ */
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 22px;
+}
+.shot { display: flex; flex-direction: column; }
+.shot.wide { grid-column: span 3; }
+.shot .window { box-shadow: var(--shadow-md); transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out); }
+.shot:hover .window { transform: translate(-2px, -2px); box-shadow: var(--shadow-lg); }
+.shot figcaption { margin-top: 14px; font-size: 13.5px; line-height: 1.7; color: var(--text2); }
+.shot figcaption b { display: block; font-size: 15px; font-weight: 800; color: var(--text); margin-bottom: 3px; }
+
+/* ============================================================
+ * 上手 / 命令
+ * ============================================================ */
+.start-grid {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+}
+.start-card {
+  display: flex; flex-direction: column;
+  min-width: 0;              /* 允许在窄屏窄于 min-content，否则极窄屏撑出横向滚动 */
+  padding: 30px 30px 32px;
+  background: var(--card);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+.start-card.is-primary { background: var(--raised); box-shadow: var(--shadow-md); }
+.start-card h3 {
+  font-size: 20px; font-weight: 800; letter-spacing: -.015em;
+  margin-bottom: 8px;
+}
+.start-card > p { font-size: 15px; line-height: 1.8; color: var(--text2); margin-bottom: 22px; }
+.start-card .btn { align-self: flex-start; }
+.start-meta {
+  margin-top: 20px; padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-size: 13px; line-height: 1.75; color: var(--dim);
+}
+.start-meta a { font-weight: 600; }
+
+.terminal {
+  margin-top: 22px;
+  background: var(--frame); color: #e9e2d0;
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-md);
+  padding: 18px 20px;
+  font-family: var(--font-mono); font-size: 13px; line-height: 2;
+  overflow-x: auto;
+}
+.terminal .cmt { color: #a1957c; }
+.terminal .cmd { color: #f4ecd8; }
+.terminal .cmd::before { content: "$ "; color: #6f9d5f; }
+.terminal .ln { display: block; white-space: pre; }
+
+/* ============================================================
+ * 常见问题
+ * ============================================================ */
+.faq { display: flex; flex-direction: column; gap: 0; border-top: 2px solid var(--ink-line); }
+.faq details { border-bottom: 1px solid var(--line2); }
+.faq summary {
+  display: flex; align-items: center; gap: 16px;
+  padding: 22px 4px;
+  font-size: 16.5px; font-weight: 700; line-height: 1.6;
+  cursor: pointer; list-style: none;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary:hover { color: var(--blue); }
+.faq summary .marker {
+  width: 22px; height: 22px; flex-shrink: 0; margin-left: auto;
+  display: grid; place-items: center;
+  border: 2px solid var(--ink-line); border-radius: var(--r-sm);
+  background: var(--raised); color: var(--text);
+  font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1;
+  transition: transform var(--dur-base) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+.faq details[open] summary { color: var(--blue); }
+.faq details[open] .marker { transform: rotate(45deg); background: var(--blue); color: var(--on-accent); }
+.faq .answer {
+  padding: 0 4px 26px;
+  max-width: 60em;
+  font-size: 15px; line-height: 1.9; color: var(--text2);
+}
+.faq .answer p + p { margin-top: 12px; }
+.faq .answer strong { color: var(--text); font-weight: 700; }
+
+/* ============================================================
+ * 结尾召唤 + 页脚
+ * ============================================================ */
+.cta {
+  border-top: 2px solid var(--ink-line);
+  background: var(--card);
+  padding: 84px 0 88px;
+  text-align: center;
+}
+.cta .sheep-sm {
+  width: 84px; height: auto; margin: 0 auto 24px;
+  filter: drop-shadow(3px 4px 0 rgba(29, 26, 22, .14));
+}
+[data-theme="dark"] .cta .sheep-sm { filter: drop-shadow(3px 4px 0 rgba(0, 0, 0, .5)); }
+.cta h2 {
+  font-size: clamp(1.7rem, 1rem + 2vw, 2.35rem);
+  font-weight: 800; letter-spacing: -.028em; line-height: 1.25;
+  margin-bottom: 16px;
+}
+.cta p { font-size: 16.5px; color: var(--text2); max-width: 40em; margin: 0 auto 30px; line-height: 1.85; }
+.cta-actions { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+.footer {
+  border-top: 2px solid var(--ink-line);
+  padding: 56px 0 34px;
+}
+.footer-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) repeat(3, minmax(0, 1fr));
+  gap: 44px;
+  padding-bottom: 40px;
+  border-bottom: 1px solid var(--line2);
+}
+.footer-brand { display: flex; align-items: center; gap: 11px; margin-bottom: 16px; }
+.footer-brand img {
+  width: 34px; height: 34px;
+  border: 2px solid var(--ink-line); border-radius: 9px;
+  background: var(--raised); padding: 2px; object-fit: contain;
+}
+.footer-brand b { font-size: 17px; font-weight: 800; letter-spacing: -.02em; }
+.footer-about { font-size: 14px; line-height: 1.8; color: var(--text2); max-width: 30em; }
+.footer-col h4 {
+  font-size: 12px; font-weight: 700; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--dim);
+  margin-bottom: 16px;
+}
+.footer-col a {
+  display: block; font-size: 14.5px; font-weight: 600;
+  color: var(--text2); padding: 5px 0;
+}
+.footer-col a:hover { color: var(--blue); }
+.footer-bottom {
+  display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 14px;
+  padding-top: 26px;
+  font-size: 13px; color: var(--dim);
+}
+.footer-bottom .left { display: flex; flex-direction: column; gap: 5px; }
+.footer-bottom .sheep-line { color: var(--dim); }
+
+/* ============================================================
+ * 滚动入场
+ * ============================================================ */
+.rise { opacity: 0; transform: translateY(20px); }
+.rise.in {
+  opacity: 1; transform: none;
+  transition: opacity .62s var(--ease-out), transform .62s var(--ease-out);
+}
+
+/* ============================================================
+ * 响应式
+ * ============================================================ */
+@media (max-width: 1080px) {
+  .hero-grid { grid-template-columns: 1fr; gap: 52px; }
+  .hero-visual { max-width: 640px; }
+  .hero-sheep { right: 4px; bottom: -30px; }
+  .safety-grid, .panel-grid { grid-template-columns: 1fr; gap: 40px; }
+  .scenes { grid-template-columns: repeat(2, 1fr); }
+  .gallery { grid-template-columns: repeat(2, 1fr); }
+  .shot.wide { grid-column: span 2; }
+  .footer-grid { grid-template-columns: repeat(2, 1fr); gap: 34px; }
+  .footer-brand-col { grid-column: span 2; }
+}
+
+@media (max-width: 820px) {
+  /* 主导航收成可横向滑动的条带，而不是整条消失——窄屏也得能跳到各版块 */
+  .masthead-inner { height: auto; flex-wrap: wrap; padding-top: 12px; gap: 12px; }
+  .brand { order: 1; }
+  .masthead-actions { order: 2; margin-left: auto; }
+  .nav {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    gap: 22px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 10px;
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav a { flex-shrink: 0; white-space: nowrap; }
+  .section { padding: 66px 0; }
+  .hero { padding: 48px 0 66px; }
+  .facts-grid { grid-template-columns: repeat(2, 1fr); }
+  .fact { padding: 24px 20px; }
+  .fact:nth-child(2) { border-right: none; }
+  .fact:nth-child(1), .fact:nth-child(2) { border-bottom: 1px solid var(--line); }
+  .fact b { font-size: 25px; }
+  .tiers { grid-template-columns: 1fr; }
+  .start-grid { grid-template-columns: 1fr; }
+  .tabs { width: 100%; }
+  .tab { flex: 1; padding: 10px 12px; text-align: center; }
+}
+
+@media (max-width: 640px) {
+  body { font-size: 15px; }
+  .wrap, .wrap-narrow { width: min(100% - 32px, 100%); }
+  .scenes, .gallery { grid-template-columns: 1fr; }
+  .shot.wide { grid-column: span 1; }
+  .footer-grid { grid-template-columns: 1fr; }
+  .footer-brand-col { grid-column: span 1; }
+  .hero-actions .btn { flex: 1 1 100%; }
+  .cta-actions .btn { flex: 1 1 100%; }
+  .lane { grid-template-columns: 62px 1fr; gap: 10px; }
+  .lane-name { font-size: 11.5px; }
+  .lane-track { font-size: 11px; padding: 0 9px; }
+  .terminal { font-size: 12px; }
+  .diff { font-size: 11.5px; }
+}
+
+/* 极窄屏（320px 一类）：页眉只留图标与下载按钮，避免挤出横向滚动 */
+@media (max-width: 380px) {
+  .brand-text { display: none; }
+  .brand { gap: 0; }
+  .masthead-inner { gap: 10px; }
+  .masthead-actions { gap: 8px; }
+  .masthead-actions .btn { padding: 8px 14px; }
+  .hero-note { font-size: 12.5px; }
+  .fact { padding: 20px 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  .rise { opacity: 1; transform: none; }
+}
+
+@media print {
+  .masthead, .cta, .hero-sheep { display: none; }
+  body { background: #fff; color: #000; }
+}
+</style>
 </head>
 <body>
-  <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
-    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
-    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M12 16v5m-5 0h10"/></symbol>
-    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h5l3 4h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></symbol>
-    <symbol id="i-code" viewBox="0 0 24 24"><path d="m7 6-6 6 6 6m10-12 6 6-6 6M14 3l-4 18"/></symbol>
-    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
-    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 2 9 4v6c0 5-9 10-9 10S3 17 3 12V6l9-4Z"/><path d="m8 11 3 3 5-5"/></symbol>
-    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
-    <symbol id="i-team" viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><path d="M2 21v-3a7 7 0 0 1 14 0v3M16 4a3 3 0 0 1 0 6m3 11v-3a7 7 0 0 0-2-5"/></symbol>
-    <symbol id="i-round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><circle cx="12" cy="3" r="2"/><circle cx="3" cy="17" r="2"/><circle cx="21" cy="17" r="2"/><path d="M12 5v3M5 16l4-2m6 0 4 2"/></symbol>
-    <symbol id="i-review" viewBox="0 0 24 24"><path d="M14 3H5v18h14v-6M8 8h4m-4 5h3m-3 4h6"/><circle cx="18" cy="7" r="4"/><path d="m21 10 2 2"/></symbol>
-    <symbol id="i-revert" viewBox="0 0 24 24"><path d="M3 9h11a7 7 0 1 1 0 14M3 9l6-6M3 9l6 6"/></symbol>
-    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M8 3v5m8-5v5M5 8h14v3a7 7 0 0 1-14 0V8Zm7 10v4"/></symbol>
-    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M10 5h4m-3 14h2"/></symbol>
-    <symbol id="i-mouse" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="7"/><path d="M12 2v7"/></symbol>
-    <symbol id="i-map" viewBox="0 0 24 24"><circle cx="5" cy="5" r="3"/><circle cx="19" cy="8" r="3"/><circle cx="10" cy="19" r="3"/><path d="m8 6 8 1M6 8l3 8m8-6-5 6"/></symbol>
-    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
-    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10Z"/></symbol>
-    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
-    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
-  </svg>
-  <a class="skip" href="#main">跳到主要内容</a>
-  <header class="site-header">
-    <div class="wrap nav-bar">
-      <a class="brand" href="#top" aria-label="SkySheep 云朵小羊，返回首页">
-        <img src="docs/images/cloud-sheep-web.webp" alt="" width="38" height="38">
-        <span class="brand-name">SkySheep<small>云朵小羊 · 桌面 AI 工作台</small></span>
-      </a>
-      <nav class="nav-links" id="site-nav" aria-label="主要导航">
-        <a href="#scenes">能做什么</a><a href="#collaboration">多模型协作</a><a href="#security">安全与掌控</a><a href="#faq">常见问题</a>
-      </nav>
-      <div class="nav-actions">
-        <button class="icon-button" id="theme-toggle" type="button" aria-label="切换到深色主题" title="切换到深色主题"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button>
-        <a class="button button-primary" href="#download">下载 SkySheep <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></a>
-        <button class="icon-button menu-button" id="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="打开导航菜单"><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button>
+<a class="skip-link" href="#main">跳到主要内容</a>
+
+<!-- ============ 页眉 ============ -->
+<header class="masthead">
+  <div class="wrap masthead-inner">
+    <a class="brand" href="#top" aria-label="SkySheep 首页">
+      <img class="brand-mark" src="docs/images/cloud-sheep-web.webp" alt="" width="38" height="38">
+      <span class="brand-text">
+        <b>SkySheep</b>
+        <span>Local AI Workbench</span>
+      </span>
+    </a>
+    <nav class="nav" aria-label="主导航">
+      <a href="#scenes">能干什么</a>
+      <a href="#safety">安全</a>
+      <a href="#collab">多模型</a>
+      <a href="#shots">界面</a>
+      <a href="#start">上手</a>
+      <a href="#faq">常见问题</a>
+      <a href="https://github.com/sky-scrape/SkySheep" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <div class="masthead-actions">
+      <button class="theme-toggle" data-theme-toggle type="button" aria-label="切换深浅主题" title="切换深浅主题">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4.2"/>
+          <path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1z"/>
+        </svg>
+      </button>
+      <a class="btn btn-primary btn-sm" href="https://github.com/sky-scrape/SkySheep/releases/latest">下载</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <span id="top"></span>
+
+  <!-- ============ 首屏 ============ -->
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="dot"></span>Windows 桌面 · 开源 MIT · v2.5.0</p>
+        <h1>它替你动手，<br>但<span class="mark"><span>每一步先问你</span></span></h1>
+        <p class="hero-lede">
+          跑在本机的开源 AI Agent 工作台。给它一个任务，它会自己读写文件、执行命令、
+          联网检索、操作电脑——而<strong>写文件与跑命令默认逐次弹卡确认</strong>，
+          每轮文件改动自动快照、随时撤销。
+        </p>
+        <p class="hero-lede">
+          会话、配置、密钥全部留在你自己的电脑上。
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">
+            下载安装包
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" width="17" height="17" aria-hidden="true">
+              <path d="M12 3v13M6.5 11l5.5 5.5L17.5 11M4 20.5h16"/>
+            </svg>
+          </a>
+          <a class="btn btn-ghost btn-lg" href="#safety">先看它怎么管权限</a>
+        </div>
+        <p class="hero-note">
+          <span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
+            Windows 10 / 11 x64
+          </span>
+          <span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
+            无遥测，数据不出本机
+          </span>
+          <span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
+            首次运行需放行 SmartScreen
+          </span>
+        </p>
+      </div>
+
+      <div class="hero-visual">
+        <figure class="hero-shot window">
+          <div class="window-bar">
+            <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="window-title">SkySheep —— 深色「夜墨」主题</span>
+            <span class="window-spacer" aria-hidden="true"></span>
+          </div>
+          <img src="docs/images/right-panel.png" alt="SkySheep 桌面工作台：左侧会话与项目，中间对话区与确认卡片，右侧实时面板与终端" width="1080" height="608" fetchpriority="high" decoding="async">
+        </figure>
+        <img class="hero-sheep" src="docs/images/cloud-sheep-web.webp" alt="云朵小羊" width="132" height="132" aria-hidden="true">
       </div>
     </div>
-  </header>
-  <main id="main">
-    <section class="hero" id="top" aria-labelledby="hero-title">
-      <div class="wrap">
-        <div class="hero-top">
-          <div>
-            <a class="release-link" href="https://github.com/Sky-scrape/SkySheep/releases/tag/v2.5.0" target="_blank" rel="noopener noreferrer"><span>v2.5.0</span> 新增对抗审查与会话分屏 <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
-            <h1 id="hero-title">让 AI 在你的电脑上，<br><em>把事情做完。</em></h1>
-            <p class="hero-copy">不止回答问题，更能动手。读写文件、处理文档、执行命令，让多个模型一起干活——你给目标，小羊接手，每一步由你掌握。</p>
-            <div class="hero-actions">
-              <a class="button button-primary" href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener noreferrer"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg> 下载 Windows 版</a>
-              <a class="button button-secondary" href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener noreferrer"><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg> 查看开源代码</a>
+  </section>
+
+  <!-- ============ 事实条 ============ -->
+  <section class="facts" aria-label="项目概况">
+    <div class="wrap facts-grid">
+      <div class="fact"><b>24</b><span>内置工具：文件、命令、检索、文档、图像</span></div>
+      <div class="fact"><b>10+</b><span>模型服务预设，也可接本地推理服务</span></div>
+      <div class="fact"><b>3</b><span>档权限模式，默认逐次确认每次写入</span></div>
+      <div class="fact"><b>20</b><span>个官方场景技能包，开箱即装</span></div>
+    </div>
+  </section>
+
+  <!-- ============ 能干什么 ============ -->
+  <section class="section" id="scenes">
+    <div class="wrap">
+      <div class="section-head rise">
+        <span class="section-label">Capabilities</span>
+        <h2>不按功能清单介绍，先说它具体能接哪些活</h2>
+        <p>下面每一类都是把要求说清楚就能开工的日常任务，不需要你先写脚本。</p>
+      </div>
+
+      <div class="scenes">
+        <article class="scene rise">
+          <p class="scene-no">01 / 文件与文档</p>
+          <h3>整理堆积如山的文件</h3>
+          <p>文件读写与精确编辑、PDF / Word / Excel / PPT / CSV 解析都是内置工具。移动与删除走可回滚的专用操作，误删也能撤。</p>
+          <p class="scene-quote">把下载文件夹堆了半年的文件，按类型归档重命名</p>
+        </article>
+
+        <article class="scene rise">
+          <p class="scene-no">02 / 现有项目</p>
+          <h3>在代码库里干活</h3>
+          <p>读代码、定位问题、改文件、跑测试，一轮做完不满意就撤销本轮改动。适合改配置、批量重构、写小工具这类验收标准明确的任务。</p>
+          <p class="scene-quote">这个报错复现一下，找到根因改掉，再补一条防回归的测试</p>
+        </article>
+
+        <article class="scene rise">
+          <p class="scene-no">03 / 定时自动化</p>
+          <h3>把重复劳动变成定时任务</h3>
+          <p>定时任务与依赖编排负责到点执行和产出传递；导出为 Windows 计划任务后，应用没开着也能到点跑。</p>
+          <p class="scene-quote">每天早上八点抓这几个网站的新内容，汇总后推到飞书群</p>
+        </article>
+
+        <article class="scene rise">
+          <p class="scene-no">04 / 多模型会诊</p>
+          <h3>重要的事不只问一个模型</h3>
+          <p>圆桌让多个模型各自作答、主席融合成一份答案；团队按角色分工、工单板跟进度；对抗模式组织专门挑错的审查流水线。</p>
+          <p class="scene-quote">这个方案让几个模型各自挑一遍毛病，再给我结论</p>
+        </article>
+
+        <article class="scene rise">
+          <p class="scene-no">05 / 电脑控制</p>
+          <h3>替你操作界面</h3>
+          <p>截屏、鼠标、键盘、窗口、剪贴板五类动作，默认关闭，需要时在设置里按需开启。适合「在几个软件里各点一遍导出」这类重复操作。</p>
+          <p class="scene-quote">在这三个软件里各导出一次报表，存到同一个文件夹</p>
+        </article>
+
+        <article class="scene rise">
+          <p class="scene-no">06 / 人不在电脑前</p>
+          <h3>远程也管得住</h3>
+          <p>手机浏览器打开完整界面，确认卡照常逐条弹；飞书 / 微信里发消息派活，收日报与终态通知。</p>
+          <p class="scene-quote">出门前派个活，路上用手机把确认卡点完</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 安全 ============ -->
+  <section class="section" id="safety">
+    <div class="wrap">
+      <div class="section-head rise">
+        <span class="section-label">Safety by default</span>
+        <h2>让 Agent 替你动手，前提是出了事兜得住</h2>
+        <p>安全是默认行为，不需要先配置一轮。</p>
+      </div>
+
+      <div class="safety-grid">
+        <div class="rise">
+          <ul class="safety-points">
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>每一步先确认</b>
+                <p>只读操作自动放行；写文件（附 diff 预览）与执行命令默认逐次弹卡确认。三档权限模式可调，放宽档仅限本机界面切换。</p>
+              </div>
+            </li>
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>命令白名单按实际 shell 判定</b>
+                <p>按完整词前缀匹配；含 shell 拼接或解释器旗标的命令不命中规则、一律重新确认。规则按项目持久化，设置页可管理。</p>
+              </div>
+            </li>
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>改动可回滚</b>
+                <p>文件改动按轮快照，一键撤销本轮改动，重启后仍可回滚；每会话保留 50 轮，全项目兜底 500 条。</p>
+              </div>
+            </li>
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>数据不出本机</b>
+                <p>会话、配置、密钥存于本机，无遥测。网页抓取仅允许公网 http(s)、具备 SSRF 防护；外部网页内容按数据处理，不当作指令执行。</p>
+              </div>
+            </li>
+            <li>
+              <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
+              <div>
+                <b>出错了有得救</b>
+                <p>会话库自动滚动备份可可视化恢复；项目自带的 MCP 与技能配置需先确认信任；诊断包导出自动打码密钥。</p>
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <div class="rise">
+          <div class="demo-stage">
+            <p class="demo-label">确认卡片长这样</p>
+            <div class="card-confirm">
+              <div class="card-confirm-head">
+                <span class="badge">写入</span>
+                <span>Agent 想修改这个文件</span>
+                <span class="path">src/config.py</span>
+              </div>
+              <div class="diff" role="img" aria-label="变更预览：新增两行、删除一行">
+                <div class="diff-row"><span class="sign"> </span>TIMEOUT = 30</div>
+                <div class="diff-row diff-del"><span class="sign">-</span>RETRY = 1</div>
+                <div class="diff-row diff-add"><span class="sign">+</span>RETRY = 3</div>
+                <div class="diff-row diff-add"><span class="sign">+</span>BACKOFF = 1.5</div>
+              </div>
+              <div class="card-confirm-actions">
+                <span class="chip-btn is-primary">允许这次</span>
+                <span class="chip-btn">总是允许</span>
+                <span class="chip-btn">拒绝</span>
+              </div>
             </div>
-            <div class="hero-meta"><span><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg> Windows 10 / 11 x64</span><span>MIT 开源</span><span>自选模型 · 无需 SkySheep 账号</span></div>
+            <p class="demo-caption">
+              示意图，按钮不可点击。真实界面里三个选项逐次出现，选择结果会写进本轮记录，随时可查。
+            </p>
           </div>
-          <aside class="mission" aria-label="文件整理任务示意">
-            <img class="mission-sheep" src="docs/images/cloud-sheep-web.webp" alt="云朵小羊" width="116" height="116">
-            <div class="mission-label"><span class="status-dot"></span> 给小羊的一句话 <span class="demo-label">任务示意</span></div>
-            <p class="mission-prompt">“把这些 PDF 的关键信息，<br>整理成一张 Excel 对照表。”</p>
-            <ul class="mission-list">
-              <li><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg> 读取文档，提取需要的信息</li>
-              <li><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg> 按你的要求整理字段</li>
-              <li><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> 写入文件前，等你确认</li>
-            </ul>
-            <span class="mission-note">从一句话，到一份交付。</span>
-          </aside>
-        </div>
-        <div class="desktop-stage" id="shots">
-          <div class="stage-top"><span class="stage-name"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg> 你的桌面，就是 AI 的工作现场。</span><span class="stage-note">SkySheep / 实际产品界面</span></div>
-          <div id="preview-panel" role="tabpanel" aria-labelledby="preview-workspace">
-            <button class="screenshot-button" id="open-preview" type="button" aria-label="放大查看工作台截图" aria-haspopup="dialog"><img id="preview-image" src="docs/images/right-panel.png" width="1280" height="720" alt="SkySheep 夜墨主题工作台：会话侧栏、对话区、右侧实时面板与桌面宠物" fetchpriority="high"></button>
-          </div>
-        </div>
-        <div class="preview-bar">
-          <div class="preview-tabs" role="tablist" aria-label="产品界面预览">
-            <button id="preview-workspace" type="button" role="tab" aria-selected="true" aria-controls="preview-panel" data-preview="workspace"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg> 桌面工作台</button>
-            <button id="preview-agenda" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" tabindex="-1" data-preview="agenda"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg> 日程与自动化</button>
-            <button id="preview-models" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" tabindex="-1" data-preview="models"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg> 自选模型服务</button>
-          </div>
-          <p class="preview-caption" id="preview-caption">夜墨主题 · 对话、工具调用与实时面板，一处看清。点击截图放大。</p>
-        </div>
-        <div class="proof-strip"><p>熟悉的模型，在同一个工作台。</p><div class="model-list" aria-label="支持的模型服务示例"><span>Anthropic</span><span>DeepSeek</span><span>Kimi</span><span>智谱 GLM</span><span>Qwen</span><span>Ollama</span><span>及其他兼容服务</span></div></div>
-      </div>
-    </section>
 
-    <section class="section" id="scenes" aria-labelledby="scenes-title">
-      <div class="wrap">
-        <div class="section-head"><div><span class="eyebrow">从你的实际工作出发</span><h2 id="scenes-title">少一点来回复制，<br>多一点真正完成。</h2></div><p>文件就在本机，工具就在手边。<br>把要求说清楚，不必先学一套命令。</p></div>
-        <div class="scene-grid">
-          <article class="scene"><div class="scene-icon"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></div><h3>把文件变成成果</h3><p>批量归档文件，从 PDF 提取信息，读写 Word、Excel 与 PPT。让堆着的资料，变成能用的结果。</p><div class="prompt">“把下载目录按类型归档，再列一份文件清单给我。”</div><div class="scene-output"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg> 整理好的目录 + 文件清单</div></article>
-          <article class="scene"><div class="scene-icon"><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg></div><h3>在项目里直接动手</h3><p>读代码、定位问题、修改文件、跑测试。文件、终端和改动记录就在对话旁，不用来回切窗口。</p><div class="prompt">“找到这个报错的原因，修复它，并跑一遍相关测试。”</div><div class="scene-output"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg> 文件改动 + 测试结果</div></article>
-          <article class="scene"><div class="scene-icon"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg></div><h3>让重复的事自己跑</h3><p>定时收集信息，编排多步骤任务，把结果推送到飞书、微信或 Webhook。跑了什么，随时可查。</p><div class="prompt">“每天早上收集这几个网站的更新，汇总后发到飞书。”</div><div class="scene-output"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg> 定时任务 + 汇总推送</div></article>
-        </div>
-      </div>
-    </section>
-
-    <section class="section collab-section" id="collaboration" aria-labelledby="collab-title">
-      <div class="wrap collab-layout">
-        <div class="collab-intro"><span class="eyebrow">原生多模型协作</span><h2 class="section-title" id="collab-title">不是多开几个窗口，<br>而是真的一起工作。</h2><p>一个问题要多种观点，一项工作要分头推进，一份方案要有人挑错。三种协作方式，各有用处。</p>
-          <div class="collab-tabs" role="tablist" aria-label="多模型协作方式" aria-orientation="vertical">
-            <button class="collab-tab" id="tab-roundtable" type="button" role="tab" aria-controls="panel-roundtable" aria-selected="true" data-mode="roundtable"><svg class="icon" aria-hidden="true"><use href="#i-round"/></svg><span><strong>圆桌</strong><small>多方作答，融合观点</small></span><svg class="icon tab-arrow" aria-hidden="true"><use href="#i-arrow"/></svg></button>
-            <button class="collab-tab" id="tab-team" type="button" role="tab" aria-controls="panel-team" aria-selected="false" tabindex="-1" data-mode="team"><svg class="icon" aria-hidden="true"><use href="#i-team"/></svg><span><strong>团队</strong><small>拆解派工，验收交付</small></span><svg class="icon tab-arrow" aria-hidden="true"><use href="#i-arrow"/></svg></button>
-            <button class="collab-tab" id="tab-review" type="button" role="tab" aria-controls="panel-review" aria-selected="false" tabindex="-1" data-mode="review"><svg class="icon" aria-hidden="true"><use href="#i-review"/></svg><span><strong>对抗</strong><small>交叉验证，认真挑错</small></span><svg class="icon tab-arrow" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+          <div class="tiers">
+            <div class="tier is-default">
+              <span class="tag">默认</span>
+              <b>安全执行</b>
+              <p>写入与执行逐次确认，只读自动放行。</p>
+            </div>
+            <div class="tier">
+              <span class="tag">可调</span>
+              <b>自动编辑</b>
+              <p>工作目录内的写入自动放行，命令仍需确认。</p>
+            </div>
+            <div class="tier">
+              <span class="tag">谨慎</span>
+              <b>完全访问</b>
+              <p>不再逐次打断，仅建议在受控项目里使用。</p>
+            </div>
           </div>
         </div>
-        <div>
-          <div class="collab-panel" id="panel-roundtable" role="tabpanel" aria-labelledby="tab-roundtable" tabindex="0"><div class="panel-label"><span>圆桌 / 一次提问，多种视角</span><span class="demo-label">协作机制示意</span></div><div class="collab-question">“这份方案，有哪些值得重新考虑的地方？”</div><div class="parallel"><div class="model-node"><b>批评者</b><span>找出薄弱环节</span></div><div class="model-node"><b>事实核查员</b><span>验证关键依据</span></div><div class="model-node"><b>实干者</b><span>判断实施路径</span></div></div><div class="flow-arrow" aria-hidden="true">↓</div><div class="merge-node"><svg class="icon" aria-hidden="true"><use href="#i-round"/></svg><b>主席融合</b><small>一份综合答案</small></div><p class="panel-description">成员独立作答，主席综合草稿。也可以开启辩论轮，让成员互看观点后再修订；原始草稿可回看。</p></div>
-          <div class="collab-panel" id="panel-team" role="tabpanel" aria-labelledby="tab-team" tabindex="0" hidden><div class="panel-label"><span>团队 / 从分工到交付</span><span class="demo-label">协作机制示意</span></div><div class="director"><b>总管 · 拆解、派工、验收</b><span>用户或 AI 担任</span></div><div class="workboard"><div class="board-column"><p>待办</p><div class="work-order"><b>补充资料</b><small>调研队员</small></div></div><div class="board-column"><p>进行中</p><div class="work-order"><b>整理报告</b><small>写作队员</small></div></div><div class="board-column"><p>待验收</p><div class="work-order complete"><b>核对来源</b><small>审查队员</small></div></div></div><div class="team-channel"><b>团队频道</b>随时插话、接管，或打回不合格的工单。</div><p class="panel-description">总管把目标拆成工单，队员各自执行，再逐条验收。你可以亲自派工，也可以把推进工作交给 AI 总管。</p></div>
-          <div class="collab-panel" id="panel-review" role="tabpanel" aria-labelledby="tab-review" tabindex="0" hidden><div class="panel-label"><span>对抗 / 不轻易附和一个结论</span><span class="demo-label">协作机制示意</span></div><div class="collab-question">“审查这段代码，给出有依据的问题和修复建议。”</div><div class="review-steps"><div class="review-step"><span>1</span><b>发现者</b><small>尽可能找出候选问题</small></div><div class="review-step"><span>2</span><b>调查者</b><small>逐条验证，推翻不成立的疑点</small></div><div class="review-step"><span>3</span><b>建议者</b><small>针对成立的问题提出修复方案</small></div><div class="review-step"><span>4</span><b>裁判</b><small>汇总裁决，交付终审报告</small></div></div><p class="panel-description">四角色接力，各阶段隔离上下文，减少附和与确认偏差。审查结果是辅助判断，不替代人工验收。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 多模型协作 ============ -->
+  <section class="section" id="collab">
+    <div class="wrap">
+      <div class="section-head rise">
+        <span class="section-label">Multi-model</span>
+        <h2>一次任务，三种把多个模型组织起来的方式</h2>
+        <p>三种模式在图形界面里直接开关，不用拼命令行参数。同一轮只能选一种，避免互相打架。</p>
+      </div>
+
+      <div class="tabs rise" role="tablist" aria-label="多模型协作模式">
+        <button class="tab" role="tab" id="tab-round" aria-controls="panel-round" aria-selected="true" type="button">圆桌</button>
+        <button class="tab" role="tab" id="tab-team" aria-controls="panel-team" aria-selected="false" tabindex="-1" type="button">团队</button>
+        <button class="tab" role="tab" id="tab-adv" aria-controls="panel-adv" aria-selected="false" tabindex="-1" type="button">对抗</button>
+      </div>
+
+      <!-- 圆桌 -->
+      <div class="tabpanel" role="tabpanel" id="panel-round" aria-labelledby="tab-round" tabindex="0">
+        <div class="panel-grid">
+          <div class="panel-copy">
+            <h3>圆桌 —— 一次提问，多个模型共同作答</h3>
+            <p>成员模型并行独立作答，主席（主对话模型）把全部草稿融合成一份最终答案，锋利的批评和稳妥的结论都能留下。</p>
+            <div class="panel-role">
+              <h4>可调的部分</h4>
+              <ol>
+                <li><b>身份预设</b>：批评者、事实核查员、简洁派、实干者等五种成员角色</li>
+                <li><b>辩论修订</b>：可开启辩论轮，成员互看草稿后再修订一轮；A/B 模式保留各自原始回答</li>
+                <li><b>草稿留存</b>：每份草稿随会话落库，可回看、引用、追问</li>
+              </ol>
+            </div>
+          </div>
+          <div class="flow rise">
+            <p class="flow-label">流程示意</p>
+            <div class="flow-lanes">
+              <div class="lane"><span class="lane-name">成员 A</span><span class="lane-track is-member">独立作答 · 批评者</span></div>
+              <div class="lane"><span class="lane-name">成员 B</span><span class="lane-track is-member">独立作答 · 事实核查</span></div>
+              <div class="lane"><span class="lane-name">成员 C</span><span class="lane-track is-member">独立作答 · 实干者</span></div>
+              <div class="lane"><span class="lane-name">主席</span><span class="lane-track is-chain">融合成一份最终答案</span></div>
+            </div>
+            <p class="flow-out">输出：一份融合结论 + 可回看的全部草稿</p>
+            <p class="flow-note">雷同草稿会去重、成员使用轻上下文等七项机制用于控制 Token 消耗。</p>
+          </div>
         </div>
       </div>
-    </section>
 
-    <section class="section" id="security" aria-labelledby="safety-title">
-      <div class="wrap safety-layout">
-        <div class="safety-copy"><span class="eyebrow">能动手，也要管得住</span><h2 class="section-title" id="safety-title">执行交给 AI，<br>决定权留给你。</h2><p>默认安全执行。只读操作自动放行；写文件、跑命令等敏感操作，先展示确认卡，再继续。</p><div class="safety-items"><div class="safety-item"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><div><h3>看清楚，再允许</h3><p>文件编辑有 diff 预览，确认卡说明操作范围与可撤销性。权限三档可调，尺度由你选择。</p></div></div><div class="safety-item"><svg class="icon" aria-hidden="true"><use href="#i-revert"/></svg><div><h3>文件改错，撤销本轮改动</h3><p>受支持的文件操作自动留下检查点，重启后仍可回滚。命令与电脑控制的副作用不保证可撤销。</p></div></div><div class="safety-item"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><div><h3>会话与配置，保存在本机</h3><p>无需 SkySheep 账号，无遥测。接入你选择的云端服务，或使用 Ollama 等本地推理服务。</p></div></div></div><p class="privacy-note">使用云端模型时，请求内容会发送到所选模型服务。是否完全本地处理，取决于你的模型与联网工具配置。</p></div>
-        <div><div class="permission-demo"><div class="panel-label"><span>安全执行 · 等待你的决定</span><span class="demo-label">交互示意，非真实执行</span></div><div class="permission-title"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> 小羊想修改一个文件</div><p class="permission-sub">先核对改动内容，再决定是否允许。</p><div class="diff"><div class="diff-file">项目 / reports / summary.md</div><div class="diff-lines"><span>  # 本周项目进展</span><span class="removed">− 状态：待整理</span><span class="added">+ 状态：已完成资料汇总</span><span class="added">+ 附件：项目对照表.xlsx</span></div></div><div class="permission-scope"><span>范围：工作目录内</span><span>可撤销：检查点</span></div><div class="permission-actions"><button class="allow" id="demo-allow" type="button">允许一次</button><button id="demo-deny" type="button">拒绝</button></div><p class="permission-status" id="permission-status" role="status" aria-live="polite">试试做出决定，看看任务如何继续。</p></div><p class="privacy-note">上方仅演示权限交互，不调用模型，不读写任何本地文件。</p></div>
+      <!-- 团队 -->
+      <div class="tabpanel" role="tabpanel" id="panel-team" aria-labelledby="tab-team" tabindex="0" hidden>
+        <div class="panel-grid">
+          <div class="panel-copy">
+            <h3>团队 —— 按角色分工，工单板跟进度</h3>
+            <p>把一个大任务拆成若干工单，每个队员有自己的角色、模型和工具范围，在团队频道里汇报、被验收、被打回重做。</p>
+            <div class="panel-role">
+              <h4>两种总管</h4>
+              <ol>
+                <li><b>用户总管</b>：你每条消息就是一道指令，自己决定派给谁</li>
+                <li><b>AI 总管</b>：指定一个模型当总管，自动推进拆解 → 派工 → 收报 → 验收 → 交付；你保留插话、接管、收队三权</li>
+                <li><b>小会</b>：需要几个人碰一下时开一轮圆桌，讨论只在频道里呈现，不打断主线</li>
+              </ol>
+            </div>
+          </div>
+          <div class="flow rise">
+            <p class="flow-label">流程示意</p>
+            <div class="flow-lanes">
+              <div class="lane"><span class="lane-name">总管</span><span class="lane-track">拆解任务 · 派单</span></div>
+              <div class="lane"><span class="lane-name">队员 1</span><span class="lane-track is-member">认领工单 · 执行</span></div>
+              <div class="lane"><span class="lane-name">队员 2</span><span class="lane-track is-member">认领工单 · 执行</span></div>
+              <div class="lane"><span class="lane-name">总管</span><span class="lane-track is-chain">验收 / 打回 / 改派</span></div>
+            </div>
+            <p class="flow-out">输出：可交付成果 + 完整频道记录</p>
+            <p class="flow-note">防失控上限：全局轮次上限、重复返工超限强制裁定、成员停滞自动移交总管、Token 预算越线强制交付。</p>
+          </div>
+        </div>
       </div>
-    </section>
 
-    <section aria-labelledby="automation-title">
-      <div class="wrap automation"><div><span class="eyebrow">把重复工作串起来</span><h2 id="automation-title">你安排一次，<br>小羊按计划接力。</h2><p>定时触发，任务按依赖推进，结果送到你常用的渠道。无人值守执行只在预授权范围内进行。</p><a class="text-link" href="https://github.com/Sky-scrape/SkySheep#-它能帮你做什么" target="_blank" rel="noopener noreferrer">了解自动化能力 <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a></div><div><div class="pipeline" aria-label="任务编排示意：定时收集、汇总审查、推送结果"><div class="pipeline-node"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><b>定时收集</b><small>每天 / 每周</small></div><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg><div class="pipeline-node"><svg class="icon" aria-hidden="true"><use href="#i-review"/></svg><b>汇总审查</b><small>依赖完成后接力</small></div><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg><div class="pipeline-node"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><b>推送结果</b><small>飞书 / 微信</small></div></div><p class="pipeline-foot">应用内调度需保持运行；导出为 Windows 系统计划任务后，可独立执行。</p></div></div>
-    </section>
+      <!-- 对抗 -->
+      <div class="tabpanel" role="tabpanel" id="panel-adv" aria-labelledby="tab-adv" tabindex="0" hidden>
+        <div class="panel-grid">
+          <div class="panel-copy">
+            <h3>对抗 —— 专门找错的审查流水线</h3>
+            <p>不追求答案好看，追求把问题挖出来。四个角色接力，各自只看得到自己该看的那部分，避免互相迁就。</p>
+            <div class="panel-role">
+              <h4>为什么更难被糊弄</h4>
+              <ol>
+                <li><b>不对称激励</b>：挑出问题的收益高于点头附和，角色设定上就不鼓励和稀泥</li>
+                <li><b>阶段上下文隔离</b>：发现、调查、建议、裁判各自独立，后面的角色不被前面的措辞带偏</li>
+                <li><b>失败隔离降级</b>：某一环失败不会让整条流水线作废，按降级路径给出可用结论</li>
+              </ol>
+            </div>
+          </div>
+          <div class="flow rise">
+            <p class="flow-label">流程示意</p>
+            <div class="flow-lanes">
+              <div class="lane"><span class="lane-name">发现</span><span class="lane-track is-member">列出可疑点</span></div>
+              <div class="lane"><span class="lane-name">调查</span><span class="lane-track is-member">逐条核实</span></div>
+              <div class="lane"><span class="lane-name">建议</span><span class="lane-track is-member">给出改法</span></div>
+              <div class="lane"><span class="lane-name">裁判</span><span class="lane-track is-chain">裁定哪些成立</span></div>
+            </div>
+            <p class="flow-out">输出：成立的问题清单 + 对应修复建议</p>
+            <p class="flow-note">纯文本推理，不经过权限门；适合方案评审、代码审查、合同风险这类「宁可得罪人也要说」的场景。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-    <section class="section" id="features" aria-labelledby="features-title">
-      <div class="wrap"><div class="section-head"><div><span class="eyebrow">围绕工作，而不只是对话</span><h2 id="features-title">一个工作台，<br>接住你的整套工作。</h2></div><a class="text-link" href="https://github.com/Sky-scrape/SkySheep#-功能总览" target="_blank" rel="noopener noreferrer">查看完整能力清单 <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a></div><div class="capability-grid"><article class="capability"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg><h3>MCP 与技能</h3><p>接入外部工具，导入场景技能。把一次做对的方法，存成下次能复用的技能。</p><span class="capability-tag">MCP / SKILLS</span></article><article class="capability"><svg class="icon" aria-hidden="true"><use href="#i-mouse"/></svg><h3>浏览器与电脑控制</h3><p>让小羊处理重复界面操作。控制能力默认关闭，需要时开启，并按权限确认。</p><span class="capability-tag">BROWSER / DESKTOP</span></article><article class="capability"><svg class="icon" aria-hidden="true"><use href="#i-phone"/></svg><h3>人不在，也管得到</h3><p>手机打开完整界面，飞书或微信派活收结果。远程访问默认关闭，只给可信设备。</p><span class="capability-tag">REMOTE / CHANNELS</span></article><article class="capability"><svg class="icon" aria-hidden="true"><use href="#i-map"/></svg><h3>记忆与用量</h3><p>项目记忆与演化地图衔接工作；用量仪表盘让模型消耗和费用估算有据可查。</p><span class="capability-tag">MEMORY / USAGE</span></article></div></div>
-    </section>
+  <!-- ============ 界面 ============ -->
+  <section class="section" id="shots">
+    <div class="wrap">
+      <div class="section-head rise">
+        <span class="section-label">Interface</span>
+        <h2>看得见、管得住、够得着</h2>
+        <p>和终端 Agent 的差异不在逐条功能清单，而在产品形态：对话、确认卡、diff 预览、文件改动、终端输出、审查诊断都在界面里，不用盯终端滚动日志。</p>
+      </div>
 
-    <section class="section download-section" id="download" aria-labelledby="download-title">
-      <div class="wrap download-box"><div class="download-main"><div><span class="eyebrow">把小羊带到你的桌面</span><h2 class="section-title" id="download-title">下一件要做的事，<br>让小羊一起。</h2><p>免费开源，自带图形界面。<br>无需终端经验，从一个小任务开始。</p><div class="download-actions"><a class="button button-primary" href="https://github.com/Sky-scrape/SkySheep/releases/latest" target="_blank" rel="noopener noreferrer"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg> 获取 Windows 安装包</a><span class="download-version">v2.5.0 / Windows x64</span></div></div><ol class="setup-steps"><li><span class="setup-number">1</span><div><b>下载并安装</b><small>在 GitHub Releases 获取最新安装包。</small></div></li><li><span class="setup-number">2</span><div><b>接入你选的模型</b><small>按向导填写 API Key，或连接本地推理服务。</small></div></li><li><span class="setup-number">3</span><div><b>说出你的第一个任务</b><small>没有 Key？先进入演示模式，看看完整执行过程。</small></div></li></ol></div><div class="download-bottom"><p>安装包尚未签名。遇到 SmartScreen 提示，请先核对来源，参阅 <a href="https://github.com/Sky-scrape/SkySheep/blob/main/docs/smartscreen-%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener noreferrer">安装说明</a>。</p><span>模型服务可能单独计费。</span></div></div>
-    </section>
+      <div class="gallery">
+        <figure class="shot rise">
+          <div class="window">
+            <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">模型服务设置</span><span class="window-spacer" aria-hidden="true"></span></div>
+            <img src="docs/images/providers.png" alt="模型服务设置页：内置多家服务预设，填入 API Key 即可接入" loading="lazy" decoding="async" width="1080" height="608">
+          </div>
+          <figcaption><b>多模型服务</b>内置预设填入 Key 即可接入，也可接中转或本机推理服务。</figcaption>
+        </figure>
 
-    <section class="section" id="faq" aria-labelledby="faq-title">
-      <div class="wrap faq-layout"><div class="faq-intro"><span class="eyebrow">开始之前</span><h2 class="section-title" id="faq-title">你可能还想知道。</h2><p>先弄清边界，再放心使用。</p><a class="text-link" href="https://github.com/Sky-scrape/SkySheep/issues" target="_blank" rel="noopener noreferrer">反馈问题 <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a></div><div class="faq-list">
-        <details><summary>SkySheep 免费吗？需要账号吗？</summary><p>SkySheep 以 MIT 协议开源，无需注册 SkySheep 账号。使用云端模型时，需要提供所选服务的 API Key，费用由该服务收取；也可连接本地推理服务。演示模式无需 API Key，但不是免费的真实模型服务。</p></details>
-        <details><summary>和普通聊天客户端有什么不同？</summary><p>SkySheep 不只生成回答，还能调用工具读写文件、执行命令、处理文档和操作电脑。权限确认、文件改动、终端输出与任务进度都在图形界面里，多模型协作与自动化也是原生功能。</p></details>
-        <details><summary>我的数据会离开电脑吗？</summary><p>会话、配置与密钥保存在本机，SkySheep 无遥测。但云端模型需要接收请求中的上下文，联网工具也会联系外部服务。要在本地处理，请选择本地推理服务，并根据需要限制联网工具；不要把“本机存储”理解成“所有请求都不联网”。</p></details>
-        <details><summary>它做的所有操作，都能撤销吗？</summary><p>不能。受支持的文件操作会记录检查点，可使用“撤销本轮改动”恢复。执行命令、电脑控制，以及外部服务上的操作可能产生不可回滚的副作用；确认前请查看操作范围与可撤销性，不要未经核对就放宽权限。</p></details>
-        <details><summary>支持 macOS、Linux 或手机吗？</summary><p>当前受支持的产品形态是 Windows 10 / 11 x64 桌面应用。手机可通过远程访问打开网页界面，不是独立原生 App。macOS / Linux 上的 <code>--browser</code> 是开发者兜底路径，不在桌面支持承诺内。</p></details>
-        <details><summary>开发者怎么从源码运行？</summary><p>需要 Python ≥ 3.11 与 uv。Windows 为支持平台；启动后按向导配置模型。以下命令只安装并启动项目，不涉及你的真实会话数据管理。</p><div class="source-block"><div class="source-top"><span>在终端运行</span><button class="copy-button" id="copy-src" type="button">复制命令</button></div><pre><code id="src-code">git clone https://github.com/Sky-scrape/SkySheep.git
-cd SkySheep/engine
-uv sync
-uv run skysheep app</code></pre><p class="copy-status" id="copy-status" role="status" aria-live="polite"></p></div></details>
-      </div></div>
-    </section>
-  </main>
-  <footer class="site-footer"><div class="wrap"><div class="footer-top"><a class="brand" href="#top" aria-label="SkySheep，返回顶部"><img src="docs/images/cloud-sheep-web.webp" alt="" width="38" height="38"><span class="brand-name">SkySheep<small>云朵小羊与你同在</small></span></a><nav class="footer-links" aria-label="项目资源"><a href="https://github.com/Sky-scrape/SkySheep" target="_blank" rel="noopener noreferrer">GitHub</a><a href="https://github.com/Sky-scrape/SkySheep/blob/main/README.md" target="_blank" rel="noopener noreferrer">使用文档</a><a href="https://github.com/Sky-scrape/SkySheep/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">更新记录</a><a href="https://github.com/Sky-scrape/SkySheep/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">安全说明</a><a href="https://github.com/sponsors/Sky-scrape" target="_blank" rel="noopener noreferrer">支持项目</a></nav></div><div class="footer-bottom"><span>开源的 Windows 桌面 AI Agent 工作台。</span><span>Windows 桌面应用 · MIT License · 你的模型，你的工作台。</span></div></div></footer>
-  <dialog class="image-dialog" id="image-dialog" aria-labelledby="dialog-title"><div class="dialog-bar"><span id="dialog-title">SkySheep · 产品界面</span><button class="icon-button" id="close-preview" type="button" aria-label="关闭截图预览"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div><img id="dialog-image" src="docs/images/right-panel.png" alt="SkySheep 工作台大图"></dialog>
-  <script>
-    (() => {
-      const root = document.documentElement;
-      const themeButton = document.getElementById('theme-toggle');
-      const themeColor = document.querySelector('meta[name="theme-color"]');
-      function renderTheme() {
-        const dark = root.dataset.theme === 'dark';
-        const label = dark ? '切换到浅色主题' : '切换到深色主题';
-        themeButton.setAttribute('aria-label', label);
-        themeButton.title = label;
-        themeButton.querySelector('use').setAttribute('href', dark ? '#i-sun' : '#i-moon');
-        themeColor.content = dark ? '#101c2c' : '#f5f8fc';
+        <figure class="shot rise">
+          <div class="window">
+            <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">日程周历</span><span class="window-spacer" aria-hidden="true"></span></div>
+            <img src="docs/images/agenda.png" alt="日程周历视图：定时任务与日程排入周历" loading="lazy" decoding="async" width="1080" height="608">
+          </div>
+          <figcaption><b>日程与定时</b>任务排进周历，到点自动执行，可导出为系统计划任务。</figcaption>
+        </figure>
+
+        <figure class="shot rise">
+          <div class="window">
+            <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">用量仪表盘</span><span class="window-spacer" aria-hidden="true"></span></div>
+            <img src="docs/images/usage.png" alt="用量仪表盘：按会话、服务、模型统计 Token 与费用" loading="lazy" decoding="async" width="1080" height="608">
+          </div>
+          <figcaption><b>用量与费用</b>Token 用量按会话 / 服务 / 模型拆分，支持费用估算与预算护栏。</figcaption>
+        </figure>
+
+        <figure class="shot wide rise">
+          <div class="window">
+            <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">消息与操作</span><span class="window-spacer" aria-hidden="true"></span></div>
+            <img src="docs/images/message-ops.png" alt="对话消息与操作区：工具调用、权限确认、改动回滚入口集中呈现" loading="lazy" decoding="async" width="1006" height="340">
+          </div>
+          <figcaption><b>每一步都留痕</b>工具调用、权限决策、文件改动、回滚入口集中在消息流里，改了什么、谁发起的、能不能撤销一眼看清。</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 上手 ============ -->
+  <section class="section" id="start">
+    <div class="wrap">
+      <div class="section-head rise">
+        <span class="section-label">Getting started</span>
+        <h2>两条路，看你是普通用户还是想看代码</h2>
+      </div>
+
+      <div class="start-grid">
+        <div class="start-card is-primary rise">
+          <h3>装好就用</h3>
+          <p>下载安装包双击安装，Windows 10 / 11 x64。首次启动由三步向导完成接入：选服务 → 填 Key → 开始，也会自动检测本机的本地推理服务。</p>
+          <a class="btn btn-primary" href="https://github.com/sky-scrape/SkySheep/releases/latest">到 Releases 下载</a>
+          <p class="start-meta">
+            没有 API Key 也能先进入<strong>演示模式</strong>，看一轮真实工具调用的完整过程。<br>
+            首次运行若被 Windows SmartScreen 拦截，点「更多信息 → 仍要运行」——
+            未签名程序的默认待遇，<a href="docs/smartscreen-说明.md">详细说明</a>。
+          </p>
+        </div>
+
+        <div class="start-card rise">
+          <h3>从源码跑</h3>
+          <p>源码运行以 Windows 为支持平台。macOS / Linux 上引擎与网页界面可用，但不承诺桌面壳与系统集成能力。</p>
+          <div class="terminal" role="img" aria-label="源码运行命令：克隆仓库后进入 engine 目录，依次执行 uv sync 与 uv run skysheep app">
+            <span class="ln cmt"># 需要 Python 3.11+ 与 uv</span>
+            <span class="ln cmd">cd SkySheep/engine</span>
+            <span class="ln cmd">uv sync</span>
+            <span class="ln cmd">uv run skysheep app</span>
+            <span class="ln cmt"># 终端交互：uv run skysheep chat</span>
+          </div>
+          <p class="start-meta">
+            也可以直接双击仓库里的 <span class="mono">启动SkySheep.bat</span>。<br>
+            源码运行默认使用 dev 身份，数据在 <span class="mono">~/.skysheep-dev/</span>，与安装版互不干扰。
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 常见问题 ============ -->
+  <section class="section" id="faq">
+    <div class="wrap-narrow">
+      <div class="section-head rise">
+        <span class="section-label">FAQ</span>
+        <h2>几个容易被问到的地方</h2>
+      </div>
+
+      <div class="faq rise">
+        <details>
+          <summary>「数据不出本机」和调用云端模型矛盾吗？<span class="marker" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>不矛盾，但要说清楚界限：<strong>会话、配置、密钥、检查点、记忆都存在你自己的电脑上</strong>，SkySheep 本身没有遥测、不上传任何数据。</p>
+            <p>而当你配置的是云端模型服务时，发出去的那段对话内容自然会经过服务商——这是模型推理本身的要求，和「数据被应用收集」是两回事。要完全不出本机，可以接本机推理服务，SkySheep 会自动检测。</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>定时任务需要应用一直开着吗？<span class="marker" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>默认是的。定时任务与日程提醒由应用内循环触发，所以关窗时选择「缩到系统托盘」才会继续后台运行；彻底退出期间到点的任务会在下次启动补跑。</p>
+            <p>如果需要应用完全关闭也照常执行，在任务卡片上点「⊞」导出为 Windows 系统计划任务，到点以无头模式独立跑。</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>改动可回滚，具体能撤到什么程度？<span class="marker" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>文件改动按轮次快照，可以一键撤销本轮的文件改动，重启应用后仍然能回滚。每会话保留 50 轮，全项目兜底 500 条。</p>
+            <p>注意回滚覆盖的是<strong>文件改动</strong>，不是整个系统状态——命令执行产生的副作用（比如已经发出去的请求、已经推到群里的消息）不在回滚范围内。这也是为什么执行命令默认要你确认。</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>支持 macOS 或 Linux 吗？<span class="marker" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>SkySheep 是<strong>Windows 桌面产品</strong>。安装包、桌面壳、凭据加密、Windows 沙箱、窗口与进程管理、计划任务导出都只针对 Windows 打磨。</p>
+            <p><span class="mono">--browser</span> 模式能在 macOS / Linux 上跑起引擎与网页界面，属于开发者兜底路径，不在支持承诺内。跨平台要等 Windows 桌面体验达到稳定标准后再单独评估。</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>为什么安装包会触发 SmartScreen 警告？<span class="marker" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>因为目前安装包<strong>还没有代码签名证书</strong>。未签名程序首次下载运行被 SmartScreen 拦截是 Windows 的默认行为，不代表检测到了病毒。</p>
+            <p>点「更多信息 → 仍要运行」即可继续。代码签名是项目的首要支出方向，签名后这个提示会消失。同时应用内更新要求发布方提供 <span class="mono">.sha256</span> 校验附件，缺失即拒绝自动安装。</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>和 Claude Code、Codex CLI 这类终端 Agent 有什么不同？<span class="marker" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>差异在产品形态与使用方式，不在逐条功能清单。终端工具强在脚本化与 CI 集成，SkySheep 强在<strong>看得见、管得住、够得着</strong>：图形界面中文优先，权限确认、检查点回滚、白名单管理全部图形化，人不在电脑前也能用手机审批确认卡。</p>
+            <p>反过来，如果你要的是脚本化嵌入 CI、纯键盘效率流，终端 Agent 仍是更顺手的形态。SkySheep 内置无头模式与终端 REPL 作为补充。</p>
+          </div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 结尾召唤 ============ -->
+  <section class="cta">
+    <div class="wrap">
+      <img class="sheep-sm" src="docs/images/cloud-sheep-web.webp" alt="" width="84" height="84" aria-hidden="true" loading="lazy">
+      <h2>云朵小羊与你同在</h2>
+      <p>给你的电脑请一个愿意先问一句再动手的助手。开源、可审计、数据留在本机。</p>
+      <div class="cta-actions">
+        <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">下载 SkySheep</a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/sky-scrape/SkySheep" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16" fill="currentColor" width="18" height="18" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+          看源码
+        </a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ 页脚 ============ -->
+<footer class="footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-brand-col">
+        <div class="footer-brand">
+          <img src="docs/images/cloud-sheep-web.webp" alt="" width="34" height="34" loading="lazy">
+          <b>SkySheep</b>
+        </div>
+        <p class="footer-about">
+          开源 Windows 桌面 AI Agent 工作台。多模型协作、权限由你掌握、改动可回滚，数据留在本机。
+        </p>
+      </div>
+      <div class="footer-col">
+        <h4>项目</h4>
+        <a href="https://github.com/sky-scrape/SkySheep" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/sky-scrape/SkySheep/releases" target="_blank" rel="noopener">版本发布</a>
+        <a href="https://github.com/sky-scrape/SkySheep/blob/main/CHANGELOG.md" target="_blank" rel="noopener">更新日志</a>
+        <a href="https://github.com/sky-scrape/SkySheep/blob/main/LICENSE" target="_blank" rel="noopener">MIT 许可</a>
+      </div>
+      <div class="footer-col">
+        <h4>文档</h4>
+        <a href="https://github.com/sky-scrape/SkySheep#readme" target="_blank" rel="noopener">中文说明</a>
+        <a href="https://github.com/sky-scrape/SkySheep/blob/main/README.en.md" target="_blank" rel="noopener">English Docs</a>
+        <a href="https://github.com/sky-scrape/SkySheep/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">参与贡献</a>
+        <a href="https://github.com/sky-scrape/SkySheep/blob/main/SECURITY.md" target="_blank" rel="noopener">安全策略</a>
+      </div>
+      <div class="footer-col">
+        <h4>社区</h4>
+        <a href="https://github.com/sky-scrape/SkySheep/issues" target="_blank" rel="noopener">问题反馈</a>
+        <a href="https://github.com/sky-scrape/SkySheep/discussions" target="_blank" rel="noopener">讨论区</a>
+        <a href="https://github.com/sponsors/Sky-scrape" target="_blank" rel="noopener">赞助支持</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <div class="left">
+        <span>© 2026 SkySheep · 以 MIT 协议开源</span>
+        <span>代码签名分发是赞助支出的第一优先方向。</span>
+      </div>
+      <span class="sheep-line">☁️ 本地运行，先问后做 ☁️</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* ============================================================
+ * 主题切换：偏好落 localStorage，跟随系统作为缺省
+ * （首帧由 head 里的内联脚本先定调，这里只处理手动切换）
+ * ============================================================ */
+(function () {
+  var root = document.documentElement;
+  var toggle = document.querySelector('[data-theme-toggle]');
+
+  function systemPref() {
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  if (toggle) {
+    toggle.addEventListener('click', function () {
+      var next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+      root.dataset.theme = next;
+      root.style.background = '';   // 交回 CSS 的渐变底
+      try { localStorage.setItem('ss-theme', next); } catch (_) {}
+      var meta = document.querySelector('meta[name="theme-color"]:not([media])');
+      if (!meta) {
+        meta = document.createElement('meta');
+        meta.name = 'theme-color';
+        document.head.appendChild(meta);
       }
-      themeButton.addEventListener('click', () => {
-        const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
-        root.dataset.theme = next;
-        try { localStorage.setItem('ss-theme', next); } catch (_) {}
-        renderTheme();
-      });
-      renderTheme();
-      // 用户还没手动选过主题时，跟随系统深浅的实时变化
-      matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
-        let saved = null;
-        try { saved = localStorage.getItem('ss-theme'); } catch (_) {}
-        if (saved === 'light' || saved === 'dark') return;
-        root.dataset.theme = event.matches ? 'dark' : 'light';
-        renderTheme();
-      });
+      meta.content = next === 'dark' ? '#171410' : '#e8dfc7';
+    });
+  }
 
-      const menuButton = document.getElementById('menu-toggle');
-      const nav = document.getElementById('site-nav');
-      function closeMenu() {
-        nav.classList.remove('open');
-        menuButton.setAttribute('aria-expanded', 'false');
-        menuButton.setAttribute('aria-label', '打开导航菜单');
-      }
-      menuButton.addEventListener('click', () => {
-        const open = nav.classList.toggle('open');
-        menuButton.setAttribute('aria-expanded', String(open));
-        menuButton.setAttribute('aria-label', open ? '关闭导航菜单' : '打开导航菜单');
-      });
-      nav.addEventListener('click', event => { if (event.target.closest('a')) closeMenu(); });
-      document.addEventListener('keydown', event => { if (event.key === 'Escape') closeMenu(); });
-      document.addEventListener('click', event => { if (!event.target.closest('.site-header')) closeMenu(); });
-      matchMedia('(min-width:761px)').addEventListener('change', closeMenu);
+  /* 用户没有手动选过时，跟随系统变化实时切换 */
+  var mq = matchMedia('(prefers-color-scheme: dark)');
+  var onSystemChange = function () {
+    var saved = null;
+    try { saved = localStorage.getItem('ss-theme'); } catch (_) {}
+    if (saved === 'light' || saved === 'dark') return;   // 用户已明确选择，不覆盖
+    root.dataset.theme = systemPref();
+  };
+  if (mq.addEventListener) mq.addEventListener('change', onSystemChange);
+  else if (mq.addListener) mq.addListener(onSystemChange);
 
-      function wireTabs(tablist, select) {
-        const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
-        function activate(tab, focus = false) {
-          tabs.forEach(item => {
-            const active = item === tab;
-            item.setAttribute('aria-selected', String(active));
-            item.tabIndex = active ? 0 : -1;
-          });
-          select(tab);
-          if (focus) tab.focus();
-        }
-        tabs.forEach(tab => tab.addEventListener('click', () => activate(tab)));
-        tablist.addEventListener('keydown', event => {
-          if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key)) return;
-          const current = tabs.indexOf(document.activeElement);
-          if (current < 0) return;
-          event.preventDefault();
-          let next = current;
-          if (event.key === 'Home') next = 0;
-          else if (event.key === 'End') next = tabs.length - 1;
-          else next = (current + (['ArrowRight','ArrowDown'].includes(event.key) ? 1 : -1) + tabs.length) % tabs.length;
-          activate(tabs[next], true);
-        });
-      }
-      const previews = {
-        workspace: { src:'docs/images/right-panel.png', alt:'SkySheep 夜墨主题工作台：会话侧栏、对话区、右侧实时面板与桌面宠物', label:'工作台', caption:'夜墨主题 · 对话、工具调用与实时面板，一处看清。点击截图放大。' },
-        agenda: { src:'docs/images/agenda.png', alt:'SkySheep 夜墨主题日程周历，查看任务安排与日程提醒', label:'日程与自动化', caption:'日程周历 · 在同一个工作台里安排任务与提醒。点击截图放大。' },
-        models: { src:'docs/images/providers.png', alt:'SkySheep 纸墨主题模型服务设置，自选并配置模型服务', label:'模型服务', caption:'纸墨主题 · 配置你自己的模型服务，不绑定单一厂商。点击截图放大。' }
-      };
-      let currentPreview = previews.workspace;
-      const image = document.getElementById('preview-image');
-      const openPreview = document.getElementById('open-preview');
-      wireTabs(document.querySelector('.preview-tabs'), tab => {
-        currentPreview = previews[tab.dataset.preview];
-        image.src = currentPreview.src;
-        image.alt = currentPreview.alt;
-        document.getElementById('preview-caption').textContent = currentPreview.caption;
-        document.getElementById('preview-panel').setAttribute('aria-labelledby', tab.id);
-        openPreview.setAttribute('aria-label', '放大查看' + currentPreview.label + '截图');
-      });
-      wireTabs(document.querySelector('.collab-tabs'), tab => {
-        document.querySelectorAll('.collab-panel').forEach(panel => { panel.hidden = panel.id !== tab.getAttribute('aria-controls'); });
-      });
-      const collabTabs = document.querySelector('.collab-tabs');
-      const mobile = matchMedia('(max-width:760px)');
-      function orientTabs() { collabTabs.setAttribute('aria-orientation', mobile.matches ? 'horizontal' : 'vertical'); }
-      mobile.addEventListener('change', orientTabs);
-      orientTabs();
+/* ============================================================
+ * 协作模式标签页：点击 + 方向键切换，符合 WAI-ARIA tabs 惯例
+ * ============================================================ */
+  var tablist = document.querySelector('[role="tablist"]');
+  if (tablist) {
+    var tabs = Array.prototype.slice.call(tablist.querySelectorAll('.tab'));
 
-      const dialog = document.getElementById('image-dialog');
-      openPreview.addEventListener('click', () => {
-        document.getElementById('dialog-image').src = currentPreview.src;
-        document.getElementById('dialog-image').alt = currentPreview.alt;
-        document.getElementById('dialog-title').textContent = 'SkySheep · ' + currentPreview.label;
-        dialog.showModal();
+    function select(idx, focus) {
+      tabs.forEach(function (t, i) {
+        var on = i === idx;
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        t.tabIndex = on ? 0 : -1;
+        var panel = document.getElementById(t.getAttribute('aria-controls'));
+        if (panel) panel.hidden = !on;
       });
-      document.getElementById('close-preview').addEventListener('click', () => dialog.close());
-      dialog.addEventListener('click', event => {
-        const bounds = dialog.getBoundingClientRect();
-        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
+      if (focus) tabs[idx].focus();
+    }
+
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { select(i, false); });
+      t.addEventListener('keydown', function (e) {
+        var next = null;
+        if (e.key === 'ArrowRight') next = (i + 1) % tabs.length;
+        else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = tabs.length - 1;
+        if (next !== null) { e.preventDefault(); select(next, true); }
       });
-      const permissionStatus = document.getElementById('permission-status');
-      document.getElementById('demo-allow').addEventListener('click', () => {
-        permissionStatus.textContent = '已允许这一次操作。示意任务继续，文件改动将记录到检查点。';
-        permissionStatus.classList.add('result');
+    });
+  }
+
+/* ============================================================
+ * 滚动入场：只做一次，尊重 prefers-reduced-motion
+ * ============================================================ */
+  var riseItems = document.querySelectorAll('.rise');
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  if (reduce || !('IntersectionObserver' in window)) {
+    Array.prototype.forEach.call(riseItems, function (el) { el.classList.add('in'); });
+  } else {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry, i) {
+        if (!entry.isIntersecting) return;
+        var el = entry.target;
+        /* 同批出现的元素错开一点，避免整块同时弹入 */
+        el.style.transitionDelay = Math.min(i * 60, 240) + 'ms';
+        el.classList.add('in');
+        io.unobserve(el);
       });
-      document.getElementById('demo-deny').addEventListener('click', () => {
-        permissionStatus.textContent = '已拒绝。示意任务不会执行这次修改，决定权始终在你手里。';
-        permissionStatus.classList.remove('result');
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+    Array.prototype.forEach.call(riseItems, function (el) { io.observe(el); });
+  }
+
+/* ============================================================
+ * 常见问题：同时只展开一条，避免页面被拉得很长
+ * ============================================================ */
+  var allDetails = document.querySelectorAll('.faq details');
+  Array.prototype.forEach.call(allDetails, function (d) {
+    d.addEventListener('toggle', function () {
+      if (!d.open) return;
+      Array.prototype.forEach.call(allDetails, function (other) {
+        if (other !== d) other.open = false;
       });
-      const copyButton = document.getElementById('copy-src');
-      copyButton.addEventListener('click', async () => {
-        const status = document.getElementById('copy-status');
-        try {
-          if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('Clipboard unavailable');
-          await navigator.clipboard.writeText(document.getElementById('src-code').textContent);
-          status.textContent = '命令已复制，可粘贴到终端。';
-          copyButton.textContent = '已复制';
-        } catch (_) {
-          status.textContent = '浏览器未允许复制，请选中上方命令手动复制。';
-          copyButton.textContent = '复制命令';
-        }
-      });
-    })();
-  </script>
+    });
+  });
+})();
+</script>
 </body>
 </html>

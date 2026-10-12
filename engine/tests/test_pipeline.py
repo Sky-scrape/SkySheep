@@ -667,8 +667,11 @@ def test_pipeline_import_cron_ws(home):
             "allowed_tools": ["read_file"],
         }})
         cron = recv_until(ws, "ca")["result"]
+        # 节点默认并发 2：导入节点与占位节点同时就绪时各自并发派跑，而 FakeProvider
+        # 按调用顺序弹脚本，谁拿到哪条响应不定；本用例要按轮次逐条断言，固定顺序执行
         ws.send_json({"id": "c1", "method": "pipeline.create", "params": {
-            "name": "导入线", "nodes": [{"title": "占位", "prompt": "先做点别的"}],
+            "name": "导入线", "concurrency": 1,
+            "nodes": [{"title": "占位", "prompt": "先做点别的"}],
         }})
         pipe = recv_until(ws, "c1")["result"]["pipeline"]
         ws.send_json({"id": "ic", "method": "pipeline.import_cron", "params": {

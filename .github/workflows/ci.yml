@@ -78,6 +78,49 @@ jobs:
         working-directory: engine
         run: uv run pytest -m e2e -q
 
+  # 真实浏览器 UI 交互（Playwright）：前端零构建、无 Node 工具链，键盘操作、
+  # 焦点、视口缩放、窄屏无溢出这些真实渲染行为此前只能手动验。playwright 放在
+  # 独立的 browser 依赖组（不进 dev）——单测与 e2e 两个 job 的 uv sync --locked
+  # 不拉它，这里显式 --group browser 装、并缓存 Chromium 二进制，让这组用例真正
+  # 在 CI 跑起来而不是整组跳过。
+  ui:
+    name: browser UI (playwright)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync dependencies (browser group)
+        working-directory: engine
+        run: uv sync --locked --group browser
+
+      # Chromium 约 150MB：按 uv.lock 做键缓存，命中就不重下；restore-keys 让
+      # 依赖变动时先复用旧缓存再增量补
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('engine/uv.lock') }}
+          restore-keys: |
+            playwright-chromium-${{ runner.os }}-
+
+      - name: Install Chromium
+        working-directory: engine
+        run: uv run --group browser python -m playwright install chromium
+
+      # 显式点名文件：这组用例带 e2e + slow 标记，靠路径选定而非 -m 选择器。
+      # uv run 也带 --group browser：不让隐式同步语义决定 playwright 在不在。
+      - name: Pytest (browser UI)
+        working-directory: engine
+        run: uv run --group browser pytest tests/test_browser_ui.py -q
+
   # 依赖漏洞扫描：从 uv.lock 导出全部运行时依赖（不含 dev 组、不含本包）交 pip-audit 审。
   # 跑 windows-latest 与本地核验环境一致（lock 是全平台通用锁，pywinpty/pywin32 等
   # Windows 专属依赖在别的平台装不出来）；不改 pyproject.toml / uv.lock，导出是纯读。

@@ -48,6 +48,15 @@ dev = [
     # 被修剪、打包当天才炸（AGENTS.md 旧 ⚠️ 记载的坑）。
     "pyinstaller>=6.10",
 ]
+# 真实浏览器 UI 交互（Playwright）：键盘操作、焦点、视口缩放、窄屏无溢出等真实
+# 渲染行为此前只能手动验。独立成组而不并入 dev——它要下载 Chromium（约 150MB），
+# 并进 dev 会让每次 uv sync 与单测/e2e 两个 CI job 都白拉一遍。CI 的 browser UI
+# job 显式 `uv sync --group browser` 装它；其余 job 的 --locked 不受影响，测试文件
+# 仍靠 pytest.importorskip 在未装时整组跳过。入组后版本由 uv.lock 锁定，避免
+# 「CI 上现装一个浮动版本、哪天静默改行为」。
+browser = [
+    "playwright>=1.49",
+]
 
 [build-system]
 requires = ["hatchling"]

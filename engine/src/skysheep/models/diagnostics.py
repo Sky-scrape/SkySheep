@@ -228,24 +228,37 @@ async def test_connection(
     api_key: str | None = None,
     model: str = "",
     timeout_s: float = 20.0,
+    transport: object | None = None,
 ) -> TestResult:
     """对单个模型服务做一次最小真实调用，返回连通性与能力探测结果。
 
     流程：models.list 找模型拿窗口字段 → 用 1 token 的非流式请求实测对话。
     models.list 失败不提前失败（部分服务不提供该接口）：仍会尝试对话调用。
-    对话调用成功即判定连通；失败时给出分类诊断。
+    对话调用成功即判定连通；失败时给出分类诊断。transport 仅供测试注入
+    （httpx.MockTransport），注入后整条链路不再打真实网络。
     """
-    from .probe import _extract_context_limit, _is_local
+    from .probe import _extract_context_limit, _is_local, http_client_module
 
     base = (base_url or "").strip()
     model = (model or "").strip()
     result = TestResult(ok=False, model=model)
-    extra: dict = {}
-    if base and _is_local(base):
-        # 本地服务直连（probe 同款：系统代理会把 127.0.0.1 转走）
-        extra["http_client"] = __import__("httpx").AsyncClient(
-            trust_env=False, timeout=timeout_s
-        )
+
+    def _client_extra() -> dict:
+        """每次新建客户端都单独建一个 httpx 客户端。
+
+        不能共用一个 http_client：SDK 的 close() 会把它一并关掉，第一段
+        （models.list）收尾后再给第二段（对话调用）同一个已关闭的连接池，
+        本地服务会直接报 Connection error——本地测试连接必挂。
+        transport 仅供测试注入（httpx.MockTransport），注入后整条链路不打真实网络；
+        httpx 模块按协议取（anthropic 1.5+ 只认 httpx2）。
+        """
+        hx = http_client_module(kind)
+        if transport is not None:
+            return {"http_client": hx.AsyncClient(transport=transport, timeout=timeout_s)}
+        if base and _is_local(base):
+            # 本地服务直连（probe 同款：系统代理会把 127.0.0.1 转走）
+            return {"http_client": hx.AsyncClient(trust_env=False, timeout=timeout_s)}
+        return {}
 
     t0 = time.monotonic()
 
@@ -258,14 +271,14 @@ async def test_connection(
 
             client = AsyncAnthropic(
                 api_key=api_key or "", base_url=base or None,
-                timeout=timeout_s, max_retries=0, **extra,
+                timeout=timeout_s, max_retries=0, **_client_extra(),
             )
         else:
             from openai import AsyncOpenAI
 
             client = AsyncOpenAI(
                 api_key=api_key or "", base_url=base or None,
-                timeout=timeout_s, max_retries=0, **extra,
+                timeout=timeout_s, max_retries=0, **_client_extra(),
             )
         try:
             if kind == "anthropic":
@@ -277,7 +290,7 @@ async def test_connection(
                 model_listed = model in ids
             # 在原始条目里找窗口字段：SDK 的 model 对象不一定带，重查一次原始 JSON
             try:
-                import httpx as _httpx
+                hx = http_client_module(kind)
 
                 url = (base or "https://api.openai.com/v1").rstrip("/") + "/models"
                 headers = (
@@ -285,8 +298,9 @@ async def test_connection(
                     if kind == "anthropic"
                     else {"Authorization": "Bearer " + (api_key or "")}
                 )
-                async with _httpx.AsyncClient(
-                    timeout=timeout_s, trust_env=not (base and _is_local(base))
+                async with hx.AsyncClient(
+                    timeout=timeout_s, trust_env=not (base and _is_local(base)),
+                    transport=transport,
                 ) as hc:
                     resp = await hc.get(url, headers=headers)
                     if resp.status_code == 200:
@@ -320,7 +334,7 @@ async def test_connection(
 
             client = AsyncAnthropic(
                 api_key=api_key or "", base_url=base or None,
-                timeout=timeout_s, max_retries=0, **extra,
+                timeout=timeout_s, max_retries=0, **_client_extra(),
             )
             resp = await client.messages.create(
                 model=model or "claude-3-haiku-20240307",
@@ -333,7 +347,7 @@ async def test_connection(
 
             client = AsyncOpenAI(
                 api_key=api_key or "", base_url=base or None,
-                timeout=timeout_s, max_retries=0, **extra,
+                timeout=timeout_s, max_retries=0, **_client_extra(),
             )
             resp = await client.chat.completions.create(
                 model=model or "gpt-4o-mini",
@@ -447,17 +461,16 @@ def _cap_client(kind: str, base_url: str | None, api_key: str | None,
     """构造探测用的 SDK 客户端（一次构建、四项共用，用完统一关闭）。
 
     transport 仅供测试注入（httpx.MockTransport）；本地地址不走系统代理，
-    与 probe.py 同一套直连规则。
+    与 probe.py 同一套直连规则。httpx 模块按协议取（anthropic 1.5+ 只认 httpx2）。
     """
-    import httpx
+    from .probe import _is_local, http_client_module
 
-    from .probe import _is_local
-
+    hx = http_client_module(kind)
     extra: dict = {}
     if transport is not None:
-        extra["http_client"] = httpx.AsyncClient(transport=transport, timeout=timeout_s)
+        extra["http_client"] = hx.AsyncClient(transport=transport, timeout=timeout_s)
     elif base_url and _is_local(base_url):
-        extra["http_client"] = httpx.AsyncClient(trust_env=False, timeout=timeout_s)
+        extra["http_client"] = hx.AsyncClient(trust_env=False, timeout=timeout_s)
     if kind == "anthropic":
         from anthropic import AsyncAnthropic
 

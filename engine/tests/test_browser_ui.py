@@ -9,14 +9,14 @@ Enter 发送）此前只能手动验证。本文件用 Playwright 连真实 Chro
 - 视口缩放（200% / 50%）与窄屏（手机宽度）不产生横向溢出致命错乱；
 - PWA service worker 在真实浏览器里注册成功。
 
-依赖策略：playwright 是**可选 dev 依赖**（不进 pyproject dev 组，不进单测
-CI 必跑集，`uv sync --locked` 会修剪它）——本地装了就跑、没装整组跳过
-（pytest.importorskip）；装了包但未下载浏览器二进制时同样跳过。
-标记 ``e2e + slow``：单测 CI 集（not e2e）不跑，CI 的 e2e 专层因未装
-Playwright 而整体跳过；本地显式验证时按需装配：
+依赖策略：playwright 在 pyproject 的独立 **browser 依赖组**（不进 dev 组，
+单测 / e2e 两个 CI job 的 `uv sync --locked` 不拉它，本地默认也不装）——
+没装整组跳过（pytest.importorskip），装了包但未下载浏览器二进制时同样跳过。
+CI 由专门的 `browser UI (playwright)` job 用 `uv sync --group browser` 装齐后跑；
+本地显式验证按需装配：
 
-    uv pip install playwright && python -m playwright install chromium
-    pytest tests/test_browser_ui.py
+    uv sync --group browser && uv run python -m playwright install chromium
+    uv run pytest tests/test_browser_ui.py
 """
 
 from __future__ import annotations

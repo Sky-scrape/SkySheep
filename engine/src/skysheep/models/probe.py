@@ -19,16 +19,36 @@ def _is_local(url: str | None) -> bool:
     return host in _LOCAL_HOSTS or host.endswith(".local") or host.endswith(".localhost")
 
 
-def _client_kwargs(base_url: str | None, timeout_s: float) -> dict:
+def http_client_module(kind: str = "openai"):
+    """SDK 期望的 httpx 模块：anthropic 1.5+ 走 vendored 的 httpx2，openai 走 httpx。
+
+    传错模块会被 SDK 直接拒绝（Invalid `http_client` argument）——所以本地直连
+    与测试注入两处都从这里取，不各自 import。老版 anthropic 仍用 httpx，导入
+    httpx2 失败时回退 httpx。
+    """
+    if kind == "anthropic":
+        try:
+            import httpx2
+
+            return httpx2
+        except ImportError:  # 老版 anthropic 用 httpx
+            pass
+    import httpx
+
+    return httpx
+
+
+def _client_kwargs(base_url: str | None, timeout_s: float, kind: str = "openai") -> dict:
     """本地地址不走系统代理。
 
     httpx 默认 trust_env=True 会读取系统代理（Windows 上来自注册表），把
     127.0.0.1:11434 这类请求也转给代理，轻则变慢、重则直接 502——本地服务
-    必须直连。
+    必须直连。http_client 用该协议对应的 httpx 模块（anthropic 走 httpx2）。
     """
     if not _is_local(base_url):
         return {}
-    return {"http_client": httpx.AsyncClient(trust_env=False, timeout=timeout_s)}
+    hx = http_client_module(kind)
+    return {"http_client": hx.AsyncClient(trust_env=False, timeout=timeout_s)}
 
 
 async def probe_ollama(base_url: str = OLLAMA_BASE, timeout_s: float = 2.0) -> list[str]:
@@ -64,7 +84,7 @@ async def probe_provider_models(
         raise RuntimeError("需要先填写 API Key 才能检测可用模型")
 
     base = (base_url or "").strip() or None
-    extra = _client_kwargs(base, timeout_s)
+    extra = _client_kwargs(base, timeout_s, kind)
     try:
         if kind == "anthropic":
             from anthropic import AsyncAnthropic

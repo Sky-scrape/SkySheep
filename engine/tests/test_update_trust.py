@@ -161,6 +161,7 @@ def test_backup_user_data_copies_files_and_db(home):
 
 def test_backup_user_data_prunes_old_dirs(home):
     import os
+    import time
 
     home_dir = Path(home) / "home"
     backups = home_dir / "backups"
@@ -177,7 +178,9 @@ def test_backup_user_data_prunes_old_dirs(home):
     names = [p.name for p in backups.glob("preupdate-*")]
     # 滚动保留按「总数」计：本次新建的 1 份 + 旧 5 份裁到只剩最新 2 份 = 共 3 份
     assert len(names) == remote_mod.PREUPDATE_BACKUP_KEEP, "滚动保留份数要生效"
-    assert any(n.startswith("preupdate-2.5.0-") is False or "20261011" in n for n in names)
+    # 新建的那份要留在保留集里：按当天日期认它（不要写死具体日期，否则跨天必挂）
+    today = time.strftime("%Y%m%d")
+    assert any(today in n for n in names), f"当天新建的备份应在保留集里：{names}"
     assert "preupdate-2.5.0-20260104-000000" in names
     assert "preupdate-2.5.0-20260103-000000" in names
     assert "preupdate-2.5.0-20260102-000000" not in names

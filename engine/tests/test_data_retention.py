@@ -435,3 +435,215 @@ def test_retention_card_wired():
     # 「立即清理」回报清理量；切到关于页时拉一次状态
     assert "已清理" in js and "retentionBytes" in js
     assert "renderRetentionCfg().catch" in js
+
+
+# ---- 防御分支：目录/文件系统错误不得让巡检或统计炸掉 ----
+
+
+def test_iter_target_files_swallows_root_error(monkeypatch, tmp_path):
+    """根目录列不出（OSError）时静默返回空，不抛。"""
+    monkeypatch.setattr(Path, "iterdir", lambda self: _raise(OSError("unreadable")))
+    assert list(dr._iter_target_files(tmp_path, dr.CATEGORIES[0])) == []
+
+
+def test_iter_target_files_swallows_subdir_errors(monkeypatch, tmp_path):
+    """深度 2：子目录 is_dir / iterdir 抛错都跳过该子目录。"""
+    deep = next(c for c in dr.CATEGORIES if c.depth == 2)
+    (tmp_path / "2026-01-01").mkdir()
+
+    real_is_dir = Path.is_dir
+
+    def _boom_isdir(self):
+        if self.name == "2026-01-01":
+            raise OSError("gone")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", _boom_isdir)
+    assert list(dr._iter_target_files(tmp_path, deep)) == []
+
+    monkeypatch.setattr(Path, "is_dir", real_is_dir)
+    real_iterdir = Path.iterdir
+
+    def _boom_iterdir(self):
+        if self.name == "2026-01-01":
+            raise OSError("gone")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _boom_iterdir)
+    assert list(dr._iter_target_files(tmp_path, deep)) == []
+
+
+def test_prune_empty_date_dirs_swallows_errors(monkeypatch, tmp_path):
+    """撤空壳时 iterdir / rmdir 抛错都静默；depth != 2 的类别直接跳过。"""
+    deep = next(c for c in dr.CATEGORIES if c.depth == 2)
+    monkeypatch.setattr(Path, "iterdir", lambda self: _raise(OSError("no")))
+    dr._prune_empty_date_dirs(tmp_path, deep)  # 不抛
+
+    monkeypatch.undo()
+    (tmp_path / "2026-01-01").mkdir()
+    monkeypatch.setattr(dr.os, "rmdir", lambda _p: _raise(OSError("busy")))
+    dr._prune_empty_date_dirs(tmp_path, deep)  # 不抛
+
+    flat = next(c for c in dr.CATEGORIES if c.depth == 1)
+    dr._prune_empty_date_dirs(tmp_path, flat)  # depth != 2：直接 return
+
+
+def test_sweep_skips_stat_and_unlink_errors(home, monkeypatch):
+    """stat 失败与 unlink 失败都跳过该文件，不中断整轮清理。"""
+    cat = dr.CATEGORIES[0]
+    root = dr.category_roots(cat, [])[0]
+    root.mkdir(parents=True, exist_ok=True)
+
+    class _StatFail:
+        name = "x.png"
+
+        def is_file(self):
+            return True
+
+        def stat(self):
+            raise OSError("stat failed")
+
+        def unlink(self):
+            raise AssertionError("stat 失败就不该走到 unlink")
+
+    class _OldStat:
+        st_mtime = 0.0
+        st_size = 10
+
+    class _UnlinkFail:
+        name = "y.png"
+
+        def is_file(self):
+            return True
+
+        def stat(self):
+            return _OldStat()
+
+        def unlink(self):
+            raise OSError("in use")
+
+    monkeypatch.setattr(dr, "_iter_target_files", lambda _r, _c: iter([_StatFail()]))
+    assert dr.sweep_all(FULL_DAYS, [])["screenshots"]["deleted"] == 0
+
+    monkeypatch.setattr(dr, "_iter_target_files", lambda _r, _c: iter([_UnlinkFail()]))
+    assert dr.sweep_all(FULL_DAYS, [])["screenshots"]["deleted"] == 0
+
+
+def test_usage_all_swallows_stat_errors(home, monkeypatch):
+    (home / "home" / "screenshots").mkdir(parents=True, exist_ok=True)
+
+    class _StatFail:
+        def is_file(self):
+            return True
+
+        def stat(self):
+            raise OSError("stat")
+
+    monkeypatch.setattr(dr, "_iter_target_files", lambda _r, _c: iter([_StatFail()]))
+    usage = usage_all([])
+    # stat 失败的文件仍计入文件数（文件确实存在），但字节数不累加——如实记录行为
+    assert usage["screenshots"]["files"] == 1
+    assert usage["screenshots"]["bytes"] == 0
+
+
+def test_clamp_days_and_days_from_defensive():
+    assert dr._clamp_days("abc") == -1  # 非法 → 调用方回落默认
+    assert dr._clamp_days(None) == -1
+    assert dr._clamp_days(5) == 5
+    assert dr._clamp_days(-3) == 0
+    assert dr._clamp_days(10**9) == dr.DAYS_MAX
+
+    # days_from：字段类型不对（bool / 非 int）时保持默认
+    class _Section:
+        screenshots_days = True
+        quarantine_days = "oops"
+        reports_days = 12
+
+    class _Cfg:
+        retention = _Section()
+
+    out = days_from(_Cfg())
+    assert out["reports"] == 12
+    assert out["screenshots"] == DEFAULT_DAYS["screenshots"]
+    assert out["quarantine"] == DEFAULT_DAYS["quarantine"]
+
+    class _NoSection:
+        pass
+
+    assert days_from(_NoSection()) == DEFAULT_DAYS
+
+
+def test_load_state_non_dict_falls_back(home):
+    dr.state_path().parent.mkdir(parents=True, exist_ok=True)
+    dr.state_path().write_text("[1, 2, 3]", encoding="utf-8")
+    assert load_state() == dr.default_state()
+
+
+def test_log_sweep_skips_disabled_categories(monkeypatch):
+    """days<=0 的类别不产生日志噪音。"""
+    logged = []
+    monkeypatch.setattr(dr, "obs_info", lambda *a, **k: logged.append((a, k)))
+    dr._log_sweep({
+        "a": {"key": "a", "label": "A", "days": 0, "deleted": 1, "bytes": 2},
+        "b": {"key": "b", "label": "B", "days": 30, "deleted": 3, "bytes": 4},
+    })
+    assert len(logged) == 1
+    assert logged[0][1]["key"] == "b"
+
+
+async def test_retention_loop_swallows_pass_errors(monkeypatch):
+    """单轮抛错不终止循环；CancelledError 照常向上抛。"""
+    import asyncio as _aio
+
+    calls = []
+
+    async def _pass(_store, _cfg):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("sweep boom")
+        raise _aio.CancelledError()
+
+    monkeypatch.setattr(dr, "run_retention_pass", _pass)
+
+    class _Stub(dr.RetentionMixin):
+        store = None
+        cfg = None
+
+    _Stub.RETENTION_FIRST_DELAY_S = 0.0
+    _Stub.RETENTION_CHECK_INTERVAL_S = 0.0
+    stub = _Stub()
+    with pytest.raises(_aio.CancelledError):
+        await stub._retention_loop()
+    assert len(calls) >= 2, "第一轮抛错后循环要继续（不能因单轮失败终止）"
+
+
+async def test_retention_loop_start_stop(monkeypatch):
+    """启动/停止后台巡检任务；停止幂等。"""
+    import asyncio as _aio
+    import contextlib
+
+    async def _noop(_store, _cfg):
+        return {}
+
+    monkeypatch.setattr(dr, "run_retention_pass", _noop)
+
+    class _Stub(dr.RetentionMixin):
+        store = None
+        cfg = None
+
+    _Stub.RETENTION_FIRST_DELAY_S = 0.0
+    _Stub.RETENTION_CHECK_INTERVAL_S = 100.0
+    stub = _Stub()
+    stub.start_retention_loop()
+    task = stub._retention_task
+    assert task is not None
+    await _aio.sleep(0)
+    stub.stop_retention_loop()
+    assert stub._retention_task is None
+    with contextlib.suppress(_aio.CancelledError):
+        await task
+    stub.stop_retention_loop()  # 幂等
+
+
+def _raise(exc):
+    raise exc

@@ -164,3 +164,66 @@ def test_agent_reports_turn_summary(home):
         assert "tools_used" in finished
         assert "tools_total_ms" in finished
         assert "model_retries" in finished
+
+
+def test_provider_management_paths(home):
+    """模型服务增删启停的边界分支（WS 层，走完整后端）。
+
+    覆盖：演示模式写入 kind=fake 服务并切为当前服务 → 停用当前服务（was_active）、
+    重新启用、删除当前服务、内置预设删除=隐藏且可恢复、保存未知服务报错、
+    fake 协议的能力探测提前返回、测试连接对已配置服务解析 Key 并登记失败健康灯。
+    """
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        # 演示模式：写入 kind=fake 的 demo 服务并切过去（成为当前服务）
+        r = _rpc(ws, "d1", "demo.enable")
+        assert r["ok"] is True
+        assert r["result"]["provider"] == "demo"
+
+        # fake 协议的能力探测：走「没有真实接口」提前返回分支
+        r = _rpc(ws, "d2", "model.probe_capabilities", {"name": "demo"})
+        assert r["ok"] is True
+        assert r["result"]["summary"] == "该服务类型不支持能力探测。"
+
+        # 停用正在使用的服务：was_active True
+        r = _rpc(ws, "d3", "config.set_provider_enabled", {"name": "demo", "enabled": False})
+        assert r["ok"] is True
+        assert r["result"]["was_active"] is True
+
+        # 重新启用（走 restore 路径），此时已不是当前服务
+        r = _rpc(ws, "d4", "config.set_provider_enabled", {"name": "demo", "enabled": True})
+        assert r["ok"] is True
+        assert r["result"]["was_active"] is False
+
+        # 保存当前服务的字段并设为默认：走「固化当前模型 + 重建」路径
+        r = _rpc(ws, "d5", "config.save_provider",
+                 {"name": "demo", "set_default": True, "supports_vision": False})
+        assert r["ok"] is True
+        assert r["result"]["saved"] == "demo"
+
+        # 测试连接走已配置服务：解析出 Key（走 resolve_api_key），
+        # 地址指向 discard 端口保证快速失败、不触外网，失败登记健康灯
+        r = _rpc(ws, "d6", "model.test",
+                 {"name": "demo", "base_url": "http://127.0.0.1:9"})
+        assert r["ok"] is True
+        assert r["result"]["ok"] is False
+        health = _rpc(ws, "d7", "model.providers_health")
+        assert health["ok"] is True
+        rows = {x["name"]: x for x in health["result"]["providers"]}
+        assert rows["demo"]["level"] == "down"
+
+        # 删掉当前服务：was_active True
+        r = _rpc(ws, "d8", "config.delete_provider", {"name": "demo"})
+        assert r["ok"] is True
+        assert r["result"]["was_active"] is True
+
+        # 内置预设删除 = 隐藏（可恢复），删非当前服务时 was_active False
+        r = _rpc(ws, "d9", "config.delete_provider", {"name": "zhipu"})
+        assert r["ok"] is True
+        assert r["result"]["hidden"] is True
+        assert r["result"]["was_active"] is False
+        r = _rpc(ws, "d10", "config.restore_provider", {"name": "zhipu"})
+        assert r["ok"] is True
+
+        # 保存未知服务：报错（不静默）
+        r = _rpc(ws, "d11", "config.save_provider", {"name": "no-such", "model": "x"})
+        assert r["ok"] is False

@@ -6,6 +6,22 @@
 
 ### 新增
 
+- **覆盖率薄弱模块补测**（总覆盖率 85% → 86%，未覆盖行 -368）：
+  - **窗口配色 `wintheme.py` 42% → 100%**：原生路径（DWM 四属性着色、窗口图标
+    small/big 与旧句柄销毁、系统深浅色读注册表、麦克风权限钩子、事件驱动重刷）
+    全部用注入的假 windll 与假模块覆盖，不依赖真实窗口。
+  - **模型诊断 `models/diagnostics.py` 73% → 91%**：新增 anthropic 协议的能力探测与
+    测试连接链路（httpx2 MockTransport，含 SSE 流、tool_use、图片、thinking 四条）。
+  - **`backend_parts/providers.py` 68% → 94%**：服务增删启停的边界分支（停用/删除
+    当前服务、预设隐藏与恢复、保存未知服务报错、fake 协议探测、失败登记健康灯）。
+  - **`backend_parts/data_retention.py` 71% → 98%**、**`tools/search.py` 70% → 99%**、
+    **`tools/shell.py` 75% → 86%**：防御分支（目录/文件系统错误、上限截断、rg 命令
+    构造与回退）与纯助手函数（环境剥密、输出收集、受限进程代理）。
+  - **新覆盖 `storage.usage` / `storage.cleanup`**（数据管理卡片，此前零覆盖）：占用
+    统计、目录体量、清理校验、真删行与 VACUUM、「有会话在跑时拒绝」防线。
+  - 修掉一个**时间相关坏测试**：更新前备份修剪用例把日期写死成 `20261011`，跨天必挂
+    （改为按当天日期认新建目录）。
+
 - **模型能力探测与诊断报告**（模型诊断中心收尾）：
   - **能力探测**：设置 · 模型服务详情页「测试连接」旁新增「🧪 能力探测」——对流式输出、
     工具调用、图片输入、思考强度各发一次最小真实调用（探测项彼此独立，单项失败不影响
@@ -73,7 +89,25 @@
     （config.toml 必须是合法 TOML、ui.json 必须是合法 JSON，不合法一个字节不落盘）。
     陌生文件照旧跳过并回报。
 
+- **UI 自动化回归进 CI**：真实浏览器交互用例（`test_browser_ui.py`：骨架与输入焦点、
+  Enter 发送 / Shift+Enter 换行、390px 窄屏无横向溢出、200% 缩放、service worker 注册）
+  此前依赖可选依赖 Playwright，`uv sync --locked` 会把它修剪掉，CI 里整组跳过、只在本地
+  手动跑。现在新增 `browser` 依赖组（`playwright>=1.49`，版本由 `uv.lock` 锁定）与独立
+  的 `browser UI (playwright)` CI job：`uv sync --group browser` 装齐、按 lock 缓存
+  Chromium 二进制后真跑这组用例；单测 / e2e 两个 job 仍不拉 Playwright，本地默认也不装
+  （未装时整组跳过）。
+
 ### 修复
+
+- **本地模型的「测试连接」对话阶段必然失败**：`test_connection` 把同一个 `http_client`
+  传给前后两个 SDK 客户端，第一个 `close()` 把它一并关掉——第二段（对话调用）拿到的
+  是已关闭的连接池，本地服务（Ollama / LM Studio）一律报 Connection error。改为每建
+  一个客户端就单独建一个 http 客户端。
+
+- **anthropic 1.5+ 的 httpx2 兼容**：新版 anthropic SDK 走 vendored 的 `httpx2` 包，
+  传 `httpx.AsyncClient` 会被拒（Invalid `http_client` argument），本地 anthropic
+  端点的模型列表 / 上下文探测 / 测试连接因此失效。新增 `probe.http_client_module()`
+  按协议取模块（anthropic → httpx2，openai → httpx），探测与诊断两处共用。
 
 - **桌面壳被后退手势/意外导航带回启动页卡死**：触屏边滑、鼠标侧键等历史导航会把窗口
   带回启动动画页——那是一张无脚本静态页，回去了就没人再导航回来，窗口永远停在

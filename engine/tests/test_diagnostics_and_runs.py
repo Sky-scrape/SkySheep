@@ -25,6 +25,7 @@ from skysheep.models.diagnostics import (
     probe_capabilities,
     test_connection,
 )
+from skysheep.models.probe import http_client_module as _http_client_module
 
 # ---- 错误分类 ----
 
@@ -325,3 +326,189 @@ def test_run_to_dict_has_labels():
     r = Run(id="x", kind="turn", session_id="s")
     d = r.to_dict()
     assert "state_label" in d and "running" in d
+
+
+# ---- 测试连接的成功/失败分支（MockTransport，不联网） ----
+
+
+def _openai_conn_app(*, list_status=200, chat_status=200, model="m1", ctx=128000):
+    """openai 兼容端点：/models 给列表（含窗口字段）+ /chat/completions 给对话。"""
+    import httpx
+
+    async def handler(request):
+        path = request.url.path
+        if path.endswith("/models"):
+            if list_status != 200:
+                return httpx.Response(list_status, json={"error": {"message": "no list"}})
+            entry = {"id": model, "object": "model", "created": 1}
+            if ctx:
+                entry["context_length"] = ctx
+            return httpx.Response(200, json={"object": "list", "data": [entry]})
+        if path.endswith("/chat/completions"):
+            if chat_status != 200:
+                return httpx.Response(chat_status,
+                                      json={"error": {"message": "invalid api key"}})
+            return httpx.Response(200, json={
+                "id": "c", "object": "chat.completion", "created": 1, "model": model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                             "finish_reason": "stop"}],
+            })
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+
+    return handler
+
+
+def _anthropic_message(model="m1", text="hi", stop_reason="end_turn"):
+    return {"id": "msg_1", "type": "message", "role": "assistant", "model": model,
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": stop_reason, "stop_sequence": None,
+            "usage": {"input_tokens": 5, "output_tokens": 2}}
+
+
+# anthropic SDK 1.5+ 走独立的 httpx2 包：MockTransport 与 Response 都必须来自它，
+# 混用 httpx 的同名类会被拒（Invalid `http_client` argument / 响应类型不符）
+_HX2 = _http_client_module("anthropic")
+
+
+def _anthropic_transport(handler):
+    """anthropic 用的 MockTransport（httpx2 版；httpx 的会被 SDK 拒绝）。"""
+    return _HX2.MockTransport(handler)
+
+
+def _anthropic_conn_app(*, list_status=200, chat_status=200, model="m1", ctx=200000):
+    async def handler(request):
+        path = request.url.path
+        if path.endswith("/models"):
+            if list_status != 200:
+                return _HX2.Response(list_status, json={
+                    "type": "error",
+                    "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
+            entry = {"id": model, "type": "model", "display_name": "M",
+                     "created_at": "2024-01-01T00:00:00Z"}
+            if ctx:
+                entry["context_length"] = ctx
+            return _HX2.Response(200, json={"data": [entry], "has_more": False,
+                                             "first_id": model, "last_id": model})
+        if path.endswith("/messages"):
+            if chat_status != 200:
+                return _HX2.Response(chat_status, json={
+                    "type": "error",
+                    "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
+            return _HX2.Response(200, json=_anthropic_message(model))
+        return _HX2.Response(404, json={
+            "type": "error", "error": {"type": "not_found_error", "message": "no"}})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_test_connection_openai_success_reports_capabilities():
+    """成功路径：连通 + 模型在列表 + 窗口字段一并回报（真 HTTP 栈，MockTransport）。"""
+    r = await test_connection(
+        kind="openai", base_url="https://mock.test/v1", api_key="sk-x", model="m1",
+        transport=httpx.MockTransport(_openai_conn_app()),
+    )
+    assert r.ok is True
+    assert r.model_listed is True
+    assert r.context_limit == 128000
+    assert r.latency_ms >= 0
+    assert r.error == ""
+
+
+@pytest.mark.asyncio
+async def test_test_connection_anthropic_success():
+    r = await test_connection(
+        kind="anthropic", base_url="https://mock.test", api_key="sk-x", model="m1",
+        transport=_anthropic_transport(_anthropic_conn_app()),
+    )
+    assert r.ok is True
+    assert r.model_listed is True
+    assert r.context_limit == 200000
+
+
+@pytest.mark.asyncio
+async def test_test_connection_list_fails_but_chat_ok():
+    """模型列表接口不可用（404）不判死：对话调用成功仍算连通。"""
+    r = await test_connection(
+        kind="openai", base_url="https://mock.test/v1", api_key="sk-x", model="m1",
+        transport=httpx.MockTransport(_openai_conn_app(list_status=404)),
+    )
+    assert r.ok is True
+    assert r.model_listed is None  # 列表没跑成：无法判定是否在列表里
+
+
+@pytest.mark.asyncio
+async def test_test_connection_chat_auth_failure_classified():
+    """对话调用 401：判不通，并给出 auth 分类与中文建议。"""
+    r = await test_connection(
+        kind="openai", base_url="https://mock.test/v1", api_key="sk-bad", model="m1",
+        transport=httpx.MockTransport(_openai_conn_app(chat_status=401)),
+    )
+    assert r.ok is False
+    assert r.category == "auth"
+    assert r.title and r.advice
+
+
+@pytest.mark.asyncio
+async def test_test_connection_anthropic_auth_failure_short_circuits():
+    """anthropic 列表阶段就 401：直接返回（不再打对话调用）。"""
+    r = await test_connection(
+        kind="anthropic", base_url="https://mock.test", api_key="sk-bad", model="m1",
+        transport=_anthropic_transport(_anthropic_conn_app(list_status=401)),
+    )
+    assert r.ok is False
+    assert r.category == "auth"
+
+
+# ---- 能力探测：anthropic 分支（MockTransport，不联网） ----
+
+_ANTHROPIC_SSE = (
+    'event: message_start\n'
+    'data: {"type":"message_start","message":{"id":"msg_1","type":"message",'
+    '"role":"assistant","model":"m1","content":[],"stop_reason":null,'
+    '"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+    'event: content_block_start\n'
+    'data: {"type":"content_block_start","index":0,'
+    '"content_block":{"type":"text","text":""}}\n\n'
+    'event: content_block_delta\n'
+    'data: {"type":"content_block_delta","index":0,'
+    '"delta":{"type":"text_delta","text":"ok"}}\n\n'
+    'event: content_block_stop\n'
+    'data: {"type":"content_block_stop","index":0}\n\n'
+    'event: message_delta\n'
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn",'
+    '"stop_sequence":null},"usage":{"output_tokens":2}}\n\n'
+    'event: message_stop\n'
+    'data: {"type":"message_stop"}\n\n'
+)
+
+
+def _anthropic_cap_app():
+    async def handler(request):
+        body = json.loads(request.content.decode() or "{}")
+        if body.get("stream"):
+            return _HX2.Response(200, text=_ANTHROPIC_SSE,
+                                  headers={"content-type": "text/event-stream"})
+        if body.get("tools"):
+            return _HX2.Response(200, json={
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "m1",
+                "content": [{"type": "tool_use", "id": "t1", "name": "get_weather",
+                             "input": {"city": "北京"}}],
+                "stop_reason": "tool_use", "stop_sequence": None,
+                "usage": {"input_tokens": 10, "output_tokens": 5}})
+        return _HX2.Response(200, json=_anthropic_message("m1", "收到"))
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_probe_capabilities_anthropic_all_supported():
+    r = await probe_capabilities(
+        kind="anthropic", base_url="https://mock.test", api_key="sk-x", model="m1",
+        transport=_anthropic_transport(_anthropic_cap_app()),
+    )
+    assert r["streaming"]["supported"] is True
+    assert r["tools"]["supported"] is True
+    assert r["vision"]["supported"] is True
+    assert r["reasoning"]["supported"] is True
+    assert "支持：" in r["summary"]

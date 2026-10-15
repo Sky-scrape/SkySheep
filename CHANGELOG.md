@@ -2,7 +2,7 @@
 
 本项目的所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.3.0/)。
 
-## [未发布]
+## [2.6.0] - 2026-10-15
 
 ### 变更
 
@@ -57,6 +57,24 @@ og 标签，以及两份 README 的副标题与开篇段统一改为以圆桌 / 
   格式的官方文件）——CI 因此改装与本地同大版本的官方 Inno Setup 7（GitHub release
   资产，版本钉住），并把同 tag 的官方中文消息文件显式摆到编译器 `Languages` 下
   （与本机那份 sha256 一致，不再赌安装包带没带）。
+
+### 安全
+
+- **权限门命令分词收紧（A1/A2/B1）**：白名单匹配的命令切分改 `shlex`（Windows 用
+  `posix=False` 保留引号交由归一化处理），可执行名只剥「首尾成对」的引号——原先
+  `strip('"').strip("'")` 连剥首尾任意引号字符，对 `python`、`python"` 这类畸形词会给出
+  意外结果；解释器识别会前探跳过 `env` / `nohup` / `xargs` 等包装器命令与赋值（扫描窗口
+  8 词），`env A=1 python -c …` 不再被误判成非解释器调用而漏掉 code-exec 旗标。
+- **钩子子进程不再继承密钥环境**：钩子命令此前直接继承 `os.environ`，能读到进程里的
+  API Key 并写日志 / 外发；现在走与 `run_command` / 终端面板同一份 `child_environment()`。
+- **检查点状态签名分块读（B1）**：64 KiB 分块，内存峰值与被签名文件的大小脱钩。
+- **报告目录滚动清理共用化（C3）**：team 频道报告与子代理报告两份逐字相同的清理实现
+  提取为 `core/report_prune.py`（各传各的命名形状与配额，口径不再分叉）；egress 参数
+  收集结果确定化（A4，set 迭代顺序随哈希随机化、超上限被丢弃的字符串不再不稳定）。
+- **杂项加固（B5/C1）**：`GET /` 的 index.html 按 (mtime_ns, size) 单条目缓存，不再每次
+  请求都在事件循环里同步读盘；圆桌 / 对抗 / 团队三处逐字相同的 emit 闭包合并为
+  `_dump_emit` 工厂。产品代码全部盲捕获补 `# noqa: BLE001` 并附理由，ruff 启用 BLE
+  规则（tests / examples / desktop.py 按性质豁免），hatch 构建显式排除 `.mimosa` / `.zcode`。
 
 ## [2.5.1] - 2026-10-12
 

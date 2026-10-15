@@ -83,6 +83,11 @@ html, body {
      之外的内容级开关，双保险 */
   overscroll-behavior: none;
 }
+/* overscroll-behavior 不继承，而侧栏、会话列表、对话列表各自都是滚动容器——只写在
+   html/body 上时，手势落进这些容器里仍会被内核当成「后退 / 前进」：画一个圆形后退
+   提示、再真的执行一次历史导航。所以逐元素关掉横向那一轴（纵向不动：内层列表滚到
+   底接着滚外层面板是正常体验）。引擎侧另有更硬的一层，见 skysheep/webviewargs.py */
+* { overscroll-behavior-x: none; }
 /* 极早期兜底（body 还没画出来、app.css 还没到时）：露出的也是纸色而不是 WebView 白底 */
 html { background: var(--bg); }
 body {

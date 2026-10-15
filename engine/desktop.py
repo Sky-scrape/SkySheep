@@ -1137,6 +1137,13 @@ def _run_windowed() -> int:
     static = static_dir()
     picker = FilePicker()
 
+    # 关掉 Chromium 的滑动历史导航（触屏边缘滑、触控板横滑都会走它）：WebView2 创建
+    # 环境时只读一次该环境变量，必须赶在 webview.start() 之前——放在这里是因为上面
+    # 那几个引擎模块本来就已导入，webviewargs 自身只依赖标准库，不拖慢首屏。
+    from skysheep.webviewargs import apply_browser_args
+
+    apply_browser_args()
+
     # 边滑手势KillSwitch落地确认：pywebview 在 on_webview_ready 里已设
     # IsSwipeNavigationEnabled=False，这里包一层并写日志回读验证——若 WebView2
     # 运行时不支持该开关或设置未生效，日志会直接暴露，而不是静默失灵。
@@ -1535,8 +1542,11 @@ def _run_windowed() -> int:
         try:
             if window.native is not None:
                 _install_no_history_nav(int(window.native.Handle.ToInt64()))
-        except Exception:
-            pass  # 吞不掉系统注入就降级：还有 app.js 哨兵、启动页自愈与导航看守
+                _log("窗口过程已挂 APPCOMMAND 后退/前进吞并")
+        except Exception as exc:  # noqa: BLE001
+            # 吞不掉系统注入就降级：还有 app.js 哨兵、启动页自愈与导航看守。失败留痕——
+            # 这条路径挂了，鼠标侧键与系统注入的后退就是真会导航的，不能再静默
+            _log(f"APPCOMMAND 吞并挂载失败: {exc!r}")
         try:
             # 第一次真正加载引擎（重导入，约 2.4s）发生在动画已经可见之后
             from skysheep.cli.app import run_desktop_backend

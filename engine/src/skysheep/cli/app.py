@@ -691,7 +691,7 @@ def _show_error_page(window, exc: BaseException) -> None:
 
         window.load_html(error_html(detail, str(skysheep_home() / "logs" / "desktop.log"),
                                      theme=wintheme.current_theme_mode()))
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -707,12 +707,12 @@ def _show_on_first_paint(window) -> None:
     def _show(*_args, **_kwargs) -> None:
         try:
             window.show()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     try:
         window.events.loaded += _show
-    except Exception:
+    except Exception:  # noqa: BLE001
         _show()
         return
 
@@ -743,7 +743,7 @@ def _app_cmd(args) -> None:
     if not use_browser:
         try:
             import webview  # pywebview
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             console.print(f"[yellow]pywebview 不可用（{e}），改用浏览器打开[/]")
             use_browser = True
 
@@ -763,10 +763,16 @@ def _app_cmd(args) -> None:
     # 窗口模式（终端直接 skysheep app）：主窗口第一页是启动动画，引擎就绪后原地切换
     icon_path = STATIC_DIR / "skysheep.ico"
     from ..server.picker import FilePicker
+    from ..webviewargs import apply_browser_args
+
+    # 关掉 Chromium 的滑动历史导航（触屏边缘滑、触控板横滑都会走它）：本入口原先
+    # 只吃到 pywebview 的 IsSwipeNavigationEnabled（只覆盖触屏），触控板那条路会画出
+    # 圆形后退提示并真的后退一次。必须在 webview.start() 之前设置（见 webviewargs）
+    apply_browser_args()
 
     try:
         screen = webview.screens[0]
-    except Exception:
+    except Exception:  # noqa: BLE001
         screen = None
 
     width, height = 1360, 860

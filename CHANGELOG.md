@@ -21,6 +21,25 @@ og 标签，以及两份 README 的副标题与开篇段统一改为以圆桌 / 
 
 ### 修复
 
+- **触屏边缘滑 / 触控板横滑仍会画出「←」圆形后退提示，并真的后退一次**：内核把这两个
+  手势当成 Chromium 的「滑动历史导航」——先画出那个圆形箭头提示，再执行一次历史导航，
+  窗口就退回启动动画页或空白页。2.5.1 加的四层兜底只保证「退回去了能拉回来」，提示与
+  那一次导航本身都还在。根因是覆盖面：WebView2 的 `IsSwipeNavigationEnabled` 按官方
+  文档只管「触摸输入设备」（触屏），触控板那条路径不在它的范围内；页面 CSS 的
+  `overscroll-behavior` 又是不继承的，只写在 `html, body` 上时，手势落进侧栏 / 会话列表 /
+  对话列表这些内部滚动容器里照样触发（那个提示正好浮在侧栏会话列表上就是这个原因）。
+  现在两层一起补：引擎侧新增 `skysheep/webviewargs.py`，经
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`（官方文档写明是**追加**语义，不会顶掉
+  pywebview 自己设的参数）把 `OverscrollHistoryNavigation`、
+  `TouchpadOverscrollHistoryNavigation`——连同 pywebview 原本就关着的 `ElasticOverscroll`
+  一起，免得被后出现的 `--disable-features` 顶掉——整体关掉，两个窗口入口
+  （`desktop.py` 与 `skysheep app`）都在 `webview.start()` 之前设好；页面侧把
+  `overscroll-behavior-x: none` 从 `html, body` 下移到每个元素，只关横向那一轴（内层列表
+  滚到底接着滚外层面板的纵向体验不动）。实测 WebView2 进程命令行已带上这些参数。
+  另：`_install_no_history_nav`（窗口过程里吞 APPCOMMAND 后退/前进）挂载失败原先静默
+  降级，现在会在 `desktop.log` 留一行——这条路径挂了，鼠标侧键与系统注入的后退是真会
+  导航的，不该没有痕迹。
+
 - **CI 发布候选门禁从未真正跑通过**（`ci.yml` 的 `package` job：2026-10-11 引入、
   v2.5.1 首次执行即红，且因只在 tag / 手动触发时运行而一直没被发现）：手写的
   PowerShell 冒烟里 `$home` 撞上 PowerShell 只读变量 `$HOME`（名字不区分大小写），

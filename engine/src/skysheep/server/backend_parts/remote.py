@@ -24,14 +24,20 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ... import __version__
 from ...bgtasks import spawn_bg
 from ...config import db_path, load_config, skysheep_home, update_config_section
 from ...core.uptodate import CHANNELS as UPDATE_CHANNELS
+from ...core.uptodate import client_kwargs as _egress_client_kwargs
 from ...core.uptodate import fetch_latest_release as check_latest_release
 from ...core.uptodate import is_newer_version
+from ...core.uptodate import proxy_candidates as _egress_fallbacks
 from ...textio import write_text_atomic
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = logging.getLogger("skysheep.security")
 
@@ -600,7 +606,7 @@ class RemoteMixin:
 
         expected = await asyncio.to_thread(_fetch_setup_sha256, url)
         try:
-            await asyncio.to_thread(_download_setup, url, dest, expected)
+            await asyncio.to_thread(_download_setup_with_fallback, url, dest, expected)
         except UpdateChecksumError as e:
             # 发布方未提供可用校验和：fail closed，引导用户手动下载并自行核对
             raise RuntimeError(str(e)) from e
@@ -744,11 +750,15 @@ class UpdateChecksumError(RuntimeError):
 def _download_setup(
     url: str, dest: Path, expected_sha256: str = "",
     allow_unverified: bool = False,
+    proxy: httpx.Proxy | None = None,
 ) -> None:
     """把安装包下载到 dest（.part 暂存、完成后改名）。同步阻塞，须在线程里跑。
 
     follow_redirects 必开：browser_download_url 会 302 到 objects.githubusercontent.com。
-    trust_env=False 与 web_fetch 同口径：不让环境变量里的代理/netrc 插手更新链。
+    trust_env=False 与 web_fetch 同口径：不让环境变量里的代理/netrc 插手更新链；
+    连接建立不起来的回退（环境变量代理 → Windows 系统代理）在
+    _download_setup_with_fallback 里做，这里只认给定的 proxy（见 core/uptodate.py
+    「出网回退」）。回退只改从哪里出去：更新源 URL、TLS 校验与下面三道防线口径不变。
 
     校验策略：expected_sha256 非空时必须匹配；为空（发布方未提供 .sha256 或
     拉取失败）默认拒绝安装——MZ 头 + 体积上限只能防半截文件，不能证明内容
@@ -764,7 +774,8 @@ def _download_setup(
         )
     part = dest.with_suffix(dest.suffix + ".part")
     try:
-        with httpx.Client(timeout=60.0, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(**_egress_client_kwargs(
+                60.0, None, proxy, follow_redirects=True)) as client:
             with client.stream("GET", url) as resp:
                 resp.raise_for_status()
                 digest = hashlib.sha256()
@@ -789,6 +800,35 @@ def _download_setup(
         part.unlink(missing_ok=True)
 
 
+def _download_setup_with_fallback(url: str, dest: Path, expected_sha256: str,
+                                  allow_unverified: bool = False) -> None:
+    """直连优先下载；连接建立不起来（墙 / 只有系统代理的机器）按序回退出网路径。
+
+    候选顺序见 core/uptodate.py 的 proxy_candidates()（环境变量代理 → Windows
+    系统代理）。只有「连接根本建立不起来」（ConnectError / ConnectTimeout）才
+    回退；最后一条路径也连不上时按原样抛最后一次连接错误，调用方口径不变。
+    """
+    import httpx
+
+    attempts: list[httpx.Proxy | None] = [None]
+    last_conn: Exception | None = None
+    idx = 0
+    while idx < len(attempts):
+        proxy = attempts[idx]
+        idx += 1
+        try:
+            _download_setup(url, dest, expected_sha256, allow_unverified, proxy=proxy)
+            return
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            last_conn = e
+            if len(attempts) == 1:
+                attempts.extend(_egress_fallbacks())
+            continue
+    # 每条出网路径都建立不起连接：按原样抛最后一次连接错误（调用方口径不变）
+    assert last_conn is not None
+    raise last_conn
+
+
 def _fetch_setup_sha256(url: str) -> str:
     """取同名 `.sha256` 附件；没有就返回空串（不阻断更新）。
 
@@ -796,13 +836,28 @@ def _fetch_setup_sha256(url: str) -> str:
     匿名限流 60 次/小时/IP，国内共享出口很容易被耗尽），所以拿不到附件清单，
     只能按发布约定试探同目录下的 .sha256。因此这项是「有则必校」：发布方
     上传了校验和就能防住篡改，没上传就退回 MZ 头 + 体积上限两道。
+    连接建立不起来时按序回退出网路径（同 _download_setup_with_fallback）；
+    其余网络错误与老版一样返回空串（不阻断更新）。
     """
     import httpx
 
-    try:
-        with httpx.Client(timeout=15.0, follow_redirects=True, trust_env=False) as client:
-            resp = client.get(url + ".sha256")
-    except httpx.HTTPError:
+    attempts: list[httpx.Proxy | None] = [None]
+    idx = 0
+    while idx < len(attempts):
+        proxy = attempts[idx]
+        idx += 1
+        try:
+            with httpx.Client(**_egress_client_kwargs(
+                    15.0, None, proxy, follow_redirects=True)) as client:
+                resp = client.get(url + ".sha256")
+            break
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if len(attempts) == 1:
+                attempts.extend(_egress_fallbacks())
+            continue
+        except httpx.HTTPError:
+            return ""
+    else:
         return ""
     if resp.status_code != 200:
         return ""

@@ -34,11 +34,16 @@ def _sha(b: bytes) -> str:
 
 
 def _mock_httpx(monkeypatch, handler):
-    """给 remote 函数内部自建的 httpx.Client 注入 MockTransport（其余参数原样）。"""
+    """给 remote 函数内部自建的 httpx.Client 注入 MockTransport（其余参数原样）。
+
+    transport 与 proxy 都剥掉：MockTransport 接管全部出网，真实回退候选在此
+    无意义（回退链行为由显式替换 _egress_fallbacks 的用例覆盖）。
+    """
     real_client = httpx.Client
 
     def factory(*args, **kwargs):
         kwargs.pop("transport", None)
+        kwargs.pop("proxy", None)
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
     monkeypatch.setattr(httpx, "Client", factory)
@@ -241,3 +246,60 @@ async def test_install_update_no_newer_version_skips_download(tmp_path, monkeypa
     }
     assert calls == [], "已是最新版就不该发起任何下载"
     await be.shutdown()
+
+
+# ---- 出网回退：直连失败 → 环境变量代理 / Windows 系统代理（见 core/uptodate.py）----
+
+
+def test_download_setup_falls_back_after_connect_failure(tmp_path, monkeypatch):
+    """只有系统代理一条路的机器：直连 ConnectTimeout 后经候选路径重试成功。"""
+    calls = {"n": 0}
+    payload = _payload()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectTimeout("直连超时", request=request)
+        return httpx.Response(200, content=payload)
+
+    _mock_httpx(monkeypatch, handler)
+    monkeypatch.setattr(remote_mod, "_egress_fallbacks",
+                        lambda: [httpx.Proxy("http://127.0.0.1:9")])
+    dest = tmp_path / "setup.exe"
+    remote_mod._download_setup_with_fallback(SETUP_URL, dest, _sha(payload))
+    assert dest.read_bytes() == payload
+    assert calls["n"] == 2
+    assert not (tmp_path / "setup.exe.part").exists(), "暂存文件不残留"
+
+
+def test_download_setup_fallback_exhausted_reraises_last_connect_error(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectTimeout("全部超时", request=request)
+
+    _mock_httpx(monkeypatch, handler)
+    monkeypatch.setattr(remote_mod, "_egress_fallbacks",
+                        lambda: [httpx.Proxy("http://127.0.0.1:9")])
+    with pytest.raises(httpx.ConnectTimeout):
+        remote_mod._download_setup_with_fallback(SETUP_URL, tmp_path / "setup.exe", _sha(_payload()))
+    assert calls["n"] == 2, "直连 + 候选各试一次"
+    assert not (tmp_path / "setup.exe.part").exists()
+
+
+def test_fetch_setup_sha256_falls_back_after_connect_failure(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectTimeout("直连超时", request=request)
+        return httpx.Response(200, text=f"{'a' * 64}  SkySheep-2.7.0-setup.exe")
+
+    _mock_httpx(monkeypatch, handler)
+    monkeypatch.setattr(remote_mod, "_egress_fallbacks",
+                        lambda: [httpx.Proxy("http://127.0.0.1:9")])
+    sha = remote_mod._fetch_setup_sha256("https://example.com/SkySheep-2.7.0-setup.exe")
+    assert sha == "a" * 64
+    assert calls["n"] == 2

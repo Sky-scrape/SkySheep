@@ -2,6 +2,20 @@
 
 本项目的所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.3.0/)。
 
+## [未发布]
+
+### 修复
+
+- **只有系统代理的机器检查更新必然 ConnectTimeout**：更新链直连 github.com，而
+  httpx 不读 Windows 系统代理，`trust_env=False` 也不读环境变量（与 web_fetch
+  同口径的有意为之）——「只有系统代理一条路」的用户全部卡死在检查这一步。现在
+  连接建立不起来（ConnectError / ConnectTimeout）时按序回退：环境变量代理 →
+  Windows 系统代理（注册表 `ProxyServer`，支持 `host:port` 与 `http=/https=/socks=`
+  分列两种写法）；检查（`core/uptodate.py`）与安装包下载 / `.sha256` 探测
+  （`server/backend_parts/remote.py`）走同一套回退。回退只改「从哪里出去」：
+  更新源 URL 仍是硬编码常量、TLS 照常校验（代理只是 CONNECT 隧道），直连成功的
+  用户零变化；HTTP 状态错误与读写超时说明链路已通，不触发回退。
+
 ## [2.6.0] - 2026-10-15
 
 ### 变更

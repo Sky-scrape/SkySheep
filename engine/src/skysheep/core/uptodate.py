@@ -22,7 +22,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Callable
 from urllib.parse import unquote, urljoin
 
 import httpx
@@ -153,28 +155,153 @@ def release_from_feed(feed_text: str, feed_url: str) -> dict:
             "setup_url": f"{DOWNLOAD_BASE}/{tag}/SkySheep-{version}{SETUP_ASSET_SUFFIX}"}
 
 
+# ---- 出网回退（2026-10，接「系统代理用户检查更新 ConnectTimeout」的反馈）----
+#
+# 直连是更新链的首选路径，也是绝大多数用户的现状；但 httpx 不读 Windows 系统代理，
+# trust_env=False 又特意不读环境变量（与 web_fetch 同口径：不让环境里的代理/netrc
+# 静默插手更新链），于是「只有系统代理一条路」的机器会 ConnectTimeout。这里把回退
+# 做成显式的第二段：连接建立不起来（ConnectError / ConnectTimeout）时按序试
+# 环境变量代理 → Windows 系统代理。回退只改「从哪里出去」：更新源 URL 仍是硬编码
+# 常量，TLS 照常校验（代理只是 CONNECT 隧道），不构成供应链入口；HTTP 状态错误
+# （限流页、404 等）说明链路已通，不属于连不上，不触发回退。
+
+_PROXY_ENV_KEYS = (
+    "HTTPS_PROXY", "https_proxy",
+    "ALL_PROXY", "all_proxy",
+    "HTTP_PROXY", "http_proxy",
+)
+
+
+def _proxy_url_from_proxy_server(value: str) -> str | None:
+    """把注册表 ProxyServer 的取值归一成 httpx 可用的代理 URL；看不懂返回 None。
+
+    三种常见形态：``host:port``（对全部协议生效）；``http=…;https=…;socks=…``
+    （按协议分列，依次取 https / http / socks）；已带 scheme 的原样返回。
+    """
+    raw = (value or "").strip().rstrip("/")
+    if not raw:
+        return None
+    if "://" in raw:
+        return raw
+    if "=" in raw:
+        per: dict[str, str] = {}
+        for part in raw.split(";"):
+            scheme, _, addr = part.partition("=")
+            scheme, addr = scheme.strip().lower(), addr.strip().rstrip("/")
+            if scheme and addr:
+                per[scheme] = addr
+        for scheme, prefix in (("https", "http://"), ("http", "http://"), ("socks", "socks5://")):
+            addr = per.get(scheme)
+            if addr:
+                return prefix + addr
+        return None
+    return "http://" + raw
+
+
+def system_proxy_url() -> str | None:
+    """读 Windows 系统代理（HKCU Internet Settings）；未启用、未配置或非 Windows 返回 None。"""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            if not enabled:
+                return None
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+    except OSError:
+        return None
+    return _proxy_url_from_proxy_server(server if isinstance(server, str) else "")
+
+
+def _env_proxy_url() -> str | None:
+    for key in _PROXY_ENV_KEYS:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def proxy_candidates() -> list[httpx.Proxy]:
+    """直连失败后的回退候选，按序去重；一条都没有就返回空表（行为与旧版一致）。
+
+    环境变量代理在前（开发态的显式配置），Windows 系统代理在后（最终用户的常见
+    形态）。socks 候选在缺 socksio 依赖时构造会抛 ImportError——跳过该候选，
+    不连累其余路径。
+    """
+    urls: list[str] = []
+    for url in (_env_proxy_url(), system_proxy_url()):
+        if url and url not in urls:
+            urls.append(url)
+    out: list[httpx.Proxy] = []
+    for url in urls:
+        try:
+            out.append(httpx.Proxy(url))
+        except Exception:  # noqa: BLE001  环境缺口（如缺 socks 依赖）：弃用该候选
+            continue
+    return out
+
+
+def _is_connect_failure(e: BaseException) -> bool:
+    """「连接根本建立不起来」才是回退条件；HTTP 状态错误与读写超时不重试。"""
+    return isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+
+
+def client_kwargs(timeout_s: float, transport: httpx.AsyncBaseTransport | None,
+                  proxy: httpx.Proxy | None, follow_redirects: bool = False) -> dict:
+    """更新链 httpx 客户端的统一构造参数：trust_env 恒为 False（环境不静默插手），
+    transport（测试注入）与 proxy（出网回退）互斥——httpx 里 transport 会整体
+    接管出网，proxy 只在真实网络下有意义。"""
+    kwargs: dict = {"timeout": timeout_s, "trust_env": False,
+                    "follow_redirects": follow_redirects}
+    if transport is not None:
+        kwargs["transport"] = transport
+    elif proxy is not None:
+        kwargs["proxy"] = proxy
+    return kwargs
+
+
 async def fetch_latest_release(latest_url: str = RELEASES_LATEST,
                                timeout_s: float = TIMEOUT_S,
                                transport: httpx.AsyncBaseTransport | None = None,
-                               channel: str = "stable") -> dict:
+                               channel: str = "stable",
+                               candidates_fn: Callable[[], list[httpx.Proxy]] = proxy_candidates,
+                               ) -> dict:
     """拉取最新 release 信息；失败抛 RuntimeError（调用方决定静默还是展示）。
 
     channel="stable"（默认）走 /releases/latest 的 302 Location；channel="beta"
     走 releases.atom 订阅第一条（含预发布，见模块 docstring）。两者都不跟随
-    重定向。transport 仅供测试注入 MockTransport；渠道值不认识时按 stable。
+    重定向。先直连，连接建立不起来时按 candidates_fn() 的顺序回退出网路径
+    （见上方「出网回退」注）。transport 仅供测试注入 MockTransport——注入后
+    它接管每次尝试的出网（httpx 里 transport 与 proxy 互斥，proxy 不参与），
+    回退因此等价于对同一张 Mock 网络重试，用例可复现；candidates_fn 是回退
+    链的测试钩子（默认 proxy_candidates）。渠道值不认识时按 stable。
     """
     if channel not in CHANNELS:
         channel = "stable"
     url = latest_url if channel == "stable" else RELEASES_FEED
-    try:
-        async with httpx.AsyncClient(timeout=timeout_s, trust_env=False,
-                                     follow_redirects=False,
-                                     transport=transport) as client:
-            resp = await client.get(url, headers={"Accept": "text/html"})
-    except httpx.HTTPError as e:
-        raise RuntimeError(f"无法连接更新源：{type(e).__name__}") from e
-    if resp.status_code >= 400:
-        raise RuntimeError(f"更新源返回 HTTP {resp.status_code}")
-    if channel == "beta":
-        return release_from_feed(resp.text, url)
-    return release_from_redirect(latest_url, str(resp.headers.get("Location") or ""))
+    attempts: list[httpx.Proxy | None] = [None]
+    last_exc: httpx.HTTPError | None = None
+    idx = 0
+    while idx < len(attempts):
+        proxy = attempts[idx]
+        idx += 1
+        try:
+            async with httpx.AsyncClient(**client_kwargs(timeout_s, transport, proxy)) as client:
+                resp = await client.get(url, headers={"Accept": "text/html"})
+        except httpx.HTTPError as e:
+            if not _is_connect_failure(e):
+                raise RuntimeError(f"无法连接更新源：{type(e).__name__}") from e
+            last_exc = e
+            if len(attempts) == 1:
+                attempts.extend(candidates_fn())
+            continue
+        if resp.status_code >= 400:
+            raise RuntimeError(f"更新源返回 HTTP {resp.status_code}")
+        if channel == "beta":
+            return release_from_feed(resp.text, url)
+        return release_from_redirect(latest_url, str(resp.headers.get("Location") or ""))
+    raise RuntimeError(f"无法连接更新源：{type(last_exc).__name__}") from last_exc

@@ -184,7 +184,7 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         return None
     if cfg.transport == "stdio":
@@ -272,7 +272,7 @@ def load_mcp_configs(
                 continue
             try:
                 merged[name] = MCPServerConfig(**section)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # 单个坏配置不影响其他，但要让用户看得见它被跳过了
                 first = str(e).strip().splitlines()[0] if str(e).strip() else str(e)
                 warnings.append(f"{label}配置里的服务「{name}」定义不合法，已跳过：{first}")
@@ -672,7 +672,7 @@ class MCPManager:
                     else ""
                 )
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             status.error = _friendly_error(e)
         finally:
             status.connecting = False
@@ -909,7 +909,7 @@ class MCPManager:
             return
         try:
             listing = await session.list_tools()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return  # 列不出来多半是连接也快没了：交给断线重连路径处理
         cfg = self._configs.get(name)
         if cfg is None:

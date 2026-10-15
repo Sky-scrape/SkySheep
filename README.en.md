@@ -121,7 +121,7 @@ cd engine
 .venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec   # Output: dist/SkySheep/SkySheep.exe (PyInstaller ships with uv sync)
 ```
 
-Single-file installer: install [Inno Setup 6](https://jrsoftware.org/isdl.php), then run `ISCC.exe tools\installer.iss`; the output lands in `installer/`. Or run `python tools/release.py` for a one-command package → verify → smoke-test → installer chain (build-only by default; `--upload` performs the release upload).
+Single-file installer: install [Inno Setup 7](https://jrsoftware.org/isdl.php) (6.x does not ship the Simplified Chinese message file with the compiler, which fails the installer build), then run `ISCC.exe tools\installer.iss`; the output lands in `installer/`. Or run `python tools/release.py` for a one-command package → verify → smoke-test → installer chain (build-only by default; `--upload` performs the release upload).
 
 </details>
 
@@ -150,7 +150,7 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 
 **Models & conversation**
 
-- Ten built-in provider presets (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / Zhipu / Kimi / Qwen / Xiaomi MiMo) + custom relay endpoints; local inference services auto-detected; one-click model listing and context-window detection, plus a capability probe (streaming / tools / vision / reasoning) and a masked diagnostic report
+- Built-in presets for ten cloud services (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / Zhipu / Kimi / Qwen / Xiaomi MiMo) plus local Ollama and custom relay endpoints; local inference services auto-detected; one-click model listing and context-window detection, plus a capability probe (streaming / tools / vision / reasoning) and a masked diagnostic report
 - Reasoning effort auto-tuned per task; thinking process streamed live and replayable in a collapsible view; a per-session turn-diagnostics panel in the review page breaks down each round's time (tool counts & slowest tool / permission waits / tokens)
 - Automatic context compaction (CJK-aware estimation, adjustable trigger ratio; manual `/compact` from the desktop input box — the CLI has no such command)
 - Daily token budget guardrails; a channel alert is pushed when usage crosses the 80% / 100% tiers (at most one per tier per day; alerts follow the channels — with no chat / Webhook channel enabled there is no alert, and the in-app guardrail still applies); usage dashboard by session / provider / model with cost estimation
@@ -159,8 +159,8 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 
 **Task execution**
 
-- 24 built-in tools: file read/write with precise editing, command execution (with background process management), regex search, web fetch and search (multiple providers), PDF / Word / Excel / PPT / CSV I/O, image understanding, AI image generation; web fetch ships injection defense — external content is wrapped in an explicit boundary frame declaring that instructions inside it are not yours, and a suspected-injection hint is appended when known injection patterns are detected
-- Computer control: screenshot, mouse, keyboard, window, clipboard (off by default; enable in settings)
+- 28 built-in tools: file read/write with precise editing, command execution (with background process management), regex search, web fetch and search (multiple providers), PDF / Word / Excel / PPT / CSV I/O, image understanding, AI image generation; web fetch ships injection defense — external content is wrapped in an explicit boundary frame declaring that instructions inside it are not yours, and a suspected-injection hint is appended when known injection patterns are detected
+- Computer and browser control: screenshot, mouse, keyboard, window, clipboard, browser opening / in-page automation (off by default; enable in settings)
 - Sub-agents: six built-in roles + custom roles (tool scope / model / reasoning effort configurable); parallel background execution with queuing; isolated spawns on a dedicated git worktree that auto-commits to its own branch
 - Execute / plan dual mode with a live-synced task list; task duration estimates and actual-time logging
 - Per-round checkpoints — undo this round's file changes with one click; rollbacks survive restarts
@@ -179,7 +179,7 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 - Skill packages: global / project scopes; import from a folder, a .zip, or a GitHub/Gitee URL; scan-and-import skills already on this machine; twenty official scenario templates bundled — one-click install uses the in-app copy and works offline; /save-skill turns the current session's approach into a skill draft in one command
 - Remote access: LAN token + QR code opens the full UI on your phone; Tailscale supported for cross-network access (security boundaries and advice in [docs/远程访问安全.md](docs/远程访问安全.md))
 - Chat channels: Feishu (WebSocket long connection) / WeChat (QR login); read-only by default, optional approval cards with timeout auto-deny. Generic Webhook channel: outbound-only pushes (optional HMAC signature verification), no inbound allowlist concept
-- Desktop form factor: six themes + follow-system, system tray, launch at startup, window geometry memory, global hotkey, desktop pet; multiple session tabs and a ten-tab right panel (terminal / browser / review / files / tasks / agenda / automation / project memory / memory map / MCP·Skills)
+- Desktop form factor: six themes + follow-system, system tray, launch at startup, window geometry memory, global hotkey, desktop pet; multiple session tabs, a ten-tab right panel (auxiliary chat / browser / review / files / tasks / agenda / automation / project memory / memory map / MCP·Skills), and a multi-tab terminal docked at the bottom (Ctrl+\` toggle)
 - Session management: full-text search (Chinese-aware), session branching, pin / archive / tags, Markdown / HTML export, rolling backups with visual restore
 
 </details>
@@ -218,7 +218,7 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 
 Design keynote: **event-stream driven** — the entire agent run is modeled as `AgentEvent`s, and the CLI, GUI, and WebSocket server all consume the same engine API; sensitive operations go through the `PermissionGate`, which emits a confirmation event and suspends until the frontend decides.
 
-Auditability: all project source (the Python engine and the frontend trio) ships as readable, unobfuscated code; the mermaid/xterm bundles under `static/vendor/` are upstream build artifacts of third-party libraries (versions pinned, never modified).
+Auditability: all project source (the Python engine and the frontend HTML/CSS/JS) ships as readable, unobfuscated code; the mermaid/xterm bundles under `static/vendor/` are upstream build artifacts of third-party libraries (versions pinned, never modified).
 
 ## 🤝 Development & Contributing
 

@@ -133,7 +133,11 @@ class FeishuChannel(Channel):
         return str(skysheep_home() / "feishu-cli")
 
     def _env(self) -> dict:
-        env = dict(os.environ)
+        # 与 run_command / 终端 / 钩子同一口径：剥掉密钥类环境变量，lark-cli
+        # 子进程不需要它们，继承过去只是密钥泄露面。延迟导入防导入环。
+        from ..tools.shell import child_environment
+
+        env = child_environment()
         env["LARKSUITE_CLI_CONFIG_DIR"] = self.config_dir()
         # 关掉升级通知与技能更新提示：无人值守的渠道进程不该自行拉新二进制，
         # 也不该在 stdout/stderr 里混入 _notice（会干扰事件流的 NDJSON 解析）。

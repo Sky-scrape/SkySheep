@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 import time
@@ -179,7 +178,13 @@ class HookRunner:
         input_dict: dict, session_id: str, record: bool = True,
     ) -> tuple[int, str, str, int]:
         """跑一条钩子命令，返回 (退出码, stdout, stderr, 耗时ms)。"""
-        env = dict(os.environ)
+        # 子进程环境走 child_environment()：剥掉密钥类变量，与 run_command /
+        # 终端面板同一口径（AGENTS.md 约定「任何一条命令执行路径也不例外」）。
+        # 钩子命令（如示例的 python check.py）此前直接继承 os.environ，能读到
+        # 进程里的 API Key 并写日志/外发，是密钥泄露面。延迟导入防导入环。
+        from ..tools.shell import child_environment
+
+        env = child_environment()
         env["SKYSHEEP_TOOL"] = tool_name
         env["SKYSHEEP_EVENT"] = kind
         env["SKYSHEEP_PROJECT"] = str(self.working_dir or "")

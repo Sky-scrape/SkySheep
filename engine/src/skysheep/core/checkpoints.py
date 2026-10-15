@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import stat
 import threading
 import time
 from pathlib import Path
@@ -51,18 +52,40 @@ def _safe_dirname(raw: str) -> str:
     return raw if (raw and ok) else "s-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
+# 状态签名的分块读大小：内存峰值与文件大小脱钩（审查 B1）
+_SIG_CHUNK = 1 << 16  # 64 KiB
+
+
 def _state_sig(path_s: str) -> str | None:
     """文件当前状态的签名：内容 sha256；目录记 "dir"；不存在记 None。
 
     签名只用于「保存之后有没有又被改过」的比对，不承担编码/行尾符职责。
+
+    两点与旧实现不同（审查 B1）：其一，读内容用分块流式哈希，不再一次性
+    read_bytes 把整份文件读进内存——单文件内存峰值恒为 64KiB。其二，超过
+    MAX_CHECKPOINT_FILE_BYTES 的文件改用 (size, mtime_ns) 弱签名、跳过全量
+    读盘：这类文件本就进不了快照（_limit_pre 跳过），回滚无从回滚，而
+    「改前小、改后膨胀」的文件此前会绕过 _limit_pre 的上限，在每轮保存/
+    回滚时被整份读两遍。弱签名对「同尺寸同纳秒 mtime」的改动会漏检——概率
+    极低，且代价仅是多一次逐次确认，不毁数据。
     """
     p = Path(path_s)
     try:
-        if p.is_dir():
-            return "dir"
-        return hashlib.sha256(p.read_bytes()).hexdigest()
+        st = p.stat()
     except OSError:
         return None
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    if st.st_size > MAX_CHECKPOINT_FILE_BYTES:
+        return f"stat:{st.st_size}:{st.st_mtime_ns}"
+    h = hashlib.sha256()
+    try:
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(_SIG_CHUNK), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
 
 
 def _limit_pre(pre: dict[str, bytes | None]) -> tuple[dict[str, bytes | None], list[str]]:

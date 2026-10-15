@@ -949,3 +949,53 @@ def test_checkpoint_legacy_meta_without_sizes_still_restores(tmp_path):
     p.write_text("现", encoding="utf-8")
     reloaded.restore(cp["id"], force=True)  # 不抛 CorruptError：旧 meta 不校验
     assert p.read_text(encoding="utf-8") == "bef"
+
+
+# ---- 审查 B1：状态签名改为分块流式哈希 + 大文件弱签名 ----
+
+
+def test_state_sig_uses_weak_signature_for_large_files(tmp_path):
+    """超过 MAX_CHECKPOINT_FILE_BYTES 的文件用 stat 弱签名，不全量读盘（审查 B1）。"""
+    from skysheep.core import checkpoints as ckpt
+
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (ckpt.MAX_CHECKPOINT_FILE_BYTES + 1))
+    sig = ckpt._state_sig(str(big))
+    assert sig is not None and sig.startswith("stat:"), sig
+    # 同尺寸同 mtime 的复读稳定（确定性强，便于测试与排障）
+    assert ckpt._state_sig(str(big)) == sig
+
+
+def test_state_sig_streams_small_file_content(tmp_path):
+    """小文件走内容哈希：改内容即改签名（脏检查仍有效）。"""
+    from skysheep.core import checkpoints as ckpt
+
+    p = tmp_path / "a.txt"
+    p.write_bytes(b"hello")
+    s1 = ckpt._state_sig(str(p))
+    assert s1 and not s1.startswith("stat:")
+    p.write_bytes(b"world")
+    assert ckpt._state_sig(str(p)) != s1
+    assert ckpt._state_sig(str(tmp_path)) == "dir"
+    assert ckpt._state_sig(str(tmp_path / "missing")) is None
+
+
+def test_checkpoint_conflict_detected_for_large_file_change(tmp_path):
+    """改后膨胀成大文件时，弱签名变化仍能触发回滚冲突（不再全量读盘，但防线不丢）。"""
+    import time
+
+    from skysheep.core import checkpoints as ckpt
+    from skysheep.core.checkpoints import CheckpointConflictError
+
+    root = tmp_path / "cps"
+    store = CheckpointStore(root)
+    p = tmp_path / "grow.bin"
+    p.write_bytes(b"small")
+    cp = store.save("s1", {str(p): b"small"})
+    # 保存之后文件被改成超过阈值的大文件（含清空场景）；mtime_ns 前进一档确保弱签名变
+    p.write_bytes(b"y" * (ckpt.MAX_CHECKPOINT_FILE_BYTES + 1))
+    bumped = time.time() + 1
+    import os
+    os.utime(p, (bumped, bumped))
+    with pytest.raises(CheckpointConflictError):
+        store.restore(cp["id"])

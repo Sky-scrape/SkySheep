@@ -64,6 +64,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/skysheep"]
+# 源码目录内不得混入外部工具状态：显式排除，不依赖 hatchling 读 .gitignore 的隐式行为
+exclude = ["**/.mimosa", "**/.zcode", "**/__pycache__"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -95,4 +97,13 @@ line-length = 110
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "BLE"]
+
+# BLE001 (blind-except) 在下列范围属于「必须兜住任何异常、绝不上抛」的性质，
+# 逐条 noqa 只会淹没意图：测试用例的期望捕获、示例脚本、以及桌面启动器
+# desktop.py（一个异常弹不出窗口就等于应用起不来）。
+# 产品代码 src/skysheep 不豁免：那里的每处盲捕获必须显式写 # noqa: BLE001 并说明理由。
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["BLE001"]
+"examples/**" = ["BLE001"]
+"desktop.py" = ["BLE001"]

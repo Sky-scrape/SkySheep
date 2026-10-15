@@ -67,7 +67,7 @@ class SystemMixin:
         所以独立实现读取，不 import。"""
         try:
             return str(self._read_ui_prefs().get("hotkey") or "")
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ""
 
     def hooks_settings(self) -> dict:
@@ -302,7 +302,7 @@ class SystemMixin:
             combo = str(hotkey).strip()
             try:
                 await self._write_ui_prefs({"hotkey": combo or None})
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
         autostart = params.get("autostart")

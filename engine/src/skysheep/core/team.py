@@ -66,6 +66,7 @@ from ..textio import write_text_atomic
 from ..tools.base import Safety, Tool, ToolContext, ToolError, ToolRegistry
 from .agent import Agent
 from .prompt import TEAM_DIRECTOR_PROMPT, TEAM_HUDDLE_PROMPT, TEAM_MEMBER_PROMPT
+from .report_prune import prune_report_files
 from .roundtable import MemberSpec, run_roundtable
 
 # 发给前端的事件回调（backend 负责转成 WS 帧广播；与 roundtable.EmitFn 同形）
@@ -375,25 +376,14 @@ class TeamChannel:
 
         只动本频道的 team-*.md 命名（同目录的子代理长报告不同名，不受波及）；
         best-effort——探测/删除失败只放弃本轮清理或留下该文件，不阻断落盘。
+        实现见 core/report_prune.prune_report_files（与子代理报告清理共用）。
         """
-        try:
-            stats = sorted(
-                ((p, p.stat()) for p in self._reports_dir.glob("team-*.md") if p.is_file()),
-                key=lambda kv: kv[1].st_mtime,
-            )
-        except OSError:
-            return
-        total = sum(st.st_size for _, st in stats)
-        remaining = len(stats)
-        for path, st in stats:
-            if remaining <= TEAM_REPORT_KEEP_FILES and total <= TEAM_REPORT_KEEP_TOTAL_BYTES:
-                break
-            try:
-                path.unlink()
-            except OSError:
-                pass  # 删不掉（被占用等）：留下，下轮落盘时再试
-            total -= st.st_size
-            remaining -= 1
+        prune_report_files(
+            self._reports_dir,
+            name_ok=lambda n: n.startswith("team-") and n.endswith(".md"),
+            keep_files=TEAM_REPORT_KEEP_FILES,
+            keep_total_bytes=TEAM_REPORT_KEEP_TOTAL_BYTES,
+        )
 
     # ---- 未读 ----
 

@@ -57,7 +57,7 @@ class LifecycleMixin:
         if isinstance(remembered, str) and remembered:
             try:
                 return await self.resume_session(remembered)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # 已删/跨项目：静默落回最近会话
         latest = await self.store.latest_session(self._cur_project_id())
         if latest is not None:
@@ -237,7 +237,7 @@ class LifecycleMixin:
         # 不影响切换本身）。
         try:
             await self._write_ui_prefs({self.SESSION_ACTIVE_KEY: session_id})
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         if session_id not in self.runtimes:
             rt = await self._get_runtime(session_id)
@@ -344,7 +344,7 @@ class LifecycleMixin:
             try:
                 await ws_emit({"kind": "session_updated",
                                "session_id": session_id, "title": title})
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         return {"id": session_id, "title": title}
 

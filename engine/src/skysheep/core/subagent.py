@@ -46,6 +46,7 @@ from ..tools import GlobTool, GrepTool, ListDirTool, ReadFileTool, Safety, Tool,
 from ..tools.base import ToolContext
 from .agent import Agent
 from .prompt import SUBAGENT_PROMPT
+from .report_prune import prune_report_files
 from .subagent_store import BUILTIN_AGENT_TYPES, BUILTIN_DESCRIPTIONS
 from .worktree import commit_all, ensure_worktree, remove_worktree
 
@@ -265,7 +266,7 @@ async def run_subagent(
         if on_event is not None:
             try:
                 await on_event(ev)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # 直播失败不影响子代理本身
         if ev.kind == "error":
             # 子代理内 Provider 故障被 Agent 吞成 ErrorEvent：不能当成正常产出，
@@ -579,7 +580,7 @@ class TaskManager:
                 "queued": rec.status == "queued",
                 "prompt": rec.prompt[:60],
             })
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # 直播失败不影响子代理本身
 
     def _make_forwarder(self, rec: TaskRecord):
@@ -601,7 +602,7 @@ class TaskManager:
                     "agent_type": rec.agent_type,
                     "event": ev.model_dump(),
                 })
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # 直播失败不影响子代理本身
 
         return forward
@@ -614,7 +615,7 @@ class TaskManager:
                 rec.session_id, rec.provider_name, rec.provider_model,
                 rec.tokens_in, rec.tokens_out, rec.tokens_cached,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # 记账失败不拖垮任务本身
 
     async def run_sync(self, agent_type: str, prompt: str, session_id: str = "") -> str:
@@ -885,7 +886,7 @@ class TaskManager:
                         commit_all, workdir,
                         f"SkySheep 隔离任务 {rec.id}（{rec.agent_type}）：{rec.prompt[:60]}",
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001
                     rec.commit_id = ""  # 提交失败不拖垮任务：改动留在工作区可手动处理
             self._maybe_write_report(rec, result)
             return result, agent
@@ -920,29 +921,14 @@ class TaskManager:
         只动本模块写入的形状（``<10位hex>-<类型>.md``）：team 频道报告是
         ``team-*.md`` 命名，不碰（它有自己的配额）；用户自己的 .md 也不碰。
         best-effort——探测/删除失败只放弃本轮清理，不阻断落盘。
+        实现见 core/report_prune.prune_report_files（与 team 报告清理共用）。
         """
-        try:
-            stats = sorted(
-                (
-                    (p, p.stat())
-                    for p in rdir.glob("*.md")
-                    if p.is_file() and _REPORT_NAME_RE.match(p.name)
-                ),
-                key=lambda kv: kv[1].st_mtime,
-            )
-        except OSError:
-            return
-        total = sum(st.st_size for _, st in stats)
-        remaining = len(stats)
-        for path, st in stats:
-            if remaining <= REPORT_KEEP_FILES and total <= REPORT_KEEP_TOTAL_BYTES:
-                break
-            try:
-                path.unlink()
-            except OSError:
-                pass  # 删不掉（被占用等）：留下，下轮落盘时再试
-            total -= st.st_size
-            remaining -= 1
+        prune_report_files(
+            rdir,
+            name_ok=lambda n: _REPORT_NAME_RE.match(n) is not None,
+            keep_files=REPORT_KEEP_FILES,
+            keep_total_bytes=REPORT_KEEP_TOTAL_BYTES,
+        )
 
     def _isolated_note(self, rec: TaskRecord) -> str:
         """隔离任务的收尾说明：分支 / 提交 / 工作区位置与合并、清理指引。"""
@@ -1030,7 +1016,7 @@ class TaskManager:
             # 模型调用出错：子代理结果不是成功产出，落 error 终态而不是 done
             rec.status = "error"
             rec.error = str(e)[:2000]
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             rec.status = "error"
             rec.error = str(e)
         self._note_for_next_turn(rec)
@@ -1049,7 +1035,7 @@ class TaskManager:
                 "status": rec.status,
                 "prompt": rec.prompt[:60],
             })
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     def list_tasks(self, limit: int = 30, session_id: str | None = None) -> list[dict]:

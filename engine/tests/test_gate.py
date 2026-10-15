@@ -987,3 +987,46 @@ async def test_normal_command_exact_rule_still_auto_approves():
     for command in ("tar -c -f x.tar dir", "git commit -c message", "grep -c foo bar"):
         gate.add_session_rule(gate.rule_for(cmd, {"command": command}))
         assert await gate.authorize(cmd, {"command": command}) is None, command
+
+
+# ---- 第三轮审查 A1/A2：前置赋值 / 包装器可把解释器挤出首词，绕过 code-exec 检测 ----
+
+
+def test_code_exec_flag_sees_through_leading_assignments_and_wrappers():
+    """`env A=1 B=2 python -c ...` 这类前置赋值/包装器：首词不是解释器，
+    旧实现退化为 head 截断、-c 落在窗口外便漏判（审查 A1）。修复后必须识别。"""
+    # 前置变量赋值把 -c 挤出前 4 词
+    assert _has_code_exec_flag('A=1 B=2 C=3 python -c "import os;os.system(\'calc\')"')
+    # env / 包装器 + 赋值
+    assert _has_code_exec_flag('env A=1 B=2 C=3 python -c "import os;os.system(\'calc\')"')
+    assert _has_code_exec_flag('env FOO=bar powershell -Command "Start-Process calc"')
+    assert _has_code_exec_flag('nohup python -c "print(1)"')
+    assert _has_code_exec_flag('sudo env X=1 node -e "require(\'fs\')"')
+    # 正常命令不受影响（不误伤）
+    assert not _has_code_exec_flag("python script.py --flag value")
+    assert not _has_code_exec_flag("git status --short")
+    assert not _has_code_exec_flag("env FOO=bar some_tool --flag")
+
+
+async def test_leading_assignment_does_not_sink_into_wide_prefix_rule(tmp_path):
+    """`env A=1 python -c ...` 经批准后不得沉淀成 `env A=1` 这类宽前缀规则，
+    否则后续换成另一段代码即免确认执行（审查 A1 的落库面）。"""
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    evil = 'env A=1 B=2 C=3 python -c "import os;os.system(\'calc\')"'
+    rule = gate.rule_for(cmd, {"command": evil})
+    assert rule.kind == "exact", rule
+    # 挂 exact 规则只放行当次，同前缀的另一段代码仍需确认
+    gate.add_session_rule(rule)
+    other = 'env A=1 B=2 C=3 python -c "import os;os.system(\'notepad\')"'
+    assert await gate.authorize(cmd, {"command": other}) is not None
+
+
+async def test_legacy_wide_prefix_rule_cannot_run_leading_assignment_code():
+    """历史遗留的 `env A=1` 前缀规则（或任何以包装器开头的前缀）不得放行
+    其后接的解释器任意代码（匹配层 fail-closed）。"""
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    gate.add_session_rule(WhitelistRule(tool="run_command", kind="prefix", pattern="env A=1"))
+    evil = 'env A=1 B=2 C=3 python -c "import os;os.system(\'calc\')"'
+    assert await gate.authorize(cmd, {"command": evil}) is not None

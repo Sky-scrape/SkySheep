@@ -94,7 +94,7 @@ def embeddings_available(deadline: float | None = None) -> bool:
         return True
     except _EmbedBudgetExceeded:
         return False
-    except Exception:
+    except Exception:  # noqa: BLE001
         _mark_available(False)
         return False
 
@@ -167,7 +167,7 @@ def _embedded(
             vec = _embed_via_http([t], deadline=deadline)[0]
         except _EmbedBudgetExceeded:
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001
             _mark_available(False)
             return None
         if len(_vec_cache) >= _VEC_CACHE_MAX:
@@ -231,7 +231,7 @@ def select_relevant_auto(
         return select_relevant(entries, query_text, limit)
     try:
         ranked = rank_by_embeddings(entries, query_text, deadline=deadline)
-    except Exception:
+    except Exception:  # noqa: BLE001
         ranked = None
     if ranked is None:
         return select_relevant(entries, query_text, limit)
@@ -291,7 +291,7 @@ def schedule_warmup() -> None:
 def _warm_once() -> None:
     try:
         warm_vec_cache()
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass  # 预热是纯增强：失败静默（与归档提炼同一姿态），绝不影响主路径
     finally:
         global _warming

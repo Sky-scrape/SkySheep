@@ -766,11 +766,11 @@ class SessionStore:
         self.fts_ready = False
         try:
             await self._db.executescript(FTS_SCHEMA)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return  # 没有 FTS5 支持：保留 LIKE 扫描路径
         try:
             await self._backfill_fts()
-        except Exception:
+        except Exception:  # noqa: BLE001
             # 回填半途而废会留下水位以下的洞（水位增量只补水位以上的行），
             # 必须置脏：下次启动改走查漏模式，把洞补回来（与 _fts_insert 同口径）
             self._fts_dirty = True
@@ -1499,7 +1499,7 @@ class SessionStore:
             return None
         try:
             plain = Message.model_validate_json(row["content"]).to_plain()
-        except Exception:
+        except Exception:  # noqa: BLE001
             plain = ""
         return {"seq": row["seq"], "role": row["role"], "text": plain}
 
@@ -1639,13 +1639,13 @@ class SessionStore:
             cur = await self._db.execute(
                 "SELECT COUNT(*) FROM sessions WHERE project_id IS NULL"
                 " AND pinned = 0 AND archived = 0"
-                " AND id NOT IN (SELECT DISTINCT session_id FROM messages)"
+                " AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sessions.id)"
             )
         else:
             cur = await self._db.execute(
                 "SELECT COUNT(*) FROM sessions WHERE project_id = ?"
                 " AND pinned = 0 AND archived = 0"
-                " AND id NOT IN (SELECT DISTINCT session_id FROM messages)",
+                " AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sessions.id)",
                 (project_id,),
             )
         row = await cur.fetchone()
@@ -1663,7 +1663,8 @@ class SessionStore:
         cur = await self._db.execute(
             f"SELECT id FROM sessions WHERE {proj_clause} AND pinned = 0"
             " AND archived = 0"
-            " AND id NOT IN (SELECT DISTINCT session_id FROM messages) AND id != ?",
+            " AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sessions.id)"
+            " AND id != ?",
             params,
         )
         ids = [r["id"] for r in await cur.fetchall()]
@@ -1837,7 +1838,15 @@ class SessionStore:
                 args + (match, self.SEARCH_SQL_LIMIT),
             )
             return await cur.fetchall()
-        except Exception:  # noqa: BLE001 - 索引/语法问题不应对用户显形
+        except sqlite3.OperationalError as e:
+            # 语法异常 / 虚表缺失：预期内的降级，静默退 LIKE。
+            if "fts5" in str(e).lower() or "syntax" in str(e).lower():
+                return await self._search_like(project_id, query, scope)
+            # 其它 OperationalError（database is locked / malformed 等）是真故障：
+            # 仍退 LIKE 保可用，但留痕，别再让「搜索突然很慢」无处排查（审查 D2）
+            logger.warning("FTS 查询失败，退回 LIKE 扫描：%s", e)
+            return await self._search_like(project_id, query, scope)
+        except Exception:  # noqa: BLE001 - 其余异常同退 LIKE，不留用户可见
             return await self._search_like(project_id, query, scope)
 
     async def _search_like(self, project_id: int | None, query: str, scope: str) -> list:
@@ -2339,7 +2348,7 @@ class SessionStore:
                 args,
             )
             by_provider = [dict(r) for r in await cur.fetchall()]
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         return {
             "by_day": by_day,
@@ -2360,7 +2369,7 @@ class SessionStore:
             )
             row = await cur.fetchone()
             return int(row[0] or 0)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return 0
 
     # ---- 快捷指令（snippets）：用户自定义提示词模板，~ 菜单展示 ----

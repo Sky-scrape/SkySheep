@@ -109,7 +109,7 @@ async def probe_provider_models(
             # 关闭自身的失败不掩盖查询结果（成功路径不受收尾问题影响）
             try:
                 await client.close()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
     except Exception as e:  # 网络/鉴权/解析错误统一转成可读提示
         raise RuntimeError(_friendly_error(e, base)) from e

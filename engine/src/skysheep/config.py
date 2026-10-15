@@ -1320,7 +1320,7 @@ def disabled_providers_in_config() -> list[str]:
     try:
         with p.open("rb") as f:
             raw = tomllib.load(f)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
     return [str(n) for n in (raw.get("disabled_providers") or [])]
 
@@ -1365,7 +1365,7 @@ def enabled_models_of(name: str) -> list[str]:
     try:
         with p.open("rb") as f:
             raw = tomllib.load(f)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
     section = (raw.get("providers") or {}).get(name) or {}
     models = [str(m) for m in (section.get("models") or [])]

@@ -260,6 +260,24 @@ def _no_store_static(app) -> None:
 
 STATIC_DIR = _static_dir()
 
+
+# index.html 内容极小、几乎不变，但每次 GET / 都在事件循环里同步读盘（审查 B5）。
+# 按 (mtime_ns, size) 缓存：文件没动就直接用缓存，开发时改了也能立刻生效。
+# 单条目缓存即可——本函数只服务 index.html。
+_index_html_cache: tuple[tuple[int, int], str] | None = None
+
+
+def _read_index_html() -> str:
+    global _index_html_cache
+    path = STATIC_DIR / "index.html"
+    st = path.stat()
+    key = (st.st_mtime_ns, st.st_size)
+    if _index_html_cache is not None and _index_html_cache[0] == key:
+        return _index_html_cache[1]
+    text = path.read_text(encoding="utf-8")
+    _index_html_cache = (key, text)
+    return text
+
 # PWA 清单的 Content-Type：.webmanifest 是否被识别取决于 Python 内置表与
 # Windows 注册表（后者因机器而异，可能给成 text/plain），StaticFiles 按它
 # 猜类型——显式注册成标准类型，/static/ 下的直连与显式路由返回一致。
@@ -1648,7 +1666,7 @@ async def _h_runs_cancel(backend: ServerBackend, params: dict, emit, local: bool
         if backend.tasks is not None:
             try:
                 cancelled = backend.tasks.cancel_task(tid, session_id=run.session_id or None)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 cancelled = False
     if cancelled:
         backend.runs.cancel(run_id)
@@ -2560,7 +2578,7 @@ def create_app(
 
     @app.get("/")
     async def index() -> HTMLResponse:
-        page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        page = _read_index_html()
         try:
             attrs = _first_paint_attrs(backend.first_paint_prefs())
         except Exception:  # noqa: BLE001  偏好读不到就用默认外观，不影响打开
@@ -2874,7 +2892,7 @@ def create_app(
                             sess = ((result or {}).get("session") or {})
                             conn_state["session"] = sess.get("id") if isinstance(sess, dict) else None
                         await send({"id": mid, "ok": True, "result": result})
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001
                         await send({"id": mid, "ok": False, "error": str(e)})
 
                 spawn_bg(process())

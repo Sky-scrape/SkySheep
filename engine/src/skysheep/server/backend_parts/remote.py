@@ -164,7 +164,7 @@ class RemoteMixin:
         try:
             if self._read_ui_prefs().get("update_check", 1) != 1:
                 return
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         try:
             info = await check_latest_release(channel=self._update_channel())

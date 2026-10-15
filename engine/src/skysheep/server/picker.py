@@ -69,7 +69,7 @@ class FilePicker:
                 picked = self._window.create_file_dialog(open_file, file_types=("JSON 配置 (*.json)",))
             else:
                 return {"paths": [], "error": "未知的选择类型：" + str(kind)}
-        except Exception as e:  # 对话框不可用（缺后端等）→ 让前端退回手动输入
+        except Exception as e:  # 对话框不可用（缺后端等）→ 让前端退回手动输入  # noqa: BLE001
             return {"paths": [], "error": str(e)}
         if not picked:
             return {"paths": []}

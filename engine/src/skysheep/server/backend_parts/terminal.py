@@ -54,7 +54,7 @@ class TerminalSlot:
                 env=child_environment(),
                 dimensions=(max(2, int(rows)), max(10, int(cols))),
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"无法启动 PowerShell：{e}") from None
 
     def write(self, data: str) -> None:
@@ -176,7 +176,7 @@ class TerminalManager:
         while proc is not None and proc.isalive():
             try:
                 data = await asyncio.to_thread(proc.read, 4096)
-            except Exception:  # EOFError（进程退出）/ 底层异常：收尾广播
+            except Exception:  # EOFError（进程退出）/ 底层异常：收尾广播  # noqa: BLE001
                 break
             if not data:
                 continue

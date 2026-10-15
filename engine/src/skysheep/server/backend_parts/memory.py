@@ -108,7 +108,7 @@ class MemoryMixin:
             })
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             memory_log.warning("archive memory digest failed: %s", e)
         finally:
             self._digesting.discard(sid)
@@ -168,7 +168,7 @@ class MemoryMixin:
                 add_candidates(cands, context=transcript, session_id=sid)
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             memory_log.warning("turn memory distill failed: %s", e)
         finally:
             d = getattr(self, "_distilling", None)
@@ -220,7 +220,7 @@ class MemoryMixin:
                 await self._memory_maintenance_tick()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # 单轮巡检失败不终止循环（与 cron/提醒循环同一姿态）
 
     async def _memory_maintenance_tick(self) -> None:
@@ -335,7 +335,7 @@ class MemoryMixin:
             return "changed"
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             memory_log.warning("memory maintain failed (%s): %s", scope, e)
             return "skipped"
         finally:

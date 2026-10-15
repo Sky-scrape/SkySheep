@@ -19,7 +19,7 @@ import sys
 import time
 import zipfile
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -424,6 +424,19 @@ BUILTIN_SNIPPETS = [
     },
 ]
 
+
+
+def _dump_emit(emit: Callable[[dict], Awaitable[None]]) -> Callable[[object], Awaitable[None]]:
+    """把 Pydantic 事件对象 model_dump 后交给 emit 的闭包工厂。
+
+    圆桌 / 对抗 / 团队三处轮次实现此前各自定义了一份逐字相同的
+    ``async def emit_ev(ev): await emit(ev.model_dump())``（审查 C1），
+    提取到此处共用，避免行为分叉。
+    """
+    async def _emit(ev) -> None:
+        await emit(ev.model_dump())
+
+    return _emit
 
 
 def _decode_bytes(data: bytes) -> str:
@@ -1182,7 +1195,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """读新会话默认模型偏好，返回 (provider, model)；未设置返回 ("", "")。"""
         try:
             prefs = self._read_ui_prefs()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return "", ""
         name = str(prefs.get(self.DEFAULT_MODEL_PROVIDER_KEY) or "").strip()
         if not name or name not in self.cfg.providers:
@@ -1213,7 +1226,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 真全局切换（model.switch）时变化。
         try:
             return self._build_detached_provider(baked[0], baked[1] or None)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return self.provider  # 预设被删/停用时回退全局，不让发消息失败
 
     def _session_effective_model(self, session_id: str) -> tuple[str, str]:
@@ -1846,7 +1859,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.session = sess
         try:
             await self._write_ui_prefs({self.SESSION_ACTIVE_KEY: session_id})
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         rt = await self._get_runtime(session_id)
         msgs = await self._reload_agent_history(rt.agent, session_id)
@@ -2386,9 +2399,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 try:
                     await ws_emit({"kind": "session_updated",
                                    "session_id": sid, "title": title})
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # 标题生成失败完全静默
         finally:
             self._titling.discard(sid)
@@ -2874,7 +2887,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 agent.total_in_tokens - tin0, agent.total_out_tokens - tout0,
                 agent.total_cached_tokens - tcached0,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         # 预算告警：越线档位经渠道推一条（内部不抛、推送 spawn_bg 不阻塞收尾）
         await self._check_budget_alerts()
@@ -3136,8 +3149,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         else:
             chair_name, chair_model = self.provider_name or "", self.provider_model or ""
 
-        async def emit_ev(ev) -> None:
-            await emit(ev.model_dump())
+        emit_ev = _dump_emit(emit)
 
         # 圆桌轮耗时起点：成员并行 + 辩论 + 主席融合的总墙钟，随 TurnFinished
         # 下发，前端据此把「已用时」芯片定格成真实值（与落库后显示一致）。
@@ -3431,8 +3443,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         else:
             judge_name, judge_model = self.provider_name or "", self.provider_model or ""
 
-        async def emit_ev(ev) -> None:
-            await emit(ev.model_dump())
+        emit_ev = _dump_emit(emit)
 
         adv_t0 = time.monotonic()
 
@@ -3954,8 +3965,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """
         orch = self._teams.get(sid)
 
-        async def emit_ev(ev) -> None:
-            await emit(ev.model_dump())
+        emit_ev = _dump_emit(emit)
 
         # 用量按事件流归属：usage 事件先于其定稿 TeamMessage 到达，攒到定稿时
         # 记到名下（MemberTurnResult 的用量不随返回值交给宿主，事件流是逐成员
@@ -5505,7 +5515,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         服务可能已被删除、模型可能已被下架，读取时校验，失效即视为未设置。"""
         try:
             prefs = self._read_ui_prefs()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return "", ""
         name = str(prefs.get("aux_model_provider") or "").strip()
         if not name or name not in self.cfg.providers:
@@ -6754,7 +6764,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         try:
             data = base64.b64decode(raw, validate=True)
             zf = zipfile.ZipFile(io.BytesIO(data))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"zip 解析失败: {e}") from None
         items, unknown = [], []
         contains_secrets = False
@@ -6804,7 +6814,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         try:
             data = base64.b64decode(raw, validate=True)
             zf = zipfile.ZipFile(io.BytesIO(data))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"zip 解析失败: {e}") from None
         # 白名单过滤（skills-manifest.json 等暂不自动恢复，避免覆盖现有技能状态）
         pending: dict[str, bytes] = {}
@@ -6824,7 +6834,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 import tomllib
 
                 tomllib.loads(pending["config.toml"].decode("utf-8"))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 raise RuntimeError(f"包里的 config.toml 不是合法 TOML，已取消导入：{e}") from None
         if "ui.json" in pending:
             try:
@@ -6872,7 +6882,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if "config.toml" in restored:
             try:
                 self.cfg = load_config()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # 校验已挡住绝大多数坏配置；走到这里（如本机路径相关的加载错误）
                 # 同样整体还原，不让坏 config.toml 留在盘上
                 _rollback()
@@ -7119,7 +7129,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         path = self._full_import_zip_path(params)
         try:
             zf = zipfile.ZipFile(path)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"打不开导出包（不是合法 zip？）：{e}") from None
         with zf:
             names = [i.filename.replace("\\", "/") for i in zf.infolist() if not i.is_dir()]
@@ -7238,7 +7248,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         try:
             try:
                 zf = zipfile.ZipFile(path)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 raise RuntimeError(f"打不开导出包（不是合法 zip？）：{e}") from None
             with zf:
                 staged, unknown = self._stage_full_import(zf, stage)
@@ -7253,7 +7263,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 try:
                     safety = await self._replace_store_db(staged_db)
                     db_replaced = True
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     await self._undo_store_db_replace(safety, had_db=had_db)
                     raise RuntimeError(f"会话库恢复失败，已回滚：{e}") from None
 
@@ -7273,14 +7283,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                         parsed_ui = json.loads(staged_cfg["ui.json"].decode("utf-8"))
                         if not isinstance(parsed_ui, dict):
                             raise ValueError("ui.json 不是 JSON 对象")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     raise RuntimeError(
                         f"导入包配置校验不通过，未写入任何文件（本机数据未改动）：{e}"
                     ) from None
                 cfg_snapshot = self._snapshot_config_files(staged_cfg)
                 try:
                     cfg_restored = self._restore_config_files_from(staged_cfg, cfg_snapshot)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     failed = await _undo_all([])
                     raise RuntimeError(
                         "配置恢复失败，已回滚"
@@ -7314,7 +7324,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                             skills_backup[src_dir.name] = backup
                         shutil.copytree(src_dir, dst, dirs_exist_ok=True)
                         skills_installed.append(src_dir.name)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     failed = await _undo_all([])
                     raise RuntimeError(
                         "技能恢复失败，已回滚"
@@ -7326,7 +7336,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             # config 加载失败说明本机路径等环境与包不兼容，同样整体回滚
             try:
                 self.cfg = load_config()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 failed = await _undo_all([])
                 raise RuntimeError(
                     "导入后配置加载失败（本机环境与导出包可能不兼容），已回滚"
@@ -7394,7 +7404,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 and (self.session is None or self.session.id != want_active):
             try:
                 await self.activate_session(want_active)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         # 上次开着的标签列表：逐个校验归属（别的项目/已删的丢弃），保序去重
         open_tabs: list[dict] = []
@@ -7406,7 +7416,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     continue
                 try:
                     s = await self._get_owned_session(sid)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     continue
                 open_tabs.append({"id": s.id, "title": s.title})
                 if len(open_tabs) >= self.SESSION_TABS_MAX:

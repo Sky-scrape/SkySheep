@@ -496,7 +496,7 @@ class Agent:
                         except Exception:  # noqa: BLE001 - 健康上报不拖垮主流程
                             pass
                     break  # 本轮调用正常完成
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     got_content = bool(text_parts or reasoning_parts or blocks)
                     if got_content or attempt > MAX_STREAM_RETRIES or not is_transient_error(e):
                         finished_by_error = True
@@ -985,7 +985,7 @@ class Agent:
             except ToolError as e:
                 result = str(e)
                 is_error = True
-            except Exception as e:  # 参数校验失败或工具内部异常
+            except Exception as e:  # 参数校验失败或工具内部异常  # noqa: BLE001
                 result = f"tool failed: {type(e).__name__}: {e}"
                 is_error = True
         finally:

@@ -104,6 +104,21 @@ def test_expand_and_newline_always_chain() -> None:
     assert _has_shell_chain("echo $(id)")
 
 
+def test_lone_percent_not_treated_as_chain_on_windows() -> None:
+    """孤立 % 不构成 cmd 展开，不再误报为拼接（审查 A3）——降低逐次确认噪音。
+
+    cmd.exe 的 %VAR% 展开必须成对；`echo 100%` 只有一个 %，不会展开第二段。
+    仅 Windows 生效（POSIX 上 % 本就是普通字符）。"""
+    import sys as _sys
+
+    if _sys.platform != "win32":
+        pytest.skip("cmd.exe 语义，仅 Windows")
+    assert not _has_shell_chain("echo 100%")
+    assert not _has_shell_chain("echo 50% off")
+    # 成对出现仍拦（真展开面）
+    assert _has_shell_chain("echo %VAR%")
+
+
 def test_code_exec_flags_block_prefix_and_glob() -> None:
     """解释器旗标：前缀/规则提炼必须退化 exact，任意代码不能借白名单进门。"""
     for cmd in ("python -c 'import os'", "py -3 -c \"1\"", "powershell -Command gci",

@@ -100,7 +100,7 @@ def refresh_now() -> bool:
         return False
     try:
         apply_caption_theme(window)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     try:
         from System.Drawing import ColorTranslator  # noqa: PLC0415  pywebview 自带
@@ -109,7 +109,7 @@ def refresh_now() -> bool:
         if native is not None:
             native.BackColor = ColorTranslator.FromHtml(window_background())
             apply_window_icon(native, dark=theme_is_dark())
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return True
 
@@ -156,7 +156,7 @@ def apply_window_icon(native, dark: bool = False) -> bool:
                 user32.DestroyIcon(old)
             _icon_holder[key] = new
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -288,7 +288,7 @@ def apply_caption_theme(window) -> bool:
             if dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(color), 4) != 0:
                 ok = False  # 老系统不支持该属性 → 保留系统默认
         return ok
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -301,7 +301,7 @@ def hook_caption_theme(window) -> None:
 
     try:
         window.events.shown += _on_shown
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -325,14 +325,14 @@ def allow_microphone(window) -> None:
             CoreWebView2PermissionState,
         )
         from webview.platforms import edgechromium  # noqa: PLC0415
-    except Exception:
+    except Exception:  # noqa: BLE001
         return
 
     def _on_permission(sender, args) -> None:
         try:
             if str(args.PermissionKind) == "Microphone":
                 args.State = CoreWebView2PermissionState.Allow
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     original = edgechromium.EdgeChrome.on_webview_ready
@@ -341,7 +341,7 @@ def allow_microphone(window) -> None:
         outcome = original(self, sender, args)
         try:
             sender.CoreWebView2.PermissionRequested += _on_permission
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         return outcome
 

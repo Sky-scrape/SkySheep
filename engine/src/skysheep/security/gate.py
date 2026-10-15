@@ -1,4 +1,4 @@
-"""Permission Gate：敏感操作确认与白名单。
+r"""Permission Gate：敏感操作确认与白名单。
 
 工具分级：
 - READONLY：自动放行；
@@ -32,6 +32,7 @@ import asyncio
 import difflib
 import fnmatch
 import os
+import shlex
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -106,20 +107,65 @@ _PREFIX_UNSAFE_COMMANDS = frozenset({"docker", "ssh", "scp"})
 
 
 def _norm_exe_name(word: str) -> str:
-    """可执行名归一：小写、去引号、去路径前缀、去 .exe 后缀（两平台写法都认）。"""
-    exe = word.lower().strip('"').strip("'")
+    """可执行名归一：小写、去配对引号、去路径前缀、去 .exe 后缀（两平台写法都认）。"""
+    exe = word.lower()
+    # 只剥「首尾成对」的引号：原 strip('"').strip("'") 会连去首尾任意引号字符，
+    # 对 ``python、python" 这类畸形词给出意外结果（审查 A2）。
+    if len(exe) >= 2 and exe[0] == exe[-1] and exe[0] in "\"'":
+        exe = exe[1:-1]
     exe = exe.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     if exe.endswith(".exe"):
         exe = exe[: -len(".exe")]
     return exe
 
 
+def _tokenize(text: str) -> list[str]:
+    r"""命令分词：优先 shlex（正确切分带引号/空格的路径，`"C:\Program Files\...\python.exe" -c`
+    不会被空格拆碎），失败退回 str.split。Windows 用 posix=False 保留引号交由
+    _norm_exe_name 配对剥离；POSIX 用 posix=True 由 shlex 去引号。"""
+    try:
+        return shlex.split(text, posix=(not _IS_WINDOWS))
+    except ValueError:
+        return text.split()
+
+
+# 「后面紧跟真实命令」的包装器命令：解释器可被这些前缀挤出首词，只看 words[0]
+# 会把 `env A=1 python -c ...` 误判为非解释器调用而漏掉 code-exec 旗标。
+_WRAPPER_COMMANDS = frozenset({
+    "env", "nohup", "nice", "time", "sudo", "doas", "setsid", "stdbuf",
+    "xargs", "command", "exec", "timeout", "ionice", "chrt",
+})
+
+# 解释器识别向前扫描的词数上限（跳过赋值/包装器/选项/纯数字后取真实命令词）。
+_INTERPRETER_SCAN_WINDOW = 8
+
+
+def _is_var_assignment(word: str) -> bool:
+    """POSIX 前置赋值 `NAME=value`（NAME 是合法标识符）。"""
+    name, sep, _ = word.partition("=")
+    return bool(sep) and name.isidentifier()
+
+
 def _interpreter_invocation(text: str) -> bool:
-    """命令是否以解释器/shell 可执行名开头（带引号、路径前缀、.exe 后缀均可）。"""
-    words = text.split()
-    if not words:
+    """命令是否以解释器/shell 调用（带引号、路径前缀、.exe 后缀、前置赋值/包装器均可）。
+
+    仅看首词会被 `env A=1 B=2 C=3 python -c ...` 这类前置赋值/包装器绕过——首词是
+    `env`/`A=1` 而非解释器，_has_code_exec_flag 随即退化为只扫前几个词，`-c`
+    落在窗口外便不判 code-exec（审查 A1）。这里剥掉前置赋值与常见包装器，取第一个
+    真实命令词判定。方向 fail-closed：宁可多判 code-exec，不多放行。
+
+    已知限制：包装器自带「带值选项」时（如 `nice -n 10 python`、`sudo -u root python`）
+    数值/用户名会被当普通词提前终止扫描而漏判——这类调用需已配置 sudo 免密/特定环境，
+    场景窄，且漏判只影响前缀规则提炼（仍会逐次确认），故不额外处理。
+    """
+    for w in _tokenize(text)[:_INTERPRETER_SCAN_WINDOW]:
+        exe = _norm_exe_name(w)
+        if exe in _INTERPRETER_COMMANDS:
+            return True
+        if _is_var_assignment(w) or exe in _WRAPPER_COMMANDS or w.isdigit() or w.startswith("-"):
+            continue
         return False
-    return _norm_exe_name(words[0]) in _INTERPRETER_COMMANDS
+    return False
 
 
 def _has_code_exec_flag(text: str, head: int = 4) -> bool:
@@ -133,7 +179,7 @@ def _has_code_exec_flag(text: str, head: int = 4) -> bool:
     在普通工具（``tar -c``、``grep -c``、``git commit -c``）里是常见参数，
     全词扫描会误伤正常命令。
     """
-    words = text.split()
+    words = _tokenize(text)
     limit = len(words) if _interpreter_invocation(text) else head
     return any(w.lower() in _CODE_EXEC_FLAGS for w in words[:limit])
 
@@ -216,6 +262,9 @@ def _has_shell_chain(text: str) -> bool:
     double = False
     # 转义符在调用时按 _IS_WINDOWS 现取（测试会打桩该模块全局），不做导入期常量
     escape = "^" if _IS_WINDOWS else "\\"
+    # cmd.exe 的 %VAR% 展开必须成对：孤立一个 %（echo 100%）不会展开，按拼接
+    # 拦下只是噪音（审查 A3）。% 出现 >= 2 次才可能构成展开，此时才纳入拦截。
+    pct_active = _IS_WINDOWS and text.count("%") >= 2
     for ch in text:
         if ch == '"' and not single:
             double = not double
@@ -227,7 +276,7 @@ def _has_shell_chain(text: str) -> bool:
             continue
         if single:
             continue
-        if ch in _CHAIN_EXPAND_CHARS or (_IS_WINDOWS and ch == "%") or ch == escape:
+        if ch in _CHAIN_EXPAND_CHARS or (pct_active and ch == "%") or ch == escape:
             return True
         if double:
             continue
@@ -293,12 +342,17 @@ def _collect_param_strings(value: object, depth: int = 0, out: list[str] | None 
         if value:
             out.append(value)
     elif isinstance(value, dict):
+        # 只收 value 不收 key：key 是固定字段名（path/command 等），收进来只会
+        # 占满 _EGRESS_MAX_STRINGS 上限、挤掉真正该扫的值，弊大于利。
         for v in value.values():
             _collect_param_strings(v, depth + 1, out)
             if len(out) >= _EGRESS_MAX_STRINGS:
                 break
     elif isinstance(value, (list, tuple, set)):
-        for v in value:
+        # set 迭代顺序随进程哈希随机化：超上限被丢弃的字符串不稳定、排障难复现
+        # （审查 A4）。按 str 排序保证确定性（元素可能非 str，key=str 免类型比较报错）。
+        seq = sorted(value, key=str) if isinstance(value, set) else value
+        for v in seq:
             _collect_param_strings(v, depth + 1, out)
             if len(out) >= _EGRESS_MAX_STRINGS:
                 break

@@ -407,6 +407,18 @@ async def test_gate_nested_scan_covers_lists_and_deep_dicts(home):
     assert len(texts) == _EGRESS_MAX_STRINGS, "总量上限生效"
 
 
+def test_collect_param_strings_set_is_deterministic():
+    """set 迭代顺序随哈希随机化——超上限被丢弃的字符串不稳定，排障难复现
+    （审查 A4）。收集结果必须跨调用确定。"""
+    from skysheep.security.gate import _collect_param_strings
+
+    s = {f"tok{i}" for i in range(20)}
+    first = _collect_param_strings(s)
+    for _ in range(5):
+        assert _collect_param_strings(s) == first, "set 收集结果应确定"
+    assert first == sorted(first), "按 str 排序"
+
+
 async def test_gate_generic_note_for_readonly_open_world(home):
     """web_fetch 参数仅命中通用形态：不预拒绝，egress_note 给注记。"""
 

@@ -250,7 +250,7 @@ async def run_cron_task_core(
             duration = time.time() - started_at
             _fire_cron_push(channels, task, "error", duration,
                             cron_push_body(task, "error", duration))
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         return task
     finally:
@@ -374,7 +374,7 @@ class AutomationMixin:
                 await self._reminder_pass()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # 单轮扫描失败不终止循环
             await asyncio.sleep(self.REMINDER_INTERVAL)
 
@@ -385,7 +385,7 @@ class AutomationMixin:
             for ws_emit in list(self.ws_emitters):
                 try:
                     await ws_emit({"kind": "schedule_reminder", **row})
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
             await self.store.mark_schedule_reminded(row["id"])
 
@@ -412,7 +412,7 @@ class AutomationMixin:
                 await self._cron_pass()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # 单轮扫描失败不终止循环
             await asyncio.sleep(self.CRON_INTERVAL)
 
@@ -429,7 +429,7 @@ class AutomationMixin:
                 spawn_bg(
                     ws_emit({"kind": "cron_updated", "task": task})
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
     async def cron_list(self) -> dict:
@@ -995,7 +995,7 @@ class AutomationMixin:
                 await self._pipeline_pass()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # 单轮扫描失败不终止循环
             await asyncio.sleep(self.PIPELINE_INTERVAL)
 
@@ -1176,7 +1176,7 @@ class AutomationMixin:
                 spawn_bg(
                     ws_emit({"kind": "pipeline_updated", "pipeline": pipe})
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
     @staticmethod
@@ -1446,7 +1446,7 @@ class AutomationMixin:
             try:
                 await self._pipeline_node_fail(pipe, node, sid, str(e)[:300],
                                                notify_body=str(e)[:160])
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         finally:
             self._pipeline_running.discard(node["id"])
@@ -1496,7 +1496,7 @@ class AutomationMixin:
     async def _pipeline_kick(self) -> None:
         try:
             await self._pipeline_pass()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     # ---- 流水线节点终态推送（渠道出站通知；与定时任务终态推送同一套底座） ----
@@ -1634,7 +1634,7 @@ class AutomationMixin:
         # token 用量汇总：节点会话的 usage_log 聚合（无人值守批量跑的成本一眼可见）
         try:
             usage = await self.store.pipeline_usage(pipe["id"])
-        except Exception:
+        except Exception:  # noqa: BLE001
             usage = {"in_tokens": 0, "out_tokens": 0}
         return {"pipeline": pipe, "usage": usage}
 
@@ -2081,7 +2081,7 @@ class AutomationMixin:
                 await run_daily_report_pass(self.store, self.channels)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # 单轮失败不终止循环（与 cron / 流水线扫描循环同一姿态）
             await asyncio.sleep(self.DAILY_REPORT_INTERVAL)
 

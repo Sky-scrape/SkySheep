@@ -2,20 +2,6 @@
 
 本项目的所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.3.0/)。
 
-## [未发布]
-
-### 修复
-
-- **只有系统代理的机器检查更新必然 ConnectTimeout**：更新链直连 github.com，而
-  httpx 不读 Windows 系统代理，`trust_env=False` 也不读环境变量（与 web_fetch
-  同口径的有意为之）——「只有系统代理一条路」的用户全部卡死在检查这一步。现在
-  连接建立不起来（ConnectError / ConnectTimeout）时按序回退：环境变量代理 →
-  Windows 系统代理（注册表 `ProxyServer`，支持 `host:port` 与 `http=/https=/socks=`
-  分列两种写法）；检查（`core/uptodate.py`）与安装包下载 / `.sha256` 探测
-  （`server/backend_parts/remote.py`）走同一套回退。回退只改「从哪里出去」：
-  更新源 URL 仍是硬编码常量、TLS 照常校验（代理只是 CONNECT 隧道），直连成功的
-  用户零变化；HTTP 状态错误与读写超时说明链路已通，不触发回退。
-
 ## [2.6.0] - 2026-10-15
 
 ### 变更
@@ -53,6 +39,16 @@ og 标签，以及两份 README 的副标题与开篇段统一改为以圆桌 / 
   另：`_install_no_history_nav`（窗口过程里吞 APPCOMMAND 后退/前进）挂载失败原先静默
   降级，现在会在 `desktop.log` 留一行——这条路径挂了，鼠标侧键与系统注入的后退是真会
   导航的，不该没有痕迹。
+
+- **只有系统代理的机器检查更新必然 ConnectTimeout**：更新链直连 github.com，而
+  httpx 不读 Windows 系统代理，`trust_env=False` 也不读环境变量（与 web_fetch
+  同口径的有意为之）——「只有系统代理一条路」的用户全部卡死在检查这一步。现在
+  连接建立不起来（ConnectError / ConnectTimeout）时按序回退：环境变量代理 →
+  Windows 系统代理（注册表 `ProxyServer`，支持 `host:port` 与 `http=/https=/socks=`
+  分列两种写法）；检查（`core/uptodate.py`）与安装包下载 / `.sha256` 探测
+  （`server/backend_parts/remote.py`）走同一套回退。回退只改「从哪里出去」：
+  更新源 URL 仍是硬编码常量、TLS 照常校验（代理只是 CONNECT 隧道），直连成功的
+  用户零变化；HTTP 状态错误与读写超时说明链路已通，不触发回退。
 
 - **CI 发布候选门禁从未真正跑通过**（`ci.yml` 的 `package` job：2026-10-11 引入、
   v2.5.1 首次执行即红，且因只在 tag / 手动触发时运行而一直没被发现）：手写的

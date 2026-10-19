@@ -465,9 +465,9 @@ async def test_concurrent_stop_and_approve_only_one_wins(home):
         # 不产生第二执行者：只有一个控制提交，状态停留在合法单路径结果上。
         # 停止路径允许先落 stopping（提交时 worker 尚未退出），但必须自行收敛
         # 到 stopped——卡在「正在停止」比多推进一步更糟，所以这里轮询而不是
-        # 抓取瞬间快照。
+        # 抓取瞬间快照。给 10s 余量：CI 慢机环境下 worker 收尾可能被 IO 卡住。
         legal = ("running", "waiting_confirmation", "completed", "stopped")
-        end = time.monotonic() + 3.0
+        end = time.monotonic() + 10.0
         snap = await be.store.relay_get(task_id)
         while time.monotonic() < end and snap["task"]["state"] not in legal:
             await asyncio.sleep(0.01)

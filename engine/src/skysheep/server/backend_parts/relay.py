@@ -743,6 +743,9 @@ class RelaySettingsMixin:
         def _cleanup(_t, tid=task_id):
             if st["workers"].get(tid) is worker:
                 st["workers"].pop(tid, None)
+            # 必须用 create_task 把清理逻辑挂到事件循环，因为 add_done_callback
+            # 是同步的，而清理涉及 DB 读写。提前退出可能造成「stopping」死锁。
+            asyncio.create_task(self._relay_worker_cleanup(tid))
 
         st["workers"][task_id] = worker
         worker.add_done_callback(_cleanup)
@@ -1166,6 +1169,24 @@ class RelaySettingsMixin:
         except Exception as exc:  # noqa: BLE001 - worker 崩了也要把任务落到可读状态
             logger.warning("接力 worker 异常（%s）：%s", task_id, exc)
             await self._relay_park(task_id, "relay_error", f"接力内部错误：{exc}")
+
+    async def _relay_worker_cleanup(self, task_id: str) -> None:
+        """worker 退出后的统一兜底（无论是正常 return、异常还是被取消）。
+
+        如果任务卡在 stopping 状态（例如正在跑 _relay_run_node 时收到 stop，
+        但在重新进入循环顶部处理 stopping 前抛错退出了），这里强制把它落定。
+        """
+        try:
+            current = await self.store.relay_get_task(task_id)
+            if current is None or current["state"] != "stopping":
+                return
+            result = await self.store.relay_mutate(
+                task_id, expect_states=("stopping",), new_state="stopped"
+            )
+            if result is not None:
+                await self._relay_broadcast(result)
+        except Exception as exc:
+            logger.warning("接力 worker 收尾异常（%s）：%s", task_id, exc)
 
     async def _relay_run_node(self, task_id: str, task: dict, node: dict) -> bool:
         """运行一个已授权节点。返回 True 表示 worker 应就此退出（停止/让出）。"""

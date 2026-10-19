@@ -3864,6 +3864,14 @@ html[data-theme="pine"] .restart-banner {
   color: var(--text2); font-size: 12px; line-height: 1.5;
 }
 .gallery-item .gallery-install { flex-shrink: 0; font-size: 12px; padding: 2px 8px; }
+/* 官方示例卡的格式徽标（SkySheep 格式 / Claude Code 插件格式）：只是区分
+   两套 Mod API，不是状态，所以用最弱的视觉权重——不抢 item-name 与按钮 */
+.gallery-item .item-badge {
+  align-self: flex-start;
+  font-size: 11px; line-height: 1.4; padding: 0 6px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  color: var(--dim); background: var(--paper-sunken);
+}
 /* 工具条不吃通用行 hover 底色（.list li:hover 的 --blue-weak 是半透明色，
    一盖上去，滚到工具条底下的首行就透出来，看着像两行重叠）：
    hover 时按回不透明底色，与常态一致 */

@@ -316,15 +316,20 @@ function renderOfficialMods(entries) {
   const grid = document.getElementById("mods-official-grid");
   if (!grid) return;
   if (!entries.length) {
-    grid.innerHTML = '<span class="dim small">本机没有官方示例清单（随应用安装包内置）。</span>';
+    grid.innerHTML = '<span class="dim small">本机没有当前模式可用的官方示例（随应用安装包内置）。</span>';
     return;
   }
   grid.innerHTML = "";
   entries.forEach((m) => {
     const card = document.createElement("div");
     card.className = "gallery-item";
+    // 格式徽标：让用户一眼看出这个示例用的是哪套 Mod API
+    const fmtBadge = m.format === "cc"
+      ? '<span class="item-badge">Claude Code 插件格式</span>'
+      : '<span class="item-badge">SkySheep 格式</span>';
     card.innerHTML = `
       <span class="item-name">${escapeHtml(m.name || m.id)}</span>
+      ${fmtBadge}
       <span class="item-desc">${escapeHtml(m.description || "")}</span>
       <button class="btn-ghost" ${m.installed ? "disabled" : ""}>${m.installed ? "已安装" : "一键安装"}</button>`;
     const btn = card.querySelector("button");

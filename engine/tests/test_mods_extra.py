@@ -475,6 +475,79 @@ async def test_widgets_per_result_capped_at_eight(home):
 # ---- WS 方法缺口：官方一键装与 mods_updated 广播 ----
 
 
+def test_official_mods_filtered_by_mode(home):
+    """官方示例按当前 Mods 运行模式过滤。
+
+    两套示例用的是不同的 Mod API，格式不匹配时装了也跑不起来：
+    quickjs 只认 mod.json（CC 目录连清单都读不出来），CC 模式的 Node 运行时
+    只认 register()（老格式 export default 会加载"成功"却注册 0 个 hook，
+    静默失效）。所以 official_mods 必须只给当前模式能用的。
+    """
+    from skysheep.config import set_mods_claude_in_config
+    from skysheep.core.mods import bundled_gallery_dir
+
+    if bundled_gallery_dir() is None:
+        pytest.skip("官方示例包在本机不可用")
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        # quickjs 模式（默认）：只给 SkySheep 格式
+        ws.send_json({"id": "q1", "method": "mods.official"})
+        r = recv_until(ws, "q1")["result"]
+        assert r["mode"] == "quickjs"
+        ids = {m["id"] for m in r["mods"]}
+        assert ids == {"token-weather", "blast-radius"}, ids
+        assert all(m["format"] == "sky" for m in r["mods"])
+
+    # 切到 CC 模式：只给 CC 插件格式
+    set_mods_claude_in_config(enabled=True, enabled_mods=[])
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "mods.official"})
+        r = recv_until(ws, "c1")["result"]
+        assert r["mode"] == "claude"
+        ids = {m["id"] for m in r["mods"]}
+        assert ids == {"token-weather-cc", "blast-radius-cc"}, ids
+        assert all(m["format"] == "cc" for m in r["mods"])
+
+
+def test_install_official_rejects_format_mismatch(home):
+    """格式不匹配的官方示例必须拒装，并给出可读原因。
+
+    前端 official_mods 已按模式过滤，但服务端仍要校验（纵深防御：旧前端 /
+    手工构造的 RPC 也不该装进跑不起来的格式）。
+    """
+    from skysheep.core.mods import bundled_gallery_dir
+
+    if bundled_gallery_dir() is None:
+        pytest.skip("官方示例包在本机不可用")
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        # quickjs 模式下装 CC 格式 → 拒
+        ws.send_json({"id": "m1", "method": "mods.install_official",
+                      "params": {"id": "token-weather-cc"}})
+        r = recv_until(ws, "m1")
+        assert r["ok"] is False, r
+        assert "Claude Code 插件格式" in r["error"], r
+        assert "运行模式不匹配" in r["error"], r
+        # 目录不该被创建
+        assert not (mods_root() / "token-weather-cc").exists()
+
+
+def test_install_official_accepts_matching_format(home):
+    """格式匹配的官方示例正常安装（回归：过滤不能把正常路径也挡掉）。"""
+    from skysheep.core.mods import bundled_gallery_dir
+
+    if bundled_gallery_dir() is None:
+        pytest.skip("官方示例包在本机不可用")
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "s1", "method": "mods.install_official",
+                      "params": {"id": "token-weather"}})
+        r = recv_until(ws, "s1")
+        assert r["ok"], r
+        assert r["result"]["installed"] == "token-weather"
+        assert (mods_root() / "token-weather" / "mod.json").is_file()
+
+
 def test_mods_install_official_uses_repo_gallery_fallback(home):
     """mods.install_official：bundled 缺席时回落仓库 mods-gallery，装完即启用。"""
     from skysheep.config import _read_raw_config

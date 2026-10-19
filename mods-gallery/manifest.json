@@ -9,6 +9,7 @@
       "display_name": "上下文天气",
       "description": "把上下文占用做成天气式的常驻状态条：晴 → 多云 → 风暴，该压缩历史时看得见。",
       "hooks": ["tool_post", "turn_stop"],
+      "format": "sky",
       "source": "https://github.com/Sky-scrape/SkySheep/tree/main/mods-gallery/token-weather"
     },
     {
@@ -18,6 +19,7 @@
       "display_name": "高危命令影响面",
       "description": "高危命令（递归删除/格式化/强杀进程等）一律逐次确认，并在确认卡上给出影响面说明；只收紧，不放行。",
       "hooks": ["permission_request", "tool_pre"],
+      "format": "sky",
       "source": "https://github.com/Sky-scrape/SkySheep/tree/main/mods-gallery/blast-radius"
     },
     {
@@ -27,6 +29,7 @@
       "display_name": "上下文天气（CC 插件格式）",
       "description": "Claude Code 插件格式示例：.claude-plugin/plugin.json + register() API + 元素树 UI。",
       "hooks": ["tool.post", "turn.stop"],
+      "format": "cc",
       "source": "https://github.com/Sky-scrape/SkySheep/tree/main/mods-gallery/token-weather-cc"
     },
     {
@@ -36,6 +39,7 @@
       "display_name": "高危命令影响面（CC 插件格式）",
       "description": "Claude Code 插件格式示例：tool.check 返回 ask 强制逐次确认（可改写 input、可 allow/deny）。",
       "hooks": ["tool.check", "tool.pre"],
+      "format": "cc",
       "source": "https://github.com/Sky-scrape/SkySheep/tree/main/mods-gallery/blast-radius-cc"
     }
   ]

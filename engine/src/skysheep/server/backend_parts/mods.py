@@ -597,6 +597,18 @@ class ModsMixin:
         entry = next((m for m in manifest_list if str(m.get("id")) == str(mod_id)), None)
         if entry is None:
             raise RuntimeError("不是官方示例 Mod：" + str(mod_id))
+        # 服务端再校验一次格式匹配（前端 official_mods 已按模式过滤，这里是
+        # 纵深防御：旧前端 / 手工构造的 RPC 也不该装进跑不起来的格式）。
+        # 格式不匹配时装进去只会变成一条「加载失败」的坏记录，或者更糟——
+        # CC 模式装老格式，import 成功但 register() 一次没调，Mod 静默不工作。
+        want = "cc" if self._mods_mode() == "claude" else "sky"
+        fmt = str(entry.get("format") or "sky")
+        if fmt != want:
+            label = "Claude Code 插件格式" if fmt == "cc" else "SkySheep 格式"
+            raise RuntimeError(
+                f"「{entry.get('display_name') or mod_id}」是 {label} 示例，"
+                f"当前 Mods 运行模式不匹配——请先在 设置 · Mods 扩展 切换运行模式"
+            )
         bundled = bundled_gallery_dir()
         src = bundled / str(entry.get("dir", "")) if bundled else None
         if src is None or not src.is_dir():
@@ -625,13 +637,26 @@ class ModsMixin:
         return {"installed": str(mod_id), "enabled": True}
 
     def official_mods(self) -> dict:
-        """官方示例清单（打包内副本 + 已装比对），纯本地只读。"""
+        """官方示例清单（打包内副本 + 已装比对），纯本地只读。
+
+        按当前 Mods 运行模式过滤：两套示例用的是不同的 Mod API，格式不匹配时
+        装了也跑不起来（quickjs 只认 mod.json，CC 格式目录连清单都读不出来；
+        CC 模式能读老格式的 mod.json，但 Node 运行时的 import 只认 register()，
+        老格式的 export default 会加载"成功"却注册 0 个 hook——静默失效，
+        比报错更糟）。所以这里直接只给当前模式能用的示例，见 mods-gallery/
+        manifest.json 的 format 字段（sky / cc）。
+        """
         from ...core.mods import bundled_gallery_dir, load_gallery_manifest
 
         mods = self.mods
         installed_ids = set(mods.mods) if mods else set()
+        mode = self._mods_mode()  # "quickjs" | "claude"
+        want = "cc" if mode == "claude" else "sky"
         entries = []
         for m in load_gallery_manifest():
+            fmt = str(m.get("format") or "sky")  # 缺省按 sky（老清单没有这个字段）
+            if fmt != want:
+                continue
             mid = str(m.get("id", ""))
             entries.append({
                 "id": mid,
@@ -639,9 +664,10 @@ class ModsMixin:
                 "name": str(m.get("display_name") or mid),
                 "description": str(m.get("description", "")),
                 "hooks": m.get("hooks") or [],
+                "format": fmt,
                 "installed": mid in installed_ids,
             })
-        return {"mods": entries, "bundled": bundled_gallery_dir() is not None}
+        return {"mods": entries, "bundled": bundled_gallery_dir() is not None, "mode": mode}
 
     async def delete_mod(self, mod_id: str) -> dict:
         """删除 Mod 目录（落点校验同安装）并从启用名单摘除。"""

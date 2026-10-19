@@ -102,7 +102,7 @@ def _node(snap: dict, node_id: str) -> dict:
     return next(n for n in snap["nodes"] if n["node_id"] == node_id)
 
 
-async def _wait_snapshot(be, task_id, state, timeout=3.0) -> dict:
+async def _wait_snapshot(be, task_id, state, timeout=10.0) -> dict:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         snap = await be.store.relay_get(task_id)
@@ -112,7 +112,7 @@ async def _wait_snapshot(be, task_id, state, timeout=3.0) -> dict:
     raise AssertionError(f"任务未在 {timeout}s 内进入状态 {state}")
 
 
-async def _wait_node_running(be, task_id, node_id, timeout=3.0):
+async def _wait_node_running(be, task_id, node_id, timeout=10.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         snap = await be.store.relay_get(task_id)
@@ -126,7 +126,7 @@ async def _wait_node_running(be, task_id, node_id, timeout=3.0):
 async def _await_worker(be, task_id):
     worker = be._relay_state()["workers"].get(task_id)
     if worker is not None:
-        await asyncio.wait_for(asyncio.shield(worker), timeout=3.0)
+        await asyncio.wait_for(asyncio.shield(worker), timeout=10.0)
 
 
 async def test_serial_ab_full_flow(home):

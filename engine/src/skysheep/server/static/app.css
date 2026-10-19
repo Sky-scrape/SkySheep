@@ -6123,7 +6123,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 .mod-btn {
   flex-shrink: 0; padding: 3px 10px; font-size: 11.5px; font-weight: 600;
   border: 1px solid var(--line2); border-radius: var(--r-sm);
-  background: var(--paper); color: var(--text2); cursor: pointer;
+  background: var(--paper-raised); color: var(--text2); cursor: pointer;
 }
 .mod-btn:hover { border-color: var(--blue); color: var(--blue); }
 .mod-btn.mod-btn-primary { background: var(--blue); color: #fff; border-color: var(--blue); }

@@ -99,6 +99,12 @@
 
 ### 修复
 
+- **接力「停止」可能卡在「正在停止」**：`relay_stop` 先判断 worker 是否存活
+  再提交状态，两步之间存在窗口——判断时 worker 尚未退出（节点刚 park 到
+  waiting_confirmation、还在 return 路上），于是落下 `stopping`；而 worker 的
+  done 回调在此之前已按旧状态跳过收尾，提交后已没有 worker 能把 stopping 推到
+  stopped，任务永久停在「正在停止」。提交 stopping 后复查一次 worker 存活性，
+  已退出就立即兜底收敛到 stopped（幂等，CAS 保护）。
 - **Webhook 渠道推送会误走系统代理**：Windows 上 httpx 默认读注册表里的
   WinINET 系统代理，本机 / 内网接收端（127.0.0.1 的自建服务、企业微信中转等）
   的 POST 也被转给代理，代理连不上就是 502、推送静默失败。Webhook 客户端改为

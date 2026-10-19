@@ -1098,6 +1098,15 @@ class RelaySettingsMixin:
         )
         if result is None:
             raise ValueError("relay_conflict：任务已变化，请重新读取后再停止")
+        # 判断 worker_live 与提交之间有窗口：判断时 worker 尚未 done（刚 park 到
+        # waiting_confirmation、还在 return 路上），落 stopping 后它才退出，而
+        # done 回调已按旧状态（非 stopping）跳过收尾——没人再把 stopping 推到
+        # stopped。这里复查一次，worker 已死就立刻兜底收尾（幂等，CAS 保护）。
+        if target == "stopping" and not self._relay_worker_live(task_id):
+            # finalize 内部已广播 stopped，直接返回读回的快照，避免重复广播。
+            await self._relay_finalize_stopping(task_id)
+            done = await self.store.relay_get(task_id)
+            return done if done is not None else result
         await self._relay_broadcast(result)
         return result
 

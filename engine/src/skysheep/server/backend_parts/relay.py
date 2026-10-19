@@ -1185,7 +1185,7 @@ class RelaySettingsMixin:
             )
             if result is not None:
                 await self._relay_broadcast(result)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 收尾失败只留日志，不打瘫后端
             logger.warning("接力 worker 收尾异常（%s）：%s", task_id, exc)
 
     async def _relay_run_node(self, task_id: str, task: dict, node: dict) -> bool:

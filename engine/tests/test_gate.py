@@ -15,6 +15,7 @@ from skysheep.security.gate import (
     _has_code_exec_flag,
 )
 from skysheep.tools import EditFileTool, ReadFileTool, RunCommandTool, WriteFileTool
+from skysheep.tools.fs import DeleteFileTool
 
 
 async def test_readonly_auto_allowed():
@@ -1030,3 +1031,47 @@ async def test_legacy_wide_prefix_rule_cannot_run_leading_assignment_code():
     gate.add_session_rule(WhitelistRule(tool="run_command", kind="prefix", pattern="env A=1"))
     evil = 'env A=1 B=2 C=3 python -c "import os;os.system(\'calc\')"'
     assert await gate.authorize(cmd, {"command": evil}) is not None
+
+
+# ---- 确认卡预览：扫描上限与事件循环不阻塞（对抗审查第四轮） ----
+
+
+async def test_preview_scan_capped_for_huge_dirs(tmp_path, monkeypatch):
+    """超大目录的删除预览有扫描上限，且明确告知「实际可能更多」。
+
+    node_modules 级目录十万+ 文件，全量 rglob + 逐文件 stat 会把确认卡生成
+    拖到数秒；且不能把「已扫到的」当成「全部的」——删目录不可逆，用户必须
+    知道实际规模可能更大。
+    """
+    gate = PermissionGate(working_dir=tmp_path)
+    monkeypatch.setattr(gate, "TREE_PREVIEW_SCAN_MAX", 10)
+    big = tmp_path / "big"
+    big.mkdir()
+    for i in range(30):
+        (big / f"f{i}.txt").write_text("x", encoding="utf-8")
+
+    out = gate._preview_fs_impact(DeleteFileTool(), {"path": "big"})
+    assert "仅扫描前 10 个条目" in out
+    assert "实际文件数可能更多" in out
+
+
+async def test_preview_diff_does_not_block_event_loop(tmp_path, monkeypatch):
+    """确认卡的 diff 预览必须在线程池里算：同步扫全树会冻结整个引擎。
+
+    5000 文件实测 93ms、十万文件约 2 秒——期间 WS 推送、渠道、其它会话全部
+    停摆。这里打桩 _preview_diff 检测它是否在事件循环线程外被调用。
+    """
+    import threading
+
+    gate = PermissionGate(working_dir=tmp_path)
+    loop_thread = threading.current_thread()
+    seen: dict = {}
+
+    def fake_preview(tool, input_dict):
+        seen["thread"] = threading.current_thread()
+        return ""
+
+    monkeypatch.setattr(gate, "_preview_diff", fake_preview)
+    pending = await gate._build_pending(WriteFileTool(), {"path": "a.txt", "content": "x"})
+    assert pending is not None
+    assert seen["thread"] is not loop_thread, "diff 预览仍在事件循环线程上同步执行"

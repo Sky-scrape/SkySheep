@@ -110,6 +110,31 @@ class WriteLeaseHub:
         timed_out: list[str] = []
         waited: list[str] = []
         deadline = time.monotonic() + wait_s
+        try:
+            return await self._claim_loop(
+                paths, owner, wait_s, deadline, held, timed_out, waited
+            )
+        except BaseException:
+            # 取消（用户停止 / 会话关闭 / 任务被取消）会从 await 点穿透，而
+            # agent 循环的 finally 只 release 已拿到的 lease 对象——多路径调用
+            # 在拿到前面几条、卡在后面一条时被取消，前面那几条就泄漏了，
+            # 最坏要等 LEASE_TTL_S（600s）才被 TTL 清掉，期间别人写同路径会
+            # 白等 WRITE_LEASE_WAIT_S 并被扣上「可能覆盖对方改动」的错误注记。
+            # 这里兜住：任何异常路径都把已登记的条目按身份归还。
+            self._release(held)
+            raise
+
+    async def _claim_loop(
+        self,
+        paths: list[tuple[Path, str]],
+        owner: str,
+        wait_s: float,
+        deadline: float,
+        held: list[tuple[str, object]],
+        timed_out: list[str],
+        waited: list[str],
+    ) -> WriteLease:
+        """claim 的主体循环（拆出来只为了让取消路径能统一释放已持有的条目）。"""
         for path, label in paths:
             key = _key(path)
             while True:

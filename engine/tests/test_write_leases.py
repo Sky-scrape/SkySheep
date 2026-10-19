@@ -192,3 +192,50 @@ async def test_exec_tool_tool_error_still_releases(tmp_path):
     )
     assert is_error is True
     assert leases.hub_for(tmp_path)._entries == {}
+
+
+# ---------------------------------------------------------------- 取消路径
+
+
+async def test_lease_cancel_mid_claim_releases_held(tmp_path):
+    """多路径领取中途被取消：已拿到的条目必须归还，不得留到 600s TTL。
+
+    真实场景：move_file 的源+目标两条路径，拿到源、卡在目标时用户点了停止。
+    agent 循环的 finally 只 release 已返回的 lease 对象——claim 内部已登记的
+    条目若不在异常路径上主动归还，就会一直占着（最坏等 LEASE_TTL_S=600s），
+    期间别的会话写同路径会白等一个 WRITE_LEASE_WAIT_S 并被扣上「可能覆盖对方
+    改动」的错误注记。
+    """
+    hub = leases.WriteLeaseHub()
+    # sA 占住目标路径，让 sB 的 claim 卡在第二条上
+    lease_a = await hub.claim([(tmp_path / "dst.txt", "dst.txt")], owner="sA")
+
+    task = asyncio.create_task(
+        hub.claim(
+            [(tmp_path / "src.txt", "src.txt"), (tmp_path / "dst.txt", "dst.txt")],
+            owner="sB", wait_s=5.0,
+        )
+    )
+    # 让出几轮事件循环：sB 必然先同步登记 src.txt，再在 dst.txt 上 await
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if any(e["owner"] == "sB" for e in hub._entries.values()):
+            break
+    assert any(e["owner"] == "sB" for e in hub._entries.values()), "sB 未拿到第一条路径"
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    # 取消后不得残留 sB 的租约
+    leaked = [k for k, e in hub._entries.items() if e["owner"] == "sB"]
+    assert leaked == [], f"取消后残留租约：{leaked}"
+
+    # 后续 sC 写 src.txt 应立刻拿到，不被泄漏条目卡住
+    lease_c = await hub.claim([(tmp_path / "src.txt", "src.txt")], owner="sC", wait_s=0.2)
+    assert lease_c.note == "", "被泄漏的租约卡住，注记说明误判为并行写入"
+
+    lease_a.release()
+    lease_c.release()
+    assert hub._entries == {}

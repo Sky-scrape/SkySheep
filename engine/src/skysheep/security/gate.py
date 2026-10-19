@@ -1369,6 +1369,13 @@ class PermissionGate:
             if always_rule is _KEEP_ALWAYS_RULE
             else always_rule  # type: ignore[assignment]
         )
+        # diff 预览（尤其 move_file / delete_file 的 _preview_fs_impact）会
+        # 递归扫全树 + 逐文件 stat：5000 文件实测 93ms，node_modules 级 10 万+
+        # 文件约 2 秒。这是同步跑在事件循环上的，期间 WS 推送、渠道、其它会话
+        # 全部冻结（对抗审查第四轮）。本方法已是 async，放进线程池执行。
+        diff_preview = await asyncio.to_thread(
+            self._preview_diff, tool, input_dict
+        )
         pending = PendingPermission(
             request_id=uuid.uuid4().hex[:12],
             tool_name=tool.name,
@@ -1377,7 +1384,7 @@ class PermissionGate:
             detail=arg_text,
             note=self._note_for(tool, arg_text),
             _future=asyncio.get_running_loop().create_future(),
-            diff=self._preview_diff(tool, input_dict),
+            diff=diff_preview,
             always_rule=resolved_rule,
         )
         # 确认卡固定字段：影响范围 + 可回滚性（与 diff/规则预告同一事实源，
@@ -1528,6 +1535,11 @@ class PermissionGate:
 
     TREE_PREVIEW_MAX = 120
 
+    # 目录预览扫描的条目上限：node_modules 级目录动辄十万+，全量 rglob + 排序 +
+    # 逐文件 stat 在极端目录上是 O(n log n) 次系统调用。确认弹窗只需要「大概
+    # 多大、动哪些东西」，超过上限就按已扫到的部分给结论并注明「可能更多」。
+    TREE_PREVIEW_SCAN_MAX = 20_000
+
     def _list_tree_lines(self, target: Path, label: str) -> list[str]:
         """列出文件 / 目录下的条目（确认弹窗用），超长截断。"""
         if target.is_file():
@@ -1537,7 +1549,15 @@ class PermissionGate:
                 return [f"{label}：{target.name}"]
             return [f"{label}：{target.name}（{size:,} B）"]
         try:
-            entries = sorted(target.rglob("*"))
+            # 手动带计数地迭代，命上限即停——sorted 会先物化整棵树
+            entries = []
+            truncated_scan = False
+            for i, e in enumerate(target.rglob("*")):
+                if i >= self.TREE_PREVIEW_SCAN_MAX:
+                    truncated_scan = True
+                    break
+                entries.append(e)
+            entries.sort()
         except OSError:
             return []
         files = [e for e in entries if e.is_file()]
@@ -1555,6 +1575,13 @@ class PermissionGate:
                 lines.append("  " + str(e))
         if len(files) > self.TREE_PREVIEW_MAX:
             lines.append(f"  …（其余 {len(files) - self.TREE_PREVIEW_MAX} 个文件省略）")
+        if truncated_scan:
+            # 扫描本身就到了上限：不能把「已扫到的」当成「全部的」展示——
+            # 确认卡上必须让用户知道实际规模可能更大（删目录是不可逆操作）
+            lines.append(
+                f"  …（目录过大，仅扫描前 {self.TREE_PREVIEW_SCAN_MAX:,} 个条目，"
+                "实际文件数可能更多）"
+            )
         return lines
 
     async def persist_rule(self, rule: WhitelistRule) -> None:

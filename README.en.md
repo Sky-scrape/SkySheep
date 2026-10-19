@@ -238,7 +238,7 @@ Running into a problem? In the app, go to Settings → About → "💬 Report an
 
 ## 🗺 Roadmap & Non-goals
 
-- ✅ current release **v2.6.0**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors → session split view & adversarial review → runtime reliability & data lifecycle hardening → touch swipe-navigation taming & security-review remediation (full history in [CHANGELOG.md](CHANGELOG.md))
+- ✅ current release **v2.6.1**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors → session split view & adversarial review → runtime reliability & data lifecycle hardening → touch swipe-navigation taming & security-review remediation → global egress settings and collaboration workbench (full history in [CHANGELOG.md](CHANGELOG.md))
 - 🚧 **Next up**: code-signed distribution · Windows desktop polish and stability (until then, see [docs/smartscreen-说明.md](docs/smartscreen-说明.md) for the SmartScreen workaround for unsigned installers)
 
 **Non-goals**:

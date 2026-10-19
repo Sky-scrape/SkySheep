@@ -112,6 +112,21 @@ async def test_long_text_is_not_split(collector):
     assert json.loads(collector.requests[0]["body"])["text"] == long_text
 
 
+async def test_local_target_bypasses_system_proxy(collector, monkeypatch):
+    """本地接收端不走系统代理。
+
+    Windows 上 httpx 默认 trust_env=True 会读注册表里的 WinINET 系统代理，
+    把 127.0.0.1 的推送也转给代理（代理不可用即 502）。webhook 必须直连。
+    """
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    ch = _channel(collector)
+    assert ch._http().trust_env is False
+    assert await ch.send_text("", "直连") is True
+    assert len(collector.requests) == 1
+
+
 async def test_unreachable_url_fails_silently():
     """URL 不可达：返回 False、不抛、原因留在 error（端口 1 不可能有监听）。"""
     ch = WebhookChannel({"enabled": True, "url": "http://127.0.0.1:1/nope"}, lambda _m: None)

@@ -110,6 +110,10 @@ class WebhookChannel(Channel):
                 transport=self._transport,
                 # 不跟随重定向：目标写错时把 3xx 原样报成失败，而不是换个地址继续 POST
                 follow_redirects=False,
+                # 不读系统代理/环境代理：接收端多是本机或自建服务，Windows 上
+                # trust_env=True 会读注册表里的 WinINET 代理，把 127.0.0.1 的请求
+                # 也转给代理，轻则变慢重则直接 502（与 web_fetch/更新链同口径）。
+                trust_env=False,
             )
         return self._client
 

@@ -438,6 +438,11 @@ class WhitelistRule:
         return False
 
 
+_KEEP_ALWAYS_RULE: object = object()
+"""_build_pending 的 always_rule 默认哨兵：表示「按引擎默认计算」，
+None 表示「显式不提供总是允许」。"""
+
+
 @dataclass
 class PendingPermission:
     request_id: str
@@ -1110,12 +1115,30 @@ class PermissionGate:
             return self._egress_denied(tool, input_dict, scan)
         return None
 
-    async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
-        """返回 None 表示放行；返回 PendingPermission 表示需要用户决策。"""
+    async def authorize(
+        self, tool: Tool, input_dict: dict, *, force_pending: bool = False,
+        force_allow: bool = False,
+    ) -> PendingPermission | None:
+        """返回 None 表示放行；返回 PendingPermission 表示需要用户决策。
+
+        force_pending=True：跳过全部自动放行分支，强制落到 pending 创建。供
+        Claude Code 兼容模式的 tool.check=ask 使用——Mod 点名 ask 时必须逐次
+        确认。无法绕过 _egress_pre_deny（出站密钥预拒绝）与引擎主目录写入守卫。
+
+        force_allow=True：跳过白名单/档位判断直接放行（Claude Code 兼容模式的
+        tool.check=allow）。硬性守卫保留：_egress_pre_deny 已在入口跑过；引擎
+        主目录写入仍逐次确认（全局技能/凭据文件跨信任边界，Mod 不得放开）。
+        两者同时为 True 时 force_pending 优先（更保守）。
+        """
         # 出站密钥防线（提示注入纵深防御）：先于一切放行分支，见上方方法组说明
         blocked = self._egress_pre_deny(tool, input_dict)
         if blocked is not None:
             return blocked
+        if force_pending:
+            # force_pending 时不提供「总是允许」：否则用户点一次就把 Mod 的
+            # 逐次确认永久关掉（规则落库后下次不再询问），等于绕过 Mod 意志
+            pending = await self._build_pending(tool, input_dict, always_rule=None)
+            return pending
         # Mods 收紧声明（require_confirm_tools）命中即跳过下方全部自动放行分支，
         # 落到 pending 创建：即使 READONLY 短路 / 完全访问档 / 自动允许写入档 /
         # 白名单本会放行，被 Mod 点名的工具一律回落逐次确认——只收紧，不放行。
@@ -1128,6 +1151,21 @@ class PermissionGate:
         # 永远逐次确认，白名单沉淀不出放行。完全访问档（auto_accept_all）与
         # 既有 P2-7 守卫同界，不受影响。
         engine_home_write = self._write_hits_engine_home(tool, input_dict)
+        # Claude Code 兼容模式的 tool.check=allow：跳过引擎自动放行判定。
+        # 硬性守卫保留，Mod 也不得放开：
+        # - 引擎主目录写入（全局技能/凭据跨信任边界）
+        # - 名义是移动、实为递归删除（move_file overwrite 覆盖目录）
+        # - 旧 Mods 收紧声明（extra_required，两管理器互斥时为 False）
+        if force_allow:
+            if (
+                not engine_home_write
+                and not self._write_is_actually_delete(tool, input_dict)
+                and not extra_required
+            ):
+                return None
+            return await self._build_pending(
+                tool, input_dict, extra_required=extra_required,
+            )
         if tool.safety == Safety.READONLY and not engine_home_write and not extra_required:
             return None
         # 完全访问档：写入与执行都自动放行（白名单之外的全部放开）
@@ -1170,6 +1208,25 @@ class PermissionGate:
                 except Exception:  # noqa: BLE001
                     pass
             return None
+        return await self._build_pending(
+            tool, input_dict, extra_required=extra_required,
+        )
+
+    async def _build_pending(
+        self, tool: Tool, input_dict: dict, *, extra_required: bool = False,
+        always_rule: WhitelistRule | None | object = _KEEP_ALWAYS_RULE,
+    ) -> PendingPermission:
+        """构造 PendingPermission 并回调 on_request。
+
+        供 authorize 正常路径与 force_pending 路径共用：force_pending 只跳过
+        自动放行分支，其余步骤（diff、scope、规则预告、mod note）一条不少。
+        """
+        arg_text = tool.arg_text(input_dict)
+        resolved_rule = (
+            self.rule_for(tool, input_dict, self.working_dir)
+            if always_rule is _KEEP_ALWAYS_RULE
+            else always_rule  # type: ignore[assignment]
+        )
         pending = PendingPermission(
             request_id=uuid.uuid4().hex[:12],
             tool_name=tool.name,
@@ -1179,7 +1236,7 @@ class PermissionGate:
             note=self._note_for(tool, arg_text),
             _future=asyncio.get_running_loop().create_future(),
             diff=self._preview_diff(tool, input_dict),
-            always_rule=self.rule_for(tool, input_dict, self.working_dir),
+            always_rule=resolved_rule,
         )
         # 确认卡固定字段：影响范围 + 可回滚性（与 diff/规则预告同一事实源，
         # authorize 一次算齐，前端不自行猜测）。失败不阻塞确认流程。
@@ -1379,7 +1436,9 @@ class HeadlessGate(PermissionGate):
         super().__init__(**kw)
         self.allowed = set(allowed or [])
 
-    async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
+    async def authorize(
+        self, tool: Tool, input_dict: dict, **kwargs,
+    ) -> PendingPermission | None:
         # 出站密钥防线先于名单放行（_egress_pre_deny 对 READONLY 内部短路）：
         # 无人值守名单不能成为已知密钥外传的免确认通道。
         blocked = self._egress_pre_deny(tool, input_dict)
@@ -1407,7 +1466,7 @@ class HeadlessGate(PermissionGate):
             # 改写它们的通道。命中时落父类 authorize——无人值守没有用户可应答，
             # PendingPermission 随即被 resolve(DENY)，fail-closed。
             return None
-        pending = await super().authorize(tool, input_dict)
+        pending = await super().authorize(tool, input_dict, **kwargs)
         if pending is not None:
             pending.resolve(Decision.DENY)
         return pending

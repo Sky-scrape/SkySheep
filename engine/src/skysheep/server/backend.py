@@ -73,6 +73,7 @@ from ..core.hooks import (
     hooks_from_config,
     load_raw_config,
 )
+from ..core.mods_tool import ModTool
 from ..core.prompt import (
     PLAN_MODE_PREFIX,
     load_project_instructions,
@@ -786,6 +787,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # Mods 扩展（实验性，core/mods.py）：setup/_bind_project 里经 _reload_mods
         # 重建并挂到 Agent 与权限门上；无已装 Mod 时为 None（零开销直通）
         self.mods = None
+        # Claude Code 兼容模式的 Mods 管理器（core/mods_claude.py）：
+        # 与 self.mods（quickjs 沙箱模式）二选一。由 _reload_mods_claude
+        # 按 config [mods_claude] 表创建；启用时 self.mods 留空。
+        self.mods_claude = None
         self._pending_mod_install: dict | None = None  # 两段安装的待确认项
         self.term = TerminalManager()
         self.aux_history: list[Message] = []
@@ -917,6 +922,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         working_dir: Path | None,
         session_id: str = "",
         mods=None,
+        mods_claude=None,
         recorder: ChangeRecorder | None = None,
         ctx: ProjectCtx | None = None,
     ) -> Agent:
@@ -941,6 +947,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             compaction_auto=self.cfg.compaction_auto,
             hooks=self.hooks,
             mods=mods,
+            mods_claude=mods_claude,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
             session_id=session_id,
             job_containment=self.cfg.shell.job_containment,
@@ -1150,6 +1157,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     working_dir=ctx.workdir,
                     session_id=session_id,
                     mods=self.mods,
+                    mods_claude=self.mods_claude,
                     recorder=recorder,
                     ctx=ctx,
                 ),
@@ -1526,11 +1534,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             self._connect_mcp_after_boot(list(mcp_config_warnings))
         )
 
+        # 启动期先加载 Claude 兼容模式（若配置启用），再建 base agent
+        self._reload_mods_claude()
         self._base_agent = self._build_agent(
             provider=self.provider,
             gate=self.gate,
             working_dir=self.working_dir,
             mods=self.mods,
+            mods_claude=self.mods_claude,
         )
         # 上次应用内更新的结果对账（成功清标记 / 失败亮现场），要赶在 boot
         # 快照组装前结算完，前端首帧就能看到结果
@@ -1678,6 +1689,26 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 ))
         for t in self.mcp_tools:
             registry.register(t)
+        # Mod 注册的工具（Claude 兼容模式）：handler 在 Node 侧，这里只是转调包装。
+        # 一律 DANGEROUS 分级（第三方代码 + 无沙箱），不会因 Mod 自报 safety 免确认。
+        manager = getattr(self, "mods_claude", None)
+        if manager is not None:
+            for mod in manager.mods.values():
+                for spec in mod.registered_tools:
+                    name = str(spec.get("name") or "").strip()
+                    if not name or registry.get(name) is not None:
+                        continue  # 重名不覆盖内置/别的 Mod（先到先得）
+                    try:
+                        registry.register(ModTool(
+                            mod_id=mod.id, name=name,
+                            description=str(spec.get("description") or ""),
+                            schema=spec.get("schema") or {},
+                            loaded_mod=mod,
+                        ))
+                    except Exception:  # noqa: BLE001 - 单个 Mod 工具坏掉不拖垮注册表
+                        logger.warning(
+                            "Mod 工具注册失败：%s/%s", mod.id, name, exc_info=True,
+                        )
         return registry
 
     def _apply_registry_to_agents(self, recorder: ChangeRecorder | None = None) -> None:
@@ -6456,6 +6487,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # Mods 与钩子同位重建：工作目录变了，草稿落点/收紧声明语境随之刷新；
         # Agent 构造点（setup 的 base agent、_get_runtime）在之后读 self.mods
         self._reload_mods()
+        # Claude 兼容模式同位重建（两者互斥：启用了 Claude 模式则 self.mods 留空）
+        self._reload_mods_claude()
         self.checkpoints = CheckpointStore(root=self._checkpoint_root())
 
         # 旧项目的活动团队一并失效：成员 Agent 挂着旧项目的工具表与权限门，

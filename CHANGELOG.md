@@ -2,6 +2,23 @@
 
 本项目的所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.3.0/)。
 
+## [Unreleased]
+
+### 新增
+
+- **Mods 支持 Claude Code 插件格式（实验性）**：通过 `[mods_claude]` 配置切换后，
+  Mod 跑在独立 Node.js 子进程里，兼容 Claude Code 插件标准位置
+  （`.claude-plugin/plugin.json`）与 `register()` 中间件链 API——同一套插件既能
+  在 Claude Code 里跑，也能在 SkySheep 里跑。权限决策从「只能收紧」扩到
+  allow / ask / deny 与改写工具参数；界面扩到元素树（box / text / button /
+  input / select / image），新增对话区顶部常驻面板（pane）、输入框上方状态条
+  （above_prompt）与模态浮层（dialog）三个落点，全部走固定渲染器与 textContent。
+  引擎侧硬性守卫不放宽：出站密钥预拒绝、引擎主目录写入逐次确认、递归删除守卫
+  在 force_allow 分支上照旧生效；Mod 注册的工具一律按 DANGEROUS 分级。与既有
+  quickjs 沙箱模式二选一，互斥运行，配置层各用 `[mods]` / `[mods_claude]`
+  一张表；设置页说明、运行状态与权限档文案按当前模式改写，不出现与实际能力
+  相反的安全承诺。内置 `token-weather-cc` 与 `blast-radius-cc` 两个官方示例。
+
 ## [2.6.0] - 2026-10-15
 
 ### 变更

@@ -231,8 +231,12 @@ class ModUI(Event):
     kind: Literal["mod_ui"] = "mod_ui"
     mod_id: str = ""
     session_id: str = ""
-    slot: str = "stream"  # tray / stream / perm
+    slot: str = "stream"  # tray / stream / perm / pane / above_prompt
     widget: dict = Field(default_factory=dict)
+    # Claude Code 兼容模式的元素树（core/mods_ui.py 已校验白名单）：
+    # 非空时前端走 buildModNode 递归渲染，忽略 widget 字段。旧的 widget 词表
+    # 路径（quickjs 沙箱模式）继续用 widget，两条路径互斥。
+    payload: dict = Field(default_factory=dict)
 
 
 class TeamStarted(Event):

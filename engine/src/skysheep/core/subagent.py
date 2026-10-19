@@ -125,7 +125,7 @@ class SubagentGate(PermissionGate):
         "由主 Agent 处理。"
     )
 
-    async def authorize(self, tool, input_dict):
+    async def authorize(self, tool, input_dict, **kwargs):
         # 引擎主目录写入守卫先于 READONLY 短路（与主门/无人值守/渠道门同口径，
         # 第二轮审查 FINDING 2）：memory_write 名义 READONLY 却写全局记忆
         # （注入所有项目所有会话的 system prompt），子代理内同样不得零确认放行。
@@ -133,7 +133,7 @@ class SubagentGate(PermissionGate):
         engine_home_write = self._write_hits_engine_home(tool, input_dict)
         if tool.safety == Safety.READONLY and not engine_home_write:
             return None
-        pending = await super().authorize(tool, input_dict)
+        pending = await super().authorize(tool, input_dict, **kwargs)
         if pending is not None:
             # 出站密钥防线的预拒绝自带「为什么被拦」的中文说明（比通用文案
             # 更可行动），保留；其余情况与原行为一致，覆写为子代理通用文案。
@@ -158,7 +158,7 @@ class IsolatedGate(PermissionGate):
         "由主 Agent 合并后在主工作区执行。"
     )
 
-    async def authorize(self, tool, input_dict):
+    async def authorize(self, tool, input_dict, **kwargs):
         # 出站密钥防线先于「工作区内写入自动放行」（_egress_pre_deny 对
         # READONLY 内部短路）：工作区隔离是「用户确认」的替代，但它替代的
         # 是误操作的代价，不覆盖「把本机密钥写出去」——已知密钥值命中一律
@@ -175,7 +175,7 @@ class IsolatedGate(PermissionGate):
             return None
         if tool.safety == Safety.WRITE and self._write_target_inside_workdir(tool, input_dict):
             return None
-        pending = await super().authorize(tool, input_dict)
+        pending = await super().authorize(tool, input_dict, **kwargs)
         if pending is not None:
             pending.deny_note = pending.deny_note or self.DENY_NOTE
             pending.resolve(Decision.DENY)

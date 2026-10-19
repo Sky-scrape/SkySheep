@@ -1,0 +1,11 @@
+{
+  "name": "token-weather-cc",
+  "version": "1.0.0",
+  "description": "把上下文占用做成天气式常驻条（Claude Code 插件格式示例，用 register() API）",
+  "main": "hooks/main.js",
+  "hooks": [
+    "tool.post",
+    "turn.stop"
+  ],
+  "permissions": "full"
+}

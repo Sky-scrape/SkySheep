@@ -2005,6 +2005,21 @@ async def _h_mods_set_enabled(backend: ServerBackend, params: dict, emit, local:
     return await backend.set_mods_enabled(bool(params.get("enabled", False)))
 
 
+async def _h_mods_claude_action(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """Claude 兼容模式的 UI 交互回传（按钮点击 / 输入变更）。
+
+    P4：只做记录与 ack；真正把 action 投递给 Mod handler（tool.check 之外的
+    交互事件）留给 P5（需要额外的事件名与 handler 契约）。
+    """
+    return await backend.dispatch_mod_action(
+        mod_id=str(params.get("mod_id", "")),
+        action_id=str(params.get("action_id", "")),
+        kind=str(params.get("kind", "")),
+        value=params.get("value"),
+        session_id=str(params.get("session_id", "")),
+    )
+
+
 async def _h_mods_save_draft(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 草稿写进 <项目>/.skysheep/mods-drafts/：安装仍要两段人工确认
     return await backend.save_mod_draft(params)
@@ -2425,6 +2440,7 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "mods.delete": _WsMethod(_h_mods_delete, local_only=True),
     "mods.toggle": _WsMethod(_h_mods_toggle, local_only=True),
     "mods.set_enabled": _WsMethod(_h_mods_set_enabled, local_only=True),
+    "mods_claude.action": _WsMethod(_h_mods_claude_action, local_only=True),
     "mods.save_draft": _WsMethod(_h_mods_save_draft, local_only=True),
     "mods.test": _WsMethod(
         _h_mods_test, local_only=True, local_error="Mod 测试器只能在本机界面上操作",

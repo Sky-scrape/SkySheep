@@ -285,6 +285,74 @@ def parse_manifest(data: object, *, source_label: str = "") -> dict:
     }
 
 
+# CC 事件名 → 旧内部事件名（安装预览用：旧 parse_manifest 只认内部名）
+_CC_HOOK_TO_LEGACY = {
+    "tool.check": "tool_pre",
+    "tool.pre": "tool_pre",
+    "tool.post": "tool_post",
+    "permission.request": "permission_request",
+    "prompt.submit": "iteration_start",
+    "iteration.start": "iteration_start",
+    "turn.stop": "turn_stop",
+    "session.start": "iteration_start",
+    "session.end": "turn_stop",
+}
+
+
+def is_claude_plugin_manifest(data: object, manifest_path: Path | None = None) -> bool:
+    """判断清单是否是 Claude Code 插件格式（.claude-plugin/plugin.json 或明显特征）。"""
+    if manifest_path is not None and manifest_path.name == "plugin.json":
+        return True
+    if not isinstance(data, dict):
+        return False
+    if "id" in data and "main" not in data and "commands" not in data:
+        return False  # 明显是 SkySheep 旧格式
+    hooks = data.get("hooks")
+    if isinstance(hooks, list) and any("." in str(h) for h in hooks):
+        return True
+    if "main" in data or "commands" in data or "agents" in data:
+        return True
+    return False
+
+
+def convert_claude_plugin_manifest(data: dict) -> dict:
+    """把 Claude Code 插件清单转换成旧 parse_manifest 能吃的形状。
+
+    只做形状转换，不改变语义：
+      - name → id（小写 + 非标识符字符换 -）
+      - main → entry
+      - hooks 的点号名映射到旧内部名（去重）
+      - permissions: full/allow → tighten（旧档位的保守面）
+      - 丢弃旧清单不认识的元数据字段
+    """
+    out: dict = {}
+    raw_id = str(data.get("id") or "").strip()
+    if not raw_id:
+        raw_name = str(data.get("name") or "").strip()
+        raw_id = re.sub(r"[^A-Za-z0-9_-]+", "-", raw_name).strip("-").lower() or "mod"
+    out["id"] = raw_id
+    out["name"] = str(data.get("name") or raw_id)
+    out["version"] = str(data.get("version") or "0.0.0")
+    out["description"] = str(data.get("description") or "")
+    out["author"] = str(data.get("author") or "")
+    entry = str(data.get("entry") or data.get("main") or "").strip()
+    out["entry"] = entry or "main.js"
+    hooks_raw = data.get("hooks")
+    legacy_hooks: list[str] = []
+    if isinstance(hooks_raw, list):
+        for h in hooks_raw:
+            hs = str(h or "").strip()
+            mapped = _CC_HOOK_TO_LEGACY.get(hs, hs if hs in MOD_HOOKS else "")
+            if mapped and mapped not in legacy_hooks:
+                legacy_hooks.append(mapped)
+    out["hooks"] = legacy_hooks
+    perm = str(data.get("permissions") or "").strip().lower()
+    out["permissions"] = perm if perm in MOD_PERMISSIONS else "tighten"
+    upstream = data.get("homepage") or data.get("repository") or ""
+    out["cc_mods"] = {"compatible": True, "upstream": str(upstream)[:300]}
+    return out
+
+
 def load_manifest_from_dir(mod_dir: Path) -> tuple[dict, Path]:
     """从 Mod 目录读清单：mod.json / mods.json（CC 别名）任一存在即可。"""
     manifest_path: Path | None = None

@@ -1,0 +1,11 @@
+{
+  "name": "blast-radius-cc",
+  "version": "1.0.0",
+  "description": "高危命令影响面（Claude Code 插件格式示例，用 tool.check 决定 allow/ask/deny）",
+  "main": "hooks/main.js",
+  "hooks": [
+    "tool.check",
+    "tool.pre"
+  ],
+  "permissions": "full"
+}

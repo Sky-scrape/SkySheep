@@ -8,6 +8,7 @@ ModManager 本体在 core/mods.py；这里只做服务层的目录落点、confi
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import uuid
@@ -15,7 +16,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from ...config import set_mods_in_config
+from ...config import set_mods_claude_in_config, set_mods_in_config
 from ...core.mods import (
     MANIFEST_NAMES,
     MAX_ENTRY_BYTES,
@@ -23,7 +24,9 @@ from ...core.mods import (
     ModManager,
     _mod_target,
     _parse_action_result,
+    convert_claude_plugin_manifest,
     delete_mod_state,
+    is_claude_plugin_manifest,
     load_mod_state,
     mods_root,
     mods_template,
@@ -32,6 +35,8 @@ from ...core.mods import (
 )
 from ...skills.installer import rmtree_force
 from ...textio import read_text_file, write_text_atomic
+
+logger = logging.getLogger("skysheep.mods_server")
 
 # 单个 Mod 包的解包上限（skills 安装同量级：Mod 只有三个文件，上限是防误选整盘）
 MAX_MOD_FILES = 200
@@ -46,6 +51,26 @@ def _read_mods_cfg() -> tuple[bool, list[str]]:
     return mods_config_from_raw(load_raw_config())
 
 
+def _read_mods_claude_cfg() -> tuple[bool, list[str]]:
+    """读 [mods_claude] 配置（Claude 兼容模式独立的开关与名单）。
+
+    与 _read_mods_cfg 同构：不同表，不互相污染。两条表由 _mods_mode 决定用哪一条。
+    """
+    from ...core.hooks import load_raw_config
+
+    raw = load_raw_config()
+    section = raw.get("mods_claude") if isinstance(raw.get("mods_claude"), dict) else {}
+    enabled = bool(section.get("enabled", False))
+    ids_raw = section.get("enabled_mods") or []
+    ids: list[str] = []
+    if isinstance(ids_raw, list):
+        for item in ids_raw:
+            text = str(item or "").strip()
+            if text and text not in ids:
+                ids.append(text)
+    return enabled, ids
+
+
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -53,9 +78,145 @@ def _now_iso() -> str:
 class ModsMixin:
     """Mods 扩展：安装/启停/删除/草稿/测试器与热生效。"""
 
+    def _mods_mode(self) -> str:
+        """当前 Mods 运行模式：'claude'（Node 无沙箱）或 'quickjs'（沙箱）。
+
+        检测基于 config.toml 的 [mods_claude].enabled，不基于 self.mods_claude
+        是否非 None——后者在「config 已启用但 _reload 还没跑 / 没装任何 Mod」时
+        可能为 None，若用它判断会把 config 写入打到错误的表上，且 list_mods
+        回退到 quickjs 管理器扫同一个 root 时报「目录里没有 mod.json」。
+        """
+        from ...core.hooks import load_raw_config
+
+        raw = load_raw_config()
+        section = raw.get("mods_claude") if isinstance(raw.get("mods_claude"), dict) else {}
+        return "claude" if section.get("enabled") else "quickjs"
+
+    def _set_mods_cfg(self, *, enabled: bool, ids: list[str]) -> None:
+        """按当前模式写 config.toml（toggle / set_enabled / install / delete 共用）。"""
+        if self._mods_mode() == "claude":
+            set_mods_claude_in_config(enabled=enabled, enabled_mods=ids)
+        else:
+            set_mods_in_config(enabled=enabled, enabled_mods=ids)
+
+    async def dispatch_mod_action(
+        self, *, mod_id: str, action_id: str, kind: str,
+        value: object, session_id: str,
+    ) -> dict:
+        """Claude 兼容模式的 UI 交互回传：投给发起它的 Mod，结果刷新界面。
+
+        Mod 用 register('ui.action', ...) 接收；返回的 ui 元素树作为
+        mod_ui 事件广播回前端（pane / above_prompt / dialog / stream）。
+        """
+        manager = getattr(self, "mods_claude", None)
+        if manager is None:
+            return {"ok": False, "error": "Claude Mods 未启用"}
+        logger.info(
+            "[mods_claude] action mod=%s id=%s kind=%s value=%r session=%s",
+            mod_id, action_id, kind, value, session_id,
+        )
+        entries = await manager.on_action(mod_id, action_id, kind, value, session_id)
+        from ...bgtasks import spawn_bg
+        from ...events import ModUI
+
+        out: list[dict] = []
+        for entry in entries:
+            if entry.get("error"):
+                out.append({"error": entry["error"]})
+                continue
+            ui = entry.get("ui")
+            if not ui:
+                continue
+            ev = ModUI(
+                mod_id=str(entry.get("mod_id", "")),
+                session_id=session_id,
+                slot=str(ui.get("slot", "stream")),
+                payload={"slot": ui.get("slot", "stream"), "tree": ui.get("tree")},
+            )
+            for ws_emit in list(self.ws_emitters):
+                try:
+                    spawn_bg(ws_emit({"kind": "event", "event": ev.model_dump()}))
+                except RuntimeError:
+                    continue
+        return {"ok": True, "mod_id": mod_id, "action_id": action_id, "entries": out}
+
     def _build_mod_manager(self) -> ModManager:
         enabled, ids = _read_mods_cfg()
         return ModManager(enabled=enabled, enabled_ids=ids)
+
+    def _build_mod_manager_claude(self):
+        """按 [mods_claude] 配置建 Claude 兼容模式管理器；未启用返回 None。
+
+        引擎能力（provider / mcp / settings）在创建时注入闭包，闭包内读
+        self 的当前值——切模型、重连 MCP 之后 Mod 拿到的是最新能力，不用重建。
+        """
+        from ...core.hooks import load_raw_config
+        from ...core.mods_claude import ClaudeModManager
+
+        raw = load_raw_config()
+        section = raw.get("mods_claude") if isinstance(raw.get("mods_claude"), dict) else {}
+        if not section.get("enabled"):
+            return None
+        ids_raw = section.get("enabled_mods") or []
+        ids = (
+            [str(x).strip() for x in ids_raw if str(x or "").strip()]
+            if isinstance(ids_raw, list) else []
+        )
+        mgr = ClaudeModManager(enabled=True, enabled_ids=ids)
+        mgr.provider_getter = lambda: self.provider
+        mgr.mcp_manager = self.mcp
+        mgr.settings_getter = self._mods_claude_settings
+        # Mod 注册新工具后重建注册表，让模型当轮就能看到
+        mgr.on_tools_changed = self._apply_registry_to_agents
+        mgr.load_all()
+        # 不因为「一个 Mod 都没装」返回 None：self.mods_claude is not None 是
+        # 全代码里判断「当前在 Claude 模式」的唯一锚点（_reload_mods_claude 用它
+        # 决定是否清 self.mods）。返回 None 会让 list/toggle 在「config 已启用
+        # 但还没装 Mod」的窗口期落回 quickjs 路径扫同一个 root、报「目录里没有
+        # mod.json」。空管理器本身开销为零：Agent 侧 on_* 遍历空 dict 即返回。
+        return mgr
+
+    def _mods_claude_settings(self) -> dict:
+        """$.settings.get 的能力面：只暴露非敏感配置（不含 api_key）。"""
+        cfg = self.cfg
+        if cfg is None:
+            return {}
+        return {
+            "default_provider": getattr(cfg, "default", ""),
+            "working_dir": str(self.working_dir or ""),
+            "max_iterations": int(getattr(cfg, "max_iterations", 0)),
+        }
+
+    def _reload_mods_claude(self) -> None:
+        """重建 Claude 兼容模式管理器并推给所有 Agent（与 _reload_mods 同位）。"""
+        old = getattr(self, "mods_claude", None)
+        try:
+            manager = self._build_mod_manager_claude()
+        except Exception as e:  # noqa: BLE001 - Mods 起不来不该拖垮应用启动
+            logger.warning("Claude Mods 加载失败：%s", e)
+            manager = None
+        if old is not None:
+            try:
+                # 旧实例的 Node 子进程在后台关掉，不阻塞切项目
+                from ...bgtasks import spawn_bg
+
+                spawn_bg(old.close())
+            except Exception:  # noqa: BLE001
+                pass
+        self.mods_claude = manager
+        if manager is not None:
+            # 两种模式互斥：Claude 兼容模式启用时关掉旧 quickjs 路径
+            self.mods = None
+            if self.gate is not None:
+                self.gate.extra_confirm = None
+        if hasattr(self, "_base_agent") and self._base_agent is not None:
+            self._base_agent.mods_claude = manager
+        for ag in self._for_each_agent():
+            if ag is not None:
+                ag.mods_claude = manager
+        for orch in getattr(self, "_teams", {}).values():
+            for ag in orch.agents():
+                ag.mods_claude = manager
 
     def sweep_mod_staging(self) -> None:
         """启动清扫：install 与 confirm 之间进程重启遗留的 .importing-* 暂存目录。
@@ -83,6 +244,20 @@ class ModsMixin:
         进程内展示状态，启停只切执行资格，不该被重建无声清空（安装/删除走
         默认 False——装的是新包、删的连 Mod 都不在了）。
         """
+        # 两种模式互斥：Claude 兼容模式启用时不建 quickjs 管理器
+        from ...core.hooks import load_raw_config
+
+        raw = load_raw_config()
+        section = raw.get("mods_claude") if isinstance(raw.get("mods_claude"), dict) else {}
+        if section.get("enabled"):
+            if self.mods is not None:
+                self.mods.close()
+            self.mods = None
+            if self.gate is not None:
+                self.gate.extra_confirm = None
+            # Claude 模式启用时，安装/启停/删除的刷新走 claude 管理器
+            self._reload_mods_claude()
+            return
         old = self.mods
         manager = self._build_mod_manager()
         if keep_recent and old is not None:
@@ -109,6 +284,9 @@ class ModsMixin:
         for orch in self._teams.values():
             for ag in orch.agents():
                 ag.mods = self.mods
+        # 旧模式刷新时也同步 Claude 管理器：两种模式的 Mod 装在同一 root，
+        # 用户切换模式后各自那一侧都是最新的（未启用时 _build 返回 None，零开销）
+        self._reload_mods_claude()
 
     def notify_mods_updated(self) -> None:
         """Mods 状态变化后广播事件（无在线连接时静默，照 notify_mcp_updated）。"""
@@ -124,7 +302,39 @@ class ModsMixin:
 
     async def list_mods(self) -> dict:
         """清单（只读方法，远程连接也可调）：不携带本机绝对路径——mods_root 在
-        用户主目录下，回传会给局域网令牌客户端暴露主目录结构，且前端并未使用。"""
+        用户主目录下，回传会给局域网令牌客户端暴露主目录结构，且前端并未使用。
+
+        按 _mods_mode 分路，两种模式各自独立管理器与配置表，不交叉。旧实现的
+        「self.mods if not None else _build_mod_manager()」在 Claude 模式下会
+        回退到 quickjs 管理器扫同一个 root、把两个 CC 插件报成「目录里没有
+        mod.json」——这是本次修的核心 bug。
+        """
+        if self._mods_mode() == "claude":
+            enabled, ids = _read_mods_claude_cfg()
+            manager = self.mods_claude
+            if manager is None:
+                manager = self._build_mod_manager_claude()
+            if manager is None:
+                # config 已启用但管理器没建起来（例如还没走过 _reload）：直接探
+                # 一下 Node 供前端展示「需要 Node.js」提示。
+                from ...core.mods_node import probe_node
+                node_ok, node_ver = probe_node()
+                return {
+                    "mods": [], "enabled": enabled,
+                    "runtime_available": node_ok, "runtime_version": node_ver,
+                    "mode": "claude",
+                }
+            items = [
+                m.public_summary(active=enabled and m.id in ids)
+                for m in manager.mods.values()
+            ]
+            return {
+                "mods": items,
+                "enabled": enabled,
+                "runtime_available": manager.node_available,
+                "runtime_version": manager.node_version,
+                "mode": "claude",
+            }
         mods = self.mods if self.mods is not None else self._build_mod_manager()
         enabled, ids = _read_mods_cfg()
         items = [
@@ -136,10 +346,23 @@ class ModsMixin:
             "enabled": enabled,
             "runtime_available": mods.runtime_available,
             "runtime_version": mods.runtime_version,
+            "mode": "quickjs",
         }
 
     async def get_mod(self, mod_id: str) -> dict:
         """详情（只读方法，远程连接也可调）：同 list_mods，不回本机绝对路径。"""
+        if self._mods_mode() == "claude":
+            manager = self.mods_claude or self._build_mod_manager_claude()
+            if manager is None or mod_id not in manager.mods:
+                raise RuntimeError("Mod 不存在：" + mod_id)
+            mod = manager.mods[mod_id]
+            enabled, ids = _read_mods_claude_cfg()
+            return {
+                "mod": mod.public_summary(active=enabled and mod.id in ids),
+                "manifest": dict(mod.manifest),
+                "readme": read_mod_readme(mod.dir),
+                "recent": [],
+            }
         mods = self.mods if self.mods is not None else self._build_mod_manager()
         mod = mods.mods.get(mod_id)
         if mod is None:
@@ -157,14 +380,26 @@ class ModsMixin:
     # ---- 安装（两段确认：needs_confirm + install_token，照 mcp stdio 导入模式） ----
 
     def _mod_source_candidates(self, staging: Path) -> list[Path]:
-        """staging 里含清单的候选目录（mod.json/mods.json 任一，最浅层优先）。"""
+        """staging 里含清单的候选目录（最浅层优先）。
+
+        三种清单位置都认：
+          - <dir>/mod.json / <dir>/mods.json    —— SkySheep / CC Mods 别名
+          - <dir>/.claude-plugin/plugin.json    —— Claude Code 插件标准位置
+        """
         found: list[Path] = []
         for dirpath, dirnames, filenames in os.walk(staging):
-            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-            if any(name in MANIFEST_NAMES for name in filenames):
-                found.append(Path(dirpath))
+            # 不跳过 .claude-plugin：它是清单的标准位置。其余点开头目录
+            # （.git / .importing-* 等）照旧跳过。
+            dirnames[:] = sorted(
+                d for d in dirnames if not d.startswith(".") or d == ".claude-plugin"
+            )
+            cur = Path(dirpath)
+            has_manifest = any(name in MANIFEST_NAMES for name in filenames)
+            if not has_manifest and (cur / ".claude-plugin" / "plugin.json").is_file():
+                has_manifest = True
+            if has_manifest:
+                found.append(cur)
                 dirnames[:] = []  # Mod 目录内部不再下钻
-        # 最浅层优先：zip 外层包装目录里的才算
         found.sort(key=lambda p: len(p.relative_to(staging).parts))
         return found
 
@@ -211,7 +446,13 @@ class ModsMixin:
             zf.extractall(staging, members=members)
 
     def _preview_staged_mod(self, staging: Path, manifest_path: Path) -> dict:
-        """安装预览：id/hooks/permissions 档/收紧表/文件数与字节/main.js 前 40 行。"""
+        """安装预览：id/hooks/permissions 档/收紧表/文件数与字节/入口前 40 行。
+
+        同时支持两种清单格式：
+          - SkySheep 旧格式（mod.json / mods.json）：parse_manifest 严格校验
+          - Claude Code 插件格式（.claude-plugin/plugin.json）：先转换成旧形状
+            再校验（convert_claude_plugin_manifest）
+        """
         try:
             tf = read_text_file(manifest_path)
         except OSError as e:
@@ -220,8 +461,15 @@ class ModsMixin:
             data = json.loads(tf.text)
         except ValueError as e:
             raise ModError(f"清单不是有效 JSON：{e}") from e
+        # Claude Code 插件格式：形状转换后再走同一套严格校验
+        if is_claude_plugin_manifest(data, manifest_path):
+            data = convert_claude_plugin_manifest(data)
         manifest = parse_manifest(data, source_label=str(manifest_path))
+        # mod_dir 是 Mod 根目录：CC 清单在 .claude-plugin/ 里，但 entry 与
+        # 全部文件路径都相对 Mod 根（hooks/main.js 而非 .claude-plugin/hooks/main.js）
         mod_dir = manifest_path.parent
+        if mod_dir.name == ".claude-plugin":
+            mod_dir = mod_dir.parent
         entry_path = mod_dir / manifest["entry"]
         # 入口必须 resolve 后仍在 Mod 目录内（防穿越）
         root_resolved = mod_dir.resolve()
@@ -276,10 +524,18 @@ class ModsMixin:
         try:
             candidates = self._mod_source_candidates(staging)
             if not candidates:
-                raise ModError("没有找到 Mod：目录里需要 mod.json（或 CC 别名 mods.json）")
-            manifest_path = candidates[0] / (
-                "mod.json" if (candidates[0] / "mod.json").is_file() else "mods.json"
-            )
+                raise ModError(
+                    "没有找到 Mod：目录里需要 mod.json（或 CC 别名 mods.json、"
+                    "或 .claude-plugin/plugin.json）"
+                )
+            # 三种清单位置，优先级与 core.mods_claude.MANIFEST_CANDIDATES 一致
+            base = candidates[0]
+            if (base / "mod.json").is_file():
+                manifest_path = base / "mod.json"
+            elif (base / "mods.json").is_file():
+                manifest_path = base / "mods.json"
+            else:
+                manifest_path = base / ".claude-plugin" / "plugin.json"
             preview = self._preview_staged_mod(staging, manifest_path)
         except ModError:
             shutil.rmtree(staging, ignore_errors=True)
@@ -357,10 +613,13 @@ class ModsMixin:
             json.dumps({"source": "bundled", "installed_at": _now_iso()},
                        ensure_ascii=False),
         )
-        _enabled, ids = _read_mods_cfg()
+        if self._mods_mode() == "claude":
+            _enabled, ids = _read_mods_claude_cfg()
+        else:
+            _enabled, ids = _read_mods_cfg()
         if str(mod_id) not in ids:
             ids.append(str(mod_id))
-        set_mods_in_config(enabled=True, enabled_mods=ids)
+        self._set_mods_cfg(enabled=True, ids=ids)
         self._reload_mods()
         self.notify_mods_updated()
         return {"installed": str(mod_id), "enabled": True}
@@ -391,15 +650,31 @@ class ModsMixin:
             raise RuntimeError("Mod 不存在：" + str(mod_id))
         rmtree_force(target)
         delete_mod_state(str(mod_id))
-        _enabled, ids = _read_mods_cfg()
+        if self._mods_mode() == "claude":
+            enabled, ids = _read_mods_claude_cfg()
+        else:
+            enabled, ids = _read_mods_cfg()
         if str(mod_id) in ids:
             ids.remove(str(mod_id))
-            set_mods_in_config(enabled=_enabled, enabled_mods=ids)
+            self._set_mods_cfg(enabled=enabled, ids=ids)
         self._reload_mods()
         self.notify_mods_updated()
         return {"deleted": str(mod_id)}
 
     async def toggle_mod(self, mod_id: str, enabled: bool) -> dict:
+        if self._mods_mode() == "claude":
+            manager = self.mods_claude or self._build_mod_manager_claude()
+            if manager is not None and mod_id not in manager.mods:
+                raise RuntimeError("Mod 不存在：" + mod_id)
+            cur_enabled, ids = _read_mods_claude_cfg()
+            if enabled and mod_id not in ids:
+                ids.append(mod_id)
+            if not enabled and mod_id in ids:
+                ids.remove(mod_id)
+            self._set_mods_cfg(enabled=cur_enabled, ids=ids)
+            self._reload_mods(keep_recent=True)
+            self.notify_mods_updated()
+            return {"id": mod_id, "enabled": bool(enabled)}
         mods = self.mods if self.mods is not None else self._build_mod_manager()
         if str(mod_id) not in mods.mods:
             raise RuntimeError("Mod 不存在：" + str(mod_id))
@@ -408,7 +683,7 @@ class ModsMixin:
             ids.append(str(mod_id))
         if not enabled and str(mod_id) in ids:
             ids.remove(str(mod_id))
-        set_mods_in_config(enabled=cur_enabled, enabled_mods=ids)
+        self._set_mods_cfg(enabled=cur_enabled, ids=ids)
         # 启停只切执行资格，不换 Mod 本体：「最近执行」贴回，否则停用再启用，
         # 用户视角执行历史无声消失，与「停用后保留安装」的文案预期相悖
         self._reload_mods(keep_recent=True)
@@ -416,8 +691,14 @@ class ModsMixin:
         return {"id": str(mod_id), "enabled": bool(enabled)}
 
     async def set_mods_enabled(self, enabled: bool) -> dict:
+        if self._mods_mode() == "claude":
+            _cur, ids = _read_mods_claude_cfg()
+            self._set_mods_cfg(enabled=bool(enabled), ids=ids)
+            self._reload_mods(keep_recent=True)
+            self.notify_mods_updated()
+            return {"enabled": bool(enabled)}
         _cur, ids = _read_mods_cfg()
-        set_mods_in_config(enabled=bool(enabled), enabled_mods=ids)
+        self._set_mods_cfg(enabled=bool(enabled), ids=ids)
         # 总开关同款：关开之间不清「最近执行」（同一进程周期的展示状态）
         self._reload_mods(keep_recent=True)
         self.notify_mods_updated()

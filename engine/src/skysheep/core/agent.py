@@ -98,6 +98,7 @@ class Agent:
         compaction_auto: bool = True,
         hooks=None,
         mods=None,
+        mods_claude=None,
         restrict_to_workdir: bool = False,
         session_id: str = "",
         job_containment: bool = True,
@@ -123,6 +124,10 @@ class Agent:
         # 天然不挂（ mods 的 JS handler 全在权限门之后，且对门只能收紧；见
         # core/mods.py）
         self.mods = mods
+        # core.mods_claude.ClaudeModManager | None：Claude Code 兼容模式。
+        # 与 self.mods 二选一（由 backend 按配置决定传哪个）；两个都非 None
+        # 时以 mods_claude 为准、mods 分支被跳过。见 core/mods_claude.py
+        self.mods_claude = mods_claude
         self.restrict_to_workdir = restrict_to_workdir
         # 命令执行沙箱化一期：run_command 子进程纳入 Job Object 进程遏制
         # （security/sandbox_win.py，仅 Windows，失败自动降级）。默认开。
@@ -381,6 +386,28 @@ class Agent:
             )
             return out
 
+        def _claude_ui_events(entries: list[dict]) -> list[AgentEvent]:
+            """把 on_event 返回的 ui 条目转成 ModUI 事件（共用同一轮上限）。"""
+            nonlocal mod_ui_budget
+            out: list[AgentEvent] = []
+            for entry in entries or []:
+                ui = entry.get("ui")
+                if not ui:
+                    continue
+                if mod_ui_budget <= 0:
+                    if not mod_ui_overflow["warned"]:
+                        mod_ui_overflow["warned"] = True
+                        out.append(NoticeEvent(message="Mods 片段已达本轮上限（50 条），其余已省略"))
+                    return out
+                mod_ui_budget -= 1
+                out.append(ModUI(
+                    mod_id=str(entry.get("mod_id", "")),
+                    session_id=self.session_id,
+                    slot=str(ui.get("slot", "stream")),
+                    payload={"slot": ui.get("slot", "stream"), "tree": ui.get("tree")},
+                ))
+            return out
+
         def _mod_deny_parts(tu: ToolUseBlock, note: str) -> tuple[Message, AgentEvent, AgentEvent]:
             """Mod 否决/拦截的工具调用按「用户拒绝」同一形态落历史与事件流
             （与 514-528 的 deny 分支同构）：deny tool_result 进历史 + 工具卡
@@ -423,11 +450,25 @@ class Agent:
             iterations = iteration
             yield TurnStarted(iteration=iteration)
             # 3a5. Mod 迭代开始（迭代级，非回合级：一次提交会触发多次）——仅 ui
-            if self.mods is not None:
+            if self.mods is not None and self.mods_claude is None:
                 it_verdict = await self.mods.on_iteration_start(self.session_id, iteration)
                 for ev in _mod_notices(it_verdict.get("errors") or []):
                     yield ev
                 for ev in _take_mod_ui(it_verdict.get("ui") or []):
+                    yield ev
+            elif self.mods_claude is not None:
+                it_entries = await self.mods_claude.on_event(
+                    "iteration.start",
+                    {"iteration": int(iteration),
+                     "contextTokens": self.used_context_tokens()},
+                    self.session_id,
+                )
+                for entry in it_entries:
+                    if entry.get("error"):
+                        yield NoticeEvent(
+                            message=f"[mods] {entry['mod_id']}: {entry['error']}"
+                        )
+                for ev in _claude_ui_events(it_entries):
                     yield ev
 
             # turn 内压缩复查：单轮内工具结果可膨胀数十 k token，只在开头
@@ -611,10 +652,50 @@ class Agent:
                     i += 1
                     continue
 
+                # 3a-claude. Claude Code 兼容模式：tool.check 决定 allow / ask /
+                # deny + 可改写 input（"input" 字段出现即重写 tu.input，后续步骤
+                # 全部使用改写后的参数；assistant 历史消息保持模型原始输出不变）。
+                # 与下面 3a0 的旧 quickjs 模式互斥：self.mods 与 self.mods_claude
+                # 由 backend 二选一传入，一般不会同时非 None。
+                mod_force_allow = False
+                mod_force_pending = False
+                if self.mods_claude is not None:
+                    check = await self.mods_claude.on_tool_check(
+                        tu.name, tu.input, self.session_id,
+                    )
+                    for err in check.get("errors") or []:
+                        yield NoticeEvent(message=f"[mods] {err}")
+                    mdec = check.get("decision")
+                    if mdec == "deny":
+                        deny_msg, deny_started, deny_finished = _mod_deny_parts(
+                            tu, check.get("reason") or "denied by mod",
+                        )
+                        self.history.append(deny_msg)
+                        yield deny_started
+                        yield deny_finished
+                        i += 1
+                        continue
+                    if check.get("input") is not None:
+                        new_input = check["input"]
+                        tu = tu.model_copy(update={"input": new_input})
+                        tool_uses[i] = tu
+                        # 同步历史里的 assistant 消息：tool_use.input 必须与即将
+                        # 落库的 tool_result 一致，否则下次模型调用看到「input=a
+                        # 但 result 说的是 b」的协议不自洽。assistant 是本轮
+                        # 刚 append 的消息对象，改它的 content 即改历史。
+                        for blk in assistant.content:
+                            if isinstance(blk, ToolUseBlock) and blk.id == tu.id:
+                                blk.input = new_input
+                                break
+                    if mdec == "allow":
+                        mod_force_allow = True
+                    elif mdec == "ask":
+                        mod_force_pending = True
+
                 # 3a0. Mod 收紧声明（declarative.deny_tools）：authorize 之前的
                 # 纯 Python 查询，命中即拒绝——比门更早的收紧，不创建 pending、
                 # 不弹确认卡，与 514-528 的 deny 分支同构落历史与事件
-                if self.mods is not None:
+                if self.mods is not None and self.mods_claude is None:
                     mod_deny_reason = self.mods.declarative_deny(tu.name, tu.input)
                     if mod_deny_reason:
                         deny_msg, deny_started, deny_finished = _mod_deny_parts(
@@ -626,8 +707,14 @@ class Agent:
                         i += 1
                         continue
 
-                # 3a. 权限确认（READONLY 或白名单命中时 authorize 返回 None）
-                pending = await self.gate.authorize(tool, tu.input)
+                # 3a. 权限确认（READONLY 或白名单命中时 authorize 返回 None）。
+                # Claude Code 兼容模式可能注入 force_allow / force_pending，
+                # 分别跳过自动放行分支 / 强制落到 pending（见 gate.authorize）
+                pending = await self.gate.authorize(
+                    tool, tu.input,
+                    force_allow=mod_force_allow,
+                    force_pending=mod_force_pending,
+                )
                 if pending is not None:
                     self._pending[pending.request_id] = pending
                     # Mod 权限请求挂点（门后）：附加信息 / 否决（替用户提前拒绝，
@@ -639,7 +726,7 @@ class Agent:
                             tu.name, tu.input, pending.safety.value,
                             pending.detail, self.session_id,
                         )
-                        if self.mods is not None else None
+                        if self.mods is not None and self.mods_claude is None else None
                     )
                     if perm_mod_verdict is not None:
                         for ev in _mod_notices(perm_mod_verdict.get("errors") or []):
@@ -660,9 +747,14 @@ class Agent:
                         for ev in _take_mod_ui(perm_mod_verdict.get("ui") or []):
                             yield ev
                     # 预告「总是允许」将写入的规则：与落库共用同一个对象，
-                    # 确认弹窗显示的范围就是之后实际生效的范围
-                    always_rule = pending.always_rule or self.gate.rule_for(
-                        tool, tu.input, self.gate.working_dir)
+                    # 确认弹窗显示的范围就是之后实际生效的范围。
+                    # force_pending（Claude 兼容模式的 ask）时始终给空 kind：
+                    # 不得提供「总是允许」，否则一次点选即永久绕过 Mod。
+                    if mod_force_pending:
+                        always_rule = None
+                    else:
+                        always_rule = pending.always_rule or self.gate.rule_for(
+                            tool, tu.input, self.gate.working_dir)
                     yield PermissionRequest(
                         request_id=pending.request_id,
                         tool_name=tu.name,
@@ -671,8 +763,8 @@ class Agent:
                         detail=pending.detail,
                         diff=pending.diff,
                         note=pending.note,
-                        rule_kind=always_rule.kind,
-                        rule_pattern=always_rule.pattern,
+                        rule_kind=always_rule.kind if always_rule else "",
+                        rule_pattern=always_rule.pattern if always_rule else "",
                         origin=pending.origin,
                         scope=pending.scope,
                         reversible=pending.reversible,
@@ -688,7 +780,10 @@ class Agent:
                         self._pending.pop(pending.request_id, None)
                     yield PermissionResolved(request_id=pending.request_id, decision=decision)
 
-                    if decision == Decision.ALLOW_ALWAYS:
+                    if decision == Decision.ALLOW_ALWAYS and always_rule is not None:
+                        # always_rule 为 None（force_pending 路径 / 无规则可提炼）
+                        # 时前端不应显示「总是允许」，但旧客户端仍可能发出该决策：
+                        # 静默降级为「本次允许」，不落规则——否则一次点选即绕过 Mod
                         await self.gate.persist_rule(always_rule)
                     if decision == Decision.DENY:
                         self.history.append(
@@ -729,7 +824,7 @@ class Agent:
 
                 # 3b2. Mod 工具调用前（门后，hooks 已拦截则不达）：deny / note / ui。
                 # 没有任何 modify 能力——tu.input 从这里往后的全部路径都不再有写点
-                if self.mods is not None:
+                if self.mods is not None and self.mods_claude is None:
                     pre_verdict = await self.mods.on_tool_pre(
                         tu.name, tu.input, self.session_id, self.used_context_tokens()
                     )
@@ -749,8 +844,15 @@ class Agent:
                     if pre_verdict.get("note"):
                         yield NoticeEvent(message=pre_verdict["note"])
 
-                # 并发窗口：从这里起收集连续的免确认只读工具一起跑
-                if tool.safety == Safety.READONLY:
+                # 并发窗口：从这里起收集连续的免确认只读工具一起跑。
+                # Claude Code 兼容模式启用时禁用并发批：tool.check 可能对批内
+                # 任一成员给出 ask/deny/rewrite，而批路径不调用 authorize——
+                # 直接并发会让 ask 与 rewrite 被静默丢弃。退化串行、安全第一
+                # （与旧 Mods 的 has_tool_pre 断批同款取舍）。
+                batch_blocked_by_mods = (
+                    self.mods_claude is not None and self.mods_claude.has_active()
+                )
+                if tool.safety == Safety.READONLY and not batch_blocked_by_mods:
                     batch: list[tuple[ToolUseBlock, Tool, dict]] = [(tu, tool, {})]
                     j = i + 1
                     while j < len(tool_uses):
@@ -772,7 +874,7 @@ class Agent:
                         # Mods 挂点存在时也不并发：toolPre 要逐个观察/拦截
                         # READONLY 成员，declarative（deny/require_confirm）要
                         # 逐个判定；命中即断批回退串行路径（plan-mods 挂点 3）
-                        if self.mods is not None and (
+                        if self.mods is not None and self.mods_claude is None and (
                             await self.mods.has_tool_pre() or self.mods.has_declarative
                         ):
                             break
@@ -820,7 +922,7 @@ class Agent:
                                 yield ScheduleUpdated()
                             # 3d2. Mod 工具调用后（并发批收割点）：只观察，不能改
                             # 结果与历史（落笔在上面已完成）
-                            if self.mods is not None:
+                            if self.mods is not None and self.mods_claude is None:
                                 post_verdict = await self.mods.on_tool_post(
                                     b_tu.name, b_tu.input,
                                     truncate_output(result, MAX_TOOL_PREVIEW),
@@ -855,7 +957,7 @@ class Agent:
                         pass
 
                 # 3d2. Mod 工具调用后（串行收割点）：只观察（note / ui）
-                if self.mods is not None:
+                if self.mods is not None and self.mods_claude is None:
                     post_verdict = await self.mods.on_tool_post(
                         tu.name, tu.input, truncate_output(result, MAX_TOOL_PREVIEW),
                         is_error, duration_ms,
@@ -926,7 +1028,7 @@ class Agent:
                 pass
         # 3e. Mod 回合结束（stop_reason ∈ {end_turn, max_iterations, error}；
         # 取消路径到不了这里，无需排除）。仅观察 + ui，不阻塞收尾。
-        if self.mods is not None:
+        if self.mods is not None and self.mods_claude is None:
             stop_verdict = await self.mods.on_turn_stop(
                 stop_reason, iterations, self.session_id, self.used_context_tokens(),
                 self.context_limit_tokens,
@@ -934,6 +1036,21 @@ class Agent:
             for ev in _mod_notices(stop_verdict.get("errors") or []):
                 yield ev
             for ev in _take_mod_ui(stop_verdict.get("ui") or []):
+                yield ev
+        elif self.mods_claude is not None:
+            entries = await self.mods_claude.on_event(
+                "turn.stop",
+                {
+                    "stopReason": stop_reason, "iterations": int(iterations),
+                    "contextTokens": self.used_context_tokens(),
+                    "contextLimitTokens": int(self.context_limit_tokens),
+                },
+                self.session_id,
+            )
+            for entry in entries:
+                if entry.get("error"):
+                    yield NoticeEvent(message=f"[mods] {entry['mod_id']}: {entry['error']}")
+            for ev in _claude_ui_events(entries):
                 yield ev
         yield TurnFinished(
             stop_reason=stop_reason, iterations=iterations,

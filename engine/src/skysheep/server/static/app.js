@@ -4313,7 +4313,11 @@ function handleEvent(kind, data) {
       }
       break;
     }
-    case "mod_ui": onModUi(data); break;
+    case "mod_ui":
+      // Claude 兼容模式的元素树走 onModUiTree；旧的 widget 词表走 onModUi
+      if (data.payload && data.payload.tree) onModUiTree(data);
+      else onModUi(data);
+      break;
     case "mods_updated": {
       // Mods 安装/启停/删除后的广播（notify_mods_updated）：设置页开着就重绘清单
       if (settingsOpen) renderModsCfg().catch(() => {});
@@ -4589,12 +4593,40 @@ function showPermission(data) {
   // 独立样式区渲染——第三方文本不上无标识的安全确认卡
   const modNoteEl = document.getElementById("perm-mod-note");
   if (modNoteEl) {
-    const lines = [];
-    if (data.mod_note) lines.push(escapeHtml(data.mod_note));
+    // 用 DOM 构建而非 innerHTML 拼接：Mod 元素树是结构化节点，必须走
+    // textContent 落地；旧的字符串片段（html 已 escape）用 <br> 分隔保持原样。
+    modNoteEl.replaceChildren();
+    let hasContent = false;
+    if (data.mod_note) {
+      const line = document.createElement("div");
+      line.innerHTML = escapeHtml(data.mod_note);
+      modNoteEl.appendChild(line);
+      hasContent = true;
+    }
     const sidLines = pendingPermModLines.get(data.session_id || "");
-    if (sidLines && sidLines.length) lines.push(sidLines.join("<br>"));
-    modNoteEl.innerHTML = lines.join("<br>");
-    modNoteEl.hidden = !lines.length;
+    if (sidLines && sidLines.length) {
+      sidLines.forEach((entry) => {
+        if (entry && typeof entry === "object" && entry.tree) {
+          const el = buildModNode(entry.tree);
+          if (!el) return;
+          const wrap = document.createElement("div");
+          wrap.className = "mod-tree";
+          const cap = document.createElement("span");
+          cap.className = "mod-frag-src";
+          cap.textContent = "Mod·" + (entry.modId || "");
+          wrap.appendChild(cap);
+          wrap.appendChild(el);
+          modNoteEl.appendChild(wrap);
+          hasContent = true;
+        } else if (typeof entry === "string" && entry) {
+          const line = document.createElement("div");
+          line.innerHTML = entry;
+          modNoteEl.appendChild(line);
+          hasContent = true;
+        }
+      });
+    }
+    modNoteEl.hidden = !hasContent;
   }
   // 「总是允许」将写入的规则范围（由 gate.rule_for 生成后随事件下发）：
   // 点按钮前就能看到它会放行多大范围，而不是事后到设置里才发现

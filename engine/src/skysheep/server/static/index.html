@@ -225,6 +225,10 @@
         </div>
 
         <div id="chat">
+          <!-- Mods（Claude 兼容模式）元素树区域：Pane 常驻面板宿主（每 Mod 一个槽） -->
+          <div id="mod-pane-host" class="mod-pane-host hidden"></div>
+          <!-- Mod 对话框（模态浮层，点背景或 ✕ 关闭） -->
+          <div id="mod-dialog-host" class="mod-dialog-host hidden"></div>
           <!-- 对话内查找条（Ctrl+F）：在消息里找词、上下跳转、高亮 -->
           <div id="find-bar" class="find-bar hidden">
             <input id="find-input" type="text" placeholder="在本对话里查找…" autocomplete="off">
@@ -281,6 +285,8 @@
         <footer id="composer">
           <div id="image-tray" class="image-tray hidden"></div>
           <div id="ref-tray" class="ref-tray hidden"></div>
+          <!-- Mods（Claude 兼容模式）元素树区域：AbovePrompt 常驻条（输入框上方） -->
+          <div id="mod-above-prompt" class="mod-above-prompt hidden"></div>
           <textarea id="input" rows="2" placeholder="描述你的任务…"></textarea>
           <div id="composer-bar">
             <!-- 功能开关收成小图标：悬停看说明，激活亮主题色（规划蓝 / 圆桌紫 / 写入金） -->
@@ -1208,14 +1214,17 @@
               <h3>Mods 扩展（实验性）</h3>
               <label class="toggle-row"><input type="checkbox" id="mods-toggle"><span>启用 Mods</span></label>
             </div>
-            <p class="settings-hint">
+            <!-- 三条说明按当前运行模式改写（renderModsCfg 填文本）：quickjs 沙箱 vs
+                 Claude 兼容（Node.js 无沙箱）。默认文案是 quickjs 口径，Claude 模式下
+                 JS 会换掉，避免出现「只能收紧」这种与实际能力相反的安全承诺。 -->
+            <p class="settings-hint" id="mods-intro">
               Mod 是<b>第三方编写的事件处理扩展</b>：挂在工具调用前后、权限请求与回合生命周期上，
               做观察、提示或<b>收紧</b>（拒绝 / 要求确认）。
             </p>
-            <ul class="settings-hint hint-points">
-              <li><b>安全底线</b>：对权限门<b>只能收紧、永不放行</b>，也不能修改工具参数。</li>
-              <li>代码跑在引擎侧沙箱，无文件 / 网络 / 进程能力。</li>
-              <li>界面里的 Mod 片段是固定渲染器画的声明式小部件，Mod 无法自由绘制界面。</li>
+            <ul class="settings-hint hint-points" id="mods-hints">
+              <li id="mods-hint-safety"><b>安全底线</b>：对权限门<b>只能收紧、永不放行</b>，也不能修改工具参数。</li>
+              <li id="mods-hint-sandbox">代码跑在引擎侧沙箱，无文件 / 网络 / 进程能力。</li>
+              <li id="mods-hint-ui">界面里的 Mod 片段是固定渲染器画的声明式小部件，Mod 无法自由绘制界面。</li>
             </ul>
             <div id="mods-runtime-status" class="card-status" hidden></div>
             <div id="mods-status" class="card-status" hidden></div>
@@ -1233,6 +1242,9 @@
               安装位置在本机用户目录的 <code>.skysheep\mods\</code>；安装来源是本机文件夹（含 mod.json）
               或 .zip 压缩包。安装前会先展示内容预览，确认后才落盘。
             </p>
+            <!-- mods-root-hint 的文案由 renderModsCfg 按运行模式覆写：Claude 兼容模式
+                 同时认 .claude-plugin/plugin.json，与 quickjs 模式的说明不同 -->
+            
             <ul id="mods-list" class="list settings-skill-list"></ul>
           </section>
 

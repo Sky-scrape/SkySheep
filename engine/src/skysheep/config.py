@@ -953,6 +953,41 @@ def set_mods_in_config(
     _write_raw_config(p, raw)
 
 
+def set_mods_claude_in_config(
+    *,
+    enabled: bool | None = None,
+    enabled_mods: list[str] | None = None,
+) -> None:
+    """写入 config.toml 的 [mods_claude] 表（Claude 兼容模式，None 表示该项不动）。
+
+    与 set_mods_in_config 同姿态：每组全空时删整表，坏条目不静默清洗。
+    """
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError("Mods 总开关只能是 true / false")
+    cleaned: list[str] | None = None
+    if enabled_mods is not None:
+        if not isinstance(enabled_mods, list):
+            raise ConfigError("启用 Mods 的名单必须是字符串数组")
+        cleaned = []
+        for i, item in enumerate(enabled_mods, start=1):
+            text = str(item or "").strip()
+            if not text:
+                raise ConfigError(f"启用 Mods 名单第 {i} 项是空的")
+            if text not in cleaned:
+                cleaned.append(text)
+    p, raw = _read_raw_config()
+    section = dict(raw.get("mods_claude") or {})
+    if enabled is not None:
+        section["enabled"] = enabled
+    if cleaned is not None:
+        section["enabled_mods"] = cleaned
+    if not section.get("enabled") and not section.get("enabled_mods"):
+        raw.pop("mods_claude", None)
+    else:
+        raw["mods_claude"] = section
+    _write_raw_config(p, raw)
+
+
 def _clean_hook_items(items: list, *, with_match: bool = True) -> list[dict]:
     """校验并整理钩子条目（坏条目直接报错，而不是静默丢掉）。"""
     out: list[dict] = []

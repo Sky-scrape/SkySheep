@@ -5662,6 +5662,71 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 .mod-tl-t { flex-shrink: 0; min-width: 64px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .mod-tl-text { color: var(--text2); word-break: break-word; }
 
+/* ---- Claude 兼容模式：元素树渲染（P3） ---- */
+/* 容器：Pane 在对话区顶部常驻，AbovePrompt 在输入框上方常驻 */
+.mod-pane-host {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 0 0 8px; flex-shrink: 0;
+}
+.mod-above-prompt {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-bottom: 6px;
+}
+.mod-pane, .mod-above { display: flex; flex-direction: column; }
+.mod-tree {
+  display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--line2); border-left: 3px solid var(--blue);
+  border-radius: var(--r-sm); background: var(--paper-raised);
+  font-size: 12px; line-height: 1.55; max-width: 100%;
+}
+.mod-box { display: flex; gap: 6px; width: 100%; min-width: 0; }
+.mod-box.mod-dir-row { flex-direction: row; align-items: center; }
+.mod-box.mod-dir-column { flex-direction: column; align-items: stretch; }
+.mod-text { color: var(--text2); word-break: break-word; min-width: 0; }
+.mod-text.mod-tone-dim { color: var(--dim); }
+.mod-text.mod-tone-ok { color: var(--down); }
+.mod-text.mod-tone-warn { color: var(--gold); }
+.mod-text.mod-tone-danger { color: var(--up); font-weight: 600; }
+.mod-btn {
+  flex-shrink: 0; padding: 3px 10px; font-size: 11.5px; font-weight: 600;
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  background: var(--paper); color: var(--text2); cursor: pointer;
+}
+.mod-btn:hover { border-color: var(--blue); color: var(--blue); }
+.mod-btn.mod-btn-primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+.mod-btn.mod-btn-danger { border-color: var(--up); color: var(--up); }
+.mod-input, .mod-select {
+  flex: 1 1 120px; min-width: 0; padding: 3px 8px; font-size: 12px;
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  background: var(--paper-inset); color: var(--text); font-family: inherit;
+}
+.mod-image { max-width: 100%; border-radius: var(--r-sm); border: 1px solid var(--line2); }
+
+/* Mod 对话框：模态浮层 */
+.mod-dialog-host {
+  position: fixed; inset: 0; z-index: 900;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.mod-dialog {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.mod-dialog-card {
+  position: relative; max-width: min(560px, 90vw); max-height: 80vh; overflow: auto;
+  padding: 16px 18px;
+  background: var(--paper-raised); border: 1px solid var(--line2);
+  border-radius: var(--r-md, 8px); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.mod-dialog-close {
+  position: absolute; top: 6px; right: 8px;
+  background: none; border: none; cursor: pointer;
+  font-size: 14px; color: var(--dim); padding: 2px 6px;
+}
+.mod-dialog-close:hover { color: var(--text); }
+
 /* 设置 · Mods 扩展：清单行（复用 settings-skill-list 的列表节奏） */
 li.mod-row {
   align-items: flex-start; padding: 10px 12px; cursor: default;

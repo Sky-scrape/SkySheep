@@ -92,7 +92,9 @@ class ChannelGate(PermissionGate):
         # （审查 P3-15）。
         self.turn_chat_id = ""
 
-    async def authorize(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
+    async def authorize(
+        self, tool: Tool, input_dict: dict, **kwargs,
+    ) -> PendingPermission | None:
         # 出站密钥防线先于名单放行（_egress_pre_deny 对 READONLY 内部短路）：
         # 渠道是无人值守通道，注入最需要防的路径——预授权名单不能成为已知
         # 密钥外传的免确认通道，开不开审批都一样拦。
@@ -124,7 +126,7 @@ class ChannelGate(PermissionGate):
 
         # 未开启审批：等价 HeadlessGate——立刻拒绝，不阻塞。
         if not self.approve_enabled:
-            pending = await super().authorize(tool, input_dict)
+            pending = await super().authorize(tool, input_dict, **kwargs)
             if pending is not None:
                 # 先把 future 落定再返回，循环拿到的是"已拒绝"的结果
                 pending.resolve(Decision.DENY)
@@ -132,7 +134,7 @@ class ChannelGate(PermissionGate):
 
         # 开启审批：先生成 PendingPermission（父类会把 on_request 回调跑掉，
         # 这里不用 on_request 而自己记 waiting，避免两处状态不一致）
-        pending = await super().authorize(tool, input_dict)
+        pending = await super().authorize(tool, input_dict, **kwargs)
         if pending is None:
             return None
         self.waiting[pending.request_id] = pending

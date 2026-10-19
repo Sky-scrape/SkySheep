@@ -76,7 +76,8 @@ class PreferencesMixin:
     # 在合并前就漏收过，一并补上）；terminal 是更早的终端标签，留着不碍事。
     RIGHT_TAB_IDS = (
         "aux", "review", "browser", "files", "tasks", "agenda", "auto", "memory", "ext",
-        "todo", "ptasks", "cron", "pipeline", "terminal",
+        "todo", "ptasks", "cron", "pipeline", "relay", "terminal",
+        "mcp", "skills",  # ext（MCP / Skills）的分段 id：right_active 存的就是它
     )
     # 会话标签恢复：session.tabs 存 sid 数组（与 tab_order 同款上限），
     # session.active 存激活的 sid。都在前端写（标签开/关/切换时），
@@ -170,6 +171,14 @@ class PreferencesMixin:
             seen: set[str] = set()
             deduped = [x for x in torder if not (x in seen or seen.add(x))]
             prefs["tab_order"] = deduped
+        # 顶栏模型菜单的服务列拖动序（服务名数组）：与 tab_order 同款去重
+        porder = data.get("provider_order")
+        if isinstance(porder, list) and porder and all(
+            isinstance(x, str) and x for x in porder
+        ):
+            seen_p: set[str] = set()
+            deduped_p = [x for x in porder if not (x in seen_p or seen_p.add(x))]
+            prefs["provider_order"] = deduped_p[:100]
         nlog = self._clean_notif_log(data.get("notif_log"))
         if nlog:
             prefs["notif_log"] = nlog
@@ -293,6 +302,7 @@ class PreferencesMixin:
         for key, val in (prefs or {}).items():
             known = ("right_tabs", "right_active", "project_order", "quick_pos",
                      "session_order", "tab_order", "session_tabs", "session_active",
+                     "provider_order",
                      "hotkey", "default_model_name", "default_model_provider",
                      "aux_model_name", "aux_model_provider",
                      "notif_log")
@@ -352,6 +362,23 @@ class PreferencesMixin:
                         current.pop("project_order", None)
                 else:
                     current.pop("project_order", None)
+                continue
+            if key == "provider_order":
+                # 顶栏模型菜单里服务列的拖动序（服务名字符串数组）：只收非空字符串，
+                # 去重封顶 100；一个有效项都没有时删键（= 未自定义排序，按后端默认序）
+                if isinstance(val, list):
+                    seen_p: list[str] = []
+                    for x in val:
+                        if isinstance(x, str) and x and x not in seen_p:
+                            seen_p.append(x)
+                            if len(seen_p) >= 100:
+                                break
+                    if seen_p:
+                        current["provider_order"] = seen_p
+                    else:
+                        current.pop("provider_order", None)
+                else:
+                    current.pop("provider_order", None)
                 continue
             if key == "quick_pos":
                 # 快聊分组的锚点位置（经典/分组两视图共用）：固定项 top/bottom，

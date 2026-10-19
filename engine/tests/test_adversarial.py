@@ -189,6 +189,7 @@ async def test_run_adversarial_full_flow():
     # findings_meta 是持久化形状（限长、裁决与方案齐备）
     meta = findings_meta(outcome)
     assert meta[0]["verdict"] == "confirmed" and meta[0]["solution"]
+    assert meta[0]["evidence"] == "第 10 行没有判空"  # 转团队工单时的待核实依据
     assert meta[1]["severity"] == "low" and "日志" in meta[1]["description"]
     assert outcome.report == JUDGE_REPORT
 
@@ -361,6 +362,56 @@ async def test_cancel_during_judge_keeps_partial_report():
     assert events[-1].status == "cancelled"
 
 
+@pytest.mark.asyncio
+async def test_all_findings_refuted_skips_advisor_and_reports():
+    """全部候选问题被推翻：建议阶段没有可处理对象，直接跳过，
+    裁判仍产出报告（结论是「内容干净」），统计与摘要如实反映。"""
+    finder = FakeProvider([[TextBlock(text=json.dumps({
+        "findings": [
+            {"category": "bug", "severity": "high", "location": "a.py:1",
+             "description": "候选一", "evidence": "推理一"},
+            {"category": "security", "severity": "critical", "location": "b.py:2",
+             "description": "候选二", "evidence": "推理二"},
+        ]
+    }, ensure_ascii=False))]])
+    investigator = FakeProvider([[TextBlock(text=json.dumps({"verdicts": [
+        {"id": "F-001", "verdict": "refuted", "reason": "外层已有判空"},
+        {"id": "F-002", "verdict": "refuted", "reason": "参数化查询已覆盖"},
+    ]}, ensure_ascii=False))]])
+    advisor = FakeProvider([[TextBlock(text=json.dumps({"solutions": []}))]])
+    judge = FakeProvider([[TextBlock(text="## 对抗审查报告\n\n未发现需处理的问题。")]])
+    events, emit = collector()
+
+    outcome = await run_adversarial(
+        finder=make_member(finder),
+        investigator=make_member(investigator),
+        advisor=make_member(advisor),
+        judge=judge, judge_provider="fake", judge_model="fake-1",
+        history=[], user_text="审查目标", timeout_s=30, emit=emit,
+    )
+
+    assert outcome.status == "done"
+    assert all(f.verdict == "refuted" for f in outcome.findings)
+    assert all(f.solution == "" for f in outcome.findings)
+    # 没有成立/部分成立的问题：建议阶段一次都不调
+    assert advisor.calls == []
+    assert not any(
+        e.kind == "adversarial_phase" and e.phase == "advisor" for e in events
+    )
+    # 裁判照常出报告，统计如实
+    assert outcome.report.startswith("## 对抗审查报告")
+    assert stats(outcome) == {
+        "total": 2, "confirmed": 0, "refuted": 2, "partial": 0, "pending": 0,
+    }
+    finished = events[-1]
+    assert finished.status == "done"
+    assert "成立 0" in finished.summary and "推翻 2" in finished.summary
+    # 用量只含实际调用的三个角色
+    assert [r["role"] for r in outcome.role_usage] == [
+        "finder", "investigator", "judge",
+    ]
+
+
 # ---------- 协议级：WS 端到端 ----------
 
 
@@ -423,11 +474,14 @@ def test_adversarial_send_end_to_end(home):
     assert len(meta["findings"]) == 3
     assert meta["findings"][0]["verdict"] == "confirmed"
     assert frame["result"]["adversarial"] == meta
+    # 落库后才回填的消息序号随响应下发（实时「转为团队工单」的服务端锚点）
+    assert frame["result"]["adversarial_seq"] > 0
 
     # 持久化：user + assistant（带元数据）落库；按角色逐条入账 usage_log
     db = sqlite3.connect(home / "home" / "skysheep.db")
-    rows = db.execute("SELECT role, content FROM messages ORDER BY id").fetchall()
+    rows = db.execute("SELECT role, content, seq FROM messages ORDER BY id").fetchall()
     assert [r[0] for r in rows] == ["user", "assistant"]
+    assert rows[1][2] == frame["result"]["adversarial_seq"]
     saved = json.loads(rows[1][1])
     assert saved["adversarial"]["mode"] == "adversarial"
     usage = db.execute(

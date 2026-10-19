@@ -66,11 +66,14 @@
       </button>
 
       <nav class="side-menu">
+        <!-- 顺序按「使用频次」排：天天点的在最上，配置类沉底。
+             折叠栏 .rail-btn 必须保持同一顺序（两处一起改） -->
         <button class="nav-item" data-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里">任务</button>
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
+        <button class="nav-item" data-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕；与输入框的圆桌、团队、对抗分开">接力</button>
+        <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
         <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
-        <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
       </nav>
 
@@ -126,23 +129,26 @@
       <div class="section">
         <h3>设置</h3>
         <ul id="settings-nav" class="list">
-          <!-- 分组按「上手顺序 + 使用频率」排：先配能力（模型 / 工具 / 分身 / 外部工具），
-               再调日常习惯（提示词 / 记忆 / 界面），然后是安全与实验性（高级里含
-               本项目白名单卡片），最后是只读信息（用量 / 关于）。新增设置页时按这个分组插进对应段。
+          <!-- 分组按「这是什么」排，不按新旧：
+               能力 = 让 Agent 会做什么（模型 / 技能 / 分身 / 外部工具 / 扩展）；
+               日常 = 长期偏好（提示词 / 记忆 / 界面）；
+               安全 = 把机器交出去之前要看清的东西（远程控制 / 目录限制 / 白名单）；
+               信息 = 只读查看（运行 / 用量 / 关于）。
+               协作方式（圆桌 / 团队 / 对抗 / 接力）都在「技能与工具」页里，不单列入口。
                分组标题只是扫描锚点（.nav-cap），无 data-target，点击绑定在 li[data-target] 上 -->
           <li class="nav-cap" aria-hidden="true">能力</li>
           <li class="active" data-target="providers">模型服务</li>
           <li data-target="skills">技能与工具</li>
           <li data-target="subagents">子代理</li>
           <li data-target="mcp">MCP 服务</li>
-          <li data-target="remote">远程控制</li>
+          <li data-target="mods">Mods 扩展（实验性）</li>
           <li class="nav-cap" aria-hidden="true">日常</li>
           <li data-target="snippets">提示词</li>
           <li data-target="memory">全局记忆</li>
           <li data-target="ui">界面与通知</li>
           <li class="nav-cap" aria-hidden="true">安全</li>
+          <li data-target="remote">远程控制</li>
           <li data-target="advanced">高级</li>
-          <li data-target="mods">Mods 扩展（实验性）</li>
           <li class="nav-cap" aria-hidden="true">信息</li>
           <li data-target="runs">运行中心</li>
           <li data-target="usage">用量</li>
@@ -168,21 +174,24 @@
        展开态的显示规则一起压掉（此前「折叠后再也打不开侧栏」正是它造成的）。 -->
   <aside id="sb-rail" aria-label="侧栏已折叠">
     <button id="rail-expand" class="rail-btn" title="展开侧栏（Ctrl+B）">»</button>
-    <!-- 功能导航六件套：与侧栏 .side-menu 同一套动作（openRightTab）；图标为本项目手绘线稿 -->
+    <!-- 功能导航七件套：与侧栏 .side-menu 同一套动作、同一顺序（openRightTab / 接力走工作台）；图标为本项目手绘线稿 -->
     <button class="rail-btn" data-rail-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里" aria-label="任务">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V4"/><path d="m9 13.5 2.2 2.2 4-4.5"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="agenda" title="日程：到点在应用内提醒，跨会话保留" aria-label="日程">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15.5" rx="2"/><path d="M8 3v4M16 3v4M4 10.5h16"/></svg>
     </button>
+    <button class="rail-btn" data-rail-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕" aria-label="接力">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h5l2-4 3 8 2-4h6"/><circle cx="3.5" cy="12" r="1.2"/><circle cx="20.5" cy="12" r="1.2"/></svg>
+    </button>
+    <button class="rail-btn" data-rail-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
+    </button>
     <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，自动注入每一轮对话" aria-label="项目记忆">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h5.5A3.5 3.5 0 0 1 12 7.5V21a2.5 2.5 0 0 0-2.5-2.5H3Z"/><path d="M21 4h-5.5A3.5 3.5 0 0 0 12 7.5V21a2.5 2.5 0 0 1 2.5-2.5H21Z"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="map" title="记忆地图：项目演化的可视化（时间线 + 主题图谱）" aria-label="记忆地图">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>
-    </button>
-    <button class="rail-btn" data-rail-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="ext" title="MCP / Skills：技能包与 MCP 服务管理" aria-label="MCP / Skills">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/></svg>
@@ -293,10 +302,10 @@
             <button id="mode-switch" class="cp-icon" title="当前：执行模式 · 点击切到规划模式">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.8 13.2h5.7L10.2 22l8.9-11.6h-5.6L13 2z"/></svg>
             </button>
-            <!-- 协作模式（圆桌 / 团队）：一个入口，点开统一菜单选模式与成员设置。
+            <!-- 协作模式（圆桌 / 团队 / 对抗）：一个入口，点开统一菜单选模式与成员设置。
                  激活亮主题色（圆桌紫 / 团队绿），徽记显示当前模式与成员数 -->
             <span id="coop-group">
-              <button id="coop-switch" class="cp-icon" title="协作：圆桌 / 团队（点击选择模式与成员）">
+              <button id="coop-switch" class="cp-icon" title="协作：圆桌 / 团队 / 对抗（点击选择模式与成员）">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.7-3.4 2.9-5.2 5.5-5.2s4.8 1.8 5.5 5.2"/><circle cx="17" cy="9.5" r="2.5"/><path d="M15.7 14.6c2.5.3 4.3 1.9 4.8 4.4"/></svg>
                 <span class="cp-state" hidden></span>
               </button>
@@ -658,14 +667,73 @@
             </div>
           </section>
 
-          <!-- MCP / Skills：卡片平时住在设置页，打开本标签时由 app.js 整体搬进来 -->
-          <section id="rp-page-ext" class="rp-page hidden"></section>
+          <!-- 接力（主副屏交替）：主屏 = 当前会话，副屏 = 独立的接力会话，
+               右侧看板只放总任务/两屏任务/执行/中断与轮次。 -->
+          <section id="rp-page-relay" class="rp-page hidden">
+            <header id="relay-topbar">
+              <h2>接力</h2>
+              <span id="relay-pair-head" class="dim small"></span>
+              <span class="spacer"></span>
+              <button id="relay-open-peer" class="rp-mini" title="把副屏会话重新打开在右侧分栏">打开副屏</button>
+            </header>
+            <div id="relay-workbench">
+              <section class="relay-start-card">
+                <div id="relay-pair-chips" class="relay-pair-chips">
+                  <span id="relay-main-chip" class="relay-chip relay-chip-main">主屏 · 当前会话</span>
+                  <span class="relay-swap" aria-hidden="true">⇄</span>
+                  <span id="relay-peer-chip" class="relay-chip relay-chip-peer">副屏 · 未创建</span>
+                </div>
+                <label for="relay-goal">总任务</label>
+                <textarea id="relay-goal" class="modal-input" rows="2" placeholder="两个屏一起要完成什么？"></textarea>
+                <div class="relay-task-grid">
+                  <div class="relay-task-field">
+                    <label for="relay-main-task"><span class="relay-side-tag">主</span>主屏每一轮做什么</label>
+                    <textarea id="relay-main-task" class="modal-input" rows="3"></textarea>
+                  </div>
+                  <div class="relay-task-field">
+                    <label for="relay-peer-task"><span class="relay-side-tag peer">副</span>副屏每一轮做什么</label>
+                    <textarea id="relay-peer-task" class="modal-input" rows="3"></textarea>
+                  </div>
+                </div>
+                <div class="relay-start-actions">
+                  <button id="relay-run-start" class="btn-primary">开始接力</button>
+                  <button id="relay-run-stop" class="rp-mini" disabled>中断</button>
+                  <label class="relay-auto" title="每轮完成后自动让另一方接着执行，直到你点中断">
+                    <input type="checkbox" id="relay-auto-alternate"> 连续交替
+                  </label>
+                  <span id="relay-run-status" class="dim small" role="status">尚未开始</span>
+                </div>
+                <p class="settings-hint">
+                  点「执行」让轮到的一方做完这一轮任务，完成后自动交棒，再点一次让另一方继续。
+                  两屏都是完整会话：可以使用工具、读写文件，写入与执行照常征询你的确认。
+                </p>
+              </section>
+              <section class="relay-turn-card">
+                <div class="card-head">
+                  <h3>轮次</h3>
+                  <span id="relay-turn-count" class="dim small"></span>
+                </div>
+                <div id="relay-turn-list" class="relay-turn-list"></div>
+              </section>
+            </div>
+          </section>
+
+          <!-- MCP / Skills：卡片平时住在设置页，打开本标签时由 app.js 搬进对应的分段
+               （MCP 一段、Skills 一段），免得两页卡片堆在一起互相干扰 -->
+          <section id="rp-page-ext" class="rp-page hidden">
+            <div class="rp-segs seg-row seg-mini" id="rp-segs-ext" data-tab="ext">
+              <button data-view="mcp" class="active" title="接入外部工具（浏览器、数据库、办公软件…）">MCP</button>
+              <button data-view="skills" title="技能手册、场景模板与多模型协作方式">Skills</button>
+            </div>
+            <div class="rp-seg-view" id="rp-view-mcp"></div>
+            <div class="rp-seg-view hidden" id="rp-view-skills"></div>
+          </section>
 
         </div>
       </aside>
     </div>
 
-    <!-- 视图二：设置 -->
+    <!-- 视图三：设置 -->
     <div id="view-settings" class="view hidden">
       <header id="settings-topbar">
         <h2>设置</h2>
@@ -697,7 +765,7 @@
             <!-- 列表视图：紧凑展示每个服务，点一行进入它的配置 -->
             <div id="provider-list-view">
               <p class="settings-hint">
-                点是哪一行就进哪个服务的配置。<b class="star">★</b> 是启动默认模型，「使用中」是当前对话所用模型。
+                点哪一行就进哪个服务的配置。<b class="star">★</b> 是启动默认模型，「使用中」是当前对话所用模型。
                 列表里没有的服务（自建中转、公司内网、其他厂商）用右上角按钮自己添加；
                 用不到的进它的配置里移出列表即可——内置服务只是<b>停用</b>、随时可恢复，自定义服务才会真正<b>删除</b>。
               </p>
@@ -726,6 +794,7 @@
         <section class="settings-page hidden" id="settings-page-skills">
           <!-- 总览视图：技能卡片整行可点 → 进独立技能页（与模型服务同一套列表/详情范式） -->
           <div id="skill-list-view">
+          <div class="settings-group-title">技能扩展</div>
           <section class="settings-card" id="skill-card">
             <div class="card-head">
               <h3>技能</h3>
@@ -763,6 +832,12 @@
               <span class="dim small">正在加载场景模板…</span>
             </div>
           </section>
+          </div>
+
+          <!-- 外部服务 / 多模型协作 / 内置工具：不属于「技能」本身，
+               只留在设置页，不随「MCP / Skills」面板搬走 -->
+          <div id="skill-extras">
+          <div class="settings-group-title">外部服务</div>
           <section class="settings-card">
             <div class="card-head"><h3>联网搜索</h3></div>
             <p class="settings-hint" id="websearch-hint"></p>
@@ -781,6 +856,7 @@
             <div id="speech-status" class="card-status" hidden></div>
             <div id="speech-form" class="toolcfg-form"></div>
           </section>
+          <div class="settings-group-title">多模型协作</div>
           <section class="settings-card">
             <div class="card-head"><h3>圆桌</h3></div>
             <p class="settings-hint" id="roundtable-hint"></p>
@@ -799,6 +875,28 @@
             <div id="adversarial-status" class="card-status" hidden></div>
             <div id="adversarial-form" class="toolcfg-form"></div>
           </section>
+          <!-- 接力：第四种多模型协作方式（主副屏交替）。只放说明与入口，
+               真正的配置在右侧「接力」看板里做，这里不需要表单 -->
+          <section class="settings-card" id="relay-config-card">
+            <div class="card-head">
+              <h3>接力</h3>
+              <span class="head-ops">
+                <button id="relay-open-workbench" class="btn-ghost">打开接力工作台</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              主屏与副屏交替推进：用于「发布方案 → 执行 → 反馈」这类需要两个分工不同的
+              Agent 轮流上手的任务。主屏就是当前会话，副屏是点「接力」时自动在右侧打开的
+              独立会话，两屏按顺序各做一轮，后一轮能读到前一轮的输出。
+            </p>
+            <ul class="settings-hint hint-points">
+              <li>在右侧「接力」看板里填写总任务、主屏任务、副屏任务，点「执行」让轮到的一方开始。</li>
+              <li>每次执行是一轮完整对话，工具与权限门照常生效；点「中断」会停下正在跑的那一轮，再点执行可继续。</li>
+              <li>勾选「连续交替」可让两屏自动轮流执行，直到你中断；不勾选则每轮结束后停下来等你检查。</li>
+              <li>两屏各自使用所在会话的模型，可在副屏输入栏单独切换。</li>
+            </ul>
+          </section>
+          <div class="settings-group-title">工具</div>
           <section class="settings-card">
             <h3>内置工具</h3>
             <p class="settings-hint">
@@ -878,8 +976,11 @@
           <section class="settings-card">
             <div class="card-head">
               <h3>基础设置</h3>
-              <label class="toggle-row"><input type="checkbox" id="subagent-toggle"><span>启用子代理</span></label>
             </div>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="subagent-toggle">
+              <span>启用子代理</span>
+            </label>
             <p class="settings-hint">
               子代理是 Agent 派出去的「分身」：调研、后台跑任务可以并行做，不挤占主对话。
             </p>
@@ -936,6 +1037,10 @@
 
         <section class="settings-page hidden" id="settings-page-advanced">
           <datalist id="hook-tools"></datalist>
+          <!-- 这页混着两级作用域：白名单跟项目走，其余卡片全局生效。
+               分区标题把边界摆在明面上——只靠卡片里的小字提示，切项目后
+               发现设置没变的人会以为是 bug -->
+          <div class="settings-group-title">本项目（切项目会换）</div>
           <section class="settings-card" id="rules-card">
             <div class="card-head">
               <h3>本项目白名单</h3>
@@ -1000,6 +1105,7 @@
             </details>
           </section>
 
+          <div class="settings-group-title">全局（所有项目共用）</div>
           <section class="settings-card">
             <div class="card-head">
               <h3>钩子（Hooks）</h3>
@@ -1408,6 +1514,7 @@
         </section>
 
         <section class="settings-page hidden" id="settings-page-ui">
+          <div class="settings-group-title">外观与通知</div>
           <section class="settings-card">
             <h3>主题</h3>
             <p class="settings-hint">
@@ -1519,6 +1626,7 @@
               关闭后空白会话保持空白。偏好自动保存。
             </p>
           </section>
+          <div class="settings-group-title">尺寸与操作</div>
           <section class="settings-card">
             <h3>界面缩放</h3>
             <p class="settings-hint">
@@ -1670,6 +1778,7 @@
         </section>
 
         <section class="settings-page hidden" id="settings-page-about">
+          <div class="settings-group-title">应用</div>
           <section class="settings-card">
             <h3>关于</h3>
             <p class="settings-hint">
@@ -1694,10 +1803,17 @@
             <div id="about-info" class="about"></div>
             <div id="about-update" class="about-update"></div>
           </section>
+          <div class="settings-group-title">数据与迁移</div>
           <section class="settings-card">
             <h3>数据与隐私</h3>
             <p class="settings-hint">
-              SkySheep 是纯本地应用：会话记录、配置、API Key 全部只保存在你自己的电脑上，不经过任何第三方服务器。以下是你本机的数据位置。
+              SkySheep 没有自己的云端服务：会话记录、配置、API Key 全部只保存在你自己的电脑上，
+              开发者看不到，也不会上传到任何中转服务器。以下是本机的数据位置。
+            </p>
+            <p class="settings-hint">
+              <b>需要知道的边界</b>：对话内容会按你的配置直接发送给所选的模型服务商
+              （OpenAI / DeepSeek / 智谱等），由各自的服务条款与隐私政策约束；
+              SkySheep 只在你的电脑与那家服务之间转发，不经手也不留存。
             </p>
             <div id="about-privacy" class="about"></div>
             <div class="io-row">
@@ -1840,6 +1956,7 @@
 <script src="/static/app-skills.js"></script>
 <script src="/static/app-memmap.js"></script>
 <script src="/static/app-advanced.js"></script>
+<script src="/static/app-relay.js"></script>
 <script src="/static/app-about.js"></script>
 <script src="/static/app-mods.js"></script>
 <script src="/static/app.js"></script>

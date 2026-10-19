@@ -189,6 +189,8 @@ function resetProjectPanels() {
       if (urlBox) urlBox.value = "";
     }
   }
+  // 接力任务属于项目：切项目时不能把旧项目的报告留在右侧看板。
+  if (typeof relayResetForProject === "function") relayResetForProject();
   // 终端：命令是在项目目录里跑的，旧项目的输出与运行态一并作废
   resetTermTabs();
 }
@@ -287,25 +289,25 @@ async function refreshProjects(prefetched) {
       };
       li.appendChild(del);
     }
-    // 悬浮＋（新建对话）：与分组视图组头的＋同一行为——当前项目=新标签，
+    // 悬浮＋（新建会话）：与分组视图组头的＋同一行为——当前项目=新标签，
     // 其他项目=先切过去再新建；远程连接无工作目录，不提供（行点击已能
     // 打开最近对话，两个入口重复）。与 ✕ 同靠悬停才现，不挤常驻空间
     if (!remote) {
       const add = document.createElement("button");
       add.className = "p-add";
       add.textContent = "＋";
-      add.title = p.is_current ? "新建对话" : "切换到该项目并新建对话";
+      add.title = p.is_current ? "新建会话" : "切换到该项目并新建会话";
       add.onclick = async (e) => {
         e.stopPropagation();
         try {
           if (!p.is_current) {
             await request("project.switch", { path: p.root_path });
             await applyWorkspaceData(await fetchWorkspaceData());
-            addNotice(`已切换到项目「${p.name}」，新建对话`);
+            addNotice(`已切换到项目「${p.name}」，新建会话`);
           }
           startNewTab(); // 自带侧栏刷新
         } catch (e2) {
-          addNotice("新建对话失败：" + e2.message);
+          addNotice("新建会话失败：" + e2.message);
         }
       };
       li.appendChild(add);
@@ -407,7 +409,7 @@ function deleteProjectModal(p) {
   box.innerHTML =
     `<p>确定从列表中移除项目 <b>${escapeHtml(p.name)}</b> 吗？</p>` +
     (cur
-      ? `<p class="dim small">这是<b>当前正在使用的项目</b>：它的全部会话、白名单与任务会被删除，` +
+      ? `<p class="dim small">这是<b>当前正在使用的项目</b>：它的全部会话、白名单与事项会被删除，` +
         `然后切换到其他项目（没有其他项目就进入快聊）。</p>`
       : `<p class="dim small">该项目下的<b>会话记录与白名单会一并删除</b>；电脑上的文件夹和文件` +
         `<b>不受影响</b>，以后随时可以重新添加回来。</p>`) +

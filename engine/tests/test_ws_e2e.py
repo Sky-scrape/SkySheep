@@ -53,8 +53,12 @@ async def live_server(home, script):
         provider_factory=lambda: provider,
     )
     port = _free_port()
+    # 同 test_browser_ui.live_server：优雅关闭要有上限，否则 Windows Proactor
+    # 偶发漏掉一条连接的 connection_lost 时 wait_closed() 会无限等，下面 10s 的
+    # 取消会跳过 lifespan shutdown、漏掉 aiosqlite 非 daemon 线程，pytest 挂死。
     config = uvicorn.Config(
         app, host="127.0.0.1", port=port, log_level="warning", lifespan="on",
+        timeout_graceful_shutdown=5,
     )
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
@@ -337,8 +341,9 @@ async def test_real_socket_ai_director_closed_loop(home):
         provider_factory=lambda: pool.pop(0) if pool else FakeProvider([]),
     )
     port = _free_port()
+    # 同 live_server：给优雅关闭设上限，保证 lifespan shutdown 一定执行
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                            lifespan="on")
+                            lifespan="on", timeout_graceful_shutdown=5)
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
     try:
@@ -432,8 +437,9 @@ async def test_real_socket_team_template_create_then_team_log_replay(home):
         provider_factory=lambda: pool.pop(0) if pool else FakeProvider([]),
     )
     port = _free_port()
+    # 同 live_server：给优雅关闭设上限，保证 lifespan shutdown 一定执行
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                            lifespan="on")
+                            lifespan="on", timeout_graceful_shutdown=5)
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
     try:

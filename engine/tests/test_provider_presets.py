@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from skysheep.config import PRESETS, load_config
 
-# 用户指定的默认页签顺序（末尾附加的 ollama 是本地模型入口，不占厂商位）
+# 用户指定的默认页签顺序
 EXPECTED_ORDER = [
     "anthropic", "openai", "google", "xai", "minimax",
     "deepseek", "zhipu", "moonshot", "qwen", "mimo",
@@ -26,8 +26,8 @@ def test_preset_order_and_labels():
     assert PRESETS["deepseek"].label == "Deepseek"
     # 聚合平台移出预设（老配置里的条目自动归自定义页签）
     assert "openrouter" not in PRESETS and "siliconflow" not in PRESETS
-    # 本地模型入口保留
-    assert "ollama" in PRESETS
+    # 本地模型入口不进预设：本地服务走「＋ 添加自定义服务」，不占默认列表
+    assert "ollama" not in PRESETS
     # 新增预设协议与端点
     assert PRESETS["anthropic"].kind == "anthropic"
     for key in ("openai", "google", "xai", "minimax", "qwen", "mimo"):

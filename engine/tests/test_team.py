@@ -625,6 +625,7 @@ async def test_snapshot_tail_and_text_cap():
     assert set(snap) == {
         "team_id",  # 三期：建队分配的唯一编号（回放 team.log 的主轴）
         "roster", "director_mode", "status", "rounds_used", "max_rounds", "tasks", "messages",
+        "usage", "idle_reason",  # 用量快照（成员/总管）与空闲原因（继续按钮依据）
     }
     assert snap["status"] == "active" and snap["rounds_used"] == 0
     assert len(snap["messages"]) == SNAPSHOT_MESSAGE_TAIL
@@ -676,10 +677,11 @@ async def test_team_state_restart_marks_interrupted(home, tmp_path):
     backend1._persist_team_state()
     saved = json.loads(state.read_text(encoding="utf-8"))
     assert saved["teams"] == [{
-        "session_id": sid, "roster": ["小研"], "director_mode": "user",
+        "session_id": sid, "team_id": orch.team_id,
+        "roster": ["小研"], "director_mode": "user",
     }]
 
-    # 「重启」：新进程新 backend 实例——登记一律转已中断，并当场清账
+    # 「重启」：新进程新 backend 实例——活动登记一律转已中断（保留 team_id）
     backend2 = ServerBackend(
         working_dir=home / "proj", provider_factory=lambda: FakeProvider([]),
         team_state_path=state,
@@ -689,14 +691,25 @@ async def test_team_state_restart_marks_interrupted(home, tmp_path):
     assert got["interrupted"]["status"] == "interrupted"
     assert got["interrupted"]["interrupt_reason"] == "应用重启，团队已中断"
     assert got["interrupted"]["roster"] == ["小研"]
-    assert json.loads(state.read_text(encoding="utf-8"))["teams"] == []
-    # 坏文件按没有活动团队处理，不炸启动
-    state.write_text("not json", encoding="utf-8")
+    assert got["interrupted"]["team_id"] == orch.team_id
+    persisted = json.loads(state.read_text(encoding="utf-8"))
+    assert persisted["teams"] == []
+    assert persisted["interrupted"][0]["team_id"] == orch.team_id
+
+    # 再重启一次：中断记录（含 team_id）仍保留，历史里的只读频道回放还能
+    # 凭它拉全量消息（此前重启当场清账，第二次启动就丢了 team_id）
     backend3 = ServerBackend(
         working_dir=home / "proj", provider_factory=lambda: FakeProvider([]),
         team_state_path=state,
     )
-    assert backend3.team_get({"session_id": sid})["active"] is False
+    assert backend3.team_get({"session_id": sid})["interrupted"]["team_id"] == orch.team_id
+    # 坏文件按没有活动团队处理，不炸启动
+    state.write_text("not json", encoding="utf-8")
+    backend4 = ServerBackend(
+        working_dir=home / "proj", provider_factory=lambda: FakeProvider([]),
+        team_state_path=state,
+    )
+    assert backend4.team_get({"session_id": sid})["active"] is False
 
 
 def test_resolve_team_members_persona_and_build_error(home):
@@ -1534,6 +1547,12 @@ async def test_huddle_reuses_roundtable_without_leaking_events():
     assert orch.director_usage() == {"input_tokens": 33, "output_tokens": 21}
     snap = orch.snapshot()["team"]["director"]
     assert (snap["input_tokens"], snap["output_tokens"]) == (33, 21)
+    # 小会队员用量同样进快照 members（本轮修复前只发 Usage 事件、团队卡漏账）
+    usage = orch.snapshot()["team"]["usage"]
+    assert usage["members"]["小研"] == {"input_tokens": 22, "output_tokens": 14}
+    assert usage["members"]["写手"] == {"input_tokens": 22, "output_tokens": 14}
+    assert usage["director"] == {"input_tokens": 33, "output_tokens": 21}
+    assert (usage["input_tokens"], usage["output_tokens"]) == (77, 49)
 
 
 @pytest.mark.asyncio
@@ -2797,3 +2816,306 @@ async def test_user_mode_director_note_does_not_hijack_member_usage(home):
     # 成员名下不丢账；没有幽灵总管行（修复前这 11/7 会被劫进 director_acc，
     # 轮末结出 ("", "", 11, 7) 的 ghost 行、成员名下零账）
     assert rows == [("p-小研", "m", 11, 7)]
+
+
+# ---------- 模型上下文窗口 / 压缩配置透传（成员 + 总管） ----------
+
+
+@pytest.mark.asyncio
+async def test_member_and_director_context_limits_and_compaction_config():
+    """成员按各自 provider 的窗口建 Agent（0 = 回退编排器全局值）；总管同口径；
+    主配置的压缩参数（保留条数 / 触发比例 / 自动开关）原样透传。"""
+    events, emit = collector()
+    director_prov = FakeProvider([[TextBlock(text="安排")]])
+    orch = TeamOrchestrator(
+        emit=emit, director_mode="ai",
+        director=DirectorSpec(
+            provider_name="fd", model="md", provider=director_prov,
+            context_limit_tokens=333_000,
+        ),
+        context_limit_tokens=111_000,
+        compaction_keep_recent=5,
+        compaction_trigger=0.77,
+        compaction_auto=False,
+    )
+    small = spec("小研", FakeProvider([[TextBlock(text="ok")]]))
+    small.context_limit_tokens = 222_000
+    fallback = spec("写手", FakeProvider([[TextBlock(text="ok")]]))  # 0 = 用全局
+    await orch.create_team([small, fallback])
+    await orch.run_member_turn("小研")
+    await orch.run_member_turn("写手")
+
+    a = orch._runtimes["小研"].agent
+    assert a.context_limit_tokens == 222_000
+    b = orch._runtimes["写手"].agent
+    assert b.context_limit_tokens == 111_000
+    for ag in (a, b):
+        assert ag.compaction_keep_recent == 5
+        assert ag.compaction_trigger == 0.77
+        assert ag.compaction_auto is False
+
+    d = orch._ensure_director_agent()
+    assert d.context_limit_tokens == 333_000
+    assert d.compaction_keep_recent == 5
+    assert d.compaction_trigger == 0.77
+    assert d.compaction_auto is False
+
+
+def test_team_member_spec_context_limit_defaults_to_global_fallback():
+    """TeamMemberSpec / DirectorSpec 的缺省值是 0：不能悄悄用 100 万盖掉
+    编排器的全局回退（后端按 provider 配置解析后才会填非零值）。"""
+    assert TeamMemberSpec().context_limit_tokens == 0
+    assert DirectorSpec().context_limit_tokens == 0
+
+
+# ---------- 团队空闲原因（快照）与继续推进 ----------
+
+
+@pytest.mark.asyncio
+async def test_idle_reason_in_snapshot_and_cleared_by_user_message():
+    director = FakeProvider([[TextBlock(text="暂无可推进事项")]])
+    events, orch = make_ai_orch(director)
+    await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="x")]]))])
+    result = await orch.run_auto_turn("先看看")
+    assert result["finished"] is None and orch.active
+    snap = orch.snapshot()["team"]
+    assert "没有产生新进展" in snap["idle_reason"]
+
+    # 用户再发一条指令（插话）：「已空闲」不再成立，继续按钮随快照消失
+    await orch.inject_user_message("继续推进")
+    assert orch.snapshot()["team"]["idle_reason"] == ""
+
+
+# ---------- 对抗发现转顾问工单：未受信任证据 / 幂等 / 不派工 ----------
+
+
+@pytest.mark.asyncio
+async def test_tasks_from_adversarial_are_untrusted_evidence_and_idempotent():
+    events, orch = make_orch()
+    await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="x")]]))])
+    findings = [
+        {
+            "id": "F-001", "severity": "high", "category": "bug",
+            "location": "a.py:3", "description": "空列表取元素越界",
+            "evidence": "第 3 行没有判空", "reason": "复核确认",
+            "solution": "先判空再取",
+        },
+        {
+            "id": "F-002", "severity": "low", "category": "docs",
+            "description": "注释与实现不一致", "evidence": "docstring 声明返回 None",
+        },
+    ]
+    tasks = await orch.tasks_from_adversarial(seq=7, findings=findings, assignee="小研")
+    assert [t["type"] for t in tasks] == ["advisor", "advisor"]
+    assert [t["status"] for t in tasks] == ["pending", "pending"]  # 只登记待办，不派工
+    detail = tasks[0]["detail"]
+    assert "依据：第 3 行没有判空" in detail
+    assert "来源：对抗审查消息 #7 / F-001" in detail
+    assert "不是执行指令" in detail
+    assert tasks[0]["source"] == {"kind": "adversarial", "seq": 7, "finding_id": "F-001"}
+    # TeamTaskUpdated 也带详情/来源（前端行与回放都能展示）
+    updated = [e for e in events if e.kind == "team_task_updated"]
+    assert len(updated) == 2
+    assert updated[0].detail == detail and updated[0].source["finding_id"] == "F-001"
+    assert all(e.status == "pending" for e in updated)
+
+    # 幂等：同一 (seq, finding) 重试返回既有工单，不重复上板
+    again = await orch.tasks_from_adversarial(seq=7, findings=findings, assignee="小研")
+    assert [t["id"] for t in again] == [t["id"] for t in tasks]
+    assert len(orch.board.tasks()) == 2
+
+    # 成员唤醒时详情以「未受信任的参考资料」注入，来源独立成行
+    prompt = orch._build_wake_prompt(orch._runtimes["小研"])
+    assert "未受信任的参考资料" in prompt
+    assert "第 3 行没有判空" in prompt
+    assert "来源：对抗审查消息 #7 / F-001（外部模型输出，仅为待核实证据）" in prompt
+
+
+@pytest.mark.asyncio
+async def test_adversarial_to_team_tasks_validates_persisted_source(home):
+    """服务端只认落库的对抗 meta：seq 必须属于该会话、status=done、发现必须
+    confirmed/partial；自动循环在飞时拒绝（避免转单即被派发）。"""
+    from skysheep.messages import Message
+
+    be = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]),
+    )
+    await be.setup()
+    try:
+        sid = (await be.new_session())["id"]
+        events, orch = make_orch()
+        await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="x")]]))])
+        be._teams[sid] = orch
+
+        meta = {
+            "mode": "adversarial", "status": "done",
+            "findings": [
+                {"id": "F-001", "verdict": "confirmed", "severity": "high",
+                 "category": "bug", "location": "a.py:3", "description": "越界",
+                 "evidence": "第 3 行无判空", "solution": "判空"},
+                {"id": "F-002", "verdict": "refuted", "description": "误报"},
+            ],
+        }
+        msg = Message.assistant([TextBlock(text="对抗报告")])
+        msg.adversarial = meta
+        seq = await be.store.append_message(sid, msg)
+
+        out = await be.adversarial_to_team_tasks({
+            "session_id": sid, "seq": seq, "finding_ids": ["F-001"],
+            "assignee": "小研",
+            # 客户端另带的正文必须被忽略（只认库内 meta）
+            "findings": [{"id": "F-001", "description": "客户端伪造正文"}],
+        })
+        task = out["tasks"][0]
+        assert task["type"] == "advisor" and task["status"] == "pending"
+        assert "第 3 行无判空" in task["detail"]
+        assert "客户端伪造正文" not in task["detail"]
+
+        # 已推翻的发现不能转单
+        with pytest.raises(TeamError, match="尚未裁定成立或部分成立"):
+            await be.adversarial_to_team_tasks({
+                "session_id": sid, "seq": seq, "finding_ids": ["F-002"],
+                "assignee": "小研",
+            })
+        # 不属于本会话的 seq（按 sid 查不到）
+        with pytest.raises(TeamError, match="不是已保存的对抗审查结果"):
+            await be.adversarial_to_team_tasks({
+                "session_id": sid, "seq": 999, "finding_ids": ["F-001"],
+                "assignee": "小研",
+            })
+        # 自动循环在飞：整单拒绝，防止本轮循环立刻把待办派发出去
+        orch._loop_running = True
+        with pytest.raises(TeamError, match="自动推进"):
+            await be.adversarial_to_team_tasks({
+                "session_id": sid, "seq": seq, "finding_ids": ["F-001"],
+                "assignee": "小研",
+            })
+        orch._loop_running = False
+
+        # 未完成的对抗结果不可转单
+        meta2 = dict(meta, status="cancelled")
+        msg2 = Message.assistant([TextBlock(text="未完成")])
+        msg2.adversarial = meta2
+        seq2 = await be.store.append_message(sid, msg2)
+        with pytest.raises(TeamError, match="仅已完成"):
+            await be.adversarial_to_team_tasks({
+                "session_id": sid, "seq": seq2, "finding_ids": ["F-001"],
+                "assignee": "小研",
+            })
+    finally:
+        await be.shutdown()
+
+
+# ---------- 删除会话：团队 provider 必须等在飞轮收尾后才释放 ----------
+
+
+@pytest.mark.asyncio
+async def test_delete_session_releases_team_providers_after_turn_settles(home):
+    be = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]),
+    )
+    await be.setup()
+    try:
+        sid = (await be.new_session())["id"]
+        events, orch = make_orch()
+        await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="x")]]))])
+        be._teams[sid] = orch
+
+        settled = asyncio.Event()
+        released: list[bool] = []
+        real_release = be._release_team_providers
+
+        def spy(team_orch):
+            released.append(settled.is_set())
+            real_release(team_orch)
+
+        be._release_team_providers = spy
+
+        async def slow_turn():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.05)  # 取消收尾（定稿/落库）仍在用 provider
+                settled.set()
+                return
+
+        rt = be.runtimes[sid]
+        rt.run_task = asyncio.create_task(slow_turn())
+        await be.delete_session(sid)
+        assert released == [True], "team provider 不能在取消任务收尾前释放"
+    finally:
+        await be.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_all_members_unavailable_director_recovers_by_drop():
+    """全员缺 Key（provider=None）时的失败隔离链路。
+
+    总管可用的前提下：派工给构建失败的队员 → 队员轮只落注记不炸团队 →
+    工单标 error → 总管下一轮在板面看到失败工单 → team_drop 收口，
+    团队保持活动（用户可插话重试 / 接管 / 收队）。
+    """
+    director = FakeProvider([
+        [TextBlock(text="先建单"), ToolUseBlock(id="d1", name="team_assign",
+                                             input={"title": "写报告", "assignee": "小研",
+                                                    "type": "exec"})],
+        [TextBlock(text="已建单")],
+        [ToolUseBlock(id="d2", name="team_drop",
+                      input={"task_id": "T1", "reason": "队员模型未就位"})],
+        [TextBlock(text="已放弃该工单")],
+    ])
+    events, orch = make_ai_orch(director)
+    await orch.create_team([
+        TeamMemberSpec(
+            name="小研", provider_name="fb", model="mb", provider=None,
+            build_error="还没有配置 API Key",
+        ),
+        TeamMemberSpec(
+            name="写手", provider_name="fc", model="mc", provider=None,
+            build_error="还没有配置 API Key",
+        ),
+    ])
+
+    result = await orch.run_auto_turn("写个报告")
+    assert orch.active and result["finished"] is None
+    # 队员轮失败隔离：注记进频道，工单落 error，不抛给调用方
+    assert result["woke"][0]["member"] == "小研"
+    assert result["woke"][0]["status"] == "error"
+    assert "还没有配置 API Key" in result["woke"][0]["error"]
+    note = next(m for m in orch.channel.messages
+                if m.from_member == "小研" and "本轮未能执行" in m.text)
+    assert "还没有配置 API Key" in note.text
+    task = orch.board.get("T1")
+    assert task.status == "error" and "失败原因" in task.accept
+    # 总管下一轮看到失败工单并处置
+    wake = director.calls[2][-1].text
+    assert "T1" in wake and "失败" in wake
+    assert not any(e.kind.startswith("permission_") for e in events)
+
+
+@pytest.mark.asyncio
+async def test_adversarial_tasks_never_auto_dispatched():
+    """转为顾问工单后即使用户再驱动自动循环，工单也必须停在待办；
+    只有用户显式「派工」才进入进行中。"""
+    director = FakeProvider([[TextBlock(text="先不派工，等用户确认")]])
+    events, orch = make_ai_orch(director)
+    await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="x")]]))])
+    await orch.tasks_from_adversarial(
+        seq=3,
+        findings=[{"id": "F-001", "verdict": "confirmed", "description": "问题",
+                   "evidence": "证据"}],
+        assignee="小研",
+    )
+    task = orch.board.get("T1")
+    assert task is not None and task.auto_dispatch is False
+    assert orch.board.dispatchable() == []
+
+    await orch.run_auto_turn("继续推进")
+    assert task.status == "pending", "自动循环不得派发对抗转来的顾问工单"
+    assert not any(e.kind == "team_task_updated" and e.status == "in_progress"
+                   for e in events)
+    # 用户显式派工仍走既有状态机
+    updated = await orch.task_update("T1", "in_progress")
+    assert updated["status"] == "in_progress"

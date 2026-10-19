@@ -119,7 +119,7 @@ jobs:
       # uv run 也带 --group browser：不让隐式同步语义决定 playwright 在不在。
       - name: Pytest (browser UI)
         working-directory: engine
-        run: uv run --group browser pytest tests/test_browser_ui.py -q
+        run: uv run --group browser pytest tests/test_browser_ui.py tests/test_relay_browser.py -q
 
   # 依赖漏洞扫描：从 uv.lock 导出全部运行时依赖（不含 dev 组、不含本包）交 pip-audit 审。
   # 跑 windows-latest 与本地核验环境一致（lock 是全平台通用锁，pywinpty/pywin32 等

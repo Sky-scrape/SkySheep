@@ -1,4 +1,4 @@
-"""本地模型探测：Ollama / LM Studio 等本地推理服务的可用模型列表。"""
+"""模型探测：兼容服务的可用模型列表与上下文窗口查询。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-OLLAMA_BASE = "http://localhost:11434"
 LMSTUDIO_BASE = "http://localhost:1234/v1"
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
@@ -49,18 +48,6 @@ def _client_kwargs(base_url: str | None, timeout_s: float, kind: str = "openai")
         return {}
     hx = http_client_module(kind)
     return {"http_client": hx.AsyncClient(trust_env=False, timeout=timeout_s)}
-
-
-async def probe_ollama(base_url: str = OLLAMA_BASE, timeout_s: float = 2.0) -> list[str]:
-    """返回本机 Ollama 已拉取的模型名列表；服务未运行时返回空列表。"""
-    try:
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
-            resp = await client.get(base_url.rstrip("/") + "/api/tags")
-            resp.raise_for_status()
-            data = resp.json()
-    except (httpx.HTTPError, ValueError):
-        return []
-    return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
 
 
 async def probe_provider_models(
@@ -190,42 +177,10 @@ async def probe_context_limit(
             "note": "Anthropic 接口不提供窗口信息，请按官方文档填写（多数 200K；Sonnet 4 及以上支持 100 万）",
         }
 
-    if kind == "ollama":
-        url = (base.rstrip("/") if base else OLLAMA_BASE) + "/api/show"
-        # 注意不能把 _client_kwargs() 直接摊给裸 httpx 客户端：它返回的
-        # http_client= 是 AsyncOpenAI/AsyncAnthropic 的 SDK 参数，httpx 自己
-        # 不认（本地探测此前在此 TypeError 崩掉）。这里按同一意图直写：
-        # 本地地址 trust_env=False 直连，远端走系统默认（信任环境代理）。
-        async with httpx.AsyncClient(
-            timeout=timeout_s, trust_env=not _is_local(base or OLLAMA_BASE)
-        ) as client:
-            try:
-                resp = await client.post(url, json={"model": model})
-                resp.raise_for_status()
-                data = resp.json()
-            except (httpx.HTTPError, ValueError) as e:
-                raise RuntimeError(_friendly_error(e, base or OLLAMA_BASE)) from e
-        top = data.get("context_length")
-        if isinstance(top, int) and top > 0:
-            note = f"Ollama 报告 {model or '该模型'} 的上下文窗口 {top:,} tokens"
-            return {"limit": top, "note": note}
-        info = data.get("model_info") or {}
-        vals = [
-            v for k, v in info.items()
-            if k.endswith(".context_length") and isinstance(v, int) and v > 0
-        ]
-        if vals:
-            note = f"Ollama 报告 {model or '该模型'} 的上下文窗口 {max(vals):,} tokens"
-            return {"limit": max(vals), "note": note}
-        return {
-            "limit": None,
-            "note": "Ollama 没有返回该模型的窗口信息（模型可能还没 pull 下来，或版本太旧）",
-        }
-
     # openai 兼容：GET {base}/models，在模型条目里找窗口字段
     url = (base or "https://api.openai.com/v1").rstrip("/") + "/models"
     headers = {"Authorization": "Bearer " + (api_key or "")} if api_key else {}
-    # 同 ollama 分支：本地地址直连；LM Studio 这类本地服务此前同样 TypeError 崩
+    # 本地地址直连；LM Studio 这类本地服务此前同样 TypeError 崩
     async with httpx.AsyncClient(
         timeout=timeout_s, trust_env=not _is_local(base)
     ) as client:

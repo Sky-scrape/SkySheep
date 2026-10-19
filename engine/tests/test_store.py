@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from skysheep.messages import Message, ToolUseBlock
+from skysheep.messages import Message, TextBlock, ToolUseBlock
 from skysheep.session.store import SessionStore
 
 
@@ -648,3 +648,19 @@ async def test_table_counts_and_cleanup(tmp_path):
         assert s.db_size() > 0
     finally:
         await s.close()
+
+
+async def test_get_full_message_at_reads_persisted_metadata(store):
+    p = await store.get_or_create_project("/tmp/demo-full")
+    s = await store.create_session(p.id, title="full")
+    msg = Message.assistant([TextBlock(text="对抗报告")])
+    msg.adversarial = {"mode": "adversarial", "status": "done", "findings": [{"id": "F-001"}]}
+    seq = await store.append_message(s.id, msg)
+
+    full = await store.get_full_message_at(s.id, seq)
+    assert full is not None and full.seq == seq
+    assert full.adversarial["findings"][0]["id"] == "F-001"
+    assert await store.get_full_message_at(s.id, seq + 1) is None
+    # 会话归属：另一个会话的同序号不会串读
+    other = await store.create_session(p.id, title="other")
+    assert await store.get_full_message_at(other.id, seq) is None

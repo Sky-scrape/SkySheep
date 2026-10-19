@@ -609,10 +609,10 @@ def test_hidden_preset_default_falls_back(home):
 def test_add_hidden_preset_name_tells_restore(home):
     """名称撞上"已被隐藏"的内置服务时，提示去恢复而不是让用户重新添加。"""
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
-        ws.send_json({"id": "d1", "method": "config.delete_provider", "params": {"name": "ollama"}})
+        ws.send_json({"id": "d1", "method": "config.delete_provider", "params": {"name": "mimo"}})
         assert recv_until(ws, "d1")["ok"]
         ws.send_json({"id": "a1", "method": "config.add_provider", "params": {
-            "name": "ollama", "model": "qwen3:8b", "base_url": "http://localhost:11434/v1",
+            "name": "mimo", "model": "MiMo-V2.5-Pro", "base_url": "https://api.xiaomimimo.com/v1",
         }})
         frame = recv_until(ws, "a1")
         assert not frame["ok"]
@@ -632,13 +632,15 @@ def test_probe_models_wiring(home, monkeypatch):
     monkeypatch.setattr("skysheep.server.backend_parts.providers.probe_provider_models", fake_probe)
 
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
-        # 内置 ollama 自带 api_key="ollama"，应能直接检测
-        ws.send_json({"id": "p1", "method": "config.probe_models", "params": {"name": "ollama"}})
+        # 已保存 base_url 的服务：不传地址时回落到配置里的值
+        # （内置服务都从环境变量取 Key，这里先给 deepseek 注入一个）
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        ws.send_json({"id": "p1", "method": "config.probe_models", "params": {"name": "deepseek"}})
         r = recv_until(ws, "p1")
         assert r["ok"], r
         assert r["result"]["count"] == 3
         assert r["result"]["models"] == ["aaa-model", "bbb-model", "ccc-model"]
-        assert calls[-1]["base_url"] == "http://localhost:11434/v1", "应回落到已保存的地址"
+        assert calls[-1]["base_url"] == "https://api.deepseek.com", "应回落到已保存的地址"
 
         # 没配 Key 的内置服务 → 可读错误
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)

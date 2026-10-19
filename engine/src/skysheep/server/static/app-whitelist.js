@@ -794,19 +794,37 @@ function addProviderModal() {
       } else {
         const cur = val("model");
         pickWrap.classList.remove("hidden");
+        // 检测结果可能上百行：给搜索框 + 实时计数，勾选状态独立于筛选（筛掉的不会丢勾）
+        const renderPickList = () => {
+          const kw = (pickWrap.querySelector(".ap-search input") || {}).value || "";
+          const f = kw.trim().toLowerCase();
+          const rows = f ? r.models.filter((m) => m.toLowerCase().includes(f)) : r.models;
+          const cntEl = pickWrap.querySelector(".ap-count");
+          if (cntEl) cntEl.textContent = f ? `${rows.length} / ${r.count}` : "";
+          const listEl = pickWrap.querySelector(".ap-list");
+          if (!rows.length) {
+            listEl.innerHTML =
+              `<div class="empty-hint">没有匹配「${escapeHtml(kw.trim())}」的模型</div>`;
+            return;
+          }
+          listEl.innerHTML = rows.map((m) =>
+            `<label class="ap-row"><input type="checkbox" value="${escapeHtml(m)}"${m === cur ? " checked" : ""}>` +
+            `<span class="mono">${escapeHtml(m)}</span></label>`).join("");
+        };
         pickWrap.innerHTML =
           `<div class="ap-pick-head"><span>检测到 ${r.count} 个可用模型，勾选要一并启用的</span>` +
           `<span><button class="link-btn" type="button" data-a="all">全选</button>` +
           `<button class="link-btn" type="button" data-a="none">清空</button></span></div>` +
-          `<div class="ap-list">` +
-          r.models.map((m) =>
-            `<label class="ap-row"><input type="checkbox" value="${escapeHtml(m)}"${m === cur ? " checked" : ""}>` +
-            `<span class="mono">${escapeHtml(m)}</span></label>`).join("") +
-          `</div>`;
+          `<div class="ap-search"><input type="search" placeholder="搜索模型名（模糊匹配）" autocomplete="off">` +
+          `<span class="ap-count"></span></div>` +
+          `<div class="ap-list"></div>`;
+        renderPickList();
+        pickWrap.querySelector(".ap-search input").oninput = renderPickList;
+        // 全选 / 清空作用于「当前可见的行」，与搜索配合即可「按关键词批量勾」
         pickWrap.querySelector('[data-a="all"]').onclick = () =>
-          pickWrap.querySelectorAll("input").forEach((c) => (c.checked = true));
+          pickWrap.querySelectorAll(".ap-list input").forEach((c) => (c.checked = true));
         pickWrap.querySelector('[data-a="none"]').onclick = () =>
-          pickWrap.querySelectorAll("input").forEach((c) => (c.checked = false));
+          pickWrap.querySelectorAll(".ap-list input").forEach((c) => (c.checked = false));
         formStatus.textContent = `✓ 检测到 ${r.count} 个可用模型，勾选后随服务一并启用（当前模型始终启用）`;
         formStatus.className = "form-status ok";
       }

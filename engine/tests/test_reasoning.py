@@ -153,11 +153,11 @@ def test_config_persists_and_validates_effort(home):
     # 默认对所有服务提供该能力（auto 档不传参，无副作用）；可在设置里显式关闭
     assert cfg.providers["anthropic"].supports_reasoning is True
     assert cfg.providers["deepseek"].supports_reasoning is True
-    assert cfg.providers["ollama"].supports_reasoning is True
+    assert cfg.providers["qwen"].supports_reasoning is True
 
     # 显式关闭后落盘、可被读回
-    update_provider_in_config("ollama", supports_reasoning=False)
-    assert load_config().providers["ollama"].supports_reasoning is False
+    update_provider_in_config("qwen", supports_reasoning=False)
+    assert load_config().providers["qwen"].supports_reasoning is False
 
     with pytest.raises(ConfigError):
         update_provider_in_config("deepseek", reasoning_effort="extreme")

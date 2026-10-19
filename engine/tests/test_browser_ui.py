@@ -56,8 +56,14 @@ async def live_server(home, script):
         provider_factory=lambda: provider,
     )
     port = _free_port()
+    # timeout_graceful_shutdown：uvicorn 优雅关闭默认无限等连接排空，而 Windows
+    # Proactor 偶发漏掉一条连接的 connection_lost，asyncio.Server.wait_closed()
+    # 就会一直卡住。设上限后 uvicorn 超时会照常执行 lifespan shutdown
+    # （→ backend.shutdown → store.close）；否则下面 10s 的取消会整段跳过它，
+    # 漏掉的 aiosqlite 非 daemon 工作线程会让 pytest 打完 passed 后永不退出。
     config = uvicorn.Config(app, host="127.0.0.1", port=port,
-                            log_level="error", lifespan="on")
+                            log_level="error", lifespan="on",
+                            timeout_graceful_shutdown=5)
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
     try:

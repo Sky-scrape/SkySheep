@@ -296,6 +296,8 @@ let wsConnOn = false; // 当前连接状态镜像：分屏列在连接建立后�
 
 function setConn(on) {
   wsConnOn = on;
+  // 重连恢复：接力任务只刷新快照，绝不重放执行（业务推进在后端）
+  if (on && typeof relayOnReconnect === "function") relayOnReconnect();
   // 文字已删，只留圆点：连接状态走 title 悬停说明（断线时悬停可见「重连中…」）
   const dot = document.getElementById("conn-status");
   dot.className = "dot " + (on ? "on" : "off");
@@ -862,6 +864,9 @@ async function activateTab(tab) {
   renderTabs();
   hidePermission();
   currentSessionId = tab.sid;
+  // 接力工作台顶部的会话名跟着活动会话走（右侧面板开着时切标签也要更新）
+  // 接力看板跟着活动会话走（右侧面板开着时才重读）
+  if (typeof relayDualOnSessionChange === "function") relayDualOnSessionChange();
   // 侧栏会话行选中态跟着活动标签走（与分组视图组头高亮同一来源）：
   // 否则从侧栏点开 A 会话再切到快聊标签，组头高亮动了、行高亮还留在 A
   activeSessionSid = tab.sid || null;
@@ -899,6 +904,7 @@ async function activateTab(tab) {
 }
 
 function openTabForSession(sid, title, opts = {}) {
+  // 接力在右侧面板与聊天并行显示，切换会话时保留面板并更新其会话上下文。
   // 同一会话只在一个面上打开：主栏要开它就把开着的那一列收掉（侧栏点行、
   // 通知跳转、列头 🔒 等路径都汇在这里）。不收的话事件按 tabFor 优先全进
   // 标签，列的运行点/输入锁再也没有事件来复位
@@ -939,6 +945,7 @@ function openTabForSession(sid, title, opts = {}) {
     if (adopted && t === activeTab) {
       attachTabLog(t);
       currentSessionId = t.sid;
+      if (typeof relayDualOnSessionChange === "function") relayDualOnSessionChange();
       restoreComposerState(t.sid); // activateTab 早退了：输入区状态在这里恢复
       refreshActiveSessionBadges(t);
       renderTabs();
@@ -1285,12 +1292,13 @@ async function openSplitPane(sid, title) {
   // 「在分屏打开」的语义 = 把会话从主栏搬进分屏。运行中的标签随关闭一并停止轮次
   // （与手动关标签同一语义），提示里说明。
   const conflict = tabFor(sid);
+  let conflictNotice = "";
   if (conflict) {
     const wasRunning = conflict.running;
     closeTab(conflict);
-    addNotice(wasRunning
+    conflictNotice = wasRunning
       ? "已从主栏搬进分屏：原标签已关闭，运行中的轮次一并停止"
-      : "已从主栏搬进分屏：原标签已关闭");
+      : "已从主栏搬进分屏：原标签已关闭";
   }
   const exist = splitPanes.find((p) => p.sid === sid);
   if (exist) closeSplitPane(exist, { restore: false }); // 已开着这一栏：关掉重开 = 拉最新快照
@@ -1329,7 +1337,7 @@ async function openSplitPane(sid, title) {
     '<div class="composer-bar split-bar">' +
     '<button class="cp-icon" data-role="plan" title="规划模式（每栏独立）：本栏消息只调研、不改动文件">' +
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.8 13.2h5.7L10.2 22l8.9-11.6h-5.6L13 2z"/></svg></button>' +
-    '<button class="cp-icon" data-role="coop" title="协作（每栏独立）：圆桌 / 团队 / 对抗，点击选择">' +
+    '<button class="cp-icon" data-role="coop" title="协作（每栏独立）：圆桌 / 团队 / 对抗，点击选择。分阶段报告请从侧栏打开接力工作台">' +
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.7-3.4 2.9-5.2 5.5-5.2s4.8 1.8 5.5 5.2"/><circle cx="17" cy="9.5" r="2.5"/><path d="M15.7 14.6c2.5.3 4.3 1.9 4.8 4.4"/></svg>' +
     '<span class="cp-state" hidden></span>' +
     '</button>' +
@@ -1395,15 +1403,17 @@ async function openSplitPane(sid, title) {
   col.querySelector(".split-refresh").onclick = async () => {
     // 运行中不刷新：renderHistory 会清空日志，而流式增量还写进已被摘除的
     // 旧流式节点——本轮回答在列里不可见（主栏 loadTabHistory 同一守卫）
-    if (pane.running) { addNotice("这一栏正在运行，等当前轮结束再刷新"); return; }
+    if (pane.running) { paneNotice(pane, "这一栏正在运行，等当前轮结束再刷新"); return; }
     try {
       const fresh = await request("session.peek_messages", { id: sid });
       pane.title = fresh.title || pane.title;
       col.querySelector(".split-title").textContent = pane.title;
       renderHistory(pane, fresh.messages || []);
-    } catch (e) { addNotice("刷新分屏失败: " + e.message); }
+    } catch (e) { paneNotice(pane, "刷新分屏失败: " + e.message); }
   };
   reload();
+  // 搬栏提示写进新列：它描述的是这一栏，不该出现在主栏
+  if (conflictNotice) paneNotice(pane, conflictNotice);
   if (!pane.logEl.children.length) {
     pane.logEl.innerHTML = '<div class="rp-empty">这个会话还没有消息。</div>';
   }
@@ -1422,7 +1432,7 @@ async function openSplitPane(sid, title) {
     if ((!text && !images.length) || pane.running) return;
     // 视觉能力按本列生效模型判（与主栏同一道提前拦截）
     if (images.length && pane.model && pane.model.supports_vision === false) {
-      addNotice(`这一栏生效的模型「${pane.model.name}」不支持图片输入，请先在栏上换成多模态模型`);
+      paneNotice(pane, `这一栏生效的模型「${pane.model.name}」不支持图片输入，请先在栏上换成多模态模型`);
       return;
     }
     input.value = "";
@@ -1469,7 +1479,7 @@ async function openSplitPane(sid, title) {
     } catch (e) {
       pane.running = false;
       paintSplitHead(pane);
-      addNotice("发送失败: " + e.message);
+      paneNotice(pane, "发送失败: " + e.message);
     } finally {
       // 兜底复位：事件路由异常时列的运行态不能永久卡死（蓝点常亮 + 输入锁死）。
       // 正常路径轮末 queue_updated(pending=0) 已复位，这里是双保险
@@ -1553,11 +1563,11 @@ async function openSplitPane(sid, title) {
         // 语音输入按面：录转的文字落进这一栏的输入框（同一支麦克风，谁点归谁）
         if (voiceBusy) {
           if (voiceRecorder && voiceRecorder.state === "recording") voiceStop();
-          else addNotice("正在识别上一条录音，稍等一下…");
+          else paneNotice(pane, "正在识别上一条录音，稍等一下…");
         } else voiceStart(pane);
       } else {
         // 剩余镜像入口各给一句如实提示（不再统一一句模糊话）
-        addNotice("这是全局设置/主栏功能，请到主栏操作");
+        paneNotice(pane, "这是全局设置/主栏功能，请到主栏操作");
       }
     };
   });
@@ -1615,16 +1625,16 @@ async function cycleSplitAccept(pane, btn) {
     try {
       const g = await request("session.accept_get", { id: pane.sid });
       cur = g.mode;
-    } catch (e) { addNotice("读取权限档位失败: " + e.message); return; }
+    } catch (e) { paneNotice(pane, "读取权限档位失败: " + e.message); return; }
   }
   const next = order[(order.indexOf(cur || "confirm") + 1) % order.length];
   try {
     const r = await request("session.accept_set", { id: pane.sid, mode: next });
     pane.acceptMode = r.mode;
     paintAcceptIcon(btn, r.mode);
-    addNotice((ACCEPT_NOTICE[r.mode] || ACCEPT_NOTICE.confirm) + "（仅这一栏）");
+    paneNotice(pane, (ACCEPT_NOTICE[r.mode] || ACCEPT_NOTICE.confirm) + "（仅这一栏）");
   } catch (e) {
-    addNotice("切换失败: " + e.message);
+    paneNotice(pane, "切换失败: " + e.message);
   }
 }
 
@@ -1632,13 +1642,13 @@ async function cycleSplitAccept(pane, btn) {
 // 发送后由 Agent 自己读文件），项目外的文件也可以
 async function attachSplitFiles(pane) {
   const r = await pickPath("file").catch(() => ({ error: "no-picker" }));
-  if (r.error) { addNotice("打开文件选择框失败：" + (r.error === "no-picker" ? "未安装文件选择组件" : r.error)); return; }
+  if (r.error) { paneNotice(pane, "打开文件选择框失败：" + (r.error === "no-picker" ? "未安装文件选择组件" : r.error)); return; }
   const paths = (r.paths || []).filter(Boolean);
   if (!paths.length) return;
   const input = pane.el.querySelector(".split-input");
   input.value = (input.value ? input.value + " " : "") + paths.map((p) => "@" + p).join(" ");
   input.focus();
-  addNotice(`已引用 ${paths.length} 个文件（将随这一栏的消息一起发送）`);
+  paneNotice(pane, `已引用 ${paths.length} 个文件（将随这一栏的消息一起发送）`);
 }
 
 // 列的模型显示与选择：会话级覆盖（session.model_switch），只影响这一栏
@@ -1673,7 +1683,7 @@ function syncSplitBarToggles(pane) {
     coop.title = pane.rtOn ? "圆桌（每栏独立）：本栏消息由多个模型共同思考。点击可换模式"
       : pane.teamOn ? "团队（每栏独立）：本栏消息组建团队协作。点击可换模式"
       : pane.advOn ? "对抗（每栏独立）：本栏消息做对抗性审查。点击可换模式"
-      : "协作（每栏独立）：圆桌 / 团队 / 对抗，点击选择";
+      : "协作（每栏独立）：圆桌 / 团队 / 对抗，点击选择。分阶段报告请从侧栏打开接力工作台";
   }
 }
 
@@ -1760,8 +1770,8 @@ async function pickSplitModel(pane, anchor) {
       try {
         const r = await request("session.model_switch", { id: pane.sid, name: row.name, model: row.model });
         paintSplitModel(pane, { name: r.provider, model: r.model, overridden: true });
-        addNotice(`✓ 这一栏将使用「${r.provider} / ${r.model}」，主栏不变`);
-      } catch (err) { addNotice("切换失败: " + err.message); }
+        paneNotice(pane, `✓ 这一栏将使用「${r.provider} / ${r.model}」，主栏不变`);
+      } catch (err) { paneNotice(pane, "切换失败: " + err.message); }
     };
     menu.appendChild(b);
   };
@@ -2049,7 +2059,7 @@ async function newSessionFromHighlight() {
       return;
     }
     startNewTab();
-    addNotice(`已切换到项目「${lit.name}」，新建对话`);
+    addNotice(`已切换到项目「${lit.name}」，新建会话`);
     return;
   }
   startNewTab();
@@ -2128,6 +2138,14 @@ function addNotice(text) {
   d.textContent = text;
   curLog().appendChild(d);
   scrollLog();
+}
+
+/** 分屏列自己的操作提示：必须写进那一列。
+ *  addNotice 落在 curTab（routeTab || activeTab），分屏里的按钮操作没有路由，
+ *  直接调会把「这一栏将使用…」写进主栏——两块对话串台，用户看到的就是这个。 */
+function paneNotice(pane, text) {
+  if (!pane || !pane.logEl) { addNotice(text); return; }
+  withTab(pane, () => addNotice(text));
 }
 
 // 历史图片按需加载：boot/切会话只收占位（_msg_brief 不再带 base64），
@@ -2431,6 +2449,10 @@ function finishAssistant(rtMeta, seq) {
       // 对抗报告：徽标 + 折叠上方的问题清单卡（报告已流进本气泡）
       addAdvBadge(t.streamingEl, rtMeta);
       t.streamingEl._rtMeta = rtMeta; // 重新生成时据此重跑同样的对抗配置
+      rtMeta.seq = seq;
+      t.advSeq = seq;
+      t.advMeta = rtMeta;
+      advAttachTransfer(t, rtMeta, seq);
       if (t.advCard && t.advCard.isConnected && !t.advCard.classList.contains("folded") && t.advFold) {
         t.advFold();
       }
@@ -2442,10 +2464,24 @@ function finishAssistant(rtMeta, seq) {
       const allSettled = rtEls.length &&
         rtEls.every((x) => x.card.classList.contains("ok") || x.card.classList.contains("err")
           || x.card.classList.contains("skipped"));
+      if (t.rtCard) {
+        // 对照卡底部说明：A/B 与圆桌的结论去向不同，但不推断共识/分歧
+        const note = t.rtCard.querySelector(".rt-note");
+        if (note) {
+          note.textContent = rtMeta.mode === "compare"
+            ? "对照各方观点，展开全文查看完整回答；所选模型的回答见下方。"
+            : "对照各方观点，展开全文查看完整回答，融合结论见下方回答。";
+        }
+        // 自动折叠后展开时用的副标题（rtMemberFinished 的进度文案已过时）
+        t.rtCard._rtSubText = rtMeta.mode === "compare"
+          ? `${rtEls.length} 个模型 · 已定稿 · 展开查看各成员草稿`
+          : `${rtEls.length} 个模型 · 草稿完成，融合结论见下方回答`;
+      }
       if (rtMeta.members && allSettled && t.rtCard && !t.rtCard.classList.contains("folded")) {
         t.rtCard.classList.add("folded");
         const foldBtn = t.rtCard.querySelector(".rt-fold");
         if (foldBtn) foldBtn.textContent = "展开";
+        if (foldBtn) foldBtn.setAttribute("aria-expanded", "false");
         const sub = t.rtCard.querySelector(".rt-sub");
         if (sub) sub.textContent = `${rtEls.length} 个模型 · 已折叠 · 点击标题栏展开查看各成员草稿`;
       }
@@ -2518,8 +2554,10 @@ function quoteRoundtableDraft(provider, model, text, tab) {
   input.setSelectionRange(input.value.length, input.value.length);
 }
 
-// 一批成员卡片的公共 DOM：head + grid；返回 {card, grid, sub}
-function buildRtCardShell(members, subText) {
+// 一批成员卡片的公共 DOM：head + grid + 底部说明；返回 {card, grid, sub, note}
+// note 只陈述「并列展示、不推断共识/分歧」这一事实——现有协议没有结构化的
+// 立场/共识数据，界面不凭空生成共识或分歧区块。
+function buildRtCardShell(members, subText, noteText) {
   const card = document.createElement("div");
   card.className = "roundtable";
   const head = document.createElement("div");
@@ -2527,43 +2565,56 @@ function buildRtCardShell(members, subText) {
   const sub = document.createElement("span");
   sub.className = "rt-sub";
   sub.textContent = subText;
+  card._rtSubText = subText; // 展开态复用的最新副标题（轮次进度会覆盖它）
   const title = document.createElement("span");
   title.className = "rt-title";
-  title.textContent = "👥 圆桌讨论";
+  title.textContent = "👥 圆桌 · 观点对照";
   const fold = document.createElement("button");
   fold.className = "rt-fold";
   fold.textContent = "折叠";
+  fold.setAttribute("aria-expanded", "true");
   const toggleFold = () => {
     const folded = card.classList.toggle("folded");
     fold.textContent = folded ? "展开" : "折叠";
+    fold.setAttribute("aria-expanded", folded ? "false" : "true");
     sub.textContent = folded
       ? `${members.length} 个模型 · 已折叠 · 点击展开查看各成员草稿`
-      : subText;
+      : (card._rtSubText || subText);
+    // 折叠时网格 display:none 量不出高度；展开后重算「展开全文」入口
+    if (!folded && card._rtMembers) card._rtMembers.forEach(rtSyncClamp);
   };
   fold.onclick = (e) => { e.stopPropagation(); toggleFold(); };
   head.onclick = (e) => { if (e.target !== fold) toggleFold(); };
   head.append(title, sub, fold);
   const grid = document.createElement("div");
   grid.className = "rt-grid";
-  // 按成员数定列数：1/2/3 各成一列排一行，4 及以上 2×2——auto-fit 会排出 3+1 的孤行，视觉很乱
+  // 按成员数定列数：1/2/3 各成一列排一行，4 及以上 2 列（2×N）——
+  // 上限三列；4 个时若排 3 列会出现 3+1 孤行，视觉更乱
   grid.style.setProperty("--rt-cols", members.length >= 4 ? 2 : Math.max(1, members.length));
-  card.append(head, grid);
-  return { card, grid, sub };
+  const note = document.createElement("div");
+  note.className = "rt-note";
+  note.textContent = noteText
+    || "对照各方观点，展开全文查看完整回答。";
+  card.append(head, grid, note);
+  return { card, grid, sub, note };
 }
 
-// 成员卡的公共 DOM：head + body + foot（用量 / 引用追问）
-// 返回 {el, mcard, statusEl, roundEl, tokensEl, footEl, bodyEl, quoteBtn}
-function buildRtMemberCard(m) {
+// 成员卡的公共 DOM：序号 + head + body + foot（展开 / 用量 / 引用追问）
+// 返回 {el, mcard, statusEl, roundEl, tokensEl, footEl, bodyEl, quoteBtn, moreBtn}
+function buildRtMemberCard(m, index) {
   const mcard = document.createElement("div");
   mcard.className = "rt-member";
+  const idx = Number.isInteger(index) ? index + 1 : 0;
   mcard.innerHTML =
-    `<div class="rt-m-head"><span class="rt-m-name">${escapeHtml(m.provider)}</span>` +
+    `<div class="rt-m-head"><span class="rt-m-idx">${idx || "·"}</span>` +
+    `<span class="rt-m-name">${escapeHtml(m.provider)}</span>` +
     `<span class="rt-m-model">${escapeHtml(m.model)}</span>` +
     `<span class="rt-m-role"${m.role ? "" : " hidden"}>${m.role ? escapeHtml(rtRoleLabel(m.role)) : ""}</span>` +
     '<span class="rt-m-round" hidden></span>' +
     '<span class="rt-m-status">⋯</span></div>' +
     '<div class="rt-m-body"><div class="md"></div></div>' +
     '<div class="rt-m-foot" hidden><span class="rt-m-tokens"></span>' +
+    '<button class="rt-m-more" type="button" aria-expanded="false" hidden>展开全文</button>' +
     '<button class="rt-m-quote" type="button" title="把这份草稿引用进输入框，继续追问">引用追问</button></div>';
   return {
     card: mcard,
@@ -2572,9 +2623,47 @@ function buildRtMemberCard(m) {
     tokensEl: mcard.querySelector(".rt-m-tokens"),
     foot: mcard.querySelector(".rt-m-foot"),
     body: mcard.querySelector(".rt-m-body .md"),
+    moreBtn: mcard.querySelector(".rt-m-more"),
     quoteBtn: mcard.querySelector(".rt-m-quote"),
   };
 }
+
+// 长草稿折叠/展开：body 的 max-height 由 CSS 控制（桌面 240px、窄屏 200px），
+// 阈值按实际计算值取，媒体查询下调后「展开全文」入口不会漏出。
+// 只有内容确实溢出才显示「展开全文」；展开状态在流式重渲与事件重画间保留。
+const RT_DRAFT_CLAMP_PX = 240;
+function rtSyncClamp(m) {
+  if (!m || !m.card || !m.moreBtn) return;
+  const body = m.body.parentElement;
+  if (!body) return;
+  const expanded = m.card.classList.contains("expanded");
+  if (!expanded) {
+    const maxH = parseFloat(getComputedStyle(body).maxHeight) || RT_DRAFT_CLAMP_PX;
+    m._draftOverflow = body.scrollHeight > maxH + 6;
+  }
+  const show = !!m._draftOverflow;
+  m.card.classList.toggle("can-expand", show);
+  m.moreBtn.hidden = !show;
+  m.moreBtn.textContent = expanded ? "收起" : "展开全文";
+  m.moreBtn.setAttribute("aria-expanded", expanded ? "true" : "false");
+  m.moreBtn.title = expanded ? "收起这份草稿" : "展开完整草稿（不截断内容）";
+}
+function rtToggleDraft(m) {
+  if (!m || !m.card) return;
+  const expanded = m.card.classList.toggle("expanded");
+  if (expanded) m._draftOverflow = true; // 已确认可展开，收起后继续保持入口
+  rtSyncClamp(m);
+}
+// 窗口宽度跨过 760/520 断点时 max-height 会变，已渲染的对照卡重新量一次
+let rtClampResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(rtClampResizeTimer);
+  rtClampResizeTimer = setTimeout(() => {
+    document.querySelectorAll(".roundtable").forEach((card) => {
+      (card._rtMembers || []).forEach(rtSyncClamp);
+    });
+  }, 150);
+});
 
 // ---------- 圆桌卡片：成员草稿并列展示 + 融合进度（状态挂标签） ----------
 function beginRoundtable(members, rounds) {
@@ -2586,19 +2675,21 @@ function beginRoundtable(members, rounds) {
     `${members.length} 个模型正在并行思考${total > 1 ? `（共 ${total} 轮）` : ""}…`
   );
   t.rtCard = card;
-  t.rtMemberEls = members.map((m) => {
-    const u = buildRtMemberCard(m);
+  t.rtMemberEls = members.map((m, i) => {
+    const u = buildRtMemberCard(m, i);
     grid.appendChild(u.card);
     u.text = "";
     u.round = 0;
     u.finishedRound = -1;
     u.tokens = 0;
+    u.moreBtn.onclick = (e) => { e.stopPropagation(); rtToggleDraft(u); };
     u.quoteBtn.onclick = (e) => {
       e.stopPropagation();
       quoteRoundtableDraft(m.provider, m.model, u.text, t);
     };
     return u;
   });
+  card._rtMembers = t.rtMemberEls;
   curLog().appendChild(card);
   scrollLog();
 }
@@ -2619,7 +2710,10 @@ function rtMemberDelta(data) {
     // 进入新一轮修订：旧草稿清空，整段换成修订版（不被上一轮文本拼接污染）
     m.round = r;
     m.text = "";
-    m.card.classList.remove("ok", "err", "skipped");
+    m.card.classList.remove("ok", "err", "skipped", "expanded", "can-expand");
+    m.card.classList.add("streaming");
+    m._draftOverflow = false;
+    if (m.moreBtn) m.moreBtn.hidden = true;
     m.status.textContent = "⋯";
     setMemberRound(m, t, r, r > 0 ? `第 ${r + 1} 轮修订` : `第 ${r + 1} 轮`);
     m.body.innerHTML = "";
@@ -2627,6 +2721,7 @@ function rtMemberDelta(data) {
     setMemberRound(m, t, 0);
   }
   m.text += data.text || "";
+  m.card.classList.add("streaming");
   // 节流渲染：多成员并行流式时逐 delta 全量重渲 markdown 很吃性能（长草稿卡顿）
   if (!m._renderTimer) {
     m._renderTimer = setTimeout(() => {
@@ -2647,9 +2742,12 @@ function rtMemberFinished(data) {
     // 防御：没收到（或没来得及收）delta 就直接来了结束事件
     m.round = r;
     m.text = "";
-    m.card.classList.remove("ok", "err", "skipped");
+    m.card.classList.remove("ok", "err", "skipped", "expanded", "can-expand");
+    m._draftOverflow = false;
+    if (m.moreBtn) m.moreBtn.hidden = true;
     m.body.innerHTML = "";
   }
+  m.card.classList.remove("streaming");
   m.finishedRound = r;
   if (data.skipped) {
     // 已收敛：上一轮修订没有改动，本轮跳过
@@ -2675,16 +2773,17 @@ function rtMemberFinished(data) {
   m.tokens += (data.output_tokens || 0) + (data.input_tokens || 0);
   if (m.tokens > 0) m.tokensEl.textContent = `≈${fmtTokens(m.tokens)} tokens`;
   if (m.text.trim()) m.foot.hidden = false;
+  rtSyncClamp(m);
   // 按轮结算：本轮所有成员的结束事件到齐（含 skipped）→ 更新进度文案
   const total = t.rtRounds || 1;
   const allNow = t.rtMemberEls.every((x) => x.finishedRound >= r);
   if (allNow) {
     const sub = t.rtCard.querySelector(".rt-sub");
-    if (sub) {
-      sub.textContent = (r + 1 < total)
-        ? `第 ${r + 1} / ${total} 轮完成，进入修订…`
-        : "草稿完成，主席融合中…";
-    }
+    const msg = (r + 1 < total)
+      ? `第 ${r + 1} / ${total} 轮完成，进入修订…`
+      : "草稿完成，主席融合中…";
+    t.rtCard._rtSubText = msg;
+    if (sub) sub.textContent = msg;
   }
 }
 
@@ -2692,20 +2791,32 @@ function rtMemberFinished(data) {
 // tab 供「引用追问」按发起面回填对应输入框（分屏列里回放的历史卡也要回列）
 function buildRtReplayCard(meta, tab) {
   const members = meta.members || [];
+  const compare = meta.mode === "compare";
+  const rounds = meta.rounds || 1;
+  // 展开态副标题先在壳里挂好：fold 切换回展开时用的是这一份（不能拿折叠文案
+  // 当 subText，否则展开后仍写着「已折叠」）
+  let expandedSub = `${members.length} 个模型 · 各成员草稿（独立成稿）`;
+  if (rounds > 1) expandedSub += ` · 辩论 ${rounds - 1} 轮`;
   const { card, grid, sub } = buildRtCardShell(
-    members, `${members.length} 个模型 · 已折叠 · 点击展开查看各成员草稿`
+    members,
+    expandedSub,
+    compare
+      ? "对照各方观点，展开全文查看完整回答；所选模型的回答见下方。"
+      : "对照各方观点，展开全文查看完整回答，融合结论见下方回答。"
   );
   card.classList.add("folded");
   card.querySelector(".rt-fold").textContent = "展开";
-  const rounds = meta.rounds || 1;
-  if (rounds > 1) sub.textContent += ` · 辩论 ${rounds - 1} 轮`;
-  members.forEach((m) => {
-    const u = buildRtMemberCard(m);
+  card.querySelector(".rt-fold").setAttribute("aria-expanded", "false");
+  sub.textContent = `${members.length} 个模型 · 已折叠 · 点击展开查看各成员草稿`;
+  const memberEls = [];
+  members.forEach((m, i) => {
+    const u = buildRtMemberCard(m, i);
     const draft = m.draft || "";
     u.card.classList.add(m.status === "done" ? "ok" : "err");
     u.status.textContent = m.status === "done" ? "✓" : "✗";
     const tk = (m.input_tokens || 0) + (m.output_tokens || 0);
     if (tk) u.tokensEl.textContent = `≈${fmtTokens(tk)} tokens`;
+    u.moreBtn.onclick = (e) => { e.stopPropagation(); rtToggleDraft(u); };
     if (draft.trim()) {
       u.body.innerHTML = renderMarkdown(draft);
       u.foot.hidden = false;
@@ -2721,7 +2832,9 @@ function buildRtReplayCard(meta, tab) {
       u.body.innerHTML = `<p class="dim">✗ ${escapeHtml(m.error || "作答失败")}</p>`;
     }
     grid.appendChild(u.card);
+    memberEls.push(u);
   });
+  card._rtMembers = memberEls;
   return card;
 }
 
@@ -2736,6 +2849,21 @@ const ADV_PHASES = [
 ];
 const ADV_SEVERITY_LABEL = { critical: "致命", high: "高", medium: "中", low: "低" };
 const ADV_VERDICT_LABEL = { confirmed: "成立", refuted: "已推翻", partial: "部分成立", pending: "待定" };
+// 问题清单的裁决筛选（统计条与筛选共用一份词表；键与元数据 verdict 一一对应）
+const ADV_VERDICT_FILTERS = [
+  ["all", "全部"],
+  ["confirmed", "成立"],
+  ["partial", "部分"],
+  ["refuted", "推翻"],
+  ["pending", "待定"],
+];
+const ADV_SEVERITY_FILTERS = [
+  ["all", "全部严重度"],
+  ["critical", "致命"],
+  ["high", "高"],
+  ["medium", "中"],
+  ["low", "低"],
+];
 const advRoleLabel = (role) =>
   ({ finder: "发现者", investigator: "调查者", advisor: "建议者", judge: "裁判" })[role] || role || "";
 
@@ -2746,14 +2874,17 @@ function advRolesTitle(roles) {
     .join("\n");
 }
 
-// 一行候选问题（实时与回放共用）：编号 + 严重度 + 类别 + 位置 + 裁决徽记
+// 一行候选问题（实时与回放共用）：编号 + 严重度 + 类别 + 位置 + 裁决徽记，
+// 下方是问题正文；依据/建议收进可展开的 details（默认收起，键盘可操作）。
 function advFindingRow(f, opts = {}) {
   const row = document.createElement("div");
   row.className = "adv-finding";
   row.dataset.findingId = f.finding_id || f.id || "";
   const sev = f.severity || f.effective_severity || "medium";
-  const sevLabel = ADV_SEVERITY_LABEL[sev] || sev;
+  row.dataset.severity = sev;
   const verdict = f.verdict || "";
+  row.dataset.verdict = verdict || "pending";
+  const sevLabel = ADV_SEVERITY_LABEL[sev] || sev;
   const vLabel = verdict ? (ADV_VERDICT_LABEL[verdict] || verdict) : "";
   row.innerHTML =
     `<div class="adv-f-head">` +
@@ -2763,18 +2894,182 @@ function advFindingRow(f, opts = {}) {
     `<span class="adv-f-loc" title="${escapeHtml(f.location || "")}">${escapeHtml(f.location || "")}</span>` +
     (vLabel ? `<span class="adv-f-verdict verdict-${escapeHtml(verdict)}">${escapeHtml(vLabel)}</span>` : "<span class=\"adv-f-verdict\" hidden></span>") +
     `</div>` +
-    `<div class="adv-f-desc md"></div>` +
-    (opts.replay && f.reason ? `<div class="adv-f-reason dim"></div>` : "") +
-    (opts.replay && f.solution ? `<div class="adv-f-fix"></div>` : "");
+    `<div class="adv-f-desc md"></div>`;
   row.querySelector(".adv-f-desc").innerHTML = renderMarkdown(f.description || "");
   if (f.reason) row.title = f.reason;
-  if (opts.replay && f.reason) {
-    row.querySelector(".adv-f-reason").innerHTML = "裁决依据：" + renderMarkdown(f.reason);
+  // 证据/依据/建议：按可用字段拼细节区（实时只有裁决后才有依据）
+  const details = document.createElement("details");
+  details.className = "adv-f-details";
+  details.hidden = true;
+  const summary = document.createElement("summary");
+  summary.textContent = opts.replay && f.solution
+    ? "证据、依据与修复建议" : "证据与裁决依据";
+  const body = document.createElement("div");
+  body.className = "adv-f-detail-body";
+  details.append(summary, body);
+  if (f.evidence) {
+    const ev = document.createElement("div");
+    ev.className = "adv-f-evidence dim";
+    ev.innerHTML = "发现依据：" + renderMarkdown(f.evidence);
+    body.appendChild(ev);
+  }
+  if (f.reason) {
+    const reason = document.createElement("div");
+    reason.className = "adv-f-reason dim";
+    reason.innerHTML = "裁决依据：" + renderMarkdown(f.reason);
+    body.appendChild(reason);
   }
   if (opts.replay && f.solution) {
-    row.querySelector(".adv-f-fix").innerHTML = "🛠 " + renderMarkdown(f.solution);
+    const fix = document.createElement("div");
+    fix.className = "adv-f-fix";
+    fix.innerHTML = "🛠 " + renderMarkdown(f.solution);
+    body.appendChild(fix);
   }
+  details.hidden = !body.children.length;
+  row.appendChild(details);
   return row;
+}
+
+// 四阶段流程条：编号 + 名称 + 连接线。done/active 由 advSetPhase 切换，
+// 回放时整条置 done（已经走完的流水线）。
+function advBuildFlow() {
+  const flow = document.createElement("div");
+  flow.className = "adv-steps";
+  flow.setAttribute("role", "list");
+  flow.setAttribute("aria-label", "对抗审查四阶段");
+  const stepEls = {};
+  ADV_PHASES.forEach((p, i) => {
+    const step = document.createElement("div");
+    step.className = "adv-step";
+    step.dataset.phase = p.key;
+    step.setAttribute("role", "listitem");
+    step.title = `第 ${i + 1} 阶段：${p.label}`;
+    const num = document.createElement("span");
+    num.className = "adv-step-num";
+    num.textContent = String(i + 1);
+    const name = document.createElement("span");
+    name.className = "adv-step-name";
+    name.textContent = p.label;
+    step.append(num, name);
+    flow.appendChild(step);
+    stepEls[p.key] = step;
+    if (i < ADV_PHASES.length - 1) {
+      const link = document.createElement("span");
+      link.className = "adv-step-link";
+      link.setAttribute("aria-hidden", "true");
+      flow.appendChild(link);
+    }
+  });
+  return { flow, stepEls };
+}
+
+// 裁决统计 + 筛选条：每个徽章是开关按钮（aria-pressed），右侧严重度下拉。
+// 统计数从已渲染的问题行实时数出来（实时事件只给单条裁决，没有汇总字段）。
+function advBuildToolbar(card) {
+  const bar = document.createElement("div");
+  bar.className = "adv-toolbar";
+  const stats = document.createElement("div");
+  stats.className = "adv-stats";
+  stats.setAttribute("role", "group");
+  stats.setAttribute("aria-label", "按裁决筛选问题");
+  const buttons = {};
+  ADV_VERDICT_FILTERS.forEach(([key, label]) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "adv-stat v-" + key;
+    btn.dataset.verdict = key;
+    btn.setAttribute("aria-pressed", key === "all" ? "true" : "false");
+    btn.textContent = label;
+    const n = document.createElement("span");
+    n.className = "adv-stat-n";
+    n.textContent = "0";
+    btn.appendChild(n);
+    btn.onclick = () => {
+      card._advFilter = Object.assign({}, card._advFilter, { verdict: key });
+      advApplyFilter(card);
+    };
+    stats.appendChild(btn);
+    buttons[key] = btn;
+  });
+  const sev = document.createElement("select");
+  sev.className = "adv-sev-filter";
+  sev.title = "按严重度筛选问题";
+  sev.setAttribute("aria-label", "按严重度筛选问题");
+  ADV_SEVERITY_FILTERS.forEach(([key, label]) => {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = label;
+    sev.appendChild(opt);
+  });
+  sev.onchange = () => {
+    card._advFilter = Object.assign({}, card._advFilter, { severity: sev.value || "all" });
+    advApplyFilter(card);
+  };
+  bar.append(stats, sev);
+  card._advStats = { buttons, sev, counts: {} };
+  return bar;
+}
+
+function advRowCounts(card) {
+  const counts = { all: 0, confirmed: 0, partial: 0, refuted: 0, pending: 0 };
+  if (!card || !card._advList) return counts;
+  card._advList.querySelectorAll(".adv-finding").forEach((row) => {
+    const v = row.dataset.verdict || "pending";
+    counts.all += 1;
+    counts[v] = (counts[v] || 0) + 1;
+  });
+  return counts;
+}
+
+function advUpdateStats(card) {
+  if (!card || !card._advStats) return;
+  const counts = advRowCounts(card);
+  card._advStats.counts = counts;
+  Object.entries(card._advStats.buttons).forEach(([key, btn]) => {
+    const n = btn.querySelector(".adv-stat-n");
+    if (n) n.textContent = String(counts[key] || 0);
+    btn.classList.toggle("zero", !(counts[key] || 0));
+    btn.setAttribute("aria-pressed",
+      String(((card._advFilter || {}).verdict || "all") === key));
+  });
+  if (card._advStats.sev) {
+    card._advStats.sev.value = (card._advFilter || {}).severity || "all";
+  }
+}
+
+function advApplyFilter(card) {
+  if (!card || !card._advList) return;
+  const f = card._advFilter || { verdict: "all", severity: "all" };
+  const rows = [...card._advList.querySelectorAll(".adv-finding")];
+  let visible = 0;
+  rows.forEach((row) => {
+    const okV = f.verdict === "all" || (row.dataset.verdict || "pending") === f.verdict;
+    const okS = f.severity === "all" || row.dataset.severity === f.severity;
+    row.hidden = !(okV && okS);
+    if (!row.hidden) visible += 1;
+  });
+  advUpdateStats(card);
+  if (card._advEmpty) {
+    if (!rows.length) {
+      card._advEmpty.hidden = false;
+      card._advEmpty.textContent = card._advFinished
+        ? "未发现候选问题。" : "等待发现者产出候选问题…";
+    } else if (!visible) {
+      card._advEmpty.hidden = false;
+      card._advEmpty.textContent = "没有符合筛选条件的问题。";
+    } else {
+      card._advEmpty.hidden = true;
+    }
+  }
+}
+
+function advToggleFold(card, sub, fold, t) {
+  const folded = card.classList.toggle("folded");
+  fold.textContent = folded ? "展开" : "折叠";
+  fold.setAttribute("aria-expanded", folded ? "false" : "true");
+  sub.textContent = folded
+    ? `${(t.advFindingEls || []).length} 条候选问题 · 已折叠 · 点击展开查看清单`
+    : (t.advSubText || "");
 }
 
 function beginAdversarial(roles) {
@@ -2791,39 +3086,36 @@ function beginAdversarial(roles) {
   const fold = document.createElement("button");
   fold.className = "rt-fold";
   fold.textContent = "折叠";
-  const toggleFold = () => {
-    const folded = card.classList.toggle("folded");
-    fold.textContent = folded ? "展开" : "折叠";
-    sub.textContent = folded
-      ? `${(t.advFindingEls || []).length} 条候选问题 · 已折叠 · 点击展开查看清单`
-      : (t.advSubText || "");
-  };
+  fold.setAttribute("aria-expanded", "true");
+  const toggleFold = () => advToggleFold(card, sub, fold, t);
   fold.onclick = (e) => { e.stopPropagation(); toggleFold(); };
   head.onclick = (e) => { if (e.target !== fold) toggleFold(); };
   head.append(title, sub, fold);
-  const steps = document.createElement("div");
-  steps.className = "adv-phases";
-  const stepEls = {};
-  for (const p of ADV_PHASES) {
-    const s = document.createElement("span");
-    s.className = "adv-phase";
-    s.dataset.phase = p.key;
-    s.textContent = p.label;
-    steps.appendChild(s);
-    stepEls[p.key] = s;
-  }
+  const { flow, stepEls } = advBuildFlow();
   const list = document.createElement("div");
   list.className = "adv-findings";
-  card.append(head, steps, list);
+  const empty = document.createElement("div");
+  empty.className = "adv-empty";
+  card._advList = list;
+  card._advEmpty = empty;
+  card._advFilter = { verdict: "all", severity: "all" };
+  card._advFinished = false;
+  const toolbar = advBuildToolbar(card);
+  card.append(head, flow, toolbar, list, empty);
   if (roles && roles.length) card.title = advRolesTitle(roles);
   t.advCard = card;
   t.advSub = sub;
+  // 上一场对抗的元数据/序号作废：新一轮的「转为团队工单」必须用本轮的
+  // findings 与 seq，残留旧值会让按钮指向旧报告（甚至重复挂载）
+  t.advMeta = null;
+  t.advSeq = 0;
   t.advSubText = "四角色流水线审查进行中…";
   sub.textContent = t.advSubText;
   t.advPhaseEls = stepEls;
   t.advFindingEls = [];
   t.advFindingsBox = list;
   t.advFold = toggleFold;
+  advApplyFilter(card);
   curLog().appendChild(card);
   scrollLog();
 }
@@ -2838,6 +3130,8 @@ function advSetPhase(phase, note) {
     if (!el) return;
     el.classList.toggle("done", idx >= 0 && i < idx);
     el.classList.toggle("active", i === idx);
+    if (i === idx) el.setAttribute("aria-current", "step");
+    else el.removeAttribute("aria-current");
   });
   if (note) {
     t.advSubText = note;
@@ -2851,6 +3145,7 @@ function advAddFinding(data) {
   const row = advFindingRow(data);
   t.advFindingsBox.appendChild(row);
   t.advFindingEls.push(row);
+  advApplyFilter(t.advCard);
 }
 
 function advApplyVerdict(data) {
@@ -2863,7 +3158,115 @@ function advApplyVerdict(data) {
   v.hidden = false;
   v.textContent = ADV_VERDICT_LABEL[data.verdict] || data.verdict || "";
   v.className = "adv-f-verdict verdict-" + (data.verdict || "pending");
-  if (data.reason) row.title = data.reason;
+  row.dataset.verdict = data.verdict || "pending";
+  if (data.reason) {
+    row.title = data.reason;
+    const details = row.querySelector(".adv-f-details");
+    const body = details && details.querySelector(".adv-f-detail-body");
+    if (body && !body.querySelector(".adv-f-reason")) {
+      const reason = document.createElement("div");
+      reason.className = "adv-f-reason dim";
+      reason.innerHTML = "裁决依据：" + renderMarkdown(data.reason);
+      body.appendChild(reason);
+      details.hidden = false;
+    }
+  }
+  advApplyFilter(t.advCard);
+}
+
+// 把「转为团队工单」入口挂到当前对抗卡（先摘掉旧入口再重建：同一条报告
+// 只会有一个按钮，晚到的 seq 也只会补一次，不会重复）。
+function advAttachTransfer(tab, meta, seq) {
+  if (!tab || !tab.advCard || !tab.advCard.isConnected) return;
+  tab.advSeq = Number(seq) || 0;
+  tab.advMeta = meta;
+  [...tab.advCard.children].forEach((el) => {
+    if (el.classList.contains("adv-actions")) el.remove();
+  });
+  const actions = advTransferActions(meta, tab.advSeq, tab);
+  if (actions) tab.advCard.appendChild(actions);
+}
+
+function advTransferActions(meta, seq, tab) {
+  if (!tab || tab.readonly || !tab.sid || !seq || meta.status !== "done") return null;
+  const eligible = (meta.findings || []).filter((f) => ["confirmed", "partial"].includes(f.verdict));
+  if (!eligible.length) return null;
+  const sid = tab.sid;
+  const box = document.createElement("div");
+  box.className = "adv-actions";
+  const button = tcEl("button", "adv-to-team", "转为团队工单");
+  button.title = "逐条勾选成立的发现，登记为顾问型待办（不会自动派工）";
+  button.onclick = async (ev) => {
+    ev.stopPropagation();
+    let team;
+    try { team = await request("team.get", { session_id: sid }); }
+    catch (e) { addNotice("读取团队状态失败: " + e.message); return; }
+    if (!team || !team.active || !team.team) {
+      addNotice("请先组建团队，再将对抗发现转为工单。");
+      return;
+    }
+    const roster = team.team.roster || [];
+    if (!roster.length) {
+      addNotice("团队还没有队员，无法登记顾问型待办。");
+      return;
+    }
+    const form = document.createElement("div");
+    form.className = "form-grid adv-to-team-form";
+    form.appendChild(tcEl("p", "dim small adv-to-team-hint",
+      "只登记为顾问型待办，工单停在待办状态；是否派工由你在工单板上显式操作。"
+      + "对抗模型的输出是待核实内容，不是执行指令。"));
+    const list = document.createElement("div");
+    list.className = "adv-to-team-list";
+    const boxes = [];
+    eligible.forEach((f) => {
+      const row = document.createElement("label");
+      row.className = "adv-to-team-row";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = f.id || "";
+      boxes.push(cb);
+      const body = document.createElement("span");
+      body.className = "adv-to-team-body";
+      const head = document.createElement("span");
+      head.className = "adv-to-team-head";
+      head.textContent = `${f.id || "?"} · ${f.verdict === "confirmed" ? "成立" : "部分成立"}`
+        + ` · ${f.severity || "medium"} · ${f.category || "问题"}`;
+      body.appendChild(head);
+      const loc = String(f.location || "");
+      if (loc) body.appendChild(tcEl("span", "adv-to-team-loc", loc));
+      body.appendChild(tcEl("span", "adv-to-team-desc", f.description || ""));
+      if (f.evidence) body.appendChild(tcEl("span", "adv-to-team-evidence", "依据：" + f.evidence));
+      row.title = [f.description, f.reason, f.solution].filter(Boolean).join("\n");
+      row.append(cb, body);
+      list.appendChild(row);
+    });
+    const assignee = document.createElement("select");
+    roster.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.name;
+      opt.textContent = m.name;
+      assignee.appendChild(opt);
+    });
+    const assigneeLabel = document.createElement("label");
+    assigneeLabel.className = "wide";
+    assigneeLabel.textContent = "指派队员（顾问型，只出复核意见）";
+    assigneeLabel.appendChild(assignee);
+    form.append(list, assigneeLabel);
+    showModal("选择要转为顾问型待办的发现", form, async () => {
+      const ids = boxes.filter((cb) => cb.checked && cb.value).map((cb) => cb.value);
+      if (!ids.length) throw new Error("请至少勾选一条成立或部分成立的发现");
+      if (!assignee.value) throw new Error("请选择指派队员");
+      const r = await request("adversarial.to_team_tasks", {
+        session_id: sid, seq, finding_ids: ids, assignee: assignee.value,
+      });
+      const card = teamCardFor(tab, String((team.team && team.team.team_id) || ""))
+        || lastTeamCard(tab);
+      (r.tasks || []).forEach((task) => tcUpsertTask(card, task));
+      addNotice(`已登记 ${((r && r.tasks) || []).length} 张顾问型待办工单，尚未派工。`);
+    }, "登记工单");
+  };
+  box.appendChild(button);
+  return box;
 }
 
 function advFinished(data) {
@@ -2872,14 +3275,19 @@ function advFinished(data) {
   for (const k in t.advPhaseEls) {
     t.advPhaseEls[k].classList.remove("active");
     t.advPhaseEls[k].classList.add("done");
+    t.advPhaseEls[k].removeAttribute("aria-current");
   }
   const status = data.status || "done";
   t.advCard.classList.add(status === "done" ? "ok" : status === "cancelled" ? "cancelled" : "err");
+  t.advCard._advFinished = true;
   const st = status === "done" ? ("✓ " + (data.summary || "审查完成"))
     : status === "cancelled" ? "已中止（已得结论保留）"
     : "✗ " + (data.summary || "审查未完成");
   t.advSubText = st;
   if (!t.advCard.classList.contains("folded")) t.advSub.textContent = st;
+  advApplyFilter(t.advCard);
+  // 「转为团队工单」要等报告消息落库拿到 seq（AssistantMessage 事件的 seq 为空，
+  // 真实序号随 chat.send 响应回来），这里不提前挂按钮
   // 终审报告随后流进下方回答气泡：稍候自动折叠清单（可随时展开回看）
   if (status === "done") {
     setTimeout(() => {
@@ -2888,12 +3296,16 @@ function advFinished(data) {
   }
 }
 
-// 历史回放：从消息的 adversarial 元数据重建对抗卡（默认折叠，与圆桌回放卡同姿态）
-function buildAdvReplayCard(meta) {
+// 历史回放：从消息的 adversarial 元数据重建对抗卡（默认折叠，与圆桌回放卡同姿态）。
+// 统计条与筛选照常可用（数据来自持久化的 findings，不依赖实时事件）。
+function buildAdvReplayCard(meta, seq, tab) {
+  meta = { ...meta, seq };
   const findings = meta.findings || [];
   const card = document.createElement("div");
   card.className = "adversarial folded " +
     (meta.status === "error" ? "err" : meta.status === "cancelled" ? "cancelled" : "ok");
+  card._advFilter = { verdict: "all", severity: "all" };
+  card._advFinished = true;
   const head = document.createElement("div");
   head.className = "rt-head";
   const title = document.createElement("span");
@@ -2906,6 +3318,7 @@ function buildAdvReplayCard(meta) {
     if (s.confirmed) sumBits.push(`成立 ${s.confirmed}`);
     if (s.partial) sumBits.push(`部分 ${s.partial}`);
     if (s.refuted) sumBits.push(`推翻 ${s.refuted}`);
+    if (s.pending) sumBits.push(`待定 ${s.pending}`);
   }
   const sub = document.createElement("span");
   sub.className = "rt-sub";
@@ -2913,9 +3326,11 @@ function buildAdvReplayCard(meta) {
   const fold = document.createElement("button");
   fold.className = "rt-fold";
   fold.textContent = "展开";
+  fold.setAttribute("aria-expanded", "false");
   const toggleFold = () => {
     const folded = card.classList.toggle("folded");
     fold.textContent = folded ? "展开" : "折叠";
+    fold.setAttribute("aria-expanded", folded ? "false" : "true");
     sub.textContent = folded
       ? `${findings.length} 条候选问题 · 已折叠 · 点击展开查看清单`
       : subText;
@@ -2923,19 +3338,21 @@ function buildAdvReplayCard(meta) {
   fold.onclick = (e) => { e.stopPropagation(); toggleFold(); };
   head.onclick = (e) => { if (e.target !== fold) toggleFold(); };
   head.append(title, sub, fold);
-  const steps = document.createElement("div");
-  steps.className = "adv-phases";
-  for (const p of ADV_PHASES) {
-    const el = document.createElement("span");
-    el.className = "adv-phase done";
-    el.textContent = p.label;
-    steps.appendChild(el);
-  }
+  const { flow } = advBuildFlow();
+  flow.querySelectorAll(".adv-step").forEach((el) => el.classList.add("done"));
   const list = document.createElement("div");
   list.className = "adv-findings";
+  const empty = document.createElement("div");
+  empty.className = "adv-empty";
+  card._advList = list;
+  card._advEmpty = empty;
+  const toolbar = advBuildToolbar(card);
   findings.forEach((f) => list.appendChild(advFindingRow(f, { replay: true })));
-  card.append(head, steps, list);
+  const actions = advTransferActions(meta, Number(meta.seq || 0), tab);
+  card.append(head, flow, toolbar, list, empty);
+  if (actions) card.appendChild(actions);
   if (meta.roles && meta.roles.length) card.title = advRolesTitle(meta.roles);
+  advApplyFilter(card);
   sub.textContent = `${findings.length} 条候选问题 · 已折叠 · 点击展开查看清单`;
   return card;
 }
@@ -2988,6 +3405,142 @@ function tcEl(tag, cls, text) {
   return el;
 }
 
+// 工单看板的三列（待办 / 进行中 / 待验收）；完成与失败收进可折叠尾区。
+// 列顺序就是工单生命周期顺序，不再额外发明阶段。
+const TEAM_TASK_COLUMNS = [
+  { key: "pending", label: "待办" },
+  { key: "in_progress", label: "进行中" },
+  { key: "review", label: "待验收" },
+];
+
+function tcColumnKey(status) {
+  return TEAM_TASK_COLUMNS.some((c) => c.key === status) ? status : "closed";
+}
+
+// 看板骨架：三列 + 完成/失败折叠区。列容器保持稳定，工单行按状态在各列间搬。
+function tcBuildKanban(card) {
+  const kanban = tcEl("div", "tc-kanban");
+  kanban.setAttribute("role", "group");
+  kanban.setAttribute("aria-label", "团队工单看板");
+  const cols = {};
+  TEAM_TASK_COLUMNS.forEach((col) => {
+    const sec = tcEl("section", "tc-col");
+    sec.dataset.col = col.key;
+    sec.setAttribute("aria-label", col.label);
+    const head = tcEl("div", "tc-col-head");
+    head.append(
+      tcEl("span", "tc-col-title", col.label),
+      tcEl("span", "tc-col-count", "0"),
+    );
+    const list = tcEl("div", "tc-col-list");
+    const empty = tcEl("div", "tc-col-empty", "暂无工单");
+    sec.append(head, list, empty);
+    kanban.appendChild(sec);
+    cols[col.key] = { sec, list, count: head.querySelector(".tc-col-count"), empty };
+  });
+  const closed = document.createElement("details");
+  closed.className = "tc-closed";
+  closed.hidden = true;
+  const summary = document.createElement("summary");
+  summary.className = "tc-closed-summary";
+  const closedCount = tcEl("span", "tc-closed-count", "已完成 0 · 失败 0");
+  summary.appendChild(closedCount);
+  const closedList = tcEl("div", "tc-closed-list");
+  closed.append(summary, closedList);
+  return { kanban, cols, closed, closedList, closedCount };
+}
+
+// 工单 / 频道视图切换：两个视图都常驻 DOM，只切显隐——频道流式与历史回放
+// 在后台照常落行，切回来不会丢内容。
+function tcBuildViewTabs(card) {
+  const bar = tcEl("div", "tc-views");
+  bar.setAttribute("role", "tablist");
+  bar.setAttribute("aria-label", "团队视图");
+  const make = (view, label) => {
+    const b = tcEl("button", "tc-view-tab", label);
+    b.type = "button";
+    b.dataset.view = view;
+    b.setAttribute("role", "tab");
+    const n = tcEl("span", "tc-view-count", "0");
+    b.appendChild(n);
+    b.onclick = () => tcSetView(card, view);
+    return { b, n };
+  };
+  const board = make("board", "工单");
+  const channel = make("channel", "频道");
+  channel.b.title = "团队频道：成员发言与总管指令的完整时间线";
+  bar.append(board.b, channel.b);
+  const tabs = [board.b, channel.b];
+  tabs.forEach((tab, i) => {
+    tab.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+      tcSetView(card, next.dataset.view);
+      next.focus();
+    });
+  });
+  return { bar, tabs, board, channel };
+}
+
+function tcSetView(card, view) {
+  const ui = card && card._ui;
+  if (!ui || !ui.tabBoard) return;
+  const v = view === "channel" ? "channel" : "board";
+  card._view = v;
+  card.classList.toggle("view-channel", v === "channel");
+  [ui.tabBoard, ui.tabChannel].forEach((tab) => {
+    const on = tab.dataset.view === v;
+    tab.classList.toggle("is-active", on);
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+    tab.tabIndex = on ? 0 : -1;
+  });
+  if (v === "channel") {
+    ui.tabChannel.classList.remove("has-new");
+    ui.channelEl.scrollTop = ui.channelEl.scrollHeight;
+  }
+}
+
+// 频道有新行时给「频道」页签一个圆点（只在用户正看工单板时提示；
+// 卡片折叠着不打扰——历史回放的大量补行也不算未读）
+function tcMarkChannelNew(card) {
+  if (!card || !card._ui || card._view === "channel" || card._suppressNew) return;
+  if (card.classList.contains("folded")) return;
+  card._ui.tabChannel.classList.add("has-new");
+}
+
+function tcSyncChannelCount(card) {
+  if (!card || !card._ui) return;
+  const n = card._ui.channelEl.querySelectorAll(".tc-msg").length;
+  if (card._ui.tabChannelCount) card._ui.tabChannelCount.textContent = String(n);
+}
+
+// 看板计数与空态：列头数字、空列提示、完成/失败折叠区计数、
+// 「工单」页签显示未终态张数（完成/失败不计入待办负担）
+function tcSyncBoardCounts(card) {
+  const ui = card && card._ui;
+  if (!ui) return;
+  const counts = { pending: 0, in_progress: 0, review: 0, done: 0, error: 0 };
+  ui.boardList.querySelectorAll(".tc-task").forEach((row) => {
+    const st = row.dataset.status || "pending";
+    counts[st] = (counts[st] || 0) + 1;
+  });
+  TEAM_TASK_COLUMNS.forEach((col) => {
+    const c = ui.cols[col.key];
+    const n = counts[col.key] || 0;
+    c.count.textContent = String(n);
+    c.empty.hidden = n > 0;
+    c.sec.classList.toggle("is-empty", n === 0);
+  });
+  const done = counts.done || 0;
+  const err = counts.error || 0;
+  ui.closed.hidden = done + err === 0;
+  ui.closedCount.textContent = `已完成 ${done} · 失败 ${err}`;
+  const active = (counts.pending || 0) + (counts.in_progress || 0) + (counts.review || 0);
+  if (ui.tabBoardCount) ui.tabBoardCount.textContent = String(active);
+  tcSyncChannelCount(card);
+}
+
 function buildTeamCard(roster, directorMode, director) {
   const card = document.createElement("div");
   card.className = "teamcard";
@@ -3000,20 +3553,27 @@ function buildTeamCard(roster, directorMode, director) {
   const sub = tcEl("span", "tc-sub", "组建中…");
   const status = tcEl("span", "tc-status", "进行中");
   const fold = tcEl("button", "tc-fold", "折叠");
+  fold.setAttribute("aria-expanded", "true");
+  const resumeBtn = tcEl("button", "tc-resume", "继续推进");
+  resumeBtn.hidden = true;
+  resumeBtn.title = "向 AI 总管发送继续指令，恢复自动推进";
+  resumeBtn.onclick = (e) => { e.stopPropagation(); tcContinueTeam(card); };
   head.append(tcEl("span", "tc-title", "🧩 团队"), sub, status, fold);
   const toggleFold = () => {
     const folded = card.classList.toggle("folded");
     fold.textContent = folded ? "展开" : "折叠";
+    fold.setAttribute("aria-expanded", folded ? "false" : "true");
   };
   fold.onclick = (e) => { e.stopPropagation(); toggleFold(); };
   head.onclick = (e) => { if (e.target !== fold) toggleFold(); };
   const body = tcEl("div", "tc-body");
   const rosterEl = tcEl("div", "tc-roster");
-  const boardList = tcEl("div", "tc-board-list");
+  const kanban = tcBuildKanban(card);
   const taskForm = buildTaskForm(card);
   const boardEl = tcEl("div", "tc-board");
-  boardEl.append(tcEl("div", "tc-board-head", "工单板"), boardList, taskForm);
+  boardEl.append(kanban.kanban, kanban.closed, taskForm);
   const channelEl = tcEl("div", "tc-channel");
+  const views = tcBuildViewTabs(card);
   const deliverBtn = tcEl("button", "tc-deliver", "交付");
   deliverBtn.title = "确认交付：产出《交付说明》并关闭团队（未完成的工单会记为未尽事项），本会话恢复普通对话";
   deliverBtn.onclick = async () => {
@@ -3073,17 +3633,29 @@ function buildTeamCard(roster, directorMode, director) {
       takeoverBtn.textContent = "接管";
     }
   };
-  // 存为模板（三期）：把当前名册与总管形态存成建队模板，之后建队可一键填入。
+  // 存为模板（三期）：把当前名册与总管形态存成团队模板，之后建队可一键填入。
   // 终态后仍可用（收队的团队正是模板的好素材），所以不进 ended 隐藏清单
-  const saveTplBtn = tcEl("button", "tc-savetpl", "存为模板");
-  saveTplBtn.title = "把当前名册与总管形态存成建队模板：之后在输入框的团队面板里「从模板创建」一键填入";
+  const saveTplBtn = tcEl("button", "tc-savetpl", "另存为模板");
+  saveTplBtn.title = "把当前名册与总管形态存成团队模板：之后在输入框的团队面板里「从模板创建」一键填入";
   saveTplBtn.onclick = () => tcSaveTemplateModal(card);
   const foot = tcEl("div", "tc-foot");
-  foot.append(saveTplBtn, takeoverBtn, deliverBtn, stopBtn);
-  body.append(rosterEl, boardEl, channelEl, foot);
+  foot.append(saveTplBtn, takeoverBtn, resumeBtn, deliverBtn, stopBtn);
+  body.append(rosterEl, views.bar, boardEl, channelEl, foot);
   card.append(head, body);
-  card._ui = { sub, status, fold, rosterEl, boardList, taskForm, channelEl, deliverBtn, stopBtn, takeoverBtn };
+  card._ui = {
+    sub, status, fold, rosterEl, taskForm, channelEl, deliverBtn, stopBtn,
+    takeoverBtn, resumeBtn,
+    boardList: boardEl, // 看板根（含完成/失败折叠区）：既有查询（[data-task]）继续在这里找行
+    cols: kanban.cols, closed: kanban.closed, closedList: kanban.closedList,
+    closedCount: kanban.closedCount,
+    tabBoard: views.board.b, tabChannel: views.channel.b,
+    tabBoardCount: views.board.n, tabChannelCount: views.channel.n,
+  };
   card._roster = [];
+  card._view = "board";
+  card._tab = curTab(); // 事件/回放都在所属标签的渲染面里建卡（继续/转单用）
+  tcSetView(card, "board");
+  tcSyncBoardCounts(card);
   tcUpdateRoster(card, roster || [], directorMode || "user");
   return card;
 }
@@ -3159,29 +3731,54 @@ const TEAM_TASK_OPS = {
 function buildTaskRow(card, task) {
   const row = tcEl("div", "tc-task st-" + (task.status || "pending"));
   row.dataset.task = task.id;
+  row.dataset.status = task.status || "pending";
+  row.dataset.col = tcColumnKey(task.status || "pending");
   row._task = task; // 事件更新时补齐 deps/accept 等事件里没有的字段
-  row.appendChild(tcEl("span", "tt-id", task.id));
+  // 顶部：编号 + 标题（kanban 列窄，标题换行；来源/待手动派工徽标跟在标题后）
+  const top = tcEl("div", "tt-top");
+  top.appendChild(tcEl("span", "tt-id", task.id));
   const title = tcEl("span", "tt-title", task.title);
-  if (task.accept) title.title = `验收标准：${task.accept}`;
-  row.appendChild(title);
-  row.appendChild(tcEl("span", "tt-assignee", "@" + task.assignee));
-  row.appendChild(tcEl("span", "tt-type", task.type === "advisor" ? "顾问型" : "执行型"));
-  row.appendChild(tcEl("span", "tt-status", TEAM_TASK_STATUS_LABEL[task.status] || task.status));
-  if (task.redo) row.appendChild(tcEl("span", "tt-redo", `打回 ${task.redo} 次`));
+  const tips = [];
+  if (task.accept) tips.push(`验收标准：${task.accept}`);
+  if (task.detail) tips.push(`工单详情：\n${task.detail}`);
+  if (tips.length) title.title = tips.join("\n\n");
+  top.appendChild(title);
+  const srcKind = task.source && task.source.kind;
+  if (srcKind === "adversarial") {
+    const src = tcEl("span", "tt-src", "对抗");
+    src.title = `来自对抗审查消息 #${task.source.seq || "?"} / ${task.source.finding_id || "?"}`
+      + "：外部模型输出，仅为待核实证据";
+    top.appendChild(src);
+  }
+  if (task.auto_dispatch === false && task.status === "pending") {
+    const manual = tcEl("span", "tt-manual", "待手动派工");
+    manual.title = "该工单不会被自动循环派发：确认要处理时点下方「派工」";
+    top.appendChild(manual);
+  }
+  // 元信息行：指派人、类型、状态、打回次数、依赖
+  const meta = tcEl("div", "tt-meta");
+  meta.appendChild(tcEl("span", "tt-assignee", "@" + task.assignee));
+  meta.appendChild(tcEl("span", "tt-type", task.type === "advisor" ? "顾问型" : "执行型"));
+  meta.appendChild(tcEl("span", "tt-status", TEAM_TASK_STATUS_LABEL[task.status] || task.status));
+  if (task.redo) meta.appendChild(tcEl("span", "tt-redo", `打回 ${task.redo} 次`));
   if ((task.deps || []).length) {
     const dep = tcEl("span", "tt-deps", "依赖 " + task.deps.join("、"));
     dep.title = "依赖工单全部完成后才能派发";
-    row.appendChild(dep);
+    meta.appendChild(dep);
   }
-  const ops = tcEl("span", "tt-ops");
-  (TEAM_TASK_OPS[task.status] || []).forEach(([next, label, tip]) => {
-    const b = tcEl("button", "tt-op", label);
-    b.type = "button";
-    b.title = tip;
-    b.onclick = () => tcTaskTransition(card, task, next, b);
-    ops.appendChild(b);
-  });
-  if (ops.children.length) row.appendChild(ops);
+  row.append(top, meta);
+  // 终态/中断卡不再重建操作按钮（晚到的事件重画时也保持只读）
+  if (!card._finished) {
+    const ops = tcEl("span", "tt-ops");
+    (TEAM_TASK_OPS[task.status] || []).forEach(([next, label, tip]) => {
+      const b = tcEl("button", "tt-op", label);
+      b.type = "button";
+      b.title = tip;
+      b.onclick = () => tcTaskTransition(card, task, next, b);
+      ops.appendChild(b);
+    });
+    if (ops.children.length) row.appendChild(ops);
+  }
   return row;
 }
 
@@ -3237,22 +3834,45 @@ async function tcTaskUpdateRequest(card, task, status, note, btn) {
   }
 }
 
+// 单张工单落位：同编号替换；跨列（状态变化）时从旧列摘掉再插到新列，
+// 列内按 T<n> 升序（与工单编号的生成顺序一致）。
 function tcUpsertTask(card, task) {
   if (!card || !card._ui) return;
   const board = card._ui.boardList;
+  const key = tcColumnKey(task.status || "pending");
+  const target = key === "closed" ? card._ui.closedList : card._ui.cols[key].list;
   const fresh = buildTaskRow(card, task);
   const old = board.querySelector(`[data-task="${task.id}"]`);
-  if (old) {
-    old.replaceWith(fresh);
-    return;
-  }
-  // 新工单按编号有序插入（id 是 T<n>）
+  if (old) old.remove();
   const n = Number(String(task.id || "").replace(/\D/g, "")) || 0;
   let anchor = null;
-  for (const r of board.children) {
+  for (const r of target.children) {
     if ((Number(String(r.dataset.task || "").replace(/\D/g, "")) || 0) > n) { anchor = r; break; }
   }
-  board.insertBefore(fresh, anchor);
+  target.insertBefore(fresh, anchor);
+  tcSyncBoardCounts(card);
+}
+
+// 全量重画看板（team.get 快照 / 历史回放共用）：只清行，不重建列/折叠区，
+// 用户展开的「完成 / 失败」区与当前视图保持不变。
+function tcRenderTasks(card, tasks) {
+  if (!card || !card._ui) return;
+  TEAM_TASK_COLUMNS.forEach((col) => { card._ui.cols[col.key].list.innerHTML = ""; });
+  card._ui.closedList.innerHTML = "";
+  (tasks || []).slice().sort((a, b) =>
+    (Number(String(a.id || "").replace(/\D/g, "")) || 0)
+    - (Number(String(b.id || "").replace(/\D/g, "")) || 0)
+  ).forEach((task) => {
+    const key = tcColumnKey(task.status || "pending");
+    const target = key === "closed" ? card._ui.closedList : card._ui.cols[key].list;
+    target.appendChild(buildTaskRow(card, task));
+  });
+  tcSyncBoardCounts(card);
+}
+
+function tcMemberTokens(card, name) {
+  const u = (((card._usage || {}).members) || {})[name];
+  return u ? (u.input_tokens || 0) + (u.output_tokens || 0) : 0;
 }
 
 function tcUpdateRoster(card, roster, directorMode) {
@@ -3262,9 +3882,14 @@ function tcUpdateRoster(card, roster, directorMode) {
   box.appendChild(tcEl("span", "tc-roster-label", "名册"));
   (roster || []).forEach((m) => {
     const item = tcEl("span", "tc-m");
+    item.dataset.member = m.name || "";
     item.appendChild(tcAvatar(m.provider));
     item.appendChild(tcEl("span", "tc-m-name", m.name));
-    item.appendChild(tcEl("span", "tc-m-model", `${m.provider}/${m.model}`));
+    if (m.provider || m.model) {
+      item.appendChild(tcEl("span", "tc-m-model", `${m.provider || "?"}/${m.model || "默认"}`));
+    }
+    const tok = tcMemberTokens(card, m.name);
+    if (tok) item.appendChild(tcEl("span", "tc-m-tokens", fmtTokens(tok)));
     if (m.persona) {
       const per = tcEl("span", "tc-m-persona", m.persona);
       per.title = `成员人设：${m.persona}`;
@@ -3275,8 +3900,11 @@ function tcUpdateRoster(card, roster, directorMode) {
   // 尾部总管标识（二期）：AI 总管显示 provider/model，用户总管照旧一期文案
   const dir = card._director;
   if (dir) {
+    const du = (card._usage || {}).director || {};
+    const dTok = (du.input_tokens || 0) + (du.output_tokens || 0);
     const d = tcEl("span", "tc-director is-ai",
-      `AI 总管 · ${dir.provider || "?"}/${dir.model || "默认"}`);
+      `AI 总管 · ${dir.provider || "?"}/${dir.model || "默认"}` +
+      (dTok ? ` · ${fmtTokens(dTok)}` : ""));
     d.title = "AI 总管自动推进团队循环（拆解、派工、验收、交付）；你随时插话，或点下方「接管」亲自指挥";
     box.appendChild(d);
   } else {
@@ -3305,7 +3933,7 @@ function tcSyncTakeover(card, directorMode) {
   if (on) { btn.disabled = false; btn.textContent = "接管"; }
 }
 
-// 「存为模板」弹窗（三期）：把这张团队卡的名册与总管形态存成建队模板。
+// 「存为模板」弹窗（三期）：把这张团队卡的名册与总管形态存成团队模板。
 // 名字是唯一键——同名覆盖原条目（位置不变、内容换新），弹窗里实时提示会覆盖；
 // 名字不合法（空/超长/带路径分隔符）由后端 TeamError 原文回显在弹窗行内
 async function tcSaveTemplateModal(card) {
@@ -3343,7 +3971,7 @@ async function tcSaveTemplateModal(card) {
     overwriteTip.hidden = !covered;
   };
   nameInput.addEventListener("input", syncOverwrite);
-  showModal("把这支团队存为模板", box, async () => {
+  showModal("另存为团队模板", box, async () => {
     const name = nameInput.value.trim();
     if (!name) throw new Error("请先给模板起个名字");
     const r = await request("team.template_save", {
@@ -3360,12 +3988,62 @@ async function tcSaveTemplateModal(card) {
   nameInput.focus();
 }
 
+// 「继续推进」：向 AI 总管发一条普通消息，驱动 run_auto_turn 从空闲点续跑。
+// 定向到建卡时所属的会话（不依赖当前活动标签），只读分屏列不允许发消息。
+async function tcContinueTeam(card) {
+  const t = card._tab || curTab();
+  if (!t || !t.sid) { addNotice("会话尚未就绪，无法继续推进团队"); return; }
+  if (t.readonly) { addNotice("该会话属于其他项目（只读查看），不能继续推进团队。"); return; }
+  if (t.running) { addNotice("团队本轮仍在推进中，请等它结束"); return; }
+  const text = "继续推进团队，先检查当前工单与待验收事项。";
+  withTab(t, () => {
+    addUser(text);
+    attachMsgOps(curLog().lastElementChild, t, "user", () => text);
+    scrollLog();
+  });
+  setRunning(true, t);
+  try {
+    const plan = splitPanes.includes(t) ? !!t.planMode : workMode === "plan";
+    const r = await request("chat.send", { text, session_id: t.sid, plan_mode: plan });
+    setContextUsage(r.context_tokens || 0, r.context_limit || 0, t);
+    if (r.context_detail) setContextDetail(r.context_detail, t);
+    if (r.team && r.team.team) withTab(t, () => applyTeamMeta(t, r.team.team));
+  } catch (e) {
+    addNotice("继续推进失败: " + e.message);
+    finishEta(t);
+    setRunning(false, t);
+  }
+}
+
 function tcSetSub(card, team) {
   const tasks = team.tasks || [];
+  card._usage = team.usage || {};
+  const usage = card._usage;
+  const tokens = (usage.input_tokens || 0) + (usage.output_tokens || 0);
+  const idle = team.idle_reason || "";
+  const idleShort = idle.length > 80 ? idle.slice(0, 80) + "…" : idle;
+  const active = (team.status || "active") === "active";
   card._ui.sub.textContent =
     `${(team.roster || []).length} 名队员 · 已用 ${team.rounds_used || 0}` +
     `${team.max_rounds ? `/${team.max_rounds}` : ""} 轮` +
-    (tasks.length ? ` · 工单 ${tasks.length} 张` : " · 尚无工单");
+    (tasks.length ? ` · 工单 ${tasks.length} 张` : " · 尚无工单") +
+    (tokens ? ` · ${fmtTokens(tokens)} tokens` : "") +
+    (idleShort ? ` · 已空闲：${idleShort}` : "");
+  card._ui.sub.title = idle || (tokens
+    ? `团队累计用量 ${tokens.toLocaleString()} tokens（成员与总管合计）` : "");
+  if (idle) card._ui.channelEl.dataset.idleReason = idle;
+  else delete card._ui.channelEl.dataset.idleReason;
+  card._ui.status.title = idle || "";
+  if (card._ui.resumeBtn) {
+    card._ui.resumeBtn.hidden = !idle || card._finished || !active
+      || team.director_mode !== "ai";
+  }
+  // 用量徽标随快照刷新（tcUpdateRoster 先于 tcSetSub 画名册，这里补一次）
+  card._ui.rosterEl.querySelectorAll(".tc-m").forEach((item) => {
+    item.querySelectorAll(".tc-m-tokens").forEach((el) => el.remove());
+    const n = tcMemberTokens(card, item.dataset.member || "");
+    if (n) item.appendChild(tcEl("span", "tc-m-tokens", fmtTokens(n)));
+  });
 }
 
 function tcSetStatus(card, status) {
@@ -3379,6 +4057,21 @@ function tcFinish(card, status, summary) {
   card._finished = true;
   tcSetStatus(card, status);
   card.classList.add("ended");
+  // 终态/中断卡一律只读：交付、收队、接管、继续推进、工单表单与状态按钮
+  // 全部收起（中断回放没有可操作的运行时，留着按钮只会得到「没有团队」）
+  const ui = card._ui;
+  if (ui) {
+    [ui.deliverBtn, ui.stopBtn, ui.takeoverBtn, ui.resumeBtn].forEach((btn) => {
+      if (!btn) return;
+      btn.hidden = true;
+      btn.disabled = true;
+    });
+    if (ui.taskForm) ui.taskForm.hidden = true;
+  }
+  card.querySelectorAll(".tt-op").forEach((btn) => {
+    btn.hidden = true;
+    btn.disabled = true;
+  });
   if (summary) {
     const old = card.querySelector(".tc-summary");
     if (old) old.remove();
@@ -3391,6 +4084,7 @@ function tcFinish(card, status, summary) {
   if (!card.classList.contains("folded")) {
     card.classList.add("folded");
     card._ui.fold.textContent = "展开";
+    card._ui.fold.setAttribute("aria-expanded", "false");
   }
 }
 
@@ -3449,6 +4143,7 @@ function tcUpsertMsg(card, m) {
   const to = m.to_member !== undefined ? m.to_member : m.to;
   const seq = m.seq;
   const old = channel.querySelector(`[data-seq="${seq}"]`);
+  const isNew = !old;
   if (old) old.remove();
   const row = buildMsgRow(card, seq, from, to, m.msg_kind, m.task_ref, m.text);
   let anchor = null;
@@ -3460,6 +4155,8 @@ function tcUpsertMsg(card, m) {
   if (channel.scrollHeight - channel.scrollTop - channel.clientHeight < 80) {
     channel.scrollTop = channel.scrollHeight;
   }
+  if (isNew) tcSyncChannelCount(card); // 定稿替换不改变行数，不必重数
+  tcMarkChannelNew(card);
 }
 
 // 发言流式增量：按 (member_index, seq) 找（或建）半成品行，追加文本；
@@ -3468,6 +4165,7 @@ function tcUpsertMsg(card, m) {
 function tcOpenStreamRow(card, data) {
   const channel = card._ui.channelEl;
   let row = channel.querySelector(`[data-seq="${data.seq}"]`);
+  const isNew = !row;
   if (!row) {
     const isDirector = data.member_index === -1;
     const member = isDirector ? null : (card._roster || [])[data.member_index] || null;
@@ -3485,6 +4183,8 @@ function tcOpenStreamRow(card, data) {
   if (channel.scrollHeight - channel.scrollTop - channel.clientHeight < 80) {
     channel.scrollTop = channel.scrollHeight;
   }
+  if (isNew) tcSyncChannelCount(card);
+  tcMarkChannelNew(card);
 }
 
 // 用一份团队快照全量对齐卡片（team.get 刷新 / meta 回放 / stop·takeover 返回值共用）
@@ -3497,14 +4197,20 @@ function updateTeamCard(card, team) {
         model: (team.director && team.director.model) || "",
       }
     : null;
+  card._teamId = String(team.team_id || card._teamId || "");
+  card._usage = team.usage || {}; // 名册用量徽标在 tcUpdateRoster 里读
   tcUpdateRoster(card, team.roster || [], team.director_mode || "user");
   tcSetSub(card, team);
   const status = team.status || "active";
   tcSetStatus(card, status);
-  const board = card._ui.boardList;
-  board.innerHTML = "";
-  (team.tasks || []).forEach((task) => board.appendChild(buildTaskRow(card, task)));
+  tcRenderTasks(card, team.tasks || []);
+  // 快照批量补行：不逐条闪未读圆点，结束后按「行数是否真的变多」补一次
+  const before = card._ui.channelEl.querySelectorAll(".tc-msg").length;
+  card._suppressNew = true;
   (team.messages || []).forEach((m) => tcUpsertMsg(card, m));
+  card._suppressNew = false;
+  tcSyncChannelCount(card);
+  if (card._ui.channelEl.querySelectorAll(".tc-msg").length > before) tcMarkChannelNew(card);
   if (status !== "active") card.classList.add("ended");
 }
 
@@ -3512,6 +4218,16 @@ function updateTeamCard(card, team) {
 function lastTeamCard(t) {
   const cards = t.logEl.querySelectorAll(".teamcard");
   return cards.length ? cards[cards.length - 1] : null;
+}
+
+// 按 team_id 找同一队的卡（无 id 的旧记录退回最后一张）
+function teamCardFor(t, teamId) {
+  const cards = t.logEl.querySelectorAll(".teamcard");
+  if (!teamId) return cards.length ? cards[cards.length - 1] : null;
+  for (let i = cards.length - 1; i >= 0; i--) {
+    if (cards[i]._teamId === teamId) return cards[i];
+  }
+  return null;
 }
 
 // team_started：建卡（同一个团队不会重复发 team_started；已有未终态卡时只对齐一次）
@@ -3568,6 +4284,9 @@ function teamTaskUpdated(data) {
   tcUpsertTask(card, Object.assign({}, prev, {
     id: data.task_id, title: data.title, assignee: data.assignee,
     type: data.type, status: data.status, redo: data.redo,
+    detail: data.detail !== undefined ? data.detail : prev.detail,
+    source: data.source !== undefined ? data.source : prev.source,
+    auto_dispatch: data.auto_dispatch !== undefined ? data.auto_dispatch : prev.auto_dispatch,
   }));
 }
 
@@ -3600,15 +4319,36 @@ function applyTeamSnapshot(r) {
     return;
   }
   // 重启/切项目前的团队一律「已中断」，不自动恢复（沿子代理任务簿先例）：
-  // 流里有未终态的团队卡就把它标成中断，没有就提示一次
+  // 流里有同一队的未终态卡就标中断；没有就建一张只读回放卡（名册是
+  // ["名字"] 字符串，建卡前补成 {name, provider, model} 形状）
   if (r && r.interrupted) {
-    const card = lastTeamCard(t);
-    if (card && !card.classList.contains("ended")) {
-      tcFinish(card, "interrupted", "");
-    } else if (!card && !t._teamInterruptedNoticed) {
-      t._teamInterruptedNoticed = true;
-      addNotice(`⚠️ ${r.interrupted.interrupt_reason || "应用重启，团队已中断"}：本会话恢复普通对话，如需继续请重新组建团队。`);
+    const teamId = String(r.interrupted.team_id || "");
+    const card = teamCardFor(t, teamId);
+    if (card) {
+      if (!card.classList.contains("ended")) {
+        tcFinish(card, "interrupted", "");
+        card.classList.add("interrupted");
+        card._ui.sub.textContent = "应用重启前的团队记录 · 只读回放";
+      }
+      if (teamId) tcFetchFullLog(t, card, { team_id: teamId, session_id: t.sid });
+      return;
     }
+    if (t._teamInterruptedNoticed) return;
+    t._teamInterruptedNoticed = true;
+    const roster = (r.interrupted.roster || []).map((m) =>
+      (m && typeof m === "object")
+        ? m
+        : { name: String(m || ""), provider: "", model: "" });
+    const fresh = buildTeamCard(roster, r.interrupted.director_mode || "user",
+      r.interrupted.director_mode === "ai" ? { provider: "", model: "" } : null);
+    fresh._teamId = teamId;
+    fresh.classList.add("interrupted");
+    fresh._ui.sub.textContent = "应用重启前的团队记录 · 只读回放";
+    tcFinish(fresh, "interrupted", "");
+    t._lastTeamCard = fresh;
+    t.logEl.appendChild(fresh);
+    if (teamId) tcFetchFullLog(t, fresh, { team_id: teamId, session_id: t.sid });
+    addNotice(`${r.interrupted.interrupt_reason || "应用重启，团队已中断"}：已载入只读频道回放；工单板与执行状态未恢复。`);
   }
 }
 
@@ -3620,6 +4360,8 @@ function applyTeamMeta(t, team) {
     // 前一张卡已终态而团队仍在活动（重新建队）：另起一张新卡
     const fresh = buildTeamCard(team.roster || [], team.director_mode || "user",
       tcDirectorOfSnapshot(team));
+    fresh._tab = t;
+    fresh._teamId = String(team.team_id || "");
     t.teamCard = fresh;
     const last = t.logEl.lastElementChild;
     // assistant_message 事件先于 chat.send 返回到达：纪要气泡已在流尾，卡插在它前面
@@ -3637,14 +4379,21 @@ function applyTeamMeta(t, team) {
 
 // 历史回放：从持久化的 meta 重建团队卡（默认折叠；同一团队跨多轮刷新同一张卡）。
 // meta 兼容二期 director 块（ai 模式新增）；一期 meta 无块照旧渲染「用户总管」
-function buildTeamReplayCard(meta) {
+function buildTeamReplayCard(meta, tab) {
   const team = meta.team || {};
   const card = buildTeamCard(team.roster || [], team.director_mode || "user",
     tcDirectorOfSnapshot(team));
+  card._tab = tab || curTab();
+  card._teamId = String(team.team_id || "");
   card.classList.add("folded");
   card._ui.fold.textContent = "展开";
+  card._ui.fold.setAttribute("aria-expanded", "false");
+  // 终态团队的历史卡一律只读（重画工单行时不再挂派工/验收按钮）
+  if ((team.status || "active") !== "active") {
+    card._finished = true;
+    card.classList.add("ended");
+  }
   updateTeamCard(card, team);
-  if ((team.status || "active") !== "active") card.classList.add("ended");
   return card;
 }
 
@@ -3680,7 +4429,10 @@ function tcFetchFullLog(tab, card, team) {
     tcApplyLogRows(card, teamLogCache.get(teamId));
     return;
   }
-  request("team.log", { team_id: teamId })
+  request("team.log", {
+    team_id: teamId,
+    session_id: (team && team.session_id) || (tab && tab.sid) || undefined,
+  })
     .then((r) => {
       const rows = (r && r.messages) || [];
       teamLogCache.set(teamId, rows);
@@ -4044,14 +4796,14 @@ function renderProjectTasks(tasks) {
         <span class="ptask-title">${escapeHtml(t.title)}</span>
         ${t.detail ? `<span class="ptask-detail">${escapeHtml(t.detail)}</span>` : ""}
       </span>
-      <button class="ptask-del" title="删除这条任务">✕</button>`;
+      <button class="ptask-del" title="删除这条事项">✕</button>`;
     li.querySelector(".ptask-check").onchange = async (e) => {
       try {
         await request("project.task_update", { id: t.id, done: e.target.checked });
         loadProjectTasks(true);
       } catch (err) {
         e.target.checked = !e.target.checked;
-        addNotice("更新任务失败：" + err.message);
+        addNotice("更新事项失败：" + err.message);
       }
     };
     li.querySelector(".ptask-del").onclick = async () => {
@@ -4059,7 +4811,7 @@ function renderProjectTasks(tasks) {
         await request("project.task_delete", { id: t.id });
         loadProjectTasks(true);
       } catch (err) {
-        addNotice("删除任务失败：" + err.message);
+        addNotice("删除事项失败：" + err.message);
       }
     };
     li.querySelector(".ptask-main").onclick = () => ptaskModal(t);
@@ -4081,9 +4833,9 @@ function ptaskModal(t) {
                   placeholder="做到什么程度算完成；有什么约束或偏好">${t ? escapeHtml(t.detail || "") : ""}</textarea>
       </label>
     </div>`;
-  showModal(isNew ? "新建任务" : "编辑任务", box, async () => {
+  showModal(isNew ? "新建事项" : "编辑事项", box, async () => {
     const title = box.querySelector('[data-f="title"]').value.trim();
-    if (!title) throw new Error("任务内容不能为空");
+    if (!title) throw new Error("事项内容不能为空");
     const detail = box.querySelector('[data-f="detail"]').value;
     if (isNew) {
       await request("project.task_add", { title, detail });
@@ -4106,7 +4858,7 @@ function wireProjectTasksPanel() {
     input.disabled = true;
     request("project.task_add", { title })
       .then(() => { input.value = ""; loadProjectTasks(true); })
-      .catch((err) => addNotice("添加任务失败：" + err.message))
+      .catch((err) => addNotice("添加事项失败：" + err.message))
       .finally(() => { input.disabled = false; });
   });
   if (addBtn && !addBtn.dataset.wired) {
@@ -4213,6 +4965,16 @@ function finishEta(t, engineMs) {
 }
 
 function handleEvent(kind, data) {
+  // 接力（主副屏交替）状态：无会话路由，交给右侧看板按 pair_id 更新。
+  if (kind === "relay_pair_state") {
+    if (typeof relayOnPairState === "function") relayOnPairState(data && data.relay);
+    return;
+  }
+  // 旧的无工具串行接力事件（界面已不再使用）：保留钩子，避免旧后端混跑时报错。
+  if (kind === "relay_state") {
+    if (typeof relayOnState === "function") relayOnState(data && data.relay);
+    return;
+  }
   // 多会话路由：事件带 session_id → 找到（或后台创建）对应标签再渲染。
   // session_updated 例外：它只是另一窗口「改名/归档/移动」等元数据操作的广播
   // 回声，不承载轮次内容——为它开标签会把刚归档（或刚关掉标签）的会话原样
@@ -4336,6 +5098,8 @@ function handleEvent(kind, data) {
           closeSplitPanesForSids(new Set([data.session_id]));
           const dead = tabFor(data.session_id);
           if (dead) closeTab(dead);
+          // 删的是接力副屏：看板上的「副屏」胶囊跟着回到未创建
+          if (typeof relayPeerDeleted === "function") relayPeerDeleted(data.session_id);
         } else {
           if (data.archived === true) {
             // 归档：侧栏行消失，上方标签与分屏列一并收掉（与删除同一处置，但
@@ -4759,7 +5523,7 @@ async function refreshSessions(prefetched) {
     const target = projs.find((p) => String(p.id) === pid);
     ul.innerHTML = "";
     if (!plist.length) {
-      ul.innerHTML = '<li class="empty-hint">这个项目还没有对话</li>';
+      ul.innerHTML = '<li class="empty-hint">这个项目还没有会话</li>';
     } else {
       const ordered = orderedSessionList(plist, classicViewGk);
       lastGroupedListByGroup.set(classicViewGk, ordered); // 拖拽排序的家族归并数据源（commitSessionOrder 读）
@@ -5315,12 +6079,12 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
     // 兜底组「其他」（project=null 且非快聊）不提供新建：那些会话本属某项目，
     // 只是项目被移除后成了孤儿，新建无意义
     (headPlus || project
-      ? `<button class="pg-add" title="${headPlus ? "新建快聊（不需要文件夹，随时能聊）" : "新建对话"}">＋</button>` : "");
-  // 组头交互：整行点击展开/折叠；右侧＋新建对话（箭头已移除，展开态靠组下
+      ? `<button class="pg-add" title="${headPlus ? "新建快聊（不需要文件夹，随时能聊）" : "新建会话"}">＋</button>` : "");
+  // 组头交互：整行点击展开/折叠；右侧＋新建会话（箭头已移除，展开态靠组下
   // 会话行本身可见）。＋行为按组分流：快聊保持原 headPlus；当前项目=新标签
   // （发送第一条消息时才落库，见 create_task_chat）；其他项目先切过去再新建；
   // 远程连接没有工作目录，打开它名下最近的对话。
-  head.title = `${name} —— 点击展开/折叠该项目下的会话；点＋新建对话`;
+  head.title = `${name} —— 点击展开/折叠该项目下的会话；点＋新建会话`;
   const addBtn = head.querySelector(".pg-add");
   if (addBtn) {
     addBtn.onclick = async (e) => {
@@ -5337,13 +6101,13 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
           await request("project.switch", { path: rootPath });
           await applyWorkspaceData(await fetchWorkspaceData());
           startNewTab();
-          addNotice(`已切换到项目「${name}」，新建对话`);
+          addNotice(`已切换到项目「${name}」，新建会话`);
         } else {
           // 远程连接：无工作目录，打开最近的渠道对话
           await switchToGroupProject(project, name, rootPath);
         }
       } catch (e2) {
-        addNotice("新建对话失败：" + e2.message);
+        addNotice("新建会话失败：" + e2.message);
       }
     };
   }
@@ -5473,7 +6237,7 @@ async function switchToGroupProject(project, name, rootPath) {
       .filter((s) => s.project_id === project.id)
       .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     if (!list.length) {
-      addNotice("「远程连接」还没有对话——在飞书/微信里给机器人发条消息就会出现在这里");
+      addNotice("「远程连接」还没有会话——在飞书/微信里给机器人发条消息就会出现在这里");
       return;
     }
     await openTabForSession(list[0].id, list[0].title);
@@ -6631,12 +7395,14 @@ let curSupportsVision = true;
 
 // ---------- 顶栏模型菜单：对话页直接切换已启用的模型（对标 ChatGPT/Claude 模型选择器） ----------
 const modelMenu = document.getElementById("model-menu");
-let modelMenuTab = "preset"; // 菜单当前页签：preset=默认（内置预设）、custom=自定义（用户新增）
+let modelPopup = null; // 当前展开的模型弹层（同一时间只有一个，随菜单重画一同销毁）
+let providerOrder = []; // 服务列表的拖动序（ui.json 的 provider_order；缺省按后端默认序）
 let defaultModelPref = { provider: "", model: "", label: "" }; // 新会话默认模型（Shift+点击行设置）
 
 function hideModelMenu() {
   modelMenu.classList.add("hidden");
   modelMenu.innerHTML = "";
+  modelPopup = null; // 弹层随 innerHTML 一起没了，引用一并清掉
 }
 
 function buildModelRows(detail, cur) {
@@ -6648,6 +7414,7 @@ function buildModelRows(detail, cur) {
       rows.push({
         name, model: m, hasKey: p.has_key,
         label: p.label || name, // 界面显示名（预设如「智谱」「小米 Mimo」）
+        vision: !!p.supports_vision, // 能否看图（右列「视觉」标签）
         active: cur
           ? name === cur.name && m === (cur.model || p.active_model || p.model)
           : p.is_active && m === (p.active_model || p.model),
@@ -6669,7 +7436,7 @@ async function toggleModelMenu(e) {
   const vh = window.innerHeight / uiScale;
   modelMenu.style.top = "auto";
   modelMenu.style.bottom = (vh - chipR.top / uiScale + 6) + "px";
-  modelMenu.style.left = Math.max(8, chipR.right / uiScale - 250) + "px";
+  modelMenu.style.left = Math.max(8, chipR.right / uiScale - 260) + "px";
   const detail = await request("config.providers").catch(() => null);
   if (!detail || modelMenu.classList.contains("hidden")) return; // 请求失败或期间已被关掉
   // 新会话默认模型（★ 行标记用）：拉取失败不阻塞菜单
@@ -6683,28 +7450,36 @@ async function toggleModelMenu(e) {
     if (cg && activeTab === tabAtOpen && cg.session_id === tabAtOpen.sid) sessCur = cg;
   }
   const rows = buildModelRows(detail, sessCur);
-  // 两页：内置预设 = 默认，用户新增 = 自定义（页签沿用侧栏搜索范围的分段控件样式）
-  const groups = [
-    {
-      tab: "preset", label: "默认", rows: rows.filter((r) => r.preset),
-      empty: "内置服务都已停用，可在管理页恢复",
-    },
-    {
-      tab: "custom", label: "自定义", rows: rows.filter((r) => !r.preset),
-      empty: "还没有自定义服务，点下方「管理模型服务」添加",
-    },
-  ];
+  // 两列菜单：左列服务、右列该服务的模型（不再分「默认/自定义」页签）。
+  // 只列已配置 API Key 的服务——没配 Key 的切过去必然失败，不如不进清单
+  const svcGroups = new Map();
+  rows.forEach((r) => {
+    if (!r.hasKey) return;
+    let g = svcGroups.get(r.name);
+    if (!g) {
+      g = { name: r.name, label: r.label, models: [] };
+      svcGroups.set(r.name, g);
+    }
+    g.models.push(r);
+  });
+  // 服务列按用户的拖动序排；名单外的新服务排后面（保持后端默认序，稳定排序）
+  const rank = new Map(providerOrder.map((n, i) => [n, i]));
+  const svcList = [...svcGroups.values()].sort((a, b) => {
+    const ra = rank.has(a.name) ? rank.get(a.name) : Infinity;
+    const rb = rank.has(b.name) ? rank.get(b.name) : Infinity;
+    return ra === rb ? 0 : ra - rb;
+  });
   const addRow = (row) => {
     const b = document.createElement("button");
     b.className = "mm-item" + (row.active ? " active" : "");
-    b.innerHTML = providerAvatar(row.name) +
+    b.innerHTML =
+      `<span class="mm-title">` +
       `<span class="mm-model">${row.active ? "✓ " : ""}${escapeHtml(row.model)}</span>` +
+      (row.vision ? '<span class="mm-vision">视觉</span>' : "") +
+      `</span>` +
       (defaultModelPref.provider === row.name && defaultModelPref.model === row.model
-        ? `<span class="mm-def" title="新会话将默认使用这个模型">★ 新会话默认</span>` : "") +
-      `<span class="mm-prov${row.hasKey ? "" : " no-key"}">${row.hasKey ? "" : "⚠ "}${escapeHtml(row.label)}</span>`;
-    b.title = row.hasKey
-      ? `切换到 ${row.label} / ${row.model}（点击${sessCur ? "，只影响当前会话" : ""}）；Shift+点击 设为新会话默认`
-      : `「${row.label}」还没配置 API Key，切换过去会失败`;
+        ? `<span class="mm-def" title="新会话将默认使用这个模型">★ 新会话默认</span>` : "");
+    b.title = `切换到 ${row.label} / ${row.model}（点击${sessCur ? "，只影响当前会话" : ""}）；Shift+点击 设为新会话默认`;
     b.onclick = async (ev) => {
       // Shift+点击：把这一行设为「新会话默认模型」（不改当前对话）
       if (ev.shiftKey) {
@@ -6712,7 +7487,9 @@ async function toggleModelMenu(e) {
           const r = await request("default_model.set", { name: row.name, model: row.model });
           defaultModelPref = r;
           addNotice(`✓ 已设为新会话默认：${r.label}（当前对话不变）`);
-          paint();
+          // 重建菜单但保持这个服务的弹层开着：★ 标记会立刻出现在刚点的那行上，
+          // 用户不用为了看一眼效果再点一次服务
+          paint(row.name);
         } catch (err) {
           addNotice("设置失败: " + err.message);
         }
@@ -6753,37 +7530,138 @@ async function toggleModelMenu(e) {
         addNotice("切换失败: " + err.message);
       }
     };
-    return b; // 挂载交给 paint 的 .mm-list 容器统一处理
+    return b;
   };
-  // 整页重画（页签 + 当前列表 + 管理入口），切页时数据已在手，无需重新请求
-  const paint = () => {
-    modelMenu.innerHTML = "";
-    const seg = document.createElement("div");
-    seg.className = "seg-row seg-mini mm-seg";
-    for (const g of groups) {
-      const t = document.createElement("button");
-      t.textContent = g.label;
-      t.classList.toggle("active", modelMenuTab === g.tab);
-      t.onclick = (ev) => {
-        ev.stopPropagation(); // 别让冒泡到 document 的 click 把菜单关掉
-        if (modelMenuTab === g.tab) return;
-        modelMenuTab = g.tab;
-        paint();
-      };
-      seg.appendChild(t);
+  // 模型弹层：点服务行后在它右侧浮出该服务的模型列表。
+  // 同一时间只开一个；开关状态与选中态都记在弹层自己身上，服务行不再显示选中
+  const closePopup = () => {
+    if (!modelPopup) return;
+    modelPopup.el.remove();
+    modelPopup.btn.classList.remove("active");
+    modelPopup.btn.querySelector(".mm-svc-go").textContent = "›";
+    modelPopup = null;
+  };
+  const openPopup = (btn, group) => {
+    // 点同一个服务 = 收起（toggle）；点另一个服务 = 换内容并挪到新行旁
+    if (modelPopup && modelPopup.btn === btn) return closePopup();
+    closePopup();
+    const el = document.createElement("div");
+    el.className = "mm-models";
+    group.models.forEach((row) => el.appendChild(addRow(row)));
+    modelMenu.appendChild(el);
+    btn.classList.add("active");
+    btn.querySelector(".mm-svc-go").textContent = "⌄"; // 展开态箭头朝下
+    // 贴着服务行右侧浮出；右侧放不下就翻到左边，两边都窄时收窄宽度留在右侧。
+    // 注意 getBoundingClientRect 给的是物理像素（菜单带 zoom），而 style.left/bottom
+    // 用的是布局像素——所有几何量都必须先除回 uiScale，否则会按缩放比错位重叠
+    const menuR = modelMenu.getBoundingClientRect();
+    const rowR = btn.getBoundingClientRect();
+    const vw = window.innerWidth / uiScale;
+    const mRight = menuR.right / uiScale, mLeft = menuR.left / uiScale;
+    // 弹层底边与行底对齐；模型很多时按「行底到屏幕顶」收高度，绝不顶出视口
+    el.style.bottom = (menuR.bottom - rowR.bottom) / uiScale + 4 + "px";
+    el.style.maxHeight = Math.max(120, rowR.bottom / uiScale - 12) + "px";
+    const w = el.offsetWidth;      // 布局像素（el 在 zoom 容器内，offsetWidth 已是布局值）
+    const menuW = menuR.width / uiScale; // 物理 → 布局，绝对定位的 left 基准在 padding box
+    if (mRight + 4 + w + 8 <= vw) {
+      el.style.left = (menuW + 4) + "px"; // 右侧够宽
+    } else if (mLeft - 4 - w >= 8) {
+      el.style.left = (-w - 4) + "px"; // 右侧不够，翻到左边
+    } else {
+      // 两边都放不下：留在右侧并收窄（菜单本身已贴到窗口边时才会走到）
+      el.style.left = (menuW + 4) + "px";
+      el.style.maxWidth = Math.max(160, vw - mRight - 16) + "px";
     }
-    modelMenu.appendChild(seg);
-    const cur = groups.find((g) => g.tab === modelMenuTab) || groups[0];
-    const list = document.createElement("div");
-    list.className = "mm-list"; // 限高滚动容器：页签与管理入口固定，行多了列表内滚
-    if (!cur.rows.length) {
+    // 模型多时让当前 ✓ 那行进入弹层可视区：只调弹层自己的 scrollTop，
+    // 不用 scrollIntoView——后者会把外层滚动容器（乃至页面）一起带着滚
+    const curRow = el.querySelector(".mm-item.active");
+    if (curRow) {
+      const rr = curRow.getBoundingClientRect();
+      const er = el.getBoundingClientRect();
+      if (rr.top < er.top || rr.bottom > er.bottom) {
+        el.scrollTop += (rr.top - er.top) / uiScale;
+      }
+    }
+    modelPopup = { el, btn };
+  };
+  // 整页重画（服务列 + 管理入口），数据已在手，切服务时无需重新请求。
+  // openSvc：重建后要自动展开弹层的服务——
+  //   "current"（默认 true 的语义）= 当前生效模型所在的服务（初次打开菜单时用）；
+  //   服务名字符串 = 指定服务（Shift+点击设默认后保持弹层不跳）；
+  //   "" 或 null = 不展开。
+  const paint = (openSvc = null) => {
+    modelMenu.innerHTML = "";
+    modelPopup = null; // innerHTML 清空时弹层一并没了
+    let curBtn = null, curGroup = null, svcBox = null; // 当前生效模型所在的服务行
+    const svcBtns = new Map(); // 服务名 → 行按钮（重建后按名找回要展开的那行）
+    if (!svcList.length) {
+      // 没有已配置 Key 的服务：只留一句空态与下方管理入口
       const hint = document.createElement("div");
       hint.className = "mm-empty";
-      hint.textContent = cur.empty;
-      list.appendChild(hint);
+      hint.textContent = "还没有配置好 API Key 的服务，点下方「管理模型服务」配置";
+      modelMenu.appendChild(hint);
+    } else {
+      svcBox = document.createElement("div");
+      svcBox.className = "mm-services";
+      let dragFrom = -1; // 拖动中的源行序号
+      let justDragged = false; // 拖完落位后浏览器仍可能补一个 click，别让它顺手开弹层
+      for (const [i, g] of svcList.entries()) {
+        const b = document.createElement("button");
+        // 正在使用的服务：行首竖条持久标识（弹层关掉也能一眼看出当前用的是谁）
+        const isCur = g.models.some((r) => r.active);
+        b.className = "mm-svc" + (isCur ? " current" : "");
+        if (isCur) { curBtn = b; curGroup = g; }
+        svcBtns.set(g.name, b);
+        b.draggable = true;
+        b.innerHTML = providerAvatar(g.name) +
+          `<span class="mm-svc-name">${escapeHtml(g.label)}</span>` +
+          '<span class="mm-svc-go">›</span>';
+        b.title = `${g.label}（${g.models.length} 个模型）· 点击选择模型 · 可拖动调整顺序`;
+        b.onclick = () => {
+          if (justDragged) { justDragged = false; return; }
+          openPopup(b, g);
+        };
+        b.ondragstart = (ev) => {
+          dragFrom = i;
+          justDragged = true;
+          closePopup(); // 行要挪位置，弹层的锚点已失效，先收掉
+          b.classList.add("dragging");
+          ev.dataTransfer.effectAllowed = "move";
+          try { ev.dataTransfer.setData("text/plain", g.name); } catch {}
+        };
+        b.ondragend = () => {
+          b.classList.remove("dragging");
+          svcBox.querySelectorAll(".mm-svc").forEach((x) => x.classList.remove("drag-over"));
+          dragFrom = -1;
+          // 复位放到下一个宏任务：拖动结束后浏览器可能补发一个 click（同步派发），
+          // 那时标记必须还在才能把它吞掉；放 setTimeout(0) 里正好晚于那次 click。
+          // 落位成功的路径已由 paint() 重建 DOM，旧闭包变量随之作废
+          setTimeout(() => { justDragged = false; }, 0);
+        };
+        b.ondragover = (ev) => {
+          if (dragFrom < 0 || dragFrom === i) return;
+          ev.preventDefault();
+          ev.dataTransfer.dropEffect = "move";
+          b.classList.add("drag-over");
+        };
+        b.ondragleave = () => b.classList.remove("drag-over");
+        b.ondrop = (ev) => {
+          ev.preventDefault();
+          b.classList.remove("drag-over");
+          if (dragFrom < 0 || dragFrom === i) return;
+          const moved = svcList.splice(dragFrom, 1)[0];
+          svcList.splice(i, 0, moved);
+          // 落盘拖动序：当前完整顺序（含未在名单里的新服务，下次照样按此排）
+          providerOrder = svcList.map((x) => x.name);
+          saveUiPrefs({ provider_order: providerOrder });
+          dragFrom = -1;
+          closePopup(); // 行顺序变了，弹层锚点已失效，直接收起
+          paint();
+        };
+        svcBox.appendChild(b);
+      }
+      modelMenu.appendChild(svcBox);
     }
-    cur.rows.forEach((row) => list.appendChild(addRow(row)));
-    modelMenu.appendChild(list);
     const manage = document.createElement("button");
     manage.className = "mm-manage";
     manage.textContent = "⚙ 管理模型服务…";
@@ -6798,8 +7676,20 @@ async function toggleModelMenu(e) {
     modelMenu.style.bottom = (window.innerHeight / uiScale - chipR.top / uiScale + 6) + "px";
     modelMenu.style.left =
       Math.max(8, Math.min(chipR.right / uiScale - mw, window.innerWidth / uiScale - mw - 8)) + "px";
+    // 服务多时把当前服务行滚进可视区（同上，只调服务列自己的 scrollTop）
+    if (curBtn && svcBox) {
+      const br = curBtn.getBoundingClientRect();
+      const sr = svcBox.getBoundingClientRect();
+      if (br.top < sr.top || br.bottom > sr.bottom) {
+        svcBox.scrollTop += (br.top - sr.top) / uiScale;
+      }
+    }
+    // 按 openSvc 决定重建后展开哪个服务的弹层
+    const want = openSvc === "current" ? (curGroup ? curGroup.name : "") : (openSvc || "");
+    const openBtn = want ? svcBtns.get(want) : null;
+    if (openBtn) openPopup(openBtn, svcGroups.get(want));
   };
-  paint();
+  paint("current"); // 初次打开：直接展开当前模型所在服务，省一次点击
 }
 modelChip.style.cursor = "pointer";
 modelChip.title = "当前模型 · 点击切换已启用的模型";
@@ -6809,7 +7699,15 @@ document.addEventListener("click", (e) => {
       !modelMenu.contains(e.target) && !modelChip.contains(e.target)) hideModelMenu();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") hideModelMenu();
+  if (e.key !== "Escape") return;
+  // 两级菜单逐层退：先收模型弹层，再按一次才关整个菜单
+  if (modelPopup) {
+    modelPopup.el.remove();
+    modelPopup.btn.classList.remove("active");
+    modelPopup = null;
+    return;
+  }
+  hideModelMenu();
 });
 window.addEventListener("resize", hideModelMenu);
 
@@ -7658,12 +8556,12 @@ async function boot() {
 }
 
 // ---------- 首次启动配置向导：没有可用模型时 3 步引导（选服务 → 填 Key → 开始用） ----------
-// 无 Key 用户还有两条免注册出路：本机 Ollama（自动检测）与内置演示模式。
+// 无 Key 用户还有一条免注册出路：内置演示模式。
 function maybeOnboard(snap) {
   const hasWorkingProvider = !snap.provider_error && snap.provider;
-  // Ollama 预设出厂自带占位 Key（本机服务不校验 Key），其 has_key 恒为 true——
-  // 「用户真的配过 Key」必须排除 localhost 服务，否则全新机器也会被误判成
-  // 已配置，向导一次都不弹、还倒写 onboarded 把自己永久关掉
+  // 「用户真的配过 Key」要排除 localhost 服务：本地服务通常不校验 Key，
+  // 若把本地服务的 has_key 也算进来，全新机器会被误判成已配置，
+  // 向导一次都不弹、还倒写 onboarded 把自己永久关掉
   const isLocalSvc = (u) =>
     /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?(\/|$)/i.test(String(u || ""));
   const anyKeyed = Object.values(snap.providers || {}).some(
@@ -7701,12 +8599,10 @@ function showOnboardWizard(snap) {
     </label>
     <div class="form-status"></div>
     <div class="ob-alt">
-      <div class="ob-alt-title dim small">没有 Key？两条免注册的出路：</div>
+      <div class="ob-alt-title dim small">没有 Key？可以先看演示模式：</div>
       <div class="ob-alt-row">
         <button type="button" class="btn-ghost" data-f="ob-demo">🎬 先看演示模式</button>
-        <button type="button" class="btn-ghost" data-f="ob-ollama" hidden>🦙 启用本机 Ollama</button>
       </div>
-      <div class="dim small" data-f="ob-ollama-hint">正在检测本机是否装了 Ollama（本地模型，无需 Key）…</div>
     </div>`;
   const val = (f) => box.querySelector(`[data-f="${f}"]`);
   const status = box.querySelector(".form-status");
@@ -7730,26 +8626,6 @@ function showOnboardWizard(snap) {
       status.textContent = "✗ " + e.message;
     }
   };
-  // 免注册出路 ②：检测到本机 Ollama 时亮出「一键启用」
-  request("ollama.detect").then((det) => {
-    const hint = val("ob-ollama-hint");
-    if (!det || !det.available) {
-      hint.textContent = "没检测到本机 Ollama——装了它就能完全离线用本地模型（不装也没关系，云服务都有免费额度）";
-      return;
-    }
-    hint.textContent = `检测到本机 Ollama（${det.models.length} 个模型：${det.models.slice(0, 3).join("、")}${det.models.length > 3 ? "…" : ""}），可以直接用`;
-    const btn = val("ob-ollama");
-    btn.hidden = false;
-    btn.onclick = async () => {
-      status.textContent = "正在启用 Ollama…";
-      try {
-        const r = await request("ollama.enable", { model: det.models[0] });
-        finish(`✓ 已切换到本机 Ollama（${r.model}）——无需 Key，直接开始对话吧`);
-      } catch (e) {
-        status.textContent = "✗ " + e.message;
-      }
-    };
-  }).catch(() => {});
   showModal("👋 欢迎使用 SkySheep", box, async () => {
     const name = box.querySelector("input[name=ob-preset]:checked").value;
     const key = val("ob-key").value.trim();
@@ -7935,9 +8811,16 @@ function renderCoopMenuItems(menu) {
       `<span class="coop-mode-label">${escapeHtml(m.label)}</span>` +
       `<span class="coop-mode-desc">${escapeHtml(m.desc)}</span>` +
       `</span>`;
-    b.title = m.active ? "再点一次收起" : "点击启用，并在右侧放出设置";
+    b.title = m.active
+      ? (m.key === "off" ? "点击收起" : "点击打开设置")
+      : "点击启用，并在右侧放出设置";
     b.onclick = () => {
-      if (m.active) { closeMenu(); return; }
+      // 已启用的模式再点不放出设置弹层（「不用协作」没有设置，仍只收起）
+      if (m.active) {
+        if (m.key !== "off") openSettingsBeside(m.key);
+        else closeMenu();
+        return;
+      }
       coopRenderGuard = true;
       if (m.key === "rt") { setRtOn(true); openSettingsBeside("rt"); }
       else if (m.key === "team") { setTeamOn(true); openSettingsBeside("team"); }
@@ -8598,7 +9481,8 @@ function positionRtMenu(menu, anchorId) {
 }
 document.addEventListener("click", (e) => {
   if (coopRenderGuard) return; // 程序性重建期间不算「点在外面」
-  const inCoop = !!(e.target.closest && e.target.closest("#coop-group"));
+  // #coop-menu 也算协作 UI：点菜单项（含再点已启用模式放出设置）不该被当成「点在外面」
+  const inCoop = !!(e.target.closest && e.target.closest("#coop-group, #coop-menu"));
   const coopMenu = document.getElementById("coop-menu");
   const clickInSettings = !!(e.target.closest && e.target.closest("#rt-menu, #team-menu, #adv-menu"));
   if (coopMenu && !coopMenu.classList.contains("hidden") &&
@@ -9311,6 +10195,11 @@ async function send() {
     });
     setContextUsage(r.context_tokens || 0, r.context_limit || 0, tab);
     if (r.context_detail) setContextDetail(r.context_detail, tab);
+    // 对抗报告的真实消息序号随响应回来（assistant_message 事件先于落库，
+    // 事件里的 seq 为空）：补挂「转为团队工单」入口
+    if (r.adversarial && r.adversarial_seq) {
+      advAttachTransfer(tab, r.adversarial, r.adversarial_seq);
+    }
     tab.firstSend = false;
     if (r.session_id && !tab.sid) {
       tab.sid = r.session_id;
@@ -9703,7 +10592,7 @@ function paintHistorySlice(tab, messages, start, end) {
       } else if (m.role === "assistant") {
         // 对抗报告消息：先重建问题清单卡（默认折叠），再放报告本体
         if (m.adversarial && ((m.adversarial.findings || []).length || m.adversarial.stats)) {
-          const advCard = buildAdvReplayCard(m.adversarial);
+          const advCard = buildAdvReplayCard(m.adversarial, m.seq, tab);
           curLog().appendChild(advCard);
           renderMermaidIn(advCard);
           highlightCodeIn(advCard);
@@ -9724,7 +10613,7 @@ function paintHistorySlice(tab, messages, start, end) {
             updateTeamCard(prev, m.roundtable.team);
             tcFetchFullLog(tab, prev, m.roundtable.team);
           } else {
-            const tc = buildTeamReplayCard(m.roundtable);
+            const tc = buildTeamReplayCard(m.roundtable, tab);
             tab._lastTeamCard = tc;
             curLog().appendChild(tc);
             renderMermaidIn(tc);
@@ -9829,7 +10718,11 @@ async function msgRegenerate(tab, el, seq) {
       }
       params.debate_rounds = rtMeta.debate_rounds || 0;
     }
-    await request("chat.send", params);
+    await request("chat.send", params).then((r) => {
+      if (r && r.adversarial && r.adversarial_seq) {
+        advAttachTransfer(tab, r.adversarial, r.adversarial_seq);
+      }
+    });
     setContextUsage(0, 0, tab);
   } catch (e) {
     addNotice("重新生成失败: " + e.message);
@@ -10841,7 +11734,7 @@ function showHelp() {
         <li>「读一下这个文件夹里的合同，列出到期时间」</li>
         <li>「帮我把这个报错修好，改完跑一遍测试」</li>
       </ul>
-      <p>涉及写文件、执行命令时它会先弹确认条（<b>允许一次 / 本项目总是允许 / 拒绝</b>）；
+      <p>涉及写文件、执行命令时它会先弹确认条（<b>允许一次 / 总是允许（本项目） / 拒绝</b>）；
       只读操作自动放行。想少点确认，可点输入框工具条上的权限按钮（盾牌图标）在三档间切换：
       「自动编辑」只自动放行工作目录内的文件写入，目录外的写入与执行命令仍会征询；
       「完全访问」连执行命令也不再征询，仅在完全信任任务的环境里使用。</p>
@@ -10851,6 +11744,7 @@ function showHelp() {
       <ul>
         <li><b>⚡ 规划模式</b>：先出方案再动手，适合大改动</li>
         <li><b>👥 圆桌</b>：一条消息让多个模型同时作答再融合，难题更稳</li>
+        <li><b>接力</b>：主屏与副屏使用各自的会话交替处理任务，每轮可指定执行屏幕；它与输入框里的圆桌、团队、对抗是分开的。</li>
         <li><b>＋ 文件</b>：选本机任意文件（含项目外）让 Agent 读；图片请直接粘贴或拖入</li>
         <li><b>底部终端</b>：多开 PowerShell 标签，真终端（提示符 / 颜色 / Ctrl+C / 交互程序，Ctrl+&#96; 开关）</li>
         <li><b>右侧面板</b>：文件树、浏览器预览、审查看每轮改了哪些文件</li>
@@ -10887,7 +11781,8 @@ function showHelp() {
 
 document.getElementById("btn-help").onclick = () => showHelp();
 
-// ---------- 左栏功能导航（任务 / 日程 / 项目记忆 / 记忆地图 / 自动化 / MCP·Skills） ----------
+// ---------- 左栏功能导航（任务 / 日程 / 接力 / 自动化 / 项目记忆 / 记忆地图 / MCP·Skills） ----------
+// 顺序按使用频次排，与 index.html 的 .side-menu、.rail-btn 两处保持一致（改一处必须同步改另外两处）
 const navPending = {}; // 已全部上线，保留结构便于扩展
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -10902,6 +11797,8 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     if (act === "auto") return openRightTab("auto"); // 自动化 = 定时任务 + 任务编排（容器标签，默认落定时任务分段）
     if (act === "memory") return openRightTab("memory");
     if (act === "map") return openRightTab("map");
+    // 接力：右侧看板 + 在当前会话下打开副屏分栏（入口统一走 openRelayWorkbench）
+    if (act === "relay") return openRelayWorkbench();
     if (act === "project") return projectModal();
     if (act === "ext") return openRightTab("ext");
     if (navPending[act]) addNotice(`「${navPending[act]}」开发中，即将上线`);
@@ -11127,6 +12024,17 @@ function backToChat() {
 }
 btnSettings.onclick = () => (settingsOpen ? backToChat() : openSettings());
 
+// ---------- 接力工作台：作为右侧面板标签与聊天并排显示 ----------
+function openRelayWorkbench() {
+  if (settingsOpen) backToChat();
+  if (!document.getElementById("rp-page-relay")) return openSettings("skills"); // 接力说明卡在技能与工具页
+  openRightTab("relay");
+  // 点「接力」= 在当前会话开一个副屏：把绑定会话打开在右侧分栏里
+  if (typeof relayOpenWithPeer === "function") relayOpenWithPeer();
+}
+
+document.getElementById("relay-open-workbench").onclick = openRelayWorkbench;
+
 // 设置子项目：点击导航切换独立页面
 function showSettingsPage(target) {
   document.querySelectorAll("#settings-nav li").forEach((x) =>
@@ -11171,17 +12079,39 @@ function invalidateSettingsCardIndex() {
 function settingsCardIndex() {
   if (_settingsCardIndexCache) return _settingsCardIndexCache;
   const items = [];
-  document.querySelectorAll(".settings-page").forEach((pg) => {
-    const pageId = pg.id.replace("settings-page-", "");
+  // 面板打开时 MCP / 技能卡片被搬进右面板，不再挂在 .settings-page 下，
+  // 单扫 .settings-page 会让设置搜索漏掉它们——把面板里的两个容器也当页收进来
+  const pages = [...document.querySelectorAll(".settings-page")]
+    .map((pg) => [pg, pg.id.replace("settings-page-", "")]);
+  const SLOT_PAGES = { "rp-view-mcp": "mcp", "rp-view-skills": "skills" };
+  Object.entries(SLOT_PAGES).forEach(([id, pageId]) => {
+    const el = document.getElementById(id);
+    if (el) pages.push([el, pageId]);
+  });
+  pages.forEach(([pg, pageId]) => {
     const nav = document.querySelector(`#settings-nav li[data-target="${pageId}"]`);
     const pageName = nav ? nav.textContent.trim() : pageId;
-    pg.querySelectorAll(":scope > .settings-card").forEach((card) => {
-      const h3 = card.querySelector("h3");
-      items.push({
-        pageId, pageName, card,
-        title: h3 ? h3.textContent.trim() : "(未命名卡片)",
-        // 预小写全量正文：搜索时不再每键逐卡转小写（重复工作）
-        text: (card.textContent || "").toLowerCase(),
+    // 收卡范围：直接子卡 + 包在中间层里的卡。技能页的卡片挂在 #skill-list-view /
+    // #skill-manage-view 下（两视图互斥切换），只扫 :scope > .settings-card 会整页漏掉
+    const containers = [pg, ...pg.querySelectorAll(":scope > div")];
+    containers.forEach((box) => {
+      // 分组标题只影响「正文」匹配，不单独成为索引项：它没有自己的卡片，
+      // 点进去该滚到哪一张并不明确。这样搜「多模型协作」能把该组下所有卡片
+      // 都作为候选列出（每张卡的 text 里带上所属分组名）
+      let groupTitle = "";
+      [...box.children].forEach((el) => {
+        if (el.classList.contains("settings-group-title")) {
+          groupTitle = el.textContent.trim();
+          return;
+        }
+        if (!el.classList.contains("settings-card")) return;
+        const h3 = el.querySelector("h3");
+        items.push({
+          pageId, pageName, card: el,
+          title: h3 ? h3.textContent.trim() : "(未命名卡片)",
+          // 预小写全量正文：搜索时不再每键逐卡转小写（重复工作）
+          text: ((groupTitle ? groupTitle + " " : "") + (el.textContent || "")).toLowerCase(),
+        });
       });
     });
   });
@@ -11457,6 +12387,7 @@ const RP_ICONS = {
   // 记忆地图：三颗星连成星座——项目演化「星轨图」的意象
   map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>',
   ext: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5V8M15 3.5V8"/><path d="M6.5 8h11v2.5a5.5 5.5 0 0 1-5.5 5.5 5.5 5.5 0 0 1-5.5-5.5z"/><path d="M12 16v4.5"/></svg>',
+  relay: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.3"/><circle cx="18" cy="18" r="2.3"/><path d="M8 6h5a4 4 0 0 1 4 4v2M16 18h-5a4 4 0 0 1-4-4v-2"/><path d="m13 9 4 3 3-4M11 15l-4-3-3 4"/></svg>',
   // 面板开关：箭头指明点击后的动作——收起时 `>`（向右展开）、展开时 `<`（向左收起），
   // 展开态把面板列填色提示"此刻是开着的"
   panelClosed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M14.5 4.5v15"/><path d="m8.5 9.5 2.5 2.5-2.5 2.5"/></svg>',
@@ -11472,25 +12403,26 @@ const RP_ICONS = {
 const TAB_META = {
   aux: { title: "辅助对话" },
   review: { title: "审查" },
-  browser: { title: "浏览器" },
   files: { title: "文件" },
+  browser: { title: "浏览器" },
   tasks: { title: "任务", sub: "子代理 · 步骤 · 事项" },
   agenda: { title: "日程" },
   auto: { title: "自动化", sub: "定时 · 编排" },
+  relay: { title: "接力" },
   memory: { title: "项目记忆" },
   map: { title: "记忆地图", sub: "项目演化 · 时间线 · 图谱" },
   ext: { title: "MCP / Skills" },
 };
 // 分段 id → 所属标签。合并前的 ui.json 里存的就是分段 id（todo / ptasks /
 // cron / pipeline），靠这张表映射回所属标签并把分段一并还原。
-const TAB_OF = { tasks: "tasks", todo: "tasks", ptasks: "tasks", cron: "auto", pipeline: "auto" };
+const TAB_OF = { tasks: "tasks", todo: "tasks", ptasks: "tasks", cron: "auto", pipeline: "auto", mcp: "ext", skills: "ext" };
 // 标签 id → 分段顺序（第一个是打开时的默认段）；不在表里的标签没有分段
-const TAB_VIEWS = { tasks: ["tasks", "todo", "ptasks"], auto: ["cron", "pipeline"] };
+const TAB_VIEWS = { tasks: ["tasks", "todo", "ptasks"], auto: ["cron", "pipeline"], ext: ["mcp", "skills"] };
 let rightTabs = [];    // 打开的标签 id（有序；只存容器标签，不存分段）
 let rightActive = null;
 // 每个合并标签当前显示哪一段（内存态：落盘时把分段 id 写进 right_active，
 // 重启后还原——见 rightActiveView / initUiPrefs）
-const rightView = { tasks: "tasks", auto: "cron" };
+const rightView = { tasks: "tasks", auto: "cron", ext: "mcp" };
 
 /** 分段 id（或普通标签 id）→ 面板标签 id。 */
 function rightTabFor(id) {
@@ -11552,9 +12484,12 @@ const RIGHT_TAB_LOADERS = {
   review: () => refreshReview(),
   memory: () => loadMemoryPanel(),
   map: () => loadMemoryMap(),
-  ext: () => openExtPanel(),
+  ext: () => openExtPanel(), // 容器 id 直接传进来时（恢复偏好等）也接得住
+  mcp: () => openExtPanel(),
+  skills: () => openExtPanel(),
   todo: () => loadTodoPanel(),
   aux: () => refreshAuxModel(), // 模型下拉：每次激活都重拉（主模型换了「跟随」项的标注要跟着变）
+  relay: (force) => relayWorkbenchShown({ force, focus: false }),
 };
 
 /** 按需加载某个视图的数据；未知 id 静默跳过。
@@ -11604,13 +12539,25 @@ function renderRightPanel() {
   // 容器宽度变化时由 ResizeObserver 走同一条路
   applyRpTabDensity();
   // 横滚档保证激活标签落在可视区：启动恢复/打开新标签后它可能在滚动区外
-  const overflowing = rpTabs.scrollWidth > rpTabs.clientWidth;
-  if (rightActive && overflowing) {
+  if (rightActive && rpTabs.scrollWidth > rpTabs.clientWidth) {
     const activeEl = rpTabs.querySelector(`.rp-tab[data-tab-id="${rightActive}"]`);
-    if (activeEl) activeEl.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (activeEl) {
+      // 不用 offsetLeft，因为它的计算依赖 offsetParent（跨层时不可靠）
+      // getBoundingClientRect 会强制触发 layout，同步读取结果是精确的
+      const cRect = rpTabs.getBoundingClientRect();
+      const aRect = activeEl.getBoundingClientRect();
+      if (aRect.left < cRect.left) {
+        rpTabs.scrollLeft += aRect.left - cRect.left - 8;
+      } else if (aRect.right > cRect.right) {
+        rpTabs.scrollLeft += aRect.right - cRect.right + 8;
+      }
+    }
   }
   document.querySelectorAll("#rp-body .rp-page").forEach((p) => p.classList.add("hidden"));
-  if (rightActive && !rightCollapsed) document.getElementById("rp-page-" + rightActive).classList.remove("hidden");
+  if (rightActive && !rightCollapsed) {
+    const page = document.getElementById("rp-page-" + rightActive);
+    if (page) page.classList.remove("hidden");
+  }
   applyRightSubView(rightActive); // 合并标签里该露哪一段（收起时也刷，展开即正确）
 }
 
@@ -11709,6 +12656,19 @@ function activateRightTab(id) {
 
 function closeRightTab(id) {
   const tab = rightTabFor(id);
+  // 关闭 MCP/Skills 标签时，把卡片搬回设置页，否则设置页里这两个页面会空白
+  if (tab === "ext") {
+    const mcpPage = document.getElementById("settings-page-mcp");
+    if (mcpPage.closest("#rp-page-ext")) {
+      const body = document.querySelector(".settings-body");
+      body.insertBefore(mcpPage, document.getElementById("settings-page-advanced"));
+      const skillsPage = document.getElementById("settings-page-skills");
+      const listView = document.getElementById("skill-list-view");
+      const manageView = document.getElementById("skill-manage-view");
+      skillsPage.insertBefore(listView, document.getElementById("skill-extras"));
+      skillsPage.appendChild(manageView);
+    }
+  }
   rightTabs = rightTabs.filter((t) => t !== tab);
   if (rightActive === tab) rightActive = rightTabs[rightTabs.length - 1] || null;
   if (!rightTabs.length) rightCollapsed = true; // 最后一个标签关掉 → 面板收起
@@ -11719,27 +12679,49 @@ function closeRightTab(id) {
 }
 
 // —— MCP / Skills 标签：技能与 MCP 卡片只有一份，靠 DOM 搬家在「设置页 ↔ 右面板」
-// 之间共享（appendChild 移动节点时事件监听器随节点走，按 ID 绑定/查找不受位置影响）——
+// 之间共享（appendChild 移动节点时事件监听器随节点走，按 ID 绑定/查找不受位置影响）。
+// 面板里分 MCP / Skills 两段，各占一个独立容器：两页卡片不再上下堆在一起。
 const extPanelPage = document.getElementById("rp-page-ext");
 
-function openExtPanel() {
-  const skillsPage = document.getElementById("settings-page-skills");
+/** 把设置页的卡片搬进面板各自的容器（已搬过则不动）。
+    Skills 段只搬「技能 / 场景模板」两个视图——外部服务、多模型协作、内置工具
+    不属于技能本身，留在设置页（#skill-extras），不随面板走。 */
+function mountExtPanels() {
   const mcpPage = document.getElementById("settings-page-mcp");
-  extPanelPage.appendChild(mcpPage); // 顺序对齐入口名：MCP 在上、技能在下
-  extPanelPage.appendChild(skillsPage);
-  skillsPage.classList.remove("hidden");
-  mcpPage.classList.remove("hidden");
-  resetSkillView(); // 每次都从总览开始，与进设置页的行为一致
+  const mcpSlot = document.getElementById("rp-view-mcp");
+  if (mcpPage && mcpSlot) {
+    if (mcpPage.parentElement !== mcpSlot) mcpSlot.appendChild(mcpPage);
+    // 回到设置页时 showSettingsPage 会给它加 hidden，这里每次都要撤掉
+    mcpPage.classList.remove("hidden");
+  }
+  const skillSlot = document.getElementById("rp-view-skills");
+  const listView = document.getElementById("skill-list-view");
+  const manageView = document.getElementById("skill-manage-view");
+  if (skillSlot && listView && manageView && listView.parentElement !== skillSlot) {
+    skillSlot.appendChild(listView);
+    skillSlot.appendChild(manageView);
+  }
+}
+
+function openExtPanel() {
+  mountExtPanels();
+  if (rightView.ext === "skills") resetSkillView(); // 与进设置页一致：技能页从总览开始
   renderSettings().catch((e) => addNotice("加载设置失败: " + e.message));
 }
 
 function closeExtPanel() {
-  const skillsPage = document.getElementById("settings-page-skills");
   const mcpPage = document.getElementById("settings-page-mcp");
-  if (skillsPage.parentElement !== extPanelPage) return; // 卡片本来就在设置页
+  if (!mcpPage.closest("#rp-page-ext")) return; // 卡片本来就在设置页
   const body = document.querySelector(".settings-body");
-  body.insertBefore(skillsPage, document.getElementById("settings-page-subagents"));
   body.insertBefore(mcpPage, document.getElementById("settings-page-advanced"));
+  // 技能两视图放回技能页，位置在「外部服务」那组之前
+  const skillsPage = document.getElementById("settings-page-skills");
+  const listView = document.getElementById("skill-list-view");
+  const manageView = document.getElementById("skill-manage-view");
+  if (skillsPage && listView && manageView && listView.parentElement !== skillsPage) {
+    skillsPage.insertBefore(listView, document.getElementById("skill-extras"));
+    skillsPage.appendChild(manageView);
+  }
   if (rightTabs.includes("ext")) closeRightTab("ext"); // 内容回设置页，面板不留空壳标签
 }
 
@@ -11837,6 +12819,8 @@ document.getElementById("rail-search").onclick = () => {
 document.querySelectorAll("#sb-rail [data-rail-act]").forEach((btn) => {
   btn.onclick = () => {
     if (settingsOpen) backToChat();
+    // 接力走带副屏的入口；其余照旧打开右侧标签
+    if (btn.dataset.railAct === "relay") return openRelayWorkbench();
     openRightTab(btn.dataset.railAct);
   };
 });
@@ -13397,6 +14381,8 @@ async function initUiPrefs() {
     ? prefs.session_order : {};
   // 标签栏页签的拖动序：sid 数组（渲染前先填好，renderTabs 按它排）
   tabOrderPrefs = Array.isArray(prefs.tab_order) ? prefs.tab_order : [];
+  // 顶栏模型菜单里服务列的拖动序（服务名数组）：渲染前先填好，按它排
+  providerOrder = Array.isArray(prefs.provider_order) ? prefs.provider_order : [];
   // 快聊分组的锚点位置（渲染前先填好，refreshSessions/refreshProjects 按它插）
   quickPosPref = (prefs.quick_pos === "top" || prefs.quick_pos === "bottom")
     ? prefs.quick_pos
@@ -14147,15 +15133,15 @@ async function loadLanPanel() {
 }
 document.getElementById("lan-toggle").addEventListener("change", async (e) => {
   if (e.target.checked && !(await confirmModal(
-    "开启局域网访问？\n\n" +
+    "开启手机控制？\n\n" +
     "开启后，同一 Wi-Fi 下的设备凭令牌即可访问本机 SkySheep（完整界面与文件读写能力），" +
     "地址为 http 明文传输，令牌会出现在地址栏与二维码里。\n\n" +
     "只建议在可信网络使用；跨网络或不可信 Wi-Fi 请改用「远程访问（Tailscale）」。\n\n确定开启？",
-    { title: "开启局域网访问", okLabel: "开启", danger: true }
+    { title: "开启手机控制", okLabel: "开启", danger: true }
   ))) { e.target.checked = false; return; }
   try {
     const r = e.target.checked ? await request("lan.enable", {}) : await request("lan.disable");
-    addNotice(r.note || "局域网访问设置已更新");
+    addNotice(r.note || "手机控制设置已更新");
     loadLanPanel();
     needsRestart(); // LAN 开关要重启才生效：页顶横条提醒（可就地重启）
   } catch (err) {
@@ -14194,7 +15180,7 @@ async function loadTsPanel() {
       <div id="ts-qr" class="qr-box"></div>
       <div class="lan-note">手机扫码直达。二维码含访问令牌，<b>请勿截图外传</b>；
         只有你 Tailscale 账号里的设备能连进来，同一 Wi-Fi 下的陌生设备反而进不来。<br>
-        ${st.port ? "" : "⚠️ 当前端口随机：装 PWA（添加到主屏幕）前先在「局域网访问」卡片固定服务端口，否则重启后手机图标打开的是旧地址。<br>"}
+        ${st.port ? "" : "⚠️ 当前端口随机：装 PWA（添加到主屏幕）前先在「手机控制」卡片固定服务端口，否则重启后手机图标打开的是旧地址。<br>"}
         <button id="ts-copy" class="btn-ghost" style="margin-top:6px">⧉ 复制地址</button>
         <button id="ts-rotate" class="btn-ghost" style="margin-top:6px">⟳ 重新生成令牌</button>
         <span id="ts-copy-msg" class="io-msg"></span>

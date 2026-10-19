@@ -15,6 +15,7 @@ import sqlite3
 import tempfile
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -213,6 +214,92 @@ CREATE TABLE IF NOT EXISTS team_messages (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_team_messages_team ON team_messages(team_id, seq);
+-- 接力（无工具串行 A/B，运行期）：任务 / 节点 / 动作三张表。
+-- 运行纯文本模型调用，绝不创建普通会话、绝不执行工具；节点输入输出作为
+-- 明确任务记录落在这里，而不是伪装成用户会话消息（避免劫持用户会话）。
+-- relay_tasks.session_id 只是「发起接力的锚点会话」注记，用于归属展示；
+-- 接力不往该会话写消息，会话删除也不级联删接力历史（历史保留只读回放）。
+CREATE TABLE IF NOT EXISTS relay_tasks (
+    id TEXT PRIMARY KEY,
+    project_id INTEGER,
+    session_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'running',
+    current_node TEXT NOT NULL DEFAULT '',
+    active_slot TEXT NOT NULL DEFAULT '',
+    generation INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0,
+    instruction_revision INTEGER NOT NULL DEFAULT 0,
+    step INTEGER NOT NULL DEFAULT 0,
+    owner_instance TEXT NOT NULL DEFAULT '',
+    goal TEXT NOT NULL DEFAULT '',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    model_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    error_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_relay_tasks_project ON relay_tasks(project_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS relay_nodes (
+    task_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    slot TEXT NOT NULL DEFAULT '',
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    terminal INTEGER NOT NULL DEFAULT 0,
+    prompt TEXT NOT NULL DEFAULT '',
+    report TEXT NOT NULL DEFAULT '',
+    report_hash TEXT NOT NULL DEFAULT '',
+    report_id TEXT NOT NULL DEFAULT '',
+    attempt INTEGER NOT NULL DEFAULT 0,
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    error_json TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (task_id, node_id)
+);
+CREATE TABLE IF NOT EXISTS relay_actions (
+    task_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    PRIMARY KEY (task_id, request_id)
+);
+-- 接力（主副屏交替，2026-10-18 语义修订）：一个 pair 绑定两个**正常会话**
+-- （主屏 = 用户当前会话，副屏 = 独立的接力会话），两侧按 current_side 轮流
+-- 执行一整轮正常 Agent 对话（工具、权限门、检查点全部照常），这里只记录
+-- 总任务、两屏的常驻任务、轮次与每一轮的指令和产出。
+-- 与上面的无工具串行 A/B 三表并存：旧运行期保留，新界面走 pair。
+CREATE TABLE IF NOT EXISTS relay_pairs (
+    id TEXT PRIMARY KEY,
+    project_id INTEGER,
+    main_session_id TEXT NOT NULL,
+    peer_session_id TEXT NOT NULL,
+    goal TEXT NOT NULL DEFAULT '',
+    main_task TEXT NOT NULL DEFAULT '',
+    peer_task TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'idle',
+    current_side TEXT NOT NULL DEFAULT 'main',
+    turn_no INTEGER NOT NULL DEFAULT 0,
+    auto_alternate INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0,
+    error_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_relay_pairs_session ON relay_pairs(main_session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_relay_pairs_project ON relay_pairs(project_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS relay_turns (
+    pair_id TEXT NOT NULL,
+    turn_no INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    brief TEXT NOT NULL DEFAULT '',
+    output TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    started_at REAL NOT NULL,
+    finished_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (pair_id, turn_no)
+);
 """
 
 # 全文搜索索引：messages 的 FTS5 虚表（trigram 分词）。
@@ -266,10 +353,12 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 )
 
 # 数据库结构版本：SCHEMA 或 _COLUMN_MIGRATIONS 每次变更时 +1。
+# v2：新增 relay_tasks / relay_nodes / relay_actions（接力运行期三表）。
+# v3：新增 relay_pairs / relay_turns（主副屏交替接力）。
 # 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
 # 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
 # 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -424,6 +513,17 @@ def _stage_and_replace(src: Path, main: Path) -> None:
 # usage_stats 的 project_id 哨兵：None 在项目语义里表示快聊（合法过滤目标），
 # 因此「不过滤」用独立哨兵表示，避免与 NULL 项目混淆（安全审查 B14 的过滤参数）。
 _ALL = object()
+
+
+def _relay_json_load(text, default):
+    try:
+        value = json.loads(text) if text else default
+    except (ValueError, TypeError):
+        return default
+    return value if value is not None else default
+
+
+_RELAY_UNSET = object()
 
 
 class SessionStore:
@@ -1487,6 +1587,20 @@ class SessionStore:
         )
         row = await cur.fetchone()
         return row["m"] if row and row["m"] is not None else None
+
+    async def get_full_message_at(self, session_id: str, seq: int) -> Message | None:
+        """按会话与序号读取完整消息，供需验证持久化元数据的服务端操作使用。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT seq, content FROM messages WHERE session_id = ? AND seq = ?",
+            (session_id, seq),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        message = Message.model_validate_json(row["content"])
+        message.seq = row["seq"]
+        return message
 
     async def get_message_at(self, session_id: str, seq: int) -> dict | None:
         assert self._db
@@ -2958,6 +3072,605 @@ class SessionStore:
                 cand += 7 * 24 * 3600
             return cand
         return n + 24 * 3600
+
+    # ---- 接力（无工具串行 A/B，运行期） ----
+    #
+    # 独立短写事务：接力任务每次状态变更都要一次 CAS，且必须能在共享 aiosqlite
+    # 事务之外独立提交——不能借用 self._db，共享连接上的多语句事务会被其他协程
+    # 的语句穿插，破坏原子性。因此每条写路径开一条独立连接 BEGIN IMMEDIATE，
+    # 参数化 SQL，短事务提交后立刻关闭。**绝不在该事务内 await provider / 窗口 /
+    # 其他会自行 commit 的存储 API**（调用方保证）；事务内的读写全部是本地同步。
+
+    RELAY_TERMINAL_STATES: tuple[str, ...] = ("stopped", "completed")
+
+    @asynccontextmanager
+    async def _relay_txn(self):
+        conn = await aiosqlite.connect(self.path)
+        try:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            await conn.commit()
+        except BaseException:
+            try:
+                await conn.rollback()
+            except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                pass
+            raise
+        finally:
+            await conn.close()
+
+    @staticmethod
+    def _relay_task_row(row) -> dict:
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "session_id": row["session_id"],
+            "state": row["state"],
+            "current_node": row["current_node"],
+            "active_slot": row["active_slot"],
+            "generation": int(row["generation"]),
+            "revision": int(row["revision"]),
+            "instruction_revision": int(row["instruction_revision"]),
+            "step": int(row["step"]),
+            "owner_instance": row["owner_instance"],
+            "goal": row["goal"],
+            "config": _relay_json_load(row["config_json"], {}),
+            "model_snapshot": _relay_json_load(row["model_snapshot_json"], {}),
+            "error": _relay_json_load(row["error_json"], {}),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    @staticmethod
+    def _relay_node_row(row) -> dict:
+        return {
+            "task_id": row["task_id"],
+            "node_id": row["node_id"],
+            "slot": row["slot"],
+            "ordinal": int(row["ordinal"]),
+            "status": row["status"],
+            "terminal": bool(row["terminal"]),
+            "prompt": row["prompt"],
+            "report": row["report"],
+            "report_hash": row["report_hash"],
+            "report_id": row["report_id"],
+            "attempt": int(row["attempt"]),
+            "usage": _relay_json_load(row["usage_json"], {}),
+            "error": _relay_json_load(row["error_json"], {}),
+            "updated_at": row["updated_at"],
+        }
+
+    async def _relay_snapshot_conn(self, conn, task_id: str) -> dict | None:
+        cur = await conn.execute("SELECT * FROM relay_tasks WHERE id = ?", (task_id,))
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        cur = await conn.execute(
+            "SELECT * FROM relay_nodes WHERE task_id = ? ORDER BY ordinal", (task_id,)
+        )
+        nodes = [self._relay_node_row(r) for r in await cur.fetchall()]
+        return {"task": self._relay_task_row(row), "nodes": nodes}
+
+    @asynccontextmanager
+    async def _relay_read_txn(self):
+        """只读短事务：让多条 SELECT 落在同一读快照上（WAL 下不阻塞写）。
+
+        为什么不能借共享连接：共享 self._db 上其他协程随时在跑语句，在这里
+        BEGIN 会把别人的语句卷进本事务，且事务边界互相穿插。独立连接 +
+        BEGIN DEFERRED 是本地文件上最省的做法——只读事务关闭即回滚。
+        """
+        conn = await aiosqlite.connect(self.path)
+        try:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN DEFERRED")
+            yield conn
+        finally:
+            await conn.close()
+
+    async def relay_get(self, task_id: str) -> dict | None:
+        """读任务快照：task 行与 nodes 行必须来自同一读快照。
+
+        这份快照同时是调用方做 CAS 的 revision 基准（approve / pause /
+        resume 都拿它提交）。分两次独立 SELECT 会在「worker 提交节点状态
+        变更」的瞬间读到「旧 revision + 新 node」，调用方据此提交必然
+        relay_conflict，表现为用户点暂停被告知「任务已变化」，机器越忙
+        越容易命中。故走单读事务。
+        """
+        assert self._db
+        async with self._relay_read_txn() as conn:
+            return await self._relay_snapshot_conn(conn, task_id)
+
+    async def relay_get_task(self, task_id: str) -> dict | None:
+        assert self._db
+        cur = await self._db.execute("SELECT * FROM relay_tasks WHERE id = ?", (task_id,))
+        row = await cur.fetchone()
+        return self._relay_task_row(row) if row else None
+
+    async def relay_nodes(self, task_id: str) -> list[dict]:
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM relay_nodes WHERE task_id = ? ORDER BY ordinal", (task_id,)
+        )
+        return [self._relay_node_row(r) for r in await cur.fetchall()]
+
+    async def relay_list_tasks(self, project_id: int | None, limit: int = 20) -> list[dict]:
+        """项目内任务列表（新到旧）；project_id 为 None 表示快聊（无项目）任务。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM relay_tasks WHERE project_id IS ? ORDER BY created_at DESC LIMIT ?",
+            (project_id, int(limit)),
+        )
+        return [self._relay_task_row(r) for r in await cur.fetchall()]
+
+    async def relay_create(self, task: dict, nodes: list[dict]) -> dict:
+        """新建接力任务与其全部节点（一条独立事务；创建成功不代表授予执行权）。"""
+        now = time.time()
+        async with self._relay_txn() as conn:
+            await conn.execute(
+                "INSERT INTO relay_tasks (id, project_id, session_id, state, current_node,"
+                " active_slot, generation, revision, instruction_revision, step, owner_instance,"
+                " goal, config_json, model_snapshot_json, error_json, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    task["id"], task["project_id"], task.get("session_id", ""),
+                    task["state"], task["current_node"], task.get("active_slot", ""),
+                    int(task.get("generation", 0)), int(task.get("revision", 0)),
+                    int(task.get("instruction_revision", 0)), int(task.get("step", 0)),
+                    task.get("owner_instance", ""), task.get("goal", ""),
+                    json.dumps(task.get("config", {}), ensure_ascii=False),
+                    json.dumps(task.get("model_snapshot", {}), ensure_ascii=False),
+                    json.dumps(task.get("error", {}), ensure_ascii=False),
+                    now, now,
+                ),
+            )
+            for n in nodes:
+                await conn.execute(
+                    "INSERT INTO relay_nodes (task_id, node_id, slot, ordinal, status, terminal,"
+                    " prompt, report, report_hash, report_id, attempt, usage_json, error_json,"
+                    " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        task["id"], n["node_id"], n.get("slot", ""), int(n.get("ordinal", 0)),
+                        n.get("status", "pending"), 1 if n.get("terminal") else 0,
+                        n.get("prompt", ""), "", "", "", 0, "{}", "{}", now,
+                    ),
+                )
+        snap = await self.relay_get(task["id"])
+        assert snap is not None
+        return snap
+
+    async def relay_mutate(
+        self,
+        task_id: str,
+        *,
+        request_id: str | None = None,
+        action: str = "",
+        expect_states: tuple[str, ...] | None = None,
+        expected_revision: int | None = None,
+        new_state: str | None = None,
+        active_slot: str | None = None,
+        current_node: object = _RELAY_UNSET,
+        bump_generation: bool = False,
+        step_delta: int = 0,
+        error: object = _RELAY_UNSET,
+        node_id: str | None = None,
+        node_status: str | None = None,
+        node_report: str | None = None,
+        node_report_hash: str | None = None,
+        node_report_id: str | None = None,
+        node_attempt: int | None = None,
+        node_usage: dict | None = None,
+        node_error: object = _RELAY_UNSET,
+    ) -> dict | None:
+        """一次 CAS 状态变更（独立短事务）。
+
+        返回变更后的快照 dict（含 "replayed" 标记）；CAS 不通过（状态或 revision
+        不匹配，或任务不存在）返回 None。带 request_id 时先查 relay_actions：
+        重复 request_id 直接返回已存结果，不重复变更。
+        """
+        now = time.time()
+        async with self._relay_txn() as conn:
+            if request_id:
+                cur = await conn.execute(
+                    "SELECT result_json FROM relay_actions WHERE task_id = ? AND request_id = ?",
+                    (task_id, request_id),
+                )
+                row = await cur.fetchone()
+                if row is not None:
+                    stored = _relay_json_load(row["result_json"], None)
+                    if stored is not None:
+                        return {**stored, "replayed": True}
+            cur = await conn.execute("SELECT * FROM relay_tasks WHERE id = ?", (task_id,))
+            trow = await cur.fetchone()
+            if trow is None:
+                return None
+            if expect_states is not None and trow["state"] not in expect_states:
+                return None
+            if expected_revision is not None and int(trow["revision"]) != int(expected_revision):
+                return None
+            sets = ["revision = revision + 1", "updated_at = ?"]
+            params: list = [now]
+            if new_state is not None:
+                sets.append("state = ?")
+                params.append(new_state)
+            if active_slot is not None:
+                sets.append("active_slot = ?")
+                params.append(active_slot)
+            if current_node is not _RELAY_UNSET:
+                sets.append("current_node = ?")
+                params.append(str(current_node))
+            if bump_generation:
+                sets.append("generation = generation + 1")
+            if step_delta:
+                sets.append("step = step + ?")
+                params.append(int(step_delta))
+            if error is not _RELAY_UNSET:
+                sets.append("error_json = ?")
+                params.append(json.dumps(error or {}, ensure_ascii=False))
+            params.append(task_id)
+            await conn.execute(
+                f"UPDATE relay_tasks SET {', '.join(sets)} WHERE id = ?", tuple(params)
+            )
+            node_changed = False
+            if node_id is not None:
+                nsets = ["updated_at = ?"]
+                nparams: list = [now]
+                for col, val in (
+                    ("status", node_status), ("report", node_report),
+                    ("report_hash", node_report_hash), ("report_id", node_report_id),
+                ):
+                    if val is not None:
+                        nsets.append(f"{col} = ?")
+                        nparams.append(val)
+                if node_attempt is not None:
+                    nsets.append("attempt = ?")
+                    nparams.append(int(node_attempt))
+                if node_usage is not None:
+                    nsets.append("usage_json = ?")
+                    nparams.append(json.dumps(node_usage, ensure_ascii=False))
+                if node_error is not _RELAY_UNSET:
+                    nsets.append("error_json = ?")
+                    nparams.append(json.dumps(node_error or {}, ensure_ascii=False))
+                nparams.extend([task_id, node_id])
+                cur = await conn.execute(
+                    f"UPDATE relay_nodes SET {', '.join(nsets)}"
+                    " WHERE task_id = ? AND node_id = ?",
+                    tuple(nparams),
+                )
+                node_changed = cur.rowcount == 1
+            snap = await self._relay_snapshot_conn(conn, task_id)
+            if snap is None:
+                return None
+            if node_changed and node_id is not None:
+                snap["node"] = next(
+                    (n for n in snap["nodes"] if n["node_id"] == node_id), None
+                )
+            if request_id:
+                await conn.execute(
+                    "INSERT OR REPLACE INTO relay_actions"
+                    " (task_id, request_id, action, result_json, created_at) VALUES (?,?,?,?,?)",
+                    (task_id, request_id, action,
+                     json.dumps(snap, ensure_ascii=False), now),
+                )
+        return snap
+
+    async def relay_action_get(self, scope_id: str, request_id: str) -> dict | None:
+        """幂等键查询（scope_id 可为任务 id 或 "start:<project_id>" 这类伪作用域）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT result_json FROM relay_actions WHERE task_id = ? AND request_id = ?",
+            (scope_id, request_id),
+        )
+        row = await cur.fetchone()
+        return _relay_json_load(row["result_json"], None) if row else None
+
+    async def relay_action_put(
+        self, scope_id: str, request_id: str, action: str, result: dict
+    ) -> None:
+        """登记一次幂等控制结果（独立短事务）。"""
+        now = time.time()
+        async with self._relay_txn() as conn:
+            await conn.execute(
+                "INSERT OR REPLACE INTO relay_actions"
+                " (task_id, request_id, action, result_json, created_at) VALUES (?,?,?,?,?)",
+                (scope_id, request_id, action, json.dumps(result, ensure_ascii=False), now),
+            )
+
+    async def relay_mark_interrupted(self, owner_instance: str) -> int:
+        """启动恢复：把全部非终态任务标为 interrupted 并作废旧执行代际。
+
+        只由持有数据目录独占锁的后端调用（否则第二个后端会把别的进程正在跑的
+        活任务打断）。generation + 1 使所有旧 token 失效；不自动重放任何节点。
+        """
+        now = time.time()
+        async with self._relay_txn() as conn:
+            cur = await conn.execute(
+                "SELECT id FROM relay_tasks WHERE state NOT IN (?, ?)",
+                self.RELAY_TERMINAL_STATES,
+            )
+            ids = [r["id"] for r in await cur.fetchall()]
+            for tid in ids:
+                await conn.execute(
+                    "UPDATE relay_tasks SET state = 'interrupted', generation = generation + 1,"
+                    " revision = revision + 1, owner_instance = ?, error_json = ?, updated_at = ?"
+                    " WHERE id = ?",
+                    (owner_instance,
+                     json.dumps({"code": "relay_interrupted",
+                                 "message": "应用重启，接力任务已中断；请核对后再显式恢复"},
+                                ensure_ascii=False),
+                     now, tid),
+                )
+            # 主副屏接力：运行中的 pair 在重启后同样没有执行者，标为 interrupted，
+            # 不自动重放（重开会把一条指令再次发给模型，可能重复执行工具）
+            await conn.execute(
+                "UPDATE relay_pairs SET state = 'interrupted', revision = revision + 1,"
+                " error_json = ?, updated_at = ? WHERE state = 'running'",
+                (json.dumps({"code": "relay_interrupted",
+                             "message": "应用重启，接力已中断；确认后再点执行继续"},
+                            ensure_ascii=False), now),
+            )
+        return len(ids)
+
+    # ---- 接力（主副屏交替）：pair / turn ----
+    #
+    # 与上面的「无工具串行 A/B」并存。pair 绑定两个正常会话：主屏是用户当前
+    # 会话，副屏是独立的接力会话；每一轮通过 chat 管道跑完整 Agent（工具、
+    # 权限门、检查点照常），这里只记录任务与轮次，绝不自己执行模型调用。
+
+    @staticmethod
+    def _relay_pair_row(row) -> dict:
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "main_session_id": row["main_session_id"],
+            "peer_session_id": row["peer_session_id"],
+            "goal": row["goal"],
+            "main_task": row["main_task"],
+            "peer_task": row["peer_task"],
+            "state": row["state"],
+            "current_side": row["current_side"],
+            "turn_no": int(row["turn_no"]),
+            "auto_alternate": bool(row["auto_alternate"]),
+            "revision": int(row["revision"]),
+            "error": _relay_json_load(row["error_json"], {}),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    @staticmethod
+    def _relay_turn_row(row) -> dict:
+        return {
+            "pair_id": row["pair_id"],
+            "turn_no": int(row["turn_no"]),
+            "side": row["side"],
+            "status": row["status"],
+            "brief": row["brief"],
+            "output": row["output"],
+            "error": row["error"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+        }
+
+    async def _relay_pair_snapshot_conn(self, conn, pair_id: str) -> dict | None:
+        cur = await conn.execute("SELECT * FROM relay_pairs WHERE id = ?", (pair_id,))
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        cur = await conn.execute(
+            "SELECT * FROM relay_turns WHERE pair_id = ? ORDER BY turn_no", (pair_id,)
+        )
+        return {
+            "pair": self._relay_pair_row(row),
+            "turns": [self._relay_turn_row(r) for r in await cur.fetchall()],
+        }
+
+    async def relay_pair_snapshot(self, pair_id: str) -> dict | None:
+        assert self._db
+        return await self._relay_pair_snapshot_conn(self._db, pair_id)
+
+    async def relay_pair_get(self, pair_id: str) -> dict | None:
+        assert self._db
+        cur = await self._db.execute("SELECT * FROM relay_pairs WHERE id = ?", (pair_id,))
+        row = await cur.fetchone()
+        return self._relay_pair_row(row) if row else None
+
+    async def relay_pair_latest(self, main_session_id: str) -> dict | None:
+        """某个主屏会话最近一次的接力（新到旧；含已结束的，便于回看）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM relay_pairs WHERE main_session_id = ?"
+            " ORDER BY created_at DESC LIMIT 1",
+            (main_session_id,),
+        )
+        row = await cur.fetchone()
+        return self._relay_pair_row(row) if row else None
+
+    async def relay_pair_list(self, project_id: int | None, limit: int = 20) -> list[dict]:
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM relay_pairs WHERE project_id IS ? ORDER BY created_at DESC LIMIT ?",
+            (project_id, int(limit)),
+        )
+        return [self._relay_pair_row(r) for r in await cur.fetchall()]
+
+    async def relay_pair_create(self, pair: dict) -> dict:
+        now = time.time()
+        async with self._relay_txn() as conn:
+            await conn.execute(
+                "INSERT INTO relay_pairs (id, project_id, main_session_id, peer_session_id,"
+                " goal, main_task, peer_task, state, current_side, turn_no, auto_alternate,"
+                " revision, error_json, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    pair["id"], pair.get("project_id"), pair["main_session_id"],
+                    pair["peer_session_id"], pair.get("goal", ""),
+                    pair.get("main_task", ""), pair.get("peer_task", ""),
+                    pair.get("state", "idle"), pair.get("current_side", "main"),
+                    int(pair.get("turn_no", 0)),
+                    1 if pair.get("auto_alternate") else 0,
+                    int(pair.get("revision", 0)),
+                    json.dumps(pair.get("error") or {}, ensure_ascii=False), now, now,
+                ),
+            )
+            snap = await self._relay_pair_snapshot_conn(conn, pair["id"])
+        assert snap is not None
+        return snap
+
+    async def relay_pair_update(
+        self, pair_id: str, fields: dict,
+        *, expect_states: tuple[str, ...] | None = None,
+        expected_revision: int | None = None,
+        bump: bool = True,
+    ) -> dict | None:
+        """CAS 更新 pair（任务/状态/当前侧）；不匹配返回 None。
+
+        bump=False 用于只改内容的保存（总任务/两屏任务/自动交替）：这类编辑
+        不应该推进 revision——worker 开轮时按 revision 做 CAS，内容编辑把
+        revision 顶掉会让 worker 的开轮失败、任务停在 running 无人推进。
+        """
+        allowed = {
+            "goal", "main_task", "peer_task", "state", "current_side",
+            "turn_no", "auto_alternate", "error", "peer_session_id",
+        }
+        now = time.time()
+        async with self._relay_txn() as conn:
+            cur = await conn.execute("SELECT * FROM relay_pairs WHERE id = ?", (pair_id,))
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            if expect_states is not None and row["state"] not in expect_states:
+                return None
+            if expected_revision is not None and int(row["revision"]) != int(expected_revision):
+                return None
+            sets = ["updated_at = ?"]
+            params: list = [now]
+            if bump:
+                sets.insert(0, "revision = revision + 1")
+            for key, value in fields.items():
+                if key not in allowed:
+                    continue
+                if key == "error":
+                    sets.append("error_json = ?")
+                    params.append(json.dumps(value or {}, ensure_ascii=False))
+                elif key == "auto_alternate":
+                    sets.append("auto_alternate = ?")
+                    params.append(1 if value else 0)
+                elif key == "turn_no":
+                    sets.append("turn_no = ?")
+                    params.append(int(value))
+                else:
+                    sets.append(f"{key} = ?")
+                    params.append(value)
+            params.append(pair_id)
+            await conn.execute(
+                f"UPDATE relay_pairs SET {', '.join(sets)} WHERE id = ?", tuple(params)
+            )
+            snap = await self._relay_pair_snapshot_conn(conn, pair_id)
+        return snap
+
+    async def relay_pair_start_turn(
+        self, pair_id: str, side: str, brief: str, expected_revision: int
+    ) -> dict | None:
+        """开一轮：turn_no+1、写 running 的 turn、pair 置 running（同一事务）。
+
+        并发保护：只有 state=running 且 revision 与调用方读到的一致才开轮，
+        两个「执行」点击只有一个能落库。
+        """
+        now = time.time()
+        async with self._relay_txn() as conn:
+            cur = await conn.execute("SELECT * FROM relay_pairs WHERE id = ?", (pair_id,))
+            row = await cur.fetchone()
+            if row is None or row["state"] != "running":
+                return None
+            if int(row["revision"]) != int(expected_revision):
+                return None
+            turn_no = int(row["turn_no"]) + 1
+            await conn.execute(
+                "INSERT INTO relay_turns (pair_id, turn_no, side, status, brief, output,"
+                " error, started_at, finished_at) VALUES (?,?,?,?,?,'','',?,0)",
+                (pair_id, turn_no, side, "running", brief, now),
+            )
+            await conn.execute(
+                "UPDATE relay_pairs SET turn_no = ?, current_side = ?, revision = revision + 1,"
+                " updated_at = ? WHERE id = ?",
+                (turn_no, side, now, pair_id),
+            )
+            snap = await self._relay_pair_snapshot_conn(conn, pair_id)
+        return snap
+
+    async def relay_pair_finish_turn(
+        self, pair_id: str, turn_no: int, *,
+        status: str, output: str = "", error: str = "",
+        next_side: str | None = None, auto: bool = False,
+    ) -> dict | None:
+        """收一轮：写 turn 结果并推进 pair 状态。
+
+        done + auto → 保持 running（worker 接着跑对方）；
+        done → idle（等用户点下一次执行）；cancelled → idle；其余 → paused。
+        """
+        now = time.time()
+        async with self._relay_txn() as conn:
+            cur = await conn.execute("SELECT * FROM relay_pairs WHERE id = ?", (pair_id,))
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            await conn.execute(
+                "UPDATE relay_turns SET status = ?, output = ?, error = ?, finished_at = ?"
+                " WHERE pair_id = ? AND turn_no = ?",
+                (status, output or "", error or "", now, pair_id, turn_no),
+            )
+            if status == "done":
+                state = "running" if auto else "idle"
+                err: dict = {}
+            elif status == "cancelled":
+                state = "idle"
+                err = {"code": "relay_turn_cancelled", "message": "本轮已被中断"}
+            else:
+                state = "paused"
+                err = {"code": "relay_turn_error", "message": (error or "执行失败")[:500]}
+            sets = ["state = ?", "revision = revision + 1", "updated_at = ?", "error_json = ?"]
+            params: list = [state, now, json.dumps(err, ensure_ascii=False)]
+            if next_side:
+                sets.append("current_side = ?")
+                params.append(next_side)
+            params.append(pair_id)
+            await conn.execute(
+                f"UPDATE relay_pairs SET {', '.join(sets)} WHERE id = ?", tuple(params)
+            )
+            snap = await self._relay_pair_snapshot_conn(conn, pair_id)
+        return snap
+
+    async def relay_peer_session(
+        self, project_id: int | None, title: str, *, create: bool = True
+    ) -> Session | None:
+        """副屏会话：优先复用同项目里同名且还没有消息的空会话，否则新建。
+
+        点「接力」会先开副屏、后填任务；不复用的话每点一次就多一条空会话。
+        进程内串行化：侧栏点击与右侧面板加载可能同时各发一次 dual_open，
+        并发查询会各自查空、各建一条同名空会话，前端就开了两块副屏。
+        create=False 用于「面板自动加载」：只找现成的空副屏，没有就返回 None，
+        不能因为打开应用时右侧停在接力标签就凭空建一条会话。
+        """
+        lock = getattr(self, "_relay_peer_lock", None)
+        if lock is None:
+            lock = self._relay_peer_lock = asyncio.Lock()
+        async with lock:
+            assert self._db
+            cur = await self._db.execute(
+                "SELECT * FROM sessions WHERE project_id IS ? AND title = ? AND archived = 0"
+                " AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sessions.id)"
+                " ORDER BY updated_at DESC LIMIT 1",
+                (project_id, title),
+            )
+            row = await cur.fetchone()
+            if row is not None:
+                return Session(row["id"], row["project_id"], row["title"],
+                               row["created_at"], row["updated_at"])
+            if not create:
+                return None
+            return await self.create_session(project_id, title=title)
 
 
 def export_messages_text(messages: list[Message]) -> str:

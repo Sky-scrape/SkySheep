@@ -847,6 +847,12 @@ function renderSkillList(skills) {
   const sul = document.getElementById("settings-skill-list");
   if (!sul) return;
   sul.innerHTML = "";
+  // 空态要给出路：技能页是「从零开始」的常见落点，只留空白会让人以为加载失败
+  if (!skills.length) {
+    sul.innerHTML = '<li class="dim small">还没有安装任何技能。点上方「＋ 导入技能」装一个，' +
+      '或从「本机现存」把其它工具已装的技能导进来；下方的场景模板也能一键安装。</li>';
+    return;
+  }
   // 批量删除工具条：全选 / 删除所选。勾选状态不跨渲染保留（重渲染即清零）。
   let syncPicks = null;
   if (skills.length) {

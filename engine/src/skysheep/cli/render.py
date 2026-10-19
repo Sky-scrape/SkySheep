@@ -142,8 +142,8 @@ class Renderer:
             )
         elif k == "permission_resolved":
             label = {
-                "allow_once": "本次允许",
-                "allow_always": "本项目总是允许",
+                "allow_once": "允许一次",
+                "allow_always": "总是允许（本项目）",
                 "deny": "已拒绝",
                 "cancelled": "已取消（轮次已停止）",  # 收尾补发的清卡事件，非用户决策
             }.get(ev.decision, ev.decision)

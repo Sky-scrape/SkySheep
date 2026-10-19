@@ -2,7 +2,7 @@
 
 [![SkySheep](docs/images/banner.png)](https://sheepsky.com/)
 
-**An open-source desktop AI Agent workbench — roundtable, team, and adversarial multi-model collaboration over files, commands, and your computer.**
+**An open-source desktop AI Agent workbench — roundtable, team, and adversarial collaboration plus a separate relay workbench for files, commands, and your computer.**
 
 [![CI](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg)](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows--first-blue)
@@ -15,7 +15,7 @@
 
 </div>
 
-SkySheep is an open-source AI Agent workbench that runs entirely on your machine: a Python asyncio engine, a pywebview desktop shell, and a zero-build frontend. Hand it a task and it reads and writes files, runs commands, searches the web, operates your computer, and carries multi-step work through on its own. For the work that matters, you can put several models on it — roundtable answers in parallel and fuses the drafts, team mode splits the job by roles, adversarial review hunts for what's wrong — all three toggled right in the UI. Sensitive actions such as file writes and command execution still pop up a confirmation card by default, every round of file changes is automatically snapshotted for one-click rollback, and sessions, configuration, and API keys never leave your machine.
+SkySheep is an open-source AI Agent workbench that runs entirely on your machine: a Python asyncio engine, a pywebview desktop shell, and a zero-build frontend. Hand it a task and it reads and writes files, runs commands, searches the web, operates your computer, and carries multi-step work through on its own. For the work that matters, you can put several models on it — roundtable answers in parallel and fuses the drafts, team mode splits the job by roles, and adversarial review hunts for what's wrong. These three composer modes are joined by a separate right-side relay workbench that alternates work between the main and peer sessions. Sensitive actions such as file writes and command execution still pop up a confirmation card by default, every round of file changes is automatically snapshotted for one-click rollback, and sessions, configuration, and API keys never leave your machine.
 
 <div align="center">
 
@@ -43,7 +43,7 @@ Instead of a feature checklist, here are the jobs it actually takes on:
 
 ## 👥 Three ways to put several models on one task
 
-Multi-model here doesn't mean opening three windows and asking the same question. It means models take different parts of one task. All three modes toggle in the UI — no command-line plumbing — and only one can be active per turn, so they never fight each other.
+Multi-model here doesn't mean opening three windows and asking the same question. It means models take different parts of one task. Roundtable, team, and adversarial modes are selected in the composer, with only one active per turn. Relay is a separate right-side workbench that alternates full Agent turns between the main and peer sessions.
 
 **Roundtable — one question, several models answering.** Members answer independently in parallel; the chairman (your main conversation model) fuses every draft into a single final answer, so sharp criticism and safe conclusions both survive. Members can wear identity presets (critic, fact-checker, minimalist, pragmatist, and more), an optional debate round lets them read each other's drafts and revise once, and every draft is stored with the session for later review, citation, and follow-up. Seven mechanisms — deduplicating near-identical drafts, light context for members, and more — keep the token bill down.
 
@@ -52,6 +52,10 @@ Multi-model here doesn't mean opening three windows and asking the same question
 **Adversarial — a review pipeline built to find fault.** It doesn't aim for a pretty answer; it aims to dig problems out. Four roles relay in sequence — discover, investigate, recommend, judge — each seeing only its own slice. Finding a problem pays better than nodding along (asymmetric incentives), stage contexts are isolated from each other, and if one stage fails the pipeline degrades to a usable conclusion instead of collapsing. Fits plan reviews, code reviews, and contract risk — cases where you'd rather offend than agree.
 
 Two boundaries worth stating: roundtable and team go through their own permission gates, so sensitive actions still ask for confirmation; adversarial review is pure text reasoning and does not pass the permission gate. Multi-model really is more expensive than a single model — the controls already exist: the roundtable's seven token mechanisms, the team's global round cap and forced delivery on budget overrun, plus per-member model choice (cheap models as members, a strong model as chairman or director).
+
+### Separate workbench: Relay
+
+Relay is for research or plans that benefit from alternating between two screens. The main screen is the current session; the peer screen is an independent session opened for the relay. The sessions appear side by side in the same window and alternate their configured tasks. It is not a fourth composer mode: both sides are full Agent sessions, so tools, permission confirmations, and checkpoints still apply.
 
 ## 🔒 Why you can trust it with real work
 
@@ -80,7 +84,7 @@ An agent that edits files and runs commands must be survivable when things go wr
 
 The difference from terminal agents like Claude Code or OpenAI Codex CLI is not a feature-by-feature checklist but the product form — terminal tools excel at scripting and CI integration; SkySheep excels at being **visible, controllable, and reachable**:
 
-- **Multi-model as a native experience**: roundtable / team / adversarial modes toggle right in the UI — no command-line plumbing (see [the section above](#-three-ways-to-put-several-models-on-one-task))
+- **Multi-model as a native experience**: roundtable / team / adversarial modes are selected in the composer; Relay opens in the right-side panel from the sidebar (see [the section above](#-three-ways-to-put-several-models-on-one-task))
 - **Visible**: a full graphical interface, Chinese-first — conversation, confirmation cards, diff previews, file changes, terminal output, and review diagnostics all live in the UI instead of a scrolling terminal log
 - **Controllable**: permission gates, checkpoint rollback, workspace trust, and the command whitelist are all graphical — which file changed, who started it, and whether it can be undone, visible at a glance
 - **Reachable**: work continues while you're away — scheduled tasks and dependency pipelines run on their own, pushing daily digests and completion notices to Feishu / WeChat / a Webhook; the full UI opens in your phone's browser with remote approval cards
@@ -150,7 +154,7 @@ Nodes form a DAG pipeline: upstream nodes run in parallel, downstream starts aut
 
 **Models & conversation**
 
-- Built-in presets for ten cloud services (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / Zhipu / Kimi / Qwen / Xiaomi MiMo) plus local Ollama and custom relay endpoints; local inference services auto-detected; one-click model listing and context-window detection, plus a capability probe (streaming / tools / vision / reasoning) and a masked diagnostic report
+- Built-in presets for ten cloud services (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / Zhipu / Kimi / Qwen / Xiaomi MiMo) plus custom relay endpoints (including local inference services such as LM Studio); one-click model listing and context-window detection, plus a capability probe (streaming / tools / vision / reasoning) and a masked diagnostic report
 - Reasoning effort auto-tuned per task; thinking process streamed live and replayable in a collapsible view; a per-session turn-diagnostics panel in the review page breaks down each round's time (tool counts & slowest tool / permission waits / tokens)
 - Automatic context compaction (CJK-aware estimation, adjustable trigger ratio; manual `/compact` from the desktop input box — the CLI has no such command)
 - Daily token budget guardrails; a channel alert is pushed when usage crosses the 80% / 100% tiers (at most one per tier per day; alerts follow the channels — with no chat / Webhook channel enabled there is no alert, and the in-app guardrail still applies); usage dashboard by session / provider / model with cost estimation

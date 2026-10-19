@@ -46,7 +46,6 @@ from ..mcp import MCPManager, load_mcp_configs
 from ..messages import Message
 from ..models import Provider
 from ..models.factory import build_provider
-from ..models.probe import OLLAMA_BASE, probe_ollama
 from ..security.gate import Decision, HeadlessGate
 from ..security.trust import WorkspaceTrust
 from ..server.backend_parts._shared import SessionRuntime
@@ -284,7 +283,7 @@ class ChatApp:
     async def _ask_permission(self, ev) -> str:
         try:
             raw = await self.prompt.prompt_async(
-                "[y] 允许一次  [a] 本项目总是允许  [n] 拒绝 > "
+                "[y] 允许一次  [a] 总是允许（本项目）  [n] 拒绝 > "
             )
         except (EOFError, KeyboardInterrupt):
             return Decision.DENY
@@ -534,16 +533,7 @@ async def _models_cmd() -> None:
     for name, pc in cfg.providers.items():
         mark = "→" if name == cfg.default else " "
         print(f"  {mark} {name:<12} {pc.kind:<9} {pc.model}")
-    print()
-    print(f"本地 Ollama 探测（{OLLAMA_BASE}）:")
-    models = await probe_ollama()
-    if not models:
-        print("  (未检测到 Ollama 服务或模型；启动 ollama serve 并 ollama pull 模型后可用)")
-    for m in models:
-        print(f"  · {m}")
-    if models:
-        print()
-        print("接入方式：在 config.toml 的 [providers.ollama] 中把 model 改为上面的名称之一。")
+
 
 
 def _wait_port(port: int, timeout_s: float = 60.0) -> bool:
@@ -1276,7 +1266,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     sub.add_parser("sessions", help="list recent sessions")
-    sub.add_parser("models", help="list configured providers and local (Ollama) models")
+    sub.add_parser("models", help="list configured providers")
 
     args = parser.parse_args(argv)
     # 注意：Windows 上不强制 Selector 事件循环——MCP stdio 子进程需要 Proactor

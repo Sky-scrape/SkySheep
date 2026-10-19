@@ -412,7 +412,7 @@ def test_roundtable_default_members_from_config(home):
     (home_dir / "config.toml").write_text(
         """
 default = "p1"
-disabled_providers = ["ollama"]   # 排除内置预设（自带占位 Key）对默认策略的干扰
+disabled_providers = ["mimo"]   # 排除其余内置预设，只看显式配置的服务
 
 [roundtable]
 max_members = 1
@@ -531,12 +531,13 @@ async def test_roundtable_chair_follows_session_model(home, monkeypatch):
 
 
 def test_roundtable_without_members_errors_cleanly(home):
-    # 无显式成员且没有其他可用 provider（ollama 预设自带占位 Key，这里禁掉）
+    # 无显式成员且没有其他可用 provider（把所有内置预设禁掉，也不配自定义服务）
     # → 默认策略选不到成员，应给出明确错误而不是空跑
     home_dir = home / "home"
     home_dir.mkdir(parents=True, exist_ok=True)
     (home_dir / "config.toml").write_text(
-        'disabled_providers = ["ollama"]\n',
+        'disabled_providers = ["anthropic", "openai", "google", "xai", "minimax",\n'
+        '  "deepseek", "zhipu", "moonshot", "qwen", "mimo"]\n',
         encoding="utf-8",
     )
     with make_rt_client(home, [[[TextBlock(text="x")]]]) as client, \

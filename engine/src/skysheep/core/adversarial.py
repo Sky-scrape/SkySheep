@@ -455,6 +455,9 @@ def findings_meta(outcome: AdversarialOutcome) -> list[dict]:
             "severity": f.effective_severity,
             "location": f.location,
             "description": clip_draft(f.effective_description.strip()),
+            # 发现者给出的原始依据：转团队顾问工单时作为待核实证据，
+            # 不能让成员只看到结论而无从复核。
+            "evidence": clip_draft(f.evidence.strip()),
             "verdict": f.verdict,
             "reason": clip_draft(f.verdict_reason.strip()),
             "solution": clip_draft(f.solution.strip()),

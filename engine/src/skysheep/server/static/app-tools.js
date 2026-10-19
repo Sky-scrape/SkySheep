@@ -486,7 +486,7 @@ function subagentStatus(text, ok = true, which = "base") {
 
 function modelOptions(d, selectedProvider, selectedModel) {
   // 一个下拉同时选服务与模型：value = "provider|model"；空值 = 跟随主对话。
-  // 只列出配了 Key 的服务（Ollama 等本机服务出厂即视为已配）；当前选中的服务
+  // 只列出配了 Key 的服务（本机服务通常不校验 Key，同样视为已配）；当前选中的服务
   // 即使未配 Key 也保留并标注，避免已有配置被静默丢弃、用户却找不到原因
   const sel = `${(selectedProvider || "").trim()}|${(selectedModel || "").trim()}`;
   let html = `<option value="">跟随主对话</option>`;
@@ -607,6 +607,11 @@ function editBuiltinModal(d, type, ov) {
 function renderCustomSubagents(d) {
   const ul = document.getElementById("custom-subagent-list");
   ul.innerHTML = "";
+  if (!(d.custom || []).length) {
+    ul.innerHTML = '<li class="dim small">还没有自定义子代理。上面的内置六个已经能用；' +
+      '想要专门的角色（比如「只读代码审查」）时，点右上角「＋ 新建子代理」定制一个。</li>';
+    return;
+  }
   (d.custom || []).forEach((c) => {
     const li = document.createElement("li");
     li.className = "subagent-row";

@@ -274,11 +274,21 @@ class LifecycleMixin:
         self._base_agent.load_history([Message.system(self.compose_system())])
         return None
 
-    async def delete_session(self, session_id: str) -> dict:
-        # 归属校验：别的项目的会话不能凭枚举到的 id 删除（安全审查 B6）
-        await self._get_owned_session(session_id)
+    async def delete_session(self, session_id: str, *, local: bool = False) -> dict:
+        # 归属校验：远程客户端不能凭枚举到的 id 删除别的项目的会话（安全审查 B6）。
+        # 本机界面例外：侧栏分组视图本来就列出所有项目的会话（含接力自动创建的
+        # 副屏），点删除却报 session not found 只会让人以为删不掉；本地客户端按 id
+        # 直删，删除目标仍由用户自己点选。远程边界不放宽。
+        await self._get_owned_session(session_id, local=local)
         # 先停掉该会话正在跑的 turn，再清理 runtime，最后删数据
         self.cancel_run(session_id)
+        # 团队先摘出登记（此后不再接新事件），但 provider 的释放要等在飞的轮
+        # 真正收尾之后：取消是异步投递，立刻释放 httpx 连接池会让正在收尾的
+        # 成员轮/总管轮撞上「连接已关闭」，半截发言与落库都跟着丢。
+        orch = self._teams.pop(session_id, None)
+        self._teams_interrupted.pop(session_id, None)
+        if orch is not None or self._team_state_path is not None:
+            self._persist_team_state()
         rt = self.runtimes.pop(session_id, None)
         self._session_models.pop(session_id, None)  # 会话级模型覆盖随删除清掉
         self._session_efforts.pop(session_id, None)  # 会话级思考档位同款清理
@@ -314,6 +324,10 @@ class LifecycleMixin:
                 await asyncio.wait_for(asyncio.shield(pt), timeout=10)
             except Exception:  # noqa: BLE001 - 超时/任务异常都不拦删除本身
                 pass
+        # 在飞的轮与后台落库都已收尾（或超时兜底），此时才释放团队 provider：
+        # 避免取消投递后、收尾代码仍在使用连接池时把池关掉
+        if orch is not None:
+            self._release_team_providers(orch)
         await self.store.delete_session(session_id)
         # 检查点（改前文件快照）随会话一起清：会话没了，快照不该继续占磁盘
         await asyncio.to_thread(self.checkpoints.forget_session, session_id)

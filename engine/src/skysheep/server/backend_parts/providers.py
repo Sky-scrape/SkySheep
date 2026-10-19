@@ -10,6 +10,8 @@ webtools 的设置卡共用。
 
 from __future__ import annotations
 
+import re
+
 from ...config import (
     PRESETS,
     ConfigError,
@@ -29,6 +31,24 @@ from ...models.diagnostics import probe_capabilities, test_connection
 from ...models.probe import probe_context_limit, probe_provider_models
 from ...obs import info as obs_info
 from ...obs import warning as obs_warning
+
+# 多模态命名信号（各家惯例高度一致，用正则才能覆盖 vl2 / 4.5v 这类写法）
+_VISION_RE = re.compile(
+    r"vision|multimodal|omni|image|pixtral"
+    r"|-4o\b"        # gpt-4o / gpt-4o-mini
+    r"|vl-|vl\d"     # qwen2.5-vl-72b / internvl2
+    r"|\d+v\b",     # 智谱系：glm-4v / glm-4.5v
+    re.IGNORECASE,
+)
+
+
+def _model_looks_vision(name: str) -> bool:
+    """按模型名判断是否多模态。宁可漏判也不误判——误判会让前端把纯文本模型
+    标成能看图，用户贴图后收到上游报错，比没标更糟。
+
+    只认业界通用的命名信号：vision / vl / omni / 4o / image / pixtral / 数字v。
+    """
+    return bool(name) and _VISION_RE.search(name) is not None
 
 
 class ProvidersMixin:
@@ -64,6 +84,12 @@ class ProvidersMixin:
                 # 内置预设不可删除：删掉 config 里的条目它也仍会被合并回来
                 "is_preset": name in PRESETS,
                 "models": list(pc.models),
+                # 逐模型的视觉能力：详情页的启用列表要按模型打「视觉」标签。
+                # 服务的 supports_vision 只代表默认模型，一个服务里混着
+                # flash / flash-vision 这类不同能力的模型是常态
+                "vision_models": [
+                    m for m in pc.models if _model_looks_vision(m)
+                ] if pc.supports_vision else [],
                 "supports_reasoning": bool(pc.supports_reasoning),
                 "supports_vision": bool(pc.supports_vision),
                 "reasoning_effort": pc.reasoning_effort,

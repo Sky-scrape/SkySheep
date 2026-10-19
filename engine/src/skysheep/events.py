@@ -290,6 +290,12 @@ class TeamTaskUpdated(Event):
     type: str = "exec"  # exec（执行型，带工具）/ advisor（顾问型，只出意见）——工单级属性
     status: str = "pending"  # pending / in_progress / review / done / error（待办/进行中/待验收/完成/失败）
     redo: int = 0  # 被打回次数
+    # 工单详情与来源（对抗发现转单等外部内容）：随事件下发供前端展示，
+    # 同时作为成员的「未受信任参考资料」注入唤醒消息（不是执行指令）。
+    detail: str = ""
+    source: dict = Field(default_factory=dict)
+    # 是否允许编排器自动派发（对抗发现转来的顾问工单为 False：等用户显式派工）
+    auto_dispatch: bool = True
 
 
 class TeamFinished(Event):

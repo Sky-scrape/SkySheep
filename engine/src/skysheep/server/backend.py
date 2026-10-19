@@ -229,6 +229,10 @@ _MERGEABLE_DELTA_KINDS = (
 # 锁死等异常，不能拖着整个收尾无限等（排队轮还等着交棒）。
 _PERSIST_HARVEST_TIMEOUT = 10.0
 
+# team_active.json 里「已中断」记录的保留上限：团队运行时本就不跨进程恢复，
+# 这些记录只用于历史里的只读频道回放（凭 team_id 拉全量），按最近保留即可。
+_TEAM_INTERRUPTED_KEEP = 50
+
 
 class StreamDeltaMerger:
     """把连续的流式增量拼成批量事件，减少 WS 帧数。
@@ -1442,6 +1446,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     async def setup(self) -> None:
         self.cfg = load_config()
         self.store = self._store_override or await SessionStore(db_path()).connect()
+        # 接力运行期：取数据目录独占运行权；持锁者才把上次非终态任务标为中断。
+        # 第二个后端取不到锁时不做恢复，绝不打断别的进程正在跑的活任务。
+        await self._relay_startup()
         # 启动即确定「当前项目」：优先恢复上次用的（ui.json 的 active_project，
         # 0 = 明确的无项目态）；没有记住过（首次启动/老版本升级）才沿用启动目录。
         # 无项目态是合法状态：不建任何项目记录，快聊照常可用。
@@ -1756,6 +1763,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             tm.cancel_all()
         if self.mods is not None:
             self.mods.close()  # 收掉每个 Mod 的沙箱执行线程（quickjs runtime 不可并发）
+        # 接力：优先停止 worker 并等待收尾，再释放数据目录独占锁；最后才关 store
+        await self._relay_shutdown()
         if self.store and self._store_override is None:
             await self.store.close()
 
@@ -2881,6 +2890,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                         session_id=sid,
                     )
 
+        # 对抗报告的消息序号在落库时才回填（AssistantMessage 事件先于落库发出，
+        # 事件里 seq 为空）：收尾后从本轮新增消息里取回来随响应下发，前端据此
+        # 给「转为团队工单」按钮补上服务端校验用的锚点。
+        adv_seq = 0
+        if adv_meta is not None:
+            for m in reversed(new_msgs):
+                if m.role == "assistant" and m.adversarial and m.seq:
+                    adv_seq = int(m.seq)
+                    break
+
         # 运行中心终态收口：取消 → cancelled；异常 → failed（带可重试标记）；
         # 引擎级错误（ErrorEvent / TurnFinished stop_reason=error）→ failed；
         # 正常 → completed。团队/圆桌/对抗轮也按同一口径（meta.status 已带取消）。
@@ -3005,6 +3024,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "plan_mode": plan_mode,
             "roundtable": rt_meta,
             "adversarial": adv_meta,
+            "adversarial_seq": adv_seq,
             "team": tm_meta,
             "context_tokens": agent.used_context_tokens(),
             "context_limit": agent.context_limit_tokens,
@@ -3721,7 +3741,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """重启恢复：上次进程退出时还活动的团队一律标「已中断」（沿任务簿先例）。
 
         团队的运行时（成员 Agent / 频道 / 工单板）只在内存，不跨进程恢复；
-        这里只恢复「曾有个团队」的事实供 team.get 展示，状态文件当场清账。
+        这里恢复「曾有个团队」的事实（含 team_id，供只读频道回放）供 team.get
+        展示。已中断记录本身也持久保留（回写进同一文件的 interrupted 段）——
+        否则第二次重启后团队卡就失去 team_id，历史里的频道无法再全量回放。
+        记录按会话去重，最多保留 _TEAM_INTERRUPTED_KEEP 条。
         """
         if self._team_state_path is None or not self._team_state_path.exists():
             return
@@ -3729,6 +3752,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             data = json.loads(read_text_file(self._team_state_path).text)
         except (OSError, ValueError):
             return  # 坏文件按没有活动团队处理（write_text_atomic 保证不会有半个文件）
+        for item in (data or {}).get("interrupted") or []:
+            if not isinstance(item, dict) or not item.get("session_id"):
+                continue
+            rec = dict(item)
+            rec["status"] = "interrupted"
+            rec.setdefault("interrupt_reason", "应用重启，团队已中断")
+            self._teams_interrupted[str(item["session_id"])] = rec
         for item in (data or {}).get("teams") or []:
             if not isinstance(item, dict) or not item.get("session_id"):
                 continue
@@ -3737,18 +3767,26 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             rec["interrupt_reason"] = "应用重启，团队已中断"
             self._teams_interrupted[str(item["session_id"])] = rec
         if self._teams_interrupted:
-            self._persist_team_state()  # 已中断的不会再恢复：登记当场清账
+            self._persist_team_state()  # 活动段清账，中断段（含 team_id）回写保留
 
     def _persist_team_state(self) -> None:
-        """活动团队登记落盘（textio 原子写；失败不拖垮团队本身）。"""
+        """活动团队与已中断团队登记落盘（textio 原子写；失败不拖垮团队本身）。"""
         if self._team_state_path is None:
             return
-        data = {"teams": [
-            {"session_id": sid,
-             "roster": [m.name for m in orch.roster],
-             "director_mode": orch.director_mode}
-            for sid, orch in self._teams.items()
-        ]}
+        # 已中断记录按插入序保留最近的若干条（同一会话只留最新一份）
+        interrupted = list(self._teams_interrupted.values())[
+            -_TEAM_INTERRUPTED_KEEP:
+        ]
+        data = {
+            "teams": [
+                {"session_id": sid,
+                 "team_id": orch.team_id,
+                 "roster": [m.name for m in orch.roster],
+                 "director_mode": orch.director_mode}
+                for sid, orch in self._teams.items()
+            ],
+            "interrupted": interrupted,
+        }
         try:
             write_text_atomic(
                 self._team_state_path,
@@ -3784,6 +3822,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             self._release_team_providers(orch)
             self._teams_interrupted[sid] = {
                 "session_id": sid,
+                "team_id": orch.team_id,
                 "roster": [m.name for m in orch.roster],
                 "director_mode": orch.director_mode,
                 "status": "interrupted",
@@ -3791,6 +3830,19 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             }
         self._teams.clear()
         self._persist_team_state()
+
+    def _team_provider_context_limit(self, name: str) -> int:
+        """成员/总管模型的上下文窗口（按 provider 配置；0 = 编排器全局回退）。
+
+        ``_resolve_team_members`` 可能在 setup 之前被直接调用（测试/工具），
+        此时 cfg 尚未装载：回 0 让编排器用全局值，不要因缺配置炸掉解析。
+        """
+        cfg = self.cfg
+        if cfg is None:
+            return 0
+        pc = cfg.providers.get(name)
+        return pc.effective_context_limit(cfg.context_limit_tokens) if pc \
+            else cfg.context_limit_tokens
 
     def _resolve_team_members(self, members_params: list | None) -> list[TeamMemberSpec]:
         """解析团队队员：显式列表优先（可带 name / persona）；缺省沿圆桌的自动解析。
@@ -3816,6 +3868,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     provider_name=name,
                     model=model,
                     persona=str((m or {}).get("persona", "") or "").strip(),
+                    context_limit_tokens=self._team_provider_context_limit(name),
                 )
                 try:
                     provider = self._build_member_provider(name, model)
@@ -3830,6 +3883,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 specs.append(TeamMemberSpec(
                     provider_name=ms.provider_name, model=ms.model,
                     provider=ms.provider, build_error=ms.build_error,
+                    context_limit_tokens=self._team_provider_context_limit(ms.provider_name),
                 ))
         return specs
 
@@ -3917,7 +3971,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 raise TeamError(
                     'director_mode="ai" 需要指定担任总管的模型服务（director.provider）'
                 )
-            director = DirectorSpec(provider_name=d_provider, model=d_model)
+            director = DirectorSpec(
+                provider_name=d_provider, model=d_model,
+                context_limit_tokens=self._team_provider_context_limit(d_provider),
+            )
             try:
                 provider = self._build_member_provider(d_provider, d_model)
                 director.provider = provider
@@ -3943,6 +4000,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             director_mode=director_mode,
             director=director,
             budget_check=self._team_budget_check(),
+            context_limit_tokens=self.cfg.context_limit_tokens,
+            compaction_keep_recent=self.cfg.compaction_keep_recent,
+            compaction_trigger=self.cfg.compaction_trigger,
+            compaction_auto=self.cfg.compaction_auto,
             # 频道消息逐条落库（三期）：收队/重启后仍可按 team_id 回放全量
             message_sink=self._team_message_sink(sid),
         )
@@ -4264,6 +4325,52 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             deps=[str(d) for d in deps] if isinstance(deps, list) else None,
         )
         return {"task": task}
+
+    async def adversarial_to_team_tasks(self, params: dict) -> dict:
+        """从已落库对抗元数据创建受控顾问工单，不接受客户端提交发现正文。
+
+        来源校验只认服务端持久化的消息（seq + 当前会话归属）；发现的裁决必须
+        是 confirmed / partial，正文与依据一律从库内 meta 取，客户端只能选 id
+        与指派对象。只登记待办、不自动派工：自动循环在飞时整单拒绝，避免
+        「转单即被派发」绕过用户的显式操作。
+        """
+        sid, orch = self._team_for(params)
+        if self.store is None:
+            raise TeamError("当前会话存储不可用，无法验证对抗发现来源")
+        if orch.loop_running:
+            raise TeamError("总管正在自动推进中：请等本轮结束后再转为工单")
+        try:
+            seq = int(params.get("seq", 0))
+        except (TypeError, ValueError):
+            raise TeamError("无效的对抗消息序号") from None
+        if seq <= 0:
+            raise TeamError("缺少对抗消息序号")
+        message = await self.store.get_full_message_at(sid, seq)
+        if message is None or not message.adversarial:
+            raise TeamError("指定消息不是已保存的对抗审查结果")
+        meta = message.adversarial
+        if meta.get("status") != "done":
+            raise TeamError("仅已完成的对抗审查可以转为工单")
+        wanted = params.get("finding_ids")
+        ids = list(dict.fromkeys(str(v) for v in wanted if v)) if isinstance(wanted, list) else []
+        if not ids or len(ids) > 20:
+            raise TeamError("请选择 1 至 20 条发现")
+        selected = []
+        for finding in meta.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            fid = str(finding.get("id") or "")
+            if fid not in ids:
+                continue
+            verdict = finding.get("verdict")
+            if verdict not in ("confirmed", "partial"):
+                raise TeamError(f"发现 {fid} 尚未裁定成立或部分成立")
+            selected.append(finding)
+        if {str(f.get("id") or "") for f in selected} != set(ids):
+            raise TeamError("部分发现不属于该对抗结果")
+        assignee = str(params.get("assignee") or "")
+        tasks = await orch.tasks_from_adversarial(seq=seq, findings=selected, assignee=assignee)
+        return {"tasks": tasks}
 
     async def team_task_update(self, params: dict) -> dict:
         """team.task_update：工单状态流转（板只由用户变更，成员不自行改板）。
@@ -6505,6 +6612,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 self._release_team_providers(orch)
                 self._teams_interrupted[sid] = {
                     "session_id": sid,
+                    "team_id": orch.team_id,
                     "roster": [m.name for m in orch.roster],
                     "director_mode": orch.director_mode,
                     "status": "interrupted",
@@ -7529,7 +7637,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 {"name": name, "base_url": pc.base_url or "", "model": pc.model,
                  "env_key": pc.env_key or "", "kind": pc.kind,
                  "signup": PRESET_SIGNUP_URLS.get(name, "")}
-                for name, pc in PRESETS.items() if name != "ollama"
+                for name, pc in PRESETS.items()
             ],
             # 崩溃哨兵：上次运行没有正常退出（崩溃/强杀）时为 True，
             # 前端据此提示用户导出诊断包（见 server/app.py 的 lifespan）

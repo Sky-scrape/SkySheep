@@ -3,7 +3,7 @@
 从 backend.py 按职责注释整段搬入。方法体逐字保留，逻辑不变。
 覆盖四个相邻职责区：高级设置（主循环轮数 / 上下文上限 / 压缩保留 /
 目录限制 / 开机自启 / 热键）、钩子（设置页读写与测试）、本地目录与
-诊断包（系统集成入口）、首启激活（演示模式 / 本地 Ollama）。
+诊断包（系统集成入口）、首启激活（演示模式）。
 """
 
 from __future__ import annotations
@@ -27,9 +27,10 @@ from ...core.hooks import (
     load_raw_config,
     recent_hook_runs,
 )
+from .relay import RelaySettingsMixin
 
 
-class SystemMixin:
+class SystemMixin(RelaySettingsMixin):
     """高级设置、钩子设置与系统集成（目录/诊断/首启激活）。
 
     方法自 backend.py 按职责注释逐字搬入。
@@ -368,7 +369,7 @@ class SystemMixin:
             raise RuntimeError(f"打开链接失败：{e}") from None
         return {"url": target}
 
-    # ---- 首启激活：演示模式 / 本地 Ollama 检测（无 Key 用户的两条出路） ----
+    # ---- 首启激活：演示模式（无 Key 用户的免注册出路） ----
 
     async def demo_enable(self) -> dict:
         """开启「演示模式」：写入 kind=fake 的 demo 服务并切换过去（无需任何 Key）。
@@ -388,41 +389,6 @@ class SystemMixin:
         self.cfg = load_config()
         await self.switch_model("demo")
         return {"provider": "demo", "model": "演示模式"}
-
-    async def ollama_detect(self) -> dict:
-        """探测本机 Ollama（localhost:11434）是否在运行、有哪些模型。
-
-        首启向导用它把「装过 Ollama 的用户」从「必须去注册 API Key」的
-        路径里解救出来——检测到即提示一键启用，零 Key 零费用。
-        """
-        import httpx
-
-        try:
-            async with httpx.AsyncClient(timeout=1.5, trust_env=False) as client:
-                resp = await client.get("http://localhost:11434/api/tags")
-            resp.raise_for_status()
-            models = [
-                str(m.get("name") or "")
-                for m in (resp.json().get("models") or [])
-                if m.get("name")
-            ]
-        except Exception:  # noqa: BLE001 - 没装/没起/端口不通：都视为不可用
-            return {"available": False, "models": []}
-        return {"available": True, "models": models}
-
-    async def ollama_enable(self, model: str = "") -> dict:
-        """启用本地 Ollama：把检测到的模型写入 ollama 预设并切换过去。"""
-        if not model:
-            det = await self.ollama_detect()
-            models = det.get("models") or []
-            if not det.get("available") or not models:
-                raise RuntimeError("没有检测到本机 Ollama（或其中没有任何模型）。"
-                                   "请先安装并启动 Ollama，再回来点「检测」。")
-            model = models[0]
-        update_provider_in_config("ollama", model=model, set_default=True)
-        self.cfg = load_config()
-        await self.switch_model("ollama", model=model)
-        return {"provider": "ollama", "model": model}
 
     def export_diagnostics(self) -> dict:
         """打包诊断 zip（版本/环境/日志/打码后的配置）并打开所在目录。"""

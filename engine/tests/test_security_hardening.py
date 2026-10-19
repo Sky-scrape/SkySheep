@@ -178,10 +178,12 @@ async def test_store_get_session_for_project(store):
 
 
 def test_cross_project_session_ops_denied(home, monkeypatch):
-    """跨项目会话操作的全链路边界：管理面（activate/export/元数据/删除/移动）
-    本机跨项目也拒绝；交互面（chat.send）本机跨项目放行——分屏列是完整会话，
-    runtime 绑定会话所属项目干活（正向覆盖见 test_peek_cross_project）；
-    远程客户端一律拒绝（安全审查 B 族，报错不区分存在/无权）。"""
+    """跨项目会话操作的全链路边界：管理面（activate/export/元数据/移动）
+    本机跨项目也拒绝；删除是本机例外（侧栏分组视图列出所有项目，本机可直删，
+    见 test_local_delete_cross_project_session）；交互面（chat.send）本机跨项目
+    放行——分屏列是完整会话，runtime 绑定会话所属项目干活（正向覆盖见
+    test_peek_cross_project）；远程客户端一律拒绝（安全审查 B 族，报错不区分
+    存在/无权）。"""
     from skysheep.messages import TextBlock
 
     (home / "proj2").mkdir()
@@ -208,7 +210,6 @@ def test_cross_project_session_ops_denied(home, monkeypatch):
             ("session.archive", {"id": sid_b, "archived": True}),
             ("session.tags", {"id": sid_b, "tags": ["偷打标签"]}),
             ("session.move", {"id": sid_b, "project_id": None}),
-            ("session.delete", {"id": sid_b}),
         ]
         for i, (method, params) in enumerate(cases):
             ws.send_json({"id": f"c{i}", "method": method, "params": params})
@@ -244,6 +245,27 @@ def test_cross_project_session_ops_denied(home, monkeypatch):
             frame = rpc(f"r{i}", method, params)
             assert frame["ok"] is False, method
             assert "not found" in frame["error"], method
+
+
+async def test_local_delete_cross_project_session(home):
+    """本机界面可以直接删除其他项目的会话（接力副屏就是跨项目可见的场景）；
+    默认（远程口径）仍按项目归属拒绝，B6 边界不变。"""
+    from skysheep.server.backend import ServerBackend
+
+    be = ServerBackend(working_dir=home / "proj")
+    await be.setup()
+    try:
+        other = await be.store.get_or_create_project(str(home / "proj2"))
+        sid = (await be.store.create_session(other.id, title="接力 · 副屏")).id
+        await be.delete_session(sid, local=True)
+        assert await be.store.get_session(sid) is None
+
+        kept = (await be.store.create_session(other.id, title="别的项目")).id
+        with pytest.raises(RuntimeError, match="not found"):
+            await be.delete_session(kept)  # 默认 = 远程口径：跨项目拒绝
+        assert await be.store.get_session(kept) is not None
+    finally:
+        await be.shutdown()
 
 
 def test_refs_cross_project_local_injected_remote_filtered(home, monkeypatch):

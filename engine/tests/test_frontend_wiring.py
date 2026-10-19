@@ -236,29 +236,39 @@ def test_aux_model_menu_tabbed_like_main_menu():
 # ---------- 模型菜单限高滚动：主菜单与辅助面板的行列表包进 .mm-list ----------
 
 def test_model_menus_rows_scrollable():
-    """两处模型菜单（顶栏主菜单 + 辅助对话面板）的行列表都包进 .mm-list
-    固定高度滚动容器，页签/跟随行/管理入口不随列表滚走；CSS 侧固定高度。"""
+    """模型菜单的行列表都包进固定高度滚动容器：辅助面板沿用 .mm-list；
+    主菜单改为服务列（.mm-services）+ 模型弹层（.mm-models）各自滚动，
+    底部的「管理模型服务」入口固定在两列之外、不随列表滚走。"""
     js = read_app_bundle()
-    assert js.count('className = "mm-list"') == 2, "主菜单与辅助面板应各有一个 .mm-list 容器"
+    assert js.count('className = "mm-list"') == 1, "辅助面板仍用 .mm-list 滚动容器"
+    assert 'className = "mm-services"' in js, "主菜单服务列要自成滚动容器"
+    assert 'className = "mm-models"' in js, "主菜单模型弹层要自成滚动容器"
     css = read_static("app.css")
     i = css.index(".model-menu .mm-list")
     seg = css[i:i + 200]
     assert "height: min(" in seg and "overflow-y: auto" in seg
+    svc_seg = css[css.index("#model-menu .mm-services"):][:260]
+    assert "max-height: min(" in svc_seg and "overflow-y: auto" in svc_seg
+    mdl_seg = css[css.index("#model-menu .mm-models {"):][:360]
+    assert "max-height: min(" in mdl_seg and "overflow-y: auto" in mdl_seg
 
 
 # ---------- 模型菜单行样式统一：logo + 名称 + 厂家徽章右贴 ----------
 
 def test_model_menu_rows_logo_and_right_badge():
-    """两处菜单行统一「logo + 模型名 + 厂家徽章」：主菜单行也带服务 logo；
-    徽章右贴行尾（mm-item 占满菜单宽 + mm-model flex:1 顶开），★ 标记在徽章左侧。"""
+    """主菜单改为「服务列 + 模型弹层」两级：服务行带头像（providerAvatar(g.name)）
+    与名字；厂家徽章随服务名上移到服务列，模型行不再重复；★ 新会话默认标记
+    仍缀在模型行末尾。"""
     js = read_app_bundle()
     i = js.index("async function toggleModelMenu")
     seg = js[i:js.index("modelChip.style.cursor")]
-    assert "providerAvatar(row.name)" in seg, "主菜单行也应带服务 logo"
-    assert seg.index("mm-def") < seg.index("mm-prov"), "★ 新会话默认标记应在厂家徽章左侧（徽章最右）"
+    assert "providerAvatar(g.name)" in seg, "服务行应带服务头像"
+    assert "mm-svc-name" in seg, "服务行要有名字列"
+    assert "mm-def" in seg, "★ 新会话默认标记仍在模型行"
+    assert "mm-prov" not in seg, "厂家徽章已上移到服务列，模型行不再重复"
     css = read_static("app.css")
-    item_seg = css[css.index(".model-menu .mm-item {"):]
-    assert "width: 100%" in item_seg[:120], "mm-item 须占满菜单宽，徽章才右贴"
+    item_seg = css[css.index("#model-menu .mm-svc {"):]
+    assert "width: 100%" in item_seg[:140], "服务行须占满菜单宽，名字才能撑满"
 
 
 # ---------- 定时任务终态推送：cronModal 的「完成后推送到聊天渠道」开关接线 ----------
@@ -463,3 +473,195 @@ def test_danger_button_style_exists():
     css = read_static("app.css")
     assert ".btn-danger" in css and "var(--reg)" in css, "危险按钮样式缺失"
     assert ".confirm-text" in css, "确认弹窗正文样式缺失"
+
+
+# ---------- 团队空闲原因 / 继续推进 / 用量快照 ----------
+
+
+def test_team_idle_resume_and_usage_wiring():
+    js = read_app_bundle()
+    # 「继续推进」不存在的 sendMessage 已移除；走捕获标签的定向 chat.send
+    assert "sendMessage(" not in js
+    assert "function tcContinueTeam(card)" in js
+    assert "session_id: t.sid" in js
+    assert "t.readonly" in js, "只读分屏列不能继续推进团队"
+    # 空闲原因与继续按钮：仅 AI 总管、活动态、未终态时显示
+    assert "team.idle_reason" in js
+    assert "resumeBtn.hidden = !idle || card._finished || !active" in js
+    assert "tc-resume" in js
+    # 成员/总管 token 快照徽标
+    assert "function tcMemberTokens" in js
+    assert "tc-m-tokens" in js and ".director || {}" in js
+    # 终态/中断卡只读：交付/收队/接管/继续与工单按钮全部收起
+    i = js.index("function tcFinish(card, status, summary)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "ui.deliverBtn" in body and "ui.stopBtn" in body
+    assert "ui.takeoverBtn" in body and "ui.resumeBtn" in body
+    assert "ui.taskForm.hidden = true" in body
+    assert 'card.querySelectorAll(".tt-op")' in body
+
+
+# ---------- 对抗发现转团队工单：显式选择 / 来源锚点 / 只读保护 ----------
+
+
+def test_adversarial_to_team_transfer_wiring():
+    js = read_app_bundle()
+    assert "function advAttachTransfer(tab, meta, seq)" in js
+    assert "function advTransferActions(meta, seq, tab)" in js
+    # 真实消息序号在落库后随 chat.send 响应回来
+    assert "r.adversarial_seq" in js
+    assert "advAttachTransfer(tab, r.adversarial, r.adversarial_seq)" in js
+    # 新一轮对抗清掉旧元数据/旧 seq，避免按钮指向上一份报告
+    i = js.index("function beginAdversarial(roles)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "t.advMeta = null" in body and "t.advSeq = 0" in body
+    # advFinished 不提前挂按钮（事件里没有 seq）；只在拿到 seq 后挂一次
+    i = js.index("function advFinished(data)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "advTransferActions" not in body and "advMeta" not in body
+    # 逐条勾选、默认不选；空选拒绝；只读标签不挂入口
+    i = js.index("function advTransferActions(meta, seq, tab)")
+    body = js[i:js.index("\n}\n\nfunction advFinished", i)]
+    assert 'cb.type = "checkbox"' in body
+    assert "cb.checked = true" not in body
+    assert "请至少勾选一条成立或部分成立的发现" in body
+    assert "if (!tab || tab.readonly" in body
+    assert "adversarial.to_team_tasks" in body
+
+
+# ---------- 中断团队只读回放：roster 形状 / 同 team 匹配 / team.log 会话锚点 ----------
+
+
+def test_interrupted_team_replay_wiring():
+    js = read_app_bundle()
+    assert "function teamCardFor(t, teamId)" in js
+    # 中断记录里的 roster 是字符串数组，必须补成对象再建卡
+    assert 'typeof m === "object"' in js
+    assert 'team_id: teamId, session_id: t.sid' in js
+    # team.log 按当前标签的会话请求（后台/分屏标签不会被后端按活动会话误判）
+    assert 'session_id: (team && team.session_id) || (tab && tab.sid)' in js
+    # 同一 team 的卡只标一次中断，不重复建卡
+    assert "const card = teamCardFor(t, teamId);" in js
+    assert "if (t._teamInterruptedNoticed) return;" in js
+
+
+# ---------- 三种协作模式可视化：圆桌对照卡 / 团队看板 / 对抗流程条 ----------
+
+
+def test_roundtable_viewpoint_cards_wiring():
+    """圆桌升级为观点对照卡：最多三列、长文折叠可展开、窄屏单列堆叠；
+    现有协议没有结构化的共识/分歧数据，界面只并列展示，不凭空推断。"""
+    js = read_app_bundle()
+    # 列数上限三列；4 个及以上用 2 列（2×N），避免 3+1 孤行
+    assert 'grid.style.setProperty("--rt-cols", members.length >= 4 ? 2' in js
+    # 长草稿折叠/展开（阈值与 CSS max-height 240px 对齐）
+    assert "const RT_DRAFT_CLAMP_PX = 240" in js
+    assert "function rtSyncClamp(m)" in js
+    assert "function rtToggleDraft(m)" in js
+    assert "展开全文" in js and "aria-expanded" in js
+    assert "m.card.classList.remove(\"streaming\")" in js
+    # 阈值跟随 CSS 的 max-height（窄屏 200px 时不会漏掉「展开全文」）
+    assert "parseFloat(getComputedStyle(body).maxHeight)" in js
+    # 对照说明只陈述事实，不生成共识/分歧区块
+    assert "对照各方观点，展开全文查看完整回答" in js
+    assert "buildRtCardShell(members, subText, noteText)" in js
+    # 历史回放展开时重算折叠入口（折叠网格量不出高度）
+    assert "card._rtMembers" in js
+    assert "if (!folded && card._rtMembers) card._rtMembers.forEach(rtSyncClamp)" in js
+    css = read_static("app.css")
+    assert ".rt-member .rt-m-more" in css
+    assert ".rt-member.expanded .rt-m-body" in css
+    assert ".rt-member.streaming .rt-m-body" in css
+    assert ".roundtable .rt-note" in css
+    assert ".roundtable.folded .rt-note { display: none; }" in css
+
+
+def test_team_kanban_board_wiring():
+    """团队工单列表升级为待办/进行中/待验收看板：完成与失败折叠、
+    工单/频道视图切换，且既有派工/验收/打回/流式/回放接线全部保留。"""
+    js = read_app_bundle()
+    assert "const TEAM_TASK_COLUMNS = [" in js
+    for label in ("待办", "进行中", "待验收"):
+        assert f'label: "{label}"' in js
+    assert "function tcColumnKey(status)" in js
+    assert "function tcBuildKanban(card)" in js
+    assert "function tcRenderTasks(card, tasks)" in js
+    assert "function tcSyncBoardCounts(card)" in js
+    # 完成/失败进原生 details 折叠区；快照重画只清行，保留展开状态
+    assert '"tc-closed"' in js and '"tc-closed-list"' in js
+    assert "card._ui.closedList.innerHTML = \"\"" in js
+    assert "ui.closed.hidden = done + err === 0" in js
+    # 工单 / 频道两视图常驻，只切显隐；键盘方向键可切页签
+    assert "function tcBuildViewTabs(card)" in js
+    assert "function tcSetView(card, view)" in js
+    assert 'card.classList.toggle("view-channel", v === "channel")' in js
+    assert "e.key !== \"ArrowLeft\" && e.key !== \"ArrowRight\"" in js
+    assert "tcMarkChannelNew(card)" in js
+    # 既有操作/流式/历史回放不能因看板改造丢失
+    assert "const TEAM_TASK_OPS = {" in js
+    assert "function tcOpenStreamRow(card, data)" in js
+    assert "function tcFetchFullLog(tab, card, team)" in js
+    assert "tcSyncBoardCounts(card);" in js  # 单行增量更新后同步列计数
+    # 终态/中断回放卡只读：重画时也不再挂派工按钮
+    i = js.index("function buildTeamReplayCard(meta, tab)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "card._finished = true" in body
+    css = read_static("app.css")
+    assert ".teamcard .tc-kanban" in css
+    assert ".teamcard .tc-view-tab.is-active" in css
+    assert ".teamcard.view-channel .tc-channel { display: flex; }" in css
+    assert ".teamcard.view-channel .tc-board { display: none; }" in css
+    assert ".teamcard .tc-closed-summary" in css
+
+
+def test_adversarial_flow_stats_filter_wiring():
+    """对抗卡升级为四阶段流程条 + 裁决统计/筛选问题清单；证据仍可展开，
+    转团队工单入口不变。"""
+    js = read_app_bundle()
+    # 四阶段流程条（编号 + 名称 + 连接线），回放整条置 done
+    assert "function advBuildFlow()" in js
+    assert 'flow.className = "adv-steps"' in js
+    assert "adv-step-num" in js and "adv-step-link" in js
+    assert 'flow.querySelectorAll(".adv-step").forEach((el) => el.classList.add("done"))' in js
+    # 统计 + 筛选：裁决徽章按实时行数计数，严重度下拉
+    assert "const ADV_VERDICT_FILTERS = [" in js
+    assert "const ADV_SEVERITY_FILTERS = [" in js
+    assert "function advBuildToolbar(card)" in js
+    assert "function advUpdateStats(card)" in js
+    assert "function advApplyFilter(card)" in js
+    assert 'btn.setAttribute("aria-pressed"' in js
+    assert 'row.dataset.verdict = verdict || "pending"' in js
+    assert "row.dataset.severity = sev" in js
+    assert "没有符合筛选条件的问题" in js
+    # 证据/依据/建议仍是可展开区（details/summary），并按裁决更新
+    assert 'details.className = "adv-f-details"' in js
+    assert "function advApplyVerdict(data)" in js
+    i = js.index("function advApplyVerdict(data)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "body.querySelector(\".adv-f-reason\")" in body
+    assert "advApplyFilter(t.advCard)" in body
+    # 转团队工单入口仍在（回归 test_adversarial_to_team_transfer_wiring 之外再锚一次）
+    assert "function advTransferActions(meta, seq, tab)" in js
+    css = read_static("app.css")
+    assert ".adversarial .adv-steps" in css
+    assert ".adversarial .adv-stat" in css
+    assert ".adv-finding .adv-f-details" in css
+    assert '.adv-finding[data-verdict="confirmed"]' in css
+
+
+def test_coop_cards_share_theme_tokens_and_narrow_rules():
+    """三张协作卡共用同一套头部/状态/按钮节奏；新增样式只走主题变量，
+    不写死颜色（六套主题自动适配），窄屏统一降级、焦点可见。"""
+    css = read_static("app.css")
+    i = css.index("三种协作卡共用骨架")
+    seg = css[i:css.index("/* 上下文容量环形仪表", i)]
+    assert ".roundtable .rt-head" in seg and ".teamcard .tc-head" in seg
+    assert ".adversarial .rt-head" in seg
+    assert "var(--dur-fast)" in seg and "var(--blue)" in seg
+    # 该段不得出现硬编码色值（#hex / rgb() / hsl()），否则深色主题会失衡
+    import re
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", seg)
+    assert not re.search(r"\brgba?\(", seg)
+    assert not re.search(r"\bhsla?\(", seg)
+    assert "prefers-reduced-motion: reduce" in seg
+    assert "max-width: 760px" in seg and "max-width: 520px" in seg

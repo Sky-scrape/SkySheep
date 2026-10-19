@@ -342,6 +342,370 @@ def test_tab_drag_order_protocol(home):
     assert 'request("ui.save", { prefs: { tab_order: keys } })' in commit
 
 
+def test_provider_available_models_search(home):
+    """可用模型面板的搜索：检测到模型后才能用，按名字模糊匹配，命中数实时显示。
+
+    锁住：
+      ① 模板里带搜索框（avail-search / avail-filter / avail-count）；
+      ② 换服务时清空搜索词（不同服务命名差异大，继承上一次的过滤会误导）；
+      ③ 过滤逻辑是大小写不敏感的子串包含，无命中给可读提示；
+      ④ 搜索框在「收起」时不出现（收起就是不想看列表，再留搜索没意义）。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    prov = (STATIC_DIR / "app-providers.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+    # ① 模板：搜索行在可用模型列表上方，独立 id 便于状态同步
+    assert 'id="avail-search"' in prov
+    assert 'id="avail-filter"' in prov
+    assert 'id="avail-count"' in prov
+
+    # ② 换服务清空搜索词
+    open_fn = prov[prov.index("function openProviderDetail("):]
+    open_fn = open_fn[:open_fn.index("\n}\n")]
+    assert 'availFilter = ""' in open_fn
+
+    # ③ 过滤：toLowerCase + includes（大小写不敏感子串）
+    render = prov[prov.index("const renderAvailPanel = "):]
+    render = render[:render.index("const note = ")]
+    assert "availFilter.trim().toLowerCase()" in render
+    assert "m.toLowerCase().includes(filter)" in render
+    assert "没有匹配" in render
+
+    # ④ 收起时不出现搜索框
+    assert "searchBox.hidden = !all.length || availListCollapsed" in render
+
+    # 样式存在
+    assert ".avail-search" in css and ".as-count" in css
+
+
+def test_settings_search_indexes_nested_cards(home):
+    """设置搜索必须能索引到技能页的卡片。
+
+    技能页的卡片不直接挂在 .settings-page 下，而是包在 #skill-list-view /
+    #skill-manage-view 里（两视图互斥切换）。索引只扫 :scope > .settings-card
+    会把整页漏掉——搜「技能」「场景模板」都搜不到。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = read_app_bundle()
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # HTML 侧确认技能页确实是嵌套结构（否则这条测试失去意义）
+    skills = html[html.index('id="settings-page-skills"'):]
+    skills = skills[:skills.index('id="settings-page-subagents"')]
+    assert 'id="skill-list-view"' in skills
+    assert skills.index('id="skill-list-view"') < skills.index('id="skill-card"')
+
+    # JS 侧：索引要下探一层容器，不能只认直接子卡
+    idx = js[js.index("function settingsCardIndex("):]
+    idx = idx[:idx.index("function hideSettingsSearch(")]
+    assert 'querySelectorAll(":scope > div")' in idx, "要下探到中间层容器"
+    assert "containers.forEach" in idx
+
+    # 分组标题参与正文匹配（搜「多模型协作」能列出该组下的卡）
+    assert "groupTitle ? groupTitle" in idx
+
+
+def test_settings_page_group_titles(home):
+    """长设置页用分区标题做扫描锚点，避免卡片平铺失去方位感。
+
+    锁住四处分组（这几页卡片多，是「滚到中间不知道在哪」的高发区）；
+    标题必须出现在正确位置——错位比没有更糟（会让人以为分组是别的意思）。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    def page(id_):
+        start = html.index('id="settings-page-' + id_ + '"')
+        seg = html[start:]
+        nxt = seg.find('<section class="settings-page')
+        return seg[:nxt] if nxt > 0 else seg
+
+    # 技能与工具：四组，且「接力」在多模型协作组里
+    skills = page("skills")
+    for cap in ("技能扩展", "外部服务", "多模型协作", "工具"):
+        assert ">" + cap + "</div>" in skills, cap
+    assert skills.index("多模型协作") < skills.index('id="relay-config-card"')
+
+    # 界面与通知：外观 / 尺寸两分
+    ui = page("ui")
+    assert ">外观与通知</div>" in ui and ">尺寸与操作</div>" in ui
+    assert ui.index("外观与通知") < ui.index("尺寸与操作")
+
+    # 关于：应用 / 数据与迁移两分，「数据与隐私」属于后者
+    about = page("about")
+    assert ">应用</div>" in about and ">数据与迁移</div>" in about
+    assert about.index("数据与迁移") < about.index("数据与隐私")
+
+    # 分区标题样式存在
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert ".settings-group-title" in css
+
+
+def test_settings_nav_grouping(home):
+    """设置侧栏分组按「这是什么」排，不按新旧。
+
+    锁住三处易错位：
+      ① 远程控制归安全组（它决定谁能远程操作本机，不该混在普通能力里）；
+      ② Mods 归能力组（扩展能力，不是安全项）；
+      ③ 协作方式（圆桌 / 团队 / 对抗 / 接力）都在「技能与工具」页里，不单列导航项。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    nav = html[html.index('<ul id="settings-nav"'):]
+    nav = nav[:nav.index("</ul>")]
+
+    # ① 远程控制在安全组（安全标题之后）
+    assert nav.index('aria-hidden="true">安全') < nav.index('data-target="remote"')
+    # ② Mods 在能力组（日常标题之前）
+    assert nav.index('data-target="mods"') < nav.index('aria-hidden="true">日常')
+    # ③ 接力不再单列
+    assert 'data-target="relay"' not in nav
+    assert 'id="settings-page-relay"' not in html
+    # 接力说明卡搬进技能与工具页，且与对抗卡相邻
+    skills = html[html.index('id="settings-page-skills"'):]
+    skills = skills[:skills.index('id="settings-page-advanced"')]
+    assert 'id="relay-config-card"' in skills
+    assert skills.index('id="adversarial-form"') < skills.index('id="relay-config-card"')
+    assert 'id="relay-open-workbench"' in skills
+
+
+def test_side_nav_order_matches_rail(home):
+    """左栏展开态（.side-menu）与收起态（.rail-btn）的功能顺序必须一致。
+
+    两处是同一套动作的两个渲染面：顺序不一致会让「展开/收起侧栏」看起来
+    像功能被挪了位置。顺序按使用频次排，改一处必须同步改另一处。
+    """
+    import re
+
+    from skysheep.server.app import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    side = re.findall(r'class="nav-item" data-act="([^"]+)"', html)
+    rail = re.findall(r'class="rail-btn" data-rail-act="([^"]+)"', html)
+
+    assert side, "侧栏导航没找到"
+    assert side == rail, f"两处顺序不一致：侧栏={side} 收起栏={rail}"
+    # 频次顺序：任务与日程最前，配置类（MCP/Skills）沉底
+    assert side[0] == "todo" and side[1] == "agenda"
+    assert side[-1] == "ext"
+
+
+def test_temperature_presets(home):
+    """温度字段：常用档位胶囊 + 当前生效状态提示。
+
+    锁住：
+      ① 四档（0 / 0.3 / 0.7 / 1.2）+ 清空，点一下直接填值；
+      ② 清空 = 空串（保存时清除该项，回到「不发送该参数」）；
+      ③ 状态行区分「不发送，用服务默认」与具体值；
+      ④ 说明文字点明推理模型通常不接受此项（避免用户白调）。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    prov = (STATIC_DIR / "app-providers.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+    i = prov.index("function renderProviderDetail(")
+    seg = prov[i:i + 60000]
+
+    # ① 档位与清空
+    for v, label in (("0", "精确"), ("0.3", "保守"), ("0.7", "均衡"), ("1.2", "创意")):
+        assert f'data-v="{v}">{label}' in seg, label
+    assert 'data-v="">清空' in seg
+
+    # ② 点击写入 + 清空是空串
+    assert "tempInput.value = c.dataset.v;" in seg
+    assert 'c.dataset.v === ""' in seg or 'cv === ""' in seg
+
+    # ③ 状态文案
+    assert "当前：不发送，用服务默认" in seg
+    assert "当前：" in seg
+
+    # ④ 推理模型提示
+    assert "推理模型" in seg and "不接受此项" in seg
+
+    # 样式
+    assert ".temp-chip" in css and ".temp-presets" in css
+    assert ".temp-state.dim-state" in css and ".temp-state.on-state" in css
+
+
+def test_provider_detail_unsaved_guard(home):
+    """服务详情有未保存改动时，返回列表先确认。
+
+    锁住：
+      ① 渲染完采集快照；返回列表比对当前值，不同就弹确认；
+      ② Key 只比「有没有填」，不把明文存进快照；
+      ③ 只读 / 一次性输入字段（name、manual_model）不算改动；
+      ④ resetProviderView 清快照（内部路径不走确认）。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    src = (STATIC_DIR / "app-providers.js").read_text(encoding="utf-8")
+
+    # ① 快照采集 + 比对确认
+    assert "detailSnapshot = detailFormFingerprint(box)" in src
+    close_fn = src[src.index("async function closeProviderDetail("):]
+    close_fn = close_fn[:close_fn.index("function resetProviderView(")]
+    assert "detailFormFingerprint(box) !== detailSnapshot" in close_fn
+    assert "await confirmModal(" in close_fn and "danger: true" in close_fn
+
+    # ② Key 不存明文
+    fp = src[src.index("function detailFormFingerprint("):]
+    fp = fp[:fp.index("\n}\n")]
+    assert 'el.value.trim() ? "set" : ""' in fp, "Key 只记填没填"
+    assert "api_key" in fp
+
+    # ③ 只读字段不算改动
+    assert 'if (f === "name" || f === "manual_model") return;' in fp
+
+    # ④ 重置时清快照
+    reset = src[src.index("function resetProviderView("):]
+    reset = reset[:reset.index("\n}\n")]
+    assert "detailSnapshot = \"\"" in reset
+
+
+def test_vision_model_inference(home):
+    """按模型名推断多模态：只认通用命名信号，纯文本模型绝不误判。
+
+    误判的代价不对称——把纯文本模型标成能看图，用户贴图后才收到上游报错；
+    漏判只是少一个提示。所以规则必须保守。
+    """
+    from skysheep.server.backend_parts.providers import _model_looks_vision
+
+    # 该判成多模态的
+    for name in ("gpt-4o", "gpt-4o-mini", "qwen2.5-vl-72b-instruct",
+                 "glm-4.5v", "internvl2", "llava-vision", "pixtral-12b",
+                 "gemini-2.0-flash-omni"):
+        assert _model_looks_vision(name), name
+
+    # 绝不能误判的（纯文本模型，名字里带 vl/omni 之外的元素也不行）
+    for name in ("deepseek-chat", "deepseek-reasoner", "glm-5.3", "kimi-k3",
+                 "gpt-4-turbo", "claude-sonnet-4", "qwen3-max", "glm-5.3-flash"):
+        assert not _model_looks_vision(name), name
+
+    # 空值不炸
+    assert not _model_looks_vision("")
+    assert not _model_looks_vision(None)
+
+
+def test_add_provider_modal_search(home):
+    """添加自定义服务弹窗里，检测出的模型列表同样可搜索。
+
+    锁住：
+      ① 检测结果渲染函数按关键词过滤（大小写不敏感子串）；
+      ② 搜索只影响「显示哪些行」，勾选状态不因筛选丢失——全选/清空只作用于当前可见行；
+      ③ 无匹配给可读提示。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    src = (STATIC_DIR / "app-whitelist.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+    i = src.index("function addProviderModal(")
+    seg = src[i:src.index("function deleteProviderModal(")]
+    assert "const renderPickList = () =>" in seg
+    assert "m.toLowerCase().includes(f)" in seg
+    assert "没有匹配" in seg
+    # 全选/清空限定在 .ap-list 内（当前可见行），不波及被筛掉的行
+    assert 'pickWrap.querySelectorAll(".ap-list input")' in seg
+    assert ".ap-search" in css and ".ap-count" in css
+
+
+def test_provider_bulk_enable_and_delete_confirm(home):
+    """可用模型批量启用 + 已启用模型删除确认。
+
+    锁住：
+      ① 批量启用按钮只对「当前筛选结果里未启用」的模型生效，文案带数量；
+      ② 批量启用走单个接口循环，但只统一刷新一次（不 N 次 renderSettings）；
+      ③ 删除已启用模型前必须确认；唯一模型给更强的提示。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    prov = (STATIC_DIR / "app-providers.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+    # ① 按钮出现条件与文案
+    assert 'id="avail-bulk"' in prov
+    assert "const pending = shown.filter((m) => !enabled.has(m))" in prov
+    assert 'bulkBtn.classList.toggle("hidden", !pending.length' in prov
+    assert "＋ 全部启用" in prov
+
+    # ② 批量：循环调接口，循环外只刷新一次
+    bulk = prov[prov.index("const setEnabledModels = "):]
+    bulk = bulk[:bulk.index("const setEnabledModel = ")]
+    assert 'request("config.add_provider_model"' in bulk
+    assert bulk.count("await renderSettings()") == 1, "批量启用只能重绘一次"
+    assert "for (const [i, model] of list.entries())" in bulk, "逐个启用并给进度"
+
+    # ③ 删除确认
+    dele = prov[prov.index('li.querySelector(".em-del").onclick'):]
+    dele = dele[:dele.index("enabledBox.appendChild(li)")]
+    assert "await confirmModal(" in dele
+    assert "danger: true" in dele
+    assert "唯一的模型" in dele, "删光该服务的模型要单独提示"
+
+    assert ".avail-search .as-bulk" in css
+
+
+def test_provider_drag_order_protocol(home):
+    """顶栏模型菜单的服务列拖动排序：provider_order 偏好 + 拖动 + 弹层模型列表。
+
+    锁住：
+      ① 后端 ui.save 收 provider_order（服务名字符串数组，去重封顶 100），
+         且读取面同样清洗后回传给前端；
+      ② 菜单只列已配置 Key 的服务，未配 Key 的整组不进清单；
+      ③ 服务行可拖动，落位后把完整顺序写回偏好；
+      ④ 模型列表改为点服务行才弹出的浮层（同一时间只开一个），
+         弹层不被 .session-menu 的 overflow 裁掉。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    js = read_app_bundle()
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    backend = (STATIC_DIR.parent / "backend_parts" / "preferences.py").read_text(encoding="utf-8")
+
+    # ① 后端：写入白名单 + 清洗 + 读取回传
+    assert '"provider_order"' in backend
+    writer = backend[backend.index("async def _write_ui_prefs("):]
+    branch = writer[writer.index('if key == "provider_order"'):]
+    branch = branch[:branch.index("\n                continue")]
+    assert "len(seen_p) >= 100" in branch, "服务序要封顶，防异常超大载荷"
+    reader = backend[backend.index("def _read_ui_prefs("):]
+    reader = reader[:reader.index("def notify_enabled")]
+    assert 'data.get("provider_order")' in reader, "读取面也要回传，否则下次打开丢序"
+
+    # ② 只列已配置 Key 的服务
+    menu = js[js.index("async function toggleModelMenu("):]
+    menu = menu[:menu.index("modelChip.style.cursor")]
+    assert "if (!r.hasKey) return;" in menu, "没配 Key 的服务切过去必然失败，不进清单"
+
+    # ③ 拖动接线 + 落盘完整顺序
+    assert "b.draggable = true" in menu
+    assert "providerOrder = svcList.map((x) => x.name)" in menu
+    assert "saveUiPrefs({ provider_order: providerOrder })" in menu
+    assert "#model-menu .mm-svc.dragging" in css and "#model-menu .mm-svc.drag-over" in css
+
+    # ④ 模型列表是点服务行弹出的浮层，且菜单不能裁掉它
+    assert "const openPopup = (btn, group) =>" in menu
+    assert "modelPopup = { el, btn }" in menu
+    assert "#model-menu { width: 260px; overflow: visible; }" in css, \
+        "session-menu 默认 overflow:hidden 会把右侧浮层裁掉"
+    assert "#model-menu .mm-models {" in css
+    assert "position: absolute" in css.split("#model-menu .mm-models {")[1].split("}")[0]
+
+    # ⑤ 日常细节：初次打开自动展开当前服务、当前服务行有竖条、Esc 逐层退
+    assert 'paint("current")' in menu, "打开菜单应直接展开当前模型所在服务"
+    assert 'b.className = "mm-svc" + (isCur ? " current" : "")' in menu
+    assert "#model-menu .mm-svc.current::before" in css
+    assert "if (modelPopup) {" in js, "Esc 应先收弹层再关菜单"
+    assert "closePopup(); // 行要挪位置" in menu, "拖动前要收起弹层，避免锚点失效飘位"
+
+
 def test_tab_takes_over_blank_placeholder(home):
     """打开真会话时要接管已有空标签，不能旁边再叠一张。
 
@@ -1043,7 +1407,7 @@ def test_right_tab_restore_loads_data_on_startup(home):
     # ① 一张表覆盖所有需要拉数据的标签（含日程，正是漏掉的那个）
     table = js[js.index("const RIGHT_TAB_LOADERS = {"):]
     table = table[:table.index("};\n")]
-    for tab in ("files", "tasks", "agenda", "ptasks", "cron", "pipeline", "review", "memory", "ext"):
+    for tab in ("files", "tasks", "agenda", "ptasks", "cron", "pipeline", "review", "memory", "ext", "relay"):
         assert f"\n  {tab}:" in table, f"RIGHT_TAB_LOADERS 缺标签 {tab}"
     assert "function loadRightTab(" in js
 
@@ -1085,12 +1449,12 @@ def test_right_panel_merged_tabs_keep_every_view_reachable(home):
     js = read_app_bundle()
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
-    # ① 菜单里只剩 10 格（含记忆地图），合并掉的四个不再作为标签出现
+    # ① 菜单里包含接力工作台；任务/自动化内部段仍不单独占菜单格
     meta = js[js.index("const TAB_META = {"):]
     meta = meta[:meta.index("\n};")]
     tab_ids = re.findall(r"^  (\w+): \{", meta, re.M)
-    assert tab_ids == ["aux", "review", "browser", "files", "tasks", "agenda",
-                       "auto", "memory", "map", "ext"], f"标签集合变了：{tab_ids}"
+    assert tab_ids == ["aux", "review", "files", "browser", "tasks", "agenda",
+                       "auto", "relay", "memory", "map", "ext"], f"标签集合变了：{tab_ids}"
     for old in ("todo", "ptasks", "cron", "pipeline"):
         assert f"\n  {old}: {{" not in meta, f"{old} 已并入容器标签，不该再单独占一格菜单"
 
@@ -1100,7 +1464,8 @@ def test_right_panel_merged_tabs_keep_every_view_reachable(home):
     views = views[:views.index("};")]
     merged = dict(re.findall(r'(\w+): \[([^\]]*)\]', views))
     merged = {k: re.findall(r'"(\w+)"', v) for k, v in merged.items()}
-    assert merged == {"tasks": ["tasks", "todo", "ptasks"], "auto": ["cron", "pipeline"]}, merged
+    assert merged == {"tasks": ["tasks", "todo", "ptasks"], "auto": ["cron", "pipeline"],
+                      "ext": ["mcp", "skills"]}, merged
     tab_of = js[js.index("const TAB_OF = {"):]
     tab_of = tab_of[:tab_of.index("};")]
     tab_of = dict(re.findall(r'(\w+): "(\w+)"', tab_of))
@@ -1291,7 +1656,7 @@ def test_remote_project_fixed_entry(home):
     # 经典视图：root_path 为空即固定项目；不切项目、不显示删除钮
     assert "const remote = !p.root_path;" in js
     assert 'if (remote) li.classList.add("remote-fixed")' in js
-    assert "「远程连接」还没有对话" in js, "没有对话时给出去渠道发一条的提示"
+    assert "「远程连接」还没有会话" in js, "没有对话时给出去渠道发一条的提示"
     assert "openTabForSession(list[0].id" in js, "点击打开名下最近的会话"
     # 点击处理里固定项目只陈列其会话，而不是切换引擎工作目录（锚在 refreshProjects 区域内）
     seg = js[js.index("async function refreshProjects("):]

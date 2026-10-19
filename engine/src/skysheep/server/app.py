@@ -722,7 +722,7 @@ async def _h_session_image(backend: ServerBackend, params: dict, emit, local: bo
 
 
 async def _h_session_delete(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.delete_session(str(params.get("id", "")))
+    return await backend.delete_session(str(params.get("id", "")), local=local)
 
 
 async def _h_session_project_path(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -1254,6 +1254,62 @@ async def _h_storage_cleanup(backend: ServerBackend, params: dict, emit, local: 
     return await backend.storage_cleanup(params)
 
 
+async def _h_relaycfg_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.relay_settings()
+
+
+async def _h_relaycfg_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.save_relay_settings(params)
+
+
+async def _h_relay_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_list(params)
+
+
+async def _h_relay_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_get(params)
+
+
+async def _h_relay_start(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_start(params)
+
+
+async def _h_relay_approve(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_approve(params)
+
+
+async def _h_relay_pause(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_pause(params)
+
+
+async def _h_relay_resume(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_resume(params)
+
+
+async def _h_relay_stop(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_stop(params)
+
+
+async def _h_relay_dual_open(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_dual_open(params)
+
+
+async def _h_relay_dual_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_dual_save(params)
+
+
+async def _h_relay_dual_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_dual_get(params)
+
+
+async def _h_relay_dual_run(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_dual_run(params)
+
+
+async def _h_relay_dual_stop(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.relay_dual_stop(params)
+
+
 async def _h_hooks_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.hooks_settings()
 
@@ -1359,14 +1415,6 @@ async def _h_demo_enable(backend: ServerBackend, params: dict, emit, local: bool
     return await backend.demo_enable()
 
 
-async def _h_ollama_detect(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.ollama_detect()
-
-
-async def _h_ollama_enable(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.ollama_enable(str(params.get("model") or ""))
-
-
 async def _h_websearch_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.websearch_detail()
 
@@ -1417,6 +1465,10 @@ async def _h_team_get(backend: ServerBackend, params: dict, emit, local: bool) -
 
 async def _h_team_task_add(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.team_task_add(_team_scoped_params(backend, params, local))
+
+
+async def _h_adversarial_to_team_tasks(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.adversarial_to_team_tasks(_team_scoped_params(backend, params, local))
 
 
 async def _h_team_task_update(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -2275,6 +2327,24 @@ _WS_METHODS: dict[str, _WsMethod] = {
         _h_storage_cleanup, local_only=True,
         local_error="存储清理只能在桌面端本机执行",
     ),
+    "relaycfg.get": _WsMethod(_h_relaycfg_get, local_only=True),
+    "relaycfg.save": _WsMethod(_h_relaycfg_save, local_only=True),
+    # 接力运行期（无工具串行 A/B）：本机 RPC；不创建会话、不执行工具、
+    # 不启动 Agent。远程连接不能借 task_id 读取或推进其他项目的任务。
+    "relay.list": _WsMethod(_h_relay_list, local_only=True),
+    "relay.get": _WsMethod(_h_relay_get, local_only=True),
+    "relay.start": _WsMethod(_h_relay_start, local_only=True),
+    "relay.approve": _WsMethod(_h_relay_approve, local_only=True),
+    "relay.pause": _WsMethod(_h_relay_pause, local_only=True),
+    "relay.resume": _WsMethod(_h_relay_resume, local_only=True),
+    "relay.stop": _WsMethod(_h_relay_stop, local_only=True),
+    # 接力（主副屏交替）：主屏为当前会话、副屏为绑定会话，每轮走完整 chat
+    # 管道（工具/权限门照常）。本机 RPC，远程不能看到或推进本机接力。
+    "relay.dual_open": _WsMethod(_h_relay_dual_open, local_only=True),
+    "relay.dual_save": _WsMethod(_h_relay_dual_save, local_only=True),
+    "relay.dual_get": _WsMethod(_h_relay_dual_get, local_only=True),
+    "relay.dual_run": _WsMethod(_h_relay_dual_run, local_only=True),
+    "relay.dual_stop": _WsMethod(_h_relay_dual_stop, local_only=True),
     "hooks.get": _WsMethod(_h_hooks_get),
     "hooks.save": _WsMethod(_h_hooks_save, local_only=True),
     "hooks.test": _WsMethod(_h_hooks_test, local_only=True, local_error="钩子测试只能在本机界面上操作"),
@@ -2302,8 +2372,6 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "remote.enable": _WsMethod(_h_remote_enable, local_only=True),
     "remote.disable": _WsMethod(_h_remote_disable),
     "demo.enable": _WsMethod(_h_demo_enable, local_only=True),
-    "ollama.detect": _WsMethod(_h_ollama_detect),
-    "ollama.enable": _WsMethod(_h_ollama_enable, local_only=True),
     "websearch.get": _WsMethod(_h_websearch_get),
     "websearch.save": _WsMethod(_h_websearch_save, local_only=True),
     "roundtable.get": _WsMethod(_h_roundtable_get),
@@ -2320,6 +2388,7 @@ _WS_METHODS: dict[str, _WsMethod] = {
     # （仿 roundtable.get/save）
     "team.get": _WsMethod(_h_team_get),
     "team.task_add": _WsMethod(_h_team_task_add),
+    "adversarial.to_team_tasks": _WsMethod(_h_adversarial_to_team_tasks),
     "team.task_update": _WsMethod(_h_team_task_update),
     "team.stop": _WsMethod(_h_team_stop),
     "team.deliver": _WsMethod(_h_team_deliver),

@@ -10,6 +10,7 @@ let bootSnap = null;      // 最近一次 boot 快照（模板里要用工作目
 let availCacheModels = null; // 详情页探测到的可用模型（切视图不丢）
 let availNoteState = null;   // 可用模型面板的提示状态
 let availListCollapsed = false; // 检测到的模型列表是否收起（上百行时给页面让地方）
+let availFilter = "";            // 可用模型列表的搜索词（按模型名模糊匹配；换服务时清空）
 let detailOpen = false;   // 是否正停在某个服务的配置页
 let detailName = "";
 let providerTab = "preset"; // 列表页签：preset=默认（内置预设）、custom=自定义（用户新增）
@@ -31,7 +32,6 @@ const PROVIDER_META = {
   moonshot: { logo: "logos/moonshot.svg", color: "#16191e" },
   qwen: { logo: "logos/qwen.svg", color: "#615ced" },
   mimo: { logo: "logos/mimo.svg", color: "#ff6900" },
-  ollama: { logo: "logos/ollama.svg", color: "#3f3f46" },
 };
 
 function providerAvatar(name) {
@@ -82,7 +82,7 @@ function providerRow([name, p]) {
       <span class="svc-name">${escapeHtml(providerLabel(name, p))}<span class="svc-key${p.has_key ? "" : " svc-warn"}">· ${escapeHtml(keyState)}</span>${badges}</span>
       <span class="svc-sub">${escapeHtml(p.kind)} · ${escapeHtml(p.model || "未设置模型")}</span>
     </span>
-    <button class="svc-del" type="button" title="${p.is_preset ? "停用该服务（可恢复）" : "删除该服务"}">✕</button>
+    <button class="svc-del" type="button" title="${p.is_preset ? "停用该服务（可在下方「已停用的服务」里恢复）" : "删除该服务（配置从 config.toml 移除）"}">✕</button>
     <button class="svc-go" type="button" title="进入配置">›</button>`;
   // 整行可点：进该服务的配置页
   row.onclick = () => openProviderDetail(name);
@@ -166,6 +166,7 @@ function openProviderDetail(name) {
   detailOpen = true;
   detailName = name;
   availListCollapsed = false; // 每次进详情默认展开
+  availFilter = "";            // 换服务时清空搜索：不同服务的模型清单没有继承关系
   document.getElementById("provider-list-view").hidden = true;
   document.getElementById("provider-detail").hidden = false;
   document.getElementById("btn-add-provider").hidden = true;
@@ -173,7 +174,20 @@ function openProviderDetail(name) {
   renderProviderDetail(name);
 }
 
-function closeProviderDetail() {
+// 返回列表：有未保存改动时先确认。异步确认走不了同步函数签名，
+// 所以这里返回 Promise，调用方（按钮 onclick）不关心返回值。
+async function closeProviderDetail() {
+  if (detailOpen) {
+    const box = document.getElementById("provider-detail-body");
+    if (box && detailSnapshot && detailFormFingerprint(box) !== detailSnapshot) {
+      const ok = await confirmModal(
+        "当前服务有没保存的改动，返回列表会丢弃它们。确定返回？",
+        { title: "有未保存的改动", okLabel: "丢弃并返回", danger: true }
+      );
+      if (!ok) return;
+    }
+  }
+  detailSnapshot = "";
   resetProviderView();
   renderProviderList();
 }
@@ -182,6 +196,7 @@ function closeProviderDetail() {
 function resetProviderView() {
   detailOpen = false;
   detailName = "";
+  detailSnapshot = ""; // 视图已重置，脏检测基线一并清掉
   document.getElementById("provider-detail").hidden = true;
   document.getElementById("provider-list-view").hidden = false;
   document.getElementById("btn-add-provider").hidden = false;
@@ -189,6 +204,9 @@ function resetProviderView() {
   ds.hidden = true;
   ds.textContent = "";
 }
+
+// 详情表单的「初始值快照」：用来判断有没有未保存的改动（离开时提醒）
+let detailSnapshot = "";
 
 function renderProviderDetail(name) {
   const p = providerCfg.providers[name];
@@ -263,12 +281,25 @@ function renderProviderDetail(name) {
         <div class="field-tip ctx-note hidden"></div>
       </div>
       <div class="field">
-        <label>温度 temperature（可选）</label>
+        <div class="label-row">
+          <label>温度 temperature（可选）</label>
+          <span class="temp-state" id="temp-state"></span>
+        </div>
         <input data-f="temperature" type="number" min="0" max="2" step="0.1"
                value="${p.temperature === null || p.temperature === undefined ? "" : p.temperature}"
                placeholder="留空 = 用服务默认"
                title="越低越稳定保守，越高越发散有创意；多数服务默认 0.7 左右">
-        <div class="field-tip">写作、头脑风暴可以调高（1.0+）；改代码、查资料建议留空或 0.2–0.5</div>
+        <!-- 常用档位：不用理解 0–2 的刻度，点一下直接填；「留空」回到交给服务 -->
+        <div class="temp-presets" id="temp-presets">
+          <button type="button" class="temp-chip" data-v="0">精确 0</button>
+          <button type="button" class="temp-chip" data-v="0.3">保守 0.3</button>
+          <button type="button" class="temp-chip" data-v="0.7">均衡 0.7</button>
+          <button type="button" class="temp-chip" data-v="1.2">创意 1.2</button>
+          <button type="button" class="temp-chip temp-chip-clear" data-v="">清空</button>
+        </div>
+        <div class="field-tip">多数任务留空即可——不填就不发送该参数，用各家服务自己的默认值（通常 0.7–1.0，因服务而异）。
+          写文案、起名字、头脑风暴可试 1.0+；改代码、查资料建议留空或 0.2–0.5。
+          <b>推理模型（deepseek-reasoner 等）通常不接受此项</b>，填了也会被忽略。</div>
       </div>
       <div class="field">
         <label>代理地址（可选）</label>
@@ -322,6 +353,15 @@ function renderProviderDetail(name) {
         <div class="panel-note" id="avail-note">还没有拉取：点右上角「检测并获取模型」，或在下面手动填写模型 ID。</div>
         <button id="avail-toggle" class="link-btn hidden" type="button"></button>
       </div>
+      <!-- 搜索框：上百个模型时按名字模糊筛，右侧实时显示「命中 / 总数」 -->
+      <div class="avail-search" id="avail-search" hidden>
+        <input type="search" id="avail-filter" placeholder="搜索模型名（模糊匹配）" autocomplete="off">
+        <span class="as-count" id="avail-count"></span>
+        <!-- 批量启用：中转站动辄返回上百个模型，逐个点 ＋ 太累。
+             只启用「当前筛选结果里还没启用的」，配合搜索就是「按关键词批量加」 -->
+        <button class="btn-ghost as-bulk hidden" id="avail-bulk" type="button"
+          title="把当前列表里还没启用的模型一次全部启用">＋ 全部启用</button>
+      </div>
       <div id="avail-list"></div>
       <div class="add-row">
         <input data-f="manual_model" autocomplete="off" title="手动填写模型 ID（如 deepseek-chat / glm-5.3），回车或点 ＋ 添加">
@@ -364,14 +404,49 @@ function renderProviderDetail(name) {
     const p2 = providerCfg.providers[detailName];
     const enabled = new Set(p2 ? p2.models || [] : []);
     const list = document.getElementById("avail-list");
-    list.innerHTML = (availCacheModels || [])
-      .map((m) => {
-        const on = enabled.has(m);
-        return `<div class="avail-model ${on ? "on" : ""}" data-model="${escapeHtml(m)}">
-          <span class="plus">${on ? "✓" : "＋"}</span><span>${escapeHtml(m)}</span>
-          ${on ? '<span class="chip chip-blue">已启用</span>' : ""}</div>`;
-      })
-      .join("");
+    const all = availCacheModels || [];
+    const filter = availFilter.trim().toLowerCase();
+    const shown = filter ? all.filter((m) => m.toLowerCase().includes(filter)) : all;
+    // 搜索框：有检测结果才出现；「命中 / 总数」实时反馈筛选结果
+    const searchBox = document.getElementById("avail-search");
+    const filterInput = document.getElementById("avail-filter");
+    const countEl = document.getElementById("avail-count");
+    if (searchBox) {
+      searchBox.hidden = !all.length || availListCollapsed;
+      if (filterInput) {
+        if (filterInput.value !== availFilter) filterInput.value = availFilter;
+        // oninput 只挂一次：renderAvailPanel 会重复调用，重复挂不影响行为
+        if (filterInput.oninput == null) {
+          filterInput.oninput = () => {
+            availFilter = filterInput.value;
+            renderAvailPanel();
+          };
+        }
+      }
+      if (countEl) countEl.textContent = filter && all.length ? `${shown.length} / ${all.length}` : "";
+      // 批量启用按钮：只在「当前可见结果里还有没启用的」时出现，文案带上数量
+      const bulkBtn = document.getElementById("avail-bulk");
+      if (bulkBtn) {
+        const pending = shown.filter((m) => !enabled.has(m));
+        bulkBtn.classList.toggle("hidden", !pending.length || availListCollapsed);
+        bulkBtn.textContent = `＋ 全部启用 ${pending.length}`;
+        bulkBtn.onclick = () => setEnabledModels(pending, bulkBtn);
+      }
+    }
+    if (filter && all.length && !shown.length) {
+      // 搜索词存在但没命中：给出可读提示（不同服务命名差异大，一个都匹配不上很常见）
+      list.innerHTML =
+        `<div class="empty-hint">没有匹配「${escapeHtml(availFilter.trim())}」的模型，换个关键词试试</div>`;
+    } else {
+      list.innerHTML = shown
+        .map((m) => {
+          const on = enabled.has(m);
+          return `<div class="avail-model ${on ? "on" : ""}" data-model="${escapeHtml(m)}">
+            <span class="plus">${on ? "✓" : "＋"}</span><span>${escapeHtml(m)}</span>
+            ${on ? '<span class="chip chip-blue">已启用</span>' : ""}</div>`;
+        })
+        .join("");
+    }
     list.querySelectorAll(".avail-model:not(.on)").forEach((el) => {
       el.onclick = () => setEnabledModel(el.dataset.model);
     });
@@ -403,6 +478,7 @@ function renderProviderDetail(name) {
   // —— 已启用模型列表：✓ 当前使用，✕ 删除，点行切换 ——
   const enabledModels = p.models && p.models.length ? [...p.models] : (p.model ? [p.model] : []);
   const currentModel = p.is_active ? p.active_model || p.model : null;
+  const visionSet = new Set(p.vision_models || []); // 后端按模型名推断的多模态清单
   const enabledBox = document.getElementById("enabled-models");
   enabledBox.innerHTML = "";
   enabledModels.forEach((m) => {
@@ -412,6 +488,7 @@ function renderProviderDetail(name) {
     li.innerHTML = `
       <span class="ok-mark">✓</span>
       <span class="em-name">${escapeHtml(m)}</span>
+      ${visionSet.has(m) ? '<span class="chip" title="该模型支持图片输入">视觉</span>' : ""}
       ${isCur ? '<span class="chip chip-blue">使用中</span>' : ""}
       <button class="em-del" type="button" title="从已启用列表删除">✕</button>`;
     li.querySelector(".em-name").onclick = async () => {
@@ -427,6 +504,16 @@ function renderProviderDetail(name) {
     };
     li.querySelector(".em-del").onclick = async (e) => {
       e.stopPropagation();
+      // 删除前确认：✕ 就在行尾，误触一次就得重新检测+启用；
+      // 唯一模型删光后该服务直接没有可用模型，单独加重提示
+      const last = enabledModels.length <= 1;
+      const ok = await confirmModal(
+        last
+          ? `「${m}」是这个服务唯一的模型，删掉后它将没有可用模型（需要重新检测并启用）。确认删除？`
+          : `从已启用列表删除「${m}」？${isCur ? "它正在被使用，删除后会自动换一个。" : ""}`,
+        { title: "删除已启用模型", okLabel: "删除", danger: true }
+      );
+      if (!ok) return;
       try {
         const r = await request("config.remove_provider_model", { name, model: m });
         await renderSettings();
@@ -442,6 +529,34 @@ function renderProviderDetail(name) {
   });
   if (!enabledModels.length)
     enabledBox.innerHTML = '<div class="empty-hint">还没有启用的模型，从下面的可用模型里添加，或手动填写模型 ID。</div>';
+
+  // 批量启用：循环调单个接口（后端没有批量面），中间不刷新，
+  // 全部走完再统一 renderSettings + boot，N 个模型只重绘一次
+  const setEnabledModels = async (models, btn) => {
+    const list = (models || []).filter(Boolean);
+    if (!list.length) return;
+    const prevText = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = `启用中… 0/${list.length}`; }
+    let added = 0, activated = 0;
+    const failed = [];
+    for (const [i, model] of list.entries()) {
+      try {
+        const r = await request("config.add_provider_model", { name, model });
+        if (r.added !== false) added++;
+        if (r.activated) activated++;
+      } catch {
+        failed.push(model);
+      }
+      if (btn) btn.textContent = `启用中… ${i + 1}/${list.length}`;
+    }
+    if (btn) { btn.disabled = false; btn.textContent = prevText; }
+    await renderSettings();
+    boot();
+    const parts = [`✓ 已启用 ${added} 个模型`];
+    if (activated) parts.push("并已切换使用");
+    if (failed.length) parts.push(`${failed.length} 个失败`);
+    note(parts.join("，"), !failed.length);
+  };
 
   const setEnabledModel = async (model) => {
     if (!model) return;
@@ -688,6 +803,33 @@ function renderProviderDetail(name) {
     renderAvailPanel(); // 复用同一处同步逻辑（列表显隐 + 按钮文案）
   };
 
+  // 温度：档位胶囊 + 当前状态同步。输入框与胶囊双向联动，
+  // 「生效中」徽章让人一眼看出这项到底发不发参数
+  const tempInput = q('input[data-f="temperature"]');
+  const tempState = box.querySelector("#temp-state");
+  const tempChips = [...box.querySelectorAll("#temp-presets .temp-chip")];
+  const syncTempState = () => {
+    const v = tempInput.value.trim();
+    // 高亮：值正好等于某个档位就点亮它；空值点亮「清空」
+    tempChips.forEach((c) => {
+      const cv = c.dataset.v;
+      const hit = cv === "" ? v === "" : v !== "" && Number(v) === Number(cv);
+      c.classList.toggle("on", hit);
+    });
+    if (tempState) {
+      tempState.textContent = v === "" ? "当前：不发送，用服务默认" : `当前：${v}`;
+      tempState.className = "temp-state" + (v === "" ? " dim-state" : " on-state");
+    }
+  };
+  tempChips.forEach((c) => {
+    c.onclick = () => {
+      tempInput.value = c.dataset.v; // 空串 = 清空（保存时清除该项）
+      syncTempState();
+    };
+  });
+  tempInput.addEventListener("input", syncTempState);
+  syncTempState();
+
   // 启用开关：关闭 = 从列表隐藏（配置保留），自动回到服务列表
   q('input[data-f="enabled"]').onchange = async (e) => {
     const on = e.target.checked;
@@ -711,4 +853,19 @@ function renderProviderDetail(name) {
     saveProvider(box, name, true, q("select[data-f='kind']").value);
   box.querySelector(".del").onclick = () => deleteProviderModal(name, p.is_preset);
   if (detailName === name && availCacheModels) renderAvailPanel(); // 还原上次拉取的可用模型
+  // 采集初始快照：之后与当前值比对，判断有没有没保存的改动。
+  // 只收用户可编辑的字段（名称是只读的，Key 只比「填没填」不比明文）
+  detailSnapshot = detailFormFingerprint(box);
+}
+
+/** 表单指纹：可编辑字段的当前值拼串。Key 只记「有没有填」，不记内容（避免明文留存）。 */
+function detailFormFingerprint(box) {
+  const parts = [];
+  box.querySelectorAll("input[data-f], select[data-f]").forEach((el) => {
+    const f = el.dataset.f;
+    if (f === "name" || f === "manual_model") return; // 只读 / 一次性输入，不算改动
+    if (f === "api_key") { parts.push(f + "=" + (el.value.trim() ? "set" : "")); return; }
+    parts.push(f + "=" + (el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim()));
+  });
+  return parts.join("|");
 }

@@ -84,12 +84,12 @@ def test_collect_secrets_from_temp_home_config(home):
 
 
 def test_collect_secrets_skips_short_values_and_non_secrets():
-    """短值（如 Ollama 演示 Key「ollama」）与 env_key（变量名不是值）不收。"""
+    """过短的配置值（多为占位符）与 env_key（变量名不是值）不收。"""
     from types import SimpleNamespace
 
     cfg = SimpleNamespace(
         providers={
-            "a": ProviderConfig(api_key="ollama"),  # 6 字符：剔除
+            "a": ProviderConfig(api_key="abc123"),  # 6 字符：剔除
             "b": ProviderConfig(api_key="abcd1234efgh5678", env_key="A_API_KEY"),
         },
         websearch=SimpleNamespace(api_key=""),
@@ -102,7 +102,7 @@ def test_collect_secrets_skips_short_values_and_non_secrets():
     vals = collect_secrets(cfg)
     assert "abcd1234efgh5678" in vals
     assert "wx-token-1234567890" in vals
-    assert "ollama" not in vals
+    assert "abc123" not in vals
     assert "A_API_KEY" not in vals
     assert "https://example.com" not in vals
 

@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from . import instance, secure_store
+from .relayconfig import RelayConfig
 
 logger = logging.getLogger("skysheep.config")
 
@@ -372,6 +373,7 @@ class SkySheepConfig(BaseModel):
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
     adversarial: AdversarialConfig = Field(default_factory=AdversarialConfig)
+    relay: RelayConfig = Field(default_factory=RelayConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     imagegen: ImageGenConfig = Field(default_factory=ImageGenConfig)
@@ -383,7 +385,7 @@ class SkySheepConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
 
-# 内置预设：按「默认」页签的展示顺序排列（Anthropic → 小米 Mimo，末尾 Ollama 本地）。
+# 内置预设：按「默认」页签的展示顺序排列（Anthropic → 小米 Mimo）。
 # label 是界面显示名；配置键保持 ASCII 稳定标识（老配置里的 [providers.deepseek] 等段落
 # 升级后继续生效）。此前预设里的 openrouter / siliconflow 已移出：老用户配置过的条目
 # 会按自定义服务保留（配置原样、Key 不丢），只是挪到「自定义」页签。
@@ -458,13 +460,6 @@ PRESETS: dict[str, ProviderConfig] = {
         env_key="MIMO_API_KEY",
         model="MiMo-V2.5-Pro",
         label="小米 Mimo",
-    ),
-    "ollama": ProviderConfig(
-        kind="openai",
-        base_url="http://localhost:11434/v1",
-        api_key="ollama",
-        model="qwen3:8b",
-        label="Ollama",
     ),
 }
 
@@ -554,6 +549,7 @@ def load_config() -> SkySheepConfig:
     retention = RetentionConfig()
     shell = ShellConfig()
     search = SearchConfig()
+    raw = {}
     p = config_path()
     if p.exists():
         try:
@@ -692,6 +688,7 @@ def load_config() -> SkySheepConfig:
             roundtable=roundtable,
             team=team,
             adversarial=adversarial,
+            relay=raw.get("relay", {}),
             cron=cron,
             websearch=websearch,
             imagegen=imagegen,
@@ -1458,7 +1455,7 @@ def restore_provider_in_config(name: str) -> None:
     """把服务放回列表。
 
     内置服务：按当前出厂预设重建条目（kind/base_url/env_key/model 取最新
-    PRESETS 值），仅保留 api_key（用户填过优先，否则用出厂值如 ollama）。
+    PRESETS 值），仅保留 api_key（用户填过优先，否则用出厂值）。
     隐藏内置服务时旧条目仍留在文件里，若原样放行，历史快照（如旧默认模型名）
     会覆盖升级后的预设，导致「恢复回来还是老模型」。
     自定义服务：仅移出停用名单，条目原样保留（set_provider_enabled 重新启用时走这里）。
@@ -1515,12 +1512,6 @@ model = "glm-5.3"
 kind = "anthropic"
 model = "claude-opus-5"
 # api_key = "..."              # 或设置环境变量 ANTHROPIC_API_KEY
-
-[providers.ollama]
-kind = "openai"
-base_url = "http://localhost:11434/v1"
-api_key = "ollama"
-model = "qwen3:8b"
 
 # 也可以自定义任意 OpenAI 兼容 provider：
 # [providers.siliconflow]

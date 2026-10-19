@@ -41,7 +41,7 @@ from typing import Any
 
 from .. import secure_store
 
-# 短于该长度的配置值不收（如 Ollama 预设的演示 Key「ollama」、占位符）：
+# 短于该长度的配置值不收（多为占位符，不是真实密钥）：
 # 已知值匹配按子串命中，太短的值会把大量普通词误判成密钥外传。
 MIN_SECRET_VALUE_CHARS = 8
 

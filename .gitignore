@@ -44,6 +44,14 @@ engine/requirements-audit.txt
 
 # 临时/隔离运行目录（SKYSHEEP_HOME 指向的临时 home、截图与验证用工作目录）
 .tmp-*/
+# 开发期临时目录（手工验证、pytest 中间产物）
+engine/.tmp/
+# Windows 未展开的环境变量目录名（`> %LOCALAPPDATA%\...` 在 cmd 里没展开时建出的目录）
+engine/%LOCALAPPDATA%/
+
+# pytest 全量输出（本地核验用，随用随生成）
+pytest-full.err
+
 
 # Windows 误重定向产物：把 `> /dev/null` 写成 `> nul` 会建出名为 nul 的文件
 nul

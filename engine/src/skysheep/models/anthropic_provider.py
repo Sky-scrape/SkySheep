@@ -21,6 +21,7 @@ from ..messages import (
     dialogue,
     system_text,
 )
+from ..network import NetworkConfig, make_async_httpx2_client
 
 if TYPE_CHECKING:
     # 仅注解用：运行时延迟到建客户端时才导入（anthropic 包导入约 0.75s，启动期用不到）
@@ -124,6 +125,7 @@ class AnthropicProvider(Provider):
         max_tokens: int = 8192,
         client: AsyncAnthropic | None = None,
         proxy: str = "",
+        network: NetworkConfig | None = None,
     ) -> None:
         super().__init__()
         self.name = name
@@ -134,8 +136,15 @@ class AnthropicProvider(Provider):
         # 最坏等待翻倍，界面长时间卡在「第 1/3 次重试」上
         kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 1}
         self._owned_http: object | None = None
-        if proxy:
-            # anthropic SDK 同样接受 http_client；不同 SDK 版本绑定 httpx 或 httpx2
+        if network is not None:
+            # anthropic SDK 1.5+ 强制要求 httpx2.AsyncClient（传 httpx 会抛 TypeError），
+            # 所以这里必须走 httpx2 工厂而不是通用那个
+            kw["http_client"] = make_async_httpx2_client(
+                network, timeout=300.0, proxy_override=proxy or None,
+            )
+            self._owned_http = kw["http_client"]
+        elif proxy:
+            # 兼容路径：只有服务级代理、没有全局配置；不同 SDK 版本绑定 httpx 或 httpx2
             try:
                 import httpx2 as _httpx
             except ImportError:

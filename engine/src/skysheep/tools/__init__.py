@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from .base import (
     ChangeRecorder,
     Safety,
@@ -38,6 +42,10 @@ from .shell import RunCommandTool
 from .todo import TodoWriteTool
 from .web import WebFetchTool, WebSearchTool
 
+if TYPE_CHECKING:
+    # 仅注解用：network 模块很轻，但工具层不该在导入期把它拉进 CLI 冷启动路径
+    from ..network import NetworkConfig
+
 # 电脑控制七件套的工具名（子代理 tools="all" 排除清单、审计口径共用这份清单：
 # 截屏/窗口列表属于隐私敏感只读，不该因为 "all" 就顺手进子代理工具集）
 COMPUTER_TOOL_NAMES = frozenset({
@@ -53,6 +61,7 @@ def default_tools(
     imagegen: dict | None = None,
     computer_control: bool = False,
     browser_control: bool = False,
+    network: NetworkConfig | None = None,
 ) -> list[Tool]:
     """内置工具集：文件/命令/检索 + 任务清单 + 联网抓取/搜索 + 日程/记忆 + 文档 + 画图 + 电脑/浏览器控制。
 
@@ -81,8 +90,8 @@ def default_tools(
         GrepTool(),
         RunCommandTool(),
         TodoWriteTool(),
-        WebFetchTool(),
-        WebSearchTool(**(websearch or {})),
+        WebFetchTool(network=network),
+        WebSearchTool(**(websearch or {}), network=network),
         ReadDocumentTool(),
         WriteDocumentTool(recorder=recorder),
         MemoryWriteTool(),

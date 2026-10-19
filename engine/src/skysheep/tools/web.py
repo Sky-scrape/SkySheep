@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from .. import obs
 from ..instance import data_home
+from ..network import NetworkConfig, make_async_httpx_client, make_httpx_client
 from ..sanitize import (
     UNTRUSTED_DATA_NOTE,
     scan_injection_patterns,
@@ -518,9 +519,14 @@ class WebFetchTool(Tool):
     open_world_hint = True
     args_model = WebFetchArgs
 
-    def __init__(self, allow_private_hosts: bool = False) -> None:
+    def __init__(
+        self, allow_private_hosts: bool = False, network: NetworkConfig | None = None
+    ) -> None:
         # 仅测试注入：允许访问内网（本地 HTTP 桩）
         self.allow_private_hosts = allow_private_hosts
+        # 全局出网设置（代理 / no_proxy / 自签 CA）。None = 旧行为（直连、不吃
+        # 环境代理），供未接配置的调用点（子代理 research 工具等）保持兼容
+        self.network = network
         # 站点信任评级（二期）：手动标记 + 注入命中自动计数；路径首次使用时才解析
         self.reputation = SiteReputation()
 
@@ -551,14 +557,18 @@ class WebFetchTool(Tool):
         读进内存再截断：目标返回没有 Content-Length 的巨大/无限流时，内存会在截断
         之前就被吃干。这里改成边读边计数，超限直接停止。
         """
+        buffer = bytearray()
+        truncated = False
+        # 钉连：把连接固定到已校验的 IP，httpx 建连时不会再做一次 DNS 解析。
+        # 注意：配了全局代理时 make_async_httpx_client 会忽略这个 transport——
+        # 代理由代理端解析域名，DNS rebinding 的威胁面已不存在，钉连没有意义。
         transport = httpx.AsyncHTTPTransport(trust_env=False)
-        # 把连接固定到已校验的 IP：httpx 建连时不会再做一次 DNS 解析
         _install_pinned_backend(
             transport, _PinnedBackend({parsed.hostname: ips}), "web_fetch"
         )
-        buffer = bytearray()
-        truncated = False
-        async with httpx.AsyncClient(
+        async with make_async_httpx_client(
+            self.network or NetworkConfig(),
+            url=url,
             transport=transport,
             follow_redirects=False,
             timeout=TIMEOUT_S,
@@ -793,11 +803,13 @@ class WebSearchTool(Tool):
     args_model = WebSearchArgs
 
     def __init__(self, provider: str = "", api_key: str = "",
-                 base_url: str = "", transport=None) -> None:
+                 base_url: str = "", transport=None, network: NetworkConfig | None = None) -> None:
         self.provider = provider  # bocha / tavily / zhipu / custom；空 = 未配置
         self.api_key = api_key
         self.base_url = (base_url or "").rstrip("/")
         self._transport = transport  # 仅测试注入
+        # 全局出网设置；None = 旧行为（直连）
+        self.network = network
 
     @property
     def configured(self) -> bool:
@@ -855,7 +867,10 @@ class WebSearchTool(Tool):
         else:
             raise ToolError(f"未知的搜索服务商: {self.provider}")
 
-        with httpx.Client(timeout=SEARCH_TIMEOUT_S, trust_env=False, transport=self._transport) as client:
+        with make_httpx_client(
+            self.network or NetworkConfig(),
+            url=url, timeout=SEARCH_TIMEOUT_S, transport=self._transport,
+        ) as client:
             resp = client.post(url, json=payload, headers=headers)
         if resp.status_code >= 400:
             detail = resp.text[:200]
@@ -904,8 +919,10 @@ class WebSearchTool(Tool):
         headers = {"Accept": "application/json"}
         if self.api_key:
             headers["Authorization"] = "Bearer " + self.api_key
-        with httpx.Client(timeout=SEARCH_TIMEOUT_S, trust_env=False,
-                          transport=self._transport) as client:
+        with make_httpx_client(
+            self.network or NetworkConfig(),
+            url=url, timeout=SEARCH_TIMEOUT_S, transport=self._transport,
+        ) as client:
             resp = client.get(url, params=params, headers=headers)
         if resp.status_code in (404, 405):
             raise _CustomProtocolMismatch(
@@ -920,8 +937,10 @@ class WebSearchTool(Tool):
         headers = {"Accept": "application/json"}
         if self.api_key:
             headers["Authorization"] = "Bearer " + self.api_key
-        with httpx.Client(timeout=SEARCH_TIMEOUT_S, trust_env=False,
-                          transport=self._transport) as client:
+        with make_httpx_client(
+            self.network or NetworkConfig(),
+            url=self.base_url, timeout=SEARCH_TIMEOUT_S, transport=self._transport,
+        ) as client:
             resp = client.post(
                 self.base_url,
                 json={"query": query, "max_results": max_results},

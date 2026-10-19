@@ -16283,6 +16283,7 @@ document.getElementById("runs-refresh").onclick = () => loadRunsPage();
 // 设置·高级（运行参数 / 目录限制 / 信任清单）的函数本体在 app-advanced.js；
 // 下方为加载期接线。
 document.getElementById("btn-advanced-save").onclick = saveAdvanced;
+document.getElementById("btn-network-save").onclick = saveNetwork;
 document.getElementById("adv-compaction-auto").onchange = syncCompactionInputs;
 document.getElementById("adv-job-containment").onchange = syncSandboxLevel;
 

@@ -172,6 +172,7 @@ from ..tools.memory import (
 )
 from ..tools.memory_embed import schedule_warmup
 from ..tools.pipeline import PipelineWriteTool
+from ..tools.shell import set_child_network
 from ..tools.skill import LoadSkillTool
 from .audit import record_audit
 from .backend_parts._shared import EmitFn, ProjectCtx, SessionRuntime, collect_stream_text
@@ -1445,6 +1446,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     async def setup(self) -> None:
         self.cfg = load_config()
+        # 全局出网设置先落到子进程环境口径上：run_command / 终端 / 钩子 /
+        # MCP stdio / Mods 的 Node 进程都经 child_environment() 取它。
+        # 后续在设置页保存网络配置时同样会热更新（见 save_network_settings）。
+        set_child_network(self.cfg.network)
         self.store = self._store_override or await SessionStore(db_path()).connect()
         # 接力运行期：取数据目录独占运行权；持锁者才把上次非终态任务标为中断。
         # 第二个后端取不到锁时不做恢复，绝不打断别的进程正在跑的活任务。
@@ -1530,6 +1535,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             mcp_configs,
             on_tools_changed=self._on_mcp_tools_changed,
             reconnect_gate=self._mcp_reconnect_gate,
+            network=self.cfg.network,
         )
         # MCP 连接放后台：单台服务器连不上（uvx 冷启动拉包、代理没就绪、地址写错）
         # 各自最多烧 CONNECT_TIMEOUT_S，同步等它会把「服务就绪」拖过桌面端的启动
@@ -1670,6 +1676,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             imagegen=self._imagegen_kwargs(),
             computer_control=self.cfg.computer_control,
             browser_control=self.cfg.browser_control,
+            network=self.cfg.network,
         ))
         registry.register(LoadSkillTool(self.skills))
         if ctx is not None and ctx.own:
@@ -1787,7 +1794,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 先构建成功再记录状态：构建失败（如缺 API Key）时不能改动"当前使用的模型"，
         # 否则 provider_name 指向新名字、provider 仍是旧对象，界面与实际调用会不一致。
         try:
-            provider = build_provider(name, pc)
+            provider = build_provider(name, pc, self.cfg.network)
         except ConfigError as e:
             # ConfigError 文案自带出路（设置页指引）；CLI 场景的 config init 提示不适用于图形界面
             raise RuntimeError(str(e)) from e
@@ -1807,7 +1814,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if model:
             pc = pc.model_copy(update={"model": model})
         try:
-            return build_provider(name, pc)
+            return build_provider(name, pc, self.cfg.network)
         except ConfigError as e:
             raise RuntimeError(str(e)) from e
 
@@ -3099,7 +3106,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         pc = self.cfg.providers[name]
         if model:
             pc = pc.model_copy(update={"model": model})
-        return build_provider(name, pc)
+        return build_provider(name, pc, self.cfg.network)
 
     def _resolve_members(
         self, members_params: list | None, chair_answers: bool | None = None,
@@ -6350,14 +6357,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 data["model"] = model
             if reasoning:
                 data["reasoning_effort"] = reasoning
-            return build_provider(provider_name, ProviderConfig(**data))
+            return build_provider(provider_name, ProviderConfig(**data), self.cfg.network)
         if self.provider is None:
             raise RuntimeError("主对话当前没有可用模型，子代理无法启动——先到模型服务里配好 Key")
         if reasoning and self.provider_name and self.provider_name in self.cfg.providers:
             pc = self.cfg.providers[self.provider_name].model_copy(
                 update={"reasoning_effort": reasoning}
             )
-            return build_provider(self.provider_name, pc)
+            return build_provider(self.provider_name, pc, self.cfg.network)
         return self.provider
 
     def _subagent_registry(self, policy):

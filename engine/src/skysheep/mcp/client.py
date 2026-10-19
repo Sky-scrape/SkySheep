@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from .. import obs
 from ..bgtasks import spawn_bg
 from ..messages import ImageBlock
-from ..models.probe import _is_local
+from ..network import NetworkConfig, effective_proxy, make_async_httpx2_client
 from ..sanitize import (
     EMPTY_DESCRIPTION_PLACEHOLDER,
     MAX_PROMPT_DESCRIPTION_CHARS,
@@ -558,8 +558,13 @@ class MCPManager:
         servers: dict[str, MCPServerConfig],
         on_tools_changed: Callable[[str], Awaitable[None]] | None = None,
         reconnect_gate: Callable[[str], bool] | None = None,
+        network: NetworkConfig | None = None,
     ) -> None:
         self._configs = dict(servers)
+        # 全局出网设置：远程 MCP 的 HTTP 客户端按它决定代理 / 自签 CA，
+        # stdio 子进程按它注入代理环境变量。None = 直连且只信系统证书库
+        # （旧调用路径与纯测试不必关心全局配置）。
+        self.network = network
         # 自动重连前的放行门（backend 注入）：返回 False 的服务器不再自动重连
         # ——项目级服务器在信任跌落后不该按内存里的旧配置被悄悄拉起（审查 P2-5）
         self.reconnect_gate = reconnect_gate
@@ -846,8 +851,15 @@ class MCPManager:
                     from mcp.client.streamable_http import streamable_http_client  # noqa: PLC0415
 
                     if cfg.transport == "stdio":
+                        # 子进程环境与 run_command / 终端面板同一份口径：剥密钥、
+                        # 按全局出网设置注入代理与自签 CA。配置里显式给的 env
+                        # 优先（用户可以覆盖某台服务器自己的代理）。
+                        from ..tools.shell import child_environment  # noqa: PLC0415
+
+                        merged_env = child_environment()
+                        merged_env.update(cfg.env or {})
                         params = StdioServerParameters(
-                            command=cfg.command, args=cfg.args, env=cfg.env or None
+                            command=cfg.command, args=cfg.args, env=merged_env or None
                         )
                         read, write = await stack.enter_async_context(stdio_client(params))
                     else:
@@ -865,24 +877,30 @@ class MCPManager:
                         # 注册表里的 WinINET 系统代理，系统代理进程没在跑时，发往
                         # 127.0.0.1 的请求会被转给代理然后连不上。
                         extra_headers = _headers_only(cfg)
-                        local_url = _is_local(cfg.url)
                         import httpx2  # noqa: PLC0415  mcp 可选依赖的传递依赖
                         from mcp.shared._httpx_utils import (  # noqa: PLC0415
                             MCP_DEFAULT_SSE_READ_TIMEOUT,
                             MCP_DEFAULT_TIMEOUT,
                         )
 
-                        http_client = httpx2.AsyncClient(
+                        network = self.network or NetworkConfig()
+                        http_client = make_async_httpx2_client(
+                            network,
+                            url=cfg.url,
                             headers=extra_headers or None,
                             timeout=httpx2.Timeout(
                                 MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT
                             ),
-                            trust_env=not local_url,
+                        )
+                        # 走代理时不再钉连：DNS 由代理解析，rebinding 威胁面不存在，
+                        # 而工厂在代理路径上也不接受调用方的 transport（见 network.py）。
+                        proxied = bool(
+                            effective_proxy(network, url=cfg.url)
                         )
                         # 钉连后端：只用预检拿到的那批已校验 IP；拿不到（回环/
                         # 解析失败但允许回环的场景已在 _preflight 放行）时保持
                         # 默认解析——此时目标是本机，不存在 rebinding 威胁面。
-                        if pin_host and pin_ips:
+                        if pin_host and pin_ips and not proxied:
                             try:
                                 pool = getattr(
                                     getattr(http_client, "_transport", None),

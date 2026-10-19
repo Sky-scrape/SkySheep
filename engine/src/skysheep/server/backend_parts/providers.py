@@ -263,7 +263,8 @@ class ProvidersMixin:
         eff_model = (model or (pc.model if pc else "") or "").strip()
 
         out = await probe_context_limit(
-            kind=eff_kind, base_url=eff_url or None, api_key=eff_key or None, model=eff_model
+            kind=eff_kind, base_url=eff_url or None, api_key=eff_key or None,
+            model=eff_model, network=self.cfg.network,
         )
         return {"provider": name, "kind": eff_kind, "model": eff_model, **out}
 

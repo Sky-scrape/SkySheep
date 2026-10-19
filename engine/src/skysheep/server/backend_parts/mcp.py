@@ -125,6 +125,7 @@ class McpMixin:
                 configs,
                 on_tools_changed=self._on_mcp_tools_changed,
                 reconnect_gate=self._mcp_reconnect_gate,
+                network=self.cfg.network,
             )
         manager = self.mcp
         for name in [n for n in old if n not in configs]:
@@ -157,6 +158,7 @@ class McpMixin:
             configs,
             on_tools_changed=self._on_mcp_tools_changed,
             reconnect_gate=self._mcp_reconnect_gate,
+            network=self.cfg.network,
         )
         self.mcp_tools = await self.mcp.connect_all()
         self.mcp_warnings = cfg_warnings + [

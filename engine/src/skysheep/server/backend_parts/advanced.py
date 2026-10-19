@@ -17,6 +17,7 @@ from ...config import (
     load_config,
     set_advanced_settings_in_config,
     set_hooks_in_config,
+    set_network_settings_in_config,
     skysheep_home,
     update_provider_in_config,
 )
@@ -27,6 +28,7 @@ from ...core.hooks import (
     load_raw_config,
     recent_hook_runs,
 )
+from ...tools.shell import set_child_network
 from .relay import RelaySettingsMixin
 
 
@@ -207,6 +209,10 @@ class SystemMixin(RelaySettingsMixin):
             # 全局唤起热键（仅 Windows 桌面版生效；其它平台 supported=False）
             "hotkey": self._hotkey_pref(),
             "hotkey_supported": sys.platform == "win32",
+            # 全局出网设置（设置 · 高级 · 网络卡三字段）
+            "network_proxy": self.cfg.network.proxy,
+            "network_no_proxy": self.cfg.network.no_proxy,
+            "network_ca_cert": self.cfg.network.ca_cert,
         }
 
     async def save_advanced_settings(self, params: dict) -> dict:
@@ -289,7 +295,26 @@ class SystemMixin(RelaySettingsMixin):
             )
         except ConfigError as e:
             raise RuntimeError(str(e)) from e
+        # 全局出网设置（代理 / 绕行名单 / 自签 CA）：三项任一非 None 才写。
+        # 与其它设置项同一姿态（不传 = 不动），留空串 = 清掉该项。
+        if any(
+            params.get(k) is not None
+            for k in ("network_proxy", "network_no_proxy", "network_ca_cert")
+        ):
+            try:
+                set_network_settings_in_config(
+                    proxy=params.get("network_proxy"),
+                    no_proxy=params.get("network_no_proxy"),
+                    ca_cert=params.get("network_ca_cert"),
+                )
+            except ConfigError as e:
+                raise RuntimeError(str(e)) from e
         self.cfg = load_config()
+        # 出网设置热生效：子进程口径（run_command / 终端 / 钩子 / MCP stdio /
+        # Mods Node）与 MCP 的 HTTP 客户端都跟着换，用户不必重启应用。
+        set_child_network(self.cfg.network)
+        if self.mcp is not None:
+            self.mcp.network = self.cfg.network
         self._apply_advanced_to_agents()
         # 电脑/浏览器控制开关改变了工具清单：重建基础 Agent 与所有会话运行时的注册表
         # （与 MCP 热生效同一套机制；运行中的轮次下一次调用时自然使用新清单）

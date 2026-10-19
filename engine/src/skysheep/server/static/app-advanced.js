@@ -250,6 +250,10 @@ async function renderAdvancedCfg() {
   q("adv-daily-budget").value = d.daily_token_budget || "";
   q("adv-turn-budget").value = d.turn_token_budget || "";
   q("adv-fallback-model").value = d.fallback_model || "";
+  // 全局出网设置（代理 / 绕行名单 / 自签 CA）
+  q("adv-network-proxy").value = d.network_proxy || "";
+  q("adv-network-no-proxy").value = d.network_no_proxy || "";
+  q("adv-network-ca").value = d.network_ca_cert || "";
   // 全局唤起热键（仅 Windows 桌面版生效；其它平台置灰提示）
   const hk = q("adv-hotkey");
   advancedLoadedHotkey = d.hotkey || "";
@@ -317,6 +321,29 @@ async function saveAdvanced() {
     }
   } catch (e) {
     advancedStatus("✗ 保存失败：" + e.message, false);
+  }
+}
+
+function networkStatus(text, ok = true) {
+  const el = document.getElementById("network-status");
+  el.textContent = text;
+  el.className = "card-status " + (ok ? "ok" : "bad");
+  el.hidden = !text;
+  autoHideStatus(el, text, ok);
+}
+
+// 网络卡单独保存：只提交三项，不动运行参数（避免用户只改代理却连带重置轮数）
+async function saveNetwork() {
+  const q = (id) => document.getElementById(id);
+  try {
+    await request("advanced.save", {
+      network_proxy: (q("adv-network-proxy").value || "").trim(),
+      network_no_proxy: (q("adv-network-no-proxy").value || "").trim(),
+      network_ca_cert: (q("adv-network-ca").value || "").trim(),
+    });
+    networkStatus("✓ 已保存并立即生效");
+  } catch (e) {
+    networkStatus("✗ 保存失败：" + e.message, false);
   }
 }
 

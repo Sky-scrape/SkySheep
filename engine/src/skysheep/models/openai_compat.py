@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from ..messages import ImageBlock, Message, ThinkingBlock, ToolResultBlock, dialogue, system_text
+from ..network import NetworkConfig, make_async_httpx_client
 
 if TYPE_CHECKING:
     # 仅注解用：运行时延迟到建客户端时才导入（见 __init__ 内注释）
@@ -112,6 +113,7 @@ class OpenAICompatProvider(Provider):
         base_url: str | None = None,
         client: AsyncOpenAI | None = None,
         proxy: str = "",
+        network: NetworkConfig | None = None,
     ) -> None:
         super().__init__()
         self.name = name
@@ -121,7 +123,16 @@ class OpenAICompatProvider(Provider):
         # SDK 再各自叠 2 次会把持续性限流的最坏等待翻倍
         kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 1}
         self._owned_http: object | None = None
-        if proxy:
+        if network is not None:
+            # 全局出网设置（代理 / no_proxy / 自签 CA）：工厂内部定死 trust_env=False，
+            # 并把 no_proxy 判定、CA 追加一并做掉。proxy_override 传服务级覆盖：
+            # None = 跟随全局；空串 = 该服务显式直连（用户清空服务代理即可）
+            kw["http_client"] = make_async_httpx_client(
+                network, timeout=300.0, proxy_override=proxy or None,
+            )
+            self._owned_http = kw["http_client"]
+        elif proxy:
+            # 兼容路径：只有服务级代理、没有全局配置（旧测试/边缘调用点）
             kw["http_client"] = httpx.AsyncClient(proxy=proxy, timeout=300.0, trust_env=False)
             self._owned_http = kw["http_client"]
         # SDK 延迟到建客户端时才导入：openai 包导入约 0.77s，而启动期（splash/服务）

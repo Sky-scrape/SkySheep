@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from ..config import ConfigError, ProviderConfig, resolve_api_key
+from ..network import NetworkConfig
 from .anthropic_provider import AnthropicProvider
 from .base import Provider
 from .fake import DEMO_DEFAULT_REPLY, DEMO_SCRIPT, FakeProvider
 from .openai_compat import OpenAICompatProvider
 
 
-def build_provider(name: str, cfg: ProviderConfig) -> Provider:
+def build_provider(
+    name: str, cfg: ProviderConfig, network: NetworkConfig | None = None
+) -> Provider:
     if cfg.kind == "fake":
         # 首启向导的「演示模式」：脚本化回放，不访问任何网络服务，天然不需要
         # API Key——必须先于 Key 检查分支，否则没配 Key 的用户会被下面的
@@ -30,11 +33,12 @@ def build_provider(name: str, cfg: ProviderConfig) -> Provider:
     if cfg.kind == "anthropic":
         provider: Provider = AnthropicProvider(
             name=name, model=cfg.model, api_key=key, base_url=cfg.base_url, max_tokens=cfg.max_tokens,
-            proxy=cfg.proxy,
+            proxy=cfg.proxy, network=network,
         )
     else:
         provider = OpenAICompatProvider(
-            name=name, model=cfg.model, api_key=key, base_url=cfg.base_url, proxy=cfg.proxy
+            name=name, model=cfg.model, api_key=key, base_url=cfg.base_url,
+            proxy=cfg.proxy, network=network,
         )
     # 思考强度：只对声明支持的服务生效（预设/配置里 supports_reasoning=True）
     provider.supports_reasoning = bool(cfg.supports_reasoning)

@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from . import instance, secure_store
+from .network import ALLOWED_PROXY_SCHEMES, NetworkConfig, build_ssl_context
 from .relayconfig import RelayConfig
 
 logger = logging.getLogger("skysheep.config")
@@ -382,6 +383,10 @@ class SkySheepConfig(BaseModel):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    # 全局出网设置（[network]）：代理 / 绕行名单 / 自签 CA。
+    # 与 ProviderConfig.proxy 的分工见 network.py 的模块 docstring：
+    # 这里是整台应用的出网口径，ProviderConfig.proxy 是单服务覆盖。
+    network: NetworkConfig = Field(default_factory=NetworkConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
 
@@ -549,6 +554,7 @@ def load_config() -> SkySheepConfig:
     retention = RetentionConfig()
     shell = ShellConfig()
     search = SearchConfig()
+    network = NetworkConfig()
     raw = {}
     p = config_path()
     if p.exists():
@@ -628,6 +634,11 @@ def load_config() -> SkySheepConfig:
                 search = cur
             else:
                 server = cur
+        # [network] 单独读，不并进上面的 section 元组：那个循环靠链式
+        # if/elif 逐项赋值、末尾 else 兜底给 server，追加成员容易落错变量。
+        net_raw = raw.get("network")
+        if isinstance(net_raw, dict):
+            network = _build_section_model(NetworkConfig, net_raw, "network")
         channels = _load_channels(raw.get("channels"))
         for name, section in (raw.get("providers") or {}).items():
             if not isinstance(section, dict):
@@ -697,6 +708,7 @@ def load_config() -> SkySheepConfig:
             channels=channels,
             shell=shell,
             search=search,
+            network=network,
             providers=merged,
         )
     except ValidationError as e:
@@ -806,6 +818,56 @@ def set_advanced_settings_in_config(
         raw["search"] = search_sec
     else:
         raw.pop("search", None)
+    _write_raw_config(p, raw)
+
+
+def set_network_settings_in_config(
+    *,
+    proxy: str | None = None,
+    no_proxy: str | None = None,
+    ca_cert: str | None = None,
+) -> None:
+    """写入 config.toml 的 [network] 表（None 表示该项不动）。
+
+    设置 · 高级 · 网络卡的三个字段走这里，与其它设置项同一套读写路径
+    （_read_raw_config / _write_raw_config，不手拼 TOML）。三项全空时删掉
+    整张表——留空表会让用户以为配置还在生效（与 hooks / mods 同一惯例）。
+
+    ca_cert 只校验「文件存在且能加载为 PEM」：写坏的路径必须在保存时就报错，
+    否则要等到下一次出网才炸，且错误现场离配置动作很远。
+    """
+    from urllib.parse import urlparse
+
+    if proxy is not None:
+        proxy = str(proxy).strip()
+        if proxy:
+            parsed = urlparse(proxy)
+            if parsed.scheme not in ALLOWED_PROXY_SCHEMES:
+                schemes = " / ".join(s + "://" for s in ALLOWED_PROXY_SCHEMES)
+                raise ConfigError("代理地址需以 " + schemes + " 开头: " + proxy)
+            if not parsed.hostname:
+                raise ConfigError("代理地址缺少主机名（形如 http://127.0.0.1:7890）: " + proxy)
+    if no_proxy is not None:
+        no_proxy = str(no_proxy).strip()
+    if ca_cert is not None:
+        ca_cert = str(ca_cert).strip()
+        if ca_cert:
+            try:
+                build_ssl_context(ca_cert)  # 只校验可加载，返回的上下文丢弃
+            except ValueError as e:
+                raise ConfigError(str(e)) from e
+    p, raw = _read_raw_config()
+    section = dict(raw.get("network") or {})
+    if proxy is not None:
+        section["proxy"] = proxy
+    if no_proxy is not None:
+        section["no_proxy"] = no_proxy
+    if ca_cert is not None:
+        section["ca_cert"] = ca_cert
+    if any(section.get(k) for k in ("proxy", "no_proxy", "ca_cert")):
+        raw["network"] = section
+    else:
+        raw.pop("network", None)
     _write_raw_config(p, raw)
 
 

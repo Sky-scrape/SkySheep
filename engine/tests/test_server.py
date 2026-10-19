@@ -2538,7 +2538,8 @@ def test_probe_context_wiring(home, monkeypatch):
     """上下文窗口检测：结果透传前端；模型名回落到已保存配置；传入值优先。"""
     calls = []
 
-    async def fake_probe(*, kind="openai", base_url=None, api_key=None, model="", timeout_s=15.0):
+    async def fake_probe(*, kind="openai", base_url=None, api_key=None, model="",
+                         timeout_s=15.0, network=None):
         calls.append({"kind": kind, "base_url": base_url, "model": model})
         return {"limit": 131072, "note": "检测到上下文窗口 131,072 tokens"}
 

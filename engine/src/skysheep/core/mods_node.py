@@ -88,6 +88,18 @@ def _no_window_flags() -> int:
     return 0
 
 
+def _node_env() -> dict[str, str]:
+    """Node 子进程环境：与 run_command / 终端同一份 child_environment()。
+
+    延迟导入防导入环（core 不在导入期拉 tools.shell）；返回新 dict，不改
+    os.environ。代理变量与 NODE_EXTRA_CA_CERTS 由 child_environment 按全局
+    网络设置注入，Mod 里的 fetch 因此遵守设置页里的配置。
+    """
+    from ..tools.shell import child_environment  # noqa: PLC0415
+
+    return child_environment()
+
+
 class NodeRuntime:
     """单个 Mod 的 Node.js 子进程宿主。
 
@@ -147,6 +159,10 @@ class NodeRuntime:
                 errors="replace",
                 creationflags=_no_window_flags(),
                 cwd=str(self.mod_dir),
+                # 子进程环境走与 run_command 同一份口径：剥密钥、按全局出网
+                # 设置注入代理与 NODE_EXTRA_CA_CERTS。此前不传 env 时 Node
+                # 整体继承 os.environ，代理设置对 Mod 的网络请求不生效。
+                env=_node_env(),
             )
         except OSError as e:
             raise NodeRuntimeError(f"启动 Node.js 失败：{e}") from e

@@ -1240,6 +1240,38 @@
           </section>
 
           <section class="settings-card">
+            <div class="card-head">
+              <h3>网络</h3>
+              <button id="btn-network-save" class="btn-ghost">保存</button>
+            </div>
+            <p class="settings-hint">
+              全应用的出网口径：模型请求、联网搜索、网页抓取、MCP、命令子进程都遵循这里。
+            </p>
+            <div id="network-status" class="card-status" hidden></div>
+            <div class="toolcfg-form">
+              <div class="toolcfg-row">
+                <label>代理地址</label>
+                <input type="text" id="adv-network-proxy" placeholder="http://127.0.0.1:7890"
+                       autocomplete="off" spellcheck="false">
+                <span class="dim small">支持 http:// / https:// / socks5://；留空 = 直连，且不读系统代理</span>
+              </div>
+              <div class="toolcfg-row">
+                <label>绕行名单</label>
+                <input type="text" id="adv-network-no-proxy"
+                       placeholder="localhost, 127.0.0.1, .corp.com"
+                       autocomplete="off" spellcheck="false">
+                <span class="dim small">逗号 / 分号 / 空格分隔。命中即直连，支持域名后缀与 CIDR 网段</span>
+              </div>
+              <div class="toolcfg-row">
+                <label>CA 证书</label>
+                <input type="text" id="adv-network-ca" placeholder="C:\certs\corp-root.pem"
+                       autocomplete="off" spellcheck="false">
+                <span class="dim small">额外信任的 PEM 证书（追加到系统证书库，不会替换）</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-card">
             <h3>安全与后台</h3>
             <p class="settings-hint">
               这些开关影响 Agent 能碰什么、以及它能自己醒着干活的范围。

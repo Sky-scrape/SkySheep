@@ -54,6 +54,7 @@ from ..session import SessionStore, export_messages_text
 from ..skills import SkillLoader
 from ..tools import ChangeRecorder, ToolRegistry, default_tools
 from ..tools.memory import render_memory_section
+from ..tools.shell import set_child_network
 from ..tools.skill import LoadSkillTool
 from .render import Renderer
 
@@ -142,6 +143,8 @@ class ChatApp:
         if not self.working_dir.exists():
             raise SystemExit("directory not found: " + str(self.working_dir))
         self.cfg = load_config()
+        # 子进程环境口径（run_command / 终端 / 钩子 / MCP stdio / Mods Node）
+        set_child_network(self.cfg.network)
         self.store = await SessionStore(db_path()).connect()
         self.project = await self.store.get_or_create_project(str(self.working_dir))
         self.gate = self._make_gate()
@@ -159,7 +162,7 @@ class ChatApp:
             skysheep_home() / "mcp.json",
             (self.working_dir / ".skysheep" / "mcp.json") if self.trusted else None,
         )
-        self.mcp = MCPManager(mcp_configs)
+        self.mcp = MCPManager(mcp_configs, network=self.cfg.network)
         # connect_all 返回工具列表（单值）；解析告警与连接失败状态合并
         mcp_tools = await self.mcp.connect_all()
         mcp_warnings = [
@@ -190,6 +193,7 @@ class ChatApp:
             imagegen=resolve_imagegen(self.cfg),
             computer_control=self.cfg.computer_control,
             browser_control=self.cfg.browser_control,
+            network=self.cfg.network,
         ))
         registry.register(LoadSkillTool(self.skills))
         registry.register(SpawnAgentTool(self.tasks))
@@ -257,7 +261,7 @@ class ChatApp:
                 "unknown provider: {}\navailable: {}".format(name, ", ".join(self.cfg.providers))
             )
         try:
-            return build_provider(name, self.cfg.providers[name]), name
+            return build_provider(name, self.cfg.providers[name], self.cfg.network), name
         except ConfigError as e:
             raise SystemExit(
                 str(e) + "\nhint: run `skysheep config init` and fill in the key"
@@ -860,7 +864,7 @@ async def _assemble_headless_engine(store, working_dir: Path, cfg, provider_obj,
         skysheep_home() / "mcp.json",
         (working_dir / ".skysheep" / "mcp.json") if trusted else None,
     )
-    mcp = MCPManager(mcp_configs)
+    mcp = MCPManager(mcp_configs, network=cfg.network)
     mcp_tools = await mcp.connect_all()
 
     tasks = TaskManager(
@@ -874,6 +878,7 @@ async def _assemble_headless_engine(store, working_dir: Path, cfg, provider_obj,
         imagegen=resolve_imagegen(cfg),
         computer_control=cfg.computer_control,
         browser_control=cfg.browser_control,
+        network=cfg.network,
     ))
     registry.register(LoadSkillTool(skills))
     registry.register(SpawnAgentTool(tasks))
@@ -915,7 +920,7 @@ async def run_headless(
         provider_name = "fake"
     else:
         try:
-            provider_obj = build_provider(name, cfg.providers[name])
+            provider_obj = build_provider(name, cfg.providers[name], cfg.network)
         except ConfigError as e:
             raise SystemExit(str(e) + "\nhint: skysheep config init 后填入 API Key") from e
         provider_name = name

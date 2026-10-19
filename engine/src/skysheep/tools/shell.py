@@ -90,15 +90,48 @@ def _is_secret_env_name(name: str) -> bool:
     return any(w in low for w in _SECRET_ENV_WORDS)
 
 
+# 全局出网设置（NetworkConfig）在子进程环境里的投影：backend 保存设置后
+# 调 set_child_network 热更新，child_environment 每次读取最新值。不导入
+# network 的类型（tools 层不在导入期拉 httpx/pydantic 进 CLI 冷启动路径），
+# 只按对象属性用，延迟到运行时才 import network 里的翻译函数。
+_child_network: object | None = None
+
+
+def set_child_network(network: object | None) -> None:
+    """登记「子进程该遵循的全局出网设置」（传 None 恢复直连口径）。"""
+    global _child_network
+    _child_network = network
+
+
 def child_environment() -> dict[str, str]:
-    """给引擎拉起的子进程用的环境：剥掉密钥类变量，其余原样继承。
+    """给引擎拉起的子进程用的环境：剥密钥 + 按全局出网设置注入代理。
 
     PATH / SystemRoot / ComSpec / TEMP / HOME / USERPROFILE 这些必须留着，
     否则 cmd.exe 与绝大多数命令直接跑不起来。返回新 dict，不改 os.environ。
     所有「引擎侧拉起子进程」的路径共用这一份口径——run_command 与终端面板
     （TerminalSlot.spawn）都必须走这里，任何一条新命令执行路径也不例外。
+
+    代理处理与 httpx 工厂的 trust_env=False 同一口径：先清掉继承环境里的
+    HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY（大小写），再按全局设置注入。
+    否则宿主机残留的代理变量会悄悄盖过设置页里的配置，「关掉代理」无法验证。
     """
-    return {k: v for k, v in os.environ.items() if not _is_secret_env_name(k)}
+    env = {k: v for k, v in os.environ.items() if not _is_secret_env_name(k)}
+    try:
+        from ..network import PROXY_ENV_NAMES, NetworkConfig, subprocess_proxy_env
+
+        for name in PROXY_ENV_NAMES:
+            env.pop(name, None)
+            env.pop(name.upper(), None)
+        env.update(subprocess_proxy_env(_child_network or NetworkConfig()))
+    except Exception as e:  # noqa: BLE001 - 网络模块异常不该让命令跑不起来
+        # fail-open 但 fail-visible：用户配了代理却因为配置错误被静默跳过时，
+        # 至少能在日志里看到线索（否则表现成「代理不生效」而无从排查）。
+        obs.warning(
+            "child_proxy_env_skipped",
+            "子进程代理环境注入失败，本次按直连运行",
+            error=str(e),
+        )
+    return env
 
 
 def _child_env() -> dict[str, str]:

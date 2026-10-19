@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ..network import NetworkConfig, make_async_httpx_client
+
 LMSTUDIO_BASE = "http://localhost:1234/v1"
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
@@ -160,6 +162,7 @@ async def probe_context_limit(
     api_key: str | None = None,
     model: str = "",
     timeout_s: float = 15.0,
+    network: NetworkConfig | None = None,
 ) -> dict:
     """探测某服务模型的最大上下文窗口。
 
@@ -180,10 +183,22 @@ async def probe_context_limit(
     # openai 兼容：GET {base}/models，在模型条目里找窗口字段
     url = (base or "https://api.openai.com/v1").rstrip("/") + "/models"
     headers = {"Authorization": "Bearer " + (api_key or "")} if api_key else {}
-    # 本地地址直连；LM Studio 这类本地服务此前同样 TypeError 崩
-    async with httpx.AsyncClient(
-        timeout=timeout_s, trust_env=not _is_local(base)
-    ) as client:
+    # 出网口径与其它 httpx 调用点一致：一律 trust_env=False，代理只认设置页里
+    # 的配置（不会因宿主机残留 HTTP_PROXY 而改变行为）。本地地址（LM Studio /
+    # Ollama）显式直连——此前这类请求被转给系统代理后 502，且 httpx 的默认
+    # trust_env=True 在 Windows 上还会读注册表里的 WinINET 代理。
+    try:
+        client = make_async_httpx_client(
+            network or NetworkConfig(),
+            url=url,
+            timeout=timeout_s,
+            proxy_override="" if _is_local(base) else None,
+        )
+    except ValueError as e:
+        # 工厂内 build_ssl_context 在 CA 文件坏掉时抛 ValueError：这是配置
+        # 错误而非网络错误，直接给用户可读提示（否则裸 ValueError 冒到设置页）
+        raise RuntimeError(str(e)) from e
+    async with client:
         try:
             resp = await client.get(url, headers=headers)
             resp.raise_for_status()

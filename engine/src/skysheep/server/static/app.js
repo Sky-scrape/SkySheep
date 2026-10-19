@@ -5044,17 +5044,33 @@ function handleEvent(kind, data) {
     case "permission_request":
       showPermission(data); // 通知统一在 showPermission 里发（活动/后台各一份）
       break;
-    case "permission_resolved":
+    case "permission_resolved": {
       // 只收起「这一张」卡：多标签同时各挂一张确认卡时，后台标签的 resolved
       // 不该把活动标签正在显示的另一张真卡也藏掉（藏掉后 permRequest 已 null，
       // 真卡按钮会静默失效，只能靠切标签恢复）
       if (!data.request_id || data.request_id === permRequest) hidePermission();
-      if (routeTab) {
-        routeTab.needsPerm = false;
-        routeTab.permData = null;
+      // 同样只清「对应的那个标签」：permission_resolved 不带 session_id（后端
+      // 契约如此），handleEvent 的会话路由会回落到 activeTab——旧实现无条件
+      // 清 routeTab 的卡数据，于是「A 标签的卡被解决」会把 B 标签挂着的那张
+      // 未决卡一并抹掉：切到 B 时 activateTab 的 `needsPerm && permData` 恢复
+      // 分支拿不到数据，卡永久消失，而后端那一轮还挂在权限门上无限等待。
+      // 改为按 request_id 匹配，只清真正被解决的那一张。
+      const rid = data.request_id;
+      if (rid) {
+        for (const t of [...chatTabs, ...splitPanes]) {
+          if (t.permData && t.permData.request_id === rid) {
+            t.needsPerm = false;
+            t.permData = null;
+          }
+        }
+        if (routeTab && routeTab.permData && routeTab.permData.request_id === rid) {
+          routeTab.needsPerm = false;
+          routeTab.permData = null;
+        }
         renderTabs();
       }
       break;
+    }
     case "usage":
       usageIn += data.input_tokens || 0;
       usageOut += data.output_tokens || 0;

@@ -649,6 +649,31 @@ def test_adversarial_flow_stats_filter_wiring():
     assert '.adv-finding[data-verdict="confirmed"]' in css
 
 
+def test_permission_resolved_clears_only_matching_tab():
+    """permission_resolved 只清「对应那一个」标签的卡数据。
+
+    后端契约里 PermissionResolved 不带 session_id，handleEvent 的会话路由会
+    回落到 activeTab。旧实现无条件清 routeTab 的 needsPerm/permData：
+    多标签各挂一张确认卡时，「A 的卡被解决」会把 B 挂着的那张未决卡一并
+    抹掉——切到 B 时 activateTab 的 `needsPerm && permData` 恢复分支拿不到
+    数据，卡永久消失，而后端那一轮还挂在权限门上无限等待。
+    """
+    js = read_app_bundle()
+    i = js.index('case "permission_resolved":')
+    body = js[i:js.index("break;", i)]
+    # 必须按 request_id 匹配标签，不能无条件清 routeTab
+    assert "t.permData.request_id === rid" in body, (
+        "permission_resolved 必须按 request_id 匹配标签，不能无条件清 routeTab"
+    )
+    assert "for (const t of [...chatTabs, ...splitPanes])" in body, (
+        "要遍历全部标签与分屏列，不只活动标签"
+    )
+    # 旧的无条件写法不得回归
+    assert "routeTab.needsPerm = false;\n        routeTab.permData = null;" not in body, (
+        "无条件清 routeTab 卡数据的旧写法回归了"
+    )
+
+
 def test_coop_cards_share_theme_tokens_and_narrow_rules():
     """三张协作卡共用同一套头部/状态/按钮节奏；新增样式只走主题变量，
     不写死颜色（六套主题自动适配），窄屏统一降级、焦点可见。"""

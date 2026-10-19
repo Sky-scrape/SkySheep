@@ -190,3 +190,45 @@ def test_normal_commands_still_get_prefix_rule(command: str) -> None:
     """常见子命令型命令仍应提炼出 prefix（保留便利性，非一刀切 exact）。"""
     rule = _rule_for(command)
     assert rule.kind == "prefix", (command, rule)
+
+
+
+# ---- 包装器前缀与带值旗标（对抗审查第二轮） ----
+
+@pytest.mark.parametrize("benign,malicious", [
+    ("sudo -u root python manage.py runserver", "sudo -u root rm -rf /"),
+    ("sudo -u root python manage.py runserver", "sudo -u other python x"),
+    ("nice -n 10 python x.py", "nice -n 10 rm -rf /"),
+    ("timeout -s KILL 5 python x.py", "timeout -s KILL 5 rm -rf /"),
+    ("sudo apt install foo", "sudo apt remove bar"),
+    ("nohup long.py", "nohup other.py"),
+])
+def test_wrapper_prefix_does_not_unlock_other_commands(benign: str, malicious: str) -> None:
+    """包装器两词前缀收尾在旗标/赋值上时不安全（sudo -u 后即任意 root 命令）；
+    提权包装器取三词前缀（sudo apt install 与 sudo apt remove 各成一类）。"""
+    rule = _rule_for(benign)
+    assert not rule.matches("run_command", malicious), (
+        f"包装器前缀过宽：批准 {benign!r}（rule={rule}）后放行 {malicious!r}"
+    )
+
+
+@pytest.mark.parametrize("command", [
+    "sudo -u root python -c 'import os'",
+    "sudo -u root python -m evil",
+    "nice -n 10 python -c 'x'",
+    "timeout -s KILL 5 python -c 'x'",
+    "sudo env X=1 node -e 'require(1)'",
+])
+def test_wrapper_value_option_skips_value(command: str) -> None:
+    """包装器带值旗标（-u root / -n 10 / -s KILL）的值被跳过，其后的解释器仍被识别。"""
+    assert _has_code_exec_flag(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "sudo apt install foo",
+    "sudo apt remove bar",
+    "echo hi",
+])
+def test_wrapper_ordinary_commands_not_code_exec(command: str) -> None:
+    """普通命令（无解释器旗标）不被误判 code-exec。"""
+    assert not _has_code_exec_flag(command), command

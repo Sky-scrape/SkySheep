@@ -167,6 +167,38 @@ _WRAPPER_COMMANDS = frozenset({
 # 解释器识别向前扫描的词数上限（跳过赋值/包装器/选项/纯数字后取真实命令词）。
 _INTERPRETER_SCAN_WINDOW = 8
 
+# 提权包装器：前缀提炼取三词（`sudo apt install` / `sudo apt remove` 各成一类），
+# 不用两词前缀——`sudo apt` 会把 install 与 remove 合并，remove 可卸载关键包。
+_SUDO_WRAPPERS = frozenset({"sudo", "doas"})
+
+# 包装器命令的「下一参数是值」旗标（小写，含长短形态）：`sudo -u root python`、
+# `nice -n 10 python` 这类调用里，值（root / 10）不是命令词，扫描时必须跳过，
+# 否则会把它当"非解释器词"提前终止、漏判后面的 python -c（此前已知限制）。
+# 只列会出现在"包装器 + 解释器"前缀里的常见包装器与它们的带值旗标；
+# 未列的包装器（如 `env`）用前置赋值处理，不带值旗标。
+# 值统一按小写比对（`w.lower() in opts`）：判定只看"这个旗标带不带值"，
+# 不区分 -u/-U 这类大小写语义差异——多跳过一个值只会多判 code-exec，方向 fail-closed。
+_WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({
+        "-u", "-g", "-h", "-p", "-c", "-t", "-r",
+        "--user", "--group", "--host", "--prompt", "--close-from",
+        "--role", "--type", "--other-user",
+    }),
+    "doas": frozenset({"-u", "-c"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "-n", "-p", "-u", "--class", "--classdata"}),
+    "chrt": frozenset({"-p", "-t", "--pid", "--sched-runtime"}),
+    "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "time": frozenset({"-f", "-o", "--format", "--output"}),
+    "nohup": frozenset(),
+    "setsid": frozenset(),
+    "command": frozenset(),
+    "exec": frozenset(),
+    "env": frozenset({"-u", "--unset", "-c", "--chdir", "-s", "--split-string"}),
+    "xargs": frozenset({"-n", "-i", "-l", "-p", "-s", "-a", "-d", "-e"}),
+}
+
 
 def _is_var_assignment(word: str) -> bool:
     """POSIX 前置赋值 `NAME=value`（NAME 是合法标识符）。"""
@@ -182,15 +214,43 @@ def _interpreter_invocation(text: str) -> bool:
     落在窗口外便不判 code-exec（审查 A1）。这里剥掉前置赋值与常见包装器，取第一个
     真实命令词判定。方向 fail-closed：宁可多判 code-exec，不多放行。
 
-    已知限制：包装器自带「带值选项」时（如 `nice -n 10 python`、`sudo -u root python`）
-    数值/用户名会被当普通词提前终止扫描而漏判——这类调用需已配置 sudo 免密/特定环境，
-    场景窄，且漏判只影响前缀规则提炼（仍会逐次确认），故不额外处理。
+    包装器的「带值旗标」（`sudo -u root python`、`nice -n 10 python`、`timeout -s
+    KILL 5 python`）按 _WRAPPER_VALUE_OPTS 跳过其值——值（root / 10 / KILL）不是命令词，
+    旧实现把它当普通词提前终止扫描，`sudo -u root python -c '<任意代码>'` 因此漏判
+    （对抗审查已知限制，现已修复）。
     """
-    for w in _tokenize(text)[:_INTERPRETER_SCAN_WINDOW]:
+    words = _tokenize(text)[:_INTERPRETER_SCAN_WINDOW]
+    wrapper: str | None = None
+    i = 0
+    while i < len(words):
+        w = words[i]
         exe = _norm_exe_name(w)
         if exe in _INTERPRETER_COMMANDS:
             return True
-        if _is_var_assignment(w) or exe in _WRAPPER_COMMANDS or w.isdigit() or w.startswith("-"):
+        if _is_var_assignment(w):
+            i += 1
+            continue
+        if exe in _WRAPPER_COMMANDS:
+            # 允许包装器链（`sudo env X=1 node -e …`）：后一个覆盖前一个，
+            # 后续按最新包装器的带值旗标表跳过其值
+            wrapper = exe
+            i += 1
+            continue
+        if wrapper is not None:
+            opts = _WRAPPER_VALUE_OPTS.get(wrapper, frozenset())
+            if w.lower() in opts:
+                i += 2  # 跳过该旗标的值（用户名 / 数值 / 信号名 / 目录）
+                continue
+            if w.startswith("-") and not w.isdigit():
+                i += 1  # 其他无值旗标
+                continue
+            if w.isdigit():
+                i += 1  # 位置数值（如 timeout 的时长）
+                continue
+            # 非选项、非数值：真命令词（非解释器则不是解释器调用）
+            return False
+        if w.isdigit() or w.startswith("-"):
+            i += 1
             continue
         return False
     return False
@@ -753,6 +813,30 @@ class PermissionGate:
             words = arg_text.split()
             if _has_code_exec_flag(arg_text):
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+            # 包装器两词前缀收尾在旗标/赋值上时不是安全前缀：`sudo -u` 之后的
+            # 命令是任意 root 操作，`nice -n` / `timeout -s` 同理——真实命令词
+            # 还没出现，前缀实质是「这个包装器的任意参数」，必须改为 exact
+            # （对抗审查第二轮：旧实现会为 `sudo -u root python manage.py x`
+            # 提炼 `sudo -u`，批准一次后 `sudo -u root rm -rf /` 免确认）
+            if (
+                len(words) >= 2
+                and _norm_exe_name(words[0]) in _WRAPPER_COMMANDS
+                and (words[1].startswith("-") or _is_var_assignment(words[1]))
+            ):
+                return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+            # 提权包装器（sudo/doas）取三词前缀：`sudo apt install` 与
+            # `sudo apt remove` 是不同操作（remove 可卸载关键包），两词前缀
+            # `sudo apt` 会把它们合并成一个放行面。三词前缀让子命令分开，
+            # 既保留常见免确认便利（install/status 各管各的），又不放大破坏面。
+            if (
+                len(words) >= 3
+                and _norm_exe_name(words[0]) in _SUDO_WRAPPERS
+                and not words[1].startswith("-")
+                and not _is_var_assignment(words[1])
+                and not words[2].startswith("-")
+            ):
+                prefix3 = " ".join(words[:3])
+                return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix3)
             # 「第二词之后仍是任意执行/任意文件面」的入口命令（docker/ssh/scp，
             # 见 _PREFIX_UNSAFE_COMMANDS 的清单与 kubectl 取舍注释）：与解释器
             # 调用同语义，没有安全前缀可提炼，只固化用户当时批准的这一条。

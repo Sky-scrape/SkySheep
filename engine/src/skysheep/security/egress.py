@@ -34,10 +34,13 @@ API Key、渠道 token 等）拼进命令、文件写入等工具参数里外传
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import time
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 from .. import secure_store
 
@@ -214,6 +217,57 @@ def _known_map() -> dict[str, str]:
     return m
 
 
+# 已知密钥值的编码变体：注入诱导的「编码绕行」最常见的几种机械变形。
+# 只为每个密钥生成**有界数量**的变体再对文本做子串匹配——不尝试解码任意文本
+# （解码形态空间不可枚举、误报与性能都不可控），成本与密钥数成正比。
+# 覆盖：URL 百分号编码（%XX，大小写各一份）、base64 标准与 urlsafe（去尾 =）、
+# JSON 转义（\uXXXX 与 \/ 形态）、hex。取变体里长度 >= MIN_SECRET_VALUE_CHARS
+# 的才算候选（短密钥的编码变体会退化成常见子串，必须排除）。
+def _encoded_variants(value: str) -> list[str]:
+    """把一个密钥值展开成它的常见编码变体（去重、去太短的）。"""
+    out: set[str] = set()
+    raw = value.encode("utf-8")
+
+    # URL 百分号编码：quote 不编码字母数字，所以纯字母数字密钥的 %XX 形态存在
+    try:
+        out.add(quote(value, safe=""))
+        out.add(quote_plus(value, safe=""))
+        # 部分编码（只编码特殊字符、保留字母数字）是更常见的写法：
+        # 对纯字母数字密钥它与原文相同，去重后不影响
+    except Exception:  # noqa: BLE001 - 编码失败只丢该变体
+        pass
+
+    # base64 标准与 urlsafe（去尾 = 是常见变体）
+    try:
+        b64 = base64.b64encode(raw).decode("ascii")
+        out.add(b64)
+        out.add(b64.rstrip("="))
+        urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+        out.add(urlsafe)
+        out.add(urlsafe.rstrip("="))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # hex（小写）
+    try:
+        out.add(binascii.hexlify(raw).decode("ascii"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # JSON 字符串里的转义形态：每个字符写成 \uXXXX（ASCII 之外必现，
+    # ASCII 内是可选的但确实有人这么生成）
+    try:
+        escaped_ascii = json.dumps(value, ensure_ascii=True)[1:-1]
+        out.add(escaped_ascii)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 原文本身不进变体表（调用方已单独匹配原文，避免重复命中同一条）
+    out.discard(value)
+    # 太短的变体不做子串匹配：会退化成常见词、误报不可接受
+    return [v for v in out if len(v) >= MIN_SECRET_VALUE_CHARS]
+
+
 def scan_outbound(text: str, *, known: list[str] | None = None) -> dict:
     """扫描出站文本里的密钥：命中已知值或通用形态即报。
 
@@ -242,14 +296,24 @@ def scan_outbound(text: str, *, known: list[str] | None = None) -> dict:
 
     # 已知值优先：子串命中全部记下（known 标签）；通用形态只补没被已知值
     # 覆盖的区段（用户真实 Key 同时长得像 sk-… 时按已知值报，文案更有用）。
+    # 除了原值，还要扫常见编码变体（base64 / %XX / \uXXXX / hex）——注入诱导的
+    # 典型规避就是「把密钥编码后再拼进 URL/命令」，只匹配原文等于漏掉一整类。
     spans: list[tuple[int, int, str, str]] = []
     has_known = False
     for value, label in known_map.items():
-        start = text.find(value)
+        needle = value
+        start = text.find(needle)
         while start != -1:
-            spans.append((start, start + len(value), label, "known"))
+            spans.append((start, start + len(needle), label, "known"))
             has_known = True
-            start = text.find(value, start + len(value))
+            start = text.find(needle, start + len(needle))
+        # 编码变体：标签带「编码」后缀，日志与文案里能看出是以变形形态命中的
+        for variant in _encoded_variants(value):
+            start = text.find(variant)
+            while start != -1:
+                spans.append((start, start + len(variant), label + "（编码变形）", "known"))
+                has_known = True
+                start = text.find(variant, start + len(variant))
     for name, pat in GENERIC_SECRET_PATTERNS:
         for m in pat.finditer(text):
             s, e = m.span()

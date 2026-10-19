@@ -126,6 +126,14 @@ class SubagentGate(PermissionGate):
     )
 
     async def authorize(self, tool, input_dict, **kwargs):
+        # 出站密钥防线必须先于 READONLY 短路（对抗审查第三轮）：researcher 型
+        # 子代理带 web_fetch / web_search（READONLY + open_world_hint），旧实现
+        # 在 READONLY 分支直接放行，而父类的 _egress_pre_deny 根本跑不到——
+        # 被注入的子代理可把本机配置里的真实密钥拼进 URL 静默外发，其余四道门
+        # （主门 / 无人值守 / 渠道 / 隔离）都拦，唯独子代理门漏了。
+        blocked = self._egress_pre_deny(tool, input_dict)
+        if blocked is not None:
+            return blocked
         # 引擎主目录写入守卫先于 READONLY 短路（与主门/无人值守/渠道门同口径，
         # 第二轮审查 FINDING 2）：memory_write 名义 READONLY 却写全局记忆
         # （注入所有项目所有会话的 system prompt），子代理内同样不得零确认放行。

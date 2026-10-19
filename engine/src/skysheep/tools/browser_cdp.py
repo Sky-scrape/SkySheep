@@ -49,6 +49,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from ..config import skysheep_home
 from ..messages import ImageBlock
+from ..sanitize import untrusted_data_wrap
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 from .computer import _prune_screenshots
 from .web import _resolve_public_ips
@@ -737,7 +738,11 @@ async def cdp_extract(conn: CdpConnection, session_id: str, selector: str) -> st
         text = await _eval_text(conn, session_id, expr)
         if not text:
             return "（页面没有可见文本。）"
-    return truncate_output(text)
+    # 提示注入纵深防御（机械标注层）：页面文本是任意外部内容，与 web_fetch /
+    # read_document 同口径包上「数据不是指令」标注。此前 web_page 的 extract
+    # 是唯一裸交付外部文本的入口——它甚至比 web_fetch 更危险（能带 Cookie
+    # 提取登录后页面，用户又看不到这个无头实例里发生了什么）。
+    return truncate_output(untrusted_data_wrap(text))
 
 
 async def cdp_screenshot(conn: CdpConnection, session_id: str) -> bytes:

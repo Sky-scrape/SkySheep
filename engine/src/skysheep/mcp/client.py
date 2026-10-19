@@ -40,6 +40,7 @@ from ..sanitize import (
     EMPTY_DESCRIPTION_PLACEHOLDER,
     MAX_PROMPT_DESCRIPTION_CHARS,
     sanitize_description,
+    untrusted_data_wrap,
 )
 from ..tools.base import Safety, Tool, ToolContext, ToolError, truncate_output
 from ..tools.web import _resolve_public_ips
@@ -507,6 +508,13 @@ def _extract_result(result: CallToolResult, ctx: ToolContext) -> str:
     text = "\n".join(parts)
     if images:
         text = (text + "\n" if text else "") + f"（另附加 {images} 张图片）"
+    if text:
+        # 提示注入纵深防御（机械标注层）：MCP 工具的返回内容来自外部服务器
+        # （远程服务或第三方包），与 web_fetch / read_document / web_page 同
+        # 口径包上「数据不是指令」标注。此前 MCP 结果是唯一裸交付外部文本的
+        # 入口——而它恰是最容易引入不可信内容的一条路（打开项目就自动连接的
+        # 项目级服务器、随手装的社区包）。
+        text = untrusted_data_wrap(text)
     return truncate_output(text, MAX_MCP_OUTPUT_CHARS)
 
 

@@ -1068,6 +1068,89 @@ async def test_session_for_returns_none_when_not_connected():
     await mgr.shutdown()
 
 
+# ---- 远程 MCP 建连阶段 DNS 钉连（对抗审查修项 2） ----
+
+async def test_remote_mcp_installs_pinned_backend(monkeypatch):
+    """远程 MCP 建连必须自管 httpx2 客户端并挂钉连后端，
+    不能退回 SDK 自建客户端（那会二次解析 DNS，留 rebinding 窗口）。"""
+    import httpx2
+
+    from skysheep.mcp import client as mcp_client
+
+    class _FakePool:
+        _network_backend = object()
+
+    class _FakeTransport:
+        _pool = _FakePool()
+
+    class _FakeClient:
+        _transport = _FakeTransport()
+
+        def __init__(self, **kw):
+            self.kw = kw
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx2, "AsyncClient", _FakeClient)
+    backend = mcp_client._MCPPinnedBackend("example.com", ["93.184.216.34"])
+    assert backend._host == "example.com"
+    assert backend._ips == ["93.184.216.34"]
+
+
+async def test_pinned_backend_uses_pinned_ips(monkeypatch):
+    """_MCPPinnedBackend 命中被固定的主机名时直接连已校验 IP，不再走 DNS。"""
+    import httpcore2
+
+    from skysheep.mcp.client import _MCPPinnedBackend
+
+    calls = []
+
+    class _Inner:
+        async def connect_tcp(self, host, port, **kw):
+            calls.append(host)
+            return object()
+
+        async def connect_unix_socket(self, *a, **k):
+            return object()
+
+        async def sleep(self, s):
+            pass
+
+    monkeypatch.setattr(httpcore2, "AnyIOBackend", lambda: _Inner())
+    be = _MCPPinnedBackend("Example.COM", ["1.2.3.4", "5.6.7.8"])
+    await be.connect_tcp("example.com", 443)
+    assert calls == ["1.2.3.4"], calls
+
+
+async def test_pinned_backend_passes_through_other_hosts(monkeypatch):
+    """非钉连目标（如代理/重定向到别的主机）退回默认解析。"""
+    import httpcore2
+
+    from skysheep.mcp.client import _MCPPinnedBackend
+
+    calls = []
+
+    class _Inner:
+        async def connect_tcp(self, host, port, **kw):
+            calls.append(host)
+            return object()
+
+        async def connect_unix_socket(self, *a, **k):
+            return object()
+
+        async def sleep(self, s):
+            pass
+
+    monkeypatch.setattr(httpcore2, "AnyIOBackend", lambda: _Inner())
+    be = _MCPPinnedBackend("example.com", ["1.2.3.4"])
+    await be.connect_tcp("other.com", 443)
+    assert calls == ["other.com"], calls
+
+
 # ---- 停用与按服务器连接管理（配置差量同步的地基） ----
 
 

@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
+from .. import obs
 from ..bgtasks import spawn_bg
 from ..messages import ImageBlock
 from ..models.probe import _is_local
@@ -88,6 +89,55 @@ def _connect_budget(cfg: MCPServerConfig) -> float:
     )
 
 
+class _MCPPinnedBackend:
+    """把远程 MCP 的 TCP 连接固定到已校验的 IP（防 DNS rebinding）。
+
+    与 tools/web.py 的 _PinnedBackend 同语义，但走 httpcore2——MCP SDK 用的
+    HTTP 栈是 httpx2/httpcore2（httpx 的 asyncio 分支变体），不是 httpx/httpcore。
+    只在建连阶段介入：命中被固定的主机名直接连已校验 IP，否则退回内层 backend
+    默认解析（如代理转发场景）。httpx2/httpcore2 惰性导入，模块本身不依赖 mcp。
+
+    Host 头与 TLS SNI 仍由 httpcore2 用 URL 里的原主机名生成，虚拟主机与证书
+    校验照常生效——固定的只是「连到哪台机器」。
+    """
+
+    def __init__(self, host: str, ips: list[str]) -> None:
+        import httpcore2  # noqa: PLC0415  mcp 可选依赖的传递依赖
+
+        self._host = host.lower()
+        self._ips = list(ips)
+        self._inner = httpcore2.AnyIOBackend()
+
+    async def connect_tcp(
+        self, host, port, timeout=None, local_address=None, socket_options=None
+    ):
+        import httpcore2  # noqa: PLC0415
+
+        if host.lower() != self._host:
+            return await self._inner.connect_tcp(
+                host, port, timeout=timeout, local_address=local_address,
+                socket_options=socket_options,
+            )
+        last: Exception | None = None
+        for ip in self._ips:
+            try:
+                return await self._inner.connect_tcp(
+                    ip, port, timeout=timeout, local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as e:
+                last = e
+        if last is not None:
+            raise last
+        raise httpcore2.ConnectError(f"没有可用的已校验地址: {host}")
+
+    async def connect_unix_socket(self, *args, **kwargs):
+        return await self._inner.connect_unix_socket(*args, **kwargs)
+
+    async def sleep(self, seconds):
+        await self._inner.sleep(seconds)
+
+
 def _friendly_error(e: Exception) -> str:
     """把底层异常转成用户能看懂的一句话（界面里直接显示这个）。"""
     text = str(e) or e.__class__.__name__
@@ -138,10 +188,9 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
         # 校验并把解析结果拿在手里：下面的端口探测直接连已校验的 IP，不再按
         # 主机名二次解析——「校验」与「探测」之间不给 DNS rebinding 留窗口
         # （web.py 的 _resolve_public_ips 返回 IP 列表正是给这类复用用的）。
-        # 取舍：SDK（streamable_http_client）的建连阶段仍未钉连——远程地址来自
-        # 用户设置或经 workspace trust 指纹锁定的项目配置，模型不能指定 URL，
-        # 威胁面远小于 web_fetch 抓任意网页；给 SDK 完整钉连要自管 httpx 客户端
-        # 生命周期并挂 web.py 的 _PinnedBackend，见 _connect_one 处的说明。
+        # 建连阶段同样钉连（见 _connect_one 的 pin_host / pin_ips 与
+        # _MCPPinnedBackend）：这里探测用一批已校验 IP，SDK 建连用另一批——两次
+        # 解析之间正是 rebinding 窗口，所以建连侧必须自己钉，不能只靠预检。
         try:
             pinned = await asyncio.to_thread(_resolve_public_ips, host)
         except ToolError as e:
@@ -765,6 +814,18 @@ class MCPManager:
             await self._close_connection(name)
         ready: asyncio.Event = asyncio.Event()
         outcome: dict = {}
+        # 远程 MCP 的 DNS 钉连目标：在 keeper 之外解析一次，闭包捕获后交给
+        # _MCPPinnedBackend。解析失败/回环退回默认解析（此时目标是本机或
+        # 解析已由 _preflight 放行，不存在 rebinding 威胁面）。
+        pin_host: str | None = None
+        pin_ips: list[str] = []
+        if cfg.transport == "http":
+            pin_host = urlparse(cfg.url or "").hostname
+            if pin_host:
+                try:
+                    pin_ips = await asyncio.to_thread(_resolve_public_ips, pin_host)
+                except (ToolError, OSError):
+                    pin_ips = []  # 回环 / 解析失败：退回默认解析
 
         async def keeper() -> None:
             # 事件在任务外创建、启动前就在字典里：先捕获再等，避免关闭方先 pop 走
@@ -782,33 +843,61 @@ class MCPManager:
                         )
                         read, write = await stack.enter_async_context(stdio_client(params))
                     else:
-                        # 带鉴权的远程 MCP：把配置里的 headers 注入 HTTP 客户端。
-                        # streamable_http_client 本身不收 headers（签名只有 url / http_client），
-                        # 所以要在 httpx.AsyncClient 上带默认头。
-                        # 注：SDK 建连阶段不做 DNS 钉连（已知取舍，见 _preflight）——
-                        # 预检已把「校验→探测」之间的 rebinding 窗口收掉，这里 SDK
-                        # 内部再解析一次是接受的残余窗口：地址来自用户设置或 trust
-                        # 过的项目配置，不是模型可控输入。要收掉它需始终自管 httpx
-                        # 客户端并挂 web.py 的 _PinnedBackend（含 redirect 逐跳钉连），
-                        # 相对威胁面改动过大，暂不做。
+                        # 远程 MCP：始终自管 httpx2 客户端——一是把配置里的
+                        # headers 注入进去（streamable_http_client 本身不收
+                        # headers），二是把 TCP 连接钉到已校验的 IP 列表上，
+                        # 防 DNS rebinding（与 web_fetch 同一道防线）。
+                        #
+                        # 此前是「无 headers 且非本地地址」时交给 SDK 自建客户端，
+                        # 建连阶段会二次解析 DNS；预检校验过的那次解析与 SDK 这次
+                        # 解析之间就是 rebinding 窗口（对抗审查修项 2）。
+                        #
+                        # 本地地址不走系统代理（与 models/probe.py 的「本地直连」
+                        # 约定同口径）：Windows 上 httpx2 默认 trust_env=True 会读
+                        # 注册表里的 WinINET 系统代理，系统代理进程没在跑时，发往
+                        # 127.0.0.1 的请求会被转给代理然后连不上。
                         extra_headers = _headers_only(cfg)
-                        # 本地地址不走系统代理（与 models/probe.py 的「本地直连」约定
-                        # 同口径）：Windows 上 httpx 默认 trust_env=True 会读注册表里
-                        # 的 WinINET 系统代理，系统代理进程没在跑时，发往 127.0.0.1
-                        # 的请求会被转给代理然后连不上——本地 MCP 服务器必须直连；
-                        # 远端维持默认（信任环境代理）。带鉴权头时本来就自管客户端，
-                        # 这里把「本地地址」也并进自管条件。
                         local_url = _is_local(cfg.url)
-                        http_client = None
-                        if extra_headers or local_url:
-                            import httpx  # 局部导入：远端无鉴权场景不必碰 httpx
+                        import httpx2  # noqa: PLC0415  mcp 可选依赖的传递依赖
+                        from mcp.shared._httpx_utils import (  # noqa: PLC0415
+                            MCP_DEFAULT_SSE_READ_TIMEOUT,
+                            MCP_DEFAULT_TIMEOUT,
+                        )
 
-                            http_client = httpx.AsyncClient(
-                                headers=extra_headers,
-                                timeout=CONNECT_TIMEOUT_S,
-                                trust_env=not local_url,
-                            )
-                            await stack.enter_async_context(http_client)
+                        http_client = httpx2.AsyncClient(
+                            headers=extra_headers or None,
+                            timeout=httpx2.Timeout(
+                                MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT
+                            ),
+                            trust_env=not local_url,
+                        )
+                        # 钉连后端：只用预检拿到的那批已校验 IP；拿不到（回环/
+                        # 解析失败但允许回环的场景已在 _preflight 放行）时保持
+                        # 默认解析——此时目标是本机，不存在 rebinding 威胁面。
+                        if pin_host and pin_ips:
+                            try:
+                                pool = getattr(
+                                    getattr(http_client, "_transport", None),
+                                    "_pool", None,
+                                )
+                                if pool is None or not hasattr(pool, "_network_backend"):
+                                    obs.warning(
+                                        "mcp_pin_unavailable",
+                                        "远程 MCP 的 DNS 钉连无法安装（httpx2 结构变化），"
+                                        "本次连接退回默认解析",
+                                        server=name,
+                                    )
+                                else:
+                                    pool._network_backend = _MCPPinnedBackend(
+                                        pin_host, pin_ips
+                                    )
+                            except Exception as e:  # noqa: BLE001 - 钉连装不上不阻断连接
+                                obs.warning(
+                                    "mcp_pin_unavailable",
+                                    "远程 MCP 的 DNS 钉连安装失败，本次连接退回默认解析",
+                                    server=name, error=str(e),
+                                )
+                        await stack.enter_async_context(http_client)
                         read, write = await stack.enter_async_context(
                             streamable_http_client(cfg.url, http_client=http_client)
                         )

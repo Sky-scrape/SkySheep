@@ -202,6 +202,52 @@ og 标签，以及两份 README 的副标题与开篇段统一改为以圆桌 / 
   请求都在事件循环里同步读盘；圆桌 / 对抗 / 团队三处逐字相同的 emit 闭包合并为
   `_dump_emit` 工厂。产品代码全部盲捕获补 `# noqa: BLE001` 并附理由，ruff 启用 BLE
   规则（tests / examples / desktop.py 按性质豁免），hatch 构建显式排除 `.mimosa` / `.zcode`。
+- **白名单前缀规则的解释器旗标与任意执行入口补齐**：批准一次看似无害的命令后，同前缀
+  的危险变体曾可免确认执行——`python -m pytest` 放行 `python -m <任意模块>`、
+  `powershell -File x.ps1` 放行任意脚本、`wsl -d Ubuntu ls` 放行 `wsl -d <任意> bash -c <任意>`、
+  `certutil -urlcache …` 放行任意 URL 下载落地。新增 `_INTERPRETER_EXTRA_FLAGS`
+  （`-m`/`-File`/`-f`/`eval`/`--require` 等，只对解释器调用生效，避免 `tar -m` / `curl -f` 误伤）
+  与扩充的 `_PREFIX_UNSAFE_COMMANDS`（wsl / npx / uvx / bunx / go / make /
+  regsvr32 / certutil / mshta / rundll32）；脚本名后追加旗标的变体 fail-closed，
+  原命令仍保留 prefix（不破坏 `python manage.py runserver` 既有语义）。19 条端到端绕过
+  路径全部封死，新增 72 条回归用例。
+- **包装器前缀过宽与带值旗标漏判**：`sudo -u root python manage.py x` 此前提炼出
+  `sudo -u` 两词前缀，批准一次后 `sudo -u root rm -rf /` 等任意提权命令免确认。新增
+  `_WRAPPER_VALUE_OPTS` 让包装器的带值旗标（`-u root` / `-n 10` / `-s KILL`）在解释器
+  识别时跳过其值（此前会把值当普通词提前终止扫描、漏判 `python -c`）；包装器两词前缀
+  收尾在旗标/赋值上时改为 exact；提权包装器取三词前缀（`sudo apt install` 与
+  `sudo apt remove` 各成一类）；允许包装器链（`sudo env X=1 node -e …`）。
+- **SubagentGate 绕过出站密钥防线**：其余四道门（主门 / 无人值守 / 渠道 / 隔离）都在
+  READONLY 短路前跑 `_egress_pre_deny`，唯独子代理门漏了——researcher 型子代理带
+  `web_fetch` / `web_search`，被注入后可零确认把本机配置里的真实密钥拼进 URL 外发。
+  补齐前置，新增「五道门对已知密钥外发一律预拒绝」的对照用例。
+- **出站密钥扫描覆盖编码变形**：此前只匹配原文，注入诱导的编码规避（base64 / %XX /
+  `\uXXXX` / hex）整类漏过。改为把每个已知密钥展开成有界的编码变体再匹配（成本与
+  密钥数成正比），短于 `MIN_SECRET_VALUE_CHARS` 的变体不做子串匹配以防误报；命中标签
+  带「（编码变形）」后缀。
+- **远程 MCP 建连阶段钉连 DNS**：预检已把解析结果钉到探测连接上，但 SDK 建连时会自己
+  再解析一次 DNS，两次解析之间是 rebinding 窗口。远程 MCP 改为一律自管 httpx2 客户端并
+  挂新的 `_MCPPinnedBackend`（走 httpcore2，MCP SDK 的 HTTP 栈），只连预检拿到的已校验
+  IP；装不上时降级并留 obs 告警（不阻断连接）。
+- **web_page extract 与 MCP 结果的注入标注**：`web_fetch` / `read_document` 早已包上
+  「数据不是指令」标注，这两个入口漏了——`web_page` 的 extract 甚至比 `web_fetch` 更
+  危险（能带 Cookie 提取登录后页面，用户看不到无头实例里发生了什么），MCP 结果则来自
+  外部服务器（打开项目就自动连接的项目级服务器是最大的不可信内容来源）。统一改为
+  `untrusted_data_wrap(text)`。
+- **写租约取消泄漏**：多路径领取（`move_file` 源+目标）中途被取消时，已登记的条目无人
+  释放——agent 循环的 `finally` 只 release 已返回的 lease 对象。最坏等
+  `LEASE_TTL_S`（600s）才被 TTL 清掉，期间别的会话写同路径会白等一个
+  `WRITE_LEASE_WAIT_S` 并被扣上「可能覆盖对方改动」的错误注记。claim 主体拆成
+  `_claim_loop`，异常路径统一按身份归还。
+- **确认卡预览阻塞事件循环**：`move_file` / `delete_file` 的预览递归扫全树 + 逐文件
+  stat，同步跑在事件循环上——5000 文件实测 93ms，`node_modules` 级十万+ 文件约 2 秒，
+  期间 WS 推送、渠道、其它会话全部冻结。改为 `asyncio.to_thread` + 加 20k 条目扫描
+  上限，并明确提示「实际文件数可能更多」（删目录不可逆）。
+- **permission_resolved 只清对应标签的确认卡**：该事件不带 `session_id`，前端会话路由
+  会回落到活动标签；旧实现无条件清 `routeTab` 的 `needsPerm`/`permData`，多标签各挂一张
+  确认卡时会把后台标签那张未决卡一并抹掉——切过去时恢复分支拿不到数据，卡永久消失而
+  后端那一轮还挂在权限门上等待。改为按 `request_id` 匹配 `chatTabs` / `splitPanes` 里
+  真正挂那张卡的标签。
 
 ## [2.5.1] - 2026-10-12
 

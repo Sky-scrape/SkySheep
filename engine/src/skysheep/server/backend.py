@@ -798,7 +798,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.mods_claude = None
         self._pending_mod_install: dict | None = None  # 两段安装的待确认项
         self.term = TerminalManager()
-        self.aux_history: list[Message] = []
+        self.aux_histories: dict[str, list[Message]] = {}
         # 会话级模型覆盖（分屏独立对话）：sid → (服务名, 模型名)。有记录的会话
         # runtime 用覆盖模型（_runtime_provider 首建时、session.model_switch 热切），
         # 未记录的跟随全局；session.model_switch 写、delete_session 清
@@ -6541,7 +6541,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._trust = None
         # 辅助对话的历史里带着旧项目的 cwd（系统消息只在历史为空时注入），
         # 换项目不清掉的话，模型仍以为还在上一个目录里干活
-        self.aux_history = []
+        self.aux_histories.clear()
         # 白名单按项目隔离：换项目 = 换一套规则；权限档位跨项目保持
         prev_accept = self.gate.auto_accept_write if self.gate else False
         prev_full = self.gate.auto_accept_all if self.gate else False

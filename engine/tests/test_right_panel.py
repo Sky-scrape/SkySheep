@@ -1,6 +1,6 @@
-"""底部终端面板（PTY 真终端：term.spawn/input/resize/close）、辅助对话（chat.aux）、
-审查（checkpoint.diff）、项目记忆读写（编码安全 / 截断明示 / 切项目重置 aux 历史）、
-以及界面偏好的标签持久化（right_tabs 等）。"""
+"""底部终端面板（PTY 真终端：term.spawn/input/resize/close）、辅助对话（chat.aux，
+支持多实例 auxN 各自独立历史）、审查（checkpoint.diff）、项目记忆读写（编码安全 /
+截断明示 / 切项目重置 aux 历史）、以及界面偏好的标签持久化（right_tabs 等）。"""
 
 from __future__ import annotations
 
@@ -160,6 +160,41 @@ def test_chat_aux_streams_and_keeps_history(home):
         assert [m.role for m in third_call] == ["system", "user"]
 
 
+def test_chat_aux_multiple_instances_are_isolated(home):
+    """辅助对话多开：不同 aux_id 各自一份独立历史，互不串上下文；
+    aux.clear 只清指定的那个实例，其余实例的记忆保留。"""
+    from skysheep.models.fake import FakeProvider
+
+    prov = FakeProvider([
+        [TextBlock(text="A1")], [TextBlock(text="B1")],
+        [TextBlock(text="A2")], [TextBlock(text="B2")],
+    ])
+    with make_client(home, [], provider=prov) as client, client.websocket_connect("/ws") as ws:
+        def ask(mid, text, aux_id):
+            ws.send_json({"id": mid, "method": "chat.aux",
+                          "params": {"text": text, "aux_id": aux_id}})
+            return recv_until(ws, mid)
+
+        assert ask("a1", "问 A 一", "aux1")["ok"]
+        assert ask("b1", "问 B 一", "aux2")["ok"]
+        # aux2 的第二问不该看到 aux1 的问答
+        assert ask("b2", "问 B 二", "aux2")["ok"]
+        second_b = prov.calls[2]
+        assert [m.role for m in second_b] == ["system", "user", "assistant", "user"]
+        assert "问 B 一" in second_b[1].text
+        assert all("问 A 一" not in m.text for m in second_b if m.role != "system")
+
+        backend = client.app.state.backend
+        assert set(backend.aux_histories) == {"aux1", "aux2"}
+
+        # 清 aux1 不影响 aux2
+        ws.send_json({"id": "c1", "method": "aux.clear", "params": {"aux_id": "aux1"}})
+        assert recv_until(ws, "c1")["result"]["cleared"] is True
+        assert "aux1" not in backend.aux_histories
+        roles_b = [m.role for m in backend.aux_histories["aux2"]]
+        assert roles_b == ["system", "user", "assistant", "user", "assistant"]
+
+
 def test_chat_aux_requires_provider(home):
     # 不注入 provider 工厂 → provider 为 None → 给出可读错误
     from fastapi.testclient import TestClient
@@ -239,7 +274,12 @@ def test_aux_model_chat_uses_detached_provider(home):
 
 
 def test_aux_model_wired(home):
-    """前端接线：发送钮上方的徽章入口、弹出菜单容器、装载与切换调用都在。"""
+    """前端接线：发送钮上方的徽章入口、弹出菜单容器、装载与切换调用都在。
+
+    辅助对话自 2.6.2 起支持多开：每个 auxN 的页面由 createAuxPage 动态创建，
+    徽章/输入框/发送钮从固定 id 改为类名（.aux-model-chip 等），因此这里校验
+    JS 源码里的模板结构，不再依赖 index.html 里的静态节点。
+    """
     from skysheep.server.app import STATIC_DIR
 
     js = read_app_bundle()
@@ -247,13 +287,14 @@ def test_aux_model_wired(home):
     assert "refreshAuxModel" in js and "pickAuxModel" in js
     assert "providerAvatar(" in js  # 闭合态只显品牌 logo
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    assert 'id="aux-model-chip"' in html and 'id="aux-model-menu"' in html
+    assert 'id="aux-model-menu"' in html  # 菜单容器仍是全局单例
     # 徽章与发送按钮同侧上下排列：同在 aux-row 右侧的 aux-side 纵列里，
-    # 徽章在上、发送在下（DOM 顺序 textarea → 徽章 → 发送）
-    assert 'class="aux-side"' in html
-    i_input = html.index('id="aux-input"')
-    i_chip = html.index('id="aux-model-chip"')
-    i_send = html.index('id="aux-send"')
+    # 徽章在上、发送在下（DOM 顺序 textarea → 徽章 → 发送），由 createAuxPage 生成
+    assert "function createAuxPage(" in js
+    assert 'class="aux-side"' in js
+    i_input = js.index('class="aux-input"')
+    i_chip = js.index('class="aux-model-chip"')
+    i_send = js.index('class="rp-mini primary aux-send-btn"')
     assert i_input < i_chip < i_send
 
 
@@ -446,44 +487,76 @@ def test_ui_prefs_right_panel_keys(home):
         assert stored["right_active"] == "memory"
 
 
-def test_rp_tabs_compress_then_scroll(home):
-    """标签条压缩呈现：先均分收缩、藏图标留字，压到放不下转横向滚动。
+def test_aux_multi_instance_prefs_roundtrip(home):
+    """辅助对话多开实例的标签持久化：auxN 形式的 id 合法可存取；aux_titles
+    自定义标题随偏好往返；非 auxN 的伪造 id 与空标题被拒。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({
+            "id": "u1", "method": "ui.save",
+            "params": {"prefs": {
+                "right_tabs": ["aux1", "aux2", "files", "auxBogus", "aux"],
+                "right_active": "aux2",
+                "aux_titles": {"aux1": "代码问题", "aux2": "   ", "files": "越界"},
+            }},
+        })
+        frame = recv_until(ws, "u1")
+        prefs = frame["result"]["prefs"]
+        # aux1/aux2 收下；auxBogus 不是 auxN 形式；files 不是辅助对话实例
+        assert prefs["right_tabs"] == ["aux1", "aux2", "files", "aux"]
+        assert prefs["right_active"] == "aux2"
+        # 空白标题与非 auxN 键都不收
+        assert prefs["aux_titles"] == {"aux1": "代码问题"}
 
-    均分 + 省略号 + title 提示保证标签再多也不挤成糊；旧设计的终档是
-    「整格只剩图标」（关闭钮悬浮右上角），实际用起来要逐个猜，已废除——
-    不足 64px/个就不再压缩，标签回到自然宽度、整条栏横向滑动查看。
+        ws.send_json({"id": "u2", "method": "ui.get"})
+        stored = recv_until(ws, "u2")["result"]["prefs"]
+        assert stored["aux_titles"] == {"aux1": "代码问题"}
+        assert stored["right_tabs"] == ["aux1", "aux2", "files", "aux"]
+
+        # 传 null 删键（= 全部回到默认名）
+        ws.send_json({"id": "u3", "method": "ui.save", "params": {"prefs": {"aux_titles": None}}})
+        assert "aux_titles" not in recv_until(ws, "u3")["result"]["prefs"]
+
+
+def test_rp_tabs_compress_and_overflow_menu(home):
+    """标签条压缩呈现：先均分收缩、藏图标留字；挤到看不清时出现行尾「»」菜单。
+
+    标签**不横向滚动**（来回拖找标签成本高）：容器 overflow 收住，标签永远
+    均分压缩、文字截断加省略号；不足 92px/个藏图标只留字；不足 64px/个时
+    文字已只能显示两三个字，这时行尾出现「»」按钮，点开列出全部标签直接跳。
     档位由 JS 渲染后按均分宽度判定。
     """
     from skysheep.server.app import STATIC_DIR
 
     js = read_app_bundle()
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    # CSS：容器开横向滚动（平时均分不会溢出、无滚动条）；标签可压缩、文字截断
+    # CSS：容器不横滚（overflow:hidden）；标签可压缩、文字截断
     tabs_block = css.split("#rp-tabs {")[1].split("}")[0]
-    assert "overflow-x: auto" in tabs_block, "压到放不下时标签条要能横向滚动"
+    assert "overflow-x: auto" not in tabs_block, "标签条不再横向滚动"
+    assert "overflow: hidden" in tabs_block
+    assert "#rp-tabs::-webkit-scrollbar" not in css, "滚动条样式随之删除"
     tab_block = css.split(".rp-tab {")[1].split("}")[0]
     assert "flex: 1 1 0" in tab_block and "min-width: 0" in tab_block
     span_rule = css.split(".rp-tab > span:not(.rp-x) {")[1].split("}")[0]
     assert "text-overflow: ellipsis" in span_rule
     assert "#rp-tabs.rp-tight" in css, "不足 92px/个时藏图标留字"
-    assert "#rp-tabs.rp-scroll" in css, "压到放不下转横向滚动"
+    assert "rp-scroll" not in css, "横向滚动档已删除"
     assert "rp-cramped" not in css and "rp-icon" not in css, "紧凑档/图标档已废除"
-    # 滚动档：标签回到自然宽度，不再被压扁
-    scroll_rule = css.split("#rp-tabs.rp-scroll .rp-tab {")[1].split("}")[0]
-    assert "flex: 0 0 auto" in scroll_rule
-    # JS：档位判定抽成 applyRpTabDensity，渲染与容器宽度变化（ResizeObserver）共用；
-    # 两档互斥（滚动档标签有自然宽度，tight 的藏图标规则无意义）
+    # 「»」全部标签按钮：平时不显示，挤到看不清时（rp-has-more）出现
+    more_rule = css.split(".rp-more {")[1].split("}")[0]
+    assert "display: none" in more_rule
+    assert "#rp-tabs.rp-has-more .rp-more { display: inline-flex; }" in css
+    # JS：档位判定抽成 applyRpTabDensity，渲染与容器宽度变化（ResizeObserver）共用
     assert "function applyRpTabDensity(" in js
-    assert 'classList.toggle("rp-scroll", key === "scroll")' in js
     assert 'classList.toggle("rp-tight", key === "tight")' in js
+    assert 'classList.toggle("rp-has-more", key === "more")' in js
+    assert '"scroll"' not in js.split("function applyRpTabDensity(")[1].split("}")[0]
     assert "iconOnly" not in js and '"cramped"' not in js, "图标档/紧凑档判定已删"
     assert "ResizeObserver" in js, "拖面板宽度后档位要即时跟上"
-    # 溢出时保证激活标签可见（scrollIntoView 同 #chat-tabs）
-    assert 'scrollIntoView({ block: "nearest", inline: "nearest" })' in js
-    # 「＋」钮在标签栏最左、常驻可见：横滚档粘在可视区左缘，不随标签滚出画面
+    # 溢出菜单列出全部标签、直接激活
+    assert "function showRpOverflowMenu(" in js
+    assert "activateRightTab(id)" in js
+    # 「＋」钮在标签栏最左
     assert "rpTabs.prepend(addBtn)" in js, "＋ 要插在所有标签之前（行首）"
-    add_rule = css.split(".rp-add {")[1].split("}")[0]
-    assert "position: sticky" in add_rule and "left: 0" in add_rule
     # RO 回调必须 rAF 推迟 + 档位无变化不写 DOM：回调内同步改布局会刷
     # 「ResizeObserver loop completed」告警（真循环的根因在各自 RO 回调里修；
     # 曾兜底的调试错误陷阱 __errdump 已按评审移除，这里只锁根因侧的修法）
@@ -496,7 +569,7 @@ def test_rp_tabs_compress_then_scroll(home):
 def test_chat_aux_remote_is_stateless(home, monkeypatch):
     """审查 P1-3 收口：远程调用的辅助对话必须无状态。
 
-    共享 aux_history 是本机侧栏的面板语义——远端借「重复上面的内容」类提问
+    共享 aux_histories 是本机侧栏的面板语义——远端借「重复上面的内容」类提问
     能套出本机用户问过什么，远端的提问也不该写进本机面板。local=False 时
     用一次性历史：模型只看到 system + 本条消息，共享历史零读写。
     """
@@ -515,7 +588,7 @@ def test_chat_aux_remote_is_stateless(home, monkeypatch):
         assert [m.role for m in prov.calls[0]] == ["system", "user"]
         # 共享历史零读写
         backend = client.app.state.backend
-        assert backend.aux_history == []
+        assert backend.aux_histories == {}
 
     # 本机调用语义不变：仍走共享历史（先恢复 _client_is_local 的远端模拟）
     monkeypatch.undo()
@@ -524,4 +597,4 @@ def test_chat_aux_remote_is_stateless(home, monkeypatch):
         ws.send_json({"id": "a2", "method": "chat.aux", "params": {"text": "本地问题"}})
         assert recv_until(ws, "a2")["ok"]
         backend = client.app.state.backend
-        assert [m.role for m in backend.aux_history] == ["system", "user", "assistant"]
+        assert [m.role for m in backend.aux_histories["aux1"]] == ["system", "user", "assistant"]

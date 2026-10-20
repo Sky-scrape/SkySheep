@@ -79,6 +79,25 @@ class PreferencesMixin:
         "todo", "ptasks", "cron", "pipeline", "relay", "terminal",
         "mcp", "skills",  # ext（MCP / Skills）的分段 id：right_active 存的就是它
     )
+
+    @classmethod
+    def _is_right_tab_id(cls, tid) -> bool:
+        """标签 id 合法：白名单里的容器/分段 id，或辅助对话多开实例 aux1/aux2…"""
+        if not isinstance(tid, str) or not tid:
+            return False
+        if tid in cls.RIGHT_TAB_IDS:
+            return True
+        return cls._is_aux_instance_id(tid)
+
+    @staticmethod
+    def _is_aux_instance_id(tid) -> bool:
+        """辅助对话多开实例 id（aux1 / aux2 …）：只认这种形式，无编号的 aux 不算实例。"""
+        return (
+            isinstance(tid, str)
+            and len(tid) > 3
+            and tid.startswith("aux")
+            and tid[3:].isdigit()
+        )
     # 会话标签恢复：session.tabs 存 sid 数组（与 tab_order 同款上限），
     # session.active 存激活的 sid。都在前端写（标签开/关/切换时），
     # snapshot() 读出来校验归属后下发给前端恢复。
@@ -87,6 +106,22 @@ class PreferencesMixin:
     # 新会话默认模型（ui.json 的 default_model）：provider 键用字符串白名单校验
     # （只能是已配置的服务名），模型名随 provider 一起存进 value（"name::model"）
     DEFAULT_MODEL_PROVIDER_KEY = "default_model_provider"
+
+    @classmethod
+    def _clean_aux_titles(cls, val) -> dict[str, str]:
+        """清洗辅助对话实例的自定义标题：键只认 auxN（辅助对话实例），
+        值是非空字符串（去首尾空白、截断到 40 字）；整体封顶 50 条。"""
+        if not isinstance(val, dict):
+            return {}
+        cleaned: dict[str, str] = {}
+        for k, v in val.items():
+            if not cls._is_aux_instance_id(k):
+                continue
+            if isinstance(v, str) and v.strip():
+                cleaned[k[:32]] = v.strip()[:40]
+            if len(cleaned) >= 50:
+                break
+        return cleaned
 
     def _ui_prefs_path(self) -> Path:
         return skysheep_home() / "ui.json"
@@ -133,13 +168,18 @@ class PreferencesMixin:
         if isinstance(tabs, list):
             cleaned: list[str] = []
             for t in tabs:
-                if t in self.RIGHT_TAB_IDS and t not in cleaned:
+                if self._is_right_tab_id(t) and t not in cleaned:
                     cleaned.append(t)
             if cleaned:
                 prefs["right_tabs"] = cleaned
         active = data.get("right_active")
-        if isinstance(active, str) and active in self.RIGHT_TAB_IDS:
+        if self._is_right_tab_id(active):
             prefs["right_active"] = active
+        titles = data.get("aux_titles")
+        if isinstance(titles, dict):
+            cleaned_titles = self._clean_aux_titles(titles)
+            if cleaned_titles:
+                prefs["aux_titles"] = cleaned_titles
         order = data.get("project_order")
         if isinstance(order, list) and all(
             isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in order
@@ -300,7 +340,7 @@ class PreferencesMixin:
         """
         current = self._read_ui_prefs()
         for key, val in (prefs or {}).items():
-            known = ("right_tabs", "right_active", "project_order", "quick_pos",
+            known = ("right_tabs", "right_active", "aux_titles", "project_order", "quick_pos",
                      "session_order", "tab_order", "session_tabs", "session_active",
                      "provider_order",
                      "hotkey", "default_model_name", "default_model_provider",
@@ -332,7 +372,7 @@ class PreferencesMixin:
                 if isinstance(val, list):
                     cleaned: list[str] = []
                     for t in val:
-                        if t in self.RIGHT_TAB_IDS and t not in cleaned:
+                        if self._is_right_tab_id(t) and t not in cleaned:
                             cleaned.append(t)
                     if cleaned:
                         current["right_tabs"] = cleaned
@@ -340,10 +380,19 @@ class PreferencesMixin:
                         current.pop("right_tabs", None)
                 continue
             if key == "right_active":
-                if isinstance(val, str) and val in self.RIGHT_TAB_IDS:
+                if self._is_right_tab_id(val):
                     current["right_active"] = val
                 else:
                     current.pop("right_active", None)
+                continue
+            if key == "aux_titles":
+                # 辅助对话实例的自定义标题：{ aux1: "代码问题", ... }。
+                # 键只认 auxN（辅助对话实例），值是非空字符串；空表 = 全用默认名
+                cleaned_titles = self._clean_aux_titles(val)
+                if cleaned_titles:
+                    current["aux_titles"] = cleaned_titles
+                else:
+                    current.pop("aux_titles", None)
                 continue
             if key == "project_order":
                 # 分组视图拖动排序的项目 id 顺序（项目列表的展示序，随 ui.json 持久化）。

@@ -4448,20 +4448,15 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
   background: var(--card); border-left: 2px solid var(--ink-line);
 }
 
-/* 标签头：标签一多先压缩呈现——全部标签均分剩余宽度，文字截断加省略号；
+/* 标签头：标签一多就压缩呈现——全部标签均分剩余宽度，文字截断加省略号；
    悬停/激活时完整标题在 title 提示里。太窄时降级（判定见 app.js 的
-   applyRpTabDensity）：先藏图标留文字；再窄就不再挤，整条标签栏横向滚动
-   （标签回到自然宽度，激活标签滚入可视区），行首「＋」粘在可视区左缘常驻。
-   滚动条压细同 #chat-tabs */
+   applyRpTabDensity）：先藏图标留文字；再挤到只能显示两三个字时，行尾出现
+   「»」按钮列出全部标签（标签栏本身不横滚，来回拖找标签成本太高）。 */
 #rp-tabs {
   display: flex; align-items: stretch; flex-shrink: 0;
   border-bottom: 2px solid var(--ink-line); padding: 0 6px;
-  overflow-x: auto; overflow-y: hidden;
+  overflow: hidden; /* 标签始终均分压缩显示，不横滚（超出用「»」菜单看全部） */
 }
-#rp-tabs::-webkit-scrollbar { height: 5px; }
-#rp-tabs::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 3px; border: none; }
-#rp-tabs::-webkit-scrollbar-thumb:hover { background: var(--dim); }
-#rp-tabs::-webkit-scrollbar-track { background: transparent; }
 .rp-tab {
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   flex: 1 1 0; min-width: 0; /* 均分宽度，允许被压到极窄 */
@@ -4492,18 +4487,10 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
    用容器查询的宽度区间近似：#rp-tabs 加 .rp-tight 类由 JS 在渲染后判定 */
 #rp-tabs.rp-tight .rp-tab svg { display: none; }
 #rp-tabs.rp-tight .rp-tab { padding: 8px 3px; }
-/* 再窄（不足 64px/个，四字标签只剩两三个字）就不再硬挤：标签回到自然宽度，
-   整条栏横向滑动查看（容器 overflow-x 常开，平时均分不会溢出、无滚动条）。
-   配平占位一并撤掉：自然宽度下没有可分的剩余空间，字组靠左、✕ 靠右
-   （空 ::before 的固有尺寸贡献 browsers 各有解释，留着反而漂移） */
-#rp-tabs.rp-scroll .rp-tab { flex: 0 0 auto; }
-#rp-tabs.rp-scroll .rp-tab::before { display: none; }
 .rp-tab .rp-x:hover { background: rgba(143, 29, 29, .12); color: var(--reg); }
 .rp-add {
-  align-self: center; width: 22px; height: 22px; flex-shrink: 0;
-  /* 常驻可见：放在标签栏最左，横滚档里粘在可视区左缘、不随标签滚出画面；
-     垫卡片底色让被压住的标签从底下滚过（不滚动时就待在行首自然位） */
-  position: sticky; left: 0; background: var(--card);
+  /* 行首常驻的「＋」：标签不横滚了，它只是个固定宽度的普通按钮 */
+  align-self: stretch; width: 26px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--dim); font-size: 15px; font-weight: 700; border-radius: var(--r-xs);
   transition: background var(--dur-fast), color var(--dur-fast);
@@ -4526,6 +4513,33 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
 .tabs-menu-item svg { width: 15px; height: 15px; flex-shrink: 0; }
 .tabs-menu-item:hover { background: var(--blue-weak); color: var(--text); }
 .tabs-menu-item .tm-state { margin-left: auto; font-size: 10px; color: var(--down); }
+
+/* 右侧标签栏的「»」全部标签按钮：标签挤到看不清时出现（rp-has-more），
+   固定在行尾、撑满高度；平时不占位，标签能多分到一点宽度 */
+.rp-more {
+  display: none; align-self: stretch; width: 26px; flex-shrink: 0;
+  align-items: center; justify-content: center;
+  color: var(--dim); font-size: 15px; font-weight: 700;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+#rp-tabs.rp-has-more .rp-more { display: inline-flex; }
+.rp-more:hover { background: var(--blue-weak); color: var(--blue); }
+
+/* 标签拖拽排序：拖起源半透明，落点画一道左缘竖条指示插入位置 */
+.rp-tab.dragging { opacity: .45; }
+.rp-tab.drag-over { box-shadow: inset 3px 0 0 var(--blue); }
+
+/* 标签行内重命名（仅辅助对话实例）：输入框顶替标题文字，撑满可用宽度 */
+.rp-tab-rename {
+  flex: 1 1 auto; min-width: 0; width: 100%;
+  font: inherit; font-size: 12.5px; font-weight: 700;
+  color: var(--text); background: var(--paper-raised);
+  border: 1.5px solid var(--blue); border-radius: var(--r-xs);
+  padding: 1px 4px; outline: none;
+}
+
+/* 标签右键菜单：复用 .tabs-menu 的面板语言，宽度收窄一点 */
+.rp-tab-menu { width: 168px; }
 
 #rp-body { flex: 1; min-height: 0; display: flex; }
 .rp-page { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
@@ -4651,7 +4665,7 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
 .td-btn:hover { color: var(--text); background: var(--paper-sunken); }
 
 /* —— 辅助对话 —— */
-#aux-log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.aux-log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .aux-msg { max-width: 92%; padding: 8px 12px; font-size: 13px; line-height: 1.65; animation: rise var(--dur-slow) var(--ease-out) both; }
 .aux-msg.user {
   align-self: flex-end; background: var(--blue); color: var(--on-accent);
@@ -4673,13 +4687,13 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
   display: flex; align-items: flex-end; gap: 8px; flex-shrink: 0;
   padding: 8px 10px; border-top: 2px solid var(--ink-line); background: var(--card);
 }
-#aux-input {
+.aux-input {
   flex: 1; min-width: 0; resize: none; min-height: 44px;
   background: var(--paper-raised); color: var(--text);
   border: 1.5px solid var(--ink-line); border-radius: var(--r-md);
   padding: 9px 11px; font: inherit; font-size: 13px; box-shadow: var(--shadow-sm);
 }
-#aux-input:focus { outline: none; }
+.aux-input:focus { outline: none; }
 /* 模型徽章与发送按钮：右侧同侧上下排列（aux-side 纵列，拉伸同宽），徽章在上、
    发送在下。徽章用同一套「盖章按钮」语言：按钮面即品牌色块（svc-avatar 铺满），
    不再套米色外框，避免盒中盒；弹出菜单复用 .session-menu/.model-menu */

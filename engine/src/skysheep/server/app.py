@@ -451,8 +451,9 @@ async def _h_chat_compact(backend: ServerBackend, params: dict, emit, local: boo
 
 async def _h_chat_aux(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     text = str(params.get("text", ""))
+    aux_id = str(params.get("aux_id", "aux1"))
     # 远端调用走一次性历史：不读本机共享面板历史、也不写入（审查 P1-3 收口）
-    return await backend.chat_aux(text, emit, local=local)
+    return await backend.chat_aux(text, aux_id, emit, local=local)
 
 
 async def _h_permission_respond(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -521,7 +522,8 @@ async def _h_aux_model_set(backend: ServerBackend, params: dict, emit, local: bo
 
 
 async def _h_aux_clear(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return backend.aux_clear()
+    aux_id = str(params.get("aux_id", "aux1"))
+    return backend.aux_clear(aux_id)
 
 
 async def _h_model_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:

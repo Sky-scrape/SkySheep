@@ -281,7 +281,7 @@ class TerminalPanelMixin:
     )
     AUX_HISTORY_CAP = 31  # system + 15 轮问答
 
-    async def chat_aux(self, text: str, emit: EmitFn, local: bool = True) -> dict:
+    async def chat_aux(self, text: str, aux_id: str, emit: EmitFn, local: bool = True) -> dict:
         """辅助对话：独立于主会话的轻量一问一答（不落库、不带工具、内存历史）。
 
         local=False（局域网/远程调用，审查 P1-3 收口）时使用一次性历史：
@@ -315,42 +315,45 @@ class TerminalPanelMixin:
             async for pe in provider.stream(history, []):
                 if isinstance(pe, ProviderTextDelta):
                     parts.append(pe.text)
-                    await emit({"kind": "aux_delta", "text": pe.text})
+                    await emit({"kind": "aux_delta", "text": pe.text, "aux_id": aux_id})
                 elif isinstance(pe, ProviderReasoning):
-                    await emit({"kind": "aux_thinking", "text": pe.text})
+                    await emit({"kind": "aux_thinking", "text": pe.text, "aux_id": aux_id})
                 elif isinstance(pe, ProviderDone):
                     pass
             return {"text": "".join(parts), "stateless": True}
-        if not self.aux_history:
-            self.aux_history.append(Message.system(
+        if aux_id not in self.aux_histories:
+            self.aux_histories[aux_id] = []
+        history = self.aux_histories[aux_id]
+        if not history:
+            history.append(Message.system(
                 self.AUX_SYSTEM.format(cwd=str(self.working_dir or "（未选择项目）"))))
-        self.aux_history.append(Message.user(text))
+        history.append(Message.user(text))
         parts: list[str] = []
         think_parts: list[str] = []
         try:
-            async for pe in provider.stream(list(self.aux_history), []):
+            async for pe in provider.stream(list(history), []):
                 if isinstance(pe, ProviderTextDelta):
                     parts.append(pe.text)
-                    await emit({"kind": "aux_delta", "text": pe.text})
+                    await emit({"kind": "aux_delta", "text": pe.text, "aux_id": aux_id})
                 elif isinstance(pe, ProviderReasoning):
                     # 思考模型的推理增量：面板实时灰显，不进历史与回复
                     think_parts.append(pe.text)
-                    await emit({"kind": "aux_thinking", "text": pe.text})
+                    await emit({"kind": "aux_thinking", "text": pe.text, "aux_id": aux_id})
                 elif isinstance(pe, ProviderDone):
                     pass  # 辅助对话不计入用量统计
         except Exception:
             # 失败的这轮不入历史，避免污染后续上下文
-            self.aux_history.pop()
+            history.pop()
             raise
         reply = "".join(parts)
-        self.aux_history.append(Message.assistant([TextBlock(text=reply)]))
-        overflow = len(self.aux_history) - self.AUX_HISTORY_CAP
+        history.append(Message.assistant([TextBlock(text=reply)]))
+        overflow = len(history) - self.AUX_HISTORY_CAP
         if overflow > 0:
-            del self.aux_history[1 : 1 + overflow]  # system 永远保留在首位
+            del history[1 : 1 + overflow]  # system 永远保留在首位
         return {"text": reply}
 
-    def aux_clear(self) -> dict:
-        self.aux_history = []
+    def aux_clear(self, aux_id: str = "aux1") -> dict:
+        self.aux_histories.pop(aux_id, None)
         return {"cleared": True}
 
     def respond_permission(self, request_id: str, decision: str) -> bool:

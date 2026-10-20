@@ -5227,16 +5227,26 @@ function handleEvent(kind, data) {
       if (t && t.term) t.term.write("\r\n\x1b[90m[shell 已退出，输入任意命令重启]\x1b[0m\r\n");
       break;
     }
-    case "aux_delta":
-      if (auxStreamingEl) {
-        auxStreamingText += data.text || "";
-        auxThinkingPhase = false;
-        auxScheduleRender();
+    case "aux_delta": {
+      const sec = document.getElementById("rp-page-" + (data.aux_id || "aux1"));
+      if (sec) {
+        const st = getAuxState(sec);
+        st.streamingText += data.text || "";
+        st.thinkingPhase = false;
+        auxScheduleRender(sec);
       }
       break;
-    case "aux_thinking":
-      auxThinkingDelta(data.text);
+    }
+    case "aux_thinking": {
+      const sec = document.getElementById("rp-page-" + (data.aux_id || "aux1"));
+      if (sec) {
+        const st = getAuxState(sec);
+        st.thinkingText += data.text || "";
+        st.thinkingPhase = !st.streamingText;
+        auxScheduleRender(sec);
+      }
       break;
+    }
     case "turn_finished": {
       finishAssistant();
       // 用引擎实测耗时定格芯片：前端本地计时从收到预估事件算起，与引擎的
@@ -12445,6 +12455,20 @@ function rightTabFor(id) {
   return TAB_OF[id] || id;
 }
 
+// 辅助对话实例的自定义标题（ui.json 的 aux_titles）：{ aux1: "代码问题" }
+let auxTitles = {};
+
+function auxDefaultTitle(id) {
+  return "辅助对话" + id.slice(3);
+}
+
+function getTabMeta(id) {
+  if (id.startsWith("aux") && id !== "aux") {
+    return { title: auxTitles[id] || auxDefaultTitle(id) };
+  }
+  return TAB_META[id] || { title: id };
+}
+
 /** 当前标签实际显示的视图 id：合并标签返回当前分段，普通标签就是它自己。
     落盘与「某视图是否正显示」都以它为准（right_active 存的就是视图）。 */
 function rightActiveView() {
@@ -12515,6 +12539,7 @@ const RIGHT_TAB_LOADERS = {
     renderRightPanel 展开面板都传的是容器 id，靠这一条统一接住。 */
 function loadRightTab(id, force) {
   const tab = rightTabFor(id);
+  if (tab.startsWith("aux") && tab !== "aux") return refreshAuxModel(); // 辅助对话多实例：只重拉模型徽章
   const view = TAB_VIEWS[tab] ? (id === tab ? rightView[tab] : id) : tab;
   const fn = RIGHT_TAB_LOADERS[view];
   return fn ? fn(force) : undefined;
@@ -12530,71 +12555,77 @@ function renderRightPanel() {
   btnTabs.title = open ? "收起右侧面板" : "展开右侧面板";
   rpTabs.innerHTML = "";
   rightTabs.forEach((id) => {
+    const meta = getTabMeta(id);
     const b = document.createElement("button");
     b.className = "rp-tab" + (id === rightActive ? " active" : "");
     b.setAttribute("role", "tab");
     b.setAttribute("aria-selected", id === rightActive ? "true" : "false");
     b.dataset.tabId = id;
-    b.title = TAB_META[id].title + (TAB_META[id].sub ? "：" + TAB_META[id].sub : "");
-    b.setAttribute("aria-label", TAB_META[id].title); // 图标档藏文字后无障碍名不丢
-    b.innerHTML = RP_ICONS[id] + "<span>" + TAB_META[id].title + '</span><span class="rp-x" title="关闭标签">✕</span>';
+    b.title = meta.title + (meta.sub ? "：" + meta.sub : "") + "（可拖动排序 · 右键更多）";
+    b.setAttribute("aria-label", meta.title); // 图标档藏文字后无障碍名不丢
+    b.innerHTML = (RP_ICONS[id] || RP_ICONS.aux) + "<span>" + meta.title + '</span><span class="rp-x" title="关闭标签">✕</span>';
     b.querySelector(".rp-x").onclick = (e) => { e.stopPropagation(); closeRightTab(id); };
-    b.onclick = () => activateRightTab(id);
+    b.onclick = () => {
+      if (rpJustDragged) { rpJustDragged = false; return; } // 拖完补发的 click 别切标签
+      activateRightTab(id);
+    };
+    if (id.startsWith("aux")) {
+      b.ondblclick = (e) => { e.preventDefault(); startRpTabRename(id); };
+    }
+    attachRpTabDnD(b, id);
+    b.oncontextmenu = (e) => { e.preventDefault(); showRpTabMenu(id, e.clientX, e.clientY); };
     rpTabs.appendChild(b);
   });
-  // 行首「＋」：唤出标签小菜单（不弹窗）。放在最左＋粘住左缘——横滚时不会被
-  // 标签挤出画面，也不压在完整标签的关闭钮上（右缘方案会盖住半截标签的 ✕）
+  // 行首「＋」：唤出标签小菜单（不弹窗）。固定在行首，不压在标签的关闭钮上
+  // （右缘方案会盖住半截标签的 ✕）
   const addBtn = document.createElement("button");
   addBtn.className = "rp-add";
   addBtn.title = "打开其它标签";
   addBtn.textContent = "＋";
   addBtn.onclick = (e) => { e.stopPropagation(); toggleTabsMenu(addBtn); };
   rpTabs.prepend(addBtn);
-  // 压缩档位：均分宽度不足时先藏图标留字，再窄就不再挤、转横向滚动
-  // （滚动档标签回到自然宽度）；判定抽成 applyRpTabDensity，
-  // 容器宽度变化时由 ResizeObserver 走同一条路
+  // 行尾「»」：标签挤到看不清时出现，点开列出全部标签直接跳
+  const moreBtn = document.createElement("button");
+  moreBtn.className = "rp-more";
+  moreBtn.title = "全部标签";
+  moreBtn.textContent = "»";
+  moreBtn.onclick = (e) => { e.stopPropagation(); showRpOverflowMenu(moreBtn); };
+  rpTabs.appendChild(moreBtn);
+  // 压缩档位：均分宽度不足时先藏图标留字，再挤就出「»」全部标签菜单；
+  // 判定抽成 applyRpTabDensity，容器宽度变化时由 ResizeObserver 走同一条路
   applyRpTabDensity();
-  // 横滚档保证激活标签落在可视区：启动恢复/打开新标签后它可能在滚动区外
-  if (rightActive && rpTabs.scrollWidth > rpTabs.clientWidth) {
-    const activeEl = rpTabs.querySelector(`.rp-tab[data-tab-id="${rightActive}"]`);
-    if (activeEl) {
-      // 不用 offsetLeft，因为它的计算依赖 offsetParent（跨层时不可靠）
-      // getBoundingClientRect 会强制触发 layout，同步读取结果是精确的
-      const cRect = rpTabs.getBoundingClientRect();
-      const aRect = activeEl.getBoundingClientRect();
-      if (aRect.left < cRect.left) {
-        rpTabs.scrollLeft += aRect.left - cRect.left - 8;
-      } else if (aRect.right > cRect.right) {
-        rpTabs.scrollLeft += aRect.right - cRect.right + 8;
-      }
-    }
-  }
   document.querySelectorAll("#rp-body .rp-page").forEach((p) => p.classList.add("hidden"));
   if (rightActive && !rightCollapsed) {
-    const page = document.getElementById("rp-page-" + rightActive);
+    let page = document.getElementById("rp-page-" + rightActive);
+    if (!page && rightActive.startsWith("aux")) {
+      createAuxPage(rightActive);
+      page = document.getElementById("rp-page-" + rightActive);
+    }
     if (page) page.classList.remove("hidden");
   }
   applyRightSubView(rightActive); // 合并标签里该露哪一段（收起时也刷，展开即正确）
 }
 
 /** 标签栏压缩档位：按均分到每个标签的宽度降级（CSS 规则见 app.css 的
-    rp-tight / rp-scroll）。renderRightPanel 与容器宽度变化
+    rp-tight / rp-has-more）。renderRightPanel 与容器宽度变化
     （ResizeObserver）都调它——拖面板宽度、缩放窗口后档位即时跟上。
     档位无变化时不动 DOM：RO 回调里每次写 class 会重新触发尺寸观察，
-    形成「ResizeObserver loop completed」告警循环。 */
+    形成「ResizeObserver loop completed」告警循环。
+
+    标签永远均分压缩、不横向滚动（横滚要来回拖、找标签成本高）：
+    不足 92px/个藏图标只留字；不足 64px/个时文字已只能显示两三个字，
+    这时出现行尾「»」按钮，点开列出全部标签直接跳。 */
 let _rpDensityKey = "";
 function applyRpTabDensity() {
   const tabCount = rightTabs.length;
-  const avail = rpTabs.clientWidth - 34; // 扣「＋」钮与内边距
+  const avail = rpTabs.clientWidth - 38; // 扣「＋」钮、右侧间距与内边距
   const per = tabCount > 0 ? avail / tabCount : 999;
-  // 两档互斥：不足 92px/个先藏图标留字；不足 64px/个（四字标签只剩两三个字）
-  // 不再硬挤——转横向滚动档，标签回到自然宽度。滚动条出现/消失会把 per 往
-  // 远离阈值的方向推（出现变挤、消失变宽），单阈值不会在边界上反复横跳
-  const key = per < 64 ? "scroll" : per < 92 ? "tight" : "";
+  const key = per < 64 ? "more" : per < 92 ? "tight" : "";
   if (key === _rpDensityKey) return; // 档位未变：不写 DOM，断掉 RO 循环
   _rpDensityKey = key;
-  rpTabs.classList.toggle("rp-scroll", key === "scroll");
   rpTabs.classList.toggle("rp-tight", key === "tight");
+  // 「»」在文字已经挤到看不清时才出现，均分档下多一个按钮只是噪音
+  rpTabs.classList.toggle("rp-has-more", key === "more");
 }
 // 容器宽度变化（拖面板 / 窗口缩放）时重算档位：此前只在重渲染时算一次，
 // 拖窄后文字挤着也不降级、拖宽后仍卡在紧凑档。
@@ -12607,6 +12638,155 @@ if (typeof ResizeObserver === "function") {
     cancelAnimationFrame(rpDensityRaf);
     rpDensityRaf = requestAnimationFrame(() => applyRpTabDensity());
   }).observe(rpTabs);
+}
+
+// —— 右侧标签：拖拽排序 / 右键菜单 / 重命名 / 溢出菜单 ——
+// 标签一多就挤成几个字，只能靠记忆猜；这几个入口分别解决：自己排顺序、
+// 给实例起名、一眼看到全部标签直接跳。
+
+let rpDragFrom = null;   // 拖动源标签 id
+let rpJustDragged = false; // 拖完补发的 click 要吞掉，别顺手切标签
+
+function attachRpTabDnD(el, id) {
+  el.draggable = true;
+  el.addEventListener("dragstart", (e) => {
+    rpDragFrom = id;
+    rpJustDragged = true;
+    el.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", id); } catch {}
+  });
+  el.addEventListener("dragend", () => {
+    rpDragFrom = null;
+    el.classList.remove("dragging");
+    rpTabs.querySelectorAll(".rp-tab").forEach((x) => x.classList.remove("drag-over"));
+    // 复位放宏任务：拖动结束后浏览器可能同步补一个 click
+    setTimeout(() => { rpJustDragged = false; }, 0);
+  });
+  el.addEventListener("dragover", (e) => {
+    if (!rpDragFrom || rpDragFrom === id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    el.classList.add("drag-over");
+  });
+  el.addEventListener("dragleave", () => el.classList.remove("drag-over"));
+  el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    el.classList.remove("drag-over");
+    if (!rpDragFrom || rpDragFrom === id) return;
+    const from = rightTabs.indexOf(rpDragFrom);
+    const to = rightTabs.indexOf(id);
+    if (from < 0 || to < 0) return;
+    const [moved] = rightTabs.splice(from, 1);
+    rightTabs.splice(to, 0, moved);
+    rpDragFrom = null;
+    renderRightPanel();
+    saveUiPrefs({ right_tabs: [...rightTabs] });
+  });
+}
+
+// —— 标签右键菜单：重命名（仅辅助对话）/ 清空（仅辅助对话）/ 关闭 / 关闭其它 ——
+let rpTabMenuEl = null;
+function hideRpTabMenu() {
+  if (rpTabMenuEl) { rpTabMenuEl.remove(); rpTabMenuEl = null; }
+}
+function showRpTabMenu(id, x, y) {
+  hideRpTabMenu();
+  const menu = document.createElement("div");
+  menu.className = "tabs-menu rp-tab-menu";
+  const items = [];
+  if (id.startsWith("aux")) {
+    items.push({ label: "重命名…", act: () => startRpTabRename(id) });
+    items.push({
+      label: "清空对话", act: () => {
+        const sec = document.getElementById("rp-page-" + id);
+        const btn = sec && sec.querySelector(".aux-clear-btn");
+        if (btn) btn.click();
+      },
+    });
+  }
+  items.push({ label: "关闭标签", act: () => closeRightTab(id) });
+  if (rightTabs.length > 1) {
+    items.push({
+      label: "关闭其它标签", act: () => {
+        [...rightTabs].filter((t) => t !== id).forEach((t) => closeRightTab(t));
+      },
+    });
+  }
+  items.forEach((it) => {
+    const b = document.createElement("button");
+    b.className = "tabs-menu-item";
+    b.textContent = it.label;
+    b.onclick = () => { hideRpTabMenu(); it.act(); };
+    menu.appendChild(b);
+  });
+  document.body.appendChild(menu);
+  rpTabMenuEl = menu;
+  // 贴鼠标、不越界（物理像素除回布局坐标）
+  const w = 168, h = menu.offsetHeight || 120;
+  menu.style.left = Math.max(8, Math.min(x / uiScale, window.innerWidth / uiScale - w - 8)) + "px";
+  menu.style.top = Math.max(8, Math.min(y / uiScale, window.innerHeight / uiScale - h - 8)) + "px";
+}
+document.addEventListener("click", hideRpTabMenu);
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") hideRpTabMenu(); });
+
+// —— 标签行内重命名（仅辅助对话实例）：双击或右键菜单进入 ——
+function startRpTabRename(id) {
+  const el = rpTabs.querySelector('.rp-tab[data-tab-id="' + id + '"]');
+  if (!el) return;
+  const span = el.querySelector("span:not(.rp-x)");
+  if (!span) return;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "rp-tab-rename";
+  input.value = getTabMeta(id).title;
+  input.maxLength = 20;
+  input.placeholder = auxDefaultTitle(id);
+  span.replaceWith(input);
+  el.draggable = false;
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    const val = input.value.trim();
+    if (save) {
+      // 改回默认名 = 清掉自定义标题
+      if (val && val !== auxDefaultTitle(id)) auxTitles[id] = val;
+      else delete auxTitles[id];
+      saveUiPrefs({ aux_titles: Object.keys(auxTitles).length ? auxTitles : null });
+    }
+    renderRightPanel();
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  };
+  input.onblur = () => finish(true);
+  input.onclick = (e) => e.stopPropagation();
+  input.ondblclick = (e) => e.stopPropagation();
+}
+
+// —— 溢出菜单：标签挤到看不清时点「»」列出全部标签直接跳转 ——
+function showRpOverflowMenu(anchor) {
+  if (tabsMenuEl) { hideTabsMenu(); return; }
+  tabsMenuEl = document.createElement("div");
+  tabsMenuEl.className = "tabs-menu";
+  rightTabs.forEach((id) => {
+    const b = document.createElement("button");
+    b.className = "tabs-menu-item" + (id === rightActive ? " active" : "");
+    b.innerHTML = (RP_ICONS[id] || RP_ICONS.aux) +
+      "<span>" + escapeHtml(getTabMeta(id).title) + "</span>" +
+      (id === rightActive ? '<span class="tm-state">当前</span>' : "");
+    b.onclick = () => { hideTabsMenu(); activateRightTab(id); };
+    tabsMenuEl.appendChild(b);
+  });
+  document.body.appendChild(tabsMenuEl);
+  const r = anchor.getBoundingClientRect();
+  const w = 184;
+  tabsMenuEl.style.top = Math.min(r.bottom / uiScale + 6, window.innerHeight / uiScale - 210) + "px";
+  tabsMenuEl.style.left = Math.max(8, r.right / uiScale - w) + "px";
 }
 
 /** 合并标签的分段切换（任务 / 自动化）。
@@ -12649,8 +12829,15 @@ document.querySelectorAll("#rp-body .rp-segs").forEach((bar) => {
 });
 
 function openRightTab(id) {
+  if (id === "aux") {
+    // 辅助对话可多开：每次点入口分配下一个未占用的编号（辅助对话1、2…）
+    let n = 1;
+    while (rightTabs.includes("aux" + n)) n++;
+    id = "aux" + n;
+    createAuxPage(id);
+  }
   const tab = rightTabFor(id);
-  if (!TAB_META[tab]) return;
+  if (!TAB_META[tab] && !tab.startsWith("aux")) return;
   if (TAB_VIEWS[tab] && id !== tab) rightView[tab] = id; // 入口指定了分段就落到那一段
   document.body.classList.remove("sidebar-open"); // 手机互斥：开右抽屉就收侧栏
   if (!rightTabs.includes(tab)) rightTabs.push(tab);
@@ -12672,6 +12859,11 @@ function activateRightTab(id) {
 
 function closeRightTab(id) {
   const tab = rightTabFor(id);
+  if (tab.startsWith("aux")) {
+    const page = document.getElementById("rp-page-" + tab);
+    if (page) page.remove();
+    request("aux.clear", { aux_id: tab }).catch(() => {});
+  }
   // 关闭 MCP/Skills 标签时，把卡片搬回设置页，否则设置页里这两个页面会空白
   if (tab === "ext") {
     const mcpPage = document.getElementById("settings-page-mcp");
@@ -12765,8 +12957,12 @@ function toggleTabsMenu(anchor) {
   Object.keys(TAB_META).forEach((id) => {
     const b = document.createElement("button");
     b.className = "tabs-menu-item";
+    // 辅助对话是多开标签（存 auxN），菜单项按「有没有任何一个 aux 实例」判断
+    const opened = id === "aux"
+      ? rightTabs.some((t) => t.startsWith("aux"))
+      : rightTabs.includes(id);
     b.innerHTML = RP_ICONS[id] + "<span>" + TAB_META[id].title + "</span>" +
-      (rightTabs.includes(id) ? '<span class="tm-state">已打开</span>' : "");
+      (opened ? '<span class="tm-state">已打开</span>' : "");
     b.onclick = () => { hideTabsMenu(); openRightTab(id); };
     tabsMenuEl.appendChild(b);
   });
@@ -13059,107 +13255,142 @@ document.getElementById("term-to-agent").onclick = () => {
 };
 
 // —— 辅助对话：独立小问答（不进主会话、不落库） ——
-const auxLog = document.getElementById("aux-log");
-const auxInput = document.getElementById("aux-input");
+// 支持多开：每个「辅助对话N」对应 rp-page-auxN 区块，历史、流式状态各自独立
 const AUX_EMPTY = '<div class="rp-empty">在这里问点小问题，不会进入主对话，也不会写进会话记录。</div>';
-let auxStreamingEl = null;
-let auxStreamingText = "";
-let auxThinkingText = "";
-let auxBusy = false;
-// 流式渲染节流（同主聊天 appendStream 的 80ms 方案）：思考/正文两阶段共用
-// 一个定时器，按最新阶段决定渲染形态；auxSend 的最终全量渲染兜底
-let auxRenderTimer = null;
-let auxThinkingPhase = false;
-function auxScheduleRender() {
-  if (auxRenderTimer) return;
-  auxRenderTimer = setTimeout(() => {
-    auxRenderTimer = null;
-    if (!auxStreamingEl) return;
-    auxStreamingEl.innerHTML = auxThinkingPhase
+
+function getAuxState(section) {
+  if (!section._auxState) {
+    section._auxState = {
+      streamingEl: null, streamingText: "", thinkingText: "",
+      busy: false, renderTimer: null, thinkingPhase: false,
+    };
+  }
+  return section._auxState;
+}
+
+function auxScheduleRender(section) {
+  const st = getAuxState(section);
+  if (st.renderTimer) return;
+  st.renderTimer = setTimeout(() => {
+    st.renderTimer = null;
+    if (!st.streamingEl) return;
+    st.streamingEl.innerHTML = st.thinkingPhase
       ? '<div class="think-inline">💭 思考中…<br>' +
-        escapeHtml(auxThinkingText.slice(-400)) +
+        escapeHtml(st.thinkingText.slice(-400)) +
         "</div><p>▍</p>"
-      : renderMarkdown(auxStreamingText);
-    auxLog.scrollTop = auxLog.scrollHeight;
+      : renderMarkdown(st.streamingText);
+    const log = section.querySelector(".aux-log");
+    if (log) log.scrollTop = log.scrollHeight;
   }, 80);
 }
 
-// 思考模型的推理增量：面板内灰显（收尾后被正文渲染覆盖），不进历史
-function auxThinkingDelta(txt) {
-  auxThinkingText += txt || "";
-  auxThinkingPhase = !auxStreamingText;
-  auxScheduleRender();
-}
+function createAuxPage(id) {
+  const section = document.createElement("section");
+  section.id = "rp-page-" + id;
+  section.className = "rp-page hidden";
+  section.innerHTML = `
+    <div class="rp-toolbar">
+      <span class="dim small">主对话之外的快速提问，独立进行、不占用主会话。</span>
+      <span class="spacer"></span>
+      <button class="rp-mini aux-clear-btn" title="清空辅助对话（模型对这段对话的记忆一并重置）">清空</button>
+    </div>
+    <div class="aux-log">${AUX_EMPTY}</div>
+    <div class="aux-row">
+      <textarea class="aux-input" rows="2" placeholder="问点小的…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <div class="aux-side">
+        <button class="aux-model-chip" title="辅助对话使用的模型（独立于主对话）"><span class="svc-avatar aux-mm-tile">?</span></button>
+        <button class="rp-mini primary aux-send-btn">发送</button>
+      </div>
+    </div>`;
+  document.getElementById("rp-body").appendChild(section);
+  const log = section.querySelector(".aux-log");
+  const input = section.querySelector(".aux-input");
+  const sendBtn = section.querySelector(".aux-send-btn");
+  const chip = section.querySelector(".aux-model-chip");
 
-function auxAddUser(text) {
-  const empty = auxLog.querySelector(".rp-empty");
-  if (empty) empty.remove();
-  const d = document.createElement("div");
-  d.className = "aux-msg user";
-  d.textContent = text;
-  auxLog.appendChild(d);
-  auxLog.scrollTop = auxLog.scrollHeight;
-}
+  const addUser = (text) => {
+    const empty = log.querySelector(".rp-empty");
+    if (empty) empty.remove();
+    const d = document.createElement("div");
+    d.className = "aux-msg user";
+    d.textContent = text;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  };
 
-async function auxSend() {
-  const text = auxInput.value.trim();
-  if (!text || auxBusy) return;
-  auxBusy = true;
-  const sendBtn = document.getElementById("aux-send");
-  sendBtn.disabled = true; // 忙碌反馈：生成中按钮变灰（断线清账保证 busy 一定能解开）
-  sendBtn.textContent = "…";
-  auxInput.value = "";
-  auxAddUser(text);
-  const stream = document.createElement("div");
-  stream.className = "aux-msg ai";
-  stream.innerHTML = "<p>▍</p>";
-  auxLog.appendChild(stream);
-  auxLog.scrollTop = auxLog.scrollHeight;
-  auxStreamingEl = stream;
-  auxStreamingText = "";
-  auxThinkingText = "";
-  try {
-    const r = await request("chat.aux", { text });
-    stream.innerHTML = renderMarkdown(r.text || auxStreamingText);
-    renderMermaidIn(stream);
-    highlightCodeIn(stream);
-  } catch (e) {
-    stream.innerHTML = '<p class="dim">✗ ' + escapeHtml(e.message) + "</p>";
-  } finally {
-    if (auxRenderTimer) { clearTimeout(auxRenderTimer); auxRenderTimer = null; }
-    auxStreamingEl = null;
-    auxStreamingText = "";
-    auxThinkingText = "";
-    auxBusy = false;
-    sendBtn.disabled = false;
-    sendBtn.textContent = "发送";
-    auxLog.scrollTop = auxLog.scrollHeight;
-  }
-}
+  const send = async () => {
+    const st = getAuxState(section);
+    const text = input.value.trim();
+    if (!text || st.busy) return;
+    st.busy = true;
+    sendBtn.disabled = true;
+    sendBtn.textContent = "…";
+    input.value = "";
+    addUser(text);
+    const stream = document.createElement("div");
+    stream.className = "aux-msg ai";
+    stream.innerHTML = "<p>▍</p>";
+    log.appendChild(stream);
+    log.scrollTop = log.scrollHeight;
+    st.streamingEl = stream;
+    st.streamingText = "";
+    st.thinkingText = "";
+    try {
+      const r = await request("chat.aux", { text, aux_id: id });
+      stream.innerHTML = renderMarkdown(r.text || st.streamingText);
+      renderMermaidIn(stream);
+      highlightCodeIn(stream);
+    } catch (e) {
+      stream.innerHTML = '<p class="dim">✗ ' + escapeHtml(e.message) + "</p>";
+    } finally {
+      if (st.renderTimer) { clearTimeout(st.renderTimer); st.renderTimer = null; }
+      st.streamingEl = null;
+      st.streamingText = "";
+      st.thinkingText = "";
+      st.busy = false;
+      sendBtn.disabled = false;
+      sendBtn.textContent = "发送";
+      log.scrollTop = log.scrollHeight;
+    }
+  };
 
-async function auxClear() {
-  // 面板里的对话与后端记忆（模型还记得的上下文）一起清；有内容先问一声
-  if (auxLog.querySelector(".aux-msg") &&
-      !(await confirmModal("清空辅助对话",
-        "<p>清空辅助对话？模型对这段对话的记忆也会一并重置。</p>", "清空"))) return;
-  request("aux.clear").catch((e) => addNotice("重置辅助对话记忆失败：" + e.message));
-  auxLog.innerHTML = AUX_EMPTY;
-  auxStreamingEl = null;
-  auxStreamingText = "";
-  auxThinkingText = "";
+  const clear = async () => {
+    if (log.querySelector(".aux-msg") &&
+        !(await confirmModal("清空辅助对话",
+          "<p>清空辅助对话？模型对这段对话的记忆也会一并重置。</p>", "清空"))) return;
+    request("aux.clear", { aux_id: id }).catch((e) => addNotice("重置辅助对话记忆失败：" + e.message));
+    log.innerHTML = AUX_EMPTY;
+    const st = getAuxState(section);
+    st.streamingEl = null;
+    st.streamingText = "";
+    st.thinkingText = "";
+  };
+
+  sendBtn.onclick = send;
+  section.querySelector(".aux-clear-btn").onclick = clear;
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  chip.onclick = async (e) => {
+    e.stopPropagation();
+    if (!auxModelMenu.classList.contains("hidden")) return hideAuxModelMenu();
+    auxModelMenu.innerHTML = '<div class="mm-empty">加载中…</div>';
+    auxModelMenu.classList.remove("hidden");
+    if (!auxModelRows.length) await refreshAuxModel();
+    const chipR = chip.getBoundingClientRect();
+    const vh = window.innerHeight / uiScale;
+    auxModelMenu.style.top = "auto";
+    auxModelMenu.style.bottom = (vh - chipR.top / uiScale + 6) + "px";
+    auxModelMenu.style.left = Math.max(8, chipR.right / uiScale - 250) + "px";
+    buildAuxMenu(chip);
+  };
 }
-document.getElementById("aux-send").onclick = auxSend;
-document.getElementById("aux-clear").onclick = auxClear;
-auxInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); auxSend(); }
-});
 
 // —— 辅助对话模型：面板独立的模型选择（跟随主对话或指定服务/模型） ——
 // 后端按 ui.json 偏好在每次 chat.aux 时构建专用 provider，主对话与其余
 // 会话不受影响；这里只负责把选择写进偏好，发送路径不用带模型参数。
 // 入口是发送钮上方右下角的品牌徽章：闭合态只显 logo（跟随主对话就画主对话
 // 服务的 logo，跟的是谁一眼可见），全称挪到悬停提示与菜单行里
-const auxModelChip = document.getElementById("aux-model-chip");
 const auxModelMenu = document.getElementById("aux-model-menu");
 let auxModelRows = []; // config.providers 展开的服务×模型行（与主模型菜单同源）
 let auxModelState = { provider: "", model: "", label: "", main_provider: "", main_label: "" };
@@ -13172,7 +13403,6 @@ function auxMiniAvatar(name) {
 }
 
 async function refreshAuxModel() {
-  if (!auxModelChip) return;
   const [detail, state] = await Promise.all([
     request("config.providers").catch(() => null),
     request("aux.model.get").catch(() => null),
@@ -13185,11 +13415,13 @@ async function refreshAuxModel() {
 
 function paintAuxChip() {
   const eff = auxModelState.provider || auxModelState.main_provider || "";
-  auxModelChip.innerHTML = auxMiniAvatar(eff);
-  auxModelChip.title = auxModelState.provider
-    ? `辅助对话模型：${auxModelState.label}（独立于主对话，点按更换）`
-    : "辅助对话跟随主对话" + (auxModelState.main_label ? `（${auxModelState.main_label}）` : "")
-      + "，点按更换";
+  document.querySelectorAll(".aux-model-chip").forEach((chip) => {
+    chip.innerHTML = auxMiniAvatar(eff);
+    chip.title = auxModelState.provider
+      ? `辅助对话模型：${auxModelState.label}（独立于主对话，点按更换）`
+      : "辅助对话跟随主对话" + (auxModelState.main_label ? `（${auxModelState.main_label}）` : "")
+        + "，点按更换";
+  });
 }
 
 function hideAuxModelMenu() {
@@ -13197,7 +13429,7 @@ function hideAuxModelMenu() {
   auxModelMenu.innerHTML = "";
 }
 
-function buildAuxMenu() {
+function buildAuxMenu(chip) {
   // 与主模型菜单同款：页签（默认/自定义）+ 行列表 + 管理入口。「跟随主对话」
   // 不属于任何页签，固定在页签上方——这是辅助面板独有的一行
   const addRow = (row) => {
@@ -13272,7 +13504,7 @@ function buildAuxMenu() {
     };
     auxModelMenu.appendChild(manage);
     // 内容替换后按实际宽度重新定位：贴着徽章上方，右缘对齐徽章（不够放时往左收）
-    const chipR = auxModelChip.getBoundingClientRect(); // 物理像素，下同
+    const chipR = chip.getBoundingClientRect(); // 物理像素，下同
     const mw = auxModelMenu.offsetWidth; // 布局像素，无需换算
     auxModelMenu.style.bottom = (window.innerHeight / uiScale - chipR.top / uiScale + 6) + "px";
     auxModelMenu.style.left =
@@ -13293,22 +13525,10 @@ async function pickAuxModel(row) {
   }
 }
 
-auxModelChip.onclick = async (e) => {
-  e.stopPropagation(); // 别让冒泡到 document 的外点关闭立刻把菜单关掉
-  if (!auxModelMenu.classList.contains("hidden")) return hideAuxModelMenu();
-  auxModelMenu.innerHTML = '<div class="mm-empty">加载中…</div>';
-  auxModelMenu.classList.remove("hidden");
-  if (!auxModelRows.length) await refreshAuxModel(); // 首次打开兜底拉一次
-  const chipR = auxModelChip.getBoundingClientRect(); // 物理像素，下同
-  const vh = window.innerHeight / uiScale;
-  auxModelMenu.style.top = "auto";
-  auxModelMenu.style.bottom = (vh - chipR.top / uiScale + 6) + "px"; // 靠底向上弹
-  auxModelMenu.style.left = Math.max(8, chipR.right / uiScale - 250) + "px";
-  buildAuxMenu();
-};
+
 document.addEventListener("click", (e) => {
   if (!auxModelMenu.classList.contains("hidden") &&
-      !auxModelMenu.contains(e.target) && !auxModelChip.contains(e.target)) hideAuxModelMenu();
+      !auxModelMenu.contains(e.target) && !e.target.closest(".aux-model-chip")) hideAuxModelMenu();
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideAuxModelMenu(); });
 window.addEventListener("resize", hideAuxModelMenu);
@@ -14425,14 +14645,23 @@ async function initUiPrefs() {
   // right_tabs 只收容器标签；老 ui.json 里存的分段 id（todo / ptasks / cron /
   // pipeline）在这里映射回所属标签，并把该分段一并还原——升级后打开的面板
   // 与升级前看到的是同一页，不会退到默认分段。
+  auxTitles = (prefs.aux_titles && typeof prefs.aux_titles === "object") ? prefs.aux_titles : {};
   rightTabs = [];
   for (const t of prefs.right_tabs || []) {
-    const tab = rightTabFor(t);
-    if (!TAB_META[tab] || rightTabs.includes(tab)) continue;
+    let tab = rightTabFor(t);
+    // 老 ui.json 存的是无编号的「辅助对话」：迁移成带编号的 auxN（多开语义）
+    if (tab === "aux") {
+      let n = 1;
+      while (rightTabs.includes("aux" + n)) n++;
+      tab = "aux" + n;
+    }
+    if ((!TAB_META[tab] && !tab.startsWith("aux")) || rightTabs.includes(tab)) continue;
     rightTabs.push(tab);
     if (TAB_VIEWS[tab] && t !== tab) rightView[tab] = t;
   }
-  const activeTab = rightTabFor(prefs.right_active);
+  let activeTab = rightTabFor(prefs.right_active);
+  // 激活项是旧的无编号 aux：指向迁移后的第一个辅助对话标签
+  if (activeTab === "aux") activeTab = rightTabs.find((t) => t.startsWith("aux")) || null;
   if (rightTabs.includes(activeTab)) {
     rightActive = activeTab;
     if (TAB_VIEWS[activeTab] && TAB_VIEWS[activeTab].includes(prefs.right_active)) {

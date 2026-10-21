@@ -72,6 +72,9 @@ def test_both_window_entries_apply_the_args():
     cli_app = (_ENGINE / "src" / "skysheep" / "cli" / "app.py").read_text(encoding="utf-8")
     for name, source in (("desktop.py", desktop), ("cli/app.py", cli_app)):
         assert "apply_browser_args()" in source, f"{name} 没设 WebView2 滑动导航参数"
+        # 「清除全部浏览器数据」的落地同样必须在两个入口、且在窗口之前：漏一个入口，
+        # 那条路径上排队的清除就永远不会执行（使用中删不掉 Cookie）
+        assert "apply_pending_reset()" in source, f"{name} 没落地排队的浏览器数据清除"
 
 
 def test_webviewargs_module_is_importable_without_heavy_deps():

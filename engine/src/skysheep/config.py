@@ -287,6 +287,19 @@ class RetentionConfig(BaseModel):
     reports_days: int = Field(default=30, ge=0, le=3650)
 
 
+class ArchiveConfig(BaseModel):
+    """会话自动归档（设置 · 归档管理）。
+
+    auto_archive 打开后定时扫描：最后活动（updated_at）早于 auto_after_days
+    天的未归档会话自动归档；置顶与正在运行/打开的会话不受影响（扫描侧
+    排除，见 ``server/backend_parts/archive_mgmt.py``）。只动 archived 标记，
+    不删任何数据，归档后可随时在 设置 · 归档管理 恢复。
+    """
+
+    auto_archive: bool = False
+    auto_after_days: int = Field(default=14, ge=1, le=3650)
+
+
 class ShellConfig(BaseModel):
     """命令执行（run_command）的沙箱配置。
 
@@ -355,6 +368,10 @@ class SkySheepConfig(BaseModel):
     # 浏览器控制工具（browser：用系统浏览器打开网址/搜索）总开关，默认关，
     # 与电脑控制同一安全姿态；打开后 Agent 可把网页/搜索结果展示给用户看。
     browser_control: bool = False
+    # 内置浏览器忽略 HTTPS 证书校验（设置 · 浏览器控制），默认关。只影响浏览器：
+    # 应用窗口与右侧预览面板（WebView2，改动重启后生效）与无头 Edge（web_page，
+    # 关掉实例后下次动作即生效）；网页抓取 / 模型请求走 [network] 的自签 CA，不受它影响。
+    browser_ignore_cert: bool = False
     # 每日 token 预算护栏：当天累计输入+输出超过该值后拒绝发送新消息（0 = 不限制）。
     # 面向"怕烧钱"的普通用户；用量统计（usage_log）是现成的数据源。
     daily_token_budget: int = Field(default=0, ge=0)
@@ -371,6 +388,7 @@ class SkySheepConfig(BaseModel):
     memory_maintenance: MemoryMaintenanceConfig = Field(default_factory=MemoryMaintenanceConfig)
     memory_map: MemoryMapConfig = Field(default_factory=MemoryMapConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
     adversarial: AdversarialConfig = Field(default_factory=AdversarialConfig)
@@ -552,6 +570,7 @@ def load_config() -> SkySheepConfig:
     memory_maintenance = MemoryMaintenanceConfig()
     memory_map = MemoryMapConfig()
     retention = RetentionConfig()
+    archive = ArchiveConfig()
     shell = ShellConfig()
     search = SearchConfig()
     network = NetworkConfig()
@@ -585,6 +604,7 @@ def load_config() -> SkySheepConfig:
         restrict_workdir = bool(raw.get("restrict_to_workdir", False))
         computer_control = bool(raw.get("computer_control", False))
         browser_control = bool(raw.get("browser_control", False))
+        browser_ignore_cert = bool(raw.get("browser_ignore_cert", False))
         daily_budget = _clamp_int(raw, "daily_token_budget", 0, 0)
         turn_budget = _clamp_int(raw, "turn_token_budget", 0, 0)
         fallback_model = str(raw.get("fallback_model", "") or "")
@@ -610,6 +630,7 @@ def load_config() -> SkySheepConfig:
             ("memory_maintenance", MemoryMaintenanceConfig, memory_maintenance),
             ("memory_map", MemoryMapConfig, memory_map),
             ("retention", RetentionConfig, retention),
+            ("archive", ArchiveConfig, archive),
             ("shell", ShellConfig, shell),
             ("search", SearchConfig, search),
         ):
@@ -628,6 +649,8 @@ def load_config() -> SkySheepConfig:
                 memory_map = cur
             elif section_name == "retention":
                 retention = cur
+            elif section_name == "archive":
+                archive = cur
             elif section_name == "shell":
                 shell = cur
             elif section_name == "search":
@@ -660,6 +683,7 @@ def load_config() -> SkySheepConfig:
         restrict_workdir = False
         computer_control = False
         browser_control = False
+        browser_ignore_cert = False
         daily_budget = 0
         turn_budget = 0
         fallback_model = ""
@@ -689,6 +713,7 @@ def load_config() -> SkySheepConfig:
             restrict_to_workdir=restrict_workdir,
             computer_control=computer_control,
             browser_control=browser_control,
+            browser_ignore_cert=browser_ignore_cert,
             daily_token_budget=daily_budget,
             turn_token_budget=turn_budget,
             fallback_model=fallback_model,
@@ -696,6 +721,7 @@ def load_config() -> SkySheepConfig:
             memory_maintenance=memory_maintenance,
             memory_map=memory_map,
             retention=retention,
+            archive=archive,
             roundtable=roundtable,
             team=team,
             adversarial=adversarial,
@@ -729,6 +755,7 @@ def set_advanced_settings_in_config(
     restrict_to_workdir: bool | None = None,
     computer_control: bool | None = None,
     browser_control: bool | None = None,
+    browser_ignore_cert: bool | None = None,
     daily_token_budget: int | None = None,
     turn_token_budget: int | None = None,
     fallback_model: str | None = None,
@@ -782,6 +809,8 @@ def set_advanced_settings_in_config(
         raw["computer_control"] = bool(computer_control)
     if browser_control is not None:
         raw["browser_control"] = bool(browser_control)
+    if browser_ignore_cert is not None:
+        raw["browser_ignore_cert"] = bool(browser_ignore_cert)
     if daily_token_budget is not None:
         raw["daily_token_budget"] = max(0, int(daily_token_budget))
     if turn_token_budget is not None:
@@ -939,6 +968,36 @@ def set_retention_in_config(
         raw["retention"] = section
     else:
         raw.pop("retention", None)
+    _write_raw_config(p, raw)
+
+
+def set_archive_in_config(
+    *,
+    auto_archive: bool | None = None,
+    auto_after_days: int | None = None,
+) -> None:
+    """写入 config.toml 的 [archive] 表（None 表示该项不动）。
+
+    设置 · 归档管理的自动归档开关与保留天数走这里，与其它设置项同一套读写
+    路径。天数下限 1（0 天等于「全部立刻归档」，不是合法保留期）；越界值在
+    写入前就报错，不静默夹取。
+    """
+    if auto_after_days is not None and (
+        isinstance(auto_after_days, bool)
+        or not isinstance(auto_after_days, int)
+        or not 1 <= auto_after_days <= 3650
+    ):
+        raise ConfigError("自动归档的保留时长要在 1–3650 天之间")
+    p, raw = _read_raw_config()
+    section = dict(raw.get("archive") or {})
+    if auto_archive is not None:
+        section["auto_archive"] = bool(auto_archive)
+    if auto_after_days is not None:
+        section["auto_after_days"] = int(auto_after_days)
+    if section:
+        raw["archive"] = section
+    else:
+        raw.pop("archive", None)
     _write_raw_config(p, raw)
 
 

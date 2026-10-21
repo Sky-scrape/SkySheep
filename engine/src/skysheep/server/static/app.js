@@ -12072,6 +12072,8 @@ function showSettingsPage(target) {
   if (target === "runs") loadRunsPage();
   if (target === "usage") loadUsage();
   if (target === "memory") loadMemoryPage();
+  if (target === "archive") loadArchivePage();
+  if (target === "browser") loadBrowserPage();
   if (target === "snippets") loadSnippets();
   if (target === "remote") { loadLanPanel(); loadTsPanel(); loadChannelPanel(); }
   if (target === "skills") { loadToolControl(); renderTeamCfg().catch(() => {}); }
@@ -15497,17 +15499,17 @@ document.getElementById("btn-app-restart").onclick = async () => {
   }
 };
 
-// ---------- 设置 · 技能与工具：电脑控制 / 浏览器控制（工具总开关，开关即保存） ----------
-// 这两个开关决定对应工具是否注册给 Agent（打开即热生效）。它们是「Agent 能用哪些工具」，
+// ---------- 设置 · 技能与工具：电脑控制（工具总开关，开关即保存） ----------
+// 开关决定对应工具是否注册给 Agent（打开即热生效）。它是「Agent 能用哪些工具」，
 // 不是「远程接入」能力，所以放在「内置工具」列表处；advanced.save 支持只提交
 // 要改的字段，其余高级参数保持不变。
+// 浏览器控制那份开关 2026-10-21 搬到了设置 · 浏览器控制页（那里一起管证书开关
+// 与浏览器数据），前端接线在 app-browser.js，走的是 browser.save。
 async function loadToolControl() {
   let d;
   try { d = await request("advanced.get"); } catch (e) { return; }
   const c = document.getElementById("tool-computer-control");
-  const b = document.getElementById("tool-browser-control");
   if (c) c.checked = !!d.computer_control;
-  if (b) b.checked = !!d.browser_control;
 }
 function toolControlStatus(statusId, text, ok = true) {
   const st = document.getElementById(statusId);
@@ -15516,14 +15518,11 @@ function toolControlStatus(statusId, text, ok = true) {
   st.className = "card-status " + (ok ? "ok" : "bad");
   st.hidden = !text;
 }
-async function saveToolControl(el, key, statusId, label) {
+async function saveToolControl(el, key, statusId) {
   try {
     const d = await request("advanced.save", { [key]: el.checked });
-    // 用返回值同步两个开关（避免再发一次请求）
     const c = document.getElementById("tool-computer-control");
-    const b = document.getElementById("tool-browser-control");
     if (c) c.checked = !!d.computer_control;
-    if (b) b.checked = !!d.browser_control;
     // 成功不提示：开关本身就是状态（此前会显一行绿色「已开启…」，太吵）；
     // 失败才需要说明原因，比如配置写入被拒
     toolControlStatus(statusId, "");
@@ -15537,12 +15536,7 @@ async function saveToolControl(el, key, statusId, label) {
 const toolComputerToggle = document.getElementById("tool-computer-control");
 if (toolComputerToggle) {
   toolComputerToggle.addEventListener("change", (e) =>
-    saveToolControl(e.target, "computer_control", "tool-computer-status", "电脑控制"));
-}
-const toolBrowserToggle = document.getElementById("tool-browser-control");
-if (toolBrowserToggle) {
-  toolBrowserToggle.addEventListener("change", (e) =>
-    saveToolControl(e.target, "browser_control", "tool-browser-status", "浏览器控制"));
+    saveToolControl(e.target, "computer_control", "tool-computer-status"));
 }
 
 // ---------- 设置 · 聊天机器人渠道（Bot Channel） ----------

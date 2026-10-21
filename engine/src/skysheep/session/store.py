@@ -15,6 +15,7 @@ import sqlite3
 import tempfile
 import time
 import uuid
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -1541,6 +1542,32 @@ class SessionStore:
             "UPDATE sessions SET archived = ? WHERE id = ?", (1 if archived else 0, session_id)
         )
         await self._db.commit()
+
+    async def stale_session_ids(
+        self, cutoff: float, exclude_ids: Iterable[str] = (), limit: int = 200
+    ) -> list[str]:
+        """自动归档候选：未归档、未置顶、最后更新早于 cutoff 的会话 id（最旧在前）。
+
+        排除名单是运行期状态（正在跑/打开的会话），库外判断后传进来——
+        置顶与已归档是库内字段，直接进 WHERE。
+        """
+        assert self._db
+        exclude = [str(s) for s in exclude_ids if s][:50]
+        if exclude:
+            ph = ",".join("?" * len(exclude))
+            cur = await self._db.execute(
+                "SELECT id FROM sessions WHERE archived = 0 AND pinned = 0"
+                f" AND updated_at < ? AND id NOT IN ({ph})"
+                " ORDER BY updated_at ASC LIMIT ?",
+                (cutoff, *exclude, limit),
+            )
+        else:
+            cur = await self._db.execute(
+                "SELECT id FROM sessions WHERE archived = 0 AND pinned = 0"
+                " AND updated_at < ? ORDER BY updated_at ASC LIMIT ?",
+                (cutoff, limit),
+            )
+        return [r["id"] for r in await cur.fetchall()]
 
     async def get_session_memory_digested(self, session_id: str) -> bool:
         """归档自动记忆是否已对该会话提炼过（取消归档再归档不重复提炼）。"""

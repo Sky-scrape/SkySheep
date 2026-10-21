@@ -183,6 +183,21 @@ class CdpBrowser:
 
     # -- 生命周期 --
 
+    def _cert_args(self) -> list[str]:
+        """设置 · 浏览器控制的「忽略证书校验」：本实例启动时按当前配置取。
+
+        每次 start 现读配置（本地 TOML，开销可忽略）——设置页改完会主动关掉
+        实例（见 :func:`close_browser`），下一次动作重新拉起即带上新参数。
+        """
+        try:
+            from ..config import load_config
+
+            if load_config().browser_ignore_cert:
+                return ["--ignore-certificate-errors"]
+        except Exception:  # noqa: BLE001 - 配置读失败按默认（校验证书）起
+            return []
+        return []
+
     def is_alive(self) -> bool:
         # asyncio 子进程没有 poll()：returncode 为 None 即仍在运行
         return self.proc is not None and self.proc.returncode is None and bool(self.ws_url)
@@ -199,6 +214,7 @@ class CdpBrowser:
             "--no-default-browser-check",
             "--disable-extensions",
             "--window-size=1280,900",
+            *self._cert_args(),
             "about:blank",
         ]
         try:

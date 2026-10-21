@@ -1140,9 +1140,14 @@ def _run_windowed() -> int:
     # 关掉 Chromium 的滑动历史导航（触屏边缘滑、触控板横滑都会走它）：WebView2 创建
     # 环境时只读一次该环境变量，必须赶在 webview.start() 之前——放在这里是因为上面
     # 那几个引擎模块本来就已导入，webviewargs 自身只依赖标准库，不拖慢首屏。
-    from skysheep.webviewargs import apply_browser_args
+    # apply_pending_reset 紧随其后、同样在窗口之前：设置页排队的「清除全部浏览器
+    # 数据」在这里落地——此刻还没有任何东西占用 profile 文件，运行中删不掉。
+    from skysheep.webviewargs import apply_browser_args, apply_pending_reset
 
     apply_browser_args()
+    _reset = apply_pending_reset()
+    if _reset:
+        _log(f"browser data reset applied: {[str(p) for p in _reset]}")
 
     # 边滑手势KillSwitch落地确认：pywebview 在 on_webview_ready 里已设
     # IsSwipeNavigationEnabled=False，这里包一层并写日志回读验证——若 WebView2

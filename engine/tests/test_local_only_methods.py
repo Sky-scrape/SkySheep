@@ -40,6 +40,12 @@ MUST_BE_LOCAL = (
     "advanced.save", "hooks.save", "memory.save",
     # 数据保留策略：改保留天数与立即清理会删数据目录里的文件，只能本机触发
     "retention.save", "retention.sweep",
+    # 归档管理：list 列出全部项目的归档会话标题（跨项目泄露面），改配置与
+    # 批量恢复/删除是破坏性管理动作，同 retention 家族姿态仅本机
+    "archive.save", "archive.list", "archive.restore", "archive.delete",
+    # 浏览器控制：改开关（含「忽略证书校验」这个降防护档位）与清除内置浏览器
+    # profile 都是本机管理动作，同 archive 家族姿态仅本机
+    "browser.save", "browser.clear",
     "subagent.save", "default_model.set", "aux.model.set",
     # 本机体验/信息面（审查 P1-3 收口）
     "app.notify", "fs.open", "term.close", "memory.get", "model.switch",

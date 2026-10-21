@@ -757,12 +757,14 @@ def _app_cmd(args) -> None:
     # 窗口模式（终端直接 skysheep app）：主窗口第一页是启动动画，引擎就绪后原地切换
     icon_path = STATIC_DIR / "skysheep.ico"
     from ..server.picker import FilePicker
-    from ..webviewargs import apply_browser_args
+    from ..webviewargs import apply_browser_args, apply_pending_reset
 
     # 关掉 Chromium 的滑动历史导航（触屏边缘滑、触控板横滑都会走它）：本入口原先
     # 只吃到 pywebview 的 IsSwipeNavigationEnabled（只覆盖触屏），触控板那条路会画出
     # 圆形后退提示并真的后退一次。必须在 webview.start() 之前设置（见 webviewargs）
+    # 排队的「清除全部浏览器数据」同样在这里落地：窗口还没建，profile 文件没人占用
     apply_browser_args()
+    apply_pending_reset()
 
     try:
         screen = webview.screens[0]

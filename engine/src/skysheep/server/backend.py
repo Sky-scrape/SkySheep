@@ -177,7 +177,9 @@ from ..tools.skill import LoadSkillTool
 from .audit import record_audit
 from .backend_parts._shared import EmitFn, ProjectCtx, SessionRuntime, collect_stream_text
 from .backend_parts.advanced import SystemMixin
+from .backend_parts.archive_mgmt import ArchiveMgmtMixin
 from .backend_parts.automation import AutomationMixin
+from .backend_parts.browser_data import BrowserDataMixin
 from .backend_parts.channels import (
     ChannelsMixin,
     _channel_allowed_tools_warning,  # noqa: F401  测试从本模块引用
@@ -732,7 +734,8 @@ def _team_digest(orch: TeamOrchestrator, result: dict) -> str:
 class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    SystemMixin, TerminalPanelMixin, RemoteMixin, WebtoolsMixin,
                    LifecycleMixin, McpMixin, ModsMixin, PreferencesMixin,
-                   ProvidersMixin, ProjectDataMixin, RetentionMixin):
+                   ProvidersMixin, ProjectDataMixin, RetentionMixin,
+                   ArchiveMgmtMixin, BrowserDataMixin):
     def __init__(
         self,
         working_dir: str | Path = ".",

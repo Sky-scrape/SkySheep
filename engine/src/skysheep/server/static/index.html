@@ -139,6 +139,7 @@
           <li class="nav-cap" aria-hidden="true">能力</li>
           <li class="active" data-target="providers">模型服务</li>
           <li data-target="skills">技能与工具</li>
+          <li data-target="browser">浏览器控制</li>
           <li data-target="subagents">子代理</li>
           <li data-target="mcp">MCP 服务</li>
           <li data-target="mods">Mods 扩展（实验性）</li>
@@ -146,6 +147,7 @@
           <li data-target="snippets">提示词</li>
           <li data-target="memory">全局记忆</li>
           <li data-target="ui">界面与通知</li>
+          <li data-target="archive">归档管理</li>
           <li class="nav-cap" aria-hidden="true">安全</li>
           <li data-target="remote">远程控制</li>
           <li data-target="advanced">高级</li>
@@ -885,7 +887,8 @@
             <h3>内置工具</h3>
             <p class="settings-hint">
               Agent 完成任务时可以调用的工具。<b>只读</b>操作自动放行；<b>写入</b>与<b>高危</b>（执行命令）操作默认会先征得你确认。
-              下面「电脑与浏览器控制」两个开关<b>默认关闭</b>，打开后对应工具才会出现在列表里（打开即生效）。
+              下面「电脑控制」开关<b>默认关闭</b>，打开后对应工具才会出现在列表里（打开即生效）。
+              浏览器控制的开关搬到了<b>「浏览器控制」页</b>——那里还有证书校验与浏览器数据的入口。
             </p>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="tool-computer-control">
@@ -896,15 +899,6 @@
               高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，有「帮我操作这个软件」这类需求时再打开。
             </p>
             <div id="tool-computer-status" class="card-status" hidden></div>
-            <label class="toggle-row adv-toggle">
-              <input type="checkbox" id="tool-browser-control">
-              <span>浏览器控制 —— 给你看：Agent 替你打开网页 / 搜索</span>
-            </label>
-            <p class="dim small adv-toggle-desc">
-              让 Agent 用你的默认浏览器打开网址或搜索关键词（比如「帮我打开这个链接」「搜一下最近的新闻给我看」），
-              页面在你的浏览器里展开，逐次确认、可按动作加白名单；<b>默认关闭</b>。Agent 自己读网页内容不受此开关影响（web_fetch）。
-            </p>
-            <div id="tool-browser-status" class="card-status" hidden></div>
             <details id="tool-list-fold" class="market-fold">
               <summary id="tool-list-fold-cap">展开查看全部内置工具</summary>
               <ul id="settings-tool-list" class="list settings-tool-list"></ul>
@@ -954,6 +948,67 @@
               <ul id="settings-skill-list" class="list settings-skill-list"></ul>
             </section>
           </div>
+        </section>
+
+        <!-- 浏览器控制：这套工具的总开关、证书开关与内置浏览器数据。
+             工具页那份「浏览器控制」开关已搬到这里（2026-10-21）——那里是
+             「Agent 能用哪些工具」的总览，这里是这套工具运行环境的设置面。
+             内置浏览器指两处：应用窗口 / 右侧预览面板（WebView2）与 web_page
+             用的无头 Edge；两处的数据与证书参数口径都在这里。 -->
+        <section class="settings-page hidden" id="settings-page-browser">
+          <section class="settings-card">
+            <h3>浏览器控制</h3>
+            <p class="settings-hint">
+              让 Agent 能上网做事：把网页开在<b>你自己的浏览器</b>里给你看（打开网址 / 搜索），
+              或者在内置的<b>无头浏览器</b>里自己翻页、点按钮、填表单、读页面内容
+              （web_page 工具，页面你看不到，内容会回给模型）。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="browser-control-toggle">
+              <span>启用浏览器控制</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              两种用法都是<b>高危</b>操作：逐次确认，可按动作加白名单。关闭时这两类工具不出现在工具清单里，
+              不影响 Agent 自己读网页内容（web_fetch）。<b>默认关闭</b>。
+            </p>
+            <div id="browser-control-status" class="card-status" hidden></div>
+          </section>
+          <section class="settings-card">
+            <h3>安全</h3>
+            <p class="settings-hint">
+              内置浏览器遇到自签证书或证书错误的站点时，默认按浏览器标准拒绝打开
+              （页面报「你的连接不是私密连接」）。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="browser-cert-toggle">
+              <span>忽略证书校验</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              打开后内置浏览器不再校验证书，只影响浏览器本身：应用窗口与右侧预览面板
+              <b>重启应用后生效</b>，无头浏览器在下一次动作生效。网页抓取（web_fetch）与模型请求
+              不走这个开关——它们认「高级 · 网络」里的自签 CA。<b>默认关闭</b>。
+            </p>
+            <div id="browser-cert-status" class="card-status" hidden></div>
+          </section>
+          <section class="settings-card">
+            <h3>浏览器数据</h3>
+            <p class="settings-hint" id="browser-data-size">内置浏览器把 Cookie、站点数据与缓存存在数据目录里。</p>
+            <div class="bctl-row">
+              <div class="bctl-row-main">
+                <b>清除缓存</b>
+                <span>清除 HTTP 缓存、代码与 GPU 缓存、Service Worker 缓存；保留 Cookie 与站点数据，页面下次访问重新联网取一遍。</span>
+              </div>
+              <button id="btn-browser-clear-cache" class="btn-ghost">清除缓存</button>
+            </div>
+            <div class="bctl-row">
+              <div class="bctl-row-main">
+                <b>清除全部浏览器数据</b>
+                <span>删除 Cookie、站点数据、本地存储与缓存，等于把内置浏览器恢复成刚装好的样子。应用正在使用这份数据、无法在使用中删除，<b>点完会在下次启动应用时落地</b>；此操作不可撤销。</span>
+              </div>
+              <button id="btn-browser-clear-all" class="btn-ghost danger">清除全部</button>
+            </div>
+            <div id="browser-data-status" class="card-status" hidden></div>
+          </section>
         </section>
 
         <section class="settings-page hidden" id="settings-page-subagents">
@@ -1700,6 +1755,53 @@
           </section>
         </section>
 
+        <!-- 归档管理：自动归档旧会话 + 跨全部项目的已归档会话管理（恢复/删除）。
+             侧栏的「归档会话」弹窗只管当前项目，这里才是全局视图 -->
+        <section class="settings-page hidden" id="settings-page-archive">
+          <section class="settings-card">
+            <h3>自动归档</h3>
+            <p class="settings-hint">
+              定时扫描，将最后活动时间超过保留期的会话自动归档；置顶和运行中的会话不受影响。
+            </p>
+            <label class="toggle-row check-row">
+              <input type="checkbox" id="archive-auto-toggle">
+              <span>自动归档旧会话</span>
+            </label>
+            <div class="maintain-row">
+              <label for="archive-auto-days">归档保留时长</label>
+              <select id="archive-auto-days">
+                <option value="3">3 天后归档</option>
+                <option value="7">7 天后归档</option>
+                <option value="14">14 天后归档</option>
+                <option value="30">30 天后归档</option>
+                <option value="90">90 天后归档</option>
+              </select>
+            </div>
+            <p class="dim small archive-auto-hint">
+              会话最后更新时间早于该时长后，才会进入自动归档候选。自动归档只收进
+              下面的列表，不删除任何数据，可随时恢复。
+            </p>
+            <div id="archive-auto-status" class="card-status" hidden></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>已归档的会话</h3>
+              <button id="btn-archive-purge" class="rp-mini danger" hidden>🗑 全部删除</button>
+            </div>
+            <div class="archive-mgr-tools">
+              <input id="archive-mgr-search" type="text" placeholder="搜索已归档会话" autocomplete="off">
+              <label for="archive-mgr-sort">排序方式</label>
+              <select id="archive-mgr-sort">
+                <option value="updated">更新时间</option>
+                <option value="created">创建时间</option>
+                <option value="title">标题</option>
+              </select>
+              <select id="archive-mgr-project"><option value="">所有项目</option></select>
+            </div>
+            <div id="archive-mgr-list" class="archive-mgr-list"></div>
+          </section>
+        </section>
+
         <section class="settings-page hidden" id="settings-page-snippets">
           <section class="settings-card">
             <div class="card-head">
@@ -1976,6 +2078,8 @@
 <script src="/static/app-advanced.js"></script>
 <script src="/static/app-relay.js"></script>
 <script src="/static/app-about.js"></script>
+<script src="/static/app-archive.js"></script>
+<script src="/static/app-browser.js"></script>
 <script src="/static/app-mods.js"></script>
 <script src="/static/app.js"></script>
 <!-- 工具配置区块（联网搜索 / AI 画图 / 语音输入 / 圆桌）拆在 app-tools.js：

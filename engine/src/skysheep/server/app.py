@@ -1256,9 +1256,52 @@ async def _h_storage_cleanup(backend: ServerBackend, params: dict, emit, local: 
     return await backend.storage_cleanup(params)
 
 
+async def _h_archive_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 归档管理回读：开关/保留天数/归档总数（只读度量，不含会话内容）
+    return await backend.archive_status()
+
+
+async def _h_archive_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.archive_save(params)
+
+
+async def _h_archive_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 跨全部项目的归档列表（含项目名）：设置 · 归档管理的本机管理视图
+    return await backend.archive_manage_list()
+
+
+async def _h_archive_restore(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    raw = params.get("ids")
+    if not isinstance(raw, list):
+        raise RuntimeError("缺少要恢复的会话清单（ids）")
+    return await backend.archive_restore_batch([str(i) for i in raw])
+
+
+async def _h_archive_delete(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # ids 缺省 = 全部已归档（「全部删除」）；删除走 delete_session 完整清理链
+    raw = params.get("ids")
+    if raw is not None and not isinstance(raw, list):
+        raise RuntimeError("ids 需要一个会话 id 数组")
+    ids = None if raw is None else [str(i) for i in raw]
+    return await backend.archive_delete_batch(ids)
+
+
+async def _h_browser_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 浏览器控制回读：两个开关 + 内置浏览器 profile 的占用（只读度量，不含内容）
+    return backend.browser_status()
+
+
+async def _h_browser_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.save_browser_settings(params)
+
+
+async def _h_browser_clear(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # mode=cache 只删缓存；mode=all 另登记「下次启动清空」（使用中删不掉 Cookie）
+    return await backend.clear_browser_data(str(params.get("mode", "cache")))
+
+
 async def _h_relaycfg_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.relay_settings()
-
 
 async def _h_relaycfg_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.save_relay_settings(params)
@@ -2329,6 +2372,37 @@ _WS_METHODS: dict[str, _WsMethod] = {
         _h_storage_cleanup, local_only=True,
         local_error="存储清理只能在桌面端本机执行",
     ),
+    # 归档管理（设置 · 归档管理）：状态回读只读放行各端；改配置、跨项目
+    # 列表与批量恢复/删除是本机管理动作（列表含其他项目的会话标题，
+    # 远程不放宽；删除走 delete_session 完整清理链）
+    "archive.status": _WsMethod(_h_archive_status),
+    "archive.save": _WsMethod(
+        _h_archive_save, local_only=True,
+        local_error="归档设置只能在桌面端本机修改",
+    ),
+    "archive.list": _WsMethod(
+        _h_archive_list, local_only=True,
+        local_error="归档管理只能在本机界面上查看",
+    ),
+    "archive.restore": _WsMethod(
+        _h_archive_restore, local_only=True,
+        local_error="恢复已归档会话只能在桌面端本机操作",
+    ),
+    "archive.delete": _WsMethod(
+        _h_archive_delete, local_only=True,
+        local_error="删除已归档会话只能在桌面端本机操作",
+    ),
+    # 浏览器控制（设置 · 浏览器控制）：状态回读只读放行各端；改开关与清数据是
+    # 本机管理动作（清数据会删本机浏览器 profile，远程不放宽）
+    "browser.status": _WsMethod(_h_browser_status),
+    "browser.save": _WsMethod(
+        _h_browser_save, local_only=True,
+        local_error="浏览器控制设置只能在桌面端本机修改",
+    ),
+    "browser.clear": _WsMethod(
+        _h_browser_clear, local_only=True,
+        local_error="清除浏览器数据只能在本机界面上操作",
+    ),
     "relaycfg.get": _WsMethod(_h_relaycfg_get, local_only=True),
     "relaycfg.save": _WsMethod(_h_relaycfg_save, local_only=True),
     # 接力运行期（无工具串行 A/B）：本机 RPC；不创建会话、不执行工具、
@@ -2573,6 +2647,7 @@ def create_app(
         backend.start_memory_maintenance_loop()
         backend.start_daily_report_loop()
         backend.start_retention_loop()
+        backend.start_archive_loop()
         import logging
 
         logging.getLogger("skysheep").info(
@@ -2585,6 +2660,7 @@ def create_app(
         backend.stop_memory_maintenance_loop()
         backend.stop_daily_report_loop()
         backend.stop_retention_loop()
+        backend.stop_archive_loop()
         # crash.flag 的清除在 backend.shutdown() 开头做：收尾链最后一环最容易
         # 被截断（桌面壳 1.5s 上限、程序内更新的 os._exit），清在末尾等于没清
         await backend.shutdown()

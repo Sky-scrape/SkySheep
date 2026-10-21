@@ -1875,6 +1875,94 @@ mark.search-hit-mark {
 .archive-time { font-size: 11.5px; color: var(--dim); }
 .archive-ops { display: flex; gap: 6px; flex-shrink: 0; }
 
+/* ---------- 设置 · 归档管理 ----------
+   工具行（搜索/排序/项目筛选）+ 按项目分组折叠的会话列表；
+   组头一行点开收合，⋯ 唤出组级菜单（恢复/删除整组），行内是单发操作 */
+.archive-mgr-tools {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 10px 0 12px;
+}
+/* 工具栏控件走「卡片内控件」同一张皮（.subagent-ops select / .scan-foot 同款）：
+   纸面底 + 1px 描边 + 4px 圆角 + 聚焦内描边。不写这段就掉回浏览器原生样式
+   （13.3px Arial、系统描边、零内边距与圆角），六套主题下都跟整页不是一路 */
+.archive-mgr-tools input[type="text"],
+.archive-mgr-tools select {
+  background: var(--paper-raised); color: var(--text);
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  padding: 5px 9px; font-size: 12.5px; font-family: inherit;
+}
+.archive-mgr-tools input[type="text"] { flex: 1; min-width: 140px; }
+.archive-mgr-tools input[type="text"]::placeholder { color: var(--dim); }
+.archive-mgr-tools input[type="text"]:focus,
+.archive-mgr-tools select:focus {
+  outline: none; border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue);
+}
+.archive-mgr-tools select { flex-shrink: 0; cursor: pointer; }
+.archive-mgr-tools label { flex-shrink: 0; color: var(--text2); font-size: 12.5px; }
+/* 保留时长下拉下的说明：.maintain-row 的 margin 只有上边，紧随其后的说明段
+   会贴住下拉框，给一段呼吸（与 .maintain-last 同款间距） */
+.archive-auto-hint { margin-top: 8px; }
+.archive-mgr-list {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 430px; overflow: auto; padding-right: 2px;
+}
+.arch-grp {
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  background: var(--paper-raised);
+}
+.arch-grp-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 10px; cursor: pointer; user-select: none;
+}
+.arch-grp-head:hover { background: var(--paper-sunken); }
+.arch-grp-arrow {
+  display: inline-block; color: var(--dim); font-size: 13px;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.arch-grp.open .arch-grp-arrow { transform: rotate(90deg); }
+.arch-grp-head svg { width: 15px; height: 15px; color: var(--text2); flex-shrink: 0; }
+.arch-grp-name {
+  font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.arch-grp-count { font-size: 11.5px; color: var(--dim); flex-shrink: 0; margin-left: auto; }
+.arch-grp-more {
+  flex-shrink: 0; background: none; border: none; color: var(--dim);
+  cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px;
+  border-radius: var(--r-xs);
+}
+.arch-grp-more:hover { color: var(--text); background: var(--paper-inset); }
+.arch-grp-rows {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 4px 10px 9px;
+}
+.arch-row {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 6px 9px; background: var(--card);
+}
+.arch-row-main { flex: 1; min-width: 0; }
+.arch-row-main b {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12.5px;
+}
+.arch-row-time { font-size: 11px; color: var(--dim); }
+.arch-row-ops { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* ---------- 设置 · 浏览器控制 ----------
+   数据卡的两行「说明 + 动作按钮」：左列标题与说明，按钮贴右不换行。
+   与 .toolcfg-row（label + 控件）不同——这里按钮是次要动作，不该撑满一行 */
+.bctl-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 0; border-top: 1px solid var(--line);
+}
+.bctl-row:first-of-type { border-top: none; padding-top: 2px; }
+.bctl-row-main { flex: 1; min-width: 0; }
+/* 只把行标题（第一个 b）立成一行：说明里还会有行内 <b> 强调，一起 block 化会
+   把它顶成独立一行（实测踩过：「；此操作不可撤销」被折到第三行开头） */
+.bctl-row-main > b:first-child { display: block; font-size: 13px; margin-bottom: 3px; }
+.bctl-row-main span { display: block; font-size: 12px; color: var(--dim); line-height: 1.65; }
+.bctl-row .btn-ghost { flex-shrink: 0; font-size: 12.5px; padding: 5px 12px; }
+
 /* ---------- 会话标签分组 ----------
    分组头一行，点一下只看那组；标签小片画在会话标题下方 */
 #session-list li.s-group {
@@ -3690,7 +3778,13 @@ html[data-theme="pine"] .restart-banner {
 }
 /* 设置 · 全局记忆「定期整理」：开关下的周期行与按钮行 */
 .maintain-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; }
-.maintain-row label { width: 64px; flex-shrink: 0; color: var(--text2); font-size: 12.5px; }
+/* label 走 min-width 而不是定宽：定宽 64px 装不下「归档保留时长」（6 字 ≈ 75px），
+   会被折成两行、把整行撑高。min-width 让短标签（「整理周期」）照样占满 64px 的列，
+   长标签自然撑开不换行，两个页面共用同一条不会各自跑偏 */
+.maintain-row label {
+  min-width: 64px; width: auto; white-space: nowrap; flex-shrink: 0;
+  color: var(--text2); font-size: 12.5px;
+}
 .maintain-row select {
   flex: 1; min-width: 0; background: var(--paper-raised); color: var(--text);
   border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);

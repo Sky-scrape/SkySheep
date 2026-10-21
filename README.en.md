@@ -87,9 +87,15 @@ Multi-model here doesn't mean opening three windows and asking the same question
 
 **Roundtable — one question, several models answering.** Members answer independently in parallel; the chairman (your main conversation model) fuses every draft into a single final answer, so sharp criticism and safe conclusions both survive. Members can wear identity presets (critic, fact-checker, minimalist, pragmatist, and more), an optional debate round lets them read each other's drafts and revise once, and A/B mode keeps each member's original answer. Every draft is stored with the session for later review, citation, and follow-up.
 
+![Roundtable: three models answering in parallel with identity presets, the chairman fusing the drafts into one answer with a comparison table](docs/images/roundtable.webp)
+
 **Team — work split by role, tracked on a task board.** One big task becomes a set of tickets; each teammate has its own role, model, and tool scope, reports in the team channel, and gets accepted or sent back for rework. There are two kinds of director: you (every message you send is an instruction) or an AI director (pick a model as director and it drives decompose → dispatch → collect → accept → deliver on its own, while you keep the right to interrupt, take over, and call it off). When a few members need to hash something out, a "small meeting" runs a roundtable inside the channel without derailing the main line. Runaway guards include a global round cap, forced adjudication when rework loops exceed the limit, hand-off to the director when a member stalls, and forced delivery when the token budget is crossed.
 
+![Team: roster with per-member usage, the AI director badge, the ticket board (including rework counts), and the delivery summary](docs/images/team.webp)
+
 **Adversarial — a review pipeline built to find fault.** It doesn't aim for a pretty answer; it aims to dig problems out. Each of the four roles sees only its own slice. Finding a problem pays better than nodding along (asymmetric incentives), stage contexts are isolated from each other, and if one stage fails the pipeline degrades to a usable conclusion instead of collapsing. A finding the pipeline upholds can be ticked and registered as a consulting ticket for a team member to verify.
+
+![Adversarial: the discover → investigate → recommend → judge pipeline, with severity and verdict (upheld / partial / refuted / pending) per finding](docs/images/adversarial.webp)
 
 One thing that's easy to misread: relay is not a fourth member of that trio. It is a standalone workbench for work that hands off back and forth ("propose → execute → feedback → revise"). Open "Relay" from the sidebar, fill in the overall task and each side's per-turn task on the right-side board, then hit Run to let the side whose turn it is execute a full, normal Agent turn (agent loop, tools, permission gate, and checkpoints all apply). The baton passes automatically and the next turn carries the other side's previous output; "Continuous alternation" runs the turns back to back. Both sides' transcripts stay in their own sessions. Design notes: [docs/接力模式设计.md](docs/接力模式设计.md).
 
@@ -117,11 +123,17 @@ Scheduled tasks cover one-shot, interval, and complex schedules ("every 20 minut
 
 ### Memory and archiving
 
+![Project memory: AGENTS.md edited right in the UI, injected into every turn](docs/images/memory.webp)
+
 Project memory is edited directly in the UI; global auto memory turns noteworthy facts into pending-review candidates that only reach memory after you adopt them; session archives can be distilled automatically, and the scheduled tidy-up backs up first. The memory map renders a project evolution timeline, a topic association graph, and an LLM-generated evolution summary. When sessions pile up, archive management groups them by project with search and sorting by time or title, and a configurable retention window can sweep stale sessions into the archive automatically — it only flips a flag, deletes nothing, and they can be restored at any time.
 
 ### Extending it: MCP / Skills / Mods
 
 Extension points converge on three entry points, and the frontend stays zero-build with no proprietary plugin JS API. **MCP** supports stdio and Streamable HTTP, is Claude Desktop config compatible, ships seven presets, and reconnects automatically after a crash with already-registered tools still working. **Skills** come in global / project scopes, import from a folder, a .zip, or a GitHub/Gitee link, include twenty official scenario templates, and `/save-skill` turns a workflow you just did into a skill draft. **Mods** (experimental) run either in a quickjs sandbox or — switched to the Claude Code plugin format — in a dedicated Node subprocess, so one plugin runs in both. How the whole app reaches the network is decided in one place (Settings → Advanced → Network): proxy, bypass list (curl syntax, including `*.example.com` and CIDR), and a self-signed CA certificate (append semantics; the public chain is not broken) — followed by model calls, web search, web fetch, MCP, command subprocesses, the terminal panel, and the Mods Node runtime.
+
+| MCP servers (one-click presets) | Skills and scenario templates (twenty built in) |
+|:---:|:---:|
+| ![MCP panel: presets added in one click, read-only and connection state visible at a glance](docs/images/mcp.webp) | ![Skills panel: local skill management and one-click install of official scenario templates](docs/images/skills.webp) |
 
 ## 🔒 Why you can trust it with real work
 

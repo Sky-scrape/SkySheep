@@ -1,3 +1,5 @@
+# SkySheep
+
 <div align="center">
 
 [![SkySheep](docs/images/banner.png)](https://sheepsky.com/)
@@ -27,7 +29,7 @@ Its difference from a single-model agent cuts both ways — and these are the tw
 
 ![SkySheep main window](docs/images/right-panel.png)
 
-*The full "Night-ink" dark theme: sidebar, conversation area, live right panel, and the desktop pet*
+*The full "Night-ink" dark theme: sessions on the left, conversation in the middle, the workbench panel and desktop pet on the right*
 
 </div>
 
@@ -45,29 +47,85 @@ Instead of a feature checklist, here are the jobs it actually takes on:
 
 **Stay in control while away from the desk** — open the full UI from your phone's browser with confirmation cards intact; dispatch work and receive daily digests and completion notices over Feishu / WeChat.
 
-## 👥 Three ways to put several models on one task
+## 📦 Capability overview
+
+- **Collaboration**: roundtable (parallel answers + chairman fusion) · team (roles + task board + AI director) · adversarial (four-role fault-finding pipeline) · relay (main and peer screens alternating)
+- **Execution**: file read/write and precise editing · command execution (with background processes) · regex and glob search · web fetch and search · PDF / Word / Excel / PPT / CSV I/O · image understanding and AI image generation · sub-agents (optionally in an isolated worktree)
+- **Automation**: scheduled tasks · dependency pipelines (DAG) · agenda reminders · export to the Windows Task Scheduler · Feishu / WeChat / Webhook pushes · daily run digests
+- **Extensions**: MCP (two transports, seven presets) · Skills (twenty official templates) · Mods (experimental) · global egress (proxy / bypass list / self-signed CA)
+- **Desktop**: six themes · phone remote access and Tailscale · multi-tab terminal · desktop pet · Chinese-aware full-text search · per-round checkpoint rollback
+
+## 🧠 Design principles
+
+### The three columns are not decoration
+
+Sessions and entry points on the left, conversation in the middle, everything auxiliary on the right: files, browser, review, tasks, agenda, automation, project memory, memory map, relay, MCP and skills. The auxiliary area is one tabbed panel rather than floating windows scattered over the conversation, because what an agent run lacks is not more prompts but seeing what it is touching and how far it has got, all on one screen. A multi-tab terminal sits at the bottom (Ctrl+\`) so running a command never means switching windows.
+
+### A smarter agent needs better context
+
+Once context gets muddled, even a strong model is only guessing. So project, session, memory, and skills are kept apart and injected on demand: a project binds the working directory, and sub-agents, pipelines, skills and MCP follow that project; a session handles one specific piece of work; memory is split between project memory and global memory, with the oversized part injected by per-turn relevance; a skill hands its body to the model only when it is actually needed (20,000 characters max). Keep the partitions clean and the model sees exactly the slice it should.
+
+### Every step is visible, controllable, and reversible
+
+Letting an agent touch your files and commands only works if you can survive the mistake. So confirmation prompts, diff previews, the command whitelist, and change snapshots are defaults rather than options: read-only actions run through, writes and commands confirm every time, each round of changes is snapshotted for one-click undo, and two parallel tasks writing the same file must claim a write lease first.
+
+### A judgement worth making is worth more than one model
+
+A single model's answer reads fluently and is still one viewpoint. The roundtable has several models answer and a chairman fuse; the team puts roles in front of each other for acceptance; adversarial review assigns a stage to nothing but fault-finding. The extra time and tokens stay controllable — pick per-member models (cheap models as members, a strong one as chairman), and lean on the budget guardrail, round caps, and draft dedupe.
+
+## 👥 Multi-model collaboration: models take different parts of one turn
 
 Multi-model here doesn't mean opening three windows and asking the same question. It means models take different parts of one task. Roundtable, team, and adversarial modes are selected in the composer, with only one active per turn.
+
+| | Roundtable | Team | Adversarial |
+|---|---|---|---|
+| Who speaks | Members answer independently in parallel; the chairman fuses them | A director dispatches tickets; members report by role in the channel | Discover → investigate → recommend → judge, four roles in sequence |
+| Fits | Wanting one answer with fewer blind spots | A big task that needs splitting and tracking | Reviews that must find fault: plans, code, contracts |
+| How it converges | Every draft fused into one final answer | Tickets accepted one by one, or sent back | The judge rules; upheld findings become tickets to verify |
+| Cost control | Seven mechanisms (dedupe, light context, fusion budget, …) | Global round cap + forced delivery on budget overrun | Four serial stages: time bought for thoroughness |
+| Permissions | Its own permission gate | Its own permission gate | Pure text reasoning, no permission gate |
 
 **Roundtable — one question, several models answering.** Members answer independently in parallel; the chairman (your main conversation model) fuses every draft into a single final answer, so sharp criticism and safe conclusions both survive. Members can wear identity presets (critic, fact-checker, minimalist, pragmatist, and more), an optional debate round lets them read each other's drafts and revise once, and A/B mode keeps each member's original answer. Every draft is stored with the session for later review, citation, and follow-up.
 
 **Team — work split by role, tracked on a task board.** One big task becomes a set of tickets; each teammate has its own role, model, and tool scope, reports in the team channel, and gets accepted or sent back for rework. There are two kinds of director: you (every message you send is an instruction) or an AI director (pick a model as director and it drives decompose → dispatch → collect → accept → deliver on its own, while you keep the right to interrupt, take over, and call it off). When a few members need to hash something out, a "small meeting" runs a roundtable inside the channel without derailing the main line. Runaway guards include a global round cap, forced adjudication when rework loops exceed the limit, hand-off to the director when a member stalls, and forced delivery when the token budget is crossed.
 
-**Adversarial — a review pipeline built to find fault.** It doesn't aim for a pretty answer; it aims to dig problems out. Four roles relay in sequence — discover, investigate, recommend, judge — each seeing only its own slice. Finding a problem pays better than nodding along (asymmetric incentives), stage contexts are isolated from each other, and if one stage fails the pipeline degrades to a usable conclusion instead of collapsing. Fits plan reviews, code reviews, and contract risk — cases where you'd rather offend than agree. A finding the pipeline upholds can be ticked and registered as a consulting ticket for a team member to verify.
+**Adversarial — a review pipeline built to find fault.** It doesn't aim for a pretty answer; it aims to dig problems out. Each of the four roles sees only its own slice. Finding a problem pays better than nodding along (asymmetric incentives), stage contexts are isolated from each other, and if one stage fails the pipeline degrades to a usable conclusion instead of collapsing. A finding the pipeline upholds can be ticked and registered as a consulting ticket for a team member to verify.
 
-Three things are worth stating up front:
+One thing that's easy to misread: relay is not a fourth member of that trio. It is a standalone workbench for work that hands off back and forth ("propose → execute → feedback → revise"). Open "Relay" from the sidebar, fill in the overall task and each side's per-turn task on the right-side board, then hit Run to let the side whose turn it is execute a full, normal Agent turn (agent loop, tools, permission gate, and checkpoints all apply). The baton passes automatically and the next turn carries the other side's previous output; "Continuous alternation" runs the turns back to back. Both sides' transcripts stay in their own sessions. Design notes: [docs/接力模式设计.md](docs/接力模式设计.md).
 
-- **Permission boundaries**: roundtable and team go through their own permission gates, so sensitive actions still ask for confirmation; adversarial review is pure text reasoning, does not pass the permission gate, and never touches files itself.
-- **Cost**: multi-model really is more expensive than a single model. The controls already exist — the roundtable's seven token mechanisms (near-duplicate draft dedupe, light member context, fusion-budget clipping, and more), the team's global round cap and forced delivery on budget overrun, and per-member model choice (cheap models as members, a strong model as chairman or director). Members sharing one provider also share a concurrency gate, so a single key can't rate-limit itself out.
-- **Traceability**: roundtable drafts, team tickets and channel messages, and every adversarial stage's output are persisted with the session and replayable on another device.
+## 🔍 Feature walkthrough
 
-### Relay workbench: the main and peer screens taking turns
+### A full file write in one message
 
-Relay suits work that hands off back and forth (say "propose → execute → feedback → revise"). It is not a fourth composer mode but a standalone workbench: open "Relay" from the sidebar, fill in the overall task and each side's per-turn task on the right-side board, then hit Run to let the side whose turn it is execute a full, normal Agent turn (agent loop, tools, permission gate, and checkpoints all apply). The baton passes automatically and the next turn carries the other side's previous output; "Continuous alternation" runs the turns back to back. Both sides' transcripts stay in their own sessions. Design notes: [docs/接力模式设计.md](docs/接力模式设计.md).
+![Conversation with tool calls and rollback](docs/images/message-ops.webp)
 
-## 🔒 Safe by default: confirm first, roll back, data stays local
+You say "put the meeting notes into meeting-notes.md in the working directory" — and a whole sequence happens: the model decides to call `write_file` → the permission gate judges it against your current tier → the confirmation card shows a diff preview → the file lands → the conversation footer summarizes "1 file changed this round" with "Undo this round" right beside it. Tool timings, diffs, and the change list never require digging through logs. To cut the interruptions, switch the tier to "Auto-edit" and writes inside the working directory stop asking one by one, while anything outside it is still blocked and confirmed.
 
-An agent that edits files and runs commands must be survivable when things go wrong. Safety is the default behavior — no setup required:
+### Models, usage, and cost
+
+| Paste a key into a built-in preset | Usage and cost, per session |
+|:---:|:---:|
+| ![Model provider settings](docs/images/providers.png) | ![Usage dashboard](docs/images/usage.png) |
+
+Ten built-in cloud presets (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSeek / Zhipu / Kimi / Qwen / Xiaomi MiMo), plus custom relay endpoints and local inference services (LM Studio, Ollama). One click detects the model list, context windows, and capabilities (streaming / tools / vision / reasoning), with a masked diagnostic report. Usage is tallied by session / provider / model with cost estimates, and a daily budget guardrail pushes a channel alert at the 80% and 100% tiers. Reasoning effort is auto-tuned per task; when you want to know why a turn was slow, the review page's turn diagnostics break out tool counts and the slowest tool, permission waits, and tokens.
+
+### Scheduled tasks and agenda
+
+![Agenda weekly view](docs/images/agenda.png)
+
+Scheduled tasks cover one-shot, interval, and complex schedules ("every 20 minutes between 10:00 and 12:00 on weekdays") and can pre-authorize tools so unattended runs don't stall on prompts; agenda reminders come with weekly / monthly views and advance reminders. Final states and a daily digest can be pushed to Feishu / WeChat / a Webhook. One caveat worth stating plainly: in-app schedules only fire while SkySheep is running — choose "Minimize to system tray" when closing to keep it going in the background, and tasks that come due while fully exited are caught up at the next launch. To fire with the app fully closed, export the task to the Windows Task Scheduler from its card ("⊞").
+
+### Memory and archiving
+
+Project memory is edited directly in the UI; global auto memory turns noteworthy facts into pending-review candidates that only reach memory after you adopt them; session archives can be distilled automatically, and the scheduled tidy-up backs up first. The memory map renders a project evolution timeline, a topic association graph, and an LLM-generated evolution summary. When sessions pile up, archive management groups them by project with search and sorting by time or title, and a configurable retention window can sweep stale sessions into the archive automatically — it only flips a flag, deletes nothing, and they can be restored at any time.
+
+### Extending it: MCP / Skills / Mods
+
+Extension points converge on three entry points, and the frontend stays zero-build with no proprietary plugin JS API. **MCP** supports stdio and Streamable HTTP, is Claude Desktop config compatible, ships seven presets, and reconnects automatically after a crash with already-registered tools still working. **Skills** come in global / project scopes, import from a folder, a .zip, or a GitHub/Gitee link, include twenty official scenario templates, and `/save-skill` turns a workflow you just did into a skill draft. **Mods** (experimental) run either in a quickjs sandbox or — switched to the Claude Code plugin format — in a dedicated Node subprocess, so one plugin runs in both. How the whole app reaches the network is decided in one place (Settings → Advanced → Network): proxy, bypass list (curl syntax, including `*.example.com` and CIDR), and a self-signed CA certificate (append semantics; the public chain is not broken) — followed by model calls, web search, web fetch, MCP, command subprocesses, the terminal panel, and the Mods Node runtime.
+
+## 🔒 Why you can trust it with real work
+
+Safety is the default behavior — no setup required:
 
 - **Confirm every step**: read-only actions run through automatically; file writes (with a diff preview) and command execution prompt for confirmation one by one. Three permission modes — Safe execution / Auto-edit (auto-approves writes inside the working directory only) / Full access; relaxed modes can only be switched from the local UI
 - **Command whitelist**: matches by full word prefix; commands carrying shell chaining or interpreter flags never match a rule and always re-confirm; rules persist per project, managed in settings
@@ -89,37 +147,23 @@ An agent that edits files and runs commands must be survivable when things go wr
 
 </details>
 
-## ⏰ Work continues while you're away
-
-An agent earns its keep when it keeps working without you. Three pieces cover "fires on schedule", "tells you when it's done", and "you can cut in anytime":
-
-- **Fires on schedule**: scheduled tasks (recurring, with pre-authorized tool lists) and agenda reminders (weekly / monthly calendar, advance reminders); pipelines chain tasks into a DAG where upstream nodes run in parallel, downstream starts as dependencies land, and failures auto-retry with the last failure reason attached. Need a task to fire with the app fully closed? Export it as a Windows scheduled task (registered via `schtasks`, run standalone as `skysheep cron run <task id>`)
-- **Tells you when it's done**: task and pipeline final states plus a daily run digest push to Feishu / WeChat / a generic Webhook (outbound-only, optional HMAC signature verification); the automation panel's "Today" card summarizes the day's runs
-- **You can cut in anytime**: the full UI opens in your phone's browser (LAN token + QR code, or Tailscale for cross-network access) with confirmation cards approved remotely; Feishu / WeChat channels let you dispatch work, add instructions, and receive completion notices
-
-Long-term memory lives on this layer too: project memory is edited in-app; global auto memory turns noteworthy facts into pending-review candidates that only reach memory after you adopt them; session archives can be distilled automatically and the scheduled tidy-up backs up first; the memory map renders a project evolution timeline, a topic association graph, and an LLM-generated evolution summary.
-
-## 🧩 Extension through open standards
-
-Extension points converge on MCP, Skills, and Mods; the frontend stays zero-build, with no proprietary plugin JS API:
-
-- **MCP client**: stdio / Streamable HTTP, Claude Desktop config compatible, seven built-in presets (structured thinking, web fetch, time, Git, filesystem, memory, cua computer driver). After a server crash it reconnects automatically and already-registered tools keep working — the call that failed is never replayed
-- **Skill packages**: global / project scopes; import from a folder, a .zip, or a GitHub/Gitee URL, or scan-and-import skills already on this machine; twenty official scenario templates bundled — one-click install uses the in-app copy and works offline; `/save-skill` turns the current session's approach into a skill draft
-- **Mods (experimental)**: the bundled examples run either inside a quickjs sandbox or — switched to the Claude Code plugin format — in a dedicated Node subprocess, so one plugin runs in both. A Mod can add UI (a pane, a status strip, a modal), register tools, and take part in permission decisions (tighten-only, or explicitly rewrite tool arguments); Mod-registered tools are always classed at the highest risk, and the engine's outbound secret pre-rejection, engine-directory write confirmation, and recursive-delete guard are never relaxed for a Mod
-- **One egress setting for the whole app**: Settings → Advanced → Network decides how every part of the app reaches the network — proxy, bypass list (`example.com` / `.example.com` / `*.example.com` / CIDR, curl-compatible syntax), and a self-signed CA certificate (append semantics: it adds to the system trust store instead of replacing the public chain). Model calls, web search, web fetch, MCP (remote HTTP and stdio subprocesses), command subprocesses, hooks, the terminal panel, and the Mods Node runtime all follow it
-
 ## 🧭 How it differs from terminal agents
 
-The difference from terminal agents like Claude Code or OpenAI Codex CLI is not a feature-by-feature checklist but the product form — terminal tools excel at scripting and CI integration; SkySheep excels at being **visible, controllable, and reachable**:
+Terminal agents like Claude Code or OpenAI Codex CLI excel at scripting and CI integration. SkySheep puts the same class of capability behind a graphical interface and makes multi-model collaboration a native interaction.
 
-- **Multi-model as a native experience**: roundtable / team / adversarial modes are selected in the composer, and Relay opens in the right-side panel from the sidebar (see [the section above](#-three-ways-to-put-several-models-on-one-task))
-- **Visible**: a full graphical interface, Chinese-first — conversation, confirmation cards, diff previews, file changes, terminal output, and review diagnostics all live in the UI instead of a scrolling terminal log
-- **Controllable**: permission gates, checkpoint rollback, workspace trust, and the command whitelist are all graphical — which file changed, who started it, and whether it can be undone, visible at a glance
-- **Reachable**: work continues while you're away — scheduled tasks and dependency pipelines run on their own, pushing daily digests and completion notices to Feishu / WeChat / a Webhook; the full UI opens in your phone's browser with remote approval cards
+| Dimension | Terminal agents | SkySheep |
+|---|---|---|
+| Interaction | A command-line stream in a terminal, built for scripts and CI | Graphical, Chinese-first: confirmation cards, diffs, and panels live in the UI |
+| Multi-model | Usually one model all the way through | Roundtable / team / adversarial, plus the relay workbench |
+| Permission confirmation | Command-line flags and rule files | Three graphical tiers + per-action confirmation cards + a per-project command whitelist |
+| Rollback | You lean on git yourself | Per-round snapshots, one-click undo, surviving restarts |
+| Unattended work | You wire up your own scheduling | Scheduled tasks / dependency pipelines / Task Scheduler export / channel digests |
+| Extending | Plugin and script ecosystems | MCP + Skills + Mods, with a zero-build frontend |
+| Platforms | Native on macOS / Linux and others | A Windows desktop product |
 
 Conversely, if what you want is scripting inside CI or a pure keyboard-driven workflow, terminal agents remain the better fit; SkySheep ships `skysheep run` headless mode and a terminal REPL as complements.
 
-SkySheep is a **Windows desktop product**: the installer, desktop shell, DPAPI credential encryption, Windows sandbox, window and process management, and `schtasks` export are all built and polished for Windows only. The `--browser` mode can bring up the engine and web UI on macOS / Linux, but that is a developer fallback, not a supported product form. Cross-platform support will be reconsidered only after the Windows desktop experience reaches a stable bar (see [Roadmap & Non-goals](#-roadmap--non-goals)).
+SkySheep is a **Windows desktop product**: the installer, desktop shell, DPAPI credential encryption, Windows sandbox, window and process management, and `schtasks` export are all built and polished for Windows only. The `--browser` mode can bring up the engine and web UI on macOS / Linux, but that is a developer fallback, not a supported product form (see [Roadmap & Non-goals](#-roadmap--non-goals)).
 
 ## 🚀 Installation & Running
 
@@ -159,24 +203,10 @@ Single-file installer: install [Inno Setup 7](https://jrsoftware.org/isdl.php) (
 
 > **📦 Multiple instances**: source builds run under a `dev` identity by default, with data in `~/.skysheep-dev/` — isolated from the installed app's `~/.skysheep/` and safe to run side by side; the `SKYSHEEP_INSTANCE` environment variable spawns further independent instances.
 
-> **⏰ Scheduled tasks require the app to be running**: scheduled tasks and agenda reminders fire from the app's internal loop. Choose "Minimize to system tray" when closing to keep them running in the background; tasks that come due while fully exited are caught up on the next launch. Enable "Launch at startup" under Settings → Advanced for always-on duty. Need a task to fire even when the app is fully closed? Export it as a Windows scheduled task from the task card ("⊞" button).
-
-## 🖼 Screenshots
-
-| A full file write in one view | Model provider settings |
-|:---:|:---:|
-| ![Conversation with tool calls and rollback](docs/images/message-ops.webp) | ![Model provider settings](docs/images/providers.png) |
-| Tool call, diff preview, and one-click undo for the round | Paste an API key into a built-in preset to connect |
-
-| Agenda weekly view | Usage dashboard |
-|:---:|:---:|
-| ![Agenda weekly view](docs/images/agenda.png) | ![Usage dashboard](docs/images/usage.png) |
-| Scheduled tasks and reminders land on the calendar and fire on time | Token usage and cost estimates, per session |
-
-## 📋 Feature overview
+## 📋 Full capability list
 
 <details>
-<summary><b>Full capability list</b> (expand)</summary>
+<summary><b>Expand</b></summary>
 
 **Multi-model collaboration**
 
@@ -219,7 +249,7 @@ Single-file installer: install [Inno Setup 7](https://jrsoftware.org/isdl.php) (
 - Network: global proxy / bypass list / self-signed CA; a per-provider proxy can override the global one (three states: follow global / explicit direct / use this proxy), and local services always connect directly
 - Remote access: LAN token + QR code; Tailscale supported for cross-network access (security boundaries and advice in [docs/远程访问安全.md](docs/远程访问安全.md))
 - Desktop form factor: six themes + follow-system, system tray, launch at startup, window geometry memory, global hotkey, desktop pet; multiple session tabs, an eleven-tab right panel (auxiliary chat / browser / review / files / tasks / agenda / automation / project memory / memory map / relay / MCP·Skills), and a multi-tab terminal docked at the bottom (Ctrl+\` toggle)
-- Session management: full-text search (Chinese-aware), session branching, pin / archive / tags (with archive management grouped by project and automatic archiving of stale sessions), Markdown / HTML export, rolling backups with visual restore
+- Session management: full-text search (Chinese-aware), session branching, pin / archive / tags, Markdown / HTML export, rolling backups with visual restore
 
 </details>
 
@@ -254,15 +284,18 @@ Auditability: all project source (the Python engine and the frontend HTML/CSS/JS
 
 ## 🤝 Development & Contributing
 
-```bash
-cd engine
-uv run pytest        # Full test suite (-m "not e2e" skips the real-socket tests; -m eval runs the 30-scenario behavioral eval baseline)
-uv run ruff check .  # lint
-```
+Bug fixes, docs, tests, and experience polish are all welcome — as are new skill packages and MCP configs drawn from real workflows. Before opening a PR, please check:
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md). To report a security vulnerability, use the private channel in [SECURITY.md](SECURITY.md) — please don't open a public issue. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for the code of conduct.
+- Use `uv` (Python >= 3.11); the frontend stays zero-build — edit `engine/src/skysheep/server/static/` directly, no Node / npm toolchain
+- Run `uv run pytest` (`-m "not e2e"` skips the real-socket tests, `-m eval` runs the behavioral eval baseline) and `uv run ruff check .`
+- A new feature usually touches four places: `server/backend.py` plus a `dispatch()` branch in `server/app.py`, then `static/index.html` and `static/app.js` (settings pages have their own convention; config reads/writes go through `config.py`'s `_read_raw_config` / `_write_raw_config`)
+- A new tool must declare `safety` on `Tool` and spell out the four MCP annotations; anything that writes files or runs commands must go through the `PermissionGate` — this is not negotiable
+- Text reads and writes always go through `textio.py` (encoding and line-ending safety); move / delete / make-directory use the dedicated reversible tools rather than teaching the agent `mv` / `rm` / `mkdir` inside `run_command`
+- A new mergeable streaming event kind must be added to `_MERGEABLE_DELTA_KINDS`, and all three paths — turn end, exception, cancellation — must flush
+- Version consistency across six places is machine-checked by `engine/tools/check_versions.py`; the `uv.lock` copy is held by `uv sync --locked`
+- Packaging and packaging smoke tests use the executables in `.venv` directly, never via `uv run`
 
-Running into a problem? In the app, go to Settings → About → "💬 Report an issue" to auto-package a redacted diagnostic bundle and open the feedback page.
+Security vulnerabilities go through the private channel in [SECURITY.md](SECURITY.md) — please don't open a public issue. Everything else is in [CONTRIBUTING.md](CONTRIBUTING.md), with the code of conduct in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Running into a problem? In the app, go to Settings → About → "💬 Report an issue" to auto-package a redacted diagnostic bundle and open the feedback page.
 
 ## 🗺 Roadmap & Non-goals
 
@@ -272,15 +305,15 @@ Running into a problem? In the app, go to Settings → About → "💬 Report an
 **Non-goals**:
 
 - **Native mobile apps** — the desktop shell is the carrier for permission confirmation, checkpoints, and other safety interactions; there is no mobile-grade security model at this stage. The web PWA is already supported (add to home screen).
-- **macOS / Linux desktop support (for now)** — SkySheep is a Windows desktop product: its security model (DPAPI credential encryption, the Windows sandbox, window and process management, `schtasks` scheduling) rests on Windows. The `--browser` mode can run the engine and web UI on macOS / Linux as a developer fallback, not as a supported product form. Other platforms get reconsidered only once the Windows desktop reaches a stable bar; until then the project deliberately avoids abstracting the security model, window management, and installer flow for cross-platform portability.
+- **macOS / Linux desktop support (for now)** — SkySheep is a Windows desktop product: its security model (DPAPI credential encryption, the Windows sandbox, window and process management, `schtasks` scheduling) rests on Windows. The `--browser` mode can run the engine and web UI on macOS / Linux as a developer fallback, not as a supported product form. Other platforms get reconsidered only once the Windows desktop reaches a stable bar.
 - **Vector memory / multi-tier context compaction** — the built-in compaction and archive-time memory digests already cover current usage; not worth growing the install size.
-- **Replacing the built-in search with ripgrep** — pure-Python, zero-dependency "install and it works" distribution stays; no bundled binary, but an installed rg may optionally accelerate search (implemented: ASCII-pattern search is accelerated automatically when a local rg is present; the built-in search remains the default).
+- **Replacing the built-in search with ripgrep** — pure-Python, zero-dependency "install and it works" distribution stays; no bundled binary, but an installed rg may optionally accelerate search.
 - **A proprietary plugin JS API** — extension points stay on the three entry points, MCP, Skills, and Mods; the frontend remains zero-build.
 - **An operated skill marketplace** — skills ship via the in-app import flow (folder / .zip / links); no curated store to moderate.
 
 ## 📄 License & Sponsorship
 
-Released under the [MIT](LICENSE) license.
+Released under the [MIT](LICENSE) license: use it, modify it, and distribute it freely, including commercially — just keep the copyright and license notice.
 
 Donations are accepted via the channel listed in [.github/FUNDING.yml](.github/FUNDING.yml) — GitHub Sponsors: [Sky-scrape](https://github.com/sponsors/Sky-scrape). The first spending priority is **code-signed distribution**: signed installers remove the Windows SmartScreen warning (see [docs/smartscreen-说明.md](docs/smartscreen-说明.md)) so everyday users can install with a double-click.
 

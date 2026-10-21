@@ -1495,7 +1495,8 @@ def test_right_panel_merged_tabs_keep_every_view_reachable(home):
     # ④ 恢复偏好时要按 TAB_OF 映射（老 ui.json 存的是分段 id），并还原分段
     init = js[js.index("async function initUiPrefs()"):]
     init = init[:init.index("// ----------")]
-    assert "const tab = rightTabFor(t);" in init, "老偏好里的分段 id 没映射回容器标签"
+    # 这里用 let 而非 const：循环里会把 tab 重写成带编号的 auxN（辅助对话多开迁移）
+    assert "let tab = rightTabFor(t);" in init, "老偏好里的分段 id 没映射回容器标签"
     assert "rightView[tab] = t" in init, "老偏好里打开的分段没还原"
 
     # ⑤ 后端白名单要收得下容器与分段两种 id：漏收即升级后标签静默消失

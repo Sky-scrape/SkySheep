@@ -491,6 +491,46 @@ def test_adversarial_send_end_to_end(home):
     assert usage[0][0] == "fa" and usage[3][0] == "fake"
 
 
+def test_adversarial_meta_survives_history_reload(home):
+    """重开会话后对抗审查卡必须还能重建：历史 brief 要带 adversarial 元数据。
+
+    前端的历史回放靠 m.adversarial 重建问题清单卡（buildAdvReplayCard）；
+    _msg_brief 漏掉这个键时，卡片只在当轮实时存在，刷新或重开会话就只剩正文
+    （团队与圆桌的 meta 寄在 roundtable 键下，所以只有对抗会这样丢）。
+    """
+    scripts = [
+        [[TextBlock(text=JUDGE_REPORT)]],       # 裁判（当前主模型）
+        [[TextBlock(text=FINDER_JSON)]],        # 发现者
+        [[TextBlock(text=INVESTIGATOR_JSON)]],  # 调查者
+        [[TextBlock(text=ADVISOR_JSON)]],       # 建议者
+    ]
+    with make_adv_client(home, scripts) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "chat.send", "params": {
+            "text": "审查这段代码：print(pop([]))",
+            "adversarial": True,
+            "members": [
+                {"provider": "fa", "model": "ma"},
+                {"provider": "fb", "model": "mb"},
+                {"provider": "fc", "model": "mc"},
+            ],
+        }})
+        events = []
+        frame = recv_until(ws, "a1", events)
+        sid = frame["result"]["session_id"]
+        live = next(
+            e for e in events if e["event"] == "assistant_message"
+        )["data"]["message"]["adversarial"]
+
+        # 与界面上「重新打开会话」同一条路径：session.resume 重发全量历史
+        ws.send_json({"id": "r1", "method": "session.resume", "params": {"id": sid}})
+        resume = recv_until(ws, "r1", [])
+
+    assert resume["ok"]
+    assistant = [m for m in resume["result"]["messages"] if m["role"] == "assistant"][-1]
+    assert assistant["adversarial"] == live, "历史回放丢了对抗元数据，审查卡会消失"
+    assert assistant["adversarial"]["findings"], "回放的问题清单不能是空的"
+
+
 def test_adversarial_settings_roundtrip(home):
     with make_adv_client(home, [[[TextBlock(text="x")]]]) as client, \
             client.websocket_connect("/ws") as ws:

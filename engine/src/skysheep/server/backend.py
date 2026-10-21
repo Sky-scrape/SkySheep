@@ -640,6 +640,12 @@ def _msg_brief(m: Message) -> dict:
         "seq": m.seq,
         "images": images,
         "roundtable": m.roundtable,
+        # 对抗轮元数据同样必须随历史下发：前端的历史回放靠它重建审查卡
+        # （buildAdvReplayCard 读 m.adversarial）。只带实时响应的话，刷新或
+        # 重开会话后卡就没了、只剩正文；团队与圆桌的 meta 寄在 roundtable
+        # 键下，所以只有对抗漏了这一格。findings 正文在落库时已逐字段限长，
+        # 与原样回传同量级。
+        "adversarial": m.adversarial,
         # 思考型模型的推理内容（前端渲染为可折叠块）；其他角色为空串
         "thinking": "".join(b.text for b in m.content if getattr(b, "type", "") == "thinking"),
         # 思考耗时（毫秒）：折叠标题显示「思考 X 秒」，与正文用时区分开

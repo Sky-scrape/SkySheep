@@ -50,6 +50,9 @@
     sheep: "#f6f1e4", sheepShade: "#d8cfbc", sheepFace: "#33302a",
     ink: "#2b2a24", ok: "#6aa86a", warn: "#e0a33c", bad: "#cf503f", idle: "#9a958a",
     product: "#f0d58b", roofLight: "#c07a5c",
+    bgSteel: "#b9b0a2", bgSteelDark: "#a79e90", bgSteelLight: "#d2c9ba",
+    bgRust: "#c39a7c", bgRustDark: "#b08a6e", bgRustLight: "#d9b394",
+    bgHaze: "#e8c9a4",
     shadow: "rgba(58, 40, 24, 0.34)", glow: "rgba(255, 196, 110, 0.20)",
   };
   // 夜盘：钢蓝暮色 + 暖黄窗光 + 浓烟
@@ -68,6 +71,9 @@
     sheep: "#d9d2c4", sheepShade: "#b3ac9c", sheepFace: "#1b1a18",
     ink: "#0b0c10", ok: "#5aa05a", warn: "#c9903a", bad: "#b8443f", idle: "#6a6c73",
     product: "#c9a95c", roofLight: "#8a5040",
+    bgSteel: "#3f4f5e", bgSteelDark: "#33424f", bgSteelLight: "#4f6272",
+    bgRust: "#5c4436", bgRustDark: "#4d372b", bgRustLight: "#70533f",
+    bgHaze: "#2a4358",
     shadow: "rgba(0, 0, 0, 0.46)", glow: "rgba(255, 196, 110, 0.26)",
   };
 
@@ -523,6 +529,8 @@
 
     var minX = hall.x - 70, maxX = hall.x + 70;
     var minY = hall.y - 50, maxY = hall.y + 50;
+    var minX = hall.x - 70, maxX = hall.x + 70;
+    var minY = hall.y - 50, maxY = hall.y + 50;
     factories.forEach(function (f) {
       minX = Math.min(minX, f.x - f.halfW - 20);
       maxX = Math.max(maxX, f.x + f.halfW + 20);
@@ -535,15 +543,12 @@
       models: site.models, site: site,
       bounds: { minX: minX, maxX: maxX, minY: minY, maxY: maxY },
     };
-    // 厂区集合 / 产线集合变了才重新取景；运行事件刷新不动镜头
     S.worldSig = projects.map(function (p) {
       return p.id + ":" + (p.lines || []).map(function (l) { return l.key; }).join(",");
     }).join("|");
     S.selectedKey = null;
   }
 
-  // 工业厂区：所有会遮住别的东西的物件都是三维模型（盒体 / 圆柱 / 桁架传送带），
-  // 在世界坐标里给出底面中心、半宽、半深与高度，渲染时按屏幕底线排序。
   function buildIndustrialSite(hall, factories) {
     var rand = seeded(0x1D05721A);
     var models = [];
@@ -575,51 +580,135 @@
     factories.forEach(function (f) {
       var cx = f.x, cy = f.y, hw = f.halfW, hh = f.halfH;
       var baseZ = 5;
-      // 场院平台（带铺装与围栏）
+      var variant = Math.abs(hashKey("site" + f.id)) % 4;
       addBox(cx, cy, hw * 0.96, hh * 0.96, 5, "sand", { paving: true, rail: true });
-      // 主厂房（灰钢，锯齿屋顶 + 暖窗 + 大门）
-      var bx = cx - hw * 0.18, by = cy - hh * 0.12;
-      addBox(bx, by, hw * 0.31, hh * 0.52, 38, "steel",
-             { z0: baseZ, windows: 3, door: true, roof: "saw" });
-      // 副仓库（低矮厂房，填满场院）
-      addBox(cx - hw * 0.62, cy - hh * 0.02, hw * 0.14, hh * 0.34, 15, "steel",
-             { z0: baseZ, windows: 1, roof: "saw" });
-      addCyl(bx + hw * 0.13, by - hh * 0.04, 2.4, 56, "steel",
-             { z0: baseZ, bands: 2 });
-      smoke.push({ x: bx + hw * 0.13, y: by - hh * 0.04, h: baseZ + 56 });
-      // 锈色筒仓 ×2
-      addCyl(cx + hw * 0.30, cy - hh * 0.10, hw * 0.11, 54, "rust",
-             { z0: baseZ, bands: 4, ladder: true });
-      smoke.push({ x: cx + hw * 0.30, y: cy - hh * 0.10, h: baseZ + 54 });
-      addCyl(cx + hw * 0.47, cy + hh * 0.10, hw * 0.10, 48, "rust",
-             { z0: baseZ, bands: 3, ladder: true });
-      // 处理机组
+
+      var mainBx = cx - hw * 0.18, mainBy = cy - hh * 0.12;
+      var topZ = baseZ + 38;
+
+      if (variant === 1) {
+        // 仓储型：两条长仓 + 小罐区 + 低办公楼
+        mainBx = cx - hw * 0.34; mainBy = cy - hh * 0.20;
+        addBox(mainBx, mainBy, hw * 0.19, hh * 0.58, 24, "steel",
+               { z0: baseZ, windows: 2, door: true, roof: "saw" });
+        addBox(cx + hw * 0.06, cy - hh * 0.26, hw * 0.17, hh * 0.48, 18, "steel",
+               { z0: baseZ, windows: 2, roof: "flat" });
+        addCyl(cx + hw * 0.30, cy - hh * 0.18, 2.0, 44, "steel", { z0: baseZ, bands: 2 });
+        smoke.push({ x: cx + hw * 0.30, y: cy - hh * 0.18, h: baseZ + 44 });
+        for (var ti = 0; ti < 3; ti += 1) {
+          addCyl(cx + hw * (0.40 + ti * 0.10), cy + hh * (-0.06 + ti * 0.14),
+                 hw * 0.06, 18, "rust", { z0: baseZ, bands: 2 });
+        }
+        addBox(cx + hw * 0.26, cy + hh * 0.26, hw * 0.12, hh * 0.24, 12, "glass",
+               { z0: baseZ, windows: 2, roof: "flat" });
+        topZ = baseZ + 44;
+      } else if (variant === 2) {
+        // 塔楼型：高层厂房 + 双烟囱 + 单筒仓 + 低附楼
+        mainBx = cx - hw * 0.10; mainBy = cy - hh * 0.15;
+        addBox(mainBx, mainBy, hw * 0.26, hh * 0.40, 56, "steel",
+               { z0: baseZ, windows: 5, door: true, roof: "flat" });
+        addCyl(mainBx - hw * 0.10, mainBy - hh * 0.02, 2.2, 70, "steel", { z0: baseZ, bands: 2 });
+        addCyl(mainBx + hw * 0.10, mainBy - hh * 0.02, 2.2, 70, "steel", { z0: baseZ, bands: 2 });
+        smoke.push({ x: mainBx - hw * 0.10, y: mainBy - hh * 0.02, h: baseZ + 70 });
+        smoke.push({ x: mainBx + hw * 0.10, y: mainBy - hh * 0.02, h: baseZ + 70 });
+        addBox(cx - hw * 0.52, cy + hh * 0.02, hw * 0.14, hh * 0.30, 18, "steel",
+               { z0: baseZ, windows: 2, roof: "flat" });
+        addCyl(cx + hw * 0.42, cy - hh * 0.05, hw * 0.11, 46, "rust",
+               { z0: baseZ, bands: 3, ladder: true });
+        addBox(cx + hw * 0.26, cy + hh * 0.28, hw * 0.12, hh * 0.22, 14, "glass",
+               { z0: baseZ, windows: 2, roof: "flat" });
+        topZ = baseZ + 70;
+      } else if (variant === 3) {
+        // 联排型：主厂房 + 侧翼 + 高筒仓 + 小罐
+        mainBx = cx - hw * 0.20; mainBy = cy - hh * 0.14;
+        addBox(mainBx, mainBy, hw * 0.28, hh * 0.50, 34, "steel",
+               { z0: baseZ, windows: 3, door: true, roof: "saw" });
+        addBox(cx + hw * 0.18, cy - hh * 0.04, hw * 0.22, hh * 0.28, 20, "steel",
+               { z0: baseZ, windows: 2, roof: "saw" });
+        addCyl(cx + hw * 0.46, cy - hh * 0.20, hw * 0.10, 58, "rust",
+               { z0: baseZ, bands: 4, ladder: true });
+        smoke.push({ x: cx + hw * 0.46, y: cy - hh * 0.20, h: baseZ + 58 });
+        addCyl(cx + hw * 0.50, cy + hh * 0.15, hw * 0.06, 20, "rust",
+               { z0: baseZ, bands: 2 });
+        addCyl(mainBx - hw * 0.06, mainBy - hh * 0.02, 2.0, 50, "steel",
+               { z0: baseZ, bands: 1 });
+        smoke.push({ x: mainBx - hw * 0.06, y: mainBy - hh * 0.02, h: baseZ + 50 });
+        topZ = baseZ + 58;
+      } else {
+        // 锯齿厂房型：主厂房 + 副仓 + 双筒仓
+        mainBx = cx - hw * 0.18; mainBy = cy - hh * 0.12;
+        addBox(mainBx, mainBy, hw * 0.31, hh * 0.52, 38, "steel",
+               { z0: baseZ, windows: 3, door: true, roof: "saw" });
+        addBox(cx - hw * 0.62, cy - hh * 0.02, hw * 0.14, hh * 0.34, 15, "steel",
+               { z0: baseZ, windows: 1, roof: "saw" });
+        addCyl(mainBx + hw * 0.13, mainBy - hh * 0.04, 2.4, 56, "steel",
+               { z0: baseZ, bands: 2 });
+        smoke.push({ x: mainBx + hw * 0.13, y: mainBy - hh * 0.04, h: baseZ + 56 });
+        addCyl(cx + hw * 0.30, cy - hh * 0.10, hw * 0.11, 54, "rust",
+               { z0: baseZ, bands: 4, ladder: true });
+        smoke.push({ x: cx + hw * 0.30, y: cy - hh * 0.10, h: baseZ + 54 });
+        addCyl(cx + hw * 0.47, cy + hh * 0.10, hw * 0.10, 48, "rust",
+               { z0: baseZ, bands: 3, ladder: true });
+        topZ = baseZ + 56;
+      }
+
+      // 处理机组（所有厂型共用）
       var px = cx + hw * 0.02, py = cy + hh * 0.30;
       addBox(px, py, hw * 0.17, hh * 0.46, 22, "rust",
              { z0: baseZ, windows: 1, roof: "flat", pipes: true });
       sparks.push({ x: px, y: py, h: baseZ + 22 });
-      // 厂房 → 处理机组的内部传送带
       models.push({ kind: "conveyor",
-        path: [{ x: bx + hw * 0.18, y: by + hh * 0.24 }, { x: px, y: py }],
-        h0: baseZ + 30, h1: baseZ + 16, width: 3.2, ore: true });
-      // 产线机台
+        path: [{ x: mainBx + hw * 0.14, y: mainBy + hh * 0.24 }, { x: px, y: py }],
+        h0: baseZ + 26, h1: baseZ + 16, width: 3.2, ore: true });
       f.lines.forEach(function (rec) {
         models.push({ kind: "machine", x: rec.x, y: rec.y, hw: 7.5, hh: 3.8,
                       h: 13, z0: baseZ, line: rec.line, rec: rec });
-        // 主线到机台的支线
         models.push({ kind: "conveyor",
           path: [f.belt[f.belt.length - 1], { x: rec.x, y: rec.y }],
           h0: 12, h1: 12, width: 2.4, ore: false });
       });
       models.push({ kind: "pallet", x: f.tray.x, y: f.tray.y, z0: baseZ, projectId: f.id });
-      models.push({ kind: "crate", x: cx - hw * 0.60, y: cy + hh * 0.34, s: 1, z0: baseZ });
-      models.push({ kind: "barrel", x: cx + hw * 0.58, y: cy + hh * 0.38, s: 1, z0: baseZ });
-      models.push({ kind: "ore", x: cx + hw * 0.20, y: cy + hh * 0.52, s: 1.1 });
-      models.push({ kind: "worker", x: cx - hw * 0.46, y: cy + hh * 0.16, z0: baseZ });
-      models.push({ kind: "truck", x: cx - hw * 0.24, y: cy + hh * 0.66, z0: baseZ });
-      // 调度厅 → 厂区的高架传送带
+      models.push({ kind: "crate", x: cx - hw * 0.72, y: cy + hh * 0.45, s: 1, z0: baseZ });
+      models.push({ kind: "barrel", x: cx + hw * 0.62, y: cy + hh * 0.52, s: 1, z0: baseZ });
+      models.push({ kind: "ore", x: cx + hw * 0.22, y: cy + hh * 0.58, s: 1.1 });
+      models.push({ kind: "worker", x: cx - hw * 0.55, y: cy + hh * 0.60, z0: baseZ });
+      models.push({ kind: "truck", x: cx - hw * 0.24, y: cy + hh * 0.70, z0: baseZ });
       models.push({ kind: "conveyor", path: f.belt, h0: 12, h1: 22, width: 3.6, ore: true });
+      f.labelZ = topZ + 6;
     });
+
+    // 远景工业带：储罐、仓库、输电塔、铁路、矿堆与卡车
+    models.push({ kind: "box", x: 300, y: -150, hw: 58, hh: 30, h: 28, role: "steel", windows: 4, roof: "saw", bg: true });
+    models.push({ kind: "cyl", x: 330, y: -60, r: 22, h: 44, role: "rust", bands: 4, bg: true });
+    models.push({ kind: "cyl", x: 300, y: 10, r: 16, h: 34, role: "steel", bands: 3, bg: true });
+    models.push({ kind: "box", x: -320, y: -100, hw: 50, hh: 26, h: 22, role: "steel", windows: 3, roof: "flat", bg: true });
+    models.push({ kind: "cyl", x: -300, y: 40, r: 24, h: 40, role: "rust", bands: 4, bg: true });
+    models.push({ kind: "pylon", x: -240, y: -230, bg: true });
+    models.push({ kind: "pylon", x: 220, y: -240, bg: true });
+    models.push({ kind: "pylon", x: 360, y: -40, bg: true });
+    models.push({ kind: "rail", path: [{ x: -380, y: 170 }, { x: -120, y: 190 }, { x: 140, y: 200 }, { x: 380, y: 185 }], bg: true });
+    models.push({ kind: "truck", x: -60, y: 175, z0: 0, bg: true });
+    models.push({ kind: "truck", x: 80, y: 190, z0: 0, bg: true });
+    models.push({ kind: "ore", x: 250, y: 200, s: 2.6, bg: true });
+    models.push({ kind: "ore", x: -200, y: 210, s: 2.2, bg: true });
+    models.push({ kind: "rock", x: -180, y: -160, s: 2, bg: true });
+    models.push({ kind: "rock", x: 180, y: 60, s: 1.6, bg: true });
+    models.push({ kind: "shrub", x: -100, y: 260, s: 1.3, bg: true });
+    models.push({ kind: "shrub", x: 260, y: 240, s: 1.2, bg: true });
+    models.push({ kind: "conveyor", path: [{ x: 270, y: -150 }, { x: 330, y: -60 }], h0: 16, h1: 10, width: 2.6, ore: true, bg: true });
+    models.push({ kind: "box", x: -210, y: 140, hw: 26, hh: 14, h: 14, role: "steel", windows: 2, roof: "saw", bg: true });
+    models.push({ kind: "cyl", x: -245, y: 155, r: 8, h: 18, role: "rust", bands: 2, bg: true });
+    models.push({ kind: "box", x: 220, y: 150, hw: 22, hh: 12, h: 12, role: "steel", windows: 2, roof: "flat", bg: true });
+    models.push({ kind: "cyl", x: 250, y: 165, r: 7, h: 16, role: "steel", bands: 2, bg: true });
+    models.push({ kind: "truck", x: -150, y: 185, z0: 0, bg: true });
+    models.push({ kind: "truck", x: 120, y: 198, z0: 0, bg: true });
+    models.push({ kind: "rock", x: -90, y: 130, s: 1.4, bg: true });
+    models.push({ kind: "shrub", x: 60, y: 150, s: 1.2, bg: true });
+    models.push({ kind: "ore", x: -40, y: 195, s: 1.6, bg: true });
+    var tracks = [
+      { path: [{ x: -360, y: 210 }, { x: -160, y: 250 }, { x: 60, y: 275 }, { x: 300, y: 290 }] },
+      { path: [{ x: -260, y: -40 }, { x: -120, y: 20 }, { x: 20, y: 90 }] },
+    ];
 
     // 中央调度塔：石台 + 钢塔 + 玻璃顶 + 天线
     addBox(hall.x, hall.y, 46, 23, 8, "sand");
@@ -631,7 +720,7 @@
     models.push({ kind: "radar", x: hall.x, y: hall.y - 5, z0: 66 });
     sparks.push({ x: hall.x, y: hall.y, h: 18 });
 
-    return { models: models, patches: patches, smoke: smoke, sparks: sparks };
+    return { models: models, patches: patches, smoke: smoke, sparks: sparks, tracks: tracks };
   }
 
   function routeBelt(a, b, seed) {
@@ -1020,7 +1109,13 @@
   // ---------- 工业场景：三维模型渲染 ----------
   // 所有建筑/筒仓/传送带都是三维体：给出底面中心、半宽、半深、高度，按「顶面 + 左面 + 右面」
   // 三块面着色；渲染时按屏幕底线排序（画家算法），再叠投影、烟雾、粉尘与火花。
-  function roleCols(pal, role) {
+  function roleCols(pal, role, bg) {
+    if (bg) {
+      if (role === "rust") return { top: pal.bgRustLight, left: pal.bgRust, right: pal.bgRustDark };
+      if (role === "glass") return { top: pal.bgSteelLight, left: pal.bgSteel, right: pal.bgSteelDark };
+      if (role === "sand") return { top: pal.bgHaze, left: pal.bgHaze, right: pal.bgHaze };
+      return { top: pal.bgSteelLight, left: pal.bgSteel, right: pal.bgSteelDark };
+    }
     if (role === "rust") return { top: pal.rustLight, left: pal.rust, right: pal.rustDark };
     if (role === "glass") return { top: pal.glassLight, left: pal.glass, right: pal.glassDark };
     if (role === "sand") return { top: pal.groundLight, left: pal.ground, right: pal.groundDark };
@@ -1057,6 +1152,7 @@
       }
       ctx.globalAlpha = 1;
     }
+    drawSkyline(ctx, pal, skyH, W);
     // 沙地
     var ground = ctx.createLinearGradient(0, skyH, 0, H);
     ground.addColorStop(0, pal.groundLight);
@@ -1065,9 +1161,12 @@
     ctx.fillStyle = ground;
     ctx.fillRect(0, skyH, W, H - skyH);
     // 地平线雾带
-    ctx.globalAlpha = 0.12;
-    ctx.fillStyle = pal.sun;
-    ctx.fillRect(0, skyH - 2, W, 5);
+    var haze = ctx.createLinearGradient(0, skyH - 4, 0, skyH + 28);
+    haze.addColorStop(0, pal.bgHaze);
+    haze.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.globalAlpha = S.night ? 0.16 : 0.22;
+    ctx.fillStyle = haze;
+    ctx.fillRect(0, skyH - 4, W, 32);
     ctx.globalAlpha = 1;
     // 远处沙丘剪影
     ctx.globalAlpha = S.night ? 0.30 : 0.22;
@@ -1108,11 +1207,17 @@
         ctx.fillRect(Math.round(pt.x) + 1, Math.round(pt.y) + 1, 2, 1);
       }
     });
+    (site.tracks || []).forEach(function (tr) {
+      var pts = tr.path.map(function (q) { return viewPoint(q.x, q.y); });
+      linePath(ctx, pts, vlen(3), pal.roadDark);
+      linePath(ctx, pts, Math.max(1, vlen(1)), pal.roadLight);
+    });
   }
 
   function drawShadows(ctx, pal) {
     var z = S.cam.zoom;
     S.world.models.forEach(function (m) {
+      if (m.bg) return;
       var p = viewPoint(m.x, m.y);
       if (m.kind === "box") {
         var hw = m.hw * z, hh = m.hh * z;
@@ -1130,16 +1235,20 @@
   }
 
   function drawModels(ctx, pal) {
-    var list = S.world.models.map(function (m) {
+    var bg = [], main = [];
+    S.world.models.forEach(function (m) {
       var mx = m.x, my = m.y;
       if (m.kind === "conveyor" && m.path && m.path.length) {
         var mid = pointAt(m.path, 0.5);
         mx = mid.x; my = mid.y;
       }
-      return { m: m, d: viewPoint(mx, my).y };
+      var item = { m: m, d: viewPoint(mx, my).y };
+      if (m.bg) bg.push(item); else main.push(item);
     });
-    list.sort(function (a, b) { return a.d - b.d; });
-    list.forEach(function (it) { drawModel(ctx, pal, it.m); });
+    bg.sort(function (a, b) { return a.d - b.d; });
+    main.sort(function (a, b) { return a.d - b.d; });
+    bg.forEach(function (it) { drawModel(ctx, pal, it.m); });
+    main.forEach(function (it) { drawModel(ctx, pal, it.m); });
   }
 
   function drawModel(ctx, pal, m) {
@@ -1154,6 +1263,10 @@
     else if (m.kind === "worker") drawWorkerModel(ctx, pal, m);
     else if (m.kind === "truck") drawTruckModel(ctx, pal, m);
     else if (m.kind === "radar") drawRadarModel(ctx, pal, m);
+    else if (m.kind === "pylon") drawPylonModel(ctx, pal, m);
+    else if (m.kind === "rail") drawRailModel(ctx, pal, m);
+    else if (m.kind === "rock") drawRockModel(ctx, pal, m);
+    else if (m.kind === "shrub") drawShrubModel(ctx, pal, m);
   }
 
   function drawTruckModel(ctx, pal, m) {
@@ -1162,16 +1275,23 @@
     var baseY = p.y - Math.round((m.z0 || 0) * z);
     var L = Math.max(10, Math.round(26 * z));
     var W = Math.max(4, Math.round(9 * z));
+    var steel = m.bg ? pal.bgSteel : steel;
+    var steelDark = m.bg ? pal.bgSteelDark : steelDark;
+    var steelLight = m.bg ? pal.bgSteelLight : steelLight;
+    var rust = m.bg ? pal.bgRust : rust;
+    var rustDark = m.bg ? pal.bgRustDark : rustDark;
+    var rustLight = m.bg ? pal.bgRustLight : rustLight;
+    var wheel = m.bg ? pal.bgSteelDark : wheel;
     fillOval(ctx, p.x, baseY + 1, L * 0.5, W * 0.4, pal.shadow);
-    ctx.fillStyle = pal.ink;
+    ctx.fillStyle = wheel;
     for (var i = 0; i < 3; i += 1) {
       fillOval(ctx, p.x - L * 0.3 + i * L * 0.28, baseY,
-               Math.max(1, W * 0.28), Math.max(1, W * 0.16), pal.ink);
+               Math.max(1, W * 0.28), Math.max(1, W * 0.16), wheel);
     }
     drawIsoBoxAt(ctx, p.x - L * 0.08, baseY - 2, L * 0.34, W * 0.3,
-                 Math.max(5, Math.round(9 * z)), pal.steelLight, pal.steel, pal.steelDark);
+                 Math.max(5, Math.round(9 * z)), steelLight, steel, steelDark);
     drawIsoBoxAt(ctx, p.x + L * 0.38, baseY - 2, L * 0.15, W * 0.28,
-                 Math.max(4, Math.round(7 * z)), pal.rustLight, pal.rust, pal.rustDark);
+                 Math.max(4, Math.round(7 * z)), rustLight, rust, rustDark);
     ctx.fillStyle = pal.windowDark;
     ctx.fillRect(Math.round(p.x + L * 0.45), Math.round(baseY - 2 - 6 * z),
                  Math.max(1, Math.round(3 * z)), Math.max(1, Math.round(2 * z)));
@@ -1217,7 +1337,7 @@
     var hw = Math.max(2, Math.round(m.hw * z));
     var hh = Math.max(1, Math.round(m.hh * z));
     var h = Math.max(2, Math.round(m.h * z));
-    var cols = roleCols(pal, m.role);
+    var cols = roleCols(pal, m.role, m.bg);
     drawIsoBoxAt(ctx, base.x, baseY, hw, hh, h, cols.top, cols.left, cols.right);
     // 瓦楞竖线（只画左面）
     if (m.role === "steel") {
@@ -1327,7 +1447,7 @@
     var rx = Math.max(2, Math.round(m.r * z));
     var ry = Math.max(1, Math.round(rx * 0.5));
     var h = Math.max(3, Math.round(m.h * z));
-    var cols = roleCols(pal, m.role);
+    var cols = roleCols(pal, m.role, m.bg);
     // 底部弧、筒身、左右明暗
     fillOval(ctx, base.x, baseY, rx, ry, cols.right);
     ctx.fillStyle = cols.left;
@@ -1371,15 +1491,20 @@
     var total = pathLength(pts);
     if (!total) return;
     var w = Math.max(2, Math.round(m.width * z));
+    var steel = m.bg ? pal.bgSteel : steel;
+    var steelDark = m.bg ? pal.bgSteelDark : steelDark;
+    var steelLight = m.bg ? pal.bgSteelLight : steelLight;
+    var ore = m.bg ? pal.bgRust : ore;
+    var oreDark = m.bg ? pal.bgRustDark : oreDark;
     // 桁架支腿
     var step = Math.max(8, vlen(20));
     for (var d = 0; d < total; d += step) {
       var t = d / total;
       var pt = pointAt(pts, t);
       var hh = (m.h0 + (m.h1 - m.h0) * t) * z;
-      ctx.fillStyle = pal.steelDark;
+      ctx.fillStyle = steelDark;
       ctx.fillRect(Math.round(pt.x), Math.round(pt.y - hh), 1, Math.max(2, Math.round(hh)));
-      ctx.fillStyle = pal.steel;
+      ctx.fillStyle = steel;
       ctx.fillRect(Math.round(pt.x) - 2, Math.round(pt.y - hh * 0.55), 1, 1);
     }
     // 带面
@@ -1394,21 +1519,21 @@
       var nx = -dy / len * w / 2, ny = dx / len * w / 2;
       // 侧面
       linePath(ctx, [{ x: a.x, y: ya + 2 }, { x: b.x, y: yb + 2 }],
-               Math.max(1, Math.round(w * 0.5)), pal.steelDark);
+               Math.max(1, Math.round(w * 0.5)), steelDark);
       fillPoly(ctx, [
         { x: a.x + nx, y: ya + ny }, { x: a.x - nx, y: ya - ny },
         { x: b.x - nx, y: yb - ny }, { x: b.x + nx, y: yb + ny },
-      ], pal.steel);
+      ], steel);
       // 矿石与高光
       var mid = pointAt([a, b], 0.5);
       if (m.ore) {
-        ctx.fillStyle = pal.ore;
+        ctx.fillStyle = ore;
         ctx.fillRect(Math.round(mid.x - w * 0.3), Math.round((ya + yb) / 2 - 1),
                      Math.max(1, Math.round(w * 0.6)), 1);
-        ctx.fillStyle = pal.oreDark;
+        ctx.fillStyle = oreDark;
         ctx.fillRect(Math.round(mid.x - w * 0.1), Math.round((ya + yb) / 2), 1, 1);
       }
-      ctx.fillStyle = pal.steelLight;
+      ctx.fillStyle = steelLight;
       ctx.fillRect(Math.round(mid.x + nx * 0.5), Math.round((ya + yb) / 2 + ny * 0.5), 1, 1);
     }
   }
@@ -1538,10 +1663,13 @@
     var z = S.cam.zoom;
     var p = viewPoint(m.x, m.y);
     var s = Math.max(3, Math.round(7 * z)) * (m.s || 1);
+    var ore = m.bg ? pal.bgRust : ore;
+    var oreDark = m.bg ? pal.bgRustDark : oreDark;
+    var oreHi = m.bg ? pal.bgRustLight : oreHi;
     fillOval(ctx, p.x, p.y, s * 1.4, s * 0.6, pal.shadow);
-    fillOval(ctx, p.x, p.y - 1, s, s * 0.6, pal.oreDark);
-    fillOval(ctx, p.x - s * 0.3, p.y - 2, s * 0.7, s * 0.45, pal.ore);
-    ctx.fillStyle = pal.rustLight;
+    fillOval(ctx, p.x, p.y - 1, s, s * 0.6, oreDark);
+    fillOval(ctx, p.x - s * 0.3, p.y - 2, s * 0.7, s * 0.45, ore);
+    ctx.fillStyle = oreHi;
     ctx.fillRect(Math.round(p.x - s * 0.2), Math.round(p.y - s * 0.7), 1, 1);
     ctx.fillRect(Math.round(p.x + s * 0.3), Math.round(p.y - s * 0.4), 1, 1);
   }
@@ -1573,6 +1701,106 @@
     ctx.fillRect(Math.round(size * 0.18), top - Math.round(u * 1.6),
                  Math.round(size * 0.4), Math.max(1, u));
     ctx.restore();
+  }
+
+  function drawPylonModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var h = Math.max(10, Math.round(34 * z));
+    var w = Math.max(3, Math.round(9 * z));
+    var steel = pal.bgSteel, dark = pal.bgSteelDark;
+    linePath(ctx, [{ x: p.x - w, y: p.y }, { x: p.x - Math.round(w * 0.35), y: p.y - h }], 1, dark);
+    linePath(ctx, [{ x: p.x + w, y: p.y }, { x: p.x + Math.round(w * 0.35), y: p.y - h }], 1, dark);
+    for (var i = 1; i <= 4; i += 1) {
+      var yy = p.y - Math.round(h * i / 5);
+      var ww = Math.round(w * (1 - i / 5) + 1);
+      ctx.fillStyle = steel;
+      ctx.fillRect(p.x - ww, yy, ww * 2, 1);
+    }
+    ctx.fillStyle = steel;
+    ctx.fillRect(p.x - Math.round(w * 1.6), p.y - h + Math.round(h * 0.12), Math.round(w * 3.2), 1);
+    ctx.fillStyle = pal.bgRust;
+    ctx.fillRect(p.x - Math.round(w * 1.2), p.y - h + Math.round(h * 0.12) + 1, 1, 2);
+    ctx.fillRect(p.x + Math.round(w * 1.2), p.y - h + Math.round(h * 0.12) + 1, 1, 2);
+  }
+
+  function drawRailModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var pts = m.path.map(function (q) { return viewPoint(q.x, q.y); });
+    linePath(ctx, pts, Math.max(1, Math.round(2 * z)), pal.bgSteelDark);
+    var total = pathLength(pts);
+    for (var d = 0; d < total; d += Math.max(4, Math.round(8 * z))) {
+      var pt = pointAt(pts, total ? d / total : 0);
+      ctx.fillStyle = pal.bgSteel;
+      ctx.fillRect(Math.round(pt.x - 2), Math.round(pt.y), 4, 1);
+    }
+  }
+
+  function drawRockModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var s = Math.max(2, Math.round((m.s || 1) * 4 * z));
+    fillOval(ctx, p.x, p.y + 1, s, Math.max(1, Math.round(s * 0.45)), pal.shadow);
+    ctx.fillStyle = pal.bgSteelDark;
+    ctx.fillRect(p.x - s, p.y - s, s * 2, s);
+    ctx.fillStyle = pal.bgSteel;
+    ctx.fillRect(p.x - s + 1, p.y - s, Math.max(1, s), Math.max(1, s - 1));
+  }
+
+  function drawShrubModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var s = Math.max(1, Math.round((m.s || 1) * 3 * z));
+    ctx.fillStyle = pal.bgRustDark;
+    ctx.fillRect(p.x - s, p.y - 1, s * 2, 1);
+    ctx.fillStyle = pal.bgRust;
+    ctx.fillRect(p.x - s + 1, p.y - 2, Math.max(1, s), 1);
+    ctx.fillRect(p.x, p.y - 3, Math.max(1, s), 1);
+  }
+
+  function drawSkyline(ctx, pal, skyH, W) {
+    var rand = seeded(0x51C1E);
+    ctx.globalAlpha = S.night ? 0.45 : 0.38;
+    ctx.fillStyle = pal.bgHaze;
+    for (var i = 0; i < 16; i += 1) {
+      var x = Math.round(i * W / 15 + rand() * 10);
+      var w = Math.round(10 + rand() * 26);
+      var h = Math.round(5 + rand() * 14);
+      var shape = rand();
+      if (shape > 0.8) {
+        fillPoly(ctx, [
+          { x: x, y: skyH }, { x: x + Math.round(w * 0.28), y: skyH - h },
+          { x: x + Math.round(w * 0.72), y: skyH - h }, { x: x + w, y: skyH },
+        ], pal.bgHaze);
+      } else if (shape > 0.62) {
+        fillPoly(ctx, [
+          { x: x, y: skyH - h }, { x: x + Math.round(w / 2), y: skyH - h - 5 },
+          { x: x + w, y: skyH - h },
+        ], pal.bgHaze);
+        ctx.fillRect(x, skyH - h, w, h);
+      } else {
+        ctx.fillRect(x, skyH - h, w, h);
+      }
+      if (rand() > 0.55) ctx.fillRect(x + Math.round(w * 0.3), skyH - h - 7, 1, 7);
+    }
+    ctx.globalAlpha = S.night ? 0.6 : 0.5;
+    ctx.fillStyle = pal.bgSteel;
+    for (var j = 0; j < 10; j += 1) {
+      var x2 = Math.round(j * W / 9 + rand() * 16);
+      var w2 = Math.round(14 + rand() * 34);
+      var h2 = Math.round(8 + rand() * 20);
+      ctx.fillRect(x2, skyH - h2, w2, h2);
+      if (rand() > 0.55) {
+        fillOval(ctx, x2 + Math.round(w2 * 0.68), skyH - h2 - 3,
+                 Math.round(w2 * 0.16), 3, pal.bgRust);
+      }
+      if (S.night) {
+        ctx.fillStyle = pal.window;
+        for (var k = 0; k < 3; k += 1) ctx.fillRect(x2 + 4 + k * 6, skyH - h2 + 4, 1, 1);
+        ctx.fillStyle = pal.bgSteel;
+      }
+    }
+    ctx.globalAlpha = 1;
   }
 
   function drawEffects(ctx, pal) {
@@ -1766,8 +1994,9 @@
     return el;
   }
 
-  function placeLabel(el, wx, wy, text, cls) {
+  function placeLabel(el, wx, wy, text, cls, z) {
     var p = viewPoint(wx, wy);
+    p.y -= Math.round((z || 0) * S.cam.zoom);
     var sx = p.x * (S.cssW / S.bufW);
     var sy = p.y * (S.cssH / S.bufH);
     if (sx < -40 || sy < -20 || sx > S.cssW + 40 || sy > S.cssH + 20) { el.style.display = "none"; return; }
@@ -1786,7 +2015,7 @@
     var i = 0;
     var st = activeState();
     var running = (st && st.counters && st.counters.running) || 0;
-    placeLabel(labelFor(i++), S.world.hall.x, S.world.hall.y - 42, "调度厅" + (running ? " · 在转 " + running + " 件" : ""), "hall");
+    placeLabel(labelFor(i++), S.world.hall.x, S.world.hall.y, "调度厅" + (running ? " · 在转 " + running + " 件" : ""), "hall", 92);
     // 厂区名牌优先
     var factories = S.world.factories.slice().sort(function (a, b) { return a.y - b.y; });
     factories.forEach(function (f) {
@@ -1797,7 +2026,7 @@
       var hidden = Math.max(0, allLines.length - 6);
       if (hidden) text += " · +" + hidden + " 线";
       if (f.root_ok === false) text += " · 停工";
-      placeLabel(labelFor(i++), f.x, f.y - f.halfH - 6, text, "project");
+      placeLabel(labelFor(i++), f.x, f.y, text, "project", f.labelZ || 44);
     });
     // 机台名：放大到能读时才出现
     if (S.cam.zoom >= 0.55) {
@@ -1812,7 +2041,7 @@
           if (rec.line.status === "running" && rec.kind === "cron") {
             mlabel += " " + fmtClockShort(lineRunSeconds(rec.line)); // 机台上方计时 mm:ss
           }
-          placeLabel(labelFor(i++), rec.x, rec.y - 18, mlabel, "machine");
+          placeLabel(labelFor(i++), rec.x, rec.y, mlabel, "machine", 20);
         });
       });
     }

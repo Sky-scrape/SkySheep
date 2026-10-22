@@ -167,10 +167,10 @@ def test_factory_calls_present_in_bundled_frontend():
 
 def test_factory_pixel_specs_and_safety_bounds():
     js = read_static("app-factory.js")
-    # 32×16 等距瓦片、内部缓冲 1/3（最小 320×180）、60 枚包裹、40 个标签
+    # 32×16 等距瓦片、内部缓冲 1/2（最小 320×180）、60 枚包裹、40 个标签
     assert "var TILE_W = 32;" in js and "var TILE_H = 16;" in js
     assert "BUFFER_MIN_W = 320" in js and "BUFFER_MIN_H = 180" in js
-    assert "Math.round(S.cssW / 3)" in js and "Math.round(S.cssH / 3)" in js
+    assert "Math.round(S.cssW / 2)" in js and "Math.round(S.cssH / 2)" in js
     assert "MAX_PACKAGES = 60" in js
     assert "MAX_LABELS = 40" in js
     assert "imageSmoothingEnabled = false" in js
@@ -187,6 +187,35 @@ def test_factory_module_respects_reduced_motion_and_visibility():
     assert "visibilitychange" in js
     # 主题切换 / 明暗判定用的是既有 resolvedThemeId
     assert "resolvedThemeId" in js
+
+
+def test_factory_module_wires_new_heavy_models():
+    """新大型设备（冷却塔 / 管廊 / 输煤栈桥）必须有绘制分派与场景构建接线。
+
+    坐标、path/高度与假 Canvas 绘制在 `test_factory_scene_models.py` 里跑运行时探针；
+    这里只锁源码接线，防止 kind 或函数名改半边。
+    """
+    js = read_static("app-factory.js")
+    for kind, fn in (
+        ("cooling", "drawCoolingTowerModel"),
+        ("pipeRack", "drawPipeRackModel"),
+        ("transferBridge", "drawTransferBridgeModel"),
+    ):
+        assert f"function {fn}(" in js, f"缺少绘制函数 {fn}"
+        assert f'else if (m.kind === "{kind}") {fn}(ctx, pal, m);' in js, (
+            f"drawModel 没有分派 {kind} → {fn}"
+        )
+    # 公用设施在 buildIndustrialSite 里、远景工业带之前构建，与项目产线解耦
+    i_site = js.index("function buildIndustrialSite(")
+    i_utility = js.index("// 公用设施独立于项目产线", i_site)
+    i_bg = js.index("// 远景工业带", i_utility)
+    assert i_site < i_utility < i_bg
+    utility_seg = js[i_utility:i_bg]
+    for kind in ("cooling", "pipeRack"):
+        assert f'kind: "{kind}"' in utility_seg, f"公用设施段没有构建 {kind}"
+    # 转运桥退出主厂区、挪到远景工业带，且必须带 bg 标记（只作天际线层次）
+    i_bridge = js.index('kind: "transferBridge"', i_bg)
+    assert "bg: true" in js[i_bridge:i_bridge + 260], "远景转运桥缺少 bg 标记"
 
 
 # ---------- app.css ----------

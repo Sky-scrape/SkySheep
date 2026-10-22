@@ -6,7 +6,7 @@
  *   factoryRepaint() / factoryEscape()
  *
  * 数据：factory.state（打开时一次） + factory_run 事件（开始 / 结束各一次）。
- * 场景：固定斜 45° 等距，32×16 瓦片；内部缓冲按 CSS 尺寸 1/3 渲染（最小 320×180），
+ * 场景：固定斜 45° 等距，32×16 瓦片；内部缓冲按 CSS 尺寸 1/2 渲染（最小 320×180），
  *       最近邻放大；世界动画 10fps，镜头平移 / 缩放走 rAF。
  * 全部图形程序化绘制（矩形 / 菱形 / 折线），不引入图片、库或出网请求。
  * 文字一律 DOM 覆盖层（中文像素字体不可分发），最多约 40 个标签。
@@ -37,9 +37,11 @@
   // 昼盘：黄金时刻的工业厂区（灰钢 / 锈色筒仓 / 沙地 / 暖窗）
   var PAL_DAY = {
     skyTop: "#f7d488", skyMid: "#e8a35a", skyLow: "#c97a45", sun: "#ffe6a8",
-    ground: "#c9a06a", groundDark: "#a87b4e", groundLight: "#e0bd8a", groundHi: "#f0d6a8",
-    road: "#5a5148", roadDark: "#3e3830", roadLight: "#8a7d6b",
+    ground: "#c3a176", groundDark: "#a17d55", groundLight: "#dcc198", groundHi: "#efdab4",
+    road: "#8a7a63", roadDark: "#6f6049", roadLight: "#a8977d",
     steel: "#8a8f96", steelDark: "#545a62", steelLight: "#c2c8ce",
+    stone: "#9e8063", stoneDark: "#655342", stoneLight: "#d0b592",
+    concrete: "#a89f92", concreteDark: "#7c7365", concreteLight: "#c4bbae",
     rust: "#b4623a", rustDark: "#7a3d24", rustLight: "#dc8a54",
     glass: "#6f8f9a", glassDark: "#3f5660", glassLight: "#a8c8d0",
     window: "#ffcf6b", windowDark: "#3a2f28",
@@ -58,9 +60,11 @@
   // 夜盘：钢蓝暮色 + 暖黄窗光 + 浓烟
   var PAL_NIGHT = {
     skyTop: "#122a44", skyMid: "#1b3a56", skyLow: "#2b4c64", sun: "#a8c6da",
-    ground: "#3a3b37", groundDark: "#282925", groundLight: "#4c4c45", groundHi: "#5c5b51",
-    road: "#2c2e31", roadDark: "#1a1c1f", roadLight: "#45484d",
+    ground: "#43443f", groundDark: "#2f302b", groundLight: "#54544c", groundHi: "#63625a",
+    road: "#3f4144", roadDark: "#2c2e30", roadLight: "#5b5f65",
     steel: "#4e5c6a", steelDark: "#2e3945", steelLight: "#748696",
+    stone: "#50514d", stoneDark: "#303834", stoneLight: "#71756c",
+    concrete: "#494a46", concreteDark: "#30312d", concreteLight: "#5b5c55",
     rust: "#7a4530", rustDark: "#48281b", rustLight: "#9c5e44",
     glass: "#4a6a7a", glassDark: "#293f4c", glassLight: "#7fa6b8",
     window: "#ffd36e", windowDark: "#1a1a18",
@@ -461,6 +465,27 @@
     return { x: (x - y) * (TILE_W / 2), y: (x + y) * (TILE_H / 2) };
   }
 
+  // 台地尺寸按厂区平台外缘反推：菱形台面在四个斜方向上都必须兜住每一块厂区坪，
+  // 否则厂区会悬在台地边缘外。k 取所有厂区坪尖角的 |x|/hw + |y|/hh 最大值。
+  function makePlateau(factories) {
+    var k = 1;
+    factories.forEach(function (f) {
+      [
+        { x: f.x - f.halfW, y: f.y }, { x: f.x + f.halfW, y: f.y },
+        { x: f.x, y: f.y - f.halfH }, { x: f.x, y: f.y + f.halfH },
+      ].forEach(function (p) {
+        k = Math.max(k, Math.abs(p.x) / 260 + Math.abs(p.y) / 125);
+      });
+    });
+    k = clamp(k * 1.06, 1.05, 3.2);
+    var hh = Math.round(125 * k);
+    return {
+      cx: 0, cy: Math.round(hh * 0.2),
+      hw: Math.round(260 * k), hh: hh,
+      th: Math.round(52 * Math.min(1.18, k)),
+    };
+  }
+
   function buildWorld(st) {
     var projects = (st && st.projects) || [];
     var hall = { x: 0, y: 0 };
@@ -525,10 +550,9 @@
       i += 1;
     });
 
-    var site = buildIndustrialSite(hall, factories);
+    var plateau = makePlateau(factories);
+    var site = buildIndustrialSite(hall, factories, plateau);
 
-    var minX = hall.x - 70, maxX = hall.x + 70;
-    var minY = hall.y - 50, maxY = hall.y + 50;
     var minX = hall.x - 70, maxX = hall.x + 70;
     var minY = hall.y - 50, maxY = hall.y + 50;
     factories.forEach(function (f) {
@@ -538,9 +562,27 @@
       maxY = Math.max(maxY, f.y + f.halfH + 26);
     });
 
+    site.models.forEach(function (m) {
+      if (m.bg) return;
+      var points = m.path || [{ x: m.x, y: m.y }];
+      var hw = m.hw || m.r || m.width || 8;
+      var hh = m.hh || (m.r ? m.r * 0.5 : 5);
+      // 高塔只算占地，不把塔顶算进取景：否则一座冷却塔就把整个场景压小一圈
+      var height = Math.min(30, (m.z0 || 0) + (m.h || Math.max(m.h0 || 0, m.h1 || 0)));
+      points.forEach(function (pt) {
+        minX = Math.min(minX, pt.x - hw - 8);
+        maxX = Math.max(maxX, pt.x + hw + 8);
+        minY = Math.min(minY, pt.y - height - hh - 16);
+        maxY = Math.max(maxY, pt.y + hh + 12);
+      });
+    });
+
+    // 台地左右与前沿都可以溢出画面，只把后缘压在地平线以下；全塞进取景会把厂区压成一小团
+    minY = Math.min(minY, plateau.cy - plateau.hh);
+
     S.world = {
       hall: hall, factories: factories, lines: lines,
-      models: site.models, site: site,
+      models: site.models, site: site, plateau: plateau,
       bounds: { minX: minX, maxX: maxX, minY: minY, maxY: maxY },
     };
     S.worldSig = projects.map(function (p) {
@@ -549,19 +591,41 @@
     S.selectedKey = null;
   }
 
-  function buildIndustrialSite(hall, factories) {
+  function buildIndustrialSite(hall, factories, plateau) {
     var rand = seeded(0x1D05721A);
     var models = [];
     var patches = [];
     var smoke = [];
     var sparks = [];
-    var extentX = 380, extentY = 310;
+    var roads = [];
+    var extentX = 300, extentY = 150;
 
-    for (var b = 0; b < 44; b += 1) {
-      var bx = (rand() * 2 - 1) * extentX;
-      var by = (rand() * 2 - 1) * extentY;
-      var br = 14 + rand() * 32;
+    for (var b = 0; b < 64; b += 1) {
+      var bx = 0, by = 0;
+      for (var attempt = 0; attempt < 8; attempt += 1) {
+        bx = (rand() * 2 - 1) * extentX;
+        by = (rand() * 2 - 1) * extentY;
+        if (!plateau) break;
+        if (Math.abs(bx - plateau.cx) / plateau.hw + Math.abs(by - plateau.cy) / plateau.hh <= 0.96) break;
+      }
+      var br = 8 + rand() * 26;
       patches.push({ x: bx, y: by, rx: br, ry: br * (0.32 + rand() * 0.2), light: rand() < 0.5 });
+    }
+
+    // 台地表面的干裂纹：短折线，跟着沙地的走向散开
+    var cracks = [];
+    for (var ck = 0; ck < 7; ck += 1) {
+      var cxp = (rand() * 2 - 1) * 240;
+      var cyp = 20 + (rand() * 2 - 1) * 110;
+      if (plateau && Math.abs(cxp - plateau.cx) / plateau.hw + Math.abs(cyp - plateau.cy) / plateau.hh > 0.86) continue;
+      var seg = [{ x: cxp, y: cyp }];
+      var ang = rand() * Math.PI * 2;
+      for (var sp = 0; sp < 4; sp += 1) {
+        ang += (rand() - 0.5) * 1.1;
+        seg.push({ x: seg[sp].x + Math.cos(ang) * (9 + rand() * 12),
+                   y: seg[sp].y + Math.sin(ang) * (4 + rand() * 7) });
+      }
+      cracks.push({ path: seg });
     }
 
     function addBox(x, y, hw, hh, h, role, opts) {
@@ -581,7 +645,7 @@
       var cx = f.x, cy = f.y, hw = f.halfW, hh = f.halfH;
       var baseZ = 5;
       var variant = Math.abs(hashKey("site" + f.id)) % 4;
-      addBox(cx, cy, hw * 0.96, hh * 0.96, 5, "sand", { paving: true, rail: true });
+      addBox(cx, cy, hw * 0.96, hh * 0.96, 5, "concrete", { paving: true, rail: true });
 
       var mainBx = cx - hw * 0.18, mainBy = cy - hh * 0.12;
       var topZ = baseZ + 38;
@@ -678,29 +742,112 @@
         models.push({ kind: "gantry", x: cx + hw * 0.12, y: cy + hh * 0.62,
                       w: hw * 0.16, h: 26, z0: baseZ });
       }
-      models.push({ kind: "conveyor", path: f.belt, h0: 12, h1: 22, width: 3.6, ore: true });
+      models.push({ kind: "conveyor", path: f.belt, h0: 16, h1: 27, width: 7, ore: true });
       f.labelZ = topZ + 6;
     });
 
+    // 公用设施独立于项目产线，不表示跨项目供料或新的执行状态。
+    // 冷却塔放在调度厅背后：两根蒸汽柱给中央天际线立起垂直参照，泵房与管廊把机组接回地面。
+    addBox(-16, -64, 82, 16, 3, "concrete", { paving: true, rail: true });
+    models.push({ kind: "cooling", x: -78, y: -64, r: 20, h: 62, z0: 3 });
+    models.push({ kind: "cooling", x: 46, y: -72, r: 17, h: 52, z0: 3 });
+    smoke.push({ x: -78, y: -64, h: 65, steam: true });
+    smoke.push({ x: 46, y: -72, h: 55, steam: true });
+    addBox(-52, -50, 13, 7, 11, "steel", { windows: 2, roof: "flat", vent: true });
+    addCyl(68, -58, 6, 16, "rust", { bands: 2, ladder: true });
+    models.push({ kind: "pipeRack", path: [{ x: -40, y: -53 }, { x: -62, y: -60 }], h0: 9, h1: 9, width: 7 });
+    models.push({ kind: "pipeRack", path: [{ x: 62, y: -63 }, { x: 48, y: -71 }], h0: 8, h1: 8, width: 6 });
+
+    // 台地左右两翼的物流堆场：集装箱、值班房与货车，填住厂区外圈的空地
+    [-1, 1].forEach(function (side) {
+      var yx = side * 232, yy = 62;
+      addBox(yx, yy, 42, 22, 2, "concrete", { paving: true });
+      addBox(yx - side * 8, yy - 6, 20, 9, 9, "rust", { windows: 1, roof: "flat" });
+      addBox(yx + side * 20, yy + 10, 16, 8, 7, "steel", { roof: "flat" });
+      addBox(yx - side * 24, yy + 12, 14, 7, 13, "steel", { windows: 1, roof: "flat", vent: true });
+      addBox(yx + side * 2, yy + 16, 10, 5, 6, "rust", { roof: "flat" });
+      models.push({ kind: "truck", x: yx + side * 12, y: yy - 14, z0: 2 });
+      models.push({ kind: "crate", x: yx - side * 30, y: yy - 10, s: 1.2 });
+      models.push({ kind: "barrel", x: yx + side * 28, y: yy - 2, s: 1 });
+    });
+
+    // 台地上的零散植被与碎石：让大块空地有尺度参照
+    [
+      { x: -250, y: -10, s: 2.2 }, { x: -205, y: 78, s: 1.7 }, { x: -120, y: 86, s: 1.3 },
+      { x: 250, y: -6, s: 2.0 }, { x: 206, y: 82, s: 1.6 }, { x: 118, y: 92, s: 1.2 },
+      { x: -8, y: 128, s: 1.4 }, { x: 56, y: 118, s: 1.1 },
+    ].forEach(function (r) { models.push({ kind: "rock", x: r.x, y: r.y, s: r.s }); });
+    [
+      { x: -270, y: 40 }, { x: -212, y: -32 }, { x: -160, y: 96 }, { x: 268, y: 44 },
+      { x: 214, y: -26 }, { x: 168, y: 98 }, { x: -30, y: 142 }, { x: 80, y: 130 },
+    ].forEach(function (r) { models.push({ kind: "shrub", x: r.x, y: r.y, s: 1.3 }); });
+
+    // 调度厅前场：地磅房与停在道边的货车
+    addBox(24, 46, 30, 12, 2, "concrete", { paving: true });
+    addBox(38, 44, 9, 6, 10, "steel", { windows: 1, roof: "flat" });
+    models.push({ kind: "truck", x: 14, y: 52, z0: 2 });
+    models.push({ kind: "crate", x: -4, y: 42, s: 1.1 });
+    models.push({ kind: "barrel", x: 8, y: 40, s: 1 });
+
+    // 前沿两座装卸场：给台地南半部一点重量，别让厂区下面空一大片
+    [-1, 1].forEach(function (side) {
+      var yx = side * 112, yy = 112;
+      addBox(yx, yy, 34, 16, 2, "concrete", { paving: true });
+      addBox(yx - side * 14, yy - 2, 16, 8, 8, "steel", { windows: 1, roof: "flat", vent: true });
+      addBox(yx + side * 16, yy + 4, 11, 5, 6, "rust", { roof: "flat" });
+      addBox(yx + side * 2, yy + 9, 9, 4, 5, "rust", { roof: "flat" });
+      models.push({ kind: "gantry", x: yx + side * 6, y: yy - 8, w: 12, h: 20, z0: 2 });
+      models.push({ kind: "truck", x: yx - side * 22, y: yy - 10, z0: 2 });
+      models.push({ kind: "crate", x: yx + side * 26, y: yy - 6, s: 1.1 });
+      models.push({ kind: "barrel", x: yx - side * 4, y: yy + 11, s: 1 });
+    });
+    // 台地前沿的货运站台：长条仓库 + 集装箱位，把画面下半部压住
+    addBox(0, 148, 45, 10, 11, "steel", { windows: 3, roof: "flat", vent: true });
+    addBox(0, 158, 40, 4, 3, "concrete", { paving: true });
+    models.push({ kind: "gantry", x: -34, y: 154, w: 12, h: 18, z0: 3 });
+    models.push({ kind: "gantry", x: 30, y: 154, w: 12, h: 18, z0: 3 });
+    [-32, -12, 10, 30].forEach(function (cx, ci) {
+      addBox(cx, 160, 8, 3.5, 7, ci % 2 ? "rust" : "steel", { roof: "flat" });
+    });
+    models.push({ kind: "truck", x: 8, y: 142, z0: 3 });
+    models.push({ kind: "crate", x: -18, y: 142, s: 1.2 });
+
+    roads.push(
+      { path: [{ x: -112, y: 112 }, { x: -62, y: 104 }, { x: -34, y: 116 }, { x: -30, y: 146 }] },
+      { path: [{ x: 112, y: 112 }, { x: 62, y: 104 }, { x: 34, y: 116 }, { x: 30, y: 146 }] },
+      { path: [{ x: -50, y: 130 }, { x: -14, y: 140 }, { x: 22, y: 140 }] }
+    );
+
+    // 从台地边缘通到调度厅的两条厂区大道（从厂区之间的空档穿过去）
+    roads.push(
+      { path: [{ x: -300, y: 20 }, { x: -210, y: 16 }, { x: -120, y: 10 }, { x: -54, y: 4 }] },
+      { path: [{ x: 300, y: 20 }, { x: 210, y: 16 }, { x: 120, y: 10 }, { x: 54, y: 4 }] }
+    );
+
     // 远景工业带：储罐、仓库、输电塔、铁路、矿堆与卡车
-    models.push({ kind: "box", x: 300, y: -150, hw: 58, hh: 30, h: 28, role: "steel", windows: 4, roof: "saw", bg: true });
+    models.push({ kind: "box", x: 300, y: -96, hw: 58, hh: 30, h: 28, role: "steel", windows: 4, roof: "saw", bg: true });
     models.push({ kind: "cyl", x: 330, y: -60, r: 22, h: 44, role: "rust", bands: 4, bg: true });
     models.push({ kind: "cyl", x: 300, y: 10, r: 16, h: 34, role: "steel", bands: 3, bg: true });
     models.push({ kind: "box", x: -320, y: -100, hw: 50, hh: 26, h: 22, role: "steel", windows: 3, roof: "flat", bg: true });
     models.push({ kind: "cyl", x: -300, y: 40, r: 24, h: 40, role: "rust", bands: 4, bg: true });
-    models.push({ kind: "pylon", x: -240, y: -230, bg: true });
-    models.push({ kind: "pylon", x: 220, y: -240, bg: true });
+    models.push({ kind: "pylon", x: -240, y: -95, bg: true });
+    models.push({ kind: "pylon", x: 270, y: -100, bg: true });
     models.push({ kind: "pylon", x: 360, y: -40, bg: true });
     models.push({ kind: "rail", path: [{ x: -380, y: 100 }, { x: -120, y: 112 }, { x: 140, y: 122 }, { x: 380, y: 110 }], bg: true });
     models.push({ kind: "truck", x: -60, y: 108, z0: 0, bg: true });
     models.push({ kind: "truck", x: 80, y: 118, z0: 0, bg: true });
     models.push({ kind: "ore", x: 250, y: 112, s: 2.6, bg: true });
     models.push({ kind: "ore", x: -200, y: 114, s: 2.2, bg: true });
-    models.push({ kind: "rock", x: -180, y: -160, s: 2, bg: true });
+    models.push({ kind: "rock", x: -180, y: -110, s: 2, bg: true });
     models.push({ kind: "rock", x: 180, y: 60, s: 1.6, bg: true });
     models.push({ kind: "shrub", x: -100, y: 108, s: 1.3, bg: true });
     models.push({ kind: "shrub", x: 260, y: 100, s: 1.2, bg: true });
-    models.push({ kind: "conveyor", path: [{ x: 270, y: -150 }, { x: 330, y: -60 }], h0: 16, h1: 10, width: 2.6, ore: true, bg: true });
+    models.push({ kind: "conveyor", path: [{ x: 280, y: -100 }, { x: 334, y: -56 }], h0: 16, h1: 10, width: 2.6, ore: true, bg: true });
+    // 远景转运桥：接在储罐与仓库之间，只作天际线的横向层次，不参与厂区环线
+    models.push({ kind: "transferBridge", path: [{ x: 292, y: -74 }, { x: 352, y: -30 }],
+                  h0: 20, h1: 15, width: 8, bg: true });
+    models.push({ kind: "box", x: 290, y: -76, hw: 10, hh: 6, h: 26, role: "steel", windows: 1, roof: "flat", bg: true });
+    models.push({ kind: "box", x: 354, y: -28, hw: 9, hh: 5, h: 22, role: "rust", roof: "flat", bg: true });
     models.push({ kind: "box", x: -210, y: 92, hw: 26, hh: 14, h: 14, role: "steel", windows: 2, roof: "saw", bg: true });
     models.push({ kind: "cyl", x: -245, y: 104, r: 8, h: 18, role: "rust", bands: 2, bg: true });
     models.push({ kind: "box", x: 220, y: 96, hw: 22, hh: 12, h: 12, role: "steel", windows: 2, roof: "flat", bg: true });
@@ -730,7 +877,8 @@
     models.push({ kind: "figure", x: hall.x - 4, y: hall.y + 6, z0: 10 });
     sparks.push({ x: hall.x, y: hall.y, h: 18 });
 
-    return { models: models, patches: patches, smoke: smoke, sparks: sparks, tracks: tracks };
+    return { models: models, patches: patches, cracks: cracks, smoke: smoke, sparks: sparks,
+             tracks: tracks, roads: roads };
   }
 
   function routeBelt(a, b, seed) {
@@ -944,12 +1092,14 @@
   function fitCamera(animate) {
     var w = S.bufW, h = S.bufH;
     var b = (S.world && S.world.bounds) || { minX: -80, maxX: 80, minY: -50, maxY: 50 };
-    var pad = 34;
+    var pad = 32;
+    // 世界后缘要落在地平线以下：天空带的高度不参与取景，台地才不会顶进天里
+    var skyH = Math.max(26, Math.round(h * 0.22) + 6);
     var z = Math.min((w - pad * 2) / Math.max(1, b.maxX - b.minX),
-                     (h - pad * 2) / Math.max(1, b.maxY - b.minY));
-    z = clamp(z * 1.28, 0.22, 1.45);
+                     (h - skyH - 16) / Math.max(1, b.maxY - b.minY));
+    z = clamp(z, 0.22, 1.45);
     var cx = (b.minX + b.maxX) / 2;
-    var cy = (b.minY + b.maxY) / 2;
+    var cy = b.minY + (h / 2 - skyH) / z;
     if (animate) {
       S.cam.tx = cx; S.cam.ty = cy; S.cam.tz = z;
     } else {
@@ -970,8 +1120,8 @@
     var rect = dom.stage.getBoundingClientRect();
     S.cssW = Math.max(1, Math.round(rect.width));
     S.cssH = Math.max(1, Math.round(rect.height));
-    var bw = Math.max(BUFFER_MIN_W, Math.round(S.cssW / 3));
-    var bh = Math.max(BUFFER_MIN_H, Math.round(S.cssH / 3));
+    var bw = Math.max(BUFFER_MIN_W, Math.round(S.cssW / 2));
+    var bh = Math.max(BUFFER_MIN_H, Math.round(S.cssH / 2));
     if (dom.canvas.width !== bw || dom.canvas.height !== bh) {
       dom.canvas.width = bw;
       dom.canvas.height = bh;
@@ -1129,6 +1279,7 @@
     }
     if (role === "rust") return { top: pal.rustLight, left: pal.rust, right: pal.rustDark };
     if (role === "glass") return { top: pal.glassLight, left: pal.glass, right: pal.glassDark };
+    if (role === "concrete") return { top: pal.concreteLight, left: pal.concrete, right: pal.concreteDark };
     if (role === "sand") return { top: pal.groundLight, left: pal.ground, right: pal.groundDark };
     return { top: pal.steelLight, left: pal.steel, right: pal.steelDark };
   }
@@ -1164,6 +1315,18 @@
       ctx.globalAlpha = 1;
     }
     drawSkyline(ctx, pal, skyH, W);
+    // 白天薄云：几团软边的暖色雾，给渐变天空一点层次
+    if (!S.night) {
+      ctx.globalAlpha = 0.15;
+      for (var cl = 0; cl < 5; cl += 1) {
+        var cx2 = (cl * 211 + 70) % W;
+        var cy2 = Math.round(skyH * (0.16 + (cl % 3) * 0.13));
+        var cw = Math.round(W * (0.05 + (cl % 2) * 0.03));
+        fillOval(ctx, cx2, cy2, cw, Math.max(2, Math.round(skyH * 0.05)), pal.sun);
+        fillOval(ctx, cx2 + cw * 0.55, cy2 + 1, cw * 0.6, Math.max(2, Math.round(skyH * 0.038)), pal.sun);
+      }
+      ctx.globalAlpha = 1;
+    }
     // 沙地
     var ground = ctx.createLinearGradient(0, skyH, 0, H);
     ground.addColorStop(0, pal.groundLight);
@@ -1171,6 +1334,15 @@
     ground.addColorStop(1, pal.groundDark);
     ctx.fillStyle = ground;
     ctx.fillRect(0, skyH, W, H - skyH);
+    // 远景沙丘：屏幕空间、只压在地平线以下，给远处的仓库与储罐一个地平面
+    for (var dune = 0; dune < 9; dune += 1) {
+      var dx2 = (dune * 137 + 53) % W;
+      var dy2 = skyH + 16 + ((dune * 71) % Math.max(8, Math.round(H * 0.14)));
+      var dw2 = Math.round(W * (0.05 + (dune % 4) * 0.012));
+      ctx.globalAlpha = 0.10 + (dune % 3) * 0.03;
+      fillOval(ctx, dx2, dy2, dw2, Math.max(2, Math.round(H * 0.012)), pal.groundDark);
+    }
+    ctx.globalAlpha = 1;
     // 地平线雾带
     var haze = ctx.createLinearGradient(0, skyH - 4, 0, skyH + 28);
     haze.addColorStop(0, pal.bgHaze);
@@ -1196,10 +1368,11 @@
 
   function drawTerrain(ctx, pal) {
     var z = S.cam.zoom;
-    var c = viewPoint(0, 0);
-    var hw = Math.max(120, Math.round(260 * z));
-    var hh = Math.max(60, Math.round(125 * z));
-    var th = Math.max(20, Math.round(48 * z));
+    var pl = (S.world && S.world.plateau) || { cx: 0, cy: 0, hw: 260, hh: 125, th: 48 };
+    var c = viewPoint(pl.cx, pl.cy);
+    var hw = Math.max(120, Math.round(pl.hw * z));
+    var hh = Math.max(60, Math.round(pl.hh * z));
+    var th = Math.max(20, Math.round(pl.th * z));
     fillDiamond(ctx, c.x + Math.round(12 * z), c.y + th + Math.round(8 * z), hw, hh, pal.shadow);
     // 崖壁：左右两面
     fillPoly(ctx, [
@@ -1247,18 +1420,25 @@
     var site = S.world && S.world.site;
     if (!site) return;
     var z = S.cam.zoom;
+    ctx.globalAlpha = 0.16;
     site.patches.forEach(function (b) {
       var p = viewPoint(b.x, b.y);
       fillOval(ctx, p.x, p.y, Math.max(2, Math.round(b.rx * z)),
                Math.max(1, Math.round(b.ry * z)),
                b.light ? pal.groundHi : pal.groundDark);
     });
+    ctx.globalAlpha = 1;
+    (site.cracks || []).forEach(function (ck) {
+      var pts = ck.path.map(function (q) { return viewPoint(q.x, q.y); });
+      linePath(ctx, pts, 1, pal.groundDark);
+      linePath(ctx, pts.map(function (q) { return { x: q.x, y: q.y - 1 }; }), 1, pal.groundHi);
+    });
     // 传送带下方的土路与车辙
     S.world.factories.forEach(function (f) {
       var pts = f.belt.map(function (p) { return viewPoint(p.x, p.y); });
-      linePath(ctx, pts, vlen(14), pal.roadDark);
-      linePath(ctx, pts, vlen(11), pal.road);
-      linePath(ctx, pts, vlen(2), pal.roadLight);
+      linePath(ctx, pts, vlen(8), pal.roadDark);
+      linePath(ctx, pts, vlen(6), pal.road);
+      linePath(ctx, pts, vlen(1), pal.roadLight);
       var total = pathLength(pts);
       for (var d = 0; d < total; d += Math.max(5, vlen(16))) {
         var pt = pointAt(pts, total ? d / total : 0);
@@ -1266,6 +1446,15 @@
         ctx.fillRect(Math.round(pt.x) - 3, Math.round(pt.y) - 1, 2, 1);
         ctx.fillRect(Math.round(pt.x) + 1, Math.round(pt.y) + 1, 2, 1);
       }
+    });
+    (site.roads || []).forEach(function (rd) {
+      var pts = rd.path.map(function (q) { return viewPoint(q.x, q.y); });
+      linePath(ctx, pts, vlen(7), pal.roadDark);
+      linePath(ctx, pts, vlen(5), pal.road);
+      linePath(ctx, pts.map(function (q) { return { x: q.x - 1, y: q.y }; }),
+               Math.max(1, vlen(1)), pal.roadLight);
+      linePath(ctx, pts.map(function (q) { return { x: q.x + 1, y: q.y }; }),
+               Math.max(1, vlen(1)), pal.roadLight);
     });
     (site.tracks || []).forEach(function (tr) {
       var pts = tr.path.map(function (q) { return viewPoint(q.x, q.y); });
@@ -1277,7 +1466,8 @@
   function drawShadows(ctx, pal) {
     var z = S.cam.zoom;
     S.world.models.forEach(function (m) {
-      if (m.bg) return;
+      // 远景模型也要有接地影，否则雾里一排白色方块看着像浮在天上
+      ctx.globalAlpha = m.bg ? 0.45 : 1;
       var p = viewPoint(m.x, m.y);
       if (m.kind === "box") {
         var hw = m.hw * z, hh = m.hh * z;
@@ -1287,18 +1477,21 @@
         var rx = m.r * z, ry = Math.max(1, rx * 0.55);
         var off2 = Math.min(22, m.h * z * 0.2);
         fillOval(ctx, p.x + off2 * 0.7, p.y + off2 * 0.45, rx * 1.1, ry * 1.1, pal.shadow);
-      } else if (m.kind === "conveyor") {
+      } else if (m.kind === "cooling") {
+        fillOval(ctx, p.x + vlen(9), p.y + vlen(4), vlen(m.r * 1.1), vlen(m.r * 0.45), pal.shadow);
+      } else if (m.path) {
         var pts = m.path.map(function (q) { return viewPoint(q.x, q.y); });
-        linePath(ctx, pts, vlen(6), pal.shadow);
+        linePath(ctx, pts, vlen(m.width || 6), pal.shadow);
       }
     });
+    ctx.globalAlpha = 1;
   }
 
   function drawModels(ctx, pal) {
     var bg = [], main = [];
     S.world.models.forEach(function (m) {
       var mx = m.x, my = m.y;
-      if (m.kind === "conveyor" && m.path && m.path.length) {
+      if (m.path && m.path.length) {
         var mid = pointAt(m.path, 0.5);
         mx = mid.x; my = mid.y;
       }
@@ -1330,6 +1523,9 @@
     else if (m.kind === "gantry") drawGantryModel(ctx, pal, m);
     else if (m.kind === "catwalk") drawCatwalkModel(ctx, pal, m);
     else if (m.kind === "figure") drawFigureModel(ctx, pal, m);
+    else if (m.kind === "cooling") drawCoolingTowerModel(ctx, pal, m);
+    else if (m.kind === "pipeRack") drawPipeRackModel(ctx, pal, m);
+    else if (m.kind === "transferBridge") drawTransferBridgeModel(ctx, pal, m);
   }
 
   function drawTruckModel(ctx, pal, m) {
@@ -1407,8 +1603,26 @@
       ctx.fillStyle = cols.right;
       for (var u = 0.12; u < 0.95; u += 0.12) {
         var wx = Math.round(base.x - hw + hw * u);
-        var wy = Math.round(baseY - h + hh * (1 - u));
-        ctx.fillRect(wx, wy, 1, Math.max(1, Math.round(h - hh * (1 - u))));
+        var wy = Math.round(baseY - h + hh * u);
+        ctx.fillRect(wx, wy, 1, Math.max(1, h));
+      }
+    }
+    if (!m.paving && m.h >= 14) {
+      linePath(ctx, [{ x: base.x - hw, y: baseY - h }, { x: base.x, y: baseY - h + hh },
+                    { x: base.x + hw, y: baseY - h }], 1, cols.top);
+      linePath(ctx, [{ x: base.x - hw, y: baseY - 2 }, { x: base.x, y: baseY + hh - 2 },
+                    { x: base.x + hw, y: baseY - 2 }], Math.max(1, vlen(2)), cols.right);
+      for (var seam = 1; seam < 5; seam += 1) {
+        var st = seam / 5;
+        linePath(ctx, [{ x: base.x + hw * st, y: baseY - h + hh * (1 - st) },
+                      { x: base.x + hw * st, y: baseY + hh * (1 - st) }], 1, cols.left);
+      }
+      if (!m.bg && hw > 9) {
+        var ventX = base.x + hw * 0.50, ventY = baseY - h * 0.5 + hh * 0.50;
+        for (var grille = 0; grille < 3; grille += 1) {
+          linePath(ctx, [{ x: ventX, y: ventY + grille * 2 },
+                        { x: ventX + hw * 0.24, y: ventY - hh * 0.24 + grille * 2 }], 1, pal.metalDark);
+        }
       }
     }
     // 暖窗：左面平行四边形
@@ -1608,6 +1822,9 @@
       }
       ctx.fillStyle = steelLight;
       ctx.fillRect(Math.round(mid.x + nx * 0.5), Math.round((ya + yb) / 2 + ny * 0.5), 1, 1);
+      // 两侧护栏亮线：让产线从底下的土路里跳出来
+      linePath(ctx, [{ x: a.x + nx, y: ya + ny }, { x: b.x + nx, y: yb + ny }], 1, steelLight);
+      linePath(ctx, [{ x: a.x - nx, y: ya - ny }, { x: b.x - nx, y: yb - ny }], 1, steelLight);
     }
   }
 
@@ -1918,6 +2135,161 @@
     linePath(ctx, [{ x: p.x, y: baseY + hh }, { x: p.x + hw, y: baseY }], 1, pal.steelLight);
   }
 
+  function drawCoolingTowerModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - (m.z0 || 0) * z;
+    var r = m.r * z, h = m.h * z;
+    var cols = roleCols(pal, "concrete", m.bg);
+    var levels = [
+      { t: 0, r: 1 }, { t: 0.12, r: 0.90 }, { t: 0.30, r: 0.69 },
+      { t: 0.52, r: 0.55 }, { t: 0.69, r: 0.53 }, { t: 0.84, r: 0.59 }, { t: 1, r: 0.72 },
+    ];
+    drawIsoBoxAt(ctx, p.x, baseY + 3 * z, r * 1.18, r * 0.52, 4 * z,
+                 pal.stoneLight, pal.stone, pal.stoneDark);
+    fillOval(ctx, p.x, baseY, r, r * 0.35, cols.right);
+    for (var leg = 0; leg < 10; leg += 1) {
+      var a = Math.PI * leg / 9;
+      var lx = p.x + Math.cos(a) * r * 0.88;
+      var ly = baseY + Math.sin(a) * r * 0.3;
+      linePath(ctx, [{ x: lx, y: ly }, { x: lx - Math.cos(a) * 2 * z, y: ly - 8 * z }],
+               Math.max(1, vlen(2)), cols.top);
+    }
+    var shellBase = baseY - 7 * z;
+    // 每个圆环分成受光、过渡与背光面，轮廓收腰而非直筒。
+    for (var band = 0; band < levels.length - 1; band += 1) {
+      var lo = levels[band], hi = levels[band + 1];
+      for (var face = 0; face < 12; face += 1) {
+        var a0 = Math.PI * face / 12, a1 = Math.PI * (face + 1) / 12;
+        function shellPoint(level, angle) {
+          return { x: p.x + Math.cos(angle) * r * level.r,
+                   y: shellBase - level.t * (h - 7 * z) + Math.sin(angle) * r * level.r * 0.32 };
+        }
+        fillPoly(ctx, [shellPoint(lo, a0), shellPoint(lo, a1), shellPoint(hi, a1), shellPoint(hi, a0)],
+                 face < 3 ? cols.right : face < 7 ? cols.left : cols.top);
+      }
+    }
+    for (var rib = 1; rib < 12; rib += 1) {
+      var angle = Math.PI * rib / 12;
+      var pts = levels.map(function (lv) {
+        return { x: p.x + Math.cos(angle) * r * lv.r,
+                 y: shellBase - lv.t * (h - 7 * z) + Math.sin(angle) * r * lv.r * 0.32 };
+      });
+      ctx.globalAlpha = rib % 3 === 0 ? 0.55 : 0.25;
+      linePath(ctx, pts, 1, rib < 6 ? cols.right : cols.left);
+    }
+    ctx.globalAlpha = 1;
+    var topY = baseY - h, rimR = r * 0.72;
+    fillOval(ctx, p.x, topY, rimR, rimR * 0.34, cols.top);
+    fillOval(ctx, p.x, topY, Math.max(1, rimR - 2 * z), Math.max(1, rimR * 0.34 - z), pal.ink);
+    linePath(ctx, [{ x: p.x - rimR, y: topY }, { x: p.x - rimR * 0.6, y: topY + rimR * 0.24 },
+                  { x: p.x + rimR * 0.6, y: topY + rimR * 0.24 }, { x: p.x + rimR, y: topY }], 1, cols.top);
+    var ladderX = p.x + r * 0.28;
+    linePath(ctx, [{ x: ladderX, y: shellBase + 2 * z }, { x: ladderX, y: topY + 3 * z }], 1, pal.metalDark);
+    linePath(ctx, [{ x: ladderX + 3 * z, y: shellBase + 2 * z }, { x: ladderX + 3 * z, y: topY + 3 * z }], 1, pal.metalDark);
+    for (var rung = 5; rung < m.h - 6; rung += 5) {
+      linePath(ctx, [{ x: ladderX, y: baseY - rung * z }, { x: ladderX + 3 * z, y: baseY - rung * z }], 1, pal.metalLight);
+    }
+    if (S.night) fillOval(ctx, p.x - rimR * 0.8, topY, Math.max(1, z), Math.max(1, z), pal.bad);
+  }
+
+  function elevatedPoint(m, t, offset, lift) {
+    var a = m.path[0], b = m.path[m.path.length - 1];
+    var dx = b.x - a.x, dy = b.y - a.y;
+    var length = Math.hypot(dx, dy) || 1;
+    var p = viewPoint(a.x + dx * t - dy / length * offset, a.y + dy * t + dx / length * offset);
+    p.y -= ((m.h0 + (m.h1 - m.h0) * t) + (lift || 0)) * S.cam.zoom;
+    return p;
+  }
+
+  // 远景公用设施用雾化色，别让远处的桥和管廊比近景还抢眼
+  function mutedPalette(pal) {
+    var pc = Object.create(pal);
+    pc.steel = pal.bgSteel; pc.steelDark = pal.bgSteelDark; pc.steelLight = pal.bgSteelLight;
+    pc.rust = pal.bgRust; pc.rustDark = pal.bgRustDark; pc.rustLight = pal.bgRustLight;
+    pc.metal = pal.bgSteel; pc.metalDark = pal.bgSteelDark; pc.metalLight = pal.bgSteelLight;
+    return pc;
+  }
+
+  function drawRackSupports(ctx, pal, m) {
+    var length = pathLength(m.path);
+    var bays = Math.max(1, Math.ceil(length / 24));
+    for (var i = 0; i <= bays; i += 1) {
+      var t = i / bays;
+      var left = elevatedPoint(m, t, -m.width * 0.58, 0);
+      var right = elevatedPoint(m, t, m.width * 0.58, 0);
+      var height = (m.h0 + (m.h1 - m.h0) * t) * S.cam.zoom;
+      [left, right].forEach(function (pt) {
+        linePath(ctx, [{ x: pt.x, y: pt.y + height }, pt], Math.max(1, vlen(2)), pal.steelDark);
+        drawIsoBoxAt(ctx, pt.x, pt.y + height + 1, vlen(3), vlen(1.5), vlen(2),
+                     pal.stoneLight, pal.stone, pal.stoneDark);
+      });
+      linePath(ctx, [left, right], Math.max(1, vlen(2)), pal.steelLight);
+      if (i < bays) {
+        var next = elevatedPoint(m, (i + 1) / bays, m.width * 0.58, 0);
+        linePath(ctx, [{ x: right.x, y: right.y + height * 0.75 }, next], 1, pal.steel);
+        linePath(ctx, [right, { x: next.x, y: next.y + height * 0.75 }], 1, pal.steelDark);
+      }
+    }
+    return bays;
+  }
+
+  function drawPipeRackModel(ctx, pal, m) {
+    var pc = m.bg ? mutedPalette(pal) : pal;
+    var bays = drawRackSupports(ctx, pc, m);
+    for (var pipe = 0; pipe < 3; pipe += 1) {
+      var offset = (pipe - 1) * m.width * 0.30;
+      var pts = [elevatedPoint(m, 0, offset, 3), elevatedPoint(m, 1, offset, 3)];
+      linePath(ctx, pts, vlen(3), pipe === 1 ? pc.rustDark : pc.metalDark);
+      linePath(ctx, pts.map(function (p) { return { x: p.x, y: p.y - 1 }; }),
+               Math.max(1, vlen(1)), pipe === 1 ? pc.rustLight : pc.metalLight);
+      for (var flange = 0; flange <= bays; flange += 1) {
+        var pt = elevatedPoint(m, flange / bays, offset, 3);
+        linePath(ctx, [{ x: pt.x - 1, y: pt.y - 2 }, { x: pt.x + 1, y: pt.y + 2 }], 1, pc.steelLight);
+      }
+    }
+    var elbow = elevatedPoint(m, 1, 0, 3);
+    var down = elevatedPoint(m, 1, 0, -m.h1 + 4);
+    linePath(ctx, [elbow, down], vlen(3), pc.rustDark);
+    linePath(ctx, [{ x: elbow.x - 1, y: elbow.y }, { x: down.x - 1, y: down.y }], 1, pc.rustLight);
+    var valve = elevatedPoint(m, 0.52, 0, 5);
+    linePath(ctx, [valve, { x: valve.x, y: valve.y - vlen(5) }], 1, pc.metalDark);
+    fillOval(ctx, valve.x, valve.y - vlen(5), vlen(3), vlen(1.5), pc.rust);
+  }
+
+  function drawTransferBridgeModel(ctx, pal, m) {
+    var pc = m.bg ? mutedPalette(pal) : pal;
+    var bays = drawRackSupports(ctx, pc, m) * 2;
+    var a = elevatedPoint(m, 0, 0, 0), b = elevatedPoint(m, 1, 0, 0);
+    linePath(ctx, [{ x: a.x, y: a.y + vlen(3) }, { x: b.x, y: b.y + vlen(3) }], vlen(m.width), pc.steelDark);
+    fillPoly(ctx, [elevatedPoint(m, 0, -m.width / 2, 0), elevatedPoint(m, 1, -m.width / 2, 0),
+                   elevatedPoint(m, 1, m.width / 2, 0), elevatedPoint(m, 0, m.width / 2, 0)], pc.metalDark);
+    for (var side = -1; side <= 1; side += 2) {
+      var off = side * m.width / 2;
+      linePath(ctx, [elevatedPoint(m, 0, off, 0), elevatedPoint(m, 1, off, 0)], 1, pc.steelLight);
+      linePath(ctx, [elevatedPoint(m, 0, off, 11), elevatedPoint(m, 1, off, 11)], 1, pc.steelLight);
+      for (var i = 0; i < bays; i += 1) {
+        var t0 = i / bays, t1 = (i + 1) / bays;
+        linePath(ctx, [elevatedPoint(m, t0, off, 0), elevatedPoint(m, t1, off, 11)], 1, pc.rust);
+        linePath(ctx, [elevatedPoint(m, t0, off, 11), elevatedPoint(m, t1, off, 0)], 1, pc.steel);
+      }
+    }
+    fillPoly(ctx, [elevatedPoint(m, 0, -m.width * 0.64, 12), elevatedPoint(m, 1, -m.width * 0.64, 12),
+                   elevatedPoint(m, 1, 0, 15), elevatedPoint(m, 0, 0, 15)], pc.steelLight);
+    fillPoly(ctx, [elevatedPoint(m, 0, 0, 15), elevatedPoint(m, 1, 0, 15),
+                   elevatedPoint(m, 1, m.width * 0.64, 12), elevatedPoint(m, 0, m.width * 0.64, 12)], pc.steel);
+    for (var panel = 1; panel < bays; panel += 1) {
+      linePath(ctx, [elevatedPoint(m, panel / bays, -m.width * 0.64, 12),
+                    elevatedPoint(m, panel / bays, 0, 15), elevatedPoint(m, panel / bays, m.width * 0.64, 12)], 1, pc.steelDark);
+    }
+    if (S.night) {
+      for (var lamp = 0; lamp <= bays; lamp += 2) {
+        var lp = elevatedPoint(m, lamp / bays, m.width * 0.58, 8);
+        fillOval(ctx, lp.x, lp.y, 1, 1, pc.window);
+      }
+    }
+  }
+
   function drawFigureModel(ctx, pal, m) {
     var z = S.cam.zoom;
     var p = viewPoint(m.x, m.y);
@@ -1946,8 +2318,13 @@
         var px = p.x + Math.sin((S.ticks * 0.03 + i) * 2) * 3 - t * 9;
         var py = top - t * Math.max(10, 26 * z);
         var r = Math.max(2, (2 + t * 6) * z);
-        ctx.globalAlpha = (1 - t) * 0.32;
-        fillOval(ctx, px, py, r, r * 0.72, pal.smoke);
+        if (s.steam) {
+          px = p.x + Math.sin(i * 1.7 + t * 4) * (3 + t * 5) * z - t * 10 * z;
+          py = top - t * 37 * z;
+          r = Math.max(2, (4 + t * 10) * z);
+        }
+        ctx.globalAlpha = (1 - t) * (s.steam ? 0.27 : 0.32);
+        fillOval(ctx, px, py, r, r * 0.72, s.steam ? pal.steelLight : pal.smoke);
       }
       ctx.globalAlpha = 1;
     });
@@ -2123,12 +2500,26 @@
     return el;
   }
 
-  function placeLabel(el, wx, wy, text, cls, z) {
+  function placeLabel(el, wx, wy, text, cls, z, used) {
     var p = viewPoint(wx, wy);
     p.y -= Math.round((z || 0) * S.cam.zoom);
     var sx = p.x * (S.cssW / S.bufW);
     var sy = p.y * (S.cssH / S.bufH);
     if (sx < -40 || sy < -20 || sx > S.cssW + 40 || sy > S.cssH + 20) { el.style.display = "none"; return; }
+    // 名牌互相压字比少显示几个更难看：按 hall → project → machine 的优先级让位
+    if (used) {
+      var w = Math.max(26, String(text).length * 11 + 12);
+      var h = cls === "machine" ? 18 : 21;
+      var box = { l: sx - w / 2, r: sx + w / 2, t: sy - h, b: sy };
+      for (var ui = 0; ui < used.length; ui += 1) {
+        var o = used[ui];
+        if (box.l < o.r && box.r > o.l && box.t < o.b && box.b > o.t) {
+          el.style.display = "none";
+          return;
+        }
+      }
+      used.push(box);
+    }
     el.style.display = "";
     el.style.left = Math.round(sx) + "px";
     el.style.top = Math.round(sy) + "px";
@@ -2142,9 +2533,10 @@
       return;
     }
     var i = 0;
+    var used = [];
     var st = activeState();
     var running = (st && st.counters && st.counters.running) || 0;
-    placeLabel(labelFor(i++), S.world.hall.x, S.world.hall.y, "调度厅" + (running ? " · 在转 " + running + " 件" : ""), "hall", 92);
+    placeLabel(labelFor(i++), S.world.hall.x, S.world.hall.y, "调度厅" + (running ? " · 在转 " + running + " 件" : ""), "hall", 92, used);
     // 厂区名牌优先
     var factories = S.world.factories.slice().sort(function (a, b) { return a.y - b.y; });
     factories.forEach(function (f) {
@@ -2155,10 +2547,10 @@
       var hidden = Math.max(0, allLines.length - 6);
       if (hidden) text += " · +" + hidden + " 线";
       if (f.root_ok === false) text += " · 停工";
-      placeLabel(labelFor(i++), f.x, f.y, text, "project", f.labelZ || 44);
+      placeLabel(labelFor(i++), f.x, f.y, text, "project", f.labelZ || 44, used);
     });
-    // 机台名：放大到能读时才出现
-    if (S.cam.zoom >= 0.55) {
+    // 机台名：放大到能读时才出现；默认取景下只留厂区名牌，避免一排小字糊在一起
+    if (S.cam.zoom >= 0.82) {
       factories.forEach(function (f) {
         f.lines.forEach(function (rec) {
           if (i >= MAX_LABELS - 2) return;
@@ -2170,7 +2562,7 @@
           if (rec.line.status === "running" && rec.kind === "cron") {
             mlabel += " " + fmtClockShort(lineRunSeconds(rec.line)); // 机台上方计时 mm:ss
           }
-          placeLabel(labelFor(i++), rec.x, rec.y, mlabel, "machine", 20);
+          placeLabel(labelFor(i++), rec.x, rec.y, mlabel, "machine", 20 + (rec.index % 2) * 8, used);
         });
       });
     }

@@ -34,27 +34,47 @@
   var TRIGGER_TEXT = { schedule: "定时", manual: "手动", link: "供货" };
   var WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-  // 昼盘（约 24 色）
+  // 昼盘：草地三层 / 泥土与石阶 / 木屋与金属 / 暖窗（约 40 色）
   var PAL_DAY = {
-    grass: "#7ba05b", plot: "#9cc47c", plotEdge: "#4f6b3c",
-    roof: "#c7d3d8", roofDark: "#8b9aa1", wall: "#cbb694", wallDark: "#9a8768",
-    window: "#f2d36b", belt: "#8a8378", beltDark: "#565049", beltMark: "#cfc7b5",
-    crate: "#c98a4b", crateDark: "#7d5326",
-    hall: "#dfe8ea", hallDark: "#93a3a8", hallGlow: "#f7e6a2",
-    sheep: "#f4efe2", sheepFace: "#33302a",
-    ink: "#2c2a25", ok: "#5aa85a", warn: "#d9a03c", bad: "#c94f47", idle: "#8d8a80",
-    product: "#e6cd83",
+    grass: "#5f8f4a", grassLight: "#7aa95b", grassDark: "#47703a", grassHi: "#a6c878",
+    meadow: "#6c9b52",
+    dirt: "#b08d5f", dirtDark: "#7d5f3f", dirtLight: "#d3b483",
+    stone: "#a9a493", stoneDark: "#6f6b5e", stoneLight: "#d6d0bd",
+    water: "#4b8fa6", waterDark: "#2e6478", waterLight: "#8fc6d6",
+    treeDark: "#2e5537", treeMid: "#3f7448", treeLight: "#5f9a5c", treeHi: "#8fc07a",
+    pine: "#244a34", pineLight: "#3c6b48",
+    roof: "#9a5b43", roofDark: "#6b392b", roofLight: "#c07a5c", roofTile: "#7f4635",
+    wall: "#d9c49b", wallDark: "#a88d67", wallLight: "#f0e2c0",
+    window: "#ffd77a", windowDark: "#3a3f46",
+    metal: "#8b949c", metalDark: "#4c545c", metalLight: "#c3ccd2",
+    belt: "#6e6a60", beltDark: "#3d3a34", beltMark: "#c9c2b0",
+    crate: "#c98a4b", crateDark: "#7d5326", crateLight: "#e0a869",
+    hall: "#dfe8ea", hallDark: "#8fa0a6", hallGlass: "#bfe0e6", hallGlow: "#ffe6a0",
+    sheep: "#f6f1e4", sheepShade: "#d8cfbc", sheepFace: "#33302a",
+    ink: "#2b2a24", ok: "#5faa5f", warn: "#d9a03c", bad: "#c94f47", idle: "#8d8a80",
+    product: "#f0d58b", firefly: "#ffe9a8",
+    shadow: "rgba(24, 34, 22, 0.28)", glow: "rgba(255, 214, 130, 0.16)",
   };
-  // 夜盘（同槽位，整体压暗、窗子点亮）
+  // 夜盘（同槽位，深蓝绿底、窗与路灯点亮）
   var PAL_NIGHT = {
-    grass: "#1e2a33", plot: "#26382c", plotEdge: "#121c15",
-    roof: "#3d4657", roofDark: "#2a3140", wall: "#3a3730", wallDark: "#262420",
-    window: "#f2c96b", belt: "#4a4640", beltDark: "#2b2824", beltMark: "#6a6458",
-    crate: "#8a5f35", crateDark: "#52371c",
-    hall: "#4a5a6d", hallDark: "#2f3b49", hallGlow: "#f2d98a",
-    sheep: "#d9d2c4", sheepFace: "#1b1a18",
-    ink: "#0c0d12", ok: "#4f9a5a", warn: "#c9903a", bad: "#b8443f", idle: "#6a6c73",
-    product: "#c9a95c",
+    grass: "#1d3a31", grassLight: "#274d3f", grassDark: "#132923", grassHi: "#376b54",
+    meadow: "#22443a",
+    dirt: "#443e32", dirtDark: "#2a2720", dirtLight: "#5a5240",
+    stone: "#565b5e", stoneDark: "#33383b", stoneLight: "#7a8085",
+    water: "#1d4a5c", waterDark: "#102c38", waterLight: "#3d7a8c",
+    treeDark: "#122f26", treeMid: "#1f4738", treeLight: "#30634a", treeHi: "#478a64",
+    pine: "#0f291f", pineLight: "#204434",
+    roof: "#563832", roofDark: "#33201d", roofLight: "#7a5046", roofTile: "#432a25",
+    wall: "#4a463c", wallDark: "#302d27", wallLight: "#635d50",
+    window: "#ffd36e", windowDark: "#1c2026",
+    metal: "#4a5057", metalDark: "#2b2f34", metalLight: "#6f767e",
+    belt: "#3a3831", beltDark: "#211f1b", beltMark: "#7a7364",
+    crate: "#8a6138", crateDark: "#4b351d", crateLight: "#a87846",
+    hall: "#46586a", hallDark: "#29353f", hallGlass: "#5d8497", hallGlow: "#ffd98a",
+    sheep: "#d9d2c4", sheepShade: "#b3ac9c", sheepFace: "#1b1a18",
+    ink: "#0b0c10", ok: "#4f9a5a", warn: "#c9903a", bad: "#b8443f", idle: "#6a6c73",
+    product: "#c9a95c", firefly: "#ffe08a",
+    shadow: "rgba(4, 8, 10, 0.42)", glow: "rgba(255, 214, 130, 0.20)",
   };
 
   // ---------- 模块状态 ----------
@@ -89,6 +109,7 @@
     bound: false,
     worldSig: "",
     snapshotTimer: 0,
+    night: false,
   };
 
   var dom = {};
@@ -504,6 +525,8 @@
       i += 1;
     });
 
+    var decor = buildDecor(hall, factories);
+
     var minX = hall.x - 70, maxX = hall.x + 70;
     var minY = hall.y - 50, maxY = hall.y + 50;
     factories.forEach(function (f) {
@@ -514,7 +537,7 @@
     });
 
     S.world = {
-      hall: hall, factories: factories, lines: lines,
+      hall: hall, factories: factories, lines: lines, decor: decor,
       bounds: { minX: minX, maxX: maxX, minY: minY, maxY: maxY },
     };
     // 厂区集合 / 产线集合变了才重新取景；运行事件刷新不动镜头
@@ -522,6 +545,111 @@
       return p.id + ":" + (p.lines || []).map(function (l) { return l.key; }).join(",");
     }).join("|");
     S.selectedKey = null;
+  }
+
+  // 地表装饰：树、石、灌木、花、池塘、路灯。全部世界坐标，镜头平移时一起动。
+  function buildDecor(hall, factories) {
+    var rand = seeded(0x5EED2026);
+    var trees = [], rocks = [], bushes = [], flowers = [], lamps = [], ponds = [], tufts = [], blobs = [];
+    var extentX = 360, extentY = 300;
+
+    function nearHall(x, y) {
+      return Math.abs(x - hall.x) < 120 && Math.abs(y - hall.y) < 78;
+    }
+    function nearFactory(x, y, pad) {
+      for (var i = 0; i < factories.length; i += 1) {
+        var f = factories[i];
+        var dx = (x - f.x) / (f.halfW + 30 + pad);
+        var dy = (y - f.y) / (f.halfH + 24 + pad);
+        if (dx * dx + dy * dy < 1) return true;
+      }
+      return false;
+    }
+    function nearBelt(x, y, pad) {
+      for (var i = 0; i < factories.length; i += 1) {
+        var pts = factories[i].belt;
+        for (var j = 1; j < pts.length; j += 1) {
+          if (distToSeg(x, y, pts[j - 1].x, pts[j - 1].y, pts[j].x, pts[j].y) < 15 + pad) return true;
+        }
+      }
+      return false;
+    }
+    function blocked(x, y, pad) {
+      return nearHall(x, y) || nearFactory(x, y, pad) || nearBelt(x, y, pad);
+    }
+
+    for (var b = 0; b < 46; b += 1) {
+      var bx = (rand() * 2 - 1) * extentX;
+      var by = (rand() * 2 - 1) * extentY;
+      var br = 14 + rand() * 34;
+      blobs.push({ x: bx, y: by, rx: br, ry: br * (0.36 + rand() * 0.22), light: rand() < 0.46 });
+    }
+    for (var t = 0; t < 220; t += 1) {
+      tufts.push({
+        x: (rand() * 2 - 1) * extentX, y: (rand() * 2 - 1) * extentY,
+        s: rand() < 0.28 ? 2 : 1, hi: rand() < 0.5,
+      });
+    }
+    var pondCandidates = [
+      { x: -255, y: 150, rx: 62, ry: 30 },
+      { x: 258, y: 205, rx: 54, ry: 26 },
+      { x: 250, y: -205, rx: 48, ry: 22 },
+    ];
+    pondCandidates.forEach(function (p) {
+      if (!blocked(p.x, p.y, 34)) ponds.push(p);
+    });
+    function nearPond(x, y) {
+      for (var i = 0; i < ponds.length; i += 1) {
+        var dx = (x - ponds[i].x) / (ponds[i].rx + 18);
+        var dy = (y - ponds[i].y) / (ponds[i].ry + 14);
+        if (dx * dx + dy * dy < 1) return true;
+      }
+      return false;
+    }
+    var tries = 0;
+    while (trees.length < 42 && tries < 1200) {
+      tries += 1;
+      var tx = (rand() * 2 - 1) * extentX;
+      var ty = (rand() * 2 - 1) * extentY;
+      if (blocked(tx, ty, 8) || nearPond(tx, ty)) continue;
+      var tooClose = false;
+      for (var k = 0; k < trees.length; k += 1) {
+        if (Math.hypot(tx - trees[k].x, ty - trees[k].y) < 21) { tooClose = true; break; }
+      }
+      if (tooClose) continue;
+      trees.push({
+        x: tx, y: ty, type: rand() < 0.58 ? "pine" : "round",
+        scale: 0.75 + rand() * 0.65, tone: rand(),
+      });
+    }
+    function scatter(count, make) {
+      var out = [];
+      var tries = 0;
+      while (out.length < count && tries < count * 30) {
+        tries += 1;
+        var sx = (rand() * 2 - 1) * extentX;
+        var sy = (rand() * 2 - 1) * extentY;
+        if (blocked(sx, sy, 4) || nearPond(sx, sy)) continue;
+        out.push(make(sx, sy));
+      }
+      return out;
+    }
+    rocks = scatter(16, function (x, y) { return { x: x, y: y, s: 1 + Math.floor(rand() * 2) }; });
+    bushes = scatter(20, function (x, y) { return { x: x, y: y, s: 1 + rand() * 1.2 }; });
+    flowers = scatter(30, function (x, y) { return { x: x, y: y, tone: rand() }; });
+    factories.forEach(function (f) {
+      var pts = f.belt;
+      [0.28, 0.72].forEach(function (tt) {
+        var pt = pointAt(pts, tt);
+        var nxt = pointAt(pts, Math.min(1, tt + 0.02));
+        var dx = nxt.x - pt.x, dy = nxt.y - pt.y;
+        var len = Math.hypot(dx, dy) || 1;
+        var lx = pt.x - dy / len * 11;
+        var ly = pt.y + dx / len * 11;
+        if (!nearFactory(lx, ly, 4)) lamps.push({ x: lx, y: ly });
+      });
+    });
+    return { trees: trees, rocks: rocks, bushes: bushes, flowers: flowers, lamps: lamps, ponds: ponds, tufts: tufts, blobs: blobs };
   }
 
   function routeBelt(a, b, seed) {
@@ -738,7 +866,7 @@
     var pad = 34;
     var z = Math.min((w - pad * 2) / Math.max(1, b.maxX - b.minX),
                      (h - pad * 2) / Math.max(1, b.maxY - b.minY));
-    z = clamp(z, 0.22, 1.4);
+    z = clamp(z * 1.2, 0.22, 1.45);
     var cx = (b.minX + b.maxX) / 2;
     var cy = (b.minY + b.maxY) / 2;
     if (animate) {
@@ -797,6 +925,61 @@
     }
   }
 
+  // 像素椭圆：逐行扫，边缘保持硬像素
+  function fillOval(ctx, cx, cy, rx, ry, color) {
+    cx = Math.round(cx); cy = Math.round(cy);
+    rx = Math.max(1, Math.round(rx)); ry = Math.max(1, Math.round(ry));
+    ctx.fillStyle = color;
+    for (var dy = -ry; dy <= ry; dy += 1) {
+      var t = 1 - (dy * dy) / (ry * ry);
+      if (t <= 0) continue;
+      var w = Math.max(1, Math.round(rx * Math.sqrt(t)));
+      ctx.fillRect(cx - w, cy + dy, w * 2, 1);
+    }
+  }
+
+  // 像素多边形（屋顶、树冠三角）
+  function fillPoly(ctx, pts, color) {
+    if (!pts || pts.length < 3) return;
+    ctx.fillStyle = color;
+    var minY = Infinity, maxY = -Infinity;
+    for (var i = 0; i < pts.length; i += 1) {
+      minY = Math.min(minY, pts[i].y);
+      maxY = Math.max(maxY, pts[i].y);
+    }
+    for (var y = Math.floor(minY); y <= Math.ceil(maxY); y += 1) {
+      var xs = [];
+      for (var j = 0; j < pts.length; j += 1) {
+        var a = pts[j], b = pts[(j + 1) % pts.length];
+        if ((y >= a.y && y < b.y) || (y >= b.y && y < a.y)) {
+          xs.push(a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y));
+        }
+      }
+      xs.sort(function (p, q) { return p - q; });
+      for (var k = 0; k + 1 < xs.length; k += 2) {
+        var x0 = Math.round(xs[k]), x1 = Math.round(xs[k + 1]);
+        ctx.fillRect(x0, y, Math.max(1, x1 - x0), 1);
+      }
+    }
+  }
+
+  function seeded(seed) {
+    // 装饰布局用确定性伪随机（非安全用途）：每次刷新同一座工厂长得一样
+    var s = seed >>> 0;
+    return function () {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  function distToSeg(px, py, ax, ay, bx, by) {
+    var dx = bx - ax, dy = by - ay;
+    var len2 = dx * dx + dy * dy;
+    if (!len2) return Math.hypot(px - ax, py - ay);
+    var t = clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+  }
+
   function linePath(ctx, pts, width, color) {
     if (!pts || pts.length < 2) return;
     ctx.fillStyle = color;
@@ -836,86 +1019,291 @@
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.imageSmoothingEnabled = false;
+    S.night = pal === PAL_NIGHT;
     ctx.fillStyle = pal.grass;
     ctx.fillRect(0, 0, W, H);
 
-    drawGroundSpecks(ctx, pal);
+    drawGround(ctx, pal);
 
     S.hits = [];
     if (S.world) {
       drawBelts(ctx, pal);
+      drawDecor(ctx, pal);
       drawHall(ctx, pal);
       var factories = S.world.factories.slice().sort(function (a, b) {
         return viewPoint(a.x, a.y).y - viewPoint(b.x, b.y).y;
       });
       factories.forEach(function (f) { drawFactory(ctx, pal, f); });
       drawPackages(ctx, pal);
+      drawLighting(ctx, pal);
     }
     updateLabels();
   }
 
-  function drawGroundSpecks(ctx, pal) {
-    var seed = 1337;
+  function drawGround(ctx, pal) {
+    var d = S.world && S.world.decor;
+    if (!d) return;
+    var z = S.cam.zoom;
+    // 大块草色斑：两层椭圆叠出不规则边缘
+    d.blobs.forEach(function (b) {
+      var p = viewPoint(b.x, b.y);
+      var rx = Math.max(2, Math.round(b.rx * z));
+      var ry = Math.max(1, Math.round(b.ry * z));
+      fillOval(ctx, p.x, p.y, rx, ry, b.light ? pal.meadow : pal.grassDark);
+      fillOval(ctx, p.x + Math.round(rx * 0.3), p.y - Math.round(ry * 0.2),
+               Math.max(1, Math.round(rx * 0.5)), Math.max(1, Math.round(ry * 0.55)),
+               b.light ? pal.meadow : pal.grassDark);
+    });
+    d.ponds.forEach(function (pond) { drawPond(ctx, pal, pond); });
+    // 草簇
+    d.tufts.forEach(function (t) {
+      var p = viewPoint(t.x, t.y);
+      ctx.fillStyle = t.hi ? pal.grassHi : pal.grassDark;
+      ctx.fillRect(p.x, p.y, t.s >= 2 ? 2 : 1, 1);
+      if (t.s >= 2) ctx.fillRect(p.x + 1, p.y - 1, 1, 1);
+    });
+  }
+
+  function drawPond(ctx, pal, pond) {
+    var p = viewPoint(pond.x, pond.y);
+    var z = S.cam.zoom;
+    var rx = Math.max(5, Math.round(pond.rx * z));
+    var ry = Math.max(2, Math.round(pond.ry * z));
+    fillOval(ctx, p.x, p.y + 1, rx + 4, ry + 3, pal.dirtLight);
+    fillOval(ctx, p.x, p.y, rx + 2, ry + 2, pal.dirtDark);
+    fillOval(ctx, p.x, p.y, rx, ry, pal.waterDark);
+    fillOval(ctx, p.x, p.y - 1, Math.max(3, rx - 3), Math.max(1, ry - 2), pal.water);
+    var ph = S.reduced ? 0 : (S.ticks % 4);
+    fillOval(ctx, p.x - Math.round(rx * 0.3), p.y - Math.round(ry * 0.1),
+             Math.max(1, Math.round(rx * 0.2) + ph), 1, pal.waterLight);
+    fillOval(ctx, p.x + Math.round(rx * 0.28), p.y + Math.round(ry * 0.2),
+             Math.max(1, Math.round(rx * 0.14)), 1, pal.waterLight);
+    // 荷叶与芦苇
+    ctx.fillStyle = pal.treeMid;
+    ctx.fillRect(p.x + Math.round(rx * 0.12), p.y - 1, 2, 1);
+    ctx.fillRect(p.x - Math.round(rx * 0.42), p.y + 2, 2, 1);
+    ctx.fillStyle = pal.grassHi;
+    ctx.fillRect(p.x - rx - 1, p.y - 3, 1, 4);
+    ctx.fillRect(p.x + rx, p.y - 2, 1, 3);
+  }
+
+  function drawDecor(ctx, pal) {
+    var d = S.world && S.world.decor;
+    if (!d) return;
+    d.rocks.forEach(function (r) { drawRock(ctx, pal, r); });
+    d.bushes.forEach(function (b) { drawBush(ctx, pal, b); });
+    d.flowers.forEach(function (f) { drawFlower(ctx, pal, f); });
+    var items = d.trees.concat(d.lamps);
+    items.sort(function (a, b) { return a.y - b.y; });
+    items.forEach(function (it) {
+      if (it.scale !== undefined) drawTree(ctx, pal, it);
+      else drawLamp(ctx, pal, it);
+    });
+    if (S.night) drawFireflies(ctx, pal, d);
+  }
+
+  function drawTree(ctx, pal, t) {
+    var p = viewPoint(t.x, t.y);
+    var z = Math.min(1.9, Math.max(0.45, S.cam.zoom)) * t.scale;
+    var h = Math.round((t.type === "pine" ? 36 : 27) * z);
+    var w = Math.round((t.type === "pine" ? 17 : 21) * z);
+    fillOval(ctx, p.x, p.y + 1, Math.max(2, Math.round(w * 0.52)),
+             Math.max(1, Math.round(w * 0.2)), pal.shadow);
+    ctx.fillStyle = pal.dirtDark;
+    ctx.fillRect(p.x - 1, p.y - Math.round(h * 0.34), 2, Math.round(h * 0.34));
+    if (t.type === "pine") {
+      for (var i = 2; i >= 0; i -= 1) {
+        var baseY = p.y - Math.round(h * (0.22 + i * 0.18));
+        var topY = baseY - Math.round(h * 0.42);
+        var ww = Math.max(2, Math.round(w * (0.62 - i * 0.1)));
+        fillPoly(ctx, [
+          { x: p.x, y: topY },
+          { x: p.x - ww, y: baseY },
+          { x: p.x + ww, y: baseY },
+        ], i === 2 ? pal.pine : i === 1 ? pal.treeDark : pal.pineLight);
+        ctx.fillStyle = i === 0 ? pal.treeHi : pal.pineLight;
+        ctx.fillRect(p.x - Math.round(ww * 0.45), baseY - 1, Math.max(1, Math.round(ww * 0.5)), 1);
+      }
+    } else {
+      fillOval(ctx, p.x, p.y - Math.round(h * 0.52),
+               Math.max(3, Math.round(w * 0.5)), Math.max(2, Math.round(h * 0.3)), pal.treeDark);
+      fillOval(ctx, p.x - Math.round(w * 0.24), p.y - Math.round(h * 0.62),
+               Math.max(2, Math.round(w * 0.36)), Math.max(1, Math.round(h * 0.24)), pal.treeMid);
+      fillOval(ctx, p.x + Math.round(w * 0.2), p.y - Math.round(h * 0.68),
+               Math.max(2, Math.round(w * 0.32)), Math.max(1, Math.round(h * 0.22)), pal.treeLight);
+      ctx.fillStyle = pal.treeHi;
+      ctx.fillRect(p.x - Math.round(w * 0.1), p.y - Math.round(h * 0.8), Math.max(1, Math.round(w * 0.18)), 1);
+      ctx.fillRect(p.x + Math.round(w * 0.2), p.y - Math.round(h * 0.7), Math.max(1, Math.round(w * 0.12)), 1);
+    }
+  }
+
+  function drawRock(ctx, pal, r) {
+    var p = viewPoint(r.x, r.y);
+    var s = Math.max(1, Math.round(r.s * Math.min(2, S.cam.zoom)));
+    fillOval(ctx, p.x, p.y + 1, s * 2, s, pal.shadow);
+    ctx.fillStyle = pal.stoneDark;
+    ctx.fillRect(p.x - s, p.y - s, s * 2, s + 1);
+    ctx.fillStyle = pal.stone;
+    ctx.fillRect(p.x - s + 1, p.y - s, Math.max(1, s), s);
+    ctx.fillStyle = pal.stoneLight;
+    ctx.fillRect(p.x - s + 1, p.y - s, Math.max(1, s - 1), 1);
+  }
+
+  function drawBush(ctx, pal, b) {
+    var p = viewPoint(b.x, b.y);
+    var s = Math.max(1, Math.round(b.s * Math.min(2, S.cam.zoom)));
+    fillOval(ctx, p.x, p.y + 1, s * 2, s, pal.shadow);
+    fillOval(ctx, p.x, p.y - 1, s * 2, s, pal.treeDark);
+    fillOval(ctx, p.x - s, p.y - 2, Math.max(1, s), Math.max(1, Math.round(s * 0.8)), pal.treeMid);
+    fillOval(ctx, p.x + Math.round(s * 0.6), p.y - 2, Math.max(1, s), Math.max(1, Math.round(s * 0.7)), pal.treeLight);
+    ctx.fillStyle = pal.treeHi;
+    ctx.fillRect(p.x - 1, p.y - s - 1, 1, 1);
+  }
+
+  function drawFlower(ctx, pal, f) {
+    var p = viewPoint(f.x, f.y);
+    ctx.fillStyle = pal.grassDark;
+    ctx.fillRect(p.x, p.y, 1, 2);
+    ctx.fillStyle = f.tone < 0.4 ? pal.product : f.tone < 0.7 ? pal.sheep : pal.hallGlass;
+    ctx.fillRect(p.x - 1, p.y - 1, 1, 1);
+    ctx.fillRect(p.x + 1, p.y - 1, 1, 1);
+    ctx.fillRect(p.x, p.y - 2, 1, 1);
+  }
+
+  function drawLamp(ctx, pal, lamp) {
+    var p = viewPoint(lamp.x, lamp.y);
+    var h = Math.round(22 * Math.min(1.8, Math.max(0.6, S.cam.zoom)));
+    fillOval(ctx, p.x, p.y + 1, 4, 2, pal.shadow);
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(p.x, p.y - h, 1, h);
+    ctx.fillRect(p.x, p.y - h, 3, 1);
+    ctx.fillStyle = pal.metal;
+    ctx.fillRect(p.x + 2, p.y - h - 2, 3, 3);
+    ctx.fillStyle = S.night ? pal.window : pal.hallGlass;
+    ctx.fillRect(p.x + 3, p.y - h - 1, 1, 2);
+    if (S.night) {
+      ctx.globalAlpha = 0.28;
+      fillOval(ctx, p.x + 3, p.y - h + 2, 12, 8, pal.hallGlow);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawFireflies(ctx, pal, d) {
+    var t = S.ticks * 0.32;
+    for (var i = 0; i < Math.min(14, d.trees.length); i += 1) {
+      var tr = d.trees[i];
+      var a = t + i * 1.7;
+      var p = viewPoint(tr.x + Math.cos(a) * 11, tr.y + Math.sin(a * 1.3) * 8 - 9);
+      if ((S.ticks + i * 3) % 9 > 5) continue;
+      ctx.fillStyle = pal.firefly;
+      ctx.fillRect(p.x, p.y, 1, 1);
+      if (i % 4 === 0) {
+        ctx.globalAlpha = 0.3;
+        ctx.fillRect(p.x - 1, p.y - 1, 3, 3);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function drawLighting(ctx, pal) {
     var W = S.bufW, H = S.bufH;
-    ctx.fillStyle = pal.plotEdge;
-    for (var i = 0; i < 130; i += 1) {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      var px = seed % W;
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      var py = seed % H;
-      ctx.fillRect(px, py, 1, 1);
-    }
-    ctx.fillStyle = pal.grass;
-    for (var j = 0; j < 80; j += 1) {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      var qx = seed % W;
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      var qy = seed % H;
-      ctx.fillRect(qx, qy, 2, 1);
-    }
+    var g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.34,
+                                     W / 2, H / 2, Math.max(W, H) * 0.72);
+    g.addColorStop(0, "rgba(0,0,0,0)");
+    g.addColorStop(1, pal.shadow);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
   }
 
   function drawBelts(ctx, pal) {
     S.world.factories.forEach(function (f) {
       var pts = f.belt.map(function (p) { return viewPoint(p.x, p.y); });
-      linePath(ctx, pts, Math.max(2, vlen(5)), pal.beltDark);
-      linePath(ctx, pts, Math.max(1, vlen(3)), pal.belt);
-      // 两帧滚动的横向刻度
-      var total = pathLength(pts);
-      var step = Math.max(6, vlen(14));
-      for (var d = (S.ticks % 2) * step * 0.5; d < total; d += step) {
-        var pt = pointAt(pts, total ? d / total : 0);
-        ctx.fillStyle = pal.beltMark;
-        ctx.fillRect(Math.round(pt.x) - 1, Math.round(pt.y) - 1, 2, 2);
-      }
+      // 土路肩 + 石缘 + 金属传送带
+      linePath(ctx, pts, vlen(13), pal.dirtDark);
+      linePath(ctx, pts, vlen(11), pal.dirt);
+      linePath(ctx, pts, vlen(8), pal.stoneDark);
+      linePath(ctx, pts, vlen(6), pal.metalDark);
+      linePath(ctx, pts, vlen(4), pal.metal);
+      drawSlats(ctx, pal, pts);
+      // 每个机台的支线
+      f.lines.forEach(function (rec) {
+        var end = pts[pts.length - 1];
+        var spur = [end, viewPoint(rec.x, rec.y)];
+        linePath(ctx, spur, vlen(5), pal.metalDark);
+        linePath(ctx, spur, vlen(3), pal.metal);
+        drawSlats(ctx, pal, spur);
+      });
     });
+  }
+
+  // 传送带横档：沿法线取两个像素，加中心滚动标记
+  function drawSlats(ctx, pal, pts) {
+    var total = pathLength(pts);
+    if (!total) return;
+    var step = Math.max(4, vlen(7));
+    for (var d = (S.ticks % 2) * step * 0.5; d < total; d += step) {
+      var t = d / total;
+      var pt = pointAt(pts, t);
+      var a = pointAt(pts, Math.max(0, t - 0.01));
+      var b = pointAt(pts, Math.min(1, t + 0.01));
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var len = Math.hypot(dx, dy) || 1;
+      var nx = -dy / len, ny = dx / len;
+      ctx.fillStyle = pal.metalLight;
+      ctx.fillRect(Math.round(pt.x + nx * 2), Math.round(pt.y + ny * 2), 1, 1);
+      ctx.fillRect(Math.round(pt.x - nx * 2), Math.round(pt.y - ny * 2), 1, 1);
+      ctx.fillStyle = pal.beltMark;
+      ctx.fillRect(Math.round(pt.x), Math.round(pt.y), 1, 1);
+    }
   }
 
   function drawHall(ctx, pal) {
     var h = S.world ? S.world.hall : { x: 0, y: 0 };
     var p = viewPoint(h.x, h.y);
-    var z = S.cam.zoom;
-    var base = vlen(8 * (5 + 3));
-    var height = vlen(4 * (5 + 3));
-    // 台基
-    fillDiamond(ctx, p.x, p.y + vlen(4), base, height, pal.hallDark);
-    fillDiamond(ctx, p.x, p.y, base, height, pal.hall);
+    var base = vlen(60), height = vlen(30);
+    // 阴影与石砌台基
+    fillDiamond(ctx, p.x, p.y + vlen(8), base + 4, height + 4, pal.shadow);
+    fillDiamond(ctx, p.x, p.y, base, height, pal.stoneDark);
+    fillDiamond(ctx, p.x, p.y - vlen(1), base - 3, height - 3, pal.stone);
+    fillDiamond(ctx, p.x, p.y - vlen(2), Math.round(base * 0.8), Math.round(height * 0.8), pal.stoneLight);
+    // 南侧台阶
+    for (var s = 0; s < 3; s += 1) {
+      fillDiamond(ctx, p.x, p.y + height + vlen(2 + s * 2),
+                  base * (0.5 - s * 0.1), vlen(3), s % 2 ? pal.stone : pal.stoneDark);
+    }
     // 玻璃圆顶
-    var r = Math.max(4, vlen(20));
-    fillCircle(ctx, p.x, p.y - vlen(4), r, pal.hallDark);
-    fillCircle(ctx, p.x, p.y - vlen(6), Math.max(3, r - 2), pal.hall);
-    ctx.fillStyle = pal.window;
-    ctx.fillRect(p.x - 2, p.y - vlen(10), 4, 2);
-    // 转盘：8 颗珠子 + 中心轴；转角在 tick 里按 10fps 推进（派工时加速）
-    var ringR = Math.max(5, vlen(13));
-    for (var i = 0; i < 8; i += 1) {
-      var a = S.rot + i * Math.PI / 4;
+    var r = Math.max(7, vlen(30));
+    fillOval(ctx, p.x, p.y - vlen(8), r + 3, Math.max(4, vlen(13)), pal.hallDark);
+    fillOval(ctx, p.x, p.y - vlen(10), r, Math.max(3, vlen(11)), pal.hall);
+    fillOval(ctx, p.x - Math.round(r * 0.2), p.y - vlen(12),
+             Math.round(r * 0.7), Math.max(2, vlen(7)), pal.hallGlass);
+    // 玻璃竖框与顶部高光
+    ctx.fillStyle = pal.hallDark;
+    for (var i = -2; i <= 2; i += 1) {
+      ctx.fillRect(p.x + Math.round(i * r * 0.42), p.y - vlen(18), 1, Math.max(2, vlen(9)));
+    }
+    ctx.fillStyle = pal.sheep;
+    ctx.fillRect(p.x - Math.round(r * 0.45), p.y - vlen(19), Math.max(2, Math.round(r * 0.3)), 1);
+    // 转盘珠子
+    var ringR = Math.max(8, vlen(21));
+    for (var j = 0; j < 10; j += 1) {
+      var a = S.rot + j * Math.PI / 5;
       var bx = Math.round(p.x + Math.cos(a) * ringR);
-      var by = Math.round(p.y - vlen(3) + Math.sin(a) * ringR * 0.42);
-      ctx.fillStyle = i % 2 ? pal.hallGlow : pal.beltMark;
+      var by = Math.round(p.y - vlen(4) + Math.sin(a) * ringR * 0.42);
+      ctx.fillStyle = j % 3 === 0 ? pal.hallGlow : j % 3 === 1 ? pal.beltMark : pal.metalLight;
       ctx.fillRect(bx - 1, by - 1, 2, 2);
     }
-    fillCircle(ctx, p.x, p.y - vlen(3), Math.max(1, vlen(2)), pal.hallGlow);
+    fillOval(ctx, p.x, p.y - vlen(5), Math.max(2, vlen(3)), Math.max(1, vlen(2)), pal.hallGlow);
+    // 顶部旗杆
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(p.x, p.y - vlen(28), 1, vlen(8));
+    ctx.fillStyle = pal.bad;
+    ctx.fillRect(p.x + 1, p.y - vlen(28), Math.max(2, vlen(4)), Math.max(1, vlen(2)));
+    if (S.night) {
+      ctx.globalAlpha = 0.22;
+      fillOval(ctx, p.x, p.y - vlen(6), r + 10, Math.max(4, vlen(16)), pal.hallGlow);
+      ctx.globalAlpha = 1;
+    }
   }
 
   function drawFactory(ctx, pal, f) {
@@ -924,10 +1312,19 @@
     var hw = 8 * (f.w + f.h) * z;
     var hh = 4 * (f.w + f.h) * z;
     var edge = Math.max(1, Math.round(2 * z));
-    // 地块：外描边 + 草地 + 内院
-    fillDiamond(ctx, p.x, p.y, hw, hh, pal.plotEdge);
-    fillDiamond(ctx, p.x, p.y, Math.max(2, hw - edge), Math.max(1, hh - edge), pal.plot);
-    fillDiamond(ctx, p.x, p.y, Math.max(2, hw * 0.78), Math.max(1, hh * 0.78), pal.plot);
+    // 地块：草缘 + 泥土场院 + 石砌内院
+    fillDiamond(ctx, p.x, p.y + vlen(3), hw + 3, hh + 3, pal.shadow);
+    fillDiamond(ctx, p.x, p.y, hw + 2, hh + 2, pal.grassDark);
+    fillDiamond(ctx, p.x, p.y, hw, hh, pal.dirtDark);
+    fillDiamond(ctx, p.x, p.y - vlen(1), Math.max(2, hw - edge), Math.max(1, hh - edge), pal.dirt);
+    fillDiamond(ctx, p.x, p.y - vlen(2), Math.max(2, hw * 0.7), Math.max(1, hh * 0.7), pal.stoneDark);
+    fillDiamond(ctx, p.x, p.y - vlen(2), Math.max(2, hw * 0.66), Math.max(1, hh * 0.66), pal.stone);
+
+    drawFence(ctx, pal, p, hw, hh, z);
+    drawWorkshop(ctx, pal, p.x, p.y - Math.round(hh * 0.26), hw, z);
+    // 场院杂物：木箱与木桶，给厂区一点生活感
+    drawPropCrate(ctx, pal, p.x - Math.round(hw * 0.62), p.y + Math.round(hh * 0.42), z);
+    drawPropBarrel(ctx, pal, p.x + Math.round(hw * 0.62), p.y + Math.round(hh * 0.38), z);
 
     // 停工牌（红/黄）：厂区不可用或整组产线都没启用
     var allLines = (f.project && f.project.lines) || f.lines;
@@ -948,8 +1345,144 @@
     drawSheep(ctx, pal, f);
   }
 
-  function lineEnabled(line) {
-    if (line.kind === "pipeline") return line.status !== "draft";
+  // 木栅栏：四个菱形边各立 4 根柱子 + 一道横杆
+  function drawFence(ctx, pal, p, hw, hh, z) {
+    if (z < 0.48) return;
+    var corners = [
+      { x: p.x, y: p.y - hh }, { x: p.x + hw, y: p.y },
+      { x: p.x, y: p.y + hh }, { x: p.x - hw, y: p.y },
+    ];
+    var postH = Math.max(2, Math.round(6 * z));
+    for (var i = 0; i < 4; i += 1) {
+      var a = corners[i], b = corners[(i + 1) % 4];
+      for (var k = 0; k <= 4; k += 1) {
+        var t = k / 4;
+        var x = Math.round(a.x + (b.x - a.x) * t);
+        var y = Math.round(a.y + (b.y - a.y) * t);
+        ctx.fillStyle = pal.dirtDark;
+        ctx.fillRect(x, y - postH, 1, postH);
+        ctx.fillStyle = pal.wallDark;
+        ctx.fillRect(x, y - postH, 1, 1);
+      }
+      linePath(ctx, [{ x: a.x, y: a.y - postH + 1 }, { x: b.x, y: b.y - postH + 1 }],
+               1, pal.dirtDark);
+    }
+  }
+
+  // 正面小木屋：山墙屋顶、木板墙、暖窗、门与烟囱
+  function drawWorkshop(ctx, pal, cx, baseY, hw, z) {
+    var w = Math.max(18, Math.round(Math.min(hw * 1.5, 62 * z)));
+    var bodyH = Math.max(10, Math.round(20 * z));
+    var roofH = Math.max(6, Math.round(14 * z));
+    var left = cx - Math.round(w / 2);
+    var right = cx + Math.round(w / 2);
+
+    fillOval(ctx, cx, baseY + 2, Math.round(w * 0.58),
+             Math.max(1, Math.round(4 * z)), pal.shadow);
+    ctx.fillStyle = pal.stoneDark;
+    ctx.fillRect(left - 1, baseY - 1, w + 2, Math.max(2, Math.round(3 * z)));
+    // 墙：左亮右暗 + 木板线
+    ctx.fillStyle = pal.wall;
+    ctx.fillRect(left, baseY - bodyH, w, bodyH);
+    ctx.fillStyle = pal.wallDark;
+    ctx.fillRect(left + Math.round(w * 0.56), baseY - bodyH, Math.round(w * 0.44), bodyH);
+    for (var yy = baseY - bodyH + Math.max(3, Math.round(4 * z)); yy < baseY;
+         yy += Math.max(3, Math.round(5 * z))) {
+      ctx.fillRect(left + 1, yy, w - 2, 1);
+    }
+    // 山墙屋顶：深色外檐 + 亮面 + 右侧受光
+    var eave = Math.max(2, Math.round(3 * z));
+    fillPoly(ctx, [
+      { x: left - eave, y: baseY - bodyH },
+      { x: cx, y: baseY - bodyH - roofH },
+      { x: right + eave, y: baseY - bodyH },
+    ], pal.roofDark);
+    fillPoly(ctx, [
+      { x: left - eave + 1, y: baseY - bodyH - 1 },
+      { x: cx, y: baseY - bodyH - roofH + 2 },
+      { x: right + eave - 1, y: baseY - bodyH - 1 },
+    ], pal.roof);
+    fillPoly(ctx, [
+      { x: cx, y: baseY - bodyH - roofH + 2 },
+      { x: right + eave - 1, y: baseY - bodyH - 1 },
+      { x: cx, y: baseY - bodyH - 1 },
+    ], pal.roofLight);
+    // 瓦片横线
+    ctx.fillStyle = pal.roofTile;
+    for (var r = 1; r < 5; r += 1) {
+      var ry = baseY - bodyH - Math.round(roofH * r / 6);
+      var rw = Math.round((w / 2 + eave) * (1 - r / 6));
+      ctx.fillRect(cx - rw, ry, Math.max(1, rw * 2), 1);
+    }
+    // 门
+    var doorW = Math.max(3, Math.round(6 * z));
+    var doorH = Math.max(5, Math.round(11 * z));
+    ctx.fillStyle = pal.crateDark;
+    ctx.fillRect(cx - Math.round(doorW / 2), baseY - doorH, doorW, doorH);
+    ctx.fillStyle = pal.crate;
+    ctx.fillRect(cx - Math.round(doorW / 2) + 1, baseY - doorH + 1,
+                 Math.max(1, doorW - 2), Math.max(1, doorH - 1));
+    ctx.fillStyle = pal.wallLight;
+    ctx.fillRect(cx + Math.round(doorW / 2) - 2, baseY - Math.round(doorH * 0.5), 1, 1);
+    // 两扇暖窗
+    var winW = Math.max(3, Math.round(7 * z));
+    var winH = Math.max(3, Math.round(6 * z));
+    var wy = baseY - bodyH + Math.max(2, Math.round(4 * z));
+    [left + Math.round(w * 0.16), right - Math.round(w * 0.24)].forEach(function (wx) {
+      ctx.fillStyle = pal.windowDark;
+      ctx.fillRect(wx, wy, winW, winH);
+      ctx.fillStyle = S.night ? pal.window : pal.hallGlass;
+      ctx.fillRect(wx + 1, wy + 1, Math.max(1, winW - 2), Math.max(1, winH - 2));
+      ctx.fillStyle = pal.wallDark;
+      ctx.fillRect(wx + Math.round(winW / 2), wy, 1, winH);
+      if (S.night) {
+        ctx.globalAlpha = 0.26;
+        fillOval(ctx, wx + winW / 2, wy + winH / 2, winW + 7, winH + 5, pal.hallGlow);
+        ctx.globalAlpha = 1;
+      }
+    });
+    // 烟囱与檐下灯
+    var chx = cx + Math.round(w * 0.28);
+    var chTop = baseY - bodyH - Math.round(roofH * 0.72);
+    var chH = Math.max(3, Math.round(8 * z));
+    ctx.fillStyle = pal.stoneDark;
+    ctx.fillRect(chx, chTop - chH, Math.max(2, Math.round(3 * z)), chH);
+    ctx.fillStyle = pal.stone;
+    ctx.fillRect(chx, chTop - chH, Math.max(2, Math.round(3 * z)), 1);
+    if (S.night) {
+      ctx.fillStyle = pal.window;
+      ctx.fillRect(cx - Math.round(doorW / 2) - 2, baseY - doorH - 2, 2, 2);
+      ctx.globalAlpha = 0.2;
+      fillOval(ctx, cx - Math.round(doorW / 2) - 1, baseY - doorH, 8, 5, pal.hallGlow);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawPropCrate(ctx, pal, x, y, z) {
+    var s = Math.max(2, Math.round(4 * z));
+    fillOval(ctx, x, y + 1, s + 1, Math.max(1, Math.round(2 * z)), pal.shadow);
+    ctx.fillStyle = pal.crateDark;
+    ctx.fillRect(x - s, y - s * 2, s * 2, s * 2);
+    ctx.fillStyle = pal.crate;
+    ctx.fillRect(x - s + 1, y - s * 2 + 1, Math.max(1, s * 2 - 2), Math.max(1, s * 2 - 2));
+    ctx.fillStyle = pal.crateLight;
+    ctx.fillRect(x - s + 1, y - s * 2 + 1, Math.max(1, s * 2 - 2), 1);
+  }
+
+  function drawPropBarrel(ctx, pal, x, y, z) {
+    var s = Math.max(2, Math.round(3 * z));
+    var h = Math.max(3, Math.round(6 * z));
+    fillOval(ctx, x, y + 1, s + 1, Math.max(1, Math.round(2 * z)), pal.shadow);
+    ctx.fillStyle = pal.crateDark;
+    ctx.fillRect(x - s, y - h, s * 2, h);
+    ctx.fillStyle = pal.crate;
+    ctx.fillRect(x - s + 1, y - h + 1, Math.max(1, s * 2 - 2), Math.max(1, h - 2));
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(x - s, y - Math.round(h * 0.72), s * 2, 1);
+    ctx.fillRect(x - s, y - Math.round(h * 0.24), s * 2, 1);
+  }
+
+  function lineEnabled(line) {    if (line.kind === "pipeline") return line.status !== "draft";
     return line.status !== "paused" && line.status !== "stopped";
   }
   function lineSmoking(line) {
@@ -961,33 +1494,55 @@
     var line = rec.line;
     var p = viewPoint(rec.x, rec.y);
     var z = S.cam.zoom;
-    var w = Math.max(4, Math.round(22 * z));
-    var topH = Math.max(2, Math.round(10 * z));
-    var bodyH = Math.max(2, Math.round(7 * z));
+    var w = Math.max(7, Math.round(20 * z));
+    var h = Math.max(6, Math.round(13 * z));
     var x = p.x, y = p.y;
+    var baseH = Math.max(2, Math.round(3 * z));
 
-    // 选中高亮：机台下的亮圈
     if (S.selectedKey === rec.key) {
-      fillDiamond(ctx, x, y + bodyH, w * 0.9, topH * 0.6, pal.hallGlow);
+      fillOval(ctx, x, y + 1, Math.round(w * 0.9),
+               Math.max(2, Math.round(4 * z)), pal.hallGlow);
     }
-    // 阴影
-    ctx.fillStyle = pal.ink;
-    ctx.fillRect(x - w / 2 - 1, y + bodyH - 1, w + 2, Math.max(1, Math.round(2 * z)));
-    // 机身：左右两片 + 顶面
-    ctx.fillStyle = pal.wallDark;
-    ctx.fillRect(x - w / 2, y - bodyH, w, bodyH);
-    ctx.fillStyle = pal.wall;
-    ctx.fillRect(x - w / 2, y - bodyH, Math.max(1, Math.round(w * 0.62)), bodyH);
-    fillDiamond(ctx, x, y - bodyH - Math.round(topH / 2), w / 2, topH / 2, pal.roof);
-    fillDiamond(ctx, x, y - bodyH - Math.round(topH / 2), w / 2 - Math.max(1, Math.round(2 * z)),
-                Math.max(1, topH / 2 - Math.max(1, Math.round(z))), pal.roofDark);
-    // 窗（运行时亮）
-    var winOn = line.status === "running";
-    ctx.fillStyle = winOn ? pal.window : pal.roofDark;
-    var ww = Math.max(2, Math.round(6 * z));
-    ctx.fillRect(x - Math.round(w / 4), y - bodyH + Math.round(bodyH * 0.25), ww, Math.max(1, Math.round(2 * z)));
-
-    // 状态灯：待机 / 运行 / 故障 / 停工
+    fillOval(ctx, x, y + 1, Math.round(w * 0.72),
+             Math.max(1, Math.round(3 * z)), pal.shadow);
+    // 金属基座
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(x - Math.round(w / 2), y - baseH, w, baseH);
+    ctx.fillStyle = pal.metalLight;
+    ctx.fillRect(x - Math.round(w / 2) + 1, y - baseH, Math.max(1, w - 2), 1);
+    // 机身：左亮右暗
+    var bodyTop = y - baseH - h;
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(x - Math.round(w * 0.4), bodyTop, Math.round(w * 0.8), h);
+    ctx.fillStyle = pal.metal;
+    ctx.fillRect(x - Math.round(w * 0.4), bodyTop, Math.round(w * 0.42), h);
+    ctx.fillStyle = pal.metalLight;
+    ctx.fillRect(x - Math.round(w * 0.4), bodyTop, Math.round(w * 0.8), 1);
+    // 顶面色带：按产线稳定取色，缩小后也能区分机台
+    var tones = [pal.roof, pal.hallGlass, pal.treeMid, pal.crate];
+    ctx.fillStyle = tones[Math.abs(hashKey(rec.key)) % tones.length];
+    ctx.fillRect(x - Math.round(w * 0.4), bodyTop, Math.round(w * 0.8),
+                 Math.max(1, Math.round(1.6 * z)));
+    // 齿轮
+    var gr = Math.max(2, Math.round(3.4 * z));
+    var gx = x + Math.round(w * 0.14);
+    var gy = bodyTop + Math.round(h * 0.5);
+    fillCircle(ctx, gx, gy, gr, pal.metalLight);
+    fillCircle(ctx, gx, gy, Math.max(1, gr - 2), pal.metalDark);
+    if (line.status === "running" && !S.reduced) {
+      var ga = S.rot * 3;
+      ctx.fillStyle = pal.hallGlow;
+      ctx.fillRect(Math.round(gx + Math.cos(ga) * gr), Math.round(gy + Math.sin(ga) * gr), 1, 1);
+      ctx.fillRect(Math.round(gx - Math.cos(ga) * gr), Math.round(gy - Math.sin(ga) * gr), 1, 1);
+    }
+    // 排气管
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(x - Math.round(w * 0.42), bodyTop - Math.max(2, Math.round(4 * z)),
+                 Math.max(1, Math.round(2 * z)), Math.max(2, Math.round(4 * z)));
+    ctx.fillStyle = pal.metalLight;
+    ctx.fillRect(x - Math.round(w * 0.42), bodyTop - Math.max(2, Math.round(4 * z)),
+                 Math.max(1, Math.round(2 * z)), 1);
+    // 状态灯
     var lamp = pal.idle;
     if (line.status === "paused" || line.status === "stopped") lamp = pal.warn;
     else if (line.status === "failed" || line.last_status === "error") lamp = pal.bad;
@@ -995,60 +1550,107 @@
     var blink = line.status === "running" && !S.reduced && (S.ticks % 6 < 4);
     if (!blink || line.status !== "running") {
       ctx.fillStyle = lamp;
-      var ls = Math.max(2, Math.round(3 * z));
-      ctx.fillRect(x - 1, y - bodyH - topH - ls - 1, ls, ls);
+      var ls = Math.max(2, Math.round(2.6 * z));
+      ctx.fillRect(x - 1, bodyTop - ls - Math.max(2, Math.round(4 * z)), ls, ls);
     }
-
-    // 烟囱：只有启用的产线冒烟
-    if (lineEnabled(line)) {
-      var cx = x + Math.round(w / 2) - Math.max(2, Math.round(3 * z));
-      var cyTop = y - bodyH - topH;
-      var chH = Math.max(3, Math.round(8 * z));
-      ctx.fillStyle = pal.wallDark;
-      ctx.fillRect(cx, cyTop - chH, Math.max(1, Math.round(2 * z)), chH);
-      if (lineSmoking(line) && !S.reduced) {
-        for (var i = 0; i < 3; i += 1) {
-          var t = ((S.ticks * 0.4 + i * 2.2) % 6.6);
-          var sy = cyTop - chH - Math.round(t * 2 * Math.max(0.6, z));
-          var sx = cx + Math.round(Math.sin(t * 1.4) * 2 * Math.max(0.6, z));
-          ctx.fillStyle = i === 2 ? pal.beltDark : pal.beltMark;
-          var ss = Math.max(1, Math.round((1 + (t > 3 ? 1 : 0)) * Math.max(0.6, z)));
-          ctx.fillRect(sx, sy, ss, ss);
-        }
+    // 停工小黄牌
+    if (line.status === "paused" || line.status === "stopped") {
+      ctx.fillStyle = pal.warn;
+      ctx.fillRect(x + Math.round(w * 0.28), bodyTop,
+                   Math.max(2, Math.round(3 * z)), Math.max(2, Math.round(3 * z)));
+    }
+    // 烟
+    if (lineEnabled(line) && lineSmoking(line) && !S.reduced) {
+      var cx2 = x - Math.round(w * 0.42);
+      var cyTop = bodyTop - Math.max(2, Math.round(4 * z));
+      for (var i = 0; i < 3; i += 1) {
+        var t = ((S.ticks * 0.4 + i * 2.2) % 6.6);
+        var sy = cyTop - Math.round(t * 2 * Math.max(0.6, z));
+        var sx = cx2 + Math.round(Math.sin(t * 1.4) * 2 * Math.max(0.6, z));
+        ctx.fillStyle = i === 2 ? pal.beltDark : pal.beltMark;
+        ctx.fillRect(sx, sy, Math.max(1, Math.round(1.4 * Math.max(0.6, z))), 1);
       }
     }
-
-    // 机台名牌的锚点（DOM 覆盖层用）
+    // 装配线：三个小工位串在一条短带上
+    if (line.kind === "pipeline" && (line.nodes || []).length) {
+      drawPipelineStations(ctx, pal, rec, x, y, w, h, z);
+    }
     rec._vx = x;
-    rec._vy = y - bodyH - topH - Math.max(4, vlen(6));
+    rec._vy = bodyTop - Math.max(4, vlen(6));
+  }
+
+  function drawPipelineStations(ctx, pal, rec, x, y, w, h, z) {
+    var nodes = rec.line.nodes || [];
+    var n = Math.min(3, nodes.length);
+    var span = Math.max(12, Math.round(w * 1.7));
+    var y0 = y + Math.round(h * 0.22);
+    linePath(ctx, [
+      { x: x - Math.round(span / 2), y: y0 },
+      { x: x + Math.round(span / 2), y: y0 },
+    ], Math.max(1, Math.round(2 * z)), pal.beltDark);
+    for (var i = 0; i < n; i += 1) {
+      var sx = x - Math.round(span / 2) + Math.round(span * i / Math.max(1, n - 1));
+      var sy = y0 + (i % 2 ? Math.round(2 * z) : 0);
+      var s = Math.max(2, Math.round(3.2 * z));
+      ctx.fillStyle = pal.metalDark;
+      ctx.fillRect(sx - s, sy - s, s * 2, s * 2);
+      ctx.fillStyle = pal.metal;
+      ctx.fillRect(sx - s + 1, sy - s + 1, Math.max(1, s * 2 - 2), Math.max(1, s * 2 - 2));
+      var node = nodes[i];
+      var c = node.status === "running" ? pal.ok
+        : node.status === "error" ? pal.bad
+          : node.status === "done" ? pal.metalLight
+            : node.status === "ready" ? pal.warn : pal.idle;
+      ctx.fillStyle = c;
+      ctx.fillRect(sx - 1, sy - s - 2, 2, 2);
+    }
   }
 
   function drawTray(ctx, pal, f) {
     var p = viewPoint(f.tray.x, f.tray.y);
     var z = S.cam.zoom;
-    var w = Math.max(6, Math.round(24 * z));
-    var h = Math.max(2, Math.round(5 * z));
-    ctx.fillStyle = pal.ink;
-    ctx.fillRect(p.x - w / 2, p.y, w, h);
-    ctx.fillStyle = pal.wallDark;
-    ctx.fillRect(p.x - w / 2 + 1, p.y + 1, w - 2, Math.max(1, h - 2));
-    // 今日成品码垛（最多 4 件，按项目今日 done 数）
+    var w = Math.max(10, Math.round(26 * z));
+    var h = Math.max(3, Math.round(5 * z));
+    fillOval(ctx, p.x, p.y + 1, Math.round(w * 0.62),
+             Math.max(1, Math.round(3 * z)), pal.shadow);
+    // 木托盘：底 + 三道板条
+    ctx.fillStyle = pal.crateDark;
+    ctx.fillRect(p.x - Math.round(w / 2), p.y, w, h);
+    ctx.fillStyle = pal.crate;
+    ctx.fillRect(p.x - Math.round(w / 2) + 1, p.y + 1,
+                 Math.max(1, w - 2), Math.max(1, h - 2));
+    ctx.fillStyle = pal.crateLight;
+    for (var k = 0; k < 3; k += 1) {
+      ctx.fillRect(p.x - Math.round(w / 2) + 2 + k * Math.max(2, Math.round(w / 4)),
+                   p.y + 1, 1, Math.max(1, h - 1));
+    }
+    // 今日成品码垛
     var st = activeState();
     var done = 0;
     ((st && st.runs) || []).forEach(function (r) {
       if (r.project_id === f.id && r.status === "done" && isToday(r.finished_at)) done += 1;
     });
-    var stack = Math.min(4, done);
-    var bw = Math.max(3, Math.round(6 * z));
+    var stack = Math.min(6, done);
+    var bw = Math.max(3, Math.round(5 * z));
     for (var i = 0; i < stack; i += 1) {
       var col = i % 2, row = Math.floor(i / 2);
-      var bx = p.x - bw + col * (bw + 1);
+      var bx = p.x - Math.round(bw * 1.1) + col * (bw + 1);
       var by = p.y - Math.max(1, Math.round(2 * z)) - row * (bw + 1);
       ctx.fillStyle = pal.crateDark;
       ctx.fillRect(bx, by, bw, bw);
       ctx.fillStyle = pal.product;
       ctx.fillRect(bx + 1, by + 1, Math.max(1, bw - 2), Math.max(1, bw - 2));
+      ctx.fillStyle = pal.crateLight;
+      ctx.fillRect(bx + Math.round(bw / 2), by + 1, 1, Math.max(1, bw - 2));
     }
+    // 托盘小旗
+    var poleX = p.x + Math.round(w / 2) - 1;
+    var poleH = Math.max(4, Math.round(10 * z));
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(poleX, p.y - poleH, 1, poleH);
+    ctx.fillStyle = pal.ok;
+    ctx.fillRect(poleX + 1, p.y - poleH, Math.max(2, Math.round(4 * z)),
+                 Math.max(1, Math.round(2 * z)));
   }
 
   function isToday(sec) {
@@ -1061,45 +1663,65 @@
   function drawSheep(ctx, pal, f) {
     var p = viewPoint(f.sheep.x, f.sheep.y);
     var z = S.cam.zoom;
-    // 固定 16×16：中文名牌之外的第二视觉锚点，缩小后也认得出
-    var u = clamp(Math.round(2 * z), 1, 2);
-    var size = 8 * u;
+    var u = clamp(Math.round(2.6 * z), 2, 3);
+    var size = 6 * u;
     var x = p.x;
-    var baseY = p.y + Math.round(size * 0.2);
+    var baseY = p.y + Math.round(size * 0.15);
     var jump = 0;
     var flip = 1;
     if (!S.reduced && f.jumpStart) {
       var ph = (nowMs() - f.jumpStart) / 900;
       if (ph < 1) {
-        jump = Math.round(Math.sin(ph * Math.PI) * 10 * u * 0.6);
+        jump = Math.round(Math.sin(ph * Math.PI) * 12 * u * 0.55);
         flip = Math.cos(ph * Math.PI * 2) >= 0 ? 1 : -1;
       }
     }
     var frame = S.reduced ? 0 : (Math.floor(S.ticks / 3) % 4);
     var breathe = frame === 1 || frame === 3 ? 1 : 0;
+    fillOval(ctx, x, baseY + 1, Math.round(size * 0.5),
+             Math.max(1, Math.round(u * 1.4)), pal.shadow);
 
     ctx.save();
     ctx.translate(Math.round(x), Math.round(baseY - jump));
     ctx.scale(flip, 1);
     var bodyTop = -size + breathe * u;
-    // 羊毛身体
-    ctx.fillStyle = pal.sheep;
-    ctx.fillRect(-Math.round(size * 0.55), bodyTop, Math.round(size * 0.9), Math.round(size * 0.55));
-    ctx.fillRect(-Math.round(size * 0.45), bodyTop - u, Math.round(size * 0.65), u);
-    // 头部（深色）与耳朵
+    // 腿
     ctx.fillStyle = pal.sheepFace;
-    ctx.fillRect(Math.round(size * 0.2), bodyTop + Math.round(size * 0.12), Math.round(size * 0.42), Math.round(size * 0.4));
-    ctx.fillRect(Math.round(size * 0.1), bodyTop + Math.round(size * 0.08), u, Math.round(u * 2));
-    // 眼睛
+    ctx.fillRect(-Math.round(size * 0.34), -Math.round(size * 0.42), u, Math.round(size * 0.42));
+    ctx.fillRect(Math.round(size * 0.18), -Math.round(size * 0.42), u, Math.round(size * 0.42));
+    // 羊毛：三层块 + 下缘阴影
     ctx.fillStyle = pal.sheep;
-    ctx.fillRect(Math.round(size * 0.5), bodyTop + Math.round(size * 0.2), Math.max(1, u), Math.max(1, u));
+    ctx.fillRect(-Math.round(size * 0.55), bodyTop, Math.round(size * 0.95), Math.round(size * 0.52));
+    ctx.fillRect(-Math.round(size * 0.62), bodyTop + u, Math.round(size * 0.55), Math.round(size * 0.3));
+    ctx.fillRect(-Math.round(size * 0.4), bodyTop - u, Math.round(size * 0.62), u);
+    ctx.fillStyle = pal.sheepShade;
+    ctx.fillRect(-Math.round(size * 0.55), bodyTop + Math.round(size * 0.45),
+                 Math.round(size * 0.95), Math.max(1, u));
+    // 头（深色）与耳朵
+    ctx.fillStyle = pal.sheepFace;
+    ctx.fillRect(Math.round(size * 0.28), bodyTop + Math.round(size * 0.08),
+                 Math.round(size * 0.48), Math.round(size * 0.38));
+    ctx.fillRect(Math.round(size * 0.18), bodyTop + Math.round(size * 0.04), u, Math.round(u * 2));
+    // 眼睛与腮红
+    ctx.fillStyle = pal.sheep;
+    ctx.fillRect(Math.round(size * 0.58), bodyTop + Math.round(size * 0.16),
+                 Math.max(1, u - 1), Math.max(1, u - 1));
+    ctx.fillStyle = pal.roofLight;
+    ctx.fillRect(Math.round(size * 0.34), bodyTop + Math.round(size * 0.28),
+                 Math.max(1, u - 1), Math.max(1, u - 1));
+    // 安全帽
+    ctx.fillStyle = pal.warn;
+    ctx.fillRect(Math.round(size * 0.12), bodyTop - Math.round(u * 0.6),
+                 Math.round(size * 0.62), Math.max(1, u));
+    ctx.fillRect(Math.round(size * 0.2), bodyTop - Math.round(u * 1.6),
+                 Math.round(size * 0.42), Math.max(1, u));
+    ctx.fillStyle = pal.product;
+    ctx.fillRect(Math.round(size * 0.24), bodyTop - Math.round(u * 1.5),
+                 Math.max(1, Math.round(size * 0.2)), 1);
     // 尾巴
     ctx.fillStyle = pal.sheep;
-    ctx.fillRect(-Math.round(size * 0.68), bodyTop + Math.round(size * 0.22), u, Math.round(u * 2));
-    // 四条腿
-    ctx.fillStyle = pal.sheepFace;
-    ctx.fillRect(-Math.round(size * 0.42), -Math.round(size * 0.45), Math.max(1, u), Math.round(size * 0.45));
-    ctx.fillRect(Math.round(size * 0.18), -Math.round(size * 0.45), Math.max(1, u), Math.round(size * 0.45));
+    ctx.fillRect(-Math.round(size * 0.68), bodyTop + Math.round(size * 0.18),
+                 u, Math.round(u * 2));
     ctx.restore();
   }
 
@@ -1206,12 +1828,19 @@
     else if (pkg.finish === "interrupted" || pkg.finish === "skipped") { color = pal.idle; edge = pal.ink; }
     else if (pkg.finish === "done") { color = pal.product; edge = pal.crateDark; }
     var x = Math.round(pos.x), y = Math.round(pos.y) - s;
+    // 影子 + 箱体 + 顶面高光 + 十字胶带
+    fillOval(ctx, x, y + s + 1, s, Math.max(1, Math.round(s * 0.4)), pal.shadow);
     ctx.fillStyle = edge;
     ctx.fillRect(x - s, y - s, s * 2, s * 2);
     ctx.fillStyle = color;
     ctx.fillRect(x - s + 1, y - s + 1, Math.max(1, s * 2 - 2), Math.max(1, s * 2 - 2));
+    ctx.fillStyle = pal.crateLight;
+    ctx.fillRect(x - s + 1, y - s + 1, Math.max(1, s * 2 - 2), 1);
     ctx.fillStyle = edge;
     ctx.fillRect(x - 1, y - s + 1, 1, Math.max(1, s * 2 - 2));
+    ctx.fillRect(x - s + 1, y - 1, Math.max(1, s * 2 - 2), 1);
+    ctx.fillStyle = pal.crateLight;
+    ctx.fillRect(x - s + 2, y - s + 2, Math.max(1, s - 1), 1);
     // 记录点击热区
     S.hits.push({ type: "pkg", id: pkg.id, x: pos.x, y: pos.y - s, r: Math.max(5, s * 1.6) });
   }

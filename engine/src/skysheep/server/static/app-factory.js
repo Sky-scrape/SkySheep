@@ -606,7 +606,7 @@
         // 塔楼型：高层厂房 + 双烟囱 + 单筒仓 + 低附楼
         mainBx = cx - hw * 0.10; mainBy = cy - hh * 0.15;
         addBox(mainBx, mainBy, hw * 0.26, hh * 0.40, 56, "steel",
-               { z0: baseZ, windows: 5, door: true, roof: "flat" });
+               { z0: baseZ, windows: 5, door: true, roof: "flat", vent: true });
         addCyl(mainBx - hw * 0.10, mainBy - hh * 0.02, 2.2, 70, "steel", { z0: baseZ, bands: 2 });
         addCyl(mainBx + hw * 0.10, mainBy - hh * 0.02, 2.2, 70, "steel", { z0: baseZ, bands: 2 });
         smoke.push({ x: mainBx - hw * 0.10, y: mainBy - hh * 0.02, h: baseZ + 70 });
@@ -673,6 +673,11 @@
       models.push({ kind: "ore", x: cx + hw * 0.22, y: cy + hh * 0.58, s: 1.1 });
       models.push({ kind: "worker", x: cx - hw * 0.55, y: cy + hh * 0.60, z0: baseZ });
       models.push({ kind: "truck", x: cx - hw * 0.24, y: cy + hh * 0.70, z0: baseZ });
+      models.push({ kind: "figure", x: cx + hw * 0.34, y: cy + hh * 0.40, z0: baseZ });
+      if (variant === 0 || variant === 2) {
+        models.push({ kind: "gantry", x: cx + hw * 0.12, y: cy + hh * 0.62,
+                      w: hw * 0.16, h: 26, z0: baseZ });
+      }
       models.push({ kind: "conveyor", path: f.belt, h0: 12, h1: 22, width: 3.6, ore: true });
       f.labelZ = topZ + 6;
     });
@@ -686,38 +691,43 @@
     models.push({ kind: "pylon", x: -240, y: -230, bg: true });
     models.push({ kind: "pylon", x: 220, y: -240, bg: true });
     models.push({ kind: "pylon", x: 360, y: -40, bg: true });
-    models.push({ kind: "rail", path: [{ x: -380, y: 170 }, { x: -120, y: 190 }, { x: 140, y: 200 }, { x: 380, y: 185 }], bg: true });
-    models.push({ kind: "truck", x: -60, y: 175, z0: 0, bg: true });
-    models.push({ kind: "truck", x: 80, y: 190, z0: 0, bg: true });
-    models.push({ kind: "ore", x: 250, y: 200, s: 2.6, bg: true });
-    models.push({ kind: "ore", x: -200, y: 210, s: 2.2, bg: true });
+    models.push({ kind: "rail", path: [{ x: -380, y: 100 }, { x: -120, y: 112 }, { x: 140, y: 122 }, { x: 380, y: 110 }], bg: true });
+    models.push({ kind: "truck", x: -60, y: 108, z0: 0, bg: true });
+    models.push({ kind: "truck", x: 80, y: 118, z0: 0, bg: true });
+    models.push({ kind: "ore", x: 250, y: 112, s: 2.6, bg: true });
+    models.push({ kind: "ore", x: -200, y: 114, s: 2.2, bg: true });
     models.push({ kind: "rock", x: -180, y: -160, s: 2, bg: true });
     models.push({ kind: "rock", x: 180, y: 60, s: 1.6, bg: true });
-    models.push({ kind: "shrub", x: -100, y: 260, s: 1.3, bg: true });
-    models.push({ kind: "shrub", x: 260, y: 240, s: 1.2, bg: true });
+    models.push({ kind: "shrub", x: -100, y: 108, s: 1.3, bg: true });
+    models.push({ kind: "shrub", x: 260, y: 100, s: 1.2, bg: true });
     models.push({ kind: "conveyor", path: [{ x: 270, y: -150 }, { x: 330, y: -60 }], h0: 16, h1: 10, width: 2.6, ore: true, bg: true });
-    models.push({ kind: "box", x: -210, y: 140, hw: 26, hh: 14, h: 14, role: "steel", windows: 2, roof: "saw", bg: true });
-    models.push({ kind: "cyl", x: -245, y: 155, r: 8, h: 18, role: "rust", bands: 2, bg: true });
-    models.push({ kind: "box", x: 220, y: 150, hw: 22, hh: 12, h: 12, role: "steel", windows: 2, roof: "flat", bg: true });
-    models.push({ kind: "cyl", x: 250, y: 165, r: 7, h: 16, role: "steel", bands: 2, bg: true });
-    models.push({ kind: "truck", x: -150, y: 185, z0: 0, bg: true });
-    models.push({ kind: "truck", x: 120, y: 198, z0: 0, bg: true });
-    models.push({ kind: "rock", x: -90, y: 130, s: 1.4, bg: true });
-    models.push({ kind: "shrub", x: 60, y: 150, s: 1.2, bg: true });
-    models.push({ kind: "ore", x: -40, y: 195, s: 1.6, bg: true });
+    models.push({ kind: "box", x: -210, y: 92, hw: 26, hh: 14, h: 14, role: "steel", windows: 2, roof: "saw", bg: true });
+    models.push({ kind: "cyl", x: -245, y: 104, r: 8, h: 18, role: "rust", bands: 2, bg: true });
+    models.push({ kind: "box", x: 220, y: 96, hw: 22, hh: 12, h: 12, role: "steel", windows: 2, roof: "flat", bg: true });
+    models.push({ kind: "cyl", x: 250, y: 108, r: 7, h: 16, role: "steel", bands: 2, bg: true });
+    models.push({ kind: "truck", x: -150, y: 116, z0: 0, bg: true });
+    models.push({ kind: "truck", x: 120, y: 124, z0: 0, bg: true });
+    models.push({ kind: "rock", x: -90, y: 88, s: 1.4, bg: true });
+    models.push({ kind: "shrub", x: 60, y: 98, s: 1.2, bg: true });
+    models.push({ kind: "ore", x: -40, y: 120, s: 1.6, bg: true });
     var tracks = [
-      { path: [{ x: -360, y: 210 }, { x: -160, y: 250 }, { x: 60, y: 275 }, { x: 300, y: 290 }] },
+      { path: [{ x: -360, y: 102 }, { x: -160, y: 112 }, { x: 60, y: 120 }, { x: 300, y: 126 }] },
       { path: [{ x: -260, y: -40 }, { x: -120, y: 20 }, { x: 20, y: 90 }] },
     ];
 
     // 中央调度塔：石台 + 钢塔 + 玻璃顶 + 天线
     addBox(hall.x, hall.y, 46, 23, 8, "sand");
     addBox(hall.x, hall.y, 22, 11, 46, "steel",
-           { z0: 8, windows: 4, door: true, roof: "flat" });
+           { z0: 8, windows: 4, door: true, roof: "flat", vent: true });
     addBox(hall.x, hall.y - 5, 13, 6.5, 58, "glass",
            { z0: 8, windows: 0, roof: "flat" });
     addCyl(hall.x, hall.y - 5, 2.6, 72, "steel", { z0: 8, bands: 1 });
     models.push({ kind: "radar", x: hall.x, y: hall.y - 5, z0: 66 });
+    models.push({ kind: "catwalk", x: hall.x, y: hall.y, hw: 26, hh: 13, z0: 26 });
+    models.push({ kind: "catwalk", x: hall.x, y: hall.y, hw: 26, hh: 13, z0: 44 });
+    models.push({ kind: "figure", x: hall.x - 20, y: hall.y - 2, z0: 28 });
+    models.push({ kind: "figure", x: hall.x + 16, y: hall.y + 2, z0: 46 });
+    models.push({ kind: "figure", x: hall.x - 4, y: hall.y + 6, z0: 10 });
     sparks.push({ x: hall.x, y: hall.y, h: 18 });
 
     return { models: models, patches: patches, smoke: smoke, sparks: sparks, tracks: tracks };
@@ -1093,6 +1103,7 @@
     S.night = pal === PAL_NIGHT;
 
     drawSkyGround(ctx, pal);
+    drawTerrain(ctx, pal);
     drawGroundPatches(ctx, pal);
 
     S.hits = [];
@@ -1183,6 +1194,55 @@
     ctx.globalAlpha = 1;
   }
 
+  function drawTerrain(ctx, pal) {
+    var z = S.cam.zoom;
+    var c = viewPoint(0, 0);
+    var hw = Math.max(120, Math.round(260 * z));
+    var hh = Math.max(60, Math.round(125 * z));
+    var th = Math.max(20, Math.round(48 * z));
+    fillDiamond(ctx, c.x + Math.round(12 * z), c.y + th + Math.round(8 * z), hw, hh, pal.shadow);
+    // 崖壁：左右两面
+    fillPoly(ctx, [
+      { x: c.x - hw, y: c.y }, { x: c.x, y: c.y + hh },
+      { x: c.x, y: c.y + hh + th }, { x: c.x - hw, y: c.y + th },
+    ], pal.stoneDark);
+    fillPoly(ctx, [
+      { x: c.x, y: c.y + hh }, { x: c.x + hw, y: c.y },
+      { x: c.x + hw, y: c.y + th }, { x: c.x, y: c.y + hh + th },
+    ], pal.groundDark);
+    // 岩层横纹
+    for (var i = 1; i <= 3; i += 1) {
+      var dy = Math.round(th * i / 4);
+      linePath(ctx, [{ x: c.x - hw, y: c.y + dy }, { x: c.x, y: c.y + hh + dy }], 1, pal.stone);
+      linePath(ctx, [{ x: c.x, y: c.y + hh + dy }, { x: c.x + hw, y: c.y + dy }], 1, pal.groundLight);
+    }
+    // 台地顶面
+    fillDiamond(ctx, c.x, c.y, hw, hh, pal.ground);
+    linePath(ctx, [{ x: c.x - hw, y: c.y }, { x: c.x, y: c.y - hh }], 1, pal.groundHi);
+    linePath(ctx, [{ x: c.x, y: c.y - hh }, { x: c.x + hw, y: c.y }], 1, pal.groundHi);
+    linePath(ctx, [{ x: c.x - hw, y: c.y }, { x: c.x, y: c.y + hh }], 2, pal.stone);
+    linePath(ctx, [{ x: c.x, y: c.y + hh }, { x: c.x + hw, y: c.y }], 2, pal.stone);
+    // 崖壁裂缝
+    ctx.fillStyle = pal.roadDark;
+    for (var ck = 0; ck < 5; ck += 1) {
+      var ct = (ck + 1) / 6;
+      ctx.fillRect(Math.round(c.x - hw + hw * ct), Math.round(c.y + hh * ct + th * 0.18),
+                   1, Math.round(th * 0.5));
+      ctx.fillRect(Math.round(c.x + hw * (1 - ct)), Math.round(c.y + hh * ct + th * 0.2),
+                   1, Math.round(th * 0.42));
+    }
+    // 崖底碎石
+    for (var r = 0; r < 12; r += 1) {
+      var t = (r + 0.5) / 12;
+      var side = r % 2 ? 1 : -1;
+      var bx = c.x + side * (hw - hw * t) - Math.round(t * 8);
+      var by = c.y + hh * t + th + Math.round((r % 3) * 2 * z);
+      fillOval(ctx, bx, by, Math.max(2, Math.round(4 * z)), Math.max(1, Math.round(2 * z)), pal.groundDark);
+      ctx.fillStyle = pal.stoneLight;
+      ctx.fillRect(bx, by - 1, 1, 1);
+    }
+  }
+
   function drawGroundPatches(ctx, pal) {
     var site = S.world && S.world.site;
     if (!site) return;
@@ -1267,6 +1327,9 @@
     else if (m.kind === "rail") drawRailModel(ctx, pal, m);
     else if (m.kind === "rock") drawRockModel(ctx, pal, m);
     else if (m.kind === "shrub") drawShrubModel(ctx, pal, m);
+    else if (m.kind === "gantry") drawGantryModel(ctx, pal, m);
+    else if (m.kind === "catwalk") drawCatwalkModel(ctx, pal, m);
+    else if (m.kind === "figure") drawFigureModel(ctx, pal, m);
   }
 
   function drawTruckModel(ctx, pal, m) {
@@ -1275,13 +1338,13 @@
     var baseY = p.y - Math.round((m.z0 || 0) * z);
     var L = Math.max(10, Math.round(26 * z));
     var W = Math.max(4, Math.round(9 * z));
-    var steel = m.bg ? pal.bgSteel : steel;
-    var steelDark = m.bg ? pal.bgSteelDark : steelDark;
-    var steelLight = m.bg ? pal.bgSteelLight : steelLight;
-    var rust = m.bg ? pal.bgRust : rust;
-    var rustDark = m.bg ? pal.bgRustDark : rustDark;
-    var rustLight = m.bg ? pal.bgRustLight : rustLight;
-    var wheel = m.bg ? pal.bgSteelDark : wheel;
+    var steel = m.bg ? pal.bgSteel : pal.steel;
+    var steelDark = m.bg ? pal.bgSteelDark : pal.steelDark;
+    var steelLight = m.bg ? pal.bgSteelLight : pal.steelLight;
+    var rust = m.bg ? pal.bgRust : pal.rust;
+    var rustDark = m.bg ? pal.bgRustDark : pal.rustDark;
+    var rustLight = m.bg ? pal.bgRustLight : pal.rustLight;
+    var wheel = m.bg ? pal.bgSteelDark : pal.ink;
     fillOval(ctx, p.x, baseY + 1, L * 0.5, W * 0.4, pal.shadow);
     ctx.fillStyle = wheel;
     for (var i = 0; i < 3; i += 1) {
@@ -1384,6 +1447,16 @@
       ], pal.windowDark);
     }
     // 屋顶：锯齿 / 平顶
+    if (m.vent) {
+      for (var vv = 0; vv < 3; vv += 1) {
+        var vx = base.x - hw * 0.4 + vv * hw * 0.4;
+        var vy = baseY - h - hh * 0.35 + vv * hh * 0.2;
+        ctx.fillStyle = pal.metalDark;
+        ctx.fillRect(Math.round(vx), Math.round(vy), Math.max(1, Math.round(3 * z)), Math.max(1, Math.round(2 * z)));
+        ctx.fillStyle = pal.metalLight;
+        ctx.fillRect(Math.round(vx), Math.round(vy), Math.max(1, Math.round(2 * z)), 1);
+      }
+    }
     if (m.roof === "saw") {
       for (var r = 0; r < 3; r += 1) {
         var rx0 = base.x - hw + hw * (0.1 + r * 0.28);
@@ -1491,11 +1564,11 @@
     var total = pathLength(pts);
     if (!total) return;
     var w = Math.max(2, Math.round(m.width * z));
-    var steel = m.bg ? pal.bgSteel : steel;
-    var steelDark = m.bg ? pal.bgSteelDark : steelDark;
-    var steelLight = m.bg ? pal.bgSteelLight : steelLight;
-    var ore = m.bg ? pal.bgRust : ore;
-    var oreDark = m.bg ? pal.bgRustDark : oreDark;
+    var steel = m.bg ? pal.bgSteel : pal.steel;
+    var steelDark = m.bg ? pal.bgSteelDark : pal.steelDark;
+    var steelLight = m.bg ? pal.bgSteelLight : pal.steelLight;
+    var ore = m.bg ? pal.bgRust : pal.ore;
+    var oreDark = m.bg ? pal.bgRustDark : pal.oreDark;
     // 桁架支腿
     var step = Math.max(8, vlen(20));
     for (var d = 0; d < total; d += step) {
@@ -1663,9 +1736,9 @@
     var z = S.cam.zoom;
     var p = viewPoint(m.x, m.y);
     var s = Math.max(3, Math.round(7 * z)) * (m.s || 1);
-    var ore = m.bg ? pal.bgRust : ore;
-    var oreDark = m.bg ? pal.bgRustDark : oreDark;
-    var oreHi = m.bg ? pal.bgRustLight : oreHi;
+    var ore = m.bg ? pal.bgRust : pal.ore;
+    var oreDark = m.bg ? pal.bgRustDark : pal.oreDark;
+    var oreHi = m.bg ? pal.bgRustLight : pal.rustLight;
     fillOval(ctx, p.x, p.y, s * 1.4, s * 0.6, pal.shadow);
     fillOval(ctx, p.x, p.y - 1, s, s * 0.6, oreDark);
     fillOval(ctx, p.x - s * 0.3, p.y - 2, s * 0.7, s * 0.45, ore);
@@ -1801,6 +1874,62 @@
       }
     }
     ctx.globalAlpha = 1;
+  }
+
+  function drawGantryModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var w = Math.max(6, Math.round(m.w * z));
+    var h = Math.max(8, Math.round(m.h * z));
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(p.x - w, baseY - h, 2, h);
+    ctx.fillRect(p.x + w - 2, baseY - h, 2, h);
+    ctx.fillStyle = pal.steelLight;
+    ctx.fillRect(p.x - w, baseY - h, w * 2, 2);
+    ctx.fillStyle = pal.metal;
+    for (var i = 1; i < 4; i += 1) {
+      ctx.fillRect(p.x - w, baseY - h + Math.round(h * i / 4), w * 2, 1);
+    }
+    ctx.fillStyle = pal.warn;
+    ctx.fillRect(p.x - 3, baseY - h + 2, 6, 2);
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(p.x, baseY - h + 4, 1, Math.round(h * 0.4));
+    ctx.fillStyle = pal.warn;
+    ctx.fillRect(p.x - 1, baseY - h + 4 + Math.round(h * 0.4), 2, 2);
+  }
+
+  function drawCatwalkModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var hw = Math.max(6, Math.round(m.hw * z));
+    var hh = Math.max(3, Math.round(m.hh * z));
+    drawIsoBoxAt(ctx, p.x, baseY, hw, hh, Math.max(1, Math.round(2 * z)),
+                 pal.steelLight, pal.steel, pal.steelDark);
+    var ph = Math.max(2, Math.round(4 * z));
+    for (var k = 0; k <= 4; k += 1) {
+      var t = k / 4;
+      ctx.fillStyle = pal.steelDark;
+      ctx.fillRect(Math.round(p.x - hw + hw * t), Math.round(baseY + hh * t - ph), 1, ph);
+      ctx.fillRect(Math.round(p.x + hw - hw * t), Math.round(baseY + hh * t - ph), 1, ph);
+    }
+    linePath(ctx, [{ x: p.x - hw, y: baseY }, { x: p.x, y: baseY + hh }], 1, pal.steelLight);
+    linePath(ctx, [{ x: p.x, y: baseY + hh }, { x: p.x + hw, y: baseY }], 1, pal.steelLight);
+  }
+
+  function drawFigureModel(ctx, pal, m) {
+    var z = S.cam.zoom;
+    var p = viewPoint(m.x, m.y);
+    var baseY = p.y - Math.round((m.z0 || 0) * z);
+    var h = Math.max(2, Math.round(4 * z));
+    ctx.fillStyle = pal.ink;
+    ctx.fillRect(p.x, baseY - h, 1, h);
+    ctx.fillRect(p.x, baseY - h - 1, 1, 1);
+    if (S.night) {
+      ctx.fillStyle = pal.warn;
+      ctx.fillRect(p.x, baseY - h + 1, 1, 1);
+    }
   }
 
   function drawEffects(ctx, pal) {

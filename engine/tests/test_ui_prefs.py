@@ -1271,7 +1271,9 @@ def test_new_session_follows_sidebar_highlight(home):
     assert "不能在这里新建" in fn
     # 五个入口都走它（标签栏＋ / 左上按钮 / 窄栏＋ / /new）
     assert "plus.onclick = () => newSessionFromHighlight();" in js
-    assert 'getElementById("btn-new").onclick = () => newSessionFromHighlight();' in js
+    # 左上按钮：工厂/设置开着时先回对话再建，落点仍走同一个分发函数
+    btn_new = js[js.index('getElementById("btn-new").onclick'):]
+    assert "newSessionFromHighlight();" in btn_new[:200]
     rail = js[js.index('getElementById("rail-new").onclick'):]
     assert "newSessionFromHighlight();" in rail[:200]
     slash = js[js.index('case "/new"'):]

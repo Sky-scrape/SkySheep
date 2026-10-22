@@ -16,6 +16,7 @@ from pathlib import Path
 from ...bgtasks import spawn_bg
 from ...channels.manager import _fmt_dur
 from ...core import system_schedule
+from ...core.run_ledger import RunLedger
 from ...security.gate import HeadlessGate
 from ...tools import ChangeRecorder
 from ...tools.pipeline import task_node_fields
@@ -155,6 +156,8 @@ async def run_cron_task_core(
     notify=None,        # (dict) -> None：桌面通知（CLI 无界面，传 None）
     channels=None,      # 渠道管理器（终态推送目标；CLI 传只发不收的实例）
     running: set | None = None,  # 在跑去重集合（后端扫描循环用；CLI 传 None）
+    emit_run=None,      # (ev) -> None：运行账本事件出口（工厂观战；CLI 传 None）
+    ledger=None,        # 宿主共享账本（后端的常驻 RunLedger）；None = 本次调用自建
 ) -> dict | None:
     """执行一个定时任务并收尾：结果写回任务行、重排下次运行、广播与终态推送。
 
@@ -167,6 +170,8 @@ async def run_cron_task_core(
       raise 即按失败收尾（回写 last_status=error 并推送）。
     - broadcast / notify：广播与桌面通知出口（可为 None）。
     - channels：渠道管理器；None = 无推送目标（静默跳过）。
+    - emit_run：运行账本事件出口（工厂观战用）；None = 只记账不发事件。
+    - ledger：宿主传进来的常驻账本；None = 本次调用自建（CLI 路径）。
 
     返回收尾后的任务行；任务不存在 / 未启用且未 force / 已在跑时返回 None。
     执行失败不向上抛（回写错误状态就是收尾），调用方读任务行拿结果。
@@ -187,6 +192,17 @@ async def run_cron_task_core(
         running.add(task_id)
         added = True
     started_at = time.time()  # 终态推送要报耗时（成功与失败两条路都要用）
+    # 运行账本（工厂观战）：开一条 running，收尾在成功 / 异常两路各写一次。
+    # 记账失败不能拦住任务本身——工厂少一枚包裹，好过整条定时任务跑不动。
+    ledger = ledger or RunLedger(store, emit=emit_run)
+    run = None
+    try:
+        run = await ledger.start(
+            "cron", task_id, project_id=task.get("project_id"),
+            trigger="manual" if force else "schedule",
+        )
+    except Exception:  # noqa: BLE001
+        run = None
     try:
         runtime, _sid, stopped = await execute(task)
         # 取本轮最后一条助手文本作为结果摘要
@@ -226,6 +242,17 @@ async def run_cron_task_core(
         # 终态推送（成功/异常同开关）：fire-and-forget，失败只记日志
         duration = time.time() - started_at
         _fire_cron_push(channels, task, status, duration, cron_push_body(task, status, duration))
+        # 运行账本收尾：ok → done，空产出 → empty，被中断（既有口径记 error）→ error
+        if run is not None:
+            try:
+                await ledger.finish(
+                    run["id"],
+                    status={"ok": "done", "empty": "empty"}.get(status, "error"),
+                    result_excerpt=last_text,
+                    session_id=_sid,
+                )
+            except Exception:  # noqa: BLE001 - 记账失败不影响任务收尾
+                pass
         return task
     except Exception as e:  # noqa: BLE001 - 任务失败也要回写状态
         try:
@@ -252,6 +279,11 @@ async def run_cron_task_core(
                             cron_push_body(task, "error", duration))
         except Exception:  # noqa: BLE001
             pass
+        if run is not None:
+            try:
+                await ledger.finish(run["id"], status="error", error=str(e)[:300])
+            except Exception:  # noqa: BLE001 - 记账失败不影响任务收尾
+                pass
         return task
     finally:
         if added and running is not None:
@@ -419,7 +451,20 @@ class AutomationMixin:
     async def _cron_pass(self) -> None:
         for row in await self.store.due_cron_tasks():
             if row["id"] in self._cron_running:
+                # 上一轮还没跑完又到点：记一条 skipped（包裹视图里是一枚「跳过」），
+                # 但同一个到点批次只记一次——长跑期间每 20 秒的扫描都会命中同一个
+                # due 行，不去重会把账本堆满重复的跳过记录。键按 (task_id, next_run_at)
+                # 口径存（dict[task_id] = 上次记过的 next_run_at）。
+                nra = float(row["next_run_at"] or 0)
+                if self._cron_skip_mark.get(int(row["id"])) == nra:
+                    continue
+                self._cron_skip_mark[int(row["id"])] = nra
+                try:
+                    await self.run_ledger.skipped(row)
+                except Exception:  # noqa: BLE001 - 记账失败不拦扫描循环
+                    pass
                 continue
+            self._cron_skip_mark.pop(int(row["id"]), None)
             # 后台触发：任务跑多久都不阻塞扫描循环（下一轮扫描跳过 in-flight 任务）
             spawn_bg(self._run_cron_task(row["id"]))
 
@@ -601,6 +646,8 @@ class AutomationMixin:
             notify=self.notify,
             channels=self.channels,
             running=self._cron_running,
+            emit_run=self._emit_factory_run,
+            ledger=self.run_ledger,
         )
 
     async def _execute_cron_turn(self, task: dict):
@@ -1314,6 +1361,10 @@ class AutomationMixin:
         占住并发槽）。会话续跑遇忙：不消耗重试次数，退避后重排队。
         """
         sid = ""
+        # 运行账本：每次尝试一行（自动重试的每一轮各一行）。各分支只改 outcome，
+        # 由 finally 恰好收尾一次——避免超时/失败/取消几条路径重复写账本。
+        run = None
+        outcome = {"status": "error", "error": "", "excerpt": ""}
         try:
             if self.provider is None:
                 raise RuntimeError("尚未配置可用的模型 API Key")
@@ -1342,6 +1393,13 @@ class AutomationMixin:
                 runs=(node["runs"] or 0) + 1, last_error="",
             )
             self._broadcast_pipeline(await self.store.get_pipeline(pipe["id"]))
+            try:
+                run = await self.run_ledger.start(
+                    "pipeline_node", node["id"], project_id=run_pid,
+                    pipeline_id=pipe["id"], trigger="manual",
+                )
+            except Exception:  # noqa: BLE001 - 记账失败不拦节点执行
+                run = None
 
             prompt = await self._compose_node_prompt(
                 node, attempt=int(node.get("runs") or 1), prev_error=prev_error,
@@ -1395,6 +1453,8 @@ class AutomationMixin:
                 try:
                     result = await asyncio.wait_for(run_coro, timeout=timeout_s)
                 except TimeoutError:
+                    outcome["status"] = "error"
+                    outcome["error"] = f"节点超时（超过 {timeout_txt}）"
                     await self._pipeline_node_fail(
                         pipe, node, sid,
                         f"节点超时（超过 {timeout_txt}），已中止；可在节点上调大超时或拆小任务",
@@ -1409,15 +1469,20 @@ class AutomationMixin:
                     last_text = m.text.strip()
                     break
             if result.get("stopped"):
+                outcome["status"] = "cancelled"
+                outcome["error"] = "运行被中断"
                 await self._pipeline_node_fail(
                     pipe, node, sid, "运行被中断", retriable=False, notify_body="运行被中断",
                 )
             elif not last_text:
+                outcome["status"] = "empty"
                 await self._pipeline_node_fail(
                     pipe, node, sid, "节点没有产出", notify_body="这一轮没有产出文本",
                 )
             else:
                 final_text, finished = self._loop_settle(node, last_text)
+                outcome["status"] = "done"
+                outcome["excerpt"] = final_text[:200]
                 if finished:
                     node = await self.store.update_pipeline_node(
                         node["id"], status="done", result=final_text,
@@ -1435,6 +1500,8 @@ class AutomationMixin:
                     )
                     node["status"] = "ready"
         except asyncio.CancelledError:
+            outcome["status"] = "cancelled"
+            outcome["error"] = "用户停止流水线"
             await self.store.update_pipeline_node(
                 node["id"], status="cancelled", last_error="用户停止流水线",
                 session_id=sid, finished_at=time.time(),
@@ -1443,12 +1510,23 @@ class AutomationMixin:
             self._spawn_pipeline_node_push(
                 pipe, node, "cancelled", self._node_run_duration(node))
         except Exception as e:  # noqa: BLE001 - 节点失败也要落状态
+            outcome["status"] = "error"
+            outcome["error"] = str(e)[:300]
             try:
                 await self._pipeline_node_fail(pipe, node, sid, str(e)[:300],
                                                notify_body=str(e)[:160])
             except Exception:  # noqa: BLE001
                 pass
         finally:
+            if run is not None:
+                try:
+                    await self.run_ledger.finish(
+                        run["id"], status=outcome["status"],
+                        result_excerpt=outcome["excerpt"], error=outcome["error"],
+                        session_id=sid or None,
+                    )
+                except Exception:  # noqa: BLE001 - 记账失败不影响节点收尾
+                    pass
             self._pipeline_running.discard(node["id"])
             self._pipeline_node_tasks.pop(node["id"], None)
             # 立刻补扫：刚完成的节点可能解锁了下游，不等下一个扫描周期

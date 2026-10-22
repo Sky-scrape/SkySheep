@@ -241,6 +241,8 @@ function connect() {
     if (wsEverConnected) {
       reloadProjectPanels();
       restorePendingPermissions(); // 重连后补回未决的权限确认卡
+      // 工厂开着时重拉一次：断线期间的运行事件可能丢了，计数与场景以服务端为准
+      if (factoryOpen && typeof factoryReload === "function") factoryReload();
     }
     wsEverConnected = true;
   };
@@ -5082,6 +5084,12 @@ function handleEvent(kind, data) {
       if (rightViewVisible("agenda")) loadAgenda();
       break;
     }
+    case "factory_run": {
+      // 工厂：一次运行的开始 / 结束（顶层不带 session_id，会话 id 只在 run 里）。
+      // 视图没开也照传——app-factory.js 自己决定只更新内存态还是顺带重绘。
+      if (typeof factoryOnEvent === "function") factoryOnEvent(data);
+      break;
+    }
     case "mcp_updated": {
       // MCP 后台连接完成/状态变化（启动不阻塞，连完推送）：设置页开着或
       // MCP/Skills 标签开着都重绘——ext 页签的卡片是从设置页搬过去的同一份
@@ -5725,7 +5733,7 @@ function renderRailSessions(sessions) {
     b.textContent = railInitial(s.title);
     b.title = (s.title || "(未命名)") + (active ? "（当前会话）" : "") + " · 点击切换";
     b.onclick = () => {
-      if (settingsOpen) backToChat();
+      if (pageViewOpen()) backToChat();
       openTabForSession(s.id, s.title);
     };
     box.appendChild(b);
@@ -9664,7 +9672,7 @@ function renderNotifPanel() {
       item.title = "点击前往对应会话";
       item.onclick = () => {
         notifPanel.classList.add("hidden");
-        if (settingsOpen) backToChat(); // 在设置页里点的：先回对话视图再切标签
+        if (pageViewOpen()) backToChat(); // 在设置 / 工厂页里点的：先回对话视图再切标签
         activateTab(tab);
       };
     }
@@ -11503,14 +11511,31 @@ function composerKeydown(e, face) {
   }
 }
 document.getElementById("input").addEventListener("keydown", (e) => composerKeydown(e, null));
-document.getElementById("btn-new").onclick = () => newSessionFromHighlight();
+document.getElementById("btn-new").onclick = () => {
+  if (pageViewOpen()) backToChat(); // 工厂 / 设置是整屏视图：先回对话再新建
+  newSessionFromHighlight();
+};
 window.addEventListener("keydown", (e) => {
   if (!e.ctrlKey && !e.metaKey) {
-    // Esc 停止运行（设置页/弹窗打开时不劫持——它们有自己的 Esc 语义）。
-    // 停谁按键盘焦点定，不按 routeTab：那是事件路由的残留指针，分屏列在跑
-    // 时它常指向那一列、人却在主栏——按残留停会停错会话，且列里没有停止
-    // 按钮无从纠正。焦点在分屏列内停那一列，否则停主栏活动标签。
-    if (e.key === "Escape" && !settingsOpen && !modalOpen()) {
+    // Esc 的优先级：弹窗 → 工厂（先收抽屉）→ 设置 → 停止运行。
+    // 弹窗自己的 document 监听会处理取消；这里只负责视图层。
+    if (e.key === "Escape") {
+      if (modalOpen()) return;
+      if (factoryOpen) {
+        e.preventDefault();
+        if (typeof factoryEscape === "function" && factoryEscape()) return; // 抽屉开着：先关抽屉
+        closeFactoryPage();
+        return;
+      }
+      if (settingsOpen) {
+        e.preventDefault();
+        backToChat();
+        return;
+      }
+      // 停止运行：设置页/弹窗打开时不劫持——它们有自己的 Esc 语义。
+      // 停谁按键盘焦点定，不按 routeTab：那是事件路由的残留指针，分屏列在跑
+      // 时它常指向那一列、人却在主栏——按残留停会停错会话，且列里没有停止
+      // 按钮无从纠正。焦点在分屏列内停那一列，否则停主栏活动标签。
       const ae = document.activeElement;
       const colEl = ae && ae.closest ? ae.closest(".split-col") : null;
       const pane = colEl ? splitPanes.find((p) => p.el === colEl) : null;
@@ -11537,24 +11562,24 @@ window.addEventListener("keydown", (e) => {
   // Ctrl+Shift+F 搜索会话（全项目 / 历史）
   if (k === "f" && e.shiftKey && !e.altKey) {
     e.preventDefault();
-    if (!settingsOpen) openSettingsSearch();
+    if (!pageViewOpen()) openSettingsSearch();
     return;
   }
   if (e.shiftKey || e.altKey) return;
   // Ctrl+N 新建会话
   if (k === "n") {
     e.preventDefault();
-    if (!typing && !settingsOpen) document.getElementById("btn-new").click();
+    if (!typing && !pageViewOpen()) document.getElementById("btn-new").click();
     return;
   }
   // Ctrl+F 在本对话里查找（所有编辑类软件的惯例；会话搜索见 Ctrl+Shift+F）
-  if (k === "f" && !settingsOpen) {
+  if (k === "f" && !pageViewOpen()) {
     e.preventDefault();
     if (!settingsOpenFlag()) openFindBar();
     return;
   }
   // Ctrl+K 模型切换菜单
-  if (k === "k" && !settingsOpen) {
+  if (k === "k" && !pageViewOpen()) {
     e.preventDefault();
     if (!typing) toggleModelMenu();
     return;
@@ -11566,13 +11591,13 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   // Ctrl+W 关闭当前会话标签
-  if (k === "w" && !settingsOpen) {
+  if (k === "w" && !pageViewOpen()) {
     e.preventDefault();
     if (!typing && activeTab) closeTab(activeTab);
     return;
   }
   // Ctrl+Tab / Ctrl+Shift+Tab 在会话标签间循环切换（按展示序，即拖拽后的顺序）
-  if (k === "Tab" && (e.ctrlKey || e.metaKey) && !settingsOpen) {
+  if (k === "Tab" && (e.ctrlKey || e.metaKey) && !pageViewOpen()) {
     e.preventDefault();
     cycleTab(e.shiftKey ? -1 : 1);
     return;
@@ -11592,7 +11617,8 @@ function cycleTab(dir) {
 function modalOpen() {
   return !document.getElementById("modal").classList.contains("hidden");
 }
-function settingsOpenFlag() { return settingsOpen; }
+// 对话视图是否被设置 / 工厂两个顶层视图遮住（Ctrl+F 等快捷键的守卫读这里）
+function settingsOpenFlag() { return pageViewOpen(); }
 
 function openSettingsSearch() {
   const inp = document.getElementById("session-search");
@@ -11817,6 +11843,10 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     // 窄屏上侧栏是抽屉：点了导航就收回（任务等打开的是右侧面板标签，
     // 不收回的话侧栏（z 更高）正好盖住刚打开的面板）
     document.body.classList.remove("sidebar-open");
+    // 工厂是第三顶层视图：从对话 / 设置任一处都能直接进
+    if (act === "factory") return openFactoryPage();
+    // 其余导航项都在对话视图里生效：工厂开着时先回对话
+    if (factoryOpen) backToChat();
     // 任务/日程/自动化：右侧面板标签（不再用侧栏折叠区）
     if (act === "todo") return openRightTab("todo");
     if (act === "agenda") return openRightTab("agenda");
@@ -11829,6 +11859,13 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     if (act === "ext") return openRightTab("ext");
     if (navPending[act]) addNotice(`「${navPending[act]}」开发中，即将上线`);
   };
+});
+
+// 工厂是整屏视图：点侧栏里的会话/项目行时先回对话，否则点了看不见结果。
+// 捕获阶段挂一次即可（列表内容会被重建，容器本身不动）。
+["session-list", "project-list"].forEach((id) => {
+  const box = document.getElementById(id);
+  if (box) box.addEventListener("click", () => { if (factoryOpen) backToChat(); }, true);
 });
 
 document.getElementById("btn-agenda-add").onclick = () => agendaModal(null);
@@ -12013,16 +12050,22 @@ async function projectModal() {
 document.getElementById("session-add-project").onclick = projectModal;
 // 添加项目唯一入口：两种视图共用，常驻「会话」标题行右端（分组视图下排在折叠钮之后）
 
-// ---------- 设置页：视图切换（侧栏同步切换为设置子项目） ----------
+// ---------- 设置页 / 工厂页：视图切换（侧栏同步切换为设置子项目） ----------
 const viewChat = document.getElementById("view-chat");
 const viewSettings = document.getElementById("view-settings");
+const viewFactory = document.getElementById("view-factory");
 const sideChat = document.getElementById("side-chat");
 const sideSettings = document.getElementById("side-settings");
 const btnSettings = document.getElementById("btn-settings");
 let settingsOpen = false;
+// 第三顶层视图「工厂」。与 settingsOpen 互斥；快捷键守卫统一读 pageViewOpen()，
+// 避免逐处再加一个标志（工厂 / 设置都不是对话视图）。
+let factoryOpen = false;
+function pageViewOpen() { return settingsOpen || factoryOpen; }
 
 function openSettings(page = "providers") {
   closeExtPanel(); // MCP/Skills 卡片若正被右面板借用，先搬回来，技能/MCP 两页才不会是空的
+  closeFactoryView(); // 从工厂直接进设置：先卸掉场景循环、让出视图
   settingsOpen = true;
   viewChat.classList.add("hidden");
   viewSettings.classList.remove("hidden");
@@ -12037,9 +12080,46 @@ function openSettings(page = "providers") {
   showSettingsPage(page);
   renderSettings().catch((e) => addNotice("加载设置失败: " + e.message));
 }
+
+// 只负责「把工厂视图收起来」：不碰设置页状态，供 openSettings / backToChat 共用
+function closeFactoryView() {
+  if (!factoryOpen) return;
+  factoryOpen = false;
+  if (typeof factoryUnmount === "function") factoryUnmount();
+  viewFactory.classList.add("hidden");
+}
+
+function openFactoryPage() {
+  if (factoryOpen) return;
+  if (settingsOpen) {
+    // 从设置页进工厂：把设置视图的收尾走一遍（但不调用 petSettle 之外的对话刷新）
+    settingsOpen = false;
+    viewSettings.classList.add("hidden");
+    sideSettings.classList.add("hidden");
+    sideChat.classList.remove("hidden");
+    btnSettings.textContent = "⚙ 设置";
+  }
+  factoryOpen = true;
+  viewChat.classList.add("hidden");
+  viewSettings.classList.add("hidden");
+  viewFactory.classList.remove("hidden");
+  document.body.classList.remove("sidebar-open"); // 窄屏：侧栏抽屉别盖住场景
+  // 视图必须已经可见再 mount：Canvas 要按真实尺寸算内部缓冲
+  if (typeof factoryMount === "function") factoryMount();
+}
+
+function closeFactoryPage() {
+  if (!factoryOpen) return;
+  closeFactoryView();
+  viewChat.classList.remove("hidden");
+  document.body.classList.remove("sidebar-open");
+  petSettle();
+}
+
 function backToChat() {
   settingsOpen = false;
   viewSettings.classList.add("hidden");
+  closeFactoryView(); // 工厂 → 对话：场景循环一并停掉
   viewChat.classList.remove("hidden");
   document.body.classList.remove("sidebar-open"); // 手机：返回对话同样先收回抽屉
   sideSettings.classList.add("hidden");
@@ -12049,10 +12129,11 @@ function backToChat() {
   petSettle();
 }
 btnSettings.onclick = () => (settingsOpen ? backToChat() : openSettings());
+document.getElementById("factory-close").onclick = () => closeFactoryPage();
 
 // ---------- 接力工作台：作为右侧面板标签与聊天并排显示 ----------
 function openRelayWorkbench() {
-  if (settingsOpen) backToChat();
+  if (pageViewOpen()) backToChat();
   if (!document.getElementById("rp-page-relay")) return openSettings("skills"); // 接力说明卡在技能与工具页
   openRightTab("relay");
   // 点「接力」= 在当前会话开一个副屏：把绑定会话打开在右侧分栏里
@@ -12196,7 +12277,12 @@ if (settingsSearchInput) {
   // 索引缓存可能过时；一次聚焦重建一次，输入突发期间全部命中缓存。
   settingsSearchInput.addEventListener("focus", () => invalidateSettingsCardIndex());
   settingsSearchInput.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { settingsSearchInput.value = ""; hideSettingsSearch(); }
+    if (e.key === "Escape") {
+      // 搜索框里的 Esc 先清检索，不再冒泡成「关闭设置页」
+      e.stopPropagation();
+      settingsSearchInput.value = "";
+      hideSettingsSearch();
+    }
   });
   document.addEventListener("click", (e) => {
     if (e.target !== settingsSearchInput && !settingsSearchResults.contains(e.target)) {
@@ -13017,11 +13103,11 @@ document.getElementById("btn-left-collapse").onclick = toggleLeftSidebar;
 // renderRailSessions 里各自接管。停在设置页时先回对话再看结果。
 document.getElementById("rail-expand").onclick = toggleLeftSidebar;
 document.getElementById("rail-new").onclick = () => {
-  if (settingsOpen) backToChat();
+  if (pageViewOpen()) backToChat();
   newSessionFromHighlight();
 };
 document.getElementById("rail-search").onclick = () => {
-  if (settingsOpen) backToChat();
+  if (pageViewOpen()) backToChat();
   if (leftCollapsed) toggleLeftSidebar();
   requestAnimationFrame(() => {
     const el = document.getElementById("session-search");
@@ -13032,7 +13118,9 @@ document.getElementById("rail-search").onclick = () => {
 // 停在设置页时先回对话，别让面板开在看不见的地方。
 document.querySelectorAll("#sb-rail [data-rail-act]").forEach((btn) => {
   btn.onclick = () => {
-    if (settingsOpen) backToChat();
+    // 工厂走第三顶层视图；其余入口都回到对话再开右侧标签
+    if (btn.dataset.railAct === "factory") return openFactoryPage();
+    if (pageViewOpen()) backToChat();
     // 接力走带副屏的入口；其余照旧打开右侧标签
     if (btn.dataset.railAct === "relay") return openRelayWorkbench();
     openRightTab(btn.dataset.railAct);
@@ -14833,6 +14921,9 @@ function applyThemeMode(mode, save = true) {
   mermaidSetTheme(dark ? "dark" : "default");
   // 已开的 xterm 终端跟着换配色（背景/前景/ANSI 十六色）
   for (const t of termTabs) if (t.term) t.term.options.theme = xtermTheme();
+  // 工厂场景的昼夜盘由「本地时刻 + 当前主题明暗」决定：主题切换后重绘一次
+  // （系统深浅切换同样走这里，见 themeMql 的 change 监听）
+  if (typeof factoryRepaint === "function") factoryRepaint();
   renderThemePicker();
   renderThemeSwatches();
   if (save) saveUiPrefs({ theme: themePref === "auto" ? null : themePref });
@@ -16761,7 +16852,7 @@ document.getElementById("btn-mod-template").onclick = async () => {
     const d = await request("mods.get_template");
     const text = d.template || "";
     const hint = document.getElementById("mods-draft-hint");
-    if (settingsOpen) backToChat();
+    if (pageViewOpen()) backToChat();
     inputEl.value = text;
     autoGrowInput();
     inputEl.focus();

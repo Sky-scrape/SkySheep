@@ -72,6 +72,7 @@
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
         <button class="nav-item" data-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕；与输入框的圆桌、团队、对抗分开">接力</button>
         <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
+        <button class="nav-item" data-act="factory" title="工厂：跨项目的自动化观战与派工，像素厂区里看每一次真实运行（仅本机可用）">工厂</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
         <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
@@ -188,6 +189,9 @@
     </button>
     <button class="rail-btn" data-rail-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
+    </button>
+    <button class="rail-btn" data-rail-act="factory" title="工厂：跨项目的自动化观战与派工（仅本机可用）" aria-label="工厂">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20V10.5l5 3v-3l5 3v-3l5 3V20Z"/><path d="M3 20h18"/><path d="M7 10.5V5h2.4v4"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，自动注入每一轮对话" aria-label="项目记忆">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h5.5A3.5 3.5 0 0 1 12 7.5V21a2.5 2.5 0 0 0-2.5-2.5H3Z"/><path d="M21 4h-5.5A3.5 3.5 0 0 0 12 7.5V21a2.5 2.5 0 0 1 2.5-2.5H21Z"/></svg>
@@ -2048,6 +2052,62 @@
         </section>
       </div>
     </div>
+
+    <!-- 视图三：工厂（跨项目的自动化观战台 + 总厂调度台，本机专属）。
+         像素场景是一扇窗：外壳（计数条 / 监控面板 / 工具栏 / 抽屉）全部走主题变量，
+         Canvas 内部用 JS 里的昼夜调色板，不跟六套主题换色。 -->
+    <div id="view-factory" class="view hidden">
+      <header id="factory-hud">
+        <div class="fh-cells">
+          <div class="fh-cell" data-k="running" title="正在运行的包裹数">
+            <b id="factory-num-running">0</b><span>运行中</span>
+          </div>
+          <div class="fh-cell" data-k="queued" title="编排节点里依赖已满足、正在等并发额度的工位数">
+            <b id="factory-num-queued">0</b><span>排队</span>
+          </div>
+          <div class="fh-cell" data-k="attention" role="button" tabindex="0" title="孤儿任务、上次失败、运行中断、到点被跳过与停工厂区（点击逐条列出）">
+            <b id="factory-num-attention">0</b><span>需留意</span>
+          </div>
+          <div class="fh-cell" data-k="done" title="本地今天 0 点以后成功完成的运行数">
+            <b id="factory-num-done">0</b><span>今日完成</span>
+          </div>
+        </div>
+        <div id="factory-hud-ops">
+          <button id="factory-settings" class="btn-ghost" title="工厂设置：入口开关、样板厂、昼夜天色与运行历史保留">⚙</button>
+          <button id="factory-close" class="btn-ghost" title="返回对话（Esc）">← 返回对话</button>
+        </div>
+        <div id="factory-clock" title="本机时间">
+          <span id="factory-clock-time">--:--:--</span>
+          <span id="factory-clock-date"></span>
+        </div>
+      </header>
+      <div id="factory-main">
+        <aside id="factory-panel" aria-label="自动化监控">
+          <div id="factory-panel-head">
+            <span class="fp-title">自动化监控</span>
+            <span class="fp-ops">
+              <button id="factory-line-add" class="sec-ops" title="给指定厂区新建一条轻量定时产线">＋</button>
+              <button id="factory-panel-fold" class="sec-ops" title="折叠 / 展开监控面板">‹</button>
+            </span>
+          </div>
+          <div id="factory-panel-body"></div>
+        </aside>
+        <section id="factory-stage" aria-label="工厂像素场景">
+          <canvas id="factory-canvas"></canvas>
+          <div id="factory-labels" aria-hidden="true"></div>
+          <div id="factory-toolbar" role="toolbar" aria-label="镜头与显示">
+            <button id="factory-fit" title="全景：装下全部厂区">全景</button>
+            <button id="factory-zoom-in" title="拉近">＋</button>
+            <button id="factory-zoom-out" title="拉远">－</button>
+            <button id="factory-labels-toggle" title="显示 / 隐藏厂区与机台名牌" aria-pressed="true">名牌</button>
+            <button id="factory-all-runs" title="全部运行（最多 60 条）">全部任务</button>
+          </div>
+        </section>
+        <!-- 远程 / 空态 / 样板厂提示：放 stage 外，窄屏不画场景时也能看到 -->
+        <div id="factory-notice" class="hidden"></div>
+        <aside id="factory-drawer" class="hidden" aria-label="运行详情"></aside>
+      </div>
+    </div>
   </main>
 </div>
 <div id="session-menu" class="session-menu hidden"></div>
@@ -2082,6 +2142,9 @@
 <script src="/static/app-browser.js"></script>
 <script src="/static/app-mods.js"></script>
 <script src="/static/app.js"></script>
+<!-- 工厂视图（第三顶层视图）：像素场景与监控面板；普通 script、零构建，
+     先 app.js 后本文件，靠全局函数互调（factoryMount / factoryOnEvent…） -->
+<script src="/static/app-factory.js"></script>
 <!-- 工具配置区块（联网搜索 / AI 画图 / 语音输入 / 圆桌）拆在 app-tools.js：
      同为普通 script、零构建，先 app.js 后本文件，两文件靠全局函数互调 -->
 <script src="/static/app-tools.js"></script>

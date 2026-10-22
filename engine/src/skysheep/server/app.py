@@ -236,6 +236,7 @@ def _no_store_static(app) -> None:
         "/",
         "/static/index.html",
         "/static/app.js",
+        "/static/app-factory.js",
         "/static/app-memmap.js",
         "/static/app-projects.js",
         "/static/app-providers.js",
@@ -1284,6 +1285,34 @@ async def _h_archive_delete(backend: ServerBackend, params: dict, emit, local: b
         raise RuntimeError("ids 需要一个会话 id 数组")
     ids = None if raw is None else [str(i) for i in raw]
     return await backend.archive_delete_batch(ids)
+
+
+# ---- 工厂（跨项目自动化观战）：全部本机专属，跨项目枚举面不对远程开放 ----
+
+async def _h_factory_state(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.factory_state()
+
+
+async def _h_factory_runs(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.factory_runs(params)
+
+
+async def _h_factory_run_now(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 派工复用 _run_cron_task(force=True)：权限门/白名单/工作目录仍按目标项目
+    return await backend.factory_run_now(params)
+
+
+async def _h_factory_toggle(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.factory_toggle(params)
+
+
+async def _h_factory_line_add(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 写入的是普通 cron_tasks 行（提示词是纯文本，永不作为命令执行）
+    return await backend.factory_line_add(params)
+
+
+async def _h_factory_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.factory_save(params)
 
 
 async def _h_browser_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -2392,6 +2421,33 @@ _WS_METHODS: dict[str, _WsMethod] = {
         _h_archive_delete, local_only=True,
         local_error="删除已归档会话只能在桌面端本机操作",
     ),
+    # 工厂（跨项目自动化观战）：六个方法全部本机专属——状态与运行历史是跨项目
+    # 枚举面，派工/启停/新建产线是无人值守执行面，远程 / 手机连接一律拒绝，
+    # 前端打开工厂只显示「工厂仅在本机可用」。
+    "factory.state": _WsMethod(
+        _h_factory_state, local_only=True,
+        local_error="工厂仅在本机可用",
+    ),
+    "factory.runs": _WsMethod(
+        _h_factory_runs, local_only=True,
+        local_error="工厂运行历史只能在本机查看",
+    ),
+    "factory.run_now": _WsMethod(
+        _h_factory_run_now, local_only=True,
+        local_error="工厂派工只能在桌面端本机执行",
+    ),
+    "factory.toggle": _WsMethod(
+        _h_factory_toggle, local_only=True,
+        local_error="产线启停只能在桌面端本机操作",
+    ),
+    "factory.line_add": _WsMethod(
+        _h_factory_line_add, local_only=True,
+        local_error="新建产线只能在桌面端本机操作",
+    ),
+    "factory.save": _WsMethod(
+        _h_factory_save, local_only=True,
+        local_error="工厂设置只能在桌面端本机修改",
+    ),
     # 浏览器控制（设置 · 浏览器控制）：状态回读只读放行各端；改开关与清数据是
     # 本机管理动作（清数据会删本机浏览器 profile，远程不放宽）
     "browser.status": _WsMethod(_h_browser_status),
@@ -2912,6 +2968,10 @@ def create_app(
                         return  # 所有会话事件（含用户消息/工具/权限）按连接归属过滤
                 elif k in ("subagent_spawned", "subagent_event", "task_finished"):
                     return  # 缺少归属的子代理事件不能向远端推送
+                elif k == "factory_run":
+                    # 工厂是跨项目观战面（六个方法全部本机专属）：运行事件也
+                    # 不向远端推送，避免其他项目的产线名 / 结果摘要经事件流泄露
+                    return
                 elif k in ("term_data", "term_exit"):
                     # 终端输出只属于本机终端面板：spawn/input 仅本机（app.py:664），
                     # 输出里可能含用户亲手回显的环境变量等敏感值，远端一律不推送

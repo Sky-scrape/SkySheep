@@ -301,6 +301,26 @@ CREATE TABLE IF NOT EXISTS relay_turns (
     finished_at REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (pair_id, turn_no)
 );
+CREATE TABLE IF NOT EXISTS automation_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    task_id INTEGER NOT NULL,
+    pipeline_id INTEGER,
+    project_id INTEGER,
+    session_id TEXT,
+    trigger TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    finished_at REAL,
+    duration_s REAL,
+    result_excerpt TEXT DEFAULT '',
+    error TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_project
+    ON automation_runs(project_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_task
+    ON automation_runs(task_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_status ON automation_runs(status);
 """
 
 # 全文搜索索引：messages 的 FTS5 虚表（trigram 分词）。
@@ -356,10 +376,11 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 # 数据库结构版本：SCHEMA 或 _COLUMN_MIGRATIONS 每次变更时 +1。
 # v2：新增 relay_tasks / relay_nodes / relay_actions（接力运行期三表）。
 # v3：新增 relay_pairs / relay_turns（主副屏交替接力）。
+# v4：新增 automation_runs（自动化运行账本：定时任务 / 编排节点每次运行一行）。
 # 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
 # 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
 # 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -2708,6 +2729,203 @@ class SessionStore:
         )
         rows = await cur.fetchall()
         return [self._cron_row(r) for r in rows]
+
+    # ---- 运行账本（automation_runs）：每次自动化运行一行 ----
+    # 既有表只保存每个任务的「最后一次」运行（last_run_at/last_status/last_result），
+    # 没有历史与耗时；工厂观战需要「运行」这一实体。写入点见
+    # core/run_ledger.py（RunLedger）与 server/backend_parts/automation.py。
+    # 外部输入一律走占位符绑定；SQL 片段只拼接本方法内的常量字符串。
+
+    # 与设计稿 §8.1 的截断口径一致：结果摘要 ≤200 字、错误摘要 ≤300 字
+    MAX_RESULT_EXCERPT_CHARS = 200
+    MAX_RUN_ERROR_CHARS = 300
+
+    @staticmethod
+    def _automation_run_row(r) -> dict:
+        return {
+            "id": r["id"],
+            "kind": r["kind"],
+            "task_id": r["task_id"],
+            "pipeline_id": r["pipeline_id"],
+            "project_id": r["project_id"],
+            "session_id": r["session_id"],
+            "trigger": r["trigger"],
+            "status": r["status"],
+            "started_at": r["started_at"],
+            "finished_at": r["finished_at"],
+            "duration_s": r["duration_s"],
+            "result_excerpt": r["result_excerpt"] or "",
+            "error": r["error"] or "",
+        }
+
+    async def get_automation_run(self, run_id: int) -> dict | None:
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM automation_runs WHERE id = ?", (int(run_id),)
+        )
+        row = await cur.fetchone()
+        return self._automation_run_row(row) if row else None
+
+    async def add_automation_run(
+        self,
+        *,
+        kind: str,
+        task_id: int,
+        pipeline_id: int | None = None,
+        project_id: int | None = None,
+        session_id: str | None = None,
+        trigger: str = "schedule",
+        status: str = "running",
+        started_at: float | None = None,
+    ) -> dict:
+        """开一条运行记录；默认 status=running（结束请走 finish_automation_run）。"""
+        assert self._db
+        ts = time.time() if started_at is None else float(started_at)
+        cur = await self._db.execute(
+            "INSERT INTO automation_runs (kind, task_id, pipeline_id, project_id,"
+            " session_id, trigger, status, started_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(kind), int(task_id),
+                None if pipeline_id is None else int(pipeline_id),
+                None if project_id is None else int(project_id),
+                None if session_id is None else str(session_id),
+                str(trigger), str(status), ts,
+            ),
+        )
+        run_id = cur.lastrowid
+        await self._db.commit()
+        return await self.get_automation_run(run_id)
+
+    async def finish_automation_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        finished_at: float | None = None,
+        duration_s: float | None = None,
+        result_excerpt: str = "",
+        error: str = "",
+        session_id: str | None = None,
+    ) -> dict | None:
+        """收尾一条运行；不存在返回 None。
+
+        duration_s 缺省按 finished_at - started_at 计算（服务重启等场景由调用方
+        显式传入时以调用方为准）。session_id 只覆盖不抹除：None = 保持原值。
+        """
+        assert self._db
+        run = await self.get_automation_run(run_id)
+        if run is None:
+            return None
+        fin = time.time() if finished_at is None else float(finished_at)
+        if duration_s is None:
+            duration = max(0.0, fin - float(run["started_at"] or fin))
+        else:
+            duration = max(0.0, float(duration_s))
+        await self._db.execute(
+            "UPDATE automation_runs SET status = ?, finished_at = ?, duration_s = ?,"
+            " result_excerpt = ?, error = ?,"
+            " session_id = COALESCE(?, session_id) WHERE id = ?",
+            (
+                str(status), fin, duration,
+                str(result_excerpt or "")[: self.MAX_RESULT_EXCERPT_CHARS],
+                str(error or "")[: self.MAX_RUN_ERROR_CHARS],
+                None if session_id is None else str(session_id),
+                int(run_id),
+            ),
+        )
+        await self._db.commit()
+        return await self.get_automation_run(run_id)
+
+    async def mark_interrupted_runs(self) -> int:
+        """把残留的 running 运行统一标为 interrupted（应用启动时收尾）。
+
+        只动 status，不动 finished_at 已有值——正常运行的 finished_at 本就为
+        NULL，这里保持原样，由工厂页按 started_at 推算「中断于未知时刻」。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "UPDATE automation_runs SET status = 'interrupted' WHERE status = 'running'"
+        )
+        await self._db.commit()
+        return max(0, int(cur.rowcount or 0))
+
+    async def list_automation_runs(
+        self,
+        *,
+        project_id: int | None = None,
+        task_id: int | None = None,
+        pipeline_id: int | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """运行历史分页（最近在前）。过滤条件全部参数绑定。"""
+        assert self._db
+        clauses: list[str] = []
+        args: list = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            args.append(int(project_id))
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            args.append(int(task_id))
+        if pipeline_id is not None:
+            clauses.append("pipeline_id = ?")
+            args.append(int(pipeline_id))
+        if status is not None:
+            clauses.append("status = ?")
+            args.append(str(status))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        lim = max(1, min(500, int(limit)))
+        off = max(0, int(offset))
+        cur = await self._db.execute(
+            f"SELECT * FROM automation_runs{where}"
+            " ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
+            (*args, lim, off),
+        )
+        rows = await cur.fetchall()
+        return [self._automation_run_row(r) for r in rows]
+
+    async def prune_automation_runs(self, *, keep: int = 2000, days: int = 30) -> int:
+        """按「最近 keep 条 + 最近 days 天」清理历史，返回删除条数。
+
+        两个条件是并集：超出条数上限的，或早于天数窗口的，都清。running 行
+        永不删（进行中的运行必须能被收尾，删了就成了没有归属的孤儿记录）。
+        保留集按 started_at 倒序取前 keep 条——running 通常也在其中。
+        """
+        assert self._db
+        keep = max(1, int(keep))
+        days = max(1, int(days))
+        cutoff = time.time() - days * 86400.0
+        cur = await self._db.execute(
+            "DELETE FROM automation_runs WHERE status != 'running' AND ("
+            " started_at < ? OR id IN ("
+            "  SELECT id FROM automation_runs ORDER BY started_at DESC, id DESC"
+            "  LIMIT -1 OFFSET ?))",
+            (cutoff, keep),
+        )
+        await self._db.commit()
+        return max(0, int(cur.rowcount or 0))
+
+    async def automation_run_counters(self, *, done_since: float) -> dict:
+        """工厂计数聚合：running 总数与 done_since 之后完成（status=done）的条数。
+
+        单条 SQL 聚合，避免工厂页把全量历史拉回前端再数。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT"
+            " SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,"
+            " SUM(CASE WHEN status = 'done' AND finished_at >= ? THEN 1 ELSE 0 END)"
+            " AS done_today FROM automation_runs",
+            (float(done_since),),
+        )
+        row = await cur.fetchone()
+        return {
+            "running": int((row["running"] if row else 0) or 0),
+            "done_today": int((row["done_today"] if row else 0) or 0),
+        }
 
     # ---- 任务编排（pipelines / pipeline_nodes）：按依赖顺序自动跑的 Agent 任务 ----
     # 流水线是「草稿 → 运行 → 终态」的容器；节点是 DAG 上的一个 headless 运行，

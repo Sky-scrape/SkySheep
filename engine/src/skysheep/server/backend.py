@@ -87,6 +87,7 @@ from ..core.roundtable import (
     run_roundtable,
     usage_rows,
 )
+from ..core.run_ledger import RunLedger
 from ..core.runs import (
     RunCenter,
 )
@@ -185,6 +186,7 @@ from .backend_parts.channels import (
     _channel_allowed_tools_warning,  # noqa: F401  测试从本模块引用
 )
 from .backend_parts.data_retention import RetentionMixin
+from .backend_parts.factory import FactoryMixin
 from .backend_parts.lifecycle import LifecycleMixin
 from .backend_parts.mcp import McpMixin
 from .backend_parts.memory import MemoryMixin
@@ -741,7 +743,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    SystemMixin, TerminalPanelMixin, RemoteMixin, WebtoolsMixin,
                    LifecycleMixin, McpMixin, ModsMixin, PreferencesMixin,
                    ProvidersMixin, ProjectDataMixin, RetentionMixin,
-                   ArchiveMgmtMixin, BrowserDataMixin):
+                   ArchiveMgmtMixin, BrowserDataMixin, FactoryMixin):
     def __init__(
         self,
         working_dir: str | Path = ".",
@@ -835,6 +837,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._reminder_task: asyncio.Task | None = None
         self._cron_task: asyncio.Task | None = None
         self._cron_running: set[int] = set()  # 正在跑的定时任务 id（防重复触发）
+        # 长跑任务反复到点时的跳过去重：task_id → 上次记过的 next_run_at
+        # （同一到点批次只记一条 skipped，见 AutomationMixin._cron_pass）
+        self._cron_skip_mark: dict[int, float] = {}
+        # 工厂运行账本（automation_runs）：store 在 setup() 里才连上，实例也在
+        # 那里创建；先占位，属性名保持不变（流水线/扫描循环按它记账）。
+        self.run_ledger: RunLedger | None = None
         # schtasks 执行入口的注入点（测试替换成假 runner，绝不真建系统计划任务）
         self._schtasks_runner = None
         self._pipeline_task: asyncio.Task | None = None
@@ -1453,6 +1461,20 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     # ---- 生命周期 ----
 
+    def _emit_factory_run(self, ev: dict) -> None:
+        """广播 factory_run 事件（同步出口，RunLedger 在运行首尾各调一次）。
+
+        ev 形如 ``{"kind": "factory_run", "phase": ..., "run": {...}}``；ws_emit
+        会把它包成 ``{"event": "factory_run", "data": ev}``。顶层刻意不带
+        session_id（run 里的会话 id 嵌在 run 内）——前端通用路由会把任何带
+        顶层 session_id 的事件当聊天事件开标签页。
+        """
+        for ws_emit in list(self.ws_emitters):
+            try:
+                spawn_bg(ws_emit(ev))
+            except Exception:  # noqa: BLE001 - 单个连接异常不影响其它广播
+                pass
+
     async def setup(self) -> None:
         self.cfg = load_config()
         # 全局出网设置先落到子进程环境口径上：run_command / 终端 / 钩子 /
@@ -1460,6 +1482,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 后续在设置页保存网络配置时同样会热更新（见 save_network_settings）。
         set_child_network(self.cfg.network)
         self.store = self._store_override or await SessionStore(db_path()).connect()
+        # 工厂运行账本：automation_runs 的写入口 + factory_run 事件出口。
+        # 保留策略取 [factory] 配置；factory.save 保存后热更新这两项。
+        _factory_cfg = getattr(self.cfg, "factory", None)
+        self.run_ledger = RunLedger(
+            self.store, emit=self._emit_factory_run,
+            keep=int(getattr(_factory_cfg, "history_keep", 2000)),
+            days=int(getattr(_factory_cfg, "history_days", 30)),
+        )
         # 接力运行期：取数据目录独占运行权；持锁者才把上次非终态任务标为中断。
         # 第二个后端取不到锁时不做恢复，绝不打断别的进程正在跑的活任务。
         await self._relay_startup()
@@ -1488,6 +1518,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             logging.getLogger("skysheep").info(
                 "任务编排：%d 个节点因上次退出被中断，已标记待重跑", _interrupted
             )
+        # 工厂运行账本收尾：上次强退残留的 running 统一标为 interrupted（与
+        # reset_interrupted_pipelines 同一姿态），再按保留策略清一次历史。
+        # 记账失败不拦启动——工厂少几张旧包裹，不影响应用本身。
+        try:
+            _stale_runs = await self.run_ledger.mark_interrupted()
+            if _stale_runs:
+                logging.getLogger("skysheep").info(
+                    "工厂：%d 条残留的运行记录已标为中断", _stale_runs
+                )
+            await self.run_ledger.maybe_prune()
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("skysheep").warning("运行账本启动收尾失败（忽略）：%s", e)
         self.subagent_store.load()
         # 团队模板册同款启动装载：不 load 的话 template_list 恒回空、
         # template_remove 对磁盘已有模板误报「找不到」，此后任意一次

@@ -43,6 +43,11 @@ MUST_BE_LOCAL = (
     # 归档管理：list 列出全部项目的归档会话标题（跨项目泄露面），改配置与
     # 批量恢复/删除是破坏性管理动作，同 retention 家族姿态仅本机
     "archive.save", "archive.list", "archive.restore", "archive.delete",
+    # 工厂（跨项目自动化）：state 列出全部项目的产线与运行历史（跨项目枚举面），
+    # run_now / toggle / line_add 写自动化的派工与定义，save 改保留策略——
+    # 全部与 cron/pipeline 的无人值守执行面同姿态，仅本机
+    "factory.state", "factory.runs", "factory.run_now",
+    "factory.toggle", "factory.line_add", "factory.save",
     # 浏览器控制：改开关（含「忽略证书校验」这个降防护档位）与清除内置浏览器
     # profile 都是本机管理动作，同 archive 家族姿态仅本机
     "browser.save", "browser.clear",

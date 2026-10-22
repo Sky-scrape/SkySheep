@@ -300,6 +300,26 @@ class ArchiveConfig(BaseModel):
     auto_after_days: int = Field(default=14, ge=1, le=3650)
 
 
+class FactoryConfig(BaseModel):
+    """工厂（跨项目自动化观战，第三顶层视图）的配置。
+
+    enabled：关闭后隐藏左侧导航入口（已打开的视图仍可用，改动热生效）。
+    demo：没有真实产线时播放「样板厂」演示场景——数据只在内存，永不写库、
+    永不触发运行（见 static/app-factory.js）。ambient：昼夜天色。
+    weather：二期天气（默认关，一期不联网）。history_keep / history_days：
+    运行账本（automation_runs）的保留条数与天数，启动与每 100 次插入各清一次，
+    进行中的行永不清理。max_packages：场景同屏最多包裹数（超出折叠为「+N」）。
+    """
+
+    enabled: bool = True
+    demo: bool = True
+    ambient: bool = True
+    weather: bool = False
+    history_keep: int = Field(default=2000, ge=100, le=100000)
+    history_days: int = Field(default=30, ge=1, le=3650)
+    max_packages: int = Field(default=60, ge=10, le=300)
+
+
 class ShellConfig(BaseModel):
     """命令执行（run_command）的沙箱配置。
 
@@ -389,6 +409,7 @@ class SkySheepConfig(BaseModel):
     memory_map: MemoryMapConfig = Field(default_factory=MemoryMapConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
+    factory: FactoryConfig = Field(default_factory=FactoryConfig)
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
     adversarial: AdversarialConfig = Field(default_factory=AdversarialConfig)
@@ -571,6 +592,7 @@ def load_config() -> SkySheepConfig:
     memory_map = MemoryMapConfig()
     retention = RetentionConfig()
     archive = ArchiveConfig()
+    factory = FactoryConfig()
     shell = ShellConfig()
     search = SearchConfig()
     network = NetworkConfig()
@@ -631,6 +653,7 @@ def load_config() -> SkySheepConfig:
             ("memory_map", MemoryMapConfig, memory_map),
             ("retention", RetentionConfig, retention),
             ("archive", ArchiveConfig, archive),
+            ("factory", FactoryConfig, factory),
             ("shell", ShellConfig, shell),
             ("search", SearchConfig, search),
         ):
@@ -651,6 +674,8 @@ def load_config() -> SkySheepConfig:
                 retention = cur
             elif section_name == "archive":
                 archive = cur
+            elif section_name == "factory":
+                factory = cur
             elif section_name == "shell":
                 shell = cur
             elif section_name == "search":
@@ -722,6 +747,7 @@ def load_config() -> SkySheepConfig:
             memory_map=memory_map,
             retention=retention,
             archive=archive,
+            factory=factory,
             roundtable=roundtable,
             team=team,
             adversarial=adversarial,
@@ -998,6 +1024,54 @@ def set_archive_in_config(
         raw["archive"] = section
     else:
         raw.pop("archive", None)
+    _write_raw_config(p, raw)
+
+
+def set_factory_in_config(
+    *,
+    enabled: bool | None = None,
+    demo: bool | None = None,
+    ambient: bool | None = None,
+    weather: bool | None = None,
+    history_keep: int | None = None,
+    history_days: int | None = None,
+    max_packages: int | None = None,
+) -> None:
+    """写入 config.toml 的 [factory] 表（None 表示该项不动）。
+
+    工厂页右上角的小面板走这里，与其它设置项同一套读写路径。区间与
+    FactoryConfig 的 Field 约束一致（history_keep 100–100000、history_days
+    1–3650、max_packages 10–300）；越界在写入前报错，不静默夹取。
+    """
+    for name, value, lo, hi in (
+        ("运行历史保留条数", history_keep, 100, 100000),
+        ("运行历史保留天数", history_days, 1, 3650),
+        ("同屏包裹数", max_packages, 10, 300),
+    ):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+            raise ConfigError(f"{name}要在 {lo}–{hi} 之间")
+    p, raw = _read_raw_config()
+    section = dict(raw.get("factory") or {})
+    if enabled is not None:
+        section["enabled"] = bool(enabled)
+    if demo is not None:
+        section["demo"] = bool(demo)
+    if ambient is not None:
+        section["ambient"] = bool(ambient)
+    if weather is not None:
+        section["weather"] = bool(weather)
+    if history_keep is not None:
+        section["history_keep"] = int(history_keep)
+    if history_days is not None:
+        section["history_days"] = int(history_days)
+    if max_packages is not None:
+        section["max_packages"] = int(max_packages)
+    if section:
+        raw["factory"] = section
+    else:
+        raw.pop("factory", None)
     _write_raw_config(p, raw)
 
 

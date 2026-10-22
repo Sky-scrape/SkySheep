@@ -36,7 +36,7 @@ def _nodes() -> list[dict]:
 
 
 async def test_schema_version_bumped_and_tables_exist(store):
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
     cur = await store._db.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
         " AND name IN ('relay_tasks','relay_nodes','relay_actions',"

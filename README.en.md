@@ -51,7 +51,7 @@ Instead of a feature checklist, here are the jobs it actually takes on:
 
 - **Collaboration**: roundtable (parallel answers + chairman fusion) · team (roles + task board + AI director) · adversarial (four-role fault-finding pipeline) · relay (main and peer screens alternating)
 - **Execution**: file read/write and precise editing · command execution (with background processes) · regex and glob search · web fetch and search · PDF / Word / Excel / PPT / CSV I/O · image understanding and AI image generation · sub-agents (optionally in an isolated worktree)
-- **Automation**: scheduled tasks · dependency pipelines (DAG) · agenda reminders · export to the Windows Task Scheduler · Feishu / WeChat / Webhook pushes · daily run digests
+- **Automation**: scheduled tasks · dependency pipelines (DAG) · factory board (cross-project observability / dispatch · day-night and real weather) · agenda reminders · export to the Windows Task Scheduler · Feishu / WeChat / Webhook pushes · daily run digests
 - **Extensions**: MCP (two transports, seven presets) · Skills (twenty official templates) · Mods (experimental) · global egress (proxy / bypass list / self-signed CA)
 - **Desktop**: six themes · phone remote access and Tailscale · multi-tab terminal · desktop pet · Chinese-aware full-text search · per-round checkpoint rollback
 
@@ -120,6 +120,10 @@ Ten built-in cloud presets (Anthropic / OpenAI / Gemini / xAI / MiniMax / DeepSe
 ![Agenda weekly view](docs/images/agenda.png)
 
 Scheduled tasks cover one-shot, interval, and complex schedules ("every 20 minutes between 10:00 and 12:00 on weekdays") and can pre-authorize tools so unattended runs don't stall on prompts; agenda reminders come with weekly / monthly views and advance reminders. Final states and a daily digest can be pushed to Feishu / WeChat / a Webhook. One caveat worth stating plainly: in-app schedules only fire while SkySheep is running — choose "Minimize to system tray" when closing to keep it going in the background, and tasks that come due while fully exited are caught up at the next launch. To fire with the app fully closed, export the task to the Windows Task Scheduler from its card ("⊞").
+
+The **factory board** lays every project's scheduled tasks and pipelines onto one isometric site: each line is a machine, each real run is a parcel moving along a conveyor. Click a factory header to zoom in and see machine names, the tool currently running, and elapsed time; dispatch, pause, or stop runs across projects. "Needs attention" lists failures, empty output, and runs that finished with blocked tools; "Made today" counts `outcome = ok`, so runs blocked by the gate are never reported as successes. The scene switches between day and night by local time; fill in a city under factory settings and enable "real weather" to render rain, snow, fog, and lightning from the local sunrise/sunset and weather code. The city name is only used to look up coordinates — no IP geolocation, and no network request at all while weather is off. All factory methods are local-only; remote connections are rejected.
+
+![Factory board: project sites, dispatch hall, parcels in transit, and the automation monitor panel](docs/images/factory.webp)
 
 ### Memory and archiving
 

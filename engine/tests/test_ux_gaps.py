@@ -638,13 +638,13 @@ async def test_backup_and_restore_blocked_while_unattended_turns_run(home):
     """
     be = await _mk_be(home)
     try:
-        # 定时任务在跑（_cron_running 是防重触发集，直接置位模拟）
-        be._cron_running.add(1)
+        # 定时任务在跑（_cron_running 是防重触发登记表，直接置位模拟）
+        be._cron_running[1] = None
         with pytest.raises(RuntimeError, match="定时任务"):
             await be.create_session_backup()
         with pytest.raises(RuntimeError, match="定时任务"):
             await be.restore_session_backup("whatever.db")
-        be._cron_running.discard(1)
+        be._cron_running.pop(1, None)
 
         # 流水线节点在跑
         be._pipeline_running.add(7)

@@ -184,7 +184,7 @@ async def test_cron_force_run_registers_in_running_and_dedups(store):
         return SimpleNamespace(agent=SimpleNamespace(history=[
             Message.assistant([TextBlock(text="完成")])])), "sid", False
 
-    running: set = set()
+    running: dict = {}
 
     async def one_force():
         return await run_cron_task_core(
@@ -193,14 +193,14 @@ async def test_cron_force_run_registers_in_running_and_dedups(store):
 
     first = asyncio.get_running_loop().create_task(one_force())
     await asyncio.wait_for(entered.wait(), timeout=5)
-    assert t["id"] in running, "force 运行期间必须登记进 running 去重集合"
+    assert t["id"] in running, "force 运行期间必须登记进 running 去重登记表"
     # 并发的第二个 force（双击按钮 / 扫描循环）被去重挡下，不触发新一轮
     assert await one_force() is None
     assert calls["n"] == 1
     release.set()
     final = await first
     assert final is not None and final["id"] == t["id"]
-    assert t["id"] not in running, "收尾后要从 running 集合摘除"
+    assert t["id"] not in running, "收尾后要从 running 登记表摘除"
     assert calls["n"] == 1, "全程只有一轮执行"
 
 
@@ -218,7 +218,7 @@ def test_cron_run_now_reports_already_running(home, monkeypatch):
 
         backend = client.app.state.backend
         # 预先把任务占进在跑集合（模拟另一处触发的执行在飞）
-        backend._cron_running.add(task["id"])
+        backend._cron_running[task["id"]] = None
         try:
             ws.send_json({"id": "rn", "method": "cron.run_now",
                           "params": {"id": task["id"]}})
@@ -227,7 +227,7 @@ def test_cron_run_now_reports_already_running(home, monkeypatch):
             assert r["result"]["started"] is False
             assert "正在运行" in r["result"]["notice"]
         finally:
-            backend._cron_running.discard(task["id"])
+            backend._cron_running.pop(task["id"], None)
 
         # 集合释放后照常触发
         ws.send_json({"id": "rn2", "method": "cron.run_now",

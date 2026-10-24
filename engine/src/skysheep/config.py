@@ -306,18 +306,32 @@ class FactoryConfig(BaseModel):
     enabled：关闭后隐藏左侧导航入口（已打开的视图仍可用，改动热生效）。
     demo：没有真实产线时播放「样板厂」演示场景——数据只在内存，永不写库、
     永不触发运行（见 static/app-factory.js）。ambient：昼夜天色。
-    weather：二期天气（默认关，一期不联网）。history_keep / history_days：
+    weather / weather_location：现实天气（默认关）——填城市名才联网，城市名只
+    用于地理编码取经纬度；关闭时一次网络请求都不发。history_keep / history_days：
     运行账本（automation_runs）的保留条数与天数，启动与每 100 次插入各清一次，
     进行中的行永不清理。max_packages：场景同屏最多包裹数（超出折叠为「+N」）。
+
+    无人值守兜底三项（观战台要敢把产线开多的前提）：
+    - run_timeout_minutes：单次运行硬超时（分钟，0 = 不限）。超时按失败收尾并
+      释放占用位——没有它，一条挂在流式/网络上的运行会永远显示「运行中」；
+    - max_parallel_runs：定时任务同时在跑的上限（与编排节点的 3 路口径一致）。
+      超出的到点任务留在队列里，下一次扫描（20 秒后）再接，HUD 的「排队」是
+      这个数字加编排待运行节点；
+    - alert_after_failures：连续失败多少次推一条告警（0 = 不推）。同一条产线
+      每天最多一条，宁可迟一点也不要淹人。
     """
 
     enabled: bool = True
     demo: bool = True
     ambient: bool = True
     weather: bool = False
+    weather_location: str = Field(default="", max_length=80)
     history_keep: int = Field(default=2000, ge=100, le=100000)
     history_days: int = Field(default=30, ge=1, le=3650)
     max_packages: int = Field(default=60, ge=10, le=300)
+    run_timeout_minutes: int = Field(default=60, ge=0, le=1440)
+    max_parallel_runs: int = Field(default=3, ge=1, le=20)
+    alert_after_failures: int = Field(default=3, ge=0, le=50)
 
 
 class ShellConfig(BaseModel):
@@ -1033,25 +1047,37 @@ def set_factory_in_config(
     demo: bool | None = None,
     ambient: bool | None = None,
     weather: bool | None = None,
+    weather_location: str | None = None,
     history_keep: int | None = None,
     history_days: int | None = None,
     max_packages: int | None = None,
+    run_timeout_minutes: int | None = None,
+    max_parallel_runs: int | None = None,
+    alert_after_failures: int | None = None,
 ) -> None:
     """写入 config.toml 的 [factory] 表（None 表示该项不动）。
 
     工厂页右上角的小面板走这里，与其它设置项同一套读写路径。区间与
     FactoryConfig 的 Field 约束一致（history_keep 100–100000、history_days
-    1–3650、max_packages 10–300）；越界在写入前报错，不静默夹取。
+    1–3650、max_packages 10–300、run_timeout_minutes 0–1440、
+    max_parallel_runs 1–20、alert_after_failures 0–50）；越界在写入前报错，
+    不静默夹取。weather_location 只做去空白与 80 字截断（空串 = 清除城市）。
     """
     for name, value, lo, hi in (
         ("运行历史保留条数", history_keep, 100, 100000),
         ("运行历史保留天数", history_days, 1, 3650),
         ("同屏包裹数", max_packages, 10, 300),
+        ("运行超时（分钟）", run_timeout_minutes, 0, 1440),
+        ("同时运行上限", max_parallel_runs, 1, 20),
+        ("连续失败告警阈值", alert_after_failures, 0, 50),
     ):
         if value is None:
             continue
         if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
             raise ConfigError(f"{name}要在 {lo}–{hi} 之间")
+    city = None
+    if weather_location is not None:
+        city = " ".join(str(weather_location).split())[:80]
     p, raw = _read_raw_config()
     section = dict(raw.get("factory") or {})
     if enabled is not None:
@@ -1062,12 +1088,20 @@ def set_factory_in_config(
         section["ambient"] = bool(ambient)
     if weather is not None:
         section["weather"] = bool(weather)
+    if city is not None:
+        section["weather_location"] = city
     if history_keep is not None:
         section["history_keep"] = int(history_keep)
     if history_days is not None:
         section["history_days"] = int(history_days)
     if max_packages is not None:
         section["max_packages"] = int(max_packages)
+    if run_timeout_minutes is not None:
+        section["run_timeout_minutes"] = int(run_timeout_minutes)
+    if max_parallel_runs is not None:
+        section["max_parallel_runs"] = int(max_parallel_runs)
+    if alert_after_failures is not None:
+        section["alert_after_failures"] = int(alert_after_failures)
     if section:
         raw["factory"] = section
     else:

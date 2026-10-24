@@ -836,7 +836,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.ws_emitters: list = []  # 在线 WS 连接的 emit 函数（提醒/日程广播用）
         self._reminder_task: asyncio.Task | None = None
         self._cron_task: asyncio.Task | None = None
-        self._cron_running: set[int] = set()  # 正在跑的定时任务 id（防重复触发）
+        # 正在跑的定时任务：task_id → 运行句柄（防重复触发 + 供工厂「叫停」）。
+        # 值是 asyncio.Task；只有 spawn_bg 建出来的后台运行允许取消（取消一个
+        # 正在等回执的请求任务会连带掐掉 WS 回执，见 bgtasks.is_bg_task）。
+        self._cron_running: dict[int, asyncio.Task | None] = {}
         # 长跑任务反复到点时的跳过去重：task_id → 上次记过的 next_run_at
         # （同一到点批次只记一条 skipped，见 AutomationMixin._cron_pass）
         self._cron_skip_mark: dict[int, float] = {}
@@ -848,6 +851,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._pipeline_task: asyncio.Task | None = None
         self._pipeline_running: set[int] = set()  # 正在跑的编排节点 id（并发约束）
         self._pipeline_node_tasks: dict[int, asyncio.Task] = {}  # 节点句柄（停止流水线用）
+        self._pipeline_manual_triggers: set[int] = set()  # 用户明确重排、尚未开始尝试的节点
         # 会话续跑节点遇忙的退避表（node_id → 最早可重试时刻）：不占 DB，重启即清零，
         # 清零后重试也不伤——busy 预检还在，会再次退避。
         self._pipeline_busy_until: dict[int, float] = {}

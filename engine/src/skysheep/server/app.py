@@ -1297,6 +1297,16 @@ async def _h_factory_runs(backend: ServerBackend, params: dict, emit, local: boo
     return await backend.factory_runs(params)
 
 
+async def _h_factory_live(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 只读 RunCenter 内存（在跑的对话轮 / 子代理），不查库；工厂轮询用
+    return await backend.factory_live()
+
+
+async def _h_factory_weather(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 仅当 [factory] weather 开启且填了城市时出网；30 分钟缓存
+    return await backend.factory_weather(params)
+
+
 async def _h_factory_run_now(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 派工复用 _run_cron_task(force=True)：权限门/白名单/工作目录仍按目标项目
     return await backend.factory_run_now(params)
@@ -1306,6 +1316,16 @@ async def _h_factory_toggle(backend: ServerBackend, params: dict, emit, local: b
     return await backend.factory_toggle(params)
 
 
+async def _h_factory_cancel(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 叫停只取消本轮运行：不放松权限、不改启用状态与排期
+    return await backend.factory_cancel(params)
+
+
+async def _h_factory_ack(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 「需留意」已处理标记：只写一个时间戳，不删运行历史
+    return await backend.factory_ack(params)
+
+
 async def _h_factory_line_add(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 写入的是普通 cron_tasks 行（提示词是纯文本，永不作为命令执行）
     return await backend.factory_line_add(params)
@@ -1313,6 +1333,11 @@ async def _h_factory_line_add(backend: ServerBackend, params: dict, emit, local:
 
 async def _h_factory_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.factory_save(params)
+
+
+async def _h_factory_run_mark(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 人工判定「这轮算不算做成」：只改运行行的 outcome，不删历史、不改状态
+    return await backend.factory_run_mark(params)
 
 
 async def _h_browser_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -2421,9 +2446,9 @@ _WS_METHODS: dict[str, _WsMethod] = {
         _h_archive_delete, local_only=True,
         local_error="删除已归档会话只能在桌面端本机操作",
     ),
-    # 工厂（跨项目自动化观战）：六个方法全部本机专属——状态与运行历史是跨项目
-    # 枚举面，派工/启停/新建产线是无人值守执行面，远程 / 手机连接一律拒绝，
-    # 前端打开工厂只显示「工厂仅在本机可用」。
+    # 工厂（跨项目自动化观战）：十一个方法全部本机专属——状态与运行历史是跨项目
+    # 枚举面，派工/启停/叫停/新建产线是无人值守执行面，天气会按本机配置出网，
+    # 远程 / 手机连接一律拒绝，前端打开工厂只显示「工厂仅在本机可用」。
     "factory.state": _WsMethod(
         _h_factory_state, local_only=True,
         local_error="工厂仅在本机可用",
@@ -2431,6 +2456,14 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "factory.runs": _WsMethod(
         _h_factory_runs, local_only=True,
         local_error="工厂运行历史只能在本机查看",
+    ),
+    "factory.live": _WsMethod(
+        _h_factory_live, local_only=True,
+        local_error="工厂实时状态只能在本机查看",
+    ),
+    "factory.weather": _WsMethod(
+        _h_factory_weather, local_only=True,
+        local_error="工厂天气只能在本机查看",
     ),
     "factory.run_now": _WsMethod(
         _h_factory_run_now, local_only=True,
@@ -2440,6 +2473,14 @@ _WS_METHODS: dict[str, _WsMethod] = {
         _h_factory_toggle, local_only=True,
         local_error="产线启停只能在桌面端本机操作",
     ),
+    "factory.cancel": _WsMethod(
+        _h_factory_cancel, local_only=True,
+        local_error="叫停产线只能在桌面端本机操作",
+    ),
+    "factory.ack": _WsMethod(
+        _h_factory_ack, local_only=True,
+        local_error="工厂的需留意标记只能在本机处理",
+    ),
     "factory.line_add": _WsMethod(
         _h_factory_line_add, local_only=True,
         local_error="新建产线只能在桌面端本机操作",
@@ -2447,6 +2488,10 @@ _WS_METHODS: dict[str, _WsMethod] = {
     "factory.save": _WsMethod(
         _h_factory_save, local_only=True,
         local_error="工厂设置只能在桌面端本机修改",
+    ),
+    "factory.run_mark": _WsMethod(
+        _h_factory_run_mark, local_only=True,
+        local_error="运行判定只能在本机修改",
     ),
     # 浏览器控制（设置 · 浏览器控制）：状态回读只读放行各端；改开关与清数据是
     # 本机管理动作（清数据会删本机浏览器 profile，远程不放宽）

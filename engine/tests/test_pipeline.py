@@ -344,6 +344,11 @@ def test_pipeline_failure_blocks_downstream_and_rerun_releases(home):
         assert done2["status"] == "done"
         assert by_title2["下游"]["result"] == "下游完成"
         assert "依赖的节点" not in by_title2["下游"]["last_error"]
+        ws.send_json({"id": "runs", "method": "factory.runs", "params": {"pipeline_id": pipe["id"]}})
+        runs = recv_until(ws, "runs")["result"]["runs"]
+        bad_runs = sorted((r for r in runs if r["task_id"] == bad_id), key=lambda r: r["id"])
+        assert [r["trigger"] for r in bad_runs] == ["schedule", "manual"]
+        assert all(r["trigger"] == "schedule" for r in runs if r["task_id"] != bad_id)
 
 
 def test_pipeline_headless_gate_authorized_write_only(home):

@@ -6,10 +6,26 @@
 
 - 扫描范围不变：``due_cron_tasks()`` 与 ``list_pipelines()`` 本来就是全项目口径；
 - 执行上下文不变：每个任务仍按自己所属项目的工作目录 / 白名单 / 权限门运行；
-- 派工复用 ``_run_cron_task(task_id, force=True)``（与 cron.run_now 同口径：
-  停工的产线仍可手动跑一次，同一工位在跑时返回 started=false）；
+- 派工复用 ``_run_cron_task(task_id, force=True)``，但改成后台起跑（请求立刻
+  回执，句柄留在 ``_cron_running`` 里供「叫停」）；同一工位在跑时返回
+  started=false；
+- 叫停只取消本轮（``factory.cancel``），落 ``cancelled`` 终态并重排下次运行，
+  不动启用状态、不放松权限；
 - 暂停 / 启用等价于改 ``cron_tasks.enabled``（与 cron.update 的 enabled 分支一致）；
 - 新建轻量产线写的是普通 ``cron_tasks`` 行，之后完全由现有循环接管。
+
+观战口径：``factory.state`` 一次给齐产线、在途运行、计数、需留意与**产线体检**
+（近 7 天成功率 / 平均与 P95 耗时 / 连续失败 / 最近 20 次状态），运行行自带
+本次 token 用量、被门控拒绝的次数（``denied_count``）、失败归因（``error_kind``）
+与「做成」判定（``outcome`` + 来源）；「需留意」可以按产线标记已处理
+（``factory.ack``），更晚的失败会重新浮上来。``factory.run_mark`` 允许用户
+人工推翻某一轮运行的「做成」判定（自动判定回答不了「产出对不对」）。
+``state.live`` 是在跑的对话轮与子代理的只读快照（core/runs.py 的 RunCenter），
+工厂因此覆盖四类 Agent 活动：定时任务、编排节点、对话轮、子代理。
+
+口径原则：**观战窗的结论必须与执行口径一致**。所以厂区目录不存在时，扫描循环
+不派工、记一条 error，与这里的「停工」牌是同一个结论；「排队」按真实并发闸算，
+不是只数编排里 ready 的节点。
 
 全部方法在 WS 层 local_only=True（跨项目枚举面不对远程开放，见 server/app.py）。
 运行账本（automation_runs）的读写细节在 ``core/run_ledger.py`` 与
@@ -18,9 +34,11 @@
 
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 
+from ...bgtasks import is_bg_task, spawn_bg
 from ...config import ConfigError, load_config, set_factory_in_config
 from ...core import system_schedule
 
@@ -30,16 +48,140 @@ FACTORY_RUN_LIST_LIMIT = 60
 FACTORY_ATTENTION_LIMIT = 50
 # 近 24 小时的失败 / 中断 / 跳过运行进入「需留意」
 FACTORY_ATTENTION_WINDOW_S = 24 * 3600
-# 最近运行查询上限（store.list_automation_runs 的硬上限是 500）
-FACTORY_RECENT_SCAN_LIMIT = 500
+# 产线体检的统计窗口（成功率 / 耗时 / 连续失败）
+FACTORY_HEALTH_WINDOW_S = 7 * 86400
+# 体检里「最近 N 次」状态色条的格数
+FACTORY_HEALTH_TAIL = 20
+# 「排队中」最多给前端多少条明细（场景最多画 3 枚，多给的用于标签计数）
+FACTORY_WAITING_LIMIT = 20
 
-_CRON_LAST_STATUSES = ("ok", "error", "empty")
+_CRON_LAST_STATUSES = ("ok", "error", "empty", "cancelled")
 _PIPELINE_LINE_STATUSES = ("running", "done", "failed", "draft")
 _RUN_ATTENTION_TEXT = {
     "error": "上次运行失败",
     "interrupted": "上次运行被中断",
+    "empty": "上次运行无产出",
     "skipped": "上一轮未结束，本次跳过",
 }
+# 「需留意」同一产线只留一条：等级高的覆盖等级低的（孤儿 / 停工结构性问题
+# 最优先，其次真失败，partial 只是警示）。这样最新的 partial 不会盖住同一
+# 产线更早但更严重的 error。
+_ATTENTION_RANK = {
+    "orphan": 6, "stopped": 6,
+    "error": 5, "interrupted": 4, "empty": 4,
+    "partial": 3,
+    "skipped": 1,
+}
+# 体检口径：这些状态不算「一次尝试」，不计入成功率分母与耗时样本
+_NON_ATTEMPT_STATUSES = ("running", "skipped", "cancelled")
+
+
+def factory_run_line_key(run: dict) -> str | None:
+    """运行行归属的产线键（与 state 里的 line.key 同一口径）。"""
+    if run.get("kind") == "cron":
+        return f"cron:{int(run['task_id'])}"
+    if run.get("pipeline_id") is not None:
+        return f"pipe:{int(run['pipeline_id'])}"
+    return None
+
+
+def _p95(values: list[float]) -> float:
+    """最近邻分位的 P95（样本少时退化为最大值，不做插值假装精度）。"""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, max(0, math.ceil(0.95 * len(ordered)) - 1))
+    return round(float(ordered[idx]), 1)
+
+
+def factory_line_health(rows: list[dict]) -> dict[str, dict]:
+    """按产线聚合体检指标：成功率、平均 / P95 / 最慢耗时、连续失败、最近 N 次。
+
+    ``rows`` 是 ``automation_runs_since`` 的结果（已按开始时间倒序）。调用方
+    不需要逐线查库：一次扫描把 7 天样本摊到各条产线上，厂区多了也不退化。
+
+    口径：
+    - 成功率的分母只算「真尝试」（排除 running / skipped / cancelled），
+      用户叫停不算一次失败，也不该拉低成功率；
+    - 分子按 ``outcome`` 算（有 outcome 就用它，旧行 / 无结论回落 status == done）：
+      被门控拦过的 done 记 partial，**不计入成功**——否则「模型绕开写总结」会被算成
+      做成，成功率永远是绿的；
+    - 耗时样本同样只取真尝试，失败的尝试有耗时也计入（一次运行花多久是
+      客观事实，不因为结果失败就抹掉）；
+    - 连续失败沿「新 → 旧」数，跳过 running / skipped / cancelled（它们不是
+      一次判断）；``error / interrupted / empty`` 以及被人工判为 ``failed`` 的运行
+      都算一次失败——``empty`` 在 outcome 口径里就是「没做成」，不能只在成功率
+      里算失败、连续失败却在它这里清零；
+    - ``marked_failed`` 只统计用户亲手判负的运行（``outcome_source = user``）：
+      自动判负的空产出不该被显示成「判定不算」。
+    """
+    buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        key = factory_run_line_key(row)
+        if key is None:
+            continue
+        buckets.setdefault(key, []).append(row)
+
+    out: dict[str, dict] = {}
+    for key, items in buckets.items():
+        attempts = [r for r in items if str(r.get("status")) not in _NON_ATTEMPT_STATUSES]
+        durations = [
+            float(r["duration_s"]) for r in attempts
+            if r.get("duration_s") is not None
+        ]
+        total = len(attempts)
+        done = sum(1 for r in attempts if r.get("status") == "done")
+        # 「做成」口径：有 outcome 就按 outcome（人工标记优先于自动判定），
+        # 没有 outcome（旧行 / 跳过 / 叫停）才退回 status == done。
+        def _outcome(r: dict) -> str:
+            return str(r.get("outcome") or "")
+
+        succeeded = sum(
+            1 for r in attempts
+            if (_outcome(r) == "ok" if _outcome(r) else r.get("status") == "done")
+        )
+        partial = sum(1 for r in attempts if _outcome(r) == "partial")
+        marked_failed = sum(
+            1 for r in attempts
+            if (_outcome(r) == "failed" and r.get("outcome_source") == "user"
+                and r.get("status") == "done")
+        )
+        streak = 0
+        for r in items:  # 新 → 旧
+            status = str(r.get("status"))
+            if status in _NON_ATTEMPT_STATUSES:
+                continue  # 还没结论 / 用户叫停 / 到点跳过：都不是一次判断
+            if status in ("error", "interrupted", "empty") or _outcome(r) == "failed":
+                streak += 1
+            else:
+                break
+        last = next(
+            (r for r in items if str(r.get("status")) not in _NON_ATTEMPT_STATUSES),
+            None,
+        )
+        out[key] = {
+            "total": total,
+            "done": done,
+            "succeeded": succeeded,
+            "partial": partial,
+            "error": sum(1 for r in attempts if r.get("status") == "error"),
+            "marked_failed": marked_failed,
+            "success_rate": round(succeeded / total, 3) if total else 0.0,
+            "avg_s": round(sum(durations) / len(durations), 1) if durations else 0.0,
+            "p95_s": _p95(durations),
+            "max_s": round(max(durations), 1) if durations else 0.0,
+            "streak": streak,
+            "last_status": str(last.get("status") or "") if last else "",
+            "last_outcome": str(last.get("outcome") or "") if last else "",
+            "last_at": float(last.get("finished_at") or last.get("started_at") or 0)
+            if last else 0.0,
+            "tail": [str(r.get("status")) for r in items[:FACTORY_HEALTH_TAIL]],
+            # 与 tail 等长：前端据此把「done 但有拦截」的格子染成警示色
+            "tail_outcomes": [
+                str(r.get("outcome") or "") for r in items[:FACTORY_HEALTH_TAIL]
+            ],
+        }
+    return out
 
 
 class FactoryMixin:
@@ -55,14 +197,18 @@ class FactoryMixin:
             "demo": bool(getattr(sec, "demo", True)),
             "ambient": bool(getattr(sec, "ambient", True)),
             "weather": bool(getattr(sec, "weather", False)),
+            "weather_location": str(getattr(sec, "weather_location", "") or ""),
             "history_keep": int(getattr(sec, "history_keep", 2000)),
             "history_days": int(getattr(sec, "history_days", 30)),
             "max_packages": int(getattr(sec, "max_packages", 60)),
+            "run_timeout_minutes": int(getattr(sec, "run_timeout_minutes", 60)),
+            "max_parallel_runs": int(getattr(sec, "max_parallel_runs", 3)),
+            "alert_after_failures": int(getattr(sec, "alert_after_failures", 3)),
         }
 
     @staticmethod
     def _factory_local_midnight(now: float) -> float:
-        """本地当天 0 点的时间戳（「今日完成」按用户本地时区算）。"""
+        """本地当天 0 点的时间戳（「今日做成」按用户本地时区算）。"""
         lt = time.localtime(now)
         return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
 
@@ -80,18 +226,33 @@ class FactoryMixin:
 
     @staticmethod
     def _factory_run_view(run: dict, cron_names: dict, node_names: dict,
-                          proj_names: dict) -> dict:
-        """运行行补 name / project_name（前端拿到就能画，不再二次查询）。"""
+                          proj_names: dict, proj_roots: dict | None = None) -> dict:
+        """运行行补 name / project_name（前端拿到就能画，不再二次查询）。
+
+        编排节点的产出全文写在 ``<项目>/.skysheep/pipeline-results/node-<id>.md``
+        （见 automation._node_result_file）；这里顺手给出绝对路径，前端点「打开
+        产出」就能直接走既有的文件预览，不用自己拼项目根目录。
+        """
         out = dict(run)
         if out.get("kind") == "pipeline_node":
             out["name"] = node_names.get(out.get("task_id"), "")
+            root = (proj_roots or {}).get(out.get("project_id"))
+            if root:
+                result = (
+                    Path(root) / ".skysheep" / "pipeline-results"
+                    / f"node-{int(out['task_id'])}.md"
+                )
+                # 只有真正落盘的产出才给按钮：running / empty / error 以及
+                # 迭代节点未收尾时没有这个文件，点了只会弹「打开失败」。
+                if result.is_file():
+                    out["result_path"] = str(result)
         else:
             out["name"] = cron_names.get(out.get("task_id"), "")
         out["project_name"] = proj_names.get(out.get("project_id"), "")
         return out
 
-    async def _factory_name_maps(self) -> tuple[dict, dict, dict]:
-        """一次取齐 name / project_name 用的三张表，避免逐条运行回查。"""
+    async def _factory_name_maps(self) -> tuple[dict, dict, dict, dict]:
+        """一次取齐 name / project_name / result_path 用的四张表，避免逐条回查。"""
         tasks = await self.store.list_cron_tasks()
         pipelines = await self.store.list_pipelines()
         projects = await self.store.list_projects()
@@ -101,14 +262,16 @@ class FactoryMixin:
             for pipe in pipelines for n in (pipe.get("nodes") or [])
         }
         proj_names = {int(p.id): str(p.name or "") for p in projects}
-        return cron_names, node_names, proj_names
+        proj_roots = {int(p.id): str(p.root_path or "") for p in projects}
+        return cron_names, node_names, proj_names, proj_roots
 
     async def _factory_target_project(self, project_id) -> None:
         """派工前置校验：目标厂区的项目行与目录都必须真实存在。
 
         与 ``_cron_execution_context`` 的回退行为刻意不同——那里目录缺失时
         回退到当前项目继续跑（既有行为不改），但工厂派工是用户显式指定
-        目标，跑错目录比报错更糟，所以这里 fail closed。
+        目标，跑错目录比报错更糟，所以这里 fail closed。扫描循环与
+        ``_execute_cron_turn`` 现在也是同一姿态：到点不派工、立即运行直接报错。
         """
         proj = None
         if project_id is not None:
@@ -122,10 +285,12 @@ class FactoryMixin:
     # ---- WS 方法 ----
 
     async def factory_state(self) -> dict:
-        """工厂首屏快照：项目 / 产线 / 在途运行 / 四个计数 / 需留意 / 配置。
+        """工厂首屏快照：项目 / 产线 / 在途运行 / 五个计数 / 需留意 / 配置。
 
         数据源全部走全项目口径的单次查询（项目、定时任务、编排、运行），
-        不在项目循环里逐项目回查——厂区多了也不会退化成 N+1。
+        不在项目循环里逐项目回查——厂区多了也不会退化成 N+1。运行数据取
+        「近 7 天一次 + 最近 60 条列表」两份：前者供产线体检与需留意识别，
+        后者供在途列表，都不按 60 条截断体检样本。
         """
         now = time.time()
         store = self.store
@@ -142,24 +307,73 @@ class FactoryMixin:
         root_ok = {int(p.id): Path(p.root_path).is_dir() for p in projects}
         lines_by_project: dict[int, list] = {int(p.id): [] for p in projects}
         attention: dict[str, dict] = {}
+        attention_rank: dict[str, int] = {}
+        # 计数与列表分开：列表要给前端画（限 50 条），计数必须以「全部问题」
+        # 为准——以前两件事共用一个被截断的 dict，问题超过 50 条时 HUD 永远显示 50。
+        seen_attention: set[str] = set()
+        # 名称映射在任务 / 编排取回后填充；_attention 在两层循环里用它们把
+        # 「上次运行失败」补成「厂区 · 产线：上次运行失败」，否则需留意列表
+        # 只是一排同样的字，用户不知道该点哪一条。
+        task_names: dict[int, str] = {}
+        pipe_names: dict[int, str] = {}
 
         def _attention(kind: str, project_id, line_key: str, text: str) -> None:
-            if line_key in attention or len(attention) >= FACTORY_ATTENTION_LIMIT:
+            seen_attention.add(line_key)
+            rank = _ATTENTION_RANK.get(kind, 0)
+            if line_key in attention:
+                if rank <= attention_rank.get(line_key, 0):
+                    return
+            elif len(attention) >= FACTORY_ATTENTION_LIMIT:
                 return
+            pname = ""
+            if project_id is not None:
+                try:
+                    pname = proj_names.get(int(project_id), "")
+                except (TypeError, ValueError):
+                    pname = ""
+            lname = ""
+            if line_key.startswith("cron:"):
+                try:
+                    lname = task_names.get(int(line_key.split(":", 1)[1]), "")
+                except (TypeError, ValueError):
+                    lname = ""
+            elif line_key.startswith("pipe:"):
+                try:
+                    lname = pipe_names.get(int(line_key.split(":", 1)[1]), "")
+                except (TypeError, ValueError):
+                    lname = ""
+            prefix = " · ".join(part for part in (pname, lname) if part)
+            shown = f"{prefix}：{text}" if prefix else text
+            attention_rank[line_key] = rank
             attention[line_key] = {
                 "kind": kind,
                 "project_id": project_id,
+                "project_name": pname,
                 "line_key": line_key,
-                "text": text,
+                "line_name": lname,
+                "text": shown,
             }
 
         tasks = await store.list_cron_tasks()
         pipelines = await store.list_pipelines()
+        task_names.update(
+            {int(t["id"]): str(t.get("name") or "") for t in tasks})
+        pipe_names.update(
+            {int(p["id"]): str(p.get("name") or "") for p in pipelines})
         running = await store.list_automation_runs(status="running", limit=500)
+        # 到点的任务（「排队」与「停工」两个计数都看它）：只看 enabled/next_run_at，
+        # 目录可用性另判（与 _cron_pass 的派工口径一致）
+        due = await store.due_cron_tasks(now)
         running_by_task = {
             int(r["task_id"]): int(r["id"])
             for r in running if r.get("kind") == "cron"
         }
+        # 「需留意」的已处理标记（line_key → 时间戳）：比标记更晚的失败才会再浮上来
+        acks = await store.list_factory_acks()
+        # 近 7 天的运行一次取回：体检与「需留意」共用，不按 60 条截断
+        window = await store.automation_runs_since(now - FACTORY_HEALTH_WINDOW_S)
+        health = factory_line_health(window)
+        midnight = self._factory_local_midnight(now)
 
         # ---- 定时任务：一条产线 ----
         for task in tasks:
@@ -183,8 +397,12 @@ class FactoryMixin:
             else:
                 status = "idle"
             last_status = str(task.get("last_status") or "")
-            if last_status == "error":
+            # 已处理过（且这次失败发生在标记之前）就不再红着：ack 之后的新失败
+            # 一定带更新的 last_run_at，会重新浮上来
+            if last_status == "error" and float(task.get("last_run_at") or 0) > acks.get(key, 0):
                 _attention("error", pid, key, "上次运行失败")
+            elif last_status == "empty" and float(task.get("last_run_at") or 0) > acks.get(key, 0):
+                _attention("empty", pid, key, "上次运行无产出")
             lines_by_project[pid].append({
                 "key": key,
                 "kind": "cron",
@@ -197,6 +415,7 @@ class FactoryMixin:
                 "last_status": last_status if last_status in _CRON_LAST_STATUSES else "",
                 "last_run_at": float(task.get("last_run_at") or 0),
                 "running_run_id": running_by_task.get(tid),
+                "health": health.get(key),
                 "nodes": [],
             })
 
@@ -214,7 +433,8 @@ class FactoryMixin:
             # 契约的产线状态只有 running/done/failed/draft/idle：
             # 用户主动取消（cancelled）不是故障，落 idle；其余未知值同样落 idle。
             status = raw_status if raw_status in _PIPELINE_LINE_STATUSES else "idle"
-            if raw_status == "failed":
+            if (raw_status == "failed"
+                    and float(pipe.get("finished_at") or 0) > acks.get(key, 0)):
                 _attention("error", pid, key, "编排未通过（有节点失败）")
             lines_by_project[pid].append({
                 "key": key,
@@ -228,6 +448,7 @@ class FactoryMixin:
                 "last_status": "",
                 "last_run_at": float(pipe.get("finished_at") or 0),
                 "running_run_id": None,
+                "health": health.get(key),
                 "nodes": [
                     {
                         "id": int(n["id"]),
@@ -239,28 +460,36 @@ class FactoryMixin:
             })
 
         # ---- 最近 24h 的失败 / 中断 / 跳过（按 line_key 去重）----
-        recent_scan = await store.list_automation_runs(limit=FACTORY_RECENT_SCAN_LIMIT)
+        # 从 7 天窗口里筛，而不是再拉一份「最近 500 条」：24h 内超过 500 次
+        # 运行时旧写法会静默漏看更早的失败。
         cutoff = now - FACTORY_ATTENTION_WINDOW_S
-        for run in recent_scan:
-            if float(run.get("started_at") or 0) < cutoff:
+        for run in window:
+            started = float(run.get("started_at") or 0)
+            if started < cutoff:
                 continue
             run_status = str(run.get("status") or "")
+            line_key = factory_run_line_key(run) or f"node:{int(run['task_id'])}"
+            if started <= acks.get(line_key, 0):
+                continue  # 这条产线的这个问题已经「知道了」
+            # 跑完但有工具被门控拦下：状态仍是 done，但 outcome 已经降级为
+            # partial，必须在这里浮出来——否则「预授权没勾全」在工厂里永远是绿的。
+            if run_status == "done" and str(run.get("outcome") or "") == "partial":
+                n = int(run.get("denied_count") or 0)
+                _attention("partial", run.get("project_id"), line_key,
+                           "跑完但有工具被拦" + (f"（{n} 次）" if n else ""))
+                continue
             if run_status not in _RUN_ATTENTION_TEXT:
                 continue
-            if run.get("kind") == "cron":
-                line_key = f"cron:{int(run['task_id'])}"
-            elif run.get("pipeline_id") is not None:
-                line_key = f"pipe:{int(run['pipeline_id'])}"
-            else:
-                line_key = f"node:{int(run['task_id'])}"
             text = _RUN_ATTENTION_TEXT[run_status]
             if run_status == "error" and run.get("error"):
                 text = f"{text}：{str(run['error'])[:60]}"
             _attention(run_status, run.get("project_id"), line_key, text)
 
         # ---- 在途 / 最近运行（running 优先，再按开始时间倒序）----
+        # 列表只要最近 60 条：走带索引的 list_automation_runs，不把 7 天样本
+        # 拉回前端（体检在服务端聚合）。
         merged: dict[int, dict] = {}
-        for run in recent_scan[:FACTORY_RUN_LIST_LIMIT]:
+        for run in await store.list_automation_runs(limit=FACTORY_RUN_LIST_LIMIT):
             merged[int(run["id"])] = run
         for run in running:
             merged.setdefault(int(run["id"]), run)
@@ -275,15 +504,42 @@ class FactoryMixin:
             int(n["id"]): str(n.get("title") or "")
             for pipe in pipelines for n in (pipe.get("nodes") or [])
         }
-        runs = [self._factory_run_view(r, cron_names, node_names, proj_names)
+        proj_roots = {int(p.id): str(p.root_path or "") for p in all_projects}
+        runs = [self._factory_run_view(r, cron_names, node_names, proj_names, proj_roots)
                 for r in ordered]
 
-        counters = await store.automation_run_counters(
-            done_since=self._factory_local_midnight(now))
-        queued = sum(
+        counters = await store.automation_run_counters(done_since=midnight)
+        pipeline_queued = sum(
             1 for pipe in pipelines for n in (pipe.get("nodes") or [])
             if n.get("status") == "ready"
         )
+        # 「排队」以前只数编排里已就绪的节点，定时任务那一路直接 spawn、没有闸，
+        # 于是同一分钟到点十条产线时 HUD 依然显示 0。现在按同一个并发口径算：
+        # 到点但没跑上的任务，减去当前空闲额度（额度之外才是真的在排队）。
+        cap = max(1, int(self._factory_config()["max_parallel_runs"]))
+        cron_running = len(getattr(self, "_cron_running", {}) or {})
+        free_slots = max(0, cap - cron_running)
+        waiting = [
+            t for t in due
+            if int(t["id"]) not in running_by_task
+            and t.get("project_id") is not None
+            and root_ok.get(int(t["project_id"]), False)
+        ] if due else []
+        queued = pipeline_queued + max(0, len(waiting) - free_slots)
+        # 真正在等的那些（额度之外的部分，按到点时间升序）：前端按每条自己等了
+        # 多久决定抖动幅度，而不是把整个「排队 N」当成一个数字画三枚一模一样的包裹。
+        # 只给画得出来的字段，不含任务指令与预授权。
+        over = waiting[free_slots:free_slots + FACTORY_WAITING_LIMIT] if waiting else []
+        waiting_view = [
+            {
+                "key": f"cron:{int(t['id'])}",
+                "name": str(t.get("name") or ""),
+                "project_id": int(t["project_id"]) if t.get("project_id") is not None else None,
+                "due_at": float(t.get("next_run_at") or 0),
+            }
+            for t in over
+        ]
+
         return {
             "projects": [
                 {
@@ -297,14 +553,92 @@ class FactoryMixin:
             "counters": {
                 "running": int(counters.get("running", 0)),
                 "queued": int(queued),
-                "attention": len(attention),
+                # 计数用「去重后的全部问题数」，列表仍然只给前 50 条（见 _attention）
+                "attention": len(seen_attention),
                 "done_today": int(counters.get("done_today", 0)),
+                "tokens_today": int(counters.get("tokens_today", 0)),
             },
             "attention": list(attention.values()),
+            "attention_total": len(seen_attention),
+            "waiting": waiting_view,
             "runs": runs,
+            "live": self._factory_live(now),
             "config": self._factory_config(),
             "now": now,
         }
+
+    def _factory_live(self, now: float) -> dict:
+        """工厂之外的盲区：对话轮与后台子代理现在在跑什么（只读快照）。
+
+        ``core/runs.py`` 的 RunCenter 早就记着这些运行，但工厂里一格都没有——
+        用户在工厂能看见「定时任务」，看不见「我自己刚发的那条对话还在跑」。
+        这里只取在跑态（run.state ∈ RUNNING），不读历史、不做任何操作入口；
+        stale 是「疑似卡住」的软判定（超过 5 分钟没有任何更新），给用户一个
+        「去看看」的理由，硬兜底仍靠运行自身的超时。
+        """
+        live = {"chat": 0, "subagent": 0, "runs": []}
+        center = getattr(self, "runs", None)
+        if center is None:
+            return live
+        try:
+            rows = center.running_runs()
+        except Exception:  # noqa: BLE001 - 观战快照失败不该拖垮整个 state
+            return live
+        items = []
+        for run in rows:
+            try:
+                items.append({
+                    "id": run.id,
+                    "kind": run.kind,
+                    "session_id": run.session_id,
+                    "title": run.title or "",
+                    "state": run.state,
+                    "detail": run.detail or "",
+                    "started_at": float(run.created_at or 0),
+                    "updated_at": float(run.updated_at or 0),
+                    "stale": bool(now - float(run.updated_at or 0) > 300),
+                })
+            except Exception:  # noqa: BLE001 - 单条坏数据跳过
+                continue
+        items.sort(key=lambda r: r["started_at"], reverse=True)
+        live["runs"] = items[:20]
+        live["chat"] = sum(1 for r in items if r["kind"] == "turn")
+        live["subagent"] = sum(1 for r in items if r["kind"] != "turn")
+        return live
+
+    async def factory_live(self) -> dict:
+        """轻量实时快照：只读 RunCenter 内存，不查库。
+
+        工厂首屏的 ``factory.state`` 会拉项目 / 任务 / 编排 / 7 天运行等多份
+        数据，不适合每十几秒轮询。这里只回答「现在有多少对话轮 / 子代理在跑、
+        哪些超过 5 分钟没更新」，前端据此刷新 HUD 与「对话在跑」抽屉。
+        """
+        now = time.time()
+        return {"live": self._factory_live(now), "now": now}
+
+    async def factory_weather(self, params: dict | None = None) -> dict:
+        """现实天气：仅在设置里显式开启并填了城市时联网。
+
+        先城市名地理编码、再按坐标取当前天气 / 昼夜 / 日出日落；结果在
+        ``core.weather.WeatherService`` 里缓存 30 分钟，失败时优先沿用上一份
+        可用数据（``stale=true``），不让场景因为没有网络就突然放晴。
+        未开启时返回 ``{enabled: false, weather: null}``，前端据此隐藏天气信息。
+        """
+        cfg = self._factory_config()
+        if not cfg["weather"]:
+            return {"enabled": False, "weather": None}
+        svc = getattr(self, "_weather_service", None)
+        if svc is None:
+            from ...core.weather import WeatherService
+            svc = WeatherService(getattr(self.cfg, "network", None))
+            self._weather_service = svc
+        # 设置页改代理 / 自签 CA 后热更新出网方式
+        svc.set_network(getattr(self.cfg, "network", None))
+        weather = await svc.get(
+            str(cfg.get("weather_location") or ""),
+            force=bool((params or {}).get("force")),
+        )
+        return {"enabled": True, "weather": weather}
 
     async def factory_runs(self, params: dict) -> dict:
         """运行历史分页（按开始时间倒序）。"""
@@ -319,35 +653,121 @@ class FactoryMixin:
                 raise RuntimeError(f"{key} 需要一个整数") from None
 
         status = params.get("status")
+        kind = params.get("kind") or None
+        if kind not in (None, "cron", "pipeline_node"):
+            raise RuntimeError("kind 只支持 cron / pipeline_node")
+        view = str(params.get("view") or "all")
+        if view not in ("all", "done_today", "tokens_today"):
+            raise RuntimeError("view 只支持 all / done_today / tokens_today")
+        midnight = self._factory_local_midnight(time.time())
         rows = await self.store.list_automation_runs(
+            kind=kind,
             project_id=_opt_int("project_id"),
             task_id=_opt_int("task_id"),
             pipeline_id=_opt_int("pipeline_id"),
             status=str(status) if status else None,
+            outcome="ok_or_legacy" if view == "done_today" else None,
+            started_since=midnight if view == "tokens_today" else None,
+            finished_since=midnight if view == "done_today" else None,
             limit=_opt_int("limit") or 50,
             offset=_opt_int("offset") or 0,
         )
         if not rows:
             return {"runs": []}
-        cron_names, node_names, proj_names = await self._factory_name_maps()
+        cron_names, node_names, proj_names, proj_roots = await self._factory_name_maps()
         return {
-            "runs": [self._factory_run_view(r, cron_names, node_names, proj_names)
+            "runs": [self._factory_run_view(r, cron_names, node_names, proj_names, proj_roots)
                      for r in rows]
         }
 
+    async def factory_run_mark(self, params: dict) -> dict:
+        """人工判定一轮运行「算不算做成」（outcome = ok / failed / ''）。
+
+        自动口径（outcome_source=auto）只看「跑完没有 / 有没有被门控拦过」，
+        真实世界里「产出对不对」只有用户知道。这里让人一键改写，之后这条
+        运行就以人工判定为准（成功率的分母分子都跟着它走）。
+        """
+        try:
+            run_id = int(params.get("run_id", 0))
+        except (TypeError, ValueError):
+            raise RuntimeError("run_id 需要一个整数") from None
+        outcome = str(params.get("outcome") or "").strip()
+        if outcome not in ("", "ok", "failed"):
+            raise RuntimeError("outcome 只支持 ok / failed / 空（撤销标记）")
+        run = await self.store.get_automation_run(run_id)
+        if run is None:
+            raise RuntimeError("运行不存在: " + str(run_id))
+        if str(run.get("status")) == "running":
+            raise RuntimeError("这一轮还没结束，等收尾后再判定")
+        row = await self.store.set_automation_run_outcome(
+            run_id, outcome, source="user" if outcome else "")
+        return {"ok": True, "run": row}
+
     async def factory_run_now(self, params: dict) -> dict:
-        """立即派工：复用 cron.run_now 的路径（force=True）。"""
+        """立即派工：后台起一轮运行，请求立刻返回（句柄留在在跑登记表里）。
+
+        与 ``cron.run_now`` 的差异只在「等不等」：那边是请求内同步跑完（一次
+        运行几分钟，按钮一直转），工厂要的是「派完就回执」，而且只有后台
+        运行才允许被「叫停」——取消一个正在等回执的请求任务会连带掐掉回执。
+
+        去重口径不变：已在跑时返回 started=false，不重复触发。极小概率的
+        双请求竞态由 ``run_cron_task_core`` 的登记判定兜住（只会少跑，不会
+        重复跑），回执文案可能乐观一点，可接受。
+        """
         tid = int(params.get("task_id", 0))
         task = await self.store.get_cron_task(tid)
         if task is None:
             raise RuntimeError("任务不存在: " + str(tid))
         await self._factory_target_project(task.get("project_id"))
-        row = await self._run_cron_task(tid, force=True)
-        if row is None:
-            # core 只在「已在跑」（被去重集合挡下）时返回 None：如实回报
+        if tid in self._cron_running:
             return {"started": False, "id": tid,
                     "notice": "该任务正在运行中，本次未重复触发"}
+        spawn_bg(self._run_cron_task(tid, force=True))
         return {"started": True, "id": tid}
+
+    async def factory_cancel(self, params: dict) -> dict:
+        """叫停一条正在跑的产线（只取消本轮运行，不动启用状态与排期）。
+
+        执行语义与 ``pipeline_cancel`` 同款：取消协程后由
+        ``run_cron_task_core`` 的取消分支写 cancelled 终态并重排下次运行。
+        拿不到句柄（运行由请求同步执行 / 已结束）时如实回报，不假装成功。
+        """
+        tid = int(params.get("task_id", 0))
+        task = await self.store.get_cron_task(tid)
+        if task is None:
+            raise RuntimeError("任务不存在: " + str(tid))
+        if tid not in self._cron_running:
+            return {"cancelled": False, "id": tid,
+                    "notice": "这条产线当前没有在跑的运行"}
+        handle = self._cron_running.get(tid)
+        if handle is None or handle.done():
+            return {"cancelled": False, "id": tid,
+                    "notice": "这一轮拿不到可取消的句柄（可能刚结束），刷新后再看"}
+        if not is_bg_task(handle):
+            return {"cancelled": False, "id": tid,
+                    "notice": "本轮运行由发起请求同步执行，无法从工厂叫停"}
+        handle.cancel()
+        return {"cancelled": True, "id": tid}
+
+    async def factory_ack(self, params: dict) -> dict:
+        """把「需留意」标记为已处理（按产线记时间戳，之后的新失败会再浮上来）。
+
+        一次可以给多个 line_key（「全部知道了」）：前端把当前列表的键传上来，
+        后端只认形如 ``cron:12`` / ``pipe:3`` 的键，不碰别的数据。
+        """
+        raw = params.get("line_keys")
+        if raw is None:
+            raw = [params.get("line_key")]
+        if not isinstance(raw, list):
+            raise RuntimeError("line_keys 需要一个数组")
+        keys = [str(k).strip() for k in raw if str(k or "").strip()]
+        keys = [k for k in keys if ":" in k and not k.startswith(":")]
+        if not keys:
+            raise RuntimeError("line_key 需要一个形如 cron:12 / pipe:3 的产线键")
+        ts = time.time()
+        for key in keys:
+            await self.store.factory_ack(key, ts)
+        return {"ok": True, "line_keys": keys, "acked_at": ts}
 
     async def factory_toggle(self, params: dict) -> dict:
         """暂停 / 启用一条产线（复刻 cron.update 的 enabled 分支与广播）。"""
@@ -412,7 +832,9 @@ class FactoryMixin:
         ]
         task = await self.store.add_cron_task(
             pid, name, prompt, stype, interval, tod, wd, tools,
-            notify_channel=False,
+            # 终态推送开关：默认关（防打扰），与 cron.add 同一口径；
+            # 新建时勾了就在这条产线上生效，之后可在自动化页改
+            notify_channel=bool(params.get("notify_channel")),
         )
         task = await self.store.update_cron_task(
             task["id"], next_run_at=self.store.compute_next_run(task)
@@ -443,15 +865,25 @@ class FactoryMixin:
             except (TypeError, ValueError):
                 raise RuntimeError(f"{key} 需要一个整数") from None
 
+        def _opt_str(key: str):
+            value = params.get(key)
+            if value is None:
+                return None
+            return " ".join(str(value).split())[:80]
+
         try:
             set_factory_in_config(
                 enabled=_opt_bool("enabled"),
                 demo=_opt_bool("demo"),
                 ambient=_opt_bool("ambient"),
                 weather=_opt_bool("weather"),
+                weather_location=_opt_str("weather_location"),
                 history_keep=_opt_int("history_keep"),
                 history_days=_opt_int("history_days"),
                 max_packages=_opt_int("max_packages"),
+                run_timeout_minutes=_opt_int("run_timeout_minutes"),
+                max_parallel_runs=_opt_int("max_parallel_runs"),
+                alert_after_failures=_opt_int("alert_after_failures"),
             )
         except ConfigError as e:
             raise RuntimeError(str(e)) from e

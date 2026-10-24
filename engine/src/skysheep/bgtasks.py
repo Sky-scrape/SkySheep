@@ -20,6 +20,11 @@ from typing import Any
 # 未结束的后台任务集合：持有强引用，任务结束时自动移除
 _BG_TASKS: set[asyncio.Task] = set()
 
+# spawn_bg 建出来的任务统一打标记：定时任务/工厂派工需要判断「这个运行是不是
+# 可以安全取消的后台运行」——取消一个正在等回执的 WS 请求任务会连带掐掉回执，
+# 只有 detached 的后台运行才允许被「叫停」。
+_BG_MARK = "_skysheep_bg_task"
+
 logger = logging.getLogger("skysheep.bg")
 
 
@@ -44,9 +49,15 @@ def _on_bg_done(task: asyncio.Task) -> None:
 def spawn_bg(coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
     """创建后台任务并持强引用，直到它结束（结束即从登记表移除）。"""
     task = asyncio.get_running_loop().create_task(coro)
+    setattr(task, _BG_MARK, True)
     _BG_TASKS.add(task)
     task.add_done_callback(_on_bg_done)
     return task
+
+
+def is_bg_task(task: Any) -> bool:
+    """该任务是否由 :func:`spawn_bg` 建出来的（可安全取消的后台运行）。"""
+    return bool(getattr(task, _BG_MARK, False))
 
 
 async def drain_bg_tasks(timeout: float = 30.0) -> int:
@@ -76,4 +87,4 @@ def pending_count() -> int:
     return len(_BG_TASKS)
 
 
-__all__ = ["drain_bg_tasks", "pending_count", "spawn_bg"]
+__all__ = ["drain_bg_tasks", "is_bg_task", "pending_count", "spawn_bg"]

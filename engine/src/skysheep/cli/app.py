@@ -41,7 +41,7 @@ from ..config import (
 from ..core import Agent, build_system_prompt
 from ..core.hooks import HookRunner, hooks_from_config, load_raw_config
 from ..core.subagent import CheckTaskTool, SpawnAgentTool, TaskManager
-from ..events import ErrorEvent, TextDelta, TurnFinished
+from ..events import ErrorEvent, PermissionResolved, TextDelta, TurnFinished
 from ..mcp import MCPManager, load_mcp_configs
 from ..messages import Message
 from ..models import Provider
@@ -1147,11 +1147,14 @@ async def _cron_run_async(
             n_before = len(agent.history)
             error = None
             stop_reason = "error"
+            denied = 0  # 被无人值守门控拒绝的工具次数（预授权没勾全的痕迹）
             async for ev in agent.run_turn(t["prompt"]):
                 if isinstance(ev, ErrorEvent):
                     error = ev.message
                 elif isinstance(ev, TurnFinished):
                     stop_reason = ev.stop_reason
+                elif isinstance(ev, PermissionResolved) and ev.decision == "deny":
+                    denied += 1
             # 消息落库（run_headless 同款）：异常结束的一轮也要可审计
             for m in agent.history[n_before:]:
                 await store.append_message(sid, m)
@@ -1167,7 +1170,7 @@ async def _cron_run_async(
             if error is not None or stop_reason not in ("end_turn", "max_iterations"):
                 # 异常结束按失败收尾：run_cron_task_core 回写错误状态、渠道必推
                 raise RuntimeError(error or f"轮次异常结束（{stop_reason}）")
-            return runtime, sid, False
+            return runtime, sid, False, {"denied": denied}
 
         final = await run_cron_task_core(
             store, task_id, force=False, execute=execute,
@@ -1175,6 +1178,11 @@ async def _cron_run_async(
             notify=None,  # 无桌面：不打 toast，渠道推送照常
             channels=channels,
             running=None,  # 单次进程，无需在跑去重集合
+            # 与后端同一口径的单次运行硬超时（[factory] run_timeout_minutes）
+            timeout_s=(
+                float(cfg.factory.run_timeout_minutes) * 60.0
+                if getattr(cfg.factory, "run_timeout_minutes", 0) else None
+            ),
         )
         if final is None:
             # 任务不存在已在上面拦；剩下就是「已停用」——尊重开关，不算失败

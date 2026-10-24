@@ -314,13 +314,30 @@ CREATE TABLE IF NOT EXISTS automation_runs (
     finished_at REAL,
     duration_s REAL,
     result_excerpt TEXT DEFAULT '',
-    error TEXT DEFAULT ''
+    error TEXT DEFAULT '',
+    in_tokens INTEGER NOT NULL DEFAULT 0,
+    out_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    denied_count INTEGER NOT NULL DEFAULT 0,
+    denied_tools TEXT NOT NULL DEFAULT '',
+    error_kind TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT '',
+    outcome_source TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_automation_runs_project
     ON automation_runs(project_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_automation_runs_task
     ON automation_runs(task_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_automation_runs_status ON automation_runs(status);
+CREATE TABLE IF NOT EXISTS factory_acks (
+    line_key TEXT PRIMARY KEY,
+    acked_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS factory_alerts (
+    line_key TEXT PRIMARY KEY,
+    day TEXT NOT NULL,
+    alerted_at REAL NOT NULL
+);
 """
 
 # 全文搜索索引：messages 的 FTS5 虚表（trigram 分词）。
@@ -371,16 +388,32 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("whitelist_rules", "last_hit_at REAL NOT NULL DEFAULT 0"),
     ("cron_tasks", "notify_channel INTEGER NOT NULL DEFAULT 0"),
     ("pipelines", "notify_channel INTEGER NOT NULL DEFAULT 0"),
+    ("automation_runs", "in_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("automation_runs", "out_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("automation_runs", "cached_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("automation_runs", "denied_count INTEGER NOT NULL DEFAULT 0"),
+    ("automation_runs", "denied_tools TEXT NOT NULL DEFAULT ''"),
+    ("automation_runs", "error_kind TEXT NOT NULL DEFAULT ''"),
+    ("automation_runs", "outcome TEXT NOT NULL DEFAULT ''"),
+    ("automation_runs", "outcome_source TEXT NOT NULL DEFAULT ''"),
 )
 
 # 数据库结构版本：SCHEMA 或 _COLUMN_MIGRATIONS 每次变更时 +1。
 # v2：新增 relay_tasks / relay_nodes / relay_actions（接力运行期三表）。
 # v3：新增 relay_pairs / relay_turns（主副屏交替接力）。
 # v4：新增 automation_runs（自动化运行账本：定时任务 / 编排节点每次运行一行）。
+# v5：automation_runs 增 in/out/cached_tokens（单次运行成本）；新增 factory_acks
+#     （「需留意」的已处理标记：按产线记一个时间戳，更晚的失败会重新浮上来）。
+# v6：automation_runs 增 denied_count（本轮被无人值守门控拒绝的工具次数）/
+#     error_kind（失败归因分类）/ outcome 与 outcome_source（「跑完」之外的
+#     「做成」判定：自动启发式 + 人工标记）；新增 factory_alerts
+#     （失败聚合告警的去重：同一产线同一天最多告警一次）。
+# v7：automation_runs 增 denied_tools（被拦工具名与次数的 JSON 快照）——
+#     只记次数无法告诉用户该补哪个预授权工具。
 # 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
 # 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
 # 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 
 
 @dataclass
@@ -2756,6 +2789,14 @@ class SessionStore:
             "duration_s": r["duration_s"],
             "result_excerpt": r["result_excerpt"] or "",
             "error": r["error"] or "",
+            "in_tokens": int(r["in_tokens"] or 0),
+            "out_tokens": int(r["out_tokens"] or 0),
+            "cached_tokens": int(r["cached_tokens"] or 0),
+            "denied_count": int(r["denied_count"] or 0),
+            "denied_tools": r["denied_tools"] or "",
+            "error_kind": r["error_kind"] or "",
+            "outcome": r["outcome"] or "",
+            "outcome_source": r["outcome_source"] or "",
         }
 
     async def get_automation_run(self, run_id: int) -> dict | None:
@@ -2807,11 +2848,30 @@ class SessionStore:
         result_excerpt: str = "",
         error: str = "",
         session_id: str | None = None,
+        in_tokens: int = 0,
+        out_tokens: int = 0,
+        cached_tokens: int = 0,
+        denied_count: int = 0,
+        denied_tools: str = "",
+        error_kind: str = "",
+        outcome: str = "",
+        outcome_source: str = "",
     ) -> dict | None:
         """收尾一条运行；不存在返回 None。
 
         duration_s 缺省按 finished_at - started_at 计算（服务重启等场景由调用方
         显式传入时以调用方为准）。session_id 只覆盖不抹除：None = 保持原值。
+        token 三项是同一次运行的用量快照（由账本按会话 + 时间窗汇总后传入），
+        与状态一起写入，之后即使 usage_log 被清理也留得住。
+
+        denied_count：本轮被无人值守门控拒绝的工具次数（0 = 没被拦）。这是
+        「预授权工具没勾全」这类最常见故障的唯一痕迹。
+        denied_tools：被拦工具名 → 次数的 JSON 快照（只留前几项），用于直接
+        告诉用户该补哪些预授权工具。
+        error_kind：失败归因分类（permission / model / path / budget / unknown）。
+        outcome / outcome_source：把「跑完」与「做成」分开——auto 为收尾时的
+        机械判定（被拦过即 partial），user 为用户在运行详情里的手动标记。
+        outcome 为空表示还没有结论（running / 跳过 / 叫停）。
         """
         assert self._db
         run = await self.get_automation_run(run_id)
@@ -2825,14 +2885,38 @@ class SessionStore:
         await self._db.execute(
             "UPDATE automation_runs SET status = ?, finished_at = ?, duration_s = ?,"
             " result_excerpt = ?, error = ?,"
-            " session_id = COALESCE(?, session_id) WHERE id = ?",
+            " session_id = COALESCE(?, session_id),"
+            " in_tokens = ?, out_tokens = ?, cached_tokens = ?,"
+            " denied_count = ?, error_kind = ?,"
+            " denied_tools = ?,"
+            " outcome = CASE WHEN ? = '' THEN outcome ELSE ? END,"
+            " outcome_source = CASE WHEN ? = '' THEN outcome_source ELSE ? END"
+            " WHERE id = ?",
             (
                 str(status), fin, duration,
                 str(result_excerpt or "")[: self.MAX_RESULT_EXCERPT_CHARS],
                 str(error or "")[: self.MAX_RUN_ERROR_CHARS],
                 None if session_id is None else str(session_id),
+                max(0, int(in_tokens)), max(0, int(out_tokens)),
+                max(0, int(cached_tokens)),
+                max(0, int(denied_count)), str(error_kind or "")[:24],
+                str(denied_tools or "")[:600],
+                str(outcome or ""), str(outcome or ""),
+                str(outcome_source or ""), str(outcome_source or ""),
                 int(run_id),
             ),
+        )
+        await self._db.commit()
+        return await self.get_automation_run(run_id)
+
+    async def set_automation_run_outcome(
+        self, run_id: int, outcome: str, *, source: str = "user",
+    ) -> dict | None:
+        """人工改写一条运行的「做成」判定（'' 表示撤销标记，回到自动口径）。"""
+        assert self._db
+        await self._db.execute(
+            "UPDATE automation_runs SET outcome = ?, outcome_source = ? WHERE id = ?",
+            (str(outcome or ""), str(source or ""), int(run_id)),
         )
         await self._db.commit()
         return await self.get_automation_run(run_id)
@@ -2853,10 +2937,14 @@ class SessionStore:
     async def list_automation_runs(
         self,
         *,
+        kind: str | None = None,
         project_id: int | None = None,
         task_id: int | None = None,
         pipeline_id: int | None = None,
         status: str | None = None,
+        outcome: str | None = None,
+        started_since: float | None = None,
+        finished_since: float | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
@@ -2864,6 +2952,9 @@ class SessionStore:
         assert self._db
         clauses: list[str] = []
         args: list = []
+        if kind is not None:
+            clauses.append("kind = ?")
+            args.append(str(kind))
         if project_id is not None:
             clauses.append("project_id = ?")
             args.append(int(project_id))
@@ -2876,6 +2967,17 @@ class SessionStore:
         if status is not None:
             clauses.append("status = ?")
             args.append(str(status))
+        if outcome == "ok_or_legacy":
+            clauses.append("(outcome = 'ok' OR (outcome = '' AND status = 'done'))")
+        elif outcome is not None:
+            clauses.append("outcome = ?")
+            args.append(str(outcome))
+        if started_since is not None:
+            clauses.append("started_at >= ?")
+            args.append(float(started_since))
+        if finished_since is not None:
+            clauses.append("finished_at >= ?")
+            args.append(float(finished_since))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         lim = max(1, min(500, int(limit)))
         off = max(0, int(offset))
@@ -2909,23 +3011,123 @@ class SessionStore:
         return max(0, int(cur.rowcount or 0))
 
     async def automation_run_counters(self, *, done_since: float) -> dict:
-        """工厂计数聚合：running 总数与 done_since 之后完成（status=done）的条数。
+        """工厂计数聚合：running 总数与 done_since 之后的「做成」条数。
 
-        单条 SQL 聚合，避免工厂页把全量历史拉回前端再数。
+        单条 SQL 聚合，避免工厂页把全量历史拉回前端再数。「今日做成」按
+        outcome 口径：`ok` 才算，`partial`（被拦过）不算；旧行没有 outcome
+        时回落到 `status = done`，避免升级当天的历史凭空少一截。
         """
         assert self._db
         cur = await self._db.execute(
             "SELECT"
             " SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,"
-            " SUM(CASE WHEN status = 'done' AND finished_at >= ? THEN 1 ELSE 0 END)"
-            " AS done_today FROM automation_runs",
-            (float(done_since),),
+            " SUM(CASE WHEN finished_at >= ? AND ("
+            "   outcome = 'ok' OR (outcome = '' AND status = 'done'))"
+            " THEN 1 ELSE 0 END) AS done_today,"
+            " SUM(CASE WHEN started_at >= ? THEN in_tokens + out_tokens ELSE 0 END)"
+            " AS tokens_today FROM automation_runs",
+            (float(done_since), float(done_since)),
         )
         row = await cur.fetchone()
         return {
             "running": int((row["running"] if row else 0) or 0),
             "done_today": int((row["done_today"] if row else 0) or 0),
+            "tokens_today": int((row["tokens_today"] if row else 0) or 0),
         }
+
+    async def automation_runs_since(self, since: float, *, limit: int = 4000) -> list[dict]:
+        """since 之后开始的全部运行（新→旧），供工厂算「需留意」与产线体检。
+
+        与 ``list_automation_runs`` 的区别是**不按 60 条截断**：24h 内的失败
+        被 500 条上限挡住会静默漏看，体检也要 7 天的样本。行数天然受
+        ``prune_automation_runs`` 的保留策略约束（默认 2000 条），这里的
+        limit 只是兜底，正常不会触发。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM automation_runs WHERE started_at >= ?"
+            " ORDER BY started_at DESC, id DESC LIMIT ?",
+            (float(since), max(1, min(20000, int(limit)))),
+        )
+        rows = await cur.fetchall()
+        return [self._automation_run_row(r) for r in rows]
+
+    async def session_usage_between(
+        self, session_id: str, since: float, until: float | None = None,
+    ) -> dict:
+        """一次运行用掉的 token（按会话 + 时间窗汇总 usage_log）。
+
+        定时任务每次运行都新建会话，所以会话 id 基本等价于「这一次运行」；
+        会话续跑型编排节点复用会话，时间窗把范围收回到本次运行。
+        """
+        assert self._db
+        clauses = ["session_id = ?", "ts >= ?"]
+        args: list = [str(session_id), float(since)]
+        if until is not None:
+            clauses.append("ts <= ?")
+            args.append(float(until))
+        cur = await self._db.execute(
+            "SELECT SUM(in_tokens) AS it, SUM(out_tokens) AS ot,"
+            " SUM(cached_tokens) AS ct FROM usage_log WHERE " + " AND ".join(clauses),
+            tuple(args),
+        )
+        row = await cur.fetchone()
+        return {
+            "in_tokens": int((row["it"] if row else 0) or 0),
+            "out_tokens": int((row["ot"] if row else 0) or 0),
+            "cached_tokens": int((row["ct"] if row else 0) or 0),
+        }
+
+    async def factory_ack(self, line_key: str, at: float | None = None) -> float:
+        """把一条产线的「需留意」标记为已处理（同一产线只留最新一次）。"""
+        assert self._db
+        ts = time.time() if at is None else float(at)
+        await self._db.execute(
+            "INSERT INTO factory_acks (line_key, acked_at) VALUES (?, ?)"
+            " ON CONFLICT(line_key) DO UPDATE SET acked_at = excluded.acked_at",
+            (str(line_key), ts),
+        )
+        await self._db.commit()
+        return ts
+
+    async def list_factory_acks(self) -> dict[str, float]:
+        """全部已处理的产线标记（line_key → 时间戳）。"""
+        assert self._db
+        cur = await self._db.execute("SELECT line_key, acked_at FROM factory_acks")
+        rows = await cur.fetchall()
+        return {str(r["line_key"]): float(r["acked_at"] or 0) for r in rows}
+
+    async def factory_alert_claim(self, line_key: str, day: str) -> bool:
+        """申领一次失败告警额度：同一条产线同一天只有第一次返回 True。
+
+        告警是「吵醒用户」的动作，宁少勿多：连续失败聚合告警按天去重，
+        一条产线一天最多一条。天变了自动重新申领成功（按行覆盖）。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT day FROM factory_alerts WHERE line_key = ?", (str(line_key),)
+        )
+        row = await cur.fetchone()
+        if row is not None and str(row["day"] or "") == str(day):
+            return False
+        await self._db.execute(
+            "INSERT INTO factory_alerts (line_key, day, alerted_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(line_key) DO UPDATE SET day = excluded.day,"
+            " alerted_at = excluded.alerted_at",
+            (str(line_key), str(day), time.time()),
+        )
+        await self._db.commit()
+        return True
+
+    async def prune_factory_alerts(self, *, keep_days: int = 30) -> int:
+        """清掉很久没再告警的产线标记（顺手，不影响任何判定）。"""
+        assert self._db
+        cutoff = time.time() - max(1, int(keep_days)) * 86400.0
+        cur = await self._db.execute(
+            "DELETE FROM factory_alerts WHERE alerted_at < ?", (cutoff,)
+        )
+        await self._db.commit()
+        return max(0, int(cur.rowcount or 0))
 
     # ---- 任务编排（pipelines / pipeline_nodes）：按依赖顺序自动跑的 Agent 任务 ----
     # 流水线是「草稿 → 运行 → 终态」的容器；节点是 DAG 上的一个 headless 运行，

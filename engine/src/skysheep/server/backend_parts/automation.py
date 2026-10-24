@@ -16,7 +16,12 @@ from pathlib import Path
 from ...bgtasks import spawn_bg
 from ...channels.manager import _fmt_dur
 from ...core import system_schedule
-from ...core.run_ledger import RunLedger
+from ...core.run_ledger import (
+    RunLedger,
+    classify_run_error,
+    denied_tools_json,
+    outcome_for,
+)
 from ...security.gate import HeadlessGate
 from ...tools import ChangeRecorder
 from ...tools.pipeline import task_node_fields
@@ -57,6 +62,62 @@ from .daily_report import (
 )
 
 logger = logging.getLogger("skysheep.security")
+
+
+def make_progress_emit(ledger, kind: str, task_id: int, facts: dict | None = None):
+    """把无头运行的事件流压成「工序进度」（工厂机台上显示在跑什么）。
+
+    无人值守运行原本把 emit 整个丢掉（``pass``），观战窗只能看到「在跑」和
+    计时，看不出这一轮在干什么。这里只认工具起止与轮次开始，把「当前工具 +
+    已执行步数」交给账本推一条 ``factory_run`` / phase=progress；文本与思考
+    增量一律不看，节流（1 次/秒）在 ``RunLedger.progress`` 里做。
+
+    顺带把「被门控拦了几次」数出来（``facts``，由调用方传一个空 dict 进来
+    原地填）：无人值守下 HeadlessGate 对未预授权的写操作是静默 DENY，
+    拒绝事件以前被整个丢掉，工厂里零痕迹——成功率于是天然接近 100%。
+    这里认 ``permission_resolved`` 的 deny 决策，把工具名与次数记下来，
+    收尾时写进运行行，抽屉里就能直接说「这条产线该补哪个工具」。
+
+    ``ledger`` 为 None（CLI 路径 / 账本未就绪）时只做计数、不发事件。
+    """
+    state = facts if facts is not None else {}
+    state.setdefault("steps", 0)
+    state.setdefault("tool", "")
+    state.setdefault("denied", 0)
+    state.setdefault("denied_tools", {})
+    pending: dict[str, str] = {}  # request_id → 工具名（deny 事件里没有工具名）
+
+    async def emit(ev: dict) -> None:
+        k = ev.get("kind")
+        if k == "permission_request":
+            rid = str(ev.get("request_id") or "")
+            if rid:
+                pending[rid] = str(ev.get("tool_name") or "")
+            return
+        if k == "permission_resolved":
+            rid = str(ev.get("request_id") or "")
+            tool = pending.pop(rid, "")
+            if str(ev.get("decision") or "") != "deny":
+                return
+            state["denied"] = int(state.get("denied") or 0) + 1
+            tools = state["denied_tools"]
+            key = tool or "（未知工具）"
+            tools[key] = int(tools.get(key) or 0) + 1
+        elif k == "tool_call_started":
+            state["steps"] = int(state.get("steps") or 0) + 1
+            state["tool"] = str(ev.get("name") or "")
+        elif k in ("tool_call_finished", "turn_started"):
+            # 工具跑完到下一个工具开始之间没有「正在做的事」：清空而不是
+            # 继续显示上一个工具名（那是谎报）
+            state["tool"] = ""
+        else:
+            return
+        if ledger is None:
+            return
+        ledger.progress(kind, task_id, tool=state["tool"], steps=state["steps"],
+                        denied=int(state.get("denied") or 0))
+
+    return emit
 
 # 无人值守门控：定时任务与 headless run 共用 security.gate.HeadlessGate
 CronGate = HeadlessGate
@@ -149,15 +210,99 @@ def cron_push_body(task: dict, status: str, duration_s: float) -> str:
     return "\n".join(lines)
 
 
+async def alert_repeated_failures(
+    store, notify, channels, task: dict, *,
+    error: str = "", threshold: int = 0,
+    kind: str = "cron", pipeline_id: int | None = None,
+) -> bool:
+    """连续失败聚合告警：同一条产线同一天最多推一条，返回是否真的推了。
+
+    为什么不是「每次失败都推」：无人值守的产线一天跑几十次，逐次推送会
+    很快被用户静音，反而失去告警意义。这里只在连续失败达到阈值时提醒一次，
+    并带着「最近一次为什么失败」——用户看到就知道该去勾工具还是去修目录。
+
+    桌面通知走 ``notify``（总是发）；渠道/Webhook 只在该任务开了
+    ``notify_channel`` 时发，尊重既有的逐任务推送开关。
+    任何异常都只记日志：告警失败绝不能反过来影响任务收尾。
+
+    失败口径与产线体检一致：``error / interrupted / empty`` 以及被人工判为
+    ``failed`` 的运行都算一次失败；running / skipped / cancelled 不是判断，
+    直接跳过。定时任务按 ``cron:<id>`` 聚合，装配线按 ``pipe:<id>`` 聚合。
+    """
+    n = int(threshold or 0)
+    if n <= 0:
+        return False
+    try:
+        tid = int(task.get("id") or 0)
+        if tid <= 0:
+            return False
+        pipeline_id = None if pipeline_id is None else int(pipeline_id)
+        limit = max(20, n + 5)
+        if kind == "pipeline_node" and pipeline_id is not None:
+            rows = await store.list_automation_runs(
+                kind="pipeline_node", pipeline_id=pipeline_id, limit=limit)
+            key = f"pipe:{pipeline_id}"
+        else:
+            rows = await store.list_automation_runs(
+                kind="cron", task_id=tid, limit=limit)
+            key = f"cron:{tid}"
+
+        def _failed(row: dict) -> bool:
+            st = str(row.get("status") or "")
+            if st in ("running", "skipped", "cancelled"):
+                return False
+            return st in ("error", "interrupted", "empty") or (
+                str(row.get("outcome") or "") == "failed")
+
+        streak = 0
+        last_hint = ""
+        for row in rows:
+            st = str(row.get("status") or "")
+            if st in ("running", "skipped", "cancelled"):
+                continue  # 还没结论 / 到点跳过 / 用户叫停：都不是一次判断
+            if not _failed(row):
+                break
+            streak += 1
+            if not last_hint and row.get("error"):
+                last_hint = str(row["error"])
+        if streak < n:
+            return False
+        if not await store.factory_alert_claim(key, time.strftime("%Y-%m-%d")):
+            return False  # 今天这条产线已经吵过用户一次了
+        label = "装配线" if kind == "pipeline_node" else "产线"
+        name = str(task.get("name") or f"未命名{label}")
+        hint = str(error or last_hint or "").replace("\n", " ")[:120]
+        body = f"「{name}」已连续 {streak} 次失败"
+        if hint:
+            body += f"，最近一次：{hint}"
+        body += f"。打开工厂 →「需留意」查看，或在{label}详情里补预授权工具。"
+        if notify is not None:
+            try:
+                await notify({"title": f"⚠ 工厂：{label}连续失败", "body": body})
+            except Exception as e:  # noqa: BLE001 - 桌面通知失败不影响其它出口
+                logger.debug("工厂告警桌面通知失败（忽略）：%s", e)
+        if task.get("notify_channel") and channels is not None:
+            try:
+                await push_text_to_targets(channels, body, what="工厂告警")
+            except Exception as e:  # noqa: BLE001 - 渠道不通不影响本地告警
+                logger.debug("工厂告警渠道推送失败（忽略）：%s", e)
+        return True
+    except Exception as e:  # noqa: BLE001 - 告警是附加动作，失败不反噬业务
+        logger.debug("工厂失败告警失败（忽略）：%s", e)
+        return False
+
+
 async def run_cron_task_core(
     store, task_id: int, *, force: bool = False,
     execute,            # async (task) -> tuple[SessionRuntime, str, bool]：宿主差异点
     broadcast=None,     # (task) -> None：任务行变化出口（后端 WS 广播 / CLI 打印）
     notify=None,        # (dict) -> None：桌面通知（CLI 无界面，传 None）
     channels=None,      # 渠道管理器（终态推送目标；CLI 传只发不收的实例）
-    running: set | None = None,  # 在跑去重集合（后端扫描循环用；CLI 传 None）
+    running: dict | None = None,  # 在跑登记表 task_id → asyncio.Task（后端扫描循环用）
     emit_run=None,      # (ev) -> None：运行账本事件出口（工厂观战；CLI 传 None）
     ledger=None,        # 宿主共享账本（后端的常驻 RunLedger）；None = 本次调用自建
+    timeout_s: float | None = None,  # 单次运行硬超时（秒；None/0 = 不限）
+    alert_after: int = 0,            # 连续失败多少次告警（0 = 不告警）
 ) -> dict | None:
     """执行一个定时任务并收尾：结果写回任务行、重排下次运行、广播与终态推送。
 
@@ -172,9 +317,15 @@ async def run_cron_task_core(
     - channels：渠道管理器；None = 无推送目标（静默跳过）。
     - emit_run：运行账本事件出口（工厂观战用）；None = 只记账不发事件。
     - ledger：宿主传进来的常驻账本；None = 本次调用自建（CLI 路径）。
+    - timeout_s：单次运行硬超时（秒）。超时按失败收尾并释放占用位——没有它，
+      一条挂在模型流式 / 网络上的运行会永远显示「运行中」，之后每 20 秒的
+      扫描都只能记一条「上一轮未结束」，看不出根因。
+    - alert_after：连续失败多少次推一条聚合告警（0 = 不推）。
 
     返回收尾后的任务行；任务不存在 / 未启用且未 force / 已在跑时返回 None。
     执行失败不向上抛（回写错误状态就是收尾），调用方读任务行拿结果。
+    被叫停时写 ``last_status=cancelled`` 并把 CancelledError 继续向上抛——
+    取消必须真的把协程停住，不能吞掉。
     """
     task = await store.get_cron_task(task_id)
     if task is None:
@@ -188,10 +339,13 @@ async def run_cron_task_core(
     # 循环才能看见它——否则强制运行在飞期间任务仍是 due 状态，下一轮扫描
     # 必然并发二次派跑（双倍 token / 推送翻倍 / 回写互相覆盖）。「已在跑不
     # 重复触发」仍由上面的 running 判定承担，方向相反但口径一致。
+    # 登记值是当前协程的 Task：工厂「叫停」靠它取消（只有 spawn_bg 建出来的
+    # 后台运行才允许取消，见 bgtasks.is_bg_task）。
     if running is not None:
-        running.add(task_id)
+        running[task_id] = asyncio.current_task()
         added = True
     started_at = time.time()  # 终态推送要报耗时（成功与失败两条路都要用）
+    denied = 0                # 本轮被门控拒绝的工具次数（异常路径读不到 facts）
     # 运行账本（工厂观战）：开一条 running，收尾在成功 / 异常两路各写一次。
     # 记账失败不能拦住任务本身——工厂少一枚包裹，好过整条定时任务跑不动。
     ledger = ledger or RunLedger(store, emit=emit_run)
@@ -204,7 +358,22 @@ async def run_cron_task_core(
     except Exception:  # noqa: BLE001
         run = None
     try:
-        runtime, _sid, stopped = await execute(task)
+        try:
+            if timeout_s and float(timeout_s) > 0:
+                async with asyncio.timeout(float(timeout_s)):
+                    out = await execute(task)
+            else:
+                out = await execute(task)
+        except TimeoutError as e:
+            minutes = max(1, int(round(float(timeout_s or 0) / 60)))
+            raise RuntimeError(
+                f"运行超时（超过 {minutes} 分钟），已强制收尾；"
+                "可在工厂设置里调整超时或拆分任务指令"
+            ) from e
+        # execute 允许返回第 4 项「本轮事实」（被拦次数等）；旧的三元组照常可用
+        runtime, _sid, stopped = out[0], out[1], out[2]
+        facts = out[3] if len(out) > 3 and isinstance(out[3], dict) else {}
+        denied = int(facts.get("denied") or 0)
         # 取本轮最后一条助手文本作为结果摘要
         last_text = ""
         for m in reversed(runtime.agent.history):
@@ -244,17 +413,55 @@ async def run_cron_task_core(
         _fire_cron_push(channels, task, status, duration, cron_push_body(task, status, duration))
         # 运行账本收尾：ok → done，空产出 → empty，被中断（既有口径记 error）→ error
         if run is not None:
+            run_status = {"ok": "done", "empty": "empty"}.get(status, "error")
+            outcome = outcome_for(run_status, denied_count=denied)
             try:
                 await ledger.finish(
                     run["id"],
-                    status={"ok": "done", "empty": "empty"}.get(status, "error"),
+                    status=run_status,
                     result_excerpt=last_text,
                     session_id=_sid,
+                    denied_count=denied,
+                    denied_tools=denied_tools_json(facts),
+                    outcome=outcome,
+                    outcome_source="auto" if outcome else "",
                 )
             except Exception:  # noqa: BLE001 - 记账失败不影响任务收尾
                 pass
         return task
+    except asyncio.CancelledError:
+        # 用户叫停（工厂页「叫停」按钮）：这不是故障，也不是「中断」——
+        # 写 cancelled 终态并照常重排下次运行，否则任务行会停在 running、
+        # 账本停在 running，只能等下次启动被标成 interrupted。
+        try:
+            task = await store.update_cron_task(
+                task_id,
+                last_run_at=time.time(),
+                last_status="cancelled",
+                last_result="已叫停（用户取消本轮）",
+            )
+            if task["enabled"]:
+                task = await store.update_cron_task(
+                    task_id,
+                    next_run_at=store.compute_next_run(
+                        {**task, "last_run_at": task["last_run_at"]}),
+                )
+            if broadcast is not None:
+                broadcast(task)
+            if notify is not None:
+                await notify({"title": f"⏹ 定时任务已叫停：{task['name']}",
+                              "body": "本轮由你手动停止，不会自动重试"})
+        except Exception:  # noqa: BLE001 - 收尾失败也要让取消继续
+            pass
+        if run is not None:
+            try:
+                await ledger.finish(run["id"], status="cancelled", error="用户叫停",
+                                    denied_count=denied)
+            except Exception:  # noqa: BLE001 - 记账失败不影响取消
+                pass
+        raise
     except Exception as e:  # noqa: BLE001 - 任务失败也要回写状态
+        error_kind = classify_run_error(str(e))
         try:
             task = await store.update_cron_task(
                 task_id,
@@ -281,13 +488,20 @@ async def run_cron_task_core(
             pass
         if run is not None:
             try:
-                await ledger.finish(run["id"], status="error", error=str(e)[:300])
+                await ledger.finish(run["id"], status="error", error=str(e)[:300],
+                                    denied_count=denied, error_kind=error_kind,
+                                    outcome="failed", outcome_source="auto")
             except Exception:  # noqa: BLE001 - 记账失败不影响任务收尾
                 pass
+        # 连续失败聚合告警：同一条产线每天最多一条（见 alert_repeated_failures）
+        await alert_repeated_failures(
+            store, notify, channels, task or {"id": task_id},
+            error=str(e), threshold=int(alert_after or 0),
+        )
         return task
     finally:
         if added and running is not None:
-            running.discard(task_id)
+            running.pop(task_id, None)
 
 
 
@@ -448,25 +662,114 @@ class AutomationMixin:
                 pass  # 单轮扫描失败不终止循环
             await asyncio.sleep(self.CRON_INTERVAL)
 
+    def _factory_setting(self, name: str, default):
+        """读 [factory] 的一项配置（cfg 未加载 / 缺字段时用默认值）。
+
+        扫描循环与工厂页都要用这几个阈值（并发 / 超时 / 告警），但两者都可能
+        在 cfg 尚未加载的路径上被调用（测试夹具、CLI 单次运行），所以统一
+        走一个容错读取，不在每个调用点各写一遍 getattr 链。
+        """
+        sec = getattr(getattr(self, "cfg", None), "factory", None)
+        if sec is None:
+            return default
+        return getattr(sec, name, default)
+
+    async def _cron_target_ready(self, task: dict) -> bool:
+        """到点任务的厂区是否真的可用（项目行存在且目录还在）。
+
+        ``due_cron_tasks`` 只看 enabled 与 next_run_at，不看目录是否存在；
+        而 ``_cron_execution_context`` 在目录缺失时会回退到当前打开的项目。
+        两条叠起来的后果是：工厂挂着「停工」牌，调度到点照派工，还把 A 项目
+        的 prompt 跑进 B 项目的目录。观战口径不能先于执行口径说停工——所以
+        派工前在这里 fail closed，工厂与执行看到同一个结论。
+        """
+        pid = task.get("project_id")
+        if pid is None:
+            return False
+        try:
+            proj = await self.store.get_project(int(pid))
+        except (TypeError, ValueError):
+            return False
+        return proj is not None and Path(proj.root_path).is_dir()
+
+    async def _cron_mark_undispatchable(self, task: dict) -> None:
+        """厂区不可用：不派工，记一条失败运行并照常重排下次运行。
+
+        必须重排 next_run_at——否则这条任务每 20 秒都会被判定「到点」，账本
+        会被刷满同一条错误。语义上这是一次「尝试过但跑不了」的运行：写
+        last_status=error（自动化页与工厂的「上次失败」都看它），账本记
+        status=error / error_kind=path，需留意里能看见。
+        """
+        tid = int(task["id"])
+        now = time.time()
+        text = "厂区不可用（项目目录不存在），本轮未派工"
+        try:
+            row = await self.store.update_cron_task(
+                tid, last_run_at=now, last_status="error", last_result=text)
+            if row["enabled"]:
+                row = await self.store.update_cron_task(
+                    tid, next_run_at=self.store.compute_next_run(
+                        {**row, "last_run_at": row["last_run_at"]}))
+            self._broadcast_cron(row)
+        except Exception:  # noqa: BLE001 - 回写失败也不该拦扫描循环
+            return
+        ledger = getattr(self, "run_ledger", None)
+        if ledger is None:
+            return
+        try:
+            run = await ledger.start("cron", tid, project_id=task.get("project_id"))
+            await ledger.finish(
+                run["id"], status="error", error=text,
+                error_kind="path", outcome="failed", outcome_source="auto",
+            )
+        except Exception:  # noqa: BLE001 - 记账失败不拦扫描循环
+            pass
+
     async def _cron_pass(self) -> None:
-        for row in await self.store.due_cron_tasks():
-            if row["id"] in self._cron_running:
+        due = await self.store.due_cron_tasks()
+        # 全局并发闸：同一时刻最多跑 max_parallel_runs 条（默认 3，与编排节点
+        # 的 PIPELINE_GLOBAL_CAP 同口径）。超出的任务留在队列里——它们还是
+        # due 状态，下一轮扫描（20 秒后）按 next_run_at 升序先接它们。
+        cap = max(1, int(self._factory_setting("max_parallel_runs", 3) or 1))
+        used = len(self._cron_running)  # 在跑登记表就是当前占用
+        for row in due:
+            tid = int(row["id"])
+            if tid in self._cron_running:
                 # 上一轮还没跑完又到点：记一条 skipped（包裹视图里是一枚「跳过」），
                 # 但同一个到点批次只记一次——长跑期间每 20 秒的扫描都会命中同一个
                 # due 行，不去重会把账本堆满重复的跳过记录。键按 (task_id, next_run_at)
                 # 口径存（dict[task_id] = 上次记过的 next_run_at）。
                 nra = float(row["next_run_at"] or 0)
-                if self._cron_skip_mark.get(int(row["id"])) == nra:
+                if self._cron_skip_mark.get(tid) == nra:
                     continue
-                self._cron_skip_mark[int(row["id"])] = nra
+                self._cron_skip_mark[tid] = nra
                 try:
                     await self.run_ledger.skipped(row)
                 except Exception:  # noqa: BLE001 - 记账失败不拦扫描循环
                     pass
                 continue
-            self._cron_skip_mark.pop(int(row["id"]), None)
+            self._cron_skip_mark.pop(tid, None)
+            if not await self._cron_target_ready(row):
+                await self._cron_mark_undispatchable(row)
+                continue
+            if used >= cap:
+                # 并发已满：不派工也不记账，让它们继续排队（HUD 的「排队」按
+                # 这个口径算）。break 而不是 continue：后面的任务同样没额度，
+                # 且 due 已按 next_run_at 升序，下一轮仍会先接最旧的那条。
+                break
             # 后台触发：任务跑多久都不阻塞扫描循环（下一轮扫描跳过 in-flight 任务）
-            spawn_bg(self._run_cron_task(row["id"]))
+            spawn_bg(self._run_cron_task(tid))
+            used += 1
+        # 顺手清掉已删除任务的跳过标记（只增不减的字典，量不大但没有理由留着）
+        if len(self._cron_skip_mark) > 32:
+            try:
+                alive = {int(t["id"]) for t in await self.store.list_cron_tasks()}
+            except Exception:  # noqa: BLE001 - 清理失败无所谓
+                alive = set()
+            if alive:
+                for key in list(self._cron_skip_mark):
+                    if key not in alive:
+                        self._cron_skip_mark.pop(key, None)
 
     def _broadcast_cron(self, task: dict) -> None:
         for ws_emit in list(self.ws_emitters):
@@ -648,17 +951,36 @@ class AutomationMixin:
             running=self._cron_running,
             emit_run=self._emit_factory_run,
             ledger=self.run_ledger,
+            timeout_s=self._cron_timeout_s(),
+            alert_after=int(self._factory_setting("alert_after_failures", 3) or 0),
         )
+
+    def _cron_timeout_s(self) -> float | None:
+        """单次运行硬超时（秒）；0 = 不限。配置以分钟表达，接口按秒。"""
+        try:
+            minutes = int(self._factory_setting("run_timeout_minutes", 60) or 0)
+        except (TypeError, ValueError):
+            minutes = 60
+        return float(minutes) * 60.0 if minutes > 0 else None
 
     async def _execute_cron_turn(self, task: dict):
         """后端侧的一轮定时任务执行（run_cron_task_core 的 execute 注入点）。
 
         按任务自身项目跑（见 _cron_execution_context）：会话归属、白名单、
         工作目录都要对上，不能把别的项目的任务挂到当前项目执行。
-        返回 (runtime, sid, stopped)。
+        返回 (runtime, sid, stopped, facts)：facts 里带本轮「被门控拦了几次 /
+        拦的是哪些工具」，由 run_cron_task_core 写进运行行。
         """
         if self.provider is None:
             raise RuntimeError("尚未配置可用的模型 API Key")
+        # 厂区可用性 fail closed（与扫描循环 / 工厂派工同一口径）：_cron_execution_context
+        # 在目录缺失时会回退到当前项目，那等于把 A 项目的 prompt 跑进 B 项目目录。
+        # 这条检查会同时拦住「自动化页点立即运行」与「系统计划任务」两条入口。
+        pid = task.get("project_id")
+        if pid is not None:
+            proj = await self.store.get_project(int(pid))
+            if proj is None or not Path(proj.root_path).is_dir():
+                raise RuntimeError("厂区不可用（项目目录不存在），本次未执行")
         cron_pid, cron_workdir = await self._cron_execution_context(task)
         if cron_pid is None or cron_workdir is None:
             # 项目已删空（无项目态）：没有可落的工作目录，不再重排下一次运行
@@ -683,14 +1005,21 @@ class AutomationMixin:
         )
         runtime.agent.set_system(self.compose_system_for(cron_workdir))
 
+        # facts：本轮事实（步数 / 当前工具 / 被拦次数与工具名），原地累积
+        facts: dict = {}
+        progress_emit = make_progress_emit(
+            getattr(self, "run_ledger", None), "cron", int(task["id"]), facts)
+
         async def cron_emit(ev: dict) -> None:
-            pass  # 无人值守：流式/权限/队列事件不进前端，结果走任务行
+            # 无人值守：流式/权限/队列事件不进前端，结果走任务行；
+            # 只有「在跑什么」与「被拦了几次」以工序进度（1 次/秒）进工厂观战窗
+            await progress_emit(ev)
 
         result = await self._run_turn_pipeline(
             task["prompt"], cron_emit, plan_mode=False,
             images=None, runtime=runtime, session_id=sid,
         )
-        return runtime, sid, bool(result.get("stopped"))
+        return runtime, sid, bool(result.get("stopped")), facts
 
     # ---- 定时任务终态推送（渠道出站通知） ----
     # 开关 notify_channel 存在任务行里（默认关，防打扰）；推送目标与失败语义
@@ -1180,7 +1509,11 @@ class AutomationMixin:
             node["status"] = "running"
             running += 1
             self._pipeline_running.add(node["id"])
-            task = asyncio.get_running_loop().create_task(self._run_pipeline_node(pipe, node))
+            trigger = "manual" if node["id"] in self._pipeline_manual_triggers else "schedule"
+            self._pipeline_manual_triggers.discard(node["id"])
+            task = asyncio.get_running_loop().create_task(
+                self._run_pipeline_node(pipe, node, trigger=trigger)
+            )
             self._pipeline_node_tasks[node["id"]] = task
         await self._maybe_finish_pipeline(pipe)
 
@@ -1354,13 +1687,16 @@ class AutomationMixin:
             )
         return prompt
 
-    async def _run_pipeline_node(self, pipe: dict, node: dict) -> None:
+    async def _run_pipeline_node(
+        self, pipe: dict, node: dict, *, trigger: str = "schedule",
+    ) -> None:
         """跑一个节点：独立会话 + headless 门控；产出写回节点行（对标 _run_cron_task）。
 
         超时：timeout_s > 0 时限时执行，超时按可重试失败处理（防止单节点卡死
         占住并发槽）。会话续跑遇忙：不消耗重试次数，退避后重排队。
         """
         sid = ""
+        facts: dict = {}  # 本轮事实（步数 / 当前工具 / 被拦次数与工具名），原地累积
         # 运行账本：每次尝试一行（自动重试的每一轮各一行）。各分支只改 outcome，
         # 由 finally 恰好收尾一次——避免超时/失败/取消几条路径重复写账本。
         run = None
@@ -1381,6 +1717,8 @@ class AutomationMixin:
                 busy_rt = self.runtimes.get(node["ref_id"])
                 busy_task = getattr(busy_rt, "run_task", None) if busy_rt else None
                 if busy_task is not None and not busy_task.done():
+                    if trigger == "manual":
+                        self._pipeline_manual_triggers.add(int(node["id"]))
                     self._pipeline_busy_until[node["id"]] = time.time() + self.BUSY_RETRY_WAIT_S
                     wait_min = max(1, self.BUSY_RETRY_WAIT_S // 60)
                     await self.store.update_pipeline_node(
@@ -1396,7 +1734,7 @@ class AutomationMixin:
             try:
                 run = await self.run_ledger.start(
                     "pipeline_node", node["id"], project_id=run_pid,
-                    pipeline_id=pipe["id"], trigger="manual",
+                    pipeline_id=pipe["id"], trigger=trigger,
                 )
             except Exception:  # noqa: BLE001 - 记账失败不拦节点执行
                 run = None
@@ -1440,8 +1778,14 @@ class AutomationMixin:
             else:
                 runtime.agent.set_system(pipe_system)
 
+            # 与定时任务同一口径——装配线节点最常出的故障也是预授权没勾全。
+            node_progress = make_progress_emit(
+                self.run_ledger, "pipeline_node", int(node["id"]), facts)
+
             async def pipe_emit(ev: dict) -> None:
-                pass  # 无人值守：流式/权限事件不进前端，产出走节点行
+                # 无人值守：流式 / 权限事件不进前端，产出走节点行；
+                # 工序进度同定时任务，让工厂里的工位也能显示在跑什么
+                await node_progress(ev)
 
             timeout_s = max(0, int(node.get("timeout_s") or 0))
             run_coro = self._run_turn_pipeline(
@@ -1519,14 +1863,35 @@ class AutomationMixin:
                 pass
         finally:
             if run is not None:
+                # 与定时任务同一口径：done → 做成，empty / error → 没做成，
+                # cancelled 不给结论（用户叫停不算失败）；错误按关键词归因。
+                node_denied = int(facts.get("denied") or 0)
+                node_outcome = outcome_for(str(outcome["status"]),
+                                           denied_count=node_denied)
                 try:
                     await self.run_ledger.finish(
                         run["id"], status=outcome["status"],
                         result_excerpt=outcome["excerpt"], error=outcome["error"],
                         session_id=sid or None,
+                        denied_count=node_denied,
+                        denied_tools=denied_tools_json(facts),
+                        error_kind=(classify_run_error(outcome["error"])
+                                    if outcome["status"] == "error" else ""),
+                        outcome=node_outcome,
+                        outcome_source="auto" if node_outcome else "",
                     )
                 except Exception:  # noqa: BLE001 - 记账失败不影响节点收尾
                     pass
+            # 连续失败聚合告警：与定时任务同一阈值、同一按线每天一条去重。
+            # 装配线已有逐节点的渠道推送，这里只补桌面通知，不重复推渠道。
+            if str(outcome["status"]) in ("error", "empty"):
+                await alert_repeated_failures(
+                    self.store, getattr(self, "notify", None), None,
+                    {"id": int(pipe["id"]), "name": str(pipe.get("name") or "")},
+                    error=str(outcome.get("error") or ""),
+                    threshold=int(self._factory_setting("alert_after_failures", 3) or 0),
+                    kind="pipeline_node", pipeline_id=int(pipe["id"]),
+                )
             self._pipeline_running.discard(node["id"])
             self._pipeline_node_tasks.pop(node["id"], None)
             # 立刻补扫：刚完成的节点可能解锁了下游，不等下一个扫描周期
@@ -2040,6 +2405,7 @@ class AutomationMixin:
         pipe = await self.store.update_pipeline(pipe["id"], status="cancelled",
                                                 finished_at=time.time())
         for n in pipe["nodes"]:
+            self._pipeline_manual_triggers.discard(int(n["id"]))
             if n["status"] in ("blocked", "ready"):
                 await self.store.update_pipeline_node(
                     n["id"], status="cancelled", last_error="用户停止流水线",
@@ -2058,6 +2424,7 @@ class AutomationMixin:
         if pipe is not None:
             self._check_pipeline_ownership(pipe)
             for n in pipe["nodes"]:
+                self._pipeline_manual_triggers.discard(int(n["id"]))
                 if n["status"] == "running":
                     t = self._pipeline_node_tasks.get(n["id"])
                     if t is not None and not t.done():
@@ -2093,6 +2460,7 @@ class AutomationMixin:
                     "needs_confirm": True,
                     "downstream": [n["title"] for n in live],
                 }
+        manual_nodes = {int(node["id"])}
         await self.store.update_pipeline_node(
             node["id"], status="blocked", result="", last_error="", finished_at=0,
         )
@@ -2102,6 +2470,7 @@ class AutomationMixin:
                 if n["kind"] == "task" or n["id"] == node["id"]:
                     continue
                 if n["status"] in ("done", "error", "skipped", "cancelled"):
+                    manual_nodes.add(int(n["id"]))
                     await self.store.update_pipeline_node(
                         n["id"], status="blocked", result="", last_error="", finished_at=0,
                     )
@@ -2117,6 +2486,7 @@ class AutomationMixin:
         if pipe["status"] in ("failed", "cancelled", "done"):
             # done 也要拉回：重跑已完成节点（含级联）后，流水线必须重新参与调度
             pipe = await self.store.update_pipeline(pipe["id"], status="running", finished_at=0)
+        self._pipeline_manual_triggers.update(manual_nodes)
         self._broadcast_pipeline(pipe)
         if pipe["status"] == "running":
             spawn_bg(self._pipeline_pass())

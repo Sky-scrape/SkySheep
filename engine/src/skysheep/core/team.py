@@ -1729,7 +1729,9 @@ class TeamOrchestrator:
     def _director_closing(self) -> str:
         """本轮收尾指令：按板面状态给总管一句话的行动取向（验收 / 交付 / 推进）。"""
         tasks = self.board.tasks()
-        if tasks and self.board.all_done() and not self._deliver_prompted:
+        # 不按 _deliver_prompted 抑制：该标志只控制循环是否再给一轮，
+        # 交付指令必须真正进入总管下一轮上下文，否则全完成后会误判空闲。
+        if tasks and self.board.all_done():
             return (
                 "全部工单已完成：请面向用户产出《交付说明》（成果汇总、各队员贡献、"
                 "未尽事项），发言结束后调用 team_deliver 收口交付。"

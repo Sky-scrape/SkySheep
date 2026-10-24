@@ -1098,6 +1098,45 @@ class GatedDirector(Provider):
             yield ProviderDone(stop_reason="end_turn", input_tokens=11, output_tokens=7)
 
 
+class DeliveryPromptDirector(Provider):
+    """只在明确收到「全部工单已完成」时才交付的总管。
+
+    回归 `_deliver_prompted` 不得吞掉交付指令：全完成后的下一轮唤醒必须
+    带交付指令，否则按指令行事的模型会停在空闲而不是收口交付。
+    """
+
+    name, model = "dpd", "d1"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wakes: list[str] = []
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        last = messages[-1]
+        if last.role == "tool":
+            yield ProviderTextDelta("本轮动作完成。")
+            yield ProviderDone(stop_reason="end_turn", input_tokens=1, output_tokens=1)
+            return
+        self.wakes.append(last.text)
+        if "【待验收工单" in last.text:
+            yield ProviderTextDelta("验收。")
+            yield ProviderToolUse(id="a1", name="team_accept", input={"task_id": "T1"})
+            yield ProviderDone(stop_reason="tool_use", input_tokens=1, output_tokens=1)
+        elif "全部工单已完成" in last.text:
+            yield ProviderTextDelta("《交付说明》：已完成。")
+            yield ProviderToolUse(id="d1", name="team_deliver", input={})
+            yield ProviderDone(stop_reason="tool_use", input_tokens=1, output_tokens=1)
+        elif "【工单板】（空" in last.text:
+            yield ProviderTextDelta("分工。")
+            yield ProviderToolUse(id="b1", name="team_assign", input={
+                "title": "写调研报告", "assignee": "小研", "type": "exec",
+                "accept": "有结论"})
+            yield ProviderDone(stop_reason="tool_use", input_tokens=1, output_tokens=1)
+        else:
+            yield ProviderTextDelta("等待。")
+            yield ProviderDone(stop_reason="end_turn", input_tokens=1, output_tokens=1)
+
+
 class DirectorDeltaThenHang(Provider):
     """先吐一段发言再挂住的总管（取消收尾测试）。"""
 
@@ -1174,6 +1213,26 @@ async def test_ai_director_closed_loop_assign_accept_deliver(tmp_path):
         "input_tokens": 66, "output_tokens": 42, "stalled": [],
     }
     assert not orch.active  # 交付后团队关闭，会话恢复普通回合
+
+
+@pytest.mark.asyncio
+async def test_delivery_prompt_reaches_director_on_all_done(tmp_path):
+    """全部工单完成后的下一轮必须收到「全部工单已完成」指令。
+
+    回归：run_auto_turn 在进入下一轮前就把 _deliver_prompted 置真，而
+    _director_closing 又按该标志抑制交付提示——结果按指令行事的模型只收到
+    泛化的「请推进团队目标」，团队停在空闲而不是自动交付。
+    """
+    director = DeliveryPromptDirector()
+    _, orch = make_ai_orch(director, working_dir=tmp_path)
+    await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="调研完成")]]))])
+
+    result = await orch.run_auto_turn("目标：产出调研报告")
+
+    assert result["finished"] is not None, "全完成后应自动交付，而不是停在空闲"
+    assert result["finished"]["status"] == "done"
+    assert any("全部工单已完成" in w for w in director.wakes)
+    assert result["rounds_used"] == 4
 
 
 @pytest.mark.asyncio

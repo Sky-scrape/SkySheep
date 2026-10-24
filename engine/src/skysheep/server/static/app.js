@@ -4022,9 +4022,11 @@ function tcSetSub(card, team) {
   card._usage = team.usage || {};
   const usage = card._usage;
   const tokens = (usage.input_tokens || 0) + (usage.output_tokens || 0);
-  const idle = team.idle_reason || "";
-  const idleShort = idle.length > 80 ? idle.slice(0, 80) + "…" : idle;
   const active = (team.status || "active") === "active";
+  // 空闲原因是活动期提示：终态快照即使还带着旧值也不能再渲染（「已交付」旁边
+  // 挂着「已空闲」会自相矛盾）；直接交付走 tcFinish 的 tcClearIdle 清掉残留。
+  const idle = active ? (team.idle_reason || "") : "";
+  const idleShort = idle.length > 80 ? idle.slice(0, 80) + "…" : idle;
   card._ui.sub.textContent =
     `${(team.roster || []).length} 名队员 · 已用 ${team.rounds_used || 0}` +
     `${team.max_rounds ? `/${team.max_rounds}` : ""} 轮` +
@@ -4054,10 +4056,26 @@ function tcSetStatus(card, status) {
   el.dataset.status = status || "active";
 }
 
+// 终态收口时清掉活动期的空闲副标题（tcSetSub 已对终态快照做了同样防护，
+// 这里兜住 team.deliver/stop 直接 tcFinish、不经快照刷新那条路径）。
+function tcClearIdle(card) {
+  const ui = card._ui;
+  if (!ui) return;
+  const sub = ui.sub;
+  if (sub) {
+    const i = sub.textContent.indexOf(" · 已空闲：");
+    if (i >= 0) sub.textContent = sub.textContent.slice(0, i);
+    sub.title = "";
+  }
+  if (ui.channelEl) delete ui.channelEl.dataset.idleReason;
+  if (ui.status) ui.status.title = "";
+}
+
 // 终态收口：停用交付/收队/表单/行内按钮，展示《交付/收队说明》，自动折叠让出空间
 function tcFinish(card, status, summary) {
   card._finished = true;
   tcSetStatus(card, status);
+  tcClearIdle(card);
   card.classList.add("ended");
   // 终态/中断卡一律只读：交付、收队、接管、继续推进、工单表单与状态按钮
   // 全部收起（中断回放没有可操作的运行时，留着按钮只会得到「没有团队」）
@@ -5168,6 +5186,8 @@ function handleEvent(kind, data) {
       if (rightViewVisible("cron")) {
         loadCron();
       }
+      // 工厂开着时同步：跑完后的「下次运行」、新建 / 暂停 / 删除的产线都要跟上
+      if (typeof factoryOnAutomationChanged === "function") factoryOnAutomationChanged();
       break;
     }
     case "pipeline_updated": {
@@ -5184,6 +5204,8 @@ function handleEvent(kind, data) {
         }
         if (rightViewVisible("pipeline")) loadPipelines();
       }
+      // 工厂开着时同步：编排起停、节点状态与产线成败都要跟上
+      if (typeof factoryOnAutomationChanged === "function") factoryOnAutomationChanged();
       break;
     }
     case "notice": addNotice("⏳ " + data.message); break;
@@ -11833,11 +11855,13 @@ function showHelp() {
 
 document.getElementById("btn-help").onclick = () => showHelp();
 
-// ---------- 左栏功能导航（任务 / 日程 / 接力 / 自动化 / 项目记忆 / 记忆地图 / MCP·Skills） ----------
-// 顺序按使用频次排，与 index.html 的 .side-menu、.rail-btn 两处保持一致（改一处必须同步改另外两处）
+// ---------- 左栏功能导航（工厂看板 / 任务 / 日程 / 接力 / 自动化 / 项目记忆 / 记忆地图 / MCP·Skills） ----------
+// 顺序按使用频次排，与 index.html 的 .side-menu、.rail-btn 图标条两处保持一致（改一处必须同步改另外两处）
+// 工厂看板是与「新建会话」并列的主操作（#btn-factory，同一身 .nav-new 皮），已不在 .side-menu 里，
+// 但动作分发仍只在这一处：选择器把两个都收进来，别在别处再挂一遍 onclick
 const navPending = {}; // 已全部上线，保留结构便于扩展
 
-document.querySelectorAll(".nav-item").forEach((btn) => {
+document.querySelectorAll(".nav-item, #btn-factory").forEach((btn) => {
   btn.onclick = () => {
     const act = btn.dataset.act;
     // 窄屏上侧栏是抽屉：点了导航就收回（任务等打开的是右侧面板标签，
@@ -12945,6 +12969,77 @@ function activateRightTab(id) {
   loadRightTab(rightActiveView());
 }
 
+/** 工厂 → 自动化页：切到目标项目、打开右侧「自动化」标签，并把任务行滚进视野。
+
+    工厂里看到「上次失败」之后最常见的下一步就是改提示词 / 补预授权工具，
+    以前要「返回对话 → 切项目 → 开面板 → 找任务」四步，观战台看到问题却
+    停在那里不动。失败不静默：切不过去就如实说，至少把面板打开。 */
+async function openAutomationFor(projectId, taskId) {
+  let target = null;
+  try {
+    const { projects } = await request("project.list");
+    target = (projects || []).find((p) => String(p.id) === String(projectId)) || null;
+  } catch (e) {
+    addNotice("读取项目列表失败：" + e.message);
+    return false;
+  }
+  if (!target || !target.root_path) {
+    addNotice("该产线所属项目已不存在，无法打开");
+    return false;
+  }
+  if (!target.is_current) {
+    try {
+      await request("project.switch", { path: target.root_path });
+      await applyWorkspaceData(await fetchWorkspaceData());
+    } catch (e) {
+      addNotice("切换到该项目失败：" + e.message);
+      return false;
+    }
+  }
+  if (typeof backToChat === "function") backToChat();
+  openRightTab("cron"); // rightTabFor("cron") → 自动化合并标签的定时分段
+  // 任务行由 loadCron 异步渲染：轮询几拍再定位（最多约 2 秒），找不到就只开面板
+  let tries = 0;
+  const focusRow = () => {
+    const li = taskId
+      ? document.querySelector(`#cron-list [data-cron-id="${taskId}"]`)
+      : null;
+    if (!li) {
+      if (tries++ < 8) setTimeout(focusRow, 250);
+      return;
+    }
+    li.scrollIntoView({ block: "center", behavior: "smooth" });
+    li.classList.add("cron-focus");
+    setTimeout(() => li.classList.remove("cron-focus"), 2600);
+  };
+  setTimeout(focusRow, 120);
+  return true;
+}
+
+async function openPipelineFor(projectId, pipelineId, nodeId) {
+  try {
+    const { projects } = await request("project.list");
+    const target = (projects || []).find((p) => String(p.id) === String(projectId));
+    if (!target || !target.root_path) {
+      addNotice("该编排所属项目已不存在，无法打开");
+      return false;
+    }
+    if (!target.is_current) {
+      await request("project.switch", { path: target.root_path });
+      await applyWorkspaceData(await fetchWorkspaceData());
+    }
+    const r = await request("pipeline.get", { id: Number(pipelineId) });
+    if (!r.pipeline) { addNotice("该编排已不存在"); return false; }
+    backToChat();
+    openRightTab("pipeline");
+    pipelineModal(r.pipeline, nodeId);
+    return true;
+  } catch (e) {
+    addNotice("打开编排失败：" + e.message);
+    return false;
+  }
+}
+
 function closeRightTab(id) {
   const tab = rightTabFor(id);
   if (tab.startsWith("aux")) {
@@ -13114,8 +13209,8 @@ document.getElementById("rail-search").onclick = () => {
     if (el) { el.focus(); el.select(); }
   });
 };
-// 窄栏功能导航六件套：与侧栏导航项同一套动作（openRightTab 打开右侧面板标签）；
-// 停在设置页时先回对话，别让面板开在看不见的地方。
+// 窄栏功能导航七件套（含主操作组的工厂看板）：与侧栏导航项同一套动作
+// （openRightTab 打开右侧面板标签）；停在设置页时先回对话，别让面板开在看不见的地方。
 document.querySelectorAll("#sb-rail [data-rail-act]").forEach((btn) => {
   btn.onclick = () => {
     // 工厂走第三顶层视图；其余入口都回到对话再开右侧标签

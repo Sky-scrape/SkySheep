@@ -499,6 +499,10 @@ def test_team_idle_resume_and_usage_wiring():
     assert "ui.takeoverBtn" in body and "ui.resumeBtn" in body
     assert "ui.taskForm.hidden = true" in body
     assert 'card.querySelectorAll(".tt-op")' in body
+    # 终态不再保留活动期空闲副标题：直接收口与快照刷新两条路径都要清
+    assert "function tcClearIdle(card)" in js
+    assert "tcClearIdle(card);" in body
+    assert "const idle = active ? (team.idle_reason" in js
 
 
 # ---------- 对抗发现转团队工单：显式选择 / 来源锚点 / 只读保护 ----------

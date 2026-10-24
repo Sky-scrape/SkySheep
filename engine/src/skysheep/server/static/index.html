@@ -65,14 +65,19 @@
         <span class="kbd">Ctrl N</span>
       </button>
 
+      <!-- 工厂看板：第三顶层视图（本机专属），升为与「新建会话」并列的主操作——
+           同一个 .nav-new 皮，图标沿用窄栏那枚手绘线稿（线色跟 --blue 走）。
+           它原在下方 .side-menu 里；收起态的对应入口（#sb-rail 中紧随 rail-new）
+           必须一起挪，别只改一处。 -->
+      <button id="btn-factory" class="nav-new" data-act="factory" title="工厂看板：跨项目的自动化观战与派工，像素厂区里看每一次真实运行（仅本机可用）"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20V10.5l5 3v-3l5 3v-3l5 3V20Z"/><path d="M3 20h18"/><path d="M7 10.5V5h2.4v4"/></svg></span>工厂看板</button>
+
       <nav class="side-menu">
         <!-- 顺序按「使用频次」排：天天点的在最上，配置类沉底。
-             折叠栏 .rail-btn 必须保持同一顺序（两处一起改） -->
+             折叠栏 .rail-btn 图标条必须保持同一顺序（两处一起改） -->
         <button class="nav-item" data-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里">任务</button>
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
         <button class="nav-item" data-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕；与输入框的圆桌、团队、对抗分开">接力</button>
         <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
-        <button class="nav-item" data-act="factory" title="工厂：跨项目的自动化观战与派工，像素厂区里看每一次真实运行（仅本机可用）">工厂</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
         <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
@@ -170,8 +175,8 @@
   <!-- 拖动调整侧栏宽度（双击恢复默认） -->
   <div id="sb-resizer" class="ui-resizer ui-resizer-v" title="拖动调整侧栏宽度 · 双击恢复默认"></div>
 
-  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航六件套 + 功能图标（新建会话 / 搜索）
-       + 最近会话的首字快捷列（点击直接切换会话，当前项高亮）。
+  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航七件套 + 主操作（新建会话 /
+       工厂看板）与搜索 + 最近会话的首字快捷列（点击直接切换会话，当前项高亮）。
        显隐完全交给 CSS 的 body.left-collapsed（宽度 / 负 margin 滑动过渡，非硬切）——
        不要给 rail 及其按钮加 .hidden 类：它是 display:none !important，会把
        展开态的显示规则一起压掉（此前「折叠后再也打不开侧栏」正是它造成的）。 -->
@@ -190,9 +195,6 @@
     <button class="rail-btn" data-rail-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="factory" title="工厂：跨项目的自动化观战与派工（仅本机可用）" aria-label="工厂">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20V10.5l5 3v-3l5 3v-3l5 3V20Z"/><path d="M3 20h18"/><path d="M7 10.5V5h2.4v4"/></svg>
-    </button>
     <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，自动注入每一轮对话" aria-label="项目记忆">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h5.5A3.5 3.5 0 0 1 12 7.5V21a2.5 2.5 0 0 0-2.5-2.5H3Z"/><path d="M21 4h-5.5A3.5 3.5 0 0 0 12 7.5V21a2.5 2.5 0 0 1 2.5-2.5H21Z"/></svg>
     </button>
@@ -203,7 +205,12 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0Z"/><path d="M12 17v4"/></svg>
     </button>
     <div class="rail-sep" aria-hidden="true"></div>
+    <!-- 主操作组：新建会话，工厂看板紧随其后（与展开态 #btn-factory 并列的关系一致），
+         再是搜索。工厂看板是第三顶层视图，图标与本项目其余线稿同款 -->
     <button id="rail-new" class="rail-btn" title="新建会话（Ctrl+N）">＋</button>
+    <button id="rail-factory" class="rail-btn" data-rail-act="factory" title="工厂看板：跨项目的自动化观战与派工（仅本机可用）" aria-label="工厂看板">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20V10.5l5 3v-3l5 3v-3l5 3V20Z"/><path d="M3 20h18"/><path d="M7 10.5V5h2.4v4"/></svg>
+    </button>
     <button id="rail-search" class="rail-btn" title="搜索会话：展开侧栏并聚焦搜索框">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
     </button>
@@ -2059,23 +2066,34 @@
     <div id="view-factory" class="view hidden">
       <header id="factory-hud">
         <div class="fh-cells">
-          <div class="fh-cell" data-k="running" title="正在运行的包裹数">
+          <div class="fh-cell" data-k="running" role="button" tabindex="0" title="正在运行的包裹数">
             <b id="factory-num-running">0</b><span>运行中</span>
           </div>
-          <div class="fh-cell" data-k="queued" title="编排节点里依赖已满足、正在等并发额度的工位数">
+          <div class="fh-cell" data-k="queued" role="button" tabindex="0" title="到点但超过并发额度、等下一轮扫描的定时任务，加上编排里依赖已满足、正在等并发额度的工位数">
             <b id="factory-num-queued">0</b><span>排队</span>
           </div>
-          <div class="fh-cell" data-k="attention" role="button" tabindex="0" title="孤儿任务、上次失败、运行中断、到点被跳过与停工厂区（点击逐条列出）">
+          <div class="fh-cell" data-k="attention" role="button" tabindex="0" title="孤儿任务、上次失败、运行中断、空产出、有工具被拦、到点被跳过与停工厂区（点击逐条列出）">
             <b id="factory-num-attention">0</b><span>需留意</span>
           </div>
-          <div class="fh-cell" data-k="done" title="本地今天 0 点以后成功完成的运行数">
-            <b id="factory-num-done">0</b><span>今日完成</span>
+          <div class="fh-cell" data-k="done" role="button" tabindex="0" title="本地今天 0 点以后「做成」的运行数：跑完且有产出、没有被门控拦过；有拦截的空产出不计">
+            <b id="factory-num-done">0</b><span>今日做成</span>
+          </div>
+          <div class="fh-cell" data-k="tokens" role="button" tabindex="0" title="本地今天 0 点以后各次运行消耗的 token 合计（输入 + 输出；未记录用量的运行不计）">
+            <b id="factory-num-tokens">0</b><span>今日 token</span>
+          </div>
+          <div class="fh-cell" data-k="chat" role="button" tabindex="0" title="正在跑的对话轮与后台子代理（只读快照；点击查看并跳过去）">
+            <b id="factory-num-chat">0</b><span>对话在跑</span>
           </div>
         </div>
+        <!-- 样板厂：数据只在内存、永不运行。计数条同时灰掉，避免把演示数字当成真的 -->
+        <span id="factory-demo-badge" class="fh-demo hidden"
+              title="样板厂：本机还没有真实产线，下面全是演示数据，只在内存、不会真的运行">演示</span>
         <div id="factory-hud-ops">
-          <button id="factory-settings" class="btn-ghost" title="工厂设置：入口开关、样板厂、昼夜天色与运行历史保留">⚙</button>
+          <button id="factory-settings" class="btn-ghost" title="工厂设置：入口开关、样板厂、昼夜天色、现实天气与运行历史保留">⚙</button>
           <button id="factory-close" class="btn-ghost" title="返回对话（Esc）">← 返回对话</button>
         </div>
+        <span id="factory-weather" class="fh-weather hidden" role="button" tabindex="0"
+              title="现实天气：在工厂设置里填写城市后开启；结果缓存 30 分钟"></span>
         <div id="factory-clock" title="本机时间">
           <span id="factory-clock-time">--:--:--</span>
           <span id="factory-clock-date"></span>
@@ -2090,17 +2108,28 @@
               <button id="factory-panel-fold" class="sec-ops" title="折叠 / 展开监控面板">‹</button>
             </span>
           </div>
+          <!-- 筛选与搜索：厂区多了以后，面板要能只看在跑 / 需留意 / 停工 -->
+          <div id="factory-panel-filter">
+            <div class="fx-chips" role="group" aria-label="筛选产线">
+              <button class="fx-chip active" data-filter="all" aria-pressed="true">全部</button>
+              <button class="fx-chip" data-filter="running" aria-pressed="false">在跑</button>
+              <button class="fx-chip" data-filter="attention" aria-pressed="false">需留意</button>
+              <button class="fx-chip" data-filter="stopped" aria-pressed="false">停工</button>
+            </div>
+            <input id="factory-search" type="search" autocomplete="off"
+                   placeholder="搜厂区或产线" aria-label="按厂区名或产线名筛选">
+          </div>
           <div id="factory-panel-body"></div>
         </aside>
         <section id="factory-stage" aria-label="工厂像素场景">
           <canvas id="factory-canvas"></canvas>
           <div id="factory-labels" aria-hidden="true"></div>
-          <div id="factory-toolbar" role="toolbar" aria-label="镜头与显示">
-            <button id="factory-fit" title="全景：装下全部厂区">全景</button>
-            <button id="factory-zoom-in" title="拉近">＋</button>
-            <button id="factory-zoom-out" title="拉远">－</button>
+          <!-- 工具栏：全景 / 名牌 / 全部运行。全景按钮在聚焦档里是可见的返回出口；
+               滚轮与拖动仍不改比例，场景保持固定 45°。 -->
+          <div id="factory-toolbar" role="toolbar" aria-label="显示">
+            <button id="factory-center" title="回到全景（Esc）">全景</button>
             <button id="factory-labels-toggle" title="显示 / 隐藏厂区与机台名牌" aria-pressed="true">名牌</button>
-            <button id="factory-all-runs" title="全部运行（最多 60 条）">全部任务</button>
+            <button id="factory-all-runs" title="全部运行：按状态 / 厂区筛选、翻页，行内可直接打开产出">全部运行</button>
           </div>
         </section>
         <!-- 远程 / 空态 / 样板厂提示：放 stage 外，窄屏不画场景时也能看到 -->

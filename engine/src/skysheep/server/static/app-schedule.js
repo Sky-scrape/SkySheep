@@ -928,7 +928,10 @@ async function loadCron() {
   tasks.forEach((t) => {
     const li = document.createElement("li");
     li.className = "cron-item" + (t.enabled ? "" : " off");
-    const status = t.last_status === "ok" ? "✓" : t.last_status === "error" ? "✗" : "";
+    li.dataset.cronId = t.id; // 工厂「去编辑」按这个定位到具体任务行
+    // ⏹ = 上一轮被用户叫停（不是失败，也不算完成）
+    const status = t.last_status === "ok" ? "✓" : t.last_status === "error" ? "✗"
+      : t.last_status === "cancelled" ? "⏹" : "";
     li.innerHTML =
       `<div class="cron-main">
          <span class="cron-title">${t.enabled ? "" : "⏸ "}${escapeHtml(t.name)}</span>
@@ -1329,7 +1332,7 @@ async function loadPipelines() {
   });
 }
 
-function pipelineModal(p) {
+function pipelineModal(p, focusNodeId) {
   const box = document.createElement("div");
   const KIND_BADGE = { task: "⛓ 挂接任务", session: "💬 会话续跑" };
   const timeoutTxt = (n) => n.kind !== "task"
@@ -1462,6 +1465,13 @@ function pipelineModal(p) {
     };
   }
   showModal(`编排 · ${p.name}`, box, onOk, okLabel);
+  if (focusNodeId) requestAnimationFrame(() => {
+    const card = box.querySelector(`.pl-node-view[data-nid="${Number(focusNodeId)}"]`);
+    if (!card) return;
+    card.scrollIntoView({ block: "center", behavior: "smooth" });
+    card.classList.add("flash");
+    setTimeout(() => card.classList.remove("flash"), 1200);
+  });
 }
 
 function pipelineCreateModal() {

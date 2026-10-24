@@ -475,10 +475,12 @@ def test_settings_nav_grouping(home):
 
 
 def test_side_nav_order_matches_rail(home):
-    """左栏展开态（.side-menu）与收起态（.rail-btn）的功能顺序必须一致。
+    """左栏展开态（.side-menu）与收起态（.rail-btn 图标条）的功能顺序必须一致。
 
     两处是同一套动作的两个渲染面：顺序不一致会让「展开/收起侧栏」看起来
     像功能被挪了位置。顺序按使用频次排，改一处必须同步改另一处。
+    「工厂看板」已升为与「新建会话」并列的主操作（展开态 #btn-factory，收起态
+    紧随 rail-new），两处都挪出了这段功能菜单，所以不参与这组顺序比对。
     """
     import re
 
@@ -487,13 +489,20 @@ def test_side_nav_order_matches_rail(home):
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
     side = re.findall(r'class="nav-item" data-act="([^"]+)"', html)
-    rail = re.findall(r'class="rail-btn" data-rail-act="([^"]+)"', html)
+    # 收起态只取图标条那一段（第一条分隔线之前）：分隔线下面是主操作与最近会话
+    rail_strip = html[html.index('id="sb-rail"'):html.index('<div class="rail-sep"')]
+    rail = re.findall(r'class="rail-btn" data-rail-act="([^"]+)"', rail_strip)
 
     assert side, "侧栏导航没找到"
     assert side == rail, f"两处顺序不一致：侧栏={side} 收起栏={rail}"
     # 频次顺序：任务与日程最前，配置类（MCP/Skills）沉底
     assert side[0] == "todo" and side[1] == "agenda"
     assert side[-1] == "ext"
+    # 主操作位：两处都上移了工厂看板（展开态在 #btn-new 之后，收起态在 #rail-new 之后）
+    assert "factory" not in side and "factory" not in rail, "工厂看板不该留在功能菜单里"
+    assert 'class="nav-new" data-act="factory"' in html
+    assert html.index('id="btn-new"') < html.index('id="btn-factory"')
+    assert html.index('id="rail-new"') < html.index('data-rail-act="factory"')
 
 
 def test_temperature_presets(home):

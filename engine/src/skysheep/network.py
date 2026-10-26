@@ -12,9 +12,16 @@
 - ca_cert 是「追加」语义：在系统默认证书库之上再信任这张证书，对齐
   NODE_EXTRA_CA_CERTS。直接给 httpx 传 verify="path.pem" 是「替换」语义，
   用户配企业根证书后会把公网证书链打断，因此这里显式构造 SSLContext。
-- transport 与 proxy 在 httpx 0.27 互斥（传 proxy 会重建 transport）。走代理时
-  DNS 由代理解析，调用方传入的钉连 transport 已无意义，本模块直接忽略它——
-  这是语义正确的取舍，调用方无需自行判断。
+  verify 与 proxy 正交：走代理的请求同样做端到端证书校验，自签 CA 在代理
+  路径上照常附加（遗漏这一点的历史版本会让「企业代理 + TLS 审查」组合下
+  配置静默失效）。
+- transport 与 proxy 不能同时生效（httpx 0.28 里 proxy 是「全站 mount」，会
+  遮蔽调用方 transport）。走代理时目标域名由代理解析（HTTP CONNECT 与 SOCKS5
+  都把主机名交给代理端），调用方的钉连 transport 固定不了「代理→目标」这一段
+  ——本模块在代理路径上忽略它。这**不是**「威胁面不存在」：本地校验与代理解析
+  是两次独立解析，代理路径的钉连语义要由调用方自行补齐（socks5 本地解析场景，
+  见 tools/web.py：把校验过的 IP 交给代理建连）或如实标注残余风险（http/socks5h
+  代理解析场景，web_fetch 的结果注记与审计日志）。直连路径的钉连不受影响。
 """
 
 from __future__ import annotations
@@ -198,6 +205,26 @@ def _host_of(url: str) -> str:
         return ""
 
 
+# 本机地址判定（models/probe.py 的 _is_local 同源）：这些主机（及 .local /
+# .localhost 后缀）一律显式直连——全局代理不该把发往本机的请求转走，代理侧的
+# 127.0.0.1 不是用户本机（M19：本地模型服务「检测通过、对话失败」的成因）。
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"})
+
+
+def is_local_base_url(url: str | None) -> bool:
+    """base_url 是否指向本机（LM Studio / Ollama / 本地网关一类）。
+
+    对话路径（providers）、探测路径（models/probe.py）与诊断路径共用这一份
+    判定，避免「检测直连、对话走代理」的口径漂移。
+    """
+    if not url:
+        return False
+    host = _host_of(url).lower()
+    return (
+        host in _LOCAL_HOSTS or host.endswith(".local") or host.endswith(".localhost")
+    )
+
+
 def _client_kwargs(
     network: NetworkConfig,
     *,
@@ -211,6 +238,7 @@ def _client_kwargs(
     """组装 Client / AsyncClient 的公共参数。
 
     直连与代理两条路径都在这里定死 trust_env=False，调用方无从漏掉。
+    proxy_override 三态（M19）：None=跟随全局；""=显式直连；非空=用该代理。
     """
     kw: dict = {
         "timeout": timeout,
@@ -222,12 +250,20 @@ def _client_kwargs(
     if proxy and not bypass:
         kw["proxy"] = proxy
         kw["trust_env"] = False
-        # 走代理：忽略调用方的 transport（见模块 docstring 的说明）
+        # 走代理：忽略调用方的 transport（proxy 是全站 mount，会遮蔽它），但
+        # verify 与 proxy 正交——自签 CA 必须在代理路径同样生效（M13：历史上
+        # 代理分支不传 verify，「企业代理 + TLS 审查 + 自签 CA」静默失效）。
+        verify = _verify(network)
+        if verify is not True:
+            kw["verify"] = verify
     else:
         kw["trust_env"] = False
         if transport is not None:
             kw["transport"] = transport
         verify = _verify(network)
+        # transport 由调用方自带时，证书策略随 transport 走（直连钉连场景由
+        # tools/web.py 用 make_async_transport 把 CA 烧进 transport）；
+        # 只有工厂自建 transport 时才在这里附加 CA。
         if verify is not True and transport is None:
             kw["verify"] = verify
     return kw
@@ -247,7 +283,9 @@ def make_httpx_client(
 
     url：本次请求的目标（用于判定 no_proxy）。多目标场景可传 None，
         此时配了代理就走代理、没配就直连。
-    transport：仅在直连且未配 CA 时生效；走代理时被忽略（见模块 docstring）。
+    transport：仅在直连路径生效（证书策略随 transport 自带，见 _client_kwargs）；
+        走代理时被忽略（见模块 docstring），残余风险由调用方如实标注。
+    proxy_override 三态（M19）：None=跟随全局；""=显式直连；非空=用该代理。
     """
     return httpx.Client(**_client_kwargs(
         network, url=url, transport=transport, timeout=timeout,
@@ -306,6 +344,10 @@ def make_async_httpx2_client(
     if proxy and not bypass:
         kw["proxy"] = proxy
         kw["trust_env"] = False
+        # 代理与 verify 正交：自签 CA 在代理路径同样生效（与 _client_kwargs 同口径）
+        verify = _verify(network)
+        if verify is not True:
+            kw["verify"] = verify
     else:
         kw["trust_env"] = False
         if transport is not None:

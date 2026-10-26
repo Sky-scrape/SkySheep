@@ -188,17 +188,22 @@ async def test_fts_write_failure_is_recorded_and_repaired(tmp_path, monkeypatch)
     await store.append_message(sess.id, Message.user("第一条"))
     assert store.fts_ready is True
 
-    # 制造一次索引写失败：让 INSERT 抛错（模拟 FTS 写入异常）
+    # 制造一次索引写失败：让 FTS 的 INSERT 抛错（模拟 FTS 写入异常）。
+    # M16 起 FTS 写随 append_message 走独立事务连接，注入点从 store._db.execute
+    # 搬到 _fts_insert 的连接参数上——「失败置脏、不拦主流程」语义不变。
     calls = {"n": 0}
-    real_execute = store._db.execute
+    real_fts_insert = SessionStore._fts_insert
 
-    async def flaky(sql, *args, **kwargs):
-        if "INSERT INTO messages_fts" in sql:
-            calls["n"] += 1
+    class _FtsDownConn:
+        @staticmethod
+        async def execute(sql, *args, **kwargs):
             raise RuntimeError("fts down")
-        return await real_execute(sql, *args, **kwargs)
 
-    monkeypatch.setattr(store._db, "execute", flaky)
+    async def flaky_fts_insert(self, conn, message_id, content_json):
+        calls["n"] += 1
+        return await real_fts_insert(self, _FtsDownConn(), message_id, content_json)
+
+    monkeypatch.setattr(SessionStore, "_fts_insert", flaky_fts_insert)
     await store.append_message(sess.id, Message.user("搜不到的那条"))
     assert calls["n"] == 1
     assert store._fts_dirty is True, "失败要置脏（旧实现静默吞掉）"

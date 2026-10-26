@@ -69,14 +69,24 @@ def test_app_filters_terminal_events_for_remote():
 
     过滤闭包在 WS 处理器内部无法直接调用；与 test_ui_prefs 读 app.js 同理，
     用源码断言锁住接线——有人删过滤分支时测试变红。
+
+    （审计 M05 改白名单后更新锚点：过滤层改为「无会话归属事件默认拦截，
+    白名单 _REMOTE_ANON_KINDS 逐个放行」，term_data/term_exit 不在白名单即被拦，
+    行为不变；这里的源码断言跟着锁新结构——白名单机制在位且终端两类不在名单内。
+    运行时行为由本文件的 spawn/input 本机专属用例与白名单运行时测试共同兜底。）
     """
     from skysheep.server import app as server_app
 
     src = Path(server_app.__file__).read_text(encoding="utf-8")
-    assert 'elif k in ("term_data", "term_exit"):' in src
+    assert 'elif k not in _REMOTE_ANON_KINDS:' in src
+    assert "_REMOTE_ANON_KINDS = frozenset({" in src
+    assert '"term_data"' not in src[src.index("_REMOTE_ANON_KINDS"):
+                                      src.index("})", src.index("_REMOTE_ANON_KINDS"))]
+    assert '"term_exit"' not in src[src.index("_REMOTE_ANON_KINDS"):
+                                      src.index("})", src.index("_REMOTE_ANON_KINDS"))]
     # 过滤分支必须位于「非本机」条件内（粗校验：过滤行出现在 client_is_local 判定之后）
     assert src.index("client_is_local = _client_is_local") < src.index(
-        'elif k in ("term_data", "term_exit"):'
+        'elif k not in _REMOTE_ANON_KINDS:'
     )
 
 

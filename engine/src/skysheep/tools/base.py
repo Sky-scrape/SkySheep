@@ -16,6 +16,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import json
+import os
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -167,40 +168,113 @@ class ChangeRecorder:
     write_file / edit_file 在真正覆盖前调用 record()；同一轮里同一文件
     只记第一次（即本轮开始前的状态），轮末由 backend 存入 CheckpointStore，
     用户可一键回滚本轮改动（对标 Claude Code checkpoints / Codex rollback）。
+
+    读取一律经 asyncio.to_thread 进工作线程（审查 SEC-M10）：record 的整读、
+    record_tree 的全树扫描此前都跑在事件循环上，大文件/大目录会把所有会话
+    的流式 UI 一起冻结数秒到数十秒。并发前提：同一把 recorder 只被同一条
+    agent 任务链顺序调用——每个会话 runtime 各持一把；团队队员按名册串行
+    唤醒（_wake_actionable 的 for-await）；普通子代理的写操作被 SubagentGate
+    预拒绝，够不到 recorder。
     """
 
     def __init__(self) -> None:
         self.pre: dict[str, bytes | None] = {}
 
-    def record(self, path: Path) -> None:
-        key = str(path)
-        if key in self.pre:
-            return
-        try:
-            self.pre[key] = path.read_bytes()
-        except OSError:
-            try:
-                is_dir = path.is_dir()
-            except OSError:
-                is_dir = False
-            if is_dir:
-                self.pre[key] = DIR_MARKER  # 改前是目录 → 回滚时重建目录本身
-            else:
-                self.pre[key] = None  # 改前不存在 → 回滚时应删除
+    async def record(self, path: Path) -> None:
+        """记下 path 的改前状态。读不到时按真实语义分流，绝不把「读失败」
+        当成「改前不存在」——记 None 等于告诉回滚「这个文件本来就不在」，
+        会把还活着的文件删掉（审查 M09）：
 
-    def record_tree(self, root: Path) -> None:
+        - 读到内容：进检查点；
+        - FileNotFoundError：改前不存在 → 记 None（回滚时应删除）；
+        - 读的是目录（Windows 上 read_bytes 对目录抛 PermissionError，POSIX
+          抛 IsADirectoryError，同属 OSError）：记 DIR_MARKER（回滚时重建
+          目录本身）；
+        - 其余读失败（文件被占用 / 无权限的普通文件）：内容拿不到，记 None
+          或静默跳过都会让随后的覆盖/删除变得不可回滚——抛 ToolError 让
+          调用方拒绝本次操作。
+
+        读取在工作线程里跑（to_thread），线程里抛出的 ToolError 原样传回；
+        读失败时不留半条记录（见 _pre_state）。
+        """
+        key = str(path)
+        if key in self.pre:  # 同一轮去重：第一次记下的才是改前状态
+            return
+        self.pre[key] = await asyncio.to_thread(self._pre_state, path)
+
+    def _pre_state(self, path: Path) -> bytes | None:
+        """读出「改前状态」并分类（语义见 record；在工作线程执行，无 I/O 语义变更）。"""
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None  # 改前不存在 → 回滚时应删除
+        except OSError:
+            pass
+        try:
+            is_dir = path.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            return DIR_MARKER  # 改前是目录 → 回滚时重建目录本身
+        raise ToolError(
+            f"无法读取 {path} 的当前内容（文件可能被占用或权限不足），"
+            "无法为本次改动建立可回滚的检查点，操作已拒绝。"
+            "请先关闭占用该文件的程序或确认权限后重试。"
+        )
+
+    async def record_tree(self, root: Path) -> None:
         """目录：逐文件记录改前内容（目录本身的哨兵由调用方按需 record）。
 
         移动/删除目录时只有文件条目进检查点，回滚才能逐文件还原；空子目录
         不重建（与 delete_file 的既有行为一致）。
+
+        扫描失败必须抛 ToolError 拒绝调用方的删除/移动，不能「记了半棵树就
+        放行」：pathlib 的 rglob 会把遍历中的 PermissionError 静默吞掉（实测
+        碰到受保护子目录即静默截断、不抛错），旧实现靠 rglob 时未记录的文件
+        回滚时无处可还（审查 M09）。这里用 os.walk + onerror 显式收错。
+
+        全树扫描与逐文件读取整体放进工作线程（to_thread，审查 SEC-M10），
+        逐文件读取前先 stat：超过 MAX_CHECKPOINT_FILE_BYTES 的文件直接跳过
+        （save 端 _limit_pre 反正会把它丢弃，白读整份还撑内存）。
         """
+        await asyncio.to_thread(self._record_tree_sync, root)
+
+    def _record_tree_sync(self, root: Path) -> None:
+        # 延迟导入：core.checkpoints 反向 import 本模块的 DIR_MARKER，模块级
+        # 引用会造成循环依赖；在函数内取属性，测试也能按值 monkeypatch 上限。
+        from ..core.checkpoints import MAX_CHECKPOINT_FILE_BYTES
+
+        def _on_error(e: OSError) -> None:
+            raise ToolError(
+                f"无法完整读取目录 {root}（{e}），检查点可能记录不全，"
+                "为避免不可回滚的删除/移动，操作已拒绝。"
+            ) from e
+
         try:
-            children = sorted(root.rglob("*"))
-        except OSError:
-            return
-        for child in children:
-            if child.is_file():
-                self.record(child)
+            # 先物化整棵树的遍历结果再逐个记录：扫描中途失败（onerror 抛出或
+            # entry 判定抛 OSError）时一个条目都还没进检查点，不会留下「半棵树」。
+            # ToolError 不是 OSError，不会被下面 except 误吞。
+            entries = list(os.walk(root, onerror=_on_error))
+        except OSError as e:
+            raise ToolError(
+                f"无法完整读取目录 {root}（{e}），检查点可能记录不全，"
+                "为避免不可回滚的删除/移动，操作已拒绝。"
+            ) from e
+        for dirpath, _dirnames, filenames in entries:
+            for name in filenames:
+                p = Path(dirpath) / name
+                key = str(p)
+                if key in self.pre:  # 同一轮去重：第一次记下的才是改前状态
+                    continue
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    size = -1  # stat 不出来不跳过：交给 _pre_state 按读失败分流
+                if size > MAX_CHECKPOINT_FILE_BYTES:
+                    # 与 save 端 _limit_pre 的单文件上限对齐：超限文件反正进不了
+                    # 快照，提前跳过省掉整份读盘与内存占用（审查 SEC-M10）。
+                    continue
+                self.pre[key] = self._pre_state(p)
 
     def reset(self) -> None:
         self.pre.clear()

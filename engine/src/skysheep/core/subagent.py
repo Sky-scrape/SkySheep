@@ -270,21 +270,34 @@ async def run_subagent(
     )
     final_text = ""
     failed = False
-    async for ev in agent.run_turn(prompt):
-        if on_event is not None:
-            try:
-                await on_event(ev)
-            except Exception:  # noqa: BLE001
-                pass  # 直播失败不影响子代理本身
-        if ev.kind == "error":
-            # 子代理内 Provider 故障被 Agent 吞成 ErrorEvent：不能当成正常产出，
-            # 否则任务会被记为 done、运行中心显示“已完成”，重跑入口也拿不到
-            failed = True
-        if ev.kind == "assistant_message":
-            content = ev.message.get("content", [])
-            final_text = "".join(
-                b.get("text", "") for b in content if b.get("type") == "text"
-            )
+    try:
+        async for ev in agent.run_turn(prompt):
+            if on_event is not None:
+                try:
+                    await on_event(ev)
+                except Exception:  # noqa: BLE001
+                    pass  # 直播失败不影响子代理本身
+            if ev.kind == "error":
+                # 子代理内 Provider 故障被 Agent 吞成 ErrorEvent：不能当成正常产出，
+                # 否则任务会被记为 done、运行中心显示“已完成”，重跑入口也拿不到
+                failed = True
+            if ev.kind == "assistant_message":
+                content = ev.message.get("content", [])
+                final_text = "".join(
+                    b.get("text", "") for b in content if b.get("type") == "text"
+                )
+    except asyncio.CancelledError as ce:
+        # 用户停止/主轮取消（M15）：用户已看到的部分正文不凭空消失（与圆桌/
+        # 团队的取消回收同语义）。Agent 层 run_turn 的 finally 已把流式中断的
+        # 已流出正文兜底并进 history（_persist_partial_stream_text 的产物形态：
+        # 末条 assistant 消息、尾部带「已停止」注记）——Agent 实例只在这个
+        # 作用域里，由这里收割后挂在取消异常上随上抛带出，交给 _run_one 的
+        # 取消分支写进任务记录并照常落盘。绝不吞掉取消：收割是同步操作，
+        # 记完账原样上抛，取消语义保持不变。
+        partial = _harvest_cancelled_text(agent)
+        if partial:
+            ce.partial_result = partial
+        raise
     if failed:
         # 子代理内 Provider 故障被 Agent 吞成 ErrorEvent：不能当成正常产出，
         # 否则任务会被记为 done、运行中心显示“已完成”，重跑入口也拿不到。
@@ -300,6 +313,20 @@ async def run_subagent(
             "; ".join(m.to_plain()[:500] for m in agent.history[-3:])
         )
     return final_text, agent
+
+
+def _harvest_cancelled_text(agent: Agent) -> str:
+    """取消收尾时收割已流出的兜底正文（M15）。
+
+    Agent.run_turn 的 finally 已把流式中断的正文并进 history 末尾
+    （_persist_partial_stream_text 的产物：末条 assistant 消息，尾部带
+    「…（已停止）」注记）；这里按同一产物形态取回末条 assistant 消息的
+    文本。没有可回收的正文（取消落在任何正文流出之前）时返回空串。
+    """
+    for msg in reversed(agent.history):
+        if msg.role == "assistant":
+            return msg.text
+    return ""
 
 
 class TaskRecord:
@@ -898,13 +925,21 @@ class TaskManager:
                     rec.commit_id = ""  # 提交失败不拖垮任务：改动留在工作区可手动处理
             self._maybe_write_report(rec, result)
             return result, agent
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as ce:
             # 被取消：已消耗的 token 也要入账，然后原样上抛
             if agent is not None:
                 rec.tokens_in = agent.total_in_tokens
                 rec.tokens_out = agent.total_out_tokens
                 rec.tokens_cached = agent.total_cached_tokens
                 await self._record_usage(rec)
+            # run_subagent 收割的取消前已流出正文（M15，挂在取消异常上带出）：
+            # 写进任务记录并照常走 _maybe_write_report 落盘——用户已经看到的
+            # 不凭空消失（与圆桌/团队的取消回收同语义）。状态仍由上层取消
+            # 收尾统一标 cancelled，这里不吞取消、原样上抛。
+            partial = getattr(ce, "partial_result", "")
+            if partial:
+                rec.result = "（任务已取消，以下为取消前已流出的部分内容）\n\n" + partial
+                self._maybe_write_report(rec, rec.result)
             raise
 
     def _maybe_write_report(self, rec: TaskRecord, result: str) -> None:

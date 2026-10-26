@@ -5,6 +5,9 @@ Codex 联网检索，SkySheep 由此获得联网能力）。
 - 仅接受 http/https URL；
 - 解析域名得到的 IP 必须是公网地址——拒绝回环/内网/链路本地/保留段（防 SSRF）；
 - 解析一次即把连接**固定**到已校验的 IP（防 DNS rebinding：校验与建连之间不再二次解析）；
+- 配置全局代理时按出网形态分流（M11）：直连保持完整钉连；socks5 把已校验 IP
+  交给代理建连（钉连语义保留）；http/https/socks5h 由代理解析域名、无法钉连，
+  结果注记与外发审计日志如实标注「代理解析未做 DNS 钉连校验」，绝不静默降级；
 - 重定向逐跳重新做协议、地址校验与固定（最多 5 跳）；
 - 响应体**流式**读取并累计计数，超过 2 MB 立即中止（不等整个文件下完再截断）；
 - 超时 20s；HTML 去标签转纯文本后按字符数截断，防撑爆上下文。
@@ -35,7 +38,13 @@ from pydantic import BaseModel, Field
 
 from .. import obs
 from ..instance import data_home
-from ..network import NetworkConfig, make_async_httpx_client, make_httpx_client
+from ..network import (
+    NetworkConfig,
+    effective_proxy,
+    make_async_httpx_client,
+    make_async_transport,
+    make_httpx_client,
+)
 from ..sanitize import (
     UNTRUSTED_DATA_NOTE,
     scan_injection_patterns,
@@ -92,16 +101,6 @@ def _safe_charset(name: str | None) -> str:
     if not getattr(info, "_is_text_encoding", True):
         return "utf-8"
     return name
-
-
-def _assert_public_host(host: str) -> None:
-    """域名必须解析到公网 IP，否则拒绝（防 SSRF）。
-
-    保留为薄封装：调用方（如 imagegen 的图片下载）只需要「先校验一次」时仍可用它；
-    需要把连接固定到已校验 IP 的场景（web_fetch）请用 _resolve_public_ips
-    拿到 IP 列表后自己建连。
-    """
-    _resolve_public_ips(host)
 
 
 def _resolve_public_ips(host: str) -> list[str]:
@@ -550,46 +549,132 @@ class WebFetchTool(Tool):
             return out
         return _resolve_public_ips(host)
 
+    def _egress_mode(self, url: str) -> str:
+        """判定该 URL 本次抓取的出网形态（决定钉连语义，M11）。
+
+        - "direct"：直连或 no_proxy 绕行——完整钉连：连接固定到已校验 IP。
+        - "socks5"：socks5 代理——本工具先在本地把目标解析成已校验 IP，再把
+          **IP** 交给代理建连（请求目标写 IP 形态、Host 头与 TLS SNI 仍用原
+          主机名），钉连语义由此补齐。
+        - "proxy"：http/https/socks5h 代理——目标域名由代理解析，本工具与
+          httpx 都固定不了「代理→目标」那一段（httpcore 把主机名原样交给
+          CONNECT/SOCKS 握手），无法钉连；残余风险由 run() 在结果注记与
+          外发审计日志里如实标注，不假装「威胁面不存在」。
+        """
+        network = self.network or NetworkConfig()
+        proxy = effective_proxy(network, url=url)
+        if not proxy:
+            return "direct"
+        if urlparse(proxy).scheme.lower() == "socks5":
+            return "socks5"
+        return "proxy"
+
+    @staticmethod
+    def _ip_form_url(url: str, ip: str) -> str:
+        """把 URL 的主机替换成已校验 IP（端口保留），socks5 钉连路径用。
+
+        原主机名由调用方放进 Host 头与 sni_hostname 扩展保留（虚拟主机与
+        证书校验照常）；这里只改「连到哪台机器」——与 _PinnedBackend 同一
+        语义，只是发生 SOCKS 隧道的对端。
+        """
+        p = urlparse(url)
+        host = ip if ":" not in ip else f"[{ip}]"
+        netloc = f"{host}:{p.port}" if p.port else host
+        return urlunparse(p._replace(netloc=netloc))
+
     async def _fetch_once(self, url: str, parsed, ips: list[str]) -> tuple[int, dict, bytes]:
         """发一次请求，流式读取响应体并累计计数，超上限立即中止。
 
         返回 (状态码, 响应头, 已读字节)。非流式调用（``client.get``）会先把整个响应体
         读进内存再截断：目标返回没有 Content-Length 的巨大/无限流时，内存会在截断
         之前就被吃干。这里改成边读边计数，超限直接停止。
+
+        出网形态由 _egress_mode 决定（M11）：
+        - direct：钉连 transport（make_async_transport 造，自签 CA 随之生效——M13
+          此前恒传无 verify 的裸 transport，CA 对 web_fetch 断链）+ 已校验 IP；
+        - socks5：代理客户端 + 每个已校验 IP 一次请求（IP 形态 URL + Host/SNI
+          保留原主机名），把「连到哪」固定在校验过的地址上；
+        - proxy（http/https/socks5h）：代理解析域名，无法钉连——由 run() 标注。
         """
         buffer = bytearray()
         truncated = False
-        # 钉连：把连接固定到已校验的 IP，httpx 建连时不会再做一次 DNS 解析。
-        # 注意：配了全局代理时 make_async_httpx_client 会忽略这个 transport——
-        # 代理由代理端解析域名，DNS rebinding 的威胁面已不存在，钉连没有意义。
-        transport = httpx.AsyncHTTPTransport(trust_env=False)
-        _install_pinned_backend(
-            transport, _PinnedBackend({parsed.hostname: ips}), "web_fetch"
+        network = self.network or NetworkConfig()
+        mode = self._egress_mode(url)
+        hostname = parsed.hostname or ""
+        transport = None
+        extra_headers: dict = {"User-Agent": USER_AGENT}
+        extra_extensions: dict = {}
+        if mode == "direct":
+            # 直连：把连接固定到已校验的 IP，httpx 建连时不会再做一次 DNS 解析。
+            # transport 经 make_async_transport 构造：自签 CA 设置烧进 transport
+            # （M13），钉连后端随后装进它的连接池。
+            transport = make_async_transport(network)
+            _install_pinned_backend(
+                transport, _PinnedBackend({hostname: ips}), "web_fetch"
+            )
+        elif mode == "socks5":
+            # socks5：本地解析出的已校验 IP 直接交给代理建连（M11 恢复钉连语义）。
+            # 请求目标写 IP 形态；原主机名进 Host 头（虚拟主机）与 sni_hostname
+            # 扩展（TLS SNI 与证书校验），对端看到的仍是原站点。
+            if parsed.scheme == "https":
+                extra_extensions["sni_hostname"] = hostname
+            extra_headers["Host"] = parsed.netloc
+        # mode == "proxy"：不装钉连、不伪装——由 run() 的注记与审计日志如实标注。
+
+        attempts = (
+            [self._ip_form_url(url, ip) for ip in ips] if mode == "socks5" else [url]
         )
-        async with make_async_httpx_client(
-            self.network or NetworkConfig(),
-            url=url,
-            transport=transport,
-            follow_redirects=False,
-            timeout=TIMEOUT_S,
-            headers={"User-Agent": USER_AGENT},
-        ) as client:
-            async with client.stream("GET", url) as resp:
-                status = resp.status_code
-                headers = dict(resp.headers)
-                charset = _safe_charset(resp.charset_encoding)
-                if status in (301, 302, 303, 307, 308):
-                    return status, headers, b""  # 重定向体无意义，不读
-                async for chunk in resp.aiter_bytes():
-                    room = MAX_RESPONSE_BYTES - len(buffer)
-                    if room <= 0:
-                        truncated = True
-                        break
-                    if len(chunk) > room:
-                        buffer += chunk[:room]
-                        truncated = True
-                        break
-                    buffer += chunk
+        try:
+            async with make_async_httpx_client(
+                network,
+                url=url,
+                transport=transport,
+                follow_redirects=False,
+                timeout=TIMEOUT_S,
+                headers=extra_headers,
+            ) as client:
+                status = 0
+                headers: dict = {}
+                charset = "utf-8"
+                last_err: Exception | None = None
+                for target in attempts:
+                    try:
+                        buffer.clear()  # 上一个已校验地址的半截响应不带入本次尝试
+                        truncated = False
+                        async with client.stream(
+                            "GET", target, extensions=extra_extensions or None
+                        ) as resp:
+                            status = resp.status_code
+                            headers = dict(resp.headers)
+                            charset = _safe_charset(resp.charset_encoding)
+                            if status in (301, 302, 303, 307, 308):
+                                break  # 重定向体无意义，不读
+                            async for chunk in resp.aiter_bytes():
+                                room = MAX_RESPONSE_BYTES - len(buffer)
+                                if room <= 0:
+                                    truncated = True
+                                    break
+                                if len(chunk) > room:
+                                    buffer += chunk[:room]
+                                    truncated = True
+                                    break
+                                buffer += chunk
+                        break  # 本跳完成（含流式截断）：不再换下一个已校验地址
+                    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                        last_err = e  # 这个已校验地址不通：试下一个（与直连钉连同语义）
+                        continue
+                else:
+                    raise ToolError(
+                        f"没有可用的已校验地址: {hostname}"
+                        + (f"（{last_err}）" if last_err else "")
+                    ) from last_err
+        except ImportError as e:
+            # socks 代理族需要 httpx[socks]（socksio）：当前环境未安装时在
+            # 客户端构造处就抛 ImportError，转成可读工具错误而不是裸栈
+            raise ToolError(
+                "socks5 代理需要安装 httpx[socks] 依赖（socksio）后才能出网；"
+                "请在 配置 中改用 http(s) 代理或安装该依赖"
+            ) from e
         if truncated:
             headers["x-skysheep-truncated"] = "1"
         headers["x-skysheep-charset"] = charset
@@ -630,7 +715,9 @@ class WebFetchTool(Tool):
         status = 0
         headers: dict = {}
         body = b""
+        egress_modes: list[str] = []  # 每一跳的出网形态（direct / socks5 / proxy）
         for _ in range(MAX_REDIRECTS + 1):
+            egress_modes.append(self._egress_mode(current))
             status, headers, body = await self._fetch_once(current, urlparse(current), ips)
             if status in (301, 302, 303, 307, 308):
                 location = headers.get("location", "")
@@ -662,6 +749,17 @@ class WebFetchTool(Tool):
         note = ""
         if headers.get("x-skysheep-truncated"):
             note = f"\n\n... [响应体超过 {MAX_RESPONSE_BYTES // 1024 // 1024} MB，已截断] ..."
+        # M11：代理解析（http/https/socks5h 代理）场景无法做 DNS 钉连——本地校验
+        # 与代理解析是两次独立解析，直连与 socks5（本地把已校验 IP 交给代理）
+        # 之外的所有代理路径都在这里如实标注，不假装「威胁面不存在」。
+        egress_mode = egress_modes[-1] if egress_modes else "direct"
+        proxy_unpinned = "proxy" in egress_modes
+        if proxy_unpinned:
+            note += (
+                "\n\n⚠ 本次抓取经全局代理出网：代理解析未做 DNS 钉连校验"
+                "（公网校验止于请求前的本地解析，「代理→目标」建连段由代理解析）。"
+                "需要完整钉连防护时请改用直连或 socks5 代理。"
+            )
         # 外发审计（审查 P1-2）：READONLY 工具零确认外发，日志里留一条「去了哪」。
         # 刻意只记 host/path 与 query 长度——query 本体可能正是被外带的敏感值，
         # 落盘会随诊断包二次泄漏；长度异常本身就是最有用的排查信号。
@@ -670,6 +768,7 @@ class WebFetchTool(Tool):
             "web_fetch", "外发请求完成",
             host=parsed_final.hostname, path=parsed_final.path[:200],
             query_len=len(parsed_final.query), status=status, bytes=len(body),
+            egress=egress_mode, proxy_unpinned=proxy_unpinned,
         )
         # 提示注入纵深防御（第一期「框起来 + 标记」，不拦截）：抓取到的文本是
         # 不可信外部内容，包进明确边界行交还模型；命中经典注入形态时在输出尾部

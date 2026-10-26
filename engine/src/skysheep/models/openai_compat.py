@@ -15,6 +15,7 @@ import httpx
 
 from ..messages import ImageBlock, Message, ThinkingBlock, ToolResultBlock, dialogue, system_text
 from ..network import NetworkConfig, make_async_httpx_client
+from .probe import _is_local
 
 if TYPE_CHECKING:
     # 仅注解用：运行时延迟到建客户端时才导入（见 __init__ 内注释）
@@ -112,7 +113,7 @@ class OpenAICompatProvider(Provider):
         api_key: str,
         base_url: str | None = None,
         client: AsyncOpenAI | None = None,
-        proxy: str = "",
+        proxy: str | None = None,
         network: NetworkConfig | None = None,
     ) -> None:
         super().__init__()
@@ -124,11 +125,17 @@ class OpenAICompatProvider(Provider):
         kw: dict = {"api_key": api_key, "base_url": base_url, "timeout": 300.0, "max_retries": 1}
         self._owned_http: object | None = None
         if network is not None:
-            # 全局出网设置（代理 / no_proxy / 自签 CA）：工厂内部定死 trust_env=False，
-            # 并把 no_proxy 判定、CA 追加一并做掉。proxy_override 传服务级覆盖：
-            # None = 跟随全局；空串 = 该服务显式直连（用户清空服务代理即可）
+            # 全局出网设置（代理 / no_proxy / 自签 CA）：工厂内部定死 trust_env=False。
+            # M19 三处修正：
+            # - url=base_url：让 no_proxy 绕行名单对模型流量生效（此前不传 url，
+            #   bypass 恒为 False，绕行名单对对话路径结构性失效）；
+            # - 本地地址（LM Studio / Ollama）显式直连，与探测路径（probe）同判定
+            #   （network.is_local_base_url）——全局代理不该把发往本机的请求转走；
+            # - 服务级 proxy 三态直传：None=跟随全局；""=显式直连（配置里显式
+            #   写的空串）；非空=用该服务自己的代理。不做 `proxy or None` 塌缩。
             kw["http_client"] = make_async_httpx_client(
-                network, timeout=300.0, proxy_override=proxy or None,
+                network, timeout=300.0, url=base_url,
+                proxy_override="" if _is_local(base_url) else proxy,
             )
             self._owned_http = kw["http_client"]
         elif proxy:

@@ -16,7 +16,7 @@
  */
 "use strict";
 
-const SW_VERSION = "skysheep-shell-v65";
+const SW_VERSION = "skysheep-shell-v80";
 const CACHE_NAME = "skysheep-shell-" + SW_VERSION;
 
 // 缓存白名单：手写静态壳 + vendor 第三方库，一个不多。全部是确定的文件路径，
@@ -27,10 +27,15 @@ const SHELL_URLS = [
   "/static/app.css",
   "/static/app.js",
   "/static/app-factory.js",
+  "/static/app-factory-scene.js",
+  "/static/app-factory-drawer.js",
+  "/static/app-factory-draw.js",
   "/static/app-tools.js",
   "/static/app-advanced.js",
   "/static/app-relay.js",
   "/static/app-about.js",
+  "/static/app-archive.js",
+  "/static/app-browser.js",
   "/static/app-mods.js",
   "/static/app-projects.js",
   "/static/app-schedule.js",

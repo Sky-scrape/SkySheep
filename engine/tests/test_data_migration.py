@@ -12,7 +12,6 @@ import io
 import json
 import sqlite3
 import zipfile
-from pathlib import Path
 
 from skysheep.messages import TextBlock
 from skysheep.session.store import SCHEMA_VERSION
@@ -261,9 +260,12 @@ def test_import_full_rolls_back_when_second_config_write_fails(home, monkeypatch
     旧实现的快照是「边写边建、随函数返回才交给调用方」：第二项写失败时
     第一项的快照没有传播出去，回滚拿到空字典，接口仍称「已回滚」但原
     config.toml 已被覆盖。这里用真实 data.import_full 入口钉住行为。
+    注入点对齐现实现：配置恢复走 textio 的原子写入口（backend 模块内绑定
+    名），不再直接调 Path.write_bytes。
     """
     from test_server import make_client, recv_until
 
+    import skysheep.server.backend as backend_mod
     from skysheep.config import skysheep_home
 
     home_dir = skysheep_home()
@@ -278,26 +280,29 @@ def test_import_full_rolls_back_when_second_config_write_fails(home, monkeypatch
     })
 
     # 只让 memory.md 的写入失败（模拟磁盘/权限错误），config.toml 正常写入
-    real_write_bytes = Path.write_bytes
+    real_atomic = backend_mod.write_bytes_atomic
+    atomic_calls: list[str] = []
 
-    def flaky_write_bytes(self, data):
-        if self.name == "memory.md":
+    def flaky_atomic(path, data, **kw):
+        atomic_calls.append(path.name)
+        if path.name == "memory.md":
             raise PermissionError(13, "permission denied (probe)")
-        return real_write_bytes(self, data)
+        return real_atomic(path, data, **kw)
 
-    monkeypatch.setattr(Path, "write_bytes", flaky_write_bytes)
-    try:
-        with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
-            ws.send_json({"id": "i1", "method": "data.import_full",
-                          "params": {"path": str(zip_path)}})
-            bad = recv_until(ws, "i1")
-            assert not bad["ok"], bad
-            assert "已回滚" in bad["error"]
-    finally:
-        monkeypatch.setattr(Path, "write_bytes", real_write_bytes)
+    monkeypatch.setattr(backend_mod, "write_bytes_atomic", flaky_atomic)
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "i1", "method": "data.import_full",
+                      "params": {"path": str(zip_path)}})
+        bad = recv_until(ws, "i1")
+        assert not bad["ok"], bad
+        assert "已回滚" in bad["error"]
 
     # 关键断言：已写入的 config.toml 必须回到导入前内容
     assert (home_dir / "config.toml").read_text(encoding="utf-8") == original
+    # 回滚同样走原子入口：config.toml 写了两次（恢复一次 + 回滚还原一次），
+    # memory.md 只在恢复时失败过一次（回滚走 unlink，不经过原子写）
+    assert atomic_calls.count("config.toml") == 2
+    assert atomic_calls.count("memory.md") == 1
 
 
 def test_import_full_rolls_back_skills_on_late_failure(home, monkeypatch):

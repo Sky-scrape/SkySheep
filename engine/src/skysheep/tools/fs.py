@@ -179,7 +179,7 @@ class WriteFileTool(Tool):
         shown = rel_path(ctx, p)
         check_write_size(args.content, shown)
         if self.recorder is not None:
-            self.recorder.record(p)  # 检查点：记下覆盖前的原始内容
+            await self.recorder.record(p)  # 检查点：记下覆盖前的原始内容
         # 覆盖已有文件：沿用它的编码与行尾符；新建文件用 UTF-8 + LF。
         # 编码探测（round-trip 校验）是全文读盘：放线程池，别卡事件循环。
         encoding, newline, old = "utf-8", "\n", ""
@@ -228,7 +228,7 @@ class EditFileTool(Tool):
         if not p.exists() or p.is_dir():
             raise ToolError("file not found: " + shown)
         if self.recorder is not None:
-            self.recorder.record(p)  # 检查点：记下编辑前的原始内容
+            await self.recorder.record(p)  # 检查点：记下编辑前的原始内容
         loaded = await asyncio.to_thread(_load_for_edit, p, shown)
         content = loaded.text
         if args.old_string not in content:
@@ -290,7 +290,13 @@ class MoveFileTool(Tool):
         self.recorder = recorder
 
     def arg_text(self, input_dict: dict) -> str:
-        return f"{input_dict.get('source', '')} -> {input_dict.get('destination', '')}"
+        text = f"{input_dict.get('source', '')} -> {input_dict.get('destination', '')}"
+        if input_dict.get("overwrite"):
+            # 覆盖形态在确认卡/白名单上可见（审查 M02）：带 overwrite 的调用与
+            # 普通移动的 arg_text 不同——exact 规则各固化各的；不带 overwrite 的
+            # 调用 arg_text 保持原样，既有前缀/glob 规则的命中不受影响。
+            text += " [overwrite]"
+        return text
 
     async def run(self, args: MoveFileArgs, ctx: ToolContext) -> str:
         src = resolve_path(ctx, args.source)
@@ -316,16 +322,19 @@ class MoveFileTool(Tool):
         # 否则「撤销」删得掉移过去的树却还原不出源；覆盖目标时旧内容同样逐文件
         # 记录，目标里没有同位文件的源文件补记 None（改前不存在），回滚时才能
         # 把移入的副本删干净（审查 A-3：目录只记 None 导致回滚丢数据/二次删除）。
+        # 记录失败（record / record_tree 抛 ToolError）会让整个移动被拒绝：
+        # 宁可不做，不可留下一个回滚不了的动作（审查 M09）。下面的 rglob 循环
+        # 只在 record_tree(src) 已证明源树可完整扫描后执行，不会静默截断。
         if self.recorder is not None:
             if src.is_dir():
-                self.recorder.record_tree(src)
+                await self.recorder.record_tree(src)
                 if args.overwrite and dst.exists() and dst.is_dir():
-                    self.recorder.record_tree(dst)
+                    await self.recorder.record_tree(dst)
                     for child in src.rglob("*"):
                         if child.is_file():
-                            self.recorder.record(dst / child.relative_to(src))
-            self.recorder.record(src)
-            self.recorder.record(dst)
+                            await self.recorder.record(dst / child.relative_to(src))
+            await self.recorder.record(src)
+            await self.recorder.record(dst)
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             if args.overwrite and dst.exists():
@@ -382,7 +391,7 @@ class DeleteFileTool(Tool):
                     f"{shown} 是非空目录。确认要连内容一起删除时，显式传 recursive=true"
                 )
         if self.recorder is not None:
-            self._record_tree(p)
+            await self._record_tree(p)
         try:
             if p.is_dir():
                 shutil.rmtree(p)
@@ -392,14 +401,19 @@ class DeleteFileTool(Tool):
             raise ToolError("cannot delete " + shown + ": " + str(e)) from e
         return f"deleted {shown}（可「撤销本轮改动」恢复）"
 
-    def _record_tree(self, p: Path) -> None:
-        """目录删除：把目录下每个文件都记进检查点，回滚时能整体还原。"""
+    async def _record_tree(self, p: Path) -> None:
+        """目录删除：把目录下每个文件都记进检查点，回滚时能整体还原。
+
+        委托 recorder.record_tree（os.walk + onerror 显式收错，读取在工作
+        线程执行）：扫描失败（受保护子目录等）抛 ToolError 整体拒绝本次删除。
+        旧实现自己 rglob，而 pathlib 会把权限错误静默吞掉——只记到半棵树就
+        放行 rmtree，删到受保护目录才报错时，已删部分只剩不完整的检查点
+        （审查 M09）。
+        """
         if p.is_file():
-            self.recorder.record(p)
+            await self.recorder.record(p)
             return
-        for child in sorted(p.rglob("*")):
-            if child.is_file():
-                self.recorder.record(child)
+        await self.recorder.record_tree(p)
 
 
 class MakeDirArgs(BaseModel):

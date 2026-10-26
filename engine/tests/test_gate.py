@@ -15,7 +15,7 @@ from skysheep.security.gate import (
     _has_code_exec_flag,
 )
 from skysheep.tools import EditFileTool, ReadFileTool, RunCommandTool, WriteFileTool
-from skysheep.tools.fs import DeleteFileTool
+from skysheep.tools.fs import DeleteFileTool, MoveFileTool
 
 
 async def test_readonly_auto_allowed():
@@ -1053,6 +1053,164 @@ async def test_preview_scan_capped_for_huge_dirs(tmp_path, monkeypatch):
     out = gate._preview_fs_impact(DeleteFileTool(), {"path": "big"})
     assert "仅扫描前 10 个条目" in out
     assert "实际文件数可能更多" in out
+
+
+# ---- M02：move_file(overwrite=true) 的确认预览必须披露将被覆盖删除的目标树 ----
+
+
+async def test_preview_move_overwrite_dir_discloses_deleted_tree(tmp_path):
+    """overwrite=true 且真实落点已存在：预览列出被覆盖删除的旧树并警示递归删除。
+
+    落点按工具执行语义算（目标是已存在的目录 → 移进去保留原名）：预览披露的
+    必须是 dst_dir/src_dir 这棵真实被 rmtree 的树，而不是 destination 本身。
+    """
+    (tmp_path / "src_dir").mkdir()
+    (tmp_path / "src_dir" / "new.txt").write_text("n", encoding="utf-8")
+    (tmp_path / "dst_dir" / "src_dir").mkdir(parents=True)
+    (tmp_path / "dst_dir" / "src_dir" / "old.txt").write_text("old", encoding="utf-8")
+
+    gate = PermissionGate(working_dir=tmp_path)
+    out = gate._preview_fs_impact(MoveFileTool(), {
+        "source": "src_dir", "destination": "dst_dir", "overwrite": True})
+    landing = str((tmp_path / "dst_dir" / "src_dir").resolve())
+    assert landing in out, "预览必须按真实落点（移进去保留原名）展示"
+    assert "old.txt" in out, "将被覆盖删除的旧文件必须列出"
+    assert "将覆盖删除" in out
+    assert "递归删除" in out, "目录覆盖必须带递归删除警示"
+
+    # 对照：overwrite=false 时工具层会因「目标已存在」报错，什么都不会删——
+    # 预览不得做任何删除预告（不误报）
+    out2 = gate._preview_fs_impact(MoveFileTool(), {
+        "source": "src_dir", "destination": "dst_dir"})
+    assert "将覆盖删除" not in out2
+    assert "递归删除" not in out2
+
+    # 真实落点不存在（目标目录里没有同名子目录）：即使带 overwrite 也不误报
+    (tmp_path / "fresh").mkdir()
+    out3 = gate._preview_fs_impact(MoveFileTool(), {
+        "source": "src_dir", "destination": "fresh", "overwrite": True})
+    assert "将覆盖删除" not in out3
+    assert "递归删除" not in out3
+
+
+async def test_preview_move_overwrite_file_discloses_replaced_file(tmp_path):
+    """覆盖已存在的普通文件：预览披露该文件将被删除替换；不带 overwrite 不预告。"""
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    gate = PermissionGate(working_dir=tmp_path)
+    out = gate._preview_fs_impact(MoveFileTool(), {
+        "source": "a.txt", "destination": "b.txt", "overwrite": True})
+    assert "将覆盖删除" in out
+    assert "b.txt" in out
+    out2 = gate._preview_fs_impact(MoveFileTool(), {
+        "source": "a.txt", "destination": "b.txt"})
+    assert "将覆盖删除" not in out2
+
+
+async def test_preview_move_overwrite_relative_escape_discloses_landing(tmp_path):
+    """destination 相对路径（../）逃出工作目录：预览按执行侧真实落点披露覆盖删除。
+
+    M02 复核缺口：旧实现 resolve() 对目录外返回 None 后，回退只处理绝对路径、
+    披露也要求 absolute——`../outside` 这类相对逃逸的覆盖在确认卡上只显示 raw
+    路径、不披露任何删除面，而执行侧会照常解析落点并覆盖删除。
+    读取边界（既有确认设计）：目录外只披露真实落点 + 类型（元数据），
+    不逐条枚举其内容。
+    """
+    (tmp_path / "src_dir").mkdir()
+    (tmp_path / "src_dir" / "new.txt").write_text("n", encoding="utf-8")
+    outside = tmp_path.parent / "m02-preview-escape-dst"
+    (outside / "src_dir").mkdir(parents=True)
+    (outside / "src_dir" / "old.txt").write_text("old", encoding="utf-8")
+    try:
+        gate = PermissionGate(working_dir=tmp_path)
+        landing = (outside / "src_dir").resolve()
+        out = gate._preview_fs_impact(MoveFileTool(), {
+            "source": "src_dir", "destination": "../m02-preview-escape-dst",
+            "overwrite": True})
+        assert str(landing) in out, "预览必须按执行侧真实落点（逃逸后的绝对路径）展示"
+        assert "将覆盖删除" in out
+        assert "递归删除" in out, "目录落点必须带递归删除警示（不静默省略）"
+        assert "工作目录之外" in out, "目录外落点必须明示预览未列出其内容"
+        assert "old.txt" not in out, "不读取工作目录之外的目录树"
+
+        # 对照：不带 overwrite 时工具层会报「目标已存在」，不预告删除
+        out2 = gate._preview_fs_impact(MoveFileTool(), {
+            "source": "src_dir", "destination": "../m02-preview-escape-dst"})
+        assert str(landing) in out2, "落点语义与执行侧一致，与 overwrite 无关"
+        assert "将覆盖删除" not in out2
+        assert "递归删除" not in out2
+    finally:
+        import shutil as _sh
+        _sh.rmtree(outside, ignore_errors=True)
+
+
+async def test_preview_move_overwrite_relative_escape_file_target(tmp_path):
+    """相对路径逃逸 + 落点是已有文件：同样必须披露实际覆盖目标。"""
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    outside = tmp_path.parent / "m02-preview-escape-file.txt"
+    outside.write_text("old", encoding="utf-8")
+    try:
+        gate = PermissionGate(working_dir=tmp_path)
+        out = gate._preview_fs_impact(MoveFileTool(), {
+            "source": "a.txt", "destination": "../m02-preview-escape-file.txt",
+            "overwrite": True})
+        assert str(outside.resolve()) in out
+        assert "将覆盖删除" in out
+        assert "工作目录之外" in out
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+async def test_preview_move_overwrite_absolute_outside_metadata_only(tmp_path):
+    """绝对路径逃出工作目录的覆盖：披露真实落点但不枚举目录外内容（既有确认
+    设计：预览只读取工作目录内的目录树，目录外明示「未列出」而非静默省略）。"""
+    (tmp_path / "s").mkdir()
+    (tmp_path / "s" / "f.txt").write_text("x", encoding="utf-8")
+    outside_root = tmp_path.parent / "m02-preview-abs-dst"
+    (outside_root / "s").mkdir(parents=True)
+    (outside_root / "s" / "old.txt").write_text("old", encoding="utf-8")
+    try:
+        gate = PermissionGate(working_dir=tmp_path)
+        out = gate._preview_fs_impact(MoveFileTool(), {
+            "source": "s", "destination": str(outside_root), "overwrite": True})
+        assert str((outside_root / "s").resolve()) in out, "落点 = 目标目录/s（移进去保留原名）"
+        assert "将覆盖删除" in out
+        assert "递归删除" in out
+        assert "工作目录之外" in out
+        assert "old.txt" not in out
+    finally:
+        import shutil as _sh
+        _sh.rmtree(outside_root, ignore_errors=True)
+
+
+def test_move_file_arg_text_marks_overwrite():
+    """overwrite=true 的调用在 arg_text 上可见（审查 M02）：确认卡能显示，
+    exact 规则各固化各的——带标记的规则放行不了不带 overwrite 的调用。"""
+    tool = MoveFileTool()
+    plain = tool.arg_text({"source": "a", "destination": "b"})
+    marked = tool.arg_text({"source": "a", "destination": "b", "overwrite": True})
+    assert plain == "a -> b"
+    assert marked == "a -> b [overwrite]"
+    rule = WhitelistRule(tool="move_file", kind="exact", pattern=marked)
+    assert rule.matches("move_file", marked)
+    assert not rule.matches("move_file", plain)
+    # 不带 overwrite 的 arg_text 保持原样：既有前缀/白名单规则不受影响
+    assert WhitelistRule(
+        tool="move_file", kind="exact", pattern=plain,
+    ).matches("move_file", plain)
+
+
+async def test_move_file_overwrite_pending_carries_flag(tmp_path):
+    """确认卡的 arg_text（detail）必须带 overwrite 标记，用户看得见这是覆盖形态。"""
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    gate = PermissionGate(working_dir=tmp_path)
+    pending = await gate._build_pending(MoveFileTool(), {
+        "source": "a.txt", "destination": "b.txt", "overwrite": True})
+    assert pending.arg_text.endswith(" [overwrite]")
+    # 预览里同步披露将被覆盖删除的旧文件
+    assert "将覆盖删除" in pending.diff
+    assert "b.txt" in pending.diff
 
 
 async def test_preview_diff_does_not_block_event_loop(tmp_path, monkeypatch):

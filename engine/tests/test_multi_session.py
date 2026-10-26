@@ -10,6 +10,7 @@ from conftest import FakeProvider
 from skysheep.messages import TextBlock, ToolUseBlock
 from skysheep.models.base import ProviderDone, ProviderTextDelta
 from skysheep.server.backend import ServerBackend
+from skysheep.session.store import SessionStore
 
 
 class SlowProvider:
@@ -384,27 +385,25 @@ async def test_double_cancel_on_persist_harvests_before_handoff(home, monkeypatc
         await asyncio.sleep(0.01)
     assert be.runtimes[sid].queue, "第二轮应排队等待交棒"
 
-    # 时序门控：被停轮的第一条消息 INSERT 扣在门外，同时补第二刀——
+    # 时序门控：被停轮的第一条消息落库扣在门外，同时补第二刀——
     # 外层此刻正 await shield(persist_task)，CancelledError 正好落在那里
     # （persist_task 已在后台独立跑）。
-    db = be.store._db
-    orig_execute = db.execute
+    # M16 起 append_message 的 INSERT 走独立事务连接（_write_txn），共享连接
+    # 的 execute 上再也看不到它，门控搬到 _write_txn 接缝——被扣住的是同一条
+    # 消息的同一个写，不变式不变。
+    orig_write_txn = SessionStore._write_txn
     gate = asyncio.Event()
     held = False
 
-    async def gated_execute(sql, *args, **kwargs):
+    async def gated_write_txn(self, fn):
         nonlocal held
-        if (
-            isinstance(sql, str)
-            and sql.startswith("INSERT INTO messages (")
-            and not held
-        ):
+        if not held:
             held = True
             task.cancel()  # 第二刀
             await gate.wait()
-        return await orig_execute(sql, *args, **kwargs)
+        return await orig_write_txn(self, fn)
 
-    monkeypatch.setattr(db, "execute", gated_execute)
+    monkeypatch.setattr(SessionStore, "_write_txn", gated_write_txn)
 
     task.cancel()  # 第一次取消：流式中被捕获，语义定为 stopped
     gate_open = False

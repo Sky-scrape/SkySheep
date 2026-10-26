@@ -216,6 +216,17 @@ function renderProviderDetail(name) {
   const box = document.getElementById("provider-detail-body");
   box.dataset.kind = p.kind;
   const keyLabel = p.has_key ? "已配置，留空保持不变" : "尚未配置";
+  // 服务级代理三态（M19）：null=跟随全局 / ""=强制直连 / 非空=该服务专属代理。
+  // null 与 "" 在输入框里都是空值，靠 placeholder 与下方说明行区分当前态；
+  // data-orig 记住打开时的值，保存时只在改动过才携带 proxy 字段（见 saveProvider）
+  const proxyVal = p.proxy == null ? "" : String(p.proxy);
+  const proxyPlaceholder = p.proxy == null ? "跟随全局代理"
+    : (p.proxy === "" ? "强制直连（不走任何代理）" : "http://127.0.0.1:7890");
+  const proxyStateTip = p.proxy == null
+    ? "当前：跟随全局代理（此服务未单独设置）"
+    : p.proxy === ""
+      ? "当前：强制直连（此服务不走任何代理）"
+      : "当前：仅该服务走此代理";
   box.innerHTML = `
     <h4 class="sec-title">基本信息</h4>
     <div class="flat-panel">
@@ -302,10 +313,12 @@ function renderProviderDetail(name) {
           <b>推理模型（deepseek-reasoner 等）通常不接受此项</b>，填了也会被忽略。</div>
       </div>
       <div class="field">
-        <label>代理地址（可选）</label>
-        <input data-f="proxy" value="${escapeHtml(p.proxy || "")}" placeholder="http://127.0.0.1:7890" autocomplete="off"
-          title="仅该服务的 API 请求走此代理；留空直连">
-        <div class="field-tip">访问境外服务需要代理时填写；留空直连。支持 http(s)://（socks5:// 需额外依赖，推荐用本地代理软件的 http 端口）</div>
+        <label>服务级代理（可选）</label>
+        <input data-f="proxy" data-orig="${escapeHtml(proxyVal)}" value="${escapeHtml(proxyVal)}" placeholder="${proxyPlaceholder}" autocomplete="off"
+          title="未单独设置 = 跟随全局代理；显式清空并保存 = 强制直连；填地址 = 仅该服务走此代理">
+        <div class="field-tip">${proxyStateTip}。三态：不动此框保存 = 保持现状（未设置时继续跟随全局）；
+          填 http(s):// 地址保存 = 仅该服务的 API 请求走此代理；把已有地址清空后保存 = 该服务强制直连。
+          全局代理在 设置 · 高级 · 网络。socks5:// 需额外依赖，推荐用本地代理软件的 http 端口</div>
       </div>
       <div class="field">
         <label>每百万 tokens 单价（元，可选）</label>

@@ -22,6 +22,7 @@ from ..messages import (
     system_text,
 )
 from ..network import NetworkConfig, make_async_httpx2_client
+from .probe import _is_local
 
 if TYPE_CHECKING:
     # 仅注解用：运行时延迟到建客户端时才导入（anthropic 包导入约 0.75s，启动期用不到）
@@ -124,7 +125,7 @@ class AnthropicProvider(Provider):
         base_url: str | None = None,
         max_tokens: int = 8192,
         client: AsyncAnthropic | None = None,
-        proxy: str = "",
+        proxy: str | None = None,
         network: NetworkConfig | None = None,
     ) -> None:
         super().__init__()
@@ -138,9 +139,13 @@ class AnthropicProvider(Provider):
         self._owned_http: object | None = None
         if network is not None:
             # anthropic SDK 1.5+ 强制要求 httpx2.AsyncClient（传 httpx 会抛 TypeError），
-            # 所以这里必须走 httpx2 工厂而不是通用那个
+            # 所以这里必须走 httpx2 工厂而不是通用那个。
+            # M19：url=base_url 让 no_proxy 生效；本地地址显式直连（与 probe 同判定）；
+            # 服务级 proxy 三态直传（None=跟随全局 / ""=显式直连 / 非空=该代理），
+            # 不做 `proxy or None` 塌缩。
             kw["http_client"] = make_async_httpx2_client(
-                network, timeout=300.0, proxy_override=proxy or None,
+                network, timeout=300.0, url=base_url,
+                proxy_override="" if _is_local(base_url) else proxy,
             )
             self._owned_http = kw["http_client"]
         elif proxy:

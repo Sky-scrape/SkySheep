@@ -231,6 +231,97 @@ def test_maintain_yields_when_file_changed_concurrently(home, mem_file):
         assert not list(mem_file.parent.glob("memory.md.bak-*"))  # 没落盘就没备份
 
 
+def test_maintain_gb18030_crlf_backup_and_rewrite(home, mem_file):
+    """GB18030 + CRLF 的记忆文件：整理前逐字节原样备份，整理后编码与行尾保持。
+
+    修复前：按 utf-8 errors=replace 读（中文读成替换字符，模型照乱码整理），
+    写回走固定 UTF-8 的 write_text_atomic——非 UTF-8 文件的编码与行尾都被
+    静默改写。现在读原始字节走 textio 探测，备份原 bytes、写回按原编码行尾。
+    """
+    old = "\r\n".join(
+        f"- [2026-09-{d:02d}] 中文记忆条目第{d}条，用户偏好简洁直接的回复"
+        for d in range(1, 16)
+    )
+    assert len(old) >= MAINTAIN_MIN_GLOBAL_CHARS
+    raw = old.encode("gb18030")
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    mem_file.write_bytes(raw)
+    new = "- [2026-09-01] 中文记忆条目：用户偏好简洁直接的回复"
+    provider = FakeProvider([[TextBlock(text=new)]])
+    with make_client(home, [], provider=provider) as client:
+        backend = client.app.state.backend
+        assert asyncio.run(backend._maintain_memory("global", force=True)) == "changed"
+        # 备份是原始字节的逐字节副本（能还原 GB18030+CRLF 的原件）
+        baks = list(mem_file.parent.glob("memory.md.bak-*"))
+        assert len(baks) == 1 and baks[0].read_bytes() == raw
+        # 落盘保持原编码与行尾：GB18030 + CRLF，末尾恰好一个换行
+        data = mem_file.read_bytes()
+        assert data.decode("gb18030") == new + "\r\n"
+        assert data != (new + "\r\n").encode("utf-8")  # 没有被静默转成 UTF-8
+        # 模型拿到的是正确解码的记忆（不是 utf-8 replace 的乱码）
+        assert "中文记忆条目第1条" in provider.calls[0][0].text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\x81\x7f" * 300,      # utf-8 与 gb18030 都严格解不开、无 BOM 无 NUL：真实 uncertain
+        b"binary\x00data" * 40,  # 含 NUL 无 BOM：判二进制
+    ],
+    ids=["uncertain", "binary"],
+)
+def test_maintain_skips_when_encoding_uncertain_or_binary(home, mem_file, raw):
+    """编码探测不确凿或二进制：跳过整理，不调模型、不备份、不写。
+
+    uncertain 用例按真实探测结果构造（当前 sniff 对无 BOM 的字节序列只会认
+    utf-8/gb18030，两样都解不开才是 uncertain），不押「无 BOM 的 UTF-16 一定
+    uncertain」这类会随探测实现变化的假设。
+    """
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    mem_file.write_bytes(raw)
+    provider = FakeProvider([[TextBlock(text="整理稿")]])
+    with make_client(home, [], provider=provider) as client:
+        backend = client.app.state.backend
+        assert asyncio.run(backend._maintain_memory("global", force=True)) == "skipped"
+        assert len(provider.calls) == 0  # 读取阶段就让路：模型调用都没起
+        assert mem_file.read_bytes() == raw  # 原件未动
+        assert not list(mem_file.parent.glob("memory.md.bak-*"))  # 没落盘就没备份
+
+
+def test_maintain_gb18030_conflict_yields_to_concurrent_write(home, mem_file):
+    """GB18030 文件在整理窗口内被并发改写：锁内按原始字节比对出冲突，让路不覆盖。
+
+    并发写入的内容必须原样保留、不产生备份、整理时间不推进（巡检下一轮
+    带着新内容重新整理）。
+    """
+    old = "\r\n".join(
+        f"- [2026-09-{d:02d}] 中文记忆条目第{d}条，用户偏好简洁直接的回复"
+        for d in range(1, 16)
+    )
+    raw = old.encode("gb18030")
+    concurrent_raw = (
+        old + "\r\n- [2026-09-30] (自动) 整理期间归档提炼的新条目\r\n"
+    ).encode("gb18030")
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    mem_file.write_bytes(raw)
+
+    class RewriteDuringMaintain(FakeProvider):
+        """模拟整理调模型的窗口里，另一会话写入了同一份 GB18030 文件。"""
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            mem_file.write_bytes(concurrent_raw)
+            async for ev in super().stream(messages, tool_schemas, effort):
+                yield ev
+
+    provider = RewriteDuringMaintain([[TextBlock(text="- [2026-09-01] 整理稿内容")]])
+    with make_client(home, [], provider=provider) as client:
+        backend = client.app.state.backend
+        assert asyncio.run(backend._maintain_memory("global", force=True)) == "conflict"
+        assert mem_file.read_bytes() == concurrent_raw  # 并发写入的内容原样保留
+        assert not list(mem_file.parent.glob("memory.md.bak-*"))  # 没落盘就没备份
+        assert load_maintenance_state().get("global_last", 0) == 0  # 时间没推进
+
+
 def test_maintain_now_blocked_in_demo_mode(home, mem_file):
     """演示模式点「立即整理」必须拒绝：fake provider 的脚本文本不许盖掉真实记忆。"""
     _seed_global(mem_file)

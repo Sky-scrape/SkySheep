@@ -152,6 +152,77 @@ def test_fs_write_to_directory_rejected(home):
         assert not r["ok"] and "写入失败" in r["error"]
 
 
+def test_fs_write_atomic_replace_failure_preserves_original(home, monkeypatch):
+    """原子替换那一步失败（如目标被别的进程锁住）：报「写入失败」，
+    原文件字节原样保留，且不留半截临时文件。
+
+    注入点取 textio 原子写的最后一步 os.replace：只对目标文件抛
+    PermissionError，其余 os.replace 调用原样放行。直接覆盖写时代的
+    「写一半毁掉旧内容」在这里被钉住：替换失败 = 磁盘上还是旧字节。
+    """
+    import os
+
+    target = home / "proj" / "locked.md"
+    target.write_bytes("原始内容".encode())
+    real_replace = os.replace
+
+    def flaky_replace(src, dst, *args, **kwargs):
+        if str(dst) == str(target):
+            raise PermissionError(32, "another process holds the file (probe)")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        read = _call(ws, "af1", "fs.read", {"path": "locked.md"})["result"]
+        r = _call(ws, "af2", "fs.write", {
+            "path": "locked.md", "text": "新内容", "base_mtime": read["mtime"],
+        })
+        assert not r["ok"] and "写入失败" in r["error"]
+
+    assert target.read_bytes() == "原始内容".encode(), "替换失败绝不能动原文件"
+    leftovers = [p.name for p in (home / "proj").rglob("*.tmp")]
+    assert leftovers == [], f"原子写失败要自己清掉临时文件: {leftovers}"
+
+
+def test_fs_write_base_mtime_chain_and_stale_conflict(home):
+    """原子写落盘不改变 mtime 冲突语义：连续保存用上一轮返回值当基准畅通，
+    旧基准撞上磁盘新状态必须冲突不落盘，force 才放行。"""
+    import os
+    import time
+
+    path = home / "proj" / "chain.md"
+    path.write_text("v1", encoding="utf-8")
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        m0 = _call(ws, "mc1", "fs.read", {"path": "chain.md"})["result"]["mtime"]
+        r1 = _call(ws, "mc2", "fs.write", {"path": "chain.md", "text": "v2", "base_mtime": m0})
+        assert r1["ok"] and r1["result"]["saved"] is True
+        m1 = r1["result"]["mtime"]
+        assert m1 == path.stat().st_mtime_ns // 1_000_000
+        # 连续保存：文件没人动过，上一轮 mtime 立刻再存必须成功
+        r2 = _call(ws, "mc3", "fs.write", {"path": "chain.md", "text": "v3", "base_mtime": m1})
+        assert r2["ok"] and r2["result"]["saved"] is True
+        assert path.read_text(encoding="utf-8") == "v3"
+        # 确定性制造「磁盘比基准新」：把文件 mtime 拨回 60 秒前——
+        # 与时钟精度无关，旧基准必然失配
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        stale = _call(ws, "mc4", "fs.write", {"path": "chain.md", "text": "v4", "base_mtime": m1})
+        assert stale["ok"], "冲突不是协议错误"
+        assert stale["result"]["conflict"] is True and stale["result"]["saved"] is False
+        assert stale["result"]["mtime"] == path.stat().st_mtime_ns // 1_000_000
+        assert path.read_text(encoding="utf-8") == "v3", "冲突时绝不能落盘"
+        # force 覆盖后内容落盘，返回的 mtime 可继续做下一轮基准
+        rf = _call(ws, "mc5", "fs.write", {
+            "path": "chain.md", "text": "v4", "base_mtime": m1, "force": True,
+        })
+        assert rf["ok"] and rf["result"]["saved"] is True
+        assert path.read_text(encoding="utf-8") == "v4"
+        assert rf["result"]["mtime"] == path.stat().st_mtime_ns // 1_000_000
+        # 正常保存链全程不在工作区留临时文件
+        assert [p.name for p in (home / "proj").rglob("*.tmp")] == []
+
+
 def test_fs_write_empty_path_rejected(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         r = _call(ws, "e1", "fs.write", {"path": "  ", "text": "x"})

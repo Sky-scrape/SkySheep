@@ -99,7 +99,10 @@ class ProvidersMixin:
                 ),
                 "global_context_limit": self.cfg.context_limit_tokens,
                 "temperature": pc.temperature,
-                "proxy": pc.proxy or "",
+                # 服务级代理三态（M19）：None（键不存在）= 跟随全局 / ""=强制直连 /
+                # 非空 = 该服务专属代理。原样回传，不塌缩——`or ""` 会把「跟随全局」
+                # 和「强制直连」都渲染成空输入框，前端从此无法表达「跟随全局」
+                "proxy": pc.proxy,
                 "price_in": pc.price_in,
                 "price_out": pc.price_out,
                 "price_cache": pc.price_cache,

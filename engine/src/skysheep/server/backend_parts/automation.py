@@ -184,6 +184,13 @@ def _fire_cron_push(mgr, task: dict, status: str, duration_s: float, body: str) 
 
 CRON_PUSH_RESULT_CHARS = 500  # 结果摘要的推送上限（任务行本身只存 200 字）
 
+# 到点认领的容差（秒）：cron-run 子进程由 Windows 计划任务按分钟边界拉起，
+# 相对 next_run_at 可能早到几十秒（daily/weekly 的调度抖动、interval 的相位
+# 漂移），容差内视为同一到点槽位照常认领。上限必须压在 60 秒之内：认领占位
+# 值按认领时刻推算，最小也是「现在 + 1 个最小间隔（60 秒）」，容差一旦 ≥ 60
+# 秒，读到他人占位值的后来者就能把占位值误当到点再认领一次（去重失效）。
+CRON_CLAIM_TOLERANCE_S = 30.0
+
 
 def cron_push_body(task: dict, status: str, duration_s: float) -> str:
     """定时任务终态摘要文案：任务名 / 状态 / 耗时 / 完成时间 / 结果摘要（≤500 字截断）。"""
@@ -322,10 +329,21 @@ async def run_cron_task_core(
       扫描都只能记一条「上一轮未结束」，看不出根因。
     - alert_after：连续失败多少次推一条聚合告警（0 = 不推）。
 
-    返回收尾后的任务行；任务不存在 / 未启用且未 force / 已在跑时返回 None。
+    返回收尾后的任务行；任务不存在 / 未启用且未 force / 已在跑 / 未到点或
+    已被另一方认领（非 force 的库级 CAS 认领，见下）时返回 None。
     执行失败不向上抛（回写错误状态就是收尾），调用方读任务行拿结果。
     被叫停时写 ``last_status=cancelled`` 并把 CancelledError 继续向上抛——
     取消必须真的把协程停住，不能吞掉。
+
+    库级 CAS 认领（SEC-M17）：system_schedule=true 时，同一到点槽位可能被
+    应用内扫描（20 秒一轮）与 Windows 计划任务拉起的 cron-run 子进程同时
+    盯上，进程内 running 字典管不住跨进程。非 force 触发在执行前先把
+    next_run_at 原子前移为占位值（store.claim_cron_task，单 UPDATE 带
+    WHERE 旧值，0 行受影响 = 已被另一方认领即放弃）；到点判定（含容差）
+    挡住读到占位值的后来者。完成/失败/取消的既有回写照常按真实完成时刻
+    重排 next_run_at 覆盖占位值——认领只是把「写 next_run_at 的时点」提前，
+    各收尾路径语义不变，也不会把旧值还原成无限重试。force（用户手动立即
+    运行）不认领：保持既有语义，是否在跑仍由 running 字典承担。
     """
     task = await store.get_cron_task(task_id)
     if task is None:
@@ -334,6 +352,17 @@ async def run_cron_task_core(
         return None  # 已在跑：force 也不重复触发（与既有扫描循环口径一致）
     if not task["enabled"] and not force:
         return None
+    if not force:
+        # 库级认领（跨进程去重的唯一互斥点）：拿读到的旧 next_run_at 竞争，
+        # 只有改得动的一方获得执行权。未到点（含 next_run_at 已被另一方
+        # 认领成占位将来时间）与 CAS 落败都直接放弃——执行权归先到者。
+        expected = float(task["next_run_at"] or 0.0)
+        now = time.time()
+        if expected > now + CRON_CLAIM_TOLERANCE_S:
+            return None  # 未到点：要么没轮到本轮，要么已被另一方认领在跑
+        placeholder = store.compute_next_run({**task, "last_run_at": now}, now)
+        if not await store.claim_cron_task(task_id, expected, placeholder):
+            return None  # 旧 next_run_at 已被另一方改写：本轮让给它
     added = False
     # 登记与 force 解耦：强制运行（cron.run_now / 连点）也进在跑集合，扫描
     # 循环才能看见它——否则强制运行在飞期间任务仍是 due 状态，下一轮扫描

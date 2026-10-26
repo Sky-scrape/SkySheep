@@ -15,10 +15,11 @@ import sqlite3
 import tempfile
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 import aiosqlite
 
@@ -26,6 +27,8 @@ from ..messages import Message
 from ..textio import sweep_stale_tmp_files
 
 logger = logging.getLogger("skysheep.store")
+
+_T = TypeVar("_T")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -451,6 +454,70 @@ def session_from_row(r) -> Session:
     )
 
 
+class _SharedConnRetry:
+    """共享连接的瞬时锁失败重试壳。
+
+    M16 起多语句写走独立连接（_write_txn/_immediate_txn），共享连接上的单语句
+    写开始与它们竞争写锁。实测（pipeline 并发节点压测）：共享连接的 DML 在
+    独立事务提交的瞬间可能拿到**绕过 busy_timeout 的即时 locked 失败**（延迟
+    事务快照过期一类，busy handler 对这类场景不生效），且失败后隐式事务停在
+    共享连接上，把后续所有语句一起拖死。这里对这类瞬时失败做有限次退避重试；
+    重试仍失败则回滚收场再上抛——单语句写方法里该事务只含失败语句本身，
+    回滚即「本方法未完成」的如实语义，也不会把毒事务留给后续方法。
+
+    只代理 execute / executemany（写语义所在），其余属性透传原始连接。
+    """
+
+    def __init__(self, conn: aiosqlite.Connection,
+                 retries: int = 3, delay: float = 0.02) -> None:
+        self._conn = conn
+        self._retries = retries
+        self._delay = delay
+
+    async def execute(self, sql, *args, **kwargs):
+        delay = self._delay
+        for attempt in range(self._retries + 1):
+            try:
+                return await self._conn.execute(sql, *args, **kwargs)
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                transient = "locked" in msg or "busy" in msg
+                if not transient or attempt >= self._retries:
+                    if transient:
+                        # 放弃前清掉留在连接上的失败事务，别毒化后续方法
+                        logger.warning("共享连接写重试 %d 次仍失败，回滚收场：%s", attempt + 1, e)
+                        try:
+                            await self._conn.rollback()
+                        except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                            pass
+                    raise
+                await asyncio.sleep(delay)
+                delay *= 2
+
+    async def executemany(self, sql, *args, **kwargs):
+        delay = self._delay
+        for attempt in range(self._retries + 1):
+            try:
+                return await self._conn.executemany(sql, *args, **kwargs)
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                transient = "locked" in msg or "busy" in msg
+                if not transient or attempt >= self._retries:
+                    if transient:
+                        logger.warning("共享连接 executemany 重试 %d 次仍失败，回滚收场：%s",
+                                       attempt + 1, e)
+                        try:
+                            await self._conn.rollback()
+                        except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                            pass
+                    raise
+                await asyncio.sleep(delay)
+                delay *= 2
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 def _message_duration_seconds(content_json: str) -> float | None:
     """从消息 JSON 里取实测轮耗时（秒）；没有该字段（旧消息）返回 None。
 
@@ -857,6 +924,10 @@ class SessionStore:
                     logger.warning("迁移前备份失败（不影响启动）：%s", e)
             await self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self._db.commit()
+        # M16：共享连接套上瞬时锁失败重试壳（_SharedConnRetry）。放在全部
+        # 连接级 pragma / row_factory 设置之后——壳只代理 execute / executemany，
+        # 其余属性（commit / close / in_transaction / row_factory…）仍透传原始连接。
+        self._db = _SharedConnRetry(self._db)
         self._fts_dirty = False  # 索引写失败过 → 下次启动走查漏模式
         await self._setup_fts()
         return self
@@ -975,16 +1046,18 @@ class SessionStore:
         except Exception:  # noqa: BLE001 - 坏行退化成原始字符串，不能让它挡住索引
             return str(raw)
 
-    async def _fts_insert(self, message_id: int, content_json: str) -> None:
-        """同步一条消息进 FTS；未启用时无事发生。
+    async def _fts_insert(self, conn, message_id: int, content_json: str) -> None:
+        """把一条消息同步进 FTS（conn 是承载本次写入事务的连接）；未启用时无事发生。
 
         写失败不影响主存储，但要留痕并置脏：静默吞掉会让这条消息永久搜不到
         （水位法补不回它），脏标记让下次启动走查漏模式修复（安全审查低危项）。
+        调用方把 FTS 语句与主表语句放进同一写事务——主表失败回滚时已写的
+        索引行随之回滚，不会与主表漂移。
         """
-        if not self.fts_ready or self._db is None:
+        if not self.fts_ready:
             return
         try:
-            await self._db.execute(
+            await conn.execute(
                 "INSERT INTO messages_fts(rowid, plain) VALUES (?, ?)",
                 (int(message_id), self._plain_text(content_json)),
             )
@@ -992,12 +1065,17 @@ class SessionStore:
             self._fts_dirty = True
             logger.warning("FTS 索引写入失败（消息 %s，下次启动补齐）：%s", message_id, e)
 
-    async def _fts_delete(self, where_sql: str, args: tuple) -> None:
-        """按 messages 的命中行同步删除 FTS 行（where_sql 作用于 messages 子查询）。"""
-        if not self.fts_ready or self._db is None:
+    async def _fts_delete(self, conn, where_sql: str, args: tuple) -> None:
+        """按 messages 的命中行同步删除 FTS 行（where_sql 作用于 messages 子查询）。
+
+        conn 是承载本次写入事务的连接；必须在主表删除之前调用（子查询还要
+        借 messages 现存行圈定要删的索引行）。主表删除失败回滚时，这里已删的
+        索引行随事务一起回滚，不会再出现「索引删了、消息还在」的漂移。
+        """
+        if not self.fts_ready:
             return
         try:
-            await self._db.execute(
+            await conn.execute(
                 "DELETE FROM messages_fts WHERE rowid IN "
                 f"(SELECT id FROM messages WHERE {where_sql})",
                 args,
@@ -1012,6 +1090,72 @@ class SessionStore:
         if self._db:
             await self._db.close()
             self._db = None
+
+    # ---- 独立连接写事务（多语句全有全无） ----
+    #
+    # 共享 self._db（aiosqlite 默认 isolation_level="" 隐式延迟事务）上的多语句
+    # 写没有事务边界：其他协程的 commit() 会把本方法的中间状态提交落盘，方法
+    # 中途失败也不回滚，留下半完成状态（半删除的项目、新旧交错的演化摘要、
+    # FTS 与主表漂移）。凡「多条写语句必须同生同死」的路径都走这里：开一条
+    # 独立连接 BEGIN IMMEDIATE 拿写锁——事务内其他协程既插不进语句也提交不了，
+    # 异常整体回滚、成功一次提交。纪律与接力表相同：回调内只做本地 SQL，
+    # 绝不 await provider / 窗口 / 其他会自行 commit 的存储 API（写锁持有
+    # 时间必须短）。单语句写不需要这里（SQLite 单语句本就原子）。
+
+    @asynccontextmanager
+    async def _immediate_txn(self):
+        """独立短写事务骨架：独立连接 + BEGIN IMMEDIATE，正常出口提交、异常回滚。
+
+        pragmas 与主连接同口径：busy_timeout=5000 兜写写碰撞；journal_mode 是
+        库级持久属性、短连接无需重设，synchronous 是连接级、归一到主连接的
+        NORMAL（WAL 下安全且 fsync 次数与主连接一致）。回滚失败不掩盖原异常。
+        """
+        conn = await aiosqlite.connect(self.path)
+        try:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("PRAGMA synchronous=NORMAL")
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as e:
+                # 共享连接上的孤儿写事务兜底：任务在写方法的 execute 与 commit
+                # 之间被取消（典型：轮次中途点停止打断 touch/落库），隐式事务
+                # 就留在共享连接上无人收尸，写锁被它占死，这里的 BEGIN 等
+                # busy_timeout 耗尽后报 locked。这份中间态本就不该提交——它的
+                # 方法从未完成、返回值无人接住，回滚即清理（正是本审计要消除
+                # 的「半完成状态」），清掉后重取锁。活跃写者的 commit 不依赖
+                # 本连接，能熬过 5 秒等待还开着事务的只能是孤儿。
+                if (
+                    self._db is None
+                    or not self._db.in_transaction
+                    or "locked" not in str(e).lower()
+                ):
+                    raise
+                logger.warning("清理共享连接上的孤儿写事务后重试 BEGIN（%s）", e)
+                await self._db.rollback()
+                await conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            await conn.commit()
+        except BaseException:
+            try:
+                await conn.rollback()
+            except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                pass
+            raise
+        finally:
+            await conn.close()
+
+    async def _write_txn(
+        self, fn: Callable[[aiosqlite.Connection], Awaitable[_T]]
+    ) -> _T:
+        """在独立写事务里执行 fn(conn)，透传 fn 的返回值；fn 抛异常则整体回滚。
+
+        多语句写方法的标准入口：把「这组语句必须同生同死」的部分包成回调，
+        语句全部落进 BEGIN IMMEDIATE 事务，中间状态在提交前对其他连接不可见，
+        也不会被其他协程的 commit 提前落盘。
+        """
+        async with self._immediate_txn() as conn:
+            return await fn(conn)
 
     # ---- projects ----
 
@@ -1088,29 +1232,40 @@ class SessionStore:
         只清数据库记录，电脑上的项目文件夹不受影响。
 
         定时任务/流水线必须级联：留下孤儿任务的话，到点扫描仍会捞到它，
-        执行上下文兜底会把它挂到「当前项目」的工作目录与白名单下继续跑。"""
+        执行上下文兜底会把它挂到「当前项目」的工作目录与白名单下继续跑。
+
+        全部删除走独立写事务：要么全删、要么不删——中途失败整体回滚，不会
+        留下「消息没了但 sessions/白名单还在」的半删除，也不会被其他协程的
+        commit 把中间状态提前落盘。
+        """
         assert self._db
-        await self._fts_delete(
-            "session_id IN (SELECT id FROM sessions WHERE project_id = ?)", (project_id,)
-        )
-        await self._db.execute(
-            "DELETE FROM messages WHERE session_id IN "
-            "(SELECT id FROM sessions WHERE project_id = ?)",
-            (project_id,),
-        )
-        await self._db.execute("DELETE FROM sessions WHERE project_id = ?", (project_id,))
-        await self._db.execute("DELETE FROM whitelist_rules WHERE project_id = ?", (project_id,))
-        await self._db.execute("DELETE FROM project_tasks WHERE project_id = ?", (project_id,))
-        await self._db.execute(
-            "DELETE FROM pipeline_nodes WHERE pipeline_id IN "
-            "(SELECT id FROM pipelines WHERE project_id = ?)",
-            (project_id,),
-        )
-        await self._db.execute("DELETE FROM pipelines WHERE project_id = ?", (project_id,))
-        await self._db.execute("DELETE FROM cron_tasks WHERE project_id = ?", (project_id,))
-        cur = await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-        await self._db.commit()
-        return cur.rowcount
+
+        async def txn(conn: aiosqlite.Connection) -> int:
+            # FTS 与主表删除同一事务：回滚即一起回滚，索引不漂移
+            await self._fts_delete(
+                conn,
+                "session_id IN (SELECT id FROM sessions WHERE project_id = ?)",
+                (project_id,),
+            )
+            await conn.execute(
+                "DELETE FROM messages WHERE session_id IN "
+                "(SELECT id FROM sessions WHERE project_id = ?)",
+                (project_id,),
+            )
+            await conn.execute("DELETE FROM sessions WHERE project_id = ?", (project_id,))
+            await conn.execute("DELETE FROM whitelist_rules WHERE project_id = ?", (project_id,))
+            await conn.execute("DELETE FROM project_tasks WHERE project_id = ?", (project_id,))
+            await conn.execute(
+                "DELETE FROM pipeline_nodes WHERE pipeline_id IN "
+                "(SELECT id FROM pipelines WHERE project_id = ?)",
+                (project_id,),
+            )
+            await conn.execute("DELETE FROM pipelines WHERE project_id = ?", (project_id,))
+            await conn.execute("DELETE FROM cron_tasks WHERE project_id = ?", (project_id,))
+            cur = await conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            return cur.rowcount
+
+        return await self._write_txn(txn)
 
     # ---- 项目任务清单 ----
 
@@ -1240,42 +1395,46 @@ class SessionStore:
         return int(row[0] or 0) if row else 0
 
     async def replace_map_digests(self, project_id: int, rows: list[dict]) -> None:
-        """整体替换某项目的演化摘要（隐式事务内先删后插，一次 commit）。
+        """整体替换某项目的演化摘要（独立写事务内先删后插，成功一次提交）。
 
         生成是「重新总结一遍」而不是增量合并：阶段划分随每次生成整体作废，
-        避免新旧阶段时间窗交错让地图自相矛盾。写失败时整体回滚到旧摘要。
+        避免新旧阶段时间窗交错让地图自相矛盾。写失败时整体回滚到旧摘要
+        （删除不会被后续任何协程的 commit 提前落盘，新旧摘要不会交错）。
         """
         assert self._db
         now = time.time()
-        await self._db.execute("DELETE FROM map_digests WHERE project_id = ?", (project_id,))
-        for r in rows:
-            await self._db.execute(
-                "INSERT INTO map_digests (project_id, kind, title, summary, highlights,"
-                " topics, session_ids, start_ts, end_ts, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    project_id,
-                    "overview" if r.get("kind") == "overview" else "phase",
-                    str(r.get("title") or "")[:200],
-                    str(r.get("summary") or "")[:2000],
-                    json.dumps(
-                        [str(x)[:200] for x in (r.get("highlights") or [])[:10]],
-                        ensure_ascii=False,
+
+        async def txn(conn: aiosqlite.Connection) -> None:
+            await conn.execute("DELETE FROM map_digests WHERE project_id = ?", (project_id,))
+            for r in rows:
+                await conn.execute(
+                    "INSERT INTO map_digests (project_id, kind, title, summary, highlights,"
+                    " topics, session_ids, start_ts, end_ts, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        project_id,
+                        "overview" if r.get("kind") == "overview" else "phase",
+                        str(r.get("title") or "")[:200],
+                        str(r.get("summary") or "")[:2000],
+                        json.dumps(
+                            [str(x)[:200] for x in (r.get("highlights") or [])[:10]],
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            [str(x)[:40] for x in (r.get("topics") or [])[:12]],
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            [str(x) for x in (r.get("session_ids") or [])[:500]],
+                            ensure_ascii=False,
+                        ),
+                        float(r.get("start_ts") or 0),
+                        float(r.get("end_ts") or 0),
+                        now,
                     ),
-                    json.dumps(
-                        [str(x)[:40] for x in (r.get("topics") or [])[:12]],
-                        ensure_ascii=False,
-                    ),
-                    json.dumps(
-                        [str(x) for x in (r.get("session_ids") or [])[:500]],
-                        ensure_ascii=False,
-                    ),
-                    float(r.get("start_ts") or 0),
-                    float(r.get("end_ts") or 0),
-                    now,
-                ),
-            )
-        await self._db.commit()
+                )
+
+        await self._write_txn(txn)
 
     async def map_sessions_with_stats(
         self, project_id: int, start_ts: float, end_ts: float,
@@ -1702,41 +1861,54 @@ class SessionStore:
         """删除 seq 在锚点之后（或含锚点）的消息，返回删除条数。
 
         锚点之后可能残留比锚点大的 seq，用 > / >= 锚点即可（seq 单调递增）。
+        FTS 删除与主表删除纳入同一独立写事务：主表删除失败回滚时已删的索引行
+        一起回滚——旧实现两步走共享连接，FTS 删成功后主表失败连 _fts_dirty
+        都没机会置位，索引与主表就此漂移；现在结构上不可能漂移。
         """
         assert self._db
         op = ">=" if include_self else ">"
-        # FTS 是独立表，删 messages 前先按同一条件清掉对应行
-        await self._fts_delete(f"session_id = ? AND seq {op} ?", (session_id, seq))
-        cur = await self._db.execute(
-            f"DELETE FROM messages WHERE session_id = ? AND seq {op} ?",
-            (session_id, seq),
-        )
-        await self._db.commit()
-        return cur.rowcount
+
+        async def txn(conn: aiosqlite.Connection) -> int:
+            # FTS 先按同一条件清（子查询还要借 messages 现存行圈定索引行）
+            await self._fts_delete(conn, f"session_id = ? AND seq {op} ?", (session_id, seq))
+            cur = await conn.execute(
+                f"DELETE FROM messages WHERE session_id = ? AND seq {op} ?",
+                (session_id, seq),
+            )
+            return cur.rowcount
+
+        return await self._write_txn(txn)
 
     async def copy_messages_between(
         self, src_session: str, dst_session: str, upto_seq: int
     ) -> int:
-        """把 seq <= upto_seq 的消息复制到新会话（分叉用），返回复制条数。"""
+        """把 seq <= upto_seq 的消息复制到新会话（分叉用），返回复制条数。
+
+        复制走独立写事务：中途失败整体回滚，目标会话不会留下半批消息；
+        消息行与对应 FTS 行同事务进出。
+        """
         assert self._db
-        cur = await self._db.execute(
-            "SELECT seq, role, content, created_at FROM messages"
-            " WHERE session_id = ? AND seq <= ? ORDER BY seq ASC",
-            (src_session, upto_seq),
-        )
-        rows = await cur.fetchall()
-        n = 0
-        for r in rows:
-            cur2 = await self._db.execute(
-                "INSERT INTO messages (session_id, seq, role, content, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (dst_session, r["seq"], r["role"], r["content"], r["created_at"]),
+
+        async def txn(conn: aiosqlite.Connection) -> int:
+            cur = await conn.execute(
+                "SELECT seq, role, content, created_at FROM messages"
+                " WHERE session_id = ? AND seq <= ? ORDER BY seq ASC",
+                (src_session, upto_seq),
             )
-            if cur2.lastrowid is not None:
-                await self._fts_insert(int(cur2.lastrowid), r["content"])
-            n += 1
-        await self._db.commit()
-        return n
+            rows = await cur.fetchall()
+            n = 0
+            for r in rows:
+                cur2 = await conn.execute(
+                    "INSERT INTO messages (session_id, seq, role, content, created_at)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (dst_session, r["seq"], r["role"], r["content"], r["created_at"]),
+                )
+                if cur2.lastrowid is not None:
+                    await self._fts_insert(conn, int(cur2.lastrowid), r["content"])
+                n += 1
+            return n
+
+        return await self._write_txn(txn)
 
     async def get_session_title(self, session_id: str) -> str:
         """轻量取标题（多会话管线收尾用，不拉全部列）。"""
@@ -1890,34 +2062,49 @@ class SessionStore:
         await self._db.commit()
 
     async def delete_session(self, session_id: str) -> None:
-        """删除会话及其全部消息。"""
+        """删除会话及其全部消息。
+
+        走独立写事务：消息行、会话行与 FTS 行要么一起没、要么都在——中途
+        失败回滚，不会留下「消息没了、会话壳还在」的半删除。
+        """
         assert self._db
-        await self._fts_delete("session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        await self._db.commit()
+
+        async def txn(conn: aiosqlite.Connection) -> None:
+            await self._fts_delete(conn, "session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+        await self._write_txn(txn)
 
     # ---- messages ----
 
     async def append_message(self, session_id: str, message: Message) -> int:
+        """追加一条消息，返回消息行 id。
+
+        seq 分配（MAX+1 → INSERT）与 FTS 写进同一独立写事务：并发追加不再
+        互相踩 seq（BEGIN IMMEDIATE 下写者串行），UNIQUE(session_id, seq)
+        仍是最后兜底；FTS 与消息行同生同死，提交前其他连接看不到中间状态。
+        """
         assert self._db
-        cur = await self._db.execute(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?",
-            (session_id,),
-        )
-        row = await cur.fetchone()
-        seq = row[0]
         content_json = message.model_dump_json()
-        cur = await self._db.execute(
-            "INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (session_id, seq, message.role, content_json, time.time()),
-        )
-        # FTS 与主表同一事务：写在 commit 之后会挂进新的隐式事务，
-        # 靠下一次写操作的 commit 才顺带提交，收尾/崩溃时尾部落空
-        await self._fts_insert(int(cur.lastrowid), content_json)
-        await self._db.commit()
+
+        async def txn(conn: aiosqlite.Connection) -> tuple[int, int | None]:
+            cur = await conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            row = await cur.fetchone()
+            seq = row[0]
+            cur = await conn.execute(
+                "INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                (session_id, seq, message.role, content_json, time.time()),
+            )
+            await self._fts_insert(conn, int(cur.lastrowid), content_json)
+            return seq, cur.lastrowid
+
+        seq, row_id = await self._write_txn(txn)
         message.seq = seq  # 回填给内存历史/前端 brief 用
-        return cur.lastrowid
+        return row_id
 
     async def load_messages(self, session_id: str) -> list[Message]:
         assert self._db
@@ -2763,6 +2950,29 @@ class SessionStore:
         rows = await cur.fetchall()
         return [self._cron_row(r) for r in rows]
 
+    async def claim_cron_task(
+        self, task_id: int, expected_next_run_at: float, new_next_run_at: float
+    ) -> bool:
+        """CAS 认领一个到点的定时任务：next_run_at 仍等于期望值时原子前移。
+
+        单条 UPDATE 带 WHERE 双条件（id + 旧 next_run_at），原子性由 SQLite
+        写锁保证：应用内扫描循环与 cron-run 子进程（系统计划任务拉起）两个
+        触发方各拿自己读到的旧值竞争，只有先到者改得动（rowcount=1 认领
+        成功），后到者 0 行受影响即放弃——跨进程去重，杜绝同一到点槽位被
+        两边各跑一轮（副作用重复、token 双倍、回写互覆）。
+
+        认领值只是占位：执行完成/失败/取消的既有回写照常按真实完成时刻
+        重排 next_run_at 覆盖它；认领方在执行中崩溃时占位值在未来，任务
+        到点后自然恢复，不会卡死也不会立即重放。返回是否认领成功。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "UPDATE cron_tasks SET next_run_at = ? WHERE id = ? AND next_run_at = ?",
+            (float(new_next_run_at), int(task_id), float(expected_next_run_at)),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
     # ---- 运行账本（automation_runs）：每次自动化运行一行 ----
     # 既有表只保存每个任务的「最后一次」运行（last_run_at/last_status/last_result），
     # 没有历史与耗时；工厂观战需要「运行」这一实体。写入点见
@@ -3235,6 +3445,8 @@ class SessionStore:
 
         nodes 里每项的 depends_on 用「同批次序号」（0 起，见 tools/pipeline.py 的
         after 字段），这里统一物化成真实节点 id——对外（WS/工具查询）只有 id 一种引用。
+        流水线行与全部节点行走独立写事务：任一节点插入失败整体回滚，
+        不会留下没有节点的孤儿流水线。
         """
         assert self._db
         nodes = list(nodes or [])
@@ -3245,25 +3457,30 @@ class SessionStore:
         for n in nodes:
             self._validate_node_text(n.get("title") or "", n.get("prompt") or "")
         now = time.time()
-        cur = await self._db.execute(
-            "INSERT INTO pipelines (project_id, name, status, concurrency, notify_channel, created_at)"
-            " VALUES (?, ?, 'draft', ?, ?, ?)",
-            (project_id, name, max(1, min(4, int(concurrency or 2))),
-             1 if notify_channel else 0, now),
-        )
-        pid = cur.lastrowid
-        ids: list[int] = []
-        for i, n in enumerate(nodes or []):
-            deps = await self._materialize_deps(n.get("depends_on") or [], ids)
-            nid = await self._insert_node(
-                pid, i, n.get("title") or f"节点 {i + 1}", n.get("prompt") or "",
-                n.get("allowed_tools") or [], deps, n.get("dep_mode") or "all",
-                kind=n.get("kind") or "run", ref_id=str(n.get("ref_id") or ""),
-                control=str(n.get("control") or ""), max_runs=int(n.get("max_runs") or 1),
-                timeout_s=n.get("timeout_s") if n.get("timeout_s") is not None else 3600,
+
+        async def txn(conn: aiosqlite.Connection) -> int:
+            cur = await conn.execute(
+                "INSERT INTO pipelines (project_id, name, status, concurrency, notify_channel, created_at)"
+                " VALUES (?, ?, 'draft', ?, ?, ?)",
+                (project_id, name, max(1, min(4, int(concurrency or 2))),
+                 1 if notify_channel else 0, now),
             )
-            ids.append(nid)
-        await self._db.commit()
+            pid = cur.lastrowid
+            ids: list[int] = []
+            for i, n in enumerate(nodes or []):
+                deps = await self._materialize_deps(n.get("depends_on") or [], ids)
+                nid = await self._insert_node(
+                    pid, i, n.get("title") or f"节点 {i + 1}", n.get("prompt") or "",
+                    n.get("allowed_tools") or [], deps, n.get("dep_mode") or "all",
+                    kind=n.get("kind") or "run", ref_id=str(n.get("ref_id") or ""),
+                    control=str(n.get("control") or ""), max_runs=int(n.get("max_runs") or 1),
+                    timeout_s=n.get("timeout_s") if n.get("timeout_s") is not None else 3600,
+                    conn=conn,
+                )
+                ids.append(nid)
+            return pid
+
+        pid = await self._write_txn(txn)
         return await self.get_pipeline(pid)
 
     async def add_pipeline_node(
@@ -3313,9 +3530,14 @@ class SessionStore:
         allowed_tools: list[str], depends_on: list[int], dep_mode: str,
         kind: str = "run", ref_id: str = "",
         control: str = "", max_runs: int = 1, timeout_s: int = 3600,
+        conn: aiosqlite.Connection | None = None,
     ) -> int:
-        assert self._db
-        cur = await self._db.execute(
+        """插入节点行返回 id；conn 传独立事务连接时语句落进该事务
+        （add_pipeline 的全有全无建线），缺省仍写共享连接（单语句路径）。"""
+        if conn is None:
+            assert self._db
+            conn = self._db
+        cur = await conn.execute(
             "INSERT INTO pipeline_nodes (pipeline_id, seq, title, prompt, allowed_tools,"
             " depends_on, dep_mode, kind, ref_id, control, max_runs, timeout_s, status)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked')",
@@ -3532,21 +3754,10 @@ class SessionStore:
 
     @asynccontextmanager
     async def _relay_txn(self):
-        conn = await aiosqlite.connect(self.path)
-        try:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA busy_timeout=5000")
-            await conn.execute("BEGIN IMMEDIATE")
+        """接力表专用写事务（形态保留，relay 各写路径照旧）；骨架由 _immediate_txn
+        提供（独立连接 + BEGIN IMMEDIATE + 异常回滚，pragmas 与主连接同口径）。"""
+        async with self._immediate_txn() as conn:
             yield conn
-            await conn.commit()
-        except BaseException:
-            try:
-                await conn.rollback()
-            except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
-                pass
-            raise
-        finally:
-            await conn.close()
 
     @staticmethod
     def _relay_task_row(row) -> dict:

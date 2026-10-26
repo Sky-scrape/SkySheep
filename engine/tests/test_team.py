@@ -2610,18 +2610,30 @@ async def test_team_ws_methods_converge_foreign_session_for_remote_callers(home)
     backend.session = SimpleNamespace(id="sess-mine")
     noop_emit = collector()[1]
 
-    # 非本机：他人 sid 不可见（快照收敛到自己的会话）
-    got = await _h_team_get(backend, {"session_id": foreign_sid}, noop_emit, local=False)
-    assert got["active"] is False and got["session_id"] == "sess-mine"
-    # 非本机：拿他人 sid 加单/收队被收敛拒绝，板原样
-    with pytest.raises(TeamError, match="没有进行中的团队"):
-        await _h_team_task_add(backend, {"session_id": foreign_sid,
-                                         "title": "黑工单", "assignee": "小研"},
+    # 非本机：他人 sid 不可见——收敛到「连接绑定的会话」而非全局
+    # backend.session（审计 M03：全局指针会被别的连接/本机窗口切走，收敛
+    # 对象随之漂移；本测试在 WS 请求外直调 handler，用连接级上下文注入
+    # 绑定会话，backend.session 只作漂移诱饵留在原地）
+    import skysheep.server.app as _server_app
+    token = _server_app._CONN_SESSION.set("sess-mine")
+    try:
+        got = await _h_team_get(backend, {"session_id": foreign_sid}, noop_emit, local=False)
+        assert got["active"] is False and got["session_id"] == "sess-mine"
+        # 非本机：拿他人 sid 加单/收队被收敛拒绝，板原样
+        with pytest.raises(TeamError, match="没有进行中的团队"):
+            await _h_team_task_add(backend, {"session_id": foreign_sid,
+                                             "title": "黑工单", "assignee": "小研"},
+                                   noop_emit, local=False)
+        with pytest.raises(TeamError, match="没有进行中的团队"):
+            await _h_team_stop(backend, {"session_id": foreign_sid, "reason": "越权"},
                                noop_emit, local=False)
-    with pytest.raises(TeamError, match="没有进行中的团队"):
-        await _h_team_stop(backend, {"session_id": foreign_sid, "reason": "越权"},
-                           noop_emit, local=False)
-    assert backend._teams.get(foreign_sid) is orch and orch.active
+        assert backend._teams.get(foreign_sid) is orch and orch.active
+    finally:
+        _server_app._CONN_SESSION.reset(token)
+
+    # 非本机且连接未绑定会话：收敛为空串 fail closed，绝不回退全局活动会话
+    got0 = await _h_team_get(backend, {"session_id": foreign_sid}, noop_emit, local=False)
+    assert got0["active"] is False and got0["session_id"] == ""
 
     # 非本机：他人团队的频道文本不可回放（收敛后的 sid 与落库行归属对不上）
     await store.add_team_message("tid-foreign", seq=1, from_member="user",

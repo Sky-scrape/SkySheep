@@ -642,6 +642,7 @@ function resetSkillView() {
 function renderSkillSummary(skills) {
   const el = document.getElementById("skill-summary-text");
   if (!el) return;
+  el.classList.remove("skeleton"); // 回填真实内容后摘掉骨架屏闪动（占位期见 index.html）
   const active = skills.filter((s) => s.enabled && s.applies).length;
   el.textContent = skills.length
     ? `${skills.length} 个技能 · 本项目生效 ${active} 个 — 点这里查看、设使用范围`

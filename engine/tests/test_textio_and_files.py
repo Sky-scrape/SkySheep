@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import base64
+import os
+from pathlib import Path
 
 import pytest
 
@@ -432,6 +434,150 @@ async def test_move_overwrite_dir_checkpoint_restores_both_sides(tmp_path):
     assert (tmp_path / "src" / "new.txt").read_text(encoding="utf-8") == "new"
     assert (tmp_path / "dst" / "src" / "old.txt").read_text(encoding="utf-8") == "old"
     assert not (tmp_path / "dst" / "src" / "new.txt").exists(), "移入副本应被回滚清掉"
+
+
+# ------------------------------------------------ M09：记录失败不得当成「改前不存在」
+
+
+async def test_record_missing_file_records_none(tmp_path):
+    """基线语义不变：改前不存在的路径记 None（回滚时应删除）。"""
+    rec = ChangeRecorder()
+    missing = tmp_path / "nope.txt"
+    await rec.record(missing)
+    assert rec.pre[str(missing)] is None
+
+
+async def test_record_directory_survives_read_denial(tmp_path):
+    """目录记录：read_bytes 对目录在 Windows 上抛 PermissionError（POSIX 上是
+    IsADirectoryError），都属「其他 OSError」——必须走 is_dir → DIR_MARKER
+    分支，回滚时重建目录本身，而不是被当成「改前不存在」。"""
+    from skysheep.tools.base import DIR_MARKER
+
+    rec = ChangeRecorder()
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "f.txt").write_text("x", encoding="utf-8")
+    await rec.record(d)
+    assert rec.pre[str(d)] == DIR_MARKER
+
+
+def _deny_read_bytes(target: Path):
+    """把 Path.read_bytes 打桩成对 target 抛 PermissionError（模拟被占用/无权限
+    的普通文件；Windows 上共享冲突即表现为 PermissionError）。"""
+    real_read_bytes = Path.read_bytes
+
+    def denied(self):
+        if self == target:
+            raise PermissionError(13, "模拟文件被占用")
+        return real_read_bytes(self)
+
+    return denied
+
+
+async def test_record_read_failed_file_rejects_and_keeps_content(tmp_path, monkeypatch):
+    """普通文件读失败：拒绝操作且不记 None——记 None 等于告诉回滚
+    「改前不存在」，会把还活着的文件删掉（审查 M09）。"""
+    p = tmp_path / "locked.txt"
+    p.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(Path, "read_bytes", _deny_read_bytes(p))
+
+    rec = ChangeRecorder()
+    with pytest.raises(ToolError):
+        await rec.record(p)
+    assert str(p) not in rec.pre, "读失败不得记 None、也不得留半条记录"
+    assert p.read_text(encoding="utf-8") == "keep", "文件本身不受影响"
+
+
+async def test_write_file_rejected_when_pre_read_fails(tmp_path, monkeypatch):
+    """端到端：覆盖被占用文件在检查点处被拒，write_file 不执行、原内容保留。"""
+    p = tmp_path / "locked.txt"
+    p.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(Path, "read_bytes", _deny_read_bytes(p))
+
+    rec = ChangeRecorder()
+    tool = ToolRegistry(default_tools(recorder=rec)).get("write_file")
+    with pytest.raises(ToolError) as ei:
+        await tool.run(WriteFileArgs(path="locked.txt", content="new"), _ctx(tmp_path))
+    assert "操作已拒绝" in str(ei.value)
+    assert p.read_text(encoding="utf-8") == "old"
+    assert str(p) not in rec.pre
+
+
+async def test_delete_file_rejected_when_pre_read_fails(tmp_path, monkeypatch):
+    """读失败的单文件同样拒绝删除（fail-closed），文件保留。"""
+    p = tmp_path / "locked.txt"
+    p.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(Path, "read_bytes", _deny_read_bytes(p))
+
+    rec = ChangeRecorder()
+    tool = ToolRegistry(default_tools(recorder=rec)).get("delete_file")
+    with pytest.raises(ToolError):
+        await tool.run(DeleteFileArgs(path="locked.txt"), _ctx(tmp_path))
+    assert p.read_text(encoding="utf-8") == "keep"
+    assert str(p) not in rec.pre
+
+
+def _deny_scandir(guard: Path):
+    """把 os.scandir 打桩成对 guard 目录抛 PermissionError（模拟受保护子目录，
+    对应 Windows ACL 拒绝列目录的真实形态）。"""
+    real_scandir = os.scandir
+
+    def denied(path):
+        if str(path) == str(guard):
+            raise PermissionError(13, "模拟拒绝访问")
+        return real_scandir(path)
+
+    return denied
+
+
+async def test_record_tree_scan_failure_rejects(tmp_path, monkeypatch):
+    """record_tree 扫描失败必须抛错，且一个条目都不能先进检查点——
+    pathlib 的 rglob 会把权限错误静默吞掉（扫到受保护子目录即静默截断），
+    旧实现「只记半棵树就返回」，删除放行后未记录的文件无处可还（M09）。"""
+    d = tmp_path / "d"
+    (d / "guard").mkdir(parents=True)
+    (d / "a.txt").write_text("a", encoding="utf-8")
+    (d / "guard" / "secret.txt").write_text("s", encoding="utf-8")
+    monkeypatch.setattr(os, "scandir", _deny_scandir(d / "guard"))
+
+    rec = ChangeRecorder()
+    with pytest.raises(ToolError):
+        await rec.record_tree(d)
+    assert not rec.pre, "扫描失败不得留下半棵树的记录"
+
+
+async def test_delete_dir_rejected_when_tree_scan_fails(tmp_path, monkeypatch):
+    """端到端：子目录扫描失败时拒绝整棵删除，一个文件都不许少。"""
+    d = tmp_path / "d"
+    (d / "guard").mkdir(parents=True)
+    (d / "a.txt").write_text("a", encoding="utf-8")
+    (d / "guard" / "secret.txt").write_text("s", encoding="utf-8")
+    monkeypatch.setattr(os, "scandir", _deny_scandir(d / "guard"))
+
+    rec = ChangeRecorder()
+    tool = ToolRegistry(default_tools(recorder=rec)).get("delete_file")
+    with pytest.raises(ToolError):
+        await tool.run(DeleteFileArgs(path="d", recursive=True), _ctx(tmp_path))
+    assert (d / "a.txt").read_text(encoding="utf-8") == "a"
+    assert (d / "guard" / "secret.txt").read_text(encoding="utf-8") == "s"
+    assert str(d / "a.txt") not in rec.pre, "被拒的操作不得留下半棵树的检查点"
+
+
+async def test_move_dir_rejected_when_tree_scan_fails(tmp_path, monkeypatch):
+    """端到端：源树扫描失败时拒绝移动，源文件原地保留、目标不产生。"""
+    d = tmp_path / "d"
+    (d / "guard").mkdir(parents=True)
+    (d / "a.txt").write_text("a", encoding="utf-8")
+    (d / "guard" / "secret.txt").write_text("s", encoding="utf-8")
+    monkeypatch.setattr(os, "scandir", _deny_scandir(d / "guard"))
+
+    rec = ChangeRecorder()
+    tool = ToolRegistry(default_tools(recorder=rec)).get("move_file")
+    with pytest.raises(ToolError):
+        await tool.run(MoveFileArgs(source="d", destination="e"), _ctx(tmp_path))
+    assert (d / "a.txt").read_text(encoding="utf-8") == "a"
+    assert (d / "guard" / "secret.txt").read_text(encoding="utf-8") == "s"
+    assert not (tmp_path / "e").exists()
 
 
 # ---------------------------------------------------------------- 权限门与新增工具

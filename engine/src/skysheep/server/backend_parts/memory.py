@@ -24,7 +24,7 @@ from ...config import (
 from ...core.checkpoints import CheckpointStore
 from ...core.prompt import MAX_INSTRUCTIONS_CHARS
 from ...session.store import Project
-from ...textio import write_text_atomic
+from ...textio import decode_bytes, write_text_atomic, write_text_file
 from ...tools.memory import (
     MAINTAIN_MIN_GLOBAL_CHARS,
     MAINTAIN_MIN_PROJECT_CHARS,
@@ -261,11 +261,13 @@ class MemoryMixin:
         return {"ran": False, "message": "整理完成：跑过的部分无需改动（另一份还没到整理规模）"}
 
     async def _maintain_memory(self, scope: str, force: bool = False) -> str:
-        """整理一份记忆文件：模型重写 → 备份原件 → 落盘 → 刷新系统提示词。
+        """整理一份记忆文件：读原始字节探测编码 → 模型重写 → 备份原件 → 落盘。
 
         返回 "changed"（整理并落盘）/ "unchanged"（模型认为无需改动或输出无效）
-        / "skipped"（没到整理规模或上一轮还在跑）/ "conflict"（读旧稿后文件被
-        并发写过，让路不写，不推进「上次整理时间」，下一轮巡检自动重试）。
+        / "skipped"（没到整理规模、上一轮还在跑、或编码不确定/二进制——textio
+        探测不确凿的文件不备份不写，宁可不整理也不冒写坏的风险）
+        / "conflict"（读旧稿后文件被并发写过——按原始字节比对，让路不写，不
+        推进「上次整理时间」，下一轮巡检自动重试）。
         失败静默记日志（整理是锦上添花，绝不打扰主流程）；「立即整理」按四态
         分别给用户反馈。
         """
@@ -279,12 +281,21 @@ class MemoryMixin:
             path = Path(self.instructions_file) if self.instructions_file else None
             min_chars = MAINTAIN_MIN_PROJECT_CHARS
             max_chars = MAX_INSTRUCTIONS_CHARS
-        old_text = ""
+        old_text, raw, encoding, newline = "", b"", "utf-8", "\n"
         if path is not None:
             try:
-                old_text = path.read_text(encoding="utf-8", errors="replace")
+                raw = path.read_bytes()
             except OSError:
-                old_text = ""
+                raw = b""
+            # 读原始字节 + textio 解码（tools/fs 同一套探测）：AGENTS.md 是用户
+            # 手写的文件，可能是 GB18030/CRLF——按 utf-8 errors=replace 读会把
+            # 中文读成一串替换字符，模型照着乱码整理、写回再固化，整份文件就毁了
+            tf = decode_bytes(raw)
+            if tf.binary or not tf.certain:
+                memory_log.info(
+                    "memory maintain skipped (%s): binary or encoding uncertain", scope)
+                return "skipped"  # 编码靠猜：不备份不写，宁可不整理
+            old_text, encoding, newline = tf.text, tf.encoding, tf.newline
         if len(old_text.strip()) < min_chars:
             return "skipped"  # 还没到值得整理的规模，也不消耗「上次整理时间」
         self._maintaining = True
@@ -297,20 +308,25 @@ class MemoryMixin:
                 return "unchanged"  # 输出为空/与原文一致/超长失控/结构破坏：一律不动原文件
             async with self._memory_io_lock:
                 # 读旧稿之后文件可能已被并发写过（归档提炼追加了新条目、设置页
-                # 保存）：整理稿按旧快照生成，直接覆盖会把新内容静默抹掉。对不上
-                # 就让路——整理时间不推进，巡检下一轮会带着新内容重新整理。
+                # 保存）：整理稿按旧快照生成，直接覆盖会把新内容静默抹掉。按
+                # 原始字节比对（比解码文本更可靠：不经编码往返，编码/行尾层面
+                # 的改动同样让路），对不上就让路——整理时间不推进，巡检下一轮
+                # 会带着新内容重新整理。
                 try:
-                    cur = path.read_text(encoding="utf-8", errors="replace")
+                    cur_raw = path.read_bytes()
                 except OSError:
-                    cur = ""
-                if cur != old_text:
+                    cur_raw = b""
+                if cur_raw != raw:
                     return "conflict"
                 try:
-                    # 先备份后写：备份失败（磁盘满/权限）就放弃本次整理，不裸写
-                    backup_before_maintain(path, old_text)
-                    # 原子写（textio 同族）：写一半被杀不能留下半截记忆文件
-                    write_text_atomic(path, new_text + "\n")
-                except OSError as e:
+                    # 先备份后写：备份失败（磁盘满/权限）就放弃本次整理，不裸写。
+                    # 备份原始字节：GB18030 等非 UTF-8 文件要能逐字节还原
+                    backup_before_maintain(path, raw)
+                    # 按原编码与行尾写回（textio.write_text_file，同族原子写）：
+                    # GB18030 不再被写成 UTF-8、CRLF 不再被写成 LF、BOM 保留；
+                    # 末尾补一个换行的语义与之前一致
+                    write_text_file(path, new_text + "\n", encoding, newline)
+                except (OSError, UnicodeEncodeError) as e:
                     memory_log.warning("memory maintain write failed (%s): %s", scope, e)
                     return "skipped"
             if scope == "project":

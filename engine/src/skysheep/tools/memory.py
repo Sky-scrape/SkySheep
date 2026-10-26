@@ -28,7 +28,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..textio import write_text_atomic
+from ..textio import write_bytes_atomic, write_text_atomic
 from .base import Safety, Tool, ToolContext, ToolError
 from .memory_embed import schedule_warmup, select_relevant_auto
 
@@ -412,7 +412,7 @@ def save_maintenance_state(state: dict) -> None:
         pass  # 状态写不进去只影响下次提前整理，不值得打断主流程
 
 
-def backup_before_maintain(path: Path, old_text: str) -> Path:
+def backup_before_maintain(path: Path, old_text: str | bytes) -> Path:
     """整理前把原件备份为带时间戳的 .bak-YYYYMMDD-HHMMSS-微秒，滚动保留最近数份。
 
     备份写失败直接抛 OSError——调用方应放弃本次覆盖（宁可不整理也不裸写）；
@@ -427,8 +427,14 @@ def backup_before_maintain(path: Path, old_text: str) -> Path:
     while bak.exists():
         n += 1
         bak = path.with_name(f"{path.name}.bak-{stamp}-{n:03d}")
-    # 备份也走原子写：备份是原件的唯一恢复途径，半截备份等于没有备份
-    write_text_atomic(bak, old_text)
+    # 备份也走原子写：备份是原件的唯一恢复途径，半截备份等于没有备份。
+    # bytes 按原始字节落盘：整理路径备份的是文件的原始字节，备份必须能逐字节
+    # 还原原编码/行尾的文件——经 str 中转再按 UTF-8 编码会把 GB18030 等
+    # 非 UTF-8 文件写坏；str 仍走文本原子写（既有调用与测试的兼容路径）。
+    if isinstance(old_text, bytes):
+        write_bytes_atomic(bak, old_text)
+    else:
+        write_text_atomic(bak, old_text)
     try:
         baks = sorted(path.parent.glob(path.name + ".bak-*"))
         for extra in baks[:-MAINTENANCE_BACKUP_KEEP]:

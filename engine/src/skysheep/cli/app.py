@@ -1185,8 +1185,10 @@ async def _cron_run_async(
             ),
         )
         if final is None:
-            # 任务不存在已在上面拦；剩下就是「已停用」——尊重开关，不算失败
-            print("任务已停用，跳过执行")
+            # 任务不存在已在上面拦；剩下是「已停用」或「到点槽位已被另一方
+            # 认领 / 未到点」（库级 CAS 认领放弃，SEC-M17）——都不算失败，
+            # 后者说明本轮已由应用内扫描或另一个子进程接手执行
+            print("任务已停用，或本轮已由其他触发方接手（未到点/已被认领），跳过执行")
             return 0
         status = final.get("last_status")
         if status == "error":

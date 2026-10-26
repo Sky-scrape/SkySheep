@@ -91,9 +91,12 @@ class ProviderConfig(BaseModel):
     # 实际下发参数，对"其实不支持该参数"的服务也无副作用；若某服务明确不支持，
     # 可在设置里关掉以隐藏控件（避免给出无效选项）。
     supports_reasoning: bool = True
-    # HTTP(S) 代理地址（如 http://127.0.0.1:7890）；空 = 不用代理。
-    # 仅作用于该服务的 API 请求（SDK 客户端），不影响系统其他网络访问。
-    proxy: str = ""
+    # HTTP(S) 代理地址（如 http://127.0.0.1:7890）。三态（M19 兑现 CHANGELOG
+    # 2.6.1 的承诺；TOML 表达不了 null，靠「键是否存在 + 空串」区分）：
+    # None（TOML 里没有 proxy 键，代码默认）= 跟随全局 [network] 代理；
+    # ""（设置页清空后显式保存的空串）= 该服务强制直连；
+    # 非空 = 只对该服务的 SDK 请求用这个代理，不影响系统其他网络访问。
+    proxy: str | None = None
 
     def effective_context_limit(self, fallback: int) -> int:
         """该服务实际使用的上下文上限：填了用自己的，否则用全局默认。"""
@@ -329,6 +332,8 @@ class FactoryConfig(BaseModel):
     history_keep: int = Field(default=2000, ge=100, le=100000)
     history_days: int = Field(default=30, ge=1, le=3650)
     max_packages: int = Field(default=60, ge=10, le=300)
+    machine_limit: int = Field(default=6, ge=1, le=12)
+    label_limit: int = Field(default=40, ge=10, le=80)
     run_timeout_minutes: int = Field(default=60, ge=0, le=1440)
     max_parallel_runs: int = Field(default=3, ge=1, le=20)
     alert_after_failures: int = Field(default=3, ge=0, le=50)
@@ -1051,6 +1056,8 @@ def set_factory_in_config(
     history_keep: int | None = None,
     history_days: int | None = None,
     max_packages: int | None = None,
+    machine_limit: int | None = None,
+    label_limit: int | None = None,
     run_timeout_minutes: int | None = None,
     max_parallel_runs: int | None = None,
     alert_after_failures: int | None = None,
@@ -1067,6 +1074,8 @@ def set_factory_in_config(
         ("运行历史保留条数", history_keep, 100, 100000),
         ("运行历史保留天数", history_days, 1, 3650),
         ("同屏包裹数", max_packages, 10, 300),
+        ("每厂区机台上限", machine_limit, 1, 12),
+        ("场景标签上限", label_limit, 10, 80),
         ("运行超时（分钟）", run_timeout_minutes, 0, 1440),
         ("同时运行上限", max_parallel_runs, 1, 20),
         ("连续失败告警阈值", alert_after_failures, 0, 50),
@@ -1096,6 +1105,10 @@ def set_factory_in_config(
         section["history_days"] = int(history_days)
     if max_packages is not None:
         section["max_packages"] = int(max_packages)
+    if machine_limit is not None:
+        section["machine_limit"] = int(machine_limit)
+    if label_limit is not None:
+        section["label_limit"] = int(label_limit)
     if run_timeout_minutes is not None:
         section["run_timeout_minutes"] = int(run_timeout_minutes)
     if max_parallel_runs is not None:

@@ -160,7 +160,7 @@ from ..skills.installer import (
 )
 from ..skills.installer import install as install_skill
 from ..skills.loader import _load_skill_from_dir
-from ..textio import encode_text, read_text_file, write_text_atomic
+from ..textio import encode_text, read_text_file, write_bytes_atomic, write_text_atomic
 from ..tools import (
     COMPUTER_TOOL_NAMES,
     ChangeRecorder,
@@ -4318,8 +4318,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         await self._check_budget_alerts()
 
     def _team_for(self, params: dict) -> tuple[str, TeamOrchestrator]:
-        """按 params.session_id（缺省活动会话）取活动团队；没有就报参数错。"""
-        sid = str(params.get("session_id") or "") or (self.session.id if self.session else "")
+        """按 params.session_id（缺省活动会话）取活动团队；没有就报参数错。
+
+        会话归属兜底（安全审查 M03）：session_id 键存在但为空串——远程连接
+        未绑定会话时由 app 层收敛注入（_team_scoped_params）——按「没有团队」
+        处理，不回退全局活动会话。空串落进 ``or`` 链会重新拿到
+        backend.session，全局指针切走后收敛对象随之漂移，fail closed 形同虚设。
+        """
+        raw = params.get("session_id")
+        sid = str(raw) if raw is not None else (self.session.id if self.session else "")
         orch = self._teams.get(sid)
         if orch is None:
             raise TeamError("当前会话没有进行中的团队")
@@ -4364,9 +4371,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """team.get：团队快照（名册 / 工单 / 频道尾部）。
 
         无活动团队时返回空态；该会话有「已中断」记录（重启/切项目前留过团队）
-        时附带 interrupted 记录供前端提示。
+        时附带 interrupted 记录供前端提示。会话归属兜底见 _team_for（M03）：
+        显式空串按「无会话」处理，不回退全局活动会话。
         """
-        sid = str(params.get("session_id") or "") or (self.session.id if self.session else "")
+        raw = params.get("session_id")
+        sid = str(raw) if raw is not None else (self.session.id if self.session else "")
         orch = self._teams.get(sid)
         if orch is not None:
             return {"active": True, "session_id": sid, "team": orch.snapshot()["team"]}
@@ -4613,7 +4622,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         前端退回截断 meta；空结果没有可泄露的内容。行字段与列序即
         store.list_team_messages。
         """
-        sid = str(params.get("session_id") or "") or (self.session.id if self.session else "")
+        sid = str(params["session_id"]) if params.get("session_id") is not None \
+            else (self.session.id if self.session else "")
         team_id = str(params.get("team_id", "") or "").strip()
         if not team_id:
             raise TeamError("缺少 team_id：请从团队 meta 的 team.team_id 取回放主轴")
@@ -5021,7 +5031,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         try:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
+                # 原子写：先落同目录临时文件再 replace，写一半被杀/替换失败
+                # 都不会把旧内容毁成半个文件（面板保存与 Agent 写同一文件并存）
+                write_bytes_atomic(target, data)
                 mtime = target.stat().st_mtime_ns // 1_000_000
             except OSError as e:
                 raise RuntimeError("写入失败: " + str(e)) from None
@@ -5105,28 +5117,76 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     # ---- 检查点（撤销本轮改动） ----
 
-    async def list_checkpoints(self) -> dict:
-        sid = self.session.id if self.session else ""
-        return {"checkpoints": self.checkpoints.list_for(sid)}
+    async def _checkpoint_store_for_session(self, session_id: str) -> CheckpointStore:
+        """会话的检查点库：与保存侧同一套判定（安全审查 M08）。
 
-    async def restore_checkpoint(self, checkpoint_id: str, force: bool = False) -> dict:
+        跨项目分屏会话的快照落它自己项目的目录树（runtime ctx.own 的
+        checkpoints，backend.py 轮末保存同款判定），读取侧必须取同一个
+        store——否则这些会话的「撤销本轮改动」永远查不到自己的快照，回滚
+        安全网静默失效。runtime 还在时直接用 ctx.checkpoints（保存侧用的
+        就是它）；runtime 已被淘汰/未建时按会话所属项目的工作目录重新解析
+        （_checkpoint_store_for_root 进程内缓存单例，与保存侧同一实例）。
+        解析失败（项目目录消失等）回落引擎当前项目库——该会话本就产生不了
+        新快照，查不到即报「不存在」，不会跨库误读。同名检查点 id（各项目
+        store 的 seq 各自从 0 起，cp1 重名是常态）因此天然按会话所属库消歧。
+        """
+        rt = self.runtimes.get(session_id)
+        if rt is not None and rt.ctx is not None:
+            return rt.ctx.checkpoints
+        try:
+            _, workdir = await self._session_project(session_id)
+        except Exception:  # noqa: BLE001 - 见 docstring：解析失败回落当前项目库
+            return self.checkpoints
+        cur = self.working_dir
+        same = (workdir is None and cur is None) or (
+            workdir is not None and cur is not None
+            and os.path.normcase(str(workdir)) == os.path.normcase(str(cur))
+        )
+        return self.checkpoints if same else self._checkpoint_store_for_root(workdir)
+
+    async def list_checkpoints(self, session_id: str | None = None) -> dict:
+        """列出会话的检查点（审查面板数据源）。
+
+        session_id 缺省取活动会话（本机既有契约）；显式传入时按该会话解析。
+        远程调用由 app 层传连接绑定的会话、未绑定为空串——空串直接回空列表
+        fail closed，绝不回退全局活动会话（安全审查 M04，与 runs.list 同口径）。
+        store 按会话所属项目取（M08，见 _checkpoint_store_for_session）。
+        """
+        sid = session_id if session_id is not None else (self.session.id if self.session else "")
+        if not sid:
+            return {"checkpoints": []}  # 无会话/远程未绑定：不给任何条目
+        store = await self._checkpoint_store_for_session(sid)
+        return {"checkpoints": store.list_for(sid)}
+
+    async def restore_checkpoint(self, checkpoint_id: str, force: bool = False,
+                                 session_id: str | None = None) -> dict:
         """把某轮的文件改动回滚到改前状态；并告知模型「文件已被回滚」。
 
         回滚前引擎会比对「快照保存之后文件有没有又被改过」（并行会话/任务
         写同一文件的场景）：有冲突且未 force 时不动磁盘，返回 conflict 结果，
-        前端把冲突文件列给用户确认后再带 force=true 重试。
+        前端把冲突文件列给用户确认后再带 force=true 重试。force 只豁免冲突
+        检查，不豁免会话归属校验（_check_checkpoint_ownership 先行，M04）。
+
+        session_id 是授权会话（缺省活动会话，本机既有契约不变）：远程调用由
+        app 层传连接绑定的会话（未绑定为空串→下方直接拒绝，调用方断言的 sid
+        不参与）；检查点从授权会话所属项目的 store 读取（M08），同名 cp1 按
+        库消歧——别的项目同 id 的快照不在查找路径上。
         """
+        sid = session_id if session_id is not None else (self.session.id if self.session else "")
+        if not sid:
+            raise RuntimeError("当前没有可回滚的会话")
+        store = await self._checkpoint_store_for_session(sid)
         # get/restore 都是重量级同步磁盘活（读 blob、全文件哈希比对、原子写回；
         # 单条上限 256MB），与 save 一样包进线程跑，大检查点不冻结事件循环。
         # CheckpointConflictError / KeyError 可正常穿过 to_thread 传回。
-        cp = await asyncio.to_thread(self.checkpoints.get, checkpoint_id)
+        cp = await asyncio.to_thread(store.get, checkpoint_id)
         if cp is None:
             raise RuntimeError(
                 f"检查点 {checkpoint_id} 不存在或已过期（每会话保留最近 50 轮，更早的会被淘汰）"
             )
-        # 归属校验（安全审查 B12）：检查点 id 顺序可枚举，不属于当前项目的
+        # 归属校验（安全审查 B12）：检查点 id 顺序可枚举，不属于授权会话的
         # 快照不能凭 id 恢复（否则别的项目的文件内容会被写回磁盘）
-        await self._check_checkpoint_ownership(cp)
+        await self._check_checkpoint_ownership(cp, sid)
         # 会话运行中拒绝回滚（与 truncate 同一守卫）：回滚会改写正在跑的
         # 历史并往 runtime 追加系统提示，轮末落库会把这条提示再插一遍
         cp_sid = (cp or {}).get("session_id")
@@ -5135,7 +5195,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise RuntimeError("该会话正在运行，等当前轮结束再回滚")
         try:
             files = await asyncio.to_thread(
-                self.checkpoints.restore, checkpoint_id, force=force
+                store.restore, checkpoint_id, force=force
             )
         except CheckpointConflictError as e:
             return {
@@ -5152,35 +5212,47 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             + ", ".join(files)
             + "。后续如需引用这些文件请先重新读取。"
         )
-        sid = (cp or {}).get("session_id") or (self.session.id if self.session else None)
+        sid = (cp or {}).get("session_id") or sid
         agent = self.runtimes[sid].agent if sid and sid in self.runtimes else self.agent
         agent.history.append(note)
         if sid:
             await self.store.append_message(sid, note)
         return {"restored": checkpoint_id, "files": files}
 
-    async def _check_checkpoint_ownership(self, cp: dict) -> None:
-        """检查点必须属于当前活动会话（B12：cp id 顺序可枚举）。
+    async def _check_checkpoint_ownership(self, cp: dict,
+                                          session_id: str | None = None) -> None:
+        """检查点必须属于授权会话（B12：cp id 顺序可枚举）。
 
-        同项目里其他会话的快照也不能凭枚举到的 id 恢复/对比——恢复是写盘原语，
-        对比会返回文件内容。无会话归属的旧检查点（meta 里没写 session_id）
-        无法校验，同样拒绝。
+        授权会话：显式传入的 session_id（远程连接=连接绑定的会话，由 app 层
+        传入；本机分屏列=前端显式指定的会话），缺省活动会话。同项目里其他
+        会话的快照也不能凭枚举到的 id 恢复/对比——恢复是写盘原语，对比会
+        返回文件内容。无会话归属的旧检查点（meta 里没写 session_id）无法
+        校验，同样拒绝。
         """
         sid = (cp or {}).get("session_id") or ""
-        active = self.session.id if self.session else ""
-        if not sid or not active or sid != active:
+        authorized = session_id if session_id is not None else (self.session.id if self.session else "")
+        if not sid or not authorized or sid != authorized:
             raise RuntimeError("该检查点不属于当前会话，无法校验归属")
 
-    async def checkpoint_diff(self, checkpoint_id: str) -> dict:
-        """「审查」标签页：某个检查点里每个文件的 改前快照 vs 磁盘现状 的 unified diff。"""
+    async def checkpoint_diff(self, checkpoint_id: str,
+                              session_id: str | None = None) -> dict:
+        """「审查」标签页：某个检查点里每个文件的 改前快照 vs 磁盘现状 的 unified diff。
+
+        会话授权与 store 解析同 restore_checkpoint（M04/M08）：远程按连接绑定
+        会话，检查点从该会话所属项目的 store 读取。
+        """
+        sid = session_id if session_id is not None else (self.session.id if self.session else "")
+        if not sid:
+            raise RuntimeError("当前没有可对比的会话")
+        store = await self._checkpoint_store_for_session(sid)
         # get（读 blob）与逐文件对比（读磁盘 + difflib）都离环跑，见 restore_checkpoint
-        cp = await asyncio.to_thread(self.checkpoints.get, checkpoint_id)
+        cp = await asyncio.to_thread(store.get, checkpoint_id)
         if cp is None:
             raise RuntimeError(
                 f"检查点 {checkpoint_id} 不存在或已过期（每会话保留最近 50 轮，更早的会被淘汰）"
             )
         # 同 restore：凭枚举 id 不能读别的项目会话的文件快照（B12）
-        await self._check_checkpoint_ownership(cp)
+        await self._check_checkpoint_ownership(cp, sid)
         files = await asyncio.to_thread(_checkpoint_diff_files, cp)
         return {"id": checkpoint_id, "ts": cp["ts"], "files": files}
 
@@ -7064,7 +7136,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     if old is None:
                         p.unlink(missing_ok=True)  # 导入前不存在：删掉新写的
                     else:
-                        p.write_bytes(old)
+                        write_bytes_atomic(p, old)
                 except OSError:
                     logger.warning("设置导入回滚 %s 失败", name, exc_info=True)
 
@@ -7077,7 +7149,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     # 导入包里带来的该字段一律不生效（换机/别人给的包不应该顺手放宽写入）
                     self._strip_accept_edits_from_ui_export(target, blob)
                 else:
-                    target.write_bytes(blob)
+                    write_bytes_atomic(target, blob)
             except OSError as e:
                 _rollback()
                 raise RuntimeError(f"写入 {name} 失败，已回滚本次导入（未改动任何文件）：{e}") from None
@@ -7110,7 +7182,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             return  # 内容不是合法 JSON：保留原行为，不写入半个文件
         if data.pop("accept_edits", None) is not None:
             logger.info("导入的 ui.json 里带着 accept_edits，已丢弃（该开关只能在本机切换）")
-        target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        write_text_atomic(target, json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     # ---- 完整导出包的导入（与 export_full_data 配对；仅本机） ----
 
@@ -7241,7 +7313,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 # 与 settings.import 同一防护：accept_edits 只能在本机切换
                 ServerBackend._strip_accept_edits_from_ui_export(p, staged[name])
             else:
-                p.write_bytes(staged[name])
+                write_bytes_atomic(p, staged[name])
             restored.append(name)
         return restored
 
@@ -7260,7 +7332,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 if old is None:
                     p.unlink(missing_ok=True)
                 else:
-                    p.write_bytes(old)
+                    write_bytes_atomic(p, old)
             except OSError:
                 failed.append(name)
                 logger.warning("完整导入回滚 %s 失败", name, exc_info=True)

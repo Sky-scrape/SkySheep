@@ -640,7 +640,7 @@ class WriteDocumentTool(Tool):
         check_write_size(content, shown)
         existed = p.exists()
         if self.recorder is not None:
-            self.recorder.record(p)  # 检查点：改前不存在 → 回滚时删除
+            await self.recorder.record(p)  # 检查点：改前不存在 → 回滚时删除
         try:
             if suffix == ".docx":
                 summary = await asyncio.to_thread(build_docx, p, content)

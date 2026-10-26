@@ -68,6 +68,28 @@ def _remote_scope(local: bool) -> str | None:
     return _conn_session() or ""
 
 
+# 无会话归属（引擎级）事件里明确允许下发远端的一组（安全审查 M05：白名单）。
+# 旧实现对这类事件是黑名单——只拦子代理/工厂/终端三组，新引擎级事件默认
+# 直达远端，cron_updated（携带任务 prompt、预授权工具名单与运行结果）、
+# pipeline_updated（其他项目流水线全文）、map_updated（项目记忆生成状态）
+# 这类整行广播曾借此送达任何持令牌设备。改为默认拒绝后：
+# - 新增引擎级事件想给远端看，必须来这里显式登记（新事件默认不出门）；
+# - 会话事件（带 session_id）不受本表影响，仍按连接归属过滤；
+# - 子代理直播 / 工厂运行 / 终端输出 / 上述三类整行广播等继续拦在门外。
+_REMOTE_ANON_KINDS = frozenset({
+    # chat.aux 的请求内流式（辅助对话面板远端可用，delta 链路不能断）
+    "aux_delta",
+    "aux_thinking",
+    # 无载荷刷新信号：远端界面的 MCP / Mods / 日程列表与桌面保持一致
+    "mcp_updated",
+    "mods_updated",
+    "schedule_updated",
+    # 日程提醒推送（title/notes，用户写给自己的跨设备提醒；
+    # 不含 prompt / 预授权名单 / 运行结果这类项目数据）
+    "schedule_reminder",
+})
+
+
 _OWN_HOST_NAMES: frozenset[str] | None = None
 
 
@@ -235,15 +257,28 @@ def _no_store_static(app) -> None:
     no_store = {
         "/",
         "/static/index.html",
+        # app.js 与全部拆分模块（清单 = index.html 的 script 标签，顺序同载入序）：
+        # 模块间靠全局函数互调、必须同版配套，漏登记的模块会被 WebView 按启发式
+        # 缓存供旧副本，与新 backend / 新 app.js 混跑（审计 M18/L29）；清单漂移
+        # 由 tests/test_frontend_wiring.py 的三清单对齐断言机械守住
         "/static/app.js",
-        "/static/app-factory.js",
-        "/static/app-memmap.js",
         "/static/app-projects.js",
-        "/static/app-providers.js",
         "/static/app-schedule.js",
-        "/static/app-skills.js",
-        "/static/app-tools.js",
+        "/static/app-providers.js",
         "/static/app-whitelist.js",
+        "/static/app-skills.js",
+        "/static/app-memmap.js",
+        "/static/app-advanced.js",
+        "/static/app-relay.js",
+        "/static/app-about.js",
+        "/static/app-archive.js",
+        "/static/app-browser.js",
+        "/static/app-mods.js",
+        "/static/app-factory.js",
+        "/static/app-factory-scene.js",
+        "/static/app-factory-drawer.js",
+        "/static/app-factory-draw.js",
+        "/static/app-tools.js",
         "/static/app.css",
         # PWA 两个入口文件同属「手写、无指纹、改版要立即可见」：sw.js 不禁缓存
         # 的话，浏览器按启发式缓存旧副本，前端改版后 PWA 用户迟迟拿不到新 SW
@@ -985,18 +1020,49 @@ async def _h_snippets_import(backend: ServerBackend, params: dict, emit, local: 
     return await backend.import_snippets(params)
 
 
+def _checkpoint_scope(params: dict, local: bool) -> str | None:
+    """checkpoint.* 的授权会话（M04/M08）。
+
+    远程：收敛到连接绑定的会话（_remote_scope），未绑定回空串由调用方
+    fail closed——检查点 id（cp{seq}）顺序可枚举，凭全局指针能枚举/对比/
+    回滚别会话的文件快照。本机：前端显式指定的 session_id（跨项目分屏列的
+    审查面板按列传 sid）优先，缺省 None=活动会话（本机既有语义不变；显式
+    指定是他自己机器上点选的会话，与 delete 等本机操作的既有姿态一致）。
+    """
+    only = _remote_scope(local)
+    if only is not None:
+        return only
+    sid = str(params.get("session_id") or "").strip()
+    return sid or None
+
+
 async def _h_checkpoint_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.list_checkpoints()
+    only = _checkpoint_scope(params, local)
+    if only == "":
+        return {"checkpoints": []}  # 远程尚未绑定会话：不给任何条目
+    return await backend.list_checkpoints(only)
 
 
 async def _h_checkpoint_restore(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # restore 是写盘原语（把工作区文件覆盖回改前快照）：远程只允许回滚连接
+    # 绑定会话自己的检查点，调用方断言的 sid / force 都不能越界（M04）。
+    only = _checkpoint_scope(params, local)
+    if only == "":
+        raise RuntimeError("远程未绑定会话，无法回滚检查点")
     return await backend.restore_checkpoint(
-        str(params.get("id", "")), force=bool(params.get("force", False))
+        str(params.get("id", "")), force=bool(params.get("force", False)),
+        session_id=only,
     )
 
 
 async def _h_checkpoint_diff(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.checkpoint_diff(str(params.get("id", "")))
+    # diff 会返回改前文件内容：与 list/restore 同一套会话授权口径（M04）。
+    only = _checkpoint_scope(params, local)
+    if only == "":
+        raise RuntimeError("远程未绑定会话，无法对比检查点")
+    return await backend.checkpoint_diff(
+        str(params.get("id", "")), session_id=only,
+    )
 
 
 async def _h_diagnostics_turn_breakdown(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -1545,17 +1611,23 @@ async def _h_adversarial_save(backend: ServerBackend, params: dict, emit, local:
 # 参数错误（无活动团队 / 指派对象不在名册 / 状态机不许可 / redo 超限）按
 # TeamError 原文回给调用方。
 def _team_scoped_params(backend: ServerBackend, params: dict, local: bool) -> dict:
-    """非本机连接把 session_id 收敛到其绑定的活动会话（沿 tasks.* 既有口径）。
+    """非本机连接把 session_id 收敛到其绑定的活动会话（沿 runs/tasks 既有口径）。
 
     团队快照、工单板、收队/交付/接管与频道回放只对「该连接正在交互的会话」
     生效——team.* 的归属校验不能信任调用方断言的 sid（sid 可经 session.list
     枚举）：断言他人 sid 读他人团队快照与全量频道文本、加单/改态他人工单板、
-    越权交付乃至收队他人团队，在入口即被收敛拒绝。返回新 dict，不改调用方的
-    参数对象；本机调用不受影响（前端显式传 sid 的既有用法照旧）。
+    越权交付乃至收队他人团队，在入口即被收敛拒绝。
+
+    作用域取连接级上下文（_conn_session），不读全局 backend.session——后者
+    会被另一个连接或本机窗口切走，收敛对象随全局指针漂移（安全审查 M03）；
+    backend.session 为 None 时也不能放行调用方断言的 sid（旧实现因此与
+    docstring 口径相反）。未绑定会话的远程连接收敛为空串 fail closed：
+    team.get 回空态、写操作在 _team_for 报「没有进行中的团队」。返回新 dict，
+    不改调用方的参数对象；本机调用不受影响（前端显式传 sid 的既有用法照旧）。
     """
-    if not local and backend.session is not None:
-        params = {**params, "session_id": backend.session.id}
-    return params
+    if local:
+        return params
+    return {**params, "session_id": _conn_session() or ""}
 
 
 async def _h_team_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -3011,16 +3083,12 @@ def create_app(
                 if ev.get("session_id"):
                     if conn_state["session"] != ev["session_id"]:
                         return  # 所有会话事件（含用户消息/工具/权限）按连接归属过滤
-                elif k in ("subagent_spawned", "subagent_event", "task_finished"):
-                    return  # 缺少归属的子代理事件不能向远端推送
-                elif k == "factory_run":
-                    # 工厂是跨项目观战面（六个方法全部本机专属）：运行事件也
-                    # 不向远端推送，避免其他项目的产线名 / 结果摘要经事件流泄露
-                    return
-                elif k in ("term_data", "term_exit"):
-                    # 终端输出只属于本机终端面板：spawn/input 仅本机（app.py:664），
-                    # 输出里可能含用户亲手回显的环境变量等敏感值，远端一律不推送
-                    # （审查 P1-1）。
+                elif k not in _REMOTE_ANON_KINDS:
+                    # 无会话归属的引擎级事件默认不下发远端（M05 白名单）：
+                    # 缺少归属的子代理事件（B15）、工厂运行事件（六方法全本机）、
+                    # 终端输出（P1-1：可能含用户回显的环境变量等敏感值），以及
+                    # cron_updated/pipeline_updated/map_updated 等携带其他项目
+                    # prompt/预授权名单/结果的整行广播，一并拦在门外。
                     return
             if not client_is_local:
                 rid = str(ev.get("request_id") or "")

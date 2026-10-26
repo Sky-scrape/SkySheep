@@ -4,11 +4,18 @@
 等边缘，下载主体的三道防线（体积上限、MZ 头、sha256 比对）零执行——而
 docs/发布清单.md 自述这条链路「1.7 引入、1.9 才修好」。这里用 httpx
 MockTransport 打真实函数（web_fetch 硬化测试同款手法），不打真实网络。
+
+SEC-H01（2026-10 全面测试与灰度评估报告）：本文件是全套件里唯一一处
+「无 SKYSHEEP_HOME 隔离就构造 ServerBackend 并 setup()」的用例组——会读写
+开发者真实 ~/.skysheep（库、哨兵、建目录）并按真实 mcp.json 拉起 MCP 子进程。
+修复：_backend 构造前显式设隔离；文末另有 SEC-M20 隔离回归（根级 autouse
+夹具的默认隔离，特意不挂 home 夹具验证）。
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import httpx
@@ -49,7 +56,16 @@ def _mock_httpx(monkeypatch, handler):
     monkeypatch.setattr(httpx, "Client", factory)
 
 
-def _backend(tmp_path):
+def _backend(tmp_path, monkeypatch):
+    """构造 ServerBackend：构造前显式设 SKYSHEEP_HOME（SEC-H01 的修复锚）。
+
+    ServerBackend.__init__ 当场解析 skysheep_home()（subagents.json /
+    teams.json / team_active.json），setup() 再连会话库、读 mcp.json——
+    不隔离就会读写开发者真实 ~/.skysheep。根级 autouse 夹具（engine/
+    conftest.py）虽已兜底，这里仍显式设一遍：本文件的用例自证隔离，
+    不依赖夹具的加载顺序。
+    """
+    monkeypatch.setenv("SKYSHEEP_HOME", str(tmp_path / "home"))
     from skysheep.server.backend import ServerBackend
 
     return ServerBackend(
@@ -174,7 +190,7 @@ async def _setup_frozen_backend(tmp_path, monkeypatch, handler, version="9.9.9")
 
     monkeypatch.setattr(remote_mod, "check_latest_release", fake_release)
     monkeypatch.setattr(remote_mod, "_update_dir", lambda: tmp_path)  # 不碰真实 %TEMP%
-    be = _backend(tmp_path)
+    be = _backend(tmp_path, monkeypatch)
     await be.setup()
     be._is_frozen = True  # 测试进程永远非 frozen：显式按安装版驱动
     return be
@@ -303,3 +319,54 @@ def test_fetch_setup_sha256_falls_back_after_connect_failure(monkeypatch):
     sha = remote_mod._fetch_setup_sha256("https://example.com/SkySheep-2.7.0-setup.exe")
     assert sha == "a" * 64
     assert calls["n"] == 2
+
+
+# ---- SEC-M20 隔离回归：根级 autouse 夹具（以下用例特意不挂 home 夹具） ----
+
+
+def test_skysheep_home_isolated_without_home_fixture(tmp_path):
+    """不挂 home 夹具：根级 autouse 夹具也必须把 SKYSHEEP_HOME 指到 tmp_path/home。
+
+    home 夹具是 opt-in 的，SEC-M20 的修复是把默认隔离上提到 engine/conftest.py
+    （tests/ 与 evals/ 两棵测试树共同的根）——漏挂夹具的测试不再绑到开发者
+    真实 ~/.skysheep。config.skysheep_home 与 instance.data_home 同源，一并断言。
+    """
+    from skysheep.config import skysheep_home
+    from skysheep.instance import data_home
+
+    assert Path(os.environ["SKYSHEEP_HOME"]) == tmp_path / "home"
+    assert skysheep_home() == data_home() == tmp_path / "home"
+    assert skysheep_home() != Path.home() / ".skysheep"
+
+
+async def test_backend_construction_and_setup_stay_in_isolated_home(tmp_path, monkeypatch):
+    """Backend 构造与 setup 的全部主目录落点都在临时 home（H01 复现面的反面）。
+
+    H01 的复现产物是：真实 ~/.skysheep 出现 skysheep.db、fast-talk/、
+    remote-control/、snippets 哨兵，并按真实 mcp.json 拉起 MCP 子进程。
+    本用例不挂 home 夹具、走完整 setup()，同样的产物必须全部落在临时
+    home——临时 home 里没有 mcp.json，也就不会有任何 MCP 子进程。
+    """
+    from skysheep.config import db_path
+
+    async def fake_release(channel: str = "stable"):  # 拦住后台更新检查，不发真实网络
+        return {"version": "9.9.9", "setup_url": SETUP_URL, "notes": ""}
+
+    monkeypatch.setattr(remote_mod, "check_latest_release", fake_release)
+    home = Path(os.environ["SKYSHEEP_HOME"])
+    assert home == tmp_path / "home", "根级 autouse 夹具必须已就位"
+    (tmp_path / "proj").mkdir()
+    be = _backend(tmp_path, monkeypatch)
+    try:
+        # __init__ 期就地解析的三处落点（H01 的根因面）
+        assert be.subagent_store.path == home / "subagents.json"
+        assert be.team_templates.path == home / "teams.json"
+        assert be._team_state_path == home / "team_active.json"
+        assert db_path() == home / "skysheep.db"
+        await be.setup()
+        # setup 的写路径：会话库与两个固定工作目录全部落在临时 home 内
+        assert (home / "skysheep.db").exists()
+        assert (home / "fast-talk").is_dir()
+        assert (home / "remote-control").is_dir()
+    finally:
+        await be.shutdown()

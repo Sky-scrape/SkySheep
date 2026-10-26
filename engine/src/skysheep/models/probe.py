@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
 import httpx
 
-from ..network import NetworkConfig, make_async_httpx_client
+from ..network import NetworkConfig, is_local_base_url, make_async_httpx_client
 
 LMSTUDIO_BASE = "http://localhost:1234/v1"
 
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
-
 
 def _is_local(url: str | None) -> bool:
-    if not url:
-        return False
-    host = (urlparse(url).hostname or "").lower()
-    return host in _LOCAL_HOSTS or host.endswith(".local") or host.endswith(".localhost")
+    """本机地址判定：实现上移到 network.is_local_base_url（M19）。
+
+    对话路径（providers）与诊断路径（diagnostics）现在与探测路径共用同一份
+    判定——单一事实来源，避免「检测直连、对话走代理」的口径漂移。这里保留
+    原名与原签名，供既有调用点与测试使用。
+    """
+    return is_local_base_url(url)
 
 
 def http_client_module(kind: str = "openai"):

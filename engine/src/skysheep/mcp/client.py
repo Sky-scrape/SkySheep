@@ -175,11 +175,24 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
     探一次端口、检查一下启动命令是否存在——这两种错误占实际配置错误的绝大多数，
     提前拦掉能让设置页立刻给出「哪里填错了」而不是转圈。
     """
+    problem, _pins = await _preflight_with_pins(cfg)
+    return problem
+
+
+async def _preflight_with_pins(cfg: MCPServerConfig) -> tuple[str | None, list[str]]:
+    """同 _preflight，并带回「本次解析校验通过的 IP 批次」给建连钉连复用（M12）。
+
+    返回 ``(错误说明, pinned_ips)``：错误非 None 时 pins 无意义；错误为 None 时
+    pins 一定非空——公网目标是 ``_resolve_public_ips`` 校验通过的那批，回环目标
+    （本机 MCP 是最常见形态）是 getaddrinfo 解析出的回环批次。``_connect_one``
+    把**同一批** IP 钉给 SDK 建连，使「校验/探测」与「SDK 建连」之间不存在
+    第二次解析；解析失败在这里已经拒绝，建连侧不再有回退默认解析的 fail-open。
+    """
     if cfg.transport == "http":
         parsed = urlparse(cfg.url or "")
         host = parsed.hostname
         if not host:
-            return "地址不合法（需要 http:// 主机:端口/路径）：" + str(cfg.url)
+            return "地址不合法（需要 http:// 主机:端口/路径）：" + str(cfg.url), []
         # 内网防护（审查 P2-10）：preflight 本是一次裸 TCP 探测，此前对任意
         # 目标都放行——口径与 web_fetch 不一致。现在非回环目标必须解析为公网
         # 地址（复用 web_fetch 的同一份校验，含 NAT64/6to4 翻译段）；回环地址
@@ -189,9 +202,8 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
         # 校验并把解析结果拿在手里：下面的端口探测直接连已校验的 IP，不再按
         # 主机名二次解析——「校验」与「探测」之间不给 DNS rebinding 留窗口
         # （web.py 的 _resolve_public_ips 返回 IP 列表正是给这类复用用的）。
-        # 建连阶段同样钉连（见 _connect_one 的 pin_host / pin_ips 与
-        # _MCPPinnedBackend）：这里探测用一批已校验 IP，SDK 建连用另一批——两次
-        # 解析之间正是 rebinding 窗口，所以建连侧必须自己钉，不能只靠预检。
+        # 建连阶段把同一批 IP 钉给 SDK（见 _connect_one 的 pin_host / pin_ips 与
+        # _MCPPinnedBackend），三次「解析→使用」用的是同一批已校验地址。
         try:
             pinned = await asyncio.to_thread(_resolve_public_ips, host)
         except ToolError as e:
@@ -208,9 +220,9 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
                 loopback = False
                 pinned = []
             if not loopback:
-                return str(e)
+                return str(e), []
         except OSError:
-            return f"无法解析主机 {host}：请检查远程地址是否拼写正确"
+            return f"无法解析主机 {host}：请检查远程地址是否拼写正确", []
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         writer = None
         for ip in pinned:
@@ -223,26 +235,26 @@ async def _preflight(cfg: MCPServerConfig) -> str | None:
                 return (
                     f"连不上 {host}:{port}（{PREFLIGHT_TIMEOUT_S:g} 秒无响应）"
                     "——检查地址和端口，服务是否已启动"
-                )
+                ), []
             except OSError:
                 continue  # 这个已校验地址不通：试下一个（与按主机名连时逐地址尝试同义）
         if writer is None:
             return (
                 f"连不上 {host}:{port}（连接被拒绝或网络不可达）"
                 "——检查地址与端口是否正确、服务是否已启动"
-            )
+            ), []
         writer.close()
         try:
             await writer.wait_closed()
         except Exception:  # noqa: BLE001
             pass
-        return None
+        return None, pinned
     if cfg.transport == "stdio":
         command = cfg.command or ""
         if not shutil.which(command) and not Path(command).exists():
-            return f"启动命令不存在：{command}（需要先安装它，或把完整路径填进 command）"
-        return None
-    return "配置里需要有 command（本地命令）或 url（远程地址）"
+            return f"启动命令不存在：{command}（需要先安装它，或把完整路径填进 command）", []
+        return None, []
+    return "配置里需要有 command（本地命令）或 url（远程地址）", []
 
 
 class MCPServerConfig(BaseModel):
@@ -317,7 +329,18 @@ def load_mcp_configs(
         if not isinstance(data, dict):
             warnings.append(f"{label}配置 {path.name} 顶层不是 JSON 对象，已按空配置处理")
             continue
-        for name, section in (data.get("mcpServers") or {}).items():
+        # mcpServers 段本身不是 JSON 对象（手编成数组/字符串/数字等合法 JSON）：
+        # 非空值是真值，``or {}`` 兜不住，直接 .items() 会 AttributeError 炸掉
+        # 启动/重载（发现 M14，口径同 installer.load_servers）——按空配置处理
+        # 并告警；null/空数组等空值保持既有降级（静默当空配置）
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            if servers:
+                warnings.append(
+                    f"{label}配置 {path.name} 的 mcpServers 段不是 JSON 对象，已按空配置处理"
+                )
+            continue
+        for name, section in servers.items():
             if not isinstance(section, dict):
                 continue
             try:
@@ -818,7 +841,7 @@ class MCPManager:
         if cfg.transport == "invalid":
             status.error = "config needs either 'command' (stdio) or 'url' (http)"
             return []
-        problem = await _preflight(cfg)
+        problem, preflight_pins = await _preflight_with_pins(cfg)
         if problem:
             status.error = problem
             return []
@@ -827,18 +850,17 @@ class MCPManager:
             await self._close_connection(name)
         ready: asyncio.Event = asyncio.Event()
         outcome: dict = {}
-        # 远程 MCP 的 DNS 钉连目标：在 keeper 之外解析一次，闭包捕获后交给
-        # _MCPPinnedBackend。解析失败/回环退回默认解析（此时目标是本机或
-        # 解析已由 _preflight 放行，不存在 rebinding 威胁面）。
+        # 远程 MCP 的 DNS 钉连目标：直接复用 preflight 解析并探测过的那批已校验
+        # IP（_preflight_with_pins 带回）。公网目标是 _resolve_public_ips 校验通过
+        # 的批次，回环目标是 preflight 解析出的回环批次（本机 MCP 是最常见形态，
+        # 放行）。解析失败在 preflight 已拒绝，建连侧不再回退默认解析（M12：
+        # fail-open → fail-closed），「校验/探测」与「SDK 建连」之间不存在第二次解析。
         pin_host: str | None = None
         pin_ips: list[str] = []
         if cfg.transport == "http":
             pin_host = urlparse(cfg.url or "").hostname
-            if pin_host:
-                try:
-                    pin_ips = await asyncio.to_thread(_resolve_public_ips, pin_host)
-                except (ToolError, OSError):
-                    pin_ips = []  # 回环 / 解析失败：退回默认解析
+            if pin_host and preflight_pins:
+                pin_ips = list(preflight_pins)
 
         async def keeper() -> None:
             # 事件在任务外创建、启动前就在字典里：先捕获再等，避免关闭方先 pop 走
@@ -892,37 +914,70 @@ class MCPManager:
                                 MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT
                             ),
                         )
-                        # 走代理时不再钉连：DNS 由代理解析，rebinding 威胁面不存在，
-                        # 而工厂在代理路径上也不接受调用方的 transport（见 network.py）。
+                        # M11 口径修正：走代理时目标域名由代理解析（HTTP CONNECT
+                        # 与 SOCKS 握手都把主机名原样交给代理端），钉连后端只
+                        # 作用于「本机→代理」的 TCP 段，固定不了「代理→目标」——
+                        # 代理路径无法钉连，如实留结构化日志，不写「威胁面不存在」。
                         proxied = bool(
                             effective_proxy(network, url=cfg.url)
                         )
-                        # 钉连后端：只用预检拿到的那批已校验 IP；拿不到（回环/
-                        # 解析失败但允许回环的场景已在 _preflight 放行）时保持
-                        # 默认解析——此时目标是本机，不存在 rebinding 威胁面。
-                        if pin_host and pin_ips and not proxied:
+                        if proxied:
+                            obs.info(
+                                "mcp_proxy_egress",
+                                "远程 MCP 经代理出网：目标域名由代理解析，DNS 钉连不适用",
+                                server=name, host=pin_host or "",
+                            )
+                        elif pin_host and pin_ips:
+                            # 钉连后端：只用 preflight 拿到并探测过的那批已校验 IP。
+                            # 安装失败时不再回退默认解析（M12 fail-closed）：公网
+                            # 目标退回默认解析正是 _MCPPinnedBackend 要堵的
+                            # rebinding 窗口，宁可拒绝建连；回环目标（本机 MCP）
+                            # 默认解析仍只会得到回环地址、地址类别不会改变，放行
+                            # 并留告警。
+                            pin_error = ""
                             try:
                                 pool = getattr(
                                     getattr(http_client, "_transport", None),
                                     "_pool", None,
                                 )
                                 if pool is None or not hasattr(pool, "_network_backend"):
-                                    obs.warning(
-                                        "mcp_pin_unavailable",
-                                        "远程 MCP 的 DNS 钉连无法安装（httpx2 结构变化），"
-                                        "本次连接退回默认解析",
-                                        server=name,
-                                    )
+                                    pin_error = "httpx2 私有结构变化，钉连后端无法安装"
                                 else:
                                     pool._network_backend = _MCPPinnedBackend(
                                         pin_host, pin_ips
                                     )
-                            except Exception as e:  # noqa: BLE001 - 钉连装不上不阻断连接
-                                obs.warning(
-                                    "mcp_pin_unavailable",
-                                    "远程 MCP 的 DNS 钉连安装失败，本次连接退回默认解析",
-                                    server=name, error=str(e),
+                            except Exception as e:  # noqa: BLE001 - 失败按下面口径分流
+                                pin_error = str(e)
+                            if pin_error:
+                                loopback_target = bool(pin_ips) and all(
+                                    ipaddress.ip_address(ip).is_loopback
+                                    for ip in pin_ips
                                 )
+                                if loopback_target:
+                                    obs.warning(
+                                        "mcp_pin_unavailable",
+                                        "本机目标的 DNS 钉连安装失败，退回默认解析"
+                                        "（地址类别仍是回环，不构成改换）",
+                                        server=name, error=pin_error,
+                                    )
+                                else:
+                                    raise RuntimeError(
+                                        "无法固定已校验地址（DNS 钉连安装失败），已拒绝"
+                                        "连接：退回默认解析会重新打开 DNS rebinding 窗口"
+                                    )
+                        else:
+                            # 防御性告警（不改变行为）：preflight 契约是「错误为 None
+                            # 时 pins 必非空」（见 _preflight_with_pins 文档）——公网
+                            # 目标 pins 为空在上游就该已报错，走不到这里；能到这里
+                            # 说明契约被破坏（隐性 fail-open 回归点），不能静默不装
+                            # 钉连。如实记一条告警，维持现行为：按回环目标降级放行
+                            # 的口径默认解析建连。
+                            obs.warning(
+                                "mcp_pin_skipped",
+                                "远程 MCP 的 DNS 钉连被跳过：preflight 带回的"
+                                "已校验 IP 批次为空（契约上不应发生）",
+                                server=name, host=pin_host or "",
+                            )
                         await stack.enter_async_context(http_client)
                         read, write = await stack.enter_async_context(
                             streamable_http_client(cfg.url, http_client=http_client)

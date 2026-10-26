@@ -99,6 +99,10 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "BLE"]
 
+[tool.ruff.lint.isort]
+# 保持测试树 conftest helper 的既有导入分组，不随根级 conftest 的存在而变化。
+known-third-party = ["conftest"]
+
 # BLE001 (blind-except) 在下列范围属于「必须兜住任何异常、绝不上抛」的性质，
 # 逐条 noqa 只会淹没意图：测试用例的期望捕获、示例脚本、以及桌面启动器
 # desktop.py（一个异常弹不出窗口就等于应用起不来）。

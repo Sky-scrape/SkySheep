@@ -162,7 +162,7 @@ class GenerateImageTool(Tool):
             p = p.with_suffix(".png")
         shown = rel_path(ctx, p)
         if self.recorder is not None:
-            self.recorder.record(p)  # 检查点：改前不存在 → 回滚时删除
+            await self.recorder.record(p)  # 检查点：改前不存在 → 回滚时删除
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(image_bytes)

@@ -663,9 +663,17 @@ async function saveProvider(row, name, setDefault, kind) {
   if (row.querySelector('input[data-f="temperature"]')) {
     params.temperature = get("temperature");  // 空串 = 清除
   }
-  // 代理：始终传（字符串可为空 = 清除），后端校验格式
+  // 服务级代理三态（M19）：只在用户改动过此框时才携带 proxy 字段——
+  // 缺键 = 后端保持原值（配置里没键就继续「跟随全局」，不会被写成空串）；
+  // 显式清空后保存 = 传 ""（强制直连）；填地址 = 传该地址。
+  // 不能无条件回传：原先总是带 proxy:""，配了全局代理的服务在设置页
+  // 改任意字段保存，就会被静默切成「强制直连」，且界面再也无法表达「跟随全局」
   const proxyInput = row.querySelector('input[data-f="proxy"]');
-  if (proxyInput) params.proxy = proxyInput.value.trim();
+  if (proxyInput) {
+    const v = proxyInput.value.trim();
+    const orig = (proxyInput.dataset.orig ?? "").trim();
+    if (v !== orig) params.proxy = v;
+  }
   // 单价：表单里始终带着当前值，整组回传（空 = 0 不计价）；详情页之外的
   // 紧凑行没有这三格，不传即保持原值
   if (row.querySelector('input[data-f="price_in"]')) {

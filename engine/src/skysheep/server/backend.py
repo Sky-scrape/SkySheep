@@ -7356,6 +7356,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if store._db is not None:
             await store._db.close()
             store._db = None
+        # 常驻写连接同样攥着库文件句柄，不收掉 os.replace 会被拒绝访问
+        await store._close_writer()
         for suffix in ("-wal", "-shm"):
             try:
                 Path(str(store.path) + suffix).unlink()
@@ -7374,6 +7376,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             except Exception:  # noqa: BLE001 - 回滚路径上的关闭失败不掩盖原错误
                 pass
             store._db = None
+        # 常驻写连接同样攥着库文件句柄，回滚换文件前必须收
+        try:
+            await store._close_writer()
+        except Exception:  # noqa: BLE001 - 回滚路径上的关闭失败不掩盖原错误
+            pass
         for suffix in ("-wal", "-shm"):
             try:
                 Path(str(store.path) + suffix).unlink()

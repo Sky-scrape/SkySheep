@@ -660,6 +660,13 @@ class SessionStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._db: aiosqlite.Connection | None = None
+        # 常驻独立写连接（_immediate_txn 用）：首版每条写事务都现场
+        # connect/close 一次，append_message 这类一消息一事务的路径在慢盘
+        # （CI runner）上把连接开销放大成 pytest-timeout。连接本身不便宜，
+        # 复用一条；并发仍由 asyncio.Lock + BEGIN IMMEDIATE 串行，语义不变。
+        self._writer: aiosqlite.Connection | None = None
+        self._writer_lock: asyncio.Lock = asyncio.Lock()
+        self._writer_owner: asyncio.Task | None = None
         self.backup_created: str | None = None
         # FTS5 全文索引是否就绪（断开后 connect 会重新判定）；
         # False 时 search_messages 退到 LIKE 扫描，功能不降级只是变慢。
@@ -852,6 +859,8 @@ class SessionStore:
         if self._db is not None:
             await self._db.close()
             self._db = None
+        # 换库文件前同样要收掉常驻写连接，否则它还攥着旧文件的句柄与 WAL
+        await self._close_writer()
         # 干净关闭后 -wal/-shm 已被 SQLite 自己收走；万一残留（异常关闭），
         # 换库前必须清掉——旧 WAL 帧套到新主库上等于注入垃圾页
         for suffix in ("-wal", "-shm"):
@@ -1087,63 +1096,92 @@ class SessionStore:
             logger.warning("FTS 索引删除失败（下次启动对齐）：%s", e)
 
     async def close(self) -> None:
+        await self._close_writer()
         if self._db:
             await self._db.close()
             self._db = None
 
-    # ---- 独立连接写事务（多语句全有全无） ----
+    async def _close_writer(self) -> None:
+        """收掉常驻写连接。close() 与备份恢复（换库文件）前都必须走。"""
+        async with self._writer_lock:
+            if self._writer:
+                try:
+                    await self._writer.close()
+                except Exception:  # noqa: BLE001 - 关闭失败不掩盖原流程
+                    logger.warning("关闭独立写连接失败（忽略）：%s", self.path.name)
+                self._writer = None
+                self._writer_owner = None
+
+    # ---- 独立写连接事务（多语句全有全无） ----
     #
     # 共享 self._db（aiosqlite 默认 isolation_level="" 隐式延迟事务）上的多语句
     # 写没有事务边界：其他协程的 commit() 会把本方法的中间状态提交落盘，方法
     # 中途失败也不回滚，留下半完成状态（半删除的项目、新旧交错的演化摘要、
-    # FTS 与主表漂移）。凡「多条写语句必须同生同死」的路径都走这里：开一条
-    # 独立连接 BEGIN IMMEDIATE 拿写锁——事务内其他协程既插不进语句也提交不了，
-    # 异常整体回滚、成功一次提交。纪律与接力表相同：回调内只做本地 SQL，
-    # 绝不 await provider / 窗口 / 其他会自行 commit 的存储 API（写锁持有
-    # 时间必须短）。单语句写不需要这里（SQLite 单语句本就原子）。
+    # FTS 与主表漂移）。凡「多条写语句必须同生同死」的路径都走这里：在常驻
+    # 独立写连接上 BEGIN IMMEDIATE 拿写锁——事务内其他协程既插不进语句也提交
+    # 不了，异常整体回滚、成功一次提交。连接常驻不重开（首版一事务一连接，
+    # append_message 一消息一事务，连接开销在慢盘上被放大成 CI 超时），协程
+    # 间串行由 asyncio.Lock 承担，SQLite 写锁由 BEGIN IMMEDIATE 承担。纪律与
+    # 接力表相同：回调内只做本地 SQL，绝不 await provider / 窗口 / 其他会自行
+    # commit 的存储 API，也绝不再进任何 _write_txn（锁不可重入，嵌套即死锁，
+    # 见下面的显式防御）。单语句写不需要这里（SQLite 单语句本就原子）。
 
     @asynccontextmanager
     async def _immediate_txn(self):
-        """独立短写事务骨架：独立连接 + BEGIN IMMEDIATE，正常出口提交、异常回滚。
+        """独立短写事务骨架：常驻写连接 + BEGIN IMMEDIATE，正常出口提交、异常回滚。
 
         pragmas 与主连接同口径：busy_timeout=5000 兜写写碰撞；journal_mode 是
-        库级持久属性、短连接无需重设，synchronous 是连接级、归一到主连接的
+        库级持久属性、连接建一次即可，synchronous 是连接级、归一到主连接的
         NORMAL（WAL 下安全且 fsync 次数与主连接一致）。回滚失败不掩盖原异常。
         """
-        conn = await aiosqlite.connect(self.path)
-        try:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA busy_timeout=5000")
-            await conn.execute("PRAGMA synchronous=NORMAL")
+        if self._writer_lock.locked() and self._writer_owner is asyncio.current_task():
+            raise RuntimeError(
+                "写事务回调内又调了存储写方法（嵌套 _write_txn）——纪律禁止："
+                "回调内只做本地 SQL，需要另一组写入就在回调外完成或合并进本事务"
+            )
+        async with self._writer_lock:
+            self._writer_owner = asyncio.current_task()
             try:
-                await conn.execute("BEGIN IMMEDIATE")
-            except sqlite3.OperationalError as e:
-                # 共享连接上的孤儿写事务兜底：任务在写方法的 execute 与 commit
-                # 之间被取消（典型：轮次中途点停止打断 touch/落库），隐式事务
-                # 就留在共享连接上无人收尸，写锁被它占死，这里的 BEGIN 等
-                # busy_timeout 耗尽后报 locked。这份中间态本就不该提交——它的
-                # 方法从未完成、返回值无人接住，回滚即清理（正是本审计要消除
-                # 的「半完成状态」），清掉后重取锁。活跃写者的 commit 不依赖
-                # 本连接，能熬过 5 秒等待还开着事务的只能是孤儿。
-                if (
-                    self._db is None
-                    or not self._db.in_transaction
-                    or "locked" not in str(e).lower()
-                ):
-                    raise
-                logger.warning("清理共享连接上的孤儿写事务后重试 BEGIN（%s）", e)
-                await self._db.rollback()
-                await conn.execute("BEGIN IMMEDIATE")
-            yield conn
-            await conn.commit()
-        except BaseException:
-            try:
-                await conn.rollback()
-            except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
-                pass
-            raise
-        finally:
-            await conn.close()
+                conn = self._writer
+                if conn is None:
+                    conn = await aiosqlite.connect(self.path)
+                    conn.row_factory = aiosqlite.Row
+                    await conn.execute("PRAGMA busy_timeout=5000")
+                    await conn.execute("PRAGMA synchronous=NORMAL")
+                    self._writer = conn
+                try:
+                    await conn.execute("BEGIN IMMEDIATE")
+                except sqlite3.OperationalError as e:
+                    # 共享连接上的孤儿写事务兜底：任务在写方法的 execute 与
+                    # commit 之间被取消（典型：轮次中途点停止打断 touch/落库），
+                    # 隐式事务就留在共享连接上无人收尸，写锁被它占死，这里的
+                    # BEGIN 等 busy_timeout 耗尽后报 locked。这份中间态本就不该
+                    # 提交——它的方法从未完成、返回值无人接住，回滚即清理
+                    # （正是本审计要消除的「半完成状态」），清掉后重取锁。
+                    # 活跃写者的 commit 不依赖共享连接，能熬过 5 秒等待还开着
+                    # 事务的只能是孤儿。写连接自身按纪律出口必 commit/rollback，
+                    # 理论不会残留事务；万一报「已在事务中」按同样思路回滚重试。
+                    low = str(e).lower()
+                    if "locked" in low and self._db is not None and self._db.in_transaction:
+                        logger.warning("清理共享连接上的孤儿写事务后重试 BEGIN（%s）", e)
+                        await self._db.rollback()
+                        await conn.execute("BEGIN IMMEDIATE")
+                    elif "within a transaction" in low:
+                        logger.warning("写连接残留未收尾事务，回滚后重试 BEGIN（%s）", e)
+                        await conn.rollback()
+                        await conn.execute("BEGIN IMMEDIATE")
+                    else:
+                        raise
+                yield conn
+                await conn.commit()
+            except BaseException:
+                try:
+                    await conn.rollback()
+                except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                    pass
+                raise
+            finally:
+                self._writer_owner = None
 
     async def _write_txn(
         self, fn: Callable[[aiosqlite.Connection], Awaitable[_T]]

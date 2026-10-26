@@ -693,4 +693,60 @@ def test_coop_cards_share_theme_tokens_and_narrow_rules():
     assert not re.search(r"\brgba?\(", seg)
     assert not re.search(r"\bhsla?\(", seg)
     assert "prefers-reduced-motion: reduce" in seg
-    assert "max-width: 760px" in seg and "max-width: 520px" in seg
+    # 窄屏降级挂在归并后的统一断点阶梯上（520/860/1100，旧 760 已并入 860）
+    assert "max-width: 860px" in seg and "max-width: 520px" in seg
+
+
+# ---------- 审计 M18/L29：静态资源三清单对齐（防缓存清单漂移第三次复发） ----------
+
+def _index_html_script_urls() -> list[str]:
+    """index.html 实际加载的 /static/ 脚本清单（顶层模块的单一事实来源）。"""
+    import re
+    html = read_static("index.html")
+    return [u for u in re.findall(r'<script src="([^"]+)"', html)
+            if u.startswith("/static/")]
+
+
+def _app_py_no_store_paths() -> set[str]:
+    """从 app.py 源码抽 _no_store_static 的 no_store 集合字面量。
+
+    app.py 不能当模块随便 import（import 即装配整台 server），这里按源码
+    解析：函数体里 `no_store = {` 起步、闭 `}` 前的字符串字面量集合。
+    """
+    import re
+    src = (ROOT / "src" / "skysheep" / "server" / "app.py").read_text(encoding="utf-8")
+    m = re.search(r"def _no_store_static\(.*?no_store = \{(.*?)\n    \}", src, re.S)
+    assert m, "app.py 必须保留 _no_store_static 的 no_store 集合字面量"
+    return set(re.findall(r'"([^"]+)"', m.group(1)))
+
+
+def _sw_shell_urls() -> list[str]:
+    """从 sw.js 源码解析 SHELL_URLS 预缓存白名单（与 test_pwa_static 同法）。"""
+    import re
+    src = read_static("sw.js")
+    m = re.search(r"const SHELL_URLS = \[(.*?)\];", src, re.S)
+    assert m, "sw.js 里必须保留 SHELL_URLS 缓存白名单数组"
+    return re.findall(r'"([^"]+)"', m.group(1))
+
+
+def test_static_lists_stay_aligned_with_index_html():
+    """index.html 加载的每个顶层模块都必须同时登记进 app.py 的 no_store
+    （禁缓存，WebView 不许吃启发式缓存的旧脚本）与 sw.js 的 SHELL_URLS
+    （PWA 预缓存壳不许缺角）——审计 M18/L29 的六个拆分模块就是这样漏掉的。
+
+    口径：只断言 A ⊆ B 且 A ⊆ C，反向不要求——no_store 另含
+    index.html / app.css / manifest / sw.js 等非 script 入口；SHELL_URLS
+    另含 vendor 库等 index.html 不直接加载的壳文件。新增分区模块时只要
+    登记了 script 标签，本用例会强制两份清单跟上。"""
+    loaded = set(_index_html_script_urls())
+    assert loaded, "index.html 的 script 清单不能为空"
+    no_store = _app_py_no_store_paths()
+    shell = set(_sw_shell_urls())
+    missing_no_store = sorted(loaded - no_store)
+    missing_shell = sorted(loaded - shell)
+    assert not missing_no_store, (
+        "index.html 加载的脚本缺 no_store 登记（升级后旧脚本与新 app.js 混跑）：\n  "
+        + "\n  ".join(missing_no_store))
+    assert not missing_shell, (
+        "index.html 加载的脚本缺 SHELL_URLS 预缓存登记（PWA 壳缺角）：\n  "
+        + "\n  ".join(missing_shell))

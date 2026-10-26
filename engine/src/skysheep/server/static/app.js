@@ -12957,7 +12957,7 @@ function openRightTab(id) {
   rightCollapsed = false;
   renderRightPanel();
   const openPrefs = { right_tabs: [...rightTabs], right_active: rightActiveView() };
-  if (!NARROW_MQ.matches) openPrefs.right_collapsed = 0;
+  if (!NARROW_MQ.matches && !TABLET_MQ.matches) openPrefs.right_collapsed = 0;
   saveUiPrefs(openPrefs);
   loadRightTab(rightActiveView());
 }
@@ -13065,7 +13065,7 @@ function closeRightTab(id) {
   if (!rightTabs.length) rightCollapsed = true; // 最后一个标签关掉 → 面板收起
   renderRightPanel();
   const closePrefs = { right_tabs: [...rightTabs], right_active: rightActiveView() };
-  if (!NARROW_MQ.matches) closePrefs.right_collapsed = rightCollapsed ? 1 : 0;
+  if (!NARROW_MQ.matches && !TABLET_MQ.matches) closePrefs.right_collapsed = rightCollapsed ? 1 : 0;
   saveUiPrefs(closePrefs);
 }
 
@@ -13123,9 +13123,12 @@ let tabsMenuEl = null;
 // 展开/收起在那里是会话内的临时状态——启动一律收起（不照搬桌面 ui.json 的
 // right_collapsed，否则手机一进来就被抽屉盖住），操作也不回写偏好（桌面端不受手机影响）。
 const NARROW_MQ = window.matchMedia("(max-width: 860px)");
+// 平板档（与 app.css 的 @media max-width:1100px 同一断点）：面板仍是停靠栏但收窄，
+// 启动默认收起给对话让位；与手机同一条纪律——该档的收起/展开不回写桌面偏好。
+const TABLET_MQ = window.matchMedia("(max-width: 1100px)");
 
 function persistRightCollapsed() {
-  if (NARROW_MQ.matches) return;
+  if (NARROW_MQ.matches || TABLET_MQ.matches) return;
   saveUiPrefs({ right_collapsed: rightCollapsed ? 1 : 0 });
 }
 
@@ -14857,6 +14860,7 @@ async function initUiPrefs() {
   }
   rightCollapsed = prefs.right_collapsed === 1;
   if (NARROW_MQ.matches) rightCollapsed = true; // 手机启动一律收起覆盖抽屉，别让面板盖住对话区
+  else if (TABLET_MQ.matches) rightCollapsed = true; // 平板同样默认收起（收窄的一栏给对话让位），顶栏按钮随时开
   renderRightPanel();
   // 上次开着的标签挨个把数据拉回来。以前只处理了 ext（卡片要搬进面板），
   // 其余标签又画了空壳——启动后日程页只见空白网格、连日期范围都是空的，
@@ -16379,6 +16383,38 @@ sidebarClose.title = "收起菜单";
 sidebarClose.textContent = "✕";
 sidebarClose.onclick = () => document.body.classList.remove("sidebar-open");
 document.getElementById("sidebar").appendChild(sidebarClose);
+
+// ---------- 窄屏抽屉手势（纯表现层增强）：左缘右滑开侧栏、抽屉上左滑收回、右缘左滑开右面板 ----------
+// 只拨弄既有的 classList / rightCollapsed 通道（与 ☰、顶栏开关同路径），不动任何业务状态；
+// passive 监听、不 preventDefault——纵向滚动与系统手势都不受影响，老内核吃不到事件时静默无手势。
+(function initDrawerGestures() {
+  let sx = 0, sy = 0, tracking = false;
+  document.addEventListener("touchstart", (ev) => {
+    tracking = false;
+    if (!NARROW_MQ.matches || !ev.touches.length) return;
+    const t = ev.touches[0];
+    sx = t.clientX; sy = t.clientY; tracking = true;
+  }, { passive: true });
+  document.addEventListener("touchmove", (ev) => {
+    if (!tracking || !ev.touches.length) return;
+    const t = ev.touches[0];
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) < 64) return;                       // 未到阈值继续观察
+    tracking = false;
+    if (Math.abs(dy) > Math.abs(dx) * 0.6) return;       // 偏纵向的滑动不抢（列表滚动优先）
+    const fromLeftEdge = sx <= 24, fromRightEdge = sx >= window.innerWidth - 24;
+    const sidebarOpen = document.body.classList.contains("sidebar-open");
+    const inSidebar = sidebarOpen && sx <= Math.min(320, window.innerWidth * 0.84); // 与抽屉 CSS 宽度一致
+    if (dx > 0 && fromLeftEdge && !sidebarOpen) {
+      document.body.classList.add("sidebar-open");
+    } else if (dx < 0 && inSidebar) {
+      document.body.classList.remove("sidebar-open");
+    } else if (dx < 0 && fromRightEdge && !sidebarOpen && rightTabs.length && rightCollapsed) {
+      rightCollapsed = false;                            // 与顶栏开关同一条通道（内部含手机互斥）
+      renderRightPanel();
+    }
+  }, { passive: true });
+})();
 document.getElementById("chat").addEventListener("click", () => {
   if (document.body.classList.contains("sidebar-open")) {
     document.body.classList.remove("sidebar-open");

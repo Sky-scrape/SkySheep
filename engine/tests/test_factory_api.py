@@ -68,12 +68,14 @@ def test_factory_state_returns_exact_contract_shape(home):
         assert set(state["config"]) == {
             "enabled", "demo", "ambient", "weather", "weather_location",
             "history_keep", "history_days", "max_packages",
+            "machine_limit", "label_limit",
             "run_timeout_minutes", "max_parallel_runs", "alert_after_failures",
         }
         assert state["config"] == {
             "enabled": True, "demo": True, "ambient": True, "weather": False,
             "weather_location": "",
             "history_keep": 2000, "history_days": 30, "max_packages": 60,
+            "machine_limit": 6, "label_limit": 40,
             "run_timeout_minutes": 60, "max_parallel_runs": 3,
             "alert_after_failures": 3,
         }

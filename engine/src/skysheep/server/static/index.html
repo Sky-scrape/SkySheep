@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>SkySheep</title>
   <link rel="icon" href="/static/skysheep.ico">
   <!-- PWA（手机端添加到主屏幕）：manifest 由站点根提供（start_url="./" 才解析到 /）；
@@ -810,7 +810,7 @@
             <div id="skill-summary" class="skill-entry">
               <span class="skill-entry-main">
                 <span class="item-name">管理与安装</span>
-                <span class="item-desc" id="skill-summary-text">正在加载…</span>
+                <span class="item-desc skeleton" id="skill-summary-text">正在加载…</span>
               </span>
               <span class="skill-entry-go" title="进入技能页">›</span>
             </div>
@@ -826,7 +826,7 @@
             </ul>
             <div id="gallery-status" class="card-status" hidden></div>
             <div id="gallery-grid" class="gallery-grid">
-              <span class="dim small">正在加载场景模板…</span>
+              <span class="dim small skeleton">正在加载场景模板…</span>
             </div>
           </section>
           </div>
@@ -1464,7 +1464,7 @@
               也是「Mod 怎么写」的参考实现。
             </p>
             <div id="mods-official-grid" class="gallery-grid">
-              <span class="dim small">正在加载官方示例…</span>
+              <span class="dim small skeleton">正在加载官方示例…</span>
             </div>
           </section>
         </section>
@@ -2060,31 +2060,17 @@
       </div>
     </div>
 
-    <!-- 视图三：工厂（跨项目的自动化观战台 + 总厂调度台，本机专属）。
-         像素场景是一扇窗：外壳（计数条 / 监控面板 / 工具栏 / 抽屉）全部走主题变量，
-         Canvas 内部用 JS 里的昼夜调色板，不跟六套主题换色。 -->
+    <!-- 视图三：工厂（跨项目的可视化生产场景，本机专属）。
+         像素场景是一扇窗：外壳（监控面板 / 工具栏 / 抽屉）全部走主题变量，
+         Canvas 内部用 JS 里的昼夜调色板，不跟六套主题换色。
+         顶部不再挂六格计数条：在跑几件、今天做成几件、谁在返工，都长在场景里
+         （传送带上的包裹、码高的成品垛、堆起来的返工箱）；顶上只留一盏「需留意」灯。 -->
     <div id="view-factory" class="view hidden">
       <header id="factory-hud">
-        <div class="fh-cells">
-          <div class="fh-cell" data-k="running" role="button" tabindex="0" title="正在运行的包裹数">
-            <b id="factory-num-running">0</b><span>运行中</span>
-          </div>
-          <div class="fh-cell" data-k="queued" role="button" tabindex="0" title="到点但超过并发额度、等下一轮扫描的定时任务，加上编排里依赖已满足、正在等并发额度的工位数">
-            <b id="factory-num-queued">0</b><span>排队</span>
-          </div>
-          <div class="fh-cell" data-k="attention" role="button" tabindex="0" title="孤儿任务、上次失败、运行中断、空产出、有工具被拦、到点被跳过与停工厂区（点击逐条列出）">
-            <b id="factory-num-attention">0</b><span>需留意</span>
-          </div>
-          <div class="fh-cell" data-k="done" role="button" tabindex="0" title="本地今天 0 点以后「做成」的运行数：跑完且有产出、没有被门控拦过；有拦截的空产出不计">
-            <b id="factory-num-done">0</b><span>今日做成</span>
-          </div>
-          <div class="fh-cell" data-k="tokens" role="button" tabindex="0" title="本地今天 0 点以后各次运行消耗的 token 合计（输入 + 输出；未记录用量的运行不计）">
-            <b id="factory-num-tokens">0</b><span>今日 token</span>
-          </div>
-          <div class="fh-cell" data-k="chat" role="button" tabindex="0" title="正在跑的对话轮与后台子代理（只读快照；点击查看并跳过去）">
-            <b id="factory-num-chat">0</b><span>对话在跑</span>
-          </div>
-        </div>
+        <button id="factory-attention" class="fh-lamp hidden" type="button"
+                title="有一条产线需要看一眼（上次失败 / 被拦 / 停工）；点击逐条列出">
+          <i aria-hidden="true"></i><b id="factory-attn-num">0</b><span>需留意</span>
+        </button>
         <!-- 样板厂：数据只在内存、永不运行。计数条同时灰掉，避免把演示数字当成真的 -->
         <span id="factory-demo-badge" class="fh-demo hidden"
               title="样板厂：本机还没有真实产线，下面全是演示数据，只在内存、不会真的运行">演示</span>
@@ -2102,10 +2088,9 @@
       <div id="factory-main">
         <aside id="factory-panel" aria-label="自动化监控">
           <div id="factory-panel-head">
-            <span class="fp-title">自动化监控</span>
+            <span class="fp-title">厂区</span>
             <span class="fp-ops">
-              <button id="factory-line-add" class="sec-ops" title="给指定厂区新建一条轻量定时产线">＋</button>
-              <button id="factory-panel-fold" class="sec-ops" title="折叠 / 展开监控面板">‹</button>
+              <button id="factory-panel-fold" class="sec-ops" title="折叠 / 展开厂区目录">‹</button>
             </span>
           </div>
           <!-- 筛选与搜索：厂区多了以后，面板要能只看在跑 / 需留意 / 停工 -->
@@ -2124,12 +2109,19 @@
         <section id="factory-stage" aria-label="工厂像素场景">
           <canvas id="factory-canvas"></canvas>
           <div id="factory-labels" aria-hidden="true"></div>
-          <!-- 工具栏：全景 / 名牌 / 全部运行。全景按钮在聚焦档里是可见的返回出口；
+          <!-- 工具栏：全景 / 名牌 / 回放 / 全部运行。全景按钮在聚焦档里是可见的返回出口；
                滚轮与拖动仍不改比例，场景保持固定 45°。 -->
           <div id="factory-toolbar" role="toolbar" aria-label="显示">
             <button id="factory-center" title="回到全景（Esc）">全景</button>
             <button id="factory-labels-toggle" title="显示 / 隐藏厂区与机台名牌" aria-pressed="true">名牌</button>
+            <button id="factory-replay" title="回放今天：把今天跑过的每一轮按时间顺序在传送带上重演一遍">回放</button>
             <button id="factory-all-runs" title="全部运行：按状态 / 厂区筛选、翻页，行内可直接打开产出">全部运行</button>
+          </div>
+          <!-- 回放进度：只在回放时出现，替代顶上的时钟（那会儿显示的是虚拟时间） -->
+          <div id="factory-replay-bar" class="hidden" aria-live="polite">
+            <span id="factory-replay-time">--:--</span>
+            <span id="factory-replay-hint"></span>
+            <button id="factory-replay-stop" class="btn-ghost">回到此刻</button>
           </div>
         </section>
         <!-- 远程 / 空态 / 样板厂提示：放 stage 外，窄屏不画场景时也能看到 -->
@@ -2172,8 +2164,13 @@
 <script src="/static/app-mods.js"></script>
 <script src="/static/app.js"></script>
 <!-- 工厂视图（第三顶层视图）：像素场景与监控面板；普通 script、零构建，
-     先 app.js 后本文件，靠全局函数互调（factoryMount / factoryOnEvent…） -->
+     先 app.js 后本文件，靠全局函数互调（factoryMount / factoryOnEvent…）。
+     工厂拆成四个分区，按序加载：主文件（状态/面板/事件）→ 场景构建 → 抽屉 → 绘制，
+     共享状态与跨层函数经 window.FX 命名空间互调 -->
 <script src="/static/app-factory.js"></script>
+<script src="/static/app-factory-scene.js"></script>
+<script src="/static/app-factory-drawer.js"></script>
+<script src="/static/app-factory-draw.js"></script>
 <!-- 工具配置区块（联网搜索 / AI 画图 / 语音输入 / 圆桌）拆在 app-tools.js：
      同为普通 script、零构建，先 app.js 后本文件，两文件靠全局函数互调 -->
 <script src="/static/app-tools.js"></script>

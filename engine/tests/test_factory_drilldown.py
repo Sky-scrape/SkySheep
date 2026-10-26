@@ -119,10 +119,17 @@ def test_factory_list_presets_stale_response_and_pipeline_navigation(tmp_path):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node unavailable")
-    source = (STATIC / "app-factory.js").read_text(encoding="utf-8")
-    source = source.replace("})();", (
-        "window.fx = { S, dom, openAllRunsDrawer, loadAllRuns, openQueueDrawer, openAttentionDrawer };\n})();"
-    ))
+    # 工厂已拆成四个分区（共享 window.FX）：按加载顺序拼接后从 FX 取内部函数
+    source = "\n".join((STATIC / n).read_text(encoding="utf-8") for n in (
+        "app-factory.js", "app-factory-scene.js",
+        "app-factory-drawer.js", "app-factory-draw.js"))
+    source += (
+        "\nwindow.fx = { S: window.FX.S, dom: window.FX.dom,"
+        " openAllRunsDrawer: window.FX.openAllRunsDrawer,"
+        " loadAllRuns: window.FX.loadAllRuns,"
+        " openQueueDrawer: window.FX.openQueueDrawer,"
+        " openAttentionDrawer: window.FX.openAttentionDrawer };\n"
+    )
     app = (STATIC / "app.js").read_text(encoding="utf-8")
     nav = app[app.index("async function openPipelineFor("):app.index("function closeRightTab(")]
     driver = r'''

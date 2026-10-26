@@ -15,6 +15,14 @@
 (function () {
   "use strict";
 
+  // ---------- FX 命名空间 ----------
+  // 工厂拆成四个普通 script，加载顺序：本文件（状态 / 数据 / 面板 / 循环 / 事件）
+  // → app-factory-scene.js（世界布局建模）→ app-factory-drawer.js（抽屉与产线
+  // 操作）→ app-factory-draw.js（场景绘制）。共享状态、常量与跨层函数统一挂
+  // window.FX：先加载方在 IIFE 尾部导出，后加载方在顶部绑定活引用；先加载方
+  // 调后加载方的函数一律经 FX.xxx 运行时查表（见各「转发」区块）。
+  var FX = window.FX = window.FX || {};
+
   // ---------- 常量 ----------
   var TILE_W = 32;
   var TILE_H = 16;
@@ -23,8 +31,13 @@
   var BUFFER_MIN_W = 320;
   var BUFFER_MIN_H = 180;
   var TICK_MS = 100;          // 世界动画 10fps
-  var UPCOMING_WINDOW_S = 1800;  // 待发月台只看未来 30 分钟到点的产线
-  var UPCOMING_MAX = 7;          // 月台上最多摆几枚待发包裹（再多靠标签计数）
+  var UPCOMING_WINDOW_S = 1800;  // 待发告示牌只看未来 30 分钟到点的产线
+  var UPCOMING_MAX = 1;          // 牌面不再写任务名（只留短标题 + 状态灯），常量沿用（弹窗明细用）
+  var UPCOMING_OVERDUE_S = 1800; // 过期下界预留位：现在不按过期时长裁（见 refreshUpcoming）
+  var UPCOMING_NAME_MAX = 8;     // 名字截断长度（弹窗里的任务名沿用；牌面已不写名字）
+  // 告示牌固定像素尺寸（内部缓冲坐标，不随窗口条数或摄像机缩放变）：小立牌，
+  // 只放「待发」短标题与状态灯，明细点击后在居中弹窗里看（openUpcomingDialog）。
+  var UPCOMING_BOARD = { w: 28, h: 17, pillar: 8, lead: 5 };
   var QUEUED_MAX_DRAW = 3;       // 排队卡住的包裹最多画几枚（其余靠标签补足）
   // 排队等待分级（秒）：到点后等得越久抖得越急、颜色越烫。
   // 分段而不是连续：连续插值在 10fps 的像素场景里读不出差别，三段才分得清。
@@ -41,7 +54,22 @@
   var RUN_TAIL_MS = 6000;     // 包裹落地后停留多久再消失
   var STALE_S = 300;          // 运行多久没有任何更新算「卡住」（与 liveStale 同口径）
   var NEAR_TIMEOUT_RATIO = 0.8; // 已跑超过超时额度的这个比例，开始冒烟
-  var BATCH_RUN_LIMIT = 5;    // 一次批量派工最多派几条（手滑连点不该烧掉一天额度）
+  var SPARSE_PROJECTS = 8;    // 厂区少于这个数时，筛选条不出现（没有「看不过来」的问题）
+  var PALLET_SIZE = 6;        // 一只托盘码几箱（2 列 × 3 层）；满一托盘就该来一辆车
+  var PALLET_MAX = 2;         // 场院里最多同时摆几只成品托盘（再多就只标「满」）
+  var REWORK_MAX = 6;         // 返工堆最多画几箱（再多的部分靠厂区地面的红灯说）
+  var UPCOMING_GLYPH_S = 1800; // 机台上方的到点沙漏只看未来 30 分钟
+  var TRIP_PHASES = [          // 出车五段：进场 → 等候 → 停靠 → 装货 → 离场
+    { name: "approach", ms: 2800 },   // 从坪沿外淡入，沿场院前带开到等候点
+    { name: "wait", ms: 1400 },       // 等候点熄火等装货位腾出来（表现节奏）
+    { name: "dock", ms: 1600 },       // 缓动挪进装货位
+    { name: "load", ms: 3600 },       // 叉车在托盘与车斗之间往返搬箱
+    { name: "leave", ms: 2600 },      // 原路倒出，坪沿外淡出
+  ];
+  var TRIP_MS = TRIP_PHASES.reduce(function (sum, ph) { return sum + ph.ms; }, 0);
+  var TRIP_MAX = 4;           // 全场同时在场的出车上限（纯表现，防扎堆）
+  var WAVE_MS = 900;          // 点工头小羊之后的挥手时长（位姿函数读同一常量）
+  var REPLAY_CAP_MS = 60000;  // 回放的总时长上限（每轮至少 0.9 秒、最多 2.6 秒）
   var FILTER_DEBOUNCE_MS = 120;
   var LIVE_POLL_MS = 12000;   // 「对话在跑」轻量快照的轮询间隔（只读内存）
   var WEATHER_POLL_MS = 30 * 60 * 1000; // 天气后端缓存 30 分钟，前端同频轮询
@@ -131,8 +159,15 @@
     world: null,
     packages: new Map(),   // run.id -> 包裹
     flowingProjects: new Set(),
+    // 厂区今日统计（做成 / 返工 / 在跑）：只喂给场景，不当文字显示
+    stats: {},
+    trips: [],             // 出货卡车（装满一托盘放一辆，纯表现）
+    replay: null,          // 回放今天的进度；running=false 时表示没在回放
+    replayLoading: false,
     runCache: new Map(),   // 抽屉里按需求回的行
-    upcoming: [],          // 待发月台：未来 30 分钟到点的产线（按 eta 升序）
+    upcoming: [],          // 告示牌数据：近 30 分钟到点（含刚过点未启动）的产线，按 eta 升序
+    noticeboardView: null,    // 告示牌离散状态（noticeboardState 的结果，绘制/标签/测试同源）
+    noticeboard: null,     // 告示牌本帧几何（绘制层写，标签层与点击热区共用）
     cam: { x: 0, y: 0, zoom: 1, tx: 0, ty: 0, tz: 1 },
     fitZoom: 0.82,         // 全景取景的缩放：机台名只在比全景更近时出现
     focusPid: null,        // 聚焦档：点厂区头「飞过去」看机台，Esc / 全景按钮回全景
@@ -142,10 +177,11 @@
     rot: 0,
     hallBoost: 0,          // performance 时间戳：派工时转盘加速
     labelsOff: false,
-    panelFolded: false,
+    panelFolded: true,   // 目录默认折叠：工厂的主体是场景，目录按需展开
     drawer: null,
     selectedKey: null,
     hits: [],
+    hover: null,           // 当前悬停的命中（{type,key/id/pid}）；离开 / 重建 / 卸载即清
     labelPool: [],
     raf: 0,
     clockTimer: 0,
@@ -154,6 +190,7 @@
     lastPanel: 0,
     demoSeq: 0,
     reduced: false,
+    hiddenAt: 0,           // 页面隐藏时刻：恢复时把出车 t0 整体平移，避免瞬跳
     bound: false,
     worldSig: "",
     snapshotTimer: 0,
@@ -187,31 +224,6 @@
     return (st && st.config) || {};
   }
 
-  /** 天气种类：只有开启且拿到 ok 快照才参与绘制；关闭 / 失败按晴天处理。 */
-  function weatherKind() {
-    var cfg = activeConfig();
-    if (!cfg || cfg.weather !== true || S.demo) return "clear";
-    var w = S.weather;
-    if (!w || !w.ok) return "clear";
-    return String(w.kind || "unknown");
-  }
-
-  /** 昼夜：开着现实天气时按当地日出日落（服务端 is_day），否则按本机时刻。
-      06:00–18:00 为白天；主题明暗不再影响场景——场景是一扇按真实时间变化的窗。 */
-  function weatherIsDay() {
-    var cfg = activeConfig();
-    if (cfg.ambient === false) return true;
-    if (cfg.weather && S.weather && S.weather.ok
-        && typeof S.weather.is_day === "boolean") {
-      return !!S.weather.is_day;
-    }
-    var h = new Date().getHours();
-    return h >= 6 && h < 18;
-  }
-
-  function palette() {
-    return weatherIsDay() ? PAL_DAY : PAL_NIGHT;
-  }
 
   // ---------- 时间文案 ----------
   function fmtClock(d) {
@@ -256,12 +268,21 @@
     return Math.max(0, nowMs() / 1000 - (run.started_at || 0));
   }
 
+  // 产线键的唯一拼接入口：定时任务 cron:<id>、编排 pipe:<id>
+  // （与后端 factory_line_key 同一口径；解析侧后端用 parse_factory_line_key）
+  function lineKeyFor(kind, id) {
+    return (kind === "pipeline" || kind === "pipeline_node") ? "pipe:" + id : "cron:" + id;
+  }
+
   function runKey(run) {
-    return run.kind === "pipeline_node" ? "pipe:" + run.pipeline_id : "cron:" + run.task_id;
+    return run.kind === "pipeline_node" ? lineKeyFor("pipeline", run.pipeline_id) : lineKeyFor("cron", run.task_id);
   }
 
   // ---------- 数据源 ----------
   function activeState() { return S.demo || S.state; }
+  // 上限按 [factory] 配置读（默认 6 台机台 / 40 个标签），越界按后端同口径夹取
+  function machineCap() { return clamp(Math.round(Number(activeConfig().machine_limit) || 6), 1, 12); }
+  function labelCap() { return clamp(Math.round(Number(activeConfig().label_limit) || MAX_LABELS), 10, 80); }
   function allRuns() {
     var st = activeState();
     return (st && st.runs) || [];
@@ -290,6 +311,8 @@
     S.mounted = true;
     cacheDom();
     bindOnce();
+    // 目录默认折叠（状态在 S.panelFolded，折叠按钮会把它翻过来）
+    if (dom.panel) dom.panel.classList.toggle("folded", S.panelFolded);
     updateClock();
     if (!S.clockTimer) S.clockTimer = setInterval(updateClock, 1000);
     // 「减少动态效果」：场景是静态快照，每分钟刷一次（设计 §4.5）
@@ -311,6 +334,9 @@
 
   function factoryUnmount() {
     S.mounted = false;
+    S.hover = null;
+    S.hoverPointer = null;
+    hideHoverTip();
     if (S.raf) { cancelAnimationFrame(S.raf); S.raf = 0; }
     if (S.clockTimer) { clearInterval(S.clockTimer); S.clockTimer = 0; }
     if (S.snapshotTimer) { clearInterval(S.snapshotTimer); S.snapshotTimer = 0; }
@@ -336,19 +362,31 @@
     dom.labelToggle = $("factory-labels-toggle");
     dom.settingsBtn = $("factory-settings");
     dom.panelFold = $("factory-panel-fold");
-    dom.hudRunning = $("factory-num-running");
-    dom.hudQueued = $("factory-num-queued");
-    dom.hudAttention = $("factory-num-attention");
-    dom.hudDone = $("factory-num-done");
-    dom.hudTokens = $("factory-num-tokens");
-    dom.hudChat = $("factory-num-chat");
+    // 顶上只剩一盏灯：在跑几件、今天做成几件已经长在场景里，不再占计数条
+    dom.attentionLamp = $("factory-attention");
+    dom.attnNum = $("factory-attn-num");
+    dom.replayBtn = $("factory-replay");
+    dom.replayBar = $("factory-replay-bar");
+    dom.replayTime = $("factory-replay-time");
+    dom.replayHint = $("factory-replay-hint");
+    dom.replayStop = $("factory-replay-stop");
     dom.weatherChip = $("factory-weather");
     dom.hud = $("factory-hud");
     dom.demoBadge = $("factory-demo-badge");
     dom.chips = $("factory-panel-filter");
     dom.search = $("factory-search");
-    dom.hudAttentionCell = document.querySelector('#factory-hud .fh-cell[data-k="attention"]');
-    dom.hudChatCell = document.querySelector('#factory-hud .fh-cell[data-k="chat"]');
+    // 悬停信息牌：轻量 DOM 层（中文不入 canvas），首次挂载时补建；
+    // createElement 不可用（测试 shim）时保持 undefined，读写处均已判空
+    dom.tip = $("factory-tip");
+    if (!dom.tip && dom.stage && document.createElement) {
+      var tipEl = document.createElement("div");
+      tipEl.id = "factory-tip";
+      tipEl.className = "fx-tip";
+      tipEl.style.display = "none";
+      tipEl.setAttribute("aria-hidden", "true");
+      dom.stage.appendChild(tipEl);
+      dom.tip = tipEl;
+    }
   }
 
   function bindOnce() {
@@ -357,10 +395,8 @@
     cacheDom();
 
     var allBtn = $("factory-all-runs");
-    var addBtn = $("factory-line-add");
 
     if (allBtn) allBtn.onclick = function () { openAllRunsDrawer(); };
-    if (addBtn) addBtn.onclick = function () { openNewLineDrawer(0); };
     if (dom.centerBtn) {
       dom.centerBtn.onclick = function () {
         fitCamera(true);
@@ -395,18 +431,6 @@
       dom.panelBody.addEventListener("click", function (ev) {
         var clearEl = ev.target.closest("[data-clear-filter]");
         if (clearEl) { resetFilter(); return; }
-        var batchRun = ev.target.closest("[data-batch-run]");
-        if (batchRun && !batchRun.disabled) {
-          batchRunLines(Number(batchRun.dataset.batchRun), batchRun);
-          return;
-        }
-        var batchPause = ev.target.closest("[data-batch-pause]");
-        if (batchPause && !batchPause.disabled) {
-          batchPauseLines(Number(batchPause.dataset.batchPause), batchPause);
-          return;
-        }
-        var addEl = ev.target.closest("[data-add-project]");
-        if (addEl) { openNewLineDrawer(Number(addEl.dataset.addProject) || 0); return; }
         var head = ev.target.closest("[data-focus-project]");
         if (head) { focusProject(Number(head.dataset.focusProject)); return; }
         var lineEl = ev.target.closest("[data-line-key]");
@@ -416,37 +440,10 @@
       dom.panelBody.addEventListener("keydown", panelKeyNav);
     }
     bindFilter();
-    var hudActions = {
-      running: function () { openAllRunsDrawer({ status: "running" }); },
-      queued: openQueueDrawer,
-      done: function () { openAllRunsDrawer({ view: "done_today" }); },
-      tokens: function () { openAllRunsDrawer({ view: "tokens_today" }); },
-    };
-    Object.keys(hudActions).forEach(function (key) {
-      var cell = document.querySelector('#factory-hud .fh-cell[data-k="' + key + '"]');
-      if (!cell) return;
-      var open = function () {
-        if (S.demo) { addNotice("当前是样板厂演示，没有真实运行记录"); return; }
-        hudActions[key]();
-      };
-      cell.onclick = open;
-      cell.onkeydown = function (ev) {
-        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); }
-      };
-    });
-    if (dom.hudAttentionCell) {
-      dom.hudAttentionCell.onclick = function () { openAttentionDrawer(); };
-      dom.hudAttentionCell.onkeydown = function (ev) {
-        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openAttentionDrawer(); }
-      };
-    }
-    // 「对话在跑」：工厂之外还有一个盲区——我这些会话里正在跑什么、哪个卡住了
-    if (dom.hudChatCell) {
-      dom.hudChatCell.onclick = function () { openLiveDrawer(); };
-      dom.hudChatCell.onkeydown = function (ev) {
-        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openLiveDrawer(); }
-      };
-    }
+    // 需留意：厂区头顶的红灯是主入口，这盏灯是键盘 / 扫视的等价入口
+    if (dom.attentionLamp) dom.attentionLamp.onclick = function () { openAttentionDrawer(); };
+    if (dom.replayBtn) dom.replayBtn.onclick = function () { toggleReplay(); };
+    if (dom.replayStop) dom.replayStop.onclick = function () { stopReplay(); };
 
     if (dom.canvas) {
       dom.canvas.addEventListener("pointerdown", onPointerDown);
@@ -465,19 +462,30 @@
     window.addEventListener("resize", function () { if (S.mounted) resizeScene(false); });
     document.addEventListener("visibilitychange", function () {
       if (!S.mounted) return;
-      if (!document.hidden) {
-        S.lastFrame = 0;
-        S.lastTick = 0;
-        renderAll();
-        refreshLive();
-        refreshWeather(false);
+      if (document.hidden) {
+        // 记下隐藏时刻：出车的 t0 是绝对时间，恢复时整体平移，
+        // 避免后台挂了很久再回来时车从半路瞬移到离场
+        S.hiddenAt = nowMs();
+        return;
       }
+      if (S.hiddenAt) {
+        var drift = nowMs() - S.hiddenAt;
+        S.hiddenAt = 0;
+        S.trips.forEach(function (t) { t.t0 += drift; });
+      }
+      S.lastFrame = 0;
+      S.lastTick = 0;
+      renderAll();
+      refreshLive();
+      refreshWeather(false);
     });
     try {
       var mq = window.matchMedia("(prefers-reduced-motion: reduce)");
       S.reduced = mq.matches;
       var onChange = function (e) {
         S.reduced = e.matches;
+        // 切到减少动态：在途出车立即撤场（位姿是时间函数，不清会继续跑）
+        if (S.reduced) S.trips = [];
         if (S.mounted) render();
       };
       if (mq.addEventListener) mq.addEventListener("change", onChange);
@@ -651,6 +659,8 @@
     var src = activeState();
     buildWorld(src);
     syncPackages(true);
+    // quiet：重拉快照不补放货车——否则每次配置变化都会有一队车同时涌出来
+    refreshProjectStats(true);
     renderCounters();
     renderPanel();
     renderAttentionNotice(cfg);
@@ -676,786 +686,14 @@
     if (dom.panelBody) dom.panelBody.innerHTML = '<div class="fx-empty">' + text + "</div>";
   }
 
-  // ---------- 世界 ----------
-  // 世界按 3×3 网格排布：调度厅占中心格，项目厂区占外层八格（不画格线）。
-  // 超过 8 个项目时继续向外扩 5×5、7×7 的外圈，间距不变。
-  var GRID_X = 224;
-  var GRID_Y = 120;
-
-  function gridSlots(n) {
-    // 固定槽位顺序，不随项目数量重排；坐标投影与平台菱形的两条轴一致。
-    var order = [[-1, -1], [1, -1], [-1, 1], [1, 1],
-                 [0, -1], [-1, 0], [1, 0], [0, 1]];
-    var out = order.slice(0, Math.max(0, n));
-    var ring = 2;
-    while (out.length < n) {
-      var cells = [];
-      for (var gx = -ring; gx <= ring; gx += 1) {
-        for (var gy = -ring; gy <= ring; gy += 1) {
-          if (Math.max(Math.abs(gx), Math.abs(gy)) !== ring) continue;
-          cells.push([gx, gy]);
-        }
-      }
-      // 从正北开始顺时针排，保证外圈顺序稳定
-      cells.sort(function (a, b) {
-        return Math.atan2(a[0], -a[1]) - Math.atan2(b[0], -b[1]);
-      });
-      for (var ci = 0; ci < cells.length && out.length < n; ci += 1) out.push(cells[ci]);
-      ring += 1;
-    }
-    return out.map(function (g) { return { gx: g[0], gy: g[1] }; });
-  }
-
-  function plotSpec(n) {
-    if (n <= 2) return { w: 4, h: 3, cols: 2, rows: 1 };
-    if (n <= 5) return { w: 5, h: 4, cols: 3, rows: 2 };
-    return { w: 6, h: 5, cols: 3, rows: 2 };
-  }
-
-  function toTile(x, y) {
-    return { x: x / TILE_W + y / TILE_H, y: y / TILE_H - x / TILE_W };
-  }
-  function iso(x, y) {
-    return { x: (x - y) * (TILE_W / 2), y: (x + y) * (TILE_H / 2) };
-  }
-
-  // 台地尺寸按 3×3 网格外圈算：直接取所有厂区坪的极限尖角，
-  // 加一格余量，让台地恰好包住外圈厂区——中间不空一大片。
-  function makePlateau(factories) {
-    // 保留完整九宫格，即使部分外圈格暂时没有项目也不缩掉。
-    var ring = Math.max(1, Math.ceil((Math.sqrt(factories.length + 1) - 1) / 2));
-    var hw = GRID_X * (ring + 0.5);
-    var hh = GRID_Y * (ring + 0.5);
-    var required = 1;
-    factories.forEach(function (f) {
-      [[f.x - f.halfW, f.y], [f.x + f.halfW, f.y],
-       [f.x, f.y - f.halfH], [f.x, f.y + f.halfH]].forEach(function (p) {
-        required = Math.max(required, Math.abs(p[0]) / hw + Math.abs(p[1]) / hh);
-      });
-    });
-    hw = Math.ceil(hw * required * 1.04);
-    hh = Math.ceil(hh * required * 1.04);
-    return {
-      cx: 0, cy: 0,
-      hw: hw, hh: hh,
-      th: 0,
-    };
-  }
-
-  function buildWorld(st) {
-    var projects = (st && st.projects) || [];
-    var hall = { x: 0, y: 0 };
-    var factories = [];
-    var lines = new Map();
-    var keepSelected = S.selectedKey;
-    // 3×3 网格：调度厅居中，项目按外层格排布（格线不画出来）。
-    // 先占外围四角，再补边格；新增项目不改变已占槽位。
-    var slots = gridSlots(projects.length);
-    var i = 0;
-    projects.forEach(function (p) {
-      var slot = slots[i] || { gx: 0, gy: -1 };
-      var fx = (slot.gx - slot.gy) * GRID_X / 2;
-      var fy = (slot.gx + slot.gy) * GRID_Y / 2;
-      var spec = plotSpec((p.lines || []).length);
-      var f = {
-        project: p, id: p.id, name: p.name, root_ok: p.root_ok !== false,
-        x: fx, y: fy, w: spec.w, h: spec.h, spec: spec, lines: [],
-        jumpStart: 0,
-      };
-      var n = spec.w + spec.h;
-      // 菱形坪要装下后场厂房 + 附房 + 筒仓 + 前场两排机台，半宽按 104 起算；
-      // 建筑与机台都收在「菱形内切矩形」附近，四角不再压出坪沿。
-      f.halfW = Math.max(104, 10.5 * n);
-      f.halfH = f.halfW * 0.5;
-      // 入口位于调度厅与厂区中心连线的坪沿，主轨道保持一条直线。
-      var edgeScale = 0.96 / (Math.abs(fx) / f.halfW + Math.abs(fy) / f.halfH || 1);
-      f.entrance = { x: fx * (1 - edgeScale), y: fy * (1 - edgeScale) };
-      f.hub = { x: fx + f.halfW * 0.28, y: fy + f.halfH * 0.06 };
-      f.tray = { x: fx + f.halfW * 0.40, y: fy + f.halfH * 0.26 };
-      f.sheep = { x: fx - f.halfW * 0.45, y: fy + f.halfH * 0.36 };
-      f.belt = routeBelt(hall, f.entrance, i);
-      // 机台在前场排两排，横向按场院宽度铺开；支线停在机台口，不横穿工作区。
-      var gapX = Math.min(34, f.halfW * 0.32);
-      var rowY = fy + f.halfH * 0.15;
-      (p.lines || []).forEach(function (line, li) {
-        if (line.kind === "cron" && line.status === "stopped") { /* 仍画机台：挂停工牌 */ }
-        var col = li % spec.cols;
-        var row = Math.floor(li / spec.cols);
-        var mx = fx + (col - (spec.cols - 1) / 2) * gapX;
-        var my = rowY + row * f.halfH * 0.24;
-        var rec = {
-          key: line.key, line: line, kind: line.kind,
-          id: line.id, project: p, factory: f,
-          x: mx, y: my, index: li, drawn: li < 6,
-        };
-        rec.path = f.belt.concat([f.hub, { x: mx, y: my - 7 }]);
-        rec.transit = transitSeconds(rec.path);
-        // 单厂最多画 6 台机台；其余只在面板 / 抽屉里列出（名牌标 +N）
-        if (li < 6) f.lines.push(rec);
-        lines.set(rec.key, rec);
-      });
-      factories.push(f);
-      i += 1;
-    });
-
-    var plateau = makePlateau(factories);
-    var site = buildIndustrialSite(hall, factories, plateau);
-
-    var minX = hall.x - 70, maxX = hall.x + 70;
-    var minY = hall.y - 50, maxY = hall.y + 50;
-    factories.forEach(function (f) {
-      minX = Math.min(minX, f.x - f.halfW - 20);
-      maxX = Math.max(maxX, f.x + f.halfW + 20);
-      minY = Math.min(minY, f.y - f.halfH - 26);
-      maxY = Math.max(maxY, f.y + f.halfH + 26);
-    });
-
-    site.models.forEach(function (m) {
-      if (m.bg && !m.peripheral) return;
-      var points = m.path || [{ x: m.x, y: m.y }];
-      var hw = m.hw || m.r || m.width || 8;
-      var hh = m.hh || (m.r ? m.r * 0.5 : 5);
-      // 轴系零件（煤棚 / 筒仓群）的占地落在「沿公路 / 纵深」两条轴上，投影回屏幕
-      // 两轴再取包围盒；轴对齐零件照旧（ax=1, ay=0 时两个 span 就是 hw / hh）。
-      var ax = m.axis ? m.axis.x : 1, ay = m.axis ? m.axis.y : 0;
-      var spanX = Math.abs(hw * ax) + Math.abs(hh * ay);
-      var spanY = Math.abs(hw * ay) + Math.abs(hh * ax);
-      // 取景包含塔顶，避免缩放和不同窗口尺寸下裁掉主体。
-      var height = (m.z0 || 0) + (m.h || Math.max(m.h0 || 0, m.h1 || 0));
-      points.forEach(function (pt) {
-        minX = Math.min(minX, pt.x - spanX - 8);
-        maxX = Math.max(maxX, pt.x + spanX + 8);
-        minY = Math.min(minY, pt.y - height - spanY - 16);
-        maxY = Math.max(maxY, pt.y + spanY + 12);
-      });
-    });
-
-    // 固定取景同时包含园区边缘与外围设施，避免居中后裁掉前沿道路。
-    minX = Math.min(minX, plateau.cx - plateau.hw - 20);
-    maxX = Math.max(maxX, plateau.cx + plateau.hw + 20);
-    minY = Math.min(minY, plateau.cy - plateau.hh);
-    maxY = Math.max(maxY, plateau.cy + plateau.hh + 20);
-
-    S.world = {
-      hall: hall, factories: factories, lines: lines,
-      models: site.models, site: site, plateau: plateau,
-      bounds: { minX: minX, maxX: maxX, minY: minY, maxY: maxY },
-    };
-    S.worldSig = projects.map(function (p) {
-      return p.id + ":" + (p.lines || []).map(function (l) { return l.key; }).join(",");
-    }).join("|");
-    // 重建世界时不丢选中态：cron_updated / 运行事件会触发防抖重拉，若每次都把
-    // 高亮清掉，面板会一直在用户眼皮底下「闪一下」
-    S.selectedKey = lines.has(keepSelected) ? keepSelected : null;
-  }
-
-  function buildIndustrialSite(hall, factories, plateau) {
-    // 台地由 buildWorld 算好传进来；单测 / 探针会只传前两个参数，
-    // 而贴路布置（料场 / 罐区 / 前场支路）依赖台地尺寸，不能依赖调用方传参。
-    if (!plateau) plateau = makePlateau(factories);
-    var rand = seeded(0x1D05721A);
-    var models = [];
-    var patches = [];
-    var smoke = [];
-    var sparks = [];
-    var roads = [];
-    var extentX = 300, extentY = 150;
-
-    for (var b = 0; b < 64; b += 1) {
-      var bx = 0, by = 0;
-      for (var attempt = 0; attempt < 8; attempt += 1) {
-        bx = (rand() * 2 - 1) * extentX;
-        by = (rand() * 2 - 1) * extentY;
-        if (!plateau) break;
-        if (Math.abs(bx - plateau.cx) / plateau.hw + Math.abs(by - plateau.cy) / plateau.hh <= 0.96) break;
-      }
-      var br = 8 + rand() * 26;
-      patches.push({ x: bx, y: by, rx: br, ry: br * (0.32 + rand() * 0.2), light: rand() < 0.5 });
-    }
-
-    function addBox(x, y, hw, hh, h, role, opts) {
-      var m = { kind: "box", x: x, y: y, hw: hw, hh: hh, h: h, role: role, z0: 0 };
-      if (opts) for (var k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) m[k] = opts[k];
-      models.push(m);
-      return m;
-    }
-    function addCyl(x, y, r, h, role, opts) {
-      var m = { kind: "cyl", x: x, y: y, r: r, h: h, role: role, z0: 0 };
-      if (opts) for (var k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) m[k] = opts[k];
-      models.push(m);
-      return m;
-    }
-
-    factories.forEach(function (f) {
-      var cx = f.x, cy = f.y, hw = f.halfW, hh = f.halfH;
-      var baseZ = 5;
-      var variant = Math.abs(hashKey("site" + f.id)) % 8;
-      f.buildingVariant = variant;
-      addBox(cx, cy, hw * 0.96, hh * 0.96, 5, "concrete",
-             { paving: true, rail: true, curb: true, yard: f });
-
-      var compoundStart = models.length;
-      var styles = ["重工铸造厂", "物流集散仓", "垂直加工塔", "联排制造坊",
-                    "数据机房", "退台研发园", "双跨装配厂", "罐区精炼站"];
-      f.compoundStyle = styles[variant];
-      var layouts = [
-        [-0.20, -0.28, 0.25, 0.18], [-0.10, -0.37, 0.38, 0.16],
-        [-0.10, -0.40, 0.14, 0.14], [-0.32, -0.20, 0.16, 0.18],
-        [-0.22, -0.25, 0.24, 0.22], [-0.18, -0.32, 0.23, 0.18],
-        [-0.27, -0.28, 0.19, 0.24], [-0.37, -0.12, 0.13, 0.16]
-      ];
-      var layout = layouts[variant];
-      var mainBx = cx + hw * layout[0], mainBy = cy + hh * layout[1];
-      var mainHW = hw * layout[2], mainHH = hh * layout[3];
-      var heights = [38, 24, 56, 34, 27, 32, 22, 29];
-      var mainH = heights[variant];
-      var topZ = baseZ + mainH;
-      addBox(mainBx, mainBy, mainHW, mainHH, mainH, "steel",
-             { z0: baseZ, windows: variant === 4 ? 1 : 4, door: true,
-               roof: variant === 0 || variant === 3 || variant === 6 ? "saw" : "flat",
-               vent: variant === 2, hall: true, pipes: variant === 0 || variant === 7 });
-
-      function wing(x, y, w, d, h, role, opts) {
-        var options = { z0: baseZ, roof: "flat", windows: 2, annex: true };
-        if (opts) Object.keys(opts).forEach(function (key) { options[key] = opts[key]; });
-        return addBox(cx + hw * x, cy + hh * y, hw * w, hh * d, h, role, options);
-      }
-      function tank(x, y, r, h, role, opts) {
-        var options = { z0: baseZ, bands: 3, ladder: true, silo: true };
-        if (opts) Object.keys(opts).forEach(function (key) { options[key] = opts[key]; });
-        return addCyl(cx + hw * x, cy + hh * y, hw * r, h, role, options);
-      }
-      function stack(x, y, h) {
-        var chimneyX = cx + hw * x, chimneyY = cy + hh * y;
-        addCyl(chimneyX, chimneyY, 2.3, h, "steel",
-               { z0: baseZ, bands: 2, chimney: true, cap: true });
-        smoke.push({ x: chimneyX, y: chimneyY, h: baseZ + h });
-      }
-      if (variant === 0) {
-        models.push({ kind: "furnace", x: cx - hw * 0.56, y: cy - hh * 0.10,
-                      hw: 10, hh: 6, h: 34, z0: baseZ, role: "rust", projectId: f.id });
-        wing(0.25, -0.27, 0.14, 0.13, 16, "rust", { roof: "saw", pipes: true });
-        tank(0.49, -0.15, 0.065, 27, "rust");
-        stack(-0.27, -0.55, 53);
-        stack(-0.07, -0.55, 46);
-        wing(-0.20, 0.00, 0.19, 0.055, 7, "steel", { canopy: true, windows: 0 });
-      } else if (variant === 1) {
-        wing(0.34, -0.06, 0.12, 0.15, 11, "rust", { door: true });
-        wing(-0.10, -0.13, 0.30, 0.045, 8, "steel", { canopy: true, windows: 0 });
-        for (var container = 0; container < 3; container += 1) {
-          wing(-0.48 + container * 0.22, 0.14, 0.085, 0.075, 6,
-               container === 1 ? "steel" : "rust", { container: true, windows: 0 });
-        }
-        wing(-0.48, 0.14, 0.075, 0.065, 5, "steel",
-             { z0: baseZ + 6, container: true, windows: 0 });
-        models.push({ kind: "truck", x: cx + hw * 0.40, y: cy + hh * 0.25, z0: baseZ });
-      } else if (variant === 2) {
-        wing(-0.10, -0.40, 0.09, 0.09, 8, "glass", { z0: topZ, windows: 3 });
-        topZ += 8;
-        wing(-0.36, -0.08, 0.19, 0.12, 14, "steel", { vent: true });
-        wing(0.25, -0.18, 0.13, 0.13, 21, "rust", { pipes: true });
-        models.push({ kind: "transferBridge",
-                      path: [{ x: cx - hw * 0.03, y: cy - hh * 0.29 },
-                             { x: cx + hw * 0.20, y: cy - hh * 0.18 }],
-                      h0: 20, h1: 20, width: 3 });
-      } else if (variant === 3) {
-        wing(0.04, -0.40, 0.15, 0.16, 26, "rust", { roof: "saw", door: true });
-        wing(0.34, -0.20, 0.13, 0.17, 18, "steel", { roof: "saw", door: true });
-        wing(-0.06, -0.10, 0.07, 0.07, 10, "glass");
-        wing(-0.50, 0.14, 0.075, 0.06, 7, "rust", { container: true, windows: 0 });
-      } else if (variant === 4) {
-        wing(0.31, -0.28, 0.16, 0.18, 23, "steel", { windows: 1 });
-        for (var ac = 0; ac < 3; ac += 1) {
-          addBox(mainBx - mainHW * 0.60 + ac * mainHW * 0.60, mainBy,
-                 mainHW * 0.20, mainHH * 0.24, 6, "steel",
-                 { z0: topZ, roof: "flat", vent: true });
-        }
-        wing(0.01, 0.02, 0.12, 0.07, 8, "glass", { windows: 4 });
-        for (var cooler = 0; cooler < 3; cooler += 1) {
-          wing(-0.51 + cooler * 0.14, 0.15, 0.045, 0.06, 8, "steel", { vent: true, windows: 0 });
-        }
-        topZ += 6;
-      } else if (variant === 5) {
-        addBox(mainBx, mainBy, mainHW * 0.72, mainHH * 0.72, 12, "glass",
-               { z0: topZ, windows: 5, roof: "flat" });
-        topZ += 12;
-        wing(0.26, -0.18, 0.15, 0.13, 17, "glass", { windows: 4 });
-        wing(-0.42, 0.07, 0.10, 0.08, 11, "steel", { windows: 3 });
-        for (var garden = 0; garden < 3; garden += 1) {
-          var gardenX = cx + hw * (0.04 + garden * 0.15);
-          var gardenY = cy + hh * 0.12;
-          addBox(gardenX, gardenY, hw * 0.045, hh * 0.045, 2, "concrete", { z0: baseZ });
-          models.push({ kind: "shrub", x: gardenX, y: gardenY, s: 0.8, z0: baseZ + 2 });
-        }
-      } else if (variant === 6) {
-        wing(0.23, -0.27, 0.19, 0.24, 28, "steel", { roof: "saw", door: true });
-        wing(-0.01, -0.04, 0.055, 0.075, 9, "glass");
-        models.push({ kind: "transferBridge",
-                      path: [{ x: cx - hw * 0.28, y: cy - hh * 0.22 },
-                             { x: cx + hw * 0.24, y: cy - hh * 0.22 }],
-                      h0: 32, h1: 32, width: 3.5 });
-        for (var reel = 0; reel < 3; reel += 1) {
-          models.push({ kind: "reel", x: cx - hw * 0.52 + reel * hw * 0.14,
-                        y: cy + hh * 0.15, s: 0.8, z0: baseZ });
-        }
-      } else {
-        [{ x: 0.04, y: -0.72, h: 48, role: "steel" },
-         { x: 0.25, y: -0.55, h: 39, role: "rust" }].forEach(function (column) {
-          models.push({ kind: "distillation", x: cx + hw * column.x, y: cy + hh * column.y,
-                        r: 3.2, hw: 5.5, hh: 3, h: column.h, z0: baseZ,
-                        platforms: 3, role: column.role });
-        });
-        tank(-0.06, -0.51, 0.085, 43, "rust");
-        tank(0.25, -0.37, 0.10, 32, "steel");
-        tank(0.48, -0.10, 0.07, 24, "rust");
-        tank(0.12, -0.02, 0.065, 18, "steel");
-        wing(-0.36, 0.18, 0.12, 0.075, 10, "glass");
-        stack(-0.30, -0.43, 48);
-        models.push({ kind: "pipeRack",
-                      path: [{ x: cx - hw * 0.04, y: cy - hh * 0.34 },
-                             { x: cx + hw * 0.43, y: cy - hh * 0.12 }],
-                      h0: 9, h1: 9, width: 3 });
-      }
-      var gateSide = (f.entrance.x >= cx) ? 1 : -1;
-      if (variant === 0 || variant === 1 || variant === 6 || variant === 7) {
-        wing(gateSide * 0.63, 0.04, 0.045, 0.05, 7, "steel", { door: true, gatehouse: true });
-      }
-      models.slice(compoundStart).forEach(function (m) {
-        m.projectId = f.id;
-        m.compoundPart = true;
-      });
-
-      // 前场机台：围绕分配带排两排；机台自带底座与状态灯柱
-      f.lines.forEach(function (rec, li) {
-        models.push({ kind: "machine", x: rec.x, y: rec.y, hw: 9, hh: 4.5,
-                      h: 12.5, z0: baseZ, line: rec.line, rec: rec, index: li });
-      });
-      // 分配带：入口 → 前场枢纽，再分短支线停在每台机台身后（低于机台，不压工作面）
-      var hub = f.hub || { x: cx + hw * 0.30, y: cy + hh * 0.12 };
-      models.push({ kind: "conveyor", path: [f.entrance, hub],
-                    h0: 9, h1: 9, width: 2.6, ore: false, projectId: f.id });
-      f.lines.forEach(function (rec) {
-        models.push({ kind: "conveyor", path: [hub, { x: rec.x, y: rec.y - 7 }],
-                      h0: 9, h1: 7, width: 1.6, ore: false, spur: true });
-      });
-      // 前场两角：成品托盘 / 料箱与卷盘；灯杆与工头放在通道边
-      models.push({ kind: "pallet", x: f.tray.x, y: f.tray.y, z0: baseZ, projectId: f.id, bay: true });
-      if (variant === 0 || variant === 3 || variant === 7) {
-        addBox(cx - hw * 0.48, cy + hh * 0.26, 5.4, 2.7, 3, "concrete", { z0: baseZ, pad: true });
-        models.push({ kind: "crate", x: cx - hw * 0.48, y: cy + hh * 0.24, s: 0.9, z0: baseZ });
-        models.push({ kind: "barrel", x: cx - hw * 0.57, y: cy + hh * 0.31, s: 0.9, z0: baseZ });
-        if (variant === 7) {
-          models.push({ kind: "barrel", x: cx - hw * 0.45, y: cy + hh * 0.39, s: 0.8, z0: baseZ });
-        }
-      } else if (variant === 1 || variant === 2) {
-        models.push({ kind: "crate", x: cx - hw * 0.42, y: cy + hh * 0.30, s: 1.1, z0: baseZ });
-        models.push({ kind: "reel", x: cx - hw * 0.24, y: cy + hh * 0.47, s: 0.85, z0: baseZ });
-      }
-      var sheep = f.sheep || { x: cx - hw * 0.45, y: cy + hh * 0.36 };
-      models.push({ kind: "figure", x: sheep.x, y: sheep.y, z0: baseZ });
-      models.push({ kind: "lamp", x: cx - hw * 0.52, y: cy + hh * 0.16, z0: baseZ, h: 30 });
-      models.push({ kind: "lamp", x: cx + hw * 0.52, y: cy - hh * 0.16, z0: baseZ, h: 26 });
-      if (variant === 0) {
-        models.push({ kind: "pipeRack",
-                      path: [{ x: cx + hw * 0.43, y: cy - hh * 0.15 },
-                             { x: cx + hw * 0.23, y: cy - hh * 0.27 }],
-                      h0: 6, h1: 6, width: 3, projectId: f.id, compoundPart: true });
-      }
-      models.push({ kind: "conveyor", path: f.belt, h0: 12, h1: 12, width: 4, ore: true,
-                    projectId: f.id });
-      // 名牌按主体屋脊定位，不跟随烟囱或独立反应罐抬高。
-      f.labelZ = topZ + 10;
-    });
-
-    var perimeterStart = models.length;
-    var perimeterSmokeStart = smoke.length;
-    function anchorFacility(start, smokeStart, name, origin, target) {
-      models.slice(start).concat(smoke.slice(smokeStart)).forEach(function (m) {
-        m.facility = name;
-        m.facilityOrigin = origin;
-        m.facilityTarget = target;
-      });
-    }
-    var coolingStart = models.length, coolingSmokeStart = smoke.length;
-    // 外围设施共用组坐标；局部零件间距不随扩圈变化。
-    models.push({ kind: "cooling", x: 356, y: -233, r: 16, h: 52, z0: 0 });
-    models.push({ kind: "cooling", x: 404, y: -207, r: 14, h: 46, z0: 0 });
-    smoke.push({ x: 356, y: -233, h: 55, steam: true });
-    smoke.push({ x: 404, y: -207, h: 49, steam: true });
-    addBox(325, -250, 13, 6.5, 10, "steel", { z0: 0, windows: 2, roof: "flat", vent: true });
-    models.push({ kind: "pipeRack", path: [{ x: 338, y: -246 }, { x: 352, y: -236 }], h0: 10, h1: 10, width: 6 });
-
-    anchorFacility(coolingStart, coolingSmokeStart, "coolingPlant",
-                   { x: 380, y: -220 }, { x: 155, y: -140 });
-
-    models.push({ kind: "box", x: 480, y: -220, hw: 42, hh: 22, h: 24, role: "steel", windows: 4, roof: "saw", bg: true });
-    models.push({ kind: "cyl", x: 510, y: -180, r: 16, h: 34, role: "rust", bands: 4, bg: true });
-    // 远景工业带：独立物件不参与建筑组的零件位移。
-
-    models.push({ kind: "cyl", x: 470, y: -100, r: 12, h: 26, role: "steel", bands: 3, bg: true, roadsideTank: 1 });
-    models.push({ kind: "box", x: -480, y: -200, hw: 50, hh: 26, h: 22, role: "steel", windows: 3, roof: "flat", bg: true });
-    models.push({ kind: "cyl", x: -460, y: -60, r: 24, h: 40, role: "rust", bands: 4, bg: true, roadsideTank: -1 });
-    models.push({ kind: "pylon", x: -380, y: -160, bg: true });
-    models.push({ kind: "pylon", x: 400, y: -150, bg: true });
-    models.push({ kind: "pylon", x: 520, y: -140, bg: true });
-    models.push({ kind: "truck", x: -360, y: 190, z0: 0, bg: true });
-    models.push({ kind: "truck", x: 360, y: 200, z0: 0, bg: true });
-    models.push({ kind: "ore", x: 380, y: 170, s: 2.6, bg: true });
-    models.push({ kind: "ore", x: -380, y: 175, s: 2.2, bg: true });
-    models.push({ kind: "rock", x: -380, y: -170, s: 2, bg: true });
-    models.push({ kind: "rock", x: 400, y: 80, s: 1.6, bg: true });
-    models.push({ kind: "shrub", x: -360, y: 180, s: 1.3, bg: true });
-    models.push({ kind: "shrub", x: 360, y: 180, s: 1.2, bg: true });
-    models.push({ kind: "conveyor", path: [{ x: 454, y: -224 }, { x: 508, y: -180 }], h0: 16, h1: 10, width: 2.6, ore: true, bg: true });
-    models.push({ kind: "transferBridge", path: [{ x: 468, y: -196 }, { x: 528, y: -152 }],
-                  h0: 16, h1: 12, width: 6, bg: true });
-    models.push({ kind: "box", x: 466, y: -198, hw: 7, hh: 4, h: 20, role: "steel", windows: 1, roof: "flat", bg: true });
-    models.push({ kind: "box", x: 530, y: -150, hw: 6, hh: 3.5, h: 18, role: "rust", roof: "flat", bg: true });
-    var frontY = factories.reduce(function (y, f) { return Math.max(y, f.y + f.halfH); }, 110) + 25;
-    models.push({ kind: "truck", x: -380, y: frontY + 10, z0: 0, bg: true });
-    // 外围新设施：变电站、水塔和维修库；与项目厂区保持独立。
-    var substationStart = models.length;
-    addBox(-410, -182, 22, 11, 3, "concrete", { paving: true, bg: true, facility: "substation" });
-    for (var tr = 0; tr < 2; tr += 1) {
-      addBox(-418 + tr * 15, -182, 5, 2.5, 9, "steel", { bg: true, facility: "substation", vent: true });
-      for (var ins = 0; ins < 3; ins += 1) {
-        addCyl(-421 + tr * 15 + ins * 3, -182, 0.9, 4, "glass",
-               { z0: 9, bg: true, facility: "substation" });
-      }
-    }
-    anchorFacility(substationStart, smoke.length, "substation",
-                   { x: -410, y: -182 }, { x: -210, y: -92 });
-    var waterStart = models.length;
-    addBox(-414, -111, 12, 6, 3, "concrete", { paving: true, bg: true, facility: "waterTower" });
-    [[-6, -2], [6, -2], [0, 3]].forEach(function (leg) {
-      addCyl(-414 + leg[0], -111 + leg[1], 1.2, 22, "steel", { bg: true, facility: "waterTower" });
-    });
-    addCyl(-414, -111, 11, 13, "steel", { z0: 22, bg: true, bands: 2, ladder: true, facility: "waterTower" });
-    anchorFacility(waterStart, smoke.length, "waterTower",
-                   { x: -414, y: -111 }, { x: -214, y: -21 });
-    var repairStart = models.length;
-    addBox(441, -255, 21, 10.5, 16, "rust",
-           { windows: 2, roof: "saw", bg: true, facility: "repairDepot", door: true });
-    models.push({ kind: "truck", x: 462, y: -245, z0: 0, bg: true, facility: "repairDepot" });
-    anchorFacility(repairStart, smoke.length, "repairDepot",
-                   { x: 441, y: -255 }, { x: 231, y: -130 });
-    // 厂外建筑群：不生成项目名牌、任务机台或运行状态；整组锚在 facilityAnchor 上，
-    // 项目变多（环数 +1）时按锚点整体外移，组内相对位置不变。
-    // opts.near=true：摆在前场做近景——不标 bg（bg 会被 roleCols 与雾化调色板压成灰调远景）。
-    // opts.plateauAligned=true：位置已按台地前缘公路算好，别再按环数位移（见 perimeterOffset）。
-    function utilityGroup(name, x, y, build, opts) {
-      var start = models.length;
-      build(x, y);
-      models.slice(start).forEach(function (m) {
-        if (!(opts && opts.near)) m.bg = true;
-        m.facility = name;
-        if (opts && opts.plateauAligned) m.plateauAligned = true;
-        else m.facilityAnchor = { x: x, y: y };
-      });
-    }
-    utilityGroup("serviceQuarter", -170, -140, function (x, y) {
-      addBox(x, y, 66, 27, 2, "concrete", { paving: true });
-      addBox(x - 26, y - 8, 24, 12, 30, "steel", { z0: 2, roof: "flat", windows: 4, door: true });
-      addBox(x - 26, y - 8, 17, 8, 8, "glass", { z0: 32, roof: "flat", windows: 3 });
-      addBox(x + 26, y - 5, 20, 10, 19, "rust", { z0: 2, roof: "saw", windows: 3, door: true });
-      addBox(x + 4, y + 14, 15, 6, 10, "steel", { z0: 2, roof: "flat", windows: 2, canopy: true });
-      addBox(x - 48, y + 9, 9, 4.5, 9, "steel", { z0: 2, roof: "flat", door: true });
-      models.push({ kind: "truck", x: x + 39, y: y + 15, z0: 2 });
-      models.push({ kind: "lamp", x: x - 8, y: y + 25, z0: 2, h: 22 });
-    });
-    utilityGroup("energyQuarter", 275, -160, function (x, y) {
-      addBox(x, y, 63, 27, 2, "concrete", { paving: true });
-      addBox(x - 25, y - 7, 23, 11.5, 25, "rust",
-             { z0: 2, roof: "saw", windows: 3, door: true, pipes: true });
-      addBox(x - 26, y - 7, 9, 4.5, 6, "steel", { z0: 32, roof: "flat", vent: true });
-      addBox(x + 18, y + 9, 17, 8.5, 13, "steel", { z0: 2, roof: "flat", windows: 3, vent: true });
-      addCyl(x + 22, y - 15, 9, 31, "steel", { z0: 2, bands: 3, ladder: true });
-      addCyl(x + 45, y - 4, 7, 23, "rust", { z0: 2, bands: 2, ladder: true });
-      models.push({ kind: "pipeRack", path: [{ x: x + 17, y: y - 9 }, { x: x + 41, y: y + 4 }],
-                    h0: 8, h1: 8, width: 3 });
-      models.push({ kind: "lamp", x: x - 37, y: y + 19, z0: 2, h: 24 });
-    });
-    // 西侧物资场：填住外圈后勤带与料场之间那块空沙地，作为库房 / 工棚 / 备件场的补充
-    utilityGroup("westDepot", -360, -70, function (x, y) {
-      addBox(x - 20, y, 38, 25, 2, "concrete", { paving: true });
-      // 主库房（左后）+ 长条工棚（右后），中间留出消防通道
-      addBox(x - 25, y - 6, 18, 9, 16, "steel",
-             { z0: 2, roof: "flat", windows: 4, door: true });
-      addBox(x + 15, y - 21, 13, 5.5, 10, "rust",
-             { z0: 2, roof: "saw", windows: 2, door: true });
-      // 检修工棚（右侧）与门房（左前）
-      addBox(x + 33, y - 6, 11, 6, 10, "steel",
-             { z0: 2, roof: "saw", windows: 2, door: true });
-      addBox(x - 41, y + 8, 6, 3.5, 7, "glass",
-             { z0: 2, roof: "flat", windows: 2, door: true });
-      // 备件罐（右前）与管廊
-      addCyl(x + 41, y + 14, 5.5, 14, "rust", { z0: 2, bands: 2, ladder: true });
-      addCyl(x + 53, y + 8, 4.5, 10, "steel", { z0: 2, bands: 1, ladder: true });
-      models.push({ kind: "pipeRack", path: [{ x: x - 25, y: y + 6 }, { x: x - 5, y: y + 6 }],
-                    h0: 6, h1: 6, width: 3 });
-      // 前场：两辆卡车、两盏灯，拉开整组的横向跨度
-      models.push({ kind: "truck", x: x - 21, y: y + 24, z0: 2 });
-      models.push({ kind: "truck", x: x + 25, y: y + 24, z0: 2 });
-      models.push({ kind: "lamp", x: x - 47, y: y + 24, z0: 2, h: 24 });
-      models.push({ kind: "lamp", x: x + 41, y: y + 24, z0: 2, h: 22 });
-      // 散料：别都堆在一角
-      models.push({ kind: "crate", x: x - 46, y: y - 20, z0: 2, s: 1.1 });
-      models.push({ kind: "crate", x: x + 40, y: y + 8, z0: 2, s: 0.9 });
-      models.push({ kind: "barrel", x: x + 15, y: y + 22, z0: 2, s: 1 });
-      models.push({ kind: "reel", x: x - 35, y: y + 22, z0: 2, s: 0.9 });
-      // 小龙门吊站在场院右前缘，吊钩下留一组备件箱
-      models.push({ kind: "gantry", x: x + 49, y: y + 30, w: 7, h: 18, hw: 8, hh: 3 });
-      models.push({ kind: "crate", x: x + 49, y: y + 34, s: 1.2 });
-    }, { near: true });
-    // 前场两组近景：贴着前缘公路外侧布置（左西料场、右东罐区）。
-    // 位置按当前台地算——公路走向就是台地前缘那两条边，台地变大两组跟着挪，
-    // 所以它们标 plateauAligned，不再参与 perimeterOffset 的按环位移（见下）。
-    // 场坪一律 2:1 菱形，与园区坪、公路同一倾斜度。
-    var roadLen = Math.hypot(plateau.hw + 14, plateau.hh + 8) || 1;
-    function roadsideAnchor(side, t, gap) {
-      // 前缘左/右臂：侧角 → 前角；返回「路外侧 gap 处」的场地中心（gap=0 即落在公路中线上）
-      var ax = side * (plateau.hw + 14), ay = 0;
-      var bx = 0, by = plateau.hh + 8;
-      var px = ax + (bx - ax) * t, py = ay + (by - ay) * t;
-      var nx = side * (plateau.hh + 8) / roadLen, ny = (plateau.hw + 14) / roadLen;
-      return { x: Math.round(px + nx * gap), y: Math.round(py + ny * gap),
-               nx: nx, ny: ny };
-    }
-    // 间距不写死：整组建完先量一次「最靠路那面墙沿外法线到公路中线的距离」（负=压上路），
-    // 再把整组沿外法线挪过去，只留一条排水沟的宽度。改建筑布局不用回来手改常数。
-    var ROAD_CLEARANCE = 14;
-    function alignYardToRoad(name, armCorner, n) {
-      var near = Infinity;
-      models.forEach(function (m) {
-        if (m.facility !== name) return;
-        var pts = m.path || [{ x: m.x, y: m.y }];
-        var hw = m.hw || m.r || 0;
-        var hh = m.hh || (m.r ? m.r * 0.5 : 0);
-        // 轴系零件（煤棚 / 筒仓群）的纵深本来就沿外法线摆，支撑长度就是 hh；
-        // 轴对齐零件要按两条轴在外法线上的投影合成。
-        var extent = m.axis ? hh : (hw * Math.abs(n.x) + hh * Math.abs(n.y));
-        pts.forEach(function (pt) {
-          var d = (pt.x - armCorner.x) * n.x + (pt.y - armCorner.y) * n.y - extent;
-          near = Math.min(near, d);
-        });
-      });
-      if (!isFinite(near)) return;
-      var shift = Math.round(ROAD_CLEARANCE - near);
-      models.forEach(function (m) {
-        if (m.facility !== name) return;
-        if (m.path) {
-          m.path = m.path.map(function (pt) {
-            return { x: pt.x + n.x * shift, y: pt.y + n.y * shift };
-          });
-        } else { m.x += n.x * shift; m.y += n.y * shift; }
-      });
-    }
-    // 两组站在沙地上、贴前缘公路外侧；位置都按当前台地算（公路走向就是台地前缘
-    // 那两条边），台地随项目变多长大时跟着挪。
-    var stockYard = roadsideAnchor(-1, 0.52, 0);
-    var tankYard = roadsideAnchor(1, 0.52, 0);
-
-    // 料场整组顺着公路排：u 轴取公路方向，v 轴取前缘那条边的外法线（v 越大越远离马路）。
-    // 老版把「纵深」当成世界 y 轴，而公路本身是斜的，摆出来整排与马路不平行，最高体量
-    // 反而被推到最靠路的一侧；现在组内一律用 (u, v) 表达，整排与马路平行。
-    var stockNormal = { x: -(plateau.hh + 8) / roadLen, y: (plateau.hw + 14) / roadLen };
-    var stockAlong = { x: stockNormal.y, y: -stockNormal.x };
-
-    // 料场按两条马路的方向摆：L 沿近侧公路，R 沿另一条路；两条轴围出平行四边形场院，
-    // 三排内容沿 R 方向由后往前排——后排筒仓、中排煤棚与煤堆、前排地磅与排队卡车。
-    // 这样围栏的两条翼栅和场内每一排都共用同两条马路方向，不会一边斜一边正。
-    utilityGroup("stockyard", stockYard.x, stockYard.y, function (x, y) {
-      function at(u, v) {
-        return { x: x + stockAlong.x * u + stockNormal.x * v,
-                 y: y + stockAlong.y * u + stockNormal.y * v };
-      }
-      // 围栏后缘中点作为场院坐标原点；L 沿近路，R 沿另一条路并向排前方向
-      var backC = at(0, 72);
-      var cross = { x: stockAlong.x, y: -stockAlong.y };
-      function site(l, d) {
-        return { x: backC.x + stockAlong.x * l + cross.x * d,
-                 y: backC.y + stockAlong.y * l + cross.y * d };
-      }
-      var W = 75, D = 95;
-      // 后排：筒仓群 + 提升机塔，仓列沿 L 排开
-      models.push(Object.assign({ kind: "siloBattery", axis: stockAlong,
-                    count: 3, r: 6.4, h: 30, gapX: 24, towerGap: 9, role: "steel",
-                    hw: 58, hh: 4 }, site(0, 12)));
-      // 中排：煤棚居中，两堆煤分列左右
-      models.push(Object.assign({ kind: "coalShed", axis: stockAlong,
-                    hw: 34, hh: 11, h: 20, rise: 7, role: "steel" }, site(0, 45)));
-      models.push(Object.assign({ kind: "coalPile", hw: 14, hh: 8, h: 10 }, site(-52, 45)));
-      models.push(Object.assign({ kind: "coalPile", hw: 11, hh: 6.5, h: 8 }, site(50, 45)));
-      // 运煤线：塔顶 → 煤棚脊
-      models.push({ kind: "conveyor", path: [site(46, 13), site(-14, 45)],
-                    h0: 40, h1: 20, width: 2.6, ore: true });
-      // 前排：地磅在中间，排队车朝公路一侧收口，磅房贴在地磅左前方
-      models.push(Object.assign({ kind: "weighbridge", hw: 18, hh: 8, h: 2.5 },
-                                site(-20, 60)));
-      models.push(Object.assign({ kind: "truck", z0: 3 }, site(-20, 60)));
-      models.push(Object.assign({ kind: "truck" }, site(-20, 78)));
-      models.push(Object.assign({ kind: "truck" }, site(-20, 90)));
-      var booth = site(-38, 80);
-      addBox(booth.x, booth.y, 5, 4, 7, "concrete", { roof: "flat", windows: 2, door: true });
-      models.push(Object.assign({ kind: "crate", s: 0.9 }, site(30, 82)));
-      models.push(Object.assign({ kind: "barrel", s: 0.9 }, site(45, 80)));
-      models.push(Object.assign({ kind: "reel", s: 0.9 }, site(-60, 70)));
-      // 灯杆：前缘两端 + 地磅入口 + 煤堆侧
-      models.push(Object.assign({ kind: "lamp", h: 26 }, site(-65, 88)));
-      models.push(Object.assign({ kind: "lamp", h: 22 }, site(65, 88)));
-      models.push(Object.assign({ kind: "lamp", h: 20 }, site(-45, 92)));
-      models.push(Object.assign({ kind: "lamp", h: 22 }, site(-65, 45)));
-      // 两盏冷白投光：一盏照筒仓群，一盏照煤棚右翼
-      models.push(Object.assign({ kind: "floodlight", hw: 6, hh: 3, h: 36 }, site(-65, 25)));
-      models.push(Object.assign({ kind: "floodlight", hw: 6, hh: 3, h: 34 }, site(67, 30)));
-      // 围栏：后缘沿 L，左右翼沿 R；前侧完全敞开，地磅入口正对公路
-      models.push({ kind: "fence", role: "steel", h: 4, width: 1.5, postGap: 6,
-                    path: [site(-W, D), site(-W, 0), site(W, 0), site(W, D)] });
-    }, { near: true, plateauAligned: true });
-    // 前场东侧罐区：北排是生产（气柜 + 循环水池 + 泵房/管廊），南排是装车（台 + 罐车），
-    // 棚子必须整块落在北排的前缘以南——它在 h=15 处张开，压到气柜 / 水池底上就看着粘在一起。
-    utilityGroup("tankFarm", tankYard.x, tankYard.y, function (x, y) {
-      models.push({ kind: "gasholder", x: x - 46, y: y - 10, r: 15, h: 30, role: "rust" });
-      models.push({ kind: "basin", x: x + 30, y: y - 14, hw: 30, hh: 15, h: 3 });
-      addBox(x + 62, y - 4, 9, 4.5, 8, "steel", { roof: "flat", windows: 2, vent: true });
-      models.push({ kind: "pipeRack", path: [{ x: x + 30, y: y - 4 }, { x: x + 56, y: y - 4 }],
-                    h0: 7, h1: 7, width: 2.5 });
-      models.push({ kind: "loadingRack", x: x - 8, y: y + 30, hw: 22, hh: 11, h: 15 });
-      models.push({ kind: "truck", x: x - 8, y: y + 38 });   // 停在棚下靠外的位置
-      models.push({ kind: "flare", x: x + 64, y: y + 12, hw: 7, hh: 3.5, h: 54 });
-      models.push({ kind: "barrel", x: x - 58, y: y + 14, s: 1 });
-      models.push({ kind: "lamp", x: x - 64, y: y + 36, h: 24 });
-      models.push({ kind: "lamp", x: x + 44, y: y + 36, h: 26 });
-    }, { near: true, plateauAligned: true });
-    // 贴路：两组各挪到「建筑最近那面墙离公路中线 14 单位」。
-    [["stockyard", stockYard, -1], ["tankFarm", tankYard, 1]].forEach(function (item) {
-      var side = item[2];
-      var n = { x: side * (plateau.hh + 8) / roadLen, y: (plateau.hw + 14) / roadLen };
-      alignYardToRoad(item[0], { x: side * (plateau.hw + 14), y: 0 }, n);
-    });
-    var tracks = [];
-    var perimeterRing = Math.max(1, Math.ceil((Math.sqrt(factories.length + 1) - 1) / 2));
-    function perimeterOffset(m) {
-      if (m.plateauAligned) return { x: 0, y: 0 };
-      if (m.facilityOrigin) {
-        return { x: m.facilityTarget.x * perimeterRing - m.facilityOrigin.x,
-                 y: m.facilityTarget.y * perimeterRing - m.facilityOrigin.y };
-      }
-      if (m.roadsideTank) {
-        // 罐体连同高度投影退到前缘道路外侧，不能只让底心离开路面。
-        var tankX = m.roadsideTank < 0 ? -300 : 320;
-        var tankY = m.roadsideTank < 0 ? 110 : 95;
-        return { x: tankX * perimeterRing - m.x, y: tankY * perimeterRing - m.y };
-      }
-      if (m.facilityAnchor) {
-        return { x: m.facilityAnchor.x * (perimeterRing - 1),
-                 y: m.facilityAnchor.y * (perimeterRing - 1) };
-      }
-      var p = m.path ? pointAt(m.path, 0.5) : m;
-      var dx, dy;
-      if (!m.bg) { dx = -225; dy = 80; }
-      else if (p.y < 0) {
-        dx = p.x < 0 ? 200 : -210;
-        dy = p.x < 0 ? 90 : 125;
-        if (p.y > -110) { dx = p.x < 0 ? 200 : -180; dy = p.x < 0 ? 115 : 140; }
-      } else { dx = p.x < 0 ? 170 : -170; dy = -60; }
-      if (m.kind === "pylon") {
-        if (p.x < 0) { dx = 170; dy = 50; }
-        else if (p.x < 450) { dx = -170; dy = 75; }
-        else { dx = -190; dy = 100; }
-      }
-      if (m.kind === "rock" && p.y < 0) { dx = 180; dy = 60; }
-      if (m.kind === "rock" && p.y > 0) { dx = -150; dy = 0; }
-      var x = p.x + dx, y = p.y + dy;
-      if (perimeterRing > 1) {
-        dx += x * (perimeterRing - 1);
-        dy += y * (perimeterRing - 1);
-      }
-      return { x: dx, y: dy };
-    }
-    for (var pi = perimeterStart; pi < models.length; pi += 1) {
-      var pm = models[pi], offset = perimeterOffset(pm);
-      pm.peripheral = true;
-      if (pm.path) {
-        pm.path = pm.path.map(function (pt) { return { x: pt.x + offset.x, y: pt.y + offset.y }; });
-      } else { pm.x += offset.x; pm.y += offset.y; }
-    }
-    for (var si = perimeterSmokeStart; si < smoke.length; si += 1) {
-      var sm = smoke[si], smokeOffset = perimeterOffset(sm);
-      sm.x += smokeOffset.x; sm.y += smokeOffset.y;
-    }
-
-    // 中央调度厅：石台 + 台阶 + 钢塔 + 检修环 + 玻璃冠 + 天线 + 四角灯柱
-    addBox(hall.x, hall.y, 37, 18.5, 6, "concrete", { paving: true, hallBase: true });
-    addBox(hall.x, hall.y, 30, 15, 2.5, "concrete", { z0: 6, step: true });
-    for (var st = 0; st < 3; st += 1) {
-      addBox(hall.x, hall.y + 20 + st * 2.1, 12 - st * 3, 1.1, 1 + st,
-             "concrete", { z0: 0, step: true });
-    }
-    addBox(hall.x, hall.y, 18, 9, 40, "steel",
-           { z0: 8.5, windows: 3, door: true, roof: "flat", tower: true });
-    addBox(hall.x, hall.y, 20, 10, 9, "glass",
-           { z0: 48.5, windows: 3, roof: "flat", crown: true });
-    addCyl(hall.x, hall.y, 1.6, 10, "steel", { z0: 57.5 });
-    models.push({ kind: "radar", x: hall.x, y: hall.y, z0: 67.5 });
-    models.push({ kind: "lamp", x: hall.x - 42, y: hall.y + 13, z0: 6, h: 24 });
-    models.push({ kind: "lamp", x: hall.x + 42, y: hall.y + 13, z0: 6, h: 24 });
-    models.push({ kind: "lamp", x: hall.x - 36, y: hall.y - 14, z0: 6, h: 20 });
-    models.push({ kind: "lamp", x: hall.x + 36, y: hall.y - 14, z0: 6, h: 20 });
-    models.push({ kind: "flag", x: hall.x - 14, y: hall.y + 19, z0: 6, h: 26 });
-    models.push({ kind: "flag", x: hall.x + 14, y: hall.y + 19, z0: 6, h: 26 });
-
-    return { models: models, patches: patches, smoke: smoke, sparks: sparks,
-             tracks: tracks, roads: roads };
-  }
-
-  function routeBelt(a, b, seed) {
-    var dx = b.x - a.x, dy = b.y - a.y;
-    var length = Math.hypot(dx, dy) || 1;
-    // 从调度厅外墙出发；直达对应入口，不绕去另一个厂区。
-    var start = Math.min(31, length * 0.25);
-    return [
-      { x: a.x + dx / length * start, y: a.y + dy / length * start },
-      { x: b.x, y: b.y },
-    ];
-  }
-
-  function transitSeconds(pts) {
-    var len = 0;
-    for (var i = 1; i < pts.length; i += 1) {
-      len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-    }
-    return clamp(len / 34, 3, 12);
-  }
-
-  function pathLength(pts) {
-    var len = 0;
-    for (var i = 1; i < pts.length; i += 1) {
-      len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-    }
-    return len;
-  }
-
-  function pointAt(pts, t) {
-    if (!pts || !pts.length) return { x: 0, y: 0 };
-    if (t <= 0) return pts[0];
-    if (t >= 1) return pts[pts.length - 1];
-    var total = pathLength(pts);
-    var want = total * t;
-    var acc = 0;
-    for (var i = 1; i < pts.length; i += 1) {
-      var seg = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-      if (acc + seg >= want) {
-        var k = seg ? (want - acc) / seg : 0;
-        return {
-          x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * k,
-          y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * k,
-        };
-      }
-      acc += seg;
-    }
-    return pts[pts.length - 1];
-  }
+  // ---------- 场景构建转发 ----------
+  // 世界布局实现在 app-factory-scene.js（经 window.FX 运行时查表）。
+  function buildWorld(st) { return FX.buildWorld(st); }
+  function pathLength(pts) { return FX.pathLength(pts); }
+  // 路径取样点：实现同样在 app-factory-scene.js（drawPackage 要用），
+  // 漏掉这一行会让工厂首屏在渲染包裹时抛 ReferenceError，再被数据加载的
+  // catch 误报成「读取工厂数据失败」。
+  function pointAt(pts, t) { return FX.pointAt(pts, t); }
 
   function focusProject(pid) {
     if (!S.world) return;
@@ -1474,28 +712,21 @@
     render();
   }
 
+  /** 顶部只更新「需留意」这一盏灯。
+      其余读数（在跑几件 / 今天做成几件 / 谁在返工）一律不在这里显示——
+      它们已经在场景里有形状：带上的包裹、垛高的成品、地上堆的返工箱。 */
   function renderCounters() {
     var st = activeState();
     var c = (st && st.counters) || {};
-    if (dom.hudRunning) dom.hudRunning.textContent = String(c.running || 0);
-    if (dom.hudQueued) dom.hudQueued.textContent = String(c.queued || 0);
-    if (dom.hudAttention) dom.hudAttention.textContent = String(c.attention || 0);
-    if (dom.hudDone) dom.hudDone.textContent = String(c.done_today || 0);
-    if (dom.hudTokens) dom.hudTokens.textContent = fmtTokens(c.tokens_today || 0);
-    if (dom.hudAttentionCell) dom.hudAttentionCell.classList.toggle("alert", (c.attention || 0) > 0);
-    // 对话 / 子代理在跑（工厂之外的盲区，只读快照）
-    var live = (st && st.live) || {};
-    var liveCount = (live.chat || 0) + (live.subagent || 0);
-    if (dom.hudChat) dom.hudChat.textContent = String(liveCount);
-    if (dom.hudChatCell) {
-      var stale = (live.runs || []).filter(liveStale).length;
-      dom.hudChatCell.classList.toggle("alert", stale > 0);
-      dom.hudChatCell.title = liveCount
-        ? ("在跑的对话轮 " + (live.chat || 0) + " 个、后台子代理 " + (live.subagent || 0) + " 个" +
-           (stale ? "（其中 " + stale + " 个长时间没有更新，可能卡住）" : "") + "；点击查看")
-        : "当前没有在跑的对话轮或子代理；点击查看说明";
+    var n = Number(c.attention) || 0;
+    if (dom.attnNum) dom.attnNum.textContent = String(n);
+    if (dom.attentionLamp) {
+      dom.attentionLamp.classList.toggle("hidden", n <= 0);
+      dom.attentionLamp.title = n > 0
+        ? (n + " 条产线需要看一眼（上次失败 / 有工具被拦 / 停工）；点击逐条列出")
+        : "当前没有需要留意的产线";
     }
-    // 样板厂：计数条整体灰掉并挂「演示」，避免把演示数字当成真的
+    // 样板厂：整条顶栏挂「演示」，避免把演示当成真的
     if (dom.hud) dom.hud.classList.toggle("demo", !!S.demo);
     if (dom.demoBadge) dom.demoBadge.classList.toggle("hidden", !S.demo);
   }
@@ -1637,6 +868,26 @@
     S.world.factories.forEach(function (f) { f.alert = factoryAlert(f); });
   }
 
+/** 厂区的「心情」：working / trouble / stopped / idle。
+
+      这是场景层的总开关：大门抬不抬、工头在不在场院上走、烟多不多、窗光亮几格，
+      全都读这一个值。以前这些表现各写各的判定（有的看 line.status、有的看 alert），
+      于是会出现「门抬着、工头不动、烟也不冒」的拼接感。现在只在这里判一次。
+
+      trouble 的门槛是红级（上次失败 / 被判不算），黄级（被拦 / 空产出）仍算 working：
+      它还在开工，只是这轮不干净——黄级交给机台灯柱与返工堆表达，不该让整座厂区停摆。 */
+  function refreshFactoryMood() {
+    if (!S.world) return;
+    S.world.factories.forEach(function (f) {
+      var st = statFor(f.id);
+      if (f.root_ok === false) f.mood = "stopped";
+      else if (f.alert && f.alert.level >= 2) f.mood = "trouble";
+      else if (st.busy > 0) f.mood = "working";
+      else if (f.alert && f.alert.level === 1) f.mood = "working";
+      else f.mood = "idle";
+    });
+  }
+
   /** 等距菱形轮廓点列：一个环而非填满，用于脉冲光晕 / 停工边界。 */
   function ringPts(cx, cy, hw, hh) {
     return [{ x: cx - hw, y: cy }, { x: cx, y: cy - hh }, { x: cx + hw, y: cy },
@@ -1673,21 +924,6 @@
       else if (!q && mode === "all" && !allLines.length) out.push({ project: p, lines: [] });
     });
     return out;
-  }
-
-  /** 批量派工目标：启用的定时产线，且当前不在跑 / 未停工（装配线不参与）。 */
-  function batchRunTargets(lines) {
-    return (lines || []).filter(function (l) {
-      return l.kind === "cron" && l.status !== "running"
-        && l.status !== "paused" && l.status !== "stopped";
-    });
-  }
-
-  /** 批量暂停目标：还在启用中的定时产线（已暂停 / 停工的跳过）。 */
-  function batchPauseTargets(lines) {
-    return (lines || []).filter(function (l) {
-      return l.kind === "cron" && l.status !== "paused" && l.status !== "stopped";
-    });
   }
 
   function filterActive() {
@@ -1761,96 +997,22 @@
     items[next].focus();
   }
 
-  function findProjectGroup(pid) {
-    var st = activeState();
-    var projects = (st && st.projects) || [];
-    for (var i = 0; i < projects.length; i += 1) {
-      if (Number(projects[i].id) === Number(pid)) return projects[i];
-    }
-    return null;
-  }
-
-  /** 厂区级批量派工：确认后逐条串行派（单次上限 BATCH_RUN_LIMIT 条）。 */
-  function batchRunLines(pid, btn) {
-    if (S.demo) { addNotice("样板厂不会真的运行；先新建一条真实产线"); return; }
-    var project = findProjectGroup(pid);
-    if (!project) return;
-    var all = batchRunTargets(project.lines);
-    if (!all.length) { addNotice("这座厂区没有待命的产线"); return; }
-    var targets = all.slice(0, BATCH_RUN_LIMIT);
-    var extra = all.length - targets.length;
-    confirmModal(
-      "会给「" + (project.name || "这座厂区") + "」的 " + targets.length + " 条产线各派一次工。"
-        + (extra > 0 ? "另有 " + extra + " 条超出单次上限 " + BATCH_RUN_LIMIT + " 条，本次不派。" : "")
-        + "每条都会真的跑一轮，按各自项目的白名单与权限门执行。",
-      { title: "批量派工", okLabel: "派工" },
-    ).then(function (ok) {
-      if (!ok) return;
-      if (btn) btn.disabled = true;
-      var done = 0;
-      var problems = [];
-      var chain = Promise.resolve();
-      targets.forEach(function (l) {
-        chain = chain.then(function () {
-          return request("factory.run_now", { task_id: l.id }).then(function (r) {
-            if (r && r.started) done += 1;
-            else problems.push((l.name || l.key) + "：" + ((r && r.notice) || "未派"));
-          }).catch(function (e) {
-            problems.push((l.name || l.key) + "：" + (e.message || "失败"));
-          });
-        });
-      });
-      chain.then(function () {
-        var tail = problems.length
-          ? "；" + problems.length + " 条未派（" + problems.slice(0, 2).join("；") + "）" : "";
-        addNotice("批量派工：" + done + " 条已派" + tail);
-      }).finally(function () {
-        if (btn) btn.disabled = false;
-      });
-    });
-  }
-
-  /** 厂区级批量暂停：确认后逐条串行停用（只动定时产线，装配线不碰）。 */
-  function batchPauseLines(pid, btn) {
-    if (S.demo) { addNotice("样板厂不会真的运行；先新建一条真实产线"); return; }
-    var project = findProjectGroup(pid);
-    if (!project) return;
-    var targets = batchPauseTargets(project.lines);
-    if (!targets.length) { addNotice("这座厂区没有启用中的产线"); return; }
-    confirmModal(
-      "会暂停「" + (project.name || "这座厂区") + "」的 " + targets.length + " 条产线："
-        + "之后不再到点派工（仍可手动跑一次）。之后可在自动化页逐条恢复。",
-      { title: "批量暂停", okLabel: "全部暂停", danger: true },
-    ).then(function (ok) {
-      if (!ok) return;
-      if (btn) btn.disabled = true;
-      var done = 0;
-      var failed = 0;
-      var chain = Promise.resolve();
-      targets.forEach(function (l) {
-        chain = chain.then(function () {
-          return request("factory.toggle", { task_id: l.id, enabled: false })
-            .then(function () { done += 1; })
-            .catch(function () { failed += 1; });
-        });
-      });
-      chain.then(function () {
-        addNotice("批量暂停：" + done + " 条已停" + (failed ? "，" + failed + " 条失败" : ""));
-        factoryReload();
-      }).finally(function () {
-        if (btn) btn.disabled = false;
-      });
-    });
-  }
 
   function renderPanel() {
     if (!dom.panelBody) return;
+    // 全量重建会重置滚动条：重建前记住位置、写回后恢复，
+    // 否则运行事件密集时监控面板会反复跳回顶部。
+    var keepScroll = dom.panelBody.scrollTop;
+    function setHtml(html) {
+      dom.panelBody.innerHTML = html;
+      dom.panelBody.scrollTop = keepScroll;
+    }
     var st = activeState();
     if (!st) { showPanelMessage("正在读取工厂数据…"); return; }
     var projects = st.projects || [];
     if (!projects.length) {
-      dom.panelBody.innerHTML = '<div class="fx-empty">还没有项目。先在侧栏添加一个项目，' +
-        '工厂就会为它建一座厂区。</div>';
+      setHtml('<div class="fx-empty">还没有项目。先在侧栏添加一个项目，' +
+        '工厂就会为它建一座厂区。</div>');
       return;
     }
     var attentionKeys = new Set();
@@ -1859,8 +1021,8 @@
     });
     var groups = filterProjects(projects, attentionKeys, S.filter);
     if (!groups.length) {
-      dom.panelBody.innerHTML = '<div class="fx-empty">没有符合条件的产线。' +
-        '<button class="fx-add-line" data-clear-filter="1">清除筛选</button></div>';
+      setHtml('<div class="fx-empty">没有符合条件的产线。' +
+        '<button class="fx-add-line" data-clear-filter="1">清除筛选</button></div>');
       return;
     }
     var html = "";
@@ -1869,10 +1031,9 @@
       var lines = g.lines;
       var allLines = p.lines || [];
       var busy = allLines.filter(function (l) { return l.status === "running"; }).length;
-      // 批量按钮：样板厂一律禁用（不能对演示数据派工），没有目标也禁用
-      var runCount = batchRunTargets(lines).length;
-      var pauseCount = batchPauseTargets(lines).length;
-      var demoOff = !!S.demo;
+      // 这里只留「这座厂区是谁、几条线、现在在忙什么」。
+      // 批量派工 / 批量暂停 / 新建产线都退回了自动化页——那些是配置与调度，
+      // 不是看场景时该出现在眼前的东西。派工仍可：点机台或点产线行，抽屉里一次一条。
       html += '<div class="fx-proj">';
       html += '<div class="fx-proj-head">' +
         '<button class="fx-proj-title" data-focus-project="' + escapeHtml(String(p.id)) +
@@ -1880,41 +1041,27 @@
         "<span>" + escapeHtml(p.name || "未命名项目") + "</span>" +
         '<span class="fx-badge' + (p.root_ok === false ? " warn" : "") + '">' +
         (p.root_ok === false ? "停工" : allLines.length + " 线" + (busy ? " · " + busy + " 在忙" : "")) +
-        "</span></button>" +
-        '<span class="fx-proj-ops">' +
-        '<button data-batch-run="' + escapeHtml(String(p.id)) + '"' +
-        (demoOff || !runCount ? " disabled" : "") + " title=\"" +
-        (demoOff ? "样板厂：不会真的运行"
-          : "把这座厂区里 " + runCount + " 条待命产线各跑一次（单次最多 " + BATCH_RUN_LIMIT + " 条）") +
-        '">▶</button>' +
-        '<button data-batch-pause="' + escapeHtml(String(p.id)) + '"' +
-        (demoOff || !pauseCount ? " disabled" : "") + " title=\"" +
-        (demoOff ? "样板厂：不会真的运行"
-          : "暂停这座厂区的 " + pauseCount + " 条启用产线") +
-        '">⏸</button>' +
-        "</span></div>";
+        "</span></button></div>";
       if (!lines.length) {
-        html += '<div class="fx-empty">这个厂区还没有产线。' +
-          '<button class="fx-add-line" data-add-project="' + escapeHtml(String(p.id)) + '">＋ 新建一条定时产线</button>' +
-          "</div>";
+        html += '<div class="fx-empty">这个厂区还没有产线。在左侧「自动化」里给它建一条。</div>';
       } else {
         lines.forEach(function (l) {
-          var next = l.next_run_at ? " · 下次 " + fmtTs(l.next_run_at).slice(-5) : "";
-          var sub = (l.trigger_text || "") + next;
-          // 在跑的产线优先显示「在跑什么」（工序进度），其次才是排期
+          // 面板只说「在跑什么」：下次几点、成功率、token 都进抽屉，别在目录里堆数字
+          var sub = "";
           if (l.status === "running") {
             var step = runningStepText(l);
-            if (step) sub = "在跑 " + step;
+            sub = step ? "在跑 " + step : "在跑";
+          } else if (l.health && l.health.streak >= 2) {
+            sub = "连错 " + l.health.streak;
           }
-          if (l.health && l.health.streak >= 2) sub += " · 连错 " + l.health.streak;
           var stateText = lineStateText(l);
             html += '<button class="fx-line ' + lineDotClass(l) +
               (S.selectedKey === l.key ? " active" : "") +
-              '" data-line-key="' + escapeHtml(l.key) + '" title="点开看最近运行与派工">' +
+              '" data-line-key="' + escapeHtml(l.key) + '" title="点开看这轮在做什么，并可立即运行">' +
             '<span class="fx-dot ' + lineDotClass(l) + '"></span>' +
             '<span class="fx-line-main">' +
             '<span class="fx-line-name">' + escapeHtml(l.name || l.key) + "</span>" +
-            '<span class="fx-line-sub">' + escapeHtml(sub) + "</span>" +
+            (sub ? '<span class="fx-line-sub">' + escapeHtml(sub) + "</span>" : "") +
             "</span>" +
             '<span class="fx-line-state ' + lineStateClass(l) + '">' + escapeHtml(stateText) + "</span>" +
             "</button>";
@@ -1927,7 +1074,9 @@
       html += '<div class="fx-empty fx-filter-note">筛选中：' + shown + " 条产线。" +
         '<button class="fx-add-line" data-clear-filter="1">清除筛选</button></div>';
     }
-    dom.panelBody.innerHTML = html;
+    setHtml(html);
+    // 厂区少的时候筛选条不出场：它解决的是「多到看不过来」，不是默认态
+    if (dom.chips) dom.chips.classList.toggle("sparse", projects.length < SPARSE_PROJECTS);
   }
 
   function refreshPanelStates() {
@@ -1941,7 +1090,8 @@
       renderPanel();
       var rows = dom.panelBody.querySelectorAll("[data-line-key]");
       for (var i = 0; i < rows.length; i += 1) {
-        if (rows[i].dataset.lineKey === key) { rows[i].focus(); break; }
+        // preventScroll：滚动位置已由 renderPanel 保持，焦点恢复不再把它拽走
+        if (rows[i].dataset.lineKey === key) { rows[i].focus({ preventScroll: true }); break; }
       }
       return;
     }
@@ -1952,10 +1102,10 @@
     var st = activeState();
     if (!st) return;
     if (S.demo) {
+      // 建线入口不在工厂里：这里只说「去哪儿建」，不给表单
       showNotice("<b>样板厂</b>：本机还没有真实产线，下面是演示数据——只在内存，不会真的运行。" +
-        (hasRealLines(S.state) ? "" : "") +
-        '<div class="fx-notice-ops"><button class="btn-ghost" data-notice-new="1">＋ 新建一条真实产线</button>' +
-        '<button class="btn-ghost" data-notice-dismiss="1">知道了</button></div>', false);
+        "在左侧「自动化」里给项目建一条定时产线，这座园区就开始动起来。" +
+        '<div class="fx-notice-ops"><button class="btn-ghost" data-notice-dismiss="1">知道了</button></div>', false);
       bindNoticeOps();
       return;
     }
@@ -1983,8 +1133,6 @@
     if (!dom.notice) return;
     var retry = dom.notice.querySelector("[data-notice-retry]");
     if (retry) retry.onclick = function () { hideNotice(); factoryReload(); };
-    var add = dom.notice.querySelector("[data-notice-new]");
-    if (add) add.onclick = function () { openNewLineDrawer(0); };
     var dismiss = dom.notice.querySelector("[data-notice-dismiss]");
     if (dismiss) dismiss.onclick = function () { hideNotice(); };
     var enable = dom.notice.querySelector("[data-notice-enable]");
@@ -1995,17 +1143,40 @@
   function fitCamera(animate) {
     S.focusPid = null;   // 全景 = 退出聚焦档（Esc / 重开视图都回到这里）
     var w = S.bufW, h = S.bufH;
-    var b = (S.world && S.world.bounds) || { minX: -80, maxX: 80, minY: -50, maxY: 50 };
+    // 有 focus 就用 focus：只框调度厅 + 厂区坪，不把台地前缘与远景设施算进来。
+    // 场景不支持缩放，默认取景就是唯一画幅——框得越准，机台越大。
+    var b = (S.world && (S.world.focus || S.world.bounds))
+      || { minX: -80, maxX: 80, minY: -50, maxY: 50 };
     var pad = 32;
     var z = Math.min((w - pad * 2) / Math.max(1, b.maxX - b.minX),
                      (h - pad * 2) / Math.max(1, b.maxY - b.minY));
     z = Math.max(0.01, Math.min(z, 1.45));
-    S.fitZoom = z;
     var cx = (b.minX + b.maxX) / 2;
-    // 天空占上方约 22%，园区中心落在剩余陆地中间；保留底部安全边距。
+    // 垂直取景尽量把「台地前缘前景」（油罐 / 公路 / 前沿设施）一起收进画幅：
+    // 大窗口下全景缩放顶到 1.45 上限后，厂区坪只占画幅六七成，若仍只按坪
+    // 居中，余量全堆在顶部成大片空天，前缘景物被底边拦腰裁断。前缘装不下
+    // 时允许 zoom 最多回缩一成换完整前缘（天空仍拿 11%、底部留 16px）；
+    // 再装不下（窗口小，机台优先）维持只框厂区坪，前缘沿底边自然出画。
+    var frontMaxY = (S.world && S.world.bounds)
+      ? Math.max(b.maxY, S.world.bounds.maxY) : b.maxY;
+    var frontDepth = frontMaxY - b.maxY;
+    if (frontDepth > 0) {
+      var span = b.maxY - b.minY + frontDepth;
+      var sky = h * 0.11;
+      if (span * z + sky + 16 > h) {
+        var zAlt = (h - sky - 16) / span;
+        if (zAlt >= z * 0.9) z = zAlt;   // 机台缩小一成以内，换前缘完整入画
+      }
+    }
+    S.fitZoom = z;
+    var frameMaxY = (frontDepth > 0 &&
+                     (b.maxY - b.minY + frontDepth) * z + h * 0.11 + 16 <= h)
+      ? frontMaxY : b.maxY;
+    // 天空占上方约 11% 封顶，余量上下均分且底部保 16px 安全边；机台名等
+    // 「比全景更近才出现」的阈值仍按 fitZoom（取景框变化不改变全景语义）。
     var landOffset = Math.max(0, Math.min(h * 0.11,
-      (h - (b.maxY - b.minY) * z) / 2 - 16));
-    var cy = (b.minY + b.maxY) / 2 - landOffset / z;
+      (h - (frameMaxY - b.minY) * z) / 2 - 16));
+    var cy = (b.minY + frameMaxY) / 2 - landOffset / z;
     if (animate) {
       S.cam.tx = cx; S.cam.ty = cy; S.cam.tz = z;
     } else {
@@ -2066,3191 +1237,77 @@
     else fitCamera(false);
   }
 
-  // ---------- 绘制基础 ----------
-  function fillDiamond(ctx, cx, cy, hw, hh, color) {
-    cx = Math.round(cx); cy = Math.round(cy);
-    hw = Math.max(1, Math.round(hw)); hh = Math.max(1, Math.round(hh));
-    ctx.fillStyle = color;
-    for (var dy = -hh; dy < hh; dy += 1) {
-      var t = 1 - Math.abs(dy + 0.5) / hh;
-      var w = Math.max(1, Math.round(hw * t));
-      ctx.fillRect(cx - w, cy + dy, w * 2, 1);
-    }
-  }
-
-  function fillCircle(ctx, cx, cy, r, color) {
-    cx = Math.round(cx); cy = Math.round(cy);
-    r = Math.max(1, Math.round(r));
-    ctx.fillStyle = color;
-    for (var dy = -r; dy <= r; dy += 1) {
-      var w = Math.round(Math.sqrt(Math.max(0, r * r - dy * dy)));
-      ctx.fillRect(cx - w, cy + dy, Math.max(1, w * 2), 1);
-    }
-  }
-
-  // 像素椭圆：逐行扫，边缘保持硬像素
-  function fillOval(ctx, cx, cy, rx, ry, color) {
-    cx = Math.round(cx); cy = Math.round(cy);
-    rx = Math.max(1, Math.round(rx)); ry = Math.max(1, Math.round(ry));
-    ctx.fillStyle = color;
-    for (var dy = -ry; dy <= ry; dy += 1) {
-      var t = 1 - (dy * dy) / (ry * ry);
-      if (t <= 0) continue;
-      var w = Math.max(1, Math.round(rx * Math.sqrt(t)));
-      ctx.fillRect(cx - w, cy + dy, w * 2, 1);
-    }
-  }
-
-  // 像素多边形（屋顶、树冠三角）
-  function fillPoly(ctx, pts, color) {
-    if (!pts || pts.length < 3) return;
-    ctx.fillStyle = color;
-    var minY = Infinity, maxY = -Infinity;
-    for (var i = 0; i < pts.length; i += 1) {
-      minY = Math.min(minY, pts[i].y);
-      maxY = Math.max(maxY, pts[i].y);
-    }
-    for (var y = Math.floor(minY); y <= Math.ceil(maxY); y += 1) {
-      var xs = [];
-      for (var j = 0; j < pts.length; j += 1) {
-        var a = pts[j], b = pts[(j + 1) % pts.length];
-        if ((y >= a.y && y < b.y) || (y >= b.y && y < a.y)) {
-          xs.push(a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y));
-        }
-      }
-      xs.sort(function (p, q) { return p - q; });
-      for (var k = 0; k + 1 < xs.length; k += 2) {
-        var x0 = Math.round(xs[k]), x1 = Math.round(xs[k + 1]);
-        ctx.fillRect(x0, y, Math.max(1, x1 - x0), 1);
-      }
-    }
-  }
-
-  function seeded(seed) {
-    // 装饰布局用确定性伪随机（非安全用途）：每次刷新同一座工厂长得一样
-    var s = seed >>> 0;
-    return function () {
-      s = (s * 1664525 + 1013904223) >>> 0;
-      return s / 4294967296;
-    };
-  }
-
-  function distToSeg(px, py, ax, ay, bx, by) {
-    var dx = bx - ax, dy = by - ay;
-    var len2 = dx * dx + dy * dy;
-    if (!len2) return Math.hypot(px - ax, py - ay);
-    var t = clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
-    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-  }
-
-  function linePath(ctx, pts, width, color) {
-    if (!pts || pts.length < 2) return;
-    ctx.fillStyle = color;
-    var w = Math.max(1, Math.round(width));
-    for (var i = 1; i < pts.length; i += 1) {
-      var a = pts[i - 1], b = pts[i];
-      var steps = Math.max(1, Math.round(Math.hypot(b.x - a.x, b.y - a.y)));
-      for (var s = 0; s <= steps; s += 1) {
-        var k = s / steps;
-        ctx.fillRect(Math.round(a.x + (b.x - a.x) * k) - (w >> 1),
-                     Math.round(a.y + (b.y - a.y) * k) - (w >> 1), w, w);
-      }
-    }
-  }
-
-  // 世界坐标 → 视口（内部缓冲）坐标；全部取整，避免半像素抖动
-  function viewPoint(x, y) {
-    var z = S.cam.zoom;
-    return {
-      x: Math.round((x - S.cam.x) * z + S.bufW / 2),
-      y: Math.round((y - S.cam.y) * z + S.bufH / 2),
-    };
-  }
-  function vlen(v) { return Math.max(1, Math.round(v * S.cam.zoom)); }
-
-  // ---------- 渲染 ----------
-  function render() {
-    if (!S.mounted || !dom.canvas) return;
-    // 窄屏（≤860px）画布被 CSS 隐藏：不白画，面板与抽屉仍是完整信息源
-    if (S.cssW <= 1 || S.cssH <= 1) return;
-    var cv = dom.canvas;
-    var ctx = cv.getContext("2d");
-    if (!ctx) return;
-    var pal = palette();
-    var W = S.bufW, H = S.bufH;
-    var z = S.cam.zoom;
-
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.imageSmoothingEnabled = false;
-    S.night = pal === PAL_NIGHT;
-
-    drawSkyGround(ctx, pal);
-    drawTerrain(ctx, pal);
-    drawGroundPatches(ctx, pal);
-
-    S.hits = [];
-    if (S.world) {
-      refreshFactoryAlerts();
-      drawShadows(ctx, pal);
-      refreshUpcoming();
-      drawAlertGround(ctx, pal);
-      drawLightPools(ctx, pal);
-      drawBerths(ctx, pal);
-      drawModels(ctx, pal);
-      drawUpcoming(ctx, pal);
-      drawPackages(ctx, pal);
-      drawEffects(ctx, pal);
-      drawLighting(ctx, pal);
-      drawWeather(ctx, pal);
-      drawAlertBeacon(ctx, pal);
-    }
-    updateLabels();
-  }
-
-  // ---------- 工业场景：三维模型渲染 ----------
-  // 所有建筑/筒仓/传送带都是三维体：给出底面中心、半宽、半深、高度，按「顶面 + 左面 + 右面」
-  // 三块面着色；渲染时按屏幕底线排序（画家算法），再叠投影、烟雾、粉尘与火花。
-  function roleCols(pal, role, bg) {
-    if (bg) {
-      if (role === "rust") return { top: pal.bgRustLight, left: pal.bgRust, right: pal.bgRustDark };
-      if (role === "glass") return { top: pal.bgSteelLight, left: pal.bgSteel, right: pal.bgSteelDark };
-      if (role === "sand") return { top: pal.bgHaze, left: pal.bgHaze, right: pal.bgHaze };
-      return { top: pal.bgSteelLight, left: pal.bgSteel, right: pal.bgSteelDark };
-    }
-    if (role === "rust") return { top: pal.rustLight, left: pal.rust, right: pal.rustDark };
-    if (role === "glass") return { top: pal.glassLight, left: pal.glass, right: pal.glassDark };
-    if (role === "concrete") return { top: pal.concreteLight, left: pal.concrete, right: pal.concreteDark };
-    if (role === "sand") return { top: pal.groundLight, left: pal.ground, right: pal.groundDark };
-    return { top: pal.steelLight, left: pal.steel, right: pal.steelDark };
-  }
-
-  function sceneHorizon() {
-    var nominal = Math.max(22, Math.round(S.bufH * 0.22));
-    if (!S.world) return nominal;
-    var nearestRoof = S.bufH;
-    S.world.models.forEach(function (m) {
-      if (!m.peripheral || (!m.h && !m.h0 && !m.h1) || m.paving) return;
-      var height = (m.z0 || 0) + (m.h || Math.max(m.h0 || 0, m.h1 || 0));
-      var depth = m.hh || (m.r ? m.r * 0.5 : 5);
-      (m.path || [m]).forEach(function (p) {
-        nearestRoof = Math.min(nearestRoof, viewPoint(p.x, p.y - height - depth).y);
-      });
-    });
-    return Math.max(22, Math.min(nominal, nearestRoof - 14));
-  }
-
-  function drawSkyGround(ctx, pal) {
-    var W = S.bufW, H = S.bufH;
-    var skyH = sceneHorizon();
-    var kind = weatherKind();
-    var heavy = kind === "cloudy" || kind === "rain" || kind === "drizzle"
-      || kind === "snow" || kind === "thunder" || kind === "fog";
-    var sky = ctx.createLinearGradient(0, 0, 0, skyH + 26);
-    sky.addColorStop(0, pal.skyTop);
-    sky.addColorStop(0.62, pal.skyMid);
-    sky.addColorStop(1, pal.skyLow);
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, W, skyH + 26);
-    // 太阳/月亮放在左上：与墙面受光（左面中、右面暗）和右下投影同一方向
-    var sunX = Math.round(W * 0.24);
-    var sunY = Math.round(skyH * 0.30);
-    var glow = ctx.createRadialGradient(sunX, sunY, 2, sunX, sunY, Math.round(W * 0.36));
-    glow.addColorStop(0, pal.sun);
-    glow.addColorStop(1, "rgba(255, 210, 130, 0)");
-    ctx.globalAlpha = (S.night ? 0.14 : 0.38) * (heavy ? 0.25 : 1);
-    ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, W, skyH + 26);
-    var sunBreath = S.reduced ? 0 : Math.sin(S.ticks * 0.025) * 0.025;
-    ctx.globalAlpha = ((S.night ? 0.5 : 0.42) + sunBreath) * (heavy ? 0.35 : 1);
-    var orbR = Math.max(2, Math.round(W * 0.010));
-    fillOval(ctx, sunX, sunY, orbR, orbR, pal.sun);
-    ctx.globalAlpha = 1;
-    // 夜空星点：阴雨 / 雾天被云层挡住
-    if (S.night && !heavy) {
-      ctx.fillStyle = pal.glassLight;
-      for (var st = 0; st < 30; st += 1) {
-        var stx = (st * 97 + 31) % W;
-        var sty = (st * 53 + 17) % Math.max(4, skyH - 4);
-        ctx.globalAlpha = 0.22 + (st % 4) * 0.12;
-        ctx.fillRect(stx, sty, 1, 1);
-      }
-      ctx.globalAlpha = 1;
-    }
-    drawSkyline(ctx, pal, skyH, W);
-    if (!S.night && !heavy) {
-      // 晴天 / 多云的薄云：低速漂移，给固定视角的天空一点远景呼吸感。
-      ctx.globalAlpha = 0.15;
-      var cloudDrift = S.reduced ? 0 : (S.ticks % 4800) * 0.025;
-      for (var cl = 0; cl < 5; cl += 1) {
-        var cw = Math.round(W * (0.05 + (cl % 2) * 0.03));
-        var cx2 = ((cl * 211 + 70 + cloudDrift) % (W + cw * 2)) - cw;
-        var cy2 = Math.round(skyH * (0.16 + (cl % 3) * 0.13));
-        fillOval(ctx, cx2, cy2, cw, Math.max(2, Math.round(skyH * 0.05)), pal.sun);
-        fillOval(ctx, cx2 + cw * 0.55, cy2 + 1, cw * 0.6, Math.max(2, Math.round(skyH * 0.038)), pal.sun);
-      }
-      ctx.globalAlpha = 1;
-    }
-    if (heavy) {
-      // 阴雨 / 雾天：低垂的灰云压住天空，颜色用钢灰而不是暖沙
-      ctx.globalAlpha = S.night ? 0.30 : 0.24;
-      ctx.fillStyle = S.night ? pal.steelDark : pal.concreteLight;
-      var clouds = kind === "fog" ? 5 : 8;
-      for (var hc = 0; hc < clouds; hc += 1) {
-        var hx = (hc * 179 + 40) % W;
-        var hy = Math.round(skyH * (0.10 + (hc % 4) * 0.085));
-        var hw = Math.round(W * (0.07 + (hc % 3) * 0.035));
-        fillOval(ctx, hx, hy, hw, Math.max(3, Math.round(skyH * 0.085)), ctx.fillStyle);
-        fillOval(ctx, hx + hw * 0.5, hy - 2, hw * 0.62,
-                 Math.max(2, Math.round(skyH * 0.06)), ctx.fillStyle);
-      }
-      ctx.globalAlpha = 1;
-    }
-    // 沙地
-    var ground = ctx.createLinearGradient(0, skyH, 0, H);
-    ground.addColorStop(0, pal.groundLight);
-    ground.addColorStop(0.24, pal.ground);
-    ground.addColorStop(1, pal.groundDark);
-    ctx.fillStyle = ground;
-    ctx.fillRect(0, skyH, W, H - skyH);
-    // 远景沙丘：屏幕空间、只压在地平线以下，给远处的仓库与储罐一个地平面
-    for (var dune = 0; dune < 9; dune += 1) {
-      var dx2 = (dune * 137 + 53) % W;
-      var dy2 = skyH + 16 + ((dune * 71) % Math.max(8, Math.round(H * 0.14)));
-      var dw2 = Math.round(W * (0.05 + (dune % 4) * 0.012));
-      ctx.globalAlpha = 0.10 + (dune % 3) * 0.03;
-      fillOval(ctx, dx2, dy2, dw2, Math.max(2, Math.round(H * 0.012)), pal.groundDark);
-    }
-    ctx.globalAlpha = 1;
-    // 地平线雾带
-    var haze = ctx.createLinearGradient(0, skyH - 4, 0, skyH + 28);
-    haze.addColorStop(0, pal.bgHaze);
-    haze.addColorStop(1, "rgba(0,0,0,0)");
-    var hazeAlpha = kind === "fog"
-      ? (S.night ? 0.34 : 0.42)
-      : (S.night ? 0.16 : 0.22) * (heavy ? 1.3 : 1);
-    ctx.globalAlpha = hazeAlpha;
-    ctx.fillStyle = haze;
-    ctx.fillRect(0, skyH - 4, W, 32);
-    ctx.globalAlpha = 1;
-    // 远处沙丘剪影
-    ctx.globalAlpha = S.night ? 0.30 : 0.22;
-    for (var i = 0; i < 7; i += 1) {
-      var mx = Math.round((i + 0.5) * W / 7);
-      var mw = Math.round(W / 12 + (i % 3) * 6);
-      var mh = Math.round(5 + (i % 4) * 4);
-      fillPoly(ctx, [
-        { x: mx - mw, y: skyH + 2 },
-        { x: mx, y: skyH - mh },
-        { x: mx + mw, y: skyH + 2 },
-      ], pal.groundDark);
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function drawTerrain(ctx, pal) {
-    var z = S.cam.zoom;
-    var pl = (S.world && S.world.plateau) || { cx: 0, cy: 0, hw: 260, hh: 125 };
-    var c = viewPoint(pl.cx, pl.cy);
-    var hw = Math.max(120, Math.round(pl.hw * z));
-    var hh = Math.max(60, Math.round(pl.hh * z));
-    fillDiamond(ctx, c.x, c.y, hw, hh, pal.ground);
-    // 园区边界与外围道路处于同一地面，不画侧壁或下沉投影。
-    var rim = [
-      { x: c.x - hw, y: c.y }, { x: c.x, y: c.y - hh },
-      { x: c.x + hw, y: c.y }, { x: c.x, y: c.y + hh },
-      { x: c.x - hw, y: c.y },
-    ];
-    linePath(ctx, rim, 1, pal.stoneLight);
-    // 干道贴着台地前缘两条边，两端再各自顺走向延长出去——出图的方向感
-    var armL = { x: pl.cx - pl.hw - 14, y: pl.cy };
-    var armR = { x: pl.cx + pl.hw + 14, y: pl.cy };
-    var face = { x: pl.cx, y: pl.cy + pl.hh + 8 };
-    function extendRoad(from, toward, len) {
-      var dx = toward.x - from.x, dy = toward.y - from.y;
-      var l = Math.hypot(dx, dy) || 1;
-      return { x: from.x - dx / l * len, y: from.y - dy / l * len };
-    }
-    var road = [extendRoad(armL, face, 150), armL, face, armR, extendRoad(armR, face, 150)]
-      .map(function (p) { return viewPoint(p.x, p.y); });
-    linePath(ctx, road, vlen(10), pal.road);
-    linePath(ctx, road, 1, pal.roadLight);
-  }
-
-  function drawGroundPatches(ctx, pal) {
-    var site = S.world && S.world.site;
-    if (!site) return;
-    var z = S.cam.zoom;
-    var pl = (S.world && S.world.plateau) || { cx: 0, cy: 0, hw: 260, hh: 125 };
-    // 沙地风纹：几道很淡的横向长弧，压住大面积平涂
-    var wr = seeded(0x6C0FFEE);
-    ctx.globalAlpha = 0.06;
-    for (var w = 0; w < 7; w += 1) {
-      var wx = pl.cx + (wr() * 2 - 1) * pl.hw * 0.66;
-      var wy = pl.cy + (wr() * 2 - 1) * pl.hh * 0.62;
-      fillOval(ctx, viewPoint(wx, wy).x, viewPoint(wx, wy).y,
-               Math.max(6, Math.round(pl.hw * (0.10 + wr() * 0.16) * z)),
-               Math.max(1, Math.round(2 * z)), pal.groundHi);
-    }
-    ctx.globalAlpha = 0.16;
-    site.patches.forEach(function (b) {
-      var p = viewPoint(b.x, b.y);
-      fillOval(ctx, p.x, p.y, Math.max(2, Math.round(b.rx * z)),
-               Math.max(1, Math.round(b.ry * z)),
-               b.light ? pal.groundHi : pal.groundDark);
-    });
-    // 砾石点：撒在台面范围内，近处更密
-    var grit = seeded(0x5A17C0);
-    for (var g = 0; g < 130; g += 1) {
-      var gx = pl.cx + (grit() * 2 - 1) * pl.hw * 0.94;
-      var gy = pl.cy + (grit() * 2 - 1) * pl.hh * 0.94;
-      if (Math.abs(gx - pl.cx) / pl.hw + Math.abs(gy - pl.cy) / pl.hh > 0.98) continue;
-      var gp = viewPoint(gx, gy);
-      ctx.globalAlpha = 0.12 + grit() * 0.16;
-      ctx.fillStyle = grit() < 0.55 ? pal.groundDark : pal.groundHi;
-      ctx.fillRect(gp.x, gp.y, 1, 1);
-    }
-    ctx.globalAlpha = 1;
-    // 传送带下方的土路与车辙
-    S.world.factories.forEach(function (f) {
-      var pts = f.belt.map(function (p) { return viewPoint(p.x, p.y); });
-      linePath(ctx, pts, vlen(8), pal.roadDark);
-      linePath(ctx, pts, vlen(6), pal.road);
-      linePath(ctx, pts, vlen(1), pal.roadLight);
-      var total = pathLength(pts);
-      for (var d = 0; d < total; d += Math.max(5, vlen(16))) {
-        var pt = pointAt(pts, total ? d / total : 0);
-        ctx.fillStyle = pal.roadDark;
-        ctx.fillRect(Math.round(pt.x) - 3, Math.round(pt.y) - 1, 2, 1);
-        ctx.fillRect(Math.round(pt.x) + 1, Math.round(pt.y) + 1, 2, 1);
-      }
-    });
-    (site.roads || []).forEach(function (rd) {
-      var pts = rd.path.map(function (q) { return viewPoint(q.x, q.y); });
-      linePath(ctx, pts, vlen(7), pal.roadDark);
-      linePath(ctx, pts, vlen(5), pal.road);
-      linePath(ctx, pts.map(function (q) { return { x: q.x - 1, y: q.y }; }),
-               Math.max(1, vlen(1)), pal.roadLight);
-      linePath(ctx, pts.map(function (q) { return { x: q.x + 1, y: q.y }; }),
-               Math.max(1, vlen(1)), pal.roadLight);
-    });
-    (site.tracks || []).forEach(function (tr) {
-      var pts = tr.path.map(function (q) { return viewPoint(q.x, q.y); });
-      linePath(ctx, pts, vlen(3), pal.roadDark);
-      linePath(ctx, pts, Math.max(1, vlen(1)), pal.roadLight);
-    });
-  }
-
-  function drawShadows(ctx, pal) {
-    var z = S.cam.zoom;
-    S.world.models.forEach(function (m) {
-      // 远景模型也要有接地影，否则雾里一排白色方块看着像浮在天上
-      ctx.globalAlpha = m.bg ? 0.45 : 1;
-      var p = viewPoint(m.x, m.y);
-      if (m.kind === "box" || m.kind === "furnace" || m.kind === "distillation") {
-        var hw = m.hw * z, hh = m.hh * z;
-        var off = Math.min(20, (m.h || 10) * z * 0.22);
-        fillDiamond(ctx, p.x + off * 0.7, p.y + off * 0.45, hw * 1.02, hh * 1.02, pal.shadow);
-      } else if (m.kind === "cyl") {
-        var rx = m.r * z, ry = Math.max(1, rx * 0.55);
-        var off2 = Math.min(22, m.h * z * 0.2);
-        fillOval(ctx, p.x + off2 * 0.7, p.y + off2 * 0.45, rx * 1.1, ry * 1.1, pal.shadow);
-      } else if (m.kind === "cooling") {
-        fillOval(ctx, p.x + vlen(9), p.y + vlen(4), vlen(m.r * 1.1), vlen(m.r * 0.45), pal.shadow);
-      } else if (m.kind === "coalShed" || m.kind === "loadingRack") {
-        if (m.axis) {
-          // 煤棚是轴系零件：影子跟着转到「沿公路 / 纵深」两条轴上
-          var shedFrame = yardFrame(m, p.x + vlen(6), p.y + vlen(3), z);
-          fillPoly(ctx, [shedFrame(-m.hw * 1.02, -m.hh * 1.02), shedFrame(m.hw * 1.02, -m.hh * 1.02),
-                         shedFrame(m.hw * 1.02, m.hh * 1.02), shedFrame(-m.hw * 1.02, m.hh * 1.02)],
-                   pal.shadow);
-        } else {
-          fillDiamond(ctx, p.x + vlen(6), p.y + vlen(3), m.hw * z * 1.02, m.hh * z * 1.02, pal.shadow);
-        }
-      } else if (m.kind === "siloBattery") {
-        // 一仓一影：筒仓群是并排几只仓，用整块影子会糊成一坨（仓列沿公路方向）
-        var siloCount = Math.max(1, Math.round(m.count || 3));
-        var siloFrame = yardFrame(m, p.x + vlen(7), p.y + vlen(3), z);
-        for (var sk = 0; sk < siloCount; sk += 1) {
-          var siloPt = siloFrame((sk - (siloCount - 1) / 2) * (m.gapX || 16), 0);
-          fillOval(ctx, siloPt.x, siloPt.y, vlen(m.r * 1.12), vlen(m.r * 0.56), pal.shadow);
-        }
-      } else if (m.kind === "gasholder") {
-        fillOval(ctx, p.x + vlen(8), p.y + vlen(4), vlen(m.r * 1.14), vlen(m.r * 0.57), pal.shadow);
-      } else if (m.kind === "flare") {
-        fillOval(ctx, p.x + vlen(3), p.y + vlen(2), vlen(m.hw || 7), vlen(m.hh || 3.5), pal.shadow);
-      } else if (m.kind === "coalPile") {
-        fillOval(ctx, p.x + vlen(3), p.y + vlen(2), vlen(m.hw * 1.05), vlen(m.hh * 0.7), pal.shadow);
-      } else if (m.kind === "weighbridge") {
-        fillDiamond(ctx, p.x + vlen(2), p.y + vlen(1), m.hw * z * 1.02, m.hh * z * 1.02, pal.shadow);
-      } else if (m.kind === "floodlight") {
-        fillOval(ctx, p.x + vlen(2), p.y + vlen(1), vlen(5), vlen(2.5), pal.shadow);
-      } else if (m.kind === "gantry") {
-        fillOval(ctx, p.x + vlen(2), p.y + vlen(1), vlen(m.w || 8), vlen(3), pal.shadow);
-      } else if (m.path) {
-        var pts = m.path.map(function (q) { return viewPoint(q.x, q.y); });
-        linePath(ctx, pts, vlen(m.width || 6), pal.shadow);
-      }
-    });
-    ctx.globalAlpha = 1;
-  }
-
-  /** 厂区级异常的地面层：场院外缘一圈脉冲光晕。
-
-      画在模型之前（和光池同一层），所以只会从场坪边缘透出来，不会盖住机台
-      与建筑；停机（root_ok=false）画成静止的红环 + 斜向封锁带，不闪。
-      脉冲只改透明度、不改几何：reduced-motion 下自然退化为静止描边。 */
-  function drawAlertGround(ctx, pal) {
-    if (!S.world) return;
-    var z = S.cam.zoom;
-    S.world.factories.forEach(function (f) {
-      var a = f.alert || { level: 0 };
-      if (!a.level) return;
-      var c = viewPoint(f.x, f.y);
-      var hw = Math.max(40, Math.round(f.halfW * z * 0.94));
-      var hh = Math.max(20, Math.round(f.halfH * z * 0.94));
-      var color = a.level === 1 ? pal.warn : pal.bad;
-      var pts = ringPts(c.x, c.y, hw, hh);
-      if (a.level === 4) {
-        // 停工：两道静止的环，像拉了封锁带，不随时间闪（它不是「正在出事」）
-        ctx.globalAlpha = 0.34;
-        linePath(ctx, pts, Math.max(1, Math.round(2 * z)), color);
-        ctx.globalAlpha = 0.16;
-        linePath(ctx, ringPts(c.x, c.y, hw * 0.88, hh * 0.88),
-                 Math.max(1, Math.round(2 * z)), color);
-        ctx.globalAlpha = 1;
-        return;
-      }
-      // 脉冲：4 秒一轮；等级越高基线越亮，让严重的那座自己跳出来
-      var base = a.level >= 3 ? 0.30 : (a.level === 2 ? 0.20 : 0.13);
-      var pulse = S.reduced ? 0 : Math.sin(S.ticks * 0.16) * (a.level >= 3 ? 0.18 : 0.08);
-      ctx.globalAlpha = clamp(base + pulse, 0.05, 0.55);
-      linePath(ctx, pts, Math.max(1, Math.round(2 * z)), color);
-      // 场坪内侧再压一层很淡的填充，远看是一整块警示色而不是一条细线
-      ctx.globalAlpha = clamp(base * 0.35 + pulse * 0.3, 0.02, 0.2);
-      fillDiamond(ctx, c.x, c.y, hw, hh, color);
-      ctx.globalAlpha = 1;
-    });
-  }
-
-  /** 厂区级的警报灯柱：立在场院后沿，高出厂房，全景下也能一眼看见。
-
-      地面光晕解决「哪一块区域有问题」，灯柱解决「问题在哪座厂区」——等距俯视
-      下光晕会被厂房压住，而竖直的柱子不会被任何前景挡住（它画在模型之后）。
-      这是纯装饰层：不参与命中测试，交互仍走厂区名牌与左面板。 */
-  function drawAlertBeacon(ctx, pal) {
-    if (!S.world) return;
-    var z = S.cam.zoom;
-    S.world.factories.forEach(function (f) {
-      var a = f.alert || { level: 0 };
-      if (!a.level) return;
-      var c = viewPoint(f.x, f.y);
-      var groundY = c.y - Math.round(f.halfH * z * 0.72);
-      var mastH = Math.max(14, Math.round(34 * z));
-      var color = a.level === 1 ? pal.warn : pal.bad;
-      var x = Math.round(c.x + f.halfW * z * 0.5);
-      // 桅杆
-      ctx.fillStyle = pal.metalDark;
-      ctx.fillRect(x, groundY - mastH, Math.max(1, Math.round(z)), mastH);
-      // 灯头：等级 3 画两颗，等级 4 画成熄灭的暗红（停工不是「正在发生」）
-      var lampR = Math.max(2, Math.round(3 * z));
-      var on = a.level !== 4;
-      var blink = on && !S.reduced ? (Math.sin(S.ticks * 0.22) > -0.2 ? 1 : 0.35) : 1;
-      ctx.globalAlpha = a.level === 4 ? 0.5 : blink;
-      fillCircle(ctx, x, groundY - mastH - lampR, lampR, color);
-      if (on) {
-        // 光晕：夜里更亮，白天靠对比度也读得出来
-        var halo = Math.max(5, Math.round((S.night ? 12 : 9) * z));
-        ctx.globalAlpha = (S.night ? 0.26 : 0.16) * blink;
-        fillCircle(ctx, x, groundY - mastH - lampR, halo, color);
-      }
-      if (a.level >= 3) {
-        var r2 = Math.max(1, Math.round(2 * z));
-        ctx.globalAlpha = a.level === 4 ? 0.5 : blink;
-        fillCircle(ctx, x, groundY - mastH - lampR * 2 - r2, r2, color);
-      }
-      ctx.globalAlpha = 1;
-    });
-  }
-
-  /** 夜里的地面光池：先于模型画在地面上，灯光才不会盖住建筑。 */
-  function drawLightPools(ctx, pal) {
-    if (!S.night) return;
-    var lightIndex = 0;
-    S.world.models.forEach(function (m) {
-      var flicker = S.reduced ? 1 : 0.94 + 0.06 * Math.sin(S.ticks * 0.075 + lightIndex * 1.7);
-      lightIndex += 1;
-      if (m.bg) return;
-      var p = viewPoint(m.x, m.y);
-      var baseY = p.y - Math.round((m.z0 || 0) * S.cam.zoom);
-      if (m.kind === "lamp") {
-        var arm = Math.max(3, Math.round(4 * S.cam.zoom));
-        ctx.globalAlpha = 0.30 * flicker;
-        fillOval(ctx, p.x - arm, baseY + vlen(1), vlen(13), vlen(5.5), pal.glow);
-        ctx.globalAlpha = 0.42 * flicker;
-        fillOval(ctx, p.x - arm, baseY + vlen(1), vlen(8), vlen(3.5), pal.glow);
-      } else if (m.kind === "floodlight") {
-        ctx.globalAlpha = 0.34 * flicker;
-        fillOval(ctx, p.x, baseY + vlen(1), vlen(24), vlen(10), pal.glowCool);
-        ctx.globalAlpha = 0.48;
-        fillOval(ctx, p.x, baseY + vlen(1), vlen(15), vlen(6), pal.glowCool);
-        ctx.globalAlpha = 0.62;
-        fillOval(ctx, p.x, baseY + vlen(1), vlen(8), vlen(3.4), pal.glowCool);
-      } else if (m.kind === "flare") {
-        ctx.globalAlpha = 0.35;
-        fillOval(ctx, p.x, baseY + vlen(1), vlen(10), vlen(4.5), pal.glow);
-      } else if (m.kind === "loadingRack") {
-        ctx.globalAlpha = 0.28;
-        fillOval(ctx, p.x, baseY + vlen(1), vlen(m.hw * 1.1), vlen(m.hh * 0.8), pal.glow);
-      } else if (m.kind === "box" && m.door && !m.bg) {
-        // 厂房门口的暖光落在场坪上
-        var dhw = m.hw * S.cam.zoom, dhh = m.hh * S.cam.zoom;
-        var dcx = p.x - dhw * 0.5, dcy = baseY + dhh * 0.5;
-        ctx.globalAlpha = 0.18;
-        fillOval(ctx, dcx, dcy, Math.max(3, dhw * 0.34), Math.max(2, dhh * 0.30), pal.glow);
-        ctx.globalAlpha = 0.28;
-        fillOval(ctx, dcx, dcy, Math.max(2, dhw * 0.20), Math.max(1, dhh * 0.17), pal.glow);
-      }
-    });
-    ctx.globalAlpha = 1;
-  }
-
-  function sceneDrawItems(models) {
-    var items = [];
-    models.forEach(function (m) {
-      if (m.kind === "conveyor") {
-        var total = pathLength(m.path), acc = 0;
-        for (var i = 1; i < m.path.length; i += 1) {
-          var a = m.path[i - 1], b = m.path[i];
-          var len = Math.hypot(b.x - a.x, b.y - a.y);
-          var count = Math.max(1, Math.ceil(len / 14));
-          for (var j = 0; j < count; j += 1) {
-            var t0 = j / count, t1 = (j + 1) / count;
-            var piece = Object.assign({}, m, {
-              path: [{ x: a.x + (b.x - a.x) * t0, y: a.y + (b.y - a.y) * t0 },
-                     { x: a.x + (b.x - a.x) * t1, y: a.y + (b.y - a.y) * t1 }],
-              h0: m.h0 + (m.h1 - m.h0) * (total ? (acc + len * t0) / total : 0),
-              h1: m.h0 + (m.h1 - m.h0) * (total ? (acc + len * t1) / total : 0),
-              flowStart: acc + len * t0,
-              flowEnd: acc + len * t1,
-              flowTotal: total,
-              support: m.support !== false && j % 2 === 0,
-            });
-            items.push(piece);
-          }
-          acc += len;
-        }
-      } else items.push(m);
-    });
-    return items.map(function (m, index) {
-      var mid = m.path ? pointAt(m.path, 0.5) : m;
-      return { m: m, d: mid.y, index: index };
-    }).sort(function (a, b) {
-      var layerA = drawLayer(a.m);
-      var layerB = drawLayer(b.m);
-      return layerA - layerB || a.d - b.d || (a.m.z0 || 0) - (b.m.z0 || 0) || a.index - b.index;
-    });
-  }
-
-  /** 分层：铺装永远在最下，远景 bg 在中，立体件按 y 排在上面。 */
-  function drawLayer(m) {
-    if (m.paving) return 0;
-    return m.bg ? 1 : 2;
-  }
-
-  function drawModels(ctx, pal) {
-    var items = sceneDrawItems(S.world.models);
-    var hasBg = items.some(function (it) { return it.m.bg; });
-    var hazed = !hasBg;
-    items.forEach(function (it) {
-      if (!hazed && !it.m.bg) {
-        // 远景画完、主体之前压一层薄雾：背景带整体退后，仍保留轮廓
-        var W = S.bufW, H = S.bufH;
-        var horizon = sceneHorizon();
-        ctx.fillStyle = pal.bgHaze;
-        // 阶梯式薄雾（不用渐变：假 Canvas / 老 WebView 都只认纯色填充）
-        for (var hb = 0; hb < 6; hb += 1) {
-          ctx.globalAlpha = (S.night ? 0.10 : 0.14) * (1 - hb / 6);
-          ctx.fillRect(0, horizon - 18 + hb * Math.max(3, Math.round(H * 0.06)),
-                       W, Math.max(3, Math.round(H * 0.06)) + 1);
-        }
-        ctx.globalAlpha = S.night ? 0.05 : 0.07;
-        ctx.fillRect(0, 0, W, H);
-        ctx.globalAlpha = 1;
-        hazed = true;
-      }
-      drawModel(ctx, pal, it.m);
-    });
-  }
-
-  function sawRoofFaces(x, y, hw, hh, rise) {
-    function pt(u, v, lift) {
-      return { x: x + (u - v) * hw, y: y + (u + v - 1) * hh - (lift || 0) };
-    }
-    var faces = [];
-    for (var i = 0; i < 3; i += 1) {
-      var a = i / 3, b = (i + 1) / 3;
-      faces.push({ side: "slope", points: [pt(a, 0), pt(a, 1), pt(b, 1, rise), pt(b, 0, rise)] });
-      faces.push({ side: "gable", points: [pt(a, 1), pt(b, 1), pt(b, 1, rise)] });
-      faces.push({ side: "glazing", points: [pt(b, 0), pt(b, 0, rise), pt(b, 1, rise), pt(b, 1)] });
-    }
-    return faces;
-  }
-
-  function drawModel(ctx, pal, m) {
-    if (m.kind === "box") drawBoxModel(ctx, pal, m);
-    else if (m.kind === "cyl") drawCylinderModel(ctx, pal, m);
-    else if (m.kind === "furnace") drawFurnaceModel(ctx, pal, m);
-    else if (m.kind === "distillation") drawDistillationModel(ctx, pal, m);
-    else if (m.kind === "conveyor") drawConveyorModel(ctx, pal, m);
-    else if (m.kind === "machine") drawMachineModel(ctx, pal, m);
-    else if (m.kind === "pallet") drawPalletModel(ctx, pal, m);
-    else if (m.kind === "crate") drawCrateModel(ctx, pal, m);
-    else if (m.kind === "barrel") drawBarrelModel(ctx, pal, m);
-    else if (m.kind === "ore") drawOreModel(ctx, pal, m);
-    else if (m.kind === "worker") drawWorkerModel(ctx, pal, m);
-    else if (m.kind === "truck") drawTruckModel(ctx, pal, m);
-    else if (m.kind === "radar") drawRadarModel(ctx, pal, m);
-    else if (m.kind === "pylon") drawPylonModel(ctx, pal, m);
-    else if (m.kind === "rail") drawRailModel(ctx, pal, m);
-    else if (m.kind === "rock") drawRockModel(ctx, pal, m);
-    else if (m.kind === "shrub") drawShrubModel(ctx, pal, m);
-    else if (m.kind === "gantry") drawGantryModel(ctx, pal, m);
-    else if (m.kind === "catwalk") drawCatwalkModel(ctx, pal, m);
-    else if (m.kind === "figure") drawFigureModel(ctx, pal, m);
-    else if (m.kind === "cooling") drawCoolingTowerModel(ctx, pal, m);
-    else if (m.kind === "pipeRack") drawPipeRackModel(ctx, pal, m);
-    else if (m.kind === "transferBridge") drawTransferBridgeModel(ctx, pal, m);
-    else if (m.kind === "fence") drawFenceModel(ctx, pal, m);
-    else if (m.kind === "coalShed") drawCoalShedModel(ctx, pal, m);
-    else if (m.kind === "siloBattery") drawSiloBatteryModel(ctx, pal, m);
-    else if (m.kind === "gasholder") drawGasholderModel(ctx, pal, m);
-    else if (m.kind === "basin") drawBasinModel(ctx, pal, m);
-    else if (m.kind === "loadingRack") drawLoadingRackModel(ctx, pal, m);
-    else if (m.kind === "flare") drawFlareModel(ctx, pal, m);
-    else if (m.kind === "coalPile") drawCoalPileModel(ctx, pal, m);
-    else if (m.kind === "weighbridge") drawWeighbridgeModel(ctx, pal, m);
-    else if (m.kind === "floodlight") drawFloodlightModel(ctx, pal, m);
-    else if (m.kind === "lamp") drawLampModel(ctx, pal, m);
-    else if (m.kind === "reel") drawReelModel(ctx, pal, m);
-    else if (m.kind === "flag") drawFlagModel(ctx, pal, m);
-  }
-
-  function drawTruckModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var L = Math.max(10, Math.round(26 * z));
-    var W = Math.max(4, Math.round(9 * z));
-    var steel = m.bg ? pal.bgSteel : pal.steel;
-    var steelDark = m.bg ? pal.bgSteelDark : pal.steelDark;
-    var steelLight = m.bg ? pal.bgSteelLight : pal.steelLight;
-    var rust = m.bg ? pal.bgRust : pal.rust;
-    var rustDark = m.bg ? pal.bgRustDark : pal.rustDark;
-    var rustLight = m.bg ? pal.bgRustLight : pal.rustLight;
-    var wheel = m.bg ? pal.bgSteelDark : pal.ink;
-    fillOval(ctx, p.x, baseY + 1, L * 0.5, W * 0.4, pal.shadow);
-    if (S.night && !m.bg) {
-      ctx.globalAlpha = 0.12;
-      fillOval(ctx, p.x + Math.round(L * 0.66), baseY + 1,
-               Math.max(3, Math.round(7 * z)), Math.max(1, Math.round(2.5 * z)), pal.window);
-      ctx.globalAlpha = 1;
-    }
-    ctx.fillStyle = wheel;
-    for (var i = 0; i < 3; i += 1) {
-      fillOval(ctx, p.x - L * 0.3 + i * L * 0.28, baseY,
-               Math.max(1, W * 0.28), Math.max(1, W * 0.16), wheel);
-    }
-    drawIsoBoxAt(ctx, p.x - L * 0.08, baseY - 2, L * 0.34, W * 0.3,
-                 Math.max(5, Math.round(9 * z)), steelLight, steel, steelDark);
-    drawIsoBoxAt(ctx, p.x + L * 0.38, baseY - 2, L * 0.15, W * 0.28,
-                 Math.max(4, Math.round(7 * z)), rustLight, rust, rustDark);
-    ctx.fillStyle = pal.windowDark;
-    ctx.fillRect(Math.round(p.x + L * 0.45), Math.round(baseY - 2 - 6 * z),
-                 Math.max(1, Math.round(3 * z)), Math.max(1, Math.round(2 * z)));
-    if (S.night && !m.bg) {
-      ctx.fillStyle = pal.window;
-      ctx.fillRect(Math.round(p.x + L * 0.5), Math.round(baseY - 4 * z),
-                   Math.max(1, Math.round(2 * z)), 1);
-      ctx.fillStyle = pal.bad;
-      ctx.fillRect(Math.round(p.x - L * 0.44), Math.round(baseY - 4 * z),
-                   Math.max(1, Math.round(1.5 * z)), 1);
-    }
-  }
-
-  function drawRadarModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var h = Math.max(4, Math.round(7 * z));
-    ctx.fillStyle = pal.steelDark;
-    ctx.fillRect(p.x, baseY - h, 1, h);
-    var a = S.rot * 2;
-    var dx = Math.round(Math.cos(a) * 3 * z);
-    var dy = Math.round(Math.sin(a) * 1.5 * z);
-    var rx = Math.max(2, Math.round(4 * z));
-    var ry = Math.max(1, Math.round(2 * z));
-    fillOval(ctx, p.x + dx, baseY - h - ry, rx, ry, pal.steelLight);
-    ctx.fillStyle = pal.steelDark;
-    ctx.fillRect(p.x + dx, baseY - h - ry, Math.max(1, Math.abs(dx) + 1), 1);
-    if (S.night) {
-      ctx.fillStyle = pal.bad;
-      ctx.fillRect(p.x - 1, baseY - h - ry * 2 - 2, 2, 2);
-    }
-  }
-
+  // ---------- 绘制层转发 ----------
+  // 绘制实现搬入 app-factory-draw.js（经 window.FX 运行时查表）；
+  // 本文件内的调用点保持裸名不变，由这组同签名转发函数承接。
+  function render() { FX.render(); }
+  function viewPoint(x, y) { return FX.viewPoint(x, y); }
   function drawIsoBoxAt(ctx, x, y, hw, hh, h, top, left, right) {
-    fillPoly(ctx, [
-      { x: x - hw, y: y - h }, { x: x, y: y - h + hh },
-      { x: x, y: y + hh }, { x: x - hw, y: y },
-    ], left);
-    fillPoly(ctx, [
-      { x: x, y: y - h + hh }, { x: x + hw, y: y - h },
-      { x: x + hw, y: y }, { x: x, y: y + hh },
-    ], right);
-    fillDiamond(ctx, x, y - h, hw, hh, top);
+    return FX.drawIsoBoxAt(ctx, x, y, hw, hh, h, top, left, right);
   }
-
-  function drawBoxModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var base = viewPoint(m.x, m.y);
-    var baseY = base.y - Math.round((m.z0 || 0) * z);
-    var hw = Math.max(2, Math.round(m.hw * z));
-    var hh = Math.max(1, Math.round(m.hh * z));
-    var h = Math.max(2, Math.round(m.h * z));
-    var cols = roleCols(pal, m.role, m.bg);
-    var top = cols.top, left = cols.left, right = cols.right;
-    var frame = m.bg ? pal.bgSteelDark : pal.panelLine;
-
-    if (m.paving) {
-      // 场院坪保留整洁亮面，仅用边缘表现厚度。
-      drawIsoBoxAt(ctx, base.x, baseY, hw, hh, h, top, left, right);
-      var ty = baseY - h;
-      // 坪缘石：上缘亮线、下缘暗线，平台不再是一片平涂
-      linePath(ctx, [{ x: base.x - hw, y: ty }, { x: base.x, y: ty + hh },
-                    { x: base.x + hw, y: ty }], Math.max(1, Math.round(z)), pal.mark);
-      linePath(ctx, [{ x: base.x - hw, y: ty + 1 }, { x: base.x, y: ty + hh + 1 },
-                    { x: base.x + hw, y: ty + 1 }], Math.max(1, Math.round(z)), pal.groundDark);
-      if (m.curb) {
-        var postH = Math.max(2, Math.round(4 * z));
-        [[base.x - hw, ty], [base.x, ty + hh], [base.x + hw, ty]].forEach(function (cp) {
-          ctx.fillStyle = pal.paint;
-          ctx.fillRect(Math.round(cp[0]), Math.round(cp[1] - postH), 1, postH);
-          ctx.fillStyle = pal.paintDark;
-          ctx.fillRect(Math.round(cp[0]) - 1, Math.round(cp[1]) - 1, 3, 1);
-        });
-      }
-      // 坪面污渍（确定性散布，不随帧变化）
-      var rand = seeded(hashKey("pave" + m.x + ":" + m.y + ":" + hw));
-      for (var st = 0; st < 5; st += 1) {
-        var sx = base.x + (rand() * 2 - 1) * hw * 0.62;
-        var sy = ty + (rand() * 2 - 1) * hh * 0.56;
-        ctx.globalAlpha = 0.10 + rand() * 0.06;
-        fillOval(ctx, sx, sy, Math.max(2, hw * (0.05 + rand() * 0.08)),
-                 Math.max(1, hh * (0.03 + rand() * 0.05)), pal.stain);
-      }
-      ctx.globalAlpha = 1;
-      drawYardMarkings(ctx, pal, m, base.x, baseY - h, hw, hh);
-      // 围栏：前缘高栏 + 后缘低栏，围出完整的场院边界
-      if (m.rail) {
-        var ph = Math.max(2, Math.round(4 * z));
-        for (var ri = 0; ri <= 8; ri += 1) {
-          var rt = ri / 8;
-          ctx.fillStyle = pal.steelDark;
-          ctx.fillRect(Math.round(base.x - hw + hw * rt),
-                       Math.round(ty + hh * rt - ph), 1, ph);
-          ctx.fillRect(Math.round(base.x + hw - hw * rt),
-                       Math.round(ty + hh * rt - ph), 1, ph);
-        }
-        linePath(ctx, [{ x: base.x - hw, y: ty }, { x: base.x, y: ty + hh },
-                      { x: base.x + hw, y: ty }], 1, pal.steelLight);
-        // 后缘：矮护栏，压住平台后侧，不挡建筑
-        ctx.globalAlpha = 0.65;
-        var bh = Math.max(1, Math.round(2 * z));
-        for (var bi = 0; bi <= 8; bi += 1) {
-          var bt = bi / 8;
-          ctx.fillStyle = pal.steelDark;
-          ctx.fillRect(Math.round(base.x - hw + hw * bt),
-                       Math.round(ty - hh + hh * bt - bh), 1, bh);
-          ctx.fillRect(Math.round(base.x + hw - hw * bt),
-                       Math.round(ty - hh + hh * bt - bh), 1, bh);
-        }
-        linePath(ctx, [{ x: base.x - hw, y: ty }, { x: base.x, y: ty - hh },
-                      { x: base.x + hw, y: ty }], 1, pal.steel);
-        ctx.globalAlpha = 1;
-      }
-      return;
-    }
-
-    drawIsoBoxAt(ctx, base.x, baseY, hw, hh, h, top, left, right);
-    // 勒脚：墙根压暗一档，接缝处补亮线，建筑稳稳落在地坪上
-    var plinth = Math.max(2, Math.round(Math.min(h * 0.14, 5 * z)));
-    fillPoly(ctx, [
-      { x: base.x - hw, y: baseY - plinth }, { x: base.x, y: baseY + hh - plinth },
-      { x: base.x, y: baseY + hh }, { x: base.x - hw, y: baseY },
-    ], m.bg ? pal.bgSteelDark : (m.role === "rust" ? pal.rustDark : m.role === "glass" ? pal.glassDark : pal.steelDark));
-    fillPoly(ctx, [
-      { x: base.x, y: baseY + hh - plinth }, { x: base.x + hw, y: baseY - plinth },
-      { x: base.x + hw, y: baseY }, { x: base.x, y: baseY + hh },
-    ], m.bg ? pal.bgSteelDark : (m.role === "rust" ? pal.rustDark : m.role === "glass" ? pal.glassDark : pal.steelDark));
-    linePath(ctx, [{ x: base.x - hw, y: baseY - plinth }, { x: base.x, y: baseY + hh - plinth },
-                  { x: base.x + hw, y: baseY - plinth }], 1, top);
-
-    // 墙面分缝：竖缝按面板宽度铺，横缝两道腰线
-    if (h >= 10) {
-      var step = m.bg ? 0.22 : (hw > 26 ? 0.09 : 0.14);
-      var seamCol = m.bg ? pal.bgSteel : (m.role === "rust" ? pal.rustDark : pal.steelDark);
-      for (var u = step; u < 0.96; u += step) {
-        linePath(ctx, [
-          { x: base.x - hw + hw * u, y: baseY - h + hh * u },
-          { x: base.x - hw + hw * u, y: baseY + hh * u },
-        ], 1, seamCol);
-        linePath(ctx, [
-          { x: base.x + hw * u, y: baseY - h + hh * (1 - u) },
-          { x: base.x + hw * u, y: baseY + hh * (1 - u) },
-        ], 1, m.bg ? pal.bgSteelDark : pal.steelMid);
-      }
-      ctx.globalAlpha = 0.55;
-      [0.34, 0.64].forEach(function (vv) {
-        linePath(ctx, [
-          { x: base.x - hw, y: baseY - h + h * vv },
-          { x: base.x, y: baseY - h + hh + h * vv },
-          { x: base.x + hw, y: baseY - h + h * vv },
-        ], 1, seamCol);
-      });
-      ctx.globalAlpha = 1;
-      // 檐口：顶边一条亮线，把屋顶和墙面分开
-      linePath(ctx, [{ x: base.x - hw, y: baseY - h }, { x: base.x, y: baseY - h + hh },
-                    { x: base.x + hw, y: baseY - h }], Math.max(1, Math.round(z)),
-                m.bg ? pal.bgSteelLight : pal.roofSlateLight);
-    }
-
-    // 墙面窗体：左面两排、右面一排；白天是冷灰玻璃，夜里亮暖窗
-    if (m.windows && h >= 12) {
-      var rows = h >= 40 ? 3 : h >= 26 ? 2 : 1;
-      var n = Math.max(1, m.windows);
-      var glassDay = m.bg ? pal.bgSteelDark : (m.role === "rust" ? pal.rustDark : pal.glass);
-      var glassLit = m.bg ? pal.bgSteelLight : pal.window;
-      function facePt(side, uu, vv) {
-        if (side === 0) {
-          return { x: base.x - hw + hw * uu, y: baseY - h + hh * uu + h * vv };
-        }
-        return { x: base.x + hw * uu, y: baseY - h + hh * (1 - uu) + h * vv };
-      }
-      function drawWin(side, u0, v0, du, dv) {
-        fillPoly(ctx, [
-          facePt(side, u0, v0), facePt(side, u0 + du, v0),
-          facePt(side, u0 + du, v0 + dv), facePt(side, u0, v0 + dv),
-        ], frame);
-        fillPoly(ctx, [
-          facePt(side, u0 + 0.012, v0 + 0.02), facePt(side, u0 + du - 0.012, v0 + 0.02),
-          facePt(side, u0 + du - 0.012, v0 + dv - 0.02), facePt(side, u0 + 0.012, v0 + dv - 0.02),
-        ], S.night ? glassLit : glassDay);
-        // 玻璃上沿反光
-        linePath(ctx, [facePt(side, u0 + 0.02, v0 + dv * 0.22),
-                      facePt(side, u0 + du - 0.02, v0 + dv * 0.22)], 1,
-                 S.night ? pal.window : pal.glassLight);
-        // 窗台与中挺
-        linePath(ctx, [facePt(side, u0, v0 + dv), facePt(side, u0 + du, v0 + dv)],
-                 1, m.bg ? pal.bgSteelLight : pal.steelLight);
-        linePath(ctx, [facePt(side, u0 + du / 2, v0), facePt(side, u0 + du / 2, v0 + dv)],
-                 1, frame);
-        if (S.night && !m.bg) {
-          var wc = facePt(side, u0 + du / 2, v0 + dv / 2);
-          ctx.globalAlpha = 0.20;
-          fillOval(ctx, wc.x, wc.y, Math.max(3, hw * 0.20), Math.max(2, hw * 0.13), glassLit);
-          ctx.globalAlpha = 1;
-        }
-      }
-      for (var row = 0; row < rows; row += 1) {
-        var v0 = rows === 1 ? 0.40 : rows === 2 ? (row === 0 ? 0.24 : 0.56) : (0.16 + row * 0.24);
-        var dv = rows === 1 ? 0.20 : rows === 2 ? 0.16 : 0.12;
-        for (var wi = 0; wi < n; wi += 1) {
-          var u0 = n === 1 ? 0.44 : 0.14 + wi * (0.68 / (n - 1));
-          drawWin(0, u0, v0, Math.min(0.12, 0.42 / n), dv);
-        }
-      }
-      // 右面一列窗，数量减半，避免两面都花
-      var rn = Math.max(1, Math.round(n / 2));
-      for (var rj = 0; rj < rn; rj += 1) {
-        var ru = rn === 1 ? 0.52 : 0.30 + rj * (0.40 / (rn - 1));
-        drawWin(1, ru, 0.38, Math.min(0.10, 0.30 / rn), 0.18);
-      }
-    }
-
-    // 大门 + 雨棚 + 门灯
-    if (m.door) {
-      var dpt = function (uu, vv) {
-        return {
-          x: base.x - hw + hw * uu,
-          y: baseY - h + hh * uu + h * vv,
-        };
-      };
-      fillPoly(ctx, [
-        dpt(0.40, 0.58), dpt(0.60, 0.58), dpt(0.60, 1), dpt(0.40, 1),
-      ], pal.ink);
-      fillPoly(ctx, [
-        dpt(0.415, 0.60), dpt(0.585, 0.60), dpt(0.585, 0.985), dpt(0.415, 0.985),
-      ], pal.steelDark);
-      // 卷帘门横条
-      for (var sl = 0.64; sl < 0.97; sl += 0.055) {
-        linePath(ctx, [dpt(0.42, sl), dpt(0.58, sl)], 1, pal.steelMid);
-      }
-      ctx.fillStyle = pal.paint;
-      ctx.fillRect(Math.round(base.x - hw * 0.28), Math.round(baseY - h + h * 0.56 - 1),
-                   Math.max(2, Math.round(hw * 0.12)), 1);
-      // 雨棚（薄板挑出）
-      fillPoly(ctx, [
-        { x: base.x - hw * 0.34, y: baseY - h * 0.995 + hh * 0.34 - hh * 0.22 },
-        { x: base.x - hw * 0.06, y: baseY - h * 0.995 + hh * 0.06 + hh * 0.42 },
-        { x: base.x - hw * 0.06, y: baseY - h * 0.995 + hh * 0.06 + hh * 0.50 },
-        { x: base.x - hw * 0.34, y: baseY - h * 0.995 + hh * 0.34 - hh * 0.14 },
-      ], pal.roofSlateLight);
-      // 门槛压条 + 门灯（夜里亮一盏暖光）
-      linePath(ctx, [dpt(0.38, 0.985), dpt(0.62, 0.985)], 1, pal.concreteLight);
-      if (S.night && !m.bg) {
-        var dl = dpt(0.50, 0.615);
-        ctx.fillStyle = pal.window;
-        ctx.fillRect(Math.round(dl.x), Math.round(dl.y), 2, 1);
-        ctx.globalAlpha = 0.22;
-        fillOval(ctx, dl.x, dl.y, Math.max(3, Math.round(hw * 0.10)),
-                 Math.max(2, Math.round(hw * 0.06)), pal.window);
-        ctx.globalAlpha = 1;
-      }
-    }
-
-    // 屋顶：锯齿 / 平顶 + 屋顶设备
-    if (m.roof === "saw") {
-      var roof = sawRoofFaces(base.x, baseY - h, hw, hh, Math.max(2, vlen(5)));
-      roof.forEach(function (face) {
-        var fc = face.side === "slope" ? (m.bg ? pal.bgSteelLight : pal.roofSlateLight)
-          : face.side === "gable" ? (m.bg ? pal.bgSteel : pal.roofSlate)
-            : (m.bg ? pal.bgSteelDark : (S.night ? pal.glassDark : pal.glass));
-        fillPoly(ctx, face.points, fc);
-        if (face.side === "slope") {
-          // 压脊线与檐口线，再补两道檩条，坡面不再是一块平色
-          linePath(ctx, [face.points[3], face.points[2]], 1,
-                   m.bg ? pal.bgSteelLight : pal.roofSlateLight);
-          linePath(ctx, [face.points[0], face.points[1]], 1,
-                   m.bg ? pal.bgSteelDark : pal.roofSlateDark);
-          ctx.globalAlpha = m.bg ? 0.32 : 0.30;
-          for (var pr = 1; pr <= 2; pr += 1) {
-            var pt = pr / 3;
-            linePath(ctx, [
-              { x: face.points[0].x + (face.points[3].x - face.points[0].x) * pt,
-                y: face.points[0].y + (face.points[3].y - face.points[0].y) * pt },
-              { x: face.points[1].x + (face.points[2].x - face.points[1].x) * pt,
-                y: face.points[1].y + (face.points[2].y - face.points[1].y) * pt },
-            ], 1, m.bg ? pal.bgSteelDark : pal.roofSlateDark);
-          }
-          ctx.globalAlpha = 1;
-        } else if (face.side === "gable") {
-          linePath(ctx, face.points.concat([face.points[0]]), 1,
-                   m.bg ? pal.bgSteelDark : pal.roofSlateDark);
-        }
-        if (face.side === "glazing") {
-          var mid = { x: (face.points[0].x + face.points[2].x) / 2,
-                      y: (face.points[0].y + face.points[2].y) / 2 };
-          ctx.fillStyle = S.night ? pal.window : pal.glassGlow;
-          ctx.globalAlpha = S.night ? 0.28 : 0.35;
-          ctx.fillRect(Math.round(mid.x) - 1, Math.round(mid.y) - 1, 2, 2);
-          ctx.globalAlpha = 1;
-        }
-      });
-    } else {
-      // 平顶：檐口厚度 + 女儿墙 + 天窗 + 屋顶机组
-      linePath(ctx, [{ x: base.x - hw, y: baseY - h }, { x: base.x, y: baseY - h - hh },
-                    { x: base.x + hw, y: baseY - h }], Math.max(1, Math.round(z)),
-                m.bg ? pal.bgSteelLight : pal.roofSlateLight);
-      // 前檐压暗一档，内侧再补一条女儿墙亮线，顶板有厚度
-      linePath(ctx, [{ x: base.x - hw, y: baseY - h + 1 },
-                    { x: base.x, y: baseY - h + hh + 1 },
-                    { x: base.x + hw, y: baseY - h + 1 }], 1,
-                m.bg ? pal.bgSteelDark : pal.roofSlateDark);
-      linePath(ctx, [{ x: base.x - hw + 1, y: baseY - h },
-                    { x: base.x, y: baseY - h + hh - 1 },
-                    { x: base.x + hw - 1, y: baseY - h }], 1,
-                m.bg ? pal.bgSteelLight : pal.roofSlateLight);
-      if (hw > 8) {
-        var skx = base.x - hw * 0.28, sky = baseY - h + hh * 0.30;
-        fillDiamond(ctx, skx, sky, Math.max(2, Math.round(hw * 0.18)),
-                    Math.max(1, Math.round(hh * 0.16)), m.bg ? pal.bgSteelLight : pal.glassGlow);
-        if (S.night && !m.bg) {
-          ctx.globalAlpha = 0.16;
-          fillOval(ctx, skx, sky, Math.max(3, Math.round(hw * 0.22)),
-                   Math.max(2, Math.round(hh * 0.20)), pal.window);
-          ctx.globalAlpha = 1;
-        }
-      }
-      if (!m.bg && hw > 7) {
-        drawIsoBoxAt(ctx, base.x + hw * 0.22, baseY - h + hh * 0.18 - hh * 0.20,
-                     Math.max(2, Math.round(hw * 0.26)), Math.max(1, Math.round(hh * 0.26)),
-                     Math.max(2, Math.round(3 * z)), pal.metalLight, pal.metal, pal.metalDark);
-        ctx.fillStyle = pal.metalDark;
-        ctx.fillRect(Math.round(base.x - hw * 0.40), Math.round(baseY - h - hh * 0.30),
-                     Math.max(2, Math.round(hw * 0.16)), 1);
-      }
-      if (!m.bg && hw > 16) {
-        // 第二台屋顶机组 + 跨顶管线
-        drawIsoBoxAt(ctx, base.x - hw * 0.34, baseY - h + hh * 0.50,
-                     Math.max(2, Math.round(hw * 0.12)), Math.max(1, Math.round(hh * 0.16)),
-                     Math.max(2, Math.round(2.4 * z)), pal.metal, pal.metalDark, pal.metalDark);
-        linePath(ctx, [{ x: base.x + hw * 0.02, y: baseY - h + hh * 0.20 },
-                      { x: base.x + hw * 0.58, y: baseY - h + hh * 0.58 }], 1, pal.metalDark);
-        linePath(ctx, [{ x: base.x + hw * 0.02, y: baseY - h + hh * 0.20 - 1 },
-                      { x: base.x + hw * 0.58, y: baseY - h + hh * 0.58 - 1 }], 1, pal.metalLight);
-      }
-      if (m.bg && hw > 12) {
-        // 远景大屋面也别是一块平板：补一个检修口/通风帽
-        drawIsoBoxAt(ctx, base.x - hw * 0.24, baseY - h + hh * 0.24,
-                     Math.max(2, Math.round(hw * 0.12)), Math.max(1, Math.round(hh * 0.12)),
-                     Math.max(1, Math.round(2 * z)), pal.bgSteelLight, pal.bgSteel, pal.bgSteelDark);
-      }
-    }
-    // 屋顶通风器 / 排气帽
-    if (m.vent && !m.bg) {
-      var ventCount = hw > 14 ? 3 : 2;
-      for (var vv = 0; vv < ventCount; vv += 1) {
-        var vx = base.x - hw * 0.36 + vv * hw * 0.34;
-        var vy = baseY - h - hh * 0.42 + vv * hh * 0.30;
-        ctx.fillStyle = pal.metalDark;
-        ctx.fillRect(Math.round(vx), Math.round(vy - Math.max(2, 3 * z)),
-                     Math.max(1, Math.round(2 * z)), Math.max(1, Math.round(3 * z)));
-        ctx.fillStyle = pal.metalLight;
-        ctx.fillRect(Math.round(vx), Math.round(vy - Math.max(2, 3 * z)), 2, 1);
-      }
-    }
-    // 调度塔：控制室玻璃横带 + 顶冠竖梃
-    if (m.tower) {
-      var bandV0 = 0.27, bandV1 = 0.35;
-      fillPoly(ctx, [
-        { x: base.x - hw, y: baseY - h + h * bandV0 },
-        { x: base.x, y: baseY - h + hh + h * bandV0 },
-        { x: base.x, y: baseY - h + hh + h * bandV1 },
-        { x: base.x - hw, y: baseY - h + h * bandV1 },
-      ], pal.glassDark);
-      linePath(ctx, [
-        { x: base.x - hw, y: baseY - h + h * bandV0 },
-        { x: base.x, y: baseY - h + hh + h * bandV0 },
-      ], 1, pal.glassLight);
-      for (var bw = 0; bw < 5; bw += 1) {
-        var bu = 0.10 + bw * 0.19;
-        ctx.fillStyle = S.night ? pal.window : pal.glassGlow;
-        ctx.fillRect(Math.round(base.x - hw + hw * bu),
-                     Math.round(baseY - h + h * bandV0 + hh * bu + h * 0.02), 2, 1);
-        if (S.night) {
-          ctx.globalAlpha = 0.18;
-          fillOval(ctx, base.x - hw + hw * bu, baseY - h + h * bandV0 + hh * bu, 3, 2, pal.window);
-          ctx.globalAlpha = 1;
-        }
-      }
-    }
-    if (m.crown) {
-      for (var cu = 0.10; cu < 0.96; cu += 0.12) {
-        linePath(ctx, [
-          { x: base.x - hw + hw * cu, y: baseY - h + hh * cu },
-          { x: base.x - hw + hw * cu, y: baseY + hh * cu },
-        ], 1, pal.glassDark);
-      }
-      ctx.globalAlpha = S.night ? 0.30 : 0.20;
-      fillDiamond(ctx, base.x, baseY - h, hw - 1, hh - 1, S.night ? pal.window : pal.glassGlow);
-      ctx.globalAlpha = 1;
-    }
-    // 外露管线：沿左面下到勒脚
-    if (m.pipes && !m.bg) {
-      var pipeX = base.x - hw * 0.72;
-      linePath(ctx, [{ x: pipeX, y: baseY - h * 0.96 }, { x: pipeX, y: baseY + hh * 0.28 }],
-               1, pal.metalDark);
-      linePath(ctx, [{ x: pipeX + 1, y: baseY - h * 0.96 }, { x: pipeX + 1, y: baseY + hh * 0.28 }],
-               1, pal.metalLight);
-      [0.20, 0.52, 0.84].forEach(function (pv) {
-        ctx.fillStyle = pal.metalDark;
-        ctx.fillRect(Math.round(pipeX - 1), Math.round(baseY - h * pv + hh * 0.10), 3, 1);
-      });
-    }
-    // 附房雨棚 / 站台雨棚：加一道浅色挑檐
-    if (m.canopy) {
-      linePath(ctx, [{ x: base.x - hw, y: baseY - h + 1 }, { x: base.x, y: baseY - h + hh + 1 },
-                    { x: base.x + hw, y: baseY - h + 1 }], 1, pal.mark);
-    }
-    // 站台围栏：两条前缘立短柱 + 横杆
-    if (m.rail) {
-      var railTop = baseY - h;
-      var ph = Math.max(2, Math.round(4 * z));
-      for (var ri = 0; ri <= 6; ri += 1) {
-        var rt = ri / 6;
-        var lx = base.x - hw + hw * rt;
-        var ly = railTop + hh * rt;
-        ctx.fillStyle = pal.steelDark;
-        ctx.fillRect(Math.round(lx), Math.round(ly - ph), 1, ph);
-        var rx2 = base.x + hw - hw * rt;
-        ctx.fillRect(Math.round(rx2), Math.round(ly - ph), 1, ph);
-      }
-      linePath(ctx, [{ x: base.x - hw, y: railTop }, { x: base.x, y: railTop + hh }],
-               1, pal.steelLight);
-      linePath(ctx, [{ x: base.x, y: railTop + hh }, { x: base.x + hw, y: railTop }],
-               1, pal.steelLight);
-    }
-    // 落水管 + 检修爬梯：给所有盒体建筑补一层工业立面细节
-    if (h >= 9) {
-      var trimDark = m.bg ? pal.bgSteelDark : pal.metalDark;
-      var trimLight = m.bg ? pal.bgSteelLight : pal.metalLight;
-      ctx.globalAlpha = m.bg ? 0.45 : 0.8;
-      (m.bg ? [0.05] : [0.05, 0.95]).forEach(function (u) {
-        var px = base.x - hw + hw * u;
-        var yTop = baseY - h + hh * u + Math.max(1, Math.round(2 * z));
-        var yBot = baseY + hh * u - 1;
-        linePath(ctx, [{ x: px, y: yTop }, { x: px, y: yBot }], 1, trimDark);
-        linePath(ctx, [{ x: px + 1, y: yTop }, { x: px + 1, y: yBot - 1 }], 1, trimLight);
-        ctx.fillStyle = trimDark;
-        ctx.fillRect(Math.round(px), Math.round(yBot - 1), 2, 1);
-      });
-      ctx.globalAlpha = 1;
-      if (!m.bg && h >= 16 && hw >= 7) {
-        // 高厂房右立面靠后侧：检修爬梯（压在窗列之外）
-        var u0 = 0.84;
-        var lx = base.x + hw * u0;
-        var ins = hh * (1 - u0);
-        var lt = baseY - h + ins + Math.max(1, Math.round(h * 0.09));
-        var lb = baseY + ins - Math.max(1, Math.round(h * 0.02));
-        ctx.fillStyle = trimDark;
-        ctx.fillRect(Math.round(lx), Math.round(lt), 1, Math.round(lb - lt));
-        ctx.fillRect(Math.round(lx) + 2, Math.round(lt), 1, Math.round(lb - lt));
-        for (var rr = lt + 3; rr < lb; rr += Math.max(3, Math.round(4 * z))) {
-          ctx.fillRect(Math.round(lx), Math.round(rr), 3, 1);
-        }
-        ctx.fillStyle = trimLight;
-        ctx.fillRect(Math.round(lx) - 1, Math.round(lt) - 1, 5, 1);
-      }
-    }
-  }
-
-  // 坪面标线：安全区黄虚线、通道双黄线、轮胎痕与角落碎石。
-  // 在铺装模型画完之后调用，写字楼/机台等主体随后覆盖其上，天然落在「地面」层。
-  function drawYardMarkings(ctx, pal, m, baseX, topY, hw, hh) {
-    var z = S.cam.zoom;
-    if (m.hallBase) {
-      ctx.globalAlpha = 0.30;
-      linePath(ctx, [
-        { x: baseX - hw * 0.88, y: topY }, { x: baseX, y: topY + hh * 0.88 },
-        { x: baseX + hw * 0.88, y: topY }, { x: baseX, y: topY - hh * 0.88 },
-        { x: baseX - hw * 0.88, y: topY },
-      ], 1, pal.mark);
-      for (var q = 0; q < 4; q += 1) {
-        var ang = Math.PI / 2 * q + Math.PI / 4;
-        linePath(ctx, [
-          { x: baseX + Math.cos(ang) * hw * 0.62, y: topY + Math.sin(ang) * hh * 0.62 },
-          { x: baseX + Math.cos(ang) * hw * 0.84, y: topY + Math.sin(ang) * hh * 0.84 },
-        ], 2, pal.paint);
-      }
-      ctx.globalAlpha = 1;
-      return;
-    }
-    var f = m.yard;
-    if (!f) return;
-    function yPoint(wx, wy) {
-      var p = viewPoint(wx, wy);
-      p.y -= Math.round(5 * z);
-      return p;
-    }
-    function dashed(a, b, dash) {
-      var len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-      var n = Math.max(1, Math.floor(len / Math.max(3, dash)));
-      for (var i = 0; i < n; i += 1) {
-        var t0 = i / n, t1 = Math.min(1, (i + 0.52) / n);
-        linePath(ctx, [
-          { x: a.x + (b.x - a.x) * t0, y: a.y + (b.y - a.y) * t0 },
-          { x: a.x + (b.x - a.x) * t1, y: a.y + (b.y - a.y) * t1 },
-        ], 1, pal.paint);
-      }
-    }
-    // 机台安全区：黄虚线框（收在菱形坪的前场内切矩形里）
-    var zx0 = f.x - f.halfW * 0.42, zx1 = f.x + f.halfW * 0.42;
-    var zy0 = f.y + f.halfH * 0.06, zy1 = f.y + f.halfH * 0.52;
-    var c1 = yPoint(zx0, zy0), c2 = yPoint(zx1, zy0);
-    var c3 = yPoint(zx1, zy1), c4 = yPoint(zx0, zy1);
-    ctx.globalAlpha = 0.28;
-    dashed(c1, c2, Math.max(6, 8 * z));
-    dashed(c2, c3, Math.max(6, 8 * z));
-    dashed(c3, c4, Math.max(6, 8 * z));
-    dashed(c4, c1, Math.max(6, 8 * z));
-    // 入口 → 分配枢纽：通道边线
-    var e = yPoint(f.entrance.x, f.entrance.y);
-    var hub = yPoint(f.hub.x, f.hub.y);
-    linePath(ctx, [{ x: e.x - 1, y: e.y }, { x: hub.x - 1, y: hub.y }], 1, pal.paint);
-    linePath(ctx, [{ x: e.x + 1, y: e.y }, { x: hub.x + 1, y: hub.y }], 1, pal.paint);
-    // 通往主厂房的轮胎痕
-    var door = yPoint(f.x - f.halfW * 0.30, f.y + f.halfH * 0.06);
-    ctx.globalAlpha = 0.13;
-    linePath(ctx, [{ x: e.x - 2, y: e.y }, { x: door.x - 2, y: door.y }], 1, pal.ink);
-    linePath(ctx, [{ x: e.x + 2, y: e.y }, { x: door.x + 2, y: door.y }], 1, pal.ink);
-    // 地井盖与排水格栅
-    [[-0.34, 0.36], [0.12, 0.60]].forEach(function (o) {
-      var hp = yPoint(f.x + f.halfW * o[0], f.y + f.halfH * o[1]);
-      fillOval(ctx, hp.x, hp.y, Math.max(2, Math.round(3 * z)),
-               Math.max(1, Math.round(2 * z)), pal.metalDark);
-      ctx.fillStyle = pal.metal;
-      ctx.fillRect(Math.round(hp.x - 1), Math.round(hp.y), 2, 1);
-    });
-    var gr = yPoint(f.x + f.halfW * 0.42, f.y + f.halfH * 0.46);
-    for (var gi = 0; gi < 3; gi += 1) {
-      ctx.fillStyle = pal.metalDark;
-      ctx.fillRect(Math.round(gr.x - 3), Math.round(gr.y + gi), Math.max(3, Math.round(6 * z)), 1);
-    }
-    // 入口斑马线：黄黑相间的短斜杠
-    ctx.globalAlpha = 0.55;
-    for (var hz = 0; hz < 3; hz += 1) {
-      linePath(ctx, [
-        { x: e.x - 4 + hz * 4, y: e.y + 3 },
-        { x: e.x + hz * 4, y: e.y - 3 },
-      ], 1, hz % 2 ? pal.ink : pal.paint);
-    }
-    // 角落碎石与杂草点
-    var rand = seeded(hashKey("yard" + f.id));
-    ctx.globalAlpha = 0.45;
-    for (var k = 0; k < 16; k += 1) {
-      var wx = f.x + (rand() * 2 - 1) * f.halfW * 0.86;
-      var wy = f.y + (rand() * 2 - 1) * f.halfH * 0.86;
-      var pp = yPoint(wx, wy);
-      ctx.fillStyle = rand() < 0.5 ? pal.soil : pal.groundDark;
-      ctx.fillRect(Math.round(pp.x), Math.round(pp.y), 1, 1);
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function drawFurnaceModel(ctx, pal, m) {
-    var z = S.cam.zoom, p = viewPoint(m.x, m.y);
-    var y = p.y - (m.z0 || 0) * z, w = m.hw * z, d = m.hh * z, h = m.h * z;
-    var c = roleCols(pal, m.role, m.bg);
-    function at(u, v, lift) { return { x: p.x + u * w, y: y + v * d - lift * h }; }
-    drawIsoBoxAt(ctx, p.x, y, w, d, h * 0.10, pal.concreteLight, pal.concrete, pal.concreteDark);
-    // 各段共用同一组截面顶点，收腰炉身与上部炉喉之间不留裂缝。
-    var levels = [[0.10, 0.64], [0.30, 0.86], [0.58, 0.74], [0.83, 0.38], [0.94, 0.38]];
-    for (var i = 1; i < levels.length; i += 1) {
-      var a = levels[i - 1], b = levels[i];
-      fillPoly(ctx, [at(-a[1], 0, a[0]), at(0, a[1], a[0]),
-                     at(0, b[1], b[0]), at(-b[1], 0, b[0])], c.left);
-      fillPoly(ctx, [at(0, a[1], a[0]), at(a[1], 0, a[0]),
-                     at(b[1], 0, b[0]), at(0, b[1], b[0])], c.right);
-      linePath(ctx, [at(-b[1], 0, b[0]), at(0, b[1], b[0]), at(b[1], 0, b[0])], 1, c.top);
-    }
-    drawIsoBoxAt(ctx, p.x, y - h * 0.94, w * 0.40, d * 0.40, h * 0.06,
-                 pal.metalLight, pal.metal, pal.metalDark);
-    fillDiamond(ctx, p.x, y - h, w * 0.24, d * 0.24, pal.ink);
-    [0.32, 0.65].forEach(function (height) {
-      var deck = y - h * height;
-      var inner = height < 0.5 ? 0.85 : 0.64;
-      [-1, 1].forEach(function (side) {
-        fillPoly(ctx, [{ x: p.x + side * w * 0.93, y: deck },
-                       { x: p.x, y: deck + d * 0.93 },
-                       { x: p.x, y: deck + d * inner },
-                       { x: p.x + side * w * inner, y: deck }], pal.metalLight);
-      });
-      // 平台内侧炉身继续向上，前缘护栏立在走道外沿。
-      for (var j = 0; j <= 4; j += 1) {
-        var t = j / 4;
-        var x = p.x - w * 0.93 + w * 0.93 * t, py = deck + d * 0.93 * t;
-        linePath(ctx, [{ x: x, y: py }, { x: x, y: py - 3 * z }], 1, pal.metalDark);
-      }
-      linePath(ctx, [{ x: p.x - w * 0.93, y: deck - 3 * z },
-                    { x: p.x, y: deck + d * 0.93 - 3 * z }], 1, pal.metalLight);
-    });
-    var lx = p.x + w * 0.80;
-    linePath(ctx, [{ x: lx, y: y - h * 0.12 }, { x: lx, y: y - h * 0.72 }], 1, pal.metalDark);
-    linePath(ctx, [{ x: lx + 2 * z, y: y - h * 0.12 }, { x: lx + 2 * z, y: y - h * 0.72 }], 1, pal.metalDark);
-    for (var rung = 0.16; rung < 0.72; rung += 0.10) {
-      linePath(ctx, [{ x: lx, y: y - h * rung }, { x: lx + 2 * z, y: y - h * rung }], 1, pal.metalLight);
-    }
-    linePath(ctx, [at(-0.75, 0, 0.25), at(0, 0.75, 0.25), at(0.75, 0, 0.25)],
-             Math.max(1, 2 * z), pal.metalDark);
-    [-0.48, 0, 0.48].forEach(function (u) {
-      var nozzle = at(u, 0.64 - Math.abs(u) * 0.3, 0.23);
-      fillOval(ctx, nozzle.x, nozzle.y, Math.max(1, z), Math.max(1, z), pal.metalLight);
-    });
-    var tap = at(-0.35, 0.35, 0.13);
-    drawIsoBoxAt(ctx, tap.x, tap.y, w * 0.22, d * 0.22, h * 0.09,
-                 pal.metalDark, pal.ink, pal.ink);
-    // 炉口是装饰性余热，不表示任务正在运行。
-    fillOval(ctx, tap.x, tap.y - h * 0.04, Math.max(1, w * 0.14), Math.max(1, h * 0.025), pal.rustLight);
-    if (S.night) {
-      ctx.globalAlpha = 0.24;
-      fillOval(ctx, tap.x, tap.y, w * 0.45, d * 0.5, pal.window);
-      ctx.globalAlpha = 1;
-    }
-  }
-
-  function drawDistillationModel(ctx, pal, m) {
-    var z = S.cam.zoom, p = viewPoint(m.x, m.y);
-    var y = p.y - (m.z0 || 0) * z, r = m.r * z, h = m.h * z;
-    var c = roleCols(pal, m.role, m.bg);
-    var foot = h * 0.08, top = y - h * 0.94;
-    drawIsoBoxAt(ctx, p.x, y, m.hw * z, m.hh * z, foot,
-                 pal.concreteLight, pal.concrete, pal.concreteDark);
-    fillOval(ctx, p.x, y - foot, r, r * 0.5, c.right);
-    ctx.fillStyle = c.left;
-    ctx.fillRect(Math.round(p.x - r), Math.round(top), Math.max(1, r * 2), h * 0.86);
-    ctx.fillStyle = c.top;
-    ctx.fillRect(Math.round(p.x - r * 0.65), Math.round(top), Math.max(1, r * 0.35), h * 0.86);
-    ctx.fillStyle = c.right;
-    ctx.fillRect(Math.round(p.x + r * 0.4), Math.round(top), Math.max(1, r * 0.6), h * 0.86);
-    for (var seam = 0.16; seam < 0.94; seam += 0.13) {
-      linePath(ctx, [{ x: p.x - r, y: y - h * seam },
-                    { x: p.x, y: y - h * seam + r * 0.42 },
-                    { x: p.x + r, y: y - h * seam }], 1, c.right);
-    }
-    fillOval(ctx, p.x, top, r, r * 0.5, c.top);
-    fillOval(ctx, p.x, top - h * 0.025, r * 0.72, r * 0.34, c.top);
-    linePath(ctx, [{ x: p.x, y: top - h * 0.02 }, { x: p.x, y: y - h }], Math.max(1, z), pal.metalLight);
-    var count = m.platforms || 3;
-    for (var i = 0; i < count; i += 1) {
-      var dy = y - h * (0.28 + i * 0.25), width = m.hw * z;
-      for (var arc = 0; arc < 10; arc += 1) {
-        var a0 = Math.PI * arc / 10, a1 = Math.PI * (arc + 1) / 10;
-        fillPoly(ctx, [
-          { x: p.x + Math.cos(a0) * width, y: dy + Math.sin(a0) * width * 0.46 },
-          { x: p.x + Math.cos(a1) * width, y: dy + Math.sin(a1) * width * 0.46 },
-          { x: p.x + Math.cos(a1) * r, y: dy + Math.sin(a1) * r * 0.5 },
-          { x: p.x + Math.cos(a0) * r, y: dy + Math.sin(a0) * r * 0.5 }
-        ], pal.metalDark);
-      }
-      linePath(ctx, [{ x: p.x - width, y: dy }, { x: p.x, y: dy + width * 0.46 },
-                    { x: p.x + width, y: dy }], Math.max(1, z), pal.metalLight);
-      [-1, 0, 1].forEach(function (side) {
-        var px = p.x + side * width, py = dy + (side ? 0 : width * 0.46);
-        linePath(ctx, [{ x: px, y: py }, { x: px, y: py - 2.5 * z }], 1, pal.metalDark);
-      });
-      linePath(ctx, [{ x: p.x - width, y: dy - 2.5 * z },
-                    { x: p.x, y: dy + width * 0.46 - 2.5 * z },
-                    { x: p.x + width, y: dy - 2.5 * z }], 1, pal.metalLight);
-    }
-    var lx = p.x + r * 0.45, ly = y - h * 0.86;
-    [0, 2 * z].forEach(function (off) {
-      linePath(ctx, [{ x: lx + off, y: y - foot }, { x: lx + off, y: ly }], 1, pal.metalDark);
-    });
-    for (var step = 4; step < m.h * 0.80; step += 4) {
-      linePath(ctx, [{ x: lx, y: y - step * z }, { x: lx + 2 * z, y: y - step * z }], 1, pal.metalLight);
-    }
-    var pipeX = p.x - r * 1.25;
-    linePath(ctx, [{ x: p.x - r * 0.65, y: y - h * 0.65 },
-                  { x: pipeX, y: y - h * 0.65 }, { x: pipeX, y: y - foot }], Math.max(1, z * 1.5), pal.metalDark);
-    fillOval(ctx, pipeX, y - h * 0.2, Math.max(1, 1.5 * z), Math.max(1, z), pal.rustLight);
-    if (S.night) {
-      ctx.fillStyle = pal.window;
-      ctx.fillRect(Math.round(p.x - r), Math.round(y - h * 0.78), 1, 1);
-    }
-  }
-
-  function drawCylinderModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var base = viewPoint(m.x, m.y);
-    var baseY = base.y - Math.round((m.z0 || 0) * z);
-    var rx = Math.max(2, Math.round(m.r * z));
-    var ry = Math.max(1, Math.round(rx * 0.5));
-    var h = Math.max(3, Math.round(m.h * z));
-    var cols = roleCols(pal, m.role, m.bg);
-    var top = cols.top, left = cols.left, right = cols.right;
-    // 接地弧影 + 底座环
-    fillOval(ctx, base.x, baseY + 1, Math.round(rx * 1.16), Math.round(ry * 1.16), pal.shadow);
-    ctx.fillStyle = m.bg ? pal.bgSteelDark : pal.stoneDark;
-    ctx.fillRect(base.x - rx, baseY - 2, rx * 2, 2);
-    // 筒身：左中右三段受光 + 竖瓦楞
-    fillOval(ctx, base.x, baseY, rx, ry, right);
-    ctx.fillStyle = left;
-    ctx.fillRect(base.x - rx, baseY - h, rx * 2, h);
-    ctx.fillStyle = top;
-    ctx.fillRect(base.x - Math.round(rx * 0.72), baseY - h, Math.round(rx * 0.44), h);
-    ctx.fillStyle = right;
-    ctx.fillRect(base.x + Math.round(rx * 0.30), baseY - h,
-                 Math.max(1, Math.round(rx * 0.70)), h);
-    if (rx > 4 && h > 8) {
-      for (var c = 1; c < 6; c += 1) {
-        var cx = base.x - rx + Math.round(rx * 2 * c / 6);
-        linePath(ctx, [{ x: cx, y: baseY - h }, { x: cx, y: baseY }], 1,
-                 c < 3 ? top : right);
-      }
-    }
-    // 箍圈
-    if (m.bands) {
-      for (var i = 1; i <= m.bands; i += 1) {
-        var by = Math.round(baseY - h * i / (m.bands + 1));
-        ctx.fillStyle = right;
-        ctx.fillRect(base.x - rx, by, rx * 2, 1);
-        ctx.fillStyle = top;
-        ctx.fillRect(base.x - Math.round(rx * 0.5), by, Math.round(rx * 0.52), 1);
-        ctx.fillStyle = left;
-        ctx.fillRect(base.x - rx, by + 1, rx * 2, 1);
-      }
-    }
-    // 顶盖：穹顶带环口；烟囱是开口 + 警示环
-    if (m.chimney) {
-      fillOval(ctx, base.x, baseY - h, rx, ry, top);
-      fillOval(ctx, base.x, baseY - h, Math.max(1, rx - 1), Math.max(1, ry - 1), pal.ink);
-      linePath(ctx, [{ x: base.x - rx, y: baseY - h },
-                    { x: base.x, y: baseY - h + ry },
-                    { x: base.x + rx, y: baseY - h }], 1, pal.steelLight);
-      ctx.fillStyle = pal.bad;
-      ctx.fillRect(base.x - rx, baseY - Math.round(h * 0.86), rx * 2, Math.max(1, Math.round(z)));
-      ctx.fillStyle = pal.mark;
-      ctx.fillRect(base.x - rx, baseY - Math.round(h * 0.80), rx * 2, Math.max(1, Math.round(z)));
-    } else {
-      fillOval(ctx, base.x, baseY - h, rx, ry, top);
-      fillOval(ctx, base.x, baseY - h, Math.max(1, rx - 2), Math.max(1, ry - 1), left);
-      linePath(ctx, [{ x: base.x - Math.round(rx * 0.78), y: baseY - h },
-                    { x: base.x, y: baseY - h - Math.round(ry * 0.72) },
-                    { x: base.x + Math.round(rx * 0.78), y: baseY - h }], 1, top);
-      // 顶部人孔与呼吸阀
-      ctx.fillStyle = pal.metalDark;
-      ctx.fillRect(base.x - 1, baseY - h - 1, 2, 2);
-    }
-    // 爬梯 + 护笼
-    if (m.ladder) {
-      var lx = base.x - Math.round(rx * 0.18);
-      ctx.fillStyle = pal.metalDark;
-      ctx.fillRect(lx, baseY - h + 2, 1, h - 3);
-      ctx.fillRect(lx + Math.max(2, Math.round(rx * 0.22)), baseY - h + 2, 1, h - 3);
-      for (var l = 3; l < h - 2; l += Math.max(3, Math.round(4 * z))) {
-        ctx.fillRect(lx, baseY - h + l, Math.max(2, Math.round(rx * 0.22)), 1);
-      }
-      if (h > 18) {
-        ctx.globalAlpha = 0.7;
-        for (var cg = 6; cg < h - 4; cg += 8) {
-          ctx.fillRect(lx - 1, baseY - h + cg, Math.max(4, Math.round(rx * 0.30)), 1);
-        }
-        ctx.globalAlpha = 1;
-      }
-    }
-    // 侧向出料管：筒仓脚边一根短管
-    if (m.silo) {
-      linePath(ctx, [{ x: base.x + Math.round(rx * 0.55), y: baseY - Math.round(h * 0.12) },
-                    { x: base.x + rx + Math.round(5 * z), y: baseY - Math.round(h * 0.12) },
-                    { x: base.x + rx + Math.round(5 * z), y: baseY + 1 }],
-               Math.max(1, Math.round(2 * z)), pal.metalDark);
-      ctx.fillStyle = pal.metalLight;
-      ctx.fillRect(base.x + rx + Math.round(5 * z), baseY - Math.round(h * 0.12), 1, 1);
-    }
-    if (S.night) {
-      ctx.fillStyle = pal.window;
-      ctx.fillRect(base.x - 1, baseY - h - ry - 1, 2, 2);
-      ctx.globalAlpha = 0.25;
-      fillOval(ctx, base.x, baseY - h - ry - 1, 4, 3, pal.window);
-      ctx.globalAlpha = 1;
-    }
-  }
-
-  function drawConveyorModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var pts = m.path.map(function (p) { return viewPoint(p.x, p.y); });
-    var total = pathLength(pts);
-    if (!total) return;
-    var w = Math.max(2, Math.round(m.width * z));
-    var bg = !!m.bg;
-    var steel = bg ? pal.bgSteel : pal.steel;
-    var steelDark = bg ? pal.bgSteelDark : pal.steelDark;
-    var steelLight = bg ? pal.bgSteelLight : pal.steelLight;
-    var beltCol = bg ? pal.bgSteel : pal.belt;
-    var beltDark = bg ? pal.bgSteelDark : pal.beltDark;
-    var beltMark = bg ? pal.bgSteelLight : pal.beltMark;
-    var ore = bg ? pal.bgRust : pal.ore;
-    var oreDark = bg ? pal.bgRustDark : pal.oreDark;
-    // 支腿：双肢 + 斜撑 + 脚板；低矮支线不画腿，避免像栅栏
-    var step = Math.max(8, vlen(20));
-    for (var d = 0; m.support !== false && d < total; d += step) {
-      var t = d / total;
-      var pt = pointAt(pts, t);
-      var hh = (m.h0 + (m.h1 - m.h0) * t) * z;
-      if (hh < 3) continue;
-      var legW = Math.max(2, Math.round(w * 0.62));
-      ctx.fillStyle = steelDark;
-      ctx.fillRect(Math.round(pt.x - legW), Math.round(pt.y - hh), 1, Math.max(2, Math.round(hh)));
-      ctx.fillRect(Math.round(pt.x + legW), Math.round(pt.y - hh), 1, Math.max(2, Math.round(hh)));
-      ctx.fillStyle = steel;
-      ctx.fillRect(Math.round(pt.x), Math.round(pt.y - hh * 0.55), 1, 1);
-      // 斜撑
-      linePath(ctx, [{ x: pt.x - legW, y: pt.y - 2 },
-                    { x: pt.x + legW, y: pt.y - hh + 1 }], 1, steel);
-      linePath(ctx, [{ x: pt.x + legW, y: pt.y - 2 },
-                    { x: pt.x - legW, y: pt.y - hh + 1 }], 1, steel);
-      // 脚板
-      ctx.fillStyle = steelLight;
-      ctx.fillRect(Math.round(pt.x - legW - 1), Math.round(pt.y - 1), 4, 1);
-    }
-    // 带面：侧裙 + 皮带 + 滚轮刻线 + 边梁；刻线随帧缓慢移动
-    for (var i = 1; i < pts.length; i += 1) {
-      var a = pts[i - 1], b = pts[i];
-      var ta = (i - 1) / Math.max(1, pts.length - 1);
-      var tb = i / Math.max(1, pts.length - 1);
-      var ya = a.y - (m.h0 + (m.h1 - m.h0) * ta) * z;
-      var yb = b.y - (m.h0 + (m.h1 - m.h0) * tb) * z;
-      var dx = b.x - a.x, dy = b.y - a.y;
-      var len = Math.hypot(dx, dy) || 1;
-      var nx = -dy / len * w / 2, ny = dx / len * w / 2;
-      // 侧裙
-      linePath(ctx, [{ x: a.x, y: ya + Math.max(2, Math.round(w * 0.42)) },
-                    { x: b.x, y: yb + Math.max(2, Math.round(w * 0.42)) }],
-               Math.max(1, Math.round(w * 0.66)), beltDark);
-      // 带面
-      fillPoly(ctx, [
-        { x: a.x + nx, y: ya + ny }, { x: a.x - nx, y: ya - ny },
-        { x: b.x - nx, y: yb - ny }, { x: b.x + nx, y: yb + ny },
-      ], beltCol);
-      // 皮带中缝与移动刻线
-      linePath(ctx, [{ x: a.x + nx * 0.15, y: ya + ny * 0.15 },
-                    { x: b.x + nx * 0.15, y: yb + ny * 0.15 }],
-               Math.max(1, Math.round(w * 0.24)), m.ore ? steelDark : beltDark);
-      if (!m.spur && w >= 3) {
-        var phase = ((S.ticks * 0.7 + i * 3) % 14) / 14;
-        var tick = pointAt([a, b], phase);
-        var ty = ya + (yb - ya) * phase;
-        ctx.fillStyle = beltMark;
-        ctx.fillRect(Math.round(tick.x - nx * 0.55), Math.round(ty - ny * 0.55),
-                     Math.max(1, Math.round(w * 0.34)), 1);
-      }
-      // 矿石
-      if (m.ore) {
-        var orePos = pointAt([a, b], 0.45);
-        ctx.fillStyle = ore;
-        ctx.fillRect(Math.round(orePos.x - w * 0.22),
-                     Math.round((ya + yb) / 2 - Math.max(1, w * 0.22)),
-                     Math.max(1, Math.round(w * 0.44)), Math.max(1, Math.round(w * 0.34)));
-        ctx.fillStyle = oreDark;
-        ctx.fillRect(Math.round(orePos.x - w * 0.10),
-                     Math.round((ya + yb) / 2), Math.max(1, Math.round(w * 0.22)), 1);
-        ctx.fillStyle = steelLight;
-        ctx.fillRect(Math.round(orePos.x + w * 0.06),
-                     Math.round((ya + yb) / 2 - Math.max(1, w * 0.22)), 1, 1);
-      }
-      // 边梁亮线
-      linePath(ctx, [{ x: a.x + nx, y: ya + ny }, { x: b.x + nx, y: yb + ny }], 1, steelLight);
-      linePath(ctx, [{ x: a.x - nx, y: ya - ny }, { x: b.x - nx, y: yb - ny }], 1, steelLight);
-    }
-    // 流向高光：只在主干带面上跑两枚低密度像素，给「调度厅 → 厂区」的方向感。
-    // flowStart / flowEnd 来自切片时的原始路径距离，保证拐弯处不会跳回起点。
-    if (!S.reduced && !m.spur && m.projectId && S.flowingProjects.has(m.projectId)
-        && m.flowTotal > 0 && total > 2) {
-      var flowTotal = m.flowTotal;
-      var flowSpeed = m.ore ? 3.6 : 2.6;
-      var flowPhase = (S.ticks * flowSpeed) % flowTotal;
-      [flowPhase, (flowPhase + flowTotal * 0.5) % flowTotal].forEach(function (mark) {
-        if (mark < m.flowStart || mark > m.flowEnd) return;
-        var mt = (mark - m.flowStart) / Math.max(1, m.flowEnd - m.flowStart);
-        var mp = pointAt(pts, mt);
-        var mh = (m.h0 + (m.h1 - m.h0) * mt) * z;
-        var mx = Math.round(mp.x), my = Math.round(mp.y - mh - 1);
-        ctx.fillStyle = m.ore ? pal.paintLight : pal.glassGlow;
-        ctx.fillRect(mx, my, Math.max(1, Math.round(z)), Math.max(1, Math.round(z)));
-        ctx.fillRect(mx - Math.max(1, Math.round(z * 0.5)), my + 1,
-                     Math.max(1, Math.round(z * 0.5)), 1);
-      });
-    }
-    // 夜间边灯：沿带面每隔一段一颗暖黄小灯
-    if (S.night && !bg) {
-      for (var nd = 0; nd <= total; nd += Math.max(10, vlen(26))) {
-        var nt = total ? nd / total : 0;
-        var np = pointAt(pts, nt);
-        np.y -= (m.h0 + (m.h1 - m.h0) * nt) * z;
-        ctx.fillStyle = pal.window;
-        ctx.fillRect(Math.round(np.x), Math.round(np.y) + 1, 1, 1);
-      }
-    }
-  }
-
-  function drawMachineModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var base = viewPoint(m.x, m.y);
-    var baseY = base.y - Math.round((m.z0 || 0) * z);
-    var hw = Math.max(3, Math.round(m.hw * z));
-    var hh = Math.max(1, Math.round(m.hh * z));
-    var h = Math.max(4, Math.round(m.h * z));
-    var line = m.line;
-    var skid = Math.max(2, Math.round(2 * z));
-    // 滑撬底座 + 主体
-    fillDiamond(ctx, base.x, baseY, hw + Math.max(1, Math.round(z)), hh + 1, pal.ink);
-    drawIsoBoxAt(ctx, base.x, baseY - skid, hw, hh, skid,
-                 pal.steelLight, pal.metal, pal.metalDark);
-    drawIsoBoxAt(ctx, base.x, baseY - skid, hw, hh, h,
-                 pal.steelLight, pal.steel, pal.steelDark);
-    // 侧板与散热格栅
-    ctx.fillStyle = pal.steelMid;
-    for (var gr = 1; gr <= 3; gr += 1) {
-      linePath(ctx, [{ x: base.x - hw + hw * 0.18, y: baseY - h + hh * 0.18 + gr * h * 0.18 },
-                    { x: base.x - hw + hw * 0.70, y: baseY - h + hh * 0.70 + gr * h * 0.18 }],
-               1, pal.steelDark);
-    }
-    // 产线色带（顶沿）+ 反光
-    var tones = [pal.rust, pal.glassLight, pal.ok, pal.product];
-    var tone = tones[Math.abs(hashKey(m.rec.key)) % tones.length];
-    ctx.fillStyle = tone;
-    ctx.fillRect(base.x - hw, baseY - skid - h, Math.max(1, hw * 2), Math.max(1, Math.round(z * 1.3)));
-    ctx.fillStyle = pal.steelLight;
-    ctx.fillRect(base.x - hw, baseY - skid - h, Math.max(1, hw * 2), 1);
-    // 右面控制柜：屏幕 + 按钮
-    var cabW = Math.max(2, Math.round(hw * 0.42));
-    var cabH = Math.max(2, Math.round(h * 0.44));
-    var cabX = base.x + Math.max(1, Math.round(hw * 0.28));
-    var cabY = baseY - skid - Math.max(1, Math.round(h * 0.82));
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(cabX, cabY, cabW, cabH);
-    ctx.fillStyle = line.status === "running" ? pal.glassGlow : pal.steelDark;
-    ctx.fillRect(cabX + 1, cabY + 1, Math.max(1, cabW - 2), Math.max(1, Math.round(cabH * 0.42)));
-    ctx.fillStyle = line.status === "running" ? pal.ok : pal.idle;
-    ctx.fillRect(cabX + 1, cabY + cabH - 2, 1, 1);
-    ctx.fillStyle = pal.paint;
-    ctx.fillRect(cabX + cabW - 2, cabY + cabH - 2, 1, 1);
-    // 状态灯柱。运行中被判成停滞时灯从绿转暗黄：这是「在跑但不健康」，
-    // 与「失败」（红）和「正常在跑」（绿）都不同——它还没失败，只是不动了。
-    var stall = line.status === "running" ? lineStall(line) : "";
-    var lamp = pal.idle;
-    if (line.status === "paused" || line.status === "stopped") lamp = pal.warn;
-    else if (line.status === "failed" || line.last_status === "error") lamp = pal.bad;
-    else if (line.status === "running") lamp = stall ? pal.warn : pal.ok;
-    else if (line.last_status === "empty"
-             || (line.health && line.health.last_outcome === "partial")) lamp = pal.warn;
-    var poleH = Math.max(4, Math.round(6 * z));
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(base.x + hw - 1, baseY - skid - h - poleH, 1, poleH + 1);
-    ctx.fillStyle = lamp;
-    ctx.fillRect(base.x + hw - 1, baseY - skid - h - poleH, 2, 2);
-    if (line.status === "running") {
-      // 正常运行的指示灯轻轻呼吸；停滞灯保持克制，减弱动态时两者都静止。
-      var glowPulse = !S.reduced && !stall ? 0.82 + 0.18 * Math.sin(S.ticks * 0.10 + m.index) : 1;
-      ctx.globalAlpha = (S.night ? 0.32 : 0.16) * glowPulse;
-      fillOval(ctx, base.x + hw, baseY - skid - h - poleH, Math.max(3, 4 * z),
-               Math.max(2, 3 * z), lamp);
-      ctx.globalAlpha = 1;
-    }
-    // 快超时 / 已超时：机台顶部冒烟。烟从机台正上方走，不与状态灯抢位置。
-    if (stall === "nearTimeout" || stall === "timeout") {
-      var puff = stall === "timeout" ? 4 : 2;
-      for (var sp = 0; sp < puff; sp += 1) {
-        var st2 = ((S.ticks * (stall === "timeout" ? 0.06 : 0.045) + sp * 0.25) % 1);
-        var sx2 = base.x + Math.sin(S.ticks * 0.05 + sp) * Math.max(1, 2.5 * z) - st2 * 2;
-        var sy2 = baseY - skid - h - st2 * Math.max(8, 18 * z);
-        var sr = Math.max(1, (1.4 + st2 * 3) * z);
-        ctx.globalAlpha = (1 - st2) * (stall === "timeout" ? 0.55 : 0.32);
-        fillOval(ctx, Math.round(sx2), Math.round(sy2), sr, sr * 0.75,
-                 stall === "timeout" ? pal.ink : pal.smoke);
-      }
-      ctx.globalAlpha = 1;
-    }
-    // 运行中的活塞臂：小工位有节奏地往复
-    if (line.status === "running") {
-      var arm = Math.round(Math.sin(S.ticks * 0.9) * Math.max(1, hw * 0.22));
-      ctx.fillStyle = pal.metalLight;
-      ctx.fillRect(base.x - hw - Math.max(1, Math.round(z)) + arm,
-                   baseY - skid - Math.max(2, Math.round(h * 0.52)), Math.max(2, Math.round(z * 2)), 1);
-    }
-    // 出料滑槽 + 小成品箱
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(base.x - hw - Math.max(1, Math.round(2 * z)), baseY + hh - 1,
-                 Math.max(2, Math.round(3 * z)), Math.max(1, Math.round(z)));
-    if (hw > 4) {
-      drawIsoBoxAt(ctx, base.x - hw - Math.max(1, Math.round(2 * z)), baseY + hh + Math.max(1, Math.round(z)),
-                   Math.max(1, Math.round(2 * z)), Math.max(1, Math.round(z)),
-                   Math.max(2, Math.round(3 * z)), pal.crateLight, pal.crate, pal.crateDark);
-    }
-    // 装配线：工位串在后沿短带上，带面本身就是依赖流向
-    if (line.kind === "pipeline" && (line.nodes || []).length) {
-      drawPipelineFlow(ctx, pal, m, base, baseY, hw, hh);
-    }
-    m.rec._vx = base.x;
-    m.rec._vy = baseY - skid - h - poleH - Math.max(4, vlen(6));
-  }
-
-  /** 装配线的工位流向：带面 + 逐工位的料状态。
-
-      以前只画三颗灯珠，看得出「有几个工位」，看不出「谁在等谁」——而依赖流向
-      正是装配线区别于单机产线的地方。现在：
-      - 带面分三段着色：上游已出料的段是亮的，被失败 / 等待卡住的段是暗的；
-      - 每个工位上方站一个小料箱，只有 `done` 的工位才有料流到下一段；
-      - `blocked`（等待依赖）画成空位 + 暗灯，`ready` 画成待料的小空箱，
-        `running` 画成料箱 + 活塞抖动，`done` 画成成品箱 + 亮灯；
-      - 任一工位 `error`：它之后的整段带面画成断开（红色缺口），下游亮「等料」。
-      以上全是表现层，节点状态机仍以 nodeStatusText 为准。 */
-  function drawPipelineFlow(ctx, pal, m, base, baseY, hw, hh) {
-    var z = S.cam.zoom;
-    var nodes = m.line.nodes || [];
-    var n = Math.min(PIPELINE_MAX_NODES, nodes.length);
-    if (!n) return;
-    var x0 = base.x - hw * 1.15;
-    var span = hw * 2.3;
-    var y = baseY + hh - Math.max(1, Math.round(2 * z));
-    var stepPx = n > 1 ? span / (n - 1) : 0;
-    // 找到第一个失败的工位：它之后的带面全部断开
-    var breakAt = -1;
-    for (var b = 0; b < n; b += 1) {
-      if (nodes[b].status === "error" || nodes[b].status === "cancelled") { breakAt = b; break; }
-    }
-    // 带面分段：上游 done 越多，亮段越长
-    for (var seg = 0; seg < n; seg += 1) {
-      var ax = x0 + stepPx * seg;
-      var bx2 = x0 + stepPx * (seg + 1);
-      var lit = seg < n - 1 && nodes[seg].status === "done" && (breakAt < 0 || seg < breakAt);
-      var col = lit ? pal.beltMark : pal.beltDark;
-      if (seg === breakAt) col = pal.bad;   // 断口
-      linePath(ctx, [{ x: ax, y: y }, { x: bx2, y: y }], Math.max(1, Math.round(z * 1.2)), col);
-      // 卡料：断口前堆一小撮，表示料过不去
-      if (seg === breakAt - 1 && breakAt > 0) {
-        ctx.fillStyle = pal.crateDark;
-        ctx.fillRect(Math.round(bx2 - Math.max(1, z)), Math.round(y - Math.max(1, z * 1.5)),
-                     Math.max(1, Math.round(z * 1.5)), Math.max(1, Math.round(z * 1.5)));
-      }
-    }
-    for (var i = 0; i < n; i += 1) {
-      var sx = Math.round(x0 + stepPx * i);
-      var node = nodes[i];
-      var st = String(node.status || "");
-      var blockedDown = breakAt >= 0 && i > breakAt;
-      // 支柱
-      ctx.fillStyle = pal.steelDark;
-      ctx.fillRect(sx - Math.max(1, Math.round(z)), Math.round(y - Math.max(2, 3 * z)),
-                   Math.max(2, Math.round(2 * z)), Math.max(2, Math.round(3 * z)));
-      // 工位料箱
-      var bw = Math.max(1, Math.round(2.2 * z));
-      var boxY = y - Math.max(3, 4 * z);
-      if (st === "done") {
-        drawIsoBoxAt(ctx, sx, boxY, bw, Math.max(1, Math.round(bw * 0.5)), bw,
-                     pal.product, pal.crate, pal.crateDark);
-      } else if (st === "running") {
-        var shake = S.reduced ? 0 : Math.round(Math.sin(S.ticks * 0.9 + i) * Math.max(0.6, z * 0.7));
-        drawIsoBoxAt(ctx, sx, boxY + shake, bw, Math.max(1, Math.round(bw * 0.5)), bw,
-                     pal.crateLight, pal.crate, pal.crateDark);
-      } else if (st === "ready") {
-        // 待料：空箱（只有框）
-        linePath(ctx, ringPts(sx, boxY, bw, Math.max(1, Math.round(bw * 0.5))),
-                 Math.max(1, Math.round(z)), pal.metalDark);
-      }
-      // 状态灯
-      var nc = st === "running" ? pal.ok
-        : st === "error" || st === "cancelled" ? pal.bad
-          : st === "done" ? pal.steelLight
-            : blockedDown ? pal.warn : pal.idle;
-      ctx.fillStyle = nc;
-      ctx.fillRect(sx, boxY - Math.max(2, 3 * z), Math.max(1, Math.round(z)), Math.max(1, Math.round(z)));
-      // 下游等料：灯下挂一小段红色虚线，指着断口方向
-      if (blockedDown && !S.reduced) {
-        ctx.globalAlpha = 0.6;
-        ctx.fillStyle = pal.warn;
-        for (var d = 0; d < 2; d += 1) {
-          ctx.fillRect(sx - Math.round(stepPx * 0.3) - d * Math.max(1, Math.round(2 * z)),
-                       boxY - Math.max(3, 4 * z), Math.max(1, Math.round(z)), 1);
-        }
-        ctx.globalAlpha = 1;
-      }
-    }
-  }
-
-  function isToday(sec) {
-    if (!sec) return false;
-    var d = new Date(sec * 1000);
-    var n = new Date();
-    return d.getFullYear() === n.getFullYear() &&
-      d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
-  }
-
-  function drawPalletModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var base = viewPoint(m.x, m.y);
-    var baseY = base.y - Math.round((m.z0 || 0) * z);
-    var w = Math.max(8, Math.round(22 * z));
-    var h = Math.max(2, Math.round(3 * z));
-    var hw = Math.round(w * 0.5), hh = Math.max(1, Math.round(h * 0.5));
-    // 停放框：黄漆虚线 + 四角短标
-    if (m.bay) {
-      ctx.globalAlpha = 0.55;
-      var bayHW = hw + Math.max(4, Math.round(6 * z));
-      var bayHH = hh + Math.max(2, Math.round(3 * z));
-      linePath(ctx, [{ x: base.x - bayHW, y: baseY }, { x: base.x, y: baseY + bayHH },
-                    { x: base.x + bayHW, y: baseY }, { x: base.x, y: baseY - bayHH },
-                    { x: base.x - bayHW, y: baseY }],
-               1, pal.paint);
-      ctx.globalAlpha = 1;
-    }
-    // 木托盘：底档 + 板条
-    ctx.fillStyle = pal.crateDark;
-    ctx.fillRect(base.x - hw, baseY - h, w, h);
-    ctx.fillStyle = pal.crate;
-    ctx.fillRect(base.x - hw + 1, baseY - h + 1, Math.max(1, w - 2), Math.max(1, h - 1));
-    for (var slat = 1; slat <= 4; slat += 1) {
-      ctx.fillStyle = pal.crateDark;
-      ctx.fillRect(Math.round(base.x - hw + w * slat / 5), baseY - h + 1, 1, Math.max(1, h - 1));
-    }
-    ctx.fillStyle = pal.crateLight;
-    ctx.fillRect(base.x - hw + 1, baseY - h, Math.max(1, w - 2), 1);
-    // 成品垛：瓦楞纸箱 + 胶带 + 标签
-    var done = 0;
-    var st = activeState();
-    ((st && st.runs) || []).forEach(function (r) {
-      if (r.project_id === m.projectId && r.status === "done" && isToday(r.finished_at)) done += 1;
-    });
-    var stack = Math.min(5, done);
-    var bw = Math.max(2, Math.round(4 * z));
-    for (var i = 0; i < stack; i += 1) {
-      var col = i % 2, row = Math.floor(i / 2);
-      var bx = base.x - Math.round(bw * 1.15) + col * (bw + 1);
-      var by = baseY - h - row * (bw + 1);
-      drawIsoBoxAt(ctx, bx, by, bw, Math.max(1, bw * 0.5), Math.max(2, bw),
-                   pal.product, pal.crate, pal.crateDark);
-      // 胶带十字 + 面单
-      ctx.fillStyle = pal.crateLight;
-      ctx.fillRect(bx - 1, by - Math.max(2, bw), Math.max(1, bw * 2 - 1), 1);
-      ctx.fillStyle = pal.mark;
-      ctx.fillRect(bx + Math.max(1, Math.round(bw * 0.3)),
-                   by - Math.max(2, bw) + 1, Math.max(1, Math.round(bw * 0.4)), 1);
-    }
-    // 小旗 + 托盘编号牌
-    var poleX = base.x + Math.round(w / 2) - 1;
-    var poleH = Math.max(4, Math.round(9 * z));
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(poleX, baseY - h - poleH, 1, poleH);
-    ctx.fillStyle = pal.ok;
-    ctx.fillRect(poleX + 1, baseY - h - poleH, Math.max(2, Math.round(3 * z)),
-                 Math.max(1, Math.round(2 * z)));
-    ctx.fillStyle = pal.paint;
-    ctx.fillRect(base.x - hw + 1, baseY - h - Math.max(1, Math.round(2 * z)),
-                 Math.max(2, Math.round(3 * z)), 1);
-  }
-
-  function drawCrateModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var base = viewPoint(m.x, m.y);
-    var baseY = base.y - Math.round((m.z0 || 0) * z);
-    var s = Math.max(2, Math.round(4 * z)) * (m.s || 1);
-    fillOval(ctx, base.x, baseY + 1, s + 1, Math.max(1, Math.round(2 * z)), pal.shadow);
-    drawIsoBoxAt(ctx, base.x, baseY, s, Math.max(1, s * 0.5), s * 2,
-                 pal.crateLight, pal.crate, pal.crateDark);
-    ctx.fillStyle = pal.crateDark;
-    ctx.fillRect(base.x - 1, baseY - s * 2, 1, s * 2);
-  }
-
-  function drawBarrelModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var base = viewPoint(m.x, m.y);
-    var baseY = base.y - Math.round((m.z0 || 0) * z);
-    var s = Math.max(2, Math.round(3 * z)) * (m.s || 1);
-    var h = Math.max(4, Math.round(7 * z));
-    fillOval(ctx, base.x, baseY + 1, s + 1, Math.max(1, Math.round(2 * z)), pal.shadow);
-    ctx.fillStyle = pal.crateDark;
-    ctx.fillRect(base.x - s, baseY - h, s * 2, h);
-    ctx.fillStyle = pal.crate;
-    ctx.fillRect(base.x - s + 1, baseY - h + 1, Math.max(1, s * 2 - 2), Math.max(1, h - 2));
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(base.x - s, baseY - Math.round(h * 0.7), s * 2, 1);
-    ctx.fillRect(base.x - s, baseY - Math.round(h * 0.25), s * 2, 1);
-    fillOval(ctx, base.x, baseY - h, s, Math.max(1, s * 0.5), pal.crateLight);
-  }
-
-  function drawOreModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var s = Math.max(3, Math.round(7 * z)) * (m.s || 1);
-    var ore = m.bg ? pal.bgRust : pal.ore;
-    var oreDark = m.bg ? pal.bgRustDark : pal.oreDark;
-    var oreHi = m.bg ? pal.bgRustLight : pal.rustLight;
-    fillOval(ctx, p.x, p.y, s * 1.4, s * 0.6, pal.shadow);
-    fillOval(ctx, p.x, p.y - 1, s, s * 0.6, oreDark);
-    fillOval(ctx, p.x - s * 0.3, p.y - 2, s * 0.7, s * 0.45, ore);
-    ctx.fillStyle = oreHi;
-    ctx.fillRect(Math.round(p.x - s * 0.2), Math.round(p.y - s * 0.7), 1, 1);
-    ctx.fillRect(Math.round(p.x + s * 0.3), Math.round(p.y - s * 0.4), 1, 1);
-  }
-
-  function drawWorkerModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var u = clamp(Math.round(2.8 * z), 2, 4);
-    var size = 6 * u;
-    fillOval(ctx, p.x, baseY + 1, Math.round(size * 0.5), Math.max(1, u), pal.shadow);
-    ctx.save();
-    ctx.translate(Math.round(p.x), Math.round(baseY));
-    var top = -size;
-    ctx.fillStyle = pal.sheepFace;
-    ctx.fillRect(-Math.round(size * 0.30), -Math.round(size * 0.40), u, Math.round(size * 0.40));
-    ctx.fillRect(Math.round(size * 0.18), -Math.round(size * 0.40), u, Math.round(size * 0.40));
-    ctx.fillStyle = pal.sheep;
-    ctx.fillRect(-Math.round(size * 0.52), top, Math.round(size * 0.9), Math.round(size * 0.5));
-    ctx.fillStyle = pal.sheepShade;
-    ctx.fillRect(-Math.round(size * 0.52), top + Math.round(size * 0.42),
-                 Math.round(size * 0.9), Math.max(1, u));
-    // 反光背心：让工头在灰坪上有个暖色落点
-    ctx.fillStyle = pal.paint;
-    ctx.fillRect(-Math.round(size * 0.40), top + Math.round(size * 0.28),
-                 Math.round(size * 0.64), Math.max(1, u));
-    ctx.fillStyle = pal.sheepFace;
-    ctx.fillRect(Math.round(size * 0.26), top + Math.round(size * 0.06),
-                 Math.round(size * 0.42), Math.round(size * 0.34));
-    ctx.fillStyle = pal.warn;
-    ctx.fillRect(Math.round(size * 0.08), top - Math.round(u * 0.6),
-                 Math.round(size * 0.62), Math.max(1, u));
-    ctx.fillRect(Math.round(size * 0.18), top - Math.round(u * 1.6),
-                 Math.round(size * 0.4), Math.max(1, u));
-    ctx.restore();
-  }
-
-  function drawPylonModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var h = Math.max(10, Math.round(34 * z));
-    var w = Math.max(3, Math.round(9 * z));
-    var steel = pal.bgSteel, dark = pal.bgSteelDark;
-    linePath(ctx, [{ x: p.x - w, y: p.y }, { x: p.x - Math.round(w * 0.35), y: p.y - h }], 1, dark);
-    linePath(ctx, [{ x: p.x + w, y: p.y }, { x: p.x + Math.round(w * 0.35), y: p.y - h }], 1, dark);
-    for (var i = 1; i <= 4; i += 1) {
-      var yy = p.y - Math.round(h * i / 5);
-      var ww = Math.round(w * (1 - i / 5) + 1);
-      ctx.fillStyle = steel;
-      ctx.fillRect(p.x - ww, yy, ww * 2, 1);
-    }
-    ctx.fillStyle = steel;
-    ctx.fillRect(p.x - Math.round(w * 1.6), p.y - h + Math.round(h * 0.12), Math.round(w * 3.2), 1);
-    ctx.fillStyle = pal.bgRust;
-    ctx.fillRect(p.x - Math.round(w * 1.2), p.y - h + Math.round(h * 0.12) + 1, 1, 2);
-    ctx.fillRect(p.x + Math.round(w * 1.2), p.y - h + Math.round(h * 0.12) + 1, 1, 2);
-  }
-
-  function drawRailModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var pts = m.path.map(function (q) { return viewPoint(q.x, q.y); });
-    linePath(ctx, pts, Math.max(1, Math.round(2 * z)), pal.bgSteelDark);
-    var total = pathLength(pts);
-    for (var d = 0; d < total; d += Math.max(4, Math.round(8 * z))) {
-      var pt = pointAt(pts, total ? d / total : 0);
-      ctx.fillStyle = pal.bgSteel;
-      ctx.fillRect(Math.round(pt.x - 2), Math.round(pt.y), 4, 1);
-    }
-  }
-
-  function drawRockModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var s = Math.max(2, Math.round((m.s || 1) * 4 * z));
-    fillOval(ctx, p.x, p.y + 1, s, Math.max(1, Math.round(s * 0.45)), pal.shadow);
-    ctx.fillStyle = pal.bgSteelDark;
-    ctx.fillRect(p.x - s, p.y - s, s * 2, s);
-    ctx.fillStyle = pal.bgSteel;
-    ctx.fillRect(p.x - s + 1, p.y - s, Math.max(1, s), Math.max(1, s - 1));
-  }
-
-  function drawShrubModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var s = Math.max(1, Math.round((m.s || 1) * 3 * z));
-    ctx.fillStyle = pal.bgRustDark;
-    ctx.fillRect(p.x - s, p.y - 1, s * 2, 1);
-    ctx.fillStyle = pal.bgRust;
-    ctx.fillRect(p.x - s + 1, p.y - 2, Math.max(1, s), 1);
-    ctx.fillRect(p.x, p.y - 3, Math.max(1, s), 1);
-  }
-
-  function drawSkyline(ctx, pal, skyH, W) {
-    var rand = seeded(0x51C1E);
-    ctx.globalAlpha = S.night ? 0.45 : 0.38;
-    ctx.fillStyle = pal.bgHaze;
-    for (var i = 0; i < 16; i += 1) {
-      var x = Math.round(i * W / 15 + rand() * 10);
-      var w = Math.round(10 + rand() * 26);
-      var h = Math.round(5 + rand() * 14);
-      var shape = rand();
-      if (shape > 0.8) {
-        fillPoly(ctx, [
-          { x: x, y: skyH }, { x: x + Math.round(w * 0.28), y: skyH - h },
-          { x: x + Math.round(w * 0.72), y: skyH - h }, { x: x + w, y: skyH },
-        ], pal.bgHaze);
-      } else if (shape > 0.62) {
-        fillPoly(ctx, [
-          { x: x, y: skyH - h }, { x: x + Math.round(w / 2), y: skyH - h - 5 },
-          { x: x + w, y: skyH - h },
-        ], pal.bgHaze);
-        ctx.fillRect(x, skyH - h, w, h);
-      } else {
-        ctx.fillRect(x, skyH - h, w, h);
-      }
-      if (rand() > 0.55) ctx.fillRect(x + Math.round(w * 0.3), skyH - h - 7, 1, 7);
-    }
-    ctx.globalAlpha = S.night ? 0.6 : 0.5;
-    ctx.fillStyle = pal.bgSteel;
-    for (var j = 0; j < 10; j += 1) {
-      var x2 = Math.round(j * W / 9 + rand() * 16);
-      var w2 = Math.round(14 + rand() * 34);
-      var h2 = Math.round(8 + rand() * 20);
-      ctx.fillRect(x2, skyH - h2, w2, h2);
-      if (rand() > 0.55) {
-        fillOval(ctx, x2 + Math.round(w2 * 0.68), skyH - h2 - 3,
-                 Math.round(w2 * 0.16), 3, pal.bgRust);
-      }
-      if (S.night) {
-        ctx.fillStyle = pal.window;
-        for (var k = 0; k < 3; k += 1) ctx.fillRect(x2 + 4 + k * 6, skyH - h2 + 4, 1, 1);
-        ctx.fillStyle = pal.bgSteel;
-      }
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function drawGantryModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var w = Math.max(6, Math.round(m.w * z));
-    var h = Math.max(8, Math.round(m.h * z));
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(p.x - w, baseY - h, 2, h);
-    ctx.fillRect(p.x + w - 2, baseY - h, 2, h);
-    ctx.fillStyle = pal.steelLight;
-    ctx.fillRect(p.x - w, baseY - h, w * 2, 2);
-    ctx.fillStyle = pal.metal;
-    for (var i = 1; i < 4; i += 1) {
-      ctx.fillRect(p.x - w, baseY - h + Math.round(h * i / 4), w * 2, 1);
-    }
-    ctx.fillStyle = pal.warn;
-    ctx.fillRect(p.x - 3, baseY - h + 2, 6, 2);
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(p.x, baseY - h + 4, 1, Math.round(h * 0.4));
-    ctx.fillStyle = pal.warn;
-    ctx.fillRect(p.x - 1, baseY - h + 4 + Math.round(h * 0.4), 2, 2);
-  }
-
-  function drawCatwalkModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var hw = Math.max(6, Math.round(m.hw * z));
-    var hh = Math.max(3, Math.round(m.hh * z));
-    drawIsoBoxAt(ctx, p.x, baseY, hw, hh, Math.max(1, Math.round(2 * z)),
-                 pal.steelLight, pal.steel, pal.steelDark);
-    var ph = Math.max(2, Math.round(4 * z));
-    for (var k = 0; k <= 4; k += 1) {
-      var t = k / 4;
-      ctx.fillStyle = pal.steelDark;
-      ctx.fillRect(Math.round(p.x - hw + hw * t), Math.round(baseY + hh * t - ph), 1, ph);
-      ctx.fillRect(Math.round(p.x + hw - hw * t), Math.round(baseY + hh * t - ph), 1, ph);
-    }
-    linePath(ctx, [{ x: p.x - hw, y: baseY }, { x: p.x, y: baseY + hh }], 1, pal.steelLight);
-    linePath(ctx, [{ x: p.x, y: baseY + hh }, { x: p.x + hw, y: baseY }], 1, pal.steelLight);
-  }
-
-  function drawCoolingTowerModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - (m.z0 || 0) * z;
-    var r = m.r * z, h = m.h * z;
-    var cols = roleCols(pal, "concrete", m.bg);
-    var levels = [
-      { t: 0, r: 1 }, { t: 0.12, r: 0.90 }, { t: 0.30, r: 0.69 },
-      { t: 0.52, r: 0.55 }, { t: 0.69, r: 0.53 }, { t: 0.84, r: 0.59 }, { t: 1, r: 0.72 },
-    ];
-    drawIsoBoxAt(ctx, p.x, baseY + 3 * z, r * 1.18, r * 0.52, 4 * z,
-                 pal.stoneLight, pal.stone, pal.stoneDark);
-    fillOval(ctx, p.x, baseY, r, r * 0.35, cols.right);
-    for (var leg = 0; leg < 10; leg += 1) {
-      var a = Math.PI * leg / 9;
-      var lx = p.x + Math.cos(a) * r * 0.88;
-      var ly = baseY + Math.sin(a) * r * 0.3;
-      linePath(ctx, [{ x: lx, y: ly }, { x: lx - Math.cos(a) * 2 * z, y: ly - 8 * z }],
-               Math.max(1, vlen(2)), cols.top);
-    }
-    var shellBase = baseY - 7 * z;
-    // 每个圆环分成受光、过渡与背光面，轮廓收腰而非直筒。
-    for (var band = 0; band < levels.length - 1; band += 1) {
-      var lo = levels[band], hi = levels[band + 1];
-      for (var face = 0; face < 12; face += 1) {
-        var a0 = Math.PI * face / 12, a1 = Math.PI * (face + 1) / 12;
-        function shellPoint(level, angle) {
-          return { x: p.x + Math.cos(angle) * r * level.r,
-                   y: shellBase - level.t * (h - 7 * z) + Math.sin(angle) * r * level.r * 0.32 };
-        }
-        fillPoly(ctx, [shellPoint(lo, a0), shellPoint(lo, a1), shellPoint(hi, a1), shellPoint(hi, a0)],
-                 face < 3 ? cols.right : face < 7 ? cols.left : cols.top);
-      }
-    }
-    for (var rib = 1; rib < 12; rib += 1) {
-      var angle = Math.PI * rib / 12;
-      var pts = levels.map(function (lv) {
-        return { x: p.x + Math.cos(angle) * r * lv.r,
-                 y: shellBase - lv.t * (h - 7 * z) + Math.sin(angle) * r * lv.r * 0.32 };
-      });
-      ctx.globalAlpha = rib % 3 === 0 ? 0.55 : 0.25;
-      linePath(ctx, pts, 1, rib < 6 ? cols.right : cols.left);
-    }
-    ctx.globalAlpha = 1;
-    var topY = baseY - h, rimR = r * 0.72;
-    fillOval(ctx, p.x, topY, rimR, rimR * 0.34, cols.top);
-    fillOval(ctx, p.x, topY, Math.max(1, rimR - 2 * z), Math.max(1, rimR * 0.34 - z), pal.ink);
-    linePath(ctx, [{ x: p.x - rimR, y: topY }, { x: p.x - rimR * 0.6, y: topY + rimR * 0.24 },
-                  { x: p.x + rimR * 0.6, y: topY + rimR * 0.24 }, { x: p.x + rimR, y: topY }], 1, cols.top);
-    var ladderX = p.x + r * 0.28;
-    linePath(ctx, [{ x: ladderX, y: shellBase + 2 * z }, { x: ladderX, y: topY + 3 * z }], 1, pal.metalDark);
-    linePath(ctx, [{ x: ladderX + 3 * z, y: shellBase + 2 * z }, { x: ladderX + 3 * z, y: topY + 3 * z }], 1, pal.metalDark);
-    for (var rung = 5; rung < m.h - 6; rung += 5) {
-      linePath(ctx, [{ x: ladderX, y: baseY - rung * z }, { x: ladderX + 3 * z, y: baseY - rung * z }], 1, pal.metalLight);
-    }
-    if (S.night) fillOval(ctx, p.x - rimR * 0.8, topY, Math.max(1, z), Math.max(1, z), pal.bad);
-  }
-
-  function elevatedPoint(m, t, offset, lift) {
-    var a = m.path[0], b = m.path[m.path.length - 1];
-    var dx = b.x - a.x, dy = b.y - a.y;
-    var length = Math.hypot(dx, dy) || 1;
-    var p = viewPoint(a.x + dx * t - dy / length * offset, a.y + dy * t + dx / length * offset);
-    p.y -= ((m.h0 + (m.h1 - m.h0) * t) + (lift || 0)) * S.cam.zoom;
-    return p;
-  }
-
-  // 远景公用设施用雾化色，别让远处的桥和管廊比近景还抢眼
-  function mutedPalette(pal) {
-    var pc = Object.create(pal);
-    pc.steel = pal.bgSteel; pc.steelDark = pal.bgSteelDark; pc.steelLight = pal.bgSteelLight;
-    pc.rust = pal.bgRust; pc.rustDark = pal.bgRustDark; pc.rustLight = pal.bgRustLight;
-    pc.metal = pal.bgSteel; pc.metalDark = pal.bgSteelDark; pc.metalLight = pal.bgSteelLight;
-    return pc;
-  }
-
-  function drawRackSupports(ctx, pal, m) {
-    var length = pathLength(m.path);
-    var bays = Math.max(1, Math.ceil(length / 24));
-    for (var i = 0; i <= bays; i += 1) {
-      var t = i / bays;
-      var left = elevatedPoint(m, t, -m.width * 0.58, 0);
-      var right = elevatedPoint(m, t, m.width * 0.58, 0);
-      var height = (m.h0 + (m.h1 - m.h0) * t) * S.cam.zoom;
-      [left, right].forEach(function (pt) {
-        linePath(ctx, [{ x: pt.x, y: pt.y + height }, pt], Math.max(1, vlen(2)), pal.steelDark);
-        drawIsoBoxAt(ctx, pt.x, pt.y + height + 1, vlen(3), vlen(1.5), vlen(2),
-                     pal.stoneLight, pal.stone, pal.stoneDark);
-      });
-      linePath(ctx, [left, right], Math.max(1, vlen(2)), pal.steelLight);
-      if (i < bays) {
-        var next = elevatedPoint(m, (i + 1) / bays, m.width * 0.58, 0);
-        linePath(ctx, [{ x: right.x, y: right.y + height * 0.75 }, next], 1, pal.steel);
-        linePath(ctx, [right, { x: next.x, y: next.y + height * 0.75 }], 1, pal.steelDark);
-      }
-    }
-    return bays;
-  }
-
-  function drawPipeRackModel(ctx, pal, m) {
-    var pc = m.bg ? mutedPalette(pal) : pal;
-    var bays = drawRackSupports(ctx, pc, m);
-    for (var pipe = 0; pipe < 3; pipe += 1) {
-      var offset = (pipe - 1) * m.width * 0.30;
-      var pts = [elevatedPoint(m, 0, offset, 3), elevatedPoint(m, 1, offset, 3)];
-      linePath(ctx, pts, vlen(3), pipe === 1 ? pc.rustDark : pc.metalDark);
-      linePath(ctx, pts.map(function (p) { return { x: p.x, y: p.y - 1 }; }),
-               Math.max(1, vlen(1)), pipe === 1 ? pc.rustLight : pc.metalLight);
-      for (var flange = 0; flange <= bays; flange += 1) {
-        var pt = elevatedPoint(m, flange / bays, offset, 3);
-        linePath(ctx, [{ x: pt.x - 1, y: pt.y - 2 }, { x: pt.x + 1, y: pt.y + 2 }], 1, pc.steelLight);
-      }
-    }
-    var elbow = elevatedPoint(m, 1, 0, 3);
-    var down = elevatedPoint(m, 1, 0, -m.h1 + 4);
-    linePath(ctx, [elbow, down], vlen(3), pc.rustDark);
-    linePath(ctx, [{ x: elbow.x - 1, y: elbow.y }, { x: down.x - 1, y: down.y }], 1, pc.rustLight);
-    var valve = elevatedPoint(m, 0.52, 0, 5);
-    linePath(ctx, [valve, { x: valve.x, y: valve.y - vlen(5) }], 1, pc.metalDark);
-    fillOval(ctx, valve.x, valve.y - vlen(5), vlen(3), vlen(1.5), pc.rust);
-  }
-
-  function drawTransferBridgeModel(ctx, pal, m) {
-    var pc = m.bg ? mutedPalette(pal) : pal;
-    var bays = drawRackSupports(ctx, pc, m) * 2;
-    var a = elevatedPoint(m, 0, 0, 0), b = elevatedPoint(m, 1, 0, 0);
-    linePath(ctx, [{ x: a.x, y: a.y + vlen(3) }, { x: b.x, y: b.y + vlen(3) }], vlen(m.width), pc.steelDark);
-    fillPoly(ctx, [elevatedPoint(m, 0, -m.width / 2, 0), elevatedPoint(m, 1, -m.width / 2, 0),
-                   elevatedPoint(m, 1, m.width / 2, 0), elevatedPoint(m, 0, m.width / 2, 0)], pc.metalDark);
-    for (var side = -1; side <= 1; side += 2) {
-      var off = side * m.width / 2;
-      linePath(ctx, [elevatedPoint(m, 0, off, 0), elevatedPoint(m, 1, off, 0)], 1, pc.steelLight);
-      linePath(ctx, [elevatedPoint(m, 0, off, 11), elevatedPoint(m, 1, off, 11)], 1, pc.steelLight);
-      for (var i = 0; i < bays; i += 1) {
-        var t0 = i / bays, t1 = (i + 1) / bays;
-        linePath(ctx, [elevatedPoint(m, t0, off, 0), elevatedPoint(m, t1, off, 11)], 1, pc.rust);
-        linePath(ctx, [elevatedPoint(m, t0, off, 11), elevatedPoint(m, t1, off, 0)], 1, pc.steel);
-      }
-    }
-    fillPoly(ctx, [elevatedPoint(m, 0, -m.width * 0.64, 12), elevatedPoint(m, 1, -m.width * 0.64, 12),
-                   elevatedPoint(m, 1, 0, 15), elevatedPoint(m, 0, 0, 15)], pc.steelLight);
-    fillPoly(ctx, [elevatedPoint(m, 0, 0, 15), elevatedPoint(m, 1, 0, 15),
-                   elevatedPoint(m, 1, m.width * 0.64, 12), elevatedPoint(m, 0, m.width * 0.64, 12)], pc.steel);
-    for (var panel = 1; panel < bays; panel += 1) {
-      linePath(ctx, [elevatedPoint(m, panel / bays, -m.width * 0.64, 12),
-                    elevatedPoint(m, panel / bays, 0, 15), elevatedPoint(m, panel / bays, m.width * 0.64, 12)], 1, pc.steelDark);
-    }
-    if (S.night) {
-      for (var lamp = 0; lamp <= bays; lamp += 2) {
-        var lp = elevatedPoint(m, lamp / bays, m.width * 0.58, 8);
-        fillOval(ctx, lp.x, lp.y, 1, 1, pc.window);
-      }
-    }
-  }
-
-  // ---------- 厂外建筑：料场与罐区（前场两组，见 buildIndustrialSite） ----------
-  // 约定与冷却塔 / 管廊一致：模型只记占地（hw/hh 或 r）与高度（h / z0），形态全在这里画。
-  // 前场这两组不标 bg——bg 会被 roleCols 与雾化调色板压成远景色，摆在近景会发灰。
-
-  /** 场院轴向取点：把组内坐标 (u 沿公路, v 纵深) 折到屏幕坐标。
-      `m.axis` 是「沿公路方向」的世界单位向量（缺省 = 屏幕 x 轴向右）；纵深方向取它
-      逆时针 90°，`v` 越大越远离公路那一侧。返回的点以 (x, baseY) 为原点，`up` 是
-      模型自身的高度方向（往上为屏幕 -y），按像素给。 */
-  function yardFrame(m, x, baseY, z) {
-    var ax = m.axis ? m.axis.x : 1;
-    var ay = m.axis ? m.axis.y : 0;
-    var nx = -ay, ny = ax;
-    return function (u, v, up) {
-      return {
-        x: x + Math.round((u * ax + v * nx) * z),
-        y: baseY + Math.round((u * ay + v * ny) * z) - (up || 0),
-      };
-    };
-  }
-
-  /** 矮围栏：沿 path 立柱 + 两道横杆。料场用它把三排圈成一组——不铺场坪，
-      范围靠这道线标出来、底面仍是沙地；靠公路那侧留出入口，门口另立一段高门柱。 */
-  function drawFenceModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var h = Math.max(2, Math.round((m.h || 4) * z));
-    var cols = roleCols(pal, m.role || "steel", m.bg);
-    var postW = Math.max(1, Math.round(1.4 * z));
-    var gap = Math.max(4, m.postGap || 6);
-    var base = m.path.map(function (q) { var p = viewPoint(q.x, q.y); return { x: p.x, y: p.y }; });
-    // 横杆先画（顶杆 + 腰杆），立柱压在上面
-    [[h, cols.top], [Math.round(h * 0.55), cols.right]].forEach(function (bar) {
-      linePath(ctx, base.map(function (p) { return { x: p.x, y: p.y - bar[0] }; }),
-               Math.max(1, Math.round(1.6 * z)), bar[1]);
-    });
-    // 立柱：按世界步长沿 path 均布
-    for (var i = 0; i < base.length - 1; i += 1) {
-      var a = base[i], b = base[i + 1];
-      var n = Math.max(1, Math.round(
-        Math.hypot(b.x - a.x, b.y - a.y) / Math.max(1, gap * z)));
-      for (var k = 0; k <= n; k += 1) {
-        var t = k / n;
-        var px = Math.round(a.x + (b.x - a.x) * t);
-        var py = Math.round(a.y + (b.y - a.y) * t);
-        ctx.fillStyle = k % 2 ? cols.right : cols.left;
-        ctx.fillRect(px, py - h, postW, h);
-      }
-    }
-  }
-
-  /** 拱顶煤棚：高柱 + 平檐双坡屋盖（前侧全开）+ 后缘挡煤墙 + 棚下煤堆。
-      檐口要比煤堆顶高出约一个坪深，煤堆才露得出来（否则屋盖把料整个盖住）。 */
-  function drawCoalShedModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var hw = m.hw || 30, hh = m.hh || 12;
-    var h = Math.max(8, Math.round(m.h * z));
-    var rise = Math.max(3, Math.round((m.rise || m.h * 0.22) * z));
-    var cols = roleCols(pal, m.role || "steel", m.bg);
-    var steelDark = m.bg ? pal.bgSteelDark : pal.steelDark;
-    var steelLight = m.bg ? pal.bgSteelLight : pal.steelLight;
-    var postW = Math.max(1, Math.round(1.8 * z));
-    var at = yardFrame(m, p.x, baseY, z);
-    // 菱形四角：L / R 是沿公路的两端，B 是后缘（远离公路那侧）、F 是敞口（朝公路）
-    var L = at(-hw, 0), R = at(hw, 0), B = at(0, hh), F = at(0, -hh);
-    // 后缘挡煤墙：两片矮墙，遮住煤堆后侧（前侧全开，料从这儿铲出去）
-    var wallH = Math.max(3, Math.round(h * 0.42));
-    fillPoly(ctx, [at(-hw, 0), at(0, hh), at(0, hh, wallH), at(-hw, 0, wallH)], cols.left);
-    fillPoly(ctx, [at(0, hh), at(hw, 0), at(hw, 0, wallH), at(0, hh, wallH)], cols.right);
-    linePath(ctx, [at(-hw, 0, wallH), at(0, hh, wallH), at(hw, 0, wallH)], 1, steelLight);
-    // 煤堆：压在棚前半部（靠公路那侧），脊线在棚内、坡脚落到前檐外，正好露在开口里
-    var ridgeUp = Math.max(3, Math.round(h * 0.30));
-    var crownUp = Math.max(2, Math.round(3 * z));
-    fillPoly(ctx, [
-      at(-hw * 0.9, -hh * 1.02), at(hw * 0.9, -hh * 1.02),
-      at(hw * 0.62, -hh * 0.42, ridgeUp), at(-hw * 0.62, -hh * 0.42, ridgeUp),
-    ], pal.oreDark);
-    fillPoly(ctx, [
-      at(-hw * 0.62, -hh * 0.42, ridgeUp), at(hw * 0.62, -hh * 0.42, ridgeUp),
-      at(hw * 0.40, -hh * 0.42, ridgeUp + crownUp),
-      at(-hw * 0.40, -hh * 0.42, ridgeUp + crownUp),
-    ], pal.ore);
-    // 散落的煤块（确定性散布，不随帧变化）
-    var rand = seeded(hashKey("coal" + m.x + ":" + m.y));
-    for (var lump = 0; lump < 5; lump += 1) {
-      var lumpPt = at((rand() * 2 - 1) * hw * 0.86, -hh * (0.55 + rand() * 0.62));
-      ctx.fillStyle = lump % 2 ? pal.oreDark : pal.ink;
-      ctx.fillRect(lumpPt.x, lumpPt.y, Math.max(1, Math.round(2 * z)), 1);
-      ctx.fillRect(lumpPt.x + 1, lumpPt.y - 1, 1, 1);
-    }
-    // 六根立柱：四个角 + 左右两侧中点；檐口齐平（平檐双坡）
-    [L, at(-hw * 0.5, hh * 0.5), B, R, at(hw * 0.5, hh * 0.5), F].forEach(function (node, ni) {
-      ctx.fillStyle = ni === 0 || ni === 4 || ni === 5 ? steelDark : steelLight;
-      ctx.fillRect(node.x, node.y - h, postW, h);
-      ctx.fillStyle = steelDark;
-      ctx.fillRect(node.x - 1, node.y - 1, postW + 2, 1);
-    });
-    // 屋盖：双坡（脊线沿公路方向，前后檐齐平），只画可见的两片坡面 + 一道檐口厚度
-    var ridgeV = hh * 0.08, eaveV = hh * 0.92, ridgeUp = h + rise;
-    fillPoly(ctx, [at(-hw * 0.94, ridgeV, ridgeUp), at(hw * 0.94, ridgeV, ridgeUp),
-                   at(hw, eaveV, h), at(-hw, eaveV, h)], cols.top);
-    fillPoly(ctx, [at(-hw * 0.94, ridgeV, ridgeUp), at(hw * 0.94, ridgeV, ridgeUp),
-                   at(hw, -eaveV, h), at(-hw, -eaveV, h)], cols.left);
-    linePath(ctx, [at(-hw * 0.94, ridgeV, ridgeUp), at(hw * 0.94, ridgeV, ridgeUp)],
-             Math.max(1, Math.round(z)), steelLight);
-    linePath(ctx, [at(-hw, -eaveV, h), at(hw, -eaveV, h)],
-             Math.max(1, Math.round(z)), steelDark);
-    linePath(ctx, [at(-hw, eaveV, h), at(hw, eaveV, h)],
-             Math.max(1, Math.round(z)), cols.right);
-    // 屋面檩条：前后两坡各两道，压住大片屋面色
-    ctx.globalAlpha = 0.32;
-    [1 / 3, 2 / 3].forEach(function (pt) {
-      var up = h + rise * (1 - pt);
-      linePath(ctx, [at(-hw * 0.94, ridgeV + (-eaveV - ridgeV) * pt, up),
-                    at(hw * 0.94, ridgeV + (-eaveV - ridgeV) * pt, up)],
-               1, steelDark);
-      linePath(ctx, [at(-hw * 0.94, ridgeV + (eaveV - ridgeV) * pt, up),
-                    at(hw * 0.94, ridgeV + (eaveV - ridgeV) * pt, up)],
-               1, cols.right);
-    });
-    ctx.globalAlpha = 1;
-    // 屋顶采光带：两块斜置天窗，夜里透出一点暖光
-    [-0.34, 0.30].forEach(function (u0) {
-      function rp(uu, tt) {
-        return at(uu, ridgeV + (-eaveV - ridgeV) * tt, ridgeUp + (h - ridgeUp) * tt);
-      }
-      var u1 = u0 + 0.13;
-      fillPoly(ctx, [rp(hw * u0, 0.30), rp(hw * u1, 0.30),
-                     rp(hw * u1, 0.42), rp(hw * u0, 0.42)],
-               S.night ? pal.glassDark : pal.glassGlow);
-      linePath(ctx, [rp(hw * u0, 0.30), rp(hw * u1, 0.30)], 1, steelLight);
-      if (S.night) {
-        var sg = rp(hw * (u0 + 0.065), 0.36);
-        ctx.globalAlpha = 0.16;
-        fillOval(ctx, sg.x, sg.y, vlen(5), vlen(2.4), pal.window);
-        ctx.globalAlpha = 1;
-      }
-    });
-    // 脊部通风帽
-    var ridgePt = at(0, ridgeV, ridgeUp);
-    drawIsoBoxAt(ctx, ridgePt.x, ridgePt.y,
-                 Math.max(2, Math.round(4 * z)), Math.max(1, Math.round(2 * z)),
-                 Math.max(1, Math.round(2 * z)), steelLight, cols.left, steelDark);
-    if (S.night) {
-      var glow = at(0, 0, Math.max(3, Math.round(h * 0.34)));
-      ctx.globalAlpha = 0.3;
-      fillOval(ctx, glow.x, glow.y, vlen(10), vlen(5), pal.window);
-      ctx.globalAlpha = 1;
-      // 棚口再补一层暖光，让敞开的料堆在夜里读得出来
-      var mouth = at(0, -hh * 0.7, h * 0.42);
-      ctx.globalAlpha = 0.22;
-      fillOval(ctx, mouth.x, mouth.y, vlen(9), vlen(4.5), pal.window);
-      ctx.globalAlpha = 1;
-      var edge = at(-hw, -hh * 0.9, h);
-      ctx.fillStyle = pal.window;
-      ctx.fillRect(edge.x + 2, edge.y, 2, 1);
-    }
-  }
-
-  /** 筒仓群 + 斗式提升机塔：原料/成品仓，塔顶机房与筒仓顶用一条输送管连通。 */
-  function drawSiloBatteryModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var count = Math.max(1, Math.round(m.count || 3));
-    var gap = m.gapX || 16;                 // 沿公路方向的仓距（世界单位，见 yardFrame）
-    var r = Math.max(3, Math.round(m.r * z));
-    var h = Math.max(10, Math.round(m.h * z));
-    var cols = roleCols(pal, m.role || "steel", m.bg);
-    var body = m.bg ? pal.bgSteel : pal.steel;
-    var bodyLight = m.bg ? pal.bgSteelLight : pal.steelLight;
-    var bodyDark = m.bg ? pal.bgSteelDark : pal.steelDark;
-    var leg = Math.max(2, Math.round(5 * z));
-    var hopper = Math.max(3, Math.round(6 * z));
-    var at = yardFrame(m, p.x, baseY, z);
-    // 塔（斗式提升机）立在仓列沿公路方向的右端：细高 + 顶部机房
-    var towerU = ((count - 1) / 2) * gap + (m.r || 0) * 2.1 + (m.towerGap || 0);
-    var towerPt = at(towerU, 0);
-    var towerW = Math.max(3, Math.round(7 * z));
-    var towerH = h + Math.max(6, Math.round(12 * z));
-    for (var i = 0; i < count; i += 1) {
-      var c = at((i - (count - 1) / 2) * gap, (i % 2) * 2);
-      var cx = c.x, cy = c.y;
-      // 筒仓腿 + 锥斗：仓底悬空，物料从锥口落到下面的皮带
-      fillOval(ctx, cx, cy + 1, Math.round(r * 1.1), Math.max(1, Math.round(r * 0.34)), pal.shadow);
-      ctx.fillStyle = bodyDark;
-      ctx.fillRect(cx - Math.round(r * 0.8), cy - leg, Math.max(1, Math.round(1.5 * z)), leg);
-      ctx.fillRect(cx + Math.round(r * 0.6), cy - leg, Math.max(1, Math.round(1.5 * z)), leg);
-      fillPoly(ctx, [
-        { x: cx - Math.round(r * 0.9), y: cy - leg }, { x: cx + Math.round(r * 0.9), y: cy - leg },
-        { x: cx + Math.round(r * 0.34), y: cy - leg - hopper },
-        { x: cx - Math.round(r * 0.34), y: cy - leg - hopper },
-      ], bodyDark);
-      // 仓身：三段受光 + 竖瓦楞 + 箍圈
-      var bodyTop = cy - leg - hopper - h;
-      var rx = r;
-      fillOval(ctx, cx, cy - leg - hopper, rx, Math.max(1, Math.round(rx * 0.5)), body);
-      ctx.fillStyle = body;
-      ctx.fillRect(cx - rx, bodyTop, rx * 2, cy - leg - hopper - bodyTop);
-      ctx.fillStyle = bodyLight;
-      ctx.fillRect(cx - Math.round(rx * 0.66), bodyTop, Math.max(1, Math.round(rx * 0.42)),
-                   cy - leg - hopper - bodyTop);
-      ctx.fillStyle = bodyDark;
-      ctx.fillRect(cx + Math.round(rx * 0.36), bodyTop, Math.max(1, Math.round(rx * 0.64)),
-                   cy - leg - hopper - bodyTop);
-      for (var band = 1; band <= 3; band += 1) {
-        var by = Math.round(bodyTop + (cy - leg - hopper - bodyTop) * band / 4);
-        ctx.fillStyle = bodyDark;
-        ctx.fillRect(cx - rx, by, rx * 2, 1);
-        ctx.fillStyle = bodyLight;
-        ctx.fillRect(cx - Math.round(rx * 0.6), by, Math.round(rx * 0.62), 1);
-      }
-      // 仓顶：穹顶 + 人孔 + 除尘帽
-      fillOval(ctx, cx, bodyTop, rx, Math.max(1, Math.round(rx * 0.5)), bodyLight);
-      fillOval(ctx, cx, bodyTop, Math.max(1, rx - Math.max(1, Math.round(2 * z))),
-               Math.max(1, Math.round(rx * 0.5) - 1), body);
-      linePath(ctx, [{ x: cx - Math.round(rx * 0.7), y: bodyTop },
-                    { x: cx, y: bodyTop - Math.max(2, Math.round(rx * 0.5)) },
-                    { x: cx + Math.round(rx * 0.7), y: bodyTop }], 1, bodyLight);
-      ctx.fillStyle = bodyDark;
-      ctx.fillRect(cx - 1, bodyTop - Math.max(2, Math.round(rx * 0.5)) - 1, 3, 2);
-      if (S.night) {
-        // 冷白投光在仓身左侧留一道窄高光
-        ctx.globalAlpha = 0.30;
-        ctx.fillStyle = pal.glassGlow;
-        ctx.fillRect(cx - rx, bodyTop + 1, 1,
-                     Math.max(2, Math.round((cy - leg - hopper - bodyTop) * 0.55)));
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = pal.bad;
-        ctx.fillRect(cx - 1, bodyTop - Math.max(3, Math.round(rx * 0.5)) - 2, 2, 1);
-      }
-      // 仓身检修梯：放大了才画，全景时保持干净
-      if (rx >= 4) {
-        var lx2 = cx - rx + 1;
-        var lt = bodyTop + 2;
-        var lb = cy - leg - hopper - 1;
-        ctx.fillStyle = bodyDark;
-        ctx.fillRect(lx2, lt, 1, lb - lt);
-        ctx.fillRect(lx2 + 2, lt, 1, lb - lt);
-        for (var lr = lt + 3; lr < lb; lr += 3) ctx.fillRect(lx2, lr, 3, 1);
-      }
-    }
-    // 顶部输送管：机房 → 各仓顶（略高于仓顶，接在塔身上段，沿公路方向）
-    var pipeUp = leg + hopper + h + Math.max(3, Math.round(6 * z));
-    var pipeRoot = at(towerU, 0, pipeUp);
-    var pipeEnd = at(-(count - 1) / 2 * gap, 0, pipeUp);
-    linePath(ctx, [{ x: pipeRoot.x - Math.round(towerW * 0.5), y: pipeRoot.y }, pipeEnd],
-             Math.max(1, Math.round(2 * z)), bodyDark);
-    linePath(ctx, [{ x: pipeRoot.x - Math.round(towerW * 0.5), y: pipeRoot.y - 1 },
-                  { x: pipeEnd.x, y: pipeEnd.y - 1 }],
-             1, bodyLight);
-    // 提升机塔
-    fillOval(ctx, towerPt.x, towerPt.y + 1, Math.round(towerW * 1.3), Math.max(1, Math.round(towerW * 0.5)), pal.shadow);
-    ctx.fillStyle = bodyDark;
-    ctx.fillRect(towerPt.x - towerW, towerPt.y - towerH, towerW * 2, towerH);
-    ctx.fillStyle = bodyLight;
-    ctx.fillRect(towerPt.x - Math.round(towerW * 0.6), towerPt.y - towerH, Math.max(1, Math.round(towerW * 0.6)), towerH);
-    ctx.fillStyle = body;
-    ctx.fillRect(towerPt.x + Math.round(towerW * 0.4), towerPt.y - towerH, Math.max(1, Math.round(towerW * 0.6)), towerH);
-    for (var seg = 1; seg <= 4; seg += 1) {
-      var sy = Math.round(towerPt.y - towerH * seg / 5);
-      ctx.fillStyle = bodyDark;
-      ctx.fillRect(towerPt.x - towerW, sy, towerW * 2, 1);
-    }
-    // 机房（顶部大一号的箱体）
-    var houseH = Math.max(4, Math.round(10 * z));
-    drawIsoBoxAt(ctx, towerPt.x, towerPt.y - towerH, Math.round(towerW * 1.5), Math.round(towerW * 0.75), houseH,
-                 m.bg ? pal.bgSteelLight : pal.roofSlateLight, body, bodyDark);
-    if (S.night) {
-      // 塔顶平台灯 + 机房窗 + 航空障碍灯
-      ctx.globalAlpha = 0.5;
-      ctx.fillStyle = pal.glassGlow;
-      ctx.fillRect(towerPt.x - towerW, towerPt.y - towerH + 1, towerW * 2, 1);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = pal.window;
-      ctx.fillRect(towerPt.x - Math.round(towerW * 0.4), towerPt.y - towerH - houseH + 1, 2, 2);
-      ctx.fillStyle = pal.bad;
-      ctx.fillRect(towerPt.x + 1, towerPt.y - towerH - houseH - 2, 2, 1);
-    }
-    if (towerW >= 4) {
-      // 塔身外梯
-      var tlx = towerPt.x - towerW - 1;
-      ctx.fillStyle = bodyDark;
-      ctx.fillRect(tlx, towerPt.y - towerH + 4, 1, towerH - 5);
-      ctx.fillRect(tlx + 2, towerPt.y - towerH + 4, 1, towerH - 5);
-      for (var tly = towerPt.y - towerH + 6; tly < towerPt.y - 2;
-           tly += Math.max(3, Math.round(4 * z))) {
-        ctx.fillRect(tlx, tly, 3, 1);
-      }
-      // 塔脚控制箱
-      drawIsoBoxAt(ctx, towerPt.x + towerW + 3, towerPt.y - 1,
-                   Math.max(2, Math.round(3 * z)), Math.max(1, Math.round(1.6 * z)),
-                   Math.max(2, Math.round(3 * z)),
-                   pal.steelLight, pal.steel, pal.steelDark);
-      if (S.night) {
-        ctx.fillStyle = pal.window;
-        ctx.fillRect(towerPt.x + towerW + 3, towerPt.y - Math.max(2, Math.round(3 * z)), 2, 1);
-      }
-    }
-    // 侧向出料管：塔脚一根落地管
-    linePath(ctx, [{ x: towerPt.x + towerW, y: towerPt.y - Math.round(towerH * 0.24) },
-                  { x: towerPt.x + towerW + Math.max(2, Math.round(4 * z)), y: towerPt.y - Math.round(towerH * 0.24) },
-                  { x: towerPt.x + towerW + Math.max(2, Math.round(4 * z)), y: towerPt.y + 1 }],
-             Math.max(1, Math.round(2 * z)), cols.right);
-  }
-
-  /** 露天煤堆：截顶四棱锥，顶面与正面受光，散几块煤。 */
-  function drawCoalPileModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var hw = Math.max(4, Math.round((m.hw || 12) * z));
-    var hh = Math.max(2, Math.round((m.hh || 6) * z));
-    var h = Math.max(2, Math.round((m.h || 8) * z));
-    var top = Math.max(1, Math.round(hw * 0.52));
-    var topH = Math.max(1, Math.round(hh * 0.52));
-    var topY = baseY - h;
-    var W = { x: p.x - hw, y: baseY }, N = { x: p.x, y: baseY - hh };
-    var E = { x: p.x + hw, y: baseY }, SP = { x: p.x, y: baseY + hh };
-    var WT = { x: p.x - top, y: topY }, NT = { x: p.x, y: topY - topH };
-    var ET = { x: p.x + top, y: topY }, ST = { x: p.x, y: topY + topH };
-    fillDiamond(ctx, p.x, baseY + 1, Math.round(hw * 1.04), Math.round(hh * 1.04), pal.oreDark);
-    fillPoly(ctx, [W, N, NT, WT], pal.oreDark);
-    fillPoly(ctx, [N, E, ET, NT], pal.oreDark);
-    fillPoly(ctx, [W, SP, ST, WT], pal.ore);
-    fillPoly(ctx, [SP, E, ET, ST], pal.ore);
-    fillDiamond(ctx, p.x, topY, top, topH, pal.ore);
-    linePath(ctx, [WT, ST, ET], 1, pal.oreLight);
-    // 散落的煤块（确定性散布，不随帧变化）
-    var rand = seeded(hashKey("coalpile" + m.x + ":" + m.y));
-    for (var i = 0; i < 7; i += 1) {
-      var lu = rand() * 2 - 1;
-      var lv = rand() * 2 - 1;
-      var lx = p.x + Math.round(lu * hw * 0.8);
-      var ly = topY + Math.round(lv * topH * 0.8);
-      ctx.fillStyle = i % 3 ? pal.ink : pal.oreLight;
-      ctx.fillRect(lx, ly, Math.max(1, Math.round(2 * z)), 1);
-    }
-  }
-
-  /** 地磅：低混凝土台 + 深色秤板 + 黄黑端线 + 计量立杆。 */
-  function drawWeighbridgeModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var hw = Math.max(6, Math.round((m.hw || 15) * z));
-    var hh = Math.max(3, Math.round((m.hh || 7) * z));
-    var h = Math.max(1, Math.round((m.h || 1.6) * z));
-    drawIsoBoxAt(ctx, p.x, baseY, hw, hh, h,
-                 pal.concreteLight, pal.concrete, pal.concreteDark);
-    fillDiamond(ctx, p.x, baseY - h, Math.round(hw * 0.88), Math.round(hh * 0.82), pal.metalDark);
-    linePath(ctx, [{ x: p.x - hw + 1, y: baseY - h },
-                  { x: p.x, y: baseY - h + hh - 1 },
-                  { x: p.x + hw - 1, y: baseY - h }], 1, pal.warn);
-    linePath(ctx, [{ x: p.x - Math.round(hw * 0.8), y: baseY - h + Math.round(hh * 0.28) },
-                  { x: p.x + Math.round(hw * 0.8), y: baseY - h + Math.round(hh * 0.28) }],
-             1, pal.metal);
-    linePath(ctx, [{ x: p.x - Math.round(hw * 0.8), y: baseY - h + Math.round(hh * 0.66) },
-                  { x: p.x + Math.round(hw * 0.8), y: baseY - h + Math.round(hh * 0.66) }],
-             1, pal.metal);
-    // 两端黄黑警示条：做大一档，卡车压上去后仍能从台缘读出来
-    [-1, 1].forEach(function (side) {
-      var ex = p.x + Math.round(hw * 0.9) * side;
-      for (var s = 0; s < 4; s += 1) {
-        ctx.fillStyle = s % 2 ? pal.ink : pal.warn;
-        ctx.fillRect(ex - Math.round(hw * 0.18) + s * Math.max(2, Math.round(3 * z)),
-                     baseY - h + Math.round(hh * 0.18), Math.max(2, Math.round(3 * z)),
-                     Math.max(1, Math.round(2 * z)));
-      }
-    });
-    // 计量立杆（台侧）：细杆 + 状态灯
-    var postX = p.x + Math.round(hw * 0.94);
-    var postY = baseY - h + Math.round(hh * 0.5);
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(postX, postY - Math.round(8 * z), 1, Math.round(8 * z));
-    ctx.fillStyle = pal.warn;
-    ctx.fillRect(postX - 1, postY - Math.round(9 * z), 3, 2);
-    if (S.night) {
-      ctx.globalAlpha = 0.45;
-      fillOval(ctx, postX, postY - Math.round(9 * z), vlen(4), vlen(2), pal.window);
-      ctx.globalAlpha = 1;
-    }
-  }
-
-  /** 冷白投光灯：细高杆 + 横臂双灯头，地面光池由 drawLightPools 统一画。 */
-  function drawFloodlightModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var h = Math.max(12, Math.round((m.h || 32) * z));
-    var arm = Math.max(4, Math.round(6 * z));
-    ctx.fillStyle = pal.stoneDark;
-    ctx.fillRect(p.x - 2, baseY - 1, 4, 2);
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(p.x, baseY - h, Math.max(1, Math.round(1.6 * z)), h);
-    ctx.fillStyle = pal.metal;
-    ctx.fillRect(p.x - 1, baseY - Math.round(h * 0.45), Math.max(2, Math.round(2.6 * z)), 1);
-    ctx.fillRect(p.x - arm, baseY - h, arm * 2 + 1, Math.max(1, Math.round(1.4 * z)));
-    [-arm, arm - Math.max(2, Math.round(3 * z))].forEach(function (dx) {
-      var hx = p.x + dx;
-      ctx.fillStyle = pal.metal;
-      ctx.fillRect(hx, baseY - h + 1, Math.max(2, Math.round(3 * z)), Math.max(1, Math.round(2 * z)));
-      ctx.fillStyle = S.night ? pal.glassGlow : pal.metalLight;
-      ctx.fillRect(hx, baseY - h + 2, Math.max(2, Math.round(2 * z)), 1);
-      if (S.night) {
-        ctx.globalAlpha = 0.28;
-        fillOval(ctx, hx + 1, baseY - h + 2, vlen(4), vlen(2.5), pal.glassGlow);
-        ctx.globalAlpha = 1;
-      }
-    });
-  }
-
-  /** 湿式气柜：三节套筒互相套着升降，外套导架 + 外梯，罐顶放散管。 */
-  function drawGasholderModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var r = Math.max(4, Math.round(m.r * z));
-    var h = Math.max(12, Math.round(m.h * z));
-    var cols = roleCols(pal, m.role || "rust", m.bg);
-    var dark = m.bg ? pal.bgSteelDark : pal.metalDark;
-    var light = m.bg ? pal.bgSteelLight : pal.metalLight;
-    // 基础环
-    ctx.fillStyle = m.bg ? pal.bgSteelDark : pal.stoneDark;
-    ctx.fillRect(p.x - Math.round(r * 1.1), baseY - 2, Math.round(r * 2.2), 2);
-    fillDiamond(ctx, p.x, baseY - 2, Math.round(r * 1.16), Math.max(1, Math.round(r * 0.58)),
-                m.bg ? pal.bgSteel : pal.stone);
-    // 导架：两根后立柱先画（被罐体挡住一半）
-    var frameH = h + Math.max(3, Math.round(5 * z));
-    [-0.86, 0.86].forEach(function (side) {
-      var fx = p.x + Math.round(r * side);
-      ctx.fillStyle = dark;
-      ctx.fillRect(fx, baseY - frameH, Math.max(1, Math.round(1.4 * z)), frameH);
-    });
-    // 三节套筒：底节最粗，往上逐节变细，露出上一节的上沿
-    var sections = [
-      { rr: 1.0, top: 0.50 }, { rr: 0.90, top: 0.70 }, { rr: 0.80, top: 0.86 },
-    ];
-    sections.forEach(function (sec) {
-      var sr = Math.round(r * sec.rr), sh = Math.round(h * sec.top);
-      var ry = Math.max(1, Math.round(sr * 0.5));
-      fillOval(ctx, p.x, baseY, sr, ry, cols.right);
-      ctx.fillStyle = cols.left;
-      ctx.fillRect(p.x - sr, baseY - sh, sr * 2, sh);
-      ctx.fillStyle = cols.top;
-      ctx.fillRect(p.x - Math.round(sr * 0.70), baseY - sh, Math.max(1, Math.round(sr * 0.40)), sh);
-      ctx.fillStyle = cols.right;
-      ctx.fillRect(p.x + Math.round(sr * 0.32), baseY - sh, Math.max(1, Math.round(sr * 0.68)), sh);
-      // 上沿环口：套筒的标志
-      fillOval(ctx, p.x, baseY - sh, sr, ry, cols.top);
-      fillOval(ctx, p.x, baseY - sh, Math.max(1, sr - Math.max(1, Math.round(1.6 * z))),
-               Math.max(1, ry - 1), cols.right);
-      linePath(ctx, [{ x: p.x - sr, y: baseY - sh }, { x: p.x, y: baseY - sh + ry },
-                    { x: p.x + sr, y: baseY - sh }], 1, light);
-    });
-    // 罐顶：穹顶 + 放散管 + 人孔
-    var topY = baseY - Math.round(h * 0.86);
-    var topR = Math.round(r * 0.8);
-    for (var cap = 0; cap < 3; cap += 1) {
-      var cr = Math.round(topR * (1 - cap * 0.24));
-      fillOval(ctx, p.x, topY - Math.round(cap * 3 * z), cr, Math.max(1, Math.round(cr * 0.5)),
-               cap === 0 ? cols.top : light);
-    }
-    linePath(ctx, [{ x: p.x, y: topY - Math.round(9 * z) },
-                  { x: p.x, y: topY - Math.round(13 * z) }], Math.max(1, Math.round(1.5 * z)), dark);
-    linePath(ctx, [{ x: p.x - 1, y: topY - Math.round(13 * z) }, { x: p.x + 1, y: topY - Math.round(13 * z) }],
-             1, light);
-    // 前柱压在罐体上：前缘的两根导架柱（比后柱亮一档即可，别亮成白线）
-    [-0.86, 0.86].forEach(function (side) {
-      var fx = p.x + Math.round(r * side);
-      ctx.fillStyle = m.bg ? pal.bgSteel : pal.steel;
-      ctx.fillRect(fx, baseY - frameH, Math.max(1, Math.round(1.4 * z)), Math.round(frameH * 0.9));
-    });
-    // 顶部导架环 + 外梯
-    linePath(ctx, [{ x: p.x - Math.round(r * 0.86), y: baseY - frameH },
-                  { x: p.x + Math.round(r * 0.86), y: baseY - frameH }],
-             Math.max(1, Math.round(1.4 * z)), light);
-    var ladderX = p.x + Math.round(r * 0.34);
-    linePath(ctx, [{ x: ladderX, y: baseY + 2 }, { x: ladderX, y: topY + 2 }], 1, dark);
-    linePath(ctx, [{ x: ladderX + Math.max(2, Math.round(2.4 * z)), y: baseY + 2 },
-                  { x: ladderX + Math.max(2, Math.round(2.4 * z)), y: topY + 2 }], 1, dark);
-    for (var rung = 4; rung < h - 4; rung += Math.max(3, Math.round(4 * z))) {
-      linePath(ctx, [{ x: ladderX, y: baseY - rung * z },
-                    { x: ladderX + Math.max(2, Math.round(2.4 * z)), y: baseY - rung * z }], 1, light);
-    }
-    // 中间检修平台
-    var deckY = baseY - Math.round(h * 0.50);
-    linePath(ctx, [{ x: p.x - Math.round(r * 0.95), y: deckY },
-                  { x: p.x, y: deckY + Math.max(1, Math.round(r * 0.48)) },
-                  { x: p.x + Math.round(r * 0.95), y: deckY }], Math.max(1, Math.round(1.4 * z)), light);
-    if (S.night) {
-      ctx.fillStyle = pal.bad;
-      ctx.fillRect(p.x - 1, topY - Math.round(15 * z), 2, 2);
-      ctx.globalAlpha = 0.3;
-      fillOval(ctx, p.x, topY - Math.round(15 * z), vlen(5), vlen(3), pal.bad);
-      ctx.globalAlpha = 1;
-    }
-    // 出口管：气柜侧下方的短管接到管廊
-    linePath(ctx, [{ x: p.x - Math.round(r * 0.6), y: baseY - Math.round(h * 0.14) },
-                  { x: p.x - r - Math.max(2, Math.round(4 * z)), y: baseY - Math.round(h * 0.14) }],
-             Math.max(1, Math.round(2 * z)), cols.right);
-  }
-
-  /** 循环水池：下沉水面 + 池壁 + 栏杆 + 溢流堰；夜里水面反灯。 */
-  function drawBasinModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var hw = Math.max(8, Math.round(m.hw * z));
-    var hh = Math.max(5, Math.round(m.hh * z));
-    var wall = Math.max(2, Math.round((m.h || 3) * z));
-    var concrete = roleCols(pal, "concrete", m.bg);
-    var steelDark = m.bg ? pal.bgSteelDark : pal.steelDark;
-    var steelLight = m.bg ? pal.bgSteelLight : pal.steelLight;
-    // 池壁：外圈台阶 + 内壁两片暗面
-    drawIsoBoxAt(ctx, p.x, baseY, hw, hh, wall, concrete.top, concrete.left, concrete.right);
-    var iw = Math.max(4, hw - Math.max(2, Math.round(5 * z)));
-    var ih = Math.max(3, hh - Math.max(1, Math.round(2.5 * z)));
-    fillDiamond(ctx, p.x, baseY - wall, iw, ih, m.bg ? pal.bgSteelDark : pal.glassDark);
-    fillDiamond(ctx, p.x, baseY - wall - Math.max(1, Math.round(2 * z)),
-                Math.max(2, iw - vlen(3)), Math.max(2, ih - vlen(2)), pal.glass);
-    // 涟漪：两道横向淡线 + 一道高光
-    ctx.globalAlpha = 0.55;
-    linePath(ctx, [{ x: p.x - iw * 0.6, y: baseY - wall - vlen(4) },
-                  { x: p.x + iw * 0.2, y: baseY - wall - vlen(5) }], 1, pal.glassLight);
-    linePath(ctx, [{ x: p.x - iw * 0.1, y: baseY - wall - vlen(7) },
-                  { x: p.x + iw * 0.62, y: baseY - wall - vlen(7) }], 1, pal.glassLight);
-    ctx.globalAlpha = 1;
-    // 溢流堰：一角的小方口 + 侧向排水管
-    var weirX = p.x + Math.round(iw * 0.58);
-    ctx.fillStyle = concrete.top;
-    ctx.fillRect(weirX - vlen(4), baseY - wall - vlen(2), vlen(8), Math.max(1, Math.round(1.5 * z)));
-    linePath(ctx, [{ x: p.x + hw - 1, y: baseY - wall - vlen(2) },
-                  { x: p.x + hw + vlen(4), y: baseY - wall - vlen(2) },
-                  { x: p.x + hw + vlen(4), y: baseY + 1 }], Math.max(1, vlen(2)), steelDark);
-    // 栏杆：沿左右两缘（前缘留出检修口）
-    for (var ri = 0; ri <= 5; ri += 1) {
-      var t = ri / 5;
-      ctx.fillStyle = steelDark;
-      ctx.fillRect(Math.round(p.x - hw + hw * t), Math.round(baseY - wall + ih * t - vlen(4)), 1, vlen(4));
-      ctx.fillRect(Math.round(p.x + hw - hw * t), Math.round(baseY - wall + ih * t - vlen(4)), 1, vlen(4));
-    }
-    ctx.globalAlpha = 0.85;
-    linePath(ctx, [{ x: p.x - hw, y: baseY - wall - vlen(4) },
-                  { x: p.x, y: baseY - wall + ih - vlen(4) }], 1, steelLight);
-    linePath(ctx, [{ x: p.x, y: baseY - wall + ih - vlen(4) },
-                  { x: p.x + hw, y: baseY - wall - vlen(4) }], 1, steelLight);
-    ctx.globalAlpha = 1;
-    if (S.night) {
-      ctx.globalAlpha = 0.35;
-      fillOval(ctx, p.x + Math.round(iw * 0.2), baseY - wall - vlen(3), vlen(10), vlen(3), pal.window);
-      ctx.globalAlpha = 1;
-    }
-  }
-
-  /** 装车台：混凝土台 + 四柱顶棚 + 两根鹤管 + 计量牌，棚下停罐车。 */
-  function drawLoadingRackModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var hw = Math.max(8, Math.round(m.hw * z));
-    var hh = Math.max(4, Math.round(m.hh * z));
-    var h = Math.max(10, Math.round(m.h * z));
-    var cols = roleCols(pal, "steel", m.bg);
-    var steelDark = m.bg ? pal.bgSteelDark : pal.steelDark;
-    var steelLight = m.bg ? pal.bgSteelLight : pal.steelLight;
-    var postW = Math.max(1, Math.round(2 * z));
-    // 装车台面
-    drawIsoBoxAt(ctx, p.x, baseY, hw, hh, Math.max(1, Math.round(2 * z)),
-                 pal.stoneLight, pal.stone, pal.stoneDark);
-    // 四根立柱（前后各两根，前柱画在顶棚之后）
-    var legs = [[-0.84, 0.72, false], [0.84, 0.72, false], [-0.84, -0.78, true], [0.84, -0.78, true]];
-    legs.forEach(function (lg) {
-      if (lg[2]) return;
-      var lx = p.x + Math.round(hw * lg[0]), ly = baseY + Math.round(hh * lg[1]);
-      ctx.fillStyle = steelDark;
-      ctx.fillRect(lx, ly - h, postW, h);
-      ctx.fillStyle = steelLight;
-      ctx.fillRect(lx, ly - h, postW, 1);
-    });
-    // 顶棚：菱形板 + 檐口 + 警示斜纹
-    drawIsoBoxAt(ctx, p.x, baseY - h, hw, hh, Math.max(1, Math.round(2 * z)),
-                 cols.top, cols.left, cols.right);
-    linePath(ctx, [{ x: p.x - hw, y: baseY - h }, { x: p.x, y: baseY - h + hh },
-                  { x: p.x + hw, y: baseY - h }], Math.max(1, Math.round(z)), steelLight);
-    ctx.fillStyle = pal.warn;
-    for (var stripe = 0; stripe < 3; stripe += 1) {
-      var sx = p.x - Math.round(hw * 0.5) + stripe * Math.max(4, Math.round(hw * 0.32));
-      ctx.fillRect(sx, baseY - h + Math.round(hh * 0.82), Math.max(2, Math.round(3 * z)), 1);
-      ctx.fillStyle = pal.ink;
-      ctx.fillRect(sx + Math.max(2, Math.round(2 * z)), baseY - h + Math.round(hh * 0.82), 1, 1);
-      ctx.fillStyle = pal.warn;
-    }
-    // 前柱（压在顶棚上）
-    legs.forEach(function (lg) {
-      if (!lg[2]) return;
-      var lx = p.x + Math.round(hw * lg[0]), ly = baseY + Math.round(hh * lg[1]);
-      ctx.fillStyle = steelDark;
-      ctx.fillRect(lx, ly - h, postW, h);
-      ctx.fillStyle = steelLight;
-      ctx.fillRect(lx, ly - h, postW, 1);
-    });
-    // 鹤管：两根从棚底垂到罐口高度，带阀门轮与软管弯头
-    [-0.34, 0.30].forEach(function (off) {
-      var ax = p.x + Math.round(hw * off);
-      var armTop = baseY - h + vlen(2);
-      var armBottom = baseY - Math.round(h * 0.42);
-      linePath(ctx, [{ x: ax, y: armTop }, { x: ax, y: armBottom }], Math.max(1, Math.round(2 * z)), steelDark);
-      linePath(ctx, [{ x: ax - 1, y: armTop }, { x: ax - 1, y: armBottom }], 1, steelLight);
-      linePath(ctx, [{ x: ax, y: armBottom }, { x: ax + Math.round(hw * 0.14), y: armBottom }],
-               Math.max(1, Math.round(2 * z)), steelDark);
-      fillOval(ctx, ax, armBottom - vlen(4), vlen(2), Math.max(1, vlen(2)), pal.rust);
-      ctx.fillStyle = pal.warn;
-      ctx.fillRect(ax - 1, armBottom + 1, 2, 1);
-    });
-    // 计量牌：台侧的立牌
-    var signX = p.x + Math.round(hw * 0.92), signY = baseY + Math.round(hh * 0.4);
-    ctx.fillStyle = steelDark;
-    ctx.fillRect(signX, signY - vlen(7), 1, vlen(7));
-    ctx.fillStyle = pal.mark;
-    ctx.fillRect(signX - vlen(3), signY - vlen(9), vlen(6), vlen(4));
-    ctx.fillStyle = pal.paintDark;
-    ctx.fillRect(signX - vlen(2), signY - vlen(8), vlen(4), 1);
-    if (S.night) {
-      ctx.globalAlpha = 0.34;
-      fillOval(ctx, p.x, baseY - Math.round(h * 0.6), vlen(16), vlen(7), pal.window);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = pal.window;
-      ctx.fillRect(p.x - Math.round(hw * 0.3), baseY - h + 1, 2, 1);
-    }
-  }
-
-  /** 火炬塔：细高塔身 + 塔顶燃烧头 + 三只引火管，昼夜都有火苗与烟柱。 */
-  function drawFlareModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var h = Math.max(16, Math.round(m.h * z));
-    var steel = m.bg ? pal.bgSteel : pal.steel;
-    var steelDark = m.bg ? pal.bgSteelDark : pal.steelDark;
-    var steelLight = m.bg ? pal.bgSteelLight : pal.steelLight;
-    var metalDark = m.bg ? pal.bgSteelDark : pal.metalDark;
-    // 基础墩 + 三个地脚
-    drawIsoBoxAt(ctx, p.x, baseY, vlen(m.hw || 7), vlen(m.hh || 3.5), Math.max(1, Math.round(2 * z)),
-                 pal.stoneLight, pal.stone, pal.stoneDark);
-    // 塔身：三段收细（下粗上细），每段一条法兰
-    var segs = [
-      { w: 2.2, top: 0.42 }, { w: 1.9, top: 0.74 }, { w: 1.6, top: 1.0 },
-    ];
-    var prev = 0;
-    segs.forEach(function (sg) {
-      var w = Math.max(1, Math.round(sg.w * z));
-      var from = baseY - Math.round(h * prev), to = baseY - Math.round(h * sg.top);
-      ctx.fillStyle = steelDark;
-      ctx.fillRect(p.x - w, to, w * 2, from - to);
-      ctx.fillStyle = steelLight;
-      ctx.fillRect(p.x - w, to, Math.max(1, w), from - to);
-      ctx.fillStyle = steelDark;
-      ctx.fillRect(p.x - w - 1, to, (w + 1) * 2, Math.max(1, Math.round(z)));
-      prev = sg.top;
-    });
-    // 检修平台 + 爬梯
-    var deck = baseY - Math.round(h * 0.62);
-    linePath(ctx, [{ x: p.x - vlen(5), y: deck }, { x: p.x + vlen(5), y: deck }],
-             Math.max(1, Math.round(1.4 * z)), steelLight);
-    linePath(ctx, [{ x: p.x + vlen(3), y: baseY }, { x: p.x + vlen(3), y: baseY - Math.round(h * 0.95) }],
-             1, metalDark);
-    for (var rung = 3; rung < h * 0.9; rung += Math.max(3, Math.round(4 * z))) {
-      linePath(ctx, [{ x: p.x + vlen(3), y: baseY - rung * z }, { x: p.x + vlen(5), y: baseY - rung * z }],
-               1, steelLight);
-    }
-    // 燃烧头：略宽的短节 + 三只引火管
-    var tipY = baseY - h;
-    var tipW = Math.max(2, Math.round(2.6 * z));
-    ctx.fillStyle = steelDark;
-    ctx.fillRect(p.x - tipW, tipY - Math.max(2, Math.round(3 * z)), tipW * 2, Math.max(2, Math.round(3 * z)));
-    ctx.fillStyle = steelLight;
-    ctx.fillRect(p.x - tipW, tipY - Math.max(2, Math.round(3 * z)), tipW, 1);
-    [-1, 0, 1].forEach(function (dir) {
-      ctx.fillStyle = metalDark;
-      ctx.fillRect(p.x + Math.round(dir * tipW * 1.2), tipY - Math.max(2, Math.round(3 * z)) - 1, 1, 2);
-    });
-    // 火苗：昼夜都烧，夜里更亮更大（外层火色 → 内层亮芯，逐帧轻抖）
-    var flick = 1 + Math.sin((S.ticks || 0) * 0.11 + m.x * 0.05) * 0.16;
-    var flameH = Math.max(4, Math.round((S.night ? 10 : 7) * z * flick));
-    var flameW = Math.max(2, Math.round((S.night ? 4.2 : 3.2) * z * flick));
-    var flameY = tipY - Math.max(2, Math.round(3 * z));
-    ctx.globalAlpha = S.night ? 0.55 : 0.4;
-    fillOval(ctx, p.x, flameY - Math.round(flameH * 0.4), Math.round(flameW * 1.5),
-             Math.round(flameH * 0.8), pal.warn);
-    ctx.globalAlpha = S.night ? 0.75 : 0.5;
-    fillOval(ctx, p.x, flameY - Math.round(flameH * 0.35), flameW, Math.round(flameH * 0.6), pal.rustLight);
-    ctx.globalAlpha = 1;
-    fillOval(ctx, p.x, flameY - Math.round(flameH * 0.3), Math.max(1, Math.round(flameW * 0.5)),
-             Math.max(1, Math.round(flameH * 0.34)), S.night ? pal.window : pal.mark);
-    // 烟柱：从火苗往上飘，越远越淡（不用渐变，纯色叠 alpha）
-    for (var s = 1; s <= 3; s += 1) {
-      ctx.globalAlpha = 0.22 / s;
-      fillOval(ctx, p.x + Math.round(s * 1.6 * z), flameY - Math.round(flameH + s * 7 * z),
-               Math.max(1, Math.round((2 + s * 1.6) * z)), Math.max(1, Math.round((2 + s * 1.2) * z)),
-               m.bg ? pal.bgSteel : pal.smoke);
-    }
-    ctx.globalAlpha = 1;
-    // 塔脚围栏
-    ctx.fillStyle = pal.warn;
-    ctx.fillRect(p.x - vlen(6), baseY - vlen(3), vlen(12), 1);
-  }
-
-  function drawLampModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var h = Math.max(8, Math.round((m.h || 24) * z));
-    var arm = Math.max(3, Math.round(4 * z));
-    fillOval(ctx, p.x, baseY + 1, Math.max(2, Math.round(3 * z)), 1, pal.shadow);
-    ctx.fillStyle = pal.stoneDark;
-    ctx.fillRect(p.x - 1, baseY - 1, 3, 2);
-    // 灯杆 + 挑臂 + 灯头
-    ctx.fillStyle = pal.metalDark;
-    ctx.fillRect(p.x, baseY - h, 1, h);
-    ctx.fillRect(p.x - arm, baseY - h, arm + 1, 1);
-    ctx.fillStyle = S.night ? pal.window : pal.glassGlow;
-    ctx.fillRect(p.x - arm, baseY - h + 1, 2, 1);
-    ctx.fillStyle = pal.steelLight;
-    ctx.fillRect(p.x - arm - 1, baseY - h + 1, 1, 1);
-    if (S.night) {
-      ctx.globalAlpha = 0.20;
-      fillOval(ctx, p.x - arm, baseY - h + 1, Math.max(3, Math.round(4 * z)),
-               Math.max(2, Math.round(3 * z)), pal.window);
-      ctx.globalAlpha = 0.05;
-      fillPoly(ctx, [
-        { x: p.x - arm - 1, y: baseY - h + 2 },
-        { x: p.x - arm + 2, y: baseY - h + 2 },
-        { x: p.x + Math.round(5 * z), y: baseY + 1 },
-        { x: p.x - Math.round(6 * z), y: baseY + 1 },
-      ], pal.window);
-      ctx.globalAlpha = 1;
-    }
-  }
-
-  function drawReelModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var s = Math.max(3, Math.round(6 * z)) * (m.s || 1);
-    var r = Math.max(2, Math.round(s * 0.55));
-    fillOval(ctx, p.x, baseY + 1, Math.round(s * 1.1), Math.max(1, Math.round(s * 0.4)), pal.shadow);
-    // 侧放线盘：外圈木法兰 + 内圈线缆
-    fillOval(ctx, p.x, baseY - r, r, Math.round(r * 0.72), pal.crateDark);
-    fillOval(ctx, p.x, baseY - r, Math.max(1, r - 2), Math.max(1, Math.round(r * 0.60)), pal.crate);
-    for (var wr = 1; wr <= 3; wr += 1) {
-      linePath(ctx, [{ x: p.x - Math.round(r * 0.72), y: baseY - r + wr },
-                    { x: p.x + Math.round(r * 0.72), y: baseY - r + wr }], 1, pal.metalDark);
-    }
-    fillOval(ctx, p.x, baseY - r, Math.max(1, Math.round(r * 0.28)),
-             Math.max(1, Math.round(r * 0.20)), pal.crateDark);
-    ctx.fillStyle = pal.paint;
-    ctx.fillRect(p.x - 1, baseY - r - 1, 2, 1);
-  }
-
-  function drawFlagModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var h = Math.max(6, Math.round((m.h || 24) * z));
-    fillOval(ctx, p.x, baseY + 1, Math.max(2, Math.round(2 * z)), 1, pal.shadow);
-    ctx.fillStyle = pal.stoneDark;
-    ctx.fillRect(p.x - 1, baseY - 1, 3, 2);
-    ctx.fillStyle = pal.metalLight;
-    ctx.fillRect(p.x, baseY - h, 1, h);
-    var wave = Math.round(Math.sin(S.ticks * 0.35 + m.x) * Math.max(1, 2 * z));
-    var fw = Math.max(4, Math.round(9 * z));
-    var fh = Math.max(2, Math.round(3 * z));
-    ctx.fillStyle = pal.paint;
-    ctx.fillRect(p.x + 1, baseY - h + 1 + wave, fw, fh);
-    ctx.fillStyle = pal.mark;
-    ctx.fillRect(p.x + 1, baseY - h + 1 + wave, fw, 1);
-  }
-
-  function drawFigureModel(ctx, pal, m) {
-    var z = S.cam.zoom;
-    var p = viewPoint(m.x, m.y);
-    var baseY = p.y - Math.round((m.z0 || 0) * z);
-    var h = Math.max(2, Math.round(4 * z));
-    ctx.fillStyle = pal.ink;
-    ctx.fillRect(p.x, baseY - h, 1, h);
-    ctx.fillRect(p.x, baseY - h - 1, 1, 1);
-    if (S.night) {
-      ctx.fillStyle = pal.warn;
-      ctx.fillRect(p.x, baseY - h + 1, 1, 1);
-    }
-  }
-
-  function drawEffects(ctx, pal) {
-    var site = S.world && S.world.site;
-    if (!site) return;
-    var z = S.cam.zoom;
-    var W = S.bufW, H = S.bufH;
-    // 烟囱/筒仓的烟
-    site.smoke.forEach(function (s) {
-      var p = viewPoint(s.x, s.y);
-      var top = p.y - s.h * z;
-      for (var i = 0; i < 5; i += 1) {
-        var t = ((S.ticks * 0.055 + i * 0.2) % 1);
-        var px = p.x + Math.sin((S.ticks * 0.03 + i) * 2) * 3 - t * 9;
-        var py = top - t * Math.max(10, 26 * z);
-        var r = Math.max(2, (2 + t * 6) * z);
-        if (s.steam) {
-          px = p.x + Math.sin(i * 1.7 + t * 4) * (3 + t * 5) * z - t * 10 * z;
-          py = top - t * 37 * z;
-          r = Math.max(2, (4 + t * 10) * z);
-        }
-        ctx.globalAlpha = (1 - t) * (s.steam ? 0.27 : 0.32);
-        fillOval(ctx, px, py, r, r * 0.72, s.steam ? pal.steelLight : pal.smoke);
-      }
-      ctx.globalAlpha = 1;
-    });
-    // 处理机组的火星
-    site.sparks.forEach(function (s) {
-      var p = viewPoint(s.x, s.y);
-      var top = p.y - s.h * z;
-      for (var i = 0; i < 6; i += 1) {
-        var t = ((S.ticks * 0.11 + i * 0.15) % 1);
-        var px = p.x + Math.sin(i * 2.1 + S.ticks * 0.05) * (4 + t * 10);
-        var py = top + t * t * 16 * z - t * 5;
-        ctx.fillStyle = i % 2 ? pal.sun : pal.rustLight;
-        ctx.fillRect(Math.round(px), Math.round(py), 1, 1);
-      }
-    });
-    // 空气里的粉尘
-    for (var i = 0; i < 60; i += 1) {
-      var seed = i * 97 + 13;
-      var dx = ((seed * 37) % Math.max(1, W) + S.ticks * 0.12 * (1 + i % 3)) % Math.max(1, W);
-      var dy = Math.round(H * 0.22) + ((seed * 53) % Math.max(1, Math.round(H * 0.7)));
-      ctx.globalAlpha = 0.10 + (i % 5) * 0.035;
-      ctx.fillStyle = pal.dust;
-      ctx.fillRect(Math.round(dx), Math.round(dy + Math.sin(S.ticks * 0.02 + i) * 2), 1, 1);
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function drawLighting(ctx, pal) {
-    var W = S.bufW, H = S.bufH;
-    var g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.34,
-                                     W / 2, H / 2, Math.max(W, H) * 0.72);
-    g.addColorStop(0, "rgba(0,0,0,0)");
-    g.addColorStop(1, pal.shadow);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
-  }
-
-  // ---------- 现实天气 ----------
-  /** 天气层：整体压暗 / 雾 / 雨 / 雪 / 雷闪。粒子只画在 Canvas 内，
-      文字标签仍是 DOM 覆盖层；reduced-motion 下只保留静态色调。 */
-  function drawWeather(ctx, pal) {
-    var kind = weatherKind();
-    if (kind === "clear" || kind === "unknown") return;
-    var W = S.bufW, H = S.bufH;
-    if (kind !== "fog") {
-      ctx.globalAlpha = kind === "thunder" ? 0.20 : (kind === "snow" ? 0.07 : 0.13);
-      ctx.fillStyle = S.night ? "rgba(8, 16, 24, 1)" : "rgba(56, 64, 74, 1)";
-      ctx.fillRect(0, 0, W, H);
-      ctx.globalAlpha = 1;
-    }
-    if (kind === "fog") {
-      var fog = ctx.createLinearGradient(0, H * 0.22, 0, H);
-      fog.addColorStop(0, "rgba(200, 205, 205, 0)");
-      fog.addColorStop(0.55, S.night ? "rgba(90, 105, 120, 0.20)"
-        : "rgba(220, 215, 205, 0.22)");
-      fog.addColorStop(1, S.night ? "rgba(70, 85, 100, 0.34)"
-        : "rgba(235, 228, 215, 0.34)");
-      ctx.fillStyle = fog;
-      ctx.fillRect(0, H * 0.22, W, H * 0.78);
-    }
-    if (kind === "rain" || kind === "drizzle" || kind === "thunder") {
-      drawRain(ctx, pal, kind);
-    }
-    if (kind === "snow") drawSnow(ctx, pal);
-    if (kind === "thunder") drawLightning(ctx, pal);
-  }
-
-  function drawRain(ctx, pal, kind) {
-    if (S.reduced) return;
-    var W = S.bufW, H = S.bufH;
-    var drizzle = kind === "drizzle";
-    var count = drizzle ? 70 : 132;
-    ctx.fillStyle = S.night ? pal.glassLight : pal.glassGlow;
-    for (var i = 0; i < count; i += 1) {
-      var seed = i * 97 + 13;
-      var x = (seed * 7 + S.ticks * (drizzle ? 1.1 : 2.4)) % W;
-      var y = (seed * 31 + S.ticks * (drizzle ? 3 : 7) + (i % 5) * 17) % H;
-      ctx.globalAlpha = 0.14 + (i % 4) * 0.055;
-      ctx.fillRect(Math.round(x), Math.round(y), 1, drizzle ? 2 : 4);
-      if (!drizzle) {
-        ctx.fillRect(Math.round(x) + 1, Math.round(y) + 4, 1, 1);
-      }
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function drawSnow(ctx, pal) {
-    if (S.reduced) return;
-    var W = S.bufW, H = S.bufH;
-    ctx.fillStyle = S.night ? pal.glassLight : "#f4f7fb";
-    for (var i = 0; i < 84; i += 1) {
-      var drift = Math.sin(S.ticks * 0.045 + i * 0.7) * 9;
-      var x = (i * 113 + drift + 23) % W;
-      var y = (i * 47 + S.ticks * 1.7) % H;
-      ctx.globalAlpha = 0.30 + (i % 3) * 0.16;
-      var size = (i % 2) + 1;
-      ctx.fillRect(Math.round(x), Math.round(y), size, size);
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function drawLightning(ctx, pal) {
-    var phase = S.ticks % 120;
-    if (phase >= 2) return;
-    var W = S.bufW, H = S.bufH;
-    var skyH = sceneHorizon();
-    ctx.globalAlpha = phase === 0 ? 0.22 : 0.10;
-    ctx.fillStyle = "#eaf4ff";
-    ctx.fillRect(0, 0, W, H);
-    ctx.globalAlpha = 0.65;
-    ctx.strokeStyle = pal.glassLight;
-    ctx.lineWidth = 1;
-    var bx = Math.round(W * (0.52 + (S.ticks % 7) * 0.045));
-    var by = 0;
-    ctx.beginPath();
-    ctx.moveTo(bx, by);
-    for (var i = 1; i <= 6; i += 1) {
-      bx += ((i * 37) % 19) - 9;
-      by = Math.round(skyH * (i / 6) + ((i * 13) % 7));
-      ctx.lineTo(bx, by);
-    }
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-  }
+  function vlen(v) { return FX.vlen(v); }
+  function fillDiamond(ctx, cx, cy, hw, hh, color) { FX.fillDiamond(ctx, cx, cy, hw, hh, color); }
+  function fillOval(ctx, cx, cy, rx, ry, color) { FX.fillOval(ctx, cx, cy, rx, ry, color); }
+  function linePath(ctx, pts, width, color) { FX.linePath(ctx, pts, width, color); }
+  function seeded(seed) { return FX.seeded(seed); }
+  function isToday(sec) { return FX.isToday(sec); }
+  function roleCols(pal, role, bg) { return FX.roleCols(pal, role, bg); }
 
   // ---------- 包裹 ----------
-  // ---------- 待发月台（未来排期可视化） ----------
-  /** 把「未来 30 分钟会到点的产线」算成一份按 eta 升序的列表。
-
-      以前场景只表达「此刻」：包裹凭空从调度厅冒出来，看不到还没开始的那一段。
-      待发月台把 `cron_tasks.next_run_at` 翻译成摆在场院上的静止包裹，于是同一幅画
-      同时有「成品（过去）/ 在途（此刻）/ 待发（未来）」三段。eta 用本机时间现算：
-      `next_run_at` 是服务端时间戳，用 `Date.now()/1000` 直接减，30 分钟窗口内
-      几秒的钟差可以忽略；用快照里的 `state.now` 会在两次拉取之间冻住。 */
-  function refreshUpcoming() {
-    var st = activeState();
+  // ---------- 待发告示牌（未来排期可视化） ----------
+  /** 近 30 分钟到点的 cron 产线（eta 升序；eta <= 0 表示到点还没跑起来）。 */
+  function upcomingList(st, nowSec) {
     var out = [];
     if (st && st.projects) {
-      var now = Date.now() / 1000;
       st.projects.forEach(function (p) {
         if (p.root_ok === false) return;   // 停工的厂区不会到点派工
         (p.lines || []).forEach(function (l) {
           if (l.kind !== "cron" || l.status !== "idle") return;  // 在跑 / 停工的都不算
-          var at = Number(l.next_run_at) || 0;
-          if (!at) return;
-          var eta = at - now;
-          if (eta <= 0 || eta > UPCOMING_WINDOW_S) return;
-          out.push({ key: l.key, name: l.name || l.key,
-                     project: p.name || "", eta: eta });
+          var at = Number(l.next_run_at);
+          if (!Number.isFinite(at) || at <= 0) return;  // 缺字段 / 脏时间戳不成一条待发
+          var eta = at - nowSec;
+          if (eta > UPCOMING_WINDOW_S) return;   // 过点的不裁：等运行事件或下轮排期带走它
+          out.push({ key: l.key, name: l.name || l.key, project: p.name || "",
+                     eta: eta, due: eta <= 0 });
         });
       });
     }
     out.sort(function (a, b) { return a.eta - b.eta; });
-    S.upcoming = out;
+    return out;
+  }
+
+  /** 牌面任务名截断：牌子只有几格宽，长名字顶出板面就不好看了。 */
+  function truncName(name) {
+    var s = String(name == null ? "" : name);
+    return s.length > UPCOMING_NAME_MAX ? s.slice(0, UPCOMING_NAME_MAX) : s;
+  }
+
+  /** 告示牌牌面离散状态：empty 暂无待发 / due 到点未启动（等待调度）/ soon 倒计时。 */
+  function noticeboardState(st, nowSec) {
+    var list = upcomingList(st, nowSec);
+    if (!list.length) {
+      return { state: "empty", key: "", name: "", countdown: "",
+               text: "暂无待发", count: 0, overflow: 0 };
+    }
+    var first = list[0];
+    var name = truncName(first.name);
+    var countdown = first.due ? "" : fmtCountdown(first.eta);
+    return {
+      state: first.due ? "due" : "soon",
+      key: first.key,
+      name: name,
+      countdown: countdown,
+      text: name + (countdown ? " · " + countdown : " · 等待调度"),
+      count: list.length,
+      overflow: Math.max(0, list.length - UPCOMING_MAX),
+    };
+  }
+
+  function refreshUpcoming() {
+    var st = activeState();
+    var now = Date.now() / 1000;
+    S.upcoming = upcomingList(st, now);
+    S.noticeboardView = noticeboardState(st, now);
   }
 
   /** 排队中的任务：按到点时间算「已经等了多久」。
@@ -5385,7 +1442,205 @@
     return clamp(elapsed / transit, 0, 1);
   }
 
+  // ---------- 厂区「今天干了多少」：让成品垛 / 返工堆 / 出货有数据来源 ----------
+  /** 每个厂区今天的做成 / 返工件数，以及当前在跑几条线。
+
+      这些数字不显示成文字，只喂给场景：做成几件 → 托盘上码几箱，堆满一托盘
+      就叫一辆车来拉走；返工件数 → 场院角上堆几个红箱。取数口径与顶部那盏灯
+      和抽屉体检一致：`done` 且不是 partial 才算做成，partial 与 error 都进返工堆。
+
+      样本来源是快照里的 runs（服务端只回最近 60 条）。所以这是个「够看」的量：
+      成品垛封顶 PALLET_SIZE × PALLET_MAX 箱、返工堆封顶 REWORK_MAX 箱，
+      样本饱和时画面上本来也看不出差别。 */
+  function refreshProjectStats(quiet) {
+    var st = activeState();
+    if (!st) return;
+    var next = {};
+    (st.projects || []).forEach(function (p) {
+      next[p.id] = { done: 0, rework: 0, busy: 0, lines: (p.lines || []).length };
+    });
+    (st.runs || []).forEach(function (r) {
+      var s = next[r.project_id];
+      if (!s) return;
+      if (r.status === "running") s.busy += 1;
+      if (!isToday(r.finished_at)) return;
+      var partial = r.outcome === "partial" || r.outcome === "failed";
+      if (r.status === "done" && !partial) s.done += 1;
+      else if (r.status === "error" || partial) s.rework += 1;
+    });
+    // 成色变化 → 出货：每攒满一托盘放一辆车出厂（首帧 / 重拉时不补放，
+    // 否则每次切项目都会有一队车同时涌出来）。
+    if (!quiet && S.world) {
+      Object.keys(next).forEach(function (pid) {
+        var before = (S.stats && S.stats[pid] && S.stats[pid].done) || 0;
+        var after = next[pid].done;
+        if (after > before
+            && Math.floor(after / PALLET_SIZE) > Math.floor(before / PALLET_SIZE)) {
+          spawnTrip(S.world.factories.filter(function (f) {
+            return String(f.id) === String(pid);
+          })[0]);
+        }
+      });
+    }
+    S.stats = next;
+  }
+
+  /** 取某个厂区的今日统计（绘制层用；没有数据时返回全零）。 */
+  function statFor(pid) {
+    var s = S.stats && S.stats[pid];
+    return s || { done: 0, rework: 0, busy: 0, lines: 0 };
+  }
+
+  // ---------- 出货：装满一托盘就来一辆车 ----------
+  /** 出车走完整动线：进场 → 等候 → 停靠装货位 → 叉车装货 → 离场。
+      纯表现：不参与任何判定、不改运行状态；动线几何与位姿插值在 scene 层。 */
+  function spawnTrip(f) {
+    if (!f || S.reduced) return;          // 减少动态效果：不动，托盘垛仍是静态读数
+    if (!f.dock || !f.apron) return;      // 旧世界没有动线几何：不放假车
+    // 同厂一次只走一组装运；全场同时在场的车不超过 TRIP_MAX 组
+    for (var i = 0; i < S.trips.length; i += 1) {
+      if (String(S.trips[i].pid) === String(f.id)) return;
+    }
+    if (S.trips.length >= TRIP_MAX) return;
+    var done = statFor(f.id).done || 0;
+    var boxes = done % PALLET_SIZE || Math.min(2, PALLET_SIZE);  // 没读到统计按半托装
+    S.trips.push({ pid: f.id, factory: f, t0: nowMs(), boxes: clamp(boxes, 1, 3) });
+  }
+
+  function updateTrips(now) {
+    if (!S.trips.length) return;
+    S.trips = S.trips.filter(function (t) { return now - t.t0 < TRIP_MS; });
+  }
+
+  // ---------- 回放今天 ----------
+  /** 把今天跑过的每一轮按时间顺序在传送带上重演。
+
+      为什么值得做：工厂是「此刻」的一扇窗，可生产这件事最好看的样子是它的一天——
+      早上空垛、中午堆满、傍晚被车拉走、中间出过几次红箱。数据全在
+      `automation_runs` 里（`factory.runs` 的 tokens_today 视图就是「今天开始的运行」），
+      不需要新的执行路径，也不需要落任何东西。
+
+      - 按轮次排队演：每轮一个固定档期（0.9–2.6 秒），一天的轮次越多总时长越长
+        （上限 REPLAY_CAP_MS）；不按真实时间轴等比压缩，否则几十秒的运行会闪一下就没；
+      - 进度条上写的是这轮真实的开始钟点，不是加速后的虚拟时钟；
+      - 回放时实时包裹停画（避免真假同屏），Esc /「回到此刻」立刻退出。 */
+  function toggleReplay() {
+    if (S.replay && S.replay.running) { stopReplay(); return; }
+    if (S.demo) { addNotice("样板厂没有真实运行记录，回放只在有真实产线的项目里可用"); return; }
+    if (S.replayLoading) return;
+    S.replayLoading = true;
+    request("factory.runs", { view: "tokens_today", limit: 400 }).then(function (r) {
+      var rows = ((r && r.runs) || []).filter(function (x) {
+        return x.started_at && isToday(x.started_at);
+      });
+      if (!rows.length) {
+        addNotice("今天还没有运行记录可回放");
+        return;
+      }
+      rows.sort(function (a, b) { return a.started_at - b.started_at; });
+      // 按「轮次」排队演，不按真实时间轴等比压缩：今天的运行大多几十秒，
+      // 摊到 13 个小时里压成 42 秒，每一轮只会闪一下——那不是回放，是闪烁。
+      // 现在每轮占一个固定档期（约 2.2 秒），一天 25 轮大约 55 秒看完，
+      // 进度条上的钟点仍然写这轮真实的开始时间。
+      var step = Math.max(900, Math.min(2600, Math.floor(REPLAY_CAP_MS / rows.length)));
+      S.replay = {
+        running: true, startedAt: nowMs(), step: step, duration: step * rows.length,
+        items: rows.map(function (x, i) {
+          return {
+            id: x.id, run: x, key: runKey(x), slot: i,
+            at: x.started_at,
+            status: x.status,
+          };
+        }),
+      };
+      document.body.classList.add("factory-replaying");
+      if (dom.replayBtn) { dom.replayBtn.classList.add("playing"); dom.replayBtn.textContent = "回放中"; }
+      if (dom.replayBar) dom.replayBar.classList.remove("hidden");
+      render();
+    }).catch(function (e) {
+      addNotice("回放数据读取失败：" + escapeHtml(e && e.message ? e.message : "未知错误"));
+    }).finally(function () {
+      S.replayLoading = false;
+    });
+  }
+
+  function stopReplay() {
+    S.replay = null;
+    document.body.classList.remove("factory-replaying");
+    if (dom.replayBtn) { dom.replayBtn.classList.remove("playing"); dom.replayBtn.textContent = "回放"; }
+    if (dom.replayBar) dom.replayBar.classList.add("hidden");
+    render();
+  }
+
+  /** 某条回放项此刻的进度（0..1）；还没轮到 / 已经演完都返回 -1。 */
+  function replayProgress(rp, it, elapsed) {
+    var local = elapsed - it.slot * rp.step;
+    if (local < 0) return -1;
+    // 最后 15% 的档期留给「落地」：包裹停一会儿再消失，不然看不清结果色
+    var run = rp.step * 0.85;
+    if (local > rp.step) return -1;
+    return clamp(local / run, 0, 1);
+  }
+
+  function replayTick(now) {
+    var rp = S.replay;
+    if (!rp || !rp.running) return;
+    var elapsed = now - rp.startedAt;
+    if (dom.replayTime) {
+      // 进度条上的钟点是「这轮真实的开始时间」，不是加速后的虚拟时钟
+      var idx = clamp(Math.floor(elapsed / rp.step), 0, rp.items.length - 1);
+      var d = new Date((rp.items[idx].at || 0) * 1000);
+      dom.replayTime.textContent = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    }
+    if (dom.replayHint) {
+      var k = clamp(Math.floor(elapsed / rp.step) + 1, 1, rp.items.length);
+      dom.replayHint.textContent = "第 " + k + "/" + rp.items.length + " 轮";
+    }
+    if (elapsed >= rp.duration) stopReplay();
+  }
+
+  function drawReplay(ctx, pal) {
+    var rp = S.replay;
+    if (!rp || !rp.running || !S.world) return;
+    var elapsed = nowMs() - rp.startedAt;
+    rp.items.forEach(function (it) {
+      var progress = replayProgress(rp, it, elapsed);
+      if (progress < 0) return;
+      var line = S.world.lines.get(it.key);
+      if (!line || !line.drawn) return;
+      var z = S.cam.zoom;
+      var pts = line.path.map(function (p) { return viewPoint(p.x, p.y); });
+      var steps = Math.max(3, Math.round(pathLength(pts) / Math.max(8, vlen(16))));
+      var pos = pointAt(pts, Math.round(progress * steps) / steps);
+      var s = Math.max(2, Math.round(7 * z));
+      var lift = 14 * z;
+      var color = pal.product;
+      var edge = pal.crateDark;
+      if (it.status === "error" || it.status === "interrupted" || it.status === "orphan") {
+        color = pal.bad; edge = pal.ink;
+      } else if (it.status === "empty" || it.status === "skipped") {
+        color = pal.beltMark; edge = pal.beltDark;
+      }
+      // 落地后淡出：档期最后那一小段
+      var alpha = progress > 0.94 ? clamp((1 - progress) / 0.06, 0, 1) : 1;
+      ctx.globalAlpha = alpha;
+      var x = Math.round(pos.x), gy = Math.round(pos.y);
+      fillOval(ctx, x, gy + 1, Math.max(1, Math.round(s * 0.8)),
+               Math.max(1, Math.round(s * 0.35)), pal.shadow);
+      ctx.fillStyle = edge;
+      ctx.fillRect(x - s, gy - Math.round(lift) - s, s * 2, s * 2);
+      ctx.fillStyle = color;
+      ctx.fillRect(x - s + 1, gy - Math.round(lift) - s + 1,
+                   Math.max(1, s * 2 - 2), Math.max(1, s * 2 - 2));
+      ctx.fillStyle = pal.crateLight;
+      ctx.fillRect(x - s + 1, gy - Math.round(lift) - s + 1, Math.max(1, s * 2 - 2), 1);
+      ctx.globalAlpha = 1;
+    });
+  }
+
   function drawPackages(ctx, pal) {
+    // 回放时只演历史：实时包裹停画，两种「包裹」同屏会分不清哪个是真的
+    if (S.replay && S.replay.running) { S.overflow = 0; drawReplay(ctx, pal); return; }
     var now = nowMs();
     var items = [];
     S.packages.forEach(function (pkg) {
@@ -5457,97 +1712,139 @@
     S.berthLane = used ? { cap: cap, used: used } : null;
   }
 
-  /** 待发月台：调度厅前沿摆一排静止包裹，越近越靠前。
+  /** 待发告示牌：调度厅右前方一块固定像素的小立牌（影子 + 中柱底座 + 板面 + 状态灯）。
 
-      位置以调度厅为中心向外排，避开四条主干道（那些是 belt 起点）——月台在
-      厅的正下方（屏幕南侧），是等距视角下唯一不会被厅体自身挡住的方位。
-      排队（到点但没抢到并发额度）的包裹画在月台出口，用警示色与轻微抖动
-      表示「卡住了」，这就是计数条上「排队 N」的可视化。 */
+      位置沿用原右侧月台锚点，尺寸固定（UPCOMING_BOARD）：不随条数或缩放长大，
+      不遮厅、不越月台、不占 3×3 外围。牌面只放「待发」短标题与状态灯，不写任务名 /
+      倒计时 / 溢出条数——明细点击后在居中弹窗里看（openUpcomingDialog）。中文一律
+      由 DOM 标签层贴，canvas 不画字。 */
+  function drawNoticeboard(ctx, pal) {
+    if (!S.world) return;
+    var view = S.noticeboardView || noticeboardState(activeState(), Date.now() / 1000);
+    var hall = S.world.hall;
+    var dock = viewPoint(hall.x + 34, hall.y + 22);   // 原右侧月台锚点
+    var w = UPCOMING_BOARD.w, h = UPCOMING_BOARD.h, pillar = UPCOMING_BOARD.pillar;
+    var x0 = Math.round(dock.x + UPCOMING_BOARD.lead);
+    var gy = Math.round(dock.y);
+    var top = gy - pillar - h;
+    var cx = x0 + Math.round(w / 2);
+    // 影子比底座宽：牌子是「立」在月台上的，不是飘着的
+    fillOval(ctx, cx, gy, Math.round(w * 0.34), 3, pal.shadow);
+    // 中柱 + 底座横档
+    ctx.fillStyle = pal.metalDark;
+    ctx.fillRect(cx - 2, gy - pillar, 4, pillar + 1);
+    ctx.fillStyle = pal.metal;
+    ctx.fillRect(cx - Math.round(w * 0.16), gy - 2, Math.round(w * 0.32), 2);
+    // 板面：浅框 + 深底（标题栏与状态灯压在框内）
+    ctx.fillStyle = pal.mark;
+    ctx.fillRect(x0, top, w, h);
+    ctx.fillStyle = pal.ink;
+    ctx.fillRect(x0 + 1, top + 1, w - 2, h - 2);
+    // 标题栏：到点还没跑起来时转锈色——「在等」和「该跑没跑」一眼分得开
+    ctx.fillStyle = view.state === "due" ? pal.rust : pal.steelDark;
+    ctx.fillRect(x0 + 2, top + 2, w - 4, 7);
+    // 状态灯：空态灰、倒计时绿、等待调度黄；10fps 脉冲，减动效时静止
+    var lamp = view.state === "empty" ? pal.idle
+      : (view.state === "due" ? pal.warn : pal.ok);
+    ctx.globalAlpha = view.state === "empty" ? 0.7
+      : (S.reduced ? 0.85 : 0.55 + 0.45 * Math.abs(Math.sin(S.ticks * 0.12)));
+    fillOval(ctx, x0 + 7, top + 5, 2, 2, lamp);
+    ctx.globalAlpha = 1;
+    // 两道抽象字迹：只示意「这是一块告示牌」，不呈现任何真实内容（名字 / 倒计时都在弹窗里）
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = pal.mark;
+    ctx.fillRect(x0 + 4, top + 11, w - 8, 1);
+    ctx.fillRect(x0 + 4, top + 14, w - 12, 1);
+    ctx.globalAlpha = 1;
+    // 挂牌的钉：板面下沿两枚，交代「这块是挂上去的」（压字迹之上）
+    ctx.fillStyle = pal.metalLight;
+    ctx.fillRect(x0 + 4, top + h - 5, 2, 2);
+    ctx.fillRect(x0 + w - 6, top + h - 5, 2, 2);
+    // 整块板面都是热区；点它打开待发信息弹窗（空态也开，只报「暂无待发」），
+    // 也不会穿透到背后的机台。标题贴在牌面上方，明细不进牌面。
+    S.noticeboard = {
+      x: x0, y: top, w: w, h: h, state: view.state, key: view.key,
+      titleX: cx, titleY: top - 2,
+    };
+    S.hits.push({ type: "upcoming", key: view.key || "",
+                  x: cx, y: top + Math.round(h / 2), rw: Math.round(w / 2),
+                  rh: Math.round(h / 2) });
+  }
+
+  /** 待发月台的残留半边：厅左前方那堆「到点没抢到并发额度」的排队包裹。
+
+      待发那半边已收成告示牌；排队这半边保留包裹形态（警示色 + 轻微抖动），
+      就是计数条上「排队 N」的可视化。 */
   function drawUpcoming(ctx, pal) {
+    S.noticeboard = null;
     if (!S.world) return;
     var z = S.cam.zoom;
     var hall = S.world.hall;
-    var base = viewPoint(hall.x, hall.y);
-    // 由厅向外分三层：泊位(23) → 排队包裹(33) → 待发包裹(44)。排队紧贴泊位外侧
-    // 才读得出「额度占满、这些在等」，待发在更外面是还没轮到的。以前三者挤在
-    // 26 那一层，泊位一加就全叠在一起了。
-    var queuedY = base.y + Math.round(33 * z);
-    var laneY = base.y + Math.round(44 * z);
-    var gap = Math.max(9, Math.round(17 * z));
-    var s = Math.max(2, Math.round(4 * z));
-    var lift = Math.round(9 * z);
-    var list = S.upcoming || [];
+    var leftDock = viewPoint(hall.x - 34, hall.y + 22);
+    var gapX = Math.max(12, Math.round(22 * z),
+      Math.ceil(44 * S.bufW / S.cssW));
+    var gapY = Math.max(4, Math.round(gapX * 0.5));
+    var s = Math.max(2, Math.round(7 * z));
+    var hh = Math.max(1, Math.round(s * 0.5));
+    var h = Math.max(2, Math.round(s * 1.4));
+    var boxBackOffset = Math.max(1, Math.round(hh * 0.5));
+    var boxBottomOffset = hh - boxBackOffset;
+    var labelTail = Math.ceil(16 * S.bufH / S.cssH);
+    var labelGap = Math.max(1, Math.round(S.bufH / S.cssH));
+    var labelOffset = boxBottomOffset + labelTail + labelGap;
 
-    // 排队数来自计数条；明细来自 waiting（额度之外真正在等的那几条）。
+    drawNoticeboard(ctx, pal);
+
+    // 排队数来自计数条：明细来自 waiting（额度之外真正在等的那几条）。
     // 只有计数没有明细时（旧快照 / 编排节点排队）退回按计数画，不编造等待时长。
     var st = activeState();
     var queued = Number(st && st.counters && st.counters.queued) || 0;
     var waits = queuedWaits();
     var queuedDraw = Math.min(QUEUED_MAX_DRAW, Math.max(queued, waits.length));
-    var shownCount = Math.min(UPCOMING_MAX, list.length);
-    var total = Math.max(shownCount, queuedDraw);
-    // 先清掉上一帧的排布：月台空了还留着旧坐标，标签会画在空场院上
-    S.upcomingLane = null;
+    // 先清掉上一帧的排布：场院空了还留着旧坐标，标签会画在空场院上
     S.queuedLane = null;
-    if (!total) return;
-    // 整排从厅中线向两侧铺开，保证不以厅顶为中心偏左
-    var startX = base.x - (total - 1) * gap / 2;
+    var queuedPositions = [];
 
-    function box(x, y, body, edge, alpha) {
-      ctx.globalAlpha = alpha == null ? 1 : alpha;
-      ctx.fillStyle = pal.shadow;
-      fillOval(ctx, x, y + 1, Math.max(1, Math.round(s * 0.8)),
-               Math.max(1, Math.round(s * 0.35)), pal.shadow);
-      ctx.fillStyle = edge;
-      ctx.fillRect(x - s, y - s, s * 2, s * 2);
-      ctx.fillStyle = body;
-      ctx.fillRect(x - s + 1, y - s + 1, Math.max(1, s * 2 - 2), Math.max(1, s * 2 - 2));
+    /** 一只立在月台线上的包裹：接地影子 + 三面体箱 + 顶面高光。 */
+    function parcel(x, groundY, top, body, side) {
+      // 接地影子比箱底略宽，从两侧探出来——包裹是「摆在」月台上，不是飘着。
+      fillOval(ctx, x, groundY, Math.max(2, Math.round(s * 1.1)),
+               Math.max(1, Math.round(s * 0.42)), pal.shadow);
+      var by = groundY - boxBackOffset;
+      drawIsoBoxAt(ctx, x, by, s + 1, hh + 1, h + 1,
+                   pal.crateDark, pal.crateDark, pal.crateDark);
+      drawIsoBoxAt(ctx, x, by, s, hh, h, top, body, side);
       ctx.fillStyle = pal.crateLight;
-      ctx.fillRect(x - s + 1, y - s + 1, Math.max(1, s * 2 - 2), 1);
-      ctx.globalAlpha = 1;
+      ctx.fillRect(x - s, by - h, Math.max(1, s * 2 - 1), 1);
+      ctx.fillStyle = pal.crateDark;
+      ctx.fillRect(x, by - h + hh, 1, h);
     }
 
-    var i = 0;
-    for (; i < shownCount; i += 1) {
-      var item = list[i];
-      var x = Math.round(startX + i * gap);
-      var y = Math.round(laneY) - lift;
-      // 最近的几枚偏暖，越远越淡：一眼看出先后顺序
-      var warmth = i === 0 ? pal.product : (i < 3 ? pal.crate : pal.beltMark);
-      box(x, y, warmth, pal.crateDark, i < 3 ? 1 : 0.72);
-      S.hits.push({ type: "upcoming", key: item.key, x: x, y: y,
-                    r: Math.max(5, s * 1.6) });
-    }
-    // 排队包裹：紧贴泊位外侧那一层，警示色 + 抖动；reduced-motion 下不抖。
-    // 它们与待发包裹不在同一行：同一行会让人以为是同一批，而这里差的是
-    // 「已经到点但没抢到额度」与「还没到点」两种完全不同的处境。
+    // 排队箱沿调度厅左下侧紧凑排列；最久一枚保留轻微抖动，标签跟随同一坐标。
+    var firstQueued = null;
     for (var q = 0; q < queuedDraw; q += 1) {
-      var qx = Math.round(startX + q * gap);
       var wait = waits[q];
-      // 没有明细的那几枚按「刚到点」画：静止、警示色，不假装它等了很久
       var tier = wait ? WAIT_TIERS[wait.tier] : WAIT_TIERS[0];
       var wob = 0;
       if (!S.reduced && tier.amp > 0) {
         wob = Math.sin(S.ticks * tier.freq + q) * Math.max(tier.amp * 0.6, tier.amp * z);
       }
+      var xq = Math.round(leftDock.x - q * gapX);
+      var yq = Math.round(leftDock.y + q * gapY + wob);
+      var qpos = { x: xq, y: yq };
+      queuedPositions.push(qpos);
+      if (q === 0) firstQueued = qpos;
       var body = pal[tier.tone] || pal.warn;
-      box(qx, Math.round(queuedY - lift + wob), body, pal.ink, 1);
+      parcel(xq, yq, body, body, pal.ink);
       S.hits.push({ type: "queued", key: wait ? wait.key : "",
-                    x: qx, y: Math.round(queuedY - lift), r: Math.max(5, s * 1.6) });
+                    x: xq, y: yq - Math.round(h * 0.6), r: Math.max(5, s * 1.6) });
     }
-    // 排队层的位置与「等最久的那条」交给标签层：标签不自己再算一遍坐标，
-    // 否则有排队包裹时整排左移，标签会落在空处。
+    // 标签锚点与箱体使用同一组位置。
     S.queuedLane = queuedDraw ? {
-      startX: startX, y: queuedY - lift,
+      positions: queuedPositions,
+      label: firstQueued ? { x: firstQueued.x, y: firstQueued.y + labelOffset } : null,
       top: waits.length ? waits[0] : null,
     } : null;
-    // 排布交给标签层复用：标签不能自己再算一遍 startX——绘制时如果有排队包裹，
-    // 整排会左移，标签按另一套公式算就会与箱体错开一格。
-    S.upcomingLane = {
-      startX: startX, y: laneY - lift, gap: gap,
-      count: shownCount,
-      overflow: Math.max(0, list.length - UPCOMING_MAX) + Math.max(0, queued - queuedDraw),
-    };
   }
 
   function drawPackage(ctx, pal, pkg, now) {
@@ -5566,8 +1863,9 @@
       pos.y += Math.sin(S.ticks * 0.5) * Math.max(1, vlen(1));
     }
     var z = S.cam.zoom;
-    var s = Math.max(2, Math.round(5 * z));
-    var lift = 12 * z;
+    // 包裹从 5 放大到 7：以前在全景里约 7px，包装带的动作读不出来
+    var s = Math.max(2, Math.round(7 * z));
+    var lift = 14 * z;
     var color = pkg.color === 0 ? pal.crate : pkg.color === 1 ? pal.steelLight : pal.product;
     var edge = pal.crateDark;
     if (pkg.finish === "error") { color = pal.bad; edge = pal.ink; }
@@ -5709,49 +2007,38 @@
     }
     var i = 0;
     var used = [];
+    var maxLabels = labelCap();
     var st = activeState();
     var running = (st && st.counters && st.counters.running) || 0;
     var berth = S.berthLane;
     var hallText = "调度厅" + (running ? " · 在转 " + running + " 件" : "");
     if (berth) hallText += " · 额度 " + berth.used + "/" + berth.cap;
     placeLabel(labelFor(i++), S.world.hall.x, S.world.hall.y, hallText, "hall", 76, used);
-    // 待发月台：最近三枚写倒计时，再往后的只报个数——全景下每枚都带字会糊成
-    // 一排，而「还有几枚在等」本来就是这排包裹要说的话。
-    // 位置直接取 drawUpcoming 算好的屏幕坐标：placeLabel 的入参是世界坐标，
-    // 且会做名牌互压检测；四枚倒计时起点相同，走它会被第一枚全部压掉。
-    var upc = S.upcoming || [];
-    var lane = S.upcomingLane;
-    if (upc.length && lane) {
-      var sx2 = S.cssW / S.bufW, sy2 = S.cssH / S.bufH;
-      var shown = Math.min(3, lane.count);
-      for (var u = 0; u < shown; u += 1) {
-        placeLabelAt(labelFor(i++), (lane.startX + u * lane.gap) * sx2,
-                     lane.y * sy2, fmtCountdown(upc[u].eta), "upcoming");
-      }
-      if (lane.overflow > 0) {
-        placeLabelAt(labelFor(i++), (lane.startX + shown * lane.gap) * sx2,
-                     lane.y * sy2, "待发 +" + lane.overflow, "upcoming more");
-      }
+    // 待发告示牌：只贴「待发」短标题（牌面太小，任务名 / 倒计时 / 条数一律不上面，
+    // 明细点击后进弹窗）。中文一律走标签池，牌面上不画字。
+    var board = S.noticeboard;
+    if (board) {
+      var bxs = S.cssW / S.bufW, bys = S.cssH / S.bufH;
+      placeLabelAt(labelFor(i++), board.titleX * bxs, board.titleY * bys,
+                   "待发", "board title");
     }
-    // 排队最久的那一枚标等待时长：抖动只表达「急不急」，标不出「等了多久」。
-    // 只标一枚——整排都带字会把月台糊成一排，而最久的那条才是要处理的那条。
-    // 坐标取自 drawUpcoming 记下的排队层，标签才不会和箱体错开。
+    // 排队最久的一枚位于左下侧；从绘制层复用其实际位置，抖动时标签同步移动。
     var qLane = S.queuedLane;
-    if (qLane && qLane.top) {
+    if (qLane && qLane.top && qLane.label) {
       var topTier = qLane.top.tier;
-      placeLabelAt(labelFor(i++), qLane.startX * (S.cssW / S.bufW),
-                   qLane.y * (S.cssH / S.bufH),
+      placeLabelAt(labelFor(i++), qLane.label.x * (S.cssW / S.bufW),
+                   qLane.label.y * (S.cssH / S.bufH),
                    "等 " + fmtCountdown(qLane.top.waited),
                    topTier >= 2 ? "queued hot" : "queued");
     }
     // 厂区名牌优先
     var factories = S.world.factories.slice().sort(function (a, b) { return a.y - b.y; });
     factories.forEach(function (f) {
-      if (i >= MAX_LABELS - 8) return;
+      if (i >= maxLabels - 8) return;
       var allLines = (f.project && f.project.lines) || [];
       var busy = allLines.filter(function (l) { return l.status === "running"; }).length;
       var text = f.name + (busy ? " · " + busy + " 忙碌" : "");
-      var hidden = Math.max(0, allLines.length - 6);
+      var hidden = Math.max(0, allLines.length - machineCap());
       if (hidden) text += " · +" + hidden + " 线";
       if (f.root_ok === false) text += " · 停工";
       placeLabel(labelFor(i++), f.x, f.y, text, "project", f.labelZ || 44, used);
@@ -5763,7 +2050,7 @@
         // 聚焦档只画这一个厂区的机台：别的厂区在屏幕外，画了也只是被裁掉
         if (S.focusPid && f.id !== S.focusPid) return;
         f.lines.forEach(function (rec) {
-          if (i >= MAX_LABELS - 2) return;
+          if (i >= maxLabels - 2) return;
           if (rec._vx == null) return;
           var sx = rec._vx * (S.cssW / S.bufW);
           var sy = rec._vy * (S.cssH / S.bufH);
@@ -5784,7 +2071,7 @@
     var now = nowMs();
     factories.forEach(function (f) {
       if (!f.float || now >= f.float.until || !f.float.text) return;
-      if (i >= MAX_LABELS - 1) return;
+      if (i >= maxLabels - 1) return;
       placeLabel(labelFor(i++), f.float.x, f.float.y - 8, f.float.text,
         "float" + (f.float.bad ? " bad" : "") + (f.float.warn ? " warn" : ""));
     });
@@ -5859,9 +2146,16 @@
     // 演示模式：每 3 秒推一次内存里的运行，永不写库
     if (S.demo) demoTick(now);
 
+    // 出货卡车：纯表现层的倒计时，跑完就回收
+    updateTrips(now);
+    // 回放：推进虚拟时间、刷进度条、到点自动收队
+    replayTick(now);
+
     // 运行时长文案每 5 秒刷一次面板（有焦点时不重建）
     if (now - S.lastPanel > 5000) {
       S.lastPanel = now;
+      // 快照之外还有演示 / 手动补的数据：定期重算一次，成品垛不会停在旧数
+      refreshProjectStats(true);
       refreshPanelStates();
       renderCounters();
     }
@@ -5883,6 +2177,87 @@
     pointerPress = { x: ev.clientX, y: ev.clientY, moved: 0, id: ev.pointerId };
   }
 
+  /** 悬停的轻量中文提示：只说画面上真实存在的状态，不虚构关联。
+      机台 / 车 / 叉车 / 羊同时会画一圈高亮（见绘制层），提示文字写回 canvas.title。 */
+  function hoverTitle(hit) {
+    if (!hit) return "";
+    if (hit.type === "pkg") {
+      var run = findRun(hit.id);
+      return run ? ("包裹 #" + run.id + " · " + (run.name || "")) : "包裹";
+    }
+    if (hit.type === "line") {
+      var rec = findLine(hit.key);
+      return rec ? ("机台 · " + (rec.line.name || rec.key) + " · " + lineStateText(rec.line)) : "";
+    }
+    if (hit.type === "upcoming") {
+      // 牌面只给短标题 + 状态灯，这里补一句「有多少项 / 点开看明细」，
+      // 空态也说清能点（点了会开弹窗报「暂无待发」）。
+      var boardView = S.noticeboardView;
+      var n = (boardView && boardView.count) || 0;
+      return n ? ("待发告示牌 · " + n + " 项（点击查看）")
+               : "待发告示牌 · 暂无待发（点击查看）";
+    }
+    if (hit.type === "queued") {
+      var recQ = findLine(hit.key);
+      return recQ ? ("排队 · " + (recQ.line.name || recQ.key)) : "";
+    }
+    if (hit.type === "truck") {
+      var trip = null;
+      S.trips.forEach(function (t) { if (String(t.pid) === String(hit.pid)) trip = t; });
+      var phase = trip ? FX.tripPose(trip, nowMs()).phase : "";
+      return "出货卡车 · " + ({ approach: "正在进场", wait: "等候装货", dock: "停靠装货位",
+        load: "装货中", leave: "离场" }[phase] || "在场内");
+    }
+    if (hit.type === "forklift") return "叉车 · 托盘与车斗之间搬货";
+    if (hit.type === "sheep") {
+      var f = factoryById(hit.pid);
+      if (!f) return "";
+      var pose = FX.workerPose(f, nowMs(), S.reduced);
+      var what = { patrol: "巡检中", pause: "巡检停留", gate: "在门口值守", idle: "待命" }[pose.state] || "在场";
+      return "工头小羊 · " + what + (S.reduced ? "" : "（点一下挥手）");
+    }
+    return "";
+  }
+
+  function factoryById(pid) {
+    if (!S.world) return null;
+    for (var i = 0; i < S.world.factories.length; i += 1) {
+      if (String(S.world.factories[i].id) === String(pid)) return S.world.factories[i];
+    }
+    return null;
+  }
+
+  /** 悬停信息牌：跟随命中点的轻量 DOM（中文文案不入 canvas）。
+      文本与 hoverTitle 同源；隐藏 / 显示都不接收指针事件。 */
+  function showHoverTip(hit, ev) {
+    if (!dom.tip) return;
+    var text = hoverTitle(hit);
+    if (!text) {
+      hideHoverTip();
+      return;
+    }
+    var rect = dom.stage.getBoundingClientRect();
+    var width = dom.stage.clientWidth || rect.width;
+    var height = dom.stage.clientHeight || rect.height;
+    var px = (ev.clientX - rect.left) * width / (rect.width || width);
+    var py = (ev.clientY - rect.top) * height / (rect.height || height);
+    var x = px + 14;
+    var y = py + 18;
+    dom.tip.textContent = text;
+    dom.tip.style.display = "";
+    // 贴边收拢：信息牌不探出舞台
+    var w = dom.tip.offsetWidth || 120;
+    var h = dom.tip.offsetHeight || 24;
+    if (x + w > width - 8) x = Math.max(4, px - w - 12);
+    if (y + h > height - 8) y = Math.max(4, py - h - 10);
+    dom.tip.style.left = Math.round(x) + "px";
+    dom.tip.style.top = Math.round(y) + "px";
+  }
+
+  function hideHoverTip() {
+    if (dom.tip && dom.tip.style.display !== "none") dom.tip.style.display = "none";
+  }
+
   function onPointerMove(ev) {
     if (!dom.canvas) return;
     if (pointerPress) {
@@ -5892,17 +2267,20 @@
       pointerPress.moved = Math.max(pointerPress.moved, Math.abs(dx) + Math.abs(dy));
       return;
     }
-    // 悬停提示：包裹编号 / 机台名（Canvas 没有 title，写回元素上）
+    // 悬停提示 + 高亮：命中记录进 S.hover（绘制层每帧读取）；reduced 模式的
+    // 主循环不重绘，hover 变化时补一帧让高亮即时出现/消失。
+    S.hoverPointer = { clientX: ev.clientX, clientY: ev.clientY };
     var pt = canvasPoint(ev);
     var hit = hitTest(pt.x, pt.y);
-    if (hit && hit.type === "pkg") {
-      var run = findRun(hit.id);
-      dom.canvas.title = run ? ("包裹 #" + run.id + " · " + (run.name || "")) : "包裹";
-    } else if (hit && hit.type === "line") {
-      var rec = findLine(hit.key);
-      dom.canvas.title = rec ? (rec.line.name || rec.key) : "";
-    } else {
-      dom.canvas.title = "";
+    var prev = S.hover;
+    S.hover = hit || null;
+    dom.canvas.title = hoverTitle(hit);
+    showHoverTip(hit, ev);
+    if (S.reduced && (S.hover || prev) &&
+        (String(S.hover && S.hover.type) !== String(prev && prev.type) ||
+         String(S.hover && S.hover.key) !== String(prev && prev.key) ||
+         String(S.hover && S.hover.pid) !== String(prev && prev.pid))) {
+      render();
     }
   }
 
@@ -5922,10 +2300,11 @@
       openLineDrawer(hit.key, { focus: true });
       return;
     }
-    // 点待发包裹 = 提前看这条产线（与点机台同一个抽屉），不派工：
+    // 点告示牌 = 打开待发信息弹窗（空态也开，只报「暂无待发」）：牌面太小放不下
+    // 明细，明细在居中只读弹窗里看，点其中一条才开原产线抽屉。全程不派工——
     // 还没到点的那一轮不该因为一次误触就提前跑起来。
     if (hit && hit.type === "upcoming") {
-      openLineDrawer(hit.key, { focus: true });
+      openUpcomingDialog();
       return;
     }
     // 点排队包裹 = 看这条产线为什么卡着（抽屉里有状态与排期），同样不派工：
@@ -5934,11 +2313,32 @@
       openLineDrawer(hit.key, { focus: true });
       return;
     }
+    // 点工头小羊：短挥手一下（纯表现；减少动态效果时不挥手）
+    if (hit && hit.type === "sheep" && !S.reduced) {
+      var f = factoryById(hit.pid);
+      if (f) {
+        f.waveUntil = nowMs() + WAVE_MS;
+        render();
+      }
+    }
+  }
+
+  function refreshHover() {
+    if (!S.hoverPointer || !dom.canvas) return;
+    var pt = canvasPoint(S.hoverPointer);
+    S.hover = hitTest(pt.x, pt.y) || null;
+    dom.canvas.title = hoverTitle(S.hover);
+    showHoverTip(S.hover, S.hoverPointer);
   }
 
   function onPointerLeave() {
+    var hadHover = !!S.hover;
+    S.hover = null;
+    S.hoverPointer = null;
+    hideHoverTip();
     if (dom.canvas) dom.canvas.title = "";
     pointerPress = null;
+    if (hadHover && S.reduced) render();
   }
 
   function onWheel(ev) {
@@ -5947,10 +2347,18 @@
   }
 
   function hitTest(x, y) {
-    // 包裹优先（小目标）：在跑的与待发的都是小目标，一起按距离判
+    // 包裹（小目标）与告示牌优先：在跑的、排队的、牌面与动态对象（车 / 叉车 / 羊）
+    // 都是小目标，一起判——它们必须压过脚下的机台热区
     for (var i = S.hits.length - 1; i >= 0; i -= 1) {
       var h = S.hits[i];
-      if ((h.type === "pkg" || h.type === "upcoming" || h.type === "queued")
+      // 告示牌给的是矩形（整块板面比一枚包裹大得多，圆热区在四角会漏点）
+      if (h.rw != null) {
+        if (h.type === "upcoming" && Math.abs(x - h.x) <= h.rw
+            && Math.abs(y - h.y) <= h.rh) return h;
+        continue;
+      }
+      if ((h.type === "pkg" || h.type === "upcoming" || h.type === "queued"
+           || h.type === "sheep" || h.type === "truck" || h.type === "forklift")
           && Math.hypot(x - h.x, y - h.y) <= h.r) return h;
     }
     if (!S.world) return null;
@@ -5966,1014 +2374,21 @@
     return best;
   }
 
-  // ---------- 抽屉 ----------
-  /** 被拦工具的快照（后端存 JSON；旧行 / 坏数据回落原文），给抽屉一句人话。 */
-  function deniedToolsText(run) {
-    var raw = String((run && run.denied_tools) || "");
-    if (!raw) return "";
-    try {
-      var obj = JSON.parse(raw);
-      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-        return Object.keys(obj).map(function (name) {
-          return name + " ×" + Number(obj[name] || 0);
-        }).join(" / ");
-      }
-    } catch (e) { /* 不是 JSON：按原文显示 */ }
-    return raw;
-  }
-
-  /** 单次运行的 token 用量（未记录时不占位，避免一排「0 in / 0 out」）。 */
-  function tokenRow(run) {
-    var tin = Number(run && run.in_tokens) || 0;
-    var tout = Number(run && run.out_tokens) || 0;
-    if (tin <= 0 && tout <= 0) return "";
-    var cached = Number(run && run.cached_tokens) || 0;
-    var text = fmtTokens(tin) + " in / " + fmtTokens(tout) + " out";
-    if (cached > 0) text += "（缓存 " + fmtTokens(cached) + "）";
-    return "<dt>用量</dt><dd>" + escapeHtml(text) + "</dd>";
-  }
-
-  /** 产线体检：近 7 天成功率 / 耗时 / 连续失败 + 最近 N 次状态色条。 */
-  function healthBlock(line) {
-    var h = line && line.health;
-    if (!h || !h.total) {
-      return '<div><div class="dim small">产线体检</div>' +
-        '<div class="fx-hint">近 7 天还没有可统计的运行。</div></div>';
-    }
-    var rate = Math.round((h.success_rate || 0) * 100);
-    var parts = [
-      "成功率 <b>" + rate + "%</b>（7 天 " + h.total + " 次）",
-      "平均 " + fmtDur(h.avg_s),
-      "P95 " + fmtDur(h.p95_s),
-      "最慢 " + fmtDur(h.max_s),
-    ];
-    // 「跑完了但被门控拦过」与「用户判定不算」单独说清：它们不拉低状态色条，
-    // 但必须拉低成功率，否则这个百分比会一直是绿的
-    if (h.partial) parts.push('<span class="fx-warn">有拦截 ' + h.partial + " 次</span>");
-    if (h.marked_failed) parts.push('<span class="fx-bad">判定不算 ' + h.marked_failed + " 次</span>");
-    if (h.streak >= 2) parts.push('<span class="fx-bad">连续失败 ' + h.streak + " 次</span>");
-    var tail = h.tail || [];
-    var tailOutcomes = h.tail_outcomes || [];
-    var strip = tail.map(function (s, idx) {
-      var oc = tailOutcomes[idx] || "";
-      // done 但有拦截的格子不能染成成功绿：它是 partial，不是做成
-      var cls = (s === "done" && oc === "partial") ? "partial" : s;
-      var tip = (RUN_STATUS[s] || s) + (oc ? " · " + (RUN_OUTCOME[oc] || oc) : "");
-      return '<i class="' + escapeHtml(cls) + '" title="' + escapeHtml(tip) + '"></i>';
-    }).join("");
-    return '<div><div class="dim small">产线体检</div>' +
-      '<div class="fx-health">' + parts.join(" · ") + "</div>" +
-      '<div class="fx-strip" title="最近 ' + tail.length + ' 次运行（新 → 旧）">' + strip + "</div></div>";
-  }
-
-  function drawerShell(title, bodyHtml) {
-    return '<div class="fx-drawer-head"><h3>' + title + "</h3>" +
-      '<button class="fx-drawer-close" title="关闭（Esc）">✕</button></div>' +
-      '<div class="fx-drawer-body">' + bodyHtml + "</div>";
-  }
-
-  function openDrawer(html) {
-    if (!dom.drawer) return;
-    var wasHidden = dom.drawer.classList.contains("hidden");
-    dom.drawer.innerHTML = html;
-    if (wasHidden) dom.drawer.classList.remove("factory-entered");
-    dom.drawer.classList.remove("hidden");
-    if (wasHidden) {
-      void dom.drawer.offsetWidth;
-      dom.drawer.classList.add("factory-entered");
-    }
-    var close = dom.drawer.querySelector(".fx-drawer-close");
-    if (close) {
-      close.onclick = closeDrawer;
-      // 键盘用户从面板 / 画布打开抽屉后，焦点要跟着进来（Esc 关闭、Tab 从关闭键开始）；
-      // 程序化刷新（事件到达 / live 轮询）不抢焦点。
-      if (wasHidden) close.focus();
-    }
-  }
-
-  function closeDrawer() {
-    S.drawer = null;
-    if (dom.drawer) {
-      dom.drawer.classList.add("hidden");
-      dom.drawer.innerHTML = "";
-    }
-  }
-
-  function factoryEscape() {
-    if (S.drawer) { closeDrawer(); return true; }
-    // 聚焦档里 Esc 先回全景；工具栏的「全景」按钮是同一出口（键盘 / 鼠标都行）
-    if (S.focusPid) { fitCamera(true); return true; }
-    return false;
-  }
-
-  function openRunDrawer(id) {
-    var run = findRun(id);
-    if (!run) return;
-    S.drawer = { type: "run", id: id };
-    var status = run.status || "";
-    var denied = Number(run.denied_count) || 0;
-    var deniedTools = deniedToolsText(run);
-    var outcome = run.outcome || "";
-    var html = '<div class="fx-kv">' +
-      "<dt>包裹</dt><dd>#" + escapeHtml(String(run.id)) + "</dd>" +
-      "<dt>产线</dt><dd>" + escapeHtml(runTitle(run)) + "</dd>" +
-      "<dt>厂区</dt><dd>" + escapeHtml(run.project_name || "—") + "</dd>" +
-      "<dt>触发</dt><dd>" + escapeHtml(run.kind === "pipeline_node" && run.trigger === "schedule"
-        ? "编排自动推进" : (TRIGGER_TEXT[run.trigger] || run.trigger || "—")) + "</dd>" +
-      "<dt>状态</dt><dd><span class=\"fx-status " + escapeHtml(status) + "\">" +
-        escapeHtml(RUN_STATUS[status] || status || "—") + "</span>" +
-        (outcome
-          ? " " + outcomeChip(run) + '<span class="fx-run-meta">' +
-            (run.outcome_source === "user" ? "（你判定的）" : "（自动判定）") + "</span>"
-          : "") + "</dd>" +
-      "<dt>开始</dt><dd>" + escapeHtml(fmtTs(run.started_at)) + "</dd>" +
-      "<dt>结束</dt><dd>" + escapeHtml(fmtTs(run.finished_at)) + "</dd>" +
-      "<dt>耗时</dt><dd>" + escapeHtml(fmtDur(runElapsed(run))) + "</dd>" +
-      (denied > 0
-        ? "<dt>被拦</dt><dd class=\"fx-bad\">" + denied + " 次" +
-          (deniedTools ? "：" + escapeHtml(deniedTools) : "") +
-          "<br><span class=\"fx-run-meta\">无人值守门控拒绝了写入 / 执行类工具，" +
-          (run.kind === "cron" ? "产出可能只是模型的绕行说明；点下方「去编辑」核对预授权工具"
-            : "产出可能只是模型的绕行说明；点下方「查看编排」核对节点预授权，修改可在对话中交给 Agent 处理") + "</span></dd>"
-        : "") +
-      tokenRow(run) +
-      (status === "running"
-        ? "<dt>在跑</dt><dd id=\"fx-run-progress\">" +
-          escapeHtml(progressText(run.progress) || "启动中") + "</dd>"
-        : "") +
-      "</div>";
-    if (run.error) {
-      var kind = run.error_kind ? (ERROR_KIND[run.error_kind] || run.error_kind) : "";
-      html += "<div><div class=\"dim small\">错误" +
-        (kind ? " · <span class=\"fx-bad\">" + escapeHtml(kind) + "</span>" : "") +
-        "</div><pre class=\"fx-excerpt\">" + escapeHtml(run.error) + "</pre></div>";
-    }
-    if (run.result_excerpt) {
-      html += "<div><div class=\"dim small\">结果摘要</div><pre class=\"fx-excerpt\">" +
-        escapeHtml(run.result_excerpt) + "</pre></div>";
-    }
-    html += '<div class="fx-drawer-ops">';
-    if (run.session_id) {
-      html += '<button class="btn-primary" data-open-session="' + escapeHtml(String(run.session_id)) + '">打开会话</button>';
-    }
-    if (run.result_path) {
-      html += '<button class="btn-ghost" data-open-result="' + escapeHtml(String(run.result_path)) +
-        '" title="打开这个工位的产出全文">打开产出</button>';
-    }
-    if (status !== "running") {
-      // 人工判定与自动判定分开记：跑完了不等于做成了，只有用户知道产出对不对
-      html += '<button class="btn-ghost" data-mark="ok">这轮算过</button>';
-      html += '<button class="btn-ghost" data-mark="failed">不算</button>';
-      if (run.outcome_source === "user") {
-        html += '<button class="btn-ghost" data-mark="">撤销判定</button>';
-      }
-    }
-    if (run.status === "running" && run.kind === "cron") {
-      html += '<button class="btn-ghost fx-danger" data-cancel-task="' +
-        escapeHtml(String(run.task_id)) + '">叫停</button>';
-    }
-    if (run.kind === "cron" && run.project_id != null) {
-      html += '<button class="btn-ghost" data-edit-task="' + escapeHtml(String(run.task_id)) +
-        '" data-edit-project="' + escapeHtml(String(run.project_id)) +
-        '" title="切到该厂区并打开自动化面板，直接改提示词 / 补预授权工具">去编辑</button>';
-    }
-    if (run.kind === "pipeline_node" && run.pipeline_id && run.project_id != null) {
-      html += '<button class="btn-ghost" data-view-pipeline="1">查看编排</button>';
-    }
-    html += '<button class="btn-ghost" data-close-drawer="1">关闭</button></div>';
-    openDrawer(drawerShell("运行详情", html));
-    if (!dom.drawer) return;
-    var pipeBtn = dom.drawer.querySelector("[data-view-pipeline]");
-    if (pipeBtn) pipeBtn.onclick = function () {
-      closeDrawer();
-      openPipelineFor(run.project_id, run.pipeline_id, run.task_id);
-    };
-    var cancelBtn = dom.drawer.querySelector("[data-cancel-task]");
-    if (cancelBtn) {
-      cancelBtn.onclick = function () {
-        cancelRun(Number(cancelBtn.dataset.cancelTask), run.name, cancelBtn);
-      };
-    }
-    var resultBtn = dom.drawer.querySelector("[data-open-result]");
-    if (resultBtn) {
-      resultBtn.onclick = function () { openFactoryResult(resultBtn.dataset.openResult); };
-    }
-    var editBtn = dom.drawer.querySelector("[data-edit-task]");
-    if (editBtn) {
-      editBtn.onclick = function () {
-        closeDrawer();
-        if (typeof openAutomationFor === "function") {
-          openAutomationFor(Number(editBtn.dataset.editProject),
-                            Number(editBtn.dataset.editTask));
-        }
-      };
-    }
-    dom.drawer.querySelectorAll("[data-mark]").forEach(function (b) {
-      b.onclick = function () { markRunOutcome(run, b.dataset.mark, b); };
-    });
-    var openBtn = dom.drawer.querySelector("[data-open-session]");
-    if (openBtn) {
-      openBtn.onclick = function () {
-        // 会话 id 是 12 位十六进制串（uuid 前缀），不是数字——以前 Number() 一下
-        // 变成 NaN，工厂里「打开会话」其实一直是坏的
-        var sid = String(openBtn.dataset.openSession || "");
-        closeDrawer();
-        if (typeof backToChat === "function") backToChat();
-        if (typeof openTabForSession === "function") openTabForSession(sid, "");
-      };
-    }
-    var closeBtn = dom.drawer.querySelector("[data-close-drawer]");
-    if (closeBtn) closeBtn.onclick = closeDrawer;
-  }
-
-  function openLineDrawer(key, opts) {
-    var rec = findLine(key);
-    if (!rec) return;
-    opts = opts || {};
-    var line = rec.line;
-    S.selectedKey = key;
-    renderPanel();
-    S.drawer = { type: "line", key: key };
-    var next = line.next_run_at ? fmtTs(line.next_run_at) : "—";
-    var html = '<div class="fx-kv">' +
-      "<dt>厂区</dt><dd>" + escapeHtml(rec.project.name || "—") + "</dd>" +
-      "<dt>类型</dt><dd>" + (line.kind === "pipeline" ? "装配线" : "单机产线") + "</dd>" +
-      "<dt>触发</dt><dd>" + escapeHtml(line.trigger_text || "—") + "</dd>" +
-      "<dt>下次</dt><dd>" + escapeHtml(next) + "</dd>" +
-      "<dt>状态</dt><dd>" + escapeHtml(lineStateText(line)) + "</dd>" +
-      (line.status === "running"
-        ? "<dt>在跑</dt><dd id=\"fx-progress\">" +
-          escapeHtml(progressText(line.progress) || "启动中") + "</dd>"
-        : "") +
-      "</div>";
-    if (line.kind === "pipeline" && (line.nodes || []).length) {
-      html += "<div><div class=\"dim small\">工位</div><div class=\"fx-run-list\">";
-      line.nodes.slice(0, 20).forEach(function (n) {
-        html += '<div class="fx-run-row"><span class="fx-run-name">' + escapeHtml(n.title || ("工位 " + n.id)) +
-          '</span><span class="fx-run-meta">' + escapeHtml(nodeStatusText(n.status)) + "</span></div>";
-      });
-      html += "</div></div>";
-    }
-    html += healthBlock(line);
-    if (line.kind === "pipeline") html += '<button class="btn-ghost" data-view-pipeline="1">查看编排</button>';
-    html += '<div class="fx-drawer-ops">';
-    if (line.kind === "cron") {
-      html += '<button class="btn-primary" data-run-now="1">立即运行</button>';
-      html += '<button class="btn-ghost" data-toggle-line="1">' +
-        (line.status === "paused" || line.status === "stopped" ? "启用产线" : "暂停产线") + "</button>";
-      if (line.status === "running") {
-        html += '<button class="btn-ghost fx-danger" data-cancel-line="1">叫停</button>';
-      }
-      // 看到「上次失败」之后最常见的下一步：改提示词、补预授权工具。
-      // 以前要返回对话 → 切项目 → 开自动化面板 → 找任务四步，现在一步。
-      html += '<button class="btn-ghost" data-edit-line="1" ' +
-        'title="切到这个厂区并打开自动化面板，改提示词或预授权工具">去编辑</button>';
-    }
-    html += '<button class="btn-ghost" data-close-drawer="1">关闭</button></div>';
-    html += '<div><div class="dim small">最近运行</div><div id="fx-line-runs" class="fx-run-list">' +
-      '<div class="fx-run-empty">读取中…</div></div></div>';
-    openDrawer(drawerShell(escapeHtml(line.name || key), html));
-    if (!dom.drawer) return;
-
-    var pipeBtn = dom.drawer.querySelector("[data-view-pipeline]");
-    if (pipeBtn) pipeBtn.onclick = function () { closeDrawer(); openPipelineFor(rec.project.id, line.id); };
-    var runBtn = dom.drawer.querySelector("[data-run-now]");
-    if (runBtn) {
-      runBtn.onclick = function () { runLine(line, runBtn); };
-    }
-    var toggleBtn = dom.drawer.querySelector("[data-toggle-line]");
-    if (toggleBtn) {
-      toggleBtn.onclick = function () { toggleLine(line, toggleBtn); };
-    }
-    var cancelBtn = dom.drawer.querySelector("[data-cancel-line]");
-    if (cancelBtn) {
-      cancelBtn.onclick = function () { cancelRun(line.id, line.name, cancelBtn); };
-    }
-    var editBtn = dom.drawer.querySelector("[data-edit-line]");
-    if (editBtn) {
-      editBtn.onclick = function () {
-        closeDrawer();
-        if (typeof openAutomationFor === "function") {
-          openAutomationFor(rec.project.id, line.id);
-        }
-      };
-    }
-    var closeBtn = dom.drawer.querySelector("[data-close-drawer]");
-    if (closeBtn) closeBtn.onclick = closeDrawer;
-
-    loadLineRuns(line);
-  }
-
-  function nodeStatusText(s) {
-    return {
-      blocked: "等待依赖", ready: "待运行", running: "运行中",
-      done: "已完成", error: "失败", cancelled: "已取消", skipped: "已跳过",
-    }[s] || s || "—";
-  }
-
-  function loadLineRuns(line) {
-    var box = dom.drawer && dom.drawer.querySelector("#fx-line-runs");
-    if (!box) return;
-    var params = { limit: 20 };
-    if (line.kind === "pipeline") params.pipeline_id = line.id;
-    else { params.task_id = line.id; params.kind = "cron"; }
-    request("factory.runs", params).then(function (r) {
-      var host = dom.drawer && dom.drawer.querySelector("#fx-line-runs");
-      if (!host || host !== box) return;
-      var rows = (r && r.runs) || [];
-      rows.forEach(function (x) { S.runCache.set(x.id, x); });
-      if (!rows.length) {
-        host.innerHTML = '<div class="fx-run-empty">还没有运行记录</div>';
-        return;
-      }
-      host.innerHTML = rows.map(function (x) {
-        return '<button class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
-          '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + " · " + escapeHtml(x.name || "") + "</span>" +
-          '<span class="fx-run-meta">' + escapeHtml(RUN_STATUS[x.status] || x.status) + " · " +
-          escapeHtml(fmtDurationShort(x)) + "</span></button>";
-      }).join("");
-      host.querySelectorAll("[data-run-id]").forEach(function (b) {
-        b.onclick = function () { openRunDrawer(Number(b.dataset.runId)); };
-      });
-    }).catch(function (e) {
-      var host = dom.drawer && dom.drawer.querySelector("#fx-line-runs");
-      if (host && host === box) host.innerHTML = '<div class="fx-run-empty">读取失败：' + escapeHtml(e.message || "") + "</div>";
-    });
-  }
-
-  function fmtDurationShort(run) {
-    if (run.status === "running") return "运行中";
-    return fmtDur(runElapsed(run));
-  }
-
-  /** 运行行的名字兜底：产线被删后 name 是空串，列表里不能渲染成「厂区 / 」。 */
-  function runTitle(run) {
-    return run.name || "（已删除的产线）";
-  }
-
-  /** 「做成」判定的小标签（空 = 还没有结论，不占位）。 */
-  function outcomeChip(run) {
-    var oc = run.outcome || "";
-    if (!oc) return "";
-    var cls = oc === "ok" ? "ok" : (oc === "failed" ? "bad" : "warn");
-    var tip = (run.outcome_source === "user" ? "你手动判定" : "自动判定") + "：" + (RUN_OUTCOME[oc] || oc);
-    return '<i class="fx-outcome ' + cls + '" title="' + escapeHtml(tip) + '">' +
-      escapeHtml(RUN_OUTCOME[oc] || oc) + "</i>";
-  }
-
-  var RUN_PAGE = 30;
-
-  /** 全部运行：状态 / 厂区筛选 + 分页 + 行内打开产出。
-
-      后端 factory.runs 一直支持 status / project_id / offset，前端以前只拉
-      固定的 60 条平铺——第 61 条以后的历史在工厂里根本翻不到。
-   */
-  function openAllRunsDrawer(initial) {
-    S.drawer = { type: "all" };
-    // 每次打开从「全部状态 / 全部厂区」开始：S.runsFilter 会跨打开保留，
-    // 而下面的 select 总是重建为默认项——只重置 offset 会让列表按上次筛选
-    // 查询、界面却显示「全部」，是最容易让人误判历史的一条。
-    initial = initial || {};
-    S.runsFilter = { status: initial.status || "", project_id: 0, offset: 0, view: initial.view || "all" };
-    var st = activeState();
-    var projects = (st && st.projects) || [];
-    var projOpts = ['<option value="0">全部厂区</option>'].concat(projects.map(function (p) {
-      return '<option value="' + escapeHtml(String(p.id)) + '">' +
-        escapeHtml(p.name || ("项目 " + p.id)) + "</option>";
-    })).join("");
-    var statusOpts = [
-      ["", "全部状态"], ["running", "运行中"], ["done", "已完成"], ["empty", "空产出"],
-      ["error", "失败"], ["interrupted", "中断"], ["skipped", "跳过"], ["cancelled", "已取消"],
-    ].map(function (x) {
-      return '<option value="' + x[0] + '">' + x[1] + "</option>";
-    }).join("");
-    var html = '<div class="fx-runs-filter">' +
-      '<select id="fx-runs-status" aria-label="按状态筛选">' + statusOpts + "</select>" +
-      '<select id="fx-runs-project" aria-label="按厂区筛选">' + projOpts + "</select>" +
-      "</div>" +
-      '<div id="fx-all-runs" class="fx-run-list"><div class="fx-run-empty">读取中…</div></div>' +
-      '<div class="fx-runs-pager" id="fx-runs-pager"></div>';
-    var viewTitle = { all: "全部运行", done_today: "今日做成", tokens_today: "今日 token" };
-    var note = S.runsFilter.view === "done_today"
-      ? "本地今天零点后完成，按自动或人工判定的做成口径统计（含旧版完成记录）。"
-      : (S.runsFilter.view === "tokens_today" ? "本地今天零点后开始的运行；用量为输入 + 输出，未记录用量的运行记为 0。" : "");
-    openDrawer(drawerShell(viewTitle[S.runsFilter.view] || "全部运行",
-      (note ? '<p class="fx-form-msg">' + note + "</p>" : "") + html));
-    if (!dom.drawer) return;
-    var statusSel = dom.drawer.querySelector("#fx-runs-status");
-    var projSel = dom.drawer.querySelector("#fx-runs-project");
-    if (statusSel) {
-      statusSel.value = S.runsFilter.status;
-      statusSel.onchange = function () {
-        S.runsFilter.status = statusSel.value;
-        S.runsFilter.offset = 0;
-        loadAllRuns();
-      };
-    }
-    if (projSel) {
-      projSel.onchange = function () {
-        S.runsFilter.project_id = Number(projSel.value) || 0;
-        S.runsFilter.offset = 0;
-        loadAllRuns();
-      };
-    }
-    loadAllRuns();
-  }
-
-  var runsRequestId = 0;
-
-  function loadAllRuns() {
-    var f = Object.assign({}, S.runsFilter);
-    var requestId = ++runsRequestId;
-    var drawer = dom.drawer && dom.drawer.querySelector("#fx-all-runs");
-    var params = { limit: RUN_PAGE, offset: f.offset || 0 };
-    params.view = f.view || "all";
-    if (f.status) params.status = f.status;
-    if (f.project_id) params.project_id = f.project_id;
-    request("factory.runs", params).then(function (r) {
-      var host = dom.drawer && dom.drawer.querySelector("#fx-all-runs");
-      if (!host || host !== drawer || requestId !== runsRequestId) return;
-      var rows = (r && r.runs) || [];
-      rows.forEach(function (x) { S.runCache.set(x.id, x); });
-      if (!rows.length) {
-        host.innerHTML = '<div class="fx-run-empty">' +
-          (f.offset ? "这一页没有更多了。" : "没有符合条件的运行记录。") + "</div>";
-      } else {
-        host.innerHTML = rows.map(function (x) {
-          var path = x.result_path || "";
-          return '<div class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
-            '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + " · " +
-            escapeHtml(x.project_name || "—") + " / " + escapeHtml(runTitle(x)) + "</span>" +
-            outcomeChip(x) +
-            '<span class="fx-run-meta">' + escapeHtml(RUN_STATUS[x.status] || x.status) +
-            " · " + escapeHtml(fmtDurationShort(x)) +
-            (f.view === "tokens_today" ? " · " + (Number(x.in_tokens || 0) + Number(x.out_tokens || 0)).toLocaleString() + " token" : "") + "</span>" +
-            (path
-              ? '<button class="fx-ack" data-open-result="' + escapeHtml(path) + '"' +
-                ' title="打开这个工位的产出全文">产出</button>'
-              : "") +
-            "</div>";
-        }).join("");
-        host.querySelectorAll("[data-run-id]").forEach(function (el) {
-          var open = function (ev) {
-            if (ev && ev.target.closest("[data-open-result]")) return;
-            openRunDrawer(Number(el.dataset.runId));
-          };
-          el.setAttribute("role", "button");
-          el.setAttribute("tabindex", "0");
-          el.onclick = open;
-          el.onkeydown = function (ev) {
-            if (ev.key === "Enter" || ev.key === " ") {
-              ev.preventDefault();
-              open(ev);
-            }
-          };
-        });
-        host.querySelectorAll("[data-open-result]").forEach(function (b) {
-          b.onclick = function (ev) {
-            ev.stopPropagation();
-            openFactoryResult(b.dataset.openResult);
-          };
-        });
-      }
-      var pager = dom.drawer && dom.drawer.querySelector("#fx-runs-pager");
-      if (!pager) return;
-      var off = f.offset || 0;
-      pager.innerHTML =
-        '<button class="btn-ghost" data-page="prev"' + (off > 0 ? "" : " disabled") + ">上一页</button>" +
-        '<span class="fx-run-meta">第 ' + (Math.floor(off / RUN_PAGE) + 1) + " 页 · "
-        + rows.length + " 条</span>" +
-        '<button class="btn-ghost" data-page="next"' + (rows.length >= RUN_PAGE ? "" : " disabled") + ">下一页</button>";
-      pager.querySelectorAll("[data-page]").forEach(function (b) {
-        b.onclick = function () {
-          if (b.disabled) return;
-          S.runsFilter.offset = b.dataset.page === "next"
-            ? off + RUN_PAGE : Math.max(0, off - RUN_PAGE);
-          loadAllRuns();
-        };
-      });
-    }).catch(function (e) {
-      var host = dom.drawer && dom.drawer.querySelector("#fx-all-runs");
-      if (host && host === drawer && requestId === runsRequestId) host.innerHTML = '<div class="fx-run-empty">读取失败：' + escapeHtml(e.message || "") + "</div>";
-    });
-  }
-
-  /** 打开编排节点的产出全文（<项目>/.skysheep/pipeline-results/node-<id>.md）。
-      路径由后端在 run.result_path 里给出，前端不拼目录。 */
-  function openFactoryResult(path) {
-    if (!path) return;
-    closeDrawer();
-    if (typeof backToChat === "function") backToChat();
-    if (typeof openRightTab === "function") openRightTab("files");
-    if (typeof openFile === "function") {
-      Promise.resolve(openFile(path)).catch(function (e) {
-        addNotice("打开产出失败：" + (e && e.message ? e.message : "未知错误"));
-      });
-    } else {
-      addNotice("当前版本没有文件预览入口");
-    }
-  }
-
-  /** 「对话在跑」抽屉：只读快照 + 跳到该会话。
-      工厂只覆盖定时任务与编排，用户自己发起的对话轮 / 子代理在这里是盲区。 */
-  function openLiveDrawer() {
-    var st = activeState();
-    var live = (st && st.live) || {};
-    var rows = live.runs || [];
-    S.drawer = { type: "live" };
-    var html = "";
-    if (!rows.length) {
-      html = '<div class="fx-run-empty">当前没有在跑的对话轮或后台子代理。' +
-        "工厂只统计定时任务与编排；你在对话里发起的运行会在这里出现。</div>";
-    } else {
-      html = '<div class="fx-run-list">' + rows.map(function (r) {
-        var kind = r.kind === "turn" ? "对话" : "子代理";
-        var title = r.title || (r.kind === "turn" ? "对话轮" : "后台任务");
-        return '<div class="fx-run-row">' +
-          '<span class="fx-run-name">' + escapeHtml(title) + "</span>" +
-          '<span class="fx-run-meta">' + escapeHtml(kind) +
-          (liveStale(r) ? ' · <span class="fx-bad">5 分钟无更新</span>' : "") + "</span>" +
-          (r.session_id
-            ? '<button class="fx-ack" data-live-session="' + escapeHtml(String(r.session_id)) +
-              '" title="打开这个会话">去会话</button>'
-            : "") +
-          "</div>";
-      }).join("") + "</div>" +
-        '<p class="fx-form-msg">这里是只读观战：对话轮的中止请在会话里操作（工厂的「叫停」只中止定时任务）。</p>';
-    }
-    openDrawer(drawerShell("对话与子代理在跑", html));
-    if (!dom.drawer) return;
-    dom.drawer.querySelectorAll("[data-live-session]").forEach(function (b) {
-      b.onclick = function () {
-        closeDrawer();
-        if (typeof backToChat === "function") backToChat();
-        if (typeof openTabForSession === "function") openTabForSession(b.dataset.liveSession, "");
-      };
-    });
-  }
-
-  function runLine(line, btn) {
-    if (btn) btn.disabled = true;
-    request("factory.run_now", { task_id: line.id }).then(function (r) {
-      // 后台派工：回执只表示「已起跑」，包裹稍后由 started 事件送进场景
-      if (r && r.started) addNotice("已派工：" + (line.name || line.key) + "（包裹马上上带）");
-      else addNotice((r && r.notice) || "该工位正在运行中，这次没有重复派工");
-    }).catch(function (e) {
-      addNotice("派工失败：" + (e.message || "未知错误"));
-    }).finally(function () {
-      if (btn) btn.disabled = false;
-    });
-  }
-
-  function toggleLine(line, btn) {
-    var enabled = line.status === "paused" || line.status === "stopped";
-    if (btn) btn.disabled = true;
-    request("factory.toggle", { task_id: line.id, enabled: enabled }).then(function (r) {
-      line.status = enabled ? "idle" : "paused";
-      if (r && r.next_run_at != null) line.next_run_at = r.next_run_at;
-      addNotice(enabled ? "产线已启用" : "产线已暂停（不再到点派工；仍可手动运行一次）");
-      renderPanel();
-      render();
-      if (S.drawer && S.drawer.type === "line") openLineDrawer(line.key, { focus: false });
-    }).catch(function (e) {
-      addNotice("操作失败：" + (e.message || "未知错误"));
-    }).finally(function () {
-      if (btn) btn.disabled = false;
-    });
-  }
-
-  function openQueueDrawer() {
-    var st = activeState() || {};
-    var projects = st.projects || [];
-    var rows = (st.waiting || []).map(function (r) {
-      return { key: r.key, name: r.name, project_id: r.project_id,
-        note: "定时产线 · 已等待 " + fmtDur(Math.max(0, nowMs() / 1000 - (r.due_at || 0))) };
-    });
-    projects.forEach(function (p) {
-      (p.lines || []).filter(function (l) { return l.kind === "pipeline"; }).forEach(function (l) {
-        (l.nodes || []).filter(function (n) { return n.status === "ready"; }).forEach(function (n) {
-          rows.push({ key: l.key, name: l.name + " / " + n.title, project_id: p.id,
-            note: "编排工位 · 依赖已满足，等待调度" });
-        });
-      });
-    });
-    S.drawer = { type: "queue" };
-    var total = Number((st.counters || {}).queued) || 0;
-    var html = '<p class="fx-form-msg">定时产线等待并发额度；编排工位已满足依赖，等待调度。点击查看对应产线。</p>';
-    html += rows.length ? '<div class="fx-run-list">' + rows.map(function (r) {
-      var p = projects.find(function (p) { return p.id === r.project_id; });
-      return '<button class="fx-run-row" data-queue-line="' + escapeHtml(r.key) + '"><span class="fx-run-name">' +
-        escapeHtml((p ? p.name + " · " : "") + r.name) + '</span><span class="fx-run-meta">' +
-        escapeHtml(r.note) + '</span></button>';
-    }).join("") + '</div>' : '<div class="fx-run-empty">当前没有等待中的产线。</div>';
-    if (total > rows.length) html += '<p class="fx-form-msg">共 ' + total + ' 项，当前列出 ' + rows.length + ' 项（明细有显示上限，已删除厂区也可能无法列出）。</p>';
-    openDrawer(drawerShell("排队明细", html));
-    if (dom.drawer) dom.drawer.querySelectorAll("[data-queue-line]").forEach(function (b) {
-      b.onclick = function () { openLineDrawer(b.dataset.queueLine, { focus: true }); };
-    });
-  }
-
-  function openAttentionDrawer() {
-    var st = activeState();
-    var items = (st && st.attention) || [];
-    S.drawer = { type: "attention" };
-    var html = "";
-    // 结构性问题（停工 / 孤儿）要用户去修，标记「知道了」没有意义也不生效，
-    // 所以只给运行类问题（失败 / 中断 / 跳过 / 空产出 / 有拦截）一个消化按钮。
-    var ackable = { error: 1, interrupted: 1, skipped: 1, empty: 1, partial: 1 };
-    var keys = [];
-    if (!items.length) {
-      html = '<div class="fx-run-empty">没有需要留意的事。</div>';
-    } else {
-      var kindText = {
-        error: "失败", interrupted: "中断", skipped: "跳过",
-        empty: "无产出", partial: "有拦截",
-        orphan: "孤儿", stopped: "停工",
-      };
-      html = '<div class="fx-run-list">' + items.map(function (a) {
-        var key = String(a.line_key || "");
-        var canAck = !!ackable[a.kind] && key;
-        if (canAck) keys.push(key);
-        return '<div class="fx-run-row fx-attn-row" data-attn-line="' + escapeHtml(key) +
-          '" role="button" tabindex="0" title="点开对应产线">' +
-          '<span class="fx-run-name">' +
-          escapeHtml(a.text || a.kind || "") + '</span><span class="fx-run-meta">' +
-          escapeHtml(kindText[a.kind] || a.kind || "") + "</span>" +
-          (a.kind === "partial" && findLine(key)
-            ? '<button class="fx-ack" data-attn-process="' + escapeHtml(key) + '">去处理</button>' : "") +
-          (canAck
-            ? '<button class="fx-ack" data-ack="' + escapeHtml(key) + '"' +
-              ' title="这条产线的这个问题已处理；同一问题再发生会重新提示">知道了</button>'
-            : '<span class="fx-run-meta">修好即消失</span>') +
-          "</div>";
-      }).join("") + "</div>" +
-        '<p class="fx-form-msg">点任意一行打开对应产线；「知道了」只压住这次，之后的新问题会重新提示。</p>';
-      // 列表只画前 50 条（服务端上限），但计数是全部：不能让人以为「只剩这些」
-      var total = Number(st && st.attention_total) || items.length;
-      if (total > items.length) {
-        html += '<p class="fx-form-msg">共 ' + total + " 条，这里只列出前 " +
-          items.length + " 条；处理掉眼前这些再打开会看到剩下的。</p>";
-      }
-      if (keys.length > 1) {
-        html += '<div class="fx-drawer-ops">' +
-          '<button class="btn-ghost" data-ack-all="1">全部知道了</button></div>';
-      }
-    }
-    openDrawer(drawerShell("需留意", html));
-    if (!dom.drawer) return;
-    dom.drawer.querySelectorAll("[data-attn-line]").forEach(function (row) {
-      var open = function (ev) {
-        if (ev && ev.target.closest("[data-ack], [data-attn-process]")) return;
-        var key = row.dataset.attnLine || "";
-        if (!key) return;
-        if (!findLine(key)) {
-          addNotice("这条产线已不在当前视图中（可能已被删除或所属项目已移除）");
-          return;
-        }
-        openLineDrawer(key, { focus: true });
-      };
-      row.addEventListener("click", open);
-      row.addEventListener("keydown", function (ev) {
-        if (ev.target.closest("[data-ack], [data-attn-process]")) return;
-        if (ev.key === "Enter" || ev.key === " ") {
-          ev.preventDefault();
-          open(ev);
-        }
-      });
-    });
-    dom.drawer.querySelectorAll("[data-attn-process]").forEach(function (b) {
-      b.onclick = function (ev) {
-        ev.stopPropagation();
-        var rec = findLine(b.dataset.attnProcess);
-        if (!rec || S.demo) return;
-        closeDrawer();
-        if (rec.line.kind === "cron") openAutomationFor(rec.project.id, rec.line.id);
-        else openPipelineFor(rec.project.id, rec.line.id);
-      };
-    });
-    dom.drawer.querySelectorAll("[data-ack]").forEach(function (b) {
-      b.onclick = function (ev) {
-        ev.stopPropagation();
-        ackAttention([b.dataset.ack]);
-      };
-    });
-    var allBtn = dom.drawer.querySelector("[data-ack-all]");
-    if (allBtn) allBtn.onclick = function () { ackAttention(keys); };
-  }
-
-  // ---------- 新建产线 ----------
-  function openNewLineDrawer(presetProject) {
-    var st = S.state || activeState();
-    var projects = (st && st.projects) || [];
-    if (!projects.length) { addNotice("先在侧栏添加一个项目，再给它的厂区建产线"); return; }
-    var tools = [];
-    try {
-      if (typeof bootSnap !== "undefined" && bootSnap && bootSnap.tools) tools = bootSnap.tools;
-    } catch (e) { tools = []; }
-    var projectOpts = projects.map(function (p) {
-      return '<option value="' + escapeHtml(String(p.id)) + '"' +
-        (presetProject && p.id === presetProject ? " selected" : "") + ">" +
-        escapeHtml(p.name || ("项目 " + p.id)) + (p.root_ok === false ? "（停工）" : "") + "</option>";
-    }).join("");
-    var toolRows = tools.length ? tools.map(function (t) {
-      var locked = t.safety === "readonly";
-      return '<label title="' + escapeHtml(t.description || "") + '"><input type="checkbox" data-tool="' +
-        escapeHtml(t.name) + '"' + (locked ? " checked disabled" : "") + ">" + escapeHtml(t.name) + "</label>";
-    }).join("") : '<span class="fx-hint">暂时取不到工具清单；保存后可在自动化页再编辑。</span>';
-    var weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-    var html = '<form class="fx-form" id="fx-new-line">' +
-      "<label>厂区（目标项目）</label><select id=\"fx-nl-project\">" + projectOpts + "</select>" +
-      "<label>产线名</label><input id=\"fx-nl-name\" type=\"text\" placeholder=\"例如：每日项目状态汇总\">" +
-      "<label>任务指令（到点由 Agent 执行的内容）</label>" +
-      "<textarea id=\"fx-nl-prompt\" rows=\"3\" placeholder=\"例如：扫描当前目录的 TODO，汇总成一段进度报告\"></textarea>" +
-      "<label>频率</label><select id=\"fx-nl-type\">" +
-      '<option value="interval">每隔 N 分钟</option>' +
-      '<option value="daily">每天固定时间</option>' +
-      '<option value="weekly">每周固定时间</option></select>' +
-      '<div id="fx-nl-interval-wrap"><label>间隔（分钟）</label>' +
-      '<input id="fx-nl-interval" type="number" min="1" max="525600" step="5" value="60"></div>' +
-      '<div id="fx-nl-time-wrap" class="hidden"><label>时间（HH:MM）</label>' +
-      '<input id="fx-nl-time" type="time" value="09:00">' +
-      '<label id="fx-nl-weekday-label" class="hidden">星期几</label>' +
-      '<select id="fx-nl-weekday" class="hidden">' +
-      weekdays.map(function (d, i) { return '<option value="' + i + '">' + d + "</option>"; }).join("") +
-      "</select></div>" +
-      "<label>预授权工具（无人值守时自动放行；不勾的会被拒绝）</label>" +
-      '<div class="fx-tools">' + toolRows + "</div>" +
-      '<p class="fx-hint">只读工具本来就放行；写入 / 执行类必须显式勾选。勾选 run_command 等于允许无人值守执行任意命令，建议只在任务内容完全可信时勾。</p>' +
-      '<label class="fx-check"><input id="fx-nl-notify" type="checkbox">完成后推送到已启用的聊天渠道 / Webhook</label>' +
-      '<p class="fx-hint">默认不推（每天几十次会淹人）；连续失败的聚合告警不受这个开关影响。</p>' +
-      '<div class="fx-form-msg" id="fx-nl-msg"></div>' +
-      '<div class="fx-drawer-ops"><button type="submit" class="btn-primary">创建产线</button>' +
-      '<button type="button" class="btn-ghost" data-close-drawer="1">取消</button></div>' +
-      "</form>";
-    openDrawer(drawerShell("新建轻量定时产线", html));
-    if (!dom.drawer) return;
-    var form = dom.drawer.querySelector("#fx-new-line");
-    var typeSel = dom.drawer.querySelector("#fx-nl-type");
-    var syncType = function () {
-      var v = typeSel.value;
-      dom.drawer.querySelector("#fx-nl-interval-wrap").classList.toggle("hidden", v !== "interval");
-      dom.drawer.querySelector("#fx-nl-time-wrap").classList.toggle("hidden", v === "interval");
-      dom.drawer.querySelector("#fx-nl-weekday-label").classList.toggle("hidden", v !== "weekly");
-      dom.drawer.querySelector("#fx-nl-weekday").classList.toggle("hidden", v !== "weekly");
-    };
-    typeSel.addEventListener("change", syncType);
-    syncType();
-    var closeBtn = dom.drawer.querySelector("[data-close-drawer]");
-    if (closeBtn) closeBtn.onclick = closeDrawer;
-    form.onsubmit = function (ev) {
-      ev.preventDefault();
-      var msg = dom.drawer.querySelector("#fx-nl-msg");
-      var prompt = dom.drawer.querySelector("#fx-nl-prompt").value.trim();
-      if (!prompt) { msg.textContent = "任务指令不能为空"; msg.className = "fx-form-msg error"; return; }
-      var name = dom.drawer.querySelector("#fx-nl-name").value.trim();
-      var params = {
-        project_id: Number(dom.drawer.querySelector("#fx-nl-project").value),
-        name: name || (prompt.length > 20 ? prompt.slice(0, 20) : prompt),
-        prompt: prompt,
-        schedule_type: typeSel.value,
-        interval_minutes: Number(dom.drawer.querySelector("#fx-nl-interval").value) || 60,
-        time_of_day: dom.drawer.querySelector("#fx-nl-time").value || "09:00",
-        weekday: Number(dom.drawer.querySelector("#fx-nl-weekday").value) || 0,
-        allowed_tools: Array.prototype.map.call(
-          dom.drawer.querySelectorAll("input[data-tool]:checked:not(:disabled)"),
-          function (el) { return el.dataset.tool; }
-        ),
-        notify_channel: !!dom.drawer.querySelector("#fx-nl-notify").checked,
-      };
-      msg.textContent = "正在创建…";
-      msg.className = "fx-form-msg";
-      request("factory.line_add", params).then(function (r) {
-        addNotice("产线已创建（#" + r.id + "），到点自动运行");
-        closeDrawer();
-        factoryReload();
-      }).catch(function (e) {
-        msg.textContent = e.message || "创建失败";
-        msg.className = "fx-form-msg error";
-      });
-    };
-  }
-
-  // ---------- 工厂设置 ----------
-  function openSettingsDrawer() {
-    var st = S.state || activeState();
-    var cfg = (st && st.config) || {};
-    S.drawer = { type: "settings" };
-    var html = '<form class="fx-form" id="fx-settings">' +
-      '<label class="fx-check"><input id="fx-cfg-enabled" type="checkbox"' +
-      (cfg.enabled !== false ? " checked" : "") + ">显示工厂看板入口（左侧导航）</label>" +
-      '<label class="fx-check"><input id="fx-cfg-demo" type="checkbox"' +
-      (cfg.demo !== false ? " checked" : "") + ">没有真实产线时播放样板厂</label>" +
-      '<label class="fx-check"><input id="fx-cfg-ambient" type="checkbox"' +
-      (cfg.ambient !== false ? " checked" : "") + ">昼夜天色（按本机时间；开天气时按当地日出日落）</label>" +
-      '<label class="fx-check"><input id="fx-cfg-weather" type="checkbox"' +
-      (cfg.weather === true ? " checked" : "") + ">按现实天气渲染（联网，默认关）</label>" +
-      "<label>天气城市（城市名，例如：上海 / Shanghai）</label>" +
-      '<input id="fx-cfg-weather-location" type="text" maxlength="80" value="' +
-      escapeHtml(String(cfg.weather_location || "")) + '" placeholder="留空则只用本机时间判断昼夜">' +
-      '<p class="fx-hint">只把城市名交给 Open-Meteo 解析坐标，再按坐标取当前天气；不做 IP 定位、不需要 API Key，结果缓存 30 分钟。关闭时一次网络请求都不发。</p>' +
-      "<label>运行历史保留条数（100–100000）</label>" +
-      '<input id="fx-cfg-keep" type="number" min="100" max="100000" value="' +
-      Number(cfg.history_keep || 2000) + '">' +
-      "<label>运行历史保留天数（1–3650）</label>" +
-      '<input id="fx-cfg-days" type="number" min="1" max="3650" value="' +
-      Number(cfg.history_days || 30) + '">' +
-      "<label>同屏最多包裹数（10–300）</label>" +
-      '<input id="fx-cfg-max" type="number" min="10" max="300" value="' +
-      Number(cfg.max_packages || 60) + '">' +
-      "<label>单次运行超时（分钟，0 = 不限）</label>" +
-      '<input id="fx-cfg-timeout" type="number" min="0" max="1440" value="' +
-      Number(cfg.run_timeout_minutes != null ? cfg.run_timeout_minutes : 60) + '">' +
-      '<p class="fx-hint">超时按失败收尾并释放占用位——没有它，一条挂在模型流式 / 网络上的运行会永远显示「运行中」。</p>' +
-      "<label>同时运行的产线上限（1–20）</label>" +
-      '<input id="fx-cfg-parallel" type="number" min="1" max="20" value="' +
-      Number(cfg.max_parallel_runs || 3) + '">' +
-      '<p class="fx-hint">到点的产线超过这个数会排队，等下一轮扫描（20 秒）再接；计数条里的「排队」按这个口径算。</p>' +
-      "<label>连续失败告警阈值（0 = 不告警）</label>" +
-      '<input id="fx-cfg-alert" type="number" min="0" max="50" value="' +
-      Number(cfg.alert_after_failures != null ? cfg.alert_after_failures : 3) + '">' +
-      '<p class="fx-hint">同一条产线连续失败达到这个次数推一条通知，每天最多一条（防打扰）。</p>' +
-      '<div class="fx-form-msg" id="fx-cfg-msg"></div>' +
-      '<div class="fx-drawer-ops"><button type="submit" class="btn-primary">保存</button>' +
-      '<button type="button" class="btn-ghost" data-close-drawer="1">取消</button></div></form>';
-    openDrawer(drawerShell("工厂设置", html));
-    if (!dom.drawer) return;
-    var form = dom.drawer.querySelector("#fx-settings");
-    var closeBtn = dom.drawer.querySelector("[data-close-drawer]");
-    if (closeBtn) closeBtn.onclick = closeDrawer;
-    form.onsubmit = function (ev) {
-      ev.preventDefault();
-      var msg = dom.drawer.querySelector("#fx-cfg-msg");
-      var weatherOn = dom.drawer.querySelector("#fx-cfg-weather").checked;
-      var weatherCity = dom.drawer.querySelector("#fx-cfg-weather-location").value.trim();
-      if (weatherOn && !weatherCity) {
-        msg.textContent = "开启现实天气需要填写城市（例如：上海）";
-        msg.className = "fx-form-msg error";
-        return;
-      }
-      msg.textContent = "正在保存…";
-      msg.className = "fx-form-msg";
-      saveConfig({
-        enabled: dom.drawer.querySelector("#fx-cfg-enabled").checked,
-        demo: dom.drawer.querySelector("#fx-cfg-demo").checked,
-        ambient: dom.drawer.querySelector("#fx-cfg-ambient").checked,
-        weather: weatherOn,
-        weather_location: weatherCity,
-        history_keep: Number(dom.drawer.querySelector("#fx-cfg-keep").value) || 2000,
-        history_days: Number(dom.drawer.querySelector("#fx-cfg-days").value) || 30,
-        max_packages: Number(dom.drawer.querySelector("#fx-cfg-max").value) || 60,
-        run_timeout_minutes: Number(dom.drawer.querySelector("#fx-cfg-timeout").value) || 0,
-        max_parallel_runs: Number(dom.drawer.querySelector("#fx-cfg-parallel").value) || 3,
-        alert_after_failures: Number(dom.drawer.querySelector("#fx-cfg-alert").value) || 0,
-      }, null, msg);
-    };
-  }
-
-  function saveConfig(patch, btn, msgEl) {
-    if (btn) btn.disabled = true;
-    return request("factory.save", patch).then(function (r) {
-      var cfg = (r && r.config) || patch;
-      if (S.state) S.state.config = Object.assign({}, S.state.config || {}, cfg);
-      if (S.demo) S.demo.config = Object.assign({}, S.demo.config || {}, cfg);
-      applyNavVisibility(cfg.enabled !== false);
-      addNotice("工厂设置已保存");
-      if (msgEl) { msgEl.textContent = "已保存"; msgEl.className = "fx-form-msg"; }
-      renderAttentionNotice((S.state && S.state.config) || cfg);
-      renderWeatherChip();
-      renderAll();
-      // 天气开关 / 城市变了：清掉旧快照，强制拉一次（后端仍会按城市缓存）
-      if (Object.prototype.hasOwnProperty.call(patch, "weather")
-          || Object.prototype.hasOwnProperty.call(patch, "weather_location")) {
-        S.weatherSeq += 1; // 让换城市 / 关天气前发出的请求作废
-        S.weather = null;
-        S.lastWeatherAt = 0;
-        refreshWeather(true);
-      }
-      // 样板厂开关变了：立即重取一次，进入 / 退出演示状态
-      if ((S.demo && cfg.demo === false) || (!S.demo && cfg.demo === true && !hasRealLines(S.state))) {
-        factoryReload();
-      }
-      if (S.drawer && S.drawer.type === "settings" && msgEl) {
-        // 留在设置抽屉里，让用户看到结果
-      } else if (S.drawer && S.drawer.type === "settings") {
-        closeDrawer();
-      }
-    }).catch(function (e) {
-      if (msgEl) { msgEl.textContent = e.message || "保存失败"; msgEl.className = "fx-form-msg error"; }
-      else addNotice("保存失败：" + (e.message || "未知错误"));
-    }).finally(function () {
-      if (btn) btn.disabled = false;
-    });
-  }
-
-  // ---------- 事件：factory_run（开始 / 工序进度 / 结束） ----------
-  /** 进度文案：工具名 + 步数；没有工具时退回「第 N 步 / 启动中」。
-      被门控拦过的次数挂在后面——这是「预授权没勾全」唯一看得见的痕迹。 */
-  function progressText(pr) {
-    var fresh = freshProgress(pr);
-    if (!fresh) return "";
-    var text;
-    if (fresh.tool) text = fresh.tool + (fresh.steps ? " · 第 " + fresh.steps + " 步" : "");
-    else if (fresh.steps) text = "第 " + fresh.steps + " 步";
-    else text = "启动中";
-    var denied = Number(fresh.denied) || 0;
-    if (denied > 0) text += " · 被拦 " + denied + " 次";
-    return text;
-  }
-
-  /** 进度事件：只落到产线 / 运行对象上，不重建场景（包裹位置另有计时驱动）。 */
-  function applyRunProgress(payload) {
-    if (!payload || payload.id == null) return;
-    var key = payload.kind === "pipeline_node"
-      ? "pipe:" + payload.pipeline_id : "cron:" + payload.task_id;
-    var pr = payload.progress || {};
-    var step = {
-      tool: String(pr.tool || ""),
-      at: Number(pr.at) || 0,
-      steps: Number(pr.steps) || 0,
-      denied: Number(pr.denied) || 0,
-    };
-    var rec = S.world && S.world.lines.get(key);
-    if (rec) rec.line.progress = step;
-    var cached = findRun(payload.id);
-    if (cached) cached.progress = step;
-    if (!S.mounted) return;
-    // 面板最多 2 次/秒重建（多枚包裹同时推进时不要每个事件都重排 DOM）
-    var now = nowMs();
-    if (!S.lastProgressPanel || now - S.lastProgressPanel > 500) {
-      S.lastProgressPanel = now;
-      refreshPanelStates();
-    }
-    // 抽屉正开着这条产线 / 这一轮：就地更新进度行，不重建抽屉（避免抢焦点）
-    if (S.drawer && S.drawer.type === "line" && S.drawer.key === key && dom.drawer) {
-      var el = dom.drawer.querySelector("#fx-progress");
-      if (el) el.textContent = progressText(step) || "—";
-    }
-    if (S.drawer && S.drawer.type === "run" && Number(S.drawer.id) === Number(payload.id)
-        && dom.drawer) {
-      var el2 = dom.drawer.querySelector("#fx-run-progress");
-      if (el2) el2.textContent = progressText(step) || "—";
-    }
-  }
-
-  /** 叫停：只停本轮，不动启用状态与排期（后端写 cancelled 终态并重排下次）。 */
-  function cancelRun(taskId, name, btn) {
-    confirmModal(
-      "叫停会立刻中止「" + (name || "这条产线") + "」本轮的运行，已消耗的 token 不会退回；"
-        + "产线保持启用，下一轮照原排期继续。",
-      { title: "叫停正在跑的运行", okLabel: "叫停", danger: true },
-    ).then(function (ok) {
-      if (!ok) return;
-      if (btn) btn.disabled = true;
-      request("factory.cancel", { task_id: taskId }).then(function (r) {
-        if (r && r.cancelled) addNotice("已叫停：" + (name || ("任务 " + taskId)));
-        else addNotice((r && r.notice) || "没有可叫停的运行");
-        if (!(r && r.cancelled) && btn) btn.disabled = false;
-      }).catch(function (e) {
-        addNotice("叫停失败：" + (e.message || "未知错误"));
-        if (btn) btn.disabled = false;
-      });
-    });
-  }
-
-  /** 「这轮算过 / 不算」：人工判定只改 outcome，不删历史、不改状态。
-
-      自动判定（跑完且有产出 / 有没有被门控拦过）回答不了「产出对不对」，
-      而成功率要能当决策依据就必须允许人推翻它。 */
-  function markRunOutcome(run, outcome, btn) {
-    if (btn) btn.disabled = true;
-    request("factory.run_mark", { run_id: run.id, outcome: outcome }).then(function (r) {
-      var row = (r && r.run) || {};
-      run.outcome = row.outcome || "";
-      run.outcome_source = row.outcome_source || "";
-      var cached = findRun(run.id);
-      if (cached && cached !== run) {
-        cached.outcome = run.outcome;
-        cached.outcome_source = run.outcome_source;
-      }
-      addNotice(outcome === "ok" ? "已标记：这轮算过"
-        : outcome === "failed" ? "已标记：这轮不算" : "已撤销人工判定");
-      if (S.drawer && S.drawer.type === "run") openRunDrawer(run.id);
-      scheduleResync();   // 产线体检的成功率要跟着重算
-    }).catch(function (e) {
-      addNotice("标记失败：" + (e.message || "未知错误"));
-      if (btn) btn.disabled = false;
-    });
-  }
-
-  /** 「需留意」已处理：只记时间戳，不删运行历史；更晚的失败会重新浮上来。 */
-  function ackAttention(keys) {
-    keys = (keys || []).filter(function (k) { return !!k; });
-    if (!keys.length) return;
-    request("factory.ack", { line_keys: keys }).then(function () {
-      addNotice("已标记为知道了（同一问题再发生会重新提示）");
-      closeDrawer();
-      factoryReload();
-    }).catch(function (e) {
-      addNotice("标记失败：" + (e.message || "未知错误"));
-    });
-  }
+  // ---------- 抽屉转发 ----------
+  // 抽屉与产线操作实现在 app-factory-drawer.js（经 window.FX 运行时查表）；
+  // 本文件内的调用点保持裸名不变，由这组同签名转发函数承接。
+  function openLineDrawer(key, opts) { FX.openLineDrawer(key, opts); }
+  function openUpcomingDialog() { FX.openUpcomingDialog(); }
+  function openRunDrawer(id) { FX.openRunDrawer(id); }
+  function openAllRunsDrawer(initial) { FX.openAllRunsDrawer(initial); }
+  function openLiveDrawer() { FX.openLiveDrawer(); }
+  function openQueueDrawer() { FX.openQueueDrawer(); }
+  function openAttentionDrawer() { FX.openAttentionDrawer(); }
+  function openNewLineDrawer(presetProject) { FX.openNewLineDrawer(presetProject); }
+  function openSettingsDrawer() { FX.openSettingsDrawer(); }
+  function saveConfig(patch, btn, msgEl) { FX.saveConfig(patch, btn, msgEl); }
+  function applyRunProgress(payload) { FX.applyRunProgress(payload); }
+  function closeDrawer() { FX.closeDrawer(); }
 
   // ---------- 配置变化重拉 ----------
   /** cron_updated / pipeline_updated 之后防抖重拉一次快照。
@@ -7091,8 +2506,11 @@
       }
     }
     if (!S.mounted) return;
+    // 本轮结束 → 成品垛 / 返工堆重新算一遍（顺带可能放出一辆出货的车）
+    refreshProjectStats(false);
     renderCounters();
-    renderPanel();
+    // 走 refreshPanelStates：滚动位置保持 + 焦点在面板控件上时不动面板
+    refreshPanelStates();
     // 抽屉正开着这条产线时同步刷新：状态与「最近运行」不能停在事件之前的快照
     if (S.drawer && S.drawer.type === "line" && S.drawer.key === runKey(run)) {
       openLineDrawer(S.drawer.key, { focus: false });
@@ -7148,16 +2566,18 @@
   }
 
   // ---------- 样板厂（只存在内存里） ----------
-  function demoLineCron(id, name, trigger, next, status, last, lastAt) {
+  /** 演示产线：period 为演示周期（秒），0 表示无排期（手动型，可被随机轮换拉起）。 */
+  function demoLineCron(id, name, trigger, next, status, last, lastAt, period) {
     return {
-      key: "cron:" + id, kind: "cron", id: id, project_id: 0, name: name,
+      key: lineKeyFor("cron", id), kind: "cron", id: id, project_id: 0, name: name,
       status: status || "idle", trigger_text: trigger, next_run_at: next || 0,
       last_status: last || "", last_run_at: lastAt || 0, running_run_id: null, nodes: [],
+      period_s: period || 0,
     };
   }
   function demoLinePipe(id, name, status, nodes) {
     return {
-      key: "pipe:" + id, kind: "pipeline", id: id, project_id: 0, name: name,
+      key: lineKeyFor("pipeline", id), kind: "pipeline", id: id, project_id: 0, name: name,
       status: status || "idle", trigger_text: "编排", next_run_at: 0,
       last_status: "", last_run_at: 0, running_run_id: null, nodes: nodes || [],
     };
@@ -7168,9 +2588,13 @@
     var p1 = {
       id: -1, name: "样板 · 内容厂", root_ok: true,
       lines: [
-        demoLineCron(-11, "晨间简报", "每天 09:00", now + 3600, "running", "ok", now - 7200),
-        demoLineCron(-12, "竞品巡检", "每 30 分钟", now + 900, "idle", "ok", now - 1200),
-        demoLineCron(-13, "素材归档", "每隔 120 分钟", now + 1800, "paused", "ok", now - 86400),
+        demoLineCron(-11, "晨间简报", "每天 09:00", now + 3600, "running", "ok", now - 7200, 86400),
+        // 指定待发：45 秒后到点（演示里几十秒就能看到「到点才启动」），
+        // 之后每 15 分钟一轮，牌上稳定显示倒计时
+        demoLineCron(-12, "竞品巡检", "每 15 分钟", now + 45, "idle", "ok", now - 1200, 900),
+        demoLineCron(-13, "素材归档", "每隔 120 分钟", now + 1800, "paused", "ok", now - 86400, 7200),
+        // 无排期（手动型）：交给随机轮换，演示的日常动静靠它们
+        demoLineCron(-14, "素材转码", "手动", 0, "idle", "ok", now - 5400, 0),
       ],
     };
     var p2 = {
@@ -7182,13 +2606,16 @@
           { id: 3, title: "打包", status: "ready" },
           { id: 4, title: "发布", status: "blocked" },
         ]),
-        demoLineCron(-22, "依赖体检", "每周一 08:30", now + 86400, "idle", "error", now - 3600),
+        demoLineCron(-22, "依赖体检", "每周一 08:30", now + 86400, "idle", "error", now - 3600, 604800),
+        demoLineCron(-23, "临时打包", "手动", 0, "idle", "ok", now - 4800, 0),
       ],
     };
     var p3 = {
       id: -3, name: "样板 · 资料厂", root_ok: true,
       lines: [
-        demoLineCron(-31, "文档快照", "每天 18:00", now + 5400, "idle", "empty", now - 10800),
+        demoLineCron(-31, "文档快照", "每天 18:00", now + 5400, "idle", "empty", now - 10800, 86400),
+        // 无排期（手动型）：保留给随机轮换，演示不会因为没有近排期机台而冷场
+        demoLineCron(-32, "临时批处理", "手动", 0, "idle", "ok", now - 6000, 0),
       ],
     };
     [[p1, -1], [p2, -2], [p3, -3]].forEach(function (pair) {
@@ -7216,8 +2643,8 @@
       projects: [p1, p2, p3],
       counters: { running: 2, queued: 1, attention: 2, done_today: 2, tokens_today: 18400 },
       attention: [
-        { kind: "error", project_id: -2, line_key: "cron:-22", text: "依赖体检 · 上次失败" },
-        { kind: "stopped", project_id: -1, line_key: "cron:-13", text: "素材归档 · 停工" },
+        { kind: "error", project_id: -2, line_key: lineKeyFor("cron", -22), text: "依赖体检 · 上次失败" },
+        { kind: "stopped", project_id: -1, line_key: lineKeyFor("cron", -13), text: "素材归档 · 停工" },
       ],
       attention_total: 2,
       runs: runs,
@@ -7275,11 +2702,26 @@
     };
   }
 
+  /** 演示产线是否「排了期」：排了期的到点才启动，随机轮换不许提前拉起。 */
+  function demoReserved(line, nowSec) {
+    return (Number(line.next_run_at) || 0) > nowSec;
+  }
+
+  /** 起一轮演示运行（纯内存）：随机轮换与「到点启动」走同一条路。 */
+  function startDemoRun(st, line, sec) {
+    var id = -2000 - (S.demoSeq += 1);
+    line.status = "running";
+    line.running_run_id = id;
+    st.runs.unshift(demoRun(id, "cron", line.id, line.project_id, line.name,
+                            demoProjectName(line.project_id), "running", sec, null, ""));
+    st.counters.running += 1;
+  }
+
   function demoTick(now) {
     var st = S.demo;
     if (!st) return;
     var sec = now / 1000;
-    // 收尾：运行超过 18 秒的演示运行
+    // 收尾：运行超过 18 秒的演示运行；排了期的产线顺延到下一轮
     st.runs.forEach(function (r) {
       if (r.status !== "running") return;
       if (sec - r.started_at < 18) return;
@@ -7296,28 +2738,55 @@
         line.status = "idle";
         line.last_status = status === "error" ? "error" : status === "empty" ? "empty" : "ok";
         line.last_run_at = sec;
+        // 排期顺延：跑完推到下一个周期（无周期的手动型保持 0，继续参与轮换）
+        if (Number(line.period_s) > 0) line.next_run_at = sec + Number(line.period_s);
       }
       st.counters.running = Math.max(0, st.counters.running - 1);
-      if (status === "done") st.counters.done_today += 1;
-      else st.counters.attention += 1;
+      if (status === "done") {
+        st.counters.done_today += 1;
+        // 样板厂的出货与真实路径同一条 spawnTrip 规则：演示运行做成也放车
+        var doneRec = S.world && S.world.lines.get(runKey(r));
+        if (doneRec && doneRec.factory) spawnTrip(doneRec.factory);
+      } else {
+        st.counters.attention += 1;
+      }
     });
 
-    // 每 ~6 秒起一枚新包裹（挑一条空闲的启用产线）
+    // 样板厂首入约 2 秒放第一组装运（别让观战干等），之后每 ~14 秒补一轮，
+    // 让「进场→等候→停靠→装货→离场」在演示里随时都看得见。
+    var tripEvery = st.demoTripped ? 140 : 18;
+    if (S.world && S.ticks > 0 && S.ticks % tripEvery === 0) {
+      var fs = S.world.factories;
+      var pickF = fs[Math.abs(hashKey("trip" + Math.floor(S.ticks / tripEvery))) % fs.length];
+      if (pickF) {
+        spawnTrip(pickF);
+        st.demoTripped = true;
+      }
+    }
+
+    // 到点启动：排了期且已到点的产线此刻才起（牌上数到 0 就开跑）
+    st.projects.forEach(function (p) {
+      (p.lines || []).forEach(function (l) {
+        if (l.kind !== "cron" || l.status !== "idle") return;
+        var at = Number(l.next_run_at) || 0;
+        if (!at || sec < at) return;
+        startDemoRun(st, l, sec);
+      });
+    });
+
+    // 每 ~6 秒起一枚新包裹：只在没排期的机台上轮换，排了期的到点才跑
     if (S.ticks % 60 === 0) {
       var candidates = [];
       st.projects.forEach(function (p) {
         (p.lines || []).forEach(function (l) {
-          if (l.kind !== "cron" || l.status === "paused" || l.status === "stopped" || l.status === "running") return;
+          if (l.kind !== "cron" || l.status !== "idle") return;
+          if (demoReserved(l, sec)) return;
           candidates.push(l);
         });
       });
       if (candidates.length) {
         var pick = candidates[Math.abs(hashKey(String(S.ticks))) % candidates.length];
-        var id = -2000 - (S.demoSeq += 1);
-        pick.status = "running";
-        pick.running_run_id = id;
-        st.runs.unshift(demoRun(id, "cron", pick.id, pick.project_id, pick.name, demoProjectName(pick.project_id), "running", sec, null, ""));
-        st.counters.running += 1;
+        startDemoRun(st, pick, sec);
       }
     }
     if (st.runs.length > 30) {
@@ -7350,11 +2819,62 @@
     scheduleResync();
   }
 
+  // ---------- FX 导出（绘制层绑定 + 测试探针入口） ----------
+  FX.S = S; FX.dom = dom;
+  FX.PAL_DAY = PAL_DAY; FX.PAL_NIGHT = PAL_NIGHT;
+  FX.PIPELINE_MAX_NODES = PIPELINE_MAX_NODES;
+  // 场景侧的「痕迹」口径：托盘几箱、返工堆几箱、沙漏看多远、车跑多久
+  FX.PALLET_SIZE = PALLET_SIZE; FX.PALLET_MAX = PALLET_MAX;
+  FX.REWORK_MAX = REWORK_MAX; FX.UPCOMING_GLYPH_S = UPCOMING_GLYPH_S;
+  FX.TRIP_MS = TRIP_MS;
+  FX.statFor = statFor; FX.refreshProjectStats = refreshProjectStats;
+  FX.TRIP_PHASES = TRIP_PHASES; FX.TRIP_MAX = TRIP_MAX;
+  FX.WAVE_MS = WAVE_MS;
+  FX.spawnTrip = spawnTrip; FX.updateTrips = updateTrips;
+  FX.toggleReplay = toggleReplay; FX.stopReplay = stopReplay;
+  FX.TILE_W = TILE_W; FX.TILE_H = TILE_H;
+  FX.RUN_STATUS = RUN_STATUS; FX.RUN_OUTCOME = RUN_OUTCOME;
+  FX.ERROR_KIND = ERROR_KIND; FX.TRIGGER_TEXT = TRIGGER_TEXT;
+  FX.activeConfig = activeConfig; FX.activeState = activeState;
+  FX.hashKey = hashKey; FX.lineStall = lineStall; FX.clamp = clamp; FX.ringPts = ringPts;
+  // 场景构建层与抽屉层的绑定源
+  FX.nowMs = nowMs; FX.factoryReload = factoryReload;
+  FX.findLine = findLine; FX.findRun = findRun; FX.fitCamera = fitCamera;
+  FX.fmtDur = fmtDur; FX.fmtTs = fmtTs; FX.freshProgress = freshProgress;
+  FX.hasRealLines = hasRealLines; FX.lineStateText = lineStateText; FX.liveStale = liveStale;
+  FX.refreshPanelStates = refreshPanelStates; FX.refreshWeather = refreshWeather;
+  FX.renderAll = renderAll; FX.renderAttentionNotice = renderAttentionNotice;
+  FX.renderPanel = renderPanel; FX.renderWeatherChip = renderWeatherChip;
+  FX.runElapsed = runElapsed; FX.scheduleResync = scheduleResync;
+  FX.applyNavVisibility = applyNavVisibility;
+  FX.drawBerths = drawBerths; FX.drawPackages = drawPackages; FX.drawUpcoming = drawUpcoming;
+  FX.drawNoticeboard = drawNoticeboard;
+  FX.refreshFactoryAlerts = refreshFactoryAlerts; FX.refreshUpcoming = refreshUpcoming;
+  // 待发告示牌：口径常量 + 纯函数（绘制层、标签层与测试同源）
+  FX.UPCOMING_WINDOW_S = UPCOMING_WINDOW_S; FX.UPCOMING_MAX = UPCOMING_MAX;
+  FX.UPCOMING_OVERDUE_S = UPCOMING_OVERDUE_S; FX.UPCOMING_NAME_MAX = UPCOMING_NAME_MAX;
+  FX.UPCOMING_BOARD = UPCOMING_BOARD; FX.truncName = truncName;
+  FX.noticeboardState = noticeboardState; FX.upcomingList = upcomingList;
+  FX.fmtCountdown = fmtCountdown;
+  // 样板厂（只存在内存）：demoTick 的到点启动 / 顺延排期用纯函数口径，测试可直调
+  FX.buildDemoState = buildDemoState; FX.demoTick = demoTick;
+  FX.demoLineCron = demoLineCron; FX.demoLinePipe = demoLinePipe;
+  FX.demoReserved = demoReserved; FX.startDemoRun = startDemoRun;
+  FX.refreshFactoryMood = refreshFactoryMood;
+  FX.updateLabels = updateLabels;
+  // 测试探针（test_factory_scene_models / test_factory_panel_logic）经 FX 取内部函数
+  FX.resizeScene = resizeScene; FX.fitCamera = fitCamera;
+  FX.onPointerDown = onPointerDown; FX.onPointerMove = onPointerMove;
+  FX.onPointerUp = onPointerUp; FX.onPointerLeave = onPointerLeave; FX.onWheel = onWheel;
+  FX.refreshHover = refreshHover;
+  FX.filterProjects = filterProjects; FX.matchFilterMode = matchFilterMode;
+  FX.filterActive = filterActive; FX.fmtTokens = fmtTokens; FX.lineKeyFor = lineKeyFor;
+  FX.machineCap = machineCap; FX.labelCap = labelCap;
+
   window.factoryMount = factoryMount;
   window.factoryUnmount = factoryUnmount;
   window.factoryReload = factoryReload;
   window.factoryOnEvent = factoryOnEvent;
   window.factoryRepaint = factoryRepaint;
-  window.factoryEscape = factoryEscape;
   window.factoryOnAutomationChanged = factoryOnAutomationChanged;
 })();

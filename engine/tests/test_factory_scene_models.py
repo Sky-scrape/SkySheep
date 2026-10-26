@@ -42,7 +42,7 @@ _FRONT_GROUPS = ("stockyard", "tankFarm")
 # buildIndustrialSite 里四个 variant 分支的主厂房高度（variant = hash("site"+id) % 4）
 _VARIANT_MAIN_HEIGHTS = {"0": 38, "1": 24, "2": 56, "3": 34, "4": 27, "5": 32, "6": 22, "7": 29}
 
-# 注入到 IIFE 收口之前的导出；只暴露测试要直接调用的内部函数/状态。
+# 从 window.FX 取的导出（工厂两个分区文件在各自 IIFE 尾部把内部函数挂上 FX）。
 _EXPORTED = (
     "S",
     "PAL_DAY",
@@ -879,6 +879,9 @@ _DRIVER_JS = r'''
       fx.S.cssH = 500;
       fx.fitCamera(false);
       var b = fx.S.world.bounds;
+      // 取景框（focus）：只框调度厅与厂区坪。场景禁缩放后默认画幅就是它，
+      // 台地前缘与远景设施允许被裁——它们本来就是布景。
+      var f = fx.S.world.focus;
       var cam = fx.S.cam;
       var horizon = fx.sceneHorizon();
       fx.S.world.models.forEach(function (m) {
@@ -886,6 +889,9 @@ _DRIVER_JS = r'''
         var height = (m.z0 || 0) + (m.h || Math.max(m.h0 || 0, m.h1 || 0));
         var depth = m.hh || (m.r ? m.r * 0.5 : 5);
         (m.path || [m]).forEach(function (p) {
+          var sx = (p.x - cam.x) * cam.zoom + fx.S.bufW / 2;
+          // 画外的外围建筑不参与「压天际线」判定：它已经被裁掉了
+          if (sx < -40 || sx > fx.S.bufW + 40) return;
           var roofY = (p.y - height - depth - cam.y) * cam.zoom + fx.S.bufH / 2;
           if (roofY < horizon + 13) note(report.cameraIssues, "外围建筑压入天际线 " + n);
         });
@@ -896,10 +902,31 @@ _DRIVER_JS = r'''
       if (!(b.minX < b.maxX) || !(b.minY < b.maxY)) {
         note(report.cameraIssues, n + " 项目时 bounds 不成区间: " + JSON.stringify(b));
       }
-      var cx = (b.minX + b.maxX) / 2;
+      var cx = (f.minX + f.maxX) / 2;
+      // 垂直取景镜像 fitCamera：台地前缘前景装得下（天空 11% + 底部 16px）
+      // 就并入取景框；装不下先试 zoom 回缩一成，再不行退回只框厂区坪。
+      var zFocus = Math.max(0.01, Math.min(Math.min(
+        (fx.S.bufW - 64) / Math.max(1, f.maxX - f.minX),
+        (fx.S.bufH - 64) / Math.max(1, f.maxY - f.minY)), 1.45));
+      var frontMaxY = Math.max(f.maxY, b.maxY);
+      var frontDepth = frontMaxY - f.maxY;
+      var expectZoom = zFocus;
+      if (frontDepth > 0) {
+        var span = f.maxY - f.minY + frontDepth;
+        var skyNeed = fx.S.bufH * 0.11;
+        if (span * zFocus + skyNeed + 16 > fx.S.bufH) {
+          var zAlt = (fx.S.bufH - skyNeed - 16) / span;
+          if (zAlt >= zFocus * 0.9) expectZoom = zAlt;
+        }
+      }
+      if (Math.abs(cam.zoom - expectZoom) > 1e-6) {
+        note(report.cameraIssues, n + " 项目时 zoom 未按取景公式取值: " + cam.zoom);
+      }
+      var frameMaxY = (frontDepth > 0 && (f.maxY - f.minY + frontDepth) * expectZoom
+                       + fx.S.bufH * 0.11 + 16 <= fx.S.bufH) ? frontMaxY : f.maxY;
       var landOffset = Math.max(0, Math.min(fx.S.bufH * 0.11,
-        (fx.S.bufH - (b.maxY - b.minY) * cam.zoom) / 2 - 16));
-      var cy = (b.minY + b.maxY) / 2 - landOffset / cam.zoom;
+        (fx.S.bufH - (frameMaxY - f.minY) * cam.zoom) / 2 - 16));
+      var cy = (f.minY + frameMaxY) / 2 - landOffset / cam.zoom;
       if (Math.abs(cam.x - cx) > 1e-6 || Math.abs(cam.y - cy) > 1e-6) {
         note(report.cameraIssues, n + " 项目时镜头中心未按取景公式对齐");
       }
@@ -926,11 +953,13 @@ _DRIVER_JS = r'''
       });
       var pad = 30;
       var z = cam.zoom;
-      [[b.minX, b.minY], [b.minX, b.maxY], [b.maxX, b.minY], [b.maxX, b.maxY]].forEach(function (corner) {
+      // 取景契约：focus 的四角必须在缓冲区内（场景内容不许被裁），
+      // 外围台地 / 远景设施可以出画。
+      [[f.minX, f.minY], [f.minX, f.maxY], [f.maxX, f.minY], [f.maxX, f.maxY]].forEach(function (corner) {
         var sx = (corner[0] - cam.x) * z + fx.S.bufW / 2;
         var sy = (corner[1] - cam.y) * z + fx.S.bufH / 2;
         if (sx < pad - 2 || sx > fx.S.bufW - pad + 2 || sy < pad - 2 || sy > fx.S.bufH - 14) {
-          note(report.cameraIssues, n + " 项目时 bounds 角点越出缓冲区 (" + sx + "," + sy + ")");
+          note(report.cameraIssues, n + " 项目时 focus 角点越出缓冲区 (" + sx + "," + sy + ")");
         }
       });
       if (n === 4) {
@@ -999,7 +1028,7 @@ _DRIVER_JS = r'''
     report.fixedCamera = {
       before: cameraBefore, after: cameraAfter, prevented: prevented,
       zoomLocked: zoomIn === zoomBefore && fx.S.cam.tz === zoomBefore,
-      centered: fx.S.cam.x === (fx.S.world.bounds.minX + fx.S.world.bounds.maxX) / 2 &&
+      centered: fx.S.cam.x === (fx.S.world.focus.minX + fx.S.world.focus.maxX) / 2 &&
                 fx.S.cam.y <= (fx.S.world.bounds.minY + fx.S.world.bounds.maxY) / 2,
       afterWheel: [fx.S.cam.x, fx.S.cam.y, fx.S.cam.tx, fx.S.cam.ty]
     };
@@ -1013,17 +1042,17 @@ _DRIVER_JS = r'''
 
 
 def _build_probe_source() -> str:
-    """把 app-factory.js 的 IIFE 尾部改成先导出内部 API，再接上 Node 探针。"""
-    js = (STATIC_DIR / "app-factory.js").read_text(encoding="utf-8")
-    exports = ", ".join(f"{name}: {name}" for name in _EXPORTED)
-    inject = f"  window.__factoryTest = {{ {exports} }};\n"
-    idx = js.rindex("})();")
-    instrumented = js[:idx] + inject + js[idx:]
+    """按加载顺序拼接工厂四个分区文件（共享 window.FX），探针从 FX 取内部 API。"""
+    js = "\n".join((STATIC_DIR / n).read_text(encoding="utf-8") for n in (
+        "app-factory.js", "app-factory-scene.js",
+        "app-factory-drawer.js", "app-factory-draw.js"))
+    exports = ", ".join(f"{name}: window.FX.{name}" for name in _EXPORTED)
+    tail = f"\nwindow.__factoryTest = {{ {exports} }};\n"
     shim = (
         "var window = {};\n"
         "var document = { getElementById: function () { return null; } };\n"
     )
-    return shim + instrumented + "\n" + _DRIVER_JS
+    return shim + js + tail + "\n" + _DRIVER_JS
 
 
 @pytest.fixture(scope="module")

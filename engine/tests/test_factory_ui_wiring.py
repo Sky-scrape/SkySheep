@@ -28,6 +28,15 @@ STATIC_DIR = ROOT / "src" / "skysheep" / "server" / "static"
 def read_static(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
+def read_factory_js() -> str:
+    """工厂前端按加载顺序拼接（主文件 + scene + drawer + draw 四个分区）。
+
+    工厂拆成四个分区文件后，源码锚定断言对拼接文本跑，语义与拆分前一致。
+    """
+    return "\n".join(read_static(n) for n in (
+        "app-factory.js", "app-factory-scene.js",
+        "app-factory-drawer.js", "app-factory-draw.js"))
+
 
 # ---------- index.html ----------
 
@@ -49,13 +58,19 @@ def test_factory_dom_contract_ids_present():
         "factory-center", "factory-labels-toggle",
         "factory-all-runs", "factory-drawer", "factory-notice",
         "factory-weather",
-        "factory-num-running", "factory-num-queued", "factory-num-attention",
-        "factory-num-done", "factory-num-tokens", "factory-num-chat",
+        # 顶栏只剩一盏「需留意」灯 + 回放（读数已经长在场景里）
+        "factory-attention", "factory-attn-num",
+        "factory-replay", "factory-replay-bar", "factory-replay-time",
+        "factory-replay-stop",
     ):
         assert f'id="{el_id}"' in html, f"缺少工厂 DOM 契约里的 #{el_id}"
-    # 五个计数格用 data-k 区分，前端与测试都按它定位
-    for key in ("running", "queued", "attention", "done", "tokens", "chat"):
-        assert f'data-k="{key}"' in html
+    # 六格计数条（运行中 / 排队 / 需留意 / 今日做成 / 今日 token / 对话在跑）已撤掉：
+    # 这些数字现在由场景表达（包裹 / 成品垛 / 返工堆 / 厂区红灯），不再是一排报表。
+    assert "fh-cells" not in html and "fh-cell" not in html
+    assert "factory-num-running" not in html and "factory-num-done" not in html
+    assert "factory-num-tokens" not in html and "factory-num-chat" not in html
+    # 建线入口退回自动化页：工厂里不再有「＋」
+    assert 'id="factory-line-add"' not in html
     # 面板筛选的四个模式按钮
     for mode in ("all", "running", "attention", "stopped"):
         assert f'data-filter="{mode}"' in html, f"缺少筛选模式 {mode}"
@@ -82,9 +97,14 @@ def test_factory_script_loads_after_app_js():
     i_app = html.index('<script src="/static/app.js"></script>')
     i_factory = html.index('<script src="/static/app-factory.js"></script>')
     assert i_app < i_factory, "app-factory.js 必须在 app.js 之后加载"
+    # 四个工厂分区按依赖顺序加载：主文件创建 FX 与各绑定源，绘制层最后
+    names = ["app-factory.js", "app-factory-scene.js",
+             "app-factory-drawer.js", "app-factory-draw.js"]
+    pos = [html.index(f'<script src="/static/{n}"></script>') for n in names]
+    assert pos == sorted(pos), f"工厂分区加载顺序应为 {' → '.join(names)}"
     # app.js 之后、app-tools.js 之前（与注释里「先 app.js 后本文件」一致）
     i_tools = html.index('<script src="/static/app-tools.js"></script>')
-    assert i_factory < i_tools
+    assert pos[-1] < i_tools
 
 
 # ---------- app.js ----------
@@ -146,7 +166,7 @@ def test_app_js_keyboard_guards_include_factory():
 # ---------- app-factory.js ----------
 
 def test_factory_module_exposes_globals():
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     for fn in ("factoryMount", "factoryUnmount", "factoryReload", "factoryOnEvent",
                "factoryRepaint", "factoryOnAutomationChanged"):
         assert f"function {fn}(" in js, f"缺少全局函数 {fn}"
@@ -154,7 +174,7 @@ def test_factory_module_exposes_globals():
 
 
 def test_factory_module_calls_all_ws_methods():
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     for method in (
         "factory.state", "factory.runs", "factory.run_now",
         "factory.toggle", "factory.cancel", "factory.ack",
@@ -189,7 +209,7 @@ def test_app_js_resyncs_factory_on_automation_updates():
         i = js.index(case)
         body = js[i:js.index("break;", i)]
         assert "factoryOnAutomationChanged" in body, f"{case} 没有同步工厂"
-    fjs = read_static("app-factory.js")
+    fjs = read_factory_js()
     assert "function scheduleResync(" in fjs
     # 防抖 + 只在工厂打开时重拉（没打开就不必为它查库）
     assert "S.resyncTimer" in fjs and "if (!S.mounted) return;" in fjs
@@ -197,7 +217,7 @@ def test_app_js_resyncs_factory_on_automation_updates():
 
 def test_factory_module_wires_progress_cancel_health_and_ack():
     """工序进度 / 叫停 / 产线体检 / 需留意消化四件事的前端接线。"""
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     # 工序进度：phase=progress 走独立分支，不污染运行行
     assert 'if (data.phase === "progress") { applyRunProgress(data.run); return; }' in js
     assert "function applyRunProgress(" in js and "function progressText(" in js
@@ -214,7 +234,7 @@ def test_factory_module_wires_progress_cancel_health_and_ack():
 
 
 def test_factory_pixel_specs_and_safety_bounds():
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     # 32×16 等距瓦片、内部缓冲 1/2（最小 320×180）、60 枚包裹、40 个标签
     assert "var TILE_W = 32;" in js and "var TILE_H = 16;" in js
     assert "BUFFER_MIN_W = 320" in js and "BUFFER_MIN_H = 180" in js
@@ -229,13 +249,16 @@ def test_factory_pixel_specs_and_safety_bounds():
 
 
 def test_factory_module_respects_reduced_motion_and_visibility():
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     assert "(prefers-reduced-motion: reduce)" in js
     assert "document.hidden" in js
     assert "visibilitychange" in js
-    # 昼夜由本机时间决定；开启现实天气时优先用当地日出日落（is_day）
-    assert "function weatherIsDay(" in js
-    assert "S.weather.is_day" in js and "h >= 6 && h < 18" in js
+    # 昼光系数：本机 06:00 / 18:00 为中心各 ±40 分钟过渡带；开现实天气时
+    # 优先用当地日出日落时刻，只有 is_day 布尔时仍硬切
+    assert "function daylightFactor(" in js
+    assert "DAYLIGHT_BAND_MIN = 40" in js
+    assert "w.is_day" in js and "w.sunrise" in js
+    assert "S.daylightF" in js
 
 
 def test_factory_module_wires_new_heavy_models():
@@ -244,7 +267,7 @@ def test_factory_module_wires_new_heavy_models():
     坐标、path/高度与假 Canvas 绘制在 `test_factory_scene_models.py` 里跑运行时探针；
     这里只锁源码接线，防止 kind 或函数名改半边。
     """
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     for kind, fn in (
         ("cooling", "drawCoolingTowerModel"),
         ("pipeRack", "drawPipeRackModel"),
@@ -274,7 +297,7 @@ def test_factory_module_wires_front_buildings():
     或建筑群漏了 near 标记，界面上的表现分别是「整件不动」和「近景发灰成远景」。
     这里锁源码接线，几何与假 Canvas 绘制由 test_factory_scene_models.py 的探针跑。
     """
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     for kind, fn in (
         ("coalShed", "drawCoalShedModel"),
         ("siloBattery", "drawSiloBatteryModel"),
@@ -346,7 +369,7 @@ def test_factory_module_wires_front_buildings():
 
 def test_factory_module_wires_stockyard_props_and_night_lighting():
     """料场新增的煤堆 / 地磅 / 投光要有绘制、接地影，还要接上夜间地面光池。"""
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     for kind, fn in (
         ("coalPile", "drawCoalPileModel"),
         ("weighbridge", "drawWeighbridgeModel"),
@@ -368,7 +391,7 @@ def test_factory_module_wires_stockyard_props_and_night_lighting():
 
 def test_factory_module_wires_west_depot():
     """台地左角外的物资场要真的进场景；新用的小龙门吊要有接地影。"""
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     assert 'utilityGroup("westDepot"' in js, "西侧物资场没有摆进场景"
     assert 'kind: "gantry"' in js, "物资场缺少龙门吊"
     i_shadow = js.index("function drawShadows(")
@@ -391,13 +414,27 @@ def test_factory_css_uses_theme_tokens_only():
     assert not re.search(r"\bhsla?\(", seg), "工厂外壳样式里写死了 hsl()/hsla()"
 
 
+def test_factory_dock_labels_match_pixel_parcel_style():
+    """月台两块标签的样式：常驻待发告示牌（board）与排队包裹（queued）。
+
+    告示牌把原来的多包裹行列换成一块固定牌，标签改为 board 家族
+    （title / text / more）；排队包裹一侧不动，等超 3 分钟仍转红。
+    """
+    css = read_static("app.css")
+    seg = css[css.index("工厂（第三顶层视图）"):]
+    for cls in (".fx-label.board", ".fx-label.queued"):
+        assert cls in seg, f"缺少月台标签样式 {cls}"
+    assert "text-shadow:" in seg
+    assert ".fx-label.queued.hot { color: var(--bad); }" in seg
+
+
 def test_factory_css_defines_factory_scoped_classes():
     """工厂样式段里的组件类（计数格 fh-* / 面板 fp-*）都在，且只此一家。"""
     css = read_static("app.css")
     seg = css[css.index("工厂（第三顶层视图）"):]
     # 外壳主结构走 #factory-* id；组件类用工厂专属短前缀（fh- / fp-），
     # 与既有页面共用类（.btn-ghost / .sec-ops）之外不引入全局新类。
-    for cls in (".fh-cell", ".fp-title", ".fp-ops"):
+    for cls in (".fh-lamp", ".fp-title", ".fp-ops", ".fx-more"):
         assert re.search(rf"^{re.escape(cls)}\b", seg, re.M), f"工厂样式缺少 {cls} 类规则"
 
 
@@ -409,30 +446,61 @@ def test_factory_css_hides_canvas_on_narrow_screen():
     assert "#factory-panel" in seg
 
 
-def test_factory_panel_filter_batch_and_keyboard_wiring():
-    """P2：筛选 / 批量操作 / 键盘导航 / 样板厂边界的接线。"""
-    js = read_static("app-factory.js")
+def test_factory_panel_is_a_directory_not_an_ops_console():
+    """目录该有的留下，运维台该退的都退了（这是「工厂=可视化场景」的边界）。"""
+    js = read_factory_js()
     # 筛选：纯函数 + 绑定 + 空结果与「清除筛选」出口
     for fn in ("filterProjects", "matchFilterMode", "bindFilter", "syncFilterChips",
                "resetFilter", "filterActive"):
         assert f"function {fn}(" in js, f"缺少 {fn}"
     assert 'data-clear-filter="1"' in js
-    # 批量操作：厂区头两个按钮 + 单次上限 + 样板厂一律不派
-    assert "BATCH_RUN_LIMIT = 5" in js
-    assert 'data-batch-run="' in js and 'data-batch-pause="' in js
-    assert "function batchRunLines(" in js and "function batchPauseLines(" in js
-    assert "if (S.demo) { addNotice(" in js, "样板厂不能批量派工/暂停"
+    # 厂区少的时候筛选条不出场
+    assert "SPARSE_PROJECTS" in js and 'classList.toggle("sparse"' in js
+    # 批量派工 / 批量暂停 / 建线表单都退出工厂（派工仍在：点机台或点产线行，一次一条）
+    for gone in ("BATCH_RUN_LIMIT", "data-batch-run", "data-batch-pause",
+                 "batchRunLines", "batchPauseLines", "data-add-project",
+                 "openNewLineDrawer(0)"):
+        assert gone not in js, f"工厂里不该再出现 {gone}"
+    assert "function openLineDrawer(" in js or "FX.openLineDrawer" in js
     # 键盘：面板内 ↑↓ / Home / End
     assert "function panelKeyNav(" in js
     assert "dom.panelBody.addEventListener(\"keydown\", panelKeyNav)" in js
-    # 样板厂边界：计数条灰掉 + 「演示」标记
+    # 样板厂边界：顶栏灰掉 + 「演示」标记
     assert 'dom.hud.classList.toggle("demo", !!S.demo)' in js
     assert 'dom.demoBadge.classList.toggle("hidden", !S.demo)' in js
+    # 目录默认折叠（场景优先），折叠按钮仍能翻回来
+    assert "panelFolded: true" in js
+    assert 'dom.panel.classList.toggle("folded", S.panelFolded)' in js
+
+
+def test_factory_scene_has_traces_not_numbers():
+    """② 痕迹：成品码垛 / 返工堆 / 出货卡车 / 在制火花 / 到点沙漏 / 回放。"""
+    js = read_factory_js()
+    # 场院上的「今天干了多少」：托盘按件数码、封顶、满垛插旗
+    for needle in ("function refreshProjectStats(", "function statFor(",
+                   "PALLET_SIZE", "PALLET_MAX", "REWORK_MAX"):
+        assert needle in js, f"成品垛 / 返工堆缺少 {needle}"
+    assert "kind: \"rework\"" in js and "kind: \"gate\"" in js
+    assert "function drawReworkModel(" in js and "function drawGateModel(" in js
+    # 出货：满一托盘放一辆车（纯表现，不参与判定）
+    assert "function spawnTrip(" in js and "function updateTrips(" in js
+    assert "function drawTrips(" in js
+    # 在制火花 / 到点沙漏挂在机台上
+    assert "料口灯带" in js and "待发沙漏" in js
+    assert "UPCOMING_GLYPH_S" in js
+    # 回放今天：拉今天的运行、按虚拟时间重演、Esc 可收队
+    assert "function toggleReplay(" in js and "function drawReplay(" in js
+    assert 'view: "tokens_today"' in js
+    assert "REPLAY_CAP_MS" in js and "function replayProgress(" in js
+    # 厂区心情（大门 / 工头 / 烟 都由它驱动）
+    assert "function refreshFactoryMood(" in js
+    for mood in ("working", "trouble", "stopped", "idle"):
+        assert f'"{mood}"' in js
 
 
 def test_factory_module_wires_focus_filters_and_edit_chain():
     """三期：聚焦档救活机台标签、全部运行筛选分页、打开产出、去编辑、人工判定。"""
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     # 聚焦档：镜头真的推进（以前只改选中态，机台标签的 zoom 条件恒为假）
     assert "function applyFocusCamera(" in js
     assert "S.focusPid" in js
@@ -455,6 +523,12 @@ def test_factory_module_wires_focus_filters_and_edit_chain():
         assert needle in js, f"现实天气缺少 {needle}"
     # 对话在跑：实时轮询 + 只读抽屉 + 跳到会话
     assert "function openLiveDrawer(" in js and "data-live-session" in js
+    # 入口必须绑在「设置」抽屉里（顶栏那一格撤掉之后它挪进来了）；
+    # 绑错抽屉的话按钮点了不动——纯源码断言查得出来
+    drawer_js = read_static("app-factory-drawer.js")
+    i_set = drawer_js.index("function openSettingsDrawer(")
+    set_body = drawer_js[i_set:drawer_js.index("\n  function ", i_set)]
+    assert 'data-open-live' in set_body and "openLiveDrawer()" in set_body
     assert "function refreshLive(" in js and 'request("factory.live")' in js
     assert "function liveStale(" in js
     # 运行详情跟随 finished 事件刷新，不能停在「运行中 / 叫停」
@@ -481,13 +555,13 @@ def test_factory_scene_wires_factory_level_alert_signals():
     表达，全景下扫不到。这里锁四件事：判定函数存在并被逐帧调用、两层绘制都
     接进 render、停工不闪、阈值读配置。
     """
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     assert "function factoryAlert(" in js
     assert "function refreshFactoryAlerts(" in js
     assert "function drawAlertGround(" in js
     assert "function drawAlertBeacon(" in js
     # 判定每帧算一次，两处绘制共用，避免「地面红灯、灯柱黄灯」的错位
-    i_render = js.index("function render() {")
+    i_render = js.index("function render() {\n")  # 真身在绘制层（主文件有同名单行转发函数）
     render_body = js[i_render:js.index("\n  }", i_render)]
     assert "refreshFactoryAlerts();" in render_body
     # 地面层必须先于模型（不能盖住机台），灯柱必须在模型之后（不被前景挡住）
@@ -511,46 +585,59 @@ def test_factory_scene_wires_factory_level_alert_signals():
     assert "S.reduced ? 0 :" in ground_body, "脉冲要在 reduced-motion 下退化为静止描边"
 
 
-def test_factory_scene_wires_upcoming_dock():
-    """待发月台：把未来 30 分钟到点的产线摆成静止包裹。
+def test_factory_scene_wires_noticeboard():
+    """待发告示牌：右月台常驻一块固定牌，空态也画，倒计时贴牌。
 
-    以前场景只表达「此刻」——包裹凭空从调度厅冒出来，看不到还没开始那一段。
-    这里锁：计算层存在、绘制接进 render 且在在途包裹之前、被排除的四种情况、
-    排布结果交给标签层复用（不各算一套）、点击只开抽屉不派工。
+    旧形态把未来 30 分钟到点的产线摆成「左排队、右待发」的两列包裹（多包裹
+    行列布局 + 溢出末端），现在右月台换成一块常驻告示牌：有排期显示「任务名 +
+    倒计时」，没有则显示「暂无待发」。这里锁：纯函数计算层存在、绘制接进 render
+    且在在途包裹之前、排除语义与窗口、过期不下界（超 30 分钟仍 due）、空态文案、
+    点击只开详情不派工；并按契约断言旧行列布局已退出。
     """
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     for fn in ("function refreshUpcoming(", "function drawUpcoming(",
-               "function fmtCountdown(", "function placeLabelAt("):
+               "function drawNoticeboard(", "function noticeboardState(",
+               "function upcomingList(", "function fmtCountdown("):
         assert fn in js, f"缺少 {fn}"
-    # 常量与窗口
-    assert "UPCOMING_WINDOW_S = 1800" in js and "UPCOMING_MAX = 7" in js
-    # 接线顺序：先算，再画；月台画在模型之后、在途包裹之前
-    i_render = js.index("function render() {")
+    # 常量：30 分钟窗口、牌面只挂一枚、名字截 8 字、固定牌几何
+    assert "UPCOMING_WINDOW_S = 1800" in js
+    assert "UPCOMING_MAX = 1" in js and "UPCOMING_NAME_MAX = 8" in js
+    assert "UPCOMING_BOARD = {" in js
+    # 排除语义：只认 idle cron、停工厂区与超窗都不待发；过期不设下界
+    assert 'l.status !== "idle"' in js and 'l.kind !== "cron"' in js
+    assert "p.root_ok === false" in js
+    assert "eta > UPCOMING_WINDOW_S" in js
+    # 过期不设下界：到点没跑起来的排期留在 due（行为断言在运行时测试里跑）
+    # 接线顺序：先算，再画；告示牌画在模型之后、在途包裹之前
+    i_render = js.index("function render() {\n")  # 真身在绘制层（主文件有同名单行转发函数）
     body = js[i_render:js.index("\n  }", i_render)]
     i_refresh = body.index("refreshUpcoming();")
     i_models = body.index("drawModels(ctx, pal);")
-    i_upcoming = body.index("drawUpcoming(ctx, pal);")
+    i_board = body.index("drawUpcoming(ctx, pal);")
     i_packages = body.index("drawPackages(ctx, pal);")
-    assert i_refresh < i_models < i_upcoming < i_packages
-    # 四种排除：在跑 / 停工 / 超窗 / 已过期
-    i_fn = js.index("function refreshUpcoming() {")
-    fn_body = js[i_fn:js.index("\n  }", i_fn)]
-    assert 'l.status !== "idle"' in fn_body
-    assert "p.root_ok === false" in fn_body
-    assert "eta <= 0 || eta > UPCOMING_WINDOW_S" in fn_body
-    # 排布交给标签层复用：绘制算一次 startX，标签直接读 S.upcomingLane
-    assert "S.upcomingLane = {" in js
-    assert "var lane = S.upcomingLane;" in js
-    # 点待发包裹只开抽屉，不派工（还没到点的那一轮不该因误触提前跑）
-    assert 'hit.type === "upcoming"' in js
+    assert i_refresh < i_models < i_board < i_packages
+    # 空态文案 + 常驻固定牌几何（无任务也写 S.noticeboard）
+    assert "暂无待发" in js
+    i_board_fn = js.index("function drawNoticeboard(ctx, pal) {")
+    board = js[i_board_fn:js.index("\n  function drawUpcoming(", i_board_fn)]
+    assert "S.noticeboard = {" in board
+    assert "UPCOMING_BOARD" in board
+    assert 'type: "upcoming"' in board
+    assert "view.state === \"due\" ? pal.rust" in board, "到点未跑的牌面要有区分"
+    # 旧多包裹行列布局已退出
+    for gone in ("function upcomingPosition(", "rowDrop", "upcomingOverflow",
+                 "upcomingPositions", "Math.floor(index / 2)"):
+        assert gone not in js, f"旧多包裹排布应已移除：{gone}"
+    # 告示牌打开只读弹窗，任务详情仍保留在其他对象的点击路径。
     i_up = js.index("function onPointerUp(")
     up_body = js[i_up:js.index("\n  }", i_up)]
-    assert "openLineDrawer(hit.key" in up_body
+    assert 'hit.type === "upcoming"' in up_body
+    assert "openUpcomingDialog()" in up_body
+    assert "FX.openUpcomingDialog = openUpcomingDialog" in js
     assert "factory.run_now" not in up_body
-    # 命中测试要把待发包裹一并算上
-    i_hit = js.index("function hitTest(")
-    hit_body = js[i_hit:js.index("\n  }", i_hit)]
-    assert 'h.type === "pkg" || h.type === "upcoming"' in hit_body
+    label_body = js[js.index("function updateLabels("):js.index("function loop(")]
+    assert '"待发", "board title"' in label_body
+    assert '"board text"' not in label_body and '"board more"' not in label_body
 
 
 def test_factory_scene_wires_berths_and_pipeline_flow():
@@ -560,12 +647,12 @@ def test_factory_scene_wires_berths_and_pipeline_flow():
     额度用完就是那个原因。装配线以前只画三颗灯珠，看得出有几个工位、看不出
     谁在等谁，而依赖流向正是装配线区别于单机产线的地方。
     """
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     assert "function drawBerths(" in js
     assert "function drawPipelineFlow(" in js
     assert "PIPELINE_MAX_NODES" in js
     # 泊位画在模型之前（它在地面上），且接进 render
-    i_render = js.index("function render() {")
+    i_render = js.index("function render() {\n")  # 真身在绘制层（主文件有同名单行转发函数）
     body = js[i_render:js.index("\n  }", i_render)]
     i_berth = body.index("drawBerths(ctx, pal);")
     i_models = body.index("drawModels(ctx, pal);")
@@ -576,9 +663,12 @@ def test_factory_scene_wires_berths_and_pipeline_flow():
     assert "Number.isFinite(rawCap) ? rawCap : 3" in berth_body
     assert "clamp(Math.round(" in berth_body
     assert "S.berthLane = used ? { cap: cap, used: used } : null;" in berth_body
-    # 三层排布：泊位 23 / 排队 33 / 待发 44，互相不重叠
-    assert "var queuedY = base.y + Math.round(33 * z);" in js
-    assert "var laneY = base.y + Math.round(44 * z);" in js
+    # 右月台的多包裹行列已换成常驻告示牌（见 test_factory_scene_wires_noticeboard）；
+    # 排队包裹一侧不动，仍沿调度厅左下紧凑排列、点它只看产线不派工。
+    dock = js[js.index("function drawUpcoming(ctx, pal) {"):]
+    dock = dock[:dock.index("\n  function drawPackage(")]
+    assert "var leftDock = viewPoint(hall.x - 34, hall.y + 22);" in dock
+    assert 'S.hits.push({ type: "queued"' in dock
     # 装配线：失败工位之后的带面断开、下游等料
     flow_body = js[js.index("function drawPipelineFlow("):]
     flow_body = flow_body[:flow_body.index("\n  }")]
@@ -596,7 +686,7 @@ def test_factory_scene_waits_are_tiered_by_duration():
     等了多久分三档：1 分钟内静止、1–3 分钟轻抖、3 分钟以上快抖 + 转红。
     连续插值在 10fps 像素场景里读不出差别，所以用分段而不是渐变。
     """
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     for fn in ("function queuedWaits(", "function waitingTier("):
         assert fn in js, f"缺少 {fn}"
     # 三段阈值与抖动参数
@@ -608,20 +698,23 @@ def test_factory_scene_waits_are_tiered_by_duration():
     assert tier_body.index("WAIT_HOT_S") < tier_body.index("WAIT_WARM_S")
     # 无明细时按计数画、不编造时长（top 为 null）
     assert "var waits = queuedWaits();" in js
-    assert "S.queuedLane = queuedDraw ? {" in js
+    assert "S.queuedLane =" in js
+    assert "queuedDraw" in js
     assert "top: waits.length ? waits[0] : null," in js
-    # 标签只标等待最久的那一枚，且坐标取自绘制层
+    # 标签只标等待最久的那一枚，且坐标取自左下侧首箱的绘制结果。
     assert "var qLane = S.queuedLane;" in js
     assert '"等 " + fmtCountdown(qLane.top.waited)' in js
+    assert "qLane.label.x * (S.cssW / S.bufW)" in js
+    assert "qLane.label.y * (S.cssH / S.bufH)" in js
     # 点排队包裹只开抽屉，不派工
     assert 'hit.type === "queued" && hit.key' in js
     i_up = js.index("function onPointerUp(")
     up_body = js[i_up:js.index("\n  }", i_up)]
     assert "openLineDrawer(hit.key" in up_body
-    # 命中测试要把排队包裹一起算上
+    # 命中测试要把排队包裹一起算上（小目标优先于脚下机台）
     i_hit = js.index("function hitTest(")
     hit_body = js[i_hit:js.index("\n  }", i_hit)]
-    assert 'h.type === "queued"' in hit_body
+    assert 'h.type !== "queued"' in hit_body or 'h.type === "queued"' in hit_body
     # 样式：等超过 3 分钟转红
     css = read_static("app.css")
     assert ".fx-label.queued.hot" in css
@@ -648,7 +741,7 @@ def test_factory_scene_wires_stall_visualization():
     以前这条语义只存在于左面板的计时数字里——要用户自己拿「已跑 47 分」减去
     超时配置才发现。场景直接说：包裹打转 + 问号、机台冒烟、超时后焦黑。
     """
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     for fn in ("function runStall(", "function lineStall(",
                "function drawStallMark(", "function drawTimeoutSmoke("):
         assert fn in js, f"缺少 {fn}"
@@ -690,7 +783,7 @@ def test_factory_css_covers_panel_filter_batch_and_demo_badge():
 
 
 def test_factory_art_direction_motion_and_state_cues():
-    js = read_static("app-factory.js")
+    js = read_factory_js()
     css = read_static("app.css")
     seg = css[css.index("工厂（第三顶层视图）"):]
 
@@ -709,10 +802,77 @@ def test_factory_art_direction_motion_and_state_cues():
     assert "#factory-drawer.factory-entered { animation: none; }" in seg
 
 
+def test_factory_panel_keeps_scroll_and_focus_on_rebuild():
+    """面板重建不丢滚动位置与焦点：运行事件密集时面板不能跳回顶部。
+
+    renderPanel 全量 innerHTML 重建会重置 scrollTop，故重建前记忆、写回后恢复；
+    焦点恢复用 preventScroll 防止把滚动拽走；运行事件路径走 refreshPanelStates
+    （焦点在面板控件上时不动面板），不绕过保护直调 renderPanel。
+    """
+    js = read_factory_js()
+    assert "var keepScroll = dom.panelBody.scrollTop;" in js
+    assert "dom.panelBody.scrollTop = keepScroll;" in js
+    assert "rows[i].focus({ preventScroll: true })" in js
+    i_ev = js.index("function factoryOnEvent(")
+    ev_body = js[i_ev:js.index("\n  function ", i_ev + 10)]
+    assert "refreshPanelStates();" in ev_body
+    assert "renderPanel();" not in ev_body
+
+
+def test_factory_static_layer_offscreen_cache():
+    """地面 / 斑块 / 投影是纯静态的（零动画引用），走离屏缓存，不每帧重画。
+
+    缓存 key 含世界引用（applyState 重建即失效）、缓冲尺寸与昼夜；离屏不可用
+    时直画主画布兜底；缓存层与警报层序不变（阴影仍在 alertGround 之下）。
+    """
+    js = read_factory_js()
+    assert "function drawStaticLayer(ctx, pal)" in js
+    assert "c.world === S.world" in js
+    assert "c.pal === pal" in js
+    # 相机会改变世界→屏幕投影：key 必须含相机三值（否则聚焦/全景缓动期间地面错位）
+    assert "c.camX === S.cam.x && c.camY === S.cam.y && c.zoom === S.cam.zoom" in js
+    assert 'document.createElement("canvas")' in js
+    i_render = js.index("function render() {\n")  # 真身在绘制层（主文件有同名单行转发函数）
+    render_body = js[i_render:js.index("\n  }", i_render)]
+    assert "drawStaticLayer(ctx, pal);" in render_body
+    # 静态三函数不再逐帧直调（已并入缓存层）
+    assert "drawTerrain(ctx, pal);" not in render_body
+    assert "drawShadows(ctx, pal);" not in render_body
+    # 层序不变：静态层（含投影）仍在警报地面之下
+    assert render_body.index("drawStaticLayer") < render_body.index("drawAlertGround")
+
+
+# ---------- 跨文件转发 ----------
+
+def test_factory_cross_file_helpers_are_forwarded():
+    """主文件裸调用、实现在另外三个分区文件里的函数，必须有 FX 转发。
+
+    四个工厂分区各自是一个 IIFE，跨文件调用只能经 window.FX 运行时查表。
+    漏写一行转发不报语法错误，只在跑到那条分支时抛 ReferenceError；而渲染
+    跑在数据加载的 Promise 链里，错误会被 catch 误报成「读取工厂数据失败」。
+    工厂三期在 `drawPackage` 的 `pointAt` 上正是这么踩的（首屏一有运行中的
+    包裹就白画布 + 「重试」按钮，点多少次都没用）。
+    """
+    main = read_static("app-factory.js")
+    others = "".join(read_static(n) for n in (
+        "app-factory-scene.js", "app-factory-drawer.js", "app-factory-draw.js"))
+    forwarded = set(re.findall(r"\breturn FX\.(\w+)\(", main))
+    forwarded |= set(re.findall(r"= FX\.(\w+);", main))
+    # 直接挂到 window 的（factoryEscape 一族）主文件裸调时按全局查表，无需转发
+    on_window = set(re.findall(r"window\.(\w+) = \w+;", others))
+    own = set(re.findall(r"function (\w+)\(", main))
+    called = set(re.findall(r"(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(", main))
+    moved = set(re.findall(r"function (\w+)\(", others)) - own
+    missing = sorted((called & moved) - forwarded - on_window)
+    assert not missing, f"实现在分区文件里、主文件裸调用却漏了 FX 转发：{missing}"
+
+
 # ---------- sw.js ----------
 
 def test_service_worker_shell_includes_factory_module():
     sw = read_static("sw.js")
-    assert '"/static/app-factory.js"' in sw
+    for name in ("app-factory.js", "app-factory-scene.js",
+                 "app-factory-drawer.js", "app-factory-draw.js"):
+        assert f'"/static/{name}"' in sw, f"sw.js 壳清单缺少 {name}"
     m = re.search(r'SW_VERSION = "skysheep-shell-v(\d+)"', sw)
-    assert m and int(m.group(1)) >= 37, "新增前端文件必须递增 SW_VERSION"
+    assert m and int(m.group(1)) >= 74, "工厂月台布局更新必须递增 SW_VERSION"

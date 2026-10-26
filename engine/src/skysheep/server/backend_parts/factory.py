@@ -76,12 +76,30 @@ _ATTENTION_RANK = {
 _NON_ATTEMPT_STATUSES = ("running", "skipped", "cancelled")
 
 
+def factory_line_key(kind: str, line_id) -> str:
+    """产线键的唯一拼接入口：定时任务 ``cron:<id>``、编排 ``pipe:<id>``。"""
+    prefix = "pipe" if kind in ("pipeline", "pipeline_node") else "cron"
+    return f"{prefix}:{int(line_id)}"
+
+
+def parse_factory_line_key(line_key: str) -> tuple[str | None, int | None]:
+    """产线键的唯一解析入口；认不出（空前缀 / 未知类型 / 非数字 id）返回
+    ``(None, None)``，调用方按「无名称可补」继续，不抛错。"""
+    kind, sep, raw = str(line_key or "").partition(":")
+    if not sep or kind not in ("cron", "pipe"):
+        return None, None
+    try:
+        return ("pipeline" if kind == "pipe" else "cron"), int(raw)
+    except (TypeError, ValueError):
+        return None, None
+
+
 def factory_run_line_key(run: dict) -> str | None:
     """运行行归属的产线键（与 state 里的 line.key 同一口径）。"""
     if run.get("kind") == "cron":
-        return f"cron:{int(run['task_id'])}"
+        return factory_line_key("cron", run["task_id"])
     if run.get("pipeline_id") is not None:
-        return f"pipe:{int(run['pipeline_id'])}"
+        return factory_line_key("pipeline", run["pipeline_id"])
     return None
 
 
@@ -201,6 +219,8 @@ class FactoryMixin:
             "history_keep": int(getattr(sec, "history_keep", 2000)),
             "history_days": int(getattr(sec, "history_days", 30)),
             "max_packages": int(getattr(sec, "max_packages", 60)),
+            "machine_limit": int(getattr(sec, "machine_limit", 6)),
+            "label_limit": int(getattr(sec, "label_limit", 40)),
             "run_timeout_minutes": int(getattr(sec, "run_timeout_minutes", 60)),
             "max_parallel_runs": int(getattr(sec, "max_parallel_runs", 3)),
             "alert_after_failures": int(getattr(sec, "alert_after_failures", 3)),
@@ -332,16 +352,11 @@ class FactoryMixin:
                 except (TypeError, ValueError):
                     pname = ""
             lname = ""
-            if line_key.startswith("cron:"):
-                try:
-                    lname = task_names.get(int(line_key.split(":", 1)[1]), "")
-                except (TypeError, ValueError):
-                    lname = ""
-            elif line_key.startswith("pipe:"):
-                try:
-                    lname = pipe_names.get(int(line_key.split(":", 1)[1]), "")
-                except (TypeError, ValueError):
-                    lname = ""
+            line_kind, line_id = parse_factory_line_key(line_key)
+            if line_kind == "cron":
+                lname = task_names.get(line_id, "")
+            elif line_kind == "pipeline":
+                lname = pipe_names.get(line_id, "")
             prefix = " · ".join(part for part in (pname, lname) if part)
             shown = f"{prefix}：{text}" if prefix else text
             attention_rank[line_key] = rank
@@ -379,7 +394,7 @@ class FactoryMixin:
         for task in tasks:
             tid = int(task["id"])
             pid = task.get("project_id")
-            key = f"cron:{tid}"
+            key = factory_line_key("cron", tid)
             if pid is None or int(pid) not in project_ids:
                 # 项目行没了（历史遗留 / 手工改库）：不建厂区，只挂需留意
                 if pid is not None and int(pid) in sentinel_ids:
@@ -422,7 +437,7 @@ class FactoryMixin:
         # ---- 编排：一条多工位装配线 ----
         for pipe in pipelines:
             pid = pipe.get("project_id")
-            key = f"pipe:{int(pipe['id'])}"
+            key = factory_line_key("pipeline", pipe["id"])
             if pid is None or int(pid) not in project_ids:
                 if pid is not None and int(pid) in sentinel_ids:
                     continue
@@ -532,7 +547,7 @@ class FactoryMixin:
         over = waiting[free_slots:free_slots + FACTORY_WAITING_LIMIT] if waiting else []
         waiting_view = [
             {
-                "key": f"cron:{int(t['id'])}",
+                "key": factory_line_key("cron", t["id"]),
                 "name": str(t.get("name") or ""),
                 "project_id": int(t["project_id"]) if t.get("project_id") is not None else None,
                 "due_at": float(t.get("next_run_at") or 0),
@@ -881,6 +896,8 @@ class FactoryMixin:
                 history_keep=_opt_int("history_keep"),
                 history_days=_opt_int("history_days"),
                 max_packages=_opt_int("max_packages"),
+                machine_limit=_opt_int("machine_limit"),
+                label_limit=_opt_int("label_limit"),
                 run_timeout_minutes=_opt_int("run_timeout_minutes"),
                 max_parallel_runs=_opt_int("max_parallel_runs"),
                 alert_after_failures=_opt_int("alert_after_failures"),

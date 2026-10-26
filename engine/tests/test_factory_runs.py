@@ -249,6 +249,9 @@ async def test_run_cron_task_core_writes_done_empty_and_error_rows(store, tmp_pa
     async def empty_execute(_task):
         return _runtime(""), "sid-empty", False
 
+    # 上一轮收尾把 next_run_at 重排到了未来：SEC-M17 起，非 force 触发要先
+    # 到点才能通过库级认领（读到占位/未来值按「未到点」放弃），这里重新到点
+    await store.update_cron_task(task["id"], next_run_at=time.time() - 1)
     await run_cron_task_core(
         store, task["id"], execute=empty_execute, emit_run=events.append)
     rows = await store.list_automation_runs()
@@ -258,6 +261,7 @@ async def test_run_cron_task_core_writes_done_empty_and_error_rows(store, tmp_pa
     async def bad_execute(_task):
         raise RuntimeError("系统提示词炸了")
 
+    await store.update_cron_task(task["id"], next_run_at=time.time() - 1)
     await run_cron_task_core(
         store, task["id"], execute=bad_execute, emit_run=events.append)
     rows = await store.list_automation_runs()

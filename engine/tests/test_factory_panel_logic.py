@@ -31,14 +31,16 @@ NODE_BIN = shutil.which("node") or find_node()
 
 _EXPORTED = (
     "filterProjects",
-    "batchRunTargets",
-    "batchPauseTargets",
     "matchFilterMode",
     "filterActive",
     "fmtTokens",
     "progressText",
-    "BATCH_RUN_LIMIT",
     "S",
+    "daylightFactor",
+    "statFor",
+    "PALLET_SIZE",
+    "PALLET_MAX",
+    "REWORK_MAX",
 )
 
 _DRIVER_JS = r'''
@@ -106,12 +108,12 @@ _DRIVER_JS = r'''
         { key: "cron:91", kind: "cron", id: 91, name: "Daily Build", status: "idle" }] }],
       new Set(), { mode: "all", q: "  daily  " }));
 
-    // 9) 批量派工 / 暂停的目标筛选
-    var content = projects[0].lines;
-    report.cases.batchRun = ids(fx.batchRunTargets(content));
-    report.cases.batchPause = ids(fx.batchPauseTargets(content));
-    report.cases.batchRunStopped = ids(fx.batchRunTargets(projects[1].lines));
-    report.cases.batchLimit = fx.BATCH_RUN_LIMIT;
+    // 9) 场景「痕迹」口径：一只托盘几箱、最多几只、返工堆封顶几箱；
+    //    statFor 是成品垛 / 返工堆的唯一取数口（缺数据时返回全零，不能是 undefined）
+    report.cases.pallet = [fx.PALLET_SIZE, fx.PALLET_MAX, fx.REWORK_MAX];
+    fx.S.stats = { 5: { done: 13, rework: 4, busy: 1, lines: 3 } };
+    report.cases.stat = fx.statFor(5);
+    report.cases.statMissing = fx.statFor(999);
 
     // 10) filterActive：默认不活跃，任一条件即活跃
     report.cases.filterActive = [
@@ -128,6 +130,14 @@ _DRIVER_JS = r'''
       fx.progressText({ tool: "", steps: 3, at: Date.now() / 1000 }),
       fx.progressText({ tool: "shell", steps: 1, at: Date.now() / 1000 - 120 }),
     ];
+
+    // 12) 昼光系数：默认本机 06:00 / 18:00 为中心、各 ±40 分钟过渡带
+    var D = function (h, m) {
+      return Math.round(fx.daylightFactor(new Date(2026, 9, 25, h, m)) * 1000) / 1000;
+    };
+    report.cases.daylight = [
+      D(5, 19), D(5, 20), D(6, 0), D(6, 40), D(12, 0), D(17, 20), D(18, 0), D(18, 40), D(23, 0),
+    ];
   } catch (e) {
     report.fatal = String((e && e.stack) || e);
   }
@@ -138,16 +148,17 @@ _DRIVER_JS = r'''
 
 
 def _build_probe_source() -> str:
-    js = (STATIC_DIR / "app-factory.js").read_text(encoding="utf-8")
-    exports = ", ".join(f"{name}: {name}" for name in _EXPORTED)
-    inject = f"  window.__panelTest = {{ {exports} }};\n"
-    idx = js.rindex("})();")
-    instrumented = js[:idx] + inject + js[idx:]
+    """按加载顺序拼接工厂四个分区文件（共享 window.FX），探针从 FX 取内部 API。"""
+    js = "\n".join((STATIC_DIR / n).read_text(encoding="utf-8") for n in (
+        "app-factory.js", "app-factory-scene.js",
+        "app-factory-drawer.js", "app-factory-draw.js"))
+    exports = ", ".join(f"{name}: window.FX.{name}" for name in _EXPORTED)
+    tail = f"\nwindow.__panelTest = {{ {exports} }};\n"
     shim = (
         "var window = {};\n"
         "var document = { getElementById: function () { return null; } };\n"
     )
-    return shim + instrumented + "\n" + _DRIVER_JS
+    return shim + js + tail + "\n" + _DRIVER_JS
 
 
 @pytest.fixture(scope="module")
@@ -175,7 +186,8 @@ def panel_report(tmp_path_factory) -> dict:
 
 
 def test_filter_all_keeps_empty_yards_for_new_line_entry(panel_report):
-    """「全部」下空厂区仍要露出——否则「＋ 新建一条定时产线」的入口会跟着消失。"""
+    """「全部」下空厂区仍要露出——目录里得能看见「这个项目还没产线」，
+    否则用户会以为工厂漏掉了它（建线本身在自动化页，不在工厂里）。"""
     assert panel_report["all"] == [
         {"project": "内容厂", "lines": ["cron:11", "cron:12", "cron:13", "pipe:1"]},
         {"project": "工具厂", "lines": ["cron:21", "cron:22"]},
@@ -208,15 +220,17 @@ def test_filter_query_matches_line_or_whole_project(panel_report):
         {"project": "DataPlatform", "lines": ["cron:91"]},
     ]
 
+def test_daylight_factor_transition_band(panel_report):
+    """昼光系数：日出日落各 ±40 分钟过渡带，带内线性、带外取整；正午恒昼。"""
+    assert panel_report["daylight"] == [0, 0, 0.5, 1, 1, 1, 0.5, 0, 0]
 
-def test_batch_targets_exclude_running_paused_stopped_and_pipelines(panel_report):
-    # 内容厂：晨间简报在跑、素材归档暂停、装配线不参与 → 只剩竞品巡检
-    assert panel_report["batchRun"] == ["cron:12"]
-    # 暂停目标：在跑与待命的都能停，已暂停的跳过，装配线不碰
-    assert panel_report["batchPause"] == ["cron:11", "cron:12"]
-    # 工具厂：依赖体检可派；夜班（停工）不派
-    assert panel_report["batchRunStopped"] == ["cron:21"]
-    assert panel_report["batchLimit"] == 5, "批量派工单次上限"
+
+def test_scene_trace_limits_and_stat_lookup(panel_report):
+    """成品垛 / 返工堆的口径：一只托盘 6 箱、最多 2 只、返工堆 6 箱封顶。"""
+    assert panel_report["pallet"] == [6, 2, 6]
+    assert panel_report["stat"] == {"done": 13, "rework": 4, "busy": 1, "lines": 3}
+    # 取不到厂区时返回全零而不是 undefined：绘制层直接读 .done / .rework
+    assert panel_report["statMissing"] == {"done": 0, "rework": 0, "busy": 0, "lines": 0}
 
 
 def test_filter_active_flag_and_formatting(panel_report):

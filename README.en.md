@@ -4,7 +4,7 @@
 
 [![SkySheep](docs/images/banner.png)](https://sheepsky.com/)
 
-**A local AI workbench built around multi-model collaboration — roundtable / team / adversarial modes for files, commands, and your computer.**
+**A local AI workbench for multi-model collaboration — turn one model's work into a coordinated, controllable team.**
 
 [![CI](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml/badge.svg)](https://github.com/Sky-scrape/SkySheep/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows--first-blue)
@@ -17,13 +17,16 @@
 
 </div>
 
-SkySheep is an open-source AI Agent workbench that runs entirely on your machine: a Python asyncio engine, a pywebview desktop shell, and a zero-build frontend, MIT-licensed. Hand it a task and it reads and writes files, edits code, runs commands, searches the web, operates your computer, and carries multi-step work through on its own.
+SkySheep is an open-source AI Agent workbench that runs on your own computer: a Python asyncio engine, a pywebview desktop shell, and a zero-build frontend, MIT-licensed. It reads and writes files, edits code, runs commands, searches the web, handles documents, operates your computer, and keeps multi-step work moving through sub-agents, scheduled tasks, and pipelines.
 
-Its difference from a single-model agent cuts both ways — and these are the two problems the project set out to solve.
+Its defining idea is not "another chat window". It makes **multi-model collaboration** a native workflow inside one task:
 
-**The first is who does the work**: for decisions you'd rather not trust to one model, the composer switches the same turn to a roundtable (members answer in parallel, the chairman fuses the drafts into one answer), a team (work split by role, tracked on a task board), or adversarial review (a pipeline built to find fault). A separate relay workbench alternates full turns between a main and a peer session.
+- **Roundtable**: several models answer in parallel, then a chairman model fuses the drafts into one response;
+- **Team**: split work by role and use a channel plus task board to dispatch, report, accept, and deliver;
+- **Adversarial**: assign discovery, investigation, recommendation, and judgment to roles built to find blind spots;
+- **Relay**: alternate turns between a main and peer session to connect proposal, execution, feedback, and revision.
 
-**The second is what holds when you let go**: file writes and command execution pop up a confirmation card by default (file writes come with a diff preview), every round of file changes is snapshotted for one-click rollback, and sessions, configuration, and API keys never leave your machine.
+You still stay in charge of sensitive actions: file writes and command execution ask for confirmation by default, writes include a diff preview, and file changes are snapshotted per round for rollback. SkySheep has no cloud service of its own; sessions, configuration, and keys stay on your machine. When you enable a hosted model, conversation content is sent to the provider you selected, according to your configuration.
 
 <div align="center">
 
@@ -33,9 +36,9 @@ Its difference from a single-model agent cuts both ways — and these are the tw
 
 </div>
 
-## 🎯 What it can do for you
+## 🎯 What it is good for
 
-Instead of a feature checklist, here are the jobs it actually takes on:
+SkySheep is built for work that needs an agent to actually touch things while keeping the process visible and controllable:
 
 **Tame files and documents** — "Sort half a year of downloads into folders by type", "pull key figures from dozens of PDFs into one Excel sheet". File read/write with precise editing and PDF / Word / Excel / PPT / CSV parsing are built-in tools — describe the job instead of writing a script first; moves and deletes go through reversible dedicated operations, so a mistake can be undone.
 
@@ -49,7 +52,7 @@ Instead of a feature checklist, here are the jobs it actually takes on:
 
 ## 📦 Capability overview
 
-- **Collaboration**: roundtable (parallel answers + chairman fusion) · team (roles + task board + AI director) · adversarial (four-role fault-finding pipeline) · relay (main and peer screens alternating)
+- **Multi-model collaboration**: roundtable (parallel answers + chairman fusion) · team (roles + task board + AI director) · adversarial (four-role fault-finding pipeline) · relay (main and peer screens alternating)
 - **Execution**: file read/write and precise editing · command execution (with background processes) · regex and glob search · web fetch and search · PDF / Word / Excel / PPT / CSV I/O · image understanding and AI image generation · sub-agents (optionally in an isolated worktree)
 - **Automation**: scheduled tasks · dependency pipelines (DAG) · factory board (cross-project observability / dispatch · day-night and real weather) · agenda reminders · export to the Windows Task Scheduler · Feishu / WeChat / Webhook pushes · daily run digests
 - **Extensions**: MCP (two transports, seven presets) · Skills (twenty official templates) · Mods (experimental) · global egress (proxy / bypass list / self-signed CA)
@@ -146,7 +149,7 @@ Safety is the default behavior — no setup required:
 - **Confirm every step**: read-only actions run through automatically; file writes (with a diff preview) and command execution prompt for confirmation one by one. Three permission modes — Safe execution / Auto-edit (auto-approves writes inside the working directory only) / Full access; relaxed modes can only be switched from the local UI
 - **Command whitelist**: matches by full word prefix; commands carrying shell chaining or interpreter flags never match a rule and always re-confirm; rules persist per project, managed in settings
 - **Everything is rollback-able**: file changes are snapshotted per round — undo this round's changes with one click, even after a restart; checkpoints keep 50 rounds per session, 500 per project
-- **Data stays local**: sessions, config, and keys never leave your machine, zero telemetry; web fetch is restricted to public http(s) with SSRF protection; external web / document content is treated as data, never as instructions
+- **Local-first**: SkySheep has no cloud service of its own; sessions, config, and keys stay on your machine, with zero telemetry. When you enable a hosted model, conversation content is sent to the provider you selected; web fetch is restricted to public http(s) with SSRF protection; external web / document content is treated as data, never as instructions
 - **Recovery is built in**: the session database keeps rolling backups (20 copies) with visual restore; the run center shows the state of every turn and background subagent, and failed or restart-interrupted runs can be re-sent / re-run with one click (only genuinely unfinished runs qualify — completed ones are never replayed, so write tasks can't double-fire); a project's bundled MCP / skill configs require explicit trust first; exported diagnostic bundles redact keys automatically
 
 <details>
@@ -315,7 +318,7 @@ Security vulnerabilities go through the private channel in [SECURITY.md](SECURIT
 
 ## 🗺 Roadmap & Non-goals
 
-- ✅ current release **v2.6.1**: engine core → MCP / Skills ecosystem → desktop app → roundtable multi-model & task pipelines → memory map → review-hardening passes and structural refactors → session split view & adversarial review → runtime reliability & data lifecycle hardening → touch swipe-navigation taming & security-review remediation → global egress settings and collaboration workbench (full history in [CHANGELOG.md](CHANGELOG.md))
+- ✅ current release **v2.6.1**: the multi-model collaboration workbench now covers roundtable / team / adversarial / relay, task pipelines, the visual factory board, global egress settings, and the MCP / Skills / Mods extension ecosystem (full history in [CHANGELOG.md](CHANGELOG.md))
 - 🚧 **Next up**: code-signed distribution · Windows desktop polish and stability (until then, see [docs/smartscreen-说明.md](docs/smartscreen-说明.md) for the SmartScreen workaround for unsigned installers)
 
 **Non-goals**:

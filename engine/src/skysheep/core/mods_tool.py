@@ -45,7 +45,7 @@ class ModTool(Tool):
     safety = Safety.DANGEROUS  # 第三方代码，一律要确认（见模块注释）
     read_only_hint = False
     destructive_hint = True
-    open_idempotent_hint = False
+    idempotent_hint = False
 
     def __init__(self, *, mod_id: str, name: str, description: str,
                  schema: dict, loaded_mod: object) -> None:
@@ -61,11 +61,9 @@ class ModTool(Tool):
         params = self._raw_schema if isinstance(self._raw_schema, dict) and self._raw_schema else (
             {"type": "object", "properties": {}}
         )
-        return {
-            "name": self.name,
-            "description": self.description,
-            "input_schema": params,
-        }
+        schema = super().to_schema()
+        schema["input_schema"] = params
+        return schema
 
     async def run(self, args: BaseModel, ctx: ToolContext) -> str:
         payload = args.model_dump() if hasattr(args, "model_dump") else dict(args)

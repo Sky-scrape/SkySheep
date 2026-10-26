@@ -318,7 +318,7 @@ Security vulnerabilities go through the private channel in [SECURITY.md](SECURIT
 
 ## 🗺 Roadmap & Non-goals
 
-- ✅ current release **v2.6.1**: the multi-model collaboration workbench now covers roundtable / team / adversarial / relay, task pipelines, the visual factory board, global egress settings, and the MCP / Skills / Mods extension ecosystem (full history in [CHANGELOG.md](CHANGELOG.md))
+- ✅ current release **v2.6.2**: the multi-model collaboration workbench now covers roundtable / team / adversarial / relay, task pipelines, the visual factory board, global egress settings, and the MCP / Skills / Mods extension ecosystem (full history in [CHANGELOG.md](CHANGELOG.md))
 - 🚧 **Next up**: code-signed distribution · Windows desktop polish and stability (until then, see [docs/smartscreen-说明.md](docs/smartscreen-说明.md) for the SmartScreen workaround for unsigned installers)
 
 **Non-goals**:

@@ -750,3 +750,14 @@ def test_static_lists_stay_aligned_with_index_html():
     assert not missing_shell, (
         "index.html 加载的脚本缺 SHELL_URLS 预缓存登记（PWA 壳缺角）：\n  "
         + "\n  ".join(missing_shell))
+
+
+def test_frontend_modules_keep_required_load_order():
+    scripts = [url.rsplit("/", 1)[-1] for url in _index_html_script_urls()]
+    positions = {name: scripts.index(name) for name in (
+        "app-skills.js", "app.js", "app-factory.js", "app-tools.js",
+    )}
+
+    assert positions["app-skills.js"] < positions["app.js"]
+    assert positions["app.js"] < positions["app-factory.js"]
+    assert positions["app.js"] < positions["app-tools.js"]

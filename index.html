@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>SkySheep —— 多模型协作的本地 AI 工作台</title>
-<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。圆桌、团队、对抗三种多模型协作模式，读写文件、执行命令、操作电脑；敏感操作默认逐次确认，改动按轮快照可回滚，数据留在本机。">
+<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。圆桌、团队、对抗多模型协作，接力工作台与 Mods 扩展；最新源码新增可视化工厂看板、归档管理和浏览器控制设置。">
 <meta name="theme-color" content="#e8dfc7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#171410" media="(prefers-color-scheme: dark)">
 <meta property="og:title" content="SkySheep —— 多模型协作的本地 AI 工作台">
-<meta property="og:description" content="圆桌、团队、对抗三种多模型协作模式，跑在你自己的电脑上。敏感操作默认确认，改动可回滚，数据不出本机。">
+<meta property="og:description" content="多个模型一起讨论、分工、审查，跑在你自己的电脑上。了解 v2.6.1 与最新源码中的工厂看板、归档管理和浏览器设置。">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://sheepsky.com/">
 <meta property="og:image" content="https://sheepsky.com/docs/images/social-preview.png">
@@ -937,6 +937,33 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   .rise { opacity: 1; transform: none; }
 }
 
+
+/* 最新进展沿用桌面纸墨配色，以真实厂区大图作为视觉重点。 */
+.release-note { margin-top: 18px; color: var(--dim); font-size: 12.5px; }
+.latest { background: var(--card); }
+.latest .section-head { margin-bottom: 32px; }
+.update-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
+.update-card { padding: 26px; border: 1px solid var(--line2); border-top: 3px solid var(--blue); border-radius: var(--r-md); background: var(--raised); }
+.update-card h3 { font-size: 19px; margin: 13px 0 10px; line-height: 1.5; }
+.update-card p { color: var(--text2); font-size: 14.5px; }
+.status { display: inline-block; padding: 3px 9px; font: 700 11px/1.6 var(--font-mono); border: 1px solid var(--line2); border-radius: var(--r-xs); color: var(--gold); background: var(--sunken); }
+.status.shipped { color: var(--down); }
+.update-footer { margin-top: 24px; color: var(--dim); font-size: 13px; }
+.factory-head { display: grid; grid-template-columns: 1.2fr 1fr; align-items: end; gap: 44px; margin-bottom: 30px; }
+.factory-head .section-head { margin: 0; }
+.factory-head > p { color: var(--text2); font-size: 15px; }
+.factory-shot figcaption { margin-top: 14px; font-size: 13px; color: var(--dim); }
+.factory-points { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 32px; }
+.factory-points article { border-left: 3px solid var(--blue); padding-left: 18px; }
+.factory-points h3 { font-size: 17px; margin-bottom: 8px; }
+.factory-points p { color: var(--text2); font-size: 14px; }
+.factory-link { margin-top: 28px; display: inline-block; font-weight: 700; }
+@media (max-width: 1080px) { .nav { gap: 18px; } }
+@media (max-width: 820px) {
+  .update-grid, .factory-head { grid-template-columns: 1fr; gap: 20px; }
+  .factory-points { grid-template-columns: 1fr; gap: 24px; }
+}
+
 @media print {
   .masthead, .cta, .hero-sheep { display: none; }
   body { background: #fff; color: #000; }
@@ -957,10 +984,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
       </span>
     </a>
     <nav class="nav" aria-label="主导航">
+      <a href="#latest">近期更新</a>
+      <a href="#factory">工厂</a>
       <a href="#scenes">能干什么</a>
       <a href="#collab">多模型</a>
       <a href="#safety">安全</a>
-      <a href="#shots">界面</a>
       <a href="#start">上手</a>
       <a href="#faq">常见问题</a>
       <a href="https://github.com/sky-scrape/SkySheep" target="_blank" rel="noopener">GitHub</a>
@@ -987,7 +1015,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="dot"></span>Windows 桌面应用 · 开源 MIT · v2.5.1</p>
+        <p class="eyebrow"><span class="dot"></span>Windows 桌面应用 · 开源 MIT · v2.6.1</p>
         <h1>它替你动手，<br><span class="mark"><span>多个模型一起想</span></span></h1>
         <p class="hero-lede">
           跑在本机的开源 AI Agent 工作台。给它一个任务，它会自己读写文件、执行命令、
@@ -995,8 +1023,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           圆桌并行作答后融合，团队按角色分工，对抗专门挑错。
         </p>
         <p class="hero-lede">
-          会话、配置、密钥全部留在你自己的电脑上；写文件与跑命令默认逐次弹卡确认，
-          每轮文件改动自动快照、随时撤销。
+          从讨论到执行，再到定时自动化，把任务留在同一个工作台。最新源码还把自动化变成了一座<strong>看得见运转的工厂</strong>。
         </p>
         <div class="hero-actions">
           <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">
@@ -1005,7 +1032,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
               <path d="M12 3v13M6.5 11l5.5 5.5L17.5 11M4 20.5h16"/>
             </svg>
           </a>
-          <a class="btn btn-ghost btn-lg" href="#collab">先看多模型怎么协作</a>
+          <a class="btn btn-ghost btn-lg" href="#latest">看看最近更新了什么</a>
         </div>
         <p class="hero-note">
           <span>
@@ -1014,13 +1041,14 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           </span>
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
-            无遥测，数据不出本机
+            无遥测 · 会话本地存储
           </span>
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
             首次运行需放行 SmartScreen
           </span>
         </p>
+        <p class="release-note">安装包：v2.6.1 · 工厂等新功能见下方源码进展</p>
       </div>
 
       <div class="hero-visual">
@@ -1040,10 +1068,63 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   <!-- ============ 事实条 ============ -->
   <section class="facts" aria-label="项目概况">
     <div class="wrap facts-grid">
-      <div class="fact"><b>24</b><span>内置工具：文件、命令、检索、文档、图像</span></div>
-      <div class="fact"><b>10+</b><span>模型服务预设，也可接本地推理服务</span></div>
+      <div class="fact"><b>动手</b><span>文件、命令、检索、文档与电脑操作</span></div>
+      <div class="fact"><b>接入</b><span>多家模型服务预设，兼容本地推理服务</span></div>
       <div class="fact"><b>3</b><span>种多模型协作模式：圆桌 / 团队 / 对抗</span></div>
       <div class="fact"><b>20</b><span>个官方场景技能包，开箱即装</span></div>
+    </div>
+  </section>
+
+  <section class="section latest" id="latest">
+    <div class="wrap">
+      <div class="section-head rise">
+        <span class="section-label">最近更新 · 2026.10.26</span>
+        <h2>协作之后，让工作持续运转</h2>
+        <p>v2.6.1 带来接力、扩展与网络设置；最近的开发重点，是让自动化运行更直观，让日常管理更顺手。</p>
+      </div>
+      <div class="update-grid">
+        <article class="update-card rise">
+          <span class="status">最新源码 · 未发布</span>
+          <h3>自动化有了自己的工厂</h3>
+          <p>项目变厂区，任务变产线，每次运行变成传送带上的包裹。查看结果、手动派工、回放今天，在同一张场景里完成。</p>
+        </article>
+        <article class="update-card rise">
+          <span class="status">最新源码 · 未发布</span>
+          <h3>会话与浏览器，集中管理</h3>
+          <p>归档按项目分组，支持搜索、恢复与自动归档旧会话。浏览器控制独立成页，启用开关、证书选项和数据清理都能直接设置。</p>
+        </article>
+        <article class="update-card rise">
+          <span class="status shipped">v2.6.1 · 已发布</span>
+          <h3>把协作接到下一步</h3>
+          <p>接力独立工作台、对抗发现转团队顾问工单。Mods 实验性兼容 Claude Code 插件格式，代理、绕行名单与自签 CA 统一设置。</p>
+        </article>
+      </div>
+      <p class="update-footer">源码进展尚未全部进入下载包。<a href="https://github.com/sky-scrape/SkySheep/blob/main/CHANGELOG.md" target="_blank" rel="noopener">查看完整更新日志 ↗</a></p>
+    </div>
+  </section>
+
+  <section class="section" id="factory">
+    <div class="wrap">
+      <div class="factory-head rise">
+        <div class="section-head">
+          <span class="section-label">工厂看板 · 最新源码预览</span>
+          <h2>任务在跑，<br>工厂也在运转</h2>
+        </div>
+        <p>每个项目一座厂区，每条自动化一条产线。机台亮灯、包裹前进、成品装车，把分散的定时任务与编排，放进一张看得见进度的地图。</p>
+      </div>
+      <figure class="factory-shot rise">
+        <div class="window">
+          <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">工厂看板 · 多项目自动化场景</span><span class="window-spacer" aria-hidden="true"></span></div>
+          <img src="docs/images/factory.webp" alt="工厂看板实景：左侧按项目列出产线，等距厂区中的机台与传送带展示自动化运行" width="1600" height="1000" loading="lazy" decoding="async">
+        </div>
+        <figcaption>源码界面预览。工厂看板目前仅在本机使用；没有真实产线时，可先看明确标注的样板厂演示。</figcaption>
+      </figure>
+      <div class="factory-points">
+        <article class="rise"><h3>结果有迹可查</h3><p>成功进成品区，失败进返工区。每次运行留下耗时与结果摘要；遇到权限拦截，会标明「有拦截」，方便判断任务是否真的做成。</p></article>
+        <article class="rise"><h3>运行有边界</h3><p>并发满额自动排队，单次运行有超时上限，连续失败会聚合提醒。需要时在本机手动派工或查看运行记录。</p></article>
+        <article class="rise"><h3>回看工厂的一天</h3><p>按「回放」重演今天的运行。场景随时间切换昼夜；自选天气城市后，可跟着当地天气呈现雨、雪与雾。</p></article>
+      </div>
+      <a class="factory-link" href="#start">从源码体验工厂看板 ↓</a>
     </div>
   </section>
 
@@ -1052,48 +1133,48 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="wrap">
       <div class="section-head rise">
         <span class="section-label">Capabilities</span>
-        <h2>不按功能清单介绍，先说它具体能接哪些活</h2>
+        <h2>把日常任务交给工作台</h2>
         <p>下面每一类都是把要求说清楚就能开工的日常任务，不需要你先写脚本。</p>
       </div>
 
       <div class="scenes">
         <article class="scene rise">
-          <p class="scene-no">01 / 文件与文档</p>
+          <p class="scene-no">文件与文档</p>
           <h3>整理堆积如山的文件</h3>
           <p>文件读写与精确编辑、PDF / Word / Excel / PPT / CSV 解析都是内置工具。移动与删除走可回滚的专用操作，误删也能撤。</p>
           <p class="scene-quote">把下载文件夹堆了半年的文件，按类型归档重命名</p>
         </article>
 
         <article class="scene rise">
-          <p class="scene-no">02 / 现有项目</p>
+          <p class="scene-no">现有项目</p>
           <h3>在代码库里干活</h3>
           <p>读代码、定位问题、改文件、跑测试，一轮做完不满意就撤销本轮改动。适合改配置、批量重构、写小工具这类验收标准明确的任务。</p>
           <p class="scene-quote">这个报错复现一下，找到根因改掉，再补一条防回归的测试</p>
         </article>
 
         <article class="scene rise">
-          <p class="scene-no">03 / 定时自动化</p>
+          <p class="scene-no">定时自动化</p>
           <h3>把重复劳动变成定时任务</h3>
-          <p>定时任务与依赖编排负责到点执行和产出传递；「工厂看板」把全部项目的产线摆成一张等距厂区图：每次运行是一个沿传送带走动的包裹，今天做成几件就在场院上码几只成品托盘、装满一车就有一辆货车开出厂，没做成的往返工堆里堆一个红箱。机台在跑时灯亮、冒气、料口走动，卡住打转、快超时冒烟；厂区开工抬闸、停工落闸。想看它的一天，按「回放」就把今天跑过的每一轮重演一遍。场景按本机时间切换昼夜，填一个城市后还能跟着当地天气下雨下雪。导出为 Windows 计划任务后，应用没开着也能到点跑。</p>
+          <p>定时任务到点执行，依赖编排串起多步流程。可导出为 Windows 系统计划任务，让应用关闭后也能执行。最新源码新增工厂看板，集中查看各项目的自动化运行。</p>
           <p class="scene-quote">每天早上八点抓这几个网站的新内容，汇总后推到飞书群</p>
         </article>
 
         <article class="scene rise">
-          <p class="scene-no">04 / 多模型会诊</p>
+          <p class="scene-no">多模型会诊</p>
           <h3>重要的事不只问一个模型</h3>
           <p>圆桌让多个模型各自作答、主席融合成一份答案；团队按角色分工、工单板跟进度；对抗模式组织专门挑错的审查流水线。</p>
           <p class="scene-quote">这个方案让几个模型各自挑一遍毛病，再给我结论</p>
         </article>
 
         <article class="scene rise">
-          <p class="scene-no">05 / 电脑控制</p>
+          <p class="scene-no">电脑控制</p>
           <h3>替你操作界面</h3>
           <p>截屏、鼠标、键盘、窗口、剪贴板五类动作，默认关闭，需要时在设置里按需开启。适合「在几个软件里各点一遍导出」这类重复操作。</p>
           <p class="scene-quote">在这三个软件里各导出一次报表，存到同一个文件夹</p>
         </article>
 
         <article class="scene rise">
-          <p class="scene-no">06 / 人不在电脑前</p>
+          <p class="scene-no">远程使用</p>
           <h3>远程也管得住</h3>
           <p>手机浏览器打开完整界面，确认卡照常逐条弹；飞书 / 微信里发消息派活，收日报与终态通知。</p>
           <p class="scene-quote">出门前派个活，路上用手机把确认卡点完</p>
@@ -1199,7 +1280,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
               <div class="lane"><span class="lane-name">裁判</span><span class="lane-track is-chain">裁定哪些成立</span></div>
             </div>
             <p class="flow-out">输出：成立的问题清单 + 对应修复建议</p>
-            <p class="flow-note">纯文本推理，不经过权限门；适合方案评审、代码审查、合同风险这类「宁可得罪人也要说」的场景。</p>
+            <p class="flow-note">审查结论可一键转为团队顾问工单，让发现的问题继续进入分工处理。</p>
           </div>
         </div>
       </div>
@@ -1242,7 +1323,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
             <li>
               <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
               <div>
-                <b>数据不出本机</b>
+                <b>会话本地存储，无遥测</b>
                 <p>会话、配置、密钥存于本机，无遥测。网页抓取仅允许公网 http(s)、具备 SSRF 防护；外部网页内容按数据处理，不当作指令执行。</p>
               </div>
             </li>
@@ -1359,7 +1440,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 
       <div class="start-grid">
         <div class="start-card is-primary rise">
-          <h3>装好就用</h3>
+          <h3>安装发布版 · v2.6.1</h3>
           <p>下载安装包双击安装，Windows 10 / 11 x64。首次启动由三步向导完成接入：选服务 → 填 Key → 开始，也会自动检测本机的本地推理服务。</p>
           <a class="btn btn-primary" href="https://github.com/sky-scrape/SkySheep/releases/latest">到 Releases 下载</a>
           <p class="start-meta">
@@ -1370,8 +1451,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         </div>
 
         <div class="start-card rise">
-          <h3>从源码跑</h3>
-          <p>源码运行以 Windows 为支持平台。macOS / Linux 上引擎与网页界面可用，但不承诺桌面壳与系统集成能力。</p>
+          <h3>体验最新源码</h3>
+          <p>工厂看板、归档管理和独立浏览器控制设置已进入源码，尚未随安装包发布。源码运行以 Windows 为支持平台。</p>
           <div class="terminal" role="img" aria-label="源码运行命令：克隆仓库后进入 engine 目录，依次执行 uv sync 与 uv run skysheep app">
             <span class="ln cmt"># 需要 Python 3.11+ 与 uv</span>
             <span class="ln cmd">cd SkySheep/engine</span>
@@ -1398,9 +1479,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 
       <div class="faq rise">
         <details>
-          <summary>「数据不出本机」和调用云端模型矛盾吗？<span class="marker" aria-hidden="true">+</span></summary>
+          <summary>本地存储，为什么还需要连接模型服务？<span class="marker" aria-hidden="true">+</span></summary>
           <div class="answer">
-            <p>不矛盾，但要说清楚界限：<strong>会话、配置、密钥、检查点、记忆都存在你自己的电脑上</strong>，SkySheep 本身没有遥测、不上传任何数据。</p>
+            <p>本地存储指的是：<strong>会话、配置、密钥、检查点、记忆都存在你自己的电脑上</strong>，SkySheep 不设遥测，也不把这些资料收集到自己的服务器。</p>
             <p>而当你配置的是云端模型服务时，发出去的那段对话内容自然会经过服务商——这是模型推理本身的要求，和「数据被应用收集」是两回事。要完全不出本机，可以接本机推理服务，SkySheep 会自动检测。</p>
           </div>
         </details>

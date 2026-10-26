@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
+from skysheep.core.mods_tool import ModTool
 from skysheep.core.subagent import CheckTaskTool, SpawnAgentTool, WaitTaskTool
 from skysheep.tools import ToolRegistry, default_tools
 from skysheep.tools.base import Tool
@@ -184,3 +185,29 @@ def test_base_defaults_are_conservative_for_remote_mcp_tools():
         "idempotentHint": False,
         "openWorldHint": True,
     }
+
+
+def test_mod_tool_exports_annotations_and_preserves_raw_schema():
+    raw_schema = {
+        "type": "object",
+        "properties": {"nested": {"type": "object", "properties": {"value": {"type": "string"}}}},
+    }
+    tool = ModTool(
+        mod_id="test-mod",
+        name="mod_tool",
+        description="Mod tool",
+        schema=raw_schema,
+        loaded_mod=object(),
+    )
+
+    exported = tool.to_schema()
+
+    assert set(exported) == {"name", "description", "input_schema", "annotations"}
+    assert exported["input_schema"] is raw_schema
+    assert exported["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+    assert all(isinstance(value, bool) for value in exported["annotations"].values())

@@ -12,8 +12,19 @@
 from __future__ import annotations
 
 import asyncio
+from typing import get_args
 
-from skysheep.server.backend import StreamDeltaMerger
+from skysheep.events import AgentEvent
+from skysheep.server.backend import _MERGEABLE_DELTA_KINDS, StreamDeltaMerger
+
+
+def test_mergeable_delta_kinds_are_declared_agent_events():
+    declared_kinds = {
+        event_type.model_fields["kind"].default
+        for event_type in get_args(AgentEvent)
+    }
+
+    assert set(_MERGEABLE_DELTA_KINDS) <= declared_kinds
 
 
 def collector():

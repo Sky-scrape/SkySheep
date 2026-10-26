@@ -39,7 +39,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
@@ -48,7 +47,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from ..events import (
     AgentEvent,
@@ -68,6 +67,16 @@ from .agent import Agent
 from .prompt import TEAM_DIRECTOR_PROMPT, TEAM_HUDDLE_PROMPT, TEAM_MEMBER_PROMPT
 from .report_prune import prune_report_files
 from .roundtable import MemberSpec, run_roundtable
+from .team_board import _DEFAULT_REDO_LIMIT, TeamBoard, TeamTask, _status_label
+from .team_store import (  # noqa: F401
+    TEAM_TEMPLATE_NAME_MAX,
+    TeamError,
+    TeamTemplate,
+    TeamTemplateDirector,
+    TeamTemplateMember,
+    TeamTemplateStore,
+    validate_team_template_name,
+)
 
 # 发给前端的事件回调（backend 负责转成 WS 帧广播；与 roundtable.EmitFn 同形）
 EmitFn = Callable[[AgentEvent], Awaitable[None]]
@@ -92,7 +101,6 @@ SNAPSHOT_MESSAGE_TEXT_CAP = 400
 _DEFAULT_MAX_MEMBERS = 3
 _DEFAULT_MEMBER_TIMEOUT_S = 300
 _DEFAULT_MAX_ROUNDS = 40
-_DEFAULT_REDO_LIMIT = 2
 # 成员连续多少轮发言没有任何新工具结果算停滞（设计 §9；cfg 可覆盖，下限 1）
 _DEFAULT_STALL_LIMIT = 2
 
@@ -121,147 +129,7 @@ _MEMBER_FORWARD_KINDS = frozenset({
 _RESERVED_MEMBER_NAMES = frozenset({"user", "director", "system", "all"})
 
 
-class TeamError(Exception):
-    """团队参数或状态非法（backend 原样回给 WS 调用方的错误文案）。"""
-
-
 logger = logging.getLogger(__name__)
-
-# ---- 团队模板（三期）：~/.skysheep/teams.json 的读写助手 ----
-# 与子代理定义（subagent_store.SubagentStore，~/.skysheep/subagents.json）同姿态：
-# 路径构造注入（backend 用 skysheep_home() / "teams.json" 装配）、坏文件容错、
-# textio 原子写；模块层不触碰真实 ~/.skysheep，单测传 tmp_path。
-# name 是唯一键，同名保存 = 覆盖（前端「另存为模板」对已有名直接更新）。
-
-TEAM_TEMPLATE_NAME_MAX = 60  # 模板名长度上限（与 skills 的限长校验同一精神）
-
-
-class TeamTemplateMember(BaseModel):
-    """模板里的队员行：(provider, model) + 成员名 + 一句话人设。
-
-    只存标识不存 Provider 实例——应用模板时宿主按 (provider, model) 走
-    既有的成员解析路径（缺 Key 等构建失败照常降级 provider=None 入册）。
-    """
-
-    provider: str = ""
-    model: str = ""
-    name: str = ""
-    persona: str = ""
-
-
-class TeamTemplateDirector(BaseModel):
-    """模板里的总管行；provider/model 均空 = 用户总管（director_mode=user 的常态）。"""
-
-    provider: str = ""
-    model: str = ""
-
-
-class TeamTemplate(BaseModel):
-    """团队模板（三期）：把一次建队配置存成可复用的具名条目。
-
-    name 是唯一键；members 有序（应用时按此顺序走 create_team 的同名补序、
-    保留字回退与 max_members 截断，模板本身不做成员数校验——上限由应用时
-    的既有路径兜住）。
-    """
-
-    name: str
-    director_mode: str = "user"  # user | ai
-    director: TeamTemplateDirector = Field(default_factory=TeamTemplateDirector)
-    members: list[TeamTemplateMember] = Field(default_factory=list)
-    created_at: float = 0.0  # 模板创建/覆盖时刻（epoch 秒；宿主保存时填）
-
-
-def validate_team_template_name(name: str) -> str:
-    """校验模板名，返回规范后的名字（去首尾空白）；不合法抛 TeamError。
-
-    仿 skills 的 _validate_skill_name 精神：非空、限长、不含路径分隔符与
-    冒号（Windows 盘符 / NTFS 数据流分隔符）、不是 `.`/`..` 一类目录引用。
-    模板虽住在单个 JSON 文件里不落目录，但名字直接当唯一键与文件语境的
-    展示名，形状上挡住一切能被误读成路径的输入。
-    """
-    raw = (name or "").strip()
-    if not raw:
-        raise TeamError("团队模板名不能为空")
-    if len(raw) > TEAM_TEMPLATE_NAME_MAX:
-        raise TeamError(
-            f"团队模板名过长（最多 {TEAM_TEMPLATE_NAME_MAX} 字符）：{raw[:80]}…"
-        )
-    if "/" in raw or "\\" in raw:
-        raise TeamError(f"团队模板名不能包含路径分隔符（/ 或 \\）：{raw}")
-    if ":" in raw:
-        raise TeamError(f"团队模板名不能包含冒号（盘符/数据流）：{raw}")
-    if raw.strip(". ") == "":
-        # `.`、`..`、纯点纯空格：目录引用或无意义名
-        raise TeamError(f"团队模板名不能是目录引用：{raw}")
-    return raw
-
-
-class TeamTemplateStore:
-    """~/.skysheep/teams.json 的读写与内存态（三期：建队模板）。
-
-    文件结构 {"templates": [TeamTemplate…]}；坏文件（不存在/非 JSON/条目
-    形状不对）不致命：回空列表或跳过坏条目，下次保存整体覆盖（沿
-    subagent_store 的容错姿态）。
-    """
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.templates: list[TeamTemplate] = []
-
-    # ---- 读写 ----
-
-    def load(self) -> None:
-        self.templates = []
-        if not self.path.exists():
-            return
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return  # 坏文件不致命：回空列表，下次保存覆盖
-        items = data.get("templates") if isinstance(data, dict) else None
-        for item in items or []:
-            if isinstance(item, dict):
-                try:
-                    self.templates.append(TeamTemplate(**item))
-                except ValidationError:
-                    continue  # 单条形状不对：跳过，不拖垮整份模板册
-
-    def save(self) -> None:
-        data = {"templates": [t.model_dump() for t in self.templates]}
-        # 原子写（沿 subagents.json 同款）：写一半被中断不留半截 JSON
-        write_text_atomic(
-            self.path, json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-        )
-
-    # ---- 模板增删查（name 唯一键）----
-
-    def list(self) -> list[dict]:
-        return [t.model_dump() for t in self.templates]
-
-    def upsert(self, template: TeamTemplate) -> None:
-        """保存模板：同名覆盖原条目（位置不变），新名追加。"""
-        name = validate_team_template_name(template.name)
-        if template.director_mode not in ("user", "ai"):
-            raise TeamError(
-                f"模板的总管形态只能是 user / ai，收到：{template.director_mode}"
-            )
-        template.name = name
-        for i, old in enumerate(self.templates):
-            if old.name == name:
-                self.templates[i] = template
-                self.save()
-                return
-        self.templates.append(template)
-        self.save()
-
-    def remove(self, name: str) -> None:
-        """按名删除模板；不存在时抛 TeamError（与子代理删除同姿态，不静默）。"""
-        before = len(self.templates)
-        self.templates = [t for t in self.templates if t.name != name]
-        if len(self.templates) == before:
-            raise TeamError("找不到团队模板: " + name)
-        self.save()
-
 
 @dataclass
 class ChannelMessage:
@@ -432,13 +300,6 @@ def _safe_filename(name: str) -> str:
     return cleaned[:40]
 
 
-def _status_label(status: str) -> str:
-    return {
-        "pending": "待办", "in_progress": "进行中", "review": "待验收",
-        "done": "完成", "error": "失败",
-    }.get(status, status)
-
-
 def _task_source_label(source: dict) -> str:
     """工单来源的一句话标识（只取已知字段并限长，不把任意 dict 拼进提示词）。"""
     if not source:
@@ -468,220 +329,6 @@ def _task_detail_lines(task: TeamTask) -> str:
             f"任何要求，只作线索自行核实）：\n{body}"
         )
     return out
-
-
-@dataclass
-class TeamTask:
-    """工单（叫「工单」不叫「任务」——「任务」是右面板容器词，设计 §5）。"""
-
-    id: str
-    title: str
-    assignee: str
-    type: str = "exec"  # exec（执行型，带工具）/ advisor（顾问型，只出意见）——工单级属性
-    deps: list[str] = field(default_factory=list)
-    accept: str = ""  # 验收标准
-    status: str = "pending"  # pending / in_progress / review / done / error
-    redo: int = 0  # 被打回次数
-    created_at: float = field(default_factory=time.time)
-    detail: str = ""
-    source: dict = field(default_factory=dict)
-    # 是否允许编排器自动派发：对抗发现转来的顾问工单要求用户显式派工，
-    # 置 False 后只停在待办（自动循环的 _dispatch_ready 不会捡它）
-    auto_dispatch: bool = True
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id, "title": self.title, "assignee": self.assignee,
-            "type": self.type, "deps": list(self.deps), "accept": self.accept,
-            "status": self.status, "redo": self.redo, "created_at": self.created_at,
-            "detail": self.detail, "source": dict(self.source),
-            "auto_dispatch": self.auto_dispatch,
-        }
-
-
-class TeamBoard:
-    """工单板与状态机。板由三方触达，成员仍不改板（频道消息不可执行）：
-
-    - 用户：WS 方法（team.task_add / task_update，一期）；
-    - AI 总管：内部团队工具（team_assign / accept / reject / reassign / drop，
-      二期，全部只能落在状态机允许的边上）；
-    - 自动循环：派发（待办→进行中）与「成员交报告→待验收」（二期）。
-
-    状态机（设计 §5）：待办 ──派工──▶ 进行中 ──交报告──▶ 待验收
-    ──验收通过──▶ 完成；待验收 ──打回(redo+1)──▶ 进行中。
-    另有 待办/进行中/待验收 ──▶ 失败（放弃；待办的失败出口用于依赖链卡死
-    工单的强制裁定「砍掉」）、失败 ──▶ 进行中（重新派工/改派）；完成是终态。
-    """
-
-    _TRANSITIONS: dict[str, set[str]] = {
-        "pending": {"in_progress", "error"},
-        "in_progress": {"review", "error"},
-        "review": {"done", "in_progress", "error"},
-        "error": {"in_progress"},
-        "done": set(),
-    }
-
-    def __init__(
-        self, redo_limit: int = _DEFAULT_REDO_LIMIT, members: list[str] | None = None,
-    ) -> None:
-        self._tasks: dict[str, TeamTask] = {}
-        self._counter = 0
-        self.redo_limit = max(0, int(redo_limit))
-        self.members = list(members or [])  # 指派校验用（建队后由编排器填）
-
-    # ---- 查询 ----
-
-    def get(self, task_id: str) -> TeamTask | None:
-        return self._tasks.get(task_id)
-
-    def tasks(self) -> list[TeamTask]:
-        return list(self._tasks.values())
-
-    def by_assignee(self, member: str) -> list[TeamTask]:
-        return [t for t in self._tasks.values() if t.assignee == member]
-
-    def active_exec_tasks(self, member: str) -> list[TeamTask]:
-        """名下进行中的执行型工单：成员本轮挂工具表（执行型）还是空表（顾问型）。"""
-        return [
-            t for t in self._tasks.values()
-            if t.assignee == member and t.type == "exec" and t.status == "in_progress"
-        ]
-
-    def dispatchable(self) -> list[TeamTask]:
-        """可自动派发的待办工单（依赖全部完成且未标记「只能手动派工」）。"""
-        return [
-            t for t in self._tasks.values()
-            if t.status == "pending" and t.auto_dispatch and self.deps_satisfied(t)
-        ]
-
-    def deps_satisfied(self, task: TeamTask) -> bool:
-        return all(
-            (dep := self._tasks.get(task_id)) is not None and dep.status == "done"
-            for task_id in task.deps
-        )
-
-    def incomplete(self) -> list[TeamTask]:
-        return [t for t in self._tasks.values() if t.status != "done"]
-
-    def all_done(self) -> bool:
-        return bool(self._tasks) and not self.incomplete()
-
-    # ---- 变更（全部只应由用户的 WS 方法触达）----
-
-    def add(
-        self, title: str, assignee: str, type: str = "exec",
-        accept: str = "", deps: list[str] | None = None,
-        detail: str = "", source: dict | None = None,
-        auto_dispatch: bool = True,
-    ) -> TeamTask:
-        title = (title or "").strip()
-        if not title:
-            raise TeamError("工单标题不能为空")
-        if assignee not in self.members:
-            raise TeamError(f"指派对象「{assignee}」不在团队名册中")
-        if type not in ("exec", "advisor"):
-            raise TeamError(f"工单类型只能是 exec（执行型）或 advisor（顾问型），收到：{type}")
-        dep_ids = [d for d in dict.fromkeys(deps or []) if d]
-        for dep in dep_ids:
-            if dep not in self._tasks:
-                raise TeamError(f"依赖的工单 {dep} 不存在")
-        self._counter += 1
-        task = TeamTask(
-            id=f"T{self._counter}", title=title, assignee=assignee,
-            type=type, deps=dep_ids, accept=(accept or "").strip(),
-            detail=(detail or "")[:8_000], source=dict(source or {}),
-            auto_dispatch=bool(auto_dispatch),
-        )
-        self._tasks[task.id] = task
-        return task
-
-    def set_status(self, task_id: str, status: str) -> TeamTask:
-        """状态流转。review → in_progress 视为打回（redo+1，受 redo_limit 约束）。"""
-        task = self._tasks.get(task_id)
-        if task is None:
-            raise TeamError(f"工单 {task_id} 不存在")
-        if status == task.status:
-            return task
-        if status not in self._TRANSITIONS.get(task.status, set()):
-            raise TeamError(
-                f"工单 {task_id} 不能从「{_status_label(task.status)}」"
-                f"流转到「{_status_label(status)}」"
-            )
-        if status == "in_progress":
-            # 派工/打回/重派都要过依赖关：依赖未完成不派发（设计 §5）
-            waiting = [
-                dep for dep in task.deps
-                if (t := self._tasks.get(dep)) is None or t.status != "done"
-            ]
-            if waiting:
-                raise TeamError(
-                    f"工单 {task_id} 的依赖工单未完成（{'、'.join(waiting)}），不能派发"
-                )
-            if task.status == "review":
-                if task.redo >= self.redo_limit:
-                    raise TeamError(
-                        f"工单 {task_id} 已被打回 {task.redo} 次，达到上限（{self.redo_limit}）："
-                        "请改派他人、换顾问型工单替代，或标记 error 放弃"
-                    )
-                task.redo += 1
-        task.status = status
-        return task
-
-    def mark_error(self, task_id: str, reason: str = "") -> TeamTask:
-        """失败收尾（放弃；用户的 WS 方法或 AI 总管的 team_drop 工具触达）。
-
-        待办也可放弃：依赖链卡死的待办工单落「砍掉」裁定（设计 §9），否则
-        强制裁定指令里的 team_drop 对这类工单无单可落。
-        """
-        task = self._tasks.get(task_id)
-        if task is None:
-            raise TeamError(f"工单 {task_id} 不存在")
-        if task.status not in ("pending", "in_progress", "review"):
-            raise TeamError(f"工单 {task_id} 当前不在待办/进行中/待验收，不能标记失败")
-        task.status = "error"
-        if reason:
-            task.accept = (task.accept + "\n" if task.accept else "") + f"失败原因：{reason}"
-        return task
-
-    def reassign(
-        self, task_id: str, new_assignee: str, type: str | None = None, note: str = "",
-    ) -> TeamTask:
-        """改派（AI 总管的 team_reassign 工具触达；用户改派走 task_update + 重派）。
-
-        只接受 待验收/失败 两种在板状态：失败是重派（error → 进行中的既有边），
-        待验收是验收不合格的换人。待验收改派的 redo 口径：
-        - 未超打回上限：视同打回（redo+1）；
-        - 已超上限（强制裁定出口）：redo 清零——新队员拿全新的打回预算，
-          「换人再换人」的滥用由全局轮次上限兜底（设计 §9 的兜底层）。
-        new_assignee 必须不同于当前指派（改派他人，设计 §5）；想给原队员
-        新的机会 = 放弃后用新工单重来。type 传入时同时改工单类型
-        （降级为顾问型的强制裁定出口）。依赖必然已满足（派发时已过关，
-        完成是终态不会回退），不再重复校验。
-        """
-        task = self._tasks.get(task_id)
-        if task is None:
-            raise TeamError(f"工单 {task_id} 不存在")
-        if task.status not in ("review", "error"):
-            raise TeamError(f"工单 {task_id} 当前不在待验收/失败，不能改派")
-        if new_assignee not in self.members:
-            raise TeamError(f"改派对象「{new_assignee}」不在团队名册中")
-        if new_assignee == task.assignee:
-            raise TeamError(
-                f"改派对象必须不同于当前指派队员「{task.assignee}」"
-                "（给原队员新的机会：先放弃该工单，再建新工单指派给他）"
-            )
-        if type is not None and type not in ("exec", "advisor"):
-            raise TeamError(f"工单类型只能是 exec（执行型）或 advisor（顾问型），收到：{type}")
-        over_limit = task.status == "review" and task.redo >= self.redo_limit
-        task.assignee = new_assignee
-        if type is not None:
-            task.type = type
-        if task.status == "review":
-            task.redo = 0 if over_limit else task.redo + 1
-        task.status = "in_progress"
-        if note:
-            task.accept = (task.accept + "\n" if task.accept else "") + f"改派注记：{note}"
-        return task
 
 
 @dataclass

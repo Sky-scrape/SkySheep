@@ -442,3 +442,27 @@ async def test_run_headless_tool_gating(home):
     assert (home / "proj" / "out.txt").read_text(encoding="utf-8") == "data"
     assert result2["reply"] == "写好了"
     json.loads(json.dumps(result2))  # 可 JSON 序列化（CI 管道友好）
+
+
+async def test_run_headless_stream_ndjson(home, capsys):
+    """--output stream：逐事件 NDJSON 行（字段与 WS 层 model_dump 同源），
+    末行 kind="result" 汇总、不再重复 messages（由 assistant_message 承载）。"""
+    provider = FakeProvider([[TextBlock(text="流式答案")]])
+    result = await run_headless(
+        "流式跑一轮", directory=str(home / "proj"),
+        provider_factory=lambda: provider, output="stream",
+    )
+    out = capsys.readouterr().out
+    lines = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert lines, "stream 模式应逐行输出 NDJSON"
+    assert all("kind" in line and "ts" in line for line in lines[:-1])
+    kinds = {line["kind"] for line in lines[:-1]}
+    assert "turn_started" in kinds and "text_delta" in kinds
+    last = lines[-1]
+    assert last["kind"] == "result"
+    assert last["reply"] == "流式答案"
+    assert last["stop_reason"] == "end_turn"
+    assert last["session_id"] == result["session_id"]
+    assert last["usage"] == result["usage"]
+    assert "messages" not in last
+

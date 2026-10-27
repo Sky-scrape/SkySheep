@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **无头事件流协议**：`skysheep run --output stream` 把运行全程的统一事件流逐行以
+  NDJSON 输出（与 GUI/WS 消费同一套 AgentEvent，字段见 `engine/src/skysheep/events.py`），
+  末行 `kind="result"` 汇总会话、stop_reason 与 token 用量；按 UTF-8 字节写出并即时冲刷，
+  含 emoji 的回答不再受 Windows 控制台 GBK 编码影响。脚本 / CI / 外部程序接入引擎
+  有了标准入口，协议索引见 `docs/无头运行协议.md`。
+
 ## [2.6.2] - 2026-10-26
 
 ### 修复

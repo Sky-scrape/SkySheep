@@ -3,7 +3,7 @@
 用法：
     skysheep chat [目录] [-p provider] [-s session_id]
     skysheep app [目录] [--port N] [--browser]
-    skysheep run <任务> [--allow-tool ...]
+    skysheep run <任务> [--allow-tool ...] [--output text|json|stream]
     skysheep cron run <task_id>   # 立即执行一个定时任务后退出（系统计划任务入口）
     skysheep config init|path
     skysheep sessions
@@ -896,6 +896,21 @@ async def _assemble_headless_engine(store, working_dir: Path, cfg, provider_obj,
     return skills, mcp, tasks, registry, hooks
 
 
+def _ndjson_write(payload: dict) -> None:
+    """NDJSON 协议一行落 stdout：按 UTF-8 字节写出并立即冲刷，
+    绕开 Windows 控制台 GBK 编码（含 emoji 的回答会崩 print）。"""
+    import json as _json
+    import sys as _sys
+
+    line = _json.dumps(payload, ensure_ascii=False)
+    buf = getattr(_sys.stdout, "buffer", None)
+    if buf is None:
+        print(line, flush=True)
+    else:
+        buf.write((line + "\n").encode("utf-8"))
+        buf.flush()
+
+
 async def run_headless(
     prompt: str,
     directory: str = ".",
@@ -907,7 +922,9 @@ async def run_headless(
     trust_project: bool = False,
 ) -> dict:
     """非交互跑一轮任务：完整工具链 + 无人值守门控（只读放行，预授权名单放行，
-    其余自动拒绝），消息落库可审计。返回结构化结果；失败抛 SystemExit(2)。"""
+    其余自动拒绝），消息落库可审计。返回结构化结果；失败抛 SystemExit(2)。
+    output="stream" 时逐事件以 NDJSON 行落 stdout（协议见 docs/无头运行协议.md），
+    末行为 kind="result" 的汇总行。"""
     working_dir = Path(directory).resolve()
     if not working_dir.exists():
         raise SystemExit("directory not found: " + str(working_dir))
@@ -972,6 +989,8 @@ async def run_headless(
         error: str | None = None
         stop_reason = "error"
         async for ev in agent.run_turn(prompt):
+            if output == "stream":
+                _ndjson_write(ev.model_dump(mode="json"))
             if isinstance(ev, TextDelta) and output == "text":
                 print(ev.text, end="", flush=True)
             elif isinstance(ev, ErrorEvent):
@@ -990,7 +1009,7 @@ async def run_headless(
              if m.role == "assistant" and m.text.strip()),
             "",
         )
-        return {
+        result = {
             "session_id": sess.id,
             "provider": provider_name,
             "model": getattr(provider_obj, "model", ""),
@@ -1006,6 +1025,11 @@ async def run_headless(
                 "output": agent.total_out_tokens,
             },
         }
+        if output == "stream":
+            # 末行汇总：messages 不重复给——完整消息已由 assistant_message 事件流承载
+            _ndjson_write({"kind": "result", **{
+                k: v for k, v in result.items() if k != "messages"}})
+        return result
     finally:
         if mcp is not None:
             await mcp.shutdown()
@@ -1035,7 +1059,8 @@ def _run_cmd(args) -> None:
         import json as _json
 
         print(_json.dumps(result, ensure_ascii=False))
-    else:
+    elif args.output != "stream":
+        # stream 模式的全部输出（事件行 + 末行汇总）已在 run_headless 内落 stdout
         if result["reply"]:
             print(result["reply"])
         if result.get("error"):
@@ -1249,8 +1274,10 @@ def main(argv: list[str] | None = None) -> None:
         "--allow-tool", default="",
         help="预授权工具（逗号分隔，如 write_file,edit_file,run_command）；缺省只放行只读操作",
     )
-    p_run.add_argument("--output", choices=["text", "json"], default="text",
-                       help="text=只打印最终回答；json=输出完整结构化结果")
+    p_run.add_argument("--output", choices=["text", "json", "stream"], default="text",
+                       help="text=只打印最终回答；json=输出完整结构化结果；"
+                            "stream=NDJSON 事件流（每行一个事件、末行 kind=result，"
+                            "协议见 docs/无头运行协议.md）")
     p_run.add_argument("--max-iterations", type=int, default=0,
                        help="最大工具调用轮数（缺省用 config.toml 的 max_iterations）")
     p_run.add_argument(

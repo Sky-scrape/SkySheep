@@ -2160,6 +2160,23 @@
     </div>
   </div>
 </div>
+<!-- 全局命令面板（Ctrl+K）：纯前端快启入口，动作复用既有全局函数与入口，
+     不新增后端方法；清单与交互在 app.js 尾部「全局命令面板」段，样式在 app.css -->
+<div id="palette" class="palette-overlay hidden">
+  <div class="palette-box" role="dialog" aria-modal="true" aria-label="命令面板">
+    <div class="palette-head">
+      <input id="palette-input" type="text" placeholder="搜索：会话、设置、主题、协作模式…"
+             autocomplete="off" spellcheck="false" aria-label="搜索命令或会话">
+      <span class="kbd">Esc 关闭</span>
+    </div>
+    <div id="palette-list" class="palette-list" role="listbox" aria-label="命令清单"></div>
+    <div class="palette-foot">
+      <span class="kbd">↑↓ 选择</span>
+      <span class="kbd">Enter 执行</span>
+      <span class="palette-foot-dim">Ctrl K 呼出 / 关闭</span>
+    </div>
+  </div>
+</div>
 <!-- mermaid（3.3MB）、xterm、highlight.js、qrcode 全部按需加载：首次渲染图表 /
      首次开终端 / 首个代码块高亮 / 首次画二维码时，才由 app.js 的 loadLib 注入
      script——首屏不再同步解析这几百 KB 到几 MB 的库，冷启动更快 -->

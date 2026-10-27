@@ -11699,10 +11699,12 @@ window.addEventListener("keydown", (e) => {
     if (!settingsOpenFlag()) openFindBar();
     return;
   }
-  // Ctrl+K 模型切换菜单
-  if (k === "k" && !pageViewOpen()) {
+  // Ctrl+K 全局命令面板（见文件尾「全局命令面板」段）：全局可用——设置 /
+  // 工厂开着、焦点在输入框里都响应，面板自己收焦点。原「模型切换菜单」
+  // 快捷键让位，菜单仍可点输入区模型徽章打开
+  if (k === "k") {
     e.preventDefault();
-    if (!typing) toggleModelMenu();
+    togglePalette();
     return;
   }
   // Ctrl+B 左侧栏折叠/展开（对标 VS Code 的侧栏开关；输入框聚焦时也响应）
@@ -17121,3 +17123,369 @@ document.getElementById("btn-mod-template").onclick = async () => {
     navigator.serviceWorker.register("/sw.js").catch(function () {});
   });
 })();
+
+// ============================================================
+// 全局命令面板（Ctrl+K）
+// 纯前端快启入口：呼出一个可搜索的动作清单，动作全部来自本文件与各
+// app-*.js 模块的既有全局函数与既有入口（新建会话 / 协作模式 / 主题 /
+// 设置页与设置卡 / 右面板页签 / 工厂看板 / 导出诊断包 / 最近会话），
+// 不新增任何后端方法；「导出诊断包」与 设置 · 关于 的按钮走同一个
+// app.export_diagnostics。面板 DOM 骨架在 index.html（#palette），
+// 样式在 app.css 的「全局命令面板」段。
+//
+// 交互：Ctrl+K 呼出 / 再按关闭（分发在本文件上方的快捷键总控里）；
+// Esc 关闭；↑↓ 选择（到头绕回）；Enter 执行；输入即子串过滤（大小写
+// 不敏感，标签 + 关键词）；点面板外关闭。会话清单在每次打开时异步拉取
+// （本机优先跨项目，远程端被门控拒绝就退回当前项目），拉到前先陈列
+// 静态命令，拉到后并入清单。
+// ============================================================
+
+// ---------- 命令面板：DOM 与状态 ----------
+const paletteEl = document.getElementById("palette");
+const paletteInputEl = document.getElementById("palette-input");
+const paletteListEl = document.getElementById("palette-list");
+let paletteItems = [];  // 本次打开的全量动作 {label, hint, tag, group, kwd, primary, run}
+let paletteShown = [];  // 过滤后的可见动作（paletteItems 的子集，下标对齐选中行）
+let paletteSel = 0;     // 当前高亮行（paletteShown 下标）
+let paletteOn = false;  // 面板开着吗（DOM hidden 之外的一份状态：会话异步回填时判）
+
+// 默认（空查询）陈列上限：主命令太多会淹没会话，超出部分输入即达
+const PALETTE_DEFAULT_CMDS = 20;
+const PALETTE_DEFAULT_SESS = 8;
+const PALETTE_FILTER_CAP = 60;
+
+function togglePalette() {
+  if (paletteOn) closePalette();
+  else openPalette();
+}
+
+function openPalette() {
+  if (!paletteEl || !paletteInputEl || !paletteListEl) return;
+  paletteOn = true;
+  paletteEl.classList.remove("hidden");
+  paletteInputEl.value = "";
+  paletteSel = 0;
+  // 每次打开重建静态动作：设置导航文案 / 协作与主题的「当前」标记都可能变
+  paletteItems = paletteBaseItems();
+  palettePaint();
+  paletteInputEl.focus();
+  // 会话异步并入：期间面板可能已被关掉，回填前再看一眼状态
+  paletteSessionItems().then((sess) => {
+    if (!paletteOn) return;
+    paletteItems = paletteItems.concat(sess);
+    palettePaint();
+  });
+}
+
+function closePalette() {
+  paletteOn = false;
+  if (paletteEl) paletteEl.classList.add("hidden");
+  if (paletteInputEl) paletteInputEl.value = "";
+}
+
+// 面板打开时 Esc 随时能关（焦点可能不在搜索框里）：捕获阶段拦下，
+// 不让上方窗口级 Esc（关设置页 / 停止运行）跟着触发
+document.addEventListener("keydown", (e) => {
+  if (!paletteOn) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    closePalette();
+  }
+}, true);
+
+// 点面板外关闭（mousedown：与菜单类交互一致，点选动作项也不会先触发这里）
+document.addEventListener("mousedown", (e) => {
+  if (!paletteOn) return;
+  if (paletteEl && paletteEl.contains(e.target)) return;
+  closePalette();
+});
+
+// ---------- 动作清单：静态命令 ----------
+function paletteBaseItems() {
+  const items = [];
+  // 协作模式等对话内动作：先回对话视图，让输入区的协作徽章可见可再点
+  const backToChatFirst = () => { if (pageViewOpen()) backToChat(); };
+
+  // —— 会话 ——
+  items.push({
+    label: "新建会话", tag: "会话", group: "命令", primary: true,
+    kwd: "new session chat 新建会话 开聊天",
+    // 与 #btn-new 的处理一致：整屏视图先回对话再新建
+    run: async () => { backToChatFirst(); await newSessionFromHighlight(); },
+  });
+
+  // —— 协作模式（本条消息生效的一次性开关；同输入区协作菜单四选一） ——
+  items.push({
+    label: "协作：圆桌", tag: "协作", group: "命令", primary: true,
+    hint: rtOn ? "当前" : "",
+    kwd: "roundtable 多模型 共同思考 协作",
+    run: () => { backToChatFirst(); setRtOn(true); },
+  });
+  items.push({
+    label: "协作：团队", tag: "协作", group: "命令", primary: true,
+    hint: teamOn ? "当前" : "",
+    kwd: "team 总管 队员 工单 分工 协作",
+    run: () => { backToChatFirst(); setTeamOn(true); },
+  });
+  items.push({
+    label: "协作：对抗", tag: "协作", group: "命令", primary: true,
+    hint: advOn ? "当前" : "",
+    kwd: "adversarial 审查 找问题 终审 协作",
+    run: () => { backToChatFirst(); setAdvOn(true); },
+  });
+  items.push({
+    label: "协作：不用协作", tag: "协作", group: "命令", primary: true,
+    hint: (!rtOn && !teamOn && !advOn) ? "当前" : "",
+    kwd: "off 普通对话 单模型 关闭协作",
+    run: () => { backToChatFirst(); setRtOn(false, true); setTeamOn(false, true); setAdvOn(false, true); },
+  });
+
+  // —— 页面与视图（右面板页签 / 工厂；与侧栏导航同一批入口） ——
+  items.push({
+    label: "工厂看板", tag: "页面", group: "命令", primary: true,
+    kwd: "factory 自动化 观战 派工 产线",
+    run: () => openFactoryPage(), // 设置 / 对话任一处都能直接进（openFactoryPage 自理）
+  });
+  [
+    ["todo", "任务", "todo 子代理 步骤 事项"],
+    ["agenda", "日程", "agenda 提醒 日历"],
+    ["auto", "自动化", "cron 定时 编排 无人值守"],
+    ["memory", "项目记忆", "agents.md 约定 记忆"],
+    ["map", "记忆地图", "memmap 图谱 时间线 演化"],
+    ["ext", "MCP / Skills", "mcp skills 技能 工具 管理"],
+  ].forEach(([id, label, kwd]) => {
+    items.push({
+      label, tag: "页面", group: "命令", primary: true, kwd,
+      run: () => { backToChatFirst(); openRightTab(id); },
+    });
+  });
+  items.push({
+    label: "接力工作台", tag: "页面", group: "命令", primary: true,
+    kwd: "relay 主屏 副屏 交棒 工作台",
+    run: () => openRelayWorkbench(), // 自带回对话与右面板处理（openRelayWorkbench）
+  });
+
+  // —— 导出诊断包（与 设置 · 关于「导出诊断包」按钮同一个 WS 方法） ——
+  items.push({
+    label: "导出诊断包", tag: "关于", group: "命令", primary: true,
+    kwd: "diagnostics 日志 反馈 打包 排障",
+    run: async () => {
+      addNotice("正在生成诊断包…");
+      try {
+        const r = await request("app.export_diagnostics");
+        addNotice(`✓ 已生成诊断包（${(r.size / 1024).toFixed(0)} KB）并打开所在文件夹`);
+      } catch (e) {
+        addNotice("✗ 生成诊断包失败：" + e.message);
+      }
+    },
+  });
+
+  // —— 设置各页：清单直接读设置导航（#settings-nav li[data-target]），
+  //    页面名与顺序跟侧栏永远一致，新增页零维护 ——
+  document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
+    items.push({
+      label: "设置 · " + li.textContent.trim(), tag: "设置", group: "命令", primary: true,
+      kwd: "settings 配置 选项",
+      run: () => openSettings(li.dataset.target),
+    });
+  });
+
+  // —— 六套主题 + 跟随系统：名单取上方 THEMES（改主题列表只改那一处） ——
+  Object.keys(THEMES).forEach((id) => {
+    items.push({
+      label: "主题：" + THEMES[id].name, tag: "主题", group: "主题",
+      hint: themePref === id ? "当前" : "",
+      kwd: "theme 主题 " + (THEMES[id].dark ? "深色 暗色" : "浅色 亮色") + " " + id,
+      run: () => applyThemeMode(id),
+    });
+  });
+  items.push({
+    label: "主题：跟随系统", tag: "主题", group: "主题",
+    hint: themePref === "auto" ? "当前" : "",
+    kwd: "theme auto 系统 深浅 自动",
+    run: () => applyThemeMode("auto"),
+  });
+
+  // —— 设置各卡片：复用设置内搜索的卡片索引（标题 + 所属页名可搜），
+  //    执行动作与搜索结果的跳转一致：开页 → 滚到卡 → 闪烁提示 ——
+  settingsCardIndex().forEach((it) => {
+    items.push({
+      label: it.title, hint: it.pageName, tag: "设置卡", group: "设置",
+      kwd: "设置 卡片 " + it.pageName,
+      run: () => {
+        if (settingsOpen) showSettingsPage(it.pageId);
+        else openSettings(it.pageId);
+        // 等页面切换渲染完再滚（同设置内搜索的时序）
+        setTimeout(() => {
+          it.card.scrollIntoView({ block: "center", behavior: "smooth" });
+          it.card.classList.remove("ssr-flash");
+          void it.card.offsetWidth; // 强制回流以重启动画
+          it.card.classList.add("ssr-flash");
+          setTimeout(() => it.card.classList.remove("ssr-flash"), 1600);
+        }, 60);
+      },
+    });
+  });
+  return items;
+}
+
+// ---------- 动作清单：最近会话（异步） ----------
+async function paletteSessionItems() {
+  // 本机优先跨项目（同分组侧栏的 session.list all_projects 口径）；远程端被
+  // 门控拒绝时退回当前项目清单，面板在两端都可用
+  let data = await request("session.list", { all_projects: 1 }).catch(() => null);
+  if (!data) data = await request("session.list").catch(() => null);
+  if (!data) return [];
+  const projs = ((await request("project.list").catch(() => null)) || {}).projects || [];
+  const curPid = bootSnap && bootSnap.project_id != null ? String(bootSnap.project_id) : null;
+  const seen = new Set();
+  const rows = [...(data.sessions || []), ...(data.quick_sessions || [])]
+    .filter((s) => {
+      if (!s || !s.id || seen.has(s.id) || s.archived) return false;
+      seen.add(s.id);
+      return true;
+    })
+    .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+    .slice(0, 40);
+  return rows.map((s) => {
+    const proj = projs.find((p) => String(p.id) === String(s.project_id));
+    const cross = s.project_id != null &&
+      (curPid == null || String(s.project_id) !== curPid);
+    return {
+      label: s.title || "(未命名会话)",
+      hint: cross && proj && proj.name ? proj.name : "",
+      tag: "会话", group: "最近会话",
+      kwd: "会话 对话 session " + (proj && proj.name ? proj.name : ""),
+      run: () => paletteOpenSession(s),
+    };
+  });
+}
+
+// 打开最近会话：跨项目的先切工作项目再开（同侧栏搜索跨项目命中的既有路径）
+async function paletteOpenSession(s) {
+  const curPid = bootSnap && bootSnap.project_id != null ? String(bootSnap.project_id) : null;
+  if (s.project_id != null && (curPid == null || String(s.project_id) !== curPid)) {
+    const projs = ((await request("project.list").catch(() => null)) || {}).projects || [];
+    const tp = projs.find((p) => String(p.id) === String(s.project_id));
+    if (!tp || !tp.root_path) {
+      addNotice("这个会话所在项目已不可用");
+      return;
+    }
+    try {
+      await request("project.switch", { path: tp.root_path });
+      await applyWorkspaceData(await fetchWorkspaceData());
+    } catch (e) {
+      addNotice("切换到该项目失败：" + e.message);
+      return;
+    }
+  }
+  if (pageViewOpen()) backToChat();
+  openTabForSession(s.id, s.title);
+  refreshSessions();
+}
+
+// ---------- 过滤与渲染 ----------
+function paletteRefilter() {
+  const q = paletteInputEl.value.trim().toLowerCase();
+  if (!q) {
+    const cmds = paletteItems.filter((it) => it.primary);
+    const sess = paletteItems.filter((it) => it.group === "最近会话");
+    paletteShown = cmds.slice(0, PALETTE_DEFAULT_CMDS).concat(sess.slice(0, PALETTE_DEFAULT_SESS));
+    return;
+  }
+  paletteShown = paletteItems.filter((it) =>
+    it.label.toLowerCase().includes(q) ||
+    (it.hint || "").toLowerCase().includes(q) ||
+    (it.kwd || "").toLowerCase().includes(q)
+  ).slice(0, PALETTE_FILTER_CAP);
+}
+
+function palettePaint() {
+  paletteRefilter();
+  paletteListEl.innerHTML = "";
+  if (!paletteShown.length) {
+    const d = document.createElement("div");
+    d.className = "palette-empty";
+    d.textContent = "没有匹配的命令或会话";
+    paletteListEl.appendChild(d);
+    return;
+  }
+  let lastGroup = null;
+  paletteShown.forEach((it, i) => {
+    if (it.group !== lastGroup) {
+      const h = document.createElement("div");
+      h.className = "palette-group";
+      h.textContent = it.group;
+      paletteListEl.appendChild(h);
+      lastGroup = it.group;
+    }
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "palette-item" + (i === paletteSel ? " active" : "");
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", i === paletteSel ? "true" : "false");
+    b.innerHTML =
+      `<span class="pi-label">${escapeHtml(it.label)}</span>` +
+      (it.hint ? `<span class="pi-hint">${escapeHtml(it.hint)}</span>` : "") +
+      (it.tag ? `<span class="pi-tag">${escapeHtml(it.tag)}</span>` : "");
+    // mousedown 不转移焦点：点击执行后搜索框仍是落点，键盘操作不断线
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.onclick = () => paletteRunIndex(i);
+    b.onmousemove = () => { if (paletteSel !== i) { paletteSel = i; palettePaintSel(); } };
+    paletteListEl.appendChild(b);
+  });
+}
+
+// 只翻高亮不重建 DOM：hover / 键盘移动都走这里，列表大也不闪
+function palettePaintSel() {
+  const rows = paletteListEl.querySelectorAll(".palette-item");
+  rows.forEach((el, i) => {
+    el.classList.toggle("active", i === paletteSel);
+    el.setAttribute("aria-selected", i === paletteSel ? "true" : "false");
+  });
+  const cur = rows[paletteSel];
+  if (cur) cur.scrollIntoView({ block: "nearest" });
+}
+
+function paletteRunIndex(i) {
+  const it = paletteShown[i];
+  if (!it) return;
+  closePalette();
+  let r;
+  try {
+    r = it.run();
+  } catch (e) {
+    addNotice("执行失败：" + e.message);
+    return;
+  }
+  if (r && typeof r.catch === "function") {
+    r.catch((e) => addNotice("执行失败：" + e.message));
+  }
+}
+
+// ---------- 搜索框键盘：↑↓ 选择、Enter 执行（Esc 在上面的捕获监听里统一关） ----------
+if (paletteInputEl) {
+  paletteInputEl.addEventListener("input", () => {
+    paletteSel = 0;
+    palettePaint();
+  });
+  paletteInputEl.addEventListener("keydown", (e) => {
+    // 中文输入法组词中的 Enter / 方向键是候选操作，不是面板操作
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!paletteShown.length) return;
+      const dir = e.key === "ArrowDown" ? 1 : -1;
+      paletteSel = (paletteSel + dir + paletteShown.length) % paletteShown.length;
+      palettePaintSel();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      paletteRunIndex(paletteSel);
+    }
+  });
+}

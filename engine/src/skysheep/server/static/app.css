@@ -7391,3 +7391,99 @@ li.mod-row {
     transition-duration: 0.01ms;
   }
 }
+
+/* ============================================================
+ * 全局命令面板（Ctrl+K）—— 清单与交互在 app.js 尾部「全局命令面板」段
+ * 同一张「浮起的纸」：墨描边 + 铅字压印投影，与 .overlay / .rt-menu
+ * 一个质感；只用主题变量，六套主题自动适配。
+ * ============================================================ */
+.palette-overlay {
+  position: fixed; inset: 0; z-index: var(--z-overlay);
+  zoom: var(--ui-zoom, 1);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 10vh var(--sp-4) var(--sp-5);
+  background: color-mix(in srgb, var(--ink-line) 32%, transparent);
+  animation: ui-modal-in var(--dur-fast) var(--ease-out);
+}
+.palette-overlay.hidden { display: none; }
+.palette-box {
+  position: relative;
+  width: min(560px, 100%); max-height: 70vh;
+  display: flex; flex-direction: column;
+  background: var(--card); border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  box-shadow: 5px 6px 0 color-mix(in srgb, var(--ink-line) 18%, transparent), var(--shadow-lg);
+  overflow: hidden;
+  animation: ui-modal-in var(--dur-fast) var(--ease-out);
+}
+/* 顶部主色条：与 .modal-box 同款识别条 */
+.palette-box::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 4px;
+  border-radius: var(--r-lg) var(--r-lg) 0 0; background: var(--blue);
+}
+.palette-head {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4) var(--sp-2);
+  border-bottom: 1px solid var(--line);
+}
+#palette-input {
+  flex: 1; min-width: 0;
+  background: transparent; border: 0; outline: none;
+  color: var(--text); font: inherit; font-size: var(--fs-title);
+}
+#palette-input::placeholder { color: var(--dim); }
+.palette-list {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: var(--sp-1) 0 var(--sp-2);
+  scrollbar-gutter: stable;
+}
+.palette-group {
+  padding: var(--sp-2) var(--sp-4) 2px;
+  font-size: var(--fs-cap); color: var(--dim); letter-spacing: .06em;
+}
+.palette-item {
+  display: flex; align-items: center; gap: var(--sp-2);
+  width: 100%; min-height: 36px;
+  padding: 6px var(--sp-4); border: 0;
+  background: transparent; color: var(--text);
+  font: inherit; font-size: var(--fs-md); text-align: left; cursor: pointer;
+}
+.palette-item .pi-label {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.palette-item .pi-hint {
+  flex: none; max-width: 40%;
+  color: var(--dim); font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.palette-item .pi-tag {
+  flex: none;
+  font-size: var(--fs-cap); color: var(--text2);
+  background: var(--paper-inset); border: 1px solid var(--line);
+  border-radius: var(--r-pill); padding: 1px 8px;
+}
+.palette-item.active { background: var(--blue-weak); color: var(--blue); }
+.palette-item.active .pi-hint { color: var(--blue); }
+.palette-item.active .pi-tag { color: var(--blue); border-color: var(--blue); }
+.palette-empty {
+  padding: var(--sp-4); text-align: center;
+  color: var(--dim); font-size: var(--fs-md);
+}
+.palette-foot {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--line);
+  color: var(--dim); font-size: var(--fs-cap);
+}
+.palette-foot .kbd { margin-left: 0; }
+.palette-foot-dim { margin-left: auto; }
+
+@media (max-width: 860px) {
+  /* 窄屏：贴顶全宽，触屏没有物理键盘，底部按键提示与类型角标一并收起 */
+  .palette-overlay { padding: 6vh var(--sp-3) var(--sp-4); }
+  .palette-box { width: 100%; max-height: 78vh; }
+  .palette-foot { display: none; }
+  .palette-item .pi-tag { display: none; }
+  .palette-item .pi-hint { max-width: 50%; }
+}

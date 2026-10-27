@@ -492,6 +492,16 @@ def test_factory_scene_has_traces_not_numbers():
     assert "function toggleReplay(" in js and "function drawReplay(" in js
     assert 'view: "tokens_today"' in js
     assert "REPLAY_CAP_MS" in js and "function replayProgress(" in js
+    # 回放包裹的 pointAt 结果是世界坐标，画之前必须过 viewPoint 投影——
+    # 漏投影包裹会拿世界值当屏幕值，全画到画布左上角一小片区域里乱飞
+    i_dr = js.index("function drawReplay(ctx, pal) {")
+    dr = js[i_dr:js.index("\n  }", i_dr)]
+    assert "viewPoint(pos.x, pos.y)" in dr and "drawParcelBox(ctx, pal, vp.x, vp.y" in dr
+    # 在途包裹的呼吸抖动加在屏幕 y 上（vlen 是屏幕像素口径，加进世界坐标
+    # 会被投影放大，拉近时机台口的包裹抖得不像话）
+    i_pp = js.index("function packagePose(pal, pkg, now) {")
+    pp = js[i_pp:js.index("\n  }", i_pp)]
+    assert pp.index("var vp = viewPoint(") < pp.index("vp.y += Math.sin(")
     # 厂区心情（大门 / 工头 / 烟 都由它驱动）
     assert "function refreshFactoryMood(" in js
     for mood in ("working", "trouble", "stopped", "idle"):

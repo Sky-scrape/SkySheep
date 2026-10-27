@@ -1367,7 +1367,13 @@
       if (!line || !line.drawn) return;
       if (line.project) S.flowingProjects.add(line.project.id);
       if (!S.packages.has(id)) S.packages.set(id, makePackage(run, line));
-      else S.packages.get(id).run = run;
+      else {
+        var p0 = S.packages.get(id);
+        p0.run = run;
+        // 世界重建（快照重排 / 机台数变化）后 line 是新对象：不回填的话
+        // 包裹会沿着旧几何飞，直到这条运行结束
+        p0.line = line;
+      }
     });
     // 收尾：快照里已不在 running，但包裹还在场景里 → 落定并进终态
     S.packages.forEach(function (pkg, id) {
@@ -1609,11 +1615,13 @@
       var line = S.world.lines.get(it.key);
       if (!line || !line.drawn) return;
       var z = S.cam.zoom;
-      var pts = line.path.map(function (p) { return viewPoint(p.x, p.y); });
-      var steps = Math.max(3, Math.round(pathLength(pts) / Math.max(8, vlen(16))));
-      var pos = pointAt(pts, Math.round(progress * steps) / steps);
-      var s = Math.max(2, Math.round(7 * z));
-      var lift = 14 * z;
+      // 连续插值：旧版按 16px 一格取整，拉近看包裹是一顿一顿跳格的。
+      // pointAt 吃的是世界坐标，画之前必须过 viewPoint 投影——漏了投影
+      // 包裹会拿世界值当屏幕值，全画到画布左上角一小片区域里乱窜。
+      var pos = pointAt(line.path, progress);
+      var vp = viewPoint(pos.x, pos.y);
+      // 贴带高度随行程缓降（主带 12 → 机台支线 7~9，取 12→8 线性近似）
+      var lift = Math.round((12 - 4 * progress) * z);
       var color = pal.product;
       var edge = pal.crateDark;
       if (it.status === "error" || it.status === "interrupted" || it.status === "orphan") {
@@ -1624,16 +1632,7 @@
       // 落地后淡出：档期最后那一小段
       var alpha = progress > 0.94 ? clamp((1 - progress) / 0.06, 0, 1) : 1;
       ctx.globalAlpha = alpha;
-      var x = Math.round(pos.x), gy = Math.round(pos.y);
-      fillOval(ctx, x, gy + 1, Math.max(1, Math.round(s * 0.8)),
-               Math.max(1, Math.round(s * 0.35)), pal.shadow);
-      ctx.fillStyle = edge;
-      ctx.fillRect(x - s, gy - Math.round(lift) - s, s * 2, s * 2);
-      ctx.fillStyle = color;
-      ctx.fillRect(x - s + 1, gy - Math.round(lift) - s + 1,
-                   Math.max(1, s * 2 - 2), Math.max(1, s * 2 - 2));
-      ctx.fillStyle = pal.crateLight;
-      ctx.fillRect(x - s + 1, gy - Math.round(lift) - s + 1, Math.max(1, s * 2 - 2), 1);
+      drawParcelBox(ctx, pal, vp.x, vp.y, lift, color, edge);
       ctx.globalAlpha = 1;
     });
   }
@@ -1641,7 +1640,16 @@
   function drawPackages(ctx, pal) {
     // 回放时只演历史：实时包裹停画，两种「包裹」同屏会分不清哪个是真的
     if (S.replay && S.replay.running) { S.overflow = 0; drawReplay(ctx, pal); return; }
-    var now = nowMs();
+    // 实时包裹改走动态画序（collectPackageItems）：与工头 / 车 / 叉车同一条
+    // 合并通道，按地面线插进静态件之间——以前整层盖在场景顶上，包裹路过
+    // 调度厅身后时糊在厅的正立面上。
+  }
+
+  /** 实时包裹进动态画序（绘制层 collectDynamicItems 逐帧调用）：上限折叠
+      （「+N 枚包裹」标签读的 S.overflow）沿用原口径，位姿由 packagePose
+      现算；排序键取包裹的地面世界 y，z0 与车 / 工头统一坐厂坪高度。 */
+  function collectPackageItems(pal, out, now) {
+    if (S.replay && S.replay.running) { S.overflow = 0; return; }
     var items = [];
     S.packages.forEach(function (pkg) {
       if (!pkg.line || !pkg.line.drawn) return;
@@ -1651,18 +1659,13 @@
     items.sort(function (a, b) { return (a.run.started_at || 0) - (b.run.started_at || 0); });
     // [factory] max_packages 控制同屏包裹上限（默认 60）；超出折叠为「+N」
     var limit = clamp(Math.round(Number(activeConfig().max_packages) || MAX_PACKAGES), 10, 300);
-    var drawn = 0;
-    var overflow = 0;
-    for (var i = 0; i < items.length; i += 1) {
-      if (drawn >= limit) { overflow += items.length - i; break; }
-      drawPackage(ctx, pal, items[i], now);
-      drawn += 1;
-    }
-    if (overflow > 0) {
-      S.overflow = overflow;
-    } else {
-      S.overflow = 0;
-    }
+    S.overflow = Math.max(0, items.length - limit);
+    items.slice(0, limit).forEach(function (pkg) {
+      var pose = packagePose(pal, pkg, now);
+      out.push({ d: pose.wy, z0: FX.YARD_Z, draw: function (ctx) {
+        drawPackage(ctx, pal, pkg, now);
+      } });
+    });
   }
 
   /** 调度厅泊位：把 \`max_parallel_runs\` 这个抽象额度画成看得见的车位。
@@ -1847,25 +1850,25 @@
     } : null;
   }
 
-  function drawPackage(ctx, pal, pkg, now) {
-    var pts = pkg.line.path.map(function (p) { return viewPoint(p.x, p.y); });
+  /** 在途包裹位姿（纯函数）：沿产线路径连续插值 + 贴带高度 + 状态成色。
+      旧版两处怪相在这里一并收掉：①步进按 16px 取整，拉近看包裹一顿一顿
+      跳格——pointAt 本就吃小数 t，直接连续走；②挑高恒为 14，悬在带面上方
+      像飘着——主带带面高 12、机台支线 7~9，取 12→8 线性缓降贴着带面滑。
+      返回值带世界 y（wy），给动态画序当排序键。 */
+  function packagePose(pal, pkg, now) {
     var progress = packageProgress(pkg, now);
-    var steps = Math.max(3, Math.round(pathLength(pts) / Math.max(8, vlen(16))));
-    var step = Math.round(progress * steps) / steps;
-    var dir = 1;
+    var step = progress;
     if (pkg.finish === "error" || pkg.finish === "cancelled") {
-      dir = -1;
-      var back = clamp((now - pkg.finishedAt) / 4500, 0, 1);
-      step = 1 - back;
+      // 失败 / 叫停：原路退回调度厅（4.5 秒走完），像被收回去重查
+      step = 1 - clamp((now - pkg.finishedAt) / 4500, 0, 1);
     }
-    var pos = pointAt(pts, step);
-    if (dir === 1 && progress >= 1 && !pkg.finish) {
-      pos.y += Math.sin(S.ticks * 0.5) * Math.max(1, vlen(1));
+    var pos = pointAt(pkg.line.path, step);
+    var vp = viewPoint(pos.x, pos.y);
+    if (progress >= 1 && !pkg.finish) {
+      // 到机台口等待加工：原地轻微呼吸，说明「活着在等」而不是丢件了
+      // （屏幕像素口径——世界坐标会被投影放大，拉近时抖得不像话）
+      vp.y += Math.sin(S.ticks * 0.5) * Math.max(1, vlen(1));
     }
-    var z = S.cam.zoom;
-    // 包裹从 5 放大到 7：以前在全景里约 7px，包装带的动作读不出来
-    var s = Math.max(2, Math.round(7 * z));
-    var lift = 14 * z;
     var color = pkg.color === 0 ? pal.crate : pkg.color === 1 ? pal.steelLight : pal.product;
     var edge = pal.crateDark;
     if (pkg.finish === "error") { color = pal.bad; edge = pal.ink; }
@@ -1876,7 +1879,7 @@
     // 不叠任何数字——它要说的是「这条别等了」，具体多久在抽屉里。
     var stall = pkg.finish ? "" : runStall(pkg.run, now);
     if (stall === "stale") {
-      // 卡住：包裹原地打转（画成轻微左右偏），箱体压暗一档
+      // 卡住：箱体压暗一档（打转在 drawPackage 里画）
       color = pal.idle;
       edge = pal.ink;
     } else if (stall === "nearTimeout") {
@@ -1888,33 +1891,51 @@
       color = pal.ink;
       edge = pal.ink;
     }
-    var gy = Math.round(pos.y);
-    var x = Math.round(pos.x), y = gy - Math.round(lift) - s;
-    if (stall === "stale" && !S.reduced) {
+    return {
+      x: Math.round(vp.x), gy: Math.round(vp.y), wy: pos.y,
+      lift: Math.round((12 - 4 * step) * S.cam.zoom),
+      color: color, edge: edge, stall: stall,
+    };
+  }
+
+  /** 在途包裹立体建模：与月台 / 排队包裹同一套三面体（勾边箱 + 顶面高光 +
+      前缝 + 接地影子）。以前在途的是正面平贴方块——停着的包裹是立体的，
+      一动起来变成纸片，同屏两种建模语言。返回箱顶 y，给停滞问号当锚点。 */
+  function drawParcelBox(ctx, pal, x, gy, liftPx, color, edge) {
+    var z = S.cam.zoom;
+    var s = Math.max(2, Math.round(7 * z));
+    var hh = Math.max(1, Math.round(s * 0.5));
+    var h = Math.max(2, Math.round(s * 1.4));
+    var by = gy - liftPx - Math.max(1, Math.round(hh * 0.5));
+    // 接地影子比箱底略宽；外圈勾一档深色，三面体才从带面上立起来
+    fillOval(ctx, x, gy + 1, Math.max(2, Math.round(s * 1.1)),
+             Math.max(1, Math.round(s * 0.42)), pal.shadow);
+    drawIsoBoxAt(ctx, x, by, s + 1, hh + 1, h + 1, pal.crateDark, pal.crateDark, pal.crateDark);
+    drawIsoBoxAt(ctx, x, by, s, hh, h, color, color, edge);
+    ctx.fillStyle = pal.crateLight;
+    ctx.fillRect(x - s, by - h, Math.max(1, s * 2 - 1), 1);
+    ctx.fillStyle = edge;
+    ctx.fillRect(x, by - h + hh, 1, h);
+    return by - h;
+  }
+
+  function drawPackage(ctx, pal, pkg, now) {
+    var pose = packagePose(pal, pkg, now);
+    var z = S.cam.zoom;
+    var x = pose.x;
+    if (pose.stall === "stale" && !S.reduced) {
       // 打转：只晃半格，看得出「卡住了」而不是「在跑」
       x += Math.round(Math.sin(S.ticks * 0.35) * Math.max(1, z));
     }
-    // 地面影子 + 箱体 + 顶面高光 + 十字胶带
-    fillOval(ctx, x, gy + 1, Math.max(1, Math.round(s * 0.8)),
-             Math.max(1, Math.round(s * 0.35)), pal.shadow);
-    ctx.fillStyle = edge;
-    ctx.fillRect(x - s, y - s, s * 2, s * 2);
-    ctx.fillStyle = color;
-    ctx.fillRect(x - s + 1, y - s + 1, Math.max(1, s * 2 - 2), Math.max(1, s * 2 - 2));
-    ctx.fillStyle = pal.crateLight;
-    ctx.fillRect(x - s + 1, y - s + 1, Math.max(1, s * 2 - 2), 1);
-    ctx.fillStyle = edge;
-    ctx.fillRect(x - 1, y - s + 1, 1, Math.max(1, s * 2 - 2));
-    ctx.fillRect(x - s + 1, y - 1, Math.max(1, s * 2 - 2), 1);
-    ctx.fillStyle = pal.crateLight;
-    ctx.fillRect(x - s + 2, y - s + 2, Math.max(1, s - 1), 1);
+    var topY = drawParcelBox(ctx, pal, x, pose.gy, pose.lift, pose.color, pose.edge);
     // 卡住的标记：头顶一个问号，快超时冒一缕烟，已超时压一团黑烟。
     // 全是像素图形、不带文字——问号的形状本身就说明「不知道在等什么」。
-    if (stall === "stale") drawStallMark(ctx, pal, x, y - s - Math.max(3, Math.round(5 * z)), z, false);
-    else if (stall === "nearTimeout") drawStallMark(ctx, pal, x, y - s, z, true);
-    else if (stall === "timeout") drawTimeoutSmoke(ctx, pal, x, y - s, z);
+    if (pose.stall === "stale") drawStallMark(ctx, pal, x, topY - Math.max(3, Math.round(5 * z)), z, false);
+    else if (pose.stall === "nearTimeout") drawStallMark(ctx, pal, x, topY, z, true);
+    else if (pose.stall === "timeout") drawTimeoutSmoke(ctx, pal, x, topY, z);
     // 记录点击热区
-    S.hits.push({ type: "pkg", id: pkg.id, x: x, y: y, r: Math.max(5, s * 1.6) });
+    S.hits.push({ type: "pkg", id: pkg.id, x: x, y: topY - Math.max(2, Math.round(5 * z)),
+                  r: Math.max(5, Math.round(7 * z * 1.6)) });
   }
 
   /** 停滞问号：一个 3×5 像素的问号轮廓，随时间轻微上下浮。 */
@@ -2848,6 +2869,7 @@
   FX.runElapsed = runElapsed; FX.scheduleResync = scheduleResync;
   FX.applyNavVisibility = applyNavVisibility;
   FX.drawBerths = drawBerths; FX.drawPackages = drawPackages; FX.drawUpcoming = drawUpcoming;
+  FX.collectPackageItems = collectPackageItems;   // 实时包裹进动态画序（绘制层合并）
   FX.drawNoticeboard = drawNoticeboard;
   FX.refreshFactoryAlerts = refreshFactoryAlerts; FX.refreshUpcoming = refreshUpcoming;
   // 待发告示牌：口径常量 + 纯函数（绘制层、标签层与测试同源）

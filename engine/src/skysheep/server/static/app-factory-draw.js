@@ -18,6 +18,7 @@
   var hashKey = FX.hashKey, lineStall = FX.lineStall, clamp = FX.clamp;
   var pathLength = FX.pathLength, pointAt = FX.pointAt, ringPts = FX.ringPts;
   var drawBerths = FX.drawBerths, drawPackages = FX.drawPackages, drawUpcoming = FX.drawUpcoming;
+  var collectPackageItems = FX.collectPackageItems;   // 实时包裹进动态画序
   var refreshFactoryAlerts = FX.refreshFactoryAlerts, refreshUpcoming = FX.refreshUpcoming;
   var refreshFactoryMood = FX.refreshFactoryMood;
   var updateLabels = FX.updateLabels;
@@ -827,6 +828,7 @@
       drawForklifts(pal, out, now);
     }
     drawTrips(pal, out, now);
+    if (collectPackageItems) collectPackageItems(pal, out, now);
     out.sort(function (a, b) { return a.d - b.d || a.z0 - b.z0; });
     return out;
   }

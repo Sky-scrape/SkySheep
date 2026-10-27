@@ -3650,8 +3650,10 @@ mark.search-hit-mark {
 .flat-panel .field { display: flex; flex-direction: column; gap: 6px; }
 .flat-panel .field > label { font-size: var(--fs-sm); color: var(--dim); }
 .flat-panel .field .field-tip { font-size: var(--fs-sm); color: var(--dim); line-height: 1.5; }
+/* 用量页协作成本的三个单价输入不在 .flat-panel 容器里，选择器单列出来同皮 */
 .flat-panel .field select,
-.flat-panel .field input {
+.flat-panel .field input,
+.usage-pricing input {
   background: var(--paper-raised); color: var(--text);
   border: 1px solid var(--line2); border-radius: var(--r-sm);
   padding: 8px 10px; font-size: var(--fs-md); font-family: var(--font-mono); width: 100%;
@@ -3683,10 +3685,11 @@ mark.search-hit-mark {
 .avail-note-row .panel-note { flex: 1; }
 .avail-note-row #avail-toggle { flex-shrink: 0; }
 .flat-panel .field input:disabled { color: var(--dim); background: var(--paper-sunken); cursor: not-allowed; }
-.flat-panel .field input:focus, .flat-panel .field select:focus {
+.flat-panel .field input:focus, .flat-panel .field select:focus,
+.usage-pricing input:focus {
   outline: none; border-color: var(--blue)
 }
-.flat-panel .field input::placeholder { color: var(--dim); }
+.flat-panel .field input::placeholder, .usage-pricing input::placeholder { color: var(--dim); }
 .url-preview { font-size: var(--fs-sm); color: var(--dim); font-family: var(--font-mono); }
 .url-preview:empty { display: none; }
 .label-row { display: flex; align-items: center; justify-content: space-between; }

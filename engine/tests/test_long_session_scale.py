@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -25,8 +26,11 @@ from skysheep.session.store import SessionStore
 pytestmark = pytest.mark.slow
 
 N_MESSAGES = 5000
-BUDGET_WRITE_S = 30.0
-BUDGET_READ_S = 10.0
+# 同一断言本地实测写入 0.7~5.4s，CI（windows runner + coverage 追踪）实测可到 43~52s；
+# 预算按环境分档：本地保持紧档守 M16 级写放大回归，CI 档只挡数量级劣化。
+_BUDGET_SCALE = 4.0 if os.environ.get("GITHUB_ACTIONS") == "true" else 1.0
+BUDGET_WRITE_S = 30.0 * _BUDGET_SCALE
+BUDGET_READ_S = 10.0 * _BUDGET_SCALE
 # 清单三档：500 / 1000 / 5000。小档在每次 slow 运行中都跑，大档守住上限档。
 BULK_SIZES = [500, 1000, 5000]
 
@@ -49,7 +53,7 @@ async def _fresh_store(tmp_path) -> SessionStore:
 
 @pytest.mark.parametrize("n", BULK_SIZES)
 async def test_store_write_and_read_bulk_messages(tmp_path, n):
-    """500 / 1000 / 5000 条消息：写入 ≤30s、全量回读 ≤10s、条数与顺序完整。"""
+    """500 / 1000 / 5000 条消息：写入与全量回读在预算内（本地紧档，CI 档 ×4）、条数与顺序完整。"""
     store = await _fresh_store(tmp_path)
     try:
         sess = await store.create_session(1, title="长会话")
@@ -110,7 +114,7 @@ async def test_agent_turn_with_5000_message_history(tmp_path, home):
         turn_s = time.monotonic() - t0
 
         assert "text_delta" in events and "turn_finished" in events
-        assert turn_s < 30.0, f"5000 条历史下开新一轮耗时 {turn_s:.1f}s 超预算"
+        assert turn_s < 30.0 * _BUDGET_SCALE, f"5000 条历史下开新一轮耗时 {turn_s:.1f}s 超预算"
         assert load_s < BUDGET_READ_S, f"5000 条装配耗时 {load_s:.1f}s 超预算"
         # 轮后历史 = 旧 5000 + 本轮 user/assistant
         assert len(agent.history) >= N_MESSAGES + 2

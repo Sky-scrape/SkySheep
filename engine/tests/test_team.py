@@ -3434,3 +3434,67 @@ async def test_cron_team_missing_template_fails_run(home):
         assert final["next_run_at"] > 0, "失败后照常重排下次运行（退避而非无限重试）"
     finally:
         await store.close()
+
+
+async def test_cron_team_push_delivers_summary_and_survives_failure(home, caplog):
+    """mode=team 的终态推送照走既有 notify_channel 路径（run_cron_task_core 收尾
+    统一出口）：交付说明摘要连同终态注记前缀一起进通知 body，飞书/微信/Webhook
+    一视同仁；某渠道发送炸了只记日志——任务状态 / 结果 / 下次重排照常落库。"""
+    import logging
+
+    from test_cron import _FakeChannel
+
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    class _PushChannels:
+        """渠道管理器替身：_cron_push_targets_of 只读 channels 注册表这一个面。"""
+
+        def __init__(self, **channels):
+            self.channels = channels
+
+    store = await SessionStore(home / "cron-team-push.db").connect()
+    try:
+        task = await _cron_team_task(store, home, name="推送巡检")
+        await store.update_cron_task(task["id"], notify_channel=1)
+        backend = _cron_team_backend(
+            home, store,
+            [FakeProvider([[TextBlock(text="巡检完成")]]),
+             FakeProvider([[TextBlock(text="分工方案"), ToolUseBlock(
+                 id="d1", name="team_assign",
+                 input={"title": "巡检目录", "assignee": "队员0",
+                        "type": "exec"})]])])
+        _team_template(backend, "夜班小队")
+        backend.cfg.team.max_rounds = 1  # 轮次耗尽终态：注记要进通知 body
+
+        ok_ch, bad_ch = _FakeChannel(), _FakeChannel(fail=True)
+        channels = _PushChannels(feishu=ok_ch, weixin=bad_ch)
+
+        final = await run_cron_task_core(
+            store, task["id"], execute=backend._execute_cron_turn,
+            channels=channels)
+        assert final["last_status"] == "ok", "轮次耗尽强制交付不是故障"
+        assert final["last_result"].startswith("【轮次耗尽】")
+
+        # 推送是 fire-and-forget（spawn_bg）：轮询等后台推送落地
+        for _ in range(200):
+            if ok_ch.sent and bad_ch.failed:
+                break
+            await asyncio.sleep(0.01)
+        assert len(ok_ch.sent) == 1, f"启用渠道应收到一条摘要，实际 {ok_ch.sent}"
+        chat_id, text = ok_ch.sent[0]
+        assert chat_id == "owner-1", "推送目标是渠道允许名单（主人准入标识）"
+        assert "推送巡检" in text and "【轮次耗尽】" in text, \
+            "终态注记随 last_result 进通知 body（不做错误化但要让收件人知道）"
+        assert "《交付说明》" in text, "摘要带交付说明开头（≤500 字截断）"
+        assert bad_ch.failed >= 1, "坏渠道应已尝试发送"
+        hits = [rec for rec in caplog.records
+                if "推送" in rec.getMessage() and rec.levelno >= logging.WARNING]
+        assert hits, "推送失败要留日志"
+
+        # 失败不影响收尾：任务行状态 / 结果 / 下次重排照常
+        row = await store.get_cron_task(task["id"])
+        assert row["last_status"] == "ok", "推送失败不得改写任务状态"
+        assert row["last_result"].startswith("【轮次耗尽】"), "任务结果不受推送失败影响"
+        assert row["next_run_at"] > 0, "下次运行时间照常重算"
+    finally:
+        await store.close()

@@ -15,7 +15,8 @@
   补发续跑指令（[team] cron_resume_limit，默认 1、0 = 空闲即收队），仍空闲收队并记
   未尽事项；交付说明全文落 <项目>/.skysheep/reports/cron-team-*.md（避开频道报告滚动
   清理），轮次耗尽等设计内停机不做错误化、终态注记进结果与通知；系统计划任务入口
-  （skysheep cron run）一期对团队任务报错拒绝。
+  （skysheep cron run）一期对团队任务报错拒绝；事件流形状与无人值守消费面补进
+  docs/无头运行协议.md（「定时团队的事件流」小节）。
 
 - **无头事件流协议**：`skysheep run --output stream` 把运行全程的统一事件流逐行以
   NDJSON 输出（与 GUI/WS 消费同一套 AgentEvent，字段见 `engine/src/skysheep/events.py`），

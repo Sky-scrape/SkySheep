@@ -411,6 +411,27 @@ async def test_usage_stats_scoped_to_project(store):
     assert full["session_count"] == 2
 
 
+async def test_usage_stats_quickchat_null_project_filter(store):
+    """project_id=None 是快聊过滤（合法目标），必须 IS 绑定：= 绑 NULL 恒假、
+    静默返回空统计（审计 SEC-L24，写法对齐 relay_list_tasks 的 IS ?）。"""
+    p = await store.get_or_create_project("/qc-proj")
+    sp = await store.create_session(p.id, "项目会话")
+    sq = await store.create_session(None, "快聊会话")  # project_id=NULL
+    await store.add_usage(sp.id, "p1", "m1", 100, 50)
+    await store.add_usage(sq.id, "p1", "m1", 300, 10)
+
+    qc = await store.usage_stats(14, project_id=None)
+    assert [r["sid"] for r in qc["by_session"]] == [sq.id]
+    assert qc["session_count"] == 1
+    assert sum(r["it"] for r in qc["by_day"]) == 300
+    assert sum(r["it"] for r in qc["by_provider"]) == 300
+
+    # 项目过滤与全局口径不受影响
+    proj = await store.usage_stats(14, project_id=p.id)
+    assert [r["sid"] for r in proj["by_session"]] == [sp.id]
+    assert (await store.usage_stats(14))["session_count"] == 2
+
+
 def test_checkpoint_restore_checks_session_ownership(home):
     """检查点凭 id 恢复/对比前先验会话归属（B12：cp id 顺序可枚举）。
 

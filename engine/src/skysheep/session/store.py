@@ -2604,7 +2604,9 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                 " FROM usage_log l JOIN sessions s ON s.id = l.session_id"
                 if scoped else " FROM usage_log l"
             )
-            cond = " WHERE l.ts >= ?" + (" AND s.project_id = ?" if scoped else "")
+            # IS ?：project_id=None 表示快聊（合法过滤目标），用 = 绑定 NULL 恒假
+            # 会静默返回空统计（审计 SEC-L24）；与 relay_list_tasks 同一写法。
+            cond = " WHERE l.ts >= ?" + (" AND s.project_id IS ?" if scoped else "")
             args: tuple = (since, project_id) if scoped else (since,)
             cur = await self._db.execute(
                 "SELECT date(l.ts, 'unixepoch', 'localtime') AS day,"
@@ -2623,7 +2625,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                 "SELECT l.session_id AS sid, MAX(s.title) AS title,"
                 " SUM(l.in_tokens) AS it, SUM(l.out_tokens) AS ot, MAX(l.ts) AS last_ts"
                 " FROM usage_log l LEFT JOIN sessions s ON s.id = l.session_id"
-                " WHERE l.ts >= ?" + (" AND s.project_id = ?" if scoped else "")
+                " WHERE l.ts >= ?" + (" AND s.project_id IS ?" if scoped else "")
                 + " GROUP BY l.session_id"
                 " ORDER BY last_ts DESC LIMIT 12",
                 args,

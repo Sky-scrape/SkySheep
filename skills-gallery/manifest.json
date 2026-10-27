@@ -122,6 +122,20 @@
       "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/study-notes"
     },
     {
+      "dir": "team-duty-report",
+      "name": "team-duty-report",
+      "display_name": "定时团队值班报告",
+      "description": "把团队模式接进定时任务，到点自动建队产出值班报告——含团队模板建议、预授权档位选择与交付报告结构。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/team-duty-report"
+    },
+    {
+      "dir": "team-ticket-audit",
+      "name": "team-ticket-audit",
+      "display_name": "团队工单巡检",
+      "description": "用团队频道消息与工单板做每周巡检，产出团队体检摘要——吞吐、卡单、打回、超时与未尽事项一览。",
+      "source": "https://github.com/Sky-scrape/SkySheep/tree/main/skills-gallery/team-ticket-audit"
+    },
+    {
       "dir": "travel-planner",
       "name": "travel-planner",
       "display_name": "旅行行程规划",

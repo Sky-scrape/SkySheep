@@ -55,6 +55,11 @@ MUST_BE_LOCAL = (
     "subagent.save", "default_model.set", "aux.model.set",
     # 本机体验/信息面（审查 P1-3 收口）
     "app.notify", "fs.open", "term.close", "memory.get", "model.switch",
+    # dispatch 门禁补齐（P28）：写/执行面收口
+    "app.open_path",  # 远程触发桌面机弹资源管理器（与 open_external 不代开对齐，审查 L06）
+    "app.apply_theme",  # 远端不该改桌面壳标题栏主题（本机体验面，app.notify 同族）
+    "chat.compact",  # 压缩的是桌面全局活动会话上下文，远程压错会话（审查 L05，列本机专属）
+    "model.set_reasoning",  # 写 config.toml provider 配置并热切换 provider（与 model.switch 同面）
     # 会话的项目目录面：路径回传是枚举面、reveal 在本机桌面弹资源管理器
     "session.project_path", "session.reveal",
     # 会话级模型覆盖与思考强度（分屏列/主栏的会话级模型菜单与档位菜单）：
@@ -73,6 +78,8 @@ INLINE_GUARDED = (
     "term.spawn", "term.input",  # 终端三件套仅本机（term.resize 是同块 else 兜底，无独立分支）
     "channel.save", "channel.enable", "channel.weixin_login_start",  # 渠道配置仅本机
     "trust.list", "session.search", "session.list",  # 远端收窄枚举面
+    "project.task_list", "project.task_add",  # 远端剥掉显式 project_id，收敛当前项目（审查 L07）
+    "project.task_update", "project.task_delete",  # 远端先查任务归属，非当前项目一律拒绝
 )
 
 

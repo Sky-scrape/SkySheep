@@ -244,6 +244,37 @@ class FactoryMixin:
         wd = int(task.get("weekday") or 0)
         return f"每周{days[wd] if 0 <= wd < 7 else '?'} {task.get('time_of_day') or '--:--'}"
 
+    def _factory_team_meta(self, task: dict) -> dict | None:
+        """团队产线（mode=team）的只读呈现字段：成员规模与总管形态。
+
+        数据只来自两处既有事实：cron 行自带的 ``is_team`` / ``team_template``
+        （store._cron_row 已回），加上后端启动时装载的团队模板册
+        ``self.team_templates``（backend.py 装配、触发链 ``_execute_cron_team_turn``
+        同款现查）——不为可视化新增任何引擎接口或持久化。模板悬空（建任务后
+        被删，§14.5 允许存在、触发期才报错）时 ``found=False``，前端照实标注
+        「模板已删除」；非团队任务返回 None。模板册不可用（未装配 / 读取异常）
+        同样按悬空呈现：观战窗缺详情不该拖垮整个 state。
+        """
+        if not task.get("is_team"):
+            return None
+        meta = {"found": False, "members": 0, "director_ai": False, "director_model": ""}
+        name = str(task.get("team_template") or "").strip()
+        store = getattr(self, "team_templates", None)
+        if store is None or not name:
+            return meta
+        try:
+            templates = store.templates
+        except Exception:  # noqa: BLE001 - 呈现数据不拖垮观战快照
+            return meta
+        for t in templates:
+            if t.name == name:
+                meta["found"] = True
+                meta["members"] = len(t.members)
+                meta["director_ai"] = t.director_mode == "ai"
+                meta["director_model"] = str(t.director.model or "")
+                break
+        return meta
+
     @staticmethod
     def _factory_run_view(run: dict, cron_names: dict, node_names: dict,
                           proj_names: dict, proj_roots: dict | None = None) -> dict:
@@ -432,6 +463,12 @@ class FactoryMixin:
                 "running_run_id": running_by_task.get(tid),
                 "health": health.get(key),
                 "nodes": [],
+                # 团队形态（定时团队 §14）：cron 行两键原样透传 + 模板册现查的
+                # 呈现元数据（成员规模 / AI 总管）；非团队任务 team_meta=None。
+                # 纯呈现字段，不影响派工与执行口径——团队任务就是一条普通 cron 行。
+                "is_team": bool(task.get("is_team")),
+                "team_template": str(task.get("team_template") or ""),
+                "team_meta": self._factory_team_meta(task),
             })
 
         # ---- 编排：一条多工位装配线 ----

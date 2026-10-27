@@ -399,6 +399,33 @@ def test_factory_module_wires_west_depot():
     assert 'm.kind === "gantry"' in shadow, "龙门吊缺少接地影分支"
 
 
+def test_factory_machine_team_flag_is_gated_by_project_flow():
+    """团队机台旗标（定时团队 §14 的呈现面）：
+    只画在 mode=team 的产线机台上；旗面飘动必须同时受厂区级
+    S.flowingProjects 闸门（与传送带流向高光同一口径）与「减少动态效果」
+    双闸控制——身份标记常挂，动效不常开。"""
+    js = read_factory_js()
+    i_flag = js.index("团队旗标：mode=team 的产线机台顶角挂一面小旗")
+    seg = js[i_flag:js.index("// 作业窗", i_flag)]
+    assert "line.is_team" in seg, "旗标没有按团队产线分流"
+    assert "S.flowingProjects.has(" in seg, "飘动缺厂区级动效闸门"
+    assert "S.reduced" in seg, "飘动没接「减少动态效果」"
+    # 身份标记本身不依赖闸门：非在跑 / 闸门外也要有一面静止的旗
+    assert "ctx.fillRect(flagX + 1, flagY - flagH, flagW, 2);" in seg
+
+
+def test_factory_line_drawer_presents_team_rows():
+    """产线抽屉的团队呈现：类型分流出「团队产线」，模板 / 成员 / 总管各一行，
+    悬空模板标注「模板已删除」；非团队行保持原两态（装配线 / 单机产线）。"""
+    js = read_factory_js()
+    i = js.index("function openLineDrawer(key, opts) {")
+    seg = js[i:js.index("function nodeStatusText(", i)]
+    assert "团队产线" in seg and '"装配线"' in seg and '"单机产线"' in seg
+    for row in ("<dt>模板</dt>", "<dt>成员</dt>", "<dt>总管</dt>", "模板已删除"):
+        assert row in seg, f"团队抽屉缺少 {row}"
+    assert 'l.is_team ? \'<span class="fx-line-team">团队</span>\'' in js
+
+
 # ---------- app.css ----------
 
 def test_factory_css_uses_theme_tokens_only():

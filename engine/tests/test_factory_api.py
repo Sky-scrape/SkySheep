@@ -39,6 +39,8 @@ def _line_fields() -> set[str]:
         "key", "kind", "id", "project_id", "name", "status", "trigger_text",
         "next_run_at", "last_status", "last_run_at", "running_run_id", "nodes",
         "health",
+        # 团队产线（mode=team）的只读呈现字段：cron 行两键透传 + 模板册现查
+        "is_team", "team_template", "team_meta",
     }
 
 
@@ -99,10 +101,68 @@ def test_factory_state_returns_exact_contract_shape(home):
         assert line["last_status"] == "" and line["running_run_id"] is None
         assert line["nodes"] == []
         assert line["health"] is None, "还没有运行就没有体检数据"
+        # 普通任务：团队呈现三键在场但全空（契约对 agent 形态也稳定）
+        assert line["is_team"] is False
+        assert line["team_template"] == ""
+        assert line["team_meta"] is None
         assert state["runs"] == []
         assert state["counters"]["running"] == 0
         assert state["counters"]["attention"] == 0
         assert state["counters"]["tokens_today"] == 0
+
+
+def _save_team_template(ws, wid: str, name: str, *, members: int = 2):
+    """经 WS 建一个 AI 总管团队模板（与 test_cron 同款夹具，provider 用假名——
+    入口校验只看 provider 非空，不做真实构建）。"""
+    ws.send_json({"id": wid, "method": "team.template_save", "params": {
+        "name": name, "director_mode": "ai",
+        "director": {"provider": "fa", "model": "ma"},
+        "members": [{"provider": "fa", "model": "ma", "name": f"队员{i}",
+                     "persona": ""} for i in range(members)],
+    }})
+    r = recv_until(ws, wid)
+    assert r["ok"], r.get("error")
+
+
+def test_factory_state_team_line_presentation(home):
+    """团队产线（mode=team）在工厂里要「被看见」：cron 行两键原样透传，
+    team_meta 由后端按既有团队模板册现查（成员规模 / AI 总管）；模板悬空
+    （建任务后被删，§14.5 允许）时 found=False 照实标注，不臆测。"""
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        assert _call(ws, "boot")["ok"]
+        _save_team_template(ws, "tpl", "夜班小队", members=2)
+        team_id = _call(ws, "cron.add", {
+            "name": "值班巡检团队", "prompt": "巡检并汇总",
+            "schedule_type": "interval", "interval_minutes": 60,
+            "mode": "team", "team_template": "夜班小队",
+        })["result"]["id"]
+        agent_id = _call(ws, "cron.add", {
+            "name": "普通日报", "prompt": "汇总",
+            "schedule_type": "interval", "interval_minutes": 60,
+        })["result"]["id"]
+
+        lines = {ln["id"]: ln for ln in
+                 _call(ws, "factory.state")["result"]["projects"][0]["lines"]}
+        team = lines[team_id]
+        assert team["is_team"] is True and team["team_template"] == "夜班小队"
+        assert team["team_meta"] == {
+            "found": True, "members": 2, "director_ai": True, "director_model": "ma",
+        }
+        # 同厂区的普通任务不受影响：三键在场但全空
+        agent = lines[agent_id]
+        assert agent["is_team"] is False and agent["team_template"] == ""
+        assert agent["team_meta"] is None
+
+        # 模板删除（悬空引用）：team_meta.found 翻 False，team_template 原样保留
+        rm = _call(ws, "team.template_remove", {"name": "夜班小队"})
+        assert rm["ok"], rm
+        team = next(ln for ln in
+                    _call(ws, "factory.state")["result"]["projects"][0]["lines"]
+                    if ln["id"] == team_id)
+        assert team["is_team"] is True and team["team_template"] == "夜班小队"
+        assert team["team_meta"] == {
+            "found": False, "members": 0, "director_ai": False, "director_model": "",
+        }
 
 
 def test_factory_run_now_records_run_and_updates_state(home):

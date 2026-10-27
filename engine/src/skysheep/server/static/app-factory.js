@@ -777,6 +777,23 @@
     return "待机";
   }
 
+  /** 团队产线（mode=team）的一句描述：模板名 / 成员规模 / 总管形态。
+      数据是 factory.state 透传的 cron 行两键（is_team / team_template）加
+      team_meta（后端按团队模板册现查的只读呈现字段）；模板悬空照实说
+      「已删除」（触发期才报错，观战窗不做臆测）。非团队 / 缺 meta 返回空。 */
+  function teamLineText(line) {
+    if (!line || !line.is_team) return "";
+    var meta = line.team_meta || null;
+    var tpl = String(line.team_template || "");
+    if (!meta) return tpl ? "模板「" + tpl + "」" : "团队";
+    if (!meta.found) return tpl ? "模板「" + tpl + "」已删除" : "模板已删除";
+    var parts = [];
+    if (tpl) parts.push("模板「" + tpl + "」");
+    parts.push((Number(meta.members) || 0) + " 名队员");
+    parts.push(meta.director_ai ? "AI 总管" : "用户总管");
+    return parts.join(" · ");
+  }
+
   /** 产线当前这轮运行的停滞等级（机台用）。没在跑 / 取不到运行行时返回空。 */
   function lineStall(line) {
     if (!line || line.status !== "running") return "";
@@ -1053,6 +1070,9 @@
             sub = step ? "在跑 " + step : "在跑";
           } else if (l.health && l.health.streak >= 2) {
             sub = "连错 " + l.health.streak;
+          } else if (l.is_team) {
+            // 团队产线：面板常驻一句「模板 / 成员 / 总管」，先认出这是谁在值班
+            sub = teamLineText(l);
           }
           var stateText = lineStateText(l);
             html += '<button class="fx-line ' + lineDotClass(l) +
@@ -1063,6 +1083,7 @@
             '<span class="fx-line-name">' + escapeHtml(l.name || l.key) + "</span>" +
             (sub ? '<span class="fx-line-sub">' + escapeHtml(sub) + "</span>" : "") +
             "</span>" +
+            (l.is_team ? '<span class="fx-line-team">团队</span>' : "") +
             '<span class="fx-line-state ' + lineStateClass(l) + '">' + escapeHtml(stateText) + "</span>" +
             "</button>";
         });
@@ -2077,6 +2098,7 @@
           var sy = rec._vy * (S.cssH / S.bufH);
           if (sx < -60 || sx > S.cssW + 60 || sy < 0 || sy > S.cssH) return;
           var mlabel = rec.line.name || rec.key;
+          if (rec.line.is_team) mlabel = "团队 · " + mlabel;   // 与面板「团队」徽标同一口径
           if (rec.line.status === "running" && rec.kind === "cron") {
             mlabel += " " + fmtClockShort(lineRunSeconds(rec.line)); // 机台上方计时 mm:ss
             var step = runningStepText(rec.line);
@@ -2588,13 +2610,24 @@
 
   // ---------- 样板厂（只存在内存里） ----------
   /** 演示产线：period 为演示周期（秒），0 表示无排期（手动型，可被随机轮换拉起）。 */
-  function demoLineCron(id, name, trigger, next, status, last, lastAt, period) {
-    return {
+  function demoLineCron(id, name, trigger, next, status, last, lastAt, period, team) {
+    var line = {
       key: lineKeyFor("cron", id), kind: "cron", id: id, project_id: 0, name: name,
       status: status || "idle", trigger_text: trigger, next_run_at: next || 0,
       last_status: last || "", last_run_at: lastAt || 0, running_run_id: null, nodes: [],
       period_s: period || 0,
     };
+    // 团队演示线（定时团队 §14）：形状与 factory.state 透传的行一致，让样板厂
+    // 也能演示「团队产线」的呈现（徽标 / 模板 / 成员 / 总管），只在内存
+    if (team) {
+      line.is_team = true;
+      line.team_template = team.template || "";
+      line.team_meta = {
+        found: team.found !== false, members: team.members || 0,
+        director_ai: team.directorAI !== false, director_model: "",
+      };
+    }
+    return line;
   }
   function demoLinePipe(id, name, status, nodes) {
     return {
@@ -2635,6 +2668,9 @@
       id: -3, name: "样板 · 资料厂", root_ok: true,
       lines: [
         demoLineCron(-31, "文档快照", "每天 18:00", now + 5400, "idle", "empty", now - 10800, 86400),
+        // 团队演示线：让样板厂认得出「团队产线」（面板徽标 + 机台旗标）
+        demoLineCron(-33, "值班报告团队", "每天 20:00", now + 7200, "idle", "ok", now - 43200, 86400,
+                     { template: "值班小队", members: 3 }),
         // 无排期（手动型）：保留给随机轮换，演示不会因为没有近排期机台而冷场
         demoLineCron(-32, "临时批处理", "手动", 0, "idle", "ok", now - 6000, 0),
       ],
@@ -2891,6 +2927,7 @@
   FX.refreshHover = refreshHover;
   FX.filterProjects = filterProjects; FX.matchFilterMode = matchFilterMode;
   FX.filterActive = filterActive; FX.fmtTokens = fmtTokens; FX.lineKeyFor = lineKeyFor;
+  FX.teamLineText = teamLineText;
   FX.machineCap = machineCap; FX.labelCap = labelCap;
 
   window.factoryMount = factoryMount;

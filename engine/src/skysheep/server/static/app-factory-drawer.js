@@ -256,9 +256,39 @@
     renderPanel();
     S.drawer = { type: "line", key: key };
     var next = line.next_run_at ? fmtTs(line.next_run_at) : "—";
+    // 团队产线（mode=team）：类型先认出来，模板 / 成员 / 总管各占一行——
+    // 与自动化页任务行「团队」徽标同一叫法；模板悬空时 meta.found=false，
+    // 照实标注（触发期才报错，观战窗不替引擎下结论）
+    var isTeam = !!line.is_team;
+    var meta = isTeam ? (line.team_meta || null) : null;
+    var tplCell = "—";
+    var memberCell = "—";
+    var directorCell = "—";
+    if (isTeam) {
+      var tpl = String(line.team_template || "");
+      if (meta && !meta.found) {
+        tplCell = escapeHtml(tpl || "（未引用模板）") + '<span class="fx-run-meta">（模板已删除）</span>';
+        memberCell = "—";
+        directorCell = "—";
+      } else {
+        tplCell = escapeHtml(tpl || "（未引用模板）");
+        memberCell = meta ? (Number(meta.members) || 0) + " 名队员" : "—";
+        directorCell = meta
+          ? (meta.director_ai
+              ? "AI 总管" + (meta.director_model ? "（" + escapeHtml(meta.director_model) + "）" : "")
+              : "用户总管")
+          : "—";
+      }
+    }
     var html = '<div class="fx-kv">' +
       "<dt>厂区</dt><dd>" + escapeHtml(rec.project.name || "—") + "</dd>" +
-      "<dt>类型</dt><dd>" + (line.kind === "pipeline" ? "装配线" : "单机产线") + "</dd>" +
+      "<dt>类型</dt><dd>" +
+      (isTeam ? "团队产线" : line.kind === "pipeline" ? "装配线" : "单机产线") + "</dd>" +
+      (isTeam
+        ? "<dt>模板</dt><dd>" + tplCell + "</dd>" +
+          "<dt>成员</dt><dd>" + memberCell + "</dd>" +
+          "<dt>总管</dt><dd>" + directorCell + "</dd>"
+        : "") +
       "<dt>触发</dt><dd>" + escapeHtml(line.trigger_text || "—") + "</dd>" +
       "<dt>下次</dt><dd>" + escapeHtml(next) + "</dd>" +
       "<dt>状态</dt><dd>" + escapeHtml(lineStateText(line)) + "</dd>" +

@@ -41,6 +41,7 @@ _EXPORTED = (
     "PALLET_SIZE",
     "PALLET_MAX",
     "REWORK_MAX",
+    "teamLineText",
 )
 
 _DRIVER_JS = r'''
@@ -137,6 +138,19 @@ _DRIVER_JS = r'''
     };
     report.cases.daylight = [
       D(5, 19), D(5, 20), D(6, 0), D(6, 40), D(12, 0), D(17, 20), D(18, 0), D(18, 40), D(23, 0),
+    ];
+
+    // 13) 团队产线描述（mode=team）：模板 / 成员 / 总管；悬空模板照实说，
+    //     非团队与空入参一律空串（面板 sub 不该冒出「undefined」）
+    report.cases.teamText = [
+      fx.teamLineText({ is_team: true, team_template: "夜班小队",
+        team_meta: { found: true, members: 3, director_ai: true, director_model: "ma" } }),
+      fx.teamLineText({ is_team: true, team_template: "夜班小队",
+        team_meta: { found: false, members: 0, director_ai: false, director_model: "" } }),
+      fx.teamLineText({ is_team: true, team_template: "", team_meta: null }),
+      fx.teamLineText({ is_team: false, team_template: "", team_meta: null }),
+      fx.teamLineText(null),
+      fx.teamLineText({ is_team: true, team_template: "老模板" }),
     ];
   } catch (e) {
     report.fatal = String((e && e.stack) || e);
@@ -240,3 +254,16 @@ def test_filter_active_flag_and_formatting(panel_report):
     assert progress[0] == "fs.write · 第 7 步"
     assert progress[1] == "第 3 步"
     assert progress[2] == "", "超过 30 秒的进度不能继续显示（不谎报上一个工具名）"
+
+
+def test_team_line_text_covers_found_dangling_and_absent(panel_report):
+    """团队产线描述句（面板 sub 与机台标签共源）：正常模板报「模板 / 成员 /
+    总管」，悬空模板照实说「已删除」，非团队与空入参一律空串。"""
+    assert panel_report["teamText"] == [
+        "模板「夜班小队」 · 3 名队员 · AI 总管",
+        "模板「夜班小队」已删除",
+        "团队",
+        "",
+        "",
+        "模板「老模板」",
+    ]

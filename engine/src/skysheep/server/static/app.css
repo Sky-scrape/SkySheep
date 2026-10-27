@@ -7138,6 +7138,13 @@ li.mod-row {
 .fx-line-state.running { color: var(--blue); font-weight: 700; }
 .fx-line-state.failed { color: var(--bad); font-weight: 700; }
 .fx-line-state.warn { color: var(--gold); font-weight: 700; }
+/* 团队产线徽标（mode=team）：与自动化页任务行的「团队」chip 同一色键（--down），
+   让两个页面认同一个标记；只在目录行占一格，细节进抽屉 */
+.fx-line-team {
+  flex-shrink: 0; padding: 0 4px; font-size: var(--fs-cap); line-height: 14px;
+  color: var(--down); border: 1px solid color-mix(in srgb, var(--down) 55%, transparent);
+  border-radius: var(--r-xs);
+}
 .fx-empty { padding: 10px 6px; color: var(--dim); font-size: var(--fs-sm); line-height: 1.6; }
 .fx-proj + .fx-proj { position: relative; }
 .fx-proj + .fx-proj::before {

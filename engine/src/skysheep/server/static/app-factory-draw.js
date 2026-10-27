@@ -1985,6 +1985,28 @@
     ctx.fillRect(base.x - hw, baseY - skid - h, Math.max(1, hw * 2), bandH);
     ctx.fillStyle = pal.steelLight;
     ctx.fillRect(base.x - hw, baseY - skid - h, Math.max(1, hw * 2), 1);
+    // 团队旗标：mode=team 的产线机台顶角挂一面小旗——「这台上是一支队伍在
+    // 干活」。旗是身份标记，静态常挂（色带四色不含 paint，任何色带下都可辨）；
+    // 旗面只在「本厂区有包裹在流」（S.flowingProjects，厂区级动效闸门，与
+    // 传送带流向高光同一闸）且未开「减少动态效果」时两帧轻摆，其余时刻静止。
+    if (line.is_team) {
+      var flagX = base.x - hw;
+      var flagY = baseY - skid - h;
+      var flagH = Math.max(3, Math.round(5 * z));
+      var flagW = Math.max(2, Math.round(4 * z));
+      ctx.fillStyle = pal.metalDark;
+      ctx.fillRect(flagX, flagY - flagH, 1, flagH + 1);
+      var flutter = !S.reduced && line.status === "running"
+        && m.rec && m.rec.project && S.flowingProjects.has(m.rec.project.id)
+        && (Math.floor(S.ticks * 0.25) % 2 === 1);
+      ctx.fillStyle = pal.paint;
+      if (flutter) {
+        ctx.fillRect(flagX + 1, flagY - flagH, flagW, 1);
+        ctx.fillRect(flagX + 1, flagY - flagH + 1, Math.max(1, flagW - 1), 1);
+      } else {
+        ctx.fillRect(flagX + 1, flagY - flagH, flagW, 2);
+      }
+    }
     // 作业窗：左面一块玻璃。待机是暗玻璃，跑起来就亮成暖色——机台的「眼睛」，
     // 也是全景下唯一能一眼扫出「哪几台在干活」的落点。
     if (hw >= 5) {

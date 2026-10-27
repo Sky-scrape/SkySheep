@@ -8078,6 +8078,7 @@ async function loadUsage() {
           `<span class="ud" title="${escapeHtml(s.title || "未命名")}">${escapeHtml((s.title || "未命名").slice(0, 22))}</span>` +
           `<span class="un">${usageFmtTokens(total)} tokens</span></div>`;
       }).join("") || "<p class='dim small'>暂无数据</p>";
+    loadUsageCollab();
   } catch (e) {
     document.getElementById("usage-tiles").innerHTML =
       `<p class="dim small">加载失败: ${escapeHtml(e.message)}</p>`;
@@ -8107,6 +8108,104 @@ document.querySelectorAll("#usage-chart-tabs button").forEach((b) => {
     loadUsage();
   };
 });
+
+// ---------- 协作成本看板（用量页）：按协作形态分列的 token / 轮次 / 估算费用 ----------
+// 形态由后端按会话消息里的协作标记判定（分不出的归「普通」）；色板走主题
+// 变量 --dm-c*（app.css 定义、各主题各自调色，写死色值会在深色主题下看不清）。
+const COLLAB_FORM_ORDER = ["normal", "roundtable", "team", "adversarial"];
+const COLLAB_FORM_LABELS = { normal: "普通", roundtable: "圆桌", team: "团队", adversarial: "对抗" };
+const COLLAB_FORM_COLORS = {
+  normal: "var(--dm-c1)", roundtable: "var(--dm-c6)",
+  team: "var(--dm-c2)", adversarial: "var(--dm-c3)",
+};
+
+function usageCollabGroup(title, buckets, hasPrice) {
+  const keys = COLLAB_FORM_ORDER;
+  const maxTotal = Math.max(1, ...keys.map(
+    (k) => ((buckets[k] || {}).in || 0) + ((buckets[k] || {}).out || 0)));
+  const rows = keys.map((k) => {
+    const d = buckets[k] || {};
+    const total = (d.in || 0) + (d.out || 0);
+    const w = total > 0 ? Math.max(3, Math.round((total / maxTotal) * 100)) : 0;
+    const cost = hasPrice ? `¥${(d.cost || 0).toFixed(2)} · ` : "";
+    const tip = `输入 ${usageFmtTokens(d.in || 0)} · 输出 ${usageFmtTokens(d.out || 0)}` +
+      ((d.cached || 0) > 0 ? ` · 缓存命中 ${usageFmtTokens(d.cached)}` : "");
+    return `<div class="uc-row"${total > 0 ? "" : ' style="opacity:.55"'}>` +
+      `<span class="uc-dot" style="background:${COLLAB_FORM_COLORS[k]}"></span>` +
+      `<span class="uc-name">${COLLAB_FORM_LABELS[k]}</span>` +
+      `<span class="uc-bar"><i style="width:${w}%;background:${COLLAB_FORM_COLORS[k]}"></i></span>` +
+      `<span class="uc-val" title="${tip}">${usageFmtTokens(total)} tokens</span>` +
+      `<span class="uc-sub">${cost}${d.turns || 0} 轮 · ${d.sessions || 0} 会话</span></div>`;
+  }).join("");
+  return `<div class="uc-group"><h4>${title}</h4>${rows}</div>`;
+}
+
+async function loadUsageCollab() {
+  const el = document.getElementById("usage-collab");
+  if (!el) return;
+  try {
+    const r = await request("usage.collab_report", { days: 30 });
+    const hasPrice = !!r.has_price;
+    el.innerHTML = usageCollabGroup("今日", r.today || {}, hasPrice) +
+      usageCollabGroup(`近 ${r.days || 30} 天`, r.forms || {}, hasPrice);
+    const totalEl = document.getElementById("usage-collab-total");
+    if (totalEl) {
+      const f = r.forms || {};
+      totalEl.textContent = hasPrice ? `近 ${r.days || 30} 天估算 ${cost_sum(f)}` : "";
+    }
+    renderUsagePricing(r.pricing || {});
+  } catch (e) {
+    el.innerHTML = `<p class="dim small">加载失败: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function cost_sum(f) {
+  const c = COLLAB_FORM_ORDER.reduce((s, k) => s + ((f[k] || {}).cost || 0), 0);
+  return `¥${c.toFixed(2)}`;
+}
+
+function renderUsagePricing(p) {
+  const el = document.getElementById("usage-pricing");
+  if (!el) return;
+  el.innerHTML =
+    '<div class="uc-price-tip">费用折算默认价目（元 / 百万 tokens）：填 0 表示不计价，' +
+    "留空表示不改动。想按服务用更准的单价，在 config.toml 的 " +
+    "[usage_pricing.providers.服务名] 里覆盖。</div>" +
+    '<div class="price-row">' +
+    `<input id="uc-price-in" type="number" min="0" step="0.1" value="${p.price_in || ""}" placeholder="输入价" title="每百万输入 tokens 的单价（元）" autocomplete="off">` +
+    `<input id="uc-price-out" type="number" min="0" step="0.1" value="${p.price_out || ""}" placeholder="输出价" title="每百万输出 tokens 的单价（元）" autocomplete="off">` +
+    `<input id="uc-price-cache" type="number" min="0" step="0.1" value="${p.price_cache || ""}" placeholder="缓存命中价" title="命中提示词缓存的输入单价（元）；留空 = 不区分缓存" autocomplete="off">` +
+    '</div><div class="uc-price-ops"><button id="uc-price-save" class="btn-ghost">保存价目</button>' +
+    '<span id="uc-price-status" class="dim small"></span></div>';
+  document.getElementById("uc-price-save").onclick = saveUsagePricing;
+}
+
+async function saveUsagePricing() {
+  const status = document.getElementById("uc-price-status");
+  const body = {};
+  const pairs = [
+    ["uc-price-in", "price_in", "输入价"],
+    ["uc-price-out", "price_out", "输出价"],
+    ["uc-price-cache", "price_cache", "缓存命中价"],
+  ];
+  for (const [id, key, label] of pairs) {
+    const v = document.getElementById(id).value.trim();
+    if (v === "") continue;
+    const n = Number(v);
+    if (!(n >= 0)) {
+      status.textContent = `${label}要是不小于 0 的数字`;
+      return;
+    }
+    body[key] = n;
+  }
+  try {
+    await request("usage.pricing_set", body);
+    status.textContent = "已保存";
+    loadUsageCollab();
+  } catch (e) {
+    status.textContent = escapeHtml(e.message);
+  }
+}
 
 // ---------- 提示词：自定义提示词模板（输入 ~ 时展示；原名「快捷指令」，2.0 起更名并换触发符号） ----------
 let snippetsCache = [];

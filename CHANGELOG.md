@@ -12,6 +12,13 @@
   含 emoji 的回答不再受 Windows 控制台 GBK 编码影响。脚本 / CI / 外部程序接入引擎
   有了标准入口，协议索引见 `docs/无头运行协议.md`。
 
+- **协作成本看板**：用量页新增「协作成本」卡，按普通 / 圆桌 / 团队 / 对抗四种协作形态
+  分列今日与近 30 天的 token 消耗（会话形态按消息里的协作标记判定，判不出的归普通）；
+  支持填价目把 token 折算成估算费用（元 / 百万 tokens，输入 / 输出 / 缓存命中三档），
+  价目存 config.toml 的 [usage_pricing]，默认全 0 = 不计价、界面只展示 token，按服务
+  覆盖走 [usage_pricing.providers.*]。新增 WS 方法 usage.collab_report（只读报表，
+  远端可查）与 usage.pricing_set（写配置，仅桌面本机）。
+
 ## [2.6.2] - 2026-10-26
 
 ### 修复

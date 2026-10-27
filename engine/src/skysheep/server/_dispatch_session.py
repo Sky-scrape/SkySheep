@@ -334,6 +334,15 @@ async def _h_usage_stats(backend: ServerBackend, params: dict, emit, local: bool
     return await backend.usage_stats(params)
 
 
+async def _h_usage_collab_report(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 只读报表：与 usage.stats 同姿态，远端照常可查（按项目口径收敛）
+    return await backend.usage_collab_report(params)
+
+
+async def _h_usage_pricing_set(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.usage_pricing_set(params)
+
+
 # ---- 本域方法的注册表条目（自 app.py 的 _WS_METHODS 逐字切片） ----
 METHODS: dict[str, _WsMethod] = {
     "session.search": _WsMethod(_h_session_search, local_gate=_gate_session_search),
@@ -383,4 +392,9 @@ METHODS: dict[str, _WsMethod] = {
     "term.stop": _WsMethod(_h_term_stop),
     "term.close": _WsMethod(_h_term_close, local_only=True),
     "usage.stats": _WsMethod(_h_usage_stats),
+    # 协作成本看板：报表只读（远端可查）；价目写 config.toml，本机专属
+    "usage.collab_report": _WsMethod(_h_usage_collab_report),
+    "usage.pricing_set": _WsMethod(
+        _h_usage_pricing_set, local_only=True,
+        local_error="价目设置会写入配置，只能在桌面端本机执行"),
 }

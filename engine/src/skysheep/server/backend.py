@@ -42,6 +42,7 @@ from ..config import (
     resolve_websearch,
     set_provider_models_in_config,
     set_subagent_settings_in_config,
+    set_usage_pricing_in_config,
     skysheep_home,
     update_config_section,
     update_provider_in_config,
@@ -4851,6 +4852,219 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             # 每日预算与当日用量：用量页据此显示「今日已用 / 预算」，0 = 未设上限
             "budget": self.cfg.daily_token_budget,
             "today": await self.store.usage_today(),
+        }
+
+    # ---- 协作成本看板（usage.collab_report / usage.pricing_set） ----
+
+    # usage_log 没有协作形态列，形态只能从会话消息的落库 JSON 判（不硬造）：
+    # 圆桌 / 团队 / 对抗的 meta 随 assistant 消息持久化（Message.roundtable /
+    # adversarial，见 messages.py 与上面圆桌 / 团队 / 对抗收尾的落库代码），
+    # 普通消息的 JSON 里这些槽是 null——所以 LIKE 必须带 "{"（对象开头），
+    # 只匹配 '"roundtable":' 会把每条普通消息都误判成圆桌。团队摘要复用
+    # roundtable 槽（_team_meta：mode == "team"），对抗用独立 adversarial 槽。
+    # 判定是会话级：一个会话混用多种形态时按 对抗 > 团队 > 圆桌 的固定优先级
+    # 归类（现有字段分不出逐轮归属，宁可整会话归一类也不硬拆），其余归「普通」。
+    _MARK_ADVERSARIAL = "content LIKE '%\"adversarial\":{%'"
+    _MARK_ROUNDTABLE = "content LIKE '%\"roundtable\":{%'"
+    _MARK_TEAM = ("content LIKE '%\"roundtable\":{%' AND"
+                  " content LIKE '%\"mode\":\"team\"%'")
+
+    @staticmethod
+    def _fold_usage_cost(it: int, ot: int, cached: int,
+                         prices: tuple[float, float, float]) -> float:
+        """按价目（输入 / 输出 / 缓存命中，元 / 百万 tokens）折算一组用量。
+
+        缓存命中价（>0）时把命中部分从输入价里拆出来单算（与 usage_stats 同式）：
+        多数服务命中提示词缓存的输入便宜得多（DeepSeek 约输入价 1/10）。
+        """
+        p_in, p_out, p_cache = prices
+        if p_cache > 0 and cached > 0:
+            cost = max(0, it - cached) / 1e6 * p_in + cached / 1e6 * p_cache
+        else:
+            cost = it / 1e6 * p_in
+        return cost + ot / 1e6 * p_out
+
+    async def usage_collab_report(self, params: dict) -> dict:
+        """协作成本看板：近 N 天（默认 30）按会话与协作形态聚合 token 与轮次。
+
+        只读。与 usage.stats 同一套项目口径（B14：有项目态只统计该项目，
+        带会话标题的 by_session 只在项目态下发）；费用折算用 [usage_pricing]
+        价目（providers.<服务名> 覆盖默认价），全 0 = 不计价，前端只展示 token。
+        「轮次」按用量入账行计：普通会话每轮一行；圆桌 / 团队 / 对抗按成员
+        （或角色）逐行入账，行数不是回合数——如实呈现，不做换算。
+        """
+        days = min(90, max(1, int(params.get("days", 30))))
+        now = time.time()
+        since = now - days * 86400
+        lt = time.localtime()
+        midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        window_start = min(since, midnight)
+        scoped = self.project is not None
+        pz = self.cfg.usage_pricing
+
+        def pricing_block() -> dict:
+            return {"price_in": pz.price_in, "price_out": pz.price_out,
+                    "price_cache": pz.price_cache}
+
+        def empty() -> dict:
+            blank = {"sessions": 0, "turns": 0, "in": 0, "out": 0, "cached": 0, "cost": 0.0}
+            keys = ("normal", "roundtable", "team", "adversarial")
+            return {
+                "days": days, "has_price": False, "pricing": pricing_block(),
+                "forms": {k: dict(blank) for k in keys},
+                "today": {k: dict(blank) for k in keys},
+                "by_session": [],
+            }
+
+        db = self.store._db
+        if db is None:
+            return empty()
+        try:
+            join = (
+                " FROM usage_log l JOIN sessions s ON s.id = l.session_id"
+                if scoped else " FROM usage_log l LEFT JOIN sessions s ON s.id = l.session_id"
+            )
+            cond = " WHERE l.ts >= ?" + (" AND s.project_id = ?" if scoped else "")
+            # 占位符顺序跟 SQL 文本走：SELECT 里 4 个 CASE 的 midnight，
+            # 再 WHERE 里的窗口起点，最后（项目态）才轮到 s.project_id
+            args: tuple = (midnight, midnight, midnight, midnight, window_start)
+            if scoped:
+                args = (*args, self.project.id)
+            cur = await db.execute(
+                "SELECT l.session_id AS sid, MAX(s.title) AS title,"
+                " l.provider AS provider,"
+                " SUM(l.in_tokens) AS it, SUM(l.out_tokens) AS ot,"
+                " SUM(l.cached_tokens) AS ct,"
+                " COUNT(*) AS turns, MAX(l.ts) AS last_ts,"
+                " SUM(CASE WHEN l.ts >= ? THEN l.in_tokens ELSE 0 END) AS it_td,"
+                " SUM(CASE WHEN l.ts >= ? THEN l.out_tokens ELSE 0 END) AS ot_td,"
+                " SUM(CASE WHEN l.ts >= ? THEN l.cached_tokens ELSE 0 END) AS ct_td,"
+                " SUM(CASE WHEN l.ts >= ? THEN 1 ELSE 0 END) AS turns_td"
+                + join + cond + " GROUP BY l.session_id, l.provider",
+                args,
+            )
+            groups = [dict(r) for r in await cur.fetchall()]
+            # 形态判定：只扫窗口内有用量的会话（子查询走 idx_usage_ts），
+            # 消息内容按标记 LIKE，命中即该会话出现过对应协作形态
+            cur = await db.execute(
+                "SELECT m.session_id AS sid,"
+                f" MAX({self._MARK_ADVERSARIAL}) AS adv,"
+                f" MAX({self._MARK_TEAM}) AS team,"
+                f" MAX({self._MARK_ROUNDTABLE}) AS rt"
+                " FROM messages m WHERE m.session_id IN"
+                " (SELECT DISTINCT session_id FROM usage_log WHERE ts >= ?)"
+                " GROUP BY m.session_id",
+                (window_start,),
+            )
+            form_by_sid: dict[str, str] = {}
+            for r in await cur.fetchall():
+                if r["adv"]:
+                    form_by_sid[r["sid"]] = "adversarial"
+                elif r["team"]:
+                    form_by_sid[r["sid"]] = "team"
+                elif r["rt"]:
+                    form_by_sid[r["sid"]] = "roundtable"
+                else:
+                    form_by_sid[r["sid"]] = "normal"
+        except Exception as e:  # noqa: BLE001 - 查不动（迁移中等）时回空报表，不炸用量页
+            logger.warning("协作成本报表查询失败，回空报表：%s", e)
+            return empty()
+
+        def price_for(provider: str) -> tuple[float, float, float]:
+            entry = pz.providers.get(provider or "")
+            if entry is not None:
+                return entry.price_in, entry.price_out, entry.price_cache
+            return pz.price_in, pz.price_out, pz.price_cache
+
+        def new_bucket() -> dict:
+            return {"sessions": set(), "turns": 0, "in": 0, "out": 0,
+                    "cached": 0, "cost": 0.0}
+
+        forms = {k: new_bucket() for k in ("normal", "roundtable", "team", "adversarial")}
+        today = {k: new_bucket() for k in ("normal", "roundtable", "team", "adversarial")}
+        by_session: dict[str, dict] = {}
+        for g in groups:
+            form = form_by_sid.get(g["sid"] or "", "normal")
+            prices = price_for(g["provider"] or "")
+            total_cost = self._fold_usage_cost(
+                g["it"] or 0, g["ot"] or 0, g["ct"] or 0, prices)
+            today_cost = self._fold_usage_cost(
+                g["it_td"] or 0, g["ot_td"] or 0, g["ct_td"] or 0, prices)
+            for bucket, it, ot, ct, turns, cost in (
+                (forms[form], g["it"], g["ot"], g["ct"], g["turns"], total_cost),
+                (today[form], g["it_td"], g["ot_td"], g["ct_td"], g["turns_td"], today_cost),
+            ):
+                bucket["sessions"].add(g["sid"] or "")
+                bucket["turns"] += int(turns or 0)
+                bucket["in"] += int(it or 0)
+                bucket["out"] += int(ot or 0)
+                bucket["cached"] += int(ct or 0)
+                bucket["cost"] += cost
+            row = by_session.setdefault(g["sid"] or "", {
+                "sid": g["sid"] or "", "title": g["title"] or "", "form": form,
+                "in": 0, "out": 0, "cached": 0, "turns": 0, "cost": 0.0, "last_ts": 0.0,
+            })
+            row["in"] += int(g["it"] or 0)
+            row["out"] += int(g["ot"] or 0)
+            row["cached"] += int(g["ct"] or 0)
+            row["turns"] += int(g["turns"] or 0)
+            row["cost"] += total_cost
+            row["last_ts"] = max(row["last_ts"], g["last_ts"] or 0.0)
+
+        def dump(buckets: dict) -> dict:
+            return {
+                key: {
+                    "sessions": len(v["sessions"]), "turns": v["turns"],
+                    "in": v["in"], "out": v["out"], "cached": v["cached"],
+                    "cost": round(v["cost"], 4),
+                }
+                for key, v in buckets.items()
+            }
+
+        sess_rows = sorted(
+            by_session.values(), key=lambda r: r["in"] + r["out"], reverse=True,
+        )[:12]
+        return {
+            "days": days,
+            "has_price": bool(
+                pz.price_in or pz.price_out or pz.price_cache
+                or any(e.price_in or e.price_out or e.price_cache
+                       for e in pz.providers.values())
+            ),
+            "pricing": pricing_block(),
+            "forms": dump(forms),
+            "today": dump(today),
+            # B14：带会话标题的明细只给项目态（与 usage.stats 同一口径）
+            "by_session": sess_rows if scoped else [],
+        }
+
+    async def usage_pricing_set(self, params: dict) -> dict:
+        """保存协作成本看板的默认价目（元 / 百万 tokens），落 config.toml 后热生效。
+
+        本机专属（dispatch 注册 local_only）：写的是配置文件。providers 子表
+        （按服务覆盖）不在此改，界面只编辑默认价目。
+        """
+        picked: dict[str, float | None] = {}
+        for key, label in (("price_in", "输入价"), ("price_out", "输出价"),
+                           ("price_cache", "缓存命中价")):
+            raw = params.get(key)
+            if raw is None or raw == "":
+                picked[key] = None
+                continue
+            try:
+                picked[key] = float(raw)
+            except (TypeError, ValueError):
+                raise RuntimeError(f"{label}需要一个数字（元 / 百万 tokens）") from None
+        try:
+            set_usage_pricing_in_config(**picked)
+        except ConfigError as e:
+            raise RuntimeError(str(e)) from e
+        self.cfg = load_config()  # 与其它设置项同一姿态：保存后重载即热生效
+        pz = self.cfg.usage_pricing
+        return {
+            "price_in": pz.price_in, "price_out": pz.price_out,
+            "price_cache": pz.price_cache,
+            "has_price": bool(pz.price_in or pz.price_out or pz.price_cache),
         }
 
     def _workspace_path(self, raw: str) -> Path:

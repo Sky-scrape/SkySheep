@@ -149,6 +149,30 @@ class AdversarialConfig(BaseModel):
     role_timeout_s: int = Field(default=300, ge=10)  # 单角色单次调用超时（裁判自动加倍）
 
 
+class UsagePriceEntry(BaseModel):
+    """单项价目（元 / 百万 tokens）：0 = 该项不计价。"""
+
+    price_in: float = Field(default=0.0, ge=0)
+    price_out: float = Field(default=0.0, ge=0)
+    price_cache: float = Field(default=0.0, ge=0)
+
+
+class UsagePricingConfig(BaseModel):
+    """协作成本看板的价目（config.toml [usage_pricing]）。
+
+    供 usage.collab_report（用量页「协作成本」卡）把 token 用量折算成估算
+    费用；与模型服务详情页的 [providers.*].price_*（usage.stats 用）相互
+    独立、互不影响。三项默认价全 0 = 不计价，界面只展示 token。
+    providers 子表按服务名覆盖默认价（[usage_pricing.providers.deepseek]），
+    未覆盖的服务回退默认价；界面只编辑默认价，按服务覆盖走 config.toml。
+    """
+
+    price_in: float = Field(default=0.0, ge=0)
+    price_out: float = Field(default=0.0, ge=0)
+    price_cache: float = Field(default=0.0, ge=0)
+    providers: dict[str, UsagePriceEntry] = Field(default_factory=dict)
+
+
 class CronConfig(BaseModel):
     """定时任务（cron_tasks）的全局行为。
 
@@ -426,6 +450,9 @@ class SkySheepConfig(BaseModel):
     memory_digest: bool = True
     memory_maintenance: MemoryMaintenanceConfig = Field(default_factory=MemoryMaintenanceConfig)
     memory_map: MemoryMapConfig = Field(default_factory=MemoryMapConfig)
+    # 协作成本看板的价目（[usage_pricing]）：usage.collab_report 折算费用用，
+    # 默认价全 0 = 不计价（界面只展示 token）。
+    usage_pricing: UsagePricingConfig = Field(default_factory=UsagePricingConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
     factory: FactoryConfig = Field(default_factory=FactoryConfig)
@@ -610,6 +637,7 @@ def load_config() -> SkySheepConfig:
     memory_maintenance = MemoryMaintenanceConfig()
     memory_map = MemoryMapConfig()
     retention = RetentionConfig()
+    usage_pricing = UsagePricingConfig()
     archive = ArchiveConfig()
     factory = FactoryConfig()
     shell = ShellConfig()
@@ -706,6 +734,9 @@ def load_config() -> SkySheepConfig:
         net_raw = raw.get("network")
         if isinstance(net_raw, dict):
             network = _build_section_model(NetworkConfig, net_raw, "network")
+        up_raw = raw.get("usage_pricing")
+        if isinstance(up_raw, dict):
+            usage_pricing = _build_section_model(UsagePricingConfig, up_raw, "usage_pricing")
         channels = _load_channels(raw.get("channels"))
         for name, section in (raw.get("providers") or {}).items():
             if not isinstance(section, dict):
@@ -765,6 +796,7 @@ def load_config() -> SkySheepConfig:
             memory_maintenance=memory_maintenance,
             memory_map=memory_map,
             retention=retention,
+            usage_pricing=usage_pricing,
             archive=archive,
             factory=factory,
             roundtable=roundtable,
@@ -1013,6 +1045,41 @@ def set_retention_in_config(
         raw["retention"] = section
     else:
         raw.pop("retention", None)
+    _write_raw_config(p, raw)
+
+
+def set_usage_pricing_in_config(
+    *,
+    price_in: float | None = None,
+    price_out: float | None = None,
+    price_cache: float | None = None,
+) -> None:
+    """写入 config.toml 的 [usage_pricing] 默认价目（None 表示该项不动）。
+
+    用量页「协作成本」卡的价目编辑走这里（usage.pricing_set），与其它设置项
+    同一套读写路径（_read_raw_config / _write_raw_config，不手拼 TOML）。
+    单价为元 / 百万 tokens，负数在写入前就报错；三项全 0 = 不计价。
+    providers 子表（按服务覆盖）不在此编辑，留给 config.toml 手改。
+    """
+    for name, value in (
+        ("输入价", price_in), ("输出价", price_out), ("缓存命中价", price_cache),
+    ):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ConfigError(f"{name}要是不小于 0 的数字（元 / 百万 tokens）")
+    p, raw = _read_raw_config()
+    section = dict(raw.get("usage_pricing") or {})
+    if price_in is not None:
+        section["price_in"] = round(float(price_in), 6)
+    if price_out is not None:
+        section["price_out"] = round(float(price_out), 6)
+    if price_cache is not None:
+        section["price_cache"] = round(float(price_cache), 6)
+    if section:
+        raw["usage_pricing"] = section
+    else:
+        raw.pop("usage_pricing", None)
     _write_raw_config(p, raw)
 
 

@@ -86,6 +86,24 @@ def _no_local_embeddings(monkeypatch):
     monkeypatch.setattr(memory_embed, "_vec_cache", {})
 
 
+@pytest.fixture(autouse=True)
+def _no_shell_popups(monkeypatch):
+    """测试默认不真弹资源管理器/系统默认程序。
+
+    导出包的「定位文件」、诊断包、打开目录、打开工作区文件走的都是真实
+    系统调用（ShellExecuteW / explorer），不拦住的话，全量测试凡是路过
+    导出/打开目录的用例都会在桌面上弹一个资源管理器窗口。要断言「打开了
+    哪」的用例自己 setattr 记录器即可（test_session_project_path_and_reveal
+    与 test_open_path_valid_kind 的写法——用例级 setattr 在本 fixture 之后
+    生效，互不干扰）。
+    """
+    from skysheep import support
+
+    monkeypatch.setattr(support, "reveal", lambda path: None)
+    monkeypatch.setattr(support, "open_folder", lambda path: None)
+    monkeypatch.setattr(support, "open_with_default_app", lambda path: "opened")
+
+
 @pytest.fixture
 async def store(tmp_path):
     s = await SessionStore(tmp_path / "test.db").connect()

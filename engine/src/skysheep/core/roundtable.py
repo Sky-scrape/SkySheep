@@ -283,9 +283,8 @@ class RoundtableOutcome:
     fused_text: str = ""
     status: str = "done"
     error: str = ""
-    input_tokens: int = 0  # 成员轮用量合计
-    output_tokens: int = 0
-    # 融合轮（主席）的用量单独放：调用方把成员逐条入账、融合记主席名下
+    # 用量不设合计字段（审计 SEC-L22：原合计字段无消费方，已删）：成员用量逐条
+    # 在 members 里（辩论跨轮已累计），融合轮记主席名下，入账统一走 usage_rows
     chair_input_tokens: int = 0
     chair_output_tokens: int = 0
     chair_cached_tokens: int = 0
@@ -667,11 +666,6 @@ async def run_roundtable(
     #（_fusion_draft_budget 也按全量历史估算，口径一致）
     member_history = recent_turn_history(history, member_history_turns)
 
-    def _settle_usage(cur: list[MemberResult]) -> None:
-        """把当前一轮 results 里的用量累计进 outcome（逐轮取 max，防跳过成员重复算）。"""
-        outcome.input_tokens = sum(r.input_tokens for r in cur)
-        outcome.output_tokens = sum(r.output_tokens for r in cur)
-
     try:
         prev: list[MemberResult] = []
         # prev_before：上一轮的前一轮草稿文本（判断成员「修订后没改动」用）
@@ -697,7 +691,6 @@ async def run_roundtable(
             for r in results:
                 if r.status == "error":
                     fail_counts[r.index] = fail_counts.get(r.index, 0) + 1
-            _settle_usage(results)
             # 全员收敛（本轮没有任何成员实际修订）→ 提前结束辩论
             if round_no > 0 and prev and len(results) == len(prev) and all(
                 a is b for a, b in zip(results, prev, strict=False)

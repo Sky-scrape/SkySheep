@@ -193,9 +193,11 @@ async def test_run_roundtable_flow_and_fusion_input(monkeypatch):
 
     assert outcome.status == "done"
     assert outcome.fused_text == "最终融合答案"
-    # 用量分两层记：成员轮合计 + 融合轮（主席名下），FakeProvider 每次 7
-    assert outcome.output_tokens == 7 * 2
+    # 用量分两层记：成员逐条（各成员跨轮累计）+ 融合轮（主席名下），FakeProvider 每次 7
     assert outcome.chair_output_tokens == 7
+    # SEC-L22 回归：无人消费的「成员用量合计」字段已随 _settle_usage 删除
+    assert not hasattr(outcome, "input_tokens")
+    assert not hasattr(outcome, "output_tokens")
     rows = usage_rows(outcome)
     assert sum(r["output_tokens"] for r in rows) == 7 * 3
     assert len(rows) == 3  # 2 成员 + 1 主席
@@ -617,6 +619,44 @@ async def test_debate_converged_member_is_skipped():
     skipped = [e for e in events if e.kind == "roundtable_member_finished" and e.skipped]
     assert len(skipped) == 1
     assert skipped[0].member_index == 0 and skipped[0].round == 2
+
+
+@pytest.mark.asyncio
+async def test_debate_skipped_member_usage_not_double_counted():
+    """SEC-L22 回归：辩论轮被跳过的成员不重复计入用量。
+
+    用量只记两处：每成员一行的跨轮累计值（usage_rows 读 members）+ 主席名下；
+    跳过轮不花钱、不发 Usage。原 outcome 上的成员用量合计字段由 _settle_usage
+    以 sum 维护、docstring 却称「取 max」且全仓库无消费方，已随字段一并删除。"""
+    member_a = FakeProvider([[TextBlock(text="A1")], [TextBlock(text="A1")]])
+    member_b = FakeProvider([
+        [TextBlock(text="B1")], [TextBlock(text="B2")], [TextBlock(text="B3")],
+    ])
+    chair = FakeProvider([[TextBlock(text="融合")]])
+    events, emit = collector()
+
+    outcome = await run_roundtable(
+        members=[make_member(member_a, "A"), make_member(member_b, "B")],
+        chair=chair, system_text="SYS", history=HISTORY, user_text="Q",
+        timeout_s=30, emit=emit, debate_rounds=2,
+    )
+
+    assert outcome.status == "done"
+    assert len(member_a.calls) == 2 and len(member_b.calls) == 3  # A 第 3 轮被跳过
+    # 合计字段已删：用量只住在逐成员行与 chair_* 里
+    assert not hasattr(outcome, "input_tokens")
+    assert not hasattr(outcome, "output_tokens")
+
+    rows = usage_rows(outcome)
+    assert len(rows) == 3  # 每成员恰一行 + 主席，多轮辩论不会重复出行
+    # FakeProvider 单次 11/7：A 两轮累计、B 三轮累计、主席一次；跳过轮零成本
+    assert (rows[0]["input_tokens"], rows[0]["output_tokens"]) == (11 * 2, 7 * 2)
+    assert (rows[1]["input_tokens"], rows[1]["output_tokens"]) == (11 * 3, 7 * 3)
+    assert (rows[2]["input_tokens"], rows[2]["output_tokens"]) == (11, 7)
+    # 交叉验证：usage_rows 合计 == 逐轮 Usage 事件之和（事件流逐轮诚实值）
+    usage_events = [e for e in events if e.kind == "usage"]
+    assert sum(e.input_tokens for e in usage_events) == sum(r["input_tokens"] for r in rows)
+    assert sum(e.output_tokens for e in usage_events) == sum(r["output_tokens"] for r in rows)
 
 
 @pytest.mark.asyncio

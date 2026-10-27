@@ -116,6 +116,33 @@ def test_apply_pending_reset_renames_profile_and_clears_marker(home):
     assert not any(base.glob("*.old-*")), "改名后的残留要清干净"
 
 
+def test_apply_pending_reset_purges_root_level_renames(home):
+    """审计 SEC-L30 回归：profile 尚无 EBWebView 内层时（首次清除的典型形态），
+    改名让位的是整个 ``<名>``，产物落根级 ``<名>.old-*``——后台清理必须也扫根级，
+    否则孤儿目录永久留存（旧版只扫 ``<名>/`` 内层）。"""
+    from skysheep.config import skysheep_home
+
+    root_home = skysheep_home()
+    for name in webviewargs.PROFILE_DIRS:
+        (root_home / name / "Default").mkdir(parents=True)  # 无 EBWebView 内层
+    stale = root_home / "webview.old-999"  # 上次启动没删完的根级残留
+    stale.mkdir()
+    foreign = root_home / "logs.old-1"  # 名单外：不能顺手扫掉
+    foreign.mkdir()
+    (root_home / webviewargs.RESET_MARKER_NAME).write_text("{}", encoding="utf-8")
+
+    renamed = webviewargs.apply_pending_reset()
+    assert len(renamed) == len(webviewargs.PROFILE_DIRS), "两份 profile 都要让位"
+    assert all(t.parent == root_home for t in renamed), "无内层时产物落根级（本回归的前提）"
+
+    deadline = time.time() + 10
+    while time.time() < deadline and (stale.exists() or any(t.exists() for t in renamed)):
+        time.sleep(0.05)
+    assert not any(t.exists() for t in renamed), "根级改名产物要被后台清理删掉"
+    assert not stale.exists(), "上次启动留下的根级残留也要被扫掉"
+    assert foreign.exists(), "只认 PROFILE_DIRS 名单，名单外的 .old-* 不能动"
+
+
 def test_apply_pending_reset_noop_without_marker(home):
     from skysheep.config import skysheep_home
 

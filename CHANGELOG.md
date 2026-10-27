@@ -46,6 +46,11 @@
   `s.project_id = ?` 绑定，传 None（快聊——store 注释明确是合法过滤目标）时
   `= NULL` 恒假、静默返回空统计；两处项目条件改为 `IS ?`（与 relay_list_tasks
   同一写法），并补快聊过滤回归测试。
+- **浏览器数据清除的根级残留（审计 SEC-L30）**：profile 尚无 EBWebView 内层时
+  （首次清除的典型形态），「清除全部浏览器数据」改名让位的是整个 profile 目录，
+  产物落根级 `webview.old-<stamp>`，而启动前的后台清理只扫 `webview/` 内层的
+  `*.old-*`，根级孤儿目录永久留存；`_purge_old_dirs` 现按 PROFILE_DIRS 名单
+  （字面前缀，不做 `webview*` 通配）同样扫描根级，并补无内层场景回归测试。
 
 ## [2.6.2] - 2026-10-26
 

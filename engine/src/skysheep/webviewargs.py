@@ -180,11 +180,19 @@ def apply_pending_reset(home: Path | None = None) -> list[Path]:
 
 
 def _purge_old_dirs(home: Path) -> None:
-    """删掉改名留下的 ``*.old-*`` 目录（含上次启动没删完的残留）。"""
+    """删掉改名留下的 ``*.old-*`` 目录（含上次启动没删完的残留）。
+
+    改名产物有两层落点（审计 SEC-L30）：profile 已建 EBWebView 内层时，改名的是
+    内层 ``<名>/EBWebView``，产物在 ``<名>/`` 下；尚无内层（首次清除的典型形态）
+    时，改名的是整个 ``<名>``，产物落根级 ``<名>.old-*``。两处都要扫，仍只认
+    PROFILE_DIRS 名单（字面 ``<名>.old-`` 前缀），不做 ``webview*`` 通配。
+    """
     for name in PROFILE_DIRS:
         base = home / name
+        leftovers: list[Path] = []
         try:
-            leftovers = list(base.glob("*.old-*"))
+            leftovers.extend(base.glob("*.old-*"))
+            leftovers.extend(home.glob(f"{name}.old-*"))
         except OSError:
             continue
         for d in leftovers:

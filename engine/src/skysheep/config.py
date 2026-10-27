@@ -134,6 +134,10 @@ class TeamConfig(BaseModel):
     # 停滞上限（二期，设计 §9）：队员连续 N 轮发言无新工具结果 → 停止自动唤醒，
     # 强制移交总管处置（改派/放弃）。1 起步：0 等于没有这道边界
     stall_limit: int = Field(default=2, ge=1)
+    # 无人值守空闲续跑（定时团队，团队模式设计 §14）：定时触发后总管空闲
+    # （run_auto_turn 因连续无进展退出）时自动补发续跑指令的次数上限。
+    # 0 = 空闲即收队（照常产出《交付说明》与未尽事项）；上限 3 防空转烧 token
+    cron_resume_limit: int = Field(default=1, ge=0, le=3)
 
 
 class AdversarialConfig(BaseModel):

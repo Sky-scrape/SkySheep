@@ -1134,71 +1134,86 @@ async def _cron_run_async(
                 raise SystemExit("指定的项目目录不存在: " + str(project_dir))
             working_dir = explicit.resolve()
 
-        # 信任口径与 run_headless 一致：有过信任记录才启用项目自带的 mcp/技能
-        trusted = WorkspaceTrust(skysheep_home(), working_dir).is_trusted()
-        skills, mcp, tasks, registry, hooks = await _assemble_headless_engine(
-            store, working_dir, cfg, provider_obj, trusted)
+        # 一期口径（团队模式设计 §14.6）：团队任务只在应用内触发（后端扫描 /
+        # 立即运行）。CLI 侧没有模板册与成员解析的装配对应物（backend 的
+        # team_templates / _resolve_team_members），半截装配只会建出注定空转的
+        # 团队——按失败收尾：单轮入口直接报错，走下方 run_cron_task_core 的
+        # 错误回写（last_status=error）与 notify_channel 推送，不静默跳过；
+        # 引擎装配一并跳过（MCP 连接对一个注定失败的运行纯属浪费与拖慢）。
+        if str(task.get("mode") or "agent") == "team":
+            async def reject_team(t: dict):
+                raise RuntimeError(
+                    "团队任务暂不支持系统计划任务入口（skysheep cron run）；"
+                    "请在应用内触发运行")
+            one_round = reject_team
+        else:
+            # 信任口径与 run_headless 一致：有过信任记录才启用项目自带的 mcp/技能
+            trusted = WorkspaceTrust(skysheep_home(), working_dir).is_trusted()
+            skills, mcp, tasks, registry, hooks = await _assemble_headless_engine(
+                store, working_dir, cfg, provider_obj, trusted)
+
+            async def agent_turn(t: dict):
+                # 与后端 _execute_cron_turn 同构：独立会话 + HeadlessGate + 一轮
+                sess = await store.create_session(t["project_id"], title=f"⏰ {t['name']}")
+                sid = sess.id
+                gate = HeadlessGate(allowed=t["allowed_tools"], store=store,
+                                    project_id=t["project_id"], working_dir=working_dir)
+                agent = Agent(
+                    provider=provider_obj,
+                    registry=registry,
+                    gate=gate,
+                    working_dir=working_dir,
+                    max_iterations=cfg.max_iterations,
+                    context_limit_tokens=cfg.context_limit_tokens,
+                    compaction_keep_recent=cfg.compaction_keep_recent,
+                    compaction_trigger=cfg.compaction_trigger,
+                    compaction_auto=cfg.compaction_auto,
+                    hooks=hooks,
+                    restrict_to_workdir=cfg.restrict_to_workdir,
+                    session_id=sid,
+                    job_containment=cfg.shell.job_containment,
+                    sandbox_level=cfg.shell.sandbox_level,
+                    use_ripgrep=cfg.search.use_ripgrep,
+                )
+                agent.set_system(
+                    build_system_prompt(working_dir)
+                    + skills.render_prompt_section()
+                    + render_memory_section()
+                )
+                runtime = SessionRuntime(sid=sid, agent=agent, recorder=ChangeRecorder())
+                n_before = len(agent.history)
+                error = None
+                stop_reason = "error"
+                denied = 0  # 被无人值守门控拒绝的工具次数（预授权没勾全的痕迹）
+                async for ev in agent.run_turn(t["prompt"]):
+                    if isinstance(ev, ErrorEvent):
+                        error = ev.message
+                    elif isinstance(ev, TurnFinished):
+                        stop_reason = ev.stop_reason
+                    elif isinstance(ev, PermissionResolved) and ev.decision == "deny":
+                        denied += 1
+                # 消息落库（run_headless 同款）：异常结束的一轮也要可审计
+                for m in agent.history[n_before:]:
+                    await store.append_message(sid, m)
+                await store.touch(sid)
+                try:
+                    await store.add_usage(
+                        sid, name, getattr(provider_obj, "model", ""),
+                        agent.total_in_tokens, agent.total_out_tokens,
+                        agent.total_cached_tokens,
+                    )
+                except Exception:  # noqa: BLE001 - 用量记录失败不影响执行
+                    pass
+                if error is not None or stop_reason not in ("end_turn", "max_iterations"):
+                    # 异常结束按失败收尾：run_cron_task_core 回写错误状态、渠道必推
+                    raise RuntimeError(error or f"轮次异常结束（{stop_reason}）")
+                return runtime, sid, False, {"denied": denied}
+
+            one_round = agent_turn
         channels = _build_sendonly_channels(cfg)
 
-        async def execute(t: dict):
-            # 与后端 _execute_cron_turn 同构：独立会话 + HeadlessGate + 一轮
-            sess = await store.create_session(t["project_id"], title=f"⏰ {t['name']}")
-            sid = sess.id
-            gate = HeadlessGate(allowed=t["allowed_tools"], store=store,
-                                project_id=t["project_id"], working_dir=working_dir)
-            agent = Agent(
-                provider=provider_obj,
-                registry=registry,
-                gate=gate,
-                working_dir=working_dir,
-                max_iterations=cfg.max_iterations,
-                context_limit_tokens=cfg.context_limit_tokens,
-                compaction_keep_recent=cfg.compaction_keep_recent,
-                compaction_trigger=cfg.compaction_trigger,
-                compaction_auto=cfg.compaction_auto,
-                hooks=hooks,
-                restrict_to_workdir=cfg.restrict_to_workdir,
-                session_id=sid,
-                job_containment=cfg.shell.job_containment,
-                sandbox_level=cfg.shell.sandbox_level,
-                use_ripgrep=cfg.search.use_ripgrep,
-            )
-            agent.set_system(
-                build_system_prompt(working_dir)
-                + skills.render_prompt_section()
-                + render_memory_section()
-            )
-            runtime = SessionRuntime(sid=sid, agent=agent, recorder=ChangeRecorder())
-            n_before = len(agent.history)
-            error = None
-            stop_reason = "error"
-            denied = 0  # 被无人值守门控拒绝的工具次数（预授权没勾全的痕迹）
-            async for ev in agent.run_turn(t["prompt"]):
-                if isinstance(ev, ErrorEvent):
-                    error = ev.message
-                elif isinstance(ev, TurnFinished):
-                    stop_reason = ev.stop_reason
-                elif isinstance(ev, PermissionResolved) and ev.decision == "deny":
-                    denied += 1
-            # 消息落库（run_headless 同款）：异常结束的一轮也要可审计
-            for m in agent.history[n_before:]:
-                await store.append_message(sid, m)
-            await store.touch(sid)
-            try:
-                await store.add_usage(
-                    sid, name, getattr(provider_obj, "model", ""),
-                    agent.total_in_tokens, agent.total_out_tokens,
-                    agent.total_cached_tokens,
-                )
-            except Exception:  # noqa: BLE001 - 用量记录失败不影响执行
-                pass
-            if error is not None or stop_reason not in ("end_turn", "max_iterations"):
-                # 异常结束按失败收尾：run_cron_task_core 回写错误状态、渠道必推
-                raise RuntimeError(error or f"轮次异常结束（{stop_reason}）")
-            return runtime, sid, False, {"denied": denied}
-
         final = await run_cron_task_core(
-            store, task_id, force=False, execute=execute,
+            store, task_id, force=False, execute=one_round,
             broadcast=lambda t: print(f"⏰ {t['name']}：{t['last_status']}"),
             notify=None,  # 无桌面：不打 toast，渠道推送照常
             channels=channels,

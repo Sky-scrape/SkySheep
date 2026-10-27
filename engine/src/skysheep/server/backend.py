@@ -4535,12 +4535,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "max_rounds": t.max_rounds,
             "redo_limit": t.redo_limit,
             "stall_limit": t.stall_limit,
+            "cron_resume_limit": t.cron_resume_limit,
             "config_hint": (
                 "团队让多个模型分工协作：总管拆解目标、登记工单，队员按工单真实"
                 "读写文件、运行命令（照常走权限确认），完成后交付。成员来自「模型"
                 "服务」里已配好 Key 的服务，在输入框的团队面板勾选并写一句话人设；"
-                "下面的上限用于防止自动循环失控。改动对之后新建的团队生效，进行中"
-                "的团队沿用建队时的值。"
+                "下面的上限用于防止自动循环失控。「无人值守续跑」用于定时团队任务："
+                "总管空闲时自动补发续跑指令的次数（0 = 空闲即收队）。改动对之后新建"
+                "的团队生效，进行中的团队沿用建队时的值。"
             ),
         }
 
@@ -4559,6 +4561,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             updates["redo_limit"] = max(0, min(5, int(params["redo_limit"])))
         if params.get("stall_limit") is not None:
             updates["stall_limit"] = max(1, int(params["stall_limit"]))
+        if params.get("cron_resume_limit") is not None:
+            updates["cron_resume_limit"] = max(0, min(3, int(params["cron_resume_limit"])))
         if updates:
             update_config_section("team", updates)
             self.cfg = load_config()

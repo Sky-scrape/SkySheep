@@ -157,6 +157,44 @@ def test_cron_run_cli_pushes_summary_to_channel(home, cron_task, monkeypatch):
     assert "每日汇总" in text and "成功" in text
 
 
+def test_cron_run_cli_rejects_team_task(home, monkeypatch):
+    """一期口径：团队任务不在系统计划任务入口执行——按失败收尾（任务行回写
+    error + 提示语），不装配引擎、不产生任何模型调用。"""
+    import skysheep.cli.app as cli_app
+
+    provider = FakeProvider([[TextBlock(text="不该被调用")]])
+    _patch_provider(monkeypatch, provider)
+
+    async def make_team_task():
+        store = await SessionStore(db_path()).connect()
+        try:
+            proj = await store.get_or_create_project(str(home / "proj"))
+            task = await store.add_cron_task(
+                proj.id, "团队任务", "干活", "interval", interval_minutes=30,
+                mode="team", team_template="某模板")
+            return task
+        finally:
+            await store.close()
+
+    task = asyncio.run(make_team_task())
+
+    with pytest.raises(SystemExit) as ei:
+        cli_app.main(["cron", "run", str(task["id"])])
+    assert ei.value.code == 1
+    assert provider.calls == [], "团队任务不得产生任何模型调用"
+
+    async def check():
+        store = await SessionStore(db_path()).connect()
+        try:
+            row = await store.get_cron_task(task["id"])
+            assert row["last_status"] == "error"
+            assert "系统计划任务" in (row["last_result"] or "")
+        finally:
+            await store.close()
+
+    asyncio.run(check())
+
+
 def test_cron_run_cli_waits_for_inflight_push_before_exit(home, cron_task, monkeypatch):
     """退出前有界等在途推送落地：慢推送不再被 asyncio.run 收尾取消而静默丢失。
 

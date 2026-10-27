@@ -140,6 +140,11 @@ CREATE TABLE IF NOT EXISTS cron_tasks (
     allowed_tools TEXT NOT NULL DEFAULT '[]',
     enabled INTEGER NOT NULL DEFAULT 1,
     notify_channel INTEGER NOT NULL DEFAULT 0,
+    -- 任务形态（定时团队，四期）：agent = 单会话 Agent（既有行为）；
+    -- team = 到点按 team_template 引用的团队模板建队、AI 总管自动闭环。
+    -- allowed_tools 列在 team 模式下语义是「队员预授权名单」，不新增列。
+    mode TEXT NOT NULL DEFAULT 'agent',
+    team_template TEXT NOT NULL DEFAULT '',
     last_run_at REAL NOT NULL DEFAULT 0,
     last_status TEXT NOT NULL DEFAULT '',
     last_result TEXT NOT NULL DEFAULT '',
@@ -392,6 +397,8 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("whitelist_rules", "hit_count INTEGER NOT NULL DEFAULT 0"),
     ("whitelist_rules", "last_hit_at REAL NOT NULL DEFAULT 0"),
     ("cron_tasks", "notify_channel INTEGER NOT NULL DEFAULT 0"),
+    ("cron_tasks", "mode TEXT NOT NULL DEFAULT 'agent'"),
+    ("cron_tasks", "team_template TEXT NOT NULL DEFAULT ''"),
     ("pipelines", "notify_channel INTEGER NOT NULL DEFAULT 0"),
     ("automation_runs", "in_tokens INTEGER NOT NULL DEFAULT 0"),
     ("automation_runs", "out_tokens INTEGER NOT NULL DEFAULT 0"),
@@ -415,10 +422,12 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 #     （失败聚合告警的去重：同一产线同一天最多告警一次）。
 # v7：automation_runs 增 denied_tools（被拦工具名与次数的 JSON 快照）——
 #     只记次数无法告诉用户该补哪个预授权工具。
+# v8：cron_tasks 增 mode（任务形态：agent 单会话 / team 定时团队）与
+#     team_template（团队模板引用名）——定时团队（团队模式设计 §14）。
 # 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
 # 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
 # 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass
@@ -2688,6 +2697,10 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "allowed_tools": [t for t in (r["allowed_tools"] or "").split(",") if t],
             "enabled": bool(r["enabled"]),
             "notify_channel": bool(r["notify_channel"]),
+            # 任务形态（定时团队）：mode 原值 + is_team bool（前端按它分流渲染）
+            "mode": r["mode"] if "mode" in r.keys() else "agent",
+            "is_team": (r["mode"] if "mode" in r.keys() else "agent") == "team",
+            "team_template": r["team_template"] if "team_template" in r.keys() else "",
             "last_run_at": r["last_run_at"],
             "last_status": r["last_status"],
             "last_result": r["last_result"],
@@ -2706,16 +2719,19 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         weekday: int = -1,
         allowed_tools: list[str] | None = None,
         notify_channel: bool = False,
+        mode: str = "agent",
+        team_template: str = "",
     ) -> dict:
         assert self._db
         tools = ",".join(allowed_tools or [])
         now = time.time()
         cur = await self._db.execute(
             "INSERT INTO cron_tasks (project_id, name, prompt, schedule_type, interval_minutes,"
-            " time_of_day, weekday, allowed_tools, notify_channel, created_at, next_run_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " time_of_day, weekday, allowed_tools, notify_channel, mode, team_template,"
+            " created_at, next_run_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (project_id, name, prompt, schedule_type, interval_minutes, time_of_day,
-             weekday, tools, 1 if notify_channel else 0, now, 0.0),
+             weekday, tools, 1 if notify_channel else 0, mode, team_template, now, 0.0),
         )
         await self._db.commit()
         return await self.get_cron_task(cur.lastrowid)
@@ -2724,7 +2740,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         assert self._db
         allowed = ("name", "prompt", "schedule_type", "interval_minutes", "time_of_day",
                    "weekday", "allowed_tools", "enabled", "notify_channel", "next_run_at",
-                   "last_run_at", "last_status", "last_result")
+                   "last_run_at", "last_status", "last_result", "mode", "team_template")
         fields, args = [], []
         for k, v in kw.items():
             if k not in allowed:

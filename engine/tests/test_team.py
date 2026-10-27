@@ -2474,7 +2474,7 @@ def test_team_log_ws_replays_persisted_channel_and_checks_ownership(home):
 
 
 def test_teamcfg_ws_roundtrip_clamp_and_hot_effect(home):
-    """teamcfg.get/save（设置页 [team] 配置卡，三期）：get 回五键 + 中文说明；
+    """teamcfg.get/save（设置页 [team] 配置卡，三期）：get 回上限键 + 中文说明；
     save 走 config.toml（update_config_section，无手拼）并回传新状态——越界值
     int 化 + clamp 收口（仿 roundtable_save）；保存后**新建的团队**读到新值
     （max_members 截断名册 + 截断 Notice 是可见行为），配置卡说明「进行中的
@@ -2489,27 +2489,31 @@ def test_teamcfg_ws_roundtrip_clamp_and_hot_effect(home):
         assert q1["ok"], q1
         got = q1["result"]
         assert set(got) == {"max_members", "member_timeout_s", "max_rounds",
-                            "redo_limit", "stall_limit", "config_hint"}
+                            "redo_limit", "stall_limit", "cron_resume_limit",
+                            "config_hint"}
         assert (got["max_members"], got["member_timeout_s"], got["max_rounds"],
-                got["redo_limit"], got["stall_limit"]) == (3, 300, 40, 2, 2)
+                got["redo_limit"], got["stall_limit"],
+                got["cron_resume_limit"]) == (3, 300, 40, 2, 2, 1)
         assert isinstance(got["config_hint"], str) and got["config_hint"]
 
         # 越界收口：全部 clamp 进合法区间；字符串值 int 化
         ws.send_json({"id": "v1", "method": "teamcfg.save", "params": {
             "max_members": 99, "member_timeout_s": 1, "max_rounds": 0,
-            "redo_limit": 50, "stall_limit": "3",
+            "redo_limit": 50, "stall_limit": "3", "cron_resume_limit": 9,
         }})
         v1 = recv_until(ws, "v1")
         assert v1["ok"], v1
         assert (v1["result"]["max_members"], v1["result"]["member_timeout_s"],
                 v1["result"]["max_rounds"], v1["result"]["redo_limit"],
-                v1["result"]["stall_limit"]) == (8, 10, 1, 5, 3)
+                v1["result"]["stall_limit"],
+                v1["result"]["cron_resume_limit"]) == (8, 10, 1, 5, 3, 3)
         # 真落 config.toml（SKYSHEEP_HOME 隔离）：再 get 与回传一致
         ws.send_json({"id": "q2", "method": "teamcfg.get", "params": {}})
         q2 = recv_until(ws, "q2")
         assert q2["result"]["max_members"] == 8 and q2["result"]["stall_limit"] == 3
         cfg_text = (home / "home" / "config.toml").read_text(encoding="utf-8")
         assert "[team]" in cfg_text and "max_members = 8" in cfg_text
+        assert "cron_resume_limit = 3" in cfg_text, "无人值守续跑键照常落 [team] 段"
 
         # 下限同样收口；只传子集时其余键不动
         ws.send_json({"id": "v2", "method": "teamcfg.save", "params": {"max_members": 0}})
@@ -3190,3 +3194,243 @@ async def test_adversarial_tasks_never_auto_dispatched():
     # 用户显式派工仍走既有状态机
     updated = await orch.task_update("T1", "in_progress")
     assert updated["status"] == "in_progress"
+
+
+# ---------- 定时团队（cron mode=team）：无人值守装配与触发（§14） ----------
+# 复用 _provider_factory_override 注入机制：provider_factory 弹池按
+# 「成员 → 总管」顺序供给；工具表只注册只读 + 写文件两件，换取真实
+# HeadlessGate 的放行 / 拒绝语义（门的判定路径是真对象，不 mock）。
+
+_DIRECTOR_CLOSED_LOOP = [
+    [TextBlock(text="分工方案：调研先行"), ToolUseBlock(
+        id="d1", name="team_assign",
+        input={"title": "巡检目录", "assignee": "队员0", "type": "exec"})],
+    [TextBlock(text="对照验收标准：合格"), ToolUseBlock(
+        id="d2", name="team_accept", input={"task_id": "T1"})],
+    [TextBlock(text="验收通过，全部工单完成")],
+    [TextBlock(text="《交付说明》：巡检完成。"), ToolUseBlock(
+        id="d3", name="team_deliver", input={})],
+]
+
+
+def _cron_team_backend(home, store, scripts):
+    """定时团队用例的后端最小装配（不跑 setup）：store/cfg/主 provider 手工挂上，
+    工具表桩成两件真工具；模板册走 ServerBackend 自建的隔离 home 路径。"""
+    from skysheep.config import load_config
+
+    pool = [p if isinstance(p, Provider) else FakeProvider(p) for p in scripts]
+    backend = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: pool.pop(0) if pool
+        else FakeProvider([[TextBlock(text="脚本耗尽的兜底回答")]]),
+    )
+    backend.store = store
+    backend.cfg = load_config()
+    backend.provider = FakeProvider([[TextBlock(text="主模型不参与团队轮")]])
+    backend._build_full_registry = lambda recorder=None, ctx=None: ToolRegistry(
+        [ListDirTool(), WriteFileTool()])
+    return backend
+
+
+def _team_template(backend, name="夜班小队", *, director_mode="ai",
+                   director_provider="fa", members=1):
+    """往（隔离 home 的）模板册里塞一个定时团队引用的模板，返回模板名。"""
+    backend.team_templates.upsert(TeamTemplate(
+        name=name, director_mode=director_mode,
+        director=TeamTemplateDirector(provider=director_provider, model="ma"),
+        members=[TeamTemplateMember(provider="fa", model="ma", name=f"队员{i}",
+                                    persona="") for i in range(members)],
+        created_at=1.0,
+    ))
+    return name
+
+
+async def _cron_team_task(store, home, *, name="夜间巡检", prompt="巡检目录并汇总",
+                          allowed_tools=None):
+    from skysheep.server.backend_parts.automation import run_cron_task_core  # noqa: F401
+
+    proj = await store.get_or_create_project(str(home / "proj"))
+    return await store.add_cron_task(
+        proj.id, name, prompt, "interval", interval_minutes=60,
+        allowed_tools=allowed_tools or [], mode="team", team_template="夜班小队",
+    )
+
+
+async def test_cron_team_turn_delivers_and_writes_back(home):
+    """到点触发 → 模板建队 → AI 总管闭环交付：run_cron_task_core 全链路收尾照常
+    （last_status=ok、《交付说明》进 last_result、会话 user+assistant 落库、
+    报告全文落盘 cron-team-*.md、成员与总管用量入账归属本次会话）。"""
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-team.db").connect()
+    try:
+        task = await _cron_team_task(store, home)
+        member = FakeProvider([[TextBlock(text="巡检完成：未见异常")]])
+        backend = _cron_team_backend(home, store, [member, FakeProvider(_DIRECTOR_CLOSED_LOOP)])
+        _team_template(backend, "夜班小队")
+
+        final = await run_cron_task_core(store, task["id"],
+                                         execute=backend._execute_cron_turn)
+        assert final is not None and final["last_status"] == "ok"
+        assert "《交付说明》" in final["last_result"], "交付说明进 last_result"
+        assert not final["last_result"].startswith("【"), "done 终态不加注记前缀"
+
+        # 会话落库：user（任务指令）+ assistant（交付说明）成对、可审计
+        proj = await store.get_project(task["project_id"])
+        sessions = await store.list_sessions(proj.id)
+        sid = next(s.id for s in sessions if (s.title or "").startswith("⏰ "))
+        msgs = await store.load_messages(sid)
+        assert any(m.role == "user" and "巡检目录并汇总" in m.text for m in msgs)
+        assert any(m.role == "assistant" and "《交付说明》" in m.text for m in msgs)
+
+        # 报告全文落盘：cron-team- 前缀（避开 team-* 滚动清理），头部带元信息
+        reports = list((home / "proj" / ".skysheep" / "reports").glob("cron-team-*.md"))
+        assert reports, "交付报告必须落盘一份"
+        text = reports[0].read_text(encoding="utf-8")
+        assert "《交付说明》" in text and "夜班小队" in text and "终态" in text
+
+        # 用量入账：成员 + 总管各入一行（FakeProvider 每次 11/7，多轮累计非零）
+        assert await store.usage_today() > 0
+    finally:
+        await store.close()
+
+
+async def test_cron_team_gate_denies_unlisted_writes(home):
+    """无人值守门控（CronGate=HeadlessGate）只读档：allowed_tools 空 → 队员的
+    write_file 被自动 DENY（文件不产生），团队照常交付；被拒次数与工具名进
+    运行行（denied_count / denied_tools），工厂抽屉里看得见该补哪个工具。"""
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-team-deny.db").connect()
+    try:
+        task = await _cron_team_task(store, home, allowed_tools=[])
+        member = FakeProvider([
+            [ToolUseBlock(id="w1", name="write_file",
+                          input={"path": "secret.txt", "content": "x"})],
+            [TextBlock(text="写入被拒；巡检完成：未见异常")],
+        ])
+        backend = _cron_team_backend(home, store, [member, FakeProvider(_DIRECTOR_CLOSED_LOOP)])
+        _team_template(backend, "夜班小队")
+
+        final = await run_cron_task_core(store, task["id"],
+                                         execute=backend._execute_cron_turn)
+        assert final["last_status"] == "ok", "被拒后团队照常交付（不阻塞不弹窗）"
+        assert not (home / "proj" / "secret.txt").exists(), \
+            "未预授权写入必须被无人值守门控拒绝"
+
+        rows = await store.list_automation_runs(kind="cron", task_id=task["id"])
+        assert rows and rows[0]["denied_count"] >= 1, "被拦次数要进运行行"
+        assert "write_file" in rows[0]["denied_tools"], "被拦工具名要进运行行"
+    finally:
+        await store.close()
+
+
+async def test_cron_team_gate_allows_whitelisted_writes(home):
+    """白名单档：allowed_tools 勾选 write_file → 队员写入放行落盘（仍过删除
+    语义与引擎主目录守卫——本用例不触碰那两个面）。"""
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-team-allow.db").connect()
+    try:
+        task = await _cron_team_task(store, home, allowed_tools=["write_file"])
+        member = FakeProvider([
+            [ToolUseBlock(id="w1", name="write_file",
+                          input={"path": "ok.txt", "content": "y"})],
+            [TextBlock(text="已写入 ok.txt；巡检完成")],
+        ])
+        backend = _cron_team_backend(home, store, [member, FakeProvider(_DIRECTOR_CLOSED_LOOP)])
+        _team_template(backend, "夜班小队")
+
+        final = await run_cron_task_core(store, task["id"],
+                                         execute=backend._execute_cron_turn)
+        assert final["last_status"] == "ok"
+        okf = home / "proj" / "ok.txt"
+        assert okf.exists() and okf.read_text(encoding="utf-8") == "y", \
+            "预授权名单内的写操作应被放行"
+    finally:
+        await store.close()
+
+
+async def test_cron_team_idle_resumes_then_stops(home):
+    """空闲续跑计数：run_auto_turn 空闲退出（finished is None）时投续跑指令，
+    最多 [team] cron_resume_limit 次（本用例调到 2，恰好两条到达总管）；仍空闲
+    stop() 收队——《收队说明》产出，last_status ok（有交付即有产出）、last_result
+    带【已空闲收队】前缀，不做错误化。"""
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-team-idle.db").connect()
+    try:
+        task = await _cron_team_task(store, home)
+        director = FakeProvider([
+            [TextBlock(text="分工方案"), ToolUseBlock(
+                id="d1", name="team_assign",
+                input={"title": "巡检目录", "assignee": "队员0", "type": "exec"})],
+            [TextBlock(text="先等等")],
+            [TextBlock(text="再等等")],
+        ])
+        member = FakeProvider([[TextBlock(text="调研完成：结论 A")]])
+        backend = _cron_team_backend(home, store, [member, director])
+        _team_template(backend, "夜班小队")
+        backend.cfg.team.cron_resume_limit = 2
+
+        final = await run_cron_task_core(store, task["id"],
+                                         execute=backend._execute_cron_turn)
+        assert final["last_status"] == "ok", "空闲收队是设计内停机，不做错误化"
+        assert final["last_result"].startswith("【已空闲收队】")
+        assert "《收队说明》" in final["last_result"]
+        assert "未尽事项" in final["last_result"], "收队说明带未完成工单"
+
+        # 每次续跑恰好在「当轮唤醒」注入一次指令（stream 收到的是全量历史回放，
+        # 只数每轮的最后一条消息，不被历史重放重复计数）
+        resumes = [call for call in director.calls
+                   if "请继续推进" in (call[-1].text or "")]
+        assert len(resumes) == 2, f"续跑指令应恰好到达总管 2 次，实际 {len(resumes)}"
+    finally:
+        await store.close()
+
+
+async def test_cron_team_rounds_exhausted_maps_to_ok_with_prefix(home):
+    """轮次耗尽（设计内停机）：强制交付产出《交付说明》→ last_status ok、
+    last_result 以【轮次耗尽】前缀注明终态，不做错误化。"""
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-team-rounds.db").connect()
+    try:
+        task = await _cron_team_task(store, home)
+        backend = _cron_team_backend(
+            home, store,
+            [FakeProvider([[TextBlock(text="巡检完成")]]),
+             FakeProvider([[TextBlock(text="分工方案"), ToolUseBlock(
+                 id="d1", name="team_assign",
+                 input={"title": "巡检目录", "assignee": "队员0", "type": "exec"})]])])
+        _team_template(backend, "夜班小队")
+        backend.cfg.team.max_rounds = 1
+
+        final = await run_cron_task_core(store, task["id"],
+                                         execute=backend._execute_cron_turn)
+        assert final["last_status"] == "ok", "轮次耗尽强制交付不是故障"
+        assert final["last_result"].startswith("【轮次耗尽】")
+        assert "《交付说明》" in final["last_result"]
+    finally:
+        await store.close()
+
+
+async def test_cron_team_missing_template_fails_run(home):
+    """模板悬空（创建后模板被删，不做级联）：触发期二次读取查无 → RuntimeError
+    → run_cron_task_core 按 error 收尾，last_result 注明模板已不存在。"""
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-team-dangling.db").connect()
+    try:
+        task = await _cron_team_task(store, home, name="悬空任务")
+        backend = _cron_team_backend(
+            home, store, [FakeProvider([[TextBlock(text="x")]])])
+        # 故意不注册模板（_team_template 不调用）：任务行引用悬空
+
+        final = await run_cron_task_core(store, task["id"],
+                                         execute=backend._execute_cron_turn)
+        assert final["last_status"] == "error"
+        assert "团队模板已不存在" in final["last_result"]
+        assert final["next_run_at"] > 0, "失败后照常重排下次运行（退避而非无限重试）"
+    finally:
+        await store.close()

@@ -382,6 +382,10 @@ async function renderTeamCfg() {
       <input type="number" data-f="stall_limit" min="1" class="num-sm" value="${d.stall_limit}">
       <span class="dim small">轮（成员连续空转达到此数，自动停止并移交总管处置）</span>
     </div>
+    <div class="toolcfg-row"><label>无人值守续跑</label>
+      <input type="number" data-f="cron_resume_limit" min="0" max="3" class="num-sm" value="${d.cron_resume_limit}">
+      <span class="dim small">次（定时团队任务总管空闲时自动补发续跑指令的次数，0 = 空闲即收队）</span>
+    </div>
     <div class="toolcfg-row">
       <span class="toolcfg-state">● 保存后对<b>之后新建的团队</b>生效，进行中的团队沿用建队时的值</span>
       <span class="spacer"></span>
@@ -403,11 +407,12 @@ async function renderTeamCfg() {
         max_rounds: num("max_rounds"),
         redo_limit: num("redo_limit"),
         stall_limit: num("stall_limit"),
+        cron_resume_limit: num("cron_resume_limit"),
       });
       teamCfgStatus("✓ 已保存并生效：队员上限 " + r.max_members + " · 单成员超时 " +
         r.member_timeout_s + " 秒 · 轮次上限 " + r.max_rounds + " · 打回上限 " +
-        r.redo_limit + " · 停滞唤醒 " + r.stall_limit +
-        "（对之后新建的团队生效）", true);
+        r.redo_limit + " · 停滞唤醒 " + r.stall_limit + " · 无人值守续跑 " +
+        r.cron_resume_limit + " 次（对之后新建的团队生效）", true);
       renderTeamCfg(); // 回显 clamp 后的值：界面与 config.toml 保持一致
     } catch (e) {
       teamCfgStatus("✗ 保存失败：" + e.message, false);

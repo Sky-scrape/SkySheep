@@ -698,3 +698,221 @@ async def test_cron_core_success_keeps_disable_during_run(store):
     final2 = await run_cron_task_core(store, t2["id"], execute=execute_ok)
     assert final2["enabled"] is True
     assert final2["next_run_at"] > _time.time() - 5, "启用任务成功后照常重排"
+
+
+# ---- 定时团队（cron mode=team）：参数校验 / cron.team_check / 任务行两列 ----
+
+
+def _save_team_template(ws, wid: str, name: str, *, director_mode: str = "ai",
+                        director_provider: str = "fa", members: int = 1):
+    """经 WS 建一个团队模板（夜班小队缺省形态 = AI 总管 + 一名队员）。"""
+    from test_server import recv_until
+
+    ws.send_json({"id": wid, "method": "team.template_save", "params": {
+        "name": name, "director_mode": director_mode,
+        "director": {"provider": director_provider, "model": "ma"},
+        "members": [{"provider": "fa", "model": "ma", "name": f"队员{i}",
+                     "persona": ""} for i in range(members)],
+    }})
+    r = recv_until(ws, wid)
+    assert r["ok"], r.get("error")
+
+
+async def test_cron_team_columns_defaults_and_roundtrip(store):
+    """任务行两列：缺省 agent/空模板名；显式 mode=team 原样回读（含 is_team 派生键）。"""
+    project = await store.get_or_create_project("/tmp/cron-team-cols")
+    t = await store.add_cron_task(project.id, "普通", "干活", "interval",
+                                  interval_minutes=30)
+    assert t["mode"] == "agent" and t["is_team"] is False and t["team_template"] == ""
+
+    t2 = await store.add_cron_task(project.id, "团队", "干活", "interval",
+                                   interval_minutes=30, mode="team",
+                                   team_template="夜班小队")
+    assert t2["mode"] == "team" and t2["is_team"] is True
+    assert t2["team_template"] == "夜班小队"
+    got = await store.get_cron_task(t2["id"])
+    assert got["mode"] == "team" and got["team_template"] == "夜班小队"
+    up = await store.update_cron_task(t2["id"], team_template="另一队")
+    assert up["team_template"] == "另一队"
+    assert up["mode"] == "team", "update 不得波及 mode 列"
+
+
+def test_cron_team_mode_add_validation_via_ws(home):
+    """cron.add 的 mode/team_template 校验：非法 mode / 缺模板 / 模板不存在 /
+    user 总管模板 / AI 总管缺 provider 一律明示拒绝；合法行回读两键。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        _save_team_template(ws, "t1", "夜班小队")
+        _save_team_template(ws, "t2", "用户总管队", director_mode="user")
+        _save_team_template(ws, "t3", "空总管队", director_provider="")
+
+        # 非法 mode 白名单拒绝
+        ws.send_json({"id": "bad0", "method": "cron.add", "params": {
+            "name": "x", "prompt": "y", "mode": "roundtable"}})
+        assert not recv_until(ws, "bad0")["ok"]
+
+        # mode=team 缺模板名
+        ws.send_json({"id": "bad1", "method": "cron.add", "params": {
+            "name": "x", "prompt": "y", "mode": "team"}})
+        r = recv_until(ws, "bad1")
+        assert not r["ok"] and "团队模板" in r["error"]
+
+        # 模板不存在
+        ws.send_json({"id": "bad2", "method": "cron.add", "params": {
+            "name": "x", "prompt": "y", "mode": "team",
+            "team_template": "查无此队"}})
+        r = recv_until(ws, "bad2")
+        assert not r["ok"] and "不存在" in r["error"]
+
+        # user 总管模板：无人值守只会空转，入口即拒
+        ws.send_json({"id": "bad3", "method": "cron.add", "params": {
+            "name": "x", "prompt": "y", "mode": "team",
+            "team_template": "用户总管队"}})
+        r = recv_until(ws, "bad3")
+        assert not r["ok"] and "AI 总管" in r["error"]
+
+        # AI 总管缺 provider
+        ws.send_json({"id": "bad4", "method": "cron.add", "params": {
+            "name": "x", "prompt": "y", "mode": "team",
+            "team_template": "空总管队"}})
+        r = recv_until(ws, "bad4")
+        assert not r["ok"] and "provider" in r["error"]
+
+        # 合法：AI 总管模板 → 入库 mode=team + 模板名（两键随 add/list 回读）
+        ws.send_json({"id": "ok", "method": "cron.add", "params": {
+            "name": "团队巡检", "prompt": "巡检目录并汇总",
+            "schedule_type": "interval", "interval_minutes": 60,
+            "mode": "team", "team_template": "夜班小队"}})
+        row = recv_until(ws, "ok")["result"]
+        assert row["mode"] == "team" and row["is_team"] is True
+        assert row["team_template"] == "夜班小队"
+
+        ws.send_json({"id": "ls", "method": "cron.list", "params": {}})
+        lst = recv_until(ws, "ls")["result"]["tasks"]
+        assert any(t["id"] == row["id"] and t["mode"] == "team"
+                   and t["team_template"] == "夜班小队" for t in lst)
+
+
+def test_cron_team_mode_update_rules_via_ws(home):
+    """cron.update：mode 不许改（换形态删了重建）；team_template 可改且改时
+    同款校验；普通任务传非空模板名拒绝、传空串视为无操作。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        _save_team_template(ws, "t1", "夜班小队")
+        _save_team_template(ws, "t2", "白班小队")
+
+        ws.send_json({"id": "ct", "method": "cron.add", "params": {
+            "name": "团队任务", "prompt": "干活", "schedule_type": "interval",
+            "interval_minutes": 60, "mode": "team", "team_template": "夜班小队"}})
+        team_row = recv_until(ws, "ct")["result"]
+        ws.send_json({"id": "ca", "method": "cron.add", "params": {
+            "name": "普通任务", "prompt": "干活", "schedule_type": "interval",
+            "interval_minutes": 60}})
+        agent_row = recv_until(ws, "ca")["result"]
+
+        # 改 mode 一律拒绝（agent↔team 双向都试）
+        for wid, tid, mid in (("um1", team_row["id"], "agent"),
+                              ("um2", agent_row["id"], "team")):
+            ws.send_json({"id": wid, "method": "cron.update", "params": {
+                "id": tid, "mode": mid}})
+            r = recv_until(ws, wid)
+            assert not r["ok"] and "不允许修改" in r["error"]
+
+        # 换模板：合法引用通过；悬空引用拒绝
+        ws.send_json({"id": "ut1", "method": "cron.update", "params": {
+            "id": team_row["id"], "team_template": "白班小队"}})
+        r = recv_until(ws, "ut1")
+        assert r["ok"] and r["result"]["team_template"] == "白班小队"
+        ws.send_json({"id": "ut2", "method": "cron.update", "params": {
+            "id": team_row["id"], "team_template": "查无此队"}})
+        r = recv_until(ws, "ut2")
+        assert not r["ok"] and "不存在" in r["error"]
+
+        # 普通任务：非空模板名拒绝；空串 = 无操作放行
+        ws.send_json({"id": "ua1", "method": "cron.update", "params": {
+            "id": agent_row["id"], "team_template": "夜班小队"}})
+        r = recv_until(ws, "ua1")
+        assert not r["ok"] and "删除后重建" in r["error"]
+        ws.send_json({"id": "ua2", "method": "cron.update", "params": {
+            "id": agent_row["id"], "team_template": "", "name": "改名"}})
+        r = recv_until(ws, "ua2")
+        assert r["ok"] and r["result"]["name"] == "改名"
+        assert r["result"]["mode"] == "agent"
+
+
+def test_cron_team_check_via_ws(home):
+    """cron.team_check 回形：存在 + AI 总管 + 成员非空 → ok:true；各资格缺口
+    逐条进 problems；模板缺失 ok:false。"""
+    from test_server import make_client, recv_until
+
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        _save_team_template(ws, "t1", "夜班小队", members=2)
+        _save_team_template(ws, "t2", "用户总管队", director_mode="user")
+        _save_team_template(ws, "t3", "无人小队", members=0)
+
+        ws.send_json({"id": "k1", "method": "cron.team_check",
+                      "params": {"team_template": "夜班小队"}})
+        r = recv_until(ws, "k1")["result"]
+        assert r["ok"] is True and r["director_mode"] == "ai"
+        assert [m["name"] for m in r["members"]] == ["队员0", "队员1"]
+        assert r["members"][0]["provider"] == "fa" and r["problems"] == []
+
+        ws.send_json({"id": "k2", "method": "cron.team_check",
+                      "params": {"team_template": "用户总管队"}})
+        r = recv_until(ws, "k2")["result"]
+        assert r["ok"] is False and r["director_mode"] == "user"
+        assert any("AI 总管" in p for p in r["problems"])
+
+        ws.send_json({"id": "k3", "method": "cron.team_check",
+                      "params": {"team_template": "无人小队"}})
+        r = recv_until(ws, "k3")["result"]
+        assert r["ok"] is False and any("队员" in p for p in r["problems"])
+
+        ws.send_json({"id": "k4", "method": "cron.team_check",
+                      "params": {"team_template": "查无此队"}})
+        r = recv_until(ws, "k4")["result"]
+        assert r["ok"] is False and any("不存在" in p for p in r["problems"])
+
+
+async def test_cron_team_columns_legacy_db_migration(tmp_path):
+    """旧库没有 mode/team_template 列：connect 补列，既有任务默认 agent、空模板名。"""
+    import sqlite3
+
+    from skysheep.session.store import SessionStore
+
+    db = tmp_path / "legacy-team.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE cron_tasks ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " project_id INTEGER,"
+        " name TEXT NOT NULL,"
+        " prompt TEXT NOT NULL,"
+        " schedule_type TEXT NOT NULL DEFAULT 'interval',"
+        " interval_minutes INTEGER NOT NULL DEFAULT 0,"
+        " time_of_day TEXT NOT NULL DEFAULT '',"
+        " weekday INTEGER NOT NULL DEFAULT -1,"
+        " allowed_tools TEXT NOT NULL DEFAULT '[]',"
+        " enabled INTEGER NOT NULL DEFAULT 1,"
+        " last_run_at REAL NOT NULL DEFAULT 0,"
+        " last_status TEXT NOT NULL DEFAULT '',"
+        " last_result TEXT NOT NULL DEFAULT '',"
+        " next_run_at REAL NOT NULL DEFAULT 0,"
+        " created_at REAL NOT NULL)"
+    )
+    con.execute(
+        "INSERT INTO cron_tasks (project_id, name, prompt, schedule_type,"
+        " interval_minutes, created_at) VALUES (1, '旧任务', '干活', 'interval', 30, 0)"
+    )
+    con.commit()
+    con.close()
+
+    s = await SessionStore(db).connect()
+    try:
+        tasks = await s.list_cron_tasks()
+        assert tasks[0]["mode"] == "agent" and tasks[0]["team_template"] == ""
+        assert tasks[0]["is_team"] is False
+    finally:
+        await s.close()

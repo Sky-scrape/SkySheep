@@ -935,6 +935,7 @@ async function loadCron() {
     li.innerHTML =
       `<div class="cron-main">
          <span class="cron-title">${t.enabled ? "" : "⏸ "}${escapeHtml(t.name)}</span>
+         ${t.mode === "team" ? `<span class="chip safe-mark" title="定时团队：按模板「${escapeHtml(t.team_template || "")}」建队，AI 总管带队员协作">团队</span>` : ""}
          <span class="cron-sched">${escapeHtml(fmtCronSchedule(t))} · 下次 ${fmtNextRun(t.next_run_at)}</span>
          ${t.last_result ? `<span class="cron-last">${status} ${escapeHtml(t.last_result)}</span>` : ""}
        </div>`;
@@ -1014,12 +1015,25 @@ async function loadCron() {
   });
 }
 
-function cronModal(existing) {
+async function cronModal(existing) {
   const isEdit = !!existing;
   const box = document.createElement("div");
   const t = existing || { name: "", prompt: "", schedule_type: "interval",
                           interval_minutes: 60, time_of_day: "09:00", weekday: 0,
-                          allowed_tools: [], enabled: true, notify_channel: false };
+                          allowed_tools: [], enabled: true, notify_channel: false,
+                          mode: "agent", team_template: "" };
+  const isTeam = (t.mode || "agent") === "team";
+  // 团队模板（数据源 team.template_list）：定时团队按模板建队（只收引用不收内联名册）。
+  // 拿不到模板册就只给空下拉，保存时后端 cron.add/update 仍会二次校验兜底
+  let teamTemplates = [];
+  try {
+    const r = await request("team.template_list");
+    teamTemplates = (r && r.templates) || [];
+  } catch (e) { /* 静默：空下拉 + 后端校验兜底 */ }
+  const tplOptions = teamTemplates.map((tp) =>
+    `<option value="${escapeHtml(tp.name)}"${t.team_template === tp.name ? " selected" : ""}>` +
+    `${escapeHtml(tp.name)}（${tp.director_mode === "ai" ? "AI 总管" : "用户总管"}，${(tp.members || []).length} 名队员）</option>`
+  ).join("");
   const days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
   const allowed = new Set(t.allowed_tools || []);
   // 工具勾选表：从最近一次 boot 快照取工具清单（含权限级别），让用户勾而不是背工具名
@@ -1039,7 +1053,20 @@ function cronModal(existing) {
     <div class="cron-fields">
       <label>任务名</label>
       <input id="cron-name" class="modal-input" type="text" placeholder="例如：每日项目状态汇总" value="${isEdit ? escapeHtml(t.name) : ""}">
-      <label>任务指令（Agent 每次到点执行的内容）</label>
+      <label>任务形态</label>
+      <select id="cron-mode" class="modal-input cron-select"${isEdit ? " disabled" : ""}>
+        <option value="agent"${!isTeam ? " selected" : ""}>单会话 —— 一个 Agent 独立完成</option>
+        <option value="team"${isTeam ? " selected" : ""}>团队 —— 按团队模板建队，AI 总管带队员协作</option>
+      </select>
+      ${isEdit ? '<p class="dim small">任务形态创建后不可修改；要换形态请删除后重建。</p>' : ""}
+      <div id="cron-team-wrap" class="${isTeam ? "" : "hidden"}">
+        <label>团队模板（无人值守必须引用 AI 总管模板）</label>
+        <select id="cron-template" class="modal-input cron-select">
+          ${tplOptions || '<option value="">（还没有团队模板——先在会话里建队并「另存为模板」）</option>'}
+        </select>
+        <div id="cron-team-check" class="dim small"></div>
+      </div>
+      <label id="cron-prompt-label">任务指令（Agent 每次到点执行的内容）</label>
       <textarea id="cron-prompt" class="modal-input" rows="3" placeholder="例如：扫描当前目录的 TODO 标记，汇总成一段进度报告">${isEdit ? escapeHtml(t.prompt) : ""}</textarea>
       <label>频率</label>
       <select id="cron-type" class="modal-input cron-select">
@@ -1083,11 +1110,41 @@ function cronModal(existing) {
   };
   box.querySelector("#cron-type").addEventListener("change", syncType);
   syncType();
+  // 任务形态切换：团队形态显出模板下拉并即时校验（cron.team_check 表单期预检）
+  const checkTemplate = async () => {
+    const sel = box.querySelector("#cron-template");
+    const hint = box.querySelector("#cron-team-check");
+    const name = sel ? sel.value : "";
+    if (!name) { hint.textContent = ""; return; }
+    hint.textContent = "校验中…";
+    try {
+      const r = await request("cron.team_check", { team_template: name });
+      hint.textContent = r.ok
+        ? `✓ 模板可用：AI 总管 + ${(r.members || []).length} 名队员`
+        : "✗ " + (r.problems || []).join("；");
+    } catch (e) { hint.textContent = "（校验失败：" + e.message + "）"; }
+  };
+  const syncMode = () => {
+    const mode = box.querySelector("#cron-mode").value;
+    box.querySelector("#cron-team-wrap").classList.toggle("hidden", mode !== "team");
+    box.querySelector("#cron-prompt-label").textContent = mode === "team"
+      ? "总管首条指令（到点发给 AI 总管的团队目标）"
+      : "任务指令（Agent 每次到点执行的内容）";
+    if (mode === "team") checkTemplate();
+    else box.querySelector("#cron-team-check").textContent = "";
+  };
+  box.querySelector("#cron-mode").addEventListener("change", syncMode);
+  box.querySelector("#cron-template").addEventListener("change", checkTemplate);
+  syncMode();
   showModal(isEdit ? "编辑定时任务" : "新建定时任务", box, async () => {
     const name = box.querySelector("#cron-name").value.trim();
     const prompt = box.querySelector("#cron-prompt").value.trim();
     if (!prompt) throw new Error("任务指令不能为空");
     const stype = box.querySelector("#cron-type").value;
+    const mode = box.querySelector("#cron-mode").value;
+    if (mode === "team" && !box.querySelector("#cron-template").value) {
+      throw new Error("团队任务必须选择团队模板（先在会话里建队并另存为模板）");
+    }
     const picked = [...box.querySelectorAll('input[data-tool]:checked')]
       .map((el) => el.dataset.tool);
     const params = {
@@ -1100,6 +1157,9 @@ function cronModal(existing) {
       allowed_tools: picked,
       notify_channel: box.querySelector("#cron-notify").checked,
     };
+    // mode 只在创建时提交（后端不允许 update 改形态）；team_template 只对团队任务有意义
+    if (!isEdit) params.mode = mode;
+    if (mode === "team") params.team_template = box.querySelector("#cron-template").value;
     let r;
     if (isEdit) r = await request("cron.update", { id: existing.id, ...params });
     else r = await request("cron.add", params);

@@ -53,6 +53,11 @@ async def _h_cron_run_now(backend: ServerBackend, params: dict, emit, local: boo
     return await backend.cron_run_now(params)
 
 
+async def _h_cron_team_check(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 定时团队任务的模板即时校验（表单期预检；落库时 cron.add/update 仍二次校验）
+    return await backend.cron_team_check(params)
+
+
 async def _h_cron_schtask_export(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.cron_schtask_export(params)
 
@@ -204,6 +209,7 @@ METHODS: dict[str, _WsMethod] = {
     "cron.update": _WsMethod(_h_cron_update, local_only=True),
     "cron.delete": _WsMethod(_h_cron_delete, local_only=True),
     "cron.run_now": _WsMethod(_h_cron_run_now, local_only=True),
+    "cron.team_check": _WsMethod(_h_cron_team_check, local_only=True),
     "cron.schtask_export": _WsMethod(_h_cron_schtask_export, local_only=True),
     "cron.schtask_remove": _WsMethod(_h_cron_schtask_remove, local_only=True),
     "cron.schtask_status": _WsMethod(_h_cron_schtask_status),

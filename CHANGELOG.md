@@ -6,6 +6,17 @@
 
 ### 新增
 
+- **定时团队**：定时任务支持团队形态（`mode="team"`）——到点按「团队模板」建队、AI
+  总管自动闭环跑一轮、交付《交付说明》后按定时任务既有路径收尾（CAS 认领 / 硬超时 /
+  结果回写 / 渠道推送 / 运行账本 / 并发上限全沿用，团队侧零新增放行：预授权工具勾选即
+  队员白名单档，名单外一律自动拒绝）。建任务时新增任务形态与模板引用（只收引用不收
+  内联名册），无人值守必须引用 AI 总管模板——cron.add / cron.update 入口校验，模板
+  悬空在触发期报 error；新增 WS 方法 cron.team_check 供表单期即时校验；总管空闲自动
+  补发续跑指令（[team] cron_resume_limit，默认 1、0 = 空闲即收队），仍空闲收队并记
+  未尽事项；交付说明全文落 <项目>/.skysheep/reports/cron-team-*.md（避开频道报告滚动
+  清理），轮次耗尽等设计内停机不做错误化、终态注记进结果与通知；系统计划任务入口
+  （skysheep cron run）一期对团队任务报错拒绝。
+
 - **无头事件流协议**：`skysheep run --output stream` 把运行全程的统一事件流逐行以
   NDJSON 输出（与 GUI/WS 消费同一套 AgentEvent，字段见 `engine/src/skysheep/events.py`），
   末行 `kind="result"` 汇总会话、stop_reason 与 token 用量；按 UTF-8 字节写出并即时冲刷，

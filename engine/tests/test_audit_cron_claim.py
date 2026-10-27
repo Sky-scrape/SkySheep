@@ -253,16 +253,39 @@ async def test_claim_gate_tolerance_boundary(store):
     assert loser is None and calls["n"] == 0, "未到点不得执行"
 
 
-async def test_force_bypasses_claim_for_not_due_task(store):
-    """force（用户手动立即运行）不认领、不受到点判定拦：语义与改造前一致。"""
-    later = await _add_due_task(store, "手动力跑", due_offset=600.0)
-    calls = {"n": 0}
+async def test_two_trigger_sources_team_mode_exactly_one_executes(store):
+    """mode=team 的长跑同样被三层重入机制罩住（定时团队，团队模式设计 §14.5）：
+    应用内扫描与 cron-run 子进程撞同一到点槽位时，CAS 认领保证恰好一方执行，
+    团队轮只是「一次运行时间更长的 cron 运行」，重入语义与单会话轮零差异。"""
+    t = await _add_due_task(store, "团队双触发")
+    await store.update_cron_task(t["id"], mode="team", team_template="某模板")
 
-    async def execute(task):
-        calls["n"] += 1
-        return _runtime("手动产出")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = {"winner": 0, "loser": 0}
 
-    final = await run_cron_task_core(store, later["id"], force=True,
-                                     execute=execute)
+    async def winner_execute(task):
+        calls["winner"] += 1
+        entered.set()
+        await release.wait()  # 团队轮在飞，卡住给后来者插手窗口
+        return _runtime("团队胜方产出")
+
+    async def loser_execute(task):
+        calls["loser"] += 1
+        return _runtime("不该出现的重复执行")
+
+    running: dict = {}
+    winner = asyncio.get_running_loop().create_task(run_cron_task_core(
+        store, t["id"], execute=winner_execute, running=running))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    loser = await run_cron_task_core(
+        store, t["id"], execute=loser_execute, running=None)
+    assert loser is None, "团队长跑期间的后到方必须放弃（CAS 落败/未到点）"
+    assert calls == {"winner": 1, "loser": 0}, "只有先到者真的执行了团队轮"
+
+    release.set()
+    final = await winner
     assert final is not None and final["last_status"] == "ok"
-    assert calls["n"] == 1, "立即运行照常触发"
+    assert final["last_result"] == "团队胜方产出"
+    assert final["mode"] == "team", "团队任务的形态列在收尾回写后原样保留"

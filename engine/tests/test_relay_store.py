@@ -39,7 +39,8 @@ async def test_schema_version_bumped_and_tables_exist(store):
     # v5：工厂二期给 automation_runs 补 token 三列 + factory_acks
     # v6：工厂三期补 denied_count / error_kind / outcome / outcome_source + factory_alerts
     # v7：运行账本补 denied_tools（被拦工具名与次数的 JSON 快照）
-    assert SCHEMA_VERSION == 7
+    # v8：cron_tasks 补 mode / team_template（定时团队，团队模式设计 §14）
+    assert SCHEMA_VERSION == 8
     cur = await store._db.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
         " AND name IN ('relay_tasks','relay_nodes','relay_actions',"

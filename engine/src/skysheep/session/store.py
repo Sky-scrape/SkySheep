@@ -25,6 +25,8 @@ import aiosqlite
 
 from ..messages import Message
 from ..textio import sweep_stale_tmp_files
+from ._store_schedules import SchedulesMixin
+from ._store_snippets import SnippetsMixin
 
 logger = logging.getLogger("skysheep.store")
 
@@ -648,7 +650,7 @@ def _relay_json_load(text, default):
 _RELAY_UNSET = object()
 
 
-class SessionStore:
+class SessionStore(SchedulesMixin, SnippetsMixin):
     BACKUP_KEEP = 20
     # 恢复前自动留的安全副本后缀（列表里单独标记，方便用户认出「这是恢复动作留下的」）
     SAFETY_TAG = "-恢复前"
@@ -2485,146 +2487,6 @@ class SessionStore:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-    # ---- schedules（用户级日程，存在全局库里，切项目不丢） ----
-
-    @staticmethod
-    def _schedule_row(r) -> dict:
-        return {
-            "id": r["id"],
-            "title": r["title"],
-            "notes": r["notes"],
-            "start_at": r["start_at"],
-            # 0 = 未设结束时间（按点事件）；>0 时 start_at~end_at 是一个时间段
-            "end_at": float(r["end_at"] or 0),
-            "remind": bool(r["remind"]),
-            "remind_before": int(r["remind_before"]),
-            "reminded": bool(r["reminded"]),
-            "done": bool(r["done"]),
-            "created_at": r["created_at"],
-            "updated_at": r["updated_at"],
-        }
-
-    async def add_schedule(
-        self,
-        title: str,
-        start_at: float,
-        notes: str = "",
-        remind: bool = True,
-        remind_before: int = 0,
-        end_at: float = 0,
-    ) -> dict:
-        assert self._db
-        now = time.time()
-        cur = await self._db.execute(
-            "INSERT INTO schedules (title, notes, start_at, end_at, remind, remind_before,"
-            " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                title,
-                notes,
-                start_at,
-                max(0.0, float(end_at or 0)),
-                1 if remind else 0,
-                max(0, int(remind_before)),
-                now,
-                now,
-            ),
-        )
-        await self._db.commit()
-        return await self.get_schedule(cur.lastrowid)  # type: ignore[return-value]
-
-    async def get_schedule(self, schedule_id: int) -> dict | None:
-        assert self._db
-        cur = await self._db.execute("SELECT * FROM schedules WHERE id = ?", (schedule_id,))
-        row = await cur.fetchone()
-        return self._schedule_row(row) if row else None
-
-    async def list_schedules(self, include_done: bool = False, limit: int = 500) -> list[dict]:
-        assert self._db
-        sql = "SELECT * FROM schedules"
-        if not include_done:
-            sql += " WHERE done = 0"
-        sql += " ORDER BY start_at LIMIT ?"
-        cur = await self._db.execute(sql, (limit,))
-        rows = await cur.fetchall()
-        return [self._schedule_row(r) for r in rows]
-
-    async def update_schedule(
-        self,
-        schedule_id: int,
-        *,
-        title: str | None = None,
-        notes: str | None = None,
-        start_at: float | None = None,
-        end_at: float | None = None,
-        remind: bool | None = None,
-        remind_before: int | None = None,
-        done: bool | None = None,
-    ) -> dict | None:
-        """按传入字段部分更新；start_at 变化时重置已提醒标记（新时间要重新提醒）。
-
-        end_at 传 0（或 None 以外的零值）即清除结束时间，回到按点事件。
-        """
-        assert self._db
-        row = await self.get_schedule(schedule_id)
-        if not row:
-            return None
-        sets: list[str] = []
-        args: list = []
-        if title is not None:
-            sets.append("title = ?")
-            args.append(title)
-        if notes is not None:
-            sets.append("notes = ?")
-            args.append(notes)
-        if start_at is not None:
-            sets.append("start_at = ?")
-            args.append(start_at)
-            sets.append("reminded = 0")
-        if end_at is not None:
-            sets.append("end_at = ?")
-            args.append(max(0.0, float(end_at or 0)))
-        if remind is not None:
-            sets.append("remind = ?")
-            args.append(1 if remind else 0)
-        if remind_before is not None:
-            sets.append("remind_before = ?")
-            args.append(max(0, int(remind_before)))
-        if done is not None:
-            sets.append("done = ?")
-            args.append(1 if done else 0)
-        if not sets:
-            return row
-        sets.append("updated_at = ?")
-        args.extend([time.time(), schedule_id])
-        await self._db.execute(f"UPDATE schedules SET {', '.join(sets)} WHERE id = ?", args)
-        await self._db.commit()
-        return await self.get_schedule(schedule_id)
-
-    async def delete_schedule(self, schedule_id: int) -> bool:
-        assert self._db
-        cur = await self._db.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
-        await self._db.commit()
-        return bool(cur.rowcount)
-
-    async def due_schedules(self, now: float | None = None) -> list[dict]:
-        """到点未提醒的日程（含提前量：start_at - remind_before 分钟 <= now）。"""
-        assert self._db
-        cur = await self._db.execute(
-            "SELECT * FROM schedules WHERE remind = 1 AND reminded = 0 AND done = 0"
-            " AND (start_at - remind_before * 60) <= ? ORDER BY start_at",
-            (now if now is not None else time.time(),),
-        )
-        rows = await cur.fetchall()
-        return [self._schedule_row(r) for r in rows]
-
-    async def mark_schedule_reminded(self, schedule_id: int) -> None:
-        assert self._db
-        await self._db.execute(
-            "UPDATE schedules SET reminded = 1, updated_at = ? WHERE id = ?",
-            (time.time(), schedule_id),
-        )
-        await self._db.commit()
-
     # ---- 用量统计（usage_log）：每轮对话的 token 消耗 ----
 
     async def add_usage(
@@ -2791,96 +2653,6 @@ class SessionStore:
             return int(row[0] or 0)
         except Exception:  # noqa: BLE001
             return 0
-
-    # ---- 快捷指令（snippets）：用户自定义提示词模板，~ 菜单展示 ----
-
-    async def list_snippets(self) -> list[dict]:
-        assert self._db
-        # sort_order 升序 = 手动排序（设置页拖拽 / 新条目置顶）；同值回退
-        # created_at 倒序——旧库行都是 0，行为与升级前一致
-        cur = await self._db.execute(
-            "SELECT * FROM snippets ORDER BY sort_order ASC, created_at DESC"
-        )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
-
-    async def add_snippet(self, name: str, content: str) -> dict:
-        assert self._db
-        # 新条目排在列表最前：sort_order 取现有最小值 - 1（空库取 0），
-        # 保证「刚建的提示词马上能在 ~ 候选前几位看到」
-        cur = await self._db.execute("SELECT MIN(sort_order) FROM snippets")
-        row = await cur.fetchone()
-        base = row[0] if row and row[0] is not None else None
-        sort_order = 0.0 if base is None else float(base) - 1.0
-        cur = await self._db.execute(
-            "INSERT INTO snippets (name, content, created_at, sort_order) VALUES (?, ?, ?, ?)",
-            (name[:40], content[:8000], time.time(), sort_order),
-        )
-        await self._db.commit()
-        row = await (await self._db.execute(
-            "SELECT * FROM snippets WHERE id = ?", (cur.lastrowid,)
-        )).fetchone()
-        return dict(row)
-
-    async def reorder_snippets(self, ids: list[int]) -> int:
-        """按给定顺序重写 sort_order（0..n-1）；未提及的 id 保持原值。
-
-        设置页拖拽排序提交整份顺序；写入值离散化后，后续新建条目
-        仍取 min-1 置顶，两种来源不会打架。返回实际更新的行数。"""
-        assert self._db
-        changed = 0
-        for idx, sid in enumerate(ids):
-            cur = await self._db.execute(
-                "UPDATE snippets SET sort_order = ? WHERE id = ?",
-                (float(idx), int(sid)),
-            )
-            changed += cur.rowcount
-        await self._db.commit()
-        return changed
-
-    async def mark_snippet_used(self, snippet_id: int) -> bool:
-        """记一次插入使用：计数 +1、刷新最近使用时间（设置页展示用）。"""
-        assert self._db
-        cur = await self._db.execute(
-            "UPDATE snippets SET use_count = use_count + 1, last_used_at = ? WHERE id = ?",
-            (time.time(), snippet_id),
-        )
-        await self._db.commit()
-        return cur.rowcount > 0
-
-    async def update_snippet(
-        self, snippet_id: int, name: str, content: str, enabled: bool | None = None,
-    ) -> bool:
-        assert self._db
-        if enabled is None:
-            cur = await self._db.execute(
-                "UPDATE snippets SET name = ?, content = ? WHERE id = ?",
-                (name[:40], content[:8000], snippet_id),
-            )
-        else:
-            # 带启用位：编辑弹窗保存时可以顺带改停用状态
-            cur = await self._db.execute(
-                "UPDATE snippets SET name = ?, content = ?, enabled = ? WHERE id = ?",
-                (name[:40], content[:8000], 1 if enabled else 0, snippet_id),
-            )
-        await self._db.commit()
-        return cur.rowcount > 0
-
-    async def set_snippet_enabled(self, snippet_id: int, enabled: bool) -> bool:
-        """只切启用位（列表行上的快捷开关）：停用的提示词不再进 ~ 候选。"""
-        assert self._db
-        cur = await self._db.execute(
-            "UPDATE snippets SET enabled = ? WHERE id = ?",
-            (1 if enabled else 0, snippet_id),
-        )
-        await self._db.commit()
-        return cur.rowcount > 0
-
-    async def delete_snippet(self, snippet_id: int) -> bool:
-        assert self._db
-        cur = await self._db.execute("DELETE FROM snippets WHERE id = ?", (snippet_id,))
-        await self._db.commit()
-        return cur.rowcount > 0
 
     # ---- 定时任务（cron_tasks）：无人值守的周期 Agent 任务 ----
 

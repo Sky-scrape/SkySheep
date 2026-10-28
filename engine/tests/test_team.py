@@ -3436,6 +3436,37 @@ async def test_cron_team_missing_template_fails_run(home):
         await store.close()
 
 
+async def test_cron_team_empty_roster_fails_not_roundtable_fallback(home):
+    """模板 members 为空：触发期装配失败按失败收尾（团队模式设计 §14.2 第 6 步
+    / §14.5），绝不回退 _resolve_team_members 的缺省分支——那是圆桌的自动解析
+    （按当前已配置服务取名册），拿它顶替模板名册违背「名册只来自模板」契约。
+    这里给圆桌解析喂一口已配置服务 + 未消费的脚本池：修复前会静默用「fa/ma」
+    建队并把脚本跑出 ok，修复后必须报「没有队员」且脚本零消费。"""
+    from skysheep.config import ProviderConfig
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-team-empty-roster.db").connect()
+    try:
+        task = await _cron_team_task(store, home, name="空名册任务")
+        member = FakeProvider([[TextBlock(text="圆桌名册不该被消费")]])
+        backend = _cron_team_backend(
+            home, store, [member, FakeProvider(_DIRECTOR_CLOSED_LOOP)])
+        _team_template(backend, "夜班小队", members=0)
+        # 让圆桌自动解析「有料可取」：cfg.providers 里配好 fa（带 Key），脚本池
+        # 里还有成对脚本——修复前 _resolve_team_members([]) 会解析出这名册建队
+        backend.cfg.providers["fa"] = ProviderConfig(
+            kind="fake", api_key="demo", model="ma")
+
+        final = await run_cron_task_core(store, task["id"],
+                                         execute=backend._execute_cron_turn)
+        assert final["last_status"] == "error"
+        assert "没有队员" in final["last_result"]
+        assert final["next_run_at"] > 0, "失败后照常重排下次运行"
+        assert member.calls == [], "圆桌自动解析出的 provider 不得被团队轮消费"
+    finally:
+        await store.close()
+
+
 async def test_cron_team_push_delivers_summary_and_survives_failure(home, caplog):
     """mode=team 的终态推送照走既有 notify_channel 路径（run_cron_task_core 收尾
     统一出口）：交付说明摘要连同终态注记前缀一起进通知 body，飞书/微信/Webhook

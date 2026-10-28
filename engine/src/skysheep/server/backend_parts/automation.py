@@ -1254,9 +1254,18 @@ class AutomationMixin:
             # 只有「在跑什么」与「被拦了几次」以工序进度（1 次/秒）进工厂观战窗
             await progress_emit(_event_dict(ev))
 
-        # 成员解析：单个构建失败照常降级 build_error 入册（唤醒时按失败隔离
-        # 呈现）；全员不可用不建注定空转的团队，装配期直接按失败收尾（§14.5）
-        specs = self._resolve_team_members([m.model_dump() for m in template.members])
+        # 成员解析：名册只来自模板（§14.2 第 6 步）——模板没有队员时装配失败
+        # 按失败收尾，绝不调用 _resolve_team_members 的缺省分支（那里会按当前
+        # 已配置服务自动解析，等于用圆桌名册顶替模板名册，违背「名册只来自
+        # 模板」契约）；显式名册下单个构建失败照常降级 build_error 入册（唤醒
+        # 时按失败隔离呈现），全员构建失败（含 provider 名全空）不建注定空转
+        # 的团队，装配期直接按失败收尾（§14.5）。模板条目不做成员数校验是
+        # 设计明文（§14.1，空名册模板可服务交互式建队的自动解析），资格缺口
+        # 由表单期 cron.team_check（成员非空）与触发期这里的失败收尾共同兜住。
+        members_params = [m.model_dump() for m in template.members]
+        if not members_params:
+            raise RuntimeError(f"团队模板「{template_name}」没有队员，本次未建队")
+        specs = self._resolve_team_members(members_params)
         if not any(s.provider is not None for s in specs):
             raise RuntimeError(
                 "团队模板的队员全部不可用（缺 API Key 或服务未配置），本次未建队")

@@ -77,6 +77,7 @@ class PreferencesMixin:
     RIGHT_TAB_IDS = (
         "aux", "review", "browser", "files", "tasks", "agenda", "auto", "memory", "ext",
         "todo", "ptasks", "cron", "pipeline", "relay", "terminal",
+        "teamroom",  # 团队室（团队模式设计 §15）：入口跟团队走，但打开过的偏好要存得下
         "mcp", "skills",  # ext（MCP / Skills）的分段 id：right_active 存的就是它
     )
 

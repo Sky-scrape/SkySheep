@@ -618,6 +618,75 @@ def test_team_kanban_board_wiring():
     assert ".teamcard .tc-closed-summary" in css
 
 
+# ---------- 团队室（独立页签）：三分区容器 / 聚合探针 / 入口与事件同源 ----------
+
+
+def test_team_room_tab_wiring():
+    """团队室页签（团队模式设计 §15）：右面板新页签三分区同屏，渲染复用
+    团队卡 tc* 系（不造第二份渲染逻辑）；装载走 team.room 聚合探针；入口
+    跟团队走（团队卡头部 + 协作菜单），不进「＋」菜单常驻；空态降级照
+    §15.4；三分区样式只引用主题变量，六套主题无写死色。"""
+    import re
+
+    js = read_app_bundle()
+    html = read_static("index.html")
+    css = read_static("app.css")
+
+    # 页签注册（app.js 页签机制内加）+ 页签体与加载顺序（index.html）
+    assert 'teamroom: { title: "团队室", sub: "频道 · 工单 · 成员" }' in js
+    assert "teamroom: (force) => loadTeamRoom(force)" in js
+    assert 'id="rp-page-teamroom"' in html and 'id="teamroom-root"' in html
+    assert html.index('<script src="/static/app-teamroom.js">') > html.index(
+        '<script src="/static/app.js">')
+
+    # 三分区容器：buildTeamCard 整卡重排，_ui 同形，频道主区 + 工单板右栏
+    assert "function buildTeamRoomCard(roster, directorMode, director)" in js
+    assert "const card = buildTeamCard(roster, directorMode, director);" in js
+    assert 'card.classList.add("teamroom-card", "view-channel")' in js
+    assert "grid.append(card._ui.channelEl, card._ui.boardList)" in js
+
+    # 装载：team.room 聚合探针 + team.log 全量回放复用（两级容错照旧）
+    assert 'request("team.room"' in js
+    assert "tcFetchFullLog({ sid }, card" in js
+
+    # 五团队事件同源喂团队室（app.js 分发分支喂卡的同时喂这里）
+    assert "function trRoomFeed(name, data)" in js
+    for feeder in ("trOnStarted", "trOnDelta", "trOnMsg", "trOnTask", "trOnFinish"):
+        assert f'trRoomFeed("{feeder}", data)' in js
+
+    # 入口两个，都跟团队走；不进「＋」菜单常驻（空态率太高，§15.1）
+    assert "在团队室打开" in js and "tc-open-room" in js
+    assert '<span class="coop-mode-label">团队室</span>' in js
+    # 不进「＋」菜单常驻（§15.1：空态率太高）——「＋」菜单跳过团队室的锚定
+    assert 'if (id === "teamroom") return;' in js
+    assert "入口跟团队走（团队卡/协作菜单），不进「＋」菜单常驻" in js
+
+    # 空态与降级（§15.4）：空态两动作、中断只读回放、页签内错误行 + 重试
+    assert "本会话没有进行中的团队" in js
+    assert "从模板建队" in js and "回到对话发起" in js
+    assert "team.template_list" in js
+    assert "只读回放频道" in js and "tcFinish(card, \"interrupted\", \"\")" in js
+    assert "团队室加载失败" in js and "loadTeamRoom(true)" in js
+
+    # 终态只读：trMountSnapshot 与回放卡同口径（_finished 先于重画工单行）
+    i = js.index("function trMountSnapshot")
+    body = js[i:js.index("\n}\n", i)]
+    assert "card._finished = true" in body
+    assert 'card.classList.add("ended")' in body
+
+    # 未读 badge：后台累计（team_message 定稿计数）、进页签即清零
+    assert "function trTabBadge()" in js
+    assert "trUnread = 0" in js
+    assert "rp-tab-badge" in css and "rp-tab-badge" in js
+
+    # 三分区样式全走主题变量：团队室 CSS 块无写死色值（hex / rgb 函数）
+    i = css.index("团队室（独立页签）")
+    seg = css[i:css.index("---------- 对抗卡", i)]
+    assert "var(--" in seg
+    assert not re.search(r"#[0-9a-fA-F]{3,8}", seg)
+    assert not re.search(r"rgba?\(", seg)
+
+
 def test_adversarial_flow_stats_filter_wiring():
     """对抗卡升级为四阶段流程条 + 裁决统计/筛选问题清单；证据仍可展开，
     转团队工单入口不变。"""

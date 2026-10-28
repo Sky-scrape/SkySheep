@@ -740,6 +740,32 @@ def _team_digest(orch: TeamOrchestrator, result: dict) -> str:
 
 
 
+_ROOM_TASK_STATUSES = ("pending", "in_progress", "review", "done", "error")
+
+
+def _room_empty_stats() -> dict:
+    """team.room 空态的 stats：五个状态全零 + 空成员用量（形状与活动态一致）。"""
+    return {"tasks_by_status": {k: 0 for k in _ROOM_TASK_STATUSES}, "member_usage": {}}
+
+
+def _room_stats(team: dict) -> dict:
+    """从团队快照派生团队室首画 stats：工单按状态计数 + 成员用量。
+
+    快照里 status 在五态之外的工单不计入（前端看板把它们折进完成/失败区，
+    这里的计数只服务成员带与列头首画，缺一个数比数错一个好）。
+    """
+    counts = {k: 0 for k in _ROOM_TASK_STATUSES}
+    for t in team.get("tasks") or []:
+        st = str((t or {}).get("status") or "")
+        if st in counts:
+            counts[st] += 1
+    usage = (team.get("usage") or {}).get("members")
+    return {
+        "tasks_by_status": counts,
+        "member_usage": dict(usage) if isinstance(usage, dict) else {},
+    }
+
+
 class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    SystemMixin, TerminalPanelMixin, RemoteMixin, WebtoolsMixin,
                    LifecycleMixin, McpMixin, ModsMixin, PreferencesMixin,
@@ -4381,6 +4407,60 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if orch is not None:
             return {"active": True, "session_id": sid, "team": orch.snapshot()["team"]}
         out: dict = {"active": False, "session_id": sid, "team": None}
+        if sid in self._teams_interrupted:
+            out["interrupted"] = self._teams_interrupted[sid]
+        return out
+
+    async def team_room(self, params: dict) -> dict:
+        """team.room：团队室聚合探针（页签激活 / 会话切换 / 断线重连各调一次）。
+
+        一次带回 team.get 形状的快照块 + latest_seq（频道最新消息序号，供前端
+        校准未读 badge）+ stats（工单按状态计数与成员用量，供成员带与工单板
+        首画免二次推断），替代「team.get + 从频道尾部推断最新 seq」的拼装。
+        只读方法、零新安全语义：session_id 轴与 team.get 同一口径（非本机连接
+        的 session_id 已在 WS 入口被 _team_scoped_params 收敛）；team_id 轴为
+        常驻团队（T3.2）预留的主轴，一期前端不传——收到时沿用 team.log 的
+        三态归属判定（活动命中 / 落库行归属 / 外来），判定不过按同文报
+        TeamError。无活动团队时 active=false、team=null、latest_seq=0，有中断
+        记录时附 interrupted（同 team.get 口径）。
+        """
+        raw = params.get("session_id")
+        sid = str(raw) if raw is not None else (self.session.id if self.session else "")
+        team_id = str(params.get("team_id", "") or "").strip()
+
+        def _room_active(orch) -> dict:
+            team = orch.snapshot()["team"]
+            msgs = orch.channel.messages
+            return {
+                "active": True, "session_id": sid, "team": team,
+                "latest_seq": msgs[-1].seq if msgs else 0,
+                "stats": _room_stats(team),
+            }
+
+        if team_id:
+            # team_id 轴（T3.2 预留）：归属判定与 team.log 逐字同口径，非本会话
+            # 的团队一律拒绝；判定过了但团队不在册（已收队/重启）回空态——
+            # 频道回放走 team.log，本方法只服务活动团队的首画。
+            orch = self._teams.get(sid)
+            active_hit = orch is not None and bool(orch.team_id) and orch.team_id == team_id
+            rows = (
+                await self.store.list_team_messages(team_id)
+                if self.store is not None else []
+            )
+            owned = bool(sid) and any(r.get("session_id") == sid for r in rows)
+            foreign = any(r.get("session_id") and r.get("session_id") != sid for r in rows)
+            if not active_hit and not owned and foreign:
+                raise TeamError("team_id 不属于当前会话：不能回放其他会话的团队频道")
+            if not active_hit:
+                return {"active": False, "session_id": sid, "team": None,
+                        "latest_seq": 0, "stats": _room_empty_stats()}
+            return _room_active(orch)
+
+        out: dict = {"active": False, "session_id": sid, "team": None,
+                     "latest_seq": 0, "stats": _room_empty_stats()}
+        orch = self._teams.get(sid)
+        if orch is not None:
+            return _room_active(orch)
         if sid in self._teams_interrupted:
             out["interrupted"] = self._teams_interrupted[sid]
         return out

@@ -2995,6 +2995,82 @@ mark.search-hit-mark {
 /* 团队纪要徽标：金底，与圆桌紫徽标区分 */
 .rt-badge.team-badge { background: var(--gold); }
 
+/* ---------- 团队室（独立页签）：成员带 · 频道 · 工单板 三分区同屏 ----------
+   容器复用团队卡全套样式（.teamcard），这里只补页签布局与团队室特有差异：
+   折叠锁死（tcFinish 会给终态卡加 .folded，团队室没有折叠语义）、频道与
+   工单板同屏（页签卡的 view-channel 互斥显示在团队室不成立）。颜色全走
+   主题变量，六套主题各自变量组自动生效，无写死色值。 */
+#rp-page-teamroom { overflow: hidden; }
+.teamroom-root {
+  flex: 1; min-height: 0; padding: 8px 10px;
+  display: flex; flex-direction: column;
+}
+.teamroom-card {
+  flex: 1; min-width: 0; min-height: 0; align-self: stretch;
+  display: flex; flex-direction: column;
+  max-width: none; padding: 0; border: none; background: transparent; box-shadow: none;
+}
+.teamroom-card .tc-head { cursor: default; flex-wrap: wrap; padding-bottom: 6px; }
+.teamroom-card .tc-open-room { display: none; } /* 自己就是团队室 */
+/* tcFinish 给终态卡加 .folded：团队室没有折叠语义，正文照常铺开 */
+.teamroom-card.folded .tc-body { display: flex; }
+.teamroom-card .tc-body {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.teamroom-card .tc-roster { flex-wrap: wrap; }
+/* 三分区 grid：频道主区 + 工单板右栏；终态《交付/收队说明》自动落到下一行 */
+.teamroom-card .tr-grid {
+  flex: 1; min-height: 0;
+  display: grid; gap: 8px; align-items: stretch;
+  grid-template-columns: minmax(0, 1fr) clamp(220px, 42%, 320px);
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+.teamroom-card .tc-channel {
+  display: flex; flex: 1; min-height: 120px; max-height: none;
+  margin-top: 0; padding-top: 0; border-top: none;
+}
+.teamroom-card .tc-board { display: block; padding: 0 2px 2px; min-height: 0; overflow-y: auto; }
+/* 窄面板（平板档）：工单板折到频道下方，页签整体恢复滚动 */
+@media (max-width: 1100px) {
+  #rp-page-teamroom { overflow-y: auto; }
+  .teamroom-root { overflow: visible; }
+  .teamroom-card { display: block; }
+  .teamroom-card .tc-body { display: block; }
+  .teamroom-card.folded .tc-body { display: block; }
+  .teamroom-card .tr-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  .teamroom-card .tc-channel { max-height: 320px; flex: none; }
+  .teamroom-card .tc-board { max-height: none; overflow: visible; }
+}
+/* 空态卡（无团队 / 已中断）：引导动作与说明，虚线框与对话区空态同语言 */
+.teamroom-empty {
+  margin: auto; max-width: 460px; padding: 18px 16px; text-align: center;
+  background: var(--paper-sunken);
+  border: 1.5px dashed var(--line2); border-radius: var(--r-md);
+}
+.teamroom-empty .tr-empty-title { font-weight: 800; color: var(--text); margin-bottom: 10px; }
+.teamroom-empty .tr-empty-actions {
+  display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 4px;
+}
+.teamroom-empty .tr-empty-hint { margin: 6px 0 0; }
+/* 页签内错误行（请求失败不发全局 Notice，就地给「重试」） */
+.teamroom-error {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: auto; max-width: 460px; padding: 10px 12px;
+  background: color-mix(in srgb, var(--reg) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--reg) 40%, var(--line));
+  border-radius: var(--r-sm);
+}
+.teamroom-error .tr-error-text { flex: 1; min-width: 0; font-size: var(--fs-sm); color: var(--text); }
+/* 页签未读 badge（团队室在后台推进时挂在页签标题旁，进页签即清零） */
+.rp-tab-badge {
+  flex: 0 0 auto; /* 压掉 .rp-tab > span:not(.rp-x) 的 flex:1 + 省略号（那是标题 span 的） */
+  overflow: visible; text-overflow: clip;
+  font-family: var(--font-mono); font-size: var(--fs-cap); line-height: 1.5;
+  color: var(--on-accent); background: var(--gold);
+  border-radius: var(--r-pill); padding: 0 6px;
+}
+
 /* ---------- 对抗卡：四角色流水线进度 + 问题清单（聊天流内的审查台） ----------
    与圆桌/团队卡同底同框；阶段步进条 + 问题行清单。主色用 --up（红，
    对抗的进攻方意象），与圆桌紫 / 团队金区分。 */

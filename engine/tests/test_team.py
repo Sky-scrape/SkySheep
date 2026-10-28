@@ -2473,6 +2473,113 @@ def test_team_log_ws_replays_persisted_channel_and_checks_ownership(home):
         assert [r["seq"] for r in g5["result"]["messages"]] == [r["seq"] for r in rows]
 
 
+# ---------- 团队室聚合探针（team.room，团队模式设计 §15.2） ----------
+
+
+def test_team_room_ws_aggregates_snapshot_stats_and_gates(home):
+    """team.room：一次带回 team.get 同源的快照块 + latest_seq（频道最新消息
+    序号，未读 badge 校准用）+ stats（工单按状态计数 / 成员用量）；无团队回
+    空态（active=false / team=null / latest_seq=0 / stats 全零）；team_id 轴
+    （T3.2 预留）与 team.log 同口径——活动命中放行、外来 id 同文拒绝。"""
+    scripts = [
+        [[TextBlock(text="x")]],  # 主模型（团队轮不消耗）
+        [[TextBlock(text="调研完成：结论 A")]],  # 小研
+    ]
+    with make_team_client(home, scripts) as client, client.websocket_connect("/ws") as ws:
+        # 无团队空态
+        ws.send_json({"id": "e0", "method": "team.room", "params": {}})
+        e0 = recv_until(ws, "e0")
+        assert e0["ok"], e0
+        assert e0["result"]["active"] is False and e0["result"]["team"] is None
+        assert e0["result"]["latest_seq"] == 0
+        assert e0["result"]["stats"] == {
+            "tasks_by_status": {"pending": 0, "in_progress": 0,
+                                "review": 0, "done": 0, "error": 0},
+            "member_usage": {},
+        }
+        assert "session_id" in e0["result"]
+
+        # 建队 + 登记一张待办工单（stats 的统计材料），成员跑完一轮进频道
+        ws.send_json({"id": "r1", "method": "chat.send", "params": {
+            "text": "@小研 开工", "team": True,
+            "members": [{"provider": "fa", "model": "ma", "name": "小研"}],
+        }})
+        r1 = recv_until(ws, "r1")
+        assert r1["ok"], r1
+        sid = r1["result"]["session_id"]
+        team_id = r1["result"]["team"]["team"]["team_id"]
+        ws.send_json({"id": "k1", "method": "team.task_add", "params": {
+            "session_id": sid, "title": "整理调研", "assignee": "小研", "type": "exec",
+        }})
+        k1 = recv_until(ws, "k1")
+        assert k1["ok"], k1
+
+        # 活动团队：快照块与 team.get 同源；latest_seq 对齐频道最大 seq
+        ws.send_json({"id": "g1", "method": "team.get", "params": {"session_id": sid}})
+        g1 = recv_until(ws, "g1")
+        assert g1["ok"], g1
+        ws.send_json({"id": "l1", "method": "team.log", "params": {"team_id": team_id}})
+        l1 = recv_until(ws, "l1")
+        assert l1["ok"], l1
+        ws.send_json({"id": "m1", "method": "team.room", "params": {"session_id": sid}})
+        m1 = recv_until(ws, "m1")
+        assert m1["ok"], m1
+        got = m1["result"]
+        assert set(got) == {"active", "session_id", "team", "latest_seq", "stats"}
+        assert got["active"] is True and got["session_id"] == sid
+        assert got["team"] == g1["result"]["team"]  # 同一快照源，页签与卡不两套
+        assert got["latest_seq"] == max(r["seq"] for r in l1["result"]["messages"])
+        assert got["latest_seq"] > 0
+        assert got["stats"]["tasks_by_status"]["pending"] == 1
+        assert got["stats"]["tasks_by_status"]["in_progress"] == 0
+        # FakeProvider 不发 usage 事件：成员用量按空册回（形状契约由键存在保证）
+        assert isinstance(got["stats"]["member_usage"], dict)
+
+        # team_id 轴（一期前端不传，T3.2 预留）：活动命中放行，形状一致
+        ws.send_json({"id": "m2", "method": "team.room", "params": {"team_id": team_id}})
+        m2 = recv_until(ws, "m2")
+        assert m2["ok"], m2
+        assert m2["result"]["active"] is True
+        assert m2["result"]["team"]["team_id"] == team_id
+        assert m2["result"]["latest_seq"] == got["latest_seq"]
+
+        # 外来 team_id（断言他人会话）：与 team.log 同文拒绝，零新安全语义
+        ws.send_json({"id": "m3", "method": "team.room", "params": {
+            "team_id": team_id, "session_id": "sess-other"}})
+        m3 = recv_until(ws, "m3")
+        assert not m3["ok"] and "不属于当前会话" in m3["error"]
+
+
+@pytest.mark.asyncio
+async def test_team_room_empty_state_carries_interrupted(home, tmp_path):
+    """team.room 空态：重启后的中断记录原样附带（团队室空态卡的只读回放
+    入口靠它）；team_id 轴对不在册团队（库内零记录）不拒绝、回空态——与
+    team.log 的「未知 id 回空」容错一致。"""
+    state = tmp_path / "team_active.json"
+    sid = "sess-1"
+    b1 = ServerBackend(
+        working_dir=home / "proj", provider_factory=lambda: FakeProvider([]),
+        team_state_path=state,
+    )
+    _events, orch = make_orch()
+    await orch.create_team([spec("小研", OrderProbe("小研", [], []))])
+    b1._teams[sid] = orch
+    b1._persist_team_state()
+
+    b2 = ServerBackend(
+        working_dir=home / "proj", provider_factory=lambda: FakeProvider([]),
+        team_state_path=state,
+    )
+    got = await b2.team_room({"session_id": sid})
+    assert got["active"] is False and got["team"] is None and got["latest_seq"] == 0
+    assert got["stats"]["member_usage"] == {}
+    assert got["interrupted"]["status"] == "interrupted"
+    assert got["interrupted"]["team_id"] == orch.team_id
+    # team_id 轴：中断团队不在册、库内零记录（无 store）→ 不拒绝，回空态
+    got2 = await b2.team_room({"session_id": sid, "team_id": orch.team_id})
+    assert got2["active"] is False and got2["team"] is None
+
+
 def test_teamcfg_ws_roundtrip_clamp_and_hot_effect(home):
     """teamcfg.get/save（设置页 [team] 配置卡，三期）：get 回上限键 + 中文说明；
     save 走 config.toml（update_config_section，无手拼）并回传新状态——越界值

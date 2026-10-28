@@ -726,6 +726,14 @@
             <div class="rp-seg-view hidden" id="rp-view-skills"></div>
           </section>
 
+          <!-- 团队室（独立页签）：成员带 · 频道消息流 · 工单板 三分区同屏，
+               规格见 docs/团队模式设计.md §15。内容全部由 app-teamroom.js 的
+               loadTeamRoom 动态构建（复用团队卡 tc* 渲染系）；入口跟团队走
+               （团队卡「在团队室打开」/ 协作菜单「团队室」），不进「＋」菜单。 -->
+          <section id="rp-page-teamroom" class="rp-page hidden">
+            <div id="teamroom-root" class="teamroom-root"></div>
+          </section>
+
         </div>
       </aside>
     </div>
@@ -2193,6 +2201,11 @@
 <script src="/static/app-browser.js"></script>
 <script src="/static/app-mods.js"></script>
 <script src="/static/app.js"></script>
+<!-- 团队室（独立页签）：普通 script、零构建，先 app.js 后本文件——三分区
+     容器复用 app.js 的团队卡 tc* 渲染系（buildTeamCard / tcUpsertMsg /
+     tcRenderTasks…），页签装载走 app.js 的 RIGHT_TAB_LOADERS.teamroom；
+     五团队事件由 app.js 的分发分支经 trRoomFeed 同源喂入 -->
+<script src="/static/app-teamroom.js"></script>
 <!-- 工厂视图（第三顶层视图）：像素场景与监控面板；普通 script、零构建，
      先 app.js 后本文件，靠全局函数互调（factoryMount / factoryOnEvent…）。
      工厂拆成四个分区，按序加载：主文件（状态/面板/事件）→ 场景构建 → 抽屉 → 绘制，

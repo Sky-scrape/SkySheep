@@ -305,6 +305,48 @@ async def test_real_socket_team_flow_create_assign_answer_finish(home):
             assert g1["result"]["active"] is False and g1["result"]["team"] is None
 
 
+async def test_real_socket_team_room_aggregate_probe(home):
+    """真实 socket 上跑通团队室聚合探针（团队模式设计 §15.2）：建队后
+    team.room 一次带回「team.get 同源快照 + latest_seq + stats」；收队后探针
+    回空态（回放态仍凭 team_id 走 team.log，不占聚合探针）。"""
+    script = [
+        [TextBlock(text="调研完成：结论 A")],  # 成员被唤醒的一轮
+    ]
+    async with live_server(home, script) as url:
+        async with websockets.connect(url) as ws:
+            await _rpc(ws, "b1", "boot")
+            ev1: list = []
+            r1 = await _rpc(ws, "t1", "chat.send", {
+                "text": "@小研 先做调研", "team": True,
+                "members": [{"provider": "fa", "model": "ma", "name": "小研"}],
+            }, events=ev1)
+            assert r1.get("ok") is True, r1
+            sid = r1["result"]["session_id"]
+            team_id = r1["result"]["team"]["team"]["team_id"]
+
+            g1 = await _rpc(ws, "g1", "team.room", {"session_id": sid})
+            assert g1.get("ok") is True, g1
+            got = g1["result"]
+            assert set(got) == {"active", "session_id", "team", "latest_seq", "stats"}
+            assert got["active"] is True and got["session_id"] == sid
+            assert got["team"]["team_id"] == team_id
+            assert got["latest_seq"] > 0
+            assert got["stats"]["tasks_by_status"] == {
+                "pending": 0, "in_progress": 0, "review": 0, "done": 0, "error": 0}
+
+            # 收队后：聚合探针回空态；频道全量仍凭 team_id 走 team.log 回放
+            s1 = await _rpc(ws, "s1", "team.stop", {"session_id": sid, "reason": "收"})
+            assert s1.get("ok") is True, s1
+            g2 = await _rpc(ws, "g2", "team.room", {"session_id": sid})
+            assert g2.get("ok") is True, g2
+            assert g2["result"]["active"] is False and g2["result"]["team"] is None
+            assert g2["result"]["latest_seq"] == 0
+            g3 = await _rpc(ws, "g3", "team.log", {"team_id": team_id})
+            assert g3.get("ok") is True, g3
+            seqs = [row["seq"] for row in g3["result"]["messages"]]
+            assert seqs == sorted(seqs) and len(seqs) >= 2
+
+
 async def test_real_socket_ai_director_closed_loop(home):
     """真实 socket 上跑通团队二期（AI 总管）的闭环：
     一句话目标 → 总管建单 → 自动派发唤醒队员 → 验收 → 交付 → 会话恢复普通回合。

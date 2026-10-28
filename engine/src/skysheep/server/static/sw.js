@@ -26,6 +26,7 @@ const SHELL_URLS = [
   "/static/index.html",
   "/static/app.css",
   "/static/app.js",
+  "/static/app-teamroom.js",
   "/static/app-factory.js",
   "/static/app-factory-scene.js",
   "/static/app-factory-drawer.js",

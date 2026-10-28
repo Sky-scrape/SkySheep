@@ -88,6 +88,13 @@ async def _h_team_log(backend: ServerBackend, params: dict, emit, local: bool) -
     return await backend.team_log(_team_scoped_params(backend, params, local))
 
 
+# 团队室聚合探针（团队室页签专用只读方法）：team.get 快照 + latest_seq + stats
+# 一次带回；非本机连接的 session_id 照走 _team_scoped_params 收敛（与 team.get/
+# team.log 同一安全口径，只读得到自己会话的团队）。
+async def _h_team_room(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_room(_team_scoped_params(backend, params, local))
+
+
 async def _h_team_template_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.team_template_list()
 
@@ -130,6 +137,7 @@ METHODS: dict[str, _WsMethod] = {
     "team.deliver": _WsMethod(_h_team_deliver),
     "team.takeover": _WsMethod(_h_team_takeover),
     "team.log": _WsMethod(_h_team_log),
+    "team.room": _WsMethod(_h_team_room),
     "team.template_list": _WsMethod(_h_team_template_list),
     "team.template_save": _WsMethod(_h_team_template_save, local_only=True),
     "team.template_remove": _WsMethod(_h_team_template_remove, local_only=True),

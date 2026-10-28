@@ -256,6 +256,7 @@ def _no_store_static(app) -> None:
         # 缓存供旧副本，与新 backend / 新 app.js 混跑（审计 M18/L29）；清单漂移
         # 由 tests/test_frontend_wiring.py 的三清单对齐断言机械守住
         "/static/app.js",
+        "/static/app-teamroom.js",  # 团队室页签模块（index.html 加载清单强制对齐）
         "/static/app-projects.js",
         "/static/app-schedule.js",
         "/static/app-providers.js",

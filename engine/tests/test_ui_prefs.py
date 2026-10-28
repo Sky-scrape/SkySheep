@@ -1465,7 +1465,8 @@ def test_right_panel_merged_tabs_keep_every_view_reachable(home):
     meta = meta[:meta.index("\n};")]
     tab_ids = re.findall(r"^  (\w+): \{", meta, re.M)
     assert tab_ids == ["aux", "review", "files", "browser", "tasks", "agenda",
-                       "auto", "relay", "memory", "map", "ext"], f"标签集合变了：{tab_ids}"
+                       "auto", "relay", "memory", "map", "ext", "teamroom"], \
+        f"标签集合变了：{tab_ids}"
     for old in ("todo", "ptasks", "cron", "pipeline"):
         assert f"\n  {old}: {{" not in meta, f"{old} 已并入容器标签，不该再单独占一格菜单"
 

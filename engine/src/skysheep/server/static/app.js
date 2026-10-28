@@ -3560,7 +3560,12 @@ function buildTeamCard(roster, directorMode, director) {
   resumeBtn.hidden = true;
   resumeBtn.title = "向 AI 总管发送继续指令，恢复自动推进";
   resumeBtn.onclick = (e) => { e.stopPropagation(); tcContinueTeam(card); };
-  head.append(tcEl("span", "tc-title", "🧩 团队"), sub, status, fold);
+  // 在团队室打开（团队模式设计 §15.1 入口①）：跳右面板「团队室」页签，
+  // 频道 / 工单板 / 成员三分区同屏；卡片与团队室同源渲染、双向即时同步
+  const roomBtn = tcEl("button", "tc-open-room", "在团队室打开");
+  roomBtn.title = "在右侧面板的「团队室」页签打开本团队：成员、频道、工单板三分区同屏";
+  roomBtn.onclick = (e) => { e.stopPropagation(); if (typeof openRightTab === "function") openRightTab("teamroom"); };
+  head.append(tcEl("span", "tc-title", "🧩 团队"), sub, status, roomBtn, fold);
   const toggleFold = () => {
     const folded = card.classList.toggle("folded");
     fold.textContent = folded ? "展开" : "折叠";
@@ -4218,6 +4223,7 @@ function updateTeamCard(card, team) {
       }
     : null;
   card._teamId = String(team.team_id || card._teamId || "");
+  card._lastTeam = team; // 最近一份快照：团队室对终态团队的只读渲染从这里取
   card._usage = team.usage || {}; // 名册用量徽标在 tcUpdateRoster 里读
   tcUpdateRoster(card, team.roster || [], team.director_mode || "user");
   tcSetSub(card, team);
@@ -5051,11 +5057,13 @@ function handleEvent(kind, data) {
     case "adversarial_finding_proposed": advAddFinding(data); break;
     case "adversarial_verdict": advApplyVerdict(data); break;
     case "adversarial_finished": advFinished(data); break;
-    case "team_started": beginTeam(data); break;
-    case "team_message_delta": teamMemberDelta(data); break;
-    case "team_message": teamMsgFinal(data); break;
-    case "team_task_updated": teamTaskUpdated(data); break;
-    case "team_finished": teamFinished(data); break;
+    // 团队五事件在喂团队卡的同时喂团队室容器（同一套 tc* 渲染函数，
+    // app-teamroom.js 的 trRoomFeed 分发；页签未打开时那边只累计未读）
+    case "team_started": beginTeam(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnStarted", data); break;
+    case "team_message_delta": teamMemberDelta(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnDelta", data); break;
+    case "team_message": teamMsgFinal(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnMsg", data); break;
+    case "team_task_updated": teamTaskUpdated(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnTask", data); break;
+    case "team_finished": teamFinished(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnFinish", data); break;
     case "tool_call_started": addToolCard(data); break;
     case "tool_call_finished": finishToolCard(data); break;
     case "subagent_spawned": onSubagentSpawned(data); break;
@@ -8987,6 +8995,21 @@ function renderCoopMenuItems(menu) {
     };
     menu.appendChild(b);
   }
+  // 团队进行中：协作菜单附「团队室」直达（团队模式设计 §15.1 入口②）——
+  // 只跳页签，不动本条消息的协作开关
+  const teamLive = activeTab && activeTab.teamCard && activeTab.teamCard.isConnected
+    && !activeTab.teamCard.classList.contains("ended");
+  if (teamLive && typeof openRightTab === "function") {
+    const room = document.createElement("button");
+    room.className = "coop-mode-item";
+    room.title = "打开右侧面板的「团队室」页签：成员、频道、工单板三分区同屏";
+    room.innerHTML = '<span class="coop-mode-check"></span>' +
+      '<span class="coop-mode-body">' +
+      '<span class="coop-mode-label">团队室</span>' +
+      '<span class="coop-mode-desc">成员 · 频道 · 工单板 大屏同看（独立页签）</span></span>';
+    room.onclick = () => { closeMenu(); openRightTab("teamroom"); };
+    menu.appendChild(room);
+  }
 }
 
 // 设置弹层贴在协作菜单右侧放出（放不下换到左侧）；确定后连协作菜单一起收起
@@ -12627,6 +12650,8 @@ const RP_ICONS = {
   map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="17" r="1.7"/><circle cx="12" cy="6" r="1.7"/><circle cx="18.5" cy="13.5" r="1.7"/><path d="m7.2 15.4 3.9-7.9M13.6 7l3.9 5.2M7.7 17.1l9.1-3"/></svg>',
   ext: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5V8M15 3.5V8"/><path d="M6.5 8h11v2.5a5.5 5.5 0 0 1-5.5 5.5 5.5 5.5 0 0 1-5.5-5.5z"/><path d="M12 16v4.5"/></svg>',
   relay: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.3"/><circle cx="18" cy="18" r="2.3"/><path d="M8 6h5a4 4 0 0 1 4 4v2M16 18h-5a4 4 0 0 1-4-4v-2"/><path d="m13 9 4 3 3-4M11 15l-4-3-3 4"/></svg>',
+  // 团队室：左侧横线＝频道消息流，右侧方格＝工单看板（页签三分区的意象）
+  teamroom: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h16"/><path d="M4 10h8M4 13.5h6M4 17h8"/><rect x="15" y="9" width="5" height="10" rx="1"/><path d="M16.8 11.8h1.4M16.8 14h1.4"/></svg>',
   // 面板开关：箭头指明点击后的动作——收起时 `>`（向右展开）、展开时 `<`（向左收起），
   // 展开态把面板列填色提示"此刻是开着的"
   panelClosed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M14.5 4.5v15"/><path d="m8.5 9.5 2.5 2.5-2.5 2.5"/></svg>',
@@ -12651,6 +12676,8 @@ const TAB_META = {
   memory: { title: "项目记忆" },
   map: { title: "记忆地图", sub: "项目演化 · 时间线 · 图谱" },
   ext: { title: "MCP / Skills" },
+  // 团队室（团队模式设计 §15）：入口跟团队走（团队卡 / 协作菜单），不进「＋」菜单
+  teamroom: { title: "团队室", sub: "频道 · 工单 · 成员" },
 };
 // 分段 id → 所属标签。合并前的 ui.json 里存的就是分段 id（todo / ptasks /
 // cron / pipeline），靠这张表映射回所属标签并把分段一并还原。
@@ -12743,6 +12770,7 @@ const RIGHT_TAB_LOADERS = {
   todo: () => loadTodoPanel(),
   aux: () => refreshAuxModel(), // 模型下拉：每次激活都重拉（主模型换了「跟随」项的标注要跟着变）
   relay: (force) => relayWorkbenchShown({ force, focus: false }),
+  teamroom: (force) => loadTeamRoom(force), // 团队室：激活/切会话都重拉（永远对准当前会话）
 };
 
 /** 按需加载某个视图的数据；未知 id 静默跳过。
@@ -12776,7 +12804,11 @@ function renderRightPanel() {
     b.dataset.tabId = id;
     b.title = meta.title + (meta.sub ? "：" + meta.sub : "") + "（可拖动排序 · 右键更多）";
     b.setAttribute("aria-label", meta.title); // 图标档藏文字后无障碍名不丢
-    b.innerHTML = (RP_ICONS[id] || RP_ICONS.aux) + "<span>" + meta.title + '</span><span class="rp-x" title="关闭标签">✕</span>';
+    // 团队室页签：后台有新频道消息时标题旁挂未读数（进页签即清零，trTabBadge 在 app-teamroom.js）
+    const roomBadge = id === "teamroom" && typeof trTabBadge === "function" ? trTabBadge() : 0;
+    b.innerHTML = (RP_ICONS[id] || RP_ICONS.aux) + "<span>" + meta.title + "</span>" +
+      (roomBadge ? '<span class="rp-tab-badge">' + roomBadge + "</span>" : "") +
+      '<span class="rp-x" title="关闭标签">✕</span>';
     b.querySelector(".rp-x").onclick = (e) => { e.stopPropagation(); closeRightTab(id); };
     b.onclick = () => {
       if (rpJustDragged) { rpJustDragged = false; return; } // 拖完补发的 click 别切标签
@@ -13242,6 +13274,7 @@ function toggleTabsMenu(anchor) {
   tabsMenuEl = document.createElement("div");
   tabsMenuEl.className = "tabs-menu";
   Object.keys(TAB_META).forEach((id) => {
+    if (id === "teamroom") return; // 团队室：入口跟团队走（团队卡/协作菜单），不进「＋」菜单常驻
     const b = document.createElement("button");
     b.className = "tabs-menu-item";
     // 辅助对话是多开标签（存 auxN），菜单项按「有没有任何一个 aux 实例」判断

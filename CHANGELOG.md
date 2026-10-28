@@ -48,6 +48,10 @@
 
 ### 修复
 
+- **无头协议文档的 team_started 名册样例**：「定时团队的事件流」节选里 `roster`
+  行缺 `persona` 字段，与 `TeamStarted.roster` 的实际形状不符（`core/team.py`
+  `_roster_dicts()` 恒定产出 `{index, name, provider, model, persona}` 五键，
+  events.py 字段注释同口径）；照实补齐，未动代码。
 - **定时团队装配期的 provider 泄漏**：无人值守建队时，`create_team` 或更早的
   编排器构造一旦 raise，成员解析与总管构建已建出的 provider（各自带 httpx 连接池）
   不会被收尾释放——对照交互式路径对团队轮的释放口径，现把「成员解析 → 总管构建 →

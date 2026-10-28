@@ -7,13 +7,24 @@
 // 未读 badge 照设计 §15.4：last_seen_seq 按 team_id 随 saveUiPrefs 既有机制落
 // ui.json，badge = latest_seq − last_seen_seq——team.room 专门带回的 latest_seq
 // 是权威水位，刷新/断线重连空档的消息由它兜住，不靠内存计数；进页签即清零。
+// 三条补线（第五批评审）：后台定稿按 team_id+seq 直接对水位记账、不依赖挂卡
+// （空态/错误态/后台起队无容器照样计数）；起队即探针校准 trTeamId/trLatestSeq
+// （眼前看过的消息即时推已见水位，切走不整表重计）；已见水位合并落盘（落盘前
+// 重读服务端现值只并本队键，--browser 多页签并存不互相回退条目）。
 // 写操作入口是团队卡既有 handler 原样可用，不新增写路径。
 
 let trCard = null;  // 现役团队室容器（teamcard 形状，_ui 与团队卡同形）
 let trSid = null;   // 容器对准的会话（页签内容永远对准当前会话，不跨会话缓存）
 let trTeamId = "";  // 页签当前对准的团队（team.room 快照带回；后台起的新队先置空）
 let trLatestSeq = 0; // 对准团队的频道最新 seq（team.room 权威值 + 后台定稿事件增量）
-let trSeenMap = null; // ui.json team_last_seen 镜像 {team_id: last_seen_seq}（惰性拉取）
+let trSeenMap = null; // ui.json team_last_seen 镜像 {team_id: last_seen_seq}（页签装载时拉取）
+// 起动校准代次（§15.4 回归②）：team_started 不带 team_id，起队后探一次
+// team.room 把 trTeamId/trLatestSeq 补齐；再次起队或权威校准（trTrackRoom）
+// 都让在途探针作废，迟到的回包不回写旧队伍的水位
+let trCalGen = 0;
+// 已见水位落盘链（§15.4 回归③）：trMarkSeen 的合并写在链上逐条串行，
+// 同页不并发读改写、后一条总在前一条落定后重读服务端现值
+let trSeenFlushChain = Promise.resolve();
 
 function trRoot() {
   return document.getElementById("teamroom-root");
@@ -32,14 +43,13 @@ function trTabBadge() {
 }
 
 // ui.json 的 team_last_seen 镜像（§15.4：last_seen_seq 按 team_id 持久化）。
-// 进程内只拉一次；拉不到不缓存（下次装载再试），badge 可能暂时把已看过的
-// 算进去——只在持久化读取失败这条坏路径上出现，且进页签后必然重校准
+// 页签每次装载都重拉：--browser 多页签并存时别的页签可能推进过水位，本页
+// 旧镜像只会把别人已见的算成未读；拉不到沿用本页旧镜像，再不行 badge 全计
+//（只在持久化读取失败这条坏路径上出现，且进页签后必然重校准）
 async function trSeenLoad() {
-  if (trSeenMap) return trSeenMap;
   const r = await request("ui.get").catch(() => null);
   const raw = r && r.prefs && r.prefs.team_last_seen;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  trSeenMap = raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) trSeenMap = raw;
   return trSeenMap;
 }
 
@@ -48,26 +58,70 @@ function trSeenFor(teamId) {
 }
 
 // 已见水位推盘（§15.4：随 saveUiPrefs 既有机制落 ui.json，原子写在后端）。
-// ui.save 对键内是整键替换，镜像齐了才发——丢别的队伍条目比少一次落盘重；
-// 同值不重发（badge 清零只在水位真前进时发生一次）
+// ui.save 对 team_last_seen 键内是整键替换，--browser 多页签并存时后写页签的
+// 旧镜像整表会把先写页签刚推进的条目回退（回归③）——落盘前重读服务端现值，
+// 读-改-写只并进本队键：别队的条目原样保留，本队别人已推得更远就不动盘。
+// 镜像未拉到也照推（合并写不依赖整表，旧实现整表替换才要求镜像齐全）
 function trMarkSeen(teamId, seq) {
   seq = Number(seq) || 0;
-  if (!teamId || seq <= 0 || !trSeenMap) return;
-  if (trSeenFor(teamId) >= seq) return;
+  if (!teamId || seq <= 0) return;
+  if (trSeenFor(teamId) >= seq) return; // 同值不重发（badge 清零只在水位真前进时发生一次）
+  if (!trSeenMap) trSeenMap = {};
   trSeenMap[teamId] = seq;
-  saveUiPrefs({ team_last_seen: Object.assign({}, trSeenMap) });
+  trSeenFlushChain = trSeenFlushChain
+    .then(() => trSeenFlush(teamId))
+    .catch(() => {});
+}
+
+async function trSeenFlush(teamId) {
+  const seq = trSeenFor(teamId); // 链上执行时镜像已是本页最新值
+  if (seq <= 0) return;
+  const r = await request("ui.get").catch(() => null);
+  const raw = r && r.prefs && r.prefs.team_last_seen;
+  const merged = (raw && typeof raw === "object" && !Array.isArray(raw))
+    ? Object.assign({}, raw) : {};
+  if ((Number(merged[teamId]) || 0) >= seq) return; // 别的页签已推得更远：不动盘
+  merged[teamId] = seq;
+  saveUiPrefs({ team_last_seen: merged });
 }
 
 // team.room 探针回来后的水位校准（§15.4）：latest_seq 以服务端为准——刷新/
 // 断线重连空档的消息由它兜住；页签在眼前才推 last_seen（进室即清零），
 // 在后台只抬水位让 badge = latest − last_seen 自然长大。无活动团队时
-// teamId 传空串、latest 传 0：badge 无从谈起，等下一支队伍
+// teamId 传空串、latest 传 0：badge 无从谈起，等下一支队伍。
+// 权威校准落在盘面上就作废在途的起动校准探针（trCalGen 前进）
 function trTrackRoom(teamId, latestSeq, sid) {
+  trCalGen++;
   trSid = sid || "";
   trTeamId = String(teamId || "");
   trLatestSeq = Number(latestSeq) || 0;
   if (trTabVisible()) trMarkSeen(trTeamId, trLatestSeq);
   trSyncBadge();
+}
+
+// 起动校准（§15.4 回归②）：team_started 事件不带 team_id，起队把 trTeamId
+// 重置成空串——页签眼前的起队在此之后推不了已见水位（trMarkSeen("") 是空
+// 操作）、trLatestSeq 也停在 0，用户看着消息进来再切走，第一条后台定稿按
+// seq−0 算成全量未读。起队后立即探一次 team.room 把 team_id 与 latest_seq
+// 校准回来：眼前在看的消息即时推已见水位，切走后 badge 只剩真正没看的。
+// 后台起队同样受益——常驻团队复用同队 id 续频道，已见水位从上轮落盘值起算，
+// badge 只计本轮新增。水位只进不退：探针在途时定稿事件可能已把 seq 抬得
+// 更高（服务端 WS 单连接 FIFO，回包不早于发出前的事件，max 只防乱序抵达）
+function trCalibrateStarted(sid) {
+  const gen = ++trCalGen;
+  request("team.room", sid ? { session_id: sid } : {})
+    .then((r) => {
+      // 迟到的回包不作数：期间又起队或权威校准（trTrackRoom）已接手
+      if (gen !== trCalGen || trTeamId) return;
+      if (!r || !r.active || !r.team) return;
+      trSid = sid || "";
+      trTeamId = String(r.team.team_id || "");
+      const latest = Number(r.latest_seq) || 0;
+      if (latest > trLatestSeq) trLatestSeq = latest;
+      if (trTabVisible()) trMarkSeen(trTeamId, trLatestSeq);
+      trSyncBadge();
+    })
+    .catch(() => { /* 探针失败：等下一次装载（loadTeamRoom）的权威校准兜底 */ });
 }
 
 // 后台定稿事件（team_message）的 seq 增量：只补两次探针之间的空档，权威
@@ -308,9 +362,19 @@ function trRoomFeed(name, data) {
   if (fn) fn(data);
 }
 
-// 容器在眼前且事件属于它对准的会话
+// 容器在眼前且事件属于它对准的会话（渲染路径：要动手画卡，必须先有卡）
 function trRoomMatches(data) {
   if (!trCard || !trCard.isConnected) return false;
+  return trBgRoomMatches(data);
+}
+
+// 后台记账的会话匹配（§15.4 回归①）：不要求挂卡——空态/错误态/后台起队
+// 都没有现役容器，卡前提会让 trOnMsg 的后台分支永不抬水位、进页签即
+// trMarkSeen(latest) 整表清零，页签开着停在空态时后台推进的团队消息未读
+// 整体丢失（早期内存计数制对后台定稿一律计数，此处是等价记账的回归点）。
+// 按 team_id+seq 直接对水位记账：只按会话过滤（别会话的 seq 是另一条数轴，
+// 照旧不混计）
+function trBgRoomMatches(data) {
   const sid = data && data.session_id;
   if (sid && trSid && sid !== trSid) return false;
   return true;
@@ -320,11 +384,15 @@ function trOnStarted(data) {
   const t = typeof curTab === "function" ? curTab() : null;
   const sid = (data && data.session_id) || (t && t.sid) || "";
   if (trSid && sid && trSid !== sid) return;
-  // 新队 seq 从 1 重数、队 id 未知（事件不带 team_id，激活时 team.room 校准）：
-  // 无论页签在不在眼前，上一支队伍的已见水位都不跨队沿用
+  // 新队 seq 从 1 重数、队 id 未知（事件不带 team_id）：无论页签在不在
+  // 眼前，上一支队伍的已见水位都不跨队沿用
   trTeamId = "";
   trLatestSeq = 0;
   trSyncBadge(); // 水位重置后页签角标同步（眼前恒 0、后台按 seen=0 全计）
+  // 起动校准（回归②）：把 team_id/latest_seq 补齐，眼前的起队才能即时推
+  // 已见水位、常驻复用才不把上轮已见的重计成未读。后台路径页签一开
+  // loadTeamRoom 就权威校准，这里先探一次只省一段 badge 失真的窗口
+  trCalibrateStarted(sid);
   if (!trTabVisible()) return; // 后台不渲染：激活时 loadTeamRoom 重拉
   trCard = null; // 新团队另起一张
   const isAi = (data.director_mode || "user") === "ai";
@@ -352,14 +420,16 @@ function trOnDelta(data) {
 
 function trOnMsg(data) {
   if (!trTabVisible()) {
-    // 页签在后台：同会话的定稿抬 seq 水位，badge = latest − last_seen（§15.4）
-    if (trRoomMatches(data)) trTrackEventSeq(data && data.seq);
+    // 页签在后台：同会话的定稿按 team_id+seq 直接对水位记账，badge =
+    // latest − last_seen（§15.4）。不依赖挂卡——空态/错误态/后台起队没有
+    // 现役容器，卡前提会让后台水位永不抬、进页签即整表清零（回归①）
+    if (trBgRoomMatches(data)) trTrackEventSeq(data && data.seq);
     return;
   }
   if (!trRoomMatches(data)) return;
   tcUpsertMsg(trCard, data);
   // 眼看过的消息即时推已见水位：切去别的页签后 badge 不把刚看过的算未读
-  //（teamId 未知时这里是空操作，进页签的 team.room 校准兜底）
+  //（teamId 未知时这里是空操作，起动校准/进页签的 team.room 校准兜底）
   trMarkSeen(trTeamId, data && data.seq);
 }
 

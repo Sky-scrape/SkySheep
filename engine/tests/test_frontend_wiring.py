@@ -746,8 +746,69 @@ def test_team_room_tab_wiring():
     i = css.index("团队室（独立页签）")
     seg = css[i:css.index("---------- 对抗卡", i)]
     assert "var(--" in seg
-    assert not re.search(r"#[0-9a-fA-F]{3,8}", seg)
+    assert not re.search(r"#[0-9a-fA-F]{3,8}", seg)
     assert not re.search(r"rgba?\(", seg)
+
+
+def test_team_room_badge_backlog_wiring():
+    """团队室未读 badge 三处补线（第五批评审，§15.4 的回归与死角）：
+    ① 后台定稿按 team_id+seq 直接对水位记账、不依赖挂卡（空态/错误态/后台
+    起队无容器也要计数，否则进页签即整表清零、未读整体丢失）；
+    ② 起队即探针校准 trTeamId/trLatestSeq（眼前看过的消息即时推已见水位，
+    切走后第一条后台定稿不再按 seq−0 整表重计）；
+    ③ 已见水位合并落盘（落盘前重读服务端现值只并本队键，--browser 多页签
+    并存不互相回退条目）。"""
+    tr_js = read_static("app-teamroom.js")
+
+    # ① 后台记账：trOnMsg 后台分支的门槛是会话匹配（trBgRoomMatches），
+    #    不过 trRoomMatches 的挂卡前提；眼前分支仍要求挂卡（要动手画卡）
+    assert "function trBgRoomMatches(data)" in tr_js
+    assert "if (trBgRoomMatches(data)) trTrackEventSeq(data && data.seq);" in tr_js
+    assert "if (!trRoomMatches(data)) return;" in tr_js
+    # trRoomMatches 本体 = 挂卡前提 + 同一套会话匹配（判定不分叉）
+    i = tr_js.index("function trRoomMatches(data)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "trCard.isConnected" in body
+    assert "return trBgRoomMatches(data);" in body
+
+    # ② 起动校准：trOnStarted 起队即打 team.room 探针；回包带代次守卫
+    #    （期间又起队/权威校准接手则迟到回包作废）与水位只进不退（探针在途
+    #    时定稿事件可能已把 seq 抬得更高），回包当下把已见水位推到 latest
+    assert "function trCalibrateStarted(sid)" in tr_js
+    assert "trCalibrateStarted(sid);" in tr_js
+    i = tr_js.index("function trCalibrateStarted(sid)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "gen !== trCalGen || trTeamId" in body
+    assert "if (latest > trLatestSeq) trLatestSeq = latest;" in body
+    assert "trMarkSeen(trTeamId, trLatestSeq);" in body
+    # 权威校准（trTrackRoom）作废在途起动探针
+    i = tr_js.index("function trTrackRoom(teamId, latestSeq, sid)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "trCalGen++;" in body
+
+    # ③ 合并落盘：写前重读 ui.get 现值，读-改-写只并本队键（别队条目原样
+    #    保留、本队别人已推得更远就不动盘）；链上串行防同页并发读改写互踩；
+    #    旧写法（整表替换、要求镜像齐全才发）不许回来
+    assert "trSeenFlushChain" in tr_js
+    i = tr_js.index("async function trSeenFlush(teamId)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert 'request("ui.get")' in body
+    assert "Object.assign({}, raw)" in body
+    assert "(Number(merged[teamId]) || 0) >= seq" in body
+    assert "merged[teamId] = seq;" in body
+    assert "saveUiPrefs({ team_last_seen: merged" in tr_js
+    assert "saveUiPrefs({ team_last_seen: Object.assign({}, trSeenMap)" not in tr_js
+    # 镜像未拉到也照推（合并写不依赖整表；旧实现才要求镜像齐全）
+    i = tr_js.index("function trMarkSeen(teamId, seq)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "trSeenMap) return" not in body
+    assert "trSeenMap[teamId] = seq;" in body
+    # 镜像页签每次装载都重拉：别的页签可能推进过水位，旧一次性缓存只会把
+    # 别人已见的算成本页未读
+    i = tr_js.index("async function trSeenLoad()")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "if (trSeenMap) return trSeenMap;" not in body
+    assert "trSeenMap = raw;" in body
 
 
 def test_adversarial_flow_stats_filter_wiring():

@@ -114,7 +114,9 @@ python build.py                                          # 4) 合成成片 + 字
 |---|---|---|
 | 成片 | [`skysheep-live-demo-1080p.mp4`](https://github.com/Sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4) | 5 分 18.9 秒 · 1920×1080 · 30 fps · H.264 + AAC 立体声；**托管在 Release [demo-2026-10](https://github.com/Sky-scrape/SkySheep/releases/tag/demo-2026-10)**，仓库里只有封面与字幕 |
 | 外挂字幕 | [`skysheep-live-demo.srt`](skysheep-live-demo.srt) | 57 条，时间轴与成片一致 |
-| 封面 | [`skysheep-live-demo-cover.webp`](skysheep-live-demo-cover.webp) | 与片头同版式，README 首图用它 |
+| 封面 | [`skysheep-live-demo-cover.webp`](skysheep-live-demo-cover.webp) | 与片头同版式，作视频的 poster 与分享图 |
+| 预告片 | [`skysheep-live-demo-teaser.mp4`](skysheep-live-demo-teaser.mp4) | 17 秒静音循环（工具卡 / 权限确认 / 终端核对 / 工厂回放），官网首屏内嵌播放，1.5 MB |
+| 动图 | [`skysheep-live-demo-preview.gif`](skysheep-live-demo-preview.gif) | 8 秒，取自预告的「终端 → 工厂」两幕，README 里自动循环，1.2 MB |
 
 ### 4.2 制作中间产物（留在制作机，不随仓库分发）
 

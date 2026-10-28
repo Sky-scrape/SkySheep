@@ -65,4 +65,4 @@ desktop.ini
 .zcode/
 
 # 演示成片走 Release 资产，不进仓库（52 MB）
-docs/demo/*.mp4
+docs/demo/skysheep-live-demo-1080p.mp4

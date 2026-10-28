@@ -40,9 +40,9 @@ SkySheep 是跑在你自己电脑上的开源 AI Agent 工作台：Python asynci
 
 <div align="center">
 
-[![SkySheep 实机演示：工厂看板与「回放今天」](docs/demo/skysheep-live-demo-cover.webp)](https://github.com/Sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4)
+[![SkySheep 实机演示：终端核对落盘与工厂回放](docs/demo/skysheep-live-demo-preview.gif)](https://github.com/Sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4)
 
-*5 分 19 秒 · 九站实机录屏：工具真执行 → diff 与撤销 → 圆桌 → 团队 → 对抗 → 接力 → 自动化 → 记忆地图 → 工厂回放*
+*5 分 19 秒 · 九站实机录屏：工具真执行 → diff 与撤销 → 圆桌 → 团队 → 对抗 → 接力 → 自动化 → 记忆地图 → 工厂回放 · 下方动图是 8 秒预览*
 
 </div>
 

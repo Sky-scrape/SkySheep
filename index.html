@@ -385,6 +385,17 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .window-title { flex: 1; text-align: center; opacity: .85; }
 .window-spacer { width: 39px; flex-shrink: 0; }
 .window img { width: 100%; height: auto; }
+.window video { display: block; width: 100%; height: auto; background: #171410; }
+
+/* 实机演示：静音循环的预告，完整版跳 Release */
+.demo-shot { margin-top: 32px; }
+.demo-shot figcaption { margin-top: 14px; font-size: 13px; color: var(--dim); }
+.demo-actions { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-top: 22px; }
+.demo-actions .demo-meta { font-size: 13px; color: var(--dim); }
+@media (max-width: 640px) {
+  /* 窗口标题在窄屏会被挤成两行，直接让位给画面 */
+  .demo-shot .window-title { display: none; }
+}
 
 /* ============================================================
  * 事实条
@@ -1072,6 +1083,31 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
       <div class="fact"><b>接入</b><span>多家模型服务预设，兼容本地推理服务</span></div>
       <div class="fact"><b>3</b><span>种多模型协作模式：圆桌 / 团队 / 对抗</span></div>
       <div class="fact"><b>20</b><span>个官方场景技能包，开箱即装</span></div>
+    </div>
+  </section>
+
+  <!-- ============ 实机演示 ============ -->
+  <section class="section demo" id="demo">
+    <div class="wrap">
+      <div class="section-head rise">
+        <span class="section-label">实机演示 · 5 分 19 秒</span>
+        <h2>它真的动手，<br>不是说说而已</h2>
+        <p>工具真的执行、写文件真的弹确认、撤销真的把文件收回；圆桌、团队、对抗、接力各自跑完整流水线。下面这段 17 秒循环是完整片里的四幕，静音自动播放。</p>
+      </div>
+      <figure class="demo-shot rise">
+        <div class="window">
+          <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">实机录屏 · 工具调用 / 权限确认 / 终端核对 / 工厂回放</span><span class="window-spacer" aria-hidden="true"></span></div>
+          <video src="docs/demo/skysheep-live-demo-teaser.mp4" poster="docs/demo/skysheep-live-demo-cover.webp"
+                 width="1280" height="666" autoplay muted loop playsinline preload="metadata"
+                 aria-label="SkySheep 实机操作预告：工具调用命中的文件、写文件前的 diff 确认、终端里核对落盘、工厂看板回放今天的运行"></video>
+        </div>
+        <figcaption>预告 17 秒，取自完整片，无声循环；完整版九站，带配乐与 57 条中文字幕。</figcaption>
+      </figure>
+      <div class="demo-actions rise">
+        <a class="btn-primary" href="https://github.com/Sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4">▶ 看完整版（5:19 · 1080p · 52 MB）</a>
+        <a class="btn-ghost" href="https://github.com/Sky-scrape/SkySheep/blob/main/docs/demo/README.md" target="_blank" rel="noopener">分镜与素材说明 ↗</a>
+        <span class="demo-meta">全部画面来自真实运行的窗口，模型文本由内置脚本化模型回放</span>
+      </div>
     </div>
   </section>
 

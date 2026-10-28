@@ -63,3 +63,6 @@ desktop.ini
 
 # ZCode 工作流运行产物
 .zcode/
+
+# 演示成片走 Release 资产，不进仓库（52 MB）
+docs/demo/*.mp4

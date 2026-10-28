@@ -36,6 +36,23 @@ SkySheep 是跑在你自己电脑上的开源 AI Agent 工作台：Python asynci
 
 </div>
 
+## 🎬 实机演示
+
+<div align="center">
+
+[![SkySheep 实机演示：工厂看板与「回放今天」](docs/demo/skysheep-live-demo-cover.webp)](https://github.com/Sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4)
+
+*5 分 19 秒 · 九站实机录屏：工具真执行 → diff 与撤销 → 圆桌 → 团队 → 对抗 → 接力 → 自动化 → 记忆地图 → 工厂回放*
+
+</div>
+
+片子里的界面全部来自**真实运行的应用窗口**（Playwright 驱动真实点击与输入），不是手绘假界面，
+每一段都能在代码里对上：工具调用、权限确认、检查点回滚、圆桌 / 团队 / 对抗 / 接力流水线、定时任务、工厂回放。
+模型说的话由内置脚本化模型回放（不联网、不耗额度），**其余都是本机真实执行**——边界与拍摄方法见
+[docs/demo/README.md](docs/demo/README.md)。
+
+[▶ 观看或下载成片（52 MB，Release 资产）](https://github.com/Sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4) · [外挂字幕](docs/demo/skysheep-live-demo.srt) · [拍摄说明](docs/demo/README.md)
+
 ## 🎯 适合什么工作
 
 SkySheep 适合那些需要模型真正动手、又希望过程可见可控的工作：

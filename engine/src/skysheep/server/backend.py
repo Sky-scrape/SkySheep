@@ -4770,10 +4770,35 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "entry": entry.model_dump()}
 
     async def team_resident_clear(self, params: dict) -> dict:
-        """team.resident_clear：解除当前会话活动团队的常驻登记（未登记报错）。"""
-        _sid, orch = self._team_for(params)
-        self.resident_teams.remove(orch.team_id)
-        return {"ok": True, "team_id": orch.team_id, "resident": False}
+        """team.resident_clear：解除常驻登记（未登记报错，不静默）。
+
+        两种口径：缺省按当前会话的活动团队（与 resident_set 对偶）；显式传
+        team_id 则直接按全局册解除——已交付/已收队的队伍没有活动团队可认，
+        终态团队卡仍要能解除常驻（评审③：否则只能手改 team_resident.json）。
+        全局册仅本机写面（dispatch 表 local_only），按 id 解除与模板按名删除
+        同姿态，不做会话归属收敛。
+        """
+        team_id = str(params.get("team_id") or "").strip()
+        if not team_id:
+            _sid, orch = self._team_for(params)
+            team_id = orch.team_id
+        self.resident_teams.remove(team_id)
+        return {"ok": True, "team_id": team_id, "resident": False}
+
+    def team_resident_get(self, params: dict) -> dict:
+        """team.resident_get：按 team_id 探询常驻登记状态（只读）。
+
+        终态团队卡（回放/中断重建的卡没有活动快照）凭它决定是否亮出「解除
+        常驻」入口；查无登记回 resident=False，不报错（探询语义）。team_id
+        是全局册主轴，无会话归属面可收敛——读面也仅本机（dispatch 表
+        local_only），不给远程客户端枚举本机常驻登记的入口。
+        """
+        team_id = str(params.get("team_id") or "").strip()
+        if not team_id:
+            raise TeamError("缺少 team_id：常驻登记以 team_id 为主轴")
+        entry = self.resident_teams.get(team_id)
+        return {"team_id": team_id, "resident": entry is not None,
+                "entry": entry.model_dump() if entry is not None else None}
 
     # ---- 频道回放（三期）：收队/重启后按 team_id 拉全量频道消息 ----
 

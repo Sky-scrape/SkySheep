@@ -3654,6 +3654,22 @@ function buildTeamCard(roster, directorMode, director) {
   residentBtn.onclick = async (e) => {
     e.stopPropagation();
     const t = curTab();
+    // 终态卡的唯一常驻操作：按 team_id 解除（resident_clear 已放开对已结束
+    // 团队按 id 解除，评审③）——已交付/收队的队伍登记还在，不能没了出口
+    if (card._finished) {
+      if (!card._teamId) return;
+      residentBtn.disabled = true;
+      try {
+        await request("team.resident_clear", { team_id: card._teamId });
+        residentBtn.hidden = true;
+        addNotice("已解除常驻：定时团队任务将照常重建队伍。");
+      } catch (err) {
+        addNotice("解除常驻失败: " + err.message);
+      } finally {
+        residentBtn.disabled = false;
+      }
+      return;
+    }
     const on = residentBtn.classList.contains("is-active");
     residentBtn.disabled = true;
     try {
@@ -4105,6 +4121,24 @@ function tcClearIdle(card) {
   if (ui.status) ui.status.title = "";
 }
 
+// 终态卡的「解除常驻」探询（评审③）：按 team_id 查常驻登记——在册才亮出
+// 解除入口（后端 team.resident_get 只读探针，仅本机）。回放/中断重建的卡
+// 没有活动快照，登记状态只能这样对齐；拉不到（旧后端没有该方法 / 断线）
+// 保持隐藏：入口缺席只是降级，不炸渲染
+async function tcProbeResidentClear(card) {
+  const btn = card._ui && card._ui.residentBtn;
+  if (!btn || !card._teamId) return;
+  try {
+    const r = await request("team.resident_get", { team_id: card._teamId });
+    if (!(r && r.resident)) return;
+    btn.hidden = false;
+    btn.disabled = false;
+    btn.classList.remove("is-active");
+    btn.textContent = "解除常驻";
+    btn.title = "解除常驻：撤销这支队伍的跨会话常驻登记（队伍已结束，登记仍在，定时任务仍会按它复用）";
+  } catch (e) { /* 旧后端 / 断线：保持隐藏 */ }
+}
+
 // 终态收口：停用交付/收队/表单/行内按钮，展示《交付/收队说明》，自动折叠让出空间
 function tcFinish(card, status, summary) {
   card._finished = true;
@@ -4112,14 +4146,30 @@ function tcFinish(card, status, summary) {
   tcClearIdle(card);
   card.classList.add("ended");
   // 终态/中断卡一律只读：交付、收队、接管、继续推进、工单表单与状态按钮
-  // 全部收起（中断回放没有可操作的运行时，留着按钮只会得到「没有团队」）
+  // 全部收起（中断回放没有可操作的运行时，留着按钮只会得到「没有团队」）；
+  // 常驻开关例外（评审③）——已登记的队伍终态后仍要能解除常驻，按 team_id
+  // 走 resident_clear，活动团队要求不再适用
   const ui = card._ui;
   if (ui) {
-    [ui.deliverBtn, ui.stopBtn, ui.takeoverBtn, ui.resumeBtn, ui.residentBtn].forEach((btn) => {
+    [ui.deliverBtn, ui.stopBtn, ui.takeoverBtn, ui.resumeBtn].forEach((btn) => {
       if (!btn) return;
       btn.hidden = true;
       btn.disabled = true;
     });
+    if (ui.residentBtn) {
+      if (ui.residentBtn.classList.contains("is-active")) {
+        // 收口前登记还在（「常驻中」）：直接换解除态，不用再探询
+        ui.residentBtn.hidden = false;
+        ui.residentBtn.disabled = false;
+        ui.residentBtn.classList.remove("is-active");
+        ui.residentBtn.textContent = "解除常驻";
+        ui.residentBtn.title = "解除常驻：撤销这支队伍的跨会话常驻登记（队伍已结束，登记仍在，定时任务仍会按它复用）";
+      } else {
+        ui.residentBtn.hidden = true;
+        ui.residentBtn.disabled = true;
+        tcProbeResidentClear(card);
+      }
+    }
     if (ui.taskForm) ui.taskForm.hidden = true;
   }
   card.querySelectorAll(".tt-op").forEach((btn) => {
@@ -4460,6 +4510,8 @@ function buildTeamReplayCard(meta, tab) {
   if ((team.status || "active") !== "active") {
     card._finished = true;
     card.classList.add("ended");
+    // 常驻登记不随队伍终态消失：在册的队伍亮出「解除常驻」（评审③）
+    tcProbeResidentClear(card);
   }
   updateTeamCard(card, team);
   return card;

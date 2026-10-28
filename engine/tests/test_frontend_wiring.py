@@ -532,6 +532,17 @@ def test_team_resident_toggle_wiring():
     assert "team_template: teamThisTurn && teamTplName" in js
     assert "template: on ? undefined : (card._template || undefined)" in js
     assert "card._template = String(team.template" in js
+    # 终态保留解除入口（评审③）：在册队伍终态后按 team_id 探询/解除，
+    # 收口与回放卡两条路径都挂探询，按钮点击走按 id 解除
+    assert "async function tcProbeResidentClear(card)" in js
+    assert '"team.resident_get"' in js
+    i = js.index("function tcFinish(card, status, summary)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "tcProbeResidentClear(card)" in body
+    assert 'request("team.resident_clear", { team_id: card._teamId })' in js
+    replay_i = js.index("function buildTeamReplayCard(meta, tab)")
+    replay_body = js[replay_i:js.index("\n}\n", replay_i)]
+    assert "tcProbeResidentClear(card)" in replay_body
 
 
 # ---------- 对抗发现转团队工单：显式选择 / 来源锚点 / 只读保护 ----------

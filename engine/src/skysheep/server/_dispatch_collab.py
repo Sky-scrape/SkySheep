@@ -118,6 +118,13 @@ async def _h_team_resident_clear(backend: ServerBackend, params: dict, emit, loc
     return await backend.team_resident_clear(_team_scoped_params(backend, params, local))
 
 
+# 常驻登记状态探询（只读）：按 team_id 查全局册，终态团队卡凭它决定是否亮
+# 「解除常驻」。team_id 无会话归属面可收敛、读的是本机全局登记——不给远程
+# 客户端枚举本机常驻登记的入口，读面也仅本机。
+async def _h_team_resident_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return backend.team_resident_get(params)
+
+
 async def _h_teamcfg_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.team_config_detail()
 
@@ -152,9 +159,11 @@ METHODS: dict[str, _WsMethod] = {
     "team.template_list": _WsMethod(_h_team_template_list),
     "team.template_save": _WsMethod(_h_team_template_save, local_only=True),
     "team.template_remove": _WsMethod(_h_team_template_remove, local_only=True),
-    # 常驻团队（T3.2）：写全局册仅本机（与模板册写面同姿态）；对象收敛同 team.get
+    # 常驻团队（T3.2）：写全局册仅本机（与模板册写面同姿态）；对象收敛同 team.get；
+    # resident_get 按 team_id 的只读探询同样仅本机（全局登记无会话归属面可收敛）
     "team.resident_set": _WsMethod(_h_team_resident_set, local_only=True),
     "team.resident_clear": _WsMethod(_h_team_resident_clear, local_only=True),
+    "team.resident_get": _WsMethod(_h_team_resident_get, local_only=True),
     "teamcfg.get": _WsMethod(_h_teamcfg_get),
     "teamcfg.save": _WsMethod(_h_teamcfg_save),
 }

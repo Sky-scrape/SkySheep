@@ -383,6 +383,82 @@ def test_team_resident_without_active_team_rejected(home):
         asyncio.run(backend.team_resident_clear({}))
 
 
+def test_resident_clear_by_team_id_and_state_probe(home):
+    """评审③：已结束队伍的常驻登记解除路径——resident_clear 显式传 team_id
+    直接按全局册解除（不要求活动团队，未登记不静默报错）；resident_get 是
+    只读探询（终态团队卡凭它决定是否亮「解除常驻」）；读面同样 local_only。"""
+    from skysheep.server.app import _WS_METHODS
+
+    entry = _WS_METHODS.get("team.resident_get")
+    assert entry is not None and entry.local_only, "resident_get 读全局登记，仅本机"
+    assert _WS_METHODS.get("team.resident_clear").local_only
+
+    backend = ServerBackend(working_dir=home / "proj",
+                            provider_factory=lambda: FakeProvider([]))
+    backend.resident_teams.load()
+    backend.resident_teams.upsert(ResidentTeamEntry(
+        team_id="ended-team", name="已结束的队", template="夜班小队"))
+
+    # 探询：在册带条目 / 未登记回 False 不报错 / 缺参拒绝
+    probed = backend.team_resident_get({"team_id": "ended-team"})
+    assert probed["resident"] is True and probed["entry"]["template"] == "夜班小队"
+    assert backend.team_resident_get({"team_id": "no-such"})["resident"] is False
+    with pytest.raises(TeamError):
+        backend.team_resident_get({})
+
+    # 按 team_id 解除：没有活动团队也行（已结束队伍的出口）
+    result = asyncio.run(backend.team_resident_clear({"team_id": "ended-team"}))
+    assert result["resident"] is False and result["team_id"] == "ended-team"
+    assert backend.resident_teams.get("ended-team") is None
+    with pytest.raises(TeamError):
+        asyncio.run(backend.team_resident_clear({"team_id": "ended-team"}))
+
+
+def test_ended_team_resident_clear_via_ws(home):
+    """终态后的解除链路（评审③端到端）：登记常驻 → 收队（活动团队摘除）→
+    resident_get 探询仍在册 → resident_clear 按 team_id 解除成功——已结束
+    队伍的常驻登记不再只能手改 team_resident.json。"""
+    from test_team import make_team_client, recv_until
+
+    scripts = [
+        [[TextBlock(text="普通回合")]],
+        [[TextBlock(text="调研完成：结论 A")]],
+        [[TextBlock(text="收队后的普通回答")]],
+    ]
+    with make_team_client(home, scripts) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "r1", "method": "chat.send", "params": {
+            "text": "@小研 先做调研", "team": True,
+            "members": [{"provider": "fa", "model": "ma", "name": "小研"}],
+        }})
+        assert recv_until(ws, "r1")["ok"]
+        ws.send_json({"id": "s1", "method": "team.resident_set", "params": {}})
+        assert recv_until(ws, "s1")["result"]["resident"] is True
+        ws.send_json({"id": "g1", "method": "team.get", "params": {}})
+        team_id = recv_until(ws, "g1")["result"]["team"]["team_id"]
+        assert team_id
+
+        # 收队：队伍进终态，活动团队从会话摘除
+        ws.send_json({"id": "st1", "method": "team.stop", "params": {}})
+        assert recv_until(ws, "st1")["ok"]
+        ws.send_json({"id": "g2", "method": "team.get", "params": {}})
+        assert recv_until(ws, "g2")["result"]["active"] is False
+
+        # 登记不随队伍终态消失：探询仍在册
+        ws.send_json({"id": "p1", "method": "team.resident_get",
+                      "params": {"team_id": team_id}})
+        assert recv_until(ws, "p1")["result"]["resident"] is True
+
+        # 按 team_id 解除：不需要活动团队；解除后探询回落
+        ws.send_json({"id": "c1", "method": "team.resident_clear",
+                      "params": {"team_id": team_id}})
+        c1 = recv_until(ws, "c1")["result"]
+        assert c1["resident"] is False and c1["team_id"] == team_id
+        ws.send_json({"id": "p2", "method": "team.resident_get",
+                      "params": {"team_id": team_id}})
+        assert recv_until(ws, "p2")["result"]["resident"] is False
+
+
 def test_resident_set_ui_flow_binds_creation_template(home):
     """UI 口径回归（评审①）：「从模板创建」的队伍经产品界面登记常驻后，
     find_for_template 能命中——此前前端登记从不带 template，条目恒为空串，

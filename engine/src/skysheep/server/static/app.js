@@ -3658,7 +3658,10 @@ function buildTeamCard(roster, directorMode, director) {
     residentBtn.disabled = true;
     try {
       const r = await request(on ? "team.resident_clear" : "team.resident_set",
-        { session_id: t ? t.sid : undefined });
+        { session_id: t ? t.sid : undefined,
+          // 建队来源模板名（四期常驻）：请求自含绑定依据；后端另有编排器
+          // 记录与原登记条目两级兜底， meta 缺 template 键的旧快照不受影响
+          template: on ? undefined : (card._template || undefined) });
       const now = !!(r && r.resident);
       residentBtn.classList.toggle("is-active", now);
       residentBtn.textContent = now ? "常驻中" : "常驻";
@@ -4249,6 +4252,9 @@ function updateTeamCard(card, team) {
       }
     : null;
   card._teamId = String(team.team_id || card._teamId || "");
+  // 建队来源模板名（四期常驻）：随快照/meta 落库，常驻登记请求凭它绑定回
+  // 模板（后端另有编排器记录兜底，这里带上让请求自含、回放卡也能对上）
+  card._template = String(team.template || card._template || "");
   card._lastTeam = team; // 最近一份快照：团队室对终态团队的只读渲染从这里取
   card._usage = team.usage || {}; // 名册用量徽标在 tcUpdateRoster 里读
   tcUpdateRoster(card, team.roster || [], team.director_mode || "user");
@@ -9332,6 +9338,15 @@ let teamDirector = (() => {
 })();
 const teamDirectorIsAi = () =>
   !!(teamDirector && teamDirector.mode === "ai" && String(teamDirector.provider || "").trim());
+// 建队来源模板名（四期常驻）：团队面板「从模板创建」应用的名字，随建队轮
+// 发后端记进团队快照——之后在团队卡上登记常驻（team.resident_set）凭它绑回
+// 模板，定时团队任务触发才能按（模板，项目）匹配复用。与成员/总管形态
+// 同为「下一次建队的规划值」，随确认落 localStorage；手选成员不改它（模板
+// 应用后微调成员仍算这个模板的队），不应用模板建队则为 null
+let teamTplName = (() => {
+  try { return JSON.parse(localStorage.getItem("skysheep.team.template") || "null"); }
+  catch { return null; }
+})();
 
 // 团队状态徽标 / 工单状态 / 频道消息类别的唯一中文叫法（与 docs/界面术语表 §12 对齐）
 const TEAM_STATUS_LABEL = {
@@ -9445,7 +9460,7 @@ async function buildTeamSettingsInto(box, closeMenu) {
       templates.map((t, i) => `<option value="${i}">${escapeHtml(t.name)}</option>`).join("");
     sel.onchange = () => {
       const tpl = templates[Number(sel.value)];
-      if (tpl) applyTeamTemplate(menu, tpl);
+      if (tpl) applyTeamTemplate(box, tpl);
     };
     tplBox.appendChild(sel);
     box.appendChild(tplBox);
@@ -9594,6 +9609,9 @@ async function buildTeamSettingsInto(box, closeMenu) {
     });
     teamMembers = picked.length ? picked : null;
     try { localStorage.setItem("skysheep.team.members", JSON.stringify(teamMembers)); } catch {}
+    // 本浮层的形参是 box：来源模板名挂在 box._tplName（applyTeamTemplate 写入）
+    teamTplName = box._tplName || null;
+    try { localStorage.setItem("skysheep.team.template", JSON.stringify(teamTplName)); } catch {}
     updateCoopHint();
     closeMenu();
   };
@@ -9611,6 +9629,8 @@ function applyTeamTemplate(menu, tpl) {
   const rbUser = menu.querySelector('input[name="tm-dir-mode"][value="user"]');
   const rbAi = menu.querySelector('input[name="tm-dir-mode"][value="ai"]');
   const cbs = [...menu.querySelectorAll("label.rt-menu-item input[type=\"checkbox\"]")];
+  // 来源模板名挂浮层上，随「确定」落 teamTplName（建队轮发后端，见全局注释）
+  menu._tplName = String(tpl.name || "");
   // 成员区先全清：模板定义整支团队，而不是往现有勾选上叠加
   cbs.forEach((cb) => {
     cb.checked = false;
@@ -10401,6 +10421,9 @@ async function send() {
       director: dirAiThisTurn
         ? { provider: String(teamDirector.provider).trim(), model: String(teamDirector.model || "").trim() }
         : undefined,
+      // 建队来源模板名（四期常驻）：「从模板创建」应用过的名字随建队轮带上，
+      // 后端记进团队快照——之后在团队卡上登记常驻凭它绑回模板
+      team_template: teamThisTurn && teamTplName ? teamTplName : undefined,
       compare: compareThisTurn || undefined,
       debate_rounds: rtThisTurn ? rtDebate : undefined,
       chair_answers: rtThisTurn ? rtChair : undefined,

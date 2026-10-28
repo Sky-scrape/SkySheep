@@ -517,6 +517,7 @@ class TeamOrchestrator:
         compaction_keep_recent: int = 8,
         compaction_trigger: float = 0.9,
         compaction_auto: bool = True,
+        source_template: str = "",
     ) -> None:
         if director_mode not in ("user", "ai"):
             raise TeamError(f"未知的总管形态：{director_mode}（只能是 user / ai）")
@@ -561,6 +562,10 @@ class TeamOrchestrator:
         # 建队时分配的唯一编号（uuid4.hex；空 = 尚未建队）：频道消息落库的
         # 归组键（team_messages.team_id）与回放主轴（team.log），随快照进 meta
         self.team_id: str = ""
+        # 建队来源的模板名（宿主从建队请求透传；空 = 手选成员建队）：随快照进
+        # meta，常驻登记（team.resident_set）据此把「这支队伍」绑回它的模板，
+        # 定时团队触发才能按（模板，项目）匹配复用
+        self.source_template = str(source_template or "").strip()
         self.director_mode = director_mode
         self.plan_mode = False  # 本轮规划模式（backend 每个团队轮同步，见 set_plan_mode）
         # 全局轮数：总管轮 + 成员唤醒轮合计（小会一场计 1；频道纯文本不计入，设计 §13.6）
@@ -1899,6 +1904,7 @@ class TeamOrchestrator:
         status = self._finished["status"] if self._finished is not None else "active"
         team: dict = {
             "team_id": self.team_id,  # 建队分配的唯一编号（前端回放 team.log 的主轴）
+            "template": self.source_template,  # 建队来源模板名（常驻登记的绑定依据）
             "roster": self._roster_dicts(),
             "director_mode": self.director_mode,
             "status": status,

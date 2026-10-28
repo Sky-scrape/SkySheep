@@ -520,6 +520,18 @@ def test_team_resident_toggle_wiring():
     i = js.index("function tcFinish(card, status, summary)")
     body = js[i:js.index("\n}\n", i)]
     assert "ui.residentBtn" in body
+    # 建队来源模板接进登记链路（评审①）：从模板创建随建队轮带 team_template、
+    # 快照落 card._template、登记请求自含 template——UI 登记的常驻条目绑得回模板。
+    # applyTeamTemplate 内部读写的 menu 是它自己的形参（setter 合法）；调用面在
+    # buildTeamSettingsInto(box) 里——自由引用 menu 的两处旧账（29f81fd 拆分漏改
+    # 的调用、评审①曾写出的 menu._tplName 回读）都会让选模板/点确定当场
+    # ReferenceError（浮层关不掉、teamTplName 落不了 localStorage、chat.send 永远
+    # 不带 team_template），锚定调用点与读取点的正确标识符，回归即红
+    assert "applyTeamTemplate(box, tpl)" in js
+    assert "teamTplName = box._tplName || null;" in js
+    assert "team_template: teamThisTurn && teamTplName" in js
+    assert "template: on ? undefined : (card._template || undefined)" in js
+    assert "card._template = String(team.template" in js
 
 
 # ---------- 对抗发现转团队工单：显式选择 / 来源锚点 / 只读保护 ----------

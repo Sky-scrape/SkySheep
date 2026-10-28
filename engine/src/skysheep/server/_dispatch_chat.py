@@ -50,6 +50,9 @@ async def _h_chat_send(backend: ServerBackend, params: dict, emit, local: bool) 
                 "provider": d_provider,
                 "model": str(raw_director.get("model", "") or "").strip(),
             }
+    # 建队来源模板名（前端「从模板创建」随建队轮带上）：只在建队路径消费，
+    # 记进编排器快照供常驻登记绑定回模板；错型/缺省按空串吞掉不炸
+    team_template = str(params.get("team_template", "") or "").strip()
     return await backend.send(
         text,
         emit,
@@ -72,6 +75,7 @@ async def _h_chat_send(backend: ServerBackend, params: dict, emit, local: bool) 
         adversarial=bool(params.get("adversarial", False)),
         director_mode=director_mode,
         director=director,
+        team_template=team_template,
         local=local,
     )
 

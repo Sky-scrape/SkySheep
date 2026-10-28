@@ -1329,6 +1329,7 @@ class AutomationMixin:
                 compaction_trigger=self.cfg.compaction_trigger,
                 compaction_auto=self.cfg.compaction_auto,
                 message_sink=self._team_message_sink(sid),
+                source_template=template_name,
             )
             if resident is not None:
                 # 唤醒常驻队伍（T3.2）：沿用原 team_id 续频道（seq 水位取注册表

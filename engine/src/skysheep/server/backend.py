@@ -594,6 +594,9 @@ class QueuedTurn:
     # 总管的 {provider, model}；仅建队路径消费，后续轮忽略
     director_mode: str = "user"
     director: dict | None = None
+    # 建队来源模板名（四期常驻）：仅建队路径消费，记进编排器快照供
+    # team.resident_set 绑定回模板（定时触发按模板匹配复用的依据）
+    team_template: str = ""
     # 本机/远程客户端（入队时随发送固定）：决定引用注入的项目归属口径
     local: bool = True
 
@@ -2304,6 +2307,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    adversarial: bool = False,
                    director_mode: str = "user",
                    director: dict | None = None,
+                   team_template: str = "",
                    local: bool = True) -> dict:
         """跑一轮对话；过程事件通过 emit 推送；结束后持久化新消息。
 
@@ -2436,6 +2440,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
                 team=team, adversarial=adversarial,
                 director_mode=director_mode, director=director,
+                team_template=team_template,
                 local=local,
             )
             if rt_now is not None:
@@ -2469,6 +2474,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 debate_rounds=debate_rounds, chair_answers=chair_answers,
                 team=team, adversarial=adversarial,
                 director_mode=director_mode, director=director,
+                team_template=team_template,
                 local=local,
             )
         except asyncio.CancelledError:
@@ -2598,6 +2604,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         adversarial: bool = False,
         director_mode: str = "user",
         director: dict | None = None,
+        team_template: str = "",
         local: bool = True,
     ) -> dict:
         """真正执行一轮对话（含持久化、规划模式切换、检查点保存）。
@@ -2854,6 +2861,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     images=images, allow_create=team, recorder=runtime.recorder,
                     plan_mode=plan_mode,
                     director_mode=director_mode, director=director,
+                    template_name=team_template,
                 )
             elif roundtable:
                 rt_meta = await self._roundtable_body(
@@ -3158,6 +3166,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 chair_answers=item.chair_answers, team=item.team,
                 adversarial=item.adversarial,
                 director_mode=item.director_mode, director=item.director,
+                team_template=item.team_template,
                 local=item.local,
             ))
         except Exception as e:  # noqa: BLE001 - 错误要送回等待中的请求
@@ -4041,6 +4050,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     async def _team_create(
         self, sid: str, emit: EmitFn, members_params: list | None, recorder: ChangeRecorder,
         director_mode: str = "user", director_params: dict | None = None,
+        template_name: str = "",
     ) -> TeamOrchestrator:
         """为本会话建队（chat.send team=true 且无活动团队）：发 TeamStarted 并登记。
 
@@ -4059,6 +4069,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         越线判定注入 _team_budget_check（越线强制交付 budget_exhausted）。
         频道消息落库（三期）注入 _team_message_sink：每条定稿消息进项目库
         team_messages 表，team_id 进快照随 meta 落库（team.log 凭它回放）。
+        template_name（四期常驻）：建队来源的模板名（前端「从模板创建」带上），
+        记进编排器快照，供 team.resident_set 把队伍绑回模板（定时触发按
+        模板匹配复用的依据）；手选成员建队传空串。
         """
         director: DirectorSpec | None = None
         if director_mode == "ai":
@@ -4103,6 +4116,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             compaction_auto=self.cfg.compaction_auto,
             # 频道消息逐条落库（三期）：收队/重启后仍可按 team_id 回放全量
             message_sink=self._team_message_sink(sid),
+            source_template=template_name,
         )
         await orch.create_team(specs)  # TeamStarted 在这里发出；超上限截断发 Notice
         self._teams[sid] = orch
@@ -4127,6 +4141,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         allow_create: bool = False, recorder: ChangeRecorder | None = None,
         plan_mode: bool = False,
         director_mode: str = "user", director: dict | None = None,
+        template_name: str = "",
     ) -> dict:
         """团队轮主体：用户消息进团队频道 → 总管推进（成员唤醒 / 自动闭环）。
 
@@ -4229,6 +4244,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 orch = await self._team_create(
                     sid, team_emit, members_params, recorder or ChangeRecorder(),
                     director_mode=director_mode, director_params=director,
+                    template_name=template_name,
                 )
                 orch.set_plan_mode(plan_mode)
             else:
@@ -4717,16 +4733,20 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     async def team_resident_set(self, params: dict) -> dict:
         """team.resident_set：把当前会话的活动团队登记为常驻（幂等，重复设刷新）。
 
-        template 可选——建队来源的模板名（前端「从模板创建」记着；给了就
-        必须在模板册里存在，防止绑定到永不匹配的悬空名）。绑了模板的常驻
-        队伍才会被定时团队任务按（模板，项目）匹配复用；未绑的只登记（界面上
-        显示常驻，但没有定时触发面）。工单板快照与频道水位取登记时刻的实时
+        template 的取值优先级：调用方显式带的 > 编排器记录的建队来源模板
+        （快照 meta 的 template 键，前端「从模板创建」随 chat.send 的
+        team_template 记下——UI 口径不传 template 也绑得回去，定时团队触发
+        才能按（模板，项目）匹配复用）> 原登记条目的旧值。绑了模板的常驻
+        队伍才会被定时团队任务按（模板，项目）匹配复用；未绑的只登记（界面
+        上显示常驻，但没有定时触发面）。非空的 template 必须在模板册里存在，
+        防止绑定到永不匹配的悬空名。工单板快照与频道水位取登记时刻的实时
         状态，定时复用前的最后一次刷新以最近一次运行收尾的回写为准。
         """
         sid, orch = self._team_for(params)
         if not orch.team_id:
             raise TeamError("该团队还没有分配 team_id，不能登记常驻")
-        template = str(params.get("template") or "").strip()
+        template = str(params.get("template") or "").strip() \
+            or str(getattr(orch, "source_template", "") or "").strip()
         if template and not any(
             t.name == template for t in self.team_templates.templates
         ):

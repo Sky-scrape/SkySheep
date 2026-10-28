@@ -624,6 +624,7 @@ async def test_snapshot_tail_and_text_cap():
     snap = orch.snapshot()["team"]
     assert set(snap) == {
         "team_id",  # 三期：建队分配的唯一编号（回放 team.log 的主轴）
+        "template",  # 四期常驻：建队来源模板名（常驻登记绑回模板的依据）
         "roster", "director_mode", "status", "rounds_used", "max_rounds", "tasks", "messages",
         "usage", "idle_reason",  # 用量快照（成员/总管）与空闲原因（继续按钮依据）
     }

@@ -383,6 +383,61 @@ def test_team_resident_without_active_team_rejected(home):
         asyncio.run(backend.team_resident_clear({}))
 
 
+def test_resident_set_ui_flow_binds_creation_template(home):
+    """UI 口径回归（评审①）：「从模板创建」的队伍经产品界面登记常驻后，
+    find_for_template 能命中——此前前端登记从不带 template，条目恒为空串，
+    「定时团队触发复用常驻队伍」经 UI 不可达。链路：chat.send 随建队轮带
+    team_template → 编排器记进快照（meta 落库）→ resident_set 不传 template
+    也按建队来源绑定。"""
+    from test_team import make_team_client, recv_until
+
+    scripts = [
+        [[TextBlock(text="普通回合")]],
+        [[TextBlock(text="调研完成：结论 A")]],
+    ]
+    with make_team_client(home, scripts) as client, \
+            client.websocket_connect("/ws") as ws:
+        # 建队来源模板：先落模板册，再随 chat.send 的 team_template 建队
+        ws.send_json({"id": "t1", "method": "team.template_save", "params": {
+            "name": "夜班小队", "director_mode": "user",
+            "members": [{"provider": "fa", "model": "ma", "name": "小研"}],
+        }})
+        assert recv_until(ws, "t1")["ok"]
+        ws.send_json({"id": "r1", "method": "chat.send", "params": {
+            "text": "@小研 先做调研", "team": True,
+            "team_template": "夜班小队",
+            "members": [{"provider": "fa", "model": "ma", "name": "小研"}],
+        }})
+        assert recv_until(ws, "r1")["ok"]
+
+        # 来源模板进快照（team.get 可见；meta 同形状随 assistant 消息落库）
+        ws.send_json({"id": "g1", "method": "team.get", "params": {}})
+        got = recv_until(ws, "g1")["result"]["team"]
+        assert got["template"] == "夜班小队"
+        team_id = got["team_id"]
+        assert team_id
+
+        # UI 口径登记：不传 template，按建队来源绑定
+        ws.send_json({"id": "s1", "method": "team.resident_set", "params": {}})
+        entry = recv_until(ws, "s1")["result"]["entry"]
+        assert entry["template"] == "夜班小队" and entry["team_id"] == team_id
+
+        # 定时触发匹配面：同模板 + 同项目命中这支 UI 登记的队伍
+        backend = client.app.state.backend
+        hit = backend.resident_teams.find_for_template("夜班小队", entry["project_id"])
+        assert hit is not None and hit.team_id == team_id
+
+        # 显式 template 仍优先：登记时改绑别的真实模板照常生效
+        ws.send_json({"id": "t2", "method": "team.template_save", "params": {
+            "name": "日班小队", "director_mode": "user",
+            "members": [{"provider": "fa", "model": "ma", "name": "小研"}],
+        }})
+        assert recv_until(ws, "t2")["ok"]
+        ws.send_json({"id": "s2", "method": "team.resident_set",
+                      "params": {"template": "日班小队"}})
+        assert recv_until(ws, "s2")["result"]["entry"]["template"] == "日班小队"
+
+
 # ---------- 定时触发复用常驻队伍 ----------
 
 

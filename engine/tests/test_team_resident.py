@@ -22,7 +22,7 @@ from skysheep.core.team_resident import (
 )
 from skysheep.core.team_store import TeamError
 from skysheep.events import TeamMessage
-from skysheep.messages import TextBlock, ToolUseBlock
+from skysheep.messages import Message, TextBlock, ToolUseBlock
 from skysheep.models.fake import FakeProvider
 from skysheep.server.backend import ServerBackend
 from skysheep.session.store import SessionStore
@@ -548,5 +548,129 @@ async def test_cron_team_reuses_resident_team(home):
         assert board_ids == {"T1", "T2"}, f"板面延续且自增越号：{board_ids}"
         t2 = next(t for t in entry.board if t["id"] == "T2")
         assert t2["title"] == "复查目录" and t2["status"] == "done"
+    finally:
+        await store.close()
+
+
+# ---------- 复用装配的板面来源：会话侧优先，注册表快照兜底（评审②） ----------
+
+
+async def test_resident_wake_board_source_priority(home):
+    """_resident_wake_board 取板优先级：本进程活动团队 > 会话最后一份团队
+    meta 的 tasks > 注册表快照（会话已不存在 / 无 meta 的兜底）——登记后的
+    交互改板（team_board 交互）要跟到下一次唤醒，缩水的注册表副本不再把
+    板面固化回上一个登记时刻。"""
+    backend = ServerBackend(working_dir=home / "proj",
+                            provider_factory=lambda: FakeProvider([]))
+    store = await SessionStore(home / "wake-board.db").connect()
+    try:
+        backend.store = store
+        backend.resident_teams.load()
+        # 会话 + 最后一份团队 meta（roundtable 槽 mode=team，板面 T1 done）
+        sess = await store.create_session(None, title="交互会话")
+        meta_msg = Message.assistant([TextBlock(text="团队纪要")])
+        meta_msg.roundtable = {"mode": "team", "team": {"tasks": [
+            {"id": "T1", "title": "巡检目录", "assignee": "队员0", "type": "exec",
+             "deps": [], "accept": "", "status": "done", "redo": 0,
+             "created_at": 1.0, "detail": "", "source": {}, "auto_dispatch": True},
+        ]}}
+        await store.append_message(sess.id, meta_msg)
+
+        # ① 本进程活动团队最优先：板面含未落 meta 的交互改动（T2），注册表空板
+        _, orch = make_orch()
+        await orch.create_team([spec("队员0", FakeProvider([]))])
+        await orch.task_add("巡检目录", "队员0")
+        await orch.task_add("复查目录", "队员0")
+        await orch.task_update("T1", "in_progress")
+        backend._teams[sess.id] = orch
+        entry = ResidentTeamEntry(team_id=orch.team_id, session_id=sess.id, board=[])
+        board = await backend._resident_wake_board(entry)
+        assert [t["id"] for t in board] == ["T1", "T2"]
+        assert board[0]["status"] == "in_progress"
+        backend._teams.pop(sess.id)
+
+        # ② 会话 meta 次之：活动团队已不在册 → 取最后一份 meta 的 T1
+        board = await backend._resident_wake_board(entry)
+        assert [t["id"] for t in board] == ["T1"]
+
+        # team_id 对不上的活动团队不算数（会话被新队伍占用时退回会话 meta）
+        _, orch2 = make_orch()
+        await orch2.create_team([spec("新队员", FakeProvider([]))])
+        backend._teams[sess.id] = orch2
+        board = await backend._resident_wake_board(entry)
+        assert [t["id"] for t in board] == ["T1"]
+        backend._teams.pop(sess.id)
+
+        # ③ 会话不存在：注册表快照兜底（原样返回，沿既有口径）
+        fallback_board = [{"id": "T9", "title": "兜底单", "assignee": "队员0",
+                           "type": "exec", "deps": [], "accept": "", "status": "done",
+                           "redo": 0, "created_at": 1.0, "detail": "", "source": {},
+                           "auto_dispatch": True}]
+        ghost = ResidentTeamEntry(team_id="ghost", session_id="no-such",
+                                  board=fallback_board)
+        assert await backend._resident_wake_board(ghost) == fallback_board
+
+        # 会话只有空团队 meta（无 tasks）：同样退回注册表快照
+        empty_sid = (await store.create_session(None, title="空 meta")).id
+        empty_msg = Message.assistant([TextBlock(text="x")])
+        empty_msg.roundtable = {"mode": "team", "team": {}}
+        await store.append_message(empty_sid, empty_msg)
+        e2 = ResidentTeamEntry(team_id="e2", session_id=empty_sid, board=fallback_board)
+        assert await backend._resident_wake_board(e2) == fallback_board
+    finally:
+        await store.close()
+
+
+async def test_cron_reuse_uses_session_board_over_registry(home):
+    """评审②端到端：登记后改板面 → 定时唤醒见新板面。注册表登记的是缩水
+    副本（空板），该队会话最后一份团队 meta 带着交互改动的板面——唤醒按
+    会话板面回放（宣告「回放 1 单」），收尾回写刷新板面，不再把缩水副本
+    固化成下次的恢复源。"""
+    from test_team import _cron_team_backend, _cron_team_task, _team_template
+
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-wake-board.db").connect()
+    try:
+        task = await _cron_team_task(store, home)
+        backend = _cron_team_backend(
+            home, store,
+            [FakeProvider([[TextBlock(text="复查完成：仍无异常")]]),
+             FakeProvider(_director_loop("复查目录", "T2", "b"))])
+        _team_template(backend, "夜班小队")
+        backend.resident_teams.load()
+        proj = await store.get_project(task["project_id"])
+
+        # 该队的「交互会话」：最后一份团队 meta 带 T1（done、指派队员0，与
+        # 模板名册对得上，快照回放才认）——注册表却登记成空板的缩水副本
+        interactive = await store.create_session(proj.id, title="交互会话")
+        meta_msg = Message.assistant([TextBlock(text="团队纪要")])
+        meta_msg.roundtable = {"mode": "team", "team": {"tasks": [
+            {"id": "T1", "title": "巡检目录", "assignee": "队员0", "type": "exec",
+             "deps": [], "accept": "", "status": "done", "redo": 0,
+             "created_at": 1.0, "detail": "", "source": {}, "auto_dispatch": True},
+        ]}}
+        await store.append_message(interactive.id, meta_msg)
+        backend.resident_teams.upsert(ResidentTeamEntry(
+            team_id="wake-board-team", name="夜班小队", template="夜班小队",
+            project_id=proj.id, session_id=interactive.id, board=[], last_seq=0,
+        ))
+
+        final = await run_cron_task_core(store, task["id"], force=True,
+                                         execute=backend._execute_cron_turn)
+        assert final["last_status"] == "ok"
+
+        # 唤醒宣告按会话板面回放（T1 在板），不是注册表的空板
+        msgs = await store.list_team_messages("wake-board-team")
+        sys_rows = [m for m in msgs if m["from_member"] == "system"
+                    and m["msg_kind"] == "system"]
+        assert sys_rows and "常驻团队唤醒" in sys_rows[-1]["text"]
+        assert "回放 1 单" in sys_rows[-1]["text"]
+
+        # 收尾回写：板面 = 会话板面（T1）+ 本轮新派的 T2——缩水副本被刷新
+        entry = backend.resident_teams.get("wake-board-team")
+        assert entry is not None and entry.wake_count == 1
+        board_ids = {t["id"] for t in entry.board}
+        assert board_ids == {"T1", "T2"}, f"板面取会话侧最新：{board_ids}"
     finally:
         await store.close()

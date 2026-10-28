@@ -1187,6 +1187,36 @@ class AutomationMixin:
         except (TypeError, ValueError):
             return 1
 
+    async def _resident_wake_board(self, resident: ResidentTeamEntry) -> list[dict]:
+        """常驻复用装配的板面来源：会话侧板面优先，注册表快照兜底（评审②）。
+
+        登记后到第一次定时唤醒之间，用户可能在团队卡上交互改板（team.task_add /
+        team.task_update，甚至跑过交互团队轮）——这些改动只进会话侧，注册表
+        快照停在登记时刻；照旧按快照回放会丢改动，收尾回写还把缩水板面固化成
+        下次的恢复源。取板优先级：
+
+        1. 本进程里该队会话的活动团队（team_id 对得上）：板面最新，含交互
+           改动（无论是否已有团队轮把 meta 落库）；
+        2. 该队会话最后一份团队 meta 的 tasks（上次团队轮收尾落库的板面，
+           store.last_team_board_tasks）；
+        3. 注册表快照 resident.board——会话已不存在 / 无团队 meta 的兜底
+           （cron 建的登记没有交互会话，沿既有口径）。
+        """
+        live = getattr(self, "_teams", {}).get(resident.session_id)
+        if live is not None and getattr(live, "team_id", "") == resident.team_id:
+            return [t.to_dict() for t in live.board.tasks()]
+        if self.store is not None and resident.session_id:
+            try:
+                tasks = await self.store.last_team_board_tasks(resident.session_id)
+            except Exception as e:  # noqa: BLE001 - 会话侧读取失败退回注册表快照
+                logger.warning(
+                    "常驻团队会话板面读取失败（team_id=%s session=%s）：%s",
+                    resident.team_id, resident.session_id, e)
+                tasks = []
+            if tasks:
+                return tasks
+        return resident.board
+
     async def _execute_cron_team_turn(self, task: dict, *, force: bool = False):
         """后端侧的一轮定时团队执行（mode=team 的注入点）。
 
@@ -1333,12 +1363,13 @@ class AutomationMixin:
             )
             if resident is not None:
                 # 唤醒常驻队伍（T3.2）：沿用原 team_id 续频道（seq 水位取注册表
-                # 与库内行号的最大者，防手工清理后的错位）、按快照回放工单板；
+                # 与库内行号的最大者，防手工清理后的错位）、按最新板面回放
+                # （会话侧活动板面优先，注册表快照只作会话不存在的兜底，评审②）；
                 # 装配路径（_resolve_team_members / _build_member_provider /
                 # TeamOrchestrator 注入面）与防失控上限照旧
                 db_seq = await self.store.last_team_message_seq(resident.team_id)
                 await orch.restore_team(
-                    resident.team_id, specs, tasks=resident.board,
+                    resident.team_id, specs, tasks=await self._resident_wake_board(resident),
                     last_seq=max(int(resident.last_seq or 0), int(db_seq or 0)),
                     wake_note=(
                         f"由定时任务「{task['name']}」唤醒"

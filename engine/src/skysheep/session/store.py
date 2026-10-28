@@ -1652,6 +1652,38 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         row = await cur.fetchone()
         return int(row[0] or 0) if row else 0
 
+    async def last_team_board_tasks(self, session_id: str) -> list[dict]:
+        """该会话最后一份团队 meta 的工单板（team.tasks；没有团队 meta 回 []）。
+
+        团队摘要搭 roundtable 槽随 assistant 消息落库（mode="team"，见
+        ServerBackend._team_meta）：每次团队轮收尾都会把当时的整面板面写进
+        消息，是「会话侧最近一次已落地的板面」。常驻团队复用装配（automation
+        的 _resident_wake_board）以它优先于注册表快照——登记之后用户在板面上
+        的交互改动要跟到下一次唤醒。倒序找第一条 mode=team 的 assistant 消息；
+        LIKE 预过滤 + LIMIT 兜底，避免给长会话全量解析 JSON。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT content FROM messages"
+            " WHERE session_id = ? AND role = 'assistant'"
+            " AND content LIKE '%\"mode\":\"team\"%'"
+            " ORDER BY seq DESC LIMIT 20",
+            (session_id,),
+        )
+        for row in await cur.fetchall():
+            try:
+                msg = Message.model_validate_json(row["content"])
+            except Exception:  # noqa: BLE001 - 单行形状不对：跳过看前一条
+                continue
+            meta = msg.roundtable or {}
+            if meta.get("mode") != "team":
+                continue
+            tasks = (meta.get("team") or {}).get("tasks")
+            if isinstance(tasks, list):
+                return [t for t in tasks if isinstance(t, dict)]
+            return []
+        return []
+
     # ---- sessions ----
 
     async def create_session(self, project_id: int | None, title: str = "") -> Session:

@@ -48,6 +48,11 @@
 
 ### 修复
 
+- **定时团队评审遗留的测试补缺**：恢复被 8288c2b 顺手覆盖删掉的
+  `test_force_bypasses_claim_for_not_due_task` 专用回归（force 手动立即运行
+  不认领、不受到点判定拦），并按团队模式设计 §14.7 给扫描循环 skipped 去重
+  记账补 `mode="team"` 用例——团队长跑期间每轮扫描只记一枚「跳过」，到点
+  批次推进再记下一条，与单会话轮同口径。
 - **无头协议文档的 team_started 名册样例**：「定时团队的事件流」节选里 `roster`
   行缺 `persona` 字段，与 `TeamStarted.roster` 的实际形状不符（`core/team.py`
   `_roster_dicts()` 恒定产出 `{index, name, provider, model, persona}` 五键，

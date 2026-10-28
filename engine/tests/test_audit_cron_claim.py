@@ -18,8 +18,12 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+from skysheep.core.run_ledger import RunLedger
 from skysheep.messages import Message, TextBlock
-from skysheep.server.backend_parts.automation import run_cron_task_core
+from skysheep.server.backend_parts.automation import (
+    AutomationMixin,
+    run_cron_task_core,
+)
 from skysheep.session.store import SessionStore
 
 
@@ -289,3 +293,51 @@ async def test_two_trigger_sources_team_mode_exactly_one_executes(store):
     assert final is not None and final["last_status"] == "ok"
     assert final["last_result"] == "团队胜方产出"
     assert final["mode"] == "team", "团队任务的形态列在收尾回写后原样保留"
+
+
+async def test_force_bypasses_claim_for_not_due_task(store):
+    """force（用户手动立即运行）不认领、不受到点判定拦：语义与改造前一致。"""
+    later = await _add_due_task(store, "手动力跑", due_offset=600.0)
+    calls = {"n": 0}
+
+    async def manual_execute(task):
+        calls["n"] += 1
+        return _runtime("手动产出")
+
+    final = await run_cron_task_core(store, later["id"], force=True,
+                                     execute=manual_execute)
+    assert final is not None and final["last_status"] == "ok"
+    assert calls["n"] == 1, "立即运行照常触发"
+
+
+async def test_cron_pass_skips_team_run_once_per_due_batch(store):
+    """mode=team 的长跑在扫描循环里同样按 (task_id, next_run_at) 去重记 skipped
+    （定时团队，团队模式设计 §14.5/§14.7）：长跑期间每 20 秒一轮的扫描只记一枚
+    「跳过」，不刷爆账本；到点批次推进（next_run_at 变了）再记下一条。"""
+    proj = await store.get_or_create_project("/tmp/cron-claim-team-skip")
+    t = await store.add_cron_task(proj.id, "团队长跑", "干活", "interval",
+                                  interval_minutes=5, mode="team",
+                                  team_template="夜班小队")
+    await store.update_cron_task(t["id"], next_run_at=time.time() - 5)
+
+    class _Pass(AutomationMixin):
+        pass
+
+    dummy = _Pass()
+    dummy.store = store
+    dummy._cron_running = {t["id"]: None}
+    dummy._cron_skip_mark = {}
+    dummy.run_ledger = RunLedger(store)
+
+    await dummy._cron_pass()
+    await dummy._cron_pass()
+    rows = await store.list_automation_runs()
+    assert len(rows) == 1, "同一到点批次只记一条 skipped（团队长跑同口径）"
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["finished_at"] is not None
+
+    # 下一批次（next_run_at 变了）再记一条
+    await store.update_cron_task(t["id"], next_run_at=time.time() - 1)
+    await dummy._cron_pass()
+    assert len(await store.list_automation_runs(limit=100)) == 2
+

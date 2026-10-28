@@ -1071,7 +1071,8 @@
           } else if (l.health && l.health.streak >= 2) {
             sub = "连错 " + l.health.streak;
           } else if (l.is_team) {
-            // 团队产线：面板常驻一句「模板 / 成员 / 总管」，先认出这是谁在值班
+            // 团队产线：非在跑且无连错时才轮到这句「模板 / 成员 / 总管」——
+            // 在跑让位给「在跑 …」、连错让位给「连错 N」，先认出这是谁在值班
             sub = teamLineText(l);
           }
           var stateText = lineStateText(l);

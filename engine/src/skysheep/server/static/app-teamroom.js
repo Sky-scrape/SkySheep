@@ -209,7 +209,10 @@ async function trStartFromTemplate() {
     addNotice("还没有团队模板：回到对话，点输入区的「协作」选「团队」当场组队。");
     return;
   }
-  if (typeof backToChatFirst === "function") backToChatFirst(); // 建队浮层长在输入区旁
+  // 建队浮层长在输入区旁：全页视图（设置/工厂）开着先回对话——与命令面板协作
+  // 命令的「先回对话再开」同款语义（那边是 paletteBaseItems 的局部函数，全局
+  // 查无此名；旧写法调它靠 typeof 守卫静默跳过，死引用已修，勿再引回）
+  if (typeof pageViewOpen === "function" && pageViewOpen() && typeof backToChat === "function") backToChat();
   if (typeof setTeamOn === "function") setTeamOn(true);
   const menu = document.getElementById("coop-menu");
   if (typeof showCoopMenu === "function"

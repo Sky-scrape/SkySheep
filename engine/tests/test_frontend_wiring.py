@@ -707,6 +707,12 @@ def test_team_room_tab_wiring():
     assert "team.template_list" in js
     assert "只读回放频道" in js and "tcFinish(card, \"interrupted\", \"\")" in js
     assert "团队室加载失败" in js and "loadTeamRoom(true)" in js
+    # 「从模板建队」先回对话视图：调用的必须是全局存在的 backToChat——
+    # 命令面板的 backToChatFirst 是 paletteBaseItems 的局部函数，全局查无此名，
+    # 旧写法的 typeof 守卫静默跳过（死引用）
+    tr_js = read_static("app-teamroom.js")
+    assert "backToChatFirst" not in tr_js
+    assert 'pageViewOpen() && typeof backToChat === "function") backToChat();' in tr_js
 
     # 终态只读：trMountSnapshot 与回放卡同口径（_finished 先于重画工单行）
     i = js.index("function trMountSnapshot")

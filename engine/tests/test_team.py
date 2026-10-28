@@ -3467,6 +3467,52 @@ async def test_cron_team_empty_roster_fails_not_roundtable_fallback(home):
         await store.close()
 
 
+async def test_cron_team_assembly_failure_releases_providers(home):
+    """装配纳入释放保护：create_team（或更早的编排器构造）raise 时，装配期建出的
+    成员 / 总管 provider 必须就地释放（对照交互式路径 backend.py 的释放口径），
+    不能挂在半截装配上泄漏连接池；失败本身照 run_cron_task_core 既有路径收尾。"""
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-team-release.db").connect()
+    try:
+        task = await _cron_team_task(store, home, name="半截建队任务")
+        member = FakeProvider([[TextBlock(text="x")]])
+        backend = _cron_team_backend(
+            home, store, [member, FakeProvider(_DIRECTOR_CLOSED_LOOP)])
+        _team_template(backend, "夜班小队")
+
+        released: list = []
+        real_release = backend._release_turn_providers
+
+        def spy(provs, keep=()):
+            released.extend(p for p in provs if p is not None)
+            real_release(provs, keep=keep)
+
+        backend._release_turn_providers = spy
+
+        async def boom(self, members):
+            raise RuntimeError("建队失败（测试注入）")
+
+        orig = TeamOrchestrator.create_team
+        TeamOrchestrator.create_team = boom
+        try:
+            final = await run_cron_task_core(store, task["id"],
+                                             execute=backend._execute_cron_turn)
+        finally:
+            TeamOrchestrator.create_team = orig
+
+        assert final is not None and final["last_status"] == "error"
+        assert "建队失败" in final["last_result"]
+        # 成员（脚本池第 1 颗弹）与总管（第 2 颗弹）两颗都已释放；主模型
+        # provider 是全局共享对象，不归本轮管，不得出现在释放名单里
+        assert member in released
+        assert len({id(p) for p in released}) == 2, \
+            f"成员与总管 provider 都要释放，实际 {released}"
+        assert backend.provider not in released, "全局共享 provider 不得被释放"
+    finally:
+        await store.close()
+
+
 async def test_cron_team_push_delivers_summary_and_survives_failure(home, caplog):
     """mode=team 的终态推送照走既有 notify_channel 路径（run_cron_task_core 收尾
     统一出口）：交付说明摘要连同终态注记前缀一起进通知 body，飞书/微信/Webhook

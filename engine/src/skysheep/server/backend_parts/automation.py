@@ -1254,64 +1254,83 @@ class AutomationMixin:
             # 只有「在跑什么」与「被拦了几次」以工序进度（1 次/秒）进工厂观战窗
             await progress_emit(_event_dict(ev))
 
-        # 成员解析：名册只来自模板（§14.2 第 6 步）——模板没有队员时装配失败
-        # 按失败收尾，绝不调用 _resolve_team_members 的缺省分支（那里会按当前
-        # 已配置服务自动解析，等于用圆桌名册顶替模板名册，违背「名册只来自
-        # 模板」契约）；显式名册下单个构建失败照常降级 build_error 入册（唤醒
-        # 时按失败隔离呈现），全员构建失败（含 provider 名全空）不建注定空转
-        # 的团队，装配期直接按失败收尾（§14.5）。模板条目不做成员数校验是
-        # 设计明文（§14.1，空名册模板可服务交互式建队的自动解析），资格缺口
-        # 由表单期 cron.team_check（成员非空）与触发期这里的失败收尾共同兜住。
-        members_params = [m.model_dump() for m in template.members]
-        if not members_params:
-            raise RuntimeError(f"团队模板「{template_name}」没有队员，本次未建队")
-        specs = self._resolve_team_members(members_params)
-        if not any(s.provider is not None for s in specs):
-            raise RuntimeError(
-                "团队模板的队员全部不可用（缺 API Key 或服务未配置），本次未建队")
-
-        # AI 总管构建失败同样装配期报错：无人值守没有插话重试的余地
-        d_provider = str(template.director.provider or "").strip()
-        d_model = str(template.director.model or "").strip()
-        director = DirectorSpec(
-            provider_name=d_provider, model=d_model,
-            context_limit_tokens=self._team_provider_context_limit(d_provider),
-        )
+        # 装配 + 建队全程纳入释放保护（对照交互式路径 backend.py 对团队轮
+        # 的 TeamError/取消释放口径）：从成员解析到 create_team 成功之间的
+        # 任何一步 raise（总管构建失败、编排器构造失败、建队半途失败、乃至
+        # 被取消），装配期建出的成员 / 总管 provider 都还没进下方 finally 的
+        # _release_team_providers 视野（roster 未接管），必须就地释放——
+        # 否则每失败一次泄漏一批 httpx 连接池。单次释放内部按实例去重；
+        # 半截建队时同一 provider 可能同时在名册与 specs 里被两路各收一遍，
+        # aclose 幂等，无害。
+        specs: list = []
+        director = DirectorSpec()
+        orch: TeamOrchestrator | None = None
         try:
-            dprov = self._build_member_provider(d_provider, d_model)
-            director.provider = dprov
-            if not director.model:
-                director.model = getattr(dprov, "model", "")
-        except Exception as e:  # noqa: BLE001 - 装配失败按失败收尾
-            raise RuntimeError(f"总管模型构建失败（{d_provider}）：{e}") from e
+            # 成员解析：名册只来自模板（§14.2 第 6 步）——模板没有队员时装配失败
+            # 按失败收尾，绝不调用 _resolve_team_members 的缺省分支（那里会按当前
+            # 已配置服务自动解析，等于用圆桌名册顶替模板名册，违背「名册只来自
+            # 模板」契约）；显式名册下单个构建失败照常降级 build_error 入册（唤醒
+            # 时按失败隔离呈现），全员构建失败（含 provider 名全空）不建注定空转
+            # 的团队，装配期直接按失败收尾（§14.5）。模板条目不做成员数校验是
+            # 设计明文（§14.1，空名册模板可服务交互式建队的自动解析），资格缺口
+            # 由表单期 cron.team_check（成员非空）与触发期这里的失败收尾共同兜住。
+            members_params = [m.model_dump() for m in template.members]
+            if not members_params:
+                raise RuntimeError(f"团队模板「{template_name}」没有队员，本次未建队")
+            specs = self._resolve_team_members(members_params)
+            if not any(s.provider is not None for s in specs):
+                raise RuntimeError(
+                    "团队模板的队员全部不可用（缺 API Key 或服务未配置），本次未建队")
 
-        # 编排器装配：注入面全部复用 _team_create 的透传口径（hooks/mods 只能
-        # 收紧；budget_check 接既有每日预算；message_sink 频道消息全量落库，
-        # team.log 回放照常可用）——TeamOrchestrator 模块层零改动
-        orch = TeamOrchestrator(
-            emit=cron_emit,
-            working_dir=cron_workdir,
-            registry=self._build_full_registry(recorder),
-            gate=gate,
-            cfg=self.cfg.team,
-            max_iterations=self.cfg.subagent_max_iterations,
-            restrict_to_workdir=self.cfg.restrict_to_workdir,
-            session_id=sid,
-            job_containment=self.cfg.shell.job_containment,
-            sandbox_level=self.cfg.shell.sandbox_level,
-            use_ripgrep=self.cfg.search.use_ripgrep,
-            hooks=self.hooks,
-            mods=self.mods,
-            director_mode="ai",
-            director=director,
-            budget_check=self._team_budget_check(),
-            context_limit_tokens=self.cfg.context_limit_tokens,
-            compaction_keep_recent=self.cfg.compaction_keep_recent,
-            compaction_trigger=self.cfg.compaction_trigger,
-            compaction_auto=self.cfg.compaction_auto,
-            message_sink=self._team_message_sink(sid),
-        )
-        await orch.create_team(specs)
+            # AI 总管构建失败同样装配期报错：无人值守没有插话重试的余地
+            d_provider = str(template.director.provider or "").strip()
+            d_model = str(template.director.model or "").strip()
+            director = DirectorSpec(
+                provider_name=d_provider, model=d_model,
+                context_limit_tokens=self._team_provider_context_limit(d_provider),
+            )
+            try:
+                dprov = self._build_member_provider(d_provider, d_model)
+                director.provider = dprov
+                if not director.model:
+                    director.model = getattr(dprov, "model", "")
+            except Exception as e:  # noqa: BLE001 - 装配失败按失败收尾
+                raise RuntimeError(f"总管模型构建失败（{d_provider}）：{e}") from e
+
+            # 编排器装配：注入面全部复用 _team_create 的透传口径（hooks/mods 只能
+            # 收紧；budget_check 接既有每日预算；message_sink 频道消息全量落库，
+            # team.log 回放照常可用）——TeamOrchestrator 模块层零改动
+            orch = TeamOrchestrator(
+                emit=cron_emit,
+                working_dir=cron_workdir,
+                registry=self._build_full_registry(recorder),
+                gate=gate,
+                cfg=self.cfg.team,
+                max_iterations=self.cfg.subagent_max_iterations,
+                restrict_to_workdir=self.cfg.restrict_to_workdir,
+                session_id=sid,
+                job_containment=self.cfg.shell.job_containment,
+                sandbox_level=self.cfg.shell.sandbox_level,
+                use_ripgrep=self.cfg.search.use_ripgrep,
+                hooks=self.hooks,
+                mods=self.mods,
+                director_mode="ai",
+                director=director,
+                budget_check=self._team_budget_check(),
+                context_limit_tokens=self.cfg.context_limit_tokens,
+                compaction_keep_recent=self.cfg.compaction_keep_recent,
+                compaction_trigger=self.cfg.compaction_trigger,
+                compaction_auto=self.cfg.compaction_auto,
+                message_sink=self._team_message_sink(sid),
+            )
+            await orch.create_team(specs)
+        except BaseException:  # noqa: BLE001 - 清理后原样上抛（含取消）
+            self._release_turn_providers(
+                [s.provider for s in specs if s.provider is not None]
+                + [director.provider])
+            if orch is not None:
+                self._release_team_providers(orch)
+            raise
         try:
             await orch.run_auto_turn(task["prompt"])
             # 空闲续跑：无人值守没有用户补消息，空闲退出（finished is None）时

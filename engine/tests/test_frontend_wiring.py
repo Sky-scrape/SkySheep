@@ -654,7 +654,8 @@ def test_team_kanban_board_wiring():
     assert ".teamcard .tc-kanban" in css
     assert ".teamcard .tc-view-tab.is-active" in css
     assert ".teamcard.view-channel .tc-channel { display: flex; }" in css
-    assert ".teamcard.view-channel .tc-board { display: none; }" in css
+    # 互斥只对页签卡成立：团队室卡不参与（:not 排除，见 test_team_room_tab_wiring）
+    assert ".teamcard.view-channel:not(.teamroom-card) .tc-board { display: none; }" in css
     assert ".teamcard .tc-closed-summary" in css
 
 
@@ -684,6 +685,12 @@ def test_team_room_tab_wiring():
     assert "const card = buildTeamCard(roster, directorMode, director);" in js
     assert 'card.classList.add("teamroom-card", "view-channel")' in js
     assert "grid.append(card._ui.channelEl, card._ui.boardList)" in js
+    # 工单板在团队室常显：页签卡的 view-channel 互斥对团队室卡 :not 排除，
+    # 板面显隐由团队室节自己的规则决定。回归形态：互斥规则（0,3,0）压过
+    # .teamroom-card .tc-board（0,2,0），板面 display:none 而右栏 220px 空列
+    # 照留、频道被挤窄（2026-10-29 真实浏览器视觉验收）
+    assert ".teamcard.view-channel:not(.teamroom-card) .tc-board { display: none; }" in css
+    assert ".teamroom-card .tc-board { display: block;" in css
 
     # 装载：team.room 聚合探针 + team.log 全量回放复用（两级容错照旧）
     assert 'request("team.room"' in js

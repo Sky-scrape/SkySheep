@@ -2865,14 +2865,16 @@ mark.search-hit-mark {
 .teamcard .tc-task-form .tf-add:disabled { color: var(--dim); }
 
 /* 频道时间线：按成员着色的消息流（流式行虚线框），用户消息整行高亮。
-   与工单板互斥显示（.view-channel 切页签），流式行在后台照常写入 DOM。 */
+   与工单板互斥显示（.view-channel 切页签；团队室卡常驻 view-channel 却要
+   三分区同屏，互斥对它 :not 排除、见下方团队室节），流式行在后台照常写入
+   DOM。 */
 .teamcard .tc-channel {
   margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line);
   display: none; flex-direction: column; gap: 6px;
   max-height: 320px; overflow-y: auto;
 }
 .teamcard.view-channel .tc-channel { display: flex; }
-.teamcard.view-channel .tc-board { display: none; }
+.teamcard.view-channel:not(.teamroom-card) .tc-board { display: none; }
 .teamcard .tc-msg {
   padding: 5px 8px; font-size: var(--fs-md); line-height: 1.55; min-width: 0;
   background: var(--card); border: 1px solid var(--line); border-radius: var(--r-sm);
@@ -3010,7 +3012,7 @@ mark.search-hit-mark {
 /* ---------- 团队室（独立页签）：成员带 · 频道 · 工单板 三分区同屏 ----------
    容器复用团队卡全套样式（.teamcard），这里只补页签布局与团队室特有差异：
    折叠锁死（tcFinish 会给终态卡加 .folded，团队室没有折叠语义）、频道与
-   工单板同屏（页签卡的 view-channel 互斥显示在团队室不成立）。颜色全走
+   工单板同屏（页签卡的 view-channel 互斥显示对团队室卡 :not 排除）。颜色全走
    主题变量，六套主题各自变量组自动生效，无写死色值。 */
 #rp-page-teamroom { overflow: hidden; }
 .teamroom-root {

@@ -108,6 +108,45 @@ def test_ui_prefs_sidebar_view_whitelist(home):
     assert frame["result"]["prefs"] == {}
 
 
+def test_team_last_seen_pref_roundtrip(home):
+    """团队室未读水位（团队模式设计 §15.4）：{team_id: last_seen_seq} 随 ui.save
+    既有通道按队伍持久化，badge = latest_seq − last_seen_seq 由前端求差。
+    键内清洗：非数水位逐条跳过、负数收敛 0、条目封顶；整键替换语义、
+    空表/null 删键（= 未读回「全计」默认）。"""
+    frame = call_ui(home, "ui.save", {"prefs": {"team_last_seen": {"team-abc": 7}}})
+    assert frame["ok"]
+    assert frame["result"]["prefs"]["team_last_seen"] == {"team-abc": 7}
+    frame = call_ui(home, "ui.get")
+    assert frame["result"]["prefs"]["team_last_seen"] == {"team-abc": 7}
+
+    # 同键再存是整键替换（前端发整表镜像），不做条目级合并
+    frame = call_ui(home, "ui.save", {"prefs": {"team_last_seen": {"team-xyz": 3}}})
+    assert frame["result"]["prefs"]["team_last_seen"] == {"team-xyz": 3}
+
+    # 脏条目逐条跳过（非数/布尔），合法条目保留；负数收敛 0
+    frame = call_ui(home, "ui.save", {"prefs": {"team_last_seen": {
+        "team-xyz": "9", "team-bad": True, "team-neg": -5, "team-ok": 2}}})
+    assert frame["result"]["prefs"]["team_last_seen"] == {"team-neg": 0, "team-ok": 2}
+
+    # 条目封顶 100：异常超大载荷不收
+    frame = call_ui(home, "ui.save", {"prefs": {"team_last_seen": {
+        f"team-{i}": i for i in range(105)}}})
+    assert len(frame["result"]["prefs"]["team_last_seen"]) == 100
+
+    # 其他偏好照常共存（水位键不挤掉别的键，别的保存也不冲掉水位键）
+    frame = call_ui(home, "ui.save", {"prefs": {"sidebar_w": 320}})
+    assert frame["result"]["prefs"]["sidebar_w"] == 320
+    assert "team_last_seen" in frame["result"]["prefs"]
+
+    # null 与空表删键（= 未读回「全计」默认）
+    frame = call_ui(home, "ui.save", {"prefs": {"team_last_seen": None}})
+    assert "team_last_seen" not in frame["result"]["prefs"]
+    frame = call_ui(home, "ui.save", {"prefs": {"team_last_seen": {}}})
+    assert "team_last_seen" not in frame["result"]["prefs"]
+    frame = call_ui(home, "ui.get")
+    assert "team_last_seen" not in frame["result"]["prefs"]
+
+
 def test_agenda_time_span_ui(home):
     """日程时间段的前端契约：可设结束时间，且三种视图都按区间呈现。
 

@@ -124,6 +124,32 @@ class PreferencesMixin:
                 break
         return cleaned
 
+    # ---- 团队室未读水位（团队模式设计 §15.4） ----
+    # {team_id: last_seen_seq}：前端按 badge = latest_seq − last_seen_seq 求差，
+    # 进页签把 last_seen 推到 team.room 带回的 latest_seq（进室即清零）。
+    # 团队收队后条目留在册里无害（同队复用时水位继续推进），只设整体条目帽
+    # 防异常超大载荷。
+    TEAM_LAST_SEEN_KEY = "team_last_seen"
+    TEAM_LAST_SEEN_MAX = 100
+    TEAM_LAST_SEEN_SEQ_CAP = 1_000_000_000
+
+    @classmethod
+    def _clean_team_last_seen(cls, val) -> dict[str, int]:
+        """清洗团队室未读水位：键是非空 team_id（截 64 字），值是整数 seq
+        （非数/布尔逐条跳过，负数收敛 0、超帽收敛到帽）；整体封顶 100 条。
+        空表/全脏值返回空表（调用方据此删键 = 未读回「全计」默认）。"""
+        if not isinstance(val, dict):
+            return {}
+        cleaned: dict[str, int] = {}
+        for k, v in val.items():
+            ks = str(k).strip()
+            if not ks or isinstance(v, bool) or not isinstance(v, (int, float)):
+                continue
+            cleaned[ks[:64]] = max(0, min(cls.TEAM_LAST_SEEN_SEQ_CAP, int(round(v))))
+            if len(cleaned) >= cls.TEAM_LAST_SEEN_MAX:
+                break
+        return cleaned
+
     def _ui_prefs_path(self) -> Path:
         return skysheep_home() / "ui.json"
 
@@ -223,6 +249,10 @@ class PreferencesMixin:
         nlog = self._clean_notif_log(data.get("notif_log"))
         if nlog:
             prefs["notif_log"] = nlog
+        # 团队室未读水位（§15.4）：{team_id: last_seen_seq}，同一套清洗
+        tseen = self._clean_team_last_seen(data.get(self.TEAM_LAST_SEEN_KEY))
+        if tseen:
+            prefs[self.TEAM_LAST_SEEN_KEY] = tseen
         # 自由字符串键（启动恢复 / 新会话默认模型 / 全局热键）：
         # 读取时与写入同一套清洗（session_tabs 去重封顶，其余非空字符串直取）
         stabs = data.get("session_tabs")
@@ -346,7 +376,8 @@ class PreferencesMixin:
                      "provider_order",
                      "hotkey", "default_model_name", "default_model_provider",
                      "aux_model_name", "aux_model_provider",
-                     "notif_log")
+                     "notif_log",
+                     self.TEAM_LAST_SEEN_KEY)
             if key not in self.UI_PREFS_LIMITS and key not in known \
                     and key not in self.STRING_PREFS:
                 continue
@@ -517,6 +548,16 @@ class PreferencesMixin:
                     current["notif_log"] = cleaned_nl
                 else:
                     current.pop("notif_log", None)
+                continue
+            if key == self.TEAM_LAST_SEEN_KEY:
+                # 团队室未读水位（§15.4）：{team_id: last_seen_seq}，同一套清洗。
+                # 键内是整键替换（前端镜像齐了才发整表）；清洗后空表 = 删键
+                #（= 未读回「全计」默认）
+                cleaned_ts = self._clean_team_last_seen(val)
+                if cleaned_ts:
+                    current[self.TEAM_LAST_SEEN_KEY] = cleaned_ts
+                else:
+                    current.pop(self.TEAM_LAST_SEEN_KEY, None)
                 continue
             if isinstance(val, bool) or not isinstance(val, (int, float)):
                 continue

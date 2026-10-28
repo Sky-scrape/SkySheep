@@ -6,6 +6,16 @@
 
 ### 修复
 
+- **团队室未读 badge 照设计 §15.4 落地**：此前是内存事件计数（trUnread），team.room
+  专门带回的 latest_seq 前端从未引用——刷新/断线重连空档的消息不计数、计数不落盘，
+  应用重启后「已看/未看」也失忆，与提交说明「badge 照设计 §15.4」不符。现在
+  last_seen_seq 按 team_id 随 ui.save 既有通道持久化（后端新偏好键 team_last_seen：
+  {team_id: last_seen_seq}，条目封顶与逐条清洗、textio 原子写），badge =
+  latest_seq − last_seen_seq：进页签把已见水位推到服务端 latest（进室即清零），页签
+  在后台只抬水位——team_message 定稿的 seq 补两次探针之间的空档，且只认页签对准
+  会话的频道（别会话的 seq 是另一条数轴，不再混计）；页签在眼前时眼看过的消息即时
+  推水位，切去别页签后不把刚看过的算未读；重启后已看水位原样恢复。
+
 - **团队室「从模板建队」先回对话的死引用**：空态按钮调用的 backToChatFirst 是命令面板
   paletteBaseItems 的局部函数，全局查无此名，typeof 守卫让它静默跳过。改为调用全局存在
   的 backToChat（配合 pageViewOpen 守卫，与命令面板协作命令「先回对话再开」同款语义），

@@ -4,11 +4,16 @@
 // 的 tc* 系函数（app.js），本文件只提供同形 _ui 的容器、页签装载（loadTeamRoom）
 // 与五事件的转发（trRoomFeed，app.js 的团队事件分支在喂团队卡的同时喂这里）。
 // 数据面：team.room 聚合探针（激活/切会话/重连各调一次）+ team.log 全量回放；
-// 本任务只做「看」，写操作入口是团队卡既有 handler 原样可用，不新增写路径。
+// 未读 badge 照设计 §15.4：last_seen_seq 按 team_id 随 saveUiPrefs 既有机制落
+// ui.json，badge = latest_seq − last_seen_seq——team.room 专门带回的 latest_seq
+// 是权威水位，刷新/断线重连空档的消息由它兜住，不靠内存计数；进页签即清零。
+// 写操作入口是团队卡既有 handler 原样可用，不新增写路径。
 
 let trCard = null;  // 现役团队室容器（teamcard 形状，_ui 与团队卡同形）
 let trSid = null;   // 容器对准的会话（页签内容永远对准当前会话，不跨会话缓存）
-let trUnread = 0;   // 页签在后台时累计的未读频道定稿条数（进页签即清零）
+let trTeamId = "";  // 页签当前对准的团队（team.room 快照带回；后台起的新队先置空）
+let trLatestSeq = 0; // 对准团队的频道最新 seq（team.room 权威值 + 后台定稿事件增量）
+let trSeenMap = null; // ui.json team_last_seen 镜像 {team_id: last_seen_seq}（惰性拉取）
 
 function trRoot() {
   return document.getElementById("teamroom-root");
@@ -19,9 +24,61 @@ function trTabVisible() {
   return typeof rightViewVisible === "function" && rightViewVisible("teamroom");
 }
 
-// 页签标题旁的未读数（app.js 的 renderRightPanel 画页签时读取）
+// 页签标题旁的未读数（app.js 的 renderRightPanel 画页签时读取）：
+// badge = latest_seq − last_seen_seq（§15.4），页签在眼前恒 0
 function trTabBadge() {
-  return trTabVisible() ? 0 : trUnread;
+  if (trTabVisible()) return 0;
+  return Math.max(0, trLatestSeq - trSeenFor(trTeamId));
+}
+
+// ui.json 的 team_last_seen 镜像（§15.4：last_seen_seq 按 team_id 持久化）。
+// 进程内只拉一次；拉不到不缓存（下次装载再试），badge 可能暂时把已看过的
+// 算进去——只在持久化读取失败这条坏路径上出现，且进页签后必然重校准
+async function trSeenLoad() {
+  if (trSeenMap) return trSeenMap;
+  const r = await request("ui.get").catch(() => null);
+  const raw = r && r.prefs && r.prefs.team_last_seen;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  trSeenMap = raw;
+  return trSeenMap;
+}
+
+function trSeenFor(teamId) {
+  return (trSeenMap && Number(trSeenMap[teamId])) || 0;
+}
+
+// 已见水位推盘（§15.4：随 saveUiPrefs 既有机制落 ui.json，原子写在后端）。
+// ui.save 对键内是整键替换，镜像齐了才发——丢别的队伍条目比少一次落盘重；
+// 同值不重发（badge 清零只在水位真前进时发生一次）
+function trMarkSeen(teamId, seq) {
+  seq = Number(seq) || 0;
+  if (!teamId || seq <= 0 || !trSeenMap) return;
+  if (trSeenFor(teamId) >= seq) return;
+  trSeenMap[teamId] = seq;
+  saveUiPrefs({ team_last_seen: Object.assign({}, trSeenMap) });
+}
+
+// team.room 探针回来后的水位校准（§15.4）：latest_seq 以服务端为准——刷新/
+// 断线重连空档的消息由它兜住；页签在眼前才推 last_seen（进室即清零），
+// 在后台只抬水位让 badge = latest − last_seen 自然长大。无活动团队时
+// teamId 传空串、latest 传 0：badge 无从谈起，等下一支队伍
+function trTrackRoom(teamId, latestSeq, sid) {
+  trSid = sid || "";
+  trTeamId = String(teamId || "");
+  trLatestSeq = Number(latestSeq) || 0;
+  if (trTabVisible()) trMarkSeen(trTeamId, trLatestSeq);
+  trSyncBadge();
+}
+
+// 后台定稿事件（team_message）的 seq 增量：只补两次探针之间的空档，权威
+// 水位仍以 team.room 为准。同会话才计数——页签对准当前会话，别的会话的
+// 频道 seq 是另一条数轴，混进来只会把差值算错
+function trTrackEventSeq(seq) {
+  seq = Number(seq) || 0;
+  if (seq > trLatestSeq) {
+    trLatestSeq = seq;
+    trSyncBadge();
+  }
 }
 
 function trSyncBadge() {
@@ -82,8 +139,7 @@ async function loadTeamRoom(force) {
   if (!root) return;
   const t = typeof curTab === "function" ? curTab() : null;
   const sid = (t && t.sid) || "";
-  trUnread = 0; // 进页签即清零（设计 §15.4）
-  trSyncBadge();
+  await trSeenLoad(); // badge 基数（按 team_id 的 last_seen）先就位再谈差值
   let r = null;
   let err = null;
   try {
@@ -97,11 +153,14 @@ async function loadTeamRoom(force) {
     trRenderError(root, err);
     return;
   }
-  trSid = sid;
   if (r && r.active && r.team) {
+    trTrackRoom(r.team.team_id, r.latest_seq, sid); // 水位校准在挂卡前（进室即清零）
     trMountSnapshot(root, r.team, sid);
     return;
   }
+  // 无活动团队：badge 无从谈起（§15.4 的 badge 行只覆盖「页签在后台而团队在
+  // 推进」），水位归零，等下一支队伍
+  trTrackRoom("", 0, sid);
   // 非活动：先看中断记录（重启/切项目前的团队），空态卡附只读回放入口
   if (r && r.interrupted && r.interrupted.team_id) {
     trRenderEmpty(root, { interrupted: r.interrupted });
@@ -261,6 +320,11 @@ function trOnStarted(data) {
   const t = typeof curTab === "function" ? curTab() : null;
   const sid = (data && data.session_id) || (t && t.sid) || "";
   if (trSid && sid && trSid !== sid) return;
+  // 新队 seq 从 1 重数、队 id 未知（事件不带 team_id，激活时 team.room 校准）：
+  // 无论页签在不在眼前，上一支队伍的已见水位都不跨队沿用
+  trTeamId = "";
+  trLatestSeq = 0;
+  trSyncBadge(); // 水位重置后页签角标同步（眼前恒 0、后台按 seen=0 全计）
   if (!trTabVisible()) return; // 后台不渲染：激活时 loadTeamRoom 重拉
   trCard = null; // 新团队另起一张
   const isAi = (data.director_mode || "user") === "ai";
@@ -287,11 +351,16 @@ function trOnDelta(data) {
 }
 
 function trOnMsg(data) {
-  if (!trTabVisible() || !trRoomMatches(data)) {
-    trBumpUnread(); // 页签在后台：只累计未读（设计 §15.4）
+  if (!trTabVisible()) {
+    // 页签在后台：同会话的定稿抬 seq 水位，badge = latest − last_seen（§15.4）
+    if (trRoomMatches(data)) trTrackEventSeq(data && data.seq);
     return;
   }
+  if (!trRoomMatches(data)) return;
   tcUpsertMsg(trCard, data);
+  // 眼看过的消息即时推已见水位：切去别的页签后 badge 不把刚看过的算未读
+  //（teamId 未知时这里是空操作，进页签的 team.room 校准兜底）
+  trMarkSeen(trTeamId, data && data.seq);
 }
 
 function trOnTask(data) {
@@ -311,10 +380,4 @@ function trOnTask(data) {
 function trOnFinish(data) {
   if (!trRoomMatches(data)) return;
   if (trCard) tcFinish(trCard, data.status, data.summary || "");
-}
-
-function trBumpUnread() {
-  if (trTabVisible()) return;
-  trUnread += 1;
-  trSyncBadge();
 }

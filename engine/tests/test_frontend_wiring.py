@@ -720,10 +720,20 @@ def test_team_room_tab_wiring():
     assert "card._finished = true" in body
     assert 'card.classList.add("ended")' in body
 
-    # 未读 badge：后台累计（team_message 定稿计数）、进页签即清零
+    # 未读 badge 照 §15.4：badge = latest_seq − last_seen_seq——last_seen 按
+    # team_id 随 saveUiPrefs 落 ui.json（原子写在后端），team.room 专门带回的
+    # latest_seq 是权威水位（刷新/断线重连空档的消息由它兜住，不靠内存计数），
+    # 进页签即清零 = 把 last_seen 推到服务端 latest
     assert "function trTabBadge()" in js
-    assert "trUnread = 0" in js
+    assert "trLatestSeq - trSeenFor(trTeamId)" in js
+    assert "saveUiPrefs({ team_last_seen:" in js
+    assert "prefs.team_last_seen" in js  # 镜像从 ui.get 回包取回
+    assert "function trTrackRoom(teamId, latestSeq, sid)" in js
+    assert "trTrackRoom(r.team.team_id, r.latest_seq, sid)" in js
     assert "rp-tab-badge" in css and "rp-tab-badge" in js
+    # 内存计数制的旧写法不许回来：刷新/重连即清零、计数不落盘
+    assert "trUnread" not in js
+    assert "trBumpUnread" not in js
 
     # 三分区样式全走主题变量：团队室 CSS 块无写死色值（hex / rgb 函数）
     i = css.index("团队室（独立页签）")

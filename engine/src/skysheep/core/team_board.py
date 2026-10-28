@@ -7,12 +7,17 @@ WS 适配留在 team.py。TeamError 由 team_store 提供，保证团队各域�
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 
 from .team_store import TeamError
 
 _DEFAULT_REDO_LIMIT = 2
+
+# 快照回放（restore）接受的工单状态集：与状态机的节点一一对应
+#（TeamBoard._TRANSITIONS 的键集，模块级另立一份避免引用类体）
+_STATUS_VALUES = frozenset({"pending", "in_progress", "review", "done", "error"})
 
 
 def _status_label(status: str) -> str:
@@ -117,6 +122,56 @@ class TeamBoard:
 
     def all_done(self) -> bool:
         return bool(self._tasks) and not self.incomplete()
+
+    # ---- 快照回放（常驻团队复用，T3.2）----
+
+    def restore(self, tasks: list[dict]) -> tuple[int, int]:
+        """按快照回放工单板：原 id、原状态、原指派，自增序号越过历史号。
+
+        逐条尽力而为、坏条目跳过（快照是上一次运行落盘的板面，其间模板名册
+        可能已改、数据可能损坏）：指派对象不在当前名册、状态未知、缺 id/标题
+        或 id 撞已有工单的条目不回放；deps 只保留指向已回放工单的引用（坏引用
+        会让依赖判定永远不满、工单永远派不出去——引用目标本身被跳过时同样
+        清除）。返回 (回放条数, 跳过条数)。不做状态机流转校验——快照状态是
+        上一次运行的真实落点，原样上板。
+        """
+        rows = [r for r in (tasks or []) if isinstance(r, dict)]
+        restored: list[TeamTask] = []
+        for raw in rows:
+            task_id = str(raw.get("id") or "").strip()
+            title = str(raw.get("title") or "").strip()
+            assignee = str(raw.get("assignee") or "").strip()
+            status = str(raw.get("status") or "").strip()
+            if not task_id or task_id in self._tasks or not title \
+                    or assignee not in self.members or status not in _STATUS_VALUES:
+                continue
+            try:
+                redo = max(0, int(raw.get("redo") or 0))
+                created = float(raw.get("created_at") or 0.0)
+            except (TypeError, ValueError):
+                redo, created = 0, 0.0
+            restored.append(TeamTask(
+                id=task_id, title=title, assignee=assignee,
+                type=raw.get("type") if raw.get("type") in ("exec", "advisor") else "exec",
+                deps=dict.fromkeys(str(x) for x in raw.get("deps") or []),
+                accept=str(raw.get("accept") or ""),
+                status=status, redo=redo,
+                created_at=created or time.time(),
+                detail=str(raw.get("detail") or ""),
+                source=dict(raw["source"]) if isinstance(raw.get("source"), dict) else {},
+                auto_dispatch=bool(raw.get("auto_dispatch", True)),
+            ))
+            m = re.fullmatch(r"T(\d+)", task_id)
+            if m:
+                self._counter = max(self._counter, int(m.group(1)))
+        # deps 收敛到「实际回放上板的 id」：先集齐再过滤，指向被跳过条目的
+        # 引用一并清除（回放前无法知道哪些行能上板，逐条过滤会看错对象）
+        restored_ids = {t.id for t in restored}
+        for task in restored:
+            task.deps = [d for d in task.deps if d in restored_ids]
+        for task in restored:
+            self._tasks[task.id] = task
+        return len(restored), len(rows) - len(restored)
 
     # ---- 变更（全部只应由用户的 WS 方法触达）----
 

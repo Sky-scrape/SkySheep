@@ -3645,13 +3645,39 @@ function buildTeamCard(roster, directorMode, director) {
   const saveTplBtn = tcEl("button", "tc-savetpl", "另存为模板");
   saveTplBtn.title = "把当前名册与总管形态存成团队模板：之后在输入框的团队面板里「从模板创建」一键填入";
   saveTplBtn.onclick = () => tcSaveTemplateModal(card);
+  // 常驻开关（T3.2）：把这支队伍登记为跨会话常驻——定时团队任务触发时优先
+  // 唤醒它（频道历史与工单板延续）而不是每次重建；再点一次解除。只在活动
+  // 团队上可操作（快照对齐点亮，tcFinish 收口），终态后随卡隐藏
+  const residentBtn = tcEl("button", "tc-resident", "常驻");
+  residentBtn.hidden = true;
+  residentBtn.title = "常驻：把这支队伍登记为跨会话常驻，定时团队任务触发时优先唤醒它（频道历史与工单板延续）而不是每次重建；再点一次解除常驻";
+  residentBtn.onclick = async (e) => {
+    e.stopPropagation();
+    const t = curTab();
+    const on = residentBtn.classList.contains("is-active");
+    residentBtn.disabled = true;
+    try {
+      const r = await request(on ? "team.resident_clear" : "team.resident_set",
+        { session_id: t ? t.sid : undefined });
+      const now = !!(r && r.resident);
+      residentBtn.classList.toggle("is-active", now);
+      residentBtn.textContent = now ? "常驻中" : "常驻";
+      addNotice(now
+        ? "已设为常驻：定时团队任务触发时将优先唤醒这支队伍（频道历史与工单板延续）。"
+        : "已解除常驻：定时团队任务将照常重建队伍。");
+    } catch (err) {
+      addNotice((on ? "解除常驻失败" : "设为常驻失败") + ": " + err.message);
+    } finally {
+      residentBtn.disabled = false;
+    }
+  };
   const foot = tcEl("div", "tc-foot");
-  foot.append(saveTplBtn, takeoverBtn, resumeBtn, deliverBtn, stopBtn);
+  foot.append(saveTplBtn, residentBtn, takeoverBtn, resumeBtn, deliverBtn, stopBtn);
   body.append(rosterEl, views.bar, boardEl, channelEl, foot);
   card.append(head, body);
   card._ui = {
     sub, status, fold, rosterEl, taskForm, channelEl, deliverBtn, stopBtn,
-    takeoverBtn, resumeBtn,
+    takeoverBtn, resumeBtn, residentBtn,
     boardList: boardEl, // 看板根（含完成/失败折叠区）：既有查询（[data-task]）继续在这里找行
     cols: kanban.cols, closed: kanban.closed, closedList: kanban.closedList,
     closedCount: kanban.closedCount,
@@ -4086,7 +4112,7 @@ function tcFinish(card, status, summary) {
   // 全部收起（中断回放没有可操作的运行时，留着按钮只会得到「没有团队」）
   const ui = card._ui;
   if (ui) {
-    [ui.deliverBtn, ui.stopBtn, ui.takeoverBtn, ui.resumeBtn].forEach((btn) => {
+    [ui.deliverBtn, ui.stopBtn, ui.takeoverBtn, ui.resumeBtn, ui.residentBtn].forEach((btn) => {
       if (!btn) return;
       btn.hidden = true;
       btn.disabled = true;
@@ -4230,6 +4256,13 @@ function updateTeamCard(card, team) {
   const status = team.status || "active";
   tcSetStatus(card, status);
   tcRenderTasks(card, team.tasks || []);
+  // 常驻开关（T3.2）：team.get 回包贴 resident 标记，点亮/熄灭开关；meta
+  // 回放与事件喂入没有这个键时不动当前态——别把用户刚点的开关刷灭
+  if (card._ui.residentBtn && team.resident !== undefined && status === "active") {
+    card._ui.residentBtn.hidden = false;
+    card._ui.residentBtn.classList.toggle("is-active", !!team.resident);
+    card._ui.residentBtn.textContent = team.resident ? "常驻中" : "常驻";
+  }
   // 快照批量补行：不逐条闪未读圆点，结束后按「行数是否真的变多」补一次
   const before = card._ui.channelEl.querySelectorAll(".tc-msg").length;
   card._suppressNew = true;
@@ -4272,6 +4305,9 @@ function beginTeam(data) {
   }
   const card = buildTeamCard(data.roster || [], data.director_mode || "user", director);
   tcSetStatus(card, "active");
+  // 常驻开关（T3.2）：刚建队的卡直接亮出按钮（不带点亮态；是否常驻由
+  // team.get 快照对齐），不等下一次快照刷新
+  if (card._ui.residentBtn) card._ui.residentBtn.hidden = false;
   t.teamCard = card;
   curLog().appendChild(card);
   scrollLog();

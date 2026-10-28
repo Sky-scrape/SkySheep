@@ -107,6 +107,17 @@ async def _h_team_template_remove(backend: ServerBackend, params: dict, emit, lo
     return await backend.team_template_remove(params)
 
 
+# 常驻团队（T3.2）：设为常驻 / 解除常驻。写全局册（team_resident.json），
+# 与模板册写面同姿态仅本机（local_only）；作用对象是「该连接正在交互的
+# 会话」的活动团队，非本机连接照走 _team_scoped_params 收敛。
+async def _h_team_resident_set(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_resident_set(_team_scoped_params(backend, params, local))
+
+
+async def _h_team_resident_clear(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.team_resident_clear(_team_scoped_params(backend, params, local))
+
+
 async def _h_teamcfg_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.team_config_detail()
 
@@ -141,6 +152,9 @@ METHODS: dict[str, _WsMethod] = {
     "team.template_list": _WsMethod(_h_team_template_list),
     "team.template_save": _WsMethod(_h_team_template_save, local_only=True),
     "team.template_remove": _WsMethod(_h_team_template_remove, local_only=True),
+    # 常驻团队（T3.2）：写全局册仅本机（与模板册写面同姿态）；对象收敛同 team.get
+    "team.resident_set": _WsMethod(_h_team_resident_set, local_only=True),
+    "team.resident_clear": _WsMethod(_h_team_resident_clear, local_only=True),
     "teamcfg.get": _WsMethod(_h_teamcfg_get),
     "teamcfg.save": _WsMethod(_h_teamcfg_save),
 }

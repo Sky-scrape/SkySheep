@@ -2971,6 +2971,18 @@ mark.search-hit-mark {
 }
 .teamcard .tc-resume:hover { background: var(--blue); color: var(--on-accent); }
 .teamcard .tc-resume[hidden] { display: none; }
+/* 常驻开关（T3.2）：默认中性描边，点亮后金描边（与接管/继续推进同一强调
+   族）——常驻是「跨会话在册」的持续态；终态后随交付/收队一起隐藏 */
+.teamcard .tc-resident {
+  flex-shrink: 0; font-size: var(--fs-sm); color: var(--text2);
+  border: 1px solid var(--line2); border-radius: var(--r-sm); padding: 2px 8px;
+}
+.teamcard .tc-resident:hover { color: var(--gold); border-color: var(--gold); }
+.teamcard .tc-resident.is-active {
+  color: var(--gold); border-color: var(--gold); font-weight: 700;
+}
+.teamcard .tc-resident:disabled { color: var(--dim); border-color: var(--line2); }
+.teamcard.ended .tc-resident { display: none; }
 /* 成员/总管用量徽标（快照 usage）：小号等宽，与模型标识同一层级 */
 .teamcard .tc-m-tokens {
   font-family: var(--font-mono); font-size: var(--fs-cap); color: var(--ok);

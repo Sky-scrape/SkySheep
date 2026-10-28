@@ -290,6 +290,14 @@ class TeamChannel:
     def tail(self, n: int = SNAPSHOT_MESSAGE_TAIL) -> list[ChannelMessage]:
         return self.messages[-n:] if n > 0 else list(self.messages)
 
+    def continue_from(self, last_seq: int) -> None:
+        """续号（常驻团队复用，T3.2）：新消息的 seq 从水位之后接着排。
+
+        历史消息不进内存频道——它们已在 team_messages 表里按 team_id 落库，
+        回放（team.log）以库为准；这里只保证 (team_id, seq) 不与历史行冲突。
+        """
+        self._next_seq = max(self._next_seq, max(0, int(last_seq)) + 1)
+
 
 def _to_label(to_member: str, member: str) -> str:
     return "我" if to_member == member else f"@{to_member}"
@@ -547,6 +555,9 @@ class TeamOrchestrator:
         self.channel = TeamChannel(self._reports_dir)
         self.board = TeamBoard(self._redo_limit)
         self.roster: list[TeamMemberSpec] = []
+        # _normalize_roster 截断超编名册时暂存的 Notice（_admit_roster 统一补发；
+        # restore_team 的恢复路径同样消费）
+        self._deferred_notice: NoticeEvent | None = None
         # 建队时分配的唯一编号（uuid4.hex；空 = 尚未建队）：频道消息落库的
         # 归组键（team_messages.team_id）与回放主轴（team.log），随快照进 meta
         self.team_id: str = ""
@@ -659,20 +670,13 @@ class TeamOrchestrator:
 
     # ---- 组队 ----
 
-    async def create_team(self, members: list[TeamMemberSpec]) -> list[dict]:
-        """建队：去重、限量、补名，分配 team_id，发 TeamStarted。返回名册 dict。
+    def _normalize_roster(self, members: list[TeamMemberSpec]) -> list[TeamMemberSpec]:
+        """名册规整（建队与常驻恢复共用）：去重、限量、补名。
 
-        members 来自宿主的成员解析（缺 Key 的成员 provider=None 照常入册，
-        唤醒时按失败隔离呈现错误，与圆桌同姿态）。缺名沿 provider 名、同名
-        自动补序号、保留字成员名（user/director/system/all，频道词汇表）
-        视同非法名回退；超过 max_members 截断并发 Notice（不静默丢人）。
-        team_id（uuid4.hex）在入册前分配：频道消息落库（message_sink）与
-        快照/meta（snapshot.team_id）都凭它归组；重复建队换新 id——旧 id
-        名下的落库消息原样留在库中，不与新团队混册。
+        缺名沿 provider 名、同名自动补序号、保留字成员名（user/director/
+        system/all，频道词汇表）视同非法名回退；超过 max_members 截断并发
+        Notice（不静默丢人）。
         """
-        if not members:
-            raise TeamError("团队至少需要一名队员；请先选择成员或配置模型服务")
-        self.team_id = uuid.uuid4().hex
         roster: list[TeamMemberSpec] = []
         seen_specs: set[tuple[str, str]] = set()
         seen_names: set[str] = set()
@@ -701,13 +705,36 @@ class TeamOrchestrator:
         if len(roster) > self._max_members:
             dropped = len(roster) - self._max_members
             roster = roster[: self._max_members]
-            await self._fire(NoticeEvent(
+            self._deferred_notice = NoticeEvent(
                 message=f"团队成员上限为 {self._max_members} 名（设置 · 团队 可调），"
                         f"已截去后面的 {dropped} 名。"
-            ))
+            )
+        return roster
+
+    async def _admit_roster(self, roster: list[TeamMemberSpec]) -> None:
+        """名册入编（成员表 / 工单板指派名单 / 成员运行时槽位），补发截断 Notice。"""
         self.roster = roster
         self.board.members = [m.name for m in roster]
         self._runtimes = {m.name: _MemberRuntime(spec=m, index=i) for i, m in enumerate(roster)}
+        notice = self._deferred_notice
+        self._deferred_notice = None
+        if notice is not None:
+            await self._fire(notice)
+
+    async def create_team(self, members: list[TeamMemberSpec]) -> list[dict]:
+        """建队：去重、限量、补名，分配 team_id，发 TeamStarted。返回名册 dict。
+
+        members 来自宿主的成员解析（缺 Key 的成员 provider=None 照常入册，
+        唤醒时按失败隔离呈现错误，与圆桌同姿态）。team_id（uuid4.hex）在入册
+        前分配：频道消息落库（message_sink）与快照/meta（snapshot.team_id）都
+        凭它归组；重复建队换新 id——旧 id 名下的落库消息原样留在库中，不与
+        新团队混册。
+        """
+        if not members:
+            raise TeamError("团队至少需要一名队员；请先选择成员或配置模型服务")
+        self.team_id = uuid.uuid4().hex
+        roster = self._normalize_roster(members)
+        await self._admit_roster(roster)
         roster_dicts = self._roster_dicts()
         await self._fire(TeamStarted(
             roster=roster_dicts,
@@ -723,6 +750,43 @@ class TeamOrchestrator:
              "model": m.model, "persona": m.persona}
             for i, m in enumerate(self.roster)
         ]
+
+    # ---- 常驻团队复用（T3.2：跨会话唤醒同一支队伍）----
+
+    async def restore_team(
+        self, team_id: str, members: list[TeamMemberSpec],
+        *, tasks: list[dict] | None = None, last_seq: int = 0,
+        wake_note: str = "",
+    ) -> list[dict]:
+        """恢复一支常驻队伍：沿用原 team_id 续频道、按快照回放工单板。
+
+        与 create_team 同一套名册规整（去重、补序、保留字回退、max_members
+        截断发 Notice），但不发 TeamStarted——不是建队，是同一支队伍的下一次
+        唤醒；频道续号见 TeamChannel.continue_from（历史行留在 team_messages
+        表，回放以库为准）。工单板按快照原 id 回放（board.restore：指派对象
+        不在恢复后名册的条目跳过），自增工单号越过历史号。最后发一条 system
+        频道消息宣告恢复（走正常 post → 落库 → 定稿事件路径，本次唤醒从此
+        在频道时间线上可见）。返回名册 dict（形状同 create_team）。
+        """
+        team_id = str(team_id or "").strip()
+        if not team_id:
+            raise TeamError("恢复常驻团队缺少 team_id")
+        if not members:
+            raise TeamError("团队至少需要一名队员；请先选择成员或配置模型服务")
+        self.team_id = team_id
+        await self._admit_roster(self._normalize_roster(members))
+        restored, skipped = self.board.restore(tasks or [])
+        self.channel.continue_from(last_seq)
+        bits = [f"（常驻团队唤醒）已恢复工单板：回放 {restored} 单"]
+        if skipped:
+            bits.append(f"，跳过 {skipped} 单（指派对象不在当前名册或快照条目无效）")
+        if wake_note:
+            bits.append(f"。{wake_note}")
+        msg = self.channel.post(
+            "system", to_member="all", msg_kind="system", text="".join(bits) + "。",
+        )
+        await self._emit_message(msg)
+        return self._roster_dicts()
 
     # ---- 用户总管回合 ----
 

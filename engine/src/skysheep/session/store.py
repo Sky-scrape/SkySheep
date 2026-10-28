@@ -1642,6 +1642,16 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         rows = await cur.fetchall()
         return [self._team_message_row(r) for r in rows]
 
+    async def last_team_message_seq(self, team_id: str) -> int:
+        """某团队频道消息的最大 seq（常驻团队复用的续号水位；查无回 0）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT MAX(seq) FROM team_messages WHERE team_id = ?",
+            (team_id,),
+        )
+        row = await cur.fetchone()
+        return int(row[0] or 0) if row else 0
+
     # ---- sessions ----
 
     async def create_session(self, project_id: int | None, title: str = "") -> Session:

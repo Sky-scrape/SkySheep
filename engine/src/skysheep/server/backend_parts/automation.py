@@ -24,6 +24,7 @@ from ...core.run_ledger import (
     outcome_for,
 )
 from ...core.team import DirectorSpec, TeamOrchestrator
+from ...core.team_resident import ResidentTeamEntry
 from ...messages import Message, TextBlock
 from ...security.gate import HeadlessGate
 from ...textio import write_text_atomic
@@ -1265,6 +1266,12 @@ class AutomationMixin:
         specs: list = []
         director = DirectorSpec()
         orch: TeamOrchestrator | None = None
+        # 常驻团队复用（T3.2）：同模板 + 同项目登记过常驻队伍时，唤醒它
+        # （原 team_id 续频道、工单板快照延续）而不是每次重建；查无则走
+        # 既有建队路径（§14 口径不变——定时触发不隐式登记常驻，是否常驻
+        # 由用户在团队卡上显式声明）
+        resident = self.resident_teams.find_for_template(template_name, cron_pid) \
+            if getattr(self, "resident_teams", None) is not None else None
         try:
             # 成员解析：名册只来自模板（§14.2 第 6 步）——模板没有队员时装配失败
             # 按失败收尾，绝不调用 _resolve_team_members 的缺省分支（那里会按当前
@@ -1323,7 +1330,22 @@ class AutomationMixin:
                 compaction_auto=self.cfg.compaction_auto,
                 message_sink=self._team_message_sink(sid),
             )
-            await orch.create_team(specs)
+            if resident is not None:
+                # 唤醒常驻队伍（T3.2）：沿用原 team_id 续频道（seq 水位取注册表
+                # 与库内行号的最大者，防手工清理后的错位）、按快照回放工单板；
+                # 装配路径（_resolve_team_members / _build_member_provider /
+                # TeamOrchestrator 注入面）与防失控上限照旧
+                db_seq = await self.store.last_team_message_seq(resident.team_id)
+                await orch.restore_team(
+                    resident.team_id, specs, tasks=resident.board,
+                    last_seq=max(int(resident.last_seq or 0), int(db_seq or 0)),
+                    wake_note=(
+                        f"由定时任务「{task['name']}」唤醒"
+                        f"（第 {resident.wake_count + 1} 次复用）。"
+                    ),
+                )
+            else:
+                await orch.create_team(specs)
         except BaseException:  # noqa: BLE001 - 清理后原样上抛（含取消）
             self._release_turn_providers(
                 [s.provider for s in specs if s.provider is not None]
@@ -1345,6 +1367,28 @@ class AutomationMixin:
                 await orch.stop(reason="无人值守空闲收队：总管多轮无进展")
         finally:
             self._release_team_providers(orch)
+
+        if resident is not None:
+            # 复用回写（best-effort）：工单板快照 / 频道水位 / 唤醒计数落回
+            # 注册表，下一次触发的恢复以这次收尾为准。只走正常终态路径——
+            # 轮被取消/异常时保留上一轮的快照（陈旧但自洽，下一轮按它恢复）
+            try:
+                msgs = orch.channel.messages
+                self.resident_teams.upsert(ResidentTeamEntry(
+                    team_id=orch.team_id,
+                    name=resident.name,
+                    template=template_name,
+                    project_id=cron_pid,
+                    session_id=sid,
+                    director_mode=orch.director_mode,
+                    roster=[m.name for m in orch.roster],
+                    board=[t.to_dict() for t in orch.board.tasks()],
+                    last_seq=msgs[-1].seq if msgs else int(resident.last_seq or 0),
+                    wake_count=resident.wake_count + 1,
+                ))
+            except Exception as e:  # noqa: BLE001 - 回写失败不影响本轮交付
+                logger.warning(
+                    "常驻团队注册表回写失败（team_id=%s）：%s", orch.team_id, e)
 
         finished = orch.finished or {}
         terminal = str(finished.get("status") or "done")

@@ -120,6 +120,7 @@ from ..core.team import (
     TeamTemplateMember,
     TeamTemplateStore,
 )
+from ..core.team_resident import ResidentTeamEntry, ResidentTeamStore
 from ..events import (
     AssistantMessage,
     ErrorEvent,
@@ -817,6 +818,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 团队模板（三期）：~/.skysheep/teams.json，与 subagents.json 同姿态
         # （路径随 SKYSHEEP_HOME，测试隔离；坏文件容错在 store 内部）
         self.team_templates = TeamTemplateStore(skysheep_home() / "teams.json")
+        # 常驻团队注册表（T3.2）：~/.skysheep/team_resident.json，同姿态——
+        # 哪支队伍跨会话常驻、复用所需的工单板快照与频道 seq 水位
+        self.resident_teams = ResidentTeamStore(skysheep_home() / "team_resident.json")
         self.instructions_file: str | None = None
         self.instructions_text: str = ""
         self.mcp_warnings: list[str] = []
@@ -1567,6 +1571,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # template_save 会以仅含新模板的内存册整体覆盖 teams.json——已存
         # 模板被静默清光（upsert→save 是全量覆盖落盘）
         self.team_templates.load()
+        # 常驻团队注册表同款启动装载（不 load 的话 resident_set/clear 对磁盘
+        # 已有登记误判，此后任意一次 upsert 会以仅含新条目的内存册整体覆盖
+        # team_resident.json——已登记的常驻队伍被静默清光）
+        self.resident_teams.load()
         # Mods 暂存目录清扫：install 与 confirm 之间重启遗留的 .importing-*
         # （只启动期调一次，运行期可能正有未确认的安装预览占着 staging）
         self.sweep_mod_staging()
@@ -4405,7 +4413,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         sid = str(raw) if raw is not None else (self.session.id if self.session else "")
         orch = self._teams.get(sid)
         if orch is not None:
-            return {"active": True, "session_id": sid, "team": orch.snapshot()["team"]}
+            team = orch.snapshot()["team"]
+            # 常驻标记（T3.2）：只贴在 team.get 的回包上，不进 snapshot——
+            # meta 落库形状保持不变，前端团队卡凭它点亮「常驻」开关
+            team["resident"] = self.resident_teams.is_resident(orch.team_id)
+            return {"active": True, "session_id": sid, "team": team}
         out: dict = {"active": False, "session_id": sid, "team": None}
         if sid in self._teams_interrupted:
             out["interrupted"] = self._teams_interrupted[sid]
@@ -4430,6 +4442,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
         def _room_active(orch) -> dict:
             team = orch.snapshot()["team"]
+            # 常驻标记（T3.2）：与 team.get 回包同款贴法——「同一快照源，
+            # 页签与卡不两套」的契约对常驻开关同样成立
+            team["resident"] = self.resident_teams.is_resident(orch.team_id)
             msgs = orch.channel.messages
             return {
                 "active": True, "session_id": sid, "team": team,
@@ -4692,6 +4707,53 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         name = str(params.get("name", "") or "").strip()
         self.team_templates.remove(name)
         return {"name": name}
+
+    # ---- 常驻团队（T3.2）：设为常驻 / 解除常驻 ----
+    # 全局册（与会话无关，team_resident.json 单文件）：登记「哪支队伍跨会话
+    # 常驻」与复用所需的工单板快照、频道 seq 水位。写面仅本机（与模板册同
+    # 姿态，dispatch 表 local_only=True）；定时团队触发时按（模板，项目）匹配
+    # 复用（automation 的 _execute_cron_team_turn），频道历史与工单板延续。
+
+    async def team_resident_set(self, params: dict) -> dict:
+        """team.resident_set：把当前会话的活动团队登记为常驻（幂等，重复设刷新）。
+
+        template 可选——建队来源的模板名（前端「从模板创建」记着；给了就
+        必须在模板册里存在，防止绑定到永不匹配的悬空名）。绑了模板的常驻
+        队伍才会被定时团队任务按（模板，项目）匹配复用；未绑的只登记（界面上
+        显示常驻，但没有定时触发面）。工单板快照与频道水位取登记时刻的实时
+        状态，定时复用前的最后一次刷新以最近一次运行收尾的回写为准。
+        """
+        sid, orch = self._team_for(params)
+        if not orch.team_id:
+            raise TeamError("该团队还没有分配 team_id，不能登记常驻")
+        template = str(params.get("template") or "").strip()
+        if template and not any(
+            t.name == template for t in self.team_templates.templates
+        ):
+            raise TeamError(f"团队模板不存在：{template}")
+        sess = await self.store.get_session(sid) if self.store is not None else None
+        old = self.resident_teams.get(orch.team_id)
+        entry = ResidentTeamEntry(
+            team_id=orch.team_id,
+            name=str((sess.title if sess else "") or ""),
+            template=template or (old.template if old else ""),
+            project_id=sess.project_id if sess else None,
+            session_id=sid,
+            director_mode=orch.director_mode,
+            roster=[m.name for m in orch.roster],
+            board=[t.to_dict() for t in orch.board.tasks()],
+            last_seq=orch.channel.messages[-1].seq if orch.channel.messages else 0,
+            wake_count=old.wake_count if old else 0,
+        )
+        self.resident_teams.upsert(entry)
+        return {"ok": True, "team_id": orch.team_id, "resident": True,
+                "entry": entry.model_dump()}
+
+    async def team_resident_clear(self, params: dict) -> dict:
+        """team.resident_clear：解除当前会话活动团队的常驻登记（未登记报错）。"""
+        _sid, orch = self._team_for(params)
+        self.resident_teams.remove(orch.team_id)
+        return {"ok": True, "team_id": orch.team_id, "resident": False}
 
     # ---- 频道回放（三期）：收队/重启后按 team_id 拉全量频道消息 ----
 

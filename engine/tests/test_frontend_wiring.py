@@ -505,6 +505,23 @@ def test_team_idle_resume_and_usage_wiring():
     assert "const idle = active ? (team.idle_reason" in js
 
 
+def test_team_resident_toggle_wiring():
+    """常驻开关（T3.2）：团队卡上的按钮、set/clear 两向请求与快照对齐、
+    终态收口一起隐藏——切换态只在活动快照对齐路径上刷，避免把用户刚点的
+    开关被 meta 回放刷灭。"""
+    js = read_app_bundle()
+    assert 'tcEl("button", "tc-resident", "常驻")' in js
+    assert '"team.resident_set"' in js and '"team.resident_clear"' in js
+    # 快照对齐：resident 键存在且活动态才动开关（meta 回放无键不刷灭）
+    assert "team.resident !== undefined" in js
+    assert "residentBtn.classList.toggle" in js
+    # 建队即亮出按钮；终态收口把按钮一起收起
+    assert "card._ui.residentBtn.hidden = false" in js
+    i = js.index("function tcFinish(card, status, summary)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "ui.residentBtn" in body
+
+
 # ---------- 对抗发现转团队工单：显式选择 / 来源锚点 / 只读保护 ----------
 
 

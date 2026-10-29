@@ -197,6 +197,17 @@ async def _h_factory_run_mark(backend: ServerBackend, params: dict, emit, local:
     return await backend.factory_run_mark(params)
 
 
+# ---- 远程观战（T4，docs/远程观战设计.md）：只读摘要与渠道推送，均本机专属 ----
+
+
+async def _h_spectate_snapshot(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.spectate_digest()
+
+
+async def _h_spectate_send(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.spectate_send()
+
+
 # ---- 本域方法的注册表条目（自 app.py 的 _WS_METHODS 逐字切片） ----
 METHODS: dict[str, _WsMethod] = {
     "schedule.list": _WsMethod(_h_schedule_list),
@@ -210,6 +221,8 @@ METHODS: dict[str, _WsMethod] = {
     "cron.delete": _WsMethod(_h_cron_delete, local_only=True),
     "cron.run_now": _WsMethod(_h_cron_run_now, local_only=True),
     "cron.team_check": _WsMethod(_h_cron_team_check, local_only=True),
+    "spectate.snapshot": _WsMethod(_h_spectate_snapshot, local_only=True),
+    "spectate.send": _WsMethod(_h_spectate_send, local_only=True),
     "cron.schtask_export": _WsMethod(_h_cron_schtask_export, local_only=True),
     "cron.schtask_remove": _WsMethod(_h_cron_schtask_remove, local_only=True),
     "cron.schtask_status": _WsMethod(_h_cron_schtask_status),

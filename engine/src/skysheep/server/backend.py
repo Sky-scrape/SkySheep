@@ -212,6 +212,7 @@ from .backend_parts.remote import (  # noqa: F401  部分名字供 app.py / 测�
     _write_update_helper,
     client_origin,
 )
+from .backend_parts.spectate import SpectateMixin
 from .backend_parts.terminal import TerminalManager, TerminalPanelMixin
 from .backend_parts.webtools import WebtoolsMixin
 
@@ -771,7 +772,7 @@ def _room_stats(team: dict) -> dict:
 
 
 class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
-                   SystemMixin, TerminalPanelMixin, RemoteMixin, WebtoolsMixin,
+                   SpectateMixin, SystemMixin, TerminalPanelMixin, RemoteMixin, WebtoolsMixin,
                    LifecycleMixin, McpMixin, ModsMixin, PreferencesMixin,
                    ProvidersMixin, ProjectDataMixin, RetentionMixin,
                    ArchiveMgmtMixin, BrowserDataMixin, FactoryMixin):

@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **远程观战最小闭环（T4）**：新增只读摘要 `spectate.snapshot` 与渠道推送
+  `spectate.send`（均仅本机）——摘要由工厂计数/需留意明细与各团队状态拼装
+  （`compose_spectate_digest` 纯函数，字段全容错），推送复用 cron 收尾同款的
+  渠道出站小件（聊天渠道名单非空才发、Webhook 广播、未配置静默、失败只记
+  日志）。设计见 `docs/远程观战设计.md`；定时节律与富卡片列二期。
+
 ### 修复
 
 - **远程口径扫尾（审计 L06/L08）**：`advanced.get` 的 `home`/`logs_dir`/`working_dir`

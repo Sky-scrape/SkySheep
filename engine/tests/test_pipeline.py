@@ -260,6 +260,35 @@ def _wait_pipe(ws, pipe_id, wanted, deadline=15.0):
     )
 
 
+def _wait_nodes_terminal(ws, pipe_id, titles, deadline=60.0):
+    """轮询 pipeline.get 直到指定节点全部终态（done/error/cancelled/skipped）。
+
+    与 _wait_pipe 的区别：流水线整体进入终态不保证每个节点都已落定（依赖判定
+    按 PIPELINE_INTERVAL 一轮一轮推进），负载敏感的用例要先等齐再断言。
+    """
+    from test_server import recv_until
+
+    end = time.time() + deadline
+    rid = 0
+    last = None
+    while time.time() < end:
+        rid += 1
+        ws.send_json({"id": f"t{rid}", "method": "pipeline.get", "params": {"id": pipe_id}})
+        frame = recv_until(ws, f"t{rid}")  # 跳过事件帧只认响应
+        if frame.get("ok"):
+            p = frame["result"]["pipeline"]
+            last = p
+            by_title = {n["title"]: n for n in p["nodes"]}
+            if all(by_title[t]["status"] in ("done", "error", "cancelled", "skipped")
+                   for t in titles):
+                return p
+        time.sleep(0.05)
+    nodes = [(n["title"], n["status"]) for n in last["nodes"]] if last else None
+    raise AssertionError(
+        f"流水线 {pipe_id} 的节点 {titles} 未在 {deadline}s 内全部终态；节点={nodes}"
+    )
+
+
 def test_pipeline_end_to_end_dependency_and_injection(home):
     """并行两节点 + 汇总节点：汇总必须等两个都完成，且指令里带上游产出。"""
     from test_server import make_client, recv_until
@@ -872,15 +901,32 @@ def test_pipeline_any_mode_waits_instead_of_dying_on_one_failed_dep(home):
         pipe = recv_until(ws, "c1")["result"]["pipeline"]
         ws.send_json({"id": "s1", "method": "pipeline.start", "params": {"id": pipe["id"]}})
         recv_until(ws, "s1")
-        done = _wait_pipe(ws, pipe["id"], ("done", "failed"))
+        done = _wait_pipe(ws, pipe["id"], ("done", "failed"), deadline=60)
+        # 极端负载下 B 的轮次可能远慢于整体终态、甚至自己失败（N5 实测 flaky：
+        # 测试服务 309s 才就绪时 B 自行报错）——先等 B 与下游都落定再下结论。
+        done = _wait_nodes_terminal(ws, pipe["id"], ("B", "下游"), deadline=60)
         by_title = {n["title"]: n for n in done["nodes"]}
-        assert by_title["A"]["status"] == "error"
-        assert by_title["下游"]["status"] == "done", (
-            "any 模式下 B 还在跑时下游不能因 A 失败被提前判死"
-        )
-        assert by_title["下游"]["result"] == "下游完成"
+
+        def _brief():
+            return "；".join(
+                f"{n['title']}={n['status']}(last_error={(n.get('last_error') or '')[:100]})"
+                for n in done["nodes"]
+            )
+
+        assert by_title["A"]["status"] == "error", f"A 必须失败：{_brief()}"
+        b = by_title["B"]["status"]
+        down = by_title["下游"]["status"]
+        if b == "done":
+            assert down == "done", (
+                f"any 模式下 B 已完成，下游不能因 A 失败被提前判死：{_brief()}"
+            )
+            assert by_title["下游"]["result"] == "下游完成"
+        else:
+            # B 自己失败：全部依赖终态且无一完成，下游判死是 any 的正确行为；
+            # 此刻下游若还悬置（blocked）才是依赖判定失灵。
+            assert down == "error", f"B 终态={b}，下游必须自洽而不是悬置：{_brief()}"
         # A 确实失败了：流水线整体仍报 failed（与 all 模式同一收尾规则），
-        # 但关键是下游已经拿到结果、没有陪着陪葬
+        # 但关键是下游没有在依赖未定局时陪葬
         assert done["status"] == "failed"
 
 

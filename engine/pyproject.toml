@@ -79,7 +79,8 @@ asyncio_mode = "auto"
 # 已知交互：显式 `-m "not e2e"` 会覆盖 addopts、连 evals 一起跑（评测不联网、
 # 不碰真实 home、进程内秒级，跑上无害）；要双排除写 `-m "not e2e and not eval"`。
 testpaths = ["tests", "evals"]
-addopts = '-m "not eval"'
+# 审查 L32：--strict-markers 让拼错的 marker 直接报错，e2e/slow/eval 的分层契约不被静默破坏
+addopts = '-m "not eval" --strict-markers'
 # 测试分层：默认全跑；用 `-m "not e2e"` 跳过真实网络栈用例（需要本机端口），
 # 用 `-m e2e` 只跑它们。slow 留给将来需要长时运行的用例。
 markers = [

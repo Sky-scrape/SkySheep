@@ -288,6 +288,13 @@
 
 ### 变更
 
+- **测试并行化 opt-in（N5 X-1/X-2）**：pytest-xdist 进 dev 依赖（`uv sync` 即装），
+  `pytest -n 4 --dist loadgroup` 实测全量 11 分钟→2.5~3 分钟（默认不加 `-n`，
+  串行口径不变，pyproject 注释写明 opt-in 用法）。前置清掉两处进程级共享态：
+  配置 DPAPI 迁移的 run-once 标志（`_migration_attempted`）在测试里 autouse 钉
+  「已迁移」（逐用例还原，断言零改动）；test_obs 的 handler 槽位改逐条留原始
+  消息、按「消息体+标记」认领，杂散记录不再污染解析。生产代码零改动。
+
 - **桌面启动省约 400ms（N2 P2）**：`cli/app.py` 的 prompt_toolkit / rich /
   markdown_it（REPL 栈）改为真正用到时才导入，`console` 改惰性单例（横幅、
   浏览器兜底、运行摘要等打印路径不变）；`import skysheep.cli.app` 模块数

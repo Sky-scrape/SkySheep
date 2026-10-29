@@ -16,6 +16,36 @@ def _capture(caplog):
     return caplog.at_level(logging.INFO, logger="skysheep.obs")
 
 
+class _RecordCapture(logging.Handler):
+    """逐条留存窗口内记录的原始消息文本（不走 StringIO 的字节流）。
+
+    skysheep.obs 是进程级共享 logger：xdist 下同一 worker 里前序用例遗留的
+    后台线程若恰好在换装窗口内也发 obs 记录，StringIO 里就会混进别人的行，
+    parse_structured 对「首条标记之后的全部字节」做 JSON 解析便被带歪
+    （表现为 payload 变 None）。逐条存消息后每条记录独立解析，互不污染；
+    自己那条按「消息体 + 标记」前缀认领，别人的行抢不走断言。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def _swap_capture(capture: _RecordCapture):
+    """把 skysheep.obs 的 handler 换成 capture，返回恢复函数（调用方 finally 用）。"""
+    lg = logging.getLogger("skysheep.obs")
+    old_handlers, old_level = lg.handlers, lg.level
+    lg.handlers, lg.level = [capture], logging.INFO
+
+    def _restore() -> None:
+        lg.handlers, lg.level = old_handlers, old_level
+
+    return _restore
+
+
 def test_info_appends_parseable_json_payload(caplog):
     with _capture(caplog):
         obs.info("turn", "turn finished", session_id="s1", duration_ms=17000)
@@ -33,18 +63,17 @@ def test_none_fields_are_dropped():
     """可选字段为 None 时不写进 JSON：日志行更短，语义是「没有这项」。"""
     line = "msg" + obs.STRUCT_TAG + json.dumps({"ev": "x", "a": 1})
     assert obs.parse_structured(line)["a"] == 1
-    # 通过公开接口验证：None 不该出现
-    import io
-    stream = io.StringIO()
-    handler = logging.StreamHandler(stream)
-    lg = logging.getLogger("skysheep.obs")
-    old_handlers, old_level = lg.handlers, lg.level
-    lg.handlers, lg.level = [handler], logging.INFO
+    # 通过公开接口验证：None 不该出现（按消息体认领自己那条，不依赖字节流独占）
+    cap = _RecordCapture()
+    restore = _swap_capture(cap)
     try:
         obs.info("turn", "t", session_id="s1", error=None)
     finally:
-        lg.handlers, lg.level = old_handlers, old_level
-    payload = obs.parse_structured(stream.getvalue().strip())
+        restore()
+    ours = [m for m in cap.messages if m.startswith("t" + obs.STRUCT_TAG)]
+    assert ours, f"本用例自己的日志行必须被接住（窗口内共 {len(cap.messages)} 条）"
+    payload = obs.parse_structured(ours[-1])
+    assert payload is not None
     assert "error" not in payload
     assert payload["session_id"] == "s1"
 
@@ -58,17 +87,15 @@ def test_warning_uses_warning_level(caplog):
 
 def test_unserializable_field_does_not_raise():
     """字段塞进不可序列化对象时，日志不能把主流程带崩。"""
-    import io
-    stream = io.StringIO()
-    handler = logging.StreamHandler(stream)
-    lg = logging.getLogger("skysheep.obs")
-    old_handlers, old_level = lg.handlers, lg.level
-    lg.handlers, lg.level = [handler], logging.INFO
+    cap = _RecordCapture()
+    restore = _swap_capture(cap)
     try:
         obs.info("turn", "weird", obj=object())
     finally:
-        lg.handlers, lg.level = old_handlers, old_level
-    payload = obs.parse_structured(stream.getvalue().strip())
+        restore()
+    ours = [m for m in cap.messages if m.startswith("weird" + obs.STRUCT_TAG)]
+    assert ours, f"本用例自己的日志行必须被接住（窗口内共 {len(cap.messages)} 条）"
+    payload = obs.parse_structured(ours[-1])
     assert payload is not None
     assert payload["ev"] == "turn"
 

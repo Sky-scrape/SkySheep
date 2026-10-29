@@ -13,8 +13,27 @@ import json
 import sqlite3
 import zipfile
 
+import pytest
+
+from skysheep import config as config_mod
 from skysheep.messages import TextBlock
 from skysheep.session.store import SCHEMA_VERSION
+
+
+@pytest.fixture(autouse=True)
+def _freeze_credential_migration(monkeypatch):
+    """把 config 的明文凭据 DPAPI 迁移钉在「已迁移过」（该标志是进程级 run-once）。
+
+    进程内第一个读到明文凭据的用例会触发整份配置加密回写，之后的用例都按
+    已迁移处理。串行下谁是「第一个」固定不变；xdist 下随 worker 分派漂移，
+    同一用例这次触发迁移（config.toml 变 dpapi: 密文）、下次没触发，本文件
+    里断言本机 config.toml 保持明文的用例就随调度红绿不定（-n 4 实测：
+    test_import_full_rejects_db_from_newer_version 的 "keep" in config.toml
+    读到 dpapi 密文）。统一按已迁移处理后本文件全程不触发迁移写盘，明文
+    断言恢复确定性；迁移行为本身由 test_secure_store.py 覆盖（那边有逐用例
+    复位的夹具）。
+    """
+    monkeypatch.setattr(config_mod, "_migration_attempted", True)
 
 
 def _zip_bytes(files: dict[str, bytes]) -> bytes:

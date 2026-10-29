@@ -47,6 +47,7 @@ dev = [
     # 旧流程靠发布清单人肉 `uv pip install pyinstaller` 补装，忘了就 altgraph
     # 被修剪、打包当天才炸（AGENTS.md 旧 ⚠️ 记载的坑）。
     "pyinstaller>=6.10",
+    "pytest-xdist>=3.8.0",
 ]
 # 真实浏览器 UI 交互（Playwright）：键盘操作、焦点、视口缩放、窄屏无溢出等真实
 # 渲染行为此前只能手动验。独立成组而不并入 dev——它要下载 Chromium（约 150MB），
@@ -81,6 +82,11 @@ asyncio_mode = "auto"
 testpaths = ["tests", "evals"]
 # 审查 L32：--strict-markers 让拼错的 marker 直接报错，e2e/slow/eval 的分层契约不被静默破坏
 addopts = '-m "not eval" --strict-markers'
+# 并行是显式 opt-in，不进 addopts：本机/CI 想提速时加 `-n 4 --dist loadgroup`
+# （pytest-xdist 已入 dev 依赖组）。用 loadgroup 而不是纯 load：它让带
+# xdist_group 标记的用例组固定在同一 worker 按序执行——套件里有依赖进程级
+# run-once 状态的用例（如 config 的明文凭据迁移标志），遇到难彻底隔离的组
+# 可以零成本加 xdist_group 串行化兜底；无标记的用例仍自由分派，不受影响。
 # 测试分层：默认全跑；用 `-m "not e2e"` 跳过真实网络栈用例（需要本机端口），
 # 用 `-m e2e` 只跑它们。slow 留给将来需要长时运行的用例。
 markers = [

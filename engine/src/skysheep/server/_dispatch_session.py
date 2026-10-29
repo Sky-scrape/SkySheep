@@ -125,6 +125,12 @@ async def _h_session_peek(backend: ServerBackend, params: dict, emit, local: boo
     return await backend.peek_session_messages(str(params.get("id", "")), local=local)
 
 
+async def _h_messages_earlier(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 大会话历史窗口化的翻页半边：归属校验在 backend.session_messages_earlier
+    # 里与 session.peek_messages 同口径执行（本机跨项目可读；远程按当前项目）
+    return await backend.session_messages_earlier(params, local=local)
+
+
 async def _h_session_model_switch(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.session_model_switch(
         str(params.get("id", "")),
@@ -358,6 +364,8 @@ METHODS: dict[str, _WsMethod] = {
     "session.project_path": _WsMethod(_h_session_project_path, local_only=True),
     "session.reveal": _WsMethod(_h_session_reveal, local_only=True),
     "session.peek_messages": _WsMethod(_h_session_peek),
+    # 大会话历史翻页（只读）：与会话打开同口径校验归属，远程可用（当前项目内）
+    "messages.earlier": _WsMethod(_h_messages_earlier),
     "session.model_switch": _WsMethod(_h_session_model_switch, local_only=True),
     "session.model_get": _WsMethod(_h_session_model_get, local_only=True),
     # 会话级思考强度（本机专属）：读不建 runtime，写换会话私有 provider

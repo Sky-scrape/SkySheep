@@ -2249,6 +2249,54 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             out.append(m)
         return out
 
+    async def load_messages_window(
+        self, session_id: str, *, before_seq: int | None = None, limit: int = 200,
+    ) -> tuple[list[Message], int, int]:
+        """窗口化读取 user/assistant 消息（大会话历史窗口化的存储半边）。
+
+        before_seq=None 取**尾部**窗口（最后 limit 条）；否则取 seq < before_seq
+        里**最后** limit 条——两档共用同一 SQL 形状（反序 LIMIT 后再正序），只在
+        SQL 层截窗，几千条的会话不再全量反序列化。role 过滤在 SQL 里完成，与
+        backend._msg_brief 的「历史 brief 只组 user/assistant」同一口径（tool 行
+        参与排序锚定但不进窗口）。
+
+        返回 (升序窗口, 会话 user/assistant 总条数, 窗口之前的条数)：第三个值即
+        「被截掉多少条」（messages_offset，0 = 更早的没有了），也供 has_more 判定。
+        """
+        assert self._db
+        limit = max(1, int(limit))
+        conds = ["session_id = ?", "role IN ('user', 'assistant')"]
+        args: list = [session_id]
+        if before_seq is not None:
+            conds.append("seq < ?")
+            args.append(int(before_seq))
+        where = " AND ".join(conds)
+        cur = await self._db.execute(
+            f"SELECT seq, content FROM messages WHERE {where}"
+            f" ORDER BY seq DESC LIMIT {int(limit)}",
+            args,
+        )
+        rows = await cur.fetchall()
+        win: list[Message] = []
+        for r in reversed(rows):  # 反序取尾窗，再翻回升序
+            m = Message.model_validate_json(r["content"])
+            m.seq = r["seq"]
+            win.append(m)
+        # 总数不受窗口口径影响（messages.earlier 翻页时会话总数不变）；
+        # 窗口之前的条数按首条 seq 计——窗口非空即首条之前的全部；空窗说明
+        # 更早的没有行了，before_seq 口径下本就是 0（尾部窗口只发生在空会话，同为 0）
+        bound = rows[-1]["seq"] if rows else (int(before_seq) if before_seq is not None else 0)
+        cur = await self._db.execute(
+            "SELECT COUNT(*) AS total,"
+            " SUM(CASE WHEN seq < ? THEN 1 ELSE 0 END) AS before_cnt"
+            " FROM messages WHERE session_id = ? AND role IN ('user', 'assistant')",
+            (bound, session_id),
+        )
+        row = await cur.fetchone()
+        total = int(row["total"] or 0)
+        offset = int(row["before_cnt"] or 0)
+        return win, total, offset
+
     async def search_messages(
         self, project_id: int | None, query: str, limit: int = 20, scope: str = "project"
     ) -> list[dict]:

@@ -664,7 +664,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   transition: background var(--dur-fast), transform var(--dur-fast);
 }
 #jump-bottom:hover { background: var(--card); transform: translateY(-1px); }
-/* 「加载更早的消息」：窗口化长会话顶部向前补画一批的入口（HISTORY_WINDOW 之外不常驻） */
+/* 「加载更早的消息」：窗口化长会话顶部向前翻一页的入口（更早的经 messages.earlier 拉取） */
 .history-more {
   align-self: center;
   margin: 2px 0;
@@ -678,6 +678,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   transition: color var(--dur-fast), border-color var(--dur-fast);
 }
 .history-more:hover { color: var(--text); border-color: var(--ink-line); }
+.history-more:disabled { opacity: .55; cursor: default; } /* 翻页在途：防重复点击 */
 /* 切换项目后的新内容淡入（switchProject 给聊天流/会话列表/项目列表加 .swap-in）：
    欢迎卡、提示条这类大块带边框内容从「瞬间弹入」变成平滑过渡，消除弹窗般的突现感 */
 @keyframes swapfade { from { opacity: .25; } to { opacity: 1; } }

@@ -6,6 +6,15 @@
 
 ### 新增
 
+- **大会话历史窗口化（N2 P1）**：打开会话不再全量下发历史——`session.resume` /
+  `session.peek_messages` / boot 快照 / fork 一律只回最后 200 条 brief（与前端
+  HISTORY_SYNC_LIMIT 同值），附 `messages_total` / `messages_offset`；新增只读 WS 方法
+  `messages.earlier`（按 before_seq 向前翻页，归属校验与 peek 同口径、远程不放开跨项目，
+  limit 缺省 100、上限 500），存储半边 `store.load_messages_window` 在 SQL 层截窗（几千条
+  的会话不再全量反序列化）。前端「加载更早」改走服务端翻页（在途防抖复用同一 Promise、
+  滚动补偿、渲染代际守卫）。5000 条会话的打开载荷 3.4MB→约 140KB，打开成本从
+  「随总历史线性」变为常数。
+
 - **远程观战最小闭环（T4）**：新增只读摘要 `spectate.snapshot` 与渠道推送
   `spectate.send`（均仅本机）——摘要由工厂计数/需留意明细与各团队状态拼装
   （`compose_spectate_digest` 纯函数，字段全容错），推送复用 cron 收尾同款的

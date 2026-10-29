@@ -937,7 +937,7 @@ function openTabForSession(sid, title, opts = {}) {
     t.needHistory = !opts.withMessages;
   }
   if (opts.withMessages) {
-    renderHistory(t, opts.withMessages);
+    renderHistory(t, opts.withMessages, opts.messagesOffset);
     if (!t.logEl.children.length) withTab(t, showWelcome); // 空会话回到欢迎页
   }
   if (!opts.background) {
@@ -969,7 +969,7 @@ async function loadTabHistory(tab) {
   tab.needHistory = false;
   try {
     const info = await request("session.resume", { id: tab.sid });
-    renderHistory(tab, info.messages || []);
+    renderHistory(tab, info.messages || [], info.messages_offset);
     // 空会话也回欢迎页（与 openTabForSession 的 withMessages 路径同一口径）——
     // 之前漏了这条，侧栏点开旧的空会话就是一片空白（用户报的「有的出现有的不出现」）
     if (!tab.logEl.children.length) withTab(tab, showWelcome);
@@ -1400,7 +1400,7 @@ async function openSplitPane(sid, title) {
     pane.logEl._followBottom = logNearBottom(pane.logEl);
   }, { passive: true });
   splitPanes.push(pane);
-  const reload = () => renderHistory(pane, info.messages || []);
+  const reload = () => renderHistory(pane, info.messages || [], info.messages_offset);
   col.querySelector(".split-close").onclick = () => closeSplitPane(pane);
   col.querySelector(".split-refresh").onclick = async () => {
     // 运行中不刷新：renderHistory 会清空日志，而流式增量还写进已被摘除的
@@ -1410,7 +1410,7 @@ async function openSplitPane(sid, title) {
       const fresh = await request("session.peek_messages", { id: sid });
       pane.title = fresh.title || pane.title;
       col.querySelector(".split-title").textContent = pane.title;
-      renderHistory(pane, fresh.messages || []);
+      renderHistory(pane, fresh.messages || [], fresh.messages_offset);
     } catch (e) { paneNotice(pane, "刷新分屏失败: " + e.message); }
   };
   reload();
@@ -1881,6 +1881,7 @@ function closeSplitPane(pane, opts = {}) {
   pane._historyGen = (pane._historyGen || 0) + 1; // 在途的分批渲染 rAF 作废
   pane._historyAll = null;
   pane._historyStart = 0;
+  pane._historyLoading = false; // 在途的 messages.earlier 翻页回来即作废（gen 已推进）
   pane._jumpSeqGen = (pane._jumpSeqGen || 0) + 1; // 在途的搜索跳转轮询作废
   if (pane._toolCards) pane._toolCards.clear();
   pane.images.length = 0;
@@ -6817,8 +6818,8 @@ async function renderSessionList(query) {
 
 /** 搜索结果 → 跳到命中消息：滚动到目标 seq 的消息并闪烁高亮。
  *
- * 窗口化渲染（只常驻最近 HISTORY_WINDOW 条）后，命中可能落在未加载的
- * 更早区间：先看当前已画节点，没有就按批「加载更早的消息」向前补画，
+ * 历史窗口化（后端只下发尾部窗口，更早的经 messages.earlier 翻页）后，命中
+ * 可能落在未加载的更早区间：先看当前已画节点，没有就按批「加载更早的消息」向前补画，
  * 直到目标出现或到底（补画上线防止极端会话里长循环）。消息画出来后
  * 再滚进视口居中并加 .msg-hit-flash 闪一下，用户立刻看得到落点。
  *
@@ -6841,14 +6842,15 @@ function jumpToMessageSeq(tab, seq, opts = {}) {
     const el = tab.logEl.querySelector(`.msg[data-seq="${seq}"]`);
     if (el) { paintJumpTarget(tab, el, opts); return; }
     // 没画到：可能 (a) 历史还在异步拉取，(b) 命中在窗口外（更早区间）。
-    // (b) 有「加载更早」按钮时点它补一批；(a) 没有按钮就再等等。
+    // (b) 有「加载更早」按钮时点它经 messages.earlier 补一批（在途翻页复用
+    // 同一 Promise，不会重复发请求）；(a) 没有按钮就再等等。
     // 轮数配额防极端会话里无限补画（每轮 HISTORY_CHUNK 条）。
     const more = tab.logEl.querySelector(".history-more");
     if (more && tab._historyStart > 0) {
+      if (tab._historyLoading) { setTimeout(attempt, 60); return; } // 翻页在途：等下一拍
       tab._jumpPreloadRounds += 1;
       if (tab._jumpPreloadRounds <= MESSAGE_JUMP_MAX_PRELOAD_ROUNDS) {
-        loadEarlierHistory(tab);
-        setTimeout(attempt, 0); // loadEarlierHistory 是同步补画，下一拍就能找到
+        loadEarlierHistory(tab).then(() => setTimeout(attempt, 0)); // 画完下一拍再看
         return;
       }
     }
@@ -8757,7 +8759,8 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
       }
     }
     openTabForSession(snap.session.id, snap.session.title,
-                      { withMessages: snap.session.messages || [] });
+                      { withMessages: snap.session.messages || [],
+                        messagesOffset: snap.session.messages_offset });
   } else {
     startNewTab(false); // 启动无可恢复会话：只开欢迎页，不落库（发首条消息时才建）
   }
@@ -10767,23 +10770,33 @@ function decorateFinalMessage(el, tab, getText, seq) {
 // 一次同步画完数千条消息（每条还要跑 markdown / mermaid / 代码高亮）会把主线程
 // 占满，切到大会话时就是一段白屏。分批把工作切成多帧，让浏览器有机会先画出首屏。
 // 阀值以下的短会话仍一次画完（不多付一帧的延迟），行为与以前完全一致。
-// 在分批之上再做窗口化：只常驻渲染最近 HISTORY_WINDOW 条，更早的靠聊天流顶部
-// 的「加载更早的消息」按钮按 HISTORY_CHUNK 向前补画——几千条的会话不再把
-// 全部节点留驻内存（对话内查找只覆盖已加载的窗口，这是取舍）。
+// 在分批之上再做历史窗口化：后端切会话只下发最后 HISTORY_SYNC_LIMIT 条 brief
+// （session.resume / session.peek_messages / boot / session.fork 同一窗口），
+// 更早的靠聊天流顶部的「加载更早的消息」按钮按 HISTORY_CHUNK 经 WS
+// messages.earlier 向前翻页——整会话的 brief 不再一帧进前端、常驻内存。
 const HISTORY_SYNC_LIMIT = 200;
 const HISTORY_CHUNK = 100;
-const HISTORY_WINDOW = 500;
 
-function renderHistory(tab, messages) {
+// messages 只是服务端尾部窗口时，offset 是窗口之前还有多少条（0/缺省 = 没有更早）。
+function historyOffsetOf(payload) {
+  const off = payload && payload.messages_offset;
+  return Number.isFinite(off) && off > 0 ? off : 0;
+}
+
+function renderHistory(tab, messages, offset) {
   const all = messages || [];
   // 渲染代际：期间又渲染过同一条聊天流（切标签 / 重进会话）时，旧的批处理作废
   const gen = (tab._historyGen = (tab._historyGen || 0) + 1);
   tab.logEl.innerHTML = "";
   tab.logEl._followBottom = true; // 重进会话从底部看起，跟随标记一并复位
   tab._toolCards = new Map(); // 在途工具卡随流清空，避免持已分离节点
-  tab._historyAll = all; // 完整消息留在内存里，「加载更早」从这里向前取
-  tab._historyStart = Math.max(0, all.length - HISTORY_WINDOW); // 窗口起点（之前未画）
-  const view = all.slice(tab._historyStart);
+  tab._historyAll = all; // 已加载的窗口（服务端只给了尾部一段）
+  // 窗口起点取服务端口径 messages_offset（被截掉多少条；0/缺省 = 没有更早），
+  // 不再从数组长度推——服务端只给了最后一段，本地没有「全量」可比。
+  // 在途翻页随代际推进一并复位
+  tab._historyStart = Math.max(0, Number.isFinite(offset) ? offset : 0);
+  tab._historyLoading = false;
+  const view = all;
   if (tab._historyStart > 0) addHistoryMoreBtn(tab);
 
   if (view.length <= HISTORY_SYNC_LIMIT) {
@@ -10794,7 +10807,7 @@ function renderHistory(tab, messages) {
 
   // 先同步画头一段：openTabForSession 会在 renderHistory 返回后马上看
   // children.length 判断是否空会话，零节点会被误当成空会话而错误地弹欢迎页
-  // （窗口化后 view 至少是最近 500 条里的头一段，同样满足这一点）
+  // （服务端窗口最多 HISTORY_SYNC_LIMIT 条，这条路径只在翻页累积后重渲染时走到）
   const first = Math.min(HISTORY_CHUNK, view.length);
   paintHistorySlice(tab, view, 0, first);
   tab.logEl.scrollTop = tab.logEl.scrollHeight;
@@ -10814,59 +10827,93 @@ function renderHistory(tab, messages) {
   requestAnimationFrame(step);
 }
 
-// 窗口顶部「加载更早的消息」按钮：向前补画一批，画完保持视口停在原内容上
+// 窗口顶部「加载更早的消息」按钮：经 WS messages.earlier 向前翻一页，
+// 画完保持视口停在原内容上。翻页期间按钮禁用（防重复点击翻重）
 function addHistoryMoreBtn(tab) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "history-more";
   btn.textContent = `加载更早的消息（还有 ${tab._historyStart} 条）`;
-  btn.onclick = () => loadEarlierHistory(tab);
+  btn.onclick = () => { loadEarlierHistory(tab); };
   tab.logEl.appendChild(btn); // 先画按钮再画消息 → 它始终在最顶上
 }
 
 function loadEarlierHistory(tab) {
-  if (!tab || !tab._historyAll || tab._historyStart <= 0) return;
-  const all = tab._historyAll;
-  const start = Math.max(0, tab._historyStart - HISTORY_CHUNK);
-  const log = tab.logEl;
-  const prevHeight = log.scrollHeight, prevTop = log.scrollTop;
-  // addUser/addAssistantDone 一律 appendChild 到流末尾（.chat-log 是纵向 flex，
-  // 追加即在底部）：先记住原内容第一个节点，画完把这批新节点搬到「加载更早」
-  // 按钮之后、原内容之前，才是真正的顶部插入——否则更早的消息会画到新消息下面
-  const btn = log.querySelector(".history-more");
-  const firstOld = btn ? btn.nextSibling : log.firstElementChild;
-  const prevCount = log.children.length;
-  paintHistorySlice(tab, all, start, tab._historyStart);
-  const added = Array.prototype.slice.call(log.children, prevCount);
-  for (const node of added) log.insertBefore(node, firstOld);
-  tab._historyStart = start;
-  // 内容插在顶部：滚动位置按新增高度下移补偿，视口里看到的内容不动
-  log.scrollTop = prevTop + (log.scrollHeight - prevHeight);
-  attachHistoryOps(tab); // 补画进来的用户消息也要挂复制/编辑（attachMsgOps 幂等）
-  // 对话内查找开着且搜过词：补画进来的消息也纳入命中（否则用户点了「加载更早」
-  // 也搜不到刚加载的内容，与查找条的“仅已加载”备注对不上）。这里不重走
-  // paintFindHit 的 scrollIntoView——用户正在看的是刚补画的更早内容，
-  // 跳回第一条命中会把他拽走；只更新计数与高亮态。
-  const findBar = document.getElementById("find-bar");
-  if (tab === activeTab && findBar && !findBar.classList.contains("hidden")) {
-    const inp = document.getElementById("find-input");
-    const q = inp ? inp.value.trim() : "";
-    if (q) {
-      const keep = findIdx;
-      runFind(q);
-      findIdx = findHits.length ? Math.min(Math.max(0, keep), findHits.length - 1) : -1;
-      const count = document.getElementById("find-count");
-      if (count) {
-        findHits.forEach((m, i) => m.classList.toggle("cur", i === findIdx));
-        count.textContent = (findHits.length ? `${findIdx + 1}/${findHits.length}` : "0/0")
-          + findCoverageNote(tab);
+  if (!tab || !tab._historyAll || tab._historyStart <= 0) return Promise.resolve();
+  // 在途翻页直接复用同一个 Promise：重复点击 / 搜索跳转轮询不会发出重复请求
+  if (tab._historyLoading && tab._historyWait) return tab._historyWait;
+  tab._historyLoading = true;
+  const btn = tab.logEl.querySelector(".history-more");
+  if (btn) btn.disabled = true;
+  const gen = tab._historyGen || 0; // 期间 renderHistory 重跑则本次结果作废
+  const oldest = tab._historyAll[0];
+  const beforeSeq = oldest && oldest.seq != null ? oldest.seq : 0;
+  tab._historyWait = (async () => {
+    let r;
+    try {
+      r = await request("messages.earlier", {
+        session_id: tab.sid, before_seq: beforeSeq, limit: HISTORY_CHUNK,
+      });
+    } catch (e) {
+      addNotice("加载更早的消息失败: " + e.message);
+      return;
+    } finally {
+      tab._historyLoading = false;
+      const b = tab.logEl && tab.logEl.querySelector(".history-more");
+      if (b) b.disabled = false;
+    }
+    if (gen !== (tab._historyGen || 0)) return; // 已被重渲染取代
+    const page = (r && r.messages) || [];
+    const offset = historyOffsetOf(r);
+    if (!page.length) {
+      // 更早的没有了（或 seq 边界已到底）：收掉按钮
+      tab._historyStart = 0;
+      if (btn && btn.isConnected) btn.remove();
+      return;
+    }
+    const all = page.concat(tab._historyAll);
+    tab._historyAll = all;
+    const log = tab.logEl;
+    const prevHeight = log.scrollHeight, prevTop = log.scrollTop;
+    // addUser/addAssistantDone 一律 appendChild 到流末尾（.chat-log 是纵向 flex，
+    // 追加即在底部）：先记住原内容第一个节点，画完把这批新节点搬到「加载更早」
+    // 按钮之后、原内容之前，才是真正的顶部插入——否则更早的消息会画到新消息下面
+    const moreBtn = log.querySelector(".history-more");
+    const firstOld = moreBtn ? moreBtn.nextSibling : log.firstElementChild;
+    const prevCount = log.children.length;
+    paintHistorySlice(tab, all, 0, page.length);
+    const added = Array.prototype.slice.call(log.children, prevCount);
+    for (const node of added) log.insertBefore(node, firstOld);
+    tab._historyStart = offset;
+    // 内容插在顶部：滚动位置按新增高度下移补偿，视口里看到的内容不动
+    log.scrollTop = prevTop + (log.scrollHeight - prevHeight);
+    attachHistoryOps(tab); // 补画进来的用户消息也要挂复制/编辑（attachMsgOps 幂等）
+    // 对话内查找开着且搜过词：补画进来的消息也纳入命中（否则用户点了「加载更早」
+    // 也搜不到刚加载的内容，与查找条的“仅已加载”备注对不上）。这里不重走
+    // paintFindHit 的 scrollIntoView——用户正在看的是刚补画的更早内容，
+    // 跳回第一条命中会把他拽走；只更新计数与高亮态。
+    const findBar = document.getElementById("find-bar");
+    if (tab === activeTab && findBar && !findBar.classList.contains("hidden")) {
+      const inp = document.getElementById("find-input");
+      const q = inp ? inp.value.trim() : "";
+      if (q) {
+        const keep = findIdx;
+        runFind(q);
+        findIdx = findHits.length ? Math.min(Math.max(0, keep), findHits.length - 1) : -1;
+        const count = document.getElementById("find-count");
+        if (count) {
+          findHits.forEach((m, i) => m.classList.toggle("cur", i === findIdx));
+          count.textContent = (findHits.length ? `${findIdx + 1}/${findHits.length}` : "0/0")
+            + findCoverageNote(tab);
+        }
       }
     }
-  }
-  if (btn) {
-    if (start <= 0) btn.remove();
-    else btn.textContent = `加载更早的消息（还有 ${start} 条）`;
-  }
+    if (moreBtn) {
+      if (offset <= 0) moreBtn.remove();
+      else moreBtn.textContent = `加载更早的消息（还有 ${offset} 条）`;
+    }
+  })();
+  return tab._historyWait;
 }
 
 // 把 messages[start:end) 画进当前聊天流（调用方负责 withTab 路由与滚动位置）。
@@ -11023,7 +11070,8 @@ async function msgFork(tab, seq) {
   if (tab.running) { addNotice("等当前轮结束再操作"); return; }
   try {
     const r = await request("session.fork", { id: tab.sid, seq: seq || undefined });
-    openTabForSession(r.id, r.title, { withMessages: r.messages || [] });
+    openTabForSession(r.id, r.title, { withMessages: r.messages || [],
+                                       messagesOffset: r.messages_offset });
     addNotice(`已分叉新会话（复制 ${r.copied} 条消息），原会话不受影响`);
     refreshSessions();
   } catch (e) {

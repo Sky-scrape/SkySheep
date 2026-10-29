@@ -113,7 +113,10 @@ def test_diff_and_pad2_deduplicated():
 
 def test_history_windowing_keeps_first_sync_paint():
     js = read_app_bundle()
-    assert "HISTORY_WINDOW" in js, "缺少历史窗口常驻上限"
+    # 服务端窗口化（2026-10）：切会话只收尾部窗口，「加载更早」经 WS
+    # messages.earlier 翻页——窗口起点取服务端 messages_offset，不再本地推
+    assert "HISTORY_SYNC_LIMIT" in js and "HISTORY_CHUNK" in js
+    assert '"messages.earlier"' in js and "messages_offset" in js
     assert "加载更早的消息" in js and "function loadEarlierHistory" in js
     # 首段同步画约束：openTabForSession 返回后立刻看 children.length 判空会话，
     # renderHistory 必须在返回前同步画出至少一个节点——这条注释与逻辑不许被窗口化冲掉
@@ -121,8 +124,10 @@ def test_history_windowing_keeps_first_sync_paint():
     assert "paintHistorySlice(tab, view, 0, first)" in js
     # 「加载更早」必须顶部插入：addUser/addAssistantDone 一律 appendChild 到流末尾，
     # 补画后要把新节点搬回按钮之后、原内容之前，否则更早的消息倒序画在新消息下面
-    assert "const firstOld = btn ? btn.nextSibling : log.firstElementChild" in js
+    assert "const firstOld = moreBtn ? moreBtn.nextSibling : log.firstElementChild" in js
     assert "log.insertBefore(node, firstOld)" in js
+    # 翻页防抖：在途请求复用同一个 Promise，重复点击不重复发
+    assert "tab._historyLoading" in js and "tab._historyWait" in js
     css = read_static("app.css")
     assert ".history-more" in css
 

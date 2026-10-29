@@ -626,6 +626,17 @@ def _strip_image_blocks(history: list[Message]) -> list[Message]:
     return out
 
 
+# ---- 大会话历史窗口化（切会话/恢复/分叉/boot 的 messages 只下发尾部窗口） ----
+# 与前端 app.js 的 HISTORY_SYNC_LIMIT / HISTORY_CHUNK 同值——两层各自定义，
+# 不跨层 import（前端零构建无模块边界，后端也不该依赖前端常量）。
+# 此前 5000 条会话一帧下发全部 brief（实测 176ms 组装 + 3.4MB WS 载荷），窗口化
+# 后单帧成本与 HISTORY_SYNC_LIMIT 恒定；更早的历史由前端经 messages.earlier 按
+# HISTORY_CHUNK 向前翻页，单页上限 HISTORY_EARLIER_MAX 防滥用。
+HISTORY_SYNC_LIMIT = 200
+HISTORY_CHUNK = 100
+HISTORY_EARLIER_MAX = 500
+
+
 def _msg_brief(m: Message) -> dict:
     """历史消息的轻量 JSON（前端渲染历史用）：role + 文本 + 图片占位；工具轮略。
 
@@ -667,6 +678,17 @@ def _msg_brief(m: Message) -> dict:
         "duration_ms": getattr(m, "duration_ms", 0),
         "estimate": getattr(m, "estimate", None),
     }
+
+
+def _window_briefs(ua: list[Message]) -> tuple[list[dict], int, int]:
+    """全量 user/assistant 列表就地窗口化：返回 (尾部 briefs, 总数, 窗口前条数)。
+
+    resume 路径的历史已为 runtime 全量装配（模型上下文需要，省不掉），回包
+    下发时就地切片即可，不必再回库查一遍窗口。offset 语义与 store.load_messages_window
+    一致：窗口之前还有多少条 user/assistant（0 = 已经是最早）。"""
+    total = len(ua)
+    start = max(0, total - HISTORY_SYNC_LIMIT)
+    return [_msg_brief(m) for m in ua[start:]], total, start
 
 
 
@@ -1987,12 +2009,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         )
         n = await self.store.copy_messages_between(sid, new_sess.id, seq)
         await self.store.touch(new_sess.id)
-        msgs = await self.store.load_messages(new_sess.id)
+        # 克隆会话可能很大（源会话整体复制）：回包同样只下发尾部窗口，前端凭
+        # messages_offset 继续经 messages.earlier 向前翻页
+        msgs, total, offset = await self.store.load_messages_window(
+            new_sess.id, limit=HISTORY_SYNC_LIMIT)
         return {
             "id": new_sess.id,
             "title": new_sess.title,
             "copied": n,
-            "messages": [_msg_brief(m) for m in msgs if m.role in ("user", "assistant")],
+            "messages": [_msg_brief(m) for m in msgs],
+            "messages_total": total,
+            "messages_offset": offset,
         }
 
     async def resume_session(self, session_id: str) -> dict:
@@ -2004,9 +2031,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             pass
         rt = await self._get_runtime(session_id)
         msgs = await self._reload_agent_history(rt.agent, session_id)
+        # runtime 历史仍全量装配（模型上下文需要）；回包只下发尾部窗口，
+        # 更早的由前端经 messages.earlier 翻页（大会话切标签不再整包下发）
+        briefs, total, offset = _window_briefs(
+            [m for m in msgs if m.role in ("user", "assistant")])
         return {
             "id": sess.id, "title": sess.title, "summary": sess.summary,
-            "messages": [_msg_brief(m) for m in msgs if m.role in ("user", "assistant")],
+            "messages": briefs,
+            "messages_total": total,
+            "messages_offset": offset,
         }
 
     async def session_model_switch(self, session_id: str, name: str, model: str) -> dict:
@@ -2184,11 +2217,58 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             or sess.project_id == cur_pid
             or sess.project_id == await self._remote_project_id(ensure=False)
         )
-        msgs = await self.store.load_messages(session_id)
+        msgs, total, offset = await self.store.load_messages_window(
+            session_id, limit=HISTORY_SYNC_LIMIT)
         return {
             "id": sess.id, "title": sess.title, "summary": sess.summary,
             "interactive": interactive,
-            "messages": [_msg_brief(m) for m in msgs if m.role in ("user", "assistant")],
+            "messages": [_msg_brief(m) for m in msgs],
+            "messages_total": total,
+            "messages_offset": offset,
+        }
+
+    async def session_messages_earlier(self, params: dict, local: bool = True) -> dict:
+        """messages.earlier：大会话历史窗口化的向前翻页半边。
+
+        前端打开会话只拿到最后 HISTORY_SYNC_LIMIT 条 brief（session.resume /
+        session.peek_messages / boot / session.fork 同此窗口），点「加载更早」
+        凭已加载最旧一条的 seq（before_seq，不含）向前翻一页。归属口径与
+        peek_session_messages 完全一致：本机界面（local=True）按 id 直查、跨
+        项目可读——历史窗口是分屏列的常规阅读面；远程客户端（local=False）
+        走 _get_owned_session 的当前项目口径，历史内容是枚举面，不向远程放开
+        跨项目，越权报「session not found」不给探测区分信号。
+
+        limit 缺省 HISTORY_CHUNK（与前端每页份量同值），上限
+        HISTORY_EARLIER_MAX 防滥用；返回页升序、与 session.open 同 _msg_brief
+        形状，附 messages_total / messages_offset / has_more（offset>0 即还有
+        更早的，前端据此决定「加载更早」按钮去留）。"""
+        sid = str(params.get("session_id", "") or "")
+        if local:
+            sess = await self.store.get_session(sid)
+            if sess is None:
+                raise RuntimeError("session not found: " + sid)
+        else:
+            sess = await self._get_owned_session(sid)
+        if params.get("before_seq") is None:
+            raise RuntimeError("缺少 before_seq（已加载最旧一条的 seq）")
+        try:
+            before_seq = int(params["before_seq"])
+        except (TypeError, ValueError):
+            raise RuntimeError("before_seq 必须是整数") from None
+        raw_limit = params.get("limit")
+        try:
+            limit = int(raw_limit) if raw_limit is not None else HISTORY_CHUNK
+        except (TypeError, ValueError):
+            raise RuntimeError("limit 必须是整数") from None
+        limit = max(1, min(limit, HISTORY_EARLIER_MAX))
+        msgs, total, offset = await self.store.load_messages_window(
+            sid, before_seq=before_seq, limit=limit)
+        return {
+            "session_id": sess.id,
+            "messages": [_msg_brief(m) for m in msgs],
+            "messages_total": total,
+            "messages_offset": offset,
+            "has_more": offset > 0,
         }
 
     # ---- 对话主流程 ----
@@ -8120,6 +8200,20 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 open_tabs.append({"id": s.id, "title": s.title})
                 if len(open_tabs) >= self.SESSION_TABS_MAX:
                     break
+        # 活动会话历史同样窗口化：刷新大会话时 boot 不再整包下发（与
+        # session.resume 同款形状——messages 尾窗 + messages_total/messages_offset，
+        # 前端 openTabForSession({withMessages}) 原样走窗口渲染，无感）
+        boot_session: dict | None = None
+        if self.session is not None:
+            msgs, total, offset = await self.store.load_messages_window(
+                self.session.id, limit=HISTORY_SYNC_LIMIT)
+            boot_session = {
+                "id": self.session.id, "title": self.session.title,
+                "summary": getattr(self.session, "summary", ""),
+                "messages": [_msg_brief(m) for m in msgs],
+                "messages_total": total,
+                "messages_offset": offset,
+            }
         return {
             "version": __version__,
             "frozen": self._is_frozen,  # 安装版可应用内一键更新；源码版提示 git pull
@@ -8142,17 +8236,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 }
                 for name, pc in self.cfg.providers.items()
             },
-            "session": (
-                {
-                    "id": self.session.id, "title": self.session.title,
-                    "summary": getattr(self.session, "summary", ""),
-                    "messages": (
-                        [_msg_brief(m) for m in await self.store.load_messages(self.session.id)
-                         if m.role in ("user", "assistant")]
-                        if self.session else []
-                    ),
-                } if self.session else None
-            ),
+            "session": boot_session,
             # 启动恢复标签列表（归属校验后的 sid+标题，按记录序）。只在至少
             # 记录了一张时下发；空列表让前端走原有的「开一张欢迎页」路径
             "instructions_file": (self.instructions_file if local else ""),

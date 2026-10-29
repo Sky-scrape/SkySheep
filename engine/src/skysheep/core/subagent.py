@@ -39,6 +39,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..bgtasks import spawn_bg
 from ..models.base import Provider
 from ..security.gate import Decision, PermissionGate
 from ..textio import write_text_atomic
@@ -699,22 +700,39 @@ class TaskManager:
         rec = self._new_record(agent_type, prompt, session_id=session_id, isolated=isolated)
         if isolated and not self.can_isolate():
             # 与旧行为一致：非 git 仓库在派生时就 fail fast，但此时已建好
-            # 隔离元数据（可在运行记录里如实体现）
-            raise SubagentLimitError("当前工作目录不是 git 仓库，无法隔离派生")
+            # 隔离元数据（可在运行记录里如实体现）。抛错前先收口（审计 L17
+            # 变体 A）：_new_record 已建记录并登记运行中心，直接 raise 会留下
+            # 永停 queued 的幽灵——任务簿把它当活动记录永久保留（_trim_tasks
+            # 不敢裁），运行中心条目永远「排队中」，且 task_id 随异常丢失，
+            # 无人能取消。
+            rec.status = "error"
+            rec.error = "当前工作目录不是 git 仓库，无法隔离派生"
+            self._on_terminal(rec)
+            raise SubagentLimitError(rec.error)
         if self._running_count() >= self._max_concurrent:
             # 并发满员不再直接报错：收进队列，空位出来按序自动开跑
             if len(self._queue) >= TASK_QUEUE_KEEP:
+                # 删任务簿记录前先给运行中心条目落终态（审计 L17 变体 B）：
+                # _run_register 登记的 "subagent-<id>" 无人收口会永远停在
+                # 「排队中」，task_id 随异常丢失后也无法再取消。
+                msg = f"后台排队也已满（{TASK_QUEUE_KEEP} 个），请等运行中的任务完成再派"
+                rec.status = "error"
+                rec.error = msg
+                self._run_sync_state(rec)
                 del self._tasks[rec.id]
-                raise SubagentLimitError(
-                    f"后台排队也已满（{TASK_QUEUE_KEEP} 个），请等运行中的任务完成再派"
-                )
+                raise SubagentLimitError(msg)
             rec.status = "queued"
             self._queue.append(rec)
             self.announce(rec, background=True)
             self._persist()
             return rec.id
-        self.announce(rec, background=True)
+        # 立即开跑的任务在 _launch 置 running 之后再广播（审计 L18）：旧顺序
+        # 读到 TaskRecord 默认的 "queued"，spawned 事件恒带 queued=true，前端
+        # 把立即开跑渲染成「并发已满，已进入排队」。announce 是同步回调，且
+        # create_task 不会同步起跑 _run_background——spawned 仍先于该任务的
+        # 任何过程事件，「派生瞬间绑定直播卡片」的前提不变。
         self._launch(rec)
+        self.announce(rec, background=True)
         return rec.id
 
     def _launch(self, rec: TaskRecord) -> None:
@@ -1048,11 +1066,15 @@ class TaskManager:
             rec.error = "用户取消"
             # 清理是收尾里唯一的 await 点：shield 挡住理论上可能的二次取消
             # （生产入口有防重入 + Task 取消合并，正常到不了这里），保证
-            # worktree 收拾（提交部分改动/移除注册）不被半途打断。即便 shield
-            # 被取消，清理也已作为独立任务继续在后台跑完；外层取消吞掉后
-            # 照走下方 _note_for_next_turn/_on_terminal，收尾不断。
+            # worktree 收拾（提交部分改动/移除注册）不被半途打断。清理任务
+            # 经 spawn_bg 持强引用（bgtasks 项目约定）：shield 即便被二次
+            # 取消打断，内层清理会脱离本协程继续跑，而事件循环对任务只持
+            # 弱引用，无强引用随时可能被 GC——worktree 收尾无声夭折，主仓
+            # 留下悬挂注册。外层取消吞掉后照走下方 _note_for_next_turn/
+            # _on_terminal，收尾不断。
+            cleanup = spawn_bg(self._cleanup_isolated(rec))
             try:
-                await asyncio.shield(self._cleanup_isolated(rec))
+                await asyncio.shield(cleanup)
             except asyncio.CancelledError:
                 pass
         except SubagentRunError as e:

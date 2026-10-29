@@ -8,6 +8,7 @@ import pytest
 
 from skysheep.core.subagent import SubagentGate, TaskManager
 from skysheep.messages import TextBlock, ToolUseBlock
+from skysheep.models.base import ProviderTextDelta
 from skysheep.models.fake import FakeProvider
 from skysheep.security.gate import Decision
 from skysheep.tools import WriteFileTool
@@ -322,6 +323,19 @@ class SlowProvider(FakeProvider):
         yield  # pragma: no cover - 取消后走不到这里
 
 
+class DeltaThenHangProvider(FakeProvider):
+    """先吐一帧正文再挂起：让「spawned 先于过程事件」的顺序可断言。"""
+
+    def __init__(self, scripted: list[list] | None = None) -> None:
+        super().__init__(scripted or [])
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.calls.append(list(messages))
+        yield ProviderTextDelta("先冒一帧")
+        await asyncio.Event().wait()  # 挂起：等外层 cancel 打断
+        yield  # pragma: no cover - 取消后走不到这里
+
+
 async def _wait_status(tasks, task_id, status, timeout=5.0):
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -435,6 +449,41 @@ async def test_background_queue_auto_promotes(tmp_path):
     assert tasks.status(first).status == "cancelled"
     with contextlib.suppress(asyncio.CancelledError):
         await tasks.status(first).asyncio_task
+
+
+async def test_queue_full_reject_terminalizes_run_center_entry(tmp_path, monkeypatch):
+    """L17 变体 B：排队满拒收时，删任务簿记录前先给运行中心条目落终态——
+    否则 "subagent-<id>" 永远停在「排队中」，且 task_id 随异常丢失，无法取消。"""
+    import contextlib
+
+    from skysheep.core import subagent as sub_mod
+    from skysheep.core.runs import RunCenter
+    from skysheep.core.subagent import SubagentLimitError
+
+    tasks = TaskManager(provider_factory=SlowProvider, working_dir=tmp_path, max_concurrent=1)
+    rc = RunCenter(tmp_path / "runs.json")
+    tasks.run_center = rc
+    first = tasks.start_background("explore", "占位")
+    monkeypatch.setattr(sub_mod, "TASK_QUEUE_KEEP", 2)
+    queued = [tasks.start_background("explore", f"排队{i}") for i in range(2)]
+    assert all(tasks.status(t).status == "queued" for t in queued)
+    with pytest.raises(SubagentLimitError, match="排队也已满"):
+        tasks.start_background("explore", "挤不进来")
+    # 任务簿记录已删（不留 queued 幽灵）；运行中心只多出被拒任务一条
+    assert set(tasks._tasks) == {first, *queued}
+    known = {"subagent-" + t for t in (first, *queued)}
+    all_ids = {d["id"] for d in rc.list_runs()}
+    rejected_id = (all_ids - known).pop()
+    run = rc.get(rejected_id)
+    assert run.state == "failed", "被拒任务的运行条目必须落终态，不能永停 queued"
+    assert run.finished_at is not None
+    assert "排队" in (run.error or "")
+    # 收尾：不留挂着的慢任务
+    tasks.cancel_all()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tasks.status(first).asyncio_task
+    assert tasks.status(first).status == "cancelled"
+    assert all(tasks.status(t).status == "cancelled" for t in queued)
 
 
 async def test_run_sync_cancel_leaves_no_zombie(tmp_path):
@@ -693,6 +742,44 @@ async def test_spawn_announce_precedes_stream(tmp_path):
     await _wait_status(tasks, tid, "done")
     sp = [s for s in seen if s["kind"] == "subagent_spawned"]
     assert sp and sp[0]["background"] is True and sp[0]["task_id"] == tid
+
+
+async def test_spawn_announce_queued_flag_reflects_reality(tmp_path):
+    """L18：立即开跑的后台任务 spawned 事件 queued=False；满员进队的才是 True。
+
+    旧实现 announce 在 _launch 置 running 之前读 TaskRecord 默认 status
+    （"queued"），立即开跑的任务被前端渲染成「并发已满，已进入排队」，与
+    实际相反。挪到 _launch 之后，标志与真实状态一致。
+    """
+    import contextlib
+
+    seen: list[dict] = []
+    tasks = TaskManager(
+        provider_factory=DeltaThenHangProvider, working_dir=tmp_path,
+        max_concurrent=1, event_emitter=lambda ev: seen.append(ev),
+    )
+    first = tasks.start_background("explore", "占位开跑")
+    second = tasks.start_background("explore", "满员排队")
+    spawned = {s["task_id"]: s for s in seen if s["kind"] == "subagent_spawned"}
+    assert spawned[first]["queued"] is False, "立即开跑不该带排队标志"
+    assert spawned[second]["queued"] is True, "满员进队该带排队标志"
+
+    # spawned 仍先于该任务的第一条过程事件（重排后依旧，绑定直播卡片的前提）
+    for _ in range(200):
+        if any(s["kind"] == "subagent_event" and s["task_id"] == first for s in seen):
+            break
+        await asyncio.sleep(0.01)
+    idx_spawned = next(i for i, s in enumerate(seen)
+                       if s["kind"] == "subagent_spawned" and s["task_id"] == first)
+    idx_event = next(i for i, s in enumerate(seen)
+                     if s["kind"] == "subagent_event" and s["task_id"] == first)
+    assert idx_spawned < idx_event
+
+    tasks.cancel_all()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tasks.status(first).asyncio_task
+    assert tasks.status(first).status == "cancelled"
+    assert tasks.status(second).status == "cancelled"
 
 
 async def test_turn_note_injected_then_consumed(tmp_path):

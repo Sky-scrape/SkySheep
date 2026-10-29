@@ -150,6 +150,83 @@ async def test_cancelled_isolated_task_cleans_worktree(tmp_path, monkeypatch):
     assert "取消" in note and rec.branch in note
 
 
+class HangingProvider(FakeProvider):
+    """流式挂起不结束的假模型：给「任务运行中被取消」一个稳定的现场。"""
+
+    def __init__(self, scripted: list[list] | None = None) -> None:
+        super().__init__(scripted or [])
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.calls.append(list(messages))
+        await asyncio.Event().wait()  # 永远挂起：等外层 cancel 打断
+        yield  # pragma: no cover - 取消后走不到这里
+
+
+@pytest.mark.skipif(GIT is None, reason="需要 git")
+async def test_double_cancelled_isolated_cleanup_stays_strongly_referenced(tmp_path, monkeypatch):
+    """审计 L19：二次取消打断取消收尾里的 shield 后，内层 worktree 清理任务
+    必须被 spawn_bg 强引用（bgtasks 项目约定）并真实跑完。
+
+    事件循环对任务只持弱引用：旧实现 `asyncio.shield(self._cleanup_isolated(rec))`
+    的内层任务在 shield 被二次取消后脱离外层协程、无强引用，随时可能被 GC——
+    worktree 收尾无声夭折，主仓留下悬挂注册。挂起在清理中间给二次取消留窗口，
+    断言清理协程在册（强持有）→ 放行 → 清理跑完、登记释放、worktree 收干净。
+    """
+    import contextlib
+
+    from skysheep import bgtasks
+
+    _init_repo(tmp_path)
+    tasks = TaskManager(provider_factory=HangingProvider, working_dir=tmp_path)
+    task_id = tasks.start_background("explore", "慢慢调研", isolated=True)
+    rec = tasks.status(task_id)
+    wt = Path(rec.worktree_dir)
+    for _ in range(200):
+        if wt.is_dir():
+            break
+        await asyncio.sleep(0.02)
+    assert wt.is_dir(), "隔离工作区应已建好"
+
+    baseline = bgtasks.pending_count()
+    entered = asyncio.Event()
+    proceed = asyncio.Event()
+    cleanup_done = asyncio.Event()
+    original = tasks._cleanup_isolated
+
+    async def traced_cleanup(r):
+        entered.set()
+        await proceed.wait()  # 挂在清理里：给二次取消留出命中 shield 的窗口
+        await original(r)
+        cleanup_done.set()
+
+    monkeypatch.setattr(tasks, "_cleanup_isolated", traced_cleanup)
+
+    tasks.cancel_task(task_id)  # 第一次取消：进入取消收尾，挂在 traced_cleanup 上
+    await asyncio.wait_for(entered.wait(), 10)
+    rec.asyncio_task.cancel()   # 第二次取消：打断 shield，清理任务脱离外层
+
+    # 清理协程此刻必须被强引用登记（回归点：旧实现不在册，弱引用随时可被 GC）
+    assert bgtasks.pending_count() == baseline + 1
+
+    proceed.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await rec.asyncio_task
+    await asyncio.wait_for(cleanup_done.wait(), 30)
+    for _ in range(200):
+        if bgtasks.pending_count() == baseline:
+            break
+        await asyncio.sleep(0.01)
+    assert bgtasks.pending_count() == baseline, "清理结束后强引用应释放"
+
+    # 二次取消后清理仍真实跑完：worktree 目录与注册都被收拾干净
+    assert not wt.exists(), "取消收尾里的 worktree 清理不得无声夭折"
+    listing = subprocess.run(  # noqa: S603
+        ["git", "worktree", "list"], cwd=tmp_path,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    ).stdout
+    assert str(wt) not in listing
+
+
 async def test_isolated_gate_allows_workdir_writes_denies_commands(tmp_path):
     """IsolatedGate：只读与工作区内写入放行；越界写入与命令执行预拒绝。"""
     gate = IsolatedGate(working_dir=tmp_path)
@@ -194,6 +271,37 @@ async def test_isolated_requires_git_repo(tmp_path):
             tool.args_model(agent_type="task", prompt="x", background=True, isolated=True),
             ToolContext(working_dir=tmp_path, session_id="s1"),
         )
+
+
+async def test_isolated_spawn_failure_terminalizes_record_and_run(tmp_path):
+    """审计 L17 变体 A：非 git 仓库的隔离派生在派生时即失败，失败记录要落
+    error 终态并同步运行中心——不留永停 queued 的幽灵任务簿记录/运行条目
+    （任务簿把 queued 当活动记录永久保留，运行中心条目也无人能取消）。
+
+    直接打 TaskManager API：SpawnAgentTool 在派生前就预检 can_isolate 并
+    报错（record 还没建，见 test_isolated_requires_git_repo），幽灵记录只
+    发生在绕过工具预检的直接派生路径上。
+    """
+    from skysheep.core.runs import RunCenter
+    from skysheep.core.subagent import SubagentLimitError
+
+    tasks = TaskManager(
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]), working_dir=tmp_path,
+    )
+    rc = RunCenter(tmp_path / "runs.json")
+    tasks.run_center = rc
+    with pytest.raises(SubagentLimitError, match="git"):
+        tasks.start_background("task", "x", session_id="s1", isolated=True)
+    recs = list(tasks._tasks.values())
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec.status == "error", "失败记录不得永停 queued（幽灵记录）"
+    assert "git" in (rec.error or "")
+    assert rec.done_event.is_set() and rec.finished_at > 0
+    run = rc.get("subagent-" + rec.id)
+    assert run is not None and run.state == "failed", "运行条目必须同步为 failed"
+    assert run.finished_at is not None
+    assert "git" in (run.error or "")
 
 
 # ---------------------------------------------------------------- 全流程

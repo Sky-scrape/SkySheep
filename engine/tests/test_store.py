@@ -326,6 +326,117 @@ async def test_migrate_logs_real_failures(store, monkeypatch, caplog):
     assert any("旧库迁移失败" in r.getMessage() for r in caplog.records)
 
 
+async def test_migrate_legacy_returns_false_on_column_failure(store, monkeypatch):
+    """补列失败除记 warning 外，还要把「迁移未完成」报给调用方（返回 False），
+    供 connect 决定是否盖 user_version（审计回归：失败路径与盖章路径解耦）。"""
+    # 先制造真实缺列，否则预检后没有 ALTER 可发
+    await store._db.execute("ALTER TABLE snippets DROP COLUMN enabled")
+    await store._db.commit()
+
+    real_execute = store._db.execute
+
+    async def flaky(sql, *args, **kwargs):
+        if isinstance(sql, str) and sql.startswith("ALTER TABLE"):
+            raise RuntimeError("database is locked")
+        return await real_execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(store._db, "execute", flaky)
+    assert await store._migrate_legacy() is False
+
+
+async def test_connect_does_not_stamp_user_version_when_migration_fails(tmp_path, monkeypatch, caplog):
+    """补列失败时 user_version 不盖章：版本号虚标成最新会让下次启动跳过迁移，
+    缺列拖到运行时才以 no such column 暴露。保持旧版本号即保持「迁移未完成」
+    语义，下次启动自然重试；重试成功后版本号照常落定。"""
+    import logging
+    import sqlite3
+
+    from skysheep.session.store import SCHEMA_VERSION
+
+    db = tmp_path / "stamp.db"
+    s1 = await SessionStore(db).connect()
+    await s1.close()
+
+    # 造一座「迁移中途失败过的旧库」：版本号退回 0 + 真实缺列
+    con = sqlite3.connect(db)
+    try:
+        con.execute("PRAGMA user_version = 0")
+        con.execute("ALTER TABLE snippets DROP COLUMN enabled")
+        con.commit()
+    finally:
+        con.close()
+
+    real_migrate = SessionStore._migrate_legacy
+
+    async def failing_migrate(self):
+        # 模拟补列失败（如超 busy_timeout 的 database locked）：warning 可见，
+        # 且如实把「未完成」报给 connect
+        logging.getLogger("skysheep.store").warning(
+            "旧库迁移失败：snippets 补列 enabled 未执行（database is locked）")
+        return False
+
+    monkeypatch.setattr(SessionStore, "_migrate_legacy", failing_migrate)
+    with caplog.at_level(logging.WARNING, logger="skysheep.store"):
+        s2 = await SessionStore(db).connect()
+    try:
+        cur = await s2._db.execute("PRAGMA user_version")
+        assert int((await cur.fetchone())[0]) == 0, "迁移失败时版本号不得虚标为最新"
+        info = await s2._db.execute("PRAGMA table_info(snippets)")
+        assert "enabled" not in {r[1] for r in await info.fetchall()}
+    finally:
+        await s2.close()
+    assert any("不盖章" in r.getMessage() for r in caplog.records)
+
+    # 下次启动：真迁移跑通 → 补列成功、版本号盖章（重试路径仍在）
+    monkeypatch.setattr(SessionStore, "_migrate_legacy", real_migrate)
+    s3 = await SessionStore(db).connect()
+    try:
+        cur = await s3._db.execute("PRAGMA user_version")
+        assert int((await cur.fetchone())[0]) == SCHEMA_VERSION
+        info = await s3._db.execute("PRAGMA table_info(snippets)")
+        assert "enabled" in {r[1] for r in await info.fetchall()}
+    finally:
+        await s3.close()
+
+
+async def test_ensure_remote_project_race_returns_existing_row(store, monkeypatch):
+    """并发首用：SELECT 没看见、INSERT 撞 root_path 的 UNIQUE 约束时，
+    返回已存在的那条而不是让 IntegrityError 冒出去打断这一轮渠道消息处理。"""
+    # 预置「另一条渠道连接已建好」的行（created_at 不同以便识别归属）
+    await store._db.execute(
+        "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
+        (store.REMOTE_PROJECT_PATH, "远程连接", 123.0),
+    )
+    await store._db.commit()
+
+    real_get = store.get_remote_project
+    calls = {"n": 0}
+
+    async def racing_get():
+        # 模拟竞态时序：首查恰在对方提交前发出，没看见那行
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await real_get()
+
+    monkeypatch.setattr(store, "get_remote_project", racing_get)
+    proj = await store.ensure_remote_project()
+    assert proj.root_path == store.REMOTE_PROJECT_PATH
+    assert proj.created_at == 123.0, "应返回已存在的那条，而不是报错或新建"
+    cur = await store._db.execute(
+        "SELECT COUNT(*) FROM projects WHERE root_path = ?", (store.REMOTE_PROJECT_PATH,)
+    )
+    assert (await cur.fetchone())[0] == 1, "库里仍只有一条哨兵项目"
+
+
+async def test_ensure_remote_project_creates_once_when_absent(store):
+    """常规路径回归：哨兵项目不存在时建一次，重复调用幂等。"""
+    assert await store.get_remote_project() is None
+    p1 = await store.ensure_remote_project()
+    p2 = await store.ensure_remote_project()
+    assert p1.id == p2.id == (await store.get_remote_project()).id
+
+
 # ---- F18：全新库 schema 直连即含全部迁移列（不再依赖 ALTER 补列） ----
 
 

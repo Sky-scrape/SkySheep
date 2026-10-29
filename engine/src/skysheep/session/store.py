@@ -931,7 +931,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         # 滚动备份要在连接建立、WAL checkpoint 之后做（数据才完整），见 _rolling_backup
         await self._rolling_backup(existed)
         await self._db.executescript(SCHEMA)
-        await self._migrate_legacy()
+        migrated = await self._migrate_legacy()
         if db_version < SCHEMA_VERSION:
             if existed:
                 # 版本升格前先留一份 pre-migrate 备份：迁移不可逆（补列只进不退），
@@ -942,7 +942,16 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                     await self._pre_migrate_backup()
                 except Exception as e:  # noqa: BLE001
                     logger.warning("迁移前备份失败（不影响启动）：%s", e)
-            await self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            if migrated:
+                await self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            else:
+                # 补列失败时不盖版本号：user_version 宣称迁移完成而实际列缺失，
+                # 只会把问题推迟到运行时 no such column。保持旧版本号即保持
+                # 「迁移未完成」语义，下次启动自然重试补列（迁移幂等）。
+                logger.warning(
+                    "旧库迁移未全部完成，user_version 保持 %d 不盖章（下次启动重试迁移）",
+                    db_version,
+                )
         await self._db.commit()
         # M16：共享连接套上瞬时锁失败重试壳（_SharedConnRetry）。放在全部
         # 连接级 pragma / row_factory 设置之后——壳只代理 execute / executemany，
@@ -965,13 +974,16 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             target.unlink()
         await asyncio.to_thread(_snapshot_or_copy, self.path, target)
 
-    async def _migrate_legacy(self) -> None:
-        """旧库迁移：缺列才补列 + 清理历史上的重复索引。
+    async def _migrate_legacy(self) -> bool:
+        """旧库迁移：缺列才补列 + 清理历史上的重复索引。返回列迁移是否全部成功。
 
         补列先按 PRAGMA table_info 逐表收集已有列，只对缺失的列发 ALTER；
         非「列已存在」的故障（disk I/O error / database locked 等）不再静默
         吞掉，记 warning 暴露出来——缺列的库此前要拖到运行时 INSERT 才报错，
-        很难排查。
+        很难排查。补列失败时返回 False，调用方（connect）据此不把 user_version
+        盖到最新：版本号宣称迁移完成而列缺失，等于把问题推迟到运行时
+        no such column；留着旧版本号，下次启动自然重试补列（按 PRAGMA 收
+        缺列，幂等）。重复索引清理失败只影响写放大，不阻塞版本盖章。
         """
         assert self._db
         tables = sorted({table for table, _ in _COLUMN_MIGRATIONS})
@@ -979,6 +991,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         for table in tables:
             cur = await self._db.execute(f"PRAGMA table_info({table})")
             existing[table] = {row[1] for row in await cur.fetchall()}
+        columns_ok = True
         for table, ddl in _COLUMN_MIGRATIONS:
             columns = existing.get(table)
             if not columns:
@@ -989,6 +1002,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             try:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
             except Exception as e:  # noqa: BLE001 - 单列失败不拦启动，但要可见
+                columns_ok = False
                 logger.warning("旧库迁移失败：%s 补列 %s 未执行（%s）", table, column, e)
         # messages 一度并存两个定义完全相同的索引（idx_messages_session 与
         # idx_messages_session_seq），最大的表写放大与存储双倍；SCHEMA 只保留
@@ -997,6 +1011,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             await self._db.execute("DROP INDEX IF EXISTS idx_messages_session")
         except Exception as e:  # noqa: BLE001 - 清理失败不影响功能，但要可见
             logger.warning("旧库迁移失败：重复索引 idx_messages_session 未清理（%s）", e)
+        return columns_ok
 
     # ---- 全文搜索索引（messages_fts） ----
 
@@ -1232,16 +1247,30 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
 
         渠道对话与桌面上的工作目录无关（工作目录是远程设备的），不落到当前
         项目或快聊里。启动不再无条件建：删除后侧栏不再出现，渠道再用时
-        经本方法幂等重建（多渠道并发调用也只建一条）。"""
+        经本方法幂等重建。多渠道并发调用也只建一条：SELECT→INSERT 之间
+        另一条渠道可能抢先建好，INSERT 撞 root_path 的 UNIQUE 约束时重查
+        返回已存在的那条，而不是让这一轮渠道消息处理失败（IntegrityError
+        不属于 _SharedConnRetry 的瞬时锁重试范围，必须在这里自己接住）。"""
+        assert self._db
+        for _ in range(3):
+            proj = await self.get_remote_project()
+            if proj:
+                return proj
+            try:
+                await self._db.execute(
+                    "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
+                    (self.REMOTE_PROJECT_PATH, "远程连接", time.time()),
+                )
+                await self._db.commit()
+            except sqlite3.IntegrityError:
+                # 并发首用撞了 UNIQUE：回滚清掉失败语句可能残留的事务状态，
+                # 下一轮重查拿已存在的那条；行「刚建好又被删」的极端时序
+                # 也在重试里覆盖。
+                await self._db.rollback()
         proj = await self.get_remote_project()
         if proj:
             return proj
-        await self._db.execute(
-            "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
-            (self.REMOTE_PROJECT_PATH, "远程连接", time.time()),
-        )
-        await self._db.commit()
-        return await self.get_remote_project()
+        raise RuntimeError("远程连接项目多次建查仍未就绪")
 
     async def get_or_create_project(self, root_path: str, name: str = "") -> Project:
         assert self._db

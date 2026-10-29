@@ -6,6 +6,13 @@
 
 ### 修复
 
+- **team.room 的 team_id 轴注释撤掉废弃口径**（第五批评审②）：`server/backend.py`
+  team_room 的 team_id 轴注释仍写「非本会话的团队一律拒绝」——这是 15.2/15.3.3 已撤掉
+  的废弃口径，且与下方自身实现矛盾（完全未知 / 未落库的 team_id 回空不拒绝）。注释改为
+  与 15.2 三态口径逐字一致（活动命中或落库行归属本会话任一放行、库内外来行两证皆无报
+  TeamError、完全未知未落库 id 照 team.log 回空不拒绝），设计文档 §15 引用的三处
+  backend.py 行号锚随注释增行同步 +3 校准。纯注释与文档，零行为改动。
+
 - **常驻复用取会话侧板面加 team_id 归属校验**（第五批评审①）：`_resident_wake_board`
   第 2 优先级「该会话最后一份团队 meta 的 tasks」（`store.last_team_board_tasks`）不校验
   meta.team_id 是否等于登记的 resident.team_id——队伍 A 已收队但常驻未解除、用户同会话

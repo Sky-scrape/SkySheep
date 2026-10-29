@@ -4469,9 +4469,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             }
 
         if team_id:
-            # team_id 轴（T3.2 预留）：归属判定与 team.log 逐字同口径，非本会话
-            # 的团队一律拒绝；判定过了但团队不在册（已收队/重启）回空态——
-            # 频道回放走 team.log，本方法只服务活动团队的首画。
+            # team_id 轴（T3.2 预留）：归属判定沿用 team.log 的三态口径（§15.2
+            # 逐字同款）——活动命中（活动团队 team_id 相等）或落库行归属本会话，
+            # 任一命中即放行；库内存在外来行且两证皆无，按 team.log 同文报
+            # TeamError；完全未知 / 未落库的 team_id 不拒绝——照 team.log 回空
+            # （空结果没有可泄露的内容）。判定过了但团队不在册（已收队/重启）
+            # 同样回空态——频道回放走 team.log，本方法只服务活动团队的首画。
             orch = self._teams.get(sid)
             active_hit = orch is not None and bool(orch.team_id) and orch.team_id == team_id
             rows = (

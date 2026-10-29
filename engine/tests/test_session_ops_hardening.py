@@ -167,7 +167,7 @@ def test_checkpoint_persist_failure_keeps_memory_copy(tmp_path, monkeypatch):
     assert cp is not None
 
     # 内存副本还在：回滚拿得到改前内容（落盘失败不再静默掏空这条检查点）
-    assert store.restore(cp["id"]) == [str(f)]
+    assert store.restore(cp["id"]) == {"restored": [str(f)], "failed": []}
 
 
 # ---- 检查点：删会话要连索引带磁盘目录一起清 ----

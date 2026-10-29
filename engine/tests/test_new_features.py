@@ -426,7 +426,7 @@ def test_checkpoint_store_persists_across_instances(tmp_path):
     with pytest.raises(CheckpointConflictError):
         store2.restore(cp["id"])
     assert f.read_text() == "v2-broken"
-    assert store2.restore(cp["id"], force=True) == [str(f)]
+    assert store2.restore(cp["id"], force=True) == {"restored": [str(f)], "failed": []}
     assert f.read_text() == "v1"
 
 

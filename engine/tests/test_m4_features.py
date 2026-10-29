@@ -275,10 +275,11 @@ async def test_checkpoint_recorder_and_restore(tmp_path):
         store.restore(cp["id"])
     assert sorted(ei.value.conflicts) == sorted([str(f), str(new_file)])
     assert f.read_text(encoding="utf-8") == "v3", "冲突时磁盘未被触碰"
-    files = store.restore(cp["id"], force=True)
+    out = store.restore(cp["id"], force=True)
     assert f.read_text(encoding="utf-8") == "v1"
     assert not new_file.exists(), "新建文件回滚 = 删除"
-    assert sorted(files) == sorted(cp["paths"])
+    assert sorted(out["restored"]) == sorted(cp["paths"])
+    assert out["failed"] == []
 
     with pytest.raises(KeyError):
         store.restore("cp999")

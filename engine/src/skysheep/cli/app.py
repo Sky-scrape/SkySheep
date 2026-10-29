@@ -18,11 +18,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 from pathlib import Path
-
-from prompt_toolkit import PromptSession
-from prompt_toolkit.history import FileHistory
-from rich.console import Console
 
 from .. import __version__
 from ..bgtasks import drain_bg_tasks
@@ -56,9 +53,17 @@ from ..tools import ChangeRecorder, ToolRegistry, default_tools
 from ..tools.memory import render_memory_section
 from ..tools.shell import set_child_network
 from ..tools.skill import LoadSkillTool
-from .render import Renderer
 
-console = Console()
+
+@functools.lru_cache(maxsize=1)
+def _console():
+    """控制台惰性单例：rich 全家（render.py 还连带 markdown_it）只在真正要
+    打印时才进内存——桌面启动路径只有横幅/兜底提示这几处用到，REPL 才是
+    大主顾。prompt_toolkit 同理在 ChatApp.setup 里现取。"""
+    from rich.console import Console
+
+    return Console()
+
 
 HELP_TEXT = """\
 命令：
@@ -90,8 +95,10 @@ class ChatApp:
     def __init__(self, args) -> None:
         self.args = args
         self.working_dir = Path(args.directory or ".").resolve()
-        self.console = console
-        self.renderer = Renderer(console)
+        self.console = _console()
+        from .render import Renderer
+
+        self.renderer = Renderer(self.console)
         self.store: SessionStore | None = None
         self.project = None
         self.session = None
@@ -100,7 +107,7 @@ class ChatApp:
         self.provider_name = ""
         self.agent: Agent | None = None
         self.gate = None
-        self.prompt: PromptSession | None = None
+        self.prompt = None  # PromptSession：REPL 模式 setup() 时现建（惰性导入）
         self.mcp: MCPManager | None = None
         self.skills: SkillLoader | None = None
         self.tasks: TaskManager | None = None
@@ -115,28 +122,28 @@ class ChatApp:
         随手回车就默认放行。信任后按项目路径记忆，指纹变了会重新问。
         """
         state = trust.state()
-        console.print(
+        _console().print(
             "[yellow]这个项目自带了会被自动执行的配置：[/yellow]"
         )
         for item in state.get("items", []):
             label = "MCP 服务器" if item.get("kind") == "mcp" else "技能"
             ro = "（其工具自动放行）" if item.get("readonly") else ""
-            console.print(f"  · {label} [bold]{item.get('name')}[/bold]：{item.get('detail')}{ro}")
+            _console().print(f"  · {label} [bold]{item.get('name')}[/bold]：{item.get('detail')}{ro}")
         if state.get("changed"):
-            console.print("[yellow]（之前信任过，但配置已变更，需要重新确认）[/yellow]")
-        console.print(
+            _console().print("[yellow]（之前信任过，但配置已变更，需要重新确认）[/yellow]")
+        _console().print(
             "先不信任也可以照常使用 Agent，只是这些项目自带配置本次不生效。"
         )
         try:
             answer = input("是否信任并启用？（y/N） ").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            console.print("[dim]已跳过（本次不启用项目自带配置）[/dim]")
+            _console().print("[dim]已跳过（本次不启用项目自带配置）[/dim]")
             return False
         if answer in ("y", "yes"):
             trust.grant()
-            console.print("[green]已信任：项目自带配置已启用[/green]")
+            _console().print("[green]已信任：项目自带配置已启用[/green]")
             return True
-        console.print("[dim]未信任：项目自带配置本次不生效（下次打开还会问）[/dim]")
+        _console().print("[dim]未信任：项目自带配置本次不生效（下次打开还会问）[/dim]")
         return False
 
     async def setup(self) -> None:
@@ -224,6 +231,9 @@ class ChatApp:
         self.agent.set_system(self._compose_system())
 
         history_file = config_path().parent / "cli-history"
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import FileHistory
+
         self.prompt = PromptSession(history=FileHistory(str(history_file)))
 
         # 恢复会话或新建
@@ -574,7 +584,7 @@ def _startup_banner(text: str) -> None:
     打印失败一律静默跳过。
     """
     try:
-        console.print(text)
+        _console().print(text)
     except Exception:  # noqa: BLE001 - 装饰性打印，任何原因失败都不致命
         pass
 
@@ -738,13 +748,13 @@ def _app_cmd(args) -> None:
         try:
             import webview  # pywebview
         except Exception as e:  # noqa: BLE001
-            console.print(f"[yellow]pywebview 不可用（{e}），改用浏览器打开[/]")
+            _console().print(f"[yellow]pywebview 不可用（{e}），改用浏览器打开[/]")
             use_browser = True
 
     if use_browser:
         server, url = _start_backend(args)
         webbrowser.open(url)
-        console.print("[dim]浏览器模式：Ctrl-C 退出[/]")
+        _console().print("[dim]浏览器模式：Ctrl-C 退出[/]")
         try:
             while True:
                 time.sleep(1)
@@ -1064,7 +1074,7 @@ def _run_cmd(args) -> None:
         if result["reply"]:
             print(result["reply"])
         if result.get("error"):
-            console.print("[red]✗ " + result["error"] + "[/]")
+            _console().print("[red]✗ " + result["error"] + "[/]")
     # 退出码：正常收尾 0；出错/被打断/异常中断 1 —— 方便脚本与 CI 判断
     if result.get("error") or result["stop_reason"] != "end_turn":
         raise SystemExit(1)

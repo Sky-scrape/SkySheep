@@ -282,6 +282,13 @@
   `*.old-*`，根级孤儿目录永久留存；`_purge_old_dirs` 现按 PROFILE_DIRS 名单
   （字面前缀，不做 `webview*` 通配）同样扫描根级，并补无内层场景回归测试。
 
+### 变更
+
+- **桌面启动省约 400ms（N2 P2）**：`cli/app.py` 的 prompt_toolkit / rich /
+  markdown_it（REPL 栈）改为真正用到时才导入，`console` 改惰性单例（横幅、
+  浏览器兜底、运行摘要等打印路径不变）；`import skysheep.cli.app` 模块数
+  813→578、墙钟约 1.1s→0.6s。REPL 与桌面路径行为不变。
+
 ## [2.6.2] - 2026-10-26
 
 ### 修复

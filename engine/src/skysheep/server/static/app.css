@@ -3026,6 +3026,14 @@ mark.search-hit-mark {
 }
 .teamroom-card .tc-head { cursor: default; flex-wrap: wrap; padding-bottom: 6px; }
 .teamroom-card .tc-open-room { display: none; } /* 自己就是团队室 */
+/* 窄右面板（~400px）头部可读性（2026-10-29 真实浏览器视觉验收）：副标题
+   基础规则是 flex:1（假想尺寸 0），折行判定永远轮不到它，被按钮行挤成
+   ~54px 宽的逐字竖条。给团队室副标题 200px 的 flex-basis 参与折行——
+   摆得下就留在标题行随空间伸展，塞不下整条折行独占一行；头部按钮禁止
+   文字内折（要折在按钮之间折，「交付」「收队」不竖排）。视口 ≤860px 的
+   副标题整行策略（.teamcard .tc-sub 那组）在其之后声明，行为不变。 */
+.teamroom-card .tc-sub { flex: 1 1 200px; }
+.teamroom-card .tc-head button { white-space: nowrap; }
 /* tcFinish 给终态卡加 .folded：团队室没有折叠语义，正文照常铺开 */
 .teamroom-card.folded .tc-body { display: flex; }
 .teamroom-card .tc-body {
@@ -3044,7 +3052,18 @@ mark.search-hit-mark {
   display: flex; flex: 1; min-height: 120px; max-height: none;
   margin-top: 0; padding-top: 0; border-top: none;
 }
-.teamroom-card .tc-board { display: block; padding: 0 2px 2px; min-height: 0; overflow-y: auto; }
+.teamroom-card .tc-board { display: block; padding: 0 2px 2px; min-height: 0; overflow-y: auto; container: trboard / inline-size; }
+/* 窄右栏看板退单列（2026-10-29 真实浏览器视觉验收）：右栏轨道
+   clamp(220px, 42%, 320px) 在 ~400px 面板下只给 220px，三列各 ~68px，
+   「转待验收」（62px 宽：11px 字号 ×4 字 + 16px 内边距 + 描边）竖排折行。
+   板面自身作命名容器，宽度只随右栏轨道走、与频道宽度解耦；摆不开三列
+   就整板退单列堆叠（工单卡拿全宽，按钮横排）——三列各保住按钮需板面
+   ≥3×72+12+4≈232px，取 260px 留取整余量。容器查询不可用时本条不生效
+   维持三列（与接力页同款兜底）；≤1100px 视口整板已折到频道下方，互不影响。 */
+@container trboard (max-width: 260px) {
+  .teamroom-card .tc-kanban { grid-template-columns: 1fr; }
+  .teamroom-card .tc-col { min-height: 0; }
+}
 /* 窄面板（平板档）：工单板折到频道下方，页签整体恢复滚动 */
 @media (max-width: 1100px) {
   #rp-page-teamroom { overflow-y: auto; }

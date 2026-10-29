@@ -750,6 +750,30 @@ def test_team_room_tab_wiring():
     assert not re.search(r"rgba?\(", seg)
 
 
+def test_team_room_narrow_panel_wiring():
+    """团队室窄面板 CSS（真实浏览器视觉验收扫尾，2026-10-29）：
+    ① ~400px 窄右面板下页签头部 .tc-sub 被按钮行挤成逐字竖条——副标题
+    基础规则 flex:1 假想尺寸 0 抢不到折行，团队室侧给 200px flex-basis
+    参与折行（塞不下整条独占一行），头部按钮禁文字内折；
+    ② 同一面板下右栏 220px 里工单板三列各 ~68px、「转待验收」竖排折行——
+    工单板自身设命名容器，板面摆不开三列（<260px）时看板退单列堆叠，
+    列高约束同步放开（与 ≤860px 视口单列档同款处理）。"""
+    css = read_static("app.css")
+
+    # ① 头部：副标题 flex-basis 折行 + 按钮不竖排（按钮文字内折是竖排窄条的
+    #    另一半成因；视口 ≤860px 的 .teamcard .tc-sub 整行档在其后声明不受影响）
+    assert ".teamroom-card .tc-sub { flex: 1 1 200px; }" in css
+    assert ".teamroom-card .tc-head button { white-space: nowrap; }" in css
+
+    # ② 板面是命名容器（宽度只随右栏轨道走），窄板面看板退单列
+    assert (".teamroom-card .tc-board { display: block; padding: 0 2px 2px; "
+            "min-height: 0; overflow-y: auto; container: trboard / inline-size; }") in css
+    i = css.index("@container trboard (max-width: 260px)")
+    seg = css[i:i + 300]
+    assert ".teamroom-card .tc-kanban { grid-template-columns: 1fr; }" in seg
+    assert ".teamroom-card .tc-col { min-height: 0; }" in seg
+
+
 def test_team_room_badge_backlog_wiring():
     """团队室未读 badge 三处补线（第五批评审，§15.4 的回归与死角）：
     ① 后台定稿按 team_id+seq 直接对水位记账、不依赖挂卡（空态/错误态/后台

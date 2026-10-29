@@ -87,6 +87,38 @@ def from_lf(text: str, newline: str) -> str:
     return to_lf(text).replace("\n", newline)
 
 
+def _looks_like_bomless_utf16(data: bytes) -> bool:
+    """无 BOM UTF-16 的廉价形态特征（审计低危 L11）。
+
+    GB18030 的「解码 → 再编码」对合法序列是双射，round-trip 甄别不了
+    「其实是 UTF-16 却被 GB18030 解成功」：纯中文的 UTF-16LE 每个码元
+    两字节都非零（CJK 基本区 U+4E00–U+9FFF 的高位字节在 0x4E–0x9F），
+    不含 NUL 走不到二进制判定，会被以 certain=True 当成 GB18030 交出——
+    模型看到乱码还被当作确凿编码，edit 按乱码基准改写。两条廉价特征：
+
+    - 零字节占比显著：UTF-16 的 ASCII 码元高字节为 0（含换行/空格的
+      文本都命中）。注意调用位置在 NUL 二进制判定之后，这类数据早已
+      被接走，此条在当前调用点是休眠保险，保留以让特征自洽；
+    - 码元高字节带：纯 CJK 的 UTF-16 无任何零字节，但码元高字节集中
+      在 0x4E–0x9F（LE 在奇数位、BE 在偶数位）；GB2312 汉字的第二
+      字节惯例在 0xA1–0xFE，两段不重叠，≥75% 即判为 UTF-16 形态。
+      误伤面：数据还必须**不是**合法 UTF-8 且恰能构成合法 GB18030
+      序列——GB2312 汉字第二字节恒 ≥0xA1，不会落进判定带。
+
+    命中后由调用方把编码降为「不确定」（certain=False）：读仍以替换
+    字符展示，写被拒绝——宁可拒绝也不能按乱码基准改写。
+    """
+    if len(data) < 8 or len(data) % 2 != 0:
+        return False
+    if data.count(b"\x00") * 8 >= len(data):  # 零字节占比 ≥ 1/8
+        return True
+    for high in (data[1::2], data[0::2]):  # LE 高位在奇数位，BE 在偶数位
+        band = sum(1 for b in high if 0x4E <= b < 0xA0)
+        if band * 4 >= len(high) * 3:  # ≥ 75% 落在 CJK 高字节带
+            return True
+    return False
+
+
 def sniff(data: bytes) -> tuple[str | None, bool, bool]:
     """探测字节串的编码。
 
@@ -97,6 +129,9 @@ def sniff(data: bytes) -> tuple[str | None, bool, bool]:
     - 否则按 utf-8 → gb18030 逐个严格解码，并用 **round-trip 校验**
       （``text.encode(enc) == data``）确认，避免 GB18030 把别的编码
       「解成功」却对不上原文；
+    - gb18030 命中前先过无 BOM UTF-16 形态甄别（``_looks_like_bomless_utf16``）：
+      GB18030 对它是双射误配，round-trip 甄别不了，降为 ``(None, False, False)``
+      走「拒绝写回」路径而不是交出 certain=True 的乱码基准；
     - 全部失败时 ``(None, False, False)``，调用方按替换字符展示并拒绝写回。
     """
     for bom, enc in BOM_ENCODINGS:
@@ -107,6 +142,8 @@ def sniff(data: bytes) -> tuple[str | None, bool, bool]:
     if not data:
         return DEFAULT_ENCODING, True, False
     for enc in FALLBACK_ENCODINGS:
+        if enc == "gb18030" and _looks_like_bomless_utf16(data):
+            return None, False, False
         try:
             text = data.decode(enc)
         except UnicodeDecodeError:
@@ -213,6 +250,21 @@ def write_bytes_atomic(path: Path, data: bytes, *, sync: bool = True) -> None:
         raise
 
 
+def _posix_keep_mode(path: Path) -> int | None:
+    """POSIX：覆盖已有文件时返回要保留的原权限位；新建文件返回 None。
+
+    新建不再还原「普通 umask 语义」——旧实现用 ``os.umask(0o022) 再
+    恢复`` 探测 umask，而 umask 是进程全局属性，探测窗口内其他线程
+    新建的文件会拿到错误权限位（审计低危 L12）。改为不探测：新建文件
+    保持 mkstemp 建出的 0600，宁可严格私有。Windows 走目录 ACL 继承，
+    不调用本函数。
+    """
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return None
+
+
 def write_text_file(path: Path, text: str, encoding: str, newline: str) -> None:
     """按目标编码与行尾符落盘（先建父目录）。可能抛 OSError / UnicodeEncodeError。
 
@@ -235,16 +287,12 @@ def write_text_file(path: Path, text: str, encoding: str, newline: str) -> None:
             f.write(data)
             _fsync_before_replace(f, sync=True)
         if os.name != "nt":
-            # POSIX：mkstemp 建出的文件是 0600，替换后会带着这个权限位。
-            # 覆盖已有文件时保留原权限位；新建文件还原成普通 umask 语义。
+            # POSIX：覆盖已有文件时保留原权限位；新建文件保持 mkstemp 的
+            # 0600（不做 umask 探测，见 _posix_keep_mode）。
             # Windows 走目录 ACL 继承，不需要处理。
-            try:
-                mode = stat.S_IMODE(path.stat().st_mode)
-            except OSError:
-                umask = os.umask(0o022)
-                os.umask(umask)
-                mode = 0o666 & ~umask
-            os.chmod(tmp_name, mode)
+            mode = _posix_keep_mode(path)
+            if mode is not None:
+                os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
     except BaseException:
         try:

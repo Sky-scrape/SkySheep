@@ -126,6 +126,44 @@ async def test_write_document_csv_bom_and_rows(tmp_path):
     assert b"13500" in raw
 
 
+async def test_write_document_csv_overwrite_keeps_gb18030_crlf(tmp_path):
+    """审计低危 L13：覆盖 GBK + CRLF 的存量 CSV（中文 Excel「另存为」的
+    默认形态）沿用原编码与行尾，不被静默转成 UTF-8 + LF。"""
+    p = tmp_path / "legacy.csv"
+    p.write_bytes("月份,销售额\r\n1月,12000\r\n".encode("gb18030"))
+    await WriteDocumentTool().run(
+        WriteDocumentArgs(path=str(p), content="月份,销售额\r\n2月,9800"),
+        make_ctx(tmp_path),
+    )
+    raw = p.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")  # 不强加 BOM
+    assert raw.decode("gb18030") == "月份,销售额\r\n2月,9800\r\n"
+
+
+async def test_write_document_csv_overwrite_keeps_utf8_sig_and_lf(tmp_path):
+    p = tmp_path / "bom.csv"
+    p.write_bytes("a,b\n1,2\n".encode("utf-8-sig"))
+    await WriteDocumentTool().run(
+        WriteDocumentArgs(path=str(p), content="a,b\n1,3"), make_ctx(tmp_path)
+    )
+    assert p.read_bytes() == "a,b\n1,3\n".encode("utf-8-sig")
+
+
+async def test_write_document_csv_overwrite_empty_or_uncertain_falls_back(tmp_path):
+    """空文件 / 编码探不出确凿值：回退 utf-8-sig + LF（新建同款，保住
+    「Excel 双击打开中文不乱码」的工具承诺）。"""
+    tool = WriteDocumentTool()
+    empty = tmp_path / "empty.csv"
+    empty.write_bytes(b"")
+    await tool.run(WriteDocumentArgs(path=str(empty), content="x,y\n1,2"), make_ctx(tmp_path))
+    assert empty.read_bytes() == "x,y\n1,2\n".encode("utf-8-sig")
+
+    weird = tmp_path / "weird.csv"
+    weird.write_bytes(b"\x80\x80\x80text")
+    await tool.run(WriteDocumentArgs(path=str(weird), content="x,y\n1,2"), make_ctx(tmp_path))
+    assert weird.read_bytes() == "x,y\n1,2\n".encode("utf-8-sig")
+
+
 async def test_write_document_errors(tmp_path):
     tool = WriteDocumentTool()
     for exc, args in [

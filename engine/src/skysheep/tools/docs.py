@@ -28,6 +28,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ..sanitize import untrusted_data_wrap
+from ..textio import read_text_file, write_text_file
 from .base import (
     ChangeRecorder,
     Safety,
@@ -648,9 +649,24 @@ class WriteDocumentTool(Tool):
                 summary = await asyncio.to_thread(build_xlsx, p, content)
             elif suffix == ".pptx":
                 summary = await asyncio.to_thread(build_pptx, p, content)
-            else:  # .csv：utf-8-sig（带 BOM），Excel 双击打开中文不乱码
+            else:  # .csv：新建走 utf-8-sig（带 BOM），Excel 双击打开中文不乱码
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(content.replace("\r\n", "\n") + "\n", encoding="utf-8-sig")
+                encoding, newline = "utf-8-sig", "\n"
+                if existed:
+                    # 覆盖已有文件沿用原编码与行尾符（与 write_file 同一契约，
+                    # 审计低危 L13）：GBK + CRLF 的存量 CSV（中文 Excel 另存的
+                    # 默认形态）不再被静默转成 UTF-8 + LF。空文件、二进制或
+                    # 编码探不出确凿值时回退 utf-8-sig + LF。content 已 strip，
+                    # 补一个行尾收尾；write_text_file 内部先归一 LF 再按原
+                    # 行尾符展开。探测是全文读盘，CSV 有 check_write_size
+                    # 上限，与原有同步写保持同一量级。
+                    try:
+                        loaded = read_text_file(p)
+                    except OSError:
+                        loaded = None
+                    if loaded is not None and loaded.certain and not loaded.binary and loaded.text:
+                        encoding, newline = loaded.encoding, loaded.newline
+                write_text_file(p, content + "\n", encoding, newline)
                 summary = f"CSV 已生成：{len(content.splitlines())} 行"
         except ToolError:
             raise

@@ -82,6 +82,35 @@ def test_sniff_unknown_encoding_not_certain():
     assert enc is None and not certain and not binary
 
 
+def test_sniff_bomless_utf16_not_claimed_as_gb18030():
+    """审计低危 L11：无 BOM 的 UTF-16 纯中文文本，每个码元两字节都非零、
+    又恰构成合法 GB18030 序列，round-trip 甄别不了——必须降为「不确定」，
+    不得以 certain=True 交出乱码基准（旧实现返回 ('gb18030', True, False)）。"""
+    for enc in ("utf-16-le", "utf-16-be"):
+        data = "中文测试文件内容".encode(enc)
+        assert sniff(data) == (None, False, False), enc
+    loaded = decode_bytes("中文测试文件内容".encode("utf-16-le"))
+    assert not loaded.certain and not loaded.binary
+
+
+def test_sniff_bomless_utf32_never_gb18030_certain():
+    """UTF-32 无 BOM 必含 NUL：走二进制判定（既有行为）。审计要守住的
+    不变量是「绝不能以 gb18030 certain=True 交出」——两种安全结局都不会
+    导致按乱码基准改写。"""
+    for enc in ("utf-32-le", "utf-32-be"):
+        _, certain, _ = sniff("中文测试文件内容".encode(enc))
+        assert certain is False, enc
+
+
+def test_sniff_utf16_guard_spares_real_gb18030():
+    """UTF-16 形态甄别不得误伤真 GB18030：偶数长度、纯中文（GB2312 汉字
+    第二字节惯例 ≥0xA1，与 UTF-16 码元高字节带 0x4E–0x9F 不重叠）、
+    带换行 ASCII 混排的常见文件形态都要照常判成 certain gb18030。"""
+    for s in ("中文测试内容", "第一行内容\n第二行内容\n", "月份,销售额\r\n1月,12000\r\n"):
+        data = s.encode("gb18030")
+        assert sniff(data) == ("gb18030", True, False), s
+
+
 def test_decode_gbk_file_keeps_text(tmp_path):
     p = tmp_path / "gbk.txt"
     p.write_bytes("第一行内容\n第二行内容\n".encode("gbk"))
@@ -739,6 +768,44 @@ def test_write_text_file_replace_failure_keeps_original(tmp_path, monkeypatch):
     monkeypatch.undo()
     assert p.read_text(encoding="utf-8") == "原始内容\n", "失败时旧内容必须原样保留"
     assert [f.name for f in tmp_path.iterdir()] == ["note.txt"]
+
+
+def test_posix_keep_mode_new_file_returns_none(tmp_path):
+    """审计低危 L12：新建文件不做 umask 探测（进程全局属性，探测窗口会
+    污染其他线程的新建文件权限），返回 None 让其保持 mkstemp 的 0600。"""
+    import stat as _stat
+
+    from skysheep.textio import _posix_keep_mode
+
+    assert _posix_keep_mode(tmp_path / "missing.txt") is None
+    # 旧实现会在此处 os.umask(0o022) 往返探测；现实现全程不触碰 umask
+    p = tmp_path / "x.txt"
+    p.write_text("x", encoding="utf-8")
+    assert _posix_keep_mode(p) == _stat.S_IMODE(p.stat().st_mode)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 权限位语义，Windows 不走该分支")
+def test_write_text_file_posix_new_file_keeps_mkstemp_0600(tmp_path):
+    import stat as _stat
+
+    from skysheep.textio import write_text_file
+
+    p = tmp_path / "fresh.txt"
+    write_text_file(p, "内容\n", "utf-8", "\n")
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 权限位语义，Windows 不走该分支")
+def test_write_text_file_posix_overwrite_keeps_original_mode(tmp_path):
+    import stat as _stat
+
+    from skysheep.textio import write_text_file
+
+    p = tmp_path / "doc.txt"
+    p.write_text("old\n", encoding="utf-8")
+    os.chmod(p, 0o644)
+    write_text_file(p, "new\n", "utf-8", "\n")
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o644
 
 
 

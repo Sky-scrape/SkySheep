@@ -565,6 +565,51 @@ async def test_feishu_surfaces_invalid_credentials(tmp_path, home):
     await ch.stop()
 
 
+async def test_feishu_credential_failure_stops_reconnect_loop(tmp_path, home):
+    """凭据同步失败是持久性错误：_run_loop 必须直接退出，不得按退避无限重试
+    （否则每 3→6→…→60 秒重跑一次 config init 向飞书发起验证，永不停止）。"""
+    from skysheep.channels.feishu import FeishuChannel
+
+    cli = _fake_cli(tmp_path, init_ok=False)
+    ch = FeishuChannel({"app_id": "cli_x", "app_secret": "bad", "cli_path": cli}, _noop_msg)
+    calls = []
+    orig_run_cli = ch._run_cli
+
+    def counting_run_cli(*args, **kwargs):
+        calls.append(list(args))
+        return orig_run_cli(*args, **kwargs)
+
+    ch._run_cli = counting_run_cli
+    try:
+        await ch.start()
+        task = ch._task
+        assert task is not None
+        # 循环必须自行终止（而不是挂在退避重连里）；wait_for 超时即回归
+        await asyncio.wait_for(task, timeout=15)
+        assert task.cancelled() is False
+        # 断言放在 stop() 之前：stop 的 event stop --force 也走 _run_cli，会混入计数
+        assert ch._cred_failed is True
+        assert "client secret is invalid" in ch.error
+        assert len(calls) == 1, "凭据失败后必须停住，不得按退避反复重跑 config init"
+    finally:
+        await ch.stop()
+
+
+async def test_feishu_credential_flag_clears_on_restart(tmp_path, home):
+    """用户改好凭据后 restart（重建实例 / start）：失败标志清零，可正常重连。"""
+    from skysheep.channels.feishu import FeishuChannel
+
+    cli = _fake_cli(tmp_path, ready=True, events=())
+    ch = FeishuChannel({"app_id": "cli_x", "app_secret": "good", "cli_path": cli}, _noop_msg)
+    ch._cred_failed = True  # 模拟上一实例残留的持久失败态
+    try:
+        await ch.start()
+        assert ch._cred_failed is False, "start（restart 路径）必须清掉失败标志"
+        assert await asyncio.wait_for(ch.wait_ready(timeout=30), timeout=35)
+    finally:
+        await ch.stop()
+
+
 async def test_feishu_stop_never_started_skips_cli_calls(tmp_path, home):
     """从未启动的渠道 stop() 必须快速返回：manager 对 enabled=False、缺凭据
     没启动成功的适配器也会遍历 stop()，此时不该白跑 event stop --force

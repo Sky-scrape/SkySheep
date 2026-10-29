@@ -646,6 +646,15 @@ class WebFetchTool(Tool):
                         ) as resp:
                             status = resp.status_code
                             headers = dict(resp.headers)
+                            # 状态载体头只由本工具写：对端可注入 x-skysheep-* 头
+                            # 伪造工具注记（如谎报「响应体已截断」——truncated
+                            # 只在真截断时覆写，对端值会残留到 run() 的注记里）。
+                            # 取头后先整前缀清洗，再由下方写入真实状态。
+                            # 注意：此处只动响应头载体，SSRF 校验逻辑不在头里，不受影响。
+                            for key in [
+                                k for k in headers if k.lower().startswith("x-skysheep-")
+                            ]:
+                                del headers[key]
                             charset = _safe_charset(resp.charset_encoding)
                             if status in (301, 302, 303, 307, 308):
                                 break  # 重定向体无意义，不读

@@ -105,6 +105,10 @@ class FeishuChannel(Channel):
         self._reader: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping = False
+        # 凭据同步失败是持久性错误（App ID/Secret 不对不会自愈）：置位后
+        # _run_loop 直接退出，不再按退避反复重跑 config init 向飞书发起验证。
+        # 用户改凭据触发 restart（重建实例后 start）时清零，可正常重连。
+        self._cred_failed = False
         self.connected = False          # 子进程是否已 ready（真的在收事件）
         # 就绪信号：与 connected 翻真同拍置位（见 _consume_once）。供调用方/测试
         # 事件驱动地等就绪，替代「固定 sleep 猜子进程什么时候拉起来」——CI 慢机上
@@ -259,6 +263,7 @@ class FeishuChannel(Channel):
             logger.warning("feishu 未找到 lark-cli，渠道无法启动")
             return
         self._stopping = False
+        self._cred_failed = False  # restart 重建实例走 start：上一轮的失败态不带入
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._run_loop())
 
@@ -331,7 +336,10 @@ class FeishuChannel(Channel):
                 logger.warning("feishu 事件子进程中断：%s", e)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
             self.connected = False
-            if self._stopping:
+            if self._stopping or self._cred_failed:
+                # 凭据同步失败（_consume_once 置位）是持久性错误：退避重连只会
+                # 每 3→6→…→60 秒重跑一次 config init 向飞书发起验证、永不停止，
+                # 与「报错停在这，等用户改配置」的意图相悖——停住，restart 清标志。
                 return
             await asyncio.sleep(delay)
 
@@ -355,7 +363,9 @@ class FeishuChannel(Channel):
         """一次完整的「起子进程 → 读事件流 → 子进程退出」。"""
         self._ready_evt.clear()  # 新一轮重连：就绪信号只代表本轮
         if not await asyncio.to_thread(self._sync_cli_credentials):
-            # 凭据不对就别反复重连了：报错停在这，等用户改配置
+            # 凭据不对就别反复重连了：报错停在这，等用户改配置。
+            # 置持久失败标志让 _run_loop 直接退出（凭据错误不会自愈）。
+            self._cred_failed = True
             raise RuntimeError(self.error or "飞书凭据不可用")
         if self._stopping:
             return

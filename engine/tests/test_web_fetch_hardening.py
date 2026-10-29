@@ -595,3 +595,53 @@ def test_fetch_once_installs_pinning_end_to_end(tmp_path):
         assert body == b"pinned-ok"
     finally:
         srv.shutdown()
+
+
+# ---- 状态载体头清洗：对端不得伪造 x-skysheep-* 注记 ----
+
+
+class _InjectedStateHeadersHandler(BaseHTTPRequestHandler):
+    """对端注入 x-skysheep-* 状态头的桩：伪造「已截断」注记与非法 charset。"""
+
+    log_message = _EchoHeaderHandler.log_message
+
+    def do_GET(self):
+        body = b"plain-body"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-SkySheep-Truncated", "1")
+        self.send_header("X-SkySheep-Charset", "base64")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_fetch_strips_peer_injected_skysheep_state_headers(tmp_path):
+    """对端可注入 x-skysheep-* 头伪造工具的状态载体：_fetch_once 取头后必须
+    先整前缀清洗，再写工具自己的真实状态——truncated 只在真截断时覆写，
+    对端值会残留成「响应体已截断」的假注记（charset 每次覆写，但同口径清掉）。
+    只清洗响应头载体，不碰任何 SSRF 校验逻辑。"""
+    from urllib.parse import urlparse
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _InjectedStateHeadersHandler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        tool = WebFetchTool(allow_private_hosts=True)
+        ctx = ToolContext(working_dir=tmp_path)
+        url = f"http://127.0.0.1:{port}/state"
+        out = asyncio.run(tool.run(WebFetchArgs(url=url), ctx))
+        assert "plain-body" in out
+        assert "已截断" not in out, "对端伪造的截断注记不得进入输出"
+
+        status, headers, body = asyncio.run(
+            tool._fetch_once(url, urlparse(url), ["127.0.0.1"])
+        )
+        assert status == 200
+        assert body == b"plain-body"
+        assert headers.get("x-skysheep-truncated") is None, \
+            "未真截断时不得有 truncated 注记"
+        assert headers.get("x-skysheep-charset") == "utf-8", \
+            "charset 必须是工具自己写的真实值，不是对端注入值"
+    finally:
+        srv.shutdown()

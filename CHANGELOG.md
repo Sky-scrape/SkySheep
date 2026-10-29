@@ -6,6 +6,17 @@
 
 ### 修复
 
+- **常驻复用取会话侧板面加 team_id 归属校验**（第五批评审①）：`_resident_wake_board`
+  第 2 优先级「该会话最后一份团队 meta 的 tasks」（`store.last_team_board_tasks`）不校验
+  meta.team_id 是否等于登记的 resident.team_id——队伍 A 已收队但常驻未解除、用户同会话
+  用同模板重建队伍 B 时，定时触发命中 A 登记、活动团队 team_id 不匹配跳过后落到会话
+  meta，而最后一份 meta 是 B 的板面，会把 B 的板面回放进 A 的频道并在收尾回写固化成
+  A 的恢复源。现在 `last_team_board_tasks` 加可选 team_id 归属校验（meta.team 的
+  team_id 与传参不一致回 []），不匹配的会话侧板面不再喂给唤醒装配，降级到注册表快照
+  （旧但自洽，与「会话不存在」同一兜底）；回归测试 `test_team_resident.py` 的
+  `test_resident_wake_board_skips_foreign_team_meta`（异队 meta 降级 + store 层直证），
+  既有优先级用例的 meta 补上 team_id。
+
 - **团队室未读 badge 三处扫尾**：§15.4 持久化改动引入的回归与死角
   （`static/app-teamroom.js`）。①后台计数被「必须有已挂载团队卡」前提关闭——
   空态与错误态不挂卡、后台起队提前返回也不挂卡，此态下 `team_message` 定稿的

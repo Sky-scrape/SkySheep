@@ -1652,7 +1652,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         row = await cur.fetchone()
         return int(row[0] or 0) if row else 0
 
-    async def last_team_board_tasks(self, session_id: str) -> list[dict]:
+    async def last_team_board_tasks(self, session_id: str,
+                                    team_id: str = "") -> list[dict]:
         """该会话最后一份团队 meta 的工单板（team.tasks；没有团队 meta 回 []）。
 
         团队摘要搭 roundtable 槽随 assistant 消息落库（mode="team"，见
@@ -1661,6 +1662,11 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         的 _resident_wake_board）以它优先于注册表快照——登记之后用户在板面上
         的交互改动要跟到下一次唤醒。倒序找第一条 mode=team 的 assistant 消息；
         LIKE 预过滤 + LIMIT 兜底，避免给长会话全量解析 JSON。
+
+        team_id 非空时加归属校验：meta.team 的 team_id 必须与它一致，不匹配
+        回 []——会话侧最后一份板面属于别的队伍（队伍 A 收队后同会话重建
+        队伍 B，meta 是 B 的），喂给 A 的常驻唤醒会把 B 的板面回放进 A 的
+        频道并在收尾回写固化，调用方按无会话板面降级到注册表快照。
         """
         assert self._db
         cur = await self._db.execute(
@@ -1678,7 +1684,10 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             meta = msg.roundtable or {}
             if meta.get("mode") != "team":
                 continue
-            tasks = (meta.get("team") or {}).get("tasks")
+            team = meta.get("team") or {}
+            if team_id and str(team.get("team_id") or "") != team_id:
+                return []
+            tasks = team.get("tasks")
             if isinstance(tasks, list):
                 return [t for t in tasks if isinstance(t, dict)]
             return []

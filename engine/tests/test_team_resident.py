@@ -633,19 +633,23 @@ async def test_cron_team_reuses_resident_team(home):
 
 async def test_resident_wake_board_source_priority(home):
     """_resident_wake_board 取板优先级：本进程活动团队 > 会话最后一份团队
-    meta 的 tasks > 注册表快照（会话已不存在 / 无 meta 的兜底）——登记后的
-    交互改板（team_board 交互）要跟到下一次唤醒，缩水的注册表副本不再把
-    板面固化回上一个登记时刻。"""
+    meta 的 tasks（meta.team_id 与登记队一致才取）> 注册表快照（会话已不
+    存在 / 无 meta / meta 属于别的队伍的兜底）——登记后的交互改板
+    （team_board 交互）要跟到下一次唤醒，缩水的注册表副本不再把板面固化回
+    上一个登记时刻。"""
     backend = ServerBackend(working_dir=home / "proj",
                             provider_factory=lambda: FakeProvider([]))
     store = await SessionStore(home / "wake-board.db").connect()
     try:
         backend.store = store
         backend.resident_teams.load()
+        # 活动团队先建（meta 要带同一 team_id——异队 meta 的分支见下个用例）
+        _, orch = make_orch()
+        await orch.create_team([spec("队员0", FakeProvider([]))])
         # 会话 + 最后一份团队 meta（roundtable 槽 mode=team，板面 T1 done）
         sess = await store.create_session(None, title="交互会话")
         meta_msg = Message.assistant([TextBlock(text="团队纪要")])
-        meta_msg.roundtable = {"mode": "team", "team": {"tasks": [
+        meta_msg.roundtable = {"mode": "team", "team": {"team_id": orch.team_id, "tasks": [
             {"id": "T1", "title": "巡检目录", "assignee": "队员0", "type": "exec",
              "deps": [], "accept": "", "status": "done", "redo": 0,
              "created_at": 1.0, "detail": "", "source": {}, "auto_dispatch": True},
@@ -653,8 +657,6 @@ async def test_resident_wake_board_source_priority(home):
         await store.append_message(sess.id, meta_msg)
 
         # ① 本进程活动团队最优先：板面含未落 meta 的交互改动（T2），注册表空板
-        _, orch = make_orch()
-        await orch.create_team([spec("队员0", FakeProvider([]))])
         await orch.task_add("巡检目录", "队员0")
         await orch.task_add("复查目录", "队员0")
         await orch.task_update("T1", "in_progress")
@@ -686,13 +688,53 @@ async def test_resident_wake_board_source_priority(home):
                                   board=fallback_board)
         assert await backend._resident_wake_board(ghost) == fallback_board
 
-        # 会话只有空团队 meta（无 tasks）：同样退回注册表快照
+        # 会话只有空团队 meta（无 tasks，也没有 team_id）：归属校验不匹配 +
+        # 无板面，同样退回注册表快照
         empty_sid = (await store.create_session(None, title="空 meta")).id
         empty_msg = Message.assistant([TextBlock(text="x")])
         empty_msg.roundtable = {"mode": "team", "team": {}}
         await store.append_message(empty_sid, empty_msg)
         e2 = ResidentTeamEntry(team_id="e2", session_id=empty_sid, board=fallback_board)
         assert await backend._resident_wake_board(e2) == fallback_board
+    finally:
+        await store.close()
+
+
+async def test_resident_wake_board_skips_foreign_team_meta(home):
+    """评审：会话侧最后一份团队 meta 属于别的队伍时不回放——队伍 A 已收队
+    但常驻未解除、用户同会话用同模板重建队伍 B，定时触发命中 A 登记：活动
+    团队 team_id 不匹配跳过后落到会话 meta，而最后一份 meta 是 B 的板面，
+    照旧取回会把 B 的板面回放进 A 的频道并在收尾回写（registry upsert）固
+    化成 A 的恢复源。修成第 2 优先级同样校验 meta.team_id == resident.team_id，
+    不匹配降级到注册表快照（归属对上的正路径见上一用例）。"""
+    backend = ServerBackend(working_dir=home / "proj",
+                            provider_factory=lambda: FakeProvider([]))
+    store = await SessionStore(home / "wake-board-foreign.db").connect()
+    try:
+        backend.store = store
+        backend.resident_teams.load()
+        sess = await store.create_session(None, title="重建会话")
+        # B 队在同会话跑过团队轮：最后一份 meta 是 B 的板面（B1 进行中）
+        b_msg = Message.assistant([TextBlock(text="B 队纪要")])
+        b_msg.roundtable = {"mode": "team", "team": {"team_id": "team-b", "tasks": [
+            {"id": "B1", "title": "B 的工单", "assignee": "新队员", "type": "exec",
+             "deps": [], "accept": "", "status": "in_progress", "redo": 0,
+             "created_at": 2.0, "detail": "", "source": {}, "auto_dispatch": True},
+        ]}}
+        await store.append_message(sess.id, b_msg)
+        # A 的常驻登记指到同一会话，注册表快照是 A 自己的 T1（旧但自洽）
+        a_board = [{"id": "T1", "title": "A 的工单", "assignee": "队员0",
+                    "type": "exec", "deps": [], "accept": "", "status": "done",
+                    "redo": 0, "created_at": 1.0, "detail": "", "source": {},
+                    "auto_dispatch": True}]
+        entry = ResidentTeamEntry(team_id="team-a", session_id=sess.id, board=a_board)
+        board = await backend._resident_wake_board(entry)
+        assert board == a_board, "meta 属于 team-b：不回放 B 的板面，降级注册表快照"
+
+        # store 层同参数直证：team_id 不匹配回 []（调用方按无会话板面降级）
+        assert await store.last_team_board_tasks(sess.id, team_id="team-a") == []
+        assert [t["id"] for t in
+                await store.last_team_board_tasks(sess.id, team_id="team-b")] == ["B1"]
     finally:
         await store.close()
 
@@ -718,10 +760,11 @@ async def test_cron_reuse_uses_session_board_over_registry(home):
         proj = await store.get_project(task["project_id"])
 
         # 该队的「交互会话」：最后一份团队 meta 带 T1（done、指派队员0，与
-        # 模板名册对得上，快照回放才认）——注册表却登记成空板的缩水副本
+        # 模板名册对得上，快照回放才认；meta.team_id 与登记队一致——异队
+        # meta 不回放，见上一用例）——注册表却登记成空板的缩水副本
         interactive = await store.create_session(proj.id, title="交互会话")
         meta_msg = Message.assistant([TextBlock(text="团队纪要")])
-        meta_msg.roundtable = {"mode": "team", "team": {"tasks": [
+        meta_msg.roundtable = {"mode": "team", "team": {"team_id": "wake-board-team", "tasks": [
             {"id": "T1", "title": "巡检目录", "assignee": "队员0", "type": "exec",
              "deps": [], "accept": "", "status": "done", "redo": 0,
              "created_at": 1.0, "detail": "", "source": {}, "auto_dispatch": True},

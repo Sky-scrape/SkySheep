@@ -1198,16 +1198,19 @@ class AutomationMixin:
         1. 本进程里该队会话的活动团队（team_id 对得上）：板面最新，含交互
            改动（无论是否已有团队轮把 meta 落库）；
         2. 该队会话最后一份团队 meta 的 tasks（上次团队轮收尾落库的板面，
-           store.last_team_board_tasks）；
-        3. 注册表快照 resident.board——会话已不存在 / 无团队 meta 的兜底
-           （cron 建的登记没有交互会话，沿既有口径）。
+           store.last_team_board_tasks）——meta.team_id 必须与 resident.team_id
+           一致（不匹配 = 队伍已收队但同会话用同模板重建了别的队伍，最后
+           一份 meta 是新队伍的板面，回放给旧队会串频道并被收尾回写固化）；
+        3. 注册表快照 resident.board——会话已不存在 / 无团队 meta / meta
+           属于别的队伍的兜底（cron 建的登记没有交互会话，沿既有口径）。
         """
         live = getattr(self, "_teams", {}).get(resident.session_id)
         if live is not None and getattr(live, "team_id", "") == resident.team_id:
             return [t.to_dict() for t in live.board.tasks()]
         if self.store is not None and resident.session_id:
             try:
-                tasks = await self.store.last_team_board_tasks(resident.session_id)
+                tasks = await self.store.last_team_board_tasks(
+                    resident.session_id, team_id=resident.team_id)
             except Exception as e:  # noqa: BLE001 - 会话侧读取失败退回注册表快照
                 logger.warning(
                     "常驻团队会话板面读取失败（team_id=%s session=%s）：%s",
@@ -1364,7 +1367,8 @@ class AutomationMixin:
             if resident is not None:
                 # 唤醒常驻队伍（T3.2）：沿用原 team_id 续频道（seq 水位取注册表
                 # 与库内行号的最大者，防手工清理后的错位）、按最新板面回放
-                # （会话侧活动板面优先，注册表快照只作会话不存在的兜底，评审②）；
+                # （会话侧活动板面优先且 team_id 对得上才取，注册表快照只作
+                # 会话侧不可用的兜底，评审②）；
                 # 装配路径（_resolve_team_members / _build_member_provider /
                 # TeamOrchestrator 注入面）与防失控上限照旧
                 db_seq = await self.store.last_team_message_seq(resident.team_id)

@@ -24,7 +24,7 @@ Its defining idea is not "another chat window". It makes **multi-model collabora
 - **Roundtable**: several models answer in parallel, then a chairman model fuses the drafts into one response;
 - **Team**: split work by role and use a channel plus task board to dispatch, report, accept, and deliver;
 - **Adversarial**: assign discovery, investigation, recommendation, and judgment to roles built to find blind spots;
-- **Relay**: alternate turns between a main and peer session to connect proposal, execution, feedback, and revision.
+- **Relay (experimental)**: alternate turns between a main and peer session to connect proposal, execution, feedback, and revision (minimal loop shipped; deeper integration frozen for now).
 
 You still stay in charge of sensitive actions: file writes and command execution ask for confirmation by default, writes include a diff preview, and file changes are snapshotted per round for rollback. SkySheep has no cloud service of its own; sessions, configuration, and keys stay on your machine. When you enable a hosted model, conversation content is sent to the provider you selected, according to your configuration.
 
@@ -100,7 +100,7 @@ Multi-model here doesn't mean opening three windows and asking the same question
 
 ![Adversarial: the discover → investigate → recommend → judge pipeline, with severity and verdict (upheld / partial / refuted / pending) per finding](docs/images/adversarial.webp)
 
-One thing that's easy to misread: relay is not a fourth member of that trio. It is a standalone workbench for work that hands off back and forth ("propose → execute → feedback → revise"). Open "Relay" from the sidebar, fill in the overall task and each side's per-turn task on the right-side board, then hit Run to let the side whose turn it is execute a full, normal Agent turn (agent loop, tools, permission gate, and checkpoints all apply). The baton passes automatically and the next turn carries the other side's previous output; "Continuous alternation" runs the turns back to back. Both sides' transcripts stay in their own sessions. Design notes: [docs/接力模式设计.md](docs/接力模式设计.md).
+One thing that's easy to misread: relay (experimental) is not a fourth member of that trio. It is a standalone workbench for work that hands off back and forth ("propose → execute → feedback → revise"). Open "Relay" from the sidebar, fill in the overall task and each side's per-turn task on the right-side board, then hit Run to let the side whose turn it is execute a full, normal Agent turn (agent loop, tools, permission gate, and checkpoints all apply). The baton passes automatically and the next turn carries the other side's previous output; "Continuous alternation" runs the turns back to back. Both sides' transcripts stay in their own sessions. Relay is in an experimental freeze: the minimal loop works, while deeper integration (native dual-screen, automated verification) is deferred. Design notes: [docs/接力模式设计.md](docs/接力模式设计.md).
 
 ## 🔍 Feature walkthrough
 

@@ -252,6 +252,15 @@ def test_resolve_path_strips_mention_prefix(tmp_path):
     assert resolve_path(ctx, "@") == (tmp_path / "@").resolve()
 
 
+def test_resolve_path_rejects_drive_relative(tmp_path):
+    # 审查 L03：盘符相对路径（"C:file.txt"）join 时重置驱动器，落点漂到引擎
+    # 进程在该盘的当前目录——直接拒绝，不再假装是普通相对路径
+    ctx = ToolContext(working_dir=tmp_path)
+    with pytest.raises(ToolError) as exc:
+        resolve_path(ctx, "C:config.toml")
+    assert "盘符相对路径" in str(exc.value)
+
+
 async def test_read_file_blocked_outside_workdir(tmp_path):
     from skysheep.tools.fs import ReadFileArgs, ReadFileTool
 

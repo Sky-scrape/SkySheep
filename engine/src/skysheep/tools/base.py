@@ -368,6 +368,14 @@ def resolve_path(ctx: ToolContext, raw: str) -> Path:
     if raw is not None and raw.startswith("@") and len(raw) > 1:
         raw = raw[1:]  # 用户 @ 引用带进提示词的写法，容错剥掉
     p = Path(raw)
+    # 审查 L03：盘符相对路径（如 "C:file.txt"，盘符有、根没有）在 pathlib 的
+    # join 里会重置驱动器、按引擎进程在该盘的当前目录解析——落点既不在工作
+    # 目录、也不是用户以为的位置。fail-closed 直接拒绝，要求补全写法。
+    if p.drive and not p.root:
+        raise ToolError(
+            f"盘符相对路径（{raw}）的落点会漂移到该盘的当前目录，已被拒绝；"
+            "请改用绝对路径（如 C:/dir/file.txt）或不含盘符的相对路径"
+        )
     if not p.is_absolute():
         p = ctx.working_dir / p
     p = p.resolve()

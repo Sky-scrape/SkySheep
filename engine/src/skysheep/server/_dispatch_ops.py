@@ -68,7 +68,12 @@ async def _h_relay_dual_stop(backend: ServerBackend, params: dict, emit, local: 
 
 
 async def _h_hooks_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return backend.hooks_settings()
+    result = backend.hooks_settings()
+    if not local:
+        # 审查 L06（M7/_p 同口径）：钩子配置文件的本机绝对路径不外泄；规则命令
+        # 是用户自己配的功能面照回，远程 Hooks 面板仍可读
+        result["config_path"] = ""
+    return result
 
 
 async def _h_hooks_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:

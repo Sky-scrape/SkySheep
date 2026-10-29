@@ -842,6 +842,9 @@ def create_app(
                         elif method == "project.switch":
                             sess = ((result or {}).get("session") or {})
                             conn_state["session"] = sess.get("id") if isinstance(sess, dict) else None
+                        elif (method == "permission.queue" and not client_is_local
+                              and isinstance(result, dict)):
+                            _register_queue_permissions(remote_permissions, result)
                         await send({"id": mid, "ok": True, "result": result})
                     except Exception as e:  # noqa: BLE001
                         await send({"id": mid, "ok": False, "error": str(e)})
@@ -860,3 +863,16 @@ def create_app(
                 pass
 
     return app
+
+
+def _register_queue_permissions(remote_permissions: dict[str, str], result: dict) -> None:
+    """审查 L08：把 permission.queue 命中的未决请求登记进连接的 remote_permissions。
+
+    断线重连/刷新后确认卡经 queue 重建，但 respond 只认本连接实际收到过
+    permission_request 事件的 rid——不登记的话卡片永远答不动（fail-closed
+    方向的可用性洞，与 queue 的设计目的直接矛盾）。queue 的远程口径已按
+    B 族收敛到绑定会话，这里登记的 rid 天然属于本连接会话。
+    """
+    for row in (result or {}).get("pending") or []:
+        if isinstance(row, dict) and row.get("request_id"):
+            remote_permissions[str(row["request_id"])] = str(row.get("session_id") or "")

@@ -443,3 +443,56 @@ def test_emit_reported_kinds_are_not_whitelisted(kind):
     from skysheep.server.app import _REMOTE_ANON_KINDS
 
     assert kind not in _REMOTE_ANON_KINDS
+
+
+# ---- 审查 L06：advanced.get / hooks.get 的本机绝对路径不外泄远端 ----
+
+
+def test_advanced_get_masks_local_paths_for_remote():
+    import asyncio
+
+    from skysheep.server._dispatch_prefs import _h_advanced_get
+
+    class _Backend:
+        def advanced_settings(self):
+            return {"home": "/home/x", "logs_dir": "/home/x/logs",
+                    "working_dir": "/work", "autostart": {"enabled": True}}
+
+    out = asyncio.run(_h_advanced_get(_Backend(), {}, None, False))
+    assert out["home"] == "" and out["logs_dir"] == "" and out["working_dir"] == ""
+    assert out["autostart"] == {"enabled": True}  # 功能面照回，远程设置页仍可读
+    out_local = asyncio.run(_h_advanced_get(_Backend(), {}, None, True))
+    assert out_local["home"] == "/home/x" and out_local["working_dir"] == "/work"
+
+
+def test_hooks_get_masks_config_path_for_remote():
+    import asyncio
+
+    from skysheep.server._dispatch_ops import _h_hooks_get
+
+    class _Backend:
+        def hooks_settings(self):
+            return {"pre": [], "config_path": "/home/x/.skysheep/config.toml"}
+
+    out = asyncio.run(_h_hooks_get(_Backend(), {}, None, False))
+    assert out["config_path"] == ""
+    out_local = asyncio.run(_h_hooks_get(_Backend(), {}, None, True))
+    assert out_local["config_path"].endswith("config.toml")
+
+
+# ---- 审查 L08：queue 命中的未决请求登记进 remote_permissions，重连后可应答 ----
+
+
+def test_queue_result_registers_permissions_for_respond():
+    from skysheep.server.app import _register_queue_permissions
+
+    rp: dict[str, str] = {}
+    _register_queue_permissions(rp, {"pending": [
+        {"request_id": "r1", "session_id": "sA"},
+        {"request_id": "", "session_id": "sA"},  # 解析不出 rid 的不登记
+        "junk",                                   # 非字典行忽略
+        {"request_id": "r2"},                     # 无 session_id 按空会话登记
+    ]})
+    assert rp == {"r1": "sA", "r2": ""}
+    _register_queue_permissions(rp, None)
+    assert rp == {"r1": "sA", "r2": ""}           # None / 空结果安全

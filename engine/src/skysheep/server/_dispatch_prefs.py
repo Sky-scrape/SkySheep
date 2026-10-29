@@ -113,7 +113,13 @@ async def _h_map_save_config(backend: ServerBackend, params: dict, emit, local: 
 
 
 async def _h_advanced_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return backend.advanced_settings()
+    result = backend.advanced_settings()
+    if not local:
+        # 审查 L06（M7/_p 同口径）：本机绝对路径不外泄——「装在哪」远程不给，
+        # 设置项的值与开关照回（advanced.save 本就 local_only，远程改不了）
+        for k in ("home", "logs_dir", "working_dir"):
+            result[k] = ""
+    return result
 
 
 async def _h_advanced_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:

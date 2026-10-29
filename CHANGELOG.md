@@ -14,6 +14,14 @@
 
 ### 修复
 
+- **盘符相对路径直接拒绝（审计 L03）**：`write_file("C:config.toml")` 这类
+  「盘符有、根没有」的路径在 pathlib join 时会重置驱动器、落到引擎进程在该盘
+  的当前目录——确认卡看着像普通相对文件名，落点却在别处。现在解析期直接拒绝
+  并提示改用绝对路径或普通相对路径（门与 restrict 边界本就 fail-closed，此次
+  收口的是落点歧义）。
+- **pytest 启用 --strict-markers（审计 L32）**：marker 拼错从警告变为直接报错，
+  e2e / slow / eval 的分层契约不再可能被静默破坏。
+
 - **远程口径扫尾（审计 L06/L08）**：`advanced.get` 的 `home`/`logs_dir`/`working_dir`
   与 `hooks.get` 的 `config_path` 对远程连接改回空串（M7/_p 同口径，本机原样）——
   「装在哪」不再随设置页外泄给局域网/Tailscale 设备；`permission.queue` 命中的

@@ -5602,7 +5602,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if cp_rt and cp_rt.run_task and not cp_rt.run_task.done():
             raise RuntimeError("该会话正在运行，等当前轮结束再回滚")
         try:
-            files = await asyncio.to_thread(
+            outcome = await asyncio.to_thread(
                 store.restore, checkpoint_id, force=force
             )
         except CheckpointConflictError as e:
@@ -5615,17 +5615,25 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise RuntimeError(
                 f"检查点 {checkpoint_id} 不存在或已过期（每会话保留最近 50 轮，更早的会被淘汰）"
             ) from None
+        files: list[str] = outcome.get("restored") or []
+        failed: list[dict] = outcome.get("failed") or []
         note = Message.user(
             "(系统提示) 用户执行了「撤销本轮改动」，以下文件已恢复到本轮改动前的状态："
             + ", ".join(files)
             + "。后续如需引用这些文件请先重新读取。"
+            + (
+                "；以下文件未能恢复（被占用或其它错误），请人工检查："
+                + "; ".join(f"{it.get('path', '')}（{it.get('error', '')}）" for it in failed)
+                if failed
+                else ""
+            )
         )
         sid = (cp or {}).get("session_id") or sid
         agent = self.runtimes[sid].agent if sid and sid in self.runtimes else self.agent
         agent.history.append(note)
         if sid:
             await self.store.append_message(sid, note)
-        return {"restored": checkpoint_id, "files": files}
+        return {"restored": checkpoint_id, "files": files, "failed": failed}
 
     async def _check_checkpoint_ownership(self, cp: dict,
                                           session_id: str | None = None) -> None:

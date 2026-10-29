@@ -444,7 +444,7 @@ class CheckpointStore:
             self._release(cp)
         return out
 
-    def restore(self, checkpoint_id: str, force: bool = False) -> list[str]:
+    def restore(self, checkpoint_id: str, force: bool = False) -> dict:
         """把快照写回磁盘：有改前内容的恢复内容，新建文件直接删除。
 
         回滚前做脏检查：文件当前内容与保存时刻的签名不一致，说明快照之后
@@ -457,7 +457,10 @@ class CheckpointStore:
         blob）无论 force 与否都抛 CheckpointCorruptError 整条拒绝——把半截
         内容写回用户文件等于静默毁数据，用户文件保持原样。
 
-        返回受影响的文件路径；检查点不存在抛 KeyError。
+        返回 {restored, failed}（审查 L10）：restored 为已恢复的文件路径，
+        failed 为未能恢复的条目 [{path, error}]——单文件失败（Windows 上被
+        其他程序占用很常见）不再中断整轮回滚、也不再静默吞错虚报已恢复；
+        检查点不存在抛 KeyError。
         """
         cp = self._items.get(checkpoint_id)
         if cp is None:
@@ -480,23 +483,31 @@ class CheckpointStore:
                     self._release(cp)
                     raise CheckpointConflictError(conflicts)
             restored: list[str] = []
+            failed: list[dict] = []
             for path_s, data in cp["files"].items():
                 p = Path(path_s)
-                if data is None:
-                    # 改前不存在 → 回滚时应删除。目录要连内容一起删（move_file 的
-                    # 「目标是新建目录」记的是目录本身）。
-                    if p.is_dir():
-                        shutil.rmtree(p, ignore_errors=True)
-                    elif p.exists():
-                        p.unlink()
-                elif data == DIR_MARKER:
-                    # 改前是目录：重建目录本身即可，内容由逐文件条目还原
-                    # （move_file 的源目录/被覆盖的目标目录，审查 A-3 修复）
-                    p.mkdir(parents=True, exist_ok=True)
-                else:
-                    # 原子写：回滚写一半被中断会把文件留在半截状态（安全审查低危项）
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    write_bytes_atomic(p, data)
+                try:
+                    if data is None:
+                        # 改前不存在 → 回滚时应删除。目录要连内容一起删（move_file 的
+                        # 「目标是新建目录」记的是目录本身）。
+                        if p.is_dir():
+                            shutil.rmtree(p)
+                        elif p.exists():
+                            p.unlink()
+                    elif data == DIR_MARKER:
+                        # 改前是目录：重建目录本身即可，内容由逐文件条目还原
+                        # （move_file 的源目录/被覆盖的目标目录，审查 A-3 修复）
+                        p.mkdir(parents=True, exist_ok=True)
+                    else:
+                        # 原子写：回滚写一半被中断会把文件留在半截状态（安全审查低危项）
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        write_bytes_atomic(p, data)
+                except OSError as e:
+                    # 审查 L10：单文件失败不中断整轮回滚——收集后继续，调用方拿到
+                    # 「已恢复/未恢复」的完整盘面；目录删除失败同样计入 failed，
+                    # 不再 ignore_errors 吞错后把该路径虚报进已恢复清单
+                    failed.append({"path": path_s, "error": str(e)})
+                    continue
                 restored.append(path_s)
             self._release(cp)
-        return restored
+        return {"restored": restored, "failed": failed}

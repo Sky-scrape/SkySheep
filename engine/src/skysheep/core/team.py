@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 import re
 import time
@@ -168,6 +169,8 @@ class TeamChannel:
 
     def __init__(self, reports_dir: Path | None = None) -> None:
         self.messages: list[ChannelMessage] = []
+        # 与 messages 同下标的 seq 镜像（bisect 用）：频道簿恒按 seq 升序（审计 L21）
+        self._seqs: list[int] = []
         self._next_seq = 1
         self._cursors: dict[str, int] = {}  # 成员名 -> 已读到的最新 seq
         self._reports_dir = reports_dir
@@ -204,7 +207,14 @@ class TeamChannel:
             seq=seq, from_member=from_member, to_member=to_member,
             msg_kind=msg_kind, task_ref=task_ref, text=text, report_path=report_path,
         )
-        self.messages.append(msg)
+        # 按 seq 插入而不是直接 append（审计 L21）：编号是「这轮什么时候开始」
+        # 的序号，定稿顺序可以与之相反——成员轮先预占编号、轮末才定稿，期间
+        # 用户插话拿到更大的编号却先入簿。若这边盲目 append，活内存里是定稿
+        # 顺序、team_messages 回放里是 seq 顺序，两套顺序对不上（未读游标、
+        # 「频道里第几条」都会错位）。恒按 seq 排序后两边一致。
+        pos = bisect.bisect_right(self._seqs, seq)
+        self._seqs.insert(pos, seq)
+        self.messages.insert(pos, msg)
         return msg
 
     def _clip_with_fallback(self, text: str, from_member: str, seq: int) -> tuple[str, str]:
@@ -1635,8 +1645,14 @@ class TeamOrchestrator:
         """用户插话（AI 总管模式，设计 §2.1）：消息进频道 + 最高优先级注入总管下一轮。
 
         跨任务安全：循环推进中也可调用——只动频道与待注入清单（两侧都是
-        同步段，无竞态），循环在下一个总管轮取走。空闲时返回
+        同步段，不会读到写了一半的状态），循环在下一个总管轮取走。空闲时返回
         loop_running=False，由宿主尽快调 run_auto_turn 唤醒总管。
+
+        注意「同步」不等于「顺序与 seq 一致」（审计 L21）：成员轮/总管轮开始时
+        就预占了自己的 seq（流式增量要编号），轮到该轮定稿时插话可能已经拿了
+        更大的 seq 先入簿。频道簿因此恒按 seq 排序（见 Channel.post），插话的
+        编号与它在回放里的位置一致，但**它可能排在一条更早开始、稍后才定稿的
+        发言之前**——这是真实时序，不是错序。
         """
         if not self.active:
             raise TeamError("当前没有进行中的团队")

@@ -48,6 +48,7 @@ from ..security.trust import WorkspaceTrust
 from ..server.backend_parts._shared import SessionRuntime
 from ..server.backend_parts.automation import run_cron_task_core
 from ..session import SessionStore, export_messages_text
+from ..session.writer_lease import WriterLease
 from ..skills import SkillLoader
 from ..tools import ChangeRecorder, ToolRegistry, default_tools
 from ..tools.memory import render_memory_section
@@ -1339,12 +1340,17 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     # 注意：Windows 上不强制 Selector 事件循环——MCP stdio 子进程需要 Proactor
+    # 写者租约（审计 L26）：命令行会话 / headless run / cron-run 都会持续写会话库，
+    # 整段持租约，桌面端的备份/恢复就能看见「别的进程正在写」并在动手前拒绝——
+    # 否则替换窗口里那些提交会随旧 inode 一起丢掉。拿不到也照跑（租约不阻塞自己）。
     if args.cmd == "chat":
-        asyncio.run(_chat_cmd(args))
+        with WriterLease():
+            asyncio.run(_chat_cmd(args))
     elif args.cmd == "app":
         _app_cmd(args)
     elif args.cmd == "run":
-        _run_cmd(args)
+        with WriterLease():
+            _run_cmd(args)
     elif args.cmd == "config":
         if args.action == "path":
             print(config_path())
@@ -1355,9 +1361,11 @@ def main(argv: list[str] | None = None) -> None:
             except ConfigError as e:
                 print(str(e))
     elif args.cmd == "cron":
-        _cron_cmd(args)
+        with WriterLease():
+            _cron_cmd(args)
     elif args.cmd == "cron-run":
-        _cron_cmd(args)
+        with WriterLease():
+            _cron_cmd(args)
     elif args.cmd == "sessions":
         asyncio.run(_sessions_cmd())
     elif args.cmd == "models":

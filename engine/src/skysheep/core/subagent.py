@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -66,6 +67,26 @@ REPORT_INLINE_LIMIT = 2400
 REPORT_EXCERPT_CHARS = 1200
 # 任务簿持久化保留的终态记录条数（超出按创建时间淘汰最旧的）
 TASK_BOOK_KEEP = 50
+# 任务簿落盘的进程内串行锁（审计 L20）：多个 TaskManager 实例共享同一个
+# state_path，「读回 → 合并 → 原子写」这三步必须成段完成，否则两个实例同时
+# 落盘仍会互相覆盖。同步锁即可——_persist 是同步方法，在事件循环线程里调用。
+_STATE_PERSIST_LOCK = threading.Lock()
+
+
+def _merge_task_book(existing: list[dict], mine: list[dict]) -> list[dict]:
+    """按 id 合并任务簿记录，返回按 created_at 取最新 TASK_BOOK_KEEP 条的列表。
+
+    ``mine`` 是本实例刚写下的记录（同 id 以它为准，它才是该任务的当前真相），
+    ``existing`` 是文件里别的实例留下的记录。排序键缺失时按 0 处理——旧文件里
+    缺字段的记录排在最前，优先被裁掉，不会挤掉新记录。
+    """
+    by_id: dict[str, dict] = {}
+    for item in existing:
+        by_id[str(item.get("id"))] = item
+    for item in mine:
+        by_id[str(item.get("id"))] = item
+    rows = sorted(by_id.values(), key=lambda r: float(r.get("created_at") or 0))
+    return rows[-TASK_BOOK_KEEP:]
 # 后台任务排队上限（并发满员后还能收下多少个排队任务）
 TASK_QUEUE_KEEP = 20
 # reports 目录子代理报告的滚动清理配额（数量 / 总字节）：与 team 报告同款策略
@@ -841,18 +862,44 @@ class TaskManager:
     )
 
     def _persist(self) -> None:
+        """落盘本实例的任务簿——**按 id 合并进文件**，不整份覆盖（审计 L20）。
+
+        同一个 state_path 被多个实例共享：主项目的 TaskManager 与切项目时按
+        工作目录懒建的那些（backend._tasks_for_workdir）各持一份内存任务簿。
+        旧实现每次都把「自己知道的」整份写回文件，于是 B 项目一落盘就把 A 项目
+        的终态记录抹掉——切项目后旧任务在任务簿里凭空消失。
+
+        现在：读回文件里已有的记录，按 id 合并（同 id 以本实例为准，本实例才是
+        该任务的当前真相），再按 created_at 取最新 TASK_BOOK_KEEP 条。合并口径
+        与内存裁剪一致，不会让已裁掉的老记录原地复活（它们早于保留窗口）。
+        进程内的并发由模块级锁串行化（_persist 是同步方法，可能被不同任务在同一
+        事件循环里连调）；跨进程并发仍按「后写覆盖」处理——单实例桌面场景下
+        另一个进程不会同时写这本任务簿。
+        """
         if self._state_path is None:
             return
         recs = sorted(self._tasks.values(), key=lambda r: r.created_at)[-TASK_BOOK_KEEP:]
-        data = {"tasks": [
-            {f: getattr(r, f) for f in self._PERSIST_FIELDS} for r in recs
-        ]}
+        mine = [{f: getattr(r, f) for f in self._PERSIST_FIELDS} for r in recs]
         try:
-            write_text_atomic(
-                self._state_path, json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-            )
+            with _STATE_PERSIST_LOCK:
+                merged = _merge_task_book(self._read_state_file(), mine)
+                write_text_atomic(
+                    self._state_path,
+                    json.dumps({"tasks": merged}, ensure_ascii=False, indent=2) + "\n",
+                )
         except OSError:
             pass  # 持久化失败不拖垮任务本身
+
+    def _read_state_file(self) -> list[dict]:
+        """读回落盘任务簿里的记录（读不出/结构不对一律当空，绝不因此丢本实例的写入）。"""
+        if self._state_path is None or not self._state_path.exists():
+            return []
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        items = (data or {}).get("tasks") if isinstance(data, dict) else None
+        return [it for it in (items or []) if isinstance(it, dict) and it.get("id")]
 
     def _load_state(self) -> None:
         if self._state_path is None or not self._state_path.exists():

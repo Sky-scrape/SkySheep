@@ -1230,3 +1230,107 @@ def test_report_name_shape_guard():
     assert not _REPORT_NAME_RE.match("team-0001-小明.md")
     assert not _REPORT_NAME_RE.match("我的笔记.md")
     assert not _REPORT_NAME_RE.match("a1b2c3d4e5-explore.txt")
+
+
+def test_task_book_merge_keeps_other_instances_records(tmp_path):
+    """审计 L20：两个实例共享同一个任务簿文件，后写者不得抹掉前者的记录。
+
+    切项目时后端会按工作目录懒建新的 TaskManager（同一 state_path）。旧实现
+    每次整份覆盖，「B 项目一落盘，A 项目的终态记录就没了」。现在按 id 合并。
+    """
+    from skysheep.core.subagent import TaskManager
+
+    state = tmp_path / "subagent_tasks.json"
+    a = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    rec_a = a._new_record("explore", "A 项目的任务")
+    rec_a.status = "done"
+    rec_a.result = "A 的结果"
+    rec_a.created_at, rec_a.finished_at = 100.0, 200.0
+    a._persist()
+
+    b = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    rec_b = b._new_record("explore", "B 项目的任务")
+    rec_b.status = "done"
+    rec_b.result = "B 的结果"
+    rec_b.created_at, rec_b.finished_at = 300.0, 400.0
+    b._persist()
+
+    reloaded = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    assert reloaded.status(rec_a.id).result == "A 的结果", "A 的记录不能被 B 的落盘抹掉"
+    assert reloaded.status(rec_b.id).result == "B 的结果"
+
+
+def test_task_book_merge_same_id_takes_newest_instance_view(tmp_path):
+    """同 id 以「刚写下的这份」为准：本实例才是该任务的当前真相。"""
+    from skysheep.core.subagent import TaskManager
+
+    state = tmp_path / "subagent_tasks.json"
+    a = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    rec = a._new_record("explore", "同一个任务")
+    rec.status = "running"
+    a._persist()
+
+    rec.status = "done"
+    rec.result = "最终结果"
+    a._persist()
+
+    reloaded = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    assert reloaded.status(rec.id).status == "done"
+    assert reloaded.status(rec.id).result == "最终结果"
+
+
+def test_task_book_merge_keeps_other_instances_records(tmp_path):
+    """审计 L20：两个实例共享同一个任务簿文件，后写者不得抹掉前者的记录。
+
+    切项目时后端会按工作目录懒建新的 TaskManager（同一 state_path）。旧实现
+    每次整份覆盖，「B 项目一落盘，A 项目的终态记录就没了」。现在按 id 合并。
+    """
+    from skysheep.core.subagent import TaskManager
+
+    state = tmp_path / "subagent_tasks.json"
+    a = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    rec_a = a._new_record("explore", "A 项目的任务")
+    rec_a.status = "done"
+    rec_a.result = "A 的结果"
+    rec_a.created_at, rec_a.finished_at = 100.0, 200.0
+    a._persist()
+
+    b = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    rec_b = b._new_record("explore", "B 项目的任务")
+    rec_b.status = "done"
+    rec_b.result = "B 的结果"
+    rec_b.created_at, rec_b.finished_at = 300.0, 400.0
+    b._persist()
+
+    reloaded = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    assert reloaded.status(rec_a.id).result == "A 的结果", "A 的记录不能被 B 的落盘抹掉"
+    assert reloaded.status(rec_b.id).result == "B 的结果"
+
+
+def test_task_book_merge_same_id_takes_newest_instance_view(tmp_path):
+    """同 id 以「刚写下的这份」为准：本实例才是该任务的当前真相。"""
+    from skysheep.core.subagent import TaskManager
+
+    state = tmp_path / "subagent_tasks.json"
+    a = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    rec = a._new_record("explore", "同一个任务")
+    rec.status = "running"
+    a._persist()
+
+    rec.status = "done"
+    rec.result = "最终结果"
+    a._persist()
+
+    reloaded = TaskManager(
+        provider_factory=lambda: FakeProvider([]), working_dir=tmp_path, state_path=state)
+    assert reloaded.status(rec.id).status == "done"
+    assert reloaded.status(rec.id).result == "最终结果"

@@ -410,6 +410,16 @@ class LifecycleMixin:
             return f"有定时任务正在运行，等它结束再{action}"
         if self._pipeline_running:
             return f"有流水线节点正在运行，等它结束再{action}"
+        # 跨进程（审计 L26）：schtasks 拉起的 cron-run 子进程、命令行会话、headless
+        # run 不在本进程的 runtimes 里，进程内预检看不见它们；它们整段持写者租约，
+        # 这里探一次——别人还握着就拒绝，免得替换窗口里的提交随旧 inode 丢掉。
+        from ...session.writer_lease import other_writer_active
+
+        if other_writer_active():
+            return (
+                "有另一个 SkySheep 进程（定时任务 / 命令行会话 / 无头运行）正在写会话库，"
+                f"等它结束再{action}"
+            )
         return None
 
     def list_session_backups(self) -> dict:

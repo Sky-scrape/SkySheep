@@ -167,6 +167,26 @@ async def test_channel_seq_monotonic_and_unread_scope():
     assert ch.unread_for("写手") == [] and ch.render_unread("写手") == ""
 
 
+@pytest.mark.asyncio
+async def test_channel_sorts_by_seq_when_interjection_lands_mid_round():
+    """审计 L21：插话在成员轮预占之后、定稿之前入簿时，频道簿仍按 seq 排序。
+
+    真实时序：成员轮开始就预占 seq=1（流式增量要编号）→ 用户插话拿 seq=2 先
+    入簿 → 成员轮定稿写 seq=1。旧实现 append，活内存是「插话、汇报」，而
+    team_messages 回放按 seq 是「汇报、插话」——两套顺序。现在恒按 seq 排序。
+    """
+    ch = TeamChannel()
+    reserved = ch.reserve_seq()  # 成员轮预占
+    interject = ch.post("user", to_member="director", msg_kind="note", text="插话")
+    report = ch.post("小研", to_member="director", msg_kind="report", text="汇报", seq=reserved)
+    assert [m.seq for m in ch.messages] == [1, 2], "频道簿必须与回放同序"
+    assert ch.messages[0] is report and ch.messages[1] is interject
+    # 未读游标照 seq 走：总管读完后不再有未读，不会因为后插入的旧号回退
+    ch.mark_read("director")
+    assert ch.unread_for("director") == []
+    assert [m.seq for m in ch.tail()] == [1, 2]
+
+
 def test_channel_clip_long_message_with_report_fallback(tmp_path):
     reports = tmp_path / "reports"
     ch = TeamChannel(reports_dir=reports)

@@ -7659,3 +7659,15 @@ li.mod-row {
   .macro-row .spacer { display: none; }
   .macro-row .macro-name { flex: 1 1 100%; }
 }
+
+/* ---------- 窄屏补强（P23 巡检发现）：子代理行操作换行、关于页长路径断行 ---------- */
+@media (max-width: 860px) {
+  /* 子代理列表行：skill-main 已在窄屏退成单列，但右侧「策略下拉 + 编辑 / 删除」
+     仍占约 361px，整行被推出视口右缘（按钮看得见、点不到）。改成行内换行：
+     操作组占满一整行，下拉可伸缩。 */
+  .custom-subagent-list li, .builtin-subagent-list li { flex-wrap: wrap; row-gap: 6px; }
+  .subagent-ops { width: 100%; flex-wrap: wrap; }
+  .subagent-ops select { flex: 1 1 140px; min-width: 0; max-width: none; }
+  /* 关于页的安装目录 / 数据目录是长路径：允许任意处断行，否则右端被裁掉一截 */
+  .about .copyable-path { overflow-wrap: anywhere; word-break: break-word; }
+}

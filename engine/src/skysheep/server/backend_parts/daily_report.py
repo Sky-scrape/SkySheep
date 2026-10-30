@@ -30,6 +30,8 @@ DEFAULT_REPORT_TIME = "09:00"
 
 # 失败明细行里单条原因的截断长度（日报要一眼看完，明细只给指路的第一句）
 DETAIL_CHARS = 120
+# 自定义模板的长度上限（P10）：日报走的是渠道文本小件，2000 字符够写花样也防手滑灌满
+TEMPLATE_MAX_CHARS = 2000
 
 
 def state_path() -> Path:
@@ -54,13 +56,17 @@ def load_state() -> dict:
     if parse_hhmm(raw.get("time")) is not None:
         state["time"] = str(raw["time"]).strip()
     state["last_sent_date"] = str(raw.get("last_sent_date") or "")
+    template = raw.get("template")
+    if isinstance(template, str) and template.strip():
+        state["template"] = template.strip()[:TEMPLATE_MAX_CHARS]
     return state
 
 
 def save_state(state: dict) -> None:
     """原子写日报状态（引擎自有状态文件一律原子写，见 textio.write_text_atomic）。
 
-    未知字段不落盘：写出去的形状永远是自己读得回来的那三个键。
+    未知字段不落盘：写出去的形状永远是自己读得回来的那几个键
+    （enabled / time / last_sent_date / 可选 template）。
     """
     clean = default_state()
     clean["enabled"] = bool(state.get("enabled", False))
@@ -69,6 +75,9 @@ def save_state(state: dict) -> None:
         str(hhmm).strip() if parse_hhmm(hhmm) is not None else DEFAULT_REPORT_TIME
     )
     clean["last_sent_date"] = str(state.get("last_sent_date") or "")
+    template = state.get("template")
+    if isinstance(template, str) and template.strip():
+        clean["template"] = template.strip()[:TEMPLATE_MAX_CHARS]
     write_text_atomic(state_path(), json.dumps(clean, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -150,13 +159,20 @@ def _failure_detail(cron_bad: list[dict], pipe_bad: list[dict]) -> list[str]:
     return out
 
 
-async def build_daily_report(store, *, now: float | None = None) -> str:
+async def build_daily_report(store, *, now: float | None = None, template: str | None = None) -> str:
     """把当天全部 cron / 流水线终态汇总成一条中文日报（成功/失败计数 + 失败明细）。
 
     数据口径：cron_tasks 表只留每个任务的**最后一次**运行（last_run_at 落在
     今天即计入，一天跑多次只见最后一次）；流水线按 finished_at 落在今天且已
     到终态（done / failed / cancelled）计入，运行中与草稿不算。全项目口径
     ——日报是整机的无人值守体检表，不按项目拆。
+
+    template（P10 模板自定义）：非空时按用户模板渲染——占位符 {date}
+    {cron_ok} {cron_fail} {pipe_done} {pipe_fail} {pipe_stop} {detail} 直替
+    （不用 str.format：模板里自带的其它花括号原样保留，未知占位不炸）；
+    {detail} 展开为失败明细多行（每行缩进两格，无失败 = 「无」）。
+    None/空白 = 内置格式。空天也照渲染（占位符落 0 / 无），不用内置的
+    「今日没有运行记录」短句——模板用户自己决定空天长什么样。
     """
     n = time.time() if now is None else float(now)
     start, end = _day_bounds(n)
@@ -177,6 +193,20 @@ async def build_daily_report(store, *, now: float | None = None) -> str:
     pipe_bad = [p for p in pipes if p["status"] == "failed"]
     pipe_stop = [p for p in pipes if p["status"] == "cancelled"]
 
+    detail = _failure_detail(cron_bad, pipe_bad)
+    if template and template.strip():
+        filled = template
+        repl = {
+            "date": today_str(n),
+            "cron_ok": len(cron_ok), "cron_fail": len(cron_bad),
+            "pipe_done": len(pipe_ok), "pipe_fail": len(pipe_bad),
+            "pipe_stop": len(pipe_stop),
+            "detail": "\n".join("  " + d for d in detail) if detail else "无",
+        }
+        for key, val in repl.items():
+            filled = filled.replace("{" + key + "}", str(val))
+        return filled
+
     lines = [f"🐑 SkySheep 运行日报 · {today_str(n)}"]
     if not cron_rows and not pipes:
         lines.append("今日没有定时任务或任务编排的运行记录。")
@@ -185,7 +215,6 @@ async def build_daily_report(store, *, now: float | None = None) -> str:
     lines.append(
         f"任务编排：完成 {len(pipe_ok)} / 失败 {len(pipe_bad)} / 已停止 {len(pipe_stop)}"
     )
-    detail = _failure_detail(cron_bad, pipe_bad)
     if detail:
         lines.append("失败明细：")
         lines.extend(detail)
@@ -214,7 +243,7 @@ async def run_daily_report_pass(
         return {"sent": False, "reason": "already_sent"}
     if not report_time_passed(state, n):
         return {"sent": False, "reason": "not_due"}
-    body = await build_daily_report(store, now=n)
+    body = await build_daily_report(store, now=n, template=state.get("template"))
     if push is None:
         from .automation import push_text_to_targets  # 局部导入避免模块环
 

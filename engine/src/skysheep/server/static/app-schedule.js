@@ -763,8 +763,10 @@ async function loadDailyReportRow() {
   }
   const tgl = document.getElementById("daily-report-toggle");
   const t = document.getElementById("daily-report-time");
+  const tpl = document.getElementById("daily-report-template");
   if (tgl) tgl.checked = !!st.enabled;
   if (t) t.value = st.time || "09:00";
+  if (tpl) tpl.value = st.template || "";
   row.classList.remove("hidden");
   bindDailyReportRow(); // 幂等重绑：重复 load 不叠加行为
 }
@@ -775,8 +777,10 @@ async function saveDailyReportRow(patch) {
     const r = await request("automation.daily_report_save", patch);
     const tgl = document.getElementById("daily-report-toggle");
     const t = document.getElementById("daily-report-time");
+    const tpl = document.getElementById("daily-report-template");
     if (tgl) tgl.checked = !!r.enabled;
     if (t) t.value = r.time || "09:00";
+    if (tpl) tpl.value = r.template || "";
     return r;
   } catch (e) {
     addNotice("日报设置保存失败: " + e.message);
@@ -790,6 +794,8 @@ function bindDailyReportRow() {
   if (tgl) tgl.onchange = () => saveDailyReportRow({ enabled: tgl.checked });
   const t = document.getElementById("daily-report-time");
   if (t) t.onchange = () => saveDailyReportRow({ time: t.value });
+  const tpl = document.getElementById("daily-report-template");
+  if (tpl) tpl.onchange = () => saveDailyReportRow({ template: tpl.value });
 }
 
 // ---------- 今日运行总览（automation.run_center_summary，只读聚合） ----------

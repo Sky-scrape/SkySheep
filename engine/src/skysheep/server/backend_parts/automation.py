@@ -50,6 +50,11 @@ from .budget_alert import (
     today_str as budget_alert_today,
 )
 from .daily_report import (
+    TEMPLATE_MAX_CHARS,
+    parse_hhmm,
+    run_daily_report_pass,
+)
+from .daily_report import (
     _clip as clip_line,
 )
 from .daily_report import (
@@ -57,10 +62,6 @@ from .daily_report import (
 )
 from .daily_report import (
     load_state as load_daily_report_state,
-)
-from .daily_report import (
-    parse_hhmm,
-    run_daily_report_pass,
 )
 from .daily_report import (
     save_state as save_daily_report_state,
@@ -3046,9 +3047,10 @@ class AutomationMixin:
         return load_daily_report_state()
 
     async def daily_report_save(self, params: dict) -> dict:
-        """保存日报设置：enabled 开关与推送时刻（HH:MM），原子写状态文件。
+        """保存日报设置：enabled 开关、推送时刻（HH:MM）与自定义模板（P10）。
 
-        时刻不合法直接报错（不静默回落默认值——用户填错要看得见）。
+        时刻不合法直接报错（不静默回落默认值——用户填错要看得见）。模板传
+        空串/纯空白 = 恢复内置格式（删除键），超长报错不静默截断。
         """
         state = load_daily_report_state()
         if params.get("enabled") is not None:
@@ -3058,6 +3060,15 @@ class AutomationMixin:
             if parse_hhmm(raw) is None:
                 raise RuntimeError("推送时间格式应为 HH:MM（24 小时制，如 09:00）")
             state["time"] = raw
+        if "template" in params:
+            raw = params.get("template")
+            if raw is None or str(raw).strip() == "":
+                state.pop("template", None)
+            else:
+                text = str(raw).strip()
+                if len(text) > TEMPLATE_MAX_CHARS:
+                    raise RuntimeError(f"日报模板最长 {TEMPLATE_MAX_CHARS} 字符，当前 {len(text)}")
+                state["template"] = text
         save_daily_report_state(state)
         return await self.daily_report_status()
 

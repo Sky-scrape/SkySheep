@@ -606,6 +606,9 @@
               <input type="time" id="daily-report-time" value="09:00"
                      title="每天到这个时刻推送日报（24 小时制）">
               <span class="dim small">到点把当天「定时 / 编排」的运行终态汇总成一条，经已启用的渠道推送</span>
+              <textarea id="daily-report-template" rows="3" spellcheck="false"
+                        placeholder="留空用内置格式；占位符：{date} {cron_ok} {cron_fail} {pipe_done} {pipe_fail} {pipe_stop} {detail}"
+                        title="自定义日报模板（最长 2000 字符）：{detail} 展开为失败明细多行，无失败时是「无」；其余花括号原样保留"></textarea>
             </div>
           </section>
 

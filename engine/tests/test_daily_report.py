@@ -333,3 +333,56 @@ def test_day_bounds_end_at_next_local_midnight_across_dst(monkeypatch):
     mid = datetime(2026, 11, 15, 17, 0, tzinfo=utc).timestamp()
     s2, e2 = dr._day_bounds(mid)
     assert e2 - s2 == 24 * 3600
+
+
+# ---- P10 模板自定义 ----
+
+
+async def test_build_report_template_placeholders(store):
+    start, _end = _day_window()
+    now = start + 3600
+    await _seed_cron(store, "备份额", "ok", now)
+    await _seed_cron(store, "巡检", "error", now, result="连不上")
+    await _seed_pipeline(store, "夜批", "failed", now)
+    body = await build_daily_report(
+        store,
+        template=(
+            "日报 {date}\n定时 {cron_ok}/{cron_fail}"
+            " 编排 {pipe_done}/{pipe_fail}/{pipe_stop}\n明细:\n{detail}"
+        ),
+    )
+    assert "定时 1/1" in body
+    assert "编排 0/1/0" in body
+    assert "巡检" in body and "连不上" in body  # {detail} 展开失败行
+    assert "{" not in body  # 已知占位符全部替换
+
+
+async def test_build_report_template_empty_day_keeps_unknown_placeholder(store):
+    body = await build_daily_report(store, template="今日 {cron_ok}·{detail}·{unknown}")
+    assert "今日 0·无·{unknown}" in body  # 无失败 {detail}=「无」；未知占位原样保留
+
+
+async def test_pass_uses_saved_template(store, home):
+    start, _end = _day_window()
+    now = start + 3600
+    await _seed_cron(store, "扫 TODO", "ok", now)
+    save_state({"enabled": True, "time": "00:00", "template": "模板版 {cron_ok} 项"})
+    push = _RecordingPush()
+    out = await run_daily_report_pass(store, None, now=now, push=push)
+    assert out["sent"] is True
+    assert out["body"] == "模板版 1 项"
+    assert "🐑" not in out["body"]  # 模板模式下不再拼内置头
+
+
+async def test_daily_report_save_template_validation(home):
+    """save 路径：合法收、空白恢复内置（删键）、超长显式报错不截断。"""
+    save_state({"enabled": True, "time": "09:00"})
+    b = AutomationMixin.__new__(AutomationMixin)  # 这两个方法不摸后端属性，裸实例可调
+    r = await AutomationMixin.daily_report_save(b, {"template": "自定义 {cron_fail}"})
+    assert r["template"] == "自定义 {cron_fail}"
+    r = await AutomationMixin.daily_report_save(b, {"template": "   "})
+    assert "template" not in r
+    with pytest.raises(RuntimeError):
+        await AutomationMixin.daily_report_save(b, {"template": "x" * 2001})
+    # 模板操作不误伤已有开关
+    assert load_state()["enabled"] is True

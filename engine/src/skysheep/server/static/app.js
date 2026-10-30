@@ -3221,7 +3221,51 @@ function advExportActions(meta, seq, tab) {
       .catch((e) => addNotice("导出失败: " + e.message));
   };
   box.appendChild(button);
+  // 与历史对比（P3 剩余半边）：看这次比同会话上一次多了/少了哪些发现。
+  // 只读、只在这张卡下方加一行注记，不新增弹窗层级。
+  const cmp = tcEl("button", "adv-compare", "与历史对比");
+  cmp.title = "对比同一会话里上一次对抗审查：发现总数与裁决档位变化、新增与已消失的问题";
+  cmp.onclick = (ev) => {
+    ev.stopPropagation();
+    cmp.disabled = true;
+    request("adversarial.compare", { session_id: tab.sid, seq })
+      .then((r) => { advRenderCompare(box, r); })
+      .catch((e) => addNotice("对比失败: " + e.message))
+      .finally(() => { cmp.disabled = false; });
+  };
+  box.appendChild(cmp);
   return box;
+}
+
+// 把 compare 结果渲染成卡片下方的一行注记（多行文本，不弹窗）
+function advRenderCompare(box, r) {
+  const old = box.querySelector(".adv-compare-note");
+  if (old) old.remove();
+  const note = document.createElement("div");
+  note.className = "adv-compare-note dim small";
+  if (!r || !r.previous) {
+    note.textContent = "这是该会话的第一次对抗审查，暂无可对比的历史。";
+    box.appendChild(note);
+    return;
+  }
+  const d = r.delta || {};
+  const sign = (n) => (n > 0 ? "+" + n : String(n));
+  const bits = [
+    `对比 seq ${r.previous_seq}：发现 ${r.previous.total} → ${r.current.total}（${sign(d.total || 0)}）`,
+  ];
+  const verdict = [];
+  for (const [key, label] of [["confirmed", "成立"], ["partial", "部分成立"],
+    ["refuted", "推翻"], ["pending", "待定"]]) {
+    if (d[key]) verdict.push(`${label} ${sign(d[key])}`);
+  }
+  if (verdict.length) bits.push("裁决变化：" + verdict.join("、"));
+  bits.push(`新增 ${(r.added || []).length} 条、已消失 ${(r.resolved || []).length} 条、仍在 ${r.common} 条`);
+  note.textContent = bits.join("｜");
+  note.title = [
+    (r.added || []).length ? "新增：" + r.added.join("；") : "",
+    (r.resolved || []).length ? "已消失：" + r.resolved.join("；") : "",
+  ].filter(Boolean).join("\n") || "没有增减的条目";
+  box.appendChild(note);
 }
 
 // 圆桌结论转团队工单（P5 跨形态流转）：登记为执行型待办、不自动派工，

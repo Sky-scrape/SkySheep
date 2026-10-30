@@ -686,6 +686,37 @@ _ADV_SEV_LABELS = {"high": "高", "medium": "中", "low": "低", "info": "提示
 _ADV_ROLE_LABELS = {"finder": "发现者", "investigator": "调查者", "advisor": "建议者", "judge": "裁判"}
 
 
+def _adversarial_fingerprints(meta: dict) -> dict:
+    """对抗结果的「指纹视图」：计数 + 每条发现的稳定键（P3 历史对比用）。
+
+    键取「位置 + 描述首行」压空白后的文本，不含 id/序号：两次审查是两次独立
+    流水线，id 不跨轮稳定，而同一个 bug 在两轮里位置与描述首行几乎一样——
+    这正是「上次那个问题还在不在」要回答的问题。认不出来的（无位置无描述）
+    退化成整段描述的前 80 字，宁可对不上也不错配。
+    """
+    meta = meta if isinstance(meta, dict) else {}
+    stats = meta.get("stats") or {}
+    findings = [f for f in (meta.get("findings") or []) if isinstance(f, dict)]
+    keys: set[str] = set()
+    titles: dict[str, str] = {}
+    for f in findings:
+        raw_desc = str(f.get("description") or "").strip()
+        first_line = raw_desc.splitlines()[0] if raw_desc else ""
+        title = " ".join(first_line.split())[:80] or str(f.get("id") or "（无描述）")
+        location = " ".join(str(f.get("location") or "").split())
+        key = (location + "｜" + title).lower()
+        keys.add(key)
+        titles[key] = title
+    summary = {
+        "total": int(stats.get("total") or len(findings)),
+        "confirmed": int(stats.get("confirmed") or 0),
+        "partial": int(stats.get("partial") or 0),
+        "refuted": int(stats.get("refuted") or 0),
+        "pending": int(stats.get("pending") or 0),
+    }
+    return {"summary": summary, "keys": keys, "titles": titles}
+
+
 def _adversarial_report_markdown(session_title: str, meta: dict, seq: int) -> tuple[str, str]:
     """把落库的对抗 meta 组装成结构化 Markdown 报告（P3 导出）。
 
@@ -4017,6 +4048,65 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise RuntimeError("指定消息不是对抗审查结果")
         markdown, filename = _adversarial_report_markdown(sess.title, message.adversarial, seq)
         return {"filename": filename, "markdown": markdown}
+
+    async def adversarial_compare(self, params: dict, local: bool = True) -> dict:
+        """adversarial.compare：本次对抗审查与「同会话上一次」的对比（P3 剩余半边）。
+
+        对比口径只看落库 meta（与导出同一事实源），不猜：
+        - 计数：发现总数、各裁决档位（成立/部分成立/推翻/待定）的增减；
+        - 清单：按「位置 + 描述首行」认指纹，算出**新增**与**已消失**的发现
+          （第二次审查把上次的问题修掉了，就是「已消失」）。
+        找上一次的方式：取该消息之前最近窗口里的对抗结果（最多回看 200 条），
+        找不到就返回 previous=None（首次审查，前端只说「这是第一次」）。
+        来源校验与导出同口径：seq + 会话归属。
+        """
+        sid = str(params.get("session_id", "") or "")
+        if local:
+            sess = await self.store.get_session(sid)
+            if sess is None:
+                raise RuntimeError("session not found: " + sid)
+        else:
+            sess = await self._get_owned_session(sid)
+        try:
+            seq = int(params.get("seq", 0))
+        except (TypeError, ValueError):
+            raise RuntimeError("无效的对抗消息序号") from None
+        if seq <= 0:
+            raise RuntimeError("缺少对抗消息序号")
+        message = await self.store.get_full_message_at(sid, seq)
+        if message is None or not message.adversarial:
+            raise RuntimeError("指定消息不是对抗审查结果")
+
+        previous = None
+        window, _first, _last = await self.store.load_messages_window(
+            sid, before_seq=seq, limit=200,
+        )
+        for candidate in reversed(window):
+            if candidate.adversarial:
+                previous = candidate
+                break
+        cur = _adversarial_fingerprints(message.adversarial)
+        if previous is None:
+            return {
+                "current": cur["summary"], "current_seq": seq,
+                "previous": None, "previous_seq": 0,
+                "delta": {}, "added": [], "resolved": [], "common": len(cur["keys"]),
+            }
+        prev = _adversarial_fingerprints(previous.adversarial)
+        added_keys = cur["keys"] - prev["keys"]
+        resolved_keys = prev["keys"] - cur["keys"]
+        delta = {
+            key: cur["summary"][key] - prev["summary"][key]
+            for key in ("total", "confirmed", "partial", "refuted", "pending")
+        }
+        return {
+            "current": cur["summary"], "current_seq": seq,
+            "previous": prev["summary"], "previous_seq": int(getattr(previous, "seq", 0) or 0),
+            "delta": delta,
+            "added": [cur["titles"][k] for k in sorted(added_keys)],
+            "resolved": [prev["titles"][k] for k in sorted(resolved_keys)],
+            "common": len(cur["keys"] & prev["keys"]),
+        }
 
     # ---- 团队：用户总管的多模型分工协作（一期 MVP，docs/团队模式设计.md） ----
     # 与圆桌并列的第二种多模型协作。活动团队是会话级状态（_teams：sid → 编排器，

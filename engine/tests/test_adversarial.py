@@ -730,3 +730,91 @@ def test_adversarial_export_errors(home):
         }})
         r = recv_until(ws, "e2")
         assert not r["ok"] and "缺少对抗消息序号" in r["error"]
+
+
+# ---- P3 剩余半边：与历史对比 ----
+
+
+def test_adversarial_fingerprints_stable_across_ids():
+    """指纹只认「位置 + 描述首行」：两次独立流水线的 id 不同也能对上同一问题。"""
+    from skysheep.server.backend import _adversarial_fingerprints
+
+    a = _adversarial_fingerprints({
+        "stats": {"total": 2, "confirmed": 1, "refuted": 1},
+        "findings": [
+            {"id": "F1", "location": "a.py:1", "description": "SQL 拼接\n第二行"},
+            {"id": "F2", "location": "b.py:9", "description": "缺超时"},
+        ],
+    })
+    b = _adversarial_fingerprints({
+        "stats": {"total": 2, "confirmed": 2},
+        "findings": [
+            {"id": "X9", "location": "A.PY:1", "description": "SQL 拼接"},
+            {"id": "X8", "location": "c.py:3", "description": "日志泄露密钥"},
+        ],
+    })
+    assert a["summary"] == {"total": 2, "confirmed": 1, "partial": 0, "refuted": 1, "pending": 0}
+    # 位置大小写不敏感、描述只取首行：F1 与 X9 视为同一条
+    assert len(a["keys"] & b["keys"]) == 1
+    assert _adversarial_fingerprints({})["summary"]["total"] == 0
+
+
+async def test_adversarial_compare_two_runs(store, home):
+    """compare：计数增减 + 新增/已消失发现，来源仍在同一个会话内。"""
+    from skysheep.messages import Message, TextBlock
+    from skysheep.server.backend import ServerBackend
+
+    sid = (await store.create_session(None)).id
+    first = Message.assistant([TextBlock(text="第一次报告")])
+    first.adversarial = {
+        "status": "done",
+        "stats": {"total": 2, "confirmed": 1, "refuted": 1},
+        "findings": [
+            {"id": "F1", "location": "a.py:1", "description": "SQL 拼接", "verdict": "confirmed"},
+            {"id": "F2", "location": "b.py:9", "description": "缺超时", "verdict": "refuted"},
+        ],
+    }
+    await store.append_message(sid, first)
+    second = Message.assistant([TextBlock(text="第二次报告")])
+    second.adversarial = {
+        "status": "done",
+        "stats": {"total": 2, "confirmed": 1, "partial": 1},
+        "findings": [
+            {"id": "F1", "location": "a.py:1", "description": "SQL 拼接", "verdict": "confirmed"},
+            {"id": "F3", "location": "c.py:3", "description": "日志泄露密钥", "verdict": "partial"},
+        ],
+    }
+    await store.append_message(sid, second)
+
+    class _Host:
+        pass
+
+    host = _Host()
+    host.store = store
+    out = await ServerBackend.adversarial_compare(
+        host, {"session_id": sid, "seq": second.seq})
+    assert out["previous_seq"] == first.seq
+    assert out["current"]["total"] == 2 and out["previous"]["total"] == 2
+    assert out["delta"]["total"] == 0
+    assert out["delta"]["partial"] == 1 and out["delta"]["refuted"] == -1
+    assert out["added"] == ["日志泄露密钥"]
+    assert out["resolved"] == ["缺超时"]
+    assert out["common"] == 1
+
+
+async def test_adversarial_compare_first_run_has_no_previous(store, home):
+    from skysheep.messages import Message, TextBlock
+    from skysheep.server.backend import ServerBackend
+
+    sid = (await store.create_session(None)).id
+    msg = Message.assistant([TextBlock(text="唯一一次")])
+    msg.adversarial = {"status": "done", "stats": {"total": 1}, "findings": []}
+    await store.append_message(sid, msg)
+
+    class _Host:
+        pass
+
+    host = _Host()
+    host.store = store
+    out = await ServerBackend.adversarial_compare(host, {"session_id": sid, "seq": msg.seq})
+    assert out["previous"] is None and out["delta"] == {}

@@ -209,10 +209,18 @@ async def test_pass_keeps_concurrent_enabled_change(store, home):
 def test_state_defaults_disabled_and_roundtrip(home):
     assert not dr.state_path().exists()
     st = load_state()
-    assert st == {"enabled": False, "time": dr.DEFAULT_REPORT_TIME, "last_sent_date": ""}
+    assert st == {
+        "enabled": False, "time": dr.DEFAULT_REPORT_TIME, "last_sent_date": "",
+        "weekly_enabled": False, "weekly_time": dr.DEFAULT_REPORT_TIME,
+        "weekly_weekday": 0, "weekly_last_sent_date": "",
+    }
 
     save_state({"enabled": True, "time": "8:05", "last_sent_date": "2026-10-01"})
-    assert load_state() == {"enabled": True, "time": "8:05", "last_sent_date": "2026-10-01"}
+    back = load_state()
+    assert back["enabled"] is True and back["time"] == "8:05"
+    assert back["last_sent_date"] == "2026-10-01"
+    # 周报默认值随同一份状态落盘（未配置 = 关 + 周一 09:00）
+    assert back["weekly_enabled"] is False and back["weekly_weekday"] == 0
     raw = json.loads(dr.state_path().read_text(encoding="utf-8"))
     assert raw["enabled"] is True
 
@@ -229,7 +237,10 @@ def test_state_tolerates_garbage(home):
 
 def test_state_unknown_fields_dropped(home):
     save_state({"enabled": True, "time": "07:00", "hacker": "x", "last_sent_date": "d"})
-    assert load_state() == {"enabled": True, "time": "07:00", "last_sent_date": "d"}
+    back = load_state()
+    assert back["enabled"] is True and back["time"] == "07:00"
+    assert back["last_sent_date"] == "d"
+    assert "hacker" not in back, "未知字段不落盘"
 
 
 @pytest.mark.parametrize("raw,expect", [
@@ -257,7 +268,18 @@ async def test_mixin_daily_report_save_and_status(home):
     assert out["enabled"] is True and out["time"] == "07:30"
     # 只改开关，时刻保持
     out = await host.daily_report_save({"enabled": False})
-    assert out == {"enabled": False, "time": "07:30", "last_sent_date": ""}
+    assert out["enabled"] is False and out["time"] == "07:30"
+    assert out["last_sent_date"] == ""
+    # 周报三件套可以单独改，互不影响日报那组
+    out = await host.daily_report_save({
+        "weekly_enabled": True, "weekly_weekday": 5, "weekly_time": "20:00"})
+    assert out["weekly_enabled"] is True
+    assert out["weekly_weekday"] == 5 and out["weekly_time"] == "20:00"
+    assert out["enabled"] is False, "改周报不该动日报开关"
+    with pytest.raises(RuntimeError):
+        await host.daily_report_save({"weekly_weekday": 9})
+    with pytest.raises(RuntimeError):
+        await host.daily_report_save({"weekly_time": "25:00"})
 
 
 async def test_mixin_daily_report_rejects_bad_time(home):
@@ -386,3 +408,121 @@ async def test_daily_report_save_template_validation(home):
         await AutomationMixin.daily_report_save(b, {"template": "x" * 2001})
     # 模板操作不误伤已有开关
     assert load_state()["enabled"] is True
+
+
+# ---- 周报（P10 剩余半边）：7 天窗口 / 周几时刻 / 防重发 ----
+
+
+def test_weekly_defaults_off_and_state_roundtrip(home):
+    st = load_state()
+    assert st["weekly_enabled"] is False
+    assert st["weekly_weekday"] == 0 and st["weekly_time"] == "09:00"
+    st.update({
+        "weekly_enabled": True, "weekly_weekday": 3, "weekly_time": "10:30",
+        "weekly_template": "总 {total} 次，失败 {fail}",
+    })
+    save_state(st)
+    back = load_state()
+    assert back["weekly_enabled"] is True
+    assert back["weekly_weekday"] == 3 and back["weekly_time"] == "10:30"
+    assert back["weekly_template"] == "总 {total} 次，失败 {fail}"
+    # 周几只认 0..6，其余回落周一（手改状态文件的兜底）
+    bad = load_state()
+    bad["weekly_weekday"] = 9
+    save_state(bad)
+    assert load_state()["weekly_weekday"] == 0
+
+
+def test_weekly_due_matches_weekday_and_time(home):
+    from datetime import datetime
+
+    from skysheep.server.backend_parts.daily_report import weekly_due
+
+    # 2026-10-28 是周三（weekday=2）
+    noon = datetime(2026, 10, 28, 12, 0).timestamp()
+    state = {"weekly_weekday": 2, "weekly_time": "09:00"}
+    assert weekly_due(state, noon) is True
+    assert weekly_due({"weekly_weekday": 1, "weekly_time": "09:00"}, noon) is False
+    # 到了周几但没到点：不发
+    assert weekly_due({"weekly_weekday": 2, "weekly_time": "18:00"}, noon) is False
+
+
+def test_week_bounds_is_seven_local_days(home):
+    from datetime import datetime
+
+    from skysheep.server.backend_parts.daily_report import _week_bounds
+
+    now = datetime(2026, 10, 28, 12, 0).timestamp()
+    start, end = _week_bounds(now)
+    assert datetime.fromtimestamp(start) == datetime(2026, 10, 22)
+    assert datetime.fromtimestamp(end) == datetime(2026, 10, 29)
+
+
+async def test_build_weekly_report_counts_from_run_ledger(store):
+    from skysheep.server.backend_parts.daily_report import build_weekly_report
+
+    now = time.time()
+    for i, (kind, status, outcome, err) in enumerate([
+        ("cron", "done", "ok", ""),
+        ("cron", "error", "failed", "凭据过期：401"),
+        ("cron", "error", "failed", "凭据过期：401"),
+        ("pipeline_node", "done", "ok", ""),
+        ("pipeline_node", "skipped", "", ""),
+    ]):
+        run = await store.add_automation_run(
+            kind=kind, task_id=i + 1, status=status, started_at=now - i * 3600,
+        )
+        await store.finish_automation_run(
+            run["id"], status=status, outcome=outcome, error=err, finished_at=now,
+        )
+    body = await build_weekly_report(store, now=now)
+    assert "运行周报" in body
+    assert "运行总数：5" in body
+    assert "成功 2 / 失败 2 / 跳过或停止 1" in body
+    assert "2 次：凭据过期：401" in body
+    assert "定时任务 3" in body
+    # 模板直替
+    tpl = await build_weekly_report(store, now=now, template="{range}｜{total}/{ok}/{fail}/{stopped}")
+    assert tpl.startswith(dr.today_str(now - 6 * 86400)[:4])  # 以年份开头
+    assert tpl.count("/") == 3 and tpl.endswith("/2/1")
+
+
+async def test_weekly_pass_respects_schedule_and_records_once(store, home):
+    from skysheep.server.backend_parts.daily_report import run_weekly_report_pass
+
+    push = _RecordingPush()
+    state = load_state()
+    state.update({"weekly_enabled": True, "weekly_weekday": 0, "weekly_time": "09:00"})
+    save_state(state)
+    # 用「今天是不是周一」决定断言方向：周一 10:00 → 发；其它日子 → not_due
+    from datetime import datetime
+
+    now = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+    is_monday = now.weekday() == 0
+    r1 = await run_weekly_report_pass(store, None, now=now.timestamp(), push=push)
+    if is_monday:
+        assert r1["sent"] is True and push.calls[0][0] == "运行周报"
+        r2 = await run_weekly_report_pass(store, None, now=now.timestamp(), push=push)
+        assert r2 == {"sent": False, "reason": "already_sent"}
+        assert len(push.calls) == 1
+    else:
+        assert r1 == {"sent": False, "reason": "not_due"}
+        # 换到今天对应的周几再试一次
+        state = load_state()
+        state["weekly_weekday"] = now.weekday()
+        save_state(state)
+        r3 = await run_weekly_report_pass(store, None, now=now.timestamp(), push=push)
+        assert r3["sent"] is True
+
+
+async def test_weekly_pass_disabled_by_default(store, home):
+    from skysheep.server.backend_parts.daily_report import run_weekly_report_pass
+
+    push = _RecordingPush()
+    r = await run_weekly_report_pass(store, None, now=time.time(), push=push)
+    assert r == {"sent": False, "reason": "disabled"}
+    assert push.calls == []
+
+
+# ---- 周报（P10 剩余半边）：7 天窗口 / 周几时刻 / 防重发 ----
+

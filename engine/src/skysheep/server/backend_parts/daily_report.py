@@ -27,6 +27,14 @@ logger = logging.getLogger("skysheep.security")
 
 STATE_FILE = "daily_report.json"
 DEFAULT_REPORT_TIME = "09:00"
+# 周报（P10 剩余半边）：每 7 天一条，窗口是「今天往前数 7 天（含今天）」。
+# 与日报共用同一个状态文件——一张卡片管两种节律，少一个要同步的地方。
+WEEK_DAYS = 7
+DEFAULT_WEEKLY_WEEKDAY = 0  # 0=周一 … 6=周日（与 datetime.weekday() 同口径）
+WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+# 周报汇总的运行条数上限（automation_runs 的分页上限 500）：超过只统计最近 500 条，
+# 报告里如实标注「仅统计最近 N 条」，不假装是全量。
+WEEKLY_RUN_LIMIT = 500
 
 # 失败明细行里单条原因的截断长度（日报要一眼看完，明细只给指路的第一句）
 DETAIL_CHARS = 120
@@ -39,7 +47,15 @@ def state_path() -> Path:
 
 
 def default_state() -> dict:
-    return {"enabled": False, "time": DEFAULT_REPORT_TIME, "last_sent_date": ""}
+    return {
+        "enabled": False, "time": DEFAULT_REPORT_TIME, "last_sent_date": "",
+        # 周报三件套：开关 / 周几 / 时刻；last_sent_date 记的是「本周已发的日期」，
+        # 与日报分开记，互不影响各自的防重发判定
+        "weekly_enabled": False,
+        "weekly_time": DEFAULT_REPORT_TIME,
+        "weekly_weekday": DEFAULT_WEEKLY_WEEKDAY,
+        "weekly_last_sent_date": "",
+    }
 
 
 def load_state() -> dict:
@@ -56,9 +72,23 @@ def load_state() -> dict:
     if parse_hhmm(raw.get("time")) is not None:
         state["time"] = str(raw["time"]).strip()
     state["last_sent_date"] = str(raw.get("last_sent_date") or "")
+    # 周报：开关同样只认真布尔；周几只认 0..6 的整数（填错回落周一），
+    # 时刻复用日报的 HH:MM 校验
+    state["weekly_enabled"] = raw.get("weekly_enabled", False) is True
+    if parse_hhmm(raw.get("weekly_time")) is not None:
+        state["weekly_time"] = str(raw["weekly_time"]).strip()
+    try:
+        wd = int(raw.get("weekly_weekday", DEFAULT_WEEKLY_WEEKDAY))
+    except (TypeError, ValueError):
+        wd = DEFAULT_WEEKLY_WEEKDAY
+    state["weekly_weekday"] = wd if 0 <= wd <= 6 else DEFAULT_WEEKLY_WEEKDAY
+    state["weekly_last_sent_date"] = str(raw.get("weekly_last_sent_date") or "")
     template = raw.get("template")
     if isinstance(template, str) and template.strip():
         state["template"] = template.strip()[:TEMPLATE_MAX_CHARS]
+    weekly_template = raw.get("weekly_template")
+    if isinstance(weekly_template, str) and weekly_template.strip():
+        state["weekly_template"] = weekly_template.strip()[:TEMPLATE_MAX_CHARS]
     return state
 
 
@@ -66,7 +96,7 @@ def save_state(state: dict) -> None:
     """原子写日报状态（引擎自有状态文件一律原子写，见 textio.write_text_atomic）。
 
     未知字段不落盘：写出去的形状永远是自己读得回来的那几个键
-    （enabled / time / last_sent_date / 可选 template）。
+    （enabled / time / last_sent_date / weekly_* / 可选 template）。
     """
     clean = default_state()
     clean["enabled"] = bool(state.get("enabled", False))
@@ -75,9 +105,23 @@ def save_state(state: dict) -> None:
         str(hhmm).strip() if parse_hhmm(hhmm) is not None else DEFAULT_REPORT_TIME
     )
     clean["last_sent_date"] = str(state.get("last_sent_date") or "")
+    clean["weekly_enabled"] = bool(state.get("weekly_enabled", False))
+    whhmm = state.get("weekly_time")
+    clean["weekly_time"] = (
+        str(whhmm).strip() if parse_hhmm(whhmm) is not None else DEFAULT_REPORT_TIME
+    )
+    try:
+        wd = int(state.get("weekly_weekday", DEFAULT_WEEKLY_WEEKDAY))
+    except (TypeError, ValueError):
+        wd = DEFAULT_WEEKLY_WEEKDAY
+    clean["weekly_weekday"] = wd if 0 <= wd <= 6 else DEFAULT_WEEKLY_WEEKDAY
+    clean["weekly_last_sent_date"] = str(state.get("weekly_last_sent_date") or "")
     template = state.get("template")
     if isinstance(template, str) and template.strip():
         clean["template"] = template.strip()[:TEMPLATE_MAX_CHARS]
+    weekly_template = state.get("weekly_template")
+    if isinstance(weekly_template, str) and weekly_template.strip():
+        clean["weekly_template"] = weekly_template.strip()[:TEMPLATE_MAX_CHARS]
     write_text_atomic(state_path(), json.dumps(clean, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -254,5 +298,158 @@ async def run_daily_report_pass(
         logger.warning("运行日报推送失败：%s", e)
     fresh = load_state()  # 写前重读合并：避免覆盖并发期间保存的开关改动
     fresh["last_sent_date"] = today
+    save_state(fresh)
+    return {"sent": True, "reason": "ok", "body": body}
+
+
+# ---- 周报（P10 剩余半边）：每 7 天一条的运行汇总 ----
+# 与日报的分工：日报回答「昨天跑得怎么样」，周报回答「这一周的趋势」——数据源
+# 必须换成运行账本 automation_runs（cron_tasks 每个任务只留最后一次，天然数不出
+# 一周）。窗口是「今天往前数 7 天（含今天）」，与日报的「本地日历天」同一套
+# 边界算法（datetime 推日，不用固定 86400 秒外推，DST 日不会错一小时）。
+
+
+def _week_bounds(now: float) -> tuple[float, float]:
+    """本地时区「最近 7 天（含今天）」的 [起点零点, 次日元旦零点) epoch 区间。"""
+    dt = datetime.fromtimestamp(now)
+    start = (datetime(dt.year, dt.month, dt.day) - timedelta(days=WEEK_DAYS - 1)).timestamp()
+    end = (datetime(dt.year, dt.month, dt.day) + timedelta(days=1)).timestamp()
+    return start, end
+
+
+def weekly_due(state: dict, now: float) -> bool:
+    """周报是否该发了：今天是配置的星期几，且已到配置时刻。
+
+    周几/时刻都不合法时回落默认值（周一 09:00）——与日报「时刻不合法回落
+    默认」同姿态；界面上填错会当场报错，这里兜的是手改状态文件的情况。
+    """
+    try:
+        wd = int(state.get("weekly_weekday", DEFAULT_WEEKLY_WEEKDAY))
+    except (TypeError, ValueError):
+        wd = DEFAULT_WEEKLY_WEEKDAY
+    if not 0 <= wd <= 6:
+        wd = DEFAULT_WEEKLY_WEEKDAY
+    dt = datetime.fromtimestamp(now)
+    if dt.weekday() != wd:
+        return False
+    hhmm = parse_hhmm(state.get("weekly_time")) or (9, 0)
+    return (dt.hour, dt.minute) >= hhmm
+
+
+def _run_failed(row: dict) -> bool:
+    """运行账本行的失败口径（与工厂/告警同一套，见 automation.alert_repeated_failures）。"""
+    status = str(row.get("status") or "")
+    if status in ("running", "skipped", "cancelled"):
+        return False
+    return status in ("error", "interrupted", "empty") or str(row.get("outcome") or "") == "failed"
+
+
+async def build_weekly_report(store, *, now: float | None = None, template: str | None = None) -> str:
+    """最近 7 天的运行汇总（成功/失败/跳过计数 + 失败原因 Top 3 + 最忙的一天）。
+
+    数据口径：``automation_runs`` 里 started_at 落在窗口内的运行行（整机口径，
+    不按项目拆）；一次查询最多取 WEEKLY_RUN_LIMIT 条，取满时报告如实标注
+    「仅统计最近 N 条」而不是假装全量。
+    """
+    n = time.time() if now is None else float(now)
+    start, end = _week_bounds(n)
+    rows = await store.list_automation_runs(
+        started_since=start, limit=WEEKLY_RUN_LIMIT,
+    )
+    rows = [r for r in rows if float(r.get("started_at") or 0) < end]
+    truncated = len(rows) >= WEEKLY_RUN_LIMIT
+
+    ok = failed = stopped = 0
+    kind_count: dict[str, int] = {}
+    day_count: dict[str, int] = {}
+    reasons: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "")
+        if status in ("running", "skipped", "cancelled"):
+            stopped += 1
+        elif _run_failed(row):
+            failed += 1
+            why = _clip(row.get("error") or row.get("result_excerpt")) or "（无原因记录）"
+            reasons[why] = reasons.get(why, 0) + 1
+        else:
+            ok += 1
+        kind = str(row.get("kind") or "other")
+        kind_count[kind] = kind_count.get(kind, 0) + 1
+        day = time.strftime("%Y-%m-%d", time.localtime(float(row.get("started_at") or 0)))
+        day_count[day] = day_count.get(day, 0) + 1
+
+    range_text = (
+        time.strftime("%Y-%m-%d", time.localtime(start))
+        + " ~ " + time.strftime("%Y-%m-%d", time.localtime(n))
+    )
+    top_reasons = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+    detail = "\n".join(f"· {cnt} 次：{why}" for why, cnt in top_reasons)
+    busiest = ""
+    if day_count:
+        day, cnt = max(day_count.items(), key=lambda kv: (kv[1], kv[0]))
+        busiest = f"{day}（{cnt} 次）"
+    kind_text = "、".join(
+        f"{KIND_LABELS.get(k, k)} {v}" for k, v in sorted(kind_count.items(), key=lambda kv: -kv[1])
+    ) or "无"
+
+    if template and template.strip():
+        repl = {
+            "range": range_text, "total": len(rows), "ok": ok, "fail": failed,
+            "stopped": stopped, "busiest": busiest or "无",
+            "detail": detail or "无", "kinds": kind_text,
+        }
+        filled = template
+        for key, val in repl.items():
+            filled = filled.replace("{" + key + "}", str(val))
+        return filled
+
+    lines = [f"🐑 SkySheep 运行周报 · {range_text}"]
+    if not rows:
+        lines.append("这一周没有定时任务或任务编排的运行记录。")
+        return "\n".join(lines)
+    lines.append(f"运行总数：{len(rows)}（{kind_text}）")
+    lines.append(f"成功 {ok} / 失败 {failed} / 跳过或停止 {stopped}")
+    lines.append("失败原因 Top 3：" if top_reasons else "失败原因：无")
+    if detail:
+        lines.extend(detail.splitlines())
+    if busiest:
+        lines.append("最忙的一天：" + busiest)
+    if truncated:
+        lines.append(f"（仅统计最近 {WEEKLY_RUN_LIMIT} 条运行，更早的请到工厂看板按日期筛）")
+    return "\n".join(lines)
+
+
+KIND_LABELS = {"cron": "定时任务", "pipeline_node": "流水线节点", "pipeline": "流水线"}
+
+
+async def run_weekly_report_pass(
+    store, mgr, *, now: float | None = None, push=None,
+) -> dict:
+    """周报的一轮检查：开关开、今天是配置的周几、已到点、本周没发过 → 推一次。
+
+    防重发键是 ``weekly_last_sent_date``（与日报的 ``last_sent_date`` 分开记）：
+    一天里循环每 60 秒扫一次，同一周只发一次。**无论送达与否都记日期**，理由
+    同日报——周报不值得为不可达的地址刷一整天请求。
+    """
+    n = time.time() if now is None else float(now)
+    state = load_state()
+    if not state.get("weekly_enabled"):
+        return {"sent": False, "reason": "disabled"}
+    today = today_str(n)
+    if state.get("weekly_last_sent_date") == today:
+        return {"sent": False, "reason": "already_sent"}
+    if not weekly_due(state, n):
+        return {"sent": False, "reason": "not_due"}
+    body = await build_weekly_report(store, now=n, template=state.get("weekly_template"))
+    if push is None:
+        from .automation import push_text_to_targets  # 局部导入避免模块环
+
+        push = push_text_to_targets
+    try:
+        await push(mgr, body, what="运行周报")
+    except Exception as e:  # noqa: BLE001 - 推送出口异常不影响记日期
+        logger.warning("运行周报推送失败：%s", e)
+    fresh = load_state()
+    fresh["weekly_last_sent_date"] = today
     save_state(fresh)
     return {"sent": True, "reason": "ok", "body": body}

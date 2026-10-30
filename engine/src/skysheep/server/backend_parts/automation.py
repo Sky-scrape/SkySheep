@@ -54,6 +54,7 @@ from .daily_report import (
     TEMPLATE_MAX_CHARS,
     parse_hhmm,
     run_daily_report_pass,
+    run_weekly_report_pass,
 )
 from .daily_report import (
     _clip as clip_line,
@@ -3066,14 +3067,19 @@ class AutomationMixin:
             self._daily_report_task = None
 
     async def _daily_report_loop(self) -> None:
-        """周期检查是否到日报时刻：到点推一次并记日期，单轮失败不终止循环。"""
+        """周期检查是否到日报/周报时刻：到点推一次并记日期，单轮失败不终止循环。
+
+        两张报表各扫各的（各自开关、各自防重发键），一次循环内先后跑完；任一方
+        抛错都不影响另一方——日报的推送失败不该把周报也一起拖掉。
+        """
         while True:
-            try:
-                await run_daily_report_pass(self.store, self.channels)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001
-                pass  # 单轮失败不终止循环（与 cron / 流水线扫描循环同一姿态）
+            for step in (run_daily_report_pass, run_weekly_report_pass):
+                try:
+                    await step(self.store, self.channels)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    pass  # 单轮失败不终止循环（与 cron / 流水线扫描循环同一姿态）
             await asyncio.sleep(self.DAILY_REPORT_INTERVAL)
 
     async def daily_report_status(self) -> dict:
@@ -3081,10 +3087,13 @@ class AutomationMixin:
         return load_daily_report_state()
 
     async def daily_report_save(self, params: dict) -> dict:
-        """保存日报设置：enabled 开关、推送时刻（HH:MM）与自定义模板（P10）。
+        """保存日报/周报设置：开关、推送时刻（HH:MM）与自定义模板（P10）。
 
         时刻不合法直接报错（不静默回落默认值——用户填错要看得见）。模板传
         空串/纯空白 = 恢复内置格式（删除键），超长报错不静默截断。
+
+        周报（P10 剩余半边）与日报共用这一张卡：weekly_* 三件套（开关 / 周几 /
+        时刻）分别校验后落同一个状态文件，防重发键也各记各的。
         """
         state = load_daily_report_state()
         if params.get("enabled") is not None:
@@ -3103,6 +3112,31 @@ class AutomationMixin:
                 if len(text) > TEMPLATE_MAX_CHARS:
                     raise RuntimeError(f"日报模板最长 {TEMPLATE_MAX_CHARS} 字符，当前 {len(text)}")
                 state["template"] = text
+        # ---- 周报 ----
+        if params.get("weekly_enabled") is not None:
+            state["weekly_enabled"] = bool(params["weekly_enabled"])
+        if params.get("weekly_time") is not None:
+            raw = str(params["weekly_time"]).strip()
+            if parse_hhmm(raw) is None:
+                raise RuntimeError("周报时间格式应为 HH:MM（24 小时制，如 09:00）")
+            state["weekly_time"] = raw
+        if params.get("weekly_weekday") is not None:
+            try:
+                wd = int(params["weekly_weekday"])
+            except (TypeError, ValueError):
+                raise RuntimeError("周报星期应为 0–6 的整数（0 = 周一）") from None
+            if not 0 <= wd <= 6:
+                raise RuntimeError("周报星期应为 0–6 的整数（0 = 周一）")
+            state["weekly_weekday"] = wd
+        if "weekly_template" in params:
+            raw = params.get("weekly_template")
+            if raw is None or str(raw).strip() == "":
+                state.pop("weekly_template", None)
+            else:
+                text = str(raw).strip()
+                if len(text) > TEMPLATE_MAX_CHARS:
+                    raise RuntimeError(f"周报模板最长 {TEMPLATE_MAX_CHARS} 字符，当前 {len(text)}")
+                state["weekly_template"] = text
         save_daily_report_state(state)
         return await self.daily_report_status()
 

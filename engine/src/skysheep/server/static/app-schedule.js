@@ -768,6 +768,20 @@ async function loadDailyReportRow() {
   if (t) t.value = st.time || "09:00";
   if (tpl) tpl.value = st.template || "";
   row.classList.remove("hidden");
+  // 周报行（P10 剩余半边）：与日报同一个状态对象，字段各管各的。旧后端没有
+  // 这些键时按默认值渲染，周报行仍可见但开关是关的（保存会写成新键，无害）。
+  const wRow = document.getElementById("weekly-report-row");
+  if (wRow) {
+    const wTgl = document.getElementById("weekly-report-toggle");
+    const wWd = document.getElementById("weekly-report-weekday");
+    const wT = document.getElementById("weekly-report-time");
+    const wTpl = document.getElementById("weekly-report-template");
+    if (wTgl) wTgl.checked = !!st.weekly_enabled;
+    if (wWd) wWd.value = String(st.weekly_weekday ?? 0);
+    if (wT) wT.value = st.weekly_time || "09:00";
+    if (wTpl) wTpl.value = st.weekly_template || "";
+    wRow.classList.remove("hidden");
+  }
   bindDailyReportRow(); // 幂等重绑：重复 load 不叠加行为
 }
 
@@ -781,6 +795,14 @@ async function saveDailyReportRow(patch) {
     if (tgl) tgl.checked = !!r.enabled;
     if (t) t.value = r.time || "09:00";
     if (tpl) tpl.value = r.template || "";
+    const wTgl = document.getElementById("weekly-report-toggle");
+    const wWd = document.getElementById("weekly-report-weekday");
+    const wT = document.getElementById("weekly-report-time");
+    const wTpl = document.getElementById("weekly-report-template");
+    if (wTgl) wTgl.checked = !!r.weekly_enabled;
+    if (wWd) wWd.value = String(r.weekly_weekday ?? 0);
+    if (wT) wT.value = r.weekly_time || "09:00";
+    if (wTpl) wTpl.value = r.weekly_template || "";
     return r;
   } catch (e) {
     addNotice("日报设置保存失败: " + e.message);
@@ -796,6 +818,15 @@ function bindDailyReportRow() {
   if (t) t.onchange = () => saveDailyReportRow({ time: t.value });
   const tpl = document.getElementById("daily-report-template");
   if (tpl) tpl.onchange = () => saveDailyReportRow({ template: tpl.value });
+  // ---- 周报（P10 剩余半边）----
+  const wTgl = document.getElementById("weekly-report-toggle");
+  if (wTgl) wTgl.onchange = () => saveDailyReportRow({ weekly_enabled: wTgl.checked });
+  const wWd = document.getElementById("weekly-report-weekday");
+  if (wWd) wWd.onchange = () => saveDailyReportRow({ weekly_weekday: parseInt(wWd.value, 10) || 0 });
+  const wT = document.getElementById("weekly-report-time");
+  if (wT) wT.onchange = () => saveDailyReportRow({ weekly_time: wT.value });
+  const wTpl = document.getElementById("weekly-report-template");
+  if (wTpl) wTpl.onchange = () => saveDailyReportRow({ weekly_template: wTpl.value });
 }
 
 // ---------- 今日运行总览（automation.run_center_summary，只读聚合） ----------

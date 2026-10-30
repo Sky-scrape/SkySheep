@@ -610,6 +610,33 @@
                         placeholder="留空用内置格式；占位符：{date} {cron_ok} {cron_fail} {pipe_done} {pipe_fail} {pipe_stop} {detail}"
                         title="自定义日报模板（最长 2000 字符）：{detail} 展开为失败明细多行，无失败时是「无」；其余花括号原样保留"></textarea>
             </div>
+
+            <!-- 每周运行周报（P10 剩余半边）：与日报共用同一个状态文件，但开关、
+                 周几、时刻、模板各管各的。数据源是运行账本（最近 7 天），由
+                 app-schedule.js 的 loadDailyReportRow 一起渲染。 -->
+            <div id="weekly-report-row" class="rp-daily hidden">
+              <label class="toggle-row check-row"
+                     title="开启后每周到设定那天的时刻，把最近 7 天的运行账本汇总成一条中文周报（总数 / 成功失败 / 失败原因 Top 3 / 最忙的一天），经已启用的聊天渠道 / Webhook 推送一次">
+                <input type="checkbox" id="weekly-report-toggle">
+                <span>每周运行周报</span>
+              </label>
+              <select id="weekly-report-weekday" class="rp-mini"
+                      title="每周的哪一天推送（默认周一）">
+                <option value="0">周一</option>
+                <option value="1">周二</option>
+                <option value="2">周三</option>
+                <option value="3">周四</option>
+                <option value="4">周五</option>
+                <option value="5">周六</option>
+                <option value="6">周日</option>
+              </select>
+              <input type="time" id="weekly-report-time" value="09:00"
+                     title="周报推送时刻（24 小时制）">
+              <span class="dim small">每周一条：最近 7 天跑了多少次、成几件、败在哪儿</span>
+              <textarea id="weekly-report-template" rows="2" spellcheck="false"
+                        placeholder="留空用内置格式；占位符：{range} {total} {ok} {fail} {stopped} {kinds} {busiest} {detail}"
+                        title="自定义周报模板（最长 2000 字符）：{range} 是 7 天窗口，{detail} 展开为失败原因 Top 3，{kinds} 是按产线类型的计数"></textarea>
+            </div>
           </section>
 
           <section id="rp-page-memory" class="rp-page hidden">

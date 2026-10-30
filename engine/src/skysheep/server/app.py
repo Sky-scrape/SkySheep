@@ -46,7 +46,7 @@ from ._dispatch_files import METHODS as _M_files
 from ._dispatch_ops import METHODS as _M_ops
 from ._dispatch_prefs import METHODS as _M_prefs
 from ._dispatch_session import METHODS as _M_session
-from .backend import THEME_PREFS, ServerBackend, client_origin
+from .backend import THEME_AUTO_DARK, THEME_AUTO_LIGHT, THEME_PREFS, ServerBackend, client_origin
 
 logger = logging.getLogger("skysheep.security")
 
@@ -330,7 +330,39 @@ def _is_hidden_static_path(path: str) -> bool:
     return any(part.startswith(".") for part in tail.split("/") if part)
 
 # 具体主题 id（去掉 auto 与旧版 light/dark 两档）：<html data-theme="…"> 只打这些值
-THEME_IDS = tuple(v for v in THEME_PREFS if v not in ("auto", "light", "dark"))
+THEME_IDS = tuple(v for v in THEME_PREFS if v not in ("auto", "light", "dark", "timed"))
+
+
+def _timed_window_active(frm, to, now=None) -> bool:
+    """定时切换主题（P20）：当前本地时刻是否落在 [frm, to) 深色窗内。
+
+    跨零点按「frm 之后或 to 之前」判（19:00→07:00 是常见形态）；frm == to
+    视为空窗（恒浅色）；起止缺省/非法按默认 19:00 / 07:00。now 供测试注入。
+    """
+    def _minutes(s):
+        if not isinstance(s, str) or ":" not in s:
+            return None
+        hh, _, mm = s.partition(":")
+        if not (hh.isdigit() and mm.isdigit()):
+            return None
+        h, m = int(hh), int(mm)
+        if h > 23 or m > 59:
+            return None
+        return h * 60 + m
+
+    start = _minutes(frm)
+    if start is None:
+        start = 19 * 60
+    end = _minutes(to)
+    if end is None:
+        end = 7 * 60
+    lt = now or time.localtime()
+    cur = lt.tm_hour * 60 + lt.tm_min
+    if start == end:
+        return False
+    if start < end:
+        return start <= cur < end
+    return cur >= start or cur < end
 
 
 def _first_paint_attrs(prefs: dict) -> str:
@@ -347,7 +379,20 @@ def _first_paint_attrs(prefs: dict) -> str:
         theme = "paper"
     elif theme == "dark":
         theme = "night"
-    if theme in THEME_IDS:
+    if theme == "timed":
+        # 定时切换（P20）：服务端就在本机，直接按本地时刻把深浅落点解析好注入，
+        # 首帧不用等 JS 二次判定；运行中的分钟级重解析由前端负责。
+        # 深浅落点复用「跟随系统」的两个下拉（缺省夜墨/纸墨），口径一致。
+        dark = _timed_window_active(prefs.get("theme_timed_from"), prefs.get("theme_timed_to"))
+        dark_id = prefs.get("theme_auto_dark")
+        if dark_id not in THEME_AUTO_DARK:
+            dark_id = "night"
+        light_id = prefs.get("theme_auto_light")
+        if light_id not in THEME_AUTO_LIGHT:
+            light_id = "paper"
+        parts.append('data-theme-mode="timed"')
+        parts.append(f'data-theme="{dark_id if dark else light_id}"')
+    elif theme in THEME_IDS:
         parts.append(f'data-theme-mode="{theme}"')
         parts.append(f'data-theme="{theme}"')
     else:

@@ -124,7 +124,7 @@ TAILSCALE_NETS = (
 # 其余是主题 id——浅色：纸墨 paper、青瓷 celadon、秋柿 kaki；深色：夜墨 night、
 # 黛夜 indigo、松烟 pine。与 app.js 的 THEMES 表、app.css 的 [data-theme=…] 段、
 # index.html 设置页的主题卡片一一对应，改主题列表要四处同步。
-THEME_PREFS = ("auto", "light", "dark", "paper", "celadon", "kaki", "night", "indigo", "pine")
+THEME_PREFS = ("auto", "timed", "light", "dark", "paper", "celadon", "kaki", "night", "indigo", "pine")
 # 「跟随系统」时的落点映射（设置页主题卡下方两个下拉）：浅色/深色各落一个具体主题，
 # 与 wintheme.read_ui_theme、前端 themeAutoLight/themeAutoDark、首帧注入共用同一值域。
 THEME_AUTO_LIGHT = ("paper", "celadon", "kaki")

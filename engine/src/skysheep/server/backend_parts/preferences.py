@@ -271,6 +271,11 @@ class PreferencesMixin:
             val = data.get(key)
             if isinstance(val, str) and val in allowed:
                 prefs[key] = val
+        # 主题定时切换的时段（P20）：HH:MM 自由值装不进白名单，按格式校验收
+        for key in ("theme_timed_from", "theme_timed_to"):
+            val = data.get(key)
+            if isinstance(val, str) and self._valid_hhmm(val):
+                prefs[key] = val
         return prefs
 
     # ---- Windows 系统通知（winotify toast；失败静默，非 Windows 平台不可用） ----
@@ -347,6 +352,17 @@ class PreferencesMixin:
         删项目/首启时自写自读（0 = 无项目态），不给前端看、也不许前端写。"""
         return {k: v for k, v in prefs.items() if k != "active_project"}
 
+    @staticmethod
+    def _valid_hhmm(s: str) -> bool:
+        """「HH:MM」24 小时制时段（主题定时切换 P20 用）：宽松收 9:05 这类一位小时。"""
+        if not isinstance(s, str) or ":" not in s:
+            return False
+        hh, _, mm = s.partition(":")
+        return (
+            hh.isdigit() and mm.isdigit()
+            and 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59
+        )
+
     def first_paint_prefs(self) -> dict:
         """首帧外观偏好：由 server/app.py 注入到 index.html 的 <html> 标签。
 
@@ -376,6 +392,7 @@ class PreferencesMixin:
                      "provider_order",
                      "hotkey", "default_model_name", "default_model_provider",
                      "aux_model_name", "aux_model_provider",
+                     "theme_timed_from", "theme_timed_to",
                      "notif_log",
                      self.TEAM_LAST_SEEN_KEY)
             if key not in self.UI_PREFS_LIMITS and key not in known \
@@ -391,6 +408,13 @@ class PreferencesMixin:
                 # （desktop._parse_hotkey / set 时校验服务名）
                 if isinstance(val, str) and val.strip():
                     current[key] = val.strip()
+                else:
+                    current.pop(key, None)
+                continue
+            if key in ("theme_timed_from", "theme_timed_to"):
+                # 主题定时切换的时段（HH:MM）：非法值按删除处理（回默认 19:00/07:00）
+                if isinstance(val, str) and self._valid_hhmm(val):
+                    current[key] = val
                 else:
                     current.pop(key, None)
                 continue

@@ -15084,7 +15084,10 @@ async function initUiPrefs() {
   // auto 的深浅落点也在这里回填（要在 applyThemeMode 之前，首帧解析用得上）
   themeAutoLight = THEMES[prefs.theme_auto_light] ? prefs.theme_auto_light : "paper";
   themeAutoDark = THEMES[prefs.theme_auto_dark] ? prefs.theme_auto_dark : "night";
+  if (HHMM_RE.test(prefs.theme_timed_from || "")) themeTimedFrom = prefs.theme_timed_from;
+  if (HHMM_RE.test(prefs.theme_timed_to || "")) themeTimedTo = prefs.theme_timed_to;
   renderThemeAutoRow();
+  renderThemeTimedRow();
   applyThemeMode(normalizeThemePref(prefs.theme), false);
   // 侧栏呈现形式（classic=原两区 | grouped=按项目分组）。boot 的首渲染可能已按
   // 默认的 classic 画过一帧，是分组就再补渲染一次
@@ -15288,15 +15291,33 @@ const THEMES = {
 function normalizeThemePref(v) {
   if (v === "light") return "paper";
   if (v === "dark") return "night";
+  if (v === "timed") return "timed";
   return Object.prototype.hasOwnProperty.call(THEMES, v) ? v : "auto";
 }
-let themePref = "auto"; // auto | 主题 id
+let themePref = "auto"; // auto | timed | 主题 id
 // 「跟随系统」的深浅落点（设置页主题卡下方的两个下拉；默认纸墨/夜墨）
 let themeAutoLight = "paper";
 let themeAutoDark = "night";
+// 「定时切换」（P20）的深色时段：可跨零点，深浅落点复用上面两个下拉
+let themeTimedFrom = "19:00";
+let themeTimedTo = "07:00";
+const HHMM_RE = /^([01]?\d|2[0-3]):[0-5]\d$/;
+function timedInWindow() {
+  const mins = (s, dft) => {
+    if (!HHMM_RE.test(s || "")) return dft;
+    const [h, m] = s.split(":").map(Number);
+    return h * 60 + m;
+  };
+  const now = new Date();
+  const t = now.getHours() * 60 + now.getMinutes();
+  const f = mins(themeTimedFrom, 19 * 60), e = mins(themeTimedTo, 7 * 60);
+  if (f === e) return false; // 起止相同视为空窗，恒浅色
+  return f < e ? (t >= f && t < e) : (t >= f || t < e);
+}
 const themeMql = window.matchMedia("(prefers-color-scheme: dark)");
 
 function resolvedThemeId() {
+  if (themePref === "timed") return timedInWindow() ? themeAutoDark : themeAutoLight;
   if (themePref !== "auto") return themePref;
   return themeMql.matches ? themeAutoDark : themeAutoLight;
 }
@@ -15364,6 +15385,8 @@ function renderThemeSwatches() {
   // 跟随系统卡是「若此刻为 auto 会落到哪」的预览：只看下方两个下拉 + 系统深浅，
   // 与当前选中的主题无关（否则选了具体主题后，这张卡会跟那张卡长得一模一样）
   paint("auto", themeMql.matches ? themeAutoDark : themeAutoLight);
+  // 定时切换卡同理：预览「若此刻为 timed 会落到哪」（按当前时段 + 两个下拉）
+  paint("timed", timedInWindow() ? themeAutoDark : themeAutoLight);
 }
 
 // 「跟随系统时」的深浅落点下拉：改了立即按新落点重解析（当前是 auto 才有视觉效果）
@@ -15398,6 +15421,43 @@ themeMql.addEventListener("change", () => {
   if (themePref === "auto") applyThemeMode("auto", false);
   else renderThemeSwatches(); // 选着具体主题时也刷新跟随系统卡的预览落点
 });
+// 「定时切换」的深色时段输入（P20）：非法值回填旧值，合法即存即重解析
+function renderThemeTimedRow() {
+  const f = document.getElementById("theme-timed-from");
+  const t = document.getElementById("theme-timed-to");
+  if (f) f.value = themeTimedFrom;
+  if (t) t.value = themeTimedTo;
+}
+const timedFromInput = document.getElementById("theme-timed-from");
+if (timedFromInput) {
+  timedFromInput.onchange = () => {
+    if (HHMM_RE.test(timedFromInput.value)) {
+      themeTimedFrom = timedFromInput.value;
+      saveUiPrefs({ theme_timed_from: themeTimedFrom });
+      renderThemeSwatches();
+      if (themePref === "timed") applyThemeMode("timed", false);
+    } else renderThemeTimedRow();
+  };
+}
+const timedToInput = document.getElementById("theme-timed-to");
+if (timedToInput) {
+  timedToInput.onchange = () => {
+    if (HHMM_RE.test(timedToInput.value)) {
+      themeTimedTo = timedToInput.value;
+      saveUiPrefs({ theme_timed_to: themeTimedTo });
+      renderThemeSwatches();
+      if (themePref === "timed") applyThemeMode("timed", false);
+    } else renderThemeTimedRow();
+  };
+}
+// 定时切换的分钟级巡检：跨过时段边界时按新落点重解析（只在 timed 模式下做事）
+setInterval(() => {
+  if (themePref !== "timed") return;
+  const id = resolvedThemeId();
+  if (document.documentElement.getAttribute("data-theme") !== id) {
+    applyThemeMode("timed", false);
+  }
+}, 60000);
 
 // ---------- 第三方大库按需加载 ----------
 // mermaid 单文件 3.3MB、xterm 双文件约 290KB，此前页面一打开就同步解析，

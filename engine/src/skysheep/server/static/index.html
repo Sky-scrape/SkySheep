@@ -1614,12 +1614,17 @@
             </p>
             <ul class="settings-hint hint-points">
               <li>「跟随系统」：按 Windows 深浅色自动落到下面选的浅色 / 深色主题（默认纸墨 / 夜墨）。</li>
+              <li>「定时切换」：设定时段内用深色落点、时段外用浅色落点（深浅落点同「跟随系统」的下拉）。</li>
               <li>选中具体主题后不再随系统切换。</li>
             </ul>
             <div id="theme-grid" class="theme-grid">
               <button class="theme-card" data-theme-pref="auto" type="button">
                 <span class="theme-swatch"><i style="background:#e8dfc7"></i><i style="background:#1257c4"></i><i style="background:#171410"></i></span>
                 <b>跟随系统</b><small>浅色 / 深色自动切换</small>
+              </button>
+              <button class="theme-card" data-theme-pref="timed" type="button">
+                <span class="theme-swatch"><i style="background:#f4ecd8"></i><i style="background:#171410"></i><i style="background:#1257c4"></i></span>
+                <b>定时切换</b><small>到点自动换深色</small>
               </button>
               <button class="theme-card" data-theme-pref="paper" type="button">
                 <span class="theme-swatch"><i style="background:#f4ecd8"></i><i style="background:#1257c4"></i><i style="background:#1d1a16"></i></span>
@@ -1662,6 +1667,16 @@
                   <option value="pine">松烟</option>
                 </select>
               </label>
+            </div>
+            <div id="theme-timed-row" class="theme-auto-row">
+              <span>定时切换：</span>
+              <label>深色从
+                <input type="time" id="theme-timed-from" value="19:00">
+              </label>
+              <label>到
+                <input type="time" id="theme-timed-to" value="07:00">
+              </label>
+              <small class="settings-hint">可跨零点（19:00 → 07:00）；深浅落点用「跟随系统时」选的主题</small>
             </div>
           </section>
           <section class="settings-card">

@@ -1166,14 +1166,83 @@ def test_index_explicit_theme_id_injects_data_theme(home):
 
 
 def test_ui_prefs_theme_whitelist(home):
-    """theme 键值域：六套主题 id + auto + 旧版 light/dark；未知值丢弃、null 恢复默认。"""
-    for val in ("auto", "light", "dark", "paper", "celadon", "kaki", "night", "indigo", "pine"):
+    """theme 键值域：六套主题 id + auto + timed + 旧版 light/dark；未知值丢弃、null 恢复默认。"""
+    for val in ("auto", "timed", "light", "dark", "paper", "celadon", "kaki", "night", "indigo", "pine"):
         frame = call_ui(home, "ui.save", {"prefs": {"theme": val}})
         assert frame["result"]["prefs"] == {"theme": val}
     frame = call_ui(home, "ui.save", {"prefs": {"theme": "solarized"}})
     assert frame["result"]["prefs"] == {}
     frame = call_ui(home, "ui.save", {"prefs": {"theme": None}})
     assert frame["result"]["prefs"] == {}
+
+
+def test_ui_prefs_theme_timed_roundtrip(home):
+    """定时切换（P20）：theme=timed 入白名单，时段 HH:MM 合法收、非法删。"""
+    frame = call_ui(home, "ui.save", {"prefs": {
+        "theme": "timed", "theme_timed_from": "18:30", "theme_timed_to": "6:05",
+    }})
+    assert frame["result"]["prefs"] == {
+        "theme": "timed", "theme_timed_from": "18:30", "theme_timed_to": "6:05",
+    }
+    # 非法时段（越界 / 缺冒号 / 非数字）一律删除；此前合法保存的键与 theme 不受牵连
+    frame = call_ui(home, "ui.save", {"prefs": {
+        "theme_timed_from": "25:00", "theme_timed_to": "ab:cd",
+    }})
+    assert frame["result"]["prefs"] == {"theme": "timed"}
+    frame = call_ui(home, "ui.save", {"prefs": {"theme_timed_from": "07:30"}})
+    assert frame["result"]["prefs"] == {"theme": "timed", "theme_timed_from": "07:30"}
+
+
+def test_timed_window_active():
+    """定时窗判定：普通窗、跨零点窗、空窗、非法起止回默认。"""
+    from types import SimpleNamespace
+
+    from skysheep.server.app import _timed_window_active
+
+    def clock(h, m):
+        return SimpleNamespace(tm_hour=h, tm_min=m)
+
+    assert _timed_window_active("19:00", "07:00", now=clock(20, 0))      # 跨零点窗内
+    assert _timed_window_active("19:00", "07:00", now=clock(2, 30))
+    assert not _timed_window_active("19:00", "07:00", now=clock(12, 0))  # 窗外
+    assert _timed_window_active("12:00", "18:00", now=clock(12, 0))      # 普通窗含起点
+    assert not _timed_window_active("12:00", "18:00", now=clock(18, 0))  # 不含终点
+    assert not _timed_window_active("08:00", "08:00", now=clock(8, 30))  # 空窗
+    # 非法起止回默认 19:00/07:00：22:00 在默认窗内
+    assert _timed_window_active("x", None, now=clock(22, 0))
+    assert not _timed_window_active("x", None, now=clock(12, 0))
+
+
+def test_index_timed_first_paint_resolves_by_local_time(home):
+    """首帧定时切换：服务端按本地时刻解析落点，注入 data-theme-mode="timed"。
+
+    make_client 起的是子进程，测试进程 monkeypatch 时钟管不到它——深色侧
+    现场算一个「包含当前时刻 ±30 分钟」的宽窗（子进程再慢也落在窗内），
+    浅色侧用起止相同=空窗（恒浅色），两条都不依赖墙钟落在哪个时段。
+    """
+    import time as _time
+
+    now = _time.localtime()
+    cur = now.tm_hour * 60 + now.tm_min
+    frm = ((cur - 30) % 1440, (cur + 30) % 1440)  # (起, 止) 同一宽窗，跨零点安全
+    call_ui(home, "ui.save", {"prefs": {
+        "theme": "timed",
+        "theme_timed_from": f"{frm[0] // 60:02d}:{frm[0] % 60:02d}",
+        "theme_timed_to": f"{frm[1] // 60:02d}:{frm[1] % 60:02d}",
+        "theme_auto_dark": "indigo", "theme_auto_light": "celadon",
+    }})
+    with make_client(home, []) as client:
+        tag = _html_tag(client.get("/").text)
+    assert 'data-theme-mode="timed"' in tag
+    assert 'data-theme="indigo"' in tag  # 深色落点用「跟随系统时」选的主题
+
+    # 空窗（起止相同）恒浅色
+    call_ui(home, "ui.save", {"prefs": {
+        "theme": "timed", "theme_timed_from": "08:00", "theme_timed_to": "08:00",
+    }})
+    with make_client(home, []) as client:
+        tag = _html_tag(client.get("/").text)
+    assert 'data-theme="celadon"' in tag
 
 
 def test_index_tolerates_corrupt_ui_json(home):

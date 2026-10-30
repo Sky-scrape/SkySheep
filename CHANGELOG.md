@@ -6,6 +6,12 @@
 
 ### 新增
 
+- **WS 方法参考表自动生成（P27）**：`engine/tools/gen_ws_reference.py` 从
+  `_WS_METHODS` 注册表（8 个 dispatch 域合并表）生成 `docs/WS方法参考.md`
+  （按域分节，含 local_only 标志与 handler 说明首行），配套防漂移测试逐字
+  比对——新增方法忘更新文档会被测试抓住；域重名、新域漏登记在生成期
+  fail-closed。文档纳入 docs/README.md 索引。
+
 - **大会话历史窗口化（N2 P1）**：打开会话不再全量下发历史——`session.resume` /
   `session.peek_messages` / boot 快照 / fork 一律只回最后 200 条 brief（与前端
   HISTORY_SYNC_LIMIT 同值），附 `messages_total` / `messages_offset`；新增只读 WS 方法

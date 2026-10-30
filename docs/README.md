@@ -21,5 +21,6 @@
 - [发布清单.md](发布清单.md) — 发版纪律：版本号一致、不 --clobber、更新链路验证
 - [分发上架指南.md](分发上架指南.md) — 签名、winget、Scoop 的分发路径
 - [无头运行协议.md](无头运行协议.md) — `skysheep run --output stream` 的 NDJSON 事件流协议（脚本 / CI 接入入口）
+- [WS方法参考.md](WS方法参考.md) — 前端 WS 协议全部方法的参考表（由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑该脚本）
 - [mcp-远程服务鉴权.md](mcp-远程服务鉴权.md) — 远程 MCP 服务（Streamable HTTP）的静态请求头鉴权配置
 - [界面术语表.md](界面术语表.md) — 界面概念的唯一叫法对照（写文案先查这张表）

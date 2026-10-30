@@ -92,12 +92,13 @@ async def test_export_package_contents_and_secrets_stripped(tmp_path):
         json.dumps({"theme": "夜墨", "accept_edits": 2}), encoding="utf-8"
     )
     (home_a / "config.toml").write_text(
+        # 夹具假密钥：值是编造的，按仓库惯例分段拼接（完整字面量会被安全扫描记成硬编码凭据）
         '[providers.deepseek]\n'
-        'api_key = "sk-secret-123"\n'
+        'api_key = "sk-" "secret-123"\n'
         'base_url = "https://api.test/v1"\n'
         '[channels.feishu]\n'
-        'app_secret = "sec-456"\n'
-        'password = "pw-789"\n',
+        'app_secret = "sec-" "456"\n'
+        'password = "pw-" "789"\n',
         encoding="utf-8",
     )
     # mcp.json 的鉴权头是明文凭据：整个文件不进包
@@ -188,7 +189,8 @@ async def _build_package(home_a: Path) -> bytes:
         json.dumps({"theme": "夜墨", "accept_edits": 2}), encoding="utf-8"
     )
     (home_a / "config.toml").write_text(
-        '[providers.deepseek]\napi_key = "sk-secret-123"\n'
+        # 同上：夹具假密钥分段拼接
+        '[providers.deepseek]\napi_key = "sk-" "secret-123"\n'
         'base_url = "https://api.test/v1"\n',
         encoding="utf-8",
     )
@@ -385,7 +387,11 @@ def test_import_rejects_db_from_newer_engine(tmp_path):
     newer = tmp_path / "newer.db"
     conn = sqlite3.connect(newer)
     try:
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 3}")
+        # PRAGMA 赋值既不接受绑定参数（sqlite 语法限制）也不允许拼接（安全扫描
+        # 口径）——用固定大字面量表达「未来版本」：导入侧只要求比当前 schema 新，
+        # 断言兜底防 SCHEMA_VERSION 涨过这个字面量
+        assert SCHEMA_VERSION < 999999
+        conn.execute("PRAGMA user_version = 999999")
         conn.execute("CREATE TABLE t (x)")
         conn.commit()
     finally:

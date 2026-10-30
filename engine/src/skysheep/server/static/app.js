@@ -14231,9 +14231,19 @@ async function refreshReview() {
     return;
   }
   list.innerHTML = "";
+  // 时间线（P12）：轨道顶端是「现在」——默认磁盘状态在最新一轮之后；
+  // 本视图里回滚到某轮后，标记挪到该轮之下（磁盘停在「该轮改动前」）。
+  // 回滚后又发生新改动则会产生新轮次排在标记之上，语义仍自洽。
+  list.classList.add("review-timeline");
+  const nowEl = document.createElement("div");
+  nowEl.className = "review-now";
+  nowEl.innerHTML = "<b>现在</b> · 磁盘状态";
+  const restoredId = list.dataset.nowCp || "";
+  const rows = [];
   [...cps].reverse().forEach((cp) => {
     const item = document.createElement("div");
     item.className = "review-item";
+    item.dataset.cpId = cp.id;
     const chips = (cp.paths || []).map((p) =>
       `<button class="review-file" title="查看差异" data-cp="${cp.id}">${escapeHtml(fileName(p))}</button>`
     ).join("");
@@ -14260,6 +14270,8 @@ async function refreshReview() {
       try {
         const r = await restoreCheckpoint(cp.id);
         addNotice(`已把 ${r.files.length} 个文件恢复到 ${cp.id} 改动前的状态`);
+        // 「现在」标记挪到这一轮之下：磁盘停在该轮改动前（P12 时间线）
+        list.dataset.nowCp = cp.id;
         refreshReview();
         // 磁盘被回滚：文件树缓存失效（开着文件标签就直接刷新）
         filesLoaded = false;
@@ -14270,8 +14282,18 @@ async function refreshReview() {
         addNotice("恢复失败: " + e.message);
       }
     };
-    list.appendChild(item);
+    rows.push(item);
   });
+  // 装配时间线：「现在」标记默认在轨道顶端，回滚过就插在那一轮之下
+  let placed = false;
+  for (const item of rows) {
+    list.appendChild(item);
+    if (restoredId && item.dataset.cpId === restoredId) {
+      list.appendChild(nowEl);
+      placed = true;
+    }
+  }
+  if (!placed) list.insertBefore(nowEl, list.firstChild);
 }
 
 function fileName(p) {

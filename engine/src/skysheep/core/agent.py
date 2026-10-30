@@ -715,6 +715,12 @@ class Agent:
                     force_allow=mod_force_allow,
                     force_pending=mod_force_pending,
                 )
+                # 审计 L04：把「这次 authorize 认为的递归删除落点」记进 ctx。工具
+                # 执行前拿它复核——落点此刻是目录但不在集合里，就是批准之后才长
+                # 出来的删除面（TOCTOU），工具拒绝、模型重试、重试重新确认。
+                _delete_target = self.gate.delete_target(tool, tu.input)
+                if pending is None and _delete_target is not None:
+                    ctx.approved_deletes.add(str(_delete_target))
                 if pending is not None:
                     self._pending[pending.request_id] = pending
                     # Mod 权限请求挂点（门后）：附加信息 / 否决（替用户提前拒绝，
@@ -800,6 +806,11 @@ class Agent:
                         )
                         i += 1
                         continue
+
+                    # 允许（本次/总是）：确认覆盖的正是「递归删除这个落点」，
+                    # 执行期复核才放行（见上方 _delete_target 注释）
+                    if _delete_target is not None:
+                        ctx.approved_deletes.add(str(_delete_target))
 
                 # 3b. pre 钩子：用户配置的工具调用前检查（退出码 2 / decision=block 阻止）
                 if self.hooks is not None and self.hooks.has_pre:

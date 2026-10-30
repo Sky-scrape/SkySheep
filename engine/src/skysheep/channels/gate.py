@@ -116,6 +116,10 @@ class ChannelGate(PermissionGate):
             # delete_file（DANGEROUS，永不自动放行）的删除面。命中时不走名单
             # 放行，退回下方流程——未开审批即拒绝，开了审批则推聊天卡逐次确认。
             and not self._write_is_actually_delete(tool, input_dict)
+            # 写入边界（审计 L02，与 HeadlessGate / 交互侧「自动允许写入」档
+            # 同一口径）：名单放行写类工具时落点必须能确认在工作目录内。渠道
+            # 是远端可达的入口，预授权名单更不能等于「任意路径写」。
+            and self._write_in_bounds(tool, input_dict)
         ):
             # 预授权名单放行也要过引擎主目录守卫（审查 P2-7，与主会话门口径
             # 一致）：config.toml 是凭据本体、全局技能 SKILL.md 会注入所有

@@ -452,8 +452,12 @@ async def test_move_overwrite_dir_checkpoint_restores_both_sides(tmp_path):
     (tmp_path / "dst" / "src").mkdir(parents=True)
     (tmp_path / "dst" / "src" / "old.txt").write_text("old", encoding="utf-8")
     tool = ToolRegistry(default_tools(recorder=rec)).get("move_file")
+    ctx = _ctx(tmp_path)
+    # 审计 L04 的授权戳：真实链路由 Agent 在 authorize 通过后写入（覆盖已存在
+    # 目录=递归删除，用户确认的是这个落点）；这里手工打戳模拟「已确认」。
+    ctx.approved_deletes.add(str((tmp_path / "dst" / "src").resolve()))
     await tool.run(
-        MoveFileArgs(source="src", destination="dst", overwrite=True), _ctx(tmp_path))
+        MoveFileArgs(source="src", destination="dst", overwrite=True), ctx)
     assert (tmp_path / "dst" / "src" / "new.txt").exists()
     assert not (tmp_path / "dst" / "src" / "old.txt").exists()
 
@@ -1212,3 +1216,43 @@ def test_checkpoint_conflict_detected_for_large_file_change(tmp_path):
     os.utime(p, (bumped, bumped))
     with pytest.raises(CheckpointConflictError):
         store.restore(cp["id"])
+
+
+# ------------------------------------------------ L04：授权后目标变成目录（TOCTOU）
+
+
+async def test_move_overwrite_dir_appearing_after_authorize_is_refused(tmp_path):
+    """authorize 时目标还不是目录、执行时却是：拒绝，且一棵树都不删。
+
+    真实时序：用户批准「覆盖一个文件」→ 期间另一进程（或并行子会话）在落点
+    建出同名目录 → 旧实现直接 rmtree，等于零确认删掉一棵没批准过的树。
+    工具侧复核授权戳（ToolContext.approved_deletes），没有戳就不动手。
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "new.txt").write_text("new", encoding="utf-8")
+    (tmp_path / "dst" / "src").mkdir(parents=True)
+    (tmp_path / "dst" / "src" / "old.txt").write_text("old", encoding="utf-8")
+    tool = ToolRegistry(default_tools()).get("move_file")
+    with pytest.raises(ToolError) as ei:
+        await tool.run(
+            MoveFileArgs(source="src", destination="dst", overwrite=True), _ctx(tmp_path))
+    assert "变成了目录" in str(ei.value)
+    assert (tmp_path / "dst" / "src" / "old.txt").read_text(encoding="utf-8") == "old"
+    assert (tmp_path / "src" / "new.txt").exists(), "拒绝时源也不能动"
+
+
+def test_gate_reports_the_delete_target_it_approved(tmp_path):
+    """授权戳的落点与工具还原的落点必须一致（否则复核永远对不上）。"""
+    from skysheep.security.gate import PermissionGate
+    from skysheep.tools import MoveFileTool
+
+    (tmp_path / "src_dir").mkdir()
+    (tmp_path / "dst_dir" / "src_dir").mkdir(parents=True)
+    gate = PermissionGate(working_dir=tmp_path)
+    args = {"source": "src_dir", "destination": "dst_dir", "overwrite": True}
+    target = gate.delete_target(MoveFileTool(), args)
+    assert target == (tmp_path / "dst_dir" / "src_dir").resolve()
+    # 落点没有同名目录（普通移动）→ 没有删除面，不给戳
+    (tmp_path / "fresh").mkdir()
+    assert gate.delete_target(MoveFileTool(), {
+        "source": "src_dir", "destination": "fresh", "overwrite": True}) is None

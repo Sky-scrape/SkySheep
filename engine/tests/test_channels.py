@@ -101,9 +101,14 @@ async def test_headless_mode_denies_writes_without_blocking():
     assert await asyncio.wait_for(pending.wait(), timeout=2) == Decision.DENY
 
 
-async def test_pretool_allowed_list_passes():
-    gate = ChannelGate(allowed=["write_file"], approve_enabled=False)
-    assert await gate.authorize(_WriteTool(), {}) is None
+async def test_pretool_allowed_list_passes(tmp_path):
+    """名单内的写类工具、落点在工作目录内：照常放行（审计 L02 之后的口径）。"""
+    from skysheep.tools import WriteFileTool
+
+    gate = ChannelGate(
+        allowed=["write_file"], approve_enabled=False, working_dir=tmp_path)
+    assert await gate.authorize(
+        WriteFileTool(), {"path": "a.txt", "content": "x"}) is None
 
 
 async def test_allowed_list_still_guards_engine_home(home):

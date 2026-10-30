@@ -980,19 +980,20 @@ class PermissionGate:
             return None
 
     @staticmethod
-    def _delete_shape(
+    def _delete_target(
         working_dir: Path | None, tool_name: str, input_dict: dict,
         write_target_arg: str = "path",
-    ) -> bool:
-        """「本次调用会递归删除已有目录」的形态判定（与权限档位无关的共用本体）。
+    ) -> Path | None:
+        """「本次调用会递归删除已有目录」时返回被删的落点，否则 None（L04）。
 
-        权限门（_write_is_actually_delete）与规则提炼（rule_for）都要用；
-        working_dir 为 None 时解析不出路径，一律返回 False。
+        判定与 _delete_shape 同一本体，只是把落点也交出来：执行期要用它做
+        二次判定（authorize 到工具真正执行之间目标可能被建成目录，见
+        tools/fs.py 的 MoveFile.run）。
         """
         if tool_name != "move_file" or not input_dict.get("overwrite"):
-            return False
+            return None
         if working_dir is None:
-            return False
+            return None
 
         def _resolve(raw: object) -> Path | None:
             raw = str(raw or "").strip()
@@ -1011,10 +1012,24 @@ class PermissionGate:
         src = _resolve(input_dict.get("source", ""))
         dst = _resolve(input_dict.get(write_target_arg, ""))
         if src is None or dst is None or not src.is_dir():
-            return False
+            return None
         if dst.is_dir():
             dst = dst / src.name
-        return dst.is_dir()
+        return dst if dst.is_dir() else None
+
+    @staticmethod
+    def _delete_shape(
+        working_dir: Path | None, tool_name: str, input_dict: dict,
+        write_target_arg: str = "path",
+    ) -> bool:
+        """「本次调用会递归删除已有目录」的形态判定（与权限档位无关的共用本体）。
+
+        权限门（_write_is_actually_delete）与规则提炼（rule_for）都要用；
+        working_dir 为 None 时解析不出路径，一律返回 False。
+        """
+        return PermissionGate._delete_target(
+            working_dir, tool_name, input_dict, write_target_arg
+        ) is not None
 
     def _write_is_actually_delete(self, tool: Tool, input_dict: dict) -> bool:
         """本次写入实质上会递归删除已有目录吗？是的话不得自动放行。
@@ -1032,6 +1047,18 @@ class PermissionGate:
         判定本体在 _delete_shape（规则提炼的静态场景共用同一份）。
         """
         return self._delete_shape(
+            self.working_dir, tool.name, input_dict,
+            getattr(tool, "write_target_arg", "path") or "path",
+        )
+
+    def delete_target(self, tool: Tool, input_dict: dict) -> Path | None:
+        """本次调用若按「递归删除」处理，返回被删的落点；否则 None（L04）。
+
+        Agent 在 authorize 之后用它给 ToolContext 打「这个落点确实按删除
+        确认过」的标记，工具执行期再做一次存在性复核——authorize 到执行
+        之间目标被建成目录时，宁可让这次调用失败重试，也不静默 rmtree。
+        """
+        return self._delete_target(
             self.working_dir, tool.name, input_dict,
             getattr(tool, "write_target_arg", "path") or "path",
         )
@@ -1113,6 +1140,23 @@ class PermissionGate:
             if not self._path_inside_workdir(str(input_dict.get(extra, "") or "")):
                 return False
         return True
+
+    def _write_in_bounds(self, tool: Tool, input_dict: dict) -> bool:
+        """名单自动放行前的写入边界（审计 L02）：写类工具的落点必须在工作目录内。
+
+        交互侧「自动允许写入」档早有这条边界（_write_target_inside_workdir），
+        无人值守 / 渠道的预授权名单却没有——同一个 write_file 预授权，交互侧
+        只能写项目内，无人值守却能写整台机器的任意路径，与「无人值守一律
+        fail-closed」的口径相悖。这里把两侧拉平：名单放行写类工具时同样要求
+        落点可确认在工作目录内（解析不出、无工作目录、路径在工作目录外都算
+        不在界内），命中即回落逐次确认（无人值守没有用户可应答 → DENY）。
+
+        非写类不受影响：READONLY 的放行由各门自己的短路决定，EXECUTE 级命令
+        的破坏面本来就不是路径能框住的，它们只在用户显式写进名单时放行。
+        """
+        if tool.safety != Safety.WRITE:
+            return True
+        return self._write_target_inside_workdir(tool, input_dict)
 
     def _write_target_paths(self, tool: Tool, input_dict: dict) -> list[tuple[Path, str]]:
         """解析本次写调用的落点路径 [(路径, 展示名)]，供写租约用。
@@ -1362,8 +1406,12 @@ class PermissionGate:
         # system prompt——短路在前会让 P2-7 守卫对它结构性不可达（第二轮审查
         # FINDING 2）。命中不在此放行，落到下方逐次确认；规则放行分支同样被
         # 本守卫拦下（含整工具 always），与 P2-7 口径一致：引擎主目录写入
-        # 永远逐次确认，白名单沉淀不出放行。完全访问档（auto_accept_all）与
-        # 既有 P2-7 守卫同界，不受影响。
+        # 由白名单、自动允许写入、无人值守名单、渠道名单四路都拦得住，规则
+        # 沉淀不出放行。
+        # 唯一的例外是「完全访问」档（auto_accept_all）：那是用户显式选择的
+        # 「一切放行」，按设计也放行引擎主目录写入——与本守卫是同一语义的两面，
+        # 不是漏挡（审计 L01 把「永远逐次确认」的措辞收窄成上面这条四路口径）。
+        # 不想让引擎数据目录被无确认改写，就别开该档。
         engine_home_write = self._write_hits_engine_home(tool, input_dict)
         # Claude Code 兼容模式的 tool.check=allow：跳过引擎自动放行判定。
         # 硬性守卫保留，Mod 也不得放开：
@@ -1382,7 +1430,9 @@ class PermissionGate:
             )
         if tool.safety == Safety.READONLY and not engine_home_write and not extra_required:
             return None
-        # 完全访问档：写入与执行都自动放行（白名单之外的全部放开）
+        # 完全访问档：写入与执行都自动放行（白名单之外的全部放开）。这是用户
+        # 显式选择的「一切放行」档，引擎主目录写入也在其内（口径见上方注释与
+        # SECURITY.md「完全访问档的边界」），Mods 的收紧声明仍然压得住它。
         if self.auto_accept_all and not extra_required:
             return None
         # 自动允许写入档：只放行 WRITE 级，且目标必须确认在工作目录内；
@@ -1757,6 +1807,10 @@ class HeadlessGate(PermissionGate):
             # 不得成为免确认通道。命中时落父类 authorize——无人值守没有用户
             # 可应答，PendingPermission 随即被 resolve(DENY)，fail-closed。
             and not self._write_is_actually_delete(tool, input_dict)
+            # 写入边界（审计 L02）：名单放行写类工具时，落点必须能确认在工作
+            # 目录内——与交互侧「自动允许写入」档同一口径，否则名单就是「任意
+            # 路径写」的无人值守通道。不在界内同样落父类 → DENY。
+            and self._write_in_bounds(tool, input_dict)
         ):
             # 预授权名单放行也要过引擎主目录守卫（审查 P2-7，与主会话门口径
             # 一致）：config.toml 是明文凭据本体、全局技能 SKILL.md 会注入所有

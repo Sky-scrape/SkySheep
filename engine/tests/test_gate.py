@@ -1233,3 +1233,69 @@ async def test_preview_diff_does_not_block_event_loop(tmp_path, monkeypatch):
     pending = await gate._build_pending(WriteFileTool(), {"path": "a.txt", "content": "x"})
     assert pending is not None
     assert seen["thread"] is not loop_thread, "diff 预览仍在事件循环线程上同步执行"
+
+
+# ---- 审计 L02：预授权名单的写入边界（落点必须在工作目录内） ----
+# 交互侧「自动允许写入」档一直有这条边界，无人值守与渠道的 allowed 名单没有：
+# 同一个 write_file 预授权，交互侧只能写项目内，无人值守却能写整台机器。这里
+# 锁定口径：名单放行写类工具同样要求落点可确认在工作目录内，否则回落逐次
+# 确认（无人值守没有用户可应答 → DENY；渠道开审批 → 推卡）。
+
+
+async def test_headless_allowed_write_must_stay_inside_workdir(tmp_path):
+    from skysheep.tools import WriteFileTool
+
+    (tmp_path / "proj").mkdir()
+    gate = HeadlessGate(allowed=["write_file"], working_dir=tmp_path / "proj")
+    # 工作目录内：照常放行（不扩大打击面）
+    assert await gate.authorize(
+        WriteFileTool(), {"path": "a.txt", "content": "x"}) is None
+    # 跳出去（相对路径向上越界）：落父类 → 无人值守立即 DENY
+    pending = await gate.authorize(
+        WriteFileTool(), {"path": "../outside.txt", "content": "x"})
+    assert pending is not None, "名单不能等于任意路径写"
+    assert await asyncio.wait_for(pending.wait(), timeout=2) == Decision.DENY
+    # 绝对路径写到工作目录外：同样不放行
+    pending2 = await gate.authorize(
+        WriteFileTool(), {"path": str(tmp_path / "outside2.txt"), "content": "x"})
+    assert pending2 is not None
+    assert await asyncio.wait_for(pending2.wait(), timeout=2) == Decision.DENY
+
+
+async def test_headless_allowed_write_without_workdir_is_denied():
+    """没有工作目录就没有边界可言：名单里的写类工具一律回落确认（=DENY）。"""
+    from skysheep.tools import WriteFileTool
+
+    gate = HeadlessGate(allowed=["write_file"])
+    pending = await gate.authorize(
+        WriteFileTool(), {"path": "a.txt", "content": "x"})
+    assert pending is not None
+    assert await asyncio.wait_for(pending.wait(), timeout=2) == Decision.DENY
+
+
+async def test_headless_allowed_command_not_affected_by_write_bound(tmp_path):
+    """边界只管写类：执行类工具的放行语义不变（命令本来就不按路径判）。"""
+    from skysheep.tools import RunCommandTool
+
+    gate = HeadlessGate(allowed=["run_command"], working_dir=tmp_path)
+    assert await gate.authorize(
+        RunCommandTool(), {"command": "echo hi"}) is None
+
+
+async def test_channel_allowed_write_outside_workdir_falls_back_to_approval(tmp_path):
+    """渠道：名单内写类工具越界写入 → 退成逐次确认（开审批推卡），不静默放行。"""
+    from skysheep.tools import WriteFileTool
+
+    (tmp_path / "proj").mkdir()
+    notified = []
+    gate = ChannelGate(
+        allowed=["write_file"], approve_enabled=True, approve_timeout=5,
+        notify=lambda p: notified.append(p.request_id),
+        working_dir=tmp_path / "proj",
+    )
+    pending = await gate.authorize(
+        WriteFileTool(), {"path": "../outside.txt", "content": "x"})
+    assert pending is not None
+    assert notified == [pending.request_id]
+    gate.submit(pending.request_id, Decision.DENY)
+    assert await asyncio.wait_for(pending.wait(), timeout=2) == Decision.DENY

@@ -96,6 +96,12 @@ class ToolContext:
         # 自定义子代理复用主注册表），实例属性会把 A 任务的 diff 给到 B 任务。
         # 只在串行路径上由写工具写入——并发批只收 READONLY 工具，不会写它。
         self.last_diff: str = ""
+        # 本次轮次里「已被权限门按『递归删除目录』确认过」的落点（绝对路径字符串）。
+        # 用途只有一处：move_file(overwrite) 执行前复核目标此刻是不是目录——是，
+        # 但本集合里没有它（authorize 时目标还不是目录），说明这条删除面是批准
+        # 之后才长出来的（TOCTOU，审计 L04），工具必须拒绝并让模型重试，重试会
+        # 重新走一次确认。授权戳只在 authorize 产出的判定里写入，工具不得自行添加。
+        self.approved_deletes: set[str] = set()
 
 
 class Tool(abc.ABC):

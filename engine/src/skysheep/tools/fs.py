@@ -341,6 +341,17 @@ class MoveFileTool(Tool):
                 if dst.is_dir() and not src.is_dir():
                     raise ToolError(f"目标 {dst_shown} 是目录，源是文件，无法覆盖")
                 if dst.is_dir():
+                    # 审计 L04（TOCTOU）：权限门是按「authorize 那一刻的形态」判定
+                    # 要不要为「递归删除」逐次确认的。authorize 之后、执行之前目标
+                    # 被建成目录的话，这里会 rmtree 一棵用户从没批准过的树。执行
+                    # 前复核对授权戳：不在此集合里就拒绝，让模型重来一次——重试
+                    # 会看到目录已存在，重新走删除确认，用户才有叫停的机会。
+                    if str(dst.resolve()) not in getattr(ctx, "approved_deletes", ()):
+                        raise ToolError(
+                            f"目标 {dst_shown} 在执行期间变成了目录，覆盖它会递归删除"
+                            "整个目录树，而这次调用只被批准覆盖一个文件。已拒绝；"
+                            "如确实要删掉它，请重新发起（会再确认一次）。"
+                        )
                     shutil.rmtree(dst)
                 else:
                     dst.unlink()

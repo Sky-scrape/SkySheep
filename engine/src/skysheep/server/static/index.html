@@ -1553,6 +1553,12 @@
               Tailscale（tailscale.com）并登录<b>同一账号</b>，这里开启后（<b>重启 SkySheep 生效</b>），
               手机在任意网络打开电脑的 Tailscale 地址就能用完整界面。
             </p>
+            <!-- 一键配置向导（P22）：探测「装没装 / 登没登 / 有没有拿到地址 / 开没开」，
+                 直接说下一步该做什么，不让人自己对着一堆术语猜 -->
+            <div class="io-row">
+              <button id="ts-probe" class="btn-ghost" title="检查本机 Tailscale 状态：客户端装没装、有没有登录、拿到 100.x 地址没有">🔍 检测 / 一键配置</button>
+              <span id="ts-guide" class="io-msg"></span>
+            </div>
             <ul class="settings-hint hint-points">
               <li>链路经 Tailscale <b>端到端加密</b>，访问令牌与「手机控制」共用。</li>
               <li>未装 Tailscale 的设备（含同一 Wi-Fi 下的）反而连不进来。</li>

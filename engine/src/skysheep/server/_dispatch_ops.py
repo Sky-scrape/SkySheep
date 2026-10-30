@@ -165,6 +165,10 @@ async def _h_remote_status(backend: ServerBackend, params: dict, emit, local: bo
     return await backend.remote_status(include_token=local)
 
 
+async def _h_remote_tailscale_probe(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.remote_tailscale_probe()
+
+
 async def _h_remote_enable(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.remote_enable(params)
 
@@ -338,6 +342,7 @@ METHODS: dict[str, _WsMethod] = {
     ),
     "lan.set_port": _WsMethod(_h_lan_set_port, local_only=True),
     "remote.status": _WsMethod(_h_remote_status),
+    "remote.tailscale_probe": _WsMethod(_h_remote_tailscale_probe, local_only=True),
     "remote.enable": _WsMethod(_h_remote_enable, local_only=True),
     "remote.disable": _WsMethod(_h_remote_disable),
     "demo.enable": _WsMethod(_h_demo_enable, local_only=True),

@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-10-30 23:27:55
-- 方法总数：326（本机专属 local_only 174 个）
+- 生成时间：2026-10-30 23:50:30
+- 方法总数：327（本机专属 local_only 175 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -257,6 +257,7 @@
 | lan.kick | 是 | — |
 | lan.set_port | 是 | — |
 | remote.status |  | — |
+| remote.tailscale_probe | 是 | — |
 | remote.enable | 是 | — |
 | remote.disable |  | — |
 | demo.enable | 是 | — |

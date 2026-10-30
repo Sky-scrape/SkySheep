@@ -413,6 +413,83 @@ class RemoteMixin:
             "note": "" if server.tailscale else "远程访问当前关闭。",
         }
 
+    async def remote_tailscale_probe(self) -> dict:
+        """Tailscale 一键配置向导的探测（P22）：卡在哪一步，下一步该做什么。
+
+        读四件事：CLI 装没装、守护进程跑没跑/登没登（`tailscale status --json`
+        的 BackendState）、本机 tailnet IPv4、以及当前开关与访问地址。只读——
+        不改配置、不动网络；装与登录一律引导用户自己做（涉及账号与系统权限，
+        不做「自动装软件」这种事）。
+
+        返回:
+            installed / running / logged_in / dns_name / ips / enabled /
+            url（已开启且有 IP 时才有，带令牌，仅本机接口可达）/
+            step（install / login / up / ready 四选一）/ hint（给人看的一句话）
+        """
+        exe = shutil.which("tailscale") or shutil.which("tailscale.exe")
+        server = self.cfg.server
+        ips = self._tailscale_ips()
+        out: dict = {
+            "installed": bool(exe),
+            "running": False,
+            "logged_in": False,
+            "dns_name": "",
+            "ips": ips,
+            "enabled": bool(server.tailscale),
+            "download": "https://tailscale.com/download",
+            "url": "",
+            "step": "install",
+            "hint": "",
+        }
+        if not exe:
+            out["hint"] = "没找到 tailscale 命令：先装上 Tailscale 客户端并登录，再回来点检测。"
+            return out
+        out["cli"] = exe
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                exe, "status", "--json",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+            status = json.loads(stdout.decode("utf-8", errors="replace") or "{}")
+        except (OSError, ValueError, TimeoutError):
+            status = {}
+        state = str((status or {}).get("BackendState") or "")
+        self_info = (status or {}).get("Self") or {}
+        out["running"] = state == "Running"
+        out["logged_in"] = state in ("Running", "NeedsMachineAuth", "Starting")
+        out["dns_name"] = str(self_info.get("DNSName") or "").rstrip(".")
+        for ip in self_info.get("TailscaleIPs") or []:
+            if isinstance(ip, str) and ip not in out["ips"]:
+                out["ips"].append(ip)
+        if not out["running"]:
+            out["step"] = "login"
+            out["hint"] = (
+                "Tailscale 已安装但没连上（可能没登录或服务没启动）："
+                "打开 Tailscale 客户端登录同一账号、确认开关是 Connected。"
+            )
+            return out
+        if not out["ips"]:
+            out["step"] = "up"
+            out["hint"] = (
+                "Tailscale 显示已连接，但没拿到 100.x 地址：等几秒再检测，"
+                "或重启 SkySheep 让网卡被读到。"
+            )
+            return out
+        out["step"] = "ready"
+        port = int(getattr(server, "port", 0) or 0)
+        host = out["ips"][0]
+        if out["enabled"] and port:
+            token = server.token or ""
+            out["url"] = f"http://{host}:{port}/" + (f"?token={token}" if token else "")
+        out["hint"] = (
+            "远程访问已开启：重启 SkySheep 后手机用上面的地址访问。"
+            if out["enabled"] else
+            f"一切就绪（本机 tailnet 地址 {host}）：打开下面的开关即可开启远程访问，"
+            "开启后需要重启生效。"
+        )
+        return out
+
     async def remote_enable(self, params: dict) -> dict:
         server = self.cfg.server
         supplied = str(params.get("token") or "").strip()

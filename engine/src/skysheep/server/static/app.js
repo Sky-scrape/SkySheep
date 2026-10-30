@@ -16255,6 +16255,31 @@ async function loadTsPanel() {
     }).catch(() => { /* 二维码失败不影响地址文本 */ });
   }
 }
+// 一键配置向导（P22）：探测本机 Tailscale 状态，直接说下一步做什么。
+// 只读探测（不装软件、不改配置）；「一切就绪但没开」时给出开启引导。
+const tsProbeBtn = document.getElementById("ts-probe");
+if (tsProbeBtn) tsProbeBtn.onclick = async () => {
+  const out = document.getElementById("ts-guide");
+  const set = (text, cls) => { if (out) { out.textContent = text; out.className = "io-msg " + (cls || ""); } };
+  set("正在检测本机 Tailscale…");
+  let r;
+  try { r = await request("remote.tailscale_probe"); }
+  catch (e) { set("✗ 检测失败：" + e.message, "bad"); return; }
+  const marks = {
+    install: "① 安装 Tailscale（tailscale.com/download）",
+    login: "② 打开 Tailscale 客户端登录，确认显示 Connected",
+    up: "③ 等它拿到 100.x 地址",
+    ready: "④ 打开上面的「开启」开关，然后重启 SkySheep",
+  };
+  const done = [r.installed, r.logged_in, (r.ips || []).length > 0, r.enabled];
+  const lines = [marks.install, marks.login, marks.up, marks.ready].map((m, i) =>
+    (done[i] ? "✓ " : "○ ") + m);
+  const sep = " ｜ ";
+  set(lines.join(sep) + sep + (r.hint || "") + (r.url ? sep + "地址：" + r.url : ""),
+      r.step === "ready" ? "ok" : "");
+  if (r.step === "ready" && !r.enabled) addNotice("Tailscale 一切就绪：打开「开启」开关并重启即可远程访问。");
+};
+
 document.getElementById("ts-toggle").addEventListener("change", async (e) => {
   if (e.target.checked && !(await confirmModal(
     "开启远程访问（Tailscale）？\n\n" +

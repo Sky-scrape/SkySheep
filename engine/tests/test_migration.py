@@ -548,3 +548,128 @@ async def test_migration_import_busy_refused_over_ws(home):
                       "params": {"data_b64": base64.b64encode(b"PK").decode("ascii")}})
         frame = recv_until(ws, "m1")
         assert frame["ok"] is False and "自动循环" in frame["error"]
+
+
+# ---- P24 v2：超大包落盘模式 / 按路径导入 / 技能替换口径 ----
+
+
+class _MigHost:
+    """只要 mixin 需要的几个属性，不背整个 backend。"""
+
+    def __init__(self, store=None):
+        self.store = store
+        self._teams: dict = {}
+        self._base_run_task = None
+        self.runtimes: dict = {}
+        self._cron_running = False
+        self._pipeline_running = False
+
+    _backup_busy_message = staticmethod(lambda *a, **k: None)
+
+
+async def test_export_oversized_falls_back_to_disk_mode(home, monkeypatch):
+    """超过 64MB 不再拒绝：写到 ~/.skysheep/migrations/ 并回传路径。"""
+    from skysheep.server.backend_parts import migration as migration_mod
+    from skysheep.server.backend_parts.migration import MigrationMixin
+
+    monkeypatch.setattr(migration_mod, "MAX_MIGRATION_PACKAGE_BYTES", 64)
+    (home / "home").mkdir(parents=True, exist_ok=True)
+    (home / "home" / "config.toml").write_text("[a]\nb = 1\n", encoding="utf-8")
+
+    class _Host(_MigHost):
+        migration_export = MigrationMixin.migration_export
+
+    out = await _Host().migration_export()
+    assert out["mode"] == "file"
+    assert "data_b64" not in out, "落盘模式不再回传 base64（几百 MB 挤不进 WS 帧）"
+    path = Path(out["path"])
+    assert path.is_file() and path.stat().st_size > 0
+    assert path.parent == home / "home" / "migrations"
+    assert out["manifest"]["kind"] == "skysheep-migration"
+
+
+async def test_export_inline_mode_when_small(home):
+    from skysheep.server.backend_parts.migration import MigrationMixin
+
+    class _Host(_MigHost):
+        migration_export = MigrationMixin.migration_export
+
+    out = await _Host().migration_export()
+    assert out["mode"] == "inline" and out["data_b64"]
+
+
+async def test_import_from_path_and_replace_mode(home):
+    """按本机路径导入 + replace：同名技能整目录替换，本机多出的技能保留。"""
+    from skysheep.server.backend_parts.migration import (
+        MigrationMixin,
+        build_migration_package,
+    )
+
+    # 源机器：一个技能 demo（只含 SKILL.md）
+    src = home / "src"
+    (src / "skills" / "demo").mkdir(parents=True)
+    (src / "skills" / "demo" / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: 包里那一版\n---\n", encoding="utf-8"
+    )
+    data, _manifest = build_migration_package(src)
+    pkg = home / "pkg.zip"
+    pkg.write_bytes(data)
+
+    # 本机：同名技能多一个 extra.txt，另有一个包里没有的技能 keep
+    tgt = home / "home"
+    (tgt / "skills" / "demo").mkdir(parents=True)
+    (tgt / "skills" / "demo" / "SKILL.md").write_text("本机旧版", encoding="utf-8")
+    (tgt / "skills" / "demo" / "extra.txt").write_text("本机残留", encoding="utf-8")
+    (tgt / "skills" / "keep" / "SKILL.md").parent.mkdir(parents=True)
+    (tgt / "skills" / "keep" / "SKILL.md").write_text("keep", encoding="utf-8")
+
+    class _Host(_MigHost):
+        migration_import = MigrationMixin.migration_import
+
+    out = await _Host().migration_import({
+        "path": str(pkg), "skills_mode": "replace",
+    })
+    assert out["restart_required"] is True
+    assert out["manifest"]["skills_mode"] == "replace"
+    demo = tgt / "skills" / "demo"
+    assert "包里那一版" in (demo / "SKILL.md").read_text(encoding="utf-8")
+    assert not (demo / "extra.txt").exists(), "replace 档不得留下本机旧文件"
+    assert (tgt / "skills" / "keep" / "SKILL.md").is_file(), "包里没有的技能不删"
+
+
+async def test_import_merge_mode_keeps_local_extra_files(home):
+    """merge（默认）仍是叠加覆盖：同名技能的本机额外文件保留。"""
+    from skysheep.server.backend_parts.migration import (
+        MigrationMixin,
+        build_migration_package,
+    )
+
+    src = home / "src"
+    (src / "skills" / "demo").mkdir(parents=True)
+    (src / "skills" / "demo" / "SKILL.md").write_text("包里那一版", encoding="utf-8")
+    data, _ = build_migration_package(src)
+
+    tgt = home / "home"
+    (tgt / "skills" / "demo").mkdir(parents=True)
+    (tgt / "skills" / "demo" / "SKILL.md").write_text("本机旧版", encoding="utf-8")
+    (tgt / "skills" / "demo" / "extra.txt").write_text("本机残留", encoding="utf-8")
+
+    class _Host(_MigHost):
+        migration_import = MigrationMixin.migration_import
+
+    await _Host().migration_import({
+        "data_b64": base64.b64encode(data).decode("ascii"),
+    })
+    demo = tgt / "skills" / "demo"
+    assert (demo / "SKILL.md").read_text(encoding="utf-8") == "包里那一版"
+    assert (demo / "extra.txt").is_file(), "merge 档不该删本机文件"
+
+
+async def test_import_rejects_unknown_skills_mode(home):
+    from skysheep.server.backend_parts.migration import MigrationMixin
+
+    class _Host(_MigHost):
+        migration_import = MigrationMixin.migration_import
+
+    with pytest.raises(RuntimeError, match="merge"):
+        await _Host().migration_import({"data_b64": "AAAA", "skills_mode": "wipe"})

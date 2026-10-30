@@ -2047,7 +2047,19 @@
             <ul class="settings-hint hint-points">
               <li>导入会<b>替换</b>本机的会话库、技能、界面偏好与配置；导入前自动把当前数据备份到 backups 目录。</li>
               <li>导入完成后需<b>重启应用</b>生效；会话/定时任务/团队自动循环进行中时导入会被拒绝。</li>
+              <li>包体超过 <b>64MB</b>（大会话库常见）时导出会自动改成<b>落盘</b>：包写到
+                <code>~/.skysheep/migrations/</code>，界面给出路径，不去挤浏览器传输。</li>
             </ul>
+            <label class="toggle-row check-row" title="勾上后，包里同名技能会整目录替换本机那份（本机同名技能里的额外文件会被移走备份），不与本机合并；不勾则叠加覆盖（本机多出的文件保留）">
+              <input type="checkbox" id="migration-skills-replace">
+              <span>同名技能整目录替换（默认叠加覆盖）</span>
+            </label>
+            <div class="io-row">
+              <input type="text" id="migration-path" class="modal-input" spellcheck="false"
+                     placeholder="或填本机迁移包路径（超过 64MB 的包走这条，不走浏览器）">
+              <button id="btn-migration-import-path" class="btn-ghost"
+                      title="直接读本机磁盘上的迁移包导入（不做 base64 中转，几百 MB 也行）">按路径导入</button>
+            </div>
             <span id="migration-msg" class="io-msg"></span>
           </section>
           <section class="settings-card" id="retention-card">

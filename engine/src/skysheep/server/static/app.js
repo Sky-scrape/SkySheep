@@ -17426,10 +17426,19 @@ document.getElementById("btn-migration-export").onclick = async () => {
   if (msg) { msg.textContent = "正在打包（大会话库可能要等一会儿）…"; msg.className = "io-msg"; }
   try {
     const r = await request("migration.export");
-    downloadDataZip(r.filename, r.data_b64);
-    if (msg) {
-      msg.textContent = `✓ 已导出（${((r.size || 0) / 1024).toFixed(0)} KB），模型密钥与 MCP 配置不进包。`;
-      msg.className = "io-msg ok";
+    if (r.mode === "file") {
+      // P24 v2：超过 64MB 改落盘（大库不再被拒），界面给路径让用户自己拷走
+      if (msg) {
+        msg.textContent = `✓ 包体 ${((r.size || 0) / 1024 / 1024).toFixed(1)}MB 超过 ${r.limit_mb}MB，`
+          + `已落盘：${r.path}（拷到新机器用「按路径导入」，或拖回文件选择器）`;
+        msg.className = "io-msg ok";
+      }
+    } else {
+      downloadDataZip(r.filename, r.data_b64);
+      if (msg) {
+        msg.textContent = `✓ 已导出（${((r.size || 0) / 1024).toFixed(0)} KB），模型密钥与 MCP 配置不进包。`;
+        msg.className = "io-msg ok";
+      }
     }
   } catch (e) {
     if (msg) { msg.textContent = "✗ " + e.message; msg.className = "io-msg bad"; }
@@ -17438,9 +17447,61 @@ document.getElementById("btn-migration-export").onclick = async () => {
   }
 };
 
+// 技能还原口径（P24 v2）：勾上 = 同名技能整目录替换，不勾 = 叠加覆盖
+function migrationSkillsMode() {
+  const el = document.getElementById("migration-skills-replace");
+  return el && el.checked ? "replace" : "merge";
+}
+
+// 导入完成后的统一小结（两条导入路径共用：文件选择器 / 本机路径）
+function migrationDone(r) {
+  const msg = document.getElementById("migration-msg");
+  const man = (r && r.manifest) || {};
+  const bits = [];
+  if (man.db_restored) bits.push("会话已还原");
+  if (man.skills_count) {
+    bits.push(`技能 ${man.skills_count} 个（新增 ${(man.skills_new || []).length}，覆盖 ${(man.skills_overwritten || []).length}）`);
+  }
+  if (man.skills_mode === "replace") bits.push("同名技能已整目录替换");
+  if (man.config_restored) bits.push("配置已还原（密钥需重填）");
+  if (msg) {
+    msg.textContent = "✓ 导入完成" + (bits.length ? "：" + bits.join("，") : "") + "——重启应用后生效。";
+    msg.className = "io-msg ok";
+  }
+  addNotice("迁移包导入完成，重启应用后生效。导入前的数据已自动备份到 backups 目录。");
+}
+
 document.getElementById("btn-migration-import").onclick = () => {
   document.getElementById("migration-file").click();
 };
+
+// 按本机路径导入（P24 v2）：落盘模式导出的大包走这条，不做 base64 中转
+document.getElementById("btn-migration-import-path").onclick = async () => {
+  const input = document.getElementById("migration-path");
+  const msg = document.getElementById("migration-msg");
+  const btn = document.getElementById("btn-migration-import-path");
+  const path = ((input && input.value) || "").trim();
+  if (!path) { addNotice("先填迁移包在本机磁盘上的路径"); return; }
+  const ok = await confirmModal(
+    "导入将替换本机的会话库、技能、界面偏好与配置（模型密钥与 MCP 配置不进包、需重填）。"
+    + "导入前会自动备份当前数据到 backups 目录，完成后需重启应用生效。确定导入？",
+    { title: "按路径导入迁移包", okLabel: "导入" });
+  if (!ok) return;
+  btn.disabled = true;
+  if (msg) { msg.textContent = "正在导入…"; msg.className = "io-msg"; }
+  try {
+    const r = await request("migration.import", {
+      path,
+      skills_mode: migrationSkillsMode(),
+    });
+    migrationDone(r);
+  } catch (e) {
+    if (msg) { msg.textContent = "✗ " + e.message; msg.className = "io-msg bad"; }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 
 document.getElementById("migration-file").onchange = async () => {
   const input = document.getElementById("migration-file");
@@ -17449,8 +17510,9 @@ document.getElementById("migration-file").onchange = async () => {
   const file = input.files && input.files[0];
   input.value = "";
   if (!file) return;
-  if (file.size > 96 * 1024 * 1024) {
-    addNotice("迁移包超过 96MB（后端上限 64MB）——请确认选择的是 SkySheep 迁移包");
+  if (file.size > 64 * 1024 * 1024) {
+    addNotice("包体超过 64MB：请把它放到本机磁盘上，用下面的「按路径导入」" +
+      "（不经浏览器中转，几百 MB 也行）");
     return;
   }
   const b64 = await new Promise((resolve, reject) => {
@@ -17471,17 +17533,11 @@ document.getElementById("migration-file").onchange = async () => {
   btn.disabled = true;
   if (msg) { msg.textContent = "正在导入…"; msg.className = "io-msg"; }
   try {
-    const r = await request("migration.import", { data_b64: b64 });
-    const man = r.manifest || {};
-    const bits = [];
-    if (man.db_restored) bits.push("会话已还原");
-    if (man.skills_count) bits.push(`技能 ${man.skills_count} 个（新增 ${(man.skills_new || []).length}，覆盖 ${(man.skills_overwritten || []).length}）`);
-    if (man.config_restored) bits.push("配置已还原（密钥需重填）");
-    if (msg) {
-      msg.textContent = "✓ 导入完成" + (bits.length ? "：" + bits.join("，") : "") + "——重启应用后生效。";
-      msg.className = "io-msg ok";
-    }
-    addNotice("迁移包导入完成，重启应用后生效。导入前的数据已自动备份到 backups 目录。");
+    const r = await request("migration.import", {
+      data_b64: b64,
+      skills_mode: migrationSkillsMode(),
+    });
+    migrationDone(r);
   } catch (e) {
     if (msg) { msg.textContent = "✗ " + e.message; msg.className = "io-msg bad"; }
   } finally {

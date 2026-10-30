@@ -48,6 +48,7 @@ import base64
 import io
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -75,9 +76,20 @@ logger = logging.getLogger(__name__)
 # （与库版本降级防护同一姿态：新版产物不能被旧程序硬吃）。
 MIGRATION_FORMAT_VERSION = 1
 
-# 整包尺寸上限（v1）：包体 base64 后经 WS 传输，64MB 是防帧爆炸的经验上限。
-# 超过时给可读错误，指路用 data.export_full（落盘导出，不走 WS）。
+# 整包尺寸上限：包体 base64 后经 WS 传输，64MB 是防帧爆炸的经验上限。
+# 超过时**不再直接拒绝**（P24 v2）：导出自动改「落盘模式」——包写到
+# ~/.skysheep/migrations/ 并回传路径，导入也支持按路径读取（同样是本机操作），
+# 大库（几百 MB 的会话库）因此也能跨机迁移。
 MAX_MIGRATION_PACKAGE_BYTES = 64 * 1024 * 1024
+# 落盘模式保留的包数量（导出目录滚动裁剪；包的用途是「拷到另一台机器」，留着旧的没意义）
+MIGRATION_PACKAGE_KEEP = 5
+
+# 技能还原口径（P24 v2）：
+# - merge（默认）：同名技能**叠加覆盖**（包内文件盖掉同名文件，本机多出的文件与
+#   技能都保留）——迁移不是克隆，不动用户本机别的技能；
+# - replace：同名技能**整目录替换**（先把本机同名目录移到备份区，再整目录拷入），
+#   避免「包里的旧文件 + 本机的新文件」混在一起变成谁也说不清的状态。
+SKILLS_MODES = ("merge", "replace")
 
 # config.toml 脱敏的键名标记（小写匹配、含即删行）：与任务口径一致的四类。
 # 注意比 support.SECRET_KEYS 窄（那边还有 key/passwd/credential 等）——迁移
@@ -158,7 +170,7 @@ def _list_skill_files(skills_root: Path) -> list[tuple[str, bytes]]:
     return files
 
 
-def build_migration_package(home: Path) -> tuple[bytes, dict]:
+def build_migration_package(home: Path, *, enforce_limit: bool = True) -> tuple[bytes, dict]:
     """打整包：会话库一致性快照 + 技能目录 + ui.json + 脱敏 config.toml。
 
     返回 (zip_bytes, manifest)。manifest 含各内容文件的名称与大小（导入侧
@@ -222,11 +234,11 @@ def build_migration_package(home: Path) -> tuple[bytes, dict]:
             zf.writestr(name, blob)
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
     data = buf.getvalue()
-    if len(data) > MAX_MIGRATION_PACKAGE_BYTES:
+    if enforce_limit and len(data) > MAX_MIGRATION_PACKAGE_BYTES:
+        # 调用方（migration.export）默认不走上限：超了改落盘模式，不再直接拒绝
         raise RuntimeError(
             f"迁移包 {len(data) / 1024 / 1024:.1f}MB 超过 "
-            f"{MAX_MIGRATION_PACKAGE_BYTES // 1024 // 1024}MB 上限（经界面传输的包体"
-            "不宜过大）；请改用「设置 → 关于」的完整导出（落盘文件，不经界面传输）"
+            f"{MAX_MIGRATION_PACKAGE_BYTES // 1024 // 1024}MB 上限"
         )
     return data, manifest
 
@@ -241,7 +253,10 @@ def _prune_backups_dir(backup_dir: Path, stem: str) -> None:
             pass
 
 
-def apply_migration_package(home: Path, data: bytes, *, backup_dir: Path) -> dict:
+def apply_migration_package(
+    home: Path, data: bytes, *, backup_dir: Path,
+    skills_mode: str = "merge", max_bytes: int | None = MAX_MIGRATION_PACKAGE_BYTES,
+) -> dict:
     """应用迁移包：白名单校验 → 备份本机库 → 原子替换 db / 合并技能 / 还原配置。
 
     全部校验（白名单、manifest 比对、TOML/JSON、库 quick_check 与版本）都在
@@ -256,7 +271,9 @@ def apply_migration_package(home: Path, data: bytes, *, backup_dir: Path) -> dic
     backup_dir = Path(backup_dir)
     if not data:
         raise RuntimeError("迁移包内容为空")
-    if len(data) > MAX_MIGRATION_PACKAGE_BYTES:
+    if skills_mode not in SKILLS_MODES:
+        raise RuntimeError(f"未知的技能还原口径：{skills_mode}（只能是 merge / replace）")
+    if max_bytes is not None and len(data) > max_bytes:
         raise RuntimeError("迁移包超过尺寸上限，已拒绝导入")
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -395,6 +412,7 @@ def apply_migration_package(home: Path, data: bytes, *, backup_dir: Path) -> dic
             skills_root = home / "skills"
             skills_new: list[str] = []
             skills_overwritten: list[str] = []
+            skills_moved: list[tuple[str, Path]] = []  # replace 档移走的同名技能（回滚用）
             db_replaced = False
             try:
                 # 5a) 库：清 WAL/SHM 残留 → _stage_and_replace（同目录临时文件 +
@@ -431,10 +449,14 @@ def apply_migration_package(home: Path, data: bytes, *, backup_dir: Path) -> dic
                         ui_path, json.dumps(staged_ui, ensure_ascii=False),
                         encoding="utf-8",
                     )
-                # 5c) 技能合并：同名覆盖、本机多出的保留；目录名先过安装器
-                # 同款校验并 resolve 确认仍在技能根内
+                # 5c) 技能还原：同名覆盖，本机多出的保留；目录名先过安装器同款
+                # 校验并 resolve 确认仍在技能根内。
+                # replace 档（P24 v2）：同名技能先整目录移到备份区再整目录拷入，
+                # 避免「包里旧文件 + 本机新文件」混成一份谁也说不清的状态；移走的
+                # 目录留在备份区，写盘失败时按 moved 清单原样搬回。
                 if staged_skills.is_dir():
                     skills_root.mkdir(parents=True, exist_ok=True)
+                    staged_dirs: list[tuple[Path, Path, str]] = []
                     for src_dir in sorted(
                         p for p in staged_skills.iterdir() if p.is_dir()
                     ):
@@ -444,15 +466,32 @@ def apply_migration_package(home: Path, data: bytes, *, backup_dir: Path) -> dic
                             raise RuntimeError(
                                 f"包里的技能名不合法（{src_dir.name}）：{e}"
                             ) from None
-                        if dst.is_dir():
-                            skills_overwritten.append(src_dir.name)
-                        else:
-                            skills_new.append(src_dir.name)
+                        staged_dirs.append((src_dir, dst, src_dir.name))
+                    if skills_mode == "replace":
+                        # 被换下来的同名技能进备份区（不起眼但可回溯，回滚也靠它）
+                        aside_root = backup_dir / ("skills-" + time.strftime("%Y%m%d-%H%M%S"))
+                        for _src, dst, name in staged_dirs:
+                            if not dst.is_dir():
+                                continue
+                            aside = aside_root / name
+                            aside.parent.mkdir(parents=True, exist_ok=True)
+                            if aside.exists():
+                                shutil.rmtree(aside, ignore_errors=True)
+                            shutil.move(str(dst), str(aside))
+                            skills_moved.append((name, aside))
+                            skills_overwritten.append(name)
+                    for src_dir, dst, name in staged_dirs:
+                        if skills_mode != "replace":
+                            if dst.is_dir():
+                                skills_overwritten.append(name)
+                            else:
+                                skills_new.append(name)
                         shutil.copytree(src_dir, dst, dirs_exist_ok=True)
             except Exception as e:  # noqa: BLE001
                 residual = _rollback_import(
                     home, main_db, backup_path, had_db, db_replaced,
                     cfg_old, ui_old, skills_root, skills_new, attempted,
+                    skills_moved,
                 )
                 extra = f"（残留未还原：{'、'.join(residual)}）" if residual else ""
                 raise RuntimeError(f"迁移导入失败，已尽力回滚本机数据{extra}：{e}") from None
@@ -486,6 +525,7 @@ def _rollback_import(
     skills_root: Path,
     skills_new: list[str],
     attempted: set[str],
+    skills_moved: list[tuple[str, Path]] | None = None,
 ) -> list[str]:
     """写入阶段失败的尽力回滚；返回还原不了的名字（调用方如实上报）。
 
@@ -521,6 +561,14 @@ def _rollback_import(
             shutil.rmtree(skills_root / name, ignore_errors=True)
         except OSError:
             failed.append("skills/" + name)
+    # replace 档移走的同名技能：先清掉这次拷进来的，再把原目录搬回原位
+    for name, aside in (skills_moved or []):
+        try:
+            shutil.rmtree(skills_root / name, ignore_errors=True)
+            if aside.is_dir():
+                shutil.move(str(aside), str(skills_root / name))
+        except OSError:
+            failed.append("skills/" + name)
     return failed
 
 
@@ -533,16 +581,36 @@ class MigrationMixin:
         打包放线程跑（库快照与技能收集是阻塞 I/O）；导出是纯读面——库走
         backup API 一致性快照、其余是引擎原子写的状态文件，不需要忙碌保护。
         密钥不进包（mcp.json 整个排除、config.toml 剥密钥类键）。
+
+        **两种回传形态（P24 v2）**：包体 ≤64MB 时按 base64 经 WS 回传（`mode=inline`，
+        前端直接触发下载）；超过上限不拒绝，改写到 `~/.skysheep/migrations/` 并回传
+        路径（`mode=file`）——大库（几百 MB）也能跨机迁移，只是不再经界面传输。
+        落盘目录按 MIGRATION_PACKAGE_KEEP 滚动裁剪。
         """
         data, manifest = await asyncio.to_thread(
-            build_migration_package, skysheep_home()
+            build_migration_package, skysheep_home(), enforce_limit=False
         )
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"skysheep-migration-{stamp}.zip"
+        if len(data) <= MAX_MIGRATION_PACKAGE_BYTES:
+            return {
+                "mode": "inline",
+                "filename": filename,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+                "manifest": manifest,
+                "size": len(data),
+                "limit_mb": MAX_MIGRATION_PACKAGE_BYTES // 1024 // 1024,
+            }
+        out_dir = skysheep_home() / "migrations"
+        path = out_dir / filename
+        await asyncio.to_thread(_write_package_file, out_dir, path, data)
         return {
-            "filename": f"skysheep-migration-{stamp}.zip",
-            "data_b64": base64.b64encode(data).decode("ascii"),
+            "mode": "file",
+            "filename": filename,
+            "path": str(path),
             "manifest": manifest,
             "size": len(data),
+            "limit_mb": MAX_MIGRATION_PACKAGE_BYTES // 1024 // 1024,
         }
 
     async def migration_import(self, params: dict) -> dict:
@@ -552,6 +620,10 @@ class MigrationMixin:
         拒绝；团队自动循环在飞（``_teams`` 任一 ``loop_running``）拒绝；
         包校验全部通过且本机库已备份后才动盘。改了库必须重启生效
         （restart_required=True，前端据此提示）。
+
+        包来源两种（P24 v2）：`data_b64`（界面选择的小包）或 `path`（本机磁盘上的
+        包——落盘模式导出的那种，几百 MB 也不必挤进 WS 帧）。`skills_mode` 决定
+        同名技能是叠加覆盖（merge，默认）还是整目录替换（replace）。
         """
         busy = self._backup_busy_message("导入")
         if busy:
@@ -562,13 +634,25 @@ class MigrationMixin:
             raise RuntimeError(
                 f"有 {len(flying)} 支团队的自动循环正在运行，先收队（或等交付）再导入"
             )
-        raw = str(params.get("data_b64") or "")
-        if not raw:
-            raise RuntimeError("缺少迁移包内容（data_b64）")
-        try:
-            data = base64.b64decode(raw, validate=True)
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"迁移包内容不是合法的 base64：{e}") from None
+        skills_mode = str(params.get("skills_mode") or "merge").strip().lower()
+        if skills_mode not in SKILLS_MODES:
+            raise RuntimeError("技能还原口径只能是 merge（叠加）或 replace（替换）")
+        path_arg = str(params.get("path") or "").strip()
+        max_bytes: int | None = MAX_MIGRATION_PACKAGE_BYTES
+        if path_arg:
+            pkg_path = Path(path_arg)
+            if not pkg_path.is_file():
+                raise RuntimeError(f"找不到迁移包文件：{path_arg}")
+            data = await asyncio.to_thread(pkg_path.read_bytes)
+            max_bytes = None  # 本机磁盘上的包不受 WS 传输上限约束
+        else:
+            raw = str(params.get("data_b64") or "")
+            if not raw:
+                raise RuntimeError("缺少迁移包内容（data_b64 或 path）")
+            try:
+                data = base64.b64decode(raw, validate=True)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(f"迁移包内容不是合法的 base64：{e}") from None
         home = skysheep_home()
         store = self.store
         backup_dir = store.backup_dir() if store is not None else home / "backups"
@@ -582,9 +666,26 @@ class MigrationMixin:
             await store._close_writer()
         try:
             manifest = await asyncio.to_thread(
-                apply_migration_package, home, data, backup_dir=backup_dir
+                apply_migration_package, home, data, backup_dir=backup_dir,
+                skills_mode=skills_mode, max_bytes=max_bytes,
             )
         finally:
             if had_store:
                 await store.connect()
+        manifest["skills_mode"] = skills_mode
         return {"manifest": manifest, "restart_required": True}
+
+
+def _write_package_file(out_dir: Path, path: Path, data: bytes) -> None:
+    """把超大包写到落盘目录（同目录临时文件 + 原子换名），并滚动裁剪旧包。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".zip.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+    olds = sorted(out_dir.glob("skysheep-migration-*.zip"),
+                  key=lambda p: p.stat().st_mtime)
+    for old in olds[: max(0, len(olds) - MIGRATION_PACKAGE_KEEP)]:
+        try:
+            old.unlink()
+        except OSError:
+            pass

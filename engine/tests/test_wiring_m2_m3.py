@@ -155,12 +155,18 @@ def test_daily_report_ws_roundtrip(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         frame = _ws_call(ws, "d1", "automation.daily_report_status")
         assert frame["ok"]
-        assert frame["result"] == {"enabled": False, "time": "09:00", "last_sent_date": ""}
+        # 同一份状态文件同时承载周报（P10 剩余半边）：日报三键 + 周报默认值
+        assert frame["result"]["enabled"] is False
+        assert frame["result"]["time"] == "09:00"
+        assert frame["result"]["last_sent_date"] == ""
+        assert frame["result"]["weekly_enabled"] is False
 
         frame = _ws_call(ws, "d2", "automation.daily_report_save",
                          {"enabled": True, "time": "07:30"})
         assert frame["ok"]
-        assert frame["result"] == {"enabled": True, "time": "07:30", "last_sent_date": ""}
+        assert frame["result"]["enabled"] is True
+        assert frame["result"]["time"] == "07:30"
+        assert frame["result"]["last_sent_date"] == ""
 
         frame = _ws_call(ws, "d3", "automation.daily_report_save", {"time": "25:00"})
         assert frame["ok"] is False and "HH:MM" in frame["error"]
@@ -169,7 +175,9 @@ def test_daily_report_ws_roundtrip(home):
         assert frame["result"]["time"] == "07:30"
         # 引擎自有状态文件落在隔离的 SKYSHEEP_HOME，且是合法 JSON（原子写的产物）
         raw = json.loads((home / "home" / "daily_report.json").read_text(encoding="utf-8"))
-        assert raw == {"enabled": True, "time": "07:30", "last_sent_date": ""}
+        assert raw["enabled"] is True and raw["time"] == "07:30"
+        assert raw["last_sent_date"] == ""
+        assert raw["weekly_enabled"] is False and raw["weekly_weekday"] == 0
 
 
 def test_daily_report_ws_local_guards(home, monkeypatch):

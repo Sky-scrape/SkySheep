@@ -159,7 +159,11 @@ async def test_summary_next_run_and_report_state(store, home):
 
     d = await _host(store, project_id=proj.id).run_center_summary()
     assert abs(d["next_run_at"] - soon) < 1, "取启用人中最早的；停用任务不参与"
-    assert d["daily_report"] == {"enabled": False, "time": "09:00", "last_sent_date": ""}
+    # 状态文件同时承载日报与周报（P10 剩余半边）：日报那三个键 + 周报默认值
+    assert d["daily_report"]["enabled"] is False
+    assert d["daily_report"]["time"] == "09:00"
+    assert d["daily_report"]["last_sent_date"] == ""
+    assert d["daily_report"]["weekly_enabled"] is False
 
     save_report_state({"enabled": True, "time": "08:30"})
     d2 = await _host(store, project_id=proj.id).run_center_summary()

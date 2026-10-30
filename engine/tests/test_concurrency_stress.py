@@ -348,7 +348,12 @@ async def test_multi_team_concurrent_delivery_isolated_by_team_id():
     assert set(by_team) == team_ids
     for orch in (orch_a, orch_b, orch_c):
         msgs = by_team[orch.team_id]
-        assert [m.seq for m in msgs] == [m.seq for m in orch.channel.messages]
+        # 审计 L21 之后频道簿恒按 seq 排序，而 message_sink 是「定稿即落库」的
+        # post 序——「预占编号 + 中途插话」时两者顺序可以不同。这里比的是同一批
+        # 消息（按 seq 对齐），不假设落库顺序等于频道顺序。
+        assert sorted(m.seq for m in msgs) == [m.seq for m in orch.channel.messages]
+        assert {m.seq: m.text for m in msgs} == {
+            m.seq: m.text for m in orch.channel.messages}
 
     # ---- 事件流各自完整：一次建队一次交付，全程零权限事件（纯文本协作）----
     for events in (events_a, events_b, events_c):

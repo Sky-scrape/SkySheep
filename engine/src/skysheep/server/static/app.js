@@ -2488,6 +2488,9 @@ function finishAssistant(rtMeta, seq) {
         const sub = t.rtCard.querySelector(".rt-sub");
         if (sub) sub.textContent = `${rtEls.length} 个模型 · 已折叠 · 点击标题栏展开查看各成员草稿`;
       }
+      // 融合结论已随本气泡落库（seq 就位）：挂「转为团队工单」入口（P5）
+      const rtEx = rtToTeamActions(rtMeta, seq, t);
+      if (rtEx && t.rtCard && t.rtCard.isConnected) t.rtCard.appendChild(rtEx);
     }
   }
   t.lastAssistantText = t.streamingText;
@@ -2792,7 +2795,7 @@ function rtMemberFinished(data) {
 
 // 历史回放：从持久化的元数据重建圆桌卡片（默认折叠，可展开回看草稿）。
 // tab 供「引用追问」按发起面回填对应输入框（分屏列里回放的历史卡也要回列）
-function buildRtReplayCard(meta, tab) {
+function buildRtReplayCard(meta, tab, msg) {
   const members = meta.members || [];
   const compare = meta.mode === "compare";
   const rounds = meta.rounds || 1;
@@ -2838,6 +2841,9 @@ function buildRtReplayCard(meta, tab) {
     memberEls.push(u);
   });
   card._rtMembers = memberEls;
+  // 圆桌结论转工单（P5）：回放卡带消息 seq 即可挂入口（融合文本在库，前端不传）
+  const rtEx = rtToTeamActions(meta, Number(msg && msg.seq) || 0, tab);
+  if (rtEx) card.appendChild(rtEx);
   return card;
 }
 
@@ -2900,6 +2906,29 @@ function advFindingRow(f, opts = {}) {
     `<div class="adv-f-desc md"></div>`;
   row.querySelector(".adv-f-desc").innerHTML = renderMarkdown(f.description || "");
   if (f.reason) row.title = f.reason;
+  // 转圆桌议题（P5 跨形态流转）：把这条发现填进输入框当议题——只回填不自动
+  // 发送，发不发、以什么形态（圆桌/追问）发由用户决定，不制造意外开销
+  if (opts.tab && !opts.tab.readonly && opts.tab.sid) {
+    const btn = tcEl("button", "adv-f-topic", "转议题");
+    btn.title = "把这条发现填进输入框作为议题：选好圆桌模式与成员后发送";
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const parts = [`【对抗发现 ${f.finding_id || f.id || ""}】${(f.description || "").trim()}`];
+      if (f.evidence) parts.push(`（依据：${f.evidence}）`);
+      if (f.solution) parts.push(`（修复建议：${f.solution}）`);
+      const topic = parts.filter((s) => s.trim()).join("\n");
+      const pane = splitPanes.includes(opts.tab) ? opts.tab : null;
+      const input = pane ? pane.el.querySelector(".split-input") : document.getElementById("input");
+      if (!input) { addNotice("这一栏没有输入框可回填"); return; }
+      const existing = input.value.trim();
+      input.value = existing ? existing + "\n" + topic : topic;
+      if (!pane) autoGrowInput();
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      addNotice("发现已填入输入框：选好圆桌模式与成员后发送即可。");
+    };
+    row.querySelector(".adv-f-head").appendChild(btn);
+  }
   // 证据/依据/建议：按可用字段拼细节区（实时只有裁决后才有依据）
   const details = document.createElement("details");
   details.className = "adv-f-details";
@@ -3145,7 +3174,7 @@ function advSetPhase(phase, note) {
 function advAddFinding(data) {
   const t = curTab();
   if (!t || !t.advCard) return;
-  const row = advFindingRow(data);
+  const row = advFindingRow(data, { tab: t });
   t.advFindingsBox.appendChild(row);
   t.advFindingEls.push(row);
   advApplyFilter(t.advCard);
@@ -3190,6 +3219,58 @@ function advExportActions(meta, seq, tab) {
     request("adversarial.export", { session_id: tab.sid, seq })
       .then((r) => downloadText(r.filename, r.markdown))
       .catch((e) => addNotice("导出失败: " + e.message));
+  };
+  box.appendChild(button);
+  return box;
+}
+
+// 圆桌结论转团队工单（P5 跨形态流转）：登记为执行型待办、不自动派工，
+// 同一结论幂等（后端按 (roundtable, seq) 去重）；需团队在场，指派表单镜像对抗流。
+function rtToTeamActions(meta, seq, tab) {
+  if (!tab || tab.readonly || !tab.sid || !seq || !meta
+      || meta.mode !== "roundtable" || meta.status === "cancelled") return null;
+  const box = document.createElement("div");
+  box.className = "adv-actions";
+  const button = tcEl("button", "adv-to-team", "转为团队工单");
+  button.title = "把融合结论登记为一张执行型待办（不自动派工；同一结论重复登记不会重复建单）";
+  button.onclick = async (ev) => {
+    ev.stopPropagation();
+    let team;
+    try { team = await request("team.get", { session_id: tab.sid }); }
+    catch (e) { addNotice("读取团队状态失败: " + e.message); return; }
+    if (!team || !team.active || !team.team) {
+      addNotice("请先组建团队，再把圆桌结论转为工单。");
+      return;
+    }
+    const roster = team.team.roster || [];
+    if (!roster.length) { addNotice("团队名册为空，无法指派。"); return; }
+    const form = document.createElement("div");
+    form.className = "form-grid adv-to-team-form";
+    form.appendChild(tcEl("p", "dim small adv-to-team-hint",
+      "把融合结论登记为执行型待办，工单停在待办状态；是否派工由你在工单板上显式操作。"
+      + "同一结论重复登记不会重复建单。"));
+    const assignee = document.createElement("select");
+    roster.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.name;
+      opt.textContent = m.name;
+      assignee.appendChild(opt);
+    });
+    const assigneeLabel = document.createElement("label");
+    assigneeLabel.className = "wide";
+    assigneeLabel.textContent = "指派队员（执行型）";
+    assigneeLabel.appendChild(assignee);
+    form.appendChild(assigneeLabel);
+    showModal("把圆桌结论转为团队工单", form, async () => {
+      if (!assignee.value) throw new Error("请选择指派队员");
+      const r = await request("roundtable.to_team_task", {
+        session_id: tab.sid, seq, assignee: assignee.value,
+      });
+      const card = teamCardFor(tab, String((team.team && team.team.team_id) || ""))
+        || lastTeamCard(tab);
+      if (r.task) tcUpsertTask(card, r.task);
+      addNotice("已登记为执行型待办工单，尚未派工。");
+    }, "登记工单");
   };
   box.appendChild(button);
   return box;
@@ -3370,7 +3451,7 @@ function buildAdvReplayCard(meta, seq, tab) {
   card._advList = list;
   card._advEmpty = empty;
   const toolbar = advBuildToolbar(card);
-  findings.forEach((f) => list.appendChild(advFindingRow(f, { replay: true })));
+  findings.forEach((f) => list.appendChild(advFindingRow(f, { replay: true, tab })));
   const actions = advTransferActions(meta, Number(meta.seq || 0), tab);
   card.append(head, flow, toolbar, list, empty);
   const ex = advExportActions(meta, Number(meta.seq || 0), tab);
@@ -10957,7 +11038,7 @@ function paintHistorySlice(tab, messages, start, end) {
         }
         // 圆桌融合消息：先重建成员草稿卡（默认折叠），再放回答本体
         if (m.roundtable && m.roundtable.mode === "roundtable" && (m.roundtable.members || []).length) {
-          const rtCard = buildRtReplayCard(m.roundtable, tab);
+          const rtCard = buildRtReplayCard(m.roundtable, tab, m);
           curLog().appendChild(rtCard);
           renderMermaidIn(rtCard);
           highlightCodeIn(rtCard);

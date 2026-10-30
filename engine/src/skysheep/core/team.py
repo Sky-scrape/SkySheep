@@ -1229,6 +1229,38 @@ class TeamOrchestrator:
             created.append(task.to_dict())
         return created
 
+    async def task_from_roundtable(
+        self, *, seq: int, title: str, detail: str, assignee: str = "",
+    ) -> dict:
+        """把已落库的圆桌融合结论登记为一张执行工单（P5 跨形态流转）。
+
+        同一来源幂等（source ("roundtable", seq)）：重复请求返回既有工单，
+        不重复建单。只登记待办、不派工（auto_dispatch=False，与对抗转工单
+        同姿态——是否派发由用户在工单板上显式操作）。
+        """
+        if not self.active:
+            raise TeamError("当前没有进行中的团队")
+        existing = next(
+            (t for t in self.board.tasks()
+             if t.source.get("kind") == "roundtable" and t.source.get("seq") == seq),
+            None,
+        )
+        if existing is not None:
+            return existing.to_dict()  # 幂等重试：不要求再带指派
+        assignee = str(assignee or "").strip()
+        if not assignee:
+            # 工单板不收未指派单（board.add 同规）：入口就给可读错误
+            raise TeamError("请先选择指派队员（工单必须指派给名册成员）")
+        if assignee not in self.board.members:
+            raise TeamError(f"指派对象「{assignee}」不在团队名册中")
+        task = self.board.add(
+            title, assignee, type="exec",
+            detail=detail, source={"kind": "roundtable", "seq": seq},
+            auto_dispatch=False,
+        )
+        await self._fire_task(task)
+        return task.to_dict()
+
     async def task_update(self, task_id: str, status: str) -> dict:
         """用户改板：状态流转 / 打回（review→in_progress，redo+1）/ 失败标记。
 

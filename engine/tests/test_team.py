@@ -3190,6 +3190,92 @@ async def test_adversarial_to_team_tasks_validates_persisted_source(home):
         await be.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_task_from_roundtable_registers_exec_todo_idempotent():
+    """圆桌结论转工单（P5）：执行型待办、来源键幂等、指派须在名册。"""
+    events, orch = make_orch()
+    await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="x")]]))])
+    task = await orch.task_from_roundtable(
+        seq=5, title="圆桌结论首行", detail="融合结论全文", assignee="小研")
+    assert task["type"] == "exec" and task["status"] == "pending"  # 只登记待办
+    assert task["detail"] == "融合结论全文"
+    assert task["source"] == {"kind": "roundtable", "seq": 5}
+    updated = [e for e in events if e.kind == "team_task_updated"]
+    assert len(updated) == 1 and updated[0].status == "pending"
+
+    # 幂等：同一 (roundtable, seq) 重试返回既有工单，不重复上板
+    again = await orch.task_from_roundtable(
+        seq=5, title="另一个标题", detail="别的内容", assignee="")
+    assert again["id"] == task["id"]
+    assert len(orch.board.tasks()) == 1
+
+    with pytest.raises(TeamError, match="不在团队名册"):
+        await orch.task_from_roundtable(seq=6, title="t", detail="d", assignee="外人")
+    with pytest.raises(TeamError, match="指派队员"):
+        await orch.task_from_roundtable(seq=7, title="t", detail="d", assignee="")
+
+
+@pytest.mark.asyncio
+async def test_roundtable_to_team_task_validates_persisted_source(home):
+    """服务端只认落库的圆桌消息：seq 归属、对照模式与取消态不受理、正文取
+    库内（客户端伪造忽略）；自动循环在飞时整单拒绝。"""
+    from skysheep.messages import Message
+
+    be = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]),
+    )
+    await be.setup()
+    try:
+        sid = (await be.new_session())["id"]
+        events, orch = make_orch()
+        await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="x")]]))])
+        be._teams[sid] = orch
+
+        msg = Message.assistant([TextBlock(text="结论首行：先做 A\n\n其余论证……")])
+        msg.roundtable = {
+            "mode": "roundtable", "status": "done",
+            "members": [{"provider": "fa", "model": "ma", "status": "done"}],
+        }
+        seq = await be.store.append_message(sid, msg)
+
+        out = await be.roundtable_to_team_task(
+            {"session_id": sid, "seq": seq, "assignee": "小研"})
+        task = out["task"]
+        assert task["type"] == "exec" and task["status"] == "pending"
+        assert task["title"].startswith("结论首行")
+        assert task["detail"] == "结论首行：先做 A\n\n其余论证……"
+
+        # 幂等：同一来源重复请求返回既有工单
+        again = await be.roundtable_to_team_task({"session_id": sid, "seq": seq})
+        assert again["task"]["id"] == task["id"]
+
+        # 对照模式没有融合结论
+        cmp_msg = Message.assistant([TextBlock(text="选 B")])
+        cmp_msg.roundtable = {"mode": "compare", "members": []}
+        cmp_seq = await be.store.append_message(sid, cmp_msg)
+        with pytest.raises(TeamError, match="对照模式"):
+            await be.roundtable_to_team_task({"session_id": sid, "seq": cmp_seq})
+
+        # 已取消的圆桌不受理
+        cancel_msg = Message.assistant([TextBlock(text="部分结论")])
+        cancel_msg.roundtable = {"mode": "roundtable", "status": "cancelled", "members": []}
+        cancel_seq = await be.store.append_message(sid, cancel_msg)
+        with pytest.raises(TeamError, match="已取消"):
+            await be.roundtable_to_team_task({"session_id": sid, "seq": cancel_seq})
+
+        # 不属于本会话的 seq（按 sid 查不到）
+        with pytest.raises(TeamError, match="不是已保存的圆桌结论"):
+            await be.roundtable_to_team_task({"session_id": sid, "seq": 999})
+
+        # 自动循环在飞：整单拒绝，防止待办立刻被循环派发
+        orch._loop_running = True
+        with pytest.raises(TeamError, match="自动推进"):
+            await be.roundtable_to_team_task({"session_id": sid, "seq": seq})
+    finally:
+        await be.shutdown()
+
+
 # ---------- 删除会话：团队 provider 必须等在飞轮收尾后才释放 ----------
 
 

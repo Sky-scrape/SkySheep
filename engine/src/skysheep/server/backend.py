@@ -4738,6 +4738,42 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         tasks = await orch.tasks_from_adversarial(seq=seq, findings=selected, assignee=assignee)
         return {"tasks": tasks}
 
+    async def roundtable_to_team_task(self, params: dict) -> dict:
+        """把已落库的圆桌融合结论登记为一张工单（P5 跨形态流转：圆桌 → 团队）。
+
+        来源校验只认服务端持久化的消息（seq + 当前会话归属）：工单 detail=
+        融合结论全文（库内 assistant 正文）、title=结论首行截断，不接受客户端
+        提交的正文。对照模式没有融合结论、已取消的圆桌不受理。只登记待办、
+        不派工（自动循环在飞时整单拒绝，与对抗转工单同姿态）；同一来源幂等。
+        """
+        sid, orch = self._team_for(params)
+        if self.store is None:
+            raise TeamError("当前会话存储不可用，无法验证圆桌结论来源")
+        if orch.loop_running:
+            raise TeamError("总管正在自动推进中：请等本轮结束后再转为工单")
+        try:
+            seq = int(params.get("seq", 0))
+        except (TypeError, ValueError):
+            raise TeamError("无效的圆桌消息序号") from None
+        if seq <= 0:
+            raise TeamError("缺少圆桌消息序号")
+        message = await self.store.get_full_message_at(sid, seq)
+        if message is None or not message.roundtable:
+            raise TeamError("指定消息不是已保存的圆桌结论")
+        if message.roundtable.get("mode") == "compare":
+            raise TeamError("对照模式没有融合结论，不能转为工单")
+        if message.roundtable.get("status") == "cancelled":
+            raise TeamError("该圆桌已取消，不能转为工单")
+        text = message.text.strip()
+        if not text:
+            raise TeamError("该圆桌没有可用的融合结论")
+        title = text.splitlines()[0].strip()[:60] or f"圆桌结论（seq {seq}）"
+        task = await orch.task_from_roundtable(
+            seq=seq, title=title, detail=text,
+            assignee=str(params.get("assignee") or ""),
+        )
+        return {"task": task}
+
     async def team_task_update(self, params: dict) -> dict:
         """team.task_update：工单状态流转（板只由用户变更，成员不自行改板）。
 

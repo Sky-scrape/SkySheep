@@ -70,6 +70,11 @@ async def _h_adversarial_export(backend: ServerBackend, params: dict, emit, loca
     return await backend.adversarial_export(params, local=local)
 
 
+async def _h_roundtable_to_team_task(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 圆桌结论转工单（P5）：与 adversarial.to_team_tasks 同一收敛与拒绝口径
+    return await backend.roundtable_to_team_task(_team_scoped_params(backend, params, local))
+
+
 async def _h_team_task_update(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.team_task_update(_team_scoped_params(backend, params, local))
 
@@ -156,6 +161,7 @@ METHODS: dict[str, _WsMethod] = {
     "team.task_add": _WsMethod(_h_team_task_add),
     "adversarial.to_team_tasks": _WsMethod(_h_adversarial_to_team_tasks),
     "adversarial.export": _WsMethod(_h_adversarial_export),
+    "roundtable.to_team_task": _WsMethod(_h_roundtable_to_team_task),
     "team.task_update": _WsMethod(_h_team_task_update),
     "team.stop": _WsMethod(_h_team_stop),
     "team.deliver": _WsMethod(_h_team_deliver),

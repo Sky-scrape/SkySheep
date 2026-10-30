@@ -209,3 +209,112 @@ def test_push_without_card_unchanged():
     n = _run(push_text_to_targets(_Mgr([feishu]), "纯文本"))
     assert n == 1
     assert feishu.cards == [] and feishu.texts == [("oc_1", "纯文本")]
+
+
+# ---- 权限请求推渠道（P21 剩余半边：推送开关 + 接线）----
+
+
+class _Store:
+    """只实现 get_session_title 的假 store（权限提醒只需标题）。"""
+
+    def __init__(self, title="", boom=False):
+        self.title = title
+        self.boom = boom
+
+    async def get_session_title(self, sid):  # pragma: no cover - 形状即契约
+        if self.boom:
+            raise RuntimeError("db gone")
+        return self.title
+
+
+def test_permission_push_body_and_headline():
+    from skysheep.server.backend_parts.channels import (
+        permission_push_body,
+        permission_push_headline,
+    )
+
+    ev = {
+        "tool_name": "run_command",
+        "detail": "命令：npm test\n项目：demo",
+        "scope": "工作目录内路径",
+        "origin": "团队队员 · 前端",
+        "session_id": "s1",
+    }
+    assert permission_push_headline(ev) == "run_command 请求执行"
+    body = permission_push_body(ev, "重构会话")
+    assert "会话：重构会话" in body
+    assert "操作：命令：npm test" in body
+    assert "影响范围：工作目录内路径" in body
+    assert "发起方：团队队员 · 前端" in body
+    assert "超时未回复按拒绝处理" in body
+    # 没有标题退回会话 id，再退回占位文案
+    assert "会话：s1" in permission_push_body(ev, "")
+    assert "（未命名会话）" in permission_push_body({"tool_name": "t"}, "")
+    # 超长 detail 截断，不当成渠道消息塞满屏幕
+    long_body = permission_push_body({"tool_name": "write_file", "detail": "x" * 2000}, "t")
+    assert "…（已截断）" in long_body
+    assert len(long_body) < 800
+
+
+def test_push_permission_request_reminds_without_approval_surface():
+    """权限提醒卡：只有唤回跳转，没有任何放行/拒绝入口；标题取自 store。"""
+    from skysheep.server.backend_parts.channels import push_permission_request
+
+    feishu = _FakeFeishu(ok=True)
+    ev = {"tool_name": "run_command", "detail": "命令：npm test", "session_id": "s1"}
+    n = _run(push_permission_request(_Mgr([feishu]), _Store("重构会话"), ev))
+    assert n == 1
+    assert len(feishu.cards) == 1 and feishu.texts == []
+    card = feishu.cards[0][1]
+    actions = [a for el in card["elements"] if el.get("tag") == "action" for a in el["actions"]]
+    assert len(actions) == 1 and actions[0]["url"] == "skysheep://focus"
+    assert "run_command 请求执行" in json.dumps(card, ensure_ascii=False)
+    assert "重构会话" in json.dumps(card, ensure_ascii=False)
+    # 提醒失败不能影响权限流程：标题查不到也照发（退回会话 id）
+    boom = _FakeFeishu(ok=True)
+    n2 = _run(push_permission_request(_Mgr([boom]), _Store(boom=True), ev))
+    assert n2 == 1
+    assert "会话：s1" in json.dumps(boom.cards[0][1], ensure_ascii=False)
+
+
+def test_permission_push_setting_defaults_off_and_roundtrips(home):
+    """开关默认关，写成 true 才生效；非布尔值一律当关（宁可漏提醒不可误开）。"""
+    from skysheep.config import load_config, update_config_section
+
+    assert load_config().channels.permission_push is False
+    update_config_section("channels", {"permission_push": True})
+    assert load_config().channels.permission_push is True
+    update_config_section("channels", {"permission_push": "yes"})  # 非 true 字面量
+    assert load_config().channels.permission_push is False
+
+
+def test_fire_permission_push_respects_switch():
+    """接线门：开关关不推；开着才推，且不阻塞调用方（fire-and-forget）。"""
+    import types
+
+    from skysheep.server.backend_parts.channels import ChannelsMixin
+
+    class _Backend(ChannelsMixin):
+        pass
+
+    off = _Backend()
+    off.cfg = types.SimpleNamespace(channels=types.SimpleNamespace(permission_push=False))
+    feishu = _FakeFeishu(ok=True)
+    off.channels = _Mgr([feishu])
+    off.store = _Store("会话A")
+    ev = {"tool_name": "run_command", "detail": "命令：ls", "session_id": "s1"}
+
+    async def go(backend):
+        backend._fire_permission_push(ev)
+        await asyncio.sleep(0.05)  # 给后台任务一个跑完的机会
+        return feishu
+
+    _run(go(off))
+    assert feishu.cards == [], "开关关时不得推送"
+
+    on = _Backend()
+    on.cfg = types.SimpleNamespace(channels=types.SimpleNamespace(permission_push=True))
+    on.channels = _Mgr([feishu])
+    on.store = _Store("会话A")
+    _run(go(on))
+    assert len(feishu.cards) == 1

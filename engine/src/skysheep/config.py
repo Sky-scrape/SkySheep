@@ -280,6 +280,10 @@ class ChannelsConfig(BaseModel):
     """
 
     approve_timeout: int = Field(default=120, ge=10, le=3600)
+    # 权限请求发生时推一条渠道提醒（默认关）。**只提醒、不审批**：卡片里没有
+    # 放行/拒绝按钮，决策永远回桌面端经 PermissionGate 做——渠道凭据泄露不会
+    # 因此多出「远程批命令」的能力。关掉时桌面会话的权限等待对渠道完全静默。
+    permission_push: bool = False
     platforms: dict[str, dict] = Field(default_factory=dict)
 
 
@@ -1873,7 +1877,13 @@ def _load_channels(section) -> ChannelsConfig:
         timeout = int(section.get("approve_timeout", 120))
     except (TypeError, ValueError):
         timeout = 120
-    return ChannelsConfig(approve_timeout=timeout, platforms=platforms)
+    # 权限请求推渠道（默认关）：只认显式 true，其余一律当关——这条通路能在
+    # 用户不在电脑前时把「有个敏感操作在等确认」说出去，宁可漏提醒不可误开
+    return ChannelsConfig(
+        approve_timeout=timeout,
+        permission_push=section.get("permission_push") is True,
+        platforms=platforms,
+    )
 
 
 def update_config_section(section: str, updates: dict) -> dict:

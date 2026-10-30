@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from ...bgtasks import spawn_bg
 from ...channels import ChannelGate
+from ...channels.cards import permission_request_card
 from ...config import _read_raw_config, load_config, update_config_section
 from ...tools import ChangeRecorder
 from ._shared import SessionRuntime
@@ -66,6 +68,68 @@ def _raw_platforms_base() -> dict:
     platforms = channels.get("platforms") if isinstance(channels, dict) else None
     return dict(platforms) if isinstance(platforms, dict) else {}
 
+
+# ---- 权限请求推渠道（P21 剩余半边）----
+# 安全口径：这条通路**只提醒、不审批**。渠道里没有任何放行/拒绝入口，卡片只带
+# 「打开 SkySheep 处理」的唤回链接，决策仍由桌面端 PermissionGate 做。因此开关
+# 默认关、由用户显式打开，打开也不改变任何门语义。
+
+# 详情截断：渠道消息是「提醒」，不该把整段 diff 或超长命令推到聊天软件里
+PERMISSION_PUSH_DETAIL_CHARS = 400
+# 桌面壳注册的唤回协议（点击通知/卡片回到同一个 SkySheep 窗口）
+PERMISSION_FOCUS_LINK = "skysheep://focus"
+
+
+def permission_push_headline(ev: dict) -> str:
+    """权限提醒的标题：<工具> 请求执行。"""
+    return f"{str(ev.get('tool_name') or '工具')} 请求执行"
+
+
+def permission_push_body(ev: dict, session_title: str = "") -> str:
+    """权限提醒正文：会话 / 操作说明 / 影响范围 / 发起方 + 一句「怎么处理」。
+
+    只取事件里已有的字段，不做任何推断：事件里没有的信息（比如超出 scope 的
+    路径）宁可不写，也不让渠道侧看到比桌面确认卡更多的内容。
+    """
+    session = (session_title or str(ev.get("session_id") or "")).strip() or "（未命名会话）"
+    lines = [f"会话：{session}"]
+    detail = str(ev.get("detail") or "").strip()
+    if detail:
+        if len(detail) > PERMISSION_PUSH_DETAIL_CHARS:
+            detail = detail[:PERMISSION_PUSH_DETAIL_CHARS] + "…（已截断）"
+        lines.append("操作：" + detail)
+    scope = str(ev.get("scope") or "").strip()
+    if scope:
+        lines.append("影响范围：" + scope)
+    origin = str(ev.get("origin") or "").strip()
+    if origin:
+        lines.append("发起方：" + origin)
+    lines.append("请回到 SkySheep 窗口确认；超时未回复按拒绝处理。")
+    return "\n".join(lines)
+
+
+async def push_permission_request(mgr, store, ev: dict) -> int:
+    """把一条权限请求推到所有目标渠道（纯提醒）。返回成功送达次数。
+
+    会话标题现场查（emit 侧还没有它）；查不到退回会话 id，再退回「未命名会话」。
+    任何异常都只记日志——提醒失败绝不能影响权限流程本身。
+    """
+    from .automation import push_text_to_targets  # 局部导入避免模块环
+
+    title = ""
+    sid = str(ev.get("session_id") or "")
+    if store is not None and sid:
+        try:
+            title = str(await store.get_session_title(sid) or "")
+        except Exception as e:  # noqa: BLE001 - 标题只是修饰，取不到不影响提醒
+            logger.debug("权限提醒取会话标题失败：%s", e)
+    body = permission_push_body(ev, title)
+    card = permission_request_card(
+        title=permission_push_headline(ev),
+        detail=body,
+        link=PERMISSION_FOCUS_LINK,
+    )
+    return await push_text_to_targets(mgr, body, what="权限请求提醒", card=card)
 
 
 class ChannelsMixin:
@@ -158,6 +222,7 @@ class ChannelsMixin:
             item["allowed_tools"] = allowed_tools
             item["tools_warning"] = _channel_allowed_tools_warning(allowed_tools)
         manager_status["approve_timeout"] = int(cfg.approve_timeout) if cfg else 120
+        manager_status["permission_push"] = bool(cfg.permission_push) if cfg else False
         # 见过的来源合并持久化记录（重启后不丢，方便事后认领）
         if self.store is not None:
             try:
@@ -387,6 +452,36 @@ class ChannelsMixin:
         update_config_section("channels", {"approve_timeout": value})
         self.cfg = load_config()
         return await self.channel_status()
+
+    async def channel_set_permission_push(self, params: dict) -> dict:
+        """开关「权限请求推送到渠道」（P21 剩余半边，默认关）。
+
+        只改配置里的提醒开关，不碰门语义：权限请求照旧在桌面端确认，渠道侧的
+        消息里没有任何放行/拒绝入口。关掉时连日志都不留，避免把「用户此刻在等
+        确认」这类信息无谓地写进日志。
+        """
+        value = bool(params.get("enabled"))
+        update_config_section("channels", {"permission_push": value})
+        self.cfg = load_config()
+        return await self.channel_status()
+
+    def _fire_permission_push(self, ev: dict) -> None:
+        """权限请求事件处的接线：开关开且渠道管理器就绪才推，全程 fire-and-forget。
+
+        放在 emit 链路的旁路上，不 await——权限请求本身要立刻挂起等用户决策，
+        推送慢（飞书子进程、webhook 超时）绝不能拖慢确认卡出现的时机。
+        """
+        cfg = getattr(self, "cfg", None)
+        channels_cfg = getattr(cfg, "channels", None) if cfg is not None else None
+        if not channels_cfg or not bool(getattr(channels_cfg, "permission_push", False)):
+            return
+        mgr = getattr(self, "channels", None)
+        if mgr is None:
+            return
+        try:
+            spawn_bg(push_permission_request(mgr, getattr(self, "store", None), ev))
+        except RuntimeError:
+            pass  # 无事件循环（如纯测试环境）
 
     async def channel_test(self, params: dict) -> dict:
         """试发一条消息，验证 token 与 chat_id 是否都对。

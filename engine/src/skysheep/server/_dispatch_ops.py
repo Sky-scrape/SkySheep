@@ -266,6 +266,10 @@ async def _h_channel_set_timeout(backend: ServerBackend, params: dict, emit, loc
     return await backend.channel_set_timeout(params)
 
 
+async def _h_channel_set_permission_push(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.channel_set_permission_push(params)
+
+
 async def _h_channel_test(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.channel_test(params)
 
@@ -378,6 +382,10 @@ METHODS: dict[str, _WsMethod] = {
     ),
     "channel.set_timeout": _WsMethod(
         _h_channel_set_timeout, local_only=True,
+        local_error="聊天机器人渠道的配置只能在桌面端本机修改",
+    ),
+    "channel.set_permission_push": _WsMethod(
+        _h_channel_set_permission_push, local_only=True,
         local_error="聊天机器人渠道的配置只能在桌面端本机修改",
     ),
     "channel.test": _WsMethod(

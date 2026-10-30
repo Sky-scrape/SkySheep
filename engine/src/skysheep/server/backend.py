@@ -2821,6 +2821,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             elif kind == "permission_request":
                 self.runs.update(run_id, state="waiting_permission",
                                  detail="等待确认：" + str(ev.get("tool_name") or ""))
+                # 权限请求推渠道（P21 剩余半边，默认关）：只提醒不审批，
+                # fire-and-forget，不拖慢确认卡出现。
+                self._fire_permission_push({**ev, "session_id": sid})
             elif kind == "permission_resolved":
                 self.runs.update(run_id, state="thinking")
             elif kind == "notice" and "自动重试" in str(ev.get("message") or ""):

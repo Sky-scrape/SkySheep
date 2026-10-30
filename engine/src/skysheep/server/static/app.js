@@ -16341,6 +16341,12 @@ async function loadChannelPanel() {
         min="10" max="3600" value="${st.approve_timeout || 120}">
       <span>秒</span>
       <button id="channel-timeout-save" class="btn-ghost">保存</button>
+    </div>
+    <div class="channel-footer">
+      <label class="channel-opt">
+        <input type="checkbox" id="channel-perm-push" ${st.permission_push ? "checked" : ""}>
+        <span>权限请求推送到渠道（只提醒，确认仍在桌面端）</span>
+      </label>
     </div>`;
   renderChannelMsg();
   bindChannelEvents();
@@ -16633,6 +16639,22 @@ function bindChannelEvents() {
       channelMsg("审批等待时间已保存", "ok");
     } catch (e) { channelMsg("保存失败: " + e.message, "bad"); }
     loadChannelPanel();
+  };
+
+  // 权限请求推渠道：只提醒、不审批。失败时把复选框退回原状，别让界面
+  // 显示一个其实没生效的开关。
+  const permPush = document.getElementById("channel-perm-push");
+  if (permPush) permPush.onchange = async (e) => {
+    const wanted = !!e.target.checked;
+    try {
+      await request("channel.set_permission_push", { enabled: wanted });
+      channelMsg(wanted
+        ? "已开启：权限请求会推到各渠道（不含审批按钮，确认仍在桌面端）"
+        : "已关闭权限请求推送", "ok");
+    } catch (err) {
+      e.target.checked = !wanted;
+      channelMsg("保存失败: " + err.message, "bad");
+    }
   };
 
   document.querySelectorAll(".channel-claim").forEach((btn) => {

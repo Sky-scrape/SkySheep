@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-10-30 10:00:42
-- 方法总数：318（本机专属 local_only 168 个）
+- 生成时间：2026-10-30 21:48:19
+- 方法总数：319（本机专属 local_only 169 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -274,6 +274,7 @@
 | channel.enable | 是 | — |
 | channel.disable | 是 | — |
 | channel.set_timeout | 是 | — |
+| channel.set_permission_push | 是 | — |
 | channel.test | 是 | — |
 | channel.weixin_login_start | 是 | — |
 | channel.weixin_login_poll | 是 | — |

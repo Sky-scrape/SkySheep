@@ -121,6 +121,16 @@ class Channel(abc.ABC):
     async def send_text(self, chat_id: str, text: str) -> bool:
         """把文本发到聊天窗口。返回是否发送成功（失败不抛，调用方要能继续）。"""
 
+    async def send_card(self, chat_id: str, card: dict) -> bool:
+        """发一张富卡片（P21）。渠道不支持卡片时的默认实现：降级成纯文本。
+
+        降级文本由 cards.card_to_text 从卡片 JSON 抽取，调用方拿到 False 才
+        自己再走 send_text(body)——同一次推送不会发两份。
+        """
+        from .cards import card_to_text
+
+        return await self.send_text(chat_id, card_to_text(card))
+
     def status(self) -> ChannelStatus:
         return ChannelStatus(
             name=self.name,

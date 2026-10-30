@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from ...bgtasks import spawn_bg
+from ...channels.cards import task_finish_card
 from ...channels.manager import _fmt_dur
 from ...core import system_schedule
 from ...core.run_ledger import (
@@ -162,8 +163,13 @@ def _cron_push_targets_of(mgr) -> list:
     ]
 
 
-async def push_text_to_targets(mgr, body: str, *, what: str = "定时任务摘要") -> int:
+async def push_text_to_targets(mgr, body: str, *, what: str = "定时任务摘要",
+                               card: dict | None = None) -> int:
     """把一段文本推给所有目标渠道（纯推送，不需要回复）。返回成功送达的次数。
+
+    card（P21 富卡片）：给了就先对每个渠道试 send_card——飞书走 interactive
+    卡，不支持卡片的渠道走基类默认降级（卡抽成纯文本发）；卡片路径失败再落
+    回 body 纯文本。无论哪条路，同一次推送对同一渠道只发一份。
 
     聊天渠道逐 chat_id 发送；纯出站渠道（webhook）没有 chat_id 维度，
     整段发一次。单个失败只记日志继续；渠道管理器不可用或没有目标渠道时
@@ -171,6 +177,22 @@ async def push_text_to_targets(mgr, body: str, *, what: str = "定时任务摘�
     """
     delivered = 0
     for channel in _cron_push_targets_of(mgr):
+        if card is not None:
+            # 卡片路径与文本路径同构：纯出站渠道整段一张，聊天渠道逐 chat_id。
+            # 任一目标送达即算走卡片；整路失败落回下方文本（同一次推送只发一份）。
+            sent_card = False
+            try:
+                if getattr(channel, "pure_outbound", False):
+                    sent_card = await channel.send_card("", card)
+                else:
+                    for chat_id in sorted(channel.allowed_ids):
+                        if await channel.send_card(chat_id, card):
+                            sent_card = True
+            except Exception as e:  # noqa: BLE001 - 卡片失败降级文本，只记日志
+                logger.warning("%s卡片推送 %s 失败：%s", what, channel.name, e)
+            if sent_card:
+                delivered += 1
+                continue
         if getattr(channel, "pure_outbound", False):
             try:
                 if await channel.send_text("", body):
@@ -191,12 +213,19 @@ def _fire_cron_push(mgr, task: dict, status: str, duration_s: float, body: str) 
     """终态推送的 fire-and-forget 入口：绝不阻塞任务收尾、绝不影响任务结果。
 
     开关关（默认）直接跳过；推送全程在后台任务里跑，异常由 spawn_bg 的
-    收尾钩子记日志（skysheep.bg）。
+    收尾钩子记日志（skysheep.bg）。P21：附带一张完成卡片（飞书 interactive，
+    不支持卡片的渠道由基类降级纯文本），正文与卡片同一次推送只发一份。
     """
     if not task.get("notify_channel"):
         return
+    ok = status in ("ok", "empty")
+    card = task_finish_card(
+        name=f"定时任务 {task.get('name') or '未命名任务'}",
+        lines=[body],
+        ok=ok,
+    )
     try:
-        spawn_bg(push_text_to_targets(mgr, body))
+        spawn_bg(push_text_to_targets(mgr, body, what="定时任务推送", card=card))
     except RuntimeError:
         pass  # 无事件循环（如纯测试环境）
 
@@ -2540,7 +2569,12 @@ class AutomationMixin:
             body += f"，{failed} 个未成功"
         if skipped:
             body += f"，{len(skipped)} 个被跳过"
-        await push_text_to_targets(mgr, body, what="流水线摘要推送")
+        card = task_finish_card(
+            name=f"流水线 {pipe['name']}",
+            lines=[body],
+            ok=ok,
+        )
+        await push_text_to_targets(mgr, body, what="流水线摘要推送", card=card)
 
     async def _maybe_finish_pipeline(self, pipe: dict) -> None:
         """全部节点到终态时给流水线收尾：done/skipped 视为成功（skipped 是条件门

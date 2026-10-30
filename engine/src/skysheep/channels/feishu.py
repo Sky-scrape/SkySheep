@@ -526,6 +526,30 @@ class FeishuChannel(Channel):
 
     # ---- 出站 ----
 
+    async def send_card(self, chat_id: str, card: dict) -> bool:
+        """飞书富卡片（P21）：lark-cli 镜像 Open API 的 msg_type/content 参数。
+
+        发送失败返回 False（含没装 lark-cli / chat_id 为空），由调用方降级
+        纯文本——最坏不劣于旧行为，同一次推送不会重复发送。
+        """
+        if not str(chat_id).strip():
+            return False
+        if not self.cli:
+            self.error = "没找到 lark-cli，无法发送卡片"
+            return False
+        from .cards import card_to_json
+
+        sent, payload = await asyncio.to_thread(
+            self._run_cli,
+            ["im", "+messages-send", "--as", "bot",
+             "--chat-id", chat_id,
+             "--msg-type", "interactive", "--content", card_to_json(card)],
+        )
+        if not sent:
+            self.error = f"卡片发送失败：{self._err_text(payload)}"
+            return False
+        return True
+
     async def send_text(self, chat_id: str, text: str) -> bool:
         if not str(chat_id).strip():
             return False

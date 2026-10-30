@@ -11,6 +11,8 @@ import time
 import pytest
 
 from skysheep.messages import TextBlock, ToolUseBlock
+from skysheep.models.base import ProviderDone, ProviderTextDelta
+from skysheep.models.base import ProviderDone, ProviderTextDelta
 from skysheep.models.fake import FakeProvider
 from skysheep.tools.base import ToolError
 from skysheep.tools.pipeline import PipelineWriteArgs, PipelineWriteTool
@@ -527,10 +529,25 @@ def test_pipeline_attach_running_background_task(home):
     """核心场景：正在跑的后台任务挂进流水线，下游审查节点等它完成并拿到产出。"""
     from test_server import make_client, recv_until
 
-    provider = FakeProvider([
-        [TextBlock(text="BG-REPORT: 登录模块调研完成")],  # 后台任务的一轮
-        [TextBlock(text="审查：调研已收到")],  # 审查节点的一轮
-    ])
+    class _PromptRoutedProvider(FakeProvider):
+        """按最后一个用户消息分流，而不是按脚本下标。
+
+        原实现把两份回复排成一份顺序脚本：后台任务吃第一份、审查节点吃第二份。
+        并行跑（xdist）时机器被挤慢，后台任务在收尾前多走一轮就会把审查节点的
+        那份脚本吃掉——表现为「审查节点没产出 → 流水线 failed」。分流后每类
+        调用拿到的永远是自己的那份，与调度时序无关（N5 报告同族的负载稳健性修法）。
+        """
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            self.calls.append(list(messages))
+            last = messages[-1].text if messages else ""
+            text = ("审查：调研已收到" if "汇总审查" in last
+                    else "BG-REPORT: 登录模块调研完成")
+            for i in range(0, len(text), 4):
+                yield ProviderTextDelta(text[i : i + 4])
+            yield ProviderDone(stop_reason="end_turn", input_tokens=11, output_tokens=7)
+
+    provider = _PromptRoutedProvider([])
     with (
         make_client(home, [], provider=provider) as client,
         client.websocket_connect("/ws") as ws,

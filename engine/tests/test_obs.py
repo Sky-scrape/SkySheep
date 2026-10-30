@@ -8,7 +8,15 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 from skysheep import obs
+
+# skysheep.obs 是进程级共享 logger：并行跑（xdist）时同一 worker 内的换装顺序
+# 与串行不同，会让本模块的「改 handler → 抓窗口 → 还回去」相互踩到（表现为
+# 窗口内一条记录都没抓到）。整模块钉到同一个 worker 并按文件顺序执行：并行
+# 仍有收益（其余模块自由分派），本模块保持串行语义。
+pytestmark = pytest.mark.xdist_group("obs_logs")
 
 
 def _capture(caplog):

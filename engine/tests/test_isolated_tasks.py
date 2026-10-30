@@ -219,6 +219,12 @@ async def test_double_cancelled_isolated_cleanup_stays_strongly_referenced(tmp_p
     assert bgtasks.pending_count() == baseline, "清理结束后强引用应释放"
 
     # 二次取消后清理仍真实跑完：worktree 目录与注册都被收拾干净
+    # 有界等待再断言：`git worktree remove` 是子进程，并行跑（xdist）时被 CPU
+    # 挤慢属正常抖动，不是「清理夭折」——但超过窗口仍在才是真问题，照旧红。
+    for _ in range(200):
+        if not wt.exists():
+            break
+        await asyncio.sleep(0.02)
     assert not wt.exists(), "取消收尾里的 worktree 清理不得无声夭折"
     listing = subprocess.run(  # noqa: S603
         ["git", "worktree", "list"], cwd=tmp_path,

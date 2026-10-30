@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ..textio import write_text_atomic
 from .client import MCPServerConfig
+from .headers import encrypt_headers
 
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 
@@ -203,9 +204,21 @@ def save_servers(path: Path, servers: dict[str, dict]) -> None:
     """整体写回 mcp.json（保持 Claude Desktop 的 mcpServers 结构）。
 
     原子写（安全审查 M13 同族）：写一半被中断会丢掉整份 MCP 配置。
+    headers 的值在这里统一加密（审计 L16 代码半边，见 mcp/headers.py）：
+    远程 MCP 的 ``Authorization`` 就是凭据，与 config.toml 的渠道凭据同等待遇。
+    已是密文的原样保留，所以「读出来再整份写回」不会二次加密、也不会把密文
+    解成明文落盘。
     """
+    payload = {
+        name: (
+            {**section, "headers": encrypt_headers(section.get("headers"))}
+            if isinstance(section, dict) and section.get("headers")
+            else section
+        )
+        for name, section in servers.items()
+    }
     write_text_atomic(
-        path, json.dumps({"mcpServers": servers}, ensure_ascii=False, indent=2) + "\n"
+        path, json.dumps({"mcpServers": payload}, ensure_ascii=False, indent=2) + "\n"
     )
 
 

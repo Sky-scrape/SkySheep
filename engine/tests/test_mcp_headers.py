@@ -167,3 +167,59 @@ async def test_local_server_bypasses_system_proxy(header_server, monkeypatch):
         await manager.shutdown()
     assert _HeaderRecorder.seen, "本地服务器应当收到请求（代理不能插手本地地址）"
     assert _HeaderRecorder.seen[0].get("Authorization") == "Bearer local-token"
+
+
+# ---------------------------------------------------------------- 落盘加密（审计 L16）
+
+
+def test_saved_headers_are_encrypted_and_roundtrip(tmp_path):
+    """写进 mcp.json 的 header 值加密落盘，连接前解密还原——明文不留在磁盘上。
+
+    非 Windows / DPAPI 不可用时 secure_store 原样返回（与 config.toml 同口径），
+    此时断言退化为「落盘内容与读回值都是原文」，行为与改动前一致。
+    """
+    from skysheep import secure_store
+    from skysheep.mcp.client import load_mcp_configs
+    from skysheep.mcp.installer import save_servers
+
+    p = tmp_path / "mcp.json"
+    secret = "Bearer " + "tok-" + "abc123"
+    save_servers(p, {
+        "remote": {
+            "url": "https://mcp.example.com/mcp",
+            "headers": {"Authorization": secret, "X-Client": "skysheep"},
+        }
+    })
+    raw = p.read_text(encoding="utf-8")
+    if secure_store.dpapi_available():
+        assert secret not in raw, "鉴权头不得明文落盘"
+        assert secure_store.DPAPI_PREFIX in raw
+    else:
+        assert secret in raw  # 明确的平台取舍，见 SECURITY.md
+
+    cfg, _warn = load_mcp_configs(p, None)
+    assert cfg["remote"].headers["Authorization"] == secret
+    assert cfg["remote"].headers["X-Client"] == "skysheep"
+
+    # 幂等：把读回（已解密）的配置整份再存一次，磁盘上仍是密文、还能解回
+    save_servers(p, {"remote": cfg["remote"].model_dump(exclude_none=True)})
+    cfg2, _warn2 = load_mcp_configs(p, None)
+    assert cfg2["remote"].headers["Authorization"] == secret
+
+
+def test_encrypt_headers_is_idempotent_and_keeps_empty(tmp_path):
+    from skysheep.mcp.headers import decrypt_headers, encrypt_headers
+
+    once = encrypt_headers({"A": "v1", "Empty": ""})
+    twice = encrypt_headers(once)
+    assert twice == once, "已加密的值不得二次加密"
+    assert decrypt_headers(twice) == {"A": "v1", "Empty": ""}
+
+
+def test_decrypt_headers_keeps_undecryptable_ciphertext():
+    """换机器解不开的密文原样保留（交给服务端 401），不静默清空成空串。"""
+    from skysheep.mcp.headers import decrypt_headers
+
+    bogus = "dpapi:bm90LWEtcmVhbC1ibG9i"
+    out = decrypt_headers({"Authorization": bogus})
+    assert out["Authorization"]  # 不是空串，也不是 None

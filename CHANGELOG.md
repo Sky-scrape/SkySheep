@@ -378,6 +378,13 @@
   备份/恢复预检探一次即拒（「有另一个 SkySheep 进程正在写会话库」），替换窗口里
   别的进程的提交不再随旧 inode 丢掉。
 
+- **审计低危 L16（代码半边）：mcp.json 鉴权头加密落盘**：新增 `mcp/headers.py`，
+  `save_servers` 写盘前把 `headers` 值按 DPAPI 加密（`dpapi:` 前缀，与
+  config.toml 同一机制、已是密文的幂等跳过），`load_mcp_configs` 连接前解密；
+  解不开的原样透传（服务端 401，用户重填）。非 Windows / DPAPI 不可用时原样
+  明文，与 config.toml 的取舍一致。SECURITY.md 该条改为如实描述现状
+  （存量明文要等下次保存才迁移；stdio 的 `env` 仍明文）。
+
 ### 变更
 
 - **Microsoft Store 上架评估（P32）**：docs/分发上架指南.md 新增 §5——结论是

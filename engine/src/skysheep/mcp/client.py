@@ -44,6 +44,7 @@ from ..sanitize import (
 )
 from ..tools.base import Safety, Tool, ToolContext, ToolError, truncate_output
 from ..tools.web import _resolve_public_ips
+from .headers import decrypt_headers
 
 if TYPE_CHECKING:
     # 仅注解用：mcp SDK 导入约 0.4s，且启动期（splash/服务就绪）完全用不到——
@@ -344,11 +345,17 @@ def load_mcp_configs(
             if not isinstance(section, dict):
                 continue
             try:
-                merged[name] = MCPServerConfig(**section)
+                cfg = MCPServerConfig(**section)
             except Exception as e:  # noqa: BLE001
                 # 单个坏配置不影响其他，但要让用户看得见它被跳过了
                 first = str(e).strip().splitlines()[0] if str(e).strip() else str(e)
                 warnings.append(f"{label}配置里的服务「{name}」定义不合法，已跳过：{first}")
+                continue
+            # 落盘的 header 值可能是 dpapi: 密文（审计 L16）：连接前解密，
+            # 解不开的原样传下去（服务端 401，用户重填）——不静默清空。
+            if cfg.headers:
+                cfg.headers = decrypt_headers(cfg.headers)
+            merged[name] = cfg
     return merged, warnings
 
 

@@ -57,14 +57,18 @@ SkySheep 的定位是「普通用户也能安全用的桌面 Agent」，权限�
   字符串当作 API Key 原样发给上游（表现为 401），需在设置里重新填写 Key。
   旧版本明文写入的配置在新版本首次读取时自动迁移为加密（迁移只重写
   config.toml，写失败保持明文、下次启动再试）。
-- **远程 MCP 的鉴权头全平台明文落盘**：远程 MCP 服务（Streamable HTTP）的
-  静态请求头（`~/.skysheep/mcp.json` 与项目 `.skysheep/mcp.json` 的 `headers`
-  字段，常见为 `Authorization: Bearer …`）目前**所有平台都是明文**，不在
-  secure_store 的 `dpapi:` 加密清单内——config.toml 里的渠道凭据已加密而这里
-  没有，两处保护口径不一致。缓解面：文件只在本机用户目录、不进版本库，明文
-  残留量级与既有非 Windows config.toml、`~/.skysheep/feishu-cli/` 等一致；
-  请继续把 `~/.skysheep/` 当敏感目录对待。后续把 headers 纳入 `dpapi:` 加密
-  方案（含旧版回滚兼容与迁移路径），改造落地前本条如实保留。
+- **远程 MCP 的鉴权头：Windows 上 DPAPI 加密，其余位置仍是明文**：远程 MCP 服务
+  （Streamable HTTP）的静态请求头（`~/.skysheep/mcp.json` 与项目
+  `.skysheep/mcp.json` 的 `headers` 字段，常见为 `Authorization: Bearer …`）在
+  **保存时**按当前 Windows 账户用 DPAPI 加密成 `dpapi:<base64>`，连接前解密
+  （`mcp/headers.py`，与 config.toml 同一套 `secure_store` 机制）；非 Windows
+  平台、DPAPI 不可用或加密失败时原样明文落盘，与 config.toml 的取舍一致。
+  两条残余面如实说明：①**存量文件不会自动迁移**——旧版写下的明文 header 要等
+  下一次在设置页保存 MCP 配置（整份重写）才会变成密文；②换了机器或 Windows
+  账户后解不开的密文按原文透传，服务端报 401，重新在设置页填一次即可。
+  stdio 服务器的 `env`（可能含 `GITHUB_TOKEN` 一类）仍按明文保存——它要原样
+  交给子进程，加密后需在 spawn 点解密，尚未改造，请继续把 `~/.skysheep/` 当
+  敏感目录对待。
 - **「完全访问」档会连引擎数据目录一起放开**（审计 L01 的口径澄清）：该档是
   用户在界面上显式选择的「一切放行」，`~/.skysheep/` 下的 config.toml、全局技能、
   mcp.json 的写入也在其内——这是档位语义的一部分，不是漏挡。想守住「引擎主目录

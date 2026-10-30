@@ -638,3 +638,95 @@ def test_normal_send_has_no_adversarial_events(home):
         frame = recv_until(ws, "n1", events)
     assert frame["ok"]
     assert not any(e["event"].startswith("adversarial_") for e in events)
+
+
+# ---- P3 报告导出 ----
+
+
+def test_adversarial_report_markdown_pure():
+    """纯函数：字段全缺省不炸、标签映射、无产出兜底行、文件名含 seq。"""
+    from skysheep.server.backend import _adversarial_report_markdown
+
+    md, fn = _adversarial_report_markdown("测试会话", {}, 7)
+    assert fn == "对抗审查报告-0007.md"
+    assert "# 对抗审查报告：测试会话" in md
+    assert "没有产出" in md
+
+    md2, _ = _adversarial_report_markdown("", {
+        "status": "done",
+        "judge": {"provider": "pj", "model": "mj"},
+        "roles": [{"role": "finder", "provider": "pf", "model": "mf"}],
+        "stats": {"total": 2, "confirmed": 1, "refuted": 1},
+        "report": "终审结论",
+        "findings": [
+            {"id": "F1", "severity": "high", "category": "安全", "location": "a.py:1",
+             "description": "标题行\n第二行", "evidence": "证据正文",
+             "verdict": "confirmed", "reason": "复核属实", "solution": "修一下"},
+            {"id": "F2"},
+        ],
+    }, 3)
+    assert "# 对抗审查报告：未命名会话" in md2
+    assert "- 裁判：pj / mj" in md2
+    assert "发现者（pf / mf）" in md2
+    assert "共 2 条，成立 1，推翻 1" in md2
+    assert "## 终审报告" in md2 and "终审结论" in md2
+    assert "- 严重度：高｜类别：安全｜位置：a.py:1" in md2
+    assert "- 裁决：成立（复核属实）" in md2
+    assert "- 依据：" in md2 and "  > 证据正文" in md2
+    assert "- 修复建议：" in md2 and "  > 修一下" in md2  # 引用块，多行正文可平铺
+    assert "### 2. F2" in md2  # 无描述回退 id 当标题
+
+
+def test_adversarial_export_roundtrip(home):
+    """WS 导出：从落库 meta 组装 Markdown，文件名/发现清单/裁决标签齐全。"""
+    scripts = [
+        [[TextBlock(text=JUDGE_REPORT)]],       # 裁判（当前主模型）
+        [[TextBlock(text=FINDER_JSON)]],        # 发现者
+        [[TextBlock(text=INVESTIGATOR_JSON)]],  # 调查者
+        [[TextBlock(text=ADVISOR_JSON)]],       # 建议者
+    ]
+    with make_adv_client(home, scripts) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "chat.send", "params": {
+            "text": "审查这段代码：print(pop([]))",
+            "adversarial": True,
+            "members": [
+                {"provider": "fa", "model": "ma"},
+                {"provider": "fb", "model": "mb"},
+                {"provider": "fc", "model": "mc"},
+            ],
+        }})
+        events = []
+        frame = recv_until(ws, "a1", events)
+        sid = frame["result"]["session_id"]
+        ws.send_json({"id": "r1", "method": "session.resume", "params": {"id": sid}})
+        resume = recv_until(ws, "r1", [])
+        assistant = [m for m in resume["result"]["messages"] if m["role"] == "assistant"][-1]
+        ws.send_json({"id": "e1", "method": "adversarial.export", "params": {
+            "session_id": sid, "seq": assistant["seq"],
+        }})
+        out = recv_until(ws, "e1")
+
+    assert out["ok"], out.get("error")
+    md, fn = out["result"]["markdown"], out["result"]["filename"]
+    assert fn.startswith("对抗审查报告-") and fn.endswith(".md")
+    assert "# 对抗审查报告：" in md
+    assert "## 发现清单" in md
+    assert "- 裁决：" in md  # 裁决标签已从 verdict 键翻成中文
+
+
+def test_adversarial_export_errors(home):
+    """非对抗消息 / 缺序号各回可读错误。"""
+    with make_adv_client(home, [[[TextBlock(text="x")]]]) as client, \
+            client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "n1", "method": "session.new", "params": {}})
+        sid = recv_until(ws, "n1")["result"]["id"]
+        ws.send_json({"id": "e1", "method": "adversarial.export", "params": {
+            "session_id": sid, "seq": 999,
+        }})
+        r = recv_until(ws, "e1")
+        assert not r["ok"] and "对抗审查结果" in r["error"]
+        ws.send_json({"id": "e2", "method": "adversarial.export", "params": {
+            "session_id": sid, "seq": 0,
+        }})
+        r = recv_until(ws, "e2")
+        assert not r["ok"] and "缺少对抗消息序号" in r["error"]

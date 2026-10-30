@@ -680,6 +680,79 @@ def _msg_brief(m: Message) -> dict:
     }
 
 
+_ADV_VERDICT_LABELS = {"confirmed": "成立", "partial": "部分成立", "refuted": "推翻", "pending": "待定"}
+_ADV_SEV_LABELS = {"high": "高", "medium": "中", "low": "低", "info": "提示"}
+_ADV_ROLE_LABELS = {"finder": "发现者", "investigator": "调查者", "advisor": "建议者", "judge": "裁判"}
+
+
+def _adversarial_report_markdown(session_title: str, meta: dict, seq: int) -> tuple[str, str]:
+    """把落库的对抗 meta 组装成结构化 Markdown 报告（P3 导出）。
+
+    结构：报告头（来源/裁判/角色名册/裁决统计）→ 终审报告原文（report 字段，
+    失败或中止可能缺失）→ 发现清单（每条含严重度/类别/位置/描述/依据/裁决/
+    裁决理由/修复建议）。全字段容错：键缺失按缺省渲染，正文里不改写内容
+    （本来就是 Markdown 文本，原样嵌入）。
+    """
+    meta = meta if isinstance(meta, dict) else {}
+    stats = meta.get("stats") or {}
+    roles = [r for r in (meta.get("roles") or []) if isinstance(r, dict)]
+    judge = meta.get("judge") or {}
+    findings = [f for f in (meta.get("findings") or []) if isinstance(f, dict)]
+    status = str(meta.get("status") or "unknown")
+    status_label = {"done": "完成", "error": "失败", "cancelled": "已中止"}.get(status, status)
+    title = (session_title or "").strip() or "未命名会话"
+
+    lines = [f"# 对抗审查报告：{title}", ""]
+    lines.append(f"- 来源：消息 seq {seq} · 状态 {status_label}")
+    if judge.get("provider") or judge.get("model"):
+        lines.append(f"- 裁判：{judge.get('provider') or '?'} / {judge.get('model') or '?'}")
+    if roles:
+        lines.append("- 角色名册：" + "、".join(
+            f"{_ADV_ROLE_LABELS.get(str(r.get('role')), str(r.get('role') or '?'))}"
+            f"（{r.get('provider') or '?'} / {r.get('model') or '?'}）" for r in roles))
+    if stats.get("total"):
+        bits = [f"共 {stats['total']} 条"]
+        for key, label in (("confirmed", "成立"), ("partial", "部分成立"),
+                           ("refuted", "推翻"), ("pending", "待定")):
+            if stats.get(key):
+                bits.append(f"{label} {stats[key]}")
+        lines.append("- 裁决统计：" + "，".join(bits))
+    report = str(meta.get("report") or "").strip()
+    if report:
+        lines += ["", "## 终审报告", "", report]
+    if findings:
+        lines += ["", "## 发现清单", ""]
+        for i, f in enumerate(findings, 1):
+            head = str(f.get("description") or "").strip().splitlines()
+            title = (head[0] if head else "") or str(f.get("id") or "") or "（无描述）"
+            lines.append(f"### {i}. {title}")
+            lines.append("")
+            bits = []
+            if f.get("severity"):
+                bits.append(f"严重度：{_ADV_SEV_LABELS.get(str(f['severity']), str(f['severity']))}")
+            if f.get("category"):
+                bits.append(f"类别：{f['category']}")
+            if f.get("location"):
+                bits.append(f"位置：{f['location']}")
+            if bits:
+                lines.append("- " + "｜".join(bits))
+            if f.get("verdict"):
+                verdict = _ADV_VERDICT_LABELS.get(str(f["verdict"]), str(f["verdict"]))
+                reason = str(f.get("reason") or "").strip()
+                lines.append(f"- 裁决：{verdict}" + (f"（{reason}）" if reason else ""))
+            desc = str(f.get("description") or "").strip()
+            if desc:
+                lines += ["", desc, ""]
+            for label, key in (("依据", "evidence"), ("修复建议", "solution")):
+                body = str(f.get(key) or "").strip()
+                if body:
+                    lines += [f"- {label}：", "", "  > " + body.replace("\n", "\n  > "), ""]
+    if not report and not findings:
+        lines += ["", "（本次对抗没有产出终审报告或发现清单。）"]
+    filename = f"对抗审查报告-{seq:04d}.md"
+    return "\n".join(lines).rstrip() + "\n", filename
+
+
 def _window_briefs(ua: list[Message]) -> tuple[list[dict], int, int]:
     """全量 user/assistant 列表就地窗口化：返回 (尾部 briefs, 总数, 窗口前条数)。
 
@@ -3914,6 +3987,32 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             update_config_section("adversarial", updates)
             self.cfg = load_config()
         return self.adversarial_detail()
+
+    async def adversarial_export(self, params: dict, local: bool = True) -> dict:
+        """adversarial.export：对抗审查报告导出（P3），返回 {filename, markdown}。
+
+        来源校验与 messages.earlier 同口径：seq + 会话归属（本机任意会话可读，
+        远程只认自己名下/当前项目的会话）；报告内容一律从库内 meta 组装，
+        不接受客户端提交的正文。
+        """
+        sid = str(params.get("session_id", "") or "")
+        if local:
+            sess = await self.store.get_session(sid)
+            if sess is None:
+                raise RuntimeError("session not found: " + sid)
+        else:
+            sess = await self._get_owned_session(sid)
+        try:
+            seq = int(params.get("seq", 0))
+        except (TypeError, ValueError):
+            raise RuntimeError("无效的对抗消息序号") from None
+        if seq <= 0:
+            raise RuntimeError("缺少对抗消息序号")
+        message = await self.store.get_full_message_at(sid, seq)
+        if message is None or not message.adversarial:
+            raise RuntimeError("指定消息不是对抗审查结果")
+        markdown, filename = _adversarial_report_markdown(sess.title, message.adversarial, seq)
+        return {"filename": filename, "markdown": markdown}
 
     # ---- 团队：用户总管的多模型分工协作（一期 MVP，docs/团队模式设计.md） ----
     # 与圆桌并列的第二种多模型协作。活动团队是会话级状态（_teams：sid → 编排器，

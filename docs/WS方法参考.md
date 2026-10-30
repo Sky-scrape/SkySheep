@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-10-30 08:41:45
-- 方法总数：314（本机专属 local_only 166 个）
+- 生成时间：2026-10-30 08:46:29
+- 方法总数：315（本机专属 local_only 166 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -288,6 +288,7 @@
 | team.get |  | — |
 | team.task_add |  | — |
 | adversarial.to_team_tasks |  | — |
+| adversarial.export |  | — |
 | team.task_update |  | — |
 | team.stop |  | — |
 | team.deliver |  | — |

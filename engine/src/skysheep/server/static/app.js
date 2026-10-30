@@ -3177,6 +3177,24 @@ function advApplyVerdict(data) {
   advApplyFilter(t.advCard);
 }
 
+// 导出对抗报告（P3）：把落库 meta 的结构化 Markdown 从后端取回并下载。
+// seq 已知即可用，不依赖团队在不在场（回放卡与实时卡共用）。
+function advExportActions(meta, seq, tab) {
+  if (!tab || tab.readonly || !tab.sid || !seq) return null;
+  const box = document.createElement("div");
+  box.className = "adv-actions";
+  const button = tcEl("button", "adv-export", "导出报告");
+  button.title = "把本次对抗审查（角色名册 / 终审报告 / 全部发现与裁决）导出为 Markdown 报告";
+  button.onclick = (ev) => {
+    ev.stopPropagation();
+    request("adversarial.export", { session_id: tab.sid, seq })
+      .then((r) => downloadText(r.filename, r.markdown))
+      .catch((e) => addNotice("导出失败: " + e.message));
+  };
+  box.appendChild(button);
+  return box;
+}
+
 // 把「转为团队工单」入口挂到当前对抗卡（先摘掉旧入口再重建：同一条报告
 // 只会有一个按钮，晚到的 seq 也只会补一次，不会重复）。
 function advAttachTransfer(tab, meta, seq) {
@@ -3186,6 +3204,8 @@ function advAttachTransfer(tab, meta, seq) {
   [...tab.advCard.children].forEach((el) => {
     if (el.classList.contains("adv-actions")) el.remove();
   });
+  const ex = advExportActions(meta, tab.advSeq, tab);
+  if (ex) tab.advCard.appendChild(ex);
   const actions = advTransferActions(meta, tab.advSeq, tab);
   if (actions) tab.advCard.appendChild(actions);
 }
@@ -3353,6 +3373,8 @@ function buildAdvReplayCard(meta, seq, tab) {
   findings.forEach((f) => list.appendChild(advFindingRow(f, { replay: true })));
   const actions = advTransferActions(meta, Number(meta.seq || 0), tab);
   card.append(head, flow, toolbar, list, empty);
+  const ex = advExportActions(meta, Number(meta.seq || 0), tab);
+  if (ex) card.appendChild(ex);
   if (actions) card.appendChild(actions);
   if (meta.roles && meta.roles.length) card.title = advRolesTitle(meta.roles);
   advApplyFilter(card);

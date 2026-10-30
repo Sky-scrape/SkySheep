@@ -65,6 +65,11 @@ async def _h_adversarial_to_team_tasks(backend: ServerBackend, params: dict, emi
     return await backend.adversarial_to_team_tasks(_team_scoped_params(backend, params, local))
 
 
+async def _h_adversarial_export(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 报告导出（P3）：内容只从库内 meta 组装；归属校验与 messages.earlier 同口径
+    return await backend.adversarial_export(params, local=local)
+
+
 async def _h_team_task_update(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.team_task_update(_team_scoped_params(backend, params, local))
 
@@ -150,6 +155,7 @@ METHODS: dict[str, _WsMethod] = {
     "team.get": _WsMethod(_h_team_get),
     "team.task_add": _WsMethod(_h_team_task_add),
     "adversarial.to_team_tasks": _WsMethod(_h_adversarial_to_team_tasks),
+    "adversarial.export": _WsMethod(_h_adversarial_export),
     "team.task_update": _WsMethod(_h_team_task_update),
     "team.stop": _WsMethod(_h_team_stop),
     "team.deliver": _WsMethod(_h_team_deliver),

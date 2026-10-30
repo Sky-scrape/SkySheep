@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-10-30 22:14:41
-- 方法总数：320（本机专属 local_only 169 个）
+- 生成时间：2026-10-30 23:27:55
+- 方法总数：326（本机专属 local_only 174 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -198,6 +198,12 @@
 | map.save_config |  | — |
 | advanced.get |  | — |
 | advanced.save | 是 | — |
+| macro.list |  | — |
+| macro.get | 是 | — |
+| macro.save | 是 | — |
+| macro.delete | 是 | — |
+| macro.replay | 是 | — |
+| macro.stop | 是 | — |
 | retention.status |  | — |
 | retention.save | 是 | — |
 | retention.sweep | 是 | — |

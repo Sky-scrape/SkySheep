@@ -32,6 +32,7 @@ const SHELL_URLS = [
   "/static/app-factory-drawer.js",
   "/static/app-factory-draw.js",
   "/static/app-tools.js",
+  "/static/app-macros.js",
   "/static/app-advanced.js",
   "/static/app-relay.js",
   "/static/app-about.js",

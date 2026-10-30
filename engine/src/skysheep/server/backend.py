@@ -190,6 +190,7 @@ from .backend_parts.channels import (
 from .backend_parts.data_retention import RetentionMixin
 from .backend_parts.factory import FactoryMixin
 from .backend_parts.lifecycle import LifecycleMixin
+from .backend_parts.macros import MacrosMixin
 from .backend_parts.mcp import McpMixin
 from .backend_parts.memory import MemoryMixin
 from .backend_parts.migration import MigrationMixin
@@ -902,7 +903,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    SpectateMixin, SystemMixin, TerminalPanelMixin, RemoteMixin, WebtoolsMixin,
                    LifecycleMixin, McpMixin, ModsMixin, PreferencesMixin,
                    ProvidersMixin, ProjectDataMixin, RetentionMixin,
-                   ArchiveMgmtMixin, BrowserDataMixin, FactoryMixin, MigrationMixin):
+                   ArchiveMgmtMixin, BrowserDataMixin, FactoryMixin, MigrationMixin,
+                   MacrosMixin):
     def __init__(
         self,
         working_dir: str | Path = ".",

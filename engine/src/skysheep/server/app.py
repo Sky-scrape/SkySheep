@@ -274,6 +274,7 @@ def _no_store_static(app) -> None:
         "/static/app-factory-drawer.js",
         "/static/app-factory-draw.js",
         "/static/app-tools.js",
+        "/static/app-macros.js",
         "/static/app.css",
         # PWA 两个入口文件同属「手写、无指纹、改版要立即可见」：sw.js 不禁缓存
         # 的话，浏览器按启发式缓存旧副本，前端改版后 PWA 用户迟迟拿不到新 SW

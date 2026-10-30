@@ -5387,10 +5387,17 @@ function handleEvent(kind, data) {
     case "team_message": teamMsgFinal(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnMsg", data); break;
     case "team_task_updated": teamTaskUpdated(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnTask", data); break;
     case "team_finished": teamFinished(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnFinish", data); break;
-    case "tool_call_started": addToolCard(data); break;
-    case "tool_call_finished": finishToolCard(data); break;
+    case "tool_call_started": addToolCard(data); agentTermOnStart(data); break;
+    case "tool_call_finished": finishToolCard(data); agentTermOnFinish(data); break;
     case "subagent_spawned": onSubagentSpawned(data); break;
     case "subagent_event": onSubagentEvent(data); break;
+    // 电脑控制操作回放（P13）：重放进度与终态交给 app-macros.js 渲染
+    case "macro_progress":
+      if (typeof macroOnProgress === "function") macroOnProgress(data);
+      break;
+    case "macro_finished":
+      if (typeof macroOnFinished === "function") macroOnFinished(data);
+      break;
     case "task_finished": onTaskFinished(data); break;
     case "permission_request":
       showPermission(data); // 通知统一在 showPermission 里发（活动/后台各一份）
@@ -12693,6 +12700,8 @@ function showSettingsPage(target) {
   if (target === "snippets") loadSnippets();
   if (target === "remote") { loadLanPanel(); loadTsPanel(); loadChannelPanel(); }
   if (target === "skills") { loadToolControl(); renderTeamCfg().catch(() => {}); }
+  // 电脑控制操作回放（P13）：宏清单与电脑控制开关同页，跟着一起刷新
+  if (target === "skills" && typeof loadMacroCard === "function") loadMacroCard();
   if (target === "subagents") renderSubagentCfg().catch(() => {});
   if (target === "advanced") { renderAdvancedCfg().catch(() => {}); renderHooksCfg(); }
   if (target === "mods") renderModsCfg().catch(() => {});

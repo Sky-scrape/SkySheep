@@ -948,6 +948,17 @@
               高危操作逐次确认，可按动作加白名单。<b>默认关闭</b>——普通用户用不到，有「帮我操作这个软件」这类需求时再打开。
             </p>
             <div id="tool-computer-status" class="card-status" hidden></div>
+            <!-- 电脑控制操作回放（P13）：从会话历史录宏、二次确认后重放。
+                 只在电脑控制打开时可用；重放过程逐条显示进度并可随时停。 -->
+            <div id="macro-card" class="macro-card">
+              <div class="rp-toolbar">
+                <span class="dim small">操作回放（宏）· 把 Agent 做过的一套键鼠动作重放一遍</span>
+                <span class="spacer"></span>
+                <button id="macro-record" class="rp-mini" title="从当前会话的历史里录制：只收鼠标 / 键盘 / 窗口 / 写剪贴板四类动作">＋ 录制当前会话</button>
+              </div>
+              <ul id="macro-list" class="list macro-list"></ul>
+              <div class="dim small" id="macro-hint" hidden></div>
+            </div>
             <details id="tool-list-fold" class="market-fold">
               <summary id="tool-list-fold-cap">展开查看全部内置工具</summary>
               <ul id="settings-tool-list" class="list settings-tool-list"></ul>
@@ -2280,5 +2291,7 @@
 <!-- 工具配置区块（联网搜索 / AI 画图 / 语音输入 / 圆桌）拆在 app-tools.js：
      同为普通 script、零构建，先 app.js 后本文件，两文件靠全局函数互调 -->
 <script src="/static/app-tools.js"></script>
+<!-- 电脑控制操作回放（P13）：宏清单 / 录制 / 二次确认重放 / 停止 -->
+<script src="/static/app-macros.js"></script>
 </body>
 </html>

@@ -7640,3 +7640,22 @@ li.mod-row {
   .palette-item .pi-tag { display: none; }
   .palette-item .pi-hint { max-width: 50%; }
 }
+
+/* ---------- 电脑控制操作回放（P13）---------- */
+/* 设置 · 内置工具里的宏区块：一行一个宏（名字 + 步数 + 时间 + 重放/删除）。
+   窄屏（手机端）时按钮换行到下一行，不挤掉名字。 */
+.macro-card { margin-top: 10px; }
+.macro-list { display: flex; flex-direction: column; gap: 6px; }
+.macro-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; background: var(--card);
+  border: 1px solid var(--ink-line); border-radius: var(--r-sm);
+}
+.macro-name { font-weight: 700; }
+.macro-row .spacer { flex: 1 1 auto; }
+.macro-record-row .modal-input { flex: 1 1 160px; min-width: 0; }
+.macro-ops { display: flex; gap: 8px; margin-top: 8px; }
+@media (max-width: 860px) {
+  .macro-row .spacer { display: none; }
+  .macro-row .macro-name { flex: 1 1 100%; }
+}

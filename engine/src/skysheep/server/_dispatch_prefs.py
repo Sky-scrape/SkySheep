@@ -126,6 +126,32 @@ async def _h_advanced_save(backend: ServerBackend, params: dict, emit, local: bo
     return await backend.save_advanced_settings(params)
 
 
+async def _h_macro_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 宏清单：只有名字与步数，不含具体动作参数，各端可读
+    return await backend.macro_list()
+
+
+async def _h_macro_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 单个宏的完整步（含键鼠参数）：只在重放确认弹窗里用，仅本机
+    return await backend.macro_get(params)
+
+
+async def _h_macro_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.macro_save(params)
+
+
+async def _h_macro_delete(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.macro_delete(params)
+
+
+async def _h_macro_replay(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.macro_replay(params)
+
+
+async def _h_macro_stop(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.macro_stop()
+
+
 async def _h_retention_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 数据保留策略回读：各类保留天数与目录占用（只读度量面，不含敏感内容）
     return await backend.retention_status()
@@ -228,6 +254,29 @@ METHODS: dict[str, _WsMethod] = {
     "map.save_config": _WsMethod(_h_map_save_config),
     "advanced.get": _WsMethod(_h_advanced_get),
     "advanced.save": _WsMethod(_h_advanced_save, local_only=True),
+    # 电脑控制操作回放（P13）：清单各端可读；录制/查看步详情/重放/停止都作用于
+    # 这台机器的键鼠与本地宏库，与 computer_control 同姿态仅本机
+    "macro.list": _WsMethod(_h_macro_list),
+    "macro.get": _WsMethod(
+        _h_macro_get, local_only=True,
+        local_error="宏的步详情只能在桌面端本机查看",
+    ),
+    "macro.save": _WsMethod(
+        _h_macro_save, local_only=True,
+        local_error="宏只能从桌面端本机录制",
+    ),
+    "macro.delete": _WsMethod(
+        _h_macro_delete, local_only=True,
+        local_error="宏只能从桌面端本机删除",
+    ),
+    "macro.replay": _WsMethod(
+        _h_macro_replay, local_only=True,
+        local_error="宏重放会注入本机键鼠动作，只能在桌面端本机发起",
+    ),
+    "macro.stop": _WsMethod(
+        _h_macro_stop, local_only=True,
+        local_error="宏停止只能在桌面端本机操作",
+    ),
     # 数据保留策略（只进不出目录的治理）：状态各端可看；改保留天数与立即清理
     # 是删文件的动作面，与 advanced.save 同姿态仅本机
     "retention.status": _WsMethod(_h_retention_status),

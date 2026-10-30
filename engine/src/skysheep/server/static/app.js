@@ -3523,6 +3523,13 @@ function tcColumnKey(status) {
   return TEAM_TASK_COLUMNS.some((c) => c.key === status) ? status : "closed";
 }
 
+// 拖拽流转（P2）：沿用按钮操作表（TEAM_TASK_OPS）判定「这列收不收」——
+// 非法跨列不响应高亮也不接 drop；打回（review→in_progress）走行内理由
+// 表单（与按钮同款），其余直接流转。
+function tcCanTransition(from, to) {
+  return (TEAM_TASK_OPS[from] || []).some(([next]) => next === to);
+}
+
 // 看板骨架：三列 + 完成/失败折叠区。列容器保持稳定，工单行按状态在各列间搬。
 function tcBuildKanban(card) {
   const kanban = tcEl("div", "tc-kanban");
@@ -3541,6 +3548,28 @@ function tcBuildKanban(card) {
     const list = tcEl("div", "tc-col-list");
     const empty = tcEl("div", "tc-col-empty", "暂无工单");
     sec.append(head, list, empty);
+    // 拖拽落列（P2）：只有「按钮操作表允许的跨列」才高亮/接收；落列即流转，
+    // 打回走行内理由表单。只读列/已收尾的卡不可拖也不可落。
+    sec.addEventListener("dragover", (e) => {
+      const drag = card && card._drag;
+      if (!drag || !tcCanTransition(drag.from, col.key)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      sec.classList.add("drag-over");
+    });
+    sec.addEventListener("dragleave", (e) => {
+      if (!sec.contains(e.relatedTarget)) sec.classList.remove("drag-over");
+    });
+    sec.addEventListener("drop", (e) => {
+      e.preventDefault();
+      sec.classList.remove("drag-over");
+      const drag = card && card._drag;
+      if (!drag || !tcCanTransition(drag.from, col.key)) return;
+      const row = card._ui.boardList.querySelector(`[data-task="${drag.id}"]`);
+      if (!row || !row._task) return;
+      card._drag = null;
+      tcTaskTransition(card, row._task, col.key, null);
+    });
     kanban.appendChild(sec);
     cols[col.key] = { sec, list, count: head.querySelector(".tc-col-count"), empty };
   });
@@ -3644,7 +3673,41 @@ function tcSyncBoardCounts(card) {
   ui.closedCount.textContent = `已完成 ${done} · 失败 ${err}`;
   const active = (counts.pending || 0) + (counts.in_progress || 0) + (counts.review || 0);
   if (ui.tabBoardCount) ui.tabBoardCount.textContent = String(active);
+  tcSyncAttendance(card);
   tcSyncChannelCount(card);
+}
+
+// 出勤/绩效摘要（P2）：按名册聚合工单状态——完成/进行/待办/打回次数；
+// 名册里没派到单的成员也点名（「未派单」），谁闲着一眼可见。数据全部来自
+// 板面现有行，不另起后端查询。
+function tcSyncAttendance(card) {
+  const ui = card && card._ui;
+  if (!ui || !ui.attendance) return;
+  const stats = {};
+  (card._roster || []).forEach((m) => {
+    if (m && m.name) stats[m.name] = { done: 0, active: 0, todo: 0, redo: 0 };
+  });
+  ui.boardList.querySelectorAll(".tc-task").forEach((row) => {
+    const task = row._task || {};
+    const name = String(task.assignee || "");
+    if (!name) return;
+    if (!stats[name]) stats[name] = { done: 0, active: 0, todo: 0, redo: 0 };
+    const st = row.dataset.status || "pending";
+    if (st === "done") stats[name].done += 1;
+    else if (st === "in_progress" || st === "review") stats[name].active += 1;
+    else if (st === "pending") stats[name].todo += 1;
+    stats[name].redo += Number(task.redo) || 0;
+  });
+  const bits = Object.entries(stats).map(([name, s]) => {
+    const parts = [];
+    if (s.done) parts.push(`完成 ${s.done}`);
+    if (s.active) parts.push(`进行 ${s.active}`);
+    if (s.todo) parts.push(`待办 ${s.todo}`);
+    if (s.redo) parts.push(`打回 ${s.redo}`);
+    return `${name}：${parts.length ? parts.join(" / ") : "未派单"}`;
+  });
+  ui.attendance.textContent = bits.length ? "出勤：" + bits.join(" · ") : "";
+  ui.attendance.hidden = !bits.length;
 }
 
 function buildTeamCard(roster, directorMode, director) {
@@ -3681,8 +3744,10 @@ function buildTeamCard(roster, directorMode, director) {
   const rosterEl = tcEl("div", "tc-roster");
   const kanban = tcBuildKanban(card);
   const taskForm = buildTaskForm(card);
+  const attendance = tcEl("div", "tc-attendance");
+  attendance.hidden = true; // 无名册/无工单时不占位（tcSyncAttendance 回填）
   const boardEl = tcEl("div", "tc-board");
-  boardEl.append(kanban.kanban, kanban.closed, taskForm);
+  boardEl.append(attendance, kanban.kanban, kanban.closed, taskForm);
   const channelEl = tcEl("div", "tc-channel");
   const views = tcBuildViewTabs(card);
   const deliverBtn = tcEl("button", "tc-deliver", "交付");
@@ -3803,7 +3868,7 @@ function buildTeamCard(roster, directorMode, director) {
     takeoverBtn, resumeBtn, residentBtn,
     boardList: boardEl, // 看板根（含完成/失败折叠区）：既有查询（[data-task]）继续在这里找行
     cols: kanban.cols, closed: kanban.closed, closedList: kanban.closedList,
-    closedCount: kanban.closedCount,
+    closedCount: kanban.closedCount, attendance,
     tabBoard: views.board.b, tabChannel: views.channel.b,
     tabBoardCount: views.board.n, tabChannelCount: views.channel.n,
   };
@@ -3934,6 +3999,22 @@ function buildTaskRow(card, task) {
       ops.appendChild(b);
     });
     if (ops.children.length) row.appendChild(ops);
+  }
+  // 拖拽流转（P2）：有可执行操作的非终态工单才可拖；起点状态记在卡上
+  // （dragover 阶段读不到 dataTransfer 内容，跨引擎行为不一）
+  if (!card._finished && !card.readonly && (TEAM_TASK_OPS[task.status] || []).length) {
+    row.draggable = true;
+    row.addEventListener("dragstart", (e) => {
+      card._drag = { id: task.id, from: task.status || "pending" };
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", task.id); } catch (_) {} // IE 兼容面忽略
+      row.classList.add("dragging");
+    });
+    row.addEventListener("dragend", () => {
+      card._drag = null;
+      row.classList.remove("dragging");
+      Object.values(card._ui.cols).forEach(({ sec }) => sec.classList.remove("drag-over"));
+    });
   }
   return row;
 }

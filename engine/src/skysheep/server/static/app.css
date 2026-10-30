@@ -2777,6 +2777,20 @@ mark.search-hit-mark {
   font-size: var(--fs-cap); color: var(--dim); text-align: center; padding: 10px 2px 6px;
 }
 .teamcard .tc-col-empty[hidden] { display: none; }
+/* 拖拽流转（P2）：可拖行抓取手型、拖起降透明度、目标列虚线高亮 */
+.teamcard .tc-task[draggable="true"] { cursor: grab; }
+.teamcard .tc-task[draggable="true"]:active { cursor: grabbing; }
+.teamcard .tc-task.dragging { opacity: 0.45; }
+.teamcard .tc-col.drag-over {
+  border-color: var(--blue); border-style: dashed;
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+}
+/* 出勤/绩效摘要条（P2）：看板上方一行小字，按名册聚合完成/进行/待办/打回 */
+.teamcard .tc-attendance {
+  font-size: var(--fs-cap); color: var(--dim);
+  padding: 0 2px 6px; line-height: 1.7;
+}
+.teamcard .tc-attendance[hidden] { display: none; }
 /* 完成 / 失败折叠区：原生 details 可键盘展开，重画时 open 状态保留 */
 .teamcard .tc-closed {
   margin-top: 7px; border: 1px dashed var(--line2); border-radius: var(--r-sm);

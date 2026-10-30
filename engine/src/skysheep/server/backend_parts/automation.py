@@ -225,7 +225,7 @@ def _fire_cron_push(mgr, task: dict, status: str, duration_s: float, body: str) 
         ok=ok,
     )
     try:
-        spawn_bg(push_text_to_targets(mgr, body, what="定时任务推送", card=card))
+        spawn_bg(push_text_to_targets(mgr, body, what="定时任务摘要推送", card=card))
     except RuntimeError:
         pass  # 无事件循环（如纯测试环境）
 

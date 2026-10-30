@@ -192,6 +192,7 @@ from .backend_parts.factory import FactoryMixin
 from .backend_parts.lifecycle import LifecycleMixin
 from .backend_parts.mcp import McpMixin
 from .backend_parts.memory import MemoryMixin
+from .backend_parts.migration import MigrationMixin
 from .backend_parts.mods import ModsMixin
 from .backend_parts.preferences import PreferencesMixin
 from .backend_parts.project_data import ProjectDataMixin
@@ -870,7 +871,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    SpectateMixin, SystemMixin, TerminalPanelMixin, RemoteMixin, WebtoolsMixin,
                    LifecycleMixin, McpMixin, ModsMixin, PreferencesMixin,
                    ProvidersMixin, ProjectDataMixin, RetentionMixin,
-                   ArchiveMgmtMixin, BrowserDataMixin, FactoryMixin):
+                   ArchiveMgmtMixin, BrowserDataMixin, FactoryMixin, MigrationMixin):
     def __init__(
         self,
         working_dir: str | Path = ".",

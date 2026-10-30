@@ -1,5 +1,5 @@
 """WS handler（本机操作与外联域）：relay / hooks / app / lan / remote /
-demo / websearch / imagegen / speech / settings / data / channel。
+demo / websearch / imagegen / speech / settings / data / migration / channel。
 # 自 app.py 逐字迁入，行为零变化。
 
 # 本文件为机器搬移产物（P28 拆分）：正文与 app.py 原文逐字一致，
@@ -236,6 +236,16 @@ async def _h_data_import_full(backend: ServerBackend, params: dict, emit, local:
     return await backend.import_full_data(params)
 
 
+async def _h_migration_export(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """跨机迁移整包导出：会话库快照+技能+ui.json+脱敏 config 打包 base64 回传。"""
+    return await backend.migration_export()
+
+
+async def _h_migration_import(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """跨机迁移整包导入：白名单校验+先备份本机库后替换，改了库需重启生效。"""
+    return await backend.migration_import(params)
+
+
 async def _h_channel_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.channel_status()
 
@@ -343,6 +353,13 @@ METHODS: dict[str, _WsMethod] = {
     "data.export_full": _WsMethod(_h_data_export_full, local_only=True),
     "data.preview_import_full": _WsMethod(_h_data_preview_import_full, local_only=True),
     "data.import_full": _WsMethod(_h_data_import_full, local_only=True),
+    # 跨机迁移（P24）：整包导出/导入。导出带全部会话库、导入替换本机数据，
+    # 都是与 data.export_full 同档的敏感面——仅本机可触发
+    "migration.export": _WsMethod(_h_migration_export, local_only=True),
+    "migration.import": _WsMethod(
+        _h_migration_import, local_only=True,
+        local_error="跨机迁移的导入只能在桌面端本机操作",
+    ),
     # 聊天软件渠道：写配置/启停属降低防护的操作，与开局域网同一姿态——仅本机可改。
     # 远端（局域网/ tailnet）能看状态，但不能改，否则一个被扫码链接挟持的手机
     # 就能把 Agent 接给任意聊天账号。

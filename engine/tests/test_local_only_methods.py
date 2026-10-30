@@ -40,6 +40,9 @@ MUST_BE_LOCAL = (
     "advanced.save", "hooks.save", "memory.save",
     # 数据保留策略：改保留天数与立即清理会删数据目录里的文件，只能本机触发
     "retention.save", "retention.sweep",
+    # 跨机迁移（P24）：整包导出带全部会话库、导入替换本机数据——与
+    # settings/data 导出导入族同一敏感面，仅本机
+    "migration.export", "migration.import",
     # 归档管理：list 列出全部项目的归档会话标题（跨项目泄露面），改配置与
     # 批量恢复/删除是破坏性管理动作，同 retention 家族姿态仅本机
     "archive.save", "archive.list", "archive.restore", "archive.delete",

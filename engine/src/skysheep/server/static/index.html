@@ -1994,6 +1994,24 @@
               <span id="diag-msg" class="io-msg"></span>
             </div>
           </section>
+          <section class="settings-card" id="migration-card">
+            <div class="card-head">
+              <h3>跨机迁移</h3>
+              <span class="head-ops">
+                <button id="btn-migration-export" class="btn-ghost" title="打包会话库、技能、界面偏好与配置为一个 zip（模型密钥与 MCP 配置不进包），拷到新机器导入">📦 导出迁移包</button>
+                <button id="btn-migration-import" class="btn-ghost" title="从迁移包恢复：会话/技能/偏好/配置会被替换（导入前自动备份本机数据到 backups 目录）">📥 导入迁移包</button>
+                <input type="file" id="migration-file" accept=".zip" hidden>
+              </span>
+            </div>
+            <p class="settings-hint">
+              把这台机器的会话、技能、界面偏好与配置打包带走，在新机器上导入即可续用。<b>模型密钥与 MCP 配置不进包</b>（防丢包泄密），导入后到设置里重填。
+            </p>
+            <ul class="settings-hint hint-points">
+              <li>导入会<b>替换</b>本机的会话库、技能、界面偏好与配置；导入前自动把当前数据备份到 backups 目录。</li>
+              <li>导入完成后需<b>重启应用</b>生效；会话/定时任务/团队自动循环进行中时导入会被拒绝。</li>
+            </ul>
+            <span id="migration-msg" class="io-msg"></span>
+          </section>
           <section class="settings-card" id="retention-card">
             <div class="card-head">
               <h3>数据管理</h3>

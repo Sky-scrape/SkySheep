@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-10-30 09:09:13
-- 方法总数：316（本机专属 local_only 166 个）
+- 生成时间：2026-10-30 10:00:42
+- 方法总数：318（本机专属 local_only 168 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -267,6 +267,8 @@
 | data.export_full | 是 | — |
 | data.preview_import_full | 是 | — |
 | data.import_full | 是 | — |
+| migration.export | 是 | 跨机迁移整包导出：会话库快照+技能+ui.json+脱敏 config 打包 base64 回传。 |
+| migration.import | 是 | 跨机迁移整包导入：白名单校验+先备份本机库后替换，改了库需重启生效。 |
 | channel.status |  | — |
 | channel.save | 是 | — |
 | channel.enable | 是 | — |

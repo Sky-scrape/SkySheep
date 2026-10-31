@@ -6,6 +6,14 @@
 
 ### 新增
 
+- **一分钟介绍片上线官网与 README**：品牌介绍片（logo 动画开场 → 圆桌 / 团队 /
+  对抗 / 接力 → 命令可见与一键撤销 → 自动化工厂 → 收尾口号）进落地页新增
+  「介绍片」区（`#intro`，实机演示区之前）：页内播放器用 720p 版
+  （`docs/demo/skysheep-intro-720p.mp4`，7 MB，`preload="none"` 不拖首屏），
+  封面 `skysheep-intro-cover.webp`；两份 README 在实机演示前各加「介绍片」区，
+  封面图链接到 1080p 完整版。完整片沿 demo-2026-10 先例作 Release 资产分发
+  （`intro-2026-10`，`skysheep-intro-1080p.mp4`），不进仓库。
+
 - **渠道富卡片（P21）**：飞书 interactive 卡接入无人值守推送——cron 终态与流水线
   收尾在推纯文本的同时附一张完成卡（标题栏按成败配色，`--msg-type interactive
   --content` 经 lark-cli 发送）；不支持卡片的渠道（微信/webhook）由基类默认降级

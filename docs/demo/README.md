@@ -11,6 +11,21 @@
 
 ![封面](skysheep-live-demo-cover.webp)
 
+---
+
+## 介绍片（一分钟品牌片）
+
+与上面的实机录屏不同：这一支是**品牌介绍片**，混剪真实界面与动效包装，讲清
+「多模型协作的本地 AI 工作台」长什么样——logo 动画开场 → 圆桌观点对照 → 团队
+工单板 → 对抗审查 → 接力交替 → 命令可见与一键撤销 → 自动化工厂 → 收尾口号。
+
+**▶ 观看成片**：[下载 `skysheep-intro-1080p.mp4`](https://github.com/Sky-scrape/SkySheep/releases/download/intro-2026-10/skysheep-intro-1080p.mp4)
+（15 MB · 1920×1080 · H.264 · 内嵌中文字幕与配乐；Release 资产
+[intro-2026-10](https://github.com/Sky-scrape/SkySheep/releases/tag/intro-2026-10)，不进仓库）
+
+本目录只留两件：`skysheep-intro-720p.mp4`（官网播放器用的页内版本，7.2 MB）与
+`skysheep-intro-cover.webp`（封面，官网 `<video>` poster 与 README 缩略图共用）。
+
 | 项目 | 值 |
 |---|---|
 | 成片文件 | [`skysheep-live-demo-1080p.mp4`](https://github.com/Sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4)（Release 资产，不随仓库） |

@@ -36,6 +36,16 @@ You still stay in charge of sensitive actions: file writes and command execution
 
 </div>
 
+## 🎥 Intro video
+
+<div align="center">
+
+[![SkySheep intro: a local AI workbench for multi-model collaboration](docs/demo/skysheep-intro-cover.webp)](https://github.com/Sky-scrape/SkySheep/releases/download/intro-2026-10/skysheep-intro-1080p.mp4)
+
+*1 minute · roundtable / team / adversarial / relay / the automation factory, with music and Chinese captions · [▶ Watch in 1080p](https://github.com/Sky-scrape/SkySheep/releases/download/intro-2026-10/skysheep-intro-1080p.mp4)*
+
+</div>
+
 ## 🎯 What it is good for
 
 SkySheep is built for work that needs an agent to actually touch things while keeping the process visible and controllable:

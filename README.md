@@ -36,6 +36,16 @@ SkySheep 是跑在你自己电脑上的开源 AI Agent 工作台：Python asynci
 
 </div>
 
+## 🎥 介绍片
+
+<div align="center">
+
+[![SkySheep 介绍片：多模型协作的本地 AI 工作台](docs/demo/skysheep-intro-cover.webp)](https://github.com/Sky-scrape/SkySheep/releases/download/intro-2026-10/skysheep-intro-1080p.mp4)
+
+*1 分钟 · 圆桌 / 团队 / 对抗 / 接力 / 自动化工厂，带配乐与中文字幕 · [▶ 直接观看 1080p](https://github.com/Sky-scrape/SkySheep/releases/download/intro-2026-10/skysheep-intro-1080p.mp4)*
+
+</div>
+
 ## 🎬 实机演示
 
 <div align="center">

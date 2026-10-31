@@ -12795,6 +12795,13 @@ function runSettingsSearch(qs) {
       settingsSearchInput.value = "";
       if (settingsOpen) showSettingsPage(it.pageId);
       else openSettings(it.pageId);
+      // 落点在「技能与工具」页时先对齐两个视图：命中详情页里的卡就进独立技能页，
+      // 命中总览的卡（含被详情页收起的外部服务 / 多模型协作 / 内置工具那组）
+      // 就退回总览——不然滚过去只会滚到 display:none 的空处
+      if (it.pageId === "skills") {
+        if (it.card.closest("#skill-manage-view")) openSkillManage();
+        else resetSkillView();
+      }
       // 目标卡滚进可视区并闪烁提示（等页面切换渲染完再滚）
       setTimeout(() => {
         it.card.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -13766,6 +13773,16 @@ const btnTerm = document.getElementById("btn-term");
 let termTabs = [];     // [{ id, num, title, term, fit, screen }]
 let activeTermId = "";
 
+// Agent 命令镜像的固定标签 id / 宿主与控制量（声明在终端区顶部：newTermTab →
+// renderTermTabbar → agentTermBusyPaint 这条链在模块求值阶段就可能被调到，
+// 放到后面的实现段落里会撞 const 的暂时性死区）
+const AGENT_TERM_ID = "agent:mirror";
+const agentTermEl = document.getElementById("agent-term");
+const AT_MAX_LINES = 600;      // 屏显上限：多的从头部丢，内存不随工作时间涨
+const AT_CMD_MAX = 600;        // 单条命令最多显示多少字（超长命令只留开头）
+let agentTermBusy = 0;         // 正在跑的命令数（镜像标签上的呼吸点）
+let agentTermFollow = true;    // 视口贴着底部才自动跟随（用户回看时不抢滚动）
+
 function termTabById(id) { return termTabs.find((t) => t.id === id) || null; }
 function termActive() { return termTabById(activeTermId) || termTabs[0] || null; }
 
@@ -13852,6 +13869,10 @@ async function ensureTermScreen(t) {
   request("term.spawn", { term_id: t.id, rows: term.rows, cols: term.cols }).catch((e) => {
     term.write("终端启动失败：" + (e && e.message ? e.message : e) + "\r\n");
   });
+  // 创建是异步的（要先拉 xterm 双文件库）：等它落地时用户可能已经切到别的
+  // 标签（例如 Agent 镜像），新画布必须按「当前该显示谁」决定显隐，否则它会
+  // 盖在镜像上面——看起来像点了 Agent 却还是终端 1
+  applyTermVisibility();
   return term;
 }
 
@@ -13868,13 +13889,30 @@ function termFit(t) {
 function termFitAll() { termTabs.forEach(termFit); }
 window.addEventListener("resize", termFitAll);
 
+// 终端区的可见性统一在这里落：真终端画布与 Agent 镜像二选一
+function applyTermVisibility() {
+  const agentOn = activeTermId === AGENT_TERM_ID;
+  if (agentTermEl) agentTermEl.classList.toggle("hidden", !agentOn);
+  for (const tab of termTabs) {
+    if (tab.screen) tab.screen.classList.toggle("hidden", agentOn || tab.id !== activeTermId);
+  }
+  if (agentOn) {
+    document.getElementById("btn-term").classList.remove("has-run"); // 已经看过了
+    agentTermScrollToEnd();
+  }
+}
+
 function switchTermTab(id) {
+  if (id === AGENT_TERM_ID) {
+    activeTermId = id;
+    applyTermVisibility();
+    renderTermTabbar();
+    return;
+  }
   const t = termTabById(id);
   if (!t) return;
   activeTermId = id;
-  for (const tab of termTabs) {
-    if (tab.screen) tab.screen.classList.toggle("hidden", tab.id !== id);
-  }
+  applyTermVisibility();
   renderTermTabbar();
   ensureTermScreen(t);
   termFit(t);
@@ -13902,6 +13940,12 @@ function resetTermTabs() {
   }
   termTabs = [];
   activeTermId = "";
+  // 镜像里的命令是上一个项目的目录下跑的，切项目后不再是「当前现场」，清掉
+  if (agentTermEl && agentTermEl.dataset.ready) {
+    agentTermBody().innerHTML = "";
+    agentTermBusy = 0;
+    agentTermBusyPaint();
+  }
   // 只在终端面板正开着时才立刻重建 shell：每次 spawn 都会创建一个 ConPTY
   // 宿主进程（conhost），其窗口在创建瞬间可能闪一下——面板收着时白闪一次。
   // 收起时留空，等真正展开面板时 toggleTermDock 会自动建标签。
@@ -13910,6 +13954,19 @@ function resetTermTabs() {
 
 function renderTermTabbar() {
   tdTabs.innerHTML = "";
+  // 固定在最左的 Agent 镜像标签：不可关闭，切项目也不销毁（只清屏）
+  const agentTab = document.createElement("span");
+  agentTab.id = "td-agent";
+  agentTab.className = "td-tab td-tab-agent" + (activeTermId === AGENT_TERM_ID ? " active" : "");
+  agentTab.title = "Agent 镜像：Agent 在本机跑过的命令与输出预览（只读）";
+  const agentCap = document.createElement("span");
+  agentCap.className = "td-cap-agent";
+  agentCap.textContent = "Agent";
+  agentTab.appendChild(agentCap);
+  agentTab.onclick = () => switchTermTab(AGENT_TERM_ID);
+  tdTabs.appendChild(agentTab);
+  agentTermBusyPaint();
+
   termTabs.forEach((t) => {
     const tab = document.createElement("span");
     tab.className = "td-tab" + (t.id === activeTermId ? " active" : "");
@@ -13933,13 +13990,16 @@ function toggleTermDock(force) {
   termDock.classList.toggle("hidden", !show);
   btnTerm.classList.toggle("on", show);
   if (show) {
-    if (!termTabs.length) newTermTab(true);
-    const t = termActive();
+    // 停在 Agent 镜像上时别再悄悄建一个真终端把人踢走（用户展开面板是想接着
+    // 看镜像，结果被换到终端 1 就白展开了）
+    if (!termTabs.length && activeTermId !== AGENT_TERM_ID) newTermTab(true);
+    const t = activeTermId === AGENT_TERM_ID ? null : termActive();
     if (t) {
       ensureTermScreen(t);
       termFit(t);
       if (t.term && document.hasFocus()) t.term.focus();
     }
+    applyTermVisibility();
   }
 }
 
@@ -13947,9 +14007,117 @@ btnTerm.onclick = () => toggleTermDock();
 document.getElementById("td-add").onclick = () => { newTermTab(true); };
 document.getElementById("td-close").onclick = () => toggleTermDock(false);
 document.getElementById("term-clear").onclick = () => {
+  if (activeTermId === AGENT_TERM_ID) { agentTermClear(); return; }
   const t = termActive();
   if (t && t.term) { t.term.clear(); t.term.focus(); }
 };
+
+// —— Agent 命令镜像：终端面板里固定的只读标签 ——
+// 数据源就是既有事件流（tool_call_started 的 input / tool_call_finished 的
+// preview），不新增后端接口：Agent 在本机敲了什么、回了什么，开面板就看得见，
+// 不用回头翻消息卡片。真终端那几页仍然完全独立——要自己接管就在那里敲。
+// （AGENT_TERM_ID / agentTermEl / 上限常量在终端区顶部声明，见那里的注释）
+
+function agentTermReady() {
+  if (agentTermEl.dataset.ready) return agentTermEl;
+  agentTermEl.dataset.ready = "1";
+  const hint = document.createElement("div");
+  hint.className = "at-hint";
+  hint.textContent = "只读镜像 · Agent 执行的命令与输出预览 · 要完整滚动或自己接管，用右边的终端标签";
+  const body = document.createElement("div");
+  body.className = "at-body";
+  body.id = "at-body";
+  // 用户往回翻看历史时别把他拽到最新一行（与对话流的跟随口径一致）
+  body.addEventListener("scroll", () => {
+    agentTermFollow = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+  });
+  agentTermEl.appendChild(hint);
+  agentTermEl.appendChild(body);
+  return agentTermEl;
+}
+
+function agentTermBody() {
+  return agentTermReady().querySelector("#at-body");
+}
+
+function agentTermScrollToEnd() {
+  const body = agentTermBody();
+  agentTermFollow = true;
+  body.scrollTop = body.scrollHeight;
+}
+
+function agentTermLine(text, kind) {
+  const body = agentTermBody();
+  const el = document.createElement("div");
+  el.className = "at-line " + (kind || "out");
+  el.textContent = text;
+  body.appendChild(el);
+  while (body.children.length > AT_MAX_LINES) body.removeChild(body.firstChild);
+  if (agentTermFollow) body.scrollTop = body.scrollHeight;
+  return el;
+}
+
+// 命令跑起来 → 打一行 "$ 命令"（子会话的命令带 [子代理名] 前缀区分来源）
+function agentTermOnStart(ev, who) {
+  if (!ev || ev.name !== "run_command") return;
+  const input = ev.input || {};
+  let cmd = String(input.command || input.cmd || "");
+  if (!cmd.trim()) return;
+  if (cmd.length > AT_CMD_MAX) cmd = cmd.slice(0, AT_CMD_MAX) + "…";
+  agentTermReady();
+  agentTermBusy += 1;
+  agentTermLine("$ " + (who ? "[" + who + "] " : "") + cmd, "cmd");
+  agentTermBusyPaint();
+  agentTermPing();
+}
+
+function agentTermOnFinish(ev, who) {
+  if (!ev || ev.name !== "run_command") return;
+  if (agentTermBusy > 0) agentTermBusy -= 1;
+  const prev = String(ev.preview || "");
+  if (prev) {
+    const kind = ev.is_error ? "err" : "out";
+    for (const line of prev.split("\n")) agentTermLine(line, kind);
+    // 预览是截断后的（引擎侧 500 字上限），如实标出来，免得当成完整输出
+    if (prev.length >= 499) agentTermLine("（以上为输出预览，已截断）", "note");
+  } else {
+    agentTermLine("（无输出）", "note");
+  }
+  if (ev.duration_ms) agentTermLine("— " + (who ? "[" + who + "] " : "") + ev.duration_ms + "ms", "note");
+  agentTermBusyPaint();
+}
+
+function agentTermClear() {
+  const body = agentTermBody();
+  body.innerHTML = "";
+  agentTermLine("（已清屏 · 后续命令继续记录在这里）", "note");
+  agentTermFollow = true;
+}
+
+// 镜像标签上的「正在跑」呼吸点
+function agentTermBusyPaint() {
+  agentTermReady();
+  const tab = document.getElementById("td-agent");
+  if (!tab) return;
+  let dot = tab.querySelector(".td-busy");
+  if (agentTermBusy > 0) {
+    if (!dot) {
+      dot = document.createElement("span");
+      dot.className = "td-busy";
+      dot.textContent = "●";
+      tab.appendChild(dot);
+    }
+  } else if (dot) {
+    dot.remove();
+  }
+}
+
+// 面板收着 / 停在别的标签上时，在终端按钮上留一个小圆点提示有新命令
+function agentTermPing() {
+  const dockOpen = !termDock.classList.contains("hidden");
+  if (dockOpen && activeTermId === AGENT_TERM_ID) return;
+  document.getElementById("btn-term").classList.add("has-run");
+}
 
 // 把当前终端最近输出带入主输入框（引用块），供 Agent 分析
 document.getElementById("term-to-agent").onclick = () => {
@@ -14874,6 +15042,10 @@ function fmtTaskDur(s) {
 
 // —— 子代理直播：subagent_event 渲染进运行中的 spawn_agent 卡片 ——
 function onSubagentSpawned(data) {
+  // HUD 与卡片是两条独立的消费线：卡片只认「当前这一轮派出去的那一个」，
+  // HUD 要看见全部并行任务（含别的标签/后台会话派出去的），所以先喂 HUD，
+  // 再走卡片那条可能提前 return 的路径
+  subHudSpawned(data);
   // 卡片与任务的绑定只认 subagent_spawned（后端在派生瞬间发、必早于该任务
   // 的任何过程事件）——不靠「第一个到达的事件」，否则并发中其他后台任务
   // 的事件会在同步卡片绑定前抢先串台
@@ -14891,6 +15063,7 @@ function renderSubQueued(card) {
 }
 
 function onSubagentEvent(data) {
+  subHudEvent(data);
   if (!curSpawnCard || !curSpawnCard._spawnTaskId) return;
   if (curSpawnCard._spawnTaskId === data.task_id) renderSubEvent(curSpawnCard, data.event || {});
 }
@@ -14944,6 +15117,7 @@ function renderSubEvent(card, ev) {
 
 // —— 后台子代理任务终态通知 ——
 function onTaskFinished(data) {
+  subHudFinished(data);
   const label = { done: "完成", cancelled: "已取消", error: "失败" }[data.status] || data.status;
   addNotice(`后台子代理任务${label}（${data.agent_type || ""}）：${data.prompt || ""}`);
   offerTaskSummary(data);
@@ -14991,6 +15165,338 @@ document.getElementById("tasks-cancel").onclick = async () => {
 setInterval(() => {
   if (rightViewVisible("tasks")) loadTasks();
 }, 3000);
+
+// —— 并行子会话 HUD：顶栏徽标 + 轻量浮层 ——
+// 右侧「任务」标签是完整清单，但要先开面板才看得见；并行子任务在跑的时候
+// 用户希望它们「自己冒出来」。这里只维护一份内存态，**事件驱动、不额外轮询**
+// （任务面板已有 3s 轮询，再挂一个就是双倍请求）：subagent_spawned 建条目、
+// subagent_event 推进度、task_finished 收尾；刷新页面时用一次 tasks.list 补齐
+// 已在跑的任务。
+const SUB_HUD_DONE_KEEP = 6; // 浮层里最多保留几条已结束的（新→旧）
+
+const subHudMap = new Map(); // task_id -> 条目
+const subHudPanel = document.getElementById("subagents-panel");
+const subHudBtn = document.getElementById("btn-subagents");
+const subHudBadge = document.getElementById("subagents-badge");
+let subHudTicker = null;
+let subHudSeeded = false;
+
+const SUB_HUD_STATUS = {
+  running: "运行中", queued: "排队中", done: "完成",
+  cancelled: "已取消", error: "失败",
+};
+
+function subHudEntry(id) {
+  let e = subHudMap.get(id);
+  if (!e) {
+    e = {
+      id: String(id || ""), agentType: "", prompt: "", sessionId: "",
+      status: "running", startedAt: Date.now() / 1000, durationS: 0, tools: 0, live: "",
+    };
+    subHudMap.set(e.id, e);
+  }
+  return e;
+}
+
+function subHudActiveCount() {
+  let n = 0;
+  for (const e of subHudMap.values()) {
+    if (e.status === "running" || e.status === "queued") n += 1;
+  }
+  return n;
+}
+
+function subHudSpawned(data) {
+  const e = subHudEntry(data.task_id);
+  e.agentType = data.agent_type || e.agentType;
+  e.prompt = data.prompt || e.prompt;
+  e.sessionId = data.session_id || e.sessionId;
+  e.status = data.queued ? "queued" : "running";
+  e.startedAt = Date.now() / 1000;
+  e.live = data.queued ? "⏳ 并发已满，排队中" : "";
+  subHudPaint();
+}
+
+function subHudEvent(data) {
+  const e = subHudEntry(data.task_id);
+  if (!e.agentType) e.agentType = data.agent_type || "";
+  const ev = data.event || {};
+  if (ev.kind === "tool_call_started") {
+    e.tools += 1;
+    e.live = "▶ " + (ev.name || "") + " " + oneLine(ev.input || {});
+  } else if (ev.kind === "tool_call_finished") {
+    e.live = (ev.is_error ? "✗ " : "✓ ") + (ev.name || "") +
+      (ev.duration_ms ? ` (${ev.duration_ms}ms)` : "");
+  }
+  if (ev.kind === "tool_call_started" || ev.kind === "text_delta") {
+    if (e.status === "queued") e.status = "running";
+  }
+  // 子会话里跑的也是本机的命令：同一份输出喂给终端面板的 Agent 镜像，
+  // 否则「看见 Agent 在本机做了什么」只覆盖主会话，漏掉并行的那几路
+  if (ev.kind === "tool_call_started") agentTermOnStart(ev, e.agentType);
+  else if (ev.kind === "tool_call_finished") agentTermOnFinish(ev, e.agentType);
+  subHudPaint();
+}
+
+function subHudFinished(data) {
+  const e = subHudEntry(data.task_id);
+  e.status = data.status || "done";
+  if (e.startedAt) e.durationS = Math.max(0, Date.now() / 1000 - e.startedAt);
+  // 别的标签/后台会话里的任务打完之后顺手清理：Map 是进程内常驻的，
+  // 不裁会随着一天的工作一直长
+  if (subHudMap.size > SUB_HUD_DONE_KEEP + 24) {
+    const done = [...subHudMap.values()]
+      .filter((x) => x.status !== "running" && x.status !== "queued")
+      .sort((a, b) => a.startedAt - b.startedAt);
+    for (const x of done.slice(0, done.length - SUB_HUD_DONE_KEEP)) subHudMap.delete(x.id);
+  }
+  subHudPaint();
+}
+
+// 冷启动补齐：刷新页面时已经在跑的任务不会再有 spawned 事件
+async function subHudSeed() {
+  if (subHudSeeded) return;
+  subHudSeeded = true;
+  try {
+    const tasks = (await request("tasks.list")).tasks || [];
+    for (const t of tasks) {
+      if (t.status !== "running" && t.status !== "queued") continue;
+      if (subHudMap.has(t.id)) continue;
+      const e = subHudEntry(t.id);
+      e.agentType = t.agent_type || "";
+      e.prompt = t.prompt || "";
+      e.status = t.status;
+      e.durationS = t.duration_s || 0;
+      e.startedAt = Date.now() / 1000 - (t.duration_s || 0);
+    }
+    subHudPaint();
+  } catch (e) {
+    subHudSeeded = false; // 失败不占位，下次有事件时还能再补
+  }
+}
+
+// 浮层里「跑着的那几条」要一直走秒，但只改文本节点，不整块重绘
+function subHudStartTicker() {
+  if (subHudTicker) return;
+  subHudTicker = setInterval(() => {
+    if (subHudPanel.classList.contains("hidden")) { subHudStopTicker(); return; }
+    const now = Date.now() / 1000;
+    subHudPanel.querySelectorAll(".subs-dur[data-task]").forEach((el) => {
+      const e = subHudMap.get(el.dataset.task);
+      if (!e || (e.status !== "running" && e.status !== "queued")) return;
+      const secs = Math.max(0, now - e.startedAt);
+      const txt = e.status === "queued" ? "" : fmtTaskDur(secs);
+      if (el.textContent !== txt) el.textContent = txt;
+    });
+  }, 1000);
+}
+function subHudStopTicker() {
+  if (!subHudTicker) return;
+  clearInterval(subHudTicker);
+  subHudTicker = null;
+}
+
+// 顶栏入口：没有在跑的子任务就整个让位（浮层开着时保留，免得按钮消失后
+// 浮层失去锚点）；徽标只显示「在跑几路」
+function subHudPaint() {
+  const n = subHudActiveCount();
+  const open = !subHudPanel.classList.contains("hidden");
+  subHudBtn.classList.toggle("hidden", n === 0 && !open);
+  subHudBtn.classList.toggle("tb-live", n > 0);
+  subHudBadge.classList.toggle("hidden", n <= 0);
+  subHudBadge.textContent = n > 9 ? "9+" : String(n);
+  subHudBtn.title = n > 0
+    ? `并行子会话：${n} 个后台任务在跑（点击看进度）`
+    : "并行子会话：当前没有在跑的后台任务";
+  if (open) subHudRender();
+  else subHudStopTicker();
+}
+
+// 浮层里的条目按「同一批 id、同一顺序」判断能不能原地更新：子任务推进时
+// 每个工具调用都会来一次 paint，整块重建会把用户正悬停/正要点的 ✕ 换掉
+// （mousedown 落在旧节点、click 派发前节点已被替换 → 点了没反应）。
+// 只有条目集合或顺序变了（新任务进来、跑完的挪去下面）才重建。
+function subHudDesired() {
+  const items = [...subHudMap.values()];
+  const active = items
+    .filter((e) => e.status === "running" || e.status === "queued")
+    .sort((a, b) => a.startedAt - b.startedAt);
+  const done = items
+    .filter((e) => e.status !== "running" && e.status !== "queued")
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .slice(0, SUB_HUD_DONE_KEEP);
+  return { active, list: [...active, ...done] };
+}
+
+function subHudRender() {
+  const { active, list } = subHudDesired();
+  const want = list.map((e) => e.id).join("\u0001");
+  const have = [...subHudPanel.querySelectorAll(".subs-item")]
+    .map((el) => el.dataset.task).join("\u0001");
+  const hasHead = !!subHudPanel.querySelector(".notif-head");
+  if (!hasHead || want !== have) { subHudRebuild(list, active.length); return; }
+  subHudSyncHead(active.length);
+  for (const e of list) subHudSyncItem(e);
+}
+
+function subHudSyncHead(n) {
+  const meta = subHudPanel.querySelector(".notif-head .subs-meta");
+  if (!meta) return;
+  const txt = n ? `${n} 在跑` : "都跑完了";
+  if (meta.textContent !== txt) meta.textContent = txt;
+}
+
+function subHudRebuild(list, activeCount) {
+  subHudPanel.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "notif-head";
+  const title = document.createElement("b");
+  title.textContent = "并行子会话";
+  const meta = document.createElement("span");
+  meta.className = "dim small subs-meta";
+  meta.textContent = activeCount ? `${activeCount} 在跑` : "都跑完了";
+  head.appendChild(title);
+  head.appendChild(meta);
+  subHudPanel.appendChild(head);
+
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "dim small subs-empty";
+    empty.textContent = "当前没有并行子会话。Agent 用 spawn_agent 派出的后台任务会实时出现在这里。";
+    subHudPanel.appendChild(empty);
+    return;
+  }
+
+  for (const e of list) subHudPanel.appendChild(subHudItem(e));
+
+  const foot = document.createElement("div");
+  foot.className = "subs-foot";
+  const link = document.createElement("button");
+  link.className = "link-btn";
+  link.textContent = "在右侧面板看全部 →";
+  link.onclick = (ev) => {
+    ev.stopPropagation();
+    subHudClose();
+    openRightTab("tasks");
+  };
+  foot.appendChild(link);
+  const note = document.createElement("span");
+  note.className = "dim small";
+  note.textContent = "点击条目看完整报告";
+  foot.appendChild(note);
+  subHudPanel.appendChild(foot);
+}
+
+function subHudLiveText(e) {
+  // 最近一次工具动作 + 累计次数并成一行：浮层里每条要够矮，三条并行任务
+  // 加一个页脚才能一屏看完，不用滚
+  return [e.live, e.tools > 0 ? `· ${e.tools} 次调用` : ""].filter(Boolean).join(" ");
+}
+
+function subHudItem(e) {
+  const item = document.createElement("div");
+  item.className = "subs-item st-" + e.status;
+  item.dataset.task = e.id;
+  item.title = e.prompt || "";
+  const row = document.createElement("div");
+  row.className = "subs-row";
+  const name = document.createElement("b");
+  name.className = "subs-name";
+  name.textContent = e.agentType || "subagent";
+  const dur = document.createElement("span");
+  dur.className = "subs-dur";
+  dur.dataset.task = e.id;
+  dur.textContent = e.status === "queued" ? "" : fmtTaskDur(
+    e.status === "running" ? Math.max(0, Date.now() / 1000 - e.startedAt) : e.durationS);
+  const status = document.createElement("span");
+  status.className = "subs-status";
+  status.textContent = SUB_HUD_STATUS[e.status] || e.status;
+  row.appendChild(name);
+  row.appendChild(dur);
+  row.appendChild(status);
+  item.appendChild(row);
+
+  if (e.prompt) {
+    const p = document.createElement("div");
+    p.className = "subs-prompt";
+    p.textContent = e.prompt;
+    item.appendChild(p);
+  }
+  const live = document.createElement("div");
+  live.className = "subs-live";
+  live.textContent = subHudLiveText(e);
+  item.appendChild(live);
+
+  item.onclick = () => {
+    subHudClose();
+    openTaskDetail(e.id);
+  };
+  const x = document.createElement("button");
+  x.className = "subs-x";
+  x.textContent = "✕";
+  x.title = "取消这个子会话";
+  x.hidden = e.status !== "running" && e.status !== "queued";
+  x.onclick = async (ev) => {
+    ev.stopPropagation();
+    try { await request("tasks.cancel", { task_id: e.id }); } catch (err) { /* 已结束 */ }
+    subHudPaint();
+  };
+  row.appendChild(x);
+  return item;
+}
+
+// 原地更新一条：状态类名 / 状态字 / 耗时 / 最近动作 / 取消按钮是否还在
+function subHudSyncItem(e) {
+  const item = subHudPanel.querySelector(`.subs-item[data-task="${CSS.escape(e.id)}"]`);
+  if (!item) return;
+  item.className = "subs-item st-" + e.status;
+  item.title = e.prompt || "";
+  const status = item.querySelector(".subs-status");
+  const st = SUB_HUD_STATUS[e.status] || e.status;
+  if (status && status.textContent !== st) status.textContent = st;
+  const dur = item.querySelector(".subs-dur");
+  if (dur && e.status !== "running" && e.status !== "queued") {
+    const t = fmtTaskDur(e.durationS);
+    if (dur.textContent !== t) dur.textContent = t;
+  }
+  const live = item.querySelector(".subs-live");
+  const txt = subHudLiveText(e);
+  if (live && live.textContent !== txt) live.textContent = txt;
+  const x = item.querySelector(".subs-x");
+  if (x) x.hidden = e.status !== "running" && e.status !== "queued";
+}
+
+function subHudOpen() {
+  // 锚在顶栏按钮下方，右边对齐按钮右缘（与通知中心同一套坐标换算：
+  // getBoundingClientRect 是物理像素，浮层在 zoom 后的布局坐标系里）
+  const r = subHudBtn.getBoundingClientRect();
+  subHudPanel.classList.remove("hidden");
+  subHudPanel.style.top = (r.bottom / uiScale + 8) + "px";
+  subHudPanel.style.left = Math.max(8, r.right / uiScale - 384) + "px";
+  subHudRender();
+  subHudStartTicker();
+  subHudPaint();
+}
+
+function subHudClose() {
+  if (subHudPanel.classList.contains("hidden")) return;
+  subHudPanel.classList.add("hidden");
+  subHudStopTicker();
+  subHudPaint(); // 关掉后如果没在跑的任务，按钮自己也收起来
+}
+
+subHudBtn.onclick = (e) => {
+  e.stopPropagation();
+  if (subHudPanel.classList.contains("hidden")) subHudOpen();
+  else subHudClose();
+};
+document.addEventListener("click", (e) => {
+  if (subHudPanel.classList.contains("hidden")) return;
+  if (subHudPanel.contains(e.target) || e.target === subHudBtn) return;
+  subHudClose();
+});
+
+subHudSeed();
 
 // —— 浏览器：iframe 预览（本地开发服务器 / 可内嵌网页） ——
 const browserUrl = document.getElementById("browser-url");

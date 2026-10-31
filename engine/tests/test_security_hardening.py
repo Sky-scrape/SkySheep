@@ -735,6 +735,28 @@ def test_markdown_external_links_use_noopener(home):
     assert 'target="_blank"' in seg
 
 
+def test_first_paint_script_hash_matches_csp():
+    """index.html 里那段首帧主题内联脚本的 sha256 必须与 CSP 里钉的哈希一致。
+
+    两边一漂移，CSP 就会静默拦掉这段脚本：整页打开时第一帧落回默认外观
+    （深色用户会看见一次白闪），而且控制台只有一条 few 人注意的 CSP 报错。
+    以前确实是手工同步、漂过一次，所以这里做成机械校验。
+    """
+    import base64
+    import hashlib
+    import re
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    body = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+    digest = "sha256-" + base64.b64encode(
+        hashlib.sha256(body.encode("utf-8")).digest()).decode()
+    server_src = (STATIC_DIR.parent / "app.py").read_text(encoding="utf-8")
+    assert digest in server_src, (
+        f"index.html 内联脚本哈希是 {digest}，但 server/app.py 的 script-src 里钉的不是它——"
+        "改首帧脚本后要同步 CSP 哈希，否则这段脚本会被静默拦掉"
+    )
+
+
 def test_preview_frame_has_sandbox():
     """预览 iframe 必须带 sandbox 且绝不含 allow-same-origin（D5 主防线）。"""
     from pathlib import Path

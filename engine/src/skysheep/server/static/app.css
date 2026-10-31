@@ -1681,6 +1681,75 @@ mark.search-hit-mark {
 .notif-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .notif-body span { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ---------- 并行子会话（顶栏徽标 + 浮层） ----------
+   入口是「只在有活时才出现」的顶栏图标：没有后台子任务就整个让位，
+   不做常驻导航项——它表达的是状态，不是功能入口。 */
+#btn-subagents { position: relative; }
+#btn-subagents.tb-live { color: var(--blue); border-color: var(--blue); background: var(--blue-weak); }
+.tb-badge {
+  position: absolute; top: -5px; right: -6px;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  background: var(--blue); color: var(--on-accent);
+  border-radius: 8px; font-size: var(--fs-cap); font-weight: 700; line-height: 15px;
+  text-align: center; font-variant-numeric: var(--num);
+}
+.subagents-panel {
+  width: 384px; max-height: 470px; overflow: auto;
+  display: block; padding: 4px; border-radius: var(--r-lg);
+}
+.subs-empty { padding: 14px 12px; white-space: normal; }
+/* 一条子会话：左缘色条表示状态（与任务面板的 .task-item.st-* 同一套语义） */
+.subs-item {
+  display: flex; flex-direction: column; gap: 3px;
+  margin: 2px 0; padding: 7px 9px 8px;
+  border-left: 3px solid transparent; border-radius: var(--r-sm);
+  font-size: var(--fs-md); cursor: pointer;
+  transition: background var(--dur-fast), transform var(--dur-fast);
+}
+.subs-item:hover { background: var(--paper-raised); transform: translateX(2px); }
+.subs-item.st-running { border-left-color: var(--blue); }
+.subs-item.st-queued { border-left-color: var(--gold); }
+.subs-item.st-done { border-left-color: var(--line2); }
+.subs-item.st-error { border-left-color: var(--reg); }
+.subs-item.st-cancelled { border-left-color: var(--line2); opacity: .72; }
+.subs-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.subs-name { font-weight: 700; flex-shrink: 0; }
+.subs-dur, .subs-tools {
+  color: var(--dim); font-size: var(--fs-sm); font-variant-numeric: var(--num); flex-shrink: 0;
+}
+.subs-status {
+  margin-left: auto; padding-left: 6px; color: var(--dim);
+  font-size: var(--fs-sm); flex-shrink: 0;
+}
+.subs-item.st-running .subs-status { color: var(--blue); }
+.subs-item.st-queued .subs-status { color: var(--gold); }
+.subs-item.st-error .subs-status { color: var(--reg); }
+.subs-prompt { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 最近一次工具动作：等宽字体，和消息卡片里的工具行同一副面孔 */
+.subs-live {
+  font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.subs-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin: 4px -4px -4px; padding: 7px 12px;
+  border-top: 1.5px solid var(--line2);
+  background: linear-gradient(135deg, var(--paper-raised), var(--paper-sunken));
+}
+.subs-foot .link-btn { font-size: var(--fs-md); }
+/* 浮层里的按钮统一压平：.session-menu button 给的是菜单项尺寸（8px 14px +
+   下边框），放在这里会变成一块块方砖，和行内小图标不是一回事 */
+.subagents-panel .subs-x,
+.subagents-panel .subs-foot button {
+  background: none; border: 0; padding: 0; margin: 0;
+  font-size: var(--fs-sm); color: var(--dim); line-height: 1.3;
+  border-radius: var(--r-xs);
+}
+.subagents-panel .subs-x { padding: 0 3px; }
+.subagents-panel .subs-x:hover { color: var(--reg); }
+.subagents-panel .subs-foot button { font-size: var(--fs-md); color: var(--blue); }
+.subagents-panel .subs-foot button:hover { text-decoration: underline; }
+
 /* ---------- 任务面板（右面板「任务」标签） ---------- */
 .tasks-list { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .task-item {
@@ -3624,11 +3693,25 @@ mark.search-hit-mark {
    而 ID 选择器优先级高于 UA 的 [hidden]{display:none}——不显式兜底会让两个视图同时显示 */
 #skill-list-view[hidden],
 #skill-manage-view[hidden] { display: none; }
+/* 「管理与安装」进的是独立技能页：#skill-extras（外部服务 / 多模型协作 / 内置工具）
+   只属于总览，详情页开着时必须整组收起。否则这一组两千像素高的卡先占满版面，
+   排在它后面的 #skill-manage-view 又要 flex:1 去抢剩余高度——容器早被撑溢出了，
+   剩余高度是 0，技能卡被压成 0 高、列表整块被裁在折叠线以下，页面看着就是乱的。
+   收起交给选择器（返回时 hidden 一撤就复现），不必在 JS 里另存一份视图状态。
+   限定「详情页是技能页的直接子节点」——右面板借用这两个视图时 #skill-extras
+   仍留在设置页，不该跟着消失。 */
+#settings-page-skills:has(> #skill-manage-view:not([hidden])) > #skill-extras {
+  display: none;
+}
 /* 技能详情页铺满可视区（技能广场移除后不再留半页空白）：页面撑满设置体、
    详情卡吃满剩余高度、技能列表吃满卡片剩余高度并自己滚。
    限定在 .settings-body 之下——右面板（#rp-page-ext）复用同一节点时是自动
-   高度，沿用 .settings-skill-list 的 420px 上限，不把面板撑爆 */
-.settings-body > #settings-page-skills { flex: 1; min-height: 0; }
+   高度，沿用 .settings-skill-list 的 420px 上限，不把面板撑爆。
+   flex-basis 取 auto（而非 0）：总览视图（技能卡 + 场景模板 + 那一组设置卡）
+   比视口高得多，basis 0 会让页面盒被钉在视口高度、内容溢出到盒外，
+   设置体只能靠「溢出也算滚动区」勉强滚到底；auto 时页面盒跟着内容长，
+   设置体走正常滚动，详情页视图本身贡献 0 高（basis 0），仍吃满视口 */
+.settings-body > #settings-page-skills { flex: 1 0 auto; min-height: 0; }
 .settings-body #skill-manage-view { flex: 1; min-height: 0; }
 .settings-body #skill-manage-view > .settings-card {
   flex: 1; min-height: 0; display: flex; flex-direction: column;
@@ -4962,6 +5045,36 @@ li.mcp-failed .mcp-bad { font-weight: 700; }
   font-size: var(--fs-md); padding: 2px 7px; border-radius: var(--r-sm); flex-shrink: 0; line-height: 1.4;
 }
 .td-btn:hover { color: var(--text); background: var(--paper-sunken); }
+
+/* —— Agent 命令镜像（终端面板里固定在最左的只读标签） ——
+   Agent 每跑一次 run_command，就在这里滚出「命令 + 输出预览」：不看消息卡片
+   也知道它在本机做了什么。要完整滚动/交互，仍用右边的真终端标签自己敲。 */
+.agent-term { display: flex; flex-direction: column; padding: 0; }
+.agent-term.hidden { display: none; }
+.at-hint {
+  flex-shrink: 0; padding: 4px 10px;
+  border-bottom: 1.5px solid var(--ink-line); background: var(--card);
+  color: var(--dim); font-size: var(--fs-cap); line-height: 1.6;
+}
+.at-body {
+  flex: 1; min-height: 0; overflow: auto; padding: 6px 10px 10px;
+  font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.55;
+}
+.at-line { white-space: pre-wrap; word-break: break-word; }
+.at-line.cmd { color: var(--blue); margin-top: 7px; font-weight: 700; }
+.at-line.cmd:first-child { margin-top: 0; }
+.at-line.out { color: var(--text2); }
+.at-line.err { color: var(--reg); }
+.at-line.note { color: var(--dim); font-style: italic; }
+.td-tab-agent .td-cap-agent { color: var(--gold); }
+/* 没选中时压成普通色：Agent 是固定身份标记，不该长期比当前标签更抢眼 */
+.td-tab-agent:not(.active) .td-cap-agent { color: var(--dim); }
+/* 终端按钮上「有 Agent 命令跑过」的小圆点：面板收着时也提示去瞄一眼 */
+#btn-term { position: relative; }
+#btn-term.has-run::after {
+  content: ""; position: absolute; top: 1px; right: 1px;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--blue);
+}
 
 /* —— 辅助对话 —— */
 .aux-log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }

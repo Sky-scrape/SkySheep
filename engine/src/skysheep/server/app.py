@@ -192,8 +192,10 @@ def _host_guard(app) -> None:
             resp.headers.setdefault(
                 "Content-Security-Policy",
                 # 首帧主题脚本的 sha256：index.html 里唯一一段内联脚本
+                # （改这段脚本必须同步这个哈希，否则它会被 CSP 静默拦掉——
+                # 第一次打开会闪一下默认外观；回归护栏见 tests/test_security_hardening.py）
                 "default-src 'self'; "
-                "script-src 'self' 'sha256-c937d1705e12f092136602323e666a5c0c5305678a5f3ee4f5e3ac1fc90392d1'; "  # noqa: E501
+                "script-src 'self' 'sha256-yTfRcF4S8JITZgIyPmZqXAxTBWeKXz7k9eOsH8kDktE='; "  # noqa: E501
                 "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: blob:; "
                 "font-src 'self' data:; "

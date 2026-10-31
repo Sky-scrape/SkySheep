@@ -447,6 +447,38 @@ def test_settings_search_indexes_nested_cards(home):
     assert "groupTitle ? groupTitle" in idx
 
 
+def test_skills_manage_view_hides_overview_extras(home):
+    """「管理与安装」进独立技能页时，总览那组卡（外部服务 / 多模型协作 / 内置工具）必须收起。
+
+    不收的话：这一组两千像素高的卡排在详情页前面，先把设置体撑溢出，
+    排在后面的 #skill-manage-view 再要 flex:1 抢剩余高度——剩余高度是 0，
+    详情卡被压成 0 高、技能列表整块裁在折叠线以下（2026-10-30 用户报「页面乱」）。
+    两条口径一起锁：视图收起的 CSS，和设置搜索跳转时先对齐两个视图的 JS。
+    """
+    from skysheep.server.app import STATIC_DIR
+
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    js = read_app_bundle()
+
+    # HTML 侧：那一组卡确实与两个视图同住 #settings-page-skills（否则这条测试失去意义）
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    skills = html[html.index('id="settings-page-skills"'):]
+    skills = skills[:skills.index('id="settings-page-subagents"')]
+    assert 'id="skill-extras"' in skills
+    assert skills.index('id="skill-list-view"') < skills.index('id="skill-extras"')
+
+    # CSS 侧：详情页开着时（且详情页直接挂在技能页下）整组收起
+    assert "#settings-page-skills:has(> #skill-manage-view:not([hidden])) > #skill-extras" in css
+    # 技能页盒子按内容取高，不再用 basis 0 钉在视口高度（否则内容溢出到盒外、滚不到底）
+    assert ".settings-body > #settings-page-skills { flex: 1 0 auto; min-height: 0; }" in css
+
+    # JS 侧：搜索命中技能页的卡时先对齐视图，别滚到 display:none 的空处
+    search = js[js.index("function runSettingsSearch("):]
+    search = search[:search.index("settingsSearchInput.addEventListener")]
+    assert 'it.card.closest("#skill-manage-view")' in search
+    assert "resetSkillView()" in search
+
+
 def test_settings_page_group_titles(home):
     """长设置页用分区标题做扫描锚点，避免卡片平铺失去方位感。
 

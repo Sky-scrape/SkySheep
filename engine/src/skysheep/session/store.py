@@ -3591,6 +3591,9 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
 
     async def update_pipeline(self, pipeline_id: int, **kw) -> dict | None:
         assert self._db
+        # only_if_status：条件写入（CAS）。状态已被并发路径改走时不动库、
+        # 返回 None——收尾判定与终止节点/用户停止抢收尾时靠它让位，不覆盖。
+        only_if_status = kw.pop("only_if_status", None)
         allowed = ("name", "status", "concurrency", "finished_at", "notify_channel")
         fields, args = [], []
         for k, v in kw.items():
@@ -3604,10 +3607,14 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             args.append(v)
         if not fields:
             return await self.get_pipeline(pipeline_id)
+        sql = f"UPDATE pipelines SET {', '.join(fields)} WHERE id = ?"
         args.append(pipeline_id)
-        await self._db.execute(
-            f"UPDATE pipelines SET {', '.join(fields)} WHERE id = ?", args
-        )
+        if only_if_status is not None:
+            sql += " AND status = ?"
+            args.append(only_if_status)
+        cur = await self._db.execute(sql, args)
+        if only_if_status is not None and cur.rowcount == 0:
+            return None
         await self._db.commit()
         return await self.get_pipeline(pipeline_id)
 

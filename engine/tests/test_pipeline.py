@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -813,6 +814,57 @@ def test_pipeline_control_stop_halts_pipeline(home):
         assert by_title["上游"]["status"] == "done"
         assert by_title["到此为止"]["status"] == "done"
         assert by_title["不该跑"]["status"] == "cancelled"
+
+
+async def test_pipeline_update_only_if_status_is_cas(store):
+    """条件写入（CAS）：状态已被并发路径改走时不动库、返回 None。"""
+    project = await store.get_or_create_project("/tmp/pl-cas")
+    pipe = await store.add_pipeline(project.id, "条件写入", nodes=[{"title": "唯一"}])
+    await store.update_pipeline(pipe["id"], status="cancelled", finished_at=time.time())
+    lost = await store.update_pipeline(
+        pipe["id"], status="failed", finished_at=time.time(), only_if_status="running",
+    )
+    assert lost is None, "状态已不是 running：条件写入必须让位"
+    assert (await store.get_pipeline(pipe["id"]))["status"] == "cancelled"
+
+
+def test_pipeline_finish_never_overwrites_terminated_status(home):
+    """迟到的收尾判定不得覆盖已终止的流水线（CI 并行踩中的竞态）。
+
+    终止节点把线置 cancelled 后，另一条并发推进路径可能还拿着旧快照
+    （status 仍是 running）走到 _maybe_finish_pipeline——它必须让位，
+    而不是按「有 cancelled 节点 = failed」把终态改写掉。
+    """
+    from test_server import make_client
+
+    with make_client(home, []) as client:
+        backend = client.app.state.backend
+
+        async def scenario():
+            store = backend.store
+            project = await store.get_or_create_project("/tmp/pl-race")
+            pipe = await store.add_pipeline(project.id, "终止竞态", nodes=[
+                {"title": "上游", "prompt": "做上游"},
+                {"title": "到此为止", "prompt": "", "control": "stop", "depends_on": [0]},
+                {"title": "不该跑", "prompt": "", "depends_on": [1]},
+            ])
+            # 终止路径的产物：上游/终止节点 done，下游 cancelled，流水线 cancelled
+            nodes = await store.list_pipeline_nodes(pipe["id"])
+            await store.update_pipeline_node(
+                nodes[0]["id"], status="done", finished_at=time.time())
+            await store.update_pipeline_node(
+                nodes[1]["id"], status="done", finished_at=time.time())
+            await store.update_pipeline_node(
+                nodes[2]["id"], status="cancelled",
+                last_error="被终止节点「到此为止」截停", finished_at=time.time())
+            await store.update_pipeline(pipe["id"], status="cancelled", finished_at=time.time())
+            # 迟到的收尾拿着旧快照来抢：快照取自终止写入前，流水线还是 running
+            stale = dict(pipe)
+            stale["status"] = "running"
+            await backend._maybe_finish_pipeline(stale)
+            return (await store.get_pipeline(pipe["id"]))["status"]
+
+        assert asyncio.run(scenario()) == "cancelled", "收尾不得把已终止流水线改写成 failed"
 
 
 def test_pipeline_control_loop_until_done(home):

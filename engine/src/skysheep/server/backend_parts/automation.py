@@ -2156,6 +2156,7 @@ class AutomationMixin:
         updated = await self.store.update_pipeline(
             pipe["id"], status="cancelled", finished_at=time.time(),
         )
+        pipe["status"] = "cancelled"  # 内存快照同步，防同句柄后续判定仍当它 running
         self._broadcast_pipeline(updated)
         await self.notify({
             "title": f"⏹ 流水线已终止：{pipe['name']}",
@@ -2587,9 +2588,15 @@ class AutomationMixin:
         if not nodes or any(n["status"] in ("blocked", "ready", "running") for n in nodes):
             return
         all_done = all(n["status"] in ("done", "skipped") for n in nodes)
+        # 条件写入：本快照的 status 可能已过时——终止节点/用户停止在另一条
+        # 并发推进路径上已把流水线收尾，库里不再是 running 时让位，不覆盖
+        # （CI 并行下踩中过「cancelled 被迟到收尾改写成 failed」）。
         updated = await self.store.update_pipeline(
-            pipe["id"], status="done" if all_done else "failed", finished_at=time.time()
+            pipe["id"], status="done" if all_done else "failed", finished_at=time.time(),
+            only_if_status="running",
         )
+        if updated is None:
+            return
         self._broadcast_pipeline(updated)
         skipped = [n for n in nodes if n["status"] == "skipped"]
         bad = [n for n in nodes if n["status"] not in ("done", "skipped")]

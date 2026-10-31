@@ -79,8 +79,8 @@ _ISCC_CANDIDATES = (
     Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
 )
 
-# skills-gallery/ 官方种子技能包数量（AGENTS.md：20 个中文场景技能）
-_GALLERY_SKILL_COUNT = 20
+# skills-gallery/ 官方种子技能包数量（AGENTS.md：22 个中文场景技能）
+_GALLERY_SKILL_COUNT = 22
 # 版本号正则与 tools/check_versions.py 保持同款，避免两处各认一套写法
 _PYPROJECT_VERSION_RE = re.compile(r'(?m)^version\s*=\s*"([^"]+)"')
 _ISS_VERSION_RE = re.compile(r'(?m)^#define MyAppVersion\s+"([^"]+)"')
@@ -220,7 +220,7 @@ def step_pack() -> None:
 
 
 def step_verify_artifacts() -> None:
-    """清单 §3-3（产物部分）：exe 在、20 个内置技能在、场景模板清单在。"""
+    """清单 §3-3（产物部分）：exe 在、内置技能全在、场景模板清单在。"""
     if not _DIST_EXE.is_file():
         raise RuntimeError(f"缺打包产物 {_DIST_EXE}")
     gallery = _INTERNAL_SKILLS / "gallery"

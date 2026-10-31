@@ -23,8 +23,9 @@
 （15 MB · 1920×1080 · H.264 · 内嵌中文字幕与配乐；Release 资产
 [intro-2026-10](https://github.com/Sky-scrape/SkySheep/releases/tag/intro-2026-10)，不进仓库）
 
-本目录只留两件：`skysheep-intro-720p.mp4`（官网播放器用的页内版本，7.2 MB）与
-`skysheep-intro-cover.webp`（封面，官网 `<video>` poster 与 README 缩略图共用）。
+本目录只留两件：`skysheep-intro-1080p.mp4`（官网播放器的页内版本，与 Release 资产
+同一成片，15.4 MB）与 `skysheep-intro-cover.webp`（封面，官网 `<video>` poster 与
+README 缩略图共用）。
 
 | 项目 | 值 |
 |---|---|

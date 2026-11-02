@@ -193,6 +193,7 @@ class ChatApp:
             provider_factory=lambda: self.provider,
             working_dir=self.working_dir,
             max_iterations=self.cfg.subagent_max_iterations,
+            network=self.cfg.network,
         )
 
         registry = ToolRegistry(default_tools(
@@ -884,6 +885,7 @@ async def _assemble_headless_engine(store, working_dir: Path, cfg, provider_obj,
         provider_factory=lambda: provider_obj,
         working_dir=working_dir,
         max_iterations=cfg.subagent_max_iterations,
+        network=cfg.network,
     )
     registry = ToolRegistry(default_tools(
         store=store,
@@ -914,6 +916,12 @@ def _ndjson_write(payload: dict) -> None:
     import sys as _sys
 
     line = _json.dumps(payload, ensure_ascii=False)
+    # U+2028（行分隔符）/ U+2029（段落分隔符）是 JSON 字符串的合法内容，
+    # ensure_ascii=False 下 dumps 原样保留；但按 Unicode 行界切行的下游
+    # （部分语言的 str.splitlines、某些 NDJSON 解析器）会把它们当换行，
+    # 把一行事件切裂。转成字面转义序列 \u2028 / \u2029——JSON 语义完全
+    # 等价（json.loads 解回同一码点），行结构恢复「一行一事」。
+    line = line.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     buf = getattr(_sys.stdout, "buffer", None)
     if buf is None:
         print(line, flush=True)
@@ -999,47 +1007,70 @@ async def run_headless(
         n_before = len(agent.history)
         error: str | None = None
         stop_reason = "error"
-        async for ev in agent.run_turn(prompt):
+        interrupted = False  # 取消/异常中断：落库与 stream 末行照常走，语义如实
+        try:
+            async for ev in agent.run_turn(prompt):
+                if output == "stream":
+                    _ndjson_write(ev.model_dump(mode="json"))
+                if isinstance(ev, TextDelta) and output == "text":
+                    print(ev.text, end="", flush=True)
+                elif isinstance(ev, ErrorEvent):
+                    error = ev.message
+                elif isinstance(ev, TurnFinished):
+                    stop_reason = ev.stop_reason
+            if output == "text" and stop_reason != "max_iterations":
+                print()  # 流式文本后补换行
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # 用户停止（asyncio.run 下第一次 Ctrl-C 投递为 CancelledError，
+            # KeyboardInterrupt 只在 Runner 外层抛）：吞掉这次取消继续收尾
+            # （对照 REPL 的 uncancel 取向），末行 stop_reason 如实标 cancelled
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            interrupted = True
+            stop_reason = "cancelled"
+        except Exception as e:  # noqa: BLE001 - 落库收尾后原样上抛，语义不变
+            # 意外异常：已产生的消息与部分回答不能随异常无声丢失
+            interrupted = True
+            stop_reason = "error"
+            error = error or f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            # 打断也要落（对照 REPL 与 backend _persist_turn 的标准）：
+            # 正常 / 取消 / 异常三条路径都执行——消息照常落库，stream 模式
+            # 补 result 末行，消费方按「末行必有 result」解析才不会挂起。
+            # 异常路径 raise 穿过本块：先收尾、后上抛。
+            new_msgs = agent.history[n_before:]
+            for m in new_msgs:
+                await store.append_message(sess.id, m)
+            await store.touch(sess.id)
+            reply = next(
+                (m.text for m in reversed(new_msgs)
+                 if m.role == "assistant" and m.text.strip()),
+                "",
+            )
+            result = {
+                "session_id": sess.id,
+                "provider": provider_name,
+                "model": getattr(provider_obj, "model", ""),
+                "stop_reason": stop_reason,
+                "error": error,
+                "reply": reply.strip(),
+                "messages": [
+                    {"role": m.role, "text": m.text}
+                    for m in new_msgs if m.role in ("user", "assistant")
+                ],
+                "usage": {
+                    "input": agent.total_in_tokens,
+                    "output": agent.total_out_tokens,
+                },
+            }
             if output == "stream":
-                _ndjson_write(ev.model_dump(mode="json"))
-            if isinstance(ev, TextDelta) and output == "text":
-                print(ev.text, end="", flush=True)
-            elif isinstance(ev, ErrorEvent):
-                error = ev.message
-            elif isinstance(ev, TurnFinished):
-                stop_reason = ev.stop_reason
-        if output == "text" and stop_reason != "max_iterations":
-            print()  # 流式文本后补换行
-
-        new_msgs = agent.history[n_before:]
-        for m in new_msgs:
-            await store.append_message(sess.id, m)
-        await store.touch(sess.id)
-        reply = next(
-            (m.text for m in reversed(new_msgs)
-             if m.role == "assistant" and m.text.strip()),
-            "",
-        )
-        result = {
-            "session_id": sess.id,
-            "provider": provider_name,
-            "model": getattr(provider_obj, "model", ""),
-            "stop_reason": stop_reason,
-            "error": error,
-            "reply": reply.strip(),
-            "messages": [
-                {"role": m.role, "text": m.text}
-                for m in new_msgs if m.role in ("user", "assistant")
-            ],
-            "usage": {
-                "input": agent.total_in_tokens,
-                "output": agent.total_out_tokens,
-            },
-        }
-        if output == "stream":
-            # 末行汇总：messages 不重复给——完整消息已由 assistant_message 事件流承载
-            _ndjson_write({"kind": "result", **{
-                k: v for k, v in result.items() if k != "messages"}})
+                # 末行汇总：messages 不重复给——完整消息已由 assistant_message 事件流承载
+                _ndjson_write({"kind": "result", **{
+                    k: v for k, v in result.items() if k != "messages"}})
+            if interrupted and output == "text":
+                print()  # 打断的流式文本后也补换行，别让提示符接在半句上
         return result
     finally:
         if mcp is not None:
@@ -1122,7 +1153,10 @@ async def _cron_run_async(
             "unknown provider: {}; available: {}".format(name, ", ".join(cfg.providers))
         )
     try:
-        provider_obj = build_provider(name, cfg.providers[name])
+        # 全局出网设置必须跟着走（代理 / no_proxy / 自签 CA）：无人值守的
+        # 模型流量与 run_headless / REPL / backend 全部装配点同一口径，
+        # 漏传会静默绕过企业代理与自签 CA 直连
+        provider_obj = build_provider(name, cfg.providers[name], cfg.network)
     except ConfigError as e:
         raise SystemExit(str(e) + "\nhint: skysheep config init 后填入 API Key") from e
 

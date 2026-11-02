@@ -340,6 +340,74 @@ def test_socks5_pin_hands_verified_ip_to_proxy():
     assert b"Host: example.com" in req, "原主机名必须保留在 Host 头（虚拟主机不丢）"
 
 
+def test_socks5_proxy_error_tries_next_verified_ip(monkeypatch):
+    """socks5 代理回「目标不可达」时 httpx 抛 ProxyError——它是 ConnectError 的
+    兄弟类（同挂 TransportError）而不是子类，except 元组漏接会让多 IP 依次尝试
+    在第一个已校验地址就断掉，余下 IP 永远试不到（发现 F8.2）。修复后必须与
+    ConnectError 同待遇：换下一个已校验地址继续。"""
+    import httpx
+
+    class _FakeStreamFail:
+        async def __aenter__(self):
+            raise httpx.ProxyError("socks5 代理：目标不可达")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeStreamResp:
+        status_code = 200
+        headers = {"content-type": "text/plain"}
+        charset_encoding = "utf-8"
+
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        async def aiter_bytes(self):
+            yield self._body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.targets: list[str] = []
+
+        def stream(self, method, target, extensions=None):
+            self.targets.append(target)
+            if len(self.targets) == 1:
+                return _FakeStreamFail()  # 第一个已校验地址：代理回「目标不可达」
+            return _FakeStreamResp(b"second-ip-ok")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    client = _FakeClient()
+
+    @asynccontextmanager
+    async def fake_make_client(network, **kwargs):
+        yield client
+
+    monkeypatch.setattr(web_mod, "make_async_httpx_client", fake_make_client)
+
+    tool = WebFetchTool(network=NetworkConfig(proxy="socks5://127.0.0.1:1080"))
+    url = "http://example.com/x"
+    status, headers, body = asyncio.run(
+        tool._fetch_once(url, urlparse(url), ["203.0.113.9", "203.0.113.10"])
+    )
+    assert client.targets == [
+        "http://203.0.113.9/x",
+        "http://203.0.113.10/x",
+    ], "ProxyError 后必须继续试下一个已校验地址，不能整批放弃"
+    assert status == 200
+    assert body == b"second-ip-ok"
+
+
 def test_web_fetch_proxy_mode_annotates_result(home, monkeypatch):
     """代理解析场景（http/socks5h）：结果注记 + 审计日志如实标注「代理解析未做
     DNS 钉连校验」，不再静默降级。"""

@@ -669,8 +669,12 @@ class WebFetchTool(Tool):
                                     break
                                 buffer += chunk
                         break  # 本跳完成（含流式截断）：不再换下一个已校验地址
-                    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                        last_err = e  # 这个已校验地址不通：试下一个（与直连钉连同语义）
+                    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError) as e:
+                        # 这个已校验地址不通：试下一个（与直连钉连同语义）。
+                        # socks5 代理回「目标不可达」时 httpx 抛的是 ProxyError
+                        # （ConnectError 的兄弟类不是子类），漏接它会让多 IP
+                        # 依次尝试在第一个地址就断掉，余下 IP 永远试不到。
+                        last_err = e
                         continue
                 else:
                     raise ToolError(

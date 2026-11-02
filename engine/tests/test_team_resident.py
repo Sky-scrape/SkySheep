@@ -628,6 +628,68 @@ async def test_cron_team_reuses_resident_team(home):
         await store.close()
 
 
+async def test_cron_wake_skips_when_resident_team_still_active(home):
+    """复用前先查活动编排器（安全审查 F1.3）：登记的常驻队伍仍在原会话活动
+    （_teams 里同 team_id 的活动实例）时，定时触发不得并行建第二实例——本轮
+    跳过复用，任务结果说明跳过原因；频道零新消息、注册表不回写（wake_count
+    不增）、活动编排器原样。跳过按设计内 ok 收尾，不进失败口径。"""
+    from test_team import _cron_team_backend, _cron_team_task, _team_template
+
+    from skysheep.server.backend_parts.automation import run_cron_task_core
+
+    store = await SessionStore(home / "cron-skip-live.db").connect()
+    try:
+        task = await _cron_team_task(store, home)
+        # 空脚本池：跳过生效就一个 provider 都不该被消费——一旦建队，成员/总管
+        # 轮会拿到「脚本耗尽的兜底回答」并把它带进任务结果
+        backend = _cron_team_backend(home, store, [])
+        _team_template(backend, "夜班小队")
+        backend.resident_teams.load()
+        proj = await store.get_project(task["project_id"])
+
+        # 交互会话挂着与登记同 team_id 的活动团队（用户正在用这支队伍）
+        _, orch = make_orch()
+        await orch.create_team([spec("队员0", FakeProvider([]))])
+        sess = await store.create_session(proj.id, title="交互会话")
+        backend._teams[sess.id] = orch
+        entry = backend.resident_teams.upsert(ResidentTeamEntry(
+            team_id=orch.team_id, name="夜班小队", template="夜班小队",
+            project_id=proj.id, session_id=sess.id, board=[], last_seq=0,
+        ))
+        assert backend._resident_team_is_live(entry) is True
+
+        final = await run_cron_task_core(store, task["id"], force=True,
+                                         execute=backend._execute_cron_turn)
+        assert final["last_status"] == "ok", "设计内跳过不是故障"
+        assert "本轮跳过" in final["last_result"]
+        assert orch.team_id in final["last_result"], "结果里能对上被跳过的队伍"
+        assert "脚本耗尽" not in final["last_result"], "建了队就会拿到兜底文本"
+
+        # 不建第二实例：该 team_id 名下频道零新消息（连唤醒宣告都没有）
+        assert await store.list_team_messages(orch.team_id) == []
+        # 注册表未回写：wake_count 不增、session_id 仍是原交互会话
+        entry = backend.resident_teams.get(orch.team_id)
+        assert entry is not None and entry.wake_count == 0
+        assert entry.session_id == sess.id
+        # 活动编排器原样：仍在 _teams、仍活动
+        assert backend._teams.get(sess.id) is orch and orch.active
+
+        # 跳过说明落进本轮会话（user 指令 + assistant 说明成对，可审计）
+        sessions = await store.list_sessions(proj.id)
+        cron_sid = next(s.id for s in sessions if (s.title or "").startswith("⏰ "))
+        msgs = await store.load_messages(cron_sid)
+        assert any(m.role == "user" and "巡检目录并汇总" in m.text for m in msgs)
+        assert any(m.role == "assistant" and "本轮跳过" in m.text for m in msgs)
+
+        # 同会话换成别的队伍（team_id 对不上）不算「仍活动」：照常复用登记队
+        _, other = make_orch()
+        await other.create_team([spec("新队员", FakeProvider([]))])
+        backend._teams[sess.id] = other
+        assert backend._resident_team_is_live(entry) is False
+    finally:
+        await store.close()
+
+
 # ---------- 复用装配的板面来源：会话侧优先，注册表快照兜底（评审②） ----------
 
 

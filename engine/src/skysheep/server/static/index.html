@@ -2074,9 +2074,9 @@
             </label>
             <div class="io-row">
               <input type="text" id="migration-path" class="modal-input" spellcheck="false"
-                     placeholder="或填本机迁移包路径（超过 64MB 的包走这条，不走浏览器）">
+                     placeholder="或填本机迁移包路径（64MB 以内，不走浏览器中转）">
               <button id="btn-migration-import-path" class="btn-ghost"
-                      title="直接读本机磁盘上的迁移包导入（不做 base64 中转，几百 MB 也行）">按路径导入</button>
+                      title="直接读本机磁盘上的迁移包导入（不做 base64 中转；与文件导入同受 64MB 上限，超大包无法导入）">按路径导入</button>
             </div>
             <span id="migration-msg" class="io-msg"></span>
           </section>

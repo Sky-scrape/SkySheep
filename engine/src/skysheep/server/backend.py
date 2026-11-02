@@ -664,8 +664,9 @@ def _msg_brief(m: Message) -> dict:
         # 对抗轮元数据同样必须随历史下发：前端的历史回放靠它重建审查卡
         # （buildAdvReplayCard 读 m.adversarial）。只带实时响应的话，刷新或
         # 重开会话后卡就没了、只剩正文；团队与圆桌的 meta 寄在 roundtable
-        # 键下，所以只有对抗漏了这一格。findings 正文在落库时已逐字段限长，
-        # 与原样回传同量级。
+        # 键下，所以只有对抗漏了这一格。findings 正文在落库时已逐字段限长；
+        # report 键是终审报告原文（与消息正文同源落库），是 adversarial.export
+        # 组装「## 终审报告」节的事实源，随 meta 原样回传同量级。
         "adversarial": m.adversarial,
         # 思考型模型的推理内容（前端渲染为可折叠块）；其他角色为空串
         "thinking": "".join(b.text for b in m.content if getattr(b, "type", "") == "thinking"),
@@ -683,7 +684,13 @@ def _msg_brief(m: Message) -> dict:
 
 
 _ADV_VERDICT_LABELS = {"confirmed": "成立", "partial": "部分成立", "refuted": "推翻", "pending": "待定"}
-_ADV_SEV_LABELS = {"high": "高", "medium": "中", "low": "低", "info": "提示"}
+# 严重度四档与流水线的合法值集（core/adversarial.py _VALID_SEVERITIES）及前端
+# ADV_SEVERITY_LABEL（static/app.js）对齐：致命级在导出文件里渲染中文。
+# 旧表里的 "info" 键移除：流水线从产出过 severity 起（git 追溯到对抗功能首个
+# 提交）白名单就只有 critical/high/medium/low，落库前非法值已归为 medium，
+# "info" 是无来源的死键——渲染对未知值本就回退原文（.get 第二参），删掉与
+# 前端行为完全一致。
+_ADV_SEV_LABELS = {"critical": "致命", "high": "高", "medium": "中", "low": "低"}
 _ADV_ROLE_LABELS = {"finder": "发现者", "investigator": "调查者", "advisor": "建议者", "judge": "裁判"}
 
 
@@ -3771,7 +3778,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     ) -> dict:
         """对抗轮主体：发现 → 调查 → 建议 → 裁判 → 报告并入主历史。
 
-        返回随轮次结果回传前端的对抗元数据（角色名册、裁决统计、问题清单）。
+        返回随轮次结果回传前端的对抗元数据（角色名册、裁决统计、问题清单、
+        终审报告原文）。
         历史追加 user(被审内容) + assistant(最终报告)；中间产物（问题、裁决、
         方案）随报告消息的 adversarial 元数据持久化，历史回放时对抗卡可展开
         回看。取消语义与圆桌对齐：user 消息先入历史，中途点停止内容不丢；
@@ -3927,6 +3935,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             ],
             "stats": adversarial_stats(outcome),
             "findings": adversarial_findings_meta(outcome),
+            # 终审报告原文随 meta 落库（与消息正文同源）：adversarial.export
+            # 的「## 终审报告」节只认库内 meta（_adversarial_report_markdown），
+            # 不落这里导出文件就永远只有发现清单。裁判失败的兜底报告在下方
+            # 生成后覆写同键（degraded=True 已注明非终审）。
+            "report": outcome.report,
             "status": outcome.status,
             "error": outcome.error,
         }
@@ -3967,6 +3980,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 f"{s['partial']}、推翻 {s['refuted']}、待定 {s['pending']}。"
             )
             report = "\n".join(lines)
+            # 兜底报告同样落 meta 的 report 键：导出的「终审报告」节在裁判
+            # 失败/取消路径也有事实源（degraded=True 已如实标注非终审）
+            meta["report"] = report
             meta["degraded"] = True
 
         if report.strip():
@@ -4325,6 +4341,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     async def _team_create(
         self, sid: str, emit: EmitFn, members_params: list | None, recorder: ChangeRecorder,
+        gate: PermissionGate | None = None, working_dir: Path | None = None,
         director_mode: str = "user", director_params: dict | None = None,
         template_name: str = "",
     ) -> TeamOrchestrator:
@@ -4332,8 +4349,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
         emit 是编排器形状的事件回调（收 pydantic 事件，_team_body 传入的
         team_emit 已带用量归属）。成员 Agent 的工具表用本会话同款全量注册表
-        （改动记录进同一 recorder，队员写的文件照常进会话检查点）；权限门注入
-        会话既有门，编排器经 TeamMemberGate 只加「来自队员」来源标注、判定零改变。
+        （改动记录进同一 recorder，队员写的文件照常进会话检查点）；gate /
+        working_dir 由调用点传会话自己的（_team_body 传 runtime 的 agent.gate
+        与 agent.working_dir）：权限门注入会话既有门——会话级权限档覆盖更严时
+        队员同步更严，不回退引擎默认档；工作目录用会话自己的（快聊 / 跨项目
+        分屏列的团队落在本会话目录里干活，不借引擎当前目录）。编排器经
+        TeamMemberGate 只加「来自队员」来源标注、判定零改变（team.py 的
+        TeamMemberGate 契约）。gate 缺省 None 按编排器 fail-closed 降级为
+        全员顾问型（没有执行工具表），不构成第二套判定。
         成员 Agent 另透传本会话 id（写租约归属）与用户钩子 / Mods 拦截——
         对队员与主会话同款生效，都只能收紧。
 
@@ -4371,9 +4394,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         specs = self._resolve_team_members(members_params)
         orch = TeamOrchestrator(
             emit=emit,
-            working_dir=self.working_dir,
+            working_dir=working_dir,
             registry=self._build_full_registry(recorder),
-            gate=self.gate,
+            gate=gate,
             cfg=self.cfg.team,
             max_iterations=self.cfg.subagent_max_iterations,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
@@ -4519,6 +4542,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     raise RuntimeError("当前会话没有进行中的团队")
                 orch = await self._team_create(
                     sid, team_emit, members_params, recorder or ChangeRecorder(),
+                    # 会话私有门与会话自己的工作目录（本轮 agent 即 runtime.agent）：
+                    # 队员判定跟会话走，不回退引擎默认档（会话档更严时队员同步更严）
+                    gate=agent.gate, working_dir=agent.working_dir,
                     director_mode=director_mode, director_params=director,
                     template_name=template_name,
                 )

@@ -19,7 +19,7 @@ import asyncio
 
 from ...bgtasks import spawn_bg
 from ...core import macros as macro_lib
-from ...tools import ToolContext
+from ...tools import ToolContext, ToolRegistry
 
 # 单步进度里保留的结果摘要长度（前端只显示一行）
 _STEP_PREVIEW_CHARS = 120
@@ -119,7 +119,9 @@ class MacrosMixin:
                 "preview": macro_lib.summarize_steps(steps),
                 "hint": (
                     "重放会真的注入鼠标键盘动作，先离开键盘、确认屏幕上没有不该动的窗口。"
-                    "开始后可以随时点停止。"
+                    "window 与鼠标步按重放时点的桌面解析：窗口按标题在当前桌面重新查找、"
+                    "坐标直接落在当时的屏幕位置，桌面和录制时不一样就可能点错地方，"
+                    "重放前先核对一遍。开始后可以随时点停止。"
                 ),
             }
         if not (self.cfg and self.cfg.computer_control):
@@ -134,9 +136,17 @@ class MacrosMixin:
         except (TypeError, ValueError):
             delay_ms = macro_lib.DEFAULT_STEP_DELAY_MS
         sid = str(params.get("session_id", "") or "").strip()
-        ctx = ToolContext(working_dir=self.working_dir, session_id=sid)
-        registry = self._build_full_registry()
         stop = asyncio.Event()
+        # stop 同作 ctx.aborted：宏停止不再只在步与步之间生效，_type_text_sync
+        # 这类步内逐字符的长操作也能被中途打断。
+        ctx = ToolContext(working_dir=self.working_dir, session_id=sid, aborted=stop)
+        # 重放注册表只收 MACRO_ACTIONS 四件套：macros.json 被篡改混进来的任意
+        # 工具步（run_command 等）在这里就拿不到工具，跑不动；replay_steps 里
+        # 另有一道名单校验兜底（双保险）。
+        full_registry = self._build_full_registry()
+        registry = ToolRegistry(
+            [t for t in full_registry.all() if t.name in macro_lib.MACRO_ACTIONS]
+        )
         self._macro_stop = stop
 
         def on_step(row: dict) -> None:
@@ -166,7 +176,7 @@ class MacrosMixin:
         return {"started": True, "name": name, "steps": len(steps), "delay_ms": delay_ms}
 
     async def macro_stop(self) -> dict:
-        """请求停止正在重放的宏（步与步之间生效，最多等一个步间隔）。"""
+        """请求停止正在重放的宏：步间生效，并经 ctx.aborted 打断步内长操作。"""
         stop = getattr(self, "_macro_stop", None)
         if not self._macro_running() or stop is None:
             return {"stopping": False}

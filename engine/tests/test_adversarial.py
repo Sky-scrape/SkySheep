@@ -656,21 +656,27 @@ def test_adversarial_report_markdown_pure():
         "status": "done",
         "judge": {"provider": "pj", "model": "mj"},
         "roles": [{"role": "finder", "provider": "pf", "model": "mf"}],
-        "stats": {"total": 2, "confirmed": 1, "refuted": 1},
+        "stats": {"total": 3, "confirmed": 2, "refuted": 1},
         "report": "终审结论",
         "findings": [
-            {"id": "F1", "severity": "high", "category": "安全", "location": "a.py:1",
+            {"id": "F1", "severity": "critical", "category": "安全", "location": "a.py:1",
              "description": "标题行\n第二行", "evidence": "证据正文",
              "verdict": "confirmed", "reason": "复核属实", "solution": "修一下"},
             {"id": "F2"},
+            {"id": "F3", "severity": "high", "verdict": "refuted"},
+            {"id": "F4", "severity": "urgent", "verdict": "pending"},  # 表外值回退原文
         ],
     }, 3)
     assert "# 对抗审查报告：未命名会话" in md2
     assert "- 裁判：pj / mj" in md2
     assert "发现者（pf / mf）" in md2
-    assert "共 2 条，成立 1，推翻 1" in md2
+    assert "共 3 条，成立 2，推翻 1" in md2
     assert "## 终审报告" in md2 and "终审结论" in md2
-    assert "- 严重度：高｜类别：安全｜位置：a.py:1" in md2
+    # 严重度标签表四档齐备（对齐流水线合法值与前端 ADV_SEVERITY_LABEL）：
+    # critical 渲染「致命」而非英文原词；未知值回退原文渲染
+    assert "- 严重度：致命｜类别：安全｜位置：a.py:1" in md2
+    assert "- 严重度：高" in md2
+    assert "- 严重度：urgent" in md2
     assert "- 裁决：成立（复核属实）" in md2
     assert "- 依据：" in md2 and "  > 证据正文" in md2
     assert "- 修复建议：" in md2 and "  > 修一下" in md2  # 引用块，多行正文可平铺
@@ -678,7 +684,8 @@ def test_adversarial_report_markdown_pure():
 
 
 def test_adversarial_export_roundtrip(home):
-    """WS 导出：从落库 meta 组装 Markdown，文件名/发现清单/裁决标签齐全。"""
+    """WS 导出：从落库 meta 组装 Markdown，文件名/发现清单/裁决标签齐全；
+    终审报告正文随 meta 落库（report 键），导出文件含「## 终审报告」节。"""
     scripts = [
         [[TextBlock(text=JUDGE_REPORT)]],       # 裁判（当前主模型）
         [[TextBlock(text=FINDER_JSON)]],        # 发现者
@@ -698,9 +705,12 @@ def test_adversarial_export_roundtrip(home):
         events = []
         frame = recv_until(ws, "a1", events)
         sid = frame["result"]["session_id"]
+        assert frame["result"]["adversarial"]["report"] == JUDGE_REPORT
         ws.send_json({"id": "r1", "method": "session.resume", "params": {"id": sid}})
         resume = recv_until(ws, "r1", [])
         assistant = [m for m in resume["result"]["messages"] if m["role"] == "assistant"][-1]
+        # 落库边界：report 键随 meta 持久化并随历史回放，导出才有正文事实源
+        assert assistant["adversarial"]["report"] == JUDGE_REPORT
         ws.send_json({"id": "e1", "method": "adversarial.export", "params": {
             "session_id": sid, "seq": assistant["seq"],
         }})
@@ -710,8 +720,58 @@ def test_adversarial_export_roundtrip(home):
     md, fn = out["result"]["markdown"], out["result"]["filename"]
     assert fn.startswith("对抗审查报告-") and fn.endswith(".md")
     assert "# 对抗审查报告：" in md
+    assert "## 终审报告" in md and JUDGE_REPORT in md  # 终审报告节在成功路径出现
     assert "## 发现清单" in md
     assert "- 裁决：" in md  # 裁决标签已从 verdict 键翻成中文
+
+
+def test_adversarial_degraded_fallback_report_in_export(home):
+    """裁判失败但问题清单在：兜底报告（复核后的中间结果）同样落 meta 的
+    report 键并标 degraded，导出文件的「## 终审报告」节在裁判失败路径
+    也有事实源（评审 F7.1 的兜底半边）。"""
+    class BoomJudge(Provider):
+        name, model = "boom", "b1"
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            raise RuntimeError("fatal boom")
+            yield  # pragma: no cover
+
+    scripts = [
+        BoomJudge(),                            # 裁判（当前主模型）：直接失败
+        [[TextBlock(text=FINDER_JSON)]],        # 发现者
+        [[TextBlock(text=INVESTIGATOR_JSON)]],  # 调查者
+        [[TextBlock(text=ADVISOR_JSON)]],       # 建议者
+    ]
+    with make_adv_client(home, scripts) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "chat.send", "params": {
+            "text": "审查这段代码",
+            "adversarial": True,
+            "members": [
+                {"provider": "fa", "model": "ma"},
+                {"provider": "fb", "model": "mb"},
+                {"provider": "fc", "model": "mc"},
+            ],
+        }})
+        events = []
+        frame = recv_until(ws, "a1", events)
+        sid = frame["result"]["session_id"]
+        assistant = next(e for e in events if e["event"] == "assistant_message")["data"]["message"]
+        # 实时 AssistantMessage 事件先于落库发出、seq 为空：导出锚点用响应里
+        # 落库后回填的 adversarial_seq（与前端「转为团队工单」同一取法）
+        ws.send_json({"id": "e1", "method": "adversarial.export", "params": {
+            "session_id": sid, "seq": frame["result"]["adversarial_seq"],
+        }})
+        out = recv_until(ws, "e1")
+
+    meta = assistant["adversarial"]
+    assert meta["degraded"] is True
+    # 兜底报告落 meta 且与消息正文一致（如实的中间结果，不冒充终审）
+    assert meta["status"] == "error"
+    assert meta["report"] == assistant["content"][0]["text"]
+    assert "终审未完成" in meta["report"]
+    assert out["ok"], out.get("error")
+    assert "## 终审报告" in out["result"]["markdown"]
+    assert "复核后的中间结果" in out["result"]["markdown"]
 
 
 def test_adversarial_export_errors(home):

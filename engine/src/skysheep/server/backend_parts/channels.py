@@ -534,6 +534,25 @@ class ChannelsMixin:
         await self._get_channel_runtime(sess.id, channel_name)
         return sess.id
 
+    def _build_channel_gate(self, channel_name: str, project_id: int | None,
+                            working_dir) -> ChannelGate:
+        """按当前渠道配置构造无人值守门控（_get_channel_runtime 与
+        _refresh_channel_gates 共用同一装配，避免两处参数漂移）。"""
+        section = dict((self.cfg.channels.platforms or {}).get(channel_name) or {})
+        gate = ChannelGate(
+            allowed=list(section.get("allowed_tools") or []),
+            approve_enabled=bool(section.get("approve_enabled", False)),
+            approve_timeout=int(self.cfg.channels.approve_timeout),
+            store=self.store,
+            project_id=project_id,
+            working_dir=working_dir,
+        )
+        # notify 绑定建好的 gate：审批卡优先回本轮发起消息所在的聊天（审查 P3-15）
+        gate.notify = lambda pending, _g=gate, _n=channel_name: self._notify_channel_approval(
+            _n, pending, _g
+        )
+        return gate
+
     async def _get_channel_runtime(self, session_id: str, channel_name: str) -> SessionRuntime:
         """渠道会话的 runtime：用 ChannelGate 而非默认门控。
 
@@ -542,26 +561,29 @@ class ChannelsMixin:
         工作目录随会话归属（_session_project）：归真实项目就在项目目录里干活，
         旧「远程连接」会话仍在数据目录 remote-control 文件夹、快聊在 default。
         门控姿态不随项目变：只读 + 渠道 allowed_tools 放行，写/执行走聊天
-        审批或拒绝；项目白名单不随渠道会话生效（无人值守口径，写操作必须
-        经聊天窗口逐次确认或渠道级预授权）。
+        审批或拒绝；项目白名单与引擎档（auto_accept_write / auto_accept_all）
+        都不随渠道会话生效（无人值守口径，写操作必须经聊天窗口逐次确认或
+        渠道级预授权）。
         """
         rt = self.runtimes.get(session_id)
         if rt is not None:
+            gate = getattr(rt.agent, "gate", None)
+            if isinstance(gate, ChannelGate):
+                return rt
+            # 复用点守卫（审查 F1.1①）：runtime 在、门却是交互门——桌面端先建了
+            # 这个渠道会话的 runtime（重启后桌面打开过该会话，或渠道 runtime 被
+            # LRU 淘汰后桌面再开）。交互门不得复用：确认档下写操作会挂到一个
+            # 渠道侧永远无人应答的桌面确认卡上；桌面若开了 accept_edits /
+            # full_access（档位同步会写到 runtime 门上），更等于给无人值守通道
+            # 静默放行。就地换上渠道门：runtime 本体保留（在跑轮次持有的引用
+            # 与 run_task 记账不被打断），只把授权面换成渠道姿态。
+            project_id, workdir = await self._session_project(session_id)
+            rt.agent.gate = self._build_channel_gate(channel_name, project_id, workdir)
+            self._channel_gates[session_id] = rt.agent.gate
+            self._channel_names[session_id] = channel_name
             return rt
         project_id, workdir = await self._session_project(session_id)
-        section = dict((self.cfg.channels.platforms or {}).get(channel_name) or {})
-        gate = ChannelGate(
-            allowed=list(section.get("allowed_tools") or []),
-            approve_enabled=bool(section.get("approve_enabled", False)),
-            approve_timeout=int(self.cfg.channels.approve_timeout),
-            store=self.store,
-            project_id=project_id,
-            working_dir=workdir,
-        )
-        # notify 绑定建好的 gate：审批卡优先回本轮发起消息所在的聊天（审查 P3-15）
-        gate.notify = lambda pending, _g=gate: self._notify_channel_approval(
-            channel_name, pending, _g
-        )
+        gate = self._build_channel_gate(channel_name, project_id, workdir)
         recorder = ChangeRecorder()
         rt = SessionRuntime(
             sid=session_id,
@@ -596,17 +618,10 @@ class ChannelsMixin:
             if run_task is not None and not run_task.done():
                 continue
             old = self._channel_gates.get(sid)
-            section = dict((self.cfg.channels.platforms or {}).get(name) or {})
-            gate = ChannelGate(
-                allowed=list(section.get("allowed_tools") or []),
-                approve_enabled=bool(section.get("approve_enabled", False)),
-                approve_timeout=int(self.cfg.channels.approve_timeout),
-                store=self.store,
-                project_id=getattr(old, "project_id", None),
-                working_dir=getattr(old, "working_dir", None),
-            )
-            gate.notify = lambda pending, _g=gate, _n=name: self._notify_channel_approval(
-                _n, pending, _g
+            gate = self._build_channel_gate(
+                name,
+                getattr(old, "project_id", None),
+                getattr(old, "working_dir", None),
             )
             rt.agent.gate = gate
             self._channel_gates[sid] = gate
@@ -660,9 +675,13 @@ class ChannelsMixin:
         if self.provider is None:
             return {"error": "尚未配置可用的模型 API Key"}
         rt = self.runtimes.get(session_id)
-        if rt is None:
+        if rt is None or not isinstance(getattr(rt.agent, "gate", None), ChannelGate):
             # 自愈：runtime 可能尚未建立（重启后首次、或已被回收）。反查渠道绑定补建，
             # 而不是直接把「会话不存在」丢给聊天窗口——用户看到这句无从下手。
+            # runtime 在但门是交互门（桌面端先建了这个会话的 runtime，审查 F1.1①）
+            # 同样补建：渠道无人值守姿态不得被交互门静默替换——确认档下写操作会
+            # 挂到渠道侧无人应答的桌面确认卡，放宽档更等于免确认放行。按绑定经
+            # _get_channel_runtime 重建渠道门。
             channel_name = self._channel_names.get(session_id, "")
             if not channel_name:
                 try:

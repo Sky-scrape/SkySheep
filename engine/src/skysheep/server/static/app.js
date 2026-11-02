@@ -17958,10 +17958,11 @@ document.getElementById("btn-migration-export").onclick = async () => {
   try {
     const r = await request("migration.export");
     if (r.mode === "file") {
-      // P24 v2：超过 64MB 改落盘（大库不再被拒），界面给路径让用户自己拷走
+      // 超过 64MB 改落盘（导出不拒绝）；但导入侧受同一上限约束（防 zip bomb），
+      // 超大包只能拷贝存档，不能经「按路径导入」换回本机
       if (msg) {
         msg.textContent = `✓ 包体 ${((r.size || 0) / 1024 / 1024).toFixed(1)}MB 超过 ${r.limit_mb}MB，`
-          + `已落盘：${r.path}（拷到新机器用「按路径导入」，或拖回文件选择器）`;
+          + `已落盘：${r.path}（导入受同一上限约束，超大包仅供拷贝存档）`;
         msg.className = "io-msg ok";
       }
     } else {
@@ -17984,6 +17985,17 @@ function migrationSkillsMode() {
   return el && el.checked ? "replace" : "merge";
 }
 
+// 被降防护清洗的库表在界面上的叫法（后端 db_cleaned 的键 → 中文名）
+const MIGRATION_CLEANED_TABLES = {
+  cron_tasks: "定时任务",
+  schedules: "日程",
+  whitelist_rules: "命令白名单",
+  channel_bindings: "渠道绑定",
+  channel_sources: "渠道来源",
+  pipelines: "流水线",
+  pipeline_nodes: "流水线节点",
+};
+
 // 导入完成后的统一小结（两条导入路径共用：文件选择器 / 本机路径）
 function migrationDone(r) {
   const msg = document.getElementById("migration-msg");
@@ -17995,6 +18007,16 @@ function migrationDone(r) {
   }
   if (man.skills_mode === "replace") bits.push("同名技能已整目录替换");
   if (man.config_restored) bits.push("配置已还原（密钥需重填）");
+  // 清洗披露：随包换上的库清掉了哪些自动化/绑定/白名单数据、config 剥掉了
+  // 哪些防护总开关键——逐项点名，让用户知道哪些东西需要本机重建
+  const cleaned = man.db_cleaned || {};
+  const cleanedBits = Object.keys(cleaned)
+    .map((t) => `${MIGRATION_CLEANED_TABLES[t] || t} ${cleaned[t]} 条`);
+  if (cleanedBits.length) {
+    bits.push(`已清除随包的自动化/白名单数据（${cleanedBits.join("、")}）`);
+  }
+  const guards = man.config_guard_keys_stripped || [];
+  if (guards.length) bits.push(`防护开关不随包生效（${guards.join("、")}）`);
   if (msg) {
     msg.textContent = "✓ 导入完成" + (bits.length ? "：" + bits.join("，") : "") + "——重启应用后生效。";
     msg.className = "io-msg ok";
@@ -18042,8 +18064,8 @@ document.getElementById("migration-file").onchange = async () => {
   input.value = "";
   if (!file) return;
   if (file.size > 64 * 1024 * 1024) {
-    addNotice("包体超过 64MB：请把它放到本机磁盘上，用下面的「按路径导入」" +
-      "（不经浏览器中转，几百 MB 也行）");
+    addNotice("包体超过 64MB：导入受同一尺寸上限约束（防 zip bomb），" +
+      "超过上限的迁移包无法导入，仅供拷贝存档。");
     return;
   }
   const b64 = await new Promise((resolve, reject) => {

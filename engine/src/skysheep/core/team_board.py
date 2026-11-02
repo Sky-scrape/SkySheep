@@ -15,6 +15,15 @@ from .team_store import TeamError
 
 _DEFAULT_REDO_LIMIT = 2
 
+# 工单文本字段的上限（add 落板时截断）：title/accept/detail 都会被原样注入
+# 成员唤醒提示词（team._build_wake_prompt），登记文本是队员提示词的注入面，
+# 无上限等于一条无限长的注入通道，还可能一条工单吃满队员整轮上下文。取值
+# 对齐既有先例：标题 180（tasks_from_adversarial 的拼装上限）、字段 2000
+# （对抗来源建单的 description/evidence 等字段上限）、说明 8000（detail 既有上限）。
+TEAM_TITLE_MAX_CHARS = 180
+TEAM_ACCEPT_MAX_CHARS = 2_000
+TEAM_DETAIL_MAX_CHARS = 8_000
+
 # 快照回放（restore）接受的工单状态集：与状态机的节点一一对应
 #（TeamBoard._TRANSITIONS 的键集，模块级另立一份避免引用类体）
 _STATUS_VALUES = frozenset({"pending", "in_progress", "review", "done", "error"})
@@ -194,9 +203,12 @@ class TeamBoard:
                 raise TeamError(f"依赖的工单 {dep} 不存在")
         self._counter += 1
         task = TeamTask(
-            id=f"T{self._counter}", title=title, assignee=assignee,
-            type=type, deps=dep_ids, accept=(accept or "").strip(),
-            detail=(detail or "")[:8_000], source=dict(source or {}),
+            id=f"T{self._counter}", title=title[:TEAM_TITLE_MAX_CHARS],
+            assignee=assignee,
+            type=type, deps=dep_ids,
+            accept=(accept or "").strip()[:TEAM_ACCEPT_MAX_CHARS],
+            detail=(detail or "")[:TEAM_DETAIL_MAX_CHARS],
+            source=dict(source or {}),
             auto_dispatch=bool(auto_dispatch),
         )
         self._tasks[task.id] = task

@@ -1038,7 +1038,8 @@ class Agent:
             except Exception:  # noqa: BLE001 - stop 钩子失败不影响本轮收尾
                 pass
         # 3e. Mod 回合结束（stop_reason ∈ {end_turn, max_iterations, error}；
-        # 取消路径到不了这里，无需排除）。仅观察 + ui，不阻塞收尾。
+        # 契约全集见 events.py 的 TurnFinished——另有交互路径取消收尾的
+        # cancelled，取消路径到不了这里，无需排除）。仅观察 + ui，不阻塞收尾。
         if self.mods is not None and self.mods_claude is None:
             stop_verdict = await self.mods.on_turn_stop(
                 stop_reason, iterations, self.session_id, self.used_context_tokens(),

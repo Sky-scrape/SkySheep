@@ -13,6 +13,10 @@
   不能放在项目目录里——恶意仓库会连同信任记录一起提交，等于自我授权。
 - 记录里存项目级配置的**指纹**（内容哈希）。配置一变指纹就对不上，需要重新确认；
   否则攻击者可以先提交一个无害配置骗取信任，之后再推恶意配置进来。
+- 指纹不只覆盖配置本体，还覆盖配置**引用的执行载荷**：mcp.json 里 stdio 服务器
+  的 command/args 指向的项目内本地文件、技能目录里 SKILL.md 同目录的实际内容。
+  否则攻击者可以先提交无害脚本骗取信任，之后只把脚本换血（配置没变、指纹没变，
+  恶意代码照常执行）——载荷换血必须和配置变更一样被看见。
 - 全局配置（``~/.skysheep/mcp.json``、``~/.skysheep/skills/``）不受影响：那是用户
   自己主动写的，信任边界不同，保持自动加载。
 - 读不出/写不了信任记录时一律按「未信任」处理（fail closed）。
@@ -44,17 +48,125 @@ def _norm_root(project_root: str | Path) -> str:
     return os.path.normcase(str(resolved))
 
 
-def project_sources(project_root: Path) -> list[Path]:
-    """项目里会「自动生效」的配置来源（按固定顺序，保证指纹稳定）。
+def _project_local_path(project_root: Path, raw: str) -> Path | None:
+    """把 command/args 里的一个字符串解析成「项目内的本地文件路径」。
 
-    只看这两处：项目级 MCP 配置与项目级技能。``.skysheep/skills.json``（停用名单）
-    不算——它是用户自己的选择，且恶意仓库把它写成「全部停用」反而更安全。
+    相对路径按项目根解析（trust 关心的是随仓库分发的东西）；绝对路径只在仍
+    落在项目根内时才算。返回绝对路径；项目外/解析不了返回 None。包含判定用
+    ``os.path.abspath`` + ``relpath``（不解析符号链接）：项目内的符号链接文件
+    也算项目内——读取内容时自然哈希到链接目标的字节，那才是真正会执行的东西。
+    """
+    text = raw.strip()
+    if not text or "\n" in text or "\r" in text:
+        return None
+    p = Path(text)
+    if not p.is_absolute():
+        p = project_root / p
+    try:
+        abs_p = Path(os.path.abspath(str(p)))
+        abs_root = Path(os.path.abspath(str(project_root)))
+        rel = os.path.relpath(abs_p, abs_root)
+    except (OSError, ValueError):
+        return None
+    if os.path.isabs(rel) or rel == ".." or rel.startswith(".." + os.sep):
+        return None
+    return abs_p
+
+
+def _mcp_payload_files(project_root: Path, mcp_path: Path) -> list[Path]:
+    """项目级 mcp.json 里 stdio 服务器引用的项目内本地文件。
+
+    stdio 服务器会被 subprocess 拉起，command/args 指向的项目内脚本就是真正会
+    执行的载荷——只哈希配置本体的话，攻击者可以先交一份无害脚本骗取信任，再把
+    脚本换血（配置没变、指纹没变，恶意代码照常执行）。只纳入**存在**的项目内
+    文件（存在才纳入：不存在的路径让指纹跟着瞬态垃圾摇摆没有意义）；解析失败
+    按没有载荷处理——mcp.json 本体已参与哈希，它一变指纹照样变。
+    """
+    try:
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict):
+        return []
+    candidates: list[str] = []
+    for section in servers.values():
+        if not isinstance(section, dict):
+            continue
+        command = section.get("command")
+        if not command:
+            continue  # 远程（url）服务器没有本地执行载荷
+        if isinstance(command, str):
+            candidates.append(command)
+        args = section.get("args")
+        if isinstance(args, list):
+            candidates.extend(a for a in args if isinstance(a, str))
+    out: list[Path] = []
+    for raw in candidates:
+        p = _project_local_path(project_root, raw)
+        if p is None:
+            continue
+        try:
+            exists = p.is_file()
+        except OSError:
+            exists = True  # stat 失败按「存在」保守处理，让占位符参与哈希
+        if exists:
+            out.append(p)
+    return out
+
+
+def _skill_payload_files(skill_dir: Path) -> list[Path]:
+    """技能目录里 SKILL.md 同目录（含子目录）的实际内容。
+
+    SKILL.md 正文会指导 Agent 去跑目录里的脚本：只哈希 SKILL.md 的话，信任后把
+    脚本换血，指纹毫无察觉。目录整体做内容清单（跳过作为来源的 SKILL.md 本体，
+    不重复哈希）；符号链接目录不深入（防循环、防越界），读不动的条目跳过，
+    不让单个怪文件拖垮指纹计算。
+    """
+    out: list[Path] = []
+    top_md = skill_dir / "SKILL.md"
+    for dirpath, dirnames, filenames in os.walk(skill_dir, followlinks=False):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            p = Path(dirpath) / fn
+            if p == top_md:
+                continue
+            try:
+                regular = p.is_file()
+            except OSError:
+                regular = False
+            if regular:
+                out.append(p)
+    return out
+
+
+def project_sources(project_root: Path) -> list[Path]:
+    """项目里会「自动生效」的配置来源及其引用的执行载荷（按固定顺序，保证指纹稳定）。
+
+    配置来源只看这两处：项目级 MCP 配置与项目级技能。``.skysheep/skills.json``
+    （停用名单）不算——它是用户自己的选择，且恶意仓库把它写成「全部停用」
+    反而更安全。
+
+    每份配置之后紧跟它引用的执行载荷（指纹与逐来源哈希共用这一份清单，天然
+    同口径）：mcp.json 的 stdio command/args 指向的项目内本地文件（存在才纳入）、
+    技能目录里 SKILL.md 同目录的实际内容。载荷换血必须和配置变更一样触发重确认。
     """
     root = project_root / ".skysheep"
     out: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        # mcp 的 args 可能指到技能目录里的脚本：按归一化绝对路径去重，只哈希一次
+        key = os.path.normcase(os.path.abspath(str(p)))
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+
     mcp = root / "mcp.json"
     if mcp.is_file():
-        out.append(mcp)
+        _add(mcp)
+        for p in _mcp_payload_files(project_root, mcp):
+            _add(p)
     skills_dir = root / "skills"
     if skills_dir.is_dir():
         try:
@@ -64,16 +176,33 @@ def project_sources(project_root: Path) -> list[Path]:
         for child in children:
             md = child / "SKILL.md"
             if md.is_file():
-                out.append(md)
+                _add(md)
+                for p in _skill_payload_files(child):
+                    _add(p)
     return out
 
 
+def _rel_label(f: Path, project_root: Path) -> str:
+    """来源文件参与哈希用的相对路径标签（compute_fingerprint/source_hashes 同口径）。
+
+    载荷文件按项目根解析后是绝对路径，而调用方传进来的 project_root 可能是
+    相对路径：两种基准都试一遍，真不在项目里的（理论上不会发生）退回文件名。
+    """
+    for base in (project_root, Path(os.path.abspath(str(project_root)))):
+        try:
+            return f.relative_to(base).as_posix()
+        except ValueError:
+            continue
+    return f.name
+
+
 def compute_fingerprint(project_root: Path) -> tuple[str, list[str]]:
-    """项目级配置的内容指纹 + 相对路径清单。
+    """项目级配置与其引用执行载荷的内容指纹 + 相对路径清单。
 
     返回 ``("", [])`` 表示项目里没有任何需要信任的配置（此时无需询问）。
     用相对路径参与哈希，避免同一份内容因为克隆目录不同而指纹不同。
     读不出的文件用固定占位符参与哈希：既不会让指纹随机变化，也仍然要求一次信任。
+    清单里包含配置引用的载荷（stdio 脚本、技能目录内容）：载荷换血指纹必变。
     """
     files = project_sources(project_root)
     if not files:
@@ -81,10 +210,7 @@ def compute_fingerprint(project_root: Path) -> tuple[str, list[str]]:
     digest = hashlib.sha256()
     labels: list[str] = []
     for f in files:
-        try:
-            rel = f.relative_to(project_root).as_posix()
-        except ValueError:
-            rel = f.name
+        rel = _rel_label(f, project_root)
         try:
             data = f.read_bytes()
         except OSError:
@@ -98,13 +224,14 @@ def compute_fingerprint(project_root: Path) -> tuple[str, list[str]]:
 
 
 def source_hashes(project_root: Path) -> dict[str, str]:
-    """每个来源文件/目录的内容哈希（相对路径 → sha256），用于「谁变了」的判定。"""
+    """每个来源文件（配置本体及其引用的载荷）的内容哈希（相对路径 → sha256）。
+
+    用于「谁变了」的判定；与 compute_fingerprint 共用 project_sources 这一份
+    清单与 _rel_label 这一套标签，三处（指纹/逐来源哈希/refresh 比对）天然同口径。
+    """
     out: dict[str, str] = {}
     for f in project_sources(project_root):
-        try:
-            rel = f.relative_to(project_root).as_posix()
-        except ValueError:
-            rel = f.name
+        rel = _rel_label(f, project_root)
         try:
             data = f.read_bytes()
         except OSError:
@@ -268,6 +395,10 @@ class WorkspaceTrust:
         touched 之内」才延续信任，否则保持 pending 让用户重新确认。
         touched=None（调用方未指明）时按旧行为延续——此时无法区分是谁改的，
         但至少不再扩大范围：只有本来就信任的项目才会走到这里。
+
+        逐来源比对覆盖配置引用的执行载荷（stdio 脚本、技能目录内容）：
+        载荷换血也是「来源变了」，同样走 touched 前缀判定——mcp.json 指向的
+        项目内脚本不在技能目录前缀内，用户装技能不会把它一并洗白。
         """
         projects = self._load()
         if self.project_root is None or _norm_root(self.project_root) not in projects:

@@ -37,6 +37,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -51,6 +52,10 @@ from .prompt import SUBAGENT_PROMPT
 from .report_prune import prune_report_files
 from .subagent_store import BUILTIN_AGENT_TYPES, BUILTIN_DESCRIPTIONS
 from .worktree import commit_all, ensure_worktree, remove_worktree
+
+if TYPE_CHECKING:
+    # 仅注解用：network 模块很轻，但不进 CLI 冷启动导入路径（与 tools/__init__ 同口径）
+    from ..network import NetworkConfig
 
 # 只读研究型工具集（所有内置型共用基础）
 RESEARCH_TOOL_NAMES = ("read_file", "list_dir", "glob", "grep")
@@ -426,6 +431,7 @@ class TaskManager:
         job_containment: bool = True,
         sandbox_level: str = "job",
         use_ripgrep: bool = True,
+        network: NetworkConfig | None = None,
     ) -> None:
         self._provider_factory = provider_factory
         self._working_dir = working_dir
@@ -447,6 +453,10 @@ class TaskManager:
         self._job_containment = bool(job_containment)
         # 二期：沙箱档位随主配置透传给子代理（"restricted" = 叠加受限令牌）
         self._sandbox_level = sandbox_level
+        # 全局出网设置（代理 / no_proxy / 自签 CA）随主配置透传：researcher 型
+        # 内置子代理现场构造的 web_search / web_fetch 用它出网，不传则这两个
+        # 工具直连（旧行为），无人值守下会绕过企业代理与自签 CA
+        self._network = network
         # 运行中心（可选注入）：后台任务同步登记进全局运行列表，状态机随任务
         # 状态走（queued/running → queued/tool_running；终态一一对应）。None = 不登记。
         self.run_center = None
@@ -553,7 +563,12 @@ class TaskManager:
             if self._extra_research is None:
                 from ..tools import WebFetchTool, WebSearchTool
 
-                self._extra_research = [WebSearchTool(), WebFetchTool()]
+                # 全局出网设置透传（对照 tools.default_tools 的装配点）：
+                # 漏传会让子代理的联网搜索/抓取直连，绕过全局代理与自签 CA
+                self._extra_research = [
+                    WebSearchTool(network=self._network),
+                    WebFetchTool(network=self._network),
+                ]
             return self._extra_research
         return None
 

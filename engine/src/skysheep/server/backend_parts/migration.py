@@ -24,13 +24,25 @@
 - 条目白名单：只收 ``skysheep.db`` / ``config.toml`` / ``ui.json`` /
   ``manifest.json`` 与 ``skills/<技能名>/<文件>`` 形状；任何路径穿越
   （``..``）、盘符冒号、未知条目一律整体拒绝，不做静默跳过；
+- 技能内容有解压预算：技能条目数与累计解压大小复用技能安装器的
+  ``MAX_SKILL_FILES`` / ``MAX_UNPACKED_BYTES`` 上限，超限在扫描阶段拒绝
+  （此时一个字节都没解压）——防 zip bomb 写满磁盘；
+- 导入按「降防护状态」清洗（P24 安全收紧）：包内库里的自动化 / 白名单 /
+  渠道绑定表（``_MIGRATION_CLEAN_TABLES``）整表清空——迁移包可能来自
+  不可信机器，植入的定时任务、流水线会被在跑的 cron / 流水线循环直接
+  认领执行，命令白名单命中即自动放行，渠道绑定是无人值守遥控入口；
+  config.toml 的防护总开关键（``computer_control`` / ``browser_control`` /
+  ``browser_ignore_cert``）与 ui.json 的 ``accept_edits`` 同款处理：
+  降防护档位只能由本机用户主动切换，不随包生效。清洗了哪些表 / 键在
+  导入结果里逐项披露（前端导入完成提示同步展示）；
 - 导入前必须先备份本机库：复用 store 的 ``_snapshot_or_copy``（SQLite
   backup API 一致性快照，坏库退回裸拷贝留底），落 store 的 backups 目录、
   按 ``-迁移前`` 后缀标注，BACKUP_KEEP 滚动裁剪照旧；
 - 库文件替换走 ``_stage_and_replace``（同目录临时文件 + quick_check +
   os.replace 原子换上）；config.toml / ui.json 走 textio 原子写；
 - 技能目录**合并**还原（同名覆盖、本机多出的技能保留不删）——迁移不是
-  「克隆」，清空本机技能目录的风险大于残留旧技能；
+  「克隆」，清空本机技能目录的风险大于残留旧技能；被覆盖的同名技能
+  先整份备份（replace 档移入备份区、merge 档复制留底），失败可还原；
 - ui.json 里的 ``accept_edits``（自动允许写入）照 settings.import 同一
   防护剥掉：降防护档位只能由本机用户主动切换，不随包生效；
 - 密钥红线在导入侧再兜一遍：写盘前对包里的 config.toml 重新脱敏，
@@ -67,7 +79,12 @@ from ...session.store import (
     _stage_and_replace,
     _validate_db_file,
 )
-from ...skills.installer import SkillInstallError, _skill_target
+from ...skills.installer import (
+    MAX_SKILL_FILES,
+    MAX_UNPACKED_BYTES,
+    SkillInstallError,
+    _skill_target,
+)
 from ...textio import read_text_file, write_bytes_atomic, write_text_atomic
 
 logger = logging.getLogger(__name__)
@@ -77,9 +94,11 @@ logger = logging.getLogger(__name__)
 MIGRATION_FORMAT_VERSION = 1
 
 # 整包尺寸上限：包体 base64 后经 WS 传输，64MB 是防帧爆炸的经验上限。
-# 超过时**不再直接拒绝**（P24 v2）：导出自动改「落盘模式」——包写到
-# ~/.skysheep/migrations/ 并回传路径，导入也支持按路径读取（同样是本机操作），
-# 大库（几百 MB 的会话库）因此也能跨机迁移。
+# 超过时导出**不直接拒绝**（P24 v2）：改「落盘模式」——包写到
+# ~/.skysheep/migrations/ 并回传路径。导入侧两种来源（base64 / 本机路径）
+# 都受同一上限约束（安全收紧：磁盘上的恶意包同样要过尺寸关，配合技能
+# 内容解压预算防 zip bomb 写满磁盘）——超过上限的大包可以导出落盘用于
+# 拷贝存档，但无法再经导入链路换回本机。
 MAX_MIGRATION_PACKAGE_BYTES = 64 * 1024 * 1024
 # 落盘模式保留的包数量（导出目录滚动裁剪；包的用途是「拷到另一台机器」，留着旧的没意义）
 MIGRATION_PACKAGE_KEEP = 5
@@ -98,6 +117,33 @@ _SECRET_KEY_MARKERS = ("api_key", "secret", "token", "password")
 
 # 包内顶层固定条目（白名单的精确名部分）
 _TOP_ENTRIES = ("skysheep.db", "config.toml", "ui.json", "manifest.json")
+
+# 导入侧按「降防护状态」整表清空的库表（固定清单，语句不拼外部输入）：
+# - cron_tasks / schedules / pipelines / pipeline_nodes：无人值守自动化——
+#   后端有常驻循环，在跑的 cron 与流水线扫描到 due / running 行就直接
+#   认领执行，恶意包植入的任务会自动跑起来；
+# - whitelist_rules：命令前缀白名单，命中即自动放行（免确认执行）；
+# - channel_bindings / channel_sources：聊天渠道绑定与来源，是无人值守
+#   的远程遥控入口。
+# 迁移包可能来自不可信机器：这些类别的数据一律不随包生效，需要的话由
+# 本机用户导入后重建（对齐 ui.json accept_edits「降防护档位不随包生效」
+# 的同一语义）。清洗了哪些表（及行数）随导入结果逐项披露。
+# 注意：apply_migration_package 里的清空语句按表逐一展开成字面常量
+# （表名进不了 sqlite 的参数绑定），改动本清单必须同步增删那些语句。
+_MIGRATION_CLEAN_TABLES = (
+    "cron_tasks",
+    "schedules",
+    "whitelist_rules",
+    "channel_bindings",
+    "channel_sources",
+    "pipelines",
+    "pipeline_nodes",
+)
+
+# config.toml 防护总开关键（精确键名、小写匹配）：电脑控制 / 浏览器控制 /
+# 证书校验忽略。导入时不随包生效——这些键打开的都是「Agent 直接动真机 /
+# 放松校验」的降防护面，只能由本机用户主动切换。
+_GUARD_SWITCH_KEYS = ("computer_control", "browser_control", "browser_ignore_cert")
 
 # 导入前备份的文件名标记：落 store 的 backups 目录，界面的备份列表按
 # {stem}-*.db 收录，时间戳解析不出时退回 mtime 展示（不破坏既有列表）。
@@ -126,6 +172,38 @@ def sanitize_config_text(text: str) -> tuple[str, list[str]]:
             if any(marker in key for marker in _SECRET_KEY_MARKERS):
                 name = stripped_line.split("=", 1)[0].strip().strip('"')
                 stripped.append(f"{table}.{name}" if table else name)
+                continue
+        out.append(line)
+    return "\n".join(out) + ("\n" if out else ""), stripped
+
+
+def _strip_guard_switch_keys(text: str) -> tuple[str, list[str]]:
+    """把 config.toml 文本里防护总开关键的「键值行」整行删除，返回（清洗文本, 被删键名）。
+
+    逐行匹配两类形状（键名先去单/双引号、小写）：
+    - 精确键名：``computer_control = true``；
+    - 点分键前缀：``computer_control.x = true``——点分子键会让解析结果里
+      出现非空的 computer_control 表，加载侧 ``bool(raw.get(key, False))``
+      对非空表照样取真，等于把开关打开，必须一并剥。
+    键在哪个 [表] 下都删（这些名字是引擎保留的开关名，嵌套出现同样不是
+    正常配置该有的形状）。防误伤：匹配「等于键名」或「键名 + 点」的前缀，
+    不做「含即删」（computer_control_extra 之类不受影响）。
+
+    表形态（``[computer_control]`` 段头）**不**在此处按行处理：逐行扫描
+    分不清它是真段头还是多行字符串里的文本，误剥会损坏正常配置——该形状
+    由 apply_migration_package 在 tomllib 解析之后做 fail-closed 兜底
+    （解析结构里出现这三个键即整体拒绝；tomllib 的解析是权威的，字符串
+    内容不会被误判成表）。
+    """
+    out: list[str] = []
+    stripped: list[str] = []
+    dotted_prefixes = tuple(name + "." for name in _GUARD_SWITCH_KEYS)
+    for line in text.splitlines():
+        stripped_line = line.strip()
+        if "=" in stripped_line and not stripped_line.startswith("#"):
+            key = stripped_line.split("=", 1)[0].strip().strip("\"'").lower()
+            if key in _GUARD_SWITCH_KEYS or key.startswith(dotted_prefixes):
+                stripped.append(key.split(".", 1)[0])
                 continue
         out.append(line)
     return "\n".join(out) + ("\n" if out else ""), stripped
@@ -257,15 +335,19 @@ def apply_migration_package(
     home: Path, data: bytes, *, backup_dir: Path,
     skills_mode: str = "merge", max_bytes: int | None = MAX_MIGRATION_PACKAGE_BYTES,
 ) -> dict:
-    """应用迁移包：白名单校验 → 备份本机库 → 原子替换 db / 合并技能 / 还原配置。
+    """应用迁移包：白名单校验 → 降防护清洗 → 备份本机库 → 原子替换 / 合并 / 还原。
 
-    全部校验（白名单、manifest 比对、TOML/JSON、库 quick_check 与版本）都在
-    任何写盘之前完成——坏包根本不落盘。写入阶段失败的回滚是尽力而为：
-    config/ui 按写前字节还原、新装技能目录删除、库按导入前备份还原，
-    还原不了的名字如实带在错误信息里。调用方（MigrationMixin）负责先收掉
-    本进程攥着的库连接、调用后重开。
+    全部校验（白名单、技能内容预算、manifest 比对、TOML/JSON、库 quick_check
+    与版本）都在任何写盘之前完成——坏包根本不落盘。包内库在换上本机前按
+    「降防护状态」清洗（自动化 / 白名单 / 渠道绑定表整表清空），config.toml
+    的防护总开关键与 ui.json 的 accept_edits 一律剥掉。写入阶段失败的回滚是
+    尽力而为：config/ui 按写前字节还原、新装技能目录删除、被覆盖的同名技能
+    按备份还原、库按导入前备份还原，还原不了的名字如实带在错误信息里。
+    调用方（MigrationMixin）负责先收掉本进程攥着的库连接、调用后重开。
 
-    返回 manifest：导入了什么、备份在哪、密钥需重填提示（sanitized_keys）。
+    返回 manifest：导入了什么、备份在哪、密钥需重填提示（sanitized_keys）、
+    清洗披露（db_cleaned：表名 → 清掉的行数；config_guard_keys_stripped：
+    被剥掉的防护开关键）。
     """
     home = Path(home)
     backup_dir = Path(backup_dir)
@@ -274,7 +356,9 @@ def apply_migration_package(
     if skills_mode not in SKILLS_MODES:
         raise RuntimeError(f"未知的技能还原口径：{skills_mode}（只能是 merge / replace）")
     if max_bytes is not None and len(data) > max_bytes:
-        raise RuntimeError("迁移包超过尺寸上限，已拒绝导入")
+        raise RuntimeError(
+            f"迁移包超过尺寸上限（{max_bytes // (1024 * 1024)}MB），已拒绝导入"
+        )
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
     except Exception as e:  # noqa: BLE001
@@ -282,7 +366,13 @@ def apply_migration_package(
 
     with zf:
         # ---- 1) 条目白名单：未知/穿越/盘符一律整体拒绝（不做静默跳过）----
+        # skills 条目同时累计「条目数 / 声明解压大小」，预算与技能安装器同一套
+        # （MAX_SKILL_FILES / MAX_UNPACKED_BYTES）。大小按 zip 中央目录里声明的
+        # 解压后尺寸计——zipfile 解压时超出声明尺寸会直接报错，所以这是真实
+        # 解压预算；扫描阶段就拒绝 zip bomb，此时一个字节都还没解压落盘。
         entries: dict[str, zipfile.ZipInfo] = {}
+        skill_entry_count = 0
+        skill_entry_bytes = 0
         for info in zf.infolist():
             if info.is_dir():
                 continue
@@ -295,6 +385,17 @@ def apply_migration_package(
             if name in _TOP_ENTRIES:
                 entries[name] = info
             elif parts[0] == "skills" and len(parts) >= 3 and _skill_name_ok(parts[1], home / "skills"):
+                skill_entry_count += 1
+                skill_entry_bytes += max(0, int(info.file_size))
+                if skill_entry_count > MAX_SKILL_FILES:
+                    raise RuntimeError(
+                        f"迁移包里的技能文件数过多（超过 {MAX_SKILL_FILES} 个），已整体拒绝"
+                    )
+                if skill_entry_bytes > MAX_UNPACKED_BYTES:
+                    raise RuntimeError(
+                        "迁移包里的技能内容过大"
+                        f"（解压累计超过 {MAX_UNPACKED_BYTES // (1024 * 1024)}MB），已整体拒绝"
+                    )
                 entries[name] = info
             else:
                 raise RuntimeError(f"迁移包里含未知条目，已整体拒绝：{name}")
@@ -329,7 +430,9 @@ def apply_migration_package(
         if not actual:
             raise RuntimeError("迁移包里没有可导入的内容")
 
-        # ---- 3) 内容校验（全在临时目录里进行，此时一个字节都还没写本机）----
+        # ---- 3) 内容校验与降防护清洗（全在临时目录里进行，此时一个字节都还没写本机）----
+        cleaned_tables: dict[str, int] = {}
+        guard_stripped: list[str] = []
         with tempfile.TemporaryDirectory(prefix="skysheep-migration-") as td:
             stage = Path(td)
             staged_db: Path | None = None
@@ -345,13 +448,56 @@ def apply_migration_package(
                 conn = sqlite3.connect(str(staged_db))
                 try:
                     ver = int(conn.execute("PRAGMA user_version").fetchone()[0])
+                    if ver > SCHEMA_VERSION:
+                        raise RuntimeError(
+                            f"迁移包的会话库由更新版本的 SkySheep 创建（库版本 {ver} > "
+                            f"当前程序支持 {SCHEMA_VERSION}）。请先升级本机 SkySheep 再导入。"
+                        )
+                    # 包里库的表清单（旧库可能缺新表，缺哪张就跳过哪张）
+                    have = {
+                        str(r[0])
+                        for r in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        )
+                    }
+                    # 降防护状态清洗：自动化 / 白名单 / 渠道绑定表整表清空。
+                    # 必须赶在换库之前做——导入完成后在跑的 cron / 流水线循环
+                    # 下一轮扫描就可能认领 due / running 行，植入任务等不到
+                    # 用户看完提示。表名进不了 sqlite 的参数绑定，七条清空
+                    # 语句干脆逐一写成字面常量，不给任何拼接留口子；旧库
+                    # 缺表就跳过（没有可清的）。清掉的行数进披露字段。
+                    cleaned = 0
+                    if "cron_tasks" in have:
+                        cleaned = conn.execute("DELETE FROM cron_tasks").rowcount
+                        if cleaned > 0:
+                            cleaned_tables["cron_tasks"] = int(cleaned)
+                    if "schedules" in have:
+                        cleaned = conn.execute("DELETE FROM schedules").rowcount
+                        if cleaned > 0:
+                            cleaned_tables["schedules"] = int(cleaned)
+                    if "whitelist_rules" in have:
+                        cleaned = conn.execute("DELETE FROM whitelist_rules").rowcount
+                        if cleaned > 0:
+                            cleaned_tables["whitelist_rules"] = int(cleaned)
+                    if "channel_bindings" in have:
+                        cleaned = conn.execute("DELETE FROM channel_bindings").rowcount
+                        if cleaned > 0:
+                            cleaned_tables["channel_bindings"] = int(cleaned)
+                    if "channel_sources" in have:
+                        cleaned = conn.execute("DELETE FROM channel_sources").rowcount
+                        if cleaned > 0:
+                            cleaned_tables["channel_sources"] = int(cleaned)
+                    if "pipelines" in have:
+                        cleaned = conn.execute("DELETE FROM pipelines").rowcount
+                        if cleaned > 0:
+                            cleaned_tables["pipelines"] = int(cleaned)
+                    if "pipeline_nodes" in have:
+                        cleaned = conn.execute("DELETE FROM pipeline_nodes").rowcount
+                        if cleaned > 0:
+                            cleaned_tables["pipeline_nodes"] = int(cleaned)
+                    conn.commit()
                 finally:
                     conn.close()
-                if ver > SCHEMA_VERSION:
-                    raise RuntimeError(
-                        f"迁移包的会话库由更新版本的 SkySheep 创建（库版本 {ver} > "
-                        f"当前程序支持 {SCHEMA_VERSION}）。请先升级本机 SkySheep 再导入。"
-                    )
             staged_cfg: bytes | None = None
             if "config.toml" in entries:
                 try:
@@ -363,15 +509,31 @@ def apply_migration_package(
                 # 密钥红线在「入口」再兜一遍：导出方的脱敏是自觉，导入方不信任
                 # 包内容——再剥一次，按脱敏后的文本写盘。
                 sanitized, import_stripped = sanitize_config_text(text)
+                # 防护总开关不随包生效：包里带来的 computer_control /
+                # browser_control / browser_ignore_cert 一律剥掉（与 ui.json 的
+                # accept_edits 同款语义），这些降防护档位只能由本机用户主动切换。
+                sanitized, guard_stripped = _strip_guard_switch_keys(sanitized)
                 try:
-                    tomllib.loads(sanitized)
+                    parsed_cfg = tomllib.loads(sanitized)
                 except tomllib.TOMLDecodeError as e:
                     raise RuntimeError(
                         f"迁移包里的 config.toml 不是合法 TOML，已取消导入：{e}"
                     ) from None
+                # 防护开关的表/变体形态 fail-closed 兜底：键值行剥除后，解析
+                # 结构里若仍带出这三个键（[computer_control] 段、[[...]] 数组表、
+                # 带引号的键等逐行手段剥不掉的形状），说明包在用表形态硬塞开关
+                # ——加载侧 bool(非空表) 即真，等价于打开开关，整体拒绝导入。
+                guard_residue = [k for k in _GUARD_SWITCH_KEYS if k in parsed_cfg]
+                if guard_residue:
+                    raise RuntimeError(
+                        "迁移包里的 config.toml 含防护开关键的表/变体形态"
+                        f"（{'、'.join(guard_residue)}），已整体拒绝导入"
+                    )
                 staged_cfg = sanitized.encode("utf-8")
                 if import_stripped:
                     logger.info("迁移导入再剥密钥键：%s", "、".join(import_stripped))
+                if guard_stripped:
+                    logger.info("迁移导入剥防护开关键：%s", "、".join(guard_stripped))
             staged_ui: dict | None = None
             if "ui.json" in entries:
                 try:
@@ -412,7 +574,7 @@ def apply_migration_package(
             skills_root = home / "skills"
             skills_new: list[str] = []
             skills_overwritten: list[str] = []
-            skills_moved: list[tuple[str, Path]] = []  # replace 档移走的同名技能（回滚用）
+            skills_moved: list[tuple[str, Path]] = []  # 被覆盖技能的备份位（回滚用，两档通用）
             db_replaced = False
             try:
                 # 5a) 库：清 WAL/SHM 残留 → _stage_and_replace（同目录临时文件 +
@@ -451,9 +613,12 @@ def apply_migration_package(
                     )
                 # 5c) 技能还原：同名覆盖，本机多出的保留；目录名先过安装器同款
                 # 校验并 resolve 确认仍在技能根内。
-                # replace 档（P24 v2）：同名技能先整目录移到备份区再整目录拷入，
-                # 避免「包里旧文件 + 本机新文件」混成一份谁也说不清的状态；移走的
-                # 目录留在备份区，写盘失败时按 moved 清单原样搬回。
+                # 被覆盖的同名技能先留还原路：replace 档（P24 v2）整目录移进
+                # 备份区，避免「包里旧文件 + 本机新文件」混成一份谁也说不清的
+                # 状态；merge 档整份复制留底（本机目录原地不动，只叠加包内
+                # 文件，本机多出的文件不丢）。两档都没有备份就拒绝覆盖——
+                # 绝不裸改本机技能；备份区里的目录在写盘失败时按 moved 清单
+                # 原样搬回（_rollback_import 同一条通道）。
                 if staged_skills.is_dir():
                     skills_root.mkdir(parents=True, exist_ok=True)
                     staged_dirs: list[tuple[Path, Path, str]] = []
@@ -467,25 +632,23 @@ def apply_migration_package(
                                 f"包里的技能名不合法（{src_dir.name}）：{e}"
                             ) from None
                         staged_dirs.append((src_dir, dst, src_dir.name))
-                    if skills_mode == "replace":
-                        # 被换下来的同名技能进备份区（不起眼但可回溯，回滚也靠它）
-                        aside_root = backup_dir / ("skills-" + time.strftime("%Y%m%d-%H%M%S"))
-                        for _src, dst, name in staged_dirs:
-                            if not dst.is_dir():
-                                continue
-                            aside = aside_root / name
-                            aside.parent.mkdir(parents=True, exist_ok=True)
-                            if aside.exists():
-                                shutil.rmtree(aside, ignore_errors=True)
-                            shutil.move(str(dst), str(aside))
-                            skills_moved.append((name, aside))
-                            skills_overwritten.append(name)
-                    for src_dir, dst, name in staged_dirs:
-                        if skills_mode != "replace":
-                            if dst.is_dir():
-                                skills_overwritten.append(name)
-                            else:
+                    aside_root = backup_dir / ("skills-" + time.strftime("%Y%m%d-%H%M%S"))
+                    for _src, dst, name in staged_dirs:
+                        if not dst.is_dir():
+                            if skills_mode != "replace":
                                 skills_new.append(name)
+                            continue
+                        aside = aside_root / name
+                        aside.parent.mkdir(parents=True, exist_ok=True)
+                        if aside.exists():
+                            shutil.rmtree(aside, ignore_errors=True)
+                        if skills_mode == "replace":
+                            shutil.move(str(dst), str(aside))
+                        else:
+                            shutil.copytree(dst, aside)
+                        skills_moved.append((name, aside))
+                        skills_overwritten.append(name)
+                    for src_dir, dst, _name in staged_dirs:
                         shutil.copytree(src_dir, dst, dirs_exist_ok=True)
             except Exception as e:  # noqa: BLE001
                 residual = _rollback_import(
@@ -511,6 +674,10 @@ def apply_migration_package(
             "sanitized_keys": sorted(
                 {str(k) for k in pkg_manifest.get("sanitized_keys", [])}
             ),
+            # 清洗披露：随包换上的库清掉了哪些自动化/绑定/白名单表（表 → 行数）、
+            # config 里剥掉了哪些防护总开关键。前端导入完成提示逐项展示。
+            "db_cleaned": dict(sorted(cleaned_tables.items())),
+            "config_guard_keys_stripped": sorted(set(guard_stripped)),
         }
 
 
@@ -561,7 +728,9 @@ def _rollback_import(
             shutil.rmtree(skills_root / name, ignore_errors=True)
         except OSError:
             failed.append("skills/" + name)
-    # replace 档移走的同名技能：先清掉这次拷进来的，再把原目录搬回原位
+    # 被覆盖的同名技能（replace 档移走的、merge 档复制留底的都在这条清单里）：
+    # 先清掉这次拷进来的，再把备份位里的本机原目录搬回原位；搬不回的逐个
+    # 点名（调用方把 residual 带进报错）。
     for name, aside in (skills_moved or []):
         try:
             shutil.rmtree(skills_root / name, ignore_errors=True)
@@ -584,8 +753,10 @@ class MigrationMixin:
 
         **两种回传形态（P24 v2）**：包体 ≤64MB 时按 base64 经 WS 回传（`mode=inline`，
         前端直接触发下载）；超过上限不拒绝，改写到 `~/.skysheep/migrations/` 并回传
-        路径（`mode=file`）——大库（几百 MB）也能跨机迁移，只是不再经界面传输。
-        落盘目录按 MIGRATION_PACKAGE_KEEP 滚动裁剪。
+        路径（`mode=file`）。注意：导入侧与两种回传来源同受 64MB 上限（防 zip
+        bomb），所以超过上限的落盘包**无法再经导入换回本机**，只作拷贝存档用
+        ——「大库跨机迁移」不再是受支持的能力。落盘目录按 MIGRATION_PACKAGE_KEEP
+        滚动裁剪。
         """
         data, manifest = await asyncio.to_thread(
             build_migration_package, skysheep_home(), enforce_limit=False
@@ -621,9 +792,11 @@ class MigrationMixin:
         包校验全部通过且本机库已备份后才动盘。改了库必须重启生效
         （restart_required=True，前端据此提示）。
 
-        包来源两种（P24 v2）：`data_b64`（界面选择的小包）或 `path`（本机磁盘上的
-        包——落盘模式导出的那种，几百 MB 也不必挤进 WS 帧）。`skills_mode` 决定
-        同名技能是叠加覆盖（merge，默认）还是整目录替换（replace）。
+        包来源两种（P24 v2）：`data_b64`（界面选择的包）或 `path`（本机磁盘上的
+        包）。两种来源受同一道尺寸上限（``MAX_MIGRATION_PACKAGE_BYTES``，防
+        zip bomb 写满磁盘）与同一套技能内容解压预算——磁盘上的恶意包不因
+        「本机操作」豁免。`skills_mode` 决定同名技能是叠加覆盖（merge，默认）
+        还是整目录替换（replace）。
         """
         busy = self._backup_busy_message("导入")
         if busy:
@@ -638,13 +811,12 @@ class MigrationMixin:
         if skills_mode not in SKILLS_MODES:
             raise RuntimeError("技能还原口径只能是 merge（叠加）或 replace（替换）")
         path_arg = str(params.get("path") or "").strip()
-        max_bytes: int | None = MAX_MIGRATION_PACKAGE_BYTES
+        max_bytes = MAX_MIGRATION_PACKAGE_BYTES  # 两种来源同一道上限（调用时读取，测试可调）
         if path_arg:
             pkg_path = Path(path_arg)
             if not pkg_path.is_file():
                 raise RuntimeError(f"找不到迁移包文件：{path_arg}")
             data = await asyncio.to_thread(pkg_path.read_bytes)
-            max_bytes = None  # 本机磁盘上的包不受 WS 传输上限约束
         else:
             raw = str(params.get("data_b64") or "")
             if not raw:
@@ -679,9 +851,16 @@ class MigrationMixin:
 def _write_package_file(out_dir: Path, path: Path, data: bytes) -> None:
     """把超大包写到落盘目录（同目录临时文件 + 原子换名），并滚动裁剪旧包。"""
     out_dir.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".zip.tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    # 临时名掺随机分量：文件名的时间戳只到秒，同秒并发导出（或两次手动落盘）
+    # 会算出同一个确定性的 .zip.tmp 名，两次写盘交替进行时产物可能互相混写。
+    # 随机后缀让每个写入者各用各的临时文件，最后 os.replace 谁后完成谁生效，
+    # 落盘的永远是一份完整包（与 skills/installer.py 的暂存目录同一思路）。
+    tmp = path.with_name(f"{path.stem}-{os.urandom(4).hex()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)  # 换名成功后不存在，no-op；失败则清掉残片
     olds = sorted(out_dir.glob("skysheep-migration-*.zip"),
                   key=lambda p: p.stat().st_mtime)
     for old in olds[: max(0, len(olds) - MIGRATION_PACKAGE_KEEP)]:

@@ -134,7 +134,9 @@ class Usage(Event):
 
 class TurnFinished(Event):
     kind: Literal["turn_finished"] = "turn_finished"
-    stop_reason: str = "end_turn"  # end_turn / max_iterations / aborted
+    stop_reason: str = "end_turn"  # end_turn / max_iterations / error / cancelled
+    # （error：模型/工具链异常收尾；cancelled：交互路径被用户停止时的取消收尾。
+    # aborted 从不作为本字段的值出现——那是 team_finished 的 status 值。）
     iterations: int = 0
     # 本轮实测耗时（毫秒）：前端据此把「已用时」芯片定格成引擎真实值，
     # 而不是前端自己从收到预估事件那一刻起的本地计时（两者会有偏差）。

@@ -111,6 +111,27 @@ async def test_subagent_gate_unit():
     assert "报告" in pending.deny_note
 
 
+def test_task_manager_network_reaches_researcher_tools(tmp_path):
+    """F5.2/F8.3：researcher 型内置子代理现场构造的 web_search / web_fetch
+    必须吃到 TaskManager 透传的全局出网设置（代理 / no_proxy / 自签 CA）——
+    漏传时这两个工具直连，无人值守下会绕过企业代理与自签 CA。"""
+    from skysheep.network import NetworkConfig
+
+    net = NetworkConfig(proxy="http://127.0.0.1:7890")
+    tasks = TaskManager(provider_factory=lambda: None, working_dir=tmp_path, network=net)
+    tools = {t.name: t for t in tasks._builtin_extra_tools("researcher")}
+    assert tools["web_search"].network is net
+    assert tools["web_fetch"].network is net
+    # 复用缓存的同一批实例（懒初始化只建一次）
+    assert tasks._builtin_extra_tools("researcher") is tasks._builtin_extra_tools("researcher")
+
+    # 未接线的宿主（不传 network）保持旧行为：None = 直连，不炸
+    legacy = TaskManager(provider_factory=lambda: None, working_dir=tmp_path)
+    legacy_tools = {t.name: t for t in legacy._builtin_extra_tools("researcher")}
+    assert legacy_tools["web_search"].network is None
+    assert legacy_tools["web_fetch"].network is None
+
+
 class ReadTool:
     """最小只读工具桩（authorize 只看 safety）。"""
 

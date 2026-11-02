@@ -30,10 +30,43 @@ async def cron_task(home):
 
 
 def _patch_provider(monkeypatch, provider: FakeProvider) -> None:
-    """把 cli.app 的 build_provider 换成假模型（隔离环境没有真实 API Key）。"""
+    """把 cli.app 的 build_provider 换成假模型（隔离环境没有真实 API Key）。
+
+    签名带 *a/**k：cron run 的真实调用点现在把 cfg.network 作为第三 positional
+    传入（无人值守也走全局代理/CA，F5.2），桩函数要接得住。
+    """
     import skysheep.cli.app as cli_app
 
-    monkeypatch.setattr(cli_app, "build_provider", lambda name, pc: provider)
+    monkeypatch.setattr(cli_app, "build_provider", lambda name, pc, *a, **k: provider)
+
+
+def test_cron_run_cli_passes_network_to_build_provider(home, cron_task, monkeypatch):
+    """F5.2：无人值守的模型流量也走全局出网设置——cron run 的 build_provider
+    必须收到 cfg.network（代理 / no_proxy / 自签 CA），漏传会静默绕过直连。"""
+    import skysheep.cli.app as cli_app
+    from skysheep.config import load_config
+
+    provider = FakeProvider([[TextBlock(text="今日汇总：完成")]])
+    seen: dict = {}
+
+
+    def _fake_build(name, pc, network=None):
+        seen["name"] = name
+        seen["network"] = network
+        return provider
+
+    monkeypatch.setattr(cli_app, "build_provider", _fake_build)
+
+    with pytest.raises(SystemExit) as ei:
+        cli_app.main(["cron", "run", str(cron_task["id"])])
+    assert ei.value.code == 0
+    from skysheep.network import NetworkConfig
+
+    # load_config() 每次返回新实例，比对象值不比身份：收到的必须是配置里那份
+    # NetworkConfig（同一进程内 cron run 与 load_config 同源）
+    assert isinstance(seen["network"], NetworkConfig)
+    assert seen["network"] == load_config().network, \
+        "cron run 的 build_provider 必须拿到 cfg.network（与 run_headless / REPL 同口径）"
 
 
 def test_cron_run_cli_ok_writes_back_task_row(home, cron_task, monkeypatch):

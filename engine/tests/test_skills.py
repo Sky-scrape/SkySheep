@@ -333,6 +333,24 @@ def test_host_allowed_malformed_urls_raise_install_error():
     assert _host_allowed("https://github.com:443/u/r") == "github.com"
 
 
+def test_release_assets_github_host_allowed():
+    """GitHub release 资产的 302 落点域必须在白名单里（发现 F8.1）：
+    github.com/…/releases/download/… 的下载直链会 302 到
+    release-assets.githubusercontent.com，重定向逐跳复核时漏掉这个域
+    会让所有 GitHub release 直链安装全被拒。"""
+    # 重定向落点域放行（主机名归一小写后返回）
+    assert _host_allowed(
+        "https://release-assets.githubusercontent.com/github-production-release-asset/x/skill.zip"
+    ) == "release-assets.githubusercontent.com"
+    # 带 token 查询串的 302 落点同样放行
+    assert _host_allowed(
+        "https://release-assets.githubusercontent.com/a/b.zip?token=abc"
+    ) == "release-assets.githubusercontent.com"
+    # 用户侧入口直链不受影响：releases 下载地址仍按 .zip 直链原样返回
+    direct = "https://github.com/u/r/releases/download/v1.0/skill.zip"
+    assert resolve_url(direct) == ([direct], None)
+
+
 def test_install_from_dir_enforces_zip_limits(tmp_path, monkeypatch):
     """本地文件夹导入与 zip 同一防线：文件数/体积超上限直接报错，不落半个
     技能（发现 41：此前上限只在 zip 解压与下载时生效，「防误选整个盘」

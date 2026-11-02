@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -465,4 +466,89 @@ async def test_run_headless_stream_ndjson(home, capsys):
     assert last["session_id"] == result["session_id"]
     assert last["usage"] == result["usage"]
     assert "messages" not in last
+
+
+# ---- NDJSON 行完整性（F5.3）：U+2028/U+2029 不得裸透传 ----
+
+
+def test_ndjson_write_escapes_unicode_line_separators(capsys):
+    """U+2028（行分隔符）/ U+2029（段落分隔符）是 JSON 字符串合法内容，
+    但按 Unicode 行界切行的下游（str.splitlines 一族、部分 NDJSON 解析器）
+    会把它们当换行把一行切裂——输出侧必须转义为字面 \\u2028 / \\u2029
+    （JSON 语义等价），解回同一码点。"""
+    from skysheep.cli.app import _ndjson_write
+
+    payload = {"kind": "text_delta", "text": "a\u2028b\u2029c"}
+    _ndjson_write(payload)
+    raw = capsys.readouterr().out
+    assert raw.count("\n") == 1 and raw.endswith("\n"), "必须仍是一行一事"
+    assert "\\u2028" in raw and "\\u2029" in raw, "行分隔符必须以转义序列出现"
+    assert "\u2028" not in raw and "\u2029" not in raw, "裸行分隔符不得出现在行内"
+    assert json.loads(raw) == payload, "转义必须语义等价（解回原码点）"
+
+
+async def test_run_headless_stream_survives_unicode_line_separators(home, capsys):
+    """端到端：模型正文含 U+2028/U+2029 时，stream 输出仍逐行合法 NDJSON，
+    末行 result 的 reply 解回原文（含两个分隔符码点）。"""
+    reply = "第一段\u2028第二段\u2029第三段"
+    provider = FakeProvider([[TextBlock(text=reply)]])
+    await run_headless(
+        "行分隔符回归", directory=str(home / "proj"),
+        provider_factory=lambda: provider, output="stream",
+    )
+    raw = capsys.readouterr().out
+    assert "\u2028" not in raw and "\u2029" not in raw
+    lines = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    assert lines[-1]["kind"] == "result"
+    assert lines[-1]["reply"] == reply
+
+
+# ---- 取消场景（F5.4）：打断也要落库、stream 也要 result 末行 ----
+
+
+class _HangProvider(FakeProvider):
+    """stream 挂住不产出：模拟模型响应中途被用户停止。"""
+
+    def __init__(self, scripted) -> None:
+        super().__init__(scripted)
+        self.stream_started = asyncio.Event()
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.stream_started.set()
+        await asyncio.Event().wait()  # 永不置位：一直挂到被取消
+        yield None  # pragma: no cover - 不可达，仅保持异步生成器形态
+
+
+async def test_run_headless_cancel_persists_and_emits_result(home, capsys):
+    """取消场景：轮中途被打断，已产生的消息照常落库、stream 仍补 result 末行
+    （stop_reason 如实标 cancelled）——对照 REPL 与 backend _persist_turn 的
+    「打断也要落」标准。修复前：取消让整轮消息不落库、stream 无 result 末行，
+    NDJSON 消费方按「末行必有 result」解析会永久挂起。"""
+    provider = _HangProvider([[TextBlock(text="永远不会说完")]])
+    task = asyncio.create_task(run_headless(
+        "会被打断的任务", directory=str(home / "proj"),
+        provider_factory=lambda: provider, output="stream",
+    ))
+    await asyncio.wait_for(provider.stream_started.wait(), 5)
+    task.cancel()
+    # 取消被吞掉、收尾照常走完：不向调用方抛 CancelledError，返回如实结果
+    result = await asyncio.wait_for(task, 5)
+    assert result["stop_reason"] == "cancelled"
+    assert result["error"] is None  # 用户停止不是错误
+
+    out = capsys.readouterr().out
+    lines = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert lines, "取消前已产出的事件行不应丢失"
+    assert lines[-1]["kind"] == "result", "取消路径同样必须补 result 末行"
+    assert lines[-1]["stop_reason"] == "cancelled"
+
+    from skysheep.session import SessionStore
+
+    store = await SessionStore(db_path()).connect()
+    try:
+        msgs = await store.load_messages(result["session_id"])
+        assert any(m.role == "user" and "会被打断的任务" in m.text for m in msgs), \
+            "已产生的消息照常落库（用户消息在 run_turn 开头就进了 history）"
+    finally:
+        await store.close()
 

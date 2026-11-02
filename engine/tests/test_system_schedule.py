@@ -166,7 +166,8 @@ def test_cron_run_subcommand_writes_back_status(home, seeded_task, monkeypatch):
     import skysheep.cli.app as cli_app
 
     provider = FakeProvider([[TextBlock(text="系统级调度：完成")]])
-    monkeypatch.setattr(cli_app, "build_provider", lambda name, pc: provider)
+    # *a/**k：cron run 的调用点把 cfg.network 作为第三 positional 传入（F5.2），桩要接得住
+    monkeypatch.setattr(cli_app, "build_provider", lambda name, pc, *a, **k: provider)
 
     with pytest.raises(SystemExit) as ei:
         cli_app.main(["cron-run", str(seeded_task["id"]),
@@ -192,7 +193,7 @@ def test_cron_run_rejects_missing_project_dir(home, seeded_task, monkeypatch):
     import skysheep.cli.app as cli_app
 
     provider = FakeProvider([[TextBlock(text="不该出现")]])
-    monkeypatch.setattr(cli_app, "build_provider", lambda name, pc: provider)
+    monkeypatch.setattr(cli_app, "build_provider", lambda name, pc, *a, **k: provider)
 
     with pytest.raises(SystemExit) as ei:
         cli_app.main(["cron-run", str(seeded_task["id"]),

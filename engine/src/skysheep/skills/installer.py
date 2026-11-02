@@ -553,6 +553,8 @@ TRUSTED_ZIP_HOSTS = frozenset({
     "www.github.com",
     "codeload.github.com",
     "objects.githubusercontent.com",
+    # GitHub release 资产 302 的落点域：github.com/…/releases/download/… 会跳到这里
+    "release-assets.githubusercontent.com",
     "raw.githubusercontent.com",
     "gitee.com",
     "www.gitee.com",

@@ -131,6 +131,13 @@ _PREFIX_UNSAFE_COMMANDS = frozenset({
     "wsl", "npx", "uvx", "bunx",
     "go", "make",
     "regsvr32", "certutil", "mshta", "rundll32",
+    # 提权包装器（F6.1）：sudo/doas 锚定的前缀只有「包装器 + 命令 + 子命令」
+    # 三词形状钉得住（见 _SUDO_WRAPPERS 与 _sudo_prefix_shape_unsafe），其余
+    # 形状（两词收尾、旗标/赋值收尾）等于「以 root 跑任意命令」。_first_real_
+    # command_word 平时把 sudo/doas 当包装器越过（真实命令词落在它后面，
+    # `sudo docker build` 靠这一层拦），清单里收这两个名字是口径兜底：扫描
+    # 一旦把 sudo/doas 当真实命令词交回来，同样按任意执行面 fail-closed。
+    "sudo", "doas",
 })
 
 
@@ -173,6 +180,9 @@ _INTERPRETER_SCAN_MAX_TOKENS = 64
 
 # 提权包装器：前缀提炼取三词（`sudo apt install` / `sudo apt remove` 各成一类），
 # 不用两词前缀——`sudo apt` 会把 install 与 remove 合并，remove 可卸载关键包。
+# 三词形状由 _sudo_prefix_shape_unsafe 统一把关（提炼与匹配同源，F6.1）：锚在
+# sudo/doas 上却钉不住三个词的（词数不足 / 旗标 / 赋值收尾，含 `FOO=1 sudo`
+# 这类赋值垫前的两词残前缀）一律按任意执行面 fail-closed。
 _SUDO_WRAPPERS = frozenset({"sudo", "doas"})
 
 # 包装器命令的「下一参数是值」旗标（小写，含长短形态）：`sudo -u root python`、
@@ -437,18 +447,56 @@ def _prefix_match(text: str, pattern: str) -> bool:
     return rest[:1] in ("", " ", "\t")
 
 
+def _sudo_prefix_shape_unsafe(words: list[str]) -> bool:
+    """锚在提权包装器（sudo/doas）上的词序列钉不住可信三词 → True（F6.1）。
+
+    提权前缀只有「包装器 + 命令 + 子命令」三词形状有边界（`sudo apt install`
+    与 `sudo apt remove` 各成一类，见 _SUDO_WRAPPERS）；其余形状——词数不足
+    （`sudo apt`）、旗标收尾（`sudo rm -rf /`、`sudo -u root …`）、赋值收尾
+    （`sudo env FOO=1 …`，真实命令还没出现）——实质都是「以 root 跑任意命令」。
+    提炼与匹配两侧一律按任意执行面 fail-closed：提炼侧只固化 exact，匹配侧把
+    这类形状的前缀规则（含历史沉淀的 `FOO=1 sudo`、`sudo rm`，手工建的裸
+    `sudo`）全部判死，回落逐次确认。
+
+    锚定口径与 rule_for 的提炼分支一致：跳过前置赋值（NAME=value）定位首个
+    命令词；锚词经 _norm_exe_name 归一（路径前缀 / .exe 后缀 / 成对引号，
+    两平台写法都认）。非 sudo/doas 锚（含全赋值序列）返回 False，由调用方的
+    其他守卫处理。
+    """
+    lead = 0
+    while lead < len(words) and _is_var_assignment(words[lead]):
+        lead += 1
+    if lead >= len(words) or _norm_exe_name(words[lead]) not in _SUDO_WRAPPERS:
+        return False
+    if lead + 2 >= len(words):
+        return True  # 词数不足：`sudo apt` / `FOO=1 sudo` 钉不住子命令
+    if words[lead + 1].startswith("-") or _is_var_assignment(words[lead + 1]):
+        return True  # 旗标/赋值收尾：`sudo -u root …` / `sudo FOO=1 …`
+    if words[lead + 2].startswith("-") or _is_var_assignment(words[lead + 2]):
+        return True  # 第三词收在旗标/赋值上：`sudo rm -rf /` / `sudo env FOO=1 …`
+    return False
+
+
 def _is_arbitrary_exec_words(words: list[str]) -> bool:
-    """词序列的首个真实命令词是否落在任意执行面入口清单（_PREFIX_UNSAFE_COMMANDS）。
+    """词序列是否落在任意执行面：首个真实命令词在入口清单
+    （_PREFIX_UNSAFE_COMMANDS）内，或提权锚（sudo/doas）钉不住三词形状。
 
     找不到真实命令词时按两分处理（审查 SEC-M01）：自然扫完（全是前置赋值或
     包装器收尾，如动作语义文本 `action=read`）不算——这类模式钉不住命令，
     由匹配侧对**本次命令**的真实命令词检查兜住；但「扫描上限截断」（超长
     前置赋值链把真实命令推到上限外）必须 fail-closed 判是，否则解释器或
     入口命令可被推到上限外绕过守卫。
+    F6.1：sudo/doas 锚定且钉不住三词的形状无条件判是——`FOO=1 sudo` 这类
+    历史两词残前缀会把 `FOO=1 sudo rm -rf /` 一并放行，不得借「扫完了、
+    没找到真实命令词」漏判。
     """
     real = _first_real_command_word(words)
     if real is not None:
-        return real in _PREFIX_UNSAFE_COMMANDS
+        if real in _PREFIX_UNSAFE_COMMANDS:
+            return True
+        return _sudo_prefix_shape_unsafe(words)
+    if _sudo_prefix_shape_unsafe(words):
+        return True
     return len(words) > _INTERPRETER_SCAN_MAX_TOKENS
 
 
@@ -471,12 +519,14 @@ def _is_arbitrary_exec_prefix(pattern: str) -> bool:
 
 
 def _hits_unsafe_entry_command(text: str) -> bool:
-    """本次命令的首个真实命令词是否落在任意执行面入口清单（匹配侧，SEC-M01）。
+    """本次命令是否落在任意执行面：首个真实命令词在入口清单内，或提权锚
+    （sudo/doas）钉不住三词形状（匹配侧，SEC-M01 / F6.1）。
 
     与提炼侧（rule_for）同一清单、同一扫描（分词走 _tokenize，与
     _has_code_exec_flag 对命令文本同口径）：前置赋值/包装器把 docker/make/go
     挤出首词的命令（`TAG=latest docker run …`），不得借「首词无害」的
-    前缀规则免确认放行。
+    前缀规则免确认放行；sudo/doas 锚定但钉不住三词的命令（`sudo rm -rf /`、
+    `FOO=1 sudo …` 残形状）同样不得借任何前缀规则免确认放行。
     """
     return _is_arbitrary_exec_words(_tokenize(text))
 
@@ -897,25 +947,41 @@ class PermissionGate:
             # 这类免确认放行任意 `docker run` 的宽前缀。提炼不出可信真实命令词
             # （全是前置赋值/包装器收尾，如 `FOO=bar`、裸 `sudo`）同样不产前缀
             # ——宽前缀等于放行「该前缀后接任意命令」，fail-closed 只固化当次
-            # 参数。
+            # 参数。F6.1：提权包装器锚在赋值之后时（`FOO=1 sudo apt install`）
+            # 旧实现的三词分支只认 words[0] 是 sudo，命令落进下面的两词分支
+            # 沉淀 "FOO=1 sudo"，把 `FOO=1 sudo apt install` 与 `FOO=1 sudo
+            # rm -rf /` 合并成同一放行面——钉不住三词形状的提权命令（旗标/
+            # 词数/赋值收尾）一律 exact，与匹配侧共用 _sudo_prefix_shape_unsafe。
             real = _first_real_command_word(_tokenize(arg_text))
-            if real is None or real in _PREFIX_UNSAFE_COMMANDS:
+            if (
+                real is None
+                or real in _PREFIX_UNSAFE_COMMANDS
+                or _sudo_prefix_shape_unsafe(words)
+            ):
+                return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
+            # 前缀提炼锚在「首个非前置赋值词」上（与上面的判定同一锚定口径），
+            # 前置赋值原样垫在前缀前（`FOO=1 git status` → "FOO=1 git status"）
+            # ——赋值不改变命令语义，但前缀必须把真实命令词钉进放行面，不能
+            # 停在赋值上（旧 words[:2] 对 `FOO=1 sudo apt install` 只沉淀到
+            # "FOO=1 sudo"，对 `FOO=1 git status` 只沉淀到 "FOO=1 git"，两者
+            # 都把其后任意命令合并进同一放行面）。
+            lead = 0
+            while lead < len(words) and _is_var_assignment(words[lead]):
+                lead += 1
+            if lead >= len(words):
                 return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
             # 提权包装器（sudo/doas）取三词前缀：`sudo apt install` 与
             # `sudo apt remove` 是不同操作（remove 可卸载关键包），两词前缀
             # `sudo apt` 会把它们合并成一个放行面。三词前缀让子命令分开，
             # 既保留常见免确认便利（install/status 各管各的），又不放大破坏面。
-            if (
-                len(words) >= 3
-                and _norm_exe_name(words[0]) in _SUDO_WRAPPERS
-                and not words[1].startswith("-")
-                and not _is_var_assignment(words[1])
-                and not words[2].startswith("-")
-            ):
-                prefix3 = " ".join(words[:3])
+            # 能走到这里说明 _sudo_prefix_shape_unsafe 已判 False：锚词后
+            # 必有两个非旗标、非赋值的词，切片不会越界。
+            if _norm_exe_name(words[lead]) in _SUDO_WRAPPERS:
+                prefix3 = " ".join(words[:lead + 3])
                 return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix3)
-            # 取前两个词作为前缀，如 "git status" / "npm run"，避免把整条命令固化
-            prefix = " ".join(words[:2]) if words else arg_text
+            # 其余命令取「锚词 + 下一词」两词前缀，如 "git status" / "npm run"，
+            # 避免把整条命令固化；赋值序列原样垫前
+            prefix = " ".join(words[:lead + 2]) if words else arg_text
             return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix)
         if tool.name in PermissionGate._EXACT_ONLY_TOOLS:
             return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)

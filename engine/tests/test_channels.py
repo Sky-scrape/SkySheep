@@ -269,6 +269,59 @@ async def test_approval_actor_binding_requires_id_equality():
     assert await asyncio.wait_for(pending2.wait(), timeout=5) == Decision.DENY
 
 
+async def test_channel_gate_ignores_engine_tiers_and_project_whitelist(tmp_path):
+    """渠道姿态只由渠道门决定（审查 F1.1②）：引擎档与项目白名单不得漏进无人值守通道。
+
+    引擎档（auto_accept_write / auto_accept_all）会经 backend 的档位同步
+    （_sync_default_accept_to_runtimes / session_accept_set）写到所有会话门上；
+    项目白名单是桌面端逐次确认沉淀的持久规则。旧实现兜底走 super().authorize()，
+    这两条放行路都能让渠道会话零确认放行写/执行——落地为代码后必须被忽略：
+    未开审批即拒绝，开了审批必须经聊天窗口逐次确认。
+    """
+    from skysheep.security.gate import WhitelistRule
+    from skysheep.tools import RunCommandTool, WriteFileTool
+
+    wd = tmp_path / "proj"
+    wd.mkdir()
+
+    # 引擎档「自动允许写入」：工作目录内写操作在交互侧免确认，渠道侧必须拒绝
+    gate = ChannelGate(approve_enabled=False, working_dir=wd)
+    gate.auto_accept_write = True
+    pending = await gate.authorize(WriteFileTool(), {"path": "a.txt", "content": "x"})
+    assert pending is not None
+    assert await asyncio.wait_for(pending.wait(), timeout=2) == Decision.DENY
+
+    # 引擎档「完全访问」：命令在交互侧零确认，渠道侧同样拒绝
+    gate2 = ChannelGate(approve_enabled=False, working_dir=wd)
+    gate2.auto_accept_all = True
+    pending2 = await gate2.authorize(RunCommandTool(), {"command": "echo hi"})
+    assert pending2 is not None
+    assert await asyncio.wait_for(pending2.wait(), timeout=2) == Decision.DENY
+
+    # 项目白名单（含整工具 always 规则）：桌面沉淀的规则不随渠道会话生效
+    gate3 = ChannelGate(approve_enabled=False, working_dir=wd)
+    gate3.session_rules.append(WhitelistRule(tool="write_file", kind="always"))
+    pending3 = await gate3.authorize(WriteFileTool(), {"path": "a.txt", "content": "x"})
+    assert pending3 is not None
+    assert await asyncio.wait_for(pending3.wait(), timeout=2) == Decision.DENY
+
+    # 开了审批也不静默放行：引擎档全开仍要推聊天卡逐次确认
+    notified = []
+
+    async def notify_and_allow(p):
+        notified.append(p.request_id)
+        gate4.submit(p.request_id, Decision.ALLOW_ONCE)
+
+    gate4 = ChannelGate(
+        approve_enabled=True, approve_timeout=5, notify=notify_and_allow, working_dir=wd,
+    )
+    gate4.auto_accept_all = True
+    gate4.auto_accept_write = True
+    pending4 = await gate4.authorize(WriteFileTool(), {"path": "a.txt", "content": "x"})
+    assert notified == [pending4.request_id], "引擎档全开也必须先问聊天窗口"
+    assert await asyncio.wait_for(pending4.wait(), timeout=2) == Decision.ALLOW_ONCE
+
+
 async def _noop():
     return None
 
@@ -931,12 +984,16 @@ async def test_manager_routes_approval_reply_before_agent():
     assert host.decisions == [("feishu", Decision.ALLOW_ONCE, "9")]
     assert host.ran == [], "审批回复不应触发新一轮 Agent 运行"
 
-    # 没有待审批项时，allow 这种词应作为普通消息正常送进 Agent
+    # 没有待审批项 / 门查不到时（渠道门被换掉或重建、审批已超时落定），allow
+    # 也不再当新消息跑（审查 F1.1③）：它本是审批流的回执，落进对话会被模型
+    # 当成一条指令执行；且门查不到往往正是无人值守姿态尚未恢复的时刻。
+    # （旧行为断言「作为普通消息送进 Agent」随本项收紧一并更正。）
     host.waiting = False
     await mgr._on_message(ChannelMessage(
         channel="feishu", actor="9", chat_id="9", text="allow", approved=True,
     ))
-    assert host.ran == [("sess-feishu", "allow")]
+    assert host.ran == [], "审批词在无门可投时不得当新消息执行"
+    assert ch.out and "没有等待审批" in ch.out[-1][1]
 
 
 async def test_manager_approval_rejected_for_non_initiator():
@@ -1551,6 +1608,73 @@ def test_channel_session_binding_survives_runtime_loss(home):
             result = await be.channel_run("not-a-channel-session", "你好")
             assert "error" in result
             assert "/new" in result["error"]
+        finally:
+            await be.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_channel_runtime_never_reuses_desktop_interactive_gate(home):
+    """渠道会话被桌面端先建了 runtime（交互门）时不得复用（审查 F1.1①）。
+
+    两个复用点（channel_ensure_session / channel_run）都要校验现存门是
+    ChannelGate：确认档下写操作会挂到一个渠道侧永远无人应答的桌面确认卡上；
+    桌面若开了 accept_edits / full_access（档位同步会写到 runtime 门上），
+    更等于给无人值守通道静默放行。门不对就按绑定经 _get_channel_runtime
+    重建渠道门，然后正常跑通这一轮。
+    """
+    import asyncio
+
+    from skysheep.channels.gate import ChannelGate
+    from skysheep.messages import TextBlock
+    from skysheep.models.fake import FakeProvider
+    from skysheep.security.gate import PermissionGate
+    from skysheep.server.backend import ServerBackend
+
+    async def scenario():
+        be = ServerBackend(
+            working_dir=home / "proj",
+            provider_name="fake",
+            provider_factory=lambda: FakeProvider([]).with_default([TextBlock(text="好")]),
+        )
+        await be.setup()
+        try:
+            sid = await be.channel_ensure_session("feishu")
+
+            def _desktop_first() -> None:
+                """模拟「桌面端先建了 runtime」：清掉渠道记账后走桌面路径建。"""
+                be.runtimes.clear()
+                be._channel_gates.clear()
+                be._channel_names.clear()
+
+            async def _open_desktop() -> None:
+                _desktop_first()
+                await be._get_runtime(sid)
+                gate = be.runtimes[sid].agent.gate
+                assert isinstance(gate, PermissionGate)
+                assert not isinstance(gate, ChannelGate)
+                # 桌面侧开了「完全访问」档（会同步到会话门上）——这正是
+                # 交互门不得被渠道复用的最坏情形
+                gate.auto_accept_all = True
+
+            # 复用点 ①：channel_ensure_session 必须把交互门换回渠道门
+            await _open_desktop()
+            sid2 = await be.channel_ensure_session("feishu")
+            assert sid2 == sid
+            gate = be.runtimes[sid].agent.gate
+            assert isinstance(gate, ChannelGate), "渠道复用点不得带着交互门返回"
+            assert gate.auto_accept_all is False, "重建的渠道门不带引擎档"
+            assert be._channel_gates[sid] is gate
+            assert be._channel_names[sid] == "feishu"
+
+            # 复用点 ②：channel_run 同样不得带着交互门跑一轮
+            await _open_desktop()
+            result = await be.channel_run(sid, "你好")
+            assert "error" not in result, result
+            assert result["text"] == "好"
+            gate2 = be.runtimes[sid].agent.gate
+            assert isinstance(gate2, ChannelGate), "channel_run 不得复用交互门"
+            assert be._channel_gates[sid] is gate2
         finally:
             await be.shutdown()
 

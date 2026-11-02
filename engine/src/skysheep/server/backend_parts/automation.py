@@ -1218,6 +1218,18 @@ class AutomationMixin:
         except (TypeError, ValueError):
             return 1
 
+    def _resident_team_is_live(self, resident: ResidentTeamEntry) -> bool:
+        """常驻登记指向的队伍在本进程是否仍挂着活动编排器（同会话同 team_id）。
+
+        _teams 只登记活动团队（收队/交付即摘除），在册即视为活动——终态与
+        摘除之间的窄窗宁可多挡一次：复用会并行建出第二个编排器写同一
+        team_id 的频道（seq 错位、消息串写、注册表回写互相覆盖），挡错一次
+        的代价只是本轮跳过。team_id 对不上的活动实例（同会话用同模板重建的
+        别的队伍）不算「仍活动」，照常复用登记队伍——频道不同，不冲突。
+        """
+        live = getattr(self, "_teams", {}).get(resident.session_id)
+        return live is not None and getattr(live, "team_id", "") == resident.team_id
+
     async def _resident_wake_board(self, resident: ResidentTeamEntry) -> list[dict]:
         """常驻复用装配的板面来源：会话侧板面优先，注册表快照兜底（评审②）。
 
@@ -1336,6 +1348,30 @@ class AutomationMixin:
         # 由用户在团队卡上显式声明）
         resident = self.resident_teams.find_for_template(template_name, cron_pid) \
             if getattr(self, "resident_teams", None) is not None else None
+        if resident is not None and self._resident_team_is_live(resident):
+            # 常驻队伍仍在原会话活动（用户正在团队卡上交互）：复用会并行建出
+            # 第二个编排器写同一 team_id 的频道。本轮跳过复用——不唤醒也不
+            # 重建，任务结果与推送说明跳过原因；该团队收队（_teams 摘除）后，
+            # 下个到点照常复用唤醒。走正常 ok 收尾（设计内跳过不是故障，不进
+            # 失败告警口径），会话 user+assistant 成对落库可审计。
+            text = (
+                f"【本轮跳过】常驻团队「{resident.name or template_name}」"
+                f"（team_id={resident.team_id}）仍在原会话中活动。为避免两个"
+                "编排器并行写同一团队频道，本轮定时触发未复用建队，任务指令"
+                "未执行；该团队收队后，下次到点将照常复用唤醒。"
+            )
+            await self.store.append_message(sid, Message.user(task["prompt"]))
+            done_msg = Message.assistant([TextBlock(text=text)])
+            await self.store.append_message(sid, done_msg)
+            await self.store.touch(sid)
+            logger.info(
+                "定时团队 %s 跳过复用：常驻团队 %s 仍在会话 %s 活动",
+                task.get("id"), resident.team_id, resident.session_id,
+            )
+            runtime = SessionRuntime(
+                sid=sid, agent=_CronTeamAgentView([done_msg]), recorder=recorder,
+            )
+            return runtime, sid, False, facts
         try:
             # 成员解析：名册只来自模板（§14.2 第 6 步）——模板没有队员时装配失败
             # 按失败收尾，绝不调用 _resolve_team_members 的缺省分支（那里会按当前

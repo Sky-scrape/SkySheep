@@ -13,6 +13,13 @@
 # 命令词一律 exact（fail closed，绝不沉淀宽前缀）；历史已沉淀的这类前缀
 # 规则在匹配侧 fail-closed（含扫描上限截断的形态）。
 #
+# 审查 F6.1 补充：前缀提炼锚定在「首个非前置赋值词」上——sudo/doas 三词
+# 前缀与通用两词前缀都不再按裸 words[:2]/words[:3] 提炼（旧实现对
+# `FOO=1 sudo apt install` 沉淀 "FOO=1 sudo"，把 `FOO=1 sudo rm -rf /`
+# 合并进同一放行面）；钉不住三词形状的提权命令（旗标/词数/赋值收尾）
+# 一律 exact，匹配侧把这类形状的前缀规则（含历史沉淀与手工创建）判死
+# （_sudo_prefix_shape_unsafe，两侧同源）。
+#
 # 所有用例只断言规则判定（rule_for / matches / authorize），不真实执行任何
 # docker/make/python 载荷。
 from __future__ import annotations
@@ -107,7 +114,11 @@ def test_scan_cap_is_fail_closed_for_generation() -> None:
     ("kubectl get pods", "kubectl get"),
     ("sudo apt install htop", "sudo apt install"),
     ("env git status", "env git"),
-    ("FOO=bar git status", "FOO=bar git"),
+    # F6.1 改此断言：旧值 "FOO=bar git" 是按裸 words[:2] 提炼的合并前缀——
+    # 只钉住一个真实命令词 git，放行面覆盖任意 git 子命令。新口径锚定在
+    # 首个非前置赋值词上，两词前缀 = 锚词 + 下一词（git status），
+    # 前置赋值原样垫前。
+    ("FOO=bar git status", "FOO=bar git status"),
     ("nohup python x.py", "nohup python"),
 ])
 def test_normal_commands_keep_two_word_prefix(command: str, pattern: str) -> None:
@@ -195,6 +206,7 @@ def test_arbitrary_exec_prefix_judged_on_real_command_word(pattern: str) -> None
     "uv run",
     "kubectl get pods",
     "sudo apt install",
+    "FOO=1 sudo apt install",  # F6.1：赋值垫前的三词形状照常有效
     "TAG=latest git",
     "env git",
     "python script.py",
@@ -203,6 +215,142 @@ def test_arbitrary_exec_prefix_judged_on_real_command_word(pattern: str) -> None
 ])
 def test_benign_prefix_not_marked_arbitrary(pattern: str) -> None:
     assert not _is_arbitrary_exec_prefix(pattern), pattern
+
+
+# ---- 审查 F6.1：提权包装器锚定与两词前缀的赋值垫前 ----
+#
+# 旧实现按裸 words 提炼：sudo 三词分支只认 words[0] 是 sudo/doas，`FOO=1
+# sudo apt install` 落进通用两词分支沉淀 "FOO=1 sudo"，与 `FOO=1 sudo
+# rm -rf /` 合并成同一放行面；`sudo rm -rf /` / `sudo apt` 也沉淀出
+# "sudo rm" / "sudo apt" 两词残前缀。修复后与 SEC-M01 同口径：锚「首个
+# 非前置赋值词」，钉不住三词形状的提权命令一律 exact，匹配侧把这类形状
+# 的前缀规则（历史沉淀 + 手工创建）判死（_sudo_prefix_shape_unsafe，
+# 两侧同源）。Windows / POSIX 两形状都测：_tokenize 在 Windows 走
+# posix=False、POSIX 走 posix=True，分词路径不同判定必须一致。
+#
+# 所有用例只断言规则判定（rule_for / matches / authorize），命令串从不
+# 进入任何 shell。
+
+
+@pytest.mark.parametrize("command,pattern", [
+    # 既有口径回归：裸 sudo 三词前缀各成一类
+    ("sudo apt install htop", "sudo apt install"),
+    ("sudo apt remove bar", "sudo apt remove"),
+    ("doas apt install x", "doas apt install"),
+    # F6.1 核心：赋值垫前时锚在 sudo 上，三词前缀钉住子命令，不再合并放行面
+    ("FOO=1 sudo apt install htop", "FOO=1 sudo apt install"),
+    ("FOO=1 sudo apt remove bar", "FOO=1 sudo apt remove"),
+    ("FOO=1 doas apt install x", "FOO=1 doas apt install"),
+    # 命令词（rm）被钉进前缀、参数原样保留：放行面只覆盖「同前缀 + 任意
+    # 追加参数」，与 sudo apt install 的既有取舍同档（旧实现对这两条分别
+    # 沉淀 "FOO=1 sudo" / "sudo doas rm"——前者更宽，后者同宽）。
+    ("FOO=1 sudo rm x", "FOO=1 sudo rm x"),
+    ("sudo doas rm -rf x", "sudo doas rm"),
+])
+def test_sudo_anchor_keeps_three_word_prefix(command: str, pattern: str) -> None:
+    """提权包装器锚在首个非前置赋值词上：三词形状钉得住子命令。"""
+    rule = _rule_for(command)
+    assert rule.kind == "prefix" and rule.pattern == pattern, (command, rule)
+
+
+@pytest.mark.parametrize("command", [
+    "FOO=1 sudo rm -rf /",
+    "FOO=1 doas rm -rf /",
+    "sudo rm -rf /",           # 旧实现沉淀 "sudo rm"，任意 root 删除免确认
+    "sudo apt",                # 词数不足：旧实现沉淀 "sudo apt"，合并子命令
+    "FOO=1 sudo apt",
+    "FOO=1 sudo",              # 裁判点名的两词残形状
+    "sudo",                    # 裸 sudo（既有口径回归）
+    "sudo -u root rm -rf /",   # 旗标收尾（对抗审查第二轮既有口径）
+    "FOO=1 sudo -u root python x",  # 赋值垫前的旗标收尾：旧实现同样漏
+    "sudo env FOO=1 rm -rf /",  # 第三词收在赋值上：真实命令未出现
+])
+def test_unpinned_sudo_shapes_yield_exact(command: str) -> None:
+    """sudo/doas 锚定但钉不住三词形状（旗标/词数/赋值收尾）→ 一律 exact，
+    绝不沉淀两词残前缀。"""
+    rule = _rule_for(command)
+    assert rule.kind == "exact" and rule.pattern == command, (command, rule)
+
+
+@pytest.mark.parametrize("pattern,evil", [
+    # 裁判点名的复现：'FOO=1 sudo' 规则不得放行 'FOO=1 sudo rm -rf /'
+    ("FOO=1 sudo", "FOO=1 sudo rm -rf /"),
+    ("FOO=1 sudo", "FOO=1 sudo apt install htop"),
+    ("FOO=1 doas", "FOO=1 doas rm -rf /"),
+    ("sudo", "sudo rm -rf /"),
+    ("sudo", "sudo apt install htop"),
+    ("sudo apt", "sudo apt remove docker"),   # 两词残前缀不再合并子命令
+    ("sudo rm", "sudo rm -rf /tmp/x"),
+    ("sudo -u root", "sudo -u root rm -rf /"),
+])
+def test_legacy_sudo_prefix_rules_fail_closed(pattern: str, evil: str) -> None:
+    """历史沉淀 / 手工创建的提权两词残前缀规则：匹配侧 fail-closed，
+    不再命中任何命令，回落逐次确认。"""
+    rule = WhitelistRule(tool="run_command", kind="prefix", pattern=pattern)
+    assert not rule.matches("run_command", evil), (pattern, evil)
+
+
+@pytest.mark.parametrize("pattern,text", [
+    ("sudo apt install", "sudo apt install htop"),
+    ("FOO=1 sudo apt install", "FOO=1 sudo apt install htop"),
+    ("doas apt install", "doas apt install htop"),
+])
+def test_pinned_sudo_prefix_rules_still_match(pattern: str, text: str) -> None:
+    """三词形状的提权前缀照常命中（保留免确认便利，修复不得一刀切死）。"""
+    rule = WhitelistRule(tool="run_command", kind="prefix", pattern=pattern)
+    assert rule.matches("run_command", text), (pattern, text)
+
+
+@pytest.mark.parametrize("is_windows", [False, True])
+def test_sudo_anchor_shapes_on_both_platforms(monkeypatch, is_windows: bool) -> None:
+    """Windows 与 POSIX 两形状：分词路径不同（shlex posix=False/True），
+    提炼与匹配的判定结果必须一致（裁判点名的两个形状不得合并）。"""
+    from skysheep.security import gate as gate_mod
+
+    monkeypatch.setattr(gate_mod, "_IS_WINDOWS", is_windows)
+    install = _rule_for("FOO=1 sudo apt install htop")
+    assert install.kind == "prefix"
+    assert install.pattern == "FOO=1 sudo apt install"
+    rm = _rule_for("FOO=1 sudo rm -rf /")
+    assert rm.kind == "exact" and rm.pattern == "FOO=1 sudo rm -rf /"
+    # 历史残前缀两平台都判死
+    legacy = WhitelistRule(tool="run_command", kind="prefix", pattern="FOO=1 sudo")
+    assert not legacy.matches("run_command", "FOO=1 sudo rm -rf /")
+    assert not legacy.matches("run_command", "FOO=1 sudo apt install htop")
+    # 新沉淀的三词前缀两平台都照常命中自己的形状
+    assert install.matches("run_command", "FOO=1 sudo apt install htop")
+
+
+@pytest.mark.parametrize("is_windows", [False, True])
+def test_windows_shape_sudo_exe_path(monkeypatch, is_windows: bool) -> None:
+    """Windows 惯用形状：路径前缀 + .exe 后缀的 sudo 经 _norm_exe_name
+    归一后同样锚定提权包装器（两平台桩都跑，判定不依赖运行平台）。"""
+    from skysheep.security import gate as gate_mod
+
+    monkeypatch.setattr(gate_mod, "_IS_WINDOWS", is_windows)
+    rule = _rule_for(r"C:\Windows\System32\sudo.exe rm -rf /")
+    assert rule.kind == "exact", rule
+    assert _is_arbitrary_exec_prefix(r"C:\Windows\System32\sudo.exe")
+    assert not _is_arbitrary_exec_prefix(
+        r"C:\Windows\System32\sudo.exe apt install")
+
+
+async def test_gate_does_not_auto_allow_assignment_prefixed_sudo() -> None:
+    """F6.1 端到端：批准 `FOO=1 sudo apt install htop`（三词前缀）后，
+    `FOO=1 sudo rm -rf /` 仍需确认；历史 "FOO=1 sudo" 残前缀规则同样
+    放行不了它。"""
+    gate = PermissionGate()
+    cmd = RunCommandTool()
+    rule = _rule_for("FOO=1 sudo apt install htop")
+    assert rule.kind == "prefix" and rule.pattern == "FOO=1 sudo apt install"
+    gate.add_session_rule(rule)
+    evil = "FOO=1 sudo rm -rf /"
+    assert await gate.authorize(cmd, {"command": evil}) is not None
+
+    legacy = PermissionGate()
+    legacy.add_session_rule(
+        WhitelistRule(tool="run_command", kind="prefix", pattern="FOO=1 sudo"))
+    assert await legacy.authorize(cmd, {"command": evil}) is not None
 
 
 # ---- 门级端到端：批准无害形态后，危险变体必须仍走确认 ----

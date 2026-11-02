@@ -119,6 +119,29 @@ TAILSCALE_NETS = (
     ipaddress.ip_network("fd7a:115c:a1e0::/48"),
 )
 
+# Tailscale 探测（remote_tailscale_probe）给 `tailscale status --json` 的完成预算。
+# 常量化供测试把超时压到秒级以内（真子进程验证收割路径）。
+TAILSCALE_PROBE_TIMEOUT_S = 8.0
+
+
+async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
+    """收割仍在运行的探测子进程：kill + wait 收尸。
+
+    探测超时/被取消时子进程还活着：不收割的话，悬挂的 tailscale status
+    进程随每次点击堆积成孤儿。收尸用 wait 而不是再 communicate——取消过的
+    communicate 内部流状态已不可靠，wait 不碰管道，不会卡在管道写上。
+    收割自身的失败一律吞掉：它是兜底，不该改变探测本身的失败口径。
+    """
+    try:
+        if proc.returncode is None:
+            proc.kill()
+    except OSError:
+        return  # 进程已自行退出/不可杀：没什么可收的
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except (TimeoutError, OSError):
+        logger.warning("Tailscale 探测子进程收割超时/失败", exc_info=True)
+
 # ui.json 的 theme 键值域：auto = 跟随系统（浅色默认落纸墨、深色默认落夜墨）；
 # light / dark 是旧版两档值，读取时由前端与首帧注入分别按 paper / night 处理；
 # 其余是主题 id——浅色：纸墨 paper、青瓷 celadon、秋柿 kaki；深色：夜墨 night、
@@ -279,15 +302,23 @@ class RemoteMixin:
         if supplied:
             self._check_lan_token(supplied)
         token = supplied or server.token or secrets.token_urlsafe(16)
+        # 令牌变了（含首次设置自定义令牌）就是换锁，与 lan_rotate_token 同口径：
+        # 世代 +1 并断开旧世代远程连接。守卫每请求读最新配置只能挡新连接——
+        # 旧令牌已建立的 WebSocket 仍可继续发 RPC（实际缺口），必须主动断开。
+        token_changed = token != (server.token or "")
         update_config_section("server", {"lan": True, "token": token})
         self.cfg = load_config()
-        return {
-            **await self.lan_status(),
-            "note": "已开启局域网访问：重启 SkySheep 后生效（服务会监听全部网卡，"
-                    "同一 Wi-Fi 下的设备凭令牌访问）。手机连不上时先看 Windows 防火墙——"
-                    "首次弹出的「是否允许访问网络」要点允许；已错过的话在防火墙设置里"
-                    "放行 SkySheep 后再试。",
-        }
+        revoked = 0
+        if token_changed:
+            self.token_generation += 1
+            revoked = self.revoke_remote_connections()
+        note = ("已开启局域网访问：重启 SkySheep 后生效（服务会监听全部网卡，"
+                "同一 Wi-Fi 下的设备凭令牌访问）。手机连不上时先看 Windows 防火墙——"
+                "首次弹出的「是否允许访问网络」要点允许；已错过的话在防火墙设置里"
+                "放行 SkySheep 后再试。")
+        if token_changed:
+            note += "自定义令牌已生效：旧令牌与已建立的远程连接已作废，手机需用新令牌重新打开。"
+        return {**await self.lan_status(), "note": note, "revoked_connections": revoked}
 
     async def lan_set_port(self, params: dict) -> dict:
         """固定服务端口（0 = 恢复随机）：PWA 的 start_url 在安装时把 origin
@@ -445,12 +476,20 @@ class RemoteMixin:
             out["hint"] = "没找到 tailscale 命令：先装上 Tailscale 客户端并登录，再回来点检测。"
             return out
         out["cli"] = exe
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 exe, "status", "--json",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+            try:
+                stdout, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=TAILSCALE_PROBE_TIMEOUT_S)
+            finally:
+                # 超时/取消路径子进程还活着：收割掉再走失败分支（孤儿进程随每次
+                # 点击堆积）。communicate 正常返回时进程已退出，这里是空操作。
+                if proc.returncode is None:
+                    await _kill_and_reap(proc)
             status = json.loads(stdout.decode("utf-8", errors="replace") or "{}")
         except (OSError, ValueError, TimeoutError):
             status = {}
@@ -496,13 +535,20 @@ class RemoteMixin:
         if supplied:
             self._check_lan_token(supplied)  # 与局域网访问同一把令牌、同一强度要求
         token = supplied or server.token or secrets.token_urlsafe(16)
+        # 同 lan_enable：换令牌（含自定义令牌）即换锁，与轮换同口径——世代 +1
+        # 并断开旧世代远程连接，别让旧令牌建立的连接继续发 RPC。
+        token_changed = token != (server.token or "")
         update_config_section("server", {"tailscale": True, "token": token})
         self.cfg = load_config()
-        return {
-            **await self.remote_status(),
-            "note": "已开启远程访问：重启 SkySheep 后生效。手机需安装 Tailscale 并登录同一账号，"
-                    "之后在任意网络（含手机流量）都能用下面的地址访问。",
-        }
+        revoked = 0
+        if token_changed:
+            self.token_generation += 1
+            revoked = self.revoke_remote_connections()
+        note = ("已开启远程访问：重启 SkySheep 后生效。手机需安装 Tailscale 并登录同一账号，"
+                "之后在任意网络（含手机流量）都能用下面的地址访问。")
+        if token_changed:
+            note += "自定义令牌已生效：旧令牌与已建立的远程连接已作废，手机需用新令牌重新打开。"
+        return {**await self.remote_status(), "note": note, "revoked_connections": revoked}
 
     async def remote_disable(self) -> dict:
         update_config_section("server", {"tailscale": False})

@@ -116,12 +116,13 @@ async function macroReplay(name) {
     macroMsgSet("重放已开始", "");
     return;
   }
-  const lines = (preview.preview || []).slice(0, 12).join("\n");
-  const more = (preview.preview || []).length > 12 ? "\n…（还有更多步骤）" : "";
-  const ok = await confirmModal(
-    `将重放「${name}」共 ${preview.steps} 步：\n\n${lines}${more}\n\n${preview.hint || ""}`,
-    { title: "重放操作", okLabel: "开始重放" },
-  );
+  // 确认面与执行面等价：所有步骤全文展示，不 slice 截条——截掉的行也是
+  // 会被真注入的动作。步骤多时滚动展示（内联样式，零构建不加工具链）。
+  const allLines = (preview.preview || []).join("\n");
+  const body = '<div class="confirm-text" style="max-height:45vh;overflow-y:auto">'
+    + escapeHtml(`将重放「${name}」共 ${preview.steps} 步：\n\n${allLines}\n\n${preview.hint || ""}`)
+    + "</div>";
+  const ok = await confirmModal("重放操作", body, "开始重放");
   if (!ok) return;
   const sid = macroCurrentSid();
   try {

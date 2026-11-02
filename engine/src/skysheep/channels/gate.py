@@ -128,19 +128,26 @@ class ChannelGate(PermissionGate):
             # 开了审批则推聊天卡逐次确认。
             return None
 
+        # 兜底：构造待决策项。这里**有意不走 super().authorize()**（审查 F1.1②）：
+        # 父类 authorize 在引擎档 auto_accept_write / auto_accept_all 打开或白名单
+        # 命中时会直接放行（返回 None），而这两条放行路都会漏进渠道——引擎档是
+        # 会同步到 runtime 门上的（backend 的 _sync_default_accept_to_runtimes /
+        # session_accept_set 对所有会话门一视同仁，渠道门也在其中），桌面开
+        # 「自动允许写入/完全访问」后，无人值守的渠道会话就静默获得同等放行；
+        # 项目白名单是桌面端逐次确认沉淀的持久规则，同样不该在无人值守通道免确认。
+        # 契约（backend_parts/channels.py 的 _get_channel_runtime）：渠道姿态只由
+        # 渠道门决定——只读与渠道预授权名单放行，其余一律落到「未开审批即拒绝，
+        # 开了审批经聊天窗口逐次确认」。force_allow / force_pending（Claude 兼容
+        # 模式的 Mod 意见）在无人值守通道同样不生效：kwargs 收下但忽略，方向
+        # fail-closed（渠道构造点本就不挂 mods，这是纵深防御）。
+        pending = await self._build_pending(tool, input_dict)
         # 未开启审批：等价 HeadlessGate——立刻拒绝，不阻塞。
         if not self.approve_enabled:
-            pending = await super().authorize(tool, input_dict, **kwargs)
-            if pending is not None:
-                # 先把 future 落定再返回，循环拿到的是"已拒绝"的结果
-                pending.resolve(Decision.DENY)
+            # 先把 future 落定再返回，循环拿到的是"已拒绝"的结果
+            pending.resolve(Decision.DENY)
             return pending
 
-        # 开启审批：先生成 PendingPermission（父类会把 on_request 回调跑掉，
-        # 这里不用 on_request 而自己记 waiting，避免两处状态不一致）
-        pending = await super().authorize(tool, input_dict, **kwargs)
-        if pending is None:
-            return None
+        # 开启审批：记入待决策表并推聊天窗口等回复（超时自动拒绝）。
         self.waiting[pending.request_id] = pending
         try:
             if self.notify is not None:

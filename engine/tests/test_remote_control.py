@@ -481,3 +481,86 @@ def test_rotate_token_revokes_existing_remote_ws(home, monkeypatch):
             except WebSocketDisconnect:
                 revoked = True  # kick 已把连接关闭
             assert revoked, "轮换后旧连接必须失效"
+
+
+# ---- 7. 换自定义令牌 = 换锁：lan.enable / remote.enable 与轮换同口径 ----
+#
+# 轮换那条不变量（上一条）同样约束这两个入口：设置自定义令牌改变的是
+# 同一把凭据，只挡新连接不够——旧令牌已建立的 WebSocket 仍可继续发 RPC
+# （remote.py 注释里明文的「实际缺口」），必须世代 +1 并断开旧连接。
+
+
+def _old_ws_invalidated(ws, mid) -> bool:
+    """test_rotate_token_revokes_existing_remote_ws 的失效判定，供两个入口复用。"""
+    from starlette.websockets import WebSocketDisconnect
+
+    try:
+        r = recv_until(_send(ws, mid, "boot"), mid)
+    except WebSocketDisconnect:
+        return True  # kick 已把连接关闭
+    return (r.get("ok") is False) and ("轮换" in r.get("error", ""))
+
+
+def test_lan_enable_custom_token_revokes_existing_remote_ws(home, monkeypatch):
+    """lan.enable 设自定义令牌：世代 +1 并断开旧连接（与轮换同口径）。"""
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setattr(ServerBackend, "_hostname_ipv4s",
+                        classmethod(lambda cls: []))  # IP 枚举密封，不依赖真实网卡
+    update_config_section("server", {"lan": True, "token": "tok-old"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: False)
+    with make_client(home, []) as client:
+        with client.websocket_connect("/ws?token=tok-old") as ws:
+            assert recv_until(_send(ws, "b1", "boot"), "b1")["ok"] is True
+            be = client.app.state.backend
+            res = client.portal.call(be.lan_enable, {"token": "tok-custom-2026b"})
+            assert res["token"] == "tok-custom-2026b"
+            assert res["revoked_connections"] == 1
+            assert _old_ws_invalidated(ws, "b2"), "设自定义令牌后旧连接必须失效"
+
+
+def test_remote_enable_custom_token_revokes_existing_remote_ws(home, monkeypatch):
+    """remote.enable 设自定义令牌：同一把令牌，换锁口径与轮换一致。"""
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setattr(ServerBackend, "_hostname_ipv4s",
+                        classmethod(lambda cls: []))  # IP 枚举密封，不依赖真实网卡
+    # lan 与 tailscale 共用一把令牌；lan 同时开着（仅 tailscale 时 other 来源
+    # 在握手就被 4403 拒——那是物理局域网陌生设备，不是本用例要模拟的连接）
+    update_config_section("server", {"lan": True, "tailscale": True, "token": "tok-old"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: False)
+    with make_client(home, []) as client:
+        with client.websocket_connect("/ws?token=tok-old") as ws:
+            assert recv_until(_send(ws, "b1", "boot"), "b1")["ok"] is True
+            be = client.app.state.backend
+            res = client.portal.call(be.remote_enable, {"token": "tok-custom-2026c"})
+            assert res["token"] == "tok-custom-2026c"
+            assert res["revoked_connections"] == 1
+            assert _old_ws_invalidated(ws, "b2"), "设自定义令牌后旧连接必须失效"
+
+
+def test_enable_without_token_change_keeps_existing_ws(home, monkeypatch):
+    """没换锁就不踢人：沿用现有令牌的重复开启不动世代、不断连接。
+
+    防过火：revoke 只在令牌真变了时发生——否则设置页每次开关切换都会把
+    在场的手机端无谓踢下线。
+    """
+    from skysheep.server.backend import ServerBackend
+
+    monkeypatch.setattr(ServerBackend, "_hostname_ipv4s",
+                        classmethod(lambda cls: []))
+    update_config_section("server", {"lan": True, "token": "tok-keep"})
+    monkeypatch.setattr(server_app, "client_origin", lambda c: "other")
+    monkeypatch.setattr(server_app, "_client_is_local", lambda c: False)
+    with make_client(home, []) as client:
+        with client.websocket_connect("/ws?token=tok-keep") as ws:
+            assert recv_until(_send(ws, "b1", "boot"), "b1")["ok"] is True
+            be = client.app.state.backend
+            gen_before = be.token_generation
+            res = client.portal.call(be.lan_enable, {})
+            assert res["revoked_connections"] == 0
+            assert be.token_generation == gen_before
+            # 连接照常可用：没被世代门拒绝，也没被 kick
+            assert recv_until(_send(ws, "b2", "boot"), "b2")["ok"] is True

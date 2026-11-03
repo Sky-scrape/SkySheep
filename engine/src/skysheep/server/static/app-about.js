@@ -1,10 +1,10 @@
-// app-about.js —— 设置 · 关于页：更新检查 + 打开目录 / 诊断包 / 反馈入口 /
+// app-about.js —— 设置  关于页：更新检查 + 打开目录 / 诊断包 / 反馈入口 /
 // 会话库备份恢复 / 数据管理（保留策略）/ 存储占用与表级清理
 // 从 app.js 拆出的分区文件：同为零构建、普通 script、不引入 ES modules；
 // 本文件只有函数声明与状态常量，零加载期执行，按钮接线仍留在 app.js 原位；
 // request / showModal / escapeHtml 等助手是运行时调用。
 
-// ---------- 设置 · 关于：更新检查 ----------
+// ---------- 设置  关于：更新检查 ----------
 const REPO_PAGE = "https://github.com/Sky-scrape/SkySheep";
 const RELEASES_PAGE = REPO_PAGE + "/releases";
 // 更新渠道偏好缓存（stable/beta）：loadBackups 的 ui.get 回填，渲染状态行时用；
@@ -38,8 +38,8 @@ function renderUpdatePanel(snap) {
     <button class="btn-ghost" id="btn-check-update">检查更新</button>
     <span class="upd-state ${upd ? "new" : ""}" id="upd-state">${
       upd
-        ? `🆕 发现新版本 v${escapeHtml(upd.version)}（当前 v${escapeHtml(cur)} · ${edition}${updateChannelPref ? ` · ${channelLabel()}` : ""}）`
-        : `当前版本 v${escapeHtml(cur)} · ${edition}${updateChannelPref ? ` · ${channelLabel()}` : ""}`
+        ? `🆕 发现新版本 v${escapeHtml(upd.version)}（当前 v${escapeHtml(cur)}  ${edition}${updateChannelPref ? `  ${channelLabel()}` : ""}）`
+        : `当前版本 v${escapeHtml(cur)}  ${edition}${updateChannelPref ? `  ${channelLabel()}` : ""}`
     }</span>
     <span id="upd-actions"></span>`;
   const failBtn = box.querySelector("#btn-upd-fail-dismiss");
@@ -133,13 +133,13 @@ function renderUpdatePanel(snap) {
       const r = await request("app.check_update");
       if (r.channel === "beta" || r.channel === "stable") updateChannelPref = r.channel;
       if (r.available) {
-        state.innerHTML = `🆕 发现新版本 v${escapeHtml(r.version)}（当前 v${escapeHtml(r.current)} · ${edition} · ${channelLabel()}）`;
+        state.innerHTML = `🆕 发现新版本 v${escapeHtml(r.version)}（当前 v${escapeHtml(r.current)}  ${edition}  ${channelLabel()}）`;
         state.className = "upd-state new";
         setUpdButtons(r.version);
       } else if (r.error) {
         state.textContent = "检查失败：" + r.error;
       } else {
-        state.textContent = `已是最新版本（v${escapeHtml(r.current)} · ${edition} · ${channelLabel()}）`;
+        state.textContent = `已是最新版本（v${escapeHtml(r.current)}  ${edition}  ${channelLabel()}）`;
       }
     } catch (e) {
       state.textContent = "检查失败：" + e.message;
@@ -158,7 +158,7 @@ async function openFixedPath(kind, label) {
 }
 
 // 反馈流程（共享核心）：打包脱敏日志 + 打开 GitHub 反馈页，用户把 zip 拖进附件即可。
-// 设置 · 关于「反馈问题」与 记忆地图工具栏「反馈」两处共用；诊断包失败不阻塞打开反馈页。
+// 设置  关于「反馈问题」与 记忆地图工具栏「反馈」两处共用；诊断包失败不阻塞打开反馈页。
 async function openFeedbackPage() {
   try {
     await request("app.export_diagnostics");
@@ -197,7 +197,7 @@ function backupRowHtml(b) {
   // 修改时间，20 份备份会显示成同一个时刻。当前数据没有备份时刻，只能标它的写入时间。
   const size = `${(b.size / 1024).toFixed(0)} KB`;
   const when = b.current ? "当前数据" : fmtBackupStamp(b.stamp, b.taken || b.mtime);
-  const meta = b.current ? `最后写入 ${fmtBackupTime(b.mtime)} · ${size}` : size;
+  const meta = b.current ? `最后写入 ${fmtBackupTime(b.mtime)}  ${size}` : size;
   const tag = b.safety ? '<span class="backup-tag">恢复前</span>' : "";
   return `<li class="backup-row${b.current ? " cur" : ""}">
       <span class="item-name">${when}</span>${tag}
@@ -252,7 +252,7 @@ async function loadBackups() {
   const bs = document.getElementById("backup-status");
   const totalKB = hist.reduce((s, b) => s + (b.size || 0), 0) / 1024;
   const totalTxt = totalKB >= 1024 ? (totalKB / 1024).toFixed(2) + " MB" : totalKB.toFixed(0) + " KB";
-  bs.textContent = `共 ${hist.length} 份备份 · 共占 ${totalTxt} · 备份目录：${d.dir}（保留最近 ${d.keep} 份）`;
+  bs.textContent = `共 ${hist.length} 份备份  共占 ${totalTxt}  备份目录：${d.dir}（保留最近 ${d.keep} 份）`;
   bs.className = "card-status ok";
   bs.hidden = false;
 }
@@ -295,7 +295,7 @@ function deleteBackupConfirm(name, when, btn) {
   }, "删除");
 }
 
-// ---------- 设置 · 关于：数据管理（截图副本 / 隔离区 / 子代理报告的保留策略） ----------
+// ---------- 设置  关于：数据管理（截图副本 / 隔离区 / 子代理报告的保留策略） ----------
 function retentionStatus(text, ok = true) {
   const el = document.getElementById("retention-status");
   el.textContent = text;
@@ -370,7 +370,7 @@ async function saveRetention() {
   }
 }
 
-// ---------- 设置 · 关于：存储占用与表级清理 ----------
+// ---------- 设置  关于：存储占用与表级清理 ----------
 function storageStatus(text, ok = true) {
   const el = document.getElementById("storage-status");
   el.textContent = text;

@@ -1,10 +1,10 @@
-// app-advanced.js —— 设置 · 高级页：Hooks 钩子面板 + 运行参数 / 目录限制 /
+// app-advanced.js —— 设置  高级页：Hooks 钩子面板 + 运行参数 / 目录限制 /
 // 开机自启 / 信任项目清单
 // 从 app.js 拆出的分区文件：同为零构建、普通 script、不引入 ES modules；
 // 本文件只有函数声明与状态常量，零加载期执行，按钮接线仍留在 app.js 原位；
 // request / showModal / escapeHtml 等助手是运行时调用。
 
-// ---------- 设置 · 高级：Hooks 钩子面板 ----------
+// ---------- 设置  高级：Hooks 钩子面板 ----------
 // 规则状态存在内存里，编辑后点「保存」一次性提交（与运行参数同一交互习惯）
 let hooksState = { pre: [], post: [], stop: [], tool_names: [] };
 const HOOK_KIND_LABEL = { pre: "调用前", post: "调用后", stop: "任务完成" };
@@ -131,13 +131,13 @@ function renderHookRecentRuns(runs) {
   ul.innerHTML = runs.slice().reverse().map((r) => {
     const [label, cls] = statusMeta[r.status] || [r.status || "?", ""];
     const when = new Date((r.time || 0) * 1000).toLocaleTimeString();
-    const head = `${escapeHtml(HOOK_KIND_LABEL[r.kind] || r.kind)} · ${escapeHtml(r.tool || "—")}`;
+    const head = `${escapeHtml(HOOK_KIND_LABEL[r.kind] || r.kind)}  ${escapeHtml(r.tool || "—")}`;
     const out = r.output ? escapeHtml(r.output) : "";
     return `<li class="hook-run st-${escapeHtml(r.status || "ok")}">
       <span class="chip ${cls}">${label}</span>
       <span class="hook-run-head" title="${head}">${head}</span>
       <span class="hook-run-out" title="${out}">${out}</span>
-      <span class="dim small hook-run-meta">${when} · ${Number(r.code) || 0} · ${Number(r.duration_ms) || 0}ms</span>
+      <span class="dim small hook-run-meta">${when}  ${Number(r.code) || 0}  ${Number(r.duration_ms) || 0}ms</span>
     </li>`;
   }).join("");
 }
@@ -211,7 +211,7 @@ const hookTestRun = async () => {
   }
 };
 
-// ---------- 设置 · 高级：运行参数 / 目录限制 / 开机自启 ----------
+// ---------- 设置  高级：运行参数 / 目录限制 / 开机自启 ----------
 function advancedStatus(text, ok = true) {
   const el = document.getElementById("advanced-status");
   el.textContent = text;

@@ -25,6 +25,9 @@ import pytest
 
 from skysheep.core.mods_node import find_node
 
+# 界面分隔符已从「·」改为排版留白（两个 NBSP），断言跟着走
+GAP = "\xa0\xa0"
+
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT / "src" / "skysheep" / "server" / "static"
 NODE_BIN = shutil.which("node") or find_node()
@@ -251,7 +254,7 @@ def test_filter_active_flag_and_formatting(panel_report):
     assert panel_report["filterActive"] == [False, True, True, False]
     assert panel_report["tokens"] == ["0", "999", "1.5k", "18k", "2.5M"]
     progress = panel_report["progress"]
-    assert progress[0] == "fs.write · 第 7 步"
+    assert progress[0] == f"fs.write{GAP}第 7 步"
     assert progress[1] == "第 3 步"
     assert progress[2] == "", "超过 30 秒的进度不能继续显示（不谎报上一个工具名）"
 
@@ -260,7 +263,7 @@ def test_team_line_text_covers_found_dangling_and_absent(panel_report):
     """团队产线描述句（面板 sub 与机台标签共源）：正常模板报「模板 / 成员 /
     总管」，悬空模板照实说「已删除」，非团队与空入参一律空串。"""
     assert panel_report["teamText"] == [
-        "模板「夜班小队」 · 3 名队员 · AI 总管",
+        f"模板「夜班小队」{GAP}3 名队员{GAP}AI 总管",
         "模板「夜班小队」已删除",
         "团队",
         "",

@@ -679,7 +679,7 @@ def test_team_room_tab_wiring():
     css = read_static("app.css")
 
     # 页签注册（app.js 页签机制内加）+ 页签体与加载顺序（index.html）
-    assert 'teamroom: { title: "团队室", sub: "频道 · 工单 · 成员" }' in js
+    assert 'teamroom: { title: "团队室", sub: "频道  工单  成员" }' in js
     assert "teamroom: (force) => loadTeamRoom(force)" in js
     assert 'id="rp-page-teamroom"' in html and 'id="teamroom-root"' in html
     assert html.index('<script src="/static/app-teamroom.js">') > html.index(
@@ -983,3 +983,44 @@ def test_frontend_modules_keep_required_load_order():
     assert positions["app-skills.js"] < positions["app.js"]
     assert positions["app.js"] < positions["app-factory.js"]
     assert positions["app.js"] < positions["app-tools.js"]
+
+
+# ---------- 预览分栏：浏览页从右面板搬进主区 + 独立预览窗 ----------
+
+def test_preview_split_wiring_contract():
+    """预览分栏的五处接线：DOM / CSS / 搬动 / 偏好恢复 / 独立窗 RPC。
+
+    这套功能靠「同一个 #rp-page-browser 在两处家之间搬动」实现，任何一处漏接
+    都表现为空白面板或按钮死键（浏览器模式没有原生窗口，必须能退回 window.open）。
+    """
+    html = read_static("index.html")
+    css = read_static("app.css")
+    js = read_app_bundle()
+
+    # ① DOM：分栏容器 / 拖手 / 工具栏三个入口
+    for dom_id in ("preview-pane", "preview-pane-body", "preview-resizer",
+                   "browser-split", "browser-unpin", "browser-popout", "browser-close"):
+        assert f'id="{dom_id}"' in html, f"index.html 缺少 #{dom_id}"
+    # ② CSS：定位、主栏让位、拖拽遮罩
+    assert "#preview-pane {" in css and "#preview-resizer" in css
+    assert "#chat-main.has-preview #chat" in css
+    assert ".preview-drag-shield" in css
+    # ③ 搬动与开关：同一个 section 整体搬入/搬回，不复制第二个 iframe
+    assert "function openPreviewSplit" in js
+    assert "function closePreviewSplit" in js
+    assert 'previewPaneBody.appendChild(browserPageEl)' in js
+    assert 'rpBodyEl.appendChild(browserPageEl)' in js
+    assert 'chatMainEl.classList.add("has-preview")' in js
+    # 打开预览卡片默认走分栏（窄屏由函数内部退回右面板）
+    assert "openPreviewSplit(url)" in js
+    # 与会话分屏互斥：分屏打开时先收预览，预览打开时先收分屏
+    assert "if (previewSplitOpen)" in js
+    # ④ 偏好：宽度走 setupResizer，启动恢复守 preview_split
+    assert 'preview_w: { css: "--prev-w"' in js
+    assert 'setupResizer(previewResizer, "preview_w"' in js
+    assert 'prefs.preview_split === 1' in js
+    assert 'saveUiPrefs({ preview_url: u })' in js
+    # ⑤ 独立窗：WS 方法 + 浏览器模式兜底；本地 /preview 进沙箱壳（frame=1）
+    assert '"preview.open_window"' in js
+    assert "window.open(winUrl" in js
+    assert '"&frame=1"' in js or '"frame=1"' in js

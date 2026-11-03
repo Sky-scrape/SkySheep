@@ -173,7 +173,7 @@
   </aside>
 
   <!-- 拖动调整侧栏宽度（双击恢复默认） -->
-  <div id="sb-resizer" class="ui-resizer ui-resizer-v" title="拖动调整侧栏宽度 · 双击恢复默认"></div>
+  <div id="sb-resizer" class="ui-resizer ui-resizer-v" title="拖动调整侧栏宽度&nbsp;&nbsp;双击恢复默认"></div>
 
   <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航七件套 + 主操作（新建会话 /
        工厂看板）与搜索 + 最近会话的首字快捷列（点击直接切换会话，当前项高亮）。
@@ -230,7 +230,7 @@
           <div id="chat-tabs"></div>
           <span class="spacer"></span>
           <span id="usage" class="dim small"></span>
-          <button id="btn-help" class="tb-icon" title="帮助：快速上手 · 快捷键 · 常见问题" aria-label="帮助"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>
+          <button id="btn-help" class="tb-icon" title="帮助：快速上手&nbsp;&nbsp;快捷键&nbsp;&nbsp;常见问题" aria-label="帮助"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>
           <button id="btn-bell" class="tb-icon" title="通知中心" aria-label="通知中心"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M10.3 21a2 2 0 0 0 3.4 0"/></svg><span id="bell-badge" class="bell-badge hidden"></span></button>
           <!-- 并行子会话：只在真有后台子任务在跑时才出现（没有就完全让位，
                不做常驻图标）。点开是轻量浮层，一行一个子会话看进度；完整
@@ -267,12 +267,12 @@
             <button id="find-close" class="rp-mini" title="关闭（Esc）">✕</button>
           </div>
           <!-- 对话区宠物：云朵小羊（待机浮动 / 干活蹦跶 / 等确认摇晃 / 点击互动；拖动松手会云朵式飘落，双击回默认位，设置里可关） -->
-          <div id="chat-pet" title="云朵小羊 · 拖到哪儿松手就飘落到哪儿 · 双击回到右下角 · 点我一下">
+          <div id="chat-pet" title="云朵小羊&nbsp;&nbsp;拖到哪儿松手就飘落到哪儿&nbsp;&nbsp;双击回到右下角&nbsp;&nbsp;点我一下">
             <div id="pet-bubble" class="pet-bubble hidden"></div>
             <img id="pet-img" src="/static/cloud-sheep.png" alt="云朵小羊" draggable="false">
           </div>
-          <!-- 「回到底部」浮标：用户上翻回看时出现（新消息不再拽底），点击回底并恢复自动跟随 -->
-          <button id="jump-bottom" class="hidden" title="回到底部" aria-label="回到底部">↓ 回到底部</button>
+          <!-- 「跳至最新」浮标：用户上翻超过 120px 时出现（新消息不再拽底），点击回底并恢复自动跟随 -->
+          <button id="jump-bottom" class="hidden" title="跳至最新" aria-label="跳至最新">↓ 跳至最新</button>
         </div>
 
         <div id="permission-bar" hidden role="alert">
@@ -288,7 +288,7 @@
           <p id="perm-rule" class="perm-rule" hidden></p>
           <div class="perm-actions">
             <button class="btn-primary" data-decision="allow_once">允许一次</button>
-            <button class="btn-ghost" data-decision="allow_always" title="保存到 设置 · 高级 · 本项目白名单，随时可在那里删除">总是允许（本项目）</button>
+            <button class="btn-ghost" data-decision="allow_always" title="保存到 设置&nbsp;&nbsp;高级&nbsp;&nbsp;本项目白名单，随时可在那里删除">总是允许（本项目）</button>
             <button class="btn-ghost danger" data-decision="deny">拒绝</button>
           </div>
         </div>
@@ -309,7 +309,7 @@
         <div id="adv-menu" class="rt-menu adv-menu hidden"></div>
 
         <!-- 拖动调整输入区高度（双击恢复默认） -->
-        <div id="cp-resizer" class="ui-resizer ui-resizer-h" title="拖动调整输入区高度 · 双击恢复默认"></div>
+        <div id="cp-resizer" class="ui-resizer ui-resizer-h" title="拖动调整输入区高度&nbsp;&nbsp;双击恢复默认"></div>
 
         <footer id="composer">
           <div id="image-tray" class="image-tray hidden"></div>
@@ -319,7 +319,7 @@
           <textarea id="input" rows="2" placeholder="描述你的任务…"></textarea>
           <div id="composer-bar">
             <!-- 功能开关收成小图标：悬停看说明，激活亮主题色（规划蓝 / 圆桌紫 / 写入金） -->
-            <button id="mode-switch" class="cp-icon" title="当前：执行模式 · 点击切到规划模式">
+            <button id="mode-switch" class="cp-icon" title="当前：执行模式&nbsp;&nbsp;点击切到规划模式">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.8 13.2h5.7L10.2 22l8.9-11.6h-5.6L13 2z"/></svg>
             </button>
             <!-- 协作模式（圆桌 / 团队 / 对抗）：一个入口，点开统一菜单选模式与成员设置。
@@ -330,13 +330,13 @@
                 <span class="cp-state" hidden></span>
               </button>
             </span>
-            <button id="accept-switch" class="cp-icon" title="当前：安全执行 · 每次写入/执行都会征询。点击切到「自动编辑」（工作目录内写入放行）">
+            <button id="accept-switch" class="cp-icon" title="当前：安全执行&nbsp;&nbsp;每次写入/执行都会征询。点击切到「自动编辑」（工作目录内写入放行）">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             </button>
             <button id="file-attach" class="cp-icon" title="添加文件：选本机任意文件（支持项目外的文件与多选），插入 @ 路径让 Agent 读取；图片可直接粘贴或拖入">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7l-4-4z"/><path d="M14 3v4h4"/><path d="M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg>
             </button>
-            <!-- 语音输入：点一下开始录音，再点停止并转写（转写服务在 设置 · 语音输入 里配） -->
+            <!-- 语音输入：点一下开始录音，再点停止并转写（转写服务在 设置&nbsp;&nbsp;语音输入 里配） -->
             <button id="voice-btn" class="cp-icon" title="语音输入：点击开始录音，再点一下结束并转成文字">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21M8.5 21h7"/></svg>
             </button>
@@ -349,7 +349,7 @@
                 <text class="ring-txt" x="12" y="12.4"></text>
               </svg>
             </span>
-            <span id="cp-hint" title="& 引用对话 · @ 引用文件 · ~ 提示词 · / 命令 · 可粘贴/拖入图片 · Ctrl+N 新建会话 · Ctrl+F 本对话内查找 · Ctrl+Shift+F 搜索会话 · Ctrl+K 切换模型 · Ctrl+Tab 切换标签 · Ctrl+W 关闭标签 · Esc 停止运行">Enter 发送 · Shift+Enter 换行 · / 命令 · @ 引用文件 · 右上角？看帮助</span>
+            <span id="cp-hint" title="& 引用对话&nbsp;&nbsp;@ 引用文件&nbsp;&nbsp;~ 提示词&nbsp;&nbsp;/ 命令&nbsp;&nbsp;可粘贴/拖入图片&nbsp;&nbsp;Ctrl+N 新建会话&nbsp;&nbsp;Ctrl+F 本对话内查找&nbsp;&nbsp;Ctrl+Shift+F 搜索会话&nbsp;&nbsp;Ctrl+K 切换模型&nbsp;&nbsp;Ctrl+Tab 切换标签&nbsp;&nbsp;Ctrl+W 关闭标签&nbsp;&nbsp;Esc 停止运行">Enter 发送&nbsp;&nbsp;Shift+Enter 换行&nbsp;&nbsp;/ 命令&nbsp;&nbsp;@ 引用文件&nbsp;&nbsp;右上角？看帮助</span>
             <!-- 右侧簇整体不拆行：窗口再窄也整簇换行并靠右，「发送」永远在最右 -->
             <span id="cp-right">
               <!-- Mods 状态托盘（实验性）：Mod 产出的 stat 片段随会话标签渲染 -->
@@ -380,10 +380,21 @@
         <!-- 分屏：右键会话「在分屏打开」后，绝对定位铺在对话区右侧（顶栏下沿
              到界面底缘，含 composer 高度带——列输入框与主输入框底对齐）；
              最多两列，列内容由 JS 动态创建，#chat-main.has-split 时显示 -->
-        <div id="split-resizer" title="拖动调整分屏宽度"></div>
-        <div id="split-pane" class="hidden"></div>
+        <div id="split-resizer" title="拖动调整分屏宽度&nbsp;&nbsp;双击回到 50/50&nbsp;&nbsp;拖动中按 Esc 还原"></div>
+        <div id="split-pane" class="hidden"><div id="split-drag-shield" class="split-drag-shield"></div></div>
         <!-- 分屏列的模型选择菜单（session.model_switch：只换该列会话的模型） -->
         <div id="split-model-menu" class="session-menu model-menu hidden"></div>
+
+        <!-- 预览分栏：浏览器预览（网页 / 本地 HTML / 图片）从右侧面板搬进主区，
+             与对话并排、左缘可拖动调宽；开启时 #chat-main 挂 has-preview。
+             面板里的 #rp-page-browser 由 JS 整体搬入/搬出——同一个 iframe，
+             不复制第二份，切回右面板也还是那个页面（搬动会重载，属既定取舍）。
+             与会话分屏（#split-pane）互斥：同一块右侧空间只放一层。 -->
+        <div id="preview-resizer" class="hidden" title="拖动调整预览宽度&nbsp;&nbsp;双击回到 50/50&nbsp;&nbsp;拖动中按 Esc 还原"></div>
+        <div id="preview-pane" class="hidden">
+          <div id="preview-drag-shield" class="preview-drag-shield"></div>
+          <div id="preview-pane-body"></div>
+        </div>
 
         <!-- 底部终端停靠面板：多标签各自独立执行（后端按 term_id 区分进程），
              顶栏按钮或 Ctrl+` 开关；标签条仿桌面 IDE：＋ 新建、✕ 关闭标签 / 收起面板 -->
@@ -409,7 +420,7 @@
       </div>
 
       <!-- 拖动调整右侧面板宽度（双击恢复默认） -->
-      <div id="rp-resizer" class="ui-resizer ui-resizer-v hidden" title="拖动调整面板宽度 · 双击恢复默认"></div>
+      <div id="rp-resizer" class="ui-resizer ui-resizer-v hidden" title="拖动调整面板宽度&nbsp;&nbsp;双击恢复默认"></div>
 
       <!-- 右侧标签页面板：标签头由 JS 渲染 -->
       <aside id="right-panel" class="hidden">
@@ -441,7 +452,7 @@
 
           <section id="rp-page-files" class="rp-page hidden">
             <div class="rp-toolbar">
-              <span class="dim small">工作区文件 · 点文本文件直接编辑，Ctrl+S 保存</span>
+              <span class="dim small">工作区文件&nbsp;&nbsp;点文本文件直接编辑，Ctrl+S 保存</span>
               <span class="spacer"></span>
               <button id="files-new" class="rp-mini" title="在工作目录里新建一个文本文件">＋ 新建</button>
               <button id="files-refresh" class="rp-mini">刷新</button>
@@ -513,6 +524,14 @@
               <button id="browser-go" class="rp-mini primary">前往</button>
               <button id="browser-reload" class="rp-mini" title="重新加载">⟳</button>
               <button id="browser-fit" class="rp-mini" title="整页缩到面板宽，不出横向滚动">自适应</button>
+              <!-- 窗口形态四键一组：窄面板里整组换到第二行，地址栏不被挤没；
+                   分栏 / 收栏互斥，独立窗始终可用 -->
+              <span class="browser-window-actions">
+                <button id="browser-split" class="rp-mini" title="在分栏中打开：与对话并排，可拖动左缘调宽">分栏</button>
+                <button id="browser-unpin" class="rp-mini hidden" title="收回到右侧面板">收栏</button>
+                <button id="browser-popout" class="rp-mini" title="在独立窗口打开当前页面">独立窗</button>
+                <button id="browser-close" class="rp-mini" title="关闭预览">✕</button>
+              </span>
             </div>
             <!-- 视口容器：自适应模式下 iframe 按 1280 虚拟视口排版后整体 transform 缩放
                  到面板宽（窄面板里宽版式站点不再横向溢出），容器负责裁掉缩放边缘 -->
@@ -653,7 +672,7 @@
 
           <section id="rp-page-memory" class="rp-page hidden">
             <div class="rp-toolbar">
-              <span class="dim small">项目记忆（AGENTS.md）· 每轮对话自动注入</span>
+              <span class="dim small">项目记忆（AGENTS.md）&nbsp;&nbsp;每轮对话自动注入</span>
               <span class="spacer"></span>
               <button id="memory-reload" class="rp-mini" title="放弃修改，重新从磁盘读取">重读</button>
               <button id="memory-save" class="rp-mini primary">保存</button>
@@ -718,9 +737,9 @@
             <div id="relay-workbench">
               <section class="relay-start-card">
                 <div id="relay-pair-chips" class="relay-pair-chips">
-                  <span id="relay-main-chip" class="relay-chip relay-chip-main">主屏 · 当前会话</span>
+                  <span id="relay-main-chip" class="relay-chip relay-chip-main">主屏&nbsp;&nbsp;当前会话</span>
                   <span class="relay-swap" aria-hidden="true">⇄</span>
-                  <span id="relay-peer-chip" class="relay-chip relay-chip-peer">副屏 · 未创建</span>
+                  <span id="relay-peer-chip" class="relay-chip relay-chip-peer">副屏&nbsp;&nbsp;未创建</span>
                 </div>
                 <label for="relay-goal">总任务</label>
                 <textarea id="relay-goal" class="modal-input" rows="2" placeholder="两个屏一起要完成什么？"></textarea>
@@ -768,7 +787,7 @@
             <div class="rp-seg-view hidden" id="rp-view-skills"></div>
           </section>
 
-          <!-- 团队室（独立页签）：成员带 · 频道消息流 · 工单板 三分区同屏，
+          <!-- 团队室（独立页签）：成员带&nbsp;&nbsp;频道消息流&nbsp;&nbsp;工单板 三分区同屏，
                规格见 docs/团队模式设计.md §15。内容全部由 app-teamroom.js 的
                loadTeamRoom 动态构建（复用团队卡 tc* 渲染系）；入口跟团队走
                （团队卡「在团队室打开」/ 协作菜单「团队室」），不进「＋」菜单。 -->
@@ -964,7 +983,7 @@
                  只在电脑控制打开时可用；重放过程逐条显示进度并可随时停。 -->
             <div id="macro-card" class="macro-card">
               <div class="rp-toolbar">
-                <span class="dim small">操作回放（宏）· 把 Agent 做过的一套键鼠动作重放一遍</span>
+                <span class="dim small">操作回放（宏）&nbsp;&nbsp;把 Agent 做过的一套键鼠动作重放一遍</span>
                 <span class="spacer"></span>
                 <button id="macro-record" class="rp-mini" title="从当前会话的历史里录制：只收鼠标 / 键盘 / 窗口 / 写剪贴板四类动作">＋ 录制当前会话</button>
               </div>
@@ -1058,7 +1077,7 @@
             <p class="dim small adv-toggle-desc">
               打开后内置浏览器不再校验证书，只影响浏览器本身：应用窗口与右侧预览面板
               <b>重启应用后生效</b>，无头浏览器在下一次动作生效。网页抓取（web_fetch）与模型请求
-              不走这个开关——它们认「高级 · 网络」里的自签 CA。<b>默认关闭</b>。
+              不走这个开关——它们认「高级&nbsp;&nbsp;网络」里的自签 CA。<b>默认关闭</b>。
             </p>
             <div id="browser-cert-status" class="card-status" hidden></div>
           </section>
@@ -1687,27 +1706,27 @@
               </button>
               <button class="theme-card" data-theme-pref="paper" type="button">
                 <span class="theme-swatch"><i style="background:#f4ecd8"></i><i style="background:#1257c4"></i><i style="background:#1d1a16"></i></span>
-                <b>纸墨</b><small>浅色 · 暖纸与墨蓝</small>
+                <b>纸墨</b><small>浅色&nbsp;&nbsp;暖纸与墨蓝</small>
               </button>
               <button class="theme-card" data-theme-pref="celadon" type="button">
                 <span class="theme-swatch"><i style="background:#e9efe4"></i><i style="background:#0e7a68"></i><i style="background:#1c221d"></i></span>
-                <b>青瓷</b><small>浅色 · 龙泉青釉</small>
+                <b>青瓷</b><small>浅色&nbsp;&nbsp;龙泉青釉</small>
               </button>
               <button class="theme-card" data-theme-pref="kaki" type="button">
                 <span class="theme-swatch"><i style="background:#f6e9d2"></i><i style="background:#b45309"></i><i style="background:#2b1d12"></i></span>
-                <b>秋柿</b><small>浅色 · 柿染暖橙</small>
+                <b>秋柿</b><small>浅色&nbsp;&nbsp;柿染暖橙</small>
               </button>
               <button class="theme-card" data-theme-pref="night" type="button">
                 <span class="theme-swatch"><i style="background:#211d17"></i><i style="background:#5b93ee"></i><i style="background:#f4ecd8"></i></span>
-                <b>夜墨</b><small>深色 · 纸墨反转</small>
+                <b>夜墨</b><small>深色&nbsp;&nbsp;纸墨反转</small>
               </button>
               <button class="theme-card" data-theme-pref="indigo" type="button">
                 <span class="theme-swatch"><i style="background:#1a1f2b"></i><i style="background:#7fa3f2"></i><i style="background:#e3e8f2"></i></span>
-                <b>黛夜</b><small>深色 · 靛蓝夜空</small>
+                <b>黛夜</b><small>深色&nbsp;&nbsp;靛蓝夜空</small>
               </button>
               <button class="theme-card" data-theme-pref="pine" type="button">
                 <span class="theme-swatch"><i style="background:#18201b"></i><i style="background:#52c79d"></i><i style="background:#e8ede6"></i></span>
-                <b>松烟</b><small>深色 · 松烟墨绿</small>
+                <b>松烟</b><small>深色&nbsp;&nbsp;松烟墨绿</small>
               </button>
             </div>
             <div id="theme-auto-row" class="theme-auto-row">

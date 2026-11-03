@@ -3,7 +3,7 @@
 // 本文件只有函数声明，零加载期执行，按钮接线仍留在 app.js 原位（含
 // bindLocalSkillToolbar() 顶层裸调用——app.js 加载期执行，故 index.html
 // 先载本文件再载 app.js）；request / showModal 等助手是运行时调用。
-// 技能页区块（区块标题「设置 · 技能页」/「设置 · 技能：场景模板」）同样
+// 技能页区块（区块标题「设置  技能页」/「设置  技能：场景模板」）同样
 // 只有声明；#skill-summary / #btn-skill-back 两处接线留在 app.js 原位。
 
 // ---------- 技能：导入 / 删除 ----------
@@ -57,7 +57,7 @@ function renderMcpPresets(snap) {
   if (!presets.length) return;
   const head = document.createElement("div");
   head.className = "mcp-preset-head";
-  head.textContent = "常用预设 · 点「＋ 添加」一键接入";
+  head.textContent = "常用预设  点「＋ 添加」一键接入";
   box.appendChild(head);
   presets.forEach((p) => {
     const needMap = { uv: "需 uv（用于 uvx 拉取）", node: "需 Node.js", local: "需先安装本机程序" };
@@ -236,7 +236,7 @@ async function loadLocalSkills() {
   if (!cands.length) {
     list.innerHTML = `<li class="empty-hint">本机常见技能目录里没有找到技能。
       探测位置：~/.claude/skills、~/.agents/skills、~/.codex/skills、本项目 .claude/skills。
-      技能在别处的话，用「＋ 导入技能」选文件夹，或粘贴路径 / GitHub·Gitee 链接安装。</li>`;
+      技能在别处的话，用「＋ 导入技能」选文件夹，或粘贴路径 / GitHub、Gitee 链接安装。</li>`;
     note.textContent = "";
     return;
   }
@@ -590,7 +590,7 @@ function deleteMcpModal(name) {
   }, "删除");
 }
 
-// ---------- 设置 · 技能页：列表与使用范围 ----------
+// ---------- 设置  技能页：列表与使用范围 ----------
 let skillProjects = [];     // 最近一次拉取到的项目列表（范围勾选用）
 let skillManageOpen = false; // 是否停在独立技能页
 
@@ -645,11 +645,11 @@ function renderSkillSummary(skills) {
   el.classList.remove("skeleton"); // 回填真实内容后摘掉骨架屏闪动（占位期见 index.html）
   const active = skills.filter((s) => s.enabled && s.applies).length;
   el.textContent = skills.length
-    ? `${skills.length} 个技能 · 本项目生效 ${active} 个 — 点这里查看、设使用范围`
+    ? `${skills.length} 个技能  本项目生效 ${active} 个 — 点这里查看、设使用范围`
     : "还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能";
 }
 
-// ---------- 设置 · 技能：场景模板（打包内官方技能清单，一键安装） ----------
+// ---------- 设置  技能：场景模板（打包内官方技能清单，一键安装） ----------
 // 数据来自后端打包的 gallery_manifest.json（skills.gallery，纯本地只读）；
 // 安装复用既有 skills.install（source 取模板条目、scope 固定 global）。
 // 卡片住在 #skill-list-view 里，但整页会随「MCP / Skills」右面板搬移——
@@ -772,7 +772,7 @@ async function updateSceneTemplate(t, btn) {
 async function previewSkill(name) {
   const box = document.createElement("div");
   box.innerHTML = '<p class="dim small">正在读取…</p>';
-  showModal("技能指令 · " + name, box, async () => {}, "关闭");
+  showModal("技能指令  " + name, box, async () => {}, "关闭");
   let r;
   try {
     r = await request("skills.body", { name });
@@ -893,7 +893,7 @@ function renderSkillList(skills) {
     const srcTitle = origin.origin_url ? `来源：${origin.origin_url}（可被包作者伪造，仅作参考）` : "安装来源信息（可被包作者伪造，仅作参考）";
     const metaChips =
       (s.version ? `<span class="chip" title="技能自报版本（frontmatter）">v${escapeHtml(s.version)}</span>` : "") +
-      (srcKind ? `<span class="chip" title="${escapeHtml(srcTitle)}">${srcKind}${origin.installed_at ? " · " + escapeHtml(String(origin.installed_at).slice(0, 10)) : ""}</span>` : "");
+      (srcKind ? `<span class="chip" title="${escapeHtml(srcTitle)}">${srcKind}${origin.installed_at ? "  " + escapeHtml(String(origin.installed_at).slice(0, 10)) : ""}</span>` : "");
     li.innerHTML =
       `<div class="skill-top">
         <input type="checkbox" class="skill-pick" data-name="${escapeHtml(s.name)}" title="勾选以批量删除">

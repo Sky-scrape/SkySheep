@@ -1,4 +1,4 @@
-// app-providers.js —— 设置 · 模型服务（列表视图 / 详情视图 / 探测与编辑弹窗）
+// app-providers.js —— 设置  模型服务（列表视图 / 详情视图 / 探测与编辑弹窗）
 // 从 app.js 拆出的分区文件：同为零构建、普通 script、不引入 ES modules；
 // 本文件只有声明与纯数据常量，零加载期执行，btn-provider-back 接线仍留
 // 在 app.js 原位（加载期解引用 closeProviderDetail，故 index.html 先载
@@ -79,8 +79,8 @@ function providerRow([name, p]) {
   row.innerHTML = `
     ${providerAvatar(name)}
     <span class="svc-main">
-      <span class="svc-name">${escapeHtml(providerLabel(name, p))}<span class="svc-key${p.has_key ? "" : " svc-warn"}">· ${escapeHtml(keyState)}</span>${badges}</span>
-      <span class="svc-sub">${escapeHtml(p.kind)} · ${escapeHtml(p.model || "未设置模型")}</span>
+      <span class="svc-name">${escapeHtml(providerLabel(name, p))}<span class="svc-key${p.has_key ? "" : " svc-warn"}">${escapeHtml(keyState)}</span>${badges}</span>
+      <span class="svc-sub">${escapeHtml(p.kind)}  ${escapeHtml(p.model || "未设置模型")}</span>
     </span>
     <button class="svc-del" type="button" title="${p.is_preset ? "停用该服务（可在下方「已停用的服务」里恢复）" : "删除该服务（配置从 config.toml 移除）"}">✕</button>
     <button class="svc-go" type="button" title="进入配置">›</button>`;
@@ -287,7 +287,7 @@ function renderProviderDetail(name) {
                placeholder="留空 = 用全局默认 ${p.global_context_limit || 1000000}"
                title="该服务模型真实的上下文窗口；填对了才能在撑爆之前自动压缩历史">
         <div class="field-tip">按官方文档填模型的上下文窗口（如 64k 模型填 64000，128k 填 128000）。
-          留空则用全局默认（当前 ${(p.global_context_limit || 1000000).toLocaleString()}，可在 设置 · 高级 里改）；
+          留空则用全局默认（当前 ${(p.global_context_limit || 1000000).toLocaleString()}，可在 设置  高级 里改）；
           当前生效值 ${(p.effective_context_limit || p.global_context_limit || 0).toLocaleString()} tokens</div>
         <div class="field-tip ctx-note hidden"></div>
       </div>
@@ -318,7 +318,7 @@ function renderProviderDetail(name) {
           title="未单独设置 = 跟随全局代理；显式清空并保存 = 强制直连；填地址 = 仅该服务走此代理">
         <div class="field-tip">${proxyStateTip}。三态：不动此框保存 = 保持现状（未设置时继续跟随全局）；
           填 http(s):// 地址保存 = 仅该服务的 API 请求走此代理；把已有地址清空后保存 = 该服务强制直连。
-          全局代理在 设置 · 高级 · 网络。socks5:// 需额外依赖，推荐用本地代理软件的 http 端口</div>
+          全局代理在 设置  高级  网络。socks5:// 需额外依赖，推荐用本地代理软件的 http 端口</div>
       </div>
       <div class="field">
         <label>每百万 tokens 单价（元，可选）</label>
@@ -330,7 +330,7 @@ function renderProviderDetail(name) {
           <input data-f="price_cache" type="number" min="0" step="0.1" value="${p.price_cache || ""}"
             placeholder="缓存命中价" title="命中提示词缓存的输入单价（元）；留空 = 不区分，输入全部按输入价计" autocomplete="off">
         </div>
-        <div class="field-tip">填了输入 / 输出价，设置 · 用量 会按实际 tokens 估算费用。
+        <div class="field-tip">填了输入 / 输出价，设置  用量 会按实际 tokens 估算费用。
           缓存命中价给对提示词缓存打折的服务用（如 DeepSeek 命中部分约为输入价的 1/10），
           填了它费用才拆得准；留空 = 不区分缓存。三个都留空 = 不计价。</div>
       </div>
@@ -338,7 +338,7 @@ function renderProviderDetail(name) {
 
     <h4 class="sec-title">已启用模型</h4>
     <div class="flat-panel">
-      <div class="panel-note">${(p.models || []).length || 1} 个模型 · 点模型切换使用，✕ 从列表删除</div>
+      <div class="panel-note">${(p.models || []).length || 1} 个模型  点模型切换使用，✕ 从列表删除</div>
       <div id="enabled-models"></div>
     </div>
 
@@ -618,7 +618,7 @@ function renderProviderDetail(name) {
         if (r.model_listed === true) parts.push("模型在服务列表中");
         else if (r.model_listed === false) parts.push("⚠ 模型不在 /models 列表（部分服务不提供列表，可忽略）");
         if (r.context_limit) parts.push(`上下文窗口 ${r.context_limit.toLocaleString()} tokens`);
-        noteEl.textContent = parts.join(" · ");
+        noteEl.textContent = parts.join("  ");
         noteEl.className = "panel-note ok";
         providerHealthCache[name] = { level: "ok" };
       } else {
@@ -703,7 +703,7 @@ function renderProviderDetail(name) {
     const kind = q("select[data-f='kind']").value;
     const baseUrl = maskSensitive(q('input[data-f="base_url"]').value.trim());
     const lines = ["SkySheep 模型诊断报告"];
-    lines.push(`服务：${name} · 协议 ${kind} · 地址 ${baseUrl || "（默认接口）"}`);
+    lines.push(`服务：${name}  协议 ${kind}  地址 ${baseUrl || "（默认接口）"}`);
     lines.push(`模型：${(p2activeModel() || "").trim() || "（未填）"}`);
     if (lastTest) {
       if (lastTest.ok) {
@@ -712,7 +712,7 @@ function renderProviderDetail(name) {
         if (lastTest.context_limit) {
           parts.push(`上下文窗口 ${lastTest.context_limit.toLocaleString()} tokens`);
         }
-        lines.push("测试连接：✓ " + parts.join(" · "));
+        lines.push("测试连接：✓ " + parts.join("  "));
       } else {
         lines.push(`测试连接：✗ ${lastTest.title || "连接失败"}`
           + (lastTest.error ? "：" + maskSensitive(lastTest.error) : ""));

@@ -118,7 +118,7 @@ function renderMemoryCandidates() {
   // 不强收——开关行在里面，收起来会藏掉用户刚点过的开关）
   if (n) box.open = wasHidden || box.open;
   const title = document.getElementById("map-distill-title");
-  if (title) title.textContent = n ? `记忆候选 · ${n} 条待审` : "记忆候选 · 暂无待审";
+  if (title) title.textContent = n ? `记忆候选  ${n} 条待审` : "记忆候选  暂无待审";
   const tgl = `<label class="toggle-row check-row map-distill-toggle"
     title="开启后每轮对话收尾，用当前模型挑出「值得长期记住」的候选（每轮至多 3 条，失败静默），采纳后才写入全局记忆。额外消耗一次模型调用；寒暄、过短的轮次不会触发。">
     <input type="checkbox" id="map-distill-toggle"${distillState.enabled ? " checked" : ""}>
@@ -174,7 +174,7 @@ function renderMapChrome() {
     `<option value="${p.id}">${escapeHtml(p.name || "未命名项目")}</option>`).join("");
   sel.value = String(mapState.projectId || 0);
   // 跟随当前项目时把实际项目名露出来，用户不用猜「当前」是哪个
-  if (!mapState.projectId && d) sel.options[0].textContent = "当前项目 · " + (d.project.name || "未命名");
+  if (!mapState.projectId && d) sel.options[0].textContent = "当前项目  " + (d.project.name || "未命名");
   document.getElementById("map-range").value = mapState.range;
   document.querySelectorAll("#map-segbar button").forEach((b) => {
     b.classList.toggle("active", b.dataset.view === mapState.view);
@@ -259,11 +259,11 @@ function mapItemHtml(it) {
     const tags = (s.tags || []).slice(0, 3).map((t) => `<span class="map-tag">${escapeHtml(t)}</span>`).join("");
     const dd = new Date(it.ts * 1000);
     return `<div class="map-item map-sess ${mapTokClass(s)}${s.archived ? " archived" : ""}" data-sid="${s.id}"` +
-      ` title="${escapeHtml(s.title)} · ${s.msg_count} 条消息 · 点击打开会话">` +
+      ` title="${escapeHtml(s.title)}  ${s.msg_count} 条消息  点击打开会话">` +
       `<span class="map-dot"></span>` +
       `<span class="map-item-main"><span class="map-item-title">${escapeHtml(s.title || "（未命名）")}` +
       `${mapIsFork(s.title) ? ' <span class="map-fork">分叉</span>' : ""}${s.archived ? ' <span class="map-dim">已归档</span>' : ""}</span>` +
-      `<span class="map-item-meta">${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())} · ${s.msg_count} 条${tags ? " " + tags : ""}</span>` +
+      `<span class="map-item-meta">${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())}  ${s.msg_count} 条${tags ? " " + tags : ""}</span>` +
       `</span></div>`;
   }
   if (it.type === "evt") {
@@ -272,13 +272,13 @@ function mapItemHtml(it) {
     const dd = new Date(it.ts * 1000);
     return `<div class="map-item map-evt"><span class="map-evt-mark">${mark}</span>` +
       `<span class="map-item-main"><span class="map-item-title">${escapeHtml(it.e.title)}</span>` +
-      `<span class="map-item-meta">${label} · ${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())}</span></span></div>`;
+      `<span class="map-item-meta">${label}  ${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())}</span></span></div>`;
   }
   if (it.type === "mem") {
     return `<div class="map-item map-mem" title="全局记忆条目（memory.md，跨项目）">` +
       `<span class="map-evt-mark">📌</span><span class="map-item-main">` +
       `<span class="map-item-title">${escapeHtml(it.m.text)}</span>` +
-      `<span class="map-item-meta">${escapeHtml(it.m.date)} · 全局记忆</span></span></div>`;
+      `<span class="map-item-meta">${escapeHtml(it.m.date)}  全局记忆</span></span></div>`;
   }
   // 阶段里程碑：可展开看摘要与要点
   const dg = it.dg;
@@ -288,7 +288,7 @@ function mapItemHtml(it) {
   return `<details class="map-item map-phase" data-did="${dg.id}"><summary>` +
     `<span class="map-diamond">◆</span><span class="map-item-main">` +
     `<span class="map-item-title">${escapeHtml(dg.title)}</span>` +
-    `<span class="map-item-meta">阶段 · 起于 ${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())} · ${ (dg.session_ids || []).length } 个会话</span>` +
+    `<span class="map-item-meta">阶段  起于 ${mapPad(dd.getMonth() + 1)}-${mapPad(dd.getDate())}  ${ (dg.session_ids || []).length } 个会话</span>` +
     `</span></summary><div class="map-phase-body"><p>${escapeHtml(dg.summary || "")}</p>` +
     `${highs ? `<ul>${highs}</ul>` : ""}${topics ? `<div class="map-topics">${topics}</div>` : ""}</div></details>`;
 }
@@ -324,7 +324,7 @@ function renderMapAside() {
   // Top N 后 chip 没了，残留的过滤一并清掉，免得时间线被悄悄过滤成空
   const chips = (d.files || []).map((f) =>
     `<button class="map-file-chip${mapState.fileFilter === f.path ? " on" : ""}" data-path="${escapeHtml(f.path)}"` +
-    ` title="${escapeHtml(f.path)} · ${f.count} 次改动 · 点击过滤时间线">${escapeHtml(mapBasename(f.path))}<i>${f.count}</i></button>`).join("");
+    ` title="${escapeHtml(f.path)}  ${f.count} 次改动  点击过滤时间线">${escapeHtml(mapBasename(f.path))}<i>${f.count}</i></button>`).join("");
   if (!chips) {
     if (mapState.fileFilter) {
       mapState.fileFilter = null;
@@ -404,7 +404,7 @@ function renderMapAside() {
         if (st.sessions > 0 || st.tokens > 0) activeDays++;
       }
       const tip = future ? `${key}：还没到`
-        : st ? `${key}：${st.sessions} 个会话 · ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
+        : st ? `${key}：${st.sessions} 个会话  ${tok >= 1000 ? Math.round(tok / 1000) + "k" : tok} tokens`
         : `${key}：无活动`;
       cells += `<i class="${lv}${isToday ? " today" : ""}" data-day="${key}" title="${escapeHtml(tip)}"></i>`;
     }
@@ -652,7 +652,7 @@ function mountMapGraph(box, nodes, edges) {
       return s ? `<button class="map-pop-sess" data-sid="${sid}">${escapeHtml(s.title || "（未命名）")}</button>` : "";
     }).join("");
     pop.innerHTML = `<b>${escapeHtml(n.label)}</b>` +
-      `<span class="map-dim small">${MAP_NODE_TYPE[n.type].label} · ${sids.length} 个会话${sids.length ? "，点击直达" : ""}</span>` +
+      `<span class="map-dim small">${MAP_NODE_TYPE[n.type].label}  ${sids.length} 个会话${sids.length ? "，点击直达" : ""}</span>` +
       (rows || (n.full ? `<p class="map-pop-full">${escapeHtml(n.full)}</p>` : "<span class='dim small'>无关联会话</span>"));
     pop.classList.remove("hidden");
     const pw = pop.offsetWidth || 200, ph = pop.offsetHeight || 80;

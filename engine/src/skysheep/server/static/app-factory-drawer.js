@@ -77,11 +77,11 @@
       var oc = tailOutcomes[idx] || "";
       // done 但有拦截的格子不能染成成功绿：它是 partial，不是做成
       var cls = (s === "done" && oc === "partial") ? "partial" : s;
-      var tip = (RUN_STATUS[s] || s) + (oc ? " · " + (RUN_OUTCOME[oc] || oc) : "");
+      var tip = (RUN_STATUS[s] || s) + (oc ? "  " + (RUN_OUTCOME[oc] || oc) : "");
       return '<i class="' + escapeHtml(cls) + '" title="' + escapeHtml(tip) + '"></i>';
     }).join("");
     return '<div><div class="dim small">产线体检</div>' +
-      '<div class="fx-health">' + parts.join(" · ") + "</div>" +
+      '<div class="fx-health">' + parts.join("  ") + "</div>" +
       '<div class="fx-strip" title="最近 ' + tail.length + ' 次运行（新 → 旧）">' + strip + "</div></div>";
   }
 
@@ -155,13 +155,16 @@
         act: line.kind === "pipeline" ? "pipeline" : "grant", actText: "去补预授权",
       };
     }
-    // 历史被拦过、但名单里已经补上了：不再喊，等下一轮运行给答案
+    // 历史被拦过、名单里已经补上了：不再喊，但别承诺「已补齐」——名单成员
+    // 资格不等于门控一定放行（MCP 写工具还受写入边界/出站策略约束），等下一轮
+    // 运行给真实答案；仍被拦也不是名单没配。
     var deniedNames = Object.keys(denied);
     if (deniedNames.length) {
       return {
-        level: "ok", title: "预授权已补齐",
+        level: "ok", title: "名单已包含被拦工具",
         detail: "近 7 天被拦过 " + deniedNames.join("、") +
-          "，名单里现在都有了；下一轮跑完才知道有没有真的解开。",
+          "，名单里现在都有了；下一轮跑完才知道有没有真的解开。"
+          + "若仍被拦，可能是写入边界 / 出站策略或工具名不匹配，不是名单没配。",
         act: "", actText: "",
       };
     }
@@ -175,7 +178,7 @@
     }
     if (h.last_status === "error" || h.last_outcome === "failed") {
       return {
-        level: "bad", title: kind ? "上次失败 · " + kind : "上次失败",
+        level: "bad", title: kind ? "上次失败  " + kind : "上次失败",
         detail: h.last_error || "",
         act: "delegate", actText: "让 Agent 看看",
       };
@@ -301,7 +304,7 @@
     var h = line.health || {};
     var where = (rec.project && rec.project.name) || "当前厂区";
     var out = [];
-    out.push("【工厂 · 产线诊断】" + where + " · " + (line.name || line.key));
+    out.push("【工厂  产线诊断】" + where + "  " + (line.name || line.key));
     out.push("");
     out.push((line.kind === "pipeline" ? "这条编排" : "这条定时产线") + "最近不太对，帮我查一下。");
     out.push("");
@@ -315,7 +318,7 @@
         if (x.duration_s != null) bits.push(fmtDur(x.duration_s));
         var kind = x.error_kind ? (ERROR_KIND[x.error_kind] || x.error_kind) : "";
         if (kind) bits.push(kind);
-        out.push((i + 1) + ". " + bits.join(" · "));
+        out.push((i + 1) + ". " + bits.join("  "));
         // 只带「有问题那几次」的解释：成功的运行写摘要进来只会把报告撑长，
         // 而且种子/演示里那句「已完成本轮任务」对诊断毫无信息量
         if (x.error) {
@@ -468,7 +471,7 @@
     if (run.error) {
       var kind = run.error_kind ? (ERROR_KIND[run.error_kind] || run.error_kind) : "";
       html += "<div><div class=\"dim small\">错误" +
-        (kind ? " · <span class=\"fx-bad\">" + escapeHtml(kind) + "</span>" : "") +
+        (kind ? "  <span class=\"fx-bad\">" + escapeHtml(kind) + "</span>" : "") +
         "</div><pre class=\"fx-excerpt\">" + escapeHtml(run.error) + "</pre></div>";
     }
     if (run.result_excerpt) {
@@ -610,7 +613,7 @@
     // 厂区 / 类型 / 团队模板这些查一次就够的进折叠区
     var metaBits = [line.trigger_text || "—", "下次 " + next];
     if (isTeam && memberCell !== "—") metaBits.push(memberCell);
-    html += '<div class="fx-verdict-meta">' + escapeHtml(metaBits.join(" · ")) + "</div>";
+    html += '<div class="fx-verdict-meta">' + escapeHtml(metaBits.join("  ")) + "</div>";
     html += '<details class="fx-more"><summary>更多：产线信息</summary>' +
       '<div class="fx-kv">' +
       "<dt>厂区</dt><dd>" + escapeHtml(rec.project.name || "—") + "</dd>" +
@@ -746,15 +749,15 @@
         var stText = RUN_STATUS[x.status] || x.status;
         var warn = "";
         if (x.status === "done" && x.outcome === "partial") {
-          stText = "跑完 · 被拦";
+          stText = "跑完  被拦";
           warn = " warn";
         } else if (x.status === "done" && x.outcome === "failed") {
-          stText = "跑完 · 不算";
+          stText = "跑完  不算";
           warn = " bad";
         }
         return '<button class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
-          '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + " · " + escapeHtml(x.name || "") + "</span>" +
-          '<span class="fx-run-meta' + warn + '">' + escapeHtml(stText) + " · " +
+          '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + "  " + escapeHtml(x.name || "") + "</span>" +
+          '<span class="fx-run-meta' + warn + '">' + escapeHtml(stText) + "  " +
           escapeHtml(fmtDurationShort(x)) + "</span></button>";
       }).join("");
       host.querySelectorAll("[data-run-id]").forEach(function (b) {
@@ -867,12 +870,12 @@
         host.innerHTML = rows.map(function (x) {
           var path = x.result_path || "";
           return '<div class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
-            '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + " · " +
+            '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + "  " +
             escapeHtml(x.project_name || "—") + " / " + escapeHtml(runTitle(x)) + "</span>" +
             outcomeChip(x) +
             '<span class="fx-run-meta">' + escapeHtml(RUN_STATUS[x.status] || x.status) +
-            " · " + escapeHtml(fmtDurationShort(x)) +
-            (f.view === "tokens_today" ? " · " + (Number(x.in_tokens || 0) + Number(x.out_tokens || 0)).toLocaleString() + " token" : "") + "</span>" +
+            "  " + escapeHtml(fmtDurationShort(x)) +
+            (f.view === "tokens_today" ? "  " + (Number(x.in_tokens || 0) + Number(x.out_tokens || 0)).toLocaleString() + " token" : "") + "</span>" +
             (path
               ? '<button class="fx-ack" data-open-result="' + escapeHtml(path) + '"' +
                 ' title="打开这个工位的产出全文">产出</button>'
@@ -906,7 +909,7 @@
       var off = f.offset || 0;
       pager.innerHTML =
         '<button class="btn-ghost" data-page="prev"' + (off > 0 ? "" : " disabled") + ">上一页</button>" +
-        '<span class="fx-run-meta">第 ' + (Math.floor(off / RUN_PAGE) + 1) + " 页 · "
+        '<span class="fx-run-meta">第 ' + (Math.floor(off / RUN_PAGE) + 1) + " 页  "
         + rows.length + " 条</span>" +
         '<button class="btn-ghost" data-page="next"' + (rows.length >= RUN_PAGE ? "" : " disabled") + ">下一页</button>";
       pager.querySelectorAll("[data-page]").forEach(function (b) {
@@ -957,7 +960,7 @@
         return '<div class="fx-run-row">' +
           '<span class="fx-run-name">' + escapeHtml(title) + "</span>" +
           '<span class="fx-run-meta">' + escapeHtml(kind) +
-          (liveStale(r) ? ' · <span class="fx-bad">5 分钟无更新</span>' : "") + "</span>" +
+          (liveStale(r) ? '  <span class="fx-bad">5 分钟无更新</span>' : "") + "</span>" +
           (r.session_id
             ? '<button class="fx-ack" data-live-session="' + escapeHtml(String(r.session_id)) +
               '" title="打开这个会话">去会话</button>'
@@ -1029,7 +1032,7 @@
           return '<button type="button" class="fx-run-row" data-upcoming="' +
             escapeHtml(String(it.key || "")) + '">' +
             '<span class="fx-run-name">' + escapeHtml(it.name || it.key || "") + "</span>" +
-            '<span class="fx-run-meta">' + escapeHtml(it.project || "—") + " · " +
+            '<span class="fx-run-meta">' + escapeHtml(it.project || "—") + "  " +
             escapeHtml(status) + "</span></button>";
         }).join("") + "</div>";
     }
@@ -1068,13 +1071,13 @@
     var projects = st.projects || [];
     var rows = (st.waiting || []).map(function (r) {
       return { key: r.key, name: r.name, project_id: r.project_id,
-        note: "定时产线 · 已等待 " + fmtDur(Math.max(0, nowMs() / 1000 - (r.due_at || 0))) };
+        note: "定时产线  已等待 " + fmtDur(Math.max(0, nowMs() / 1000 - (r.due_at || 0))) };
     });
     projects.forEach(function (p) {
       (p.lines || []).filter(function (l) { return l.kind === "pipeline"; }).forEach(function (l) {
         (l.nodes || []).filter(function (n) { return n.status === "ready"; }).forEach(function (n) {
           rows.push({ key: l.key, name: l.name + " / " + n.title, project_id: p.id,
-            note: "编排工位 · 依赖已满足，等待调度" });
+            note: "编排工位  依赖已满足，等待调度" });
         });
       });
     });
@@ -1084,7 +1087,7 @@
     html += rows.length ? '<div class="fx-run-list">' + rows.map(function (r) {
       var p = projects.find(function (p) { return p.id === r.project_id; });
       return '<button class="fx-run-row" data-queue-line="' + escapeHtml(r.key) + '"><span class="fx-run-name">' +
-        escapeHtml((p ? p.name + " · " : "") + r.name) + '</span><span class="fx-run-meta">' +
+        escapeHtml((p ? p.name + "  " : "") + r.name) + '</span><span class="fx-run-meta">' +
         escapeHtml(r.note) + '</span></button>';
     }).join("") + '</div>' : '<div class="fx-run-empty">当前没有等待中的产线。</div>';
     if (total > rows.length) html += '<p class="fx-form-msg">共 ' + total + ' 项，当前列出 ' + rows.length + ' 项（明细有显示上限，已删除厂区也可能无法列出）。</p>';
@@ -1418,11 +1421,11 @@
     var fresh = freshProgress(pr);
     if (!fresh) return "";
     var text;
-    if (fresh.tool) text = fresh.tool + (fresh.steps ? " · 第 " + fresh.steps + " 步" : "");
+    if (fresh.tool) text = fresh.tool + (fresh.steps ? "  第 " + fresh.steps + " 步" : "");
     else if (fresh.steps) text = "第 " + fresh.steps + " 步";
     else text = "启动中";
     var denied = Number(fresh.denied) || 0;
-    if (denied > 0) text += " · 被拦 " + denied + " 次";
+    if (denied > 0) text += "  被拦 " + denied + " 次";
     return text;
   }
 

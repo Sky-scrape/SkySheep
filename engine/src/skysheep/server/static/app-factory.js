@@ -638,7 +638,7 @@
     }
     var loc = (w.location && w.location.name) || "";
     var temp = w.temperature_c != null ? Math.round(w.temperature_c) + "°" : "";
-    dom.weatherChip.textContent = [loc, w.label, temp].filter(Boolean).join(" · ");
+    dom.weatherChip.textContent = [loc, w.label, temp].filter(Boolean).join("  ");
     var tip = "现实天气：" + (w.label || "") + (temp ? " " + temp : "");
     if (w.sunrise && w.sunset) tip += "；当地日出 " + w.sunrise + " / 日落 " + w.sunset;
     tip += "（30 分钟缓存）";
@@ -796,7 +796,7 @@
     if (tpl) parts.push("模板「" + tpl + "」");
     parts.push((Number(meta.members) || 0) + " 名队员");
     parts.push(meta.director_ai ? "AI 总管" : "用户总管");
-    return parts.join(" · ");
+    return parts.join("  ");
   }
 
   /** 产线当前这轮运行的停滞等级（机台用）。没在跑 / 取不到运行行时返回空。 */
@@ -1062,7 +1062,7 @@
         '" title="镜头飞到这座厂区">' +
         "<span>" + escapeHtml(p.name || "未命名项目") + "</span>" +
         '<span class="fx-badge' + (p.root_ok === false ? " warn" : "") + '">' +
-        (p.root_ok === false ? "停工" : allLines.length + " 线" + (busy ? " · " + busy + " 在忙" : "")) +
+        (p.root_ok === false ? "停工" : allLines.length + " 线" + (busy ? "  " + busy + " 在忙" : "")) +
         "</span></button></div>";
       if (!lines.length) {
         html += '<div class="fx-empty">这个厂区还没有产线。在左侧「自动化」里给它建一条。</div>';
@@ -1324,7 +1324,7 @@
       key: first.key,
       name: name,
       countdown: countdown,
-      text: name + (countdown ? " · " + countdown : " · 等待调度"),
+      text: name + (countdown ? "  " + countdown : "  等待调度"),
       count: list.length,
       overflow: Math.max(0, list.length - UPCOMING_MAX),
     };
@@ -2059,8 +2059,8 @@
     var st = activeState();
     var running = (st && st.counters && st.counters.running) || 0;
     var berth = S.berthLane;
-    var hallText = "调度厅" + (running ? " · 在转 " + running + " 件" : "");
-    if (berth) hallText += " · 额度 " + berth.used + "/" + berth.cap;
+    var hallText = "调度厅" + (running ? "  在转 " + running + " 件" : "");
+    if (berth) hallText += "  额度 " + berth.used + "/" + berth.cap;
     placeLabel(labelFor(i++), S.world.hall.x, S.world.hall.y, hallText, "hall", 76, used);
     // 待发告示牌：只贴「待发」短标题（牌面太小，任务名 / 倒计时 / 条数一律不上面，
     // 明细点击后进弹窗）。中文一律走标签池，牌面上不画字。
@@ -2085,10 +2085,10 @@
       if (i >= maxLabels - 8) return;
       var allLines = (f.project && f.project.lines) || [];
       var busy = allLines.filter(function (l) { return l.status === "running"; }).length;
-      var text = f.name + (busy ? " · " + busy + " 忙碌" : "");
+      var text = f.name + (busy ? "  " + busy + " 忙碌" : "");
       var hidden = Math.max(0, allLines.length - machineCap());
-      if (hidden) text += " · +" + hidden + " 线";
-      if (f.root_ok === false) text += " · 停工";
+      if (hidden) text += "  +" + hidden + " 线";
+      if (f.root_ok === false) text += "  停工";
       placeLabel(labelFor(i++), f.x, f.y, text, "project", f.labelZ || 44, used);
     });
     // 机台名：聚焦到某个厂区时一定画（这是聚焦档存在的理由），全景下缩放
@@ -2104,13 +2104,13 @@
           var sy = rec._vy * (S.cssH / S.bufH);
           if (sx < -60 || sx > S.cssW + 60 || sy < 0 || sy > S.cssH) return;
           var mlabel = rec.line.name || rec.key;
-          if (rec.line.is_team) mlabel = "团队 · " + mlabel;   // 与面板「团队」徽标同一口径
+          if (rec.line.is_team) mlabel = "团队  " + mlabel;   // 与面板「团队」徽标同一口径
           if (rec.line.status === "running" && rec.kind === "cron") {
             mlabel += " " + fmtClockShort(lineRunSeconds(rec.line)); // 机台上方计时 mm:ss
             var step = runningStepText(rec.line);
-            if (step) mlabel += " · " + step;
+            if (step) mlabel += "  " + step;
             var dn = rec.line.progress && Number(rec.line.progress.denied) || 0;
-            if (dn) mlabel += " · 被拦 " + dn;
+            if (dn) mlabel += "  被拦 " + dn;
           }
           placeLabel(labelFor(i++), rec.x, rec.y, mlabel, "machine", 20 + (rec.index % 2) * 8, used);
         });
@@ -2232,38 +2232,38 @@
     if (!hit) return "";
     if (hit.type === "pkg") {
       var run = findRun(hit.id);
-      return run ? ("包裹 #" + run.id + " · " + (run.name || "")) : "包裹";
+      return run ? ("包裹 #" + run.id + "  " + (run.name || "")) : "包裹";
     }
     if (hit.type === "line") {
       var rec = findLine(hit.key);
-      return rec ? ("机台 · " + (rec.line.name || rec.key) + " · " + lineStateText(rec.line)) : "";
+      return rec ? ("机台  " + (rec.line.name || rec.key) + "  " + lineStateText(rec.line)) : "";
     }
     if (hit.type === "upcoming") {
       // 牌面只给短标题 + 状态灯，这里补一句「有多少项 / 点开看明细」，
       // 空态也说清能点（点了会开弹窗报「暂无待发」）。
       var boardView = S.noticeboardView;
       var n = (boardView && boardView.count) || 0;
-      return n ? ("待发告示牌 · " + n + " 项（点击查看）")
-               : "待发告示牌 · 暂无待发（点击查看）";
+      return n ? ("待发告示牌  " + n + " 项（点击查看）")
+               : "待发告示牌  暂无待发（点击查看）";
     }
     if (hit.type === "queued") {
       var recQ = findLine(hit.key);
-      return recQ ? ("排队 · " + (recQ.line.name || recQ.key)) : "";
+      return recQ ? ("排队  " + (recQ.line.name || recQ.key)) : "";
     }
     if (hit.type === "truck") {
       var trip = null;
       S.trips.forEach(function (t) { if (String(t.pid) === String(hit.pid)) trip = t; });
       var phase = trip ? FX.tripPose(trip, nowMs()).phase : "";
-      return "出货卡车 · " + ({ approach: "正在进场", wait: "等候装货", dock: "停靠装货位",
+      return "出货卡车  " + ({ approach: "正在进场", wait: "等候装货", dock: "停靠装货位",
         load: "装货中", leave: "离场" }[phase] || "在场内");
     }
-    if (hit.type === "forklift") return "叉车 · 托盘与车斗之间搬货";
+    if (hit.type === "forklift") return "叉车  托盘与车斗之间搬货";
     if (hit.type === "sheep") {
       var f = factoryById(hit.pid);
       if (!f) return "";
       var pose = FX.workerPose(f, nowMs(), S.reduced);
       var what = { patrol: "巡检中", pause: "巡检停留", gate: "在门口值守", idle: "待命" }[pose.state] || "在场";
-      return "工头小羊 · " + what + (S.reduced ? "" : "（点一下挥手）");
+      return "工头小羊  " + what + (S.reduced ? "" : "（点一下挥手）");
     }
     return "";
   }
@@ -2511,7 +2511,7 @@
             var attnLabel = attnKind === "partial" ? "跑完但有工具被拦"
               : attnKind === "empty" ? "无产出"
                 : (RUN_STATUS[attnKind] || attnKind);
-            var attnName = (run.project_name ? run.project_name + " · " : "")
+            var attnName = (run.project_name ? run.project_name + "  " : "")
               + (run.name || "产线");
             st.attention.unshift({
               kind: attnKind, project_id: run.project_id, line_key: lineKey,
@@ -2538,7 +2538,7 @@
         if (made) {
           floatText = "+1 成品";
         } else if (run.status === "done" && runOutcome === "partial") {
-          floatText = "成品 · 有拦截";
+          floatText = "成品  有拦截";
           floatWarn = true;
         } else if (run.status === "error") {
           floatText = "返工";
@@ -2646,7 +2646,7 @@
   function buildDemoState(cfg) {
     var now = nowMs() / 1000;
     var p1 = {
-      id: -1, name: "样板 · 内容厂", root_ok: true,
+      id: -1, name: "样板  内容厂", root_ok: true,
       lines: [
         demoLineCron(-11, "晨间简报", "每天 09:00", now + 3600, "running", "ok", now - 7200, 86400),
         // 指定待发：45 秒后到点（演示里几十秒就能看到「到点才启动」），
@@ -2658,7 +2658,7 @@
       ],
     };
     var p2 = {
-      id: -2, name: "样板 · 工具厂", root_ok: true,
+      id: -2, name: "样板  工具厂", root_ok: true,
       lines: [
         demoLinePipe(-21, "发布装配线", "running", [
           { id: 1, title: "构建", status: "done" },
@@ -2671,7 +2671,7 @@
       ],
     };
     var p3 = {
-      id: -3, name: "样板 · 资料厂", root_ok: true,
+      id: -3, name: "样板  资料厂", root_ok: true,
       lines: [
         demoLineCron(-31, "文档快照", "每天 18:00", now + 5400, "idle", "empty", now - 10800, 86400),
         // 团队演示线：让样板厂认得出「团队产线」（面板徽标 + 机台旗标）
@@ -2692,12 +2692,12 @@
       });
     });
     var runs = [
-      demoRun(-1001, "cron", -11, -1, "晨间简报", "样板 · 内容厂", "running", now - 8, null, ""),
-      demoRun(-1002, "pipeline_node", 2, -2, "发布装配线 / 测试", "样板 · 工具厂", "running", now - 6, null, ""),
-      demoRun(-1003, "cron", -12, -1, "竞品巡检", "样板 · 内容厂", "done", now - 1300, now - 1270, "抓到 12 条更新"),
-      demoRun(-1004, "cron", -22, -2, "依赖体检", "样板 · 工具厂", "error", now - 3700, now - 3650, ""),
-      demoRun(-1005, "cron", -31, -3, "文档快照", "样板 · 资料厂", "empty", now - 10900, now - 10880, ""),
-      demoRun(-1006, "cron", -12, -1, "竞品巡检", "样板 · 内容厂", "done", now - 3100, now - 3060, "抓到 9 条更新"),
+      demoRun(-1001, "cron", -11, -1, "晨间简报", "样板  内容厂", "running", now - 8, null, ""),
+      demoRun(-1002, "pipeline_node", 2, -2, "发布装配线 / 测试", "样板  工具厂", "running", now - 6, null, ""),
+      demoRun(-1003, "cron", -12, -1, "竞品巡检", "样板  内容厂", "done", now - 1300, now - 1270, "抓到 12 条更新"),
+      demoRun(-1004, "cron", -22, -2, "依赖体检", "样板  工具厂", "error", now - 3700, now - 3650, ""),
+      demoRun(-1005, "cron", -31, -3, "文档快照", "样板  资料厂", "empty", now - 10900, now - 10880, ""),
+      demoRun(-1006, "cron", -12, -1, "竞品巡检", "样板  内容厂", "done", now - 3100, now - 3060, "抓到 9 条更新"),
     ];
     p1.lines[0].running_run_id = -1001;
     p2.lines[0].running_run_id = -1002;
@@ -2706,8 +2706,8 @@
       projects: [p1, p2, p3],
       counters: { running: 2, queued: 1, attention: 2, done_today: 2, tokens_today: 18400 },
       attention: [
-        { kind: "error", project_id: -2, line_key: lineKeyFor("cron", -22), text: "依赖体检 · 上次失败" },
-        { kind: "stopped", project_id: -1, line_key: lineKeyFor("cron", -13), text: "素材归档 · 停工" },
+        { kind: "error", project_id: -2, line_key: lineKeyFor("cron", -22), text: "依赖体检  上次失败" },
+        { kind: "stopped", project_id: -1, line_key: lineKeyFor("cron", -13), text: "素材归档  停工" },
       ],
       attention_total: 2,
       runs: runs,
@@ -2859,7 +2859,7 @@
   }
 
   function demoProjectName(pid) {
-    return pid === -1 ? "样板 · 内容厂" : pid === -2 ? "样板 · 工具厂" : "样板 · 资料厂";
+    return pid === -1 ? "样板  内容厂" : pid === -2 ? "样板  工具厂" : "样板  资料厂";
   }
 
   function findDemoLine(st, key) {

@@ -1,4 +1,4 @@
-// app-whitelist.js —— 设置 · 白名单（手动添加 / 撤销 / 清空 / 测试 / 导入导出 / 规则检测）
+// app-whitelist.js —— 设置  白名单（手动添加 / 撤销 / 清空 / 测试 / 导入导出 / 规则检测）
 // 从 app.js 拆出的分区文件：同为零构建、普通 script、不引入 ES modules；
 // 本文件只有声明与纯数据常量（ruleCheckRun 为函数值 const，声明非调用），
 // 零加载期执行；按钮接线（含 4 处加载期函数引用解引用）仍留在 app.js 原位，
@@ -12,7 +12,7 @@ let rulesStatusTimer = null;
 
 function ruleLabelText(r) {
   const kind = RULE_KIND_LABEL[r.kind] || r.kind;
-  return `${r.tool} · ${kind} ${r.pattern || "（全部）"}`;
+  return `${r.tool}  ${kind} ${r.pattern || "（全部）"}`;
 }
 
 // 操作反馈统一走卡片里的状态行（设置页里对话区是隐藏的，addNotice 看不到）；
@@ -148,7 +148,7 @@ async function submitRuleAdd() {
     resetRuleAddForm();
     await renderSettings();
     showRulesStatus(
-      `已添加规则：${tool} · ${RULE_KIND_LABEL[kind] || kind}${pattern ? " " + pattern : "（全部）"}`,
+      `已添加规则：${tool}  ${RULE_KIND_LABEL[kind] || kind}${pattern ? " " + pattern : "（全部）"}`,
       null
     );
   } catch (err) {
@@ -181,7 +181,7 @@ const ruleCheckRun = async () => {
     const r = await request("whitelist.check", { tool, text });
     if (r.allowed) {
       const hit = r.hit || {};
-      out.textContent = `✓ 会直接放行 —— 命中规则：${hit.tool} · ${RULE_KIND_LABEL[hit.kind] || hit.kind} ${hit.pattern || "（全部）"}`;
+      out.textContent = `✓ 会直接放行 —— 命中规则：${hit.tool}  ${RULE_KIND_LABEL[hit.kind] || hit.kind} ${hit.pattern || "（全部）"}`;
       out.className = "rule-check-result ok";
     } else {
       out.textContent = `✗ 需要确认 —— ${r.reason}`;
@@ -194,6 +194,47 @@ const ruleCheckRun = async () => {
     out.hidden = false;
   }
 };
+
+// 设置页长说明默认收起：把非列表、文本超过 90 字的 .settings-hint 包进
+// <details>，首屏只留控件与短提示；点开「说明」看完整解释。
+// 带安全/危险字样的说明保持常显——高风险操作不能被藏进折叠层。
+function collapseSettingsHints() {
+  const hints = document.querySelectorAll(
+    ".settings-page .settings-hint, #rp-view-mcp .settings-hint, #rp-view-skills .settings-hint");
+  hints.forEach((el) => {
+    if (!el.isConnected) return;
+    if (el.closest("details.settings-hint-fold")) return;
+    if (el.matches(".hint-points, .hint-steps")) return;
+    const text = (el.textContent || "").trim();
+    if (text.length < 90) return;
+    if (/⚠|不可逆|危险操作|安全风险|删除后|覆盖后/.test(text)) return;
+    const fold = document.createElement("details");
+    fold.className = "settings-hint-fold";
+    const sum = document.createElement("summary");
+    sum.textContent = "说明";
+    el.parentNode.insertBefore(fold, el);
+    fold.appendChild(sum);
+    fold.appendChild(el);
+  });
+}
+
+// 页面专属 render（高级 / 子代理 / Mods…）是异步回填的，静态 renderSettings
+// 跑完后它们才插入长说明；用 MutationObserver 收尾，避免「首屏先闪一段长文」。
+let settingsHintObs = null;
+let settingsHintTimer = 0;
+function watchSettingsHints() {
+  if (settingsHintObs) return;
+  const root = document.getElementById("view-settings");
+  if (!root) return;
+  settingsHintObs = new MutationObserver(() => {
+    if (settingsHintTimer) return;
+    settingsHintTimer = setTimeout(() => {
+      settingsHintTimer = 0;
+      collapseSettingsHints();
+    }, 120);
+  });
+  settingsHintObs.observe(root, { childList: true, subtree: true });
+}
 
 async function renderSettings() {
   // 设置卡内容即将刷新：作废搜索索引缓存（下次搜索重建，保证搜到新内容）
@@ -272,7 +313,7 @@ async function renderSettings() {
       ? `<span class="chip chip-warn rule-stale" title="${escapeHtml(r.stale_reason || "该规则已不再命中")}">已失效</span>`
       : "";
     li.innerHTML = `<span class="dot ${risky ? "warn" : "on"}"${risky ? ' title="整工具放行（写 / 高危）"' : ""}></span>
-      <span class="rule-text${enabled ? "" : " rule-off"}" title="${escapeHtml(tip)}">${escapeHtml(r.tool)} · ${escapeHtml(kind)}${escapeHtml(extra)} ${escapeHtml(r.pattern || "(全部)")}${origin ? ` <span class="rule-origin">· ${escapeHtml(origin)}</span>` : ""}${enabled ? "" : ' <span class="rule-origin">· 已停用</span>'}</span>
+      <span class="rule-text${enabled ? "" : " rule-off"}" title="${escapeHtml(tip)}">${escapeHtml(r.tool)}  ${escapeHtml(kind)}${escapeHtml(extra)} ${escapeHtml(r.pattern || "(全部)")}${origin ? ` <span class="rule-origin">${escapeHtml(origin)}</span>` : ""}${enabled ? "" : ' <span class="rule-origin">已停用</span>'}</span>
       ${stale}
       ${hits}
       ${age ? `<span class="rule-age">${escapeHtml(age)}</span>` : ""}
@@ -371,12 +412,12 @@ async function renderSettings() {
     const stateText = m.enabled === false
       ? "已停用"
       : (m.connected
-        ? `已连接 · ${m.tools.length} 个工具`
+        ? `已连接  ${m.tools.length} 个工具`
         : (m.connecting ? "连接中…" : escapeHtml(m.error || "未连接")));
     // 来源标记（可被手编 mcp.json 伪造，仅作参考展示）：预设/导入/手动 + 安装时间
     const srcLabels = { preset: "预设添加", import: "导入", manual: "手动添加" };
     const srcTxt = m.installed_from
-      ? `${srcLabels[m.installed_from] || escapeHtml(m.installed_from)}${m.installed_at ? " · " + escapeHtml(String(m.installed_at).replace("T", " ").slice(0, 16)) : ""}`
+      ? `${srcLabels[m.installed_from] || escapeHtml(m.installed_from)}${m.installed_at ? "  " + escapeHtml(String(m.installed_at).replace("T", " ").slice(0, 16)) : ""}`
       : "";
     li.innerHTML = `
       <div class="mcp-head">
@@ -428,9 +469,9 @@ async function renderSettings() {
   // 版本号只由下方更新面板展示（这里是项目身份与开源链接）；无项目态 working_dir
   // 为空串，要给可读回退而不是渲染出「工作目录：」后面一片空白
   document.getElementById("about-info").innerHTML = `
-    <span>SkySheep 开源项目（${snap.frozen ? "安装版" : "源码版"}）·
-      <a href="${REPO_PAGE}" target="_blank">项目主页</a> ·
-      <a href="${REPO_PAGE}/blob/main/CHANGELOG.md" target="_blank">更新日志</a> ·
+    <span>SkySheep 开源项目（${snap.frozen ? "安装版" : "源码版"}）  
+      <a href="${REPO_PAGE}" target="_blank">项目主页</a>  
+      <a href="${REPO_PAGE}/blob/main/CHANGELOG.md" target="_blank">更新日志</a>  
       <a href="${REPO_PAGE}/blob/main/LICENSE" target="_blank">MIT License</a></span>
     <span>工作目录：${snap.working_dir
       ? `<b class="copyable-path" title="点击复制">${escapeHtml(snap.working_dir)}</b>`
@@ -544,6 +585,9 @@ async function renderSettings() {
     const importFullBtn = document.getElementById("btn-import-full");
     const importFullMsg = document.getElementById("import-full-msg");
     if (importFullBtn) importFullBtn.onclick = () => importFullModal(importFullMsg);
+
+    // 长说明统一收起（有 id 的动态提示不折，渲染回填时保持可见）
+    collapseSettingsHints();
   }
 }
 

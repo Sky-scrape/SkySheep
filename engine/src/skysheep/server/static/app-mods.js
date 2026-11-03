@@ -74,7 +74,7 @@ function onModUi(data) {
   addModFragment(data.mod_id || "", w);
 }
 
-// ---- 设置 · Mods 扩展 ----
+// ---- 设置  Mods 扩展 ----
 
 let modsState = { mods: [], enabled: false, runtime_available: true, runtime_version: "" };
 
@@ -240,7 +240,7 @@ function renderModsList(mods) {
       flags.push('<span class="chip danger-mark" title="连续超时 3 次，本进程内已停用；重启应用后恢复">超时自动停用</span>');
     }
     if (m.cc_mods) {
-      flags.push('<span class="chip safe-mark" title="实验性兼容 Claude Code Mods 的清单与入口形状（子集）">CC 兼容 · 实验性</span>');
+      flags.push('<span class="chip safe-mark" title="实验性兼容 Claude Code Mods 的清单与入口形状（子集）">CC 兼容  实验性</span>');
     }
     if (Number(m.errors) > 0) {
       // 运行期被丢弃/出错的动作数（本进程内）：解析丢弃的明细在「说明」的最近执行里（dropped 行）
@@ -251,9 +251,9 @@ function renderModsList(mods) {
         <input type="checkbox" class="mod-enabled" ${m.enabled ? "checked" : ""}>启用
       </label>
       <span class="mod-main">
-        <span class="item-name">${escapeHtml(m.name)} <span class="dim small">v${escapeHtml(m.version || "")} · ${escapeHtml(m.source || "")}</span></span>
+        <span class="item-name">${escapeHtml(m.name)} <span class="dim small">v${escapeHtml(m.version || "")}  ${escapeHtml(m.source || "")}</span></span>
         <span class="item-desc">${escapeHtml(m.description || "")}</span>
-        <span class="dim small">${escapeHtml(hooks || "（未声明 hook）")} · ${escapeHtml(modPermLabel(m.permissions))}</span>
+        <span class="dim small">${escapeHtml(hooks || "（未声明 hook）")}  ${escapeHtml(modPermLabel(m.permissions))}</span>
         ${decl.join(" ")}
         ${m.load_error ? `<span class="dim small mod-err">${escapeHtml(m.load_error)}</span>` : ""}
       </span>
@@ -293,8 +293,8 @@ async function showModDetail(modId) {
     const box = document.createElement("div");
     box.innerHTML = `
       <p class="dim small">${escapeHtml(m.description || "")}</p>
-      <p class="dim small">版本 ${escapeHtml(m.version || "")} · ${escapeHtml(m.source || "")} ·
-        ${escapeHtml(modPermLabel(m.permissions))} ·
+      <p class="dim small">版本 ${escapeHtml(m.version || "")}  ${escapeHtml(m.source || "")}  
+        ${escapeHtml(modPermLabel(m.permissions))}  
         挂点：${escapeHtml((m.hooks || []).map((h) => MOD_HOOK_LABELS[h] || h).join(" / ") || "无")}</p>
       <h4 class="mod-detail-cap">说明（README）</h4>
       <pre class="mod-readme">${escapeHtml(d.readme || "（没有 README.md）")}</pre>
@@ -303,10 +303,10 @@ async function showModDetail(modId) {
         const pair = MOD_STATUS_META[r.status] || [r.status || "?", ""];
         const when = new Date((r.time || 0) * 1000).toLocaleTimeString();
         return `<li><span class="chip ${pair[1]}">${pair[0]}</span>` +
-          `<span class="dim small">${escapeHtml(MOD_HOOK_LABELS[r.hook] || r.hook || "")} · ${when} · ${Number(r.duration_ms) || 0}ms</span>` +
+          `<span class="dim small">${escapeHtml(MOD_HOOK_LABELS[r.hook] || r.hook || "")}  ${when}  ${Number(r.duration_ms) || 0}ms</span>` +
           (r.output ? `<span class="mod-frag-text" title="${escapeHtml(r.output)}">${escapeHtml(r.output)}</span>` : "") + "</li>";
       }).join("") : '<li class="dim small">还没有执行记录。</li>'}</ul>`;
-    showModal(`Mod · ${m.name || modId}`, box, async () => {}, "关闭");
+    showModal(`Mod  ${m.name || modId}`, box, async () => {}, "关闭");
   } catch (e) {
     modsStatus("✗ " + e.message, false);
   }

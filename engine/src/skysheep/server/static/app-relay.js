@@ -106,7 +106,7 @@ async function relayDualShowPeer(peer) {
     focusSplitPane(exists);
     return;
   }
-  await openSplitPane(peer.id, peer.title || "接力 · 副屏");
+  await openSplitPane(peer.id, peer.title || "接力  副屏");
 }
 
 /** 点主页面的「接力」：开右侧看板 + 把副屏会话打开在分栏里。 */
@@ -169,7 +169,7 @@ function relayDualRenderTurns() {
     const head = document.createElement("div");
     head.className = "relay-turn-head";
     const no = document.createElement("b");
-    no.textContent = `第 ${turn.turn_no} 轮 · ${RELAY_SIDE_LABEL[turn.side] || turn.side}`;
+    no.textContent = `第 ${turn.turn_no} 轮  ${RELAY_SIDE_LABEL[turn.side] || turn.side}`;
     const state = document.createElement("span");
     state.className = "dim small";
     state.textContent = {
@@ -194,9 +194,9 @@ function relayDualRender() {
   const head = relayEl("relay-pair-head");
   const mainTitle = (relayDual && relayDual.main && relayDual.main.title) || "当前会话";
   const peerTitle = (relayDual && relayDual.peer && relayDual.peer.title) || "未创建";
-  if (mainChip) mainChip.textContent = "主屏 · " + mainTitle;
+  if (mainChip) mainChip.textContent = "主屏  " + mainTitle;
   if (peerChip) {
-    peerChip.textContent = "副屏 · " + peerTitle;
+    peerChip.textContent = "副屏  " + peerTitle;
     peerChip.classList.toggle("off", !(relayDual && relayDual.peer));
   }
   const runningNow = !!(pair && pair.state === "running");
@@ -204,9 +204,9 @@ function relayDualRender() {
   if (peerChip) peerChip.classList.toggle("active", runningNow && pair.current_side === "peer");
   if (head) {
     head.textContent = pair
-      ? `${RELAY_SIDE_LABEL[pair.current_side] || "主屏"} · ${
+      ? `${RELAY_SIDE_LABEL[pair.current_side] || "主屏"}  ${
           RELAY_STATE_LABEL[pair.state] || pair.state
-        }${pair.turn_no ? ` · 已完成 ${pair.turn_no} 轮` : ""}`
+        }${pair.turn_no ? `  已完成 ${pair.turn_no} 轮` : ""}`
       : "";
   }
 
@@ -232,18 +232,18 @@ function relayDualRender() {
   const side = RELAY_SIDE_LABEL[pair.current_side] || "主屏";
   const other = RELAY_SIDE_LABEL[relayNextSide()];
   if (running) {
-    relayStatus(`第 ${pair.turn_no + 1} 轮 · ${side}正在执行…`);
+    relayStatus(`第 ${pair.turn_no + 1} 轮  ${side}正在执行…`);
   } else if (state === "paused") {
-    relayStatus(`已中断 · 点「让${side}执行」继续`);
+    relayStatus(`已中断  点「让${side}执行」继续`);
   } else if (state === "interrupted") {
-    relayStatus(`上次中断 · 点「让${side}执行」继续`);
+    relayStatus(`上次中断  点「让${side}执行」继续`);
   } else if (pair.error && pair.error.message) {
     relayStatus(pair.error.message);
   } else {
     relayStatus(
       pair.turn_no
-        ? `第 ${pair.turn_no} 轮完成 · 轮到${side}（上次是${other}）`
-        : `准备就绪 · 从${side}开始`
+        ? `第 ${pair.turn_no} 轮完成  轮到${side}（上次是${other}）`
+        : `准备就绪  从${side}开始`
     );
   }
 }
@@ -379,7 +379,7 @@ function relayOnPairState(snapshot) {
     turns: snapshot.turns || [],
     // 广播只带 pair/turns，主副屏标题沿用打开时那一份
     main: prev.main || { id: snapshot.pair.main_session_id, title: "当前会话" },
-    peer: prev.peer || { id: snapshot.pair.peer_session_id, title: "接力 · 副屏" },
+    peer: prev.peer || { id: snapshot.pair.peer_session_id, title: "接力  副屏" },
   };
   relayDualPairId = snapshot.pair.id;
   relayDualRender();

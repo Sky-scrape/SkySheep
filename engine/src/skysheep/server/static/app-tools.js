@@ -4,7 +4,7 @@
 // （用户打开设置页时两份脚本早已加载完毕），加载顺序安全。
 // 本文件调用 app.js 侧的 request / addNotice / escapeHtml / autoHideStatus，
 // 并读写 app.js 顶层的 rtDebate / rtChair（let 全局词法绑定，经典脚本间共享）。
-// ---------- 设置 · 联网搜索 / AI 画图 ----------
+// ---------- 设置  联网搜索 / AI 画图 ----------
 // 服务商选择：只保留「自动 / 自定义 / 已配置」三档。
 // 「已配置」不是下拉选项，而是单独一屏列出你已在「模型服务」里配好的服务，
 // 点选即用它的地址与 Key（复用同一套凭据）——搜索 / 画图 / 语音都跑在
@@ -36,7 +36,7 @@ function providerPicker(d, labels, mode) {
   const items = configured.map((s) => `
     <button type="button" class="svc-item${s.name === d.provider ? " active" : ""}" data-svc="${escapeHtml(s.name)}">
       <span class="svc-name">${escapeHtml(s.name)}</span>
-      <span class="svc-meta">${escapeHtml(s.base_url || "")}${s.key_mask ? " · " + escapeHtml(s.key_mask) : ""}</span>
+      <span class="svc-meta">${escapeHtml(s.base_url || "")}${s.key_mask ? "  " + escapeHtml(s.key_mask) : ""}</span>
     </button>`).join("");
   return seg + `<div class="svc-list">${items}</div>`;
 }
@@ -272,9 +272,9 @@ async function renderRoundtableCfg() {
     </div>
     <div class="toolcfg-row"><label>辩论修订</label>
       <select data-f="debate_rounds" class="sel-md">
-        <option value="0">关闭 · 只独立作答</option>
-        <option value="1">1 轮 · 看彼此草稿后修订</option>
-        <option value="2">2 轮 · 修订两次</option>
+        <option value="0">关闭  只独立作答</option>
+        <option value="1">1 轮  看彼此草稿后修订</option>
+        <option value="2">2 轮  修订两次</option>
       </select>
     </div>
     <div class="toolcfg-row"><label>成员历史上下文</label>
@@ -351,7 +351,7 @@ async function renderAdversarialCfg() {
   };
 }
 
-// ---------- 设置 · 团队：五道防失控上限（与圆桌卡同款：读回当前值 → 编辑 → 保存热生效） ----------
+// ---------- 设置  团队：五道防失控上限（与圆桌卡同款：读回当前值 → 编辑 → 保存热生效） ----------
 // 热生效语义（后端契约）：改动只对之后新建的团队生效，进行中团队沿用建队时的值；
 // 数值越界由后端 clamp（保存后回传的是 clamp 过的新状态，直接照它回显）
 async function renderTeamCfg() {
@@ -409,9 +409,9 @@ async function renderTeamCfg() {
         stall_limit: num("stall_limit"),
         cron_resume_limit: num("cron_resume_limit"),
       });
-      teamCfgStatus("✓ 已保存并生效：队员上限 " + r.max_members + " · 单成员超时 " +
-        r.member_timeout_s + " 秒 · 轮次上限 " + r.max_rounds + " · 打回上限 " +
-        r.redo_limit + " · 停滞唤醒 " + r.stall_limit + " · 无人值守续跑 " +
+      teamCfgStatus("✓ 已保存并生效：队员上限 " + r.max_members + "  单成员超时 " +
+        r.member_timeout_s + " 秒  轮次上限 " + r.max_rounds + "  打回上限 " +
+        r.redo_limit + "  停滞唤醒 " + r.stall_limit + "  无人值守续跑 " +
         r.cron_resume_limit + " 次（对之后新建的团队生效）", true);
       renderTeamCfg(); // 回显 clamp 后的值：界面与 config.toml 保持一致
     } catch (e) {
@@ -429,7 +429,7 @@ function teamCfgStatus(text, ok) {
   autoHideStatus(el, text, ok);
 }
 
-// ---------- 设置 · 子代理（独立页：基础设置 + 自定义子代理 + 内置子代理） ----------
+// ---------- 设置  子代理（独立页：基础设置 + 自定义子代理 + 内置子代理） ----------
 async function renderSubagentCfg() {
   let d;
   try { d = await request("subagent.get"); } catch (e) { return; }
@@ -501,7 +501,7 @@ function modelOptions(d, selectedProvider, selectedModel) {
     html += `<optgroup label="${escapeHtml(p.name)}${p.has_key ? "" : "（未配 Key）"}">` +
       models.map((m) => {
         const v = `${p.name}|${m}`;
-        return `<option value="${escapeHtml(v)}"${v === sel ? " selected" : ""}>${escapeHtml(p.name + " · " + m)}</option>`;
+        return `<option value="${escapeHtml(v)}"${v === sel ? " selected" : ""}>${escapeHtml(p.name + "  " + m)}</option>`;
       }).join("") + `</optgroup>`;
   });
   return html;
@@ -622,7 +622,7 @@ function renderCustomSubagents(d) {
     li.className = "subagent-row";
     const toolLabel = c.tools === "all" ? "全部工具"
       : c.tools === "readonly" ? "仅只读"
-      : `自定义 · ${Array.isArray(c.tools) ? c.tools.length : 0} 个工具`;
+      : `自定义  ${Array.isArray(c.tools) ? c.tools.length : 0} 个工具`;
     li.innerHTML = `
       <div class="skill-main">
         <span class="item-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>

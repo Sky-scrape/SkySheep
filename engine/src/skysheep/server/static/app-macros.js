@@ -59,7 +59,7 @@ function renderMacroList() {
   box.innerHTML = macroState.list.map((m) => `
     <li class="macro-row" data-name="${escapeHtml(m.name)}">
       <span class="macro-name">${escapeHtml(m.name)}</span>
-      <span class="dim small">${m.steps} 步${m.created_at ? " · " + macroAgo(m.created_at) : ""}</span>
+      <span class="dim small">${m.steps} 步${m.created_at ? "  " + macroAgo(m.created_at) : ""}</span>
       <span class="spacer"></span>
       <button class="rp-mini macro-play" data-name="${escapeHtml(m.name)}">重放</button>
       <button class="rp-mini macro-del" data-name="${escapeHtml(m.name)}">删除</button>

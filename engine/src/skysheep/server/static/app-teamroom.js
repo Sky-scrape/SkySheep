@@ -1,4 +1,4 @@
-// ---------- 团队室（独立页签）：成员带 · 频道消息流 · 工单板 三分区同屏 ----------
+// ---------- 团队室（独立页签）：成员带  频道消息流  工单板 三分区同屏 ----------
 // 设计与落点见 docs/团队模式设计.md §15。定位：把聊天流内团队卡的三块内容
 // 提升为右侧面板的独立页签，两者同源渲染、双向即时同步——渲染全部复用团队卡
 // 的 tc* 系函数（app.js），本文件只提供同形 _ui 的容器、页签装载（loadTeamRoom）
@@ -348,7 +348,7 @@ function trOpenInterruptedReplay(rec) {
     rec.director_mode === "ai" ? { provider: "", model: "" } : null);
   card._sid = t.sid || trSid || "";
   card._teamId = teamId;
-  card._ui.sub.textContent = "应用重启前的团队记录 · 只读回放";
+  card._ui.sub.textContent = "应用重启前的团队记录  只读回放";
   trCard = card;
   root.appendChild(card);
   tcFinish(card, "interrupted", ""); // 终态口径：操作按钮全收，纯读

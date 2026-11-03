@@ -101,7 +101,7 @@ function renderWeekGrid() {
     const timeTxt = it.end_at
       ? `${agPad(d.getHours())}:${agPad(d.getMinutes())}–${agHm(it.end_at)}`
       : `${agPad(d.getHours())}:${agPad(d.getMinutes())}`;
-    const evtTitle = `${timeTxt} ${it.title}${it.notes ? " · " + it.notes : ""}`;
+    const evtTitle = `${timeTxt} ${it.title}${it.notes ? "  " + it.notes : ""}`;
     // 时间段块带上下两条拖拽手柄（拉边缘改起止）：按点事件没有时长可拉，不给手柄
     const grips = spanMin
       ? '<i class="ag-grip up" title="拖动改开始时间"></i><i class="ag-grip down" title="拖动改结束时间"></i>'
@@ -870,11 +870,11 @@ function renderRunCenter(d) {
   // 四行摘要（字段缺失容忍：一律 || 兜底，旧后端少字段也不缺行）
   q("run-center-line-tasks").textContent =
     `今日任务 ${cron.total || 0} 成功 ${cron.ok || 0} 失败 ${cron.error || 0}` +
-    (pipe.total ? ` · 流水线节点 ${pipe.total} 个（未成功 ${pipe.error || 0}）` : "");
+    (pipe.total ? `  流水线节点 ${pipe.total} 个（未成功 ${pipe.error || 0}）` : "");
   const usage = d.usage || {};
   let usageTxt = `今日 token ${usageFmtTokens(usage.today || 0)}`;
   if (usage.budget != null && usage.remaining != null) {
-    usageTxt += ` · 预算剩 ${usageFmtTokens(usage.remaining)} / ${usageFmtTokens(usage.budget)}`;
+    usageTxt += `  预算剩 ${usageFmtTokens(usage.remaining)} / ${usageFmtTokens(usage.budget)}`;
   }
   q("run-center-line-usage").textContent = usageTxt;
   q("run-center-line-next").textContent = "下次调度 " + fmtNextRun(d.next_run_at || 0);
@@ -900,7 +900,7 @@ function renderRunCenter(d) {
       ...pItems.map((it) => ({
         at: it.at,
         mark: runCenterMark(it.status),
-        head: `${it.pipeline || "流水线"} · ${it.title || "未命名节点"}`,
+        head: `${it.pipeline || "流水线"}  ${it.title || "未命名节点"}`,
         detail: it.result || "",
       })),
     ].sort((a, b) => (b.at || 0) - (a.at || 0));
@@ -973,7 +973,7 @@ async function loadCron() {
       `<div class="cron-main">
          <span class="cron-title">${t.enabled ? "" : "⏸ "}${escapeHtml(t.name)}</span>
          ${t.mode === "team" ? `<span class="chip safe-mark" title="定时团队：按模板「${escapeHtml(t.team_template || "")}」建队，AI 总管带队员协作">团队</span>` : ""}
-         <span class="cron-sched">${escapeHtml(fmtCronSchedule(t))} · 下次 ${fmtNextRun(t.next_run_at)}</span>
+         <span class="cron-sched">${escapeHtml(fmtCronSchedule(t))}  下次 ${fmtNextRun(t.next_run_at)}</span>
          ${t.last_result ? `<span class="cron-last">${status} ${escapeHtml(t.last_result)}</span>` : ""}
        </div>`;
     const ops = document.createElement("span");
@@ -1127,13 +1127,13 @@ async function cronModal(existing) {
       <div class="cron-tools">${toolRows}</div>
       <label class="cron-notify"><input id="cron-notify" type="checkbox"${t.notify_channel ? " checked" : ""}> 完成后推送到聊天渠道</label>
       <p class="dim small">任务跑完（成功或失败）会在飞书/微信渠道收到一条摘要：状态、耗时与结果节选；
-        渠道未启用或没有绑定聊天时静默跳过。渠道在 设置 · 聊天机器人渠道 里配置。</p>
+        渠道未启用或没有绑定聊天时静默跳过。渠道在 设置  聊天机器人渠道 里配置。</p>
       <p class="dim small">安全说明：定时任务无人值守运行，<b>只读工具本来就放行</b>；
         写入 / 执行类必须在这里勾选，否则运行时会自动拒绝。建议先只勾必要的。
         <b>勾选 run_command 等于允许无人值守执行任意命令</b>——任务文本一旦被注入，预授权就是它的通行证，只在任务内容完全可信时勾选。</p>
       <p class="dim small">运行前提：定时任务只在 <b>SkySheep 运行期间</b>触发（关窗时选「缩到系统托盘」它就继续在后台跑）。
         彻底退出期间错过的任务，会在下次打开应用时补跑一次。想让电脑一开机就守着，
-        可在 设置 · 高级 里打开「开机自动启动」；想让应用彻底关闭也照常到点跑，
+        可在 设置  高级 里打开「开机自动启动」；想让应用彻底关闭也照常到点跑，
         可在任务卡片上点「⊞」导出为系统计划任务（Windows）。</p>
     </div>`;
   // 与任务列表里的卡片一致：频率切换时显隐对应字段
@@ -1309,7 +1309,7 @@ function mountPipelineGraph(el, nodes, opts = {}) {
       ? ` ${n.runs || 0}/${n.max_runs}` : "";
     boxes += `<div class="pl-gnode pl-st-${n.status}${ctl ? " pl-ctl-" + n.control : ""}" style="left:${p.x}px;top:${p.y}px;width:${nodeW}px"` +
       (opts.onPick ? ` data-gid="${n.id}"` : "") +
-      ` title="${escapeHtml(n.title)} · ${PL_NODE_STATUS[n.status] || n.status}${ctl ? " · " + ctl.label : ""}">` +
+      ` title="${escapeHtml(n.title)}  ${PL_NODE_STATUS[n.status] || n.status}${ctl ? "  " + ctl.label : ""}">` +
       `<span>${mark} ${escapeHtml(n.title)}${loopTag}</span></div>`;
   });
   el.innerHTML = `<div class="pl-graph" style="height:${H}px">` +
@@ -1374,7 +1374,7 @@ async function loadPipelines() {
     li.innerHTML =
       `<div class="cron-main">
          <span class="cron-title">${escapeHtml(p.name)}</span>
-         <span class="cron-sched">${PL_PIPE_STATUS[p.status] || p.status} · 节点 ${done}/${(p.nodes || []).length} · 并发 ${p.concurrency}</span>
+         <span class="cron-sched">${PL_PIPE_STATUS[p.status] || p.status}  节点 ${done}/${(p.nodes || []).length}  并发 ${p.concurrency}</span>
          <div class="pl-graph-mount"></div>
        </div>`;
     const ops = document.createElement("span");
@@ -1433,7 +1433,7 @@ function pipelineModal(p, focusNodeId) {
   const box = document.createElement("div");
   const KIND_BADGE = { task: "⛓ 挂接任务", session: "💬 会话续跑" };
   const timeoutTxt = (n) => n.kind !== "task"
-    ? (n.timeout_s > 0 ? ` · 超时 ${Math.round(n.timeout_s / 60)} 分钟` : " · 不限时") : "";
+    ? (n.timeout_s > 0 ? `  超时 ${Math.round(n.timeout_s / 60)} 分钟` : "  不限时") : "";
   const rows = (p.nodes || []).map((n) => {
     const dep = (n.depends_on || []).map((d) => {
       const dn = (p.nodes || []).find((x) => x.id === d);
@@ -1459,7 +1459,7 @@ function pipelineModal(p, focusNodeId) {
         ${taskNote}
         ${dep ? `<div class="dim small">依赖：${escapeHtml(dep)}（${n.dep_mode === "any" ? "任一完成即可开始" : "全部完成才开始"}）</div>` : ""}
         ${n.allowed_tools && n.allowed_tools.length ? `<div class="dim small">预授权：${escapeHtml(n.allowed_tools.join("、"))}</div>` : ""}
-        ${n.kind !== "task" ? `<div class="dim small">运行方式：无人值守${escapeHtml(timeoutTxt(n))} · 已尝试 ${n.runs || 0} 次</div>` : ""}
+        ${n.kind !== "task" ? `<div class="dim small">运行方式：无人值守${escapeHtml(timeoutTxt(n))}  已尝试 ${n.runs || 0} 次</div>` : ""}
         ${n.last_error ? `<div class="pl-node-err">✗ ${escapeHtml(n.last_error)}</div>` : ""}
         ${n.result ? `<div class="pl-node-result">${escapeHtml(n.result.length > 400 ? n.result.slice(0, 400) + "…" : n.result)}</div>` : ""}
         ${rerun}
@@ -1467,7 +1467,7 @@ function pipelineModal(p, focusNodeId) {
   }).join("");
   box.innerHTML = `
     <div class="cron-fields">
-      <p class="dim small">流水线「${escapeHtml(p.name)}」· ${PL_PIPE_STATUS[p.status] || p.status} ·
+      <p class="dim small">流水线「${escapeHtml(p.name)}」  ${PL_PIPE_STATUS[p.status] || p.status}  
         每个节点是一次无人值守运行（预授权名单外的写/执行自动拒绝）；上游完成后下游自动开始，产出会注入下游的指令里。</p>
       <div class="dim small" id="pl-usage" style="display:flex;gap:12px;align-items:center">
         <span>用量统计中…</span>
@@ -1475,7 +1475,7 @@ function pipelineModal(p, focusNodeId) {
         <button class="rp-mini" data-op="export">⇩ 导出 JSON</button>
       </div>
       <label class="cron-notify"><input id="pl-notify" type="checkbox"${p.notify_channel ? " checked" : ""}> 节点完成后推送到聊天渠道</label>
-      <p class="dim small">每个节点到终态都会推一条紧凑进度（失败必推）；整条流水线收尾时照常再推一条汇总。渠道在 设置 · 聊天机器人渠道 里配置。</p>
+      <p class="dim small">每个节点到终态都会推一条紧凑进度（失败必推）；整条流水线收尾时照常再推一条汇总。渠道在 设置  聊天机器人渠道 里配置。</p>
       <div id="pl-graph-wrap" class="pl-graph-wrap"></div>
       ${rows || '<div class="dim small">（没有节点）</div>'}
       <p class="dim small">要改节点/指令：删除后重建（Agent 对话里说一句也能帮你重排）。</p>
@@ -1561,7 +1561,7 @@ function pipelineModal(p, focusNodeId) {
       await loadPipelines();
     };
   }
-  showModal(`编排 · ${p.name}`, box, onOk, okLabel);
+  showModal(`编排  ${p.name}`, box, onOk, okLabel);
   if (focusNodeId) requestAnimationFrame(() => {
     const card = box.querySelector(`.pl-node-view[data-nid="${Number(focusNodeId)}"]`);
     if (!card) return;
@@ -1700,7 +1700,7 @@ async function pipelineImportModal(preset) {
   const box = document.createElement("div");
   const opt = (v, label) => `<option value="${escapeHtml(String(v))}">${escapeHtml(label)}</option>`;
   const cronOptions = crons.map((c) =>
-    opt(c.id, `${c.enabled ? "" : "（已停用）"}${c.name} · ${c.prompt.slice(0, 30)}`)).join("");
+    opt(c.id, `${c.enabled ? "" : "（已停用）"}${c.name}  ${c.prompt.slice(0, 30)}`)).join("");
   const srcOptions = {
     cron: cronOptions,
     task: tasks.map((t) => opt(t.id, `[${t.status === "done" ? "已完成" : t.status === "running" ? "运行中" : t.status === "error" ? "失败" : "已取消"}] ${t.prompt.slice(0, 42)}`)).join(""),
@@ -1901,12 +1901,12 @@ function showAgendaReminder(item) {
   const bar = document.createElement("div");
   bar.className = "agenda-reminder";
   const remainMin = Math.ceil((item.start_at * 1000 - Date.now()) / 60000);
-  const remainTxt = remainMin > 0 ? ` · 约 ${remainMin} 分钟后开始` : "";
+  const remainTxt = remainMin > 0 ? `  约 ${remainMin} 分钟后开始` : "";
   bar.innerHTML =
     `<span class="ar-ico">⏰</span>
      <div class="ar-body">
        <b>${escapeHtml(item.title)}</b>
-       <span class="small dim">${fmtAgendaSpan(item)}${remainTxt}${item.notes ? " · " + escapeHtml(item.notes) : ""}</span>
+       <span class="small dim">${fmtAgendaSpan(item)}${remainTxt}${item.notes ? "  " + escapeHtml(item.notes) : ""}</span>
      </div>
      <button class="btn-ghost" data-a="done">完成</button>
      <button class="btn-ghost" data-a="snooze">稍后提醒</button>

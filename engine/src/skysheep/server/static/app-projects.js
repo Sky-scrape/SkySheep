@@ -176,8 +176,11 @@ function resetProjectPanels() {
   const filesResizer = document.getElementById("files-resizer");
   if (filesResizer) filesResizer.classList.add("hidden");
   // 浏览器预览若停在本项目的 /preview 相对地址上：切项目后同一路径已是新项目的
-  // 文件（或 404），留着只会「看着是旧页面、实际已是别的东西」。收回空态最诚实。
-  {
+  // 文件（或 404），留着只会「看着是旧页面、实际已是别的东西」。收回空态最诚实；
+  // 分栏形态同理（resetBrowserPreviewForProject 一并处理并清掉落盘地址）。
+  if (typeof resetBrowserPreviewForProject === "function") {
+    resetBrowserPreviewForProject();
+  } else {
     const frame = document.getElementById("browser-frame");
     const viewport = document.getElementById("browser-viewport");
     const empty = document.getElementById("browser-empty");

@@ -461,7 +461,7 @@ def test_factory_line_drawer_opens_with_a_verdict_not_a_table():
     # 最近运行列表不能把 partial 写成「已完成」：处置条说缺权限、下面六行全绿会自相矛盾
     runs_seg = js[js.index("function loadLineRuns(line) {"):]
     runs_seg = runs_seg[:runs_seg.index("function fmtDurationShort(")]
-    assert '"跑完 · 被拦"' in runs_seg and '"跑完 · 不算"' in runs_seg
+    assert '"跑完  被拦"' in runs_seg and '"跑完  不算"' in runs_seg
     assert "fx-run-meta' + warn" in runs_seg
 
 

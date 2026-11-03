@@ -175,7 +175,7 @@ from ..tools.memory import (
 )
 from ..tools.memory_embed import schedule_warmup
 from ..tools.pipeline import PipelineWriteTool
-from ..tools.shell import set_child_network
+from ..tools.shell import pop_bg_notes, set_child_network
 from ..tools.skill import LoadSkillTool
 from .audit import record_audit
 from .backend_parts._shared import EmitFn, ProjectCtx, SessionRuntime, collect_stream_text
@@ -3011,6 +3011,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             bg_note = self.tasks.pop_turn_note(sid)
             if bg_note:
                 text = bg_note + text
+        # 后台进程（run_command background=true）退出提示：同一套「上一轮之后
+        # 结束了什么」的注入口径。以前只有子代理有这条通道，命令类后台进程
+        # 得靠模型自己反复 action="read" 轮询，一次长安装就吃掉几轮上下文。
+        shell_note = pop_bg_notes(sid)
+        if shell_note:
+            text = shell_note + text
 
         # 轮末落库靠「消息身份」挑出本轮新增，不靠下标切片：compact_history 会在
         # 本轮内把 history 整体换成更短的新列表（core/context.py），旧下标随即失效：

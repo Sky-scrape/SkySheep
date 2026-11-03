@@ -67,6 +67,18 @@ _FG_CLIP_MARK = b"\n...\n"
 _BG: dict[int, dict] = {}
 _BG_NEXT_ID = [1]
 
+# 后台进程「结束」提示（进程级共享）：会话 → 待注入下一轮的提示行。
+#
+# 为什么要有它：以前 background=true 只回一句「已启动」，模型想知道结果就
+# 只能自己烧轮次反复 `action="read"`——一次长安装/长测试要吃掉好几轮上下文。
+# 现在进程退出时记一条提示，宿主在下一轮开头注入（与子代理终态注记同一套
+# 口径，见 core/subagent.py: pop_turn_note），模型开轮就知道「跑完了」。
+# 写入发生在读线程/watcher 线程，读取在事件循环线程，故用锁保护。
+_BG_NOTES: dict[str, list[str]] = {}
+_BG_NOTES_LOCK = threading.Lock()
+MAX_BG_NOTES = 10          # 每个会话最多攒 10 条，防批量起进程时把提示撑爆
+BG_NOTE_TAIL_CHARS = 600   # 提示里带多少尾部输出（够了；完整输出仍走 action=read）
+
 
 # 子进程环境剥离（安全审查 M6）：以环境变量形态配置的 API Key 会随 os.environ
 # 整体继承给 run_command 拉起的任何命令——被确认执行一次 `echo %OPENAI_API_KEY%`
@@ -497,6 +509,14 @@ def _bg_start(argv: list[str], cwd: str, owner: str = "",
     try:
         threading.Thread(target=_pump, args=(proc.stdout, buf), daemon=True).start()
         threading.Thread(target=_pump, args=(proc.stderr, buf), daemon=True).start()
+        # 退出 watcher 单起：它阻塞等退出码，混进 _pump 会把读线程占住。
+        # 起不来（线程耗尽）只是退回「模型自己 read」的旧行为，不该让启动失败。
+        try:
+            threading.Thread(
+                target=_watch_bg, args=(bid, _BG[bid]), daemon=True
+            ).start()
+        except Exception:  # noqa: BLE001 - 降级：不提示，仍可 action=read
+            obs.warning("bg_watcher_failed", f"后台进程 {bid} 的退出 watcher 启动失败")
     except Exception:
         _BG.pop(bid, None)
         _tree_kill(proc)
@@ -549,6 +569,9 @@ def _bg_kill(bid: int, sid: str = "") -> str:
     st = _BG.pop(bid, None)
     if st is None:
         return f"后台进程 {bid} 不存在（可能已结束并被清理）"
+    # 主动 kill 的不发「已结束」提示：这次终止是模型自己发起的，结果已知，
+    # 再往下一轮塞一条提示纯属白耗上下文（watcher 里也按这个标记跳过）。
+    st["killed"] = True
     proc = st["proc"]
     if proc.poll() is not None:
         close_job(st.get("job"))  # 已退出才走到这：顺手释放作业句柄
@@ -563,6 +586,54 @@ def _bg_kill(bid: int, sid: str = "") -> str:
     if isinstance(proc, _ProcProxy):
         proc.close()
     return f"后台进程 {bid} 已终止（{st['command'][:120]}）"
+
+
+def _watch_bg(bid: int, st: dict) -> None:
+    """等后台进程退出，记一条「已结束」提示给宿主下一轮注入。
+
+    单独一条线程而不是塞进 _pump：_pump 只管把读端倒进缓冲，进程退出与否它
+    并不知道（读端 EOF 也可能来自关闭继承句柄）。这里阻塞等退出码，等到了
+    再等读线程把尾巴写完（0.2 秒足够，等不到也不影响提示本身）。
+    """
+    proc = st.get("proc")
+    if proc is None:
+        return
+    try:
+        code = proc.wait()
+    except Exception:  # noqa: BLE001 - 等退出失败不该有任何副作用
+        code = None
+    owner = st.get("owner") or ""
+    if not owner or st.get("killed"):
+        # 无会话态（CLI/旧态）没人可叫醒；主动 kill 的那次模型自己知道结果，
+        # 再提示一遍只会白耗上下文。
+        return
+    time.sleep(0.2)
+    tail = str((st.get("buf") or {}).get("out") or "").strip()
+    if len(tail) > BG_NOTE_TAIL_CHARS:
+        tail = "…" + tail[-BG_NOTE_TAIL_CHARS:]
+    label = "已结束" if code == 0 else f"已退出（exit code {code}）"
+    note = (
+        f"后台进程 {bid}「{str(st.get('command') or '')[:100]}」{label}。"
+        f"用 run_command(action=\"read\", id={bid}) 取完整输出。"
+    )
+    if tail:
+        note += f"\n最近输出：\n{tail}"
+    with _BG_NOTES_LOCK:
+        bucket = _BG_NOTES.setdefault(owner, [])
+        bucket.append(note)
+        del bucket[:-MAX_BG_NOTES]
+
+
+def pop_bg_notes(session_id: str) -> str:
+    """取走该会话累积的「后台进程已结束」提示（每轮至多注入一次）。"""
+    sid = session_id or ""
+    if not sid:
+        return ""
+    with _BG_NOTES_LOCK:
+        lines = _BG_NOTES.pop(sid, None)
+    if not lines:
+        return ""
+    return "（系统提示：以下是自上一轮以来结束的后台进程）\n" + "\n".join(lines) + "\n\n"
 
 
 def _bg_list(sid: str = "") -> str:

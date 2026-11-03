@@ -109,3 +109,46 @@ async def test_search_history_tool_requires_session(tmp_path):
     tool = SearchHistoryTool(store=None)
     with pytest.raises(ToolError):
         await tool.run(SearchHistoryArgs(query="x"), ToolContext(tmp_path))
+
+
+def test_spill_transcript_is_git_ignored(tmp_path):
+    """transcripts 目录自带 .gitignore：`git add -A` 不能把会话原文/密钥提交。
+
+    同时验证发现类工具（glob/grep/@）不再索引它——跨会话读写面收口。
+    """
+    import subprocess
+
+    from skysheep.core.context import spill_transcript
+    from skysheep.core.ignore import IgnoreRules
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    agent = _agent(FakeProvider([]), tmp_path)
+    shown = spill_transcript(
+        agent,
+        [Message.user("API_KEY=sk-live-DEMOKEY123")],
+        session_id="sess-git",
+    )
+    assert shown.startswith(".skysheep/transcripts/")
+    scope = tmp_path / ".skysheep" / "transcripts"
+    assert (scope / ".gitignore").read_text(encoding="utf-8") == "*\n"
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path, check=True,
+        capture_output=True, text=True,
+    ).stdout
+    assert ".skysheep/transcripts" not in status, "会话原文被 git 当成未跟踪文件，会被 add -A 收走"
+    assert IgnoreRules.load(tmp_path).matches(".skysheep/transcripts/x.md")
+
+
+async def test_search_session_history_not_starved_by_json_key_hits(store):
+    """JSON 键名假阳性不能挤掉真命中：SQL LIMIT 必须在校验之后才截断。
+
+    旧实现一次取 limit 条（20）再过滤，60 条只含 "role" 键名的消息会把窗口
+    占满，seq=1 的真命中被静默吞成 0 条。
+    """
+    sess = await store.create_session(None, title="假阳性窗口")
+    await store.append_message(sess.id, Message.user("my role is admin in the config"))
+    for i in range(60):
+        await store.append_message(sess.id, Message.user(f"无关内容 {i}"))
+    rows = await store.search_session_history(sess.id, "role", limit=2)
+    assert rows, "JSON 键名假阳性把真命中挤没了"
+    assert any("my role is admin" in r["text"] for r in rows)

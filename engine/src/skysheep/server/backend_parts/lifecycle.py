@@ -306,6 +306,11 @@ class LifecycleMixin:
                     item.fail(RuntimeError("会话已删除"))
                 self._base_queue.clear()
             self._forget_runtime(rt)
+            # 渠道侧重键（会话 id → 绑定键/门控）随会话一起清：_forget_runtime
+            # 只管 runtime，不清这两个 dict，删过的会话会留下带 store/working_dir
+            # 闭包引用的门控与渠道名残键，长期运行单向增长。
+            self._channel_gates.pop(session_id, None)
+            self._channel_names.pop(session_id, None)
             task = rt.run_task
             if task is not None and not task.done():
                 # 等被取消的轮次收尾（含 shield 保护的落库）跑完再删行：
@@ -329,6 +334,10 @@ class LifecycleMixin:
         if orch is not None:
             self._release_team_providers(orch)
         await self.store.delete_session(session_id)
+        # 后台进程结束提示也随会话清：会话没了，桶不该继续驻留到进程退出
+        from ...tools.shell import clear_bg_notes  # 局部导入避免 tools↔server 循环
+
+        clear_bg_notes(session_id)
         # 检查点（改前文件快照）随会话一起清：会话没了，快照不该继续占磁盘
         await asyncio.to_thread(self.checkpoints.forget_session, session_id)
         self._manually_named.discard(session_id)

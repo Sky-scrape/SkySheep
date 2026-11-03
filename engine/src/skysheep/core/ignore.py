@@ -20,8 +20,11 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 IGNORE_FILE = ".skysheepignore"
-# 内建默认：密钥文件与 git 元数据永远不进「发现」结果
-BUILTIN_PATTERNS = (".env", ".env.*", ".git")
+# 内建默认：密钥文件与 git 元数据永远不进「发现」结果。
+# .skysheep/transcripts 是压缩时落盘的会话原文（可能含读过的 .env、密钥、
+# 客户数据）：发现类工具（glob/grep/@/文件树）一律不索引，避免同项目其他
+# 会话或子代理无确认地把它扫回上下文；显式 read_file 仍按既有口径可读。
+BUILTIN_PATTERNS = (".env", ".env.*", ".git", ".skysheep/transcripts")
 
 
 class _Rule:

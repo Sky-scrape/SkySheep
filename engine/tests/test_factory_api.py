@@ -255,7 +255,8 @@ def test_factory_line_add_validates_and_creates_task(home):
         assert added["name"] == "轻量产线"
         assert added["weekday"] == 0, "weekday=0（周一）是合法值"
         assert added["time_of_day"] == "08:00"
-        assert added["allowed_tools"] == ["read_file", "read_file", "list_dir"]
+        # 去空白 + 去重（重复项不再落库；名单以逗号 join 存，重复没有意义）
+        assert added["allowed_tools"] == ["read_file", "list_dir"]
         assert added["next_run_at"] > 0
 
         # 校验与 cron.add 同口径

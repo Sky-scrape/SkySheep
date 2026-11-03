@@ -80,8 +80,11 @@ def outcome_for(status: str, *, denied_count: int = 0) -> str:
 def denied_tools_json(facts: dict | None) -> str:
     """把本轮「被拦工具名 → 次数」压成一段有界的 JSON 快照。
 
-    只留次数最多的前 8 项、名字截到 60 字符：抽屉要的是「该补哪个工具」，
-    不是完整审计日志；表里也不该出现能无限增长的自由文本。
+    只留次数最多的前 8 项、名字截到 120 字符：抽屉要的是「该补哪个工具」，
+    不是完整审计日志；表里也不该出现能无限增长的自由文本。120 与后端入口
+    （backend_parts/_shared.TOOL_NAME_MAX）同值——合法的 MCP 工具名不会在
+    60 字符处被截成永远补不中的假键；真超长的截断名带「…」，处置台明确拒绝
+    补授权，不再报「已补齐」。
     """
     tools = (facts or {}).get("denied_tools")
     if not isinstance(tools, dict):
@@ -93,7 +96,10 @@ def denied_tools_json(facts: dict | None) -> str:
         except (TypeError, ValueError):
             continue
         if n > 0:
-            items.append((str(name)[:60], n))
+            label = str(name)
+            if len(label) > 120:
+                label = label[:120] + "…"
+            items.append((label, n))
     if not items:
         return ""
     items.sort(key=lambda pair: (-pair[1], pair[0]))

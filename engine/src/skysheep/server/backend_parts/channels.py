@@ -19,6 +19,11 @@ from ._shared import SessionRuntime
 
 logger = logging.getLogger("skysheep.security")
 
+# 每个平台名下的绑定（含话题键）上限：话题分会话把键空间从「一个平台一个会话」
+# 放大到「每个话题一个会话」，已批准的群成员可以不断开新话题制造会话垃圾与
+# 常驻 runtime。50 对个人使用的遥控端足够；到顶后在桌面删掉无用会话即可。
+MAX_CHANNEL_BINDINGS = 50
+
 
 def _platform_of(binding_key: str) -> str:
     """绑定键 → 平台名（`feishu#thread-1` → `feishu`）。
@@ -539,6 +544,13 @@ class ChannelsMixin:
             # 这里必须补建，否则 channel_run 会因「会话不存在」直接失败。
             await self._get_channel_runtime(bound, plat)
             return bound
+        # 只有「新建绑定」才受上限约束：已有绑定的复用不受影响（它本来就在
+        # 计数里）。到顶后拒绝新话题，避免已批准群成员无限开话题堆会话/runtime。
+        if await self.store.count_channel_bindings(plat) >= MAX_CHANNEL_BINDINGS:
+            raise RuntimeError(
+                f"该渠道的话题会话已达上限（{MAX_CHANNEL_BINDINGS} 个）："
+                "请先在桌面侧删掉不再需要的话题会话，再继续"
+            )
         sess = await self.store.create_session(target_pid, title=f"🤖 {plat}")
         await self.store.set_channel_binding(channel_name, sess.id)
         await self._get_channel_runtime(sess.id, plat)
@@ -547,6 +559,14 @@ class ChannelsMixin:
     async def channel_new_session(self, channel_name: str) -> str:
         """给渠道开一个新会话（/new），旧的保留可查。归当前项目（无项目态落快聊）。"""
         plat = _platform_of(channel_name)
+        # 全新话题键的 /new 会新增一行绑定，受平台绑定上限约束；已有键的 /new
+        # 只是替换绑定行（行数不变），不拦。
+        if await self.store.get_channel_binding(channel_name) is None and \
+                await self.store.count_channel_bindings(plat) >= MAX_CHANNEL_BINDINGS:
+            raise RuntimeError(
+                f"该渠道的话题会话已达上限（{MAX_CHANNEL_BINDINGS} 个）："
+                "请先在桌面侧删掉不再需要的话题会话，再继续"
+            )
         sess = await self.store.create_session(self._cur_project_id(), title=f"🤖 {plat}")
         await self.store.set_channel_binding(channel_name, sess.id)
         await self._get_channel_runtime(sess.id, plat)
@@ -798,8 +818,9 @@ class ChannelsMixin:
             "duration_ms": turn_ms,
         }
 
-    async def channel_stop(self, session_id: str) -> None:
-        self.cancel_run(session_id)
+    async def channel_stop(self, session_id: str) -> bool:
+        """中断该会话正在跑的轮次；返回是否真的取消到了（供 /stop 如实回执）。"""
+        return bool(self.cancel_run(session_id))
 
     async def channel_status_text(self, session_id: str) -> str:
         """给 /status 命令用的简短状态。"""
@@ -849,6 +870,9 @@ class ChannelsMixin:
     ) -> dict:
         """把聊天窗口的审批回复投给等待中的门控。
 
+        ``channel_name`` 是**绑定键**（`feishu` 或 `feishu#话题`）：话题会话的
+        门绑定在完整键下，按平台名查会永远错过它自己的审批门。
+
         返回 ``{"hit": bool, "actor_mismatch": bool}``：hit=True 表示决定已生效；
         actor_mismatch=True 表示有待决策项、但回复者不是这一轮的发起人（群聊
         场景），决定不生效——调用方据此提示，而不是把 "allow" 当新消息再跑一轮。
@@ -869,7 +893,7 @@ class ChannelsMixin:
         return {"hit": bool(gate.submit_latest(decision, actor))}
 
     async def channel_has_waiting_decision(self, channel_name: str) -> bool:
-        """该渠道是否有等待中的审批（manager 用它区分「回应确认卡」与普通消息）。"""
+        """该绑定键（平台名或 `平台#话题`）是否有等待中的审批。"""
         session_id = await self.store.get_channel_binding(channel_name)
         if not session_id:
             return False

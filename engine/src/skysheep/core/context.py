@@ -18,7 +18,7 @@ from pathlib import Path
 from ..events import CompactionEvent
 from ..messages import Message
 from ..models.base import ProviderTextDelta
-from ..textio import write_text_atomic
+from ..textio import read_text_file, write_text_atomic
 from .provider_errors import is_transient_error
 
 logger = logging.getLogger("skysheep.core.context")
@@ -148,6 +148,28 @@ def _safe_recent_start(messages: list[Message], keep: int) -> int:
     return max(1, start)
 
 
+def _ensure_transcript_gitignore(root: Path) -> None:
+    """transcripts 目录自带 .gitignore，防 `git add -A` 把会话原文提交进版本库。
+
+    原文可能含用户读过的 .env、密钥、客户数据；用户项目未必忽略 .skysheep/。
+    嵌套 .gitignore 只影响这个目录本身，不碰用户自己的 .gitignore，也不依赖
+    .git/info/exclude（worktree 下 .git 是文件，未必定位得到）。
+    """
+    ignore = root / ".gitignore"
+    try:
+        if ignore.exists():
+            text = read_text_file(ignore).text
+            if any(line.strip() == "*" for line in text.splitlines()):
+                return
+            # 已有一份不完全的忽略文件（旧版本/用户手写）：补上通配行，
+            # 不覆盖已有内容。目录是引擎自己的产物区，以不泄露为优先。
+            write_text_atomic(ignore, text.rstrip("\n") + "\n*\n")
+        else:
+            write_text_atomic(ignore, "*\n")
+    except OSError:
+        pass  # 落盘是增强，忽略文件写不出来也不拖垮压缩
+
+
 def _spill_target(agent, session_id: str) -> tuple[Path, str] | None:
     """transcript 落点：返回 (绝对路径, 给模型看的路径)。
 
@@ -167,6 +189,7 @@ def _spill_target(agent, session_id: str) -> tuple[Path, str] | None:
             root = Path.home() / ".skysheep" / TRANSCRIPT_DIR
             shown = str(root / name)
         root.mkdir(parents=True, exist_ok=True)
+        _ensure_transcript_gitignore(root)
         return root / name, shown
     except OSError as e:  # noqa: BLE001 - 磁盘/权限问题不该拖垮压缩
         logger.warning("compact_history: 无法创建 transcript 目录（%s），本次不落盘", e)

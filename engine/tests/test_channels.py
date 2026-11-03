@@ -892,6 +892,7 @@ class _FakeHost:
 
     async def channel_stop(self, session_id):
         self.stopped = session_id
+        return bool(getattr(self, "stop_ok", True))
 
     async def channel_status_text(self, session_id):
         return f"状态 {session_id}"
@@ -983,6 +984,76 @@ async def test_manager_routes_approval_reply_before_agent():
     ))
     assert host.decisions == [("feishu", Decision.ALLOW_ONCE, "9")]
     assert host.ran == [], "审批回复不应触发新一轮 Agent 运行"
+
+
+async def test_decision_in_topic_uses_binding_key():
+    """话题会话的审批必须按 `feishu#topic` 查门，不能按平台名查（否则永远错过）。"""
+    from skysheep.channels.base import ChannelMessage
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    host.waiting = True
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="oc", text="allow", approved=True,
+        thread_key="topic-1",
+    ))
+    assert host.decisions == [("feishu#topic-1", Decision.ALLOW_ONCE, "9")]
+    assert host.ran == []
+
+
+def test_take_batch_never_merges_across_chats_or_actors():
+    """合并只发生在同一 (chat_id, actor) 内：跨聊天合并会把私聊内容发进群聊。"""
+    from skysheep.channels.base import ChannelMessage
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    a1 = ChannelMessage(channel="feishu", actor="u1", chat_id="A", text="a1", approved=True)
+    b1 = ChannelMessage(channel="feishu", actor="u2", chat_id="B", text="b1", approved=True)
+    a2 = ChannelMessage(channel="feishu", actor="u1", chat_id="A", text="a2", approved=True)
+    mgr._inbox["feishu#t"] = [a1, b1, a2]
+    batch = mgr._take_batch("feishu#t")
+    assert [m.text for m in batch] == ["a1", "a2"]
+    assert [m.text for m in mgr._inbox["feishu#t"]] == ["b1"]
+
+
+async def test_stop_targets_running_binding_key():
+    """/stop 停在跑的那一批，而不是发送者自己的键；并如实回执是否停到。"""
+    from skysheep.channels.base import ChannelMessage
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    mgr._running_key = "feishu#a"
+    mgr.sessions["feishu#a"] = "sess-a"
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="oc", text="/stop", approved=True,
+        thread_key="b",
+    ))
+    assert host.stopped == "sess-a"
+    assert any("已请求中断" in text for _cid, text in ch.out)
+    # 没停到时不能回「已请求中断」
+    host.stop_ok = False
+    ch.out.clear()
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="oc", text="/stop", approved=True,
+        thread_key="b",
+    ))
+    assert any("当前没有在跑的轮次" in text for _cid, text in ch.out)
+
+
+async def test_pending_queue_cap_is_global_across_topic_keys():
+    """排队上限按所有绑定键合计：K 个话题不能各排 K 份绕过限流。"""
+    from skysheep.channels.base import ChannelMessage
+    from skysheep.channels.manager import MAX_PENDING_TURNS
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    mgr._running = True
+    for i in range(MAX_PENDING_TURNS):
+        mgr._inbox[f"feishu#t{i}"] = [ChannelMessage(
+            channel="feishu", actor="9", chat_id=f"c{i}", text="排队", approved=True,
+        )]
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="new", text="再来一条", approved=True,
+        thread_key="new",
+    ))
+    assert "排队的消息太多了" in ch.out[-1][1]
+    assert "feishu#new" not in mgr._inbox
 
     # 没有待审批项 / 门查不到时（渠道门被换掉或重建、审批已超时落定），allow
     # 也不再当新消息跑（审查 F1.1③）：它本是审批流的回执，落进对话会被模型
@@ -2468,3 +2539,18 @@ async def test_channel_style_is_injected_into_system_prompt(tmp_path):
     assert CHANNEL_STYLE_MARK in agent.history[0].text
     be._apply_channel_style(agent)             # 幂等：不重复拼接
     assert agent.history[0].text.count(CHANNEL_STYLE_MARK) == 1
+
+
+async def test_channel_binding_count_includes_topic_keys_and_cleans_on_delete(store):
+    """话题会话计数含 `feishu#topic` 键；删会话时绑定行一并清（上限不被死绑定吃掉）。"""
+    ids = []
+    for i in range(3):
+        sess = await store.create_session(None, title=f"话题{i}")
+        await store.set_channel_binding(f"feishu#t{i}", sess.id)
+        ids.append(sess.id)
+    sess = await store.create_session(None, title="主聊天")
+    await store.set_channel_binding("feishu", sess.id)
+    assert await store.count_channel_bindings("feishu") == 4
+    await store.delete_session(ids[0])
+    assert await store.count_channel_bindings("feishu") == 3
+    assert await store.get_channel_binding("feishu#t0") is None

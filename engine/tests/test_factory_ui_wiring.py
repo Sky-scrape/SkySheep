@@ -478,7 +478,7 @@ def test_factory_verdict_grants_tools_with_a_preview():
     assert 'd.act = "pipeline"' in js
     # 判「还缺什么」只看 pending_tools，不看历史 denied_tools（补完权限不会消失）
     assert "h.pending_tools || {}" in diag
-    assert "预授权已补齐" in diag
+    assert "名单已包含被拦工具" in diag
     # 补完之后先别继续喊缺权限：等「下一次运行的结束时间」晚于补的时间再重新判
     assert "S.granted[line.key]" in diag
     assert "level: \"ok\"" in diag

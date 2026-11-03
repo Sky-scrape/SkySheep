@@ -42,8 +42,45 @@ async def test_bg_process_records_completion_note(home):
     assert note, "进程退出后应留下一条完成提示"
     assert "done-marker" in note
     assert str(info["pid"]) in note
+    # 外部命令输出是不可信内容：必须带来源标注与围栏，别借引擎框架背书
+    assert "不可信" in note and "外部输出" in note
     # 取走即清空：同一条提示不会被两轮重复注入
     assert shell_mod.pop_bg_notes("sess-a") == ""
+
+
+async def test_bg_note_after_clear_read_does_not_promise_more_output(home):
+    """运行中 clear=true 取走输出后退出：提示不能再说「取完整输出」。"""
+    _reset_bg_state()
+    cmd = ("echo clear-marker & ping -n 8 127.0.0.1 >nul"
+           if shell_mod.IS_WINDOWS else "echo clear-marker; sleep 6")
+    info = shell_mod._bg_start(shell_mod._shell_argv(cmd), str(home), owner="sess-d")
+    bid = int(info["pid"])
+    out = ""
+    for _ in range(100):
+        raw = shell_mod._bg_read(bid, clear=False, sid="sess-d")
+        out = raw.split("--- 输出（最近内容） ---", 1)[-1]
+        if "clear-marker" in out:
+            break
+        await asyncio.sleep(0.05)
+    assert "clear-marker" in out
+    shell_mod._bg_read(bid, clear=True, sid="sess-d")
+    note = ""
+    for _ in range(250):
+        note = shell_mod.pop_bg_notes("sess-d")
+        if note:
+            break
+        await asyncio.sleep(0.05)
+    assert note
+    assert "没有待读的新输出" in note
+    assert "完整输出可用" not in note, "输出已被 clear 读走，不能再承诺还能取到"
+
+
+def test_clear_bg_notes_drops_session_bucket():
+    """会话删除时桶要一起清，不能随弃置会话常驻进程内存。"""
+    shell_mod._BG_NOTES.clear()
+    shell_mod._BG_NOTES["sess-gone"] = ["旧提示"]
+    shell_mod.clear_bg_notes("sess-gone")
+    assert "sess-gone" not in shell_mod._BG_NOTES
 
 
 async def test_bg_notes_are_per_session(home):

@@ -3019,9 +3019,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 后台进程（run_command background=true）退出提示：同一套「上一轮之后
         # 结束了什么」的注入口径。以前只有子代理有这条通道，命令类后台进程
         # 得靠模型自己反复 action="read" 轮询，一次长安装就吃掉几轮上下文。
-        shell_note = pop_bg_notes(sid)
-        if shell_note:
-            text = shell_note + text
+        # 团队轮不取（与子代理注记同一条守卫）：注记留在簿子里，收队/交付后
+        # 的下一普通轮自然轮到；否则会被拼进总管指令原样落频道。
+        if not team_bound:
+            shell_note = pop_bg_notes(sid)
+            if shell_note:
+                text = shell_note + text
 
         # 轮末落库靠「消息身份」挑出本轮新增，不靠下标切片：compact_history 会在
         # 本轮内把 history 整体换成更短的新列表（core/context.py），旧下标随即失效：

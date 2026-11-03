@@ -11,10 +11,11 @@ host 对象（通常就是 ServerBackend）需要提供：
     channel_ensure_session(channel_name) -> str
     channel_new_session(channel_name) -> str
     channel_run(session_id, text, actor="") -> dict   # {"text": str} 或 {"error": str}
-    channel_stop(session_id) -> None
+    channel_stop(session_id) -> bool   # 是否真的取消到了（/stop 如实回执）
     channel_status_text(session_id) -> str
     channel_list_sessions() -> list[dict]
-    channel_submit_decision(channel_name, decision, actor="") -> dict
+    channel_submit_decision(binding_key, decision, actor="") -> dict
+    channel_has_waiting_decision(binding_key) -> bool
 """
 
 from __future__ import annotations
@@ -135,6 +136,9 @@ class ChannelManager:
         # 待跑消息（按绑定键分组）+ 「现在是否有一批在跑」（见 _drain）
         self._inbox: dict[str, list[ChannelMessage]] = {}
         self._running = False
+        # 当前在跑的那一批属于哪个绑定键：/stop 要停在跑的轮次，而不是停在
+        # 发送者自己那个键上（话题分会话后两者可能不是同一个）
+        self._running_key = ""
 
     # ---- 生命周期 ----
 
@@ -279,9 +283,12 @@ class ChannelManager:
         # 不先拦这一层，用户回 "allow" 会被当成新消息再跑一轮，确认永远无人应答。
         # 决定只认这一轮的发起人（群聊里名单是按 chat_id 命中的，所有成员的消息
         # 都是 approved 的）；不是发起人时明确告知，而不是把 "allow" 当新消息跑掉。
+        # 按键必须是**绑定键**（feishu#话题）：话题会话的绑定存在完整键下，
+        # 按平台名查会永远查不到它自己的审批门。
+        decision_key = self._binding_key(msg)
         decision = parse_decision(msg.text)
         if decision is not None:
-            res = await self.host.channel_submit_decision(msg.channel, decision, msg.actor)
+            res = await self.host.channel_submit_decision(decision_key, decision, msg.actor)
             if res.get("hit"):
                 await self._reply(
                     channel, msg,
@@ -310,7 +317,7 @@ class ChannelManager:
         # 模棱两可的应和（"ok"/"1"/"可以"）不当作批准：有待审批项时给明确指引，
         # 不把它当新消息排队（前一轮正卡在审批上，排队的消息会一直等到超时被拒）
         ack_like = (msg.text or "").strip().lower() in AMBIGUOUS_ACK_WORDS
-        if ack_like and await self.host.channel_has_waiting_decision(msg.channel):
+        if ack_like and await self.host.channel_has_waiting_decision(decision_key):
             await self._reply(
                 channel, msg,
                 "看到你在回应确认卡：批准请回 allow（或 yes / 允许），拒绝请回 deny（或 拒绝）。",
@@ -332,14 +339,17 @@ class ChannelManager:
         #
         # 上限按「1 条在跑 + MAX_PENDING_TURNS 条排队」取：每条排队消息都是一整轮
         # 的量级（token 是真金白银），不设上限的话刷屏等于刷预算。
+        # 计数必须**全局**（所有绑定键合计）：话题分会话后键空间不再是一个平台
+        # 一个键，按单键计数会让 K 个话题各排 K 份，上限失效。
         bkey = self._binding_key(msg)
-        # 「前面还有几条」= 箱里排着的 + 正在跑的那一批（跑的那批已经从箱里取走了，
-        # 不加上它就会告诉用户「前面还有 0 条」，等于没回执）
-        ahead = len(self._inbox.get(bkey) or ()) + (1 if self._running else 0)
+        queued = sum(len(items) for items in self._inbox.values())
+        # 「前面还有几条」= 所有箱里排着的 + 正在跑的那一批（跑的那批已经从箱里
+        # 取走了，不加上它就会告诉用户「前面还有 0 条」，等于没回执）
+        ahead = queued + (1 if self._running else 0)
         if ahead >= MAX_PENDING_TURNS + 1:
             await self._reply(
                 channel, msg,
-                f"排队的消息太多了（前面还有 {ahead - 1 if self._running else ahead} 条），"
+                f"排队的消息太多了（前面还有 {queued} 条），"
                 "这条没有执行。等当前这轮结束再发，或发 /stop 中断当前轮。",
             )
             return
@@ -369,11 +379,28 @@ class ChannelManager:
         return ""
 
     def _take_batch(self, bkey: str) -> list[ChannelMessage]:
-        """取走该会话最多 BATCH_MAX 条连续消息，剩下的留给下一轮。"""
+        """取走该绑定键下同一聊天（同一发送者）的最多 BATCH_MAX 条消息。
+
+        合并的前提是「同一个人的同一串话」：跨聊天合并会把 A 聊天的私聊请求
+        混进 B 聊天的回复里（回复只发往 batch[0]），跨发送者合并还会让审批
+        发起人错绑（gate 只认本轮 actor）。所以按 (chat_id, actor) 分组取批，
+        其余消息原样留在箱子里等下一轮。
+        """
         items = self._inbox.get(bkey) or []
-        batch = items[:BATCH_MAX]
-        del items[:BATCH_MAX]
         if not items:
+            return []
+        chat_id = items[0].chat_id
+        actor = items[0].actor
+        batch: list[ChannelMessage] = []
+        rest: list[ChannelMessage] = []
+        for m in items:
+            if m.chat_id == chat_id and m.actor == actor and len(batch) < BATCH_MAX:
+                batch.append(m)
+            else:
+                rest.append(m)
+        if rest:
+            self._inbox[bkey] = rest
+        else:
             self._inbox.pop(bkey, None)
         return batch
 
@@ -391,7 +418,11 @@ class ChannelManager:
             if not batch:
                 continue
             async with self._lock:
-                await self._run_prompt(batch)
+                self._running_key = bkey
+                try:
+                    await self._run_prompt(batch)
+                finally:
+                    self._running_key = ""
 
     async def _reply(self, channel: Channel, msg: ChannelMessage, text: str) -> None:
         await self._send_text(channel, msg.chat_id, text)
@@ -412,11 +443,11 @@ class ChannelManager:
 
     async def _handle_command(self, channel: Channel, msg: ChannelMessage, cmd: commands.Command) -> None:
         bkey = self._binding_key(msg)
-        sid = await self._session_id(bkey)
         if cmd.name == "help":
             await self._reply(channel, msg, commands.HELP_TEXT)
         elif cmd.name == "status":
             try:
+                sid = await self._session_id(bkey)
                 text = await self.host.channel_status_text(sid)
             except Exception as e:  # noqa: BLE001
                 text = f"取状态失败：{e}"
@@ -439,15 +470,31 @@ class ChannelManager:
             except Exception as e:  # noqa: BLE001
                 await self._reply(channel, msg, f"列表失败：{e}")
         elif cmd.name == "stop":
-            # 排队中的消息一并丢弃：用户说停，多数时候意思是「这一摊都停下」，
-            # 只停当前轮而让后面几条接着跑，等于停了又没停。
-            dropped = len(self._inbox.pop(bkey, None) or ())
+            # 停的是**当前在跑的那一批**，不一定是发送者自己的绑定键：话题分会话
+            # 后群里 A 话题在跑、用户在 B 话题（或主聊天）发 /stop，按发送者键
+            # 找人会停空。排队中的消息一并丢弃（用户说停 = 这一摊都停下）。
+            # 不用 _session_id：它会顺手建会话，对没跑过的新话题发 /stop 不该
+            # 留下一个空会话。
+            target = self._running_key or bkey
+            target_sid = self.sessions.get(target) or (self.sessions.get(bkey) if target != bkey else "")
+            dropped = len(self._inbox.pop(target, None) or ())
+            if target != bkey:
+                dropped += len(self._inbox.pop(bkey, None) or ())
+            ok = False
             try:
-                await self.host.channel_stop(sid)
-                tail = f"，并丢弃了排队中的 {dropped} 条" if dropped else ""
-                await self._reply(channel, msg, f"已请求中断当前这一轮{tail}。")
+                if target_sid:
+                    ok = bool(await self.host.channel_stop(target_sid))
             except Exception as e:  # noqa: BLE001
                 await self._reply(channel, msg, f"中断失败：{e}")
+                return
+            tail = f"，并丢弃了排队中的 {dropped} 条" if dropped else ""
+            if ok:
+                await self._reply(channel, msg, f"已请求中断当前这一轮{tail}。")
+            else:
+                await self._reply(
+                    channel, msg,
+                    f"当前没有在跑的轮次{tail}。要下达新任务直接把需求说出来即可。",
+                )
 
     def _binding_key(self, msg: ChannelMessage) -> str:
         """消息落到哪个会话：平台名，或 `平台#话题键`。

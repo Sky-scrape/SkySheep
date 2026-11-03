@@ -63,6 +63,37 @@ class SessionRuntime:
     ctx: ProjectCtx | None = None
 
 
+# 预授权工具名上限：与 core/run_ledger.py 的落库截断同值。超过它的名字在
+# 运行账本里只能以「…」截断态出现，处置台永远补不中，故入口直接拒绝。
+TOOL_NAME_MAX = 120
+
+
+def clean_tool_names(raw) -> list[str]:
+    """归一预授权工具名列表：去空白、去重、拒绝英文逗号与超长名。
+
+    名单在 SessionStore 里以逗号 join 落库（allowed_tools TEXT），名字里带逗号
+    会在读回时裂成多个假键：确认页摊开的清单与库里真正生效的清单分叉，用户
+    补了授权却永远命不中。工具名本来就不该有逗号，直接在入口拒绝。
+    """
+    out: list[str] = []
+    if isinstance(raw, str):
+        raw = [raw]  # 误传单个字符串时按一项处理，别按字符拆
+    for item in raw or []:
+        name = str(item).strip()
+        if not name or name in out:
+            continue
+        if "," in name:
+            raise RuntimeError(
+                "工具名不能包含英文逗号（预授权名单以逗号分隔存储）：" + name[:40]
+            )
+        if len(name) > TOOL_NAME_MAX:
+            raise RuntimeError(
+                f"工具名过长（>{TOOL_NAME_MAX} 字符，运行账本无法完整记录）：" + name[:40] + "…"
+            )
+        out.append(name)
+    return out
+
+
 async def collect_stream_text(provider: Provider, prompt: str) -> str:
     """一次性模型调用收流：发一轮请求，把文本增量拼成完整回复返回。
 

@@ -382,3 +382,33 @@ async def test_gate_blocks_legacy_assignment_prefix_interpreter_repro() -> None:
         WhitelistRule(tool="run_command", kind="prefix", pattern="A=1 B=2"))
     evil = 'A=1 B=2 C=3 D=4 E=5 F=6 G=7 H=8 python -c "import os;os.system(\'calc\')"'
     assert await gate.authorize(cmd, {"command": evil}) is not None
+
+
+# ---- F6.1 未闭合面：包装器垫在 sudo 前（nohup/timeout/xargs） ----------
+
+@pytest.mark.parametrize("command,kind,pattern", [
+    ("nohup sudo apt install curl", "prefix", "nohup sudo apt install"),
+    ("timeout 10 sudo apt install curl", "prefix", "timeout 10 sudo apt install"),
+    ("xargs sudo apt install curl", "prefix", "xargs sudo apt install"),
+    ("nohup sudo rm -rf /", "exact", "nohup sudo rm -rf /"),
+    ("timeout 10 sudo rm -rf /", "exact", "timeout 10 sudo rm -rf /"),
+    ("xargs sudo rm -rf /", "exact", "xargs sudo rm -rf /"),
+])
+def test_wrapper_before_sudo_is_fail_closed(command: str, kind: str, pattern: str) -> None:
+    """包装器垫在 sudo 前时，锚定必须跳到 sudo（而非停在包装器上）。
+
+    旧实现只看前置赋值，`nohup sudo apt install` 会沉淀 "nohup sudo" 两词宽
+    前缀，之后任意 `nohup sudo mkfs…` 免确认。
+    """
+    rule = _rule_for(command)
+    assert rule.kind == kind and rule.pattern == pattern, (command, rule)
+
+
+@pytest.mark.parametrize("pattern", ["nohup sudo", "timeout 10", "xargs sudo"])
+def test_legacy_wrapper_sudo_prefix_is_dead(pattern: str) -> None:
+    """历史沉淀的「包装器 + sudo」两词前缀在匹配侧必须判死。"""
+    assert _is_arbitrary_exec_prefix(pattern)
+    rule = WhitelistRule(tool="run_command", kind="prefix", pattern=pattern)
+    assert not rule.matches("run_command", "nohup sudo mkfs.ext4 /dev/sda1")
+    assert not rule.matches("run_command", "timeout 10 mkfs.ext4 /dev/sda1")
+    assert not rule.matches("run_command", "xargs sudo rm -rf /")

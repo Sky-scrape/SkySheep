@@ -42,6 +42,7 @@ from pathlib import Path
 from ...bgtasks import is_bg_task, spawn_bg
 from ...config import ConfigError, load_config, set_factory_in_config
 from ...core import system_schedule
+from ._shared import TOOL_NAME_MAX, clean_tool_names
 
 # 工厂页「在途 / 最近」列表最多给多少条（设计稿 §8.3：最多 60 条）
 FACTORY_RUN_LIST_LIMIT = 60
@@ -105,7 +106,11 @@ def denied_tools_summary(rows: list[dict]) -> dict[str, int]:
                 continue
             if n <= 0:
                 continue
-            key = str(name)[:60]
+            # 与 run_ledger 的落库截断同口径（120）：60 会把合法的 MCP 工具名
+            # 截成永远命不中门控的假键，处置台补完还报「已补齐」。
+            key = str(name)
+            if len(key) > TOOL_NAME_MAX:
+                key = key[:TOOL_NAME_MAX] + "…"
             total[key] = total.get(key, 0) + n
     if not total:
         return {}
@@ -943,14 +948,15 @@ class FactoryMixin:
         raw = params.get("tools") or []
         if isinstance(raw, str):
             raw = [raw]
-        wanted: list[str] = []
-        for item in raw:
-            name = str(item).strip()
-            if not name or name in wanted:
-                continue
-            if len(name) > 60:
-                raise RuntimeError("工具名过长：" + name[:20] + "…")
-            wanted.append(name)
+        wanted = clean_tool_names(raw)
+        for name in wanted:
+            if name.endswith("…"):
+                # 账本里被截断的名字不是真实工具名：补了也命不中门控，界面
+                # 却会按「名单已包含」报「已补齐」——明确拒绝，别制造假闭环。
+                raise RuntimeError(
+                    "该工具名在运行账本里被截断，无法在这里补；"
+                    "请在自动化页手动编辑预授权名单"
+                )
         if not wanted:
             raise RuntimeError("没有要补的工具")
         if len(wanted) > 20:
@@ -1004,14 +1010,12 @@ class FactoryMixin:
         # weekday=0（周一）合法：必须按 is not None 判缺失（同 cron.add）
         raw_wd = params.get("weekday")
         wd = int(raw_wd) if raw_wd is not None else -1
-        # allowed_tools 清洗：去空白、丢空项；误传单个字符串也按一项处理
+        # allowed_tools 清洗：去空白、丢空项；误传单个字符串也按一项处理。
+        # 逗号/超长名在入口拒绝——名单以逗号 join 落库，带逗号会裂成假键。
         raw_tools = params.get("allowed_tools") or []
         if isinstance(raw_tools, str):
             raw_tools = [raw_tools]
-        tools = [
-            str(t).strip() for t in raw_tools
-            if str(t).strip()
-        ]
+        tools = clean_tool_names(raw_tools)
         task = await self.store.add_cron_task(
             pid, name, prompt, stype, interval, tod, wd, tools,
             # 终态推送开关：默认关（防打扰），与 cron.add 同一口径；

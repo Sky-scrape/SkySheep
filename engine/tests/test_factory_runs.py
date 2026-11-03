@@ -853,7 +853,14 @@ async def test_factory_grant_tools_rejects_bad_input(store, tmp_path):
         await host.factory_grant_tools(
             {"task_id": task["id"], "tools": [f"t{i}" for i in range(21)]})
     with pytest.raises(RuntimeError, match="工具名过长"):
-        await host.factory_grant_tools({"task_id": task["id"], "tools": ["x" * 61]})
+        await host.factory_grant_tools({"task_id": task["id"], "tools": ["x" * 121]})
+    # 运行账本里被截断的名字（带「…」）不是真实工具名：补了也命不中门控，
+    # 界面却会按「名单已包含」报「已补齐」——必须明确拒绝，别制造假闭环。
+    with pytest.raises(RuntimeError, match="被截断"):
+        await host.factory_grant_tools({"task_id": task["id"], "tools": ["x" * 20 + "…"]})
+    # 名单以逗号 join 落库：带逗号的名字会裂成假键，入口拒绝
+    with pytest.raises(RuntimeError, match="逗号"):
+        await host.factory_grant_tools({"task_id": task["id"], "tools": ["a,b"]})
     with pytest.raises(RuntimeError, match="任务不存在"):
         await host.factory_grant_tools({"task_id": 9999, "tools": ["write_file"]})
     assert (await store.get_cron_task(task["id"]))["allowed_tools"] == []

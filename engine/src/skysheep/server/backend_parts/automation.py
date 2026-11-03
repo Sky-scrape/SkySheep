@@ -31,7 +31,7 @@ from ...security.gate import HeadlessGate
 from ...textio import write_text_atomic
 from ...tools import ChangeRecorder
 from ...tools.pipeline import task_node_fields
-from ._shared import SessionRuntime
+from ._shared import SessionRuntime, clean_tool_names
 from .budget_alert import (
     alert_body as budget_alert_body,
 )
@@ -910,7 +910,7 @@ class AutomationMixin:
         # value 0..6（0=周一），默认选中周一，创建「每周一」任务传的就是 0。
         raw_wd = params.get("weekday")
         wd = int(raw_wd) if raw_wd is not None else -1
-        tools = [str(t).strip() for t in (params.get("allowed_tools") or []) if str(t).strip()]
+        tools = clean_tool_names(params.get("allowed_tools") or [])
         task = await self.store.add_cron_task(
             self.project.id, name, prompt, stype, interval, tod, wd, tools,
             notify_channel=bool(params.get("notify_channel")),
@@ -971,7 +971,7 @@ class AutomationMixin:
         if params.get("weekday") is not None:
             kw["weekday"] = int(params["weekday"])
         if params.get("allowed_tools") is not None:
-            kw["allowed_tools"] = [str(t).strip() for t in params["allowed_tools"] if str(t).strip()]
+            kw["allowed_tools"] = clean_tool_names(params["allowed_tools"])
         if params.get("enabled") is not None:
             kw["enabled"] = 1 if bool(params["enabled"]) else 0
         if params.get("notify_channel") is not None:
@@ -2792,7 +2792,7 @@ class AutomationMixin:
                 "prompt": prompt,
                 # after = 同批次序号（0 起），由 store 物化成节点 id
                 "depends_on": [int(d) for d in raw.get("after") or raw.get("depends_on") or []],
-                "allowed_tools": [str(t).strip() for t in raw.get("allowed_tools") or []],
+                "allowed_tools": clean_tool_names(raw.get("allowed_tools") or []),
                 "dep_mode": "any" if raw.get("dep_mode") == "any" else "all",
                 "control": control, "max_runs": max_runs, "timeout_s": timeout_s,
             }
@@ -2927,7 +2927,7 @@ class AutomationMixin:
             pipe["id"],
             str(params.get("title") or "").strip() or f"新任务：{prompt[:40]}",
             prompt,
-            allowed_tools=params.get("allowed_tools") or [],
+            allowed_tools=clean_tool_names(params.get("allowed_tools") or []),
             depends_on=[int(d) for d in depends_on] if isinstance(depends_on, list) else [],
         )
         pipe = await self.store.get_pipeline(pipe["id"])

@@ -2202,6 +2202,11 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             await self._fts_delete(conn, "session_id = ?", (session_id,))
             await conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            # 渠道绑定随会话一起清：留着悬空绑定会让「话题会话数上限」把已删
+            # 会话也算进去，且下一次入站会先命中死绑定再重建（多一次自愈）。
+            await conn.execute(
+                "DELETE FROM channel_bindings WHERE session_id = ?", (session_id,)
+            )
 
         await self._write_txn(txn)
 
@@ -2389,27 +2394,43 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         escaped = (
             query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         )
-        cur = await self._db.execute(
-            "SELECT seq, role, content, created_at FROM messages"
-            " WHERE session_id = ? AND content LIKE ? ESCAPE '\\'"
-            " ORDER BY seq DESC LIMIT ?",
-            (session_id, f"%{escaped}%", max(1, min(50, int(limit)))),
-        )
-        rows = await cur.fetchall()
+        want = max(1, min(50, int(limit)))
+        like = f"%{escaped}%"
         out: list[dict] = []
-        for r in rows:
-            plain = self._plain_text(r["content"])
-            # SQL 侧是 JSON 串上的 LIKE（键名、转义符也参与匹配），这里再按
-            # 可见正文校一次：只命中 JSON 字段名的那种假阳性不该给模型看。
-            if query.lower() not in plain.lower():
-                continue
-            out.append({
-                "seq": int(r["seq"]),
-                "role": r["role"],
-                "text": plain[:max_chars],
-                "truncated": len(plain) > max_chars,
-                "created_at": float(r["created_at"]),
-            })
+        scanned = 0
+        # 分块扫描、边扫边做正文校验：SQL 的 LIMIT 必须在**校验之后**才等价于
+        # 「取前 N 条真命中」。若一次性 LIMIT want 再过滤，像 role/name/content
+        # 这类 JSON 键名子串的假阳性会先把整个窗口占满，真正的命中被静默吞成 0。
+        # 上界仍是 SEARCH_SQL_LIMIT，防常见词命中上千行时把整表 JSON 拉进内存。
+        while len(out) < want and scanned < self.SEARCH_SQL_LIMIT:
+            take = min(100, self.SEARCH_SQL_LIMIT - scanned)
+            cur = await self._db.execute(
+                "SELECT seq, role, content, created_at FROM messages"
+                " WHERE session_id = ? AND content LIKE ? ESCAPE '\\'"
+                " ORDER BY seq DESC LIMIT ? OFFSET ?",
+                (session_id, like, take, scanned),
+            )
+            rows = await cur.fetchall()
+            if not rows:
+                break
+            scanned += len(rows)
+            for r in rows:
+                plain = self._plain_text(r["content"])
+                # SQL 侧是 JSON 串上的 LIKE（键名、转义符也参与匹配），这里再按
+                # 可见正文校一次：只命中 JSON 字段名的那种假阳性不该给模型看。
+                if query.lower() not in plain.lower():
+                    continue
+                out.append({
+                    "seq": int(r["seq"]),
+                    "role": r["role"],
+                    "text": plain[:max_chars],
+                    "truncated": len(plain) > max_chars,
+                    "created_at": float(r["created_at"]),
+                })
+                if len(out) >= want:
+                    break
+            if len(rows) < take:
+                break
         return out
 
     def _scope_condition(self, project_id: int | None, scope: str) -> tuple[str, tuple]:
@@ -2612,6 +2633,22 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         )
         row = await cur.fetchone()
         return row["session_id"] if row else None
+
+    async def count_channel_bindings(self, channel: str) -> int:
+        """统计某平台名下已建立的绑定数（含 `feishu#<话题>` 键）。
+
+        话题分会话把键空间从「一个平台一个会话」放大到「每个话题一个会话」，
+        用一个上限防止已批准群成员开无限话题制造会话垃圾与常驻 runtime。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT COUNT(*) AS n FROM channel_bindings"
+            " WHERE channel = ? OR channel LIKE ? ESCAPE '\\'",
+            (channel, channel.replace("\\", "\\\\").replace("%", "\\%")
+             .replace("_", "\\_") + "#%"),
+        )
+        row = await cur.fetchone()
+        return int(row["n"]) if row else 0
 
     async def set_channel_binding(self, channel: str, session_id: str) -> None:
         """绑定（或改绑）渠道到会话。UPSERT：同一平台重复绑定只保留最新一条。"""

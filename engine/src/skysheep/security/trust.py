@@ -196,6 +196,31 @@ def _rel_label(f: Path, project_root: Path) -> str:
     return f.name
 
 
+MAX_HASH_BYTES = 2 * 1024 * 1024
+
+
+def _hashable_bytes(path: Path) -> bytes:
+    """信任指纹用的文件字节：单文件最多读 MAX_HASH_BYTES。
+
+    指纹在用户确认信任**之前**计算（WorkspaceTrust.state()），而载荷清单来自
+    项目里的 mcp.json/技能目录——恶意项目可以指向一个 GB 级文件，让引擎在
+    打开项目时全量 read_bytes 做哈希（内存放大 + 事件循环同步阻塞）。超过
+    上限只哈希前缀 + 文件大小；超大文件本来就不是可信配置/脚本的常态。
+    """
+    try:
+        with path.open("rb") as f:
+            data = f.read(MAX_HASH_BYTES + 1)
+    except OSError:
+        return b"<unreadable>"
+    if len(data) <= MAX_HASH_BYTES:
+        return data
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = -1
+    return data[:MAX_HASH_BYTES] + f"<truncated size={size}>".encode("ascii")
+
+
 def compute_fingerprint(project_root: Path) -> tuple[str, list[str]]:
     """项目级配置与其引用执行载荷的内容指纹 + 相对路径清单。
 
@@ -211,10 +236,7 @@ def compute_fingerprint(project_root: Path) -> tuple[str, list[str]]:
     labels: list[str] = []
     for f in files:
         rel = _rel_label(f, project_root)
-        try:
-            data = f.read_bytes()
-        except OSError:
-            data = b"<unreadable>"
+        data = _hashable_bytes(f)
         digest.update(rel.encode("utf-8", "replace"))
         digest.update(b"\x00")
         digest.update(data)
@@ -232,11 +254,7 @@ def source_hashes(project_root: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     for f in project_sources(project_root):
         rel = _rel_label(f, project_root)
-        try:
-            data = f.read_bytes()
-        except OSError:
-            data = b"<unreadable>"
-        out[rel] = hashlib.sha256(data).hexdigest()
+        out[rel] = hashlib.sha256(_hashable_bytes(f)).hexdigest()
     return out
 
 

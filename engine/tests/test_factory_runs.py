@@ -725,6 +725,138 @@ async def test_run_cron_task_core_records_denied_tools(store, tmp_path):
     health = factory_line_health(rows)[f"cron:{task['id']}"]
     assert health["success_rate"] == 0.0, "partial 不该计入成功率"
     assert health["partial"] == 1
+    # 处置台首屏的原料：最近一次怎么死的 + 缺哪些预授权（这轮只有两个工具）
+    assert health["last_denied"] == 3
+    assert health["denied_tools"] == {"write_file": 2, "run_command": 1}
+
+
+def test_denied_tools_summary_merges_window_and_caps():
+    """``denied_tools_summary``：多轮相加、坏数据跳过、只留次数最多的前 6 项。
+
+    体检里的「缺哪些预授权」必须是并集而不是最后一轮——同一处没勾的权限会在
+    好几轮里重复出现，只有相加才知道该先补哪个。
+    """
+    from skysheep.server.backend_parts.factory import denied_tools_summary
+
+    rows = [
+        {"denied_tools": '{"write_file": 2, "run_command": 1}'},
+        {"denied_tools": '{"write_file": 1, "browser": 3}'},
+        {"denied_tools": ""},
+        {"denied_tools": "不是 JSON"},
+        {"denied_tools": '["write_file"]'},
+        {"denied_tools": '{"bad": "x", "neg": -2, "ok": 1}'},
+    ]
+    assert denied_tools_summary(rows) == {
+        "write_file": 3, "browser": 3, "run_command": 1, "ok": 1,
+    }
+
+    # 超过 6 项只留次数最多的；同次数按名字排序，保证同样的数据每次结果一致
+    many = {f"t{i:02d}": i + 1 for i in range(10)}
+    import json as _json
+    capped = denied_tools_summary([{"denied_tools": _json.dumps(many)}])
+    assert len(capped) == 6
+    assert list(capped) == ["t09", "t08", "t07", "t06", "t05", "t04"]
+
+    assert denied_tools_summary([]) == {}
+
+
+# ---------- 处置台：补预授权（只增不减） ----------
+
+def test_pending_tools_only_counts_what_is_still_missing():
+    """``pending_tools`` = 历史被拦 ∩ 现在没授权。
+
+    两个数必须分开：``denied_tools`` 是近 7 天被拦过谁（补完权限也不会消失），
+    ``pending_tools`` 是名单里仍然没有谁。混用的话，用户补完刷新页面又被喊一次。
+    """
+    from skysheep.server.backend_parts.factory import pending_tools_of
+
+    health = {"denied_tools": {"write_file": 3, "browser": 2}, "last_denied": 1}
+    assert pending_tools_of(health, ["read_file", "write_file"])["pending_tools"] == {
+        "browser": 2}
+    assert pending_tools_of(health, ["write_file", "browser"])["pending_tools"] == {}
+    # 编排线没有 cron_tasks 行可比对：不过滤（处置条会导到编排编辑器）
+    assert pending_tools_of(health, None)["pending_tools"] == {
+        "write_file": 3, "browser": 2}
+    # 没有历史拦截 / 没有体检：原样返回，不塞空字段
+    assert "pending_tools" not in pending_tools_of({"denied_tools": {}}, [])
+    assert pending_tools_of(None, []) is None
+
+
+async def test_factory_grant_tools_only_adds_and_never_drops(store, tmp_path):
+    """补预授权只增不减。
+
+    ``cron.update`` 的 ``allowed_tools`` 是整体替换语义，前端若直接把「被拦的
+    那几个」提交上去，用户原先勾好的权限会被一起删掉——合并必须在服务端做。
+    """
+    from skysheep.server.backend_parts.factory import FactoryMixin
+
+    proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
+    task = await store.add_cron_task(
+        proj.id, "日报", "干活", "interval", interval_minutes=10,
+        allowed_tools=["read_file", "grep"])
+
+    broadcasts: list[dict] = []
+
+    class Host(FactoryMixin):
+        def _broadcast_cron(self, row: dict) -> None:
+            broadcasts.append(row)
+
+    host = Host()
+    host.store = store
+
+    # dry_run：只算不写（抽屉要先摊开「新增 / 保留」再让人确认）
+    preview = await host.factory_grant_tools({
+        "task_id": task["id"], "tools": ["write_file", "browser", "read_file"],
+        "dry_run": True,
+    })
+    assert preview["add"] == ["write_file", "browser"]
+    assert preview["already"] == ["read_file"]
+    assert preview["kept"] == ["read_file", "grep"]
+    assert preview["allowed_tools"] == ["read_file", "grep", "write_file", "browser"]
+    assert (await store.get_cron_task(task["id"]))["allowed_tools"] == ["read_file", "grep"]
+    assert broadcasts == [], "dry_run 不许写盘也不许广播"
+
+    # 真写：原有权限一个不少，广播一次（自动化页那边跟着刷新）
+    out = await host.factory_grant_tools({
+        "task_id": task["id"], "tools": ["write_file", "browser"], "dry_run": False})
+    assert out["add"] == ["write_file", "browser"]
+    assert (await store.get_cron_task(task["id"]))["allowed_tools"] == [
+        "read_file", "grep", "write_file", "browser"]
+    assert len(broadcasts) == 1
+
+    # 重复补：add 为空 → 不写盘、不广播（幂等）
+    again = await host.factory_grant_tools({
+        "task_id": task["id"], "tools": ["write_file"], "dry_run": False})
+    assert again["add"] == [] and again["already"] == ["write_file"]
+    assert len(broadcasts) == 1
+
+
+async def test_factory_grant_tools_rejects_bad_input(store, tmp_path):
+    """空清单 / 不存在的任务 / 超长名字都要挡在写盘之前。"""
+    import pytest
+
+    from skysheep.server.backend_parts.factory import FactoryMixin
+
+    proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
+    task = await store.add_cron_task(proj.id, "日报", "干活", "interval", interval_minutes=10)
+
+    class Host(FactoryMixin):
+        def _broadcast_cron(self, row: dict) -> None:
+            raise AssertionError("不该广播")
+
+    host = Host()
+    host.store = store
+
+    with pytest.raises(RuntimeError, match="没有要补的工具"):
+        await host.factory_grant_tools({"task_id": task["id"], "tools": ["  ", ""]})
+    with pytest.raises(RuntimeError, match="一次最多补"):
+        await host.factory_grant_tools(
+            {"task_id": task["id"], "tools": [f"t{i}" for i in range(21)]})
+    with pytest.raises(RuntimeError, match="工具名过长"):
+        await host.factory_grant_tools({"task_id": task["id"], "tools": ["x" * 61]})
+    with pytest.raises(RuntimeError, match="任务不存在"):
+        await host.factory_grant_tools({"task_id": 9999, "tools": ["write_file"]})
+    assert (await store.get_cron_task(task["id"]))["allowed_tools"] == []
 
 
 async def test_factory_run_mark_overrides_outcome_and_health(store, tmp_path):

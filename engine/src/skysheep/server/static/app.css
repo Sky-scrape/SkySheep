@@ -7557,6 +7557,9 @@ li.mod-row {
 }
 .fx-run-row .fx-run-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .fx-run-row .fx-run-meta { flex-shrink: 0; color: var(--dim); font-variant-numeric: var(--num); }
+/* 列表里「跑完但被拦 / 跑完但不算」要看得出来：状态是 done，做成不是 */
+.fx-run-row .fx-run-meta.warn { color: var(--gold); }
+.fx-run-row .fx-run-meta.bad { color: var(--bad); }
 .fx-run-empty { color: var(--dim); font-size: var(--fs-sm); padding: 4px 2px; }
 /* 产线体检：一行指标 + 最近 N 次的状态色条（新 → 旧） */
 /* 抽屉里的「更多」：默认收起，展开才显示体检数字 */
@@ -7566,6 +7569,31 @@ li.mod-row {
 .fx-more[open] > summary { margin-bottom: 4px; border-bottom: 1px solid var(--line); }
 .fx-live-entry { padding: 0 0 8px; }
 .fx-live-entry .btn-ghost { width: 100%; }
+/* 处置台：抽屉首屏的一句话诊断。有病的线才出现，没病不摆药（设计稿 §17） */
+.fx-verdict {
+  display: flex; flex-direction: column; gap: 4px; padding: 7px 9px;
+  border: 1px solid var(--line); border-left: 3px solid var(--line2);
+  border-radius: var(--r-sm); background: var(--paper-raised);
+}
+.fx-verdict.warn { border-left-color: var(--gold); }
+.fx-verdict.bad { border-left-color: var(--bad); }
+.fx-verdict.mute { border-left-color: var(--dim); }
+.fx-verdict-title { font-size: var(--fs-sm); font-weight: 700; color: var(--text); }
+.fx-verdict.warn .fx-verdict-title { color: var(--gold); }
+.fx-verdict.bad .fx-verdict-title { color: var(--bad); }
+.fx-verdict-detail { font-size: var(--fs-sm); color: var(--text2); line-height: 1.6; }
+.fx-verdict .btn-primary { align-self: flex-start; margin-top: 2px; font-size: var(--fs-sm); padding: 4px 10px; }
+.fx-verdict-meta { font-size: var(--fs-sm); color: var(--dim); font-variant-numeric: var(--num); }
+/* 补完预授权、等下一轮验证：处置条转绿，动作位空着（没别的可做了） */
+.fx-verdict.ok { border-left-color: var(--ok); }
+.fx-verdict.ok .fx-verdict-title { color: var(--ok); }
+/* 补预授权的待确认块：新增 / 保留两行，点确认之前把后果说清楚 */
+.fx-grant { display: flex; flex-direction: column; gap: 3px; margin-top: 2px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.fx-grant-row { display: flex; gap: 6px; font-size: var(--fs-sm); line-height: 1.6; }
+.fx-grant-k { flex-shrink: 0; color: var(--text2); }
+.fx-grant-v { min-width: 0; color: var(--text); word-break: break-all; }
+.fx-grant-ops { display: flex; gap: 6px; margin-top: 3px; }
+.fx-grant-ops .btn-primary, .fx-grant-ops .btn-ghost { font-size: var(--fs-sm); padding: 4px 10px; }
 .fx-health { font-size: var(--fs-sm); color: var(--text2); line-height: 1.7; font-variant-numeric: var(--num); }
 .fx-health b { color: var(--text); }
 .fx-bad { color: var(--bad); font-weight: 700; }

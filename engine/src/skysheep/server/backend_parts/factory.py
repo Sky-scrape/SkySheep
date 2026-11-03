@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from pathlib import Path
@@ -74,6 +75,43 @@ _ATTENTION_RANK = {
 }
 # 体检口径：这些状态不算「一次尝试」，不计入成功率分母与耗时样本
 _NON_ATTEMPT_STATUSES = ("running", "skipped", "cancelled")
+# 体检里「缺哪些预授权」最多列几个工具（抽屉处置台要的是「该补哪个」，不是全账）
+_HEALTH_DENIED_TOP = 6
+
+
+def denied_tools_summary(rows: list[dict]) -> dict[str, int]:
+    """把一条产线近 7 天运行里的 ``denied_tools`` 合并成「工具 → 次数」。
+
+    每条运行的 ``denied_tools`` 只是一轮内的快照（``run_ledger.denied_tools_json``
+    存的前 8 项）。这里按产线把多轮相加：同一处缺的预授权会在好几轮里重复出现，
+    相加后才知道该先补哪个。只留次数最多的前 ``_HEALTH_DENIED_TOP`` 项，坏数据
+    （不是 JSON / 不是对象 / 次数不是整数）一律跳过，不让一行脏数据拖垮整条产线。
+    """
+    total: dict[str, int] = {}
+    for row in rows:
+        raw = str(row.get("denied_tools") or "")
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        for name, count in obj.items():
+            try:
+                n = int(count)
+            except (TypeError, ValueError):
+                continue
+            if n <= 0:
+                continue
+            key = str(name)[:60]
+            total[key] = total.get(key, 0) + n
+    if not total:
+        return {}
+    ordered = sorted(total.items(), key=lambda pair: (-pair[1], pair[0]))
+    return dict(ordered[:_HEALTH_DENIED_TOP])
+
 
 
 def factory_line_key(kind: str, line_id) -> str:
@@ -193,12 +231,41 @@ def factory_line_health(rows: list[dict]) -> dict[str, dict]:
             "last_outcome": str(last.get("outcome") or "") if last else "",
             "last_at": float(last.get("finished_at") or last.get("started_at") or 0)
             if last else 0.0,
+            # 抽屉「处置台」首屏的原料：最近一次尝试到底怎么了。三个字段都只描述
+            # 最后那一次，不跟 streak / success_rate 混——「现在是什么病」和
+            # 「这病犯了多久」是两件事，前者决定给哪个动作，后者决定要不要报警。
+            "last_error_kind": str((last or {}).get("error_kind") or ""),
+            "last_error": str((last or {}).get("error") or "")[:120],
+            "last_denied": int((last or {}).get("denied_count") or 0),
+            # 7 天窗口内「缺哪些预授权」的合并（见 denied_tools_summary）：补权限
+            # 时要补的是并集，不是最后一轮碰到的那一个工具
+            "denied_tools": denied_tools_summary(attempts),
             "tail": [str(r.get("status")) for r in items[:FACTORY_HEALTH_TAIL]],
             # 与 tail 等长：前端据此把「done 但有拦截」的格子染成警示色
             "tail_outcomes": [
                 str(r.get("outcome") or "") for r in items[:FACTORY_HEALTH_TAIL]
             ],
         }
+    return out
+
+
+def pending_tools_of(health: dict | None, allowed) -> dict | None:
+    """从体检里挑出「到现在还没被授权」的那几个工具。
+
+    ``denied_tools`` 是**历史**（近 7 天被拦过谁），``pending_tools`` 是**现在**
+    （名单里仍然没有谁）。两者必须分开：用户刚补完权限、下一轮还没跑时，历史
+    不会消失，但处置条不该继续喊「缺预授权」——刷新一次页面就该是「已补齐」。
+
+    ``allowed`` 传 None（编排线没有 cron 行）时不做过滤，原样返回被拦清单。
+    """
+    if not isinstance(health, dict):
+        return health
+    denied = health.get("denied_tools") or {}
+    if not isinstance(denied, dict) or not denied:
+        return health
+    granted = {str(t) for t in (allowed or []) if str(t)}
+    out = dict(health)
+    out["pending_tools"] = {k: v for k, v in denied.items() if k not in granted}
     return out
 
 
@@ -461,7 +528,9 @@ class FactoryMixin:
                 "last_status": last_status if last_status in _CRON_LAST_STATUSES else "",
                 "last_run_at": float(task.get("last_run_at") or 0),
                 "running_run_id": running_by_task.get(tid),
-                "health": health.get(key),
+                # 体检外加一列「现在还缺哪些预授权」（对比 task.allowed_tools）：
+                # 补完权限但下一轮还没跑时，历史 denied_tools 仍在，处置条不该继续喊
+                "health": pending_tools_of(health.get(key), task.get("allowed_tools")),
                 "nodes": [],
                 # 团队形态（定时团队 §14）：cron 行两键原样透传 + 模板册现查的
                 # 呈现元数据（成员规模 / AI 总管）；非团队任务 team_meta=None。
@@ -500,7 +569,9 @@ class FactoryMixin:
                 "last_status": "",
                 "last_run_at": float(pipe.get("finished_at") or 0),
                 "running_run_id": None,
-                "health": health.get(key),
+                # 编排线没有 cron_tasks 行可比对预授权：缺的工具原样留在 pending 里，
+                # 处置条会把它导到编排编辑器（节点预授权在那边改）
+                "health": pending_tools_of(health.get(key), None),
                 "nodes": [
                     {
                         "id": int(n["id"]),
@@ -844,6 +915,65 @@ class FactoryMixin:
         }
         if sync is not None:
             out["schtask_sync"] = sync
+        return out
+
+    async def factory_grant_tools(self, params: dict) -> dict:
+        """把「被门控拦下的工具」补进产线的预授权名单（处置台的一次点击）。
+
+        只增不减。``cron.update`` 的 ``allowed_tools`` 是**整体替换**语义，直接把
+        「被拦的那几个」提交上去，会把用户原先勾好的权限连带删掉——所以合并必须
+        在服务端做，前端只负责说「要补哪几个」。
+
+        不走 ``cron_update``：它带 ``_check_cron_ownership``（任务必须属于当前
+        项目），而工厂天生是跨项目视图，点别家厂区的机台会被判「任务不存在」。
+        这里与 ``factory_toggle`` 同一姿态——直接改行 + 广播，且 ``allowed_tools``
+        不影响 ``next_run_at``，不需要重排。
+
+        ``dry_run=true`` 只算不写：抽屉要先把「新增 N 个 / 原有 M 个保留」摊开给
+        用户看，再让人点确认（会放松权限的动作不该点一下就开始）。
+        """
+        try:
+            tid = int(params.get("task_id", 0))
+        except (TypeError, ValueError):
+            raise RuntimeError("task_id 需要一个整数") from None
+        task = await self.store.get_cron_task(tid)
+        if task is None:
+            raise RuntimeError("任务不存在: " + str(tid))
+
+        raw = params.get("tools") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        wanted: list[str] = []
+        for item in raw:
+            name = str(item).strip()
+            if not name or name in wanted:
+                continue
+            if len(name) > 60:
+                raise RuntimeError("工具名过长：" + name[:20] + "…")
+            wanted.append(name)
+        if not wanted:
+            raise RuntimeError("没有要补的工具")
+        if len(wanted) > 20:
+            raise RuntimeError("一次最多补 20 个工具")
+
+        current = [str(t) for t in (task.get("allowed_tools") or []) if str(t)]
+        add = [t for t in wanted if t not in current]
+        already = [t for t in wanted if t in current]
+        merged = current + add
+        out = {
+            "ok": True,
+            "id": tid,
+            "dry_run": bool(params.get("dry_run")),
+            "add": add,
+            "already": already,
+            "kept": current,
+            "allowed_tools": merged,
+        }
+        if out["dry_run"] or not add:
+            return out
+        updated = await self.store.update_cron_task(tid, allowed_tools=merged)
+        if updated is not None:
+            self._broadcast_cron(updated)
         return out
 
     async def factory_line_add(self, params: dict) -> dict:

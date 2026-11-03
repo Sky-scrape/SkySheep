@@ -426,6 +426,137 @@ def test_factory_line_drawer_presents_team_rows():
     assert 'l.is_team ? \'<span class="fx-line-team">团队</span>\'' in js
 
 
+def test_factory_line_drawer_opens_with_a_verdict_not_a_table():
+    """抽屉首屏是「处置台」：先说现在怎么了，再给一个动作（设计稿 §17）。
+
+    四期把体检数字折起来之后，连「这条线出事了」也一起折掉了——用户得自己展开
+    才知道该不该管。处置条补这一步：诊断读 ``line.health``（服务端 7 天聚合），
+    没病时整条不出现，且不新增任何改配置的表单（配置属于自动化页）。
+    """
+    js = read_factory_js()
+    assert "function lineDiagnosis(line) {" in js
+    # 首屏顺序：处置条 → 元信息 → 折叠的产线信息 / 体检 → 操作行
+    # （锚在真身而非 app-factory.js 里那行 FX 转发壳，否则区段会跨文件串到运行抽屉）
+    i = js.index("function openLineDrawer(key, opts) {\n    var rec = findLine(key);")
+    seg = js[i:js.index("function nodeStatusText(", i)]
+    for anchor in ("var diag = lineDiagnosis(line);", "if (diag) {",
+                   'class="fx-verdict ', "fx-verdict-title", "fx-verdict-detail",
+                   'data-verdict-act=', "fx-verdict-meta",
+                   '<details class="fx-more"><summary>更多：产线信息</summary>'):
+        assert anchor in seg, f"处置台漏了 {anchor}"
+    # 首屏不再直接铺一张 KV 表：厂区 / 类型 / 触发都进了折叠区
+    assert seg.index("更多：产线信息") < seg.index("<dt>厂区</dt>")
+    assert seg.index("fx-verdict") < seg.index("fx-verdict-meta") < seg.index("fx-drawer-ops")
+    # 诊断的数据来源全部是体检快照（首帧即正确，不等 runs 回包）
+    diag = js[js.index("function lineDiagnosis(line) {"):js.index("function drawerShell(")]
+    for field in ("last_error_kind", "last_denied", "denied_tools", "streak",
+                  "last_outcome", "last_status"):
+        assert field in diag, f"诊断没用到 health.{field}"
+    # 处置动作统一走 dispatchAct：grant 就地补权限，其余是跳转 / 委派
+    assert "var goEdit = function () {" in seg
+    assert "var dispatchAct = function (act, btn) {" in seg
+    assert "dispatchAct(verdictBtn.dataset.verdictAct, verdictBtn)" in seg
+    # 操作行在处置条已经给了出口时不再重复一个「去编辑」
+    assert "if (!diag || diag.act !== \"edit\")" in seg
+    # 最近运行列表不能把 partial 写成「已完成」：处置条说缺权限、下面六行全绿会自相矛盾
+    runs_seg = js[js.index("function loadLineRuns(line) {"):]
+    runs_seg = runs_seg[:runs_seg.index("function fmtDurationShort(")]
+    assert '"跑完 · 被拦"' in runs_seg and '"跑完 · 不算"' in runs_seg
+    assert "fx-run-meta' + warn" in runs_seg
+
+
+def test_factory_verdict_grants_tools_with_a_preview():
+    """处置台的「补预授权」：先 dry_run 摊开新增 / 保留，确认后才写盘。
+
+    会放松权限的动作点一下就开始不能接受，所以流程必须是两步；合并规则在
+    服务端（``cron.update`` 是整体替换，前端直接提交「被拦的那几个」会删权限）。
+    """
+    js = read_factory_js()
+    diag = js[js.index("function diagnoseLine(line) {"):js.index("function drawerShell(")]
+    # 缺权限 → grant（就地补）；编排线没有 cron 行 → 落到编排编辑器
+    assert 'act: line.kind === "pipeline" ? "pipeline" : "grant"' in diag
+    assert 'd.act = "pipeline"' in js
+    # 判「还缺什么」只看 pending_tools，不看历史 denied_tools（补完权限不会消失）
+    assert "h.pending_tools || {}" in diag
+    assert "预授权已补齐" in diag
+    # 补完之后先别继续喊缺权限：等「下一次运行的结束时间」晚于补的时间再重新判
+    assert "S.granted[line.key]" in diag
+    assert "level: \"ok\"" in diag
+
+    for fn in ("grantConfirmHtml", "startGrant", "confirmGrant"):
+        assert f"function {fn}(" in js, f"缺少 {fn}"
+    seg = js[js.index("function grantConfirmHtml("):js.index("function drawerShell(")]
+    for anchor in ("fx-grant-row", "新增", "保留", "data-grant-ok", "data-grant-cancel",
+                   "原有权限一个都不删"):
+        assert anchor in seg, f"确认块漏了 {anchor}"
+    # 两步：先 dry_run 拿合并结果，再 dry_run=false 落盘
+    assert "dry_run: true" in seg and "dry_run: false" in seg
+    assert 'request("factory.grant_tools"' in seg
+    # 按钮接线：grant 走 startGrant，不再一律当「去编辑」
+    i = js.index("function openLineDrawer(key, opts) {\n    var rec = findLine(key);")
+    drawer = js[i:js.index("function nodeStatusText(", i)]
+    assert 'if (act === "grant") startGrant(line);' in drawer
+    assert 'if (act === "delegate") delegateToAgent(line, rec, btn);' in drawer
+    assert 'if (act === "pipeline") goPipeline();' in drawer
+    assert 'if (grantOk) grantOk.onclick' in drawer
+    assert "S.grantPending = null;" in drawer
+    # 状态位落在主文件里（跨分区共享的是 S，不是局部变量）
+    main = read_static("app-factory.js")
+    assert "grantPending: null," in main and "granted: {}," in main
+
+
+def test_factory_verdict_delegates_without_sending():
+    """「让 Agent 看看」= 切项目 → 新会话 → 预填报告，**不代发**。
+
+    点一下是「决定要查」，发出去要烧 token，用户也常想再补一句背景；预填省掉的
+    是「写什么」，回车仍然是人的决定。报告必须带全最近几次的状态、归因和被拦工具，
+    否则 Agent 还得回头问一遍。
+    """
+    js = read_factory_js()
+    for fn in ("delegateReport", "ensureProject", "delegateToAgent"):
+        assert f"function {fn}(" in js, f"缺少 {fn}"
+
+    diag = js[js.index("function diagnoseLine(line) {"):js.index("function drawerShell(")]
+    # 能一键修的（补权限）就地修，其余交给 Agent，配置本身坏了才去编辑页
+    assert diag.count('act: "delegate", actText: "让 Agent 看看"') == 4, \
+        "连续失败 / 单次失败 / partial / 空产出 都应委派"
+    assert 'title: "厂区不可用"' in diag and 'act: "edit"' in diag
+
+    seg = js[js.index("function delegateToAgent("):js.index("function drawerShell(")]
+    # 顺序：先取运行史 → 切项目 → 回对话 → 新会话 → 填输入框
+    assert seg.index("factory.runs") < seg.index("ensureProject") < seg.index("startNewTab")
+    assert "input.value = delegateReport(" in seg
+    assert "autoGrowInput(input)" in seg
+    # 不代发：这段里不许出现 send()
+    assert "send()" not in seg
+    # 项目必须先切：新会话落在当前项目，切晚了报告会跑进上一个项目的会话
+    proj = js[js.index("async function ensureProject("):js.index("async function delegateToAgent(")]
+    assert 'request("project.switch"' in proj and "fetchWorkspaceData()" in proj
+
+    # 报告内容：运行行带状态 / 归因 / 被拦工具，并明确「要改先问我」
+    rep = js[js.index("function delegateReport("):js.index("async function ensureProject(")]
+    for anchor in ("最近 ", "次运行（新 → 旧）", "DENIED", "我确认后再动"):
+        if anchor == "DENIED":
+            assert "被拦工具：" in rep
+            continue
+        assert anchor in rep, f"报告漏了 {anchor}"
+
+
+def test_factory_css_defines_verdict_block_with_theme_tokens():
+    """处置条只染左边框（warn / bad / mute 三档），不引入新色值。"""
+    css = read_static("app.css")
+    seg = css[css.index("工厂（第三顶层视图）"):]
+    for rule in (".fx-verdict {", ".fx-verdict.warn", ".fx-verdict.bad",
+                 ".fx-verdict.mute", ".fx-verdict-title", ".fx-verdict-detail",
+                 ".fx-verdict-meta"):
+        assert rule in seg, f"缺少处置条样式 {rule}"
+    assert "border-left: 3px solid var(--line2)" in seg
+    assert ".fx-verdict.bad { border-left-color: var(--bad); }" in seg
+    # 列表里 partial / 判负两档要有色（后面的 .fx-warn 优先级压不过 .fx-run-row .fx-run-meta）
+    assert ".fx-run-row .fx-run-meta.warn { color: var(--gold); }" in seg
+    assert ".fx-run-row .fx-run-meta.bad { color: var(--bad); }" in seg
+
+
 # ---------- app.css ----------
 
 def test_factory_css_uses_theme_tokens_only():

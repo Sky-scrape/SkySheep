@@ -525,14 +525,15 @@ def test_factory_run_event_shape_is_flat_and_has_no_top_level_session_id(home):
 def test_factory_methods_are_local_only_with_chinese_errors():
     from skysheep.server import app as server_app
 
-    for method in ("state", "runs", "run_now", "toggle", "cancel", "ack", "line_add", "save"):
+    for method in ("state", "runs", "run_now", "toggle", "cancel", "ack", "line_add",
+                   "save", "run_mark", "grant_tools"):
         entry = server_app._WS_METHODS[f"factory.{method}"]
         assert entry.local_only is True, f"factory.{method} 必须本机专属"
         assert "本机" in entry.local_error, f"factory.{method} 的拒绝文案要用中文说清"
 
 
 def test_factory_methods_rejected_for_remote_client(home, monkeypatch):
-    """远程连接调八个工厂方法一律被拒（与 archive.list 同口径的本机专属）。"""
+    """远程连接调工厂方法一律被拒（与 archive.list 同口径的本机专属）。"""
     from starlette.testclient import TestClient
 
     from skysheep.models.fake import FakeProvider
@@ -553,6 +554,8 @@ def test_factory_methods_rejected_for_remote_client(home, monkeypatch):
         "factory.line_add": {
             "project_id": 1, "name": "x", "prompt": "p", "schedule_type": "interval"},
         "factory.save": {"demo": False},
+        "factory.run_mark": {"run_id": 1, "outcome": "ok"},
+        "factory.grant_tools": {"task_id": 1, "tools": ["write_file"]},
     }
     with TestClient(app) as client, client.websocket_connect("/ws") as ws:
         boot = _call(ws, "boot")

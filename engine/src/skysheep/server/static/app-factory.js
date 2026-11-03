@@ -180,6 +180,11 @@
     panelFolded: true,   // 目录默认折叠：工厂的主体是场景，目录按需展开
     drawer: null,
     selectedKey: null,
+    // 处置台的「补预授权」：pending 是待确认的那一次（算好了还没写盘），
+    // granted 是已经补上的（key → {n, at}），用来把处置条换成「等下一轮验证」。
+    // 两者都只活在这一页的生命周期里：真相在 cron_tasks.allowed_tools。
+    grantPending: null,
+    granted: {},
     hits: [],
     hover: null,           // 当前悬停的命中（{type,key/id/pid}）；离开 / 重建 / 卸载即清
     labelPool: [],

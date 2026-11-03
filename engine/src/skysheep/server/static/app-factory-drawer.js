@@ -85,6 +85,308 @@
       '<div class="fx-strip" title="最近 ' + tail.length + ' 次运行（新 → 旧）">' + strip + "</div></div>";
   }
 
+  /** 处置台首屏：把「这条线现在是什么病」压成一句话 + 一个动作。
+   *
+   *  只回答两件事：要不要管（level）、点了去哪儿（act）。act 三种：
+   *  ``grant`` 就地补预授权（唯一会写盘的，只增不减）、``edit`` 去自动化页、
+   *  ``pipeline`` 去编排编辑器。抽屉里不新增改配置的表单——配置属于自动化页
+   *  （设计稿 §14 与 §16.1）。返回 null = 没病，首屏不摆药。
+   *
+   *  取数只用 ``line.health``（服务端 7 天窗口聚合，含 last_error_kind /
+   *  last_denied / denied_tools），所以首帧就是对的，不需要等 runs 回包。
+   */
+  function lineDiagnosis(line) {
+    var d = diagnoseLine(line);
+    if (!d) return null;
+    // 编排线没有 cron_tasks 行：「去编辑」「补预授权」只能落到编排编辑器；
+    // 「交给 Agent」不受影响（它读的是 node 运行史，编辑由 Agent 自己做）
+    if (line.kind === "pipeline" && (d.act === "edit" || d.act === "grant")) {
+      d.act = "pipeline";
+    }
+    return d;
+  }
+
+  /** 诊断真身。``line.key`` 用来查「刚补过」的临时标记（补完先别继续喊缺权限）。 */
+  function diagnoseLine(line) {
+    var h = (line && line.health) || {};
+    if (!line) return null;
+    if (line.status === "stopped") {
+      return {
+        level: "bad", title: "厂区不可用",
+        detail: "项目目录不存在，到点也不会派工。",
+        act: "edit", actText: "去编辑",
+      };
+    }
+    if (line.status === "paused") {
+      return {
+        level: "mute", title: "产线已暂停",
+        detail: "到点不会跑；要恢复用下方「启用产线」。",
+        act: "", actText: "",
+      };
+    }
+    if (line.status === "running") return null;
+
+    // 刚补过预授权但要等下一轮才算数：运行史里的 denied_tools 是历史，不会消失，
+    // 只有「上一次运行的结束时间比补的时间更晚」才说明这轮真的验过了
+    var granted = S.granted[line.key];
+    if (granted && (Number(h.last_at) || 0) <= granted.at) {
+      return {
+        level: "ok", title: "已补上 " + granted.n + " 个预授权",
+        detail: "下一轮跑完才知道有没有真的解开；再被拦会重新亮起来。",
+        act: "", actText: "",
+      };
+    }
+
+    // 被拦优先于失败：它状态是 done、成功率却不计入，最容易被看漏。
+    // 判「还缺什么」只看 pending_tools（对比当前 allowed_tools 之后剩下的），
+    // 不看 denied_tools——后者是历史，补完权限也不会消失。
+    var denied = h.denied_tools || {};
+    var pending = h.pending_tools || {};
+    var names = Object.keys(pending);
+    if (names.length) {
+      var top = names.slice(0, 3).map(function (n) {
+        return n + " ×" + Number(pending[n] || 0);
+      }).join("、");
+      var times = Number(h.last_denied) || 0;
+      return {
+        level: "warn",
+        title: "缺预授权" + (times ? "（上次被拦 " + times + " 次）" : ""),
+        detail: "近 7 天被拦：" + top + "。产出可能只是绕行说明，不算做成。",
+        act: line.kind === "pipeline" ? "pipeline" : "grant", actText: "去补预授权",
+      };
+    }
+    // 历史被拦过、但名单里已经补上了：不再喊，等下一轮运行给答案
+    var deniedNames = Object.keys(denied);
+    if (deniedNames.length) {
+      return {
+        level: "ok", title: "预授权已补齐",
+        detail: "近 7 天被拦过 " + deniedNames.join("、") +
+          "，名单里现在都有了；下一轮跑完才知道有没有真的解开。",
+        act: "", actText: "",
+      };
+    }
+    var kind = h.last_error_kind ? (ERROR_KIND[h.last_error_kind] || h.last_error_kind) : "";
+    if (h.streak >= 2) {
+      return {
+        level: "bad", title: "连续失败 " + h.streak + " 次",
+        detail: (kind && h.last_error ? kind + "：" : "") + (h.last_error || kind),
+        act: "delegate", actText: "让 Agent 看看",
+      };
+    }
+    if (h.last_status === "error" || h.last_outcome === "failed") {
+      return {
+        level: "bad", title: kind ? "上次失败 · " + kind : "上次失败",
+        detail: h.last_error || "",
+        act: "delegate", actText: "让 Agent 看看",
+      };
+    }
+    if (h.last_outcome === "partial") {
+      return {
+        level: "warn", title: "上次跑完但有拦截",
+        detail: "有工具被门控拒绝过，这一轮不算做成。",
+        act: "delegate", actText: "让 Agent 看看",
+      };
+    }
+    if (h.last_status === "empty") {
+      return {
+        level: "warn", title: "上次没有产出",
+        detail: "跑完了但没落地任何东西，看看提示词有没有让它写出来。",
+        act: "delegate", actText: "让 Agent 看看",
+      };
+    }
+    return null;
+  }
+
+  // ---------- 补预授权（处置条唯一会写盘的动作） ----------
+
+  /** 待确认块：把「新增哪几个 / 原有哪几个不动」摊开，再让人点确认。
+   *
+   *  会放松权限的动作不该点一下就开始，所以先 dry_run 让服务端算合并结果，
+   *  这里只负责把结果说清楚——尤其是「原有 N 个一个都不动」这句：cron.update
+   *  是整体替换语义，用户最怕的就是补一个删十个。
+   */
+  function grantConfirmHtml(p) {
+    var add = p.add || [];
+    var kept = p.kept || [];
+    var rows = "";
+    if (add.length) {
+      rows += '<div class="fx-grant-row"><span class="fx-grant-k">新增</span>' +
+        '<span class="fx-grant-v">' + escapeHtml(add.join("、")) + "</span></div>";
+      rows += '<div class="fx-grant-row"><span class="fx-grant-k">保留</span>' +
+        '<span class="fx-grant-v">' +
+        escapeHtml(kept.length ? kept.join("、") + "（" + kept.length + " 个）" : "无") +
+        "</span></div>";
+    } else {
+      rows += '<div class="fx-grant-row"><span class="fx-grant-k">已全部在名单里</span>' +
+        '<span class="fx-grant-v">' +
+        escapeHtml((p.already || []).join("、") || "—") +
+        "</span></div>";
+    }
+    var ops = add.length
+      ? '<div class="fx-grant-ops">' +
+        '<button class="btn-primary" data-grant-ok="1">确认补上 ' + add.length + " 个</button>" +
+        '<button class="btn-ghost" data-grant-cancel="1">取消</button></div>'
+      : '<div class="fx-grant-ops">' +
+        '<button class="btn-ghost" data-grant-cancel="1">取消</button></div>';
+    return '<div class="fx-grant">' + rows +
+      '<div class="fx-run-meta">原有权限一个都不删，只往名单里加；补上后下一轮才会用到它们。</div>' +
+      ops + "</div>";
+  }
+
+  /** 点「去补预授权」：先算一遍（dry_run），结果回来再重画抽屉。 */
+  function startGrant(line) {
+    var h = line.health || {};
+    // 只补「还没在名单里」的那些：已授权的不必再提交一遍
+    var names = Object.keys(h.pending_tools || h.denied_tools || {});
+    if (!names.length) {
+      addNotice("这条线没有被拦过的工具，没什么可补的");
+      return;
+    }
+    S.grantPending = { key: line.key, loading: true, add: [], kept: [], already: [] };
+    openLineDrawer(line.key, { focus: false });
+    request("factory.grant_tools", {
+      task_id: line.id, tools: names, dry_run: true,
+    }).then(function (r) {
+      S.grantPending = {
+        key: line.key,
+        add: (r && r.add) || [],
+        kept: (r && r.kept) || [],
+        already: (r && r.already) || [],
+      };
+      if (S.drawer && S.drawer.type === "line" && S.drawer.key === line.key) {
+        openLineDrawer(line.key, { focus: false });
+      }
+    }).catch(function (e) {
+      S.grantPending = null;
+      addNotice("读取预授权失败：" + (e.message || "未知错误"));
+      if (S.drawer && S.drawer.type === "line" && S.drawer.key === line.key) {
+        openLineDrawer(line.key, { focus: false });
+      }
+    });
+  }
+
+  /** 点「确认补上」：真正写盘，然后把这行换成「等下一轮验证」。 */
+  function confirmGrant(line, btn) {
+    var p = S.grantPending;
+    if (!p || !(p.add || []).length) return;
+    if (btn) { btn.disabled = true; btn.textContent = "补上中…"; }
+    request("factory.grant_tools", {
+      task_id: line.id, tools: p.add, dry_run: false,
+    }).then(function (r) {
+      var n = (r && r.add ? r.add.length : p.add.length);
+      S.grantPending = null;
+      // 用服务端 now 作基准：下一次运行的 finished_at 一定比它新
+      S.granted[line.key] = {
+        n: n,
+        at: Number((activeState() || {}).now) || (Date.now() / 1000),
+      };
+      addNotice("已补上 " + n + " 个预授权（" + (p.add || []).join("、") + "）；下一轮会用到它们");
+      factoryReload();
+      if (S.drawer && S.drawer.type === "line" && S.drawer.key === line.key) {
+        openLineDrawer(line.key, { focus: false });
+      }
+    }).catch(function (e) {
+      S.grantPending = null;
+      addNotice("补预授权失败：" + (e.message || "未知错误"));
+      if (S.drawer && S.drawer.type === "line" && S.drawer.key === line.key) {
+        openLineDrawer(line.key, { focus: false });
+      }
+    });
+  }
+
+  // ---------- 交给 Agent（指认完就别让人去读日志了） ----------
+
+  /** 把这条线最近的运行史写成一段能直接发出去的开场白。 */
+  function delegateReport(line, rec, rows) {
+    var h = line.health || {};
+    var where = (rec.project && rec.project.name) || "当前厂区";
+    var out = [];
+    out.push("【工厂 · 产线诊断】" + where + " · " + (line.name || line.key));
+    out.push("");
+    out.push((line.kind === "pipeline" ? "这条编排" : "这条定时产线") + "最近不太对，帮我查一下。");
+    out.push("");
+    out.push("触发：" + (line.trigger_text || "—"));
+    if (rows && rows.length) {
+      out.push("最近 " + rows.length + " 次运行（新 → 旧）：");
+      rows.forEach(function (x, i) {
+        var bits = [fmtTs(x.started_at), RUN_STATUS[x.status] || x.status];
+        if (x.outcome === "partial") bits.push("有拦截");
+        else if (x.outcome === "failed") bits.push("不算做成");
+        if (x.duration_s != null) bits.push(fmtDur(x.duration_s));
+        var kind = x.error_kind ? (ERROR_KIND[x.error_kind] || x.error_kind) : "";
+        if (kind) bits.push(kind);
+        out.push((i + 1) + ". " + bits.join(" · "));
+        // 只带「有问题那几次」的解释：成功的运行写摘要进来只会把报告撑长，
+        // 而且种子/演示里那句「已完成本轮任务」对诊断毫无信息量
+        if (x.error) {
+          out.push("   错误：" + String(x.error).replace(/\s+/g, " ").slice(0, 200));
+        } else if (x.outcome === "partial" && x.result_excerpt) {
+          out.push("   产出：" + String(x.result_excerpt).replace(/\s+/g, " ").slice(0, 200));
+        }
+        var tools = deniedToolsText(x);
+        if (tools) out.push("   被拦工具：" + tools);
+      });
+    } else {
+      out.push("暂时读不到运行记录。");
+    }
+    if (h.streak >= 2) {
+      out.push("");
+      out.push("症状：连续失败 " + h.streak + " 次。");
+    }
+    out.push("");
+    out.push("请按这个顺序来：");
+    out.push("1. 先判断根因（配置写错 / 目录或文件没了 / 提示词本身有问题 / 模型或网络），说清依据；");
+    out.push("2. 能直接修的就修；要改预授权、改排期、删数据的，先说改什么、为什么，我确认后再动；");
+    out.push("3. 修完告诉我怎么验证下一轮会真的成功。");
+    return out.join("\n");
+  }
+
+  /** 切到那条线所属项目：新会话必须落在这个项目的语境里（目录 / 白名单 / 门控）。 */
+  async function ensureProject(projectId) {
+    var r = await request("project.list").catch(function () { return null; });
+    var target = ((r && r.projects) || []).filter(function (p) {
+      return String(p.id) === String(projectId);
+    })[0];
+    if (!target || !target.root_path) throw new Error("该产线所属项目已不存在");
+    if (target.is_current) return target;
+    await request("project.switch", { path: target.root_path });
+    await applyWorkspaceData(await fetchWorkspaceData());
+    return target;
+  }
+
+  /** 交给 Agent：切项目 → 新会话 → 把诊断报告填进输入框（**不代发**）。
+   *
+   *  不自动发送是刻意的：点一下是「决定要查」，发出去要烧 token，而且用户常想
+   *  再补一句背景。预填省掉的是「写什么」，回车仍然是人的决定——这一步是决策，
+   *  不是起点，和文章里「批红」的位置一样。
+   */
+  async function delegateToAgent(line, rec, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "准备中…"; }
+    var params = { limit: 5 };
+    if (line.kind === "pipeline") params.pipeline_id = line.id;
+    else { params.task_id = line.id; params.kind = "cron"; }
+    try {
+      var r = await request("factory.runs", params);
+      await ensureProject(rec.project.id);
+      closeDrawer();
+      if (typeof backToChat === "function") backToChat();
+      await startNewTab();
+      var input = document.getElementById("input");
+      if (!input) throw new Error("没有找到输入框");
+      input.value = delegateReport(line, rec, (r && r.runs) || []);
+      if (typeof autoGrowInput === "function") autoGrowInput(input);
+      input.focus();
+      try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) { /* 忽略 */ }
+      // 报告是给人复核的：光标留在末尾（想补一句直接写），视口回到开头
+      // （先看清是哪条线、哪几次运行）。浏览器会把光标滚进视野，所以下一帧再拉回。
+      window.setTimeout(function () { input.scrollTop = 0; }, 0);
+      addNotice("已把这条线的最近运行写进输入框，确认后回车交给 Agent");
+    } catch (e) {
+      addNotice("交给 Agent 失败：" + (e && e.message ? e.message : "未知错误"));
+      if (btn) { btn.disabled = false; btn.textContent = "让 Agent 看看"; }
+    }
+  }
+
   function drawerShell(title, bodyHtml) {
     return '<div class="fx-drawer-head"><h3>' + title + "</h3>" +
       '<button class="fx-drawer-close" title="关闭（Esc）">✕</button></div>' +
@@ -280,7 +582,37 @@
           : "—";
       }
     }
-    var html = '<div class="fx-kv">' +
+    // ---- 处置台：首屏先说「现在怎么了」，其余全部折叠 ----
+    // 四期把体检数字折起来是对的，但连「这条线出事了」也一起折掉了——用户得
+    // 自己展开才知道该不该管。处置条补的就是这一步：一句话 + 一个动作，
+    // 没病时（diag === null）整条不出现，首屏只剩元信息与操作行。
+    var diag = lineDiagnosis(line);
+    // 待确认的补权限：只对当前这条线生效（换一条线就作废，别把上一条的清单带过来）
+    var pending = S.grantPending && S.grantPending.key === key ? S.grantPending : null;
+    var html = "";
+    if (diag) {
+      html += '<div class="fx-verdict ' + escapeHtml(diag.level) + '">' +
+        '<div class="fx-verdict-title">' + escapeHtml(diag.title) + "</div>" +
+        (diag.detail
+          ? '<div class="fx-verdict-detail">' + escapeHtml(diag.detail) + "</div>"
+          : "") +
+        (pending
+          ? (pending.loading
+            ? '<div class="fx-run-meta">正在核对现有预授权…</div>'
+            : grantConfirmHtml(pending))
+          : (diag.actText
+            ? '<button class="btn-primary" data-verdict-act="' + escapeHtml(diag.act) + '">' +
+              escapeHtml(diag.actText) + "</button>"
+            : "")) +
+        "</div>";
+    }
+    // 一行元信息替代原来的 KV 首屏：观战只需要「多久跑一次、下次什么时候」，
+    // 厂区 / 类型 / 团队模板这些查一次就够的进折叠区
+    var metaBits = [line.trigger_text || "—", "下次 " + next];
+    if (isTeam && memberCell !== "—") metaBits.push(memberCell);
+    html += '<div class="fx-verdict-meta">' + escapeHtml(metaBits.join(" · ")) + "</div>";
+    html += '<details class="fx-more"><summary>更多：产线信息</summary>' +
+      '<div class="fx-kv">' +
       "<dt>厂区</dt><dd>" + escapeHtml(rec.project.name || "—") + "</dd>" +
       "<dt>类型</dt><dd>" +
       (isTeam ? "团队产线" : line.kind === "pipeline" ? "装配线" : "单机产线") + "</dd>" +
@@ -296,7 +628,7 @@
         ? "<dt>在跑</dt><dd id=\"fx-progress\">" +
           escapeHtml(progressText(line.progress) || "启动中") + "</dd>"
         : "") +
-      "</div>";
+      "</div></details>";
     if (line.kind === "pipeline" && (line.nodes || []).length) {
       html += "<div><div class=\"dim small\">工位</div><div class=\"fx-run-list\">";
       line.nodes.slice(0, 20).forEach(function (n) {
@@ -320,8 +652,11 @@
       }
       // 看到「上次失败」之后最常见的下一步：改提示词、补预授权工具。
       // 以前要返回对话 → 切项目 → 开自动化面板 → 找任务四步，现在一步。
-      html += '<button class="btn-ghost" data-edit-line="1" ' +
-        'title="切到这个厂区并打开自动化面板，改提示词或预授权工具">去编辑</button>';
+      // 处置条已经给了同一个出口时不再重复一遍，免得一行里两个「去编辑」。
+      if (!diag || diag.act !== "edit") {
+        html += '<button class="btn-ghost" data-edit-line="1" ' +
+          'title="切到这个厂区并打开自动化面板，改提示词或预授权工具">去编辑</button>';
+      }
     }
     html += '<button class="btn-ghost" data-close-drawer="1">关闭</button></div>';
     html += '<div><div class="dim small">最近运行</div><div id="fx-line-runs" class="fx-run-list">' +
@@ -343,13 +678,38 @@
     if (cancelBtn) {
       cancelBtn.onclick = function () { cancelRun(line.id, line.name, cancelBtn); };
     }
+    var goEdit = function () {
+      closeDrawer();
+      if (typeof openAutomationFor === "function") {
+        openAutomationFor(rec.project.id, line.id);
+      }
+    };
+    var goPipeline = function () {
+      closeDrawer();
+      openPipelineFor(rec.project.id, line.id);
+    };
+    var dispatchAct = function (act, btn) {
+      if (act === "grant") startGrant(line);
+      else if (act === "delegate") delegateToAgent(line, rec, btn);
+      else if (act === "pipeline") goPipeline();
+      else if (act === "edit") goEdit();
+    };
     var editBtn = dom.drawer.querySelector("[data-edit-line]");
-    if (editBtn) {
-      editBtn.onclick = function () {
-        closeDrawer();
-        if (typeof openAutomationFor === "function") {
-          openAutomationFor(rec.project.id, line.id);
-        }
+    if (editBtn) editBtn.onclick = goEdit;
+    // 处置条的主按钮：grant 就地补预授权、delegate 交给 Agent，其余是跳转
+    var verdictBtn = dom.drawer.querySelector("[data-verdict-act]");
+    if (verdictBtn) {
+      verdictBtn.onclick = function () {
+        dispatchAct(verdictBtn.dataset.verdictAct, verdictBtn);
+      };
+    }
+    var grantOk = dom.drawer.querySelector("[data-grant-ok]");
+    if (grantOk) grantOk.onclick = function () { confirmGrant(line, grantOk); };
+    var grantCancel = dom.drawer.querySelector("[data-grant-cancel]");
+    if (grantCancel) {
+      grantCancel.onclick = function () {
+        S.grantPending = null;
+        openLineDrawer(line.key, { focus: false });
       };
     }
     var closeBtn = dom.drawer.querySelector("[data-close-drawer]");
@@ -381,9 +741,20 @@
         return;
       }
       host.innerHTML = rows.map(function (x) {
+        // 状态与「做成」是两件事：跑完但被门控拦过（partial）在列表里不能写成
+        // 「已完成」，否则处置条说「缺预授权」、下面六行全说「已完成」，自相矛盾
+        var stText = RUN_STATUS[x.status] || x.status;
+        var warn = "";
+        if (x.status === "done" && x.outcome === "partial") {
+          stText = "跑完 · 被拦";
+          warn = " warn";
+        } else if (x.status === "done" && x.outcome === "failed") {
+          stText = "跑完 · 不算";
+          warn = " bad";
+        }
         return '<button class="fx-run-row" data-run-id="' + escapeHtml(String(x.id)) + '">' +
           '<span class="fx-run-name">#' + escapeHtml(String(x.id)) + " · " + escapeHtml(x.name || "") + "</span>" +
-          '<span class="fx-run-meta">' + escapeHtml(RUN_STATUS[x.status] || x.status) + " · " +
+          '<span class="fx-run-meta' + warn + '">' + escapeHtml(stText) + " · " +
           escapeHtml(fmtDurationShort(x)) + "</span></button>";
       }).join("");
       host.querySelectorAll("[data-run-id]").forEach(function (b) {
@@ -1156,6 +1527,9 @@
   FX.openUpcomingDialog = openUpcomingDialog;
   FX.saveConfig = saveConfig; FX.loadAllRuns = loadAllRuns;
   FX.progressText = progressText;
+  // 处置台的纯函数（health → 一句话诊断）：导出给测试探针直接断言，
+  // 不必先渲染抽屉
+  FX.lineDiagnosis = lineDiagnosis;
 
   window.factoryEscape = factoryEscape;
 })();

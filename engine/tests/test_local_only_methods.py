@@ -48,9 +48,10 @@ MUST_BE_LOCAL = (
     "archive.save", "archive.list", "archive.restore", "archive.delete",
     # 工厂（跨项目自动化）：state 列出全部项目的产线与运行历史（跨项目枚举面），
     # run_now / toggle / cancel / line_add 写自动化的派工与定义，save 改保留策略，
-    # ack 改「需留意」的已处理标记——全部与 cron/pipeline 的无人值守执行面同姿态，仅本机
+    # ack 改「需留意」的已处理标记，grant_tools 放松某条产线的预授权——全部与
+    # cron/pipeline 的无人值守执行面同姿态，仅本机
     "factory.state", "factory.runs", "factory.live", "factory.weather", "factory.run_now",
-    "factory.toggle", "factory.cancel", "factory.ack",
+    "factory.toggle", "factory.cancel", "factory.ack", "factory.grant_tools",
     "factory.line_add", "factory.save", "factory.run_mark",
     # 浏览器控制：改开关（含「忽略证书校验」这个降防护档位）与清除内置浏览器
     # profile 都是本机管理动作，同 archive 家族姿态仅本机

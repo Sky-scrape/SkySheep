@@ -202,6 +202,11 @@ async def _h_factory_line_add(backend: ServerBackend, params: dict, emit, local:
     return await backend.factory_line_add(params)
 
 
+async def _h_factory_grant_tools(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 处置台的「补预授权」：只增不减，合并规则在服务端（cron.update 是整体替换）
+    return await backend.factory_grant_tools(params)
+
+
 async def _h_factory_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.factory_save(params)
 
@@ -312,6 +317,10 @@ METHODS: dict[str, _WsMethod] = {
     "factory.line_add": _WsMethod(
         _h_factory_line_add, local_only=True,
         local_error="新建产线只能在桌面端本机操作",
+    ),
+    "factory.grant_tools": _WsMethod(
+        _h_factory_grant_tools, local_only=True,
+        local_error="补预授权只能在桌面端本机操作",
     ),
     "factory.save": _WsMethod(
         _h_factory_save, local_only=True,

@@ -68,6 +68,16 @@ from .daily_report import (
 from .daily_report import (
     save_state as save_daily_report_state,
 )
+from .run_inspect import (
+    inspect_runs,
+    run_inspect_pass,
+)
+from .run_inspect import (
+    load_state as load_inspect_state,
+)
+from .run_inspect import (
+    save_state as save_inspect_state,
+)
 
 logger = logging.getLogger("skysheep.security")
 
@@ -3123,6 +3133,17 @@ class AutomationMixin:
                     raise
                 except Exception:  # noqa: BLE001
                     pass  # 单轮失败不终止循环（与 cron / 流水线扫描循环同一姿态）
+            # 运行巡检（Watchdog 的本地便宜版）：走同一根时间轴，但自带开关与
+            # 「距上次够久」判定，样本不够时不消耗 last_at（下次再来）。
+            try:
+                await run_inspect_pass(
+                    self,
+                    push=lambda text, **kw: push_text_to_targets(self.channels, text, **kw),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(self.DAILY_REPORT_INTERVAL)
 
     async def daily_report_status(self) -> dict:
@@ -3182,6 +3203,51 @@ class AutomationMixin:
                 state["weekly_template"] = text
         save_daily_report_state(state)
         return await self.daily_report_status()
+
+    # ---- 运行巡检（Watchdog 的本地便宜版，见 run_inspect.py） ----
+    # 与日报的分工：日报回答「今天跑成了几件」，巡检回答「跑成的那些里有没有
+    # 其实是跑歪的」。数据只吃 automation_runs 的账本字段，不读会话正文。
+
+    async def run_inspect_status(self) -> dict:
+        """巡检设置回读（开关 / 间隔 / 窗口 / 上次结论）。"""
+        return load_inspect_state()
+
+    async def run_inspect_save(self, params: dict) -> dict:
+        """保存巡检设置。间隔与窗口都做硬校验——配错了每轮都烧一次模型调用。"""
+        state = load_inspect_state()
+        if params.get("enabled") is not None:
+            state["enabled"] = bool(params["enabled"])
+        for key, lo, hi, label in (
+            ("interval_hours", 1, 168, "巡检间隔（小时）"),
+            ("hours", 1, 744, "回看窗口（小时）"),
+        ):
+            if params.get(key) is None:
+                continue
+            try:
+                val = int(params[key])
+            except (TypeError, ValueError):
+                raise RuntimeError(f"{label}应为 {lo}–{hi} 的整数") from None
+            if not lo <= val <= hi:
+                raise RuntimeError(f"{label}应为 {lo}–{hi} 的整数")
+            state[key] = val
+        save_inspect_state(state)
+        return await self.run_inspect_status()
+
+    async def factory_inspect(self, params: dict | None = None) -> dict:
+        """手动跑一次巡检（不改开关、不动 last_at 之外的定时状态）。
+
+        hours 可覆盖窗口（默认取设置里的值）。返回模型的结论与报告路径；
+        样本不够或没有可用模型时返回 ok=False + reason，不报错——这不是
+        「操作失败」，只是「没什么可看的」。
+        """
+        params = params or {}
+        hours = params.get("hours")
+        try:
+            hours = int(hours) if hours is not None else None
+        except (TypeError, ValueError):
+            hours = None
+        return await inspect_runs(self.store, getattr(self, "provider", None), hours=hours)
+
 
     # ---- 今日运行总览（只读聚合）：无人值守能力从「配好了」变成「看得见」 ----
     # 数据全在库里：cron_tasks 的 last_run_at/last_status/last_result（每任务只留

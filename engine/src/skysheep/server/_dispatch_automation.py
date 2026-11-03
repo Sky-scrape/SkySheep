@@ -139,6 +139,20 @@ async def _h_automation_report_save(backend: ServerBackend, params: dict, emit, 
     return await backend.daily_report_save(params)
 
 
+async def _h_run_inspect_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 运行巡检的设置回读：开关 / 间隔 / 窗口 / 上次结论（无敏感面）
+    return await backend.run_inspect_status()
+
+
+async def _h_run_inspect_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.run_inspect_save(params)
+
+
+async def _h_factory_inspect(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 手动巡检：只读账本 + 一次模型调用，不改任何产线状态
+    return await backend.factory_inspect(params)
+
+
 async def _h_run_center_summary(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 今日运行总览（只读聚合）：明细已按当前项目过滤（B14 同款），远端与本地同视图
     return await backend.run_center_summary()
@@ -250,7 +264,17 @@ METHODS: dict[str, _WsMethod] = {
     ),
     # 今日运行总览：只读聚合，明细已按当前项目过滤，各端同视图可看
     "automation.run_center_summary": _WsMethod(_h_run_center_summary),
-    # 工厂（跨项目自动化观战）：十一个方法全部本机专属——状态与运行历史是跨项目
+    # 运行巡检（Watchdog 的本地便宜版）：状态各端可看，改设置与手动触发仅本机
+    "automation.inspect_status": _WsMethod(_h_run_inspect_status),
+    "automation.inspect_save": _WsMethod(
+        _h_run_inspect_save, local_only=True,
+        local_error="运行巡检的设置只能在桌面端本机修改",
+    ),
+    "automation.inspect_now": _WsMethod(
+        _h_factory_inspect, local_only=True,
+        local_error="运行巡检只能在桌面端本机触发",
+    ),
+    # 工厂（跨项目自动化观战）：十二个方法全部本机专属——状态与运行历史是跨项目
     # 枚举面，派工/启停/叫停/新建产线是无人值守执行面，天气会按本机配置出网，
     # 远程 / 手机连接一律拒绝，前端打开工厂只显示「工厂仅在本机可用」。
     "factory.state": _WsMethod(

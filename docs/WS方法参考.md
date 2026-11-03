@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-10-30 23:50:30
-- 方法总数：327（本机专属 local_only 175 个）
+- 生成时间：2026-11-03 21:27:34
+- 方法总数：331（本机专属 local_only 178 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -161,6 +161,9 @@
 | automation.daily_report_status |  | — |
 | automation.daily_report_save | 是 | — |
 | automation.run_center_summary |  | — |
+| automation.inspect_status |  | — |
+| automation.inspect_save | 是 | — |
+| automation.inspect_now | 是 | — |
 | factory.state | 是 | — |
 | factory.runs | 是 | — |
 | factory.live | 是 | — |
@@ -170,6 +173,7 @@
 | factory.cancel | 是 | — |
 | factory.ack | 是 | — |
 | factory.line_add | 是 | — |
+| factory.grant_tools | 是 | — |
 | factory.save | 是 | — |
 | factory.run_mark | 是 | — |
 

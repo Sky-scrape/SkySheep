@@ -12,10 +12,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
+from pathlib import Path
 
 from ..events import CompactionEvent
 from ..messages import Message
 from ..models.base import ProviderTextDelta
+from ..textio import write_text_atomic
 from .provider_errors import is_transient_error
 
 logger = logging.getLogger("skysheep.core.context")
@@ -44,6 +47,14 @@ COMPACT_SYSTEM = (
 SUMMARY_OPEN_TAG = "<earlier-conversation-summary>"
 SUMMARY_CLOSE_TAG = "</earlier-conversation-summary>"
 SUMMARY_NOTE = "(以上是此前对话的摘要，原始消息已省略。)"
+# 压缩时原文落盘的目录名（相对工作目录，与 .skysheep/reports 同一层）。
+# 「摘要 + 指针」而不是「只摘要」：摘要一定丢细节（路径、数字、报错原文），
+# 而完整原文在 messages 表与这份文件里都还在，模型按需取回即可——即
+# Super-agent 那套 Inline / Spill 的最小可用版。
+TRANSCRIPT_DIR = "transcripts"
+# 单份 transcript 的字符上限：超过就截断并注明。压缩本来就是为了省窗口，
+# 落盘不该反过来把磁盘写爆（一次压缩的量级通常是几十万字符）。
+MAX_TRANSCRIPT_CHARS = 2_000_000
 
 
 def is_compaction_summary(m: Message) -> bool:
@@ -137,6 +148,70 @@ def _safe_recent_start(messages: list[Message], keep: int) -> int:
     return max(1, start)
 
 
+def _spill_target(agent, session_id: str) -> tuple[Path, str] | None:
+    """transcript 落点：返回 (绝对路径, 给模型看的路径)。
+
+    给模型看的那份优先用相对工作目录的写法（模型的 cwd 就是工作目录，
+    read_file 直接可用，也短）；无项目态（工作目录为 None）才给绝对路径。
+    目录建不出来就返回 None，压缩照常进行——落盘是增强，不是前置条件。
+    """
+    base = getattr(agent, "working_dir", None)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe = re.sub(r"[^0-9A-Za-z_-]", "", session_id or "")[:24] or "session"
+    name = f"{safe}-{stamp}.md"
+    try:
+        if base is not None:
+            root = Path(base) / ".skysheep" / TRANSCRIPT_DIR
+            shown = f".skysheep/{TRANSCRIPT_DIR}/{name}"
+        else:
+            root = Path.home() / ".skysheep" / TRANSCRIPT_DIR
+            shown = str(root / name)
+        root.mkdir(parents=True, exist_ok=True)
+        return root / name, shown
+    except OSError as e:  # noqa: BLE001 - 磁盘/权限问题不该拖垮压缩
+        logger.warning("compact_history: 无法创建 transcript 目录（%s），本次不落盘", e)
+        return None
+
+
+def spill_transcript(agent, messages: list[Message], session_id: str = "") -> str:
+    """把即将被摘要替换的原文写到盘上，返回给模型看的路径（失败返回空串）。
+
+    只做「保存 + 报路径」两件事，不做索引、不做切片：模型要哪段自己用
+    read_file / grep 找。这样压缩是无损的（对能读盘的模型而言），窗口里
+    只留摘要 + 一个指针。
+    """
+    target = _spill_target(agent, session_id)
+    if target is None:
+        return ""
+    path, shown = target
+    parts: list[str] = []
+    used = 0
+    for m in messages:
+        try:
+            body = m.to_plain()
+        except Exception:  # noqa: BLE001 - 单条坏消息不该毁掉整份 transcript
+            body = str(getattr(m, "text", ""))
+        chunk = f"[{m.role.upper()}]\n{body}\n\n"
+        # 最后一条可能只剩一半：宁可少存也不写出一个看似完整的截断稿
+        if used + len(chunk) > MAX_TRANSCRIPT_CHARS:
+            parts.append(f"（超出 {MAX_TRANSCRIPT_CHARS} 字符上限，以下内容省略）\n")
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    header = (
+        f"# 会话原文（压缩前）\n\n"
+        f"会话：{session_id or '（未知）'}\n"
+        f"落盘：{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"消息数：{len(messages)}\n\n---\n\n"
+    )
+    try:
+        write_text_atomic(path, header + "".join(parts))
+    except OSError as e:  # noqa: BLE001
+        logger.warning("compact_history: 原文落盘失败（%s），本次只保留摘要", e)
+        return ""
+    return shown
+
+
 async def compact_history(
     agent,  # Agent，避免循环导入用鸭子类型
     keep_recent: int = 8,
@@ -192,8 +267,17 @@ async def compact_history(
     if not summary:
         return None
 
+    # 摘要成功之后才落盘：摘要失败直接返回 None，此时落一份没人引用的原文
+    # 只会在 .skysheep/transcripts 里堆垃圾。
+    pointer = spill_transcript(agent, list(to_summarize), getattr(agent, "session_id", ""))
+    note = SUMMARY_NOTE
+    if pointer:
+        note += (
+            f"完整原文已落盘：{pointer}"
+            "（read_file / grep 可续读；只想找某个关键词时优先用 search_history）。"
+        )
     summary_msg = Message.user(
-        f"{SUMMARY_OPEN_TAG}\n{summary}\n{SUMMARY_CLOSE_TAG}\n{SUMMARY_NOTE}"
+        f"{SUMMARY_OPEN_TAG}\n{summary}\n{SUMMARY_CLOSE_TAG}\n{note}"
     )
     agent.history = [history[0], summary_msg] + list(recent)
     return CompactionEvent(

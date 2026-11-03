@@ -2367,6 +2367,51 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
     # 只保留排序最先的命中，够覆盖几百个会话），命中超过它才可能少给结果。
     SEARCH_SQL_LIMIT = 500
 
+    async def search_session_history(
+        self, session_id: str, query: str, limit: int = 8, max_chars: int = 1200
+    ) -> list[dict]:
+        """在**单个会话**的历史里按关键词召回，多条命中都返回（不是每会话一条）。
+
+        与 search_messages 的分工：那个给用户找「这件事在哪个会话里聊的」，
+        这个给模型找「我们之前具体说过什么」——压缩掉的历史只剩 DB 一份，
+        摘要丢掉的路径、数字、报错原文都还在 messages 表里。所以这里返回
+        可回溯的锚点（seq / role），正文给到 max_chars 就够判读，不够再让
+        模型用 fs.read 读 transcripts 落盘的那份。
+
+        走 LIKE 而不是 FTS：FTS 是 trigram 分词，2 个汉字以内的查询根本构造
+        不出三字符片段（`_search_fts` 自己也会退到 LIKE），而模型最常搜的恰
+        恰是短词（文件名、函数名、错误码）。限定单会话后行数有界，全扫也不慢。
+        """
+        assert self._db
+        query = (query or "").strip()
+        if not query or not session_id:
+            return []
+        escaped = (
+            query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        cur = await self._db.execute(
+            "SELECT seq, role, content, created_at FROM messages"
+            " WHERE session_id = ? AND content LIKE ? ESCAPE '\\'"
+            " ORDER BY seq DESC LIMIT ?",
+            (session_id, f"%{escaped}%", max(1, min(50, int(limit)))),
+        )
+        rows = await cur.fetchall()
+        out: list[dict] = []
+        for r in rows:
+            plain = self._plain_text(r["content"])
+            # SQL 侧是 JSON 串上的 LIKE（键名、转义符也参与匹配），这里再按
+            # 可见正文校一次：只命中 JSON 字段名的那种假阳性不该给模型看。
+            if query.lower() not in plain.lower():
+                continue
+            out.append({
+                "seq": int(r["seq"]),
+                "role": r["role"],
+                "text": plain[:max_chars],
+                "truncated": len(plain) > max_chars,
+                "created_at": float(r["created_at"]),
+            })
+        return out
+
     def _scope_condition(self, project_id: int | None, scope: str) -> tuple[str, tuple]:
         # 已归档会话不进搜索结果（归档 = 眼不见；要找就去归档弹窗恢复）
         if scope == "all":

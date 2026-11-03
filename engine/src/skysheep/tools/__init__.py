@@ -33,6 +33,7 @@ from .fs import (
     ReadFileTool,
     WriteFileTool,
 )
+from .history import SearchHistoryTool
 from .image import ReadImageTool
 from .imagegen import GenerateImageTool
 from .memory import MemoryWriteTool
@@ -112,6 +113,8 @@ def default_tools(
         tools.append(WebPageTool())
     if store is not None:
         tools.append(ScheduleWriteTool(store))
+        # 历史召回：压缩丢掉的原文只剩 DB 一份，没有入口就等于丢了
+        tools.append(SearchHistoryTool(store))
     return tools
 
 
@@ -139,6 +142,7 @@ __all__ = [
     "RunCommandTool",
     "TodoWriteTool",
     "ScheduleWriteTool",
+    "SearchHistoryTool",
     "WebFetchTool",
     "WebSearchTool",
     "ReadDocumentTool",

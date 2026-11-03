@@ -8,7 +8,7 @@ webhook 是其中的例外：纯出站（只发不收）的单向推送口，没
 也不受 allowed_ids 的入站准入闸门约束（留空即广播），见 webhook.WebhookChannel。
 """
 
-from .base import Channel, ChannelMessage, ChannelStatus
+from .base import CHANNEL_STYLE, CHANNEL_STYLE_MARK, Channel, ChannelMessage, ChannelStatus
 from .feishu import FeishuChannel
 from .gate import ChannelGate
 from .manager import ChannelManager
@@ -16,6 +16,8 @@ from .webhook import WebhookChannel
 from .weixin import WeixinChannel
 
 __all__ = [
+    "CHANNEL_STYLE",
+    "CHANNEL_STYLE_MARK",
     "Channel",
     "ChannelGate",
     "ChannelManager",

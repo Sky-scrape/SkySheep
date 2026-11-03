@@ -47,6 +47,10 @@ MAX_SEEN = 20
 # 拒收并告诉用户怎么办。
 MAX_PENDING_TURNS = 5
 
+# 一批最多合并几条消息：3 条已经覆盖「顺手再做两件事」的日常连发，再多会把
+# 一件事的上下文搅在一起（模型容易漏掉中间那条）。
+BATCH_MAX = 3
+
 # 入站文本上限：飞书单条可到 150 KB，全量进上下文既费 token 也没必要；
 # 超过这个长度按截断处理并注明。
 MAX_INBOUND_TEXT = 8000
@@ -119,13 +123,18 @@ class ChannelManager:
         self.host = host
         self.config_provider = config_provider
         self.channels: dict[str, Channel] = {}
-        self.sessions: dict[str, str] = {}   # 平台名 → 渠道会话 id
+        # 会话映射键是「绑定键」而不是平台名：默认就是平台名（与改造前一致），
+        # 平台能给出话题键时是 `feishu#<thread>`，一个群里多段讨论各走各的
+        # 上下文。绑定同样落库（channel_bindings 的 channel 列存整个键），
+        # 所以键里带 `#` 不影响持久化。
+        self.sessions: dict[str, str] = {}
         self._seen: list[dict] = []
         # 同一时刻只允许一条渠道消息在跑：两个聊天窗口同时下指令会让
         # Agent 的权限确认与上下文交叉，行为难以预期。
         self._lock = asyncio.Lock()
-        # 正在等锁的消息数（不含正在跑的那条）：排队回执里报位置、超限拒收
-        self._pending_turns = 0
+        # 待跑消息（按绑定键分组）+ 「现在是否有一批在跑」（见 _drain）
+        self._inbox: dict[str, list[ChannelMessage]] = {}
+        self._running = False
 
     # ---- 生命周期 ----
 
@@ -316,32 +325,73 @@ class ChannelManager:
             await self._handle_command(channel, msg, cmd)
             return
 
-        # 普通消息：串行跑一轮，避免多渠道交叉。已在跑时排队并回执，让用户
-        # 知道消息没有丢；排队过长直接拒收（每条排队消息都是一整轮的 token）。
-        # 计数无条件先行，不先看 _lock.locked()：先查再抢的两步之间可能正好
-        # 撞上前一轮释放锁、排队者还没被唤醒的空档，locked() 返回 False 会让
-        # 这条消息绕过回执与上限直接插队。_pending_turns 含正在跑的那条
-        # （到达即 +1、收尾才 -1，检查与自增之间没有 await，不会被并发插队），
-        # 所以「我是不是当前唯一的一轮」看计数是否为 1 即可，上限也按
-        # 「1 条在跑 + MAX_PENDING_TURNS 条排队」取。
-        if self._pending_turns >= MAX_PENDING_TURNS + 1:
+        # 普通消息：进收件箱，然后串行消费（同一时刻只跑一轮，避免多渠道
+        # 交叉）。正在跑一轮时进来的消息留在箱里，等这一轮结束后与同会话的
+        # 其它消息**合并成一轮**——连发「改这个」「顺便跑测试」「再改
+        # CHANGELOG」本来就是一件事，拆成三轮既慢又白烧 token。
+        #
+        # 上限按「1 条在跑 + MAX_PENDING_TURNS 条排队」取：每条排队消息都是一整轮
+        # 的量级（token 是真金白银），不设上限的话刷屏等于刷预算。
+        bkey = self._binding_key(msg)
+        # 「前面还有几条」= 箱里排着的 + 正在跑的那一批（跑的那批已经从箱里取走了，
+        # 不加上它就会告诉用户「前面还有 0 条」，等于没回执）
+        ahead = len(self._inbox.get(bkey) or ()) + (1 if self._running else 0)
+        if ahead >= MAX_PENDING_TURNS + 1:
             await self._reply(
                 channel, msg,
-                f"排队的消息太多了（前面还有 {self._pending_turns - 1} 条），这条没有执行。"
-                "等当前这轮结束再发，或发 /stop 中断当前轮。",
+                f"排队的消息太多了（前面还有 {ahead - 1 if self._running else ahead} 条），"
+                "这条没有执行。等当前这轮结束再发，或发 /stop 中断当前轮。",
             )
             return
-        self._pending_turns += 1
+        self._inbox.setdefault(bkey, []).append(msg)
+        if self._running:
+            await self._reply(
+                channel, msg,
+                f"已收到，这条在排队（前面还有 {ahead} 条）。"
+                "连着发的几条会合并成一轮处理。",
+            )
+            # 有 drain 在跑：它会顺手取走箱里的消息，这里直接返回（适配器不必
+            # 跟着等，用户已经收到回执）。
+            return
+        self._running = True
         try:
-            if self._pending_turns > 1:
-                await self._reply(
-                    channel, msg,
-                    f"已收到。前面还有 {self._pending_turns - 1} 条在排队，轮到后会开始处理。",
-                )
-            async with self._lock:
-                await self._run_prompt(channel, msg, msg.text)
+            await self._drain()
         finally:
-            self._pending_turns -= 1
+            self._running = False
+
+    # ---- 收件箱（把「一条一轮」换成「一批一轮」） ----
+
+    def _next_binding(self) -> str:
+        """取下一个有货的会话键（先到先跑）。"""
+        for key, items in self._inbox.items():
+            if items:
+                return key
+        return ""
+
+    def _take_batch(self, bkey: str) -> list[ChannelMessage]:
+        """取走该会话最多 BATCH_MAX 条连续消息，剩下的留给下一轮。"""
+        items = self._inbox.get(bkey) or []
+        batch = items[:BATCH_MAX]
+        del items[:BATCH_MAX]
+        if not items:
+            self._inbox.pop(bkey, None)
+        return batch
+
+    async def _drain(self) -> None:
+        """一批接一批地跑到收件箱空。
+
+        跑一轮期间到达的消息不会被这轮忽略：循环回到顶部时会拿到它们，
+        要么并入下一批、要么单开一轮。
+        """
+        while True:
+            bkey = self._next_binding()
+            if not bkey:
+                return
+            batch = self._take_batch(bkey)
+            if not batch:
+                continue
+            async with self._lock:
+                await self._run_prompt(batch)
 
     async def _reply(self, channel: Channel, msg: ChannelMessage, text: str) -> None:
         await self._send_text(channel, msg.chat_id, text)
@@ -361,7 +411,8 @@ class ChannelManager:
         await self._send_text(channel, chat_id, BUSY_NOTICE_TEXT)
 
     async def _handle_command(self, channel: Channel, msg: ChannelMessage, cmd: commands.Command) -> None:
-        sid = await self._session_id(channel.name)
+        bkey = self._binding_key(msg)
+        sid = await self._session_id(bkey)
         if cmd.name == "help":
             await self._reply(channel, msg, commands.HELP_TEXT)
         elif cmd.name == "status":
@@ -372,8 +423,8 @@ class ChannelManager:
             await self._reply(channel, msg, text)
         elif cmd.name == "new":
             try:
-                sid = await self.host.channel_new_session(channel.name)
-                self.sessions[channel.name] = sid
+                sid = await self.host.channel_new_session(bkey)
+                self.sessions[bkey] = sid
                 await self._reply(channel, msg, "已开新会话，接着说吧。")
             except Exception as e:  # noqa: BLE001
                 await self._reply(channel, msg, f"开新会话失败：{e}")
@@ -388,22 +439,59 @@ class ChannelManager:
             except Exception as e:  # noqa: BLE001
                 await self._reply(channel, msg, f"列表失败：{e}")
         elif cmd.name == "stop":
+            # 排队中的消息一并丢弃：用户说停，多数时候意思是「这一摊都停下」，
+            # 只停当前轮而让后面几条接着跑，等于停了又没停。
+            dropped = len(self._inbox.pop(bkey, None) or ())
             try:
                 await self.host.channel_stop(sid)
-                await self._reply(channel, msg, "已请求中断当前这一轮。")
+                tail = f"，并丢弃了排队中的 {dropped} 条" if dropped else ""
+                await self._reply(channel, msg, f"已请求中断当前这一轮{tail}。")
             except Exception as e:  # noqa: BLE001
                 await self._reply(channel, msg, f"中断失败：{e}")
 
-    async def _session_id(self, channel_name: str) -> str:
-        sid = self.sessions.get(channel_name)
+    def _binding_key(self, msg: ChannelMessage) -> str:
+        """消息落到哪个会话：平台名，或 `平台#话题键`。
+
+        话题键只在平台真的给出时才用（飞书群话题），拿不到就是平台名——
+        与改造前的「一个渠道一个会话」完全一致，不需要迁移老绑定。
+        """
+        thread = str(getattr(msg, "thread_key", "") or "").strip()
+        if not thread:
+            return msg.channel
+        return f"{msg.channel}#{thread}"
+
+    async def _session_id(self, bkey: str) -> str:
+        sid = self.sessions.get(bkey)
         if not sid:
-            sid = await self.host.channel_ensure_session(channel_name)
-            self.sessions[channel_name] = sid
+            sid = await self.host.channel_ensure_session(bkey)
+            self.sessions[bkey] = sid
         return sid
 
-    async def _run_prompt(self, channel: Channel, msg: ChannelMessage, text: str) -> None:
+    @staticmethod
+    def _merge_text(batch: list[ChannelMessage]) -> str:
+        """把一批消息拼成一轮的输入。
+
+        单条原样返回（占绝大多数，别给模型加无谓的包装）；多条才加编号与
+        说明——模型要知道这是连着发的几件事，而不是一段有多段落的话。
+        """
+        if len(batch) == 1:
+            return batch[0].text
+        body = "\n\n".join(f"[{i}] {m.text}" for i, m in enumerate(batch, 1))
+        return (
+            f"（用户连着发了 {len(batch)} 条消息，按顺序合并成这一轮处理；"
+            f"逐条都给个交代）\n\n{body}"
+        )
+
+    async def _run_prompt(self, batch: list[ChannelMessage]) -> None:
+        """跑一批消息（1～BATCH_MAX 条）。回复发到第一条消息所在的聊天。"""
+        if not batch:
+            return
+        msg = batch[0]
+        channel = self.channels.get(msg.channel)
+        if channel is None:
+            return
         try:
-            sid = await self._session_id(channel.name)
+            sid = await self._session_id(self._binding_key(msg))
         except Exception as e:  # noqa: BLE001
             await self._reply(channel, msg, f"会话不可用：{e}")
             return
@@ -412,7 +500,9 @@ class ChannelManager:
         busy = asyncio.create_task(self._delayed_busy_notice(channel, msg.chat_id))
         try:
             try:
-                result = await self.host.channel_run(sid, text, actor=msg.actor, chat_id=msg.chat_id)
+                result = await self.host.channel_run(
+                    sid, self._merge_text(batch), actor=msg.actor, chat_id=msg.chat_id
+                )
             except Exception as e:  # noqa: BLE001 - 一轮失败要让用户看到原因
                 await self._reply(channel, msg, f"这一轮出错了：{e}")
                 return

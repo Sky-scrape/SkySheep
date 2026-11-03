@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..bgtasks import spawn_bg
-from ..channels import ChannelGate, ChannelManager
+from ..channels import CHANNEL_STYLE, ChannelGate, ChannelManager
 from ..config import (
     PRESET_SIGNUP_URLS,
     PRESETS,
@@ -2767,6 +2767,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 system = self.compose_system_for(rt.ctx.workdir)
             else:
                 system = self.compose_system()
+            # 渠道会话：把 IM 的输出纪律写进系统提示词（结论先给、100 字内、
+            # 不贴日志/代码）。下在生成侧而不是发出去前截断——截断会把结论
+            # 切掉，用户看到半句话还以为 Agent 没做完。
+            if sid in self._channel_names:
+                system += CHANNEL_STYLE
         agent.set_system(system)
         return msgs
 

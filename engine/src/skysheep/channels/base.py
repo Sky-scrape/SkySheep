@@ -29,6 +29,10 @@ class ChannelMessage:
     text: str = ""
     approved: bool = False  # 来源是否在允许名单内
     raw: dict = field(default_factory=dict)
+    # 话题/线程键（飞书话题、群内 thread）：同一个 chat 里多段互不相干的讨论
+    # 不该挤进同一个会话，否则上下文互相污染。平台给不出时留空 = 退回按 chat_id
+    # 分会话（与改造前行为完全一致）。
+    thread_key: str = ""
 
 
 @dataclass
@@ -143,6 +147,26 @@ class Channel(abc.ABC):
     def configured(self) -> bool:
         """关键配置是否齐全——不齐全时启用也只会立刻报错，不如提前在界面提示。"""
         return True
+
+
+CHANNEL_STYLE_MARK = "当前信道的说话方式"
+
+# 渠道轮次的输出纪律：注入渠道会话的系统提示词（见 server/backend.py:
+# _reload_agent_history）。为什么要下在生成侧、而不是发出去前截断：截断会把
+# 结论切掉，用户看到半句还以为是 Agent 没做完。约束写进提示词，模型自己
+# 决定「哪句是结论、哪些细节该留在桌面端」。
+#
+# 依据：手机上刷不完的消息等于没发。100 字是参考量级，不是硬指标——要用户
+# 拍板的那个问题，宁可多两句也要问清楚。
+CHANNEL_STYLE = (
+    "\n\n# " + CHANNEL_STYLE_MARK + "\n"
+    "你现在通过 IM（聊天窗口）跟用户对话，对方大概率在手机上看。\n"
+    "- 结论先给：第一句就是答案或当前状态，不要铺垫、不要复述思考过程。\n"
+    "- 默认控制在 100 字以内。日志、代码、逐条改动这类细节不要贴出来，"
+    "改成一句「细节在桌面端这一轮的记录里」，或先问一句要不要展开。\n"
+    "- 不描述工具调用过程（「我先读取了…」「接下来我会…」）。\n"
+    "- 需要用户拍板时，只问那一个问题，不要同时给三个方案。\n"
+)
 
 
 def split_text(text: str, limit: int) -> list[str]:

@@ -11,13 +11,23 @@ import asyncio
 import logging
 
 from ...bgtasks import spawn_bg
-from ...channels import ChannelGate
+from ...channels import CHANNEL_STYLE, CHANNEL_STYLE_MARK, ChannelGate
 from ...channels.cards import permission_request_card
 from ...config import _read_raw_config, load_config, update_config_section
 from ...tools import ChangeRecorder
 from ._shared import SessionRuntime
 
 logger = logging.getLogger("skysheep.security")
+
+
+def _platform_of(binding_key: str) -> str:
+    """绑定键 → 平台名（`feishu#thread-1` → `feishu`）。
+
+    渠道会话的绑定键可能带话题后缀（见 ChannelManager._binding_key）。凡是
+    要查配置、装配门控、写会话标题的地方都只认平台名，用整串去查会静默退化成
+    「空允许名单」（= 一律拒绝），排查起来极难。
+    """
+    return str(binding_key or "").split("#", 1)[0]
 
 def _normalize_id_list(raw) -> list[str]:
     """把界面传来的允许名单归一成字符串列表。
@@ -508,6 +518,12 @@ class ChannelsMixin:
     async def channel_ensure_session(self, channel_name: str) -> str:
         """取（或建）某个渠道绑定的会话。不切活动会话指针——渠道与桌面可并行。
 
+        channel_name 是**绑定键**：默认就是平台名（`feishu`），平台给出话题
+        键时是 `feishu#<thread>`（同一个群里不同话题各走各的会话）。绑定键
+        原样存进 `channel_bindings.channel`，落库口径不变；平台名用于标题、
+        门控装配与配置查找——两者不能混，混了会拿绑定键去查
+        `cfg.channels.platforms`，查不到就退化成「空允许名单」的拦截门。
+
         渠道会话归属「产生它时桌面所在的项目」（用户在渠道里操作的就是桌面
         当时的项目，对话应归到那个项目名下）：跟随当前项目——桌面切了项目，
         渠道下一条消息会在新项目下开新会话（旧会话留在原项目可查）；无项目
@@ -515,23 +531,25 @@ class ChannelsMixin:
         到下方的自愈路径重开，而不是把别的项目的会话挂进渠道的门控下
         （归属校验，同 B 族）。工作目录随归属（真实项目→项目目录）。
         """
+        plat = _platform_of(channel_name)
         target_pid = self._cur_project_id()
         bound = await self.store.get_channel_binding(channel_name)
         if bound and await self.store.get_session_for_project(bound, target_pid) is not None:
             # 绑定存在但 runtime 可能不在：重启后首次使用、或该会话被桌面端切走时。
             # 这里必须补建，否则 channel_run 会因「会话不存在」直接失败。
-            await self._get_channel_runtime(bound, channel_name)
+            await self._get_channel_runtime(bound, plat)
             return bound
-        sess = await self.store.create_session(target_pid, title=f"🤖 {channel_name}")
+        sess = await self.store.create_session(target_pid, title=f"🤖 {plat}")
         await self.store.set_channel_binding(channel_name, sess.id)
-        await self._get_channel_runtime(sess.id, channel_name)
+        await self._get_channel_runtime(sess.id, plat)
         return sess.id
 
     async def channel_new_session(self, channel_name: str) -> str:
         """给渠道开一个新会话（/new），旧的保留可查。归当前项目（无项目态落快聊）。"""
-        sess = await self.store.create_session(self._cur_project_id(), title=f"🤖 {channel_name}")
+        plat = _platform_of(channel_name)
+        sess = await self.store.create_session(self._cur_project_id(), title=f"🤖 {plat}")
         await self.store.set_channel_binding(channel_name, sess.id)
-        await self._get_channel_runtime(sess.id, channel_name)
+        await self._get_channel_runtime(sess.id, plat)
         return sess.id
 
     def _build_channel_gate(self, channel_name: str, project_id: int | None,
@@ -569,6 +587,8 @@ class ChannelsMixin:
         if rt is not None:
             gate = getattr(rt.agent, "gate", None)
             if isinstance(gate, ChannelGate):
+                self._channel_names[session_id] = channel_name
+                self._apply_channel_style(rt.agent)
                 return rt
             # 复用点守卫（审查 F1.1①）：runtime 在、门却是交互门——桌面端先建了
             # 这个渠道会话的 runtime（重启后桌面打开过该会话，或渠道 runtime 被
@@ -581,6 +601,8 @@ class ChannelsMixin:
             rt.agent.gate = self._build_channel_gate(channel_name, project_id, workdir)
             self._channel_gates[session_id] = rt.agent.gate
             self._channel_names[session_id] = channel_name
+            # 桌面建起来的 runtime，系统提示词里没有渠道那段输出纪律，补上
+            self._apply_channel_style(rt.agent)
             return rt
         project_id, workdir = await self._session_project(session_id)
         gate = self._build_channel_gate(channel_name, project_id, workdir)
@@ -596,11 +618,30 @@ class ChannelsMixin:
             ),
             recorder=recorder,
         )
+        # 先登记渠道名再重载历史：_reload_agent_history 靠 _channel_names 判断
+        # 要不要把 CHANNEL_STYLE 拼进系统提示词
+        self._channel_names[session_id] = channel_name
         await self._reload_agent_history(rt.agent, session_id)
         self.runtimes[session_id] = rt
         self._channel_gates[session_id] = gate
-        self._channel_names[session_id] = channel_name
         return rt
+
+    def _apply_channel_style(self, agent) -> None:
+        """把 IM 输出纪律补进已有会话的系统提示词（幂等）。
+
+        桌面端先建好 runtime 的渠道会话没有这段（它的提示词按桌面口径组装），
+        而这段直接决定「手机上收到的是结论还是三屏日志」。按标记判重，重复
+        调用不会把同一段拼两遍（拼两遍会让模型把它当成两条不同规则）。
+        """
+        try:
+            hist = getattr(agent, "history", None) or []
+            if not hist or hist[0].role != "system":
+                return
+            if CHANNEL_STYLE_MARK in hist[0].text:
+                return
+            agent.set_system(hist[0].text + CHANNEL_STYLE)
+        except Exception:  # noqa: BLE001 - 提示词增强失败不影响这一轮
+            pass
 
     def _refresh_channel_gates(self) -> None:
         """配置保存/启停后刷新已缓存渠道会话的无人值守门控（审查 P2-11）。
@@ -690,6 +731,8 @@ class ChannelsMixin:
                     channel_name = ""
             if not channel_name:
                 return {"error": "这个会话已不是渠道会话了，发送 /new 开一个新的"}
+            # 反查回来的是绑定键（可能带话题后缀），门控/配置只认平台名
+            channel_name = _platform_of(channel_name)
             # 自愈前先确认会话还在（可能被删）：归属不再按固定项目检查——
             # 渠道会话归「产生它时所在的项目」，会话自身携带归属，runtime
             # 与门控都按它解析（_get_channel_runtime）。

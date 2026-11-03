@@ -506,6 +506,7 @@ class FeishuChannel(Channel):
                 text=msg["text"],
                 approved=self.is_allowed(msg["actor"], msg["chat_id"]),
                 raw=msg["raw"],
+                thread_key=msg.get("thread_key", ""),
             )
         )
 
@@ -623,6 +624,12 @@ def parse_event(obj: dict, *, require_mention_in_group: bool = True) -> dict | N
         "chat_id": chat_id,
         "text": text,
         "message_id": str(obj.get("message_id") or obj.get("id") or "").strip(),
+        # 话题键：群里开了话题（thread）时，不同话题是互不相干的讨论，不该
+        # 共用一个会话。CLI 不同版本给的字段名不一样（thread_id / root_id /
+        # parent_id），逐个认；都没有就留空，退回按 chat_id 分会话（旧行为）。
+        "thread_key": "" if chat_type == "p2p" else str(
+            obj.get("thread_id") or obj.get("root_id") or obj.get("parent_id") or ""
+        ).strip(),
         "raw": obj,
     }
 

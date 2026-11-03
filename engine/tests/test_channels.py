@@ -1140,10 +1140,12 @@ async def test_manager_arrival_during_lock_handover_is_counted_and_acked():
     await _aio.gather(t1, t2, t3)
 
     assert set(host.ran) == {"第一条", "第二条", "第三条"}
-    # 关键断言：空档期到达的第三条也必须收到排队回执（旧实现直接静默插队）
+    # 关键断言：空档期到达的第三条不能被静默丢掉——要么收到排队回执，
+    # 要么（上一批已经彻底收尾时）直接跑掉，两种都算收到了它的意思。
     acks3 = [t for cid, t in ch.out if cid == "chat3"]
-    assert acks3 and "排队" in acks3[0]
-    assert mgr._pending_turns == 0, "全部收尾后计数要归零"
+    assert acks3, "第三条消息必须得到响应（回执或结果），不能无声无息"
+    assert "排队" in acks3[0] or "done" in acks3[0]
+    assert not mgr._inbox and not mgr._running, "全部收尾后收件箱与运行标志都要复位"
 
 
 async def test_manager_sends_busy_notice_for_slow_turn(monkeypatch):
@@ -2368,3 +2370,101 @@ def test_channel_allowed_tools_warning():
     msg = _channel_allowed_tools_warning(["read_file", "run_command", "write_file"])
     assert "run_command" in msg and "write_file" in msg
     assert "无人值守" in msg
+
+
+# ---------- 话题分会话 / 多消息合并成一轮（2026-11-03） ----------
+
+
+async def test_manager_thread_key_gets_its_own_session():
+    """同一个群里不同话题各走各的会话：上下文不能互相污染。
+
+    平台给不出话题键时是空串 → 退回平台名做键（与改造前完全一致，
+    老绑定不需要迁移）。
+    """
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    for text, thread in (("话题A的第一句", "topic-a"), ("话题B的第一句", "topic-b"),
+                         ("群里没话题的", "")):
+        await mgr._on_message(ChannelMessage(
+            channel="feishu", actor="9", chat_id="9", text=text,
+            approved=True, thread_key=thread,
+        ))
+    sids = [sid for sid, _ in host.ran]
+    assert sids == ["sess-feishu#topic-a", "sess-feishu#topic-b", "sess-feishu"]
+    # 同一话题的后续消息落回同一个会话
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="话题A的第二句",
+        approved=True, thread_key="topic-a",
+    ))
+    assert host.ran[-1][0] == "sess-feishu#topic-a"
+
+
+async def test_manager_merges_queued_messages_into_one_turn():
+    """一轮跑着时连发的几条合并成一轮：省 token，也别让模型把一件事拆三段。"""
+    import asyncio as _aio
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    release = _aio.Event()
+
+    async def slow_run(session_id, text, actor="", chat_id=""):
+        host.ran.append((session_id, text))
+        await release.wait()
+        return {"text": "done"}
+
+    host.channel_run = slow_run
+    first = _aio.create_task(mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="改这个", approved=True,
+    )))
+    await _aio.sleep(0.05)
+    t2 = _aio.create_task(mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="顺便跑测试", approved=True,
+    )))
+    t3 = _aio.create_task(mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="再改 CHANGELOG", approved=True,
+    )))
+    await _aio.sleep(0.05)
+    release.set()
+    await _aio.gather(first, t2, t3)
+
+    assert len(host.ran) == 2, f"应当两轮跑完（1 条 + 合并 2 条），实际 {host.ran}"
+    merged = host.ran[1][1]
+    assert "顺便跑测试" in merged and "再改 CHANGELOG" in merged
+    assert "[1]" in merged and "[2]" in merged, "合并消息要按顺序编号"
+    assert not mgr._inbox and not mgr._running
+
+
+async def test_channel_style_is_injected_into_system_prompt(tmp_path):
+    """渠道会话的系统提示词要带 IM 输出纪律（结论先给、100 字内）。
+
+    下在生成侧而不是发出去前截断：截断会把结论切掉。
+    """
+    from skysheep.channels.base import CHANNEL_STYLE_MARK
+    from skysheep.server.backend import ServerBackend
+
+    be = ServerBackend.__new__(ServerBackend)   # 只验提示词拼装，不建库不拉服务
+    be._channel_names = {}
+    be.compose_system = lambda: "基础提示词"
+
+    class _Agent:
+        def __init__(self):
+            self.history = []
+
+        def set_system(self, text):
+            if self.history and self.history[0].role == "system":
+                from skysheep.messages import Message
+                self.history[0] = Message.system(text)
+            else:
+                from skysheep.messages import Message
+                self.history.insert(0, Message.system(text))
+
+    agent = _Agent()
+    be._apply_channel_style(agent)             # 空历史：什么都不做
+    assert agent.history == []
+    agent.set_system("基础提示词")
+    be._apply_channel_style(agent)
+    assert CHANNEL_STYLE_MARK in agent.history[0].text
+    be._apply_channel_style(agent)             # 幂等：不重复拼接
+    assert agent.history[0].text.count(CHANNEL_STYLE_MARK) == 1

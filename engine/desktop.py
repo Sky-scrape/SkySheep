@@ -1128,7 +1128,7 @@ def _run_windowed() -> int:
 
     import webview
 
-    from skysheep import wintheme
+    from skysheep import previewwindows, wintheme
     from skysheep.bootpages import error_html, splash_html
     from skysheep.server.picker import FilePicker
 
@@ -1269,6 +1269,30 @@ def _run_windowed() -> int:
     # 看板线程提前到启动期就在跑（原先在引擎加载完成后才启动）：启动期也每秒
     # 兜底重刷标题栏颜色，且底色/标题栏图标的首刷不再依赖引擎加载完成。
     _start_theme_watchdog(window)
+
+    # 独立预览窗：注册窗口工厂。后端在 WS 线程调用 webview.create_window——
+    # pywebview 对非主线程会自己 Invoke 到 GUI 线程（见 winforms.create_window），
+    # 同一进程、同一 WebView2 profile，不另起服务。主窗口真正关闭时一并收掉，
+    # 否则最后一个窗关不掉会让 webview.start() 一直不返回。
+    def _preview_window_factory(url: str, title: str):
+        # 尺寸按屏幕回收（与主窗口同一口径）：1120×780 在 2 倍缩放的笔记本上
+        # 会高过屏幕，底边跑到屏外
+        try:
+            scr = webview.screens[0]
+            pw = max(640, min(1120, scr.width - 40))
+            ph = max(480, min(780, scr.height - 80))
+        except Exception:  # noqa: BLE001
+            pw, ph = 1120, 780
+        win = webview.create_window(
+            title, url=url, width=pw, height=ph, min_size=(520, 360),
+            text_select=True, background_color=wintheme.window_background(),
+        )
+        if win is not None:
+            wintheme.hook_caption_theme(win)
+        return win
+
+    previewwindows.register(_preview_window_factory)
+    window.events.closed += lambda *_: previewwindows.close_all_async()
 
     state = {"quitting": False}
     tray_holder: dict[str, object] = {}
@@ -1659,6 +1683,8 @@ def _run_windowed() -> int:
         storage_path=str(_home_dir() / "webview"),
         icon=str(icon) if icon.exists() else None,
     )
+    previewwindows.close_all()
+    previewwindows.unregister()
     _dispose_tray()
 
     if errors:

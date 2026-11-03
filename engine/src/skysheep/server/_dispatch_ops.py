@@ -8,6 +8,8 @@ demo / websearch / imagegen / speech / settings / data / migration / channel。
 
 from __future__ import annotations
 
+import asyncio
+
 from ._dispatch_common import _WsMethod
 from .backend import ServerBackend
 
@@ -121,6 +123,18 @@ async def _h_app_open_path(backend: ServerBackend, params: dict, emit, local: bo
 
 async def _h_app_open_external(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return backend.open_external(str(params.get("target", "")), local=local)
+
+
+async def _h_preview_open_window(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 独立预览窗：本机桌面壳开 WebView2 子窗口；远端/浏览器模式回 mode=browser
+    # 由调用方自己 window.open（后端不在别人桌面上代开，与 open_external 同口径）。
+    # pywebview 建窗会同步 Invoke 到 GUI 线程（GUI 忙时可能几百 ms），不能在
+    # 事件循环线程上直接做——挪进 executor，否则整个 WS/定时器一起卡住。
+    url = str(params.get("url", ""))
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: backend.open_preview_window(url, local=local)
+    )
 
 
 async def _h_app_export_diagnostics(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
@@ -330,6 +344,9 @@ METHODS: dict[str, _WsMethod] = {
     # 已是「不在服务端代开」口径，这里对齐
     "app.open_path": _WsMethod(_h_app_open_path, local_only=True),
     "app.open_external": _WsMethod(_h_app_open_external),
+    # 独立预览窗（浏览器预览的分栏 → 弹窗）：本地桌面壳开原生子窗口，
+    # 浏览器/手机远端由前端退回 window.open，不在服务端代开
+    "preview.open_window": _WsMethod(_h_preview_open_window),
     "app.export_diagnostics": _WsMethod(_h_app_export_diagnostics, local_only=True),
     "lan.status": _WsMethod(_h_lan_status),
     "lan.enable": _WsMethod(_h_lan_enable, local_only=True),

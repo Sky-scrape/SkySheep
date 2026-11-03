@@ -30,6 +30,9 @@ class PreferencesMixin:
         "split_composer_h": (74, 520),
         # 分屏宽度（此前漏登记，ui.save 把它当未知键丢弃，宽度从不持久化）
         "split_w": (300, 1100),
+        # 预览分栏：宽度（px）与是否开着（1=开着，浏览器预览搬到主区与对话并排）
+        "preview_w": (260, 1400),
+        "preview_split": (0, 1),
         "right_w": (240, 720),
         "right_collapsed": (0, 1),  # 右侧面板是否收起（1=收起，标签列表保留）
         "left_collapsed": (0, 1),  # 左侧栏是否折叠（1=折叠，折叠钮/Ctrl+B 切换）
@@ -276,6 +279,11 @@ class PreferencesMixin:
             val = data.get(key)
             if isinstance(val, str) and self._valid_hhmm(val):
                 prefs[key] = val
+        # 预览分栏最后打开的地址：只收 http(s)、限长（iframe src 直接用它，
+        # 不能让任意协议串从这里进）
+        pv = data.get("preview_url")
+        if isinstance(pv, str) and pv.lower().startswith(("http://", "https://")) and len(pv) <= 2000:
+            prefs["preview_url"] = pv
         return prefs
 
     # ---- Windows 系统通知（winotify toast；失败静默，非 Windows 平台不可用） ----
@@ -393,7 +401,7 @@ class PreferencesMixin:
                      "hotkey", "default_model_name", "default_model_provider",
                      "aux_model_name", "aux_model_provider",
                      "theme_timed_from", "theme_timed_to",
-                     "notif_log",
+                     "notif_log", "preview_url",
                      self.TEAM_LAST_SEEN_KEY)
             if key not in self.UI_PREFS_LIMITS and key not in known \
                     and key not in self.STRING_PREFS:
@@ -414,6 +422,14 @@ class PreferencesMixin:
             if key in ("theme_timed_from", "theme_timed_to"):
                 # 主题定时切换的时段（HH:MM）：非法值按删除处理（回默认 19:00/07:00）
                 if isinstance(val, str) and self._valid_hhmm(val):
+                    current[key] = val
+                else:
+                    current.pop(key, None)
+                continue
+            if key == "preview_url":
+                # 预览分栏最后打开的地址：只收 http(s) 且限长（iframe src 直接用它）
+                if (isinstance(val, str) and len(val) <= 2000
+                        and val.lower().startswith(("http://", "https://"))):
                     current[key] = val
                 else:
                     current.pop(key, None)

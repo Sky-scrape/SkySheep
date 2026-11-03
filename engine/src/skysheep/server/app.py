@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import html
 import ipaddress
 import json
 import logging
@@ -21,6 +22,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -628,7 +630,7 @@ def create_app(
     # ---- 本地 HTML 一键预览（浏览器标签的 iframe 用；只读、锁在工作目录内） ----
 
     @app.get("/preview")
-    async def preview(p: str = ""):
+    async def preview(p: str = "", frame: int = 0):
         raw = p.strip()
         if not raw:
             return HTMLResponse("缺少文件路径参数 p", status_code=400)
@@ -642,6 +644,28 @@ def create_app(
             return HTMLResponse("只能预览工作目录内的文件", status_code=403)
         if not target.is_file():
             return HTMLResponse("文件不存在（或这是目录）", status_code=404)
+        if frame:
+            # 独立预览窗用：顶层窗口装一层同源壳，里面仍是 sandbox iframe。
+            # 响应级 CSP sandbox 只在首个文档有效（页面自导航就甩掉了），
+            # 属性级 sandbox 才跨导航持续——顶层窗不能直接装用户文件。
+            src = "/preview?p=" + quote(raw, safe="")
+            page = (
+                '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+                "<title>预览</title>"
+                '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                "<style>html,body{margin:0;height:100%;background:#fff}"
+                "iframe{border:0;width:100%;height:100%;display:block}</style>"
+                '</head><body><iframe sandbox="allow-scripts allow-forms '
+                'allow-popups allow-downloads" src="'
+                + html.escape(src, quote=True)
+                + '"></iframe></body></html>'
+            )
+            return HTMLResponse(page, headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": (
+                    "default-src 'none'; frame-src 'self'; style-src 'unsafe-inline'"
+                ),
+            })
         # 安全审查 D5：预览的文件与主界面同源，脚本天然能带凭据调同源接口。
         # iframe 的 sandbox 属性是主防线（见 index.html），这里再给响应本身
         # 加 CSP sandbox：即使被直接打开（不经 iframe）也是隔离环境。

@@ -394,6 +394,43 @@ class SystemMixin(RelaySettingsMixin):
             raise RuntimeError(f"打开链接失败：{e}") from None
         return {"url": target}
 
+    def open_preview_window(self, url: str, local: bool = True) -> dict:
+        """把当前预览页弹到独立窗口（桌面壳的 WebView2 子窗口）。
+
+        与 open_external 同一套边界：只收 http(s)、远端不在服务端代开（返回
+        mode=browser，让远端自己的浏览器打开）。没有桌面窗口工厂时也返回
+        mode=browser——调用方（前端）退回 window.open / 系统浏览器，按钮不会
+        因为运行形态不同而失效。
+        """
+        from ... import previewwindows
+
+        target = str(url or "").strip()
+        if not target.lower().startswith(("http://", "https://")):
+            raise RuntimeError("只允许预览 http(s) 地址")
+        if len(target) > 2000:
+            raise RuntimeError("预览地址过长")
+        if not local:
+            return {"mode": "browser", "url": target, "remote": True}
+        title = "预览 · 网页"
+        try:
+            from urllib.parse import parse_qs, urlsplit
+
+            parsed = urlsplit(target)
+            host = parsed.hostname
+            if host:
+                title = "预览 · " + host
+            # 本应用的 /preview?p=<文件> 用文件名当标题，比「127.0.0.1」有用
+            if parsed.path.rstrip("/") == "/preview":
+                rel = (parse_qs(parsed.query).get("p") or [""])[0]
+                name = rel.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+                if name:
+                    title = "预览 · " + name
+        except ValueError:
+            pass  # 地址解析不了就保留通用标题，不挡开窗
+        result = previewwindows.open_window(target, title)
+        result["url"] = target
+        return result
+
     # ---- 首启激活：演示模式（无 Key 用户的免注册出路） ----
 
     async def demo_enable(self) -> dict:

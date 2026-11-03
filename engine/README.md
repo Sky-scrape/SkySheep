@@ -25,6 +25,7 @@ SkySheep 的 Python 引擎内核：Agent 循环、多协议模型接入、内置
 | `skysheep.server` | 桌面端服务层：FastAPI + WebSocket 协议 + 静态前端（Host 守卫防 DNS rebinding，安全响应头防点击劫持）|
 | `skysheep.bgtasks` | `spawn_bg`：后台任务的强引用登记（asyncio 只持弱引用，不登记的任务可能被 GC 掉）|
 | `skysheep.windowstate` | 窗口几何记忆：退出时保存大小/位置/最大化状态，启动恢复（显示器配置变化自动回退默认居中） |
+| `skysheep.previewwindows` | 独立预览窗控制器：桌面壳注册窗口工厂，WS `preview.open_window` 经它开 WebView2 子窗口（浏览器模式 / 手机远端回退系统浏览器） |
 | `desktop.py` | 无终端启动器（双击入口）：单实例、失败弹框、日志兜底 |
 
 ## 快速开始

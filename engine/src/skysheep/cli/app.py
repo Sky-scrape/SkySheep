@@ -742,7 +742,7 @@ def _app_cmd(args) -> None:
 
     import webview
 
-    from .. import instance, wintheme
+    from .. import instance, previewwindows, wintheme
     from ..server.app import STATIC_DIR
 
     use_browser = getattr(args, "browser", False)
@@ -821,6 +821,30 @@ def _app_cmd(args) -> None:
     allow_microphone(window)  # 放行麦克风（语音输入用；WebView2 默认静默拒绝）
     register_window(window)  # 前端切主题时事件驱动重刷标题栏（与 desktop.py 同机制）
 
+    # 独立预览窗：注册窗口工厂。后端在 WS 线程调用 webview.create_window——
+    # pywebview 对非主线程会自己 Invoke 到 GUI 线程（见 winforms.create_window），
+    # 同一进程、同一 WebView2 profile，不另起服务。主窗口真正关闭时一并收掉，
+    # 否则最后一个窗关不掉会让 webview.start() 一直不返回。
+    def _preview_window_factory(url: str, title: str):
+        # 尺寸按屏幕回收（与主窗口同一口径）：1120×780 在 2 倍缩放的笔记本上
+        # 会高过屏幕，底边跑到屏外
+        try:
+            scr = webview.screens[0]
+            pw = max(640, min(1120, scr.width - 40))
+            ph = max(480, min(780, scr.height - 80))
+        except Exception:  # noqa: BLE001
+            pw, ph = 1120, 780
+        win = webview.create_window(
+            title, url=url, width=pw, height=ph, min_size=(520, 360),
+            text_select=True, background_color=wintheme.window_background(),
+        )
+        if win is not None:
+            hook_caption_theme(win)
+        return win
+
+    previewwindows.register(_preview_window_factory)
+    window.events.closed += lambda *_: previewwindows.close_all_async()
+
     def _bootstrap() -> None:
         """GUI 循环启动后执行：后台起引擎与服务，就绪后本窗口内切换到应用页。"""
         try:
@@ -850,6 +874,8 @@ def _app_cmd(args) -> None:
         storage_path=str(instance.data_home() / "webview-app"),
         icon=str(icon_path) if icon_path.exists() else None,
     )
+    previewwindows.close_all()
+    previewwindows.unregister()
     if errors:
         raise errors[0]
     _stop_backend(running.get("server"))

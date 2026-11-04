@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import logging
 from pathlib import Path
 
 from .. import __version__
@@ -553,27 +554,89 @@ async def _models_cmd() -> None:
 
 
 
-def _wait_port(port: int, timeout_s: float = 60.0) -> bool:
-    """轮询本机 TCP 端口直到可连接（服务就绪）。主机固定为环回，不构造 URL。
+def _last_line(text: str) -> str:
+    """traceback 文本压缩成最后一行（真正那句异常消息），失败页只显示它。"""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
 
-    预算要盖住偶发慢路径（数据库恢复、大库备份轮转、会话重开等）：桌面端
-    宁可多等，也不能把「慢」判成「死」弹启动失败页（MCP 连接已后台化，
-    不再占这里的预算，但别的初始化仍可能偶尔超过几十秒）。
+
+class _StartupLogCatcher(logging.Handler):
+    """抄下 uvicorn 在 lifespan 启动失败时打的那条错误，取其中「真原因」那一行。
+
+    uvicorn 的失败路径不把异常抛回调用方：它在服务线程里 ``sys.exit``，
+    外层只看到「线程没了」。可启动失败页该给人看的是真原因（例如「会话数据库
+    由更新版本的 SkySheep 创建（库版本 11 > 当前程序支持 8）」），所以这里挂个
+    handler 把它抄下来。注意两种形状都要认：普通 logging 配置下是带 exc_info
+    的记录；``log_level="warning"`` 这套配置把整段 traceback 当纯文本打
+    （exc_info 为 None，2026-11-04 实测），此时取最后一行的异常消息。
+    uvicorn 收尾那句 "Application startup failed. Exiting." 不含信息量，忽略；
+    先抓到的那条留下，不被后续记录覆盖。
     """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.detail = ""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self.detail:
+                return
+            if record.exc_info and record.exc_info[1] is not None:
+                exc = record.exc_info[1]
+                text = str(exc) or type(exc).__name__
+            else:
+                text = record.getMessage()
+            text = (text or "").strip()
+            if not text or "Application startup failed" in text:
+                return
+            self.detail = _last_line(text)
+        except Exception:  # noqa: BLE001 - 记日志失败不能反过来炸启动
+            pass
+
+
+def _port_open(port: int) -> bool:
+    """本机环回端口是否可连接；主机固定为环回，不构造 URL。"""
     import socket
+
+    s = socket.socket()
+    s.settimeout(0.4)
+    try:
+        s.connect(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _wait_ready(port: int, server, timeout_s: float = 60.0) -> bool:
+    """等服务**真正**就绪：uvicorn 跑完 lifespan 启动（``server.started``）。
+
+    只探测端口能不能连是不够的：端口通只说明 socket 起来了，不代表
+    ``backend.setup()``（建库、跑迁移）成功。旧实现只看端口，于是「启动失败」
+    与「启动很慢」在界面上无法区分——用户盯着启动动画干等满 60 秒超时才看到
+    失败页，中途关窗就永远不知道原因（2026-11-04 实测：「库版本 N > 当前程序
+    支持 M」就是这样被吞掉的）。``server.started`` 在 lifespan 成功之后才置
+    True，是唯一可靠的信号。
+
+    服务线程提前结束（lifespan 抛异常 → uvicorn ``sys.exit``）立即判失败，
+    不必干等满 60 秒。超时预算本身不变：慢路径（数据库恢复、大库备份轮转、
+    会话重开）仍要给够，宁可多等也不能把「慢」判成「死」。
+    """
     import time
 
+    has_started_flag = hasattr(server, "started")
+    thread = getattr(server, "uvicorn_thread", None)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        s = socket.socket()
-        s.settimeout(0.4)
-        try:
-            s.connect(("127.0.0.1", port))
+        if has_started_flag:
+            if server.started:
+                return True
+        elif _port_open(port):  # 老版本 uvicorn 没有 started 标志，只能退回端口探测
             return True
-        except OSError:
-            time.sleep(0.2)
-        finally:
-            s.close()
+        if thread is not None and not thread.is_alive():
+            return False
+        time.sleep(0.1)
     return False
 
 
@@ -633,11 +696,20 @@ def _start_backend(args):
         name="skysheep-uvicorn",
         kwargs={"sockets": sockets} if sockets is not None else {},
     )
-    thread.start()
-    # 退出路径 join 用：置了 should_exit 还得等 lifespan 真正走完再退进程
-    server.uvicorn_thread = thread
-    if not _wait_port(port):
-        raise SystemExit("服务启动失败")
+    # 接住 lifespan 失败的真实原因：uvicorn 在服务线程里 sys.exit，异常不回流。
+    catcher = _StartupLogCatcher()
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    uvicorn_logger.addHandler(catcher)
+    try:
+        thread.start()
+        # 退出路径 join 用：置了 should_exit 还得等 lifespan 真正走完再退进程
+        server.uvicorn_thread = thread
+        ready = _wait_ready(port, server)
+    finally:
+        uvicorn_logger.removeHandler(catcher)
+    if not ready:
+        detail = catcher.detail or "后端未在限定时间内就绪，详见 logs/desktop.log"
+        raise SystemExit(f"服务启动失败：{detail}")
     # 桌面窗口/浏览器兜底一律加载本机回环地址：0.0.0.0 只是绑定地址不是可访问地址，
     # 且守卫对回环永远免令牌，本机界面不受局域网/远程访问开关影响
     url = f"http://127.0.0.1:{port}/"

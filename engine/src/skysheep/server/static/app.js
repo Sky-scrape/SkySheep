@@ -10,7 +10,7 @@
  *  ④ 顶栏：模型菜单、思考强度、通知中心、系统通知
  *  ⑤ 右侧面板：浏览器/辅助对话/审查/文件/任务/宠物；终端独立成底部多标签面板（顶栏入口）
  *  ⑥ 设置页：模型服务、技能、MCP、子代理、记忆、局域网、用量、高级、关于
- *  ⑦ 其他：帮助、主题、缩放、拖拽调宽、复制、查找（Ctrl+F）、引导向导
+ *  ⑦ 其他：帮助、主题、缩放、拖拽调宽、复制、查找（Ctrl+F）
  *
  *  维护约定：仍是单文件零构建（无工具链约束）；顶层 function 声明会挂到
  *  window（HTML 内联事件依赖这一点），顶层 let/const 不会——新增跨分区
@@ -7638,7 +7638,7 @@ function hideModal() {
 }
 
 document.getElementById("modal-cancel").onclick = hideModal;
-// Esc = 点「取消」：走 cancel 按钮的当前语义（首启向导的跳过会记 onboarded 标记），
+// Esc = 点「取消」：走 cancel 按钮的当前语义，
 // 不做隐藏弹层之外的事；菜单/查找条有自己的 Esc 分支，互不影响。
 // Tab 在弹层内循环：焦点不会漏到被遮罩的背景内容上
 document.addEventListener("keydown", (e) => {
@@ -9164,103 +9164,10 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
     window.__phoneHintShown = true;
     pushNotice("📱 手机控制模式", "你正在遥控电脑上的 SkySheep——聊天、批准确认、查看任务都在这里完成");
   }
-  maybeOnboard(snap);
 }
 
 async function boot() {
   await applyWorkspaceData(await fetchWorkspaceData());
-}
-
-// ---------- 首次启动配置向导：没有可用模型时 3 步引导（选服务 → 填 Key → 开始用） ----------
-// 无 Key 用户还有一条免注册出路：内置演示模式。
-function maybeOnboard(snap) {
-  const hasWorkingProvider = !snap.provider_error && snap.provider;
-  // 「用户真的配过 Key」要排除 localhost 服务：本地服务通常不校验 Key，
-  // 若把本地服务的 has_key 也算进来，全新机器会被误判成已配置，
-  // 向导一次都不弹、还倒写 onboarded 把自己永久关掉
-  const isLocalSvc = (u) =>
-    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?(\/|$)/i.test(String(u || ""));
-  const anyKeyed = Object.values(snap.providers || {}).some(
-    (p) => p.has_key && !isLocalSvc(p.base_url)
-  );
-  request("ui.get").then((ui) => {
-    if (ui && ui.prefs && ui.prefs.onboarded) return; // 用户之前已跳过/完成
-    if (hasWorkingProvider || anyKeyed) {
-      saveUiPrefs({ onboarded: 1 }); // 已有可用模型，补个标记不再打扰
-      return;
-    }
-    showOnboardWizard(snap);
-  }).catch(() => {});
-}
-
-function showOnboardWizard(snap) {
-  const presets = snap.provider_presets || [];
-  if (!presets.length) return;
-  const box = document.createElement("div");
-  box.innerHTML = `
-    <p class="dim small">三步就好：选一个模型服务 → 粘贴 API Key → 开始对话。
-    Key 保存在本机 ~/.skysheep/config.toml，不会上传。也可以先跳过，之后在 ⚙ 设置 里随时配置。</p>
-    <div class="ob-step"><b>① 选择模型服务</b></div>
-    <div class="ob-list">${
-      presets.map((p, i) => `
-        <label class="ob-row"><input type="radio" name="ob-preset" value="${escapeHtml(p.name)}"${i === 0 ? " checked" : ""}>
-        <span class="ob-name">${escapeHtml(p.name)}</span>
-        <span class="dim small ob-url">${escapeHtml(p.base_url || "官方接口")}</span>
-        ${p.signup ? `<a class="ob-signup" href="${escapeHtml(p.signup)}" target="_blank" rel="noopener" data-signup="${escapeHtml(p.name)}">注册获取 Key ↗</a>` : ""}</label>`).join("")
-    }</div>
-    <div class="ob-step"><b>② 粘贴 API Key</b></div>
-    <label class="ob-keyline">
-      <input data-f="ob-key" type="password" autocomplete="off" placeholder="粘贴 API Key（点上方「注册获取 Key」去官网创建）">
-      <button class="eye" type="button" title="显示 / 隐藏">👁</button>
-    </label>
-    <div class="form-status"></div>
-    <div class="ob-alt">
-      <div class="ob-alt-title dim small">没有 Key？可以先看演示模式：</div>
-      <div class="ob-alt-row">
-        <button type="button" class="btn-ghost" data-f="ob-demo">🎬 先看演示模式</button>
-      </div>
-    </div>`;
-  const val = (f) => box.querySelector(`[data-f="${f}"]`);
-  const status = box.querySelector(".form-status");
-  const finish = (msg) => {
-    saveUiPrefs({ onboarded: 1 });
-    hideModal();
-    boot();
-    providerStatus(msg);
-  };
-  box.querySelector(".eye").onclick = () => {
-    const k = val("ob-key");
-    k.type = k.type === "password" ? "text" : "password";
-  };
-  // 免注册出路 ①：演示模式（内置脚本回放一轮真实工具调用，零配置零费用）
-  val("ob-demo").onclick = async () => {
-    status.textContent = "正在进入演示模式…";
-    try {
-      await request("demo.enable");
-      finish("✓ 演示模式已开启——发送任意消息看 Agent 怎么干活；正式使用前请在 ⚙ 设置 里配一个模型服务");
-    } catch (e) {
-      status.textContent = "✗ " + e.message;
-    }
-  };
-  showModal("👋 欢迎使用 SkySheep", box, async () => {
-    const name = box.querySelector("input[name=ob-preset]:checked").value;
-    const key = val("ob-key").value.trim();
-    if (!key) throw new Error("请先粘贴 API Key（或点「跳过」之后再配置）");
-    status.textContent = "正在保存并验证…";
-    const r = await request("config.save_provider", { name, api_key: key });
-    if (r.provider_error) throw new Error(r.provider_error);
-    await request("model.switch", { name }).catch(() => {});
-    finish(`✓ 「${name}」配置完成，开始对话吧！`);
-  }, "保存并开始");
-  // 向导底部加「跳过」入口（modal 本身的取消按钮即跳过：点了也不阻塞使用）
-  const cancel = document.getElementById("modal-cancel");
-  const origCancel = cancel.onclick;
-  cancel.onclick = () => {
-    saveUiPrefs({ onboarded: 1 });
-    cancel.onclick = origCancel;
-    hideModal();
-    addNotice("已跳过配置——顶栏会提示「未配置模型」，点 ⚙ 设置 随时可配。");
-  };
 }
 
 

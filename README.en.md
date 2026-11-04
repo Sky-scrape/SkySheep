@@ -214,7 +214,7 @@ uv run skysheep run "task"       # One-shot headless run (JSON output supported)
 
 **Initial setup**
 
-A first-launch wizard connects a provider in three steps (pick a service → paste the key → go) and auto-detects local inference services; without an API key you can enter demo mode and watch a full round of real tool calls.
+Connect a provider under Settings → Providers: pick a service and paste its API key (local inference services are detected automatically), then switch models in the top bar to start chatting.
 
 <details>
 <summary><b>📦 Double-click launch / packaging</b> (expand)</summary>

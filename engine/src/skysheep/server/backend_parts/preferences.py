@@ -43,8 +43,6 @@ class PreferencesMixin:
         # 宠物拖放位置（#chat 内布局像素）；上限给足，前端拖拽时已按容器收敛
         "pet_x": (0, 4000),
         "pet_y": (0, 4000),
-        # 首次启动配置向导已完成标记（1=完成，不再自动弹出）
-        "onboarded": (0, 1),
         # 自动检查更新（1=开，默认开）：关于页开关，关掉后启动不再请求 GitHub
         "update_check": (0, 1),
         # 发送键：1 = Ctrl+Enter 发送、Enter 换行（默认 0 = Enter 发送）

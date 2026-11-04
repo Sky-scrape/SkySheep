@@ -338,6 +338,7 @@ cd engine
 
 - 环境用 `uv`（Python >= 3.11）；前端保持零构建，直接改 `engine/src/skysheep/server/static/`，不引入 Node / npm 工具链
 - 提交前跑 `uv run pytest`（`-m "not e2e"` 跳过真实 socket 用例，`-m eval` 跑行为级评测基线）与 `uv run ruff check .`
+- 改完代码先跑快速验收 `uv run pytest -m "acceptance and not e2e" -q`（约 30 秒），并在 PR / 回复里写明通过、失败、跳过数；分层与用例清单见 [docs/测试说明.md](docs/测试说明.md)
 - 加一个功能通常要走四处：`server/backend.py` 实现 + `server/app.py` 的 `dispatch()` 分支 + `static/index.html` + `static/app.js`（设置页另有约定，配置读写走 `config.py` 的 `_read_raw_config` / `_write_raw_config`）
 - 新工具必须在 `Tool` 上声明 `safety`，并显式声明 MCP 四注解；凡涉及写文件或执行命令，必须走 `PermissionGate`，这是不可绕过的
 - 文本读写一律走 `textio.py`（编码与行尾符安全），文件移动 / 删除 / 建目录用专用工具（可回滚），不要教 Agent 用 `run_command` 里的 `mv` / `rm` / `mkdir`

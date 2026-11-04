@@ -256,7 +256,13 @@ function connect() {
     pendingReplies.forEach((p, id) => {
       if (p.sent) {
         pendingReplies.delete(id);
-        p.reject(new Error("连接已断开，请重试"));
+        // offline 标记：调用方据此区分「请求本身失败」与「连接断了、但服务端
+        // 可能还在跑」。chat.send 属于后者——重连补帧会把本轮输出接回来，
+        // 不能报成「出错」让用户以为任务失败。
+        const err = new Error("连接已断开，请重试");
+        err.offline = true;
+        err.method = p.method;
+        p.reject(err);
       }
     });
     setTimeout(connect, 1500);
@@ -289,7 +295,7 @@ function connect() {
 function request(method, params = {}) {
   const id = "r" + (++reqSeq);
   return new Promise((resolve, reject) => {
-    const entry = { resolve, reject, sent: false, send: null };
+    const entry = { resolve, reject, sent: false, send: null, method };
     pendingReplies.set(id, entry);
     // send 幂等：断线清账 / 重连补发 / 「等 open」监听三条路径都可能叫到它，
     // 真正发出去的只许一次（重复发送会让后端把同一请求执行两遍）
@@ -5426,42 +5432,73 @@ function finishEta(t, engineMs) {
 }
 
 /** 断线重连后补帧：服务端只保留每个会话「当前轮」的已下发事件。
- *  补得齐就按 seq 续画；补不齐（gap，超出缓冲/跨了轮）就让历史重载兜底
- *  ——在途轮已边跑边落库，重载能看到已经发生的部分。 */
+ *
+ *  注意：轮次的事件只推给发起那条连接（旧连接），重连后的新连接不会自动
+ *  收到后续帧——所以这里要「补一次 + 轮询续拉」：每 1.5s 按最后水位问一次
+ *  events.replay，直到看到 turn_finished。补得齐就续画；`gap`（跨轮/超容量）
+ *  转历史重载——在途轮已边跑边落库，重载能看到已经发生的部分。 */
+function flushReplayBuf(t) {
+  const queued = (t.replayBuf || []).slice().sort(
+    (a, b) => (a.data.ev_seq || 0) - (b.data.ev_seq || 0)
+  );
+  t.replayBuf = [];
+  let finished = false;
+  for (const m of queued) {
+    if (typeof m.data.ev_seq === "number" && m.data.ev_seq <= t.lastSeq) continue;
+    handleEvent(m.event, m.data);
+    if (m.event === "turn_finished") finished = true;
+  }
+  return finished;
+}
+
 async function resumeEventStreams() {
   const tabs = [...chatTabs, ...splitPanes].filter(
-    (t) => t && t.sid && t.running && t.lastSeq
+    // running 之外的 interrupted：chat.send 的请求在断线时被拒，但服务端
+    // 那一轮可能还在跑（界面已解锁但事件还欠着），同样要补
+    (t) => t && t.sid && (t.running || t.interrupted) && t.lastSeq
   );
   for (const t of tabs) {
     t.replayBuf = [];
-    t.replaying = true;
+    let gotFinished = false;
     try {
-      const r = await request("events.replay", {
-        session_id: t.sid, after_seq: t.lastSeq,
-      });
-      if (r && r.gap) {
-        addNotice("断线期间的消息超出补发范围，正在重新加载会话内容");
-        const info = await request("session.resume", { id: t.sid });
-        renderHistory(t, info.messages || [], info.messages_offset);
-        t.lastSeq = r.latest_seq || t.lastSeq;
-      } else {
-        for (const ev of (r && r.events) || []) {
+      // 上限 ~7.5 分钟：单轮最长也就这个量级，超时后交给历史重载兜底
+      for (let attempt = 0; attempt < 300 && !gotFinished; attempt++) {
+        t.replaying = true;
+        let r = null;
+        try {
+          r = await request("events.replay", {
+            session_id: t.sid, after_seq: t.lastSeq,
+          });
+        } finally {
+          if (!r) t.replaying = false;
+        }
+        if (r.gap) {
+          t.replaying = false;
+          addNotice("断线期间的消息超出补发范围，正在重新加载会话内容");
+          const info = await request("session.resume", { id: t.sid });
+          renderHistory(t, info.messages || [], info.messages_offset);
+          t.lastSeq = r.latest_seq || t.lastSeq;
+          break;
+        }
+        for (const ev of r.events || []) {
           if (typeof ev.ev_seq === "number" && ev.ev_seq <= t.lastSeq) continue;
           handleEvent(ev.kind, ev);
+          if (ev.kind === "turn_finished") gotFinished = true;
         }
+        // 补帧期间的实时帧排在本批之后（seq 更大），先放缓冲再解锁
+        if (flushReplayBuf(t)) gotFinished = true;
+        t.replaying = false;
+        if (gotFinished) break;
+        // 旧连接的帧不会推到新连接：轮次没结束就按水位续拉
+        await new Promise((res) => setTimeout(res, 1500));
+        if (!chatTabs.includes(t) && !splitPanes.includes(t)) break;
       }
     } catch (e) {
-      // 会话已删 / 服务端不认识该会话：静默降级（重载历史时自然收敛）
+      // 会话已删 / 再次断线：静默降级，下一次重连还会再试
     } finally {
       t.replaying = false;
-      const queued = t.replayBuf || [];
+      t.interrupted = false;
       t.replayBuf = [];
-      // 补帧期间到达的实时帧按 seq 排序后再喂，保证顺序与去重
-      queued.sort((a, b) => (a.data.ev_seq || 0) - (b.data.ev_seq || 0));
-      for (const m of queued) {
-        if (typeof m.data.ev_seq === "number" && m.data.ev_seq <= t.lastSeq) continue;
-        handleEvent(m.event, m.data);
-      }
     }
   }
 }
@@ -10902,8 +10939,17 @@ async function send() {
     if (r.plan_mode && (tab.lastAssistantText || "").trim()) addPlanActions(tab.lastAssistantText, tab);
     if (r.checkpoint) addCheckpointBar(r.checkpoint, tab);
   } catch (e) {
-    addNotice("出错: " + e.message);
-    finishEta(tab);
+    if (e && e.offline) {
+      // 断线不是任务失败：轮次可能还在服务端跑。标记后由重连补帧收口
+      // （见 resumeEventStreams），前端不显示「出错」，也不用用户重发。
+      // 不在这里 finishEta：芯片要等补帧带回来的 turn_finished 用引擎实测
+      // 耗时定格，否则会停在断线那一刻的本地读数（用户看到 2 秒、实际 8 秒）。
+      addNotice("连接已断开，正在重连；本轮输出会在重连后自动补齐");
+      if (tab) tab.interrupted = true;
+    } else {
+      addNotice("出错: " + e.message);
+      finishEta(tab);
+    }
     setRunning(false, tab);
   }
 }

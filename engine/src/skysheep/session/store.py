@@ -145,6 +145,13 @@ CREATE TABLE IF NOT EXISTS cron_tasks (
     -- allowed_tools 列在 team 模式下语义是「队员预授权名单」，不新增列。
     mode TEXT NOT NULL DEFAULT 'agent',
     team_template TEXT NOT NULL DEFAULT '',
+    -- 产线级模型（2026-11-04）：空 = 跟随全局；provider_name 必须已配置，
+    -- model 为空表示用该服务的默认模型。团队任务的模型由模板决定，不走这两列。
+    provider_name TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    -- 验收工位（2026-11-04）：1 = 跑完后让验收模型判一次「做成了没有」。
+    -- 默认关；只读、单轮，只能把自动判定降级，不会把被拦的运行评成做成。
+    review INTEGER NOT NULL DEFAULT 0,
     last_run_at REAL NOT NULL DEFAULT 0,
     last_status TEXT NOT NULL DEFAULT '',
     last_result TEXT NOT NULL DEFAULT '',
@@ -332,7 +339,9 @@ CREATE TABLE IF NOT EXISTS automation_runs (
     denied_tools TEXT NOT NULL DEFAULT '',
     error_kind TEXT NOT NULL DEFAULT '',
     outcome TEXT NOT NULL DEFAULT '',
-    outcome_source TEXT NOT NULL DEFAULT ''
+    outcome_source TEXT NOT NULL DEFAULT '',
+    config_snapshot TEXT NOT NULL DEFAULT '',
+    review_note TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_automation_runs_project
     ON automation_runs(project_id, started_at DESC);
@@ -399,6 +408,9 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("cron_tasks", "notify_channel INTEGER NOT NULL DEFAULT 0"),
     ("cron_tasks", "mode TEXT NOT NULL DEFAULT 'agent'"),
     ("cron_tasks", "team_template TEXT NOT NULL DEFAULT ''"),
+    ("cron_tasks", "provider_name TEXT NOT NULL DEFAULT ''"),
+    ("cron_tasks", "model TEXT NOT NULL DEFAULT ''"),
+    ("cron_tasks", "review INTEGER NOT NULL DEFAULT 0"),
     ("pipelines", "notify_channel INTEGER NOT NULL DEFAULT 0"),
     ("automation_runs", "in_tokens INTEGER NOT NULL DEFAULT 0"),
     ("automation_runs", "out_tokens INTEGER NOT NULL DEFAULT 0"),
@@ -408,6 +420,8 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("automation_runs", "error_kind TEXT NOT NULL DEFAULT ''"),
     ("automation_runs", "outcome TEXT NOT NULL DEFAULT ''"),
     ("automation_runs", "outcome_source TEXT NOT NULL DEFAULT ''"),
+    ("automation_runs", "config_snapshot TEXT NOT NULL DEFAULT ''"),
+    ("automation_runs", "review_note TEXT NOT NULL DEFAULT ''"),
 )
 
 # 数据库结构版本：SCHEMA 或 _COLUMN_MIGRATIONS 每次变更时 +1。
@@ -424,10 +438,16 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 #     只记次数无法告诉用户该补哪个预授权工具。
 # v8：cron_tasks 增 mode（任务形态：agent 单会话 / team 定时团队）与
 #     team_template（团队模板引用名）——定时团队（团队模式设计 §14）。
+# v9：automation_runs 增 config_snapshot（开跑时的提示词 / 预授权 / 形态快照）——
+#     配置是原地改的，历史运行要能回答「当时用的是哪一版」。
+# v10：cron_tasks 增 provider_name / model（产线级模型：空 = 跟随全局）——
+#     日报用便宜模型、周报用强模型，不同活可以分给不同的服务跑。
+# v11：cron_tasks 增 review（验收工位开关，默认关）；automation_runs 增
+#     review_note（验收结论 / 未完成原因）——「跑完」之外再补一次只读验收。
 # 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
 # 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
 # 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 11
 
 
 @dataclass
@@ -2913,6 +2933,9 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "mode": r["mode"] if "mode" in r.keys() else "agent",
             "is_team": (r["mode"] if "mode" in r.keys() else "agent") == "team",
             "team_template": r["team_template"] if "team_template" in r.keys() else "",
+            "provider_name": r["provider_name"] if "provider_name" in r.keys() else "",
+            "model": r["model"] if "model" in r.keys() else "",
+            "review": bool(r["review"]) if "review" in r.keys() else False,
             "last_run_at": r["last_run_at"],
             "last_status": r["last_status"],
             "last_result": r["last_result"],
@@ -2933,6 +2956,9 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         notify_channel: bool = False,
         mode: str = "agent",
         team_template: str = "",
+        provider_name: str = "",
+        model: str = "",
+        review: bool = False,
     ) -> dict:
         assert self._db
         tools = ",".join(allowed_tools or [])
@@ -2940,10 +2966,11 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         cur = await self._db.execute(
             "INSERT INTO cron_tasks (project_id, name, prompt, schedule_type, interval_minutes,"
             " time_of_day, weekday, allowed_tools, notify_channel, mode, team_template,"
-            " created_at, next_run_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " provider_name, model, review, created_at, next_run_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (project_id, name, prompt, schedule_type, interval_minutes, time_of_day,
-             weekday, tools, 1 if notify_channel else 0, mode, team_template, now, 0.0),
+             weekday, tools, 1 if notify_channel else 0, mode, team_template,
+             provider_name, model, 1 if review else 0, now, 0.0),
         )
         await self._db.commit()
         return await self.get_cron_task(cur.lastrowid)
@@ -2952,7 +2979,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         assert self._db
         allowed = ("name", "prompt", "schedule_type", "interval_minutes", "time_of_day",
                    "weekday", "allowed_tools", "enabled", "notify_channel", "next_run_at",
-                   "last_run_at", "last_status", "last_result", "mode", "team_template")
+                   "last_run_at", "last_status", "last_result", "mode", "team_template",
+                   "provider_name", "model", "review")
         fields, args = [], []
         for k, v in kw.items():
             if k not in allowed:
@@ -3045,6 +3073,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "error_kind": r["error_kind"] or "",
             "outcome": r["outcome"] or "",
             "outcome_source": r["outcome_source"] or "",
+            "config_snapshot": r["config_snapshot"] or "",
+            "review_note": r["review_note"] or "",
         }
 
     async def get_automation_run(self, run_id: int) -> dict | None:
@@ -3066,20 +3096,25 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         trigger: str = "schedule",
         status: str = "running",
         started_at: float | None = None,
+        config_snapshot: str = "",
     ) -> dict:
-        """开一条运行记录；默认 status=running（结束请走 finish_automation_run）。"""
+        """开一条运行记录；默认 status=running（结束请走 finish_automation_run）。
+
+        config_snapshot 是开跑时产线配置的有界 JSON 快照（提示词 / 预授权 / 形态）；
+        由 ``RunLedger`` 写入，旧行默认空串。
+        """
         assert self._db
         ts = time.time() if started_at is None else float(started_at)
         cur = await self._db.execute(
             "INSERT INTO automation_runs (kind, task_id, pipeline_id, project_id,"
-            " session_id, trigger, status, started_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " session_id, trigger, status, started_at, config_snapshot)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(kind), int(task_id),
                 None if pipeline_id is None else int(pipeline_id),
                 None if project_id is None else int(project_id),
                 None if session_id is None else str(session_id),
-                str(trigger), str(status), ts,
+                str(trigger), str(status), ts, str(config_snapshot or ""),
             ),
         )
         run_id = cur.lastrowid
@@ -3104,6 +3139,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         error_kind: str = "",
         outcome: str = "",
         outcome_source: str = "",
+        review_note: str = "",
     ) -> dict | None:
         """收尾一条运行；不存在返回 None。
 
@@ -3138,7 +3174,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             " denied_count = ?, error_kind = ?,"
             " denied_tools = ?,"
             " outcome = CASE WHEN ? = '' THEN outcome ELSE ? END,"
-            " outcome_source = CASE WHEN ? = '' THEN outcome_source ELSE ? END"
+            " outcome_source = CASE WHEN ? = '' THEN outcome_source ELSE ? END,"
+            " review_note = ?"
             " WHERE id = ?",
             (
                 str(status), fin, duration,
@@ -3151,6 +3188,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                 str(denied_tools or "")[:600],
                 str(outcome or ""), str(outcome or ""),
                 str(outcome_source or ""), str(outcome_source or ""),
+                str(review_note or "")[:200],
                 int(run_id),
             ),
         )

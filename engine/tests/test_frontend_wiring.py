@@ -294,6 +294,38 @@ def test_cron_modal_channel_notify_toggle():
     assert ".cron-fields label.cron-notify" in css, "开关行样式缺失"
 
 
+# ---------- 定时任务产线级模型：任务弹窗的「模型（可选）」选择 ----------
+
+def test_cron_modal_line_model_selector():
+    """定时任务可以单独指定模型服务 / 模型（默认跟随全局）。
+
+    保存时两个字段始终回传（update 是全量覆盖语义）；团队任务的模型由
+    团队模板决定，前端隐藏这一项、后端也会拒绝。
+    """
+    js = read_app_bundle()
+    for needle in ('id="cron-model-wrap"', 'id="cron-provider"', 'id="cron-model"',
+                   'request("config.providers")', "跟随全局", "服务默认（",
+                   "syncModelOptions", "provider_name: \"\", model: \"\""):
+        assert needle in js, f"模型选择缺少 {needle}"
+    # 跟踪已有任务：选中的服务 / 模型随 t 回填；团队形态整块隐藏
+    assert 't.provider_name === name ? " selected"' in js
+    assert 'classList.toggle("hidden", mode === "team")' in js
+    # 保存回传（团队任务强制空，后端同样拒绝非空）
+    assert "params.provider_name = mode === \"team\" ? \"\" : (providerSel.value || \"\")" in js
+    assert "团队任务的模型由团队模板决定" in js
+
+
+def test_cron_modal_review_toggle():
+    """验收工位：默认关、按线开启；团队形态隐藏，保存回传 review。"""
+    js = read_app_bundle()
+    for needle in ('id="cron-review-wrap"', 'id="cron-review"',
+                   "跑完后让验收模型判一次", "params.review = mode === \"team\"",
+                   "验收只读、不联网、单轮"):
+        assert needle in js, f"验收开关缺少 {needle}"
+    assert "review: false" in js, "新建任务默认不做验收"
+    assert "t.review ? \" checked\"" in js
+
+
 # ---------- Mods：存草稿入口（「让 Agent 创建 Mod」闭环的前端半边） ----------
 
 def test_mod_save_draft_entry_wired():

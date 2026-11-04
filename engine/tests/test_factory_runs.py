@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -180,6 +181,63 @@ async def test_run_ledger_emits_started_and_finished_with_names(store, tmp_path)
     assert (await ledger_bad.finish(run2["id"], status="done"))["status"] == "done"
 
 
+async def test_run_ledger_snapshots_config_at_start(store, tmp_path):
+    """配置是原地改的：每一轮留下开跑时那一版提示词与预授权（§8.1 v9）。
+
+    改配置不能倒改历史——正是「改完再看历史分不清配置改坏了还是环境坏了」
+    才需要这份快照。
+    """
+    proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
+    task = await store.add_cron_task(
+        proj.id, "日报", "先读日志\n再写摘要", "interval", interval_minutes=5,
+        allowed_tools=["read_file", "write_file"],
+        provider_name="zhipu", model="glm-4.6", review=True)
+    ledger = RunLedger(store)
+
+    run = await ledger.start("cron", task["id"])
+    snap = json.loads(run["config_snapshot"])
+    assert snap["prompt"] == "先读日志 再写摘要", "换行压成空格，仍是当时那段"
+    assert snap["tools"] == ["read_file", "write_file"]
+    assert snap["mode"] == "agent"
+    assert snap["provider"] == "zhipu" and snap["model"] == "glm-4.6"
+    assert snap["review"] is True
+
+    await store.update_cron_task(
+        task["id"], prompt="新提示词", allowed_tools=["read_file"],
+        provider_name="", model="", review=False)
+    run2 = await ledger.start("cron", task["id"])
+    snap2 = json.loads(run2["config_snapshot"])
+    assert snap2["prompt"] == "新提示词" and snap2["tools"] == ["read_file"]
+    assert "provider" not in snap2, "跟随全局时不写模型键"
+    assert "review" not in snap2, "验收关闭时不写键"
+    old = await store.get_automation_run(run["id"])
+    assert json.loads(old["config_snapshot"])["prompt"] == "先读日志 再写摘要", \
+        "改配置不能倒改历史运行"
+
+
+async def test_run_ledger_snapshots_pipeline_node_kind_and_timeout(store, tmp_path):
+    """编排工位记下节点类型与超时：节点被改过之后仍能看清当时那一版。"""
+    proj, pipe, node = await _make_pipeline(store, tmp_path)
+    ledger = RunLedger(store)
+    run = await ledger.start("pipeline_node", node["id"], pipeline_id=pipe["id"])
+    snap = json.loads(run["config_snapshot"])
+    assert snap["prompt"] == "构建一下"
+    assert snap["tools"] == []
+    assert snap["node_kind"] == "run"
+    assert snap["timeout_s"] == 3600
+
+
+def test_config_snapshot_task_node_has_no_timeout():
+    """挂接任务节点跟随任务簿，不按节点超时执行：快照不能编一个超时出来。"""
+    from skysheep.core.run_ledger import config_snapshot_json
+
+    snap = json.loads(config_snapshot_json("pipeline_node", {
+        "kind": "task", "prompt": "跟随任务", "allowed_tools": [],
+        "timeout_s": 3600,
+    }))
+    assert snap["node_kind"] == "task" and "timeout_s" not in snap
+
+
 async def test_run_ledger_skipped_writes_finished_row(store, tmp_path):
     proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
     task = await store.add_cron_task(proj.id, "日报", "干活", "interval", interval_minutes=5)
@@ -190,6 +248,8 @@ async def test_run_ledger_skipped_writes_finished_row(store, tmp_path):
     assert run["status"] == "skipped"
     assert run["finished_at"] is not None and run["duration_s"] == 0.0
     assert run["name"] == "日报" and run["project_name"] == "一号厂"
+    assert json.loads(run["config_snapshot"])["prompt"] == "干活", \
+        "跳过行也记当时配置：排查「为什么这轮没跑」要看它"
     assert [e["phase"] for e in events] == ["finished"], "跳过只发结束事件"
 
     rows = await store.list_automation_runs(status="skipped")
@@ -273,6 +333,49 @@ async def test_run_cron_task_core_writes_done_empty_and_error_rows(store, tmp_pa
     await store.update_cron_task(task["id"], enabled=0)
     await run_cron_task_core(store, task["id"], execute=ok_execute, emit_run=events.append)
     assert len(await store.list_automation_runs(limit=100)) == 3
+
+
+async def test_run_cron_review_can_only_downgrade_outcome(store, tmp_path):
+    """验收判定与自动判定合并：能降级，不能把被门控拦过的轮次评成做成。"""
+    proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
+    task = await store.add_cron_task(
+        proj.id, "日报", "干活", "interval", interval_minutes=10, review=True)
+
+    async def failed_review(_task):
+        return _runtime("我看了日志，没问题"), "sid-1", False, {
+            "review": {"outcome": "failed", "note": "只描述了过程，没有结论"}}
+
+    await run_cron_task_core(
+        store, task["id"], force=True, execute=failed_review)
+    row = (await store.list_automation_runs())[0]
+    assert row["status"] == "done"
+    assert row["outcome"] == "failed" and row["outcome_source"] == "reviewer"
+    assert row["review_note"] == "只描述了过程，没有结论"
+
+    # 被门控拦过 = partial，验收评 ok 也不能升级
+    async def denied_ok_review(_task):
+        return _runtime("完成"), "sid-2", False, {
+            "denied": 2,
+            "review": {"outcome": "ok", "note": "产出覆盖要求"}}
+
+    await store.update_cron_task(task["id"], next_run_at=time.time() - 1)
+    await run_cron_task_core(
+        store, task["id"], execute=denied_ok_review)
+    rows = await store.list_automation_runs()
+    assert rows[0]["outcome"] == "partial" and rows[0]["outcome_source"] == "auto"
+    assert "有工具被拦" in rows[0]["review_note"]
+
+    # 验收不可用：保留自动判定，备注说明原因
+    async def unavailable_review(_task):
+        return _runtime("完成"), "sid-3", False, {
+            "review": {"outcome": "", "note": "验收超时，保留自动判定"}}
+
+    await store.update_cron_task(task["id"], next_run_at=time.time() - 1)
+    await run_cron_task_core(
+        store, task["id"], execute=unavailable_review)
+    rows = await store.list_automation_runs()
+    assert rows[0]["outcome"] == "ok" and rows[0]["outcome_source"] == "auto"
+    assert rows[0]["review_note"] == "验收超时，保留自动判定"
 
 
 async def test_cron_pass_records_skipped_once_per_due_batch(store, tmp_path):

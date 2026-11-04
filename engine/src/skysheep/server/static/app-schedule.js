@@ -1058,7 +1058,8 @@ async function cronModal(existing) {
   const t = existing || { name: "", prompt: "", schedule_type: "interval",
                           interval_minutes: 60, time_of_day: "09:00", weekday: 0,
                           allowed_tools: [], enabled: true, notify_channel: false,
-                          mode: "agent", team_template: "" };
+                          mode: "agent", team_template: "",
+                          provider_name: "", model: "", review: false };
   const isTeam = (t.mode || "agent") === "team";
   // 团队模板（数据源 team.template_list）：定时团队按模板建队（只收引用不收内联名册）。
   // 拿不到模板册就只给空下拉，保存时后端 cron.add/update 仍会二次校验兜底
@@ -1071,6 +1072,28 @@ async function cronModal(existing) {
     `<option value="${escapeHtml(tp.name)}"${t.team_template === tp.name ? " selected" : ""}>` +
     `${escapeHtml(tp.name)}（${tp.director_mode === "ai" ? "AI 总管" : "用户总管"}，${(tp.members || []).length} 名队员）</option>`
   ).join("");
+  // 产线级模型（可选）：服务清单与设置页同源（Key 只回掩码）。拿不到就只剩
+  // 「跟随全局」，保存时后端仍二次校验服务是否存在。
+  let providerList = {}, providerDefault = "";
+  try {
+    const pr = await request("config.providers");
+    providerList = (pr && pr.providers) || {};
+    providerDefault = (pr && pr.default) || "";
+  } catch (e) { /* 静默：空清单 + 后端校验兜底 */ }
+  const defPc = providerList[providerDefault] || null;
+  const followLabel = "跟随全局" + (defPc
+    ? `（${defPc.label || providerDefault} / ${defPc.model || "默认模型"}）` : "");
+  const providerOptions = Object.keys(providerList).map((name) => {
+    const pc = providerList[name] || {};
+    return `<option value="${escapeHtml(name)}"${t.provider_name === name ? " selected" : ""}>` +
+      `${escapeHtml(pc.label || name)}（默认：${escapeHtml(pc.model || "未设置")}）` +
+      `${pc.has_key ? "" : " · 未配置 Key"}</option>`;
+  }).join("");
+  // 任务引用的服务后来被删：仍列出来（保存时会报错，不静默改成跟随全局）
+  const orphanProvider = t.provider_name && !providerList[t.provider_name]
+    ? `<option value="${escapeHtml(t.provider_name)}" selected>` +
+      `${escapeHtml(t.provider_name)}（已不存在）</option>`
+    : "";
   const days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
   const allowed = new Set(t.allowed_tools || []);
   // 工具勾选表：从最近一次 boot 快照取工具清单（含权限级别），让用户勾而不是背工具名
@@ -1102,6 +1125,22 @@ async function cronModal(existing) {
           ${tplOptions || '<option value="">（还没有团队模板——先在会话里建队并「另存为模板」）</option>'}
         </select>
         <div id="cron-team-check" class="dim small"></div>
+      </div>
+      <div id="cron-model-wrap">
+        <label>模型（可选）</label>
+        <select id="cron-provider" class="modal-input cron-select">
+          <option value="">${followLabel}</option>
+          ${orphanProvider}${providerOptions}
+        </select>
+        <select id="cron-model" class="modal-input cron-select"></select>
+        <p class="dim small">留空跟随全局；指定后这条产线单独用这个服务 / 模型跑
+          （日报用便宜模型、周报用强模型）。团队任务的模型由团队模板决定，不显示这一项。</p>
+      </div>
+      <div id="cron-review-wrap">
+        <label class="cron-notify"><input id="cron-review" type="checkbox"${t.review ? " checked" : ""}>
+          跑完后让验收模型判一次「做成了没有」</label>
+        <p class="dim small">验收只读、不联网、单轮，默认关；只能把自动判定降级，
+          不会把有工具被拦的轮次评成做成。团队任务的验收由总管交付说明承担，不显示这一项。</p>
       </div>
       <label id="cron-prompt-label">任务指令（Agent 每次到点执行的内容）</label>
       <textarea id="cron-prompt" class="modal-input" rows="3" placeholder="例如：扫描当前目录的 TODO 标记，汇总成一段进度报告">${isEdit ? escapeHtml(t.prompt) : ""}</textarea>
@@ -1147,6 +1186,34 @@ async function cronModal(existing) {
   };
   box.querySelector("#cron-type").addEventListener("change", syncType);
   syncType();
+  // 模型选择：服务下拉决定模型候选；服务为空（跟随全局）时禁用模型下拉
+  const providerSel = box.querySelector("#cron-provider");
+  const modelSel = box.querySelector("#cron-model");
+  const syncModelOptions = (keepModel) => {
+    const prov = providerSel.value;
+    const pc = providerList[prov] || null;
+    if (!prov) {
+      modelSel.innerHTML = '<option value="">跟随全局</option>';
+      modelSel.disabled = true;
+      return;
+    }
+    const opts = ['<option value="">服务默认（' + escapeHtml((pc && pc.model) || "未设置") + '）</option>'];
+    ((pc && pc.models) || []).forEach((m) => {
+      if (pc && m === pc.model) return;  // 默认模型已单列
+      opts.push('<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>');
+    });
+    // 自定义模型（不在服务列表里）：保留当前值，不能静默改成默认模型
+    if (keepModel && keepModel !== (pc && pc.model) &&
+        ((pc && pc.models) || []).indexOf(keepModel) < 0) {
+      opts.push('<option value="' + escapeHtml(keepModel) + '">' +
+        escapeHtml(keepModel) + '</option>');
+    }
+    modelSel.innerHTML = opts.join("");
+    modelSel.disabled = false;
+    if (keepModel) modelSel.value = keepModel;
+  };
+  providerSel.addEventListener("change", () => syncModelOptions(""));
+  syncModelOptions(t.model || "");
   // 任务形态切换：团队形态显出模板下拉并即时校验（cron.team_check 表单期预检）
   const checkTemplate = async () => {
     const sel = box.querySelector("#cron-template");
@@ -1164,6 +1231,9 @@ async function cronModal(existing) {
   const syncMode = () => {
     const mode = box.querySelector("#cron-mode").value;
     box.querySelector("#cron-team-wrap").classList.toggle("hidden", mode !== "team");
+    // 团队任务的模型由模板决定（总管 / 队员各自配），单会话任务才给这两列
+    box.querySelector("#cron-model-wrap").classList.toggle("hidden", mode === "team");
+    box.querySelector("#cron-review-wrap").classList.toggle("hidden", mode === "team");
     box.querySelector("#cron-prompt-label").textContent = mode === "team"
       ? "总管首条指令（到点发给 AI 总管的团队目标）"
       : "任务指令（Agent 每次到点执行的内容）";
@@ -1194,6 +1264,11 @@ async function cronModal(existing) {
       allowed_tools: picked,
       notify_channel: box.querySelector("#cron-notify").checked,
     };
+    // 产线级模型：跟随全局时两个字段都传空（update 是全量覆盖语义）
+    params.provider_name = mode === "team" ? "" : (providerSel.value || "");
+    params.model = mode === "team"
+      ? "" : (providerSel.value ? (modelSel.value || "") : "");
+    params.review = mode === "team" ? false : box.querySelector("#cron-review").checked;
     // mode 只在创建时提交（后端不允许 update 改形态）；team_template 只对团队任务有意义
     if (!isEdit) params.mode = mode;
     if (mode === "team") params.team_template = box.querySelector("#cron-template").value;

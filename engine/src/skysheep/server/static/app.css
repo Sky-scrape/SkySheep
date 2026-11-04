@@ -1229,9 +1229,9 @@ mark.search-hit-mark {
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--paper-raised) 70%, transparent), var(--shadow-sm);
   transition: box-shadow var(--dur-fast), transform var(--dur-fast);
 }
-#input:hover { border-color: var(--blue); }
-#input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-#input:focus { outline: none; transform: translate(-1px, -1px); border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-weak), var(--shadow-md); }
+#input:hover { border-color: color-mix(in srgb, var(--text) 30%, transparent); }
+#input:focus-visible { outline: none; }
+#input:focus { outline: none; transform: translate(-1px, -1px); border-color: color-mix(in srgb, var(--text) 40%, transparent); box-shadow: var(--shadow-md); }
 #input::placeholder { color: var(--dim); }
 #btn-send { min-width: 92px; min-height: 32px; letter-spacing: 1px; }
 
@@ -5036,12 +5036,16 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   border-top: 1px solid var(--line);
 }
 .rp-daily .toggle-row { justify-content: flex-start; gap: 8px; }
-#daily-report-time {
+/* 日报 / 周报两个时刻框同一层皮（原生 time 控件不声明就是系统白底灰边，
+   两行并排时一白一纸最扎眼）；周报行是 P10 后补的，别漏 */
+#daily-report-time,
+#weekly-report-time {
   border: 1px solid var(--line2); border-radius: 6px;
   background: var(--paper-raised); color: var(--text);
   font: inherit; font-size: var(--fs-sm); padding: 2px 6px; cursor: pointer;
 }
-#daily-report-time:focus { outline: none; border-color: var(--blue); }
+#daily-report-time:focus,
+#weekly-report-time:focus { outline: none; border-color: var(--blue); }
 /* 今日运行总览卡：自动化页顶部（分段条之上，两个分段共用），四行摘要 + 可展开明细 */
 .rp-runcard {
   flex-shrink: 0; margin: 8px 10px 0; padding: 6px 10px;
@@ -6001,19 +6005,37 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   margin-top: 10px; font-size: var(--fs-md); color: var(--text2);
 }
 .theme-auto-row label { display: inline-flex; align-items: center; gap: 6px; }
-/* 两个下拉走设置页纸面框同款（与上方主题卡、模型选择一致的硬墨描边 + 铅字投影）；
-   原生箭头保留（color-scheme 跟着主题深浅走），只收拾外框 */
-.theme-auto-row select {
+/* 两个下拉 + 「定时切换」两个时间框走设置页纸面框同款（与上方主题卡、模型选择一致的
+   硬墨描边 + 铅字投影）；原生箭头/时钟图标保留（color-scheme 跟着主题深浅走），只收拾外框。
+   time 控件不声明就是系统灰底（深色主题下是一块中性暗灰，和纸面主题完全脱节），
+   所以它必须显式套同一层皮，不能靠继承。 */
+.theme-auto-row select,
+.theme-auto-row input[type="time"] {
   background: var(--paper-raised); color: var(--text);
   border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
-  padding: 4px 8px; font-size: var(--fs-md); font-family: inherit; cursor: pointer;
+  padding: 4px 8px; font-size: var(--fs-md); font-family: inherit;
   box-shadow: var(--shadow-sm);
 }
-.theme-auto-row select:hover { border-color: var(--blue); }
-.theme-auto-row select:focus {
+.theme-auto-row select { cursor: pointer; }
+.theme-auto-row input[type="time"] {
+  font-variant-numeric: var(--num);
+  cursor: text;
+  /* 原生 time 控件的内在高度比同款 select 高约 3px，同一行里一高一矮——
+     钉成与 select 一致的 28px（内嵌字段垂直居中，不裁字） */
+  height: 28px;
+}
+.theme-auto-row select:hover,
+.theme-auto-row input[type="time"]:hover { border-color: var(--blue); }
+.theme-auto-row select:focus,
+.theme-auto-row input[type="time"]:focus {
   outline: none; border-color: var(--blue);
   box-shadow: 0 0 0 1.5px var(--blue), var(--shadow-sm);
 }
+/* 时钟图标：压一档透明度收进纸面，悬停回到全亮（原生图标本身跟着 color-scheme 变深浅） */
+.theme-auto-row input[type="time"]::-webkit-calendar-picker-indicator {
+  opacity: .65; cursor: pointer; margin-left: 2px;
+}
+.theme-auto-row input[type="time"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 
 /* ---------- 对话内查找条（Ctrl+F） ---------- */
 .find-bar {
@@ -7975,14 +7997,15 @@ li.mod-row {
   box-shadow: inset 0 0 0 1.5px var(--blue), var(--shadow-md);
 }
 
-/* —— 输入框：无边框，聚焦加深双环（inset 内环 + 外两层扩散环） —— */
+/* —— 输入框：无边框；聚焦不上蓝色高亮环，只把中性描边压深一档 + 投影加深
+   （取 --text 混透明做中性档：亮色底压深、暗色底提亮，两套主题都看得见；蓝色留给可点交互件） —— */
 #input, .split-input, .aux-input, #files-editor {
   border: 0;
   box-shadow: inset 0 0 0 1.5px var(--line2), var(--shadow-sm);
   transition: box-shadow var(--dur-fast), background var(--dur-fast);
 }
-#input:hover, .split-input:hover, .aux-input:hover {
-  box-shadow: inset 0 0 0 1.5px var(--blue), var(--shadow-sm);
+#input:hover, .split-input:hover, .aux-input:hover, #files-editor:hover {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--text) 30%, transparent), var(--shadow-sm);
 }
 #input:focus, #input:focus-visible,
 .split-input:focus, .split-input:focus-visible,
@@ -7992,11 +8015,8 @@ li.mod-row {
   border-color: transparent;
   transform: none;
   box-shadow:
-    inset 0 0 0 1.5px var(--blue),
-    inset 0 0 0 4px color-mix(in srgb, var(--blue) 16%, transparent),
-    0 0 0 2px color-mix(in srgb, var(--blue) 55%, transparent),
-    0 0 0 6px color-mix(in srgb, var(--blue) 12%, transparent),
-    0 10px 24px color-mix(in srgb, var(--ink-line) 20%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--text) 40%, transparent),
+    0 10px 24px color-mix(in srgb, var(--ink-line) 16%, transparent);
 }
 
 /* —— 折叠：Grid 0fr ↔ 1fr（思考块 / 圆桌 / 团队卡） —— */
@@ -8162,19 +8182,16 @@ li.mcp-failed { border-left: 0; }
 #input, .split-input, .aux-input, #files-editor {
   box-shadow: inset 0 0 0 var(--hairline) var(--line2), var(--shadow-sm);
 }
-#input:hover, .split-input:hover, .aux-input:hover {
-  box-shadow: inset 0 0 0 var(--hairline) var(--blue), var(--shadow-sm);
+#input:hover, .split-input:hover, .aux-input:hover, #files-editor:hover {
+  box-shadow: inset 0 0 0 var(--hairline) color-mix(in srgb, var(--text) 30%, transparent), var(--shadow-sm);
 }
 #input:focus, #input:focus-visible,
 .split-input:focus, .split-input:focus-visible,
 .aux-input:focus, .aux-input:focus-visible,
 #files-editor:focus, #files-editor:focus-visible {
   box-shadow:
-    inset 0 0 0 1px var(--blue),
-    inset 0 0 0 4px color-mix(in srgb, var(--blue) 16%, transparent),
-    0 0 0 2px color-mix(in srgb, var(--blue) 55%, transparent),
-    0 0 0 6px color-mix(in srgb, var(--blue) 12%, transparent),
-    0 10px 24px color-mix(in srgb, var(--ink-line) 20%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--text) 40%, transparent),
+    0 10px 24px color-mix(in srgb, var(--ink-line) 16%, transparent);
 }
 #jump-bottom {
   box-shadow: inset 0 0 0 var(--hairline) var(--ink-line), var(--shadow-sm);

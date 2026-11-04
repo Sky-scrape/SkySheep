@@ -79,6 +79,14 @@
     running: "运行中", done: "已完成", empty: "空产出", error: "失败",
     interrupted: "中断", skipped: "跳过", orphan: "孤儿", cancelled: "已取消",
   };
+  // 运行中心（core/runs.py）的进行态：工厂 live 只读快照里每条都带 state/detail。
+  // 「等待确认」是独立状态，不能按「5 分钟没更新」当成卡住——它在等人，不是在跑。
+  var LIVE_STATE = {
+    queued: "排队中", thinking: "正在思考", tool_running: "正在执行",
+    waiting_permission: "等待确认", retrying: "重试中",
+  };
+  // 编排工位的来源（与编排编辑器的口径一致；run 是默认形态）
+  var NODE_KIND = { run: "新起会话", session: "会话续跑", task: "挂接任务" };
   // 「做成」判定（与 status 分开）：跑完了不等于做成了。partial = 跑完但有工具
   // 被无人值守门控拦下（预授权没勾全），产出可能只是模型的绕行说明。
   var RUN_OUTCOME = { ok: "做成", partial: "有拦截", failed: "没做成" };
@@ -737,9 +745,12 @@
   }
 
   /** 对话轮 / 子代理「疑似卡住」：服务端快照的 stale 或本地按 updated_at 推算。
-      轮询间隔内也要能自己变红，不能等下一次拉取才提示。 */
+      轮询间隔内也要能自己变红，不能等下一次拉取才提示。
+      「等你确认」不在此列：权限请求挂着时 updated_at 本来就不会刷新，按时间
+      判会把「等你拍板」误标成「卡死」——这是两件完全不同的事。 */
   function liveStale(r) {
     if (!r) return false;
+    if (String(r.state || "") === "waiting_permission") return false;
     if (r.stale) return true;
     var updated = Number(r.updated_at) || 0;
     return updated > 0 && nowMs() / 1000 - updated > 300;
@@ -2104,6 +2115,11 @@
           var sy = rec._vy * (S.cssH / S.bufH);
           if (sx < -60 || sx > S.cssW + 60 || sy < 0 || sy > S.cssH) return;
           var mlabel = rec.line.name || rec.key;
+          // 机台铭牌：产线指定了模型就写出来（聚焦档字够大，全景视图不画机台名）
+          if (rec.line.provider_name) {
+            mlabel += "  · " + (rec.line.model || rec.line.provider_label ||
+              rec.line.provider_name);
+          }
           if (rec.line.is_team) mlabel = "团队  " + mlabel;   // 与面板「团队」徽标同一口径
           if (rec.line.status === "running" && rec.kind === "cron") {
             mlabel += " " + fmtClockShort(lineRunSeconds(rec.line)); // 机台上方计时 mm:ss
@@ -2236,7 +2252,14 @@
     }
     if (hit.type === "line") {
       var rec = findLine(hit.key);
-      return rec ? ("机台  " + (rec.line.name || rec.key) + "  " + lineStateText(rec.line)) : "";
+      if (!rec) return "";
+      // 机台铭牌：指定了模型就写清「谁在干」（空 = 跟随全局，不占字）
+      var modelText = rec.line.provider_name
+        ? "  · " + (rec.line.provider_label || rec.line.provider_name) +
+          (rec.line.model ? " / " + rec.line.model : "")
+        : "";
+      return "机台  " + (rec.line.name || rec.key) + "  " +
+        lineStateText(rec.line) + modelText;
     }
     if (hit.type === "upcoming") {
       // 牌面只给短标题 + 状态灯，这里补一句「有多少项 / 点开看明细」，
@@ -2716,10 +2739,10 @@
         chat: 1, subagent: 1,
         runs: [
           { id: "demo-turn-1", kind: "turn", session_id: "", title: "整理这周的发布说明",
-            state: "running", detail: "正在执行 read_file", started_at: now - 30,
+            state: "tool_running", detail: "正在执行 read_file", started_at: now - 30,
             updated_at: now - 2, stale: false },
           { id: "demo-sub-1", kind: "subagent", session_id: "", title: "依赖扫描子代理",
-            state: "running", detail: "正在执行 run_command", started_at: now - 90,
+            state: "tool_running", detail: "正在执行 run_command", started_at: now - 90,
             updated_at: now - 4, stale: false },
         ],
       },
@@ -2898,6 +2921,7 @@
   FX.TILE_W = TILE_W; FX.TILE_H = TILE_H;
   FX.RUN_STATUS = RUN_STATUS; FX.RUN_OUTCOME = RUN_OUTCOME;
   FX.ERROR_KIND = ERROR_KIND; FX.TRIGGER_TEXT = TRIGGER_TEXT;
+  FX.LIVE_STATE = LIVE_STATE; FX.NODE_KIND = NODE_KIND;
   FX.activeConfig = activeConfig; FX.activeState = activeState;
   FX.hashKey = hashKey; FX.lineStall = lineStall; FX.clamp = clamp; FX.ringPts = ringPts;
   // 场景构建层与抽屉层的绑定源

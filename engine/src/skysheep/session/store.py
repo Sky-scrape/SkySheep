@@ -513,14 +513,18 @@ class _SharedConnRetry:
             except sqlite3.OperationalError as e:
                 msg = str(e).lower()
                 transient = "locked" in msg or "busy" in msg
-                if not transient or attempt >= self._retries:
-                    if transient:
-                        # 放弃前清掉留在连接上的失败事务，别毒化后续方法
-                        logger.warning("共享连接写重试 %d 次仍失败，回滚收场：%s", attempt + 1, e)
-                        try:
-                            await self._conn.rollback()
-                        except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
-                            pass
+                if not transient:
+                    raise
+                # 每次都先回滚再重试：首次失败时共享连接上已经留下一个拿不到
+                # 写锁的隐式事务，不清理的话后续重试全撞在同一份过期快照上
+                # （WAL 里「读快照升级为写」的 busy 不经过 busy handler，重试
+                # 只是白白撞墙），表现为 4 次重试在 0.1 秒内全部即时失败。
+                try:
+                    await self._conn.rollback()
+                except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                    pass
+                if attempt >= self._retries:
+                    logger.warning("共享连接写重试 %d 次仍失败，回滚收场：%s", attempt + 1, e)
                     raise
                 await asyncio.sleep(delay)
                 delay *= 2
@@ -533,14 +537,16 @@ class _SharedConnRetry:
             except sqlite3.OperationalError as e:
                 msg = str(e).lower()
                 transient = "locked" in msg or "busy" in msg
-                if not transient or attempt >= self._retries:
-                    if transient:
-                        logger.warning("共享连接 executemany 重试 %d 次仍失败，回滚收场：%s",
-                                       attempt + 1, e)
-                        try:
-                            await self._conn.rollback()
-                        except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
-                            pass
+                if not transient:
+                    raise
+                # 与 execute 同款：先清掉失败语句留下的隐式事务再重试
+                try:
+                    await self._conn.rollback()
+                except Exception:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                    pass
+                if attempt >= self._retries:
+                    logger.warning("共享连接 executemany 重试 %d 次仍失败，回滚收场：%s",
+                                   attempt + 1, e)
                     raise
                 await asyncio.sleep(delay)
                 delay *= 2
@@ -2260,6 +2266,30 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         message.seq = seq  # 回填给内存历史/前端 brief 用
         return row_id
 
+    async def replace_message(self, session_id: str, message: Message) -> bool:
+        """按 (session_id, seq) 重写一条已落库消息的内容。
+
+        只给「内容元数据在轮末才齐」的场景用（如 In-flight 落库后补 duration_ms /
+        estimate）。可检索正文不变，因此不重写 FTS 索引；seq 由 append_message
+        回填，消息没落过库（seq 为 None）时返回 False，由调用方走正常追加。
+        """
+        assert self._db
+        if message.seq is None:
+            return False
+        content_json = message.model_dump_json()
+
+        # 走独立写事务，不在共享连接上 execute+commit：两段之间一旦被取消/异常
+        # 打断，隐式写事务会留在共享连接上占死写锁（_immediate_txn 的孤儿事务
+        # 兜底注释记的就是这类坑）。
+        async def txn(conn) -> bool:
+            cur = await conn.execute(
+                "UPDATE messages SET content = ? WHERE session_id = ? AND seq = ?",
+                (content_json, session_id, message.seq),
+            )
+            return cur.rowcount > 0
+
+        return await self._write_txn(txn)
+
     async def load_messages(self, session_id: str) -> list[Message]:
         assert self._db
         cur = await self._db.execute(
@@ -2298,8 +2328,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         where = " AND ".join(conds)
         cur = await self._db.execute(
             f"SELECT seq, content FROM messages WHERE {where}"
-            f" ORDER BY seq DESC LIMIT {int(limit)}",
-            args,
+            " ORDER BY seq DESC LIMIT ?",
+            (*args, int(limit)),
         )
         rows = await cur.fetchall()
         win: list[Message] = []

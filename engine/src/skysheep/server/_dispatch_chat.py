@@ -94,6 +94,27 @@ async def _h_chat_status(backend: ServerBackend, params: dict, emit, local: bool
     return await backend.status(session_id=sid or None)
 
 
+async def _h_events_replay(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """断线重连补帧：返回 after_seq 之后本会话已下发的事件。
+
+    远程连接只能补自己正在交互的会话（与 chat.status / tasks.list 同一
+    作用域口径）；本机多标签由前端按 sid 路由，不限制。
+    """
+    sid = str(params.get("session_id", "") or "")
+    only = _remote_scope(local)
+    if only is not None:
+        if not only:
+            raise RuntimeError("尚未绑定会话：请先打开一个会话再查询")
+        sid = only
+    if not sid:
+        raise RuntimeError("缺少 session_id")
+    try:
+        after = int(params.get("after_seq", 0) or 0)
+    except (TypeError, ValueError):
+        after = 0
+    return backend.replay_events(sid, after_seq=max(0, after))
+
+
 async def _h_chat_compact(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     return await backend.compact_now()
 
@@ -394,6 +415,7 @@ METHODS: dict[str, _WsMethod] = {
     # 上下文压缩取的是桌面全局活动会话的 agent（backend.compact_now 用 self.agent）：
     # 远程连接压不到自己绑定的会话，反而会压到本机正在使用的另一个会话
     # （安全审查 L05，与 tasks.list 的 B 族口径同源）——收敛为本机专属
+    "events.replay": _WsMethod(_h_events_replay),
     "chat.compact": _WsMethod(
         _h_chat_compact, local_only=True,
         local_error="压缩上下文只能在桌面端本机执行",

@@ -360,6 +360,7 @@ def _tree_kill(proc: subprocess.Popen) -> None:
 def _run_sync(
     argv: list[str], cwd: str, timeout_s: int,
     job_containment: bool = True, sandbox_level: str = "job",
+    state: dict | None = None,
 ):
     """前台执行：输出限量收集，超时树杀。返回 (status, stdout, stderr, returncode)。
 
@@ -397,6 +398,10 @@ def _run_sync(
         job = _contain_job(proc) if job_containment else ContainmentJob(None, "")
         if not job.active and job_containment:
             notes.append("进程遏制未生效：" + (job.reason or "原因不明"))
+    # 把进程句柄交给调用方：轮次被取消时 Python 线程杀不掉，但可以从事件
+    # 循环线程直接树杀这个 pid（见 RunCommandTool.run 的 CancelledError 分支）
+    if state is not None:
+        state["proc"] = proc
     out_acc: dict = {"head": b"", "tail": b"", "capped": False}
     err_acc: dict = {"head": b"", "tail": b"", "capped": False}
     readers = [
@@ -803,10 +808,22 @@ class RunCommandTool(Tool):
                 text += "\n⚠️ " + info["containment_note"]
             return text
 
-        status, out, err, code, containment_note = await asyncio.to_thread(
+        # 前台命令跑在线程池里：asyncio 取消打不断 Python 线程，用户点「停止」
+        # 后进程会一直跑到 timeout_s（期间继续改文件、占端口）。用 state 把
+        # pid 交出来，取消时主动树杀；线程随后因管道 EOF/进程退出自然收尾，
+        # _run_sync 自己的 finally 仍会做 job/句柄清理。
+        run_state: dict = {}
+        run_task = asyncio.ensure_future(asyncio.to_thread(
             _run_sync, argv, str(workdir), args.timeout_s, ctx.job_containment,
-            ctx.sandbox_level,
-        )
+            ctx.sandbox_level, run_state,
+        ))
+        try:
+            status, out, err, code, containment_note = await run_task
+        except asyncio.CancelledError:
+            proc = run_state.get("proc")
+            if proc is not None:
+                _tree_kill(proc)
+            raise
         if status == "timeout":
             parts = [f"command timed out after {args.timeout_s}s（进程树已终止，以下是超时前的输出）"]
             if out.strip():

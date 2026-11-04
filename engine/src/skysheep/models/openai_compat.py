@@ -204,7 +204,11 @@ class OpenAICompatProvider(Provider):
                     "function": {
                         "name": s["name"],
                         "description": s["description"],
-                        "input_schema": s["input_schema"],
+                        # OpenAI 规范里函数参数 schema 的键名是 parameters
+                        # （input_schema 是 Anthropic 的叫法）。发错键名的后果
+                        # 视网关宽严而定：严格网关 400，宽松网关把工具当成无参
+                        # 函数，模型只能瞎猜参数名。
+                        "parameters": s["input_schema"],
                     },
                 }
                 for s in tool_schemas

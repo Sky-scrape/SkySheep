@@ -383,8 +383,9 @@ async def test_write_txn_propagates_return_value_and_rolls_back_on_error(store):
 
 
 async def test_shared_conn_retry_wrapper(store, monkeypatch):
-    """共享连接重试壳：瞬时 locked 自动退避重试；放弃前回滚收场；
-    非锁类错误原样上抛不重试。"""
+    """共享连接重试壳：瞬时 locked 自动退避重试；每次失败都回滚（清掉失败
+    语句留下的隐式事务，否则后续重试撞在同一份过期快照上）；非锁类错误
+    原样上抛不重试。"""
     import sqlite3
 
     from skysheep.session.store import _SharedConnRetry
@@ -405,18 +406,18 @@ async def test_shared_conn_retry_wrapper(store, monkeypatch):
         async def rollback(self):
             self.rolled_back += 1
 
-    # 前两次 locked、第三次成功：重试后返回结果
+    # 前两次 locked、第三次成功：每次失败先回滚再重试，然后返回结果
     flaky = FlakyConn(fail_times=2)
     shell = _SharedConnRetry(flaky, retries=3, delay=0.0)
     assert await shell.execute("UPDATE t SET x = 1") == "cursor"
-    assert flaky.executes == 3 and flaky.rolled_back == 0
+    assert flaky.executes == 3 and flaky.rolled_back == 2
 
-    # 一直 locked：重试耗尽后回滚收场并上抛
+    # 一直 locked：重试耗尽后回滚收场并上抛（每次失败都回滚）
     flaky = FlakyConn(fail_times=99)
     shell = _SharedConnRetry(flaky, retries=2, delay=0.0)
     with pytest.raises(sqlite3.OperationalError):
         await shell.execute("UPDATE t SET x = 1")
-    assert flaky.executes == 3 and flaky.rolled_back == 1
+    assert flaky.executes == 3 and flaky.rolled_back == 3
 
     # 非锁类错误不重试、不回滚
     flaky = FlakyConn(fail_times=0)

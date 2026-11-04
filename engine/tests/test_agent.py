@@ -15,7 +15,7 @@ from skysheep.models.anthropic_provider import to_anthropic_messages
 from skysheep.models.openai_compat import to_openai_messages
 from skysheep.security.gate import PermissionGate
 from skysheep.tools import ToolRegistry, default_tools
-from skysheep.tools.base import Safety, Tool, ToolContext
+from skysheep.tools.base import Safety, Tool, ToolContext, ToolError
 
 
 def make_agent(provider, tmp_path, store=None, project_id=None, max_iterations=10):
@@ -834,3 +834,110 @@ async def test_deny_first_allow_second_still_processes_queue(tmp_path):
     # 被拒工具留下 is_error 结果，后续工具正常
     finished = {e.tool_call_id: e for e in events if e.kind == "tool_call_finished"}
     assert finished["t1"].is_error and not finished["t2"].is_error
+
+
+async def test_repeated_identical_tool_calls_are_blocked(tmp_path):
+    """同参数 + 同结果的原样重试在第 5 次被拦下，而不是一路烧到迭代上限。"""
+    (tmp_path / "a.txt").write_text("stable body\n", encoding="utf-8")
+    call = {"path": "a.txt", "offset": 1, "limit": 50}
+    script = [
+        [ToolUseBlock(id=f"t{i}", name="read_file", input=dict(call))]
+        for i in range(6)
+    ]
+    script.append([TextBlock(text="收工")])
+    provider = FakeProvider(script)
+    agent = make_agent(provider, tmp_path, max_iterations=10)
+
+    events = await collect(agent, "读 a.txt")
+
+    blocked = [
+        e for e in events
+        if e.kind == "tool_call_finished" and e.preview == "blocked by loop guard"
+    ]
+    assert blocked, "第 5 次起应被 loop guard 拦下"
+    tool_msgs = [m for m in agent.history if m.role == "tool"]
+    assert len(tool_msgs) == 6, "每次调用都要有配对 tool_result（协议自洽）"
+
+    def _tool_text(m):
+        return "".join(
+            b.content for b in m.content if isinstance(b, ToolResultBlock)
+        )
+
+    assert sum("已拦下这次重复调用" in _tool_text(m) for m in tool_msgs) == 2
+    assert events[-1].stop_reason == "end_turn"
+    # 拦下的调用不再执行工具：provider 仍每轮被调用一次（6 次工具 + 收尾）
+    assert len(provider.calls) == 7
+
+
+class _FailArgs(BaseModel):
+    n: int = 0
+
+
+class _AlwaysFails(Tool):
+    """不同参数、同一句错误：用于验证工具级熔断（不是同参数重复）。"""
+
+    name = "always_fails"
+    description = "test tool"
+    safety = Safety.READONLY
+    args_model = _FailArgs
+
+    async def run(self, args, ctx):
+        raise ToolError("upstream unavailable")
+
+
+async def test_tool_failure_breaker_pauses_tool(tmp_path):
+    """同一工具连续 5 次返回同一句错误后，本轮暂停该工具。"""
+    provider = FakeProvider(
+        [[ToolUseBlock(id=f"t{i}", name="always_fails", input={"n": i})] for i in range(7)]
+        + [[TextBlock(text="放弃")]]
+    )
+    gate = PermissionGate(working_dir=tmp_path)
+    agent = Agent(
+        provider=provider,
+        registry=ToolRegistry([_AlwaysFails()]),
+        gate=gate,
+        working_dir=tmp_path,
+        max_iterations=10,
+    )
+
+    events = await collect(agent, "一直失败")
+
+    tool_msgs = [m for m in agent.history if m.role == "tool"]
+    texts = [
+        "".join(b.content for b in m.content if isinstance(b, ToolResultBlock))
+        for m in tool_msgs
+    ]
+    assert any("已暂停调用该工具" in t for t in texts)
+    assert events[-1].stop_reason == "end_turn"
+
+
+async def test_permission_timeout_denies_and_continues(tmp_path):
+    """确认卡没人点：超时后按拒绝继续本轮，不把会话永久挂住。"""
+    provider = FakeProvider([
+        [ToolUseBlock(id="t1", name="write_file", input={"path": "a.txt", "content": "x"})],
+        [TextBlock(text="好，我先不算这个了")],
+    ])
+    gate = PermissionGate(working_dir=tmp_path)
+    agent = Agent(
+        provider=provider,
+        registry=ToolRegistry(default_tools()),
+        gate=gate,
+        working_dir=tmp_path,
+        max_iterations=5,
+        permission_timeout_s=0.2,
+    )
+
+    events = []
+    async for ev in agent.run_turn("写 a.txt"):
+        events.append(ev)  # 刻意不响应权限请求
+
+    assert not (tmp_path / "a.txt").exists(), "超时按拒绝，写入不得发生"
+    resolved = [e for e in events if e.kind == "permission_resolved"]
+    assert resolved and resolved[0].decision == "deny"
+    assert any(e.kind == "notice" and "确认等待超时" in e.message for e in events)
+    tool_text = "".join(
+        b.content for m in agent.history if m.role == "tool"
+        for b in m.content if isinstance(b, ToolResultBlock)
+    )
+    assert "等待用户确认超时" in tool_text
+    assert events[-1].stop_reason == "end_turn"

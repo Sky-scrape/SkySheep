@@ -256,6 +256,37 @@ def test_stream_closed_when_consumer_cancelled():
     assert stream.closed, "取消路径也要确定性关闭流"
 
 
+def test_tool_schema_uses_openai_parameters_key():
+    """function 载荷里的参数 schema 必须是 parameters（OpenAI 规范）。
+
+    回归：此前发的是 input_schema（Anthropic 的叫法）。严格网关直接 400，
+    宽松网关把工具当无参函数——模型的参数名全靠猜，工具调用整体退化。
+    """
+    schema = {
+        "name": "read_file",
+        "description": "读文件",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        "annotations": {"readOnlyHint": True},
+    }
+    client = FakeClient([FakeStream([])])
+    p = OpenAICompatProvider("x", "m", "k", client=client)
+
+    async def runner():
+        async for _ in p.stream([], [schema]):
+            pass
+
+    asyncio.new_event_loop().run_until_complete(runner())
+    fn = client.calls[0]["tools"][0]["function"]
+    assert fn["parameters"] == schema["input_schema"]
+    assert "input_schema" not in fn
+    # MCP 注解只在本地用，不能发往端点（严格网关会拒收未知字段）
+    assert "annotations" not in fn
+
+
 def test_stream_closed_on_error_mid_stream():
     """流中途抛错（服务端断流等）：异常包装为 ProviderError 且流已关闭。"""
     class ExplodingStream(FakeStream):

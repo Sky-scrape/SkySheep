@@ -1362,6 +1362,11 @@
                 <span class="dim small">0 = 不限制。单次请求（含历史）超过上限直接拒绝，防止一轮就烧掉全天预算</span>
               </div>
               <div class="toolcfg-row">
+                <label>确认等待上限</label>
+                <input type="number" id="adv-permission-timeout" min="0" max="3600" step="30" placeholder="0">
+                <span class="dim small">0 = 一直等。权限确认卡超过这么多秒没人点，就按拒绝处理并继续本轮</span>
+              </div>
+              <div class="toolcfg-row">
                 <label>备用模型</label>
                 <input type="text" id="adv-fallback-model" placeholder="如 zhipu:glm-5.3（留空 = 不启用）">
                 <span class="dim small">主模型失败（鉴权/余额/服务异常）时自动切换到这个「服务:模型」</span>

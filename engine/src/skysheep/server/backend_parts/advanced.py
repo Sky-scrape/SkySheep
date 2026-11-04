@@ -54,6 +54,8 @@ class SystemMixin(RelaySettingsMixin):
             # 沙箱级别与遏制同一条热更通道（run_command 每次执行时从工具
             # 上下文取值；Agent 未带该属性的旧构造点赋值也无害）
             ag.sandbox_level = self.cfg.shell.sandbox_level
+            # 权限确认等待上限：下一张确认卡就按新值计时（轮内读取，热生效）
+            ag.permission_timeout_s = self.cfg.permission_timeout_s
 
     def _startup_status(self) -> dict:
         from ... import startup
@@ -191,6 +193,7 @@ class SystemMixin(RelaySettingsMixin):
             "browser_control": self.cfg.browser_control,
             "daily_token_budget": self.cfg.daily_token_budget,
             "turn_token_budget": self.cfg.turn_token_budget,
+            "permission_timeout_s": self.cfg.permission_timeout_s,
             "fallback_model": self.cfg.fallback_model,
             # 「安全与后台」的三项：定时调度总开关与命令沙箱（读取点都在各自
             # 执行路径上按当前配置取值，改完即热生效，无需重启）
@@ -252,6 +255,14 @@ class SystemMixin(RelaySettingsMixin):
                 raise RuntimeError("单轮 token 上限需要一个整数") from None
         else:
             turn_budget = None
+        perm_timeout = params.get("permission_timeout_s")
+        if perm_timeout is not None and perm_timeout != "":
+            try:
+                perm_timeout = int(perm_timeout)
+            except (TypeError, ValueError):
+                raise RuntimeError("权限确认等待上限需要一个整数") from None
+        else:
+            perm_timeout = None
         fallback = params.get("fallback_model")
         if fallback is not None:
             fallback = str(fallback).strip()
@@ -273,6 +284,7 @@ class SystemMixin(RelaySettingsMixin):
                 ),
                 daily_token_budget=budget,
                 turn_token_budget=turn_budget,
+                permission_timeout_s=perm_timeout,
                 fallback_model=None if fallback is None else fallback,
                 # 「安全与后台」三项：不传 = 不动（与其它布尔项同一姿态）；
                 # 读取点在执行路径上按配置取值，self.cfg 重载后即热生效

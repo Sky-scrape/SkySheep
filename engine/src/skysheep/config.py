@@ -449,6 +449,10 @@ class SkySheepConfig(BaseModel):
     # 单轮 token 上限：单次请求的估算体积（历史+新消息）超过即拒绝发送（0 = 不限制）。
     # 是每日预算的前置防线：防「一轮就烧掉全天额度」。估算偏保守。
     turn_token_budget: int = Field(default=0, ge=0)
+    # 权限确认等待上限（秒）：前端弹出确认卡后，超过这个时间没有决策就按拒绝
+    # 处理并继续本轮（0 = 一直等，保持旧行为）。面向「点完发送就去干别的」的
+    # 场景——否则一个被遗忘的确认卡会让会话永远卡在等待中。
+    permission_timeout_s: int = Field(default=0, ge=0, le=3600)
     # 备用模型：主模型调用持续失败时自动切换的「服务名:模型名」（空 = 不启用）。
     # 格式 "provider:model"，如 "zhipu:glm-5.3"。仅对 openai/anthropic 真实服务生效。
     fallback_model: str = ""
@@ -684,6 +688,7 @@ def load_config() -> SkySheepConfig:
         browser_ignore_cert = bool(raw.get("browser_ignore_cert", False))
         daily_budget = _clamp_int(raw, "daily_token_budget", 0, 0)
         turn_budget = _clamp_int(raw, "turn_token_budget", 0, 0)
+        permission_timeout = _clamp_int(raw, "permission_timeout_s", 0, 0, 3600)
         fallback_model = str(raw.get("fallback_model", "") or "")
         memory_digest = bool(raw.get("memory_digest", True))
         disabled = [str(n) for n in (raw.get("disabled_providers") or [])]
@@ -769,6 +774,7 @@ def load_config() -> SkySheepConfig:
         browser_ignore_cert = False
         daily_budget = 0
         turn_budget = 0
+        permission_timeout = 0
         fallback_model = ""
         memory_digest = True
     for name in disabled:
@@ -799,6 +805,7 @@ def load_config() -> SkySheepConfig:
             browser_ignore_cert=browser_ignore_cert,
             daily_token_budget=daily_budget,
             turn_token_budget=turn_budget,
+            permission_timeout_s=permission_timeout,
             fallback_model=fallback_model,
             memory_digest=memory_digest,
             memory_maintenance=memory_maintenance,
@@ -843,6 +850,7 @@ def set_advanced_settings_in_config(
     browser_ignore_cert: bool | None = None,
     daily_token_budget: int | None = None,
     turn_token_budget: int | None = None,
+    permission_timeout_s: int | None = None,
     fallback_model: str | None = None,
     memory_digest: bool | None = None,
     system_schedule: bool | None = None,
@@ -871,6 +879,8 @@ def set_advanced_settings_in_config(
         raise ConfigError("每日 token 预算过大，请填写 0（不限制）到 1 亿之间的整数")
     if turn_token_budget is not None and int(turn_token_budget) > 10_000_000:
         raise ConfigError("单轮 token 上限过大，请填写 0（不限制）到 1000 万之间的整数")
+    if permission_timeout_s is not None and not 0 <= int(permission_timeout_s) <= 3600:
+        raise ConfigError("权限确认等待上限要在 0–3600 秒之间（0 = 一直等）")
     if fallback_model is not None:
         fallback_model = str(fallback_model).strip()
         if fallback_model and ":" not in fallback_model:
@@ -900,6 +910,8 @@ def set_advanced_settings_in_config(
         raw["daily_token_budget"] = max(0, int(daily_token_budget))
     if turn_token_budget is not None:
         raw["turn_token_budget"] = max(0, int(turn_token_budget))
+    if permission_timeout_s is not None:
+        raw["permission_timeout_s"] = max(0, min(3600, int(permission_timeout_s)))
     if fallback_model is not None:
         if fallback_model:
             raw["fallback_model"] = fallback_model

@@ -18,7 +18,7 @@ import subprocess  # noqa: F401  测试按模块属性 patch Popen
 import sys
 import time
 import zipfile
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -234,6 +234,11 @@ STREAM_MERGE_MAX_CHARS = 2_000
 _MERGEABLE_DELTA_KINDS = (
     "text_delta", "thinking_delta", "roundtable_member_delta", "team_message_delta",
 )
+
+# 断线重连补帧的缓冲：每会话只留当前轮最近这么多帧；超过 _EVENT_LOG_SESSIONS
+# 个会话时按最早创建淘汰（长跑进程不无限涨内存）。
+_EVENT_LOG_MAX = 1_200
+_EVENT_LOG_SESSIONS = 20
 
 # 二次取消后收割后台落库的兜底超时（秒）：正常落库毫秒级完成，超时说明库被
 # 锁死等异常，不能拖着整个收尾无限等（排队轮还等着交棒）。
@@ -1005,6 +1010,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._teams_interrupted: dict[str, dict] = {}
         self._load_team_state()
         self.ws_emitters: list = []  # 在线 WS 连接的 emit 函数（提醒/日程广播用）
+        # 事件回放（断线重连补帧）：seq 全局单调，缓冲按会话只保留当前轮
+        self._event_seq = 0
+        self._event_logs: dict[str, deque] = {}
+        self._event_log_order: list[str] = []
+        # 在途落库的全局写锁：多会话并行时进度写彼此串行，减少与其它
+        # 单语句写的锁碰撞（真正的一致性由 store 的写事务兜底）
+        self._progress_write_lock = asyncio.Lock()
         self._reminder_task: asyncio.Task | None = None
         self._cron_task: asyncio.Task | None = None
         # 正在跑的定时任务：task_id → 运行句柄（防重复触发 + 供工厂「叫停」）。
@@ -1150,6 +1162,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             job_containment=self.cfg.shell.job_containment,
             sandbox_level=self.cfg.shell.sandbox_level,
             use_ripgrep=self.cfg.search.use_ripgrep,
+            permission_timeout_s=self.cfg.permission_timeout_s,
         )
         agent.on_provider_ok = self._provider_on_ok
         agent.on_provider_error = self._provider_on_error
@@ -1646,6 +1659,54 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if orch.respond_permission(request_id, decision):
                 return True
         return False
+
+    # ---- 会话事件回放（断线重连补帧） ----
+
+    def log_session_event(self, session_id: str, payload: dict) -> dict:
+        """给事件打上全局单调 seq 并存入该会话的「当前轮」缓冲。
+
+        只保留当前轮：轮首（turn_started）清空上一轮——重连要补的是「这次
+        断线期间错过的帧」，历史内容由消息表兜底（在途轮已边跑边落库）。
+        """
+        self._event_seq += 1
+        # 键名 ev_seq 而不是 seq：seq 在团队频道消息等事件里已有自己的语义
+        # （频道内序号），覆盖它会破坏前端按频道 seq 聚合增量。
+        ev = {**payload, "ev_seq": self._event_seq}
+        buf = self._event_logs.get(session_id)
+        if buf is None:
+            buf = deque(maxlen=_EVENT_LOG_MAX)
+            self._event_logs[session_id] = buf
+            self._event_log_order.append(session_id)
+            while len(self._event_log_order) > _EVENT_LOG_SESSIONS:
+                old = self._event_log_order.pop(0)
+                self._event_logs.pop(old, None)
+        if payload.get("kind") == "turn_started":
+            buf.clear()
+        buf.append(ev)
+        return ev
+
+    def replay_events(
+        self, session_id: str, after_seq: int = 0, limit: int = 1000,
+    ) -> dict:
+        """返回 after_seq 之后本会话已下发的事件帧。
+
+        gap=True 表示请求的位置已经被挤出缓冲（不是当前轮，或帧数超出容量），
+        前端应改走历史重载，而不是拿一段不连续的帧去续画。
+        """
+        buf = self._event_logs.get(session_id)
+        events: list[dict] = []
+        gap = False
+        if buf:
+            first = int(buf[0].get("ev_seq") or 0)
+            gap = first > int(after_seq) + 1
+            events = [
+                ev for ev in buf if int(ev.get("ev_seq") or 0) > int(after_seq)
+            ]
+        return {
+            "events": events[-max(1, int(limit)):],
+            "gap": gap,
+            "latest_seq": int(buf[-1].get("ev_seq") or 0) if buf else 0,
+        }
 
     # ---- 生命周期 ----
 
@@ -2788,14 +2849,21 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         agent.set_system(system)
         return msgs
 
-    async def _persist_turn(self, sid: str, new_msgs: list) -> None:
-        """一轮对话的落库（独立方法便于 shield 保护：取消时后台完成落库）。"""
+    async def _persist_turn(
+        self, sid: str, new_msgs: list, summary_src: list | None = None,
+    ) -> None:
+        """一轮对话的落库（独立方法便于 shield 保护：取消时后台完成落库）。
+
+        new_msgs 只含「还没在途落库」的消息；摘要要从本轮全部新增里挑，
+        否则增量落库已经把最终回答写掉的轮次会算不出会话摘要。
+        """
         for m in new_msgs:
             await self.store.append_message(sid, m)
         await self.store.touch(sid)
         summary = next(
             (m.text.strip().replace("\n", " ")[:120]
-             for m in reversed(new_msgs) if m.role == "assistant" and m.text.strip()),
+             for m in reversed(summary_src if summary_src is not None else new_msgs)
+             if m.role == "assistant" and m.text.strip()),
             "",
         )
         if summary:
@@ -2849,7 +2917,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 流式增量合并：emit_ev 下发给前端前先过一层缓冲，把连续的同类型增量
         # （text_delta / thinking_delta / roundtable_member_delta）拼成批量帧。
         # 其余事件在 merger 里会先冲刷缓冲再原样发出，顺序与合并前一致。
-        merger = StreamDeltaMerger(emit)
+        async def emit_logged(payload: dict) -> None:
+            # 先记进回放缓冲再下发：连接断掉时 emit 静默失败，但帧仍留在
+            # 缓冲里供重连补发（seq 记的是「发生过」而不是「送达过」）。
+            await emit(self.log_session_event(sid, payload))
+
+        merger = StreamDeltaMerger(emit_logged)
 
         # 本轮工具/权限的耗时统计（给轮末结构化日志用）。
         # 从事件流里数而不是侵入 agent 循环：事件本就带 duration_ms，
@@ -2889,8 +2962,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                                  detail=str(ev.get("message") or "")[:200])
             elif kind == "error":
                 # 本轮出现引擎级错误：记下来供终态收口判定（不在这里直接定终态，
-                # 因为团队/圆桌降级等路径可能随后仍有可用产出）
+                # 因为团队/圆桌降级等路径可能随后仍有可用产出）。category 是
+                # diagnostics 的分类（auth/rate_limit/context_overflow…），
+                # 事后归因比一句英文报错有用。
                 turn_fail.setdefault("error", str(ev.get("message") or "")[:300])
+                turn_fail.setdefault("category", str(ev.get("category") or ""))
                 self.runs.update(
                     run_id, state="failed", error=str(ev.get("message") or "")[:300],
                     detail="")
@@ -2917,6 +2993,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 if t0 is not None:
                     turn_stats["permission_waits"] += 1
                     turn_stats["permission_ms"] += int((time.monotonic() - t0) * 1000)
+            # 消息边界增量落库（见 _persist_progress）：只在历史真正变化的事件上
+            # 写库，文本增量不碰 DB
+            if kind in (
+                "turn_started", "assistant_message", "tool_call_finished",
+                "turn_finished", "permission_request",
+            ):
+                await _persist_progress()
             await merger.send({**ev, "session_id": sid})
 
         # 「用户消息」广播给其余在线客户端：轮次事件只发给发起连接，其他窗口 /
@@ -3046,6 +3129,40 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 消息 id 由 Message 默认工厂生成、随序列化保留，压缩后 recent 段仍是原对象
         # （id 不变），所以「不在轮前 id 集合里」正好等于「本轮新增」。
         pre_ids = {m.id for m in agent.history}
+        # 在途轮增量落库：旧口径是轮末一次性批量写，进程崩在轮中（长工具、长
+        # 思考、用户强退）时这一轮的用户消息、已完成的助手消息与工具结果全部
+        # 丢失，重启后像是「没发过」。这里在消息边界上把本轮新增补进库：
+        # 崩在两次边界之间最多丢当前一小段，缺的 tool_result 由下一轮的
+        # repair_dangling_tool_uses 补成 interrupted 结果（协议仍自洽）。
+        # 轮末仍走 _persist_turn，只写还没落过的那些（按消息 id 去重）。
+        persisted_ids: set[str] = set()
+        # 进度写节流：消息边界事件很密（每次工具结束都来一次），每条都写会把
+        # 写锁竞争放大；1 秒一次足够抗崩溃，轮末还有一次全量兜底。
+        _progress_at = [0.0]
+        _PROGRESS_MIN_INTERVAL = 1.0
+
+        async def _persist_progress() -> None:
+            # best-effort：在途落库只是抗崩溃的保险，失败不能打断正在跑的轮次
+            # （轮末 _persist_turn 还会兜一次；真写不进去时那里也会报错）
+            now = time.monotonic()
+            if now - _progress_at[0] < _PROGRESS_MIN_INTERVAL:
+                return
+            async with self._progress_write_lock:
+                for m in list(agent.history):
+                    if m.id in pre_ids or m.id in persisted_ids:
+                        continue
+                    if is_compaction_summary(m):
+                        continue
+                    try:
+                        await self.store.append_message(sid, m)
+                    except Exception as e:  # noqa: BLE001
+                        logging.getLogger("skysheep").warning(
+                            "在途消息落库失败（下一处边界或轮末重试）：%s", e
+                        )
+                        return
+                    persisted_ids.add(m.id)
+            _progress_at[0] = time.monotonic()
+
         # 本轮墙钟起点：圆桌路径没有 agent 主循环计时，这里兜底（见 _stamp_turn_estimate）
         turn_t0 = time.monotonic()
         stopped = False
@@ -3161,15 +3278,25 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 压缩摘要不落库：它是引擎生成的上下文产物，入库会被当成一条 user 消息
         # 回传前端（渲染成假的用户气泡），也会进 FTS 与会话导出；不落库的代价
         # 只是重启后长会话重新压缩一次，比上面两类污染便宜得多。
-        new_msgs = [
+        new_msgs_all = [
             m for m in agent.history
             if m.id not in pre_ids and not is_compaction_summary(m)
         ]
-        _stamp_turn_estimate(new_msgs, turn_estimate, turn_t0)
+        _stamp_turn_estimate(new_msgs_all, turn_estimate, turn_t0)
+        # new_msgs 保持「本轮全部新增」口径，后面的摘要/标题/记忆提炼都还用；
+        # 落库只写还没在途写过的那些（已在途增量落库的消息回写一次元数据）。
+        new_msgs = new_msgs_all
+        to_persist = [m for m in new_msgs_all if m.id not in persisted_ids]
+        for m in new_msgs_all:
+            if m.id in persisted_ids and m.role == "assistant" and m.estimate is not None:
+                try:
+                    await self.store.replace_message(sid, m)
+                except Exception:  # noqa: BLE001 - 元数据回写失败不拖垮收尾
+                    pass
         # 落库建成显式任务（shield 的内层）：被停时它在后台继续跑完；登记进
         # _persist_tasks 供 delete_session 等待（等主轮任务等不到后台落库）。
         persist_task = asyncio.get_running_loop().create_task(
-            self._persist_turn(sid, new_msgs)
+            self._persist_turn(sid, to_persist, summary_src=new_msgs)
         )
         self._persist_tasks[sid] = persist_task
         persist_task.add_done_callback(
@@ -3248,8 +3375,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         elif turn_fail:
             # Agent 已把 Provider 异常吞成 ErrorEvent：外层无异常但本轮确实失败
             run_final_state = "failed"
-        elif turn_stats["tool_errors"] and not turn_stats["tool_calls"]:
-            run_final_state = "failed"
+        # 工具报错不单独判失败：模型可能靠后续调用或文字回答救回来。
+        # （旧分支 tool_errors and not tool_calls 永远不成立——两者在同一处累加）
         run_error = (
             (type(turn_exc).__name__ + ": " + str(turn_exc)[:200]) if turn_exc
             else (turn_fail.get("error") or None)
@@ -3298,7 +3425,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 permission_ms=turn_stats["permission_ms"] or None,
                 in_tokens=agent.total_in_tokens - tin0 or None,
                 out_tokens=agent.total_out_tokens - tout0 or None,
-                error=type(turn_exc).__name__ if turn_exc else None,
+                # 只记类名会丢掉「为什么失败」：附上前 200 字；Agent 内部
+                # 吞掉的失败（ErrorEvent / stop_reason=error）带错误类别
+                error=(
+                    f"{type(turn_exc).__name__}: {str(turn_exc)[:200]}"
+                    if turn_exc else (
+                        ": ".join(
+                            x for x in (
+                                turn_fail.get("category"), turn_fail.get("error")
+                            ) if x
+                        )[:300] or None
+                    )
+                ),
             )
         except Exception:  # noqa: BLE001 - 日志不偿能影响主流程
             pass

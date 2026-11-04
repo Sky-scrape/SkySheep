@@ -249,6 +249,7 @@ async function renderAdvancedCfg() {
   renderTrustList();
   q("adv-daily-budget").value = d.daily_token_budget || "";
   q("adv-turn-budget").value = d.turn_token_budget || "";
+  q("adv-permission-timeout").value = d.permission_timeout_s || "";
   q("adv-fallback-model").value = d.fallback_model || "";
   // 全局出网设置（代理 / 绕行名单 / 自签 CA）
   q("adv-network-proxy").value = d.network_proxy || "";
@@ -300,6 +301,7 @@ async function saveAdvanced() {
       compaction_auto: q("adv-compaction-auto").checked,
       daily_token_budget: Number(q("adv-daily-budget").value) || 0,
       turn_token_budget: Number(q("adv-turn-budget").value) || 0,
+      permission_timeout_s: Number(q("adv-permission-timeout").value) || 0,
       fallback_model: (q("adv-fallback-model").value || "").trim(),
       restrict_to_workdir: q("adv-restrict-workdir").checked,
       system_schedule: q("adv-system-schedule").checked,

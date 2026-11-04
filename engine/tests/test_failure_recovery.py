@@ -11,10 +11,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
+
 from fastapi.testclient import TestClient
 
 from skysheep.core.runs import INTERRUPTED, RUNNING_STATES, RunCenter
 from skysheep.messages import TextBlock
+from skysheep.models.base import ProviderDone, ProviderTextDelta
 from skysheep.models.fake import FakeProvider
 from skysheep.server import create_app
 from skysheep.tools import browser_cdp
@@ -325,3 +329,96 @@ def test_sweep_orphan_browser_profiles_skips_locked_dir(tmp_path, monkeypatch):
 def test_sweep_orphan_browser_profiles_ignores_missing_tempdir(tmp_path):
     """tempdir 不存在（被清理/路径拼错）时安静返回 0，不抛。"""
     assert browser_cdp.sweep_orphan_browser_profiles(str(tmp_path / "nope")) == 0
+
+
+class _PausingProvider(FakeProvider):
+    """吐第一段后停顿：给测试留出「轮还没结束」的观察窗口。"""
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.calls.append(list(messages))
+        yield ProviderTextDelta("第一段")
+        await asyncio.sleep(0.8)
+        yield ProviderTextDelta("第二段")
+        yield ProviderDone(input_tokens=5, output_tokens=4)
+
+
+def _db_rows(home, sid=None):
+    # home 夹具返回 tmp_path，SKYSHEEP_HOME 指向 tmp_path/home
+    conn = sqlite3.connect(str(home / "home" / "skysheep.db"))
+    try:
+        sql = "SELECT role, content FROM messages"
+        args: tuple = ()
+        if sid:
+            sql += " WHERE session_id = ?"
+            args = (sid,)
+        sql += " ORDER BY seq"
+        return conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+
+
+def test_inflight_messages_persist_before_turn_ends(home):
+    """轮末批量落库的旧口径在崩溃时整轮丢失：用户消息与已完成助手消息要
+    在轮次进行中就已经在库里（崩溃/强退后至少能看到已经发生的部分）。"""
+    client = make_client(home, [], provider=_PausingProvider([]))
+    with client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c1", "method": "chat.send",
+                      "params": {"text": "先落库再回答"}})
+        # 等到 turn_started：此时用户消息应已在库
+        while True:
+            frame = ws.receive_json()
+            if frame.get("event") == "turn_started":
+                break
+        rows = _db_rows(home)
+        assert any(role == "user" and "先落库再回答" in content for role, content in rows), rows
+
+        # 等 assistant_message：此时助手消息也应已在库（轮次尚未收尾）
+        while True:
+            frame = ws.receive_json()
+            if frame.get("event") == "assistant_message":
+                break
+        rows = _db_rows(home)
+        assistant = [c for r, c in rows if r == "assistant"]
+        assert assistant and "第二段" in assistant[-1], rows
+
+        # 收尾：模型脚本已耗尽，等 RPC 回包
+        recv_until(ws, "c1")
+
+
+def test_events_replay_returns_missed_frames(home):
+    """断线重连补帧：事件带全局 seq，可按 after_seq 补发；跨轮补不齐时
+    返回 gap=True 让前端改走历史重载。"""
+    provider = FakeProvider([[TextBlock(text="第一轮回答")], [TextBlock(text="第二轮回答")]])
+    with make_client(home, [], provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        def run_turn(mid, text):
+            ws.send_json({"id": mid, "method": "chat.send", "params": {"text": text}})
+            frames = []
+            while True:
+                frame = ws.receive_json()
+                if "event" in frame:
+                    frames.append(frame)
+                    continue
+                if frame.get("id") == mid:
+                    return frames
+
+        frames1 = run_turn("c1", "第一问")
+        seqs = [f["data"]["ev_seq"] for f in frames1 if isinstance(f["data"].get("ev_seq"), int)]
+        assert seqs and seqs == sorted(seqs), "事件帧必须带单调递增的 seq"
+        sid = next(f["data"]["session_id"] for f in frames1 if f["data"].get("session_id"))
+
+        after = seqs[len(seqs) // 2]
+        r = _rpc(ws, "rp", "events.replay",
+                 {"session_id": sid, "after_seq": after})["result"]
+        got = r["events"]
+        assert got and all(e["ev_seq"] > after for e in got)
+        assert [e["ev_seq"] for e in got] == sorted(e["ev_seq"] for e in got)
+        assert got[-1]["ev_seq"] == seqs[-1]
+        assert r["gap"] is False
+
+        # 第二轮会把缓冲重置为「当前轮」：从 0 补会缺口，必须报 gap
+        run_turn("c2", "第二问")
+        r2 = _rpc(ws, "rp2", "events.replay",
+                  {"session_id": sid, "after_seq": 0})["result"]
+        assert r2["gap"] is True
+        assert r2["events"], "gap 也要把当前轮还能给的帧带回来"

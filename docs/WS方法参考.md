@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-11-04 00:28:04
-- 方法总数：332（本机专属 local_only 178 个）
+- 生成时间：2026-11-04 16:24:04
+- 方法总数：333（本机专属 local_only 178 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -14,6 +14,7 @@
 | boot |  | — |
 | chat.send |  | — |
 | chat.status |  | — |
+| events.replay |  | 断线重连补帧：返回 after_seq 之后本会话已下发的事件。 |
 | chat.compact | 是 | — |
 | chat.aux |  | — |
 | permission.respond |  | — |

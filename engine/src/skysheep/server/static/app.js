@@ -241,6 +241,8 @@ function connect() {
     if (wsEverConnected) {
       reloadProjectPanels();
       restorePendingPermissions(); // 重连后补回未决的权限确认卡
+      // 还在跑的轮次：把断线期间漏掉的流式帧补回来（否则会缺一段正文/工具卡）
+      if (typeof resumeEventStreams === "function") resumeEventStreams();
       // 工厂开着时重拉一次：断线期间的运行事件可能丢了，计数与场景以服务端为准
       if (factoryOpen && typeof factoryReload === "function") factoryReload();
     }
@@ -262,7 +264,19 @@ function connect() {
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
-    if (msg.event) { handleEvent(msg.event, msg.data); return; }
+    if (msg.event) {
+      // 断线补帧窗口：该标签正在拉漏掉的帧，实时帧先排队（否则新旧帧
+      // 交错 append，长回答会出现「后半段接在前半段前面」）。窗口外
+      // 已消费过的重复帧（seq 不大于水位）直接丢弃。
+      const sid = msg.data && msg.data.session_id;
+      if (sid && typeof msg.data.ev_seq === "number") {
+        const t = tabFor(sid) || splitPanes.find((p) => p.sid === sid);
+        if (t && t.replaying) { t.replayBuf.push(msg); return; }
+        if (t && t.lastSeq && msg.data.ev_seq <= t.lastSeq) return;
+      }
+      handleEvent(msg.event, msg.data);
+      return;
+    }
     const p = pendingReplies.get(msg.id);
     if (p) {
       pendingReplies.delete(msg.id);
@@ -5411,6 +5425,47 @@ function finishEta(t, engineMs) {
   updateEtaChip(t);
 }
 
+/** 断线重连后补帧：服务端只保留每个会话「当前轮」的已下发事件。
+ *  补得齐就按 seq 续画；补不齐（gap，超出缓冲/跨了轮）就让历史重载兜底
+ *  ——在途轮已边跑边落库，重载能看到已经发生的部分。 */
+async function resumeEventStreams() {
+  const tabs = [...chatTabs, ...splitPanes].filter(
+    (t) => t && t.sid && t.running && t.lastSeq
+  );
+  for (const t of tabs) {
+    t.replayBuf = [];
+    t.replaying = true;
+    try {
+      const r = await request("events.replay", {
+        session_id: t.sid, after_seq: t.lastSeq,
+      });
+      if (r && r.gap) {
+        addNotice("断线期间的消息超出补发范围，正在重新加载会话内容");
+        const info = await request("session.resume", { id: t.sid });
+        renderHistory(t, info.messages || [], info.messages_offset);
+        t.lastSeq = r.latest_seq || t.lastSeq;
+      } else {
+        for (const ev of (r && r.events) || []) {
+          if (typeof ev.ev_seq === "number" && ev.ev_seq <= t.lastSeq) continue;
+          handleEvent(ev.kind, ev);
+        }
+      }
+    } catch (e) {
+      // 会话已删 / 服务端不认识该会话：静默降级（重载历史时自然收敛）
+    } finally {
+      t.replaying = false;
+      const queued = t.replayBuf || [];
+      t.replayBuf = [];
+      // 补帧期间到达的实时帧按 seq 排序后再喂，保证顺序与去重
+      queued.sort((a, b) => (a.data.ev_seq || 0) - (b.data.ev_seq || 0));
+      for (const m of queued) {
+        if (typeof m.data.ev_seq === "number" && m.data.ev_seq <= t.lastSeq) continue;
+        handleEvent(m.event, m.data);
+      }
+    }
+  }
+}
+
 function handleEvent(kind, data) {
   // 接力（主副屏交替）状态：无会话路由，交给右侧看板按 pair_id 更新。
   if (kind === "relay_pair_state") {
@@ -5453,6 +5508,10 @@ function handleEvent(kind, data) {
     }
   } else {
     routeTab = activeTab;
+  }
+  // 断线补帧的水位：每个标签记已消费到的最大 seq（补帧按它续传并去重）
+  if (routeTab && data && typeof data.ev_seq === "number") {
+    if (!routeTab.lastSeq || data.ev_seq > routeTab.lastSeq) routeTab.lastSeq = data.ev_seq;
   }
   switch (kind) {
     case "thinking_delta": appendThinking(data.text); break;
@@ -18484,6 +18543,7 @@ document.getElementById("btn-advanced-reset").onclick = async () => {
   q("adv-compaction-trigger").value = 90;
   q("adv-daily-budget").value = "";
   q("adv-turn-budget").value = "";
+  q("adv-permission-timeout").value = "";
   q("adv-fallback-model").value = "";
   await saveAdvanced();
 };

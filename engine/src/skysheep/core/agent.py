@@ -54,6 +54,7 @@ from ..security.gate import (
 from ..tools.base import Safety, Tool, ToolContext, ToolError, ToolRegistry, truncate_output
 from .context import compact_history, estimate_tokens
 from .effort import resolve_auto_effort
+from .loop_guard import LoopGuard
 
 # 瞬态错误判定在 core/provider_errors.py（context.py 压缩重试也要用，且不能
 # 反向导入 agent）——这里 re-export 维持 `from .agent import is_transient_error`
@@ -104,6 +105,7 @@ class Agent:
         job_containment: bool = True,
         sandbox_level: str = "job",
         use_ripgrep: bool = True,
+        permission_timeout_s: float = 0.0,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -140,8 +142,14 @@ class Agent:
         self.use_ripgrep = use_ripgrep
         # 会话 id：透传给钩子命令的 stdin JSON（多会话场景钩子可区分来源）
         self.session_id = session_id
+        # 确认卡等待上限（秒）：0 = 一直等（旧行为）。超过上限按拒绝继续本轮，
+        # 避免用户离开后会话永久卡在「等待确认」。渠道/无头门有自己的超时。
+        self.permission_timeout_s = max(0.0, float(permission_timeout_s or 0.0))
         self.history: list[Message] = []
         self._pending: dict[str, PendingPermission] = {}
+        # 一轮内的重复调用检测与工具熔断（每次 run_turn 开头 reset）：
+        # 拦「同参数 + 同结果」的原样重试，以及同一工具反复撞同一句错误。
+        self.loop_guard = LoopGuard()
         self.total_in_tokens = 0
         self.total_out_tokens = 0
         # 累计命中提示词缓存的 token（分母用 total_in_tokens：provider 已把
@@ -352,6 +360,9 @@ class Agent:
             sandbox_level=self.sandbox_level,
             use_ripgrep=self.use_ripgrep,
         )
+        # 防打转状态按轮重置：上一轮的重试/熔断不该影响新任务（用户新消息
+        # 可能正是要求换个思路做同一件事）
+        self.loop_guard.reset()
         iterations = 0
         stop_reason = "max_iterations"  # 正常结束时在 break 前改为 end_turn
 
@@ -652,6 +663,22 @@ class Agent:
                     i += 1
                     continue
 
+                # 3a-guard. 重复调用 / 工具熔断：在权限门之前判定——已经确定
+                # 没有新信息的调用不该再弹确认卡浪费用户一次点击。
+                guard_block = self.loop_guard.before(tu.name, tu.input)
+                if guard_block:
+                    self.history.append(
+                        Message.tool_result(tu.id, guard_block, is_error=True)
+                    )
+                    yield ToolCallStarted(tool_call_id=tu.id, name=tu.name, input=tu.input)
+                    yield ToolCallFinished(
+                        tool_call_id=tu.id, name=tu.name,
+                        preview="blocked by loop guard",
+                        is_error=True, duration_ms=0,
+                    )
+                    i += 1
+                    continue
+
                 # 3a-claude. Claude Code 兼容模式：tool.check 决定 allow / ask /
                 # deny + 可改写 input（"input" 字段出现即重写 tu.input，后续步骤
                 # 全部使用改写后的参数；assistant 历史消息保持模型原始输出不变）。
@@ -777,14 +804,37 @@ class Agent:
                         revert_note=pending.revert_note,
                         mod_note=(perm_mod_verdict or {}).get("note", ""),
                     )
+                    permission_timed_out = False
                     try:
-                        decision = await pending.wait()
+                        if self.permission_timeout_s > 0:
+                            try:
+                                decision = await asyncio.wait_for(
+                                    pending.wait(), self.permission_timeout_s
+                                )
+                            except TimeoutError:
+                                # 用户离开/没看到卡：按拒绝继续本轮，而不是让
+                                # 会话永久挂起。deny_note 让模型知道是超时、
+                                # 该请用户回来，而不是「用户明确不同意」。
+                                permission_timed_out = True
+                                decision = Decision.DENY
+                                pending.deny_note = (
+                                    f"等待用户确认超时（{self.permission_timeout_s:.0f} 秒），"
+                                    "已按拒绝处理。若确实需要执行，请先向用户说明要做什么，"
+                                    "等用户在场后再重试。"
+                                )
+                        else:
+                            decision = await pending.wait()
                     finally:
                         # 取消/异常也要摘掉：残留的 request_id 之后还能被
                         # respond_permission 投递成功，等于给一个已经结束的轮次
                         # 补决策（安全审查 M12：取消后残留可再「成功投递」）
                         self._pending.pop(pending.request_id, None)
                     yield PermissionResolved(request_id=pending.request_id, decision=decision)
+                    if permission_timed_out:
+                        yield NoticeEvent(message=(
+                            f"确认等待超时（{self.permission_timeout_s:.0f} 秒），"
+                            "已自动拒绝这次操作并继续。"
+                        ))
 
                     if decision == Decision.ALLOW_ALWAYS and always_rule is not None:
                         # always_rule 为 None（force_pending 路径 / 无规则可提炼）
@@ -792,13 +842,13 @@ class Agent:
                         # 静默降级为「本次允许」，不落规则——否则一次点选即绕过 Mod
                         await self.gate.persist_rule(always_rule)
                     if decision == Decision.DENY:
+                        deny_text = pending.deny_note or "User denied this operation."
                         self.history.append(
-                            Message.tool_result(
-                                tu.id,
-                                pending.deny_note or "User denied this operation.",
-                                is_error=True,
-                            )
+                            Message.tool_result(tu.id, deny_text, is_error=True)
                         )
+                        # 用户连续拒绝同一工具的调用也计入熔断：模型应当换
+                        # 方案或停下来问，而不是一遍遍弹同一张卡
+                        self.loop_guard.after(tu.name, tu.input, deny_text, True)
                         yield ToolCallStarted(tool_call_id=tu.id, name=tu.name, input=tu.input)
                         yield ToolCallFinished(
                             tool_call_id=tu.id, name=tu.name, preview="denied by user",
@@ -879,6 +929,9 @@ class Agent:
                         # 确认回调，串行路径不会重复弹窗。
                         if self.gate.needs_confirm(t2, tu2.input):
                             break
+                        # 重复调用判定：命中即断批，回退串行路径由 3a-guard 拦下
+                        if self.loop_guard.before(t2.name, tu2.input):
+                            break
                         # pre 钩子存在时不并发（每个调用都可能被阻断，语义复杂化）
                         if self.hooks is not None and self.hooks.has_pre:
                             break
@@ -905,6 +958,11 @@ class Agent:
                         ):
                             self._turn_tools_used += 1
                             self._turn_tools_total_ms += duration_ms
+                            loop_note = self.loop_guard.after(
+                                b_tu.name, b_tu.input, result, is_error
+                            )
+                            if loop_note:
+                                result = result + "\n\n" + loop_note
                             self.history.append(
                                 Message.tool_result(
                                     b_tu.id, truncate_output(result), is_error=is_error
@@ -955,6 +1013,9 @@ class Agent:
                 result, is_error, duration_ms, diff, images = await self._exec_tool(tu, tool, ctx)
                 self._turn_tools_used += 1
                 self._turn_tools_total_ms += duration_ms
+                loop_note = self.loop_guard.after(tu.name, tu.input, result, is_error)
+                if loop_note:
+                    result = result + "\n\n" + loop_note
 
                 # 3d. post 钩子：仅通知，不影响工具结果
                 if self.hooks is not None and self.hooks.post_rules:

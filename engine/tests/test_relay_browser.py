@@ -45,7 +45,7 @@ async def test_relay_opens_peer_pane_and_runs_alternating(home):
                 "轮到副屏", timeout=15000
             )
             assert await page.locator("#relay-turn-list .relay-turn").count() == 1
-            await expect(page.locator("#relay-turn-list")).to_contain_text("第 1 轮 · 主屏")
+            await expect(page.locator("#relay-turn-list")).to_contain_text("第 1 轮  主屏")
 
             # 交棒：第二次执行轮到副屏，面板按钮跟着改口
             await expect(page.locator("#relay-run-start")).to_have_text("让副屏执行")
@@ -54,7 +54,7 @@ async def test_relay_opens_peer_pane_and_runs_alternating(home):
                 "轮到主屏", timeout=15000
             )
             assert await page.locator("#relay-turn-list .relay-turn").count() == 2
-            await expect(page.locator("#relay-turn-list")).to_contain_text("第 2 轮 · 副屏")
+            await expect(page.locator("#relay-turn-list")).to_contain_text("第 2 轮  副屏")
 
             # 两屏正文都留在各自会话里（副屏分栏里能看到它的产出）
             await expect(page.locator("#split-pane .split-log")).to_contain_text("回复")

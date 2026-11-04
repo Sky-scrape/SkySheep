@@ -37,6 +37,7 @@ from ..config import (
 )
 from ..core import Agent, build_system_prompt
 from ..core.hooks import HookRunner, hooks_from_config, load_raw_config
+from ..core.review import review_output
 from ..core.subagent import CheckTaskTool, SpawnAgentTool, TaskManager
 from ..events import ErrorEvent, PermissionResolved, TextDelta, TurnFinished
 from ..mcp import MCPManager, load_mcp_configs
@@ -1196,6 +1197,22 @@ async def _cron_run_async(
         proj = await store.get_project(int(task.get("project_id") or 0))
         if proj is None or not Path(proj.root_path).is_dir():
             raise SystemExit("任务所属的项目目录已不存在，无法执行")
+        # 产线级模型：与桌面端同一口径（空 = 跟随全局）。CLI 的定时预览
+        # 也要认这两列，否则同一条任务在 CLI 与桌面跑的是两个模型。
+        line_provider = str(task.get("provider_name") or "").strip()
+        context_limit = cfg.context_limit_tokens
+        if line_provider:
+            pc = cfg.providers.get(line_provider)
+            if pc is None:
+                raise SystemExit(f"产线指定的模型服务「{line_provider}」不存在或已停用")
+            line_model = str(task.get("model") or "").strip()
+            if line_model:
+                pc = pc.model_copy(update={"model": line_model})
+            try:
+                provider_obj = build_provider(line_provider, pc, cfg.network)
+            except ConfigError as e:
+                raise SystemExit(str(e) + "\nhint: skysheep config init 后填入 API Key") from e
+            context_limit = pc.effective_context_limit(cfg.context_limit_tokens)
         working_dir = Path(proj.root_path)
         if project_dir:
             # 系统计划任务的 /TR 里写死了注册时的项目目录：计划任务进程的
@@ -1235,7 +1252,7 @@ async def _cron_run_async(
                     gate=gate,
                     working_dir=working_dir,
                     max_iterations=cfg.max_iterations,
-                    context_limit_tokens=cfg.context_limit_tokens,
+                    context_limit_tokens=context_limit,
                     compaction_keep_recent=cfg.compaction_keep_recent,
                     compaction_trigger=cfg.compaction_trigger,
                     compaction_auto=cfg.compaction_auto,
@@ -1269,16 +1286,51 @@ async def _cron_run_async(
                 await store.touch(sid)
                 try:
                     await store.add_usage(
-                        sid, name, getattr(provider_obj, "model", ""),
+                        sid, getattr(provider_obj, "name", "") or name,
+                        getattr(provider_obj, "model", ""),
                         agent.total_in_tokens, agent.total_out_tokens,
                         agent.total_cached_tokens,
                     )
                 except Exception:  # noqa: BLE001 - 用量记录失败不影响执行
                     pass
+                # 验收工位（可选，默认关）：只读、单轮，结论交给 run_cron_task_core
+                # 与自动判定合并（只能降级，不能升级）
+                review = None
+                if (t.get("review") and error is None
+                        and stop_reason in ("end_turn", "max_iterations")):
+                    last_text = ""
+                    for m in reversed(agent.history[n_before:]):
+                        text = str(getattr(m, "text", "") or "").strip()
+                        if getattr(m, "role", "") == "assistant" and text:
+                            last_text = text
+                            break
+                    if last_text:
+                        review = await review_output(
+                            provider_obj,
+                            task_name=str(t.get("name") or ""),
+                            task_prompt=str(t.get("prompt") or ""),
+                            result=last_text,
+                            denied=denied,
+                        )
+                        if review.get("in_tokens") or review.get("out_tokens"):
+                            try:
+                                await store.add_usage(
+                                    sid,
+                                    getattr(provider_obj, "name", "") or name,
+                                    getattr(provider_obj, "model", ""),
+                                    int(review.get("in_tokens") or 0),
+                                    int(review.get("out_tokens") or 0),
+                                    int(review.get("cached_tokens") or 0),
+                                )
+                            except Exception:  # noqa: BLE001 - 用量是附加信息
+                                pass
                 if error is not None or stop_reason not in ("end_turn", "max_iterations"):
                     # 异常结束按失败收尾：run_cron_task_core 回写错误状态、渠道必推
                     raise RuntimeError(error or f"轮次异常结束（{stop_reason}）")
-                return runtime, sid, False, {"denied": denied}
+                facts = {"denied": denied}
+                if review is not None:
+                    facts["review"] = review
+                return runtime, sid, False, facts
 
             one_round = agent_turn
         channels = _build_sendonly_channels(cfg)

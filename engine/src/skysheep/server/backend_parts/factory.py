@@ -316,6 +316,21 @@ class FactoryMixin:
         wd = int(task.get("weekday") or 0)
         return f"每周{days[wd] if 0 <= wd < 7 else '?'} {task.get('time_of_day') or '--:--'}"
 
+    def _factory_line_model(self, task: dict) -> tuple[str, str, str]:
+        """产线级模型的呈现字段：(服务名, 模型名, 服务显示名)。
+
+        空串 = 跟随全局（机台铭牌不写模型）。只读 cfg，不触发任何构建——
+        模型服务被删 / Key 被清掉时仍照实显示配置过的名字，运行失败由执行侧报。
+        """
+        name = str(task.get("provider_name") or "")
+        model = str(task.get("model") or "")
+        label = name
+        if name:
+            pc = getattr(self.cfg, "providers", {}).get(name)
+            if pc is not None:
+                label = str(getattr(pc, "label", "") or name)
+        return name, model, label
+
     def _factory_team_meta(self, task: dict) -> dict | None:
         """团队产线（mode=team）的只读呈现字段：成员规模与总管形态。
 
@@ -521,6 +536,7 @@ class FactoryMixin:
                 _attention("error", pid, key, "上次运行失败")
             elif last_status == "empty" and float(task.get("last_run_at") or 0) > acks.get(key, 0):
                 _attention("empty", pid, key, "上次运行无产出")
+            model_provider, model_name, model_label = self._factory_line_model(task)
             lines_by_project[pid].append({
                 "key": key,
                 "kind": "cron",
@@ -543,6 +559,12 @@ class FactoryMixin:
                 "is_team": bool(task.get("is_team")),
                 "team_template": str(task.get("team_template") or ""),
                 "team_meta": self._factory_team_meta(task),
+                # 产线级模型（空 = 跟随全局）：机台铭牌 / 抽屉 / 运行快照都读它
+                "provider_name": model_provider,
+                "provider_label": model_label,
+                "model": model_name,
+                # 验收工位开关（只读呈现；开关在自动化页的任务弹窗里）
+                "review": bool(task.get("review")),
             })
 
         # ---- 编排：一条多工位装配线 ----

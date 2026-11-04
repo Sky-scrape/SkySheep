@@ -18,6 +18,7 @@ from ...bgtasks import spawn_bg
 from ...channels.cards import task_finish_card
 from ...channels.manager import _fmt_dur
 from ...core import system_schedule
+from ...core.review import review_output
 from ...core.run_ledger import (
     RunLedger,
     classify_run_error,
@@ -503,6 +504,21 @@ async def run_cron_task_core(
         if run is not None:
             run_status = {"ok": "done", "empty": "empty"}.get(status, "error")
             outcome = outcome_for(run_status, denied_count=denied)
+            source = "auto" if outcome else ""
+            review_note = ""
+            review = facts.get("review") if isinstance(facts, dict) else None
+            if isinstance(review, dict):
+                verdict = str(review.get("outcome") or "")
+                review_note = str(review.get("note") or "")[:200]
+                if outcome and verdict in ("ok", "partial", "failed"):
+                    if outcome == "partial" and verdict == "ok":
+                        # 被门控拦过的轮次不许被验收评成做成：拦了就是没做成
+                        review_note = (
+                            ((review_note + "；") if review_note else "")
+                            + "本轮有工具被拦，不升级"
+                        )[:200]
+                    else:
+                        outcome, source = verdict, "reviewer"
             try:
                 await ledger.finish(
                     run["id"],
@@ -512,7 +528,8 @@ async def run_cron_task_core(
                     denied_count=denied,
                     denied_tools=denied_tools_json(facts),
                     outcome=outcome,
-                    outcome_source="auto" if outcome else "",
+                    outcome_source=source,
+                    review_note=review_note,
                 )
             except Exception:  # noqa: BLE001 - 记账失败不影响任务收尾
                 pass
@@ -873,6 +890,29 @@ class AutomationMixin:
         tasks = await self.store.list_cron_tasks(self.project.id)
         return {"tasks": tasks}
 
+    def _cron_model_fields(self, params: dict, *, is_team: bool) -> tuple[str, str]:
+        """产线级模型的入口校验（空 = 跟随全局）。
+
+        只校验「服务存在 / 模型名有界」：模型名不按服务列表白名单硬卡——
+        OpenAI 兼容端点可以接任意上游模型名，列表只是候选，不是闭集。
+        团队任务的模型由模板决定（总管与队员各有 provider），不接受这两列。
+        """
+        name = str(params.get("provider_name") or "").strip()
+        model = str(params.get("model") or "").strip()
+        if is_team:
+            if name or model:
+                raise RuntimeError("团队任务的模型由团队模板决定，不能单独指定")
+            return "", ""
+        if not name:
+            if model:
+                raise RuntimeError("指定模型前要先选模型服务")
+            return "", ""
+        if name not in self.cfg.providers:
+            raise RuntimeError(f"模型服务不存在或已停用：{name}")
+        if len(model) > 120:
+            raise RuntimeError("模型名太长（上限 120 字符）")
+        return name, model
+
     async def cron_add(self, params: dict) -> dict:
         self._require_project("新建定时任务")  # 定时任务绑定项目的工作目录与白名单
         name = str(params.get("name", "")).strip()[:40] or "未命名任务"
@@ -891,6 +931,10 @@ class AutomationMixin:
         if mode == "team":
             team_template = str(params.get("team_template") or "").strip()
             self._validate_cron_team_template(team_template, require_name=True)
+        provider_name, model = self._cron_model_fields(params, is_team=(mode == "team"))
+        review = bool(params.get("review"))
+        if mode == "team" and review:
+            raise RuntimeError("团队任务的验收由总管交付说明承担，不支持单独验收")
         interval = max(1, int(params.get("interval_minutes") or 1))
         # 入口侧校验（安全审查残留发现）：interval 超出 schtasks 可表达范围、
         # time_of_day 不是 HH:MM 的垃圾值以前原样入库——系统级注册静默失败、
@@ -915,6 +959,7 @@ class AutomationMixin:
             self.project.id, name, prompt, stype, interval, tod, wd, tools,
             notify_channel=bool(params.get("notify_channel")),
             mode=mode, team_template=team_template,
+            provider_name=provider_name, model=model, review=review,
         )
         task = await self.store.update_cron_task(
             task["id"], next_run_at=self.store.compute_next_run(task)
@@ -945,6 +990,14 @@ class AutomationMixin:
             elif tmpl:
                 # 普通任务没有团队模板语义；空串按无操作放行（表单全量回传的容错）
                 raise RuntimeError("普通任务没有团队模板；要改成团队任务请删除后重建")
+        if params.get("provider_name") is not None or params.get("model") is not None:
+            kw["provider_name"], kw["model"] = self._cron_model_fields(
+                params, is_team=is_team)
+        if params.get("review") is not None:
+            review = bool(params["review"])
+            if is_team and review:
+                raise RuntimeError("团队任务的验收由总管交付说明承担，不支持单独验收")
+            kw["review"] = 1 if review else 0
         if params.get("name") is not None:
             kw["name"] = str(params["name"]).strip()[:40] or task["name"]
         if params.get("prompt") is not None:
@@ -1149,6 +1202,23 @@ class AutomationMixin:
             minutes = 60
         return float(minutes) * 60.0 if minutes > 0 else None
 
+    def _cron_line_provider(self, task: dict):
+        """这条产线实际要用的 provider：空 = 跟随全局；指定了就用独立实例。
+
+        detached 构建：不改写全局「当前使用服务」（底部徽章 / model.list 的 current）。
+        服务被删 / Key 被清掉时按本轮失败收尾，错误文案直接指到配置。
+        """
+        name = str(task.get("provider_name") or "").strip()
+        if not name:
+            return self.provider
+        model = str(task.get("model") or "").strip() or None
+        try:
+            return self._build_detached_provider(name, model)
+        except KeyError:
+            raise RuntimeError(f"产线指定的模型服务「{name}」不存在或已停用") from None
+        except Exception as e:  # noqa: BLE001 - ConfigError 等统一归成可读错误
+            raise RuntimeError(f"产线指定的模型不可用：{e}") from e
+
     async def _execute_cron_turn(self, task: dict, *, force: bool = False):
         """后端侧的一轮定时任务执行（run_cron_task_core 的注入点）。
 
@@ -1161,7 +1231,8 @@ class AutomationMixin:
         # 只有执行方式换成 TeamOrchestrator 闭环
         if str(task.get("mode") or "agent") == "team":
             return await self._execute_cron_team_turn(task, force=force)
-        if self.provider is None:
+        provider = self._cron_line_provider(task)
+        if provider is None:
             raise RuntimeError("尚未配置可用的模型 API Key")
         # 厂区可用性 fail closed（与扫描循环 / 工厂派工同一口径）：_cron_execution_context
         # 在目录缺失时会回退到当前项目，那等于把 A 项目的 prompt 跑进 B 项目目录。
@@ -1185,7 +1256,7 @@ class AutomationMixin:
         runtime = SessionRuntime(
             sid=sid,
             agent=self._build_agent(
-                provider=self.provider,
+                provider=provider,
                 gate=gate,
                 working_dir=cron_workdir,
                 session_id=sid,
@@ -1209,7 +1280,44 @@ class AutomationMixin:
             task["prompt"], cron_emit, plan_mode=False,
             images=None, runtime=runtime, session_id=sid,
         )
-        return runtime, sid, bool(result.get("stopped")), facts
+        stopped = bool(result.get("stopped"))
+        # 验收工位（可选，默认关）：只读、单轮，结论只写 facts，由
+        # run_cron_task_core 与自动判定合并（只能降级，不能升级）。
+        # 评审沿用这条产线自己的服务：不把任务内容额外发给另一家。
+        if task.get("review") and not stopped:
+            last_text = ""
+            for m in reversed(runtime.agent.history):
+                text = str(getattr(m, "text", "") or "").strip()
+                if getattr(m, "role", "") == "assistant" and text:
+                    last_text = text
+                    break
+            if last_text:
+                reviewer = provider
+                try:
+                    review = await review_output(
+                        reviewer,
+                        task_name=str(task.get("name") or ""),
+                        task_prompt=str(task.get("prompt") or ""),
+                        result=last_text,
+                        denied=int(facts.get("denied") or 0),
+                    )
+                    facts["review"] = review
+                    if review.get("in_tokens") or review.get("out_tokens"):
+                        try:
+                            await self.store.add_usage(
+                                sid,
+                                getattr(reviewer, "name", "") or self.provider_name,
+                                getattr(reviewer, "model", "") or self.provider_model,
+                                int(review.get("in_tokens") or 0),
+                                int(review.get("out_tokens") or 0),
+                                int(review.get("cached_tokens") or 0),
+                            )
+                        except Exception:  # noqa: BLE001 - 用量是附加信息
+                            pass
+                except Exception as e:  # noqa: BLE001 - 验收失败不能反噬运行收尾
+                    facts["review"] = {
+                        "outcome": "", "note": ("验收未执行：" + str(e))[:160]}
+        return runtime, sid, stopped, facts
 
     # ---- 定时团队（团队模式设计 §14.2）：mode=team 的执行路径 ----
     # 到点以「团队模板」建队、AI 总管自动闭环跑一轮、交付《交付说明》后按

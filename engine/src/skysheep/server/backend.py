@@ -1138,7 +1138,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             gate=gate,
             working_dir=working_dir,
             max_iterations=self.cfg.max_iterations,
-            context_limit_tokens=self._context_limit(),
+            context_limit_tokens=self._context_limit_for(provider),
             compaction_keep_recent=self.cfg.compaction_keep_recent,
             compaction_trigger=self.cfg.compaction_trigger,
             compaction_auto=self.cfg.compaction_auto,
@@ -1489,6 +1489,19 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         pc = self._current_provider_cfg()
         if pc is None:
             return self.cfg.context_limit_tokens
+        return pc.effective_context_limit(self.cfg.context_limit_tokens)
+
+    def _context_limit_for(self, provider) -> int:
+        """按「这一轮实际使用的 provider」取上下文上限。
+
+        会话级模型覆盖、产线级模型（定时任务）都是独立实例：拿全局上限会
+        让跑在 32k 服务上的长任务以为自己有 200k，压缩触发得太晚。
+        provider.name 就是配置键；认不出来（fake / 测试桩）回落全局口径。
+        """
+        name = str(getattr(provider, "name", "") or "")
+        pc = self.cfg.providers.get(name) if name else None
+        if pc is None:
+            return self._context_limit()
         return pc.effective_context_limit(self.cfg.context_limit_tokens)
 
     def _supports_vision(self) -> bool:
@@ -3248,9 +3261,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         )
 
         # 用量记录：本轮实际消耗的输入/输出 tokens（含缓存命中数，费用按缓存价拆算）
+        # 服务 / 模型取这一轮 Agent 实际持有的 provider：会话级模型覆盖、产线级
+        # 模型（定时任务）都是独立 provider 实例，不能记成全局「当前服务」。
         try:
+            prov = getattr(agent, "provider", None)
             await self.store.add_usage(
-                sid, self.provider_name, self.provider_model,
+                sid,
+                getattr(prov, "name", "") or self.provider_name,
+                getattr(prov, "model", "") or self.provider_model,
                 agent.total_in_tokens - tin0, agent.total_out_tokens - tout0,
                 agent.total_cached_tokens - tcached0,
             )

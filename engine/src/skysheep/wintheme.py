@@ -141,10 +141,13 @@ def apply_window_icon(native, dark: bool = False) -> bool:
             return False
         user32 = ctypes.windll.user32
         hwnd = int(native.Handle.ToInt64())
-        small_size = user32.GetSystemMetrics(49) or 16  # SM_CXSMICON，随 DPI
+        # 两个尺寸都必须问系统要（SM_CXSMICON=标题栏、SM_CXICON=任务栏/Alt-Tab，都随 DPI 放大）：
+        # 写死 48 时 200% DPI 下系统要 64，于是又把 48 放大一遍——糊上加糊（2026-11-04 实测）。
+        small_size = user32.GetSystemMetrics(49) or 16  # SM_CXSMICON
+        big_size = user32.GetSystemMetrics(11) or 32  # SM_CXICON
 
         small = user32.LoadImageW(None, str(line_path), IMAGE_ICON, small_size, small_size, LR_LOADFROMFILE)
-        big = user32.LoadImageW(None, str(color_path), IMAGE_ICON, 48, 48, LR_LOADFROMFILE)
+        big = user32.LoadImageW(None, str(color_path), IMAGE_ICON, big_size, big_size, LR_LOADFROMFILE)
         if not small or not big:
             return False
         user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, small)

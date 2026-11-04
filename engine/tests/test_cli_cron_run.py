@@ -268,3 +268,64 @@ def test_cron_run_cli_waits_for_inflight_push_before_exit(home, cron_task, monke
     assert ei.value.code == 0
     assert ch.sent, "main() 返回前在途推送必须已落地（退出前有界等待）"
     assert "每日汇总" in ch.sent[0][1]
+
+
+def test_cron_run_cli_uses_line_model(home, cron_task, monkeypatch):
+    """产线级模型在 CLI 的 cron run 同样生效：不能桌面跑 glm-4.6、CLI 跑全局。"""
+    import skysheep.cli.app as cli_app
+
+    async def set_model():
+        store = await SessionStore(db_path()).connect()
+        try:
+            await store.update_cron_task(
+                cron_task["id"], provider_name="zhipu", model="glm-4.6")
+        finally:
+            await store.close()
+
+    asyncio.run(set_model())
+    calls: list[tuple[str, str]] = []
+
+    def _fake_build(name, pc, *a, **k):
+        calls.append((str(name), str(getattr(pc, "model", ""))))
+        return FakeProvider([[TextBlock(text="今日汇总：完成")]])
+
+    monkeypatch.setattr(cli_app, "build_provider", _fake_build)
+    with pytest.raises(SystemExit) as ei:
+        cli_app.main(["cron", "run", str(cron_task["id"])])
+    assert ei.value.code == 0
+    assert ("zhipu", "glm-4.6") in calls, "产线指定的服务 / 模型必须传给 build_provider"
+
+
+def test_cron_run_cli_applies_review(home, cron_task, monkeypatch):
+    """CLI 的 cron run 也执行验收：同一条任务不能桌面验收、CLI 只看自动判定。"""
+    import skysheep.cli.app as cli_app
+
+    async def enable_review():
+        store = await SessionStore(db_path()).connect()
+        try:
+            await store.update_cron_task(cron_task["id"], review=1)
+        finally:
+            await store.close()
+
+    asyncio.run(enable_review())
+    # 第一组给主轮，第二组给验收（同一实例按序弹出）
+    provider = FakeProvider([
+        [TextBlock(text="今日汇总：完成")],
+        [TextBlock(text='{"verdict":"failed","reason":"只有过程，没有结论"}')],
+    ])
+    monkeypatch.setattr(cli_app, "build_provider", lambda *a, **k: provider)
+    with pytest.raises(SystemExit) as ei:
+        cli_app.main(["cron", "run", str(cron_task["id"])])
+    assert ei.value.code == 0
+
+    async def read_row():
+        store = await SessionStore(db_path()).connect()
+        try:
+            return (await store.list_automation_runs())[0]
+        finally:
+            await store.close()
+
+    row = asyncio.run(read_row())
+    assert row["status"] == "done"
+    assert row["outcome"] == "failed" and row["outcome_source"] == "reviewer"
+    assert "没有结论" in row["review_note"]

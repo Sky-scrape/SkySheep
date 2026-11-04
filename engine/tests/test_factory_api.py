@@ -8,6 +8,7 @@ test_local_only_methods.py，这里只抽查拒绝文案）。
 
 from __future__ import annotations
 
+import json
 import time
 
 from test_server import make_client, recv_until
@@ -41,6 +42,10 @@ def _line_fields() -> set[str]:
         "health",
         # 团队产线（mode=team）的只读呈现字段：cron 行两键透传 + 模板册现查
         "is_team", "team_template", "team_meta",
+        # 产线级模型（空 = 跟随全局）：机台铭牌 / 悬停 / 抽屉读它
+        "provider_name", "provider_label", "model",
+        # 验收工位开关（只读呈现；开关在自动化页的任务弹窗里）
+        "review",
     }
 
 
@@ -105,6 +110,7 @@ def test_factory_state_returns_exact_contract_shape(home):
         assert line["is_team"] is False
         assert line["team_template"] == ""
         assert line["team_meta"] is None
+        assert line["review"] is False
         assert state["runs"] == []
         assert state["counters"]["running"] == 0
         assert state["counters"]["attention"] == 0
@@ -170,7 +176,7 @@ def test_factory_run_now_records_run_and_updates_state(home):
         assert _call(ws, "boot")["ok"]
         tid = _call(ws, "cron.add", {
             "name": "日报", "prompt": "汇总", "schedule_type": "interval",
-            "interval_minutes": 30,
+            "interval_minutes": 30, "provider_name": "zhipu", "model": "glm-4.6",
         })["result"]["id"]
 
         res = _call(ws, "factory.run_now", {"task_id": tid})
@@ -187,8 +193,19 @@ def test_factory_run_now_records_run_and_updates_state(home):
             "finished_at", "duration_s", "result_excerpt", "error",
             "in_tokens", "out_tokens", "cached_tokens",
             "denied_count", "denied_tools", "error_kind", "outcome", "outcome_source",
+            "config_snapshot", "review_note",
         }
         assert run["kind"] == "cron" and run["task_id"] == tid
+        # 开跑时那版配置随运行行回来（抽屉的「本轮配置」直接读它）
+        snap = json.loads(run["config_snapshot"])
+        assert snap["prompt"] == "汇总" and snap["mode"] == "agent"
+        assert snap["provider"] == "zhipu" and snap["model"] == "glm-4.6"
+        # 工厂产线带上模型呈现字段：机台铭牌 / 悬停 / 抽屉都读它
+        st = _call(ws, "factory.state")["result"]
+        line = next(ln for ln in st["projects"][0]["lines"] if ln["id"] == tid)
+        assert line["provider_name"] == "zhipu"
+        assert line["provider_label"] == "智谱"
+        assert line["model"] == "glm-4.6"
         assert run["trigger"] == "manual" and run["status"] == "done"
         assert run["outcome"] == "ok" and run["outcome_source"] == "auto", \
             "跑完且没有被门控拦过 → 自动判定「做成」"

@@ -106,6 +106,78 @@ def denied_tools_json(facts: dict | None) -> str:
     return json.dumps(dict(items[:8]), ensure_ascii=False)
 
 
+#: 配置快照里提示词的截断长度：够看清「当时用的是哪一版」，又不把表撑成日志。
+SNAPSHOT_PROMPT_CHARS = 120
+#: 预授权工具最多记几个、单个名字截到多长（MCP 工具名可能很长）。
+SNAPSHOT_TOOLS_MAX = 12
+SNAPSHOT_TOOL_CHARS = 60
+
+
+def _snapshot_tools(raw) -> list[str]:
+    """把 allowed_tools（list / 逗号串 / JSON 串）归一成有界的名字清单。"""
+    items: list = []
+    if isinstance(raw, (list, tuple)):
+        items = list(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                parsed = None
+            items = parsed if isinstance(parsed, list) else []
+        else:
+            items = [x for x in text.split(",") if x.strip()]
+    out: list[str] = []
+    for item in items:
+        label = str(item).strip()
+        if not label:
+            continue
+        if len(label) > SNAPSHOT_TOOL_CHARS:
+            label = label[:SNAPSHOT_TOOL_CHARS] + "…"
+        out.append(label)
+        if len(out) >= SNAPSHOT_TOOLS_MAX:
+            break
+    return out
+
+
+def config_snapshot_json(kind: str, rec: dict | None) -> str:
+    """把开跑时的产线配置压成一段有界 JSON（``automation_runs.config_snapshot``）。
+
+    提示词与预授权是原地改的：改完再看历史运行，光凭结果分不清「配置改坏了」
+    还是「环境坏了」。这里只记复核需要的最小事实，不存整份配置、不存密钥。
+    旧行 / 取不到任务时返回空串，抽屉里整块不出现。
+    """
+    if not rec:
+        return ""
+    prompt = " ".join(str(rec.get("prompt") or "").split())
+    if len(prompt) > SNAPSHOT_PROMPT_CHARS:
+        prompt = prompt[:SNAPSHOT_PROMPT_CHARS] + "…"
+    snap: dict = {"prompt": prompt, "tools": _snapshot_tools(rec.get("allowed_tools"))}
+    if str(kind) == "pipeline_node":
+        node_kind = str(rec.get("kind") or "run")
+        snap["node_kind"] = node_kind
+        try:
+            timeout = int(rec.get("timeout_s") or 0)
+        except (TypeError, ValueError):
+            timeout = 0
+        # 挂接任务节点跟随任务簿，不按节点超时执行（编排编辑器也不显示这个数）
+        if timeout > 0 and node_kind != "task":
+            snap["timeout_s"] = timeout
+    else:
+        provider = str(rec.get("provider_name") or "").strip()
+        if provider:
+            snap["provider"] = provider
+            snap["model"] = str(rec.get("model") or "").strip()
+        if rec.get("review"):
+            snap["review"] = True
+        mode = str(rec.get("mode") or "agent")
+        snap["mode"] = mode
+        if mode == "team":
+            snap["template"] = str(rec.get("team_template") or "")
+    return json.dumps(snap, ensure_ascii=False, separators=(",", ":"))
+
+
 class RunLedger:
     """``automation_runs`` 的写入口（实例由 ServerBackend 持有）。"""
 
@@ -186,27 +258,29 @@ class RunLedger:
         """开一条运行（status=running）并发 ``started`` 事件。"""
         kind = str(kind)
         name = ""
+        rec: dict | None = None
         if kind == "pipeline_node":
-            node = await self.store.get_pipeline_node(int(task_id))
-            if node is not None:
-                name = str(node.get("title") or "")
+            rec = await self.store.get_pipeline_node(int(task_id))
+            if rec is not None:
+                name = str(rec.get("title") or "")
                 if pipeline_id is None:
-                    pipeline_id = node.get("pipeline_id")
+                    pipeline_id = rec.get("pipeline_id")
                 if project_id is None:
-                    node_pipe_id = node.get("pipeline_id")
+                    node_pipe_id = rec.get("pipeline_id")
                     if node_pipe_id is not None:
                         pipe = await self.store.get_pipeline(int(node_pipe_id))
                         if pipe is not None:
                             project_id = pipe.get("project_id")
         else:
-            task = await self.store.get_cron_task(int(task_id))
-            if task is not None:
-                name = str(task.get("name") or "")
+            rec = await self.store.get_cron_task(int(task_id))
+            if rec is not None:
+                name = str(rec.get("name") or "")
                 if project_id is None:
-                    project_id = task.get("project_id")
+                    project_id = rec.get("project_id")
         row = await self.store.add_automation_run(
             kind=kind, task_id=int(task_id), pipeline_id=pipeline_id,
             project_id=project_id, trigger=str(trigger), status="running",
+            config_snapshot=config_snapshot_json(kind, rec),
         )
         run = {**row, "name": name,
                "project_name": await self._project_name(project_id)}
@@ -263,6 +337,7 @@ class RunLedger:
         error_kind: str = "",
         outcome: str = "",
         outcome_source: str = "",
+        review_note: str = "",
     ) -> dict | None:
         """收尾一条运行并发 ``finished`` 事件；行不存在返回 None。
 
@@ -287,6 +362,7 @@ class RunLedger:
             denied_count=int(denied_count or 0), denied_tools=str(denied_tools or ""),
             error_kind=str(error_kind or ""),
             outcome=str(outcome or ""), outcome_source=str(outcome_source or ""),
+            review_note=str(review_note or ""),
         )
         run = await self._decorate(row)
         if run is not None:
@@ -312,6 +388,7 @@ class RunLedger:
         row = await self.store.add_automation_run(
             kind="cron", task_id=tid, project_id=pid,
             trigger="schedule", status="skipped", started_at=now,
+            config_snapshot=config_snapshot_json("cron", task),
         )
         row = await self.store.finish_automation_run(
             row["id"], status="skipped", finished_at=now, duration_s=0.0,

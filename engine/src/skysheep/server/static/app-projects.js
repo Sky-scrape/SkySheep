@@ -34,7 +34,7 @@ async function switchProject(path) {
     // 4) 右侧面板里与项目绑定的页按需重拉（boot 不管这些）
     reloadProjectPanels();
     addNotice(`已切换到项目「${currentProjectName() || path}」`);
-    // 5) 新内容整体淡入 180ms：欢迎卡/提示条/列表从「瞬间弹入」变成平滑过渡，
+    // 5) 新内容整体淡入 180ms：提示条/列表从「瞬间弹入」变成平滑过渡，
     //    消除切换时大块内容突然出现又（下次切换时）突然消失的「弹窗感」
     for (const el of [
       document.querySelector("#chat > .chat-log"),

@@ -537,7 +537,7 @@ function renderTabs() {
   }
   // 启动恢复：把当前标签集合与激活态写回 ui.json（下次启动回到同一现场）。
   // 放在 renderTabs 末尾是因为所有标签变动（开/关/接管/懒创建）最终都会走到这；
-  // 只收有 sid 的标签，空标签（欢迎页）不进恢复列表。偏好写失败静默。
+  // 只收有 sid 的标签，空标签不进恢复列表。偏好写失败静默。
   // 初次 boot 的恢复流程自身也会触发 renderTabs——与写回同一份偏好，无副作用。
   const tabSids = ordered.filter((t) => t.sid).map((t) => t.sid);
   const activeSid = activeTab && activeTab.sid ? activeTab.sid : null;
@@ -619,7 +619,7 @@ function miniMsgs() {
     // 只收真正的消息卡片：user / assistant / error。
     // 不能用 classList.contains("msg") 粗筛——.msg.notice（系统提示胶囊，如
     // 「已切换到规划模式」）与 .msg.plan-actions（计划执行按钮条）也带 msg 前缀，
-    // 会被当成消息，多出圆点、与对话对不上（welcome 卡同理，它连 msg 都没有）
+    // 会被当成消息，多出圆点、与对话对不上（空态引导那类没有 msg 的节点同理）
     if (!el.classList.contains("msg")) continue;
     if (el.classList.contains("notice") || el.classList.contains("plan-actions")) continue;
     out.push(el);
@@ -942,7 +942,7 @@ function openTabForSession(sid, title, opts = {}) {
   let adopted = false;
   if (!t) {
     // 先接管一张空占位标签，再考虑新建。启动时没有历史会话、标签全关、刚点过
-    //「新建会话」都会留下一张空标签（欢迎页）——不接管就会在旁边再叠一张，
+    //「新建会话」都会留下一张空标签——不接管就会在旁边再叠一张，
     // 界面上看起来就是「点了一下 ＋，却冒出两个会话」。
     // 优先接管当前激活的那张：接管后台那张的话，激活的空标签还会赖在栏上。
     // 与 handleEvent 里「懒创建会话直接认领」是同一套做法。
@@ -965,7 +965,6 @@ function openTabForSession(sid, title, opts = {}) {
   }
   if (opts.withMessages) {
     renderHistory(t, opts.withMessages, opts.messagesOffset);
-    if (!t.logEl.children.length) withTab(t, showWelcome); // 空会话回到欢迎页
   }
   if (!opts.background) {
     // 接管来的标签常常就是当前激活那张，而 activateTab 对「已经是当前标签」
@@ -986,7 +985,7 @@ function openTabForSession(sid, title, opts = {}) {
   return t;
 }
 
-/** 空占位标签：没有绑定会话、也没在跑（欢迎页那张）。可以被新会话接管。
+/** 空占位标签：没有绑定会话、也没在跑（启动时那张）。可以被新会话接管。
     跑着的无会话标签不算——它正懒创建会话，抢过来会劫持别人的运行。 */
 function isBlankTab(t) { return !!t && !t.sid && !t.running; }
 
@@ -997,9 +996,6 @@ async function loadTabHistory(tab) {
   try {
     const info = await request("session.resume", { id: tab.sid });
     renderHistory(tab, info.messages || [], info.messages_offset);
-    // 空会话也回欢迎页（与 openTabForSession 的 withMessages 路径同一口径）——
-    // 之前漏了这条，侧栏点开旧的空会话就是一片空白（用户报的「有的出现有的不出现」）
-    if (!tab.logEl.children.length) withTab(tab, showWelcome);
   } catch (e) { addNotice("加载会话内容失败: " + e.message); }
 }
 
@@ -1261,9 +1257,8 @@ function closeTab(tab) {
       groupedClickGk = null;
       restoreComposerState(null); // 不过 activateTab：直接恢复输入区/托盘/徽章默认态
       refreshReasoning(); // 空标签回到全局口径的思考档位
-      showWelcome();
       renderTabs();
-      refreshSessions(); // 侧栏组头高亮回落引擎当前项目（欢迎页无会话可跟）
+      refreshSessions(); // 侧栏组头高亮回落引擎当前项目（空标签无会话可跟）
     }
   } else renderTabs();
 }
@@ -1989,7 +1984,7 @@ function closeSplitPanesForSids(sidSet, opts = {}) {
  *
  *  分屏的语义是「把会话从主栏搬进分屏」（openSplitPane 会先收掉主栏冲突标签），
  *  那么关掉最后一列就应把会话搬回主栏——否则主栏常停在空会话/空白标签上，
- *  主栏当前有内容（消息/欢迎卡/提示）时不搬，不抢已有会话的焦点；跨项目只读
+ *  主栏当前有内容（消息/提示）时不搬，不抢已有会话的焦点；跨项目只读
  *  列与运行中的列不搬。（另注：用户当时报的「关了分屏主栏还是灰」是独立 bug——
  *  关列的点击冒泡到已摘除列的聚焦监听，把 main-dimmed 重新加了回去；已在
  *  focusSplitPane 加活列守卫，CSS 侧再以 :not(:has(.split-col)) 兜底。）
@@ -2012,7 +2007,7 @@ function restoreMainAfterSplit(pane) {
  *  原则统一：只要点击，就在当前高亮的项目下真正新建一个会话。persist=true
  *  （默认）立即向后端落库——侧栏列表只陈列已落库的会话，不落库就永远不会
  *  出现（用户报的「新建后侧栏没有新标签」正是这个错位）。发送首条消息时
- *  send() 见 sid 已存在就直接用，欢迎页照旧。creatingTab 只挡「一次请求
+ *  send() 见 sid 已存在就直接用，空标签照旧。creatingTab 只挡「一次请求
  *  还在路上」的连击，不是行为规则；连点会落下多个空会话，交给
  *  「清理空会话」兜底。
  *
@@ -2036,7 +2031,6 @@ async function startNewTab(persist = true) {
     restoreComposerState(null); // 不过 activateTab：输入区恢复默认态（空标签口径）
     refreshReasoning(); // 空标签：思考徽章回到全局口径
     clearTodoPanel();
-    showWelcome();
     renderTabs();
     refreshSessions();
     return t;
@@ -2058,7 +2052,6 @@ async function startNewTab(persist = true) {
     restoreComposerState(s.id); // 不过 activateTab：新会话从默认态开始
     refreshActiveSessionBadges(t); // 默认模型会话的徽章与会话生效模型对齐
     clearTodoPanel();
-    showWelcome();
     renderTabs();
     // 新会话归属当前项目：列表切回本项目视图（哪怕之前在看快聊/远程），新行马上可见
     if (classicViewGk != null) {
@@ -2069,7 +2062,7 @@ async function startNewTab(persist = true) {
     return t;
   } catch (e) {
     const t = blank();
-    addNotice("会话创建失败，已先打开欢迎页：" + e.message);
+    addNotice("会话创建失败，已先打开空白会话：" + e.message);
     return t;
   } finally {
     creatingTab = false;
@@ -2136,73 +2129,6 @@ async function newSessionFromHighlight() {
     return;
   }
   startNewTab();
-}
-
-// 内置示例任务：场景模板清单拉不到时的回落（见 showWelcome）
-const WELCOME_SAMPLES = [
-  { label: "🎮 写一个贪吃蛇网页并测试", q: "帮我在这个目录里创建一个贪吃蛇网页游戏，写完自己打开测试一下" },
-  { label: "🗂 总结当前项目结构", q: "看看当前项目的结构，给我一份架构总结" },
-  { label: "🧹 整理当前目录文件", q: "把目录下所有文件按类型整理进子文件夹，并列出你做了什么" },
-];
-
-// 场景模板前 6 条（打包内官方技能清单）：进程内缓存一次，失败不缓存
-// （下次进欢迎页重试），始终回落内置示例
-let welcomeSceneCache = null;
-async function welcomeSceneSamples() {
-  if (welcomeSceneCache) return welcomeSceneCache;
-  try {
-    const r = await request("skills.gallery");
-    const items = (r.templates || []).slice(0, 6);
-    if (items.length) {
-      welcomeSceneCache = items.map((t) => ({
-        label: "🧩 " + (t.display_name || t.name),
-        title: t.description,
-        q: `请使用「${t.name}」技能完成任务：${t.description}`,
-      }));
-    }
-  } catch (e) { /* 加载失败：回落内置示例 */ }
-  return welcomeSceneCache;
-}
-
-function welcomeSamplesHtml(samples) {
-  return samples.map((s) =>
-    `<button class="w-sample" data-q="${escapeHtml(s.q)}" title="${escapeHtml(s.title || s.q)}">${escapeHtml(s.label)}</button>`
-  ).join("");
-}
-
-function bindWelcomeSamples(host) {
-  host.querySelectorAll(".w-sample").forEach((btn) => {
-    btn.onclick = () => {
-      document.getElementById("input").value = btn.dataset.q;
-      send();
-    };
-  });
-}
-
-function showWelcome() {
-  const host = curLog();
-  // 设置  界面与通知 关掉欢迎卡后，空白会话保持空白（四个调用点统一从这里出口）
-  if (!welcomeOn) {
-    host.innerHTML = "";
-    return;
-  }
-  host.innerHTML = `
-    <div class="welcome">
-      <div class="w-title"><i class="w-logo" aria-hidden="true"></i>欢迎使用 SkySheep</div>
-      <div class="w-sub">一个跑在你电脑上的 AI Agent 工作台。试着给它一个完整任务，比如：</div>
-      <div class="w-samples">${welcomeSamplesHtml(WELCOME_SAMPLES)}</div>
-      <div class="w-note">写文件、执行命令等敏感操作都会先征求你的确认。</div>
-    </div>`;
-  bindWelcomeSamples(host);
-  // 示例任务优先用场景模板（A2）：先画内置示例不空等，清单取到前 6 条就原位替换；
-  // 加载失败 / 清单为空时内置示例原地不动（回落）。欢迎卡已被清掉时不再写回。
-  welcomeSceneSamples().then((samples) => {
-    if (!samples) return;
-    const box = host.querySelector(".w-samples");
-    if (!box) return;
-    box.innerHTML = welcomeSamplesHtml(samples);
-    bindWelcomeSamples(host);
-  }).catch(() => {});
 }
 
 function addNotice(text) {
@@ -6575,8 +6501,8 @@ async function refreshSessionsGrouped() {
   lastGroupedCurrentKey = currentKey;
   // 组头高亮跟随「正在看的会话」所在组：快聊/远程连接的会话激活时引擎工作项目
   // 不变（切目录才有意义），若高亮仍挂在当前项目上，「看到的组」与「高亮的组」
-  // 就对不上（用户报的「已切到快聊、高亮还在 A」）。没有活动会话（欢迎页/
-  // 空标签）回落引擎当前项目——欢迎页属于当前项目的工作上下文。切换/删除/
+  // 就对不上（用户报的「已切到快聊、高亮还在 A」）。没有活动会话（空标签）
+  // 回落引擎当前项目——空标签属于当前项目的工作上下文。切换/删除/
   // 跨项目会话点击仍按 isCurrent（引擎当前）判定，高亮纯视觉。
   // 活动会话不在本次列表（超 50 条被截/已归档）时同样回落。点了组头
   // （groupedClickGk，见下）时高亮先借给点的那个组，切会话/切标签再交回。
@@ -9180,7 +9106,7 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
   if (snap.session) {
     // 启动恢复：snapshot 带了上次开着的标签列表（归属校验后）就按序重建，
     // 激活那张（snap.session）带消息；其余后台打开、进标签时再拉历史。
-    // 没有记录（首次启动/全关过）保持原路径：只开当前会话或欢迎页。
+    // 没有记录（首次启动/全关过）保持原路径：只开当前会话或空标签。
     const openTabs = Array.isArray(snap.open_tabs) ? snap.open_tabs : [];
     if (openTabs.length > 1 || (openTabs.length === 1 && !snap.session)) {
       for (const s of openTabs) {
@@ -9192,7 +9118,7 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
                       { withMessages: snap.session.messages || [],
                         messagesOffset: snap.session.messages_offset });
   } else {
-    startNewTab(false); // 启动无可恢复会话：只开欢迎页，不落库（发首条消息时才建）
+    startNewTab(false); // 启动无可恢复会话：只开空标签，不落库（发首条消息时才建）
   }
   // 会话列表与项目列表一起画（数据已在手，不会出现空列表帧）
   await Promise.allSettled([
@@ -10223,7 +10149,6 @@ let currentSessionId = null; // 当前会话（/export、检查点列表用）
 let uiNotifyOn = true;
 let ctrlEnterSend = false; // 发送键：false = Enter 发送（默认），true = Ctrl+Enter 发送
 let uiNotifySound = false; // 提示音（默认关）：任务完成/等确认时合成短音，设置页开关
-let welcomeOn = true; // 空白会话欢迎卡（默认开）：新建/空白会话显示「欢迎使用」，设置  界面与通知 可关
 let uiNotifySoundFocus = true; // 仅失焦时提示音（默认开）：前台人已在看，响一声反而吵
 let uiNotifyKindDone = true; // 任务完成通知开关（关掉不弹系统通知、不响提示音）
 let uiNotifyKindPerm = true; // 等待确认通知开关（同上）
@@ -10736,28 +10661,6 @@ if (petToggle) {
   };
 }
 
-// ---------- 空白会话欢迎卡（welcome_card，设置  界面与通知） ----------
-function renderWelcomeToggle() {
-  const t = document.getElementById("welcome-card-toggle");
-  if (t) t.checked = welcomeOn;
-}
-const welcomeCardToggle = document.getElementById("welcome-card-toggle");
-if (welcomeCardToggle) {
-  welcomeCardToggle.onchange = () => {
-    welcomeOn = welcomeCardToggle.checked;
-    saveUiPrefs({ welcome_card: welcomeOn ? 1 : 0 });
-    // 活动标签若是空白会话就即时跟着变（在设置页里关也能生效）：开→补欢迎卡，关→清成空白
-    const log = curLog();
-    if (log) {
-      const blankView = !log.children.length || !!log.querySelector(".welcome");
-      if (blankView) {
-        if (welcomeOn) showWelcome();
-        else log.innerHTML = "";
-      }
-    }
-  };
-}
-
 // ---------- 宠物大小（pet_scale，60–140%，100 = 默认）：±步进 + 双击回默认 ----------
 const PET_SCALE_DEFAULT = 100, PET_SCALE_MIN = 60, PET_SCALE_MAX = 140, PET_SCALE_STEP = 10;
 let petScale = PET_SCALE_DEFAULT;
@@ -10839,9 +10742,8 @@ async function send() {
       currentSessionId = s.id;
       activeSessionSid = s.id;
       refreshAcceptChip(); // 懒创建落库后盾牌切到新会话档位（继承引擎默认）
-      if (tab.logEl.querySelector(".welcome")) tab.logEl.innerHTML = ""; // 清掉欢迎页
       renderTabs();
-      refreshSessions(); // 侧栏立即出现新会话行（启动欢迎页首发消息的懒创建路径）
+      refreshSessions(); // 侧栏立即出现新会话行（启动空标签首发消息的懒创建路径）
       tab.firstSend = !preNamed; // 预命名过：首轮不自动起标题（尊重用户命名）
     } catch (e) {
       addNotice("新建会话失败: " + e.message);
@@ -11294,8 +11196,7 @@ function renderHistory(tab, messages, offset) {
     return;
   }
 
-  // 先同步画头一段：openTabForSession 会在 renderHistory 返回后马上看
-  // children.length 判断是否空会话，零节点会被误当成空会话而错误地弹欢迎页
+  // 先同步画头一段：渲染完立刻要能看见内容，零节点会先闪一帧空白
   // （服务端窗口最多 HISTORY_SYNC_LIMIT 条，这条路径只在翻页累积后重渲染时走到）
   const first = Math.min(HISTORY_CHUNK, view.length);
   paintHistorySlice(tab, view, 0, first);
@@ -16468,8 +16369,6 @@ async function initUiPrefs() {
   // 对话区宠物开关（默认显示）+ 大小（pet_scale，缺省 100%）+ 横向落点
   // （pet_x；纵向有重力，总是落在底部）
   petOn = prefs.pet == null ? true : prefs.pet === 1;
-  welcomeOn = prefs.welcome_card == null ? true : prefs.welcome_card === 1;
-  renderWelcomeToggle();
   renderPetToggle();
   applyPetScale(Number.isFinite(Number(prefs.pet_scale)) ? Number(prefs.pet_scale) : 100);
   if (petEl) {

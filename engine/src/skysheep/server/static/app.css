@@ -746,7 +746,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .history-more:hover { color: var(--text); border-color: var(--ink-line); }
 .history-more:disabled { opacity: .55; cursor: default; } /* 翻页在途：防重复点击 */
 /* 切换项目后的新内容淡入（switchProject 给聊天流/会话列表/项目列表加 .swap-in）：
-   欢迎卡、提示条这类大块带边框内容从「瞬间弹入」变成平滑过渡，消除弹窗般的突现感 */
+   提示条这类大块带边框内容从「瞬间弹入」变成平滑过渡，消除弹窗般的突现感 */
 @keyframes swapfade { from { opacity: .25; } to { opacity: 1; } }
 .swap-in { animation: swapfade .18s ease-out; }
 
@@ -928,32 +928,6 @@ mark.search-hit-mark {
 .io-row .io-msg.ok { color: var(--ok); }
 .io-row .io-msg.bad { color: var(--bad); }
 
-/* 欢迎卡：一张摊开的说明纸 */
-.welcome {
-  align-self: center; max-width: 620px; width: 90%;
-  background: var(--card); border: 1.5px solid var(--line2); border-radius: var(--r-lg);
-  box-shadow: var(--shadow-md); padding: 20px 24px; margin-top: 5vh;
-  animation: rise var(--dur-slow) var(--ease-out) both;
-}
-.w-title { font-size: var(--fs-display); font-weight: var(--fw-heavy); letter-spacing: 1px; margin-bottom: 8px;
-  display: flex; align-items: center; gap: 8px; }
-.w-title .w-logo {
-  width: 34px; height: 34px; flex-shrink: 0; display: inline-block;
-  background: var(--text);  /* 同 .logo-mark：原版线稿随主题 */
-  -webkit-mask: url("/static/skysheep-line-ink.png") center / contain no-repeat;
-  mask: url("/static/skysheep-line-ink.png") center / contain no-repeat;
-}
-.w-sub { color: var(--text2); margin-bottom: 14px; line-height: 1.7; }
-.w-samples { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
-.w-sample {
-  text-align: left; background: var(--paper-raised); color: var(--text);
-  border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
-  padding: 9px 13px; font-size: var(--fs-md); box-shadow: var(--shadow-sm);
-  transition: transform var(--dur-fast), box-shadow var(--dur-fast), background var(--dur-fast);
-}
-.w-sample:hover { background: var(--blue-weak); transform: translate(-1px, -1px); box-shadow: var(--shadow-md); }
-.w-sample:active { transform: translate(1px, 1px); box-shadow: none; }
-.w-note { color: var(--dim); font-size: var(--fs-sm); border-top: 1px dashed var(--line2); padding-top: 10px; }
 .msg.error .md { border-color: var(--reg); background: rgba(143, 29, 29, .06); }
 .msg.error .md p { color: var(--reg); font-weight: var(--fw-bold); }
 
@@ -6904,42 +6878,6 @@ li.mod-row {
   padding-right: clamp(56px, 6vw, 80px);
   padding-bottom: 8px;
 }
-.welcome {
-  position: relative;
-  width: min(680px, 100%);
-  margin-top: clamp(4vh, 7vh, 9vh);
-  padding: 24px 26px 20px;
-  border-color: var(--ink-line);
-  box-shadow: 4px 4px 0 color-mix(in srgb, var(--blue) 28%, transparent), var(--shadow-lg);
-  overflow: hidden;
-}
-.welcome::before {
-  content: "准备开始";
-  position: absolute;
-  top: 0;
-  right: 0;
-  padding: 5px 10px;
-  color: var(--blue);
-  background: var(--blue-weak);
-  border-left: 1px solid var(--line2);
-  border-bottom: 1px solid var(--line2);
-  font-size: var(--fs-cap);
-  font-weight: var(--fw-heavy);
-  letter-spacing: 1px;
-}
-.w-title {
-  font-size: clamp(19px, 2vw, 22px);
-  letter-spacing: .8px;
-  margin-bottom: 10px;
-}
-.w-sub { max-width: 54em; margin-bottom: 16px; }
-.w-samples { gap: 9px; }
-.w-sample {
-  min-height: 40px;
-  display: flex;
-  align-items: center;
-  padding: 9px 13px;
-}
 .msg.assistant .md {
   border-left: 3px solid var(--blue);
   padding: 13px 17px;
@@ -7166,7 +7104,6 @@ li.mod-row {
 @media (max-width: 860px) {
   #chat { padding: 12px 10px 10px; }
   .chat-log { padding-right: 0; gap: 10px; }
-  .welcome { margin-top: 3vh; padding: 20px 16px 16px; }
   #composer { padding: 8px 9px 10px; }
   #cp-right { padding-left: 4px; }
   #btn-send { min-width: 78px; }
@@ -7174,9 +7111,6 @@ li.mod-row {
 @media (max-width: 520px) {
   #topbar { padding: 6px 8px; }
   #chat-tabs { max-width: calc(100% - 150px); }
-  .welcome { width: 100%; }
-  .w-title { font-size: var(--fs-display); }
-  .w-sub { font-size: var(--fs-md); }
   .msg.user { max-width: 88%; }
   .msg.assistant .md { padding: 11px 13px; }
 
@@ -8121,7 +8055,7 @@ li.mod-row {
 
 /* 关键标题防孤字：平衡换行只在标题/引导语上开，正文仍用 pretty */
 .md h1, .md h2, .md h3,
-.w-title, .roundtable .rt-title, .teamcard .tc-title,
+.roundtable .rt-title, .teamcard .tc-title,
 .adversarial .rt-title, .settings-card h3, .card-head h3 {
   text-wrap: balance;
 }

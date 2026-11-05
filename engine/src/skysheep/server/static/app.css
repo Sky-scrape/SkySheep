@@ -1428,7 +1428,7 @@ mark.search-hit-mark {
   margin-top: 10px;
 }
 /* 只改「卡直接子级」的信任行 label（运行参数 4 行的 label 在 toolcfg-form
-   里，保持 96px 固定列不缩进）；信任行 label 宽度自适应 + 缩进 24px，
+   里，保持 112px 固定列不缩进）；信任行 label 宽度自适应 + 缩进 24px，
    状态文字紧跟标题 */
 #settings-page-advanced .settings-card > .toolcfg-row > label {
   flex: 0 0 auto; padding-left: 24px;
@@ -4182,6 +4182,36 @@ mark.search-hit-mark {
 }
 #backup-list .backup-more .btn-ghost:hover { color: var(--blue); border-color: var(--blue); }
 
+/* 存储占用与清理（设置 · 关于）
+   占用总览三项一行；账本行拆成「名称 / 条数 / 动作」三段分列——标签长短不一，
+   按钮直接跟在文字后面时三行三个起点。名称列定宽后条数与按钮各自成列，
+   「整理数据库」是整卡动作，已挪进卡片头与「刷新」同组。
+   纯信息行不绑点击，摘掉 .list li 的手型光标与悬浮底色，别让它看着能点。 */
+#storage-overview li.st-meta,
+#storage-overview li.st-row { cursor: default; }
+#storage-overview li.st-meta:hover,
+#storage-overview li.st-row:hover { background: none; }
+#storage-overview li.st-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 26px;
+  padding-bottom: 7px; margin-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+}
+#storage-overview li.st-meta .st-k { margin-right: 6px; }
+#storage-overview li.st-meta b,
+#storage-overview .st-count b {
+  color: var(--text); font-weight: var(--fw-semi); font-variant-numeric: var(--num);
+}
+#storage-overview li.st-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+#storage-overview .st-name {
+  flex: 0 1 15em; min-width: 6em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#storage-overview .st-count { flex: 0 0 auto; min-width: 3.6em; color: var(--dim); }
+#storage-overview .st-ops { display: flex; gap: 6px; flex-shrink: 0; }
+
 /* 帮助弹窗：快速上手 / 快捷键 / 常见问题 */
 .help-body { display: flex; flex-direction: column; gap: 14px; max-height: 62vh; overflow-y: auto; }
 .help-sec h4 { font-size: var(--fs-md); margin-bottom: 6px; color: var(--text); }
@@ -6046,11 +6076,13 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 .memory-text:focus { outline: none; border-color: var(--blue); }
 
 /* ---------- 设置页：联网搜索 / AI 画图 配置表单 ----------
-   名称列与控件列都是固定宽度：两张卡片的标签、输入框上下左右对齐 */
+   名称列与控件列都是固定宽度：两张卡片的标签、输入框上下左右对齐。
+   112px 按 7 个汉字取（「成员历史上下文」「子代理报告保留」这类 7 字标签
+   刚好一行）；整句标签（子代理基础设置）在各自表单里单独放宽。 */
 .toolcfg-form { display: flex; flex-direction: column; gap: 9px; margin-top: 4px; }
 .toolcfg-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .toolcfg-row label {
-  flex: 0 0 96px; font-size: var(--fs-md); font-weight: var(--fw-bold); color: var(--text2);
+  flex: 0 0 112px; font-size: var(--fs-md); font-weight: var(--fw-bold); color: var(--text2);
 }
 /* 文本类控件统一纸墨样式：type 枚举写全会漏（number/date… 会掉回浏览器默认白框），
    所以用「排除勾选框」的方式选中所有输入框。
@@ -6082,6 +6114,9 @@ details.map-phase summary::-webkit-details-marker { display: none; }
   outline: none; border-color: var(--blue)
 }
 .toolcfg-state { font-size: var(--fs-sm); color: var(--dim); }
+/* 子代理基础设置的标签是整句话（最长 11 个汉字），全局 112px 列会把两行
+   都折成两行；这里单独放宽到 168px，两个数字框仍共用同一条左边缘 */
+#subagent-form .toolcfg-row label { flex: 0 0 168px; }
 
 /* ---------- 设置页：钩子（Hooks）规则列表 ----------
    每行一条规则：工具名通配 + 命令 + 超时 + 删除；窄屏自动换行 */
@@ -6189,6 +6224,8 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 }
 .qr-box img, .qr-box canvas { display: block; }
 .lan-note { font-size: var(--fs-sm); color: var(--dim); line-height: 1.6; }
+/* 端口行下面的说明：脱离「输入框 + 保存」那条行，单独起一段 */
+.lan-port-hint { margin-top: 4px; }
 /* 端口输入框对齐「盖章按钮」语言：纸面底 + 墨线描边 + 圆角，聚焦上浮；
    显式定高与旁边「保存」按钮（btn-ghost 实测 34px）一样高——number input
    的行盒比 button 高，靠 padding 对不齐 */

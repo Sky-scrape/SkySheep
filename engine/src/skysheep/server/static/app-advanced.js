@@ -33,7 +33,9 @@ function renderHooksList(kind) {
   if (!box) return;
   const items = hooksState[kind] || [];
   if (!items.length) {
-    box.innerHTML = `<div class="rp-empty">还没有${HOOK_KIND_LABEL[kind] || kind}钩子。</div>`;
+    // 空态跟随卡片里的其他空列表（左对齐的 dim 小字）；rp-empty 是右面板的
+    // 居中式空态，放进这条宽卡片会孤零零地悬在中间，离左侧分组标题很远
+    box.innerHTML = `<div class="empty-hint">还没有${HOOK_KIND_LABEL[kind] || kind}钩子。</div>`;
     return;
   }
   box.innerHTML = "";

@@ -386,19 +386,29 @@ async function renderStorageCard() {
     list.innerHTML = `<li class="empty-hint">加载失败：${escapeHtml(e.message)}</li>`;
     return;
   }
+  // 占用总览：三项一组，标签弱化、数值加重（原先只加粗数据库、另两项裸数值）
   const rows = [
-    `<li class="dim">会话数据库：<b>${retentionBytes(d.db_bytes)}</b>　备份目录：${retentionBytes(d.backups_bytes)}　日志：${retentionBytes(d.logs_bytes)}</li>`,
+    `<li class="st-meta">` +
+      `<span><span class="st-k">会话数据库</span><b>${retentionBytes(d.db_bytes)}</b></span>` +
+      `<span><span class="st-k">备份目录</span><b>${retentionBytes(d.backups_bytes)}</b></span>` +
+      `<span><span class="st-k">日志</span><b>${retentionBytes(d.logs_bytes)}</b></span>` +
+    `</li>`,
   ];
   for (const t of d.tables || []) {
     if (t.rows <= 0) continue; // 空表不占行：少即是多
+    // 名称 / 条数 / 动作三段分列：标签长短不一，不拆段时每行的按钮起点都在变
     rows.push(
-      `<li>${escapeHtml(t.label)}：<b>${t.rows}</b> 条` +
-      ` <button class="btn-ghost" data-clean-table="${escapeHtml(t.table)}" title="删除 30 天前的记录">清理 30 天前</button>` +
-      ` <button class="btn-ghost" data-clean-all="${escapeHtml(t.table)}" title="清空整表（不可恢复）">清空</button></li>`
+      `<li class="st-row">` +
+        `<span class="st-name">${escapeHtml(t.label)}</span>` +
+        `<span class="st-count"><b>${t.rows}</b> 条</span>` +
+        `<span class="st-ops">` +
+          `<button class="btn-ghost" data-clean-table="${escapeHtml(t.table)}" title="删除 30 天前的记录">清理 30 天前</button>` +
+          `<button class="btn-ghost" data-clean-all="${escapeHtml(t.table)}" title="清空整表（不可恢复）">清空</button>` +
+        `</span>` +
+      `</li>`
     );
   }
   if (rows.length === 1) rows.push(`<li class="empty-hint">没有可清理的账本数据</li>`);
-  rows.push(`<li><button id="btn-storage-vacuum" class="btn-ghost" title="整理数据库文件，释放已删数据占用的空间（大库会花几秒）">整理数据库（VACUUM）</button></li>`);
   list.innerHTML = rows.join("");
 
   list.querySelectorAll("[data-clean-table]").forEach((btn) => {

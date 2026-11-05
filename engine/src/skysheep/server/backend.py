@@ -2993,12 +2993,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     turn_stats["permission_waits"] += 1
                     turn_stats["permission_ms"] += int((time.monotonic() - t0) * 1000)
             # 消息边界增量落库（见 _persist_progress）：只在历史真正变化的事件上
-            # 写库，文本增量不碰 DB
+            # 写库，文本增量不碰 DB。用户消息与助手消息是两个用户最在意的边界，
+            # 强制写、不吃 1 秒节流——崩溃丢掉刚发的一句 / 刚答完的一段最扎眼；
+            # 工具结束与权限请求密集，仍按节流写，避免把写锁竞争放大
             if kind in (
                 "turn_started", "assistant_message", "tool_call_finished",
                 "turn_finished", "permission_request",
             ):
-                await _persist_progress()
+                await _persist_progress(
+                    force=kind in ("turn_started", "assistant_message")
+                )
             await merger.send({**ev, "session_id": sid})
 
         # 「用户消息」广播给其余在线客户端：轮次事件只发给发起连接，其他窗口 /
@@ -3140,11 +3144,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         _progress_at = [0.0]
         _PROGRESS_MIN_INTERVAL = 1.0
 
-        async def _persist_progress() -> None:
+        async def _persist_progress(force: bool = False) -> None:
             # best-effort：在途落库只是抗崩溃的保险，失败不能打断正在跑的轮次
             # （轮末 _persist_turn 还会兜一次；真写不进去时那里也会报错）
             now = time.monotonic()
-            if now - _progress_at[0] < _PROGRESS_MIN_INTERVAL:
+            if not force and now - _progress_at[0] < _PROGRESS_MIN_INTERVAL:
                 return
             async with self._progress_write_lock:
                 for m in list(agent.history):

@@ -61,13 +61,13 @@ async def test_relay_opens_peer_pane_and_runs_alternating(home):
 
 
 async def test_relay_settings_page_is_explainer_and_opens_workbench(home):
-    """接力说明卡在「技能与工具」页：只做说明、不带 JSON 表单；入口能回到看板。"""
+    """接力说明卡在「多模型协作」页：只做说明、不带 JSON 表单；入口能回到看板。"""
     async with live_server(home, [[TextBlock(text="好")]]) as base:
         async with browser_page(base) as page:
             await _open_main_view(page)
             await page.click("#btn-settings")
-            # 接力并入了「技能与工具」页（与圆桌 / 团队 / 对抗并列），不再单列导航项
-            await page.click('#settings-nav li[data-target="skills"]')
+            # 协作方式独立成页（与圆桌 / 团队 / 对抗并列），接力不再单列导航项
+            await page.click('#settings-nav li[data-target="collab"]')
             await expect(page.locator("#relay-config-card")).to_be_visible()
             await expect(page.locator("#relay-config-card")).to_contain_text("主屏与副屏交替推进")
             assert await page.locator("#relay-config-card textarea").count() == 0

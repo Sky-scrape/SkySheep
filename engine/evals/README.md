@@ -39,7 +39,7 @@ uv run pytest -m "not e2e and not eval"      # 跳过 e2e 与评测基线
 （评测不联网、不碰真实 home、进程内秒级，跑上只增加回归保护）；`-m e2e`
 层不受影响。
 
-## 现有场景（30 个）
+## 现有场景（33 个）
 
 | # | 场景 | 文件 | 回归史出处 |
 |---|---|---|---|
@@ -73,6 +73,9 @@ uv run pytest -m "not e2e and not eval"      # 跳过 e2e 与评测基线
 | 28 | 聊天渠道出站推送开关：定时任务 notify_channel 关=一字不发；开=推名单内每个 chat，空名单拒发；推送不影响任务行回写（mock 渠道） | test_eval_channel_push_scenario.py | 无人值守闭环第一期「定时任务终态推送」 |
 | 29 | 隔离区模式开关两态：关=正文整体进上下文（一期行为）；开=摘录+隔离文件路径进上下文、全文原子落盘 quarantine/、边界行带信任级 | test_eval_web_injection_scenario.py | 注入纵深防御第二期（QUARANTINE_ENABLED，monkeypatch 切换） |
 | 30 | Webhook 出站：enabled 门（关=configured 也不发）；开=整段 POST 一次、JSON 形状固定、secret 出可验签的 HMAC 签名头；不影响任务行回写 | test_eval_webhook_scenario.py | 通用 Webhook 渠道（真实 WebhookChannel + MockTransport） |
+| 31 | 圆桌融合：主席也出草稿 + 两成员独立作答 + 主席融合——草稿不进主历史、融合答案带 roundtable 元数据落库、融合输入含全部草稿 | tests/test_collab_scenarios.py（本体）+ evals/test_eval_collab_scenarios.py（eval 挂载） | CHANGELOG [2.6.3] P29「协作行为 eval 基线另批」 |
+| 32 | 团队闭环：AI 总管自动闭环（拆解 → 派工 → 验收 → 交付）——《交付说明》随 team_finished 落库、user+assistant 成对可审计、用量按角色入账 | 同上（本体 + eval 挂载） | 同上 |
+| 33 | 对抗裁决：发现 → 调查 → 建议 → 裁判四阶段——裁决统计随 adversarial_finished 下发、终审报告带对抗元数据落库、用量按角色入账 | 同上（本体 + eval 挂载） | 同上 |
 
 ## 写新场景
 
@@ -96,6 +99,12 @@ uv run pytest -m "not e2e and not eval"      # 跳过 e2e 与评测基线
 事件的属性访问；驱动后端前先把隔离 home 的 `ui.json` 预置
 `{"update_check": 0, "notify": 0}`（评测不联网、不打扰真实桌面），管道场景
 文件里的 `_make_backend` 是现成做法。
+
+**协作场景（31–33）的本体在 tests/test_collab_scenarios.py**：场景函数在这里
+实现并在默认套件跑（协作组装行为进默认回归），evals/test_eval_collab_scenarios.py
+只做 re-export 挂载（本目录 conftest 自动打 eval 标记）——两处跑同一份实现，没有
+两套断言。不这么放的话，直接 `pytest evals/xxx.py` 会因 addopts 一条都收不到
+（见上「为什么单跑文件也要带 -m eval」），协作回归就只剩 `-m eval` 一条入口。
 
 渠道/流水线出站推送的断言用 **mock 渠道**（`_MockChannel`，最小 duck-type：
 enabled/configured/allowed_ids/send_text），塞进真实 ChannelManager 的注册表

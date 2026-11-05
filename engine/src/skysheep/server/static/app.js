@@ -3919,6 +3919,8 @@ function buildTeamCard(roster, directorMode, director) {
       try {
         await request("team.resident_clear", { team_id: card._teamId });
         residentBtn.hidden = true;
+        // 侧栏角标镜像（§15.3.5）：登记已解除，等不到下一次探询就先记负
+        if (typeof trSideNote === "function") trSideNote(String(card._teamId || ""), false);
         addNotice("已解除常驻：定时团队任务将照常重建队伍。");
       } catch (err) {
         addNotice("解除常驻失败: " + err.message);
@@ -3938,6 +3940,10 @@ function buildTeamCard(roster, directorMode, director) {
       const now = !!(r && r.resident);
       residentBtn.classList.toggle("is-active", now);
       residentBtn.textContent = now ? "常驻中" : "常驻";
+      // 侧栏角标镜像（§15.3.5）：set/clear 回包带 team_id 与登记结果，即时并入
+      if (typeof trSideNote === "function") {
+        trSideNote(String((r && r.team_id) || card._teamId || ""), now);
+      }
       addNotice(now
         ? "已设为常驻：定时团队任务触发时将优先唤醒这支队伍（频道历史与工单板延续）。"
         : "已解除常驻：定时团队任务将照常重建队伍。");
@@ -4403,6 +4409,11 @@ async function tcProbeResidentClear(card) {
   if (!btn || !card._teamId) return;
   try {
     const r = await request("team.resident_get", { team_id: card._teamId });
+    // 侧栏角标的常驻镜像（§15.3.5）：探询结果两个方向都是权威真值——在册收进
+    // 镜像（翻旧会话即给角标补上登记数），不在册就剔除（别处解除过的旧账）
+    if (typeof trSideNote === "function") {
+      trSideNote(String(card._teamId || ""), !!(r && r.resident));
+    }
     if (!(r && r.resident)) return;
     btn.hidden = false;
     btn.disabled = false;
@@ -4697,6 +4708,13 @@ async function refreshTeamState(tab) {
   tab._teamRefreshing = true;
   try {
     const r = await request("team.get", { session_id: tab.sid });
+    // 侧栏「团队」角标（§15.3.5）：team.get 回包对活动团队是权威——对齐当前
+    // 会话的活动团队并并入常驻镜像。快速连切会话时只认仍是当前页签的回包，
+    // 迟到的旧会话快照不覆盖新对齐（团队卡走的 withTab 渲染另有归属，不混用）
+    if (typeof trSideAlign === "function") {
+      const now = curTab();
+      if ((now && now.sid) === tab.sid) trSideAlign(r && r.active ? r.team : null, tab.sid);
+    }
     withTab(tab, () => applyTeamSnapshot(r));
   } catch (e) { /* 引擎暂无团队方法（旧后端 / 连接断开）：静默跳过 */ }
   finally { tab._teamRefreshing = false; }
@@ -5433,6 +5451,11 @@ function handleEvent(kind, data) {
   // 接力（主副屏交替）状态：无会话路由，交给右侧看板按 pair_id 更新。
   if (kind === "relay_pair_state") {
     if (typeof relayOnPairState === "function") relayOnPairState(data && data.relay);
+    return;
+  }
+  // 接力交接门进度（复述/核验进行到第几次）：只影响看板状态行。
+  if (kind === "relay_pair_verify") {
+    if (typeof relayOnVerify === "function") relayOnVerify(data && data.relay);
     return;
   }
   // 旧的无工具串行接力事件（界面已不再使用）：保留钩子，避免旧后端混跑时报错。
@@ -12462,7 +12485,7 @@ function showHelp() {
 
 document.getElementById("btn-help").onclick = () => showHelp();
 
-// ---------- 左栏功能导航（工厂看板 / 任务 / 日程 / 接力 / 自动化 / 项目记忆 / 记忆地图 / MCP·Skills） ----------
+// ---------- 左栏功能导航（工厂看板 / 任务 / 日程 / 接力 / 团队室 / 自动化 / 项目记忆 / 记忆地图 / MCP·Skills） ----------
 // 顺序按使用频次排，与 index.html 的 .side-menu、.rail-btn 图标条两处保持一致（改一处必须同步改另外两处）
 // 工厂看板是与「新建会话」并列的主操作（#btn-factory，同一身 .nav-new 皮），已不在 .side-menu 里，
 // 但动作分发仍只在这一处：选择器把两个都收进来，别在别处再挂一遍 onclick
@@ -12486,6 +12509,8 @@ document.querySelectorAll(".nav-item, #btn-factory").forEach((btn) => {
     if (act === "map") return openRightTab("map");
     // 接力：右侧看板 + 在当前会话下打开副屏分栏（入口统一走 openRelayWorkbench）
     if (act === "relay") return openRelayWorkbench();
+    // 团队室：侧栏常驻入口（§15.3.5，常驻团队 T3.2 落地后增设）——开右面板页签
+    if (act === "teamroom") return openRightTab("teamroom");
     if (act === "project") return projectModal();
     if (act === "ext") return openRightTab("ext");
     if (navPending[act]) addNotice(`「${navPending[act]}」开发中，即将上线`);
@@ -13789,7 +13814,7 @@ function toggleTabsMenu(anchor) {
   tabsMenuEl = document.createElement("div");
   tabsMenuEl.className = "tabs-menu";
   Object.keys(TAB_META).forEach((id) => {
-    if (id === "teamroom") return; // 团队室：入口跟团队走（团队卡/协作菜单），不进「＋」菜单常驻
+    if (id === "teamroom") return; // 团队室：入口跟团队走（侧栏/团队卡/协作菜单），不进「＋」菜单常驻
     const b = document.createElement("button");
     b.className = "tabs-menu-item";
     // 辅助对话是多开标签（存 auxN），菜单项按「有没有任何一个 aux 实例」判断
@@ -13861,7 +13886,7 @@ document.getElementById("rail-search").onclick = () => {
     if (el) { el.focus(); el.select(); }
   });
 };
-// 窄栏功能导航七件套（含主操作组的工厂看板）：与侧栏导航项同一套动作
+// 窄栏功能导航八件套（含主操作组的工厂看板）：与侧栏导航项同一套动作
 // （openRightTab 打开右侧面板标签）；停在设置页时先回对话，别让面板开在看不见的地方。
 document.querySelectorAll("#sb-rail [data-rail-act]").forEach((btn) => {
   btn.onclick = () => {

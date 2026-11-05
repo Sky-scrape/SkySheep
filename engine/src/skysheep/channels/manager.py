@@ -329,8 +329,20 @@ class ChannelManager:
             await self._reply(channel, msg, f"未知命令：{msg.text.split()[0]}\n\n{commands.HELP_TEXT}")
             return
         if cmd.is_command:
-            await self._handle_command(channel, msg, cmd)
-            return
+            # 对抗遥控（对抗模式设计 §12 二期）：/对抗 把余下文本当被审内容，
+            # 改写成本文并就地标记，落到下面普通消息的排队路径——同一套串行、
+            # 合并与 busy 提示，只是本轮经 host.channel_run 带 adversarial 标志
+            # 进执行链（chat.send 的对抗面）；角色不指定按 §2 自动补位。
+            # 空参数不跑轮，回用法。
+            if cmd.name == "adversarial":
+                if not cmd.arg.strip():
+                    await self._reply(channel, msg, commands.ADVERSARIAL_USAGE_TEXT)
+                    return
+                msg.text = cmd.arg
+                msg.adversarial = True
+            else:
+                await self._handle_command(channel, msg, cmd)
+                return
 
         # 普通消息：进收件箱，然后串行消费（同一时刻只跑一轮，避免多渠道
         # 交叉）。正在跑一轮时进来的消息留在箱里，等这一轮结束后与同会话的
@@ -385,16 +397,32 @@ class ChannelManager:
         混进 B 聊天的回复里（回复只发往 batch[0]），跨发送者合并还会让审批
         发起人错绑（gate 只认本轮 actor）。所以按 (chat_id, actor) 分组取批，
         其余消息原样留在箱子里等下一轮。
+        对抗轮不参与合并（对抗模式设计 §12 二期）：/对抗 显式划定被审内容，
+        跟前后的话合在一起会稀释审查对象，也避免「普通消息在前」的批次把
+        对抗标志整批吞掉——对抗消息恒单条成批，普通批次在遇到它时提前收口。
         """
         items = self._inbox.get(bkey) or []
         if not items:
             return []
+        if items[0].adversarial:
+            rest = items[1:]
+            if rest:
+                self._inbox[bkey] = rest
+            else:
+                self._inbox.pop(bkey, None)
+            return [items[0]]
         chat_id = items[0].chat_id
         actor = items[0].actor
         batch: list[ChannelMessage] = []
         rest: list[ChannelMessage] = []
-        for m in items:
-            if m.chat_id == chat_id and m.actor == actor and len(batch) < BATCH_MAX:
+        for i, m in enumerate(items):
+            if m.adversarial:
+                # 对抗轮按到达位置断流：它之后的排队消息让到下一批，
+                # 到达顺序不被乱序（先说的先跑）
+                rest.extend(items[i:])
+                break
+            if (m.chat_id == chat_id and m.actor == actor
+                    and len(batch) < BATCH_MAX):
                 batch.append(m)
             else:
                 rest.append(m)
@@ -548,7 +576,8 @@ class ChannelManager:
         try:
             try:
                 result = await self.host.channel_run(
-                    sid, self._merge_text(batch), actor=msg.actor, chat_id=msg.chat_id
+                    sid, self._merge_text(batch), actor=msg.actor, chat_id=msg.chat_id,
+                    adversarial=bool(batch[0].adversarial),
                 )
             except Exception as e:  # noqa: BLE001 - 一轮失败要让用户看到原因
                 await self._reply(channel, msg, f"这一轮出错了：{e}")

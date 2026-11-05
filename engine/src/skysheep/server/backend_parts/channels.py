@@ -725,13 +725,17 @@ class ChannelsMixin:
             raise
 
     async def channel_run(self, session_id: str, text: str, actor: str = "",
-                          chat_id: str = "") -> dict:
+                          chat_id: str = "", adversarial: bool = False) -> dict:
         """跑一轮渠道对话，返回回复文本。不劫持活动会话。
 
         actor 是这一轮的发起人（渠道消息里的 sender 标识）：写进门控后，
         本轮的审批决定只认他，群聊里其他成员的 allow/deny 不生效。
         chat_id 是发起消息所在的聊天：审批卡回这个聊天，而不是「最近一条
         入站消息」的聊天（审查 P3-15）。
+        adversarial=True 时本轮走对抗流水线（渠道遥控对抗，对抗模式设计
+        §12 二期；同 chat.send 的 adversarial 面与同轮互斥口径）——角色
+        members_params 为空按 §2 自动补位，裁判由本会话模型担任；终审报告
+        随 assistant_message 回给聊天窗口。
         """
         if self.provider is None:
             return {"error": "尚未配置可用的模型 API Key"}
@@ -791,6 +795,7 @@ class ChannelsMixin:
         try:
             result = await self._run_turn_pipeline(
                 text, collect, plan_mode=False, runtime=rt, session_id=session_id,
+                adversarial=adversarial,
             )
         except asyncio.CancelledError:
             return {"error": "这一轮被中断"}

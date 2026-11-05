@@ -38,9 +38,11 @@ from ...core.relay import (
     report_hash,
     run_node_text,
 )
+from ...messages import Message
 from ...models.base import ProviderError
 from ...security.gate import Decision, PermissionGate, normalize_decision
 from ...tools.fs import WriteFileTool
+from ...tools.shell import bg_processes_for_session
 
 logger = logging.getLogger("skysheep.relay")
 
@@ -55,6 +57,22 @@ _RELAY_LOCKS: dict[str, str] = {}
 _RELAY_PEER_TITLE = "接力 · 副屏"
 # 交接给下一轮时保留的上一轮输出长度（模型不需要全文，太长还会挤掉本轮预算）
 _RELAY_DUAL_PREV_CHARS = 6000
+
+# 交接复述核验（接力模式设计 §6 在 dual 工作台的最小落地）：自动交替换手前，
+# 接收方先无工具复述、移交方再核验，服务端做结构校验，全不通过就暂停等人。
+_RELAY_VERIFY_ATTEMPTS = 3        # 复述总次数（含首次）；驳回/格式错误/超时都计入
+_RELAY_VERIFY_TIMEOUT = 90        # 单次复述或核验的模型调用超时（秒）
+_RELAY_RESTATEMENT_MAX_CHARS = 4000
+_RELAY_RESTATEMENT_SECTIONS = ("【目标】", "【已完成】", "【待办】", "【计划】", "【不确定】")
+
+
+def _assistant_text_of(msg: dict) -> str:
+    """assistant_message 事件负载的正文：Message.text 是属性不进
+    model_dump，事件负载按 content 块取文本。"""
+    return "".join(
+        str(b.get("text") or "") for b in (msg.get("content") or [])
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
 
 
 class RelaySettingsMixin:
@@ -235,10 +253,11 @@ class RelaySettingsMixin:
         return payload
 
     async def relay_dual_save(self, params: dict) -> dict:
-        """保存总任务 / 两屏任务 / 自动交替（只改内容，不推进 revision）
+        """保存总任务 / 两屏任务 / 自动交替 / 交接核验（只改内容，不推进 revision）
         ——运行中也能改，下一轮生效。"""
         self._relay_reject_unknown(
-            params, ("pair_id", "goal", "main_task", "peer_task", "auto_alternate")
+            params, ("pair_id", "goal", "main_task", "peer_task", "auto_alternate",
+                     "verify_handoff")
         )
         pair_id = self._relay_str(params, "pair_id", maxlen=64)
         await self._relay_dual_owned(pair_id)
@@ -251,6 +270,8 @@ class RelaySettingsMixin:
             fields["peer_task"] = self._relay_str(params, "peer_task", required=False, maxlen=4000)
         if "auto_alternate" in params:
             fields["auto_alternate"] = bool(params.get("auto_alternate"))
+        if "verify_handoff" in params:
+            fields["verify_handoff"] = bool(params.get("verify_handoff"))
         if not fields:
             raise ValueError("relay_invalid：没有可保存的字段")
         snapshot = await self.store.relay_pair_update(pair_id, fields, bump=False)
@@ -275,7 +296,7 @@ class RelaySettingsMixin:
         self._relay_reject_unknown(
             params,
             ("session_id", "pair_id", "goal", "main_task", "peer_task",
-             "auto_alternate", "request_id", "expected_revision"),
+             "auto_alternate", "verify_handoff", "request_id", "expected_revision"),
         )
         self._require_relay_lock()
         request_id = self._relay_request_id(params)
@@ -303,6 +324,7 @@ class RelaySettingsMixin:
                 "main_task": self._relay_str(params, "main_task", required=False, maxlen=4000),
                 "peer_task": self._relay_str(params, "peer_task", required=False, maxlen=4000),
                 "auto_alternate": bool(params.get("auto_alternate")),
+                "verify_handoff": bool(params.get("verify_handoff", True)),
                 "state": "idle",
                 "current_side": "main",
             })
@@ -329,7 +351,9 @@ class RelaySettingsMixin:
             return {**replay, "replayed": True}
         if pair["state"] == "running":
             raise ValueError("relay_busy：正在执行，等这一轮结束或先点中断")
-        if expected_revision and int(pair["revision"]) != expected_revision:
+        # expected_revision=0 是显式值（与 store 层 is not None 同口径）：
+        # 传 0 也要校验，pair 被 worker 抬升后陈旧客户端必须刷新
+        if expected_revision is not None and int(pair["revision"]) != expected_revision:
             raise ValueError("relay_conflict：接力状态已更新，请刷新后再执行")
 
         fields: dict = {}
@@ -338,6 +362,8 @@ class RelaySettingsMixin:
                 fields[key] = self._relay_str(params, key, required=False, maxlen=limit)
         if "auto_alternate" in params:
             fields["auto_alternate"] = bool(params.get("auto_alternate"))
+        if "verify_handoff" in params:
+            fields["verify_handoff"] = bool(params.get("verify_handoff"))
         goal = str(fields.get("goal", pair["goal"]) or "").strip()
         main_task = str(fields.get("main_task", pair["main_task"]) or "").strip()
         peer_task = str(fields.get("peer_task", pair["peer_task"]) or "").strip()
@@ -385,7 +411,7 @@ class RelaySettingsMixin:
         replay = await self.store.relay_action_get(f"dual-stop:{pair_id}", request_id)
         if replay is not None:
             return {**replay, "replayed": True}
-        if expected_revision and int(pair["revision"]) != expected_revision:
+        if expected_revision is not None and int(pair["revision"]) != expected_revision:
             raise ValueError("relay_conflict：接力状态已更新，请刷新后再中断")
 
         st = self._relay_dual_state()
@@ -442,16 +468,50 @@ class RelaySettingsMixin:
         if existing is not None and not existing.done():
             return
         worker = asyncio.create_task(self._relay_dual_worker(pair_id))
+
+        def _done(t: asyncio.Task) -> None:
+            # 双保险（对齐串行 _relay_spawn 的 done-callback）：异常必须
+            # 有人取回（防「Task exception was never retrieved」），注册表
+            # 清理由 worker 自己的 finally 做（stop 超时后可能有后继 worker）
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("接力 worker 异常退出（%s）：%s",
+                               pair_id, t.exception())
+
+        worker.add_done_callback(_done)
         st["workers"][pair_id] = worker
 
     async def _relay_dual_worker(self, pair_id: str) -> None:
         st = self._relay_dual_state()
         turn_no = 0
         sid = ""
+        # 轮内 token 计量（本次 worker 存活期累计，来源=轮次 emits 的 usage
+        # 事件）：配合轮次上限做「无上限空转烧预算」的兜底（§4，对齐串行
+        # _relay_run_node 的 max_steps / token_budget 既有机制）
+        run_usage = {"in": 0, "out": 0}
+        # 本轮产出桶（每轮 send 前 clear）：捕获只属于本轮的 assistant 正文
+        turn_out: list[str] = []
         try:
             while True:
                 pair = await self.store.relay_pair_get(pair_id)
                 if pair is None or pair["state"] != "running":
+                    return
+                # 上限兜底（轮次累计 + 本次运行 token）：越线即暂停等人决策，
+                # 不凭「还有 auto_alternate」无上限推进
+                workflow = None
+                if getattr(self, "cfg", None) is not None:
+                    workflow = getattr(self.cfg.relay, "workflow", None)
+                if workflow is None:
+                    from ...relayconfig import RelayWorkflow as _RW
+                    workflow = _RW()
+                if int(pair["turn_no"]) >= workflow.max_steps:
+                    await self._relay_dual_park(
+                        pair_id, "relay_max_steps",
+                        f"已达接力轮次上限（{workflow.max_steps} 轮），已暂停")
+                    return
+                if run_usage["in"] + run_usage["out"] >= workflow.token_budget:
+                    await self._relay_dual_park(
+                        pair_id, "relay_token_budget",
+                        f"已达接力 token 预算（{workflow.token_budget}），已暂停")
                     return
                 side = "peer" if pair["current_side"] == "peer" else "main"
                 sid = pair["peer_session_id"] if side == "peer" else pair["main_session_id"]
@@ -468,8 +528,13 @@ class RelaySettingsMixin:
                 prev = await self._relay_dual_prev_output(pair_id, side)
                 brief = _dual_brief(pair["goal"], label, task_text,
                                     "主屏" if side == "peer" else "副屏", prev)
+                gate = await self._relay_dual_handoff_gate(pair, side, task_text, prev, brief)
+                if gate is None:
+                    return  # 交接门没过：pair 已落成暂停并写明原因，等人决策
+                brief, verify = gate
                 started = await self.store.relay_pair_start_turn(
-                    pair_id, side, brief, expected_revision=pair["revision"]
+                    pair_id, side, brief, expected_revision=pair["revision"],
+                    verify=verify,
                 )
                 if started is None:
                     await asyncio.sleep(0.05)
@@ -479,10 +544,39 @@ class RelaySettingsMixin:
                     "turn_no": turn_no, "side": side, "session_id": sid,
                 }
                 await self._relay_dual_broadcast(started)
+                # 接力执行标记（§4 第一条）：本轮的工具上下文按接力姿态收敛，
+                # shell 的 background=true 在工具层直接拒绝（模型看到中文错误
+                # 改前台执行）；轮结束即清除——用户在同一会话里的普通轮不受限。
+                # runtime 可能还没建（副屏首轮 / 重启后的主屏——send 内部才懒
+                # 建）：先把 runtime 就位再打标，否则整轮漏置位、background 拒绝
+                # 失效（交接门的盘点只是事后兜底）
+                rt_turn = self.runtimes.get(sid)
+                if rt_turn is None:
+                    await self._ready_runtime_for_send(sid, local=True)
+                    rt_turn = self.runtimes.get(sid)
+                if rt_turn is not None:
+                    rt_turn.agent.relay_execution = True
+                # 本轮产出按 emit 捕获（assistant_message 的正文）——不能回退到
+                # 「会话最后一条非空 assistant」：会话已有历史时那会把上一轮的
+                # 旧文本当成产出，空产出保护永不触发（§4：空产出不算完成）
+                turn_out.clear()
+
+                async def turn_emit(ev: dict) -> None:
+                    if ev.get("kind") == "usage":
+                        run_usage["in"] += int(ev.get("input_tokens") or 0)
+                        run_usage["out"] += int(ev.get("output_tokens") or 0)
+                    elif ev.get("kind") == "assistant_message":
+                        turn_out.append(_assistant_text_of(ev.get("message") or {}))
+                    await self._relay_dual_emit(ev)
+
                 try:
-                    result = await self.send(
-                        brief, self._relay_dual_emit, session_id=sid, local=True
-                    )
+                    try:
+                        result = await self.send(
+                            brief, turn_emit, session_id=sid, local=True
+                        )
+                    finally:
+                        if rt_turn is not None:
+                            rt_turn.agent.relay_execution = False
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - 单轮失败落成可读状态
@@ -494,7 +588,9 @@ class RelaySettingsMixin:
                         await self._relay_dual_broadcast(snapshot)
                     return
                 stopped = bool(isinstance(result, dict) and result.get("stopped"))
-                output = "" if stopped else await self._relay_dual_last_output(sid)
+                # 本轮产出 = 本轮 send 实际发出的最后一条 assistant 正文；会话
+                # 历史里更早的文本与本轮无关（空产出保护不许被旧文本顶掉）
+                output = "" if stopped else (turn_out[-1] if turn_out else "")
                 if not stopped and not output.strip():
                     # 空产出不能当作「完成」：连续交替时会空转、白烧预算
                     snapshot = await self.store.relay_pair_finish_turn(
@@ -516,12 +612,28 @@ class RelaySettingsMixin:
                 )
                 if snapshot is not None:
                     await self._relay_dual_broadcast(snapshot)
+                # 本轮已收口：之后的取消（中断/关机）落在交接门或下一轮开轮前，
+                # 没有「正在跑的轮」可标——把句柄清零，abort 走「无轮可标」分支
+                turn_no = 0
+                sid = ""
                 if stopped or not auto:
                     return
                 # 连续交替：pair 仍是 running，current_side 已翻到对方，继续下一轮
         except asyncio.CancelledError:
             await self._relay_dual_abort(pair_id, turn_no, sid)
             raise
+        except Exception as exc:  # noqa: BLE001 - worker 不许带异常死透
+            # store 写失败 / 交接门与协商链的意外异常：pair 卡在 running 就
+            # 永远「执行中」（执行按钮禁用、拒新轮、重启不自动解开）——镜像
+            # 串行路径（_relay_worker 的 except Exception → park）落成可读
+            # 暂停态；park 自身再抛也要套住，异常不能从收尾里逃逸
+            logger.warning("接力 worker 异常（%s）：%s", pair_id, exc)
+            try:
+                await self._relay_dual_park(
+                    pair_id, "relay_error",
+                    f"接力执行异常，已暂停：{str(exc)[:300]}")
+            except Exception:  # noqa: BLE001 - 收尾失败只留日志
+                logger.warning("接力 worker 异常收尾失败（%s）", pair_id)
         finally:
             # 只清理自己：stop 超时后用户可能已重新 run 起新 worker，
             # 无条件 pop 会把后继 worker 从注册表里抹掉（之后 stop 找不到它）
@@ -539,7 +651,10 @@ class RelaySettingsMixin:
                 snapshot = await self.store.relay_pair_finish_turn(
                     pair_id, turn_no, status="cancelled", output=output
                 )
-            else:
+            if snapshot is None:
+                # 轮已终态（迟到的 abort 不得把已成功的 done 轮改写成
+                # cancelled，store 层 CAS 守卫拦下）或本无在跑的轮：worker
+                # 已死无人推进，pair 还挂在 running 就落成暂停，等人决策
                 snapshot = await self.store.relay_pair_update(
                     pair_id, {"state": "paused"}, expect_states=("running",)
                 )
@@ -550,6 +665,193 @@ class RelaySettingsMixin:
                 await self._relay_dual_broadcast(snapshot)
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+
+    # ---- 交接门：外部副作用收敛 + 复述/核验（接力模式设计 §2 原则 2/3、§6） ----
+
+    async def _relay_dual_handoff_gate(
+        self, pair: dict, side: str, task_text: str, prev: str, brief: str,
+    ) -> tuple[str, dict] | None:
+        """每一轮开跑前的交接门。
+
+        1) 外部副作用收敛：两个会话名下仍有运行中/排队中的后台子代理时，
+           工作区不静止，执行权不交出去（external_effects_unknown，§4）；
+        2) 复述核验：自动交替换手且 pair 开了核验时，接收方无工具复述、
+           移交方核验，通过才开轮——「轮到它」不等于「它已接棒」（§6）。
+
+        返回 (brief, verify)；verify["state"] 为空表示本轮没走协商（人工批准、
+        首轮或关闭核验）。返回 None 表示门没过：pair 已落成暂停并广播。
+        """
+        pair_id = pair["id"]
+        effects = self._relay_dual_external_effects(
+            [pair["main_session_id"], pair["peer_session_id"]]
+        )
+        if effects:
+            names = "；".join(
+                f"「{(e['prompt'] or e['id'] or '后台任务')[:80]}」（{e['id'] or '状态未知'}）"
+                for e in effects[:3]
+            )
+            more = f" 等共 {len(effects)} 项" if len(effects) > 3 else ""
+            await self._relay_dual_park(
+                pair_id, "external_effects_unknown",
+                f"开轮前检查到仍有后台任务在运行{more}：{names}。"
+                "这些任务还可能改动工作区，请等它完成或取消后，再点执行继续。",
+            )
+            return None
+        if not (prev.strip() and bool(pair.get("auto_alternate"))
+                and bool(pair.get("verify_handoff", True))):
+            # 没有交接材料（首轮），或由人工逐轮批准，或 pair 关闭了核验
+            return brief, {"state": "", "attempts": 0, "restatement": "", "note": ""}
+        verify = await self._relay_dual_negotiate(pair, side, task_text, prev)
+        if verify is None:
+            return None
+        brief = brief + "\n\n【交接复述（接收方提交，已通过移交方核验）】\n" + verify["restatement"]
+        return brief, verify
+
+    def _relay_dual_external_effects(self, session_ids: list[str]) -> list[dict]:
+        """外部副作用盘点：给定会话名下仍在运行/排队中的后台子代理任务，
+        加上仍存活的后台命令进程树（shell 的 background=true 登记面）。
+
+        这些任务/进程在轮次结束后仍可能读写共享工作区——「进程号消失」不等于
+        副作用停止，证明不了静止就暂停（§4）。任务簿查询失败同样按未知处理，
+        宁可暂停也不静默放行。
+        """
+        effects: list[dict] = []
+        for tm in list(getattr(self, "_project_tasks", {}).values()):
+            for sid in session_ids:
+                try:
+                    rows = tm.list_tasks(limit=50, session_id=sid)
+                except Exception:  # noqa: BLE001 - 查不了即未知
+                    effects.append({"kind": "subagent", "id": "", "prompt": "任务簿读取失败"})
+                    continue
+                for row in rows:
+                    if row["status"] in ("running", "queued"):
+                        effects.append({
+                            "kind": "subagent", "id": row["id"], "prompt": row["prompt"],
+                        })
+        # 后台命令存活盘点（§4 第三条：复用 2.6.4 的后台进程登记面做 pid/
+        # 进程树存活检查）——接力开始前就在跑的后台命令同样属于屏障检查
+        for sid in session_ids:
+            for row in bg_processes_for_session(sid):
+                effects.append({
+                    "kind": "background_process", "id": str(row["id"]),
+                    "prompt": row["command"], "os_pid": row["os_pid"],
+                })
+        return effects
+
+    async def _relay_dual_park(self, pair_id: str, code: str, message: str) -> None:
+        """交接门没过：pair 落成暂停并写明原因；不偷偷换边、不自动重试。"""
+        snapshot = await self.store.relay_pair_update(
+            pair_id, {"state": "paused", "error": {"code": code, "message": message}},
+            expect_states=("running",),
+        )
+        if snapshot is not None:
+            await self._relay_dual_broadcast(snapshot)
+
+    def _relay_dual_side_provider(self, session_id: str):
+        """会话当前生效模型的独立 provider，返回 (provider, owned)。
+
+        owned=True（自建）用完必须释放；工厂注入的共享实例（测试/演示）一律
+        视为不拥有，绝不关闭。构建失败返回 None，由调用方暂停并说明。
+        """
+        try:
+            name, model = self._session_effective_model(session_id)
+        except Exception:  # noqa: BLE001 - 会话模型解析失败按不可用处理
+            return None
+        if not name:
+            return None
+        try:
+            provider = self._build_detached_provider(name, model or None)
+        except Exception:  # noqa: BLE001 - 服务被删/配置损坏：按不可用暂停
+            return None
+        return provider, self._provider_factory_override is None
+
+    async def _relay_dual_negotiate(
+        self, pair: dict, side: str, task_text: str, prev: str,
+    ) -> dict | None:
+        """复述/核验协商：接收方无工具复述 → 移交方核验 → 服务端结构校验。
+
+        返回 {"state": "passed", "attempts", "restatement", "note"}；尝试用尽仍
+        不通过则落成暂停并返回 None。结构校验在服务端——移交方的「通过」不能
+        覆盖复述缺节、超长这类结构性失败；驳回理由喂回下一轮复述。
+        """
+        pair_id = pair["id"]
+        receiver_sid = pair["peer_session_id"] if side == "peer" else pair["main_session_id"]
+        handover_sid = pair["main_session_id"] if side == "peer" else pair["peer_session_id"]
+        label = "副屏" if side == "peer" else "主屏"
+        handover_label = "主屏" if side == "peer" else "副屏"
+        built_r = self._relay_dual_side_provider(receiver_sid)
+        built_h = self._relay_dual_side_provider(handover_sid)
+        if built_r is None or built_h is None:
+            await self._relay_dual_park(
+                pair_id, "relay_provider_error",
+                "复述核验需要的模型服务不可用（会话所选服务可能已被删除或停用）",
+            )
+            return None
+        receiver_prov, owned_r = built_r
+        handover_prov, owned_h = built_h
+        last_fail = ""
+        rejects: list[str] = []
+        try:
+            for attempt in range(1, _RELAY_VERIFY_ATTEMPTS + 1):
+                await self._relay_dual_emit({
+                    "kind": "relay_pair_verify",
+                    "relay": {"pair_id": pair_id, "side": side, "stage": "restating",
+                              "attempt": attempt, "attempts": _RELAY_VERIFY_ATTEMPTS},
+                })
+                try:
+                    result = await run_node_text(
+                        receiver_prov,
+                        _restatement_messages(
+                            pair["goal"], label, task_text, handover_label, prev,
+                            await self._relay_dual_prev_output(pair_id, "main" if side == "peer" else "peer"),
+                        ),
+                        timeout_s=_RELAY_VERIFY_TIMEOUT,
+                        max_output_chars=_RELAY_RESTATEMENT_MAX_CHARS * 4,
+                    )
+                except (RelayLimitError, RelayProtocolError, ProviderError) as exc:
+                    last_fail = f"复述模型调用失败：{str(exc)[:200]}"
+                    continue
+                text = result["text"].strip()
+                if _parse_restatement(text) is None:
+                    last_fail = "复述缺少必需小节、小节为空或超过长度上限"
+                    continue
+                await self._relay_dual_emit({
+                    "kind": "relay_pair_verify",
+                    "relay": {"pair_id": pair_id, "side": side, "stage": "verifying",
+                              "attempt": attempt, "attempts": _RELAY_VERIFY_ATTEMPTS},
+                })
+                try:
+                    vresult = await run_node_text(
+                        handover_prov,
+                        _verdict_messages(handover_label, prev, text),
+                        timeout_s=_RELAY_VERIFY_TIMEOUT,
+                        max_output_chars=_RELAY_MAX_OUTPUT_CHARS,
+                    )
+                except (RelayLimitError, RelayProtocolError, ProviderError) as exc:
+                    last_fail = f"核验模型调用失败：{str(exc)[:200]}"
+                    continue
+                verdict = _parse_verdict(vresult["text"])
+                if verdict["verdict"] == "pass":
+                    note = ("；".join(rejects)[:500]) if rejects else ""
+                    return {"state": "passed", "attempts": attempt,
+                            "restatement": text, "note": note}
+                reason = "、".join(
+                    part for part in (verdict["missing"], verdict["corrections"], verdict["reason"])
+                    if part
+                )
+                last_fail = f"移交方驳回：{reason[:300] or '未给出理由'}"
+                rejects.append(f"第 {attempt} 次{last_fail}")
+        finally:
+            if owned_r:
+                await _safe_aclose(receiver_prov)
+            if owned_h:
+                await _safe_aclose(handover_prov)
+        await self._relay_dual_park(
+            pair_id, "relay_verification_failed",
+            f"交接复述核验未通过（{_RELAY_VERIFY_ATTEMPTS} 次）：{last_fail}。"
+            "已暂停；可点「执行」由你确认后继续，或关闭「交接前复述核验」。",
+        )
+        return None
 
     async def _relay_dual_prev_output(self, pair_id: str, side: str) -> str:
         """对方最近一次成功的输出（交接材料）；没有就返回空串。"""
@@ -712,6 +1014,71 @@ class RelaySettingsMixin:
 
     async def _relay_shutdown(self) -> None:
         """shutdown 中调用：优先停止并等待 worker 收尾，再释放独占锁。"""
+        # 冻结与关机共用同一套取消与收尾（relay_freeze_all 多清的 locks/
+        # start_locks 对关机无害——进程都要退出了）
+        await self.relay_freeze_all()
+        self._relay_release_exclusive()
+        self._relay_state()["locked"] = False
+
+    # ---- 破坏性操作的级联收敛（接力模式设计 §7：会话删除/清项目/恢复备份
+    # 必须先停止并收敛关联接力；导入备份/替换 store 先冻结。活动链不做级联
+    # 隐删——停到终态后删除，库内历史行保留只读） ----
+
+    async def _relay_cancel_serial_worker(self, task_id: str) -> None:
+        t = self._relay_state()["workers"].get(task_id)
+        if t is not None and not t.done():
+            t.cancel()
+            try:
+                await asyncio.wait_for(t, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            except Exception:  # noqa: BLE001 - 收尾异常不影响收敛本身
+                pass
+        self._relay_state()["workers"].pop(task_id, None)
+
+    async def _relay_cancel_dual_worker(self, pair_id: str) -> None:
+        st = self._relay_dual_state()
+        current = st["current"].get(pair_id)
+        if current:
+            self.cancel_run(current["session_id"])
+        task = st["workers"].get(pair_id)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            except Exception:  # noqa: BLE001 - 收尾异常不影响收敛本身
+                pass
+        st["workers"].pop(pair_id, None)
+        st["current"].pop(pair_id, None)
+
+    def relay_inflight(self) -> list[str]:
+        """在飞接力清单（worker 活着的串行任务与主副屏 pair）。
+
+        备份/导出的预检用：接力 worker 的写不在 runtimes 的 run_task 视野里
+        （串行路径走 detached provider，主副屏轮间隙也不挂 run_task），
+        _backup_busy_message 看不见它们，这里单独盘点。
+        """
+        out: list[str] = []
+        st = self._relay_state()
+        for tid, t in st["workers"].items():
+            if t and not t.done():
+                out.append(f"接力任务 {tid[:8]}…")
+        dst = self._relay_dual_state()
+        for pid, t in dst["workers"].items():
+            if t and not t.done():
+                out.append(f"主副屏接力 {pid[:8]}…")
+        return out
+
+    async def relay_freeze_all(self) -> None:
+        """替换会话库前冻结全部接力运行（§7：导入备份/替换 store 先冻结）。
+
+        取消串行与主副屏 worker 并等待收尾，清掉内存登记（worker / current /
+        locks）——之后旧内存 owner 不再复用。不动库行、不释放数据目录独占锁
+        （锁随 store 路径继续有效）；替换完成后由 relay_after_store_replace
+        按重启恢复。失败路径保持冻结（调用方不自动重启接力）。
+        """
         await self._relay_dual_shutdown()
         st = self._relay_state()
         for t in list(st["workers"].values()):
@@ -723,11 +1090,82 @@ class RelaySettingsMixin:
                 await asyncio.wait_for(
                     asyncio.gather(*workers, return_exceptions=True), timeout=5.0
                 )
-            except Exception:  # noqa: BLE001 - 收尾不阻断关机
+            except Exception:  # noqa: BLE001 - 收尾不阻断后续操作
                 pass
         st["workers"].clear()
-        self._relay_release_exclusive()
-        st["locked"] = False
+        st["locks"].clear()
+        st["start_locks"].clear()
+
+    async def relay_converge_for_deletion(
+        self, *, session_id: str = "", project_id: int | None = None,
+    ) -> list[dict]:
+        """删除会话/清项目前的级联收敛（§7：必须先停止关联接力并收敛）。
+
+        找出涉及该会话（串行任务的绑定会话、pair 的主/副任一侧）或该项目的
+        非终态接力：取消在飞 worker，把任务/pair 标成 interrupted 并附原因；
+        已终态/已中断的不动（只读历史保留，不做级联隐删）。返回收敛条目
+        （task/pair 标识与新状态），供调用方在删除结果里说明关联历史。
+        """
+        if self.store is None:
+            return []
+        reason = {
+            "code": "relay_interrupted",
+            "message": "关联会话或项目被删除，接力已收敛停止；历史保留只读",
+        }
+        converged: list[dict] = []
+        # 串行路径：绑定会话命中，或项目命中
+        if session_id:
+            tasks = await self.store.relay_tasks_by_session(session_id)
+        elif project_id is not None:
+            tasks = await self.store.relay_list_tasks(project_id, limit=1000)
+        else:
+            tasks = []
+        for task in tasks:
+            if task["state"] not in ("running", "waiting_confirmation",
+                                     "paused", "stopping"):
+                continue  # 终态 / 已中断：不动
+            await self._relay_cancel_serial_worker(task["id"])
+            snap = await self.store.relay_mutate(
+                task["id"], new_state="interrupted",
+                expect_states=("running", "waiting_confirmation", "paused", "stopping"),
+                error=reason,
+            )
+            if snap is not None:
+                await self._relay_broadcast(snap)
+                converged.append({"kind": "task", "id": task["id"],
+                                  "state": "interrupted"})
+        # 主副屏路径
+        if session_id:
+            pairs = await self.store.relay_pairs_by_session(session_id)
+        elif project_id is not None:
+            pairs = await self.store.relay_pair_list(project_id, limit=1000)
+        else:
+            pairs = []
+        for pair in pairs:
+            if pair["state"] not in ("running", "idle", "paused"):
+                continue  # 已中断：不动
+            await self._relay_cancel_dual_worker(pair["id"])
+            snap = await self.store.relay_pair_update(
+                pair["id"], {"state": "interrupted", "error": reason})
+            if snap is not None:
+                await self._relay_dual_broadcast(snap)
+                converged.append({"kind": "pair", "id": pair["id"],
+                                  "state": "interrupted"})
+        return converged
+
+    async def relay_after_store_replace(self) -> None:
+        """会话库被整体替换（备份恢复 / 完整导入）后的按重启恢复（§7）。
+
+        冻结已完成（worker 登记已清，不复用旧内存 owner）；新库里的非终态
+        任务与 running 的 pair 标 interrupted（generation/revision 前推使旧
+        token 作废），不自动重放。数据目录独占锁随 store 路径继续有效，
+        无需重取。
+        """
+        if self.store is None:
+            return
+        n = await self.store.relay_mark_interrupted(self._relay_state()["instance"])
+        if n:
+            logger.info("接力：会话库已替换，%d 个非终态任务按重启恢复标为中断", n)
 
     def _relay_worker_live(self, task_id: str) -> bool:
         t = self._relay_state()["workers"].get(task_id)
@@ -1395,6 +1833,93 @@ def _dual_brief(goal: str, label: str, task: str, peer_label: str, prev: str) ->
         parts.append("这是接力的第一轮，还没有上一轮输出。")
     parts.append("请只完成你这一轮的任务，输出要能直接交给对方继续处理。")
     return "\n\n".join(parts)
+
+
+_NO_TOOL_SYSTEM = (
+    "你正在参与一次「接力」会话交接的只读协商环节：你没有任何工具可用，"
+    "绝不要请求、模拟或假称调用了任何工具，只输出文本。"
+)
+
+
+def _restatement_messages(
+    goal: str, label: str, task: str, handover_label: str, prev: str, own_prev: str,
+) -> list[Message]:
+    """接收方的复述请求：无工具、固定五节，供服务端做结构校验与移交方核验。"""
+    lines = [
+        f"【接力交接 · 复述】你是接收方（{label}）。执行权即将由 {handover_label} 交给你，"
+        "交接前请先只读复述你对当前局面的理解，不要执行任何操作。",
+        f"总任务：{goal.strip()}",
+        f"你每一轮的常驻任务：{task.strip()}",
+        f"{handover_label}刚完成的输出：\n{prev.strip()}",
+    ]
+    if own_prev.strip():
+        lines.append(f"你上一轮的输出：\n{own_prev.strip()}")
+    lines.append(
+        "请严格按以下小节输出（每节一行标题加正文，除这五节外不要输出别的内容）：\n"
+        "【目标】用一句话写你理解的总任务\n"
+        "【已完成】双方到目前为止已完成的关键结果\n"
+        "【待办】本轮开始前仍未完成的部分\n"
+        "【计划】你这一轮打算做什么\n"
+        "【不确定】你不确定、需要对方确认的点（没有则写「无」）"
+    )
+    return [Message.system(_NO_TOOL_SYSTEM), Message.user("\n\n".join(lines))]
+
+
+def _verdict_messages(handover_label: str, prev: str, restatement: str) -> list[Message]:
+    """移交方的核验请求：对照自己刚完成的输出核收对方的复述。"""
+    lines = [
+        f"【接力交接 · 核验】你是移交方（{handover_label}）。接收方在接棒前提交了复述，"
+        "请核对它是否准确理解了交接内容：目标、已完成、待办有没有遗漏或曲解。",
+        f"你刚完成的输出：\n{prev.strip()}",
+        f"接收方的复述：\n{restatement.strip()}",
+        "请严格按以下格式输出（除这四行外不要输出别的内容）：\n"
+        "结论：通过 或 结论：驳回\n"
+        "【缺漏】复述遗漏的关键信息（通过时写「无」）\n"
+        "【纠正】需要纠正的错误理解（通过时写「无」）\n"
+        "【理由】一句话说明通过或驳回的原因",
+    ]
+    return [Message.system(_NO_TOOL_SYSTEM), Message.user("\n\n".join(lines))]
+
+
+def _parse_restatement(text: str) -> dict | None:
+    """复述的结构校验：五个小节齐全且各有正文、总长不超限才算有效。
+
+    只认小节存在与内容非空，不要求出现顺序——模型偶尔调整小节次序不该把
+    一份内容正确的复述打成结构失败；缺节或空节才是真正无法核验的信号。
+    """
+    if not text or len(text) > _RELAY_RESTATEMENT_MAX_CHARS:
+        return None
+    bounds: list[tuple[str, int]] = []
+    for marker in _RELAY_RESTATEMENT_SECTIONS:
+        idx = text.find(marker)
+        if idx < 0:
+            return None
+        bounds.append((marker, idx))
+    bounds.sort(key=lambda item: item[1])
+    for i, (marker, idx) in enumerate(bounds):
+        end = bounds[i + 1][1] if i + 1 < len(bounds) else len(text)
+        if not text[idx + len(marker):end].strip():
+            return None
+    return {"sections": [marker for marker, _ in bounds]}
+
+
+def _parse_verdict(text: str) -> dict:
+    """核验结论解析：只认「结论：通过 / 结论：驳回」；认不出按未通过处理。"""
+    out = {"verdict": "", "missing": "", "corrections": "", "reason": ""}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("结论：") or line.startswith("结论:"):
+            value = line.replace("：", ":", 1).split(":", 1)[-1].strip()
+            if value.startswith("通过"):
+                out["verdict"] = "pass"
+            elif value.startswith("驳回"):
+                out["verdict"] = "reject"
+            break
+    for marker, key in (("【缺漏】", "missing"), ("【纠正】", "corrections"), ("【理由】", "reason")):
+        idx = text.find(marker)
+        if idx >= 0:
+            out[key] = text[idx + len(marker):].split("【", 1)[0].strip()[:600]
+    return out
 
 
 def _ordered(workflow: RelayWorkflow) -> list[str]:

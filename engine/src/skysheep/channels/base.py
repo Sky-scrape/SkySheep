@@ -29,6 +29,10 @@ class ChannelMessage:
     text: str = ""
     approved: bool = False  # 来源是否在允许名单内
     raw: dict = field(default_factory=dict)
+    # 对抗轮标记（对抗模式设计 §12 二期）：渠道消息不直接带这个字段——
+    # 由 ChannelManager 的命令解析在收到 /对抗 时改写文本并就地标记，
+    # 排队/合并路径据此把本轮送进带 adversarial 标志的执行链
+    adversarial: bool = False
     # 话题/线程键（飞书话题、群内 thread）：同一个 chat 里多段互不相干的讨论
     # 不该挤进同一个会话，否则上下文互相污染。平台给不出时留空 = 退回按 chat_id
     # 分会话（与改造前行为完全一致）。

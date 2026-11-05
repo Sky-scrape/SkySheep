@@ -702,6 +702,30 @@ def _bg_list(sid: str = "") -> str:
     return "\n".join(lines)
 
 
+def bg_processes_for_session(sid: str = "") -> list[dict]:
+    """按启动会话盘点仍在运行的后台命令（接力收敛屏障的存活盘点，§4）。
+
+    返回 [{id, os_pid, command, state}]；只列进程还活着的记录——已退出的
+    记录不是「存活」，其结束提示已随 watcher 注入启动会话。owner 为空的
+    旧态记录（CLI / 无会话态启动）不归属任何会话，不进会话视角的盘点。
+    """
+    sid = sid or ""
+    out: list[dict] = []
+    for bid, st in list(_BG.items()):
+        if not _bg_owned(bid, st, sid):
+            continue
+        proc = st.get("proc")
+        if proc is None or proc.poll() is not None:
+            continue  # 已退出：不是存活进程
+        out.append({
+            "id": bid,
+            "os_pid": getattr(proc, "pid", 0),
+            "command": str(st.get("command") or ""),
+            "state": "running",
+        })
+    return out
+
+
 def _bg_gc() -> None:
     """清理已退出超过 30 分钟的后台记录（缓冲与作业句柄随记录一起丢弃）。"""
     now = time.time()
@@ -788,6 +812,14 @@ class RunCommandTool(Tool):
             return _bg_list(ctx.session_id)
         if not args.command.strip():
             raise ToolError("command 不能为空")
+        if args.background and getattr(ctx, "relay_execution", False):
+            # 接力执行轮（接力模式设计 §4 第一条）：后台进程脱离本轮生命
+            # 周期，交接屏障证明不了它静止——明确中文拒绝，让模型改前台
+            raise ToolError(
+                "接力执行中不允许后台运行（background=true 会派生脱离本轮的"
+                "常驻进程，接力屏障无法证明它已静止）；请去掉 background=true "
+                "改为前台执行。"
+            )
         workdir = require_working_dir(ctx)  # 无项目态：没有 cwd 可落，给可读拒绝
         _bg_gc()
         argv = _shell_argv(args.command)  # 参数列表形式（shell=False），与前台路径一致

@@ -109,10 +109,12 @@ function trTrackRoom(teamId, latestSeq, sid) {
 // 更高（服务端 WS 单连接 FIFO，回包不早于发出前的事件，max 只防乱序抵达）
 function trCalibrateStarted(sid) {
   const gen = ++trCalGen;
+  const sideEpoch = trSideEpoch; // 侧栏角标同批校准：在途时团队先行终态则不作数
   request("team.room", sid ? { session_id: sid } : {})
     .then((r) => {
       // 迟到的回包不作数：期间又起队或权威校准（trTrackRoom）已接手
       if (gen !== trCalGen || trTeamId) return;
+      if (sideEpoch !== trSideEpoch) return; // 团队已终态：侧栏角标的活动对齐不作数
       if (!r || !r.active || !r.team) return;
       trSid = sid || "";
       trTeamId = String(r.team.team_id || "");
@@ -120,6 +122,7 @@ function trCalibrateStarted(sid) {
       if (latest > trLatestSeq) trLatestSeq = latest;
       if (trTabVisible()) trMarkSeen(trTeamId, trLatestSeq);
       trSyncBadge();
+      trSideAlign(r.team, sid || ""); // 侧栏角标（§15.3.5）：起队即对齐，页签没开也计数
     })
     .catch(() => { /* 探针失败：等下一次装载（loadTeamRoom）的权威校准兜底 */ });
 }
@@ -151,6 +154,110 @@ function trSyncBadge() {
   }
   b.textContent = String(n);
 }
+
+// ---------- 侧栏「团队」常驻入口角标（§15.3.5，常驻团队 T3.2 落地后增设） ----------
+// 侧栏项点击开团队室页签（app.js 导航分发 data-act="teamroom"，展开态 .nav-item
+// 与折叠栏 #rail-team 两处入口）；角标计「活动团队数」＝常驻登记的团队 + 当前
+// 会话进行中的团队（去重）。数据面纯前端、不新增后端方法：
+// · 当前会话进行中的团队以 team.get / team.room 的权威回包对齐——切会话的
+//   refreshTeamState、团队室装载 loadTeamRoom、起队校准 trCalibrateStarted
+//   三处顺路喂入，不另发探针；
+// · 跨会话的锚是常驻登记册 ~/.skysheep/team_resident.json 的 team_id 集合——
+//   后端有意不给枚举入口（resident_get 只按 id 探询，dispatch 仅本机），本页
+//   维护镜像（localStorage，沿 skysheep.team.members 既有先例）：凡从权威信号
+//   （快照/回包的 resident 标志、resident_get 探询、set/clear 回包）得知某队
+//   的登记真值就并入，正负都收，镜像向册子收敛。册子里本页从未探过的登记
+//   计数不到（少计不虚计），下次探到即补上；多开窗口各自持镜像，同以权威
+//   信号收敛（--browser 跨端口属不同 origin，各自重收敛）。
+
+const TR_SIDE_LS_KEY = "skysheep.team.resident_ids";
+let trResidentIds = null; // 常驻登记镜像（Set<team_id>，懒加载自 localStorage）
+let trSideSid = "";       // 角标对齐的会话（切会话/装载时由权威回包喂入）
+let trSideTeamId = "";    // 该会话进行中的团队（权威回包的 team_id）
+let trSidePending = false; // 起队事件已见、team_id 未校准（探针回包前也即时 +1）
+let trSideEpoch = 0;      // 终态代次：活动对齐在途时团队先行终态，迟到的校准不作数
+
+function trSideLoad() {
+  if (trResidentIds) return trResidentIds;
+  trResidentIds = new Set();
+  try {
+    const raw = JSON.parse(localStorage.getItem(TR_SIDE_LS_KEY) || "[]");
+    if (Array.isArray(raw)) {
+      raw.forEach((id) => { id = String(id || "").trim(); if (id) trResidentIds.add(id); });
+    }
+  } catch (e) { /* 坏数据不致命：按空镜像起，下次权威信号重收敛 */ }
+  return trResidentIds;
+}
+
+function trSideSave() {
+  try { localStorage.setItem(TR_SIDE_LS_KEY, JSON.stringify([...trResidentIds])); } catch (e) {}
+}
+
+// 权威常驻真值并入镜像（正负都收：登记了收进来、确认解除了剔出去）并同步角标
+function trSideNote(teamId, resident) {
+  teamId = String(teamId || "").trim();
+  if (!teamId) return;
+  const ids = trSideLoad();
+  if (resident ? ids.has(teamId) : !ids.has(teamId)) return; // 无变化不落盘
+  if (resident) ids.add(teamId); else ids.delete(teamId);
+  trSideSave();
+  trSyncSideBadge();
+}
+
+// 会话级活动团队对齐（team.get / team.room 权威回包）：team 非空 = 该会话有
+// 进行中的团队（顺路并入常驻真值）；null = 没有（清位）。调用方只在对齐时刻
+// 的当前会话上调（refreshTeamState / loadTeamRoom 各自挡住过期回包）
+function trSideAlign(team, sid) {
+  sid = String(sid || "");
+  if (!sid) return;
+  trSideSid = sid;
+  trSidePending = false;
+  trSideTeamId = team ? String(team.team_id || "") : "";
+  if (team && team.team_id) trSideNote(team.team_id, team.resident === true);
+  trSyncSideBadge();
+}
+
+// 角标计数：常驻镜像 ∪ 当前会话进行中的团队（去重）
+function trSideBadgeCount() {
+  const ids = trSideLoad();
+  let n = ids.size;
+  if ((trSidePending || trSideTeamId) && !ids.has(trSideTeamId)) n += 1;
+  return n;
+}
+
+// 角标上屏：展开态（#nav-team-badge）与折叠栏（#rail-team-badge）一起；
+// 无团队时隐藏（常驻入口常在，角标只反映「有团队在场」）
+function trSyncSideBadge() {
+  const n = trSideBadgeCount();
+  [["nav-team-badge", "nav-badge"], ["rail-team-badge", "rail-badge"]].forEach(([id, cls]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = cls + (n ? "" : " hidden");
+    el.textContent = n ? String(n) : "";
+  });
+}
+
+// 五团队事件同源喂角标（trRoomFeed 入口转发，与团队卡/页签同一事件流）：
+// 起队即时 +1（team_id 未校准先记 pending，起队校准回包对齐），终态清位；
+// 别的会话的事件不进角标（角标的「进行中」只对当前会话口径）
+function trSideFeed(name, data) {
+  const sid = String((data && data.session_id) || "");
+  if (sid && trSideSid && sid !== trSideSid) return;
+  if (name === "trOnStarted") {
+    trSidePending = true;
+    trSyncSideBadge();
+  } else if (name === "trOnFinish") {
+    if (!trSidePending && !trSideTeamId) return; // 本就没有进行中的团队：不动
+    trSidePending = false;
+    trSideTeamId = "";
+    trSideEpoch++;
+    trSyncSideBadge();
+  }
+}
+
+// 模块装载即画一次：镜像里已有的常驻登记让角标在重启后立刻在场（不等第一
+// 次 team.get 对齐；登记集只在 UI 的 set/clear 上变化，镜像跨刷新仍准）
+trSyncSideBadge();
 
 // ---- 容器：复用 buildTeamCard 整卡，重排成三分区 ----
 
@@ -209,12 +316,14 @@ async function loadTeamRoom(force) {
   }
   if (r && r.active && r.team) {
     trTrackRoom(r.team.team_id, r.latest_seq, sid); // 水位校准在挂卡前（进室即清零）
+    trSideAlign(r.team, sid); // 侧栏角标（§15.3.5）：当前会话进行中的团队对齐 + 常驻真值并入
     trMountSnapshot(root, r.team, sid);
     return;
   }
   // 无活动团队：badge 无从谈起（§15.4 的 badge 行只覆盖「页签在后台而团队在
   // 推进」），水位归零，等下一支队伍
   trTrackRoom("", 0, sid);
+  trSideAlign(null, sid); // 侧栏角标（§15.3.5）：本会话没有进行中的团队，清位（中断记录不算在场）
   // 非活动：先看中断记录（重启/切项目前的团队），空态卡附只读回放入口
   if (r && r.interrupted && r.interrupted.team_id) {
     trRenderEmpty(root, { interrupted: r.interrupted });
@@ -358,6 +467,7 @@ function trOpenInterruptedReplay(rec) {
 // ---- 事件转发：五团队事件同源喂团队室（app.js 的 trRoomFeed 入口） ----
 
 function trRoomFeed(name, data) {
+  trSideFeed(name, data); // 侧栏「团队」角标同一事件源（§15.3.5，见下方角标节）
   const fn = { trOnStarted, trOnDelta, trOnMsg, trOnTask, trOnFinish }[name];
   if (fn) fn(data);
 }

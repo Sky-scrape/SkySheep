@@ -138,6 +138,11 @@ function relayDualFillInputs() {
   if (auto && document.activeElement !== auto) {
     auto.checked = !!(pair && pair.auto_alternate);
   }
+  const verify = relayEl("relay-verify-handoff");
+  if (verify && document.activeElement !== verify) {
+    // 未传 verify_handoff 的旧后端没有这个键：保持勾选默认（开）
+    verify.checked = pair ? pair.verify_handoff !== false : true;
+  }
 }
 
 function relayDualTurnPreview(turn) {
@@ -176,7 +181,22 @@ function relayDualRenderTurns() {
       running: "执行中", done: "已完成", cancelled: "已中断", error: "失败",
     }[turn.status] || turn.status;
     head.appendChild(no);
-    head.appendChild(state);
+    if (turn.verify_state === "passed") {
+      // 交接门的留痕：这一轮是复述通过移交方核验后才开跑的
+      const badge = document.createElement("span");
+      badge.className = "relay-verify-badge";
+      badge.textContent = turn.verify_attempts > 1
+        ? `复述核验通过·${turn.verify_attempts}次`
+        : "复述核验通过";
+      badge.title = (turn.restatement || "") + (turn.verify_note ? `\n\n此前驳回：${turn.verify_note}` : "");
+      const right = document.createElement("span");
+      right.className = "relay-turn-right";
+      right.appendChild(state);
+      right.appendChild(badge);
+      head.appendChild(right);
+    } else {
+      head.appendChild(state);
+    }
     const body = document.createElement("p");
     body.className = "relay-turn-text";
     body.textContent = relayDualTurnPreview(turn);
@@ -234,7 +254,9 @@ function relayDualRender() {
   if (running) {
     relayStatus(`第 ${pair.turn_no + 1} 轮  ${side}正在执行…`);
   } else if (state === "paused") {
-    relayStatus(`已中断  点「让${side}执行」继续`);
+    relayStatus(pair.error && pair.error.message
+      ? `已暂停：${pair.error.message}`
+      : `已中断  点「让${side}执行」继续`);
   } else if (state === "interrupted") {
     relayStatus(`上次中断  点「让${side}执行」继续`);
   } else if (pair.error && pair.error.message) {
@@ -279,12 +301,14 @@ async function relayDualRun() {
     return;
   }
   const pair = relayPair();
+  const verifyEl = relayEl("relay-verify-handoff");
   const params = {
     session_id: String(sid),
     goal,
     main_task: mainTask,
     peer_task: peerTask,
     auto_alternate: !!(autoEl && autoEl.checked),
+    verify_handoff: !verifyEl || !!verifyEl.checked,
     request_id: relayRequestId(),
     expected_revision: pair ? pair.revision : 0,
   };
@@ -350,6 +374,7 @@ function relayDualScheduleSave() {
     const mainTaskEl = relayEl("relay-main-task");
     const peerTaskEl = relayEl("relay-peer-task");
     const autoEl = relayEl("relay-auto-alternate");
+    const verifyEl = relayEl("relay-verify-handoff");
     try {
       const data = await request("relay.dual_save", {
         pair_id: relayDualPairId,
@@ -357,6 +382,7 @@ function relayDualScheduleSave() {
         main_task: (mainTaskEl && mainTaskEl.value || "").trim(),
         peer_task: (peerTaskEl && peerTaskEl.value || "").trim(),
         auto_alternate: !!(autoEl && autoEl.checked),
+        verify_handoff: !verifyEl || !!verifyEl.checked,
       });
       if (data && data.pair && relayDualPairId === data.pair.id) {
         relayDual = { ...(relayDual || {}), ...data, pair: data.pair, turns: data.turns || [] };
@@ -439,7 +465,20 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   const auto = relayEl("relay-auto-alternate");
   if (auto) auto.addEventListener("change", relayDualScheduleSave);
+  const verifyBox = relayEl("relay-verify-handoff");
+  if (verifyBox) verifyBox.addEventListener("change", relayDualScheduleSave);
 });
+
+/** 交接门进度（后端 relay_pair_verify 帧）：看板状态行提示复述/核验进行到第几次。 */
+function relayOnVerify(frame) {
+  if (!frame || !relayDualPairId || frame.pair_id !== relayDualPairId) return;
+  const at = `${frame.attempt || 1}/${frame.attempts || 3}`;
+  if (frame.stage === "restating") {
+    relayStatus(`交接复述中（第 ${at} 次）…`);
+  } else if (frame.stage === "verifying") {
+    relayStatus(`交接核验中（第 ${at} 次）…`);
+  }
+}
 
 /** 副屏会话被删除（侧栏/标签/另一窗口）：看板同步回到「未创建」。 */
 function relayPeerDeleted(sid) {

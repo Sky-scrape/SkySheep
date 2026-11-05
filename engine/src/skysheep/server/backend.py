@@ -7705,6 +7705,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         is_current = self.project is not None and project_id == self.project.id
         if is_current and self._run_task and not self._run_task.done():
             raise RuntimeError("当前有任务正在运行，请先停止再删除项目")
+        # 接力级联收敛（接力模式设计 §7：清项目必须先停止并收敛关联接力，
+        # 活动链不做级联隐删——停到终态再删，库内历史行保留只读）
+        relay_converged = await self.relay_converge_for_deletion(
+            project_id=project_id)
         proj = await self.store.get_project(project_id)
         removed = await self.store.delete_project(project_id)
         if not removed:
@@ -7717,7 +7721,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             cp_root = self._checkpoint_root_for(Path(proj.root_path))
             await asyncio.to_thread(shutil.rmtree, cp_root, True)
         if not is_current:
-            return {"removed": project_id, "was_current": False}
+            return {"removed": project_id, "was_current": False,
+                    "relay_converged": relay_converged}
         # 删的是当前项目：不再为同一目录重建记录；还有别的项目就接上最近的，
         # 一个都不剩就进入无项目态（列表为空，快聊继续可用）。
         # 「远程连接」是固定项目（无真实目录），不计入候选——否则删完所有
@@ -7736,11 +7741,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             return {
                 "removed": project_id, "was_current": True,
                 "switched_to": {"path": str(self.project.root_path), "name": self.project.name},
+                "relay_converged": relay_converged,
             }
         await self._bind_project(None)
         self.session = None
         self._base_agent.load_history([Message.system(self.compose_system())])
-        return {"removed": project_id, "was_current": True, "switched_to": None}
+        return {"removed": project_id, "was_current": True, "switched_to": None,
+                "relay_converged": relay_converged}
 
 
     # 字符串型偏好（值域白名单）：theme 值域见模块级 THEME_PREFS
@@ -8343,6 +8350,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         busy = self._backup_busy_message("导入")
         if busy:
             raise RuntimeError(busy)
+        # 接力冻结（接力模式设计 §7：导入备份/替换 store 先冻结与收敛接力；
+        # 库文件将被整体替换，按重启恢复在 _rebuild_after_db_replace 内做）
+        await self.relay_freeze_all()
         path = self._full_import_zip_path(params)
         home = skysheep_home()
         out_dir = home / "exports"

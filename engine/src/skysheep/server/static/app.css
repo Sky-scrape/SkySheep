@@ -3216,6 +3216,24 @@ mark.search-hit-mark {
   border-radius: var(--r-pill); padding: 0 6px;
 }
 
+/* 侧栏「团队」常驻入口的活动团队数角标（团队模式设计 §15.3.5，常驻团队 T3.2
+   落地后增设）：展开态挂条目文字右端（.nav-item 是 flex，margin-left:auto 顶到
+   行尾），折叠态挂图标右上角（同 .tb-badge 的计数泡位）。计数与配色全走主题
+   变量，与页签未读 badge 同一金色族——都是「团队有动静」的提示 */
+.nav-badge {
+  margin-left: auto; flex-shrink: 0; overflow: visible;
+  font-family: var(--font-mono); font-size: var(--fs-cap); line-height: 1.5;
+  color: var(--on-accent); background: var(--gold);
+  border-radius: var(--r-pill); padding: 0 6px;
+}
+.rail-badge {
+  position: absolute; top: -4px; right: -3px;
+  font-family: var(--font-mono); font-size: var(--fs-cap); line-height: 1.4;
+  color: var(--on-accent); background: var(--gold);
+  border-radius: var(--r-pill); padding: 0 4px;
+}
+#rail-team { position: relative; } /* .rail-badge 的定位锚（只给团队这一颗，不动兄弟按钮） */
+
 /* ---------- 对抗卡：四角色流水线进度 + 问题清单（聊天流内的审查台） ----------
    与圆桌/团队卡同底同框；阶段步进条 + 问题行清单。主色用 --up（红，
    对抗的进攻方意象），与圆桌紫 / 团队金区分。 */
@@ -8427,6 +8445,14 @@ li.mod-row {
 .relay-turn-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: 8px; font-size: var(--fs-md);
+}
+.relay-turn-right {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.relay-verify-badge {
+  font-size: var(--fs-sm); color: var(--ok);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 0 7px; line-height: 18px; white-space: nowrap;
 }
 .relay-turn-text {
   margin: 4px 0 0; font-size: var(--fs-md); line-height: 1.6;

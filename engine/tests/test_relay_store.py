@@ -43,7 +43,8 @@ async def test_schema_version_bumped_and_tables_exist(store):
     # v9：automation_runs 补 config_snapshot（开跑时的配置快照）
     # v10：cron_tasks 补 provider_name / model（产线级模型）
     # v11：cron_tasks 补 review（验收开关）；automation_runs 补 review_note
-    assert SCHEMA_VERSION == 11
+    # v12：relay_pairs 补 verify_handoff；relay_turns 补复述核验四列（交接门留痕）
+    assert SCHEMA_VERSION == 12
     cur = await store._db.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
         " AND name IN ('relay_tasks','relay_nodes','relay_actions',"
@@ -168,3 +169,62 @@ async def test_old_db_without_relay_tables_opens_empty(home):
         assert await s.relay_list_tasks(1) == []
     finally:
         await s.close()
+
+
+async def test_relay_verify_columns_migrate_from_v11(tmp_path):
+    """v11 旧库补核验列：verify_handoff 与 relay_turns 四列，旧 pair 默认开核验。"""
+    import sqlite3
+
+    db_path = tmp_path / "old-relay.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE relay_pairs (
+            id TEXT PRIMARY KEY, project_id INTEGER, main_session_id TEXT NOT NULL,
+            peer_session_id TEXT NOT NULL, goal TEXT NOT NULL DEFAULT '',
+            main_task TEXT NOT NULL DEFAULT '', peer_task TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'idle', current_side TEXT NOT NULL DEFAULT 'main',
+            turn_no INTEGER NOT NULL DEFAULT 0, auto_alternate INTEGER NOT NULL DEFAULT 0,
+            revision INTEGER NOT NULL DEFAULT 0, error_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
+        CREATE TABLE relay_turns (
+            pair_id TEXT NOT NULL, turn_no INTEGER NOT NULL, side TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running', brief TEXT NOT NULL DEFAULT '',
+            output TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+            started_at REAL NOT NULL, finished_at REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (pair_id, turn_no)
+        );
+        PRAGMA user_version = 11;
+    """)
+    conn.execute(
+        "INSERT INTO relay_pairs (id, main_session_id, peer_session_id, created_at, updated_at)"
+        " VALUES ('p1', 's1', 's2', 1.0, 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = await SessionStore(db_path).connect()
+    try:
+        assert SCHEMA_VERSION == 12
+        # PRAGMA 的表名不能参数绑定：两条字面量查询逐一核对补列结果
+        cur = await store._db.execute("PRAGMA table_info(relay_pairs)")
+        pair_cols = {r[1] for r in await cur.fetchall()}
+        assert "verify_handoff" in pair_cols
+        cur = await store._db.execute("PRAGMA table_info(relay_turns)")
+        turn_cols = {r[1] for r in await cur.fetchall()}
+        assert {"verify_state", "verify_attempts", "restatement", "verify_note"} <= turn_cols
+        # 旧 pair 补列后默认开核验；开轮可写核验留痕
+        pair = await store.relay_pair_get("p1")
+        assert pair["verify_handoff"] is True
+        updated = await store.relay_pair_update("p1", {"state": "running"}, expected_revision=0)
+        snap = await store.relay_pair_start_turn(
+            "p1", "main", "简报", updated["pair"]["revision"],
+            verify={"state": "passed", "attempts": 2, "restatement": "复述", "note": "曾驳回"},
+        )
+        turn = snap["turns"][0]
+        assert turn["verify_state"] == "passed"
+        assert turn["verify_attempts"] == 2
+        assert turn["restatement"] == "复述"
+        assert turn["verify_note"] == "曾驳回"
+    finally:
+        await store.close()

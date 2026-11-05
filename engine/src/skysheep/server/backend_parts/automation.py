@@ -25,9 +25,10 @@ from ...core.run_ledger import (
     denied_tools_json,
     outcome_for,
 )
-from ...core.team import DirectorSpec, TeamOrchestrator
+from ...core.team import DirectorSpec, TeamMemberSpec, TeamOrchestrator
 from ...core.team_resident import ResidentTeamEntry
 from ...messages import Message, TextBlock
+from ...obs import warning as obs_warning
 from ...security.gate import HeadlessGate
 from ...textio import write_text_atomic
 from ...tools import ChangeRecorder
@@ -357,6 +358,456 @@ async def alert_repeated_failures(
     except Exception as e:  # noqa: BLE001 - 告警是附加动作，失败不反噬业务
         logger.debug("工厂失败告警失败（忽略）：%s", e)
         return False
+
+
+# ---- 定时团队轮的共享执行本体（团队模式设计 §14.6 二期） ----
+# 宿主两处：后端扫描触发（_execute_cron_team_turn）与 CLI 系统计划任务入口
+# （skysheep cron run）。触发与收尾（CAS 认领 / 硬超时 / 回写 / 渠道推送 /
+# 运行账本）都在 run_cron_task_core，团队轮本体在这里，两个宿主不再各写一份；
+# 装配面差异（模板册 / 工具表 / 成员 provider 构建 / 常驻登记册 / provider
+# 释放 / 用量入账后的钩子）全部由参数注入。
+# CLI 不复用常驻队伍：跨进程无从核对登记的队伍是否仍在应用内活动
+# （resident_live 缺席），复用会并行建出第二个编排器写同一 team_id 的频道——
+# 缺判定能力就整段不复用（每次新建队伍，注册表不动）。
+
+def team_provider_context_limit(cfg, name: str) -> int:
+    """成员/总管模型的上下文窗口（按 provider 配置；0 = 编排器全局回退）。"""
+    pc = (getattr(cfg, "providers", None) or {}).get(name) if cfg else None
+    return pc.effective_context_limit(cfg.context_limit_tokens) if pc \
+        else (getattr(cfg, "context_limit_tokens", 0) or 0)
+
+
+def cron_resume_limit_of(cfg) -> int:
+    """空闲续跑次数上限（[team] cron_resume_limit，默认 1；0 = 空闲即收队）。"""
+    try:
+        return max(0, int(getattr(getattr(cfg, "team", None), "cron_resume_limit", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def resolve_template_team_members(cfg, members_params, build_provider) -> list:
+    """按模板名册解析队员（backend._resolve_team_members 显式分支的共享版）。
+
+    同名同模型去重；单个成员构建失败不阻断，降级 build_error 入册（唤醒时
+    按失败隔离呈现，与圆桌错误卡片同姿态）。cron 团队的名册只来自模板且空
+    名册在调用前已按失败收尾（§14.5），所以这里没有「缺省按已配置服务自动
+    解析」的分支——那是交互式建队（backend._resolve_team_members）的路径。
+    """
+    specs: list = []
+    seen: set = set()
+    for m in members_params or []:
+        name = str((m or {}).get("provider", "")).strip()
+        if not name:
+            continue
+        model = str((m or {}).get("model", "") or "").strip()
+        key = (name, model)
+        if key in seen:
+            continue
+        seen.add(key)
+        spec = TeamMemberSpec(
+            name=str((m or {}).get("name", "") or "").strip(),
+            provider_name=name,
+            model=model,
+            persona=str((m or {}).get("persona", "") or "").strip(),
+            context_limit_tokens=team_provider_context_limit(cfg, name),
+        )
+        try:
+            provider = build_provider(name, model)
+            spec.provider = provider
+            if not spec.model:
+                spec.model = getattr(provider, "model", "")
+        except Exception as e:  # noqa: BLE001 - 构建失败降级为错误成员
+            spec.build_error = str(e)[:200]
+        specs.append(spec)
+    return specs
+
+
+def release_orch_providers(orch, release) -> None:
+    """收集编排器持有的成员/总管 provider 交给宿主释放（httpx 连接池）。"""
+    if orch is None or release is None:
+        return
+    provs = []
+    for spec in getattr(orch, "roster", []) or []:
+        provs.append(getattr(spec, "provider", None))
+    director = getattr(orch, "_director", None)
+    if director is not None:
+        provs.append(getattr(director, "provider", None))
+    for ag in orch.agents():
+        provs.append(getattr(ag, "provider", None))
+    release(provs)
+
+
+def write_cron_team_report(task: dict, template_name: str, terminal: str,
+                           orch: TeamOrchestrator, summary: str, workdir: Path,
+                           force: bool) -> None:
+    """《交付说明》全文落盘 <项目>/.skysheep/reports/cron-team-<id>-<ts>.md。
+
+    文件头部带元信息块（任务名 / 模板 / 触发方式 / 终态 / 轮次 / 工单板
+    快照 / 用量），正文即 summary 全文。命名刻意用 cron-team- 前缀——
+    TeamChannel._prune_reports 的滚动清理只认 team-*.md，前缀避开后报告
+    留存不受频道配额清理影响（§14.4）。best-effort：落盘失败只记日志，
+    交付说明仍在任务行与会话里。
+    """
+    try:
+        snap = orch.snapshot().get("team") or {}
+        stamp = time.strftime("%Y%m%d-%H%M")
+        path = (Path(workdir) / ".skysheep" / "reports" /
+                f"cron-team-{int(task.get('id') or 0)}-{stamp}.md")
+        meta = {
+            "任务": str(task.get("name") or ""),
+            "任务ID": int(task.get("id") or 0),
+            "模板": template_name,
+            "触发": "manual（立即运行）" if force else "schedule（定时调度）",
+            "终态": terminal,
+            "轮次": f"{snap.get('rounds_used', 0)}/{snap.get('max_rounds', 0)}",
+            "工单板": snap.get("tasks") or [],
+            "用量": snap.get("usage") or {},
+        }
+        lines = [
+            "# 定时团队交付报告",
+            "",
+            "```json",
+            json.dumps(meta, ensure_ascii=False, indent=2),
+            "```",
+            "",
+            "## 交付说明",
+            "",
+            summary or "（空）",
+            "",
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(path, "\n".join(lines))
+    except Exception as e:  # noqa: BLE001 - 报告落盘失败不扣交付主流程
+        logger.warning("定时团队报告落盘失败（任务 %s）：%s", task.get("id"), e)
+
+
+async def run_cron_team_turn_core(
+    store, task: dict, *, provider, cfg, cron_pid, cron_workdir,
+    template_store, build_registry, build_member_provider,
+    hooks=None, mods=None,
+    progress_ledger=None,
+    resident_store=None, resident_live=None, wake_board=None,
+    release_providers=None,
+    after_usage=None,
+    force: bool = False,
+) -> tuple:
+    """一轮定时团队执行（mode=team 的共享执行本体，两宿主共用）。
+
+    与 _execute_cron_turn 同构（独立会话 + HeadlessGate 档位 + 收敛 emit），
+    差异是按团队模板建队、AI 总管 run_auto_turn 自动推进闭环；返回同构四元组
+    (runtime, sid, stopped, facts)——run_cron_task_core 的 execute 注入点返回
+    形状，触发链的 CAS 认领 / 硬超时 / 回写 / 推送对团队轮原样生效，团队轮
+    只是「一次运行时间更长的 cron 运行」。收尾适配：终态《交付说明》append
+    成 user+assistant 消息进会话（可审计）、全文落盘
+    <项目>/.skysheep/reports/cron-team-*.md，并返回 history=[交付说明] 的
+    _CronTeamAgentView——last_text / status 判定照常工作。任何终态（done /
+    rounds_exhausted / budget_exhausted / aborted）都产出《交付说明》→
+    last_text 非空 → ok；终态原文写进 last_result 前缀与通知 body，不做
+    错误化（设计内停机不是故障）。
+
+    宿主差异由参数注入：
+    - template_store / build_registry / build_member_provider：后端传
+      team_templates、_build_full_registry、_build_member_provider（测试经
+      provider_factory_override）；CLI 传 _assemble_headless_engine 装的模板册
+      与工具表、按 cfg 直建 provider。
+    - progress_ledger：工厂观战账本（CLI None = 只计数不发事件）。
+    - resident_store + resident_live：常驻复用（T3.2）。二者齐备才启用复用；
+      只带册子不带存活判定（CLI）等于不复用——跨进程无从核对登记队伍是否
+      仍在应用内活动，复用会并行写同一 team_id 的频道。
+    - release_providers：装配期失败与收尾的 provider 释放（后端挂「当前任务
+      完成之后」，CLI 入 bg 由退出前 drain 收口）。
+    - after_usage：用量入账后的宿主钩子（后端接每日预算告警推送；永不抛）。
+    """
+    if provider is None:
+        raise RuntimeError("尚未配置可用的模型 API Key")
+    # 厂区可用性 fail closed（与单会话轮同一口径）
+    pid = task.get("project_id")
+    if pid is not None:
+        proj = await store.get_project(int(pid))
+        if proj is None or not Path(proj.root_path).is_dir():
+            raise RuntimeError("厂区不可用（项目目录不存在），本次未执行")
+
+    # 模板二次读取：入口校验只管创建时刻，模板可能后来被删——悬空引用在
+    # 触发期报 error，由 run_cron_task_core 按失败收尾（§14.5）
+    template_name = str(task.get("team_template") or "").strip()
+    template = None
+    for t in template_store.templates:
+        if t.name == template_name:
+            template = t
+            break
+    if template is None:
+        raise RuntimeError(f"团队模板已不存在：{template_name}")
+
+    # 每个任务一个独立会话（同名），历史随运行累积、可审计
+    sess = await store.create_session(cron_pid, title=f"⏰ {task['name']}")
+    sid = sess.id
+    # 无人值守门控（唯一判定面，复用不改）：allowed_tools 空 = 只读档
+    # （只 READONLY 自动放行），勾选 = 白名单档（名单内放行，仍过删除语义
+    # 与引擎主目录守卫）；名单外一律 DENY（fail-closed），三道防线照走
+    gate = CronGate(allowed=task["allowed_tools"], store=store,
+                    project_id=cron_pid, working_dir=cron_workdir)
+    recorder = ChangeRecorder()
+
+    # facts：本轮事实（步数 / 当前工具 / 被拦次数与工具名），原地累积
+    facts: dict = {}
+    progress_emit = make_progress_emit(
+        progress_ledger, "cron", int(task["id"]), facts)
+
+    def _event_dict(ev) -> dict:
+        # 团队编排器发的是 pydantic 事件（events.py 契约），单会话管道发的是
+        # dict——进度收敛只认 dict，这里归一化（字段名同源，model_dump 即可）
+        if isinstance(ev, dict):
+            return ev
+        try:
+            return ev.model_dump()
+        except AttributeError:
+            return {"kind": str(getattr(ev, "kind", ""))}
+
+    async def cron_emit(ev: dict) -> None:
+        # 无人值守：流式/权限/团队事件不进前端，结果走任务行与报告文件；
+        # 只有「在跑什么」与「被拦了几次」以工序进度（1 次/秒）进工厂观战窗
+        await progress_emit(_event_dict(ev))
+
+    # 预算越线判定钩子（二期）：与后端 send() 入口的护栏同口径——cfg 注入后
+    # 两宿主共用一份实现（原 _team_budget_check 的自包含化）
+    async def budget_check() -> bool:
+        budget = int(cfg.daily_token_budget or 0)
+        if budget <= 0:
+            return False
+        if getattr(provider, "demo_mode", False):
+            return False
+        used_today = await store.usage_today()
+        return used_today >= budget
+
+    # 频道消息落库钩子（三期）：接到项目库的 team_messages 表（team.log 回放）。
+    # 落库是 best-effort 旁路：失败记 obs 警告不外溢——不能让落库问题拖垮团队轮
+    async def message_sink(team_id: str, msg) -> None:
+        if store is None:
+            return
+        try:
+            await store.add_team_message(
+                team_id, seq=msg.seq, from_member=msg.from_member,
+                to_member=msg.to_member, msg_kind=msg.msg_kind,
+                task_ref=msg.task_ref, text=msg.text,
+                session_id=sid, created_at=msg.ts,
+            )
+        except Exception as e:  # noqa: BLE001 - 落库失败不拖垮团队轮
+            obs_warning(
+                "team", "team message persist failed",
+                session_id=sid, team_id=team_id, seq=msg.seq,
+                error=str(e)[:200],
+            )
+
+    # 装配 + 建队全程纳入释放保护（对照交互式路径 backend.py 对团队轮
+    # 的 TeamError/取消释放口径）：从成员解析到 create_team 成功之间的
+    # 任何一步 raise（总管构建失败、编排器构造失败、建队半途失败、乃至
+    # 被取消），装配期建出的成员 / 总管 provider 都还没进下方 finally 的
+    # 释放视野（roster 未接管），必须就地释放——否则每失败一次泄漏一批
+    # httpx 连接池。单次释放内部按实例去重；半截建队时同一 provider 可能
+    # 同时在名册与 specs 里被两路各收一遍，aclose 幂等，无害。
+    specs: list = []
+    director = DirectorSpec()
+    orch: TeamOrchestrator | None = None
+    # 常驻团队复用（T3.2）：同模板 + 同项目登记过常驻队伍时，唤醒它
+    # （原 team_id 续频道、工单板快照延续）而不是每次重建；查无则走
+    # 既有建队路径（§14 口径不变——定时触发不隐式登记常驻，是否常驻
+    # 由用户在团队卡上显式声明）。复用要求「册子 + 存活判定」齐备：缺判定
+    # 能力的宿主（CLI）整段不复用，见本节头注。
+    resident = resident_store.find_for_template(template_name, cron_pid) \
+        if resident_store is not None else None
+    reuse = resident is not None and resident_live is not None
+    if reuse and resident_live(resident):
+        # 常驻队伍仍在原会话活动（用户正在团队卡上交互）：复用会并行建出
+        # 第二个编排器写同一 team_id 的频道。本轮跳过复用——不唤醒也不
+        # 重建，任务结果与推送说明跳过原因；该团队收队（_teams 摘除）后，
+        # 下个到点照常复用唤醒。走正常 ok 收尾（设计内跳过不是故障，不进
+        # 失败告警口径），会话 user+assistant 成对落库可审计。
+        text = (
+            f"【本轮跳过】常驻团队「{resident.name or template_name}」"
+            f"（team_id={resident.team_id}）仍在原会话中活动。为避免两个"
+            "编排器并行写同一团队频道，本轮定时触发未复用建队，任务指令"
+            "未执行；该团队收队后，下次到点将照常复用唤醒。"
+        )
+        await store.append_message(sid, Message.user(task["prompt"]))
+        done_msg = Message.assistant([TextBlock(text=text)])
+        await store.append_message(sid, done_msg)
+        await store.touch(sid)
+        logger.info(
+            "定时团队 %s 跳过复用：常驻团队 %s 仍在会话 %s 活动",
+            task.get("id"), resident.team_id, resident.session_id,
+        )
+        runtime = SessionRuntime(
+            sid=sid, agent=_CronTeamAgentView([done_msg]), recorder=recorder,
+        )
+        return runtime, sid, False, facts
+    try:
+        # 成员解析：名册只来自模板（§14.2 第 6 步）——模板没有队员时装配失败
+        # 按失败收尾，绝不走「缺省按已配置服务自动解析」的分支（那里会拿圆桌
+        # 名册顶替模板名册，违背「名册只来自模板」契约）；显式名册下单个构建
+        # 失败照常降级 build_error 入册（唤醒时按失败隔离呈现），全员构建失败
+        # （含 provider 名全空）不建注定空转的团队，装配期直接按失败收尾
+        # （§14.5）。模板条目不做成员数校验是设计明文（§14.1），资格缺口由
+        # 表单期 cron.team_check（成员非空）与触发期这里的失败收尾共同兜住。
+        members_params = [m.model_dump() for m in template.members]
+        if not members_params:
+            raise RuntimeError(f"团队模板「{template_name}」没有队员，本次未建队")
+        specs = resolve_template_team_members(cfg, members_params, build_member_provider)
+        if not any(s.provider is not None for s in specs):
+            raise RuntimeError(
+                "团队模板的队员全部不可用（缺 API Key 或服务未配置），本次未建队")
+
+        # AI 总管构建失败同样装配期报错：无人值守没有插话重试的余地
+        d_provider = str(template.director.provider or "").strip()
+        d_model = str(template.director.model or "").strip()
+        director = DirectorSpec(
+            provider_name=d_provider, model=d_model,
+            context_limit_tokens=team_provider_context_limit(cfg, d_provider),
+        )
+        try:
+            dprov = build_member_provider(d_provider, d_model)
+            director.provider = dprov
+            if not director.model:
+                director.model = getattr(dprov, "model", "")
+        except Exception as e:  # noqa: BLE001 - 装配失败按失败收尾
+            raise RuntimeError(f"总管模型构建失败（{d_provider}）：{e}") from e
+
+        # 编排器装配：注入面全部复用 _team_create 的透传口径（hooks/mods 只能
+        # 收紧；budget_check 接既有每日预算；message_sink 频道消息全量落库，
+        # team.log 回放照常可用）——TeamOrchestrator 模块层零改动
+        orch = TeamOrchestrator(
+            emit=cron_emit,
+            working_dir=cron_workdir,
+            registry=build_registry(recorder),
+            gate=gate,
+            cfg=cfg.team,
+            max_iterations=cfg.subagent_max_iterations,
+            restrict_to_workdir=cfg.restrict_to_workdir,
+            session_id=sid,
+            job_containment=cfg.shell.job_containment,
+            sandbox_level=cfg.shell.sandbox_level,
+            use_ripgrep=cfg.search.use_ripgrep,
+            hooks=hooks,
+            mods=mods,
+            director_mode="ai",
+            director=director,
+            budget_check=budget_check,
+            context_limit_tokens=cfg.context_limit_tokens,
+            compaction_keep_recent=cfg.compaction_keep_recent,
+            compaction_trigger=cfg.compaction_trigger,
+            compaction_auto=cfg.compaction_auto,
+            message_sink=message_sink,
+            source_template=template_name,
+        )
+        if reuse:
+            # 唤醒常驻队伍（T3.2）：沿用原 team_id 续频道（seq 水位取注册表
+            # 与库内行号的最大者，防手工清理后的错位）、按最新板面回放
+            # （会话侧活动板面优先且 team_id 对得上才取，注册表快照只作
+            # 会话侧不可用的兜底，评审②）；装配路径与防失控上限照旧
+            db_seq = await store.last_team_message_seq(resident.team_id)
+            await orch.restore_team(
+                resident.team_id, specs,
+                tasks=(await wake_board(resident)) if wake_board is not None
+                else resident.board,
+                last_seq=max(int(resident.last_seq or 0), int(db_seq or 0)),
+                wake_note=(
+                    f"由定时任务「{task['name']}」唤醒"
+                    f"（第 {resident.wake_count + 1} 次复用）。"
+                ),
+            )
+        else:
+            await orch.create_team(specs)
+    except BaseException:  # noqa: BLE001 - 清理后原样上抛（含取消）
+        if release_providers is not None:
+            release_providers(
+                [s.provider for s in specs if s.provider is not None]
+                + [director.provider])
+            release_orch_providers(orch, release_providers)
+        raise
+    try:
+        await orch.run_auto_turn(task["prompt"])
+        # 空闲续跑：无人值守没有用户补消息，空闲退出（finished is None）时
+        # 投续跑指令再驱一轮，最多 [team] cron_resume_limit 次；仍空闲则
+        # stop() 收队（产出《收队说明》与未尽事项）
+        resume_limit = cron_resume_limit_of(cfg)
+        while orch.finished is None and resume_limit > 0:
+            resume_limit -= 1
+            await orch.run_auto_turn(
+                "（定时触发）请继续推进；若无法继续，请交付并记录未尽事项。")
+        if orch.finished is None:
+            await orch.stop(reason="无人值守空闲收队：总管多轮无进展")
+    finally:
+        release_orch_providers(orch, release_providers)
+
+    if resident is not None:
+        # 复用回写（best-effort）：工单板快照 / 频道水位 / 唤醒计数落回
+        # 注册表，下一次触发的恢复以这次收尾为准。只走正常终态路径——
+        # 轮被取消/异常时保留上一轮的快照（陈旧但自洽，下一轮按它恢复）
+        try:
+            msgs = orch.channel.messages
+            resident_store.upsert(ResidentTeamEntry(
+                team_id=orch.team_id,
+                name=resident.name,
+                template=template_name,
+                project_id=cron_pid,
+                session_id=sid,
+                director_mode=orch.director_mode,
+                roster=[m.name for m in orch.roster],
+                board=[t.to_dict() for t in orch.board.tasks()],
+                last_seq=msgs[-1].seq if msgs else int(resident.last_seq or 0),
+                wake_count=resident.wake_count + 1,
+            ))
+        except Exception as e:  # noqa: BLE001 - 回写失败不影响本轮交付
+            logger.warning(
+                "常驻团队注册表回写失败（team_id=%s）：%s", orch.team_id, e)
+
+    finished = orch.finished or {}
+    terminal = str(finished.get("status") or "done")
+    summary = str(finished.get("summary") or "")
+    # 终态注记：rounds_exhausted 等设计内停机不做错误化，原文进 last_result
+    # 前缀与通知 body（cron_push_body 读 last_result）——done 本身无注记
+    tag = {
+        "aborted": "已空闲收队",
+        "rounds_exhausted": "轮次耗尽",
+        "budget_exhausted": "预算越线",
+    }.get(terminal, "")
+    text = f"【{tag}】\n{summary}" if tag else summary
+
+    # 会话落库（user+assistant 成对，完整可审计；沿 CLI cron 的 append 先例）
+    await store.append_message(sid, Message.user(task["prompt"]))
+    done_msg = Message.assistant([TextBlock(text=text)])
+    await store.append_message(sid, done_msg)
+    await store.touch(sid)
+
+    # 交付报告全文落盘 + 用量入账（都是 best-effort，不扣交付主流程）
+    write_cron_team_report(task, template_name, terminal, orch, summary,
+                           cron_workdir, force)
+    usage = (orch.snapshot().get("team") or {}).get("usage") or {}
+    rows = []
+    for spec in orch.roster:
+        u = (usage.get("members") or {}).get(spec.name) or {}
+        tin = int(u.get("input_tokens") or 0)
+        tout = int(u.get("output_tokens") or 0)
+        if tin or tout:
+            rows.append((spec.provider_name, spec.model, tin, tout))
+    du = usage.get("director") or {}
+    if int(du.get("input_tokens") or 0) or int(du.get("output_tokens") or 0):
+        info = orch.director_info()
+        rows.append((info["provider"], info["model"],
+                     int(du.get("input_tokens") or 0),
+                     int(du.get("output_tokens") or 0)))
+    if rows:
+        try:
+            for provider_name, model, tin, tout in rows:
+                await store.add_usage(sid, provider_name, model, tin, tout, 0)
+        except Exception:  # noqa: BLE001 - 记账失败不影响本轮结果
+            pass
+        if after_usage is not None:
+            await after_usage()
+
+    runtime = SessionRuntime(
+        sid=sid, agent=_CronTeamAgentView([done_msg]), recorder=recorder,
+    )
+    return runtime, sid, False, facts
 
 
 async def run_cron_task_core(
@@ -1325,17 +1776,6 @@ class AutomationMixin:
     # （=HeadlessGate 名单制 fail-closed），团队侧零新增放行；防失控上限
     # 全沿用 [team] 注入 + [factory] 硬超时/并发，失败重入全沿用既有三层。
 
-    def _cron_resume_limit(self) -> int:
-        """空闲续跑次数上限（[team] cron_resume_limit，默认 1；0 = 空闲即收队）。
-
-        容错读取（_factory_setting 同款姿态）：cfg 未装载 / 缺字段时用默认值。
-        """
-        try:
-            return max(0, int(getattr(
-                getattr(self.cfg, "team", None), "cron_resume_limit", 1)))
-        except (TypeError, ValueError):
-            return 1
-
     def _resident_team_is_live(self, resident: ResidentTeamEntry) -> bool:
         """常驻登记指向的队伍在本进程是否仍挂着活动编排器（同会话同 team_id）。
 
@@ -1384,17 +1824,14 @@ class AutomationMixin:
     async def _execute_cron_team_turn(self, task: dict, *, force: bool = False):
         """后端侧的一轮定时团队执行（mode=team 的注入点）。
 
-        与 _execute_cron_turn 同构（独立会话 + HeadlessGate 档位 + 收敛 emit），
-        差异是按团队模板建队、AI 总管 run_auto_turn 自动推进闭环；返回同构
-        四元组 (runtime, sid, stopped, facts)——触发链的 CAS 认领 / 硬超时 /
-        回写 / 推送对团队轮原样生效，团队轮只是「一次运行时间更长的 cron 运行」。
-
-        收尾适配：终态《交付说明》append 成 user+assistant 消息进会话（可审计）、
-        全文落盘 <项目>/.skysheep/reports/cron-team-*.md，并返回 agent.history
-        =[交付说明] 的 _CronTeamAgentView——run_cron_task_core 的 last_text /
-        status 判定照常工作。任何终态（done / rounds_exhausted / budget_exhausted
-        / aborted）都产出《交付说明》→ last_text 非空 → ok；终态原文写进
-        last_result 前缀与通知 body，不做错误化（设计内停机不是故障）。
+        执行本体在模块级 run_cron_team_turn_core（后端扫描触发与 CLI 系统计划
+        任务入口共用，团队模式设计 §14.6 二期落地）；本方法只做后端装配——
+        执行落点解析（_cron_execution_context，含项目缺失回退当前项目的既有
+        口径）与宿主注入面（模板册 / 完整工具表 / 成员 provider 构建，测试经
+        provider_factory_override / 常驻登记册与存活判定 / provider 释放挂
+        「当前任务完成之后」/ 用量入账后的每日预算告警推送）。返回同构四元组
+        (runtime, sid, stopped, facts)，CAS 认领 / 硬超时 / 回写 / 推送等触发
+        链语义零变化。
         """
         if self.provider is None:
             raise RuntimeError("尚未配置可用的模型 API Key")
@@ -1408,311 +1845,27 @@ class AutomationMixin:
         if cron_pid is None or cron_workdir is None:
             raise RuntimeError("任务所属的项目已不存在，定时任务已停用")
 
-        # 模板二次读取：入口校验只管创建时刻，模板可能后来被删——悬空引用在
-        # 触发期报 error，由 run_cron_task_core 按失败收尾（§14.5）
-        template_name = str(task.get("team_template") or "").strip()
-        template = None
-        for t in self.team_templates.templates:
-            if t.name == template_name:
-                template = t
-                break
-        if template is None:
-            raise RuntimeError(f"团队模板已不存在：{template_name}")
+        def _release(provs) -> None:
+            # 同步调度（挂「当前任务完成之后」关闭）：核心在异常/收尾路径上
+            # 同步调用，不在取消竞态里 await 关闭（在途流被掐会出噪音异常）
+            self._release_turn_providers(provs)
 
-        # 每个任务一个独立会话（同名），历史随运行累积、可审计
-        sess = await self.store.create_session(cron_pid, title=f"⏰ {task['name']}")
-        sid = sess.id
-        # 无人值守门控（唯一判定面，复用不改）：allowed_tools 空 = 只读档
-        # （只 READONLY 自动放行），勾选 = 白名单档（名单内放行，仍过删除语义
-        # 与引擎主目录守卫）；名单外一律 DENY（fail-closed），三道防线照走
-        gate = CronGate(allowed=task["allowed_tools"], store=self.store,
-                        project_id=cron_pid, working_dir=cron_workdir)
-        recorder = ChangeRecorder()
-
-        # facts：本轮事实（步数 / 当前工具 / 被拦次数与工具名），原地累积
-        facts: dict = {}
-        progress_emit = make_progress_emit(
-            getattr(self, "run_ledger", None), "cron", int(task["id"]), facts)
-
-        def _event_dict(ev) -> dict:
-            # 团队编排器发的是 pydantic 事件（events.py 契约），单会话管道发的是
-            # dict——进度收敛只认 dict，这里归一化（字段名同源，model_dump 即可）
-            if isinstance(ev, dict):
-                return ev
-            try:
-                return ev.model_dump()
-            except AttributeError:
-                return {"kind": str(getattr(ev, "kind", ""))}
-
-        async def cron_emit(ev: dict) -> None:
-            # 无人值守：流式/权限/团队事件不进前端，结果走任务行与报告文件；
-            # 只有「在跑什么」与「被拦了几次」以工序进度（1 次/秒）进工厂观战窗
-            await progress_emit(_event_dict(ev))
-
-        # 装配 + 建队全程纳入释放保护（对照交互式路径 backend.py 对团队轮
-        # 的 TeamError/取消释放口径）：从成员解析到 create_team 成功之间的
-        # 任何一步 raise（总管构建失败、编排器构造失败、建队半途失败、乃至
-        # 被取消），装配期建出的成员 / 总管 provider 都还没进下方 finally 的
-        # _release_team_providers 视野（roster 未接管），必须就地释放——
-        # 否则每失败一次泄漏一批 httpx 连接池。单次释放内部按实例去重；
-        # 半截建队时同一 provider 可能同时在名册与 specs 里被两路各收一遍，
-        # aclose 幂等，无害。
-        specs: list = []
-        director = DirectorSpec()
-        orch: TeamOrchestrator | None = None
-        # 常驻团队复用（T3.2）：同模板 + 同项目登记过常驻队伍时，唤醒它
-        # （原 team_id 续频道、工单板快照延续）而不是每次重建；查无则走
-        # 既有建队路径（§14 口径不变——定时触发不隐式登记常驻，是否常驻
-        # 由用户在团队卡上显式声明）
-        resident = self.resident_teams.find_for_template(template_name, cron_pid) \
-            if getattr(self, "resident_teams", None) is not None else None
-        if resident is not None and self._resident_team_is_live(resident):
-            # 常驻队伍仍在原会话活动（用户正在团队卡上交互）：复用会并行建出
-            # 第二个编排器写同一 team_id 的频道。本轮跳过复用——不唤醒也不
-            # 重建，任务结果与推送说明跳过原因；该团队收队（_teams 摘除）后，
-            # 下个到点照常复用唤醒。走正常 ok 收尾（设计内跳过不是故障，不进
-            # 失败告警口径），会话 user+assistant 成对落库可审计。
-            text = (
-                f"【本轮跳过】常驻团队「{resident.name or template_name}」"
-                f"（team_id={resident.team_id}）仍在原会话中活动。为避免两个"
-                "编排器并行写同一团队频道，本轮定时触发未复用建队，任务指令"
-                "未执行；该团队收队后，下次到点将照常复用唤醒。"
-            )
-            await self.store.append_message(sid, Message.user(task["prompt"]))
-            done_msg = Message.assistant([TextBlock(text=text)])
-            await self.store.append_message(sid, done_msg)
-            await self.store.touch(sid)
-            logger.info(
-                "定时团队 %s 跳过复用：常驻团队 %s 仍在会话 %s 活动",
-                task.get("id"), resident.team_id, resident.session_id,
-            )
-            runtime = SessionRuntime(
-                sid=sid, agent=_CronTeamAgentView([done_msg]), recorder=recorder,
-            )
-            return runtime, sid, False, facts
-        try:
-            # 成员解析：名册只来自模板（§14.2 第 6 步）——模板没有队员时装配失败
-            # 按失败收尾，绝不调用 _resolve_team_members 的缺省分支（那里会按当前
-            # 已配置服务自动解析，等于用圆桌名册顶替模板名册，违背「名册只来自
-            # 模板」契约）；显式名册下单个构建失败照常降级 build_error 入册（唤醒
-            # 时按失败隔离呈现），全员构建失败（含 provider 名全空）不建注定空转
-            # 的团队，装配期直接按失败收尾（§14.5）。模板条目不做成员数校验是
-            # 设计明文（§14.1，空名册模板可服务交互式建队的自动解析），资格缺口
-            # 由表单期 cron.team_check（成员非空）与触发期这里的失败收尾共同兜住。
-            members_params = [m.model_dump() for m in template.members]
-            if not members_params:
-                raise RuntimeError(f"团队模板「{template_name}」没有队员，本次未建队")
-            specs = self._resolve_team_members(members_params)
-            if not any(s.provider is not None for s in specs):
-                raise RuntimeError(
-                    "团队模板的队员全部不可用（缺 API Key 或服务未配置），本次未建队")
-
-            # AI 总管构建失败同样装配期报错：无人值守没有插话重试的余地
-            d_provider = str(template.director.provider or "").strip()
-            d_model = str(template.director.model or "").strip()
-            director = DirectorSpec(
-                provider_name=d_provider, model=d_model,
-                context_limit_tokens=self._team_provider_context_limit(d_provider),
-            )
-            try:
-                dprov = self._build_member_provider(d_provider, d_model)
-                director.provider = dprov
-                if not director.model:
-                    director.model = getattr(dprov, "model", "")
-            except Exception as e:  # noqa: BLE001 - 装配失败按失败收尾
-                raise RuntimeError(f"总管模型构建失败（{d_provider}）：{e}") from e
-
-            # 编排器装配：注入面全部复用 _team_create 的透传口径（hooks/mods 只能
-            # 收紧；budget_check 接既有每日预算；message_sink 频道消息全量落库，
-            # team.log 回放照常可用）——TeamOrchestrator 模块层零改动
-            orch = TeamOrchestrator(
-                emit=cron_emit,
-                working_dir=cron_workdir,
-                registry=self._build_full_registry(recorder),
-                gate=gate,
-                cfg=self.cfg.team,
-                max_iterations=self.cfg.subagent_max_iterations,
-                restrict_to_workdir=self.cfg.restrict_to_workdir,
-                session_id=sid,
-                job_containment=self.cfg.shell.job_containment,
-                sandbox_level=self.cfg.shell.sandbox_level,
-                use_ripgrep=self.cfg.search.use_ripgrep,
-                hooks=self.hooks,
-                mods=self.mods,
-                director_mode="ai",
-                director=director,
-                budget_check=self._team_budget_check(),
-                context_limit_tokens=self.cfg.context_limit_tokens,
-                compaction_keep_recent=self.cfg.compaction_keep_recent,
-                compaction_trigger=self.cfg.compaction_trigger,
-                compaction_auto=self.cfg.compaction_auto,
-                message_sink=self._team_message_sink(sid),
-                source_template=template_name,
-            )
-            if resident is not None:
-                # 唤醒常驻队伍（T3.2）：沿用原 team_id 续频道（seq 水位取注册表
-                # 与库内行号的最大者，防手工清理后的错位）、按最新板面回放
-                # （会话侧活动板面优先且 team_id 对得上才取，注册表快照只作
-                # 会话侧不可用的兜底，评审②）；
-                # 装配路径（_resolve_team_members / _build_member_provider /
-                # TeamOrchestrator 注入面）与防失控上限照旧
-                db_seq = await self.store.last_team_message_seq(resident.team_id)
-                await orch.restore_team(
-                    resident.team_id, specs, tasks=await self._resident_wake_board(resident),
-                    last_seq=max(int(resident.last_seq or 0), int(db_seq or 0)),
-                    wake_note=(
-                        f"由定时任务「{task['name']}」唤醒"
-                        f"（第 {resident.wake_count + 1} 次复用）。"
-                    ),
-                )
-            else:
-                await orch.create_team(specs)
-        except BaseException:  # noqa: BLE001 - 清理后原样上抛（含取消）
-            self._release_turn_providers(
-                [s.provider for s in specs if s.provider is not None]
-                + [director.provider])
-            if orch is not None:
-                self._release_team_providers(orch)
-            raise
-        try:
-            await orch.run_auto_turn(task["prompt"])
-            # 空闲续跑：无人值守没有用户补消息，空闲退出（finished is None）时
-            # 投续跑指令再驱一轮，最多 [team] cron_resume_limit 次；仍空闲则
-            # stop() 收队（产出《收队说明》与未尽事项）
-            resume_limit = self._cron_resume_limit()
-            while orch.finished is None and resume_limit > 0:
-                resume_limit -= 1
-                await orch.run_auto_turn(
-                    "（定时触发）请继续推进；若无法继续，请交付并记录未尽事项。")
-            if orch.finished is None:
-                await orch.stop(reason="无人值守空闲收队：总管多轮无进展")
-        finally:
-            self._release_team_providers(orch)
-
-        if resident is not None:
-            # 复用回写（best-effort）：工单板快照 / 频道水位 / 唤醒计数落回
-            # 注册表，下一次触发的恢复以这次收尾为准。只走正常终态路径——
-            # 轮被取消/异常时保留上一轮的快照（陈旧但自洽，下一轮按它恢复）
-            try:
-                msgs = orch.channel.messages
-                self.resident_teams.upsert(ResidentTeamEntry(
-                    team_id=orch.team_id,
-                    name=resident.name,
-                    template=template_name,
-                    project_id=cron_pid,
-                    session_id=sid,
-                    director_mode=orch.director_mode,
-                    roster=[m.name for m in orch.roster],
-                    board=[t.to_dict() for t in orch.board.tasks()],
-                    last_seq=msgs[-1].seq if msgs else int(resident.last_seq or 0),
-                    wake_count=resident.wake_count + 1,
-                ))
-            except Exception as e:  # noqa: BLE001 - 回写失败不影响本轮交付
-                logger.warning(
-                    "常驻团队注册表回写失败（team_id=%s）：%s", orch.team_id, e)
-
-        finished = orch.finished or {}
-        terminal = str(finished.get("status") or "done")
-        summary = str(finished.get("summary") or "")
-        # 终态注记：rounds_exhausted 等设计内停机不做错误化，原文进 last_result
-        # 前缀与通知 body（cron_push_body 读 last_result）——done 本身无注记
-        tag = {
-            "aborted": "已空闲收队",
-            "rounds_exhausted": "轮次耗尽",
-            "budget_exhausted": "预算越线",
-        }.get(terminal, "")
-        text = f"【{tag}】\n{summary}" if tag else summary
-
-        # 会话落库（user+assistant 成对，完整可审计；沿 CLI cron 的 append 先例）
-        await self.store.append_message(sid, Message.user(task["prompt"]))
-        done_msg = Message.assistant([TextBlock(text=text)])
-        await self.store.append_message(sid, done_msg)
-        await self.store.touch(sid)
-
-        # 交付报告全文落盘 + 用量入账（都是 best-effort，不扣交付主流程）
-        await self._write_cron_team_report(
-            task, template_name, terminal, orch, summary, cron_workdir, force)
-        await self._record_cron_team_usage(sid, orch)
-
-        runtime = SessionRuntime(
-            sid=sid, agent=_CronTeamAgentView([done_msg]), recorder=recorder,
+        return await run_cron_team_turn_core(
+            self.store, task, provider=self.provider, cfg=self.cfg,
+            cron_pid=cron_pid, cron_workdir=cron_workdir,
+            template_store=self.team_templates,
+            build_registry=self._build_full_registry,
+            build_member_provider=self._build_member_provider,
+            hooks=self.hooks, mods=self.mods,
+            progress_ledger=getattr(self, "run_ledger", None),
+            resident_store=getattr(self, "resident_teams", None),
+            resident_live=self._resident_team_is_live,
+            wake_board=self._resident_wake_board,
+            release_providers=_release,
+            after_usage=self._check_budget_alerts,
+            force=force,
         )
-        return runtime, sid, False, facts
 
-    async def _write_cron_team_report(
-        self, task: dict, template_name: str, terminal: str,
-        orch: TeamOrchestrator, summary: str, workdir: Path, force: bool,
-    ) -> None:
-        """《交付说明》全文落盘 <项目>/.skysheep/reports/cron-team-<id>-<ts>.md。
-
-        文件头部带元信息块（任务名 / 模板 / 触发方式 / 终态 / 轮次 / 工单板
-        快照 / 用量），正文即 summary 全文。命名刻意用 cron-team- 前缀——
-        TeamChannel._prune_reports 的滚动清理只认 team-*.md，前缀避开后报告
-        留存不受频道配额清理影响（§14.4）。best-effort：落盘失败只记日志，
-        交付说明仍在任务行与会话里。
-        """
-        try:
-            snap = orch.snapshot().get("team") or {}
-            stamp = time.strftime("%Y%m%d-%H%M")
-            path = (Path(workdir) / ".skysheep" / "reports" /
-                    f"cron-team-{int(task.get('id') or 0)}-{stamp}.md")
-            meta = {
-                "任务": str(task.get("name") or ""),
-                "任务ID": int(task.get("id") or 0),
-                "模板": template_name,
-                "触发": "manual（立即运行）" if force else "schedule（定时调度）",
-                "终态": terminal,
-                "轮次": f"{snap.get('rounds_used', 0)}/{snap.get('max_rounds', 0)}",
-                "工单板": snap.get("tasks") or [],
-                "用量": snap.get("usage") or {},
-            }
-            lines = [
-                "# 定时团队交付报告",
-                "",
-                "```json",
-                json.dumps(meta, ensure_ascii=False, indent=2),
-                "```",
-                "",
-                "## 交付说明",
-                "",
-                summary or "（空）",
-                "",
-            ]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            write_text_atomic(path, "\n".join(lines))
-        except Exception as e:  # noqa: BLE001 - 报告落盘失败不扣交付主流程
-            logger.warning("定时团队报告落盘失败（任务 %s）：%s", task.get("id"), e)
-
-    async def _record_cron_team_usage(self, sid: str, orch: TeamOrchestrator) -> None:
-        """团队轮用量入账 usage_log（逐成员 + 总管，归属本次 cron 会话）。
-
-        口径同 _team_body 的 usage_rows / _flush_team_usage：行键 (provider,
-        model) 取名册 spec 与 director_info，总量取编排器 snapshot 的内部记账
-        ——cron 团队轮的事件不走 WS 管道，事件流归属接线在这里换成快照直读。
-        best-effort：记账失败不影响交付；入账后照常触发预算越线检查。
-        """
-        usage = (orch.snapshot().get("team") or {}).get("usage") or {}
-        rows = []
-        for spec in orch.roster:
-            u = (usage.get("members") or {}).get(spec.name) or {}
-            tin = int(u.get("input_tokens") or 0)
-            tout = int(u.get("output_tokens") or 0)
-            if tin or tout:
-                rows.append((spec.provider_name, spec.model, tin, tout))
-        du = usage.get("director") or {}
-        if int(du.get("input_tokens") or 0) or int(du.get("output_tokens") or 0):
-            info = orch.director_info()
-            rows.append((info["provider"], info["model"],
-                         int(du.get("input_tokens") or 0),
-                         int(du.get("output_tokens") or 0)))
-        if not rows:
-            return
-        try:
-            for provider, model, tin, tout in rows:
-                await self.store.add_usage(sid, provider, model, tin, tout, 0)
-        except Exception:  # noqa: BLE001 - 记账失败不影响本轮结果
-            return
-        await self._check_budget_alerts()
 
     # ---- 定时任务终态推送（渠道出站通知） ----
     # 开关 notify_channel 存在任务行里（默认关，防打扰）；推送目标与失败语义

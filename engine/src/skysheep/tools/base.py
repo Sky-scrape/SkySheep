@@ -64,6 +64,7 @@ class ToolContext:
         job_containment: bool = True,
         sandbox_level: str = "job",
         use_ripgrep: bool = True,
+        relay_execution: bool = False,
     ) -> None:
         self.working_dir = working_dir
         self.aborted = aborted or asyncio.Event()
@@ -87,6 +88,10 @@ class ToolContext:
         # 注册表（读写归属校验）都从 ctx 取，不再依赖任何全局「当前会话」指针
         # ——并行会话各跑各的轮时，全局指针会被后来者覆盖导致串台。
         self.session_id = session_id
+        # 接力执行轮（接力模式设计 §4 第一条）：本轮跑在接力 pair 里，
+        # 可派生自主执行的参数（shell 的 background=true）在工具层直接
+        # 拒绝——后台进程会脱离本轮生命周期，接力屏障证明不了它静止
+        self.relay_execution = relay_execution
         # 工具产生的图片附件（如 screenshot 的截图）：agent 循环在 tool_result
         # 之后把它们作为 user 消息并入历史，模型才能"看见"图像。
         self.images: list[ImageBlock] = []

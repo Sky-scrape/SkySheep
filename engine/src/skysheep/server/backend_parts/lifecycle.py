@@ -280,6 +280,10 @@ class LifecycleMixin:
         # 副屏），点删除却报 session not found 只会让人以为删不掉；本地客户端按 id
         # 直删，删除目标仍由用户自己点选。远程边界不放宽。
         await self._get_owned_session(session_id, local=local)
+        # 接力级联收敛（接力模式设计 §7：删除会话必须先停止并收敛关联接力，
+        # 活动链不做级联隐删——停到终态再删，库内历史行保留只读）
+        relay_converged = await self.relay_converge_for_deletion(
+            session_id=session_id)
         # 先停掉该会话正在跑的 turn，再清理 runtime，最后删数据
         self.cancel_run(session_id)
         # 团队先摘出登记（此后不再接新事件），但 provider 的释放要等在飞的轮
@@ -350,6 +354,8 @@ class LifecycleMixin:
             "deleted": session_id,
             "switched_to": switched,
             "new_active": self.session.id if self.session else None,
+            # 关联接力收敛说明（§7：终态删除链说明关联历史）
+            "relay_converged": relay_converged,
         }
 
     async def rename_session(self, session_id: str, title: str) -> dict:
@@ -449,6 +455,14 @@ class LifecycleMixin:
         busy = self._backup_busy_message("备份")
         if busy:
             raise RuntimeError(busy)
+        # 接力在飞预检（接力模式设计 §7）：接力 worker 的写不在 runtimes
+        # 视野里（_backup_busy_message 看不见），单独盘点——与普通轮同一
+        # 姿态，正在跑的接力期间不做备份
+        relay_inflight = self.relay_inflight()
+        if relay_inflight:
+            raise RuntimeError(
+                "有接力正在运行（" + "、".join(relay_inflight[:2]) + "），"
+                "先停止接力再备份")
         try:
             return await self.store.backup_now()
         except OSError as e:
@@ -473,6 +487,10 @@ class LifecycleMixin:
         busy = self._backup_busy_message("恢复")
         if busy:
             raise RuntimeError(busy)
+        # 接力冻结（接力模式设计 §7：恢复备份必须先停止并收敛关联接力；
+        # 库文件将被整体替换，在飞 worker 的后续写会随旧连接一起失效）。
+        # 冻结失败路径保持冻结，不自动重启接力
+        await self.relay_freeze_all()
         try:
             result = await self.store.restore_backup(name)
         except (OSError, ValueError, FileNotFoundError, sqlite3.DatabaseError) as e:
@@ -512,6 +530,9 @@ class LifecycleMixin:
             item.fail(RuntimeError(f"{reason}，本次请求未执行"))
         self._base_queue.clear()
         self.session = None
+        # 接力按重启恢复（接力模式设计 §7：替换 store 重建连接后不复用旧
+        # 内存 owner——冻结已在替换前完成，这里把新库的非终态任务标中断）
+        await self.relay_after_store_replace()
         projects = await self.store.list_projects()
         cur = next(
             (p for p in projects if str(p.root_path).lower() == str(self.working_dir).lower()),

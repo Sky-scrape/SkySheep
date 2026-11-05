@@ -52,6 +52,10 @@ def test_command_parsing():
     assert parse_command("/状态").name == "status"
     # 群聊里命令可能带 @botname 后缀
     assert parse_command("/stop@my_bot").name == "stop"
+    # 渠道遥控对抗（对抗模式设计 §12 二期）：arg 是被审内容
+    assert parse_command("/对抗 审查这段设计").name == "adversarial"
+    assert parse_command("/对抗 审查这段设计").arg == "审查这段设计"
+    assert parse_command("/adversarial x").name == "adversarial"
     # 未知命令单独标记：不能当成普通消息送给模型，否则打错命令会得到莫名回答
     assert parse_command("/nope").name == "__unknown__"
     # 普通文本原样交给 Agent
@@ -870,6 +874,7 @@ class _FakeHost:
 
     def __init__(self):
         self.ran = []
+        self.adversarial_flags = []
         self.actors = []
         self.chat_ids = []
         self.sessions = {}
@@ -884,10 +889,12 @@ class _FakeHost:
         self.sessions[name] = f"sess-{name}-new"
         return self.sessions[name]
 
-    async def channel_run(self, session_id, text, actor="", chat_id=""):
+    async def channel_run(self, session_id, text, actor="", chat_id="",
+                          adversarial=False):
         self.ran.append((session_id, text))
         self.actors.append((session_id, actor))
         self.chat_ids.append((session_id, chat_id))
+        self.adversarial_flags.append(adversarial)
         return {"text": "回复：" + text}
 
     async def channel_stop(self, session_id):
@@ -972,6 +979,32 @@ async def test_manager_commands_do_not_hit_agent():
     assert host.ran == []
     assert ch.out and "未知命令" in ch.out[0][1]
 
+async def test_manager_adversarial_command_runs_flagged_turn():
+    """渠道遥控对抗（对抗模式设计 §12 二期）：/对抗 把余下文本当被审内容，
+    改写后落到与普通消息同一条排队路径——host.channel_run 收到 adversarial=True
+    与不带命令前缀的本文，回复照常发回发起聊天。"""
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="/对抗 审查这段设计", approved=True,
+    ))
+    assert host.ran == [("sess-feishu", "审查这段设计")], host.ran
+    assert host.adversarial_flags == [True], "本轮必须带对抗标志"
+    assert ch.out and "回复：审查这段设计" in ch.out[0][1]
+
+
+async def test_manager_adversarial_empty_arg_shows_usage():
+    """/对抗 不带内容不跑轮：回用法提示，不产生任何会话轮。"""
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    from skysheep.channels.base import ChannelMessage
+
+    await mgr._on_message(ChannelMessage(
+        channel="feishu", actor="9", chat_id="9", text="/对抗", approved=True,
+    ))
+    assert host.ran == []
+    assert ch.out and "用法：/对抗" in ch.out[0][1]
+
 
 async def test_manager_routes_approval_reply_before_agent():
     """待审批时回 allow 必须是决定，不能当成新消息再跑一轮。"""
@@ -1012,6 +1045,26 @@ def test_take_batch_never_merges_across_chats_or_actors():
     batch = mgr._take_batch("feishu#t")
     assert [m.text for m in batch] == ["a1", "a2"]
     assert [m.text for m in mgr._inbox["feishu#t"]] == ["b1"]
+
+def test_take_batch_adversarial_never_merges():
+    """对抗消息恒单条成批、普通批次在遇到它时提前收口（对抗模式设计 §12
+    二期）：/对抗 显式划定被审内容，跟前后的话合并会稀释审查对象，也避免
+    「普通消息在前」的批次把对抗标志整批吞掉。"""
+    from skysheep.channels.base import ChannelMessage
+
+    mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
+    a1 = ChannelMessage(channel="feishu", actor="u1", chat_id="A", text="a1", approved=True)
+    adv = ChannelMessage(channel="feishu", actor="u1", chat_id="A", text="审查",
+                         approved=True, adversarial=True)
+    a2 = ChannelMessage(channel="feishu", actor="u1", chat_id="A", text="a2", approved=True)
+    mgr._inbox["feishu#t"] = [a1, adv, a2]
+    batch = mgr._take_batch("feishu#t")
+    assert [m.text for m in batch] == ["a1"], "普通批次在对抗消息前收口"
+    assert [m.text for m in mgr._inbox["feishu#t"]] == ["审查", "a2"]
+    batch2 = mgr._take_batch("feishu#t")
+    assert [m.text for m in batch2] == ["审查"] and batch2[0].adversarial
+    batch3 = mgr._take_batch("feishu#t")
+    assert [m.text for m in batch3] == ["a2"]
 
 
 async def test_stop_targets_running_binding_key():
@@ -1119,7 +1172,7 @@ async def test_manager_queues_message_with_ack():
 
     release = _aio.Event()
 
-    async def slow_run(session_id, text, actor="", chat_id=""):
+    async def slow_run(session_id, text, actor="", chat_id="", adversarial=False):
         host.ran.append((session_id, text))
         await release.wait()
         return {"text": "done"}
@@ -1152,7 +1205,7 @@ async def test_manager_rejects_when_queue_is_full():
 
     release = _aio.Event()
 
-    async def slow_run(session_id, text, actor="", chat_id=""):
+    async def slow_run(session_id, text, actor="", chat_id="", adversarial=False):
         host.ran.append((session_id, text))
         await release.wait()
         return {"text": "done"}
@@ -1183,7 +1236,7 @@ async def test_manager_arrival_during_lock_handover_is_counted_and_acked():
     go = _aio.Event()        # 第一轮说要收尾了
     parked = _aio.Event()    # 收尾前最后停一拍，留给测试布置第三条
 
-    async def run1(session_id, text, actor="", chat_id=""):
+    async def run1(session_id, text, actor="", chat_id="", adversarial=False):
         host.ran.append(text)
         await release.wait()
         go.set()
@@ -1229,7 +1282,7 @@ async def test_manager_sends_busy_notice_for_slow_turn(monkeypatch):
     mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
     from skysheep.channels.base import ChannelMessage
 
-    async def slow_run(session_id, text, actor="", chat_id=""):
+    async def slow_run(session_id, text, actor="", chat_id="", adversarial=False):
         await _aio.sleep(0.2)
         return {"text": "done"}
 
@@ -1252,7 +1305,7 @@ async def test_manager_reports_run_error_back_to_chat():
     mgr, host, ch = _manager({"feishu": {"enabled": True, "allowed_ids": ["9"]}})
     from skysheep.channels.base import ChannelMessage
 
-    async def boom(session_id, text, actor="", chat_id=""):
+    async def boom(session_id, text, actor="", chat_id="", adversarial=False):
         raise RuntimeError("模型未配置")
 
     host.channel_run = boom
@@ -1681,6 +1734,64 @@ def test_channel_session_binding_survives_runtime_loss(home):
             result = await be.channel_run("not-a-channel-session", "你好")
             assert "error" in result
             assert "/new" in result["error"]
+        finally:
+            await be.shutdown()
+
+    asyncio.run(scenario())
+
+def test_channel_run_adversarial_flag_runs_pipeline(home, monkeypatch):
+    """渠道遥控对抗（对抗模式设计 §12 二期）：channel_run 的 adversarial 标志
+    接到与 chat.send 同一条执行链——角色未指定按 §2 自动补位（已配置服务按序
+    补齐，裁判由本会话模型担任），四角色流水线跑完后终审报告随 assistant_message
+    回给聊天窗口，报告消息带对抗元数据落库（前端对抗卡与转工单的事实源），
+    用量按角色入账。"""
+    import asyncio
+
+    from test_adversarial import (
+        ADVISOR_JSON,
+        FINDER_JSON,
+        INVESTIGATOR_JSON,
+        JUDGE_REPORT,
+    )
+
+    from skysheep.messages import TextBlock
+    from skysheep.models.fake import FakeProvider
+    from skysheep.server.backend import ServerBackend
+
+    async def scenario():
+        # 主模型（渠道 runtime 的 agent.provider）即裁判；角色 provider 经
+        # _provider_factory_override 注入（三个角色按序各消费一段脚本）
+        judge_provider = FakeProvider([[TextBlock(text=JUDGE_REPORT)]])
+        roles_provider = FakeProvider([
+            [TextBlock(text=FINDER_JSON)],
+            [TextBlock(text=INVESTIGATOR_JSON)],
+            [TextBlock(text=ADVISOR_JSON)],
+        ])
+        be = ServerBackend(
+            working_dir=home / "proj",
+            provider_name="fake",
+            provider_factory=lambda: judge_provider,
+        )
+        be._provider_factory_override = lambda: roles_provider
+        # §2 自动补位按「已配置 Key 的服务」解析角色：给 preset 服务一个 key，
+        # 否则自动序列为空，角色全部构建失败按错误收尾
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        await be.setup()
+        try:
+            sid = await be.channel_ensure_session("feishu")
+            result = await be.channel_run(
+                sid, "审查这段代码：print(pop([]))", adversarial=True)
+            assert "error" not in result, result
+            assert "对抗审查报告" in result["text"], result["text"][:200]
+
+            # 报告消息带对抗元数据落库（status=done：前端对抗卡与转工单的事实源）
+            msgs = await be.store.load_messages(sid)
+            adv = [m for m in msgs if m.role == "assistant" and m.adversarial]
+            assert adv, "终审报告必须以带 adversarial 元数据的消息落库"
+            assert adv[-1].adversarial.get("status") == "done"
+
+            # 用量按角色入账（FakeProvider 每次 11/7，四角色四行）
+            assert await be.store.usage_today() > 0
         finally:
             await be.shutdown()
 
@@ -2480,7 +2591,7 @@ async def test_manager_merges_queued_messages_into_one_turn():
 
     release = _aio.Event()
 
-    async def slow_run(session_id, text, actor="", chat_id=""):
+    async def slow_run(session_id, text, actor="", chat_id="", adversarial=False):
         host.ran.append((session_id, text))
         await release.wait()
         return {"text": "done"}

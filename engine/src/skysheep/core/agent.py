@@ -106,6 +106,9 @@ class Agent:
         sandbox_level: str = "job",
         use_ripgrep: bool = True,
         permission_timeout_s: float = 0.0,
+        # 接力执行轮（接力模式设计 §4 第一条）：主副屏 worker 开轮时置位，
+        # 工具上下文据此拒绝可派生自主执行的参数（shell 的 background=true）
+        relay_execution: bool = False,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -131,6 +134,7 @@ class Agent:
         # 时以 mods_claude 为准、mods 分支被跳过。见 core/mods_claude.py
         self.mods_claude = mods_claude
         self.restrict_to_workdir = restrict_to_workdir
+        self.relay_execution = bool(relay_execution)
         # 命令执行沙箱化一期：run_command 子进程纳入 Job Object 进程遏制
         # （security/sandbox_win.py，仅 Windows，失败自动降级）。默认开。
         self.job_containment = job_containment
@@ -359,6 +363,7 @@ class Agent:
             job_containment=self.job_containment,
             sandbox_level=self.sandbox_level,
             use_ripgrep=self.use_ripgrep,
+            relay_execution=self.relay_execution,
         )
         # 防打转状态按轮重置：上一轮的重试/熔断不该影响新任务（用户新消息
         # 可能正是要求换个思路做同一件事）

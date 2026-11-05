@@ -738,12 +738,13 @@ def test_team_room_tab_wiring():
     for feeder in ("trOnStarted", "trOnDelta", "trOnMsg", "trOnTask", "trOnFinish"):
         assert f'trRoomFeed("{feeder}", data)' in js
 
-    # 入口两个，都跟团队走；不进「＋」菜单常驻（空态率太高，§15.1）
+    # 入口：侧栏常驻项（§15.3.5，常驻团队落地后增设）+ 团队卡「在团队室打开」
+    # + 协作菜单；不进「＋」菜单常驻（空态率太高，§15.1——侧栏项是后评的例外）
     assert "在团队室打开" in js and "tc-open-room" in js
     assert '<span class="coop-mode-label">团队室</span>' in js
     # 不进「＋」菜单常驻（§15.1：空态率太高）——「＋」菜单跳过团队室的锚定
     assert 'if (id === "teamroom") return;' in js
-    assert "入口跟团队走（团队卡/协作菜单），不进「＋」菜单常驻" in js
+    assert "入口跟团队走（侧栏/团队卡/协作菜单），不进「＋」菜单常驻" in js
 
     # 空态与降级（§15.4）：空态两动作、中断只读回放、页签内错误行 + 重试
     assert "本会话没有进行中的团队" in js
@@ -870,6 +871,99 @@ def test_team_room_badge_backlog_wiring():
     body = tr_js[i:tr_js.index("\n}\n", i)]
     assert "if (trSeenMap) return trSeenMap;" not in body
     assert "trSeenMap = raw;" in body
+
+
+def test_team_sidebar_entry_wiring():
+    """侧栏「团队」常驻入口（团队模式设计 §15.3.5，常驻团队 T3.2 落地后增设）：
+    侧栏项开团队室页签 + 活动团队数角标。数据面纯前端、零新后端方法——当前
+    会话进行中的团队复用 team.get / team.room 既有权威回包对齐；跨会话锚是
+    常驻登记册的 team_id 集合，前端以权威信号（快照 resident 标志 /
+    resident_get 探询 / set·clear 回包）维护镜像，正负都收、少计不虚计。"""
+    import re
+
+    js = read_app_bundle()
+    html = read_static("index.html")
+    css = read_static("app.css")
+    tr_js = read_static("app-teamroom.js")
+
+    # 侧栏项：展开态 .nav-item 与折叠栏 .rail-btn 两处一起（顺序一致性由
+    # test_ui_prefs.test_side_nav_order_matches_rail 机械校验），各带一颗角标
+    assert 'class="nav-item" data-act="teamroom"' in html
+    assert 'id="nav-team-badge"' in html
+    assert 'data-rail-act="teamroom"' in html
+    assert 'id="rail-team-badge"' in html
+    # 折叠栏按钮必须在导航组里（第一条分隔线之前），不落主操作区
+    rail_strip = html[html.index('id="sb-rail"'):html.index('<div class="rail-sep"')]
+    assert 'data-rail-act="teamroom"' in rail_strip
+    # 动作分发：侧栏项与导航项同一处收（开右面板团队室页签）
+    assert 'if (act === "teamroom") return openRightTab("teamroom");' in js
+
+    # 角标计数（app-teamroom.js）：常驻镜像 ∪ 当前会话进行中的团队（去重）
+    i = tr_js.index("function trSideBadgeCount()")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "ids.size" in body
+    assert "!ids.has(trSideTeamId)" in body
+    # 镜像持久化（localStorage，沿 skysheep.team.members 先例）+ 懒加载
+    assert 'TR_SIDE_LS_KEY = "skysheep.team.resident_ids"' in tr_js
+    i = tr_js.index("function trSideLoad()")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "localStorage.getItem" in body
+    assert "if (trResidentIds) return trResidentIds;" in body
+    # 权威真值并入：正负都收（登记收进、解除剔除），无变化不落盘
+    i = tr_js.index("function trSideNote(teamId, resident)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "ids.add(teamId)" in body and "ids.delete(teamId)" in body
+    assert "无变化不落盘" in body
+    # 两处入口一起画：展开态条目 + 折叠栏图标
+    i = tr_js.index("function trSyncSideBadge()")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert '"nav-team-badge"' in body and '"rail-team-badge"' in body
+
+    # 权威信号喂入（app.js，typeof 守卫——app-teamroom.js 在其后加载）：
+    # ① 切会话 team.get 回包对齐活动团队（只认仍是当前页签的回包）
+    assert "typeof trSideAlign === \"function\"" in js
+    i = js.index("async function refreshTeamState(tab)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "trSideAlign(r && r.active ? r.team : null, tab.sid)" in body
+    assert "(now && now.sid) === tab.sid" in body
+    # ② resident_get 探询两向都是真值（终态/回放卡翻旧会话即给镜像补账）
+    i = js.index("async function tcProbeResidentClear(card)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "trSideNote(String(card._teamId || \"\"), !!(r && r.resident))" in body
+    # ③ 常驻开关 set/clear 回包即时并入（等不到下一次快照刷新）
+    assert 'trSideNote(String((r && r.team_id) || card._teamId || ""), now);' in js
+    assert 'trSideNote(String(card._teamId || ""), false);' in js
+
+    # 事件同源喂角标：trRoomFeed 入口转发，起队即时 +1（pending）、终态清位
+    i = tr_js.index("function trRoomFeed(name, data)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "trSideFeed(name, data);" in body
+    i = tr_js.index("function trSideFeed(name, data)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "if (sid && trSideSid && sid !== trSideSid) return;" in body
+    assert "trSidePending = true;" in body
+    assert "trSideEpoch++;" in body
+    # 装载对齐（页签激活/切会话）：活动分支对齐、非活动分支清位（中断不算在场）
+    assert "trSideAlign(r.team, sid); // 侧栏角标" in tr_js
+    assert "trSideAlign(null, sid);" in tr_js
+    # 起队校准顺路对齐（页签没开也计数）；终态先行时迟到回包不作数
+    i = tr_js.index("function trCalibrateStarted(sid)")
+    body = tr_js[i:tr_js.index("\n}\n", i)]
+    assert "const sideEpoch = trSideEpoch;" in body
+    assert "if (sideEpoch !== trSideEpoch) return;" in body
+    assert "trSideAlign(r.team, sid || \"\");" in body
+    # 模块装载即画一次：重启后角标凭镜像立刻在场，不等第一次 team.get
+    assert "\ntrSyncSideBadge();" in tr_js
+
+    # 样式：两颗角标成套，且全走主题变量（无写死色值）
+    assert ".nav-badge {" in css and ".rail-badge {" in css
+    assert "#rail-team { position: relative; }" in css
+    for rule in (".nav-badge", ".rail-badge"):
+        i = css.index(rule + " {")
+        seg = css[i:css.index("}", i)]
+        assert "var(--" in seg
+        assert not re.search(r"#[0-9a-fA-F]{3,8}", seg)
+        assert not re.search(r"rgba?\(", seg)
 
 
 def test_adversarial_flow_stats_filter_wiring():

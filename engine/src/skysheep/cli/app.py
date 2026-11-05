@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 
 from .. import __version__
-from ..bgtasks import drain_bg_tasks
+from ..bgtasks import drain_bg_tasks, spawn_bg
 from ..bootpages import error_html, splash_html
 from ..config import (
     ConfigError,
@@ -40,6 +40,7 @@ from ..core import Agent, build_system_prompt
 from ..core.hooks import HookRunner, hooks_from_config, load_raw_config
 from ..core.review import review_output
 from ..core.subagent import CheckTaskTool, SpawnAgentTool, TaskManager
+from ..core.team_store import TeamTemplateStore
 from ..events import ErrorEvent, PermissionResolved, TextDelta, TurnFinished
 from ..mcp import MCPManager, load_mcp_configs
 from ..messages import Message
@@ -48,7 +49,7 @@ from ..models.factory import build_provider
 from ..security.gate import Decision, HeadlessGate
 from ..security.trust import WorkspaceTrust
 from ..server.backend_parts._shared import SessionRuntime
-from ..server.backend_parts.automation import run_cron_task_core
+from ..server.backend_parts.automation import run_cron_task_core, run_cron_team_turn_core
 from ..session import SessionStore, export_messages_text
 from ..session.writer_lease import WriterLease
 from ..skills import SkillLoader
@@ -961,9 +962,15 @@ async def _assemble_headless_engine(store, working_dir: Path, cfg, provider_obj,
     """CLI 无人值守入口（skysheep run / cron run）共用的引擎装配。
 
     技能发现 → MCP 连接 → 子代理任务簿 → 工具注册表 → 钩子，与后端
-    _build_full_registry 同一能力面。返回 (skills, mcp, tasks, registry, hooks)；
-    mcp / tasks 由调用方在 finally 里收尾（shutdown / cancel_all）。
+    _build_full_registry 同一能力面。返回 (skills, mcp, tasks, registry,
+    hooks, team_templates)；mcp / tasks 由调用方在 finally 里收尾
+    （shutdown / cancel_all）。team_templates 是建队模板册（定时团队二期，
+    §14.6：cron run 的团队任务凭它按模板建队——成员解析等价物在
+    run_cron_team_turn_core，CLI 只补装配），只有 cron run 的团队任务消费。
     """
+    team_templates = TeamTemplateStore(skysheep_home() / "teams.json")
+    team_templates.load()
+
     skills = SkillLoader(
         global_dir=skysheep_home() / "skills",
         project_dir=(working_dir / ".skysheep" / "skills") if trusted else None,
@@ -1005,7 +1012,7 @@ async def _assemble_headless_engine(store, working_dir: Path, cfg, provider_obj,
     hooks = HookRunner(pre_rules, post_rules, working_dir=working_dir,
                        stop_rules=stop_rules) \
         if (pre_rules or post_rules or stop_rules) else None
-    return skills, mcp, tasks, registry, hooks
+    return skills, mcp, tasks, registry, hooks, team_templates
 
 
 def _ndjson_write(payload: dict) -> None:
@@ -1079,8 +1086,8 @@ async def run_headless(
             WorkspaceTrust(skysheep_home(), working_dir).grant()
             trusted = True
 
-        skills, mcp, tasks, registry, hooks = await _assemble_headless_engine(
-            store, working_dir, cfg, provider_obj, trusted)
+        skills, mcp, tasks, registry, hooks, _team_templates = \
+            await _assemble_headless_engine(store, working_dir, cfg, provider_obj, trusted)
 
         agent = Agent(
             provider=provider_obj,
@@ -1294,117 +1301,156 @@ async def _cron_run_async(
                 raise SystemExit("指定的项目目录不存在: " + str(project_dir))
             working_dir = explicit.resolve()
 
-        # 一期口径（团队模式设计 §14.6）：团队任务只在应用内触发（后端扫描 /
-        # 立即运行）。CLI 侧没有模板册与成员解析的装配对应物（backend 的
-        # team_templates / _resolve_team_members），半截装配只会建出注定空转的
-        # 团队——按失败收尾：单轮入口直接报错，走下方 run_cron_task_core 的
-        # 错误回写（last_status=error）与 notify_channel 推送，不静默跳过；
-        # 引擎装配一并跳过（MCP 连接对一个注定失败的运行纯属浪费与拖慢）。
-        if str(task.get("mode") or "agent") == "team":
-            async def reject_team(t: dict):
-                raise RuntimeError(
-                    "团队任务暂不支持系统计划任务入口（skysheep cron run）；"
-                    "请在应用内触发运行")
-            one_round = reject_team
-        else:
-            # 信任口径与 run_headless 一致：有过信任记录才启用项目自带的 mcp/技能
-            trusted = WorkspaceTrust(skysheep_home(), working_dir).is_trusted()
-            skills, mcp, tasks, registry, hooks = await _assemble_headless_engine(
-                store, working_dir, cfg, provider_obj, trusted)
+        # 信任口径与 run_headless 一致：有过信任记录才启用项目自带的 mcp/技能。
+        # 团队任务与单会话任务共用这条装配链（二期 §14.6：团队成员的工具表、
+        # 模板册都在这里装，一期「团队任务跳过装配直接拒绝」的口径移除）
+        trusted = WorkspaceTrust(skysheep_home(), working_dir).is_trusted()
+        skills, mcp, tasks, registry, hooks, team_templates = \
+            await _assemble_headless_engine(store, working_dir, cfg, provider_obj, trusted)
 
-            async def agent_turn(t: dict):
-                # 与后端 _execute_cron_turn 同构：独立会话 + HeadlessGate + 一轮
-                sess = await store.create_session(t["project_id"], title=f"⏰ {t['name']}")
-                sid = sess.id
-                gate = HeadlessGate(allowed=t["allowed_tools"], store=store,
-                                    project_id=t["project_id"], working_dir=working_dir)
-                agent = Agent(
-                    provider=provider_obj,
-                    registry=registry,
-                    gate=gate,
-                    working_dir=working_dir,
-                    max_iterations=cfg.max_iterations,
-                    context_limit_tokens=context_limit,
-                    compaction_keep_recent=cfg.compaction_keep_recent,
-                    compaction_trigger=cfg.compaction_trigger,
-                    compaction_auto=cfg.compaction_auto,
-                    hooks=hooks,
-                    restrict_to_workdir=cfg.restrict_to_workdir,
-                    session_id=sid,
-                    job_containment=cfg.shell.job_containment,
-                    sandbox_level=cfg.shell.sandbox_level,
-                    use_ripgrep=cfg.search.use_ripgrep,
+        async def agent_turn(t: dict):
+            # 与后端 _execute_cron_turn 同构：独立会话 + HeadlessGate + 一轮
+            sess = await store.create_session(t["project_id"], title=f"⏰ {t['name']}")
+            sid = sess.id
+            gate = HeadlessGate(allowed=t["allowed_tools"], store=store,
+                                project_id=t["project_id"], working_dir=working_dir)
+            agent = Agent(
+                provider=provider_obj,
+                registry=registry,
+                gate=gate,
+                working_dir=working_dir,
+                max_iterations=cfg.max_iterations,
+                context_limit_tokens=context_limit,
+                compaction_keep_recent=cfg.compaction_keep_recent,
+                compaction_trigger=cfg.compaction_trigger,
+                compaction_auto=cfg.compaction_auto,
+                hooks=hooks,
+                restrict_to_workdir=cfg.restrict_to_workdir,
+                session_id=sid,
+                job_containment=cfg.shell.job_containment,
+                sandbox_level=cfg.shell.sandbox_level,
+                use_ripgrep=cfg.search.use_ripgrep,
+            )
+            agent.set_system(
+                build_system_prompt(working_dir)
+                + skills.render_prompt_section()
+                + render_memory_section()
+            )
+            runtime = SessionRuntime(sid=sid, agent=agent, recorder=ChangeRecorder())
+            n_before = len(agent.history)
+            error = None
+            stop_reason = "error"
+            denied = 0  # 被无人值守门控拒绝的工具次数（预授权没勾全的痕迹）
+            async for ev in agent.run_turn(t["prompt"]):
+                if isinstance(ev, ErrorEvent):
+                    error = ev.message
+                elif isinstance(ev, TurnFinished):
+                    stop_reason = ev.stop_reason
+                elif isinstance(ev, PermissionResolved) and ev.decision == "deny":
+                    denied += 1
+            # 消息落库（run_headless 同款）：异常结束的一轮也要可审计
+            for m in agent.history[n_before:]:
+                await store.append_message(sid, m)
+            await store.touch(sid)
+            try:
+                await store.add_usage(
+                    sid, getattr(provider_obj, "name", "") or name,
+                    getattr(provider_obj, "model", ""),
+                    agent.total_in_tokens, agent.total_out_tokens,
+                    agent.total_cached_tokens,
                 )
-                agent.set_system(
-                    build_system_prompt(working_dir)
-                    + skills.render_prompt_section()
-                    + render_memory_section()
-                )
-                runtime = SessionRuntime(sid=sid, agent=agent, recorder=ChangeRecorder())
-                n_before = len(agent.history)
-                error = None
-                stop_reason = "error"
-                denied = 0  # 被无人值守门控拒绝的工具次数（预授权没勾全的痕迹）
-                async for ev in agent.run_turn(t["prompt"]):
-                    if isinstance(ev, ErrorEvent):
-                        error = ev.message
-                    elif isinstance(ev, TurnFinished):
-                        stop_reason = ev.stop_reason
-                    elif isinstance(ev, PermissionResolved) and ev.decision == "deny":
-                        denied += 1
-                # 消息落库（run_headless 同款）：异常结束的一轮也要可审计
-                for m in agent.history[n_before:]:
-                    await store.append_message(sid, m)
-                await store.touch(sid)
-                try:
-                    await store.add_usage(
-                        sid, getattr(provider_obj, "name", "") or name,
-                        getattr(provider_obj, "model", ""),
-                        agent.total_in_tokens, agent.total_out_tokens,
-                        agent.total_cached_tokens,
+            except Exception:  # noqa: BLE001 - 用量记录失败不影响执行
+                pass
+            # 验收工位（可选，默认关）：只读、单轮，结论交给 run_cron_task_core
+            # 与自动判定合并（只能降级，不能升级）
+            review = None
+            if (t.get("review") and error is None
+                    and stop_reason in ("end_turn", "max_iterations")):
+                last_text = ""
+                for m in reversed(agent.history[n_before:]):
+                    text = str(getattr(m, "text", "") or "").strip()
+                    if getattr(m, "role", "") == "assistant" and text:
+                        last_text = text
+                        break
+                if last_text:
+                    review = await review_output(
+                        provider_obj,
+                        task_name=str(t.get("name") or ""),
+                        task_prompt=str(t.get("prompt") or ""),
+                        result=last_text,
+                        denied=denied,
                     )
-                except Exception:  # noqa: BLE001 - 用量记录失败不影响执行
-                    pass
-                # 验收工位（可选，默认关）：只读、单轮，结论交给 run_cron_task_core
-                # 与自动判定合并（只能降级，不能升级）
-                review = None
-                if (t.get("review") and error is None
-                        and stop_reason in ("end_turn", "max_iterations")):
-                    last_text = ""
-                    for m in reversed(agent.history[n_before:]):
-                        text = str(getattr(m, "text", "") or "").strip()
-                        if getattr(m, "role", "") == "assistant" and text:
-                            last_text = text
-                            break
-                    if last_text:
-                        review = await review_output(
-                            provider_obj,
-                            task_name=str(t.get("name") or ""),
-                            task_prompt=str(t.get("prompt") or ""),
-                            result=last_text,
-                            denied=denied,
-                        )
-                        if review.get("in_tokens") or review.get("out_tokens"):
-                            try:
-                                await store.add_usage(
-                                    sid,
-                                    getattr(provider_obj, "name", "") or name,
-                                    getattr(provider_obj, "model", ""),
-                                    int(review.get("in_tokens") or 0),
-                                    int(review.get("out_tokens") or 0),
-                                    int(review.get("cached_tokens") or 0),
-                                )
-                            except Exception:  # noqa: BLE001 - 用量是附加信息
-                                pass
-                if error is not None or stop_reason not in ("end_turn", "max_iterations"):
-                    # 异常结束按失败收尾：run_cron_task_core 回写错误状态、渠道必推
-                    raise RuntimeError(error or f"轮次异常结束（{stop_reason}）")
-                facts = {"denied": denied}
-                if review is not None:
-                    facts["review"] = review
-                return runtime, sid, False, facts
+                    if review.get("in_tokens") or review.get("out_tokens"):
+                        try:
+                            await store.add_usage(
+                                sid,
+                                getattr(provider_obj, "name", "") or name,
+                                getattr(provider_obj, "model", ""),
+                                int(review.get("in_tokens") or 0),
+                                int(review.get("out_tokens") or 0),
+                                int(review.get("cached_tokens") or 0),
+                            )
+                        except Exception:  # noqa: BLE001 - 用量是附加信息
+                            pass
+            if error is not None or stop_reason not in ("end_turn", "max_iterations"):
+                # 异常结束按失败收尾：run_cron_task_core 回写错误状态、渠道必推
+                raise RuntimeError(error or f"轮次异常结束（{stop_reason}）")
+            facts = {"denied": denied}
+            if review is not None:
+                facts["review"] = review
+            return runtime, sid, False, facts
 
-            one_round = agent_turn
+
+        async def team_turn(t: dict):
+            # 定时团队二期（团队模式设计 §14.6）：CLI 系统计划任务入口与后端
+            # 扫描触发共用 run_cron_team_turn_core——按模板建队、AI 总管自动
+            # 闭环，交付说明走 run_cron_task_core 的既有收尾（错误回写 / 渠道
+            # 推送 / 运行账本零差异）。装配等价物：模板册与工具表来自上方
+            # _assemble_headless_engine；成员 provider 按配置直建（测试经
+            # monkeypatch 换 build_provider 桩）。不复用常驻队伍：跨进程无从
+            # 核对登记的队伍是否仍在应用内活动（resident_live 缺席），复用会
+            # 并行建出第二个编排器写同一 team_id 的频道——缺判定就整段不复用，
+            # 每次新建队伍（注册表不动，登记的队伍仍由应用内触发复用）。
+            def _release(provs) -> None:
+                # 连接池释放入 bg，退出前的 drain_bg_tasks 统一收口
+                for prov in provs:
+                    aclose = getattr(prov, "aclose", None)
+                    if callable(aclose):
+                        try:
+                            spawn_bg(aclose())
+                        except RuntimeError:
+                            pass  # 无运行中的事件循环：跳过释放
+
+            def _build_member(name_: str, model_: str | None):
+                # 后端 _build_member_provider 的 CLI 等价物：未知服务 raise，
+                # 核心降级 build_error 入册（与后端同一容错面）
+                if name_ not in cfg.providers:
+                    raise ConfigError(
+                        "unknown provider: {}; available: {}".format(
+                            name_, ", ".join(cfg.providers)))
+                pc = cfg.providers[name_]
+                if model_:
+                    pc = pc.model_copy(update={"model": model_})
+                return build_provider(name_, pc, cfg.network)
+
+            return await run_cron_team_turn_core(
+                store, t, provider=provider_obj, cfg=cfg,
+                cron_pid=int(t["project_id"]), cron_workdir=working_dir,
+                template_store=team_templates,
+                build_registry=lambda rec: registry,
+                build_member_provider=_build_member,
+                hooks=hooks, mods=None,
+                progress_ledger=None,  # CLI 无工厂观战账本：只计数不发事件
+                resident_store=None,   # 不带存活判定 = 不复用（见上）
+                release_providers=_release,
+                after_usage=None,
+            )
+
+        async def one_round(t: dict):
+            # mode 分流（与后端 _execute_cron_turn 同款）：团队任务走共享核心
+            if str(t.get("mode") or "agent") == "team":
+                return await team_turn(t)
+            return await agent_turn(t)
         channels = _build_sendonly_channels(cfg)
 
         final = await run_cron_task_core(

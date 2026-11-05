@@ -299,6 +299,7 @@ CREATE TABLE IF NOT EXISTS relay_pairs (
     current_side TEXT NOT NULL DEFAULT 'main',
     turn_no INTEGER NOT NULL DEFAULT 0,
     auto_alternate INTEGER NOT NULL DEFAULT 0,
+    verify_handoff INTEGER NOT NULL DEFAULT 1,
     revision INTEGER NOT NULL DEFAULT 0,
     error_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL,
@@ -316,6 +317,10 @@ CREATE TABLE IF NOT EXISTS relay_turns (
     error TEXT NOT NULL DEFAULT '',
     started_at REAL NOT NULL,
     finished_at REAL NOT NULL DEFAULT 0,
+    verify_state TEXT NOT NULL DEFAULT '',
+    verify_attempts INTEGER NOT NULL DEFAULT 0,
+    restatement TEXT NOT NULL DEFAULT '',
+    verify_note TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (pair_id, turn_no)
 );
 CREATE TABLE IF NOT EXISTS automation_runs (
@@ -422,6 +427,11 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("automation_runs", "outcome_source TEXT NOT NULL DEFAULT ''"),
     ("automation_runs", "config_snapshot TEXT NOT NULL DEFAULT ''"),
     ("automation_runs", "review_note TEXT NOT NULL DEFAULT ''"),
+    ("relay_pairs", "verify_handoff INTEGER NOT NULL DEFAULT 1"),
+    ("relay_turns", "verify_state TEXT NOT NULL DEFAULT ''"),
+    ("relay_turns", "verify_attempts INTEGER NOT NULL DEFAULT 0"),
+    ("relay_turns", "restatement TEXT NOT NULL DEFAULT ''"),
+    ("relay_turns", "verify_note TEXT NOT NULL DEFAULT ''"),
 )
 
 # 数据库结构版本：SCHEMA 或 _COLUMN_MIGRATIONS 每次变更时 +1。
@@ -444,10 +454,13 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 #     日报用便宜模型、周报用强模型，不同活可以分给不同的服务跑。
 # v11：cron_tasks 增 review（验收工位开关，默认关）；automation_runs 增
 #     review_note（验收结论 / 未完成原因）——「跑完」之外再补一次只读验收。
+# v12：relay_pairs 增 verify_handoff（自动交替换手前先做复述核验，默认开）；
+#     relay_turns 增 verify_state / verify_attempts / restatement / verify_note
+#     （通过核验的那次复述与过程留痕，接力模式设计 §6 的类型化交接记录）。
 # 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
 # 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
 # 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 @dataclass
@@ -4204,6 +4217,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "current_side": row["current_side"],
             "turn_no": int(row["turn_no"]),
             "auto_alternate": bool(row["auto_alternate"]),
+            "verify_handoff": bool(row["verify_handoff"]),
             "revision": int(row["revision"]),
             "error": _relay_json_load(row["error_json"], {}),
             "created_at": row["created_at"],
@@ -4222,6 +4236,10 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "error": row["error"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
+            "verify_state": row["verify_state"],
+            "verify_attempts": int(row["verify_attempts"]),
+            "restatement": row["restatement"],
+            "verify_note": row["verify_note"],
         }
 
     async def _relay_pair_snapshot_conn(self, conn, pair_id: str) -> dict | None:
@@ -4258,6 +4276,30 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         row = await cur.fetchone()
         return self._relay_pair_row(row) if row else None
 
+    async def relay_tasks_by_session(self, session_id: str) -> list[dict]:
+        """串行接力任务按绑定会话查（新到旧；含终态，调用方自行筛）。
+
+        删除会话/清项目的级联收敛用（接力模式设计 §7：删除入口必须先停止并
+        收敛关联接力）——串行任务的绑定会话被删时任务要停到终态。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM relay_tasks WHERE session_id = ? ORDER BY created_at DESC",
+            (session_id,),
+        )
+        return [self._relay_task_row(r) for r in await cur.fetchall()]
+
+    async def relay_pairs_by_session(self, session_id: str) -> list[dict]:
+        """主副屏 pair 按任一侧会话查（main 或 peer 命中都算；含终态，调用方
+        自行筛）。删除会话的级联收敛要覆盖副屏会话被删的情形。"""
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT * FROM relay_pairs WHERE main_session_id = ? OR peer_session_id = ?"
+            " ORDER BY created_at DESC",
+            (session_id, session_id),
+        )
+        return [self._relay_pair_row(r) for r in await cur.fetchall()]
+
     async def relay_pair_list(self, project_id: int | None, limit: int = 20) -> list[dict]:
         assert self._db
         cur = await self._db.execute(
@@ -4272,8 +4314,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             await conn.execute(
                 "INSERT INTO relay_pairs (id, project_id, main_session_id, peer_session_id,"
                 " goal, main_task, peer_task, state, current_side, turn_no, auto_alternate,"
-                " revision, error_json, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " verify_handoff, revision, error_json, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     pair["id"], pair.get("project_id"), pair["main_session_id"],
                     pair["peer_session_id"], pair.get("goal", ""),
@@ -4281,6 +4323,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                     pair.get("state", "idle"), pair.get("current_side", "main"),
                     int(pair.get("turn_no", 0)),
                     1 if pair.get("auto_alternate") else 0,
+                    0 if pair.get("verify_handoff") is False else 1,
                     int(pair.get("revision", 0)),
                     json.dumps(pair.get("error") or {}, ensure_ascii=False), now, now,
                 ),
@@ -4303,7 +4346,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         """
         allowed = {
             "goal", "main_task", "peer_task", "state", "current_side",
-            "turn_no", "auto_alternate", "error", "peer_session_id",
+            "turn_no", "auto_alternate", "verify_handoff", "error", "peer_session_id",
         }
         now = time.time()
         async with self._relay_txn() as conn:
@@ -4328,6 +4371,9 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                 elif key == "auto_alternate":
                     sets.append("auto_alternate = ?")
                     params.append(1 if value else 0)
+                elif key == "verify_handoff":
+                    sets.append("verify_handoff = ?")
+                    params.append(1 if value else 0)
                 elif key == "turn_no":
                     sets.append("turn_no = ?")
                     params.append(int(value))
@@ -4342,14 +4388,19 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         return snap
 
     async def relay_pair_start_turn(
-        self, pair_id: str, side: str, brief: str, expected_revision: int
+        self, pair_id: str, side: str, brief: str, expected_revision: int,
+        verify: dict | None = None,
     ) -> dict | None:
         """开一轮：turn_no+1、写 running 的 turn、pair 置 running（同一事务）。
 
+        verify 是交接门的留痕（verify_state/verify_attempts/restatement/
+        verify_note），与本轮开轮在同一事务里落库；不传即「未经复述核验」
+        （人工批准的第一轮或关闭核验的 pair）。
         并发保护：只有 state=running 且 revision 与调用方读到的一致才开轮，
         两个「执行」点击只有一个能落库。
         """
         now = time.time()
+        verify = verify or {}
         async with self._relay_txn() as conn:
             cur = await conn.execute("SELECT * FROM relay_pairs WHERE id = ?", (pair_id,))
             row = await cur.fetchone()
@@ -4360,8 +4411,11 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             turn_no = int(row["turn_no"]) + 1
             await conn.execute(
                 "INSERT INTO relay_turns (pair_id, turn_no, side, status, brief, output,"
-                " error, started_at, finished_at) VALUES (?,?,?,?,?,'','',?,0)",
-                (pair_id, turn_no, side, "running", brief, now),
+                " error, started_at, finished_at, verify_state, verify_attempts,"
+                " restatement, verify_note) VALUES (?,?,?,?,?,'','',?,0,?,?,?,?)",
+                (pair_id, turn_no, side, "running", brief, now,
+                 str(verify.get("state") or ""), int(verify.get("attempts") or 0),
+                 str(verify.get("restatement") or ""), str(verify.get("note") or "")),
             )
             await conn.execute(
                 "UPDATE relay_pairs SET turn_no = ?, current_side = ?, revision = revision + 1,"
@@ -4375,11 +4429,19 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         self, pair_id: str, turn_no: int, *,
         status: str, output: str = "", error: str = "",
         next_side: str | None = None, auto: bool = False,
+        expect_turn_status: tuple[str, ...] | None = ("running",),
     ) -> dict | None:
         """收一轮：写 turn 结果并推进 pair 状态。
 
         done + auto → 保持 running（worker 接着跑对方）；
         done → idle（等用户点下一次执行）；cancelled → idle；其余 → paused。
+
+        expect_turn_status：turn 行的 CAS 守卫（对齐 relay_pair_update /
+        relay_pair_start_turn 的既有形态），默认只收「正在跑」的轮——守卫
+        不过（轮已终态，如收尾广播上的取消落在 await 上、迟到的 abort）
+        返回 None 且不动 pair：已成功的 done 轮不得被改写成 cancelled。
+        turn 行不存在（开轮前的空任务收尾，turn_no=0）时守卫跳过，只落
+        pair 状态。传 None 关闭守卫（预留，现无调用方）。
         """
         now = time.time()
         async with self._relay_txn() as conn:
@@ -4387,6 +4449,14 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             row = await cur.fetchone()
             if row is None:
                 return None
+            if expect_turn_status is not None:
+                tcur = await conn.execute(
+                    "SELECT status FROM relay_turns WHERE pair_id = ? AND turn_no = ?",
+                    (pair_id, turn_no),
+                )
+                trow = await tcur.fetchone()
+                if trow is not None and trow["status"] not in expect_turn_status:
+                    return None
             await conn.execute(
                 "UPDATE relay_turns SET status = ?, output = ?, error = ?, finished_at = ?"
                 " WHERE pair_id = ? AND turn_no = ?",

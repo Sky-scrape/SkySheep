@@ -11,7 +11,7 @@ import asyncio
 import pytest
 
 from skysheep.config import db_path
-from skysheep.messages import TextBlock
+from skysheep.messages import TextBlock, ToolUseBlock
 from skysheep.models.fake import FakeProvider
 from skysheep.session import SessionStore
 
@@ -190,38 +190,135 @@ def test_cron_run_cli_pushes_summary_to_channel(home, cron_task, monkeypatch):
     assert "每日汇总" in text and "成功" in text
 
 
-def test_cron_run_cli_rejects_team_task(home, monkeypatch):
-    """一期口径：团队任务不在系统计划任务入口执行——按失败收尾（任务行回写
-    error + 提示语），不装配引擎、不产生任何模型调用。"""
+# 定时团队二期（团队模式设计 §14.6）：CLI 系统计划任务入口与后端扫描触发共用
+# run_cron_team_turn_core。脚本池按「主模型 → 成员 → 总管」顺序供给（成员解析
+# 与总管构建各建一颗独立 provider，均经 cli_app.build_provider 桩）。
+
+_DIRECTOR_CLOSED_LOOP = [
+    [TextBlock(text="分工方案：调研先行"), ToolUseBlock(
+        id="d1", name="team_assign",
+        input={"title": "巡检目录", "assignee": "队员0", "type": "exec"})],
+    [TextBlock(text="对照验收标准：合格"), ToolUseBlock(
+        id="d2", name="team_accept", input={"task_id": "T1"})],
+    [TextBlock(text="验收通过，全部工单完成")],
+    [TextBlock(text="《交付说明》：巡检完成。"), ToolUseBlock(
+        id="d3", name="team_deliver", input={})],
+]
+
+
+def _patch_provider_pool(monkeypatch, scripts: list) -> None:
+    """按序弹池的 build_provider 桩：主模型、成员、总管各拿各的脚本。"""
     import skysheep.cli.app as cli_app
 
-    provider = FakeProvider([[TextBlock(text="不该被调用")]])
-    _patch_provider(monkeypatch, provider)
+    pool = [p if isinstance(p, FakeProvider) else FakeProvider(p) for p in scripts]
 
-    async def make_team_task():
+    def _fake_build(name, pc, *a, **k):
+        if pool:
+            return pool.pop(0)
+        return FakeProvider([[TextBlock(text="脚本耗尽的兜底回答")]])
+
+    monkeypatch.setattr(cli_app, "build_provider", _fake_build)
+
+
+def _seed_team_template(name="夜班小队"):
+    """往（隔离 home 的）模板册里塞一个定时团队引用的 AI 总管模板。"""
+    from skysheep.config import skysheep_home
+    from skysheep.core.team_store import (
+        TeamTemplate,
+        TeamTemplateDirector,
+        TeamTemplateMember,
+        TeamTemplateStore,
+    )
+
+    st = TeamTemplateStore(skysheep_home() / "teams.json")
+    st.upsert(TeamTemplate(
+        name=name, director_mode="ai",
+        director=TeamTemplateDirector(provider="zhipu", model="ma"),
+        members=[TeamTemplateMember(provider="zhipu", model="ma", name="队员0",
+                                    persona="")],
+        created_at=1.0,
+    ))
+    return name
+
+
+async def _make_team_task(home, name="夜间巡检", prompt="巡检目录并汇总",
+                          team_template="夜班小队"):
+    store = await SessionStore(db_path()).connect()
+    try:
+        proj = await store.get_or_create_project(str(home / "proj"))
+        return await store.add_cron_task(
+            proj.id, name, prompt, "interval", interval_minutes=30,
+            mode="team", team_template=team_template)
+    finally:
+        await store.close()
+
+
+def test_cron_run_cli_team_task_runs_shared_core(home, monkeypatch):
+    """二期口径：团队任务在系统计划任务入口与后端同链执行——模板建队、AI 总管
+    闭环交付，run_cron_task_core 收尾照常（last_status=ok、《交付说明》进
+    last_result、会话 user+assistant 落库、报告全文落盘 cron-team-*.md、用量
+    入账）。一期的显式拒绝（「团队任务暂不支持系统计划任务入口」）已移除。"""
+    import skysheep.cli.app as cli_app
+
+    _patch_provider_pool(monkeypatch, [
+        [TextBlock(text="主模型不参与团队轮")],
+        [TextBlock(text="巡检完成：未见异常")],
+        _DIRECTOR_CLOSED_LOOP,
+    ])
+    _seed_team_template("夜班小队")
+    task = asyncio.run(_make_team_task(home))
+
+    with pytest.raises(SystemExit) as ei:
+        cli_app.main(["cron", "run", str(task["id"])])
+    assert ei.value.code == 0
+
+    async def check():
         store = await SessionStore(db_path()).connect()
         try:
-            proj = await store.get_or_create_project(str(home / "proj"))
-            task = await store.add_cron_task(
-                proj.id, "团队任务", "干活", "interval", interval_minutes=30,
-                mode="team", team_template="某模板")
-            return task
+            row = await store.get_cron_task(task["id"])
+            assert row["last_status"] == "ok"
+            assert "《交付说明》" in (row["last_result"] or ""), "交付说明进 last_result"
+            proj = await store.get_project(row["project_id"])
+            sessions = await store.list_sessions(proj.id)
+            sid = next(s.id for s in sessions if (s.title or "").startswith("⏰ "))
+            msgs = await store.load_messages(sid)
+            assert any(m.role == "user" and "巡检目录并汇总" in m.text for m in msgs)
+            assert any(m.role == "assistant" and "《交付说明》" in m.text for m in msgs)
+            assert await store.usage_today() > 0, "成员与总管用量入账归属本次会话"
         finally:
             await store.close()
 
-    task = asyncio.run(make_team_task())
+    asyncio.run(check())
+
+    reports = list((home / "proj" / ".skysheep" / "reports").glob("cron-team-*.md"))
+    assert reports, "交付报告必须落盘一份（cron-team- 前缀）"
+    text = reports[0].read_text(encoding="utf-8")
+    assert "《交付说明》" in text and "夜班小队" in text and "终态" in text
+
+
+def test_cron_run_cli_team_task_missing_template_fails(home, monkeypatch):
+    """模板悬空引用在触发期按失败收尾（§14.5）：exit 1、任务行回写 error，
+    只有主模型 provider 被装配（成员/总管构建未发生，不建注定空转的团队）。"""
+    import skysheep.cli.app as cli_app
+
+    member = FakeProvider([[TextBlock(text="不该被调用")]])
+    _patch_provider_pool(monkeypatch, [
+        [TextBlock(text="主模型不参与团队轮")],
+        member,
+    ])
+    task = asyncio.run(_make_team_task(home, team_template="不存在的模板"))
 
     with pytest.raises(SystemExit) as ei:
         cli_app.main(["cron", "run", str(task["id"])])
     assert ei.value.code == 1
-    assert provider.calls == [], "团队任务不得产生任何模型调用"
+    assert member.calls == [], "模板缺失时成员构建不得发生（不产生成员调用）"
 
     async def check():
         store = await SessionStore(db_path()).connect()
         try:
             row = await store.get_cron_task(task["id"])
             assert row["last_status"] == "error"
-            assert "系统计划任务" in (row["last_result"] or "")
+            assert "团队模板已不存在" in (row["last_result"] or "")
         finally:
             await store.close()
 

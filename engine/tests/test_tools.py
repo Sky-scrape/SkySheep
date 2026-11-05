@@ -193,6 +193,70 @@ async def test_run_command_background_list_and_errors(tmp_path):
         await tool.run(tool.args_model(command=""), ctx(tmp_path))
 
 
+async def test_run_command_rejects_background_in_relay_execution(tmp_path):
+    """接力执行轮（接力模式设计 §4 第一条）：run_command 的 background=true 在
+    工具层直接拒绝（后台进程脱离本轮生命周期，接力屏障证明不了它静止）——
+    明确中文错误让模型改前台；同一上下文的前台命令照常可用。"""
+    tool = RunCommandTool()
+    relay_ctx = ToolContext(working_dir=tmp_path, relay_execution=True)
+    with pytest.raises(ToolError, match="接力执行中不允许后台运行"):
+        await tool.run(tool.args_model(command="echo hi", background=True), relay_ctx)
+    # 前台不受限：接力轮里照常能跑
+    out = await tool.run(tool.args_model(command="echo fg_ok"), relay_ctx)
+    assert "fg_ok" in out
+    # 普通上下文（非接力轮）：background 照常可用（既有生命周期用例覆盖细节）
+    normal_ctx = ToolContext(working_dir=tmp_path)
+    ok = await tool.run(tool.args_model(command="echo flag_probe", background=True),
+                        normal_ctx)
+    assert "后台进程已启动" in ok
+    bid = int(ok.split("id=")[1].split("（")[0])
+    from skysheep.tools.shell import _BG
+    st = _BG.pop(bid, None)
+    if st and st["proc"].poll() is None:
+        st["proc"].kill()
+
+
+async def test_bg_processes_for_session_alive_inventory():
+    """后台命令存活盘点（接力收敛屏障的数据面，接力模式设计 §4）：只列
+    「启动会话命中且进程还活着」的记录——别的会话启动的不算、已退出的不是
+    存活（结束提示已随 watcher 注入启动会话）。"""
+    from skysheep.tools import shell as shell_mod
+
+    class _FakeProc:
+        def __init__(self, code=None) -> None:
+            self._code = code
+            self.pid = 4242
+
+        def poll(self):
+            return self._code
+
+    saved = dict(shell_mod._BG)
+    shell_mod._BG.clear()
+    try:
+        shell_mod._BG[7] = {
+            "proc": _FakeProc(), "command": "python -m http.server 8000",
+            "buf": {"out": ""}, "started": 0.0, "owner": "sess-A",
+        }
+        shell_mod._BG[8] = {
+            "proc": _FakeProc(), "command": "别家的进程",
+            "buf": {"out": ""}, "started": 0.0, "owner": "sess-B",
+        }
+        shell_mod._BG[9] = {
+            "proc": _FakeProc(code=0), "command": "已退出的命令",
+            "buf": {"out": ""}, "started": 0.0, "owner": "sess-A",
+        }
+        rows = shell_mod.bg_processes_for_session("sess-A")
+        assert len(rows) == 1
+        assert rows[0]["id"] == 7 and rows[0]["state"] == "running"
+        assert rows[0]["os_pid"] == 4242
+        assert "http.server" in rows[0]["command"]
+        assert shell_mod.bg_processes_for_session("sess-B")[0]["id"] == 8
+        assert shell_mod.bg_processes_for_session("sess-none") == []
+    finally:
+        shell_mod._BG.clear()
+        shell_mod._BG.update(saved)
+
+
 async def test_background_process_scoped_to_owning_session():
     """并行会话隔离：后台进程按启动会话归属，read/kill/list 都碰不到别家的。"""
     from skysheep.tools import shell as shell_mod

@@ -97,6 +97,9 @@
         <button class="nav-item" data-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里">任务</button>
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
         <button class="nav-item" data-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕；与输入框的圆桌、团队、对抗分开">接力</button>
+        <!-- 团队常驻入口（团队模式设计 §15.3.5，常驻团队 T3.2 落地后增设）：开团队室页签；
+             角标计活动团队数（常驻登记 + 当前会话进行中的团队，app-teamroom.js 维护） -->
+        <button class="nav-item" data-act="teamroom" id="nav-team" title="团队室：多模型协作团队的频道、工单板与成员带三分区；角标计常驻登记与当前会话进行中的团队数">团队<span id="nav-team-badge" class="nav-badge hidden"></span></button>
         <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
         <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
@@ -195,14 +198,14 @@
   <!-- 拖动调整侧栏宽度（双击恢复默认） -->
   <div id="sb-resizer" class="ui-resizer ui-resizer-v" title="拖动调整侧栏宽度&nbsp;&nbsp;双击恢复默认"></div>
 
-  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航七件套 + 主操作（新建会话 /
+  <!-- 侧栏收起后的窄栏（mini rail）：顶部展开钮 + 功能导航八件套（团队室常驻入口随 §15.3.5 增设）+ 主操作（新建会话 /
        工厂看板）与搜索 + 最近会话的首字快捷列（点击直接切换会话，当前项高亮）。
        显隐完全交给 CSS 的 body.left-collapsed（宽度 / 负 margin 滑动过渡，非硬切）——
        不要给 rail 及其按钮加 .hidden 类：它是 display:none !important，会把
        展开态的显示规则一起压掉（此前「折叠后再也打不开侧栏」正是它造成的）。 -->
   <aside id="sb-rail" aria-label="侧栏已折叠">
     <button id="rail-expand" class="rail-btn" title="展开侧栏（Ctrl+B）">»</button>
-    <!-- 功能导航七件套：与侧栏 .side-menu 同一套动作、同一顺序（openRightTab / 接力走工作台）；图标为本项目手绘线稿 -->
+    <!-- 功能导航八件套：与侧栏 .side-menu 同一套动作、同一顺序（openRightTab / 接力走工作台）；图标为本项目手绘线稿 -->
     <button class="rail-btn" data-rail-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里" aria-label="任务">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V4"/><path d="m9 13.5 2.2 2.2 4-4.5"/></svg>
     </button>
@@ -211,6 +214,11 @@
     </button>
     <button class="rail-btn" data-rail-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕" aria-label="接力">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h5l2-4 3 8 2-4h6"/><circle cx="3.5" cy="12" r="1.2"/><circle cx="20.5" cy="12" r="1.2"/></svg>
+    </button>
+    <!-- 团队常驻入口：与展开态 .side-menu 的「团队」同一顺序（§15.3.5）；图标与团队室页签同款 -->
+    <button class="rail-btn" data-rail-act="teamroom" id="rail-team" title="团队室：多模型协作团队的频道、工单板与成员带三分区；角标计常驻登记与当前会话进行中的团队数" aria-label="团队室">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h16"/><path d="M4 10h8M4 13.5h6M4 17h8"/><rect x="15" y="9" width="5" height="10" rx="1"/><path d="M16.8 11.8h1.4M16.8 14h1.4"/></svg>
+      <span id="rail-team-badge" class="rail-badge hidden"></span>
     </button>
     <button class="rail-btn" data-rail-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
@@ -778,6 +786,9 @@
                   <button id="relay-run-stop" class="rp-mini" disabled>中断</button>
                   <label class="relay-auto" title="每轮完成后自动让另一方接着执行，直到你点中断">
                     <input type="checkbox" id="relay-auto-alternate"> 连续交替
+                  </label>
+                  <label class="relay-auto" title="自动换手前，接收方先无工具复述对交接内容的理解，移交方核验通过后才真正开轮；不通过就暂停等你处理">
+                    <input type="checkbox" id="relay-verify-handoff" checked> 交接前复述核验
                   </label>
                   <span id="relay-run-status" class="dim small" role="status">尚未开始</span>
                 </div>

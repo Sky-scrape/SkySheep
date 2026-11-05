@@ -657,10 +657,9 @@ function renderSkillSummary(skills) {
   if (!el) return;
   el.classList.remove("skeleton"); // 回填真实内容后摘掉骨架屏闪动（占位期见 index.html）
   const active = skills.filter((s) => s.enabled && s.applies).length;
-  // 面板里列表就摆在下面，不需要「点这里查看」的引导
-  const tail = skillViewsInPanel() ? "" : " — 点这里查看、设使用范围";
+  // 这行入口只在设置页可见（面板里收起，计数并进了列表工具条），引导文案常驻
   el.textContent = skills.length
-    ? `${skills.length} 个技能  本项目生效 ${active} 个${tail}`
+    ? `${skills.length} 个技能  本项目生效 ${active} 个 — 点这里查看、设使用范围`
     : "还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能";
 }
 
@@ -753,6 +752,11 @@ function renderSkillList(skills) {
   // 批量删除工具条：全选 / 删除所选。勾选状态不跨渲染保留（重渲染即清零）。
   let syncPicks = null;
   if (skills.length) {
+    // 面板里「管理与安装」入口行已收起（列表就摆在总览卡下面），
+    // 总数 / 本项目生效数并进这行提示，不丢概览信息
+    const notePrefix = skillViewsInPanel()
+      ? `${skills.length} 个技能 · 本项目生效 ${skills.filter((s) => s.enabled && s.applies).length} 个 · `
+      : "";
     const bar = document.createElement("li");
     bar.className = "skill-toolbar";
     bar.innerHTML = `
@@ -768,7 +772,7 @@ function renderSkillList(skills) {
       const boxes = picked();
       delBtn.disabled = !boxes.length;
       delBtn.textContent = boxes.length ? `删除所选（${boxes.length}）` : "删除所选";
-      note.textContent = boxes.length ? "" : "勾选要删除的技能，可一次删多个";
+      note.textContent = boxes.length ? "" : notePrefix + "勾选要删除的技能，可一次删多个";
       pickAll.checked = all.length > 0 && boxes.length === all.length;
     };
     pickAll.onchange = () => {
@@ -886,6 +890,7 @@ function renderSkillList(skills) {
     }
     sul.appendChild(li);
   });
+  if (syncPicks) syncPicks(); // 提示行（面板里带计数前缀）首 render 就要就位，不等第一次勾选
   if (!skills.length)
     sul.innerHTML = '<li class="empty-hint">还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能</li>';
 }

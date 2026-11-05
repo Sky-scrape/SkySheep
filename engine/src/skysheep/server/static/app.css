@@ -4985,6 +4985,12 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 #rp-view-skills > #skill-manage-view .settings-skill-list {
   flex: 1; min-height: 0; max-height: none;
 }
+/* 「管理与安装」入口行是设置页「总览 → 独立页」的导航；面板里管理列表常驻在
+   总览卡正下方，这行只剩重复——整个收起，计数并进列表工具条的提示行 */
+#rp-view-skills #skill-summary { display: none; }
+/* 面板窄：工具条是 .list li 的 nowrap flex 行，带上计数前缀会溢出裁边——
+   这里放开换行，计数提示整条折到操作钮下面 */
+#rp-view-skills .skill-toolbar { flex-wrap: wrap; white-space: normal; row-gap: 2px; }
 
 /* —— 合并标签（任务 / 自动化）的分段条与分段视图 ——
    分段条沿用设置页的 .seg-row.seg-mini（全宽均分、小字号），这里只补面板内的

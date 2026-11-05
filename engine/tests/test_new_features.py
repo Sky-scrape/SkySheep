@@ -752,6 +752,24 @@ def test_skills_page_has_scope_controls(home):
     assert 'request("project.list")' in js
 
 
+def test_skills_panel_merges_summary_into_list(home):
+    """右面板（MCP / Skills）：管理列表常驻在总览卡下方，「管理与安装」入口行收起，
+    总数 / 本项目生效数并进列表工具条的提示行——不丢概览信息也不留重复卡。"""
+    from skysheep.server.app import STATIC_DIR
+
+    # 入口行节点保留（设置页还要用它导航进独立页），只在面板宿主里被 CSS 收起
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="skill-summary"' in html
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert "#rp-view-skills #skill-summary { display: none; }" in css
+    js = read_app_bundle()
+    # 工具条提示行在面板宿主里带计数前缀（与 renderSkillSummary 同口径的生效数）
+    assert "个技能 · 本项目生效" in js
+    assert "notePrefix + \"勾选要删除的技能，可一次删多个\"" in js
+    # 首 render 就要走一遍 syncPicks，提示行不等第一次勾选才出现
+    assert "if (syncPicks) syncPicks();" in js
+
+
 def test_skills_scope_protocol(home):
     """skills.scope / skills.body 协议：改范围热生效、预览读原文。"""
     script = [[TextBlock(text="ok")]]

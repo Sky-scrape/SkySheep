@@ -21,12 +21,21 @@ from pathlib import Path
 # 且 wintheme 只依赖标准库，不会拖慢启动首帧。
 _DARK_BOOL_THEME = "night"
 _LIGHT_BOOL_THEME = "paper"
-_DARK_THEME_IDS = {"night", "indigo", "pine"}
+_DARK_THEME_IDS = {"night", "indigo", "pine", "abyss", "scarlet", "lilac", "lime", "rouge",
+                   "obsidian", "inkred", "glowsea", "cocoa", "cinnabar"}
 
-# 失败页的代码块预览色与错误红：蓝主色与六主题共用，pre 三色与 err 逐主题取自
+# 失败页的代码块预览色与错误红：蓝主色与二十六主题共用，pre 三色与 err 逐主题取自
 # app.css 对应段落（pre 区在失败页里就是 --paper-sunken 底 + --line 边界）
 _ERR = {"paper": "8F1D1D", "celadon": "8F1D1D", "kaki": "8F1D1D",
-        "night": "E26255", "indigo": "E26255", "pine": "E26255"}
+        "mint": "8F1D1D", "bean": "8F1D1D", "mustard": "8F1D1D",
+        "sprout": "8F1D1D", "silver": "8F1D1D", "blade": "8F1D1D",
+        "sakura": "8F1D1D", "meadow": "8F1D1D", "heather": "8F1D1D",
+        "caramel": "8F1D1D",
+        "night": "E26255", "indigo": "E26255", "pine": "E26255",
+        "abyss": "E26255", "scarlet": "E5484D", "lilac": "E26255",
+        "lime": "E26255", "rouge": "FF6B5E", "obsidian": "FF6B5E",
+        "inkred": "E06A6A", "glowsea": "E26255", "cocoa": "E26255",
+        "cinnabar": "E06060"}
 
 
 def _palette(theme: str) -> dict:

@@ -107,10 +107,15 @@ def test_read_ui_theme_returns_theme_id(home):
 
 
 def test_read_ui_theme_all_theme_ids(home):
-    """六套主题 id 直接命中，不再落进「跟随系统」兜底。"""
+    """二十六套主题 id 直接命中，不再落进「跟随系统」兜底。"""
     base = home / "home"
     base.mkdir(parents=True, exist_ok=True)
-    for theme_id in ("paper", "celadon", "kaki", "night", "indigo", "pine"):
+    for theme_id in (
+        "paper", "celadon", "kaki", "mint", "bean", "mustard", "sprout", "silver",
+        "blade", "sakura", "meadow", "heather", "caramel",
+        "night", "indigo", "pine", "abyss", "scarlet", "lilac", "lime", "rouge",
+        "obsidian", "inkred", "glowsea", "cocoa", "cinnabar",
+    ):
         (base / "ui.json").write_text(json.dumps({"theme": theme_id}), encoding="utf-8")
         assert wintheme.read_ui_theme(base) == theme_id
 

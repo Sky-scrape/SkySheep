@@ -18,7 +18,7 @@ import ctypes
 import sys
 from pathlib import Path
 
-# 六套主题（app.js THEMES）的标题栏 / 窗口底色 / 标题文字 / 边线，逐主题取自
+# 二十六套主题（app.js THEMES）的标题栏 / 窗口底色 / 标题文字 / 边线，逐主题取自
 # app.css 的 --bg / --text / --ink-line（改主题色时两处要一起改）。
 # 标题栏与页面底色同源，深浅两族都不再是近似色。
 # 除标题栏三色外还包含桌面壳各页面共用的 UI 色（card/raised/sunken/text2/dim/
@@ -37,6 +37,46 @@ THEME_PALETTE = {
                 "card": "F6E9D2", "raised": "FDF3DD", "sunken": "EDDCC0",
                 "text2": "57432E", "dim": "6F5A44", "line2": "C3AC85",
                 "blue": "B45309", "blue_deep": "8F4006"},
+    "mint":    {"bg": "D9E6E3", "text": "14211D", "line": "14211D",
+                "card": "ECF5F1", "raised": "F6FBF8", "sunken": "E2EFE9",
+                "text2": "3D5049", "dim": "5C7068", "line2": "A5C3B8",
+                "blue": "0F7A62", "blue_deep": "0A5E4B"},
+    "bean":    {"bg": "E3D8D4", "text": "241C1A", "line": "241C1A",
+                "card": "F0E7E3", "raised": "F8F1ED", "sunken": "E7DCD7",
+                "text2": "54453F", "dim": "6F5D57", "line2": "BFA9A2",
+                "blue": "5A6F4C", "blue_deep": "465839"},
+    "mustard": {"bg": "E7E1D2", "text": "201E18", "line": "201E18",
+                "card": "F4EFE0", "raised": "FCF8EC", "sunken": "EAE4D4",
+                "text2": "4E4A3E", "dim": "6B6557", "line2": "BDB49C",
+                "blue": "846400", "blue_deep": "6A5000"},
+    "sprout":  {"bg": "EDE4D0", "text": "1E2116", "line": "1E2116",
+                "card": "F7EFDD", "raised": "FDF8EA", "sunken": "F0E7D4",
+                "text2": "4A4C37", "dim": "676A52", "line2": "C5B99A",
+                "blue": "4D7018", "blue_deep": "3C5A10"},
+    "silver":  {"bg": "E4E3DE", "text": "1B1B19", "line": "1B1B19",
+                "card": "F1F0EC", "raised": "FAFAF7", "sunken": "E8E7E2",
+                "text2": "46463F", "dim": "63635C", "line2": "B9B8B0",
+                "blue": "B03A4E", "blue_deep": "8E2C3D"},
+    "blade":   {"bg": "E4E9EF", "text": "161B22", "line": "161B22",
+                "card": "F1F4F8", "raised": "F9FBFD", "sunken": "E7ECF2",
+                "text2": "3F4A58", "dim": "5C6878", "line2": "B3BFCD",
+                "blue": "1F6CBD", "blue_deep": "185796"},
+    "sakura":  {"bg": "F6E6EA", "text": "23171B", "line": "23171B",
+                "card": "FDF0F3", "raised": "FFF8FA", "sunken": "F8E9ED",
+                "text2": "574249", "dim": "78626A", "line2": "D3B2BD",
+                "blue": "266F93", "blue_deep": "1E5A78"},
+    "meadow":  {"bg": "E6F0DF", "text": "1A2116", "line": "1A2116",
+                "card": "F2F8EC", "raised": "FAFDF6", "sunken": "E9F2E2",
+                "text2": "414B3A", "dim": "5F6B57", "line2": "ADC4A1",
+                "blue": "4A7733", "blue_deep": "3A5F27"},
+    "heather": {"bg": "E9E4F1", "text": "1D1826", "line": "1D1826",
+                "card": "F4F1F9", "raised": "FBF9FE", "sunken": "ECE7F4",
+                "text2": "4B4359", "dim": "685E78", "line2": "BFB3D4",
+                "blue": "6B5595", "blue_deep": "57447A"},
+    "caramel": {"bg": "EFE3D2", "text": "241A11", "line": "241A11",
+                "card": "F8EFDF", "raised": "FDF8EC", "sunken": "F2E7D6",
+                "text2": "54432F", "dim": "6F5C46", "line2": "C6B196",
+                "blue": "6F4523", "blue_deep": "5A3719"},
     "night":   {"bg": "171410", "text": "F4ECD8", "line": "0E0C09",
                 "card": "211D17", "raised": "2B261E", "sunken": "1B1813",
                 "text2": "D3C8AD", "dim": "A89D84", "line2": "574C3A",
@@ -49,14 +89,57 @@ THEME_PALETTE = {
                 "card": "18201B", "raised": "212B24", "sunken": "131A16",
                 "text2": "BEC9BF", "dim": "98A89C", "line2": "3C4C40",
                 "blue": "52C79D", "blue_deep": "35A87F"},
+    "abyss":   {"bg": "080B16", "text": "E6ECF7", "line": "04060D",
+                "card": "101527", "raised": "161C31", "sunken": "0C1120",
+                "text2": "B9C4DA", "dim": "8E9BB5", "line2": "34415E",
+                "blue": "5C7CFF", "blue_deep": "4265E8"},
+    "scarlet": {"bg": "160E0E", "text": "F3E6E2", "line": "0C0707",
+                "card": "211515", "raised": "291A1A", "sunken": "1A1010",
+                "text2": "D4BAB3", "dim": "A8908A", "line2": "4D3331",
+                "blue": "2FD6D6", "blue_deep": "1FB3B3"},
+    "lilac":   {"bg": "130F19", "text": "ECE4F4", "line": "0A0710",
+                "card": "1D1628", "raised": "251C32", "sunken": "181122",
+                "text2": "C9BCD9", "dim": "A193B4", "line2": "463657",
+                "blue": "C47AE0", "blue_deep": "A95CC4"},
+    "lime":    {"bg": "0D130C", "text": "EAF3E4", "line": "070C06",
+                "card": "162112", "raised": "1C2A17", "sunken": "111A0F",
+                "text2": "C2D2BA", "dim": "95A88C", "line2": "3D5036",
+                "blue": "8FE35C", "blue_deep": "74C445"},
+    "rouge":   {"bg": "170D12", "text": "F7E9ED", "line": "0D070A",
+                "card": "24151D", "raised": "2D1B25", "sunken": "1C1017",
+                "text2": "D9BCC6", "dim": "B0919C", "line2": "50313F",
+                "blue": "FF5C86", "blue_deep": "E33A68"},
+    "obsidian": {"bg": "121212", "text": "F2F2F2", "line": "080808",
+                 "card": "1E1E1E", "raised": "262626", "sunken": "171717",
+                 "text2": "CCCCCC", "dim": "A3A3A3", "line2": "4F4F4F",
+                 "blue": "FFDD00", "blue_deep": "D9BB00"},
+    "inkred":  {"bg": "101815", "text": "E8EDE9", "line": "070C09",
+                "card": "1A251F", "raised": "213029", "sunken": "141D19",
+                "text2": "BCC9C3", "dim": "94A69E", "line2": "40564B",
+                "blue": "D47777", "blue_deep": "BD6161"},
+    "glowsea": {"bg": "0C1722", "text": "E3EDF5", "line": "040B12",
+                "card": "132331", "raised": "1A2D3E", "sunken": "0F1C29",
+                "text2": "B4C7D6", "dim": "8AA2B5", "line2": "37526B",
+                "blue": "62D2C2", "blue_deep": "45B3A4"},
+    "cocoa":   {"bg": "17100C", "text": "F5E9DF", "line": "0A0603",
+                "card": "241A13", "raised": "2D211A", "sunken": "1C140F",
+                "text2": "D8C2B1", "dim": "B39A86", "line2": "55402F",
+                "blue": "F6B896", "blue_deep": "D99873"},
+    "cinnabar": {"bg": "150B0B", "text": "F5E8E2", "line": "0A0505",
+                 "card": "221414", "raised": "2B1B1B", "sunken": "1A0F0F",
+                 "text2": "D8BEB6", "dim": "B1968C", "line2": "523432",
+                 "blue": "D45A5A", "blue_deep": "B84242"},
 }
-# 旧版两档值与六套主题同义；ui.json 存的是主题 id；
+# 旧版两档值与二十六套主题同义；ui.json 存的是主题 id；
 # "auto"（存为 null）与未知值跟随系统深浅（深 → night / 浅 → paper）
 LEGACY_MODES = {"light": "paper", "dark": "night"}
-DARK_THEME_IDS = {"night", "indigo", "pine", "dark"}
+DARK_THEME_IDS = {
+    "night", "indigo", "pine", "abyss", "scarlet", "lilac", "lime", "rouge",
+    "obsidian", "inkred", "glowsea", "cocoa", "cinnabar", "dark",
+}
 
 # 前端主题切换的回写点：apply_theme WS 方法设置，桌面壳的看板线程轮询
-_theme_key = "paper"  # 六套主题 id 之一
+_theme_key = "paper"  # 二十六套主题 id 之一
 
 # 桌面壳注册的主窗口：apply_theme 切主题时 refresh_now() 立即重刷标题栏，
 # 不必等看板线程的下一秒轮询——否则页面先变色、标题栏晚一拍，肉眼可见。

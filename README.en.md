@@ -66,7 +66,7 @@ SkySheep is built for work that needs an agent to actually touch things while ke
 - **Execution**: file read/write and precise editing · command execution (with background processes) · regex and glob search · web fetch and search · PDF / Word / Excel / PPT / CSV I/O · image understanding and AI image generation · sub-agents (optionally in an isolated worktree)
 - **Automation**: scheduled tasks · dependency pipelines (DAG) · factory board (cross-project observability / dispatch · day-night and real weather) · agenda reminders · export to the Windows Task Scheduler · Feishu / WeChat / Webhook pushes · daily run digests
 - **Extensions**: MCP (two transports, seven presets) · Skills (twenty official templates) · Mods (experimental) · global egress (proxy / bypass list / self-signed CA)
-- **Desktop**: six themes · phone remote access and Tailscale · multi-tab terminal · desktop pet · Chinese-aware full-text search · per-round checkpoint rollback
+- **Desktop**: twenty-six themes · phone remote access and Tailscale · multi-tab terminal · desktop pet · Chinese-aware full-text search · per-round checkpoint rollback
 
 ## 🧠 Design principles
 
@@ -277,7 +277,7 @@ Single-file installer: install [Inno Setup 7](https://jrsoftware.org/isdl.php) (
 - Mods: quickjs sandbox or the Claude Code plugin format (experimental, one at a time); UI extension points and tool registration go through fixed renderers, and permission decisions can only tighten
 - Network: global proxy / bypass list / self-signed CA; a per-provider proxy can override the global one (three states: follow global / explicit direct / use this proxy), and local services always connect directly
 - Remote access: LAN token + QR code; Tailscale supported for cross-network access (security boundaries and advice in [docs/远程访问安全.md](docs/远程访问安全.md))
-- Desktop form factor: six themes + follow-system, system tray, launch at startup, window geometry memory, global hotkey, desktop pet; multiple session tabs, an eleven-tab right panel (auxiliary chat / browser / review / files / tasks / agenda / automation / project memory / memory map / relay / MCP·Skills), and a multi-tab terminal docked at the bottom (Ctrl+\` toggle)
+- Desktop form factor: twenty-six themes + follow-system, system tray, launch at startup, window geometry memory, global hotkey, desktop pet; multiple session tabs, an eleven-tab right panel (auxiliary chat / browser / review / files / tasks / agenda / automation / project memory / memory map / relay / MCP·Skills), and a multi-tab terminal docked at the bottom (Ctrl+\` toggle)
 - Session management: full-text search (Chinese-aware), session branching, pin / archive / tags, Markdown / HTML export, rolling backups with visual restore
 
 </details>

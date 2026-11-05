@@ -12775,12 +12775,19 @@ document.getElementById("relay-open-workbench").onclick = openRelayWorkbench;
 
 // 设置子项目：点击导航切换独立页面
 function showSettingsPage(target) {
+  // 主题是「界面与通知」的二级页：侧栏仍高亮该入口，避免看起来像掉出了设置
+  const navTarget = target === "theme" ? "ui" : target;
   document.querySelectorAll("#settings-nav li").forEach((x) =>
-    x.classList.toggle("active", x.dataset.target === target)
+    x.classList.toggle("active", x.dataset.target === navTarget)
   );
   document.querySelectorAll(".settings-page").forEach((pg) =>
     pg.classList.toggle("hidden", pg.id !== "settings-page-" + target)
   );
+  // 二级页从页首开始看；否则会继承上一页滚到一半的位置
+  if (target === "theme") {
+    const body = document.querySelector(".settings-body");
+    if (body) body.scrollTop = 0;
+  }
   if (typeof watchSettingsHints === "function") watchSettingsHints();
   if (target === "runs") loadRunsPage();
   if (target === "usage") loadUsage();
@@ -12829,13 +12836,15 @@ function settingsCardIndex() {
   const pages = [...document.querySelectorAll(".settings-page")]
     .map((pg) => [pg, pg.id.replace("settings-page-", "")]);
   const SLOT_PAGES = { "rp-view-mcp": "mcp", "rp-view-skills": "skills" };
+  // 二级页没有侧栏导航项，搜索结果显示它的父页名
+  const PAGE_NAMES = { theme: "主题" };
   Object.entries(SLOT_PAGES).forEach(([id, pageId]) => {
     const el = document.getElementById(id);
     if (el) pages.push([el, pageId]);
   });
   pages.forEach(([pg, pageId]) => {
     const nav = document.querySelector(`#settings-nav li[data-target="${pageId}"]`);
-    const pageName = nav ? nav.textContent.trim() : pageId;
+    const pageName = nav ? nav.textContent.trim() : (PAGE_NAMES[pageId] || pageId);
     // 收卡范围：直接子卡 + 包在中间层里的卡。技能页的卡片挂在 #skill-list-view /
     // #skill-manage-view 下（两视图互斥切换），只扫 :scope > .settings-card 会整页漏掉
     const containers = [pg, ...pg.querySelectorAll(":scope > div")];
@@ -13910,7 +13919,7 @@ function newTermTab(activate) {
   return t;
 }
 
-// xterm 配色跟六套主题走：底/字取 CSS 变量，ANSI 十六色按明暗各配一套保证可读
+// xterm 配色跟二十六套主题走：底/字取 CSS 变量，ANSI 十六色按明暗各配一套保证可读
 function xtermTheme() {
   const cs = getComputedStyle(document.documentElement);
   const v = (n, fb) => (cs.getPropertyValue(n) || "").trim() || fb;
@@ -14880,7 +14889,7 @@ function renderFileHead() {
  *    confirmModal("纯文本正文", { title, okLabel, danger }) —— 纯文本自动转义
  *
  *  原生 confirm() 用的是浏览器 / WebView 自带对话框，不受主题变量控制、不跟随
- *  六套主题，在桌面壳里像一个外来的系统弹窗；破坏性操作改用本弹层。
+ *  二十六套主题，在桌面壳里像一个外来的系统弹窗；破坏性操作改用本弹层。
  *  danger=true 时确定按钮走危险色，且默认焦点落在「取消」，避免误按回车确认。
  */
 function confirmModal(arg1, arg2, arg3) {
@@ -16526,18 +16535,43 @@ setupResizer(previewResizer, "preview_w", {
 // （函数声明提升，boot/initUiPrefs 在文件末尾调用时均已可用）
 // ============================================================
 
-// ---------- 主题：跟随系统 + 六套配色（存 ui.json 的 theme 键） ----------
-// 浅色：纸墨 paper / 青瓷 celadon / 秋柿 kaki；深色：夜墨 night / 黛夜 indigo / 松烟 pine。
+// ---------- 主题：跟随系统 + 二十六套配色（存 ui.json 的 theme 键） ----------
+// 浅色：纸墨 paper / 青瓷 celadon / 秋柿 kaki / 青提 mint / 豆沙 bean / 芥末 mustard
+//       嫩芽 sprout / 银笺 silver / 刃银 blade / 樱粉 sakura / 草兰 meadow /
+//       菀雾 heather / 醇巧 caramel；
+// 深色：夜墨 night / 黛夜 indigo / 松烟 pine / 深海 abyss / 赤青 scarlet / 雾紫 lilac
+//       青柠 lime / 胭脂 rouge / 曜金 obsidian / 墨朱 inkred / 沉海 glowsea /
+//       浓巧 cocoa / 丹金 cinnabar。
 // 每套主题是 app.css 文件尾部的一个完整 [data-theme=…] 变量组，切换 = 换 <html> 的 data-theme；
 // auto 时浅色落纸墨、深色落夜墨。light/dark 是旧版两档值，读取时映射回 paper/night。
-// 与 backend.py 的 THEME_PREFS 白名单、index.html 的主题卡片一一对应，改主题列表要同步。
+// 与 backend_parts/remote.py 的 THEME_PREFS 白名单、index.html 的主题卡片一一对应，改主题列表要同步。
 const THEMES = {
   paper: { name: "纸墨", dark: false },
   celadon: { name: "青瓷", dark: false },
   kaki: { name: "秋柿", dark: false },
+  mint: { name: "青提", dark: false },
+  bean: { name: "豆沙", dark: false },
+  mustard: { name: "芥末", dark: false },
+  sprout: { name: "嫩芽", dark: false },
+  silver: { name: "银笺", dark: false },
+  blade: { name: "刃银", dark: false },
+  sakura: { name: "樱粉", dark: false },
+  meadow: { name: "草兰", dark: false },
+  heather: { name: "菀雾", dark: false },
+  caramel: { name: "醇巧", dark: false },
   night: { name: "夜墨", dark: true },
   indigo: { name: "黛夜", dark: true },
   pine: { name: "松烟", dark: true },
+  abyss: { name: "深海", dark: true },
+  scarlet: { name: "赤青", dark: true },
+  lilac: { name: "雾紫", dark: true },
+  lime: { name: "青柠", dark: true },
+  rouge: { name: "胭脂", dark: true },
+  obsidian: { name: "曜金", dark: true },
+  inkred: { name: "墨朱", dark: true },
+  glowsea: { name: "沉海", dark: true },
+  cocoa: { name: "浓巧", dark: true },
+  cinnabar: { name: "丹金", dark: true },
 };
 function normalizeThemePref(v) {
   if (v === "light") return "paper";
@@ -16590,6 +16624,7 @@ function applyThemeMode(mode, save = true) {
   if (typeof factoryRepaint === "function") factoryRepaint();
   renderThemePicker();
   renderThemeSwatches();
+  renderThemeSummary();
   if (save) saveUiPrefs({ theme: themePref === "auto" ? null : themePref });
 }
 
@@ -16619,6 +16654,27 @@ function themeSwatchColors(id) {
   } finally {
     probe.remove();
   }
+}
+
+// 「界面与通知」的当前主题卡：色板 + 名称 + 当前模式，切主题时同步刷新
+function renderThemeSummary() {
+  const nameEl = document.getElementById("theme-current-name");
+  const descEl = document.getElementById("theme-current-desc");
+  const sw = document.getElementById("theme-current-swatch");
+  if (!nameEl || !descEl || !sw) return;
+  const id = resolvedThemeId();
+  const info = THEMES[id] || THEMES.paper;
+  const [card, accent, ground] = themeSwatchColors(id);
+  const blocks = sw.querySelectorAll("i");
+  if (blocks.length >= 3) {
+    if (card) blocks[0].style.background = card;
+    if (accent) blocks[1].style.background = accent;
+    if (ground) blocks[2].style.background = ground;
+  }
+  nameEl.textContent = info.name;
+  if (themePref === "auto") descEl.textContent = "跟随系统 · 当前" + info.name;
+  else if (themePref === "timed") descEl.textContent = "定时切换 · 当前" + info.name;
+  else descEl.textContent = (info.dark ? "深色" : "浅色") + " · 已选中";
 }
 
 function renderThemeSwatches() {
@@ -16668,6 +16724,18 @@ if (autoDarkSel) {
 document.querySelectorAll("#theme-grid .theme-card").forEach((b) => {
   b.onclick = () => applyThemeMode(b.dataset.themePref);
 });
+// 二级页进出：主页面「当前主题」卡进入，页头「← 界面与通知」返回
+const themeOpenBtn = document.getElementById("theme-open");
+if (themeOpenBtn) themeOpenBtn.onclick = () => showSettingsPage("theme");
+const themeBackBtn = document.getElementById("theme-page-back");
+if (themeBackBtn) {
+  themeBackBtn.onclick = () => {
+    showSettingsPage("ui");
+    // 从二级页回来时停在「当前主题」卡上，而不是继承色板页滚到底的位置
+    const entry = document.getElementById("theme-entry-card");
+    if (entry) entry.scrollIntoView({ block: "center" });
+  };
+}
 themeMql.addEventListener("change", () => {
   if (themePref === "auto") applyThemeMode("auto", false);
   else renderThemeSwatches(); // 选着具体主题时也刷新跟随系统卡的预览落点

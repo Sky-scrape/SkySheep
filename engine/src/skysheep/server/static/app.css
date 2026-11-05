@@ -1,9 +1,11 @@
 /* ============================================================
  * SkySheep 桌面前端 —— 主题系统
  * 默认「纸墨」：设计语言源自《带节奏》Demo——纸面底 × 硬墨描边 × 铅字压印投影；
- * 另有青瓷 / 秋柿（浅色）与夜墨 / 黛夜 / 松烟（深色），见文件尾部的 [data-theme=…] 段。
+ * 另有青瓷 / 秋柿 / 青提 / 豆沙 / 芥末 / 嫩芽 / 银笺 / 刃银 / 樱粉 / 草兰 /
+ * 菀雾 / 醇巧（浅色）与夜墨 / 黛夜 / 松烟 / 深海 / 赤青 / 雾紫 / 青柠 / 胭脂 /
+ * 曜金 / 墨朱 / 沉海 / 浓巧 / 丹金（深色），见文件尾部的 [data-theme=…] 段。
  * 纸墨的变量组同时挂在 :root 与 [data-theme="paper"] 上（见下方说明）。
- * 六套共用同一组变量槽位；--blue 是全局交互色（名字是历史遗留，各主题给它不同主色）。
+ * 二十六套共用同一组变量槽位；--blue 是全局交互色（名字是历史遗留，各主题给它不同主色）。
  * 主题由 data-theme="主题id" 打在 <html> 上切换，跟随系统时浅色落纸墨、深色落夜墨。
  * ============================================================ */
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -5748,10 +5750,21 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 
 /* ============================================================
  * 其余主题：与纸墨/夜墨同一套变量槽位，只换配色。
- * 浅色：青瓷 celadon（龙泉青釉）、秋柿 kaki（柿染暖橙）；
- * 深色：黛夜 indigo（靛蓝夜空）、松烟 pine（松烟墨绿）。
- * 新增主题五处同步：这里加 [data-theme="id"] 段 + index.html 首帧兜底底色
- * 与设置页卡片 + app.js THEMES 表 + backend.py THEME_PREFS 白名单。
+ * 浅色：青瓷 celadon、秋柿 kaki、青提 mint、豆沙 bean、芥末 mustard、
+ *       嫩芽 sprout、银笺 silver、刃银 blade、樱粉 sakura、草兰 meadow、
+ *       菀雾 heather、醇巧 caramel；
+ * 深色：黛夜 indigo、松烟 pine、深海 abyss、赤青 scarlet、雾紫 lilac、
+ *       青柠 lime、胭脂 rouge、曜金 obsidian、墨朱 inkred、沉海 glowsea、
+ *       浓巧 cocoa、丹金 cinnabar。
+ * 新增主题同步清单（漏一处就会「选了不生效 / 标题栏不跟」）：
+ *   ① 本文件加 [data-theme="id"] 完整变量组 + ::selection
+ *   ② index.html 首帧兜底底色、设置页主题卡片、两个「跟随系统落点」下拉
+ *   ③ app.js 的 THEMES 表（主题卡名单与搜索索引都从它生成）
+ *   ④ backend_parts/remote.py 的 THEME_PREFS / THEME_AUTO_LIGHT / THEME_AUTO_DARK
+ *   ⑤ server/app.py 首帧注入的 auto 落点白名单
+ *   ⑥ wintheme.py 的 THEME_PALETTE 与 DARK_THEME_IDS（标题栏/启动页/失败页）
+ *   ⑦ bootpages.py 的 _ERR 与 _DARK_THEME_IDS
+ *   ⑧ tests 里的主题名单（test_ui_prefs / test_wintheme）
  * ============================================================ */
 
 /* —— 青瓷：龙泉青瓷的釉青——淡青灰瓷底，黛绿墨线，交互色是釉青本身 —— */
@@ -5966,6 +5979,1067 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 }
 [data-theme="pine"] ::selection { background: rgba(82, 199, 157, .26); }
 
+/* —— 青提：青提果肉与雾蓝天空——薄荷纸底，黛绿墨线，交互色是提子青 —— */
+[data-theme="mint"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #d9e6e3;
+  --card: #ecf5f1;
+  --paper-raised: #f6fbf8;
+  --paper-sunken: #e2efe9;
+  --paper-inset: #d3e3dd;
+  /* —— 墨（黛绿） —— */
+  --text: #14211d;
+  --text2: #3d5049;
+  --dim: #5c7068;   /* 4.8:1 on --card */
+  --line: #c3d8d0;
+  --line2: #a5c3b8;
+  --ink-line: #14211d;
+  /* —— 色 —— */
+  --blue: #0f7a62;
+  --blue-deep: #0a5e4b;
+  --blue-weak: rgba(15, 122, 98, .10);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #5b3fa8;
+  --on-accent: #f6fbf8;
+  --dm-c1: #0f7a62; --dm-c2: #3a7d44; --dm-c3: #b03a2e; --dm-c4: #8a6410;
+  --dm-c5: #5b3fa8; --dm-c6: #1f7d94; --dm-c7: #8a5a3a; --dm-c8: #3d5049;
+  --shadow-sm: 2px 2px 0 rgba(20, 33, 29, .13);
+  --shadow-md: 3px 3px 0 rgba(20, 33, 29, .17);
+  --shadow-lg: 5px 5px 0 rgba(20, 33, 29, .22), 0 12px 32px rgba(20, 33, 29, .16);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(20, 33, 29, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #e8f2ee 0%, var(--bg) 52%, #cfded8 100%);
+  /* —— 代码高亮：薄荷纸上的青提色板 —— */
+  --hl-comment: #7d918a;
+  --hl-keyword: #a03428;
+  --hl-string: #0f7a62;
+  --hl-number: #8a6410;
+  --hl-title: #0f7a62;
+  --hl-attr: #5b3fa8;
+  --hl-type: #8a6410;
+  --hl-variable: #3d5049;
+  --hl-meta: #6b7f77;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色浅色档（与 :root 默认一致，显式占槽防漂移） —— */
+  --mark-bg: #ffe58f; --mark-fg: inherit;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="mint"] ::selection { background: rgba(15, 122, 98, .18); }
+
+/* —— 豆沙：豆沙灰与灰苔藓绿——低饱和莫兰迪，豆沙纸底，苔绿交互色 —— */
+[data-theme="bean"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #e3d8d4;
+  --card: #f0e7e3;
+  --paper-raised: #f8f1ed;
+  --paper-sunken: #e7dcd7;
+  --paper-inset: #d9cbc6;
+  /* —— 墨（豆沙褐） —— */
+  --text: #241c1a;
+  --text2: #54453f;
+  --dim: #6f5d57;   /* 5.1:1 on --card */
+  --line: #d6c4be;
+  --line2: #bfa9a2;
+  --ink-line: #241c1a;
+  /* —— 色（灰苔藓绿） —— */
+  --blue: #5a6f4c;
+  --blue-deep: #465839;
+  --blue-weak: rgba(90, 111, 76, .12);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #7a4f8a;
+  --on-accent: #f8f1ed;
+  --dm-c1: #5a6f4c; --dm-c2: #7d8a6e; --dm-c3: #a34a3f; --dm-c4: #8a6410;
+  --dm-c5: #7a4f8a; --dm-c6: #4f7a80; --dm-c7: #8a5a3a; --dm-c8: #54453f;
+  --shadow-sm: 2px 2px 0 rgba(36, 28, 26, .13);
+  --shadow-md: 3px 3px 0 rgba(36, 28, 26, .17);
+  --shadow-lg: 5px 5px 0 rgba(36, 28, 26, .22), 0 12px 32px rgba(36, 28, 26, .16);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(36, 28, 26, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #ece2de 0%, var(--bg) 52%, #d5c5c0 100%);
+  /* —— 代码高亮：豆沙纸上的低饱和墨彩 —— */
+  --hl-comment: #8b7a72;
+  --hl-keyword: #8f1d1d;
+  --hl-string: #5a6f4c;
+  --hl-number: #8a6410;
+  --hl-title: #5a6f4c;
+  --hl-attr: #7a4f8a;
+  --hl-type: #8a6410;
+  --hl-variable: #54453f;
+  --hl-meta: #7a6a62;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色浅色档（与 :root 默认一致，显式占槽防漂移） —— */
+  --mark-bg: #ffe58f; --mark-fg: inherit;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="bean"] ::selection { background: rgba(90, 111, 76, .18); }
+
+/* —— 芥末：芥末黄与雾霾灰——暖米纸底，深芥末交互色，灰调墨线 —— */
+[data-theme="mustard"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #e7e1d2;
+  --card: #f4efe0;
+  --paper-raised: #fcf8ec;
+  --paper-sunken: #eae4d4;
+  --paper-inset: #ddd6c2;
+  /* —— 墨（暖灰） —— */
+  --text: #201e18;
+  --text2: #4e4a3e;
+  --dim: #6b6557;   /* 5.0:1 on --card */
+  --line: #d6cfbb;
+  --line2: #bdb49c;
+  --ink-line: #201e18;
+  /* —— 色（深芥末；#E6B800 原色留给高亮/图表段） —— */
+  --blue: #846400;
+  --blue-deep: #6a5000;
+  --blue-weak: rgba(132, 100, 0, .12);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #4f35a8;
+  --on-accent: #fcf8ec;
+  --dm-c1: #846400; --dm-c2: #6d7a3f; --dm-c3: #b03a2e; --dm-c4: #b98a00;
+  --dm-c5: #6b4fa3; --dm-c6: #4f7a80; --dm-c7: #8a5a3a; --dm-c8: #4e4a3e;
+  --shadow-sm: 2px 2px 0 rgba(32, 30, 24, .13);
+  --shadow-md: 3px 3px 0 rgba(32, 30, 24, .17);
+  --shadow-lg: 5px 5px 0 rgba(32, 30, 24, .22), 0 12px 32px rgba(32, 30, 24, .16);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(32, 30, 24, .055) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #f1ebdc 0%, var(--bg) 52%, #d9d2be 100%);
+  /* —— 代码高亮：暖米纸上的芥末与雾灰 —— */
+  --hl-comment: #8b8270;
+  --hl-keyword: #a34a1e;
+  --hl-string: #5a6b38;
+  --hl-number: #846400;
+  --hl-title: #846400;
+  --hl-attr: #4f35a8;
+  --hl-type: #8a6410;
+  --hl-variable: #4e4a3e;
+  --hl-meta: #77705e;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色：命中高亮用 #E6B800 原色，警示沿用暖米档 —— */
+  --mark-bg: #f2d75e; --mark-fg: #201e18;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="mustard"] ::selection { background: rgba(132, 100, 0, .16); }
+
+/* —— 嫩芽：嫩芽绿与米杏色——米杏纸底，嫩叶交互色，清新偏暖 —— */
+[data-theme="sprout"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #ede4d0;
+  --card: #f7efdd;
+  --paper-raised: #fdf8ea;
+  --paper-sunken: #f0e7d4;
+  --paper-inset: #e4d9c0;
+  /* —— 墨（橄榄褐） —— */
+  --text: #1e2116;
+  --text2: #4a4c37;
+  --dim: #676a52;   /* 4.9:1 on --card */
+  --line: #dcd2b9;
+  --line2: #c5b99a;
+  --ink-line: #1e2116;
+  /* —— 色（嫩叶绿压深，保证小字对比） —— */
+  --blue: #4d7018;
+  --blue-deep: #3c5a10;
+  --blue-weak: rgba(77, 112, 24, .12);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #6b4fa3;
+  --on-accent: #fdf8ea;
+  --dm-c1: #4d7018; --dm-c2: #7a9a2e; --dm-c3: #b03a2e; --dm-c4: #8a6410;
+  --dm-c5: #6b4fa3; --dm-c6: #4f7a80; --dm-c7: #8a5a3a; --dm-c8: #4a4c37;
+  --shadow-sm: 2px 2px 0 rgba(30, 33, 22, .13);
+  --shadow-md: 3px 3px 0 rgba(30, 33, 22, .17);
+  --shadow-lg: 5px 5px 0 rgba(30, 33, 22, .22), 0 12px 32px rgba(30, 33, 22, .16);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(30, 33, 22, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #f6efdf 0%, var(--bg) 52%, #e0d5bd 100%);
+  /* —— 代码高亮：米杏纸上的嫩芽色板 —— */
+  --hl-comment: #8a8065;
+  --hl-keyword: #a03428;
+  --hl-string: #4d7018;
+  --hl-number: #8a6410;
+  --hl-title: #4d7018;
+  --hl-attr: #6b4fa3;
+  --hl-type: #8a6410;
+  --hl-variable: #4a4c37;
+  --hl-meta: #77765e;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色浅色档（与 :root 默认一致，显式占槽防漂移） —— */
+  --mark-bg: #ffe58f; --mark-fg: inherit;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="sprout"] ::selection { background: rgba(77, 112, 24, .18); }
+
+/* —— 银笺：银白与合欢红——冷银灰纸底，合欢红交互色，安静克制 —— */
+[data-theme="silver"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #e4e3de;
+  --card: #f1f0ec;
+  --paper-raised: #fafaf7;
+  --paper-sunken: #e8e7e2;
+  --paper-inset: #dcdbd5;
+  /* —— 墨（中性灰） —— */
+  --text: #1b1b19;
+  --text2: #46463f;
+  --dim: #63635c;   /* 5.3:1 on --card */
+  --line: #d2d1ca;
+  --line2: #b9b8b0;
+  --ink-line: #1b1b19;
+  /* —— 色（合欢红压深；原色偏粉只作弱底） —— */
+  --blue: #b03a4e;
+  --blue-deep: #8e2c3d;
+  --blue-weak: rgba(176, 58, 78, .10);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #4f35a8;
+  --on-accent: #fafaf7;
+  --dm-c1: #b03a4e; --dm-c2: #3a7d44; --dm-c3: #b03a2e; --dm-c4: #8a6410;
+  --dm-c5: #6b4fa3; --dm-c6: #0f7c8a; --dm-c7: #8a5a3a; --dm-c8: #46463f;
+  --shadow-sm: 2px 2px 0 rgba(27, 27, 25, .12);
+  --shadow-md: 3px 3px 0 rgba(27, 27, 25, .16);
+  --shadow-lg: 5px 5px 0 rgba(27, 27, 25, .21), 0 12px 32px rgba(27, 27, 25, .15);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(27, 27, 25, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #efeee9 0%, var(--bg) 52%, #d8d6d0 100%);
+  /* —— 代码高亮：银灰纸上的合欢红与墨彩 —— */
+  --hl-comment: #85847c;
+  --hl-keyword: #a33448;
+  --hl-string: #0f6b3a;
+  --hl-number: #8a6410;
+  --hl-title: #b03a4e;
+  --hl-attr: #4f35a8;
+  --hl-type: #8a6410;
+  --hl-variable: #46463f;
+  --hl-meta: #6f6e66;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色浅色档（与 :root 默认一致，显式占槽防漂移） —— */
+  --mark-bg: #ffe58f; --mark-fg: inherit;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="silver"] ::selection { background: rgba(176, 58, 78, .16); }
+
+/* —— 深海：深海邃蓝——近墨海蓝底，电光蓝交互色，冷冽通透 —— */
+[data-theme="abyss"] {
+  color-scheme: dark;
+  /* —— 底：四层海蓝微分层（1–3% 明度） —— */
+  --bg: #080b16;
+  --card: #0b0f1c;
+  --paper-raised: #101527;
+  --paper-sunken: #070913;
+  --paper-inset: #131a2e;
+  /* —— 字（月白偏冷） —— */
+  --text: #e6ecf7;
+  --text2: #b9c4da;
+  --dim: #8e9bb5;   /* 6.8:1 on --card */
+  --line: #1d2538;
+  --line2: #2c3852;
+  --ink-line: #27324a;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（#0026FF 在暗底上提亮成电光蓝） —— */
+  --blue: #5c7cff;
+  --blue-deep: #4265e8;
+  --blue-weak: rgba(92, 124, 255, .16);
+  --gold: #d4af5c;
+  --reg: #e26255;
+  --up: #e26255;
+  --down: #46b276;
+  --ai: #9d8cf0;
+  --on-accent: #070a14;
+  /* —— 用量环形图色板：深海提亮档 —— */
+  --dm-c1: #5c7cff; --dm-c2: #46b276; --dm-c3: #e26255; --dm-c4: #d4af5c;
+  --dm-c5: #9d8cf0; --dm-c6: #45c8d8; --dm-c7: #c98f66; --dm-c8: #8e9bb5;
+  --shadow-sm: 2px 2px 0 rgba(2, 4, 10, .5);
+  --shadow-md: 3px 3px 0 rgba(2, 4, 10, .56);
+  --shadow-lg: 5px 5px 0 rgba(2, 4, 10, .62), 0 12px 32px rgba(2, 4, 10, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(230, 236, 247, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #0b1020 0%, var(--bg) 52%, #050811 100%);
+  /* —— 代码高亮深海拔板 —— */
+  --hl-comment: #8e9bb5;
+  --hl-keyword: #e26255;
+  --hl-string: #46b276;
+  --hl-number: #d4af5c;
+  --hl-title: #5c7cff;
+  --hl-attr: #9d8cf0;
+  --hl-type: #d4af5c;
+  --hl-variable: #b9c4da;
+  --hl-meta: #8e9bb5;
+  --hl-add-bg: rgba(70, 178, 118, .16);
+  --hl-del-bg: rgba(226, 98, 85, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="abyss"] ::selection { background: rgba(92, 124, 255, .32); }
+
+/* —— 赤青：赤赭红与冰湖青——暖红墨夜底，冰湖青交互色，冷暖对冲 —— */
+[data-theme="scarlet"] {
+  color-scheme: dark;
+  /* —— 底：四层赤墨微分层（1–3% 明度） —— */
+  --bg: #160e0e;
+  --card: #1a1010;
+  --paper-raised: #211515;
+  --paper-sunken: #120b0b;
+  --paper-inset: #251818;
+  /* —— 字（暖白） —— */
+  --text: #f3e6e2;
+  --text2: #d4bab3;
+  --dim: #a8908a;   /* 6.2:1 on --card */
+  --line: #2e1d1c;
+  --line2: #432b29;
+  --ink-line: #3c2725;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（冰湖青压一点亮度防刺眼，赤赭红留给状态色） —— */
+  --blue: #2fd6d6;
+  --blue-deep: #1fb3b3;
+  --blue-weak: rgba(22, 223, 223, .14);
+  --gold: #d4af5c;
+  --reg: #e5484d;
+  --up: #e5484d;
+  --down: #46b276;
+  --ai: #f08a7a;
+  --on-accent: #0d0808;
+  /* —— 用量环形图色板：赤青对照档 —— */
+  --dm-c1: #2fd6d6; --dm-c2: #46b276; --dm-c3: #e5484d; --dm-c4: #d4af5c;
+  --dm-c5: #f08a7a; --dm-c6: #6fa8dc; --dm-c7: #c98f66; --dm-c8: #a8908a;
+  --shadow-sm: 2px 2px 0 rgba(9, 4, 4, .5);
+  --shadow-md: 3px 3px 0 rgba(9, 4, 4, .56);
+  --shadow-lg: 5px 5px 0 rgba(9, 4, 4, .62), 0 12px 32px rgba(9, 4, 4, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(243, 230, 226, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #1b1010 0%, var(--bg) 52%, #0f0909 100%);
+  /* —— 代码高亮赤青色板 —— */
+  --hl-comment: #a8908a;
+  --hl-keyword: #e5484d;
+  --hl-string: #46b276;
+  --hl-number: #d4af5c;
+  --hl-title: #2fd6d6;
+  --hl-attr: #f08a7a;
+  --hl-type: #d4af5c;
+  --hl-variable: #d4bab3;
+  --hl-meta: #a8908a;
+  --hl-add-bg: rgba(70, 178, 118, .16);
+  --hl-del-bg: rgba(229, 72, 77, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="scarlet"] ::selection { background: rgba(22, 223, 223, .26); }
+
+/* —— 雾紫：雾柔紫与晨青绿——雾紫夜底，丁香紫交互色，晨青绿作 AI 点色 —— */
+[data-theme="lilac"] {
+  color-scheme: dark;
+  /* —— 底：四层紫墨微分层（1–3% 明度） —— */
+  --bg: #130f19;
+  --card: #171120;
+  --paper-raised: #1d1628;
+  --paper-sunken: #100b15;
+  --paper-inset: #221a2e;
+  /* —— 字（月白偏紫） —— */
+  --text: #ece4f4;
+  --text2: #c9bcd9;
+  --dim: #a193b4;   /* 6.5:1 on --card */
+  --line: #2a2036;
+  --line2: #3c2e4e;
+  --ink-line: #352843;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（雾柔紫提亮，晨青绿作 AI 点色） —— */
+  --blue: #c47ae0;
+  --blue-deep: #a95cc4;
+  --blue-weak: rgba(196, 122, 224, .16);
+  --gold: #d4af5c;
+  --reg: #e26255;
+  --up: #e26255;
+  --down: #46b276;
+  --ai: #7fd35e;
+  --on-accent: #120d17;
+  /* —— 用量环形图色板：雾紫提亮档 —— */
+  --dm-c1: #c47ae0; --dm-c2: #7fd35e; --dm-c3: #e26255; --dm-c4: #d4af5c;
+  --dm-c5: #8de0c8; --dm-c6: #5fb8d4; --dm-c7: #c98f66; --dm-c8: #a193b4;
+  --shadow-sm: 2px 2px 0 rgba(6, 3, 9, .5);
+  --shadow-md: 3px 3px 0 rgba(6, 3, 9, .56);
+  --shadow-lg: 5px 5px 0 rgba(6, 3, 9, .62), 0 12px 32px rgba(6, 3, 9, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(236, 228, 244, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #171121 0%, var(--bg) 52%, #0d0912 100%);
+  /* —— 代码高亮雾紫色板 —— */
+  --hl-comment: #a193b4;
+  --hl-keyword: #e26255;
+  --hl-string: #7fd35e;
+  --hl-number: #d4af5c;
+  --hl-title: #c47ae0;
+  --hl-attr: #8de0c8;
+  --hl-type: #d4af5c;
+  --hl-variable: #c9bcd9;
+  --hl-meta: #a193b4;
+  --hl-add-bg: rgba(70, 178, 118, .16);
+  --hl-del-bg: rgba(226, 98, 85, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="lilac"] ::selection { background: rgba(196, 122, 224, .30); }
+
+/* —— 青柠：青柠绿与浅砖红（紫）——墨绿夜底，青柠交互色，紫作次要点色 —— */
+[data-theme="lime"] {
+  color-scheme: dark;
+  /* —— 底：四层墨绿微分层（1–3% 明度） —— */
+  --bg: #0d130c;
+  --card: #111a0f;
+  --paper-raised: #162112;
+  --paper-sunken: #0a1009;
+  --paper-inset: #1a2616;
+  /* —— 字（暖白偏绿） —— */
+  --text: #eaf3e4;
+  --text2: #c2d2ba;
+  --dim: #95a88c;   /* 7.0:1 on --card */
+  --line: #23301f;
+  --line2: #34452e;
+  --ink-line: #2e3d29;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（青柠绿提亮；浅砖红 #AB49D3 实为紫，作 AI 点色） —— */
+  --blue: #8fe35c;
+  --blue-deep: #74c445;
+  --blue-weak: rgba(143, 227, 92, .14);
+  --gold: #d4af5c;
+  --reg: #e26255;
+  --up: #e26255;
+  --down: #4c9e63;
+  --ai: #b06fe0;
+  --on-accent: #0a1006;
+  /* —— 用量环形图色板：青柠提亮档 —— */
+  --dm-c1: #8fe35c; --dm-c2: #4c9e63; --dm-c3: #e26255; --dm-c4: #d4af5c;
+  --dm-c5: #b06fe0; --dm-c6: #4f9dc4; --dm-c7: #c98f66; --dm-c8: #95a88c;
+  --shadow-sm: 2px 2px 0 rgba(4, 8, 3, .5);
+  --shadow-md: 3px 3px 0 rgba(4, 8, 3, .56);
+  --shadow-lg: 5px 5px 0 rgba(4, 8, 3, .62), 0 12px 32px rgba(4, 8, 3, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(234, 243, 228, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #111a10 0%, var(--bg) 52%, #080d07 100%);
+  /* —— 代码高亮青柠色板 —— */
+  --hl-comment: #95a88c;
+  --hl-keyword: #e26255;
+  --hl-string: #8fe35c;
+  --hl-number: #d4af5c;
+  --hl-title: #8fe35c;
+  --hl-attr: #b06fe0;
+  --hl-type: #d4af5c;
+  --hl-variable: #c2d2ba;
+  --hl-meta: #95a88c;
+  --hl-add-bg: rgba(143, 227, 92, .14);
+  --hl-del-bg: rgba(226, 98, 85, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="lime"] ::selection { background: rgba(143, 227, 92, .26); }
+
+/* —— 胭脂：烈粉红与琉璃金——酒红墨夜底，烈粉交互色，琉璃金作警示/强调 —— */
+[data-theme="rouge"] {
+  color-scheme: dark;
+  /* —— 底：四层酒红微分层（1–3% 明度） —— */
+  --bg: #170d12;
+  --card: #1c1017;
+  --paper-raised: #24151d;
+  --paper-sunken: #130a0e;
+  --paper-inset: #2a1822;
+  /* —— 字（暖白偏粉） —— */
+  --text: #f7e9ed;
+  --text2: #d9bcc6;
+  --dim: #b0919c;   /* 6.5:1 on --card */
+  --line: #301b24;
+  --line2: #452a36;
+  --ink-line: #3d2531;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（烈粉提亮；琉璃金 #FFD700 原色保留） —— */
+  --blue: #ff5c86;
+  --blue-deep: #e33a68;
+  --blue-weak: rgba(250, 43, 101, .16);
+  --gold: #ffd700;
+  --reg: #ff6b5e;
+  --up: #ff6b5e;
+  --down: #46b276;
+  --ai: #c98cf0;
+  --on-accent: #170a0e;
+  /* —— 用量环形图色板：胭脂提亮档 —— */
+  --dm-c1: #ff5c86; --dm-c2: #46b276; --dm-c3: #ff6b5e; --dm-c4: #ffd700;
+  --dm-c5: #c98cf0; --dm-c6: #56b8c9; --dm-c7: #c98f66; --dm-c8: #b0919c;
+  --shadow-sm: 2px 2px 0 rgba(8, 4, 6, .5);
+  --shadow-md: 3px 3px 0 rgba(8, 4, 6, .56);
+  --shadow-lg: 5px 5px 0 rgba(8, 4, 6, .62), 0 12px 32px rgba(8, 4, 6, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(247, 233, 237, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #1e1118 0%, var(--bg) 52%, #120a0e 100%);
+  /* —— 代码高亮胭脂色板 —— */
+  --hl-comment: #b0919c;
+  --hl-keyword: #ff5c86;
+  --hl-string: #46b276;
+  --hl-number: #ffd700;
+  --hl-title: #ff5c86;
+  --hl-attr: #c98cf0;
+  --hl-type: #ffd700;
+  --hl-variable: #d9bcc6;
+  --hl-meta: #b0919c;
+  --hl-add-bg: rgba(70, 178, 118, .16);
+  --hl-del-bg: rgba(255, 107, 94, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="rouge"] ::selection { background: rgba(250, 43, 101, .30); }
+
+/* —— 刃银：刃银与鞘蓝——冷银纸底，刀鞘蓝交互色，干净利落 —— */
+[data-theme="blade"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #e4e9ef;
+  --card: #f1f4f8;
+  --paper-raised: #f9fbfd;
+  --paper-sunken: #e7ecf2;
+  --paper-inset: #dbe2ea;
+  /* —— 墨（冷铁灰） —— */
+  --text: #161b22;
+  --text2: #3f4a58;
+  --dim: #5c6878;   /* 5.1:1 on --card */
+  --line: #cdd6e1;
+  --line2: #b3bfcd;
+  --ink-line: #161b22;
+  /* —— 色 —— */
+  --blue: #1f6cbd;
+  --blue-deep: #185796;
+  --blue-weak: rgba(31, 108, 189, .10);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #4f35a8;
+  --on-accent: #f9fbfd;
+  --dm-c1: #1f6cbd; --dm-c2: #3a7d44; --dm-c3: #b03a2e; --dm-c4: #8a6410;
+  --dm-c5: #4f35a8; --dm-c6: #0f7c8a; --dm-c7: #8a5a3a; --dm-c8: #3f4a58;
+  --shadow-sm: 2px 2px 0 rgba(22, 27, 34, .12);
+  --shadow-md: 3px 3px 0 rgba(22, 27, 34, .16);
+  --shadow-lg: 5px 5px 0 rgba(22, 27, 34, .21), 0 12px 32px rgba(22, 27, 34, .15);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(22, 27, 34, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #eef2f7 0%, var(--bg) 52%, #d3dbe5 100%);
+  /* —— 代码高亮：银灰纸上的刃色 —— */
+  --hl-comment: #7b8797;
+  --hl-keyword: #a03428;
+  --hl-string: #0f6b3a;
+  --hl-number: #8a6410;
+  --hl-title: #1f6cbd;
+  --hl-attr: #4f35a8;
+  --hl-type: #8a6410;
+  --hl-variable: #3f4a58;
+  --hl-meta: #6b7788;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色浅色档（与 :root 默认一致，显式占槽防漂移） —— */
+  --mark-bg: #ffe58f; --mark-fg: inherit;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="blade"] ::selection { background: rgba(31, 108, 189, .16); }
+
+/* —— 樱粉：浅粉与天蓝——樱花粉纸底，天蓝交互色，粉作 AI 点色 —— */
+[data-theme="sakura"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #f6e6ea;
+  --card: #fdf0f3;
+  --paper-raised: #fff8fa;
+  --paper-sunken: #f8e9ed;
+  --paper-inset: #efdbe1;
+  /* —— 墨（樱褐） —— */
+  --text: #23171b;
+  --text2: #574249;
+  --dim: #78626a;   /* 5.0:1 on --card */
+  --line: #e5ccd3;
+  --line2: #d3b2bd;
+  --ink-line: #23171b;
+  /* —— 色（天蓝压深；浅粉留给底色与 AI 点色） —— */
+  --blue: #266f93;
+  --blue-deep: #1e5a78;
+  --blue-weak: rgba(38, 111, 147, .10);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #bd4160;
+  --on-accent: #fff8fa;
+  --dm-c1: #266f93; --dm-c2: #bd4160; --dm-c3: #b03a2e; --dm-c4: #8a6410;
+  --dm-c5: #7a5aa8; --dm-c6: #0f7c8a; --dm-c7: #8a5a3a; --dm-c8: #574249;
+  --shadow-sm: 2px 2px 0 rgba(35, 23, 27, .11);
+  --shadow-md: 3px 3px 0 rgba(35, 23, 27, .15);
+  --shadow-lg: 5px 5px 0 rgba(35, 23, 27, .20), 0 12px 32px rgba(35, 23, 27, .14);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(35, 23, 27, .045) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #fbeef1 0%, var(--bg) 52%, #eed7de 100%);
+  /* —— 代码高亮：樱粉纸上的天空色板 —— */
+  --hl-comment: #8e7a81;
+  --hl-keyword: #b03a4e;
+  --hl-string: #0f6b3a;
+  --hl-number: #8a6410;
+  --hl-title: #266f93;
+  --hl-attr: #7a5aa8;
+  --hl-type: #8a6410;
+  --hl-variable: #574249;
+  --hl-meta: #7d6a71;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色浅色档（与 :root 默认一致，显式占槽防漂移） —— */
+  --mark-bg: #ffe58f; --mark-fg: inherit;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="sakura"] ::selection { background: rgba(38, 111, 147, .16); }
+
+/* —— 草兰：草绿与紫兰——嫩草纸底，草绿交互色，紫兰作 AI 点色 —— */
+[data-theme="meadow"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #e6f0df;
+  --card: #f2f8ec;
+  --paper-raised: #fafdf6;
+  --paper-sunken: #e9f2e2;
+  --paper-inset: #dbe8d2;
+  /* —— 墨（草褐绿） —— */
+  --text: #1a2116;
+  --text2: #414b3a;
+  --dim: #5f6b57;   /* 5.2:1 on --card */
+  --line: #cbdcc1;
+  --line2: #adc4a1;
+  --ink-line: #1a2116;
+  /* —— 色（草绿压深，紫兰作次点色） —— */
+  --blue: #4a7733;
+  --blue-deep: #3a5f27;
+  --blue-weak: rgba(74, 119, 51, .10);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #5b63d6;
+  --on-accent: #fafdf6;
+  --dm-c1: #4a7733; --dm-c2: #7c83fd; --dm-c3: #b03a2e; --dm-c4: #8a6410;
+  --dm-c5: #5b63d6; --dm-c6: #4f7a80; --dm-c7: #8a5a3a; --dm-c8: #414b3a;
+  --shadow-sm: 2px 2px 0 rgba(26, 33, 22, .12);
+  --shadow-md: 3px 3px 0 rgba(26, 33, 22, .16);
+  --shadow-lg: 5px 5px 0 rgba(26, 33, 22, .21), 0 12px 32px rgba(26, 33, 22, .15);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(26, 33, 22, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #f0f7e9 0%, var(--bg) 52%, #d8e5cf 100%);
+  /* —— 代码高亮：草纸上的绿与紫兰 —— */
+  --hl-comment: #7f8a74;
+  --hl-keyword: #a03428;
+  --hl-string: #4a7733;
+  --hl-number: #8a6410;
+  --hl-title: #4a7733;
+  --hl-attr: #5b63d6;
+  --hl-type: #8a6410;
+  --hl-variable: #414b3a;
+  --hl-meta: #717c67;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色浅色档（与 :root 默认一致，显式占槽防漂移） —— */
+  --mark-bg: #ffe58f; --mark-fg: inherit;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="meadow"] ::selection { background: rgba(74, 119, 51, .16); }
+
+/* —— 菀雾：菀雾紫与晴霜白——霜白纸底，紫藤交互色，安静偏冷 —— */
+[data-theme="heather"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #e9e4f1;
+  --card: #f4f1f9;
+  --paper-raised: #fbf9fe;
+  --paper-sunken: #ece7f4;
+  --paper-inset: #dfd8ec;
+  /* —— 墨（紫褐） —— */
+  --text: #1d1826;
+  --text2: #4b4359;
+  --dim: #685e78;   /* 5.4:1 on --card */
+  --line: #d6cde5;
+  --line2: #bfb3d4;
+  --ink-line: #1d1826;
+  /* —— 色（菀雾紫压深，梅紫作 AI 点色） —— */
+  --blue: #6b5595;
+  --blue-deep: #57447a;
+  --blue-weak: rgba(107, 85, 149, .10);
+  --gold: #8a6410;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #a34a7a;
+  --on-accent: #fbf9fe;
+  --dm-c1: #6b5595; --dm-c2: #3a7d44; --dm-c3: #b03a2e; --dm-c4: #8a6410;
+  --dm-c5: #a34a7a; --dm-c6: #0f7c8a; --dm-c7: #8a5a3a; --dm-c8: #4b4359;
+  --shadow-sm: 2px 2px 0 rgba(29, 24, 38, .12);
+  --shadow-md: 3px 3px 0 rgba(29, 24, 38, .16);
+  --shadow-lg: 5px 5px 0 rgba(29, 24, 38, .21), 0 12px 32px rgba(29, 24, 38, .15);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(29, 24, 38, .05) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #f4f1fa 0%, var(--bg) 52%, #ddd6ea 100%);
+  /* —— 代码高亮：霜白纸上的紫藤色板 —— */
+  --hl-comment: #857b94;
+  --hl-keyword: #a03428;
+  --hl-string: #0f6b3a;
+  --hl-number: #8a6410;
+  --hl-title: #6b5595;
+  --hl-attr: #a34a7a;
+  --hl-type: #8a6410;
+  --hl-variable: #4b4359;
+  --hl-meta: #7a7088;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色浅色档（与 :root 默认一致，显式占槽防漂移） —— */
+  --mark-bg: #ffe58f; --mark-fg: inherit;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="heather"] ::selection { background: rgba(107, 85, 149, .18); }
+
+/* —— 醇巧：醇巧与蜜黄——奶油可可纸底，深可可交互色，蜜黄作警示/高亮 —— */
+[data-theme="caramel"] {
+  color-scheme: light;
+  /* —— 纸 —— */
+  --bg: #efe3d2;
+  --card: #f8efdf;
+  --paper-raised: #fdf8ec;
+  --paper-sunken: #f2e7d6;
+  --paper-inset: #e6d7c1;
+  /* —— 墨（可可褐） —— */
+  --text: #241a11;
+  --text2: #54432f;
+  --dim: #6f5c46;   /* 5.6:1 on --card */
+  --line: #ddcdb6;
+  --line2: #c6b196;
+  --ink-line: #241a11;
+  /* —— 色（深可可；蜜黄 #F9D287 留给高亮与图表段） —— */
+  --blue: #6f4523;
+  --blue-deep: #5a3719;
+  --blue-weak: rgba(111, 69, 35, .11);
+  --gold: #8f6412;
+  --reg: #8f1d1d;
+  --up: #c2261d;
+  --down: #0f6b3a;
+  --ai: #6b4fa3;
+  --on-accent: #fdf8ec;
+  --dm-c1: #6f4523; --dm-c2: #3a7d44; --dm-c3: #b03a2e; --dm-c4: #8f6412;
+  --dm-c5: #6b4fa3; --dm-c6: #4f7a80; --dm-c7: #8a5a3a; --dm-c8: #54432f;
+  --shadow-sm: 2px 2px 0 rgba(36, 26, 17, .12);
+  --shadow-md: 3px 3px 0 rgba(36, 26, 17, .16);
+  --shadow-lg: 5px 5px 0 rgba(36, 26, 17, .21), 0 12px 32px rgba(36, 26, 17, .15);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(36, 26, 17, .055) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #f8efdf 0%, var(--bg) 52%, #e3d2ba 100%);
+  /* —— 代码高亮：奶油可可色板 —— */
+  --hl-comment: #8d7a63;
+  --hl-keyword: #a03428;
+  --hl-string: #0f6b3a;
+  --hl-number: #8f6412;
+  --hl-title: #6f4523;
+  --hl-attr: #6b4fa3;
+  --hl-type: #8f6412;
+  --hl-variable: #54432f;
+  --hl-meta: #7d6a52;
+  --hl-add-bg: rgba(15, 107, 58, .12);
+  --hl-del-bg: rgba(143, 29, 29, .10);
+  /* —— 语义色：命中高亮用蜜黄，警示沿用暖米档 —— */
+  --mark-bg: #f9d287; --mark-fg: #241a11;
+  --alert-bg: #f7edd8; --alert-fg: #8a6410; --alert-line: #d8c08a;
+}
+[data-theme="caramel"] ::selection { background: rgba(111, 69, 35, .16); }
+
+/* —— 曜金：曜黑与灿黄——纯黑纸底，灿黄交互色，高对比夜行 —— */
+[data-theme="obsidian"] {
+  color-scheme: dark;
+  /* —— 底：四层中性黑微分层 —— */
+  --bg: #121212;
+  --card: #171717;
+  --paper-raised: #1e1e1e;
+  --paper-sunken: #0e0e0e;
+  --paper-inset: #242424;
+  /* —— 字（冷白） —— */
+  --text: #f2f2f2;
+  --text2: #cccccc;
+  --dim: #a3a3a3;   /* 7.1:1 on --card */
+  --line: #2b2b2b;
+  --line2: #3d3d3d;
+  --ink-line: #333333;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（灿黄 #FFDD00 原色即交互色；深底上对比足够） —— */
+  --blue: #ffdd00;
+  --blue-deep: #d9bb00;
+  --blue-weak: rgba(255, 221, 0, .14);
+  --gold: #e6c200;
+  --reg: #ff6b5e;
+  --up: #ff6b5e;
+  --down: #4cbb72;
+  --ai: #b794f6;
+  --on-accent: #121212;
+  /* —— 用量环形图色板：曜金提亮档 —— */
+  --dm-c1: #ffdd00; --dm-c2: #4cbb72; --dm-c3: #ff6b5e; --dm-c4: #e6c200;
+  --dm-c5: #b794f6; --dm-c6: #56b8c9; --dm-c7: #c98f66; --dm-c8: #a3a3a3;
+  --shadow-sm: 2px 2px 0 rgba(0, 0, 0, .55);
+  --shadow-md: 3px 3px 0 rgba(0, 0, 0, .60);
+  --shadow-lg: 5px 5px 0 rgba(0, 0, 0, .66), 0 12px 32px rgba(0, 0, 0, .60);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(242, 242, 242, .035) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #181818 0%, var(--bg) 52%, #0b0b0b 100%);
+  /* —— 代码高亮曜金色板 —— */
+  --hl-comment: #a3a3a3;
+  --hl-keyword: #ff6b5e;
+  --hl-string: #4cbb72;
+  --hl-number: #ffdd00;
+  --hl-title: #ffdd00;
+  --hl-attr: #b794f6;
+  --hl-type: #ffdd00;
+  --hl-variable: #cccccc;
+  --hl-meta: #a3a3a3;
+  --hl-add-bg: rgba(76, 187, 114, .16);
+  --hl-del-bg: rgba(255, 107, 94, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="obsidian"] ::selection { background: rgba(255, 221, 0, .24); }
+
+/* —— 墨朱：墨绿与朱红——墨绿夜底，朱红交互色，传统书画的冷暖对 —— */
+[data-theme="inkred"] {
+  color-scheme: dark;
+  /* —— 底：四层墨绿微分层 —— */
+  --bg: #101815;
+  --card: #141d19;
+  --paper-raised: #1a251f;
+  --paper-sunken: #0d1411;
+  --paper-inset: #1e2b24;
+  /* —— 字（宣纸白） —— */
+  --text: #e8ede9;
+  --text2: #bcc9c3;
+  --dim: #94a69e;   /* 6.7:1 on --card */
+  --line: #24332c;
+  --line2: #35483e;
+  --ink-line: #2f4038;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（朱红 #984040 提亮；墨绿留在底与次点色） —— */
+  --blue: #d47777;
+  --blue-deep: #bd6161;
+  --blue-weak: rgba(152, 64, 64, .18);
+  --gold: #d4af5c;
+  --reg: #e06a6a;
+  --up: #e06a6a;
+  --down: #5aa87a;
+  --ai: #b08d57;
+  --on-accent: #120b0b;
+  /* —— 用量环形图色板：墨朱提亮档 —— */
+  --dm-c1: #d47777; --dm-c2: #5aa87a; --dm-c3: #e06a6a; --dm-c4: #d4af5c;
+  --dm-c5: #b08d57; --dm-c6: #5fa8b0; --dm-c7: #c98f66; --dm-c8: #94a69e;
+  --shadow-sm: 2px 2px 0 rgba(4, 9, 6, .5);
+  --shadow-md: 3px 3px 0 rgba(4, 9, 6, .56);
+  --shadow-lg: 5px 5px 0 rgba(4, 9, 6, .62), 0 12px 32px rgba(4, 9, 6, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(232, 237, 233, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #16211c 0%, var(--bg) 52%, #0b110e 100%);
+  /* —— 代码高亮墨朱色板 —— */
+  --hl-comment: #94a69e;
+  --hl-keyword: #e06a6a;
+  --hl-string: #5aa87a;
+  --hl-number: #d4af5c;
+  --hl-title: #d47777;
+  --hl-attr: #b08d57;
+  --hl-type: #d4af5c;
+  --hl-variable: #bcc9c3;
+  --hl-meta: #94a69e;
+  --hl-add-bg: rgba(90, 168, 122, .16);
+  --hl-del-bg: rgba(224, 106, 106, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="inkred"] ::selection { background: rgba(152, 64, 64, .32); }
+
+/* —— 沉海：沉海墨与幽萤青——深海墨蓝底，萤火青交互色，冷而发光 —— */
+[data-theme="glowsea"] {
+  color-scheme: dark;
+  /* —— 底：四层沉海蓝微分层 —— */
+  --bg: #0c1722;
+  --card: #0f1c29;
+  --paper-raised: #132331;
+  --paper-sunken: #09121b;
+  --paper-inset: #172839;
+  /* —— 字（海雾白） —— */
+  --text: #e3edf5;
+  --text2: #b4c7d6;
+  --dim: #8aa2b5;   /* 6.5:1 on --card */
+  --line: #1d3042;
+  --line2: #2b445c;
+  --ink-line: #263c52;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（幽萤青 #62D2C2 原色即交互色） —— */
+  --blue: #62d2c2;
+  --blue-deep: #45b3a4;
+  --blue-weak: rgba(98, 210, 194, .14);
+  --gold: #d4af5c;
+  --reg: #e26255;
+  --up: #e26255;
+  --down: #46b276;
+  --ai: #9d8cf0;
+  --on-accent: #071014;
+  /* —— 用量环形图色板：沉海提亮档 —— */
+  --dm-c1: #62d2c2; --dm-c2: #46b276; --dm-c3: #e26255; --dm-c4: #d4af5c;
+  --dm-c5: #9d8cf0; --dm-c6: #56a8d4; --dm-c7: #c98f66; --dm-c8: #8aa2b5;
+  --shadow-sm: 2px 2px 0 rgba(2, 7, 12, .5);
+  --shadow-md: 3px 3px 0 rgba(2, 7, 12, .56);
+  --shadow-lg: 5px 5px 0 rgba(2, 7, 12, .62), 0 12px 32px rgba(2, 7, 12, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(227, 237, 245, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #0f1d2a 0%, var(--bg) 52%, #071019 100%);
+  /* —— 代码高亮沉海色板 —— */
+  --hl-comment: #8aa2b5;
+  --hl-keyword: #e26255;
+  --hl-string: #62d2c2;
+  --hl-number: #d4af5c;
+  --hl-title: #62d2c2;
+  --hl-attr: #9d8cf0;
+  --hl-type: #d4af5c;
+  --hl-variable: #b4c7d6;
+  --hl-meta: #8aa2b5;
+  --hl-add-bg: rgba(98, 210, 194, .14);
+  --hl-del-bg: rgba(226, 98, 85, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="glowsea"] ::selection { background: rgba(98, 210, 194, .28); }
+
+/* —— 浓巧：浓巧与杏桃——黑巧夜底，杏桃交互色，暖而不腻 —— */
+[data-theme="cocoa"] {
+  color-scheme: dark;
+  /* —— 底：四层可可微分层 —— */
+  --bg: #17100c;
+  --card: #1c140f;
+  --paper-raised: #241a13;
+  --paper-sunken: #110b07;
+  --paper-inset: #2a1e16;
+  /* —— 字（奶白） —— */
+  --text: #f5e9df;
+  --text2: #d8c2b1;
+  --dim: #b39a86;   /* 6.8:1 on --card */
+  --line: #31221a;
+  --line2: #473327;
+  --ink-line: #3e2c21;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（杏桃 #F6B896 原色即交互色） —— */
+  --blue: #f6b896;
+  --blue-deep: #d99873;
+  --blue-weak: rgba(246, 184, 150, .14);
+  --gold: #e0b06a;
+  --reg: #e26255;
+  --up: #e26255;
+  --down: #46b276;
+  --ai: #9d8cf0;
+  --on-accent: #1a0f08;
+  /* —— 用量环形图色板：浓巧提亮档 —— */
+  --dm-c1: #f6b896; --dm-c2: #46b276; --dm-c3: #e26255; --dm-c4: #e0b06a;
+  --dm-c5: #9d8cf0; --dm-c6: #56b8c9; --dm-c7: #c98f66; --dm-c8: #b39a86;
+  --shadow-sm: 2px 2px 0 rgba(8, 4, 2, .5);
+  --shadow-md: 3px 3px 0 rgba(8, 4, 2, .56);
+  --shadow-lg: 5px 5px 0 rgba(8, 4, 2, .62), 0 12px 32px rgba(8, 4, 2, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(245, 233, 223, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #1c130e 0%, var(--bg) 52%, #0e0906 100%);
+  /* —— 代码高亮浓巧色板 —— */
+  --hl-comment: #b39a86;
+  --hl-keyword: #e26255;
+  --hl-string: #8fbf7a;
+  --hl-number: #e0b06a;
+  --hl-title: #f6b896;
+  --hl-attr: #9d8cf0;
+  --hl-type: #e0b06a;
+  --hl-variable: #d8c2b1;
+  --hl-meta: #b39a86;
+  --hl-add-bg: rgba(143, 191, 122, .14);
+  --hl-del-bg: rgba(226, 98, 85, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="cocoa"] ::selection { background: rgba(246, 184, 150, .26); }
+
+/* —— 丹金：丹红与古金——朱砂墨夜底，丹红交互色，古金作强调 —— */
+[data-theme="cinnabar"] {
+  color-scheme: dark;
+  /* —— 底：四层朱砂墨微分层 —— */
+  --bg: #150b0b;
+  --card: #1a0f0f;
+  --paper-raised: #221414;
+  --paper-sunken: #110808;
+  --paper-inset: #281717;
+  /* —— 字（宣纸暖白） —— */
+  --text: #f5e8e2;
+  --text2: #d8beb6;
+  --dim: #b1968c;   /* 6.8:1 on --card */
+  --line: #2f1c1b;
+  --line2: #452a28;
+  --ink-line: #3d2624;
+  --fw-normal: 360; --fw-medium: 460; --fw-semi: 560; --fw-bold: 660; --fw-heavy: 760;
+  /* —— 色（丹红提亮；古金作 gold/强调） —— */
+  --blue: #d45a5a;
+  --blue-deep: #b84242;
+  --blue-weak: rgba(172, 54, 54, .16);
+  --gold: #c9a227;
+  --reg: #e06060;
+  --up: #e06060;
+  --down: #46b276;
+  --ai: #b08d57;
+  --on-accent: #150808;
+  /* —— 用量环形图色板：丹金提亮档 —— */
+  --dm-c1: #d45a5a; --dm-c2: #46b276; --dm-c3: #e06060; --dm-c4: #c9a227;
+  --dm-c5: #b08d57; --dm-c6: #56b8c9; --dm-c7: #c98f66; --dm-c8: #b1968c;
+  --shadow-sm: 2px 2px 0 rgba(7, 3, 3, .5);
+  --shadow-md: 3px 3px 0 rgba(7, 3, 3, .56);
+  --shadow-lg: 5px 5px 0 rgba(7, 3, 3, .62), 0 12px 32px rgba(7, 3, 3, .55);
+  --body-bg:
+    radial-gradient(circle at 1px 1px, rgba(245, 232, 226, .04) 1px, transparent 0) 0 0 / 7px 7px,
+    linear-gradient(168deg, #1a0f0f 0%, var(--bg) 52%, #0e0707 100%);
+  /* —— 代码高亮丹金色板 —— */
+  --hl-comment: #b1968c;
+  --hl-keyword: #e06060;
+  --hl-string: #46b276;
+  --hl-number: #c9a227;
+  --hl-title: #d45a5a;
+  --hl-attr: #b08d57;
+  --hl-type: #c9a227;
+  --hl-variable: #d8beb6;
+  --hl-meta: #b1968c;
+  --hl-add-bg: rgba(70, 178, 118, .14);
+  --hl-del-bg: rgba(224, 96, 96, .14);
+  /* —— 语义色深色档（浅色主题用 :root 默认） —— */
+  --mark-bg: #7a6320; --mark-fg: #ffe9a8;
+  --alert-bg: rgba(176, 141, 87, .16); --alert-fg: #d8bd8e; --alert-line: rgba(176, 141, 87, .4);
+}
+[data-theme="cinnabar"] ::selection { background: rgba(172, 54, 54, .32); }
+
+
 /* ---------- Mermaid 图表：滚动容器 + 主题适配 ---------- */
 .md .mermaid, .mermaid-box {
   overflow-x: auto; margin: 6px 0;
@@ -5992,10 +7066,23 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 .seg-mini { display: flex; width: 100%; margin: 4px 0 2px; box-shadow: none; }
 .seg-mini button { flex: 1; padding: 3px 4px; font-size: var(--fs-sm); font-weight: var(--fw-semi); }
 
-/* ---------- 设置页：主题选择（跟随系统 + 六套配色卡片） ---------- */
-.theme-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 2px; }
+/* ---------- 设置页：主题选择（跟随系统 + 二十六套配色卡片） ---------- */
+/* 二十六套主题用四列网格：每段浅色 / 深色各两行，卡片等宽不出现「7+1」的孤行；
+   宽度上限 980px，超宽屏不会把色板拉成横幅；窄屏（手机）降到两列。 */
+.theme-grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px; margin-top: 2px; max-width: 980px;
+}
+/* 浅色 / 深色分组标签：占满一整行，把二十六张卡切成两段，扫起来不混色 */
+.theme-group-label {
+  grid-column: 1 / -1; margin: 2px 0 -2px;
+  font-size: var(--fs-cap); color: var(--dim); letter-spacing: .12em;
+}
+/* 跟随系统 / 定时切换是入口卡，各占两列，与下面四列的主题卡对齐 */
+.theme-card[data-theme-pref="auto"],
+.theme-card[data-theme-pref="timed"] { grid-column: span 2; }
 .theme-card {
-  width: 132px; padding: 8px; text-align: left;
+  width: auto; padding: 8px; text-align: left;
   background: var(--paper-raised); border: 1.5px solid var(--line2);
   border-radius: var(--r-md); box-shadow: var(--shadow-sm);
   transition: border-color var(--dur-fast), transform var(--dur-fast), box-shadow var(--dur-fast);
@@ -6009,6 +7096,38 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 }
 .theme-swatch i { flex: 1; }
 .theme-card b { display: block; font-size: var(--fs-md); color: var(--text); }
+@media (max-width: 860px) {
+  .theme-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* 「界面与通知」里的当前主题入口：只占一行，完整色板进二级页 */
+.theme-current {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  margin-top: 8px; padding: 8px 10px; text-align: left; font-family: inherit;
+  background: var(--paper-raised); border: 1.5px solid var(--ink-line);
+  border-radius: var(--r-sm); box-shadow: var(--shadow-sm); cursor: pointer;
+  transition: border-color var(--dur-fast), transform var(--dur-fast);
+}
+.theme-current:hover { border-color: var(--blue); transform: translateY(-1px); }
+.theme-current-swatch {
+  display: flex; width: 66px; height: 34px; flex: none;
+  border: 1px solid var(--ink-line); border-radius: var(--r-xs); overflow: hidden;
+}
+.theme-current-swatch i { flex: 1; }
+.theme-current-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.theme-current-main b { font-size: var(--fs-md); color: var(--text); font-weight: var(--fw-bold); }
+.theme-current-main small { font-size: var(--fs-cap); color: var(--dim); }
+.theme-current-go { margin-left: auto; color: var(--blue); font-size: var(--fs-md); white-space: nowrap; }
+
+/* 主题二级页头部：返回按钮 + 页名 + 数量 */
+.settings-subpage-head .theme-page-title {
+  font-size: var(--fs-title); font-weight: var(--fw-bold); color: var(--text);
+}
+.settings-subpage-head .settings-subpage-count { margin-left: auto; }
+
+@media (max-width: 860px) {
+  .settings-subpage-head .settings-subpage-count,
+  .theme-current-go { display: none; }
+}
 .theme-card small { display: block; font-size: var(--fs-cap); color: var(--dim); margin-top: 1px; }
 /* 「跟随系统时」的深浅落点：内联在主题卡下方（值由 app.js 回填与保存） */
 .theme-auto-row {
@@ -8061,14 +9180,14 @@ li.mod-row {
 
 /* 深色主题字重降档的兜底：未显式写 font-weight 的语义粗体（b / strong /
    标题）走浏览器默认 700，会漏掉 --fw-bold 的降 40；这里统一收口 */
-[data-theme="night"] b, [data-theme="indigo"] b, [data-theme="pine"] b,
-[data-theme="night"] strong, [data-theme="indigo"] strong, [data-theme="pine"] strong,
-[data-theme="night"] h1, [data-theme="indigo"] h1, [data-theme="pine"] h1,
-[data-theme="night"] h2, [data-theme="indigo"] h2, [data-theme="pine"] h2,
-[data-theme="night"] h3, [data-theme="indigo"] h3, [data-theme="pine"] h3,
-[data-theme="night"] h4, [data-theme="indigo"] h4, [data-theme="pine"] h4,
-[data-theme="night"] h5, [data-theme="indigo"] h5, [data-theme="pine"] h5,
-[data-theme="night"] h6, [data-theme="indigo"] h6, [data-theme="pine"] h6 {
+[data-theme="night"] b, [data-theme="indigo"] b, [data-theme="pine"] b, [data-theme="abyss"] b, [data-theme="scarlet"] b, [data-theme="lilac"] b, [data-theme="lime"] b, [data-theme="rouge"] b, [data-theme="obsidian"] b, [data-theme="inkred"] b, [data-theme="glowsea"] b, [data-theme="cocoa"] b, [data-theme="cinnabar"] b,
+[data-theme="night"] strong, [data-theme="indigo"] strong, [data-theme="pine"] strong, [data-theme="abyss"] strong, [data-theme="scarlet"] strong, [data-theme="lilac"] strong, [data-theme="lime"] strong, [data-theme="rouge"] strong, [data-theme="obsidian"] strong, [data-theme="inkred"] strong, [data-theme="glowsea"] strong, [data-theme="cocoa"] strong, [data-theme="cinnabar"] strong,
+[data-theme="night"] h1, [data-theme="indigo"] h1, [data-theme="pine"] h1, [data-theme="abyss"] h1, [data-theme="scarlet"] h1, [data-theme="lilac"] h1, [data-theme="lime"] h1, [data-theme="rouge"] h1, [data-theme="obsidian"] h1, [data-theme="inkred"] h1, [data-theme="glowsea"] h1, [data-theme="cocoa"] h1, [data-theme="cinnabar"] h1,
+[data-theme="night"] h2, [data-theme="indigo"] h2, [data-theme="pine"] h2, [data-theme="abyss"] h2, [data-theme="scarlet"] h2, [data-theme="lilac"] h2, [data-theme="lime"] h2, [data-theme="rouge"] h2, [data-theme="obsidian"] h2, [data-theme="inkred"] h2, [data-theme="glowsea"] h2, [data-theme="cocoa"] h2, [data-theme="cinnabar"] h2,
+[data-theme="night"] h3, [data-theme="indigo"] h3, [data-theme="pine"] h3, [data-theme="abyss"] h3, [data-theme="scarlet"] h3, [data-theme="lilac"] h3, [data-theme="lime"] h3, [data-theme="rouge"] h3, [data-theme="obsidian"] h3, [data-theme="inkred"] h3, [data-theme="glowsea"] h3, [data-theme="cocoa"] h3, [data-theme="cinnabar"] h3,
+[data-theme="night"] h4, [data-theme="indigo"] h4, [data-theme="pine"] h4, [data-theme="abyss"] h4, [data-theme="scarlet"] h4, [data-theme="lilac"] h4, [data-theme="lime"] h4, [data-theme="rouge"] h4, [data-theme="obsidian"] h4, [data-theme="inkred"] h4, [data-theme="glowsea"] h4, [data-theme="cocoa"] h4, [data-theme="cinnabar"] h4,
+[data-theme="night"] h5, [data-theme="indigo"] h5, [data-theme="pine"] h5, [data-theme="abyss"] h5, [data-theme="scarlet"] h5, [data-theme="lilac"] h5, [data-theme="lime"] h5, [data-theme="rouge"] h5, [data-theme="obsidian"] h5, [data-theme="inkred"] h5, [data-theme="glowsea"] h5, [data-theme="cocoa"] h5, [data-theme="cinnabar"] h5,
+[data-theme="night"] h6, [data-theme="indigo"] h6, [data-theme="pine"] h6, [data-theme="abyss"] h6, [data-theme="scarlet"] h6, [data-theme="lilac"] h6, [data-theme="lime"] h6, [data-theme="rouge"] h6, [data-theme="obsidian"] h6, [data-theme="inkred"] h6, [data-theme="glowsea"] h6, [data-theme="cocoa"] h6, [data-theme="cinnabar"] h6 {
   font-weight: var(--fw-bold);
 }
 

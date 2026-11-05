@@ -406,9 +406,9 @@ def _first_paint_attrs(prefs: dict) -> str:
         parts.append('data-theme-mode="auto"')
         auto_light = prefs.get("theme_auto_light")
         auto_dark = prefs.get("theme_auto_dark")
-        if auto_light in ("paper", "celadon", "kaki"):
+        if auto_light in THEME_AUTO_LIGHT:
             parts.append(f'data-theme-auto-light="{auto_light}"')
-        if auto_dark in ("night", "indigo", "pine"):
+        if auto_dark in THEME_AUTO_DARK:
             parts.append(f'data-theme-auto-dark="{auto_dark}"')
     style = []
     scale = prefs.get("ui_scale")

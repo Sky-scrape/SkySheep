@@ -478,6 +478,37 @@ def test_settings_page_group_titles(home):
     assert ".settings-group-title" in css
 
 
+def test_theme_subpage_structure(home):
+    """主题选择收进二级页：主页面只留当前主题入口，色板与跟随系统/定时在独立页。"""
+    from skysheep.server.app import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    ui_start = html.index('id="settings-page-ui"')
+    theme_start = html.index('id="settings-page-theme"')
+    ui = html[ui_start:theme_start]
+    theme = html[theme_start:]
+    theme = theme[:theme.index('<section class="settings-page', 1)]
+
+    # 主页面：当前主题行 + 进入按钮，不再挂完整色板
+    assert 'id="theme-current-name"' in ui and 'id="theme-open"' in ui
+    assert 'id="theme-grid"' not in ui
+    # 二级页：返回按钮 + 26 套色板 + 跟随系统 / 定时切换
+    assert 'id="theme-page-back"' in theme and "← 界面与通知" in theme
+    assert 'id="theme-grid"' in theme and 'data-theme-pref="cinnabar"' in theme
+    assert 'id="theme-auto-row"' in theme and 'id="theme-timed-row"' in theme
+    # 二级页不占侧栏导航项
+    nav = html[html.index('<ul id="settings-nav"'):]
+    nav = nav[:nav.index("</ul>")]
+    assert 'data-target="theme"' not in nav
+
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'showSettingsPage("theme")' in js
+    assert 'showSettingsPage("ui")' in js
+    assert 'PAGE_NAMES = { theme: "主题" }' in js
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert ".theme-current" in css and ".settings-subpage-head" in css
+
+
 def test_settings_nav_grouping(home):
     """设置侧栏分组按「这是什么」排，不按新旧。
 
@@ -1161,8 +1192,14 @@ def test_index_explicit_theme_id_injects_data_theme(home):
 
 
 def test_ui_prefs_theme_whitelist(home):
-    """theme 键值域：六套主题 id + auto + timed + 旧版 light/dark；未知值丢弃、null 恢复默认。"""
-    for val in ("auto", "timed", "light", "dark", "paper", "celadon", "kaki", "night", "indigo", "pine"):
+    """theme 键值域：二十六套主题 id + auto + timed + 旧版 light/dark；未知值丢弃、null 恢复默认。"""
+    for val in (
+        "auto", "timed", "light", "dark",
+        "paper", "celadon", "kaki", "mint", "bean", "mustard", "sprout", "silver",
+        "blade", "sakura", "meadow", "heather", "caramel",
+        "night", "indigo", "pine", "abyss", "scarlet", "lilac", "lime", "rouge",
+        "obsidian", "inkred", "glowsea", "cocoa", "cinnabar",
+    ):
         frame = call_ui(home, "ui.save", {"prefs": {"theme": val}})
         assert frame["result"]["prefs"] == {"theme": val}
     frame = call_ui(home, "ui.save", {"prefs": {"theme": "solarized"}})

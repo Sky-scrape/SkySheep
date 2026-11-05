@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-11-04 16:24:04
-- 方法总数：333（本机专属 local_only 178 个）
+- 生成时间：2026-11-04 22:13:38
+- 方法总数：332（本机专属 local_only 178 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -354,7 +354,6 @@
 | skills.install | 是 | — |
 | skills.preview_install | 是 | — |
 | skills.delete | 是 | — |
-| skills.gallery |  | — |
 | skills.save_from_session |  | — |
 | skills.save_draft | 是 | — |
 | mods.list |  | — |

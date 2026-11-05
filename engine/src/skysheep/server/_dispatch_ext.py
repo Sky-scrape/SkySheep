@@ -231,11 +231,6 @@ async def _h_skills_delete(backend: ServerBackend, params: dict, emit, local: bo
     return await backend.delete_skill(str(params.get("name", "")))
 
 
-async def _h_skills_gallery(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    # 纯本地只读（打包内清单 + 已装比对）：与技能清单同级，不进本机专属表
-    return backend.gallery_skills()
-
-
 async def _h_skills_save_from_session(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 只读生成（读会话消息 → 返回草稿文本）：写盘发生在 skills.save_draft
     return await backend.save_skill_from_session(str(params.get("id", "")))
@@ -424,7 +419,6 @@ METHODS: dict[str, _WsMethod] = {
     "skills.install": _WsMethod(_h_skills_install, local_only=True),
     "skills.preview_install": _WsMethod(_h_skills_preview_install, local_only=True),
     "skills.delete": _WsMethod(_h_skills_delete, local_only=True),
-    "skills.gallery": _WsMethod(_h_skills_gallery),
     "skills.save_from_session": _WsMethod(_h_skills_save_from_session),
     "skills.save_draft": _WsMethod(_h_skills_save_draft, local_only=True),
     # Mods 扩展（实验性）：写方法全部仅本机（第三方代码 + 收紧权限门的能力面）

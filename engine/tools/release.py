@@ -67,7 +67,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENGINE_DIR = _REPO_ROOT / "engine"
 _DIST_DIR = _ENGINE_DIR / "dist" / "SkySheep"
 _DIST_EXE = _DIST_DIR / "SkySheep.exe"
-_INTERNAL_SKILLS = _DIST_DIR / "_internal" / "skysheep" / "skills"
 _INSTALLER_DIR = _ENGINE_DIR / "installer"
 # ISCC 候选位：发布清单 §3-4 的本机安装位优先，其次 Program Files 下常见的
 # Inno Setup 6/7（CI 上 choco 装的就是这些位）；SKYSHEEP_ISCC 覆盖（见 iscc_path）
@@ -79,8 +78,6 @@ _ISCC_CANDIDATES = (
     Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
 )
 
-# skills-gallery/ 官方种子技能包数量（AGENTS.md：22 个中文场景技能）
-_GALLERY_SKILL_COUNT = 22
 # 版本号正则与 tools/check_versions.py 保持同款，避免两处各认一套写法
 _PYPROJECT_VERSION_RE = re.compile(r'(?m)^version\s*=\s*"([^"]+)"')
 _ISS_VERSION_RE = re.compile(r'(?m)^#define MyAppVersion\s+"([^"]+)"')
@@ -220,22 +217,10 @@ def step_pack() -> None:
 
 
 def step_verify_artifacts() -> None:
-    """清单 §3-3（产物部分）：exe 在、内置技能全在、场景模板清单在。"""
+    """清单 §3-3（产物部分）：exe 在。"""
     if not _DIST_EXE.is_file():
         raise RuntimeError(f"缺打包产物 {_DIST_EXE}")
-    gallery = _INTERNAL_SKILLS / "gallery"
-    if not gallery.is_dir():
-        raise RuntimeError(f"缺内置技能目录 {gallery}（SkySheep.spec 的 gallery 收集没生效？）")
-    count = sum(1 for p in gallery.rglob("SKILL.md") if p.is_file())
-    if count != _GALLERY_SKILL_COUNT:
-        raise RuntimeError(
-            f"内置技能包数量不符：{gallery} 下 SKILL.md 共 {count} 个，"
-            f"预期 {_GALLERY_SKILL_COUNT} 个（与仓库根 skills-gallery/ 对不上）"
-        )
-    manifest = _INTERNAL_SKILLS / "gallery_manifest.json"
-    if not manifest.is_file():
-        raise RuntimeError(f"缺场景模板清单 {manifest}")
-    print(f"  exe、内置技能（{count} 个 SKILL.md）、gallery_manifest.json 均在位")
+    print("  exe 在位")
 
 
 # ---------- 代码签名（可选：配置了证书环境变量才签，失败即中止） ----------

@@ -3,7 +3,7 @@
 // 本文件只有函数声明，零加载期执行，按钮接线仍留在 app.js 原位（含
 // bindLocalSkillToolbar() 顶层裸调用——app.js 加载期执行，故 index.html
 // 先载本文件再载 app.js）；request / showModal 等助手是运行时调用。
-// 技能页区块（区块标题「设置  技能页」/「设置  技能：场景模板」）同样
+// 技能页区块（区块标题「设置  技能页」）同样
 // 只有声明；#skill-summary / #btn-skill-back 两处接线留在 app.js 原位。
 
 // ---------- 技能：导入 / 删除 ----------
@@ -185,7 +185,6 @@ function importSkillModal(prefill = "") {
     const list = preview.items.map((it) =>
       `• ${escapeHtml(it.name)}${it.version ? `（v${escapeHtml(it.version)}）` : ""}：${escapeHtml(it.description || "无描述")}，${it.files} 个文件`
     ).join("\n");
-    const officialNote = preview.official ? "\n（官方场景模板，来自打包内副本）" : "";
     const clashNote = preview.needs_overwrite
       ? `\n\n⚠ 已存在同名技能：${escapeHtml(nameList(preview.clashes))}。确认后将覆盖（旧目录会先备份）。`
       : "";
@@ -606,10 +605,22 @@ function skillState(s) {
   return { cls: "chip-blue", label: "生效中" };
 }
 
+// 右面板（MCP / Skills）借用这两个视图：那里没有「总览 → 技能页」的导航，
+// 管理列表直接常驻在总览卡下方，把下半屏的空白用起来
+function skillViewsInPanel() {
+  const list = document.getElementById("skill-list-view");
+  return !!(list && list.closest("#rp-view-skills"));
+}
+
 function openSkillManage() {
   skillManageOpen = true;
-  document.getElementById("skill-list-view").hidden = true;
+  const inPanel = skillViewsInPanel();
+  // 面板里列表本来就在下面：点了不切走，只把列表滚进视野
+  document.getElementById("skill-list-view").hidden = !inPanel;
   document.getElementById("skill-manage-view").hidden = false;
+  if (inPanel) {
+    document.getElementById("skill-manage-view").scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
   // 范围勾选需要项目列表（切项目后路径会变，每次都重新拉）
   request("project.list")
     .then((r) => {
@@ -631,8 +642,10 @@ function openSkillManage() {
 }
 
 function resetSkillView() {
-  skillManageOpen = false;
-  document.getElementById("skill-manage-view").hidden = true;
+  // 面板里管理列表常驻（与总览同屏）；设置页仍是两视图互斥
+  const inPanel = skillViewsInPanel();
+  skillManageOpen = inPanel;
+  document.getElementById("skill-manage-view").hidden = !inPanel;
   document.getElementById("skill-list-view").hidden = false;
   // 返回总览时收起本机候选面板：留着上次的结果容易让人以为它就是当前状态
   const local = document.getElementById("skill-local-panel");
@@ -644,128 +657,11 @@ function renderSkillSummary(skills) {
   if (!el) return;
   el.classList.remove("skeleton"); // 回填真实内容后摘掉骨架屏闪动（占位期见 index.html）
   const active = skills.filter((s) => s.enabled && s.applies).length;
+  // 面板里列表就摆在下面，不需要「点这里查看」的引导
+  const tail = skillViewsInPanel() ? "" : " — 点这里查看、设使用范围";
   el.textContent = skills.length
-    ? `${skills.length} 个技能  本项目生效 ${active} 个 — 点这里查看、设使用范围`
+    ? `${skills.length} 个技能  本项目生效 ${active} 个${tail}`
     : "还没有技能：点右上角「＋ 导入技能」选文件夹 / 粘贴链接，或点「本机现存」查看本机已装的技能";
-}
-
-// ---------- 设置  技能：场景模板（打包内官方技能清单，一键安装） ----------
-// 数据来自后端打包的 gallery_manifest.json（skills.gallery，纯本地只读）；
-// 安装复用既有 skills.install（source 取模板条目、scope 固定 global）。
-// 卡片住在 #skill-list-view 里，但整页会随「MCP / Skills」右面板搬移——
-// 按 id 查找即不受位置影响。
-function galleryStatus(text, ok = true) {
-  const el = document.getElementById("gallery-status");
-  if (!el) return;
-  el.textContent = text;
-  el.className = "card-status " + (ok ? "ok" : "bad");
-  el.hidden = !text;
-  autoHideStatus(el, text, ok);
-}
-
-async function loadSceneTemplates() {
-  const grid = document.getElementById("gallery-grid");
-  if (!grid) return;
-  let items;
-  try {
-    items = (await request("skills.gallery")).templates || [];
-  } catch (e) {
-    grid.innerHTML = `<span class="dim small">场景模板加载失败：${escapeHtml(e.message)}</span>`;
-    return;
-  }
-  if (!items.length) {
-    grid.innerHTML = '<span class="dim small">暂无场景模板</span>';
-    return;
-  }
-  grid.innerHTML = "";
-  items.forEach((t) => {
-    const label = t.display_name || t.name;
-    const cell = document.createElement("div");
-    cell.className = "gallery-item";
-    // 右侧徽章 + 按钮：已安装与可更新可以同时出现（装过但与内置副本有差异），
-    // 包进 .gallery-item-ops 整体右贴，避免 space-between 把徽章摊开
-    const ops = [];
-    if (t.installed) {
-      ops.push('<span class="chip chip-blue" title="已装进本机技能目录">已安装</span>');
-    }
-    if (t.update_available) {
-      const hint = t.update_hint || "与随应用内置的模板副本有差异";
-      ops.push(`<span class="chip chip-warn" title="${escapeHtml(hint)}">可更新</span>`);
-      ops.push(`<button class="btn-ghost gallery-install" title="${escapeHtml(hint)}">更新</button>`);
-    } else if (!t.installed) {
-      ops.push('<button class="btn-ghost gallery-install" title="装进全局技能目录（所有项目可用）">一键安装</button>');
-    }
-    cell.innerHTML = `
-      <div class="gallery-item-head">
-        <span class="item-name" title="${escapeHtml(t.name)}">${escapeHtml(label)}</span>
-        <span class="gallery-item-ops">${ops.join("")}</span>
-      </div>
-      <div class="item-desc gallery-desc" title="${escapeHtml(t.description)}">${escapeHtml(t.description)}</div>`;
-    const btn = cell.querySelector(".gallery-install");
-    if (btn) {
-      btn.onclick = (e) => (t.update_available
-        ? updateSceneTemplate(t, e.currentTarget)
-        : installSceneTemplate(t, e.currentTarget));
-    }
-    grid.appendChild(cell);
-  });
-}
-
-async function installSceneTemplate(t, btn) {
-  // source 是 GitHub 链接、要走网络导入：按钮禁用 + 状态行提示，防止慢网下重复点击并发安装
-  const label = t.display_name || t.name;
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "安装中…";
-  }
-  galleryStatus(`正在安装「${label}」…（从 GitHub 拉取，可能需要几秒）`);
-  try {
-    await request("skills.install", { source: t.source, scope: "global" });
-  } catch (e) {
-    galleryStatus(`✗ 安装「${label}」失败：${e.message}`, false);
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = "一键安装";
-    }
-    return;
-  }
-  galleryStatus(`✓ 已安装场景模板「${label}」（全局，所有项目可用）`);
-  // 技能清单进快照 + 总览摘要/列表刷新；renderSettings 里会重跑 loadSceneTemplates，
-  // 这一条的「一键安装」按钮随之变成「已安装」徽标
-  boot();
-  await renderSettings();
-}
-
-// 更新已装的场景模板：确认后复用既有 skills.install（overwrite=true），
-// 后端对官方来源自动优先包内副本（bundled_dir_for），离线覆盖、装完立即生效
-async function updateSceneTemplate(t, btn) {
-  const label = t.display_name || t.name;
-  const hint = t.update_hint || "更新会用随应用内置的模板副本覆盖本地已装技能（本地改动会被替换）";
-  const ok = await confirmModal(
-    "更新场景模板",
-    `<p>「${escapeHtml(label)}」与随应用内置的模板副本有差异。${escapeHtml(hint)}。</p>`,
-    "更新"
-  );
-  if (!ok) return;
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "更新中…";
-  }
-  galleryStatus(`正在更新「${label}」…（从包内副本覆盖，无需联网）`);
-  try {
-    await request("skills.install", { source: t.source, scope: "global", overwrite: true });
-  } catch (e) {
-    galleryStatus(`✗ 更新「${label}」失败：${e.message}`, false);
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = "更新";
-    }
-    return;
-  }
-  galleryStatus(`✓ 已更新场景模板「${label}」（全局，所有项目可用）`);
-  // 技能清单进快照 + renderSettings 重跑 loadSceneTemplates，「可更新」徽标随之消失
-  boot();
-  await renderSettings();
 }
 
 // 查看技能完整指令（停用的也能看，否则无从判断该不该启用）
@@ -851,7 +747,7 @@ function renderSkillList(skills) {
   // 空态要给出路：技能页是「从零开始」的常见落点，只留空白会让人以为加载失败
   if (!skills.length) {
     sul.innerHTML = '<li class="dim small">还没有安装任何技能。点上方「＋ 导入技能」装一个，' +
-      '或从「本机现存」把其它工具已装的技能导进来；下方的场景模板也能一键安装。</li>';
+      '或从「本机现存」把其它工具已装的技能导进来。</li>';
     return;
   }
   // 批量删除工具条：全选 / 删除所选。勾选状态不跨渲染保留（重渲染即清零）。

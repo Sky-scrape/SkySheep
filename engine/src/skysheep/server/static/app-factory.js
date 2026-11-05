@@ -69,7 +69,6 @@
   var TRIP_MS = TRIP_PHASES.reduce(function (sum, ph) { return sum + ph.ms; }, 0);
   var TRIP_MAX = 4;           // 全场同时在场的出车上限（纯表现，防扎堆）
   var WAVE_MS = 900;          // 点工头小羊之后的挥手时长（位姿函数读同一常量）
-  var REPLAY_CAP_MS = 60000;  // 回放的总时长上限（每轮至少 0.9 秒、最多 2.6 秒）
   var FILTER_DEBOUNCE_MS = 120;
   var LIVE_POLL_MS = 12000;   // 「对话在跑」轻量快照的轮询间隔（只读内存）
   var WEATHER_POLL_MS = 30 * 60 * 1000; // 天气后端缓存 30 分钟，前端同频轮询
@@ -170,8 +169,6 @@
     // 厂区今日统计（做成 / 返工 / 在跑）：只喂给场景，不当文字显示
     stats: {},
     trips: [],             // 出货卡车（装满一托盘放一辆，纯表现）
-    replay: null,          // 回放今天的进度；running=false 时表示没在回放
-    replayLoading: false,
     runCache: new Map(),   // 抽屉里按需求回的行
     upcoming: [],          // 告示牌数据：近 30 分钟到点（含刚过点未启动）的产线，按 eta 升序
     noticeboardView: null,    // 告示牌离散状态（noticeboardState 的结果，绘制/标签/测试同源）
@@ -378,11 +375,6 @@
     // 顶上只剩一盏灯：在跑几件、今天做成几件已经长在场景里，不再占计数条
     dom.attentionLamp = $("factory-attention");
     dom.attnNum = $("factory-attn-num");
-    dom.replayBtn = $("factory-replay");
-    dom.replayBar = $("factory-replay-bar");
-    dom.replayTime = $("factory-replay-time");
-    dom.replayHint = $("factory-replay-hint");
-    dom.replayStop = $("factory-replay-stop");
     dom.weatherChip = $("factory-weather");
     dom.hud = $("factory-hud");
     dom.demoBadge = $("factory-demo-badge");
@@ -455,8 +447,6 @@
     bindFilter();
     // 需留意：厂区头顶的红灯是主入口，这盏灯是键盘 / 扫视的等价入口
     if (dom.attentionLamp) dom.attentionLamp.onclick = function () { openAttentionDrawer(); };
-    if (dom.replayBtn) dom.replayBtn.onclick = function () { toggleReplay(); };
-    if (dom.replayStop) dom.replayStop.onclick = function () { stopReplay(); };
 
     if (dom.canvas) {
       dom.canvas.addEventListener("pointerdown", onPointerDown);
@@ -1556,128 +1546,7 @@
     S.trips = S.trips.filter(function (t) { return now - t.t0 < TRIP_MS; });
   }
 
-  // ---------- 回放今天 ----------
-  /** 把今天跑过的每一轮按时间顺序在传送带上重演。
-
-      为什么值得做：工厂是「此刻」的一扇窗，可生产这件事最好看的样子是它的一天——
-      早上空垛、中午堆满、傍晚被车拉走、中间出过几次红箱。数据全在
-      `automation_runs` 里（`factory.runs` 的 tokens_today 视图就是「今天开始的运行」），
-      不需要新的执行路径，也不需要落任何东西。
-
-      - 按轮次排队演：每轮一个固定档期（0.9–2.6 秒），一天的轮次越多总时长越长
-        （上限 REPLAY_CAP_MS）；不按真实时间轴等比压缩，否则几十秒的运行会闪一下就没；
-      - 进度条上写的是这轮真实的开始钟点，不是加速后的虚拟时钟；
-      - 回放时实时包裹停画（避免真假同屏），Esc /「回到此刻」立刻退出。 */
-  function toggleReplay() {
-    if (S.replay && S.replay.running) { stopReplay(); return; }
-    if (S.demo) { addNotice("样板厂没有真实运行记录，回放只在有真实产线的项目里可用"); return; }
-    if (S.replayLoading) return;
-    S.replayLoading = true;
-    request("factory.runs", { view: "tokens_today", limit: 400 }).then(function (r) {
-      var rows = ((r && r.runs) || []).filter(function (x) {
-        return x.started_at && isToday(x.started_at);
-      });
-      if (!rows.length) {
-        addNotice("今天还没有运行记录可回放");
-        return;
-      }
-      rows.sort(function (a, b) { return a.started_at - b.started_at; });
-      // 按「轮次」排队演，不按真实时间轴等比压缩：今天的运行大多几十秒，
-      // 摊到 13 个小时里压成 42 秒，每一轮只会闪一下——那不是回放，是闪烁。
-      // 现在每轮占一个固定档期（约 2.2 秒），一天 25 轮大约 55 秒看完，
-      // 进度条上的钟点仍然写这轮真实的开始时间。
-      var step = Math.max(900, Math.min(2600, Math.floor(REPLAY_CAP_MS / rows.length)));
-      S.replay = {
-        running: true, startedAt: nowMs(), step: step, duration: step * rows.length,
-        items: rows.map(function (x, i) {
-          return {
-            id: x.id, run: x, key: runKey(x), slot: i,
-            at: x.started_at,
-            status: x.status,
-          };
-        }),
-      };
-      document.body.classList.add("factory-replaying");
-      if (dom.replayBtn) { dom.replayBtn.classList.add("playing"); dom.replayBtn.textContent = "回放中"; }
-      if (dom.replayBar) dom.replayBar.classList.remove("hidden");
-      render();
-    }).catch(function (e) {
-      addNotice("回放数据读取失败：" + escapeHtml(e && e.message ? e.message : "未知错误"));
-    }).finally(function () {
-      S.replayLoading = false;
-    });
-  }
-
-  function stopReplay() {
-    S.replay = null;
-    document.body.classList.remove("factory-replaying");
-    if (dom.replayBtn) { dom.replayBtn.classList.remove("playing"); dom.replayBtn.textContent = "回放"; }
-    if (dom.replayBar) dom.replayBar.classList.add("hidden");
-    render();
-  }
-
-  /** 某条回放项此刻的进度（0..1）；还没轮到 / 已经演完都返回 -1。 */
-  function replayProgress(rp, it, elapsed) {
-    var local = elapsed - it.slot * rp.step;
-    if (local < 0) return -1;
-    // 最后 15% 的档期留给「落地」：包裹停一会儿再消失，不然看不清结果色
-    var run = rp.step * 0.85;
-    if (local > rp.step) return -1;
-    return clamp(local / run, 0, 1);
-  }
-
-  function replayTick(now) {
-    var rp = S.replay;
-    if (!rp || !rp.running) return;
-    var elapsed = now - rp.startedAt;
-    if (dom.replayTime) {
-      // 进度条上的钟点是「这轮真实的开始时间」，不是加速后的虚拟时钟
-      var idx = clamp(Math.floor(elapsed / rp.step), 0, rp.items.length - 1);
-      var d = new Date((rp.items[idx].at || 0) * 1000);
-      dom.replayTime.textContent = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-    }
-    if (dom.replayHint) {
-      var k = clamp(Math.floor(elapsed / rp.step) + 1, 1, rp.items.length);
-      dom.replayHint.textContent = "第 " + k + "/" + rp.items.length + " 轮";
-    }
-    if (elapsed >= rp.duration) stopReplay();
-  }
-
-  function drawReplay(ctx, pal) {
-    var rp = S.replay;
-    if (!rp || !rp.running || !S.world) return;
-    var elapsed = nowMs() - rp.startedAt;
-    rp.items.forEach(function (it) {
-      var progress = replayProgress(rp, it, elapsed);
-      if (progress < 0) return;
-      var line = S.world.lines.get(it.key);
-      if (!line || !line.drawn) return;
-      var z = S.cam.zoom;
-      // 连续插值：旧版按 16px 一格取整，拉近看包裹是一顿一顿跳格的。
-      // pointAt 吃的是世界坐标，画之前必须过 viewPoint 投影——漏了投影
-      // 包裹会拿世界值当屏幕值，全画到画布左上角一小片区域里乱窜。
-      var pos = pointAt(line.path, progress);
-      var vp = viewPoint(pos.x, pos.y);
-      // 贴带高度随行程缓降（主带 12 → 机台支线 7~9，取 12→8 线性近似）
-      var lift = Math.round((12 - 4 * progress) * z);
-      var color = pal.product;
-      var edge = pal.crateDark;
-      if (it.status === "error" || it.status === "interrupted" || it.status === "orphan") {
-        color = pal.bad; edge = pal.ink;
-      } else if (it.status === "empty" || it.status === "skipped") {
-        color = pal.beltMark; edge = pal.beltDark;
-      }
-      // 落地后淡出：档期最后那一小段
-      var alpha = progress > 0.94 ? clamp((1 - progress) / 0.06, 0, 1) : 1;
-      ctx.globalAlpha = alpha;
-      drawParcelBox(ctx, pal, vp.x, vp.y, lift, color, edge);
-      ctx.globalAlpha = 1;
-    });
-  }
-
   function drawPackages(ctx, pal) {
-    // 回放时只演历史：实时包裹停画，两种「包裹」同屏会分不清哪个是真的
-    if (S.replay && S.replay.running) { S.overflow = 0; drawReplay(ctx, pal); return; }
     // 实时包裹改走动态画序（collectPackageItems）：与工头 / 车 / 叉车同一条
     // 合并通道，按地面线插进静态件之间——以前整层盖在场景顶上，包裹路过
     // 调度厅身后时糊在厅的正立面上。
@@ -1687,7 +1556,6 @@
       （「+N 枚包裹」标签读的 S.overflow）沿用原口径，位姿由 packagePose
       现算；排序键取包裹的地面世界 y，z0 与车 / 工头统一坐厂坪高度。 */
   function collectPackageItems(pal, out, now) {
-    if (S.replay && S.replay.running) { S.overflow = 0; return; }
     var items = [];
     S.packages.forEach(function (pkg) {
       if (!pkg.line || !pkg.line.drawn) return;
@@ -2213,8 +2081,6 @@
 
     // 出货卡车：纯表现层的倒计时，跑完就回收
     updateTrips(now);
-    // 回放：推进虚拟时间、刷进度条、到点自动收队
-    replayTick(now);
 
     // 运行时长文案每 5 秒刷一次面板（有焦点时不重建）
     if (now - S.lastPanel > 5000) {
@@ -2917,7 +2783,6 @@
   FX.TRIP_PHASES = TRIP_PHASES; FX.TRIP_MAX = TRIP_MAX;
   FX.WAVE_MS = WAVE_MS;
   FX.spawnTrip = spawnTrip; FX.updateTrips = updateTrips;
-  FX.toggleReplay = toggleReplay; FX.stopReplay = stopReplay;
   FX.TILE_W = TILE_W; FX.TILE_H = TILE_H;
   FX.RUN_STATUS = RUN_STATUS; FX.RUN_OUTCOME = RUN_OUTCOME;
   FX.ERROR_KIND = ERROR_KIND; FX.TRIGGER_TEXT = TRIGGER_TEXT;

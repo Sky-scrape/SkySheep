@@ -146,11 +146,11 @@ Project memory is edited directly in the UI; global auto memory turns noteworthy
 
 ### Extending it: MCP / Skills / Mods
 
-Extension points converge on three entry points, and the frontend stays zero-build with no proprietary plugin JS API. **MCP** supports stdio and Streamable HTTP, is Claude Desktop config compatible, ships seven presets, and reconnects automatically after a crash with already-registered tools still working. **Skills** come in global / project scopes, import from a folder, a .zip, or a GitHub/Gitee link, include twenty official scenario templates, and `/save-skill` turns a workflow you just did into a skill draft. **Mods** (experimental) run either in a quickjs sandbox or — switched to the Claude Code plugin format — in a dedicated Node subprocess, so one plugin runs in both. How the whole app reaches the network is decided in one place (Settings → Advanced → Network): proxy, bypass list (curl syntax, including `*.example.com` and CIDR), and a self-signed CA certificate (append semantics; the public chain is not broken) — followed by model calls, web search, web fetch, MCP, command subprocesses, the terminal panel, and the Mods Node runtime.
+Extension points converge on three entry points, and the frontend stays zero-build with no proprietary plugin JS API. **MCP** supports stdio and Streamable HTTP, is Claude Desktop config compatible, ships seven presets, and reconnects automatically after a crash with already-registered tools still working. **Skills** come in global / project scopes, import from a folder, a .zip, or a GitHub/Gitee link, and `/save-skill` turns a workflow you just did into a skill draft. **Mods** (experimental) run either in a quickjs sandbox or — switched to the Claude Code plugin format — in a dedicated Node subprocess, so one plugin runs in both. How the whole app reaches the network is decided in one place (Settings → Advanced → Network): proxy, bypass list (curl syntax, including `*.example.com` and CIDR), and a self-signed CA certificate (append semantics; the public chain is not broken) — followed by model calls, web search, web fetch, MCP, command subprocesses, the terminal panel, and the Mods Node runtime.
 
-| MCP servers (one-click presets) | Skills and scenario templates (twenty built in) |
+| MCP servers (one-click presets) | Skills (global / project scopes) |
 |:---:|:---:|
-| ![MCP panel: presets added in one click, read-only and connection state visible at a glance](docs/images/mcp.webp) | ![Skills panel: local skill management and one-click install of official scenario templates](docs/images/skills.webp) |
+| ![MCP panel: presets added in one click, read-only and connection state visible at a glance](docs/images/mcp.webp) | ![Skills panel: local skill management, import, and scope settings](docs/images/skills.webp) |
 
 ## 🔒 Why you can trust it with real work
 
@@ -273,7 +273,7 @@ Single-file installer: install [Inno Setup 7](https://jrsoftware.org/isdl.php) (
 **Extensions & connectivity**
 
 - MCP client: stdio / Streamable HTTP, Claude Desktop config compatible, seven built-in presets, bounded auto-reconnect
-- Skills: global / project scopes; import from a folder, a .zip, or a link, plus scan-and-import; twenty official scenario templates; `/save-skill`
+- Skills: global / project scopes; import from a folder, a .zip, or a link, plus scan-and-import; `/save-skill`
 - Mods: quickjs sandbox or the Claude Code plugin format (experimental, one at a time); UI extension points and tool registration go through fixed renderers, and permission decisions can only tighten
 - Network: global proxy / bypass list / self-signed CA; a per-provider proxy can override the global one (three states: follow global / explicit direct / use this proxy), and local services always connect directly
 - Remote access: LAN token + QR code; Tailscale supported for cross-network access (security boundaries and advice in [docs/远程访问安全.md](docs/远程访问安全.md))

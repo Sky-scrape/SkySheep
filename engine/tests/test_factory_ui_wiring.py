@@ -58,10 +58,8 @@ def test_factory_dom_contract_ids_present():
         "factory-center", "factory-labels-toggle",
         "factory-all-runs", "factory-drawer", "factory-notice",
         "factory-weather",
-        # 顶栏只剩一盏「需留意」灯 + 回放（读数已经长在场景里）
+        # 顶栏只剩一盏「需留意」灯（读数已经长在场景里）
         "factory-attention", "factory-attn-num",
-        "factory-replay", "factory-replay-bar", "factory-replay-time",
-        "factory-replay-stop",
     ):
         assert f'id="{el_id}"' in html, f"缺少工厂 DOM 契约里的 #{el_id}"
     # 六格计数条（运行中 / 排队 / 需留意 / 今日做成 / 今日 token / 对话在跑）已撤掉：
@@ -637,7 +635,7 @@ def test_factory_panel_is_a_directory_not_an_ops_console():
 
 
 def test_factory_scene_has_traces_not_numbers():
-    """② 痕迹：成品码垛 / 返工堆 / 出货卡车 / 在制火花 / 到点沙漏 / 回放。"""
+    """② 痕迹：成品码垛 / 返工堆 / 出货卡车 / 在制火花 / 到点沙漏。"""
     js = read_factory_js()
     # 场院上的「今天干了多少」：托盘按件数码、封顶、满垛插旗
     for needle in ("function refreshProjectStats(", "function statFor(",
@@ -651,15 +649,6 @@ def test_factory_scene_has_traces_not_numbers():
     # 在制火花 / 到点沙漏挂在机台上
     assert "料口灯带" in js and "待发沙漏" in js
     assert "UPCOMING_GLYPH_S" in js
-    # 回放今天：拉今天的运行、按虚拟时间重演、Esc 可收队
-    assert "function toggleReplay(" in js and "function drawReplay(" in js
-    assert 'view: "tokens_today"' in js
-    assert "REPLAY_CAP_MS" in js and "function replayProgress(" in js
-    # 回放包裹的 pointAt 结果是世界坐标，画之前必须过 viewPoint 投影——
-    # 漏投影包裹会拿世界值当屏幕值，全画到画布左上角一小片区域里乱飞
-    i_dr = js.index("function drawReplay(ctx, pal) {")
-    dr = js[i_dr:js.index("\n  }", i_dr)]
-    assert "viewPoint(pos.x, pos.y)" in dr and "drawParcelBox(ctx, pal, vp.x, vp.y" in dr
     # 在途包裹的呼吸抖动加在屏幕 y 上（vlen 是屏幕像素口径，加进世界坐标
     # 会被投影放大，拉近时机台口的包裹抖得不像话）
     i_pp = js.index("function packagePose(pal, pkg, now) {")

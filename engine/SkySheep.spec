@@ -67,37 +67,10 @@ static_datas = [
 ]
 
 datas = static_datas
-# 场景模板清单（skysheep.skills.gallery 运行时按模块同目录读取）：
-# 不在 static/ 收集范围内，单独点名带进包，落位保持包内相对路径不变
-gallery_manifest = src / "skysheep" / "skills" / "gallery_manifest.json"
-datas = datas + [(str(gallery_manifest), str(Path("skysheep") / "skills"))]
-
-# 场景模板技能本体（README「随包内置」的实物）：从仓库根 skills-gallery/ 逐文件
-# 收进包内 skysheep/skills/gallery/<dir>/，gallery 安装官方来源时优先本地拷贝
-# （skills.gallery.bundled_dir_for），GitHub 链接只作包内缺失时的更新回退。
-# datas 元组的第二项是「目标目录」而非文件全路径（static_datas 同款 .parent
-# 取法）：带文件名会把同名目录与文件嵌套成 SKILL.md/SKILL.md。与 static_datas
-# 同一防线跳过点开头路径；仓库根没有该目录（罕见）时不挡构建
-gallery_root = project_root.parent / "skills-gallery"
-if gallery_root.is_dir():
-    datas = datas + [
-        (
-            str(p),
-            str(
-                Path("skysheep")
-                / "skills"
-                / "gallery"
-                / p.relative_to(gallery_root).parent
-            ),
-        )
-        for p in sorted(gallery_root.rglob("*"))
-        if p.is_file()
-        and not any(part.startswith(".") for part in p.relative_to(gallery_root).parts)
-    ]
 
 # 官方示例 Mod（README「随包内置」的实物）：从仓库根 mods-gallery/ 逐文件收进
 # 包内 skysheep/mods/gallery/<dir>/，Mods 设置页官方示例区一键安装走打包内副本
-# （core/mods.bundled_gallery_dir），无网络依赖。收集防线与 skills-gallery 同款。
+# （core/mods.bundled_gallery_dir），无网络依赖。收集防线与 static_datas 同款。
 mods_gallery_root = project_root.parent / "mods-gallery"
 if mods_gallery_root.is_dir():
     datas = datas + [

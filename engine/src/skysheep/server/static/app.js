@@ -12784,14 +12784,14 @@ function showSettingsPage(target) {
   if (typeof watchSettingsHints === "function") watchSettingsHints();
   if (target === "runs") loadRunsPage();
   if (target === "usage") loadUsage();
-  if (target === "memory") loadMemoryPage();
+  if (target === "memory") { loadMemoryPage(); loadSnippets(); }
   if (target === "archive") loadArchivePage();
   if (target === "browser") loadBrowserPage();
-  if (target === "snippets") loadSnippets();
   if (target === "remote") { loadLanPanel(); loadTsPanel(); loadChannelPanel(); }
-  if (target === "skills") { loadToolControl(); renderTeamCfg().catch(() => {}); }
+  if (target === "skills") loadToolControl();
   // 电脑控制操作回放（P13）：宏清单与电脑控制开关同页，跟着一起刷新
   if (target === "skills" && typeof loadMacroCard === "function") loadMacroCard();
+  if (target === "collab") renderTeamCfg().catch(() => {});
   if (target === "subagents") renderSubagentCfg().catch(() => {});
   if (target === "advanced") { renderAdvancedCfg().catch(() => {}); renderHooksCfg(); }
   if (target === "mods") renderModsCfg().catch(() => {});
@@ -13712,7 +13712,7 @@ function closeRightTab(id) {
 const extPanelPage = document.getElementById("rp-page-ext");
 
 /** 把设置页的卡片搬进面板各自的容器（已搬过则不动）。
-    Skills 段只搬「技能 / 场景模板」两个视图——外部服务、多模型协作、内置工具
+    Skills 段只搬「技能」总览 / 独立技能页两个视图——外部服务、多模型协作、内置工具
     不属于技能本身，留在设置页（#skill-extras），不随面板走。 */
 function mountExtPanels() {
   const mcpPage = document.getElementById("settings-page-mcp");
@@ -13749,6 +13749,8 @@ function closeExtPanel() {
   if (skillsPage && listView && manageView && listView.parentElement !== skillsPage) {
     skillsPage.insertBefore(listView, document.getElementById("skill-extras"));
     skillsPage.appendChild(manageView);
+    // 面板里管理列表是常驻的；搬回设置页要收回总览，别把详情页也带回去
+    resetSkillView();
   }
   if (rightTabs.includes("ext")) closeRightTab("ext"); // 内容回设置页，面板不留空壳标签
 }

@@ -151,7 +151,6 @@ from ..session import SessionStore
 from ..session.store import export_messages_text
 from ..skills import SkillLoader
 from ..skills.draft import build_skill_draft, save_skill_draft
-from ..skills.gallery import bundled_dir_for, bundled_update_available, load_gallery_manifest
 from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
     SkillInstallError,
@@ -6930,24 +6929,19 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise RuntimeError("缺少来源：本地路径或网址")
         existing = {s.name for s in self.skills.all()}
         is_url = source.lower().startswith(("http://", "https://"))
-        official = False
         tmp_zip: Path | None = None
         staged_tmp: Path | None = None
         try:
             if is_url:
-                bundled = bundled_dir_for(source)
-                if bundled is not None:
-                    staged, official = bundled, True
-                else:
-                    from ..skills.installer import download_to
-                    try:
-                        tmp_zip = await asyncio.to_thread(download_to, source)
-                    except SkillInstallError as e:
-                        raise RuntimeError(str(e)) from e
-                    staged_tmp = Path(tempfile.mkdtemp(prefix="skysheep-skill-preview-"))
-                    with zipfile.ZipFile(tmp_zip) as zf:
-                        zf.extractall(staged_tmp)
-                    staged = staged_tmp
+                from ..skills.installer import download_to
+                try:
+                    tmp_zip = await asyncio.to_thread(download_to, source)
+                except SkillInstallError as e:
+                    raise RuntimeError(str(e)) from e
+                staged_tmp = Path(tempfile.mkdtemp(prefix="skysheep-skill-preview-"))
+                with zipfile.ZipFile(tmp_zip) as zf:
+                    zf.extractall(staged_tmp)
+                staged = staged_tmp
             else:
                 staged = Path(source).expanduser()
             if not staged.exists():
@@ -6975,7 +6969,6 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             return {
                 "items": items,
                 "count": len(items),
-                "official": official,
                 "scope": scope,
                 "overwrite": overwrite,
                 "clashes": clashes,
@@ -7000,23 +6993,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """
         root = self._skill_root(scope)
         existing = {s.name for s in self.skills.all()}
-        bundled: Path | None = None
         try:
             if str(source).strip().lower().startswith(("http://", "https://")):
-                # 官方场景模板优先用打包内副本：装一个模板在线要直连下载整仓
-                # 归档（无缓存复用），中文网络环境经常失败——包内副本离线秒装；
-                # bundled_dir_for 返回 None（非官方来源 / 包内没有或坏副本）才
-                # 回落在线下载，兼作更新回退
-                bundled = bundled_dir_for(str(source))
-                if bundled is not None:
-                    result = await asyncio.to_thread(
-                        install_skill, str(bundled), root,
-                        existing=existing, overwrite=overwrite,
-                    )
-                else:
-                    result = await asyncio.to_thread(
-                        install_from_url, source, root, existing=existing, overwrite=overwrite
-                    )
+                result = await asyncio.to_thread(
+                    install_from_url, source, root, existing=existing, overwrite=overwrite
+                )
             else:
                 result = await asyncio.to_thread(
                     install_skill, source, root, existing=existing, overwrite=overwrite
@@ -7040,7 +7021,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 detail=(
                     f"网址安装（{str(source)[:120]}）"
                     if str(source).strip().lower().startswith(("http://", "https://"))
-                    else ("官方模板" if bundled is not None else "本机导入")
+                    else "本机导入"
                 ),
             )
         result["scope"] = scope
@@ -7070,51 +7051,6 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         existing = {s.name for s in self.skills.all()}
         candidates = await asyncio.to_thread(scan_computer_skills, roots, existing)
         return {"candidates": candidates}
-
-    def gallery_skills(self) -> dict:
-        """场景模板：打包内官方技能清单 + 逐条比对本机是否已装。
-
-        纯本地只读（与技能清单同级，不进本机专属表）：数据来自打包内的
-        gallery_manifest.json，不联网、不动技能目录；installed 按技能名
-        与当前清单（skills.all()）比对得出，前端据此标「已安装」或给
-        一键安装按钮。安装走既有 skills.install（scope=global），这里不管。
-
-        已装的条目再与打包内副本做内容比对（skills.gallery.
-        bundled_update_available：相对路径 + 逐文件字节哈希），有差异即
-        update_available——官方更新了模板、或本地技能被改过时提示「可更新」，
-        更新动作复用 skills.install（overwrite=true，包内副本覆盖）。
-        """
-        installed_by_name = {s.name: s for s in self.skills.all()}
-        entries = load_gallery_manifest()
-        templates = []
-        for s in entries:
-            name = str(s.get("name", ""))
-            skill = installed_by_name.get(name)
-            update_available = False
-            update_hint = ""
-            if skill is not None:
-                update_available = bundled_update_available(
-                    str(s.get("source", "")), skill.path.parent
-                )
-                if update_available:
-                    update_hint = (
-                        "更新会用随应用内置的模板副本覆盖本地已装技能"
-                        "（无需联网，本地改动会被替换）"
-                    )
-            templates.append({
-                "name": name,
-                # 中文名随清单透传（欢迎页示例与场景模板卡用 display_name 展示，
-                # 缺失时前端回退 name）：2.5.0 曾漏带此字段，界面上只能显示
-                # budget-tracker 一类原始 ID
-                "display_name": str(s.get("display_name", "")),
-                "description": str(s.get("description", "")),
-                "source": str(s.get("source", "")),
-                "dir": str(s.get("dir", "")),
-                "installed": skill is not None,
-                "update_available": update_available,
-                "update_hint": update_hint,
-            })
-        return {"templates": templates, "count": len(templates)}
 
     async def delete_skill(self, name: str) -> dict:
         """删除技能目录。全局技能与项目技能都可能重名，按当前加载到的那一份删。

@@ -140,17 +140,17 @@
                日常 = 长期偏好（提示词 / 记忆 / 界面）；
                安全 = 把机器交出去之前要看清的东西（远程控制 / 目录限制 / 白名单）；
                信息 = 只读查看（运行 / 用量 / 关于）。
-               协作方式（圆桌 / 团队 / 对抗 / 接力）都在「技能与工具」页里，不单列入口。
+               协作方式（圆桌 / 团队 / 对抗 / 接力）单独一页，不跟工具配置混排。
                分组标题只是扫描锚点（.nav-cap），无 data-target，点击绑定在 li[data-target] 上 -->
           <li class="nav-cap" aria-hidden="true">能力</li>
           <li class="active" data-target="providers">模型服务</li>
           <li data-target="skills">技能与工具</li>
+          <li data-target="collab">多模型协作</li>
           <li data-target="browser">浏览器控制</li>
           <li data-target="subagents">子代理</li>
           <li data-target="mcp">MCP 服务</li>
           <li data-target="mods">Mods 扩展（实验性）</li>
           <li class="nav-cap" aria-hidden="true">日常</li>
-          <li data-target="snippets">提示词</li>
           <li data-target="memory">全局记忆</li>
           <li data-target="ui">界面与通知</li>
           <li data-target="archive">归档管理</li>
@@ -781,7 +781,7 @@
           <section id="rp-page-ext" class="rp-page hidden">
             <div class="rp-segs seg-row seg-mini" id="rp-segs-ext" data-tab="ext">
               <button data-view="mcp" class="active" title="接入外部工具（浏览器、数据库、办公软件…）">MCP</button>
-              <button data-view="skills" title="技能手册、场景模板与多模型协作方式">Skills</button>
+              <button data-view="skills" title="技能管理与多模型协作方式">Skills</button>
             </div>
             <div class="rp-seg-view" id="rp-view-mcp"></div>
             <div class="rp-seg-view hidden" id="rp-view-skills"></div>
@@ -876,31 +876,17 @@
               <li>「＋ 导入技能」：选本机技能文件夹 / .zip 包，或粘贴 <b>GitHub / Gitee 仓库链接</b>在线安装。</li>
               <li>「本机现存」：列出 Claude Code 等工具已装在本机的技能，勾选即可导入，装完立即生效。</li>
             </ul>
-            <div id="skill-summary" class="skill-entry">
-              <span class="skill-entry-main">
-                <span class="item-name">管理与安装</span>
-                <span class="item-desc skeleton" id="skill-summary-text">正在加载…</span>
-              </span>
-              <span class="skill-entry-go" title="进入技能页">›</span>
-            </div>
           </section>
-          <section class="settings-card" id="gallery-card">
-            <div class="card-head"><h3>场景模板</h3></div>
-            <p class="settings-hint">
-              官方精选的场景技能包：覆盖记账、报错排查、数据报告等常见任务。
-            </p>
-            <ul class="settings-hint hint-points">
-              <li>模板已随应用内置，点「一键安装」从包内副本装进全局技能目录（所有项目可用），无需联网、装完立即生效。</li>
-              <li>官方更新后，已安装条目会标「可更新」，点「更新」用内置副本覆盖本地技能。</li>
-            </ul>
-            <div id="gallery-status" class="card-status" hidden></div>
-            <div id="gallery-grid" class="gallery-grid">
-              <span class="dim small skeleton">正在加载场景模板…</span>
-            </div>
-          </section>
+          <div id="skill-summary" class="skill-entry">
+            <span class="skill-entry-main">
+              <span class="item-name">管理与安装</span>
+              <span class="item-desc skeleton" id="skill-summary-text">正在加载…</span>
+            </span>
+            <span class="skill-entry-go" title="进入技能页">›</span>
+          </div>
           </div>
 
-          <!-- 外部服务 / 多模型协作 / 内置工具：不属于「技能」本身，
+          <!-- 外部服务 / 内置工具：不属于「技能」本身，
                只留在设置页，不随「MCP / Skills」面板搬走 -->
           <div id="skill-extras">
           <div class="settings-group-title">外部服务</div>
@@ -921,46 +907,6 @@
             <p class="settings-hint" id="speech-hint"></p>
             <div id="speech-status" class="card-status" hidden></div>
             <div id="speech-form" class="toolcfg-form"></div>
-          </section>
-          <div class="settings-group-title">多模型协作</div>
-          <section class="settings-card">
-            <div class="card-head"><h3>圆桌</h3></div>
-            <p class="settings-hint" id="roundtable-hint"></p>
-            <div id="roundtable-status" class="card-status" hidden></div>
-            <div id="roundtable-form" class="toolcfg-form"></div>
-          </section>
-          <section class="settings-card">
-            <div class="card-head"><h3>团队</h3></div>
-            <p class="settings-hint" id="team-hint"></p>
-            <div id="team-status" class="card-status" hidden></div>
-            <div id="team-form" class="toolcfg-form"></div>
-          </section>
-          <section class="settings-card">
-            <div class="card-head"><h3>对抗</h3></div>
-            <p class="settings-hint" id="adversarial-hint"></p>
-            <div id="adversarial-status" class="card-status" hidden></div>
-            <div id="adversarial-form" class="toolcfg-form"></div>
-          </section>
-          <!-- 接力：第四种多模型协作方式（主副屏交替）。只放说明与入口，
-               真正的配置在右侧「接力」看板里做，这里不需要表单 -->
-          <section class="settings-card" id="relay-config-card">
-            <div class="card-head">
-              <h3>接力</h3>
-              <span class="head-ops">
-                <button id="relay-open-workbench" class="btn-ghost">打开接力工作台</button>
-              </span>
-            </div>
-            <p class="settings-hint">
-              主屏与副屏交替推进：用于「发布方案 → 执行 → 反馈」这类需要两个分工不同的
-              Agent 轮流上手的任务。主屏就是当前会话，副屏是点「接力」时自动在右侧打开的
-              独立会话，两屏按顺序各做一轮，后一轮能读到前一轮的输出。
-            </p>
-            <ul class="settings-hint hint-points">
-              <li>在右侧「接力」看板里填写总任务、主屏任务、副屏任务，点「执行」让轮到的一方开始。</li>
-              <li>每次执行是一轮完整对话，工具与权限门照常生效；点「中断」会停下正在跑的那一轮，再点执行可继续。</li>
-              <li>勾选「连续交替」可让两屏自动轮流执行，直到你中断；不勾选则每轮结束后停下来等你检查。</li>
-              <li>两屏各自使用所在会话的模型，可在副屏输入栏单独切换。</li>
-            </ul>
           </section>
           <div class="settings-group-title">工具</div>
           <section class="settings-card">
@@ -1099,6 +1045,51 @@
               <button id="btn-browser-clear-all" class="btn-ghost danger">清除全部</button>
             </div>
             <div id="browser-data-status" class="card-status" hidden></div>
+          </section>
+        </section>
+
+        <!-- 圆桌 / 团队 / 对抗 / 接力：四种多模型协作方式的配置。原先寄居在「技能与工具」
+             页，2026-11-05 拆成独立页——技能页只留工具配置，协作方式不跟工具混排 -->
+        <section class="settings-page hidden" id="settings-page-collab">
+          <div class="settings-group-title">多模型协作</div>
+          <section class="settings-card">
+            <div class="card-head"><h3>圆桌</h3></div>
+            <p class="settings-hint" id="roundtable-hint"></p>
+            <div id="roundtable-status" class="card-status" hidden></div>
+            <div id="roundtable-form" class="toolcfg-form"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>团队</h3></div>
+            <p class="settings-hint" id="team-hint"></p>
+            <div id="team-status" class="card-status" hidden></div>
+            <div id="team-form" class="toolcfg-form"></div>
+          </section>
+          <section class="settings-card">
+            <div class="card-head"><h3>对抗</h3></div>
+            <p class="settings-hint" id="adversarial-hint"></p>
+            <div id="adversarial-status" class="card-status" hidden></div>
+            <div id="adversarial-form" class="toolcfg-form"></div>
+          </section>
+          <!-- 接力：第四种多模型协作方式（主副屏交替）。只放说明与入口，
+               真正的配置在右侧「接力」看板里做，这里不需要表单 -->
+          <section class="settings-card" id="relay-config-card">
+            <div class="card-head">
+              <h3>接力</h3>
+              <span class="head-ops">
+                <button id="relay-open-workbench" class="btn-ghost">打开接力工作台</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              主屏与副屏交替推进：用于「发布方案 → 执行 → 反馈」这类需要两个分工不同的
+              Agent 轮流上手的任务。主屏就是当前会话，副屏是点「接力」时自动在右侧打开的
+              独立会话，两屏按顺序各做一轮，后一轮能读到前一轮的输出。
+            </p>
+            <ul class="settings-hint hint-points">
+              <li>在右侧「接力」看板里填写总任务、主屏任务、副屏任务，点「执行」让轮到的一方开始。</li>
+              <li>每次执行是一轮完整对话，工具与权限门照常生效；点「中断」会停下正在跑的那一轮，再点执行可继续。</li>
+              <li>勾选「连续交替」可让两屏自动轮流执行，直到你中断；不勾选则每轮结束后停下来等你检查。</li>
+              <li>两屏各自使用所在会话的模型，可在副屏输入栏单独切换。</li>
+            </ul>
           </section>
         </section>
 
@@ -1686,6 +1677,32 @@
             <div id="memory-maintain-status" class="card-status" hidden></div>
             <div id="memory-digest-status" class="card-status" hidden></div>
           </section>
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>提示词</h3>
+              <span class="head-ops">
+                <button id="btn-snippet-add" class="btn-ghost">＋ 新建</button>
+                <button id="btn-snippets-sort" class="btn-ghost">排序：手动顺序</button>
+                <button id="btn-snippets-import" class="btn-ghost" title="从导出的 JSON 文件合并导入提示词（名称与内容都相同的跳过）">导入</button>
+                <button id="btn-snippets-export" class="btn-ghost" title="导出全部提示词为 JSON（可备份、可分享给别的机器）">导出</button>
+                <button id="btn-snippets-restore" class="btn-ghost" title="把内置示例提示词加回来（同名已存在的跳过）">恢复示例</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              常用的提示词模板，输入 <b>~</b> 即弹出候选、选中插入；列表顺序就是候选顺序。
+            </p>
+            <details class="hint-details">
+              <summary>使用说明（快捷键 / 过滤 / 占位符）</summary>
+              <ul class="settings-hint hint-points">
+                <li><b>候选与插入</b>：行首 <b>⋮⋮</b> 拖动调顺序（「排序」按钮可改常用优先）；<b>Alt+1..8</b> 直接插入前 8 条（行首序号即快捷键位）；<code>~</code> 菜单末尾可把当前输入一键「存为提示词」。</li>
+                <li><b>过滤</b>：按名称 / 内容 / 拼音首字母（如 <code>xzb</code> 对应「写周报」）。</li>
+                <li><b>占位符</b>：<b>{{clipboard}}</b> 插入时替换为剪贴板文本（为空会请你现场填）；<b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b> 取当天日期 / 当前时间 / 当前项目名；<b>{{字段|默认值}}</b> 弹小表单现场填，留空用默认值。</li>
+                <li><b>编辑与维护</b>：编辑弹窗「✨ AI 润色」让模型改写得更清晰；行上 <b>⏸</b> 按钮停用（<code>~</code> 候选不再显示，不删除）；内置示例可点「恢复示例」加回，删光后 <code>~</code> 菜单仍带内置示例兜底。</li>
+              </ul>
+            </details>
+            <p id="snippets-status" class="dim small" hidden></p>
+            <ul id="snippets-list" class="list snippets-list"></ul>
+          </section>
         </section>
 
         <section class="settings-page hidden" id="settings-page-ui">
@@ -1906,35 +1923,6 @@
           </section>
         </section>
 
-        <section class="settings-page hidden" id="settings-page-snippets">
-          <section class="settings-card">
-            <div class="card-head">
-              <h3>提示词</h3>
-              <span class="head-ops">
-                <button id="btn-snippet-add" class="btn-ghost">＋ 新建</button>
-                <button id="btn-snippets-sort" class="btn-ghost">排序：手动顺序</button>
-                <button id="btn-snippets-import" class="btn-ghost" title="从导出的 JSON 文件合并导入提示词（名称与内容都相同的跳过）">导入</button>
-                <button id="btn-snippets-export" class="btn-ghost" title="导出全部提示词为 JSON（可备份、可分享给别的机器）">导出</button>
-                <button id="btn-snippets-restore" class="btn-ghost" title="把内置示例提示词加回来（同名已存在的跳过）">恢复示例</button>
-              </span>
-            </div>
-            <p class="settings-hint">
-              常用的提示词模板，输入 <b>~</b> 即弹出候选、选中插入；列表顺序就是候选顺序。
-            </p>
-            <details class="hint-details">
-              <summary>使用说明（快捷键 / 过滤 / 占位符）</summary>
-              <ul class="settings-hint hint-points">
-                <li><b>候选与插入</b>：行首 <b>⋮⋮</b> 拖动调顺序（「排序」按钮可改常用优先）；<b>Alt+1..8</b> 直接插入前 8 条（行首序号即快捷键位）；<code>~</code> 菜单末尾可把当前输入一键「存为提示词」。</li>
-                <li><b>过滤</b>：按名称 / 内容 / 拼音首字母（如 <code>xzb</code> 对应「写周报」）。</li>
-                <li><b>占位符</b>：<b>{{clipboard}}</b> 插入时替换为剪贴板文本（为空会请你现场填）；<b>{{date}}</b> / <b>{{time}}</b> / <b>{{project}}</b> 取当天日期 / 当前时间 / 当前项目名；<b>{{字段|默认值}}</b> 弹小表单现场填，留空用默认值。</li>
-                <li><b>编辑与维护</b>：编辑弹窗「✨ AI 润色」让模型改写得更清晰；行上 <b>⏸</b> 按钮停用（<code>~</code> 候选不再显示，不删除）；内置示例可点「恢复示例」加回，删光后 <code>~</code> 菜单仍带内置示例兜底。</li>
-              </ul>
-            </details>
-            <p id="snippets-status" class="dim small" hidden></p>
-            <ul id="snippets-list" class="list snippets-list"></ul>
-          </section>
-        </section>
-
         <section class="settings-page hidden" id="settings-page-runs">
           <!-- 与自动化页「今日运行」卡片（app-schedule.js 的 loadRunCenter）注意区分：
                本页列表由 app.js 的 loadRunsPage 渲染（名称刻意错开，防跨文件覆盖） -->
@@ -2015,7 +2003,7 @@
         </section>
 
         <section class="settings-page hidden" id="settings-page-about">
-          <div class="settings-group-title">应用</div>
+          <div class="settings-group-title">关于</div>
           <section class="settings-card">
             <h3>关于</h3>
             <p class="settings-hint">
@@ -2040,7 +2028,6 @@
             <div id="about-info" class="about"></div>
             <div id="about-update" class="about-update"></div>
           </section>
-          <div class="settings-group-title">数据与迁移</div>
           <section class="settings-card">
             <h3>数据与隐私</h3>
             <p class="settings-hint">
@@ -2061,36 +2048,7 @@
               <span id="diag-msg" class="io-msg"></span>
             </div>
           </section>
-          <section class="settings-card" id="migration-card">
-            <div class="card-head">
-              <h3>跨机迁移</h3>
-              <span class="head-ops">
-                <button id="btn-migration-export" class="btn-ghost" title="打包会话库、技能、界面偏好与配置为一个 zip（模型密钥与 MCP 配置不进包），拷到新机器导入">📦 导出迁移包</button>
-                <button id="btn-migration-import" class="btn-ghost" title="从迁移包恢复：会话/技能/偏好/配置会被替换（导入前自动备份本机数据到 backups 目录）">📥 导入迁移包</button>
-                <input type="file" id="migration-file" accept=".zip" hidden>
-              </span>
-            </div>
-            <p class="settings-hint">
-              把这台机器的会话、技能、界面偏好与配置打包带走，在新机器上导入即可续用。<b>模型密钥与 MCP 配置不进包</b>（防丢包泄密），导入后到设置里重填。
-            </p>
-            <ul class="settings-hint hint-points">
-              <li>导入会<b>替换</b>本机的会话库、技能、界面偏好与配置；导入前自动把当前数据备份到 backups 目录。</li>
-              <li>导入完成后需<b>重启应用</b>生效；会话/定时任务/团队自动循环进行中时导入会被拒绝。</li>
-              <li>包体超过 <b>64MB</b>（大会话库常见）时导出会自动改成<b>落盘</b>：包写到
-                <code>~/.skysheep/migrations/</code>，界面给出路径，不去挤浏览器传输。</li>
-            </ul>
-            <label class="toggle-row check-row" title="勾上后，包里同名技能会整目录替换本机那份（本机同名技能里的额外文件会被移走备份），不与本机合并；不勾则叠加覆盖（本机多出的文件保留）">
-              <input type="checkbox" id="migration-skills-replace">
-              <span>同名技能整目录替换（默认叠加覆盖）</span>
-            </label>
-            <div class="io-row">
-              <input type="text" id="migration-path" class="modal-input" spellcheck="false"
-                     placeholder="或填本机迁移包路径（64MB 以内，不走浏览器中转）">
-              <button id="btn-migration-import-path" class="btn-ghost"
-                      title="直接读本机磁盘上的迁移包导入（不做 base64 中转；与文件导入同受 64MB 上限，超大包无法导入）">按路径导入</button>
-            </div>
-            <span id="migration-msg" class="io-msg"></span>
-          </section>
+          <div class="settings-group-title">数据</div>
           <section class="settings-card" id="retention-card">
             <div class="card-head">
               <h3>数据管理</h3>
@@ -2192,6 +2150,37 @@
               <span id="import-full-msg" class="io-msg"></span>
             </div>
           </section>
+          <div class="settings-group-title">迁移</div>
+          <section class="settings-card" id="migration-card">
+            <div class="card-head">
+              <h3>跨机迁移</h3>
+              <span class="head-ops">
+                <button id="btn-migration-export" class="btn-ghost" title="打包会话库、技能、界面偏好与配置为一个 zip（模型密钥与 MCP 配置不进包），拷到新机器导入">📦 导出迁移包</button>
+                <button id="btn-migration-import" class="btn-ghost" title="从迁移包恢复：会话/技能/偏好/配置会被替换（导入前自动备份本机数据到 backups 目录）">📥 导入迁移包</button>
+                <input type="file" id="migration-file" accept=".zip" hidden>
+              </span>
+            </div>
+            <p class="settings-hint">
+              把这台机器的会话、技能、界面偏好与配置打包带走，在新机器上导入即可续用。<b>模型密钥与 MCP 配置不进包</b>（防丢包泄密），导入后到设置里重填。
+            </p>
+            <ul class="settings-hint hint-points">
+              <li>导入会<b>替换</b>本机的会话库、技能、界面偏好与配置；导入前自动把当前数据备份到 backups 目录。</li>
+              <li>导入完成后需<b>重启应用</b>生效；会话/定时任务/团队自动循环进行中时导入会被拒绝。</li>
+              <li>包体超过 <b>64MB</b>（大会话库常见）时导出会自动改成<b>落盘</b>：包写到
+                <code>~/.skysheep/migrations/</code>，界面给出路径，不去挤浏览器传输。</li>
+            </ul>
+            <label class="toggle-row check-row" title="勾上后，包里同名技能会整目录替换本机那份（本机同名技能里的额外文件会被移走备份），不与本机合并；不勾则叠加覆盖（本机多出的文件保留）">
+              <input type="checkbox" id="migration-skills-replace">
+              <span>同名技能整目录替换（默认叠加覆盖）</span>
+            </label>
+            <div class="io-row">
+              <input type="text" id="migration-path" class="modal-input" spellcheck="false"
+                     placeholder="或填本机迁移包路径（64MB 以内，不走浏览器中转）">
+              <button id="btn-migration-import-path" class="btn-ghost"
+                      title="直接读本机磁盘上的迁移包导入（不做 base64 中转；与文件导入同受 64MB 上限，超大包无法导入）">按路径导入</button>
+            </div>
+            <span id="migration-msg" class="io-msg"></span>
+          </section>
         </section>
       </div>
     </div>
@@ -2245,19 +2234,12 @@
         <section id="factory-stage" aria-label="工厂像素场景">
           <canvas id="factory-canvas"></canvas>
           <div id="factory-labels" aria-hidden="true"></div>
-          <!-- 工具栏：全景 / 名牌 / 回放 / 全部运行。全景按钮在聚焦档里是可见的返回出口；
+          <!-- 工具栏：全景 / 名牌 / 全部运行。全景按钮在聚焦档里是可见的返回出口；
                滚轮与拖动仍不改比例，场景保持固定 45°。 -->
           <div id="factory-toolbar" role="toolbar" aria-label="显示">
             <button id="factory-center" title="回到全景（Esc）">全景</button>
             <button id="factory-labels-toggle" title="显示 / 隐藏厂区与机台名牌" aria-pressed="true">名牌</button>
-            <button id="factory-replay" title="回放今天：把今天跑过的每一轮按时间顺序在传送带上重演一遍">回放</button>
             <button id="factory-all-runs" title="全部运行：按状态 / 厂区筛选、翻页，行内可直接打开产出">全部运行</button>
-          </div>
-          <!-- 回放进度：只在回放时出现，替代顶上的时钟（那会儿显示的是虚拟时间） -->
-          <div id="factory-replay-bar" class="hidden" aria-live="polite">
-            <span id="factory-replay-time">--:--</span>
-            <span id="factory-replay-hint"></span>
-            <button id="factory-replay-stop" class="btn-ghost">回到此刻</button>
           </div>
         </section>
         <!-- 远程 / 空态 / 样板厂提示：放 stage 外，窄屏不画场景时也能看到 -->

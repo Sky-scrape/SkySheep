@@ -1339,7 +1339,7 @@ class ModManager:
         return {"ui": ui, "errors": errors}
 
 
-# ---- 官方示例包（mods-gallery，照 skills/gallery.py 的 bundled 模式） ----
+# ---- 官方示例包（mods-gallery，照 static/ 资源随包收集的 bundled 模式） ----
 
 # 打包内示例目录：SkySheep.spec 从仓库根 mods-gallery/ 逐文件收进来，落位
 # src/skysheep/mods/gallery/<dir>/。源码/wheel 运行时该目录不存在（开发态回落

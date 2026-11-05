@@ -1,6 +1,6 @@
 # mods-gallery — 官方示例 Mod
 
-随应用内置的官方示例 Mod（实验性）。结构与 `skills-gallery/` 一致：一目录一个 Mod
+随应用内置的官方示例 Mod（实验性）。一目录一个 Mod
 （`mod.json` + `main.js` + `README.md`），根 `manifest.json` 是离线快照；
 安装入口在 **设置 · Mods 扩展（实验性）** 的官方示例区（一键安装，从打包内副本装，
 无需联网）。

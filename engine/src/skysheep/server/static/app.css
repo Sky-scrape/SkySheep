@@ -3733,7 +3733,7 @@ mark.search-hit-mark {
    详情卡吃满剩余高度、技能列表吃满卡片剩余高度并自己滚。
    限定在 .settings-body 之下——右面板（#rp-page-ext）复用同一节点时是自动
    高度，沿用 .settings-skill-list 的 420px 上限，不把面板撑爆。
-   flex-basis 取 auto（而非 0）：总览视图（技能卡 + 场景模板 + 那一组设置卡）
+   flex-basis 取 auto（而非 0）：总览视图（技能卡 + 那一组设置卡）
    比视口高得多，basis 0 会让页面盒被钉在视口高度、内容溢出到盒外，
    设置体只能靠「溢出也算滚动区」勉强滚到底；auto 时页面盒跟着内容长，
    设置体走正常滚动，详情页视图本身贡献 0 高（basis 0），仍吃满视口 */
@@ -4242,7 +4242,7 @@ mark.search-hit-mark {
   padding: 7px 10px; border-bottom: 1px solid var(--line);
   font-size: var(--fs-md); background: var(--paper-sunken);
 }
-/* 场景模板：设置 · 技能总览卡下方的官方技能包网格（自适应列数，
+/* 官方示例卡网格（Mods 官方示例用；自适应列数，
    窄面板 / 右面板搬移两种宿主宽度下都能铺开） */
 .gallery-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr));
@@ -4970,6 +4970,21 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
    UA 的 [hidden]{display:none}，这里补一条兜底（与设置页那条同因） */
 #rp-view-skills > #skill-list-view[hidden],
 #rp-view-skills > #skill-manage-view[hidden] { display: none; }
+/* 右面板没有独立的「技能页」这一层导航：管理列表常驻在总览卡下方，正好填掉
+   下半屏的空白，撑满剩余高度、列表自己滚（几十个技能也不把面板顶长）。
+   「返回 / 标题 / 导入按钮」属于设置页两视图切换时的页头，面板里总览卡
+   已经带了同名按钮，这行页头收起 */
+#rp-view-skills > #skill-list-view { flex-shrink: 0; }
+#rp-view-skills > #skill-manage-view {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
+#rp-view-skills > #skill-manage-view > .settings-card {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
+#rp-view-skills > #skill-manage-view .detail-head { display: none; }
+#rp-view-skills > #skill-manage-view .settings-skill-list {
+  flex: 1; min-height: 0; max-height: none;
+}
 
 /* —— 合并标签（任务 / 自动化）的分段条与分段视图 ——
    分段条沿用设置页的 .seg-row.seg-mini（全宽均分、小字号），这里只补面板内的
@@ -7511,19 +7526,6 @@ li.mod-row {
 #factory-toolbar button:hover { border-color: var(--blue); color: var(--blue); transform: translateY(-1px); }
 #factory-toolbar button:active { transform: translateY(0); }
 #factory-toolbar button[aria-pressed="false"] { color: var(--dim); text-decoration: line-through; }
-/* 回放中：按钮亮起，场景底边挂一条虚拟时间 */
-#factory-toolbar button.playing { background: var(--blue-weak); border-color: var(--blue); color: var(--blue); }
-#factory-replay-bar {
-  position: absolute; left: 50%; bottom: 58px; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 10px; z-index: 3;
-  padding: 5px 10px; border-radius: var(--r-pill);
-  background: color-mix(in srgb, var(--card) 94%, transparent);
-  border: 1.5px solid var(--blue); box-shadow: var(--shadow-md);
-  backdrop-filter: blur(8px); font-size: var(--fs-sm); color: var(--text2);
-}
-#factory-replay-time { font-variant-numeric: var(--num); color: var(--text); letter-spacing: 1px; }
-#factory-replay-hint { color: var(--dim); }
-#factory-replay-bar .btn-ghost { padding: 1px 8px; font-size: var(--fs-sm); }
 /* 厂区少的时候筛选条不出现：它只解决「厂区多到看不过来」这一个问题 */
 #factory-panel-filter.sparse { display: none; }
 

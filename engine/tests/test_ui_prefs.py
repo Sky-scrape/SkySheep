@@ -376,7 +376,7 @@ def test_settings_search_indexes_nested_cards(home):
 
     技能页的卡片不直接挂在 .settings-page 下，而是包在 #skill-list-view /
     #skill-manage-view 里（两视图互斥切换）。索引只扫 :scope > .settings-card
-    会把整页漏掉——搜「技能」「场景模板」都搜不到。
+    会把整页漏掉——搜「技能」「MCP」都搜不到。
     """
     from skysheep.server.app import STATIC_DIR
 
@@ -400,7 +400,7 @@ def test_settings_search_indexes_nested_cards(home):
 
 
 def test_skills_manage_view_hides_overview_extras(home):
-    """「管理与安装」进独立技能页时，总览那组卡（外部服务 / 多模型协作 / 内置工具）必须收起。
+    """「管理与安装」进独立技能页时，总览那组卡（外部服务 / 内置工具）必须收起。
 
     不收的话：这一组两千像素高的卡排在详情页前面，先把设置体撑溢出，
     排在后面的 #skill-manage-view 再要 flex:1 抢剩余高度——剩余高度是 0，
@@ -447,21 +447,31 @@ def test_settings_page_group_titles(home):
         nxt = seg.find('<section class="settings-page')
         return seg[:nxt] if nxt > 0 else seg
 
-    # 技能与工具：四组，且「接力」在多模型协作组里
+    # 技能与工具：技能 / 外部服务 / 工具三组（协作方式已拆到独立页）
     skills = page("skills")
-    for cap in ("技能扩展", "外部服务", "多模型协作", "工具"):
+    for cap in ("技能扩展", "外部服务", "工具"):
         assert ">" + cap + "</div>" in skills, cap
-    assert skills.index("多模型协作") < skills.index('id="relay-config-card"')
+    assert "多模型协作" not in skills
+
+    # 多模型协作页：一组四卡（圆桌 / 团队 / 对抗 / 接力），接力在最后
+    collab = page("collab")
+    assert ">多模型协作</div>" in collab
+    for needle in ('id="roundtable-form"', 'id="team-form"',
+                   'id="adversarial-form"', 'id="relay-config-card"'):
+        assert needle in collab, needle
+    assert collab.index('id="adversarial-form"') < collab.index('id="relay-config-card"')
 
     # 界面与通知：外观 / 尺寸两分
     ui = page("ui")
     assert ">外观与通知</div>" in ui and ">尺寸与操作</div>" in ui
     assert ui.index("外观与通知") < ui.index("尺寸与操作")
 
-    # 关于：应用 / 数据与迁移两分，「数据与隐私」属于后者
+    # 关于：关于 / 数据 / 迁移三组，「数据与隐私」归「关于」
     about = page("about")
-    assert ">应用</div>" in about and ">数据与迁移</div>" in about
-    assert about.index("数据与迁移") < about.index("数据与隐私")
+    assert ">关于</div>" in about and ">数据</div>" in about and ">迁移</div>" in about
+    assert about.index(">关于</div>") < about.index(">数据</div>") < about.index(">迁移</div>")
+    assert about.index("数据与隐私") < about.index(">数据</div>")
+    assert about.index(">迁移</div>") < about.index('id="migration-card"')
 
     # 分区标题样式存在
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
@@ -474,7 +484,7 @@ def test_settings_nav_grouping(home):
     锁住三处易错位：
       ① 远程控制归安全组（它决定谁能远程操作本机，不该混在普通能力里）；
       ② Mods 归能力组（扩展能力，不是安全项）；
-      ③ 协作方式（圆桌 / 团队 / 对抗 / 接力）都在「技能与工具」页里，不单列导航项。
+      ③ 协作方式（圆桌 / 团队 / 对抗 / 接力）独立成「多模型协作」页，接力不单列导航项。
     """
     from skysheep.server.app import STATIC_DIR
 
@@ -486,16 +496,17 @@ def test_settings_nav_grouping(home):
     assert nav.index('aria-hidden="true">安全') < nav.index('data-target="remote"')
     # ② Mods 在能力组（日常标题之前）
     assert nav.index('data-target="mods"') < nav.index('aria-hidden="true">日常')
-    # ③ 接力不再单列
+    # ③ 协作方式独立成页（不跟技能工具混排）；接力仍不单列导航
     assert 'data-target="relay"' not in nav
     assert 'id="settings-page-relay"' not in html
-    # 接力说明卡搬进技能与工具页，且与对抗卡相邻
-    skills = html[html.index('id="settings-page-skills"'):]
-    skills = skills[:skills.index('id="settings-page-advanced"')]
-    assert 'id="relay-config-card"' in skills
-    assert skills.index('id="adversarial-form"') < skills.index('id="relay-config-card"')
-    assert 'id="relay-open-workbench"' in skills
-
+    assert 'data-target="collab"' in nav
+    assert nav.index('data-target="skills"') < nav.index('data-target="collab"')
+    collab = html[html.index('id="settings-page-collab"'):]
+    collab = collab[:collab.index('id="settings-page-subagents"')]
+    for needle in ('id="roundtable-form"', 'id="team-form"',
+                   'id="adversarial-form"', 'id="relay-config-card"',
+                   'id="relay-open-workbench"'):
+        assert needle in collab, needle
 
 def test_side_nav_order_matches_rail(home):
     """左栏展开态（.side-menu）与收起态（.rail-btn 图标条）的功能顺序必须一致。

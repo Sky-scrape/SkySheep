@@ -364,8 +364,6 @@ async function renderSettings() {
   // 列表渲染抽到 renderSkillList（技能页要重复用）；这里只负责总览摘要
   renderSkillSummary(snap.skills || []);
   if (skillManageOpen) renderSkillList(snap.skills || []);
-  // 场景模板（打包内官方技能清单）：装完/删完技能后 renderSettings 会重跑，模板的已装徽标跟着刷新
-  loadSceneTemplates().catch(() => {});
 
   // —— 内置工具 ——
   const tul = document.getElementById("settings-tool-list");

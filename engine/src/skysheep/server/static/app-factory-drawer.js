@@ -23,7 +23,7 @@
       renderAll = FX.renderAll, renderAttentionNotice = FX.renderAttentionNotice,
       renderPanel = FX.renderPanel, renderWeatherChip = FX.renderWeatherChip,
       runElapsed = FX.runElapsed, scheduleResync = FX.scheduleResync,
-      lineKeyFor = FX.lineKeyFor, stopReplay = FX.stopReplay,
+      lineKeyFor = FX.lineKeyFor,
       fmtCountdown = FX.fmtCountdown, refreshUpcoming = FX.refreshUpcoming;
 
   // ---------- 抽屉 ----------
@@ -496,8 +496,6 @@
 
   function factoryEscape() {
     if (S.drawer) { closeDrawer(); return true; }
-    // 回放中：Esc 先回到此刻（它比「退出聚焦」更该先关：回放是一个临时态）
-    if (S.replay && S.replay.running) { stopReplay(); return true; }
     // 聚焦档里 Esc 先回全景；工具栏的「全景」按钮是同一出口（键盘 / 鼠标都行）
     if (S.focusPid) { fitCamera(true); return true; }
     return false;

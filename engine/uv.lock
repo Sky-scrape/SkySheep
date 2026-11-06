@@ -1895,7 +1895,7 @@ wheels = [
 
 [[package]]
 name = "skysheep-engine"
-version = "2.7.0"
+version = "2.6.6"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

@@ -10530,6 +10530,15 @@ function petClampPos(x, y) {
   return [Math.max(4, Math.min(x, b.maxX)), Math.max(4, Math.min(y, b.floor))];
 }
 
+// 分屏 / 预览分栏打开时 CSS 把宠物藏起来（display:none，offsetWidth 为 0），
+// 同一时刻 #chat 也正让出右侧宽度而变窄。隐藏期间绝不能「按容器收敛」：
+// 那样会把落点改写成窄容器里的坐标并就此留在左边——用户报的「按掉接力副屏
+// 后小羊乱跳」正是这一条（关分屏只是让它重新可见，坐标早已被改写）。
+// 隐藏期间一律不动它，重新可见时 ResizeObserver 再按真实宽度归位。
+function petShown() {
+  return !!(petEl && petEl.offsetWidth > 0);
+}
+
 // —— 云朵重力引擎 ——
 const PET_G = 300;     // 重力加速度 px/s²：云朵体质，比真实世界温柔一个量级
 const PET_TERM = 140;  // 终端速度 px/s：空气阻力大，飘着下而不是砸下去
@@ -10561,8 +10570,9 @@ function petStartFall(x, y, opts = {}) {
     petFall.y += petFall.vy * dt;
     // 摇曳：低频正弦横摆（不改变朝向，纯平移）
     const b = petBounds(); // 逐帧取：权限条弹出等会改变容器高度
-    if (!b.ok) {
-      // 容器不可见（切到设置页）：暂停下落，位置原地冻结，切回来继续飘
+    if (!b.ok || !petShown()) {
+      // 容器不可见（切到设置页）或宠物被藏起来（分屏/预览）：暂停下落，
+      // 位置原地冻结，重新可见后继续飘（否则会落在窄容器的坐标上并写进 pet_x）
       last = now;
       petFallRaf = requestAnimationFrame(step);
       return;
@@ -10594,6 +10604,7 @@ function petLand(x, b) {
 // 容器不可见（切成设置页）时一律跳过——位置原样保留，切回对话页再归位。
 function petSettle() {
   if (!petEl || !petOn || petDrag || petFall || !petPos) return;
+  if (!petShown()) return; // 分屏/预览期间宠物不可见：别按临时变窄的容器改写落点
   const b = petBounds();
   if (!b.ok) return;
   const x = Math.max(4, Math.min(Math.round(petPos.x), b.maxX));
@@ -10610,6 +10621,7 @@ if (petEl && typeof ResizeObserver === "function") {
   let petSettleTimer = null;
   new ResizeObserver(() => {
     if (!petOn || petDrag || petFall || !petPos) return;
+    if (!petShown()) return; // 分屏/预览期间藏起来了：容器变窄不代表落点要跟着收
     const b = petBounds();
     if (!b.ok) return; // 不可见（设置页）：地面无意义，别把小羊顶到顶部
     if (petPos.y < b.floor - 2) {

@@ -169,3 +169,45 @@ async def test_service_worker_registers(home):
                 "navigator.serviceWorker.controller ? 'controlled' : "
                 "(navigator.serviceWorker.ready ? 'pending' : 'none')")
             assert state in ("controlled", "pending"), f"service worker 状态异常：{state}"
+
+
+async def test_pet_keeps_position_when_split_pane_closes(home):
+    """对话分屏（接力副屏）开关不改写小羊落点：关掉副屏后小羊回原处。
+
+    分屏打开时宠物被 CSS 藏起来，同时 #chat 让出右侧宽度；旧实现会在这一帧
+    按变窄容器做「横向收敛」，落点被永久改写成窄容器里的坐标——关掉副屏
+    只是让它重新可见，小羊就「跳」到了左边。隐藏期间跳过归位后坐标原样保留。
+    """
+    async with live_server(home, [[TextBlock(text="好")]]) as base:
+        async with browser_page(base) as page:
+            await _open_main_view(page)
+            await page.wait_for_selector("#chat-pet", timeout=10000)
+            # 落点走 petApplyPos：与用户拖动 / 启动恢复同一条路径
+            before = await page.evaluate("""() => {
+                const b = petBounds();
+                petApplyPos(b.maxX, b.floor);
+                const el = document.getElementById('chat-pet');
+                return {left: el.style.left, top: el.style.top};
+            }""")
+            sid = await page.evaluate("async () => (await request('session.new', {})).id")
+            await page.evaluate("async (sid) => { await openSplitPane(sid, '分屏测试'); }", sid)
+            await expect(page.locator("#chat-main.has-split")).to_have_count(1, timeout=10000)
+            hidden = await page.evaluate("""() => {
+                const el = document.getElementById('chat-pet');
+                return {left: el.style.left, top: el.style.top,
+                        display: getComputedStyle(el).display};
+            }""")
+            assert hidden["display"] == "none", "分屏打开时宠物应被藏起来（用例前提）"
+            assert (hidden["left"], hidden["top"]) == (before["left"], before["top"]), \
+                "分屏让出右侧宽度时不该改写小羊落点"
+            await page.click("#split-pane .split-close")
+            await expect(page.locator("#chat-main.has-split")).to_have_count(0, timeout=10000)
+            await page.wait_for_timeout(600)  # 等 ResizeObserver 归位
+            after = await page.evaluate("""() => {
+                const el = document.getElementById('chat-pet');
+                return {left: el.style.left, top: el.style.top,
+                        display: getComputedStyle(el).display};
+            }""")
+            assert after["display"] != "none"
+            assert (after["left"], after["top"]) == (before["left"], before["top"]), \
+                "关掉副屏后小羊应回到原处（落点被窄容器改写过？）"

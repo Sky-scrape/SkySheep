@@ -1152,3 +1152,24 @@ def test_preview_split_wiring_contract():
     assert '"preview.open_window"' in js
     assert "window.open(winUrl" in js
     assert '"&frame=1"' in js or '"frame=1"' in js
+
+
+# ---------- 分屏 / 预览分栏藏起宠物时，不得按窄容器改写小羊落点 ----------
+
+def test_pet_position_guard_while_hidden():
+    """隐藏期间跳过一切归位计算（回归：关掉接力副屏后小羊跳到左边）。
+
+    分屏/预览打开时宠物被 CSS 藏起来，而同一帧对话区正被让出右侧宽度：
+    ResizeObserver 若照常「横向收敛」，就会把落点改写成窄容器里的坐标，
+    关掉副屏只是让它重新可见——坐标早已留在左边。
+    """
+    js = read_app_bundle()
+    css = read_static("app.css")
+    # 前提：这两处分栏打开时宠物 display:none（隐藏与容器变窄同时发生）
+    assert "#chat-main.has-split #chat-pet" in css
+    assert "#chat-main.has-preview #chat-pet" in css
+    assert "function petShown()" in js
+    # 落点归位与容器尺寸观察两处都必须先判可见
+    assert js.count("if (!petShown()) return;") >= 2
+    # 下落逐帧同样跳过（否则会落在窄容器坐标上并写进 pet_x）
+    assert "!b.ok || !petShown()" in js

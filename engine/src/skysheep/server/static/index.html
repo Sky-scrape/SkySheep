@@ -2234,15 +2234,20 @@
           </section>
           <section class="settings-card">
             <h3>数据与隐私</h3>
-            <p class="settings-hint">
-              SkySheep 没有自己的云端服务：会话记录、配置、API Key 全部只保存在你自己的电脑上，
-              开发者看不到，也不会上传到任何中转服务器。以下是本机的数据位置。
-            </p>
-            <p class="settings-hint">
-              <b>需要知道的边界</b>：对话内容会按你的配置直接发送给所选的模型服务商
-              （OpenAI / DeepSeek / 智谱等），由各自的服务条款与隐私政策约束；
-              SkySheep 只在你的电脑与那家服务之间转发，不经手也不留存。
-            </p>
+            <!-- 两段说明收进同一个折叠：先前由 JS 各自包一层，页面上并排出现两个
+                 「说明」，看着像重复项，也把下面的路径块夹得更紧 -->
+            <details class="settings-hint-fold">
+              <summary>说明</summary>
+              <p class="settings-hint">
+                SkySheep 没有自己的云端服务：会话记录、配置、API Key 全部只保存在你自己的电脑上，
+                开发者看不到，也不会上传到任何中转服务器。以下是本机的数据位置。
+              </p>
+              <p class="settings-hint">
+                <b>需要知道的边界</b>：对话内容会按你的配置直接发送给所选的模型服务商
+                （OpenAI / DeepSeek / 智谱等），由各自的服务条款与隐私政策约束；
+                SkySheep 只在你的电脑与那家服务之间转发，不经手也不留存。
+              </p>
+            </details>
             <div id="about-privacy" class="about"></div>
             <div class="io-row">
               <button id="btn-open-data" class="btn-ghost">📂 打开数据文件夹</button>

@@ -4324,6 +4324,26 @@ mark.search-hit-mark {
 .about .copyable-path:hover { color: var(--blue); }
 .about .copyable-path.copied { color: var(--ok); text-decoration: none; }
 
+/* 关于页：三块内容（更新设置 / 版本与项目信息 / 数据位置）各自成段。
+   原先开关行与「更新渠道」行零间距、渠道说明只缩进 24px 又和路径块差 1px，
+   读起来像一整块密文；这里按「段间留白 + 一条细分隔线」拉开节奏。 */
+#settings-page-about .settings-card > .toolcfg-row { margin-top: 8px; }
+/* 渠道说明跟的是下拉框而不是开关，取消 24px 缩进（那是给开关文字对位用的） */
+#settings-page-about .settings-card > .adv-toggle-desc { margin-left: 0; margin-top: 6px; }
+#settings-page-about #about-info {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+}
+#settings-page-about .about { gap: 7px; }
+#settings-page-about #about-privacy { margin: 2px 0; }
+/* 卡片里紧跟说明文字的按钮行不再贴边（隐私卡的四个按钮、导出/迁移的按钮组） */
+#settings-page-about .settings-card > .io-row { margin-top: 12px; }
+/* 「说明」折叠行前面也留一口气：它常紧跟一行按钮，贴上去像个孤零零的圆点 */
+#settings-page-about .settings-card > .settings-hint-fold { margin-top: 10px; }
+#settings-page-about #about-update { margin-top: 12px; }
+/* 迁移包的路径输入：.modal-input 写死 width:100%，在 flex 行里会独占一行、
+   把「按路径导入」挤到下一行；这里改成可伸缩宽度，按钮跟在同一行 */
+#settings-page-about #migration-path { flex: 1 1 320px; width: auto; min-width: 0; }
+
 /* 设置页：技能与工具
    内置工具用「名称 / 安全级别 / 说明」三列定宽网格，行间上下对齐 */
 .settings-skill-list li, .settings-tool-list li { display: flex; align-items: center; gap: 10px; cursor: default; }
@@ -9360,6 +9380,9 @@ li.mcp-failed { border-left: 0; }
 .settings-hint-fold > summary:hover { color: var(--text2); }
 .settings-hint-fold[open] > summary { margin-bottom: 4px; }
 .settings-hint-fold .settings-hint { margin-bottom: 4px; }
+/* 同一折叠里收了两段说明时（「数据与隐私」的用途说明 + 边界说明），
+   展开后段间要留一行气口，否则两段连成密文 */
+.settings-hint-fold .settings-hint + .settings-hint { margin-top: 10px; }
 
 /* ---------- 0.5px 精细描边 ----------
    高分屏下 1.5–2px 的硬边会显笨重；聊天控件与内容卡统一走 hairline，

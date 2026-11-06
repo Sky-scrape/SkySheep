@@ -778,6 +778,8 @@ function composerState(sid) {
     // 本来就跟随全局，model_get 落地后校正为会话生效值）
     st = {
       mode: "execute", rtOn: false, teamOn: false, draft: "",
+      // 协作模板名（一次性，随本轮发送消费）：与 rtOn/teamOn 同生命周期
+      template: "",
       providerName: curProviderName, modelName: curModelName,
       supportsVision: curSupportsVision, images: [], refs: [],
     };
@@ -793,6 +795,7 @@ function saveComposerState(sid) {
   st.rtOn = rtOn;
   st.teamOn = teamOn;
   st.advOn = advOn;
+  st.template = activeTab ? String(activeTab.template || "") : "";
   st.draft = inputEl.value;
   // 模型三件套只随会话条目记：空标签没有会话私有模型（显示跟随引擎全局，
   // 由全局镜像维护），把 cur 写回 "" 条目会把上个会话的私有模型串进去
@@ -815,6 +818,8 @@ function restoreComposerState(sid) {
   setRtOn(!!st.rtOn, true);
   setTeamOn(!!st.teamOn, true);
   setAdvOn(!!st.advOn, true);
+  // 协作模板最后恢复：三个 setter 会清空它（手动切模式即弃用模板），顺序不能反
+  if (activeTab) activeTab.template = String(st.template || "");
   if (sid) {
     curProviderName = st.providerName || "";
     curModelName = st.modelName || "";
@@ -1456,6 +1461,8 @@ async function openSplitPane(sid, title) {
     lastAssistantText: "", _toolCards: new Map(),
     // 列是完整会话：附件/引用/权限三档/上下文明细都在列上（与主栏标签各自独立）
     images: [], refs: [], acceptMode: null, ctxDetail: null,
+    // 协作模板名（一次性，随本轮发送消费）：与主栏 activeTab.template 同语义
+    template: "",
   };
   // 贴底跟随：与主栏标签同一套（用户上翻挂起、滚回底部恢复）——列没有这套
   // 监听的话，流式长回答只会在列里往下长高，视口不动
@@ -1496,6 +1503,18 @@ async function openSplitPane(sid, title) {
     const images = pane.images.slice();
     const refs = pane.refs.slice();
     if ((!text && !images.length) || pane.running) return;
+    // 本栏选了协作模板：先跑预检（团队模板 needs != read 时弹清单），
+    // 取消就停在原地（输入框还没清，草稿保留）
+    let tplPick = { template: "", grant: null };
+    if (typeof collabSendWithGrant === "function") {
+      try {
+        tplPick = await collabSendWithGrant(pane);
+      } catch (e) {
+        paneNotice(pane, "模板预检失败：" + (e && e.message ? e.message : e));
+        return;
+      }
+      if (!tplPick) return;
+    }
     // 视觉能力按本列生效模型判（与主栏同一道提前拦截）
     if (images.length && pane.model && pane.model.supports_vision === false) {
       paneNotice(pane, `这一栏生效的模型「${pane.model.name}」不支持图片输入，请先在栏上换成多模态模型`);
@@ -1514,6 +1533,10 @@ async function openSplitPane(sid, title) {
     if (images.length) params.images = images;
     if (refs.length) params.refs = refs;
     if (pane.planMode) params.plan_mode = true;
+    if (tplPick.template) {
+      params.template = tplPick.template;
+      if (tplPick.grant) params.grant = tplPick.grant;
+    }
     // 圆桌/团队/对抗是一次性开关（与主栏同语义）：发送即消费，失败也不回滚——
     // 不复位的话下一条消息会静默再带上 roundtable/team/adversarial=true
     const rtThisTurn = !!pane.rtOn;
@@ -1527,6 +1550,7 @@ async function openSplitPane(sid, title) {
       if (advMembers) params.members = advMembers;
     }
     pane.rtOn = pane.teamOn = pane.advOn = false;
+    pane.template = "";
     syncSplitBarToggles(pane);
     try {
       const r = await request("chat.send", params);
@@ -1615,7 +1639,7 @@ async function openSplitPane(sid, title) {
       if (role === "plan") {
         pane.planMode = !pane.planMode;
         btn.classList.toggle("plan", pane.planMode);
-        if (pane.planMode) { pane.rtOn = pane.teamOn = pane.advOn = false; syncSplitBarToggles(pane); }
+        if (pane.planMode) { pane.rtOn = pane.teamOn = pane.advOn = false; pane.template = ""; syncSplitBarToggles(pane); }
       } else if (role === "coop") {
         showSplitCoopMenu(pane, btn);
       } else if (role === "model") {
@@ -1738,19 +1762,23 @@ function syncSplitBarToggles(pane) {
   const plan = q("plan"), coop = q("coop");
   if (plan) plan.classList.toggle("plan", !!pane.planMode);
   if (coop) {
-    coop.classList.toggle("on", !!(pane.rtOn || pane.teamOn || pane.advOn));
+    const tplName = String(pane.template || "");
+    coop.classList.toggle("on", !!(pane.rtOn || pane.teamOn || pane.advOn || tplName));
     coop.classList.toggle("coop-rt", !!pane.rtOn && !pane.teamOn && !pane.advOn);
     coop.classList.toggle("coop-team", !!pane.teamOn && !pane.advOn);
     coop.classList.toggle("coop-adv", !!pane.advOn);
     const st = coop.querySelector(".cp-state");
     if (st) {
-      st.hidden = !pane.rtOn && !pane.teamOn && !pane.advOn;
-      st.textContent = pane.rtOn ? "圆桌" : pane.teamOn ? "团队" : pane.advOn ? "对抗" : "";
+      st.hidden = !pane.rtOn && !pane.teamOn && !pane.advOn && !tplName;
+      st.textContent = tplName ? `模板 ${tplName}`
+        : pane.rtOn ? "圆桌" : pane.teamOn ? "团队" : pane.advOn ? "对抗" : "";
     }
-    coop.title = pane.rtOn ? "圆桌（每栏独立）：本栏消息由多个模型共同思考。点击可换模式"
-      : pane.teamOn ? "团队（每栏独立）：本栏消息组建团队协作。点击可换模式"
-      : pane.advOn ? "对抗（每栏独立）：本栏消息做对抗性审查。点击可换模式"
-      : "协作（每栏独立）：圆桌 / 团队 / 对抗，点击选择。分阶段报告请从侧栏打开接力工作台";
+    coop.title = tplName
+      ? `模板「${tplName}」（每栏独立）：本栏消息按模板执行，发送后复位。点击可换模板`
+      : pane.rtOn ? "圆桌（每栏独立）：本栏消息由多个模型共同思考。点击可换模板"
+      : pane.teamOn ? "团队（每栏独立）：本栏消息组建团队协作。点击可换模板"
+      : pane.advOn ? "对抗（每栏独立）：本栏消息做对抗性审查。点击可换模板"
+      : "协作模板（每栏独立）：内置模板 / 我的模板，点击选择。分阶段报告请从侧栏打开接力工作台";
   }
 }
 
@@ -1763,35 +1791,75 @@ function showSplitCoopMenu(pane, btn) {
   menu.className = "rt-menu coop-menu";
   const tip = document.createElement("div");
   tip.className = "rt-menu-tip";
-  tip.textContent = "协作模式（本栏，发送后复位）：";
+  // 模板册就绪时列模板（内置 / 我的），否则退回模式清单兜底——与主栏菜单同一口径
+  const hasTemplates = typeof collabTplAll !== "undefined"
+    && Array.isArray(collabTplAll) && collabTplAll.length > 0;
+  tip.textContent = hasTemplates ? "协作模板（本栏，发送后复位）：" : "协作模式（本栏，发送后复位）：";
   menu.appendChild(tip);
-  const modes = [
-    { key: "off", label: "不用协作", active: !pane.rtOn && !pane.teamOn && !pane.advOn },
-    { key: "rt", label: "圆桌", active: pane.rtOn },
-    { key: "team", label: "团队", active: pane.teamOn },
-    { key: "adv", label: "对抗", active: pane.advOn },
-  ];
-  for (const m of modes) {
+
+  const clearPick = () => {
+    pane.rtOn = pane.teamOn = pane.advOn = false;
+    pane.template = "";
+  };
+  const addPickButton = (label, desc, active, onClick) => {
     const b = document.createElement("button");
-    b.className = "coop-mode-item" + (m.active ? " active" : "");
-    b.innerHTML = `<span class="coop-mode-check">${m.active ? "✓" : ""}</span>` +
-      `<span class="coop-mode-body"><span class="coop-mode-label">${m.label}</span></span>`;
-    b.onclick = () => {
-      if (m.key === "rt") { pane.rtOn = !pane.rtOn; if (pane.rtOn) { pane.teamOn = pane.advOn = false; } }
-      else if (m.key === "team") { pane.teamOn = !pane.teamOn; if (pane.teamOn) { pane.rtOn = pane.advOn = false; } }
-      else if (m.key === "adv") { pane.advOn = !pane.advOn; if (pane.advOn) { pane.rtOn = pane.teamOn = false; } }
-      else { pane.rtOn = pane.teamOn = pane.advOn = false; }
-      syncSplitBarToggles(pane);
-      menu.remove();
-    };
+    b.className = "coop-mode-item" + (active ? " active" : "");
+    b.innerHTML = `<span class="coop-mode-check">${active ? "✓" : ""}</span>` +
+      '<span class="coop-mode-body">' +
+      `<span class="coop-mode-label">${escapeHtml(label)}</span>` +
+      (desc ? `<span class="coop-mode-desc">${escapeHtml(desc)}</span>` : "") +
+      "</span>";
+    b.onclick = () => { onClick(); syncSplitBarToggles(pane); menu.remove(); };
     menu.appendChild(b);
+  };
+  addPickButton("不用协作", "", !pane.template && !pane.rtOn && !pane.teamOn && !pane.advOn,
+    clearPick);
+
+  if (hasTemplates) {
+    const activeName = String(pane.template || "");
+    const groups = [
+      ["内置模板", collabTplAll.filter((t) => t.builtin)],
+      ["我的模板", collabTplAll.filter((t) => !t.builtin)],
+    ];
+    for (const [title, items] of groups) {
+      if (!items.length) continue;
+      const head = document.createElement("div");
+      head.className = "rt-menu-tip collab-menu-group";
+      head.textContent = title;
+      menu.appendChild(head);
+      for (const t of items) {
+        const kind = COLLAB_KIND_LABELS[t.kind] || String(t.kind || "");
+        const needs = collabTplNeeds(t);
+        addPickButton(
+          String(t.name || ""),
+          kind + " · " + (COLLAB_NEEDS_LABELS[needs] || needs),
+          activeName === t.name,
+          () => { clearPick(); pane.template = String(t.name || ""); },
+        );
+      }
+    }
+  } else {
+    const modes = [
+      { key: "rt", label: "圆桌", active: pane.rtOn },
+      { key: "team", label: "团队", active: pane.teamOn },
+      { key: "adv", label: "对抗", active: pane.advOn },
+    ];
+    for (const m of modes) {
+      addPickButton(m.label, "", m.active, () => {
+        if (m.key === "rt") { pane.rtOn = !pane.rtOn; if (pane.rtOn) { pane.teamOn = pane.advOn = false; } }
+        else if (m.key === "team") { pane.teamOn = !pane.teamOn; if (pane.teamOn) { pane.rtOn = pane.advOn = false; } }
+        else { pane.advOn = !pane.advOn; if (pane.advOn) { pane.rtOn = pane.teamOn = false; } }
+      });
+    }
   }
   const sep = document.createElement("div");
   sep.className = "coop-sep";
   menu.appendChild(sep);
   const hint = document.createElement("div");
   hint.className = "rt-menu-tip";
-  hint.textContent = "指定成员/总管：把会话切到主栏后操作";
+  hint.textContent = hasTemplates
+    ? "模板与成员：把会话切到主栏后管理"
+    : "指定成员/总管：把会话切到主栏后操作";
   menu.appendChild(hint);
   pane.el.appendChild(menu);
   // fixed 定位贴着按钮向上展开，横向收敛在窗口内（rect 是物理像素，除回 uiScale）
@@ -2655,11 +2723,13 @@ function buildRtMemberCard(m, index) {
   const mcard = document.createElement("div");
   mcard.className = "rt-member";
   const idx = Number.isInteger(index) ? index + 1 : 0;
+  // 角色位：模板成员带 name（模板里起的角色名）优先显示；没名字才回落到内置角色键
+  const roleText = m.name ? String(m.name) : (m.role ? rtRoleLabel(m.role) : "");
   mcard.innerHTML =
     `<div class="rt-m-head"><span class="rt-m-idx">${idx || "·"}</span>` +
     `<span class="rt-m-name">${escapeHtml(m.provider)}</span>` +
     `<span class="rt-m-model">${escapeHtml(m.model)}</span>` +
-    `<span class="rt-m-role"${m.role ? "" : " hidden"}>${m.role ? escapeHtml(rtRoleLabel(m.role)) : ""}</span>` +
+    `<span class="rt-m-role"${roleText ? "" : " hidden"}>${roleText ? escapeHtml(roleText) : ""}</span>` +
     '<span class="rt-m-round" hidden></span>' +
     '<span class="rt-m-status">⋯</span></div>' +
     '<div class="rt-m-body"><div class="md"></div></div>' +
@@ -3815,10 +3885,10 @@ function buildTeamCard(roster, directorMode, director) {
   resumeBtn.hidden = true;
   resumeBtn.title = "向 AI 总管发送继续指令，恢复自动推进";
   resumeBtn.onclick = (e) => { e.stopPropagation(); tcContinueTeam(card); };
-  // 在团队室打开（团队模式设计 §15.1 入口①）：跳右面板「团队室」页签，
-  // 频道 / 工单板 / 成员三分区同屏；卡片与团队室同源渲染、双向即时同步
-  const roomBtn = tcEl("button", "tc-open-room", "在团队室打开");
-  roomBtn.title = "在右侧面板的「团队室」页签打开本团队：成员、频道、工单板三分区同屏";
+  // 在协作中打开（团队模式设计 §15.1 入口①）：跳右面板「协作」页签，
+  // 频道 / 工单板 / 成员三分区同屏；卡片与看板同源渲染、双向即时同步
+  const roomBtn = tcEl("button", "tc-open-room", "在协作中打开");
+  roomBtn.title = "在右侧面板的「协作」页签打开本团队：成员、频道、工单板三分区同屏";
   roomBtn.onclick = (e) => { e.stopPropagation(); if (typeof openRightTab === "function") openRightTab("teamroom"); };
   head.append(tcEl("span", "tc-title", "🧩 团队"), sub, status, roomBtn, fold);
   const toggleFold = () => {
@@ -4362,6 +4432,8 @@ function tcSetSub(card, team) {
     (tasks.length ? `  工单 ${tasks.length} 张` : "  尚无工单") +
     (tokens ? `  ${fmtTokens(tokens)} tokens` : "") +
     (idleShort ? `  已空闲：${idleShort}` : "");
+  // 建队来源模板（协作模板）标在副标题最前面：一眼知道这队按哪份配置建的
+  if (card._template) card._ui.sub.textContent = `模板：${card._template}  ` + card._ui.sub.textContent;
   card._ui.sub.title = idle || (tokens
     ? `团队累计用量 ${tokens.toLocaleString()} tokens（成员与总管合计）` : "");
   if (idle) card._ui.channelEl.dataset.idleReason = idle;
@@ -5507,6 +5579,14 @@ function handleEvent(kind, data) {
       const t = curTab();
       const meta = data.message && (data.message.roundtable || data.message.adversarial);
       const seq = data.message && data.message.seq;
+      // 协作轮定稿：并进本标签的已加载窗口，协作页的「最近协作」无需重开会话
+      // 就能看到这一轮（历史数组只由 renderHistory 初始化，这里按 seq 去重追加）
+      if (t && seq != null && meta && data.message.role === "assistant") {
+        if (!Array.isArray(t._historyAll)) t._historyAll = [];
+        if (!t._historyAll.some((m) => m && m.seq === seq)) t._historyAll.push(data.message);
+        if (typeof rightViewVisible === "function" && rightViewVisible("teamroom")
+          && typeof loadTeamRoom === "function") loadTeamRoom(true);
+      }
       if (t && t.streamingEl) {
         finishAssistant(meta, seq);
       } else {
@@ -9249,14 +9329,17 @@ const rtRoleLabel = (id) => (RT_ROLES.find((r) => r[0] === id) || RT_ROLES[0])[1
 function updateCoopHint() {
   const btn = document.getElementById("coop-switch");
   if (!btn) return;
+  const tplName = activeTab ? String(activeTab.template || "") : "";
   const n = rtMembers ? rtMembers.length : 0;
   const tn = teamMembers ? teamMembers.length : 0;
   const an = advRolesPicked();
-  btn.classList.toggle("on", rtOn || teamOn || advOn);
+  btn.classList.toggle("on", rtOn || teamOn || advOn || !!tplName);
   btn.classList.toggle("coop-rt", rtOn && !teamOn && !advOn);
   btn.classList.toggle("coop-team", teamOn && !advOn);
   btn.classList.toggle("coop-adv", advOn);
-  if (rtOn) {
+  if (tplName) {
+    btn.title = `协作模板「${tplName}」：本条消息按模板的分工、模型与工具执行（点击可换模板或模式）`;
+  } else if (rtOn) {
     btn.title = (n
       ? `圆桌（已指定 ${n} 个成员）：本条消息由多个模型并行思考，融合成更好的答案`
       : "圆桌：自动挑选已配置 Key 的模型共同思考，融合成更好的答案（点击可换模式或指定成员）");
@@ -9275,10 +9358,16 @@ function updateCoopHint() {
       ? `对抗（${an} 个角色已指定模型）：发现者找问题 → 调查者核实 → 建议者给方案，裁判出终审报告`
       : "对抗：自动挑选已配置 Key 的模型做对抗性审查——找问题、核实真伪、给方案、终审报告（点击可换模式或指定角色模型）");
   } else {
-    btn.title = "协作：圆桌 / 团队 / 对抗（点击选择模式与成员）";
+    btn.title = "协作模板：内置模板 / 我的模板（点击选择，本条消息生效）";
   }
   const state = btn.querySelector(".cp-state");
   if (!state) return;
+  // 模板优先显示：它是本轮「按哪份配置跑」的唯一答案，比模式/人数更重要
+  if (tplName) {
+    state.hidden = false;
+    state.textContent = `模板 ${tplName}`;
+    return;
+  }
   state.hidden = !rtOn && !teamOn && !advOn;
   state.textContent = rtOn ? (n ? `圆桌  ${n}` : "圆桌  自动")
     : teamOn ? (teamDirectorIsAi() ? "团队  AI总管" : tn ? `团队  ${tn}人` : "团队  自动")
@@ -9287,6 +9376,8 @@ function updateCoopHint() {
 }
 
 function setRtOn(on, silent = false) {
+  // 手动切模式 = 弃用当前协作模板（模板按 kind 绑定一种模式，见 app-collab.js）
+  if (activeTab) activeTab.template = "";
   const wasTeam = teamOn;
   rtOn = on;
   // 同一条消息只能选一种协作模式：开圆桌自动关团队/对抗（后端多开报参数错）
@@ -9319,33 +9410,42 @@ function showCoopMenu(e) {
 function renderCoopMenuItems(menu) {
   const closeMenu = () => { menu.classList.add("hidden"); closeRtTeamPopups(); };
   menu.innerHTML = "";
-  const active = rtOn ? "rt" : teamOn ? "team" : advOn ? "adv" : "off";
+  // 模板模块加载后，圆桌/团队/对抗这三个「裸模式」不再单独列——内置模板
+  // 就是这三个模式（圆桌·多模型评审 / 团队·交付小组 / 对抗·代码审查），
+  // 两套并列会让用户看到重复的三行。模块缺席（旧缓存/加载失败）时保留旧
+  // 三行做兜底。
+  const templateUI = typeof collabTemplateSection === "function";
+  const activeTpl = activeTab ? String(activeTab.template || "") : "";
+  const active = activeTpl ? "template" : rtOn ? "rt" : teamOn ? "team" : advOn ? "adv" : "off";
   const tip = document.createElement("div");
   tip.className = "rt-menu-tip";
-  tip.textContent = "协作模式（本条消息生效，发送后复位）：";
+  tip.textContent = templateUI
+    ? "协作模板（本条消息生效，发送后复位）："
+    : "协作模式（本条消息生效，发送后复位）：";
   menu.appendChild(tip);
   const n = rtMembers ? rtMembers.length : 0;
   const tn = teamMembers ? teamMembers.length : 0;
   const an = advRolesPicked();
-  const modes = [
-    {
-      key: "off", active: active === "off",
-      label: "不用协作", desc: "普通单模型对话",
-    },
+  const modeOff = {
+    key: "off", active: active === "off",
+    label: "不用协作", desc: "普通单模型对话",
+  };
+  const modes = templateUI ? [modeOff] : [
+    modeOff,
     {
       key: "rt", active: active === "rt",
-      label: rtOn && n ? `圆桌  ${n} 个成员` : "圆桌",
+      label: rtOn && n ? `圆桌  ${n} 个成员` : "圆桌",
       desc: "多个模型并行思考，融合成更好的答案",
     },
     {
       key: "team", active: active === "team",
-      label: teamOn ? (teamDirectorIsAi() ? "团队  AI 总管" : tn ? `团队  ${tn} 名队员` : "团队  自动")
+      label: teamOn ? (teamDirectorIsAi() ? "团队  AI 总管" : tn ? `团队  ${tn} 名队员` : "团队  自动")
         : "团队",
       desc: "组建团队，你的消息作为总管指令进入团队频道",
     },
     {
       key: "adv", active: active === "adv",
-      label: advOn && an ? `对抗  指定 ${an} 个角色` : "对抗",
+      label: advOn && an ? `对抗  指定 ${an} 个角色` : "对抗",
       desc: "对抗性审查：找问题 → 核实 → 给方案 → 终审报告",
     },
   ];
@@ -9357,9 +9457,9 @@ function renderCoopMenuItems(menu) {
       `<span class="coop-mode-label">${escapeHtml(m.label)}</span>` +
       `<span class="coop-mode-desc">${escapeHtml(m.desc)}</span>` +
       `</span>`;
-    b.title = m.active
-      ? (m.key === "off" ? "点击收起" : "点击打开设置")
-      : "点击启用，并在右侧放出设置";
+    b.title = m.key === "off"
+      ? (m.active ? "点击收起" : "清空本条消息的协作选择")
+      : (m.active ? "点击打开设置" : "点击启用，并在右侧放出设置");
     b.onclick = () => {
       // 已启用的模式再点不放出设置弹层（「不用协作」没有设置，仍只收起）
       if (m.active) {
@@ -9378,20 +9478,25 @@ function renderCoopMenuItems(menu) {
     };
     menu.appendChild(b);
   }
-  // 团队进行中：协作菜单附「团队室」直达（团队模式设计 §15.1 入口②）——
+  // 团队进行中：协作菜单附「协作」直达（团队模式设计 §15.1 入口②）——
   // 只跳页签，不动本条消息的协作开关
   const teamLive = activeTab && activeTab.teamCard && activeTab.teamCard.isConnected
     && !activeTab.teamCard.classList.contains("ended");
   if (teamLive && typeof openRightTab === "function") {
     const room = document.createElement("button");
     room.className = "coop-mode-item";
-    room.title = "打开右侧面板的「团队室」页签：成员、频道、工单板三分区同屏";
+    room.title = "打开右侧面板的「协作」页签：成员、频道、工单板三分区同屏";
     room.innerHTML = '<span class="coop-mode-check"></span>' +
       '<span class="coop-mode-body">' +
-      '<span class="coop-mode-label">团队室</span>' +
+      '<span class="coop-mode-label">协作</span>' +
       '<span class="coop-mode-desc">成员  频道  工单板 大屏同看（独立页签）</span></span>';
     room.onclick = () => { closeMenu(); openRightTab("teamroom"); };
     menu.appendChild(room);
+  }
+  // 协作模板：内置 / 我的 两组（app-collab.js）；模块没加载或模板册为空时整块不出现。
+  // closeMenu 是上面的局部 const，必须显式传进去——模块拿不到这个闭包
+  if (typeof collabTemplateSection === "function") {
+    menu.appendChild(collabTemplateSection(menu, closeMenu));
   }
 }
 
@@ -9748,6 +9853,7 @@ function advMembersPayload() {
 updateCoopHint(); // 启动时把协作按钮画到当前档（无模式 = 纯图标）
 
 function setTeamOn(on, silent = false) {
+  if (activeTab) activeTab.template = "";
   const wasRt = rtOn;
   teamOn = on;
   // 同一条消息只能选一种协作模式：开团队自动关圆桌/对抗（后端多开报参数错）
@@ -9764,6 +9870,7 @@ function setTeamOn(on, silent = false) {
 }
 
 function setAdvOn(on, silent = false) {
+  if (activeTab) activeTab.template = "";
   const wasRt = rtOn;
   const wasTeam = teamOn;
   advOn = on;
@@ -9966,6 +10073,8 @@ async function buildTeamSettingsInto(box, closeMenu) {
 // 或模型已下架的条目硬勾上也跑不了（后端照常降级），不能让用户以为填上了。
 // 只回填表单，不落 localStorage：用户点「确定」才按既有路径存本轮值
 function applyTeamTemplate(menu, tpl) {
+  // 旧「从模板创建」与新的协作模板互斥：套用后清掉 pane 上的协作模板名，避免叠加
+  if (activeTab) activeTab.template = "";
   const dirOpts = menu.querySelector(".tm-dir-opts");
   const rbUser = menu.querySelector('input[name="tm-dir-mode"][value="user"]');
   const rbAi = menu.querySelector('input[name="tm-dir-mode"][value="ai"]');
@@ -10659,6 +10768,23 @@ async function send() {
   }
   recordInputHistory(text); // 输入历史：供空输入按 ↑ 回看
   const tab = activeTab;
+  // 协作模板预检（app-collab.js）：团队模板 needs != read 时先列一次「角色 / 工具 /
+  // 写入范围 / 命令前缀 / 预计调用与费用」清单。取消就停在原地——此处早于清输入、
+  // addUser、建会话与 setRunning，取消零副作用（草稿保留、不产生幽灵气泡）。
+  // 全程用捕获的 tab，不读 activeTab（await 期间用户可能切走标签）。
+  let collabSel = { template: "", grant: null };
+  if (typeof collabSendWithGrant === "function") {
+    let picked = null;
+    try {
+      picked = await collabSendWithGrant(tab);
+    } catch (e) {
+      // 预检本身出错 = 权限范围未知：不发这条，别带着未知授权直接跑
+      addNotice("模板预检失败：" + (e && e.message ? e.message : e));
+      return;
+    }
+    if (!picked) return;
+    collabSel = picked;
+  }
   // 新标签（无会话）：先向后端申请一个全新会话，避免消息落进旧的活动会话。
   // 用户已经在标签上预命名过的（titleFixed），名字随创建一起落库，并且首轮
   // 不再让模型自动生成标题——不然用户起的名字一发消息就被冲掉。
@@ -10718,33 +10844,41 @@ async function send() {
     // 总管形态（二期）：建队轮才消费——AI 总管随 team=true 带上 provider/model；
     // 用户总管（默认）不传参，后端按一期行为建队
     const dirAiThisTurn = teamThisTurn && teamDirectorIsAi();
-    // 协作都是一次性开关：发送后复位
+    // 协作都是一次性开关：发送后复位（模板同理：本条已按它发出去，下一条重新选）
     setRtOn(false);
     setTeamOn(false);
     setAdvOn(false);
+    if (tab) tab.template = "";
     // 发送消费掉了草稿与一次性开关：同步清该会话的状态条目，
     // 不然切走再切回来，旧草稿/开关会原样复活
     saveComposerState(tab.sid);
-    // 辩论轮数 / 主席出草稿：弹层里的本轮值优先于配置（config 作默认值）
+    // 辩论轮数 / 主席出草稿：弹层里的本轮值优先于配置（config 作默认值）。
+    // 模板轮一律不发这两个：模板自带 limits，且模板轮的 chair_answers 恒为 false
+    // （主席只做融合，不额外出草稿——否则调用数会超出模板预算）
+    const tplThisTurn = collabSel.template || "";
     const r = await request("chat.send", {
       text,
       session_id: tab.sid || undefined,
       wants_title: tab.firstSend === true,
       plan_mode: workMode === "plan",
+      // 模板优先：后端见到 template 就按模板的 kind 路由，忽略下面三个布尔与成员/总管字段
+      template: tplThisTurn || undefined,
+      grant: tplThisTurn && collabSel.grant ? collabSel.grant : undefined,
       roundtable: rtThisTurn,
       team: teamThisTurn || undefined,
       adversarial: advThisTurn || undefined,
-      members: membersThisTurn || undefined,
-      director_mode: dirAiThisTurn ? "ai" : undefined,
-      director: dirAiThisTurn
+      members: tplThisTurn ? undefined : (membersThisTurn || undefined),
+      director_mode: !tplThisTurn && dirAiThisTurn ? "ai" : undefined,
+      director: !tplThisTurn && dirAiThisTurn
         ? { provider: String(teamDirector.provider).trim(), model: String(teamDirector.model || "").trim() }
         : undefined,
       // 建队来源模板名（四期常驻）：「从模板创建」应用过的名字随建队轮带上，
-      // 后端记进团队快照——之后在团队卡上登记常驻凭它绑回模板
+      // 后端记进团队快照——之后在团队卡上登记常驻凭它绑回模板。
+      // 协作模板轮即使带着这个键也不影响：后端见到 template 一律按模板建队
       team_template: teamThisTurn && teamTplName ? teamTplName : undefined,
       compare: compareThisTurn || undefined,
-      debate_rounds: rtThisTurn ? rtDebate : undefined,
-      chair_answers: rtThisTurn ? rtChair : undefined,
+      debate_rounds: rtThisTurn && !tplThisTurn ? rtDebate : undefined,
+      chair_answers: rtThisTurn && !tplThisTurn ? rtChair : undefined,
       images: images.length ? images : undefined,
       refs: refs.length ? refs : undefined,
     });
@@ -12823,7 +12957,11 @@ function showSettingsPage(target) {
   if (target === "skills") loadToolControl();
   // 电脑控制操作回放（P13）：宏清单与电脑控制开关同页，跟着一起刷新
   if (target === "skills" && typeof loadMacroCard === "function") loadMacroCard();
-  if (target === "collab") renderTeamCfg().catch(() => {});
+  if (target === "collab") {
+    renderTeamCfg().catch(() => {});
+    // 协作模板画廊（app-collab.js）：模块未加载/拉取失败不影响其余三张配置卡
+    if (typeof renderCollabTemplates === "function") renderCollabTemplates().catch(() => {});
+  }
   if (target === "subagents") renderSubagentCfg().catch(() => {});
   if (target === "advanced") { renderAdvancedCfg().catch(() => {}); renderHooksCfg(); }
   if (target === "mods") renderModsCfg().catch(() => {});
@@ -12969,6 +13107,7 @@ if (settingsSearchInput) {
 }
 
 document.getElementById("btn-provider-back").onclick = closeProviderDetail;
+document.getElementById("btn-provider-add-back").onclick = () => closeProviderAdd();
 
 document.getElementById("btn-rule-add").onclick = () => {
   const form = document.getElementById("rule-add-form");
@@ -13072,7 +13211,7 @@ document.getElementById("rule-check-text").addEventListener("keydown", (e) => {
   }
 });
 
-document.getElementById("btn-add-provider").onclick = addProviderModal;
+document.getElementById("btn-add-provider").onclick = openProviderAdd;
 
 // 两个视图（总览卡片 / 技能页）各有一组同义按钮：导入动作完全一致，按 ID 合并绑定；
 // 「本机现存」两处行为不同（总览=先进技能页再探测，技能页=再点一次即收起），各自绑定
@@ -13205,8 +13344,8 @@ const TAB_META = {
   memory: { title: "项目记忆" },
   map: { title: "记忆地图", sub: "项目演化  时间线  图谱" },
   ext: { title: "MCP / Skills" },
-  // 团队室（团队模式设计 §15）：入口跟团队走（团队卡 / 协作菜单），不进「＋」菜单
-  teamroom: { title: "团队室", sub: "频道  工单  成员" },
+  // 协作（团队模式设计 §15）：入口跟团队走（团队卡 / 协作菜单），不进「＋」菜单
+  teamroom: { title: "协作", sub: "频道  工单  成员" },
 };
 // 分段 id → 所属标签。合并前的 ui.json 里存的就是分段 id（todo / ptasks /
 // cron / pipeline），靠这张表映射回所属标签并把分段一并还原。

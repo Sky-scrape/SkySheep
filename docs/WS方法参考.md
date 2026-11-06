@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-11-04 22:13:38
-- 方法总数：332（本机专属 local_only 178 个）
+- 生成时间：2026-11-06 12:31:25
+- 方法总数：336（本机专属 local_only 180 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -12,7 +12,7 @@
 | 方法 | local_only | 说明 |
 | --- | --- | --- |
 | boot |  | — |
-| chat.send |  | — |
+| chat.send |  | chat.send 的协作模板扩展入口（template / grant 两个新参数）。 |
 | chat.status |  | — |
 | events.replay |  | 断线重连补帧：返回 after_seq 之后本会话已下发的事件。 |
 | chat.compact | 是 | — |
@@ -297,6 +297,10 @@
 
 | 方法 | local_only | 说明 |
 | --- | --- | --- |
+| collab.template_list |  | 列出内置与用户协作模板（各端可读；内置三张只读）。 |
+| collab.template_save | 是 | 保存用户协作模板（仅本机；内置名不可覆盖，同名即覆盖用户条目）。 |
+| collab.template_remove | 是 | 删除用户协作模板（仅本机；内置模板不可删）。 |
+| collab.preview |  | 运行前清单：角色/工具/写入范围/命令前缀/预算与费用粗估（不含凭据）。 |
 | roundtable.get |  | — |
 | roundtable.save |  | — |
 | adversarial.get |  | — |

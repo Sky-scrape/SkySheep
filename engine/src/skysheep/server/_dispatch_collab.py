@@ -148,8 +148,35 @@ async def _h_teamcfg_save(backend: ServerBackend, params: dict, emit, local: boo
     return await backend.team_config_save(params)
 
 
+# ---- 协作模板（本期）：WS handler ----
+# 模板册写面仅本机（与团队模板册 / 子代理定义同姿态）；列表与预览各端可读
+# （预览只回模板声明、工具名与价目估算，不含凭据）。collab.* 的实现在
+# ServerBackend，本处在 dispatch 表登记。
+async def _h_collab_template_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """列出内置与用户协作模板（各端可读；内置三张只读）。"""
+    return backend.collab_template_list()
+
+
+async def _h_collab_template_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """保存用户协作模板（仅本机；内置名不可覆盖，同名即覆盖用户条目）。"""
+    return await backend.collab_template_save(params)
+
+
+async def _h_collab_template_remove(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """删除用户协作模板（仅本机；内置模板不可删）。"""
+    return await backend.collab_template_remove(params)
+
+
+async def _h_collab_preview(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    """运行前清单：角色/工具/写入范围/命令前缀/预算与费用粗估（不含凭据）。"""
+    return backend.collab_template_preview(params)
+
 # ---- 本域方法的注册表条目（自 app.py 的 _WS_METHODS 逐字切片） ----
 METHODS: dict[str, _WsMethod] = {
+    "collab.template_list": _WsMethod(_h_collab_template_list),
+    "collab.template_save": _WsMethod(_h_collab_template_save, local_only=True),
+    "collab.template_remove": _WsMethod(_h_collab_template_remove, local_only=True),
+    "collab.preview": _WsMethod(_h_collab_preview),
     "roundtable.get": _WsMethod(_h_roundtable_get),
     "roundtable.save": _WsMethod(_h_roundtable_save),
     "adversarial.get": _WsMethod(_h_adversarial_get),

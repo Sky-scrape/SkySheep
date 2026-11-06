@@ -313,6 +313,21 @@ class ToolRegistry:
     def all(self) -> list[Tool]:
         return list(self._tools.values())
 
+    def subset(self, names: list[str]) -> ToolRegistry:
+        """按名字取子集，返回**新**注册表（协作模板的工具表裁剪用）。
+
+        规则：
+        - 保持本表的注册顺序（模型的工具清单顺序稳定，缓存与提示词不抖动）；
+        - 未知名字直接忽略（模板里写了当前的工具表里没有的工具——MCP / 技能
+          工具可能临时不可用——不能因此整轮拒跑）；
+        - 重复名字只保留一份；返回新表，原表的注册与 schema 缓存不受影响。
+
+        注意：这是**可见性**筛选，不是安全边界。真正的放行/拦截仍由权限门
+        （security/gate.py）判定——工具在表里不等于免确认。
+        """
+        wanted = set(names or ())
+        return ToolRegistry([t for t in self._tools.values() if t.name in wanted])
+
     def schemas(self) -> list[dict[str, Any]]:
         if self._schema_cache is None:
             self._schema_cache = [t.to_schema() for t in self._tools.values()]

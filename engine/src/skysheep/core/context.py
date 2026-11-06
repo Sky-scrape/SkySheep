@@ -17,8 +17,9 @@ from pathlib import Path
 
 from ..events import CompactionEvent
 from ..messages import Message
-from ..models.base import ProviderTextDelta
+from ..models.base import ProviderDone, ProviderTextDelta
 from ..textio import read_text_file, write_text_atomic
+from .collab_budget import BudgetExceeded, RunBudget
 from .provider_errors import is_transient_error
 
 logger = logging.getLogger("skysheep.core.context")
@@ -238,8 +239,15 @@ def spill_transcript(agent, messages: list[Message], session_id: str = "") -> st
 async def compact_history(
     agent,  # Agent，避免循环导入用鸭子类型
     keep_recent: int = 8,
+    *,
+    budget: RunBudget | None = None,
 ) -> CompactionEvent | None:
-    """压缩 agent.history；没有可压缩内容时返回 None。"""
+    """压缩 agent.history；没有可压缩内容时返回 None。
+
+    ``budget`` 非空时，摘要调用也计入模板预算（每次真实 provider 调用前
+    spend、返回的 usage 累计回填）。压缩属于模板运行内的真实模型调用，
+    不应绕过 max_calls / max_tokens（审查 finding 17）。
+    """
     history = agent.history
     if len(history) <= keep_recent + 1:
         return None
@@ -254,6 +262,7 @@ async def compact_history(
         f"[{m.role.upper()}] {_clip_for_transcript(m.to_plain())}" for m in to_summarize
     )
     summary_parts: list[str] = []
+    usage_total = 0
     # 摘要调用与主循环流式一样可能碰上瞬态 429/超时/断流：异常隔离 + 有限
     # 退避重试，耗尽后放弃压缩（返回 None）而不是把异常炸回 run_turn——
     # 那会让整轮对话以 ok=false 终止且不重试。CancelledError 不是 Exception，
@@ -261,6 +270,8 @@ async def compact_history(
     for attempt in range(1, COMPACT_STREAM_RETRIES + 2):
         summary_parts = []
         try:
+            if budget is not None:
+                budget.spend()
             async for pe in agent.provider.stream(
                 [
                     Message.system(COMPACT_SYSTEM),
@@ -272,7 +283,16 @@ async def compact_history(
                 # 既浪费注入预算又污染事实（与 backend 归档提炼同一过滤口径）
                 if isinstance(pe, ProviderTextDelta):
                     summary_parts.append(pe.text)
+                elif isinstance(pe, ProviderDone):
+                    usage_total += pe.input_tokens + pe.output_tokens
+            if budget is not None and usage_total:
+                # 增量累加：摘要调用与后续成员/阶段调用各自只知道自己这段
+                # 的用量，不能用 add_tokens 的累计值语义互相覆盖。
+                budget.add_tokens_delta(usage_total)
             break  # 摘要调用正常完成
+        except BudgetExceeded:
+            # 预算耗尽不是「压缩失败降级」，必须原样上抛让协作链路收尾
+            raise
         except Exception as e:  # noqa: BLE001 - 摘要失败降级为不压缩，不炸整轮
             if attempt > COMPACT_STREAM_RETRIES or not is_transient_error(e):
                 logger.warning(

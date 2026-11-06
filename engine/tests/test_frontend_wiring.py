@@ -711,7 +711,7 @@ def test_team_room_tab_wiring():
     css = read_static("app.css")
 
     # 页签注册（app.js 页签机制内加）+ 页签体与加载顺序（index.html）
-    assert 'teamroom: { title: "团队室", sub: "频道  工单  成员" }' in js
+    assert 'teamroom: { title: "协作", sub: "频道  工单  成员" }' in js
     assert "teamroom: (force) => loadTeamRoom(force)" in js
     assert 'id="rp-page-teamroom"' in html and 'id="teamroom-root"' in html
     assert html.index('<script src="/static/app-teamroom.js">') > html.index(
@@ -740,24 +740,26 @@ def test_team_room_tab_wiring():
 
     # 入口：侧栏常驻项（§15.3.5，常驻团队落地后增设）+ 团队卡「在团队室打开」
     # + 协作菜单；不进「＋」菜单常驻（空态率太高，§15.1——侧栏项是后评的例外）
-    assert "在团队室打开" in js and "tc-open-room" in js
-    assert '<span class="coop-mode-label">团队室</span>' in js
+    assert "在协作中打开" in js and "tc-open-room" in js
+    assert '<span class="coop-mode-label">协作</span>' in js
     # 不进「＋」菜单常驻（§15.1：空态率太高）——「＋」菜单跳过团队室的锚定
     assert 'if (id === "teamroom") return;' in js
     assert "入口跟团队走（侧栏/团队卡/协作菜单），不进「＋」菜单常驻" in js
 
     # 空态与降级（§15.4）：空态两动作、中断只读回放、页签内错误行 + 重试
-    assert "本会话没有进行中的团队" in js
-    assert "从模板建队" in js and "回到对话发起" in js
-    assert "team.template_list" in js
+    assert "本会话没有进行中的协作" in js
+    assert "trRenderQuickStart" in js and "trRenderRecentRuns" in js
+    assert "快速开始" in js and "tr-tpl-card" in js
+    assert "管理模板" in js and "回到对话" in js
+    assert "trCollabRuns" in js and "tr-recent-row" in js
     assert "只读回放频道" in js and "tcFinish(card, \"interrupted\", \"\")" in js
-    assert "团队室加载失败" in js and "loadTeamRoom(true)" in js
-    # 「从模板建队」先回对话视图：调用的必须是全局存在的 backToChat——
-    # 命令面板的 backToChatFirst 是 paletteBaseItems 的局部函数，全局查无此名，
-    # 旧写法的 typeof 守卫静默跳过（死引用）
+    assert "协作加载失败" in js and "loadTeamRoom(true)" in js
+    # 空态动作行必须真的挂进容器（此前只 append 到局部变量，按钮从不上屏）
+    assert "box.appendChild(actions);" in js
+    # 空态不再跳回对话执行建队（模板卡片直接选模板）；旧代码里调
+    # paletteBaseItems 局部函数 backToChatFirst 的死引用不得回归
     tr_js = read_static("app-teamroom.js")
     assert "backToChatFirst" not in tr_js
-    assert 'pageViewOpen() && typeof backToChat === "function") backToChat();' in tr_js
 
     # 终态只读：trMountSnapshot 与回放卡同口径（_finished 先于重画工单行）
     i = js.index("function trMountSnapshot")

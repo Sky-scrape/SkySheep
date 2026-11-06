@@ -97,9 +97,9 @@
         <button class="nav-item" data-act="todo" title="任务：Agent 拆解的执行步骤、派出的子代理与本项目事项都在这里">任务</button>
         <button class="nav-item" data-act="agenda" title="到点在应用内提醒，跨会话保留">日程</button>
         <button class="nav-item" data-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕；与输入框的圆桌、团队、对抗分开">接力</button>
-        <!-- 团队常驻入口（团队模式设计 §15.3.5，常驻团队 T3.2 落地后增设）：开团队室页签；
+        <!-- 协作入口（团队模式设计 §15.3.5，常驻团队 T3.2 落地后增设）：开协作页签；
              角标计活动团队数（常驻登记 + 当前会话进行中的团队，app-teamroom.js 维护） -->
-        <button class="nav-item" data-act="teamroom" id="nav-team" title="团队室：多模型协作团队的频道、工单板与成员带三分区；角标计常驻登记与当前会话进行中的团队数">团队<span id="nav-team-badge" class="nav-badge hidden"></span></button>
+        <button class="nav-item" data-act="teamroom" id="nav-team" title="协作：多模型协作的频道、工单板与成员带三分区；角标计常驻登记与当前会话进行中的团队数">协作<span id="nav-team-badge" class="nav-badge hidden"></span></button>
         <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
         <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
         <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
@@ -215,8 +215,8 @@
     <button class="rail-btn" data-rail-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕" aria-label="接力">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h5l2-4 3 8 2-4h6"/><circle cx="3.5" cy="12" r="1.2"/><circle cx="20.5" cy="12" r="1.2"/></svg>
     </button>
-    <!-- 团队常驻入口：与展开态 .side-menu 的「团队」同一顺序（§15.3.5）；图标与团队室页签同款 -->
-    <button class="rail-btn" data-rail-act="teamroom" id="rail-team" title="团队室：多模型协作团队的频道、工单板与成员带三分区；角标计常驻登记与当前会话进行中的团队数" aria-label="团队室">
+    <!-- 协作入口：与展开态 .side-menu 的「协作」同一顺序（§15.3.5）；图标与协作页签同款 -->
+    <button class="rail-btn" data-rail-act="teamroom" id="rail-team" title="协作：多模型协作的频道、工单板与成员带三分区；角标计常驻登记与当前会话进行中的团队数" aria-label="协作">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h16"/><path d="M4 10h8M4 13.5h6M4 17h8"/><rect x="15" y="9" width="5" height="10" rx="1"/><path d="M16.8 11.8h1.4M16.8 14h1.4"/></svg>
       <span id="rail-team-badge" class="rail-badge hidden"></span>
     </button>
@@ -665,9 +665,9 @@
               <input type="time" id="daily-report-time" value="09:00"
                      title="每天到这个时刻推送日报（24 小时制）">
               <span class="dim small">到点把当天「定时 / 编排」的运行终态汇总成一条，经已启用的渠道推送</span>
-              <textarea id="daily-report-template" rows="3" spellcheck="false"
-                        placeholder="留空用内置格式；占位符：{date} {cron_ok} {cron_fail} {pipe_done} {pipe_fail} {pipe_stop} {detail}"
-                        title="自定义日报模板（最长 2000 字符）：{detail} 展开为失败明细多行，无失败时是「无」；其余花括号原样保留"></textarea>
+              <textarea id="daily-report-template" rows="2" spellcheck="false"
+                        placeholder="留空用内置格式；可用 {date} {cron_ok} {detail} 等占位符"
+                        title="自定义日报模板（最长 2000 字符）。占位符：{date} 日期，{cron_ok} / {cron_fail} 定时任务的成败数，{pipe_done} / {pipe_fail} / {pipe_stop} 编排的完成 / 失败 / 已停止数，{detail} 失败明细多行（无失败时为「无」）；其余花括号原样保留"></textarea>
             </div>
 
             <!-- 每周运行周报（P10 剩余半边）：与日报共用同一个状态文件，但开关、
@@ -693,8 +693,8 @@
                      title="周报推送时刻（24 小时制）">
               <span class="dim small">每周一条：最近 7 天跑了多少次、成几件、败在哪儿</span>
               <textarea id="weekly-report-template" rows="2" spellcheck="false"
-                        placeholder="留空用内置格式；占位符：{range} {total} {ok} {fail} {stopped} {kinds} {busiest} {detail}"
-                        title="自定义周报模板（最长 2000 字符）：{range} 是 7 天窗口，{detail} 展开为失败原因 Top 3，{kinds} 是按产线类型的计数"></textarea>
+                        placeholder="留空用内置格式；可用 {range} {total} {detail} 等占位符"
+                        title="自定义周报模板（最长 2000 字符）。占位符：{range} 最近 7 天窗口，{total} 运行总数，{ok} / {fail} / {stopped} 成功 / 失败 / 跳过或停止数，{busiest} 最忙的一天，{kinds} 按产线类型的计数，{detail} 失败原因 Top 3"></textarea>
             </div>
           </section>
 
@@ -884,6 +884,15 @@
               </div>
               <div id="provider-detail-status" class="card-status" hidden></div>
               <div id="provider-detail-body"></div>
+            </div>
+
+            <!-- 添加视图：新建自定义服务（页内表单，与详情视图同一套范式，不用弹层） -->
+            <div id="provider-add" hidden>
+              <div class="detail-head">
+                <button id="btn-provider-add-back" class="btn-ghost">← 服务列表</button>
+                <span class="detail-title">添加自定义模型服务</span>
+              </div>
+              <div id="provider-add-body"></div>
             </div>
           </section>
         </section>
@@ -1080,9 +1089,42 @@
         </section>
 
         <!-- 圆桌 / 团队 / 对抗 / 接力：四种多模型协作方式的配置。原先寄居在「技能与工具」
-             页，2026-11-05 拆成独立页——技能页只留工具配置，协作方式不跟工具混排 -->
+             页，2026-11-05 拆成独立页——技能页只留工具配置，协作方式不跟工具混排。
+             协作模板（L1）也放这页：模板把协作方式连同角色/模型/工具存成可复用条目 -->
         <section class="settings-page hidden" id="settings-page-collab">
           <div class="settings-group-title">多模型协作</div>
+          <!-- 协作模板（L1）：内置三张只读、点「复制」改成自己的；用户模板可编辑/删除。
+               模板只能收窄权限（schema 里没有 gate 字段），跑前清单上的「本次不再逐次确认」
+               也只免模板声明过、且落在工作目录内的写入与命令前缀 -->
+          <section class="settings-card" id="collab-tpl-card">
+            <div class="card-head">
+              <h3>协作模板</h3>
+              <span class="head-ops">
+                <button id="collab-tpl-new" class="btn-ghost">＋ 新建模板</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              模板把「谁来做、用什么模型、要不要动手」存成一份可复用的配置：圆桌、团队、对抗都能在
+              输入框「协作」菜单里一键选中。模板只能<b>收窄</b>权限——它关不掉权限确认，也不能把删除、
+              引擎主目录写入、工作目录外写入变成免确认；团队模板可在运行前勾选「本次不再逐次确认」，
+              只让<b>模板声明过</b>的写入（限工作目录内）与命令前缀免确认一次。
+            </p>
+            <div id="collab-tpl-status" class="card-status" hidden></div>
+            <div id="collab-tpl-gallery" class="gallery-grid"></div>
+            <div id="collab-tpl-editor" class="collab-editor hidden">
+              <div class="card-head">
+                <h3 id="collab-tpl-editor-title">编辑模板</h3>
+                <span class="head-ops">
+                  <button id="collab-tpl-close" class="btn-ghost">收起</button>
+                  <button id="collab-tpl-save" class="btn-ghost">保存模板</button>
+                </span>
+              </div>
+              <div id="collab-tpl-form" class="toolcfg-form"></div>
+            </div>
+          </section>
+          <!-- 三个内置模式的引擎默认值：模板把「谁来做」抽走后，这里只剩上限与超时；默认折叠，避免和上方的模板画廊抢视线 -->
+          <details class="collab-defaults">
+            <summary>引擎默认值（高级）：圆桌 / 团队 / 对抗的成员上限与超时</summary>
           <section class="settings-card">
             <div class="card-head"><h3>圆桌</h3></div>
             <p class="settings-hint" id="roundtable-hint"></p>
@@ -1101,6 +1143,7 @@
             <div id="adversarial-status" class="card-status" hidden></div>
             <div id="adversarial-form" class="toolcfg-form"></div>
           </section>
+          </details>
           <!-- 接力：第四种多模型协作方式（主副屏交替）。只放说明与入口，
                真正的配置在右侧「接力」看板里做，这里不需要表单 -->
           <section class="settings-card" id="relay-config-card">
@@ -2462,6 +2505,10 @@
 <script src="/static/app-browser.js"></script>
 <script src="/static/app-mods.js"></script>
 <script src="/static/app.js"></script>
+<!-- 协作模板（L1）：设置页画廊 / 模板编辑器 / 协作菜单分组 / 跑前清单。
+     普通 script、零构建，先 app.js 后本文件——靠全局函数互调（app.js 侧的
+     调用一律带 typeof 守卫），数据走 collab.template_* 与 team.template_list -->
+<script src="/static/app-collab.js"></script>
 <!-- 团队室（独立页签）：普通 script、零构建，先 app.js 后本文件——三分区
      容器复用 app.js 的团队卡 tc* 渲染系（buildTeamCard / tcUpsertMsg /
      tcRenderTasks…），页签装载走 app.js 的 RIGHT_TAB_LOADERS.teamroom；

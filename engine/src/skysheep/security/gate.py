@@ -34,7 +34,7 @@ import fnmatch
 import os
 import shlex
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -482,6 +482,52 @@ def _prefix_match(text: str, pattern: str) -> bool:
         return False
     rest = text[len(pattern) :]
     return rest[:1] in ("", " ", "\t")
+
+
+# 模板运行级前缀通道额外拒绝的命令族（审查 finding 3）：两词前缀等于
+# 「该命令族的任意参数」，以下命令族要么本身就是删除面（rm/del/rmdir…），
+# 要么第二词之后可执行任意子命令 / 解包任意归档（find/xargs/tar/npm run…）。
+# 手建白名单仍沿既有语义（用户逐条批准）；这里只收窄模板的「本次运行免确认」
+# 通道，与 delete_file 的 DANGEROUS 永不自动放行保持同一安全预期。
+_PREFIX_DELETE_HEADS = frozenset({
+    "rm", "rmdir", "del", "erase", "rd", "unlink", "shred",
+    "deltree", "sdelete", "srm", "wipe", "truncate",
+    "taskkill", "find", "xargs", "forfiles", "unzip", "tar",
+})
+_PREFIX_EXEC_PAIRS = frozenset({
+    ("git", "clean"), ("git", "rm"),
+    ("npm", "run"), ("npm", "exec"), ("npm", "test"),
+    ("npm", "start"), ("npm", "install"), ("npm", "ci"),
+    ("yarn", "run"), ("yarn", "install"),
+    ("pnpm", "run"), ("pnpm", "install"),
+    ("bun", "run"), ("cargo", "run"), ("dotnet", "run"),
+})
+
+
+def _prefix_deletes_or_runs_arbitrary(pattern: str) -> bool:
+    """前缀是否落在删除 / 任意子命令执行族（模板前缀通道专用）。
+
+    按**首个真实命令词**判定（跳过前置赋值与 env/nohup/timeout/xargs 等包装器，
+    与 rule_for / 匹配侧同一扫描）；只有包装器、找不到真实命令词的前缀
+    （``timeout 5``）同样视为任意命令面。``find``/``xargs``/``tar`` 这类
+    后续参数可执行或解包任意内容的命令整族拒绝，不做旗标级猜测。
+    """
+    words = [w for w in _tokenize(pattern) if w]
+    if not words:
+        return False
+    real = _first_real_command_word(words)
+    if real is None:
+        return True
+    idx = next(
+        (i for i, w in enumerate(words) if _norm_exe_name(w) == real), None
+    )
+    if idx is None:
+        return True
+    rest = words[idx + 1:]
+    if real in _PREFIX_DELETE_HEADS:
+        return True
+    second = str(rest[0]).lower() if rest else ""
+    return (real, second) in _PREFIX_EXEC_PAIRS
 
 
 def _sudo_prefix_shape_unsafe(words: list[str]) -> bool:
@@ -1930,3 +1976,266 @@ class HeadlessGate(PermissionGate):
         if pending is not None:
             pending.resolve(Decision.DENY)
         return pending
+
+
+class GrantedGate:
+    """运行级「模板授权」代理门：包装会话既有权限门，只为模板声明过的
+    工具 / 命令前缀补一条一次性免确认通道。
+
+    **只收紧、不放宽**的结构性保证：
+    - 不继承 PermissionGate（与 TeamMemberGate 同理由：backend 会把会话档位
+      写到 ``agent.gate.auto_accept_*`` 上，继承会让档位落在代理门自己的属性
+      里、与真实会话门分家）；
+    - 不碰 ``auto_accept_write`` / ``auto_accept_all``（那两档按设计连引擎
+      主目录写入都放行，见 gate.py:1519-1522/1544-1545），也不调
+      ``persist_rule``——运行级授权绝不落库，下一轮重新来过；
+    - 内部门已有的硬守卫（出站密钥预拒绝、引擎主目录写入、删除语义）先跑，
+      命中即原样交回内部门逐次确认/预拒绝；
+    - 任何 `always` 规则都不认：只认「具名 WRITE 工具 + 工作目录内落点」与
+      「命令前缀命中（含全套拼接/代码旗标守卫）」两种。
+
+    免确认面（与主门 authorize 的档位分支同序同口径）：
+    1. READONLY 且落点不在引擎主目录 → 放行（与主门一致）；
+    2. WRITE 且工具名在 ``allowed_tools``、落点确认在工作目录内、非删除语义
+       → 放行；
+    3. ``run_command`` 且命令命中 ``command_prefixes``（完整词前缀）、无
+       shell 拼接、无代码执行旗标、action=run → 放行。
+    其余一律转交内部门（``await inner.authorize(...)``）：DANGEROUS 工具除
+    上面的 run_command 前缀例外外永不自动放行。
+
+    ``command_prefixes`` 调用方应已用 ``core.collab_templates.
+    normalize_command_prefix`` 提炼过；构造期再做一次兜底过滤（单词前缀、
+    解释器前缀、自身带拼接/代码旗标的前缀一律丢弃），方向只会更严。
+    """
+
+    def __init__(
+        self,
+        inner: PermissionGate,
+        allowed_tools: Iterable[str] = (),
+        command_prefixes: Iterable[str] = (),
+        run_id: str = "",
+        label: str = "",
+    ) -> None:
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_run_id", str(run_id or ""))
+        object.__setattr__(self, "_label", str(label or ""))
+        allowed = frozenset(
+            str(n).strip() for n in (allowed_tools or ()) if str(n).strip()
+        )
+        object.__setattr__(self, "_allowed", allowed)
+        rules: list[WhitelistRule] = []
+        patterns: list[str] = []
+        for raw in command_prefixes or ():
+            pattern = str(raw or "").strip()
+            if not GrantedGate._prefix_usable(pattern):
+                continue
+            rules.append(WhitelistRule(tool=_RUN_COMMAND, kind="prefix", pattern=pattern))
+            patterns.append(pattern)
+        object.__setattr__(self, "_rules", tuple(rules))
+        object.__setattr__(self, "_prefixes", tuple(patterns))
+
+    # ---- 对外只读属性（backend / 前端预览用；写操作一律落内部门） ----
+
+    @property
+    def allowed_tools(self) -> frozenset[str]:
+        return self._allowed
+
+    @property
+    def command_prefixes(self) -> tuple[str, ...]:
+        # 只回真正生效的前缀（被兜底过滤掉的危险前缀不出现，避免界面上的
+        # 「已授权」与实际放行面不一致）
+        return self._prefixes
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    def __getattr__(self, name: str):
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        # 非下划线属性一律写内部门：会员门 / 会话门是一套判定，避免「档位
+        # 写在代理上、内部门看不见」的第二套状态。
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_inner"), name, value)
+
+    # ---- 判定 ----
+
+    async def authorize(
+        self, tool: Tool, input_dict: dict, **kwargs,
+    ) -> PendingPermission | None:
+        """返回 None = 放行；PendingPermission = 交回内部门给出的逐次确认。
+
+        kwargs（force_pending / force_allow 等）原样透传：代理门不解释、
+        不吞掉新参数，Claude 兼容模式的 allow/ask 在这里同样只有收紧作用。
+        """
+        inner = object.__getattribute__(self, "_inner")
+        if kwargs.get("force_pending") or kwargs.get("force_allow"):
+            # Mod 点名 ask/allow：本门不参与判定，交给内部门（force_allow 在
+            # 内部门仍保留引擎主目录 / 删除语义 / 出站密钥三道硬守卫）
+            return await self._delegate(tool, input_dict, **kwargs)
+        # 出站密钥防线：已知密钥值的预拒绝先于一切放行分支（与各门同口径）
+        blocked = inner._egress_pre_deny(tool, input_dict)
+        if blocked is not None:
+            return blocked
+        # Mods 收紧声明命中即跳过本门的全部放行分支
+        if inner._extra_confirm_required(tool, input_dict):
+            return await self._delegate(tool, input_dict, **kwargs)
+        # 引擎主目录写入（含 memory_write 这种名义 READONLY 的固定落点写入）
+        # 永不因模板授权免确认：config.toml 是凭据本体、全局技能注入所有项目
+        if inner._write_hits_engine_home(tool, input_dict):
+            return await self._delegate(tool, input_dict, **kwargs)
+        # 「名义是移动、实为递归删除」等效 delete_file 的删除面
+        if inner._write_is_actually_delete(tool, input_dict):
+            return await self._delegate(tool, input_dict, **kwargs)
+        if tool.safety == Safety.READONLY:
+            return None
+        if tool.name == _RUN_COMMAND:
+            if self._run_allowed(tool, input_dict):
+                return None
+            return await self._delegate(tool, input_dict, **kwargs)
+        if tool.safety == Safety.WRITE:
+            if (
+                tool.name in self._allowed
+                and inner._write_target_inside_workdir(tool, input_dict)
+            ):
+                return None
+        return await self._delegate(tool, input_dict, **kwargs)
+
+    def needs_confirm(self, tool: Tool, input_dict: dict) -> bool:
+        """并发只读批的收集期预检（纯判定，不建 PendingPermission）。
+
+        Agent 的并发批只调本谓词就直接执行（core/agent.py:935 → :959），
+        不经过 authorize——所以这里必须与 authorize 的结论一致，且对「出站
+        密钥命中」的调用报 True：批路径拿不到 authorize 的预拒绝，把它推回
+        串行路径才能落到 DENY。
+        """
+        inner = object.__getattribute__(self, "_inner")
+        scan = inner._egress_scan(tool, input_dict)
+        if scan is not None and not scan["ok"]:
+            return True
+        if self._would_allow(tool, input_dict, scan):
+            return False
+        return bool(inner.needs_confirm(tool, input_dict))
+
+    def _would_allow(self, tool: Tool, input_dict: dict, scan: dict | None) -> bool:
+        """authorize 第 1~7 步的同步版本：True = 本门会直接放行。"""
+        inner = object.__getattribute__(self, "_inner")
+        if scan is not None and not scan["ok"]:
+            return False
+        if inner._extra_confirm_required(tool, input_dict):
+            return False
+        if inner._write_hits_engine_home(tool, input_dict):
+            return False
+        if inner._write_is_actually_delete(tool, input_dict):
+            return False
+        if tool.safety == Safety.READONLY:
+            return True
+        if tool.name == _RUN_COMMAND:
+            return self._run_allowed(tool, input_dict)
+        if tool.safety == Safety.WRITE:
+            return (
+                tool.name in self._allowed
+                and inner._write_target_inside_workdir(tool, input_dict)
+            )
+        return False
+
+    def _run_allowed(self, tool: Tool, input_dict: dict) -> bool:
+        """run_command 是否命中模板声明的命令前缀（唯一允许的 DANGEROUS 例外）。
+
+        三道判定缺一不可：
+        - action 必须是 run（read/kill/list 是后台进程管理动作，不是命令行）；
+        - 命令本身不得有 shell 拼接 / 代码执行旗标（双保险：规则 matches 内部
+          还会再判一次，这里先挡是为了不依赖规则的实现细节）；
+        - 任一已声明前缀按**完整词**前缀命中——匹配本体是 WhitelistRule，
+          与用户手建的白名单同一条路径，不自造宽松匹配。
+        """
+        if tool.name != _RUN_COMMAND:
+            return False
+        rules = object.__getattribute__(self, "_rules")
+        if not rules:
+            return False
+        if str(input_dict.get("action", "") or "run") != "run":
+            return False
+        text = tool.arg_text(input_dict)
+        if not text.strip():
+            return False
+        if _has_shell_chain(text) or _has_code_exec_flag(text):
+            return False
+        return any(rule.matches(_RUN_COMMAND, text) for rule in rules)
+
+    @staticmethod
+    def _prefix_usable(pattern: str) -> bool:
+        """前缀是否够格当运行级授权（normalize_command_prefix 的兜底同口径）。
+
+        - 空前缀、单词前缀：单词前缀等于放行该程序的任意参数
+          （``git status`` 与 ``git`` 是两回事），一律拒；
+        - 前缀自身带 shell 拼接 / 代码执行旗标：拒；
+        - 解释器 / shell 调用（python / bash / powershell / node…）：等于
+          放行任意脚本，拒；
+        - 删除 / 任意子命令执行族（rm -rf / del /f / find . / tar -xf /
+          npm run…）：两词前缀等于整族放行，拒（与 delete_file 永不自动
+          放行同一安全预期）。
+        """
+        pattern = str(pattern or "").strip()
+        if not pattern:
+            return False
+        if len(pattern.split()) < 2:
+            return False
+        if _has_shell_chain(pattern) or _has_code_exec_flag(pattern):
+            return False
+        if _interpreter_invocation(pattern):
+            return False
+        return not _prefix_deletes_or_runs_arbitrary(pattern)
+
+    async def _delegate(
+        self, tool: Tool, input_dict: dict, **kwargs,
+    ) -> PendingPermission | None:
+        """交给内部门逐次确认，并在确认卡上标注「为什么模板授权没覆盖它」。"""
+        inner = object.__getattribute__(self, "_inner")
+        pending = await inner.authorize(tool, input_dict, **kwargs)
+        if pending is None:
+            return None
+        label = object.__getattribute__(self, "_label")
+        if label:
+            pending.origin = pending.origin or label
+        reason = self._grant_block_reason(tool, input_dict)
+        if reason:
+            prefix = f"本次运行模板授权：{reason}"
+            # 内部门自己的 note（为什么没命中白名单等）保留，不清空
+            pending.note = f"{prefix}；{pending.note}" if pending.note else prefix
+        return pending
+
+    def _grant_block_reason(self, tool: Tool, input_dict: dict) -> str:
+        """「本可授予却被拦」的中文原因；与模板无关的调用返回空串。
+
+        只解释两类面：声明过的命令前缀、声明过的写工具。别的情况（模板根本
+        没声明这个工具）不写注记——那是内部门正常逐次确认，与本次授权无关。
+        """
+        inner = object.__getattribute__(self, "_inner")
+        if tool.name == _RUN_COMMAND:
+            rules = object.__getattribute__(self, "_rules")
+            if not rules:
+                return ""
+            if str(input_dict.get("action", "") or "run") != "run":
+                return "后台进程管理动作（read/kill/list）不在命令前缀授权范围"
+            text = tool.arg_text(input_dict)
+            if _has_shell_chain(text) or _has_code_exec_flag(text):
+                return "命令含管道/拼接或解释器代码旗标"
+            if any(_prefix_match(text, rule.pattern) for rule in rules):
+                return "该命令未通过命令前缀规则的其它安全判定"
+            return ""
+        if tool.safety == Safety.WRITE and tool.name in self._allowed:
+            if inner._write_is_actually_delete(tool, input_dict):
+                return "该调用会递归删除已有目录，删除语义永不自动放行"
+            if inner._write_hits_engine_home(tool, input_dict):
+                return "写入落点在引擎数据目录（~/.skysheep）内"
+            if not inner._write_target_inside_workdir(tool, input_dict):
+                return "写入落点无法确认在工作目录内"
+        return ""

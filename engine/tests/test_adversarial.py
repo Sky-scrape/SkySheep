@@ -878,3 +878,26 @@ async def test_adversarial_compare_first_run_has_no_previous(store, home):
     host.store = store
     out = await ServerBackend.adversarial_compare(host, {"session_id": sid, "seq": msg.seq})
     assert out["previous"] is None and out["delta"] == {}
+
+
+@pytest.mark.asyncio
+async def test_judge_prompt_appends_to_builtin_system():
+    """模板 aggregator.prompt 追加在 JUDGE_SYSTEM 之后，不能整段替换（finding 18）。"""
+    finder, investigator, advisor, judge = scripted_providers()
+    _events, emit = collector()
+    await run_adversarial(
+        finder=make_member(finder),
+        investigator=make_member(investigator),
+        advisor=make_member(advisor),
+        judge=judge,
+        judge_provider="fake",
+        judge_model="fake-1",
+        history=[Message.system("SYS"), Message.user("早前问题")],
+        user_text="审查这段代码",
+        timeout_s=30,
+        emit=emit,
+        prompts={"judge": "自定义终审人设：只输出一句话"},
+    )
+    system_text = judge.calls[0][0].text
+    assert "自定义终审人设" in system_text
+    assert "你是一场对抗性审查的终审裁判" in system_text

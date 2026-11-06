@@ -18,6 +18,7 @@ from ...bgtasks import spawn_bg
 from ...channels.cards import task_finish_card
 from ...channels.manager import _fmt_dur
 from ...core import system_schedule
+from ...core.collab_templates import is_builtin_template_name
 from ...core.review import review_output
 from ...core.run_ledger import (
     RunLedger,
@@ -536,6 +537,13 @@ async def run_cron_team_turn_core(
             template = t
             break
     if template is None:
+        if is_builtin_template_name(template_name):
+            # 内置团队模板只在代码里、不落盘：定时复用要按名字回查模板册，
+            # 给可执行的出路而不是一句「不存在」
+            raise RuntimeError(
+                f"「{template_name}」是内置团队模板，未落盘；请先在"
+                " 设置 · 多模型协作里「复制」为自己的模板再设为常驻/定时复用"
+            )
         raise RuntimeError(f"团队模板已不存在：{template_name}")
 
     # 每个任务一个独立会话（同名），历史随运行累积、可审计

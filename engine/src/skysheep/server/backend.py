@@ -23,6 +23,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from uuid import uuid4
+
+from pydantic import BaseModel, Field, ValidationError
 
 from .. import __version__
 from ..bgtasks import spawn_bg
@@ -49,6 +52,10 @@ from ..config import (
 )
 from ..core import Agent, build_system_prompt
 from ..core.adversarial import (
+    PHASE_ADVISOR,
+    PHASE_FINDER,
+    PHASE_INVESTIGATOR,
+    PHASE_JUDGE,
     AdversarialOutcome,
     run_adversarial,
 )
@@ -62,6 +69,24 @@ from ..core.adversarial import (
     usage_rows as adversarial_usage_rows,
 )
 from ..core.checkpoints import CheckpointConflictError, CheckpointStore
+from ..core.collab_budget import BudgetedProvider
+from ..core.collab_templates import (
+    COLLAB_NEEDS,
+    PREVIEW_INPUT_FLOOR_TOKENS,
+    PREVIEW_OUTPUT_TOKENS,
+    CollabTemplate,
+    CollabTemplateError,
+    CollabTemplateStore,
+    RunBudget,
+    TeamCfgView,
+    builtin_template,
+    collect_command_prefixes,
+    derive_needs,
+    effective_tool_entries,
+    is_builtin_template_name,
+    normalize_command_prefix,
+    validate_collab_template,
+)
 from ..core.context import (
     compact_history,
     estimate_text_tokens,
@@ -119,8 +144,10 @@ from ..core.team import (
     TeamTemplateDirector,
     TeamTemplateMember,
     TeamTemplateStore,
+    validate_team_template_name,
 )
 from ..core.team_resident import ResidentTeamEntry, ResidentTeamStore
+from ..core.team_store import TEAM_TEMPLATE_PERSONA_MAX
 from ..events import (
     AssistantMessage,
     ErrorEvent,
@@ -145,7 +172,13 @@ from ..obs import info as obs_info
 from ..obs import parse_structured
 from ..obs import warning as obs_warning
 from ..security import leases
-from ..security.gate import _RUN_COMMAND, RULE_KINDS, PermissionGate, _is_arbitrary_exec_prefix
+from ..security.gate import (
+    _RUN_COMMAND,
+    RULE_KINDS,
+    GrantedGate,
+    PermissionGate,
+    _is_arbitrary_exec_prefix,
+)
 from ..security.trust import STATE_PENDING, WorkspaceTrust, list_trusted, revoke_by_path
 from ..session import SessionStore
 from ..session.store import export_messages_text
@@ -219,6 +252,96 @@ from .backend_parts.webtools import WebtoolsMixin
 
 logger = logging.getLogger("skysheep.security")
 memory_log = logging.getLogger("skysheep.memory")
+
+
+# ---- 团队模板的协作扩展字段（本期兼容桥）----
+# 团队模板仍住 ~/.skysheep/teams.json（core/team_store.py 的 TeamTemplate），
+# 本批只给团队模板增加可选的协作字段（needs / tools / budget），不迁库。
+# 字段定义放在 backend 侧而不是改 core/team_store.py：本子任务的改动面限定
+# 在后端接线，团队内核与模板册由另一路并行落地；用子类承载可选字段既能让
+# teams.json 现在就存下这些键（TeamTemplateStore.save 按实例 model_dump），
+# 又能在基类将来补上同名字段时自然兼容（子类字段覆盖同义字段，行为不变）。
+# 旧文件缺键取默认（read / 空工具 / 预算不限），读取方一律走 getattr 兜底。
+
+
+class _CollabTeamTemplateBudget(BaseModel):
+    """团队模板的运行级预算（0 = 不限；映射口径见 TeamCfgView）。"""
+
+    max_calls: int = 0
+    max_tokens: int = 0
+    max_seconds: int = 0
+
+
+class _CollabTeamTemplate(TeamTemplate):
+    """TeamTemplate + 协作模板可选字段（只加在模板级，不动成员/总管子字典）。"""
+
+    needs: str = "read"
+    tools_allow: list[str] = Field(default_factory=list)
+    tools_deny: list[str] = Field(default_factory=list)
+    budget: _CollabTeamTemplateBudget = Field(
+        default_factory=_CollabTeamTemplateBudget
+    )
+
+
+class _CollabTeamTemplateStore(TeamTemplateStore):
+    """teams.json 的读写仍走 TeamTemplateStore，只把 load 的解析模型换成
+    ``_CollabTeamTemplate``（save/upsert/remove 直接复用基类实现）。
+
+    基类 load 用 TeamTemplate 解析会把协作扩展字段当未知键丢弃，重启后
+    needs / tools / budget 静默消失；这里逐字沿用基类的容错姿态（坏文件回空册、
+    单条形状不对跳过），只换模型类。
+    """
+
+    def load(self) -> None:
+        self.templates = []
+        if not self.path.exists():
+            return
+        try:
+            # 与 CollabTemplateStore 同口径：手改成 GBK 等非 UTF-8 也不抛
+            # UnicodeDecodeError（审查 finding 13）。
+            data = json.loads(read_text_file(self.path).text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return  # 坏文件不致命：回空册，下次保存覆盖
+        items = data.get("templates") if isinstance(data, dict) else None
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                self.templates.append(_CollabTeamTemplate(**item))
+            except ValidationError:
+                continue  # 单条形状不对：跳过，不拖垮整份模板册
+
+    def upsert(self, template: TeamTemplate) -> None:
+        """保存前补协作扩展字段校验（审查 finding 12）。
+
+        生产写入路径（team_template_save / collab_template_save）已经先跑
+        CollabTemplate 校验；这里再兜一道，防止将来新调用点直接把非法
+        needs / tools / budget 落进 teams.json。普通 TeamTemplate（没有扩展
+        字段）沿用基类口径。
+        """
+        if isinstance(template, _CollabTeamTemplate):
+            # 先按团队模板册口径校验名字（错误类型与旧接口一致），再做
+            # 协作扩展字段校验。
+            name = validate_team_template_name(template.name)
+            budget = template.budget or _CollabTeamTemplateBudget()
+            probe = CollabTemplate(
+                name=name,
+                kind="team",
+                roles=[{
+                    "key": "team", "name": name,
+                    "needs": template.needs,
+                    "tools_allow": list(template.tools_allow or []),
+                    "tools_deny": list(template.tools_deny or []),
+                }],
+                budget=budget.model_dump(),
+            )
+            validate_collab_template(probe, allow_builtin=False)
+            role = probe.roles[0]
+            template.needs = role.needs
+            template.tools_allow = list(role.tools_allow)
+            template.tools_deny = list(role.tools_deny)
+            template.budget = _CollabTeamTemplateBudget(**probe.budget.model_dump())
+        super().upsert(template)
 
 # 流式增量事件的合并窗口（秒）与单条合并上限（字符）。
 #
@@ -604,6 +727,11 @@ class QueuedTurn:
     # 建队来源模板名（四期常驻）：仅建队路径消费，记进编排器快照供
     # team.resident_set 绑定回模板（定时触发按模板匹配复用的依据）
     team_template: str = ""
+    # 协作模板（本期）：解析后的模板 dict（含 kind / roles / budget…）；None = 普通轮。
+    # 入队时随发送固定，交棒轮不再回查模板册（模板可在排队期间被删/改名）。
+    template: dict | None = None
+    # 模板的运行级授权（仅团队模板消费）：{scope: run|ask_each, read_only: bool}
+    grant: dict | None = None
     # 本机/远程客户端（入队时随发送固定）：决定引用注入的项目归属口径
     local: bool = True
 
@@ -961,7 +1089,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.subagent_store = SubagentStore(skysheep_home() / "subagents.json")
         # 团队模板（三期）：~/.skysheep/teams.json，与 subagents.json 同姿态
         # （路径随 SKYSHEEP_HOME，测试隔离；坏文件容错在 store 内部）
-        self.team_templates = TeamTemplateStore(skysheep_home() / "teams.json")
+        self.team_templates = _CollabTeamTemplateStore(skysheep_home() / "teams.json")
+        # 协作模板册（本期）：~/.skysheep/collab_templates.json。只存用户自建的
+        # 圆桌 / 对抗模板；团队模板仍住 teams.json（不迁移），内置三张只在代码里
+        self.collab_templates = CollabTemplateStore(
+            skysheep_home() / "collab_templates.json"
+        )
         # 常驻团队注册表（T3.2）：~/.skysheep/team_resident.json，同姿态——
         # 哪支队伍跨会话常驻、复用所需的工单板快照与频道 seq 水位
         self.resident_teams = ResidentTeamStore(skysheep_home() / "team_resident.json")
@@ -1784,6 +1917,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # template_save 会以仅含新模板的内存册整体覆盖 teams.json——已存
         # 模板被静默清光（upsert→save 是全量覆盖落盘）
         self.team_templates.load()
+        # 协作模板册同款启动装载：不 load 的话 template_list 恒缺用户模板、
+        # remove 对磁盘已有模板误报「找不到」，此后任意一次 upsert→save 会以
+        # 仅含新条目的内存册整体覆盖 collab_templates.json
+        self.collab_templates.load()
         # 常驻团队注册表同款启动装载（不 load 的话 resident_set/clear 对磁盘
         # 已有登记误判，此后任意一次 upsert 会以仅含新条目的内存册整体覆盖
         # team_resident.json——已登记的常驻队伍被静默清光）
@@ -2576,6 +2713,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    director_mode: str = "user",
                    director: dict | None = None,
                    team_template: str = "",
+                   template: str | dict | None = None,
+                   grant: dict | None = None,
                    local: bool = True) -> dict:
         """跑一轮对话；过程事件通过 emit 推送；结束后持久化新消息。
 
@@ -2620,9 +2759,29 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         _ready_runtime_for_send）——不切换活动指针：定向发送（分屏列）不能
         劫持「当前会话」，伴生面板的取数口径不被带走。
         """
+        # 协作模板（本期）：template 优先于三个布尔与 members/director——
+        # 模板自带 kind，选中模板后前端不再发协作布尔；模板与布尔同给不报错，
+        # 一律按模板路由。模板在入口就解析成 dict 并随本轮固定，交棒轮不回查
+        # 模板册（排队期间模板可能被删除/改名）。
+        tpl: dict | None = None
+        if isinstance(template, dict):
+            tpl = self._normalize_template_dict(template)
+        elif str(template or "").strip():
+            name = str(template).strip()
+            tpl = self._find_collab_template(name)
+            if tpl is None:
+                raise RuntimeError(f"找不到协作模板：{name}")
+        if tpl is not None:
+            kind = str(tpl.get("kind") or "")
+            team = kind == "team"
+            roundtable = kind == "roundtable"
+            adversarial = kind == "adversarial"
+            if kind == "team" and not team_template:
+                # 建队来源模板名：常驻登记据此把队伍绑回模板
+                team_template = str(tpl.get("name") or "")
         # 团队/圆桌/对抗同轮互斥（设计 §13.4；对抗同规则）：前端开关联动互斥，
-        # 后端多参数同给报参数错
-        if sum(bool(m) for m in (team, roundtable, adversarial)) > 1:
+        # 后端多参数同给报参数错。模板轮已由模板决定 kind，跳过这条检查。
+        if tpl is None and sum(bool(m) for m in (team, roundtable, adversarial)) > 1:
             raise RuntimeError(
                 "「团队」「圆桌」「对抗」不能同时开启：同一条消息只能选一种协作模式。"
             )
@@ -2651,6 +2810,32 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 f"当前会话有进行中的团队，消息会进入团队频道；请先收队再使用{mode_name}。"
             )
         team_bound = team or active_team
+        # 模板的运行级授权（grant）：只对团队模板有意义——圆桌/对抗本期是纯文本
+        # 协作、不挂工具，传了也忽略。远程连接一律降级为逐次确认（与「放宽权限的
+        # 档位只能本机切换」同一安全口径：模板数据绝不能借远程请求关掉权限门）。
+        grant_info: dict | None = None
+        if tpl is not None and tpl.get("kind") == "team":
+            raw_grant = grant if isinstance(grant, dict) else {}
+            scope = str(raw_grant.get("scope") or "ask_each").strip()
+            if scope not in ("run", "ask_each"):
+                scope = "ask_each"
+            read_only = bool(raw_grant.get("read_only"))
+            degraded = scope == "run" and not local
+            if degraded:
+                scope = "ask_each"
+            grant_info = {"scope": scope, "read_only": read_only}
+            if degraded:
+                await emit(NoticeEvent(
+                    message="远程连接不能使用模板的「本次运行免确认」授权，"
+                            "已降级为逐次确认。"
+                ).model_dump())
+            if active_team:
+                # 成员 Agent 的权限门在建队时固定（成员缓存 gate）：运行级授权
+                # 只随新队伍生效，现有团队沿用建队时的授权面
+                await emit(NoticeEvent(
+                    message=f"当前会话已有进行中的团队，模板「{tpl.get('name', '')}」"
+                            "本次只影响新队伍；现有团队的权限范围不变。"
+                ).model_dump())
         # 引用排除目标会话自己：引用当前对话没有意义
         clean_refs = self._sanitize_refs(refs, exclude=target_sid)
         if self.provider is None:
@@ -2709,6 +2894,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 team=team, adversarial=adversarial,
                 director_mode=director_mode, director=director,
                 team_template=team_template,
+                template=tpl, grant=grant_info,
                 local=local,
             )
             if rt_now is not None:
@@ -2743,6 +2929,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 team=team, adversarial=adversarial,
                 director_mode=director_mode, director=director,
                 team_template=team_template,
+                template=tpl, grant=grant_info,
                 local=local,
             )
         except asyncio.CancelledError:
@@ -2885,6 +3072,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         director_mode: str = "user",
         director: dict | None = None,
         team_template: str = "",
+        template: dict | None = None,
+        grant: dict | None = None,
         local: bool = True,
     ) -> dict:
         """真正执行一轮对话（含持久化、规划模式切换、检查点保存）。
@@ -3207,13 +3396,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     plan_mode=plan_mode,
                     director_mode=director_mode, director=director,
                     template_name=team_template,
+                    template=template, grant=grant,
+                    local=local,
                 )
             elif roundtable:
                 rt_meta = await self._roundtable_body(
                     text, emit_ev, members_params, agent=agent, compare=compare,
                     sid=sid, images=images,
                     debate_rounds=debate_rounds, chair_answers=chair_answers,
-                    regenerate=regenerate,
+                    regenerate=regenerate, template=template,
                 )
                 # 圆桌的取消在引擎层收敛（保留已产出的部分文本），这里同步停止位
                 if (rt_meta or {}).get("status") == "cancelled":
@@ -3221,7 +3412,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             elif adversarial:
                 adv_meta = await self._adversarial_body(
                     text, emit_ev, members_params, agent=agent, sid=sid,
-                    images=images, regenerate=regenerate,
+                    images=images, regenerate=regenerate, template=template,
                 )
                 # 对抗的取消同样在引擎层收敛（已裁决结论与部分报告文本保留）
                 if (adv_meta or {}).get("status") == "cancelled":
@@ -3538,6 +3729,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 adversarial=item.adversarial,
                 director_mode=item.director_mode, director=item.director,
                 team_template=item.team_template,
+                template=item.template, grant=item.grant,
                 local=item.local,
             ))
         except Exception as e:  # noqa: BLE001 - 错误要送回等待中的请求
@@ -3580,7 +3772,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     def _resolve_members(
         self, members_params: list | None, chair_answers: bool | None = None,
-        chair_key: tuple[str, str] | None = None,
+        chair_key: tuple[str, str] | None = None, limit: int | None = None,
     ) -> list[MemberSpec]:
         """解析圆桌成员：显式列表优先；缺省时取所有已配置 Key 的服务的当前模型。
 
@@ -3594,7 +3786,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """
         specs: list[MemberSpec] = []
         seen: set[tuple[str, str]] = set()
-        limit = self.cfg.roundtable.max_members
+        # 模板可收紧自动成员池的上限：0 / None 都按 [roundtable] 配置走
+        limit = self.cfg.roundtable.max_members if not limit else max(0, int(limit))
         chair_in = (
             self.cfg.roundtable.chair_answers if chair_answers is None
             else bool(chair_answers)
@@ -3646,7 +3839,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         agent: Agent | None = None, compare: bool = False,
         sid: str | None = None, images: list[ImageBlock] | None = None,
         debate_rounds: int | None = None, chair_answers: bool | None = None,
-        regenerate: bool = False,
+        regenerate: bool = False, template: dict | None = None,
     ) -> dict:
         """圆桌轮主体：成员并行作答（+ 可选辩论）→ 主席融合 → 结果并入主历史。
 
@@ -3663,19 +3856,50 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if self.provider is None:
             raise RuntimeError("圆桌需要当前主模型可用；请先在模型下拉中选择一个已配置 Key 的服务")
 
+        tpl = template if isinstance(template, dict) else None
+        tpl_limits = (tpl or {}).get("limits") or {}
+        tpl_agg = (tpl or {}).get("aggregator") or {}
         cfg = self.cfg.roundtable
         debate = cfg.debate_rounds if debate_rounds is None else max(0, min(int(debate_rounds), 2))
-        chair_in = cfg.chair_answers if chair_answers is None else bool(chair_answers)
+        # 模板限额优先级：显式本轮参数 > 模板 limits（0 = 不覆盖）> [roundtable] 配置
+        if tpl is not None and debate_rounds is None:
+            tpl_debate = int(tpl_limits.get("debate_rounds") or 0)
+            if tpl_debate:
+                debate = max(0, min(tpl_debate, 2))
+        # 模板轮主席只做融合、不再额外出草稿：调用数 = 角色数 ×(1+辩论轮)+1，
+        # 内置模板的预算（8 次）正好覆盖 3×(1+1)+1=7。显式 chair_answers 被忽略。
+        chair_in = (
+            False if tpl is not None
+            else (cfg.chair_answers if chair_answers is None else bool(chair_answers))
+        )
         # 主席按本轮会话解析：会话级模型覆盖/默认模型会话的 runtime 挂的是
         # detached provider，全局记账（self.provider*）跟它无关——拿全局当主席，
         # 融合就由「界面上根本没显示的模型」做了，会话自己的模型反而以成员身份
         # 重复出场，轮末 meta 与用量也记错名下。三段解析与 runtime 挂的
         # provider 同源（见 _runtime_provider），这里按它取主席实例与 (服务, 模型)。
-        chair = agent.provider if agent.provider is not None else self.provider
+        resident_chair = agent.provider if agent.provider is not None else self.provider
+        chair = resident_chair
         if sid:
             chair_name, chair_model = self._session_effective_model(sid)
         else:
             chair_name, chair_model = self.provider_name or "", self.provider_model or ""
+        # 模板的收口角色（aggregator）非空时替换主席：新 provider 本轮临时构建，
+        # 轮末释放；resident_chair（会话常驻 provider）继续保留。
+        template_chair = None
+        if tpl is not None and str(tpl_agg.get("provider") or "").strip():
+            chair_name = str(tpl_agg.get("provider") or "").strip()
+            chair_model = str(tpl_agg.get("model") or "").strip()
+            try:
+                template_chair = self._build_member_provider(chair_name, chair_model)
+            except Exception as e:  # noqa: BLE001 - 收口模型不可用要可读报错
+                raise RuntimeError(
+                    f"模板的收口模型「{chair_name}/{chair_model or '默认模型'}」不可用：{e}"
+                ) from e
+            chair = template_chair
+            if not chair_model:
+                chair_model = getattr(template_chair, "model", "") or ""
+        chair_system = str(tpl_agg.get("prompt") or "").strip() if tpl is not None else ""
+        budget = RunBudget(**((tpl or {}).get("budget") or {})) if tpl is not None else None
 
         emit_ev = _dump_emit(emit)
 
@@ -3710,13 +3934,26 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 上下文压缩护栏：成员与主席都要吃全量历史 + 全部草稿，超限时先压缩
         #（与 agent.run_turn 开头一致），否则最容易爆的反而是主席自己的上下文
         if agent.used_context_tokens() > agent.context_limit_tokens:
-            ev = await compact_history(agent, keep_recent=self.cfg.compaction_keep_recent)
+            ev = await compact_history(
+                agent, keep_recent=self.cfg.compaction_keep_recent, budget=budget,
+            )
             if ev is not None:
                 await emit_ev(ev)
 
-        members = self._resolve_members(members_params, chair_in, chair_key=(chair_name, chair_model))
+        if tpl is not None:
+            # 模板成员：按角色顺序逐个构造，不复用 _resolve_members 的去重——
+            # 同一模型承担多个角色是模板的合法写法（角色靠 system prompt 区分）
+            members = self._template_member_specs(
+                tpl.get("roles") or [],
+                chair_key=(chair_name, chair_model),
+                limit=int(tpl_limits.get("max_members") or 0),
+            )
+        else:
+            members = self._resolve_members(
+                members_params, chair_in, chair_key=(chair_name, chair_model)
+            )
         # 面板选了超过上限的成员会被静默截断，明确告知而不是让用户猜
-        if members_params:
+        if members_params and tpl is None:
             wanted = len({
                 (str((m or {}).get("provider", "")).strip(),
                  str((m or {}).get("model", "")).strip())
@@ -3760,18 +3997,27 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 chair_model=chair_model or "",
                 chair_context_tokens=agent.context_limit_tokens,
                 member_history_turns=cfg.member_history_turns,
+                chair_system=chair_system,
+                budget=budget,
             )
         finally:
             # 本轮为成员临时构建的 provider（httpx 连接池）随轮结束释放：
-            # 成员列表每轮重建（_resolve_members），不释放就是每轮泄漏一条
-            # 连接池。主席 provider 是常驻对象（agent.provider / 全局），保留。
-            self._release_turn_providers([s.provider for s in members], keep=(chair,))
+            # 成员列表每轮重建（_resolve_members / 模板角色），不释放就是每轮
+            # 泄漏一条连接池。主席 provider 是常驻对象（agent.provider / 全局）；
+            # 模板收口模型是本轮临时构建的，必须进释放清单（不能进 keep）。
+            release = [s.provider for s in members]
+            if template_chair is not None:
+                release.append(template_chair)
+            self._release_turn_providers(release, keep=(resident_chair,))
 
         def member_meta(r) -> dict:
             return {
                 "provider": r.spec.provider_name,
                 "model": r.spec.model,
                 "role": r.spec.role,
+                # 模板角色显示名（普通轮为空串；前端成员卡优先显示它）。
+                # getattr 兜底：测试/外部注入的最小 MemberSpec 兼容形状没有 name
+                "name": getattr(r.spec, "name", ""),
                 "status": r.status,
                 "error": r.error,
                 "input_tokens": r.input_tokens,
@@ -3788,6 +4034,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "rounds": 1 + debate,
             "members": [member_meta(r) for r in outcome.members],
         }
+        if tpl is not None:
+            # 模板身份随消息 meta 落库：历史回放卡头仍能显示「模板：xxx」
+            meta["template"] = str(tpl.get("name") or "")
+            meta["template_kind"] = "roundtable"
 
         # 用量入账：圆桌不走 agent.run_turn，agent.total_* 不会动（pipeline 那行
         # add_usage 记的是 0）。这里按成员逐条写 usage_log、融合记主席名下，
@@ -3804,6 +4054,33 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 pass
             # 预算告警：圆桌烧的真金白银也要触发越线提醒（内部不抛）
             await self._check_budget_alerts()
+
+        if budget is not None and budget.reason():
+            # 模板预算耗尽：已产出的成员草稿按对比式逐条保留（用户已经看到过），
+            # 如实标 error 并注明原因；不再融合、不再辩论。引擎在成员阶段已发过
+            # 一条 Notice，这里不再重复，只补收口帧。
+            reason = budget.reason_label()
+            meta["status"] = "error"
+            meta["error"] = reason
+            meta["budget_exceeded"] = budget.reason()
+            drafts = [r for r in outcome.members if r.text.strip()]
+            if drafts:
+                meta["mode"] = "compare"
+                meta["degraded"] = True
+                for r in drafts:
+                    m = Message.assistant([TextBlock(text=r.text.strip())])
+                    m.roundtable = {
+                        "mode": "compare", "chair": meta["chair"],
+                        "degraded": True, "budget_exceeded": budget.reason(),
+                        "members": [member_meta(r)],
+                    }
+                    agent.history.append(m)
+                    await emit_ev(AssistantMessage(message=m.model_dump()))
+            await emit_ev(ErrorEvent(message=reason))
+            await emit_ev(TurnFinished(
+                stop_reason="error", iterations=1, duration_ms=_rt_ms()
+            ))
+            return meta
 
         if compare:
             # A/B 对比：每个成员的回答单独成一条消息（带归属徽标），不融合
@@ -3948,6 +4225,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self, text: str, emit: EmitFn, members_params: list | None,
         agent: Agent | None = None, sid: str | None = None,
         images: list[ImageBlock] | None = None, regenerate: bool = False,
+        template: dict | None = None,
     ) -> dict:
         """对抗轮主体：发现 → 调查 → 建议 → 裁判 → 报告并入主历史。
 
@@ -3963,14 +4241,36 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if self.provider is None:
             raise RuntimeError("对抗需要当前主模型可用；请先在模型下拉中选择一个已配置 Key 的服务")
 
+        tpl = template if isinstance(template, dict) else None
+        tpl_limits = (tpl or {}).get("limits") or {}
+        tpl_agg = (tpl or {}).get("aggregator") or {}
         cfg = self.cfg.adversarial
+        # 模板限额：0 = 不覆盖 [adversarial] 配置
+        max_findings = int(tpl_limits.get("max_findings") or 0) or cfg.max_findings
+        role_timeout_s = int(tpl_limits.get("role_timeout_s") or 0) or cfg.role_timeout_s
         # 裁判按本轮会话解析（同 _roundtable_body 的主席口径）：会话级换过模型
         # 的标签/分屏列，终审必须由会话自己的模型做，而不是全局记账的模型
-        judge = agent.provider if agent.provider is not None else self.provider
+        resident_judge = agent.provider if agent.provider is not None else self.provider
+        judge = resident_judge
         if sid:
             judge_name, judge_model = self._session_effective_model(sid)
         else:
             judge_name, judge_model = self.provider_name or "", self.provider_model or ""
+        # 模板的收口角色（aggregator）非空时替换裁判（临时 provider，轮末释放）
+        template_judge = None
+        if tpl is not None and str(tpl_agg.get("provider") or "").strip():
+            judge_name = str(tpl_agg.get("provider") or "").strip()
+            judge_model = str(tpl_agg.get("model") or "").strip()
+            try:
+                template_judge = self._build_member_provider(judge_name, judge_model)
+            except Exception as e:  # noqa: BLE001 - 裁判不可用要可读报错
+                raise RuntimeError(
+                    f"模板的收口模型「{judge_name}/{judge_model or '默认模型'}」不可用：{e}"
+                ) from e
+            judge = template_judge
+            if not judge_model:
+                judge_model = getattr(template_judge, "model", "") or ""
+        budget = RunBudget(**((tpl or {}).get("budget") or {})) if tpl is not None else None
 
         emit_ev = _dump_emit(emit)
 
@@ -4002,7 +4302,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
         # 上下文压缩护栏：四个角色都吃会话上下文，超限先压缩（同圆桌）
         if agent.used_context_tokens() > agent.context_limit_tokens:
-            ev = await compact_history(agent, keep_recent=self.cfg.compaction_keep_recent)
+            ev = await compact_history(
+                agent, keep_recent=self.cfg.compaction_keep_recent, budget=budget,
+            )
             if ev is not None:
                 await emit_ev(ev)
 
@@ -4033,13 +4335,37 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             except Exception as e:  # noqa: BLE001 - 构建失败降级为错误角色卡
                 return MemberSpec(provider_name=name, model=model, build_error=str(e)[:200])
 
-        # 自动序列：未带 members（纯自动）或带普通条目时才解析；三个角色全部
-        # 显式指定时不白建 Provider
+        # 模板的角色落位（带边界）：seat 0/1/2 = 发现/调查/建议。带 phase key
+        # 的角色优先归位；没有 phase key 的按出现顺序补空位；超过三个的角色
+        # 本期不参与（对抗只有三个角色），如实计入 dropped（preview 同口径）。
+        tpl_seat_roles: dict[str, dict] = {}
+        tpl_extra_roles: list[dict] = []
+        for role in (tpl or {}).get("roles") or []:
+            if not isinstance(role, dict):
+                continue
+            key = str(role.get("key") or "").strip()
+            if key in (PHASE_FINDER, PHASE_INVESTIGATOR, PHASE_ADVISOR) \
+                    and key not in tpl_seat_roles:
+                tpl_seat_roles[key] = role
+            else:
+                tpl_extra_roles.append(role)
+        for phase in (PHASE_FINDER, PHASE_INVESTIGATOR, PHASE_ADVISOR):
+            if phase not in tpl_seat_roles and tpl_extra_roles:
+                tpl_seat_roles[phase] = tpl_extra_roles.pop(0)
+
+        # 自动序列：未带 members（纯自动）或带普通条目时才解析；模板已把三个
+        # 角色全部指定为具体服务时不白建 Provider（也避免占掉测试注入的
+        # provider 工厂池）。
+        need_auto_pool = tpl is None or any(
+            phase not in tpl_seat_roles
+            or not str((tpl_seat_roles[phase] or {}).get("provider") or "").strip()
+            for phase in (PHASE_FINDER, PHASE_INVESTIGATOR, PHASE_ADVISOR)
+        )
         specs_auto = (
             self._resolve_members(
                 auto_params, False, chair_key=(judge_name, judge_model),
             )
-            if (members_params is None or auto_params) else []
+            if (members_params is None or auto_params) and need_auto_pool else []
         )
 
         # 未显式指定的角色按 固定角色顺序 从自动序列依次取（游标递进）：全不指定
@@ -4060,9 +4386,51 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             auto_cursor += 1
             return spec
 
-        finder = _role_spec("finder")
-        investigator = _role_spec("investigator")
-        advisor = _role_spec("advisor")
+        def _template_role_spec(role: dict) -> MemberSpec:
+            """模板角色 → MemberSpec：指定服务则新建，留空按自动池游标补位。"""
+            nonlocal auto_cursor
+            name = str(role.get("name") or "").strip()
+            provider_name = str(role.get("provider") or "").strip()
+            model = str(role.get("model") or "").strip()
+            if provider_name:
+                spec = _explicit_spec(provider_name, model)
+                spec.name = name
+                return spec
+            if not specs_auto:
+                return MemberSpec(
+                    name=name, provider_name="", model="",
+                    build_error="未指定模型且没有已配置 Key 的服务",
+                )
+            base = specs_auto[auto_cursor % len(specs_auto)]
+            auto_cursor += 1
+            return MemberSpec(
+                name=name, provider_name=base.provider_name, model=base.model,
+                provider=base.provider, build_error=base.build_error,
+            )
+
+        finder = (
+            _template_role_spec(tpl_seat_roles[PHASE_FINDER])
+            if PHASE_FINDER in tpl_seat_roles else _role_spec(PHASE_FINDER)
+        )
+        investigator = (
+            _template_role_spec(tpl_seat_roles[PHASE_INVESTIGATOR])
+            if PHASE_INVESTIGATOR in tpl_seat_roles else _role_spec(PHASE_INVESTIGATOR)
+        )
+        advisor = (
+            _template_role_spec(tpl_seat_roles[PHASE_ADVISOR])
+            if PHASE_ADVISOR in tpl_seat_roles else _role_spec(PHASE_ADVISOR)
+        )
+        # 角色人设：只放非空值（空串必须回落 adversarial.py 的内置默认提示词，
+        # 不能让「模板留空」把不对称激励整段抹掉）；收口 prompt 归裁判。
+        prompts: dict[str, str] = {}
+        for phase, role in tpl_seat_roles.items():
+            text = str((role or {}).get("prompt") or "").strip()
+            if text:
+                prompts[phase] = text
+        if tpl is not None:
+            agg_prompt = str(tpl_agg.get("prompt") or "").strip()
+            if agg_prompt:
+                prompts[PHASE_JUDGE] = agg_prompt
         if all(s.provider is None for s in (finder, investigator, advisor)):
             await emit_ev(TurnFinished(stop_reason="error", iterations=1, duration_ms=_adv_ms()))
             raise RuntimeError(
@@ -4086,24 +4454,31 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 judge_model=judge_model or "",
                 history=role_history,
                 user_text=question,
-                timeout_s=cfg.role_timeout_s,
+                timeout_s=role_timeout_s,
                 emit=emit_ev,
-                max_findings=cfg.max_findings,
+                max_findings=max_findings,
+                prompts=prompts,
+                budget=budget,
             )
         finally:
-            # 角色临时 provider 随轮释放（同圆桌：裁判是用主 Agent 的常驻实例）
-            self._release_turn_providers(
-                [finder.provider, investigator.provider, advisor.provider],
-                keep=(judge,),
-            )
+            # 角色临时 provider 随轮释放（同圆桌：裁判是用主 Agent 的常驻实例；
+            # 模板收口裁判是本轮临时构建的，必须进释放清单）
+            release = [finder.provider, investigator.provider, advisor.provider]
+            if template_judge is not None:
+                release.append(template_judge)
+            self._release_turn_providers(release, keep=(resident_judge,))
 
         meta = {
             "mode": "adversarial",
             "judge": {"provider": judge_name, "model": judge_model},
             "roles": [
-                {"role": "finder", "provider": finder.provider_name, "model": finder.model},
-                {"role": "investigator", "provider": investigator.provider_name, "model": investigator.model},
-                {"role": "advisor", "provider": advisor.provider_name, "model": advisor.model},
+                {"role": "finder", "provider": finder.provider_name,
+                 "model": finder.model, "name": getattr(finder, "name", "")},
+                {"role": "investigator", "provider": investigator.provider_name,
+                 "model": investigator.model,
+                 "name": getattr(investigator, "name", "")},
+                {"role": "advisor", "provider": advisor.provider_name,
+                 "model": advisor.model, "name": getattr(advisor, "name", "")},
                 {"role": "judge", "provider": judge_name, "model": judge_model},
             ],
             "stats": adversarial_stats(outcome),
@@ -4116,6 +4491,14 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "status": outcome.status,
             "error": outcome.error,
         }
+        if tpl is not None:
+            # 模板身份随消息 meta 落库：历史回放卡头仍能显示「模板：xxx」
+            meta["template"] = str(tpl.get("name") or "")
+            meta["template_kind"] = "adversarial"
+        if budget is not None and budget.reason():
+            # 预算耗尽：报告（若有）照常保留在 outcome.report / meta["report"]，
+            # 状态如实标 error 并带上原因码
+            meta["budget_exceeded"] = budget.reason()
 
         # 用量入账：对抗不走 agent.run_turn，agent.total_* 不会动。按角色逐条
         # 写 usage_log（裁判记当前主模型名下），统计页与预算护栏才看得见真实成本。
@@ -4434,11 +4817,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 if key in seen:
                     continue
                 seen.add(key)
+                member_name = str((m or {}).get("name", "") or "").strip()
+                persona = str((m or {}).get("persona", "") or "").strip()
+                if len(persona) > TEAM_TEMPLATE_PERSONA_MAX:
+                    raise TeamError(
+                        f"成员「{member_name or name}」的人设过长"
+                        f"（最多 {TEAM_TEMPLATE_PERSONA_MAX} 字符）"
+                    )
                 spec = TeamMemberSpec(
-                    name=str((m or {}).get("name", "") or "").strip(),
+                    name=member_name,
                     provider_name=name,
                     model=model,
-                    persona=str((m or {}).get("persona", "") or "").strip(),
+                    persona=persona,
                     context_limit_tokens=self._team_provider_context_limit(name),
                 )
                 try:
@@ -4458,7 +4848,166 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 ))
         return specs
 
-    def _team_budget_check(self) -> Callable[[], bool]:
+    # ---- 协作模板：成员实例化 / 工具表裁剪 / 运行级授权（本期）----
+
+    def _template_member_specs(
+        self, roles: list[dict], chair_key: tuple[str, str] = ("", ""),
+        limit: int = 0,
+    ) -> list[MemberSpec]:
+        """模板角色 → 圆桌 MemberSpec（按角色顺序，不走去重）。
+
+        指定服务的角色新建 Provider；留空的角色按角色顺序从「已配好 Key 的
+        服务」池里轮转补位（与团队模板同口径）。同一模型承担多个角色是允许的
+        ——角色靠人设（system prompt）区分，不是身份预设（role 留空，避免
+        MEMBER_ROLES 的内置身份提示词被再拼一遍）。
+        """
+        specs: list[MemberSpec] = []
+        auto: list[MemberSpec] | None = None
+        cursor = 0
+        for role in roles or []:
+            if not isinstance(role, dict):
+                continue
+            name = str(role.get("name") or "").strip()
+            provider_name = str(role.get("provider") or "").strip()
+            model = str(role.get("model") or "").strip()
+            prompt = str(role.get("prompt") or "").strip()
+            if provider_name:
+                try:
+                    provider = self._build_member_provider(provider_name, model)
+                    specs.append(MemberSpec(
+                        provider_name=provider_name,
+                        model=model or getattr(provider, "model", ""),
+                        provider=provider,
+                        role="", name=name, prompt=prompt, system_prompt=prompt,
+                    ))
+                except Exception as e:  # noqa: BLE001 - 构建失败降级错误成员卡
+                    specs.append(MemberSpec(
+                        provider_name=provider_name, model=model,
+                        build_error=str(e)[:200],
+                        role="", name=name, prompt=prompt, system_prompt=prompt,
+                    ))
+                continue
+            if auto is None:
+                auto = self._resolve_members(
+                    None, False, chair_key=chair_key, limit=limit,
+                )
+            if not auto:
+                specs.append(MemberSpec(
+                    provider_name="", model="",
+                    build_error="未指定模型且没有已配置 Key 的服务",
+                    role="", name=name, prompt=prompt, system_prompt=prompt,
+                ))
+                continue
+            src = auto[cursor % len(auto)]
+            cursor += 1
+            specs.append(MemberSpec(
+                provider_name=src.provider_name, model=src.model,
+                provider=src.provider, build_error=src.build_error,
+                role="", name=name, prompt=prompt, system_prompt=prompt,
+            ))
+        return specs
+
+    def _template_team_specs(self, template: dict) -> list[TeamMemberSpec]:
+        """团队模板 → TeamMemberSpec：先补 model 再去重（与 _resolve_team_members
+        同口径），被（服务, 模型）重复合并掉的角色由调用方发 Notice。
+
+        模板的 provider 全空是常态（内置「团队·交付小组」就是）：此时实际
+        入册人数受已配置 Key 的服务数限制，重复角色在这里合并，而不是建队时
+        静默截断。
+        """
+        roles = (template or {}).get("roles") or []
+        auto: list[MemberSpec] | None = None
+        cursor = 0
+        specs: list[TeamMemberSpec] = []
+        seen: set[tuple[str, str]] = set()
+        for role in roles:
+            if not isinstance(role, dict):
+                continue
+            name = str(role.get("name") or "").strip()
+            persona = str(role.get("prompt") or "").strip()
+            provider_name = str(role.get("provider") or "").strip()
+            model = str(role.get("model") or "").strip()
+            if provider_name:
+                spec = TeamMemberSpec(
+                    name=name, provider_name=provider_name, model=model,
+                    persona=persona,
+                    context_limit_tokens=self._team_provider_context_limit(provider_name),
+                )
+                try:
+                    provider = self._build_member_provider(provider_name, model)
+                    spec.provider = provider
+                    if not spec.model:
+                        spec.model = getattr(provider, "model", "")
+                except Exception as e:  # noqa: BLE001 - 构建失败降级错误成员
+                    spec.build_error = str(e)[:200]
+            else:
+                if auto is None:
+                    auto = self._resolve_members(None, False, chair_key=("", ""))
+                if not auto:
+                    spec = TeamMemberSpec(
+                        name=name, persona=persona,
+                        build_error="未指定模型且没有已配置 Key 的服务",
+                    )
+                else:
+                    src = auto[cursor % len(auto)]
+                    cursor += 1
+                    spec = TeamMemberSpec(
+                        name=name, provider_name=src.provider_name, model=src.model,
+                        provider=src.provider, build_error=src.build_error,
+                        persona=persona,
+                        context_limit_tokens=self._team_provider_context_limit(
+                            src.provider_name
+                        ),
+                    )
+            key = (spec.provider_name, spec.model)
+            if key in seen:
+                continue  # 与 team.py 的 (服务, 模型) 同键去重一致（含空键）
+            seen.add(key)
+            specs.append(spec)
+        return specs
+
+    @staticmethod
+    def _template_allowed_tools(template: dict) -> list[str]:
+        """模板声明的具名工具（run_command 走前缀通道，不进 allowed_tools）。"""
+        names: list[str] = []
+        for entry in effective_tool_entries((template or {}).get("roles") or []):
+            base = entry.split(":", 1)[0]
+            if base == _RUN_COMMAND:
+                continue
+            if base not in names:
+                names.append(base)
+        return names
+
+    def _team_registry_for_template(
+        self, full: ToolRegistry, template: dict,
+    ) -> ToolRegistry:
+        """按模板的 team 级工具并集 + needs 上限裁剪执行型工具表。
+
+        这是**可见性**筛选，不是安全边界（团队每个成员共用同一 registry，
+        本期不做逐成员隔离）：真正的放行/拦截仍由 GrantedGate / 会话门判定。
+        needs=read 只留 READONLY；needs=write 只留 READONLY + WRITE；
+        needs=exec 才可能把 DANGEROUS 工具挂上（run_command 仍只在命令前缀
+        命中时由 GrantedGate 放行，delete_file 等永远逐次确认）。
+        """
+        needs = derive_needs((template or {}).get("roles") or [])
+        entries = effective_tool_entries((template or {}).get("roles") or [])
+        names = [entry.split(":", 1)[0] for entry in entries]
+        subset = full.subset(names)
+        if needs == "read":
+            return ToolRegistry(
+                [t for t in subset.all() if t.safety == Safety.READONLY]
+            )
+        if needs == "write":
+            return ToolRegistry(
+                [t for t in subset.all()
+                 if t.safety in (Safety.READONLY, Safety.WRITE)]
+            )
+        return subset
+
+    def _team_budget_check(
+        self, run_budget: RunBudget | None = None,
+        run_tokens: dict | None = None,
+    ) -> Callable[[], bool]:
         """团队的预算越线判定钩子（二期）：接既有每日 token 预算护栏路径。
 
         与 send() 入口的护栏同口径：cfg.daily_token_budget > 0 且当日
@@ -4467,9 +5016,19 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         停掉团队，费用护栏由宿主其余路径兜底（编排器对钩子异常同样按未越线
         处理，这里不吞第二次）。异步实现：usage_today 是 async，编排器的
         _budget_over 对 awaitable 返回值照常等待。
+
+        模板预算（本期）：run_budget 非空时先把跨轮累计的 token（run_tokens
+        同一个 dict，挂在编排器上跨轮复用）回填进去，再判 calls/tokens/seconds
+        三线；模板预算与每日预算任一越线都算越线。团队只在三个推进点检查
+        （成员轮/总管轮/自动循环），不宣称成员轮中途熔断。
         """
 
         async def check() -> bool:
+            if run_budget is not None:
+                if run_tokens is not None:
+                    run_budget.add_tokens(int(run_tokens.get("total", 0) or 0))
+                if run_budget.reason():
+                    return True
             budget = int(self.cfg.daily_token_budget or 0)
             if budget <= 0:
                 return False
@@ -4517,6 +5076,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         gate: PermissionGate | None = None, working_dir: Path | None = None,
         director_mode: str = "user", director_params: dict | None = None,
         template_name: str = "",
+        template: dict | None = None, grant: dict | None = None,
+        collab_tokens: dict | None = None,
     ) -> TeamOrchestrator:
         """为本会话建队（chat.send team=true 且无活动团队）：发 TeamStarted 并登记。
 
@@ -4545,8 +5106,38 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         记进编排器快照，供 team.resident_set 把队伍绑回模板（定时触发按
         模板匹配复用的依据）；手选成员建队传空串。
         """
+        tpl = template if isinstance(template, dict) else None
+        tpl_agg = (tpl or {}).get("aggregator") or {}
+        grant_info = grant if isinstance(grant, dict) else {}
+        read_only = bool(grant_info.get("read_only"))
+        grant_scope = str(grant_info.get("scope") or "ask_each")
+        if grant_scope not in ("run", "ask_each"):
+            grant_scope = "ask_each"
+        run_budget = RunBudget(**((tpl or {}).get("budget") or {})) if tpl is not None else None
+        tokens = collab_tokens if isinstance(collab_tokens, dict) else {"total": 0}
+
+        # 模板的收口角色决定总管形态：aggregator.provider 非空 = AI 总管
+        # （独立 temp provider）；为空 = 用户总管（模板明确「没人替你验收」）。
         director: DirectorSpec | None = None
-        if director_mode == "ai":
+        effective_director_mode = director_mode
+        if tpl is not None:
+            d_provider = str(tpl_agg.get("provider") or "").strip()
+            d_model = str(tpl_agg.get("model") or "").strip()
+            effective_director_mode = "ai" if d_provider else "user"
+            if d_provider:
+                director = DirectorSpec(
+                    provider_name=d_provider, model=d_model,
+                    context_limit_tokens=self._team_provider_context_limit(d_provider),
+                    system_prompt=str(tpl_agg.get("prompt") or "").strip(),
+                )
+                try:
+                    provider = self._build_member_provider(d_provider, d_model)
+                    director.provider = provider
+                    if not director.model:
+                        director.model = getattr(provider, "model", "")
+                except Exception as e:  # noqa: BLE001 - 构建失败降级，不阻断建队
+                    director.build_error = str(e)[:200]
+        elif director_mode == "ai":
             d_provider = str((director_params or {}).get("provider", "") or "").strip()
             d_model = str((director_params or {}).get("model", "") or "").strip()
             if not d_provider:
@@ -4564,13 +5155,73 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     director.model = getattr(provider, "model", "")
             except Exception as e:  # noqa: BLE001 - 构建失败降级，不阻断建队
                 director.build_error = str(e)[:200]
-        specs = self._resolve_team_members(members_params)
-        orch = TeamOrchestrator(
+        specs = (
+            self._template_team_specs(tpl)
+            if tpl is not None else self._resolve_team_members(members_params)
+        )
+        if tpl is not None:
+            declared = len([r for r in (tpl.get("roles") or []) if isinstance(r, dict)])
+            if len(specs) < declared:
+                await emit(NoticeEvent(
+                    message=f"模板的 {declared} 个角色按（服务, 模型）去重后组成 "
+                            f"{len(specs)} 名队员：已配置 Key 的服务不足或模型重复"
+                ))
+        # 模板 max_calls 是 provider 调用次数（含重试/格式纠错），不是轮次：
+        # 给每个成员与 AI 总管的 provider 套一层计数代理，团队链路（含小会）
+        # 的每次真实 stream 都会 spend()（审查 finding 15）。
+        if run_budget is not None:
+            for spec in specs:
+                if spec.provider is not None:
+                    spec.provider = BudgetedProvider(spec.provider, run_budget)
+            if director is not None and director.provider is not None:
+                director.provider = BudgetedProvider(director.provider, run_budget)
+        full_registry = self._build_full_registry(recorder)
+        registry = full_registry
+        if tpl is not None:
+            registry = self._team_registry_for_template(full_registry, tpl)
+            if read_only:
+                # 「先只读跑一遍」：工具表只留 READONLY（不挂写/执行），且不授予
+                # 任何具名写工具或命令前缀
+                registry = ToolRegistry(
+                    [t for t in full_registry.all() if t.safety == Safety.READONLY]
+                )
+        # 运行级授权（grant.scope=run）：只包一层 GrantedGate——写工具限工作
+        # 目录内、命令限模板声明的前缀；删除语义 / 引擎主目录 / 目录外写入 /
+        # DANGEROUS 一律回退会话门逐次确认。成员 Agent 在建队时缓存 gate，
+        # 授权范围因此按团队生命周期固定（不做逐轮变更）。
+        team_gate = gate
+        if tpl is not None and gate is not None:
+            if read_only:
+                team_gate = GrantedGate(
+                    gate, allowed_tools=(), command_prefixes=(),
+                    run_id=uuid4().hex[:12],
+                    label=f"模板「{tpl.get('name', '')}」只读运行",
+                )
+            elif grant_scope == "run":
+                team_gate = GrantedGate(
+                    gate,
+                    allowed_tools=self._template_allowed_tools(tpl),
+                    command_prefixes=collect_command_prefixes(tpl.get("roles") or []),
+                    run_id=uuid4().hex[:12],
+                    label=f"模板「{tpl.get('name', '')}」",
+                )
+        if tpl is not None and read_only:
+            await emit(NoticeEvent(
+                message="本次按「只读」运行模板：队员只挂只读工具，不写文件、不运行命令。"
+            ))
+        team_cfg = (
+            TeamCfgView(self.cfg.team, run_budget)
+            if run_budget is not None else self.cfg.team
+        )
+        budget_note = (
+            (lambda: run_budget.reason_label()) if run_budget is not None else None
+        )
+        orch_kwargs = dict(
             emit=emit,
             working_dir=working_dir,
-            registry=self._build_full_registry(recorder),
-            gate=gate,
-            cfg=self.cfg.team,
+            registry=registry,
+            gate=team_gate,
+            cfg=team_cfg,
             max_iterations=self.cfg.subagent_max_iterations,
             restrict_to_workdir=self.cfg.restrict_to_workdir,
             session_id=sid,
@@ -4579,17 +5230,26 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             use_ripgrep=self.cfg.search.use_ripgrep,
             hooks=self.hooks,
             mods=self.mods,
-            director_mode=director_mode,
+            director_mode=effective_director_mode,
             director=director,
-            budget_check=self._team_budget_check(),
+            budget_check=self._team_budget_check(run_budget, tokens),
             context_limit_tokens=self.cfg.context_limit_tokens,
             compaction_keep_recent=self.cfg.compaction_keep_recent,
             compaction_trigger=self.cfg.compaction_trigger,
             compaction_auto=self.cfg.compaction_auto,
             # 频道消息逐条落库（三期）：收队/重启后仍可按 team_id 回放全量
             message_sink=self._team_message_sink(sid),
-            source_template=template_name,
+            source_template=str((tpl or {}).get("name") or template_name),
         )
+        # 预算越线文案：模板预算注入精确原因（次数 / 时长 / token），
+        # 未带模板时团队沿用内置的 token 预算句
+        if budget_note is not None:
+            orch_kwargs["budget_note"] = budget_note
+        orch = TeamOrchestrator(**orch_kwargs)
+        # 模板预算与跨轮 token 累计挂编排器：同一支队伍的第二条消息起不再
+        # 重读模板，预算线必须随团队生命周期延续
+        orch.collab_budget = run_budget
+        orch.collab_tokens = tokens
         await orch.create_team(specs)  # TeamStarted 在这里发出；超上限截断发 Notice
         self._teams[sid] = orch
         self._teams_interrupted.pop(sid, None)
@@ -4597,15 +5257,23 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return orch
 
     @staticmethod
-    def _team_meta(orch: TeamOrchestrator) -> dict:
+    def _team_meta(orch: TeamOrchestrator, template_name: str = "") -> dict:
         """assistant 消息的团队 meta：{"mode": "team", "team": {…}}，仿 roundtable meta。
 
         Message 的元数据槽只有 roundtable 一个（messages.py 未设通用 meta 字段），
         团队摘要搭这个槽随会话落库/下发，前端按 mode == "team" 与圆桌卡分流。
         team 块自带建队分配的 team_id（三期）：前端回放全量频道消息
         （team.log）就凭 meta 里这个 id，收队/重启后仍然可用。
+
+        模板身份（本期）同时放在顶层 template / template_kind：卡头与历史回放
+        不依赖 team 快照的字段演进（快照里的 template 是常驻绑定的同一来源）。
         """
-        return {"mode": "team", "team": orch.snapshot()["team"]}
+        meta: dict = {"mode": "team", "team": orch.snapshot()["team"]}
+        name = str(template_name or getattr(orch, "source_template", "") or "").strip()
+        if name:
+            meta["template"] = name
+            meta["template_kind"] = "team"
+        return meta
 
     async def _team_body(
         self, text: str, emit: EmitFn, members_params: list | None,
@@ -4614,6 +5282,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         plan_mode: bool = False,
         director_mode: str = "user", director: dict | None = None,
         template_name: str = "",
+        template: dict | None = None, grant: dict | None = None,
+        local: bool = True,
     ) -> dict:
         """团队轮主体：用户消息进团队频道 → 总管推进（成员唤醒 / 自动闭环）。
 
@@ -4643,12 +5313,33 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
         emit_ev = _dump_emit(emit)
 
+        # 远程驱动已有团队：GrantedGate 是建队时按「本机用户点了本次运行免
+        # 确认」发的，不能由后续远程消息继续搭乘（审查 finding 6）。永久
+        # 收回为内部门逐次确认（fail-closed；本机要恢复免确认需重新建队）。
+        if orch is not None and not local:
+            team_gate = getattr(orch, "_gate", None)
+            if isinstance(team_gate, GrantedGate):
+                orch.set_gate(object.__getattribute__(team_gate, "_inner"))
+                await emit_ev(NoticeEvent(
+                    message="远程连接驱动已有团队：本次运行的模板免确认授权已收回，"
+                            "后续操作改为逐次确认。"
+                ))
+
         # 用量按事件流归属：usage 事件先于其定稿 TeamMessage 到达，攒到定稿时
         # 记到名下（MemberTurnResult 的用量不随返回值交给宿主，事件流是逐成员
         # 归属的唯一来源）。总管轮与小会主席的 usage 先于 from="director" 的
         # 定稿到达——冲进 director_acc，行键 provider/model 取 director_info
         # （_flush_team_usage），不与队员混账。极端取消时序下剩余用量挂给最后
         # 定稿的归属方，不凭空丢账。
+        # 模板预算：创建轮从模板构造；同一支队伍后续消息复用编排器上挂着的
+        # 那份（预算线随团队生命周期延续，不因每轮新建而重置）。token 计数用
+        # 同一个 dict 跨轮累计，并回填进 RunBudget（add_tokens 取 max，
+        # 重复回填不重复累加）。
+        run_tokens = getattr(orch, "collab_tokens", None) if orch is not None else None
+        if not isinstance(run_tokens, dict):
+            run_tokens = {"total": 0}
+        run_budget = getattr(orch, "collab_budget", None) if orch is not None else None
+
         usage_acc: dict[str, list[int]] = {}  # 成员名 -> [input, output]
         director_acc = [0, 0]  # 总管（AI 模式）累计 [input, output]
         pending_usage: list = []
@@ -4656,6 +5347,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         async def team_emit(ev) -> None:
             if ev.kind == "usage":
                 pending_usage.append(ev)
+                # 模板预算的 token 线吃**全部** provider 用量（成员 + 总管 +
+                # 小会主席），不依赖定稿归属结算的时序——预算检查点随时能读到
+                run_tokens["total"] = int(run_tokens.get("total", 0) or 0) + int(
+                    ev.input_tokens
+                ) + int(ev.output_tokens)
             elif ev.kind == "team_message" and ev.from_member == "director":
                 if orch is not None and orch.director_mode == "ai":
                     # 总管轮与小会主席的 usage 先于 from="director" 的定稿到达
@@ -4720,7 +5416,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     gate=agent.gate, working_dir=agent.working_dir,
                     director_mode=director_mode, director_params=director,
                     template_name=template_name,
+                    template=template, grant=grant,
+                    collab_tokens=run_tokens,
                 )
+                # _team_create 内已经建好并被预算钩子引用的那一份才是执法
+                # 实例：这里绝不能再用本轮临时构造的 run_budget 覆盖它，
+                # 否则 orch.collab_budget 的 calls/tokens 永远是 0，meta 也
+                # 读不到越线原因（审查 finding 16）。
+                orch.collab_tokens = run_tokens
+                run_budget = orch.collab_budget
                 orch.set_plan_mode(plan_mode)
             else:
                 # 逐轮重绑发射链（仅空闲轮）：编排器只在建队轮拿到过 emit，
@@ -4752,7 +5456,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 stopped_msg = Message.assistant([TextBlock(
                     text="（本轮已停止：正在发言的队员已把已产出的部分定稿进团队频道。）",
                 )])
-                stopped_msg.roundtable = self._team_meta(orch)
+                stopped_msg.roundtable = self._team_meta(
+                    orch,
+                    str((template or {}).get("name") or template_name or ""),
+                )
                 agent.history.append(stopped_msg)
                 for ev in (
                     AssistantMessage(message=stopped_msg.model_dump()),
@@ -4791,7 +5498,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             self._teams_interrupted.pop(sid, None)
             self._persist_team_state()
 
-        meta = self._team_meta(orch)
+        meta = self._team_meta(
+            orch, str((template or {}).get("name") or template_name or "")
+        )
+        if run_budget is not None and run_budget.reason():
+            meta["budget_exceeded"] = run_budget.reason()
+            meta["budget_note"] = run_budget.reason_label()
         digest = Message.assistant([TextBlock(text=_team_digest(orch, result))])
         digest.roundtable = meta
         agent.history.append(digest)
@@ -5206,20 +5918,87 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         """team.template_save：保存模板。name 是唯一键——同名覆盖原条目
         （位置不变、内容换新，created_at 刷新为本次保存时刻），新名追加。
         成员行只存 (provider, model, name, persona) 标识，不校验服务存在性
-        （应用模板时走 chat.send 既有解析路径，缺 Key 照常降级错误成员）。"""
-        raw_members = params.get("members")
-        members = [
-            TeamTemplateMember(
-                provider=str((m or {}).get("provider", "") or "").strip(),
-                model=str((m or {}).get("model", "") or "").strip(),
-                name=str((m or {}).get("name", "") or "").strip(),
-                persona=str((m or {}).get("persona", "") or "").strip(),
+        （应用模板时走 chat.send 既有解析路径，缺 Key 照常降级错误成员）。
+
+        协作模板扩展（本期，全部可选）：needs / tools_allow / tools_deny /
+        budget——缺省时同名沿用旧值（旧前端/旧调用方保存不会把已声明的授权
+        面抹掉）。内置名保留（内置团队模板只在代码里、不落盘）；与协作模板册
+        重名拒绝（两册的 remove/preview 都按 source 消歧）。
+        """
+        # 先用团队模板册自己的名称校验：空名/路径/冒号等错误按团队模板口径
+        # 报（与旧接口文案一致），再跑协作扩展字段的校验
+        name_raw = validate_team_template_name(str(params.get("name", "") or ""))
+        if is_builtin_template_name(name_raw):
+            raise TeamError(
+                f"「{name_raw}」是内置模板名，不能覆盖；请改名后另存"
+                f"（例如「{name_raw} · 我的版本」）"
             )
-            for m in (raw_members if isinstance(raw_members, list) else [])
-            if isinstance(m, dict)
-        ]
+        if any(t.name == name_raw for t in self.collab_templates.templates):
+            raise TeamError(f"已有同名的协作模板：{name_raw}，请换一个名字")
+        old = next(
+            (t for t in self.team_templates.templates if t.name == name_raw), None
+        )
+        raw_members = params.get("members")
+        members: list[TeamTemplateMember] = []
+        for m in (raw_members if isinstance(raw_members, list) else []):
+            if not isinstance(m, dict):
+                continue
+            member_name = str(m.get("name", "") or "").strip()
+            persona = str(m.get("persona", "") or "").strip()
+            if len(persona) > TEAM_TEMPLATE_PERSONA_MAX:
+                raise TeamError(
+                    f"成员「{member_name or '未命名'}」的人设过长"
+                    f"（最多 {TEAM_TEMPLATE_PERSONA_MAX} 字符）"
+                )
+            members.append(TeamTemplateMember(
+                provider=str(m.get("provider", "") or "").strip(),
+                model=str(m.get("model", "") or "").strip(),
+                name=member_name,
+                persona=persona,
+            ))
         raw_director = params.get("director")
-        template = TeamTemplate(
+        # 可选协作字段：缺省沿用旧值（同名覆盖时不丢授权声明）
+        needs = (
+            str(params.get("needs") or "").strip()
+            if params.get("needs") is not None
+            else str(getattr(old, "needs", "read") or "read")
+        )
+        if isinstance(params.get("tools_allow"), list):
+            tools_allow = [str(x) for x in params["tools_allow"]]
+        else:
+            tools_allow = list(getattr(old, "tools_allow", []) or [])
+        if isinstance(params.get("tools_deny"), list):
+            tools_deny = [str(x) for x in params["tools_deny"]]
+        else:
+            tools_deny = list(getattr(old, "tools_deny", []) or [])
+        raw_budget = params.get("budget")
+        if isinstance(raw_budget, dict):
+            budget = _CollabTeamTemplateBudget(**raw_budget)
+        elif old is not None and getattr(old, "budget", None) is not None:
+            old_budget = old.budget
+            budget = (
+                old_budget.model_copy(deep=True)
+                if hasattr(old_budget, "model_copy")
+                else _CollabTeamTemplateBudget(**dict(old_budget))
+            )
+        else:
+            budget = _CollabTeamTemplateBudget()
+        # 复用协作模板的条目校验（needs 取值、run_command:<前缀> 的安全提炼、
+        # 条目长度/逗号等）与注册表感知检查：团队模板不另起一套宽松口径
+        probe = CollabTemplate(
+            name=name_raw or "团队模板",
+            kind="team",
+            roles=[{
+                "key": "team", "name": name_raw or "团队",
+                "needs": needs, "tools_allow": tools_allow,
+                "tools_deny": tools_deny,
+            }],
+            budget=budget.model_dump(),
+        )
+        validate_collab_template(probe, allow_builtin=False)
+        role = probe.roles[0]
+        warnings = self._collab_template_warnings(probe)
+        template = _CollabTeamTemplate(
             name=str(params.get("name", "") or ""),
             director_mode=str(params.get("director_mode") or "user"),
             director=TeamTemplateDirector(
@@ -5228,15 +6007,661 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             ),
             members=members,
             created_at=time.time(),  # 宿主盖戳（模板册自身不感知时钟）
+            needs=role.needs,
+            tools_allow=list(role.tools_allow),
+            tools_deny=list(role.tools_deny),
+            budget=_CollabTeamTemplateBudget(**probe.budget.model_dump()),
         )
         self.team_templates.upsert(template)
-        return {"template": template.model_dump()}
+        return {"template": template.model_dump(), "warnings": warnings}
 
     async def team_template_remove(self, params: dict) -> dict:
         """team.template_remove：按名删模板（名字精确匹配；不存在报 TeamError）。"""
         name = str(params.get("name", "") or "").strip()
         self.team_templates.remove(name)
         return {"name": name}
+
+    # ---- 协作模板（本期）：内置三张 + 用户圆桌/对抗 + 团队模板统一画廊 ----
+    # 协作模板统一放在 CollabTemplate 形状下读写：用户圆桌/对抗住
+    # collab_templates.json（CollabTemplateStore），团队模板仍住 teams.json
+    # （TeamTemplateStore，本期只加可选 needs/tools/budget 字段，不迁移）。
+    # schema 里没有 gate / auto_accept / permission——模板只能声明 needs 与
+    # 工具白名单，运行时授权由 GrantedGate 与会话门取严，模板数据永远不能
+    # 关闭或降低权限门。
+
+    def _normalize_template_dict(self, data: dict) -> dict:
+        """把调用方（测试/内部）直传的模板 dict 规范成统一形状。
+
+        ``builtin`` 标记不可信：只有代码里的内置模板才有内置身份；用户传来的
+        同名字段一律抹掉（内置名另由 validate_collab_template 拒绝）。
+        """
+        payload = dict(data or {})
+        try:
+            template = CollabTemplate(**payload)
+        except ValidationError as e:
+            first = e.errors()[0] if e.errors() else {}
+            loc = ".".join(str(x) for x in (first.get("loc") or ()))
+            raise CollabTemplateError(
+                f"模板数据格式不正确：{loc or '字段'} {first.get('msg', '')}".strip()
+            ) from e
+        template.builtin = False
+        # builtin 是调用方可控字段，绝不能拿来放宽校验（审查 finding 9）：
+        # 只允许代码内 _builtin_specs() 走 allow_builtin=True；chat.send
+        # 直传的同名字段一律无效，内置名保留与「至少一个角色」照常校验。
+        return validate_collab_template(template, allow_builtin=False).model_dump()
+
+    def _team_template_to_collab(self, template: TeamTemplate) -> dict:
+        """团队模板 → 协作模板形状（画廊/预览统一口径）。
+
+        团队模板只存团队级 needs/tools（本期不做逐成员隔离）：反向生成角色时
+        每个角色都带团队级声明，并在 preview 的 role_scope_note 里明示。
+        """
+        needs = str(getattr(template, "needs", "read") or "read")
+        if needs not in COLLAB_NEEDS:
+            needs = "read"
+        tools_allow = list(getattr(template, "tools_allow", []) or [])
+        tools_deny = list(getattr(template, "tools_deny", []) or [])
+        budget_raw = getattr(template, "budget", None)
+        if hasattr(budget_raw, "model_dump"):
+            budget = budget_raw.model_dump()
+        elif isinstance(budget_raw, dict):
+            budget = dict(budget_raw)
+        else:
+            budget = {"max_calls": 0, "max_tokens": 0, "max_seconds": 0}
+        director = template.director
+        aggregator = (
+            {"provider": director.provider, "model": director.model, "prompt": ""}
+            if template.director_mode == "ai" and director.provider
+            else {"provider": "", "model": "", "prompt": ""}
+        )
+        roles = []
+        for i, member in enumerate(template.members or []):
+            roles.append({
+                "key": f"m{i}",
+                "name": member.name or f"成员{i + 1}",
+                "provider": member.provider,
+                "model": member.model,
+                "prompt": member.persona,
+                "needs": needs,
+                "tools_allow": list(tools_allow),
+                "tools_deny": list(tools_deny),
+            })
+        return {
+            "name": template.name,
+            "kind": "team",
+            "desc": "",
+            "roles": roles,
+            "aggregator": aggregator,
+            "limits": {
+                "max_members": 0, "member_timeout_s": 0, "debate_rounds": 0,
+                "max_findings": 0, "role_timeout_s": 0,
+            },
+            "budget": budget,
+            "created_at": float(template.created_at or 0.0),
+            "builtin": False,
+            "source": "team",
+        }
+
+    def _collab_to_team_template(self, template: CollabTemplate) -> _CollabTeamTemplate:
+        """协作模板（kind=team）→ teams.json 的团队模板条目。
+
+        角色 → members（name/persona），收口 → director（provider 为空 = 用户
+        总管），团队级 needs 取角色最高档，工具取并集（deny 优先）。
+        """
+        aggregator = template.aggregator
+        director_mode = "ai" if aggregator.provider else "user"
+        needs = derive_needs(template.roles)
+        tools_allow = effective_tool_entries(template.roles)
+        tools_deny: list[str] = []
+        for role in template.roles:
+            for entry in role.tools_deny:
+                if entry not in tools_deny:
+                    tools_deny.append(entry)
+        return _CollabTeamTemplate(
+            name=template.name,
+            director_mode=director_mode,
+            director=TeamTemplateDirector(
+                provider=aggregator.provider if director_mode == "ai" else "",
+                model=aggregator.model if director_mode == "ai" else "",
+            ),
+            members=[
+                TeamTemplateMember(
+                    provider=role.provider, model=role.model,
+                    name=role.name, persona=role.prompt,
+                )
+                for role in template.roles
+            ],
+            created_at=time.time(),
+            needs=needs,
+            tools_allow=tools_allow,
+            tools_deny=tools_deny,
+            budget=_CollabTeamTemplateBudget(**template.budget.model_dump()),
+        )
+
+    def _find_collab_template(
+        self, name: str, source: str | None = None,
+    ) -> dict | None:
+        """按名在「内置 + 协作册 + 团队册」三处解析，返回统一模板 dict。
+
+        两册同名（只能是手改 JSON 造出来的）且未给 source 时抛中文歧义错误；
+        source 与解析结果不符按找不到处理（调用方给「模板来源不匹配」）。
+        """
+        raw = str(name or "").strip()
+        if not raw:
+            return None
+        builtin = builtin_template(raw)
+        user_collab = next(
+            (t for t in self.collab_templates.templates if t.name == raw), None
+        )
+        team = next(
+            (t for t in self.team_templates.templates if t.name == raw), None
+        )
+        matches: list[tuple[str, object]] = []
+        if builtin is not None:
+            matches.append(("collab", builtin))
+        if user_collab is not None:
+            matches.append(("collab", user_collab))
+        if team is not None:
+            matches.append(("team", team))
+        wanted = str(source or "").strip()
+        if wanted:
+            matches = [pair for pair in matches if pair[0] == wanted]
+        elif len(matches) > 1:
+            raise CollabTemplateError(
+                "同名模板同时存在于两个模板册，请指明来源（source）"
+            )
+        if not matches:
+            return None
+        src, obj = matches[0]
+        if src == "team":
+            return self._team_template_to_collab(obj)  # type: ignore[arg-type]
+        payload = obj.model_dump()  # type: ignore[union-attr]
+        payload["source"] = "collab"
+        return payload
+
+    def _collab_template_warnings(self, template: CollabTemplate) -> list[str]:
+        """保存期的「注册表感知」校验（只对工具表里已知的工具名）。
+
+        - read 角色列了写/执行工具 → 拒绝（声明与工具面自相矛盾）；
+        - write 角色列了 DANGEROUS（run_command 前缀除外）→ 拒绝；
+        - 未知工具名 → 不拒绝，回一条 warning（MCP/技能工具可能临时不可用）。
+        """
+        warnings: list[str] = []
+        try:
+            registry = self._build_full_registry()
+        except Exception as e:  # noqa: BLE001 - 注册表构建失败不阻断保存
+            return [f"当前工具表不可用，已跳过工具名检查：{str(e)[:120]}"]
+        for role in template.roles:
+            for entry in role.tools_allow:
+                base = entry.split(":", 1)[0]
+                tool = registry.get(base)
+                if tool is None:
+                    warnings.append(
+                        f"工具 {entry} 当前工具表里不存在，运行时会被忽略"
+                    )
+                    continue
+                if role.needs == "read" and tool.safety != Safety.READONLY:
+                    raise CollabTemplateError(
+                        f"角色「{role.name}」声明只读，但列了写/执行工具 {base}："
+                        "请把它移到需要写入的角色，或把该角色 needs 改为 write"
+                    )
+                if (
+                    role.needs == "write"
+                    and tool.safety == Safety.DANGEROUS
+                    and base != _RUN_COMMAND
+                ):
+                    raise CollabTemplateError(
+                        f"角色「{role.name}」的 needs 是 write，不能列执行类工具 {base}"
+                    )
+        return warnings
+
+    def collab_template_list(self) -> dict:
+        """collab.template_list：内置三张 + 用户协作模板 + 团队模板（统一形状）。"""
+        templates: list[dict] = []
+        for item in self.collab_templates.list():
+            payload = dict(item)
+            payload["source"] = "collab"
+            templates.append(payload)
+        team_templates = [
+            self._team_template_to_collab(t) for t in self.team_templates.templates
+        ]
+        return {
+            "templates": templates,
+            "team_templates": team_templates,
+            "skipped": int(getattr(self.collab_templates, "skipped", 0) or 0),
+        }
+
+    async def collab_template_save(self, params: dict) -> dict:
+        """collab.template_save：保存协作模板（kind 决定落哪一册）。
+
+        - kind=roundtable / adversarial → collab_templates.json；
+        - kind=team → teams.json（沿用团队模板册，不迁移）；角色数超过
+          [team].max_members 直接拒绝（建队时的静默截断对用户不可见）；
+        - 内置名保留；跨册重名拒绝（两册的 remove/preview 都按 source 消歧）；
+        - ``source`` 可省略（由 kind 推导），给了但不相符按来源不匹配报错。
+        """
+        raw = params.get("template")
+        if not isinstance(raw, dict):
+            raw = params
+        try:
+            template = CollabTemplate(**raw)
+        except ValidationError as e:
+            first = e.errors()[0] if e.errors() else {}
+            loc = ".".join(str(x) for x in (first.get("loc") or ()))
+            raise CollabTemplateError(
+                f"模板数据格式不正确：{loc or '字段'} {first.get('msg', '')}".strip()
+            ) from e
+        template.builtin = False
+        validate_collab_template(template, allow_builtin=False)
+        kind = template.kind
+        expected_source = "team" if kind == "team" else "collab"
+        given_source = str(params.get("source") or "").strip()
+        if given_source and given_source != expected_source:
+            raise CollabTemplateError(
+                f"模板来源不匹配：{kind} 模板应保存到 {expected_source} 册"
+            )
+        if kind == "team":
+            if any(t.name == template.name for t in self.collab_templates.templates):
+                raise CollabTemplateError(
+                    f"已有同名的协作模板：{template.name}，请换一个名字"
+                )
+            limit = max(1, int(getattr(self.cfg.team, "max_members", 3) or 3))
+            if len(template.roles) > limit:
+                raise CollabTemplateError(
+                    f"模板有 {len(template.roles)} 个角色，超过团队上限 {limit}"
+                    "（可在 设置 · 团队 调高，或减少角色）"
+                )
+            warnings = self._collab_template_warnings(template)
+            self.team_templates.upsert(self._collab_to_team_template(template))
+            return {
+                "template": template.model_dump(),
+                "source": "team",
+                "warnings": warnings,
+                "skipped_reason": None,
+            }
+        if any(t.name == template.name for t in self.team_templates.templates):
+            raise CollabTemplateError(
+                f"已有同名的团队模板：{template.name}，请换一个名字"
+            )
+        warnings = self._collab_template_warnings(template)
+        if template.created_at <= 0:
+            template.created_at = time.time()
+        self.collab_templates.upsert(template)
+        return {
+            "template": template.model_dump(),
+            "source": "collab",
+            "warnings": warnings,
+            "skipped_reason": None,
+        }
+
+    async def collab_template_remove(self, params: dict) -> dict:
+        """collab.template_remove：按名删协作模板（内置不可删；两册同名要 source）。"""
+        name = str(params.get("name") or "").strip()
+        if not name:
+            raise CollabTemplateError("协作模板名不能为空")
+        if is_builtin_template_name(name):
+            raise CollabTemplateError(f"内置模板不能删除：{name}")
+        source = str(params.get("source") or "").strip()
+        if source and source not in ("collab", "team"):
+            raise CollabTemplateError("模板来源只能是 collab / team")
+        in_collab = any(t.name == name for t in self.collab_templates.templates)
+        in_team = any(t.name == name for t in self.team_templates.templates)
+        if source == "collab":
+            if not in_collab:
+                raise CollabTemplateError(f"找不到协作模板: {name}")
+            self.collab_templates.remove(name)
+        elif source == "team":
+            if not in_team:
+                raise CollabTemplateError(f"找不到协作模板: {name}")
+            self.team_templates.remove(name)
+        elif in_collab and in_team:
+            raise CollabTemplateError(
+                "同名模板同时存在于两个模板册，请指明来源（source）"
+            )
+        elif in_collab:
+            self.collab_templates.remove(name)
+        elif in_team:
+            self.team_templates.remove(name)
+        else:
+            raise CollabTemplateError(f"找不到协作模板: {name}")
+        return {"name": name, "source": source or ("collab" if in_collab else "team")}
+
+    def _preview_auto_pool(self) -> list[tuple[str, str]]:
+        """已配置 Key 的服务池（模板里 provider 留空时的自动补位来源）。"""
+        pool: list[tuple[str, str]] = []
+        for name, pc in self.cfg.providers.items():
+            try:
+                if resolve_api_key(name, pc) is None:
+                    continue
+            except Exception:  # noqa: BLE001 - 探测失败按未配置处理
+                continue
+            pool.append((name, pc.model or ""))
+        return pool
+
+    def _preview_team_members(self, roles: list[dict]) -> tuple[int, list[str]]:
+        """轻量复刻 _template_team_specs 的补位与去重（不构建 Provider）。
+
+        返回 (effective_member_count, dropped_role_names)：与真实建队同一
+        （服务, 模型）去重键，空键（没有任何可用服务）不去重。
+        """
+        pool = self._preview_auto_pool()
+        cursor = 0
+        seen: set[tuple[str, str]] = set()
+        count = 0
+        dropped: list[str] = []
+        for role in roles or []:
+            if not isinstance(role, dict):
+                continue
+            name = str(role.get("name") or "").strip() or "队员"
+            provider_name = str(role.get("provider") or "").strip()
+            model = str(role.get("model") or "").strip()
+            if provider_name:
+                if not model:
+                    pc = self.cfg.providers.get(provider_name)
+                    model = getattr(pc, "model", "") if pc is not None else ""
+                key = (provider_name, model)
+            elif pool:
+                src = pool[cursor % len(pool)]
+                cursor += 1
+                key = src
+            else:
+                key = ("", "")
+            if key in seen:
+                dropped.append(name)
+                continue
+            seen.add(key)
+            count += 1
+        return count, dropped
+
+    def _preview_tool_entries(
+        self, template: dict, needs: str,
+    ) -> tuple[list[dict], list[str], list[str]]:
+        """工具并集 → 预览条目（含 mode/note）、命令前缀、永远逐次确认清单。"""
+        try:
+            registry: ToolRegistry | None = self._build_full_registry()
+        except Exception:  # noqa: BLE001 - 注册表不可用时按「未知工具」展示
+            registry = None
+        entries = effective_tool_entries(template.get("roles") or [])
+        tools: list[dict] = []
+        prefixes: list[str] = []
+        for entry in entries:
+            base, _sep, prefix = entry.partition(":")
+            tool = registry.get(base) if registry is not None else None
+            known = tool is not None
+            if base == _RUN_COMMAND:
+                if prefix:
+                    # 手改 JSON 可能绕过保存期提炼：预览再做一次安全校验，
+                    # 不安全的原始前缀如实标 confirm（运行时 GrantedGate 会丢弃）
+                    try:
+                        prefix = normalize_command_prefix(prefix)
+                    except CollabTemplateError:
+                        mode = "confirm"
+                        note = "命令前缀未通过安全提炼（含拼接/解释器），运行时会被忽略"
+                        tools.append({
+                            "name": base, "command_prefix": prefix,
+                            "known": known, "mode": mode, "note": note,
+                        })
+                        continue
+                    if needs == "exec":
+                        mode = "auto"
+                        note = "仅此命令前缀免确认；拼接/代码执行旗标仍逐次确认"
+                    else:
+                        mode = "confirm"
+                        note = f"团队 needs={needs}，运行时不会放行命令执行"
+                    if prefix not in prefixes:
+                        prefixes.append(prefix)
+                else:
+                    mode = "confirm"
+                    note = "run_command 必须写成 run_command:<命令前缀>"
+            elif not known:
+                mode = "confirm"
+                note = "当前工具表里没有这个工具，运行时会被忽略"
+            elif tool.safety == Safety.READONLY:
+                mode = "auto"
+                note = "只读工具自动放行"
+            elif tool.safety == Safety.WRITE:
+                if needs in ("write", "exec"):
+                    mode = "auto"
+                    note = "工作目录内写入免确认；引擎主目录/目录外仍逐次确认"
+                else:
+                    mode = "confirm"
+                    note = f"团队 needs={needs}，运行时不挂写工具"
+            else:  # DANGEROUS
+                mode = "confirm"
+                note = "执行/控制类工具本次运行仍需逐次确认"
+            tools.append({
+                "name": base,
+                "command_prefix": prefix,
+                "known": known,
+                "mode": mode,
+                "note": note,
+            })
+        always_confirm: list[str] = []
+        if registry is not None:
+            always_confirm = sorted(
+                t.name for t in registry.all()
+                if t.safety == Safety.DANGEROUS and t.name != _RUN_COMMAND
+            )
+        return tools, prefixes, always_confirm
+
+    def _preview_pricing_calls(
+        self, template: dict, estimated_calls: int, debate_rounds: int,
+    ) -> tuple[list[tuple[str, str]], bool]:
+        """估算调用清单 [(provider, prompt)] 与「是否有角色未指定服务」。
+
+        圆桌：每个角色 (1+辩论轮) 次 + 收口 1 次；对抗：最多三个角色各 1 次 +
+        裁判 1 次；团队：max_calls 按角色轮转分摊（无法知道真实派工分布，
+        cost_basis 里如实注明是粗估）。
+        """
+        kind = str(template.get("kind") or "")
+        roles = [r for r in (template.get("roles") or []) if isinstance(r, dict)]
+        agg = template.get("aggregator") or {}
+        calls: list[tuple[str, str]] = []
+        unknown = False
+        if kind == "roundtable":
+            for role in roles:
+                provider = str(role.get("provider") or "").strip()
+                if not provider:
+                    unknown = True
+                for _ in range(1 + max(0, int(debate_rounds))):
+                    calls.append((provider, str(role.get("prompt") or "")))
+            agg_provider = str(agg.get("provider") or "").strip()
+            if not agg_provider:
+                # 收口缺省 = 当前主模型（会话级），模板本身没有声明，按不可估价
+                unknown = True
+            calls.append((agg_provider, str(agg.get("prompt") or "")))
+        elif kind == "adversarial":
+            seats = [r for r in roles[:3]]
+            for role in seats:
+                provider = str(role.get("provider") or "").strip()
+                if not provider:
+                    unknown = True
+                calls.append((provider, str(role.get("prompt") or "")))
+            # 不足三角色的空位由自动服务池补位（池里的服务名是已知的）
+            pool = self._preview_auto_pool()
+            for i in range(len(seats), 3):
+                if i - len(seats) < len(pool):
+                    calls.append((pool[i - len(seats)][0], ""))
+                else:
+                    unknown = True
+            agg_provider = str(agg.get("provider") or "").strip()
+            if not agg_provider:
+                unknown = True
+            calls.append((agg_provider, str(agg.get("prompt") or "")))
+        else:
+            # 团队：per-role 的 prompt token 按轮转分摊到 max_calls 次调用；
+            # 用户总管（aggregator 为空）不产生额外调用，不算 unknown。
+            if estimated_calls > 0 and roles:
+                for i in range(estimated_calls):
+                    role = roles[i % len(roles)]
+                    provider = str(role.get("provider") or "").strip()
+                    if not provider:
+                        unknown = True
+                    calls.append((provider, str(role.get("prompt") or "")))
+            elif estimated_calls > 0:
+                unknown = True
+        return calls, unknown
+
+    @staticmethod
+    def _preview_price_is_configured(cfg) -> bool:
+        pz = cfg.usage_pricing
+        return bool(
+            pz.price_in or pz.price_out or pz.price_cache
+            or any(
+                e.price_in or e.price_out or e.price_cache
+                for e in pz.providers.values()
+            )
+        )
+
+    def _preview_price_for(self, provider: str) -> tuple[float, float, float]:
+        pz = self.cfg.usage_pricing
+        entry = pz.providers.get(provider or "")
+        if entry is not None:
+            return entry.price_in, entry.price_out, entry.price_cache
+        return pz.price_in, pz.price_out, pz.price_cache
+
+    def collab_template_preview(self, params: dict) -> dict:
+        """collab.preview：跑前清单（角色/工具/命令前缀/预算/粗估费用）。
+
+        费用只用 config.toml 的 [usage_pricing] 真实价目折算；任一角色没有
+        声明服务（或收口角色缺省当前主模型）时如实返回 unknown_provider，
+        绝不编一个 0 元；团队 max_calls=0（不限）时返回 unbounded。
+        """
+        name = str(params.get("name") or "").strip()
+        source = str(params.get("source") or "").strip() or None
+        if not name:
+            raise CollabTemplateError("找不到协作模板：")
+        template = self._find_collab_template(name, source)
+        if template is None:
+            if source:
+                raise CollabTemplateError("模板来源不匹配")
+            raise CollabTemplateError(f"找不到协作模板：{name}")
+        kind = str(template.get("kind") or "")
+        roles = [r for r in (template.get("roles") or []) if isinstance(r, dict)]
+        limits = template.get("limits") or {}
+        budget = template.get("budget") or {}
+        needs = derive_needs(roles)
+
+        roles_preview: list[dict] = []
+        pool = self._preview_auto_pool()
+        for role in roles:
+            provider_name = str(role.get("provider") or "").strip()
+            model = str(role.get("model") or "").strip()
+            if provider_name:
+                pc = self.cfg.providers.get(provider_name)
+                if pc is None:
+                    resolved, build_error = False, "未配置该服务"
+                elif resolve_api_key(provider_name, pc) is None:
+                    resolved, build_error = False, "该服务未配置 API Key"
+                else:
+                    resolved, build_error = True, ""
+                    if not model:
+                        model = pc.model or ""
+            else:
+                resolved = bool(pool)
+                build_error = "" if pool else "没有已配置 Key 的服务"
+            roles_preview.append({
+                "key": str(role.get("key") or ""),
+                "name": str(role.get("name") or ""),
+                "provider": provider_name,
+                "model": model,
+                "needs": str(role.get("needs") or "read"),
+                "resolved": resolved,
+                "build_error": build_error,
+            })
+
+        tools, command_prefixes, always_confirm = self._preview_tool_entries(
+            template, needs
+        )
+
+        if kind == "team":
+            effective_count, dropped = self._preview_team_members(roles)
+        elif kind == "adversarial":
+            effective_count = min(3, len(roles))
+            dropped = [
+                str(r.get("name") or "") for r in roles[3:]
+            ]
+        else:
+            effective_count, dropped = len(roles), []
+
+        debate = 0
+        if kind == "roundtable":
+            debate = int(
+                limits.get("debate_rounds") or self.cfg.roundtable.debate_rounds or 0
+            )
+            debate = max(0, min(debate, 2))
+            estimated_calls = len(roles) * (1 + debate) + 1
+        elif kind == "adversarial":
+            estimated_calls = min(3, len(roles)) + 1
+        else:
+            estimated_calls = int(budget.get("max_calls") or 0)
+
+        calls, unknown_provider = self._preview_pricing_calls(
+            template, estimated_calls, debate,
+        )
+        estimated_input = sum(
+            PREVIEW_INPUT_FLOOR_TOKENS + estimate_text_tokens(prompt or "")
+            for _provider, prompt in calls
+        )
+        estimated_output = PREVIEW_OUTPUT_TOKENS * len(calls)
+
+        if unknown_provider:
+            cost_reason, estimated_cost, priced = "unknown_provider", None, False
+        elif not self._preview_price_is_configured(self.cfg):
+            cost_reason, estimated_cost, priced = "no_price", None, False
+        elif estimated_calls <= 0:
+            # 团队 max_calls=0 = 不限：调用数未知，不编一个 0 元
+            cost_reason, estimated_cost, priced = "unbounded", None, False
+        else:
+            cost = 0.0
+            for provider_name, prompt in calls:
+                cost += self._fold_usage_cost(
+                    PREVIEW_INPUT_FLOOR_TOKENS + estimate_text_tokens(prompt or ""),
+                    PREVIEW_OUTPUT_TOKENS, 0,
+                    self._preview_price_for(provider_name),
+                )
+            cost_reason, estimated_cost, priced = "ok", round(cost, 4), True
+
+        builtin = bool(template.get("builtin"))
+        return {
+            "name": str(template.get("name") or ""),
+            "kind": kind,
+            "needs": needs,
+            "source": str(template.get("source") or ""),
+            "desc": str(template.get("desc") or ""),
+            "roles": roles_preview,
+            "roles_declared": len(roles),
+            "effective_member_count": effective_count,
+            "dropped_roles": dropped,
+            "tools": tools,
+            "command_prefixes": command_prefixes,
+            "always_confirm": always_confirm,
+            # 本期团队是团队级工具并集（team.py 每个成员共用同一 registry），
+            # 角色级 tools 只用于声明与预览；不宣称逐成员隔离
+            "role_scoped": False,
+            "role_scope_note": (
+                "工具按团队声明的并集生效；角色级 tools 用于声明与预览，"
+                "本期不做逐成员隔离"
+            ),
+            "max_calls": int(budget.get("max_calls") or 0),
+            "max_tokens": int(budget.get("max_tokens") or 0),
+            "max_seconds": int(budget.get("max_seconds") or 0),
+            "estimated_calls": estimated_calls,
+            "estimated_input_tokens": estimated_input,
+            "estimated_output_tokens": estimated_output,
+            "priced": priced,
+            "estimated_cost": estimated_cost,
+            "currency": "CNY",
+            "cost_reason": cost_reason,
+            "cost_basis": (
+                "按每次调用输入≤角色提示词+400 tokens、输出 800 tokens 粗估；"
+                "价目取 config.toml [usage_pricing]"
+            ),
+            # 内置团队模板只在代码里、不落盘：无法常驻/定时复用
+            "can_resident": bool(
+                kind == "team" and template.get("source") == "team" and not builtin
+            ),
+        }
 
     # ---- 常驻团队（T3.2）：设为常驻 / 解除常驻 ----
     # 全局册（与会话无关，team_resident.json 单文件）：登记「哪支队伍跨会话
@@ -5261,6 +6686,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             raise TeamError("该团队还没有分配 team_id，不能登记常驻")
         template = str(params.get("template") or "").strip() \
             or str(getattr(orch, "source_template", "") or "").strip()
+        if template and is_builtin_template_name(template):
+            # 内置团队模板只在代码里、不落盘：常驻/定时复用都要按名字回查模板册，
+            # 给可执行的出路而不是一句「不存在」
+            raise TeamError(
+                f"「{template}」是内置团队模板，未落盘；请先在 设置 · 多模型协作里"
+                "「复制」为自己的模板再设为常驻"
+            )
         if template and not any(
             t.name == template for t in self.team_templates.templates
         ):

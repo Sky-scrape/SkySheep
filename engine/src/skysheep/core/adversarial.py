@@ -60,6 +60,7 @@ from ..events import (
 from ..messages import Message, TextBlock, dialogue
 from ..models.base import Provider, ProviderDone, ProviderTextDelta
 from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S, is_transient_error
+from .collab_budget import BudgetExceeded, RunBudget
 from .effort import resolve_auto_effort
 from .roundtable import MemberSpec, clip_draft
 
@@ -273,6 +274,7 @@ async def _run_text_turn(
     *,
     label: str,
     stream_out: bool = False,
+    budget: RunBudget | None = None,
 ) -> tuple[str, str, int, int, int]:
     """一次纯文本模型调用：流式收集 + 瞬态重试 + 超时，失败隔离在自身。
 
@@ -286,6 +288,9 @@ async def _run_text_turn(
 
     async def consume() -> None:
         nonlocal usage_in, usage_out, usage_cached
+        # 模板预算：每次真实 provider 调用前计数（含重试与格式纠错）
+        if budget is not None:
+            budget.spend()
         async for pe in provider.stream(
             messages, [], effort=resolve_auto_effort(provider, messages),
         ):
@@ -307,6 +312,10 @@ async def _run_text_turn(
             try:
                 await asyncio.wait_for(consume(), timeout=timeout_s)
                 return "".join(parts), "", usage_in, usage_out, usage_cached
+            except BudgetExceeded:
+                # 预算耗尽不是本阶段的失败，必须原样上抛让主流程统一收尾；
+                # 若落进下面的通用 except 会被吞成本阶段失败、继续烧下一阶段。
+                raise
             except TimeoutError:
                 error = f"{label}超时（>{timeout_s} 秒）"
                 retryable = not parts and attempt <= MAX_STREAM_RETRIES
@@ -335,6 +344,7 @@ async def _call_json(
     *,
     label: str,
     expect_key: str,
+    budget: RunBudget | None = None,
 ) -> tuple[dict | None, str, int, int, int]:
     """一次要求 JSON 输出的调用：解析失败追加一次格式纠错重试。
 
@@ -344,7 +354,7 @@ async def _call_json(
     结构对路（防止解析出一个不相干的对象）。
     """
     text, error, u_in, u_out, u_cached = await _run_text_turn(
-        provider, messages, timeout_s, emit, label=label,
+        provider, messages, timeout_s, emit, label=label, budget=budget,
     )
     total_in, total_out, total_cached = u_in, u_out, u_cached
     if error:
@@ -359,7 +369,7 @@ async def _call_json(
         [*messages,
          Message.assistant([TextBlock(text=text or "(空回复)")]),
          Message.user(JSON_FIX_INSTRUCTION)],
-        timeout_s, emit, label=f"{label}格式纠错",
+        timeout_s, emit, label=f"{label}格式纠错", budget=budget,
     )
     total_in += i2
     total_out += o2
@@ -596,6 +606,8 @@ async def run_adversarial(
     timeout_s: int,
     emit: EmitFn,
     max_findings: int = 20,
+    prompts: dict[str, str] | None = None,
+    budget: RunBudget | None = None,
 ) -> AdversarialOutcome:
     """跑一整场对抗：发现 → 调查 → 建议 → 裁判。
 
@@ -604,11 +616,34 @@ async def run_adversarial(
     - judge：裁判 Provider（缺省由 backend 传当前主模型，同圆桌主席）；
     - history：会话上下文（图片块须由调用方剥除，同圆桌）；user_text 是
       被审目标（本轮用户消息原文）；
+    - prompts：按阶段名（finder / investigator / advisor / judge）给的模板
+      人设；空串 / 缺键回落本模块内置的默认提示词（模板里「没填」= 不覆盖）；
+    - budget：RunBudget，每次真实 provider 调用前 spend()；超限抛
+      BudgetExceeded，由本函数统一发 Notice 并以 error 收尾（已完成阶段的
+      产出保留在 outcome 里），不再继续后续阶段；
     - 返回完整结果，不直接改写主历史；取消时 status=cancelled，已产出
       内容（裁决、方案、部分报告）保留。
     """
     outcome = AdversarialOutcome()
     target = clip_draft(user_text.strip())
+    # 只保留非空人设：空串必须回落默认提示词，不能让「模板留空」把内置的
+    # 不对称激励（发现者高召回 / 调查员先假设不成立）整段抹掉。
+    prompt_map = {
+        str(key).strip(): str(value).strip()
+        for key, value in (prompts or {}).items()
+        if str(value or "").strip()
+    }
+
+    def _system(key: str, default: str) -> str:
+        custom = prompt_map.get(key)
+        if not custom:
+            return default
+        if key == PHASE_JUDGE:
+            # 收口角色人设的契约是「追加在系统提示词之后」（与圆桌主席 /
+            # 团队总管一致）。此前直接替换会把内置终审规则整段抹掉
+            # （审查 finding 18）。
+            return f"{default}\n\n{custom}"
+        return custom
 
     def _usage_row(role: str, spec: MemberSpec | None, i: int, o: int, c: int,
                    provider: str = "", model: str = "") -> None:
@@ -619,6 +654,10 @@ async def run_adversarial(
                 "model": model or (spec.model if spec else ""),
                 "input_tokens": i, "output_tokens": o, "cached_tokens": c,
             })
+            if budget is not None:
+                # 模板 token 预算（审查 finding 14）：各阶段只知道自己这段
+                # 用量，按增量累加；此前只 spend() 计调用次数，tokens 恒 0。
+                budget.add_tokens_delta(i + o)
 
     async def _finish(status: str, summary: str) -> AdversarialOutcome:
         outcome.status = status
@@ -646,9 +685,9 @@ async def run_adversarial(
 
         data, error, u_in, u_out, u_cached = await _call_json(
             finder.provider,
-            _phase_messages(FINDER_SYSTEM, history,
+            _phase_messages(_system(PHASE_FINDER, FINDER_SYSTEM), history,
                             FINDER_USER_TEMPLATE.format(target=target)),
-            timeout_s, emit, label="发现者", expect_key="findings",
+            timeout_s, emit, label="发现者", expect_key="findings", budget=budget,
         )
         _usage_row(PHASE_FINDER, finder, u_in, u_out, u_cached)
         if error == "cancelled":
@@ -691,11 +730,11 @@ async def run_adversarial(
         else:
             data, error, u_in, u_out, u_cached = await _call_json(
                 investigator.provider,
-                _phase_messages(INVESTIGATOR_SYSTEM, history,
+                _phase_messages(_system(PHASE_INVESTIGATOR, INVESTIGATOR_SYSTEM), history,
                                 INVESTIGATOR_USER_TEMPLATE.format(
                                     target=target,
                                     findings_block=_findings_block(findings))),
-                timeout_s, emit, label="调查者", expect_key="verdicts",
+                timeout_s, emit, label="调查者", expect_key="verdicts", budget=budget,
             )
             _usage_row(PHASE_INVESTIGATOR, investigator, u_in, u_out, u_cached)
             if error == "cancelled":
@@ -731,11 +770,11 @@ async def run_adversarial(
                 ))
                 data, error, u_in, u_out, u_cached = await _call_json(
                     advisor.provider,
-                    _phase_messages(ADVISOR_SYSTEM, history,
+                    _phase_messages(_system(PHASE_ADVISOR, ADVISOR_SYSTEM), history,
                                     ADVISOR_USER_TEMPLATE.format(
                                         target=target,
                                         findings_block=_findings_block(to_solve))),
-                    timeout_s, emit, label="建议者", expect_key="solutions",
+                    timeout_s, emit, label="建议者", expect_key="solutions", budget=budget,
                 )
                 _usage_row(PHASE_ADVISOR, advisor, u_in, u_out, u_cached)
                 if error == "cancelled":
@@ -762,8 +801,8 @@ async def run_adversarial(
             findings_block=_verdicted_block(findings),
         )
         report, error, u_in, u_out, u_cached = await _run_text_turn(
-            judge, _phase_messages(JUDGE_SYSTEM, history, judge_payload),
-            max(timeout_s * 2, 300), emit, label="裁判", stream_out=True,
+            judge, _phase_messages(_system(PHASE_JUDGE, JUDGE_SYSTEM), history, judge_payload),
+            max(timeout_s * 2, 300), emit, label="裁判", stream_out=True, budget=budget,
         )
         _usage_row(PHASE_JUDGE, None, u_in, u_out, u_cached,
                    provider=judge_provider, model=judge_model)
@@ -784,6 +823,12 @@ async def run_adversarial(
         )
         return await _finish("done", summary)
 
+    except BudgetExceeded as e:
+        # 模板预算耗尽：已完成阶段的产出保留，如实收尾；不再烧后续阶段。
+        # 放在 CancelledError 之前（两者互不继承，顺序只为可读性）。
+        outcome.error = str(e)
+        await emit(NoticeEvent(message=str(e)))
+        return await _finish("error", str(e))
     except asyncio.CancelledError:
         # 阶段间隙的取消（_run_text_turn 内部已各自收敛）；已产出内容保留
         asyncio.current_task().uncancel()

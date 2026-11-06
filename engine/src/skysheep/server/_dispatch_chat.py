@@ -80,6 +80,73 @@ async def _h_chat_send(backend: ServerBackend, params: dict, emit, local: bool) 
     )
 
 
+async def _h_chat_send_with_collab(
+    backend: ServerBackend, params: dict, emit, local: bool,
+) -> dict:
+    """chat.send 的协作模板扩展入口（template / grant 两个新参数）。
+
+    与 _dispatch_chat._h_chat_send 同一套参数解析，额外透传：
+    - template：模板名（字符串）或已解析的模板 dict；backend.send 内再解析；
+    - grant：{scope: run|ask_each, read_only: bool}，仅团队模板消费。
+    远程连接传 grant.scope=run 时由 backend 降级为 ask_each（安全口径在
+    服务端，不能靠前端自觉）。
+    """
+    text = str(params.get("text", "")).strip()
+    images = params.get("images")
+    regenerate = bool(params.get("regenerate", False))
+    if not text and not (isinstance(images, list) and images) and not regenerate:
+        raise RuntimeError("empty text")
+    members = params.get("members")
+    raw_refs = params.get("refs")
+    raw_debate = params.get("debate_rounds")
+    raw_chair = params.get("chair_answers")
+    director_mode = "ai" if params.get("director_mode") == "ai" else "user"
+    raw_director = params.get("director")
+    director = None
+    if isinstance(raw_director, dict):
+        d_provider = str(raw_director.get("provider", "") or "").strip()
+        if d_provider:
+            director = {
+                "provider": d_provider,
+                "model": str(raw_director.get("model", "") or "").strip(),
+            }
+    team_template = str(params.get("team_template", "") or "").strip()
+    raw_template = params.get("template")
+    if isinstance(raw_template, dict):
+        template: str | dict | None = raw_template
+    else:
+        template = str(raw_template or "").strip()
+    raw_grant = params.get("grant")
+    grant = raw_grant if isinstance(raw_grant, dict) else None
+    return await backend.send(
+        text,
+        emit,
+        plan_mode=bool(params.get("plan_mode", False)),
+        roundtable=bool(params.get("roundtable", False)),
+        members=members if isinstance(members, list) else None,
+        images=images if isinstance(images, list) else None,
+        session_id=str(params["session_id"]) if params.get("session_id") else None,
+        wants_title=bool(params.get("wants_title", False)),
+        regenerate=bool(params.get("regenerate", False)),
+        compare=bool(params.get("compare", False)),
+        refs=[str(r) for r in raw_refs] if isinstance(raw_refs, list) else None,
+        debate_rounds=(
+            max(0, min(2, int(raw_debate)))
+            if isinstance(raw_debate, int) and not isinstance(raw_debate, bool)
+            else None
+        ),
+        chair_answers=raw_chair if isinstance(raw_chair, bool) else None,
+        team=bool(params.get("team", False)),
+        adversarial=bool(params.get("adversarial", False)),
+        director_mode=director_mode,
+        director=director,
+        team_template=team_template,
+        template=template,
+        grant=grant,
+        local=local,
+    )
+
+
 async def _h_chat_status(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # session_id 可选：给出时查那个会话的 runtime（分屏列的上下文徽标辅路），
     # 查无/已淘汰由后端显式报错，不静默回退当前会话。
@@ -410,7 +477,7 @@ async def _h_config_probe_context(backend: ServerBackend, params: dict, emit, lo
 # ---- 本域方法的注册表条目（自 app.py 的 _WS_METHODS 逐字切片） ----
 METHODS: dict[str, _WsMethod] = {
     "boot": _WsMethod(_h_boot),
-    "chat.send": _WsMethod(_h_chat_send),
+    "chat.send": _WsMethod(_h_chat_send_with_collab),
     "chat.status": _WsMethod(_h_chat_status),
     # 上下文压缩取的是桌面全局活动会话的 agent（backend.compact_now 用 self.agent）：
     # 远程连接压不到自己绑定的会话，反而会压到本机正在使用的另一个会话

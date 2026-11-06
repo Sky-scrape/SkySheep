@@ -377,3 +377,77 @@ async def test_real_socket_adversarial_pipeline_replay_and_mutex(home):
     saved = json.loads(rows[1][1])
     assert saved["adversarial"] == meta
     assert [u[0] for u in usage] == ["fa", "fb", "fc", "fake"]
+
+
+async def test_real_socket_collab_template_roundtable(home):
+    """真实 socket 上跑通「协作模板圆桌」：存模板 → 预览 → 按模板发送。
+
+    覆盖本期新增的协议面：collab.template_save / collab.preview /
+    chat.send{template}。断言模板角色名进 RoundtableStarted、成员系统提示词
+    用的是模板人设、主席只做融合（不额外出草稿——模板轮 chair_answers 恒为
+    false，调用数 = 3 成员 + 1 融合）、结果 meta 带模板身份。"""
+    p_main = FakeProvider([[TextBlock(text="融合后的最终答案")]])
+    p_a = FakeProvider([[TextBlock(text="甲的回答")]])
+    p_b = FakeProvider([[TextBlock(text="乙的回答")]])
+    p_c = FakeProvider([[TextBlock(text="丙的回答")]])
+    pool = [p_main, p_a, p_b, p_c]
+    template = {
+        "name": "e2e圆桌模板",
+        "kind": "roundtable",
+        "desc": "真实 socket 模板圆桌",
+        "roles": [
+            {"key": "r1", "name": "评审甲", "provider": "fa", "model": "ma",
+             "prompt": "你是甲，只说实话。", "needs": "read"},
+            {"key": "r2", "name": "评审乙", "provider": "fb", "model": "mb",
+             "prompt": "你是乙，只补事实。", "needs": "read"},
+            {"key": "r3", "name": "评审丙", "provider": "fc", "model": "mc",
+             "prompt": "你是丙，只给结论。", "needs": "read"},
+        ],
+        "budget": {"max_calls": 8, "max_seconds": 600},
+    }
+    async with live_server(home, pool) as url:
+        async with websockets.connect(url) as ws:
+            boot = await _rpc(ws, "b1", "boot")
+            assert boot.get("ok") is True, boot
+
+            saved = await _rpc(ws, "s1", "collab.template_save",
+                               {"template": template})
+            assert saved.get("ok") is True, saved
+            assert saved["result"]["source"] == "collab"
+
+            pv = await _rpc(ws, "p1", "collab.preview", {"name": "e2e圆桌模板"})
+            assert pv.get("ok") is True, pv
+            preview = pv["result"]
+            assert preview["kind"] == "roundtable"
+            assert preview["needs"] == "read"
+            assert [r["name"] for r in preview["roles"]] == ["评审甲", "评审乙", "评审丙"]
+            assert preview["tools"] == []
+            assert preview["estimated_calls"] == 4
+
+            ev1: list = []
+            r1 = await _rpc(ws, "t1", "chat.send", {
+                "text": "请评审这段方案", "template": "e2e圆桌模板",
+            }, events=ev1)
+            assert r1.get("ok") is True, r1
+
+            started = next(e for e in ev1 if e["event"] == "roundtable_started")
+            assert [m["name"] for m in started["data"]["members"]] == [
+                "评审甲", "评审乙", "评审丙"]
+            assert started["data"]["rounds"] == 1
+            finished = [e for e in ev1
+                        if e["event"] == "roundtable_member_finished"]
+            assert [e["data"]["status"] for e in finished] == ["done", "done", "done"]
+
+            result = r1["result"]["roundtable"]
+            assert result["template"] == "e2e圆桌模板"
+            assert result["template_kind"] == "roundtable"
+            assert result["chair_answers"] is False
+            assert [m["name"] for m in result["members"]] == [
+                "评审甲", "评审乙", "评审丙"]
+            assert result["members"][0]["draft"] == "甲的回答"
+
+            # 模板人设进了成员系统提示词，且主席只做融合（p_main 只有一次调用）
+            assert "你是甲，只说实话。" in p_a.calls[0][0].text
+            assert len(p_main.calls) == 1
+            assistant = next(e for e in ev1 if e["event"] == "assistant_message")
+            assert assistant["data"]["message"]["content"][0]["text"] == "融合后的最终答案"

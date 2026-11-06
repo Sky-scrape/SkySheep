@@ -13,6 +13,8 @@ let availListCollapsed = false; // 检测到的模型列表是否收起（上百
 let availFilter = "";            // 可用模型列表的搜索词（按模型名模糊匹配；换服务时清空）
 let detailOpen = false;   // 是否正停在某个服务的配置页
 let detailName = "";
+let addOpen = false;      // 是否正停在「添加自定义服务」表单（页内视图，不用弹层）
+let addSnapshot = "";     // 添加表单的初始值快照（填了一半就离开时提醒）
 let providerTab = "preset"; // 列表页签：preset=默认（内置预设）、custom=自定义（用户新增）
 let providerHealthCache = {};  // 服务名 → 健康状态（model.providers_health 拉取）
 
@@ -197,7 +199,11 @@ function resetProviderView() {
   detailOpen = false;
   detailName = "";
   detailSnapshot = ""; // 视图已重置，脏检测基线一并清掉
+  addOpen = false;
+  addSnapshot = "";
   document.getElementById("provider-detail").hidden = true;
+  document.getElementById("provider-add").hidden = true;
+  document.getElementById("provider-add-body").innerHTML = "";
   document.getElementById("provider-list-view").hidden = false;
   document.getElementById("btn-add-provider").hidden = false;
   const ds = document.getElementById("provider-detail-status");
@@ -881,4 +887,280 @@ function detailFormFingerprint(box) {
     parts.push(f + "=" + (el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim()));
   });
   return parts.join("|");
+}
+
+// ---------- 模型服务：添加视图（新建自定义服务，页内表单不用弹层） ----------
+// 与详情视图同一套范式：列表 → 页内表单，校验/检测失败就地报错、不离开表单。
+
+function openProviderAdd() {
+  addOpen = true;
+  detailOpen = false;
+  document.getElementById("provider-list-view").hidden = true;
+  document.getElementById("provider-detail").hidden = true;
+  document.getElementById("provider-add").hidden = false;
+  document.getElementById("btn-add-provider").hidden = true;
+  renderProviderAdd();
+}
+
+// 返回列表：填了一半就离开时先确认（与详情页的脏检测同款）
+async function closeProviderAdd(force = false) {
+  if (!addOpen) return;
+  const box = document.getElementById("provider-add-body");
+  if (!force && box && addSnapshot && addFormFingerprint(box) !== addSnapshot) {
+    const ok = await confirmModal(
+      "添加表单里的内容还没保存，返回列表会丢弃它们。确定返回？",
+      { title: "有未保存的内容", okLabel: "丢弃并返回", danger: true }
+    );
+    if (!ok) return;
+  }
+  addOpen = false;
+  addSnapshot = "";
+  document.getElementById("provider-add").hidden = true;
+  document.getElementById("provider-add-body").innerHTML = "";
+  document.getElementById("provider-list-view").hidden = false;
+  document.getElementById("btn-add-provider").hidden = false;
+  renderProviderList();
+}
+
+/** 添加表单指纹：填过的字段拼串；Key 只记「有没有填」；检测后的勾选也算内容。 */
+function addFormFingerprint(box) {
+  const parts = [];
+  box.querySelectorAll("input[data-f], select[data-f]").forEach((el) => {
+    const f = el.dataset.f;
+    if (f === "api_key") { parts.push(f + "=" + (el.value.trim() ? "set" : "")); return; }
+    parts.push(f + "=" + (el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim()));
+  });
+  parts.push("picked=" + [...box.querySelectorAll(".ap-pick input:checked")]
+    .map((c) => c.value).join(","));
+  return parts.join("|");
+}
+
+function renderProviderAdd() {
+  const box = document.getElementById("provider-add-body");
+  box.innerHTML = `
+    <p class="settings-hint">接入内置列表之外的服务：自建中转、公司内网网关、或其他厂商的 OpenAI 兼容接口。
+    保存后写入本机 config.toml，可随时在列表里改或删除。</p>
+    <div class="flat-panel">
+      <div class="field">
+        <label>服务类型</label>
+        <select data-f="kind">
+          <option value="openai">openai（OpenAI 兼容协议）</option>
+          <option value="anthropic">anthropic（Anthropic 原生协议）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>服务名称</label>
+        <input data-f="name" placeholder="my-relay" autocomplete="off">
+        <div class="field-tip">英文标识，用于 config 与日志；添加后不可修改。</div>
+      </div>
+      <div class="field">
+        <label>接口地址 base_url</label>
+        <div class="url-preview" id="add-url-preview"></div>
+        <input data-f="base_url" placeholder="https://your-relay.example.com/v1" autocomplete="off">
+      </div>
+      <div class="field">
+        <label>API Key（可留空，用环境变量 &lt;名称大写&gt;_API_KEY 提供）</label>
+        <span class="key-line">
+          <input data-f="api_key" type="password" autocomplete="off" placeholder="留空表示稍后配置">
+          <button class="eye" type="button" title="显示 / 隐藏">👁</button>
+        </span>
+      </div>
+      <div class="field">
+        <label>模型名（当前使用；点「检测」后可勾选多个一并启用）</label>
+        <span class="model-line">
+          <input data-f="model" placeholder="glm-5.3 / deepseek-chat / …" autocomplete="off">
+          <button class="btn-ghost detect" type="button"
+            title="用上面填的地址和 Key 查询可用模型">检测</button>
+        </span>
+      </div>
+      <div class="ap-pick hidden"></div>
+      <div class="form-status"></div>
+      <label class="inline-check">
+        <input data-f="use_now" type="checkbox" checked> 添加后立即切换到它（当前对话马上生效）
+      </label>
+      <label class="inline-check">
+        <input data-f="set_default" type="checkbox"> 同时设为默认模型（下次启动也用它）
+      </label>
+    </div>
+    <div class="pr-ops">
+      <button class="btn-ghost cancel" type="button">取消</button>
+      <button class="btn-primary add" type="button">添加</button>
+    </div>`;
+
+  const val = (f) => {
+    const el = box.querySelector(`[data-f="${f}"]`);
+    return el.type === "checkbox" ? el.checked : el.value.trim();
+  };
+
+  // 接口地址预览：与详情页一致，提前把完整端点拼出来
+  const preview = () => {
+    const base = val("base_url").replace(/\/+$/, "");
+    const kind = box.querySelector("select[data-f='kind']").value;
+    document.getElementById("add-url-preview").textContent = base
+      ? "预览：" + base + (kind === "anthropic" ? "/v1/messages" : "/chat/completions")
+      : "";
+  };
+  preview();
+  box.querySelector('input[data-f="base_url"]').addEventListener("input", preview);
+  box.querySelector("select[data-f='kind']").addEventListener("change", preview);
+
+  // Key 显示/隐藏
+  box.querySelector(".eye").onclick = () => {
+    const k = box.querySelector('input[data-f="api_key"]');
+    k.type = k.type === "password" ? "text" : "password";
+  };
+
+  // 检测可用模型：勾选要一并启用的（可多选），上面的模型名 = 当前使用的那个
+  const formStatus = box.querySelector(".form-status");
+  const detectBtn = box.querySelector(".detect");
+  const pickWrap = box.querySelector(".ap-pick");
+  const checkedModels = () =>
+    [...pickWrap.querySelectorAll("input:checked")].map((c) => c.value);
+  detectBtn.onclick = async () => {
+    detectBtn.disabled = true;
+    formStatus.textContent = "检测中…正在向该服务查询模型列表";
+    formStatus.className = "form-status";
+    try {
+      const r = await request("config.probe_models", {
+        kind: val("kind"),
+        base_url: val("base_url"),
+        api_key: val("api_key"),
+      });
+      if (!r.count) {
+        formStatus.textContent = "该服务没有返回任何模型（可能是接口地址不对，或该服务不提供模型列表）";
+        formStatus.className = "form-status bad";
+      } else {
+        const cur = val("model");
+        pickWrap.classList.remove("hidden");
+        // 检测结果可能上百行：给搜索框 + 实时计数，勾选状态独立于筛选（筛掉的不会丢勾）
+        const renderPickList = () => {
+          const kw = (pickWrap.querySelector(".ap-search input") || {}).value || "";
+          const f = kw.trim().toLowerCase();
+          const rows = f ? r.models.filter((m) => m.toLowerCase().includes(f)) : r.models;
+          const cntEl = pickWrap.querySelector(".ap-count");
+          if (cntEl) cntEl.textContent = f ? `${rows.length} / ${r.count}` : "";
+          const listEl = pickWrap.querySelector(".ap-list");
+          if (!rows.length) {
+            listEl.innerHTML =
+              `<div class="empty-hint">没有匹配「${escapeHtml(kw.trim())}」的模型</div>`;
+            return;
+          }
+          listEl.innerHTML = rows.map((m) =>
+            `<label class="ap-row"><input type="checkbox" value="${escapeHtml(m)}"${m === cur ? " checked" : ""}>` +
+            `<span class="mono">${escapeHtml(m)}</span></label>`).join("");
+        };
+        pickWrap.innerHTML =
+          `<div class="ap-pick-head"><span>检测到 ${r.count} 个可用模型，勾选要一并启用的</span>` +
+          `<span><button class="link-btn" type="button" data-a="all">全选</button>` +
+          `<button class="link-btn" type="button" data-a="none">清空</button></span></div>` +
+          `<div class="ap-search"><input type="search" placeholder="搜索模型名（模糊匹配）" autocomplete="off">` +
+          `<span class="ap-count"></span></div>` +
+          `<div class="ap-list"></div>`;
+        renderPickList();
+        pickWrap.querySelector(".ap-search input").oninput = renderPickList;
+        // 全选 / 清空作用于「当前可见的行」，与搜索配合即可「按关键词批量勾」
+        pickWrap.querySelector('[data-a="all"]').onclick = () =>
+          pickWrap.querySelectorAll(".ap-list input").forEach((c) => (c.checked = true));
+        pickWrap.querySelector('[data-a="none"]').onclick = () =>
+          pickWrap.querySelectorAll(".ap-list input").forEach((c) => (c.checked = false));
+        formStatus.textContent = `✓ 检测到 ${r.count} 个可用模型，勾选后随服务一并启用（当前模型始终启用）`;
+        formStatus.className = "form-status ok";
+      }
+    } catch (e) {
+      formStatus.textContent = "✗ " + e.message;
+      formStatus.className = "form-status bad";
+    } finally {
+      detectBtn.disabled = false;
+    }
+  };
+
+  box.querySelector(".cancel").onclick = () => closeProviderAdd();
+  box.querySelector(".add").onclick = () => submitProviderAdd();
+  // 输入框内回车即添加（下拉框不拦，回车是正常选择）
+  box.querySelectorAll("input[data-f]").forEach((el) => {
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitProviderAdd();
+      }
+    });
+  });
+
+  // 采集初始快照：填了一半就返回时提醒
+  addSnapshot = addFormFingerprint(box);
+  const first = box.querySelector('input[data-f="name"]');
+  if (first) first.focus();
+}
+
+async function submitProviderAdd() {
+  const box = document.getElementById("provider-add-body");
+  if (!box) return;
+  const status = box.querySelector(".form-status");
+  const btn = box.querySelector(".add");
+  const val = (f) => {
+    const el = box.querySelector(`[data-f="${f}"]`);
+    return el.type === "checkbox" ? el.checked : el.value.trim();
+  };
+  const fail = (msg, sel) => {
+    status.textContent = "✗ " + msg;
+    status.className = "form-status bad";
+    const el = sel && box.querySelector(sel);
+    if (el) el.focus();
+  };
+  if (!val("name")) return fail("请先填写服务名称（config 里的英文标识）", 'input[data-f="name"]');
+  if (!val("model")) return fail("请填写要使用的模型名", 'input[data-f="model"]');
+
+  const primary = val("model");
+  // 一并启用 = 主输入框的当前模型 + 勾选项（去重保序，主模型在首位）
+  const picked = [...box.querySelectorAll(".ap-pick input:checked")].map((c) => c.value);
+  const models = [primary, ...picked.filter((m) => m !== primary)]
+    .filter((m, i, a) => m && a.indexOf(m) === i);
+
+  btn.disabled = true;
+  status.textContent = "添加中…";
+  status.className = "form-status";
+  try {
+    const r = await request("config.add_provider", {
+      name: val("name"),
+      kind: val("kind"),
+      base_url: val("base_url"),
+      model: primary,
+      api_key: val("api_key"),
+      set_default: val("set_default"),
+      models: models.length > 1 ? models : undefined,
+    });
+    let switched = false;
+    let switchErr = "";
+    providerTab = "custom"; // 添加的是自定义服务：切到自定义页签，让新服务立即可见
+    if (val("use_now")) {
+      try {
+        const s = await request("model.switch", { name: r.added });
+        switched = true;
+        hideBanner();
+        curProviderName = s.provider;
+        curModelName = s.model;
+        setModelChip(`${s.provider}/${s.model}`);
+      } catch (e) {
+        switchErr = e.message;
+      }
+    }
+    // 已成功：直接回列表（不弹「未保存」确认），再统一刷新
+    addOpen = false;
+    addSnapshot = "";
+    document.getElementById("provider-add").hidden = true;
+    document.getElementById("provider-add-body").innerHTML = "";
+    document.getElementById("provider-list-view").hidden = false;
+    document.getElementById("btn-add-provider").hidden = false;
+    await renderSettings();
+    boot();
+    const cnt = `已启用 ${models.length} 个模型`;
+    if (switched) providerStatus(`✓ 已添加「${r.added}」并切换使用，当前对话立即生效（${cnt}）`);
+    else if (switchErr) providerStatus(`✓ 已添加「${r.added}」，但切换失败：${switchErr}（${cnt}）`, false);
+    else if (r.activated) providerStatus(`✓ 已添加「${r.added}」，原先没有可用模型，已自动启用它（${cnt}）`);
+    else providerStatus(`✓ 已添加「${r.added}」，${cnt}；需要用时点开它，在里面点「切换使用」`);
+  } catch (e) {
+    status.textContent = "✗ " + e.message;
+    status.className = "form-status bad";
+    btn.disabled = false;
+  }
 }

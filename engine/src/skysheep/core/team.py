@@ -402,6 +402,9 @@ class DirectorSpec:
     build_error: str = ""
     # 总管模型的上下文窗口（宿主按 provider 配置解析；0 = 沿用全局值）
     context_limit_tokens: int = 0
+    # 模板收口角色的人设（协作模板 aggregator.prompt）：非空时追加在
+    # TEAM_DIRECTOR_PROMPT 之后（不替换内置的团队协作规则）；空 = 旧行为
+    system_prompt: str = ""
 
 
 @dataclass
@@ -540,6 +543,7 @@ class TeamOrchestrator:
         director: DirectorSpec | None = None,
         director_mode: str = "user",
         budget_check: Callable[[], bool] | None = None,
+        budget_note: Callable[[], str] | None = None,
         message_sink: TeamMessageSink | None = None,
         context_limit_tokens: int = 1_000_000,
         compaction_keep_recent: int = 8,
@@ -604,6 +608,9 @@ class TeamOrchestrator:
         # ---- AI 总管闭环（director_mode="ai" 时启用）----
         self._director = director or DirectorSpec()
         self._budget_check = budget_check
+        # 预算越线的原因文案（模板预算：次数 / token / 时长）：宿主注入
+        # run_budget.reason_label；不注入时越线文案沿用内置的 token 预算句
+        self._budget_note = budget_note
         self._message_sink = message_sink  # 频道消息持久化钩子（None = 不落库）
         self._director_agent: Agent | None = None  # 首个总管轮创建，之后复用（独立 history）
         # 总管只挂内部团队工具（全部 READONLY、只操作工单板与编排状态，
@@ -629,6 +636,21 @@ class TeamOrchestrator:
         self._finding_task_ids: dict[tuple[int, str], str] = {}
         self._idle_reason = ""
         self._director_round_tools: list[str] = []  # 当前总管轮的板面动作摘要
+
+    def set_gate(self, gate: PermissionGate | None) -> None:
+        """替换执行门，并同步已建成员 Agent 的 TeamMemberGate 包装。
+
+        渠道接管桌面 runtime（审查 finding 7）与远程驱动已有团队（finding 6）
+        都会在建队之后才发现门需要收紧；成员 Agent 在首次唤醒时缓存了
+        TeamMemberGate(self._gate)，只改 runtime.agent.gate 不会影响它们。
+        None 保持原门不动（顾问型团队没有可执行工具）。
+        """
+        if gate is None:
+            return
+        self._gate = gate
+        for rt in self._runtimes.values():
+            if rt.agent is not None:
+                rt.agent.gate = TeamMemberGate(gate, rt.spec.name)
 
     @staticmethod
     def _cfg_value(cfg: object | None, key: str, default: int) -> int:
@@ -670,6 +692,12 @@ class TeamOrchestrator:
             return bool(result)
         except Exception:  # noqa: BLE001 - 钩子异常不捏造越线
             return False
+
+    def _budget_exhausted_text(self) -> str:
+        """预算越线的用户文案：优先用宿主注入的精确原因（次数/时长/token），
+        没注入或注入的文案为空时回退到内置的 token 预算句。"""
+        note = self._budget_note() if self._budget_note is not None else ""
+        return str(note or "").strip() or "已达团队 token 预算，团队已强制交付"
 
     def _note_director_tool(self, summary: str) -> None:
         """记录当前总管轮的板面动作（循环进展判定与 DirectorTurnResult 用）。"""
@@ -950,7 +978,7 @@ class TeamOrchestrator:
             await self.finish(status="budget_exhausted")
             return MemberTurnResult(
                 member=member_name, index=rt.index, status="error",
-                error="已达团队 token 预算，团队已强制交付",
+                error=self._budget_exhausted_text(),
             )
         self.rounds_used += 1
 
@@ -1373,13 +1401,19 @@ class TeamOrchestrator:
                 compaction_trigger=self._compaction_trigger,
                 compaction_auto=self._compaction_auto,
             )
-            agent.set_system(TEAM_DIRECTOR_PROMPT.format(
+            prompt = TEAM_DIRECTOR_PROMPT.format(
                 workdir=str(self._working_dir) if self._working_dir is not None
                 else "(none - board only)",
                 roster="、".join(
                     f"{m.name}（{m.provider_name}/{m.model}）" for m in self.roster
                 ) or "（还没有队员）",
-            ))
+            )
+            # 模板收口角色的人设：追加在内置总管规则之后（不替换团队协作
+            # 规则；空串 = 旧行为）
+            extra = (self._director.system_prompt or "").strip()
+            if extra:
+                prompt = f"{prompt}\n\n{extra}"
+            agent.set_system(prompt)
             self._director_agent = agent
         return self._director_agent
 
@@ -1401,7 +1435,10 @@ class TeamOrchestrator:
             )
         if await self._budget_over():
             await self.finish(status="budget_exhausted")
-            return DirectorTurnResult(status="error", error="已达团队 token 预算，团队已强制交付")
+            return DirectorTurnResult(
+                status="error",
+                error=self._budget_exhausted_text(),
+            )
         if self._director.provider is None:
             error = self._director.build_error or "总管模型不可用"
             msg = self.channel.post(

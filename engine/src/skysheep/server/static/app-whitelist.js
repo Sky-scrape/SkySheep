@@ -253,10 +253,11 @@ async function renderSettings() {
     if (typeof renderProviderList === "function" && !detailOpen) renderProviderList();
   }).catch(() => {});
 
-  // —— 模型服务：列表视图 / 详情视图 ——
+  // —— 模型服务：列表视图 / 详情视图 / 添加视图 ——
   providerCfg = cfg;
   if (detailOpen && cfg.providers[detailName]) renderProviderDetail(detailName);
   else if (detailOpen) closeProviderDetail(); // 配置项已被删掉 → 退回列表
+  else if (addOpen) { /* 添加表单填写中：不重画列表，避免把表单顶掉 */ }
   else renderProviderList();
 
   // —— 白名单 ——
@@ -770,7 +771,7 @@ async function switchProvider(row, name) {
   }
 }
 
-// 添加自定义模型服务（表单在弹窗内，校验失败就地报错、不关窗）
+// 设置页状态行：详情/添加视图打开时状态显示在视图内，否则显示在列表上方
 function providerStatus(text, ok = true) {
   // 详情视图打开时状态要显示在详情里（列表视图此时是隐藏的）
   const el = detailOpen
@@ -780,148 +781,6 @@ function providerStatus(text, ok = true) {
   el.className = "card-status " + (ok ? "ok" : "bad");
   el.hidden = false;
   autoHideStatus(el, text, ok);
-}
-
-function addProviderModal() {
-  const box = document.createElement("div");
-  box.innerHTML = `
-    <p class="dim small">接入内置列表之外的服务：自建中转、公司内网网关、或其他厂商的 OpenAI 兼容接口。
-    保存后写入本机 config.toml，可随时在列表里改或删除。</p>
-    <div class="form-grid">
-      <label>名称（英文标识，用于 config 与日志）
-        <input data-f="name" placeholder="my-relay" autocomplete="off">
-      </label>
-      <label>协议类型
-        <select data-f="kind">
-          <option value="openai">openai（OpenAI 兼容，多数服务选这个）</option>
-          <option value="anthropic">anthropic（Anthropic 原生协议）</option>
-        </select>
-      </label>
-      <label class="wide">接口地址 base_url
-        <input data-f="base_url" placeholder="https://your-relay.example.com/v1" autocomplete="off">
-      </label>
-      <label class="wide model-label">模型名（当前使用；点「检测」后可勾选多个一并启用）
-        <span class="model-line">
-          <input data-f="model" placeholder="glm-5.3 / deepseek-chat / …" autocomplete="off">
-          <button class="btn-ghost detect" type="button" title="用上面填的地址和 Key 查询可用模型">检测</button>
-        </span>
-      </label>
-      <div class="ap-pick hidden"></div>
-      <label class="wide">API Key（可留空，用环境变量 &lt;名称大写&gt;_API_KEY 提供）
-        <input data-f="api_key" type="password" autocomplete="off" placeholder="留空表示稍后配置">
-      </label>
-      <div class="form-status"></div>
-      <label class="wide inline-check">
-        <input data-f="use_now" type="checkbox" checked> 添加后立即切换到它（当前对话马上生效）
-      </label>
-      <label class="wide inline-check">
-        <input data-f="set_default" type="checkbox"> 同时设为默认模型（下次启动也用它）
-      </label>
-    </div>`;
-  const val = (f) => {
-    const el = box.querySelector(`[data-f="${f}"]`);
-    return el.type === "checkbox" ? el.checked : el.value.trim();
-  };
-  // 检测可用模型：勾选要一并启用的（可多选），上面的模型名 = 当前使用的那个
-  const formStatus = box.querySelector(".form-status");
-  const detectBtn = box.querySelector(".detect");
-  const pickWrap = box.querySelector(".ap-pick");
-  const checkedModels = () =>
-    [...pickWrap.querySelectorAll("input:checked")].map((c) => c.value);
-  detectBtn.onclick = async () => {
-    detectBtn.disabled = true;
-    formStatus.textContent = "检测中…正在向该服务查询模型列表";
-    formStatus.className = "form-status";
-    try {
-      const r = await request("config.probe_models", {
-        kind: val("kind"),
-        base_url: val("base_url"),
-        api_key: val("api_key"),
-      });
-      if (!r.count) {
-        formStatus.textContent = "该服务没有返回任何模型（可能是接口地址不对，或该服务不提供模型列表）";
-        formStatus.className = "form-status bad";
-      } else {
-        const cur = val("model");
-        pickWrap.classList.remove("hidden");
-        // 检测结果可能上百行：给搜索框 + 实时计数，勾选状态独立于筛选（筛掉的不会丢勾）
-        const renderPickList = () => {
-          const kw = (pickWrap.querySelector(".ap-search input") || {}).value || "";
-          const f = kw.trim().toLowerCase();
-          const rows = f ? r.models.filter((m) => m.toLowerCase().includes(f)) : r.models;
-          const cntEl = pickWrap.querySelector(".ap-count");
-          if (cntEl) cntEl.textContent = f ? `${rows.length} / ${r.count}` : "";
-          const listEl = pickWrap.querySelector(".ap-list");
-          if (!rows.length) {
-            listEl.innerHTML =
-              `<div class="empty-hint">没有匹配「${escapeHtml(kw.trim())}」的模型</div>`;
-            return;
-          }
-          listEl.innerHTML = rows.map((m) =>
-            `<label class="ap-row"><input type="checkbox" value="${escapeHtml(m)}"${m === cur ? " checked" : ""}>` +
-            `<span class="mono">${escapeHtml(m)}</span></label>`).join("");
-        };
-        pickWrap.innerHTML =
-          `<div class="ap-pick-head"><span>检测到 ${r.count} 个可用模型，勾选要一并启用的</span>` +
-          `<span><button class="link-btn" type="button" data-a="all">全选</button>` +
-          `<button class="link-btn" type="button" data-a="none">清空</button></span></div>` +
-          `<div class="ap-search"><input type="search" placeholder="搜索模型名（模糊匹配）" autocomplete="off">` +
-          `<span class="ap-count"></span></div>` +
-          `<div class="ap-list"></div>`;
-        renderPickList();
-        pickWrap.querySelector(".ap-search input").oninput = renderPickList;
-        // 全选 / 清空作用于「当前可见的行」，与搜索配合即可「按关键词批量勾」
-        pickWrap.querySelector('[data-a="all"]').onclick = () =>
-          pickWrap.querySelectorAll(".ap-list input").forEach((c) => (c.checked = true));
-        pickWrap.querySelector('[data-a="none"]').onclick = () =>
-          pickWrap.querySelectorAll(".ap-list input").forEach((c) => (c.checked = false));
-        formStatus.textContent = `✓ 检测到 ${r.count} 个可用模型，勾选后随服务一并启用（当前模型始终启用）`;
-        formStatus.className = "form-status ok";
-      }
-    } catch (e) {
-      formStatus.textContent = "✗ " + e.message;
-      formStatus.className = "form-status bad";
-    } finally {
-      detectBtn.disabled = false;
-    }
-  };
-  showModal("添加自定义模型服务", box, async () => {
-    const primary = val("model");
-    // 一并启用 = 主输入框的当前模型 + 勾选项（去重保序，主模型在首位）
-    const models = [primary, ...checkedModels().filter((m) => m !== primary)]
-      .filter((m, i, a) => m && a.indexOf(m) === i);
-    const r = await request("config.add_provider", {
-      name: val("name"),
-      kind: val("kind"),
-      base_url: val("base_url"),
-      model: primary,
-      api_key: val("api_key"),
-      set_default: val("set_default"),
-      models: models.length > 1 ? models : undefined,
-    });
-    let switched = false;
-    let switchErr = "";
-    providerTab = "custom"; // 添加的是自定义服务：切到自定义页签，让新服务立即可见
-    if (val("use_now")) {
-      try {
-        const s = await request("model.switch", { name: r.added });
-        switched = true;
-        hideBanner();
-        curProviderName = s.provider;
-        curModelName = s.model;
-        setModelChip(`${s.provider}/${s.model}`);
-      } catch (e) {
-        switchErr = e.message;
-      }
-    }
-    await renderSettings();
-    boot();
-    const cnt = `已启用 ${models.length} 个模型`;
-    if (switched) providerStatus(`✓ 已添加「${r.added}」并切换使用，当前对话立即生效（${cnt}）`);
-    else if (switchErr) providerStatus(`✓ 已添加「${r.added}」，但切换失败：${switchErr}（${cnt}）`, false);
-    else if (r.activated) providerStatus(`✓ 已添加「${r.added}」，原先没有可用模型，已自动启用它（${cnt}）`);
-    else providerStatus(`✓ 已添加「${r.added}」，${cnt}；需要用时点开它，在里面点「切换使用」`);
-  }, "添加");
 }
 
 // 从列表里移除模型服务：自定义彻底删除；内置（及停用自定义）只是停用，可在下方恢复

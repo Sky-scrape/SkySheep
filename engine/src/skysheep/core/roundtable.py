@@ -38,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..events import (
     AgentEvent,
@@ -52,6 +52,7 @@ from ..events import (
 from ..messages import Message, dialogue
 from ..models.base import Provider, ProviderDone, ProviderTextDelta
 from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S, is_transient_error
+from .collab_budget import RunBudget
 from .context import estimate_text_tokens, estimate_tokens
 from .effort import resolve_auto_effort
 
@@ -244,13 +245,29 @@ EmitFn = Callable[[AgentEvent], Awaitable[None]]
 
 @dataclass
 class MemberSpec:
-    """一个圆桌成员：provider/model 标识 + 已构建的 Provider 实例。"""
+    """一个圆桌成员：provider/model 标识 + 已构建的 Provider 实例。
+
+    模板接入（1.9 协作模板）新增三个可选字段，全部默认空 = 旧行为逐字不变：
+    - name：模板角色显示名（RoundtableStarted 与成员卡用）；
+    - prompt：模板角色人设；非空时覆盖默认 MEMBER_SYSTEM（辩论轮拼在
+      DEBATE_SYSTEM 之前，不整体替换）；
+    - system_prompt：与 prompt 同义的兼容别名（契约里的叫法），两者都非空时
+      以 prompt 为准。
+    """
 
     provider_name: str
     model: str
     provider: Provider | None = None  # 构建失败（如缺 Key）时为 None，作答时直接报错
     build_error: str = ""
     role: str = ""  # 身份预设 id（MEMBER_ROLES 键；空 = 普通成员）
+    name: str = ""
+    prompt: str = ""
+    system_prompt: str = ""
+
+    @property
+    def template_prompt(self) -> str:
+        """模板人设（兼容 prompt / system_prompt 两个字段名，prompt 优先）。"""
+        return (self.prompt or self.system_prompt or "").strip()
 
 
 @dataclass
@@ -337,6 +354,7 @@ async def _run_member(
     extra_instruction: str = "",
     semaphore: asyncio.Semaphore | None = None,
     live_parts: list[str] | None = None,
+    budget: RunBudget | None = None,
 ) -> MemberResult:
     """一个成员一轮作答：重试/超时/容错都收敛在自己身上，失败不影响其他成员。
 
@@ -362,6 +380,15 @@ async def _run_member(
 
     if spec.provider is None:
         return await finish("error", spec.build_error or "模型服务不可用")
+
+    # 模板人设：独立作答轮**覆盖**默认 MEMBER_SYSTEM；辩论轮拼在
+    # DEBATE_SYSTEM 之前（保留「看别人草稿后修订」的行为约束，不整体替换）
+    template_prompt = spec.template_prompt
+    if template_prompt:
+        system_text = (
+            template_prompt if round_no == 0
+            else f"{template_prompt}\n\n{system_text}"
+        )
 
     # 身份预设：拼在系统提示词末尾（独立作答轮与辩论轮都带上，视角贯穿全程）
     role_prompt = MEMBER_ROLES.get(spec.role, "")
@@ -392,6 +419,11 @@ async def _run_member(
                 result.cached_tokens += pe.cached_tokens
 
     async def consume() -> None:
+        # 预算计数点在最内层真实调用：重试的每次真实请求都计一次。
+        # BudgetExceeded 不在这里吞：让它落到下面的通用 except，转成该成员
+        # 的 error 终态（不会二次 finish("done")），由 run_roundtable 统一收尾。
+        if budget is not None:
+            budget.spend()
         if semaphore is not None:
             async with semaphore:
                 await stream_once()
@@ -494,6 +526,7 @@ async def _run_fusion(
     messages: list[Message],
     timeout_s: int,
     emit: EmitFn,
+    budget: RunBudget | None = None,
 ) -> tuple[str, str, int, int, int]:
     """主席融合：流式产出最终答案。返回 (text, error, input_tokens, output_tokens, cached_tokens)。
 
@@ -506,6 +539,9 @@ async def _run_fusion(
 
     async def consume() -> None:
         nonlocal usage_in, usage_out, usage_cached
+        # 融合调用同样计入模板预算（重试的每次真实调用都计）
+        if budget is not None:
+            budget.spend()
         async for pe in chair.stream(
             messages, [], effort=resolve_auto_effort(chair, messages),
         ):
@@ -557,6 +593,7 @@ async def _run_round(
     skip: set[int] | None = None,
     semaphores: dict[str, asyncio.Semaphore] | None = None,
     live_parts: dict[int, list[str]] | None = None,
+    budget: RunBudget | None = None,
 ) -> list[MemberResult]:
     """跑一轮成员作答。
 
@@ -577,6 +614,7 @@ async def _run_round(
                 spec, i, history, user_text, timeout_s, emit,
                 semaphore=semaphores.get(spec.provider_name),
                 live_parts=live_parts.setdefault(i, []),
+                budget=budget,
             )
             for i, spec in enumerate(members)
         )))
@@ -602,6 +640,7 @@ async def _run_round(
             extra_instruction=instruction,
             semaphore=semaphores.get(members[i].provider_name),
             live_parts=live_parts.setdefault(i, []),
+            budget=budget,
         )
         # 用量跨轮累计：_run_member 每次新建 result，这里把上一轮的量叠上去
         # （finish() 已经按本轮量发过 Usage 事件，事件流仍是逐轮的诚实值）
@@ -629,6 +668,9 @@ async def run_roundtable(
     chair_model: str = "",
     chair_context_tokens: int = 0,
     member_history_turns: int = 0,
+    prompts: dict[int | str, str] | list[str] | None = None,
+    chair_system: str = "",
+    budget: RunBudget | None = None,
 ) -> RoundtableOutcome:
     """跑一整场圆桌：并行作答（+ 可选辩论）→ 主席融合。
 
@@ -641,11 +683,42 @@ async def run_roundtable(
     主席融合始终吃全量历史，砍的只是成员侧的输入放大。
     返回完整结果，不直接改写主历史；取消时 outcome.status=cancelled，
     已产出内容（含进行中成员已流出的部分草稿）保留。
+
+    模板接入（全部可选，默认 None / 空 = 旧行为逐字不变）：
+    - prompts：按成员下标（int / "0"）或成员名给的模板人设，非空时覆盖
+      MemberSpec.prompt；与 MemberSpec 自带人设同时存在时以本参数为准；
+    - chair_system：收口（融合主席）的附加系统提示词，追加在原 system_text
+      之后，不替换既有身份提示词；
+    - budget：RunBudget。成员与融合的每次真实 provider 调用前 spend()；某轮
+      结束后一旦超限，立即发 Notice、把 outcome 标成 error 并返回，不再辩论/
+      融合（已产出的成员草稿保留在 outcome.members）。
     """
+    if prompts:
+        resolved: list[MemberSpec] = []
+        for i, spec in enumerate(members):
+            if isinstance(prompts, dict):
+                text = (
+                    prompts.get(i)
+                    or prompts.get(str(i))
+                    or prompts.get(spec.name)
+                    or ""
+                )
+            else:
+                text = prompts[i] if i < len(prompts) else ""
+            text = (text or "").strip()
+            resolved.append(replace(spec, prompt=text) if text else spec)
+        members = resolved
+    if (chair_system or "").strip():
+        chair_system = chair_system.strip()
+        system_text = f"{system_text}\n\n{chair_system}".strip()
+
     total_rounds = 1 + max(0, min(int(debate_rounds), 2))
     await emit(RoundtableStarted(
         members=[
-            {"index": i, "provider": s.provider_name, "model": s.model, "role": s.role}
+            {
+                "index": i, "provider": s.provider_name, "model": s.model,
+                "role": s.role, "name": s.name,
+            }
             for i, s in enumerate(members)
         ],
         rounds=total_rounds,
@@ -671,6 +744,7 @@ async def run_roundtable(
         # prev_before：上一轮的前一轮草稿文本（判断成员「修订后没改动」用）
         prev_before_texts: list[str | None] | None = None
         fail_counts: dict[int, int] = {}  # 各成员累计失败轮数（辩论轮跳过判定用）
+        member_tokens = 0
         for round_no in range(total_rounds):
             skip: set[int] = set()
             if round_no > 0:
@@ -686,8 +760,24 @@ async def run_roundtable(
                         skip.add(i)  # 上一轮修订后文本没变：已收敛，跳过
             results = await _run_round(
                 members, prev, round_no, member_history, user_text, timeout_s, emit,
-                skip, semaphores, live_parts,
+                skip, semaphores, live_parts, budget=budget,
             )
+            if budget is not None:
+                # 模板 token 预算：成员结果跨轮累计，按本轮新增量回填
+                # （审查 finding 14——此前只 spend() 计调用数，tokens 永远 0）。
+                total_member_tokens = sum(
+                    r.input_tokens + r.output_tokens for r in results
+                )
+                budget.add_tokens_delta(total_member_tokens - member_tokens)
+                member_tokens = total_member_tokens
+            if budget is not None and budget.exceeded():
+                # 预算已在成员阶段耗尽：保留已产出草稿，如实收尾，不再辩论/融合
+                reason = budget.reason_label()
+                await emit(NoticeEvent(message=reason))
+                outcome.status = "error"
+                outcome.error = reason
+                outcome.members = results
+                return outcome
             for r in results:
                 if r.status == "error":
                     fail_counts[r.index] = fail_counts.get(r.index, 0) + 1
@@ -741,12 +831,17 @@ async def run_roundtable(
         system_text, history, user_text, results, total_char_budget=fusion_budget,
     )
     fused, error, usage_in, usage_out, usage_cached = await _run_fusion(
-        chair, fusion_messages, max(timeout_s * 2, 300), emit,
+        chair, fusion_messages, max(timeout_s * 2, 300), emit, budget=budget,
     )
     outcome.fused_text = fused
     outcome.chair_input_tokens = usage_in
     outcome.chair_output_tokens = usage_out
     outcome.chair_cached_tokens = usage_cached
+    if budget is not None:
+        # 融合轮的 token 同样计入模板预算；此前圆桌从未回填 tokens，
+        # max_tokens 永不生效（审查 finding 14）。用增量累加，避免覆盖
+        # 之前 compaction / 成员轮已经记入的用量。
+        budget.add_tokens_delta(usage_in + usage_out)
     if error == "cancelled":
         outcome.status = "cancelled"
         return outcome

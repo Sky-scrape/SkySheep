@@ -667,8 +667,8 @@ def test_vision_model_inference(home):
     assert not _model_looks_vision(None)
 
 
-def test_add_provider_modal_search(home):
-    """添加自定义服务弹窗里，检测出的模型列表同样可搜索。
+def test_add_provider_form_search(home):
+    """添加自定义服务（页内表单）里，检测出的模型列表同样可搜索。
 
     锁住：
       ① 检测结果渲染函数按关键词过滤（大小写不敏感子串）；
@@ -677,11 +677,11 @@ def test_add_provider_modal_search(home):
     """
     from skysheep.server.app import STATIC_DIR
 
-    src = (STATIC_DIR / "app-whitelist.js").read_text(encoding="utf-8")
+    src = (STATIC_DIR / "app-providers.js").read_text(encoding="utf-8")
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
 
-    i = src.index("function addProviderModal(")
-    seg = src[i:src.index("function deleteProviderModal(")]
+    i = src.index("function renderProviderAdd(")
+    seg = src[i:src.index("async function submitProviderAdd(")]
     assert "const renderPickList = () =>" in seg
     assert "m.toLowerCase().includes(f)" in seg
     assert "没有匹配" in seg

@@ -2507,6 +2507,10 @@ mark.search-hit-mark {
   border-radius: var(--r-md); box-shadow: var(--shadow-md);
   z-index: var(--z-pop); padding: 8px;
 }
+/* 协作模板菜单（主栏 #coop-menu 与分屏列 .coop-menu）：内置 3 张 + 我的模板，
+   360px 会把「我的模板」整组挤进滚动区（620px 高窗口实测）。按视口放宽，
+   一屏放下 4 张模板。 */
+.coop-menu { max-height: min(520px, 72vh); }
 .rt-menu-tip { font-size: var(--fs-sm); color: var(--dim); padding: 2px 4px 6px; }
 .rt-menu-list { display: flex; flex-direction: column; gap: 2px; }
 .rt-menu-item {
@@ -3198,6 +3202,49 @@ mark.search-hit-mark {
   display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 4px;
 }
 .teamroom-empty .tr-empty-hint { margin: 6px 0 0; }
+/* 协作仪表盘（无进行中团队时）：状态 + 快速开始 + 最近协作，整页可滚。
+   旧空态是 margin:auto 的单个虚线框，上下各留一大片空白；现在从顶部排。 */
+.teamroom-root.tr-dash { justify-content: flex-start; overflow-y: auto; gap: 12px; }
+.teamroom-root.tr-dash .tr-dash-status { padding: 6px 2px 0; }
+.tr-dash-status .tr-empty-title { font-weight: var(--fw-heavy); color: var(--text); margin-bottom: 6px; }
+.tr-dash-status .tr-empty-hint { margin: 0; }
+.tr-dash-block { display: flex; flex-direction: column; gap: 7px; }
+.tr-dash-title { font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--dim); }
+.tr-tpl-grid { display: flex; flex-wrap: wrap; gap: 7px; }
+.tr-tpl-card {
+  flex: 1 1 44%; min-width: 140px; text-align: left; cursor: pointer;
+  background: var(--card); color: var(--text); font: inherit;
+  border: 1px solid var(--line2); border-radius: var(--r-sm); padding: 8px 10px;
+}
+.tr-tpl-card:hover { border-color: var(--blue); }
+.tr-tpl-card.active { border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue); }
+.tr-tpl-name {
+  display: block; font-size: var(--fs-sm); font-weight: var(--fw-bold);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tr-tpl-meta { display: block; margin-top: 2px; font-size: var(--fs-cap); color: var(--dim); }
+.tr-recent { display: flex; flex-direction: column; gap: 6px; }
+.tr-recent-row {
+  display: flex; align-items: flex-start; gap: 8px; text-align: left; cursor: pointer;
+  background: var(--card); color: var(--text); font: inherit;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 7px 9px;
+}
+.tr-recent-row:hover { border-color: var(--blue); }
+.tr-recent-kind {
+  flex: none; font-size: var(--fs-cap); color: var(--dim);
+  border: 1px solid var(--line2); border-radius: 999px; padding: 1px 7px;
+}
+.tr-recent-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tr-recent-name {
+  font-size: var(--fs-sm); font-weight: var(--fw-bold);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tr-recent-sub {
+  font-size: var(--fs-cap); color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tr-recent-bad { margin-left: 6px; color: var(--reg); font-weight: normal; }
+.tr-dash-foot { display: flex; gap: 8px; padding-top: 2px; }
 /* 页签内错误行（请求失败不发全局 Notice，就地给「重试」） */
 .teamroom-error {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -4067,8 +4114,10 @@ mark.search-hit-mark {
 .hidden-item .item-name { font-family: var(--font-mono); font-size: var(--fs-md); }
 .hidden-item .restore { font-size: var(--fs-sm); padding: 3px 10px; }
 
-/* 详情表单：单列堆叠 + 更大行距（布局对齐参考图，配色沿用纸墨主题） */
-#provider-detail-body { padding: 12px 14px; background: var(--card); border: 1px solid var(--line2); border-radius: var(--r-md); }
+/* 详情 / 添加表单：单列堆叠 + 更大行距（布局对齐参考图，配色沿用纸墨主题） */
+#provider-detail-body, #provider-add-body {
+  padding: 12px 14px; background: var(--card); border: 1px solid var(--line2); border-radius: var(--r-md);
+}
 #provider-detail-body .pr-fields input {
   background: var(--paper-raised); border: 1px solid var(--line2); border-radius: var(--r-sm);
   padding: 8px 10px; font-size: var(--fs-md); font-family: var(--font-mono); color: var(--text);
@@ -4079,6 +4128,26 @@ mark.search-hit-mark {
 #provider-detail-body .key-state { color: var(--dim); font-size: var(--fs-sm); }
 #provider-detail-body .key-state.missing { color: var(--reg); }
 #provider-detail-body .model-line .detect { font-size: var(--fs-sm); padding: 0 12px; }
+
+/* 添加视图：与详情页同皮的页内表单（不是弹层）。底部按钮右对齐，
+   复选框行在 .flat-panel 里恢复横排（.flat-panel 的 .field 是纵向布局） */
+#provider-add-body .settings-hint { margin-bottom: 12px; }
+#provider-add-body .inline-check {
+  display: flex; flex-direction: row; align-items: center; gap: 7px;
+  font-size: var(--fs-md); color: var(--text2); cursor: pointer;
+}
+#provider-add-body .inline-check input { width: auto; flex-shrink: 0; accent-color: var(--blue); }
+#provider-add-body .pr-ops {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+/* 检测出的模型多选行：弹层里靠 .form-grid 前缀转横排，页内表单里要自己带上 */
+#provider-add-body .ap-row {
+  display: flex; flex-direction: row; align-items: center; gap: 7px; padding: 2px 5px;
+  border-radius: var(--r-xs); font-size: var(--fs-md); cursor: pointer; color: var(--text);
+}
+#provider-add-body .ap-row input { width: auto; flex-shrink: 0; }
+#provider-add-body .form-status:empty { display: none; }
 
 /* 白名单规则列表 */
 .rules-list li { display: flex; align-items: center; gap: 10px; cursor: default; }
@@ -5077,6 +5146,22 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 }
 #daily-report-time:focus,
 #weekly-report-time:focus { outline: none; border-color: var(--blue); }
+/* 日报 / 周报的模板输入框：整行铺开、单独占一行（原生 textarea 不声明宽度只有
+   默认 20 来列，跟在说明文字后面挤成小方块、占位符整段被裁）；皮沿用录入件的
+   内凹纸面 + 墨线边，与上面的时刻框同一层视觉，别用系统白底灰边。两个框
+   提示都只有一行，统一两行高、同高对齐（写长的模板可拖下沿自行拉高） */
+#daily-report-template,
+#weekly-report-template {
+  flex: 1 1 100%; min-width: 0; min-height: 52px;
+  padding: 5px 8px; border: 1px solid var(--line2); border-radius: var(--r-md);
+  background: var(--paper-sunken); color: var(--text);
+  font: inherit; font-size: var(--fs-sm); line-height: 1.65;
+  resize: vertical;
+}
+#daily-report-template:focus,
+#weekly-report-template:focus { outline: none; border-color: var(--blue); }
+#daily-report-template::placeholder,
+#weekly-report-template::placeholder { color: var(--dim); }
 /* 今日运行总览卡：自动化页顶部（分段条之上，两个分段共用），四行摘要 + 可展开明细 */
 .rp-runcard {
   flex-shrink: 0; margin: 8px 10px 0; padding: 6px 10px;
@@ -9410,3 +9495,94 @@ li.mcp-failed { border-left: 0; }
 /* RTL：宠物与气泡跟着换到左下角 */
 [dir="rtl"] #chat-pet { right: auto; left: 10px; }
 [dir="rtl"] .pet-bubble { right: auto; left: 0; }
+
+/* ---------- 协作模板（L1）：设置页画廊 / 编辑器 / 协作菜单分组 / 跑前清单 ----------
+ * 模板只描述「谁来做、用什么模型、要不要动手」，不承载权限门开关：
+ * 这段样式只负责排版，颜色一律取主题变量（六套主题自动适配）。 */
+.collab-tpl-card { gap: 5px; }
+.collab-tpl-meta { font-size: var(--fs-cap); color: var(--dim); }
+.collab-tpl-ops { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 4px; }
+.collab-tpl-ops .collab-op { font-size: var(--fs-sm); padding: 3px 10px; }
+.collab-tpl-ops .collab-op.danger { color: var(--reg); }
+.collab-group-title {
+  grid-column: 1 / -1;
+  margin-top: 10px; padding-bottom: 3px;
+  font-size: var(--fs-cap); font-weight: var(--fw-bold); color: var(--dim);
+  border-bottom: 1px dashed var(--line);
+}
+.collab-group-title:first-child { margin-top: 0; }
+.collab-editor { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line2); }
+.collab-sec-title {
+  margin: 6px 0 2px;
+  font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--text2);
+}
+.collab-role-list { display: flex; flex-direction: column; gap: 8px; }
+.collab-role-row {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--paper-raised);
+}
+.collab-role-head { display: flex; align-items: center; gap: 8px; }
+.collab-role-idx {
+  flex: 0 0 auto; min-width: 22px; text-align: center;
+  padding: 1px 4px;
+  font-size: var(--fs-cap); color: var(--dim);
+  background: var(--paper-sunken); border-radius: var(--r-sm);
+}
+.collab-role-name { flex: 1 1 auto; min-width: 0; }
+.collab-role-row input[type="text"],
+.collab-role-row select,
+.collab-role-row textarea,
+#collab-tpl-form .toolcfg-row textarea {
+  padding: 6px 8px; font: inherit; color: var(--text);
+  background: var(--paper-sunken); border: 1px solid var(--line2); border-radius: var(--r-sm);
+}
+.collab-role-row select { flex: 0 0 92px; }
+.collab-role-row input:focus,
+.collab-role-row select:focus,
+.collab-role-row textarea:focus,
+#collab-tpl-form .toolcfg-row textarea:focus { outline: none; border-color: var(--blue); }
+.collab-role-row input:disabled,
+.collab-role-row select:disabled { color: var(--dim); cursor: not-allowed; }
+.collab-role-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.collab-role-grid label,
+.collab-role-prompt {
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: var(--fs-cap); color: var(--dim);
+}
+.collab-role-prompt textarea { resize: vertical; }
+.collab-role-del { flex-shrink: 0; font-size: var(--fs-sm); padding: 3px 10px; }
+.collab-tpl-note { margin: 2px 0 0; }
+#collab-tpl-form .toolcfg-row textarea { flex: 0 0 340px; max-width: 100%; min-width: 0; resize: vertical; }
+.collab-menu-group { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
+/* 三个内置模式的引擎默认值：默认折叠，模板画廊才是主入口 */
+.collab-defaults { margin: 10px 0 0; }
+.collab-defaults > summary {
+  cursor: pointer; color: var(--dim); font-size: var(--fs-sm);
+  padding: 6px 2px; user-select: none;
+}
+.collab-defaults[open] > summary { margin-bottom: 8px; }
+.collab-defaults .settings-card { margin-top: 10px; }
+/* 跑前清单内容高（角色表 + 工具表 + 勾选项 + 只读按钮），窄高窗口下让
+   #modal-content 自己滚：整层滚会把标题滚出视口（冒烟复现），标题与底部
+   取消/开始必须固定。 */
+.modal-box:has(.collab-preview-wrap) { max-height: 88vh; display: flex; flex-direction: column; }
+.modal-box:has(.collab-preview-wrap) #modal-content { overflow-y: auto; min-height: 0; }
+/* 表区再收一档：给勾选项与只读按钮留出固定高度，620px 高窗口也能一屏放下 */
+.modal-box:has(.collab-preview-wrap) .collab-preview { max-height: 50vh; }
+.collab-preview-wrap { display: flex; flex-direction: column; gap: 8px; }
+.collab-preview-wrap .collab-preview { flex: 0 1 auto; }
+.collab-preview { display: flex; flex-direction: column; gap: 6px; max-height: 56vh; overflow-y: auto; }
+.collab-preview-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+.collab-preview-table th,
+.collab-preview-table td {
+  padding: 4px 6px; text-align: left; vertical-align: top;
+  border-bottom: 1px solid var(--line); word-break: break-word;
+}
+.collab-preview-table th { font-size: var(--fs-cap); font-weight: var(--fw-bold); color: var(--dim); }
+.collab-preview-actions { display: flex; justify-content: flex-end; }
+.collab-noconfirm {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-sm); color: var(--text2); cursor: pointer;
+}

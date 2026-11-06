@@ -591,6 +591,18 @@ class ChannelsMixin:
         )
         return gate
 
+    def _sync_team_gate(self, session_id: str, gate) -> None:
+        """活动团队的执行门同步为渠道门（审查 finding 7）。
+
+        团队编排器在建队时缓存 gate，成员 Agent 又缓存了 TeamMemberGate
+        包装；只换 runtime.agent.gate 不会影响既有团队。TeamOrchestrator
+        的 set_gate 会同时刷新已建成员 Agent。
+        """
+        orch = self._teams.get(session_id)
+        setter = getattr(orch, "set_gate", None)
+        if callable(setter):
+            setter(gate)
+
     async def _get_channel_runtime(self, session_id: str, channel_name: str) -> SessionRuntime:
         """渠道会话的 runtime：用 ChannelGate 而非默认门控。
 
@@ -609,6 +621,10 @@ class ChannelsMixin:
             if isinstance(gate, ChannelGate):
                 self._channel_names[session_id] = channel_name
                 self._apply_channel_style(rt.agent)
+                # 活动团队的执行门是建队时缓存的，必须随 runtime 一起换成
+                # 渠道门；否则渠道消息会驱动按桌面授权面判定的团队
+                # （审查 finding 7）。
+                self._sync_team_gate(session_id, gate)
                 return rt
             # 复用点守卫（审查 F1.1①）：runtime 在、门却是交互门——桌面端先建了
             # 这个渠道会话的 runtime（重启后桌面打开过该会话，或渠道 runtime 被
@@ -620,6 +636,7 @@ class ChannelsMixin:
             project_id, workdir = await self._session_project(session_id)
             rt.agent.gate = self._build_channel_gate(channel_name, project_id, workdir)
             self._channel_gates[session_id] = rt.agent.gate
+            self._sync_team_gate(session_id, rt.agent.gate)
             self._channel_names[session_id] = channel_name
             # 桌面建起来的 runtime，系统提示词里没有渠道那段输出纪律，补上
             self._apply_channel_style(rt.agent)
@@ -644,6 +661,7 @@ class ChannelsMixin:
         await self._reload_agent_history(rt.agent, session_id)
         self.runtimes[session_id] = rt
         self._channel_gates[session_id] = gate
+        self._sync_team_gate(session_id, gate)
         return rt
 
     def _apply_channel_style(self, agent) -> None:
@@ -795,7 +813,7 @@ class ChannelsMixin:
         try:
             result = await self._run_turn_pipeline(
                 text, collect, plan_mode=False, runtime=rt, session_id=session_id,
-                adversarial=adversarial,
+                adversarial=adversarial, local=False,
             )
         except asyncio.CancelledError:
             return {"error": "这一轮被中断"}

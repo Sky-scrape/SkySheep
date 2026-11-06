@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ..textio import write_text_atomic
+from ..textio import read_text_file, write_text_atomic
 
 
 class TeamError(Exception):
@@ -25,6 +25,7 @@ class TeamError(Exception):
 # name 是唯一键，同名保存 = 覆盖（前端「另存为模板」对已有名直接更新）。
 
 TEAM_TEMPLATE_NAME_MAX = 60  # 模板名长度上限（与 skills 的限长校验同一精神）
+TEAM_TEMPLATE_PERSONA_MAX = 4000  # 成员人设上限（与协作模板 role.prompt 同口径）
 
 
 class TeamTemplateMember(BaseModel):
@@ -37,7 +38,9 @@ class TeamTemplateMember(BaseModel):
     provider: str = ""
     model: str = ""
     name: str = ""
-    persona: str = ""
+    # 人设会原样拼进成员系统提示词，必须有上限（审查 finding 10）：
+    # 否则 templates.json / 旧保存路径可写入任意长文本，挤占每轮上下文。
+    persona: str = Field(default="", max_length=TEAM_TEMPLATE_PERSONA_MAX)
 
 
 class TeamTemplateDirector(BaseModel):
@@ -106,8 +109,8 @@ class TeamTemplateStore:
         if not self.path.exists():
             return
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            data = json.loads(read_text_file(self.path).text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return  # 坏文件不致命：回空列表，下次保存覆盖
         items = data.get("templates") if isinstance(data, dict) else None
         for item in items or []:
@@ -137,6 +140,12 @@ class TeamTemplateStore:
                 f"模板的总管形态只能是 user / ai，收到：{template.director_mode}"
             )
         template.name = name
+        for member in template.members:
+            if len(member.persona or "") > TEAM_TEMPLATE_PERSONA_MAX:
+                raise TeamError(
+                    f"成员「{member.name or '未命名'}」的人设过长"
+                    f"（最多 {TEAM_TEMPLATE_PERSONA_MAX} 字符）"
+                )
         for i, old in enumerate(self.templates):
             if old.name == name:
                 self.templates[i] = template

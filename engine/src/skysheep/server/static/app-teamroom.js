@@ -271,7 +271,7 @@ function buildTeamRoomCard(roster, directorMode, director) {
   // CSS 对 .teamroom-card.folded 放行正文，页签内容不被收起）
   const head = card.querySelector(".tc-head");
   const title = head.querySelector(".tc-title");
-  if (title) title.textContent = "🧩 团队室";
+  if (title) title.textContent = "🧩 协作";
   head.onclick = null;
   if (card._ui.fold) card._ui.fold.hidden = true;
   // 收队/交付/接管/继续推进/另存为模板进头部（设计 §15.2）：按钮 DOM 从
@@ -345,6 +345,7 @@ async function loadTeamRoom(force) {
 
 // 一份团队快照上屏：同队复用现役容器做增量对齐，异队重建（团队室不做跨会话缓存）
 function trMountSnapshot(root, team, sid) {
+  root.classList.remove("tr-dash");
   const teamId = String(team.team_id || "");
   let card = (trCard && trCard.isConnected && trCard._teamId === teamId) ? trCard : null;
   const finished = (team.status || "active") !== "active";
@@ -372,76 +373,163 @@ function trMountSnapshot(root, team, sid) {
 // ---- 空态与降级（设计 §15.4） ----
 
 function trRenderError(root, err) {
+  root.classList.remove("tr-dash");
   root.innerHTML = "";
   const box = tcEl("div", "teamroom-error");
-  box.appendChild(tcEl("span", "tr-error-text", "团队室加载失败：" + ((err && err.message) || err)));
+  box.appendChild(tcEl("span", "tr-error-text", "协作加载失败：" + ((err && err.message) || err)));
   const retry = tcEl("button", "rp-mini", "重试");
   retry.onclick = () => loadTeamRoom(true);
   box.appendChild(retry);
   root.appendChild(box);
 }
 
+let trTplLoading = false;
+
 function trRenderEmpty(root, opts) {
   opts = opts || {};
   root.innerHTML = "";
-  const box = tcEl("div", "teamroom-empty");
-  box.appendChild(tcEl("div", "tr-empty-title",
-    opts.interrupted ? "本会话的团队已中断" : "本会话没有进行中的团队"));
-  const actions = tcEl("div", "tr-empty-actions");
   if (opts.interrupted) {
+    root.classList.remove("tr-dash");
     // 中断记录（重启/切项目前留过团队）：附中断说明与只读回放入口。
-    // 注：中断记录不带时间戳，这里只给原因（设计 §15.4 的「中断于 <时间>」
-    // 无处可取，按代码现状降级为显示 interrupt_reason）
+    const box = tcEl("div", "teamroom-empty");
+    box.appendChild(tcEl("div", "tr-empty-title", "上次团队协作已中断"));
     box.appendChild(tcEl("p", "dim small",
       "上次团队中断：" + (opts.interrupted.interrupt_reason || "应用重启，团队已中断")));
+    const actions = tcEl("div", "tr-empty-actions");
     const replayBtn = tcEl("button", "rp-mini primary", "只读回放频道");
     replayBtn.onclick = () => trOpenInterruptedReplay(opts.interrupted);
     actions.appendChild(replayBtn);
-  } else {
-    // 两个引导动作（设计 §15.4）：从模板建队走既有建队浮层，不重复造建队 UI；
-    // 模板册拉不到/为空时按设计只留文字引导（按钮移除）
-    const tplBtn = tcEl("button", "rp-mini primary", "从模板建队");
-    tplBtn.onclick = () => trStartFromTemplate();
-    const backBtn = tcEl("button", "rp-mini", "回到对话发起");
-    backBtn.title = "回到对话，用输入区的「协作」开关发起团队";
-    backBtn.onclick = () => {
-      const sw = document.getElementById("coop-switch");
-      if (sw) sw.focus();
-      else addNotice("请切回对话页，用输入区的「协作」开关发起团队");
-    };
-    actions.append(tplBtn, backBtn);
-    box.appendChild(tcEl("p", "dim small tr-empty-hint",
-      "没有合适的模板？回到对话，点输入区的「协作」选「团队」，当场点名组队。"));
-    request("team.template_list")
-      .then((r) => {
-        if (!((r && r.templates) || []).length) tplBtn.remove();
-      })
-      .catch(() => tplBtn.remove());
-  }
-  root.appendChild(box);
-}
-
-// 「从模板建队」：开启输入区团队开关并放出既有建队浮层（模板下拉在内）
-async function trStartFromTemplate() {
-  let templates = [];
-  try {
-    templates = ((await request("team.template_list")).templates) || [];
-  } catch (e) { /* 模板册拉不到：浮层照常打开，模板区自然不出现 */ }
-  if (!templates.length) {
-    addNotice("还没有团队模板：回到对话，点输入区的「协作」选「团队」当场组队。");
+    box.appendChild(actions);
+    root.appendChild(box);
     return;
   }
-  // 建队浮层长在输入区旁：全页视图（设置/工厂）开着先回对话——与命令面板协作
-  // 命令的「先回对话再开」同款语义（那边是 paletteBaseItems 的局部函数，全局
-  // 查无此名；旧写法调它靠 typeof 守卫静默跳过，死引用已修，勿再引回）
-  if (typeof pageViewOpen === "function" && pageViewOpen() && typeof backToChat === "function") backToChat();
-  if (typeof setTeamOn === "function") setTeamOn(true);
-  const menu = document.getElementById("coop-menu");
-  if (typeof showCoopMenu === "function"
-    && !(menu && !menu.classList.contains("hidden"))) {
-    showCoopMenu({ stopPropagation() {} }); // 协作菜单先摆出来，弹层才有锚
+  root.classList.add("tr-dash");
+  // 空态不再是一大片居中空白：状态 + 快速开始 + 最近协作，组成协作仪表盘
+  const status = tcEl("div", "tr-dash-status");
+  status.appendChild(tcEl("div", "tr-empty-title", "本会话没有进行中的协作"));
+  status.appendChild(tcEl("p", "dim small tr-empty-hint",
+    "选一个模板开始；团队模板会在这里展开频道与工单板。"));
+  root.appendChild(status);
+
+  trRenderQuickStart(root);
+  trRenderRecentRuns(root);
+
+  const foot = tcEl("div", "tr-dash-foot");
+  const manage = tcEl("button", "rp-mini", "管理模板");
+  manage.onclick = () => { if (typeof openSettings === "function") openSettings("collab"); };
+  const back = tcEl("button", "rp-mini", "回到对话");
+  back.onclick = () => {
+    const sw = document.getElementById("coop-switch");
+    if (sw) sw.focus();
+  };
+  foot.append(manage, back);
+  root.appendChild(foot);
+}
+
+// 「快速开始」：内置 + 我的模板直接摆出来，点一下即选到输入框（不必先开菜单）
+function trRenderQuickStart(root) {
+  const block = tcEl("div", "tr-dash-block");
+  block.appendChild(tcEl("div", "tr-dash-title", "快速开始"));
+  const list = (typeof collabTplAll !== "undefined" && Array.isArray(collabTplAll))
+    ? collabTplAll : [];
+  if (!list.length) {
+    if (!trTplLoading && typeof collabRefreshTemplates === "function") {
+      trTplLoading = true;
+      collabRefreshTemplates().then(() => {
+        trTplLoading = false;
+        if (typeof loadTeamRoom === "function") loadTeamRoom(true);
+      }).catch(() => { trTplLoading = false; });
+    }
+    block.appendChild(tcEl("div", "dim small", "正在加载模板…"));
+    root.appendChild(block);
+    return;
   }
-  if (typeof openSettingsBeside === "function") openSettingsBeside("team");
+  const selected = activeTab ? String(activeTab.template || "") : "";
+  const grid = tcEl("div", "tr-tpl-grid");
+  for (const t of list.slice(0, 6)) {
+    const kind = (typeof COLLAB_KIND_LABELS === "object" && COLLAB_KIND_LABELS[t.kind]) || String(t.kind || "");
+    const needs = (typeof collabTplNeeds === "function") ? collabTplNeeds(t) : "read";
+    const needsLabel = (typeof COLLAB_NEEDS_LABELS === "object" && COLLAB_NEEDS_LABELS[needs]) || needs;
+    const b = tcEl("button", "tr-tpl-card" + (selected === t.name ? " active" : ""));
+    b.innerHTML = `<span class="tr-tpl-name">${escapeHtml(String(t.name || ""))}</span>` +
+      `<span class="tr-tpl-meta">${escapeHtml(kind)} · ${escapeHtml(needsLabel)}</span>`;
+    b.title = `使用模板「${t.name}」：已选到输入框，写下任务发送即可`;
+    b.onclick = () => {
+      if (typeof collabApplyTemplate === "function") collabApplyTemplate(t);
+      const input = document.getElementById("input");
+      if (input) input.focus();
+    };
+    grid.appendChild(b);
+  }
+  block.appendChild(grid);
+  root.appendChild(block);
+}
+
+// 从已加载的会话历史里挑出协作轮（圆桌 / 团队 / 对抗）
+function trCollabRuns() {
+  const t = (typeof curTab === "function") ? curTab() : null;
+  const all = (t && Array.isArray(t._historyAll)) ? t._historyAll : [];
+  const runs = [];
+  for (const m of all) {
+    if (!m || m.role !== "assistant") continue;
+    const adv = m.adversarial;
+    const rt = m.roundtable;
+    if (adv && typeof adv === "object") {
+      const stats = adv.stats || {};
+      runs.push({
+        seq: m.seq, kind: "adversarial",
+        name: adv.template || "对抗审查",
+        detail: `${Number(stats.total || 0)} 条问题 · ${Number(stats.confirmed || 0)} 条成立`,
+        status: String(adv.status || ""), text: String(m.text || ""),
+      });
+    } else if (rt && typeof rt === "object") {
+      const isTeam = rt.mode === "team";
+      const team = rt.team || {};
+      const members = Array.isArray(rt.members) ? rt.members.length
+        : (Array.isArray(team.roster) ? team.roster.length : 0);
+      runs.push({
+        seq: m.seq, kind: isTeam ? "team" : "roundtable",
+        name: rt.template || (isTeam ? "团队协作"
+          : (rt.mode === "compare" ? "圆桌对比" : "圆桌会诊")),
+        detail: isTeam ? `${members} 名队员` : `${members} 个成员`,
+        status: String(team.status || rt.status || ""), text: String(m.text || ""),
+      });
+    }
+  }
+  return runs.slice(-5).reverse();
+}
+
+function trRenderRecentRuns(root) {
+  const runs = trCollabRuns();
+  const block = tcEl("div", "tr-dash-block");
+  block.appendChild(tcEl("div", "tr-dash-title",
+    runs.length ? `最近协作（${runs.length}）` : "最近协作"));
+  if (!runs.length) {
+    block.appendChild(tcEl("div", "dim small",
+      "还没有协作记录；用上面的模板发起一次，完成后会出现在这里。"));
+    root.appendChild(block);
+    return;
+  }
+  const list = tcEl("div", "tr-recent");
+  for (const r of runs) {
+    const kindLabel = r.kind === "team" ? "团队" : r.kind === "adversarial" ? "对抗" : "圆桌";
+    const bad = (r.status === "error" || r.status === "cancelled")
+      ? `<span class="tr-recent-bad">${r.status === "cancelled" ? "已停止" : "失败"}</span>` : "";
+    const preview = String(r.text || "").replace(/\s+/g, " ").trim().slice(0, 46);
+    const row = tcEl("button", "tr-recent-row");
+    row.innerHTML = `<span class="tr-recent-kind k-${r.kind}">${kindLabel}</span>` +
+      '<span class="tr-recent-main">' +
+      `<span class="tr-recent-name">${escapeHtml(String(r.name || ""))}${bad}</span>` +
+      `<span class="tr-recent-sub">${escapeHtml(r.detail)}` +
+      (preview ? " · " + escapeHtml(preview) : "") + "</span></span>";
+    row.title = "跳到这条协作消息";
+    row.onclick = () => {
+      if (typeof jumpToMessageSeq === "function") jumpToMessageSeq(curTab(), r.seq);
+    };
+    list.appendChild(row);
+  }
+  block.appendChild(list);
+  root.appendChild(block);
 }
 
 // 「只读回放频道」：凭中断记录里的 team_id 拉全量频道，渲染只读时间线

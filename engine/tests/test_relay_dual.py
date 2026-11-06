@@ -1121,3 +1121,104 @@ async def test_import_full_data_freezes_relay(home):
         assert not st["workers"] and not st["current"]
     finally:
         await be.shutdown()
+
+
+# ---- 轮间隙误杀与副屏排他（对抗审查留人工两项的修复回归） ----
+
+async def _gap_window_setup(home):
+    """把链停在「上一轮已完成、交接协商复述调用阻塞」的轮间隙窗口：
+    worker 活着、current 还登记着刚完成的主屏轮——正是误杀窗口的形态。"""
+    prov = ScriptedThenBlockProvider([[TextBlock(text="主屏方案")]])
+    be = await _mk(home, prov)
+    sid = (await be.new_session())["id"]
+    started = await be.relay_dual_run({
+        "session_id": sid, "goal": "完成示例任务",
+        "main_task": "发布方案", "peer_task": "执行并反馈",
+        "auto_alternate": True,  # 默认 verify_handoff=on：协商窗口真实存在
+        "request_id": "gap-1", "expected_revision": 0,
+    })
+    pair_id = started["pair"]["id"]
+    await asyncio.wait_for(prov.blocked.wait(), timeout=5)
+    snap = await be.store.relay_pair_snapshot(pair_id)
+    assert snap["turns"][0]["status"] == "done"
+    return prov, be, sid, pair_id
+
+
+async def test_dual_stop_spares_user_turn_in_gap(home):
+    """轮间隙手动中断不得误杀用户自己在同一会话在飞的新消息轮。
+
+    current 在轮间隙不清零：修复前 stop 按它调 cancel_run 会把用户
+    自己正在跑的那轮一起取消；修复后以库为准（最新 turn 仍 running
+    才取消），已完成的轮与用户的在飞轮都不动。"""
+    prov, be, sid, pair_id = await _gap_window_setup(home)
+    user_turn = None
+    try:
+        user_turn = asyncio.create_task(asyncio.sleep(30))
+        be.runtimes.get(sid).run_task = user_turn
+        stopped = await be.relay_dual_stop({
+            "pair_id": pair_id, "request_id": "gap-stop",
+            "expected_revision": (await be.store.relay_pair_get(pair_id))["revision"],
+        })
+        assert stopped["pair"]["state"] == "paused"
+        await asyncio.sleep(0.05)
+        assert not user_turn.done(), "轮间隙中断不得取消用户在飞轮"
+        # 已完成的轮不被改写成中断
+        snap = await be.store.relay_pair_snapshot(pair_id)
+        assert snap["turns"][0]["status"] == "done"
+    finally:
+        if user_turn is not None:
+            user_turn.cancel()
+        prov.gate.set()
+        await be.shutdown()
+
+
+async def test_cascade_spares_user_turn_in_gap(home):
+    """级联收敛不波及另一侧会话里用户的在飞轮：删副屏收敛 pair 时，
+    主屏会话里用户自己正在跑的那轮要活着。"""
+    prov, be, sid, pair_id = await _gap_window_setup(home)
+    user_turn = None
+    try:
+        peer_id = (await be.store.relay_pair_get(pair_id))["peer_session_id"]
+        user_turn = asyncio.create_task(asyncio.sleep(30))
+        be.runtimes.get(sid).run_task = user_turn
+        result = await be.relay_converge_for_deletion(session_id=peer_id)
+        assert any(c["kind"] == "pair" for c in result)
+        pair = await be.store.relay_pair_get(pair_id)
+        assert pair["state"] == "interrupted"
+        await asyncio.sleep(0.05)
+        assert not user_turn.done(), "级联收敛不得取消另一侧会话里用户在飞轮"
+    finally:
+        if user_turn is not None:
+            user_turn.cancel()
+        prov.gate.set()
+        await be.shutdown()
+
+
+async def test_dual_peer_reuse_is_exclusive(home):
+    """副屏复用必须排他：pair A 占着的副屏（哪怕还是空的），同项目另一份
+    接力不得复用，避免两份接力的轮次交错写进同一会话历史；A 自己重开仍
+    复用自己的副屏。"""
+    prov = FakeProvider([
+        [TextBlock(text="主屏方案A")],
+        [TextBlock(text="主屏方案B")],
+    ])
+    be = await _mk(home, prov)
+    try:
+        s1 = (await be.new_session())["id"]
+        started_a = await be.relay_dual_run({
+            "session_id": s1, "goal": "目标A", "main_task": "主任务A",
+            "peer_task": "副任务A", "request_id": "ex-a", "expected_revision": 0,
+        })
+        peer_a = started_a["peer"]["id"]
+        await _wait_pair_state(be, started_a["pair"]["id"], "idle")
+        # A 只跑了主屏第 1 轮，副屏还是空会话；另一会话开接力不得复用它
+        s2 = (await be.new_session())["id"]
+        opened_b = await be.relay_dual_open({"session_id": s2, "create_peer": True})
+        assert opened_b["peer"] is not None
+        assert opened_b["peer"]["id"] != peer_a
+        # A 自己重开：仍复用自己的副屏
+        opened_a = await be.relay_dual_open({"session_id": s1, "create_peer": True})
+        assert opened_a["pair"] is not None
+        assert opened_a["peer"]["id"] == peer_a
+    finally:
+        await be.shutdown()

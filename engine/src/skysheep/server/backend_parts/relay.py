@@ -233,7 +233,8 @@ class RelaySettingsMixin:
             peer = await self.store.get_session(pair["peer_session_id"])
         if peer is None:
             peer = await self.store.relay_peer_session(
-                project_id, _RELAY_PEER_TITLE, create=bool(params.get("create_peer"))
+                project_id, _RELAY_PEER_TITLE, create=bool(params.get("create_peer")),
+                exclude_pair_id=pair["id"] if pair else None,
             )
             if peer is not None and pair is not None:
                 await self.store.relay_pair_update(
@@ -315,6 +316,7 @@ class RelaySettingsMixin:
             pair = await self.store.relay_pair_latest(session_id)
         if pair is None:
             peer = await self.store.relay_peer_session(project_id, _RELAY_PEER_TITLE)
+            # 全新 pair：任何被占用的副屏都不复用（relay_peer_session 默认排他）
             created = await self.store.relay_pair_create({
                 "id": uuid.uuid4().hex,
                 "project_id": project_id,
@@ -331,7 +333,9 @@ class RelaySettingsMixin:
             pair = created["pair"]
         elif await self.store.get_session(pair["peer_session_id"]) is None:
             # 副屏会话被用户删了：换一个新的副屏再跑，别把消息写进不存在的会话
-            peer = await self.store.relay_peer_session(project_id, _RELAY_PEER_TITLE)
+            peer = await self.store.relay_peer_session(
+                project_id, _RELAY_PEER_TITLE, exclude_pair_id=pair["id"]
+            )
             await self.store.relay_pair_update(
                 pair["id"], {"peer_session_id": peer.id}, bump=False
             )
@@ -416,7 +420,7 @@ class RelaySettingsMixin:
 
         st = self._relay_dual_state()
         current = st["current"].get(pair_id)
-        if current:
+        if current and await self._relay_pair_turn_in_flight(pair_id, current):
             self.cancel_run(current["session_id"])
         task = st["workers"].get(pair_id)
         if task is not None and not task.done():
@@ -451,6 +455,25 @@ class RelaySettingsMixin:
         await self.store.relay_action_put(f"dual-stop:{pair_id}", request_id, "stop", snapshot)
         await self._relay_dual_broadcast(snapshot)
         return await self._relay_dual_payload(snapshot)
+
+    async def _relay_pair_turn_in_flight(self, pair_id: str, current: dict) -> bool:
+        """st["current"] 登记的那一轮现在是否真的在跑。
+
+        current 在轮间隙不清零（默认开核验的自动交替下，交接协商窗口可达数
+        分钟），此刻按它调 session 级 cancel_run 会无差别取消用户自己在同一
+        会话在飞的新消息轮（对抗审查：stop 与级联收敛两处）。取消前以库为准
+        核对：最新 turn 仍为 running 且轮号、侧位与登记一致才允许取消；
+        「接力轮真在跑」的既有中断语义（running 轮上 stop 可取消）不变。
+        """
+        try:
+            latest = await self.store.relay_pair_latest_turn(pair_id)
+        except Exception:  # noqa: BLE001 - 查不了按不在跑处理：宁可不取消
+            return False
+        if latest is None:
+            return False
+        return (latest["status"] == "running"
+                and int(latest["turn_no"]) == int(current["turn_no"])
+                and latest["side"] == current["side"])
 
     # ---- worker ----
 
@@ -1039,7 +1062,7 @@ class RelaySettingsMixin:
     async def _relay_cancel_dual_worker(self, pair_id: str) -> None:
         st = self._relay_dual_state()
         current = st["current"].get(pair_id)
-        if current:
+        if current and await self._relay_pair_turn_in_flight(pair_id, current):
             self.cancel_run(current["session_id"])
         task = st["workers"].get(pair_id)
         if task is not None and not task.done():

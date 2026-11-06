@@ -4484,11 +4484,17 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         return snap
 
     async def relay_peer_session(
-        self, project_id: int | None, title: str, *, create: bool = True
+        self, project_id: int | None, title: str, *, create: bool = True,
+        exclude_pair_id: str | None = None,
     ) -> Session | None:
         """副屏会话：优先复用同项目里同名且还没有消息的空会话，否则新建。
 
         点「接力」会先开副屏、后填任务；不复用的话每点一次就多一条空会话。
+        复用必须排他（对抗审查）：已被 relay_pairs 引用为副屏的空会话不再
+        复用（被占即新建）——否则同项目两份接力会绑到同一条副屏，轮次交错
+        互相当上下文。exclude_pair_id 是调用方自己的 pair：重绑自己的副屏
+        不受影响。pair 行不删（历史保留只读），所以占用随 pair 存续、语义
+        就是「一条副屏只属于一份接力」。
         进程内串行化：侧栏点击与右侧面板加载可能同时各发一次 dual_open，
         并发查询会各自查空、各建一条同名空会话，前端就开了两块副屏。
         create=False 用于「面板自动加载」：只找现成的空副屏，没有就返回 None，
@@ -4502,8 +4508,11 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             cur = await self._db.execute(
                 "SELECT * FROM sessions WHERE project_id IS ? AND title = ? AND archived = 0"
                 " AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sessions.id)"
+                " AND id NOT IN (SELECT peer_session_id FROM relay_pairs"
+                "                WHERE peer_session_id IS NOT NULL"
+                "                AND (? IS NULL OR id != ?))"
                 " ORDER BY updated_at DESC LIMIT 1",
-                (project_id, title),
+                (project_id, title, exclude_pair_id, exclude_pair_id),
             )
             row = await cur.fetchone()
             if row is not None:
@@ -4512,6 +4521,15 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             if not create:
                 return None
             return await self.create_session(project_id, title=title)
+
+    async def relay_pair_latest_turn(self, pair_id: str) -> dict | None:
+        """pair 最新一轮（轮间隙/协商窗口的新鲜度判定用，见 backend 侧守卫）。"""
+        cur = await self._db.execute(
+            "SELECT * FROM relay_turns WHERE pair_id = ? ORDER BY turn_no DESC LIMIT 1",
+            (pair_id,),
+        )
+        row = await cur.fetchone()
+        return self._relay_turn_row(row) if row else None
 
 
 def export_messages_text(messages: list[Message]) -> str:

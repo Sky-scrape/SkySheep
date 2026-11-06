@@ -28,6 +28,9 @@ from pathlib import Path
 DEFAULT_TITLE = "SkySheep"
 DEFAULT_HOME_NAME = ".skysheep"
 INSTANCE_ENV = "SKYSHEEP_INSTANCE"
+# 源码运行的默认身份：源码版的库结构会单向迁移，与安装版共用 ~/.skysheep
+# 会把用户的库升到安装版打不开的版本，所以镜像 engine 侧规则默认隔离到 dev。
+SOURCE_INSTANCE = "dev"
 # 与 skysheep.instance 同一套白名单：启动器刻意不在模块级导入引擎（引擎导入
 # 约 2.4s，必须等窗口可见后才做），所以这里镜像一份规则，并由
 # tests/test_instance.py 锁住两边一致。
@@ -92,10 +95,21 @@ def _install_no_history_nav(hwnd: int) -> None:
     _NAV_HOOKS.extend([new_proc, old])
 
 
+def _is_frozen() -> bool:
+    """是否 PyInstaller 打包运行；源码运行默认 dev 身份（见 skysheep.instance）。"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def default_instance_name() -> str | None:
+    return None if _is_frozen() else SOURCE_INSTANCE
+
+
 def instance_name() -> str | None:
-    """实例身份名；未设置或不合规时 None（等同默认身份）。见 skysheep.instance。"""
+    """实例身份名；未设置或不合规时用默认身份（安装版 None / 源码 dev）。"""
     raw = (os.environ.get(INSTANCE_ENV) or "").strip()
-    return raw if _INSTANCE_RE.match(raw) else None
+    if _INSTANCE_RE.match(raw):
+        return raw
+    return default_instance_name()
 
 
 def app_title() -> str:

@@ -18,31 +18,56 @@
 
 优先级：``SKYSHEEP_HOME`` > ``SKYSHEEP_INSTANCE`` > 默认。显式指定数据目录时
 完全按它走，不再叠加实例后缀——测试与临时环境都依赖这个语义。
+
+未设置身份时，**源码运行默认用 ``dev`` 身份**（数据落 ``~/.skysheep-dev``），
+只有打包后的安装版才用默认身份 ``~/.skysheep``：源码版的库结构会单向迁移，
+若与安装版共用目录，装完旧版的用户会在下次启动时被「库版本过新」拒之门外。
+这一判定看 ``sys.frozen``（PyInstaller 打包为真），所以 ``uv run skysheep app``
+裸跑、``engine/SkySheep.pyw``、示例脚本都自动隔离，安装版行为与历史完全一致。
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 # 默认身份：安装版用它，保持与历史版本完全一致的对外表现（升级无感知）
 DEFAULT_HOME_NAME = ".skysheep"
 DEFAULT_TITLE = "SkySheep"
 INSTANCE_ENV = "SKYSHEEP_INSTANCE"
+# 源码运行的默认身份：库结构先于安装版前进，必须与安装版数据分开
+SOURCE_INSTANCE = "dev"
 
 # 身份名白名单：小写字母数字开头，后可跟 -/_，总长不超过 24
 _INSTANCE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")
 
 
+def _is_frozen() -> bool:
+    """是否 PyInstaller 打包运行（安装版 / 本地 dist 构建）。
+
+    源码运行（uv run、SkySheep.pyw、示例脚本）为 False——这类运行默认用
+    ``dev`` 身份，避免源码版的库迁移污染安装版的数据目录。
+    """
+    return bool(getattr(sys, "frozen", False))
+
+
+def default_instance_name() -> str | None:
+    """未显式指定身份时的默认身份：安装版 ``None``，源码运行 ``dev``。"""
+    return None if _is_frozen() else SOURCE_INSTANCE
+
+
 def instance_name() -> str | None:
-    """当前实例身份名；未设置或不合规时返回 None（等同默认身份）。
+    """当前实例身份名；未设置或不合规时返回默认身份（安装版 None / 源码 dev）。
 
     不合规一律按"未设置"处理而不是抛错：身份名只影响隔离，不该让应用起不来。
     真正的写法错误由 :func:`instance_problem` 暴露给启动日志与设置页。
     """
     raw = (os.environ.get(INSTANCE_ENV) or "").strip()
-    return raw if _INSTANCE_RE.match(raw) else None
+    if _INSTANCE_RE.match(raw):
+        return raw
+    return default_instance_name()
 
 
 def instance_problem() -> str | None:
@@ -53,7 +78,7 @@ def instance_problem() -> str | None:
     return (
         f"{INSTANCE_ENV} 取值不合法：{raw!r}。"
         "只允许小写字母、数字、下划线、连字符，且以字母或数字开头（最长 24 字符）。"
-        "本次按默认身份启动，未做隔离。"
+        "本次按默认身份启动（源码运行 = dev，安装版 = 默认目录），未使用你写的名字。"
     )
 
 
@@ -93,9 +118,11 @@ __all__ = [
     "DEFAULT_HOME_NAME",
     "DEFAULT_TITLE",
     "INSTANCE_ENV",
+    "SOURCE_INSTANCE",
     "app_title",
     "autostart_value_name",
     "data_home",
+    "default_instance_name",
     "instance_name",
     "instance_problem",
     "mutex_name",

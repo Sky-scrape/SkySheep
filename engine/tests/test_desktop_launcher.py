@@ -355,9 +355,11 @@ def test_url_scheme_matches_instance_identity(monkeypatch):
     """协议名与实例身份同步：默认 skysheep，命名身份 skysheep-<name>。
 
     引擎侧 backend._toast_launch_uri 按同一拼法读注册表，两边不一致的话
-    点击系统通知就唤不回窗口——所以这里锁死拼法。
+    点击系统通知就唤不回窗口——所以这里锁死拼法。协议注册只在打包版发生，
+    所以默认身份按打包态（sys.frozen）判定。
     """
     monkeypatch.delenv("SKYSHEEP_INSTANCE", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert desktop.url_scheme() == "skysheep"
     monkeypatch.setenv("SKYSHEEP_INSTANCE", "dev")
     assert desktop.url_scheme() == "skysheep-dev"

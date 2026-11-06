@@ -31,16 +31,39 @@ def clean_env(monkeypatch):
     monkeypatch.delenv("SKYSHEEP_HOME", raising=False)
 
 
-# ---- 默认身份：与历史版本表现完全一致 ----
+@pytest.fixture
+def installed(monkeypatch):
+    """模拟安装版（PyInstaller 打包）：sys.frozen=True → 默认身份。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
 
 
-def test_default_identity_matches_legacy(clean_env):
-    """不设环境变量时，四处取值必须与 2.1 及以前完全相同（升级零感知）。"""
+@pytest.fixture
+def source(monkeypatch):
+    """模拟源码运行：sys.frozen 不存在 → 默认 dev 身份。"""
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+
+# ---- 默认身份：安装版与历史版本表现完全一致 ----
+
+def test_installed_default_identity_matches_legacy(clean_env, installed):
+    """安装版不设环境变量时，四处取值必须与 2.1 及以前完全相同（升级零感知）。"""
     assert instance.instance_name() is None
     assert instance.data_home() == Path.home() / ".skysheep"
     assert instance.app_title() == "SkySheep"
     assert instance.mutex_name() == "Local\\SkySheepDesktopSingleton"
     assert instance.autostart_value_name() == "SkySheep"
+
+
+def test_source_default_identity_is_dev(clean_env, source):
+    """源码运行默认 dev 身份：数据落 ~/.skysheep-dev，绝不碰安装版的库。
+
+    源码版的库结构会单向迁移，共用目录会把安装版锁在「库版本过新」外面。
+    """
+    assert instance.instance_name() == "dev"
+    assert instance.data_home() == Path.home() / ".skysheep-dev"
+    assert instance.app_title() == "SkySheep [dev]"
+    assert instance.mutex_name() == "Local\\SkySheepDesktopSingleton-dev"
+    assert instance.autostart_value_name() == "SkySheep-dev"
 
 
 def test_default_has_no_problem(clean_env):
@@ -88,7 +111,7 @@ def test_valid_instance_names(clean_env, monkeypatch, name):
         "",                 # 空串等同未设置
     ],
 )
-def test_invalid_instance_names_fall_back_with_reason(clean_env, monkeypatch, bad):
+def test_invalid_instance_names_fall_back_with_reason(clean_env, installed, monkeypatch, bad):
     monkeypatch.setenv(instance.INSTANCE_ENV, bad)
     assert instance.instance_name() is None
     assert instance.data_home() == Path.home() / ".skysheep"
@@ -96,6 +119,14 @@ def test_invalid_instance_names_fall_back_with_reason(clean_env, monkeypatch, ba
         assert instance.instance_problem() is not None
     else:
         assert instance.instance_problem() is None
+
+
+def test_invalid_instance_name_falls_back_to_source_default(clean_env, source, monkeypatch):
+    """源码运行把非法身份名当作未设置：落回 dev 身份，而不是安装版的目录。"""
+    monkeypatch.setenv(instance.INSTANCE_ENV, "Dev")
+    assert instance.instance_name() == "dev"
+    assert instance.data_home() == Path.home() / ".skysheep-dev"
+    assert instance.instance_problem() is not None
 
 
 def test_whitespace_padded_name_is_treated_as_set(clean_env, monkeypatch):
@@ -119,23 +150,35 @@ def test_home_env_alone_works(clean_env, monkeypatch, tmp_path):
     assert instance.data_home() == tmp_path / "custom"
 
 
-def test_config_skysheep_home_uses_instance(clean_env, monkeypatch):
+def test_config_skysheep_home_uses_instance(clean_env, installed, monkeypatch):
     """引擎侧入口（config.skysheep_home）必须与 instance 同源。"""
     from skysheep.config import skysheep_home
 
     assert skysheep_home() == Path.home() / ".skysheep"
     monkeypatch.setenv(instance.INSTANCE_ENV, "dev")
     assert skysheep_home() == Path.home() / ".skysheep-dev"
+    # 源码运行默认身份同样走同一条解析（安装版判定一去掉就落到 dev）
+    monkeypatch.delenv(instance.INSTANCE_ENV)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert skysheep_home() == Path.home() / ".skysheep-dev"
 
 
 # ---- desktop.py 的镜像实现必须与引擎逐字符一致 ----
 
 
-def test_desktop_mirrors_engine_default(clean_env):
+def test_desktop_mirrors_engine_default(clean_env, installed):
     assert desktop.instance_name() is None
     assert desktop.app_title() == instance.app_title()
     assert desktop.mutex_name() == instance.mutex_name()
     assert desktop._home_dir() == instance.data_home()
+
+
+def test_desktop_mirrors_engine_source_default(clean_env, source):
+    """桌面启动器也要把源码运行默认落到 dev 身份，否则窗口标题/互斥体与引擎错位。"""
+    assert desktop.instance_name() == instance.instance_name() == "dev"
+    assert desktop.app_title() == instance.app_title() == "SkySheep [dev]"
+    assert desktop.mutex_name() == instance.mutex_name()
+    assert desktop._home_dir() == instance.data_home() == Path.home() / ".skysheep-dev"
 
 
 def test_desktop_mirrors_engine_named(clean_env, monkeypatch):
@@ -156,7 +199,8 @@ def test_desktop_mirrors_engine_home_priority(clean_env, monkeypatch, tmp_path):
 def test_desktop_rejects_same_names_as_engine(clean_env, monkeypatch, bad):
     """两边白名单必须同口径：desktop 放行而引擎拒绝会出现"半隔离"状态。"""
     monkeypatch.setenv(instance.INSTANCE_ENV, bad)
-    assert desktop.instance_name() == instance.instance_name() is None
+    # 非法名两边都退回默认身份（源码运行 = dev），口径必须一致
+    assert desktop.instance_name() == instance.instance_name() == instance.default_instance_name()
     assert desktop.mutex_name() == instance.mutex_name()
     assert desktop.app_title() == instance.app_title()
 
@@ -195,7 +239,7 @@ def test_desktop_identity_used_by_single_instance_logic(clean_env, monkeypatch):
 # ---- 自启值名 ----
 
 
-def test_autostart_value_name_follows_instance(clean_env, monkeypatch):
+def test_autostart_value_name_follows_instance(clean_env, installed, monkeypatch):
     from skysheep import startup
 
     assert startup.value_name() == "SkySheep"

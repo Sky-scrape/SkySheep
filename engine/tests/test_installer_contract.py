@@ -18,6 +18,7 @@ SKYSHEEP_HOME 首启链路）与 test_desktop_launcher.py（启动兜底）。
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,8 +37,9 @@ def test_app_mutex_matches_desktop_singleton(iss_text, monkeypatch):
     """安装器与桌面启动器共用 default 身份的单实例互斥体。"""
     from skysheep.instance import mutex_name
 
-    # 固定默认身份：环境里若无 SKYSHEEP_INSTANCE 即 default；有则由用例剥掉
+    # 安装版 = 打包运行（sys.frozen）；源码运行默认 dev 身份，不参与这条契约
     monkeypatch.delenv("SKYSHEEP_INSTANCE", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     m = re.search(r"^AppMutex=(.+)$", iss_text, re.MULTILINE)
     assert m, "installer.iss 必须声明 AppMutex"
     assert m.group(1).strip() == mutex_name(), \

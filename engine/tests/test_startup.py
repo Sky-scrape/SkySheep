@@ -1,4 +1,6 @@
 # 开机自启（startup.py）回归：注册表经注入替身隔离，绝不碰真机 HKCU。
+import sys
+
 from skysheep import instance, startup
 
 
@@ -21,6 +23,8 @@ class FakeRegistry:
 def test_value_name_follows_instance_identity(monkeypatch):
     """两个实例身份的开机项名字必须不同，否则互相覆盖（开关状态显示已开启但被顶掉）。"""
     monkeypatch.delenv("SKYSHEEP_INSTANCE", raising=False)
+    # 安装版默认身份（源码运行默认 dev，另见 test_instance.py）
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     plain = startup.value_name()
     monkeypatch.setenv("SKYSHEEP_INSTANCE", "dev")
     dev = startup.value_name()

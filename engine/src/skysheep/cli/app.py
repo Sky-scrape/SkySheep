@@ -59,6 +59,20 @@ from ..tools.shell import set_child_network
 from ..tools.skill import LoadSkillTool
 
 
+def _data_hint(rel: str) -> str:
+    """数据目录下的路径提示：在用户主目录里显示成 ``~/...``，否则给绝对路径。
+
+    源码运行默认 dev 身份（``~/.skysheep-dev``），安装版是 ``~/.skysheep``；
+    提示文案跟着实际数据目录走，别把用户指到另一个身份的文件上。
+    """
+    home = skysheep_home()
+    try:
+        shown = "~/" + home.relative_to(Path.home()).as_posix()
+    except ValueError:
+        shown = str(home)
+    return f"{shown}/{rel}"
+
+
 @functools.lru_cache(maxsize=1)
 def _console():
     """控制台惰性单例：rich 全家（render.py 还连带 markdown_it）只在真正要
@@ -372,7 +386,7 @@ class ChatApp:
 
     def _cmd_mcp(self) -> None:
         if not self.mcp or not self.mcp.statuses:
-            self.console.print("[dim](未配置 MCP 服务器；参考 ~/.skysheep/mcp.json)[/]")
+            self.console.print(f"[dim](未配置 MCP 服务器；参考 {_data_hint('mcp.json')})[/]")
             return
         for name, st in self.mcp.statuses.items():
             if st.connected:
@@ -384,7 +398,10 @@ class ChatApp:
     def _cmd_skills(self) -> None:
         skills = self.skills.all()
         if not skills:
-            hint = "(无技能；把 SKILL.md 放到 ~/.skysheep/skills/<名称>/ 或项目的 .skysheep/skills/<名称>/)"
+            hint = (
+                f"(无技能；把 SKILL.md 放到 {_data_hint('skills/<名称>/')} "
+                "或项目的 .skysheep/skills/<名称>/)"
+            )
             self.console.print("[dim]" + hint + "[/]")
             return
         for s in skills:
@@ -548,7 +565,7 @@ async def _sessions_cmd() -> None:
 
 async def _models_cmd() -> None:
     cfg = load_config()
-    print("已配置 providers（~/.skysheep/config.toml）:")
+    print(f"已配置 providers（{_data_hint('config.toml')}）:")
     for name, pc in cfg.providers.items():
         mark = "→" if name == cfg.default else " "
         print(f"  {mark} {name:<12} {pc.kind:<9} {pc.model}")

@@ -3798,12 +3798,18 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
 
     async def delete_pipeline(self, pipeline_id: int) -> bool:
         assert self._db
-        await self._db.execute(
-            "DELETE FROM pipeline_nodes WHERE pipeline_id = ?", (pipeline_id,)
-        )
-        cur = await self._db.execute("DELETE FROM pipelines WHERE id = ?", (pipeline_id,))
-        await self._db.commit()
-        return cur.rowcount > 0
+
+        async def txn(conn: aiosqlite.Connection) -> int:
+            await conn.execute(
+                "DELETE FROM pipeline_nodes WHERE pipeline_id = ?", (pipeline_id,)
+            )
+            cur = await conn.execute("DELETE FROM pipelines WHERE id = ?", (pipeline_id,))
+            return cur.rowcount
+
+        # 节点与流水线同一事务：要么全删、要么不删——中途失败整体回滚，不会
+        # 留下「流水线没了但孤儿节点还在」的半删除，也不会被其他协程的
+        # commit 把中间状态提前落盘（与 delete_project 同一口径）。
+        return (await self._write_txn(txn)) > 0
 
     async def pipeline_usage(self, pipeline_id: int) -> dict:
         """流水线的 token 用量汇总：节点产出的会话都记在 sessions 表（title 带 ⚙

@@ -1855,8 +1855,10 @@ def write_config_template(force: bool = False) -> Path:
     p = config_path()
     if p.exists() and not force:
         raise ConfigError("config already exists: " + str(p))
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    from .textio import write_text_atomic
+
+    # 原子写：写一半被中断时不留半截 TOML（与 _write_raw_config 的 M13 同一要求）
+    write_text_atomic(p, CONFIG_TEMPLATE)
     return p
 
 

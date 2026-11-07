@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -2071,6 +2072,31 @@ async def test_weixin_poll_binded_and_verify_code_roundtrip():
     assert st2 == {"status": "binded"}
     await ch.stop()
     await ch2.stop()
+
+
+async def test_weixin_poll_qrcode_is_url_encoded():
+    """qrcode 由服务器下发、值里可能带 +/& 等字符，拼进 query 前必须 URL 编码。
+
+    不编码时 + 被服务端按空格解、& 直接把参数截断——请求变形导致扫码确认后
+    永远停在 wait 且无报错（对齐官方包：两个参数都走 encodeURIComponent）。
+    """
+    seen_urls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, json={"status": "scaned", "ret": 0})
+
+    ch = _wx({})
+    ch._transport = _mock_transport(handler)
+    st = await ch.poll_qrcode("qr+A&B")
+    assert st["status"] == "scaned"
+    assert len(seen_urls) == 1
+    query = urlsplit(seen_urls[0]).query
+    # + 与 & 必须以百分号编码出现在请求上，裸字符即请求变形
+    assert "qrcode=qr%2BA%26B" in query
+    # 服务端按 query 解码回来必须仍是原值（+ 不能丢成空格、& 不能截参数）
+    assert parse_qs(query)["qrcode"] == ["qr+A&B"]
+    await ch.stop()
 
 
 async def test_weixin_apply_login_persists_state():

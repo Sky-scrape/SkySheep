@@ -235,6 +235,29 @@ async def test_add_pipeline_failure_leaves_no_orphan(store, monkeypatch):
     assert len(pipe["nodes"]) == 3
 
 
+async def test_delete_pipeline_failure_leaves_no_orphans(store, monkeypatch):
+    proj = await store.get_or_create_project("/tmp/m16-pipe-del")
+    bystander = await store.create_session(proj.id, title="旁观会话")
+    nodes = [{"title": f"节点{i}", "prompt": f"做第{i}步"} for i in range(3)]
+    pipe = await store.add_pipeline(proj.id, "待删流水线", nodes)
+
+    # 语句序：DELETE 节点(1) → DELETE 流水线(2)。第 2 条前失败——
+    # 节点已删、流水线壳还在，正是要靠事务回滚救回的半删除
+    inject_txn_failure(monkeypatch, fail_at=2)
+    with pytest.raises(RuntimeError):
+        await store.delete_pipeline(pipe["id"])
+    monkeypatch.undo()  # 撤掉注入，后续走真实路径
+    await store.set_title(bystander.id, "穿插标题")  # 失败后的无关提交不得固化半删除
+
+    assert await store.get_pipeline(pipe["id"]) is not None  # 流水线还在
+    assert len(await store.list_pipeline_nodes(pipe["id"])) == 3  # 节点一并回滚
+
+    # 成功路径回归：真删就是全删（节点与流水线一起消失）
+    assert await store.delete_pipeline(pipe["id"]) is True
+    assert await store.get_pipeline(pipe["id"]) is None
+    assert await store.list_pipeline_nodes(pipe["id"]) == []
+
+
 # ---- 并发穿插：其他协程的 commit 不再泄漏多语句方法的中间状态 ----
 
 

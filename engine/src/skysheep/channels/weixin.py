@@ -212,7 +212,10 @@ class WeixinChannel(Channel):
         scaned_but_redirect 表示服务器迁移，要换到 redirect_host 继续轮询；
         need_verifycode 要把手机微信上显示的数字经 verify_code 参数带上重试。
         """
-        endpoint = f"ilink/bot/get_qrcode_status?qrcode={qrcode}"
+        # qrcode 是服务器下发的值，可能带 +/& 等字符：不编码的话 + 会被服务端按
+        # 空格解、& 直接把参数截断，请求变形后扫码确认也永远停在 wait 且无报错。
+        # 与下面 verify_code 一致（官方包对两个参数都 encodeURIComponent）。
+        endpoint = f"ilink/bot/get_qrcode_status?qrcode={quote(qrcode)}"
         code = verify_code.strip()
         if code:
             endpoint += f"&verify_code={quote(code)}"

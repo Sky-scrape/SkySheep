@@ -31,7 +31,7 @@ from skysheep.tools import (
     WindowTool,
     default_tools,
 )
-from skysheep.tools.computer import IS_WINDOWS, _to_abs, parse_hotkeys
+from skysheep.tools.computer import IS_WINDOWS, _to_abs, _unicode_scan_codes, parse_hotkeys
 
 
 def ctx(tmp_path):
@@ -65,6 +65,59 @@ def test_parse_hotkeys():
         parse_hotkeys("ctrl+mega")
     with pytest.raises(ToolError):
         parse_hotkeys("++")
+
+
+# ---- typing：超 BMP 字符拆 UTF-16 代理项（wScan 是 16 位 WORD） ----
+
+
+def test_unicode_scan_codes_bmp_passthrough():
+    """BMP 内字符一个码点一个 scan 码，不拆分。"""
+    assert _unicode_scan_codes("A") == (0x41,)
+    assert _unicode_scan_codes("中") == (0x4E2D,)
+
+
+def test_unicode_scan_codes_surrogate_pair():
+    """超 BMP 字符拆成 UTF-16 高低代理项各一个 scan 码，不许静默截断。
+
+    旧实现直接 ord(ch) 塞进 16 位 wScan：ctypes 实测 c_ushort(0x1F600)
+    不报错、截成 0xF600，emoji 变成错误按键还报「已输入 1 个字符」。"""
+    assert _unicode_scan_codes("😀") == (0xD83D, 0xDE00)  # U+1F600
+    assert _unicode_scan_codes("🚀") == (0xD83D, 0xDE80)  # U+1F680
+    assert _unicode_scan_codes("𠀀") == (0xD840, 0xDC00)  # CJK 扩展 B U+20000
+
+
+def test_unicode_scan_codes_all_fit_in_word():
+    """任何字符产出的 scan 码都落在 16 位内，且按 UTF-16 码元重组还原原字符。
+
+    注意按 UTF-16 编码字节比较，不能拼 Python 串比——Python 串是码点序列，
+    两个孤立代理项 != 对应的增补码点（'\ud83d\ude00' != '😀'）。"""
+    for ch in ("A", "中", "😀", "🚀", "𠀀", "𝕏", "𠮷"):
+        scans = _unicode_scan_codes(ch)
+        assert all(0 <= s <= 0xFFFF for s in scans), ch
+        packed = b"".join(s.to_bytes(2, "little") for s in scans)
+        assert packed == ch.encode("utf-16-le"), ch
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="事件结构体定义在 Win32 分支内")
+async def test_type_text_emoji_sends_surrogate_events(monkeypatch):
+    """回归：typing emoji 发高低代理项各一组 down/up，不再是截断后的单个错误码。"""
+    import types
+
+    import skysheep.tools.computer as computer
+
+    sent: list[list] = []
+    monkeypatch.setattr(computer, "_send", lambda ev: sent.append(list(ev)))
+    monkeypatch.setattr(computer, "time", types.SimpleNamespace(sleep=lambda _s: None))
+
+    out = computer._type_text_sync("😀A", None)
+    assert out == "已输入 2 个字符"  # 计数按字符，不因代理项翻倍
+    assert len(sent) == 2
+    uni, up = computer._KEYEVENTF_UNICODE, computer._KEYEVENTF_KEYUP
+    # 😀：高代理 0xD83D down/up + 低代理 0xDE00 down/up，共 4 个事件
+    assert [int(e.ki.wScan) for e in sent[0]] == [0xD83D, 0xD83D, 0xDE00, 0xDE00]
+    assert [int(e.ki.dwFlags) for e in sent[0]] == [uni, uni | up, uni, uni | up]
+    # 后一个 BMP 字符照旧：单码点 down/up 两事件
+    assert [int(e.ki.wScan) for e in sent[1]] == [0x41, 0x41]
 
 
 # ---- args 校验（不触发任何注入） ----

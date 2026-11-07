@@ -12,6 +12,12 @@ extract / screenshot / close），Agent 能拿到页面文本与截图，用户�
   解释器退出时清理。单例：多个动作共用同一实例——启动路径持 asyncio.Lock
   串行化（检查实例与赋值单例之间隔着秒级挂起的 start()，并行会话共享同一
   事件循环，不加锁会双启动 Edge、后完成者覆盖单例导致进程与临时目录泄漏）；
+- 动作级串行：常驻 tab 与 CDP 连接由所有并行会话 / 定时任务共享，每个动作
+  （拉起/复用实例 → attach → 页内命令 → detach）全程持模块级 _ACTION_LOCK
+  串行执行——不加锁时并行动作会交错操作同一页面（A 会话可能 extract 到
+  B 会话导航的页面），且 CdpConnection 收包循环按 id 跳帧，会把对方协程的
+  响应永久吞掉。启动锁（_BROWSER_LOCK）继续分开，只管「检查 + start + 赋值」
+  的启动窗口，不参与动作执行；
 - 最小 CDP 客户端：websockets 连浏览器级调试端点，按自增 id 发 JSON-RPC 命令、
   收同 id 响应（事件帧与迟到响应跳过）；Target.attachToTarget(flatten) 挂到
   页面 target 后用 sessionId 路由页面级命令；
@@ -20,12 +26,18 @@ extract / screenshot / close），Agent 能拿到页面文本与截图，用户�
   填入的文本是对页面的任意写入面，「总是允许」只固化当次的选择器与内容
   （gate._EXACT_ACTION_TOOLS，与 keyboard 同一先例），arg_text 里内容可见。
 
-SSRF 防线（与 web_fetch 同级）：页面内容会回给模型、页面开在用户看不见的
+SSRF 防线（对齐 web_fetch）：页面内容会回给模型、页面开在用户看不见的
 无头实例里——与 web_fetch 同属「引擎侧拉取」，不能沿用 browser 工具「开在
-用户自己浏览器里」的免 SSRF 取舍。navigate 前校验目标主机必须解析到公网；
+用户自己浏览器里」的免 SSRF 取舍。navigate 前校验目标主机必须解析到公网，
 导航完成后复核最终地址（重定向目标用户在确认卡上看不到），落在非公网即
-弹回空白页并拒绝返回——AGENTS.md 的「仅公网、逐跳校验」是本项目联网能力
-的底线，本工具是它的延伸而非例外。
+弹回空白页并拒绝返回；在此之上逐动作复核——extract 读内容前、screenshot
+截图前、click/press 完成后（等页面落定）再对当前页面地址过一遍公网校验，
+JS 跳转的目标同样进不来。残余风险如实说明：无头 Edge 建连自己做 DNS，
+「校验通过」与「实际建连」之间存在 TOCTOU 窗口（web_fetch 用
+_PinnedBackend 钉连关闭了它，无头浏览器的等价物是代理级钉连，当前未做）
+——逐动作复核把窗口从「整个会话」收窄到「单次动作内的一次建连」，根除
+要等代理级方案——AGENTS.md 的「仅公网、逐跳校验」是本项目联网能力的
+底线，本工具是它的延伸而非例外。
 """
 
 from __future__ import annotations
@@ -105,6 +117,10 @@ class CdpConnection:
 
     事件帧（无 id）与此前超时命令的迟到响应一律跳过；错误响应抛 ToolError；
     非 JSON / 非 JSON 对象的帧按「无法解析」报错。
+
+    本类不做并发防护：收包循环按 id 匹配，两个协程在同一连接上交错 send
+    会互相吞帧——web_page 的动作锁（_ACTION_LOCK）保证同一时刻只有一个
+    动作在使用连接，调用方必须维持这一前提。
     """
 
     def __init__(self, ws: Any) -> None:
@@ -369,6 +385,7 @@ class CdpBrowser:
 
 _BROWSER: CdpBrowser | None = None
 _BROWSER_LOCK = asyncio.Lock()  # 串行化「检查 + start + 赋值」的启动路径
+_ACTION_LOCK = asyncio.Lock()  # 动作级串行：常驻 tab 与 CDP 连接全单例共享（见模块说明）
 _ATEXIT_REGISTERED = False
 _IDLE_TASK: asyncio.Task | None = None  # 闲置回收看门狗（单例存活期间唯一一条）
 
@@ -471,7 +488,8 @@ async def get_browser() -> CdpBrowser:
     但并行会话 / 定时任务共享同一事件循环，两个协程可以同时走到 start()——
     不互斥会双启动 Edge，后完成者覆盖单例，先完成者实例（msedge 进程 +
     skysheep-edge-* 临时配置目录）两条清理路径都不可达，永久泄漏。锁只在
-    启动路径持有，动作执行不经过它。
+    启动路径持有，动作执行不经过它——动作之间的互斥由 _ACTION_LOCK 负责
+    （动作级串行；启动锁继续分开，两把锁各管各的窗口）。
     """
     global _BROWSER, _ATEXIT_REGISTERED
     async with _BROWSER_LOCK:
@@ -526,12 +544,13 @@ def _check_url(raw: str) -> str:
 
 
 def _assert_public_target(url: str) -> None:
-    """navigate 目标主机必须解析到公网（与 web_fetch 同级 SSRF 防线）。
+    """目标主机必须解析到公网（与 web_fetch 同级 SSRF 防线）。
 
-    web_page 的页面内容会回给模型、页面开在用户看不见的无头实例里，与
-    web_fetch 同属引擎侧拉取：内网字面量地址、解析出内网/回环/链路本地
-    IP 的域名一律拒绝（复用 web.py 的 _resolve_public_ips，同一套「全部
-    解析结果都必须公网」口径）。非网页地址（about:blank 等）不校验。
+    navigate 前置校验与各动作复核共用这一道闸。web_page 的页面内容会回给
+    模型、页面开在用户看不见的无头实例里，与 web_fetch 同属引擎侧拉取：
+    内网字面量地址、解析出内网/回环/链路本地 IP 的域名一律拒绝（复用
+    web.py 的 _resolve_public_ips，同一套「全部解析结果都必须公网」口径）。
+    非网页地址（about:blank 等）不校验。
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -632,6 +651,33 @@ async def _wait_ready(conn: CdpConnection, session_id: str) -> bool:
         await asyncio.sleep(_POLL_INTERVAL)
 
 
+async def _recheck_page_is_public(conn: CdpConnection, session_id: str) -> None:
+    """动作级 SSRF 复核：读当前页面最终地址，再过一遍公网校验。
+
+    navigate 的两道校验之外，extract 读内容前、screenshot 截图前、
+    click/press 触发跳转后各复核一次——JS 跳转的目标用户在确认卡上看不到，
+    不能只信 navigate 那一刻的地址（延迟 setTimeout / meta refresh 落地的
+    跳转同样被这一道闸接住）。读地址失败（导航瞬间上下文销毁等）不拦：
+    复核是纵深防御，前置校验仍是第一道。落在非公网即弹回空白页并抛错，与
+    cdp_navigate 的重定向复核同一处置——内容不进模型上下文，浏览器也不
+    留在内网页面给后续动作留口。
+    """
+    try:
+        href = (await _eval_text(conn, session_id, "location.href")).strip()
+    except ToolError:
+        return  # 最终地址拿不到：前置校验兜底，不因复核误伤正常动作
+    if not href:
+        return
+    try:
+        await asyncio.to_thread(_assert_public_target, href)
+    except ToolError:
+        try:
+            await conn.send("Page.navigate", {"url": "about:blank"}, session_id=session_id)
+        except ToolError:
+            pass  # 弹回失败不掩盖原拒绝原因
+        raise
+
+
 async def cdp_navigate(conn: CdpConnection, session_id: str, url: str) -> str:
     res = await conn.send("Page.navigate", {"url": url}, session_id=session_id)
     if res.get("errorText"):
@@ -683,6 +729,10 @@ async def cdp_click(conn: CdpConnection, session_id: str, selector: str) -> str:
     await conn.send(
         "Input.dispatchMouseEvent", {**params, "type": "mouseReleased"}, session_id=session_id
     )
+    # 点击可能触发跳转（链接 / 提交按钮）：等页面落定后复核最终地址，
+    # 落在非公网即弹回空白页并拒绝返回（SSRF 逐动作复核）
+    await _wait_ready(conn, session_id)
+    await _recheck_page_is_public(conn, session_id)
     return f"已在 ({x}, {y}) 点击元素：{selector}"
 
 
@@ -736,10 +786,16 @@ def _key_params(raw: str, type_: str) -> dict[str, Any]:
 async def cdp_press(conn: CdpConnection, session_id: str, raw: str) -> str:
     await conn.send("Input.dispatchKeyEvent", _key_params(raw, "keyDown"), session_id=session_id)
     await conn.send("Input.dispatchKeyEvent", _key_params(raw, "keyUp"), session_id=session_id)
+    # 回车等按键可能触发跳转（表单提交等）：与 click 同一复核
+    await _wait_ready(conn, session_id)
+    await _recheck_page_is_public(conn, session_id)
     return f"已发送按键：{raw.strip()}"
 
 
 async def cdp_extract(conn: CdpConnection, session_id: str, selector: str) -> str:
+    # SSRF 逐动作复核：页面可能被 JS 跳到别处，读内容前先确认最终地址
+    # 仍是公网（落在非公网即弹回空白页并拒绝返回，内容不进模型上下文）
+    await _recheck_page_is_public(conn, session_id)
     if selector.strip():
         sel = json.dumps(selector.strip(), ensure_ascii=False)
         expr = (
@@ -847,33 +903,41 @@ class WebPageTool(Tool):
             raise ToolError("fill 动作需要提供 text 参数（要填入的内容）。")
         if args.action == "press" and not args.key.strip():
             raise ToolError('press 动作需要提供 key 参数（如 "enter"、"tab" 或单个字符）。')
-
-        if args.action == "close":
-            await close_browser()
-            return "已关闭无头浏览器实例（页内会话结束，临时配置目录与 Cookie 一并清理）。"
-
         if args.action == "screenshot" and not getattr(ctx, "supports_vision", True):
             raise ToolError(
                 "当前模型不支持图片输入，网页截图它看不到。请在输入框的模型选择器里"
                 "换一个多模态模型，或改用 extract 提取页面文本。"
             )
 
-        browser = await get_browser()
-        try:
-            conn, session_id = await browser.open_page()
-        except (ConnectionClosed, WebSocketException, OSError) as e:
-            browser.drop_connection()
-            raise ToolError(f"连接无头浏览器失败：{e}\n重试会自动重新拉起实例。") from None
-        try:
-            return await self._dispatch(args, ctx, conn, session_id, url)
-        except (ConnectionClosed, WebSocketException, OSError) as e:
-            browser.drop_connection()
-            raise ToolError(
-                f"与无头浏览器的连接中断：{e}\n重试会自动重新拉起实例（页面状态会丢失）。"
-            ) from None
-        finally:
-            await browser.detach(session_id)
-            _note_browser_activity()  # 动作完成后刷新闲置计时（含报错路径）
+        # 动作级互斥（见模块说明）：常驻 tab 与 CDP 连接由所有并行会话/定时
+        # 任务共享，从拉起/复用实例到页内命令收尾全程串行——A 的动作没收尾，
+        # B 的动作进不来，既不会互相操作同一页面，也不会在 CdpConnection 上
+        # 交错收发把对方的响应按 id 吞掉。参数校验留在锁外：校验失败不必排在
+        # 别人动作后面。close 也在锁内——不许把正在跑的动作脚下的实例收走。
+        # 已知残余：设置页切「忽略证书」（browser_data 调 close_browser）与
+        # 闲置看门狗两条清理路径不经动作锁，可在动作进行中收走实例——命中时
+        # 动作走下方「连接中断、重试自动拉起」恢复路径，无泄漏无吞帧。
+        async with _ACTION_LOCK:
+            if args.action == "close":
+                await close_browser()
+                return "已关闭无头浏览器实例（页内会话结束，临时配置目录与 Cookie 一并清理）。"
+
+            browser = await get_browser()
+            try:
+                conn, session_id = await browser.open_page()
+            except (ConnectionClosed, WebSocketException, OSError) as e:
+                browser.drop_connection()
+                raise ToolError(f"连接无头浏览器失败：{e}\n重试会自动重新拉起实例。") from None
+            try:
+                return await self._dispatch(args, ctx, conn, session_id, url)
+            except (ConnectionClosed, WebSocketException, OSError) as e:
+                browser.drop_connection()
+                raise ToolError(
+                    f"与无头浏览器的连接中断：{e}\n重试会自动重新拉起实例（页面状态会丢失）。"
+                ) from None
+            finally:
+                await browser.detach(session_id)
+                _note_browser_activity()  # 动作完成后刷新闲置计时（含报错路径）
 
     async def _dispatch(
         self,
@@ -900,6 +964,10 @@ class WebPageTool(Tool):
     async def _do_screenshot(
         self, conn: CdpConnection, session_id: str, ctx: ToolContext
     ) -> str:
+        # SSRF 逐动作复核：screenshot 与 extract 同是把页面内容交回模型的
+        # 读取面，截图前先确认最终地址仍是公网（落在非公网即弹回空白页并
+        # 拒绝返回）——navigate 复核之后延迟 JS 跳转落地的窗口在这里闭合
+        await _recheck_page_is_public(conn, session_id)
         png = await cdp_screenshot(conn, session_id)
         ctx.images.append(
             ImageBlock(media_type="image/png", data=base64.b64encode(png).decode())

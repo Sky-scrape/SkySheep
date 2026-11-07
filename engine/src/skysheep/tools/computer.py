@@ -90,6 +90,21 @@ def parse_hotkeys(keys: str) -> list[int]:
     return vks
 
 
+def _unicode_scan_codes(ch: str) -> tuple[int, ...]:
+    """单个字符 → KEYEVENTF_UNICODE 事件用的 wScan 序列。
+
+    _KEYBDINPUT.wScan 是 16 位 WORD：BMP 内字符直接用码点；超过 BMP 的字符
+    （emoji、CJK 扩展 B 等）必须拆成 UTF-16 高低代理项各发一个事件、由接收
+    应用重组——直接 ord() 塞进 wScan 会被 ctypes 静默截断成错误按键
+    （已实测 c_ushort(0x1F600) 不报错、截成 0xF600）。
+    """
+    cp = ord(ch)
+    if cp <= 0xFFFF:
+        return (cp,)
+    cp -= 0x10000
+    return (0xD800 | (cp >> 10), 0xDC00 | (cp & 0x3FF))
+
+
 # ---- Win32 层（仅 Windows） ----
 
 if IS_WINDOWS:
@@ -282,10 +297,14 @@ def _type_text_sync(text: str, aborted: asyncio.Event | None) -> str:
         elif ch == "\t":
             ev = [_key_event(vk=0x09), _key_event(vk=0x09, flags=_KEYEVENTF_KEYUP)]
         else:
-            ev = [
-                _key_event(scan=ord(ch), flags=_KEYEVENTF_UNICODE),
-                _key_event(scan=ord(ch), flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP),
-            ]
+            # 超 BMP 字符拆代理项：一次 _send 发完整序列（高低代理各自的 down/up），
+            # 计数仍按字符（done += 1），返回文案与实际输入语义一致
+            ev = []
+            for scan in _unicode_scan_codes(ch):
+                ev += [
+                    _key_event(scan=scan, flags=_KEYEVENTF_UNICODE),
+                    _key_event(scan=scan, flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP),
+                ]
         _send(ev)
         done += 1
         time.sleep(0.002)

@@ -15,13 +15,15 @@ from skysheep.core.mods_tool import ModTool
 from skysheep.core.subagent import CheckTaskTool, SpawnAgentTool, WaitTaskTool
 from skysheep.tools import ToolRegistry, default_tools
 from skysheep.tools.base import Tool
+from skysheep.tools.history import SearchHistoryTool
 from skysheep.tools.pipeline import PipelineWriteTool
 from skysheep.tools.schedule import ScheduleWriteTool
 from skysheep.tools.skill import LoadSkillTool
 
 ANNOTATION_KEYS = {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
 
-# default_tools() 显式打开 computer/browser 控制时的全集（store 不传无 schedule_write）
+# default_tools() 显式打开 computer/browser 控制时的全集
+# （store 不传无 schedule_write / search_history，两者都在 store 分支注册）
 DEFAULT_TOOLS = [
     "read_file",
     "read_image",
@@ -67,8 +69,10 @@ CONTROL_TOOLS = [
 ]
 
 # server 端按需装配、不在 default_tools() 默认集里的工具
+# （schedule_write / search_history 都在 default_tools 的 store 分支注册）
 CONTEXTUAL_TOOLS = [
     "schedule_write",
+    "search_history",
     "load_skill",
     "pipeline_write",
     "spawn_agent",
@@ -80,6 +84,8 @@ CONTEXTUAL_TOOLS = [
 def _build(name: str) -> Tool:
     if name == "schedule_write":
         return ScheduleWriteTool(store=None)
+    if name == "search_history":
+        return SearchHistoryTool(store=None)
     if name == "load_skill":
         return LoadSkillTool(loader=None)
     if name == "pipeline_write":
@@ -141,6 +147,7 @@ def test_every_tool_declares_four_boolean_hints(name):
     "name,ro,dest,idem,world",
     [
         ("read_file", True, False, True, False),
+        ("search_history", True, False, True, False),
         ("make_dir", False, False, True, False),
         ("delete_file", False, True, False, False),
         ("run_command", False, True, False, True),

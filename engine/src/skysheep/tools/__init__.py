@@ -68,7 +68,8 @@ def default_tools(
 
     recorder 传入时，write_file / edit_file / generate_image / write_document 会把落盘前
     的状态记进去，供服务层生成可回滚的检查点；CLI 等不回滚的场景可不传。
-    store 传入时（SessionStore），注册跨会话日程管理工具 schedule_write。
+    store 传入时（SessionStore），注册跨会话日程管理工具 schedule_write 与
+    本会话历史召回工具 search_history（两者都在 store 分支注册，不传则缺席）。
     websearch / imagegen 传入 config.resolve_*() 的解析结果（provider/api_key 等），
     为 None 时对应工具仍注册，调用时会给出配置指引（不阻塞其他工具）。
     computer_control=True 时才注册电脑控制七件套（screenshot / window_list / clipboard /

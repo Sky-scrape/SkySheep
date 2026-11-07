@@ -460,6 +460,73 @@ async def test_test_connection_anthropic_auth_failure_short_circuits():
     assert r.category == "auth"
 
 
+# ---- 客户端收尾纪律：两段各建的 SDK 客户端都必须确定性关闭（不联网） ----
+
+
+def _track_client_closes(monkeypatch, module, attr, base_cls):
+    """给 SDK 客户端类装 close 记录器：close 被调一次记一个调用者 id。"""
+    calls: list[int] = []
+
+    class Tracking(base_cls):
+        async def close(self):
+            calls.append(id(self))
+            await super().close()
+
+    monkeypatch.setattr(module, attr, Tracking)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_test_connection_closes_both_clients_on_success(monkeypatch):
+    """成功路径：第 1 段（models.list）与第 2 段（对话）的客户端都要关闭。
+
+    第 2 段曾经漏关：每点一次「测试连接」就泄漏一个 SDK 客户端 + httpx
+    连接池直到 GC。回归锚点：close 恰好两次、且来自两个不同客户端实例。
+    """
+    import openai
+
+    calls = _track_client_closes(monkeypatch, openai, "AsyncOpenAI", openai.AsyncOpenAI)
+    r = await test_connection(
+        kind="openai", base_url="https://mock.test/v1", api_key="sk-x", model="m1",
+        transport=httpx.MockTransport(_openai_conn_app()),
+    )
+    assert r.ok is True
+    assert len(calls) == 2  # 两段各一个客户端，每个都关了一次
+    assert len(set(calls)) == 2  # _client_extra 每次新建：确是两个不同实例
+
+
+@pytest.mark.asyncio
+async def test_test_connection_closes_both_clients_on_chat_failure(monkeypatch):
+    """对话调用 401 的失败路径同样要关：except 返回前 finally 必须已执行。"""
+    import openai
+
+    calls = _track_client_closes(monkeypatch, openai, "AsyncOpenAI", openai.AsyncOpenAI)
+    r = await test_connection(
+        kind="openai", base_url="https://mock.test/v1", api_key="sk-bad", model="m1",
+        transport=httpx.MockTransport(_openai_conn_app(chat_status=401)),
+    )
+    assert r.ok is False
+    assert r.category == "auth"
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+
+
+@pytest.mark.asyncio
+async def test_test_connection_closes_clients_anthropic_success(monkeypatch):
+    """anthropic 分支同款收尾（finally 是两协议共用的同一块代码）。"""
+    import anthropic
+
+    calls = _track_client_closes(monkeypatch, anthropic, "AsyncAnthropic",
+                                 anthropic.AsyncAnthropic)
+    r = await test_connection(
+        kind="anthropic", base_url="https://mock.test", api_key="sk-x", model="m1",
+        transport=_anthropic_transport(_anthropic_conn_app()),
+    )
+    assert r.ok is True
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+
+
 # ---- 能力探测：anthropic 分支（MockTransport，不联网） ----
 
 _ANTHROPIC_SSE = (

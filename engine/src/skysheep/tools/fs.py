@@ -114,7 +114,10 @@ class ReadFileTool(Tool):
         if p.is_dir():
             raise ToolError(shown + " is a directory, use list_dir instead")
         try:
-            loaded = read_text_file(p)
+            # 编码探测（round-trip 校验）是全文读盘且无大小上限：放线程池，
+            # 别卡事件循环（与写路径 _load_for_edit / search.py 的 to_thread 口径一致；
+            # MAX_FILE_CHARS 截断保护的是输出，不是读取，读仍须全文进行）。
+            loaded = await asyncio.to_thread(read_text_file, p)
         except OSError as e:
             raise ToolError("cannot read " + shown + ": " + str(e)) from e
         if loaded.binary:

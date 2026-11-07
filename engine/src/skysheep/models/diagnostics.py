@@ -336,12 +336,6 @@ async def test_connection(
                 api_key=api_key or "", base_url=base or None,
                 timeout=timeout_s, max_retries=0, **_client_extra(),
             )
-            resp = await client.messages.create(
-                model=model or "claude-3-haiku-20240307",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
-            )
-            _ = resp.content
         else:
             from openai import AsyncOpenAI
 
@@ -349,17 +343,35 @@ async def test_connection(
                 api_key=api_key or "", base_url=base or None,
                 timeout=timeout_s, max_retries=0, **_client_extra(),
             )
-            resp = await client.chat.completions.create(
-                model=model or "gpt-4o-mini",
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
-            )
-            _ = resp.choices
-        result.ok = True
-        result.latency_ms = int((time.monotonic() - t0) * 1000)
-        result.model_listed = model_listed
-        result.context_limit = ctx_limit
-        return result
+        try:
+            if kind == "anthropic":
+                resp = await client.messages.create(
+                    model=model or "claude-3-haiku-20240307",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+                _ = resp.content
+            else:
+                resp = await client.chat.completions.create(
+                    model=model or "gpt-4o-mini",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+                _ = resp.choices
+            result.ok = True
+            result.latency_ms = int((time.monotonic() - t0) * 1000)
+            result.model_listed = model_listed
+            result.context_limit = ctx_limit
+            return result
+        finally:
+            # 客户端持有 httpx 连接池：无论对话成败都确定性关闭，不然设置页
+            # 每点一次「测试连接」就泄漏一个客户端直到 GC/进程退出。
+            # 与第 1 段 models.list / probe.list_models 同款收尾；
+            # 关闭自身的失败不掩盖对话结果（成功路径不受收尾问题影响）
+            try:
+                await client.close()
+            except Exception:  # noqa: BLE001
+                pass
     except Exception as e:  # noqa: BLE001
         diag = diagnose_error(e)
         result.latency_ms = int((time.monotonic() - t0) * 1000)

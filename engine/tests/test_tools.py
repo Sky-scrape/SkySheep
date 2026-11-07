@@ -48,6 +48,34 @@ async def test_read_offset_limit(tmp_path):
     assert "3\tl3" in text and "4\tl4" in text and "5\tl5" not in text
 
 
+async def test_read_file_reads_off_event_loop(tmp_path, monkeypatch):
+    """read_file 的全文读盘 + 编码探测必须放线程池，不卡事件循环。
+
+    编码探测是 round-trip 全文校验、无大小上限，同步跑在事件循环上会
+    把流式输出与其他会话一起卡住（与写路径 / search.py 的 to_thread 口径
+    对齐）。monkeypatch fs 模块的 read_text_file 记录执行线程来验证。
+    """
+    import threading
+
+    import skysheep.tools.fs as fs_mod
+
+    (tmp_path / "a.txt").write_text("hello\nworld", encoding="utf-8")
+    main_thread = threading.current_thread()
+    seen_threads: list[threading.Thread] = []
+    real = fs_mod.read_text_file
+
+    def spy(path):
+        seen_threads.append(threading.current_thread())
+        return real(path)
+
+    monkeypatch.setattr(fs_mod, "read_text_file", spy)
+    r = ReadFileTool()
+    text = await r.run(r.args_model(path="a.txt"), ctx(tmp_path))
+    assert "1\thello" in text
+    assert len(seen_threads) == 1
+    assert seen_threads[0] is not main_thread
+
+
 async def test_edit_unique_and_errors(tmp_path):
     w = WriteFileTool()
     await w.run(w.args_model(path="c.py", content="def main():\n    print('hi')\n"), ctx(tmp_path))

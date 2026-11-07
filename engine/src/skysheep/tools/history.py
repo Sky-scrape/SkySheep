@@ -37,6 +37,13 @@ class SearchHistoryTool(Tool):
         "the full messages are still stored even after the history was compacted."
     )
     safety = Safety.READONLY
+    # 纯读召回：只查本会话历史库，不改任何状态、不触外部实体，
+    # 同参重查结果一致——与 read_file 同档取值（基类缺省是「可能有破坏性」，
+    # 纯读工具不显式声明会被外部宿主多警告一次）
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
     args_model = SearchHistoryArgs
 
     def __init__(self, store=None) -> None:

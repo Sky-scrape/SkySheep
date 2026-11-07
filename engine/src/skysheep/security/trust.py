@@ -30,6 +30,8 @@ import os
 import time
 from pathlib import Path
 
+from ..textio import write_text_atomic
+
 TRUST_FILE_NAME = "workspace-trust.json"
 TRUST_VERSION = 1
 
@@ -333,11 +335,12 @@ class WorkspaceTrust:
         return projects if isinstance(projects, dict) else {}
 
     def _save(self, projects: dict) -> None:
-        self.home.mkdir(parents=True, exist_ok=True)
         payload = {"version": TRUST_VERSION, "projects": projects}
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)  # 原子替换：写一半断电不会留下坏文件
+        # 原子写统一走 textio.write_text_atomic（建父目录、mkstemp 唯一临时名、
+        # rename 前 fsync、失败清理临时文件）：手写 tmp.write_text + os.replace
+        # 用的是固定 tmp 名，并发写同一份信任记录会互相覆盖半成品，且缺 fsync
+        # 与失败清理。
+        write_text_atomic(self.path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     # ---- 查询 ----
 
@@ -520,9 +523,8 @@ def revoke_by_path(home: Path | str, project_root: str | Path) -> bool:
     if key not in projects:
         return False
     projects.pop(key, None)
-    Path(home).mkdir(parents=True, exist_ok=True)
     payload = {"version": TRUST_VERSION, "projects": projects}
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    # 与 _save 同一标准：原子写走 textio.write_text_atomic，不再手写固定 tmp 名
+    # 的 write_text + os.replace。
+    write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return True

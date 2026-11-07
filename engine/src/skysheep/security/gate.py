@@ -502,6 +502,12 @@ _PREFIX_EXEC_PAIRS = frozenset({
     ("pnpm", "run"), ("pnpm", "install"),
     ("bun", "run"), ("cargo", "run"), ("dotnet", "run"),
 })
+# 已知口径遗留（复查确认，预先存在、非本轮回归）：pip install / uv pip install
+# 等同样可经 setup.py / 构建钩子执行任意代码的安装器不在清单内，其两词前缀的
+# 沉淀与历史规则匹配暂未收窄。本清单为提炼（rule_for）、匹配（_matches_core）
+# 与模板通道（GrantedGate._prefix_usable / collab_templates）四方共用，扩清单
+# 必须一次同步、避免任一通道口径漂移；按「只收窄清单点名的危险族」纪律，
+# 未点名的安装器留待后续统一扩清单时一并处理。
 
 
 def _prefix_deletes_or_runs_arbitrary(pattern: str) -> bool:
@@ -528,6 +534,19 @@ def _prefix_deletes_or_runs_arbitrary(pattern: str) -> bool:
         return True
     second = str(rest[0]).lower() if rest else ""
     return (real, second) in _PREFIX_EXEC_PAIRS
+
+
+def _all_assignment_words(pattern: str) -> bool:
+    """前缀是否为纯前置赋值序列（``action=read`` 这类动作语义文本，审查 P-9）。
+
+    动作分支沉淀的语义前缀不是 shell 命令行，``_first_real_command_word``
+    在其上找不到真实命令词，会让 _prefix_deletes_or_runs_arbitrary 按
+    「找不到真实命令词 = 任意命令面」判真；匹配侧（WhitelistRule._matches_core）
+    套用执行族清单时沿用 _is_arbitrary_exec_words 的既有豁免口径——纯赋值
+    序列不算命令面，由动作分支单独沉淀，不进本判定。
+    """
+    words = [w for w in pattern.split() if w]
+    return bool(words) and all(_is_var_assignment(w) for w in words)
 
 
 def _sudo_prefix_shape_unsafe(words: list[str]) -> bool:
@@ -725,6 +744,18 @@ class WhitelistRule:
                 _is_arbitrary_exec_prefix(self.pattern)
                 or _hits_unsafe_entry_command(arg_text)
             ):
+                return False
+            # 删除 / 任意子命令执行族的前缀规则一并失效（审查 H2）：清单与
+            # 沉淀侧（rule_for 的 narrow_exec_families）同一份，见
+            # _prefix_deletes_or_runs_arbitrary——历史版本沉淀的 "npm install" /
+            # "tar x" 这类前缀等于整族放行（远程包 postinstall、
+            # --to-command 都是任意代码执行面），批准一次即永久免确认，与
+            # 上面 docker/ssh 存量规则失效同一 fail-closed 口径。纯赋值形态
+            # 的动作语义前缀（action=read）不是 shell 命令行，沿用
+            # _is_arbitrary_exec_words 的既有豁免，不进本判定。
+            if tool_name == _RUN_COMMAND and _prefix_deletes_or_runs_arbitrary(
+                self.pattern
+            ) and not _all_assignment_words(self.pattern):
                 return False
             # 解释器前缀规则的变体防护：`bash setup.sh` 的规则不放行
             # `bash setup.sh --evil`——脚本名之后追加的旗标会改变解释器行为
@@ -978,10 +1009,16 @@ class PermissionGate:
     # （规则提炼与匹配共用同一份）。
 
     @staticmethod
-    def rule_for(tool: Tool, input_dict: dict, working_dir: Path | None = None) -> WhitelistRule:
+    def rule_for(
+        tool: Tool, input_dict: dict, working_dir: Path | None = None,
+        *, narrow_exec_families: bool = False,
+    ) -> WhitelistRule:
         """根据本次调用生成"永久允许"规则。
 
-        - run_command：简单命令取前两个词做前缀（如 "git status" / "npm run"），前缀规则
+        - run_command：简单命令取前两个词做前缀（如 "git status" / "kubectl get"；
+          沉淀口径（narrow_exec_families=True）下落在删除/任意子命令执行族的
+          两词前缀——"npm run" / "npm install" 这类——改固化 exact，见下方
+          参数说明），前缀规则
           本身会拒绝带 shell 拼接的整条命令；带拼接的命令、以及「下一参数是任意代码」
           的解释器调用（python -c / powershell -Command 等）没有安全前缀可提炼，改成
           ``exact`` 只放行用户当时批准的这一条；「真实命令词之后仍是任意执行/任意文件
@@ -999,6 +1036,19 @@ class PermissionGate:
         - move_file：删除形态（覆盖已存在目录 = rmtree）不产 always 规则，只固化本次
           参数——落库的 exact 规则也不会自动放行这类调用（authorize 的删除守卫优先）；
         - 其余工具：整工具放行。
+
+        narrow_exec_families：沉淀侧执行族收窄开关（审查 H2，默认关）。开（权限门
+        沉淀「总是允许」规则的调用点 _build_pending 传 True）时，两词/三词前缀落在
+        删除或任意子命令执行族（rm/tar/find/npm install…，见
+        _prefix_deletes_or_runs_arbitrary）改固化 exact——``npm install <任意URL>``
+        的 postinstall 与 ``tar x --to-command=…`` 都是任意代码执行面，两词前缀
+        等于整族放行；与匹配侧（_matches_core 的同清单 fail-closed）同口径，
+        不产「永不生效的死规则」。默认关服务于模板校验通道
+        （collab_templates.normalize_command_prefix）：它需要 rule_for 返回原始
+        提炼结果，才能对执行族前缀给出「删除或任意子命令执行类」的专用拒绝文案
+        （该通道自身的同清单检查仍会拦下）。漏开本开关的沉淀调用点不会放行任何
+        东西——匹配侧对执行族前缀一律拒绝命中，最坏只是白名单页多一条永不生效
+        的死规则，方向 fail-closed。
         """
         arg_text = tool.arg_text(input_dict)
         if tool.name == _RUN_COMMAND:
@@ -1061,6 +1111,10 @@ class PermissionGate:
                 # 能走到这里说明 _sudo_prefix_shape_unsafe 已判 False：锚词后
                 # 必有两个非旗标、非赋值的词，切片不会越界。
                 prefix3 = " ".join(words[: sudo_lead + 3])
+                # 执行族收窄（审查 H2）：`sudo tar x <归档>` 与 `sudo npm install
+                # <任意URL>` 提权后仍是整族任意执行面，与两词分支同一清单。
+                if narrow_exec_families and _prefix_deletes_or_runs_arbitrary(prefix3):
+                    return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
                 return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix3)
             lead = 0
             while lead < len(words) and _is_var_assignment(words[lead]):
@@ -1070,6 +1124,15 @@ class PermissionGate:
             # 其余命令取「锚词 + 下一词」两词前缀，如 "git status" / "npm run"，
             # 避免把整条命令固化；赋值序列原样垫前
             prefix = " ".join(words[:lead + 2]) if words else arg_text
+            # 执行族收窄（审查 H2）：两词前缀落在删除 / 任意子命令执行族时等于
+            # 整族放行——批准一次 `npm install left-pad` 后，`npm install
+            # <任意URL>`（远程包 postinstall=任意代码）永久免确认，
+            # `tar x --to-command=…` 同理。命中改固化 exact，只放行用户当时
+            # 批准的那一条；清单与匹配侧（_matches_core）、模板通道
+            # （GrantedGate._prefix_usable / collab_templates）同一份，
+            # 见 _prefix_deletes_or_runs_arbitrary。
+            if narrow_exec_families and _prefix_deletes_or_runs_arbitrary(prefix):
+                return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
             return WhitelistRule(tool=tool.name, kind="prefix", pattern=prefix)
         if tool.name in PermissionGate._EXACT_ONLY_TOOLS:
             return WhitelistRule(tool=tool.name, kind="exact", pattern=arg_text)
@@ -1397,6 +1460,13 @@ class PermissionGate:
         的「命中即跳过 READONLY 短路」同位（在 READONLY 预检之前），否则名义
         READONLY 且被 Mod 要求确认的调用会被收进并发批绕过逐次确认。
 
+        READONLY 分支还带出站密钥扫描（审查 H1，与 GrantedGate.needs_confirm
+        同款判定）：READONLY+open_world 工具（web_fetch / web_search）的参数
+        是出站通道，authorize 顶端的已知密钥预拒绝（_egress_pre_deny）在批
+        路径上不可达——批对第 2..n 个成员只调本谓词就直接执行，预检不拦等于
+        config.toml/mcp.json 里的真实凭据零确认外发。命中（scan["ok"] 为
+        False）报 True 断批，回退串行由 authorize 预拒绝落 DENY。
+
         只对 READONLY 候选有意义（批收集先做 safety 判定才问这里）；子类门
         （HeadlessGate / ChannelGate / SubagentGate / IsolatedGate）对 READONLY
         的放行口径与本判定一致（READONLY 短路均只让引擎主目录守卫之外的调用
@@ -1408,6 +1478,12 @@ class PermissionGate:
         if self._extra_confirm_required(tool, input_dict):
             return True
         if tool.safety == Safety.READONLY and not self._write_hits_engine_home(tool, input_dict):
+            # 出站密钥预检先于免确认放行：已知密钥命中时批路径拿不到 authorize
+            # 的预拒绝，必须在这里断批（scan 为 None——非开放网络只读、无字符串
+            # 参数、防线故障降级——按未扫描处理，保持原放行语义不扩大打击面）。
+            scan = self._egress_scan(tool, input_dict)
+            if scan is not None and not scan["ok"]:
+                return True
             return False
         if self.auto_accept_all:
             return False
@@ -1641,7 +1717,12 @@ class PermissionGate:
         """
         arg_text = tool.arg_text(input_dict)
         resolved_rule = (
-            self.rule_for(tool, input_dict, self.working_dir)
+            # 沉淀「总是允许」规则走收窄口径（审查 H2）：删除 / 任意子命令
+            # 执行族的两词前缀不沉淀，改固化 exact；与匹配侧 fail-closed
+            # 同清单，保证「预告的 = 落库的」且落库的真的会生效。
+            self.rule_for(
+                tool, input_dict, self.working_dir, narrow_exec_families=True,
+            )
             if always_rule is _KEEP_ALWAYS_RULE
             else always_rule  # type: ignore[assignment]
         )

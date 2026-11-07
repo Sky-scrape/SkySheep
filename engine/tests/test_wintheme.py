@@ -426,6 +426,71 @@ def test_apply_window_icon_swallows_exception(monkeypatch):
     assert wintheme.apply_window_icon(_NativeWithHandle(1)) is False
 
 
+# ---- 进程级 DPI 感知 ----
+
+
+def test_ensure_dpi_aware_calls_win32(monkeypatch):
+    """要让系统按真实像素报 SM_CXSMICON（200% DPI = 32），只能提前标 DPI 感知。"""
+    import ctypes
+
+    calls: list[int] = []
+
+    class _User32:
+        @staticmethod
+        def SetProcessDPIAware():
+            calls.append(1)
+            return 1
+
+    monkeypatch.setattr(ctypes, "windll", types.SimpleNamespace(user32=_User32()), raising=False)
+    monkeypatch.setattr(wintheme.sys, "platform", "win32")
+    assert wintheme.ensure_dpi_aware() is True
+    assert calls == [1]
+
+
+def test_ensure_dpi_aware_returns_false_when_already_set(monkeypatch):
+    """已经感知时系统返回 0：如实报 False（不代表出错，也别抛）。"""
+    import ctypes
+
+    class _User32:
+        @staticmethod
+        def SetProcessDPIAware():
+            return 0
+
+    monkeypatch.setattr(ctypes, "windll", types.SimpleNamespace(user32=_User32()), raising=False)
+    monkeypatch.setattr(wintheme.sys, "platform", "win32")
+    assert wintheme.ensure_dpi_aware() is False
+
+
+def test_ensure_dpi_aware_skips_non_windows(monkeypatch):
+    import ctypes
+
+    calls: list[int] = []
+
+    class _User32:
+        @staticmethod
+        def SetProcessDPIAware():
+            calls.append(1)
+            return 1
+
+    monkeypatch.setattr(ctypes, "windll", types.SimpleNamespace(user32=_User32()), raising=False)
+    monkeypatch.setattr(wintheme.sys, "platform", "linux")
+    assert wintheme.ensure_dpi_aware() is False
+    assert calls == []
+
+
+def test_ensure_dpi_aware_swallows_exception(monkeypatch):
+    import ctypes
+
+    class _User32:
+        @staticmethod
+        def SetProcessDPIAware():
+            raise OSError("user32 unavailable")
+
+    monkeypatch.setattr(ctypes, "windll", types.SimpleNamespace(user32=_User32()), raising=False)
+    monkeypatch.setattr(wintheme.sys, "platform", "win32")
+    assert wintheme.ensure_dpi_aware() is False
+
+
 # ---- 事件驱动重刷 ----
 
 

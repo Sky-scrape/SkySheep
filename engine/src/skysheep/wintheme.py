@@ -197,6 +197,28 @@ def refresh_now() -> bool:
     return True
 
 
+# ---- 进程级 DPI 感知 ----
+
+
+def ensure_dpi_aware() -> bool:
+    """把进程标成 DPI 感知（System DPI Aware），要赶在任何窗口 / 图标创建之前调。
+
+    pywebview 只在 ``webview.start()`` 里调 ``SetProcessDPIAware()``，而桌面壳的
+    托盘图标在那之前就由 ``desktop._start_tray`` 建好了：此时进程还是 96 DPI 虚拟
+    坐标，``GetSystemMetrics(SM_CXSMICON)`` 回 16 而不是 200% DPI 下的 32——托盘
+    加载 16px 帧、再由系统放大成 32 物理像素，就是一团糊（2026-11-07 用户实测）。
+    窗口图标 ``apply_window_icon`` 在 ``webview.start()`` 之后才刷，所以只坑托盘。
+
+    幂等：已经感知时系统返回 0，这里如实返回 False（不代表出错，只代表"这次没调成"）。
+    """
+    try:
+        if sys.platform != "win32":
+            return False
+        return bool(ctypes.windll.user32.SetProcessDPIAware())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # 窗口图标（System.Drawing.Icon / HICON）持引用：被 GC/销毁后标题栏图标会失效
 _icon_holder: dict = {}
 

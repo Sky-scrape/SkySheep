@@ -59,6 +59,15 @@ def isolated_home(monkeypatch, tmp_path):
     return tmp_path / "home"
 
 
+@pytest.fixture(autouse=True)
+def _stub_dpi_aware(monkeypatch):
+    """main() 会标进程 DPI 感知：测试里别真的改 pytest 进程的 DPI 状态。"""
+    monkeypatch.setattr(desktop, "_ensure_dpi_aware", lambda: True)
+
+
+_REAL_ENSURE_DPI_AWARE = desktop._ensure_dpi_aware
+
+
 def test_write_and_read_pid_record(isolated_home):
     desktop._write_pid_record()
     rec = desktop._read_pid_record()
@@ -332,6 +341,39 @@ def test_main_takes_over_hung_instance(monkeypatch, fake_time, isolated_home):
     assert desktop.main() == 0
     assert killed == [4242]
     assert launched == [1]
+
+
+def test_main_marks_process_dpi_aware_before_launch(monkeypatch, isolated_home):
+    """DPI 感知必须早于启动链：托盘图标在 webview.start() 之前就按 SM_CXSMICON 载入。
+
+    进程未标感知时该值是 96 DPI 的 16，200% DPI 的托盘会把 16px 帧放大成 32 物理
+    像素——就是用户看到的糊（2026-11-07）。
+    """
+    order: list[str] = []
+    monkeypatch.setattr(desktop, "_rotate_log", lambda: None)
+    monkeypatch.setattr(desktop, "_ensure_streams", lambda: None)
+    monkeypatch.setattr(desktop, "_setup_logging", lambda: None)
+    monkeypatch.setattr(desktop, "_log", lambda msg: None)
+    monkeypatch.setattr(desktop, "_ensure_dpi_aware", lambda: order.append("dpi") or True)
+    monkeypatch.setattr(desktop, "_acquire_single_instance", lambda: True)
+    monkeypatch.setattr(desktop, "_write_pid_record", lambda: None)
+    monkeypatch.setattr(desktop, "_launch", lambda: order.append("launch") or 0)
+    monkeypatch.setattr(desktop.sys, "argv", ["SkySheep.exe"])
+
+    assert desktop.main() == 0
+    assert order == ["dpi", "launch"]
+
+
+def test_ensure_dpi_aware_wrapper_swallows_import_errors(monkeypatch):
+    """wintheme 那边炸了也不能拦启动：包装层如实返回 False。"""
+    import skysheep.wintheme as wintheme
+
+    def _boom():
+        raise RuntimeError("user32 unavailable")
+
+    monkeypatch.setattr(wintheme, "ensure_dpi_aware", _boom)
+    # 取模块加载时的真函数（autouse 夹具把模块属性换成了桩）
+    assert _REAL_ENSURE_DPI_AWARE() is False
 
 
 def test_main_alerts_when_cannot_confirm(monkeypatch, fake_time, isolated_home):

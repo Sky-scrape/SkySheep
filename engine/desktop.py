@@ -877,6 +877,22 @@ def _tray_worker(icon_path: str, holder: dict) -> None:
         log(f"tray thread crashed: {exc!r}")
 
 
+def _ensure_dpi_aware() -> bool:
+    """进程标成 DPI 感知——必须赶在任何窗口 / 图标创建之前（main() 里紧跟日志）。
+
+    pywebview 只在 ``webview.start()`` 里调 ``SetProcessDPIAware()``，而托盘图标
+    在那之前就由 ``_start_tray`` 建好了：不感知的进程把 ``SM_CXSMICON`` 读成 96 DPI
+    的虚拟值 16，托盘加载 16px 帧再被系统放大到 32 物理像素——200% DPI 上就是一团
+    糊（2026-11-07 用户实测；图标帧本身按尺寸重画过，糊的是载入尺寸）。
+    """
+    try:
+        from skysheep.wintheme import ensure_dpi_aware
+
+        return ensure_dpi_aware()
+    except Exception:  # noqa: BLE001 早退：老系统 / 非 Windows 不该拦启动
+        return False
+
+
 def _start_tray(static_dir_path: Path, holder: dict, actions: dict) -> None:
     """启动原生托盘线程；托盘不可用时只记日志，不阻塞主流程。"""
     icon_path = Path(static_dir_path) / "skysheep.ico"
@@ -1754,6 +1770,7 @@ def main() -> int:
     _ensure_streams()
     _setup_logging()
     _log(f"=== SkySheep desktop launch (pid {os.getpid()}) ===")
+    _ensure_dpi_aware()
 
     if _acquire_single_instance():
         _write_pid_record()

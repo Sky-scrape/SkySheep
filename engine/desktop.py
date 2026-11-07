@@ -73,7 +73,10 @@ def _install_no_history_nav(hwnd: int) -> None:
     )
     user32.GetWindowLongPtrW.argtypes = [ctypes.c_ssize_t, ctypes.c_int]
     user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
-    user32.SetWindowLongPtrW.argtypes = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_ssize_t]
+    # 第三参必须声明成窗口过程类型本身（同托盘 _WNDCLASSEXW.lpfnWndProc 的写法）：
+    # 按整数声明的话，传 WINFUNCTYPE 回调实例会抛 ArgumentError，整个挂载在
+    # _bootstrap 的 except 里被吞成日志，吞并从未真正装上。
+    user32.SetWindowLongPtrW.argtypes = [ctypes.c_ssize_t, ctypes.c_int, wnd_proc_type]
     user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
     user32.CallWindowProcW.argtypes = [
         ctypes.c_ssize_t, ctypes.c_ssize_t, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t,

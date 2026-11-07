@@ -130,3 +130,79 @@ def test_ci_workflow_has_release_candidate_job():
     smoke = inspect.getsource(release.step_smoke)
     assert "SKYSHEEP_HOME" in smoke and "SKYSHEEP_INSTANCE" in smoke
     assert "_URL_IN_LOG_RE" in inspect.getsource(release._wait_ready), "端口必须从日志解析，不能写死"
+
+
+def test_printable_cmd_masks_pfx_password():
+    """signtool /p 后的值在展示串里打码成 ****，其余参数与真实命令列表原样保留。"""
+    cmd = [
+        r"C:\Tools\signtool.exe", "sign", "/fd", "SHA256", "/tr",
+        "http://timestamp.digicert.com", "/p", "Sup3rSecret!", r"C:\dist\SkySheep.exe",
+    ]
+    printable = release._printable_cmd(cmd)
+    assert "Sup3rSecret!" not in printable
+    assert "/p ****" in printable
+    assert "http://timestamp.digicert.com" in printable
+    assert r"C:\dist\SkySheep.exe" in printable
+    # 打码只影响展示串：真实命令列表不动，子进程仍按原参数执行
+    assert cmd[-3] == "/p" and cmd[-2] == "Sup3rSecret!"
+
+
+def test_run_output_and_failure_report_masked_command(monkeypatch, capsys):
+    """_run 的 stdout 与失败 RuntimeError 都只带打码后的命令（评审发现回归钉）。
+
+    修复前：print 与 RuntimeError 打的是「  $  ... /p <明文密码> ...」。
+    """
+    def fake_run(cmd, cwd=None, env=None):
+        assert cmd[2] == "/p" and cmd[3] == "LeakedPw!", "真实子进程参数不得被改"
+        return argparse.Namespace(returncode=2)
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError) as exc_info:
+        release._run(["signtool", "sign", "/p", "LeakedPw!", "a.exe"])
+    captured = capsys.readouterr()
+    for text in (captured.out, captured.err, str(exc_info.value)):
+        assert "LeakedPw!" not in text
+    assert "/p ****" in captured.out
+    assert "/p ****" in str(exc_info.value)
+
+
+def test_sign_config_prefers_sha1_when_pfx_password_empty(monkeypatch, tmp_path):
+    """PFX 未配密码且 sha1 也配了时走 /sha1：密码不进 signtool 命令行的路径优先。"""
+    signtool = tmp_path / "signtool.exe"
+    signtool.write_bytes(b"")
+    monkeypatch.setenv("SKYSHEEP_SIGNTOOL", str(signtool))
+    monkeypatch.setenv("SKYSHEEP_SIGN_PFX", str(tmp_path / "cert.pfx"))
+    monkeypatch.setenv("SKYSHEEP_SIGN_CERT_SHA1", "AB12CD34")
+    monkeypatch.delenv("SKYSHEEP_SIGN_PFX_PASSWORD", raising=False)
+    cfg = release._sign_config()
+    assert cfg is not None
+    assert "/sha1" in cfg[1] and "/f" not in cfg[1]
+
+
+def test_sign_config_keeps_pfx_path_when_password_present(monkeypatch, tmp_path):
+    """PFX 配了密码时仍走 /f + /p（sha1 同时在也不抢）：/p 的值只进子进程参数。"""
+    signtool = tmp_path / "signtool.exe"
+    signtool.write_bytes(b"")
+    monkeypatch.setenv("SKYSHEEP_SIGNTOOL", str(signtool))
+    monkeypatch.setenv("SKYSHEEP_SIGN_PFX", str(tmp_path / "cert.pfx"))
+    monkeypatch.setenv("SKYSHEEP_SIGN_CERT_SHA1", "AB12CD34")
+    monkeypatch.setenv("SKYSHEEP_SIGN_PFX_PASSWORD", "pw123")
+    cfg = release._sign_config()
+    assert cfg is not None
+    args = cfg[1]
+    assert "/f" in args and "/sha1" not in args
+    assert args[args.index("/p") + 1] == "pw123"
+
+
+def test_help_epilog_documents_sha1_priority(capsys):
+    """--help 尾注必须写明「两者都配且 PFX 未配密码时优先 /sha1」的规则与发布引导。
+
+    发布清单 §3-4 暂未收录该规则（集成时归口），脚本自身的 --help 是用户
+    可达的同层引导——钉住它，防止后续改尾注时静默丢掉这条安全取向。
+    """
+    with pytest.raises(SystemExit) as exc_info:
+        release.parse_args(["--help"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "优先 /sha1" in out, "尾注缺 sha1 优先规则"
+    assert "发布更建议用它" in out, "尾注缺「发布更建议配 sha1」的引导"

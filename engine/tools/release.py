@@ -23,6 +23,9 @@
 
 代码签名（可选但强烈推荐）：配置 SKYSHEEP_SIGN_PFX（+ 可选 SKYSHEEP_SIGN_PFX_PASSWORD）
 或 SKYSHEEP_SIGN_CERT_SHA1（按指纹取「当前用户\\个人」证书存储）即自动签名，
+两者都配且 PFX 未配密码时优先 /sha1 路径（不给命令行传密码；PFX 路径的
+/p <密码> 受 signtool 工具限制仍会进子进程命令行，同机进程经 WMI 可读，
+本脚本的 stdout/stderr 只出打码形式，见 _printable_cmd），
 signtool 用 SKYSHEEP_SIGNTOOL 指定或自动枚举 Windows Kits；时间戳默认
 DigiCert（SKYSHEEP_SIGN_TIMESTAMP_URL 可换）。签名失败即中止发布；未配置时
 打印跳过说明继续（发布保持未签名，SmartScreen 拦截见 docs/smartscreen-说明.md）。
@@ -162,9 +165,35 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+def _printable_cmd(cmd: list[str]) -> str:
+    """命令的展示形式：signtool 的 ``/p <密码>`` 一段打码成 ``/p ****``。
+
+    只护本脚本自己的 stdout/stderr（含 _run 失败时的 RuntimeError 文案）；
+    signtool 子进程的真实命令行仍带明文密码（同机进程经 WMI 可读），那是
+    signtool 的工具限制、绕不开——正式发布建议走 SKYSHEEP_SIGN_CERT_SHA1
+    （/sha1 路径不给命令行传任何密码，见 _sign_config）。
+    """
+    masked: list[str] = []
+    hide_next = False
+    for arg in cmd:
+        if hide_next:
+            masked.append("****")
+            hide_next = False
+            continue
+        masked.append(arg)
+        if arg.lower() == "/p":
+            hide_next = True
+    return " ".join(masked)
+
+
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
-    """跑子命令并原样透传输出（失败带退出码抛错）。"""
-    printable = " ".join(cmd)
+    """跑子命令并原样透传输出（失败带退出码抛错）。
+
+    打印与报错一律用 _printable_cmd 的打码形式：签名密码（signtool /p 的值）
+    不落本脚本 stdout/stderr。密码仍会进 signtool 子进程自己的命令行，属
+    工具限制（见 _printable_cmd），发布建议改走 /sha1 路径。
+    """
+    printable = _printable_cmd(cmd)
     print(f"  $ {printable}")
     proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=_child_env())  # noqa: S603
     if proc.returncode != 0:
@@ -252,13 +281,17 @@ def _find_signtool() -> Path | None:
 def _sign_config() -> tuple[Path, list[str]] | None:
     """读签名环境变量，返回 (signtool 路径, sign 参数)；未配置证书返回 None。
 
-    PFX（SKYSHEEP_SIGN_PFX + 可选 SKYSHEEP_SIGN_PFX_PASSWORD）优先，其次按
-    指纹取证书存储（SKYSHEEP_SIGN_CERT_SHA1）。配置了证书却找不到 signtool
-    直接报错——发布者明确表达了签名意图，静默跳过会让未签名包带「已按流程
-    发布」的错觉出门。
+    两条路径：SKYSHEEP_SIGN_CERT_SHA1（按指纹取「当前用户\\个人」证书存储）
+    与 PFX（SKYSHEEP_SIGN_PFX + 可选 SKYSHEEP_SIGN_PFX_PASSWORD）。/sha1 不给
+    signtool 命令行传任何密码，能走就走：只配了 PFX、或 PFX 明确配了密码
+    （要按密码打开那个文件）时才落 /f <pfx>；PFX 路径的 /p <密码> 受 signtool
+    工具限制仍会进子进程命令行（同机进程经 WMI 可读），发布更建议配 sha1。
+    配置了证书却找不到 signtool 直接报错——发布者明确表达了签名意图，静默
+    跳过会让未签名包带「已按流程发布」的错觉出门。
     """
     pfx = os.environ.get("SKYSHEEP_SIGN_PFX", "").strip()
     sha1 = os.environ.get("SKYSHEEP_SIGN_CERT_SHA1", "").strip()
+    pw = os.environ.get("SKYSHEEP_SIGN_PFX_PASSWORD", "")
     if not pfx and not sha1:
         return None
     ts = os.environ.get("SKYSHEEP_SIGN_TIMESTAMP_URL", "").strip() or \
@@ -266,13 +299,14 @@ def _sign_config() -> tuple[Path, list[str]] | None:
     # /fd /td 都用 SHA256（兼容模式才是 SHA1，会被新版 Windows 拒绝）；/tr 时间戳
     # 让签名在证书过期后仍可验证——没时间戳的签名到期即死，对分发出去的旧包无解
     args = ["/fd", "SHA256", "/td", "SHA256", "/tr", ts]
-    if pfx:
+    # 两条都能签时优先 /sha1：命令行不带任何密码。只有「只配了 PFX」或
+    # 「PFX 配了密码」才走 /f <pfx>；PFX 未配密码且 sha1 也在时选 sha1
+    if sha1 and not (pfx and pw):
+        args += ["/sha1", sha1]
+    else:
         args += ["/f", str(Path(pfx).resolve())]
-        pw = os.environ.get("SKYSHEEP_SIGN_PFX_PASSWORD", "")
         if pw:
             args += ["/p", pw]
-    else:
-        args += ["/sha1", sha1]
     tool = _find_signtool()
     if tool is None:
         raise RuntimeError(
@@ -572,7 +606,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "默认绝不执行任何对外发布动作；只有显式 --upload 才会在全部阶段通过后\n"
             "调用 gh release create v<版本> 上传安装包与 .sha256（发布清单 §4-2/§4-3）。\n"
             "代码签名：配置 SKYSHEEP_SIGN_PFX（+可选 SKYSHEEP_SIGN_PFX_PASSWORD）或\n"
-            "SKYSHEEP_SIGN_CERT_SHA1 即自动签名，未配置则自动跳过并提示。\n"
+            "SKYSHEEP_SIGN_CERT_SHA1 即自动签名，未配置则自动跳过并提示；两者都配且\n"
+            "PFX 未配密码时优先 /sha1（证书存储路径、命令行不传密码，发布更建议用它）。\n"
             "阶段对应清单条目：1=§1 2=§3-1 3=§2 4=§3-2 5=§3-3 6=签名 7=§3-3 8=§3-4 "
             "9=签名 10=§4-5 11=上传（仅 --upload）。\n"
             "失败即非零退出，并打印已到达的步骤。"

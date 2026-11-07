@@ -809,8 +809,18 @@ class RemoteMixin:
         if script is None:
             raise RuntimeError("无法写出更新脚本（临时目录不可写），请到 GitHub Releases 手动下载安装")
         flags = 0
-        if hasattr(subprocess, "DETACHED_PROCESS"):
-            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            # 用「隐藏控制台」而不是 DETACHED_PROCESS：后者让 cmd 完全没有控制台，
+            # 批处理里的 ping 是控制台程序，系统会给它新分配一个控制台——Win11
+            # 默认终端是 Windows Terminal，于是点「退出并安装」后会突然弹出一个
+            # 标题为 `ping -n 3 127.0.0.1` 的终端窗口（约 2 秒后自己关掉）。
+            # CREATE_NO_WINDOW 给 cmd 一个不显示的控制台，ping 继承它：等待照常
+            # 生效，窗口不再出现；CREATE_NEW_PROCESS_GROUP 隔离 Ctrl+C/信号传播。
+            flags = (subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+                     | subprocess.CREATE_NEW_PROCESS_GROUP)  # type: ignore[attr-defined]
+        elif hasattr(subprocess, "DETACHED_PROCESS"):
+            flags = (subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+                     | subprocess.CREATE_NEW_PROCESS_GROUP)  # type: ignore[attr-defined]
         try:
             subprocess.Popen(
                 ["cmd", "/c", script.name],
@@ -966,10 +976,13 @@ def _probe_one(url: str, proxy: httpx.Proxy | None,
     """测一条出网路径的吞吐（字节/秒）；连不上或读不到数据返回 0.0。
 
     只读前 probe_bytes 字节（Range 请求；服务端不认 Range 就边读边断），
-    失败一律吞掉——探测只用来排序，不该让更新多出一个失败面。
+    失败一律吞掉——探测只用来排序，不该让更新多出一个失败面。发请求前同样
+    过 _is_safe_update_url（每个出网口子都自己校验，不依赖调用方）。
     """
     import httpx
 
+    if not _is_safe_update_url(url):
+        return 0.0
     started = time.monotonic()
     got = 0
     try:
@@ -1468,11 +1481,14 @@ def _write_update_helper(pending: str, log_path: Path | None, override: str = ""
     再 `cmd /c apply-update.cmd` 执行：批处理里没有跨层转义，引号按 cmd 的规则
     原样生效，路径含空格/中文也安全。
 
-    延迟用 ping 而不是 timeout：更新以 DETACHED_PROCESS 拉起 cmd，进程没有
-    控制台，timeout 的输入重定向检查会立即报错返回，2 秒等待名存实亡——届时
-    本应用还没退出、单实例互斥体未释放，安装器会当作已有实例在跑而放弃。
-    ping 没有控制台依赖，-n 3 恰好约 2 秒。/RESTARTAPP 让安装器装完自动拉起
-    新版（installer.iss 的 [Run] 按此参数决定，手动静默安装不受影响）。
+    延迟用 ping 而不是 timeout：更新以 CREATE_NO_WINDOW 拉起 cmd（隐藏控制台），
+    timeout 依赖控制台输入句柄，在这种场景会立即报错返回，2 秒等待名存实亡——
+    届时本应用还没退出、单实例互斥体未释放，安装器会当作已有实例在跑而放弃。
+    ping 不依赖输入，-n 3 恰好约 2 秒；它继承 cmd 的隐藏控制台，不会再像
+    DETACHED_PROCESS 那样被系统新分配一个可见控制台（Win11 上表现为弹出
+    一个标题为 `ping -n 3 127.0.0.1` 的 Windows Terminal 窗口）。
+    /RESTARTAPP 让安装器装完自动拉起新版（installer.iss 的 [Run] 按此参数决定，
+    手动静默安装不受影响）。
 
     批处理用 GBK 写（cmd 按 OEM 代码页读 .cmd，中文 Windows 即 cp936），只有
     提示文案受影响，命令本身是 ASCII。写不出文件返回 None（调用方保持原行为）。

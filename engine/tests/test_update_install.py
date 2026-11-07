@@ -157,6 +157,51 @@ def test_update_helper_batch_actually_runs_and_logs_exit_code(tmp_path):
     assert "nope-setup.exe" in log.read_text(encoding="gbk", errors="replace")
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="只验 Windows 的进程创建标志")
+def test_apply_update_launches_helper_with_hidden_console(tmp_path, monkeypatch):
+    """更新助手必须用 CREATE_NO_WINDOW 起 cmd，不能退回 DETACHED_PROCESS。
+
+    回归 2026-11 用户反馈：点「退出并安装」后会突然弹出一个标题为
+    `ping -n 3 127.0.0.1` 的 Windows Terminal 窗口。原因是 DETACHED_PROCESS
+    让 cmd 完全没有控制台，批处理里的 ping 是控制台程序，系统给它新分配一个
+    控制台；Win11 默认终端是 Windows Terminal，于是那个窗口就弹出来了。
+    CREATE_NO_WINDOW 给 cmd 一个不显示的控制台，ping 继承它即可。
+    """
+    import asyncio
+
+    import skysheep.server.backend_parts.remote as remote_mod
+
+    pending = tmp_path / "SkySheep-9.9.9-setup.exe"
+    pending.write_bytes(b"MZ")
+    seen: dict = {}
+
+    def fake_popen(args, **kwargs):
+        seen["args"] = args
+        seen["flags"] = kwargs.get("creationflags", 0)
+        return object()
+
+    monkeypatch.setattr(remote_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(remote_mod, "_backup_user_data", lambda: (None, []))
+    monkeypatch.setattr(remote_mod, "_write_update_marker", lambda *a, **k: None)
+    monkeypatch.setattr(remote_mod, "_prepare_update_log", lambda *a: None)
+    monkeypatch.setattr(remote_mod, "_write_update_helper",
+                        lambda *a, **k: tmp_path / "apply-update.cmd")
+    monkeypatch.setattr(remote_mod, "_setup_privilege_override", lambda: "/CURRENTUSER")
+    monkeypatch.setattr(remote_mod, "spawn_bg", lambda coro: coro.close())
+
+    class _Fake:
+        _pending_update = str(pending)
+
+        async def shutdown(self):
+            pass
+
+    asyncio.run(remote_mod.RemoteMixin.apply_update(_Fake()))
+    flags = seen["flags"]
+    assert flags & 0x08000000, "必须带 CREATE_NO_WINDOW（隐藏控制台）"
+    assert not flags & 0x00000008, "不能再用 DETACHED_PROCESS（ping 会弹出终端窗口）"
+    assert flags & 0x00000200, "CREATE_NEW_PROCESS_GROUP 保留（隔离信号传播）"
+
+
 def test_install_update_result_reports_uac_need():
     """install_update 的结果要带 uac 标记：本机是「所有用户」安装时，
     前端必须在应用退出前就把「留意授权窗口」讲清楚（退出后提示就看不见了）。"""

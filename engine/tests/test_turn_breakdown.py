@@ -170,16 +170,15 @@ def test_turn_breakdown_ws_limit_and_filter(home):
         assert len(r5["turns"]) == 1 and r5["turns"][0]["duration_ms"] == 1000
 
 
-# ---------- 远程收窄（B13 同款）：远端只看当前活动会话 ----------
+# ---------- 远程收敛（连接级授权，同 checkpoint.* 口径）：绑定 X 拿 X ----------
 
-def test_turn_breakdown_remote_narrows_to_active_session(home, monkeypatch):
-    """远程连接忽略传入 sid、收窄到当前活动会话。
+def test_turn_breakdown_remote_scoped_to_connection_session(home, monkeypatch):
+    """远程连接按「连接绑定的会话」授权，不读全局活动会话（安全审查 B 族）。
 
-    诊断行含时间/耗时/工具名/token，不收窄的话 LAN 持令牌的远程客户端
-    可凭任意 sid 读到别会话的轮次度量，还能借 turns 空/非空探测某 id
-    是否在本机日志里出现过。
+    诊断行含时间/耗时/工具名/token：若收窄对象随全局指针漂移，本机切会话
+    会让远程连接读到别的会话的轮次度量，还能借 turns 空/非空探测某 id 是否
+    在本机日志里出现过。与 checkpoint.* / runs.list 的 _remote_scope 同口径。
     """
-    _write_log(home, _send_turn_lines(2, sid="s1") + _send_turn_lines(1, sid="s2"))
     # 第一个连接算本机，之后的连接算远程（_client_is_local 按调用次序分流）
     calls = {"n": 0}
 
@@ -191,27 +190,59 @@ def test_turn_breakdown_remote_narrows_to_active_session(home, monkeypatch):
     with make_client(home, [[TextBlock(text="好的")]]) as client, \
          client.websocket_connect("/ws") as ws_local, \
          client.websocket_connect("/ws") as ws_remote:
-        ws_remote.send_json({"id": "b1", "method": "boot"})
-        assert recv_until(ws_remote, "b1")["ok"]
-        # 本机先跑一轮：懒创建出活动会话（远程收窄的目标）
+        backend = client.app.state.backend
+        # 本机跑一轮：懒创建出会话 B
         ws_local.send_json({"id": "c1", "method": "chat.send", "params": {"text": "hi"}})
         frame = recv_until(ws_local, "c1")
         assert frame["ok"], frame
-        active_sid = frame["result"]["session_id"]
-        assert active_sid not in ("s1", "s2")
+        sid_b = frame["result"]["session_id"]
+        # 远程自建会话 A：连接绑定到 A（session.new 即绑，同 team/checkpoint 测试）
+        ws_remote.send_json({"id": "n1", "method": "session.new", "params": {}})
+        sid_a = recv_until(ws_remote, "n1")["result"]["id"]
+        assert sid_a != sid_b
+        # 桌面把活动会话切回 B：全局指针（B）≠ 远程绑定（A），漂移场景就位
+        ws_local.send_json({"id": "act", "method": "session.activate",
+                            "params": {"id": sid_b}})
+        assert recv_until(ws_local, "act")["ok"]
 
-        # 远程传别人的 sid：被忽略，按活动会话返回
+        # 日志夹具：A 有两轮、B 有三轮、另有谁都没绑定的 sX 一轮
+        # （各会话条数不同：泄漏哪一方的行，列表长度/取值立刻对不上）
+        _write_log(home, _send_turn_lines(2, sid=sid_a)
+                   + _send_turn_lines(3, sid=sid_b)
+                   + _send_turn_lines(1, sid="sX"))
+
+        # 绑定 X 拿 X：伪造 B 的 sid 无效，返回连接绑定 A 自己的诊断行
         ws_remote.send_json({"id": "r1", "method": "diagnostics.turn_breakdown",
-                             "params": {"session_id": "s2"}})
+                             "params": {"session_id": sid_b}})
         r = recv_until(ws_remote, "r1")["result"]
-        assert r["session_id"] == active_sid
-        assert r["turns"] == [], "日志里只有 s1/s2 的行，活动会话查不到它们的轮次"
+        assert r["session_id"] == sid_a
+        assert [t["duration_ms"] for t in r["turns"]] == [1000, 1001], "A 的两轮"
 
-        # 本机连接不受影响：照常按传入 sid 查
+        # 全局指针钉在 B 上：不带 sid 也收敛到 A，不随 backend.session 漂移
+        assert backend.session.id == sid_b
+        ws_remote.send_json({"id": "r2", "method": "diagnostics.turn_breakdown",
+                             "params": {}})
+        r2 = recv_until(ws_remote, "r2")["result"]
+        assert r2["session_id"] == sid_a
+        assert [t["duration_ms"] for t in r2["turns"]] == [1000, 1001]
+
+        # 本机连接不受影响：照常按传入 sid 查 B 自己的轮次
         ws_local.send_json({"id": "d1", "method": "diagnostics.turn_breakdown",
-                            "params": {"session_id": "s2"}})
-        r2 = recv_until(ws_local, "d1")["result"]
-        assert r2["session_id"] == "s2" and len(r2["turns"]) == 1
+                            "params": {"session_id": sid_b}})
+        r3 = recv_until(ws_local, "d1")["result"]
+        assert r3["session_id"] == sid_b
+        assert [t["duration_ms"] for t in r3["turns"]] == [1000, 1001, 1002]
+
+
+def test_turn_breakdown_remote_unbound_fail_closed(home, monkeypatch):
+    """未绑定会话的远程连接：拿空结果（session_id 为空串），探不到任何日志行。"""
+    _write_log(home, _send_turn_lines(2, sid="s1"))
+    monkeypatch.setattr(server_app, "_client_is_local", lambda client: False)
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "r1", "method": "diagnostics.turn_breakdown",
+                      "params": {"session_id": "s1"}})
+        r = recv_until(ws, "r1")["result"]
+        assert r["session_id"] == "" and r["turns"] == []
 
 
 # ---------- 轮末结构化日志带 slowest_tool（本轮最慢工具） ----------

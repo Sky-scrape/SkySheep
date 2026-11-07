@@ -7624,8 +7624,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         只读当前文件、不追轮转旧文件；日志文件不存在（如 CLI 模式没接文件日志）
         返回空列表而不是报错。字段缺失容忍——旧版本日志行没有 slowest_tool 等
         字段时相应位置就是 null。
+
+        session_id 由调用方解析完毕再传入（本机=前端点选的会话；远程=连接绑定
+        会话，未绑定为空串），这里不再二次回退全局活动会话：空串一律按「无授权
+        会话」直接回空结果——否则未绑定的远程连接会读到全局指针当前指着的会话
+        的诊断（耗时/工具名/token），且边界随本机窗口切会话漂移（安全审查 B 族，
+        与 list_checkpoints 的空串口径一致）。前端审查页恒传 currentSessionId，
+        本机缺省路径没有真实调用方。
         """
-        sid = str(session_id or "").strip() or (self.session.id if self.session else "")
+        sid = str(session_id or "").strip()
         try:
             n = int(limit)
         except (TypeError, ValueError):

@@ -291,17 +291,15 @@ async def _h_checkpoint_diff(backend: ServerBackend, params: dict, emit, local: 
 
 async def _h_diagnostics_turn_breakdown(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 审查页「轮次诊断」：读结构化日志里的每轮耗时拆解（只读，不碰引擎状态）
-    if not local:
-        # 远程只看当前活动会话（安全审查 B13 同款收窄）：诊断行含时间/耗时/
-        # 工具名/token，凭传入 sid 能翻别会话的日志，还能借 turns 空/非空
-        # 探测某 id 是否在本机日志里出现过。活动指针为 None 时取空串——
-        # 日志行都带真实 session_id，空串匹配不到任何行（探测面为零）
-        sid = backend.session.id if backend.session else ""
-        return await backend.turn_breakdown(sid, params.get("limit", 20))
-    return await backend.turn_breakdown(
-        str(params.get("session_id") or ""),
-        params.get("limit", 20),
-    )
+    # 远程照 checkpoint.*（_checkpoint_scope）同款收敛到连接绑定的会话（安全
+    # 审查 B 族）：诊断行含时间/耗时/工具名/token，凭传入 sid 能翻别会话的
+    # 日志，还能借 turns 空/非空探测某 id 是否在本机日志里出现过——传入 sid
+    # 一律不认，也不读全局 backend.session（会被另一个连接或本机窗口切走，
+    # 让远程的读取边界随全局状态漂移）。未绑定收敛为空串 fail closed：日志
+    # 行都带真实 session_id，空串匹配不到任何行（探测面为零）。
+    only = _remote_scope(local)
+    sid = only if only is not None else str(params.get("session_id") or "")
+    return await backend.turn_breakdown(sid, params.get("limit", 20))
 
 
 async def _h_term_spawn(backend: ServerBackend, params: dict, emit, local: bool) -> dict:

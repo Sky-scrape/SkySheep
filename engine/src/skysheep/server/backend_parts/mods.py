@@ -581,10 +581,18 @@ class ModsMixin:
             self._pending_mod_install = None
         # 安装即启用：加进 enabled_mods 并打开总开关（用户主动装了却默认停用，
         # 会以为装失败；总开关此前是「实验性首版默认关」，随首次安装打开）
-        _enabled, ids = _read_mods_cfg()
+        # 读侧按当前模式分流、写侧走 _set_mods_cfg（与 install_official_mod /
+        # toggle_mod 同一套路由）：Claude 兼容模式下本地安装（.claude-plugin 格式
+        # 是开放路径）若固定写 [mods]，名单会进错误的表——接口返回 enabled:True
+        # 实际未激活（假启用），且 [mods].enabled 被误开，切回 quickjs 模式时
+        # 全部 Mod 被静默启用。
+        if self._mods_mode() == "claude":
+            _enabled, ids = _read_mods_claude_cfg()
+        else:
+            _enabled, ids = _read_mods_cfg()
         if manifest["id"] not in ids:
             ids.append(manifest["id"])
-        set_mods_in_config(enabled=True, enabled_mods=ids)
+        self._set_mods_cfg(enabled=True, ids=ids)
         self._reload_mods()
         self.notify_mods_updated()
         return {"installed": manifest["id"], "enabled": True}

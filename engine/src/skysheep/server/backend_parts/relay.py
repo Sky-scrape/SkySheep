@@ -175,6 +175,9 @@ class RelaySettingsMixin:
                 # check-then-act，并发下必须串行化（否则同一 request_id 会
                 # 一方成功一方报冲突，且 stop 可能与 run 交错改状态）
                 "locks": {},
+                # 首次创建 pair 的「查重 → 建行」实例级串行锁（全局一把，
+                # 见 _relay_dual_create_lock）
+                "create_lock": asyncio.Lock(),
             }
         return st
 
@@ -306,40 +309,47 @@ class RelaySettingsMixin:
         session = await self._get_owned_session(session_id, local=True)
         project_id = await self._relay_session_project(session)
 
-        pair: dict | None = None
-        if params.get("pair_id"):
-            pair_id = self._relay_str(params, "pair_id", maxlen=64)
-            pair = await self._relay_dual_owned(pair_id)
-            if pair["main_session_id"] != session_id:
-                raise ValueError("relay_forbidden：这个接力不属于当前会话")
-        else:
-            pair = await self.store.relay_pair_latest(session_id)
-        if pair is None:
-            peer = await self.store.relay_peer_session(project_id, _RELAY_PEER_TITLE)
-            # 全新 pair：任何被占用的副屏都不复用（relay_peer_session 默认排他）
-            created = await self.store.relay_pair_create({
-                "id": uuid.uuid4().hex,
-                "project_id": project_id,
-                "main_session_id": session_id,
-                "peer_session_id": peer.id,
-                "goal": self._relay_str(params, "goal", required=False, maxlen=8000),
-                "main_task": self._relay_str(params, "main_task", required=False, maxlen=4000),
-                "peer_task": self._relay_str(params, "peer_task", required=False, maxlen=4000),
-                "auto_alternate": bool(params.get("auto_alternate")),
-                "verify_handoff": bool(params.get("verify_handoff", True)),
-                "state": "idle",
-                "current_side": "main",
-            })
-            pair = created["pair"]
-        elif await self.store.get_session(pair["peer_session_id"]) is None:
-            # 副屏会话被用户删了：换一个新的副屏再跑，别把消息写进不存在的会话
-            peer = await self.store.relay_peer_session(
-                project_id, _RELAY_PEER_TITLE, exclude_pair_id=pair["id"]
-            )
-            await self.store.relay_pair_update(
-                pair["id"], {"peer_session_id": peer.id}, bump=False
-            )
-            pair = await self.store.relay_pair_get(pair["id"]) or pair
+        # 「查重 → 建行 / 换绑副屏」是 check-then-act，并发下必须串行化（先例：
+        # 串行路径 relay_start 的 _relay_start_lock）：relay_pair_latest 与
+        # relay_pair_create 之间隔着 relay_peer_session 等多个 await，两个并发
+        # 首次启动（两窗口同点执行）都可能在「查无 pair」处放行，各自建出一条
+        # pair——之后双 worker 交替空转、token 翻倍。首次创建本就该全局串行，
+        # 实例级单把锁护住整段即可，不覆盖下面的模型调用。
+        async with self._relay_dual_create_lock():
+            pair: dict | None = None
+            if params.get("pair_id"):
+                pair_id = self._relay_str(params, "pair_id", maxlen=64)
+                pair = await self._relay_dual_owned(pair_id)
+                if pair["main_session_id"] != session_id:
+                    raise ValueError("relay_forbidden：这个接力不属于当前会话")
+            else:
+                pair = await self.store.relay_pair_latest(session_id)
+            if pair is None:
+                peer = await self.store.relay_peer_session(project_id, _RELAY_PEER_TITLE)
+                # 全新 pair：任何被占用的副屏都不复用（relay_peer_session 默认排他）
+                created = await self.store.relay_pair_create({
+                    "id": uuid.uuid4().hex,
+                    "project_id": project_id,
+                    "main_session_id": session_id,
+                    "peer_session_id": peer.id,
+                    "goal": self._relay_str(params, "goal", required=False, maxlen=8000),
+                    "main_task": self._relay_str(params, "main_task", required=False, maxlen=4000),
+                    "peer_task": self._relay_str(params, "peer_task", required=False, maxlen=4000),
+                    "auto_alternate": bool(params.get("auto_alternate")),
+                    "verify_handoff": bool(params.get("verify_handoff", True)),
+                    "state": "idle",
+                    "current_side": "main",
+                })
+                pair = created["pair"]
+            elif await self.store.get_session(pair["peer_session_id"]) is None:
+                # 副屏会话被用户删了：换一个新的副屏再跑，别把消息写进不存在的会话
+                peer = await self.store.relay_peer_session(
+                    project_id, _RELAY_PEER_TITLE, exclude_pair_id=pair["id"]
+                )
+                await self.store.relay_pair_update(
+                    pair["id"], {"peer_session_id": peer.id}, bump=False
+                )
+                pair = await self.store.relay_pair_get(pair["id"]) or pair
 
         async with self._relay_dual_lock(pair["id"]):
             return await self._relay_dual_run_locked(
@@ -476,6 +486,18 @@ class RelaySettingsMixin:
                 and latest["side"] == current["side"])
 
     # ---- worker ----
+
+    def _relay_dual_create_lock(self) -> asyncio.Lock:
+        """实例级串行化 dual 首次创建的「查重 → 建行」临界区（全局一把）。
+
+        relay_pair_latest / relay_peer_session / relay_pair_create 是多次独立
+        IO，两个并发首次启动（两窗口同点执行）都可能在「查无 pair」处放行，
+        各自建出一条 pair——之后双 worker 交替空转、token 翻倍、面板状态跳变
+        （relay_pairs 无唯一约束可拦）。首次创建本就该全局串行，单把锁护住
+        整段（含副屏换绑）即可，不覆盖模型调用。先例：串行路径 relay_start
+        的 _relay_start_lock。
+        """
+        return self._relay_dual_state()["create_lock"]
 
     def _relay_dual_lock(self, pair_id: str):
         """按 pair 串行化 run/stop 的「查重 → 状态提交」临界区（不覆盖模型调用）。"""

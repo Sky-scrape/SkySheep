@@ -231,6 +231,49 @@ def test_clear_all_defers_cookies_to_next_start(home):
     assert mixin.browser_status()["pending_reset"] is True
 
 
+def test_clear_browser_data_lock_serializes_same_instance(home, monkeypatch):
+    """实例级锁的并发语义：同一后端两次并发的 clear 必须串行（原先同步代码
+    在事件循环上天然原子，改 to_thread 后靠这把锁恢复）；不同实例之间互不
+    阻塞——锁必须挂在实例上，错挂成类级/模块级会让第二个实例跟着等第一个。"""
+    import asyncio
+    import threading
+
+    calls: list[str] = []
+    thread_entered = threading.Event()
+    allow_finish = threading.Event()
+
+    def fake_clear(home=None):
+        calls.append("enter")
+        if sum(1 for c in calls if c == "enter") == 1:
+            # 第一次：挡在线程里不放，持住实例锁，直到测试放行
+            thread_entered.set()
+            assert allow_finish.wait(timeout=5), "第一次清理没等到放行"
+        calls.append("exit")
+        return {"removed": 0, "failed": 0, "freed_bytes": 0}
+
+    monkeypatch.setattr(browser_data, "clear_cache_dirs", fake_clear)
+    monkeypatch.setattr(browser_data, "sweep_orphan_browser_profiles", lambda: 0)
+
+    async def main():
+        a, b = _mixin(), _mixin()
+        loop = asyncio.get_running_loop()
+        t1 = asyncio.create_task(a.clear_browser_data("cache"))
+        assert await loop.run_in_executor(None, thread_entered.wait, 5), "第一次清理没进线程"
+        t2 = asyncio.create_task(a.clear_browser_data("cache"))  # 同实例：必须等锁
+        t3 = asyncio.create_task(b.clear_browser_data("cache"))  # 不同实例：不能被挡
+        # 宽限等 b 的假清理跑完（轮询不掐表）；a 的第二次若此时也进来了，就是锁坏了
+        deadline = time.time() + 5
+        while time.time() < deadline and len(calls) < 3:
+            await asyncio.sleep(0.02)
+        assert calls == ["enter", "enter", "exit"], f"同实例并发没被串行化: {calls}"
+        allow_finish.set()
+        results = await asyncio.gather(t1, t2, t3)
+        assert all(r["mode"] == "cache" for r in results)
+        assert calls == ["enter", "enter", "exit", "exit", "enter", "exit"], calls
+
+    asyncio.run(main())
+
+
 def test_save_browser_settings_toggles_and_restarts_headless(home, monkeypatch):
     import asyncio
 

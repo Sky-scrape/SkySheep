@@ -1222,3 +1222,53 @@ async def test_dual_peer_reuse_is_exclusive(home):
         assert opened_a["peer"]["id"] == peer_a
     finally:
         await be.shutdown()
+
+
+async def test_dual_concurrent_first_start_creates_single_pair(home):
+    """并发首次启动只建一条 pair（回归：relay_pair_latest 查重与
+    relay_pair_create 建行之间隔着 relay_peer_session 等多个 await，原来无锁
+    ——两个并发首次启动（两窗口同点执行）都可能在「查无 pair」处放行，各自
+    建出一条 pair，之后双 worker 交替空转、token 翻倍。现由实例级创建锁
+    （_relay_dual_create_lock）串行化，先例是串行路径的 _relay_start_lock。"""
+    prov = GatedProvider("主屏产出")
+    be = await _mk(home, prov)
+    try:
+        sid = (await be.new_session())["id"]
+        # 在 relay_peer_session 前制造让出点，拉宽「查重后、建行前」的竞态
+        # 窗口：修复前第二个协程必然在对方建行前也查到空（稳定复现双 pair）；
+        # 修复后它只能等创建锁，轮到它时 pair 已存在，复用不重建。
+        orig_peer = be.store.relay_peer_session
+
+        async def slow_peer(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return await orig_peer(*args, **kwargs)
+
+        be.store.relay_peer_session = slow_peer
+
+        results = await asyncio.gather(
+            be.relay_dual_run({
+                "session_id": sid, "goal": "完成示例任务",
+                "main_task": "发布方案", "peer_task": "执行并反馈",
+                "request_id": "race-1", "expected_revision": 0,
+            }),
+            be.relay_dual_run({
+                "session_id": sid, "goal": "完成示例任务",
+                "main_task": "发布方案", "peer_task": "执行并反馈",
+                "request_id": "race-2", "expected_revision": 0,
+            }),
+            return_exceptions=True,
+        )
+        pairs = await be.store.relay_pair_list(be.project.id, limit=100)
+        assert len(pairs) == 1, f"并发首次启动建出了 {len(pairs)} 条 pair"
+        # 先到者正常开轮；后到者复用同一条 pair，被拒也只落在两种可读结果上：
+        # relay_busy（该轮还在飞）或 relay_conflict（查到的版本已被先到者的
+        # 开轮抬升，按 CAS 语义刷新重试）——不能各自建 pair 成双、不能出别的异常
+        ok = [r for r in results if not isinstance(r, BaseException)]
+        rejected = [r for r in results
+                    if isinstance(r, ValueError)
+                    and ("relay_busy" in str(r) or "relay_conflict" in str(r))]
+        assert ok and len(ok) + len(rejected) == 2, results
+        assert all(r["pair"]["id"] == pairs[0]["id"] for r in ok)
+    finally:
+        prov.gate.set()
+        await be.shutdown()

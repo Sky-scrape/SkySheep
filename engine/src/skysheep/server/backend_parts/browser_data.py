@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import time
 from pathlib import Path
@@ -152,11 +153,13 @@ class BrowserDataMixin:
           （与 advanced.save 的同一套热生效机制）；
         - ``ignore_cert`` 改的是下一次拉起的启动参数 → 关掉在跑的无头 Edge 实例，
           下次动作按新参数重新拉起（WebView2 那份要重启应用，UI 已写明）。
+
+        末尾的状态回读带 profile 全树求和，在线程里跑，不卡事件循环。
         """
         want_master = params.get("browser_control")
         want_cert = params.get("ignore_cert")
         if want_master is None and want_cert is None:
-            return self.browser_status()
+            return await asyncio.to_thread(self.browser_status)
         master = None if want_master is None else bool(want_master)
         cert = None if want_cert is None else bool(want_cert)
         master_changed = master is not None and master != bool(self.cfg.browser_control)
@@ -174,7 +177,7 @@ class BrowserDataMixin:
             from ...tools.browser_cdp import close_browser
 
             await close_browser()
-        return self.browser_status()
+        return await asyncio.to_thread(self.browser_status)
 
     # ---- 清除数据 ----
 
@@ -183,21 +186,34 @@ class BrowserDataMixin:
 
         ``mode="cache"`` 只删缓存（保住 Cookie 与站点数据，页面重新联网取一遍）；
         ``mode="all"`` 在缓存之外还要清 Cookie 与站点数据——后者使用中删不掉，
-        改为登记待办、下次启动落地（见模块 docstring）。
+        改为登记待办、下次启动落地（见模块 docstring）。缓存删除与孤儿 profile
+        清扫在线程里跑，不卡事件循环（GB 级 WebView2 缓存清起来以秒计）；并发的
+        多次清除按实例级锁串行——原先同步代码在事件循环上天然原子，改 to_thread
+        后靠这把锁恢复，免得两次清除在不同线程里交错 rmtree 同一批目录。
         """
         mode = "all" if str(mode) == "all" else "cache"
         home = skysheep_home()
-        stats = clear_cache_dirs(home)
-        swept = sweep_orphan_browser_profiles()
-        result = {
-            "mode": mode,
-            "removed": stats["removed"],
-            "failed": stats["failed"],
-            "freed_bytes": stats["freed_bytes"],
-            "temp_profiles_removed": swept,
-            "needs_restart": False,
-        }
-        if mode == "all":
-            write_reset_marker(home)
-            result["needs_restart"] = reset_pending(home)
-        return result
+        # 懒建实例级锁：取用之间没有 await，事件循环上不会两个协程各建一把。
+        # 挂实例不挂类：类级锁会被先后两个事件循环复用而报错；且 asyncio.Lock
+        # 绑定首次 await 它的循环——同一实例换循环再 acquire 会 RuntimeError，
+        # 即「同一后端实例不得跨事件循环复用」（生产是单后端单循环，测试每
+        # 用例新建 mixin / 后端，均不触雷；并发语义有专项测试守护）。
+        lock = getattr(self, "_browser_clear_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._browser_clear_lock = lock  # type: ignore[attr-defined]
+        async with lock:
+            stats = await asyncio.to_thread(clear_cache_dirs, home)
+            swept = await asyncio.to_thread(sweep_orphan_browser_profiles)
+            result = {
+                "mode": mode,
+                "removed": stats["removed"],
+                "failed": stats["failed"],
+                "freed_bytes": stats["freed_bytes"],
+                "temp_profiles_removed": swept,
+                "needs_restart": False,
+            }
+            if mode == "all":
+                write_reset_marker(home)
+                result["needs_restart"] = reset_pending(home)
+            return result

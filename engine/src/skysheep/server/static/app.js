@@ -5520,6 +5520,11 @@ async function resumeEventStreams() {
 }
 
 function handleEvent(kind, data) {
+  // 应用内更新下载进度（设置 · 关于）：无会话归属，直接驱动关于页状态行。
+  if (kind === "update_progress") {
+    if (typeof updOnProgress === "function") updOnProgress(data || {});
+    return;
+  }
   // 接力（主副屏交替）状态：无会话路由，交给右侧看板按 pair_id 更新。
   if (kind === "relay_pair_state") {
     if (typeof relayOnPairState === "function") relayOnPairState(data && data.relay);

@@ -100,7 +100,8 @@ async def _h_app_check_update(backend: ServerBackend, params: dict, emit, local:
 
 
 async def _h_app_install_update(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.install_update()
+    # 传 emit：下载过程按节流推 update_progress（关于页显示百分比与速率）
+    return await backend.install_update(emit)
 
 
 async def _h_app_apply_update(backend: ServerBackend, params: dict, emit, local: bool) -> dict:

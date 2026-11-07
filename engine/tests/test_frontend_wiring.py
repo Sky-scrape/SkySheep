@@ -189,6 +189,24 @@ def test_install_update_notice_reports_sha_verification():
     assert "未能核对安装包校验值" in seg
 
 
+# ---------- 下载进度：update_progress → 关于页状态行 ----------
+
+def test_update_progress_event_wired_to_about_page():
+    """后端推 update_progress（done/total/speed），handleEvent 必须转给关于页的
+    进度渲染；没有这条接线，设置页只会一直显示「正在下载更新包…」，用户分不清
+    是慢还是卡死。"""
+    js = read_app_bundle()
+    i = js.index('if (kind === "update_progress")')
+    seg = js[i:i + 220]
+    assert "updOnProgress" in seg
+    # 进度渲染在 app-about.js：百分比 / 速率 / 预计剩余三件都要有
+    j = js.index("function updOnProgress(ev)")
+    prog = js[j:j + 900]
+    assert "retentionBytes" in prog
+    assert "/s" in prog
+    assert "分钟" in prog
+
+
 # ---------- 更新可信度：渠道切换接线 + 更新失败/成功现场展示 ----------
 
 def test_update_channel_switch_wired_to_prefs():

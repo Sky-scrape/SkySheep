@@ -14,6 +14,7 @@ SEC-H01（2026-10 全面测试与灰度评估报告）：本文件是全套件�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from pathlib import Path
@@ -89,7 +90,7 @@ def test_download_setup_success_writes_and_verifies(tmp_path, monkeypatch):
     dest = tmp_path / "setup.exe"
     remote_mod._download_setup(SETUP_URL, dest, _sha(payload))
     assert dest.read_bytes() == payload
-    assert not dest.with_suffix(".exe.part").exists(), "暂存文件用完必须消失"
+    assert not (tmp_path / "download.part").exists(), "暂存文件用完必须消失"
     assert seen == [SETUP_URL]
 
 
@@ -104,7 +105,7 @@ def test_download_setup_rejects_sha256_mismatch(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="校验和不匹配"):
         remote_mod._download_setup(SETUP_URL, dest, "0" * 64)
     assert not dest.exists(), "被篡改的包不得落正式名"
-    assert not (tmp_path / "setup.exe.part").exists(), "半截文件不残留"
+    assert not (tmp_path / "download.part").exists(), "半截文件不残留"
 
 
 def test_download_setup_enforces_size_cap(tmp_path, monkeypatch):
@@ -120,7 +121,7 @@ def test_download_setup_enforces_size_cap(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="上限"):
         remote_mod._download_setup(SETUP_URL, dest, "", allow_unverified=True)
     assert not dest.exists()
-    assert not (tmp_path / "setup.exe.part").exists()
+    assert not (tmp_path / "download.part").exists()
 
 
 def test_download_setup_rejects_non_pe_header(tmp_path, monkeypatch):
@@ -189,7 +190,7 @@ async def _setup_frozen_backend(tmp_path, monkeypatch, handler, version="9.9.9")
         return {"version": version, "setup_url": SETUP_URL, "notes": ""}
 
     monkeypatch.setattr(remote_mod, "check_latest_release", fake_release)
-    monkeypatch.setattr(remote_mod, "_update_dir", lambda: tmp_path)  # 不碰真实 %TEMP%
+    monkeypatch.setattr(remote_mod, "_update_dir", lambda *a, **k: tmp_path)  # 不碰真实 %TEMP%
     be = _backend(tmp_path, monkeypatch)
     await be.setup()
     be._is_frozen = True  # 测试进程永远非 frozen：显式按安装版驱动
@@ -210,6 +211,31 @@ async def test_install_update_downloads_verifies_and_pends(tmp_path, monkeypatch
     assert r["verified"] is True, "核对过 .sha256 必须如实上报"
     assert Path(r["path"]).read_bytes() == payload
     assert be._pending_update == r["path"]
+    assert r["egress"] in ("direct", "proxy"), "出网路径要如实回报"
+    await be.shutdown()
+
+
+async def test_install_update_emits_progress_events(tmp_path, monkeypatch):
+    """下载过程把 update_progress 推给前端（关于页显示百分比 / 速率）。"""
+    payload = _payload()
+    events: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == SETUP_URL + ".sha256":
+            return httpx.Response(200, text=_sha(payload))
+        return httpx.Response(200, content=payload)
+
+    async def emit(ev: dict) -> None:
+        events.append(ev)
+
+    be = await _setup_frozen_backend(tmp_path, monkeypatch, handler)
+    # 探测走真实排序：没有代理候选时只走直连，Mock 网络足够
+    monkeypatch.setattr(remote_mod, "_egress_fallbacks", lambda: [])
+    await be.install_update(emit)
+    await asyncio.sleep(0)  # 线程里投回的进度事件在事件循环上落地
+    progress = [e for e in events if e.get("kind") == "update_progress"]
+    assert progress, "至少要推一条进度"
+    assert progress[-1]["done"] == len(payload) == progress[-1]["total"]
     await be.shutdown()
 
 
@@ -271,6 +297,7 @@ def test_download_setup_falls_back_after_connect_failure(tmp_path, monkeypatch):
     """只有系统代理一条路的机器：直连 ConnectTimeout 后经候选路径重试成功。"""
     calls = {"n": 0}
     payload = _payload()
+    proxy = httpx.Proxy("http://127.0.0.1:9")
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
@@ -279,29 +306,31 @@ def test_download_setup_falls_back_after_connect_failure(tmp_path, monkeypatch):
         return httpx.Response(200, content=payload)
 
     _mock_httpx(monkeypatch, handler)
-    monkeypatch.setattr(remote_mod, "_egress_fallbacks",
-                        lambda: [httpx.Proxy("http://127.0.0.1:9")])
+    monkeypatch.setattr(remote_mod, "_egress_fallbacks", lambda: [proxy])
+    # 探测本身也走 Mock 网络：这里只测「换路」语义，排序直接给定
+    monkeypatch.setattr(remote_mod, "_rank_egress_paths", lambda url, cands: [None, proxy])
     dest = tmp_path / "setup.exe"
-    remote_mod._download_setup_with_fallback(SETUP_URL, dest, _sha(payload))
+    assert remote_mod._download_setup_with_fallback(SETUP_URL, dest, _sha(payload)) == "proxy"
     assert dest.read_bytes() == payload
     assert calls["n"] == 2
-    assert not (tmp_path / "setup.exe.part").exists(), "暂存文件不残留"
+    assert not (tmp_path / "download.part").exists(), "暂存文件不残留"
 
 
 def test_download_setup_fallback_exhausted_reraises_last_connect_error(tmp_path, monkeypatch):
     calls = {"n": 0}
+    proxy = httpx.Proxy("http://127.0.0.1:9")
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         raise httpx.ConnectTimeout("全部超时", request=request)
 
     _mock_httpx(monkeypatch, handler)
-    monkeypatch.setattr(remote_mod, "_egress_fallbacks",
-                        lambda: [httpx.Proxy("http://127.0.0.1:9")])
+    monkeypatch.setattr(remote_mod, "_egress_fallbacks", lambda: [proxy])
+    monkeypatch.setattr(remote_mod, "_rank_egress_paths", lambda url, cands: [None, proxy])
     with pytest.raises(httpx.ConnectTimeout):
         remote_mod._download_setup_with_fallback(SETUP_URL, tmp_path / "setup.exe", _sha(_payload()))
-    assert calls["n"] == 2, "直连 + 候选各试一次"
-    assert not (tmp_path / "setup.exe.part").exists()
+    assert calls["n"] == 2, "直连 + 候选各试一次（一个字节都没下到就不再轮第二遍）"
+    assert not (tmp_path / "download.part").exists()
 
 
 def test_fetch_setup_sha256_falls_back_after_connect_failure(monkeypatch):
@@ -316,9 +345,172 @@ def test_fetch_setup_sha256_falls_back_after_connect_failure(monkeypatch):
     _mock_httpx(monkeypatch, handler)
     monkeypatch.setattr(remote_mod, "_egress_fallbacks",
                         lambda: [httpx.Proxy("http://127.0.0.1:9")])
-    sha = remote_mod._fetch_setup_sha256("https://example.com/SkySheep-2.7.0-setup.exe")
+    sha = remote_mod._fetch_setup_sha256(
+        "https://github.com/Sky-scrape/SkySheep/releases/download/v2.7.0/"
+        "SkySheep-2.7.0-setup.exe")
     assert sha == "a" * 64
     assert calls["n"] == 2
+
+
+# ---- 落点与更新源校验（服务端发请求前先卡 host） ----
+
+
+def test_is_safe_update_url_allows_only_github_hosts():
+    assert remote_mod._is_safe_update_url(SETUP_URL)
+    assert remote_mod._is_safe_update_url(
+        "https://release-assets.githubusercontent.com/x?sig=1")
+    assert not remote_mod._is_safe_update_url("http://127.0.0.1/setup.exe")
+    assert not remote_mod._is_safe_update_url("https://localhost/setup.exe")
+    assert not remote_mod._is_safe_update_url("https://192.168.1.5/setup.exe")
+    assert not remote_mod._is_safe_update_url("https://example.com/setup.exe")
+    assert not remote_mod._is_safe_update_url("file:///C:/setup.exe")
+
+
+def test_download_setup_refuses_host_outside_allowlist(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - 不该发请求
+        raise AssertionError("非白名单地址不该发出请求")
+
+    _mock_httpx(monkeypatch, handler)
+    with pytest.raises(RuntimeError, match="允许的主机"):
+        remote_mod._download_setup("https://example.com/setup.exe",
+                                   tmp_path / "setup.exe", "", allow_unverified=True)
+
+
+# ---- 断点续传（Range / 206 / 服务端不认 Range） ----
+
+
+def test_download_setup_resumes_from_existing_part(tmp_path, monkeypatch):
+    payload = _payload(1 << 20)
+    dest = tmp_path / "setup.exe"
+    part = tmp_path / "download.part"
+    part.write_bytes(payload[:400_000])
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rng = request.headers.get("Range") or ""
+        seen.append(rng)
+        start = int(rng.split("=")[1].rstrip("-"))
+        return httpx.Response(206, content=payload[start:], headers={
+            "Content-Range": f"bytes {start}-{len(payload) - 1}/{len(payload)}",
+        })
+
+    _mock_httpx(monkeypatch, handler)
+    remote_mod._download_setup(SETUP_URL, dest, _sha(payload), resume=True)
+    assert seen == ["bytes=400000-"]
+    assert dest.read_bytes() == payload
+    assert not part.exists(), "续传成功后暂存文件消失"
+
+
+def test_download_setup_restarts_when_server_ignores_range(tmp_path, monkeypatch):
+    """服务端回 200（不认 Range）：必须从头写，不能把整包追在半截后面。"""
+    payload = _payload(4096)
+    dest = tmp_path / "setup.exe"
+    (tmp_path / "download.part").write_bytes(b"MZ" + b"\x00" * 100)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    _mock_httpx(monkeypatch, handler)
+    remote_mod._download_setup(SETUP_URL, dest, _sha(payload), resume=True)
+    assert dest.read_bytes() == payload
+
+
+def test_resume_keeps_part_on_network_error(tmp_path, monkeypatch):
+    payload = _payload(2048)
+    dest = tmp_path / "setup.exe"
+    part = tmp_path / "download.part"
+    part.write_bytes(payload[:512])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("断了", request=request)
+
+    _mock_httpx(monkeypatch, handler)
+    with pytest.raises(httpx.ReadTimeout):
+        remote_mod._download_setup(SETUP_URL, dest, _sha(payload), resume=True)
+    assert part.read_bytes() == payload[:512], "断流保留已下部分供下次续传"
+
+
+def test_checksum_mismatch_discards_part_even_with_resume(tmp_path, monkeypatch):
+    """校验失败必须丢 .part：留着坏前缀会让每次续传都接着错下去。"""
+    payload = _payload(64)
+    dest = tmp_path / "setup.exe"
+    part = tmp_path / "download.part"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"MZ" + b"\x01" * 62)
+
+    _mock_httpx(monkeypatch, handler)
+    with pytest.raises(RuntimeError, match="校验和不匹配"):
+        remote_mod._download_setup(SETUP_URL, dest, _sha(payload), resume=True)
+    assert not part.exists()
+
+
+# ---- 进度回调 ----
+
+
+def test_download_setup_reports_progress(tmp_path, monkeypatch):
+    payload = _payload(64)
+    events: list[tuple[int, int | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    _mock_httpx(monkeypatch, handler)
+    remote_mod._download_setup(SETUP_URL, tmp_path / "setup.exe", _sha(payload),
+                               progress=lambda done, total, speed: events.append((done, total)))
+    assert events, "至少要有一条进度"
+    assert events[-1] == (len(payload), len(payload)), "收尾那条必须是 100%"
+
+
+# ---- 出网择优（探测排序） ----
+
+
+def test_rank_egress_paths_prefers_fastest(monkeypatch):
+    proxy = httpx.Proxy("http://127.0.0.1:9")
+    monkeypatch.setattr(remote_mod, "_probe_one",
+                        lambda url, p, **kw: 9.0 if p is not None else 1.0)
+    order = remote_mod._rank_egress_paths(SETUP_URL, [proxy])
+    assert order == [proxy, None], "代理快就先走代理"
+
+
+def test_rank_egress_paths_keeps_failed_paths_as_backup(monkeypatch):
+    proxy = httpx.Proxy("http://127.0.0.1:9")
+    monkeypatch.setattr(remote_mod, "_probe_one",
+                        lambda url, p, **kw: 0.0 if p is not None else 1.0)
+    assert remote_mod._rank_egress_paths(SETUP_URL, [proxy]) == [None, proxy]
+
+
+def test_rank_egress_paths_skips_probe_without_proxies(monkeypatch):
+    def boom(*a, **k):  # pragma: no cover - 不该被调用
+        raise AssertionError("没有代理候选时不该探测")
+
+    monkeypatch.setattr(remote_mod, "_probe_one", boom)
+    assert remote_mod._rank_egress_paths(SETUP_URL, []) == [None]
+
+
+def test_download_fallback_uses_ranked_order(tmp_path, monkeypatch):
+    payload = _payload()
+    proxy = httpx.Proxy("http://127.0.0.1:9")
+    seen: list[object] = []
+    real = remote_mod._download_setup
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    def spy(url, dest, sha, allow=False, proxy=None, resume=False, progress=None,
+            _retried=False):
+        seen.append(proxy)
+        return real(url, dest, sha, allow, proxy=proxy, resume=resume,
+                    progress=progress, _retried=_retried)
+
+    _mock_httpx(monkeypatch, handler)
+    monkeypatch.setattr(remote_mod, "_egress_fallbacks", lambda: [proxy])
+    monkeypatch.setattr(remote_mod, "_rank_egress_paths", lambda url, cands: [proxy, None])
+    monkeypatch.setattr(remote_mod, "_download_setup", spy)
+    label = remote_mod._download_setup_with_fallback(
+        SETUP_URL, tmp_path / "setup.exe", _sha(payload))
+    assert label == "proxy"
+    assert seen and seen[0] is proxy, "第一条就该是排在前面的代理"
 
 
 # ---- SEC-M20 隔离回归：根级 autouse 夹具（以下用例特意不挂 home 夹具） ----

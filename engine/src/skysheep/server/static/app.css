@@ -7576,6 +7576,9 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 .about-update { margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .about-update .upd-state { font-size: var(--fs-md); }
 .about-update .upd-state.new { color: var(--gold); font-weight: var(--fw-bold); }
+/* 下载进度（百分比 · 速率 · 预计剩余）：弱化的小字，与状态行同一行流式排布 */
+.about-update .upd-progress { font-size: var(--fs-sm); color: var(--dim); font-variant-numeric: tabular-nums; }
+.about-update .upd-progress[hidden] { display: none; }
 
 /* ---------- 写文件卡片上的预览按钮 ---------- */
 .tool-card .preview-btn {

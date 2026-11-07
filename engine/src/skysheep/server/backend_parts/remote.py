@@ -23,8 +23,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from ... import __version__
 from ...bgtasks import spawn_bg
@@ -725,11 +728,16 @@ class RemoteMixin:
         return {"available": False, "current": __version__, "frozen": self._is_frozen,
                 "channel": channel, "latest": info["version"]}
 
-    async def install_update(self) -> dict:
+    async def install_update(self, emit=None) -> dict:
         """应用内一键更新（仅安装版）：下载最新版安装包到临时目录。
 
         源码版直接拒绝——源码的更新方式是 git pull，静默装安装包反而会把
         运行中的源码目录搅乱。下载完成后并不自动安装，等 apply_update 确认。
+
+        emit 非空时按 PROGRESS_INTERVAL_S 推送 update_progress 事件（已下载
+        字节 / 整包大小 / 实时速率），设置 · 关于据此显示百分比与速率——没有
+        进度时用户分不清「在慢慢下」还是「卡死了」。下载跑在线程里，事件经
+        run_coroutine_threadsafe 投回事件循环。
         """
         if not self._is_frozen:
             raise RuntimeError("源码版不支持应用内更新：请在仓库里执行 git pull 后重启")
@@ -739,13 +747,28 @@ class RemoteMixin:
         # setup_url 是按发布约定拼的（releases/download/<tag>/SkySheep-<版本>-setup.exe），
         # 附件真缺要到下载时才以 404 暴露
         url = info["setup_url"]
-        # 落在随机名的私有临时目录里，不用可预测的固定文件名（同机同用户抢置）
-        dest = _update_dir() / f"SkySheep-{info['version']}-setup.exe"
+        # 落在随机名的私有临时目录里，不用可预测的固定文件名（同机同用户抢置）；
+        # 同一版本复用目录，用户再点一次能接着 .part 续传。
+        dest = _update_dir(info["version"]) / f"SkySheep-{info['version']}-setup.exe"
         import httpx
+
+        loop = asyncio.get_running_loop() if emit is not None else None
+
+        def on_progress(done: int, total: int | None, speed: float) -> None:
+            if emit is None or loop is None:
+                return
+            ev = {"kind": "update_progress", "done": int(done),
+                  "total": int(total) if total else 0, "speed": int(speed)}
+            try:
+                asyncio.run_coroutine_threadsafe(emit(ev), loop)
+            except RuntimeError:
+                pass  # 事件循环已收（窗口正在关）：进度丢了不影响下载
 
         expected = await asyncio.to_thread(_fetch_setup_sha256, url)
         try:
-            await asyncio.to_thread(_download_setup_with_fallback, url, dest, expected)
+            egress = await asyncio.to_thread(
+                _download_setup_with_fallback, url, dest, expected,
+                progress=on_progress if emit is not None else None)
         except UpdateChecksumError as e:
             # 发布方未提供可用校验和：fail closed，引导用户手动下载并自行核对
             raise RuntimeError(str(e)) from e
@@ -757,6 +780,8 @@ class RemoteMixin:
         self._pending_update = str(dest)
         return {"update_available": True, "version": info["version"], "path": str(dest),
                 "verified": bool(expected),
+                # 实际走的出网路径（direct/proxy）：择优生效时界面能如实说明
+                "egress": egress,
                 # 本机安装登记的侧别决定装的时候要不要提权（HKLM=所有用户=弹 UAC，
                 # HKCU=当前用户=静默直装）。前端据此在退出前就把「留意系统弹窗」
                 # 讲清楚——应用退出后提示文本就看不见了。
@@ -881,23 +906,211 @@ class RemoteMixin:
 # 限流式边下边校，不先全量进内存（否则上限形同虚设）。
 MAX_SETUP_BYTES = 300 << 20
 
+# 出网择优（2026-11，用户反馈「正式版下载总是很慢」）：直连与每条代理候选各拉
+# 一小段比吞吐，按实测快慢排下载顺序。此前只有「连接根本建立不起来」才回退，
+# 于是「直连能连但被限速、系统代理很快」的机器永远走最慢的那条路——实测同一
+# 安装包直连 123~358 KB/s、系统代理 932~1813 KB/s，差 5~8 倍。
+PROBE_BYTES = 256 << 10      # 每条候选只读 256KB（相对 42MB 的包可忽略）
+PROBE_TIMEOUT_S = 3.0        # 单条候选的探测预算（慢到读不完就按读到的算）
+PROGRESS_INTERVAL_S = 0.4    # 进度事件最小间隔：WS 帧数与界面重绘都按它兜底
+# 续传暂存文件名（固定常量：落点不拼外部字符串，见 _safe_part）
+PART_NAME = "download.part"
+
+# 更新链路只许打这些主机：更新源是硬编码常量，这里再收一道口子——即便将来
+# 有人把地址改成可配置的，或更新源被控后 302 到别处，也进不了环回/内网/任意
+# 第三方主机（服务端发请求前校验 host 的纵深防线）。
+UPDATE_HOST_ALLOWLIST = (
+    "github.com",
+    "www.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+)
+
 
 class UpdateChecksumError(RuntimeError):
     """发布方未提供可用校验和：默认拒绝自动下载（fail closed）。"""
+
+
+def _is_safe_update_url(url: str) -> bool:
+    """更新链路的 URL 是否可发请求：仅 http(s) + 白名单主机 + 非环回/内网。
+
+    白名单按主机名精确匹配（另放行 *.githubusercontent.com，GitHub 的附件
+    存储域名会随发布策略变）；字面量 IP 一律先按网段判，环回、私有、保留、
+    链路本地、组播、未指定地址全部拒绝。域名解析不在这一层做——DNS 结果由
+    TLS 证书与固定更新源兜底，这里只挡「把地址直接改成内网 IP」这类改写。
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    host = (parts.hostname or "").strip().rstrip(".").lower()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and (ip.is_loopback or ip.is_private or ip.is_reserved
+                           or ip.is_link_local or ip.is_multicast
+                           or ip.is_unspecified):
+        return False
+    return host in UPDATE_HOST_ALLOWLIST or host.endswith(".githubusercontent.com")
+
+
+def _probe_one(url: str, proxy: httpx.Proxy | None,
+               probe_bytes: int = PROBE_BYTES,
+               timeout_s: float = PROBE_TIMEOUT_S) -> float:
+    """测一条出网路径的吞吐（字节/秒）；连不上或读不到数据返回 0.0。
+
+    只读前 probe_bytes 字节（Range 请求；服务端不认 Range 就边读边断），
+    失败一律吞掉——探测只用来排序，不该让更新多出一个失败面。
+    """
+    import httpx
+
+    started = time.monotonic()
+    got = 0
+    try:
+        with httpx.Client(**_egress_client_kwargs(
+                timeout_s, None, proxy, follow_redirects=True)) as client:
+            with client.stream(
+                "GET", url, headers={"Range": f"bytes=0-{probe_bytes - 1}"}
+            ) as resp:
+                if resp.status_code >= 400:
+                    return 0.0
+                for chunk in resp.iter_bytes(1 << 16):
+                    got += len(chunk)
+                    if got >= probe_bytes or time.monotonic() - started >= timeout_s:
+                        break
+    except Exception:  # noqa: BLE001 - 探测失败只影响排序
+        return 0.0
+    elapsed = max(time.monotonic() - started, 1e-6)
+    return got / elapsed if got else 0.0
+
+
+def _rank_egress_paths(url: str,
+                       candidates: list[httpx.Proxy]) -> list[httpx.Proxy | None]:
+    """按实测吞吐给候选出网路径排序（直连也参与）；探测失败的排最后当备胎。
+
+    没有代理候选时直接返回 [直连]，不付出任何探测开销（绝大多数用户的现状）。
+    探测并发跑，总耗时约等于最慢那条（上限 PROBE_TIMEOUT_S）。
+    """
+    paths: list[httpx.Proxy | None] = [None, *candidates]
+    if len(paths) == 1:
+        return paths
+    speeds: dict[int, float] = {}
+    with ThreadPoolExecutor(max_workers=len(paths),
+                            thread_name_prefix="skysheep-egress") as pool:
+        futures = {pool.submit(_probe_one, url, p): i for i, p in enumerate(paths)}
+        for fut, i in futures.items():
+            try:
+                speeds[i] = fut.result()
+            except Exception:  # noqa: BLE001 - 单条探测异常不影响其余候选
+                speeds[i] = 0.0
+    ranked = sorted(speeds, key=lambda i: speeds[i], reverse=True)
+    ordered = [i for i in ranked if speeds[i] > 0]
+    ordered += [i for i in ranked if speeds[i] <= 0]
+    return [paths[i] for i in ordered]
+
+
+def _egress_label(proxy: httpx.Proxy | None) -> str:
+    """出网路径的人话标签（不回显代理地址：URL 里可能带账号口令）。"""
+    return "direct" if proxy is None else "proxy"
+
+
+def _part_size(part: Path) -> int:
+    """已落盘的续传暂存大小（不存在或读不到按 0 处理）。"""
+    try:
+        return part.stat().st_size
+    except OSError:
+        return 0
+
+
+def _content_total(resp: httpx.Response, offset: int) -> int | None:
+    """服务端文件总字节数：优先 Content-Range 分母，退回 Content-Length + 已下部分。"""
+    m = re.match(r"bytes\s+\d+-\d+/(\d+)", resp.headers.get("Content-Range") or "")
+    if m:
+        return int(m.group(1))
+    cl = (resp.headers.get("Content-Length") or "").strip()
+    return int(cl) + offset if cl.isdigit() else None
+
+
+def _update_root() -> Path:
+    """更新包的允许落盘根目录：系统临时目录（_update_dir 的 mkdtemp 就在其下）。"""
+    return Path(tempfile.gettempdir()).resolve()
+
+
+def _safe_part(dest: Path) -> Path:
+    """同目录下的续传暂存路径（钉在系统临时目录内，与 _download_setup 同一约束）。
+
+    文件名用固定常量而不是「在目标名后面接后缀」：落点只由目录与常量名两部分
+    组成，任何来自外部字符串的内容都拼不进路径。
+    """
+    root = _update_root()
+    part = (dest.parent.resolve() / PART_NAME).resolve()
+    if not part.is_relative_to(root) or not part.parent.is_relative_to(root):
+        raise RuntimeError("下载暂存文件越出临时目录，已拒绝写入")
+    return part
+
+
+def _safe_part_path(part: Path) -> Path:
+    """续传暂存文件的统一校验入口：resolve 后必须仍在系统临时目录内。"""
+    root = Path(tempfile.gettempdir()).resolve()
+    target = part.resolve()
+    if not target.is_relative_to(root):
+        raise RuntimeError("下载暂存文件越出临时目录，已拒绝写入")
+    return target
+
+
+def _open_part(part: Path, append: bool):
+    """以写/追加方式打开续传暂存文件（路径先过 _safe_part_path）。"""
+    return _safe_part_path(part).open("ab" if append else "wb")
+
+
+def _read_part(part: Path):
+    """只读打开已落盘的续传前缀（路径先过 _safe_part_path）。"""
+    return _safe_part_path(part).open("rb")
+
+
+def _discard(part: Path) -> None:
+    """丢弃半截下载（调用方已把落点钉在临时目录内）；删不掉也不影响后续流程。"""
+    try:
+        if part.is_file():
+            os.remove(part)
+    except OSError:
+        pass
+
+
+def _promote(part: Path, dest: Path) -> None:
+    """把校验通过的暂存文件改名为正式安装包（同目录内原子替换）。"""
+    os.replace(part, dest)
 
 
 def _download_setup(
     url: str, dest: Path, expected_sha256: str = "",
     allow_unverified: bool = False,
     proxy: httpx.Proxy | None = None,
+    resume: bool = False,
+    progress: Callable[[int, int | None, float], None] | None = None,
+    _retried: bool = False,
 ) -> None:
     """把安装包下载到 dest（.part 暂存、完成后改名）。同步阻塞，须在线程里跑。
 
-    follow_redirects 必开：browser_download_url 会 302 到 objects.githubusercontent.com。
+    follow_redirects 必开：browser_download_url 会 302 到 GitHub 的附件存储域名。
     trust_env=False 与 web_fetch 同口径：不让环境变量里的代理/netrc 插手更新链；
-    连接建立不起来的回退（环境变量代理 → Windows 系统代理）在
-    _download_setup_with_fallback 里做，这里只认给定的 proxy（见 core/uptodate.py
-    「出网回退」）。回退只改从哪里出去：更新源 URL、TLS 校验与下面三道防线口径不变。
+    出网路径的择优与回退在 _download_setup_with_fallback 里做，这里只认给定的
+    proxy（见 core/uptodate.py「出网回退」与上方「出网择优」注）。择优只改
+    「从哪里出去」：更新源 URL、TLS 校验与下面三道防线口径不变。
+
+    resume=True（更新链的默认调用方式）：.part 已存在时发 `Range` 从断点续传，
+    服务端不认 Range（回 200）就从头写。断流/超时抛出后 .part 保留，下一次
+    尝试接着下——弱链路下 42MB 不再「一断就从头再来」。校验失败（sha256 不
+    匹配 / 非 PE / 超体积上限）一律丢弃 .part，避免续传把坏前缀越接越长。
+
+    progress(done, total, speed) 按 PROGRESS_INTERVAL_S 节流回调（done/total 为
+    整包字节数、total 未知时给 None、speed 为本次连接的实时速率）。
 
     校验策略：expected_sha256 非空时必须匹配；为空（发布方未提供 .sha256 或
     拉取失败）默认拒绝安装——MZ 头 + 体积上限只能防半截文件，不能证明内容
@@ -911,61 +1124,128 @@ def _download_setup(
             "发布方未提供 .sha256 校验和，无法验证安装包完整性，已拒绝自动安装；"
             "请到 GitHub Releases 手动下载并核对校验和。"
         )
-    part = dest.with_suffix(dest.suffix + ".part")
+    if not _is_safe_update_url(url):
+        raise RuntimeError("更新地址不在允许的主机范围内，已拒绝下载")
+    # 落点校验就地做（不藏在辅助函数里）：文件名必须是普通文件名，落点与暂存
+    # 路径 resolve() 之后必须仍在系统临时目录之内——静态检查与人工复核都能
+    # 一眼看到边界，任何改写（含符号链接）都挪不出临时目录。
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    raw_name = dest.name
+    if (not raw_name or "/" in raw_name or "\\" in raw_name
+            or not raw_name.strip(". ")):
+        raise RuntimeError("更新包文件名非法，已拒绝写入")
+    dest = (dest.parent.resolve() / raw_name).resolve()
+    if not dest.is_relative_to(temp_root):
+        raise RuntimeError("更新包落点越出临时目录，已拒绝写入")
+    part = (dest.parent / PART_NAME).resolve()
+    if not part.is_relative_to(temp_root):
+        raise RuntimeError("下载暂存文件越出临时目录，已拒绝写入")
+    offset = _part_size(part) if resume else 0
+    digest = hashlib.sha256()
+    if offset:
+        # 续传：先把已落盘的前缀喂给哈希，最终整包校验才对得上
+        with _read_part(part) as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+    headers = {"Range": f"bytes={offset}-"} if offset else {}
     try:
         with httpx.Client(**_egress_client_kwargs(
                 60.0, None, proxy, follow_redirects=True)) as client:
-            with client.stream("GET", url) as resp:
+            with client.stream("GET", url, headers=headers) as resp:
+                if resp.status_code == 416 and offset and not _retried:
+                    # 本地半截比服务端文件还长（发布方换了包）：丢弃重下一次
+                    _discard(part)
+                    _download_setup(url, dest, expected_sha256, allow_unverified,
+                                    proxy, resume, progress, _retried=True)
+                    return
                 resp.raise_for_status()
-                digest = hashlib.sha256()
-                total = 0
-                with open(part, "wb") as f:
+                if not _is_safe_update_url(str(resp.url)):
+                    raise RuntimeError("更新地址跳转到了非白名单主机，已中止下载")
+                total = _content_total(resp, offset)
+                if offset and resp.status_code != 206:
+                    # 服务端不认 Range：从头写（截断），别把新内容追在半截后面
+                    offset = 0
+                    digest = hashlib.sha256()
+                written = offset
+                started = time.monotonic()
+                last_emit = 0.0
+                with _open_part(part, bool(offset)) as f:
                     for chunk in resp.iter_bytes(1 << 16):
-                        total += len(chunk)
-                        if total > MAX_SETUP_BYTES:
+                        written += len(chunk)
+                        if written > MAX_SETUP_BYTES:
+                            f.close()
+                            _discard(part)
                             raise RuntimeError(
                                 f"安装包超过 {MAX_SETUP_BYTES // (1 << 20)}MB 上限，已中止下载")
                         digest.update(chunk)
                         f.write(chunk)
+                        now = time.monotonic()
+                        if progress is not None and now - last_emit >= PROGRESS_INTERVAL_S:
+                            last_emit = now
+                            got = written - offset
+                            progress(written, total, got / max(now - started, 1e-6))
         # 校验是 PE 可执行文件（MZ 头）再落正式名：防中途断流留下半截文件被误装
-        with open(part, "rb") as f:
+        with _read_part(part) as f:
             if f.read(2) != b"MZ":
+                _discard(part)  # 续传也不留：坏前缀接下去永远是坏的
                 raise RuntimeError("下载的内容不是 Windows 安装包（头部校验失败）")
         # 发布方附带的 .sha256 必校（上面的入口已保证非空）
         if expected_sha256 and digest.hexdigest().lower() != expected_sha256.lower():
+            _discard(part)
             raise RuntimeError("安装包校验和不匹配，已丢弃（下载可能被篡改）")
-        part.replace(dest)
-    finally:
-        part.unlink(missing_ok=True)
+        _promote(part, dest)
+        if progress is not None:
+            total_bytes = total or written
+            progress(total_bytes, total_bytes, 0.0)
+    except BaseException:
+        # 网络类失败保留 .part 供续传；校验类失败（MZ/sha/体积）在抛出处已删。
+        # resume=False 保持旧行为：失败不留半截文件。
+        if not resume:
+            _discard(part)
+        raise
 
 
 def _download_setup_with_fallback(url: str, dest: Path, expected_sha256: str,
-                                  allow_unverified: bool = False) -> None:
-    """直连优先下载；连接建立不起来（墙 / 只有系统代理的机器）按序回退出网路径。
+                                  allow_unverified: bool = False,
+                                  progress: Callable[[int, int | None, float], None] | None = None,
+                                  ) -> str:
+    """择优出网下载：先按实测吞吐给「直连 + 代理候选」排序，再逐个尝试。
 
-    候选顺序见 core/uptodate.py 的 proxy_candidates()（环境变量代理 → Windows
-    系统代理）。只有「连接根本建立不起来」（ConnectError / ConnectTimeout）才
-    回退；最后一条路径也连不上时按原样抛最后一次连接错误，调用方口径不变。
+    - 直连与每条代理候选各拉一小段比吞吐（_rank_egress_paths），快的先走。
+      没有代理候选时完全跳过探测（绝大多数用户的现状，行为与旧版一致）。
+    - 每条路径失败后 .part 保留，下一条路径从断点续传；一轮全失败但期间
+      有进展时再轮一遍——弱链路下多给一次机会，而不是从头再来。
+    - 只有网络类错误才换路：404、校验失败等直接冒泡，口径不变。
+    - 更新源 URL、TLS 校验与三道防线都不受择优影响，择优只决定「从哪里出去」。
+
+    返回实际成功的出网路径标签（"direct" / "proxy"），供界面如实说明。
     """
     import httpx
 
-    attempts: list[httpx.Proxy | None] = [None]
-    last_conn: Exception | None = None
-    idx = 0
-    while idx < len(attempts):
-        proxy = attempts[idx]
-        idx += 1
-        try:
-            _download_setup(url, dest, expected_sha256, allow_unverified, proxy=proxy)
-            return
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            last_conn = e
-            if len(attempts) == 1:
-                attempts.extend(_egress_fallbacks())
-            continue
-    # 每条出网路径都建立不起连接：按原样抛最后一次连接错误（调用方口径不变）
-    assert last_conn is not None
-    raise last_conn
+    candidates = _egress_fallbacks()
+    order = _rank_egress_paths(url, candidates)
+    part = _safe_part(dest)
+    retryable = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+                 httpx.ReadError, httpx.WriteError, httpx.PoolTimeout,
+                 httpx.RemoteProtocolError)
+    last_exc: Exception | None = None
+    for _pass in range(2):
+        progressed = False
+        for proxy in order:
+            before = _part_size(part)
+            try:
+                _download_setup(url, dest, expected_sha256, allow_unverified,
+                                proxy=proxy, resume=True, progress=progress)
+                return _egress_label(proxy)
+            except retryable as e:
+                last_exc = e
+                if _part_size(part) > before:
+                    progressed = True
+        # 一整轮下来一个字节都没多：再轮一遍也是白等，直接收工
+        if not progressed:
+            break
+    assert last_exc is not None
+    raise last_exc
 
 
 def _fetch_setup_sha256(url: str) -> str:
@@ -980,6 +1260,8 @@ def _fetch_setup_sha256(url: str) -> str:
     """
     import httpx
 
+    if not _is_safe_update_url(url):
+        return ""
     attempts: list[httpx.Proxy | None] = [None]
     idx = 0
     while idx < len(attempts):
@@ -1005,13 +1287,22 @@ def _fetch_setup_sha256(url: str) -> str:
     return m.group(1).lower() if m else ""
 
 
-def _update_dir() -> Path:
+# 本轮进程内每个版本复用的更新目录（键=版本号）：用户点第二次「一键更新」时
+# 还能接着上次的 .part 续传，而不是换个随机目录从头下。目录名仍是 mkdtemp
+# 随机串（同机抢置仍需猜中随机名），只是同一会话内不再重复新建。
+_update_dirs: dict[str, Path] = {}
+
+
+def _update_dir(version: str = "") -> Path:
     """为本轮更新开一个随机名的私有临时目录，并顺手清掉旧目录。
 
     不能落到固定可预测的 `%TEMP%\\SkySheep-<版本>-setup.exe`：那个路径同机同
     用户的任何进程都能提前占位（写一个恶意 exe 在那里），下载层只会看到
     「文件已存在」而照装不误。随机目录名使抢置需要先猜中 128 位随机串。
     旧目录按修改时间清（>24h），避免每轮更新都往 %TEMP% 里堆几十 MB。
+
+    传了 version 时按版本复用本进程内已建的目录：断掉重来（用户再点一次）
+    能接着 .part 续传，不再重新下一遍 42MB。
     """
     tmp = Path(tempfile.gettempdir())
     for old in tmp.glob("skysheep-update-*"):
@@ -1020,7 +1311,16 @@ def _update_dir() -> Path:
                 shutil.rmtree(old, ignore_errors=True)
         except OSError:
             continue
-    return Path(tempfile.mkdtemp(prefix="skysheep-update-"))
+    if version:
+        cached = _update_dirs.get(version)
+        if cached is not None:
+            if cached.is_dir():
+                return cached
+            _update_dirs.pop(version, None)
+    created = Path(tempfile.mkdtemp(prefix="skysheep-update-"))
+    if version:
+        _update_dirs[version] = created
+    return created
 
 
 # ---- 更新前备份与「更新中」标记（更新可信度：失败可发现、数据可回退） ----

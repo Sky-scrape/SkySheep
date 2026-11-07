@@ -10,6 +10,9 @@ const RELEASES_PAGE = REPO_PAGE + "/releases";
 // 更新渠道偏好缓存（stable/beta）：loadBackups 的 ui.get 回填，渲染状态行时用；
 // 未回填前按空串渲染，不显示渠道字样（不猜）
 let updateChannelPref = "";
+// 是否正在下载更新包：进度事件可能比 install_update 的响应晚到一帧，
+// 用它挡一下，免得「下载完成」的状态行被迟到的进度改回「正在下载…」
+let updDownloading = false;
 function channelLabel() {
   return updateChannelPref === "beta" ? "测试版渠道" : "稳定版渠道";
 }
@@ -41,6 +44,7 @@ function renderUpdatePanel(snap) {
         ? `🆕 发现新版本 v${escapeHtml(upd.version)}（当前 v${escapeHtml(cur)}  ${edition}${updateChannelPref ? `  ${channelLabel()}` : ""}）`
         : `当前版本 v${escapeHtml(cur)}  ${edition}${updateChannelPref ? `  ${channelLabel()}` : ""}`
     }</span>
+    <span class="upd-progress" id="upd-progress" hidden></span>
     <span id="upd-actions"></span>`;
   const failBtn = box.querySelector("#btn-upd-fail-dismiss");
   if (failBtn) failBtn.onclick = async () => {
@@ -71,8 +75,12 @@ function renderUpdatePanel(snap) {
     b.onclick = async () => {
       b.disabled = true;
       state.textContent = "正在下载更新包…";
+      updDownloading = true;
+      updProgressReset();
       try {
         const r = await request("app.install_update");
+        updDownloading = false;
+        updProgressReset();
         if (!r.update_available) {
           state.textContent = `已是最新版本（v${escapeHtml(r.current)}）`;
           actions.innerHTML = "";
@@ -83,10 +91,11 @@ function renderUpdatePanel(snap) {
         // verified === true 才算核对过；false 或旧后端没带这个字段一律按「未核对」
         // 处理，明确告诉用户，别让人默认装的是核对过的包。
         const shaOk = r.verified === true;
+        const viaProxy = r.egress === "proxy" ? "（已走系统代理加速）" : "";
         state.textContent = (r.uac
-          ? "下载完成。本机是「为所有用户」安装，点「退出并安装」后应用会先退出，"
+          ? "下载完成" + viaProxy + "。本机是「为所有用户」安装，点「退出并安装」后应用会先退出，"
             + "紧接着系统弹出授权窗口（用户账户控制）——请点「是」，装完自动重新打开。"
-          : "下载完成。点「退出并安装」后应用会自动退出并静默安装，装完自动重新打开。")
+          : "下载完成" + viaProxy + "。点「退出并安装」后应用会自动退出并静默安装，装完自动重新打开。")
           + (shaOk ? "" : " ⚠ 未能核对安装包校验值（发布页缺 .sha256 校验附件或核对未"
             + "通过），无法确认安装包未被篡改；谨慎起见可到下载页手动核对 SHA-256 后再装。");
         const b2 = document.createElement("button");
@@ -115,6 +124,8 @@ function renderUpdatePanel(snap) {
         actions.innerHTML = "";
         actions.appendChild(b2);
       } catch (e) {
+        updDownloading = false;
+        updProgressReset();
         state.textContent = "更新失败：" + e.message;
         b.disabled = false;
       }
@@ -145,6 +156,41 @@ function renderUpdatePanel(snap) {
       state.textContent = "检查失败：" + e.message;
     }
   };
+}
+
+// 下载进度（WS update_progress，无会话归属，由 app.js 的 handleEvent 直接转来）：
+// 显示「百分比（已下 / 总大小）· 速率 · 预计剩余」。下载线程每秒最多推 2~3 条，
+// 界面按最后一条刷新；关于页没开着时元素不存在，直接忽略。
+function updProgressReset() {
+  const el = document.getElementById("upd-progress");
+  if (!el) return;
+  el.textContent = "";
+  el.hidden = true;
+}
+
+function updOnProgress(ev) {
+  const el = document.getElementById("upd-progress");
+  if (!el) return;
+  if (!updDownloading) return;  // 迟到的进度帧不覆盖完成/失败状态
+  const done = Number(ev.done) || 0;
+  const total = Number(ev.total) || 0;
+  const speed = Number(ev.speed) || 0;
+  const state = document.getElementById("upd-state");
+  if (state) state.textContent = "正在下载更新包…";
+  const bits = [];
+  if (total > 0) {
+    bits.push(`${Math.min(100, Math.floor((done * 100) / total))}%（`
+      + `${retentionBytes(done)} / ${retentionBytes(total)}）`);
+  } else {
+    bits.push(retentionBytes(done));
+  }
+  if (speed > 0) bits.push(`${retentionBytes(speed)}/s`);
+  if (total > done && speed > 0) {
+    const left = Math.max(1, Math.round((total - done) / speed));
+    bits.push(left >= 90 ? `约 ${Math.ceil(left / 60)} 分钟` : `约 ${left} 秒`);
+  }
+  el.textContent = bits.join(" · ");
+  el.hidden = false;
 }
 
 // ---------- 关于：打开目录 / 诊断包 / 会话库备份恢复 ----------

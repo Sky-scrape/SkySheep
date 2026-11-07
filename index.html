@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>SkySheep —— 让 AI 不再单打独斗的本地 AI 工作台</title>
-<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。圆桌会诊、团队开工、对抗挑错、两屏接力，四种多模型协作收在同一个工作台里；写文件先给 diff，跑命令先问你，每一轮都能撤回。">
+<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。协作与接力两条线：圆桌会诊、团队开工、对抗挑错；两个会话按轮交接。写文件先给 diff，跑命令先问你，每一轮都能撤回。">
 <meta name="theme-color" content="#e8dfc7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#171410" media="(prefers-color-scheme: dark)">
 <meta property="og:title" content="SkySheep —— 让 AI 不再单打独斗">
-<meta property="og:description" content="圆桌会诊、团队开工、对抗挑错、两屏接力——四种多模型协作，跑在你自己的电脑上。动手前先问你，每一轮都能撤回。">
+<meta property="og:description" content="协作与接力两条线：圆桌会诊、团队开工、对抗挑错，两个会话按轮交接——跑在你自己的电脑上。动手前先问你，每一轮都能撤回。">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SkySheep">
 <meta property="og:locale" content="zh_CN">
@@ -20,7 +20,7 @@
 <meta property="og:image:height" content="640">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="SkySheep —— 让 AI 不再单打独斗">
-<meta name="twitter:description" content="四种多模型协作，跑在你自己的电脑上。动手前先问你，每一轮都能撤回。">
+<meta name="twitter:description" content="协作与接力两条线，跑在你自己的电脑上。动手前先问你，每一轮都能撤回。">
 <meta name="twitter:image" content="https://sheepsky.com/docs/images/social-preview.png">
 <link rel="icon" type="image/png" href="docs/images/skysheep-icon.png">
 <link rel="apple-touch-icon" href="docs/images/skysheep-icon.png">
@@ -36,7 +36,7 @@
   "inLanguage": "zh-CN",
   "url": "https://sheepsky.com/",
   "downloadUrl": "https://github.com/sky-scrape/SkySheep/releases/latest",
-  "description": "开源 Windows 桌面 AI Agent 工作台：圆桌、团队、对抗、接力四种多模型协作，动手前先确认，改动可回滚，会话与密钥留在本机。",
+  "description": "开源 Windows 桌面 AI Agent 工作台：协作与接力两条线——圆桌 / 团队 / 对抗在同一轮里分工，两个会话按轮交接；动手前先确认，改动可回滚，会话与密钥留在本机。",
   "featureList": [
     "圆桌：多个模型并行作答，主席融合",
     "团队：总管派单、队员执行、验收交付",
@@ -382,7 +382,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   background: var(--card);
   box-shadow: var(--shadow-lg);
 }
-.hero-shot img { width: 100%; height: clamp(220px, 30vw, 460px); object-fit: cover; object-position: top center; }
+/* 选择器要比后面的 .window img 更具体，否则 height 会被 height:auto 盖掉，
+   切换截图时窗口高度就会跳 */
+.window.hero-shot img { width: 100%; height: clamp(220px, 30vw, 460px); object-fit: cover; object-position: top center; }
 .hero-sheep {
   position: absolute; z-index: 3;
   width: clamp(84px, 12vw, 128px); height: auto;
@@ -506,7 +508,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .section-head p strong { color: var(--text); font-weight: 700; }
 
 /* ============================================================
- * 四种协作：拓扑 + 工牌卡
+ * 两条线：协作（三张工牌卡）与接力
  * ============================================================ */
 .topo {
   border: 2px solid var(--ink-line);
@@ -538,9 +540,53 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 
 .mode-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 26px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 22px;
 }
+
+/* 两条线：协作（圆桌 / 团队 / 对抗）与接力 */
+.collab-line { margin-top: 8px; }
+.collab-line + .collab-line { margin-top: 58px; }
+.line-head {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 30px;
+  margin-bottom: 24px;
+}
+.line-head h3 {
+  font-size: 23px; font-weight: 800; letter-spacing: -.022em;
+  line-height: 1.3;
+}
+.line-head p { margin-top: 6px; font-size: 15px; line-height: 1.8; color: var(--text2); }
+.line-tag {
+  display: block; padding-top: 7px;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  letter-spacing: .16em; color: var(--gold);
+}
+
+.relay-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr);
+  background: var(--card);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+.relay-card .mode-head { grid-column: 1 / -1; }
+.relay-shot { background: var(--frame); border-right: 2px dashed var(--line2); }
+.relay-shot video {
+  display: block; width: 100%; height: 100%; min-height: 320px;
+  object-fit: cover; object-position: top center;
+}
+.relay-copy {
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 20px 24px 24px;
+}
+.relay-copy > p { font-size: 14.5px; line-height: 1.75; color: var(--text2); }
+.relay-copy .topo { margin-bottom: 0; padding: 4px 16px; }
+.relay-copy .topo-row { grid-template-columns: 48px minmax(0, 1fr); padding: 9px 0; border-bottom: none; }
+.relay-copy .mode-specs { padding: 0; }
 .mode-card {
   display: flex; flex-direction: column;
   background: var(--card);
@@ -1062,6 +1108,10 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   .hero-visual { max-width: 680px; }
   .hero-sheep { right: 4px; bottom: -30px; }
   .safety-grid, .work-grid, .split { grid-template-columns: 1fr; gap: 40px; }
+  .mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .relay-card { grid-template-columns: 1fr; }
+  .relay-shot { border-right: none; border-bottom: 2px dashed var(--line2); }
+  .relay-shot video { min-height: 240px; }
   .gallery { grid-template-columns: repeat(2, 1fr); }
   .footer-grid { grid-template-columns: repeat(2, 1fr); gap: 34px; }
   .footer-brand-col { grid-column: span 2; }
@@ -1092,6 +1142,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   .hero { padding: 44px 0 64px; }
   .section-head { grid-template-columns: 1fr; gap: 10px; margin-bottom: 38px; }
   .section-meta { flex-direction: row; align-items: baseline; gap: 12px; padding-top: 0; }
+  .line-head { grid-template-columns: 1fr; gap: 8px; margin-bottom: 20px; }
+  .line-tag { padding-top: 0; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
   .stat { padding: 22px 20px; }
   .stat:nth-child(2) { border-right: none; }
@@ -1201,9 +1253,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         <p class="eyebrow"><span class="dot"></span><span class="eyebrow-text">Windows 桌面应用 · 开源 MIT · <span data-current-version>v2.6.8</span></span></p>
         <h1>让 AI<br><span class="mark"><span>不再单打独斗</span></span></h1>
         <p class="hero-lede">
-          Windows 桌面 Agent 工作台。<strong>圆桌会诊、团队开工、对抗挑错、两屏接力</strong>——
-          四种协作收在同一个工作台里。它会读写文件、执行命令、操作电脑，
-          但动手前先问你，每一轮都能撤回。
+          Windows 桌面 Agent 工作台。<strong>协作</strong>让多个模型在同一轮里分工——
+          圆桌会诊、团队开工、对抗挑错；<strong>接力</strong>让两个会话按轮交接。
+          它会读写文件、执行命令、操作电脑，但动手前先问你，每一轮都能撤回。
         </p>
         <div class="hero-actions">
           <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">
@@ -1237,7 +1289,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         <figure class="hero-shot window">
           <div class="window-bar">
             <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="window-title" data-hero-title>团队 —— 工单板、成员与团队频道</span>
+            <span class="window-title" data-hero-title>协作 —— 圆桌会诊、团队开工、对抗挑错</span>
             <span class="window-spacer" aria-hidden="true"></span>
           </div>
           <img data-hero-img src="docs/images/team.webp"
@@ -1245,19 +1297,15 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
                width="1600" height="981" fetchpriority="high" decoding="async">
         </figure>
 
-        <div class="hero-thumbs" role="group" aria-label="切换协作方式截图">
+        <div class="hero-thumbs" role="group" aria-label="切换协作与接力截图">
           <button type="button" aria-pressed="true" data-hero-thumb
                   data-src="docs/images/team.webp" data-w="1600" data-h="981"
-                  data-title="团队 —— 工单板、成员与团队频道"
-                  data-alt="SkySheep 团队协作界面：总管派单，工单板显示待办、进行中与待验收，成员在团队频道汇报">团队</button>
+                  data-title="协作 —— 圆桌会诊、团队开工、对抗挑错"
+                  data-alt="SkySheep 协作界面：团队工单板显示待办、进行中与待验收，成员在频道汇报">协作</button>
           <button type="button" aria-pressed="false" data-hero-thumb
-                  data-src="docs/images/roundtable.webp" data-w="1600" data-h="1280"
-                  data-title="圆桌 —— 多个成员并行作答，主席融合"
-                  data-alt="SkySheep 圆桌协作界面：多个成员模型并行作答，主席把草稿融合成一份结论">圆桌</button>
-          <button type="button" aria-pressed="false" data-hero-thumb
-                  data-src="docs/images/adversarial.webp" data-w="1600" data-h="1227"
-                  data-title="对抗 —— 发现、调查、建议、裁判"
-                  data-alt="SkySheep 对抗审查界面：五条候选中两条成立，每条列出证据、依据与修复建议">对抗</button>
+                  data-src="docs/images/relay.webp" data-w="1414" data-h="710"
+                  data-title="接力 —— 主屏与副屏按轮交接"
+                  data-alt="SkySheep 接力工作台：左边主屏、中间副屏分栏，右侧看板填写两边的任务">接力</button>
         </div>
 
         <img class="hero-sheep" src="docs/images/cloud-sheep-web.webp" alt="" width="132" height="132" aria-hidden="true">
@@ -1270,12 +1318,12 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="wrap stats-grid">
       <div class="stat"><b>30</b><span>个内置工具</span></div>
       <div class="stat"><b>10</b><span>家模型服务预设</span></div>
-      <div class="stat"><b>4</b><span>种多模型协作方式</span></div>
+      <div class="stat"><b>2</b><span>条多模型协作线</span></div>
       <div class="stat"><b>26</b><span>套界面主题</span></div>
     </div>
   </section>
 
-  <!-- ============ 四种协作 ============ -->
+  <!-- ============ 两条线：协作 / 接力 ============ -->
   <section class="section" id="collab">
     <div class="wrap">
       <div class="section-head rise">
@@ -1284,110 +1332,121 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           <span class="section-label">Multi-model</span>
         </div>
         <div class="section-body">
-          <h2>四种协作，<br>让 AI 不再单打独斗</h2>
-          <p>一个模型容易顺着自己的思路写，也想不全。SkySheep 把「多模型」做成工作流：有的并行会诊，有的分工开工，有的专门挑错，有的在两个会话之间交接。</p>
+          <h2>两条线：协作，与接力</h2>
+          <p>协作让多个模型在同一轮里分工——圆桌会诊、团队开工、对抗挑错；接力让两个会话按轮交接。它们并排放在同一个工作台里，各干各的活。</p>
         </div>
       </div>
 
-      <div class="topo rise" role="img" aria-label="四种协作的分工拓扑：圆桌由成员并行作答、主席融合；团队由总管拆解派单、队员执行、验收交付；对抗按发现、调查、建议、裁判推进；接力在主屏与副屏之间按轮交接">
-        <div class="topo-row">
-          <span class="topo-name">圆桌</span>
-          <div class="topo-track">
-            <span class="node">成员 A 独立作答</span>
-            <span class="node">成员 B 独立作答</span>
-            <span class="node">成员 C 独立作答</span>
-            <span class="arrow">→</span>
-            <span class="node is-out">主席融合</span>
+      <div class="collab-line rise">
+        <div class="line-head">
+          <span class="line-tag">Line 01</span>
+          <div>
+            <h3>协作 · 同一轮里分工</h3>
+            <p>三种形态，收在同一套协作模板里：圆桌并行作答、团队按角色派工、对抗专门挑错。</p>
           </div>
         </div>
-        <div class="topo-row">
-          <span class="topo-name">团队</span>
-          <div class="topo-track">
-            <span class="node">总管拆解</span><span class="arrow">→</span>
-            <span class="node">派单</span><span class="arrow">→</span>
-            <span class="node">队员执行</span><span class="arrow">→</span>
-            <span class="node is-out">验收交付</span>
+
+        <div class="topo" role="img" aria-label="协作的三种分工拓扑：圆桌由成员并行作答、主席融合；团队由总管拆解派单、队员执行、验收交付；对抗按发现、调查、建议、裁判推进">
+          <div class="topo-row">
+            <span class="topo-name">圆桌</span>
+            <div class="topo-track">
+              <span class="node">成员 A 独立作答</span>
+              <span class="node">成员 B 独立作答</span>
+              <span class="node">成员 C 独立作答</span>
+              <span class="arrow">→</span>
+              <span class="node is-out">主席融合</span>
+            </div>
+          </div>
+          <div class="topo-row">
+            <span class="topo-name">团队</span>
+            <div class="topo-track">
+              <span class="node">总管拆解</span><span class="arrow">→</span>
+              <span class="node">派单</span><span class="arrow">→</span>
+              <span class="node">队员执行</span><span class="arrow">→</span>
+              <span class="node is-out">验收交付</span>
+            </div>
+          </div>
+          <div class="topo-row">
+            <span class="topo-name">对抗</span>
+            <div class="topo-track">
+              <span class="node">发现</span><span class="arrow">→</span>
+              <span class="node">调查</span><span class="arrow">→</span>
+              <span class="node">建议</span><span class="arrow">→</span>
+              <span class="node is-out">裁判</span>
+            </div>
           </div>
         </div>
-        <div class="topo-row">
-          <span class="topo-name">对抗</span>
-          <div class="topo-track">
-            <span class="node">发现</span><span class="arrow">→</span>
-            <span class="node">调查</span><span class="arrow">→</span>
-            <span class="node">建议</span><span class="arrow">→</span>
-            <span class="node is-out">裁判</span>
-          </div>
-        </div>
-        <div class="topo-row">
-          <span class="topo-name">接力</span>
-          <div class="topo-track">
-            <span class="node">主屏出方案</span><span class="arrow">→</span>
-            <span class="node">复述核验</span><span class="arrow">→</span>
-            <span class="node">副屏执行</span><span class="arrow">→</span>
-            <span class="node is-out">交回修订</span>
-          </div>
+
+        <div class="mode-grid">
+          <article class="mode-card">
+            <div class="mode-head">
+              <div>
+                <span class="mode-en">Round table</span>
+                <h3>圆桌 · 会诊</h3>
+              </div>
+              <span class="stamp" aria-hidden="true">会诊</span>
+            </div>
+            <figure class="mode-shot">
+              <img src="docs/images/roundtable.webp" alt="圆桌协作界面：多个成员模型并行作答，主席融合成一份结论" loading="lazy" decoding="async" width="1600" height="1280">
+            </figure>
+            <dl class="mode-specs">
+              <div><dt>谁在干</dt><dd>几个模型同时答，主席合成一份</dd></div>
+              <div><dt>产出</dt><dd>一份结论 + 全部草稿可回看</dd></div>
+              <div><dt>适合</dt><dd>开放问题、方案比选、重要判断</dd></div>
+            </dl>
+          </article>
+
+          <article class="mode-card">
+            <div class="mode-head">
+              <div>
+                <span class="mode-en">Team</span>
+                <h3>团队 · 开工</h3>
+              </div>
+              <span class="stamp" aria-hidden="true">开工</span>
+            </div>
+            <figure class="mode-shot">
+              <video src="docs/demo/mode-team.mp4" poster="docs/images/teamroom.png"
+                     width="1200" height="602" muted loop playsinline preload="metadata" tabindex="0"
+                     title="点击或按回车暂停 / 继续"
+                     aria-label="团队协作演示：从协作菜单选择团队模板，跑前确认授权清单，工单板开始推进；点击或按回车暂停"></video>
+            </figure>
+            <dl class="mode-specs">
+              <div><dt>谁在干</dt><dd>总管拆活派单，队员按角色干</dd></div>
+              <div><dt>产出</dt><dd>一批工单成果 + 交付说明</dd></div>
+              <div><dt>适合</dt><dd>多步骤工程活、需要交付物</dd></div>
+            </dl>
+          </article>
+
+          <article class="mode-card">
+            <div class="mode-head">
+              <div>
+                <span class="mode-en">Adversarial</span>
+                <h3>对抗 · 挑错</h3>
+              </div>
+              <span class="stamp" aria-hidden="true">挑错</span>
+            </div>
+            <figure class="mode-shot">
+              <img src="docs/images/adversarial.webp" alt="对抗审查界面：五个候选中两条成立、一条部分成立、一条被推翻，每条附证据与修复建议" loading="lazy" decoding="async" width="1600" height="1227">
+            </figure>
+            <dl class="mode-specs">
+              <div><dt>谁在干</dt><dd>有人找问题，有人专管推翻</dd></div>
+              <div><dt>产出</dt><dd>只留成立的问题 + 修复建议</dd></div>
+              <div><dt>适合</dt><dd>代码、方案、文档的审查</dd></div>
+            </dl>
+          </article>
         </div>
       </div>
 
-      <div class="mode-grid">
-        <article class="mode-card rise">
-          <div class="mode-head">
-            <div>
-              <span class="mode-en">Round table</span>
-              <h3>圆桌 · 会诊</h3>
-            </div>
-            <span class="stamp" aria-hidden="true">会诊</span>
+      <div class="collab-line rise">
+        <div class="line-head">
+          <span class="line-tag">Line 02</span>
+          <div>
+            <h3>接力 · 两个会话按轮交接</h3>
+            <p>主屏出方案、副屏执行，再交回修订。每轮开跑前先复述、核验，并盘点两边的后台任务。</p>
           </div>
-          <figure class="mode-shot">
-            <img src="docs/images/roundtable.webp" alt="圆桌协作界面：多个成员模型并行作答，主席融合成一份结论" loading="lazy" decoding="async" width="1600" height="1280">
-          </figure>
-          <dl class="mode-specs">
-            <div><dt>谁在干</dt><dd>几个模型同时答，主席合成一份</dd></div>
-            <div><dt>产出</dt><dd>一份结论 + 全部草稿可回看</dd></div>
-            <div><dt>适合</dt><dd>开放问题、方案比选、重要判断</dd></div>
-          </dl>
-        </article>
+        </div>
 
-        <article class="mode-card rise">
-          <div class="mode-head">
-            <div>
-              <span class="mode-en">Team</span>
-              <h3>团队 · 开工</h3>
-            </div>
-            <span class="stamp" aria-hidden="true">开工</span>
-          </div>
-          <figure class="mode-shot">
-            <video src="docs/demo/mode-team.mp4" poster="docs/images/teamroom.png"
-                   width="1200" height="602" muted loop playsinline preload="metadata" tabindex="0"
-                   title="点击或按回车暂停 / 继续"
-                   aria-label="团队协作演示：从协作菜单选择团队模板，跑前确认授权清单，工单板开始推进；点击或按回车暂停"></video>
-          </figure>
-          <dl class="mode-specs">
-            <div><dt>谁在干</dt><dd>总管拆活派单，队员按角色干</dd></div>
-            <div><dt>产出</dt><dd>一批工单成果 + 交付说明</dd></div>
-            <div><dt>适合</dt><dd>多步骤工程活、需要交付物</dd></div>
-          </dl>
-        </article>
-
-        <article class="mode-card rise">
-          <div class="mode-head">
-            <div>
-              <span class="mode-en">Adversarial</span>
-              <h3>对抗 · 挑错</h3>
-            </div>
-            <span class="stamp" aria-hidden="true">挑错</span>
-          </div>
-          <figure class="mode-shot">
-            <img src="docs/images/adversarial.webp" alt="对抗审查界面：五个候选中两条成立、一条部分成立、一条被推翻，每条附证据与修复建议" loading="lazy" decoding="async" width="1600" height="1227">
-          </figure>
-          <dl class="mode-specs">
-            <div><dt>谁在干</dt><dd>有人找问题，有人专管推翻</dd></div>
-            <div><dt>产出</dt><dd>只留成立的问题 + 修复建议</dd></div>
-            <div><dt>适合</dt><dd>代码、方案、文档的审查</dd></div>
-          </dl>
-        </article>
-
-        <article class="mode-card rise">
+        <div class="relay-card">
           <div class="mode-head">
             <div>
               <span class="mode-en">Relay</span>
@@ -1395,18 +1454,32 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
             </div>
             <span class="stamp" aria-hidden="true">交接</span>
           </div>
-          <figure class="mode-shot">
+          <figure class="relay-shot">
             <video src="docs/demo/mode-relay.mp4" poster="docs/images/relay.webp"
                    width="1200" height="602" muted loop playsinline preload="metadata" tabindex="0"
                    title="点击或按回车暂停 / 继续"
                    aria-label="接力演示：主屏出方案、副屏评审，右侧看板记录每一轮的交接；点击或按回车暂停"></video>
           </figure>
-          <dl class="mode-specs">
-            <div><dt>谁在干</dt><dd>两个会话按轮换手，交接前先复述</dd></div>
-            <div><dt>产出</dt><dd>一条完整交接链 + 两屏各自会话</dd></div>
-            <div><dt>适合</dt><dd>长任务、换视角、换模型继续做</dd></div>
-          </dl>
-        </article>
+          <div class="relay-copy">
+            <p>适合「出方案 → 执行 → 反馈 → 修订」这类需要两边来回交接的活。主屏就是当前会话，副屏是独立会话；每轮都是完整对话，工具、权限门、检查点照常。</p>
+            <div class="topo" role="img" aria-label="接力流程：主屏出方案、复述核验、副屏执行、交回修订">
+              <div class="topo-row">
+                <span class="topo-name">接力</span>
+                <div class="topo-track">
+                  <span class="node">主屏出方案</span><span class="arrow">→</span>
+                  <span class="node">复述核验</span><span class="arrow">→</span>
+                  <span class="node">副屏执行</span><span class="arrow">→</span>
+                  <span class="node is-out">交回修订</span>
+                </div>
+              </div>
+            </div>
+            <dl class="mode-specs">
+              <div><dt>谁在干</dt><dd>两个会话按轮换手，交接前先复述</dd></div>
+              <div><dt>产出</dt><dd>一条完整交接链 + 两屏各自会话</dd></div>
+              <div><dt>适合</dt><dd>长任务、换视角、换模型继续做</dd></div>
+            </dl>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -1805,8 +1878,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
       <div class="update-grid">
         <article class="update-card rise">
           <span class="status shipped">v2.6.8 · 已发布</span>
-          <h3>四种协作，一个说法</h3>
-          <p>官网与两份 README 把多模型协作统一成四种并列方式：圆桌、团队、对抗、接力。产品功能零改动，只是把原来的事说清楚。</p>
+          <h3>协作与接力，两条并列的线</h3>
+          <p>官网与两份 README 把多模型协作说成两条线：协作让圆桌 / 团队 / 对抗在同一轮里分工，接力让两个会话按轮交接。产品功能零改动。</p>
         </article>
         <article class="update-card rise">
           <span class="status shipped">v2.6.7 · 已发布</span>
@@ -1856,7 +1929,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         <details>
           <summary>协作模板和接力是什么关系？<span class="marker" aria-hidden="true">+</span></summary>
           <div class="answer">
-            <p>它们是四种并列的多模型协作方式。<strong>圆桌、团队、对抗</strong>都在同一轮任务里分工，所以能收进同一套可复用的模板；<strong>接力</strong>是两个会话按轮交接——主屏出方案、副屏执行、再交回修订，入口在侧栏「接力」。</p>
+            <p><strong>协作</strong>与<strong>接力</strong>是两条并列的线。<strong>圆桌、团队、对抗</strong>是协作下的三种形态，都在同一轮任务里分工，所以能收进同一套可复用的模板；<strong>接力</strong>是两个会话按轮交接——主屏出方案、副屏执行、再交回修订，入口在侧栏「接力」。</p>
             <p><strong>模板只能收窄权限</strong>：它声明的是「这次运行需要用到什么」（只读 / 可写 / 可执行 + 工具白名单），关不掉权限门；删除类操作、引擎目录与工作目录外的写入照旧逐次确认。</p>
           </div>
         </details>
@@ -1901,7 +1974,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="wrap">
       <img class="sheep-sm" src="docs/images/cloud-sheep-web.webp" alt="" width="84" height="84" aria-hidden="true" loading="lazy">
       <h2>让 AI 不再单打独斗</h2>
-      <p>四种协作、30 个工具、每一步先确认、每一轮可撤回——都在一个 Windows 桌面工作台里。开源、可审计，会话与密钥留在本机。</p>
+      <p>协作与接力、30 个工具、每一步先确认、每一轮可撤回——都在一个 Windows 桌面工作台里。开源、可审计，会话与密钥留在本机。</p>
       <div class="cta-actions">
         <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">下载 SkySheep</a>
         <a class="btn btn-ghost btn-lg" href="https://github.com/sky-scrape/SkySheep" target="_blank" rel="noopener">
@@ -1933,7 +2006,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           <b>SkySheep</b>
         </div>
         <p class="footer-about">
-          开源 Windows 桌面 AI Agent 工作台。圆桌、团队、对抗、接力四种多模型协作，权限由你掌握，改动可回滚，会话与密钥留在本机。
+          开源 Windows 桌面 AI Agent 工作台。协作（圆桌 / 团队 / 对抗）与接力两条线，权限由你掌握，改动可回滚，会话与密钥留在本机。
         </p>
       </div>
       <div class="footer-col">

@@ -356,6 +356,53 @@ class AdversarialFinished(Event):
     summary: str = ""
 
 
+class SubagentSpawned(Event):
+    """子代理派生广播（core/subagent.py 的 TaskManager）。
+
+    前端靠它把直播卡片和 task_id 精确绑定（必早于该任务的任何过程事件）；
+    background / queued 描述运行方式与是否进了并发排队。
+    字段名核对过全契约：task_id 与 TeamTaskUpdated 的工单编号同名不同物
+    （那里是团队工单 T 编号，这里是子代理任务簿 hex id），消费方按 kind
+    分发不会串；prompt/background/queued/agent_type 均为新增无冲突。
+    """
+
+    kind: Literal["subagent_spawned"] = "subagent_spawned"
+    task_id: str = ""
+    session_id: str = ""  # 派生它的会话（远程连接按它过滤，B15）
+    agent_type: str = ""
+    background: bool = False
+    queued: bool = False
+    prompt: str = ""  # 截断到 60 字符的派生指令预览
+
+
+class SubagentEvent(Event):
+    """子代理过程事件直播：内层是子代理自己的 AgentEvent（按 FORWARD_KINDS 过滤）。
+
+    permission_request 不转发——子代理内已被预拒绝，弹确认框只会误导。
+    字段名 event 与基类判别字段 kind 不冲突（内层事件已各自 model_dump 成 dict）。
+    """
+
+    kind: Literal["subagent_event"] = "subagent_event"
+    task_id: str = ""
+    session_id: str = ""
+    agent_type: str = ""
+    event: dict = Field(default_factory=dict)  # 内层 AgentEvent.model_dump()
+
+
+class TaskFinished(Event):
+    """后台子代理任务终态：前端弹通知、刷新任务簿，automation 据此对账流水线。
+
+    status 与各协作事件的终态语义一致（done / error / cancelled）。
+    """
+
+    kind: Literal["task_finished"] = "task_finished"
+    task_id: str = ""
+    session_id: str = ""
+    agent_type: str = ""
+    status: str = "done"  # done / error / cancelled
+    prompt: str = ""  # 截断到 60 字符的派生指令预览
+
+
 AgentEvent = (
     TurnStarted
     | TextDelta
@@ -388,4 +435,7 @@ AgentEvent = (
     | AdversarialFindingProposed
     | AdversarialVerdict
     | AdversarialFinished
+    | SubagentSpawned
+    | SubagentEvent
+    | TaskFinished
 )

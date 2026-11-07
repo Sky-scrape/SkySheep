@@ -13,6 +13,9 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel
 
 from ...bgtasks import spawn_bg
 from ...channels.cards import task_finish_card
@@ -1136,9 +1139,16 @@ class AutomationMixin:
             except RuntimeError:
                 continue  # 无事件循环（如纯测试环境）
 
-    def _ws_broadcast(self, ev: dict) -> None:
-        """引擎侧产生的广播事件（子代理直播 / 任务终态）发给在线前端。"""
-        if isinstance(ev, dict) and ev.get("kind") == "task_finished":
+    def _ws_broadcast(self, ev: Any) -> None:
+        """引擎侧产生的广播事件（子代理直播 / 任务终态）发给在线前端。
+
+        子代理直播自事件契约化（events.py 的 SubagentSpawned / SubagentEvent /
+        TaskFinished）起进来的就是 AgentEvent 模型实例：这里先统一 model_dump
+        成协议 dict 形状再转发与对账（emit 只认 dict）；历史测试直塞的裸 dict
+        原样放行。
+        """
+        payload = ev.model_dump() if isinstance(ev, BaseModel) else ev
+        if isinstance(payload, dict) and payload.get("kind") == "task_finished":
             # 任务簿任务终态：挂接了它的流水线节点立即对账，不等下一个扫描周期
             try:
                 spawn_bg(self._pipeline_kick())
@@ -1146,7 +1156,7 @@ class AutomationMixin:
                 pass  # 无事件循环（如纯测试环境）
         for ws_emit in list(self.ws_emitters):
             try:
-                spawn_bg(ws_emit(ev))
+                spawn_bg(ws_emit(payload))
             except RuntimeError:
                 continue  # 无事件循环（如纯测试环境）
 

@@ -85,9 +85,11 @@ async def test_background_subagents_queue_and_drain_in_order(tmp_path):
     start_log: list[str] = []  # prompt 出现序 = 任务从队列开跑的顺序
     finish_order: list[str] = []  # task_finished 广播序 = 完成顺序
 
-    def emit(ev: dict) -> None:
-        if ev.get("kind") == "task_finished":
-            finish_order.append(ev["task_id"])
+    def emit(ev) -> None:
+        # 事件契约化后收到 AgentEvent 模型实例：dump 成协议 dict 再认终态
+        payload = ev.model_dump()
+        if payload.get("kind") == "task_finished":
+            finish_order.append(payload["task_id"])
 
     def factory() -> FakeProvider:
         return _StartOrderFake([[TextBlock(text="REPORT: OK")]], start_log)

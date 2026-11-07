@@ -42,9 +42,10 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from ..bgtasks import spawn_bg
+from ..events import AgentEvent, SubagentEvent, SubagentSpawned, TaskFinished
 from ..models.base import Provider
 from ..security.gate import Decision, PermissionGate
-from ..textio import write_text_atomic
+from ..textio import read_text_file, write_text_atomic
 from ..tools import GlobTool, GrepTool, ListDirTool, ReadFileTool, Safety, Tool, ToolRegistry
 from ..tools.base import ToolContext
 from .agent import Agent
@@ -413,7 +414,8 @@ class TaskManager:
     注入，用来把「设置页里定义的自定义子代理」和「内置子代理的模型/思考强度
     覆盖」解析成一次真实运行；不注入时全部走内置默认（explore/task + 主 provider）。
     usage_recorder(session_id, provider, model, in_tok, out_tok, cached_tok) 在任务结束后记账；
-    event_emitter(dict) 把直播事件广播给前端（同步回调，内部自行 create_task）。
+    event_emitter(AgentEvent) 把直播事件（subagent_spawned / subagent_event /
+    task_finished，events.py 契约成员）广播给宿主（同步回调，内部自行 create_task）。
     """
 
     def __init__(
@@ -426,7 +428,7 @@ class TaskManager:
         registry_resolver=None,
         max_concurrent: int = 3,
         usage_recorder: Callable[..., object] | None = None,
-        event_emitter: Callable[[dict], None] | None = None,
+        event_emitter: Callable[[AgentEvent], None] | None = None,
         state_path: Path | None = None,
         job_containment: bool = True,
         sandbox_level: str = "job",
@@ -643,15 +645,16 @@ class TaskManager:
         if self._event_emitter is None:
             return
         try:
-            self._event_emitter({
-                "kind": "subagent_spawned",
-                "task_id": rec.id,
-                "session_id": rec.session_id,
-                "agent_type": rec.agent_type,
-                "background": background,
-                "queued": rec.status == "queued",
-                "prompt": rec.prompt[:60],
-            })
+            # 事件契约（events.py）：以 SubagentSpawned 模型实例发出，
+            # 不再裸发 dict——无头协议与 WS 消费同一套 AgentEvent
+            self._event_emitter(SubagentSpawned(
+                task_id=rec.id,
+                session_id=rec.session_id,
+                agent_type=rec.agent_type,
+                background=background,
+                queued=rec.status == "queued",
+                prompt=rec.prompt[:60],
+            ))
         except Exception:  # noqa: BLE001
             pass  # 直播失败不影响子代理本身
 
@@ -667,13 +670,14 @@ class TaskManager:
             if emitter is None or ev.kind not in FORWARD_KINDS:
                 return
             try:
-                emitter({
-                    "kind": "subagent_event",
-                    "task_id": rec.id,
-                    "session_id": rec.session_id,
-                    "agent_type": rec.agent_type,
-                    "event": ev.model_dump(),
-                })
+                # 事件契约（events.py）：以 SubagentEvent 模型实例发出，
+                # 内层事件 model_dump 后收进 event 字段
+                emitter(SubagentEvent(
+                    task_id=rec.id,
+                    session_id=rec.session_id,
+                    agent_type=rec.agent_type,
+                    event=ev.model_dump(),
+                ))
             except Exception:  # noqa: BLE001
                 pass  # 直播失败不影响子代理本身
 
@@ -910,8 +914,11 @@ class TaskManager:
         if self._state_path is None or not self._state_path.exists():
             return []
         try:
-            data = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            # 走 textio 的编码探测：手改文件存成 GBK 等非 UTF-8 时也能读，
+            # 不再把 UnicodeDecodeError 抛到 backend.setup() 导致启动失败
+            # （textio 探测不出时也不抛，交给 JSON 解析兜底）。
+            data = json.loads(read_text_file(self._state_path).text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return []
         items = (data or {}).get("tasks") if isinstance(data, dict) else None
         return [it for it in (items or []) if isinstance(it, dict) and it.get("id")]
@@ -920,8 +927,10 @@ class TaskManager:
         if self._state_path is None or not self._state_path.exists():
             return
         try:
-            data = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            # 与 _read_state_file 同款容错：编码探测 + 宽 except，坏文件按
+            # 空簿降级而不是炸掉启动（backend.setup() 的 TaskManager 构造路径）。
+            data = json.loads(read_text_file(self._state_path).text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return
         for item in (data or {}).get("tasks") or []:
             if not isinstance(item, dict) or not item.get("id"):
@@ -1154,14 +1163,15 @@ class TaskManager:
         if self._event_emitter is None:
             return
         try:
-            self._event_emitter({
-                "kind": "task_finished",
-                "task_id": rec.id,
-                "session_id": rec.session_id,
-                "agent_type": rec.agent_type,
-                "status": rec.status,
-                "prompt": rec.prompt[:60],
-            })
+            # 事件契约（events.py）：以 TaskFinished 模型实例发出，
+            # automation._ws_broadcast 按 model_dump 后的形状对账流水线
+            self._event_emitter(TaskFinished(
+                task_id=rec.id,
+                session_id=rec.session_id,
+                agent_type=rec.agent_type,
+                status=rec.status,
+                prompt=rec.prompt[:60],
+            ))
         except Exception:  # noqa: BLE001
             pass
 

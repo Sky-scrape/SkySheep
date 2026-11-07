@@ -20,7 +20,7 @@ from pathlib import Path
 from pydantic import BaseModel, ValidationError
 
 from ..config import REASONING_EFFORTS
-from ..textio import write_text_atomic
+from ..textio import read_text_file, write_text_atomic
 
 SUBAGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 BUILTIN_AGENT_TYPES = ("task", "explore", "reviewer", "researcher", "writer", "planner")
@@ -104,8 +104,11 @@ class SubagentStore:
         if not self.path.exists():
             return
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            # 走 textio 的编码探测：手改文件存成 GBK 等非 UTF-8 时也能读，
+            # 不再把 UnicodeDecodeError 抛到 backend.setup() 导致启动失败
+            # （textio 探测不出时也不抛，交给 JSON 解析兜底）。
+            data = json.loads(read_text_file(self.path).text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return  # 坏文件不致命：回到默认，下次保存覆盖
         for t in BUILTIN_AGENT_TYPES:
             section = (data.get("builtin") or {}).get(t)

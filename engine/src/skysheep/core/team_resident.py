@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ..textio import write_text_atomic
+from ..textio import read_text_file, write_text_atomic
 from .team_store import TeamError
 
 # 条目数上限（最旧更新时间的先淘汰）：常驻是显式声明，正常不会堆积；
@@ -66,8 +66,11 @@ class ResidentTeamStore:
         if not self.path.exists():
             return
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            # 走 textio 的编码探测：手改文件存成 GBK 等非 UTF-8 时也能读，
+            # 不再把 UnicodeDecodeError 抛到 backend.setup() 导致启动失败
+            # （textio 探测不出时也不抛，交给 JSON 解析兜底）。
+            data = json.loads(read_text_file(self.path).text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return  # 坏文件不致命：回空列表，下次保存覆盖
         items = data.get("teams") if isinstance(data, dict) else None
         for item in items or []:

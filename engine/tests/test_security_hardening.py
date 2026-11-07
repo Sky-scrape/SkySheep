@@ -513,7 +513,7 @@ async def test_subagent_events_carry_session_id(tmp_path):
     tasks = TaskManager(
         provider_factory=lambda: fp,
         working_dir=tmp_path,
-        event_emitter=lambda ev: seen.append(ev),
+        event_emitter=lambda ev: seen.append(ev.model_dump()),
     )
     tasks.start_background("explore", "调研", session_id="sess-x")
     for _ in range(100):

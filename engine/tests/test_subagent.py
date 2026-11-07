@@ -749,7 +749,9 @@ async def test_spawn_announce_precedes_stream(tmp_path):
     tasks = TaskManager(
         provider_factory=lambda: FakeProvider([[TextBlock(text="R")]]),
         working_dir=tmp_path,
-        event_emitter=lambda ev: seen.append(ev),
+        # 事件契约化后 emitter 收到的是 AgentEvent 模型实例：dump 成协议 dict
+        # 再断言（形状与旧 dict 契约一致，见 test_subagent_event_contract）
+        event_emitter=lambda ev: seen.append(ev.model_dump()),
     )
     await tasks.run_sync("explore", "看看", session_id="sess-1")
     assert seen[0]["kind"] == "subagent_spawned"
@@ -777,7 +779,7 @@ async def test_spawn_announce_queued_flag_reflects_reality(tmp_path):
     seen: list[dict] = []
     tasks = TaskManager(
         provider_factory=DeltaThenHangProvider, working_dir=tmp_path,
-        max_concurrent=1, event_emitter=lambda ev: seen.append(ev),
+        max_concurrent=1, event_emitter=lambda ev: seen.append(ev.model_dump()),
     )
     first = tasks.start_background("explore", "占位开跑")
     second = tasks.start_background("explore", "满员排队")
@@ -951,8 +953,8 @@ async def test_subagent_events_forwarded_filtered(tmp_path):
     ]
     seen: list[dict] = []
 
-    def emitter(ev: dict) -> None:
-        seen.append(ev)
+    def emitter(ev) -> None:
+        seen.append(ev.model_dump())  # AgentEvent 模型实例 → 协议 dict
 
     tasks = TaskManager(
         provider_factory=lambda: FakeProvider(list(sub_script)),
@@ -984,8 +986,8 @@ async def test_task_finished_broadcast_on_background(tmp_path):
 
     seen: list[dict] = []
 
-    def emitter(ev: dict) -> None:
-        seen.append(ev)
+    def emitter(ev) -> None:
+        seen.append(ev.model_dump())  # AgentEvent 模型实例 → 协议 dict
 
     tasks = TaskManager(
         provider_factory=lambda: FakeProvider([[TextBlock(text="BG: done")]]),

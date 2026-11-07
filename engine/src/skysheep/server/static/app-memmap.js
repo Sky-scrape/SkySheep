@@ -614,7 +614,10 @@ function mountMapGraph(box, nodes, edges) {
     const a = byId.get(e.a), b = byId.get(e.b);
     if (!a || !b) return;
     // --w 驱动 CSS 里的连线不透明度（权重越高越实）
-    lines += `<line class="map-edge" data-a="${e.a}" data-b="${e.b}" style="--w:${Math.min(4, e.w)}"` +
+    // data-a/data-b 是节点 id：主题 id 拼自模型生成的 topics 与会话 tags，文件 id
+    // 拼自路径，可含引号/尖括号——进属性前必须转义（与 label 同款走 escapeHtml）。
+    // dataset 读回会自动解码成原文，悬停高亮/浮层/拖拽的比对不受影响
+    lines += `<line class="map-edge" data-a="${escapeHtml(e.a)}" data-b="${escapeHtml(e.b)}" style="--w:${Math.min(4, e.w)}"` +
       ` x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"/>`;
   });
   let legend = Object.entries(MAP_NODE_TYPE).map(([k, v]) =>
@@ -622,7 +625,9 @@ function mountMapGraph(box, nodes, edges) {
   let boxes = "";
   nodes.forEach((n) => {
     // 不设 title：原生系统提示与悬停浮层会双份出现，浮层信息更全（类型/会话数/直达）
-    boxes += `<div class="map-gnode ty-${n.type}" data-nid="${n.id}"` +
+    // data-nid 同 label 一样过 escapeHtml：id 拼自 topics / tags / 文件路径，
+    // 24 字截断只作用于 label，挡不住 id 里的引号/尖括号进属性
+    boxes += `<div class="map-gnode ty-${n.type}" data-nid="${escapeHtml(n.id)}"` +
       ` style="left:${n.x.toFixed(1)}px;top:${n.y.toFixed(1)}px"` +
       `><span>${escapeHtml(n.label)}</span></div>`;
   });
@@ -753,5 +758,11 @@ function mountMapGraph(box, nodes, edges) {
     });
   });
   box.dataset.w = String(W);
+  // 同一元素重复挂载前先摘掉旧 observer（RO 回调重排递归重挂、切换项目/刷新
+  // 重渲染都会再进本函数）：旧实现每次 new 一个且从不 disconnect，observer 在
+  // 元素上无上界累积，之后每次拖宽全部回调、成倍全量重渲染——与
+  // app-schedule.js 的 mountPipelineGraph（el._plRO）同款处理
+  if (box._mmRO) box._mmRO.disconnect();
+  box._mmRO = ro;
   ro.observe(box);
 }

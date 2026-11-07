@@ -189,7 +189,7 @@ function importSkillModal(prefill = "") {
       ? `\n\n⚠ 已存在同名技能：${escapeHtml(nameList(preview.clashes))}。确认后将覆盖（旧目录会先备份）。`
       : "";
     const ok = await confirmModal(
-      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${officialNote}${clashNote}\n\n技能内容来自外部包，会进入系统提示词。确认安装？`,
+      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${clashNote}\n\n技能内容来自外部包，会进入系统提示词。确认安装？`,
       { title: "安装技能", okLabel: "安装" }
     );
     if (!ok) return;

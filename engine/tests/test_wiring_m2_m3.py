@@ -311,6 +311,42 @@ def test_frontend_memory_candidates_wiring():
     assert ".map-distill" in css
 
 
+def _mount_map_graph_segment(js: str) -> str:
+    """取 app-memmap.js 里 mountMapGraph 的源码段。
+
+    mountMapGraph 是该分区最后一个函数、体内只有箭头函数，段尾直接取 bundle 里
+    下一个 function 声明（下一分区 app-advanced.js 的首个函数）为止。"""
+    i = js.index("function mountMapGraph")
+    return js[i:js.index("function ", i + 1)]
+
+
+def test_frontend_map_graph_attrs_escaped():
+    """图谱节点/边的 id 进 HTML 属性前过 escapeHtml。
+
+    主题 id 拼自模型生成的 topics 与会话 tags、文件 id 拼自路径，可含引号/尖括号
+    （24 字截断只作用于 label）；旧实现只转义 label，id 裸拼进 data-a/data-b/
+    data-nid 再经 innerHTML 上屏，可注入 iframe/meta-refresh/样式伪装。"""
+    js = read_app_bundle()
+    seg = _mount_map_graph_segment(js)
+    assert 'data-a="${escapeHtml(e.a)}"' in seg, "边起点 id 没有转义"
+    assert 'data-b="${escapeHtml(e.b)}"' in seg, "边终点 id 没有转义"
+    assert 'data-nid="${escapeHtml(n.id)}"' in seg, "节点 id 没有转义"
+
+
+def test_frontend_map_graph_observer_rebinds_not_accumulates():
+    """记忆地图图谱（mountMapGraph）挂载前先摘旧 ResizeObserver。
+
+    与 app-schedule.js 的 mountPipelineGraph 同款问题：每次挂载 new 一个 observer
+    且从不 disconnect，观察同一容器的 observer 无上界累积，之后每次拖宽全部回调、
+    成倍全量重渲染。修复后 observer 存到元素上（box._mmRO），重复挂载前先
+    disconnect 旧的。"""
+    js = read_app_bundle()
+    seg = _mount_map_graph_segment(js)
+    assert "box._mmRO" in seg, "observer 没有存到元素上（跨挂载去重的钩子缺失）"
+    assert "box._mmRO.disconnect()" in seg, "重复挂载前没有摘掉旧 observer"
+    assert "box._mmRO = ro" in seg, "新 observer 没有登记回元素"
+
+
 def test_frontend_webhook_card_wiring():
     """渠道设置里 Webhook 卡片：URL + 可选签名密钥 + 测试推送，名单区不出现。"""
     js = read_app_bundle()

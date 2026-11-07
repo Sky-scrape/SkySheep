@@ -1720,13 +1720,30 @@ function pipelineCreateModal() {
             : promptPh;
     };
     const del = row.querySelector(".pl-del-node");
-    if (del) del.onclick = () => { row.remove(); rebuildTitles(); };
+    if (del) del.onclick = () => {
+      const removedIdx = [...nodesBox.children].indexOf(row);
+      row.remove();
+      rebuildTitles(removedIdx);
+    };
     nodesBox.appendChild(row);
   };
-  const rebuildTitles = () => {
-    // 删节点后重排序号与依赖勾选标签（依赖索引始终指向当前列表位置）
+  const rebuildTitles = (removedIdx) => {
+    // 删节点后重排序号，并把依赖勾选按当前列表位置重写（依赖索引始终指向当前列表位置）：
+    // 删除点之后的行整体前移一位，各行的勾选 value 跟着从旧索引映射到新索引；
+    // 指向被删节点的勾选连同标签一并移除；可见标签按勾选现在指向的节点标题重写。
+    // 否则 value 停在建行时的旧行号，会提交出越界/自指的依赖——
+    // store 端越界序号静默丢弃（_materialize_deps），落库的依赖图就错了。
     [...nodesBox.children].forEach((row, i) => {
       row.querySelector("b").textContent = `节点 ${i + 1}`;
+      row.querySelectorAll(".pl-dep input[type=checkbox]").forEach((cb) => {
+        const label = cb.closest("label");
+        if (!label || Number(cb.value) === removedIdx) { label?.remove(); return; }
+        if (removedIdx >= 0 && Number(cb.value) > removedIdx) cb.value = String(Number(cb.value) - 1);
+        const dep = nodesBox.children[Number(cb.value)];
+        if (!dep) { label.remove(); return; } // 指向已不存在的节点：清掉，不许提交
+        const name = dep.querySelector(".pl-node-title").value.trim() || `节点 ${Number(cb.value) + 1}`;
+        label.replaceChildren(cb, document.createTextNode(name));
+      });
     });
   };
   addNodeRow();

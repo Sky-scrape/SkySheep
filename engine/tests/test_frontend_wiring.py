@@ -512,6 +512,39 @@ def test_danger_button_style_exists():
     assert ".confirm-text" in css, "确认弹窗正文样式缺失"
 
 
+# ---------- 技能导入确认弹窗：模板串插值变量必须在本函数内有定义 ----------
+
+def test_import_skill_modal_interpolations_are_defined():
+    """importSkillModal 确认弹窗模板串里的「裸标识符」插值 ${ident} 必须在
+    函数体内声明过（成员访问 / 表达式 / 调用不在本护栏范围）。
+
+    回归：d5a5cf5 下线场景模板时删掉了 officialNote 的定义行、漏删模板串里的
+    ${officialNote} 引用，弹窗一求值就抛 ReferenceError——文件夹 / .zip / 网址
+    三种装法共用的两段式确认（供应链防线）整体报废，skills.install 在该流程
+    不可达。前端零构建无 JS 运行时测试，按本套件惯例锁源码层。"""
+    import re
+
+    js = read_static("app-skills.js")
+    assert "officialNote" not in js, "officialNote 已随场景模板下线移除，不许残留引用"
+    i = js.index("function importSkillModal(")
+    nxt = re.search(r"^(?:async )?function [A-Za-z_$][\w$]*\(", js[i + 1:], re.M)
+    end = i + 1 + nxt.start() if nxt else len(js)
+    body = js[i:end]
+    # 声明集：const/let/var（含 for (const x of …) 头部）+ 顶层函数参数
+    declared = set(re.findall(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)", body))
+    sig = re.search(r"function importSkillModal\(([^()]*)\)", js)
+    if sig:
+        declared |= {p.split("=")[0].strip() for p in sig.group(1).split(",") if p.strip()}
+    bad = [
+        ident for ident in re.findall(r"\$\{([A-Za-z_$][\w$]*)\}", body)
+        if ident not in declared
+    ]
+    assert not bad, (
+        f"importSkillModal 模板串引用了未定义的变量：{bad}——"
+        "删功能时只删定义、漏删模板串引用，确认弹窗会当场抛 ReferenceError"
+    )
+
+
 # ---------- 团队空闲原因 / 继续推进 / 用量快照 ----------
 
 
@@ -1173,3 +1206,24 @@ def test_pet_position_guard_while_hidden():
     assert js.count("if (!petShown()) return;") >= 2
     # 下落逐帧同样跳过（否则会落在窄容器坐标上并写进 pet_x）
     assert "!b.ok || !petShown()" in js
+
+
+# ---------- 流水线弹窗：删节点后依赖勾选按新位置重写（回归：value 停在旧行号） ----------
+
+def test_pipeline_node_delete_rebuilds_dep_indexes():
+    """新建流水线弹窗删中间节点后，依赖勾选的 value 与标签必须跟着重排。
+
+    依赖勾选的 value 在建行时固定为当时的行号；若删节点后只重排「节点 N」序号
+    而不重写 value/label，提交的依赖就会指向自身（后面的行前移后撞上自己的新位置）
+    或已删节点，store 端越界序号静默丢弃（store._materialize_deps 宽松处理），
+    落库的依赖图就错了（如 D 依赖 C 变成无依赖或错误节点）。
+    """
+    js = read_static("app-schedule.js")
+    # 删除处理器：先记下被删行号再移除，重建时按它做「旧索引→新索引」映射
+    assert "const removedIdx = [...nodesBox.children].indexOf(row);" in js
+    assert "rebuildTitles(removedIdx);" in js, "删节点必须把被删行号传给重建"
+    # 重建：指向被删节点的勾选移除、删除点之后的 value 前移一位
+    assert "Number(cb.value) === removedIdx" in js
+    assert "cb.value = String(Number(cb.value) - 1)" in js
+    # 可见标签按勾选当前指向的节点标题重写（不再停留在建行时的快照）
+    assert "label.replaceChildren(cb, document.createTextNode(name))" in js

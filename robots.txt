@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://sheepsky.com/sitemap.xml

@@ -1,12 +1,13 @@
 """版本号一致性自检——发布清单 §1「版本号四处一致」的机械化（2026-09 审查发现 27）。
 
-比对五处版本号是否一致：
+比对七处版本号是否一致：
 
 1. ``engine/pyproject.toml``           的 ``version``
 2. ``engine/src/skysheep/__init__.py`` 的 ``__version__``
 3. ``engine/tools/installer.iss``      的 ``MyAppVersion``（决定安装包文件名，漂移即更新链路断裂）
 4. ``CHANGELOG.md``                    最新的「## [x.y.z]」发布条目（跳过 [未发布]；基准来源）
 5. ``README.md`` / ``README.en.md``    路线图的「✅ 当前版本 / (✅ current release)」标记
+6. ``index.html``                      所有 ``data-current-version`` 标记（官网对外版本）
 
 文件路径相对本脚本自身解析（脚本固定在 ``engine/tools/`` 下），不依赖工作目录，
 CI 与本机均可直接跑：``python tools/check_versions.py``。
@@ -31,6 +32,9 @@ _VERSION_RE = re.compile(rf"(?<![\w.-])v?({_SEMVER})(?![\w.-])")
 # CHANGELOG 发布条目标题「## [2.1.0] - 2026-09-27」；[未发布] 不是版本形态，自然被跳过
 _CHANGELOG_HEADING_RE = re.compile(r"(?m)^## \[([^\]]+)\]")
 _RELEASE_NAME_RE = re.compile(rf"^{_SEMVER}$")
+# 官网只认显式标记的「当前版本」：页面上还留着历史版本号的更新卡片，
+# 不能拿全站 vX.Y.Z 扫描去比（会把 2.6.6 / 2.6.7 也算进来）。
+_SITE_VERSION_RE = re.compile(rf"data-current-version[^>]*>\s*v?({_SEMVER})")
 
 
 def _extract(text: str, pattern: re.Pattern[str], label: str, hint: str) -> str:
@@ -88,6 +92,7 @@ def read_versions(root: Path | None = None) -> dict[str, str]:
             "✅ current release",
             "README.en.md",
         ),
+        "index.html": _site_version(_read(root, Path("index.html"), "index.html")),
     }
     invalid = {label: value for label, value in versions.items()
                if not re.fullmatch(_SEMVER, value)}
@@ -103,6 +108,19 @@ def _latest_changelog_release(text: str) -> str:
         if _RELEASE_NAME_RE.match(name):
             return name
     raise ValueError("CHANGELOG.md 里找不到「## [x.y.z]」发布条目（只有 [未发布]？）")
+
+
+def _site_version(text: str) -> str:
+    """官网里所有 ``data-current-version`` 标记必须指向同一个版本。"""
+    found = _SITE_VERSION_RE.findall(text)
+    if not found:
+        raise ValueError("index.html 里找不到 data-current-version 标记（官网当前版本）")
+    unique = set(found)
+    if len(unique) != 1:
+        raise ValueError(
+            "index.html 的 data-current-version 彼此不一致：" + ", ".join(sorted(unique))
+        )
+    return found[0]
 
 
 def _readme_marker_version(text: str, marker: str, label: str) -> str:

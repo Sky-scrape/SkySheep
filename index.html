@@ -4,16 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<title>SkySheep —— 多模型协作的本地 AI 工作台</title>
-<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。多模型协作分协作与接力两条线：圆桌 / 团队 / 对抗收成可复用模板，接力让主副屏按轮交接、交接前先复述核验；每一步先确认、可回滚，数据留在本机。">
+<title>SkySheep —— 让 AI 不再单打独斗的本地 AI 工作台</title>
+<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。圆桌会诊、团队开工、对抗挑错、两屏接力，四种多模型协作收在同一个工作台里；写文件先给 diff，跑命令先问你，每一轮都能撤回。">
 <meta name="theme-color" content="#e8dfc7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#171410" media="(prefers-color-scheme: dark)">
-<meta property="og:title" content="SkySheep —— 多模型协作的本地 AI 工作台">
-<meta property="og:description" content="多个模型一起讨论、分工、审查，跑在你自己的电脑上。协作把圆桌 / 团队 / 对抗收成模板，接力让两个会话按轮交接，每一步先确认、可回滚。">
+<meta property="og:title" content="SkySheep —— 让 AI 不再单打独斗">
+<meta property="og:description" content="圆桌会诊、团队开工、对抗挑错、两屏接力——四种多模型协作，跑在你自己的电脑上。动手前先问你，每一轮都能撤回。">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="SkySheep">
+<meta property="og:locale" content="zh_CN">
 <meta property="og:url" content="https://sheepsky.com/">
 <meta property="og:image" content="https://sheepsky.com/docs/images/social-preview.png">
+<meta property="og:image:alt" content="SkySheep：让 AI 不再单打独斗">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="SkySheep —— 让 AI 不再单打独斗">
+<meta name="twitter:description" content="四种多模型协作，跑在你自己的电脑上。动手前先问你，每一轮都能撤回。">
+<meta name="twitter:image" content="https://sheepsky.com/docs/images/social-preview.png">
 <link rel="icon" type="image/png" href="docs/images/skysheep-icon.png">
 <link rel="apple-touch-icon" href="docs/images/skysheep-icon.png">
 <link rel="canonical" href="https://sheepsky.com/">
@@ -22,10 +30,21 @@
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "SkySheep",
-  "operatingSystem": "Windows",
-  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Windows 10, Windows 11",
+  "applicationCategory": "ProductivityApplication",
+  "softwareVersion": "2.6.8",
+  "inLanguage": "zh-CN",
   "url": "https://sheepsky.com/",
-  "description": "开源 Windows 桌面 AI Agent 工作台：多模型协作分协作（圆桌 / 团队 / 对抗模板）与接力两条线，跑在你自己的电脑上。",
+  "downloadUrl": "https://github.com/sky-scrape/SkySheep/releases/latest",
+  "description": "开源 Windows 桌面 AI Agent 工作台：圆桌、团队、对抗、接力四种多模型协作，动手前先确认，改动可回滚，会话与密钥留在本机。",
+  "featureList": [
+    "圆桌：多个模型并行作答，主席融合",
+    "团队：总管派单、队员执行、验收交付",
+    "对抗：发现、调查、建议、裁判四阶段审查",
+    "接力：主副屏按轮交接，交接前复述核验",
+    "权限门：写文件附 diff 预览，执行命令逐次确认",
+    "检查点：文件改动按轮快照，一键撤销本轮"
+  ],
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
   "license": "https://opensource.org/licenses/MIT"
 }
@@ -40,6 +59,7 @@
   }
   const root = document.documentElement;
   root.dataset.theme = saved;
+  root.classList.add('js');
   root.style.background = saved === 'dark' ? '#171410' : '#e8dfc7';
 })();
 </script>
@@ -58,21 +78,19 @@
   --card: #f4ecd8;
   --raised: #fbf5e6;
   --sunken: #ece3cb;
-  --inset: #e2d9bf;
   --text: #1d1a16;
   --text2: #4a4336;
-  --dim: #6a6252;
+  --dim: #5a5242;
   --line: #d8cdb0;
   --line2: #c0b394;
   --ink-line: #1d1a16;
   --blue: #1257c4;
   --blue-deep: #0e429b;
-  --blue-weak: rgba(18, 87, 196, .08);
-  --gold: #8a6410;
+  --gold: #6f4f0a;
+  --stamp: #b23b2e;
   --mark: #f2dd9a;
   --up: #c2261d;
   --down: #0f6b3a;
-  --ai: #4f35a8;
   --on-accent: #f4ecd8;
   --frame: #2b261e;
   --frame-text: #c9bda0;
@@ -80,7 +98,6 @@
   --shadow-sm: 2px 2px 0 rgba(29, 26, 22, .13);
   --shadow-md: 3px 3px 0 rgba(29, 26, 22, .17);
   --shadow-lg: 5px 5px 0 rgba(29, 26, 22, .22), 0 12px 32px rgba(29, 26, 22, .16);
-  --lat: 2px, -2px, 3px, 2px, 1px, 2px, 2px, -3px, -2px, 4px, 2px, -2px, 3px, 1px, -2px, 3px, 2px, 2px, 2px, -3px, 3px, -2px, 1px, -2px, 0px, 2px, -1px, 2px, -1px, 1px, -2px, 0px, 2px;
   --dur-fast: 120ms; --dur-base: 180ms; --dur-slow: 320ms;
   --ease-out: cubic-bezier(.2, .9, .3, 1);
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Courier New", monospace;
@@ -96,7 +113,6 @@
   --card: #211d17;
   --raised: #2b261e;
   --sunken: #1b1813;
-  --inset: #332d23;
   --text: #f4ecd8;
   --text2: #d3c8ad;
   --dim: #a89d84;
@@ -105,12 +121,11 @@
   --ink-line: #f4ecd8;
   --blue: #5b93ee;
   --blue-deep: #4077d6;
-  --blue-weak: rgba(91, 147, 238, .14);
-  --gold: #cfa64f;
+  --gold: #d8b269;
+  --stamp: #e0715f;
   --mark: #6b5520;
   --up: #e26255;
   --down: #46b276;
-  --ai: #a48cf0;
   --on-accent: #171410;
   --frame: #0d0b08;
   --frame-text: #a89d84;
@@ -193,7 +208,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   .masthead { background: var(--bg); }
 }
 .masthead-inner {
-  display: flex; align-items: center; gap: 28px;
+  display: flex; align-items: center; gap: 26px;
   height: 72px;
 }
 .brand {
@@ -227,7 +242,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 
 .nav {
-  display: flex; align-items: center; gap: 30px;
+  display: flex; align-items: center; gap: 24px;
   margin-left: auto;
 }
 .nav a {
@@ -242,6 +257,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .nav a:hover { color: var(--blue); }
 .nav a:hover::after { right: 0; }
+.nav a.is-current { color: var(--blue); }
+.nav a.is-current::after { right: 0; }
 
 .masthead-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 
@@ -290,23 +307,24 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 /* ============================================================
  * 首屏
  * ============================================================ */
-.hero { padding: 76px 0 88px; position: relative; }
+.hero { padding: 72px 0 84px; position: relative; }
 .hero-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.06fr);
-  gap: 62px;
+  grid-template-columns: minmax(0, .94fr) minmax(0, 1.12fr);
+  gap: 58px;
   align-items: center;
 }
 
 .eyebrow {
   display: inline-flex; align-items: center; gap: 9px;
+  max-width: 100%;
   font-size: 12px; font-weight: 700; letter-spacing: .1em;
-  text-transform: uppercase;
+  line-height: 1.6;
   color: var(--text2);
   border: 2px solid var(--ink-line); border-radius: 999px;
   background: var(--raised);
   padding: 7px 16px 7px 13px;
-  margin-bottom: 26px;
+  margin-bottom: 24px;
   box-shadow: var(--shadow-sm);
 }
 .eyebrow .dot {
@@ -314,17 +332,18 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   background: var(--down);
   flex-shrink: 0;
 }
+.eyebrow-text { min-width: 0; }
 
 .hero h1 {
-  font-size: clamp(2.6rem, 1.1rem + 4.2vw, 4.1rem);
+  font-size: clamp(2.7rem, 1.05rem + 4.6vw, 4.35rem);
   font-weight: 800;
-  line-height: 1.13;
-  letter-spacing: -.035em;
+  line-height: 1.1;
+  letter-spacing: -.038em;
   margin-bottom: 24px;
   text-wrap: balance;
 }
 /* 荧光笔：垫在文字下方，不能走 z-index:-1（会落到 <h1> 不透明背景之后而看不见） */
-.hero h1 .mark { position: relative; display: inline-block; white-space: nowrap; }
+.hero h1 .mark { position: relative; display: inline-block; }
 .hero h1 .mark::before {
   content: ""; position: absolute; z-index: 0;
   left: -.09em; right: -.09em; top: .09em; bottom: .01em;
@@ -333,13 +352,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   transform: rotate(-.7deg);
 }
 .hero h1 .mark > span { position: relative; z-index: 1; }
-.hero h1 em { font-style: normal; color: var(--blue); }
 
 .hero-lede {
-  font-size: 17.5px; line-height: 1.85;
+  font-size: 17px; line-height: 1.88;
   color: var(--text2);
-  max-width: 33em;
-  margin-bottom: 18px;
+  max-width: 31em;
 }
 .hero-lede strong { color: var(--text); font-weight: 700; }
 
@@ -353,8 +370,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .hero-note span { display: inline-flex; align-items: center; gap: 7px; }
 .hero-note svg { width: 15px; height: 15px; color: var(--down); flex-shrink: 0; }
+.hero-note a { font-weight: 600; }
 
-/* 首屏视觉：产品截图 + 小羊 */
+/* 首屏视觉：产品截图 + 缩略切换 + 小羊 */
 .hero-visual { position: relative; }
 .hero-shot {
   position: relative; z-index: 2;
@@ -364,11 +382,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   background: var(--card);
   box-shadow: var(--shadow-lg);
 }
-.hero-shot img { width: 100%; height: auto; }
+.hero-shot img { width: 100%; height: clamp(220px, 30vw, 460px); object-fit: cover; object-position: top center; }
 .hero-sheep {
   position: absolute; z-index: 3;
-  width: clamp(84px, 13vw, 132px); height: auto;
-  right: -22px; bottom: -34px;
+  width: clamp(84px, 12vw, 128px); height: auto;
+  right: -20px; bottom: -38px;
   filter: drop-shadow(4px 5px 0 rgba(29, 26, 22, .16));
   animation: bob 5.5s ease-in-out infinite;
 }
@@ -376,6 +394,22 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 @keyframes bob {
   0%, 100% { transform: translateY(0) rotate(-1.5deg); }
   50% { transform: translateY(-11px) rotate(1.5deg); }
+}
+
+/* 首屏截图切换：没有 JS 时不显示，主图仍在 */
+.hero-thumbs { display: none; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.js .hero-thumbs { display: flex; }
+.hero-thumbs button {
+  font-size: 12.5px; font-weight: 700;
+  padding: 6px 14px;
+  border: 2px solid var(--ink-line); border-radius: 999px;
+  background: var(--raised); color: var(--text2);
+  box-shadow: var(--shadow-sm);
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.hero-thumbs button:hover { background: var(--sunken); color: var(--text); }
+.hero-thumbs button[aria-pressed="true"] {
+  background: var(--text); color: var(--bg); box-shadow: none;
 }
 
 /* 窗口外框（真实截图统一加壳） */
@@ -400,8 +434,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .window img { width: 100%; height: auto; }
 .window video { display: block; width: 100%; height: auto; background: #171410; }
 
-/* 实机演示：静音循环的预告，完整版跳 Release */
-.demo-shot { margin-top: 32px; }
+/* 实机演示：点击播放的预告，完整版跳 Release */
+.demo-shot { margin-top: 30px; }
 .demo-shot figcaption { margin-top: 14px; font-size: 13px; color: var(--dim); }
 .demo-actions { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-top: 22px; }
 .demo-actions .demo-meta { font-size: 13px; color: var(--dim); }
@@ -411,46 +445,55 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 
 /* ============================================================
- * 事实条
+ * 数字条
  * ============================================================ */
-.facts {
+.stats {
   border-top: 2px solid var(--ink-line);
   border-bottom: 2px solid var(--ink-line);
   background: var(--card);
 }
-.facts-grid {
+.stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
 }
-.fact {
-  padding: 30px 26px;
+.stat {
+  display: flex; align-items: baseline; gap: 11px;
+  padding: 26px 24px;
   border-right: 1px solid var(--line);
 }
-.fact:last-child { border-right: none; }
-.fact b {
-  display: block;
+.stat:last-child { border-right: none; }
+.stat b {
   font-family: var(--font-mono); font-variant-numeric: tabular-nums;
-  font-size: 30px; font-weight: 700; line-height: 1.15;
-  letter-spacing: -.02em;
-  margin-bottom: 6px;
+  font-size: 34px; font-weight: 700; line-height: 1;
+  letter-spacing: -.04em;
 }
-.fact span { font-size: 13.5px; color: var(--dim); line-height: 1.5; display: block; }
+.stat span { font-size: 13.5px; color: var(--text2); line-height: 1.5; }
 
 /* ============================================================
- * 版块骨架
+ * 版块骨架（旁注栏：编号 + 标签在左，标题正文在右）
  * ============================================================ */
-.section { padding: 92px 0; }
+.section { padding: 88px 0; }
 .section + .section { border-top: 1px solid var(--line2); }
 
-.section-head { margin-bottom: 52px; max-width: 44em; }
-.section-head.center { margin-inline: auto; text-align: center; }
+.section-head {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 30px;
+  margin-bottom: 50px;
+}
+.section-meta { display: flex; flex-direction: column; gap: 7px; padding-top: 7px; }
+.section-num {
+  font-family: var(--font-mono); font-size: 13px; font-weight: 700;
+  letter-spacing: .08em; color: var(--text);
+}
 .section-label {
   display: block;
-  font-family: var(--font-mono); font-size: 12px; font-weight: 700;
-  letter-spacing: .18em; text-transform: uppercase;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+  letter-spacing: .16em; text-transform: uppercase;
   color: var(--gold);
-  margin-bottom: 14px;
+  line-height: 1.5;
 }
+.section-body { max-width: 46em; }
 .section-head h2 {
   font-size: clamp(1.75rem, 1rem + 2.1vw, 2.5rem);
   font-weight: 800; line-height: 1.24; letter-spacing: -.028em;
@@ -460,75 +503,115 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .section-head p {
   font-size: 16.5px; line-height: 1.85; color: var(--text2);
 }
+.section-head p strong { color: var(--text); font-weight: 700; }
 
 /* ============================================================
- * 场景卡
+ * 四种协作：拓扑 + 工牌卡
  * ============================================================ */
-.scenes {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 22px;
+.topo {
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
+  padding: 8px 24px;
+  margin-bottom: 34px;
 }
-.scene {
+.topo-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 16px; align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px dashed var(--line2);
+}
+.topo-row:last-child { border-bottom: none; }
+.topo-name { font-size: 14px; font-weight: 800; letter-spacing: -.01em; }
+.topo-track { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.node {
+  padding: 4px 11px;
+  border: 1.5px solid var(--ink-line); border-radius: var(--r-sm);
+  background: var(--raised);
+  font-size: 12.5px; font-weight: 600; color: var(--text2);
+  white-space: nowrap;
+}
+.node.is-out { background: var(--blue); border-color: var(--ink-line); color: var(--on-accent); }
+.arrow { color: var(--dim); font-family: var(--font-mono); font-size: 13px; }
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 26px;
+}
+.mode-card {
   display: flex; flex-direction: column;
-  padding: 28px 26px 30px;
   background: var(--card);
   border: 2px solid var(--ink-line);
   border-radius: var(--r-lg);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
   transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
-.scene:hover { transform: translate(-2px, -2px); box-shadow: var(--shadow-lg); }
-.scene-no {
-  font-family: var(--font-mono); font-size: 12px; font-weight: 700;
-  letter-spacing: .1em; color: var(--dim);
-  margin-bottom: 14px;
+.mode-card:hover { transform: translate(-2px, -2px); box-shadow: var(--shadow-lg); }
+.mode-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 17px 22px 15px;
+  background: var(--raised);
+  border-bottom: 2px solid var(--ink-line);
 }
-.scene h3 {
-  font-size: 19px; font-weight: 800; letter-spacing: -.015em;
-  margin-bottom: 12px;
+.mode-en {
+  display: block;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: .17em; text-transform: uppercase;
+  color: var(--gold); margin-bottom: 3px;
 }
-.scene p { font-size: 15px; line-height: 1.8; color: var(--text2); }
-.scene-quote {
-  margin: 16px 0 0;
-  padding: 13px 16px;
-  background: var(--sunken);
-  border-left: 3px solid var(--blue);
-  border-radius: 0 var(--r-sm) var(--r-sm) 0;
-  font-size: 14px; line-height: 1.7; color: var(--text2);
+.mode-head h3 { font-size: 21px; font-weight: 800; letter-spacing: -.022em; line-height: 1.25; }
+.stamp {
+  flex-shrink: 0;
+  font-size: 12px; font-weight: 800; letter-spacing: .18em;
+  color: var(--stamp);
+  border: 2px solid var(--stamp); border-radius: var(--r-sm);
+  padding: 5px 9px 4px;
+  transform: rotate(-4deg);
+  box-shadow: inset 0 0 0 1px var(--raised);
 }
-.scene-quote::before { content: "「"; color: var(--dim); }
-.scene-quote::after { content: "」"; color: var(--dim); }
-.scene p:last-child { margin-top: auto; padding-top: 16px; }
+.mode-shot {
+  border-bottom: 2px dashed var(--line2);
+  background: var(--frame);
+  overflow: hidden;
+}
+.mode-shot img, .mode-shot video {
+  display: block;
+  width: 100%;
+  height: clamp(190px, 20vw, 280px);
+  object-fit: cover;
+  object-position: top center;
+}
+.mode-shot video { background: var(--frame); }
+
+.mode-specs {
+  display: flex; flex-direction: column; gap: 9px;
+  padding: 16px 22px 20px;
+}
+.mode-specs div { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; }
+.mode-specs dt {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+  letter-spacing: .08em; color: var(--dim); padding-top: 3px;
+}
+.mode-specs dd { font-size: 14px; line-height: 1.65; color: var(--text2); }
 
 /* ============================================================
- * 安全：确认演示
+ * 一套模板
  * ============================================================ */
-.safety-grid {
+.split {
   display: grid;
-  grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr);
-  gap: 58px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(0, .92fr);
+  gap: 52px; align-items: start;
 }
-.safety-points { list-style: none; display: flex; flex-direction: column; gap: 4px; }
-.safety-points li {
-  display: grid; grid-template-columns: 30px 1fr; gap: 14px;
-  padding: 16px 0;
-  border-bottom: 1px solid var(--line);
-}
-.safety-points li:last-child { border-bottom: none; }
-.safety-points .tick {
-  width: 24px; height: 24px; margin-top: 4px;
-  display: grid; place-items: center;
-  border: 2px solid var(--ink-line); border-radius: var(--r-sm);
-  background: var(--down); color: var(--card);
-}
-[data-theme="dark"] .safety-points .tick { color: var(--bg); }
-.safety-points .tick svg { width: 13px; height: 13px; }
-.safety-points b { display: block; font-size: 16px; font-weight: 800; margin-bottom: 4px; letter-spacing: -.01em; }
-.safety-points p { font-size: 14.5px; line-height: 1.75; color: var(--text2); }
+.rule-list { display: flex; flex-direction: column; gap: 20px; }
+.rule { border-left: 3px solid var(--blue); padding-left: 17px; }
+.rule b { display: block; font-size: 16.5px; font-weight: 800; margin-bottom: 5px; letter-spacing: -.01em; }
+.rule p { font-size: 14.5px; line-height: 1.78; color: var(--text2); }
 
-/* 确认卡演示 */
+/* 确认卡 / 授权清单演示 */
 .demo-stage {
   background: var(--sunken);
   border: 2px solid var(--ink-line);
@@ -541,25 +624,27 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   letter-spacing: .14em; text-transform: uppercase;
   color: var(--dim); margin-bottom: 14px;
 }
-.card-confirm {
+.card-confirm, .card-permit {
   background: var(--raised);
   border: 2px solid var(--ink-line);
   border-radius: var(--r-md);
   padding: 18px 20px 20px;
   box-shadow: var(--shadow-md);
 }
-.card-confirm-head {
+.card-confirm-head, .permit-head {
   display: flex; align-items: center; gap: 10px;
   font-size: 13px; font-weight: 700; color: var(--text2);
   padding-bottom: 13px; margin-bottom: 14px;
   border-bottom: 1px solid var(--line);
 }
-.card-confirm-head .badge {
+.card-confirm-head .badge, .permit-head .badge {
   font-family: var(--font-mono); font-size: 11px;
   padding: 2px 8px; border-radius: var(--r-xs);
   background: var(--up); color: var(--card);
 }
-[data-theme="dark"] .card-confirm-head .badge { color: var(--bg); }
+[data-theme="dark"] .card-confirm-head .badge,
+[data-theme="dark"] .permit-head .badge { color: var(--bg); }
+.permit-head .badge { background: var(--blue); }
 .card-confirm-head .path { font-family: var(--font-mono); font-size: 12px; color: var(--dim); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .diff {
@@ -592,13 +677,78 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   margin-top: 18px; font-size: 13px; line-height: 1.7; color: var(--dim);
 }
 
+.permit-list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.permit-list li { display: flex; align-items: center; gap: 11px; font-size: 14px; color: var(--text2); }
+.box {
+  width: 16px; height: 16px; flex-shrink: 0;
+  border: 2px solid var(--ink-line); border-radius: 3px;
+  display: grid; place-items: center;
+}
+.box.on { background: var(--down); border-color: var(--down); }
+.box.on::after {
+  content: ""; width: 8px; height: 4px;
+  border-left: 2px solid var(--card); border-bottom: 2px solid var(--card);
+  transform: rotate(-45deg) translateY(-1px);
+}
+[data-theme="dark"] .box.on::after { border-color: var(--bg); }
+.permit-foot { margin-top: 14px; font-size: 12.5px; line-height: 1.65; color: var(--dim); }
+
+/* ============================================================
+ * 它真动手
+ * ============================================================ */
+.work-grid {
+  display: grid;
+  grid-template-columns: minmax(0, .84fr) minmax(0, 1.16fr);
+  gap: 48px; align-items: start;
+}
+.work-points { list-style: none; display: flex; flex-direction: column; }
+.work-points li { padding: 17px 0; border-bottom: 1px solid var(--line); }
+.work-points li:first-child { padding-top: 0; }
+.work-points b { display: block; font-size: 16.5px; font-weight: 800; margin-bottom: 5px; letter-spacing: -.01em; }
+.work-points p { font-size: 14.5px; line-height: 1.78; color: var(--text2); }
+.work-tools {
+  margin-top: 20px; padding: 14px 16px;
+  background: var(--sunken);
+  border-left: 3px solid var(--blue);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: 13.5px; line-height: 1.75; color: var(--text2);
+}
+.work-tools b { color: var(--text); }
+
+/* ============================================================
+ * 安全
+ * ============================================================ */
+.safety-grid {
+  display: grid;
+  grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr);
+  gap: 58px;
+  align-items: start;
+}
+.safety-points { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.safety-points li {
+  display: grid; grid-template-columns: 30px 1fr; gap: 14px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--line);
+}
+.safety-points li:last-child { border-bottom: none; }
+.safety-points .tick {
+  width: 24px; height: 24px; margin-top: 4px;
+  display: grid; place-items: center;
+  border: 2px solid var(--ink-line); border-radius: var(--r-sm);
+  background: var(--down); color: var(--card);
+}
+[data-theme="dark"] .safety-points .tick { color: var(--bg); }
+.safety-points .tick svg { width: 13px; height: 13px; }
+.safety-points b { display: block; font-size: 16px; font-weight: 800; margin-bottom: 4px; letter-spacing: -.01em; }
+.safety-points p { font-size: 14.5px; line-height: 1.75; color: var(--text2); }
+
 /* 权限三档 */
 .tiers {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
-  margin-top: 44px;
+  margin-top: 30px;
 }
 .tier {
-  padding: 22px 22px 24px;
+  padding: 20px 20px 22px;
   background: var(--card);
   border: 2px solid var(--ink-line);
   border-radius: var(--r-lg);
@@ -617,112 +767,13 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .tier.is-default .tag { background: var(--blue); color: var(--on-accent); border-color: var(--ink-line); }
 
 /* ============================================================
- * 三种协作形态
+ * 工厂
  * ============================================================ */
-.tabs {
-  display: flex; gap: 0; flex-wrap: wrap;
-  border: 2px solid var(--ink-line);
-  border-radius: var(--r-md);
-  background: var(--raised);
-  padding: 5px;
-  width: fit-content;
-  max-width: 100%;
-  margin-bottom: 34px;
-  box-shadow: var(--shadow-sm);
-}
-.tab {
-  padding: 10px 22px;
-  font-size: 14.5px; font-weight: 700;
-  border-radius: var(--r-sm);
-  color: var(--text2);
-  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-.tab:hover { color: var(--text); background: var(--sunken); }
-.tab[aria-selected="true"] { background: var(--blue); color: var(--on-accent); }
-.tab[aria-selected="true"]:hover { background: var(--blue); color: var(--on-accent); }
-
-.tabpanel[hidden] { display: none; }
-.panel-grid {
-  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-  gap: 46px; align-items: start;
-}
-.panel-copy h3 {
-  font-size: 23px; font-weight: 800; letter-spacing: -.02em;
-  margin-bottom: 14px;
-}
-.panel-copy > p { font-size: 15.5px; line-height: 1.85; color: var(--text2); }
-.panel-role {
-  margin-top: 26px; padding: 20px 22px;
-  background: var(--card);
-  border: 2px solid var(--ink-line);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-sm);
-}
-.panel-role h4 {
-  font-size: 12px; font-weight: 700; letter-spacing: .12em;
-  text-transform: uppercase; color: var(--gold); margin-bottom: 12px;
-}
-.panel-role ol { list-style: none; counter-reset: r; }
-.panel-role li {
-  counter-increment: r;
-  position: relative;
-  padding: 7px 0 7px 34px;
-  font-size: 14.5px; line-height: 1.72; color: var(--text2);
-}
-.panel-role li::before {
-  content: counter(r, decimal-leading-zero);
-  position: absolute; left: 0; top: 9px;
-  font-family: var(--font-mono); font-size: 11.5px; font-weight: 700;
-  color: var(--dim);
-}
-.panel-role li b { color: var(--text); font-weight: 700; }
-
-/* 流式示意图 */
-.flow {
-  background: var(--sunken);
-  border: 2px solid var(--ink-line);
-  border-radius: var(--r-lg);
-  padding: 22px;
-  box-shadow: var(--shadow-md);
-}
-.flow-label {
-  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
-  letter-spacing: .14em; text-transform: uppercase;
-  color: var(--dim); margin-bottom: 16px;
-}
-.flow-lanes { display: flex; flex-direction: column; gap: 12px; }
-.lane {
-  display: grid; grid-template-columns: 96px 1fr; gap: 14px; align-items: center;
-}
-.lane-name {
-  font-size: 12.5px; font-weight: 700; color: var(--text2);
-  text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.lane-track {
-  height: 30px; border-radius: var(--r-sm);
-  border: 2px solid var(--ink-line);
-  background: var(--card);
-  display: flex; align-items: center; padding: 0 12px;
-  font-size: 12px; font-weight: 600; color: var(--text2);
-}
-.lane-track.is-member { background: var(--raised); }
-.lane-track.is-chain { background: repeating-linear-gradient(115deg, var(--card) 0 9px, var(--sunken) 9px 18px); }
-.flow-out {
-  margin-top: 18px; padding: 15px 17px;
-  background: var(--blue); color: var(--on-accent);
-  border: 2px solid var(--ink-line); border-radius: var(--r-sm);
-  font-size: 14px; font-weight: 700;
-  box-shadow: var(--shadow-sm);
-}
-.flow-note { margin-top: 15px; font-size: 12.5px; line-height: 1.7; color: var(--dim); }
-/* 多模型协作拆成两条线：协作 / 接力 的分节标题 */
-.collab-line { margin-bottom: 26px; }
-.collab-line .section-label { margin-bottom: 8px; }
-.collab-line h3 { font-size: 23px; font-weight: 800; letter-spacing: -.02em; line-height: 1.3; }
-.collab-line.is-second { margin-top: 54px; }
-/* 协作区说明：模板权限边界（标签页下方） */
-.collab-note { font-size: 13px; line-height: 1.75; color: var(--dim); }
-.collab-note.is-under-tabs { margin: -16px 0 34px; }
+.factory-shot figcaption { margin-top: 14px; font-size: 13px; line-height: 1.7; color: var(--dim); }
+.factory-points { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 30px; }
+.factory-points article { border-left: 3px solid var(--blue); padding-left: 18px; }
+.factory-points h3 { font-size: 17px; margin-bottom: 8px; }
+.factory-points p { color: var(--text2); font-size: 14px; line-height: 1.75; }
 
 /* ============================================================
  * 界面画廊
@@ -733,15 +784,61 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   gap: 22px;
 }
 .shot { display: flex; flex-direction: column; }
-.shot.wide { grid-column: span 3; }
 .shot .window { box-shadow: var(--shadow-md); transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out); }
 .shot:hover .window { transform: translate(-2px, -2px); box-shadow: var(--shadow-lg); }
 .shot figcaption { margin-top: 14px; font-size: 13.5px; line-height: 1.7; color: var(--text2); }
 .shot figcaption b { display: block; font-size: 15px; font-weight: 800; color: var(--text); margin-bottom: 3px; }
 
+.ext-row {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px;
+  margin-top: 34px;
+}
+.ext {
+  padding: 22px 22px 24px;
+  background: var(--card);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+.ext .section-label { margin-bottom: 9px; }
+.ext h3 { font-size: 17px; font-weight: 800; margin-bottom: 7px; }
+.ext p { font-size: 14px; line-height: 1.72; color: var(--text2); }
+
 /* ============================================================
- * 上手 / 命令
+ * 下载 / 上手
  * ============================================================ */
+.ledger {
+  display: inline-block;
+  font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+  letter-spacing: .09em; line-height: 1.5;
+  padding: 4px 9px;
+  border: 1px solid var(--line2); border-radius: var(--r-xs);
+  background: var(--sunken); color: var(--text2);
+}
+.download-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 26px; align-items: center;
+  padding: 28px 30px;
+  background: var(--raised);
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-md);
+}
+.dl-main h3 {
+  font-family: var(--font-mono); font-size: 20px; font-weight: 700;
+  letter-spacing: -.01em; line-height: 1.4;
+  margin: 11px 0 6px;
+  word-break: break-all;
+}
+.dl-main p { font-size: 14px; color: var(--text2); }
+.dl-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.dl-note {
+  margin: 16px 0 36px;
+  font-size: 13.5px; line-height: 1.8; color: var(--dim);
+}
+.dl-note strong { color: var(--text2); }
+
 .start-grid {
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 24px;
@@ -749,19 +846,17 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .start-card {
   display: flex; flex-direction: column;
   min-width: 0;              /* 允许在窄屏窄于 min-content，否则极窄屏撑出横向滚动 */
-  padding: 30px 30px 32px;
+  padding: 28px 30px 30px;
   background: var(--card);
   border: 2px solid var(--ink-line);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-sm);
 }
-.start-card.is-primary { background: var(--raised); box-shadow: var(--shadow-md); }
 .start-card h3 {
-  font-size: 20px; font-weight: 800; letter-spacing: -.015em;
+  font-size: 19px; font-weight: 800; letter-spacing: -.015em;
   margin-bottom: 8px;
 }
-.start-card > p { font-size: 15px; line-height: 1.8; color: var(--text2); margin-bottom: 22px; }
-.start-card .btn { align-self: flex-start; }
+.start-card > p { font-size: 15px; line-height: 1.8; color: var(--text2); margin-bottom: 20px; }
 .start-meta {
   margin-top: 20px; padding-top: 18px;
   border-top: 1px solid var(--line);
@@ -769,8 +864,32 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .start-meta a { font-weight: 600; }
 
+.steps {
+  list-style: none; counter-reset: s;
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 4px; padding: 16px 18px;
+  background: var(--sunken);
+  border: 1px solid var(--line2);
+  border-radius: var(--r-md);
+}
+.steps li {
+  counter-increment: s;
+  display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 11px;
+  align-items: center;
+  font-size: 14px; line-height: 1.6; color: var(--text2);
+}
+.steps li::before {
+  content: counter(s);
+  width: 20px; height: 20px;
+  display: grid; place-items: center;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+  color: var(--on-accent); background: var(--blue);
+  border-radius: 50%;
+}
+.steps li b { color: var(--text); font-weight: 700; }
+
 .terminal {
-  margin-top: 22px;
+  margin-top: 4px;
   background: var(--frame); color: #e9e2d0;
   border: 2px solid var(--ink-line);
   border-radius: var(--r-md);
@@ -782,6 +901,30 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .terminal .cmd { color: #f4ecd8; }
 .terminal .cmd::before { content: "$ "; color: #6f9d5f; }
 .terminal .ln { display: block; white-space: pre; }
+
+/* ============================================================
+ * 最近更新
+ * ============================================================ */
+.latest { background: var(--card); }
+.update-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
+.update-card {
+  padding: 24px;
+  border: 2px solid var(--ink-line);
+  border-top: 6px solid var(--blue);
+  border-radius: var(--r-md);
+  background: var(--raised);
+  box-shadow: var(--shadow-sm);
+}
+.update-card h3 { font-size: 18px; margin: 13px 0 9px; line-height: 1.5; letter-spacing: -.015em; }
+.update-card p { color: var(--text2); font-size: 14px; line-height: 1.75; }
+.status {
+  display: inline-block; padding: 3px 9px;
+  font: 700 11px/1.6 var(--font-mono);
+  border: 1px solid var(--line2); border-radius: var(--r-xs);
+  color: var(--gold); background: var(--sunken);
+}
+.status.shipped { color: var(--down); }
+.update-footer { margin-top: 24px; color: var(--dim); font-size: 13px; }
 
 /* ============================================================
  * 常见问题
@@ -821,7 +964,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .cta {
   border-top: 2px solid var(--ink-line);
   background: var(--card);
-  padding: 84px 0 88px;
+  padding: 82px 0 86px;
   text-align: center;
 }
 .cta .sheep-sm {
@@ -877,6 +1020,32 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .footer-bottom .sheep-line { color: var(--dim); }
 
 /* ============================================================
+ * 介绍片弹层
+ * ============================================================ */
+.video-dialog {
+  width: min(1080px, calc(100vw - 32px));
+  margin: auto;                 /* 全站 margin:0 重置会盖掉 UA 的居中 */
+  border: 2px solid var(--ink-line);
+  border-radius: var(--r-lg);
+  padding: 0;
+  background: var(--frame);
+  box-shadow: var(--shadow-lg);
+}
+.video-dialog::backdrop { background: rgba(10, 8, 6, .74); }
+.dlg-inner { position: relative; }
+.video-dialog video { display: block; width: 100%; height: auto; background: #000; }
+.dlg-close {
+  position: absolute; top: 9px; right: 9px; z-index: 2;
+  width: 34px; height: 34px;
+  display: grid; place-items: center;
+  border: 2px solid var(--ink-line); border-radius: var(--r-sm);
+  background: var(--raised); color: var(--text);
+  font-size: 14px; font-weight: 700; line-height: 1;
+  box-shadow: var(--shadow-sm);
+}
+.dlg-close:hover { background: var(--sunken); }
+
+/* ============================================================
  * 滚动入场
  * ============================================================ */
 .rise { opacity: 0; transform: translateY(20px); }
@@ -890,14 +1059,14 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
  * ============================================================ */
 @media (max-width: 1080px) {
   .hero-grid { grid-template-columns: 1fr; gap: 52px; }
-  .hero-visual { max-width: 640px; }
+  .hero-visual { max-width: 680px; }
   .hero-sheep { right: 4px; bottom: -30px; }
-  .safety-grid, .panel-grid { grid-template-columns: 1fr; gap: 40px; }
-  .scenes { grid-template-columns: repeat(2, 1fr); }
+  .safety-grid, .work-grid, .split { grid-template-columns: 1fr; gap: 40px; }
   .gallery { grid-template-columns: repeat(2, 1fr); }
-  .shot.wide { grid-column: span 2; }
   .footer-grid { grid-template-columns: repeat(2, 1fr); gap: 34px; }
   .footer-brand-col { grid-column: span 2; }
+  .ext-row { grid-template-columns: 1fr; }
+  .nav { gap: 18px; }
 }
 
 @media (max-width: 820px) {
@@ -919,33 +1088,39 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   }
   .nav::-webkit-scrollbar { display: none; }
   .nav a { flex-shrink: 0; white-space: nowrap; }
-  .section { padding: 66px 0; }
-  .hero { padding: 48px 0 66px; }
-  .facts-grid { grid-template-columns: repeat(2, 1fr); }
-  .fact { padding: 24px 20px; }
-  .fact:nth-child(2) { border-right: none; }
-  .fact:nth-child(1), .fact:nth-child(2) { border-bottom: 1px solid var(--line); }
-  .fact b { font-size: 25px; }
+  .section { padding: 62px 0; }
+  .hero { padding: 44px 0 64px; }
+  .section-head { grid-template-columns: 1fr; gap: 10px; margin-bottom: 38px; }
+  .section-meta { flex-direction: row; align-items: baseline; gap: 12px; padding-top: 0; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .stat { padding: 22px 20px; }
+  .stat:nth-child(2) { border-right: none; }
+  .stat:nth-child(1), .stat:nth-child(2) { border-bottom: 1px solid var(--line); }
+  .stat b { font-size: 28px; }
+  .mode-grid { grid-template-columns: 1fr; gap: 22px; }
   .tiers { grid-template-columns: 1fr; }
   .start-grid { grid-template-columns: 1fr; }
-  .tabs { width: 100%; }
-  .tab { flex: 1; padding: 10px 12px; text-align: center; }
+  .download-bar { grid-template-columns: 1fr; gap: 20px; }
+  .update-grid, .factory-points { grid-template-columns: 1fr; gap: 20px; }
+  .factory-points { gap: 24px; }
 }
 
 @media (max-width: 640px) {
   body { font-size: 15px; }
   .wrap, .wrap-narrow { width: min(100% - 32px, 100%); }
-  .scenes, .gallery { grid-template-columns: 1fr; }
-  .shot.wide { grid-column: span 1; }
+  .gallery { grid-template-columns: 1fr; }
   .footer-grid { grid-template-columns: 1fr; }
   .footer-brand-col { grid-column: span 1; }
-  .hero-actions .btn { flex: 1 1 100%; }
-  .cta-actions .btn { flex: 1 1 100%; }
-  .lane { grid-template-columns: 62px 1fr; gap: 10px; }
-  .lane-name { font-size: 11.5px; }
-  .lane-track { font-size: 11px; padding: 0 9px; }
+  .hero-actions .btn, .cta-actions .btn, .dl-actions .btn { flex: 1 1 100%; }
   .terminal { font-size: 12px; }
   .diff { font-size: 11.5px; }
+  .topo { padding: 6px 16px; }
+  .topo-row { grid-template-columns: 52px minmax(0, 1fr); gap: 10px; }
+  .topo-name { font-size: 13px; }
+  .node { font-size: 11.5px; padding: 3px 8px; }
+  /* 窄屏节点会换行，行首的箭头反而像噪点；顺序本身已经说明流向 */
+  .topo .arrow { display: none; }
+  .mode-shot img { height: 200px; }
 }
 
 /* 极窄屏（320px 一类）：页眉只留图标与下载按钮，避免挤出横向滚动 */
@@ -956,7 +1131,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   .masthead-actions { gap: 8px; }
   .masthead-actions .btn { padding: 8px 14px; }
   .hero-note { font-size: 12.5px; }
-  .fact { padding: 20px 16px; }
+  .stat { padding: 18px 14px; }
+  .stat b { font-size: 24px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -969,38 +1145,12 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   .rise { opacity: 1; transform: none; }
 }
 
-
-/* 最新进展沿用桌面纸墨配色，以真实厂区大图作为视觉重点。 */
-.release-note { margin-top: 18px; color: var(--dim); font-size: 12.5px; }
-.latest { background: var(--card); }
-.latest .section-head { margin-bottom: 32px; max-width: 50em; }
-.update-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
-.update-card { padding: 26px; border: 1px solid var(--line2); border-top: 3px solid var(--blue); border-radius: var(--r-md); background: var(--raised); }
-.update-card h3 { font-size: 19px; margin: 13px 0 10px; line-height: 1.5; }
-.update-card p { color: var(--text2); font-size: 14.5px; }
-.status { display: inline-block; padding: 3px 9px; font: 700 11px/1.6 var(--font-mono); border: 1px solid var(--line2); border-radius: var(--r-xs); color: var(--gold); background: var(--sunken); }
-.status.shipped { color: var(--down); }
-.update-footer { margin-top: 24px; color: var(--dim); font-size: 13px; }
-.factory-head { display: grid; grid-template-columns: 1.2fr 1fr; align-items: end; gap: 44px; margin-bottom: 30px; }
-.factory-head .section-head { margin: 0; }
-.factory-head > p { color: var(--text2); font-size: 15px; }
-.factory-shot figcaption { margin-top: 14px; font-size: 13px; color: var(--dim); }
-.factory-points { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 32px; }
-.factory-points article { border-left: 3px solid var(--blue); padding-left: 18px; }
-.factory-points h3 { font-size: 17px; margin-bottom: 8px; }
-.factory-points p { color: var(--text2); font-size: 14px; }
-.factory-link { margin-top: 28px; display: inline-block; font-weight: 700; }
-@media (max-width: 1080px) { .nav { gap: 18px; } }
-@media (max-width: 820px) {
-  .update-grid, .factory-head { grid-template-columns: 1fr; gap: 20px; }
-  .factory-points { grid-template-columns: 1fr; gap: 24px; }
-}
-
 @media print {
   .masthead, .cta, .hero-sheep { display: none; }
   body { background: #fff; color: #000; }
 }
 </style>
+<noscript><style>.rise{opacity:1;transform:none}.hero-thumbs{display:none}</style></noscript>
 </head>
 <body>
 <a class="skip-link" href="#main">跳到主要内容</a>
@@ -1016,12 +1166,13 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
       </span>
     </a>
     <nav class="nav" aria-label="主导航">
-      <a href="#latest">近期更新</a>
-      <a href="#factory">工厂</a>
-      <a href="#scenes">能干什么</a>
-      <a href="#collab">多模型</a>
+      <a href="#collab">协作</a>
+      <a href="#work">动手</a>
       <a href="#safety">安全</a>
-      <a href="#start">上手</a>
+      <a href="#factory">工厂</a>
+      <a href="#shots">工作台</a>
+      <a href="#start">下载</a>
+      <a href="#latest">更新</a>
       <a href="#faq">常见问题</a>
       <a href="https://github.com/sky-scrape/SkySheep" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -1040,22 +1191,19 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   </div>
 </header>
 
-<main id="main">
+<main id="main" tabindex="-1">
   <span id="top"></span>
 
   <!-- ============ 首屏 ============ -->
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="dot"></span>Windows 桌面应用 · 开源 MIT · v2.6.7</p>
-        <h1>它替你动手，<br><span class="mark"><span>多个模型一起想</span></span></h1>
+        <p class="eyebrow"><span class="dot"></span><span class="eyebrow-text">Windows 桌面应用 · 开源 MIT · <span data-current-version>v2.6.8</span></span></p>
+        <h1>让 AI<br><span class="mark"><span>不再单打独斗</span></span></h1>
         <p class="hero-lede">
-          跑在本机的开源 AI Agent 工作台。给它一个任务，它会自己读写文件、执行命令、
-          联网检索、操作电脑；要紧的事可以让<strong>多个模型一起做</strong>——
-          圆桌并行作答后融合，团队按角色分工，对抗专门挑错。
-        </p>
-        <p class="hero-lede">
-          从讨论到执行，再到定时自动化，都留在同一个工作台。多模型协作分两条线：<strong>协作</strong>让多个模型在同一轮里分工，<strong>接力</strong>让两个会话按轮交接；自动化则变成了一座<strong>看得见运转的工厂</strong>。
+          Windows 桌面 Agent 工作台。<strong>圆桌会诊、团队开工、对抗挑错、两屏接力</strong>——
+          四种协作收在同一个工作台里。它会读写文件、执行命令、操作电脑，
+          但动手前先问你，每一轮都能撤回。
         </p>
         <div class="hero-actions">
           <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">
@@ -1064,7 +1212,10 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
               <path d="M12 3v13M6.5 11l5.5 5.5L17.5 11M4 20.5h16"/>
             </svg>
           </a>
-          <a class="btn btn-ghost btn-lg" href="#latest">看看最近更新了什么</a>
+          <button class="btn btn-ghost btn-lg" type="button" data-open-intro>
+            <svg viewBox="0 0 24 24" fill="currentColor" width="17" height="17" aria-hidden="true"><path d="M8 5.2v13.6L19 12z"/></svg>
+            看 1 分钟介绍
+          </button>
         </div>
         <p class="hero-note">
           <span>
@@ -1073,332 +1224,300 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           </span>
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
-            无遥测 · 会话本地存储
+            无遥测，会话与密钥留在本机
           </span>
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>
-            首次运行需放行 SmartScreen
+            安装包未签名，<a href="#faq">SmartScreen 怎么放行</a>
           </span>
         </p>
-        <p class="release-note">安装包：v2.6.7 · 已含协作模板、团队常驻与定时团队</p>
       </div>
 
       <div class="hero-visual">
         <figure class="hero-shot window">
           <div class="window-bar">
             <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="window-title">SkySheep —— 深色「夜墨」主题</span>
+            <span class="window-title" data-hero-title>团队 —— 工单板、成员与团队频道</span>
             <span class="window-spacer" aria-hidden="true"></span>
           </div>
-          <img src="docs/images/right-panel.png" alt="SkySheep 桌面工作台：左侧会话与项目，中间对话区与确认卡片，右侧实时面板与终端" width="1080" height="608" fetchpriority="high" decoding="async">
+          <img data-hero-img src="docs/images/team.webp"
+               alt="SkySheep 团队协作界面：总管派单，工单板显示待办、进行中与待验收，成员在团队频道汇报"
+               width="1600" height="981" fetchpriority="high" decoding="async">
         </figure>
-        <img class="hero-sheep" src="docs/images/cloud-sheep-web.webp" alt="云朵小羊" width="132" height="132" aria-hidden="true">
-      </div>
-    </div>
-  </section>
 
-  <!-- ============ 事实条 ============ -->
-  <section class="facts" aria-label="项目概况">
-    <div class="wrap facts-grid">
-      <div class="fact"><b>动手</b><span>文件、命令、检索、文档与电脑操作</span></div>
-      <div class="fact"><b>接入</b><span>多家模型服务预设，兼容本地推理服务</span></div>
-      <div class="fact"><b>协作</b><span>圆桌 / 团队 / 对抗，收成可复用模板</span></div>
-      <div class="fact"><b>接力</b><span>主副屏按轮交接，交接前先复述核验</span></div>
-    </div>
-  </section>
-
-  <!-- ============ 介绍片 ============ -->
-  <section class="section demo" id="intro">
-    <div class="wrap">
-      <div class="section-head rise">
-        <span class="section-label">介绍片 · 1 分钟</span>
-        <h2>多模型协作，<br>一分钟看明白</h2>
-        <p>圆桌并行作答、团队工单板、对抗审查、接力交替，敏感操作默认确认、可回滚，自动化最后汇成一座看得见运转的工厂。带配乐的一分钟，看完就知道 SkySheep 长什么样。</p>
-      </div>
-      <figure class="demo-shot rise">
-        <div class="window">
-          <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">SkySheep 介绍片 · 多模型协作的本地 AI 工作台</span><span class="window-spacer" aria-hidden="true"></span></div>
-          <video src="docs/demo/skysheep-intro-1080p.mp4" poster="docs/demo/skysheep-intro-cover.webp"
-                 width="1920" height="1080" controls playsinline preload="none"
-                 aria-label="SkySheep 一分钟介绍片：开场品牌动画，依次展示圆桌观点对照、团队工单板、对抗审查、接力交替、命令可见与一键撤销、自动化工厂，收尾回到「多模型协作的本地 AI 工作台」"></video>
+        <div class="hero-thumbs" role="group" aria-label="切换协作方式截图">
+          <button type="button" aria-pressed="true" data-hero-thumb
+                  data-src="docs/images/team.webp" data-w="1600" data-h="981"
+                  data-title="团队 —— 工单板、成员与团队频道"
+                  data-alt="SkySheep 团队协作界面：总管派单，工单板显示待办、进行中与待验收，成员在团队频道汇报">团队</button>
+          <button type="button" aria-pressed="false" data-hero-thumb
+                  data-src="docs/images/roundtable.webp" data-w="1600" data-h="1280"
+                  data-title="圆桌 —— 多个成员并行作答，主席融合"
+                  data-alt="SkySheep 圆桌协作界面：多个成员模型并行作答，主席把草稿融合成一份结论">圆桌</button>
+          <button type="button" aria-pressed="false" data-hero-thumb
+                  data-src="docs/images/adversarial.webp" data-w="1600" data-h="1227"
+                  data-title="对抗 —— 发现、调查、建议、裁判"
+                  data-alt="SkySheep 对抗审查界面：五条候选中两条成立，每条列出证据、依据与修复建议">对抗</button>
         </div>
-        <figcaption>本页播放 1080p 完整版（15 MB），点播放开始、不从第三方加载；也可<a href="https://github.com/Sky-scrape/SkySheep/releases/download/intro-2026-10/skysheep-intro-1080p.mp4">直接下载 ↗</a>（GitHub Release 资产）。</figcaption>
-      </figure>
+
+        <img class="hero-sheep" src="docs/images/cloud-sheep-web.webp" alt="" width="132" height="132" aria-hidden="true">
+      </div>
     </div>
   </section>
 
-  <!-- ============ 实机演示 ============ -->
-  <section class="section demo" id="demo">
+  <!-- ============ 数字条 ============ -->
+  <section class="stats" aria-label="项目概况">
+    <div class="wrap stats-grid">
+      <div class="stat"><b>30</b><span>个内置工具</span></div>
+      <div class="stat"><b>10</b><span>家模型服务预设</span></div>
+      <div class="stat"><b>4</b><span>种多模型协作方式</span></div>
+      <div class="stat"><b>26</b><span>套界面主题</span></div>
+    </div>
+  </section>
+
+  <!-- ============ 四种协作 ============ -->
+  <section class="section" id="collab">
     <div class="wrap">
       <div class="section-head rise">
-        <span class="section-label">实机演示 · 5 分 19 秒</span>
-        <h2>它真的动手，<br>不是说说而已</h2>
-        <p>工具真的执行、写文件真的弹确认、撤销真的把文件收回；圆桌、团队、对抗、接力各自跑完整流水线。下面这段 17 秒循环是完整片里的四幕，静音自动播放。</p>
+        <div class="section-meta">
+          <span class="section-num">01</span>
+          <span class="section-label">Multi-model</span>
+        </div>
+        <div class="section-body">
+          <h2>四种协作，<br>让 AI 不再单打独斗</h2>
+          <p>一个模型容易顺着自己的思路写，也想不全。SkySheep 把「多模型」做成工作流：有的并行会诊，有的分工开工，有的专门挑错，有的在两个会话之间交接。</p>
+        </div>
       </div>
+
+      <div class="topo rise" role="img" aria-label="四种协作的分工拓扑：圆桌由成员并行作答、主席融合；团队由总管拆解派单、队员执行、验收交付；对抗按发现、调查、建议、裁判推进；接力在主屏与副屏之间按轮交接">
+        <div class="topo-row">
+          <span class="topo-name">圆桌</span>
+          <div class="topo-track">
+            <span class="node">成员 A 独立作答</span>
+            <span class="node">成员 B 独立作答</span>
+            <span class="node">成员 C 独立作答</span>
+            <span class="arrow">→</span>
+            <span class="node is-out">主席融合</span>
+          </div>
+        </div>
+        <div class="topo-row">
+          <span class="topo-name">团队</span>
+          <div class="topo-track">
+            <span class="node">总管拆解</span><span class="arrow">→</span>
+            <span class="node">派单</span><span class="arrow">→</span>
+            <span class="node">队员执行</span><span class="arrow">→</span>
+            <span class="node is-out">验收交付</span>
+          </div>
+        </div>
+        <div class="topo-row">
+          <span class="topo-name">对抗</span>
+          <div class="topo-track">
+            <span class="node">发现</span><span class="arrow">→</span>
+            <span class="node">调查</span><span class="arrow">→</span>
+            <span class="node">建议</span><span class="arrow">→</span>
+            <span class="node is-out">裁判</span>
+          </div>
+        </div>
+        <div class="topo-row">
+          <span class="topo-name">接力</span>
+          <div class="topo-track">
+            <span class="node">主屏出方案</span><span class="arrow">→</span>
+            <span class="node">复述核验</span><span class="arrow">→</span>
+            <span class="node">副屏执行</span><span class="arrow">→</span>
+            <span class="node is-out">交回修订</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="mode-grid">
+        <article class="mode-card rise">
+          <div class="mode-head">
+            <div>
+              <span class="mode-en">Round table</span>
+              <h3>圆桌 · 会诊</h3>
+            </div>
+            <span class="stamp" aria-hidden="true">会诊</span>
+          </div>
+          <figure class="mode-shot">
+            <img src="docs/images/roundtable.webp" alt="圆桌协作界面：多个成员模型并行作答，主席融合成一份结论" loading="lazy" decoding="async" width="1600" height="1280">
+          </figure>
+          <dl class="mode-specs">
+            <div><dt>谁在干</dt><dd>几个模型同时答，主席合成一份</dd></div>
+            <div><dt>产出</dt><dd>一份结论 + 全部草稿可回看</dd></div>
+            <div><dt>适合</dt><dd>开放问题、方案比选、重要判断</dd></div>
+          </dl>
+        </article>
+
+        <article class="mode-card rise">
+          <div class="mode-head">
+            <div>
+              <span class="mode-en">Team</span>
+              <h3>团队 · 开工</h3>
+            </div>
+            <span class="stamp" aria-hidden="true">开工</span>
+          </div>
+          <figure class="mode-shot">
+            <video src="docs/demo/mode-team.mp4" poster="docs/images/teamroom.png"
+                   width="1200" height="602" muted loop playsinline preload="metadata" tabindex="0"
+                   title="点击或按回车暂停 / 继续"
+                   aria-label="团队协作演示：从协作菜单选择团队模板，跑前确认授权清单，工单板开始推进；点击或按回车暂停"></video>
+          </figure>
+          <dl class="mode-specs">
+            <div><dt>谁在干</dt><dd>总管拆活派单，队员按角色干</dd></div>
+            <div><dt>产出</dt><dd>一批工单成果 + 交付说明</dd></div>
+            <div><dt>适合</dt><dd>多步骤工程活、需要交付物</dd></div>
+          </dl>
+        </article>
+
+        <article class="mode-card rise">
+          <div class="mode-head">
+            <div>
+              <span class="mode-en">Adversarial</span>
+              <h3>对抗 · 挑错</h3>
+            </div>
+            <span class="stamp" aria-hidden="true">挑错</span>
+          </div>
+          <figure class="mode-shot">
+            <img src="docs/images/adversarial.webp" alt="对抗审查界面：五个候选中两条成立、一条部分成立、一条被推翻，每条附证据与修复建议" loading="lazy" decoding="async" width="1600" height="1227">
+          </figure>
+          <dl class="mode-specs">
+            <div><dt>谁在干</dt><dd>有人找问题，有人专管推翻</dd></div>
+            <div><dt>产出</dt><dd>只留成立的问题 + 修复建议</dd></div>
+            <div><dt>适合</dt><dd>代码、方案、文档的审查</dd></div>
+          </dl>
+        </article>
+
+        <article class="mode-card rise">
+          <div class="mode-head">
+            <div>
+              <span class="mode-en">Relay</span>
+              <h3>接力 · 交接</h3>
+            </div>
+            <span class="stamp" aria-hidden="true">交接</span>
+          </div>
+          <figure class="mode-shot">
+            <video src="docs/demo/mode-relay.mp4" poster="docs/images/relay.webp"
+                   width="1200" height="602" muted loop playsinline preload="metadata" tabindex="0"
+                   title="点击或按回车暂停 / 继续"
+                   aria-label="接力演示：主屏出方案、副屏评审，右侧看板记录每一轮的交接；点击或按回车暂停"></video>
+          </figure>
+          <dl class="mode-specs">
+            <div><dt>谁在干</dt><dd>两个会话按轮换手，交接前先复述</dd></div>
+            <div><dt>产出</dt><dd>一条完整交接链 + 两屏各自会话</dd></div>
+            <div><dt>适合</dt><dd>长任务、换视角、换模型继续做</dd></div>
+          </dl>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 一套模板 ============ -->
+  <section class="section" id="templates">
+    <div class="wrap">
+      <div class="section-head rise">
+        <div class="section-meta">
+          <span class="section-num">02</span>
+          <span class="section-label">Templates</span>
+        </div>
+        <div class="section-body">
+          <h2>三种协作，收进一套模板</h2>
+          <p>圆桌、团队、对抗都能存成模板：角色、模型、提示词、预算一次配好，下次从协作菜单直接选。内置三张——圆桌·多模型评审、团队·交付小组、对抗·代码审查。</p>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="rule-list rise">
+          <div class="rule">
+            <b>跑前只问一次</b>
+            <p>开始前弹一张授权清单，勾一次「本次运行允许什么」，不用在每一轮里反复点。</p>
+          </div>
+          <div class="rule">
+            <b>模板只能收窄权限</b>
+            <p>模板只声明「这次要用到什么」：只读、可写、可执行，加工具白名单。schema 里没有关掉确认的字段。</p>
+          </div>
+          <div class="rule">
+            <b>该确认的照旧确认</b>
+            <p>删除类操作、引擎主目录与工作目录外的写入，仍然逐次弹卡；命令白名单按真实 shell 判定，拼一条命令就得重新确认。</p>
+          </div>
+          <div class="rule">
+            <b>复制一份就能改</b>
+            <p>内置模板可以直接用，也可以另存为自己的：换成员、换模型、改提示词、调预算，都留在本机。</p>
+          </div>
+        </div>
+
+        <div class="demo-stage rise">
+          <p class="demo-label">跑前授权清单 · 示意</p>
+          <div class="card-permit">
+            <div class="permit-head">
+              <span class="badge">模板</span>
+              <span>圆桌 · 多模型评审</span>
+            </div>
+            <ul class="permit-list">
+              <li><span class="box on" aria-hidden="true"></span>读取项目文件</li>
+              <li><span class="box on" aria-hidden="true"></span>在工作目录内写入</li>
+              <li><span class="box on" aria-hidden="true"></span>本次运行中不再逐次确认</li>
+              <li><span class="box" aria-hidden="true"></span>执行命令（仍需逐次确认）</li>
+            </ul>
+            <p class="permit-foot">「不再逐次确认」只覆盖勾选项，且限工作目录内；删除类与目录外写入不在此列。</p>
+          </div>
+          <p class="demo-caption">示意图。真实界面里会按模板声明的能力逐项列出，未声明的保持默认。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 它真动手 ============ -->
+  <section class="section" id="work">
+    <div class="wrap">
+      <div class="section-head rise">
+        <div class="section-meta">
+          <span class="section-num">03</span>
+          <span class="section-label">Hands-on</span>
+        </div>
+        <div class="section-body">
+          <h2>它真的会动手</h2>
+          <p>不是给建议，是把活干完，再把你该看的都摊在界面上：改了什么、跑过什么、能不能撤回。</p>
+        </div>
+      </div>
+
+      <div class="work-grid">
+        <div class="rise">
+          <ul class="work-points">
+            <li>
+              <b>写文件先给 diff</b>
+              <p>每一处改动都带变更预览，看得懂再点允许；移动与删除走可回滚的专用操作。</p>
+            </li>
+            <li>
+              <b>跑命令先问你</b>
+              <p>默认逐次确认。命令白名单按真实 shell 判定，带拼接或解释器旗标的一律重新确认。</p>
+            </li>
+            <li>
+              <b>撤销本轮改动</b>
+              <p>文件改动按轮快照，一键撤回，重启应用后仍然能撤；每会话保留 50 轮，全项目兜底 500 条。</p>
+            </li>
+          </ul>
+          <p class="work-tools"><b>30 个内置工具：</b>文件读写与精确编辑、命令与后台进程、正则与通配搜索、网页抓取、PDF / Word / Excel / PPT / CSV、图片理解与生成、浏览器与电脑控制、子代理、定时与编排。</p>
+        </div>
+
+        <figure class="window rise">
+          <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">消息与操作 —— diff、工具调用与撤销入口</span><span class="window-spacer" aria-hidden="true"></span></div>
+          <img src="docs/images/message-ops.webp" alt="对话里的工具调用：write_file 展示完整 diff，批准后写入文件，底部出现「撤销本轮改动」入口" loading="lazy" decoding="async" width="1668" height="1384">
+        </figure>
+      </div>
+
       <figure class="demo-shot rise">
         <div class="window">
           <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">实机录屏 · 工具调用 / 权限确认 / 终端核对 / 工厂看板</span><span class="window-spacer" aria-hidden="true"></span></div>
           <video src="docs/demo/skysheep-live-demo-teaser.mp4" poster="docs/demo/skysheep-live-demo-cover.webp"
-                 width="1280" height="666" autoplay muted loop playsinline preload="metadata"
+                 width="1280" height="666" controls playsinline preload="none"
                  aria-label="SkySheep 实机操作预告：工具调用命中的文件、写文件前的 diff 确认、终端里核对落盘、工厂看板里的成品垛与在跑包裹"></video>
         </div>
-        <figcaption>预告 17 秒，取自完整片，无声循环；完整版九站，带配乐与 57 条中文字幕。</figcaption>
+        <figcaption>17 秒预告，取自 5 分 19 秒完整片（九站，带配乐与 57 条中文字幕）。全部画面来自真实运行的窗口。</figcaption>
       </figure>
       <div class="demo-actions rise">
-        <a class="btn-primary" href="https://github.com/Sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4">▶ 看完整版（5:19 · 1080p · 52 MB）</a>
-        <a class="btn-ghost" href="https://github.com/Sky-scrape/SkySheep/blob/main/docs/demo/README.md" target="_blank" rel="noopener">分镜与素材说明 ↗</a>
-        <span class="demo-meta">全部画面来自真实运行的窗口，模型文本由内置脚本化模型回放</span>
-      </div>
-    </div>
-  </section>
-
-  <section class="section latest" id="latest">
-    <div class="wrap">
-      <div class="section-head rise">
-        <span class="section-label">最近更新 · 2026.11.07</span>
-        <h2>协作收成模板，交接先说清楚</h2>
-        <p>v2.6.6 把协作收成一套可复用的模板（圆桌 / 团队 / 对抗），团队可以常驻、也能到点自己上班；接力在交接前先复述核验。v2.6.7 补了一批权限门与稳定性加固。</p>
-      </div>
-      <div class="update-grid">
-        <article class="update-card rise">
-          <span class="status shipped">v2.6.6 · 已发布</span>
-          <h3>三种协作，收成一套模板</h3>
-          <p>内置「圆桌·多模型评审 / 团队·交付小组 / 对抗·代码审查」三张模板，复制一份就能改角色、模型、提示词与预算。跑前弹一次授权清单——模板只能收窄权限，关不掉确认。</p>
-        </article>
-        <article class="update-card rise">
-          <span class="status shipped">v2.6.6 · 已发布</span>
-          <h3>团队常在，也能到点上班</h3>
-          <p>侧栏「协作」入口带活动团队角标，成员带、频道与工单板三分区同屏；队伍可跨会话常驻，定时任务可选团队形态，导出成 Windows 计划任务后应用关着也照跑。</p>
-        </article>
-        <article class="update-card rise">
-          <span class="status shipped">v2.6.7 · 已发布</span>
-          <h3>权限门再收紧一档</h3>
-          <p>并发只读批补上出站密钥扫描，前缀白名单对 tar / npm 这类「一次批准 = 整族放行」的任意执行面收窄；另修了一批并发、编码与资源泄漏问题。</p>
-        </article>
-      </div>
-      <p class="update-footer">以上更新均已进入 v2.6.7 安装包。<a href="https://github.com/sky-scrape/SkySheep/blob/main/CHANGELOG.md" target="_blank" rel="noopener">查看完整更新日志 ↗</a></p>
-    </div>
-  </section>
-
-  <section class="section" id="factory">
-    <div class="wrap">
-      <div class="factory-head rise">
-        <div class="section-head">
-          <span class="section-label">工厂看板 · 持续完善</span>
-          <h2>任务在跑，<br>工厂也在运转</h2>
-        </div>
-        <p>每个项目一座厂区，每条自动化一条产线。机台亮灯、包裹前进、成品装车，把分散的定时任务与编排放进一张看得见进度的地图；点开机台先给一句话诊断，能就地修的（比如补工具预授权）两步确认即可。</p>
-      </div>
-      <figure class="factory-shot rise">
-        <div class="window">
-          <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">工厂看板 · 多项目自动化场景</span><span class="window-spacer" aria-hidden="true"></span></div>
-          <img src="docs/images/factory.webp" alt="工厂看板实景：左侧按项目列出产线，等距厂区中的机台与传送带展示自动化运行" width="1600" height="1000" loading="lazy" decoding="async">
-        </div>
-        <figcaption>源码界面预览。工厂看板目前仅在本机使用；没有真实产线时，可先看明确标注的样板厂演示。</figcaption>
-      </figure>
-      <div class="factory-points">
-        <article class="rise"><h3>结果有迹可查</h3><p>成功进成品区，失败进返工区。每次运行留下耗时与结果摘要；遇到权限拦截，会标明「有拦截」，方便判断任务是否真的做成。</p></article>
-        <article class="rise"><h3>运行有边界</h3><p>并发满额自动排队，单次运行有超时上限，连续失败会聚合提醒。需要时在本机手动派工或查看运行记录。</p></article>
-        <article class="rise"><h3>厂区的一天</h3><p>场景随时间切换昼夜；自选天气城市后，可跟着当地天气呈现雨、雪与雾。</p></article>
-      </div>
-      <a class="factory-link" href="#start">从源码体验工厂看板 ↓</a>
-    </div>
-  </section>
-
-  <!-- ============ 能干什么 ============ -->
-  <section class="section" id="scenes">
-    <div class="wrap">
-      <div class="section-head rise">
-        <span class="section-label">Capabilities</span>
-        <h2>把日常任务交给工作台</h2>
-        <p>下面每一类都是把要求说清楚就能开工的日常任务，不需要你先写脚本。</p>
-      </div>
-
-      <div class="scenes">
-        <article class="scene rise">
-          <p class="scene-no">文件与文档</p>
-          <h3>整理堆积如山的文件</h3>
-          <p>文件读写与精确编辑、PDF / Word / Excel / PPT / CSV 解析都是内置工具。移动与删除走可回滚的专用操作，误删也能撤。</p>
-          <p class="scene-quote">把下载文件夹堆了半年的文件，按类型归档重命名</p>
-        </article>
-
-        <article class="scene rise">
-          <p class="scene-no">现有项目</p>
-          <h3>在代码库里干活</h3>
-          <p>读代码、定位问题、改文件、跑测试，一轮做完不满意就撤销本轮改动。适合改配置、批量重构、写小工具这类验收标准明确的任务。</p>
-          <p class="scene-quote">这个报错复现一下，找到根因改掉，再补一条防回归的测试</p>
-        </article>
-
-        <article class="scene rise">
-          <p class="scene-no">定时自动化</p>
-          <h3>把重复劳动变成定时任务</h3>
-          <p>定时任务到点执行，依赖编排串起多步流程。可导出为 Windows 系统计划任务，让应用关闭后也能执行。工厂看板把所有项目的自动化运行摆进一张场景图，集中查看与派工。</p>
-          <p class="scene-quote">每天早上八点抓这几个网站的新内容，汇总后推到飞书群</p>
-        </article>
-
-        <article class="scene rise">
-          <p class="scene-no">多模型会诊</p>
-          <h3>重要的事不只问一个模型</h3>
-          <p>圆桌让多个模型各自作答、主席融合成一份答案；团队按角色分工、工单板跟进度；对抗模式组织专门挑错的审查流水线。三种形态都收在协作模板里；另一条线是接力，主副屏按轮交接，交接前先复述核验。</p>
-          <p class="scene-quote">这个方案让几个模型各自挑一遍毛病，再给我结论</p>
-        </article>
-
-        <article class="scene rise">
-          <p class="scene-no">电脑控制</p>
-          <h3>替你操作界面</h3>
-          <p>截屏、鼠标、键盘、窗口、剪贴板五类动作，默认关闭，需要时在设置里按需开启。适合「在几个软件里各点一遍导出」这类重复操作。</p>
-          <p class="scene-quote">在这三个软件里各导出一次报表，存到同一个文件夹</p>
-        </article>
-
-        <article class="scene rise">
-          <p class="scene-no">远程使用</p>
-          <h3>远程也管得住</h3>
-          <p>手机浏览器打开完整界面，确认卡照常逐条弹；飞书 / 微信里发消息派活，收日报与终态通知。</p>
-          <p class="scene-quote">出门前派个活，路上用手机把确认卡点完</p>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ 多模型协作 ============ -->
-  <section class="section" id="collab">
-    <div class="wrap">
-      <div class="section-head rise">
-        <span class="section-label">Multi-model</span>
-        <h2>多模型协作的两条线：协作，与接力</h2>
-        <p><strong>协作</strong>让多个模型在同一轮任务里分工：圆桌 / 团队 / 对抗三种形态，已经收进一套可复用的协作模板。<strong>接力</strong>则是两个会话按轮交接：主屏出方案、副屏执行、再交回修订。输入框的协作菜单管前者，侧栏「接力」工作台管后者。</p>
-      </div>
-
-      <div class="collab-line rise">
-        <span class="section-label">Line 01 · 协作</span>
-        <h3>同一轮任务里，让多个模型分工</h3>
-      </div>
-
-      <div class="tabs rise" role="tablist" aria-label="多模型协作模式">
-        <button class="tab" role="tab" id="tab-round" aria-controls="panel-round" aria-selected="true" type="button">圆桌</button>
-        <button class="tab" role="tab" id="tab-team" aria-controls="panel-team" aria-selected="false" tabindex="-1" type="button">团队</button>
-        <button class="tab" role="tab" id="tab-adv" aria-controls="panel-adv" aria-selected="false" tabindex="-1" type="button">对抗</button>
-      </div>
-      <p class="collab-note is-under-tabs rise">模板只能收窄权限：跑前清单里的「本次运行中不再逐次确认」，只免模板声明过、且落在工作目录内的写入与命令前缀；删除类操作、引擎主目录与工作目录外的写入照旧逐次确认。</p>
-
-      <!-- 圆桌 -->
-      <div class="tabpanel" role="tabpanel" id="panel-round" aria-labelledby="tab-round" tabindex="0">
-        <div class="panel-grid">
-          <div class="panel-copy">
-            <h3>圆桌 —— 一次提问，多个模型共同作答</h3>
-            <p>成员模型并行独立作答，主席（主对话模型）把全部草稿融合成一份最终答案，锋利的批评和稳妥的结论都能留下。</p>
-            <div class="panel-role">
-              <h4>可调的部分</h4>
-              <ol>
-                <li><b>身份预设</b>：批评者、事实核查员、简洁派、实干者等五种成员角色</li>
-                <li><b>辩论修订</b>：可开启辩论轮，成员互看草稿后再修订一轮；A/B 模式保留各自原始回答</li>
-                <li><b>草稿留存</b>：每份草稿随会话落库，可回看、引用、追问</li>
-                <li><b>收进模板</b>：成员、身份预设与预算可以存成自己的模板，下次在协作菜单里直接选</li>
-              </ol>
-            </div>
-          </div>
-          <div class="flow rise">
-            <p class="flow-label">流程示意</p>
-            <div class="flow-lanes">
-              <div class="lane"><span class="lane-name">成员 A</span><span class="lane-track is-member">独立作答 · 批评者</span></div>
-              <div class="lane"><span class="lane-name">成员 B</span><span class="lane-track is-member">独立作答 · 事实核查</span></div>
-              <div class="lane"><span class="lane-name">成员 C</span><span class="lane-track is-member">独立作答 · 实干者</span></div>
-              <div class="lane"><span class="lane-name">主席</span><span class="lane-track is-chain">融合成一份最终答案</span></div>
-            </div>
-            <p class="flow-out">输出：一份融合结论 + 可回看的全部草稿</p>
-            <p class="flow-note">雷同草稿会去重、成员使用轻上下文等七项机制用于控制 Token 消耗。</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- 团队 -->
-      <div class="tabpanel" role="tabpanel" id="panel-team" aria-labelledby="tab-team" tabindex="0" hidden>
-        <div class="panel-grid">
-          <div class="panel-copy">
-            <h3>团队 —— 按角色分工，工单板跟进度</h3>
-            <p>把一个大任务拆成若干工单，每个队员有自己的角色、模型和工具范围，在团队频道里汇报、被验收、被打回重做。队伍可以跨会话常驻，到点由定时任务唤醒。</p>
-            <div class="panel-role">
-              <h4>两种总管</h4>
-              <ol>
-                <li><b>用户总管</b>：你每条消息就是一道指令，自己决定派给谁</li>
-                <li><b>AI 总管</b>：指定一个模型当总管，自动推进拆解 → 派工 → 收报 → 验收 → 交付；你保留插话、接管、收队三权</li>
-                <li><b>小会</b>：需要几个人碰一下时开一轮圆桌，讨论只在频道里呈现，不打断主线</li>
-                <li><b>常驻与团队室</b>：队伍可跨会话常驻；成员带、频道消息流与工单板在「协作」页签三分区同屏</li>
-              </ol>
-            </div>
-          </div>
-          <div class="flow rise">
-            <p class="flow-label">流程示意</p>
-            <div class="flow-lanes">
-              <div class="lane"><span class="lane-name">总管</span><span class="lane-track">拆解任务 · 派单</span></div>
-              <div class="lane"><span class="lane-name">队员 1</span><span class="lane-track is-member">认领工单 · 执行</span></div>
-              <div class="lane"><span class="lane-name">队员 2</span><span class="lane-track is-member">认领工单 · 执行</span></div>
-              <div class="lane"><span class="lane-name">总管</span><span class="lane-track is-chain">验收 / 打回 / 改派</span></div>
-            </div>
-            <p class="flow-out">输出：可交付成果 + 完整频道记录</p>
-            <p class="flow-note">防失控上限：全局轮次上限、重复返工超限强制裁定、成员停滞自动移交总管、Token 预算越线强制交付。定时任务也能选团队形态，与手动起队走同一条执行链。</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- 对抗 -->
-      <div class="tabpanel" role="tabpanel" id="panel-adv" aria-labelledby="tab-adv" tabindex="0" hidden>
-        <div class="panel-grid">
-          <div class="panel-copy">
-            <h3>对抗 —— 专门找错的审查流水线</h3>
-            <p>不追求答案好看，追求把问题挖出来。四个角色接力，各自只看得到自己该看的那部分，避免互相迁就。</p>
-            <div class="panel-role">
-              <h4>为什么更难被糊弄</h4>
-              <ol>
-                <li><b>不对称激励</b>：挑出问题的收益高于点头附和，角色设定上就不鼓励和稀泥</li>
-                <li><b>阶段上下文隔离</b>：发现、调查、建议、裁判各自独立，后面的角色不被前面的措辞带偏</li>
-                <li><b>失败隔离降级</b>：某一环失败不会让整条流水线作废，按降级路径给出可用结论</li>
-              </ol>
-            </div>
-          </div>
-          <div class="flow rise">
-            <p class="flow-label">流程示意</p>
-            <div class="flow-lanes">
-              <div class="lane"><span class="lane-name">发现</span><span class="lane-track is-member">列出可疑点</span></div>
-              <div class="lane"><span class="lane-name">调查</span><span class="lane-track is-member">逐条核实</span></div>
-              <div class="lane"><span class="lane-name">建议</span><span class="lane-track is-member">给出改法</span></div>
-              <div class="lane"><span class="lane-name">裁判</span><span class="lane-track is-chain">裁定哪些成立</span></div>
-            </div>
-            <p class="flow-out">输出：成立的问题清单 + 对应修复建议</p>
-            <p class="flow-note">审查结论可一键转为团队顾问工单，报告可导出 Markdown；在飞书 / 微信里发 <span class="mono">/对抗 内容</span> 也能跑同一轮。</p>
-          </div>
-        </div>
-      </div>
-
-      <div class="collab-line is-second rise" id="relay-line">
-        <span class="section-label">Line 02 · 接力（实验性）</span>
-        <h3>两个会话之间，按轮交接</h3>
-      </div>
-
-      <div class="panel-grid">
-        <div class="panel-copy rise">
-          <h3>接力 —— 主副屏按轮交替</h3>
-          <p>适合「出方案 → 执行 → 反馈 → 修订」这类需要两边来回交接的活。主屏就是当前会话，副屏是独立会话；每轮都是完整对话（工具、权限门、检查点照常），后一轮能读到前一轮的输出，两屏正文各自留档。</p>
-          <div class="panel-role">
-            <h4>交接前先说清楚</h4>
-            <ol>
-              <li><b>复述</b>：接收方先做一次无工具复述（目标 / 已完成 / 待办 / 计划 / 不确定）</li>
-              <li><b>核验</b>：移交方对照刚落地的输出核验，通过才开轮；驳回带理由重述</li>
-              <li><b>盘点</b>：每轮开跑前盘点两边名下的后台子代理与后台命令，收敛不了就暂停等人</li>
-            </ol>
-          </div>
-        </div>
-        <div class="flow rise">
-          <p class="flow-label">流程示意</p>
-          <div class="flow-lanes">
-            <div class="lane"><span class="lane-name">主屏</span><span class="lane-track">出方案</span></div>
-            <div class="lane"><span class="lane-name">副屏</span><span class="lane-track is-member">执行</span></div>
-            <div class="lane"><span class="lane-name">交接核验</span><span class="lane-track is-chain">复述 → 核验 → 开轮</span></div>
-            <div class="lane"><span class="lane-name">主屏</span><span class="lane-track is-member">反馈与修订</span></div>
-          </div>
-          <p class="flow-out">输出：一条完整的交接链 + 两屏各自的会话</p>
-          <p class="flow-note">可开「连续交替」自动轮流执行；「交接前复述核验」默认开，人工逐轮批准时自动跳过。</p>
-        </div>
+        <a class="btn btn-primary" href="https://github.com/sky-scrape/SkySheep/releases/download/demo-2026-10/skysheep-live-demo-1080p.mp4">▶ 看完整版（5:19 · 1080p · 52 MB）</a>
+        <a class="btn btn-ghost" href="https://github.com/sky-scrape/SkySheep/blob/main/docs/demo/README.md" target="_blank" rel="noopener">分镜与素材说明 ↗</a>
+        <span class="demo-meta">模型文本由内置脚本化模型回放</span>
       </div>
     </div>
   </section>
@@ -1407,9 +1526,14 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   <section class="section" id="safety">
     <div class="wrap">
       <div class="section-head rise">
-        <span class="section-label">Safety by default</span>
-        <h2>让 Agent 替你动手，前提是出了事兜得住</h2>
-        <p>安全是默认行为，不需要先配置一轮。</p>
+        <div class="section-meta">
+          <span class="section-num">04</span>
+          <span class="section-label">Safety by default</span>
+        </div>
+        <div class="section-body">
+          <h2>先问，再动手，能撤回</h2>
+          <p>安全是默认行为，不需要先配置一轮。只读自动放行，写文件与执行命令默认要你点头。</p>
+        </div>
       </div>
 
       <div class="safety-grid">
@@ -1419,45 +1543,63 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
               <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
               <div>
                 <b>每一步先确认</b>
-                <p>只读操作自动放行；写文件（附 diff 预览）与执行命令默认逐次弹卡确认。三档权限模式可调，放宽档仅限本机界面切换。</p>
+                <p>写文件附 diff 预览，执行命令逐次弹卡；三档权限可调，放宽档只在本机界面切换。</p>
               </div>
             </li>
             <li>
               <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
               <div>
-                <b>命令白名单按实际 shell 判定</b>
-                <p>按完整词前缀匹配；含 shell 拼接或解释器旗标的命令不命中规则、一律重新确认。规则按项目持久化，设置页可管理。</p>
+                <b>白名单按真实 shell 判定</b>
+                <p>完整词前缀匹配；含 shell 拼接或解释器旗标的命令不命中规则，一律重新确认。规则按项目持久化。</p>
               </div>
             </li>
             <li>
               <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
               <div>
                 <b>协作模板只能收窄权限</b>
-                <p>模板只声明角色需要的能力档位（只读 / 可写 / 可执行）与工具白名单，schema 里没有能关掉确认的字段；跑前一次授权只免模板声明过、且落在工作目录内的写入与命令前缀。</p>
+                <p>模板声明的是「这次需要用到什么」，没有关掉确认的字段；跑前一次授权只免声明过、且落在工作目录内的写入与命令前缀。</p>
               </div>
             </li>
             <li>
               <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
               <div>
                 <b>改动可回滚</b>
-                <p>文件改动按轮快照，一键撤销本轮改动，重启后仍可回滚；每会话保留 50 轮，全项目兜底 500 条。</p>
+                <p>文件改动按轮快照，一键撤销本轮，重启后仍可回滚；每会话 50 轮，全项目兜底 500 条。</p>
               </div>
             </li>
             <li>
               <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
               <div>
-                <b>会话本地存储，无遥测</b>
-                <p>会话、配置、密钥存于本机，无遥测。网页抓取仅允许公网 http(s)、具备 SSRF 防护；外部网页内容按数据处理，不当作指令执行。</p>
+                <b>会话与密钥留在本机</b>
+                <p>没有云端账号，无遥测；会话、配置、密钥、检查点都存在你自己的电脑上。</p>
               </div>
             </li>
             <li>
               <span class="tick" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg></span>
               <div>
                 <b>出错了有得救</b>
-                <p>会话库自动滚动备份可可视化恢复；项目自带的 MCP 与技能配置需先确认信任；诊断包导出自动打码密钥。</p>
+                <p>会话库滚动备份可恢复；项目自带的 MCP 与技能配置先确认信任；诊断包导出自动打码密钥。</p>
               </div>
             </li>
           </ul>
+
+          <div class="tiers">
+            <div class="tier is-default">
+              <span class="tag">默认</span>
+              <b>安全执行</b>
+              <p>写入与执行逐次确认，只读自动放行。</p>
+            </div>
+            <div class="tier">
+              <span class="tag">可调</span>
+              <b>自动编辑</b>
+              <p>工作目录内的写入自动放行，命令仍需确认。</p>
+            </div>
+            <div class="tier">
+              <span class="tag">谨慎</span>
+              <b>完全访问</b>
+              <p>不再逐次打断，仅建议在受控项目里使用。</p>
+            </div>
+          </div>
         </div>
 
         <div class="rise">
@@ -1485,97 +1627,151 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
               示意图，按钮不可点击。真实界面里三个选项逐次出现，选择结果会写进本轮记录，随时可查。
             </p>
           </div>
-
-          <div class="tiers">
-            <div class="tier is-default">
-              <span class="tag">默认</span>
-              <b>安全执行</b>
-              <p>写入与执行逐次确认，只读自动放行。</p>
-            </div>
-            <div class="tier">
-              <span class="tag">可调</span>
-              <b>自动编辑</b>
-              <p>工作目录内的写入自动放行，命令仍需确认。</p>
-            </div>
-            <div class="tier">
-              <span class="tag">谨慎</span>
-              <b>完全访问</b>
-              <p>不再逐次打断，仅建议在受控项目里使用。</p>
-            </div>
-          </div>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ============ 界面 ============ -->
+  <!-- ============ 工厂 ============ -->
+  <section class="section" id="factory">
+    <div class="wrap">
+      <div class="section-head rise">
+        <div class="section-meta">
+          <span class="section-num">05</span>
+          <span class="section-label">Factory</span>
+        </div>
+        <div class="section-body">
+          <h2>自动化会自己跑，<br>也看得见</h2>
+          <p>每个项目一座厂区，每条自动化一条产线。机台亮灯、包裹前进、成品装车——定时任务与编排不再是一张看不见状态的列表。</p>
+        </div>
+      </div>
+
+      <figure class="factory-shot rise">
+        <div class="window">
+          <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">工厂看板 · 多项目自动化场景</span><span class="window-spacer" aria-hidden="true"></span></div>
+          <img src="docs/images/factory.webp" alt="工厂看板实景：左侧按项目列出产线，等距厂区中的机台与传送带展示自动化运行" width="1600" height="1000" loading="lazy" decoding="async">
+        </div>
+        <figcaption>源码界面预览。没有真实产线时，可先看明确标注的样板厂演示。</figcaption>
+      </figure>
+
+      <div class="factory-points">
+        <article class="rise"><h3>结果有迹可查</h3><p>成功进成品区，失败进返工区。每次运行留下耗时与结果摘要；被权限拦截会标明「有拦截」。</p></article>
+        <article class="rise"><h3>运行有边界</h3><p>并发满额自动排队，单次运行有超时上限，连续失败聚合提醒。</p></article>
+        <article class="rise"><h3>关着也能跑</h3><p>定时任务可导出为 Windows 系统计划任务，应用彻底退出后仍按点执行。</p></article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 工作台 ============ -->
   <section class="section" id="shots">
     <div class="wrap">
       <div class="section-head rise">
-        <span class="section-label">Interface</span>
-        <h2>看得见、管得住、够得着</h2>
-        <p>和终端 Agent 的差异不在逐条功能清单，而在产品形态：对话、确认卡、diff 预览、文件改动、终端输出、审查诊断都在界面里，不用盯终端滚动日志。</p>
+        <div class="section-meta">
+          <span class="section-num">06</span>
+          <span class="section-label">Workbench</span>
+        </div>
+        <div class="section-body">
+          <h2>工作台长这样</h2>
+          <p>对话、确认卡、diff、文件改动、终端输出、审查诊断都在同一屏；26 套主题，浅色 13 套、深色 13 套，也能跟随系统。</p>
+        </div>
       </div>
 
       <div class="gallery">
         <figure class="shot rise">
           <div class="window">
             <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">模型服务设置</span><span class="window-spacer" aria-hidden="true"></span></div>
-            <img src="docs/images/providers.png" alt="模型服务设置页：内置多家服务预设，填入 API Key 即可接入" loading="lazy" decoding="async" width="1080" height="608">
+            <img src="docs/images/providers.png" alt="模型服务设置页：内置服务预设，已配置 Key 的服务标出「使用中 / 默认」" loading="lazy" decoding="async" width="1414" height="710">
           </div>
-          <figcaption><b>多模型服务</b>内置预设填入 Key 即可接入，也可接中转或本机推理服务。</figcaption>
+          <figcaption><b>多模型服务</b>10 家预设，填 Key 即可；也能接中转或本机推理服务。</figcaption>
         </figure>
 
         <figure class="shot rise">
           <div class="window">
             <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">日程周历</span><span class="window-spacer" aria-hidden="true"></span></div>
-            <img src="docs/images/agenda.png" alt="日程周历视图：定时任务与日程排入周历" loading="lazy" decoding="async" width="1080" height="608">
+            <img src="docs/images/agenda.png" alt="日程周历：一周的会话任务与定时任务排进周历，支持周 / 月 / 分组视图" loading="lazy" decoding="async" width="1414" height="710">
           </div>
-          <figcaption><b>日程与定时</b>任务排进周历，到点自动执行，可导出为系统计划任务。</figcaption>
+          <figcaption><b>日程与定时</b>任务排进周历，到点执行，可导出为系统计划任务。</figcaption>
         </figure>
 
         <figure class="shot rise">
           <div class="window">
             <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">用量仪表盘</span><span class="window-spacer" aria-hidden="true"></span></div>
-            <img src="docs/images/usage.png" alt="用量仪表盘：按会话、服务、模型统计 Token 与费用" loading="lazy" decoding="async" width="1080" height="608">
+            <img src="docs/images/usage.png" alt="用量仪表盘：14 天 Token 柱状图，按服务与模型拆分用量和费用" loading="lazy" decoding="async" width="1414" height="710">
           </div>
-          <figcaption><b>用量与费用</b>Token 用量按会话 / 服务 / 模型拆分，支持费用估算与预算护栏。</figcaption>
+          <figcaption><b>用量与费用</b>Token 按会话 / 服务 / 模型拆分，带预算护栏。</figcaption>
         </figure>
+      </div>
 
-        <figure class="shot wide rise">
-          <div class="window">
-            <div class="window-bar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-title">消息与操作</span><span class="window-spacer" aria-hidden="true"></span></div>
-            <img src="docs/images/message-ops.webp" alt="对话消息与操作区：工具调用、权限确认、改动回滚入口集中呈现" loading="lazy" decoding="async" width="1668" height="1384">
-          </div>
-          <figcaption><b>每一步都留痕</b>写入先弹确认卡（附 diff 预览），批准后工具调用、耗时、文件改动与「撤销本轮改动」入口都留在消息流里，改了什么、谁发起的、能不能撤销一眼看清。</figcaption>
-        </figure>
+      <div class="ext-row">
+        <article class="ext rise">
+          <span class="section-label">Extensions</span>
+          <h3>MCP 与技能</h3>
+          <p>双传输 MCP 客户端、七个内置预设，兼容 Claude Desktop 配置；技能按需加载，正文只在用到时进上下文。</p>
+        </article>
+        <article class="ext rise">
+          <span class="section-label">Themes</span>
+          <h3>26 套主题</h3>
+          <p>浅色纸墨、青瓷、秋柿，深色夜墨、黛夜、松烟等；默认跟随系统深浅，界面与官网同一套纸墨血统。</p>
+        </article>
+        <article class="ext rise">
+          <span class="section-label">Remote</span>
+          <h3>手机远程</h3>
+          <p>手机浏览器打开完整界面，确认卡照常逐条弹；飞书 / 微信里派活、收日报与终态通知。</p>
+        </article>
       </div>
     </div>
   </section>
 
-  <!-- ============ 上手 ============ -->
+  <!-- ============ 下载 ============ -->
   <section class="section" id="start">
     <div class="wrap">
       <div class="section-head rise">
-        <span class="section-label">Getting started</span>
-        <h2>两条路，看你是普通用户还是想看代码</h2>
+        <div class="section-meta">
+          <span class="section-num">07</span>
+          <span class="section-label">Download</span>
+        </div>
+        <div class="section-body">
+          <h2>下载与安装</h2>
+          <p>一个安装包，或者一条命令。</p>
+        </div>
       </div>
 
+      <div class="download-bar rise">
+        <div class="dl-main">
+          <span class="ledger"><span data-current-version>v2.6.8</span> · 2026-11-07</span>
+          <h3>SkySheep-2.6.8-setup.exe</h3>
+          <p>Windows 10 / 11 x64 · 安装包未签名 · 校验值见 Release 页</p>
+        </div>
+        <div class="dl-actions">
+          <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">下载安装包</a>
+          <a class="btn btn-ghost" href="https://github.com/sky-scrape/SkySheep/releases" target="_blank" rel="noopener">所有版本</a>
+        </div>
+      </div>
+
+      <p class="dl-note">
+        <strong>首次运行如遇 SmartScreen：</strong>点「更多信息 → 仍要运行」即可，未签名程序的默认待遇，
+        <a href="https://github.com/sky-scrape/SkySheep/blob/main/docs/smartscreen-%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener">详细说明 ↗</a>。
+        没有 API Key 也能先进<strong>演示模式</strong>，看一轮真实工具调用的完整过程。
+      </p>
+
       <div class="start-grid">
-        <div class="start-card is-primary rise">
-          <h3>安装发布版 · v2.6.7</h3>
-          <p>下载安装包双击安装，Windows 10 / 11 x64。首次使用在「设置 → 模型服务」里接入：选服务 → 填 Key，也会自动检测本机的本地推理服务。</p>
-          <a class="btn btn-primary" href="https://github.com/sky-scrape/SkySheep/releases/latest">到 Releases 下载</a>
+        <div class="start-card rise">
+          <h3>装好之后：接入模型</h3>
+          <p>打开「设置 → 模型服务」，选一家服务、填入 Key 就能用；点「检测并获取模型」会读出可用模型。接本机推理服务也一样。</p>
+          <ol class="steps">
+            <li><span>打开<b>「设置 → 模型服务」</b></span></li>
+            <li><span>选择一家服务，填入 <b>API Key</b></span></li>
+            <li><span>点「检测并获取模型」，选中要用的模型</span></li>
+          </ol>
           <p class="start-meta">
-            没有 API Key 也能先进入<strong>演示模式</strong>，看一轮真实工具调用的完整过程。<br>
-            首次运行若被 Windows SmartScreen 拦截，点「更多信息 → 仍要运行」——
-            未签名程序的默认待遇，<a href="docs/smartscreen-说明.md">详细说明</a>。
+            成员模型可以各自指定：便宜模型跑成员，强模型当主席或总管。<br>
+            会话、配置与密钥都写在 <span class="mono">~/.skysheep/</span>，不经过我们的服务器。
           </p>
         </div>
 
         <div class="start-card rise">
-          <h3>体验最新源码</h3>
-          <p>想第一时间用上刚落地的功能，可直接跑源码。源码运行以 Windows 为支持平台。</p>
+          <h3>或者：从源码运行</h3>
+          <p>想第一时间用上刚落地的功能，可以直接跑源码。需要 Python 3.11+ 与 uv，以 Windows 为支持平台。</p>
           <div class="terminal" role="img" aria-label="源码运行命令：克隆仓库后进入 engine 目录，依次执行 uv sync 与 uv run skysheep app">
             <span class="ln cmt"># 需要 Python 3.11+ 与 uv</span>
             <span class="ln cmd">cd SkySheep/engine</span>
@@ -1592,12 +1788,52 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     </div>
   </section>
 
+  <!-- ============ 最近更新 ============ -->
+  <section class="section latest" id="latest">
+    <div class="wrap">
+      <div class="section-head rise">
+        <div class="section-meta">
+          <span class="section-num">08</span>
+          <span class="section-label">Releases</span>
+        </div>
+        <div class="section-body">
+          <h2>最近更新</h2>
+          <p>三个版本的主线：把协作说清楚、权限门再收紧一档、协作收成模板。</p>
+        </div>
+      </div>
+
+      <div class="update-grid">
+        <article class="update-card rise">
+          <span class="status shipped">v2.6.8 · 已发布</span>
+          <h3>四种协作，一个说法</h3>
+          <p>官网与两份 README 把多模型协作统一成四种并列方式：圆桌、团队、对抗、接力。产品功能零改动，只是把原来的事说清楚。</p>
+        </article>
+        <article class="update-card rise">
+          <span class="status shipped">v2.6.7 · 已发布</span>
+          <h3>权限门再收紧一档</h3>
+          <p>并发只读批补上出站密钥扫描；白名单对 tar / npm 这类「一次批准 = 整族放行」的执行面收窄；另修了一批并发、编码与资源泄漏问题。</p>
+        </article>
+        <article class="update-card rise">
+          <span class="status shipped">v2.6.6 · 已发布</span>
+          <h3>三种协作，收成一套模板</h3>
+          <p>内置圆桌·多模型评审、团队·交付小组、对抗·代码审查三张模板，复制一份就能改角色、模型、提示词与预算；团队可常驻，也能到点上班。</p>
+        </article>
+      </div>
+      <p class="update-footer">以上更新均已进入 <span data-current-version>v2.6.8</span> 安装包。<a href="https://github.com/sky-scrape/SkySheep/blob/main/CHANGELOG.md" target="_blank" rel="noopener">查看完整更新日志 ↗</a></p>
+    </div>
+  </section>
+
   <!-- ============ 常见问题 ============ -->
   <section class="section" id="faq">
     <div class="wrap-narrow">
       <div class="section-head rise">
-        <span class="section-label">FAQ</span>
-        <h2>几个容易被问到的地方</h2>
+        <div class="section-meta">
+          <span class="section-num">09</span>
+          <span class="section-label">FAQ</span>
+        </div>
+        <div class="section-body">
+          <h2>几个容易被问到的地方</h2>
+        </div>
       </div>
 
       <div class="faq rise">
@@ -1618,18 +1854,10 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         </details>
 
         <details>
-          <summary>协作模板是什么？协作和接力是什么关系？<span class="marker" aria-hidden="true">+</span></summary>
+          <summary>协作模板和接力是什么关系？<span class="marker" aria-hidden="true">+</span></summary>
           <div class="answer">
-            <p>多模型协作分两条并列的线：<strong>协作</strong>是多个模型在同一轮任务里分工，圆桌 / 团队 / 对抗三种形态已经收进一套可复用的模板——内置三张，复制一份就能改角色、模型、提示词与预算；<strong>接力</strong>是两个会话按轮交接（主屏出方案 → 副屏执行 → 交回修订），入口在侧栏「接力」。</p>
-            <p>团队模板仍在原来的团队模板册里，画廊会一起列出来。<strong>模板只能收窄权限</strong>——它声明的是「这次运行需要用到什么」（只读 / 可写 / 可执行 + 工具白名单），关不掉权限门；删除类操作、引擎目录与工作目录外的写入照旧逐次确认。</p>
-          </div>
-        </details>
-
-        <details>
-          <summary>定时任务需要应用一直开着吗？<span class="marker" aria-hidden="true">+</span></summary>
-          <div class="answer">
-            <p>默认是的。定时任务与日程提醒由应用内循环触发，所以关窗时选择「缩到系统托盘」才会继续后台运行；彻底退出期间到点的任务会在下次启动补跑。</p>
-            <p>如果需要应用完全关闭也照常执行，在任务卡片上点「⊞」导出为 Windows 系统计划任务，到点以无头模式独立跑。</p>
+            <p>它们是四种并列的多模型协作方式。<strong>圆桌、团队、对抗</strong>都在同一轮任务里分工，所以能收进同一套可复用的模板；<strong>接力</strong>是两个会话按轮交接——主屏出方案、副屏执行、再交回修订，入口在侧栏「接力」。</p>
+            <p><strong>模板只能收窄权限</strong>：它声明的是「这次运行需要用到什么」（只读 / 可写 / 可执行 + 工具白名单），关不掉权限门；删除类操作、引擎目录与工作目录外的写入照旧逐次确认。</p>
           </div>
         </details>
 
@@ -1672,8 +1900,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   <section class="cta">
     <div class="wrap">
       <img class="sheep-sm" src="docs/images/cloud-sheep-web.webp" alt="" width="84" height="84" aria-hidden="true" loading="lazy">
-      <h2>云朵小羊与你同在</h2>
-      <p>让多个模型一起把活干完，动手前照样先问你。开源、可审计、数据留在本机。</p>
+      <h2>让 AI 不再单打独斗</h2>
+      <p>四种协作、30 个工具、每一步先确认、每一轮可撤回——都在一个 Windows 桌面工作台里。开源、可审计，会话与密钥留在本机。</p>
       <div class="cta-actions">
         <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">下载 SkySheep</a>
         <a class="btn btn-ghost btn-lg" href="https://github.com/sky-scrape/SkySheep" target="_blank" rel="noopener">
@@ -1685,6 +1913,16 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   </section>
 </main>
 
+<!-- ============ 介绍片弹层 ============ -->
+<dialog class="video-dialog" id="intro-dialog" aria-label="SkySheep 一分钟介绍片">
+  <div class="dlg-inner">
+    <form method="dialog"><button class="dlg-close" aria-label="关闭介绍片">✕</button></form>
+    <video src="docs/demo/skysheep-intro-1080p.mp4" poster="docs/demo/skysheep-intro-cover.webp"
+           width="1920" height="1080" controls playsinline preload="none"
+           aria-label="SkySheep 一分钟介绍片：圆桌、团队、对抗、接力与自动化工厂"></video>
+  </div>
+</dialog>
+
 <!-- ============ 页脚 ============ -->
 <footer class="footer">
   <div class="wrap">
@@ -1695,7 +1933,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           <b>SkySheep</b>
         </div>
         <p class="footer-about">
-          开源 Windows 桌面 AI Agent 工作台。协作与接力两条多模型协作线，权限由你掌握，改动可回滚，数据留在本机。
+          开源 Windows 桌面 AI Agent 工作台。圆桌、团队、对抗、接力四种多模型协作，权限由你掌握，改动可回滚，会话与密钥留在本机。
         </p>
       </div>
       <div class="footer-col">
@@ -1770,34 +2008,143 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   else if (mq.addListener) mq.addListener(onSystemChange);
 
 /* ============================================================
- * 协作模式标签页：点击 + 方向键切换，符合 WAI-ARIA tabs 惯例
+ * 首屏截图切换：三张协作截图轮换，没有 JS 时只显示默认主图
  * ============================================================ */
-  var tablist = document.querySelector('[role="tablist"]');
-  if (tablist) {
-    var tabs = Array.prototype.slice.call(tablist.querySelectorAll('.tab'));
+  var heroImg = document.querySelector('[data-hero-img]');
+  var heroTitle = document.querySelector('[data-hero-title]');
+  var heroThumbs = document.querySelectorAll('[data-hero-thumb]');
 
-    function select(idx, focus) {
-      tabs.forEach(function (t, i) {
-        var on = i === idx;
-        t.setAttribute('aria-selected', on ? 'true' : 'false');
-        t.tabIndex = on ? 0 : -1;
-        var panel = document.getElementById(t.getAttribute('aria-controls'));
-        if (panel) panel.hidden = !on;
+  if (heroImg && heroThumbs.length) {
+    var preload = {};
+    function pickThumb(btn) {
+      Array.prototype.forEach.call(heroThumbs, function (b) {
+        b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
       });
-      if (focus) tabs[idx].focus();
+      var src = btn.getAttribute('data-src');
+      if (!preload[src]) { preload[src] = new Image(); preload[src].src = src; }
+      heroImg.src = src;
+      heroImg.alt = btn.getAttribute('data-alt') || '';
+      heroImg.width = btn.getAttribute('data-w') || heroImg.width;
+      heroImg.height = btn.getAttribute('data-h') || heroImg.height;
+      if (heroTitle) heroTitle.textContent = btn.getAttribute('data-title') || '';
     }
-
-    tabs.forEach(function (t, i) {
-      t.addEventListener('click', function () { select(i, false); });
-      t.addEventListener('keydown', function (e) {
-        var next = null;
-        if (e.key === 'ArrowRight') next = (i + 1) % tabs.length;
-        else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
-        else if (e.key === 'Home') next = 0;
-        else if (e.key === 'End') next = tabs.length - 1;
-        if (next !== null) { e.preventDefault(); select(next, true); }
-      });
+    Array.prototype.forEach.call(heroThumbs, function (btn) {
+      btn.addEventListener('click', function () { pickThumb(btn); });
     });
+  }
+
+/* ============================================================
+ * 协作卡短片：进入视口才播、离开暂停；减少动效时不自动播
+ * ============================================================ */
+  var modeVideos = document.querySelectorAll('.mode-shot video');
+  var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  Array.prototype.forEach.call(modeVideos, function (v) {
+    if (reduceMotion) {
+      v.controls = true;
+      try { v.pause(); } catch (_) {}
+      return;
+    }
+    /* 点击 / 回车暂停继续，不额外加控件 */
+    var toggle = function () {
+      if (v.paused) {
+        var p = v.play();
+        if (p && p.catch) p.catch(function () {});
+      } else {
+        v.pause();
+      }
+    };
+    v.addEventListener('click', toggle);
+    v.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle();
+      }
+    });
+  });
+
+  if (!reduceMotion && modeVideos.length && 'IntersectionObserver' in window) {
+    var videoIO = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var v = entry.target;
+        if (entry.isIntersecting) {
+          var p = v.play();
+          if (p && p.catch) p.catch(function () {});
+        } else {
+          v.pause();
+        }
+      });
+    }, { threshold: 0.35 });
+    Array.prototype.forEach.call(modeVideos, function (v) { videoIO.observe(v); });
+  }
+
+/* ============================================================
+ * 介绍片：原生 dialog，点遮罩或 ✕ 关闭
+ * ============================================================ */
+  var introDialog = document.getElementById('intro-dialog');
+  var introVideo = introDialog ? introDialog.querySelector('video') : null;
+  var openers = document.querySelectorAll('[data-open-intro]');
+
+  function closeIntro() {
+    if (introVideo) introVideo.pause();
+    if (introDialog && introDialog.open) introDialog.close();
+  }
+
+  Array.prototype.forEach.call(openers, function (btn) {
+    btn.addEventListener('click', function () {
+      if (!introDialog) return;
+      if (typeof introDialog.showModal === 'function') {
+        introDialog.showModal();
+      } else {
+        /* 老浏览器：退化成页面内直接播放 */
+        introDialog.setAttribute('open', '');
+        introDialog.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      if (introVideo) {
+        var p = introVideo.play();
+        if (p && p.catch) p.catch(function () {});
+      }
+    });
+  });
+
+  if (introDialog) {
+    introDialog.addEventListener('click', function (e) {
+      if (e.target === introDialog) closeIntro();
+    });
+    introDialog.addEventListener('close', function () {
+      if (introVideo) introVideo.pause();
+    });
+  }
+
+/* ============================================================
+ * 导航当前项：按视口交叉比例高亮，避免长区块抢焦点
+ * ============================================================ */
+  var navLinks = document.querySelectorAll('.nav a[href^="#"]');
+  var sections = [];
+  Array.prototype.forEach.call(navLinks, function (a) {
+    var el = document.getElementById(a.getAttribute('href').slice(1));
+    if (el) sections.push({ el: el, link: a });
+  });
+
+  if (sections.length && 'IntersectionObserver' in window) {
+    var visible = {};
+    var spy = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var hit = sections.filter(function (s) { return s.el === entry.target; })[0];
+        if (!hit) return;
+        visible[entry.target.id] = entry.isIntersecting ? entry.intersectionRatio : 0;
+      });
+      var best = null, bestRatio = 0;
+      Object.keys(visible).forEach(function (id) {
+        if (visible[id] > bestRatio) { bestRatio = visible[id]; best = id; }
+      });
+      Array.prototype.forEach.call(navLinks, function (a) { a.classList.remove('is-current'); });
+      if (best) {
+        var link = sections.filter(function (s) { return s.el.id === best; })[0];
+        if (link) link.link.classList.add('is-current');
+      }
+    }, { rootMargin: '-20% 0px -55% 0px', threshold: [0, .15, .35, .6, 1] });
+    sections.forEach(function (s) { spy.observe(s.el); });
   }
 
 /* ============================================================

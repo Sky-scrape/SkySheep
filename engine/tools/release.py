@@ -503,7 +503,31 @@ def step_sha256() -> None:
     print(f"  sha256 = {digest}")
 
 
-def step_upload(allow: bool) -> None:
+_RELEASE_NOTES_DIR = _REPO_ROOT / "docs" / "release-notes"
+
+
+def release_notes_path(version: str, explicit: str | None = None) -> Path | None:
+    """本版 Release 正文：显式路径优先，否则找 docs/release-notes/<版本>.md。
+
+    显式路径不存在直接报错（拼错了要立刻知道）；缺省路径不存在返回 None，
+    由调用方决定是拒绝上传还是退回占位正文。
+    """
+    if explicit:
+        path = Path(explicit)
+        if not path.is_absolute():
+            path = (_REPO_ROOT / path).resolve()
+        if not path.is_file():
+            raise RuntimeError(f"--notes-file 指定的文件不存在：{path}")
+        return path
+    candidate = _RELEASE_NOTES_DIR / f"{version}.md"
+    return candidate if candidate.is_file() else None
+
+
+def step_upload(
+    allow: bool,
+    notes_file: str | None = None,
+    allow_placeholder: bool = False,
+) -> None:
     """清单 §4-2/§4-3：gh release create 上传安装包 + sha256。默认（不给 --upload）绝不执行。"""
     version = pyproject_version()
     if not allow:
@@ -546,26 +570,51 @@ def step_upload(allow: bool) -> None:
     gh = shutil.which("gh")
     if not gh:
         raise RuntimeError("PATH 上找不到 gh（GitHub CLI）；不装也能完成其余全部本地阶段")
+    notes = release_notes_path(version, notes_file)
+    if notes is None:
+        if not allow_placeholder:
+            raise RuntimeError(
+                f"找不到 Release 正文 docs/release-notes/{version}.md。"
+                "先按 TEMPLATE-feature.md / TEMPLATE-fix.md 写一份再发（发布清单 §4）；"
+                "确需临时发布可加 --allow-placeholder-notes。"
+            )
+        print("  警告：没有 Release 正文，退回占位正文（--allow-placeholder-notes）")
+    else:
+        print(f"  Release 正文：{notes}")
+        _run(
+            [
+                sys.executable,
+                str(_ENGINE_DIR / "tools" / "check_release_notes.py"),
+                str(notes),
+                "--version",
+                version,
+            ],
+            cwd=_REPO_ROOT,
+        )
+
     print(f"  !! --upload 已指定：即将 gh release create v{version} 上传 2 个资产（发布清单 §4）")
     print("  !! 提醒：确认版本号四处一致已过、非同日重发；资产已存在时 gh 会报错，本脚本不做 --clobber 覆盖")
-    _run(
-        [
-            gh,
-            "release",
-            "create",
-            f"v{version}",
-            str(exe),
-            str(sha),
-            "--verify-tag",
-            "--title",
-            f"SkySheep v{version}",
+    cmd = [
+        gh,
+        "release",
+        "create",
+        f"v{version}",
+        str(exe),
+        str(sha),
+        "--verify-tag",
+        "--title",
+        f"SkySheep v{version}",
+    ]
+    if notes is not None:
+        cmd += ["--notes-file", str(notes)]
+    else:
+        cmd += [
             "--notes",
             f"SkySheep v{version}，变更内容见仓库 CHANGELOG.md 对应条目。"
             "（发布清单 §4：Release 正文请把 CHANGELOG 条目的手动换行并回长句后编辑，"
             "并在末尾贴一份可读 sha256 哈希。）",
-        ],
-        cwd=_REPO_ROOT,
-    )
+        ]
+    _run(cmd, cwd=_REPO_ROOT)
 
 
 # ---------- 阶段表与主流程 ----------
@@ -591,7 +640,11 @@ def build_steps(args: argparse.Namespace) -> list[Step]:
         Step("§3-4", "ISCC 编译安装包", step_installer, "skip_installer"),
         Step("§3-4", "signtool 签名安装包（未配置证书自动跳过）", step_sign_installer, "skip_installer"),
         Step("§4-5", "安装包 sha256 附件", step_sha256, "skip_installer"),
-        Step("§4-2/§4-3", "gh release create 上传（仅 --upload）", lambda: step_upload(args.upload)),
+        Step(
+            "§4-2/§4-3",
+            "gh release create 上传（仅 --upload）",
+            lambda: step_upload(args.upload, args.notes_file, args.allow_placeholder_notes),
+        ),
     ]
 
 
@@ -605,6 +658,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog=(
             "默认绝不执行任何对外发布动作；只有显式 --upload 才会在全部阶段通过后\n"
             "调用 gh release create v<版本> 上传安装包与 .sha256（发布清单 §4-2/§4-3）。\n"
+            "Release 正文缺省读 docs/release-notes/<版本>.md，上传前先跑\n"
+            "check_release_notes.py；找不到正文会拒绝上传（--allow-placeholder-notes 例外）。\n"
             "代码签名：配置 SKYSHEEP_SIGN_PFX（+可选 SKYSHEEP_SIGN_PFX_PASSWORD）或\n"
             "SKYSHEEP_SIGN_CERT_SHA1 即自动签名，未配置则自动跳过并提示；两者都配且\n"
             "PFX 未配密码时优先 /sha1（证书存储路径、命令行不传密码，发布更建议用它）。\n"
@@ -638,6 +693,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--upload",
         action="store_true",
         help="全部阶段通过后 gh release create 上传安装包+sha256（§4）；不给则绝不发布",
+    )
+    parser.add_argument(
+        "--notes-file",
+        help="Release 正文 Markdown；缺省自动找 docs/release-notes/<版本>.md",
+    )
+    parser.add_argument(
+        "--allow-placeholder-notes",
+        action="store_true",
+        help="找不到 Release 正文时仍用占位正文上传（不推荐，会跳过正文自检）",
     )
     args = parser.parse_args(argv)
     if args.upload and (args.skip_quality or args.skip_pack or args.skip_smoke or args.skip_installer):

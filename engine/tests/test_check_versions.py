@@ -1,7 +1,7 @@
 """engine/tools/check_versions.py 的用例（发布清单 §1 版本号一致的机械化校验）。
 
 两层：
-- 真实仓库跑一遍 check()，锁住「五处版本号不漂移」这条不变量（README 路线图
+- 真实仓库跑一遍 check()，锁住「七处版本号不漂移」这条不变量（README 路线图
   曾漂到 v1.9 而四处仍是 2.1.0，就是这条要堵的）；
 - 临时假仓库验证失配 / [未发布] 跳过 / 标记缺失三类行为，不依赖仓库现状。
 """
@@ -28,6 +28,7 @@ def _make_repo(
     changelog_heads: tuple[str, ...] = ("未发布", "1.2.3"),
     readme_marker: str | None = "v{version}（✅ 当前版本）",
     en_marker: str | None = "v{version} (✅ current release)",
+    site_versions: tuple[str, ...] | None = None,
 ) -> Path:
     """搭一个 check_versions 能吃的最小假仓库，返回仓库根。"""
     (tmp_path / "engine" / "src" / "skysheep").mkdir(parents=True)
@@ -49,6 +50,9 @@ def _make_repo(
     for name, marker in (("README.md", readme_marker), ("README.en.md", en_marker)):
         line = f"- **{marker.format(version=version)}**：条目\n" if marker else ""
         (tmp_path / name).write_text(f"# T\n\n## 🗺 路线图\n\n{line}", encoding="utf-8")
+    site = site_versions if site_versions is not None else (version,)
+    badges = "".join(f'<span data-current-version>v{v}</span>\n' for v in site)
+    (tmp_path / "index.html").write_text(f"<html><body>\n{badges}</body></html>\n", encoding="utf-8")
     return tmp_path
 
 
@@ -117,6 +121,28 @@ def test_missing_readme_marker_fails(tmp_path, which):
     ok, lines = cv.check(root)
     assert ok is False
     assert "README" in "\n".join(lines)
+
+
+def test_site_current_version_must_match(tmp_path):
+    root = _make_repo(tmp_path, site_versions=("9.9.9",))
+    ok, lines = cv.check(root)
+    assert ok is False
+    assert "index.html" in "\n".join(lines)
+
+
+def test_site_version_markers_must_agree(tmp_path):
+    root = _make_repo(tmp_path, site_versions=("1.2.3", "1.2.2"))
+    ok, lines = cv.check(root)
+    assert ok is False
+    assert "彼此不一致" in "\n".join(lines)
+
+
+def test_site_missing_marker_fails_closed(tmp_path):
+    root = _make_repo(tmp_path)
+    (root / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    ok, lines = cv.check(root)
+    assert ok is False
+    assert "data-current-version" in "\n".join(lines)
 
 
 def test_subprocess_survives_cp1252_pipe():

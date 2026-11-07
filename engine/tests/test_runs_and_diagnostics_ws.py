@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from skysheep.config import set_advanced_settings_in_config
+from skysheep.messages import TextBlock, ToolUseBlock
 from skysheep.models.fake import FakeProvider
 from skysheep.server import create_app
 
@@ -164,6 +165,70 @@ def test_agent_reports_turn_summary(home):
         assert "tools_used" in finished
         assert "tools_total_ms" in finished
         assert "model_retries" in finished
+
+
+class FlakyFake(FakeProvider):
+    """前 N 次 stream() 抛瞬态错误（触发 Agent 自动重试），之后正常回放脚本。"""
+
+    def __init__(self, failures: int, scripted: list) -> None:
+        super().__init__(scripted)
+        self.remaining_failures = failures
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        if self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            raise RuntimeError("HTTP 503 Service Unavailable")
+        async for pe in super().stream(messages, tool_schemas, effort=effort):
+            yield pe
+
+
+def test_turn_summary_reset_per_turn(home, monkeypatch):
+    """两轮统计隔离：第二轮 TurnFinished 的三字段只反映第二轮。
+
+    backend runtime 常驻复用同一 Agent（_get_runtime 按 session 缓存）——
+    轮级统计若不在 _turn_events 开头清零，第一轮的工具次数/耗时/重试次数
+    会累计进第二轮摘要，「本轮已自动重试 N 次仍失败」也会把上一轮算进来。
+    """
+    monkeypatch.setattr("skysheep.core.agent.RETRY_BASE_DELAY_S", 0.01)
+    # 第一轮：先吃掉一次 503（触发自动重试）→ list_dir 工具调用 → 收尾文本；
+    # 第二轮：纯文本回答。用例未传 wants_title（_dispatch_chat.py 默认 False），
+    # 首轮后的自动标题不会触发；scripted_default 兜住任何意料外的脚本调用，
+    # 且与剩余脚本项同为纯文本——无论谁消耗了「第二轮完成」，第二轮都无工具。
+    provider = FlakyFake(
+        1,
+        [
+            [ToolUseBlock(id="t1", name="list_dir", input={"path": "."})],
+            [TextBlock(text="第一轮完成")],
+            [TextBlock(text="第二轮完成")],
+        ],
+    ).with_default([TextBlock(text="（后台调用）")])
+    with make_client(home, None, provider=provider) as client, \
+            client.websocket_connect("/ws") as ws:
+        finished: list[dict] = []
+
+        def run_send(mid: str, text: str) -> None:
+            ws.send_json({"id": mid, "method": "chat.send", "params": {"text": text}})
+            while True:
+                frame = ws.receive_json()
+                if "event" in frame:
+                    if frame["event"] == "turn_finished":
+                        finished.append(frame["data"])
+                    continue
+                if frame.get("id") == mid:
+                    return
+
+        run_send("m1", "第一轮：列一下目录")
+        run_send("m2", "第二轮：直接回答，不用工具")
+
+        assert len(finished) == 2
+        first, second = finished
+        # 第一轮：一次工具调用 + 一次瞬态失败自动重试
+        assert first["tools_used"] == 1
+        assert first["model_retries"] == 1
+        # 第二轮纯文本：三字段必须从零计，上一轮的次数不得累计进来
+        assert second["tools_used"] == 0
+        assert second["tools_total_ms"] == 0
+        assert second["model_retries"] == 0
 
 
 def test_provider_management_paths(home):

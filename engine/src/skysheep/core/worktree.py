@@ -19,6 +19,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from ..textio import encode_text, read_text_file, write_bytes_atomic
+
 # 大仓库的 worktree 检出可能超过一般命令的秒级预算
 _GIT_TIMEOUT_S = 300
 
@@ -45,6 +47,14 @@ def _exclude_worktrees(main_dir: Path) -> None:
 
     本地忽略不进版本库，比改 .gitignore 干净；主仓库自身是 worktree（.git 是
     文件）时定位不到真实 git 目录，跳过（只影响 git status 观感，best-effort）。
+
+    读写走 textio（M2）：exclude 常带用户手写的中文备注（GBK/GB18030 编码），
+    按 utf-8/errors=replace 读再 utf-8 写回会把原文固化成 U+FFFD——不可逆
+    损坏。这里探测编码后按原编码与主行尾符写回（encode_text + 原子写，纯
+    LF/纯 CRLF 的文件已有内容逐字节不动；混合行尾会被归一成主行尾符，语义
+    无损——textio 全局既定语义），只追加一行。探测不确凿（certain=False，
+    含二进制）时宁可不登记也不按乱码基准改写，与 AGENTS.md「编码探测不确定
+    时宁可拒绝写」一致。
     """
     git_path = main_dir / ".git"
     if not git_path.is_dir():
@@ -54,12 +64,17 @@ def _exclude_worktrees(main_dir: Path) -> None:
         info.mkdir(parents=True, exist_ok=True)
         exclude = info / "exclude"
         line = "/.skysheep/worktrees/"
-        text = exclude.read_text(encoding="utf-8", errors="replace") if exclude.exists() else ""
-        if line not in text:
-            exclude.write_text(
-                (text.rstrip("\n") + "\n" if text.strip() else "") + line + "\n",
-                encoding="utf-8",
-            )
+        if exclude.exists():
+            parsed = read_text_file(exclude)
+            if not parsed.certain:
+                return
+            text, encoding, newline = parsed.text, parsed.encoding, parsed.newline
+        else:
+            text, encoding, newline = "", "utf-8", "\n"
+        if line in text:
+            return
+        new_text = (text.rstrip("\n") + "\n" if text.strip() else "") + line + "\n"
+        write_bytes_atomic(exclude, encode_text(new_text, encoding, newline))
     except OSError:
         pass
 

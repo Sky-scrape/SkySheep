@@ -368,6 +368,12 @@ class Agent:
         # 防打转状态按轮重置：上一轮的重试/熔断不该影响新任务（用户新消息
         # 可能正是要求换个思路做同一件事）
         self.loop_guard.reset()
+        # 轮摘要统计一并清零：Agent 跨轮复用（backend runtime 常驻）时不清零
+        # 会把上一轮的次数/耗时累计进 TurnFinished，「本轮已自动重试 N 次仍
+        # 失败」也会把上一轮的重试算进来误导用户。轮内累加语义不变。
+        self._turn_tools_used = 0
+        self._turn_tools_total_ms = 0
+        self._turn_model_retries = 0
         iterations = 0
         stop_reason = "max_iterations"  # 正常结束时在 break 前改为 end_turn
 

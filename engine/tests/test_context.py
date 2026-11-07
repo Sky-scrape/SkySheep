@@ -395,3 +395,48 @@ async def test_compaction_non_transient_error_gives_up_immediately():
     ev = await compact_history(_StubAgent(provider), keep_recent=1)
     assert ev is None
     assert provider.calls == 1  # 非瞬态错误不重试
+
+
+# ---- 摘要请求的总量预算（M1 回归：小窗口模型触发压缩时摘要请求自己超窗） ----
+
+
+async def test_compaction_transcript_fits_total_budget(tmp_path):
+    """M1：摘要请求的 transcript 有总量预算。
+
+    单条 8k 截断之外总量也要装进模型窗口：触发压缩时历史已逼近上限，摘要
+    请求自身超窗会先吃上游 400 → compaction_stuck，此后自动压缩与手动
+    /compact 持续失败。用 8k token 的小窗口 + 二十余条长消息（远超预算），断言
+    实际发出的摘要请求被压进预算、截断处带标记、最旧的消息也有代表。
+    """
+    provider = FakeProvider([[TextBlock(text="SUMMARY: 历史摘要。")]])
+    agent = make_agent(provider, tmp_path, context_limit_tokens=8_000)
+    agent.set_system("sys")
+    for i in range(12):
+        agent.history.append(Message.user(f"第{i}轮目标 " + "长" * 5000))
+        agent.history.append(Message.assistant([TextBlock(text="进展" + "y" * 4000)]))
+    ev = await compact_history(agent, keep_recent=2)
+    assert ev is not None
+
+    system_msg, user_msg = provider.calls[0]  # 摘要调用 = system + 模板两条
+    assert system_msg.role == "system"
+    seg = user_msg.text.split("--- CONVERSATION SEGMENT ---\n", 1)[1]
+    seg = seg.rsplit("\n--- END ---", 1)[0]
+    budget = context_mod._compact_transcript_budget(agent)
+    assert len(seg) <= budget, "摘要请求的 transcript 超出总量预算"
+    assert "已按预算截断" in seg, "被压缩的消息要带截断标记"
+    assert "第0轮目标" in seg, "等比缩放要给长消息（含最旧的）留片段代表，不是一刀砍尾"
+
+
+def test_clip_transcript_total_degrades_to_tail_pack():
+    """预算远小于条数（等比放不出片段）时退化为保尾：最新的整条优先存活，
+    更早的消息整体省略并计数，总量（含注记）仍不超预算。"""
+    chunks = [f"[USER] 第{i}条 " + "x" * 150 for i in range(50)]
+    budget = 2_000
+    clipped, dropped = context_mod._clip_transcript_total(chunks, budget)
+
+    assert 0 < dropped < 50, "退化分支应有整体省略计数"
+    assert clipped[-1] == chunks[-1], "最新的消息要整条保留"
+    assert not any("第0条" in c for c in clipped), "最旧的消息应被整体省略"
+    note = f"（另有 {dropped} 条消息因超出预算整体省略）"
+    total = sum(len(c) for c in clipped) + 2 * (len(clipped) - 1) + 2 + len(note)
+    assert total <= budget, "省略注记与连接符也要算进预算"

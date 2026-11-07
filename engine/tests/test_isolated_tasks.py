@@ -78,6 +78,44 @@ def test_ensure_worktree_and_commit_all(tmp_path):
         ensure_worktree(tmp_path.parent, wt.parent / "别处", "skysheep/task-x")  # 非仓库
 
 
+def test_exclude_worktrees_preserves_gbk_bytes(tmp_path):
+    """M2：.git/info/exclude 里的 GBK 内容不得被读坏再固化成 U+FFFD。
+
+    旧实现按 utf-8/errors=replace 读、utf-8 写回，用户手写的中文备注会被
+    替换成 U+FFFD 永久丢失（AGENTS.md 点名禁令）。合规写法：textio 探测
+    编码、按原编码与原行尾符写回——原字节逐字保留，追加行只增不改。
+    """
+    from skysheep.core.worktree import _exclude_worktrees
+
+    exclude = tmp_path / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True)
+    original = "# 中文备注：本地临时目录\n*.log\n".encode("gbk")
+    exclude.write_bytes(original)
+
+    _exclude_worktrees(tmp_path)
+    data = exclude.read_bytes()
+    assert data.startswith(original), "已有内容必须按原字节保留，不得被替换字符覆盖"
+    text = data.decode("gbk")
+    assert "\ufffd" not in text, "GBK 内容不得固化成 U+FFFD"
+    assert text.count("/.skysheep/worktrees/") == 1
+
+    _exclude_worktrees(tmp_path)  # 幂等：重复调用不重复登记
+    assert exclude.read_bytes().decode("gbk").count("/.skysheep/worktrees/") == 1
+
+
+def test_exclude_worktrees_skips_undecodable_exclude(tmp_path):
+    """exclude 探测不确凿（二进制/解不出来）时宁可不登记，也不按乱码基准改写。"""
+    from skysheep.core.worktree import _exclude_worktrees
+
+    exclude = tmp_path / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True)
+    garbage = b"\x00\x01binary\xff\xfe\x00garbage"
+    exclude.write_bytes(garbage)
+
+    _exclude_worktrees(tmp_path)
+    assert exclude.read_bytes() == garbage, "探测不确凿时不得改写文件"
+
+
 # ---------------------------------------------------------------- 门控
 
 

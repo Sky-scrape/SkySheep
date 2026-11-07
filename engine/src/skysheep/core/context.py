@@ -81,6 +81,24 @@ with no other memory. Capture, in compact markdown:
 COMPACT_MSG_CHAR_LIMIT = 8_000
 COMPACT_MSG_KEEP_TAIL = 1_500
 
+# ---- 摘要请求的总量预算（M1）----
+# 单条 8k 截断之外，transcript 加起来也要装进模型窗口：触发压缩时历史已逼近
+# 上限，摘要请求自身超窗会先吃上游 400 → compaction_stuck，此后自动压缩与
+# 手动 /compact 持续失败——最容易失败的时刻恰好最需要它成功。预算按
+# 「上下文上限 - 请求外壳 - 摘要输出余量」保守折算成字符（1 token ≈ 1 字符：
+# CJK 实际约 0.7 token/字、西文更省，只会少留不会超，超限的代价是整场压缩
+# 白跑，宁保守；与 roundtable._fusion_draft_budget 同口径）。
+COMPACT_TRANSCRIPT_CHAR_LIMIT = 48_000  # 上下文未知（<=0）时的兜底总量
+COMPACT_SUMMARY_MARGIN_TOKENS = 4_000  # 给摘要输出留的 token 余量
+MIN_COMPACT_TRANSCRIPT_CHARS = 2_000  # 剩余空间极小时预算的绝对下限
+# 等比缩放后单条正文（不含截断标记）至少保留的字符：低于它截不出有信息量的
+# 片段，宁可整体省略（条数在 transcript 末尾注明）。
+MIN_FRAGMENT_CHARS = 40
+_COMPACT_CLIP_MARK = "…（本条已按预算截断）"
+# 给「另有 N 条消息整体省略」注记预留的字符（算进预算内；片段间连接符另按
+# 条数预扣，见 _clip_transcript_total）。
+_COMPACT_OMIT_NOTE_RESERVE = 80
+
 # 压缩摘要调用的瞬态错误重试：限流/超时这类一闪而过的故障不该让整轮对话
 # 以 ok=false 收场（主循环同类错误有 3 次退避重试，见 agent.py）。这里给
 # 2 次；耗尽（或非瞬态错误）记日志并返回 None——调用方已有的 compaction_stuck
@@ -98,6 +116,72 @@ def _clip_for_transcript(text: str) -> str:
         + "\n…（本条过长，中间已截断）…\n"
         + text[-COMPACT_MSG_KEEP_TAIL:]
     )
+
+
+def _compact_transcript_budget(agent) -> int:
+    """摘要请求里 transcript 的总字符预算（M1）。
+
+    摘要调用是「system + 模板 + transcript」的全新请求，不携带历史本身：
+    预算 = 上下文上限 - 请求外壳 - 摘要输出余量，按 1 token ≈ 1 字符保守折算
+    （只会少留不会超；与 roundtable._fusion_draft_budget 同口径）。上下文
+    未知（<=0）时退回固定兜底 COMPACT_TRANSCRIPT_CHAR_LIMIT。
+    """
+    ctx = int(getattr(agent, "context_limit_tokens", 0) or 0)
+    if ctx <= 0:
+        return COMPACT_TRANSCRIPT_CHAR_LIMIT
+    shell = estimate_text_tokens(COMPACT_SYSTEM) + estimate_text_tokens(
+        COMPACT_USER_TEMPLATE.format(transcript="")
+    )
+    room = ctx - shell - COMPACT_SUMMARY_MARGIN_TOKENS
+    floor = max(MIN_COMPACT_TRANSCRIPT_CHARS, ctx // 20)
+    return min(COMPACT_TRANSCRIPT_CHAR_LIMIT, max(floor, room))
+
+
+def _clip_transcript_total(chunks: list[str], budget: int) -> tuple[list[str], int]:
+    """把进入摘要请求的 transcript 压进总量预算（M1，参照 roundtable.clip_drafts_total）。
+
+    返回 (片段列表, 整体省略的条数)，省略条数由调用方在 transcript 末尾注明。
+
+    - 总量在预算内：原样返回，一条不动。
+    - 超预算（常态）：全部消息按同一比例独立缩放（keep = len × 预算/总量，
+      没有余额重分配），截断处带标记，摘要模型能看出这里不完整。份额小到
+      放不出最小片段的消息不论新旧一律整体省略——长消息保片段、短消息让路，
+      换取 sum(int(len × scale)) ≤ 预算 的硬保证。
+    - 预算远小于条数（等比份额连最小片段都放不下）：退化为保尾——从最新的
+      消息往回装整条，装不下的更早消息整体省略（「先压最旧」落在这里）。
+    """
+    total = sum(len(c) for c in chunks)
+    if budget <= 0 or total <= budget:
+        return list(chunks), 0
+    # 注记与片段间连接符也占预算：预扣这几十字符，换「总量必不超」的硬保证
+    usable = max(0, budget - _COMPACT_OMIT_NOTE_RESERVE - 2 * max(0, len(chunks) - 1))
+    allowance = MIN_FRAGMENT_CHARS + len(_COMPACT_CLIP_MARK)
+    if usable < allowance * len(chunks):
+        # 退化：等比放不出片段，改为保尾——最新的整条优先，更早的整体省略
+        out: list[str | None] = [None] * len(chunks)
+        left = usable
+        for i in range(len(chunks) - 1, -1, -1):
+            if len(chunks[i]) <= left:
+                out[i] = chunks[i]
+                left -= len(chunks[i])
+            elif left >= allowance:
+                out[i] = chunks[i][: left - len(_COMPACT_CLIP_MARK)] + _COMPACT_CLIP_MARK
+                break
+            else:
+                break  # 装不下整条也放不出片段：剩下的（更早的）全部省略
+        dropped = sum(1 for p in out if p is None)
+        return [p for p in out if p is not None], dropped
+    scale = usable / total
+    pieces: list[str | None] = []
+    for c in chunks:
+        keep = int(len(c) * scale)
+        body = keep - len(_COMPACT_CLIP_MARK)
+        if body >= MIN_FRAGMENT_CHARS:
+            pieces.append(c[:body] + _COMPACT_CLIP_MARK)  # 截断处带标记
+        else:
+            pieces.append(None)  # 份额放不出片段：整体省略，条数末尾注明
+    dropped = sum(1 for p in pieces if p is None)
+    return [p for p in pieces if p is not None], dropped
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -258,8 +342,17 @@ async def compact_history(
         return None
     recent = history[start:]
 
-    transcript = "\n\n".join(
+    chunks = [
         f"[{m.role.upper()}] {_clip_for_transcript(m.to_plain())}" for m in to_summarize
+    ]
+    transcript_budget = _compact_transcript_budget(agent)
+    clipped, omitted = _clip_transcript_total(chunks, transcript_budget)
+    transcript = "\n\n".join(clipped)
+    if omitted:
+        transcript += f"\n\n（另有 {omitted} 条消息因超出预算整体省略）"
+    logger.debug(
+        "compact_history: transcript 总量 %d 字符、预算 %d 字符（整体省略 %d 条）",
+        sum(len(c) for c in chunks), transcript_budget, omitted,
     )
     summary_parts: list[str] = []
     usage_total = 0

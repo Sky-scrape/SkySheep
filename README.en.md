@@ -19,13 +19,10 @@
 
 SkySheep is an open-source AI Agent workbench that runs on your own computer: a Python asyncio engine, a pywebview desktop shell, and a zero-build frontend, MIT-licensed. It reads and writes files, edits code, runs commands, searches the web, handles documents, operates your computer, and keeps multi-step work moving through sub-agents, scheduled tasks, and pipelines.
 
-Its defining idea is not "another chat window". It makes **multi-model collaboration** a native workflow inside one task:
+Its defining idea is not "another chat window". It makes **multi-model collaboration** a native workflow inside one task, along two parallel lines:
 
-- **Roundtable**: several models answer in parallel, then a chairman model fuses the drafts into one response;
-- **Team**: split work by role and use a channel plus task board to dispatch, report, accept, and deliver;
-- **Adversarial**: assign discovery, investigation, recommendation, and judgment to roles built to find blind spots;
-- **Collaboration templates**: the three forms above live in one set of templates — three built-in ones (Roundtable · multi-model review / Team · delivery squad / Adversarial · code review) that you can copy to change roles, models, prompts, and budgets; a run shows one grant checklist first, and a template can only narrow permissions, never turn confirmation off;
-- **Relay (experimental)**: alternate turns between a main and peer session to connect proposal, execution, feedback, and revision (minimal loop and handoff gate shipped; deeper integration frozen for now).
+- **Collaboration**: several models share one turn — roundtable has members answer in parallel and a chairman fuse them; team splits tickets by role and reports, accepts, and delivers in a channel; adversarial assigns discovery, investigation, recommendation, and judgment to roles built to find blind spots. All three forms live in one set of **collaboration templates** (three built-ins: Roundtable · multi-model review / Team · delivery squad / Adversarial · code review) that you can copy to change roles, models, prompts, and budgets; a run shows one grant checklist first, and a template can only narrow permissions, never turn confirmation off;
+- **Relay (experimental)**: two sessions hand off turn by turn — main proposes, peer executes, main revises; before each handoff the receiver restates and the sender verifies, and background sub-agents / commands on both sides are inventoried first (minimal loop and handoff gate shipped; deeper integration frozen for now).
 
 You still stay in charge of sensitive actions: file writes and command execution ask for confirmation by default, writes include a diff preview, and file changes are snapshotted per round for rollback. SkySheep has no cloud service of its own; sessions, configuration, and keys stay on your machine. When you enable a hosted model, conversation content is sent to the provider you selected, according to your configuration.
 
@@ -63,7 +60,7 @@ SkySheep is built for work that needs an agent to actually touch things while ke
 
 ## 📦 Capability overview
 
-- **Multi-model collaboration**: collaboration templates (three built-in roundtable / team / adversarial templates, copyable and editable, one grant before a run) · resident teams and the team room · scheduled teams · relay (main and peer screens alternating + readback before handoff)
+- **Multi-model collaboration**: collaboration (three built-in roundtable / team / adversarial templates, copyable and editable, one grant before a run; resident teams, the team room, and scheduled teams) · relay (main and peer screens alternating + readback before handoff)
 - **Execution**: file read/write and precise editing · command execution (with background processes) · regex and glob search · web fetch and search · PDF / Word / Excel / PPT / CSV I/O · image understanding and AI image generation · sub-agents (optionally in an isolated worktree)
 - **Automation**: scheduled tasks · dependency pipelines (DAG) · factory board (cross-project observability / dispatch · day-night and real weather) · agenda reminders · export to the Windows Task Scheduler · Feishu / WeChat / Webhook pushes · daily run digests
 - **Extensions**: MCP (two transports, seven presets) · Skills (twenty official templates) · Mods (experimental) · global egress (proxy / bypass list / self-signed CA)
@@ -87,9 +84,16 @@ Letting an agent touch your files and commands only works if you can survive the
 
 A single model's answer reads fluently and is still one viewpoint. The roundtable has several models answer and a chairman fuse; the team puts roles in front of each other for acceptance; adversarial review assigns a stage to nothing but fault-finding. The extra time and tokens stay controllable — pick per-member models (cheap models as members, a strong one as chairman), and lean on the budget guardrail, round caps, and draft dedupe.
 
-## 👥 Multi-model collaboration: models take different parts of one turn
+## 👥 Multi-model collaboration: two lines, collaboration and relay
 
-Multi-model here doesn't mean opening three windows and asking the same question. It means models take different parts of one task. The three forms now live in one set of **collaboration templates**: pick a template in the composer's collaboration menu, with only one active per turn. Three read-only templates ship built in, and copying one lets you change roles, models, prompts, and budgets (team templates can also declare a permission tier and tool scope). Team templates (the existing `~/.skysheep/teams.json` book) are listed in the same gallery, while creating a team still uses that book.
+Multi-model here doesn't mean opening three windows and asking the same question — and it is not one single shape either. SkySheep splits it into two parallel lines:
+
+- **Collaboration** (the composer's "Collaboration" menu): several models share one turn. Roundtable / team / adversarial now live in one set of **collaboration templates** — three read-only built-ins, one active per turn; copying one lets you change roles, models, prompts, and budgets, and team templates can also declare a permission tier and tool scope. Team templates (the existing `~/.skysheep/teams.json` book) are listed in the same gallery, while creating a team still uses that book.
+- **Relay** (the sidebar's "Relay" workbench): two sessions hand off turn by turn — not more models at once, but a main and a peer session taking turns on one job.
+
+### Collaboration: three forms, one set of templates
+
+What each form is good for:
 
 | | Roundtable | Team | Adversarial |
 |---|---|---|---|
@@ -111,7 +115,9 @@ Multi-model here doesn't mean opening three windows and asking the same question
 
 ![Adversarial: the discover → investigate → recommend → judge pipeline, with severity and verdict (upheld / partial / refuted / pending) per finding](docs/images/adversarial.webp)
 
-One thing that's easy to misread: relay (experimental) is not a fourth member of that trio. It is a standalone workbench for work that hands off back and forth ("propose → execute → feedback → revise"). Open "Relay" from the sidebar, fill in the overall task and each side's per-turn task on the right-side board, then hit Run to let the side whose turn it is execute a full, normal Agent turn (agent loop, tools, permission gate, and checkpoints all apply). The baton passes automatically and the next turn carries the other side's previous output; "Continuous alternation" runs the turns back to back. Before an automatic handoff, the receiver first does a tool-free readback (goal / done / to-do / plan / uncertainties) and the handing side verifies it before the turn really starts; before every turn both sides' still-running background sub-agents and background commands are inventoried, and the pair pauses when they cannot be settled ("readback before handoff" is on by default and skipped for manual turn-by-turn approval). Both sides' transcripts stay in their own sessions. Relay is in an experimental freeze: the minimal loop and the handoff gate work, while deeper integration (native dual-screen) is deferred. Design notes: [docs/接力模式设计.md](docs/接力模式设计.md).
+### Relay: two sessions, turn by turn
+
+Relay (experimental) is the other parallel line, not a fourth form of that trio: it is a standalone workbench for work that hands off back and forth ("propose → execute → feedback → revise"). Open "Relay" from the sidebar, fill in the overall task and each side's per-turn task on the right-side board, then hit Run to let the side whose turn it is execute a full, normal Agent turn (agent loop, tools, permission gate, and checkpoints all apply). The baton passes automatically and the next turn carries the other side's previous output; "Continuous alternation" runs the turns back to back. Before an automatic handoff, the receiver first does a tool-free readback (goal / done / to-do / plan / uncertainties) and the handing side verifies it before the turn really starts; before every turn both sides' still-running background sub-agents and background commands are inventoried, and the pair pauses when they cannot be settled ("readback before handoff" is on by default and skipped for manual turn-by-turn approval). Both sides' transcripts stay in their own sessions. Relay is in an experimental freeze: the minimal loop and the handoff gate work, while deeper integration (native dual-screen) is deferred. Design notes: [docs/接力模式设计.md](docs/接力模式设计.md).
 
 ## 🔍 Feature walkthrough
 
@@ -185,7 +191,7 @@ Terminal agents like Claude Code or OpenAI Codex CLI excel at scripting and CI i
 | Dimension | Terminal agents | SkySheep |
 |---|---|---|
 | Interaction | A command-line stream in a terminal, built for scripts and CI | Graphical, Chinese-first: confirmation cards, diffs, and panels live in the UI |
-| Multi-model | Usually one model all the way through | Roundtable / team / adversarial, plus the relay workbench |
+| Multi-model | Usually one model all the way through | Collaboration (roundtable / team / adversarial) + relay |
 | Permission confirmation | Command-line flags and rule files | Three graphical tiers + per-action confirmation cards + a per-project command whitelist |
 | Rollback | You lean on git yourself | Per-round snapshots, one-click undo, surviving restarts |
 | Unattended work | You wire up your own scheduling | Scheduled tasks / dependency pipelines / Task Scheduler export / channel digests |
@@ -241,11 +247,11 @@ Single-file installer: install [Inno Setup 7](https://jrsoftware.org/isdl.php) (
 
 **Multi-model collaboration**
 
-- Collaboration templates: roundtable / team / adversarial unified into one template schema, with three built-in ones (Roundtable · multi-model review / Team · delivery squad / Adversarial · code review) that can be copied, edited, and deleted; the schema has no field that can switch the permission gate off, team templates may declare `needs` (read / write / exec) and a tool allowlist, and a run shows one grant checklist first
+- Collaboration: roundtable / team / adversarial unified into one template schema, with three built-in ones (Roundtable · multi-model review / Team · delivery squad / Adversarial · code review) that can be copied, edited, and deleted; the schema has no field that can switch the permission gate off, team templates may declare `needs` (read / write / exec) and a tool allowlist, and a run shows one grant checklist first
 - Roundtable: members answer in parallel, the chairman fuses; five member role presets (critic / fact-checker / minimalist / pragmatist and more); debate rounds and A/B mode; drafts persisted with the session for review, citation, and follow-up; seven token-control mechanisms (dedupe, budget clipping, and more)
 - Team: task board + role split + team channel; user director or AI director (seven internal tools in a closed loop, all read-only and never passing the permission gate); "small meetings" reuse the roundtable and appear only in the channel; four runaway guards; team templates you can save and reuse; tickets, reports, and channel messages persisted for replay; resident teams survive across sessions and are woken by scheduled tasks; the "Collaboration" tab shows channel, ticket board, and members side by side; scheduled teams share the same execution chain as manual ones (`skysheep cron run` included)
 - Adversarial: discover → investigate → recommend → judge, with asymmetric incentives, isolated stage contexts, and graceful degradation on failure; an upheld finding can be registered as a consulting ticket for a team member (content is read from server-side records — the client cannot forge it); reports export as Markdown; the `/对抗 <content>` channel command runs the same pipeline
-- Relay: main/peer screens alternating turns, with readback verification before handoff (five-section structure check) plus an external-side-effect inventory (background sub-agents and background commands); two persisted tables, idempotent requests with version CAS, and an exclusive lock on the data directory; local-only RPC
+- Relay (the other parallel line): main/peer screens alternating turns, with readback verification before handoff (five-section structure check) plus an external-side-effect inventory (background sub-agents and background commands); two persisted tables, idempotent requests with version CAS, and an exclusive lock on the data directory; local-only RPC
 
 **Models & conversation**
 

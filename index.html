@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>SkySheep —— 多模型协作的本地 AI 工作台</title>
-<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。圆桌、团队、对抗三种多模型协作收成可复用的协作模板，团队可常驻、可定时；接力交接前先复述核验；每一步先确认、可回滚，数据留在本机。">
+<meta name="description" content="开源 Windows 桌面 AI Agent 工作台。多模型协作分协作与接力两条线：圆桌 / 团队 / 对抗收成可复用模板，接力让主副屏按轮交接、交接前先复述核验；每一步先确认、可回滚，数据留在本机。">
 <meta name="theme-color" content="#e8dfc7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#171410" media="(prefers-color-scheme: dark)">
 <meta property="og:title" content="SkySheep —— 多模型协作的本地 AI 工作台">
-<meta property="og:description" content="多个模型一起讨论、分工、审查，跑在你自己的电脑上。三种协作收成可复用模板，团队可常驻、可定时，每一步先确认、可回滚。">
+<meta property="og:description" content="多个模型一起讨论、分工、审查，跑在你自己的电脑上。协作把圆桌 / 团队 / 对抗收成模板，接力让两个会话按轮交接，每一步先确认、可回滚。">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://sheepsky.com/">
 <meta property="og:image" content="https://sheepsky.com/docs/images/social-preview.png">
@@ -25,7 +25,7 @@
   "operatingSystem": "Windows",
   "applicationCategory": "DeveloperApplication",
   "url": "https://sheepsky.com/",
-  "description": "开源 Windows 桌面 AI Agent 工作台：圆桌、团队、对抗三种多模型协作收成可复用模板，跑在你自己的电脑上。",
+  "description": "开源 Windows 桌面 AI Agent 工作台：多模型协作分协作（圆桌 / 团队 / 对抗模板）与接力两条线，跑在你自己的电脑上。",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
   "license": "https://opensource.org/licenses/MIT"
 }
@@ -715,10 +715,14 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   box-shadow: var(--shadow-sm);
 }
 .flow-note { margin-top: 15px; font-size: 12.5px; line-height: 1.7; color: var(--dim); }
-/* 协作区说明：模板权限边界（标签页下方）与接力补充（三个面板之后） */
+/* 多模型协作拆成两条线：协作 / 接力 的分节标题 */
+.collab-line { margin-bottom: 26px; }
+.collab-line .section-label { margin-bottom: 8px; }
+.collab-line h3 { font-size: 23px; font-weight: 800; letter-spacing: -.02em; line-height: 1.3; }
+.collab-line.is-second { margin-top: 54px; }
+/* 协作区说明：模板权限边界（标签页下方） */
 .collab-note { font-size: 13px; line-height: 1.75; color: var(--dim); }
 .collab-note.is-under-tabs { margin: -16px 0 34px; }
-.collab-note.is-after-panels { margin-top: 34px; }
 
 /* ============================================================
  * 界面画廊
@@ -1051,7 +1055,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           圆桌并行作答后融合，团队按角色分工，对抗专门挑错。
         </p>
         <p class="hero-lede">
-          从讨论到执行，再到定时自动化，都留在同一个工作台。三种协作形态现在收成了可复用的<strong>协作模板</strong>，自动化也变成了一座<strong>看得见运转的工厂</strong>。
+          从讨论到执行，再到定时自动化，都留在同一个工作台。多模型协作分两条线：<strong>协作</strong>让多个模型在同一轮里分工，<strong>接力</strong>让两个会话按轮交接；自动化则变成了一座<strong>看得见运转的工厂</strong>。
         </p>
         <div class="hero-actions">
           <a class="btn btn-primary btn-lg" href="https://github.com/sky-scrape/SkySheep/releases/latest">
@@ -1098,8 +1102,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="wrap facts-grid">
       <div class="fact"><b>动手</b><span>文件、命令、检索、文档与电脑操作</span></div>
       <div class="fact"><b>接入</b><span>多家模型服务预设，兼容本地推理服务</span></div>
-      <div class="fact"><b>3</b><span>种协作形态收进一套模板</span></div>
-      <div class="fact"><b>26</b><span>套界面主题，跟随系统自动切换</span></div>
+      <div class="fact"><b>协作</b><span>圆桌 / 团队 / 对抗，收成可复用模板</span></div>
+      <div class="fact"><b>接力</b><span>主副屏按轮交接，交接前先复述核验</span></div>
     </div>
   </section>
 
@@ -1153,7 +1157,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
       <div class="section-head rise">
         <span class="section-label">最近更新 · 2026.11.07</span>
         <h2>协作收成模板，交接先说清楚</h2>
-        <p>v2.6.6 把圆桌 / 团队 / 对抗收成一套可复用的协作模板，团队可以常驻、也能到点自己上班，接力交接前先复述核验；v2.6.7 补了一批权限门与稳定性加固。</p>
+        <p>v2.6.6 把协作收成一套可复用的模板（圆桌 / 团队 / 对抗），团队可以常驻、也能到点自己上班；接力在交接前先复述核验。v2.6.7 补了一批权限门与稳定性加固。</p>
       </div>
       <div class="update-grid">
         <article class="update-card rise">
@@ -1235,7 +1239,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         <article class="scene rise">
           <p class="scene-no">多模型会诊</p>
           <h3>重要的事不只问一个模型</h3>
-          <p>圆桌让多个模型各自作答、主席融合成一份答案；团队按角色分工、工单板跟进度；对抗模式组织专门挑错的审查流水线。三种形态都收在协作模板里，复制一份就能改成自己的分工。</p>
+          <p>圆桌让多个模型各自作答、主席融合成一份答案；团队按角色分工、工单板跟进度；对抗模式组织专门挑错的审查流水线。三种形态都收在协作模板里；另一条线是接力，主副屏按轮交接，交接前先复述核验。</p>
           <p class="scene-quote">这个方案让几个模型各自挑一遍毛病，再给我结论</p>
         </article>
 
@@ -1261,8 +1265,13 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
     <div class="wrap">
       <div class="section-head rise">
         <span class="section-label">Multi-model</span>
-        <h2>一次任务，三种协作形态，收进一套模板</h2>
-        <p>在输入框的协作菜单里按模板选，同一轮只能选一种。内置「圆桌·多模型评审 / 团队·交付小组 / 对抗·代码审查」三张，复制一份就能改角色、模型、提示词与预算；团队模板还能声明权限档位与工具范围。</p>
+        <h2>多模型协作的两条线：协作，与接力</h2>
+        <p><strong>协作</strong>让多个模型在同一轮任务里分工：圆桌 / 团队 / 对抗三种形态，已经收进一套可复用的协作模板。<strong>接力</strong>则是两个会话按轮交接：主屏出方案、副屏执行、再交回修订。输入框的协作菜单管前者，侧栏「接力」工作台管后者。</p>
+      </div>
+
+      <div class="collab-line rise">
+        <span class="section-label">Line 01 · 协作</span>
+        <h3>同一轮任务里，让多个模型分工</h3>
       </div>
 
       <div class="tabs rise" role="tablist" aria-label="多模型协作模式">
@@ -1361,7 +1370,36 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         </div>
       </div>
 
-      <p class="collab-note is-after-panels rise">接力（实验性）是独立工作台，不在这三种里：主副屏按轮交替，交接前接收方先做一次无工具复述、移交方核验通过才真正开轮；开跑前还会盘点两边名下的后台子代理与后台命令，收敛不了就暂停等人。</p>
+      <div class="collab-line is-second rise" id="relay-line">
+        <span class="section-label">Line 02 · 接力（实验性）</span>
+        <h3>两个会话之间，按轮交接</h3>
+      </div>
+
+      <div class="panel-grid">
+        <div class="panel-copy rise">
+          <h3>接力 —— 主副屏按轮交替</h3>
+          <p>适合「出方案 → 执行 → 反馈 → 修订」这类需要两边来回交接的活。主屏就是当前会话，副屏是独立会话；每轮都是完整对话（工具、权限门、检查点照常），后一轮能读到前一轮的输出，两屏正文各自留档。</p>
+          <div class="panel-role">
+            <h4>交接前先说清楚</h4>
+            <ol>
+              <li><b>复述</b>：接收方先做一次无工具复述（目标 / 已完成 / 待办 / 计划 / 不确定）</li>
+              <li><b>核验</b>：移交方对照刚落地的输出核验，通过才开轮；驳回带理由重述</li>
+              <li><b>盘点</b>：每轮开跑前盘点两边名下的后台子代理与后台命令，收敛不了就暂停等人</li>
+            </ol>
+          </div>
+        </div>
+        <div class="flow rise">
+          <p class="flow-label">流程示意</p>
+          <div class="flow-lanes">
+            <div class="lane"><span class="lane-name">主屏</span><span class="lane-track">出方案</span></div>
+            <div class="lane"><span class="lane-name">副屏</span><span class="lane-track is-member">执行</span></div>
+            <div class="lane"><span class="lane-name">交接核验</span><span class="lane-track is-chain">复述 → 核验 → 开轮</span></div>
+            <div class="lane"><span class="lane-name">主屏</span><span class="lane-track is-member">反馈与修订</span></div>
+          </div>
+          <p class="flow-out">输出：一条完整的交接链 + 两屏各自的会话</p>
+          <p class="flow-note">可开「连续交替」自动轮流执行；「交接前复述核验」默认开，人工逐轮批准时自动跳过。</p>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -1580,9 +1618,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
         </details>
 
         <details>
-          <summary>协作模板是什么？和圆桌 / 团队 / 对抗是什么关系？<span class="marker" aria-hidden="true">+</span></summary>
+          <summary>协作模板是什么？协作和接力是什么关系？<span class="marker" aria-hidden="true">+</span></summary>
           <div class="answer">
-            <p>还是那三种协作形态，只是从「每轮临时勾选」变成了「一份可复用的配置」：内置圆桌·多模型评审、团队·交付小组、对抗·代码审查三张模板，复制一份就能改角色、模型、提示词与预算；团队模板还能声明权限档位与工具范围。也可以新建自己的模板。</p>
+            <p>多模型协作分两条并列的线：<strong>协作</strong>是多个模型在同一轮任务里分工，圆桌 / 团队 / 对抗三种形态已经收进一套可复用的模板——内置三张，复制一份就能改角色、模型、提示词与预算；<strong>接力</strong>是两个会话按轮交接（主屏出方案 → 副屏执行 → 交回修订），入口在侧栏「接力」。</p>
             <p>团队模板仍在原来的团队模板册里，画廊会一起列出来。<strong>模板只能收窄权限</strong>——它声明的是「这次运行需要用到什么」（只读 / 可写 / 可执行 + 工具白名单），关不掉权限门；删除类操作、引擎目录与工作目录外的写入照旧逐次确认。</p>
           </div>
         </details>
@@ -1657,7 +1695,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
           <b>SkySheep</b>
         </div>
         <p class="footer-about">
-          开源 Windows 桌面 AI Agent 工作台。把圆桌、团队、对抗收成可复用的协作模板，权限由你掌握，改动可回滚，数据留在本机。
+          开源 Windows 桌面 AI Agent 工作台。协作与接力两条多模型协作线，权限由你掌握，改动可回滚，数据留在本机。
         </p>
       </div>
       <div class="footer-col">

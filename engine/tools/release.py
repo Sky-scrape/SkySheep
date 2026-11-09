@@ -38,8 +38,9 @@ Program Files 下的 Inno Setup 6/7；``SKYSHEEP_ISCC`` 可直接指定 iscc.exe
 安全取向：
 - ``--upload`` 不给就绝不碰 gh；给了也在全部本地阶段通过后才执行，且
   ``gh release create`` 对已存在的 release 直接报错退出，不做任何覆盖重传
-  （发布清单 §4「不 --clobber 重传」）。上传正文只是占位，提醒按清单把
-  CHANGELOG 条目并回长句后再在 GitHub 上编辑。
+  （发布清单 §4「不 --clobber 重传」）。正文取 ``docs/release-notes/<版本>.md``，
+  缺失即拒绝上传；打包不可逐字节复现，正文里预填的 sha256 会在上传前按本次
+  实际产物改正并提示把修正提交上去。
 - 冒烟细节：打包版是无窗口（console=False）程序，启动输出统一重定向到
   ``<SKYSHEEP_HOME>/logs/desktop.log``（desktop.py 的 _ensure_streams），
   端口从该日志的「服务已启动: http://127.0.0.1:<port>/」行解析；
@@ -504,6 +505,8 @@ def step_sha256() -> None:
 
 
 _RELEASE_NOTES_DIR = _REPO_ROOT / "docs" / "release-notes"
+# 正文里的 sha256：与 tools/check_release_notes.py 同款匹配（64 位十六进制）
+_NOTES_SHA_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 
 
 def release_notes_path(version: str, explicit: str | None = None) -> Path | None:
@@ -521,6 +524,32 @@ def release_notes_path(version: str, explicit: str | None = None) -> Path | None
         return path
     candidate = _RELEASE_NOTES_DIR / f"{version}.md"
     return candidate if candidate.is_file() else None
+
+
+def _sync_notes_sha(notes: Path, expected: str) -> bool:
+    """把正文里过期的 sha256 改成本次产物的实际值；改过返回 True。
+
+    打包与 Inno 编译不可逐字节复现：写正文时预填的哈希来自上一次构建，
+    重新构建后必然对不上。上传前以实际产物为准改正并提示提交，避免线上
+    正文写着一份校验不过的哈希。
+    """
+    try:
+        text = notes.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"读不了 Release 正文（{notes}）：{exc}") from exc
+    stale = {h.lower() for h in _NOTES_SHA_RE.findall(text)} - {expected}
+    if not stale:
+        return False
+    fixed = _NOTES_SHA_RE.sub(expected, text)
+    try:
+        # newline="" 保留原行尾：正文是 LF，默认写回会把整份文件改成 CRLF
+        with notes.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(fixed)
+    except OSError as exc:
+        raise RuntimeError(f"写不回 Release 正文（{notes}）：{exc}") from exc
+    print(f"  正文里的 sha256 与本次产物不一致（旧值 {', '.join(sorted(stale))}）")
+    print(f"  已按实际产物改为 {expected}；发布后请把 {notes.name} 的这次修正提交上去")
+    return True
 
 
 def step_upload(
@@ -580,6 +609,7 @@ def step_upload(
             )
         print("  警告：没有 Release 正文，退回占位正文（--allow-placeholder-notes）")
     else:
+        _sync_notes_sha(notes, expected)
         print(f"  Release 正文：{notes}")
         _run(
             [

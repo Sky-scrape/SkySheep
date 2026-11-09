@@ -99,6 +99,19 @@ def test_upload_rejects_stale_sha_before_external_tools(monkeypatch, tmp_path):
         release.step_upload(True)
 
 
+def test_upload_syncs_notes_sha_to_actual_artifact(tmp_path):
+    """正文预填的 sha 在重新构建后必然过期：上传前按实际产物改正并提示提交。"""
+    notes = tmp_path / "2.4.1.md"
+    notes.write_text("sha256：`" + "a" * 64 + "`\n", encoding="utf-8", newline="")
+    assert release._sync_notes_sha(notes, "b" * 64) is True
+    fixed = notes.read_bytes()
+    assert b"b" * 64 in fixed
+    assert b"a" * 64 not in fixed
+    assert b"\r\n" not in fixed, "改写正文不能顺手把 LF 改成 CRLF"
+    # 已经是实际值时不重写（避免无谓的脏树）
+    assert release._sync_notes_sha(notes, "b" * 64) is False
+
+
 def test_quality_gate_matches_ci_coverage_threshold():
     """发布质量门与 CI 同口径：单测带覆盖率门槛，不再跑一套更松的门禁。"""
     src = inspect.getsource(release.step_quality)

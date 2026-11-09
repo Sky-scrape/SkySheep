@@ -2999,6 +2999,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                                    "session_id": sid, "title": title})
                 except Exception:  # noqa: BLE001
                     pass
+            # 主屏首轮自动标题落地后，它在飞的接力副屏标题跟着对齐
+            # （旧标题 = 自动标题前库里那份，供孤儿副屏按旧名追）
+            await self.relay_sync_peer_title(sid, title, cur_title)
         except Exception:  # noqa: BLE001
             pass  # 标题生成失败完全静默
         finally:

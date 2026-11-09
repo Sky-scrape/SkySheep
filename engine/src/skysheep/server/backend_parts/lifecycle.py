@@ -363,6 +363,7 @@ class LifecycleMixin:
         title = title.strip()[:80]  # 限长：超长标题撑爆侧栏/标签布局
         if not title:
             raise RuntimeError("标题不能为空")
+        prev_title = await self.store.get_session_title(session_id)
         await self.store.set_title(session_id, title)
         # 用户手改过名字：自动标题不再覆盖（含首轮在跑时才改名的竞态窗口）
         self._manually_named.add(session_id)
@@ -375,6 +376,9 @@ class LifecycleMixin:
                                "session_id": session_id, "title": title})
             except Exception:  # noqa: BLE001
                 pass
+        # 主屏改了名，它在飞的接力副屏标题跟着对齐（<主屏名> · 副屏）；
+        # 旧名一并传给联动（孤儿副屏按旧名追），失败静默不影响改名本身
+        await self.relay_sync_peer_title(session_id, title, prev_title)
         return {"id": session_id, "title": title}
 
     async def pin_session(self, session_id: str, pinned: bool) -> dict:

@@ -4528,6 +4528,35 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                 return None
             return await self.create_session(project_id, title=title)
 
+    async def relay_rename_orphan_peers(
+        self, project_id: int | None, old_title: str, new_title: str,
+    ) -> list[str]:
+        """主屏改名时，把「还没绑定 pair 的孤儿副屏」按旧名推导一并对齐。
+
+        副屏会话在点「接力」时就创建，relay_pairs 行要到第一次 run 才落库；
+        这个窗口里主屏改名，副屏会 stranded 在旧名上——下次 relay_peer_session
+        按新名找不到它、又建一条新的，多出一条空会话。只改「空 + 未被任何
+        pair 占用」的旧名同名会话（与复用同一排他口径）；已绑定的副屏由
+        pair 路径处理，有消息的副屏（用户可能已在里面聊过）不追改。
+        旧名必须是上次会为这个主屏生成的副屏名（_relay_peer_title_for(旧主屏名)），
+        这样连续多次改名也能一节节追上；旧名等于新名时无事可做直接返回。"""
+        assert self._db
+        if not old_title or old_title == new_title:
+            return []
+        async with self._relay_peer_lock:
+            cur = await self._db.execute(
+                "SELECT id FROM sessions WHERE project_id IS ? AND title = ?"
+                " AND archived = 0"
+                " AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sessions.id)"
+                " AND id NOT IN (SELECT peer_session_id FROM relay_pairs"
+                "                WHERE peer_session_id IS NOT NULL)",
+                (project_id, old_title),
+            )
+            ids = [r["id"] for r in await cur.fetchall()]
+            for sid in ids:
+                await self.set_title(sid, new_title)
+            return ids
+
     async def relay_pair_latest_turn(self, pair_id: str) -> dict | None:
         """pair 最新一轮（轮间隙/协商窗口的新鲜度判定用，见 backend 侧守卫）。"""
         cur = await self._db.execute(

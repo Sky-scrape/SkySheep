@@ -5724,6 +5724,16 @@ function handleEvent(kind, data) {
             sessionMeta[data.session_id] = { title: data.title };
             const t = tabFor(data.session_id);
             if (t) { t.title = data.title; renderTabs(); }
+            // 开在分屏列里的同名会话（接力副屏）标题跟着改：列头与列对象
+            // 缓存同刷，不改的话列头停在旧名，要靠手动 ⟳ 才能对上
+            const pane = splitPanes.find((p) => p.sid === data.session_id);
+            if (pane) {
+              pane.title = data.title;
+              const head = pane.el.querySelector(".split-title");
+              if (head) head.textContent = data.title;
+            }
+            // 接力看板的「副屏」胶囊（主屏改名联动副屏改名时即时反映）
+            if (typeof relayPeerRenamed === "function") relayPeerRenamed(data.session_id, data.title);
           }
         }
         refreshSessions();

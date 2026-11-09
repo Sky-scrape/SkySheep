@@ -106,7 +106,7 @@ async function relayDualShowPeer(peer) {
     focusSplitPane(exists);
     return;
   }
-  await openSplitPane(peer.id, peer.title || "接力  副屏");
+  await openSplitPane(peer.id, peer.title || RELAY_SIDE_LABEL.peer);
 }
 
 /** 点主页面的「接力」：开右侧看板 + 把副屏会话打开在分栏里。 */
@@ -405,7 +405,7 @@ function relayOnPairState(snapshot) {
     turns: snapshot.turns || [],
     // 广播只带 pair/turns，主副屏标题沿用打开时那一份
     main: prev.main || { id: snapshot.pair.main_session_id, title: "当前会话" },
-    peer: prev.peer || { id: snapshot.pair.peer_session_id, title: "接力  副屏" },
+    peer: prev.peer || { id: snapshot.pair.peer_session_id, title: RELAY_SIDE_LABEL.peer },
   };
   relayDualPairId = snapshot.pair.id;
   relayDualRender();
@@ -484,5 +484,12 @@ function relayOnVerify(frame) {
 function relayPeerDeleted(sid) {
   if (!relayDual || !relayDual.peer || relayDual.peer.id !== sid) return;
   relayDual = { ...relayDual, peer: null };
+  relayDualRender();
+}
+
+/** 副屏会话改名（用户手改 / 主屏改名联动）：看板缓存与「副屏」胶囊同步。 */
+function relayPeerRenamed(sid, title) {
+  if (!relayDual || !relayDual.peer || relayDual.peer.id !== sid) return;
+  relayDual = { ...relayDual, peer: { ...relayDual.peer, title } };
   relayDualRender();
 }

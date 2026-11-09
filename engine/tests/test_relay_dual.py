@@ -139,6 +139,75 @@ async def test_dual_open_reuses_peer_and_binds_main(home):
         await be.shutdown()
 
 
+async def test_dual_peer_title_follows_main_and_rename(home):
+    """副屏标题随主屏走：主屏无名时退回「接力 · 副屏」，有名字时「主屏名 · 副屏」；
+    主屏改名（rename_session）把非终态 pair 的副屏与「还没绑 pair 的孤儿副屏」
+    一并对齐；连续改名按旧名一节节追。"""
+    prov = FakeProvider([TextBlock(text="x")])
+    be = await _mk(home, prov)
+    try:
+        # 主屏还没有标题（新建空会话）：副屏退回固定名
+        sid = (await be.new_session())["id"]
+        opened = await be.relay_dual_open({"session_id": sid, "create_peer": True})
+        peer_id = opened["peer"]["id"]
+        assert opened["peer"]["title"] == "接力 · 副屏"
+
+        # 主屏改名 → 副屏标题跟着对齐（pair 存在即同步，state 不限：
+        # 还没跑过轮的 pair 是 idle，也属于「在飞的接力」）
+        await be.rename_session(sid, "快聊")
+        peer = await be.store.get_session(peer_id)
+        assert peer.title == "快聊 · 副屏"
+
+        # 再点一次「接力」：按新名字复用同一份空副屏（不新增）
+        again = await be.relay_dual_open({"session_id": sid, "create_peer": True})
+        assert again["peer"]["id"] == peer_id
+        sessions = await be.store.list_sessions(be.project.id)
+        assert sum(1 for s in sessions if s.title == "快聊 · 副屏") == 1
+
+        # 连续改名：旧名「快聊 · 副屏」也能追上（改名链一节节对齐）
+        await be.rename_session(sid, "发布")
+        sessions = await be.store.list_sessions(be.project.id)
+        assert sum(1 for s in sessions if s.title == "发布 · 副屏") == 1
+        assert not any(s.title == "快聊 · 副屏" for s in sessions)
+    finally:
+        await be.shutdown()
+
+
+async def test_dual_rename_aligns_orphan_peer_without_pair(home):
+    """点过接力（副屏已建）但还没跑第一轮时主屏改名：pair 行不存在，
+    孤儿副屏按旧名推导追改——否则下次按新名查落空、多建一条空会话。"""
+    prov = FakeProvider([TextBlock(text="x")])
+    be = await _mk(home, prov)
+    try:
+        sid = (await be.new_session())["id"]
+        opened = await be.relay_dual_open({"session_id": sid, "create_peer": True})
+        peer_id = opened["peer"]["id"]
+        # 只建了副屏会话，没有 pair 行（relay_pairs 仍为空）
+        assert await be.store.relay_pair_latest(sid) is None
+
+        # 主屏从无名 → 有名：孤儿副屏从兜底名追到新名
+        await be.rename_session(sid, "快聊")
+        peer = await be.store.get_session(peer_id)
+        assert peer.title == "快聊 · 副屏"
+
+        # 此时点执行：按新名复用同一条副屏，不新增
+        started = await be.relay_dual_run({
+            "session_id": sid,
+            "goal": "完成示例任务",
+            "main_task": "发布方案",
+            "peer_task": "执行并反馈",
+            "request_id": "d-orphan-1",
+            "expected_revision": 0,
+        })
+        pair_id = started["pair"]["id"]
+        await _wait_pair_state(be, pair_id, "idle")
+        assert started["peer"]["id"] == peer_id
+        sessions = await be.store.list_sessions(be.project.id)
+        assert sum(1 for s in sessions if s.title == "快聊 · 副屏") == 1
+    finally:
+        await be.shutdown()
+
+
 async def test_dual_run_alternates_and_hands_previous_output(home):
     prov = FakeProvider([
         [TextBlock(text="主屏方案：第一步读文件")],

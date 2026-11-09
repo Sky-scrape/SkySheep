@@ -53,8 +53,16 @@ _RELAY_RECENT_CONTEXT = 8
 # 同进程内按「规范化库路径」的接力独占运行权注册表（跨进程另有文件锁）
 _RELAY_LOCKS: dict[str, str] = {}
 
-# 主副屏接力：副屏会话标题（复用它判断「上次点接力留下的空副屏」）
-_RELAY_PEER_TITLE = "接力 · 副屏"
+# 主副屏接力：副屏会话标题后缀（复用它判断「上次点接力留下的空副屏」）。
+# 副屏完整标题随主屏会话名走：<主屏名> · 副屏；主屏会话还没有标题（未命名/
+# 首轮未完）时退回固定名「接力 · 副屏」——同名空会话复用的判断按完整标题。
+_RELAY_PEER_TITLE_SUFFIX = "副屏"
+_RELAY_PEER_TITLE_FALLBACK = "接力 · 副屏"
+
+
+def _relay_peer_title_for(main_title: str | None) -> str:
+    main = (main_title or "").strip()
+    return f"{main} · {_RELAY_PEER_TITLE_SUFFIX}" if main else _RELAY_PEER_TITLE_FALLBACK
 # 交接给下一轮时保留的上一轮输出长度（模型不需要全文，太长还会挤掉本轮预算）
 _RELAY_DUAL_PREV_CHARS = 6000
 
@@ -217,6 +225,61 @@ class RelaySettingsMixin:
             "peer": {"id": peer.id, "title": peer.title} if peer else None,
         }
 
+    async def relay_sync_peer_title(
+        self, main_session_id: str, main_title: str, old_main_title: str | None = None,
+    ) -> None:
+        """主屏会话改名后，把它在飞的接力副屏标题一并对齐（<主屏名> · 副屏）。
+
+        rename_session 与 _auto_title 都走这里：用户手改与首轮自动标题都算
+        「主屏有了名字」。两条路径——已绑 pair 的副屏按 pair 改（只动非终态；
+        历史 pair 的副屏可能已删/已改名，不追改）；「点过接力但还没跑第一轮」
+        的孤儿副屏按旧名推导改（old_main_title 是改名前主屏名，副屏名是从它
+        推导的；否则它 stranded 在旧名上，下次按新名建副屏会多出一条空会话）。
+        整段走 _relay_dual_create_lock 与「查重 → 建副屏 → 建行」串行化：改名
+        联动若插进 relay_dual_run 的查空窗口，新 pair 会绑到一条正被改名的
+        副屏上。失败完全静默——副屏命名是展示层的事，绝不影响改名主流程。
+        广播 session_updated 让本机其它连接（分屏列/侧栏）同步。
+        """
+        if self.store is None:
+            return
+        try:
+            async with self._relay_dual_create_lock():
+                title = _relay_peer_title_for(main_title)
+                renamed: set[str] = set()
+                pairs = await self.store.relay_pairs_by_session(main_session_id)
+                peer_ids = {
+                    p["peer_session_id"] for p in pairs
+                    if p["main_session_id"] == main_session_id
+                    and p["state"] not in ("stopped", "completed")
+                    and p["peer_session_id"]
+                }
+                for peer_id in peer_ids:
+                    await self.store.set_title(peer_id, title)
+                    renamed.add(peer_id)
+                # 孤儿副屏：旧名按「上一任主屏名推导的副屏名」逐个追；固定兜底名
+                # （点接力时主屏还没标题）也在候选里。已被 pair 路径改过的不动。
+                seen_main_titles = [old_main_title] if old_main_title else []
+                seen_main_titles.append(_RELAY_PEER_TITLE_FALLBACK.rsplit(" · ", 1)[0])
+                for prev_main in dict.fromkeys(seen_main_titles):
+                    if not prev_main:
+                        continue
+                    old_peer = _relay_peer_title_for(prev_main)
+                    if old_peer == title:
+                        continue
+                    orphans = await self.store.relay_rename_orphan_peers(
+                        self._cur_project_id(), old_peer, title,
+                    )
+                    renamed.update(orphans)
+            for peer_id in renamed:
+                for ws_emit in list(self.ws_emitters):
+                    try:
+                        await ws_emit({"kind": "session_updated",
+                                       "session_id": peer_id, "title": title})
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001 - 副屏改名联动失败不影响主流程
+            pass
+
     # ---- RPC：open / save / get / run / stop ----
 
     async def relay_dual_open(self, params: dict) -> dict:
@@ -236,7 +299,8 @@ class RelaySettingsMixin:
             peer = await self.store.get_session(pair["peer_session_id"])
         if peer is None:
             peer = await self.store.relay_peer_session(
-                project_id, _RELAY_PEER_TITLE, create=bool(params.get("create_peer")),
+                project_id, _relay_peer_title_for(session.title),
+                create=bool(params.get("create_peer")),
                 exclude_pair_id=pair["id"] if pair else None,
             )
             if peer is not None and pair is not None:
@@ -325,7 +389,9 @@ class RelaySettingsMixin:
             else:
                 pair = await self.store.relay_pair_latest(session_id)
             if pair is None:
-                peer = await self.store.relay_peer_session(project_id, _RELAY_PEER_TITLE)
+                peer = await self.store.relay_peer_session(
+                    project_id, _relay_peer_title_for(session.title)
+                )
                 # 全新 pair：任何被占用的副屏都不复用（relay_peer_session 默认排他）
                 created = await self.store.relay_pair_create({
                     "id": uuid.uuid4().hex,
@@ -344,7 +410,8 @@ class RelaySettingsMixin:
             elif await self.store.get_session(pair["peer_session_id"]) is None:
                 # 副屏会话被用户删了：换一个新的副屏再跑，别把消息写进不存在的会话
                 peer = await self.store.relay_peer_session(
-                    project_id, _RELAY_PEER_TITLE, exclude_pair_id=pair["id"]
+                    project_id, _relay_peer_title_for(session.title),
+                    exclude_pair_id=pair["id"]
                 )
                 await self.store.relay_pair_update(
                     pair["id"], {"peer_session_id": peer.id}, bump=False

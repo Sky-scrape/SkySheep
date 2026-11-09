@@ -17351,8 +17351,8 @@ function lanPortSettingHtml(st) {
   // 说明文字单独一行：原来跟输入框、保存按钮挤同一条，按钮夹在「端口」和
   // 「为什么需要固定端口」之间，读起来像半句话之后突然插了个按钮
   return `
-    <div class="lan-note">服务端口：<input id="lan-port" class="lan-port-input" type="number" min="0" max="65535"
-      value="${st.port ? Number(st.port) : ""}" placeholder="随机"> <button id="lan-port-save" class="btn-ghost">保存</button></div>
+    <div class="lan-note lan-port-row">服务端口：<input id="lan-port" class="lan-port-input" type="number" min="0" max="65535"
+      value="${st.port ? Number(st.port) : ""}" placeholder="随机"><button id="lan-port-save" class="btn-ghost">保存</button></div>
     <div class="lan-note lan-port-hint">0 = 每次启动随机。要安装 PWA（添加到主屏幕）或长期使用固定地址，
       先固定端口——否则重启 SkySheep 后手机图标打开的就是旧地址（连接失败）。保存后重启生效。</div>`;
 }

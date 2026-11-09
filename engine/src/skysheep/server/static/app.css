@@ -7511,17 +7511,20 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 .lan-note { font-size: var(--fs-sm); color: var(--dim); line-height: 1.6; }
 /* 端口行下面的说明：脱离「输入框 + 保存」那条行，单独起一段 */
 .lan-port-hint { margin-top: 4px; }
+/* 端口设置行：标签 / 输入框 / 保存按钮一行三件。inline 混排时 input 是
+   vertical-align:middle、button 走 baseline，两个控件上下错位约 7px，
+   所以整行改 flex 按中线对齐，间距交给 gap（input 自己不再带外边距） */
+.lan-port-row { display: flex; align-items: center; gap: 6px; }
 /* 端口输入框对齐「盖章按钮」语言：纸面底 + 墨线描边 + 圆角，聚焦上浮；
-   显式定高与旁边「保存」按钮（btn-ghost 实测 34px）一样高——number input
-   的行盒比 button 高，靠 padding 对不齐 */
+   显式定高与旁边「保存」按钮同高 34px（按钮也定高，不再依赖 padding 凑） */
 .lan-port-input {
-  width: 90px; height: 34px; margin: 0 6px; padding: 0 8px;
+  flex: none; width: 90px; height: 34px; margin: 0; padding: 0 8px;
   background: var(--paper-raised); color: var(--text);
   border: 1.5px solid var(--ink-line); border-radius: var(--r-xs);
   font: inherit; font-size: var(--fs-md); box-shadow: var(--shadow-sm);
-  vertical-align: middle;
   transition: transform var(--dur-fast), box-shadow var(--dur-fast);
 }
+.lan-port-row .btn-ghost { height: 34px; padding: 0 13px; }
 .lan-port-input:focus {
   outline: none; transform: translate(-1px, -1px); box-shadow: var(--shadow-md);
 }

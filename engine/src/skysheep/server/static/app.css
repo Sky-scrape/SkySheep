@@ -4147,6 +4147,18 @@ mark.search-hit-mark {
   border-radius: var(--r-xs); font-size: var(--fs-md); cursor: pointer; color: var(--text);
 }
 #provider-add-body .ap-row input { width: auto; flex-shrink: 0; }
+/* 行 = 勾选（label）+ 模型名 + 右侧「当前使用」角标 / 设为当前。
+   点整行仍只是勾选，「设为当前」改的是上面输入框里那个模型，不碰勾选。 */
+#provider-add-body .ap-row .ap-check {
+  display: flex; flex-direction: row; align-items: center; gap: 7px;
+  flex: 1; min-width: 0; cursor: pointer;
+}
+#provider-add-body .ap-row.cur { background: var(--blue-weak); }
+#provider-add-body .ap-row .ap-cur {
+  flex-shrink: 0; font-size: var(--fs-cap); color: var(--blue); font-weight: var(--fw-bold);
+}
+#provider-add-body .ap-row .ap-use { flex-shrink: 0; font-size: var(--fs-cap); color: var(--text2); }
+#provider-add-body .ap-row .ap-use:hover { color: var(--blue); }
 #provider-add-body .form-status:empty { display: none; }
 
 /* 白名单规则列表 */

@@ -15,6 +15,7 @@ let detailOpen = false;   // 是否正停在某个服务的配置页
 let detailName = "";
 let addOpen = false;      // 是否正停在「添加自定义服务」表单（页内视图，不用弹层）
 let addSnapshot = "";     // 添加表单的初始值快照（填了一半就离开时提醒）
+let addPickedModels = new Set(); // 添加表单里检测到的模型勾选（按值记，筛选重渲染不丢）
 let providerTab = "preset"; // 列表页签：preset=默认（内置预设）、custom=自定义（用户新增）
 let providerHealthCache = {};  // 服务名 → 健康状态（model.providers_health 拉取）
 
@@ -930,13 +931,14 @@ function addFormFingerprint(box) {
     if (f === "api_key") { parts.push(f + "=" + (el.value.trim() ? "set" : "")); return; }
     parts.push(f + "=" + (el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim()));
   });
-  parts.push("picked=" + [...box.querySelectorAll(".ap-pick input:checked")]
-    .map((c) => c.value).join(","));
+  // 勾选按值记在 addPickedModels 上（筛选后 DOM 里只剩可见行，不能只看 DOM）
+  parts.push("picked=" + [...addPickedModels].join(","));
   return parts.join("|");
 }
 
 function renderProviderAdd() {
   const box = document.getElementById("provider-add-body");
+  addPickedModels = new Set();
   box.innerHTML = `
     <p class="settings-hint">接入内置列表之外的服务：自建中转、公司内网网关、或其他厂商的 OpenAI 兼容接口。
     保存后写入本机 config.toml，可随时在列表里改或删除。</p>
@@ -1014,8 +1016,7 @@ function renderProviderAdd() {
   const formStatus = box.querySelector(".form-status");
   const detectBtn = box.querySelector(".detect");
   const pickWrap = box.querySelector(".ap-pick");
-  const checkedModels = () =>
-    [...pickWrap.querySelectorAll("input:checked")].map((c) => c.value);
+  const modelInput = box.querySelector('input[data-f="model"]');
   detectBtn.onclick = async () => {
     detectBtn.disabled = true;
     formStatus.textContent = "检测中…正在向该服务查询模型列表";
@@ -1030,9 +1031,18 @@ function renderProviderAdd() {
         formStatus.textContent = "该服务没有返回任何模型（可能是接口地址不对，或该服务不提供模型列表）";
         formStatus.className = "form-status bad";
       } else {
-        const cur = val("model");
         pickWrap.classList.remove("hidden");
-        // 检测结果可能上百行：给搜索框 + 实时计数，勾选状态独立于筛选（筛掉的不会丢勾）
+        // 勾选状态按值记在 addPickedModels 里（不是按 DOM）：筛选重渲染不丢勾，提交时也读它。
+        // 模型名输入框空着时，第一个勾选的自动填进去当「当前使用」——只勾不手填也能添加。
+        const picked = (addPickedModels = new Set(val("model") ? [val("model")] : []));
+        const syncPrimary = () => {
+          if (modelInput.value.trim()) return false;
+          const first = [...picked][0];
+          if (!first) return false;
+          modelInput.value = first;
+          return true;
+        };
+        // 检测结果可能上百行：给搜索框 + 实时计数
         const renderPickList = () => {
           const kw = (pickWrap.querySelector(".ap-search input") || {}).value || "";
           const f = kw.trim().toLowerCase();
@@ -1045,9 +1055,15 @@ function renderProviderAdd() {
               `<div class="empty-hint">没有匹配「${escapeHtml(kw.trim())}」的模型</div>`;
             return;
           }
+          const curNow = modelInput.value.trim();
           listEl.innerHTML = rows.map((m) =>
-            `<label class="ap-row"><input type="checkbox" value="${escapeHtml(m)}"${m === cur ? " checked" : ""}>` +
-            `<span class="mono">${escapeHtml(m)}</span></label>`).join("");
+            `<div class="ap-row${m === curNow ? " cur" : ""}">` +
+            `<label class="ap-check"><input type="checkbox" value="${escapeHtml(m)}"${picked.has(m) ? " checked" : ""}>` +
+            `<span class="mono">${escapeHtml(m)}</span></label>` +
+            (m === curNow
+              ? `<span class="ap-cur" title="添加后使用的那个模型">当前使用</span>`
+              : `<button class="link-btn ap-use" type="button" title="设为添加后使用的模型">设为当前</button>`) +
+            `</div>`).join("");
         };
         pickWrap.innerHTML =
           `<div class="ap-pick-head"><span>检测到 ${r.count} 个可用模型，勾选要一并启用的</span>` +
@@ -1058,12 +1074,40 @@ function renderProviderAdd() {
           `<div class="ap-list"></div>`;
         renderPickList();
         pickWrap.querySelector(".ap-search input").oninput = renderPickList;
+        // 手改模型名时「当前使用」角标跟着挪
+        modelInput.oninput = renderPickList;
+        // 勾选 / 取消：只改集合；首次勾选顺带成为「当前使用」（角标挪位就重画）
+        pickWrap.querySelector(".ap-list").addEventListener("change", (e) => {
+          const c = e.target;
+          if (c.type !== "checkbox") return;
+          if (c.checked) picked.add(c.value);
+          else picked.delete(c.value);
+          if (c.checked && syncPrimary()) renderPickList();
+        });
+        // 设为当前：只改「当前使用」，不动勾选状态
+        pickWrap.querySelector(".ap-list").addEventListener("click", (e) => {
+          const btn = e.target.closest(".ap-use");
+          if (!btn) return;
+          e.preventDefault();
+          modelInput.value = btn.closest(".ap-row").querySelector('input[type="checkbox"]').value;
+          renderPickList();
+        });
         // 全选 / 清空作用于「当前可见的行」，与搜索配合即可「按关键词批量勾」
-        pickWrap.querySelector('[data-a="all"]').onclick = () =>
-          pickWrap.querySelectorAll(".ap-list input").forEach((c) => (c.checked = true));
-        pickWrap.querySelector('[data-a="none"]').onclick = () =>
-          pickWrap.querySelectorAll(".ap-list input").forEach((c) => (c.checked = false));
-        formStatus.textContent = `✓ 检测到 ${r.count} 个可用模型，勾选后随服务一并启用（当前模型始终启用）`;
+        pickWrap.querySelector('[data-a="all"]').onclick = () => {
+          pickWrap.querySelectorAll(".ap-list input").forEach((c) => {
+            c.checked = true;
+            picked.add(c.value);
+          });
+          if (syncPrimary()) renderPickList();
+        };
+        pickWrap.querySelector('[data-a="none"]').onclick = () => {
+          pickWrap.querySelectorAll(".ap-list input").forEach((c) => {
+            c.checked = false;
+            picked.delete(c.value);
+          });
+          renderPickList();
+        };
+        formStatus.textContent = `✓ 检测到 ${r.count} 个可用模型：勾选要一并启用的，第一个勾选的作为「当前使用」`;
         formStatus.className = "form-status ok";
       }
     } catch (e) {
@@ -1108,11 +1152,14 @@ async function submitProviderAdd() {
     if (el) el.focus();
   };
   if (!val("name")) return fail("请先填写服务名称（config 里的英文标识）", 'input[data-f="name"]');
-  if (!val("model")) return fail("请填写要使用的模型名", 'input[data-f="model"]');
 
-  const primary = val("model");
-  // 一并启用 = 主输入框的当前模型 + 勾选项（去重保序，主模型在首位）
-  const picked = [...box.querySelectorAll(".ap-pick input:checked")].map((c) => c.value);
+  // 一并启用 = 勾选项 + 当前使用的模型（去重保序，当前模型在首位）。
+  // 勾选后没手填模型名也算数：第一个勾选的当当前模型（与列表里的「当前使用」角标一致）
+  const picked = [...addPickedModels];
+  const primary = val("model") || picked[0] || "";
+  if (!primary) {
+    return fail("请填写模型名，或点「检测」后在列表里勾选要启用的模型", 'input[data-f="model"]');
+  }
   const models = [primary, ...picked.filter((m) => m !== primary)]
     .filter((m, i, a) => m && a.indexOf(m) === i);
 

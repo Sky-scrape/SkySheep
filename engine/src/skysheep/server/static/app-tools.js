@@ -489,29 +489,189 @@ function subagentStatus(text, ok = true, which = "base") {
   autoHideStatus(el, text, ok);
 }
 
-function modelOptions(d, selectedProvider, selectedModel) {
-  // 一个下拉同时选服务与模型：value = "provider|model"；空值 = 跟随主对话。
-  // 只列出配了 Key 的服务（本机服务通常不校验 Key，同样视为已配）；当前选中的服务
-  // 即使未配 Key 也保留并标注，避免已有配置被静默丢弃、用户却找不到原因
-  const sel = `${(selectedProvider || "").trim()}|${(selectedModel || "").trim()}`;
-  let html = `<option value="">跟随主对话</option>`;
+// 子代理的模型选择：一个弹层同时选服务与模型，value = "provider|model"；
+// 空值 = 跟随全局（主对话模型）。原生 <select> 的弹出层是系统灰高亮，与
+// 纸面风格不搭，这里复用主/辅模型菜单的纸片弹层（mm-item 行 + 服务头像 +
+// 默认/自定义页签），行为对齐：行尾徽章显服务名、当前项打 ✓、未配 Key 标 ⚠
+function buildSubagentModelRows(d) {
+  // config 里的服务 × 各自模型 = 可选清单；当前选中的服务即使未配 Key 也保留
+  // （否则已有配置会被静默丢弃、用户却找不到原因），与旧 select 口径一致
+  const rows = [];
   (d.providers || []).forEach((p) => {
-    if (!p.has_key && p.name !== (selectedProvider || "").trim()) return;
     const models = p.models.length ? p.models : [p.model];
-    html += `<optgroup label="${escapeHtml(p.name)}${p.has_key ? "" : "（未配 Key）"}">` +
-      models.map((m) => {
-        const v = `${p.name}|${m}`;
-        return `<option value="${escapeHtml(v)}"${v === sel ? " selected" : ""}>${escapeHtml(p.name + "  " + m)}</option>`;
-      }).join("") + `</optgroup>`;
+    models.forEach((m) => {
+      rows.push({
+        name: p.name, model: m, hasKey: !!p.has_key,
+        label: p.label || p.name, preset: !!p.is_preset,
+      });
+    });
   });
-  return html;
+  return rows;
 }
 
-function parseModelValue(v) {
-  const s = (v || "").trim();
-  if (!s) return { provider: "", model: "" };
-  const i = s.indexOf("|");
-  return i < 0 ? { provider: s, model: "" } : { provider: s.slice(0, i), model: s.slice(i + 1) };
+function subagentModelLabel(provider, model) {
+  if (!provider) return "跟随全局（主对话模型）";
+  return model ? `${provider}  ${model}` : provider;
+}
+
+// 打开弹层：anchor 是触发按钮，current 是 {provider, model}，onPick 收同结构。
+// anchor 在模态弹窗里时（新建/编辑子代理），overlay 的 z-200 会盖住 z-pop 的
+// fixed 弹层——改挂进 .modal-box 以 absolute 定位（.in-modal），随遮罩同进退
+function openSubagentModelMenu(anchor, d, current, onPick) {
+  const menu = document.getElementById("subagent-model-menu");
+  if (!menu) return;
+  const modalBox = anchor.closest(".modal-box");
+  const inModal = !!modalBox;
+  if (inModal) modalBox.appendChild(menu);
+  menu.classList.toggle("in-modal", inModal);
+  const rows = buildSubagentModelRows(d);
+  let tab = rows.some((r) => r.preset && r.name === current.provider) ||
+      (!current.provider && rows.some((r) => r.preset)) ? "preset" : "custom";
+  if (!rows.some((r) => r.preset)) tab = "custom";
+  else if (!rows.some((r) => !r.preset)) tab = "preset";
+  const sel = `${(current.provider || "").trim()}|${(current.model || "").trim()}`;
+
+  const paint = () => {
+    menu.innerHTML = "";
+    const follow = document.createElement("button");
+    follow.className = "mm-item" + (!current.provider ? " active" : "");
+    follow.innerHTML = '<span class="svc-avatar subagent-mm-follow-tile">✦</span>' +
+      `<span class="mm-model">${!current.provider ? "✓ " : ""}跟随全局</span>` +
+      `<span class="mm-prov">主对话模型</span>`;
+    follow.title = "不单独指定模型，跟随主对话当前使用的模型";
+    follow.onclick = () => { hideSubagentModelMenu(); onPick({ provider: "", model: "" }); };
+    menu.appendChild(follow);
+    const groups = [
+      { tab: "preset", label: "默认", rows: rows.filter((r) => r.preset), empty: "内置服务都已停用，可在「模型服务」页恢复" },
+      { tab: "custom", label: "自定义", rows: rows.filter((r) => !r.preset), empty: "还没有自定义服务，到「模型服务」页添加" },
+    ];
+    const seg = document.createElement("div");
+    seg.className = "seg-row seg-mini mm-seg";
+    for (const g of groups) {
+      const t = document.createElement("button");
+      t.textContent = g.label;
+      t.classList.toggle("active", tab === g.tab);
+      t.onclick = (ev) => { ev.stopPropagation(); if (tab !== g.tab) { tab = g.tab; paint(); } };
+      seg.appendChild(t);
+    }
+    menu.appendChild(seg);
+    const cur = groups.find((g) => g.tab === tab) || groups[0];
+    const list = document.createElement("div");
+    list.className = "mm-list subagent-mm-list";
+    if (!cur.rows.length) {
+      const hint = document.createElement("div");
+      hint.className = "mm-empty";
+      hint.textContent = cur.empty;
+      list.appendChild(hint);
+    }
+    cur.rows.forEach((row) => {
+      const on = !!current.provider &&
+        row.name === current.provider && row.model === current.model;
+      const b = document.createElement("button");
+      b.className = "mm-item" + (on ? " active" : "");
+      b.innerHTML = providerAvatar(row.name) +
+        `<span class="mm-model">${on ? "✓ " : ""}${escapeHtml(row.model)}</span>` +
+        `<span class="mm-prov${row.hasKey ? "" : " no-key"}">${row.hasKey ? "" : "⚠ "}${escapeHtml(row.label)}</span>`;
+      b.title = row.hasKey
+        ? `使用 ${row.label} / ${row.model}`
+        : `「${row.label}」还没配置 API Key，选用后派活会失败`;
+      b.onclick = () => { hideSubagentModelMenu(); onPick({ provider: row.name, model: row.model }); };
+      list.appendChild(b);
+    });
+    menu.appendChild(list);
+    // 贴着按钮向上弹（设置页控件都在视口下半部），右缘对齐按钮；放不下往左收
+    menu.classList.remove("hidden");
+    const ar = anchor.getBoundingClientRect(); // 物理像素，除回 uiScale 落布局坐标
+    const mw = menu.offsetWidth;
+    if (inModal) {
+      // absolute 定位：坐标相对 .modal-box（布局像素直接可用，无需除 uiScale——
+      // .modal-box 与菜单同处 zoom 层，offsetParent 的 rect 已是同一坐标系）
+      const br = modalBox.getBoundingClientRect();
+      const btnLayoutTop = ar.top - br.top; // 同为物理像素差，相对 box 的偏移
+      menu.style.top = "auto";
+      menu.style.bottom = (br.height - btnLayoutTop / uiScale + 6) + "px";
+      menu.style.left =
+        Math.max(8, Math.min(ar.right - br.left - mw, br.width - mw - 8)) + "px";
+    } else {
+      menu.style.top = "auto";
+      menu.style.bottom = (window.innerHeight / uiScale - ar.top / uiScale + 6) + "px";
+      menu.style.left =
+        Math.max(8, Math.min(ar.right / uiScale - mw, window.innerWidth / uiScale - mw - 8)) + "px";
+    }
+  };
+  paint();
+}
+
+function hideSubagentModelMenu() {
+  const menu = document.getElementById("subagent-model-menu");
+  if (menu) {
+    menu.classList.add("hidden");
+    menu.classList.remove("in-modal"); // 归位：下一次按 anchor 所在层重新决定挂载点
+    if (menu.parentElement && menu.parentElement !== document.body) menu.remove();
+    document.body.appendChild(menu); // 回到 body：弹窗关闭后弹层不能留在 modal-box 里
+    menu.innerHTML = "";
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const menu = document.getElementById("subagent-model-menu");
+  if (menu && !menu.classList.contains("hidden") &&
+      !menu.contains(e.target) && !e.target.closest(".subagent-model-btn")) {
+    hideSubagentModelMenu();
+  }
+});
+document.addEventListener("keydown", (e) => {
+  // 捕获阶段拦截：菜单挂在模态弹窗里时，app.js 的弹窗 Esc 处理器（气泡阶段）
+  // 会把弹窗一起关掉——菜单开着时 Esc 只收菜单，capture + stopPropagation 压住
+  const menu = document.getElementById("subagent-model-menu");
+  if (e.key === "Escape" && menu && !menu.classList.contains("hidden")) {
+    e.stopPropagation();
+    e.preventDefault();
+    hideSubagentModelMenu();
+  }
+}, true);
+window.addEventListener("resize", hideSubagentModelMenu);
+window.addEventListener("scroll", hideSubagentModelMenu, true); // 弹窗内滚动/表单滚动时收起，避免锚点漂移
+
+// 行内/弹窗共用的触发按钮：闭合态是一枚纸面按钮，显当前值；点按弹模型菜单
+function paintSubagentModelButton(btn, current, rowsData) {
+  const provider = (current.provider || "").trim();
+  const has = !!provider;
+  const hasKey = has ? !(rowsData.providers || []).find((p) =>
+    p.name === provider && !p.has_key) : true;
+  const text = subagentModelLabel(provider, (current.model || "").trim());
+  btn.innerHTML = `<span class="sm-btn-label${has ? "" : " dim"}">${escapeHtml(text)}</span>` +
+    `<span class="sm-btn-caret">▾</span>`;
+  btn.title = has
+    ? (hasKey ? `这个子代理用 ${text}` : `⚠ ${provider} 未配置 API Key，选用后派活会失败`)
+    : "这个子代理跟随主对话模型，点按指定";
+  btn.classList.toggle("no-key", has && !hasKey);
+}
+
+function subagentModelButton(current, rowsData) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "subagent-model-btn";
+  paintSubagentModelButton(b, current, rowsData);
+  return b;
+}
+
+// 把触发按钮装进容器并接上弹层（rowsData 惰性取：弹窗场景打开时才有 d）
+function bindSubagentModelPicker(container, getRowsData, getCurrent, setCurrent) {
+  const btn = subagentModelButton(getCurrent(), getRowsData());
+  container.appendChild(btn);
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const menu = document.getElementById("subagent-model-menu");
+    if (menu && !menu.classList.contains("hidden")) return hideSubagentModelMenu();
+    const cur = getCurrent();
+    openSubagentModelMenu(btn, getRowsData(), cur, (picked) => {
+      setCurrent(picked);
+      // 就地重画按钮文字与警示态（菜单自身由 openSubagentModelMenu 的 onPick 关闭）
+      paintSubagentModelButton(btn, picked, getRowsData());
+    });
+  };
+  return btn;
 }
 
 const SUBAGENT_TYPE_DESC = {
@@ -540,7 +700,7 @@ function renderBuiltinSubagents(d) {
         <span class="item-desc" title="${escapeHtml(effDesc)}">${escapeHtml(effDesc)}</span>
       </div>
       <span class="subagent-ops">
-        <select data-f="model" title="这个子代理用哪个模型">${modelOptions(d, ov.provider, ov.model)}</select>
+        <span class="subagent-model-slot" data-f="model"></span>
         <select data-f="reasoning" title="思考强度（留空 = 跟随全局设置）">
           <option value="">思考：跟随全局</option>
           ${(d.reasoning_efforts || []).map((r) =>
@@ -549,7 +709,7 @@ function renderBuiltinSubagents(d) {
         <button class="btn-ghost subagent-bedit" title="编辑它的职责描述与角色提示词">编辑</button>
       </span>`;
     const save = async () => {
-      const mv = parseModelValue(li.querySelector('[data-f="model"]').value);
+      const mv = { provider: ov.provider || "", model: ov.model || "" };
       try {
         await request("subagent.save_builtin", {
           agent_type: type,
@@ -564,7 +724,12 @@ function renderBuiltinSubagents(d) {
         subagentStatus("✗ 保存失败：" + e.message, false, "builtin");
       }
     };
-    li.querySelector('[data-f="model"]').onchange = save;
+    bindSubagentModelPicker(
+      li.querySelector('[data-f="model"]'),
+      () => d,
+      () => ({ provider: ov.provider || "", model: ov.model || "" }),
+      (picked) => { ov.provider = picked.provider; ov.model = picked.model; save(); },
+    );
     li.querySelector('[data-f="reasoning"]').onchange = save;
     li.querySelector(".subagent-bedit").onclick = () => editBuiltinModal(d, type, ov);
     ul.appendChild(li);
@@ -685,7 +850,7 @@ function subagentEditorModal(d, existing = null) {
         </span>
       </label>
       <label>使用模型
-        <select data-f="model">${modelOptions(d, existing?.provider, existing?.model)}</select>
+        <span class="subagent-model-slot subagent-model-slot-modal" data-f="model"></span>
       </label>
       <label>思考强度
         <select data-f="reasoning">
@@ -703,6 +868,18 @@ function subagentEditorModal(d, existing = null) {
   policySel.onchange = () => {
     box.querySelector('[data-f="tools-pick"]').hidden = policySel.value !== "custom";
   };
+  // 模型选择：与行内同款的自定义弹层（值存 current，保存时读）；弹窗场景
+  // 弹层挂进 .modal-box，见 openSubagentModelMenu 的 in-modal 分支
+  const modelCur = {
+    provider: (isEdit ? existing?.provider : "") || "",
+    model: (isEdit ? existing?.model : "") || "",
+  };
+  bindSubagentModelPicker(
+    box.querySelector('[data-f="model"]'),
+    () => d,
+    () => modelCur,
+    (picked) => { modelCur.provider = picked.provider; modelCur.model = picked.model; },
+  );
   showModal(isEdit ? `编辑子代理「${existing.name}」` : "新建子代理", box, async () => {
     const val = (f) => box.querySelector(`[data-f="${f}"]`);
     const name = isEdit ? existing.name : val("name").value.trim();
@@ -711,14 +888,13 @@ function subagentEditorModal(d, existing = null) {
     const tools = p === "custom"
       ? [...box.querySelectorAll(".tool-pick input:checked")].map((x) => x.value)
       : p;
-    const mv = parseModelValue(val("model").value);
     await request("subagent.save_custom", {
       name,
       description: val("description").value,
       prompt: val("prompt").value,
       tools,
-      provider: mv.provider,
-      model: mv.model,
+      provider: modelCur.provider,
+      model: modelCur.model,
       reasoning: val("reasoning").value,
       enabled: val("enabled").checked,
     });

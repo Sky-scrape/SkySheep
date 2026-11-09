@@ -8834,6 +8834,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "model": pc.model,
                 "models": models,
                 "has_key": resolve_api_key(name, pc) is not None,
+                # 自定义模型弹层用：显示名（预设如「智谱」）与内置/自定义分组，
+                # 与 config.providers 的 providers_detail 同口径
+                "label": pc.label or name,
+                "is_preset": name in PRESETS,
             })
         tools = [
             {"name": t.name, "safety": t.safety.value, "description": t.description}

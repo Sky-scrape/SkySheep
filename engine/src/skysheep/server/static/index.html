@@ -2462,6 +2462,9 @@
 <div id="session-menu" class="session-menu hidden"></div>
 <div id="model-menu" class="session-menu model-menu hidden"></div>
 <div id="aux-model-menu" class="session-menu model-menu hidden"></div>
+<!-- 子代理页的模型选择弹层：复用 model-menu 行样式；弹窗场景挂进 modal-box
+     （overlay z-200 会盖住 z-pop 的 fixed 弹层），以 .in-modal 切 absolute 定位 -->
+<div id="subagent-model-menu" class="session-menu model-menu hidden"></div>
 <div id="ref-menu" class="session-menu model-menu hidden" title=""></div>
 <div id="reasoning-menu" class="session-menu model-menu hidden"></div>
 <div id="notif-panel" class="session-menu notif-panel hidden"></div>

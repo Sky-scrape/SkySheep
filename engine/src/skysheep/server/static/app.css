@@ -4681,6 +4681,37 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   padding: 5px 8px; font-size: var(--fs-sm); max-width: 210px;
 }
 .subagent-ops select:focus { outline: none; border-color: var(--blue) }
+/* 子代理模型选择：纸面触发按钮 + mm 弹层（复用 .model-menu 行样式）。
+   原生 select 的弹出层是系统灰高亮，与纸墨主题不搭，整体换成自定义弹层 */
+.subagent-model-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 260px; padding: 5px 8px 5px 10px;
+  background: var(--paper-raised); color: var(--text);
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  font-size: var(--fs-sm); font-family: inherit; cursor: pointer;
+  transition: border-color var(--dur-fast);
+}
+.subagent-model-btn:hover, .subagent-model-btn:focus-visible { border-color: var(--blue); outline: none; }
+.subagent-model-btn .sm-btn-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.subagent-model-btn .sm-btn-label.dim { color: var(--dim); font-style: italic; font-family: inherit; }
+.subagent-model-btn .sm-btn-caret { flex-shrink: 0; color: var(--dim); font-size: 10px; }
+.subagent-model-btn.no-key { border-color: var(--gold); }
+.subagent-model-btn.no-key .sm-btn-label { color: var(--gold); }
+/* 弹窗场景：弹层挂进 .modal-box（overlay z-200 盖住 z-pop 的 fixed 层），
+   切 absolute 定位、抬高宽度；收起时 hideSubagentModelMenu 会把它送回 body */
+#subagent-model-menu.in-modal {
+  position: absolute; z-index: var(--z-pop-top);
+  width: min(300px, calc(100vw - 60px));
+}
+#subagent-model-menu .mm-model { font-size: var(--fs-sm); }
+#subagent-model-menu .subagent-mm-list { max-height: min(40vh, 260px); }
+#subagent-model-menu .subagent-mm-follow-tile { font-size: 12px; color: var(--text2); }
+.subagent-model-slot { display: inline-flex; min-width: 0; }
+.subagent-model-slot-modal { width: 100%; }
+.subagent-model-slot-modal .subagent-model-btn { width: 100%; justify-content: space-between; }
 .subagent-edit, .subagent-del { flex-shrink: 0; font-size: var(--fs-sm); padding: 4px 10px; }
 
 /* 编辑器弹窗：工具勾选网格。
@@ -9139,6 +9170,8 @@ li.mod-row {
   .custom-subagent-list li, .builtin-subagent-list li { flex-wrap: wrap; row-gap: 6px; }
   .subagent-ops { width: 100%; flex-wrap: wrap; }
   .subagent-ops select { flex: 1 1 140px; min-width: 0; max-width: none; }
+  .subagent-ops .subagent-model-slot { flex: 1 1 140px; }
+  .subagent-ops .subagent-model-btn { max-width: none; width: 100%; justify-content: space-between; }
   /* 关于页的安装目录 / 数据目录是长路径：允许任意处断行，否则右端被裁掉一截 */
   .about .copyable-path { overflow-wrap: anywhere; word-break: break-word; }
 }

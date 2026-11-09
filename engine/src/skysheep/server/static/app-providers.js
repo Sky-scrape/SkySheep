@@ -158,7 +158,7 @@ function renderProviderList() {
           providerTab = restored.is_preset ? "preset" : "custom";
           renderProviderList();
         }
-        providerStatus(`✓ 已恢复「${btn.dataset.name}」，按最新出厂默认重建（API Key 保留）`);
+        providerStatus();
       };
     });
   }
@@ -517,7 +517,7 @@ function renderProviderDetail(name) {
         await request("model.switch", { name, model: m });
         await renderSettings();
         boot();
-        providerStatus(`✓ 已切换到「${m}」，当前对话立即生效`);
+        providerStatus();
       } catch (e) {
         addNotice("切换失败: " + e.message);
       }
@@ -538,9 +538,7 @@ function renderProviderDetail(name) {
         const r = await request("config.remove_provider_model", { name, model: m });
         await renderSettings();
         boot();
-        providerStatus(
-          `✓ 已删除「${m}」` + (r.switched_to ? `，已切换使用「${r.switched_to}」` : "")
-        );
+        if (r.switched_to) providerStatus(`已切换使用「${r.switched_to}」`);
       } catch (err) {
         addNotice("删除失败: " + err.message);
       }
@@ -572,10 +570,7 @@ function renderProviderDetail(name) {
     if (btn) { btn.disabled = false; btn.textContent = prevText; }
     await renderSettings();
     boot();
-    const parts = [`✓ 已启用 ${added} 个模型`];
-    if (activated) parts.push("并已切换使用");
-    if (failed.length) parts.push(`${failed.length} 个失败`);
-    note(parts.join("，"), !failed.length);
+    if (failed.length) note(`${failed.length} 个失败：` + failed.join("、"), false);
   };
 
   const setEnabledModel = async (model) => {
@@ -584,12 +579,7 @@ function renderProviderDetail(name) {
       const r = await request("config.add_provider_model", { name, model });
       await renderSettings();
       boot();
-      note(
-        r.added === false
-          ? `「${model}」已在启用列表里`
-          : `✓ 已启用「${model}」` + (r.activated ? "，并已切换使用" : ""),
-        true
-      );
+      if (r.added === false) note(`「${model}」已在启用列表里`, false);
     } catch (e) {
       note("✗ " + e.message, false);
     }
@@ -863,7 +853,7 @@ function renderProviderDetail(name) {
     resetProviderView();
     await renderSettings();
     boot();
-    providerStatus(`✓ 已${on ? "启用" : "停用"}「${name}」` + (on ? "" : "，可在下方「已停用的服务」里恢复"));
+    if (!on) providerStatus(`已停用「${name}」，可在下方「已停用的服务」里恢复`);
   };
 
   box.querySelector(".save").onclick = () =>
@@ -1200,11 +1190,7 @@ async function submitProviderAdd() {
     document.getElementById("btn-add-provider").hidden = false;
     await renderSettings();
     boot();
-    const cnt = `已启用 ${models.length} 个模型`;
-    if (switched) providerStatus(`✓ 已添加「${r.added}」并切换使用，当前对话立即生效（${cnt}）`);
-    else if (switchErr) providerStatus(`✓ 已添加「${r.added}」，但切换失败：${switchErr}（${cnt}）`, false);
-    else if (r.activated) providerStatus(`✓ 已添加「${r.added}」，原先没有可用模型，已自动启用它（${cnt}）`);
-    else providerStatus(`✓ 已添加「${r.added}」，${cnt}；需要用时点开它，在里面点「切换使用」`);
+    if (switchErr) providerStatus(`添加了「${r.added}」，但切换失败：${switchErr}`, false);
   } catch (e) {
     status.textContent = "✗ " + e.message;
     status.className = "form-status bad";

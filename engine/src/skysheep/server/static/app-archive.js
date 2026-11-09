@@ -151,7 +151,7 @@ function showArchiveGroupMenu(name, sessions, pos) {
   const items = [
     {
       icon: "archive", label: `恢复全部（${ids.length} 个）`,
-      act: () => archiveBatchRestore(ids, `已恢复 ${name} 的 ${ids.length} 个会话`),
+      act: () => archiveBatchRestore(ids, ""),
     },
     {
       icon: "trash", label: `删除全部（${ids.length} 个）`, danger: true,
@@ -190,7 +190,6 @@ function renderArchiveRow(s) {
     restore.disabled = true;
     try {
       await request("session.archive", { id: s.id, archived: false });
-      addNotice(`已恢复「${s.title || "(未命名)"}」`);
       refreshSessions();
       await loadArchiveMgr();
     } catch (e) { addNotice("恢复失败: " + e.message); restore.disabled = false; }
@@ -219,7 +218,7 @@ function renderArchiveRow(s) {
 async function archiveBatchRestore(ids, noticeText) {
   try {
     const r = await request("archive.restore", { ids });
-    addNotice(r.restored > 0 ? (noticeText || `已恢复 ${r.restored} 个会话`) : "没有可恢复的会话");
+    if (r.restored <= 0) addNotice("没有可恢复的会话");
     refreshSessions();
     await loadArchiveMgr();
   } catch (e) { addNotice("恢复失败: " + e.message); }
@@ -229,8 +228,7 @@ async function archiveBatchDelete(ids) {
   try {
     const r = await request("archive.delete", { ids });
     closeTabsForSids(r.ids || []);
-    const failed = r.failed ? `，${r.failed} 个失败` : "";
-    addNotice(r.deleted > 0 ? `已删除 ${r.deleted} 个会话${failed}` : "没有可删除的会话");
+    if (r.deleted <= 0) addNotice("没有可删除的会话");
     refreshSessions();
     await loadArchiveMgr();
   } catch (e) { addNotice("删除失败: " + e.message); }
@@ -259,7 +257,7 @@ document.getElementById("btn-archive-purge").onclick = async () => {
   try {
     const r = await request("archive.delete", {});
     closeTabsForSids(r.ids || []);
-    addNotice(r.deleted > 0 ? `已删除 ${r.deleted} 个会话` : "没有可删除的会话");
+    if (r.deleted <= 0) addNotice("没有可删除的会话");
     refreshSessions();
     await loadArchiveMgr();
   } catch (e) { addNotice("删除失败: " + e.message); }

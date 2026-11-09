@@ -264,7 +264,7 @@ function renderModsList(mods) {
     li.querySelector(".mod-enabled").onchange = async (e) => {
       try {
         await request("mods.toggle", { id: m.id, enabled: e.target.checked });
-        modsStatus(`✓ ${m.name} 已${e.target.checked ? "启用" : "停用"}（立即生效）`);
+        modsStatus();
       } catch (err) {
         modsStatus("✗ " + err.message, false);
       }
@@ -275,7 +275,7 @@ function renderModsList(mods) {
       if (!(await confirmModal(`删除 Mod「${m.name}」？`, "<p>其运行状态也会一并删除。</p>"))) return;
       try {
         await request("mods.delete", { id: m.id });
-        modsStatus(`✓ 已删除 ${m.name}`);
+        modsStatus();
       } catch (err) {
         modsStatus("✗ " + err.message, false);
       }

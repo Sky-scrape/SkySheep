@@ -808,7 +808,6 @@ function renderCustomSubagents(d) {
         <p class="dim small">只删除这份定义，不影响会话记录；删除后 Agent 不再派它出场。</p>`;
       showModal("删除子代理", box, async () => {
         await request("subagent.delete_custom", { name: c.name });
-        subagentStatus(`✓ 已删除「${c.name}」`, true, "custom");
         renderSubagentCfg();
       }, "删除");
     };

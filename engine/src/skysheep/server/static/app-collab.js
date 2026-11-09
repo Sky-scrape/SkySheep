@@ -721,7 +721,7 @@ async function collabSaveTemplate() {
     // 团队模板可能回 teams.json 形状（members/persona）：统一转回协作模板形状再回填
     if (saved && !Array.isArray(saved.roles)) saved = collabTemplateFromTeam(saved);
     const warns = Array.isArray(r.warnings) ? r.warnings : [];
-    collabStatus(`✓ 已保存模板「${saved.name || t.name}」` + (warns.length ? "；" + warns.join("；") : ""), true);
+    if (warns.length) collabStatus("保存时有提醒：" + warns.join("；"), false);
     await renderCollabTemplates();
     if (collabEditorState) {
       collabEditorState.draft = collabClone(saved);
@@ -749,7 +749,7 @@ async function collabRemoveTemplate(name, source) {
   if (!ok) return;
   try {
     await request("collab.template_remove", source ? { name: label, source } : { name: label });
-    collabStatus(`✓ 已删除模板「${label}」`, true);
+    collabStatus();
     if (collabEditorState && collabEditorState.draft && collabEditorState.draft.name === label) {
       collabCloseEditor();
     }

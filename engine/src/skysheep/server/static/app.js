@@ -1905,7 +1905,6 @@ async function pickSplitModel(pane, anchor) {
       try {
         const r = await request("session.model_switch", { id: pane.sid, name: row.name, model: row.model });
         paintSplitModel(pane, { name: r.provider, model: r.model, overridden: true });
-        paneNotice(pane, `✓ 这一栏将使用「${r.provider} / ${r.model}」，主栏不变`);
       } catch (err) { paneNotice(pane, "切换失败: " + err.message); }
     };
     menu.appendChild(b);
@@ -2193,7 +2192,6 @@ async function newSessionFromHighlight() {
       return;
     }
     startNewTab();
-    addNotice(`已切换到项目「${lit.name}」，新建会话`);
     return;
   }
   startNewTab();
@@ -4381,10 +4379,6 @@ async function tcSaveTemplateModal(card) {
       director,
       members: roster,
     });
-    const savedName = (r && r.template && r.template.name) || name;
-    addNotice(existing.includes(savedName)
-      ? `已保存模板「${savedName}」（覆盖了同名旧模板）`
-      : `已保存模板「${savedName}」`);
   }, "保存模板");
   nameInput.focus();
 }
@@ -6276,7 +6270,6 @@ function renderSessionExtras({ empty_count = 0, archived_count = 0 } = {}) {
           { title: "清理空会话", okLabel: "清理", danger: true }))) return;
         const r = await request("session.cleanup_empty");
         closeTabsForSids(r.removed_ids); // 被清掉的会话若开着标签，一并收掉
-        addNotice(`已清理 ${r.removed} 个空会话`);
         refreshSessions();
       };
     } else {
@@ -6397,8 +6390,6 @@ function renderSessionItem(s, ul) {
     li.classList.add("sess-active");
     const t = openTabForSession(s.id, s.title);
     clearTodoPanel();
-    // 点的就是当前会话时不提示：反复点同一行不该反复弹「已恢复」
-    if (currentSessionId !== s.id) addNotice(`已恢复会话 ${s.title || s.id}`);
     if (t && !t.running) t.needHistory = false;
   };
   wireRowKeyboard(li); // 键盘可达：Enter/空格触发上面的行 onclick（经典与分组视图共用本渲染）
@@ -6733,7 +6724,6 @@ function renderProjectGroup(frag, { key, name, list, isCurrent, rootPath, projec
           await request("project.switch", { path: rootPath });
           await applyWorkspaceData(await fetchWorkspaceData());
           startNewTab();
-          addNotice(`已切换到项目「${name}」，新建会话`);
         } else {
           // 远程连接：无工作目录，打开最近的渠道对话
           await switchToGroupProject(project, name, rootPath);
@@ -7119,15 +7109,12 @@ async function openArchiveModal() {
   restoreSel.onclick = async () => {
     const rows = pickedOf();
     if (!rows.length) { addNotice("先勾选要恢复的会话"); return; }
-    let ok = 0;
     for (const el of rows) {
       try {
         await request("session.archive", { id: el.dataset.sid, archived: false });
-        ok += 1;
         el.remove();
       } catch (e) { addNotice("恢复失败: " + e.message); }
     }
-    if (ok) addNotice(`已恢复 ${ok} 个会话`);
     syncBulk();
     closeIfEmpty();
   };
@@ -7140,18 +7127,15 @@ async function openArchiveModal() {
       return;
     }
     armedBatch = false;
-    let ok = 0;
     const deadIds = [];
     for (const el of rows) {
       try {
         await request("session.delete", { id: el.dataset.sid });
-        ok += 1;
         deadIds.push(el.dataset.sid);
         el.remove();
       } catch (e) { addNotice("删除失败: " + e.message); }
     }
     closeTabsForSids(deadIds); // 删掉的会话若开着标签，一并收掉
-    if (ok) addNotice(`已删除 ${ok} 个会话`);
     syncBulk();
     closeIfEmpty();
   };
@@ -7171,7 +7155,6 @@ async function openArchiveModal() {
     restore.textContent = "恢复";
     restore.onclick = async () => {
       await request("session.archive", { id: s.id, archived: false });
-      addNotice(`已恢复「${s.title || "(未命名)"}」`);
       row.remove();
       syncBulk();
       closeIfEmpty();
@@ -7185,7 +7168,6 @@ async function openArchiveModal() {
       try { await request("session.delete", { id: s.id }); }
       catch (e) { addNotice("删除失败: " + e.message); return; }
       closeTabsForSids([s.id]); // 删掉的会话若开着标签，一并收掉
-      addNotice(`已删除「${s.title || "(未命名)"}」`);
       row.remove();
       syncBulk();
       closeIfEmpty();
@@ -7455,7 +7437,6 @@ function showSessionMenu(s, li, pos) {
       label: s.pinned ? "取消置顶" : "置顶会话",
       act: async () => {
         await request("session.pin", { id: s.id, pinned: !s.pinned });
-        addNotice(s.pinned ? `已取消置顶` : `已置顶「${s.title || "(未命名)"}」`);
         refreshSessions();
       },
     },
@@ -7466,9 +7447,8 @@ function showSessionMenu(s, li, pos) {
       label: s.archived ? "取消归档" : "归档会话",
       act: async () => {
         await request("session.archive", { id: s.id, archived: !s.archived });
-        addNotice(s.archived
-          ? `已恢复「${s.title || "(未命名)"}」`
-          : `已归档「${s.title || "(未命名)"}」，点侧栏底部「归档会话」可找回`);
+        // 归档后侧栏里找不到它了：留一句去哪找回；恢复回列表是可见的，不再提示
+        if (!s.archived) addNotice(`已归档「${s.title || "(未命名)"}」，点侧栏底部「归档会话」可找回`);
         refreshSessions();
       },
     },
@@ -7803,11 +7783,7 @@ async function moveSessionModal(s) {
       id: s.id,
       project_id: checked.value === "quick" ? null : Number(checked.value),
     });
-    if (r.switched_to) {
-      addNotice(`会话已移动，已切换到「${r.switched_to.title || "(未命名)"}」`);
-    } else {
-      addNotice("会话已移动");
-    }
+    if (r.switched_to) addNotice(`已切换到「${r.switched_to.title || "(未命名)"}」`);
     refreshSessions();
   }, "移动");
 }
@@ -7817,18 +7793,11 @@ function deleteSessionModal(s) {
   box.innerHTML = `<p>确定删除会话 <b>「${escapeHtml(s.title || "(未命名)")}」</b> 吗？</p>
     <p class="dim small">该会话的全部消息将被移除，不可恢复。</p>`;
   showModal("删除会话", box, async () => {
-    const name = s.title || "(未命名)";
     const r = await request("session.delete", { id: s.id });
     const deadTab = tabFor(s.id);
     if (deadTab) closeTab(deadTab);
     closeSplitPanesForSids(new Set([s.id])); // 开着分屏的也一并收掉
-    if (r.switched_to) {
-      addNotice(`已删除会话「${name}」，已切换到「${r.switched_to.title || "(未命名)"}」`);
-    } else if (r.new_active) {
-      addNotice(`已删除会话「${name}」，并新建了一个空白会话`);
-    } else {
-      addNotice(`已删除会话「${name}」`);
-    }
+    if (r.switched_to) addNotice(`已切换到「${r.switched_to.title || "(未命名)"}」`);
     await refreshSessions();
   }, "删除");
 }
@@ -7993,13 +7962,9 @@ async function toggleReasoningMenu(e, anchor, sid) {
           renderReasoningChip(anchorEl, {
             supported: res.supported, effort: res.effort, labels: res.labels, efforts: res.efforts,
           });
-          const label = (res.labels || {})[eff] || eff;
-          addNotice(`思考强度已设为「${label}」，本会话下一轮对话生效`);
         } else {
           const res = await request("model.set_reasoning", { effort: eff });
           renderReasoningChip(anchorEl, res.reasoning);
-          const label = (res.reasoning.labels || {})[eff] || eff;
-          addNotice(`思考强度已设为「${label}」，下一轮对话生效`);
         }
       } catch (err) {
         addNotice("设置失败: " + err.message);
@@ -8119,7 +8084,6 @@ async function toggleModelMenu(e) {
         try {
           const r = await request("default_model.set", { name: row.name, model: row.model });
           defaultModelPref = r;
-          addNotice(`✓ 已设为新会话默认：${r.label}（当前对话不变）`);
           // 重建菜单但保持这个服务的弹层开着：★ 标记会立刻出现在刚点的那行上，
           // 用户不用为了看一眼效果再点一次服务
           paint(row.name);
@@ -8153,7 +8117,6 @@ async function toggleModelMenu(e) {
         if (sid) saveComposerState(sid); // 会话生效模型写回状态条目
         hideBanner();
         setModelChip(`${r.provider}/${r.model}`);
-        addNotice(`✓ 已切换到「${r.provider} / ${r.model}」，当前对话立即生效`);
         if (pendingImages.length && !curSupportsVision) {
           addNotice(`提示：该模型不支持图片输入，输入框里已贴的 ${pendingImages.length} 张图发不出去，` +
             "请换一个多模态模型或先移除图片。");
@@ -8777,7 +8740,7 @@ async function saveUsagePricing() {
   }
   try {
     await request("usage.pricing_set", body);
-    status.textContent = "已保存";
+    status.textContent = "";
     loadUsageCollab();
   } catch (e) {
     status.textContent = escapeHtml(e.message);
@@ -9077,7 +9040,7 @@ document.getElementById("btn-snippets-import").onclick = async () => {
 document.getElementById("btn-snippets-restore").onclick = async () => {
   try {
     const r = await request("snippets.restore_builtin");
-    addNotice(r.added ? `已恢复 ${r.added} 条内置示例` : "内置示例都已在列表里，无需恢复");
+    if (!r.added) addNotice("内置示例都已在列表里，无需恢复");
     await loadSnippets();
   } catch (e) { addNotice("恢复失败: " + e.message); }
 };
@@ -12769,8 +12732,7 @@ async function saveMemoryPanel() {
         `后 ${res.original_chars - res.chars} 字没有写入 → ${res.path}`, false);
       addNotice(`项目记忆超出 ${res.limit} 字上限，超出部分未保存`);
     } else {
-      memoryStatus(`✓ 已保存（${res.chars} 字）→ ${res.path}，下一轮对话即生效`);
-      addNotice(`项目记忆已保存（${res.chars} 字）→ ${res.path}`);
+      memoryStatus("");
     }
   } catch (e) {
     memoryStatus("✗ 保存失败：" + e.message, false);
@@ -12792,7 +12754,7 @@ if (rpMemoryMaintain) {
       maintainState = { global_enabled: r.global_enabled, project_enabled: r.project_enabled,
         interval_hours: r.interval_hours };
       el.checked = !!r.project_enabled; // 以落库值为准
-      memoryStatus(`✓ 项目记忆定期整理已${r.project_enabled ? "开启" : "关闭"}（周期跟全局设置）`);
+      memoryStatus("");
     } catch (err) {
       el.checked = !el.checked; // 失败回拨
       memoryStatus("✗ 保存失败：" + err.message, false);
@@ -14709,7 +14671,6 @@ async function pickAuxModel(row) {
     const r = await request("aux.model.set", row ? { name: row.name, model: row.model } : { name: "" });
     auxModelState = r;
     paintAuxChip();
-    addNotice(row ? `✓ 辅助对话将使用「${r.label}」，主对话不变` : "✓ 辅助对话已改回跟随主对话");
   } catch (err) {
     addNotice("设置失败: " + err.message);
   }
@@ -15206,7 +15167,6 @@ async function saveFile(force = false) {
     renderFileHead();
     fileIndex = null; // @ 文件提及的 30s 缓存失效，新建的文件立刻能被 @ 到
     if (wasNew) { filesLoaded = false; loadFiles(true); }
-    addNotice("已保存 " + fileEdit.path);
   } catch (e) {
     addNotice("保存失败: " + e.message);
   }
@@ -17160,8 +17120,6 @@ document.getElementById("btn-memory-save").onclick = async () => {
     const val = document.getElementById("memory-text").value;
     memoryInjectNote(val.length, res.inject_chars || 0);
     memoryAutoNote(val);
-    status.textContent = "✓ 已保存，之后所有会话立即生效";
-    status.hidden = false;
   } catch (e) {
     status.textContent = "✗ 保存失败：" + e.message;
     status.hidden = false;
@@ -17233,15 +17191,12 @@ document.getElementById("memory-maintain-now").onclick = async (e) => {
   btn.textContent = "🧹 整理中…";
   try {
     const r = await request("memory.maintain_now");
-    if (r.ran) {
-      const done = [r.global && "全局", r.project && "项目"].filter(Boolean).join("、");
-      st.textContent = `✓ 已整理：${done}（原件已备份），系统提示词已刷新`;
-    } else {
+    if (!r.ran) {
       st.textContent = r.message;
+      st.className = "card-status";
+      st.hidden = false;
+      autoHideStatus(st, st.textContent, true);
     }
-    st.className = "card-status";
-    st.hidden = false;
-    autoHideStatus(st, st.textContent, true);
     loadMemoryPage(); // 刷新「上次整理」时间
   } catch (err) {
     st.textContent = "✗ 整理失败：" + err.message;
@@ -17276,7 +17231,7 @@ async function copyAccessUrl(url, msgId) {
   }
   const msg = document.getElementById(msgId);
   if (msg) {
-    msg.textContent = ok ? "✓ 已复制，发到手机后用浏览器打开" : "✗ 复制失败，请手动长按地址复制";
+    msg.textContent = ok ? "已复制，发到手机后用浏览器打开" : "✗ 复制失败，请手动长按地址复制";
     msg.className = "io-msg " + (ok ? "ok" : "bad");
   }
 }
@@ -17312,8 +17267,7 @@ function wireKickButtons() {
       if (!(await confirmModal("断开这台设备的连接？对方页面会断开，重新打开地址即可重连。",
         { title: "断开设备", okLabel: "断开", danger: true }))) return;
       try {
-        const r = await request("lan.kick", { connection_id: btn.dataset.kick });
-        addNotice(`已断开 ${r.kicked} 个连接`);
+        await request("lan.kick", { connection_id: btn.dataset.kick });
         loadLanPanel();
         loadTsPanel();
       } catch (e) {
@@ -17363,7 +17317,7 @@ async function saveLanPort() {
   const raw = input.value.trim();
   try {
     const r = await request("lan.set_port", { port: Number(raw) || 0 });
-    addNotice(r.note || "端口设置已保存");
+    if (r.note) addNotice(r.note);
     // 固定端口与开关一样需要重启才生效：不给统一的重启横条，用户会以为
     // 已立即生效（对 PWA 用户尤其误导，旧地址在重启前依然有效）
     needsRestart();
@@ -17970,7 +17924,7 @@ function bindChannelEvents() {
     const v = parseInt(document.getElementById("channel-timeout").value, 10) || 120;
     try {
       await request("channel.set_timeout", { approve_timeout: v });
-      channelMsg("审批等待时间已保存", "ok");
+      channelMsg("");
     } catch (e) { channelMsg("保存失败: " + e.message, "bad"); }
     loadChannelPanel();
   };
@@ -18094,7 +18048,7 @@ async function saveChannel(name, opts = {}) {
   // silent：供「勾启用时顺手落盘」用——调用方紧接着还要启停并自己重渲染，
   // 这里就不再闪一次「已保存」、也不重复拉一次面板。
   if (!opts.silent) {
-    channelMsg("渠道配置已保存", "ok");
+    channelMsg("");
     loadChannelPanel();
   }
   return true;
@@ -18691,7 +18645,7 @@ document.getElementById("btn-diag").onclick = async () => {
   msg.textContent = "打包中…";
   try {
     const r = await request("app.export_diagnostics");
-    msg.textContent = `✓ 已生成诊断包（${(r.size / 1024).toFixed(0)} KB）并打开所在文件夹`;
+    msg.textContent = `已生成诊断包（${(r.size / 1024).toFixed(0)} KB）并打开所在文件夹`;
     msg.className = "io-msg ok";
   } catch (e) {
     msg.textContent = "✗ " + e.message;
@@ -18712,14 +18666,14 @@ document.getElementById("btn-migration-export").onclick = async () => {
       // 超过 64MB 改落盘（导出不拒绝）；但导入侧受同一上限约束（防 zip bomb），
       // 超大包只能拷贝存档，不能经「按路径导入」换回本机
       if (msg) {
-        msg.textContent = `✓ 包体 ${((r.size || 0) / 1024 / 1024).toFixed(1)}MB 超过 ${r.limit_mb}MB，`
+        msg.textContent = `包体 ${((r.size || 0) / 1024 / 1024).toFixed(1)}MB 超过 ${r.limit_mb}MB，`
           + `已落盘：${r.path}（导入受同一上限约束，超大包仅供拷贝存档）`;
         msg.className = "io-msg ok";
       }
     } else {
       downloadDataZip(r.filename, r.data_b64);
       if (msg) {
-        msg.textContent = `✓ 已导出（${((r.size || 0) / 1024).toFixed(0)} KB），模型密钥与 MCP 配置不进包。`;
+        msg.textContent = `已导出（${((r.size || 0) / 1024).toFixed(0)} KB），模型密钥与 MCP 配置不进包。`;
         msg.className = "io-msg ok";
       }
     }
@@ -18769,7 +18723,7 @@ function migrationDone(r) {
   const guards = man.config_guard_keys_stripped || [];
   if (guards.length) bits.push(`防护开关不随包生效（${guards.join("、")}）`);
   if (msg) {
-    msg.textContent = "✓ 导入完成" + (bits.length ? "：" + bits.join("，") : "") + "——重启应用后生效。";
+    msg.textContent = "导入完成" + (bits.length ? "：" + bits.join("，") : "") + "——重启应用后生效。";
     msg.className = "io-msg ok";
   }
   addNotice("迁移包导入完成，重启应用后生效。导入前的数据已自动备份到 backups 目录。");
@@ -18855,7 +18809,7 @@ document.getElementById("btn-feedback").onclick = async () => {
   msg.textContent = "正在打包并打开反馈页…";
   try {
     await openFeedbackPage();
-    msg.textContent = "✓ 已生成诊断包并打开反馈页——把诊断包 zip 拖进附件，描述问题即可";
+    msg.textContent = "已生成诊断包并打开反馈页——把诊断包 zip 拖进附件，描述问题即可";
     msg.className = "io-msg ok";
   } catch (e) {
     msg.textContent = "✗ 打开反馈页失败：" + e.message + "（可手动访问：" + REPO_PAGE + "/issues）";
@@ -18873,11 +18827,8 @@ document.getElementById("btn-backup-now").onclick = async () => {
   const label = btn.textContent;
   btn.textContent = "备份中…";
   try {
-    const r = await request("session.create_backup");
+    await request("session.create_backup");
     await loadBackups();
-    bs.textContent = `✓ 已手动备份：${r.name}`;
-    bs.className = "card-status ok";
-    bs.hidden = false;
     btn.textContent = label;
   } catch (e) {
     bs.textContent = "✗ 手动备份失败：" + e.message;
@@ -18901,7 +18852,7 @@ document.getElementById("btn-retention-sweep").onclick = async () => {
     const r = await request("retention.sweep");
     await renderRetentionCfg();
     retentionStatus(r.ran
-      ? `✓ 已清理 ${r.deleted} 个文件，释放 ${retentionBytes(r.bytes)}`
+      ? `已清理 ${r.deleted} 个文件，释放 ${retentionBytes(r.bytes)}`
       : "今天已经自动清理过了");
   } catch (e) {
     retentionStatus("✗ 清理失败：" + e.message, false);
@@ -18975,7 +18926,7 @@ document.getElementById("btn-mod-install").onclick = () => {
       <pre class="mod-readme">${escapeHtml(p.entry_head || "")}</pre>`;
     showModal(`确认安装「${p.name || p.id}」`, prev, async () => {
       await request("mods.confirm_install", { install_token: p.install_token });
-      modsStatus(`✓ 已安装 ${p.name || p.id}（立即生效）`);
+      modsStatus();
       renderModsCfg().catch(() => {});
     }, "安装");
   });
@@ -18985,7 +18936,7 @@ document.getElementById("btn-mod-install").onclick = () => {
 document.getElementById("mods-toggle").onchange = async (e) => {
   try {
     await request("mods.set_enabled", { enabled: e.target.checked });
-    modsStatus(`✓ Mods 已${e.target.checked ? "启用" : "关闭"}（立即生效）`);
+    modsStatus();
   } catch (err) {
     modsStatus("✗ " + err.message, false);
   }
@@ -19036,10 +18987,9 @@ document.getElementById("btn-mod-save-draft").onclick = () => {
     status.textContent = "正在校验并保存…";
     status.className = "form-status";
     const r = await request("mods.save_draft", { id: modId, manifest: manifestObj, main_js: mainJs, readme });
-    status.textContent = `✓ 已保存草稿「${r.name}」`;
-    status.className = "form-status ok";
+    status.textContent = "";
     // 草稿路径回显给「＋ 安装 Mod」用（本机专属方法，回本机路径没有泄露面）
-    modsStatus(`✓ 已保存草稿「${r.name}」到 ${r.path}——点「＋ 安装 Mod」选这个目录完成安装`);
+    modsStatus(`已保存草稿「${r.name}」到 ${r.path}——点「＋ 安装 Mod」选这个目录完成安装`);
   }, "保存草稿");
 };
 
@@ -19239,7 +19189,7 @@ function paletteBaseItems() {
       addNotice("正在生成诊断包…");
       try {
         const r = await request("app.export_diagnostics");
-        addNotice(`✓ 已生成诊断包（${(r.size / 1024).toFixed(0)} KB）并打开所在文件夹`);
+        addNotice(`已生成诊断包（${(r.size / 1024).toFixed(0)} KB）并打开所在文件夹`);
       } catch (e) {
         addNotice("✗ 生成诊断包失败：" + e.message);
       }

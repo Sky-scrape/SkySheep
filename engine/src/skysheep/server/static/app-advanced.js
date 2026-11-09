@@ -167,7 +167,6 @@ async function saveHooks() {
     // 生效计数也要跟着刷新，否则刚保存完还显示「未配置」，看起来像没生效
     renderHooksCounts(d.active_pre, d.active_post, d.active_stop);
     renderHookRecentRuns(d.recent || []);
-    hooksStatus(`✓ 已保存并立即生效（前 ${d.active_pre} / 后 ${d.active_post} / 完成 ${d.active_stop}）`);
   } catch (e) {
     hooksStatus("✗ 保存失败：" + e.message, false);
   }
@@ -200,8 +199,8 @@ const hookTestRun = async () => {
   try {
     const r = await request("hooks.test", { kind, tool, command, timeout_s: timeout, input });
     const verdict = kind === "pre"
-      ? (r.blocked ? "⛔ 这次调用会被阻止" : "✓ 这次调用会放行")
-      : "✓ 已执行（仅通知，不影响任务）";
+      ? (r.blocked ? "⛔ 这次调用会被阻止" : "这次调用会放行")
+      : "已执行（仅通知，不影响任务）";
     const detail = [
       `${verdict}（退出码 ${r.code}，耗时 ${r.duration_ms}ms）`,
       r.stdout ? `stdout：${r.stdout}` : "",
@@ -312,12 +311,8 @@ async function saveAdvanced() {
       autostart: q("adv-autostart").checked,
       hotkey: newHotkey,
     });
-    // 先重渲染（会把状态行清掉）再写成功提示，否则"✓ 已保存"一闪就没
     await renderAdvancedCfg();
-    // 热键随窗口创建注册，改键要重启才生效——与「已立即生效」分开说，别误导
-    advancedStatus(newHotkey !== oldHotkey
-      ? "✓ 已保存；全局唤起热键在重启应用后生效"
-      : "✓ 已保存并立即生效");
+    // 热键随窗口创建注册，改键要重启才生效：提示留在重启横条里，不再另写「已保存」
     if (newHotkey !== oldHotkey) needsRestart(); // 页顶横条给出就地重启入口
     const st = r.autostart || {};
     if (q("adv-autostart").checked && st.enabled) {
@@ -345,7 +340,7 @@ async function saveNetwork() {
       network_no_proxy: (q("adv-network-no-proxy").value || "").trim(),
       network_ca_cert: (q("adv-network-ca").value || "").trim(),
     });
-    networkStatus("✓ 已保存并立即生效");
+    networkStatus();
   } catch (e) {
     networkStatus("✗ 保存失败：" + e.message, false);
   }

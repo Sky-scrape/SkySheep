@@ -1489,8 +1489,7 @@
       if (S.state) S.state.config = Object.assign({}, S.state.config || {}, cfg);
       if (S.demo) S.demo.config = Object.assign({}, S.demo.config || {}, cfg);
       applyNavVisibility(cfg.enabled !== false);
-      addNotice("工厂设置已保存");
-      if (msgEl) { msgEl.textContent = "已保存"; msgEl.className = "fx-form-msg"; }
+      if (msgEl) { msgEl.textContent = ""; msgEl.className = "fx-form-msg"; }
       renderAttentionNotice((S.state && S.state.config) || cfg);
       renderWeatherChip();
       renderAll();

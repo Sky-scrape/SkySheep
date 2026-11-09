@@ -541,9 +541,8 @@ async function renderSettings() {
           if (!ok) { ioMsg.textContent = "已取消导入"; ioMsg.className = "io-msg"; return; }
           ioMsg.textContent = "导入中…";
           const r = await request("settings.import", { b64 });
-          ioMsg.textContent = "✓ 已恢复：" + (r.restored || []).join("、") +
-            (r.skipped && r.skipped.length ? "（跳过：" + r.skipped.join("、") + "）" : "") +
-            "。配置已重载。";
+          ioMsg.textContent = "配置已重载。" +
+            (r.skipped && r.skipped.length ? "（跳过：" + r.skipped.join("、") + "）" : "");
           ioMsg.className = "io-msg ok";
           boot();
         } catch (e) {

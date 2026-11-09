@@ -205,7 +205,7 @@ function bindMacroRows() {
       try {
         const st = await request("macro.delete", { name });
         macroState.list = st.macros || [];
-        macroMsgSet(`已删除「${name}」`, "");
+        macroMsgSet("", "");
         renderMacroList();
       } catch (e) {
         macroMsgSet("删除失败：" + e.message, "bad");

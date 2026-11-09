@@ -421,9 +421,9 @@ function deleteProjectModal(p) {
     const r = await request("project.delete", { id: p.id });
     await applyWorkspaceData(await fetchWorkspaceData());
     if (r.switched_to) {
-      addNotice(`已删除项目「${p.name}」，已切换到「${r.switched_to.name}」。`);
+      addNotice(`已切换到「${r.switched_to.name}」。`);
     } else {
-      addNotice(`已删除项目「${p.name}」；文件夹仍保留在电脑上，当前处于快聊。`);
+      addNotice("文件夹仍保留在电脑上，当前处于快聊。");
     }
   }, "移除");
 }

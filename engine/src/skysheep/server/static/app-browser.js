@@ -57,7 +57,7 @@ async function saveBrowserCtl(key, statusId) {
     : { browser_control: !!master.checked };
   try {
     applyBrowserStatus(await request("browser.save", params));
-    browserCtlStatus(statusId, key === "ignore_cert" ? "✓ 已保存" : "✓ 已保存并生效");
+    browserCtlStatus(statusId);
     // 总开关改变的是 Agent 的工具清单：设置页的「内置工具」列表跟着刷新
     if (key !== "ignore_cert") { try { await renderSettings(); } catch (e) { /* 列表刷新失败不影响保存 */ } }
   } catch (e) {

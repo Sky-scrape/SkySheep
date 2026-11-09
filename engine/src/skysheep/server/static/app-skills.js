@@ -205,7 +205,7 @@ function importSkillModal(prefill = "") {
     await renderSettings();
     boot();
     const where = r.scope === "project" ? "本项目" : "全局";
-    skillStatus(`✓ 已导入 ${r.count} 个技能到${where}：${nameList(r.installed)}（已启用，可直接使用）`);
+    skillStatus();
   }, "导入");
 }
 
@@ -291,7 +291,7 @@ async function importLocalSkills() {
   boot();
   const where = scope === "project" ? "本项目" : "全局";
   if (ok.length) {
-    skillStatus(`✓ 已导入 ${ok.length} 个技能到${where}：${nameList(ok)}（已启用，可直接使用）`);
+    skillStatus();
     loadLocalSkills();  // 重新探测：刚装过的转为灰显，剩余候选一眼可见
   } else {
     skillStatus("✗ " + (bad[0] || "导入失败"), false);
@@ -307,7 +307,7 @@ function deleteSkillModal(s) {
     await request("skills.delete", { name: s.name });
     await renderSettings();
     boot();
-    skillStatus(`✓ 已删除技能「${s.name}」`);
+    skillStatus();
   }, "删除");
 }
 
@@ -327,7 +327,7 @@ function batchDeleteSkillsModal(names) {
     }
     await renderSettings();
     boot();
-    skillStatus(bad.length ? `✗ 部分删除失败：${bad.join("、")}` : `✓ 已删除 ${names.length} 个技能`);
+    if (bad.length) skillStatus(`✗ 部分删除失败：${bad.join("、")}`, false);
   }, "全部删除");
 }
 
@@ -386,8 +386,6 @@ async function saveSkillDraftModal() {
     });
     await renderSettings();
     boot();
-    const where = r.scope === "project" ? "仅本项目" : "全局";
-    addNotice(`✓ 已保存技能「${r.name}」（${where}），去「MCP / Skills」页查看。`);
   }, "保存草稿");
   nameInput.focus();
   nameInput.select();
@@ -486,10 +484,7 @@ function importMcpModal(prefill = "") {
     const where = r.scope === "project" ? "本项目" : "全局";
     if (r.added.length) {
       const bad = (r.mcp_warnings || []).length;
-      mcpStatus(
-        `✓ 已导入到${where}：${r.added.join("、")}${bad ? "；有服务没连上，详情见列表里的红色提示" : "，已连接可直接使用"}`,
-        !bad
-      );
+      if (bad) mcpStatus("有服务没连上，详情见列表里的红色提示", false);
     } else {
       mcpStatus(`没有新增：${r.skipped.join("、")} 已存在。勾选「覆盖同名服务」再试即可替换。`, false);
     }
@@ -568,12 +563,7 @@ function addMcpModal() {
     boot();
     const st = (r.mcp || []).find((m) => m.name === val("name"));
     const bad = st && !st.connected;
-    mcpStatus(
-      bad
-        ? `已保存「${val("name")}」，但没连上：${st.error || "未知错误"}`
-        : `✓ 已添加「${val("name")}」${st ? `，已连接 ${st.tools.length} 个工具` : ""}`,
-      !bad
-    );
+    if (bad) mcpStatus(`已保存「${val("name")}」，但没连上：${st.error || "未知错误"}`, false);
   }, "添加");
 }
 
@@ -585,7 +575,7 @@ function deleteMcpModal(name) {
     const r = await request("mcp.delete", { name });
     await renderSettings();
     boot();
-    mcpStatus(`✓ 已删除「${name}」并断开连接`);
+    mcpStatus();
   }, "删除");
 }
 
@@ -728,7 +718,7 @@ function renderScopePicker(li, s) {
     msg.className = "scope-msg dim small";
     try {
       await request("skills.scope", { name: s.name, mode: "projects", projects: picked });
-      skillStatus(`✓ 「${s.name}」的使用范围已更新（指定 ${picked.length} 个项目）`);
+      skillStatus();
       boot();
       await renderSettings();
     } catch (e) {
@@ -834,11 +824,7 @@ function renderSkillList(skills) {
         if (old) old.remove();
         try {
           await request("skills.scope", { name: s.name, mode: sel.value, projects: [] });
-          skillStatus(
-            sel.value === "none"
-              ? `✓ 「${s.name}」已设为任何项目都不使用`
-              : `✓ 「${s.name}」已设为所有项目可用`
-          );
+          skillStatus();
           boot();
           await renderSettings();
         } catch (e) {

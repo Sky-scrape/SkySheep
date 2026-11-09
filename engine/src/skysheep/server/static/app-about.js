@@ -314,7 +314,7 @@ function restoreBackupConfirm(name, when, btn, size = 0) {
     btn.disabled = true;
     try {
       const r = await request("session.restore_backup", { name });
-      addNotice(`✓ 已恢复到 ${r.restored}` + (r.safety_copy ? "（恢复前的数据已另存一份）" : ""));
+      if (r.safety_copy) addNotice("恢复前的数据已另存一份");
       await boot(); // 会话/项目列表按恢复后的库重画
       await loadBackups();
     } catch (e) {
@@ -392,7 +392,7 @@ async function renderRetentionCfg() {
     note.textContent = d.last_sweep_date ? `上次自动清理：${d.last_sweep_date}。` : "";
     note.hidden = !d.last_sweep_date;
   }
-  retentionStatus("");
+  retentionStatus();
 }
 
 async function saveRetention() {
@@ -410,7 +410,7 @@ async function saveRetention() {
       reports_days: days("retention-reports"),
     });
     await renderRetentionCfg();
-    retentionStatus("✓ 已保存并立即生效");
+    retentionStatus();
   } catch (e) {
     retentionStatus("✗ 保存失败：" + e.message, false);
   }
@@ -469,9 +469,7 @@ async function renderStorageCard() {
     try {
       const r = await request("storage.cleanup", { targets: [], vacuum: true });
       await renderStorageCard();
-      storageStatus(r.freed_bytes > 0
-        ? `✓ 已整理数据库，释放 ${retentionBytes(r.freed_bytes)}`
-        : "✓ 数据库已整理");
+      if (r.freed_bytes <= 0) storageStatus("数据库已经整理过了");
     } catch (e) {
       storageStatus("✗ 整理失败：" + e.message, false);
     } finally { vb.disabled = false; }
@@ -491,7 +489,7 @@ async function cleanTable(table, days, btn) {
     });
     await renderStorageCard();
     const n = r.deleted[table] || 0;
-    storageStatus(n > 0 ? `✓ 已删除 ${n} 条记录` : "没有符合条件的记录");
+    if (n <= 0) storageStatus("没有符合条件的记录");
   } catch (e) {
     storageStatus("✗ 清理失败：" + e.message, false);
     btn.disabled = false;

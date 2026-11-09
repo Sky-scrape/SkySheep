@@ -101,7 +101,11 @@ async def test_relay_nav_keeps_chat_and_panel(home):
 
 
 async def test_peer_pane_notices_stay_in_peer(home):
-    """副屏里的操作提示写进副屏，不能串到主栏（用户报的串台回归）。"""
+    """副屏里的操作提示写进副屏，不能串到主栏（用户报的串台回归）。
+
+    用权限三档的切换提示触发 paneNotice——模型切换的成功提示已在 2.6.9 收掉，
+    不能再拿它当载体。
+    """
     async with live_server(home, [[TextBlock(text="好")]]) as base:
         async with browser_page(base, width=1400, height=900) as page:
             await _open_main_view(page)
@@ -111,12 +115,9 @@ async def test_peer_pane_notices_stay_in_peer(home):
             await expect(page.locator("#input")).to_have_value("", timeout=10000)
             await page.click('.nav-item[data-act="relay"]')
             await expect(page.locator("#split-pane .split-model")).to_be_visible(timeout=10000)
-            await page.click("#split-pane .split-model")
-            row = page.locator("#split-model-menu .mm-item").first
-            await expect(row).to_be_visible(timeout=10000)
-            await row.click()
+            await page.click('#split-pane .cp-icon[data-role="accept"]')
             await expect(page.locator("#split-pane .split-log")).to_contain_text(
-                "这一栏将使用", timeout=10000
+                "（仅这一栏）", timeout=10000
             )
             main_text = await page.locator("#chat .chat-log").first.inner_text()
-            assert "这一栏将使用" not in main_text
+            assert "仅这一栏" not in main_text

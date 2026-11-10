@@ -812,6 +812,9 @@ def _msg_brief(m: Message) -> dict:
         # 旧消息没有这两个字段（都是 0 / None），前端据此不渲染芯片。
         "duration_ms": getattr(m, "duration_ms", 0),
         "estimate": getattr(m, "estimate", None),
+        # 本轮来源表（引用溯源）：历史恢复时渲染「来源 [1] [2]」chip，
+        # 刷新/重开会话后仍可点回原网页核对。旧消息没有该字段，前端按空处理。
+        "sources": getattr(m, "sources", None),
     }
 
 

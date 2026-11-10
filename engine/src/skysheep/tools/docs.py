@@ -222,6 +222,8 @@ class ReadDocumentTool(Tool):
         "纯文本文件请用 read_file。用户让你「看/读/总结某个文档」时用它。"
         "超长 PDF / PPT 被截断时，用更大的 start_page 从断点继续读；"
         "PDF 的 max_chars 可调大（至多 20 万字符）。"
+        "如果是几百页的手册、或要在很多文档里找某个细节，改用 index_documents "
+        "建索引 + search_documents 按问题检索（返回页码，不必整本读完）。"
     )
     safety = Safety.READONLY
     read_only_hint = True

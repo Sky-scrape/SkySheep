@@ -51,6 +51,7 @@ from ..security.gate import (
     PermissionGate,
     normalize_decision,
 )
+from ..sources import SourceRegistry
 from ..tools.base import Safety, Tool, ToolContext, ToolError, ToolRegistry, truncate_output
 from .context import compact_history, estimate_tokens
 from .effort import resolve_auto_effort
@@ -365,6 +366,9 @@ class Agent:
             use_ripgrep=self.use_ripgrep,
             relay_execution=self.relay_execution,
         )
+        # 引用溯源：本轮 web_fetch / web_search 读到的网页登记成编号，最终回答
+        # 带上整张表（sources）落库与回传前端。轮内编号，下一轮从 1 重新开始。
+        ctx.sources = SourceRegistry()
         # 防打转状态按轮重置：上一轮的重试/熔断不该影响新任务（用户新消息
         # 可能正是要求换个思路做同一件事）
         self.loop_guard.reset()
@@ -634,6 +638,10 @@ class Agent:
             is_final = not assistant.tool_uses
             if is_final:
                 assistant.duration_ms = int((time.monotonic() - turn_t0) * 1000)
+                # 来源随最终回答落库：模型正文里写没写 [来源 N] 都不影响这条
+                # 客观记录——前端据此渲染可点开的来源 chip，历史恢复不丢。
+                if ctx.sources is not None and len(ctx.sources):
+                    assistant.sources = ctx.sources.to_list()
             self.history.append(assistant)
             # 正文已并入历史：清掉流式登记，取消兜底不再重复落库（含下面
             # yield 处被 GeneratorExit 打断的情况——消息在打断前已入库）

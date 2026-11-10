@@ -22,6 +22,7 @@ from .computer import (
     WindowListTool,
     WindowTool,
 )
+from .doc_search import IndexDocumentsTool, SearchDocumentsTool
 from .docs import ReadDocumentTool, WriteDocumentTool
 from .fs import (
     DeleteFileTool,
@@ -96,6 +97,8 @@ def default_tools(
         WebSearchTool(**(websearch or {}), network=network),
         ReadDocumentTool(),
         WriteDocumentTool(recorder=recorder),
+        IndexDocumentsTool(),
+        SearchDocumentsTool(),
         MemoryWriteTool(),
         GenerateImageTool(recorder=recorder, **(imagegen or {})),
     ]
@@ -148,6 +151,8 @@ __all__ = [
     "WebSearchTool",
     "ReadDocumentTool",
     "WriteDocumentTool",
+    "IndexDocumentsTool",
+    "SearchDocumentsTool",
     "MemoryWriteTool",
     "GenerateImageTool",
     "ScreenshotTool",

@@ -2547,7 +2547,7 @@ function addThinkingDone(text, tab, ms) {
   return el;
 }
 
-function finishAssistant(rtMeta, seq) {
+function finishAssistant(rtMeta, seq, sources) {
   const t = curTab();
   if (!t || !t.streamingEl) return;
   finishThinking(t);
@@ -2557,6 +2557,7 @@ function finishAssistant(rtMeta, seq) {
   // 定稿按整文精确重画一次（覆盖增量渲染的临时结构，光标元素一并移除）
   t.streamingEl.firstElementChild.innerHTML = renderMarkdown(t.streamingText);
   t._streamBody = null;
+  addSourceChips(t.streamingEl, sources);
   if (rtMeta) {
     if (rtMeta.mode === "adversarial") {
       // 对抗报告：徽标 + 折叠上方的问题清单卡（报告已流进本气泡）
@@ -5587,10 +5588,11 @@ function handleEvent(kind, data) {
           && typeof loadTeamRoom === "function") loadTeamRoom(true);
       }
       if (t && t.streamingEl) {
-        finishAssistant(meta, seq);
+        finishAssistant(meta, seq, data.message && data.message.sources);
       } else {
         const text = messageText(data.message);
-        if (text) addAssistantDone(text, meta, t, seq);
+        if (text) addAssistantDone(text, meta, t, seq, null, 0, 0, null,
+          data.message && data.message.sources);
       }
       break;
     }
@@ -11045,7 +11047,44 @@ function messageText(message) {
   return message.content.filter((b) => b.type === "text").map((b) => b.text || "").join("");
 }
 
-function addAssistantDone(text, rtMeta, tab, seq, thinking, thinkingMs, durationMs, estimate) {
+// 来源 chip（引用溯源）：把本轮 web_fetch / web_search 读到的网页渲染成可点开的
+// 小胶囊——回答里写没写 [来源 N] 都能对回原网页核对。点开走 app.open_external
+// （后端只放行 http(s)，远端连接时交回本端浏览器，与服务端代开同一口径）。
+function addSourceChips(el, sources) {
+  if (!el || !Array.isArray(sources) || !sources.length) return;
+  const row = document.createElement("div");
+  row.className = "msg-sources";
+  const label = document.createElement("span");
+  label.className = "ms-label";
+  label.textContent = "来源";
+  row.appendChild(label);
+  sources.forEach((s) => {
+    if (!s || !s.url) return;
+    const host = (() => {
+      try { return new URL(s.url).hostname.replace(/^www\./, ""); }
+      catch (e) { return s.url; } // 兜底：极少数手写 URL 解析不了就显示原串
+    })();
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "ms-chip";
+    chip.textContent = `[${s.index}] ${host}`;
+    chip.title = (s.title ? s.title + "\n" : "") + s.url;
+    chip.onclick = async (ev) => {
+      ev.stopPropagation();
+      try {
+        const r = await request("app.open_external", { target: s.url });
+        // 局域网/远程访问时服务端不代开：链接交回本端浏览器（与设置页一致）
+        if (r && r.remote) window.open(r.url || s.url, "_blank", "noopener");
+      } catch (e) {
+        addNotice("打开来源失败：" + e.message);
+      }
+    };
+    row.appendChild(chip);
+  });
+  if (row.children.length > 1) el.appendChild(row);
+}
+
+function addAssistantDone(text, rtMeta, tab, seq, thinking, thinkingMs, durationMs, estimate, sources) {
   const t = tab || curTab();
   const d = document.createElement("div");
   d.className = "msg assistant";
@@ -11059,11 +11098,12 @@ function addAssistantDone(text, rtMeta, tab, seq, thinking, thinkingMs, duration
     const hi = (estimate && estimate.max_seconds) || 0;
     if (estimate && estimate.basis) chip.title = "预估依据：" + estimate.basis;
     chip.textContent = hi
-      ? `⏱ 用时 ${fmtEtaDur(durationMs / 1000)}  预估 ${fmtEtaRange(lo, hi)}`
+      ? `⏱ 用时 ${fmtEtaDur(durationMs / 1000)}  预估 ${fmtEtaRange(lo, hi)}`
       : `⏱ 用时 ${fmtEtaDur(durationMs / 1000)}`;
     curLog().appendChild(chip);
   }
   d.innerHTML = `<div class="md">${renderMarkdown(text || "")}</div>`;
+  addSourceChips(d, sources);
   if (rtMeta) {
     d._rtMeta = rtMeta; // 重新生成时据此重跑同样的协作配置
     if (rtMeta.mode === "team") addTeamBadge(d, rtMeta);
@@ -11403,7 +11443,7 @@ function paintHistorySlice(tab, messages, start, end) {
         }
         addAssistantDone(
           m.text, m.roundtable || m.adversarial, tab, m.seq, m.thinking,
-          m.thinking_ms, m.duration_ms, m.estimate,
+          m.thinking_ms, m.duration_ms, m.estimate, m.sources,
         );
         el = curLog().lastElementChild;
       }

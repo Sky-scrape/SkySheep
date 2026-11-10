@@ -4773,6 +4773,27 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 .eta-chip.over { color: var(--gold); border-style: dashed; }
 .eta-chip.done { color: var(--dim); background: transparent; border-color: transparent; }
 
+/* 来源 chip（引用溯源）：回答下方一行「来源 [1] 域名 [2] 域名」，点开原网页核对。
+   与用时芯片同一族小胶囊，默认弱化、悬停提亮；换行时整体缩进对齐。 */
+.msg-sources {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 2px 0 6px; padding-left: 0;
+}
+.msg-sources .ms-label {
+  font-size: var(--fs-sm); color: var(--dim); letter-spacing: .02em;
+}
+.msg-sources .ms-chip {
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 2px 9px; font-size: var(--fs-sm); color: var(--text2);
+  background: var(--paper-raised); border: 1px solid var(--line2);
+  border-radius: var(--r-pill); cursor: pointer;
+  transition: color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast);
+}
+.msg-sources .ms-chip:hover {
+  color: var(--blue); border-color: var(--blue); background: var(--blue-weak);
+}
+@media (max-width: 860px) { .msg-sources .ms-chip { max-width: 170px; } }
+
 /* 检查点条：本轮改动文件 + 撤销按钮 */
 .checkpoint-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px;

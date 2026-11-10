@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..messages import ImageBlock
+from ..sources import SourceRegistry
 
 
 class Safety(StrEnum):
@@ -107,6 +108,10 @@ class ToolContext:
         # 之后才长出来的（TOCTOU，审计 L04），工具必须拒绝并让模型重试，重试会
         # 重新走一次确认。授权戳只在 authorize 产出的判定里写入，工具不得自行添加。
         self.approved_deletes: set[str] = set()
+        # 本轮来源登记簿（见 sources.py）：web_fetch / web_search 把读过/搜到的
+        # 网页登记成轮内编号，最终 assistant 消息带上整张表供前端展示与核对。
+        # None = 调用方不要来源标注（测试、子代理等路径），工具输出与旧版一致。
+        self.sources: SourceRegistry | None = None
 
 
 class Tool(abc.ABC):

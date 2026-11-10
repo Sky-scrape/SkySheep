@@ -39,7 +39,7 @@ uv run pytest -m "not e2e and not eval"      # 跳过 e2e 与评测基线
 （评测不联网、不碰真实 home、进程内秒级，跑上只增加回归保护）；`-m e2e`
 层不受影响。
 
-## 现有场景（33 个）
+## 现有场景（34 个）
 
 | # | 场景 | 文件 | 回归史出处 |
 |---|---|---|---|
@@ -76,6 +76,43 @@ uv run pytest -m "not e2e and not eval"      # 跳过 e2e 与评测基线
 | 31 | 圆桌融合：主席也出草稿 + 两成员独立作答 + 主席融合——草稿不进主历史、融合答案带 roundtable 元数据落库、融合输入含全部草稿 | tests/test_collab_scenarios.py（本体）+ evals/test_eval_collab_scenarios.py（eval 挂载） | CHANGELOG [2.6.3] P29「协作行为 eval 基线另批」 |
 | 32 | 团队闭环：AI 总管自动闭环（拆解 → 派工 → 验收 → 交付）——《交付说明》随 team_finished 落库、user+assistant 成对可审计、用量按角色入账 | 同上（本体 + eval 挂载） | 同上 |
 | 33 | 对抗裁决：发现 → 调查 → 建议 → 裁判四阶段——裁决统计随 adversarial_finished 下发、终审报告带对抗元数据落库、用量按角色入账 | 同上（本体 + eval 挂载） | 同上 |
+| 34 | 轮指标预算：只读工具的自动放行轮（工具 1 次、确认 0 次）与被拒绝的写入轮（确认 1 次、拒绝 1 次、零落盘）——`TurnMetrics` 逐项断言并附预算上限 | test_eval_metrics_scenario.py | 评测指标化（2026-11） |
+
+## 指标层：除了过/不过，还记录多贵多慢
+
+每条用例的结果与耗时由 `evals/conftest.py` 的插件自动记录，会话结束写
+`evals/.metrics/last-run.jsonl`（逐条）与 `last-run.json`（聚合），并打印一行
+`[eval-metrics] … 通过率 p50 p95`。开关：`SKYSHEEP_EVAL_METRICS=0` 关闭，
+`SKYSHEEP_EVAL_METRICS_DIR` 改输出目录；`.metrics/` 是产物，不提交。
+
+场景想要 token / 工具次数 / 确认次数 / 重试这些明细，用 `metrics` 夹具：
+
+```python
+from evals._metrics import TurnMetrics, assert_metrics
+
+async def test_xxx(home, metrics):
+    events = await run_eval_turn(agent, "看一下目录")
+    m = TurnMetrics.from_events(events)      # 事件流 → 客观指标
+    assert_metrics(m, max_tool_calls=1, max_permission_requests=0,
+                   max_total_tokens=100, max_duration_ms=15_000)
+    metrics.append(m)                        # 随结果落盘
+```
+
+预算只设上限、写宽一点（CI 慢机）：抓的是数量级退化（多调了十次工具、多弹了
+三次确认、token 翻倍），不是毫秒级抖动。行为断言（「至少调一次工具」）仍写在
+场景里，不混进预算。
+
+报表：`python tools/eval_report.py`（Markdown，含 p50/p95、token 合计与逐场景
+分桶）；`--json` 出机器可读；`--fail-on-failed` 供 CI 门禁用。
+
+### LLM-as-judge（可选，不进默认回归）
+
+文本质量归 `evals/judge.py`：`judge_answer(provider, question=..., answer=...,
+criteria=...)` 让裁判模型只回一个 JSON（score 0–10 / verdict / reasons），解析
+宽容（代码围栏、前后废话、字符串分数都认，解析失败记 `parsed=False` 而不是抛
+异常）。它需要真实 Key、有随机性与费用，所以**不放进默认套件**——本机或发版前
+手动跑，或者在自己的脚本里显式调用。`tests/test_eval_metrics.py` 用 FakeProvider
+钉住解析与提示词契约，不产生真实调用。
 
 ## 写新场景
 
@@ -90,7 +127,9 @@ uv run pytest -m "not e2e and not eval"      # 跳过 e2e 与评测基线
 - `run_eval_turn(agent, text, decide=None)` — 跑一轮真实循环、收集事件流；
   `decide(request_event) -> "allow_once"|"allow_always"|"deny"` 按事件内容
   回决策，**不传一律 deny**（fail-closed：忘接决策的后果是「什么都没执行」）；
-- `requests(events)` / `resolved(events)` / `finished(events)` — 事件流切片。
+- `requests(events)` / `resolved(events)` / `finished(events)` — 事件流切片；
+- `metrics` 夹具 + `TurnMetrics.from_events(events)` / `assert_metrics(...)` —
+  轮指标与预算断言（见上「指标层」）。
 
 夹具只有 `home`（SKYSHEEP_HOME 隔离 + `proj/` 临时项目目录）。新场景文件
 放进本目录即自动获得 `eval` 标记（conftest 的 `pytest_collection_modifyitems`

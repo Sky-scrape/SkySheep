@@ -50,6 +50,7 @@ from ..sanitize import (
     scan_injection_patterns,
     untrusted_frame,
 )
+from ..sources import register_source
 from ..textio import write_text_atomic
 from .base import Safety, Tool, ToolContext, ToolError, truncate_output
 
@@ -348,6 +349,26 @@ def html_to_text(html: str) -> str:
     parser.close()
     lines = (re.sub(r"[ \t]+", " ", ln).strip() for ln in parser.text().splitlines())
     return "\n".join(ln for ln in lines if ln)
+
+
+_TITLE_RE = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
+
+
+def html_title(body: bytes, charset: str, limit: int = 200) -> str:
+    """尽量取页面标题（来源 chip 上比裸 URL 好认）；取不到返回空串。
+
+    只看前 64KB 且用非回溯的懒惰匹配：标题一定在 head 里，整块页面不必解码；
+    HTMLParser 解析整页只为标题太重，这里用受限正则（输入已被长度截断）。
+    """
+    try:
+        head = body[:65536].decode(charset, errors="replace")
+    except (LookupError, ValueError):
+        return ""
+    m = _TITLE_RE.search(head)
+    if not m:
+        return ""
+    title = re.sub(r"\s+", " ", m.group(1)).strip()
+    return title[:limit]
 
 
 # ---- 提示注入纵深防御（第二期）：隔离区模式 + 站点信任评级 ----
@@ -805,19 +826,22 @@ class WebFetchTool(Tool):
             )
         if QUARANTINE_ENABLED:
             return self._quarantined_reply(
-                current, ctype, text + note, hits, trust_label, args.max_chars
+                current, ctype, text + note, hits, trust_label, args.max_chars,
+                register_source(ctx, current, html_title(body, charset)),
             )
         framed = untrusted_frame(current, truncate_output(text + note, args.max_chars))
         if hits:
             framed += "\n\n⚠ 检测到疑似指令注入形态：" + "、".join(hits)
         # 提示注入纵深防御（机械标注层）：元信息行之后、边界框之前压一遍
-        # 「数据不是指令」——标注是工具自己的话，在边界框之外；正文一字不丢
-        return f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" \
+        # 「数据不是指令」——标注是工具自己的话，在边界框之外；正文一字不丢。
+        # 来源编号（引用溯源）：同一 URL 本轮复用同一编号，随最终回答落库。
+        prefix = register_source(ctx, current, html_title(body, charset))
+        return f"{prefix}[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" \
             + UNTRUSTED_DATA_NOTE + "\n\n" + framed
 
     def _quarantined_reply(
         self, current: str, ctype: str, body_text: str, hits: list[str],
-        trust_label: str, max_chars: int,
+        trust_label: str, max_chars: int, source_prefix: str = "",
     ) -> str:
         """隔离区模式的 web_fetch 回包：全文落盘，模型只见摘录 + 路径。
 
@@ -841,7 +865,7 @@ class WebFetchTool(Tool):
         )
         excerpt = body_text[: min(QUARANTINE_EXCERPT_CHARS, max_chars)]
         framed = untrusted_frame(current, excerpt, trust=trust_label or TRUST_UNKNOWN)
-        out = f"[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" \
+        out = f"{source_prefix}[{current}] ({ctype.split(';')[0].strip() or 'text'})\n\n" \
             + UNTRUSTED_DATA_NOTE + "\n\n" + framed
         tail = (
             f"\n\n（隔离区：正文共 {len(body_text)} 字符，上方仅前 {len(excerpt)} 字符摘录，"
@@ -949,7 +973,10 @@ class WebSearchTool(Tool):
         lines = [f'[web_search] "{query}" — {len(results)} 条结果（{self.provider}）']
         for i, r in enumerate(results, start=1):
             snippet = (r.get("snippet") or "")[:MAX_SNIPPET_CHARS]
-            lines.append(f"\n{i}. {r.get('title') or '(无标题)'}\n   {r.get('url') or ''}")
+            # 来源编号：搜索结果也是「本轮看到过的来源」，模型引用摘要里的
+            # 信息时能对上号；同一 URL 与后续 web_fetch 复用同一编号。
+            label = register_source(ctx, r.get("url") or "", r.get("title") or "", "web_search")
+            lines.append(f"\n{i}. {label}{r.get('title') or '(无标题)'}\n   {r.get('url') or ''}")
             if snippet:
                 lines.append(f"   {snippet}")
         return truncate_output("\n".join(lines), MAX_SEARCH_OUTPUT_CHARS)

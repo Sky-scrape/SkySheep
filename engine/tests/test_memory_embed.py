@@ -17,8 +17,11 @@ from skysheep.tools.memory_embed import (
     OLLAMA_BASE_URL,
     OLLAMA_EMBED_MODEL,
     UNAVAILABLE_TTL_S,
+    cosine_scores,
+    cosine_scores_raw,
     cosine_similarity,
     rank_by_embeddings,
+    rank_by_hybrid,
     select_relevant_auto,
 )
 
@@ -165,15 +168,23 @@ def test_unavailable_marker_caches_and_expires(embed_unknown, monkeypatch):
 
 
 def test_probe_success_and_available_ranking_differs_from_rule(embed_unknown, monkeypatch):
-    """探测成功后按余弦排序；与规则评分的次序可以合法地不同。"""
+    """探测成功后走混合排序（BM25 + 余弦）；与规则评分的次序可以合法地不同。
+
+    记忆三期把「纯余弦排序」升级成混合排序：纯嵌入会把条目0 排在条目1 前面
+    （≈0.99 vs ≈0.71），但条目1 同时命中了查询的两个词元（苹果、手机），
+    BM25 把它拉回第一——这正是混合的意图（编号/术语精确命中不该被语义相似
+    度淹掉）。纯嵌入排序仍保留在 rank_by_embeddings 里，这里两种口径都断言。
+    """
     _mock_http(monkeypatch, {"ok": V_X, "苹果 手机": V_X,
                              "苹果 苹果条": V_ALIKE, "苹果手机条": V_MID})
     assert memory_embed.embeddings_available() is True
     entries = ["苹果 苹果条", "苹果手机条"]
     # 规则评分：条目1 命中 苹果/果手/手机 3 个词元 > 条目0 的 1 个 → [1, 0]
     assert select_relevant(entries, "苹果 手机", 3) == [1, 0]
-    # 嵌入余弦：条目0 ≈0.99 > 条目1 ≈0.71 → [0, 1]
-    assert select_relevant_auto(entries, "苹果 手机", 3) == [0, 1]
+    # 纯嵌入余弦：条目0 ≈0.99 > 条目1 ≈0.71 → [0, 1]
+    assert rank_by_embeddings(entries, "苹果 手机") == [0, 1]
+    # 混合排序：BM25 的精确命中把条目1 拉回第一 → [1, 0]
+    assert select_relevant_auto(entries, "苹果 手机", 3) == [1, 0]
 
 
 # ---------------------------------------------------------------- render 集成
@@ -388,3 +399,47 @@ async def test_schedule_warmup_spawns_background_once(embed_unknown, monkeypatch
                 break
             await asyncio.sleep(0.02)
         assert memory_embed._warming is False
+
+
+# ---------------------------------------------------------------- 混合排序（记忆三期）
+
+
+def test_cosine_scores_returns_raw_scores(embed_unknown, monkeypatch):
+    """cosine_scores 不做阈值过滤（阈值过滤是 rank_by_embeddings 的语义）。"""
+    _mock_http(monkeypatch, {"ok": V_X, "查询": V_X,
+                             "同向": V_ALIKE, "正交": V_OTHER})
+    assert memory_embed.embeddings_available() is True
+    scores = cosine_scores(["同向", "正交"], "查询")
+    assert scores is not None and len(scores) == 2
+    assert scores[0] == pytest.approx(0.99, abs=0.01)
+    assert scores[1] == pytest.approx(0.0, abs=0.01)
+
+
+def test_rank_by_hybrid_keeps_exact_term_match(embed_unknown, monkeypatch):
+    """BM25 的精确命中能把「语义稍弱但词全中」的条目拉回第一。"""
+    _mock_http(monkeypatch, {"ok": V_X, "苹果 手机": V_X, "大自然": [-1.0, 0.0],
+                             "苹果 苹果条": V_ALIKE, "苹果手机条": V_MID})
+    assert memory_embed.embeddings_available() is True
+    entries = ["苹果 苹果条", "苹果手机条"]
+    assert rank_by_hybrid(entries, "苹果 手机", 2) == [1, 0]
+    # 纯语义查询（词元零交集、余弦也低于阈值）：一条都不选
+    assert rank_by_hybrid(entries, "大自然", 2) == []
+
+
+def test_rank_by_hybrid_none_when_embedding_unavailable(embed_unknown):
+    memory_embed._mark_available(False)
+    assert rank_by_hybrid(["条目"], "查询", 3) is None
+    assert rank_by_hybrid([], "查询", 3) == []
+    assert rank_by_hybrid(["条目"], "查询", 0) == []
+
+
+def test_cosine_scores_raw_for_document_chunks(monkeypatch):
+    """文档分块：只嵌查询一次，向量缺失的块给 None，不抛。"""
+    calls = _mock_http(monkeypatch, {"查询": V_X})
+    out = cosine_scores_raw([[1.0, 0.0], None, [0.0, 1.0]], "查询")
+    assert out is not None
+    assert out[0] == pytest.approx(1.0)
+    assert out[1] is None
+    assert out[2] == pytest.approx(0.0)
+    assert len(calls) == 1  # 只发了一次查询嵌入
+    assert cosine_scores_raw([], "查询") == []

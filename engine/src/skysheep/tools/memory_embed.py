@@ -30,6 +30,8 @@ import time
 
 import httpx
 
+from .. import retrieval
+
 # 本机 Ollama 默认地址；远程机器/自定义端口改这里（如 http://192.168.1.8:11434）
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 # 嵌入模型名：先 `ollama pull nomic-embed-text`，换模型改这里（重启进程即生效，
@@ -47,6 +49,11 @@ _VEC_CACHE_MAX = 1024      # 词条向量缓存上限：超出整体清空（mem
 _UNCACHED_TURN_MAX = 8
 _TURN_BUDGET_S = 3.0
 _WARM_BUDGET_S = 60.0      # 后台预热的总预算（不占轮首，宽裕些；到点收手下轮接着补）
+
+# 混合排序权重（BM25 : 余弦）。两路各自按本批最大值归一化后加权，50/50 是
+# 保守起点：纯余弦对「v2.6.9」「:8790」这类编号不敏感，纯关键词又怕同义改写。
+_HYBRID_BM25_WEIGHT = 0.5
+_HYBRID_VEC_WEIGHT = 0.5
 
 # 探测缓存：None=还没探测过；False=不可用（TTL 内不再探测）；True=可用
 _state: dict = {"available": None, "checked_at": 0.0}
@@ -190,6 +197,21 @@ def rank_by_embeddings(
     线程串行补嵌全量条目（最多 _EMBED_MAX_ENTRIES 次 HTTP）；缓存由后台预热
     （schedule_warmup / warm_vec_cache）补齐，之后这里只剩查询向量一次请求。
     """
+    scores = cosine_scores(entries, query_text, deadline=deadline)
+    if scores is None:
+        return None
+    scored = sorted(((-s, i) for i, s in enumerate(scores)), key=lambda p: (p[0], p[1]))
+    return [i for neg_sim, i in scored if -neg_sim >= EMBED_MIN_COSINE]
+
+
+def cosine_scores(
+    entries: list[str], query_text: str, deadline: float | None = None,
+) -> list[float] | None:
+    """每条目的余弦分（**不**做阈值过滤）；失败返回 None，空入参返回 []。
+
+    与 rank_by_embeddings 共用同一套护栏与缓存：条目超量、缓存未暖齐、HTTP
+    失败都返回 None 让调用方回落。混合排序需要原始分数做加权，所以单拆出来。
+    """
     if not entries or not query_text.strip():
         return []
     if len(entries) > _EMBED_MAX_ENTRIES:
@@ -200,15 +222,69 @@ def rank_by_embeddings(
     if vecs is None:
         return None
     qvec = vecs[0]
-    scored: list[tuple[float, int]] = []
-    for i, vec in enumerate(vecs[1:]):
+    out: list[float] = []
+    for vec in vecs[1:]:
         try:
-            sim = cosine_similarity(qvec, vec)
+            out.append(cosine_similarity(qvec, vec))
         except ValueError:
             return None
-        scored.append((-sim, i))
-    scored.sort()
-    return [i for neg_sim, i in scored if -neg_sim >= EMBED_MIN_COSINE]
+    return out
+
+
+def rank_by_hybrid(
+    entries: list[str], query_text: str, limit: int, deadline: float | None = None,
+) -> list[int] | None:
+    """混合排序：BM25（中文二元组关键词）+ 嵌入余弦，各按本批最大值归一化后加权。
+
+    与纯嵌入排序的差别：同义不同词靠余弦，术语/编号（版本号、参数名）靠
+    BM25 精确命中——记忆条目往往只有一两行，纯余弦对「v2.6.9」这类词不敏感。
+    语义门沿用 EMBED_MIN_COSINE 的语义：余弦低且 BM25 零命中的条目视为不相关
+    （对应一期「0 分不返回」）。任何一路拿不到（无 Ollama / 预算耗尽 / 缓存
+    没暖齐）返回 None，调用方回落一期规则评分。
+    """
+    if limit <= 0 or not entries or not query_text.strip():
+        return []
+    cos = cosine_scores(entries, query_text, deadline=deadline)
+    if cos is None:
+        return None
+    bm = retrieval.bm25_scores(query_text, entries)
+    merged = retrieval.merge_weighted(
+        (retrieval.normalize(bm), _HYBRID_BM25_WEIGHT),
+        (retrieval.normalize(cos), _HYBRID_VEC_WEIGHT),
+    )
+    ordered = retrieval.top_indices(merged, len(entries))
+    keep = [i for i in ordered if cos[i] >= EMBED_MIN_COSINE or bm[i] > 0]
+    return keep[:limit]
+
+
+def cosine_scores_raw(
+    vecs: list[list[float] | None], query_text: str,
+    deadline: float | None = None,
+) -> list[float | None] | None:
+    """对「已有向量」算余弦（文档索引的分块用）：只嵌查询一次，无条目缓存。
+
+    与记忆检索的 cosine_scores 分开：分块向量由 docindex 从索引库读出，
+    不进这里的进程内缓存（几千块的向量会把缓存打爆，且它们跨轮不变价）。
+    向量缺失的块对应位置返回 None；查询嵌入失败返回 None。
+    """
+    if not vecs or not query_text.strip():
+        return []
+    if deadline is None:
+        deadline = time.monotonic() + _TURN_BUDGET_S
+    try:
+        qvec = _embed_via_http([query_text], deadline=deadline)[0]
+    except Exception:  # noqa: BLE001 - 嵌入是增强：失败让调用方走纯关键词
+        return None
+    out: list[float | None] = []
+    for v in vecs:
+        if not v:
+            out.append(None)
+            continue
+        try:
+            out.append(cosine_similarity(qvec, v))
+        except ValueError:
+            out.append(None)
+    return out
 
 
 def select_relevant_auto(
@@ -230,12 +306,34 @@ def select_relevant_auto(
     if not embeddings_available(deadline=deadline):
         return select_relevant(entries, query_text, limit)
     try:
-        ranked = rank_by_embeddings(entries, query_text, deadline=deadline)
+        # 混合排序（记忆三期）：BM25 + 余弦加权；同义改写靠向量、编号与
+        # 参数名靠关键词。任何一路拿不到都回落一期规则评分。
+        ranked = rank_by_hybrid(entries, query_text, limit, deadline=deadline)
     except Exception:  # noqa: BLE001
         ranked = None
     if ranked is None:
         return select_relevant(entries, query_text, limit)
-    return ranked[:limit]
+    return ranked
+
+
+def embed_texts(
+    texts: list[str], deadline: float | None = None,
+) -> list[list[float]] | None:
+    """无缓存批量嵌入（文档索引用）：不可用 / 失败 / 预算耗尽返回 None。
+
+    不复用 _vec_cache：分块数量级（成百上千）与记忆条目不同，清空式缓存
+    对它是纯浪费；索引自己把向量落库，天然持久。
+    """
+    if not texts:
+        return []
+    if deadline is None:
+        deadline = time.monotonic() + _TURN_BUDGET_S
+    if not embeddings_available(deadline=deadline):
+        return None
+    try:
+        return _embed_via_http(texts, deadline=deadline)
+    except Exception:  # noqa: BLE001 - 嵌入是增强：失败让调用方走纯关键词
+        return None
 
 
 def warm_vec_cache() -> int:

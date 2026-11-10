@@ -8,6 +8,8 @@ build/
 .pytest_cache/
 .ruff_cache/
 .coverage
+# 评测指标产物（evals/conftest.py 的插件每次跑 eval 重写，不提交）
+engine/evals/.metrics/
 
 # Node / Tauri (M3)
 node_modules/

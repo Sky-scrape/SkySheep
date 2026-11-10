@@ -92,6 +92,11 @@ class Message(BaseModel):
     # 本轮接手时下发的预估区间（秒），供历史恢复后重建「用时 X · 预估 Y」芯片。
     # 与 duration_ms 同批写入；旧消息没有这两个字段时前端不渲染芯片。
     estimate: dict | None = None
+    # 本轮的来源表（仅最终 assistant 消息携带）：[{index,url,title,kind}]。
+    # 由 Agent 的 SourceRegistry 在轮末写入（web_fetch / web_search 登记），
+    # 与内容一起落库、随历史回传前端渲染可点开的来源 chip；旧消息没有该字段，
+    # 前端按空处理。Provider 序列化线上 payload 时不涉及它。
+    sources: list[dict] | None = None
 
     # ---- 便捷构造 ----
 

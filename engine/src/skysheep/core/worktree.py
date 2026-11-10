@@ -19,6 +19,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from ..procflags import NO_WINDOW
 from ..textio import encode_text, read_text_file, write_bytes_atomic
 
 # 大仓库的 worktree 检出可能超过一般命令的秒级预算
@@ -39,6 +40,7 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
         encoding="utf-8",
         errors="replace",
         timeout=_GIT_TIMEOUT_S,
+        creationflags=NO_WINDOW,  # 桌面壳无控制台：git 不带该标志会闪一个黑窗口
     )
 
 

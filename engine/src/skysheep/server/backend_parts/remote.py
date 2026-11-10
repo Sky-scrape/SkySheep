@@ -37,6 +37,7 @@ from ...core.uptodate import client_kwargs as _egress_client_kwargs
 from ...core.uptodate import fetch_latest_release as check_latest_release
 from ...core.uptodate import is_newer_version
 from ...core.uptodate import proxy_candidates as _egress_fallbacks
+from ...procflags import NO_WINDOW
 from ...textio import write_text_atomic
 
 if TYPE_CHECKING:
@@ -528,6 +529,7 @@ class RemoteMixin:
             proc = await asyncio.create_subprocess_exec(
                 exe, "status", "--json",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                creationflags=NO_WINDOW,  # 桌面壳无控制台：别让 CLI 闪黑窗口
             )
             try:
                 stdout, _ = await asyncio.wait_for(

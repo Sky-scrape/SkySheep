@@ -7,6 +7,9 @@
 - argv 列表 + 字面量 shell 可执行文件（Windows: cmd /c，POSIX: bash -c），
   shell=False；命令本身属于产品核心能力，由 Permission Gate 在调用前
   进行人工确认/白名单控制；
+- 子进程一律带 CREATE_NO_WINDOW（procflags.NO_WINDOW）：桌面壳是 GUI
+  进程、没有控制台，控制台程序会各弹一个黑窗口；隐藏控制台不影响管道、
+  退出码与超时树杀，命令照常执行；
 - 输出限量收集（头+尾），防止刷屏命令撑爆内存；最终再按上下文截断；
 - 超时树杀并返回超时前已产生的输出（模型能据此诊断，不再盲猜）；
 - background=true 立即返回进程号，输出由后台读线程持续收入缓冲，
@@ -38,6 +41,7 @@ import time
 from pydantic import BaseModel, Field
 
 from .. import obs
+from ..procflags import NO_WINDOW
 from ..security import sandbox_win
 from ..security.sandbox_win import (
     ContainmentJob,
@@ -346,7 +350,7 @@ def _tree_kill(proc: subprocess.Popen) -> None:
         if IS_WINDOWS:
             subprocess.run(  # noqa: S603 - exe 固定为 taskkill
                 [_windows_exe("taskkill.exe"), "/PID", str(proc.pid), "/T", "/F"],
-                capture_output=True, timeout=5,
+                capture_output=True, timeout=5, creationflags=NO_WINDOW,
             )
         else:
             proc.kill()
@@ -377,7 +381,7 @@ def _run_sync(
     if sandbox_level == "restricted" and job_containment:
         # 二期：先试受限令牌路径（失败自动降级并带注记，绝不拒绝执行）
         try:
-            proc, job, note = _spawn_restricted(argv, cwd)
+            proc, job, note = _spawn_restricted(argv, cwd, NO_WINDOW)
         except Exception as e:  # noqa: BLE001 - 受限路径任何意外都降级
             proc = job = None
             note = f"受限令牌未生效：{e}"
@@ -391,6 +395,7 @@ def _run_sync(
     if proc is None:
         proc = subprocess.Popen(
             argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=NO_WINDOW,
             env=_child_env(),
         )
         # 进程遏制（一期沙箱化）：子进程创建后立即入本次调用的 job（失败自动
@@ -461,7 +466,7 @@ def _popen_bg(argv: list[str], cwd: str):
         proc = subprocess.Popen(
             argv, cwd=cwd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW,
             env=_child_env(),
         )
     else:
@@ -483,7 +488,7 @@ def _bg_start(argv: list[str], cwd: str, owner: str = "",
         # 二期：后台常驻进程同样先试受限令牌路径（失败降级并带注记）
         try:
             proc, job, note = _spawn_restricted(
-                argv, cwd, subprocess.CREATE_NEW_PROCESS_GROUP
+                argv, cwd, subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW
             )
         except Exception as e:  # noqa: BLE001 - 受限路径任何意外都降级
             proc = job = None

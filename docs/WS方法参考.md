@@ -2,8 +2,8 @@
 
 > 本文件由 engine/tools/gen_ws_reference.py 自动生成，改协议后重跑 `uv run python tools/gen_ws_reference.py`，勿手改。
 
-- 生成时间：2026-11-06 12:31:25
-- 方法总数：336（本机专属 local_only 180 个）
+- 生成时间：2026-11-10 13:07:49
+- 方法总数：341（本机专属 local_only 185 个）
 - 说明：dispatch handler 的 docstring 首行；无 docstring 记「—」。
 - local_only：是 = 远程客户端（局域网 / Tailscale 持令牌）不可调用，仅桌面端本机可执行。
 
@@ -102,6 +102,9 @@
 | project.list |  | — |
 | project.switch | 是 | — |
 | project.delete | 是 | — |
+| project.remove | 是 | — |
+| project.restore | 是 | — |
+| project.admin_list | 是 | — |
 | project.task_list |  | — |
 | project.task_add |  | — |
 | project.task_update |  | — |
@@ -191,6 +194,8 @@
 | ui.save |  | — |
 | memory.get | 是 | — |
 | memory.save | 是 | — |
+| instructions.get | 是 | — |
+| instructions.save | 是 | — |
 | memory.maintain_save |  | — |
 | memory.maintain_now |  | — |
 | memory.digest_save |  | — |

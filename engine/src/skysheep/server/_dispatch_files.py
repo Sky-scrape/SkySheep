@@ -37,6 +37,19 @@ async def _h_project_delete(backend: ServerBackend, params: dict, emit, local: b
     return await backend.delete_project(int(params.get("id", 0)))
 
 
+async def _h_project_remove(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.remove_project(int(params.get("id", 0)))
+
+
+async def _h_project_restore(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.restore_project(int(params.get("id", 0)))
+
+
+async def _h_project_admin_list(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 项目绝对路径与会话计数只给本机设置页（远程不开放项目枚举面）
+    return await backend.project_admin_list()
+
+
 def _project_task_scoped_params(params: dict, local: bool) -> dict:
     """非本机连接把任务清单读写收敛到当前项目（安全审查 L07）。
 
@@ -126,20 +139,57 @@ async def _h_snippets_list(backend: ServerBackend, params: dict, emit, local: bo
     return {"snippets": rows, "builtin": BUILTIN_SNIPPETS}
 
 
+_RESERVED_SLASH = {
+    "help", "new", "compact", "model", "status", "todos", "export", "save-skill",
+}
+
+
+def _clean_slash(raw) -> str:
+    """斜杠别名：去掉前导 /，只留 ASCII 字母数字、_、-，长度 1–32。
+
+    中文名/带空格的名称不能做命令（输入 / 时菜单按单词字符匹配）；空串 = 不注册。
+    """
+    import re
+
+    value = str(raw or "").strip().lstrip("/")
+    if not value:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", value):
+        raise RuntimeError("命令名只能用字母、数字、下划线和连字符（1–32 个字符）")
+    return value.lower()
+
+
+async def _check_slash_unique(backend: ServerBackend, slash: str, exclude_id: int = 0) -> None:
+    if not slash:
+        return
+    if slash in _RESERVED_SLASH:
+        raise RuntimeError(f"「/{slash}」是内置命令，换一个名字")
+    for s in await backend.store.list_snippets():
+        if s.get("slash") and s["slash"] == slash and int(s["id"]) != int(exclude_id):
+            raise RuntimeError(f"「/{slash}」已被提示词「{s['name']}」占用")
+
+
 async def _h_snippets_add(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     name = str(params.get("name", "")).strip()
     content = str(params.get("content", "")).strip()
     if not name or not content:
         raise RuntimeError("名称与内容不能为空")
-    return {"snippet": await backend.store.add_snippet(name, content)}
+    slash = _clean_slash(params.get("slash"))
+    await _check_slash_unique(backend, slash)
+    return {"snippet": await backend.store.add_snippet(name, content, slash=slash)}
 
 
 async def _h_snippets_update(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    sid = int(params.get("id", 0))
+    slash = None if "slash" not in params else _clean_slash(params.get("slash"))
+    if slash:
+        await _check_slash_unique(backend, slash, exclude_id=sid)
     ok = await backend.store.update_snippet(
-        int(params.get("id", 0)),
+        sid,
         str(params.get("name", "")).strip(),
         str(params.get("content", "")).strip(),
         None if "enabled" not in params else bool(params.get("enabled")),
+        slash=slash,
     )
     if not ok:
         raise RuntimeError("快捷指令不存在")
@@ -188,6 +238,9 @@ METHODS: dict[str, _WsMethod] = {
     "project.list": _WsMethod(_h_project_list),
     "project.switch": _WsMethod(_h_project_switch, local_only=True),
     "project.delete": _WsMethod(_h_project_delete, local_only=True),
+    "project.remove": _WsMethod(_h_project_remove, local_only=True),
+    "project.restore": _WsMethod(_h_project_restore, local_only=True),
+    "project.admin_list": _WsMethod(_h_project_admin_list, local_only=True),
     # 项目任务清单：此前接受任意 project_id 且远程可达（跨项目读写面，审查 L07）；
     # handler 内把非本机调用收敛到当前项目，照记忆地图 _map_resolve_project 口径
     "project.task_list": _WsMethod(_h_project_task_list),

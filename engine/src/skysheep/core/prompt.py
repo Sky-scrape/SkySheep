@@ -262,3 +262,36 @@ def render_instructions_section(path: str | None, text: str) -> str:
         return ""
     source = Path(path).name if path else "instructions"
     return f"\n# Project instructions (from {source})\n{text}\n"
+
+
+# ---- 全局自定义指令（跨项目行为规则）----
+# 与项目 AGENTS.md / memory.md 的分工：
+# - 项目 instructions：只对当前项目生效，随项目目录走；
+# - memory.md：Agent 记住的事实（偏好、环境、背景），按「条目」维护；
+# - 本文件：用户手写的全局行为规则（语气、格式、禁令、默认做法），每轮注入。
+# 放在 ~/.skysheep/instructions.md，设置 · 记忆页可直接编辑。
+GLOBAL_INSTRUCTIONS_FILENAME = "instructions.md"
+MAX_GLOBAL_INSTRUCTIONS_CHARS = 8000
+
+
+def global_instructions_path() -> Path:
+    from ..config import skysheep_home
+
+    return skysheep_home() / GLOBAL_INSTRUCTIONS_FILENAME
+
+
+def load_global_instructions() -> str:
+    """读全局自定义指令；文件不存在/读不了按空处理（不阻断回合）。"""
+    fp = global_instructions_path()
+    if not fp.is_file():
+        return ""
+    try:
+        return read_text_file(fp).text[:MAX_GLOBAL_INSTRUCTIONS_CHARS]
+    except OSError:
+        return ""
+
+
+def render_global_instructions_section(text: str) -> str:
+    if not text or not text.strip():
+        return ""
+    return f"\n# Global user instructions\n{text.strip()}\n"

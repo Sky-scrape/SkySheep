@@ -941,3 +941,48 @@ async def test_permission_timeout_denies_and_continues(tmp_path):
     )
     assert "等待用户确认超时" in tool_text
     assert events[-1].stop_reason == "end_turn"
+
+
+async def test_steer_injected_at_next_iteration(tmp_path):
+    """运行中的「引导」：工具调用后注入，下一次模型调用前进历史并生效。"""
+    provider = FakeProvider(
+        [
+            [ToolUseBlock(id="t1", name="list_dir", input={"path": "."})],
+            [TextBlock(text="收到补充，继续")],
+        ]
+    )
+    agent = make_agent(provider, tmp_path)
+    assert agent.steer("开始前不该收") is False, "轮次未开始时不接受引导"
+
+    async for ev in agent.run_turn("先看一眼目录"):
+        if ev.kind == "tool_call_finished":
+            assert agent.steer("补充：只看根目录就行") is True
+
+    # 第二次模型调用应看到引导消息（历史顺序：user 原话 → tool → user 引导）
+    steer_msgs = [m for m in agent.history if m.role == "user" and "补充" in m.text]
+    assert len(steer_msgs) == 1
+    assert any("补充：只看根目录就行" in m.text for m in provider.calls[1]), \
+        "引导消息没有进入第二次模型调用的上下文"
+    assert agent.steer("轮结束后不该收") is False
+
+
+async def test_steer_at_end_turn_runs_one_more_iteration(tmp_path):
+    """模型已给出最终回答、但用户同时补了话：再跑一轮，不让引导等下一次开口。"""
+    provider = FakeProvider(
+        [
+            [TextBlock(text="做完了")],
+            [TextBlock(text="补充已处理")],
+        ]
+    )
+    agent = make_agent(provider, tmp_path)
+
+    async for ev in agent.run_turn("做个事"):
+        if ev.kind == "assistant_message" and not agent.has_steer():
+            # 模拟「模型刚说要结束」时用户补一句；只在第一轮注入
+            if len(provider.calls) == 1:
+                assert agent.steer("再补一句") is True
+
+    assert len(provider.calls) == 2, "引导应触发一次额外模型调用"
+    assert any("再补一句" in m.text for m in provider.calls[1])
+    assert agent.history[-2].role == "user"
+    assert "再补一句" in agent.history[-2].text

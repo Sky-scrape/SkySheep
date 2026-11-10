@@ -63,6 +63,7 @@ async def _h_chat_send(backend: ServerBackend, params: dict, emit, local: bool) 
         session_id=str(params["session_id"]) if params.get("session_id") else None,
         wants_title=bool(params.get("wants_title", False)),
         regenerate=bool(params.get("regenerate", False)),
+        steer=bool(params.get("steer", False)),
         compare=bool(params.get("compare", False)),
         refs=[str(r) for r in raw_refs] if isinstance(raw_refs, list) else None,
         debate_rounds=(
@@ -128,6 +129,7 @@ async def _h_chat_send_with_collab(
         session_id=str(params["session_id"]) if params.get("session_id") else None,
         wants_title=bool(params.get("wants_title", False)),
         regenerate=bool(params.get("regenerate", False)),
+        steer=bool(params.get("steer", False)),
         compare=bool(params.get("compare", False)),
         refs=[str(r) for r in raw_refs] if isinstance(raw_refs, list) else None,
         debate_rounds=(

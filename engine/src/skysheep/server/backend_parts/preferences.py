@@ -37,6 +37,23 @@ class PreferencesMixin:
         "right_collapsed": (0, 1),  # 右侧面板是否收起（1=收起，标签列表保留）
         "left_collapsed": (0, 1),  # 左侧栏是否折叠（1=折叠，折叠钮/Ctrl+B 切换）
         "ui_scale": (70, 120),  # 界面缩放百分比（存 70–120 的整数，100 = 默认大小）
+        # 终端字体大小（px）：xterm 的 fontSize；开着的标签即时应用
+        "term_font_size": (10, 24),
+        # 保持电脑运行：1 = 阻止系统空闲睡眠（Windows），默认关
+        "prevent_sleep": (0, 1),
+        # 关闭窗口时直接缩到系统托盘（1=开；默认 0 = 每次弹三选一）
+        "close_to_tray": (0, 1),
+        # 发现新版本后自动下载安装包（1=开；默认关，安装仍需用户确认）
+        "auto_update_download": (0, 1),
+        # 消息流里显示思考过程（1=显示，默认显示）
+        "show_thinking": (0, 1),
+        # 消息流里把 todo_write 渲染成任务进度卡（1=显示，默认显示）
+        "show_todo_card": (0, 1),
+        # 代码块显示字号（px）：独立于界面缩放
+        "code_font_size": (11, 20),
+        # 代码块显示行号 / 长行自动换行（1=开）
+        "code_line_numbers": (0, 1),
+        "code_wrap": (0, 1),
         "notify": (0, 1),  # Windows 系统通知开关（1=开，默认开）
         "pet": (0, 1),  # 对话区宠物「云朵小羊」开关（1=显示，默认显示）
         "accept_edits": (0, 2),  # 分级权限模式：0=安全执行 1=自动编辑（写入免确认）2=完全访问
@@ -381,7 +398,25 @@ class PreferencesMixin:
     async def save_ui_prefs(self, prefs: dict) -> dict:
         """WS 入口：前端偏好合并保存。active_project 后端独占，前端传了也忽略。"""
         cleaned = {k: v for k, v in (prefs or {}).items() if k != "active_project"}
-        return await self._write_ui_prefs(cleaned)
+        result = await self._write_ui_prefs(cleaned)
+        # 偏好落盘后立刻应用需要后端持续生效的项（目前只有「保持电脑运行」）。
+        # 终端 Shell/字体、代码外观等由前端即时应用，不必回后端。
+        self._apply_power_pref()
+        return result
+
+    def _apply_power_pref(self) -> None:
+        """按 ui.json 的 prevent_sleep 开关阻止/恢复系统空闲睡眠（Windows）。"""
+        keeper = getattr(self, "power", None)
+        if keeper is None:
+            return
+        try:
+            enabled = self._read_ui_prefs().get("prevent_sleep", 0) == 1
+        except Exception:  # noqa: BLE001 - 偏好读不到按关闭处理
+            enabled = False
+        try:
+            keeper.set_enabled(enabled)
+        except Exception:  # noqa: BLE001 - 电源 API 失败不影响其它偏好保存
+            pass
 
     async def _write_ui_prefs(self, prefs: dict) -> dict:
         """合并保存；某项传 null 表示恢复默认（删除该项）。未知键忽略、越界值收敛到合法区间。

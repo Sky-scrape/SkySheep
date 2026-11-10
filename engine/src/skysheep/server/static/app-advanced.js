@@ -402,3 +402,49 @@ async function renderTrustList() {
     ul.appendChild(li);
   });
 }
+
+// ---------- 设置·高级：终端 / 交互与电源 ----------
+let termCfg = { shell: "auto", font: "Cascadia Mono", size: 13 };
+
+async function renderTerminalCfg() {
+  let p = {};
+  try {
+    const r = await request("ui.get");
+    p = (r && r.prefs) || {};
+  } catch (e) { /* 读不到就按默认值渲染，不阻塞整页 */ }
+  termCfg.shell = p.term_shell || "auto";
+  termCfg.font = p.term_font || "Cascadia Mono";
+  termCfg.size = Number(p.term_font_size) || 13;
+  const shell = document.getElementById("term-shell");
+  if (shell) shell.value = termCfg.shell;
+  const font = document.getElementById("term-font");
+  if (font) font.value = termCfg.font;
+  const size = document.getElementById("term-font-size");
+  if (size) size.value = termCfg.size;
+  const ps = document.getElementById("prevent-sleep-toggle");
+  if (ps) ps.checked = p.prevent_sleep === 1;
+  const im = document.getElementById("interaction-mode");
+  if (im) im.value = p.interaction_mode === "steer" ? "steer" : "queue";
+}
+
+function saveTerminalCfg() {
+  const shell = (document.getElementById("term-shell") || {}).value || "auto";
+  const font = (document.getElementById("term-font") || {}).value || "Cascadia Mono";
+  const rawSize = Number((document.getElementById("term-font-size") || {}).value);
+  const size = Number.isFinite(rawSize) ? Math.min(24, Math.max(10, Math.round(rawSize))) : 13;
+  termFont = font;
+  termFontSize = size;
+  if (typeof applyTermAppearance === "function") applyTermAppearance();
+  saveUiPrefs({
+    term_shell: shell === "auto" ? null : shell,
+    term_font: font === "Cascadia Mono" ? null : font,
+    term_font_size: size === 13 ? null : size,
+  });
+  const el = document.getElementById("terminal-status");
+  if (el) {
+    el.textContent = "已保存：新开/重启的终端使用这个 Shell，字体已应用到已打开的标签";
+    el.className = "card-status ok";
+    el.hidden = false;
+    autoHideStatus(el, el.textContent, true);
+  }
+}

@@ -152,6 +152,11 @@ class Agent:
         self.permission_timeout_s = max(0.0, float(permission_timeout_s or 0.0))
         self.history: list[Message] = []
         self._pending: dict[str, PendingPermission] = {}
+        # 「引导」收件箱：一轮运行中用户补的话，不排队等下一轮，而是在下一次
+        # 模型调用前插入当前历史（对标 ZCode / Codex 的 steer）。只在
+        # _turn_active 时接收；轮末残留由下一次 run_turn 开头补投，不丢。
+        self._steer_inbox: list[Message] = []
+        self._turn_active = False
         # 一轮内的重复调用检测与工具熔断（每次 run_turn 开头 reset）：
         # 拦「同参数 + 同结果」的原样重试，以及同一工具反复撞同一句错误。
         self.loop_guard = LoopGuard()
@@ -286,6 +291,23 @@ class Agent:
         """
         self._pending.clear()
 
+    def steer(self, text: str, images: list[ImageBlock] | None = None) -> bool:
+        """把运行中补的话放进当前轮的收件箱；不在运行中返回 False（调用方走排队）。"""
+        text = (text or "").strip()
+        if not text or not self._turn_active:
+            return False
+        self._steer_inbox.append(Message.user(text, images=images))
+        return True
+
+    def take_steer(self) -> list[Message]:
+        """取走收件箱里的引导消息（顺序即到达顺序）。"""
+        out = self._steer_inbox
+        self._steer_inbox = []
+        return out
+
+    def has_steer(self) -> bool:
+        return bool(self._steer_inbox)
+
     async def run_turn(
         self, user_text: str, images: list[ImageBlock] | None = None,
         append_user: bool = True,
@@ -302,10 +324,15 @@ class Agent:
         # append_user=False：重新生成——用户消息已在历史末尾，直接重跑这一轮
         if append_user:
             self.history.append(Message.user(user_text, images=images))
+        # 上一轮末尾才到、没赶上模型调用的引导消息：补在这轮用户消息之后，
+        # 保证不丢（前端已经显示过气泡，这里只补上下文）。
+        for msg in self.take_steer():
+            self.history.append(msg)
         # 中断标注：用户停止（CancelledError/生成器被关闭）与故障中断（其他
         # 异常）语义不同——兜底落库的尾部标注要区分开，别把故障轮也写成
         # 用户主动「已停止」
         interrupt_note = "…（已停止）"
+        self._turn_active = True
         try:
             async for ev in self._turn_events():
                 yield ev
@@ -329,6 +356,9 @@ class Agent:
             # 轮次结束（正常/取消/异常）后未决权限不再有意义：清掉，避免
             # 「取消后残留可再成功投递决策」（安全审查 M12）
             self.clear_pending()
+            # 收件箱关闭：此后 steer() 一律拒绝，调用方回落到排队路径。
+            # 收件箱里残留的消息保留，下一次 run_turn 开头补投。
+            self._turn_active = False
 
     def _persist_partial_stream_text(self, note: str = "…（已停止）") -> None:
         """把流式中途被打断的已合并正文兜底并入历史（取消收尾）。
@@ -475,6 +505,10 @@ class Agent:
         for iteration in range(1, self.max_iterations + 1):
             iterations = iteration
             yield TurnStarted(iteration=iteration)
+            # 引导：上一轮工具调用结束后、本轮模型调用前，把用户在这期间补的话
+            # 插进历史。放在 TurnStarted 之后，前端能把它归到当前轮。
+            for steer_msg in self.take_steer():
+                self.history.append(steer_msg)
             # 3a5. Mod 迭代开始（迭代级，非回合级：一次提交会触发多次）——仅 ui
             if self.mods is not None and self.mods_claude is None:
                 it_verdict = await self.mods.on_iteration_start(self.session_id, iteration)
@@ -649,6 +683,13 @@ class Agent:
             yield AssistantMessage(message=assistant.model_dump())
 
             if is_final:
+                # 模型刚说要结束时，用户可能刚好补了一句：把引导消息插进历史
+                # 再跑一轮，而不是让这条消息等下一次用户开口（否则它只会在
+                # 下一次任意消息时才被补投，用户看不到回应）。
+                pending_steer = self.take_steer()
+                if pending_steer:
+                    self.history.extend(pending_steer)
+                    continue
                 stop_reason = "end_turn"
                 break
 

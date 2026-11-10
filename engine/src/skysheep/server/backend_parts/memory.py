@@ -22,7 +22,12 @@ from ...config import (
     set_memory_map_config,
 )
 from ...core.checkpoints import CheckpointStore
-from ...core.prompt import MAX_INSTRUCTIONS_CHARS
+from ...core.prompt import (
+    MAX_GLOBAL_INSTRUCTIONS_CHARS,
+    MAX_INSTRUCTIONS_CHARS,
+    global_instructions_path,
+    load_global_instructions,
+)
 from ...session.store import Project
 from ...textio import decode_bytes, write_text_atomic, write_text_file
 from ...tools.memory import (
@@ -490,6 +495,45 @@ class MemoryMixin:
             mtime = 0.0
         return {"saved": True, "path": str(p), "chars": len(text),
                 "mtime": mtime, "inject_chars": len(inject_text(full))}
+
+    # ---- 全局自定义指令（跨项目行为规则，与 memory.md 的事实记忆分开） ----
+
+    async def instructions_get(self) -> dict:
+        p = global_instructions_path()
+        try:
+            mtime = round(p.stat().st_mtime, 3)
+        except OSError:
+            mtime = 0.0
+        return {
+            "path": str(p),
+            "text": load_global_instructions(),
+            "mtime": mtime,
+            "max_chars": MAX_GLOBAL_INSTRUCTIONS_CHARS,
+        }
+
+    async def instructions_save(self, text: str, base_mtime: float | None = None) -> dict:
+        p = global_instructions_path()
+        full = (text or "")[:MAX_GLOBAL_INSTRUCTIONS_CHARS]
+        if base_mtime is not None and float(base_mtime) > 0:
+            # 与 memory_save 同一道防覆盖：编辑期间文件被外部改过就拒绝
+            try:
+                cur = round(p.stat().st_mtime, 3)
+            except OSError:
+                cur = 0.0
+            if cur != float(base_mtime):
+                raise RuntimeError(
+                    "全局指令在你编辑期间被其他窗口改过，本次保存已阻止；"
+                    "请刷新本页重新编辑"
+                )
+        write_text_atomic(p, full)
+        # 注入系统提示词：保存后立刻对当前所有会话生效（下一轮即生效）
+        for ag in self._for_each_agent():
+            ag.set_system(self.compose_system())
+        try:
+            mtime = round(p.stat().st_mtime, 3)
+        except OSError:
+            mtime = 0.0
+        return {"saved": True, "path": str(p), "chars": len(full), "mtime": mtime}
 
     async def memory_digest_save(self, enabled: bool) -> dict:
         """归档自动记忆总闸：写 config.toml 并热生效（下一次归档即按新值决定）。"""

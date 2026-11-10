@@ -1932,3 +1932,55 @@ def test_index_first_paint_injects_auto_mapping(home):
     assert 'data-theme-mode="auto"' in tag
     assert 'data-theme-auto-light="kaki"' in tag
     assert 'data-theme-auto-dark="indigo"' in tag
+
+
+def test_new_ui_prefs_roundtrip_and_clamp(home):
+    """终端/电源/更新/消息流/代码外观：数值类型收敛、布尔仅收 0/1。"""
+    frame = call_ui(home, "ui.save", {"prefs": {
+        "term_font_size": 99, "prevent_sleep": 1, "close_to_tray": 1,
+        "auto_update_download": 1, "show_thinking": 0, "show_todo_card": 0,
+        "code_font_size": 5, "code_line_numbers": 1, "code_wrap": 0,
+    }})
+    prefs = frame["result"]["prefs"]
+    assert prefs["term_font_size"] == 24, "字号按 10–24 收敛"
+    assert prefs["code_font_size"] == 11, "代码字号按 11–20 收敛"
+    assert prefs["prevent_sleep"] == 1
+    assert prefs["close_to_tray"] == 1
+    assert prefs["auto_update_download"] == 1
+    assert prefs["show_thinking"] == 0
+    assert prefs["show_todo_card"] == 0
+    assert prefs["code_line_numbers"] == 1
+    assert prefs["code_wrap"] == 0
+
+
+def test_terminal_and_code_theme_whitelists(home):
+    """终端 Shell / 字体、交互行为、代码主题都是字符串白名单；未知值删键。"""
+    frame = call_ui(home, "ui.save", {"prefs": {
+        "term_shell": "gitbash", "term_font": "JetBrains Mono",
+        "interaction_mode": "steer", "code_theme_light": "github-light",
+        "code_theme_dark": "one-dark",
+    }})
+    prefs = frame["result"]["prefs"]
+    assert prefs["term_shell"] == "gitbash"
+    assert prefs["term_font"] == "JetBrains Mono"
+    assert prefs["interaction_mode"] == "steer"
+    assert prefs["code_theme_light"] == "github-light"
+    assert prefs["code_theme_dark"] == "one-dark"
+
+    frame = call_ui(home, "ui.save", {"prefs": {
+        "term_shell": "fish", "interaction_mode": "broadcast",
+        "code_theme_light": "solarized", "term_font": "Comic Sans",
+    }})
+    prefs = frame["result"]["prefs"]
+    assert "term_shell" not in prefs and "interaction_mode" not in prefs
+    assert "code_theme_light" not in prefs and "term_font" not in prefs
+    assert prefs["code_theme_dark"] == "one-dark", "已有的合法项保留"
+
+
+def test_terminal_font_size_default_and_null(home):
+    frame = call_ui(home, "ui.save", {"prefs": {"term_font_size": "13px"}})
+    assert frame["result"]["prefs"] == {}, "错型忽略"
+    frame = call_ui(home, "ui.save", {"prefs": {"term_font_size": 14}})
+    assert frame["result"]["prefs"] == {"term_font_size": 14}
+    frame = call_ui(home, "ui.save", {"prefs": {"term_font_size": None}})
+    assert frame["result"]["prefs"] == {}, "null 恢复默认（删键）"

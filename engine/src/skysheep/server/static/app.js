@@ -2460,6 +2460,8 @@ function thinkSummary(el, folded) {
 
 function ensureThinkEl(t) {
   if (!t) return null;
+  // 设置里关掉「显示思考过程」：不建元素、不渲染，正文照常流式
+  if (!showThinking) return null;
   if (!t.thinkEl || !t.thinkEl.isConnected) {
     const el = document.createElement("div");
     el.className = "think-block";
@@ -2526,7 +2528,7 @@ function finishThinking(t) {
 // 历史恢复：按消息携带的 thinking 文本渲染折叠块
 function addThinkingDone(text, tab, ms) {
   const t = tab || curTab();
-  if (!text) return;
+  if (!text || !showThinking) return;
   const el = ensureThinkEl(t);
   t.thinkText = text;
   // 思考耗时由后端随消息下发（引擎实测）；旧消息没有则只显示字数
@@ -4985,9 +4987,17 @@ function finishToolCard(data) {
     card = curLog().querySelector(`[data-call-id="${data.tool_call_id}"]`);
   }
   if (!card) return;
+  // 已被 todo_updated 换成任务进度卡：不再按普通工具卡补状态/预览
+  if (card.classList.contains("todo-flow-card")) return;
   if (card === curSpawnCard) curSpawnCard = null;
   card.classList.add(data.is_error ? "err" : "ok");
   card.querySelector(".t-status").textContent = data.is_error ? "✗" : `✓ ${data.duration_ms}ms`;
+  // todo_write 卡片留个指针：紧随其后的 todo_updated 事件把它原地换成
+  // 任务进度卡（设置里可关；关了保持普通工具卡）
+  if (card._toolName === "todo_write") {
+    t._lastTodoToolCard = card;
+    if (showTodoCard && t._lastTodoItems) renderTodoFlowCard(t._lastTodoItems, t);
+  }
   // spawn_agent 卡片已直播过报告流（.sub-report 有内容）时不再重复贴预览
   const subRep = card._toolName === "spawn_agent" ? card.querySelector(".sub-report") : null;
   if (subRep && subRep.textContent.trim()) {
@@ -5222,6 +5232,28 @@ function clearTodoPanel() {
   document.getElementById("todo-list").innerHTML = "";
   const empty = document.getElementById("todo-empty");
   if (empty) empty.classList.remove("hidden");
+}
+
+// 消息流里的任务进度卡：把 todo_write 的工具卡原地换成清单（设置可关）。
+// 一次 todo_write 全量覆盖清单，所以每张卡只显示它写入的那一版；后续
+// 更新由下一次 todo_write 生成新卡，历史里保留每一步的进度。
+function renderTodoFlowCard(items, tab) {
+  if (!showTodoCard || !items || !items.length) return;
+  const t = tab || curTab();
+  const card = t && t._lastTodoToolCard;
+  if (!card || !card.isConnected) return;
+  const done = items.filter((x) => x.status === "completed").length;
+  const rows = items.slice(0, 8).map((x) => {
+    const icon = { pending: "□", in_progress: "▶", completed: "✓" }[x.status] || "□";
+    return `<li class="tf-${escapeHtml(x.status)}"><span class="tf-ico">${icon}</span>` +
+      `<span class="tf-txt">${escapeHtml(x.content)}</span></li>`;
+  }).join("");
+  const more = items.length > 8 ? `<div class="tf-more dim small">还有 ${items.length - 8} 项…</div>` : "";
+  card.classList.add("todo-flow-card");
+  card.innerHTML =
+    `<div class="t-head tf-head"><span class="t-name">📋 任务进度</span>` +
+    `<span class="tf-count">${done}/${items.length}</span></div>` +
+    `<ul class="tf-list">${rows}</ul>${more}`;
 }
 
 /** 拉当前会话的任务清单画一遍（chat.status 的 todos 字段，/todos 命令同源）。
@@ -5658,7 +5690,13 @@ function handleEvent(kind, data) {
       usageOut += data.output_tokens || 0;
       renderUsage();
       break;
-    case "todo_updated": renderTodoPanel(data.items); break;
+    case "todo_updated": {
+      renderTodoPanel(data.items);
+      const t = curTab();
+      if (t) t._lastTodoItems = data.items;
+      renderTodoFlowCard(data.items, t);
+      break;
+    }
     case "task_estimate": showTaskEstimate(data); break;
     case "schedule_updated": {
       if (rightViewVisible("agenda")) loadAgenda();
@@ -8450,6 +8488,15 @@ function usageFmtTokens(n) {
   return String(n);
 }
 
+function usageFmtDuration(seconds) {
+  const sec = Math.max(0, Math.round(seconds || 0));
+  if (sec < 60) return sec ? `${sec} 秒` : "—";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟`;
+  const h = Math.floor(min / 60);
+  return `${h} 小时 ${min % 60} 分`;
+}
+
 function usageTiles(r) {
   const days = r.by_day || [];
   const total = (r.total_in || 0) + (r.total_out || 0);
@@ -8472,7 +8519,11 @@ function usageTiles(r) {
     tile(usageFmtTokens(total), "累计 Token 数", totalSub) +
     tile(usageFmtTokens(peak), "单日峰值 Token", peakDay ? `峰值在 ${escapeHtml(String(peakDay.day).slice(5))}` : "") +
     tile(String(days.reduce((s, d) => s + ((d.it || 0) + (d.ot || 0) > 0 ? 1 : 0), 0)) + " 天", "有记录天数", `统计窗口 ${usageRangeDays} 天`) +
-    tile(String(sessionCount), "参与会话", (r.by_session || []).length ? "按 tokens 排行见下方" : "")
+    tile(String(sessionCount), "参与会话", (r.by_session || []).length ? "按 tokens 排行见下方" : "") +
+    tile(String(r.streak_current || 0) + " 天", "当前连续天数",
+      `最长连续 ${r.streak_longest || 0} 天`) +
+    tile(usageFmtDuration(r.longest_chat_seconds), "最长聊天时长",
+      "首条→末条消息跨度")
   );
 }
 
@@ -8778,6 +8829,7 @@ function snippetCandidates() {
 function snippetMatch(s, q) {
   return s.name.toLowerCase().includes(q) ||
     (s.content || "").toLowerCase().includes(q) ||
+    (s.slash || "").toLowerCase().includes(q) ||
     (s.initials || "").includes(q);
 }
 
@@ -8934,6 +8986,13 @@ function snippetModal(existing, presetContent) {
     <div class="cron-fields">
       <label>名称（输入 ~ 时显示）</label>
       <input id="sn-name" class="modal-input" type="text" maxlength="40" placeholder="例如：代码审查" value="${existing ? escapeHtml(existing.name) : ""}">
+      <label>斜杠命令（可选）</label>
+      <input id="sn-slash" class="modal-input" type="text" maxlength="32"
+             placeholder="例如：review（以后输入 /review 即可插入）"
+             value="${existing && existing.slash ? escapeHtml(existing.slash) : ""}">
+      <p class="dim small" style="margin:-4px 0 2px">
+        只用字母、数字、下划线和连字符；留空则不注册命令。内置命令名不可占用。
+      </p>
       <label>内容（占位符在插入时替换）</label>
       <textarea id="sn-content" class="modal-input" rows="5" placeholder="请审查以下代码，关注正确性与边界情况：&#10;{{clipboard}}">${escapeHtml(initial)}</textarea>
       <div class="sn-chips">
@@ -8980,9 +9039,10 @@ function snippetModal(existing, presetContent) {
   showModal(existing ? "编辑提示词" : "新建提示词", box, async () => {
     const name = box.querySelector("#sn-name").value.trim();
     const content = box.querySelector("#sn-content").value.trim();
+    const slash = box.querySelector("#sn-slash").value.trim().replace(/^\/+/, "").toLowerCase();
     if (!name || !content) throw new Error("名称与内容不能为空");
-    if (existing) await request("snippets.update", { id: existing.id, name, content });
-    else await request("snippets.add", { name, content });
+    if (existing) await request("snippets.update", { id: existing.id, name, content, slash });
+    else await request("snippets.add", { name, content, slash });
     await loadSnippets();
   }, existing ? "保存" : "创建");
 }
@@ -10167,6 +10227,20 @@ let currentSessionId = null; // 当前会话（/export、检查点列表用）
 // ---------- Windows 系统通知：失焦时才弹，前台不打扰；开关存 ui.json（notify） ----------
 let uiNotifyOn = true;
 let ctrlEnterSend = false; // 发送键：false = Enter 发送（默认），true = Ctrl+Enter 发送
+// 交互行为：queue=运行中发送排队（默认），steer=作为引导注入当前轮
+let interactionMode = "queue";
+// 消息流显示开关（默认都显示）
+let showThinking = true;
+let showTodoCard = true;
+// 终端外观（新开标签用；已开标签改设置即刻应用）
+let termFont = "Cascadia Mono";
+let termFontSize = 13;
+// 代码块外观（跟随界面主题或独立配色；行号/换行/字号）
+let codeThemeLight = "auto";
+let codeThemeDark = "auto";
+let codeFontSize = 13;
+let codeLineNumbers = false;
+let codeWrap = false;
 let uiNotifySound = false; // 提示音（默认关）：任务完成/等确认时合成短音，设置页开关
 let uiNotifySoundFocus = true; // 仅失焦时提示音（默认开）：前台人已在看，响一声反而吵
 let uiNotifyKindDone = true; // 任务完成通知开关（关掉不弹系统通知、不响提示音）
@@ -10397,6 +10471,17 @@ if (updateCheckToggle) {
   };
 }
 
+// 自动下载更新（关于页）：发现新版本后台下载，安装仍需确认
+const autoUpdateDownloadToggle = document.getElementById("auto-update-download-toggle");
+if (autoUpdateDownloadToggle) {
+  autoUpdateDownloadToggle.onchange = () => {
+    saveUiPrefs({ auto_update_download: autoUpdateDownloadToggle.checked ? 1 : 0 });
+    addNotice(autoUpdateDownloadToggle.checked
+      ? "已开启自动下载：发现新版本会在后台准备安装包，安装仍需你确认"
+      : "已关闭自动下载：发现新版本后由你手动点「一键更新」");
+  };
+}
+
 // 更新渠道（关于页）：stable 只收正式版，beta 提前收预发布；切换后立即按新渠道重查
 const updateChannelSel = document.getElementById("update-channel");
 if (updateChannelSel) {
@@ -10419,6 +10504,39 @@ if (sendKeyToggle) {
   sendKeyToggle.onchange = () => {
     ctrlEnterSend = sendKeyToggle.checked;
     saveUiPrefs({ ctrl_enter_send: ctrlEnterSend ? 1 : 0 });
+  };
+}
+
+// 消息流显示开关（思考过程 / 待办卡片）与关闭到托盘
+function renderFlowToggles() {
+  const th = document.getElementById("show-thinking-toggle");
+  if (th) th.checked = showThinking;
+  const td = document.getElementById("show-todo-toggle");
+  if (td) td.checked = showTodoCard;
+}
+const showThinkingToggle = document.getElementById("show-thinking-toggle");
+if (showThinkingToggle) {
+  showThinkingToggle.onchange = () => {
+    showThinking = showThinkingToggle.checked;
+    saveUiPrefs({ show_thinking: showThinking ? 1 : 0 });
+    addNotice(showThinking ? "已显示思考过程" : "已隐藏思考过程（正文与工具不受影响）");
+  };
+}
+const showTodoToggle = document.getElementById("show-todo-toggle");
+if (showTodoToggle) {
+  showTodoToggle.onchange = () => {
+    showTodoCard = showTodoToggle.checked;
+    saveUiPrefs({ show_todo_card: showTodoCard ? 1 : 0 });
+    addNotice(showTodoCard ? "已显示待办卡片" : "已改为普通工具卡（右侧任务清单面板不变）");
+  };
+}
+const closeToTrayToggle = document.getElementById("close-to-tray-toggle");
+if (closeToTrayToggle) {
+  closeToTrayToggle.onchange = () => {
+    saveUiPrefs({ close_to_tray: closeToTrayToggle.checked ? 1 : 0 });
+    addNotice(closeToTrayToggle.checked
+      ? "已设置：关闭窗口时直接缩到托盘；彻底退出用托盘右键菜单"
+      : "已恢复：关闭窗口时每次询问「彻底退出 / 缩到托盘 / 取消」");
   };
 }
 
@@ -10809,12 +10927,14 @@ async function send() {
   addUser(text, images, refs);
   // 实时用户消息也挂操作（复制/编辑）；seq 未知，编辑走「最后一条用户消息」的后端兜底
   attachMsgOps(curLog().lastElementChild, tab, "user", () => text);
+  const steerThisTurn = !!(tab.running && interactionMode === "steer");
   if (tab.running) {
-    // 对标 Claude Code 消息队列：工作中继续发消息会排队，本轮结束自动执行
     pendingTurns += 1;
     const chip = document.createElement("div");
     chip.className = "queue-chip";
-    chip.textContent = `⏳ 已排队（当前轮结束后自动执行）`;
+    chip.textContent = steerThisTurn
+      ? "🎯 已作为引导注入当前轮（下一次模型调用前生效）"
+      : "⏳ 已排队（当前轮结束后自动执行）";
     curLog().appendChild(chip);
     scrollLog();
   } else {
@@ -10853,6 +10973,8 @@ async function send() {
       session_id: tab.sid || undefined,
       wants_title: tab.firstSend === true,
       plan_mode: workMode === "plan",
+      // 运行中「引导」：后端把消息注入当前轮；没有活动轮时自动回落到排队
+      steer: steerThisTurn || undefined,
       // 模板优先：后端见到 template 就按模板的 kind 路由，忽略下面三个布尔与成员/总管字段
       template: tplThisTurn || undefined,
       grant: tplThisTurn && collabSel.grant ? collabSel.grant : undefined,
@@ -10874,7 +10996,10 @@ async function send() {
       images: images.length ? images : undefined,
       refs: refs.length ? refs : undefined,
     });
-    setContextUsage(r.context_tokens || 0, r.context_limit || 0, tab);
+    // 引导响应是即时的、不带上下文快照：不要把环形仪表清零
+    if (r.context_tokens != null) {
+      setContextUsage(r.context_tokens || 0, r.context_limit || 0, tab);
+    }
     if (r.context_detail) setContextDetail(r.context_detail, tab);
     // 对抗报告的真实消息序号随响应回来（assistant_message 事件先于落库，
     // 事件里的 seq 为空）：补挂「转为团队工单」入口
@@ -12070,6 +12195,13 @@ function moveMenuActive(delta) {
 // 按下鼠标不抢走输入框焦点，保证菜单项 click 能触发
 inputMenu.addEventListener("mousedown", (e) => e.preventDefault());
 
+function customSlashCommands() {
+  // 提示词片段带斜杠别名时，直接注册成 /命令（内置命令优先，后端已拦冲突）
+  return (snippetsCache || [])
+    .filter((s) => s.enabled !== 0 && s.slash)
+    .map((s) => ({ cmd: "/" + s.slash, desc: `提示词：${s.name}`, snippet: s }));
+}
+
 const SLASH_COMMANDS = [
   { cmd: "/help", desc: "查看所有命令" },
   { cmd: "/new", desc: "新建会话（Ctrl+N）" },
@@ -12202,11 +12334,17 @@ function updateInputMenu(face) {
   const slash = before.match(/^\/([\w-]*)$/);
   if (slash) {
     const q = slash[1].toLowerCase();
-    const items = SLASH_COMMANDS.filter((c) => c.cmd.startsWith("/" + q))
+    const items = [...SLASH_COMMANDS, ...customSlashCommands()]
+      .filter((c) => c.cmd.startsWith("/" + q))
       .map((c) => ({
         label: c.cmd,
         desc: c.desc,
-        onPick: () => { el.value = ""; autoGrowInput(el); execSlash(c.cmd, face); },
+        onPick: () => {
+          el.value = "";
+          autoGrowInput(el);
+          if (c.snippet) insertSnippet(c.snippet, face);
+          else execSlash(c.cmd, face);
+        },
       }));
     showInputMenu(items, "（没有匹配的命令，回车仍会作为消息发送）");
     return;
@@ -12573,8 +12711,10 @@ const HELP_KEYS = [
   ["Ctrl + N", "新建会话"],
   ["Ctrl + F", "在本对话里查找（上下跳转）"],
   ["Ctrl + Shift + F", "搜索会话与消息（可切「全部项目」）"],
-  ["Ctrl + K", "切换模型"],
+  ["Ctrl + K", "全局命令面板（搜索页面 / 功能 / 会话）"],
+  ["Ctrl + B", "折叠 / 展开左侧栏"],
   ["Ctrl + W", "关闭当前会话标签"],
+  ["Ctrl + Tab", "切换到下一个会话标签"],
   ["Ctrl + `", "开关底部终端面板（多标签）"],
   ["Esc", "停止正在运行的任务"],
   ["Enter / Shift + Enter", "发送 / 换行"],
@@ -12963,8 +13103,9 @@ document.getElementById("relay-open-workbench").onclick = openRelayWorkbench;
 
 // 设置子项目：点击导航切换独立页面
 function showSettingsPage(target) {
-  // 主题是「界面与通知」的二级页：侧栏仍高亮该入口，避免看起来像掉出了设置
-  const navTarget = target === "theme" ? "ui" : target;
+  // 主题 / 代码外观是「界面与通知」的二级页：侧栏仍高亮该入口，
+  // 避免看起来像掉出了设置
+  const navTarget = (target === "theme" || target === "code") ? "ui" : target;
   document.querySelectorAll("#settings-nav li").forEach((x) =>
     x.classList.toggle("active", x.dataset.target === navTarget)
   );
@@ -12972,14 +13113,17 @@ function showSettingsPage(target) {
     pg.classList.toggle("hidden", pg.id !== "settings-page-" + target)
   );
   // 二级页从页首开始看；否则会继承上一页滚到一半的位置
-  if (target === "theme") {
+  if (target === "theme" || target === "code") {
     const body = document.querySelector(".settings-body");
     if (body) body.scrollTop = 0;
   }
   if (typeof watchSettingsHints === "function") watchSettingsHints();
   if (target === "runs") loadRunsPage();
   if (target === "usage") loadUsage();
-  if (target === "memory") { loadMemoryPage(); loadSnippets(); }
+  if (target === "memory") { loadMemoryPage(); loadInstructions(); loadSnippets(); }
+  if (target === "projects") {
+    if (typeof loadProjectAdmin === "function") loadProjectAdmin();
+  }
   if (target === "archive") loadArchivePage();
   if (target === "browser") loadBrowserPage();
   if (target === "remote") { loadLanPanel(); loadTsPanel(); loadChannelPanel(); }
@@ -12992,7 +13136,13 @@ function showSettingsPage(target) {
     if (typeof renderCollabTemplates === "function") renderCollabTemplates().catch(() => {});
   }
   if (target === "subagents") renderSubagentCfg().catch(() => {});
-  if (target === "advanced") { renderAdvancedCfg().catch(() => {}); renderHooksCfg(); }
+  if (target === "advanced") {
+    renderAdvancedCfg().catch(() => {});
+    renderHooksCfg();
+    if (typeof renderTerminalCfg === "function") renderTerminalCfg().catch(() => {});
+  }
+  if (target === "code") renderCodeAppearancePage();
+  if (target === "ui") { renderCodeAppearanceSummary(); renderFlowToggles(); }
   if (target === "mods") renderModsCfg().catch(() => {});
   if (target === "about") { loadBackups().catch(() => {}); renderRetentionCfg().catch(() => {}); renderStorageCard().catch(() => {}); }
   // 页面专属 render 可能刚插入长说明：下一帧统一收进「说明」折叠层
@@ -13030,6 +13180,7 @@ function settingsCardIndex() {
   const SLOT_PAGES = { "rp-view-mcp": "mcp", "rp-view-skills": "skills" };
   // 二级页没有侧栏导航项，搜索结果显示它的父页名
   const PAGE_NAMES = { theme: "主题" };
+  PAGE_NAMES.code = "代码外观";
   Object.entries(SLOT_PAGES).forEach(([id, pageId]) => {
     const el = document.getElementById(id);
     if (el) pages.push([el, pageId]);
@@ -14137,6 +14288,20 @@ function xtermTheme() {
   return Object.assign(base, ansi);
 }
 
+function termFontFamily() {
+  // 字体名来自设置页白名单；后面的 fallback 保证缺字体时仍可读
+  return `"${termFont}", Consolas, "Courier New", monospace`;
+}
+
+function applyTermAppearance() {
+  for (const t of termTabs) {
+    if (!t.term) continue;
+    t.term.options.fontFamily = termFontFamily();
+    t.term.options.fontSize = termFontSize;
+    termFit(t);
+  }
+}
+
 async function ensureTermScreen(t) {
   if (t.term) return t.term;
   // xterm 按需加载（首次开终端才拉双文件库），失败按提示兜底
@@ -14150,8 +14315,8 @@ async function ensureTermScreen(t) {
   screen.className = "term-screen";
   termHost.appendChild(screen);
   const term = new window.Terminal({
-    fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
-    fontSize: 13,
+    fontFamily: termFontFamily(),
+    fontSize: termFontSize,
     cursorBlink: true,
     scrollback: 5000,
     theme: xtermTheme(),
@@ -16423,6 +16588,30 @@ async function initUiPrefs() {
   uiNotifySound = prefs.notify_sound === 1;
   uiNotifySoundFocus = prefs.notify_sound_focus == null ? true : prefs.notify_sound_focus === 1;
   ctrlEnterSend = prefs.ctrl_enter_send === 1;
+  // 交互行为：运行中发送是排队还是注入当前轮（默认排队，保持旧行为）
+  interactionMode = prefs.interaction_mode === "steer" ? "steer" : "queue";
+  // 消息流显示开关（默认都显示）
+  showThinking = prefs.show_thinking !== 0;
+  showTodoCard = prefs.show_todo_card !== 0;
+  // 终端外观：字体/字号（已开的标签在设置页保存时即时应用）
+  termFont = typeof prefs.term_font === "string" && prefs.term_font ? prefs.term_font : "Cascadia Mono";
+  termFontSize = Number(prefs.term_font_size) || 13;
+  // 代码块外观：配色/字号/行号/换行
+  codeThemeLight = typeof prefs.code_theme_light === "string" ? prefs.code_theme_light : "auto";
+  codeThemeDark = typeof prefs.code_theme_dark === "string" ? prefs.code_theme_dark : "auto";
+  codeFontSize = Number(prefs.code_font_size) || 13;
+  codeLineNumbers = prefs.code_line_numbers === 1;
+  codeWrap = prefs.code_wrap === 1;
+  applyCodeAppearance();
+  renderFlowToggles();
+  const ct = document.getElementById("close-to-tray-toggle");
+  if (ct) ct.checked = prefs.close_to_tray === 1;
+  const au = document.getElementById("auto-update-download-toggle");
+  if (au) au.checked = prefs.auto_update_download === 1;
+  const st = document.getElementById("show-thinking-toggle");
+  if (st) st.checked = showThinking;
+  const sd = document.getElementById("show-todo-toggle");
+  if (sd) sd.checked = showTodoCard;
   // 通知类型开关（默认都开）
   uiNotifyKindDone = prefs.notify_kind_done == null ? true : prefs.notify_kind_done === 1;
   uiNotifyKindPerm = prefs.notify_kind_perm == null ? true : prefs.notify_kind_perm === 1;
@@ -16764,6 +16953,202 @@ const THEMES = {
   cocoa: { name: "浓巧", dark: true },
   cinnabar: { name: "丹金", dark: true },
 };
+// 独立代码配色（设置 · 界面 → 代码外观）：浅色/深色界面各选一套。
+// 不选「跟随界面」时，用内联 CSS 变量覆盖主题自带的 --hl-*（内联优先级
+// 高于 [data-theme] 规则），所以同一套主题能配任意代码色板。
+const CODE_THEMES = {
+  "github-light": {
+    comment: "#6e7781", keyword: "#cf222e", string: "#0a3069",
+    number: "#0550ae", title: "#8250df", attr: "#0550ae",
+    type: "#953800", variable: "#24292f", meta: "#6e7781",
+    "add-bg": "rgba(31, 136, 61, .12)", "del-bg": "rgba(207, 34, 46, .10)",
+  },
+  "solarized-light": {
+    comment: "#93a1a1", keyword: "#859900", string: "#2aa198",
+    number: "#d33682", title: "#268bd2", attr: "#b58900",
+    type: "#cb4b16", variable: "#657b83", meta: "#93a1a1",
+    "add-bg": "rgba(133, 153, 0, .10)", "del-bg": "rgba(220, 50, 47, .08)",
+  },
+  "one-light": {
+    comment: "#a0a1a7", keyword: "#a626a4", string: "#50a14f",
+    number: "#986801", title: "#4078f2", attr: "#986801",
+    type: "#c18401", variable: "#383a42", meta: "#a0a1a7",
+    "add-bg": "rgba(80, 161, 79, .12)", "del-bg": "rgba(228, 86, 73, .10)",
+  },
+  "github-dark": {
+    comment: "#8b949e", keyword: "#ff7b72", string: "#a5d6ff",
+    number: "#79c0ff", title: "#d2a8ff", attr: "#79c0ff",
+    type: "#ffa657", variable: "#c9d1d9", meta: "#8b949e",
+    "add-bg": "rgba(46, 160, 67, .15)", "del-bg": "rgba(248, 81, 73, .15)",
+  },
+  "solarized-dark": {
+    comment: "#586e75", keyword: "#859900", string: "#2aa198",
+    number: "#d33682", title: "#268bd2", attr: "#b58900",
+    type: "#cb4b16", variable: "#93a1a1", meta: "#586e75",
+    "add-bg": "rgba(133, 153, 0, .13)", "del-bg": "rgba(220, 50, 47, .12)",
+  },
+  "one-dark": {
+    comment: "#7f848e", keyword: "#c678dd", string: "#98c379",
+    number: "#d19a66", title: "#61afef", attr: "#e06c75",
+    type: "#e5c07b", variable: "#abb2bf", meta: "#7f848e",
+    "add-bg": "rgba(152, 195, 121, .12)", "del-bg": "rgba(224, 108, 117, .12)",
+  },
+};
+const CODE_THEME_VARS = [
+  "comment", "keyword", "string", "number", "title", "attr",
+  "type", "variable", "meta", "add-bg", "del-bg",
+];
+
+function applyCodeAppearance() {
+  const root = document.documentElement;
+  const dark = (THEMES[resolvedThemeId()] || THEMES.paper).dark;
+  const name = dark ? codeThemeDark : codeThemeLight;
+  const palette = CODE_THEMES[name];
+  if (palette) {
+    for (const key of CODE_THEME_VARS) {
+      if (palette[key]) root.style.setProperty("--hl-" + key, palette[key]);
+    }
+  } else {
+    // auto：清掉内联覆盖，回到当前界面主题自带的色板
+    for (const key of CODE_THEME_VARS) root.style.removeProperty("--hl-" + key);
+  }
+  root.style.setProperty("--code-fs", (Number(codeFontSize) || 13) + "px");
+  root.classList.toggle("code-wrap", !!codeWrap);
+  decorateAllCodeBlocks();
+}
+
+// 行号不与换行同时显示：换行后一行的物理高度不再等于一行文本，行号槽会错位。
+function decorateCodePre(pre) {
+  if (!pre) return;
+  const old = pre.querySelector(":scope > .code-gutter");
+  if (old) old.remove();
+  pre.classList.remove("has-lines");
+  if (!codeLineNumbers || codeWrap) return;
+  const code = pre.querySelector(":scope > code");
+  if (!code) return;
+  const text = (code.textContent || "").replace(/\n$/, "");
+  if (!text) return;
+  const count = Math.min(5000, text.split("\n").length);
+  if (count < 2) return;
+  const gutter = document.createElement("span");
+  gutter.className = "code-gutter";
+  gutter.setAttribute("aria-hidden", "true");
+  gutter.textContent = Array.from({ length: count }, (_, i) => i + 1).join("\n");
+  pre.insertBefore(gutter, code);
+  pre.classList.add("has-lines");
+}
+
+function decorateAllCodeBlocks(rootEl) {
+  const scope = rootEl || document;
+  scope.querySelectorAll(".md pre").forEach(decorateCodePre);
+}
+
+// 预览用的「跟随界面主题」近似色板（真实渲染由主题 CSS 决定；预览窗格
+// 不切换全局主题，只能拿一份等价色值展示）
+const CODE_AUTO_LIGHT = {
+  comment: "#8a8272", keyword: "#8f1d1d", string: "#0f6b3a",
+  number: "#8a6410", title: "#1257c4", attr: "#4f35a8",
+  type: "#8a6410", variable: "#4a4336", meta: "#6a6252",
+  "add-bg": "rgba(15, 107, 58, .12)", "del-bg": "rgba(143, 29, 29, .10)",
+};
+const CODE_AUTO_DARK = {
+  comment: "#a89d84", keyword: "#e26255", string: "#46b276",
+  number: "#cfa64f", title: "#5b93ee", attr: "#a48cf0",
+  type: "#cfa64f", variable: "#d3c8ad", meta: "#a89d84",
+  "add-bg": "rgba(70, 178, 118, .16)", "del-bg": "rgba(226, 98, 85, .14)",
+};
+const CODE_THEME_LABELS = {
+  auto: "跟随界面主题",
+  "github-light": "GitHub Light", "solarized-light": "Solarized Light",
+  "one-light": "One Light", "github-dark": "GitHub Dark",
+  "solarized-dark": "Solarized Dark", "one-dark": "One Dark",
+};
+
+function codeAppearanceSummary() {
+  const dark = (THEMES[resolvedThemeId()] || THEMES.paper).dark;
+  const name = dark ? codeThemeDark : codeThemeLight;
+  const parts = [CODE_THEME_LABELS[name] || "跟随界面主题", `${codeFontSize}px`];
+  parts.push(codeLineNumbers ? "显示行号" : "不显示行号");
+  if (codeWrap) parts.push("自动换行");
+  return parts.join(" · ");
+}
+
+function renderCodeAppearanceSummary() {
+  const el = document.getElementById("code-appearance-summary");
+  if (el) el.textContent = codeAppearanceSummary();
+}
+
+function paintCodePreview(box, key, autoPalette, bg, fg, border) {
+  if (!box) return;
+  const palette = CODE_THEMES[key] || autoPalette;
+  for (const k of CODE_THEME_VARS) {
+    if (palette[k]) box.style.setProperty("--hl-" + k, palette[k]);
+    else box.style.removeProperty("--hl-" + k);
+  }
+  const pre = box.querySelector("pre");
+  if (pre) {
+    pre.style.background = bg;
+    pre.style.color = fg;
+    pre.style.borderColor = border;
+    pre.style.borderLeftColor = border;
+  }
+}
+
+function renderCodePreviews() {
+  const lightBox = document.getElementById("code-preview-light");
+  const darkBox = document.getElementById("code-preview-dark");
+  paintCodePreview(lightBox, codeThemeLight, CODE_AUTO_LIGHT, "#f6f2e8", "#1d1a16", "#d8cbb2");
+  paintCodePreview(darkBox, codeThemeDark, CODE_AUTO_DARK, "#211d17", "#f4ecd8", "#4a4336");
+  const dark = (THEMES[resolvedThemeId()] || THEMES.paper).dark;
+  const lt = document.getElementById("code-preview-light-tag");
+  const dt = document.getElementById("code-preview-dark-tag");
+  if (lt) lt.textContent = dark ? "浅色" : "当前生效";
+  if (dt) dt.textContent = dark ? "当前生效" : "深色";
+  // 首次渲染时高亮示例代码；已有 data-hl 的块不会重复处理
+  if (lightBox) highlightCodeIn(lightBox);
+  if (darkBox) highlightCodeIn(darkBox);
+  decorateAllCodeBlocks(lightBox);
+  decorateAllCodeBlocks(darkBox);
+}
+
+function renderCodeAppearancePage() {
+  const l = document.getElementById("code-theme-light");
+  if (l) l.value = codeThemeLight;
+  const d = document.getElementById("code-theme-dark");
+  if (d) d.value = codeThemeDark;
+  const fs = document.getElementById("code-font-size");
+  if (fs) fs.value = codeFontSize;
+  const ln = document.getElementById("code-line-numbers");
+  if (ln) ln.checked = codeLineNumbers;
+  const wr = document.getElementById("code-wrap");
+  if (wr) wr.checked = codeWrap;
+  renderCodePreviews();
+}
+
+function applyCodePrefsFromControls() {
+  const l = document.getElementById("code-theme-light");
+  const d = document.getElementById("code-theme-dark");
+  const fs = document.getElementById("code-font-size");
+  const ln = document.getElementById("code-line-numbers");
+  const wr = document.getElementById("code-wrap");
+  codeThemeLight = (l && l.value) || "auto";
+  codeThemeDark = (d && d.value) || "auto";
+  const n = Number(fs && fs.value);
+  codeFontSize = Number.isFinite(n) ? Math.min(20, Math.max(11, Math.round(n))) : 13;
+  codeLineNumbers = !!(ln && ln.checked);
+  codeWrap = !!(wr && wr.checked);
+  applyCodeAppearance();
+  renderCodeAppearanceSummary();
+  renderCodePreviews();
+  saveUiPrefs({
+    code_theme_light: codeThemeLight === "auto" ? null : codeThemeLight,
+    code_theme_dark: codeThemeDark === "auto" ? null : codeThemeDark,
+    code_font_size: codeFontSize === 13 ? null : codeFontSize,
+    code_line_numbers: codeLineNumbers ? 1 : null,
+    code_wrap: codeWrap ? 1 : null,
+  });
+}
+
 function normalizeThemePref(v) {
   if (v === "light") return "paper";
   if (v === "dark") return "night";
@@ -16810,6 +17195,9 @@ function applyThemeMode(mode, save = true) {
   mermaidSetTheme(dark ? "dark" : "default");
   // 已开的 xterm 终端跟着换配色（背景/前景/ANSI 十六色）
   for (const t of termTabs) if (t.term) t.term.options.theme = xtermTheme();
+  // 代码块独立配色/字号/行号：界面明暗变了要按新的浅/深色代码主题重算
+  applyCodeAppearance();
+  renderCodeAppearanceSummary();
   // 工厂场景的昼夜盘由「本地时刻 + 当前主题明暗」决定：主题切换后重绘一次
   // （系统深浅切换同样走这里，见 themeMql 的 change 监听）
   if (typeof factoryRepaint === "function") factoryRepaint();
@@ -16927,6 +17315,25 @@ if (themeBackBtn) {
     if (entry) entry.scrollIntoView({ block: "center" });
   };
 }
+
+// 代码外观二级页：从「界面与通知」的代码外观卡进入
+const codeOpenBtn = document.getElementById("code-open");
+if (codeOpenBtn) codeOpenBtn.onclick = () => showSettingsPage("code");
+const codeBackBtn = document.getElementById("code-page-back");
+if (codeBackBtn) {
+  codeBackBtn.onclick = () => {
+    showSettingsPage("ui");
+    const entry = document.getElementById("code-appearance-entry");
+    if (entry) entry.scrollIntoView({ block: "center" });
+  };
+}
+["code-theme-light", "code-theme-dark", "code-font-size", "code-line-numbers", "code-wrap"]
+  .forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.onchange = applyCodePrefsFromControls;
+    if (el.type === "number") el.oninput = applyCodePrefsFromControls;
+  });
 themeMql.addEventListener("change", () => {
   if (themePref === "auto") applyThemeMode("auto", false);
   else renderThemeSwatches(); // 选着具体主题时也刷新跟随系统卡的预览落点
@@ -17067,6 +17474,7 @@ function highlightCodeIn(container) {
     if (m && !window.hljs.getLanguage(m[1])) return;
     try { window.hljs.highlightElement(el); } catch (e) { /* 保持原文 */ }
   });
+  decorateAllCodeBlocks(container);
 }
 
 // ---------- 本地 HTML / 图片一键预览：浏览器标签 iframe ----------
@@ -17107,6 +17515,52 @@ function memoryAutoNote(text) {
   el.hidden = n === 0;
   if (n) el.textContent = `有 ${n} 条带 (自动) 标记的记忆由归档提炼自动写入，建议偶尔审阅、清理不要的条目。`;
 }
+
+// ---- 全局自定义指令（~/.skysheep/instructions.md，每轮注入系统提示词） ----
+let instructionsMtime = 0;
+function renderInstructionsChars() {
+  const ta = document.getElementById("instructions-text");
+  const note = document.getElementById("instructions-chars");
+  if (!ta || !note) return;
+  note.textContent = `${ta.value.length} / 8000 字`;
+}
+async function loadInstructions() {
+  try {
+    const r = await request("instructions.get");
+    const ta = document.getElementById("instructions-text");
+    if (ta) ta.value = r.text || "";
+    instructionsMtime = r.mtime || 0;
+    renderInstructionsChars();
+  } catch (e) {
+    addNotice("全局指令加载失败: " + e.message);
+  }
+}
+document.getElementById("btn-instructions-save").onclick = async () => {
+  const ta = document.getElementById("instructions-text");
+  const status = document.getElementById("instructions-status");
+  const text = ta ? ta.value : "";
+  try {
+    const r = await request("instructions.save", {
+      text, base_mtime: instructionsMtime || undefined,
+    });
+    instructionsMtime = r.mtime || 0;
+    if (status) {
+      status.textContent = r.chars
+        ? `已保存（${r.chars} 字），下一轮对话立即生效`
+        : "已清空全局指令；下一轮起不再注入";
+      status.className = "card-status ok";
+      status.hidden = false;
+      autoHideStatus(status, status.textContent, true);
+    }
+  } catch (e) {
+    if (status) {
+      status.textContent = "保存失败：" + e.message;
+      status.className = "card-status bad";
+      status.hidden = false;
+    }
+  }
+};
+document.getElementById("instructions-text").addEventListener("input", renderInstructionsChars);
 
 async function loadMemoryPage() {
   try {
@@ -18339,6 +18793,9 @@ connect();
 boot();
 // 必须在 connect() 之后：ws 尚未创建时 request() 会抛错（被 catch 吞掉、偏好悄悄不生效）
 initUiPrefs();
+// 提示词片段在 ~ 菜单与 /自定义命令里都要用：启动即拉一次（设置页再拉是
+// 为了编辑后的最新列表）。失败静默，菜单仍有内置示例兜底。
+if (typeof loadSnippets === "function") loadSnippets();
 
 // ---------- 分级权限模式：安全执行 / 自动编辑 / 完全访问（对标 Codex / Claude Code 三档） ----------
 // 点击循环切换：安全执行（写入/执行都征询）→ 自动编辑（工作目录内写入放行，命令仍征询）
@@ -18638,6 +19095,20 @@ document.getElementById("runs-refresh").onclick = () => loadRunsPage();
 // 下方为加载期接线。
 document.getElementById("btn-advanced-save").onclick = saveAdvanced;
 document.getElementById("btn-network-save").onclick = saveNetwork;
+document.getElementById("btn-terminal-save").onclick = saveTerminalCfg;
+document.getElementById("prevent-sleep-toggle").onchange = (e) => {
+  saveUiPrefs({ prevent_sleep: e.target.checked ? 1 : 0 });
+  addNotice(e.target.checked
+    ? "已开启「保持电脑运行」：应用运行期间不会因空闲进入睡眠"
+    : "已关闭「保持电脑运行」：系统可以按空闲策略睡眠");
+};
+document.getElementById("interaction-mode").onchange = (e) => {
+  interactionMode = e.target.value === "steer" ? "steer" : "queue";
+  saveUiPrefs({ interaction_mode: interactionMode === "queue" ? null : interactionMode });
+  addNotice(interactionMode === "steer"
+    ? "运行中发消息将作为「引导」注入当前轮（下一次模型调用前生效）"
+    : "运行中发消息将排队，当前轮结束后自动执行");
+};
 document.getElementById("adv-compaction-auto").onchange = syncCompactionInputs;
 document.getElementById("adv-job-containment").onchange = syncSandboxLevel;
 

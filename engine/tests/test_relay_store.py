@@ -44,7 +44,8 @@ async def test_schema_version_bumped_and_tables_exist(store):
     # v10：cron_tasks 补 provider_name / model（产线级模型）
     # v11：cron_tasks 补 review（验收开关）；automation_runs 补 review_note
     # v12：relay_pairs 补 verify_handoff；relay_turns 补复述核验四列（交接门留痕）
-    assert SCHEMA_VERSION == 12
+    # v13：projects 补 removed_at（软移除）；snippets 补 slash（斜杠命令别名）
+    assert SCHEMA_VERSION == 13
     cur = await store._db.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
         " AND name IN ('relay_tasks','relay_nodes','relay_actions',"
@@ -205,7 +206,7 @@ async def test_relay_verify_columns_migrate_from_v11(tmp_path):
 
     store = await SessionStore(db_path).connect()
     try:
-        assert SCHEMA_VERSION == 12
+        assert SCHEMA_VERSION == 13
         # PRAGMA 的表名不能参数绑定：两条字面量查询逐一核对补列结果
         cur = await store._db.execute("PRAGMA table_info(relay_pairs)")
         pair_cols = {r[1] for r in await cur.fetchall()}

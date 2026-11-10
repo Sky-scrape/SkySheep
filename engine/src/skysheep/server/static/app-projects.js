@@ -427,3 +427,192 @@ function deleteProjectModal(p) {
     }
   }, "移除");
 }
+
+// ---------- 设置·项目：全局管理（软移除 / 恢复 / 闲置复核） ----------
+let projectAdminData = { projects: [], removed: [] };
+const PROJECT_STALE_DAYS = 30;
+const PROJECT_STALE_MS = PROJECT_STALE_DAYS * 86400 * 1000;
+
+function projectAgo(ts) {
+  const sec = Number(ts) || 0;
+  if (!sec) return "从未使用";
+  const diff = Date.now() / 1000 - sec;
+  if (diff < 60) return "刚刚";
+  if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
+  if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
+  if (diff < 86400 * 30) return Math.floor(diff / 86400) + " 天前";
+  return new Date(sec * 1000).toLocaleDateString();
+}
+
+function projectIsStale(p) {
+  if (!p || p.is_remote) return false;
+  if (!p.session_count) return true;
+  return (Date.now() / 1000 - (Number(p.last_active) || 0)) > PROJECT_STALE_DAYS * 86400;
+}
+
+function projectAdminRow(p, removed = false) {
+  const stale = !removed && projectIsStale(p);
+  const badges = [
+    p.is_current ? '<span class="proj-badge current">当前</span>' : "",
+    stale ? '<span class="proj-badge stale">闲置</span>' : "",
+  ].join("");
+  const path = p.is_remote ? "远程连接（渠道会话）" : (p.root_path || "");
+  const ops = removed
+    ? `<button class="btn-ghost rp-mini" data-proj-restore="${p.id}">恢复</button>` +
+      `<button class="btn-ghost rp-mini danger" data-proj-purge="${p.id}">彻底删除</button>`
+    : `<button class="btn-ghost rp-mini" data-proj-remove="${p.id}">移除</button>`;
+  return `<li class="proj-row">
+    <div class="proj-row-main">
+      <div class="proj-row-name">${FOLDER_SVG}<span>${escapeHtml(p.name || "(未命名)")}</span>${badges}</div>
+      <div class="proj-row-path" title="${escapeHtml(path)}">${escapeHtml(path)}</div>
+    </div>
+    <div class="proj-row-meta">${p.session_count || 0} 个会话<br>${projectAgo(p.last_active)}</div>
+    <div class="proj-row-ops">${ops}</div>
+  </li>`;
+}
+
+function renderProjectAdmin() {
+  const list = document.getElementById("projects-admin-list");
+  const removedList = document.getElementById("projects-removed-list");
+  const note = document.getElementById("projects-stale-note");
+  if (!list || !removedList) return;
+  const q = (document.getElementById("projects-search")?.value || "").trim().toLowerCase();
+  const filter = document.getElementById("projects-filter")?.value || "all";
+  const sort = document.getElementById("projects-sort")?.value || "recent";
+  const active = (projectAdminData.projects || []).filter((p) => {
+    if (q && !(String(p.name || "").toLowerCase().includes(q)
+      || String(p.root_path || "").toLowerCase().includes(q))) return false;
+    return filter === "stale" ? projectIsStale(p) : true;
+  });
+  if (sort === "name") active.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "zh"));
+  else active.sort((a, b) => (Number(b.last_active) || 0) - (Number(a.last_active) || 0));
+  list.innerHTML = active.length
+    ? active.map((p) => projectAdminRow(p, false)).join("")
+    : `<li class="proj-empty">${q || filter === "stale" ? "没有匹配的项目。" : "还没有项目。"}</li>`;
+
+  const removed = (projectAdminData.removed || []).filter((p) => {
+    if (!q) return true;
+    return String(p.name || "").toLowerCase().includes(q)
+      || String(p.root_path || "").toLowerCase().includes(q);
+  });
+  removedList.innerHTML = removed.length
+    ? removed.map((p) => projectAdminRow(p, true)).join("")
+    : '<li class="proj-empty">还没有移除过项目。</li>';
+
+  const staleCount = (projectAdminData.projects || []).filter(projectIsStale).length;
+  if (note) {
+    note.hidden = !staleCount;
+    if (staleCount) {
+      note.innerHTML = `<b>${staleCount} 个项目疑似不再使用</b>（${PROJECT_STALE_DAYS} 天没有活动或没有会话）。` +
+        '<span class="proj-stale-item" id="proj-stale-filter">只看疑似 ›</span>';
+      const link = document.getElementById("proj-stale-filter");
+      if (link) link.onclick = () => {
+        const sel = document.getElementById("projects-filter");
+        if (sel) sel.value = "stale";
+        renderProjectAdmin();
+      };
+    }
+  }
+
+  list.querySelectorAll("[data-proj-remove]").forEach((btn) => {
+    btn.onclick = () => removeProjectAdmin(Number(btn.dataset.projRemove));
+  });
+  removedList.querySelectorAll("[data-proj-restore]").forEach((btn) => {
+    btn.onclick = () => restoreProjectAdmin(Number(btn.dataset.projRestore));
+  });
+  removedList.querySelectorAll("[data-proj-purge]").forEach((btn) => {
+    btn.onclick = () => purgeProjectAdmin(Number(btn.dataset.projPurge));
+  });
+}
+
+async function loadProjectAdmin() {
+  try {
+    const r = await request("project.admin_list");
+    projectAdminData = {
+      projects: (r && r.projects) || [],
+      removed: (r && r.removed) || [],
+    };
+    renderProjectAdmin();
+  } catch (e) {
+    addNotice("项目列表加载失败：" + e.message);
+  }
+}
+
+async function afterProjectListChanged(wasCurrent, switchedTo) {
+  await loadProjectAdmin();
+  if (typeof refreshProjects === "function") refreshProjects();
+  if (wasCurrent) {
+    if (switchedTo && switchedTo.path) {
+      try {
+        await switchProject(switchedTo.path);
+        await loadProjectAdmin(); // 切换后「当前」标记/侧栏状态都变了
+      } catch (e) { addNotice("切换项目失败：" + e.message); }
+    } else {
+      // 没有可切换的项目 = 进入无项目态：与 switchProject 同一套「先取数、
+      // 清旧状态、同步重画」，不整页重载（项目切换必须是页内切换）
+      const data = await fetchWorkspaceData();
+      resetWorkspaceState();
+      await applyWorkspaceData(data);
+      await reloadProjectPanels();
+    }
+  }
+  if (typeof refreshSessions === "function") refreshSessions();
+}
+
+async function removeProjectAdmin(id) {
+  const p = (projectAdminData.projects || []).find((x) => x.id === id);
+  if (!p) return;
+  const ok = await confirmModal(
+    `把「${p.name}」从侧栏和项目选择器中移除？\n\n会话、白名单和自动化都会保留，` +
+    "之后可以在「已移除的项目」里恢复；磁盘上的文件夹不受影响。",
+    { title: "移除项目", okLabel: "移除" },
+  );
+  if (!ok) return;
+  try {
+    const r = await request("project.remove", { id });
+    addNotice(r.was_current && r.switched_to
+      ? `已移除「${p.name}」，切换到「${r.switched_to.name}」`
+      : `已移除「${p.name}」；会话仍保留，可在下方恢复`);
+    await afterProjectListChanged(!!r.was_current, r.switched_to);
+  } catch (e) {
+    addNotice("移除失败：" + e.message);
+  }
+}
+
+async function restoreProjectAdmin(id) {
+  const p = (projectAdminData.removed || []).find((x) => x.id === id);
+  try {
+    await request("project.restore", { id });
+    addNotice(`已恢复「${p ? p.name : "项目"}」到侧栏`);
+    await afterProjectListChanged(false, null);
+  } catch (e) {
+    addNotice("恢复失败：" + e.message);
+  }
+}
+
+async function purgeProjectAdmin(id) {
+  const p = (projectAdminData.removed || []).find((x) => x.id === id);
+  if (!p) return;
+  const ok = await confirmModal(
+    `彻底删除「${p.name}」？\n\n这会连同它的 ${p.session_count || 0} 个会话、白名单规则、` +
+    "任务清单与定时任务/流水线一起删除，不可撤销。磁盘上的文件夹不受影响。",
+    { title: "彻底删除项目", okLabel: "彻底删除", danger: true },
+  );
+  if (!ok) return;
+  try {
+    const r = await request("project.delete", { id });
+    addNotice(`已彻底删除「${p.name}」`);
+    await afterProjectListChanged(!!r.was_current, r.switched_to);
+  } catch (e) {
+    addNotice("删除失败：" + e.message);
+  }
+}
+
+const projectsSearchInput = document.getElementById("projects-search");
+if (projectsSearchInput) projectsSearchInput.oninput = renderProjectAdmin;
+const projectsFilterSel = document.getElementById("projects-filter");
+if (projectsFilterSel) projectsFilterSel.onchange = renderProjectAdmin;
+const projectsSortSel = document.getElementById("projects-sort");
+if (projectsSortSel) projectsSortSel.onchange = renderProjectAdmin;
+const projectsRefreshBtn = document.getElementById("btn-projects-refresh");
+if (projectsRefreshBtn) projectsRefreshBtn.onclick = () => loadProjectAdmin();

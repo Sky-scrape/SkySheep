@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     root_path TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    -- 软移除：>0 = 从侧栏/项目选择器隐藏（会话保留，可恢复）；0 = 正常显示
+    removed_at REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -126,7 +128,9 @@ CREATE TABLE IF NOT EXISTS snippets (
     sort_order REAL NOT NULL DEFAULT 0,
     use_count INTEGER NOT NULL DEFAULT 0,
     last_used_at REAL NOT NULL DEFAULT 0,
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    -- 斜杠命令别名（不含 /；空 = 不注册命令）
+    slash TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS cron_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -390,6 +394,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 # disk I/O error / database locked 等真实故障一起被吞（缺列的库拖到运行时
 # INSERT 才报错），且每次启动把全部 ALTER 白重跑一遍。
 _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    # v13：项目软移除（removed_at）+ 提示词斜杠别名（slash）
+    ("projects", "removed_at REAL NOT NULL DEFAULT 0"),
+    ("snippets", "slash TEXT NOT NULL DEFAULT ''"),
     ("sessions", "pinned INTEGER NOT NULL DEFAULT 0"),
     ("schedules", "remind_before INTEGER NOT NULL DEFAULT 0"),
     ("schedules", "end_at REAL NOT NULL DEFAULT 0"),
@@ -460,7 +467,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 # 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
 # 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
 # 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 @dataclass
@@ -469,6 +476,16 @@ class Project:
     root_path: str
     name: str
     created_at: float
+    # 软移除时间戳（0 = 正常显示）。项目行仍在，会话/搜索/恢复都靠它
+    removed_at: float = 0.0
+
+
+def project_from_row(r) -> Project:
+    """从一行 projects 记录构造 Project（兼容尚未补 removed_at 列的旧库行）。"""
+    return Project(
+        r["id"], r["root_path"], r["name"], r["created_at"],
+        r["removed_at"] if "removed_at" in r.keys() else 0.0,
+    )
 
 
 @dataclass
@@ -1278,7 +1295,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         )
         row = await cur.fetchone()
         if row:
-            return Project(row["id"], row["root_path"], row["name"], row["created_at"])
+            return project_from_row(row)
         return None
 
     async def ensure_remote_project(self) -> Project:
@@ -1294,6 +1311,11 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         for _ in range(3):
             proj = await self.get_remote_project()
             if proj:
+                if proj.removed_at > 0:
+                    # 用户移除过「远程连接」，渠道再次收到消息时自动恢复：
+                    # 否则渠道会话会挂在一个侧栏里看不到的项目上
+                    await self.restore_project(proj.id)
+                    proj = await self.get_remote_project() or proj
                 return proj
             try:
                 await self._db.execute(
@@ -1319,7 +1341,13 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         )
         row = await cur.fetchone()
         if row:
-            return Project(row["id"], row["root_path"], row["name"], row["created_at"])
+            proj = project_from_row(row)
+            if proj.removed_at > 0:
+                # 重新添加同一目录 = 恢复被移除的项目（不新建重复记录，
+                # root_path 有 UNIQUE 约束，新建会撞）
+                await self.restore_project(proj.id)
+                proj = await self.get_project(proj.id) or proj
+            return proj
         cur = await self._db.execute(
             "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
             (root_path, name or Path(root_path).name, time.time()),
@@ -1327,21 +1355,72 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         await self._db.commit()
         return Project(cur.lastrowid, root_path, name or Path(root_path).name, time.time())
 
-    async def list_projects(self) -> list[Project]:
+    async def list_projects(self, *, include_removed: bool = False) -> list[Project]:
+        """项目列表；默认不含软移除（removed_at > 0）的项目。
+
+        软移除的项目行与会话都在库里，get_project / 会话搜索 / 恢复仍能拿到；
+        侧栏与项目选择器走默认过滤，所以移除后不再出现。
+        """
         assert self._db
         # created_at 是秒级，同一秒内建的项目顺序不稳定；id 自增作次级键，
         # 同秒时后建的 id 更大排前面，与「新的在前」语义一致
+        where = "" if include_removed else " WHERE removed_at = 0"
         cur = await self._db.execute(
-            "SELECT * FROM projects ORDER BY created_at DESC, id DESC")
+            "SELECT * FROM projects" + where + " ORDER BY created_at DESC, id DESC")
         rows = await cur.fetchall()
-        return [Project(r["id"], r["root_path"], r["name"], r["created_at"]) for r in rows]
+        return [project_from_row(r) for r in rows]
+
+    async def hide_project(self, project_id: int) -> bool:
+        """软移除：只打 removed_at 标记，不删项目行、会话、白名单或任务。"""
+        assert self._db
+        cur = await self._db.execute(
+            "UPDATE projects SET removed_at = ? WHERE id = ? AND removed_at = 0",
+            (time.time(), int(project_id)),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def restore_project(self, project_id: int) -> bool:
+        """恢复软移除的项目（removed_at 归零）。"""
+        assert self._db
+        cur = await self._db.execute(
+            "UPDATE projects SET removed_at = 0 WHERE id = ? AND removed_at > 0",
+            (int(project_id),),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def project_admin_list(self) -> list[dict]:
+        """设置·项目页的数据：项目 + 会话数 + 最后活动时间（含已移除）。
+
+        last_active 取会话的 updated_at；没有会话时退回项目创建时间——
+        前端据此标「疑似不再使用」，不另存冗余字段。
+        """
+        assert self._db
+        cur = await self._db.execute(
+            "SELECT p.*, COUNT(s.id) AS session_count,"
+            " COALESCE(MAX(s.updated_at), p.created_at) AS last_active"
+            " FROM projects p LEFT JOIN sessions s ON s.project_id = p.id"
+            " GROUP BY p.id ORDER BY last_active DESC, p.id DESC"
+        )
+        rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            p = project_from_row(r)
+            out.append({
+                "id": p.id, "name": p.name, "root_path": p.root_path,
+                "created_at": p.created_at, "removed_at": p.removed_at,
+                "session_count": int(r["session_count"] or 0),
+                "last_active": float(r["last_active"] or 0),
+            })
+        return out
 
     async def get_project(self, project_id: int) -> Project | None:
         """按 id 取项目记录（定时任务按自身项目执行时解析工作目录用）。"""
         assert self._db
         cur = await self._db.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
         row = await cur.fetchone()
-        return Project(row["id"], row["root_path"], row["name"], row["created_at"]) if row else None
+        return project_from_row(row) if row else None
 
     async def delete_project(self, project_id: int) -> int:
         """删除项目记录及其全部会话（含消息）、白名单规则、任务清单与定时任务/
@@ -2872,6 +2951,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         scoped = project_id is not _ALL
         by_day, by_session, by_provider = [], [], []
         session_count = 0
+        streak_current = streak_longest = 0
+        longest_chat = 0.0
         try:
             join = (
                 " FROM usage_log l JOIN sessions s ON s.id = l.session_id"
@@ -2914,6 +2995,8 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                 args,
             )
             by_provider = [dict(r) for r in await cur.fetchall()]
+            streak_current, streak_longest = await self._usage_streaks(scoped, project_id)
+            longest_chat = await self._longest_chat_span(scoped, project_id)
         except Exception:  # noqa: BLE001
             pass
         return {
@@ -2921,7 +3004,65 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "by_session": by_session,
             "by_provider": by_provider,
             "session_count": session_count,
+            "streak_current": streak_current,
+            "streak_longest": streak_longest,
+            "longest_chat_seconds": longest_chat,
         }
+
+    async def _usage_streaks(self, scoped: bool, project_id) -> tuple[int, int]:
+        """按「有用量记录的自然日」算当前连续天数与历史最长连续天数。
+
+        当前连续：今天有用量就从今天倒数；今天还没用就从昨天倒数（当天尚未开始
+        不算断签）。日期按本地时区，与 usage_stats 的 by_day 同一口径。
+        """
+        assert self._db
+        if scoped:
+            cur = await self._db.execute(
+                "SELECT DISTINCT date(l.ts, 'unixepoch', 'localtime') AS day"
+                " FROM usage_log l JOIN sessions s ON s.id = l.session_id"
+                " WHERE s.project_id IS ? ORDER BY day ASC",
+                (project_id,),
+            )
+        else:
+            cur = await self._db.execute(
+                "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') AS day"
+                " FROM usage_log ORDER BY day ASC"
+            )
+        days = [str(r["day"]) for r in await cur.fetchall() if r["day"]]
+        if not days:
+            return 0, 0
+        from datetime import date, timedelta
+
+        day_set = set(days)
+        longest = run = 1
+        prev = date.fromisoformat(days[0])
+        for raw in days[1:]:
+            cur_day = date.fromisoformat(raw)
+            run = run + 1 if (cur_day - prev).days == 1 else 1
+            longest = max(longest, run)
+            prev = cur_day
+        anchor = date.today()
+        if anchor.isoformat() not in day_set:
+            anchor -= timedelta(days=1)
+        current = 0
+        while anchor.isoformat() in day_set:
+            current += 1
+            anchor -= timedelta(days=1)
+        return current, longest
+
+    async def _longest_chat_span(self, scoped: bool, project_id) -> float:
+        """最长一次会话的跨度（首条→末条消息的秒数）；无消息/无归属返回 0。"""
+        assert self._db
+        where = " WHERE s.project_id IS ?" if scoped else ""
+        args = (project_id,) if scoped else ()
+        cur = await self._db.execute(
+            "SELECT MAX(m.created_at) - MIN(m.created_at) AS span"
+            " FROM messages m JOIN sessions s ON s.id = m.session_id"
+            + where + " GROUP BY m.session_id ORDER BY span DESC LIMIT 1",
+            args,
+        )
+        row = await cur.fetchone()
+        return float(row["span"] or 0) if row and row["span"] else 0.0
 
     async def usage_today(self) -> int:
         """今天（本地时区零点起）累计消耗的 token 总量，供每日预算护栏判断。"""

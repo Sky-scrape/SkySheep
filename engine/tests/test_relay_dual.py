@@ -11,13 +11,14 @@ import pytest
 from conftest import FakeProvider
 
 from skysheep.core.subagent import TaskRecord
-from skysheep.messages import TextBlock
+from skysheep.messages import TextBlock, ToolUseBlock
 from skysheep.models.base import (
     Provider,
     ProviderDone,
     ProviderTextDelta,
 )
 from skysheep.server.backend import ServerBackend
+from skysheep.server.backend_parts.relay import _verdict_messages
 
 
 async def _mk(home, prov) -> ServerBackend:
@@ -96,6 +97,36 @@ class ScriptedThenBlockProvider(Provider):
         await self.gate.wait()
         yield ProviderTextDelta("继续")
         yield ProviderDone(stop_reason="end_turn", input_tokens=5, output_tokens=5)
+
+
+class ContextAwareVerdictProvider(FakeProvider):
+    """核验提示缺交接上下文就驳回（复刻真实模型的误判面）。
+
+    真实模型实测：核验方只看得到「自己刚完成的输出」时，会把复述里对总任务
+    和双方分工的正确理解当成凭空添加，三次全部驳回。这里要求核验提示必须
+    带总任务、双方常驻任务与接收方标识，否则直接回驳回而不消耗脚本。
+    """
+
+    def __init__(self, scripted: list) -> None:
+        super().__init__(scripted)
+        self.verdict_prompts: list[str] = []
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        text = (messages[-1].text if messages else "") or ""
+        if "【接力交接 · 核验】" in text:
+            self.verdict_prompts.append(text)
+            ok = (
+                "总任务：完成示例任务" in text
+                and "的常驻任务：" in text
+                and "接收方（" in text
+            )
+            if not ok:
+                self.calls.append(list(messages))
+                yield ProviderTextDelta(_VERDICT_REJECT)
+                yield ProviderDone(stop_reason="end_turn", input_tokens=1, output_tokens=1)
+                return
+        async for ev in super().stream(messages, tool_schemas, effort):
+            yield ev
 
 
 async def _wait_pair_state(be, pair_id, state, timeout=5.0):
@@ -499,6 +530,57 @@ async def test_dual_verify_gate_passes_and_enriches_brief(home):
         await be.shutdown()
 
 
+def test_verdict_prompt_carries_handover_context():
+    """核验提示必须带复述请求的同一份上下文（总任务/双方任务/接收方上轮输出）。"""
+    messages = _verdict_messages(
+        "主屏", "移交方的输出", "接收方的复述",
+        goal="总目标", handover_task="主屏任务", receiver_label="副屏",
+        receiver_task="副屏任务", receiver_prev="副屏上一轮的输出",
+    )
+    assert messages[0].role == "system"
+    text = messages[-1].text
+    for value in ("总目标", "主屏任务", "副屏任务", "副屏上一轮的输出",
+                  "移交方的输出", "接收方的复述", "接收方（副屏）的常驻任务"):
+        assert value in text, f"核验提示缺少 {value}"
+
+
+async def test_dual_verify_prompt_carries_handover_context(home):
+    """核验方拿不到总任务/分工时会误驳回复述——提示必须带上交接上下文。"""
+    prov = ContextAwareVerdictProvider([
+        [TextBlock(text="主屏方案：第一步读文件")],  # 第 1 轮（主屏）
+        [TextBlock(text=_RESTATED)],                 # 换手复述（副屏）
+        [TextBlock(text=_VERDICT_PASS)],             # 核验（主屏）——必须带上下文
+        [TextBlock(text="副屏执行完成")],            # 第 2 轮（副屏）
+        [TextBlock(text=_RESTATED)],                 # 再换手的复述（主屏）
+        [TextBlock(text=_VERDICT_PASS)],             # 核验（副屏）——必须带上下文
+        [TextBlock(text="")],                        # 第 3 轮空产出：暂停
+    ])
+    be = await _mk(home, prov)
+    try:
+        sid = (await be.new_session())["id"]
+        started = await be.relay_dual_run({
+            "session_id": sid, "goal": "完成示例任务",
+            "main_task": "发布方案", "peer_task": "执行并反馈",
+            "auto_alternate": True,
+            "request_id": "v-ctx", "expected_revision": 0,
+        })
+        pair_id = started["pair"]["id"]
+        await _wait_pair_state(be, pair_id, "paused")
+        snap = await be.store.relay_pair_snapshot(pair_id)
+        assert [t["side"] for t in snap["turns"]] == ["main", "peer", "main"]
+        assert snap["turns"][1]["verify_state"] == "passed"
+        assert snap["turns"][2]["verify_state"] == "passed"
+        first, second = prov.verdict_prompts[:2]
+        assert "接收方（副屏）的常驻任务：执行并反馈" in first
+        assert "你（主屏）这一轮的常驻任务：发布方案" in first
+        # 第二次换手：主屏作为接收方，核验方还应看到它自己上一轮的输出
+        assert "接收方（主屏）的常驻任务：发布方案" in second
+        assert "接收方上一轮的输出：" in second
+        assert "主屏方案：第一步读文件" in second
+    finally:
+        await be.shutdown()
+
+
 async def test_dual_verify_reject_then_pass_on_second_attempt(home):
     """移交方驳回后带理由重述：第二次通过，驳回理由进 verify_note。"""
     restated2 = _RESTATED + "\n补充：修正——示例任务就是发布方案本身"
@@ -882,6 +964,35 @@ async def test_dual_empty_output_with_history_parks_instead_of_looping(home):
         # 旧文本不被伪造成本轮产出
         assert "第一轮有产出" not in (last["output"] or "")
         assert len(prov.calls) == 2, "两轮两次模型调用后停"
+    finally:
+        await be.shutdown()
+
+
+async def test_dual_max_iterations_reports_cause_and_keeps_output(home):
+    """跑满迭代上限不能误报「没有产出文本」：最后一轮常是纯工具调用（正文
+    0 字），但前面的正文是真实产出——保留它、把暂停原因写成迭代上限。"""
+    tu = [ToolUseBlock(id="loop", name="list_dir", input={"path": "."})]
+    prov = FakeProvider([
+        [TextBlock(text="阶段产出：前半段已完成"), *tu],  # 第 1 次模型调用：有正文有工具
+        tu,                                               # 第 2 次：纯工具调用，正文 0 字
+    ])
+    be = await _mk(home, prov)
+    try:
+        be.cfg.max_iterations = 2
+        sid = (await be.new_session())["id"]
+        started = await _start_dual(be, sid, "d-maxiter-1")
+        pair_id = started["pair"]["id"]
+        await _wait_pair_state(be, pair_id, "paused")
+
+        snap = await be.store.relay_pair_snapshot(pair_id)
+        assert snap["pair"]["state"] == "paused"
+        turn = snap["turns"][0]
+        assert turn["status"] == "error"
+        assert "迭代上限" in turn["error"]
+        assert "2 次工具循环" in turn["error"]
+        assert "没有产出文本" not in turn["error"]
+        # 最后一轮正文为空，但本轮更早的真实产出不能丢
+        assert "阶段产出" in (turn["output"] or "")
     finally:
         await be.shutdown()
 

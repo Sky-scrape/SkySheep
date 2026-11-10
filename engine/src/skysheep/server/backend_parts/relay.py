@@ -602,6 +602,10 @@ class RelaySettingsMixin:
         run_usage = {"in": 0, "out": 0}
         # 本轮产出桶（每轮 send 前 clear）：捕获只属于本轮的 assistant 正文
         turn_out: list[str] = []
+        # 本轮 TurnFinished 收尾信息：到迭代上限时不能只看「最后一条 assistant
+        # 正文」——最后一轮常常是纯 todo_write/工具调用（正文 0 字），会把
+        # 「跑满 40 轮」误报成「没有产出文本」（2026-11-10 用户实例）。
+        turn_stop = {"reason": "", "iterations": 0}
         try:
             while True:
                 pair = await self.store.relay_pair_get(pair_id)
@@ -672,6 +676,8 @@ class RelaySettingsMixin:
                 # 「会话最后一条非空 assistant」：会话已有历史时那会把上一轮的
                 # 旧文本当成产出，空产出保护永不触发（§4：空产出不算完成）
                 turn_out.clear()
+                turn_stop["reason"] = ""
+                turn_stop["iterations"] = 0
 
                 async def turn_emit(ev: dict) -> None:
                     if ev.get("kind") == "usage":
@@ -679,6 +685,9 @@ class RelaySettingsMixin:
                         run_usage["out"] += int(ev.get("output_tokens") or 0)
                     elif ev.get("kind") == "assistant_message":
                         turn_out.append(_assistant_text_of(ev.get("message") or {}))
+                    elif ev.get("kind") == "turn_finished":
+                        turn_stop["reason"] = str(ev.get("stop_reason") or "")
+                        turn_stop["iterations"] = int(ev.get("iterations") or 0)
                     await self._relay_dual_emit(ev)
 
                 try:
@@ -700,6 +709,22 @@ class RelaySettingsMixin:
                         await self._relay_dual_broadcast(snapshot)
                     return
                 stopped = bool(isinstance(result, dict) and result.get("stopped"))
+                if not stopped and turn_stop["reason"] == "max_iterations":
+                    # 迭代到顶：本轮的最后一条 assistant 可能只是纯 todo/工具调用
+                    # （正文 0 字），但前面的正文是真实产出，不能丢，也不能报成
+                    # 「没有产出文本」。保留本轮最后一条非空正文，暂停等人续跑。
+                    output = next(
+                        (text for text in reversed(turn_out) if text.strip()), "")
+                    limit = turn_stop["iterations"] or getattr(
+                        getattr(rt_turn, "agent", None), "max_iterations", 0)
+                    snapshot = await self.store.relay_pair_finish_turn(
+                        pair_id, turn_no, status="error", output=output,
+                        error=(f"本轮达到迭代上限（{limit} 次工具循环），已暂停；"
+                               "本轮产出与历史都已保留，点「执行」可由这一方继续。"),
+                    )
+                    if snapshot is not None:
+                        await self._relay_dual_broadcast(snapshot)
+                    return
                 # 本轮产出 = 本轮 send 实际发出的最后一条 assistant 正文；会话
                 # 历史里更早的文本与本轮无关（空产出保护不许被旧文本顶掉）
                 output = "" if stopped else (turn_out[-1] if turn_out else "")
@@ -903,6 +928,14 @@ class RelaySettingsMixin:
         handover_prov, owned_h = built_h
         last_fail = ""
         rejects: list[str] = []
+        # 接收方自己上一轮的输出：复述请求里会给它，核验方也必须看到同一份，
+        # 否则复述里提到「我上一轮做过什么」会被当成凭空添加。
+        own_prev = await self._relay_dual_prev_output(
+            pair_id, "main" if side == "peer" else "peer")
+        # 移交方这一侧的常驻任务：核验方要拿它判断复述有没有曲解分工
+        handover_task = str(
+            (pair["main_task"] if side == "peer" else pair["peer_task"]) or ""
+        ).strip()
         try:
             for attempt in range(1, _RELAY_VERIFY_ATTEMPTS + 1):
                 await self._relay_dual_emit({
@@ -915,7 +948,7 @@ class RelaySettingsMixin:
                         receiver_prov,
                         _restatement_messages(
                             pair["goal"], label, task_text, handover_label, prev,
-                            await self._relay_dual_prev_output(pair_id, "main" if side == "peer" else "peer"),
+                            own_prev,
                         ),
                         timeout_s=_RELAY_VERIFY_TIMEOUT,
                         max_output_chars=_RELAY_RESTATEMENT_MAX_CHARS * 4,
@@ -935,7 +968,14 @@ class RelaySettingsMixin:
                 try:
                     vresult = await run_node_text(
                         handover_prov,
-                        _verdict_messages(handover_label, prev, text),
+                        _verdict_messages(
+                            handover_label, prev, text,
+                            goal=str(pair["goal"] or ""),
+                            handover_task=handover_task,
+                            receiver_label=label,
+                            receiver_task=task_text,
+                            receiver_prev=own_prev,
+                        ),
                         timeout_s=_RELAY_VERIFY_TIMEOUT,
                         max_output_chars=_RELAY_MAX_OUTPUT_CHARS,
                     )
@@ -1977,19 +2017,38 @@ def _restatement_messages(
     return [Message.system(_NO_TOOL_SYSTEM), Message.user("\n\n".join(lines))]
 
 
-def _verdict_messages(handover_label: str, prev: str, restatement: str) -> list[Message]:
-    """移交方的核验请求：对照自己刚完成的输出核收对方的复述。"""
+def _verdict_messages(
+    handover_label: str, prev: str, restatement: str, *,
+    goal: str = "", handover_task: str = "", receiver_label: str = "",
+    receiver_task: str = "", receiver_prev: str = "",
+) -> list[Message]:
+    """移交方的核验请求：对照**同一份交接上下文**核收接收方的复述。
+
+    复述请求包含总任务、双方常驻任务、移交方刚完成的输出和接收方自己上轮
+    的输出；核验方缺任何一项，都会把复述里对任务的正确理解当成「凭空添加」
+    而误驳回（真实模型实测：核验方只看到自己的输出时，三次全部驳回）。
+    """
     lines = [
         f"【接力交接 · 核验】你是移交方（{handover_label}）。接收方在接棒前提交了复述，"
         "请核对它是否准确理解了交接内容：目标、已完成、待办有没有遗漏或曲解。",
-        f"你刚完成的输出：\n{prev.strip()}",
+    ]
+    if goal.strip():
+        lines.append(f"总任务：{goal.strip()}")
+    if handover_task:
+        lines.append(f"你（{handover_label}）这一轮的常驻任务：{handover_task}")
+    if receiver_label and receiver_task:
+        lines.append(f"接收方（{receiver_label}）的常驻任务：{receiver_task}")
+    lines.append(f"你刚完成的输出：\n{prev.strip()}")
+    if receiver_prev.strip():
+        lines.append(f"接收方上一轮的输出：\n{receiver_prev.strip()}")
+    lines.extend([
         f"接收方的复述：\n{restatement.strip()}",
         "请严格按以下格式输出（除这四行外不要输出别的内容）：\n"
         "结论：通过 或 结论：驳回\n"
         "【缺漏】复述遗漏的关键信息（通过时写「无」）\n"
         "【纠正】需要纠正的错误理解（通过时写「无」）\n"
         "【理由】一句话说明通过或驳回的原因",
-    ]
+    ])
     return [Message.system(_NO_TOOL_SYSTEM), Message.user("\n\n".join(lines))]
 
 

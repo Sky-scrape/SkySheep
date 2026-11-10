@@ -8486,6 +8486,15 @@ function usageFmtTokens(n) {
   return String(n);
 }
 
+function usageFmtDuration(seconds) {
+  const sec = Math.max(0, Math.round(seconds || 0));
+  if (sec < 60) return sec ? `${sec} 秒` : "—";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟`;
+  const h = Math.floor(min / 60);
+  return `${h} 小时 ${min % 60} 分`;
+}
+
 function usageTiles(r) {
   const days = r.by_day || [];
   const total = (r.total_in || 0) + (r.total_out || 0);
@@ -8508,7 +8517,11 @@ function usageTiles(r) {
     tile(usageFmtTokens(total), "累计 Token 数", totalSub) +
     tile(usageFmtTokens(peak), "单日峰值 Token", peakDay ? `峰值在 ${escapeHtml(String(peakDay.day).slice(5))}` : "") +
     tile(String(days.reduce((s, d) => s + ((d.it || 0) + (d.ot || 0) > 0 ? 1 : 0), 0)) + " 天", "有记录天数", `统计窗口 ${usageRangeDays} 天`) +
-    tile(String(sessionCount), "参与会话", (r.by_session || []).length ? "按 tokens 排行见下方" : "")
+    tile(String(sessionCount), "参与会话", (r.by_session || []).length ? "按 tokens 排行见下方" : "") +
+    tile(String(r.streak_current || 0) + " 天", "当前连续天数",
+      `最长连续 ${r.streak_longest || 0} 天`) +
+    tile(usageFmtDuration(r.longest_chat_seconds), "最长聊天时长",
+      "首条→末条消息跨度")
   );
 }
 
@@ -8814,6 +8827,7 @@ function snippetCandidates() {
 function snippetMatch(s, q) {
   return s.name.toLowerCase().includes(q) ||
     (s.content || "").toLowerCase().includes(q) ||
+    (s.slash || "").toLowerCase().includes(q) ||
     (s.initials || "").includes(q);
 }
 
@@ -8970,6 +8984,13 @@ function snippetModal(existing, presetContent) {
     <div class="cron-fields">
       <label>名称（输入 ~ 时显示）</label>
       <input id="sn-name" class="modal-input" type="text" maxlength="40" placeholder="例如：代码审查" value="${existing ? escapeHtml(existing.name) : ""}">
+      <label>斜杠命令（可选）</label>
+      <input id="sn-slash" class="modal-input" type="text" maxlength="32"
+             placeholder="例如：review（以后输入 /review 即可插入）"
+             value="${existing && existing.slash ? escapeHtml(existing.slash) : ""}">
+      <p class="dim small" style="margin:-4px 0 2px">
+        只用字母、数字、下划线和连字符；留空则不注册命令。内置命令名不可占用。
+      </p>
       <label>内容（占位符在插入时替换）</label>
       <textarea id="sn-content" class="modal-input" rows="5" placeholder="请审查以下代码，关注正确性与边界情况：&#10;{{clipboard}}">${escapeHtml(initial)}</textarea>
       <div class="sn-chips">
@@ -9016,9 +9037,10 @@ function snippetModal(existing, presetContent) {
   showModal(existing ? "编辑提示词" : "新建提示词", box, async () => {
     const name = box.querySelector("#sn-name").value.trim();
     const content = box.querySelector("#sn-content").value.trim();
+    const slash = box.querySelector("#sn-slash").value.trim().replace(/^\/+/, "").toLowerCase();
     if (!name || !content) throw new Error("名称与内容不能为空");
-    if (existing) await request("snippets.update", { id: existing.id, name, content });
-    else await request("snippets.add", { name, content });
+    if (existing) await request("snippets.update", { id: existing.id, name, content, slash });
+    else await request("snippets.add", { name, content, slash });
     await loadSnippets();
   }, existing ? "保存" : "创建");
 }
@@ -12133,6 +12155,13 @@ function moveMenuActive(delta) {
 // 按下鼠标不抢走输入框焦点，保证菜单项 click 能触发
 inputMenu.addEventListener("mousedown", (e) => e.preventDefault());
 
+function customSlashCommands() {
+  // 提示词片段带斜杠别名时，直接注册成 /命令（内置命令优先，后端已拦冲突）
+  return (snippetsCache || [])
+    .filter((s) => s.enabled !== 0 && s.slash)
+    .map((s) => ({ cmd: "/" + s.slash, desc: `提示词：${s.name}`, snippet: s }));
+}
+
 const SLASH_COMMANDS = [
   { cmd: "/help", desc: "查看所有命令" },
   { cmd: "/new", desc: "新建会话（Ctrl+N）" },
@@ -12265,11 +12294,17 @@ function updateInputMenu(face) {
   const slash = before.match(/^\/([\w-]*)$/);
   if (slash) {
     const q = slash[1].toLowerCase();
-    const items = SLASH_COMMANDS.filter((c) => c.cmd.startsWith("/" + q))
+    const items = [...SLASH_COMMANDS, ...customSlashCommands()]
+      .filter((c) => c.cmd.startsWith("/" + q))
       .map((c) => ({
         label: c.cmd,
         desc: c.desc,
-        onPick: () => { el.value = ""; autoGrowInput(el); execSlash(c.cmd, face); },
+        onPick: () => {
+          el.value = "";
+          autoGrowInput(el);
+          if (c.snippet) insertSnippet(c.snippet, face);
+          else execSlash(c.cmd, face);
+        },
       }));
     showInputMenu(items, "（没有匹配的命令，回车仍会作为消息发送）");
     return;
@@ -13046,6 +13081,9 @@ function showSettingsPage(target) {
   if (target === "runs") loadRunsPage();
   if (target === "usage") loadUsage();
   if (target === "memory") { loadMemoryPage(); loadInstructions(); loadSnippets(); }
+  if (target === "projects") {
+    if (typeof loadProjectAdmin === "function") loadProjectAdmin();
+  }
   if (target === "archive") loadArchivePage();
   if (target === "browser") loadBrowserPage();
   if (target === "remote") { loadLanPanel(); loadTsPanel(); loadChannelPanel(); }
@@ -18715,6 +18753,9 @@ connect();
 boot();
 // 必须在 connect() 之后：ws 尚未创建时 request() 会抛错（被 catch 吞掉、偏好悄悄不生效）
 initUiPrefs();
+// 提示词片段在 ~ 菜单与 /自定义命令里都要用：启动即拉一次（设置页再拉是
+// 为了编辑后的最新列表）。失败静默，菜单仍有内置示例兜底。
+if (typeof loadSnippets === "function") loadSnippets();
 
 // ---------- 分级权限模式：安全执行 / 自动编辑 / 完全访问（对标 Codex / Claude Code 三档） ----------
 // 点击循环切换：安全执行（写入/执行都征询）→ 自动编辑（工作目录内写入放行，命令仍征询）

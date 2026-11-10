@@ -176,6 +176,7 @@
           <li class="nav-cap" aria-hidden="true">日常</li>
           <li data-target="memory">全局记忆</li>
           <li data-target="ui">界面与通知</li>
+          <li data-target="projects">项目</li>
           <li data-target="archive">归档管理</li>
           <li class="nav-cap" aria-hidden="true">安全</li>
           <li data-target="remote">远程控制</li>
@@ -2309,6 +2310,45 @@
 };</code></pre>
               </div>
             </div>
+          </section>
+        </section>
+
+        <!-- 项目：软移除（只从侧栏/选择器隐藏，会话保留）+ 恢复 + 闲置项目复核。
+             与侧栏「项目」区的区别：这里是全局管理面，能看到会话数、最后活动时间
+             和已移除的项目；侧栏只负责切换。 -->
+        <section class="settings-page hidden" id="settings-page-projects">
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>项目</h3>
+              <span class="head-ops">
+                <button id="btn-projects-refresh" class="btn-ghost">刷新</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              移除项目只会把它从<b>侧栏和项目选择器</b>中拿掉；会话仍保留在最近和搜索中，
+              磁盘上的文件夹不受影响。需要彻底删除时到下方「已移除的项目」里操作。
+            </p>
+            <div id="projects-stale-note" class="card-status warn" hidden></div>
+            <div class="proj-admin-tools">
+              <input id="projects-search" class="modal-input" type="search"
+                     placeholder="搜索项目、文件夹…" autocomplete="off">
+              <select id="projects-filter" class="modal-input">
+                <option value="all">全部项目</option>
+                <option value="stale">疑似不再使用</option>
+              </select>
+              <select id="projects-sort" class="modal-input">
+                <option value="recent">排序：最近活动</option>
+                <option value="name">排序：名称</option>
+              </select>
+            </div>
+            <ul id="projects-admin-list" class="list"></ul>
+          </section>
+          <section class="settings-card">
+            <h3>已移除的项目</h3>
+            <p class="settings-hint">
+              恢复后回到侧栏；彻底删除会连同会话、白名单与自动化一起删除，不可撤销。
+            </p>
+            <ul id="projects-removed-list" class="list"></ul>
           </section>
         </section>
 

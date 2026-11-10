@@ -9726,3 +9726,43 @@ li.mcp-failed { border-left: 0; }
   display: flex; align-items: center; gap: 6px;
   font-size: var(--fs-sm); color: var(--text2); cursor: pointer;
 }
+
+/* ---------- 设置·项目：管理列表（软移除 / 恢复 / 闲置复核） ---------- */
+.proj-admin-tools {
+  display: flex; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap;
+}
+.proj-admin-tools .modal-input { flex: 1 1 220px; min-width: 0; }
+.proj-admin-tools select.modal-input { flex: 0 0 auto; width: auto; }
+.proj-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 0; border-bottom: 1px dashed var(--line2);
+}
+.proj-row:last-child { border-bottom: none; }
+.proj-row-main { flex: 1; min-width: 0; }
+.proj-row-name {
+  display: flex; align-items: center; gap: 7px;
+  font-weight: var(--fw-semi);
+}
+.proj-row-name .p-ico { width: 15px; height: 15px; flex: 0 0 15px; color: var(--text2); }
+.proj-row-name .dim { font-weight: var(--fw-normal); }
+.proj-row-path {
+  margin-top: 2px; color: var(--dim); font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.proj-row-meta {
+  flex: 0 0 auto; color: var(--dim); font-size: var(--fs-sm);
+  font-variant-numeric: var(--num); text-align: right; line-height: 1.5;
+}
+.proj-row-ops { flex: 0 0 auto; display: flex; gap: 6px; }
+.proj-badge {
+  padding: 0 6px; border-radius: var(--r-pill); border: 1px solid var(--line2);
+  color: var(--dim); font-size: var(--fs-cap); line-height: 1.6;
+}
+.proj-badge.current { color: var(--blue); border-color: var(--blue); }
+.proj-badge.stale { color: var(--gold); border-color: var(--gold); }
+.proj-empty { padding: 12px 0; color: var(--dim); font-size: var(--fs-sm); }
+.proj-stale-item { cursor: pointer; text-decoration: underline dotted; }
+@media (max-width: 720px) {
+  .proj-row { flex-wrap: wrap; }
+  .proj-row-meta { text-align: left; width: 100%; }
+}

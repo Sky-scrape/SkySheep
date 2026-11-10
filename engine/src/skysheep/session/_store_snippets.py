@@ -16,7 +16,7 @@ class SnippetsMixin:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-    async def add_snippet(self, name: str, content: str) -> dict:
+    async def add_snippet(self, name: str, content: str, slash: str = "") -> dict:
         assert self._db
         # 新条目排在列表最前：sort_order 取现有最小值 - 1（空库取 0），
         # 保证「刚建的提示词马上能在 ~ 候选前几位看到」
@@ -25,8 +25,9 @@ class SnippetsMixin:
         base = row[0] if row and row[0] is not None else None
         sort_order = 0.0 if base is None else float(base) - 1.0
         cur = await self._db.execute(
-            "INSERT INTO snippets (name, content, created_at, sort_order) VALUES (?, ?, ?, ?)",
-            (name[:40], content[:8000], time.time(), sort_order),
+            "INSERT INTO snippets (name, content, created_at, sort_order, slash)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (name[:40], content[:8000], time.time(), sort_order, slash[:32]),
         )
         await self._db.commit()
         row = await (await self._db.execute(
@@ -61,20 +62,23 @@ class SnippetsMixin:
         return cur.rowcount > 0
 
     async def update_snippet(
-        self, snippet_id: int, name: str, content: str, enabled: bool | None = None,
+        self, snippet_id: int, name: str, content: str,
+        enabled: bool | None = None, slash: str | None = None,
     ) -> bool:
         assert self._db
-        if enabled is None:
-            cur = await self._db.execute(
-                "UPDATE snippets SET name = ?, content = ? WHERE id = ?",
-                (name[:40], content[:8000], snippet_id),
-            )
-        else:
+        sets = ["name = ?", "content = ?"]
+        args: list = [name[:40], content[:8000]]
+        if enabled is not None:
             # 带启用位：编辑弹窗保存时可以顺带改停用状态
-            cur = await self._db.execute(
-                "UPDATE snippets SET name = ?, content = ?, enabled = ? WHERE id = ?",
-                (name[:40], content[:8000], 1 if enabled else 0, snippet_id),
-            )
+            sets.append("enabled = ?")
+            args.append(1 if enabled else 0)
+        if slash is not None:
+            sets.append("slash = ?")
+            args.append(slash[:32])
+        args.append(snippet_id)
+        cur = await self._db.execute(
+            "UPDATE snippets SET " + ", ".join(sets) + " WHERE id = ?", tuple(args)
+        )
         await self._db.commit()
         return cur.rowcount > 0
 

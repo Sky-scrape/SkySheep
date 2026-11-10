@@ -184,7 +184,7 @@ from ..security.gate import (
 )
 from ..security.trust import STATE_PENDING, WorkspaceTrust, list_trusted, revoke_by_path
 from ..session import SessionStore
-from ..session.store import export_messages_text
+from ..session.store import Project, export_messages_text
 from ..skills import SkillLoader
 from ..skills.draft import build_skill_draft, save_skill_draft
 from ..skills.installer import (
@@ -1889,12 +1889,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         prefs = self._read_ui_prefs()
         remembered = prefs.get("active_project")
         projects = await self.store.list_projects()
+        # 软移除的项目不参与「当前项目」恢复，但也不能触发「首次启动自动建项目」：
+        # 用户主动移除唯一的项目后重启，应当保持无项目态，而不是把同一个目录
+        # 经 get_or_create_project 恢复回来。
+        has_removed = bool(await self.store.list_projects(include_removed=True)) and not projects
         target: Path | None = None
         if remembered:
             row = next((p for p in projects if p.id == remembered), None)
             if row is not None and Path(row.root_path).is_dir():
                 target = Path(row.root_path)
-        elif not projects:
+        elif not projects and not has_removed:
             # 首次启动（没有任何项目记录、也没记住过当前项目）：把启动目录
             # 登记成第一个项目，保持「装完即用」的开箱体验
             if self._startup_dir is not None and self._startup_dir.is_dir():
@@ -7048,6 +7052,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "total_cached": total_cached,
             # 真实去重会话数：无项目态与 by_session 被截断时它才是准确口径
             "session_count": st.get("session_count", 0),
+            # 连续天数 / 最长聊天（设置·用量页的两块统计；无数据为 0）
+            "streak_current": st.get("streak_current", 0),
+            "streak_longest": st.get("streak_longest", 0),
+            "longest_chat_seconds": st.get("longest_chat_seconds", 0.0),
             "cost": round(cost, 4),
             "has_price": any(p["price_in"] or p["price_out"] for p in prices.values()),
             # 每日预算与当日用量：用量页据此显示「今日已用 / 预算」，0 = 未设上限
@@ -7821,7 +7829,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return {
             "format": "skysheep-snippets",
             "version": 1,
-            "snippets": [{"name": s["name"], "content": s["content"]} for s in rows],
+            # slash 只在非空时带上：不含命令的旧导出保持原 JSON 形状，
+            # 外部脚本按 {name, content} 读取不会突然多出一个空字段
+            "snippets": [
+                {"name": s["name"], "content": s["content"],
+                 **({"slash": s["slash"]} if s.get("slash") else {})}
+                for s in rows
+            ],
         }
 
     async def import_snippets(self, params: dict) -> dict:
@@ -7866,10 +7880,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 continue
             name = str(it.get("name") or "").strip()[:40]
             content = str(it.get("content") or "").strip()[:8000]
+            slash = str(it.get("slash") or "").strip().lstrip("/").lower()[:32]
             if not name or not content or (name, content) in existing:
                 skipped += 1
                 continue
-            await self.store.add_snippet(name, content)
+            # 导入包里的别名可能非法/冲突：静默降级为「不注册命令」，
+            # 不让一条脏数据阻断整份提示词导入
+            if slash and not re.fullmatch(r"[a-z0-9_-]{1,32}", slash):
+                slash = ""
+            if slash and any(s.get("slash") == slash for s in await self.store.list_snippets()):
+                slash = ""
+            await self.store.add_snippet(name, content, slash=slash)
             existing.add((name, content))
             added += 1
         return {"added": added, "skipped": skipped}
@@ -9201,8 +9222,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         }
 
     async def delete_project(self, project_id: int) -> dict:
-        """把一个项目从列表里移除：项目记录、它的会话、白名单、任务清单与
-        定时任务/流水线一并删除；电脑上的文件夹不受影响。
+        """彻底删除项目：项目记录、它的会话、白名单、任务清单与定时任务/流水线
+        一并删除；电脑上的文件夹不受影响。
+
+        只是「从列表里拿掉、保留会话」请用 remove_project（软移除，可恢复）。
 
         删除是真实的删除：当前项目删掉后**不再重建一条同目录的新记录**——
         还有别的项目就切到最近的一个，一个都不剩就进入无项目态（列表为空，
@@ -9255,6 +9278,76 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._base_agent.load_history([Message.system(self.compose_system())])
         return {"removed": project_id, "was_current": True, "switched_to": None,
                 "relay_converged": relay_converged}
+
+    async def remove_project(self, project_id: int) -> dict:
+        """软移除项目：只从侧栏/项目选择器隐藏，会话、白名单、任务全部保留。
+
+        与 delete_project 的区别：项目行还在（removed_at > 0），已移除列表可恢复，
+        会话仍可被搜索命中；磁盘文件夹不受影响。
+        """
+        is_current = self.project is not None and project_id == self.project.id
+        if is_current and self._run_task and not self._run_task.done():
+            raise RuntimeError("当前有任务正在运行，请先停止再移除项目")
+        proj = await self.store.get_project(project_id)
+        if proj is None:
+            raise RuntimeError("项目不存在，可能已被移除")
+        if not await self.store.hide_project(project_id):
+            raise RuntimeError("项目已经被移除")
+        if self.is_remote_project(proj):
+            self._remote_project_id_cache = None
+        if not is_current:
+            return {"removed": project_id, "was_current": False}
+        # 当前项目被移除：切到最近的一个仍显示的项目，或者进入无项目态。
+        # 不删任何会话；隐藏项目的会话仍可通过搜索打开，恢复项目后回到侧栏。
+        remaining = [p for p in self.ordered_projects(await self.store.list_projects())
+                     if not self.is_remote_project(p)]
+        if remaining:
+            next_path = remaining[0].root_path
+            await self._bind_project(Path(next_path))
+            self.session = None
+            latest = await self.store.latest_session(self.project.id)
+            if latest is not None:
+                await self.resume_session(latest.id)
+            else:
+                self._base_agent.load_history([Message.system(self.compose_system())])
+            return {
+                "removed": project_id, "was_current": True,
+                "switched_to": {"path": str(self.project.root_path), "name": self.project.name},
+            }
+        await self._bind_project(None)
+        self.session = None
+        self._base_agent.load_history([Message.system(self.compose_system())])
+        return {"removed": project_id, "was_current": True, "switched_to": None}
+
+    async def restore_project(self, project_id: int) -> dict:
+        """恢复软移除的项目到侧栏/项目选择器（不切换当前项目）。"""
+        proj = await self.store.get_project(project_id)
+        if proj is None:
+            raise RuntimeError("项目不存在，可能已被彻底删除")
+        if not await self.store.restore_project(project_id):
+            raise RuntimeError("项目没有被移除")
+        if self.is_remote_project(proj):
+            self._remote_project_id_cache = None
+        return {"restored": project_id, "name": proj.name}
+
+    async def project_admin_list(self) -> dict:
+        """设置·项目页：全部项目（含已移除）+ 会话数 + 最后活动时间。"""
+        rows = await self.store.project_admin_list()
+        active, removed = [], []
+        for r in rows:
+            proj = Project(r["id"], r["root_path"], r["name"], r["created_at"])
+            remote = self.is_remote_project(proj)
+            item = {
+                "id": r["id"], "name": r["name"],
+                "root_path": "" if remote else r["root_path"],
+                "is_remote": remote,
+                "is_current": self.project is not None and r["id"] == self.project.id,
+                "session_count": r["session_count"],
+                "last_active": r["last_active"],
+                "removed_at": r["removed_at"],
+            }
+            (removed if r["removed_at"] > 0 else active).append(item)
+        return {"projects": active, "removed": removed}
 
 
     # 字符串型偏好（值域白名单）：theme 值域见模块级 THEME_PREFS

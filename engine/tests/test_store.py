@@ -780,3 +780,108 @@ async def test_get_full_message_at_reads_persisted_metadata(store):
     # 会话归属：另一个会话的同序号不会串读
     other = await store.create_session(p.id, title="other")
     assert await store.get_full_message_at(other.id, seq) is None
+
+
+async def test_soft_remove_project_keeps_sessions_and_restores(store, tmp_path):
+    """软移除项目：侧栏列表消失，但项目行/会话/搜索都还在，可恢复。"""
+    p = await store.get_or_create_project(str(tmp_path / "keep-me"), "保留我")
+    s = await store.create_session(p.id, title="删项目也要留下")
+    await store.append_message(s.id, Message.user("这条消息必须还在"))
+
+    assert await store.hide_project(p.id) is True
+    assert await store.hide_project(p.id) is False, "重复移除不再命中"
+    assert all(x.id != p.id for x in await store.list_projects())
+    assert any(x.id == p.id for x in await store.list_projects(include_removed=True))
+    assert (await store.get_project(p.id)).removed_at > 0
+    assert await store.get_session(s.id) is not None
+    assert [m.text for m in await store.load_messages(s.id)] == ["这条消息必须还在"]
+
+    admin = await store.project_admin_list()
+    row = next(x for x in admin if x["id"] == p.id)
+    assert row["session_count"] == 1
+    assert row["last_active"] > 0
+    assert row["removed_at"] > 0
+
+    assert await store.restore_project(p.id) is True
+    assert any(x.id == p.id for x in await store.list_projects())
+
+
+async def test_readd_removed_project_restores_same_row(store, tmp_path):
+    """移除后再次添加同一目录：恢复原行，不撞 root_path UNIQUE。"""
+    root = str(tmp_path / "readd")
+    p = await store.get_or_create_project(root)
+    assert await store.hide_project(p.id)
+    again = await store.get_or_create_project(root)
+    assert again.id == p.id
+    assert again.removed_at == 0
+    assert any(x.id == p.id for x in await store.list_projects())
+
+
+async def test_usage_streaks_and_longest_chat(store, tmp_path):
+    """用量页：连续天数（当前/最长）与最长聊天跨度（首条→末条消息）。"""
+    from datetime import date, datetime, timedelta
+    from datetime import time as dtime
+
+    p = await store.get_or_create_project(str(tmp_path / "usage"), "usage")
+    s = await store.create_session(p.id, title="长会话")
+    for text in ("a", "b", "c"):
+        await store.append_message(s.id, Message.user(text))
+
+    def noon(day: date) -> float:
+        return datetime.combine(day, dtime(12, 0)).timestamp()
+
+    today = date.today()
+    # 当前连续 3 天；历史另一段连续 4 天 → 最长 4
+    for offset in (0, 1, 2, 18, 19, 20, 21):
+        day = today - timedelta(days=offset)
+        await store._db.execute(
+            "INSERT INTO usage_log (session_id, provider, model, ts, in_tokens, out_tokens)"
+            " VALUES (?, 'p', 'm', ?, 10, 5)",
+            (s.id, noon(day)),
+        )
+    await store._db.commit()
+
+    # 消息跨度：首条 → 末条 = 2 小时（其余会话保持默认 0）
+    base = noon(today - timedelta(days=1))
+    for i, seq in enumerate((1, 2, 3)):
+        await store._db.execute(
+            "UPDATE messages SET created_at = ? WHERE session_id = ? AND seq = ?",
+            (base + i * 3600, s.id, seq),
+        )
+    await store._db.commit()
+
+    st = await store.usage_stats(30, project_id=p.id)
+    assert st["streak_current"] == 3
+    assert st["streak_longest"] == 4
+    assert st["longest_chat_seconds"] == 7200
+
+
+async def test_v13_migration_adds_project_removed_at_and_snippet_slash(tmp_path):
+    """旧库（user_version=12）升级：projects.removed_at 与 snippets.slash 自动补列。"""
+    import sqlite3
+
+    db_file = tmp_path / "old-v12.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute(
+        "CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " root_path TEXT NOT NULL UNIQUE, name TEXT NOT NULL DEFAULT '',"
+        " created_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE snippets (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " name TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL)"
+    )
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+
+    store = await SessionStore(db_file).connect()
+    try:
+        cur = await store._db.execute("PRAGMA table_info(projects)")
+        assert "removed_at" in {row[1] for row in await cur.fetchall()}
+        cur = await store._db.execute("PRAGMA table_info(snippets)")
+        assert "slash" in {row[1] for row in await cur.fetchall()}
+        cur = await store._db.execute("PRAGMA user_version")
+        assert int((await cur.fetchone())[0]) == 13
+    finally:
+        await store.close()

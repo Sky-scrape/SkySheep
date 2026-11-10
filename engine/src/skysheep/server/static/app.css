@@ -933,7 +933,22 @@ mark.search-hit-mark {
   border-left: 3px solid var(--blue);
   border-radius: var(--r-md); padding: 10px 12px; overflow-x: auto; margin: 8px 0;
 }
-.md pre code { background: none; border: none; padding: 0; font-size: var(--fs-md); line-height: 1.6; }
+.md pre code { background: none; border: none; padding: 0; font-size: var(--code-fs, var(--fs-md)); line-height: 1.6; }
+/* 长行换行（设置 · 界面 → 代码外观）：默认横向滚动，开启后按容器宽度折行 */
+html.code-wrap .md pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 行号槽：与代码块同一行高；横向滚动时贴在左侧（sticky），复制按钮不受影响 */
+.md pre.has-lines { display: flex; align-items: flex-start; padding-left: 0; }
+.md pre.has-lines .code-gutter {
+  position: sticky; left: 0; z-index: 1; flex: 0 0 auto;
+  padding: 0 8px 0 10px; margin-right: 10px;
+  color: var(--dim); background: var(--paper-sunken);
+  border-right: 1px solid var(--line2);
+  font-family: var(--font-mono); font-size: var(--code-fs, var(--fs-md));
+  line-height: 1.6; text-align: right; white-space: pre;
+  user-select: none; pointer-events: none;
+}
+.md pre.has-lines code { flex: 1 1 auto; min-width: 0; }
+html.code-wrap .md pre.has-lines { display: block; }
 
 /* ---------- 代码块语法高亮（highlight.js · 色板变量随纸墨/夜墨切换） ---------- */
 .hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
@@ -1210,6 +1225,28 @@ mark.search-hit-mark {
 .todo-ico.in_progress { color: var(--gold); }
 .todo-txt.completed { color: var(--dim); text-decoration: line-through; }
 .todo-txt.in_progress { font-weight: var(--fw-bold); }
+
+/* 消息流里的任务进度卡（todo_write 工具卡原地替换；设置可关） */
+.tool-card.todo-flow-card { padding: 9px 12px; }
+.todo-flow-card .tf-head { cursor: default; }
+.todo-flow-card .tf-count {
+  margin-left: auto; flex-shrink: 0; color: var(--dim);
+  font-family: var(--font-mono); font-variant-numeric: var(--num);
+}
+.todo-flow-card .tf-list {
+  list-style: none; margin: 7px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.todo-flow-card .tf-list li {
+  display: flex; gap: 7px; align-items: flex-start;
+  white-space: normal; line-height: 1.45; font-size: var(--fs-sm);
+}
+.todo-flow-card .tf-ico { flex-shrink: 0; font-family: var(--font-mono); font-weight: var(--fw-bold); }
+.todo-flow-card .tf-completed .tf-ico { color: var(--down); }
+.todo-flow-card .tf-in_progress .tf-ico { color: var(--gold); }
+.todo-flow-card .tf-completed .tf-txt { color: var(--dim); text-decoration: line-through; }
+.todo-flow-card .tf-in_progress .tf-txt { font-weight: var(--fw-bold); }
+.todo-flow-card .tf-more { margin-top: 5px; }
 
 /* ---------- 项目任务（与项目绑定，删项目一并清掉） ---------- */
 .ptask-input {
@@ -7231,6 +7268,35 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 /* 迷你分段控件（模型菜单、设置页服务商页签等复用） */
 .seg-mini { display: flex; width: 100%; margin: 4px 0 2px; box-shadow: none; }
 .seg-mini button { flex: 1; padding: 3px 4px; font-size: var(--fs-sm); font-weight: var(--fw-semi); }
+
+/* ---------- 设置页：代码外观（浅/深双预览） ---------- */
+.code-preview-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px; margin-top: 4px;
+}
+.code-preview {
+  border: 1px solid var(--line2); border-radius: var(--r-md);
+  overflow: hidden; background: var(--paper-raised); min-width: 0;
+}
+.code-preview-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px; border-bottom: 1px solid var(--line2);
+  font-size: var(--fs-sm);
+}
+.code-preview-head b { font-weight: var(--fw-semi); }
+.code-preview-tag {
+  margin-left: auto; padding: 1px 7px; border-radius: var(--r-pill);
+  border: 1px solid var(--line2); color: var(--dim); font-size: var(--fs-cap);
+}
+.code-preview pre {
+  margin: 0; padding: 12px; overflow: auto;
+  font-family: var(--font-mono); font-size: var(--code-fs, var(--fs-md));
+  line-height: 1.6; tab-size: 2;
+}
+.code-preview pre code { background: none; border: none; padding: 0; font-size: inherit; }
+@media (max-width: 860px) {
+  .code-preview-grid { grid-template-columns: 1fr; }
+}
 
 /* ---------- 设置页：主题选择（跟随系统 + 二十六套配色卡片） ---------- */
 /* 二十六套主题用四列网格：每段浅色 / 深色各两行，卡片等宽不出现「7+1」的孤行；

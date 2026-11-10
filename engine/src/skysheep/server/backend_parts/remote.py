@@ -218,7 +218,35 @@ class RemoteMixin:
             info = await check_latest_release(channel=self._update_channel())
             if is_newer_version(info["version"], __version__):
                 self.update_info = info
+                # 自动下载（关于页开关，默认关）：只下载，安装仍要用户点
+                # 「退出并安装」——静默重启应用不在本功能授权范围内。
+                if self._is_frozen and self._auto_update_download_pref():
+                    self._auto_update_task = spawn_bg(self._auto_download_update())
         except Exception:  # noqa: BLE001 - 离线/仓库不存在：完全静默
+            pass
+
+    def _auto_update_download_pref(self) -> bool:
+        try:
+            return self._read_ui_prefs().get("auto_update_download", 0) == 1
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _auto_download_update(self) -> None:
+        """后台下载最新安装包；完成后发系统通知，等用户到「关于」页确认安装。"""
+        try:
+            r = await self.install_update()
+        except Exception as e:  # noqa: BLE001 - 自动下载失败不打扰用户
+            logger.warning("自动下载更新失败：%s", e)
+            return
+        if not r.get("update_available"):
+            return
+        try:
+            await self.notify({
+                "title": "SkySheep 更新已下载",
+                "body": f"新版本 v{r.get('version', '')} 已准备好；"
+                        "打开 设置 · 关于 点「退出并安装」即可完成更新。",
+            })
+        except Exception:  # noqa: BLE001 - 通知失败不影响已下载的包
             pass
 
 
@@ -723,10 +751,20 @@ class RemoteMixin:
         if is_newer_version(info["version"], __version__):
             self.update_info = info
             return {"available": True, "current": __version__, "frozen": self._is_frozen,
-                    "channel": channel, **info}
+                    "channel": channel, "downloaded": self._update_ready(info["version"]),
+                    **info}
         self.update_info = None
         return {"available": False, "current": __version__, "frozen": self._is_frozen,
-                "channel": channel, "latest": info["version"]}
+                "channel": channel, "latest": info["version"], "downloaded": False}
+
+    def _update_ready(self, version: str) -> bool:
+        """该版本的安装包是否已下载完成（自动下载 / 上次手动下载都算）。"""
+        path = self._pending_update or ""
+        return bool(
+            path
+            and self._pending_update_version == str(version)
+            and Path(path).is_file()
+        )
 
     async def install_update(self, emit=None) -> dict:
         """应用内一键更新（仅安装版）：下载最新版安装包到临时目录。
@@ -744,6 +782,19 @@ class RemoteMixin:
         info = await check_latest_release(channel=self._update_channel())
         if not is_newer_version(info["version"], __version__):
             return {"update_available": False, "current": __version__, "latest": info["version"]}
+        # 自动下载（或上次手动下载）已经拿到同一版本：直接复用，不再跑一遍
+        # 网络。校验和已在下载时核对过；文件在下载落盘后不会被外部改写
+        # （随机私有临时目录），所以这里只验存在与版本匹配。
+        if self._update_ready(info["version"]):
+            return {
+                "update_available": True, "version": info["version"],
+                "path": self._pending_update,
+                # 复用下载时实际核对结果：发布页缺 .sha256 时首次就是未核对，
+                # 复用时不能伪造成 True（前端按 verified === true 决定是否提示）
+                "verified": self._pending_update_verified,
+                "egress": "direct", "reused": True,
+                "uac": _setup_privilege_override() != "/CURRENTUSER",
+            }
         # setup_url 是按发布约定拼的（releases/download/<tag>/SkySheep-<版本>-setup.exe），
         # 附件真缺要到下载时才以 404 暴露
         url = info["setup_url"]
@@ -778,6 +829,8 @@ class RemoteMixin:
                     "最新版没有 Windows 安装包附件，请到 GitHub Releases 手动下载") from e
             raise
         self._pending_update = str(dest)
+        self._pending_update_version = str(info["version"])
+        self._pending_update_verified = bool(expected)
         return {"update_available": True, "version": info["version"], "path": str(dest),
                 "verified": bool(expected),
                 # 实际走的出网路径（direct/proxy）：择优生效时界面能如实说明

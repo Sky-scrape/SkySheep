@@ -23,6 +23,7 @@ function renderUpdatePanel(snap) {
   const frozen = !!snap.frozen; // 安装版=可在应用内静默更新；源码版提示 git pull
   const edition = frozen ? "安装版" : "源码版"; // 排障时的关键信息，随版本号一起亮出来
   const upd = snap.update || null;
+  const updDownloaded = !!snap.update_downloaded;
   // 上次更新的结果对账（后端启动时结算）：失败亮现场直到「知道了」，成功提示一次
   const fail = snap.update_failure || null;
   const failHtml = fail ? `
@@ -62,7 +63,7 @@ function renderUpdatePanel(snap) {
   const actions = box.querySelector("#upd-actions");
 
   // 一键更新：下载最新安装包 → 退出并静默安装（仅安装版；源码版提示 git pull）
-  const setUpdButtons = (version) => {
+  const setUpdButtons = (version, downloaded = false) => {
     actions.innerHTML = "";
     const link = `<a href="${RELEASES_PAGE}" target="_blank">前往下载页</a>`;
     if (!frozen) {
@@ -71,7 +72,9 @@ function renderUpdatePanel(snap) {
     }
     const b = document.createElement("button");
     b.className = "btn-ghost";
-    b.textContent = `⬇ 一键更新到 v${escapeHtml(version)}`;
+    b.textContent = downloaded
+      ? `安装已下载的 v${escapeHtml(version)}`
+      : `⬇ 一键更新到 v${escapeHtml(version)}`;
     b.onclick = async () => {
       b.disabled = true;
       state.textContent = "正在下载更新包…";
@@ -134,7 +137,12 @@ function renderUpdatePanel(snap) {
     actions.insertAdjacentHTML("beforeend", `<span class="dim small">或${link}</span>`);
   };
 
-  if (upd && upd.version) setUpdButtons(upd.version);
+  if (upd && upd.version) {
+    setUpdButtons(upd.version, updDownloaded);
+    if (updDownloaded && state) {
+      state.textContent = `✓ v${upd.version} 安装包已下载，点「退出并安装」完成更新`;
+    }
+  }
 
   box.querySelector("#btn-check-update").onclick = async () => {
     state.textContent = "正在检查更新…";
@@ -146,7 +154,7 @@ function renderUpdatePanel(snap) {
       if (r.available) {
         state.innerHTML = `🆕 发现新版本 v${escapeHtml(r.version)}（当前 v${escapeHtml(r.current)}  ${edition}  ${channelLabel()}）`;
         state.className = "upd-state new";
-        setUpdButtons(r.version);
+        setUpdButtons(r.version, !!r.downloaded);
       } else if (r.error) {
         state.textContent = "检查失败：" + r.error;
       } else {
@@ -264,6 +272,8 @@ async function loadBackups() {
     const sel = document.getElementById("update-channel");
     updateChannelPref = (ui && ui.prefs.update_channel) || "stable";
     if (sel) sel.value = updateChannelPref;
+    const au = document.getElementById("auto-update-download-toggle");
+    if (au) au.checked = !!(ui && ui.prefs.auto_update_download === 1);
   }).catch(() => {});
   const ul = document.getElementById("backup-list");
   let d;

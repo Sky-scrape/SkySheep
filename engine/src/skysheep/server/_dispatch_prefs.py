@@ -60,6 +60,18 @@ async def _h_memory_save(backend: ServerBackend, params: dict, emit, local: bool
     )
 
 
+async def _h_instructions_get(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    return await backend.instructions_get()
+
+
+async def _h_instructions_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    bm = params.get("base_mtime")
+    return await backend.instructions_save(
+        str(params.get("text", "")),
+        base_mtime=None if bm is None else float(bm),
+    )
+
+
 async def _h_memory_maintain_save(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     gi, pi = params.get("global_enabled"), params.get("project_enabled")
     ih = params.get("interval_hours")
@@ -231,6 +243,10 @@ METHODS: dict[str, _WsMethod] = {
     "ui.save": _WsMethod(_h_ui_save),
     "memory.get": _WsMethod(_h_memory_get, local_only=True),
     "memory.save": _WsMethod(_h_memory_save, local_only=True),
+    # 全局自定义指令写进系统提示词：读/写都限定本机（远端不能改本机的
+    # 全局行为规则；截图同款语义——「指令只应用到你本机，远程设备单独配置」）
+    "instructions.get": _WsMethod(_h_instructions_get, local_only=True),
+    "instructions.save": _WsMethod(_h_instructions_save, local_only=True),
     "memory.maintain_save": _WsMethod(_h_memory_maintain_save),
     "memory.maintain_now": _WsMethod(_h_memory_maintain_now),
     "memory.digest_save": _WsMethod(_h_memory_digest_save),

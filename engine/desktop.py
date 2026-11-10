@@ -981,6 +981,19 @@ def _read_hotkey_pref() -> str:
         return _HOTKEY_DEFAULT
 
 
+def _read_close_to_tray_pref() -> bool:
+    """ui.json 的 close_to_tray：1 = 关闭窗口直接缩托盘，缺省/损坏 = 每次询问。"""
+    try:
+        import json
+
+        from skysheep.instance import data_home
+
+        prefs = json.loads((data_home() / "ui.json").read_text(encoding="utf-8"))
+        return int((prefs or {}).get("close_to_tray") or 0) == 1
+    except Exception:
+        return False
+
+
 def _start_global_hotkey(window, on_trigger, combo: str = "") -> None:
     """注册全局热键（默认 Ctrl+Alt+Space，可由 ui.json 的 hotkey 偏好改键）：
     唤起窗口 + 预填剪贴板。
@@ -1548,12 +1561,35 @@ def _run_windowed() -> int:
             except Exception:
                 pass
 
+    def _hide_to_tray() -> None:
+        """隐藏主窗口并弹一次「在后台运行」的托盘提示（不退出进程）。"""
+        try:
+            window.hide()
+        except Exception:
+            pass
+        nid = tray_holder.get("nid")
+        if nid is not None:
+            try:
+                nid.uFlags |= NIF_INFO
+                nid.szInfo = "双击托盘图标恢复窗口；右键图标可打开或退出。"
+                nid.szInfoTitle = f"{app_title()} 已在后台运行"
+                nid.dwInfoFlags = NIIF_INFO
+                ctypes.windll.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+            except Exception:
+                pass
+
     def _on_closing() -> bool:
         """返回 False = 阻止关闭（pywebview closing 事件语义）。"""
         if state["quitting"]:
             # 彻底退出前记住窗口几何（本分支覆盖托盘「退出」路径）
             _remember_window(window)
             return True
+        # 设置页勾了「关闭窗口时直接缩到托盘」：不再弹三选一，直接隐藏。
+        # 托盘不可用（图标缺失/线程失败）时不能隐藏——否则窗口没有入口恢复，
+        # 退回三选一让用户选「彻底退出」。
+        if _read_close_to_tray_pref() and tray_holder.get("nid") is not None:
+            _hide_to_tray()
+            return False
         choice = _ask_close_choice()
         if choice == 6:  # 是：彻底退出
             state["quitting"] = True
@@ -1562,20 +1598,7 @@ def _run_windowed() -> int:
             _dispose_tray()
             return True
         if choice == 7:  # 否：缩到系统托盘
-            try:
-                window.hide()
-            except Exception:
-                pass
-            nid = tray_holder.get("nid")
-            if nid is not None:
-                try:
-                    nid.uFlags |= NIF_INFO
-                    nid.szInfo = "双击托盘图标恢复窗口；右键图标可打开或退出。"
-                    nid.szInfoTitle = f"{app_title()} 已在后台运行"
-                    nid.dwInfoFlags = NIIF_INFO
-                    ctypes.windll.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
-                except Exception:
-                    pass
+            _hide_to_tray()
             return False
         return False  # 取消：留在当前窗口
 

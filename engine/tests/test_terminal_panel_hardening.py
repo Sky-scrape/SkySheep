@@ -101,3 +101,47 @@ def test_web_fetch_url_length_cap():
         assert "url" in str(e).lower()
     else:
         raise AssertionError("超长 URL 未被拒绝")
+
+
+def test_terminal_shell_choice_maps_to_command(monkeypatch):
+    """设置里的 Shell 白名单翻译成 ConPTY 启动命令；未知值回落到 PowerShell。"""
+    from skysheep.server.backend_parts import terminal as term_mod
+
+    assert term_mod._shell_command("auto") == "powershell.exe -NoLogo"
+    assert term_mod._shell_command("powershell") == "powershell.exe -NoLogo"
+    assert term_mod._shell_command("wsl") == "wsl.exe"
+    assert term_mod._shell_command("nonsense") == "powershell.exe -NoLogo"
+    assert term_mod._shell_command("cmd").lower().endswith("cmd.exe")
+
+    monkeypatch.setattr(term_mod, "_find_git_bash", lambda: r"C:\Program Files\Git\bin\bash.exe")
+    assert term_mod._shell_command("gitbash") == r'"C:\Program Files\Git\bin\bash.exe" --login -i'
+
+
+def test_terminal_gitbash_missing_gives_readable_error(monkeypatch):
+    from skysheep.server.backend_parts import terminal as term_mod
+
+    monkeypatch.setattr(term_mod, "_find_git_bash", lambda: None)
+    try:
+        term_mod._shell_command("gitbash")
+    except RuntimeError as e:
+        assert "Git Bash" in str(e)
+    else:
+        raise AssertionError("找不到 Git Bash 时应抛可读错误")
+
+
+def test_terminal_spawn_uses_selected_shell(monkeypatch, tmp_path):
+    """spawn 的 shell 参数真正传给 PtyProcess（而不是永远 PowerShell）。"""
+    import winpty
+
+    captured = {}
+
+    class _Pty:
+        @classmethod
+        def spawn(cls, argv, cwd=None, env=None, dimensions=None, backend=None):
+            captured["argv"] = argv
+            return object()
+
+    monkeypatch.setattr(winpty, "PtyProcess", _Pty)
+    slot = TerminalSlot()
+    slot.spawn(tmp_path, rows=24, cols=80, shell="cmd")
+    assert captured["argv"].lower().endswith("cmd.exe")

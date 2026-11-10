@@ -1471,6 +1471,75 @@
             </div>
           </section>
 
+          <!-- 终端：Shell 与字体。Shell 只影响新开/重启的标签；字体即时应用到已开标签 -->
+          <section class="settings-card" id="terminal-card">
+            <div class="card-head">
+              <h3>终端</h3>
+              <span class="head-ops">
+                <button id="btn-terminal-save" class="btn-ghost">保存</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              底部终端面板的 Shell 与字体。已打开的标签改字体即刻生效；
+              换 Shell 要对新标签或重启后的标签生效（现有 shell 不会被强杀）。
+            </p>
+            <div id="terminal-status" class="card-status" hidden></div>
+            <div class="toolcfg-form">
+              <div class="toolcfg-row">
+                <label for="term-shell">Shell</label>
+                <select id="term-shell">
+                  <option value="auto">自动（PowerShell）</option>
+                  <option value="powershell">PowerShell</option>
+                  <option value="cmd">cmd.exe</option>
+                  <option value="gitbash">Git Bash</option>
+                  <option value="wsl">WSL</option>
+                </select>
+                <span class="dim small">Git Bash / WSL 需要本机已安装；找不到时终端会给出提示</span>
+              </div>
+              <div class="toolcfg-row">
+                <label for="term-font">字体</label>
+                <select id="term-font">
+                  <option value="Cascadia Mono">Cascadia Mono</option>
+                  <option value="Consolas">Consolas</option>
+                  <option value="Courier New">Courier New</option>
+                  <option value="JetBrains Mono">JetBrains Mono</option>
+                  <option value="Fira Code">Fira Code</option>
+                  <option value="Sarasa Mono SC">Sarasa Mono SC（更纱黑体）</option>
+                </select>
+                <span class="dim small">等宽字体；本机没装时会回落到 Consolas</span>
+              </div>
+              <div class="toolcfg-row">
+                <label for="term-font-size">字号</label>
+                <input type="number" id="term-font-size" min="10" max="24" step="1">
+                <span class="dim small">10–24 px，默认 13</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 交互与电源：运行中发消息是排队还是引导；是否阻止空闲睡眠 -->
+          <section class="settings-card" id="interaction-card">
+            <h3>交互与电源</h3>
+            <p class="settings-hint">
+              运行中继续发消息时的处理方式，以及长任务期间是否阻止系统空闲睡眠。
+            </p>
+            <div class="toolcfg-row">
+              <label for="interaction-mode">交互行为</label>
+              <select id="interaction-mode">
+                <option value="queue">排队 —— 当前轮结束后自动执行</option>
+                <option value="steer">引导 —— 注入当前轮，下一次模型调用前生效</option>
+              </select>
+              <span class="dim small">引导适合「方向不对，补充一句」；排队适合另外一件独立的事</span>
+            </div>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="prevent-sleep-toggle">
+              <span>保持电脑运行（阻止空闲睡眠）</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              开启后应用运行期间阻止系统因空闲进入睡眠；手动睡眠、合盖休眠不受影响。
+              长任务、定时任务和挂机等待时有用。<b>默认关闭</b>。
+            </p>
+          </section>
+
           <section class="settings-card">
             <h3>安全与后台</h3>
             <p class="settings-hint">
@@ -1691,6 +1760,29 @@
         </section>
 
         <section class="settings-page hidden" id="settings-page-memory">
+          <!-- 全局自定义指令：跨项目的行为规则（语气/格式/禁令/默认做法），
+               与下面「全局记忆」（Agent 记住的事实）分开。写 ~/.skysheep/instructions.md，
+               每轮注入系统提示词；只对本机生效（远程设备各自配置）。 -->
+          <section class="settings-card" id="global-instructions-card">
+            <div class="card-head">
+              <h3>全局自定义指令</h3>
+              <button id="btn-instructions-save" class="btn-ghost">保存</button>
+            </div>
+            <p class="settings-hint">
+              写给 Agent 的全局行为规则：回答语气、格式偏好、必须遵守的禁令、默认做法。
+              与项目 <b>AGENTS.md</b> 和下面的「全局记忆」不同——这里是<b>规则</b>，
+              记忆是 Agent 自己记下的<b>事实</b>。
+            </p>
+            <ul class="settings-hint hint-points">
+              <li>每轮对话注入，对所有项目、所有会话生效；只对本机生效，远程设备需单独配置。</li>
+              <li>最多 8000 字；写「回答先给结论」「不要用表情符号」这类可执行的规则，效果最好。</li>
+              <li>保存后下一轮立即生效，不需要重启。</li>
+            </ul>
+            <div id="instructions-status" class="card-status" hidden></div>
+            <textarea id="instructions-text" class="memory-text" rows="8" maxlength="8000"
+                      placeholder="例如：&#10;- 回答先给结论，再列理由；不要用「当然」「好的」开头。&#10;- 改代码后必须跑测试，并在回复里写清通过/失败数。&#10;- 不要自动提交 git，除非我明确要求。"></textarea>
+            <p id="instructions-chars" class="dim small">0 / 8000 字</p>
+          </section>
           <section class="settings-card">
             <div class="card-head">
               <h3>全局记忆</h3>
@@ -1890,6 +1982,55 @@
               （前台人已在看，不必响），取消勾选则每次都响。默认关闭提示音。
             </p>
           </section>
+          <section class="settings-card">
+            <h3>消息流</h3>
+            <p class="settings-hint">
+              控制对话里显示哪些过程信息。两项即时生效、偏好自动保存。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="show-thinking-toggle">
+              <span>显示思考过程</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              关闭后不再渲染模型的思考块（正文与工具调用不受影响）；可随时打开，
+              新产生的思考会重新显示。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="show-todo-toggle">
+              <span>显示待办卡片</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              开启后 Agent 调用 todo_write 时，消息流里的工具卡会变成任务进度清单；
+              关闭则保留普通工具卡（右侧「任务清单」面板不受影响）。
+            </p>
+          </section>
+          <section class="settings-card" id="window-card">
+            <h3>窗口与托盘</h3>
+            <p class="settings-hint">
+              关闭主窗口时的行为。托盘图标右键仍可「打开 / 彻底退出」。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="close-to-tray-toggle">
+              <span>关闭窗口时直接缩到系统托盘</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              开启后点关闭按钮不再弹「彻底退出 / 缩到托盘 / 取消」三选一，
+              直接隐藏到托盘继续跑定时任务；需要完全退出时用托盘右键菜单。
+            </p>
+          </section>
+          <section class="settings-card" id="code-appearance-entry">
+            <div class="card-head">
+              <h3>代码外观</h3>
+              <span class="head-ops">
+                <button id="code-open" class="btn-ghost" type="button">调整 ›</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              代码块的语法高亮配色、字号、行号与长行换行。默认跟随当前界面主题，
+              也可以给浅色 / 深色界面各挑一套独立配色。
+            </p>
+            <p class="dim small" id="code-appearance-summary">跟随界面主题 · 13px · 不显示行号</p>
+          </section>
         </section>
 
         <!-- 主题二级页：从「界面与通知」的主题卡进入，专门放 26 套色板与
@@ -2080,6 +2221,97 @@
           </section>
         </section>
 
+        <!-- 代码外观二级页：从「界面与通知」的代码外观卡进入。浅色/深色界面
+             各挑一套代码配色；行号与换行互斥（换行后行高不再等于一行文本）。 -->
+        <section class="settings-page hidden" id="settings-page-code">
+          <div class="detail-head settings-subpage-head">
+            <button id="code-page-back" class="btn-ghost" type="button">← 界面与通知</button>
+            <span class="detail-title">代码外观</span>
+            <span class="dim small settings-subpage-count">语法高亮 · 字号 · 行号 · 换行</span>
+          </div>
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>配色与排版</h3>
+              <span class="dim small">改动即时生效并保存</span>
+            </div>
+            <p class="settings-hint">
+              浅色界面用「浅色代码主题」、深色界面用「深色代码主题」；
+              选「跟随界面主题」则沿用当前主题自带的语法色板。
+            </p>
+            <div class="toolcfg-form">
+              <div class="toolcfg-row">
+                <label for="code-theme-light">浅色代码主题</label>
+                <select id="code-theme-light">
+                  <option value="auto">跟随界面主题</option>
+                  <option value="github-light">GitHub Light</option>
+                  <option value="solarized-light">Solarized Light</option>
+                  <option value="one-light">One Light</option>
+                </select>
+              </div>
+              <div class="toolcfg-row">
+                <label for="code-theme-dark">深色代码主题</label>
+                <select id="code-theme-dark">
+                  <option value="auto">跟随界面主题</option>
+                  <option value="github-dark">GitHub Dark</option>
+                  <option value="solarized-dark">Solarized Dark</option>
+                  <option value="one-dark">One Dark</option>
+                </select>
+              </div>
+              <div class="toolcfg-row">
+                <label for="code-font-size">代码字号</label>
+                <input type="number" id="code-font-size" min="11" max="20" step="1">
+                <span class="dim small">11–20 px，默认 13；只影响代码块，不影响正文</span>
+              </div>
+              <label class="toggle-row adv-toggle">
+                <input type="checkbox" id="code-line-numbers">
+                <span>显示行号</span>
+              </label>
+              <p class="dim small adv-toggle-desc">
+                行号贴在代码块左侧，横向滚动时保持不动；开启「长行自动换行」时
+                行号会自动隐藏（折行后行高与行号对不齐）。
+              </p>
+              <label class="toggle-row adv-toggle">
+                <input type="checkbox" id="code-wrap">
+                <span>长行自动换行</span>
+              </label>
+              <p class="dim small adv-toggle-desc">
+                关闭时超长代码横向滚动；开启后按代码块宽度折行。
+              </p>
+            </div>
+            <div id="code-status" class="card-status" hidden></div>
+          </section>
+          <section class="settings-card">
+            <h3>代码预览</h3>
+            <p class="settings-hint">
+              同时看浅色与深色两套配色；当前界面使用的那一套标「当前生效」。
+            </p>
+            <div class="code-preview-grid">
+              <div class="code-preview" id="code-preview-light">
+                <div class="code-preview-head">
+                  <b>浅色预览</b>
+                  <span class="code-preview-tag" id="code-preview-light-tag">当前生效</span>
+                </div>
+                <pre><code class="language-js">const themePreview = {
+  surface: "sidebar",
+  accent: "#339CFF",
+  contrast: 45,
+};</code></pre>
+              </div>
+              <div class="code-preview code-preview-dark" id="code-preview-dark">
+                <div class="code-preview-head">
+                  <b>深色预览</b>
+                  <span class="code-preview-tag" id="code-preview-dark-tag">深色</span>
+                </div>
+                <pre><code class="language-js">const themePreview = {
+  surface: "sidebar",
+  accent: "#339CFF",
+  contrast: 45,
+};</code></pre>
+              </div>
+            </div>
+          </section>
+        </section>
+
         <!-- 归档管理：自动归档旧会话 + 跨全部项目的已归档会话管理（恢复/删除）。
              侧栏的「归档会话」弹窗只管当前项目，这里才是全局视图 -->
         <section class="settings-page hidden" id="settings-page-archive">
@@ -2228,6 +2460,14 @@
             <p class="dim small adv-toggle-desc">
               稳定版只推送正式版；测试版会提前收到预发布版本，稳定性可能打折扣。
               两个渠道的安装包都会做校验和核对，更新前自动备份会话与配置。
+            </p>
+            <label class="toggle-row adv-toggle">
+              <input type="checkbox" id="auto-update-download-toggle">
+              <span>发现新版本后自动下载安装包</span>
+            </label>
+            <p class="dim small adv-toggle-desc">
+              开启后启动时发现新版本会在后台下载（校验和照常核对；仅安装版生效）；
+              <b>安装仍需你点「退出并安装」</b>，不会静默重启应用。
             </p>
             <div id="about-info" class="about"></div>
             <div id="about-update" class="about-update"></div>

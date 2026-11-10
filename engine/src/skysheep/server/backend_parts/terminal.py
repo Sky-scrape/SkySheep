@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,55 @@ from ...messages import Message, TextBlock
 from ...models.base import ProviderDone, ProviderReasoning, ProviderTextDelta
 from ...tools.shell import child_environment
 from ._shared import EmitFn
+
+
+def _find_git_bash() -> str | None:
+    """定位 Git Bash 的 bash.exe；找不到返回 None（调用方给可读错误）。"""
+    roots: list[Path] = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        roots.append(Path(base) / "Git")
+        # 用户级安装（Git for Windows 的默认非管理员路径）
+        roots.append(Path(base) / "Programs" / "Git")
+    # PATH 上的 git.exe 反推安装根：比只看固定路径更稳
+    git = shutil.which("git.exe") or shutil.which("git")
+    if git:
+        roots.append(Path(git).resolve().parent.parent)
+    seen: set[str] = set()
+    for root in roots:
+        cand = root / "bin" / "bash.exe"
+        key = str(cand).lower()
+        if key in seen or not cand.is_file():
+            continue
+        seen.add(key)
+        return str(cand)
+    return None
+
+
+def _shell_command(choice: str) -> str:
+    """把设置里的 Shell 选择翻译成 ConPTY 启动命令（只认白名单，不拼用户输入）。
+
+    auto/powershell 沿用历史行为（PowerShell）。Git Bash/WSL 找不到时抛
+    可读错误，不回退成别的 Shell——用户明确选了，静默换掉更难排查。
+    """
+    choice = str(choice or "auto").strip().lower()
+    if choice == "cmd":
+        comspec = os.environ.get("ComSpec") or "cmd.exe"
+        return f'"{comspec}"' if " " in comspec else comspec
+    if choice == "gitbash":
+        path = _find_git_bash()
+        if not path:
+            raise RuntimeError(
+                "没有找到 Git Bash：请先安装 Git for Windows，"
+                "或把「终端 Shell」改回 PowerShell / cmd"
+            )
+        # 路径可能带空格，ConPTY 的启动命令按命令行解析，必须引号包住
+        return f'"{path}" --login -i'
+    if choice == "wsl":
+        return "wsl.exe"
+    return "powershell.exe -NoLogo"
 
 
 class TerminalSlot:
@@ -35,27 +86,32 @@ class TerminalSlot:
     def alive(self) -> bool:
         return self.proc is not None and self.proc.isalive()
 
-    def spawn(self, cwd: Path, rows: int, cols: int) -> None:
-        """启动常驻 shell（已存活时幂等）；cwd 用调用时刻的项目工作目录。"""
+    def spawn(self, cwd: Path, rows: int, cols: int, shell: str = "auto") -> None:
+        """启动常驻 shell（已存活时幂等）；cwd 用调用时刻的项目工作目录。
+
+        shell 取设置页白名单（auto/powershell/cmd/gitbash/wsl）；只影响本次
+        新开的标签——已开的 shell 不因为改设置被强杀重开。
+        """
         if self.alive():
             return
         try:
             from winpty import PtyProcess  # noqa: PLC0415  仅 Windows 提供
         except Exception as e:  # ImportError / 底层 DLL 缺失
             raise RuntimeError("终端组件不可用（ConPTY 仅支持 Windows）") from e
+        command = _shell_command(shell)
         try:
             Path(cwd).mkdir(parents=True, exist_ok=True)
             # 环境剥密钥与 run_command 同一口径（审查 P1-1）：不传 env 的话
             # ConPTY 子进程整体继承 os.environ，终端里 echo 一下就能读走
             # *_API_KEY/*_TOKEN，且输出会广播给所有连接。
             self.proc = PtyProcess.spawn(
-                "powershell.exe -NoLogo",
+                command,
                 cwd=str(cwd),
                 env=child_environment(),
                 dimensions=(max(2, int(rows)), max(10, int(cols))),
             )
         except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"无法启动 PowerShell：{e}") from None
+            raise RuntimeError(f"无法启动终端（{command}）：{e}") from None
 
     def write(self, data: str) -> None:
         if not self.alive():
@@ -126,10 +182,11 @@ class TerminalManager:
     def peek(self, term_id: str) -> TerminalSlot | None:
         return self.terms.get(self._key(term_id))
 
-    def spawn(self, term_id: str, cwd: Path, rows: int, cols: int, backend: Any) -> dict:
+    def spawn(self, term_id: str, cwd: Path, rows: int, cols: int, backend: Any,
+              shell: str = "auto") -> dict:
         key = self._key(term_id)
         slot = self.slot(term_id)
-        slot.spawn(cwd, rows, cols)
+        slot.spawn(cwd, rows, cols, shell=shell)
         self._ensure_pump(key, slot, backend)
         return {"spawned": True, "alive": slot.alive()}
 
@@ -208,12 +265,13 @@ class TerminalManager:
             except RuntimeError:
                 break
 
-    def input(self, term_id: str, cwd: Path, data: str, rows: int, cols: int, backend: Any) -> dict:
+    def input(self, term_id: str, cwd: Path, data: str, rows: int, cols: int, backend: Any,
+              shell: str = "auto") -> dict:
         """向标签的 shell 写入按键；shell 已退出时自动重启（pump 一并续上）。"""
         key = self._key(term_id)
         slot = self.slot(term_id)
         if not slot.alive():
-            slot.spawn(cwd, rows, cols)
+            slot.spawn(cwd, rows, cols, shell=shell)
         self._ensure_pump(key, slot, backend)
         slot.write(data)
         return {"ok": True}
@@ -251,19 +309,32 @@ class TerminalPanelMixin:
 
     # ---- 右侧面板：终端 / 辅助对话 ----
 
+    def _term_shell_pref(self) -> str:
+        """终端 Shell 偏好（ui.json 的 term_shell）：未知/缺省一律 auto。"""
+        try:
+            shell = str(self._read_ui_prefs().get("term_shell") or "auto")
+        except Exception:  # noqa: BLE001 - 偏好读不到按历史行为
+            shell = "auto"
+        return shell if shell in ("auto", "powershell", "cmd", "gitbash", "wsl") else "auto"
+
     def term_spawn(self, term_id: str, rows: int, cols: int) -> dict:
-        """在当前项目工作目录里开一个常驻 PowerShell 标签。"""
+        """在当前项目工作目录里开一个常驻 shell 标签（Shell 由设置页决定）。"""
         if self.working_dir is None:
             raise RuntimeError(
                 "当前没有项目，终端不可用——先在侧栏「项目」区点 ＋ 添加项目并选择一个文件夹。"
             )
-        return self.term.spawn(term_id, self.working_dir, rows, cols, self)
+        return self.term.spawn(
+            term_id, self.working_dir, rows, cols, self, shell=self._term_shell_pref()
+        )
 
     def term_input(self, term_id: str, data: str, rows: int, cols: int) -> dict:
         """向标签的 shell 写按键（shell 已退出时自动重启）。"""
         if self.working_dir is None:
             raise RuntimeError("当前没有项目，终端不可用——先添加一个项目。")
-        return self.term.input(term_id, self.working_dir, data, rows, cols, self)
+        return self.term.input(
+            term_id, self.working_dir, data, rows, cols, self,
+            shell=self._term_shell_pref(),
+        )
 
     def term_resize(self, term_id: str, rows: int, cols: int) -> dict:
         return self.term.resize(term_id, rows, cols)

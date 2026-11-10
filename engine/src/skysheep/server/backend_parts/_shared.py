@@ -61,6 +61,10 @@ class SessionRuntime:
     queue: list = field(default_factory=list)
     run_task: asyncio.Task | None = None
     ctx: ProjectCtx | None = None
+    # 当前轮是否接受「引导」注入：普通单 Agent 轮为 True；圆桌/团队/对抗
+    # 的多模型流水线为 False（它们各有自己的成员历史，主 Agent 的收件箱
+    # 不参与那些阶段），此时发送回落到排队。
+    steerable: bool = False
 
 
 # 预授权工具名上限：与 core/run_ledger.py 的落库截断同值。超过它的名字在

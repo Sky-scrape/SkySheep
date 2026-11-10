@@ -100,9 +100,12 @@ from ..core.hooks import (
     load_raw_config,
 )
 from ..core.mods_tool import ModTool
+from ..core.power import PowerKeeper
 from ..core.prompt import (
     PLAN_MODE_PREFIX,
+    load_global_instructions,
     load_project_instructions,
+    render_global_instructions_section,
     render_instructions_section,
 )
 from ..core.roundtable import (
@@ -1117,6 +1120,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.mods_claude = None
         self._pending_mod_install: dict | None = None  # 两段安装的待确认项
         self.term = TerminalManager()
+        # 保持电脑运行（防空闲睡眠）：设置页 ui.json 的 prevent_sleep 控制；
+        # 启动与每次保存偏好时应用，退出时停掉（Windows daemon 线程）
+        self.power = PowerKeeper()
         self.aux_histories: dict[str, list[Message]] = {}
         # 会话级模型覆盖（分屏独立对话）：sid → (服务名, 模型名)。有记录的会话
         # runtime 用覆盖模型（_runtime_provider 首建时、session.model_switch 热切），
@@ -1190,6 +1196,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.update_success: dict | None = None
         self.update_failure: dict | None = None
         self._pending_update: str | None = None  # 已下载待安装的更新包路径
+        self._pending_update_version: str = ""  # 待安装包的版本（复用下载时校验）
+        self._pending_update_verified: bool = False  # 下载时是否核对了 .sha256
+        self._auto_update_task: asyncio.Task | None = None  # 后台自动下载句柄
         self._is_frozen: bool = bool(getattr(sys, "frozen", False))  # 安装版=True，源码版=False
         self.channels: ChannelManager | None = None  # 聊天软件渠道（Bot Channel）
         self._channel_gates: dict[str, ChannelGate] = {}  # 渠道会话 id → 门控
@@ -1955,6 +1964,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         await self._bind_project(target, connect_mcp=False)
         # 分级权限模式：上次会话选的档位（0=安全执行 1=自动编辑 2=完全访问）重启后保持
         self._apply_gate_accept_pref(prefs.get("accept_edits", 0))
+        # 保持电脑运行：按上次保存的偏好决定是否阻止空闲睡眠（Windows）
+        self._apply_power_pref()
         # 内置示例快捷指令：首启落成真实记录（老用户已有自定义指令则跳过）
         await self._seed_builtin_snippets()
         # 缺 API Key 不阻塞启动：记录状态，界面里可见/可切换后再用
@@ -2199,6 +2210,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.cancel_run()
         self.stop_cron_loop()
         self.term.close_all()
+        # 保持电脑运行：退出时务必清掉 ES_CONTINUOUS（daemon 线程随进程退出
+        # 也会清，但正常收尾要显式关，避免更新器拉起的新进程继承空闲豁免）
+        try:
+            self.power.stop()
+        except Exception:  # noqa: BLE001 - 收尾失败不阻断退出
+            pass
         self.stop_reminder_loop()
         await self._cancel_mcp_boot_connect()
         if self.mcp:
@@ -2307,6 +2324,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             build_system_prompt(workdir)
             + self.skills.render_prompt_section()
             + render_instructions_section(instr_file, instr_text)
+            + render_global_instructions_section(load_global_instructions())
             + render_memory_section(query_text=memory_query)
         )
 
@@ -2704,6 +2722,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                    session_id: str | None = None,
                    wants_title: bool = False,
                    regenerate: bool = False,
+                   # 运行中「引导」：把这条消息注入当前轮的下一次模型调用，
+                   # 而不是排队等本轮结束。没有活动轮时自动回落到普通发送。
+                   steer: bool = False,
                    compare: bool = False,
                    refs: list[str] | None = None,
                    debate_rounds: int | None = None,
@@ -2876,6 +2897,38 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     "请在输入框的模型选择器里换一个多模态模型（如 GLM-4V、Kimi、GPT-4o 等），"
                     "或在 设置 · 模型服务 里把该服务的「支持图片输入」打开。"
                 )
+        # 运行中「引导」：当前会话有普通单 Agent 轮在跑时，消息直接进它的
+        # 收件箱（下一次模型调用前插入历史），不排队、不另起一轮。多模型
+        # 协作轮（圆桌/团队/对抗）不接受主 Agent 收件箱，回落到下面的排队。
+        if steer and target_sid:
+            rt_steer = self.runtimes.get(target_sid)
+            if (
+                rt_steer is not None
+                and rt_steer.steerable
+                and rt_steer.run_task is not None
+                and not rt_steer.run_task.done()
+                and rt_steer.agent.steer(text, images=clean_images)
+            ):
+                # 广播给其它在线客户端（发起端已本地渲染气泡，按 emit 身份
+                # 排除；与普通轮末尾的 user_message 广播同一形状）。
+                source_emit = getattr(emit, "_source_emit", emit)
+                if text or clean_images:
+                    u_ev = {
+                        "kind": "user_message", "session_id": target_sid, "text": text,
+                        "images": [
+                            {"media_type": b.media_type, "data": b.data}
+                            for b in (clean_images or [])
+                            if getattr(b, "type", "") == "image"
+                        ],
+                    }
+                    for ws_emit in list(self.ws_emitters):
+                        if ws_emit is source_emit:
+                            continue
+                        try:
+                            spawn_bg(ws_emit(u_ev))
+                        except RuntimeError:
+                            break  # 无事件循环（纯测试环境）
+                return {"steered": True, "session_id": target_sid}
         # 在任何 await 之前先占住运行位：否则两条背靠背到达的消息会在
         # new_session() 的挂起点上双双判为空闲、并发执行（撞消息表唯一约束）。
         # 占位判断同时看基底位（会话懒创建窗口）与活动 runtime 位；后来者排队。
@@ -3092,6 +3145,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             runtime = await self._get_runtime(self.session.id)
         sid = session_id or runtime.sid
         agent = runtime.agent
+        # 本轮是否接受「引导」注入：普通单 Agent 轮可以；圆桌/团队/对抗
+        # 是多模型流水线，主 Agent 收件箱不参与那些阶段，发送方回落到排队。
+        runtime.steerable = not (
+            roundtable or team or adversarial or (sid in self._teams)
+        )
         # 单轮 token 上限（单轮护栏）：估算本轮请求体积（历史 + 本条消息），
         # 超上限直接拒绝——每日预算防线的前置，避免「一轮就烧掉全天额度」。
         # 0 = 不限制；演示模式同样豁免。估算偏保守（消息文本按 1/3 折算）。
@@ -3433,6 +3491,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             # 让 WS 层返回 ok=false 的诚实错误。
             turn_exc = e
         finally:
+            # 引导收件箱随本轮关闭：此后到达的 steer 一律回落到排队
+            runtime.steerable = False
             # 先恢复完整工具集（只读注册表只在本轮生效）——同步操作必须放在
             # finally 里第一个 await 之前：第二次取消（用户连点两次停止，或
             # 停止与轮末竞态）只能在 await 点投递，同步段不会被跳过。若恢复
@@ -6803,6 +6863,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         sys_text = (
             build_system_prompt(self.working_dir)
             + render_instructions_section(self.instructions_file, self.instructions_text)
+            + render_global_instructions_section(load_global_instructions())
             + render_memory_section()
         )
         skills_text = self.skills.render_prompt_section() if self.skills else ""
@@ -9209,6 +9270,23 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 更新渠道：stable=稳定版（/releases/latest，默认）、beta=测试版（releases.atom，
         # 含预发布）。值域与 core/uptodate.py 的 CHANNELS 保持一致
         "update_channel": ("stable", "beta"),
+        # 终端 Shell：auto=沿用 PowerShell（历史行为），其余显式指定；
+        # gitbash/wsl 在系统里找不到时终端给出可读错误，不回退成别的 Shell。
+        "term_shell": ("auto", "powershell", "cmd", "gitbash", "wsl"),
+        # 终端字体：只收这几个常见等宽字体，值直接进 xterm 的 fontFamily
+        "term_font": (
+            "Cascadia Mono", "Consolas", "Courier New",
+            "JetBrains Mono", "Fira Code", "Sarasa Mono SC",
+        ),
+        # 交互行为：queue=运行中发送排队（默认），steer=作为引导注入当前轮
+        "interaction_mode": ("queue", "steer"),
+        # 代码高亮配色（浅色/深色界面各选一套；auto=跟随界面主题）
+        "code_theme_light": (
+            "auto", "github-light", "solarized-light", "one-light",
+        ),
+        "code_theme_dark": (
+            "auto", "github-dark", "solarized-dark", "one-dark",
+        ),
     }
 
     @staticmethod
@@ -9225,8 +9303,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     # 设置导出/导入覆盖的文件（~/.skysheep 下；会话数据库与检查点不导，体积大且含隐私对话）
     SETTINGS_EXPORT_FILES = (
-        "config.toml", "mcp.json", "ui.json", "memory.md", "subagents.json",
-        "skills-scope.json",
+        "config.toml", "mcp.json", "ui.json", "memory.md", "instructions.md",
+        "subagents.json", "skills-scope.json",
     )
 
     async def settings_export(self) -> dict:
@@ -10109,6 +10187,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "crashed_last_run": bool(getattr(self, "crashed_last_run", False)),
             "subagent": self.subagent_settings(),
             "update": self.update_info,
+            # 自动下载（关于页开关）是否已把该版本的安装包准备好：前端直接
+            # 把「一键更新」按钮换成「退出并安装」，不需要重新下载
+            "update_downloaded": bool(
+                self.update_info
+                and self._update_ready(str((self.update_info or {}).get("version") or ""))
+            ),
             "update_success": self.update_success,
             "update_failure": self.update_failure,
             "tools": [

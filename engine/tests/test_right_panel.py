@@ -577,21 +577,24 @@ def test_chat_aux_remote_is_stateless(home, monkeypatch):
     from skysheep.server import app as server_app
 
     prov = FakeProvider([[TextBlock(text="远端答案")], [TextBlock(text="本地答案")]])
-    monkeypatch.setattr(server_app, "_client_is_local", lambda ws: False)
-    with make_client(home, [], provider=prov) as client, \
-            client.websocket_connect("/ws") as ws:
-        ws.send_json({"id": "a1", "method": "chat.aux", "params": {"text": "远端问题"}})
-        frame = recv_until(ws, "a1")
-        assert frame["ok"] and frame["result"]["text"] == "远端答案"
-        assert frame["result"].get("stateless") is True
-        # 模型只看到 system + 本条消息：读不到任何此前内容
-        assert [m.role for m in prov.calls[0]] == ["system", "user"]
-        # 共享历史零读写
-        backend = client.app.state.backend
-        assert backend.aux_histories == {}
+    # 只在这一层里模拟远端：不能用 monkeypatch.undo()（那会把 home 夹具设的
+    # SKYSHEEP_HOME 一并撤销，第二个 client 直开真实 ~/.skysheep-dev——本机
+    # 数据目录被更新版本迁移过时，会因「库版本 13 > 程序支持 12」直接报错）。
+    with monkeypatch.context() as remote_mp:
+        remote_mp.setattr(server_app, "_client_is_local", lambda ws: False)
+        with make_client(home, [], provider=prov) as client, \
+                client.websocket_connect("/ws") as ws:
+            ws.send_json({"id": "a1", "method": "chat.aux", "params": {"text": "远端问题"}})
+            frame = recv_until(ws, "a1")
+            assert frame["ok"] and frame["result"]["text"] == "远端答案"
+            assert frame["result"].get("stateless") is True
+            # 模型只看到 system + 本条消息：读不到任何此前内容
+            assert [m.role for m in prov.calls[0]] == ["system", "user"]
+            # 共享历史零读写
+            backend = client.app.state.backend
+            assert backend.aux_histories == {}
 
-    # 本机调用语义不变：仍走共享历史（先恢复 _client_is_local 的远端模拟）
-    monkeypatch.undo()
+    # 本机调用语义不变：仍走共享历史（远端模拟已随上方的 context 退出）
     with make_client(home, [], provider=prov) as client, \
             client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "a2", "method": "chat.aux", "params": {"text": "本地问题"}})

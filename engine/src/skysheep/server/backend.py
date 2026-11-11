@@ -2723,6 +2723,22 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             + "\n\n[引用对话结束]\n\n"
         )
 
+    def _broadcast_ws(self, payload: dict, exclude=None) -> None:
+        """把一帧事件广播给所有 WS 连接（exclude：该连接已由轮自身 emit 链覆盖）。
+
+        运行态（queue_updated）是多端共同事实：只发发起连接，其他端（手机遥控、
+        第二个窗口）的运行态停在旧值——发起者断开后更是永远等不到归零帧。
+        广播帧不带 ev_seq：它不进会话事件日志，断线补帧只重放发起连接自己那份
+        带 seq 的链路，补到的 queue_updated 经 log_session_event 自带 session_id。
+        """
+        for ws_emit in list(self.ws_emitters):
+            if ws_emit is exclude:
+                continue
+            try:
+                spawn_bg(ws_emit(payload))
+            except RuntimeError:
+                break  # 无事件循环（纯测试环境）
+
     async def send(self, text: str, emit: EmitFn, plan_mode: bool = False,
                    roundtable: bool = False, members: list | None = None,
                    images: list[dict] | None = None,
@@ -2838,11 +2854,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 f"当前会话有进行中的团队，消息会进入团队频道；请先收队再使用{mode_name}。"
             )
         team_bound = team or active_team
-        # 模板的运行级授权（grant）：只对团队模板有意义——圆桌/对抗本期是纯文本
-        # 协作、不挂工具，传了也忽略。远程连接一律降级为逐次确认（与「放宽权限的
+        # 运行级授权（grant）：团队轮消费（模板团队或 team=true 直发都算）——
+        # 圆桌/对抗本期是纯文本协作、不挂工具，传了也忽略。此前只认模板路径，
+        # 直发 team=true + grant 被静默吞掉：成员写文件走逐次确认，无人应答
+        # 即 300 秒超时。远程连接一律降级为逐次确认（与「放宽权限的
         # 档位只能本机切换」同一安全口径：模板数据绝不能借远程请求关掉权限门）。
         grant_info: dict | None = None
-        if tpl is not None and tpl.get("kind") == "team":
+        if (tpl is not None and tpl.get("kind") == "team") or (team and tpl is None):
             raw_grant = grant if isinstance(grant, dict) else {}
             scope = str(raw_grant.get("scope") or "ask_each").strip()
             if scope not in ("run", "ask_each"):
@@ -2854,15 +2872,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             grant_info = {"scope": scope, "read_only": read_only}
             if degraded:
                 await emit(NoticeEvent(
-                    message="远程连接不能使用模板的「本次运行免确认」授权，"
+                    message="远程连接不能使用「本次运行免确认」授权，"
                             "已降级为逐次确认。"
                 ).model_dump())
             if active_team:
                 # 成员 Agent 的权限门在建队时固定（成员缓存 gate）：运行级授权
                 # 只随新队伍生效，现有团队沿用建队时的授权面
+                src_name = str((tpl or {}).get("name", "") or "").strip()
+                src_label = f"模板「{src_name}」" if src_name else "本次授权"
                 await emit(NoticeEvent(
-                    message=f"当前会话已有进行中的团队，模板「{tpl.get('name', '')}」"
-                            "本次只影响新队伍；现有团队的权限范围不变。"
+                    message=f"当前会话已有进行中的团队，{src_label}"
+                            "只影响新队伍；现有团队的权限范围不变。"
                 ).model_dump())
         # 引用排除目标会话自己：引用当前对话没有意义
         clean_refs = self._sanitize_refs(refs, exclude=target_sid)
@@ -2959,10 +2979,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             )
             if rt_now is not None:
                 rt_now.queue.append(item)
-                await emit(QueueUpdated(pending=len(rt_now.queue)).model_dump())
+                q_pending = len(rt_now.queue)
             else:
                 self._base_queue.append(item)
-                await emit(QueueUpdated(pending=len(self._base_queue)).model_dump())
+                q_pending = len(self._base_queue)
+            # 排队状态是所有连接的共同事实：只发发起连接，其他端（手机遥控、
+            # 第二个窗口）的运行态会停在旧值——且发起者断开后连它自己也没了
+            # 收尾广播的接收方。发起连接走 emit 保序，其余连接广播。
+            await emit(QueueUpdated(pending=q_pending, session_id=target_sid or "").model_dump())
+            self._broadcast_ws(
+                QueueUpdated(pending=q_pending, session_id=target_sid or "").model_dump(),
+                exclude=getattr(emit, "_source_emit", emit),
+            )
             return await item.fut
         # 全局并行轮数上限（评审加固）：单会话排队（上面）不增加全局并发——交棒
         # 接替的是刚结束的那轮；真正新起一轮的 send 才受这道闸。定时任务/流水线
@@ -3753,6 +3781,17 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             )
         except Exception:  # noqa: BLE001 - 客户端断开不影响收尾
             pass
+        # 收尾运行态广播到其他连接：发起连接由上方 emit_ev 覆盖（带 seq、可补帧），
+        # 排除之避免「任务完成」通知双响；发起连接已断开时它不在 ws_emitters，无碍
+        self._broadcast_ws(
+            {
+                **QueueUpdated(
+                    pending=len(runtime.queue) + (1 if handed_off else 0),
+                    session_id=sid,
+                ).model_dump()
+            },
+            exclude=getattr(emit, "_source_emit", emit),
+        )
 
         result = {
             "done": True,
@@ -3783,6 +3822,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 )
             except Exception:  # noqa: BLE001
                 pass
+            self._broadcast_ws(
+                {
+                    **QueueUpdated(
+                        pending=len(runtime.queue) + (1 if handed_off2 else 0),
+                        session_id=sid,
+                    ).model_dump()
+                },
+                exclude=getattr(emit, "_source_emit", emit),
+            )
         if turn_exc is not None:
             raise turn_exc  # 收尾已做完，原样上抛交给 WS 层
         return result
@@ -4977,6 +5025,51 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             ))
         return specs
 
+    def _expand_auto_pool(self, auto: list[MemberSpec]) -> list[MemberSpec]:
+        """把自动池按「服务 × 配置的 models 列表」展开成补位池。
+
+        自动池每个服务只贡献当前模型一条；团队模板的多个角色（provider 全空、
+        自动挑选）从这样的池轮转补位，(服务, 模型) 键全部相同，随即被去重
+        合并成一名队员——单 Key 配了多模型（如一个网关挂多个上游）时三角色
+        小组会缩成一人。展开后角色尽量各得一个独立键：第一个角色仍拿当前
+        模型（行为与旧自动池前段一致），后续角色依次取同服务的其余 models；
+        某个 model 构建失败降级为 build_error 成员，不阻断建队。
+        """
+        pool: list[MemberSpec] = []
+        seen: set[tuple[str, str]] = set()
+        for base in auto or []:
+            if not base.provider_name:
+                continue
+            models: list[str] = []
+            pc = self.cfg.providers.get(base.provider_name)
+            if pc is not None and pc.models:
+                models = [str(m) for m in pc.models if str(m).strip()]
+            if base.model and base.model not in models:
+                models.insert(0, base.model)
+            for m in models:
+                key = (base.provider_name, m)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if m == base.model and base.provider is not None:
+                    # 当前模型条目直接复用自动池已构建的 provider 实例：
+                    # 重建会多消耗一次构建（测试注入的脚本池因此整体错位）
+                    pool.append(MemberSpec(
+                        provider_name=base.provider_name, model=m,
+                        provider=base.provider,
+                    ))
+                    continue
+                spec = MemberSpec(provider_name=base.provider_name, model=m)
+                try:
+                    provider = self._build_member_provider(base.provider_name, m)
+                    spec.provider = provider
+                    if not spec.model:
+                        spec.model = getattr(provider, "model", "")
+                except Exception as e:  # noqa: BLE001 - 展开失败降级，不阻断建队
+                    spec.build_error = str(e)[:200]
+                pool.append(spec)
+        return pool or list(auto or [])
+
     def _template_team_specs(self, template: dict) -> list[TeamMemberSpec]:
         """团队模板 → TeamMemberSpec：先补 model 再去重（与 _resolve_team_members
         同口径），被（服务, 模型）重复合并掉的角色由调用方发 Notice。
@@ -5013,6 +5106,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             else:
                 if auto is None:
                     auto = self._resolve_members(None, False, chair_key=("", ""))
+                    # 单 Key 多模型（服务配了 models 列表）时按「服务 × 模型」展开
+                    # 补位池：角色尽量各得一个独立（服务, 模型）键，少被去重合并。
+                    # 展开序 = 各服务当前模型在前、其余 models 依次在后，只有
+                    # 单模型服务时与旧自动池逐项一致。
+                    auto = self._expand_auto_pool(auto)
                 if not auto:
                     spec = TeamMemberSpec(
                         name=name, persona=persona,
@@ -5186,15 +5284,32 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         run_budget = RunBudget(**((tpl or {}).get("budget") or {})) if tpl is not None else None
         tokens = collab_tokens if isinstance(collab_tokens, dict) else {"total": 0}
 
-        # 模板的收口角色决定总管形态：aggregator.provider 非空 = AI 总管
-        # （独立 temp provider）；为空 = 用户总管（模板明确「没人替你验收」）。
+        # 总管形态：模板 aggregator.provider 非空 = AI 总管（独立 temp provider），
+        # 模板自己的收口配置优先；模板没配收口时显式传入的 director_mode="ai"
+        # 仍然生效——此前无条件被覆盖成 "user"，显式参数静默吞掉、无任何提示。
+        # 两者都没有才是用户总管（模板明确「没人替你验收」）。
         director: DirectorSpec | None = None
         effective_director_mode = director_mode
+
+        def _build_director(d_provider: str, d_model: str) -> DirectorSpec:
+            spec = DirectorSpec(
+                provider_name=d_provider, model=d_model,
+                context_limit_tokens=self._team_provider_context_limit(d_provider),
+            )
+            try:
+                provider = self._build_member_provider(d_provider, d_model)
+                spec.provider = provider
+                if not spec.model:
+                    spec.model = getattr(provider, "model", "")
+            except Exception as e:  # noqa: BLE001 - 构建失败降级，不阻断建队
+                spec.build_error = str(e)[:200]
+            return spec
+
         if tpl is not None:
             d_provider = str(tpl_agg.get("provider") or "").strip()
             d_model = str(tpl_agg.get("model") or "").strip()
-            effective_director_mode = "ai" if d_provider else "user"
             if d_provider:
+                effective_director_mode = "ai"
                 director = DirectorSpec(
                     provider_name=d_provider, model=d_model,
                     context_limit_tokens=self._team_provider_context_limit(d_provider),
@@ -5207,6 +5322,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                         director.model = getattr(provider, "model", "")
                 except Exception as e:  # noqa: BLE001 - 构建失败降级，不阻断建队
                     director.build_error = str(e)[:200]
+            elif director_mode == "ai":
+                d_provider = str((director_params or {}).get("provider", "") or "").strip()
+                d_model = str((director_params or {}).get("model", "") or "").strip()
+                if not d_provider:
+                    raise TeamError(
+                        'director_mode="ai" 需要指定担任总管的模型服务（director.provider）'
+                    )
+                director = _build_director(d_provider, d_model)
+                effective_director_mode = "ai"
         elif director_mode == "ai":
             d_provider = str((director_params or {}).get("provider", "") or "").strip()
             d_model = str((director_params or {}).get("model", "") or "").strip()
@@ -5214,17 +5338,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 raise TeamError(
                     'director_mode="ai" 需要指定担任总管的模型服务（director.provider）'
                 )
-            director = DirectorSpec(
-                provider_name=d_provider, model=d_model,
-                context_limit_tokens=self._team_provider_context_limit(d_provider),
-            )
-            try:
-                provider = self._build_member_provider(d_provider, d_model)
-                director.provider = provider
-                if not director.model:
-                    director.model = getattr(provider, "model", "")
-            except Exception as e:  # noqa: BLE001 - 构建失败降级，不阻断建队
-                director.build_error = str(e)[:200]
+            director = _build_director(d_provider, d_model)
         specs = (
             self._template_team_specs(tpl)
             if tpl is not None else self._resolve_team_members(members_params)
@@ -5260,21 +5374,40 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # DANGEROUS 一律回退会话门逐次确认。成员 Agent 在建队时缓存 gate，
         # 授权范围因此按团队生命周期固定（不做逐轮变更）。
         team_gate = gate
-        if tpl is not None and gate is not None:
+        if gate is not None and (read_only or grant_scope == "run"):
             if read_only:
                 team_gate = GrantedGate(
                     gate, allowed_tools=(), command_prefixes=(),
                     run_id=uuid4().hex[:12],
-                    label=f"模板「{tpl.get('name', '')}」只读运行",
+                    label=(
+                        f"模板「{tpl.get('name', '')}」只读运行"
+                        if tpl is not None else "团队只读运行"
+                    ),
                 )
             elif grant_scope == "run":
-                team_gate = GrantedGate(
-                    gate,
-                    allowed_tools=self._template_allowed_tools(tpl),
-                    command_prefixes=collect_command_prefixes(tpl.get("roles") or []),
-                    run_id=uuid4().hex[:12],
-                    label=f"模板「{tpl.get('name', '')}」",
-                )
+                if tpl is not None:
+                    team_gate = GrantedGate(
+                        gate,
+                        allowed_tools=self._template_allowed_tools(tpl),
+                        command_prefixes=collect_command_prefixes(tpl.get("roles") or []),
+                        run_id=uuid4().hex[:12],
+                        label=f"模板「{tpl.get('name', '')}」",
+                    )
+                else:
+                    # team=true 直发（无模板声明）：按「本次运行免确认」的同一
+                    # 安全边界放行全部常规写工具；GrantedGate 仍收口——删除
+                    # 语义 / 引擎主目录 / 工作目录外 / DANGEROUS 一律回退会话门
+                    # 逐次确认。命令不预授权（没有模板声明的前缀清单可依）。
+                    team_gate = GrantedGate(
+                        gate,
+                        allowed_tools=[
+                            t.name for t in full_registry.all()
+                            if t.safety == Safety.WRITE
+                        ],
+                        command_prefixes=(),
+                        run_id=uuid4().hex[:12],
+                        label="团队（显式成员）",
+                    )
         if tpl is not None and read_only:
             await emit(NoticeEvent(
                 message="本次按「只读」运行模板：队员只挂只读工具，不写文件、不运行命令。"

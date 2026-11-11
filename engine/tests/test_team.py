@@ -3865,3 +3865,145 @@ async def test_cron_team_push_delivers_summary_and_survives_failure(home, caplog
         assert row["next_run_at"] > 0, "下次运行时间照常重算"
     finally:
         await store.close()
+
+
+# ---------- 协作实测回归（2026-11-11）：四修复的钉子 ----------
+
+
+def test_team_template_with_explicit_ai_director_not_swallowed(home):
+    """模板没配收口模型（aggregator.provider 为空）时，chat.send 显式指定的
+    director_mode="ai" 仍然生效：不再被模板路径无条件覆盖成用户总管（实测
+    回归——此前显式参数被静默吞掉，消息进频道后无人驱动、0.2 秒空回）。"""
+    from skysheep.config import ProviderConfig
+    # 构建次序 = factory 弹池次序：主模型 → director（_team_create 里 director
+    # 段先于成员解析）→ 自动池展开后的成员（当前模型复用，其余 models 各建一次）
+    scripts = [
+        [[TextBlock(text="x")]],                       # 主模型（团队轮不消耗）
+        [                                              # AI 总管：直接交付（最小闭环）
+            [TextBlock(text="任务简单，直接交付。"), ToolUseBlock(
+                id="d1", name="team_deliver", input={})],
+            [TextBlock(text="交付收口")],
+        ],
+        [[TextBlock(text="成员A待命")]],                # 调研员（当前模型，不被动用）
+        [[TextBlock(text="成员B待命")]],                # 实施者（第二个 model，不被动用）
+    ]
+    with make_team_client(home, scripts) as client:
+        backend = client.app.state.backend
+        backend.cfg.providers["fa"] = ProviderConfig(
+            kind="fake", api_key="k", model="ma", models=["ma", "mb"],
+        )
+        with client.websocket_connect("/ws") as ws:
+            ws.send_json({"id": "r1", "method": "chat.send", "params": {
+                "text": "目标：产出调研报告",
+                "template": "团队·交付小组",
+                "director_mode": "ai",
+                "director": {"provider": "fa", "model": "ma"},
+            }})
+            events: list = []
+            r1 = recv_until(ws, "r1", events)
+            assert r1["ok"], r1
+            started = next(e for e in events if e["event"] == "team_started")
+            assert (started["data"]["director_mode"],
+                    started["data"]["director_provider"]) == ("ai", "fa")
+            finished = next(e for e in events if e["event"] == "team_finished")
+            assert finished["data"]["status"] == "done"
+
+
+def test_team_grant_run_without_template_allows_workspace_write(home):
+    """team=true 直发（无模板）+ grant scope=run：GrantedGate 生效——成员写
+    工作区内文件不再挂逐次确认（实测回归：此前 grant 只被模板路径消费，
+    成员写文件挂 permission_request、无人应答即 300 秒超时）。删除语义 /
+    目录外写入仍由 GrantedGate 内部收口回退会话门。"""
+    scripts = [
+        [[TextBlock(text="x")]],  # 主模型
+        [
+            [ToolUseBlock(id="t1", name="write_file",
+                          input={"path": "out.txt", "content": "hi"})],
+            [TextBlock(text="已写入 out.txt 并回读确认")],
+        ],
+    ]
+    with make_team_client(home, scripts) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "c0", "method": "chat.send", "params": {
+            "text": "建队", "team": True,
+            "members": [{"provider": "fa", "model": "ma", "name": "小研"}],
+            "grant": {"scope": "run"},
+        }})
+        c0 = recv_until(ws, "c0")
+        assert c0["ok"], c0
+        sid = c0["result"]["session_id"]
+        # 派执行型工单并置进行中（成员下轮才挂工作区工具表）
+        ws.send_json({"id": "k1", "method": "team.task_add", "params": {
+            "title": "落盘", "assignee": "小研", "type": "exec",
+        }})
+        k1 = recv_until(ws, "k1")
+        assert k1["ok"]
+        tid = k1["result"]["task"]["id"]
+        ws.send_json({"id": "k2", "method": "team.task_update", "params": {
+            "task_id": tid, "status": "in_progress",
+        }})
+        assert recv_until(ws, "k2")["ok"]
+        ws.send_json({"id": "c1", "method": "chat.send", "params": {
+            "text": "@小研 写文件", "session_id": sid,
+        }})
+        events: list = []
+        c1 = recv_until(ws, "c1", events)
+    assert c1["ok"], c1
+    assert not any(e["event"].startswith("permission_") for e in events), (
+        "grant run 下成员写工作区文件不应再挂逐次确认"
+    )
+    assert (home / "proj" / "out.txt").read_text(encoding="utf-8") == "hi"
+
+
+def test_queue_updated_broadcasts_to_other_connections(home):
+    """轮收尾的 queue_updated 广播到所有连接并带 session_id（实测回归：此前
+    只发发起连接，发起者断开后其他端运行态永远停在「排队」；帧也无从按
+    会话路由）。"""
+    scripts = [[[TextBlock(text="好的")]]]
+    with (
+        make_team_client(home, scripts) as client,
+        client.websocket_connect("/ws") as ws_a,
+        client.websocket_connect("/ws") as ws_b,
+    ):
+        # 先给 B 发一次 boot（收掉自己的回包），让它成为纯监听端
+        ws_b.send_json({"id": "b0", "method": "boot", "params": {}})
+        recv_until(ws_b, "b0")
+        ws_a.send_json({"id": "a1", "method": "chat.send", "params": {
+            "text": "只回复两个字：好的",
+        }})
+        events_a: list = []
+        a1 = recv_until(ws_a, "a1", events_a)
+        assert a1["ok"], a1
+        sid = a1["result"]["session_id"]
+        # B 是旁观连接：应收到带 session_id 的收尾广播帧
+        got = None
+        for _ in range(300):
+            frame = ws_b.receive_json()
+            if frame.get("event") == "queue_updated":
+                got = frame["data"]
+                break
+        assert got is not None, "旁观连接应收到 queue_updated 广播"
+        assert got.get("session_id") == sid
+
+
+def test_template_team_specs_expand_multi_model_pool(home):
+    """自动池按「服务 × models 列表」展开：单 Key 配多模型时，模板角色尽量
+    各得一个独立（服务, 模型）键——3 角色在 2 个模型下只合并 1 名，而不是
+    全部挤在同一键上被去重成 1 名队员。"""
+    from skysheep.config import ProviderConfig, load_config
+    backend = ServerBackend(
+        working_dir=home / "proj",
+        provider_factory=lambda: FakeProvider([[TextBlock(text="x")]]),
+    )
+    backend.cfg = load_config()  # 单测直接构造不经 setup()：手动加载隔离配置
+    backend.cfg.providers["fa"] = ProviderConfig(
+        kind="fake", api_key="k", model="ma", models=["ma", "mb"],
+    )
+    specs = backend._template_team_specs({"kind": "team", "roles": [
+        {"key": "r1", "name": "调研员"},
+        {"key": "r2", "name": "实施者"},
+        {"key": "r3", "name": "验收员"},
+    ]})
+    assert [(s.provider_name, s.model) for s in specs] == [
+        ("fa", "ma"), ("fa", "mb"),
+    ]
+    assert specs[0].name == "调研员" and specs[1].name == "实施者"

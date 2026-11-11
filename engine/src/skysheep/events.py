@@ -175,10 +175,16 @@ class NoticeEvent(Event):
 
 
 class QueueUpdated(Event):
-    """消息排队状态变化：pending 为当前仍在排队的轮数。"""
+    """消息排队状态变化：pending 为当前仍在排队的轮数。
+
+    session_id：运行状态所属会话。轮路径经 log_session_event 附加（由此处
+    默认空串兜底）；入队/广播路径显式带上——运行状态是多端共同事实，前端
+    靠它把运行点路由到正确标签，而不是误挂到自己正在看的会话上。
+    """
 
     kind: Literal["queue_updated"] = "queue_updated"
     pending: int = 0
+    session_id: str = ""
 
 
 class ScheduleUpdated(Event):

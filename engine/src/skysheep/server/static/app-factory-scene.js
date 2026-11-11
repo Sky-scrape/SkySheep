@@ -227,36 +227,14 @@
       });
     });
 
-    // 固定取景同时包含园区边缘与外围设施，避免居中后裁掉前沿道路。
+    // 取景按 bounds（下图 world.bounds）：全景要把整个场景——台地、厂区坪与九宫格
+    // 外圈设施——都收进画幅，避免居中后裁掉前沿道路。曾经另算过「只框厂区坪」的
+    // focus 框，机器看着是大了，但外圈设施被画幅边裁掉，观感就是「局部放大」；
+    // 要近看请点厂区头进聚焦档（applyFocusCamera），全景只管「一眼看全」。
     minX = Math.min(minX, plateau.cx - plateau.hw - 20);
     maxX = Math.max(maxX, plateau.cx + plateau.hw + 20);
     minY = Math.min(minY, plateau.cy - plateau.hh);
     maxY = Math.max(maxY, plateau.cy + plateau.hh + 20);
-
-    // 取景框（focus）：只框住「调度厅 + 所有厂区坪」，不含外围台地与远景设施。
-    // 场景禁缩放之后，默认取景就是唯一画幅：3 个项目时若按 bounds（含台地前缘
-    // 与外圈设施）取景，厂区只占中间一小块，机台又回到「看不清」。
-    // 这样一来项目越少、镜头越近，机台与成品垛自然就大。
-    var focus = null;
-    factories.forEach(function (f) {
-      if (!focus) {
-        focus = { minX: f.x - f.halfW, maxX: f.x + f.halfW,
-                  minY: f.y - f.halfH, maxY: f.y + f.halfH };
-        return;
-      }
-      focus.minX = Math.min(focus.minX, f.x - f.halfW);
-      focus.maxX = Math.max(focus.maxX, f.x + f.halfW);
-      focus.minY = Math.min(focus.minY, f.y - f.halfH);
-      focus.maxY = Math.max(focus.maxY, f.y + f.halfH);
-    });
-    // 调度厅不进取景框：厂区围成一圈时它本来就在中间，一两个项目时把它算进来
-    // 会得到一个「厂房在上、调度厅占半屏」的竖长构图。厅只做背景衔接，不抢画幅。
-    // 一个项目都没有时没有「厂区坪」可框：退回整体取景，让调度厅与外围设施
-    // 完整入画（空场景不该被放大到只剩一栋楼）。
-    if (!focus) focus = { minX: minX, maxX: maxX, minY: minY, maxY: maxY };
-    var focusPad = 44;
-    focus.minX -= focusPad; focus.maxX += focusPad;
-    focus.minY -= focusPad; focus.maxY += focusPad;
 
     // 世界一换，动态对象全部撤场：旧 trip 持有旧厂区的动线几何（pose 会画在
     // 旧位置上），hover 的命中描述也可能指向已不存在的键——重建即清。
@@ -267,7 +245,6 @@
       hall: hall, factories: factories, lines: lines,
       models: site.models, site: site, plateau: plateau,
       bounds: { minX: minX, maxX: maxX, minY: minY, maxY: maxY },
-      focus: focus,
     };
     S.worldSig = projects.map(function (p) {
       return p.id + ":" + (p.lines || []).map(function (l) { return l.key; }).join(",");

@@ -1171,40 +1171,23 @@
   function fitCamera(animate) {
     S.focusPid = null;   // 全景 = 退出聚焦档（Esc / 重开视图都回到这里）
     var w = S.bufW, h = S.bufH;
-    // 有 focus 就用 focus：只框调度厅 + 厂区坪，不把台地前缘与远景设施算进来。
-    // 场景不支持缩放，默认取景就是唯一画幅——框得越准，机台越大。
-    var b = (S.world && (S.world.focus || S.world.bounds))
+    // 全景 = 整个场景（台地 + 厂区坪 + 外圈设施）都进画幅，取景按 bounds。
+    // 以前只框厂区坪：外圈设施被画幅边裁掉，看着就是「局部放大」，而「全景」
+    // 按钮重算的又是同一个框，点下去等于没点。想看机台细节点厂区头进聚焦档，
+    // 全景这一档只负责「一眼看全」。
+    var b = (S.world && S.world.bounds)
       || { minX: -80, maxX: 80, minY: -50, maxY: 50 };
     var pad = 32;
     var z = Math.min((w - pad * 2) / Math.max(1, b.maxX - b.minX),
                      (h - pad * 2) / Math.max(1, b.maxY - b.minY));
     z = Math.max(0.01, Math.min(z, 1.45));
-    var cx = (b.minX + b.maxX) / 2;
-    // 垂直取景尽量把「台地前缘前景」（油罐 / 公路 / 前沿设施）一起收进画幅：
-    // 大窗口下全景缩放顶到 1.45 上限后，厂区坪只占画幅六七成，若仍只按坪
-    // 居中，余量全堆在顶部成大片空天，前缘景物被底边拦腰裁断。前缘装不下
-    // 时允许 zoom 最多回缩一成换完整前缘（天空仍拿 11%、底部留 16px）；
-    // 再装不下（窗口小，机台优先）维持只框厂区坪，前缘沿底边自然出画。
-    var frontMaxY = (S.world && S.world.bounds)
-      ? Math.max(b.maxY, S.world.bounds.maxY) : b.maxY;
-    var frontDepth = frontMaxY - b.maxY;
-    if (frontDepth > 0) {
-      var span = b.maxY - b.minY + frontDepth;
-      var sky = h * 0.11;
-      if (span * z + sky + 16 > h) {
-        var zAlt = (h - sky - 16) / span;
-        if (zAlt >= z * 0.9) z = zAlt;   // 机台缩小一成以内，换前缘完整入画
-      }
-    }
     S.fitZoom = z;
-    var frameMaxY = (frontDepth > 0 &&
-                     (b.maxY - b.minY + frontDepth) * z + h * 0.11 + 16 <= h)
-      ? frontMaxY : b.maxY;
+    var cx = (b.minX + b.maxX) / 2;
     // 天空占上方约 11% 封顶，余量上下均分且底部保 16px 安全边；机台名等
-    // 「比全景更近才出现」的阈值仍按 fitZoom（取景框变化不改变全景语义）。
+    // 「比全景更近才出现」的阈值仍按 fitZoom（窗口尺寸变化不改变全景语义）。
     var landOffset = Math.max(0, Math.min(h * 0.11,
-      (h - (frameMaxY - b.minY) * z) / 2 - 16));
-    var cy = (b.minY + frameMaxY) / 2 - landOffset / z;
+      (h - (b.maxY - b.minY) * z) / 2 - 16));
+    var cy = (b.minY + b.maxY) / 2 - landOffset / z;
     if (animate) {
       S.cam.tx = cx; S.cam.ty = cy; S.cam.tz = z;
     } else {

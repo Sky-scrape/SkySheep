@@ -879,9 +879,6 @@ _DRIVER_JS = r'''
       fx.S.cssH = 500;
       fx.fitCamera(false);
       var b = fx.S.world.bounds;
-      // 取景框（focus）：只框调度厅与厂区坪。场景禁缩放后默认画幅就是它，
-      // 台地前缘与远景设施允许被裁——它们本来就是布景。
-      var f = fx.S.world.focus;
       var cam = fx.S.cam;
       var horizon = fx.sceneHorizon();
       fx.S.world.models.forEach(function (m) {
@@ -902,31 +899,18 @@ _DRIVER_JS = r'''
       if (!(b.minX < b.maxX) || !(b.minY < b.maxY)) {
         note(report.cameraIssues, n + " 项目时 bounds 不成区间: " + JSON.stringify(b));
       }
-      var cx = (f.minX + f.maxX) / 2;
-      // 垂直取景镜像 fitCamera：台地前缘前景装得下（天空 11% + 底部 16px）
-      // 就并入取景框；装不下先试 zoom 回缩一成，再不行退回只框厂区坪。
-      var zFocus = Math.max(0.01, Math.min(Math.min(
-        (fx.S.bufW - 64) / Math.max(1, f.maxX - f.minX),
-        (fx.S.bufH - 64) / Math.max(1, f.maxY - f.minY)), 1.45));
-      var frontMaxY = Math.max(f.maxY, b.maxY);
-      var frontDepth = frontMaxY - f.maxY;
-      var expectZoom = zFocus;
-      if (frontDepth > 0) {
-        var span = f.maxY - f.minY + frontDepth;
-        var skyNeed = fx.S.bufH * 0.11;
-        if (span * zFocus + skyNeed + 16 > fx.S.bufH) {
-          var zAlt = (fx.S.bufH - skyNeed - 16) / span;
-          if (zAlt >= zFocus * 0.9) expectZoom = zAlt;
-        }
-      }
+      var cx = (b.minX + b.maxX) / 2;
+      // 取景镜像 fitCamera：全景按 bounds 框住整个场景（台地 + 厂区坪 + 外圈设施），
+      // 天空 11% / 底部 16px 只在取景余量里让位——场景内容一律不许裁。
+      var expectZoom = Math.max(0.01, Math.min(Math.min(
+        (fx.S.bufW - 64) / Math.max(1, b.maxX - b.minX),
+        (fx.S.bufH - 64) / Math.max(1, b.maxY - b.minY)), 1.45));
       if (Math.abs(cam.zoom - expectZoom) > 1e-6) {
         note(report.cameraIssues, n + " 项目时 zoom 未按取景公式取值: " + cam.zoom);
       }
-      var frameMaxY = (frontDepth > 0 && (f.maxY - f.minY + frontDepth) * expectZoom
-                       + fx.S.bufH * 0.11 + 16 <= fx.S.bufH) ? frontMaxY : f.maxY;
       var landOffset = Math.max(0, Math.min(fx.S.bufH * 0.11,
-        (fx.S.bufH - (frameMaxY - f.minY) * cam.zoom) / 2 - 16));
-      var cy = (f.minY + frameMaxY) / 2 - landOffset / cam.zoom;
+        (fx.S.bufH - (b.maxY - b.minY) * cam.zoom) / 2 - 16));
+      var cy = (b.minY + b.maxY) / 2 - landOffset / cam.zoom;
       if (Math.abs(cam.x - cx) > 1e-6 || Math.abs(cam.y - cy) > 1e-6) {
         note(report.cameraIssues, n + " 项目时镜头中心未按取景公式对齐");
       }
@@ -953,13 +937,13 @@ _DRIVER_JS = r'''
       });
       var pad = 30;
       var z = cam.zoom;
-      // 取景契约：focus 的四角必须在缓冲区内（场景内容不许被裁），
-      // 外围台地 / 远景设施可以出画。
-      [[f.minX, f.minY], [f.minX, f.maxY], [f.maxX, f.minY], [f.maxX, f.maxY]].forEach(function (corner) {
+      // 取景契约：bounds 的四角必须在缓冲区内——全景不许把场景内容裁在画幅边上
+      // （只给 bg 远景留出彩自由）。
+      [[b.minX, b.minY], [b.minX, b.maxY], [b.maxX, b.minY], [b.maxX, b.maxY]].forEach(function (corner) {
         var sx = (corner[0] - cam.x) * z + fx.S.bufW / 2;
         var sy = (corner[1] - cam.y) * z + fx.S.bufH / 2;
         if (sx < pad - 2 || sx > fx.S.bufW - pad + 2 || sy < pad - 2 || sy > fx.S.bufH - 14) {
-          note(report.cameraIssues, n + " 项目时 focus 角点越出缓冲区 (" + sx + "," + sy + ")");
+          note(report.cameraIssues, n + " 项目时 bounds 角点越出缓冲区 (" + sx + "," + sy + ")");
         }
       });
       if (n === 4) {
@@ -1028,7 +1012,7 @@ _DRIVER_JS = r'''
     report.fixedCamera = {
       before: cameraBefore, after: cameraAfter, prevented: prevented,
       zoomLocked: zoomIn === zoomBefore && fx.S.cam.tz === zoomBefore,
-      centered: fx.S.cam.x === (fx.S.world.focus.minX + fx.S.world.focus.maxX) / 2 &&
+      centered: fx.S.cam.x === (fx.S.world.bounds.minX + fx.S.world.bounds.maxX) / 2 &&
                 fx.S.cam.y <= (fx.S.world.bounds.minY + fx.S.world.bounds.maxY) / 2,
       afterWheel: [fx.S.cam.x, fx.S.cam.y, fx.S.cam.tx, fx.S.cam.ty]
     };

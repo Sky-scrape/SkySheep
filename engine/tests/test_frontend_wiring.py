@@ -283,7 +283,7 @@ def test_model_menu_rows_logo_and_right_badge():
     与名字；厂家徽章随服务名上移到服务列，模型行不再重复；★ 新会话默认标记
     仍缀在模型行末尾。"""
     js = read_app_bundle()
-    i = js.index("async function toggleModelMenu")
+    i = js.index("async function openModelMenu")
     seg = js[i:js.index("modelChip.style.cursor")]
     assert "providerAvatar(g.name)" in seg, "服务行应带服务头像"
     assert "mm-svc-name" in seg, "服务行要有名字列"

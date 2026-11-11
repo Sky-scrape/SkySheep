@@ -754,7 +754,7 @@ def test_provider_drag_order_protocol(home):
     assert 'data.get("provider_order")' in reader, "读取面也要回传，否则下次打开丢序"
 
     # ② 只列已配置 Key 的服务
-    menu = js[js.index("async function toggleModelMenu("):]
+    menu = js[js.index("async function openModelMenu("):]
     menu = menu[:menu.index("modelChip.style.cursor")]
     assert "if (!r.hasKey) return;" in menu, "没配 Key 的服务切过去必然失败，不进清单"
 

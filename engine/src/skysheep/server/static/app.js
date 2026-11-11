@@ -1878,60 +1878,28 @@ function showSplitCoopMenu(pane, btn) {
   document.addEventListener("click", close, true);
 }
 
-// 分屏列的模型选择菜单：复用模型菜单样式，确认走 session.model_switch
-let splitModelRows = [];
+// 分屏列的模型选择：与主栏 chip 共用同一套两级菜单（服务 → 模型），
+// 落点走 session.model_switch，只影响这一栏
 async function pickSplitModel(pane, anchor) {
-  const menu = document.getElementById("split-model-menu");
-  if (!menu.classList.contains("hidden")) { menu.classList.add("hidden"); return; }
-  menu.innerHTML = '<div class="mm-empty">加载中…</div>';
-  menu.classList.remove("hidden");
-  const detail = await request("config.providers").catch(() => null);
-  if (!detail || menu.classList.contains("hidden")) return;
-  const cur = await request("session.model_get", { id: pane.sid }).catch(() => null);
-  splitModelRows = buildModelRows(detail);
-  menu.innerHTML = "";
-  const addRow = (row) => {
-    const on = cur && cur.overridden && cur.name === row.name && cur.model === row.model;
-    const b = document.createElement("button");
-    b.className = "mm-item" + (on ? " active" : "");
-    b.innerHTML = auxMiniAvatar(row.name) +
-      `<span class="mm-model">${on ? "✓ " : ""}${escapeHtml(row.model)}</span>` +
-      `<span class="mm-prov${row.hasKey ? "" : " no-key"}">${row.hasKey ? "" : "⚠ "}${escapeHtml(row.label)}</span>`;
-    b.title = row.hasKey
-      ? `这一栏使用 ${row.label} / ${row.model}（只影响本栏）`
-      : `「${row.label}」还没配置 API Key`;
-    b.onclick = async () => {
-      menu.classList.add("hidden");
-      try {
-        const r = await request("session.model_switch", { id: pane.sid, name: row.name, model: row.model });
-        paintSplitModel(pane, { name: r.provider, model: r.model, overridden: true });
-      } catch (err) { paneNotice(pane, "切换失败: " + err.message); }
-    };
-    menu.appendChild(b);
-  };
-  const rows = splitModelRows;
-  for (const [label, pred] of [["默认", (r) => r.preset], ["自定义", (r) => !r.preset]]) {
-    const hits = rows.filter(pred);
-    if (!hits.length) continue;
-    // 分组小标题：无样式的裸 div（旧的分组头类已废弃下线，见
-    // test_frontend_wiring 的整库禁用断言；它本就没有任何 CSS 规则）
-    const head = document.createElement("div");
-    head.textContent = label;
-    menu.appendChild(head);
-    hits.forEach(addRow);
-  }
-  if (!rows.length) menu.innerHTML = '<div class="mm-empty">还没有可用的模型服务</div>';
-  const r = anchor.getBoundingClientRect();
-  const vh = window.innerHeight / uiScale;
-  menu.style.top = "auto";
-  menu.style.bottom = (vh - r.top / uiScale + 6) + "px";
-  menu.style.left = Math.max(8, r.right / uiScale - 250) + "px";
+  if (!modelMenu.classList.contains("hidden") && modelMenuAnchor === anchor) return hideModelMenu();
+  openModelMenu(anchor, {
+    sid: pane.sid,
+    alive: () => splitPanes.includes(pane) && !!pane.el && pane.el.isConnected,
+    aliveHint: "这一栏已关闭，请重新打开分屏再选",
+    apply: (row) =>
+      request("session.model_switch", { id: pane.sid, name: row.name, model: row.model }),
+    afterApply: (r) => {
+      paintSplitModel(pane, {
+        name: r.provider, model: r.model, overridden: true,
+        supports_vision: r.supports_vision,
+      });
+      if (pane.images.length && r.supports_vision === false) {
+        paneNotice(pane, `这一栏的模型「${r.provider}」不支持图片输入，已贴的 ${
+          pane.images.length} 张图发不出去`);
+      }
+    },
+  });
 }
-document.addEventListener("click", (e) => {
-  const menu = document.getElementById("split-model-menu");
-  if (menu && !menu.classList.contains("hidden") &&
-      !menu.contains(e.target) && !e.target.closest('[data-role="model"]')) menu.classList.add("hidden");
-});
 
 // 分屏列头状态：运行中蓝点 + 等确认金标
 function paintSplitHead(pane) {
@@ -2003,6 +1971,8 @@ function closeSplitPane(pane, opts = {}) {
   if (refFace === pane) closeRefMenu();
   if (menuFace === pane) hideInputMenu();
   if (ctxPopFace === pane) closeCtxPop(true);
+  // 模型菜单从这一栏的徽章开出：列关了就把菜单一起收掉，别留一个悬空的浮层
+  if (modelMenuAnchor && pane.el.contains(modelMenuAnchor)) hideModelMenu();
   // 正在录音且录的就是这一栏：列都要没了，录音必须收尾并丢弃，
   // 否则录音计时器与麦克风轨道继续挂着、转写文本还会往已摘除的输入框写
   if (voiceFace === pane) voiceReset();
@@ -8036,11 +8006,18 @@ const modelMenu = document.getElementById("model-menu");
 let modelPopup = null; // 当前展开的模型弹层（同一时间只有一个，随菜单重画一同销毁）
 let providerOrder = []; // 服务列表的拖动序（ui.json 的 provider_order；缺省按后端默认序）
 let defaultModelPref = { provider: "", model: "", label: "" }; // 新会话默认模型（Shift+点击行设置）
+// 主栏 chip 与分屏列徽章共用同一个菜单：锚点与「选了之后切到哪」都记在打开时
+let modelMenuAnchor = null;
+let modelMenuCtx = null;
+let modelMenuSeq = 0; // 打开序号：异步填充回来时菜单已被重开/关掉就作废
 
 function hideModelMenu() {
+  modelMenuSeq += 1;
   modelMenu.classList.add("hidden");
   modelMenu.innerHTML = "";
   modelPopup = null; // 弹层随 innerHTML 一起没了，引用一并清掉
+  modelMenuAnchor = null;
+  modelMenuCtx = null;
 }
 
 function buildModelRows(detail, cur) {
@@ -8063,29 +8040,35 @@ function buildModelRows(detail, cur) {
   return rows;
 }
 
-async function toggleModelMenu(e) {
-  if (e) e.stopPropagation(); // 别让随后冒泡到 document 的 click 立刻把菜单关掉
-  if (!modelMenu.classList.contains("hidden")) return hideModelMenu();
+/** 打开模型菜单（主栏 chip 与分屏列徽章共用）。
+ *  ctx = {sid, alive, aliveHint, apply(row), afterApply(result)}：
+ *  sid 是切换落点的会话（空串 = 全局，只给主栏空标签用）；alive 在选择落地前
+ *  复核目标还在（标签已切走 / 分屏列已关）；apply 发切换请求，afterApply 收尾。 */
+async function openModelMenu(anchor, ctx) {
+  hideModelMenu(); // 重开时先把上一个菜单收掉：在途的那次填充随 seq 作废
+  const seq = ++modelMenuSeq;
+  modelMenuAnchor = anchor;
+  modelMenuCtx = ctx;
   // 先同步展开「加载中」，再等数据填充——点击立刻有反馈，也避免异步间隙被关掉
   modelMenu.innerHTML = '<div class="mm-empty">加载中…</div>';
   modelMenu.classList.remove("hidden");
-  const chipR = modelChip.getBoundingClientRect(); // 物理像素，下同
-  // 徽章现在住在屏幕底部的输入区工具条里：菜单向上弹（top 置 auto，用 bottom 贴徽章上沿）
+  const chipR = anchor.getBoundingClientRect(); // 物理像素，下同；锚点随开随取
+  // 徽章住在屏幕底部的输入区工具条里：菜单向上弹（top 置 auto，用 bottom 贴徽章上沿）
   const vh = window.innerHeight / uiScale;
   modelMenu.style.top = "auto";
   modelMenu.style.bottom = (vh - chipR.top / uiScale + 6) + "px";
   modelMenu.style.left = Math.max(8, chipR.right / uiScale - 260) + "px";
   const detail = await request("config.providers").catch(() => null);
-  if (!detail || modelMenu.classList.contains("hidden")) return; // 请求失败或期间已被关掉
+  if (!detail || seq !== modelMenuSeq) return; // 请求失败或期间已被重开/关掉
   // 新会话默认模型（★ 行标记用）：拉取失败不阻塞菜单
   defaultModelPref = await request("default_model.get").catch(() => defaultModelPref) || defaultModelPref;
-  // 会话生效模型：主栏开着会话时按会话标 ✓（三段解析在后端，含默认模型会话）；
-  // 空标签按全局 config 标。开菜单到落地都认 tabAtOpen，切换标签后菜单作废
-  const tabAtOpen = activeTab;
+  if (seq !== modelMenuSeq) return;
+  // 会话生效模型：sid 指向的会话按会话标 ✓（三段解析在后端）；空标签按全局 config 标。
+  // 开菜单到落地都认 ctx，切换标签/关列后由 addRow 的 alive 复核拦下
   let sessCur = null;
-  if (tabAtOpen && tabAtOpen.sid) {
-    const cg = await request("session.model_get", { id: tabAtOpen.sid }).catch(() => null);
-    if (cg && activeTab === tabAtOpen && cg.session_id === tabAtOpen.sid) sessCur = cg;
+  if (ctx.sid) {
+    const cg = await request("session.model_get", { id: ctx.sid }).catch(() => null);
+    if (cg && seq === modelMenuSeq && cg.session_id === ctx.sid && ctx.alive()) sessCur = cg;
   }
   const rows = buildModelRows(detail, sessCur);
   // 两列菜单：左列服务、右列该服务的模型（不再分「默认/自定义」页签）。
@@ -8117,7 +8100,7 @@ async function toggleModelMenu(e) {
       `</span>` +
       (defaultModelPref.provider === row.name && defaultModelPref.model === row.model
         ? `<span class="mm-def" title="新会话将默认使用这个模型">★ 新会话默认</span>` : "");
-    b.title = `切换到 ${row.label} / ${row.model}（点击${sessCur ? "，只影响当前会话" : ""}）；Shift+点击 设为新会话默认`;
+    b.title = `切换到 ${row.label} / ${row.model}（点击${ctx.sid ? "，只影响当前会话" : ""}）；Shift+点击 设为新会话默认`;
     b.onclick = async (ev) => {
       // Shift+点击：把这一行设为「新会话默认模型」（不改当前对话）
       if (ev.shiftKey) {
@@ -8132,36 +8115,18 @@ async function toggleModelMenu(e) {
         }
         return;
       }
+      const pickCtx = modelMenuCtx; // hideModelMenu 会清掉菜单上下文，先留住
       hideModelMenu();
-      // 落地竞态防护：开菜单后切过标签就作废，模型换到错会话比不切更糟
-      if (activeTab !== tabAtOpen) {
-        addNotice("标签已切换，请重新打开模型菜单再选");
+      if (!pickCtx) return;
+      // 落地竞态防护：开菜单后切过标签/关过分屏列就作废，
+      // 模型换到错会话比不切更糟
+      if (!pickCtx.alive()) {
+        addNotice(pickCtx.aliveHint || "目标已变化，请重新打开模型菜单再选");
         return;
       }
       try {
-        // 主栏有会话：切换记在该会话上（session.model_switch，本机专属），
-        // 其余会话与全局不动；空标签：全局切换
-        const sid = tabAtOpen ? tabAtOpen.sid : "";
-        const r = sid
-          ? await request("session.model_switch", { id: sid, name: row.name, model: row.model })
-          : await request("model.switch", { name: row.name, model: row.model });
-        curProviderName = r.provider;
-        curModelName = r.model;
-        if (r.supports_vision !== undefined) curSupportsVision = r.supports_vision !== false;
-        if (!sid) {
-          // 全局切换：空标签徽章的全局镜像一并刷新（会话级切换不动全局）
-          globalProviderName = r.provider;
-          globalModelName = r.model;
-          globalSupportsVision = curSupportsVision;
-        }
-        if (sid) saveComposerState(sid); // 会话生效模型写回状态条目
-        hideBanner();
-        setModelChip(`${r.provider}/${r.model}`);
-        if (pendingImages.length && !curSupportsVision) {
-          addNotice(`提示：该模型不支持图片输入，输入框里已贴的 ${pendingImages.length} 张图发不出去，` +
-            "请换一个多模态模型或先移除图片。");
-        }
-        refreshReasoning();
+        const r = await pickCtx.apply(row);
+        pickCtx.afterApply(r);
       } catch (err) {
         addNotice("切换失败: " + err.message);
       }
@@ -8327,12 +8292,59 @@ async function toggleModelMenu(e) {
   };
   paint("current"); // 初次打开：直接展开当前模型所在服务，省一次点击
 }
+
+/** 主栏 chip 的入口：点一下开/关菜单，落点按当前标签的会话（空标签=全局）。 */
+function toggleModelMenu(e) {
+  if (e) e.stopPropagation(); // 别让随后冒泡到 document 的 click 立刻把菜单关掉
+  if (!modelMenu.classList.contains("hidden") && modelMenuAnchor === modelChip) return hideModelMenu();
+  const tabAtOpen = activeTab;
+  const sid = tabAtOpen && tabAtOpen.sid ? tabAtOpen.sid : "";
+  openModelMenu(modelChip, {
+    sid,
+    alive: () => activeTab === tabAtOpen,
+    aliveHint: "标签已切换，请重新打开模型菜单再选",
+    // 落点会话按点击时刻取：菜单开着时空标签可能已经懒创建了会话
+    apply: (row) => {
+      const liveSid = tabAtOpen && tabAtOpen.sid ? tabAtOpen.sid : "";
+      return liveSid
+        ? request("session.model_switch", { id: liveSid, name: row.name, model: row.model })
+        : request("model.switch", { name: row.name, model: row.model });
+    },
+    afterApply: (r) => applyMainModelSwitch(
+      r, tabAtOpen && tabAtOpen.sid ? tabAtOpen.sid : "",
+    ),
+  });
+}
+
+/** 主栏切换成功后的收尾：chip 文案、全局镜像、视觉能力提示与思考强度。 */
+function applyMainModelSwitch(r, sid) {
+  curProviderName = r.provider;
+  curModelName = r.model;
+  if (r.supports_vision !== undefined) curSupportsVision = r.supports_vision !== false;
+  if (!sid) {
+    // 全局切换：空标签徽章的全局镜像一并刷新（会话级切换不动全局）
+    globalProviderName = r.provider;
+    globalModelName = r.model;
+    globalSupportsVision = curSupportsVision;
+  }
+  if (sid) saveComposerState(sid); // 会话生效模型写回状态条目
+  hideBanner();
+  setModelChip(`${r.provider}/${r.model}`);
+  if (pendingImages.length && !curSupportsVision) {
+    addNotice(`提示：该模型不支持图片输入，输入框里已贴的 ${pendingImages.length} 张图发不出去，` +
+      "请换一个多模态模型或先移除图片。");
+  }
+  refreshReasoning();
+}
 modelChip.style.cursor = "pointer";
 modelChip.title = "当前模型  点击切换已启用的模型";
 modelChip.onclick = toggleModelMenu;
 document.addEventListener("click", (e) => {
-  if (!modelMenu.classList.contains("hidden") &&
-      !modelMenu.contains(e.target) && !modelChip.contains(e.target)) hideModelMenu();
+  if (modelMenu.classList.contains("hidden")) return;
+  if (modelMenu.contains(e.target)) return;
+  // 外点关闭只豁免当前锚点（主栏 chip 或分屏列徽章）
+  if (modelMenuAnchor && modelMenuAnchor.contains(e.target)) return;
+  hideModelMenu();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;

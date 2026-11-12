@@ -627,6 +627,28 @@ def _build_section_model(model_cls: type[BaseModel], data: dict, label: str):
         ) from e
 
 
+def _provider_is_usable(name: str, pc: ProviderConfig) -> bool:
+    """启动时能否直接构造出 provider：演示模式，或已能取到 API Key（含环境变量）。"""
+    return pc.kind == "fake" or resolve_api_key(name, pc) is not None
+
+
+def _pick_fallback_default(providers: dict[str, ProviderConfig]) -> str:
+    """默认服务悬空时的兜底：先挑真能用的，其次 deepseek，最后列表第一项。
+
+    只按「在列表里」挑会把默认落到 PRESETS 排第一的 anthropic——它通常没填 Key，
+    启动构建直接报缺 Key，界面显示「还没有可用的模型服务」，哪怕别的服务早就
+    配好了 Key（用户当前的服务列表里只有内置预设 + 一个配好的自定义服务）。
+    """
+    if "deepseek" in providers and _provider_is_usable("deepseek", providers["deepseek"]):
+        return "deepseek"
+    for name, pc in providers.items():
+        if _provider_is_usable(name, pc):
+            return name
+    if "deepseek" in providers:
+        return "deepseek"
+    return next(iter(providers), "deepseek")
+
+
 def load_config() -> SkySheepConfig:
     """读取 config.toml 并与预设合并（文件条目按字段覆盖预设）。
 
@@ -787,7 +809,7 @@ def load_config() -> SkySheepConfig:
             pc.model = pc.models[0]
     # default 必须落在可用列表里：被删掉或写错名字都不能让启动时的 provider 构建炸掉
     if default not in merged:
-        default = "deepseek" if "deepseek" in merged else next(iter(merged), default)
+        default = _pick_fallback_default(merged)
     try:
         return SkySheepConfig(
             default=default,
@@ -1687,18 +1709,15 @@ def disabled_providers_in_config() -> list[str]:
 
 
 def _drop_default_if_matches(raw: dict, name: str) -> None:
-    """删掉的正好是默认项时把默认指向一个还在的服务，避免启动时 default 悬空。"""
-    if raw.get("default") != name:
+    """删掉/停用的正好是默认项时，把 `default` 交还给加载期兜底（挑一个能用的）。
+
+    隐式默认（配置没写 `default` 时按 deepseek 起算）也要管：不处理的话，
+    停用 deepseek 后兜底会按 PRESETS 顺序落到没填 Key 的 anthropic 上，
+    重启即显示「还没有可用的模型服务」，哪怕别的服务早就配好了 Key。
+    """
+    if (raw.get("default") or "deepseek") != name:
         return
-    still_there = set(PRESETS) | set(raw.get("providers") or {})
-    still_there -= set(raw.get("disabled_providers") or [])
-    still_there.discard(name)
-    if "deepseek" in still_there:
-        raw["default"] = "deepseek"
-    elif still_there:
-        raw["default"] = sorted(still_there)[0]
-    else:
-        raw["default"] = name
+    raw.pop("default", None)
 
 
 def disable_provider_in_config(name: str) -> None:

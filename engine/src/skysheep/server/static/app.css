@@ -862,7 +862,11 @@ mark.search-hit-mark {
   padding: 9px 14px; white-space: pre-wrap;
   box-shadow: var(--shadow-sm);
   font-variant-numeric: var(--num);
-  max-width: 100%; overflow-wrap: break-word;
+  /* 气泡按内容收缩并靠右：外层 .msg 的收缩宽度会被下面的操作按钮行（3 个
+     24px 按钮 = 76px）撑开，气泡若默认拉伸，短句会被画成一条比文字宽一截的
+     长胶囊（「你好」多出近一半空白）。长文本仍由 max-width 兜住换行。 */
+  width: fit-content; max-width: 100%; margin-left: auto;
+  overflow-wrap: break-word;
 }
 .msg.user.image-only .user-bubble { padding: 8px; }
 /* 系统补记（撤销本轮改动等）以用户角色入历史：同一位置渲染，但视觉上退成
@@ -871,6 +875,8 @@ mark.search-hit-mark {
 .msg.user.system-note .user-bubble {
   background: var(--paper-sunken); color: var(--text2);
   border: 1px dashed var(--line2); box-shadow: none;
+  /* 系统补记是提示条，不跟着内容收缩：仍铺满整行 */
+  width: auto; margin-left: 0;
   font-size: var(--fs-sm);
 }
 .msg.assistant { align-self: flex-start; width: 100%; }
@@ -5655,12 +5661,12 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   0%, 100% { transform: translateY(0) rotate(-2deg); }
   50% { transform: translateY(-7px) rotate(2deg); }
 }
-/* Agent 干活中：快速蹦跶 */
-#chat-pet.running #pet-img { animation: pet-work .5s ease-in-out infinite; }
+/* Agent 干活中：轻轻呼吸式起伏（原来 0.5s 蹦跶 + 挤压旋转，抖得太厉害，
+   改成慢速小幅：只上下浮 4px、几乎不转） */
+#chat-pet.running #pet-img { animation: pet-work 1.8s ease-in-out infinite; }
 @keyframes pet-work {
-  0%, 100% { transform: translateY(0) scale(1, 1); }
-  30% { transform: translateY(-10px) scale(.96, 1.05) rotate(-4deg); }
-  60% { transform: translateY(-4px) scale(1.02, .97) rotate(3deg); }
+  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  50% { transform: translateY(-4px) rotate(1deg); }
 }
 /* 等待权限确认：左右摇晃提醒 */
 #chat-pet.needs-perm #pet-img { animation: pet-shake .42s ease-in-out infinite; }

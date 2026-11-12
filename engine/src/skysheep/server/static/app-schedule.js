@@ -459,6 +459,10 @@ function renderAgenda(items) {
       };
       ops.querySelector('[data-op="del"]').onclick = async (e) => {
         e.stopPropagation();
+        // 与定时任务的删除同一道确认（一点即删容易误触丢日程）
+        if (!(await confirmModal("删除日程",
+          `<p>确定删除日程 <b>${escapeHtml(it.title || "未命名")}</b> 吗？</p>` +
+          `<p class="dim small">删除后不可恢复。</p>`, "删除"))) return;
         try { await request("schedule.delete", { id: it.id }); }
         catch (err) { addNotice("删除失败: " + err.message); }
         await loadAgenda();
@@ -803,6 +807,9 @@ async function saveDailyReportRow(patch) {
     if (wWd) wWd.value = String(r.weekly_weekday ?? 0);
     if (wT) wT.value = r.weekly_time || "09:00";
     if (wTpl) wTpl.value = r.weekly_template || "";
+    // 「日报 关/开」摘要行由运行中心的聚合数据渲染（renderRunCenter）：
+    // 保存成功后重拉一次，状态行即时跟着变，不用重开页面
+    if (typeof loadRunCenter === "function") loadRunCenter();
     return r;
   } catch (e) {
     addNotice("日报设置保存失败: " + e.message);

@@ -2420,6 +2420,39 @@
             <div id="perm-queue-box"></div>
             <div id="runs-list"></div>
           </section>
+
+          <!-- 运行巡检：事后回头看「跑完了，但跑歪了吗」。数据源 automation.inspect_status /
+               inspect_save / inspect_now（_dispatch_automation.py 已注册，默认关）；
+               app.js 的 loadRunInspectCard 渲染与保存。方法不可用（旧后端）时整卡保持 hidden。 -->
+          <section class="settings-card hidden" id="run-inspect-card">
+            <div class="card-head">
+              <h3>运行巡检</h3>
+              <div class="usage-head-right">
+                <button id="run-inspect-now" class="btn-ghost">立即巡检</button>
+              </div>
+            </div>
+            <p class="settings-hint">
+              事后回头看「跑完了，但跑歪了吗」：按下面的间隔把最近一段窗口里的自动运行终态压成一张紧凑表，
+              问一次模型「有没有无效循环、有没有偏离任务目标」，结论落成报告。只建议、不自动改配置；
+              只读运行账本，不读会话正文。巡检要真实调用模型，<b>默认关闭</b>。
+            </p>
+            <label class="toggle-row adv-toggle"
+                   title="开启后按巡检间隔自动执行；也可以随时点右上角「立即巡检」手动跑一次">
+              <input type="checkbox" id="run-inspect-enabled">
+              <span>自动巡检</span>
+            </label>
+            <div class="toolcfg-row">
+              <label>巡检间隔（小时）</label>
+              <input type="number" id="run-inspect-interval" min="1" max="168" step="1">
+              <span class="dim small">两次巡检至少隔这么久（1–168），默认 12</span>
+            </div>
+            <div class="toolcfg-row">
+              <label>回看窗口（小时）</label>
+              <input type="number" id="run-inspect-hours" min="1" max="744" step="1">
+              <span class="dim small">每次巡检回看最近这段窗口的运行（1–744），默认 24</span>
+            </div>
+            <p id="run-inspect-last" class="dim small"></p>
+          </section>
         </section>
 
         <section class="settings-page hidden" id="settings-page-usage">

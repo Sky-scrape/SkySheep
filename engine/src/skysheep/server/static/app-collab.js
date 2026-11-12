@@ -886,7 +886,10 @@ function collabPreviewHtml(pv) {
     const mode = t.mode === "auto" ? "本次免确认" : "逐次确认";
     const note = String(t.note || "") || (t.known === false ? "当前工具表里没有这个工具，运行时会忽略" : "");
     return `<tr><td><code>${escapeHtml(collabToolLabel(t))}</code></td>` +
-      `<td>${escapeHtml(mode)}</td><td>${escapeHtml(note)}</td></tr>`;
+      // 模板声明免确认的工具行打 pv-auto 标记：实际是否免确认还取决于下方
+      // 「本次运行中不再逐次确认」复选框，collabPreviewModal 里随勾选联动改写
+      `<td class="pv-mode${t.mode === "auto" ? " pv-auto" : ""}">${escapeHtml(mode)}</td>` +
+      `<td>${escapeHtml(note)}</td></tr>`;
   }).join("");
   const calls = Number(p.max_calls || 0);
   const secs = Number(p.max_seconds || 0);
@@ -957,6 +960,16 @@ function collabPreviewModal(preview) {
     const noConfirmEl = box.querySelector("#collab-pv-noconfirm");
     const readOnlyBtn = box.querySelector('[data-act="readonly"]');
     let settled = false;
+    // 工具表「本次」列与复选框联动：未勾选免确认时，模板声明 auto 的工具
+    // 实际仍逐次确认——标签照实改写，不再照抄模板声明误导（走查 collab-5）
+    const syncModeCells = () => {
+      const on = !!(noConfirmEl && noConfirmEl.checked);
+      box.querySelectorAll(".pv-mode.pv-auto").forEach((td) => {
+        td.textContent = on ? "本次免确认" : "逐次确认（未勾选免确认）";
+      });
+    };
+    if (noConfirmEl) noConfirmEl.addEventListener("change", syncModeCells);
+    syncModeCells();
     const grantRun = () => ({ scope: noConfirmEl && noConfirmEl.checked ? "run" : "ask_each" });
     const finish = (v) => {
       if (settled) return;

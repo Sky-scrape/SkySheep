@@ -367,6 +367,14 @@ function newTabObj(sid, title) {
 function tabFor(sid) { return sid ? chatTabs.find((t) => t.sid === sid) || null : null; }
 function curTab() { return routeTab || activeTab; }
 function curLog() { const t = curTab(); return t ? t.logEl : chatBox; }
+// 分屏列初次无消息时插的「这个会话还没有消息。」空状态：任何真实内容
+// （用户气泡 / 回复流 / 用时行）追加后就不该再留着，与辅助窗格 addUser 的
+// empty.remove() 同一套语义
+function dropEmptyHint(log) {
+  if (!log || !log.querySelector) return;
+  const empty = log.querySelector(".rp-empty");
+  if (empty) empty.remove();
+}
 // 贴底跟随：用户上翻回看时暂停「新内容拽到底部」，滚回底部自动恢复。
 // 判断必须在「追加内容之前」的滚动位置上记账——scrollLog 都在节点追加/长高之后
 // 才被调用，那时 scrollHeight 已变大，现量必然误判成「已离开底部」、永远不再跟随。
@@ -2277,7 +2285,9 @@ function addUser(text, images, refs) {
   }
   if (!text && images && images.length) d.classList.add("image-only");
   d.appendChild(bubble);
-  curLog().appendChild(d);
+  const log = curLog();
+  dropEmptyHint(log);
+  log.appendChild(d);
   scrollLog();
 }
 
@@ -2289,7 +2299,9 @@ function beginAssistant() {
   t.streamingEl = document.createElement("div");
   t.streamingEl.className = "msg assistant";
   t.streamingEl.innerHTML = '<div class="md"><p></p></div>';
-  curLog().appendChild(t.streamingEl);
+  const log = curLog();
+  dropEmptyHint(log);
+  log.appendChild(t.streamingEl);
   t.streamingText = "";
   t._streamBody = null; // 增量渲染状态槽随新气泡重建（见 renderStreamPart）
   t.thinkEl = null;
@@ -5528,6 +5540,7 @@ function showTaskEstimate(data) {
   if (data.basis) el.title = "预估依据：" + data.basis;
   t.etaEl = el; // 旧芯片留在原地，作为上一轮的用时记录
   t.eta = { lo: data.min_seconds || 0, hi: data.max_seconds || 0, start: Date.now(), done: false, actual: 0 };
+  dropEmptyHint(t.logEl);
   t.logEl.appendChild(el);
   updateEtaChip(t);
   scrollLog();
@@ -7397,6 +7410,7 @@ async function renderSessionList(query) {
   syncFoldAllBtn(); // 搜索结果是平铺列表，没有组可折，「折叠全部」随之隐藏
   if (!r.results.length) {
     ul.innerHTML = '<li class="empty-hint">所有项目里都没有匹配的会话或消息</li>';
+    revealSidebarListHead(ul);
     return;
   }
   r.results.forEach((s) => {
@@ -7438,6 +7452,17 @@ async function renderSessionList(query) {
     wireRowKeyboard(li); // 搜索结果行同样是 li：键盘也能打开命中的会话
     ul.appendChild(li);
   });
+  revealSidebarListHead(ul);
+}
+
+// 矮视口下侧栏在 .side-nav 里滚动（滚动条不滚动时不显示）：搜索结果 / 空态
+// 画在视口外时看起来像「没有结果」。画完把首行滚进可视区——首行本来就在
+// 视口内时不动作，不打扰正常布局。
+function revealSidebarListHead(ul) {
+  const first = ul && ul.firstElementChild;
+  if (first && first.getBoundingClientRect().bottom > window.innerHeight) {
+    first.scrollIntoView({ block: "nearest" });
+  }
 }
 
 /** 搜索结果 → 跳到命中消息：滚动到目标 seq 的消息并闪烁高亮。
@@ -12581,7 +12606,9 @@ function updateInputMenu(face) {
           else execSlash(c.cmd, face);
         },
       }));
-    showInputMenu(items, "（没有匹配的命令，回车仍会作为消息发送）");
+    showInputMenu(items, items.length
+      ? "（↑↓ 选择，回车执行命令；继续输入可过滤）"
+      : "（没有匹配的命令，回车仍会作为消息发送）");
     return;
   }
   const at = before.match(/@([^\s@\\/]*)$/);
@@ -12658,7 +12685,12 @@ function composerKeydown(e, face) {
     moveMenuActive(e.key === "ArrowDown" ? 1 : -1);
     return;
   }
-  if (menuOpen && (e.key === "Enter" || e.key === "Tab")) {
+  // 菜单开着但没有候选（斜杠命令无匹配时的提示态）且服务的就是本输入面：
+  // 键语义照常放行——提示语承诺「回车仍会作为消息发送」，把回车吞给
+  // pickMenuItem(0)（无候选、无操作）等于逼用户再按一次才发得出去
+  const menuSelectable = menuItems.length > 0 ||
+    !((menuFace || null) === (face || null));
+  if (menuOpen && menuSelectable && (e.key === "Enter" || e.key === "Tab")) {
     e.preventDefault();
     pickMenuItem(menuActive);
     return;
@@ -13210,7 +13242,7 @@ async function projectModal() {
       <label>切换到其他文件夹</label>
       <div class="model-line">
         <input id="proj-path-input" autocomplete="off" spellcheck="false"
-          placeholder="${canPick ? "点右侧按钮选择文件夹，或直接粘贴完整路径" : "粘贴文件夹完整路径，如 D:\\\\works\\\\demo"}">
+          placeholder="${canPick ? "点右侧按钮选择文件夹，或直接粘贴完整路径" : "粘贴文件夹完整路径，如 D:\\works\\demo"}">
         ${canPick ? '<button id="proj-pick" class="btn-ghost">' + FOLDER_SVG + '选择</button>' : ""}
       </div>
     </div>`;
@@ -13353,7 +13385,7 @@ function showSettingsPage(target) {
     if (body) body.scrollTop = 0;
   }
   if (typeof watchSettingsHints === "function") watchSettingsHints();
-  if (target === "runs") loadRunsPage();
+  if (target === "runs") { loadRunsPage(); loadRunInspectCard(); }
   if (target === "usage") loadUsage();
   if (target === "memory") { loadMemoryPage(); loadInstructions(); loadSnippets(); }
   if (target === "projects") {
@@ -15604,6 +15636,9 @@ async function saveFile(force = false) {
     fileEdit.baseMtime = r.mtime;
     fileEdit.origText = ed.value;
     fileEdit.isNew = false;
+    // 头部大小标记跟着保存刷新：fs.write 返回本次落盘字节数（不取的话
+    // 头部一直显示打开时缓存的旧值，新建文件恒为「0 B」）
+    if (Number.isFinite(r.size)) fileEdit.sizeText = fileSizeText(r.size);
     renderFileHead();
     fileIndex = null; // @ 文件提及的 30s 缓存失效，新建的文件立刻能被 @ 到
     if (wasNew) { filesLoaded = false; loadFiles(true); }
@@ -19325,6 +19360,88 @@ async function loadRunsPage() {
   });
 }
 document.getElementById("runs-refresh").onclick = () => loadRunsPage();
+
+// ---- 设置·运行中心·运行巡检卡（automation.inspect_status / inspect_save / inspect_now）----
+// 读写都走既有 WS 方法（_dispatch_automation.py 已注册，改设置仅本机）；方法不可用
+// （旧后端 / 远端被拒）时整卡保持初始 hidden，不报错打扰——与日报开关行同姿态。
+
+function renderRunInspectCard(st) {
+  const card = document.getElementById("run-inspect-card");
+  if (!card || !st) return;
+  card.classList.remove("hidden");
+  const q = (id) => document.getElementById(id);
+  const enabled = q("run-inspect-enabled");
+  const interval = q("run-inspect-interval");
+  const hours = q("run-inspect-hours");
+  if (enabled) enabled.checked = st.enabled === true;
+  if (interval) interval.value = String(st.interval_hours ?? 12);
+  if (hours) hours.value = String(st.hours ?? 24);
+  const last = q("run-inspect-last");
+  if (last) {
+    if (!st.last_at) {
+      last.textContent = "还没有巡检过：点「立即巡检」手动跑一次，或开启自动巡检等它到点。";
+    } else {
+      const when = new Date(st.last_at * 1000).toLocaleString();
+      last.textContent = `上次巡检 ${when}：${st.last_summary || "（无结论）"}`;
+      last.title = st.last_report || "";
+    }
+  }
+}
+
+async function loadRunInspectCard() {
+  let st;
+  try {
+    st = await request("automation.inspect_status", {});
+  } catch (e) {
+    return; // 旧后端 / 远端被拒：维持初始 hidden
+  }
+  renderRunInspectCard(st || {});
+}
+
+async function saveRunInspectCard(patch) {
+  try {
+    const st = await request("automation.inspect_save", patch);
+    renderRunInspectCard(st || {});
+  } catch (e) {
+    addNotice("巡检设置保存失败: " + e.message);
+    loadRunInspectCard();
+  }
+}
+
+document.getElementById("run-inspect-enabled").onchange = (e) =>
+  saveRunInspectCard({ enabled: e.target.checked });
+document.getElementById("run-inspect-interval").onchange = (e) => {
+  const v = parseInt(e.target.value, 10);
+  if (Number.isFinite(v)) saveRunInspectCard({ interval_hours: v });
+};
+document.getElementById("run-inspect-hours").onchange = (e) => {
+  const v = parseInt(e.target.value, 10);
+  if (Number.isFinite(v)) saveRunInspectCard({ hours: v });
+};
+document.getElementById("run-inspect-now").onclick = async () => {
+  const btn = document.getElementById("run-inspect-now");
+  const last = document.getElementById("run-inspect-last");
+  if (btn) { btn.disabled = true; }
+  if (last) last.textContent = "正在巡检…（读运行账本并调用一次模型，最长 90 秒）";
+  try {
+    const r = await request("automation.inspect_now", {});
+    if (r && r.ok) {
+      addNotice("巡检完成，结论已更新到下方");
+    } else {
+      const why = {
+        too_few_runs: "最近窗口里的终态运行不足 3 条，样本太少不巡",
+        no_provider: "没有可用模型：先在「模型服务」配置 API Key",
+        provider_error: "模型调用失败，详情见日志",
+        empty: "模型没有返回有效结论",
+      }[r && r.reason] || "巡检没有产出结论";
+      addNotice("巡检未执行：" + why);
+    }
+  } catch (e) {
+    addNotice("巡检失败: " + e.message);
+  }
+  await loadRunInspectCard();
+  if (btn) btn.disabled = false;
+};
 
 // 设置·高级（运行参数 / 目录限制 / 信任清单）的函数本体在 app-advanced.js；
 // 下方为加载期接线。

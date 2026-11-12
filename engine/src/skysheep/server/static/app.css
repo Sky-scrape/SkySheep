@@ -538,7 +538,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
    定向发送，流式事件按 sid 路由回所在列（withTab 路由 + 轻量伪 tab）。 */
 #split-pane {
   position: absolute; top: 44px; right: 0; bottom: 0;
-  width: var(--split-w, 46%); z-index: 4;
+  width: var(--split-used, var(--split-w, 46%)); z-index: 4;
   display: flex; align-items: stretch;
   border-left: 2px solid var(--ink-line);
   background: var(--bg);
@@ -573,14 +573,22 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .split-close:hover { color: var(--reg); }
 .split-refresh:hover { color: var(--blue); }
 .split-log { flex: 1; min-height: 0; padding: 0 18px; }
+/* 分屏实际让宽：默认取 --split-w（未存偏好时 CSS 兜底 46%），但主栏至少留
+   420px 可读宽度——窄窗口下 46% 会把主列压到不可读（实测 1280 宽窗口主列
+   只剩 288px、消息逐字竖排）。上限随容器实时收缩，分屏自动让位；clamp 上下
+   限冲突（窗口比 420px 还窄）时按规范取下限 260px。分屏容器宽、主栏 margin、
+   拖手位置三处必须解析同一个值，否则错位漏缝。 */
+#chat-main.has-split {
+  --split-used: clamp(260px, var(--split-w, 46%), calc(100% - 420px));
+}
 #chat-main.has-split #chat,
 #chat-main.has-split #composer,
 #chat-main.has-split #permission-bar,
-#chat-main.has-split #cp-resizer { margin-right: var(--split-w, 46%); }
+#chat-main.has-split #cp-resizer { margin-right: var(--split-used, var(--split-w, 46%)); }
 /* 分屏宽度拖手：贴在分屏左缘的竖向命中区（#chat-main.has-split 时显示） */
 #split-resizer {
   position: absolute; top: 44px; bottom: 0;
-  right: var(--split-w, 46%); width: 9px; margin-right: -4px;
+  right: var(--split-used, var(--split-w, 46%)); width: 9px; margin-right: -4px;
   cursor: col-resize; z-index: 6; display: none;
 }
 #chat-main.has-split #split-resizer { display: block; }
@@ -9715,11 +9723,11 @@ li.mcp-failed { border-left: 0; }
 [dir="rtl"] body.left-collapsed #sidebar { margin-left: 0; margin-right: calc(-1 * var(--sb-w, 262px)); }
 [dir="rtl"] #right-panel { border-left: 0; border-right: 2px solid var(--ink-line); }
 [dir="rtl"] #split-pane { right: auto; left: 0; border-left: 0; border-right: 2px solid var(--ink-line); }
-[dir="rtl"] #split-resizer { right: auto; left: var(--split-w, 46%); margin-right: 0; margin-left: -4px; }
+[dir="rtl"] #split-resizer { right: auto; left: var(--split-used, var(--split-w, 46%)); margin-right: 0; margin-left: -4px; }
 [dir="rtl"] #chat-main.has-split #chat,
 [dir="rtl"] #chat-main.has-split #composer,
 [dir="rtl"] #chat-main.has-split #permission-bar,
-[dir="rtl"] #chat-main.has-split #cp-resizer { margin-right: 0; margin-left: var(--split-w, 46%); }
+[dir="rtl"] #chat-main.has-split #cp-resizer { margin-right: 0; margin-left: var(--split-used, var(--split-w, 46%)); }
 [dir="rtl"] .chat-log { padding-right: 0; padding-left: 80px; }
 [dir="rtl"] #chat-main.has-split .chat-log { padding-left: 18px; }
 [dir="rtl"] #chat-minimap { right: auto; left: 8px; }

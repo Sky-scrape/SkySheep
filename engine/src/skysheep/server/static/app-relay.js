@@ -85,8 +85,11 @@ async function relayDualOpen(options = {}) {
     relayDual = {
       ...data,
       peer: data.peer || keepPeer,
-      pair: data.pair ? data.pair.pair : null,
-      turns: (data.pair && data.pair.turns) || [],
+      // 与 relayDualRun / relayDualStop 同一形状：后端 payload 的 pair / turns 是
+      // 扁平顶层字段（不存在 data.pair.pair），取错层级会让刷新/切会话后的状态
+      // 恢复渲染成空态
+      pair: data.pair || null,
+      turns: data.turns || [],
     };
     relayDualPairId = relayDual.pair ? relayDual.pair.id : null;
     relayDualOpenFor = String(sid);
@@ -247,7 +250,12 @@ function relayDualRender() {
       : (!pair ? "开始接力" : `让${RELAY_SIDE_LABEL[relayCurrentSide()]}执行`);
     start.disabled = relayDualBusy || running || !relayDualOpenFor;
   }
-  if (stop) stop.disabled = relayDualBusy || !running;
+  if (stop) {
+    stop.disabled = relayDualBusy || !running;
+    // 空闲态没有进行中的轮次可停，按钮置灰本就点不动；补一句悬停提示，
+    // 免得用户点了没反应分不清「没点上」还是「已中断」
+    stop.title = running ? "" : "当前没有进行中的轮次，无需中断";
+  }
 
   if (!pair) {
     if (relayDualOpenFor) relayStatus("填写总任务和两屏任务，点「开始接力」");

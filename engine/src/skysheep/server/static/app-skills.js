@@ -182,14 +182,23 @@ function importSkillModal(prefill = "") {
       throw e;
     }
     status.textContent = "";
+    if (!preview.items.length) {
+      const why = (preview.invalid || []).map((it) => `${it.name}：${it.reason || ""}`).join("；");
+      throw new Error(why ? `包里没有可安装的技能（${why}）` : "技能包里没有可安装的技能");
+    }
     const list = preview.items.map((it) =>
       `• ${escapeHtml(it.name)}${it.version ? `（v${escapeHtml(it.version)}）` : ""}：${escapeHtml(it.description || "无描述")}，${it.files} 个文件`
     ).join("\n");
     const clashNote = preview.needs_overwrite
       ? `\n\n⚠ 已存在同名技能：${escapeHtml(nameList(preview.clashes))}。确认后将覆盖（旧目录会先备份）。`
       : "";
+    const invalidNote = (preview.invalid || []).length
+      ? `\n\n⚠ ${preview.invalid.length} 个技能名字不合法，不会安装：\n${preview.invalid
+          .map((it) => `• ${escapeHtml(it.name)}：${escapeHtml(it.reason || "名字校验未通过")}`)
+          .join("\n")}`
+      : "";
     const ok = await confirmModal(
-      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${clashNote}\n\n技能内容来自外部包，会进入系统提示词。确认安装？`,
+      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${clashNote}${invalidNote}\n\n技能内容来自外部包，会进入系统提示词。确认安装？`,
       { title: "安装技能", okLabel: "安装" }
     );
     if (!ok) return;

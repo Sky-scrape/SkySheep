@@ -425,7 +425,8 @@ async function renderSettings() {
         ${m.insecure_http ? '<span class="chip chip-warn" title="此服务走 http 明文且配置了鉴权头：凭据可能被中间人截获，建议改用 https 地址">⚠ http 明文携带鉴权头</span>' : ""}
         ${!m.insecure_http && m.plain_http ? '<span class="chip" title="此服务走 http 明文（无鉴权头）：流量可被同网络设备窃听/篡改，本机地址除外">http 明文</span>' : ""}
         ${srcTxt ? `<span class="chip" title="安装来源信息（写入 mcp.json，可被手编文件伪造，仅作参考）">${srcTxt}</span>` : ""}
-        <span class="${m.connected ? "mcp-ok" : (m.connecting ? "mcp-pending" : "mcp-bad")}">${stateText}</span>
+        <span class="${m.connected ? "mcp-ok" : (m.connecting ? "mcp-pending" : "mcp-bad")}"
+              title="${stateText}">${stateText}</span>
         <button class="btn-ghost mcp-toggle" title="${m.enabled === false ? "重新连接这个服务" : "停用：配置保留，工具从 Agent 移除"}">${m.enabled === false ? "启用" : "停用"}</button>
         ${m.enabled !== false && !m.connected && !m.connecting ? '<button class="btn-ghost mcp-reconnect" title="重连：重建全部 MCP 连接，处理连接失败的服务器">重连</button>' : ""}
         <button class="btn-ghost danger mcp-del" title="删除这个 MCP 服务">删除</button>

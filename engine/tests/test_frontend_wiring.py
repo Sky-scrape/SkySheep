@@ -1245,3 +1245,127 @@ def test_pipeline_node_delete_rebuilds_dep_indexes():
     assert "cb.value = String(Number(cb.value) - 1)" in js
     # 可见标签按勾选当前指向的节点标题重写（不再停留在建行时的快照）
     assert "label.replaceChildren(cb, document.createTextNode(name))" in js
+
+
+# ---------- 长会话里过程条目被 flex 压没（回归：内容看起来消失了） ----------
+
+def test_chat_log_items_keep_natural_height():
+    """聊天流是列向 flex：子项默认 flex-shrink:1，而 overflow:hidden 的子项
+    （圆桌 / 团队卡用 overflow 做折叠）按规范的自动最小尺寸是 0——历史一长，
+    折叠卡就被压到只剩一条边框，看着像内容消失。所有直接子项必须不收缩，
+    装不下由 .chat-log 自己滚动。"""
+    css = read_static("app.css")
+    assert ".chat-log > * { flex-shrink: 0; }" in css
+    # 过程行的收起靠 .folded 藏正文，不引入会被压扁的 overflow 容器
+    assert ".proc-row.folded .proc-body { display: none; }" in css
+
+
+# ---------- 历史重开不再画「只有工具调用」的空气泡 ----------
+
+def test_history_skips_empty_assistant_shells():
+    """中间轮（只有 tool_use / thinking、没有正文）在历史里不画空气泡：工具卡本就不
+    落库，空壳里什么内容都没有，只会让人以为回答丢了。思考行必须在早退之前画好，
+    否则连思考过程一起丢。"""
+    js = read_app_bundle()
+    i = js.index("function addAssistantDone")
+    body = js[i:js.index("\n}\n", i)]
+    assert "if (thinking) addThinkingDone(thinking, t, thinkingMs);" in body
+    assert "if (!text) return;" in body
+    # 思考行先画、再判有没有正文
+    assert body.index("addThinkingDone") < body.index("if (!text) return;")
+    # 历史渲染按返回值挂 seq：空气泡不返回元素时不能拿 lastElementChild 顶替
+    assert "el = addAssistantDone(" in js
+
+
+# ---------- 过程时间线：思考行 / 工具行 / 中间说明按发生顺序交错 ----------
+
+def test_process_timeline_rows_are_chronological():
+    """思考与工具都排成一行行时间线：思考行「💭 思考 · X 秒 · N 字」（默认收起，
+    点开看全文），工具行「▣ 终端 command…」；中间说明（模型动手前说的话）去掉气泡皮，
+    作为时间线里的普通说明。一次模型调用结束就清掉 thinkEl，下一次思考另起一行——
+    否则后面的工具行会全部堆到最后一个思考块的末尾。"""
+    js = read_app_bundle()
+    css = read_static("app.css")
+    # 思考行：一行摘要 + 可展开正文
+    assert "proc-row proc-think folded" in js
+    assert ".proc-row.folded .proc-body { display: none; }" in css
+    # 工具行按发生顺序进当轮的过程框（不再塞进思考块）
+    i = js.index("function addToolCard")
+    body = js[i:js.index("\n}\n", i)]
+    assert "procBody = ensureProcBox(t);" in body
+    assert "procBody.appendChild(card);" in body
+    assert 'querySelector(".think-body")' not in body
+    # 过程框：一轮一个（虚线框），历史渲染按「后面还有没有助手消息」分轮成框，
+    # 不依赖后端是否下发 tool_use（旧引擎/旧会话也要能合成一个大框）
+    assert ".proc-box {" in css
+    assert "function histProcBox(tab)" in js
+    assert "if (m.thinking && showThinking) histProcBox(tab);" in js
+    assert "const next = messages[i + 1];" in js
+    assert "const isFinal = !next || next.role !== \"assistant\";" in js
+    # 框头可整体折叠：运行中展开、一轮结束收起，历史框默认收起
+    assert 'class="proc-box-head"' in js
+    assert 'class="proc-box-body"' in js
+    assert "function buildProcBox(folded)" in js
+    assert "const box = buildProcBox(true);" in js
+    assert "box.classList.add(\"folded\");" in js
+    assert ".proc-box.folded .proc-box-body { display: none; }" in css
+    # 工具行有图标 + 中文动作名（读起来像一条操作时间线）
+    assert 'run_command: { ico: "▣", label: "终端"' in js
+    assert 'write_file: { ico: "✎", label: "编辑"' in js
+    # 中间说明：带 tool_use 的助手消息收成 proc-note，不再当回答气泡
+    assert 'bubble.classList.add("proc-note")' in js
+    assert ".msg.assistant.proc-note .md" in css
+    # 一次模型调用结束清掉思考行状态（下一次另起一行）
+    k = js.index('case "assistant_message"')
+    seg = js[k:js.index('case "roundtable_started"', k)]
+    assert "finishThinking(t);" in seg
+    assert "t.thinkEl = null;" in seg and 't.thinkText = "";' in seg
+
+
+# ---------- 发送期间切标签 / 历史晚归：别把用户的话弄丢 ----------
+
+def test_send_keeps_originating_tab_context():
+    """send() 在模板预检 / 建会话的 await 期间用户可能切走标签：清输入、加气泡、
+    排队提示都必须按发起时的 tab 落地。旧写法直接读 input / curLog() / activeTab，
+    会把另一个会话刚打的草稿清掉（用户看到的就是「第一句话被吞了」），或把气泡
+    塞进别人的日志。历史请求晚归同理：请求期间已追加实时内容时不能重画冲掉它。"""
+    js = read_app_bundle()
+    i = js.index("async function send()")
+    body = js[i:js.index("\n}\n", i)]
+    assert "const steerThisTurn = !!(tab && tab.running" in body
+    assert "if (activeTab === tab) {" in body
+    assert "withTab(tab, placeSent);" in body
+    assert "setRunning(true, tab);" in body
+    j = js.index("async function loadTabHistory")
+    hist = js[j:js.index("\n}\n", j)]
+    assert "const before = tab.logEl ? tab.logEl.childElementCount : 0;" in hist
+    assert "tab.logEl.childElementCount > before" in hist
+
+
+# ---------- 启动首帧的历史渲染：日志还没挂进文档，不能用 isConnected 判框 ----------
+
+def test_history_proc_box_works_on_detached_log():
+    """启动时先 renderHistory 再 activateTab：日志元素还没进文档，isConnected 恒为
+    false。历史过程框与思考行若用它判断「框还在不在」，会每条消息新开一个空框、思考行
+    全部掉到框外（重开应用后的「一串空框」）。必须按 tab.logEl.contains 判断。"""
+    js = read_app_bundle()
+    i = js.index("function histProcBox(tab)")
+    body = js[i:js.index("\n}\n", i)]
+    assert "tab.logEl.contains(tab._histProcBox)" in body
+    assert ".isConnected" not in body
+    j = js.index("function addThinkingDone")
+    row = js[j:js.index("\n}\n", j)]
+    assert "t.logEl.contains(t._histProcBox)" in row
+    assert "t._histProcBox.isConnected" not in row
+
+
+# ---------- 右侧导航刻度只数对话消息，过程条目不算 ----------
+
+def test_minimap_skips_process_items():
+    """右侧悬浮刻度（minimap）只对应对话消息：过程时间线里的中间说明（proc-note）
+    曾经会被当成一条助手消息多占一格；过程框本身不是 .msg，但这里把两道口子都钉住。"""
+    js = read_app_bundle()
+    i = js.index("function miniMsgs()")
+    body = js[i:js.index("\n}\n", i)]
+    assert 'if (!el.classList.contains("msg")) continue;' in body
+    assert 'el.classList.contains("proc-note")' in body

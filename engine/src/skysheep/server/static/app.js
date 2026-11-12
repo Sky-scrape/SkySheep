@@ -622,6 +622,9 @@ function miniMsgs() {
     // 会被当成消息，多出圆点、与对话对不上（空态引导那类没有 msg 的节点同理）
     if (!el.classList.contains("msg")) continue;
     if (el.classList.contains("notice") || el.classList.contains("plan-actions")) continue;
+    // 过程时间线里的中间说明（模型动手前说的话）：属于「操作过程」而非对话消息，
+    // 不算右侧导航刻度（正常路径会把它收进过程框；没有过程框时留在流里也不该占一格）
+    if (el.classList.contains("proc-note")) continue;
     out.push(el);
   }
   return out;
@@ -998,8 +1001,12 @@ function isBlankTab(t) { return !!t && !t.sid && !t.running; }
 async function loadTabHistory(tab) {
   if (!tab || !tab.sid || tab.running || !tab.needHistory) return;
   tab.needHistory = false;
+  const before = tab.logEl ? tab.logEl.childElementCount : 0;
   try {
     const info = await request("session.resume", { id: tab.sid });
+    // 请求期间这一栏已经追加了实时内容（用户赶在历史回来前就发了消息）：
+    // 重画历史会把刚发出的消息和流式输出一起清掉——保留现状，历史下次打开再补
+    if (tab.running || (tab.logEl && tab.logEl.childElementCount > before)) return;
     renderHistory(tab, info.messages || [], info.messages_offset);
   } catch (e) { addNotice("加载会话内容失败: " + e.message); }
 }
@@ -2276,6 +2283,9 @@ function addUser(text, images, refs) {
 
 function beginAssistant() {
   const t = curTab();
+  // 正文开始前先把当前的思考行定格（否则行头的耗时/字数会停在「思考中…」）；
+  // finishThinking 之后再把引用清掉，下一次思考另起一行
+  finishThinking(t);
   t.streamingEl = document.createElement("div");
   t.streamingEl.className = "msg assistant";
   t.streamingEl.innerHTML = '<div class="md"><p></p></div>';
@@ -2382,13 +2392,8 @@ function initStreamBody(md, withCursor) {
 
 function appendStream(txt) {
   const t = curTab();
+  // 思考行默认就是收起的（点开看全文），正文开始不需要再折它
   if (!t.streamingEl) beginAssistant();
-  // 正文开始 → 思考块自动折叠（思考先于正文产出）
-  if (t.thinkText && t.thinkEl && !t.thinkEl.classList.contains("folded")) {
-    t.thinkEl.classList.add("folded");
-    const sum = t.thinkEl.querySelector(".think-sum");
-    if (sum) sum.textContent = thinkSummary(t.thinkEl, true);
-  }
   t.streamingText += txt;
   // 节流渲染：delta 频率远高于人眼需要；定稿前缀不再逐 tick 重跑 markdown
   // （增量方案见上方说明），流结束由 finishAssistant 全量渲染兜底
@@ -2405,27 +2410,80 @@ function appendStream(txt) {
   }
 }
 
-// ---------- 思考过程块（思考型模型：流式灰显，正文开始后折叠，可展开回看） ----------
-// 摘要文案统一走 thinkSummary：思考耗时优先用引擎实测值（历史恢复时带上），
-// 流式期间用本地起止时刻估算，都没有就退到只显示字数。
+// ---------- 思考行（思考型模型）：一行「💭 思考 · 3.3 秒 · 470 字」，点开看全文 ----------
+// 过程（思考 / 中间说明 / 工具行）按发生顺序排成一条时间线，与正文交错显示，
+// 不再整段摊开占屏；耗时优先用引擎实测值（历史恢复时带上），流式期间用本地跨度。
 function fmtThinkMs(ms) {
-  if (!ms || ms < 0) return "";
+  // 100ms 以下不显示（秒级以下的耗时没有信息量，只留字数）
+  if (!ms || ms < 100) return "";
   const s = ms / 1000;
   return s < 10 ? `${s.toFixed(1)} 秒` : `${Math.round(s)} 秒`;
 }
 
-function thinkSummary(el, folded) {
-  // 数据存在元素自身上（el._think）而不是 tab 状态：历史恢复后 tab 状态
-  // 已清空，点击展开时才能继续显示字数与耗时。
+function thinkMeta(el) {
   const data = (el && el._think) || {};
-  const text = data.text || "";
-  const n = Math.round(text.length / 10) * 10;
-  const parts = [];
-  if (n) parts.push(`${n} 字`);
+  const n = Math.round((data.text || "").length / 10) * 10;
   const dur = fmtThinkMs(data.ms || 0);
-  if (dur) parts.push(`思考 ${dur}`);
-  const tail = folded ? "点击展开" : "点击折叠";
-  return `💭 思考过程${parts.length ? "（" + parts.join("  ") + "）" : ""}  ${tail}`;
+  const parts = [];
+  if (dur) parts.push(dur);
+  if (n) parts.push(`${n} 字`);
+  return parts.length ? parts.join(" · ") : "思考中…";
+}
+
+function updateThinkMeta(el) {
+  const meta = el && el.querySelector(".proc-meta");
+  if (meta) meta.textContent = thinkMeta(el);
+}
+
+function bindThinkRow(el) {
+  el.querySelector(".proc-head").onclick = () => {
+    el.classList.toggle("folded");
+    updateThinkMeta(el);
+  };
+}
+
+// 过程框：一轮里的思考行 / 工具行 / 中间说明整体套一层虚线框，框头可整体折叠。
+// 一轮结束（最终回答）时收口并收起；下一轮开始另起一个框。
+function procMetaText(box) {
+  if (!box) return "";
+  const steps = box.querySelectorAll(".tool-card").length;
+  const thinkMs = [...box.querySelectorAll(".proc-think")]
+    .reduce((n, el) => n + ((el._think && el._think.ms) || 0), 0);
+  const parts = [];
+  if (steps) parts.push(`${steps} 步`);
+  if (thinkMs) parts.push(`思考 ${fmtThinkMs(thinkMs)}`);
+  return parts.join(" · ");
+}
+
+function updateProcMeta(box) {
+  const meta = box && box.querySelector(".pb-meta");
+  if (meta) meta.textContent = procMetaText(box);
+}
+
+function buildProcBox(folded) {
+  const box = document.createElement("div");
+  box.className = "proc-box" + (folded ? " folded" : "");
+  box.innerHTML =
+    '<button type="button" class="proc-box-head">' +
+    '<span class="pb-ico">💭</span><span class="pb-title">操作过程</span>' +
+    '<span class="pb-meta"></span><span class="pb-caret">▶</span>' +
+    "</button>" +
+    '<div class="proc-box-body"></div>';
+  box.querySelector(".proc-box-head").onclick = () => {
+    box.classList.toggle("folded");
+    updateProcMeta(box);
+  };
+  return box;
+}
+
+function ensureProcBox(t) {
+  if (!t) return curLog();
+  if (!t.procBox || !t.procBox.isConnected) {
+    const box = buildProcBox(false); // 运行中默认展开，看得见过程在往前走
+    curLog().appendChild(box);
+    t.procBox = box.querySelector(".proc-box-body");
+  }
+  return t.procBox;
 }
 
 function ensureThinkEl(t) {
@@ -2434,18 +2492,17 @@ function ensureThinkEl(t) {
   if (!showThinking) return null;
   if (!t.thinkEl || !t.thinkEl.isConnected) {
     const el = document.createElement("div");
-    el.className = "think-block";
+    el.className = "proc-row proc-think folded";
     el.innerHTML =
-      '<button type="button" class="think-sum">💭 思考中…</button>' +
-      '<div class="think-body"><div class="md"></div></div>';
-    el.querySelector(".think-sum").onclick = () => {
-      const folded = el.classList.toggle("folded");
-      const sum = el.querySelector(".think-sum");
-      if (sum) sum.textContent = thinkSummary(el, folded);
-    };
-    const log = curLog();
-    if (t.streamingEl) log.insertBefore(el, t.streamingEl);
-    else log.appendChild(el);
+      '<button type="button" class="proc-head">' +
+      '<span class="proc-ico">💭</span><span class="proc-name">思考</span>' +
+      '<span class="proc-meta">思考中…</span><span class="proc-caret">▶</span>' +
+      "</button>" +
+      '<div class="proc-body"><div class="md"></div></div>';
+    bindThinkRow(el);
+    const body = ensureProcBox(t);
+    body.appendChild(el);
+    updateProcMeta(body.parentElement);
     t.thinkEl = el;
     t.thinkText = "";
   }
@@ -2460,19 +2517,20 @@ function appendThinking(txt) {
   if (!t.thinkT0) t.thinkT0 = Date.now();
   t.thinkT1 = Date.now();
   t.thinkText += txt;
-  // 元素自持一份摘要数据（见 thinkSummary）：历史恢复清空 tab 状态后仍可展开回看
+  // 元素自持一份摘要数据：历史恢复清空 tab 状态后仍可展开回看
   el._think = { text: t.thinkText, ms: t.thinkMs || (t.thinkT0 && t.thinkT1 ? t.thinkT1 - t.thinkT0 : 0) };
   // 节流渲染（同 appendStream 的增量方案）：思考文本往往比正文还长
   if (!t._thinkRenderTimer) {
     t._thinkRenderTimer = setTimeout(() => {
       t._thinkRenderTimer = null;
       if (!t.thinkEl || !t.thinkText) return;
-      const body = t.thinkEl.querySelector(".think-body .md");
+      const body = t.thinkEl.querySelector(".proc-body .md");
       if (!body) return;
       if (!t._thinkBody) t._thinkBody = initStreamBody(body, false);
       const text = t.thinkText;
       t._thinkBody.sealed = renderStreamPart(
         t._thinkBody, text, t._thinkBody.sealed, streamSealCut(text, t._thinkBody.sealed));
+      updateThinkMeta(t.thinkEl);
       scrollLog();
     }, 80);
   }
@@ -2480,43 +2538,60 @@ function appendThinking(txt) {
 
 function finishThinking(t) {
   if (!t || !t.thinkEl || !t.thinkText) return;
-  // 补上节流攒下的最后一次渲染（定稿按整文精确重画一次），再更新折叠摘要
+  // 补上节流攒下的最后一次渲染（定稿按整文精确重画一次），再更新行头
   if (t._thinkRenderTimer) {
     clearTimeout(t._thinkRenderTimer);
     t._thinkRenderTimer = null;
-    const body = t.thinkEl.querySelector(".think-body .md");
+    const body = t.thinkEl.querySelector(".proc-body .md");
     if (body) body.innerHTML = renderMarkdown(t.thinkText);
   }
   t._thinkBody = null;
-  const folded = t.thinkEl.classList.contains("folded");
-  const sum = t.thinkEl.querySelector(".think-sum");
-  if (sum && !folded) {
-    sum.textContent = thinkSummary(t.thinkEl, false);
-  }
+  t.thinkEl._think = { text: t.thinkText, ms: t.thinkMs || (t.thinkT0 && t.thinkT1 ? t.thinkT1 - t.thinkT0 : 0) };
+  updateThinkMeta(t.thinkEl);
+  // 框头摘要里的「思考 X 秒」跟着定稿值走
+  const box = t.thinkEl.closest(".proc-box");
+  if (box) updateProcMeta(box);
 }
 
-// 历史恢复：按消息携带的 thinking 文本渲染折叠块
+// 历史恢复：同款思考行（默认折叠，点开看全文）
 function addThinkingDone(text, tab, ms) {
   const t = tab || curTab();
-  if (!text || !showThinking) return;
-  const el = ensureThinkEl(t);
-  t.thinkText = text;
-  // 思考耗时由后端随消息下发（引擎实测）；旧消息没有则只显示字数
-  t.thinkMs = ms || 0;
-  t.thinkT0 = 0;
-  t.thinkT1 = 0;
-  el.querySelector(".think-body .md").innerHTML = renderMarkdown(text);
-  // 历史渲染默认折叠，不占空间
-  el.classList.add("folded");
-  // 摘要数据挂在元素上（tab 状态马上会被清空，点击展开时还要用）
-  el._think = { text: text, ms: ms || 0 };
-  const sum = el.querySelector(".think-sum");
-  if (sum) sum.textContent = thinkSummary(el, true);
-  // 历史恢复的思考块是一次性的：随消息渲染后断开流式关联
-  t.thinkEl = null;
-  t.thinkText = "";
-  t.thinkMs = 0;
+  if (!text || !showThinking) return null;
+  const el = document.createElement("div");
+  el.className = "proc-row proc-think folded";
+  el.innerHTML =
+    '<button type="button" class="proc-head">' +
+    '<span class="proc-ico">💭</span><span class="proc-name">思考</span>' +
+    '<span class="proc-meta"></span><span class="proc-caret">▶</span>' +
+    "</button>" +
+    '<div class="proc-body"><div class="md"></div></div>';
+  bindThinkRow(el);
+  el.querySelector(".proc-body .md").innerHTML = renderMarkdown(text);
+  el._think = { text, ms: ms || 0 };
+  updateThinkMeta(el);
+  // 历史渲染时收进当轮的过程框（paintHistorySlice 先备好）；实时/其他路径直接进聊天流。
+  // 判存在用 contains 而不是 isConnected：启动时日志还没挂进文档（先 renderHistory
+  // 后 activateTab），isConnected 恒为 false，会把框误判成「不存在」而把行丢到框外
+  const inBox = !!(t && t._histProcBox && t.logEl && t.logEl.contains(t._histProcBox));
+  const host = inBox ? t._histProcBox : curLog();
+  host.appendChild(el);
+  if (inBox) updateProcMeta(t._histProcBox.parentElement);
+  // 历史恢复的思考行是一次性的：随消息渲染后断开流式关联
+  if (t) { t.thinkEl = null; t.thinkText = ""; t.thinkMs = 0; }
   return el;
+}
+
+// 历史渲染的过程框：连续的思考行/中间说明收进同一个虚线框，遇到回答或用户消息收口。
+// 用 tab.logEl.contains 判断框是否还在本栏（不能用 isConnected：启动时日志尚未挂进
+// 文档，isConnected 恒为 false，会一条消息开一个新框、行全掉到框外）
+function histProcBox(tab) {
+  if (!tab) return null;
+  if (!tab._histProcBox || !tab.logEl || !tab.logEl.contains(tab._histProcBox)) {
+    const box = buildProcBox(true); // 历史默认收起，框头一行摘要就能看完
+    curLog().appendChild(box);
+    tab._histProcBox = box.querySelector(".proc-box-body");
+  }
+  return tab._histProcBox;
 }
 
 function finishAssistant(rtMeta, seq, sources) {
@@ -4917,33 +4992,84 @@ function addTeamBadge(el, meta) {
 
 let curSpawnCard = null; // 运行中的 spawn_agent 卡片：接收 subagent_event 直播
 
+// 工具卡默认收起（操作过程不自动占屏）：有额外内容可看时在卡头留一个小提示，
+// 用户点卡头展开。提示文案由调用方给（改动 / 截图 / 进度）。
+function addToolHint(card, text) {
+  const status = card.querySelector(".t-status");
+  if (!status || card.querySelector(".t-hint")) return;
+  const hint = document.createElement("span");
+  hint.className = "t-hint";
+  hint.textContent = text;
+  status.insertAdjacentElement("beforebegin", hint);
+}
+
+// 过程行的图标与中文动作名（读起来像一条操作时间线：终端 / 查阅 / 编辑 / 读取…）
+const TOOL_ROW_META = {
+  run_command: { ico: "▣", label: "终端", arg: (i) => i.command },
+  web_search: { ico: "🔍", label: "查阅", arg: (i) => i.query },
+  web_fetch: { ico: "🔍", label: "查阅", arg: (i) => i.url },
+  search_history: { ico: "🔍", label: "查阅", arg: (i) => i.query },
+  search_messages: { ico: "🔍", label: "查阅", arg: (i) => i.query },
+  read_file: { ico: "📖", label: "读取", arg: (i) => i.path },
+  read_document: { ico: "📖", label: "读取", arg: (i) => i.path },
+  list_dir: { ico: "📁", label: "浏览", arg: (i) => i.path },
+  write_file: { ico: "✎", label: "编辑", arg: (i) => i.path },
+  edit_file: { ico: "✎", label: "编辑", arg: (i) => i.path },
+  move_file: { ico: "✎", label: "移动", arg: (i) => i.source || i.path },
+  delete_file: { ico: "🗑", label: "删除", arg: (i) => i.path },
+  make_dir: { ico: "📁", label: "新建目录", arg: (i) => i.path },
+  todo_write: { ico: "☰", label: "待办", arg: (i) => (i.items || []).map((x) => x.content).join("；") },
+  spawn_agent: { ico: "🧩", label: "子代理", arg: (i) => i.task || i.prompt },
+  memory_write: { ico: "🧠", label: "记忆", arg: (i) => i.content },
+};
+
+function toolRowInfo(name, input) {
+  const m = TOOL_ROW_META[name];
+  const raw = m && m.arg ? m.arg(input || {}) : oneLine(input);
+  return {
+    ico: m ? m.ico : "🔧",
+    label: m ? m.label : name,
+    arg: String(raw || "").replace(/\s+/g, " ").trim(),
+  };
+}
+
 function addToolCard(data) {
   finishAssistant();
+  const t = curTab();
+  // 本次模型调用的思考到这里定稿：finishAssistant 在没有正文气泡时会早退，
+  // 节流中最后一段思考会丢
+  finishThinking(t);
   const card = document.createElement("div");
   card.className = "tool-card";
   card.dataset.callId = data.tool_call_id;
   card._toolName = data.name;
   card._toolInput = data.input || {};
+  const info = toolRowInfo(data.name, card._toolInput);
+  card.title = data.name; // 原始工具名放悬停提示
   card.innerHTML = `
     <div class="t-head">
-      <span class="t-name">▶ ${escapeHtml(data.name)}</span>
-      <span class="t-args">${escapeHtml(oneLine(data.input))}</span>
+      <span class="t-ico">${info.ico}</span>
+      <span class="t-name">${escapeHtml(info.label)}</span>
+      <span class="t-args">${escapeHtml(info.arg)}</span>
       <span class="t-status">⋯</span>
+      <span class="t-caret">▶</span>
     </div>
     <div class="t-body"><pre></pre></div>`;
   card.querySelector(".t-head").onclick = () => card.classList.toggle("open");
-  // 子代理派生：自动展开卡片，直播内容进来直接可见
+  // 子代理派生：只绑直播目标，不自动展开——操作过程默认收起，点行才看
   if (data.name === "spawn_agent") {
     curSpawnCard = card;
     card._spawnTaskId = "";
-    card.classList.add("open");
+    addToolHint(card, "进度");
   }
   // 登记进在途表：finishToolCard 直接 O(1) 取，不在整个聊天流里
   // 属性选择器扫描（一轮几十上百个工具调用时是 O(n²)）
-  const t = curTab();
   if (!t._toolCards) t._toolCards = new Map();
   t._toolCards.set(data.tool_call_id, card);
-  curLog().appendChild(card);
+  // 过程行按发生顺序放进当轮的过程框：思考行 → 说明 → 工具行……与正文自然交错
+  const procBody = ensureProcBox(t);
+  procBody.appendChild(card);
+  updateProcMeta(procBody.parentElement);
   scrollLog();
 }
 
@@ -5000,11 +5126,11 @@ function finishToolCard(data) {
     pre.className = "tool-diff";
     pre.innerHTML = renderDiffText(data.diff); // 与审查页同一套 diff 行分类
     card.querySelector(".t-body").appendChild(pre);
-    card.classList.add("open"); // 有文件变更时自动展开 diff
+    addToolHint(card, "改动"); // 默认不展开，点卡头看 diff
   }
   // 截屏类工具附带的图片（screenshot）：内联展示，点击放大/还原
   if (Array.isArray(data.images) && data.images.length && !data.is_error) {
-    card.classList.add("open");
+    addToolHint(card, "截图");
     for (const img of data.images) {
       const el = document.createElement("img");
       el.className = "tool-image";
@@ -5396,6 +5522,7 @@ function fmtEtaRange(lo, hi) {
 function showTaskEstimate(data) {
   const t = curTab();
   if (!t) return;
+  t.procBox = null; // 新一轮：上一轮的过程框（若有）收口，过程条目另起一框
   const el = document.createElement("div");
   el.className = "eta-chip";
   if (data.basis) el.title = "预估依据：" + data.basis;
@@ -5594,12 +5721,39 @@ function handleEvent(kind, data) {
         if (typeof rightViewVisible === "function" && rightViewVisible("teamroom")
           && typeof loadTeamRoom === "function") loadTeamRoom(true);
       }
+      const bubble = t && t.streamingEl ? t.streamingEl : null;
       if (t && t.streamingEl) {
         finishAssistant(meta, seq, data.message && data.message.sources);
       } else {
         const text = messageText(data.message);
         if (text) addAssistantDone(text, meta, t, seq, null, 0, 0, null,
           data.message && data.message.sources);
+      }
+      // 中间轮（后面还要继续调工具）：这段正文只是过程播报，不是交付给用户的回答。
+      // 去掉气泡皮、搬进当轮的过程框，作为时间线里的一段普通说明
+      const intermediate = messageHasToolUse(data.message);
+      if (bubble && intermediate) {
+        bubble.classList.add("proc-note");
+        if (t && t.procBox && t.procBox.isConnected) {
+          t.procBox.appendChild(bubble);
+          updateProcMeta(t.procBox.parentElement);
+        }
+      }
+      // 一次模型调用结束：思考行定格；下一次调用要另起一行（工具行与说明按顺序
+      // 插在两行之间，不再并进同一个思考块堆到最后）
+      if (t) {
+        finishThinking(t);
+        t.thinkEl = null;
+        t.thinkText = "";
+        // 最终回答 = 本轮过程结束：过程框整体收起，下一轮另起一个（答案气泡在框外）
+        if (!intermediate && t.procBox) {
+          const box = t.procBox.parentElement;
+          if (box) {
+            updateProcMeta(box);
+            box.classList.add("folded");
+          }
+          t.procBox = null;
+        }
       }
       break;
     }
@@ -10933,30 +11087,44 @@ async function send() {
       return;
     }
   }
-  input.value = "";
-  autoGrowInput();
-  clearPendingImages();
-  clearPendingRefs();
-  hideInputMenu();
-  // 用户主动发送：无论翻到哪儿都回到底部看自己的消息（并恢复自动跟随）
-  const sendLog = curLog();
-  if (sendLog) sendLog._followBottom = true;
-  addUser(text, images, refs);
-  // 实时用户消息也挂操作（复制/编辑）；seq 未知，编辑走「最后一条用户消息」的后端兜底
-  attachMsgOps(curLog().lastElementChild, tab, "user", () => text);
-  const steerThisTurn = !!(tab.running && interactionMode === "steer");
-  if (tab.running) {
-    pendingTurns += 1;
-    const chip = document.createElement("div");
-    chip.className = "queue-chip";
-    chip.textContent = steerThisTurn
-      ? "🎯 已作为引导注入当前轮（下一次模型调用前生效）"
-      : "⏳ 已排队（当前轮结束后自动执行）";
-    curLog().appendChild(chip);
-    scrollLog();
-  } else {
-    setRunning(true);
+  // 上面的 await（模板预检 / 建会话）期间用户可能切走标签：输入区与气泡都按发起时
+  // 的 tab 落地。旧写法直接读 input / curLog() / activeTab——切走后会把「另一个会话
+  // 刚打的草稿」清掉、把气泡塞进别人的日志，用户看到的就是「第一句话被吞了」。
+  const steerThisTurn = !!(tab && tab.running && interactionMode === "steer");
+  if (activeTab === tab) {
+    input.value = "";
+    autoGrowInput();
+    clearPendingImages();
+    clearPendingRefs();
+    hideInputMenu();
+  } else if (tab) {
+    // 已切走：只清发起会话记下的草稿与附件，别动当前标签的输入区
+    const st = composerState(tab.sid);
+    st.draft = "";
+    st.images = [];
+    st.refs = [];
   }
+  const placeSent = () => {
+    // 用户主动发送：无论翻到哪儿都回到底部看自己的消息（并恢复自动跟随）
+    const sendLog = curLog();
+    if (sendLog) sendLog._followBottom = true;
+    addUser(text, images, refs);
+    // 实时用户消息也挂操作（复制/编辑）；seq 未知，编辑走「最后一条用户消息」的后端兜底
+    attachMsgOps(curLog().lastElementChild, tab, "user", () => text);
+    if (tab && tab.running) {
+      pendingTurns += 1;
+      const chip = document.createElement("div");
+      chip.className = "queue-chip";
+      chip.textContent = steerThisTurn
+        ? "🎯 已作为引导注入当前轮（下一次模型调用前生效）"
+        : "⏳ 已排队（当前轮结束后自动执行）";
+      curLog().appendChild(chip);
+      scrollLog();
+    }
+  };
+  if (tab) withTab(tab, placeSent);
+  else placeSent();
+  if (!tab || !tab.running) setRunning(true, tab);
   try {
     const rtThisTurn = rtOn;
     const teamThisTurn = teamOn;
@@ -11189,6 +11357,12 @@ function messageText(message) {
   return message.content.filter((b) => b.type === "text").map((b) => b.text || "").join("");
 }
 
+// 这条助手消息后面还带着工具调用（= 中间轮，还会继续干活）；没有就是最终回答
+function messageHasToolUse(message) {
+  return !!(message && Array.isArray(message.content)
+    && message.content.some((b) => b && b.type === "tool_use"));
+}
+
 // 来源 chip（引用溯源）：把本轮 web_fetch / web_search 读到的网页渲染成可点开的
 // 小胶囊——回答里写没写 [来源 N] 都能对回原网页核对。点开走 app.open_external
 // （后端只放行 http(s)，远端连接时交回本端浏览器，与服务端代开同一口径）。
@@ -11228,9 +11402,12 @@ function addSourceChips(el, sources) {
 
 function addAssistantDone(text, rtMeta, tab, seq, thinking, thinkingMs, durationMs, estimate, sources) {
   const t = tab || curTab();
+  if (thinking) addThinkingDone(thinking, t, thinkingMs);
+  // 只有工具调用、没有正文的中间消息（工具卡不落库）：历史里不画空气泡——
+  // 空壳里没有任何内容，只会让人以为回答丢了；思考块已在上方画好
+  if (!text) return;
   const d = document.createElement("div");
   d.className = "msg assistant";
-  if (thinking) addThinkingDone(thinking, t, thinkingMs);
   // 历史恢复的用时芯片：重建在回答上方（与流式期间的芯片位置一致）。
   // 旧消息没有 duration_ms（0）时不渲染，不给历史凭空造一条用时记录。
   if (durationMs) {
@@ -11256,6 +11433,7 @@ function addAssistantDone(text, rtMeta, tab, seq, thinking, thinkingMs, duration
   renderMermaidIn(d);
   highlightCodeIn(d);
   decorateFinalMessage(d, tab, () => text || "", seq);
+  return d;
 }
 
 // ---------- 弹簧反馈：与 Framer Motion 同参（stiffness / damping） ----------
@@ -11417,6 +11595,7 @@ function renderHistory(tab, messages, offset) {
   tab.logEl.innerHTML = "";
   tab.logEl._followBottom = true; // 重进会话从底部看起，跟随标记一并复位
   tab._toolCards = new Map(); // 在途工具卡随流清空，避免持已分离节点
+  tab._histProcBox = null; // 历史里的过程框按轮重建（见 histProcBox）
   tab._historyAll = all; // 已加载的窗口（服务端只给了尾部一段）
   // 窗口起点取服务端口径 messages_offset（被截掉多少条；0/缺省 = 没有更早），
   // 不再从数组长度推——服务端只给了最后一段，本地没有「全量」可比。
@@ -11549,6 +11728,7 @@ function paintHistorySlice(tab, messages, start, end) {
       const m = messages[i];
       let el = null;
       if (m.role === "user") {
+        tab._histProcBox = null; // 用户开口 = 上一轮过程结束
         addUser(m.text, m.images);
         el = curLog().lastElementChild;
         // 系统补记（撤销本轮改动等）：气泡样式保留，但不挂用户消息操作——
@@ -11589,11 +11769,26 @@ function paintHistorySlice(tab, messages, start, end) {
             tcFetchFullLog(tab, tc, m.roundtable.team);
           }
         }
-        addAssistantDone(
+        // 后面还有助手消息（工具轮）→ 这一条是中间轮；窗口内最后一条 → 最终回答。
+        // 按相邻关系判断，不依赖后端是否下发 tool_use（旧引擎/旧会话也照此分轮）
+        const next = messages[i + 1];
+        const isFinal = !next || next.role !== "assistant";
+        // 这一轮有思考：先备好过程框，思考行会画进框里
+        if (m.thinking && showThinking) histProcBox(tab);
+        el = addAssistantDone(
           m.text, m.roundtable || m.adversarial, tab, m.seq, m.thinking,
           m.thinking_ms, m.duration_ms, m.estimate, m.sources,
         );
-        el = curLog().lastElementChild;
+        // 中间轮的正文只是过程播报：与实时渲染同一口径，收成时间线里的普通说明、
+        // 搬进过程框，不挂回答气泡与消息操作
+        if (el && !isFinal) {
+          el.classList.add("proc-note");
+          const body = tab._histProcBox || histProcBox(tab);
+          body.appendChild(el);
+          updateProcMeta(body.parentElement);
+        } else if (el) {
+          tab._histProcBox = null; // 最终回答 = 本轮过程结束（框保持收起）
+        }
       }
       if (el && m.seq) el.dataset.seq = String(m.seq);
     }
@@ -11774,11 +11969,19 @@ function addCheckpointBar(cp, tab) {
   label.innerHTML = `💾 本轮改动 <b>${cp.paths.length}</b> 个文件：`;
   const files = document.createElement("span");
   files.className = "cp-files";
-  files.textContent = cp.paths.map((p) => p.split(/[\\/]/).pop()).join("、");
+  // 文件清单按个渲染成小标签（同款几何），撤销也收成小标签跟在它们右边
+  cp.paths.forEach((p) => {
+    const chip = document.createElement("span");
+    chip.className = "cp-file";
+    chip.textContent = p.split(/[\\/]/).pop();
+    chip.title = p;
+    files.appendChild(chip);
+  });
   files.title = cp.paths.join("\n");
   const btn = document.createElement("button");
-  btn.className = "btn-ghost";
-  btn.textContent = "↩ 撤销本轮改动";
+  btn.type = "button";
+  btn.className = "cp-undo";
+  btn.textContent = "↩ 撤销";
   btn.title = "把这些文件恢复到本轮改动前的状态（run_command 造成的改动不在追踪范围）";
   btn.onclick = async () => {
     btn.disabled = true;
@@ -11794,7 +11997,7 @@ function addCheckpointBar(cp, tab) {
       if (rightViewVisible("files")) loadFiles(true);
     } catch (e) {
       btn.disabled = false;
-      btn.textContent = "↩ 撤销本轮改动";
+      btn.textContent = "↩ 撤销";
       addNotice("回滚失败: " + e.message);
     }
   };

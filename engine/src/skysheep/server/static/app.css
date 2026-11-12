@@ -522,6 +522,11 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   cursor: auto; /* pywebview 禁选注入会带 body cursor:default，聊天区恢复文本 I 型光标 */
   display: flex; flex-direction: column; gap: 10px;
 }
+/* 列向 flex 的默认 flex-shrink:1 会压缩 overflow:hidden 的子项（按规范这类子项
+   的自动最小尺寸为 0）：长会话里带折叠动画的卡片（圆桌 / 团队卡）会被压到只剩
+   一条边框，看着像内容消失。聊天流里的条目一律保持自然高度，装不下由 .chat-log
+   自己滚动。 */
+.chat-log > * { flex-shrink: 0; }
 .chat-log::-webkit-scrollbar { width: 0; height: 0; } /* WebView2 / 旧 Chromium */
 /* 右侧常驻留白给导航条让位：常驻不增减，内容不会因导航条出现/消失左右横跳 */
 .chat-log { padding-right: 80px; }
@@ -876,32 +881,73 @@ mark.search-hit-mark {
 /* 无空格长串（超长链接、Base64 等）在助手里也要断行：用户气泡已有同款规则，
    缺了这行 .md 内容会把整栏撑到两千多像素宽 */
 .msg.assistant .md, .msg.error .md { overflow-wrap: break-word; min-width: 0; }
+/* 过程时间线里的中间说明（模型动手前先说的那几句）：不是交付给用户的回答，
+   去掉气泡皮，作为时间线里的一段普通说明——与思考行（一行摘要）明确区分 */
+.msg.assistant.proc-note { width: 100%; max-width: var(--chat-max-w, 880px); padding: 0 2px; }
+.msg.assistant.proc-note .md {
+  background: none; border: none; box-shadow: none; border-radius: 0;
+  padding: 0; color: var(--text2); line-height: 1.75;
+}
+.msg.assistant.proc-note .msg-ops { display: none; }
 .msg.notice {
   align-self: center; color: var(--dim); font-size: var(--fs-sm);
   background: var(--paper-sunken); border: 1px solid var(--line);
   border-radius: var(--r-pill); padding: 4px 14px;
 }
 
-/* 思考过程块（思考型模型）：灰底小字，流式展开、正文出现后折叠 */
-.think-block {
-  /* 与助手回答同宽（.msg 的行宽上限）：不跟着聊天流拉满整行 */
-  align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px); margin-bottom: 2px;
-  background: var(--paper-sunken); border: 1px dashed var(--line2);
-  border-radius: var(--r-md); overflow: hidden;
+/* ---------- 过程时间线：思考行 / 工具行 / 中间说明 ----------
+   一轮里的过程条目收在同一个虚线框（.proc-box）里，框头可整体折叠：
+   思考「💭 思考 · 3.3 秒 · 470 字」一行，工具「▣ 终端 command…」一行，
+   点行展开看详情；模型动手前说的中间说明作为普通说明段落。 */
+.proc-box {
+  align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
+  display: flex; flex-direction: column;
+  background: var(--paper-sunken);
+  border: 1px dashed var(--line2); border-radius: var(--r-md);
 }
-.think-sum {
-  display: block; width: 100%; text-align: left; border: none;
-  background: transparent; color: var(--dim); cursor: pointer;
-  font-size: var(--fs-sm); padding: 6px 12px; font-family: inherit;
+.proc-box > * { max-width: 100%; }
+/* 框头：整轮操作的摘要（N 步 · 思考 X 秒），点一下整体收起 / 展开 */
+.proc-box-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 12px; border: none; background: transparent; cursor: pointer;
+  font-family: inherit; text-align: left; color: var(--dim); font-size: var(--fs-sm);
 }
-.think-sum:hover { color: var(--text2); }
-.think-body {
-  padding: 2px 14px 10px; color: var(--text2); font-size: var(--fs-md);
-  line-height: 1.7; max-height: 320px; overflow-y: auto;
+.proc-box-head:hover { color: var(--text2); }
+.pb-ico, .pb-title { flex-shrink: 0; }
+.pb-title { font-weight: var(--fw-semi); }
+.pb-meta { white-space: nowrap; }
+.pb-caret {
+  flex-shrink: 0; margin-left: auto; font-size: 10px;
+  transition: transform var(--dur-fast) var(--ease-out);
 }
-.think-body .md p { margin: 4px 0; }
-.think-body .md h1, .think-body .md h2, .think-body .md h3 { font-size: var(--fs-md); margin: 6px 0 4px; }
-.think-block.folded .think-body { display: none; }
+.proc-box:not(.folded) .pb-caret { transform: rotate(90deg); }
+.proc-box-body { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 8px; }
+.proc-box.folded .proc-box-body { display: none; }
+.proc-row {
+  align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
+  padding: 0 2px;
+}
+.proc-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 3px 0; border: none; background: transparent; cursor: pointer;
+  font-family: inherit; text-align: left; color: var(--dim); font-size: var(--fs-sm);
+}
+.proc-head:hover { color: var(--text2); }
+.proc-ico { flex-shrink: 0; width: 18px; text-align: center; }
+.proc-name { flex-shrink: 0; font-weight: var(--fw-semi); }
+.proc-meta { white-space: nowrap; }
+.proc-caret {
+  flex-shrink: 0; margin-left: auto; font-size: 10px;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.proc-row:not(.folded) .proc-caret { transform: rotate(90deg); }
+.proc-body {
+  padding: 4px 2px 6px 26px; color: var(--text2);
+  font-size: var(--fs-md); line-height: 1.7;
+}
+.proc-row.folded .proc-body { display: none; }
+.proc-body .md p { margin: 4px 0; }
+.proc-body .md h1, .proc-body .md h2, .proc-body .md h3 { font-size: var(--fs-md); margin: 6px 0 4px; }
 .think-inline {
   color: var(--dim); font-size: var(--fs-sm); white-space: pre-wrap;
   border-left: 2px solid var(--line2); padding-left: 8px; margin-bottom: 6px;
@@ -1003,30 +1049,41 @@ html.code-wrap .md pre.has-lines { display: block; }
 /* 表格里的行内代码不要额外描边，避免密排时糊成一团 */
 .md .md-table code { background: none; border: none; padding: 0; }
 
-/* 工具调用卡片：终端纸片 */
+/* 工具调用行：与思考行同一套时间线排版（图标 + 中文动作名 + 参数 + 状态），
+   点行展开输出 / diff；不再是一张浮起的卡片 */
 .tool-card {
   align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
-  background: var(--paper-sunken); border: 1.5px solid var(--line2);
-  border-radius: var(--r-md); padding: 7px 11px; font-size: var(--fs-md);
-  box-shadow: var(--shadow-sm);
+  padding: 0 2px; font-size: var(--fs-md);
 }
-.tool-card .t-head { cursor: pointer; display: flex; align-items: center; gap: 9px; min-width: 0; }
-.tool-card .t-name { color: var(--blue); font-weight: var(--fw-heavy); font-family: var(--font-mono); flex-shrink: 0; }
+.tool-card .t-head {
+  cursor: pointer; display: flex; align-items: center; gap: 8px;
+  min-width: 0; padding: 3px 0;
+}
+.tool-card .t-ico { flex-shrink: 0; width: 18px; text-align: center; color: var(--dim); }
+.tool-card .t-name { color: var(--text2); font-weight: var(--fw-semi); flex-shrink: 0; }
 .tool-card .t-args {
-  color: var(--text2); font-family: var(--font-mono); font-size: var(--fs-sm);
+  color: var(--dim); font-family: var(--font-mono); font-size: var(--fs-sm);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
 }
-.tool-card .t-status {
-  margin-left: auto; flex-shrink: 0; font-weight: var(--fw-heavy);
-  font-variant-numeric: var(--num);
-  border: 1px solid var(--line2); border-radius: var(--r-xs);
-  padding: 0 7px; background: var(--paper-raised); color: var(--dim);
+/* 行尾的小提示：行里还有内容可看（改动 / 截图 / 进度），点行展开 */
+.tool-card .t-hint {
+  flex-shrink: 0; color: var(--dim); font-size: var(--fs-sm); font-weight: var(--fw-medium);
 }
-.tool-card.ok { border-color: var(--down); }
-.tool-card.ok .t-status { color: var(--down); border-color: var(--down); }
-.tool-card.err { border-color: var(--reg); }
-.tool-card.err .t-status { color: var(--reg); border-color: var(--reg); }
-.tool-card .t-body { display: none; margin-top: 7px; border-top: 1px dashed var(--line2); padding-top: 7px; }
+.tool-card .t-status {
+  flex-shrink: 0; margin-left: auto; color: var(--dim);
+  font-size: var(--fs-sm); font-variant-numeric: var(--num);
+}
+.tool-card.ok .t-status { color: var(--down); }
+.tool-card.err .t-status { color: var(--reg); }
+.tool-card .t-caret {
+  flex-shrink: 0; font-size: 10px; color: var(--dim);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.tool-card.open .t-caret { transform: rotate(90deg); }
+.tool-card .t-body {
+  display: none; margin: 2px 0 4px 26px; padding-top: 6px;
+  border-top: 1px dashed var(--line2);
+}
 .tool-card.open .t-body { display: block; }
 .tool-card .t-body pre {
   white-space: pre-wrap; word-break: break-all; margin: 0;
@@ -1234,8 +1291,13 @@ html.code-wrap .md pre.has-lines { display: block; }
 .todo-txt.completed { color: var(--dim); text-decoration: line-through; }
 .todo-txt.in_progress { font-weight: var(--fw-bold); }
 
-/* 消息流里的任务进度卡（todo_write 工具卡原地替换；设置可关） */
-.tool-card.todo-flow-card { padding: 9px 12px; }
+/* 消息流里的任务进度卡（todo_write 工具卡原地替换；设置可关）。
+   过程时间线里其他行都是扁平的，这张卡是进度表，给一层轻纸面区分开 */
+.tool-card.todo-flow-card {
+  margin: 2px 0; padding: 7px 11px;
+  background: var(--paper-sunken); border: 1px dashed var(--line2);
+  border-radius: var(--r-sm);
+}
 .todo-flow-card .tf-head { cursor: default; }
 .todo-flow-card .tf-count {
   margin-left: auto; flex-shrink: 0; color: var(--dim);
@@ -4839,17 +4901,37 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 }
 @media (max-width: 860px) { .msg-sources .ms-chip { max-width: 170px; } }
 
-/* 检查点条：本轮改动文件 + 撤销按钮 */
+/* 检查点条：本轮改动文件 + 撤销标签。文件与撤销是同一套小标签几何，
+   撤销用金色文字（呼应左侧金色竖条）表示可点的动作 */
 .checkpoint-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  align-self: flex-start; width: 100%; max-width: var(--chat-max-w, 880px);
   margin: 4px 0 10px; padding: 7px 12px;
   background: var(--paper-raised); border: 1px solid var(--line2);
   border-left: 3px solid var(--gold); border-radius: var(--r-sm);
   font-size: var(--fs-md); color: var(--text2);
 }
-.checkpoint-bar .cp-files { font-family: var(--font-mono); font-size: var(--fs-sm); }
-.checkpoint-bar .btn-ghost { font-size: var(--fs-sm); padding: 3px 10px; flex-shrink: 0; }
+.checkpoint-bar .cp-files { display: inline-flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.checkpoint-bar .cp-file {
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 1px 7px; border: 1px solid var(--line2); border-radius: var(--r-xs);
+  background: var(--paper-sunken); color: var(--text2);
+  font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.6;
+}
+.checkpoint-bar .cp-undo {
+  flex-shrink: 0; padding: 1px 8px; border: 1px solid var(--line2);
+  border-radius: var(--r-xs); background: var(--paper-raised);
+  color: var(--gold); font-size: var(--fs-sm); font-weight: var(--fw-semi); line-height: 1.6;
+  cursor: pointer;
+  transition: border-color var(--dur-fast), background var(--dur-fast), color var(--dur-fast);
+}
+.checkpoint-bar .cp-undo:hover {
+  border-color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 10%, var(--paper-raised));
+}
+.checkpoint-bar .cp-undo:disabled { opacity: .55; cursor: default; }
 .checkpoint-bar.done { border-left-color: var(--down); color: var(--dim); }
+.checkpoint-bar.done .cp-file { opacity: .6; }
 
 /* 侧栏会话搜索框 */
 .session-search {
@@ -9392,20 +9474,7 @@ li.mod-row {
     0 10px 24px color-mix(in srgb, var(--ink-line) 16%, transparent);
 }
 
-/* —— 折叠：Grid 0fr ↔ 1fr（思考块 / 圆桌 / 团队卡） —— */
-.think-block {
-  display: grid; grid-template-rows: auto 1fr;
-  transition: grid-template-rows var(--dur-base) var(--ease-out);
-}
-.think-block .think-body {
-  min-height: 0; overflow: hidden;
-  transition: padding var(--dur-base) var(--ease-out);
-}
-.think-block.folded { grid-template-rows: auto 0fr; }
-.think-block.folded .think-body {
-  display: block; padding-top: 0; padding-bottom: 0; overflow: hidden;
-}
-
+/* —— 折叠：Grid 0fr ↔ 1fr（圆桌 / 团队卡） —— */
 .roundtable {
   display: grid; grid-template-rows: auto 1fr auto;
   transition: grid-template-rows var(--dur-base) var(--ease-out);
@@ -9442,7 +9511,7 @@ li.mod-row {
 #split-pane.dragging .split-drag-shield { display: block; }
 
 /* —— 正文排版 —— */
-.md p, .md li, .msg.notice, .user-bubble, .think-body { text-wrap: pretty; }
+.md p, .md li, .msg.notice, .user-bubble, .proc-body { text-wrap: pretty; }
 
 /* 输入区里的主按钮：容器已框住，按钮自己不再叠第二道墨线（描边改内投影） */
 #composer .btn-primary, .split-composer .btn-primary {
@@ -9577,7 +9646,7 @@ li.mcp-failed { border-left: 0; }
 }
 .md pre { border-width: var(--hairline); border-left-width: 3px; }
 .md code { border-width: var(--hairline); }
-.think-block { border-width: var(--hairline); }
+/* 过程行沿用主题发丝线：无边框，无需处理 */
 #composer { border-top-width: 1px; }
 #split-pane { border-left-width: 1px; }
 .split-head { border-bottom-width: var(--hairline); }

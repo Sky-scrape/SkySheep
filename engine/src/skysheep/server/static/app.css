@@ -860,6 +860,14 @@ mark.search-hit-mark {
   max-width: 100%; overflow-wrap: break-word;
 }
 .msg.user.image-only .user-bubble { padding: 8px; }
+/* 系统补记（撤销本轮改动等）以用户角色入历史：同一位置渲染，但视觉上退成
+   提示条——它不是用户说的话，也没有消息操作按钮 */
+.msg.user.system-note { align-self: stretch; max-width: 100%; }
+.msg.user.system-note .user-bubble {
+  background: var(--paper-sunken); color: var(--text2);
+  border: 1px dashed var(--line2); box-shadow: none;
+  font-size: var(--fs-sm);
+}
 .msg.assistant { align-self: flex-start; width: 100%; }
 .msg.assistant .md {
   background: var(--card); border: 1.5px solid var(--line2); border-radius: var(--r-md);
@@ -8633,6 +8641,18 @@ li.mod-row {
 }
 .relay-start-card label { font-weight: var(--fw-semi); }
 .relay-start-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* 接力看板上的「某一屏在等权限确认」提示：它替代了看板上那句永远不动的
+   「执行中…」，所以用金色描边而不是普通提示条的灰边 */
+.relay-perm {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 10px; border-radius: var(--r-sm, 4px);
+  border: 1px solid var(--gold);
+  background: var(--paper-sunken);
+  font-size: var(--fs-sm); color: var(--text);
+}
+.relay-perm.hidden { display: none; }
+.relay-perm-text { flex: 1 1 auto; min-width: 0; }
 
 .relay-pair-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .relay-chip {

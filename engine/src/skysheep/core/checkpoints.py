@@ -56,6 +56,49 @@ def _safe_dirname(raw: str) -> str:
 _SIG_CHUNK = 1 << 16  # 64 KiB
 
 
+def prune_created_dirs(start: Path, keep_root: Path | None = None) -> list[str]:
+    """回滚删掉本轮新建的文件后，把顺带建出来的空目录一并收掉。
+
+    write_file / edit_file 会隐式建父目录（写 docs/a.txt 就带出 docs/），而
+    检查点只记文件：不清理就留下一个空目录，「撤销本轮改动」看起来像没撤干净。
+
+    只删「空的」目录，一路向上直到 ``keep_root``（项目/工作目录，永不删）或
+    第一个非空目录——项目里还有别的东西就立刻停。判据只有「空」这一条，
+    不看创建时间：快照的 ts 是轮末保存时刻，本轮内建的目录也早于它，按时间
+    判会把它们全当成「本来就存在」，等于没清理（2026-11-12 走查实测）。
+
+    已知取舍：一个原本就空着的占位目录，如果本轮往里写过新文件，回滚后会
+    被一并收掉（空目录没有内容可丢，而「回到本轮之前」正是撤销的预期）。
+    非空目录、``keep_root`` 及其上级永远不会动。
+    """
+    removed: list[str] = []
+    stop_at = Path(keep_root).resolve() if keep_root is not None else None
+    parent = Path(start)
+    while True:
+        if parent == parent.parent:  # 盘符根 / 文件系统根
+            break
+        try:
+            if stop_at is not None and parent.resolve() == stop_at:
+                break  # 项目根：永远不删（哪怕它是刚建的空目录）
+            st = parent.stat()
+        except OSError:
+            break
+        if not stat.S_ISDIR(st.st_mode):
+            break
+        try:
+            if any(parent.iterdir()):
+                break  # 还有别的东西：不能删，也不用再往上看了
+        except OSError:
+            break
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        removed.append(str(parent))
+        parent = parent.parent
+    return removed
+
+
 def _state_sig(path_s: str) -> str | None:
     """文件当前状态的签名：内容 sha256；目录记 "dir"；不存在记 None。
 
@@ -444,7 +487,8 @@ class CheckpointStore:
             self._release(cp)
         return out
 
-    def restore(self, checkpoint_id: str, force: bool = False) -> dict:
+    def restore(self, checkpoint_id: str, force: bool = False,
+                keep_root: Path | None = None) -> dict:
         """把快照写回磁盘：有改前内容的恢复内容，新建文件直接删除。
 
         回滚前做脏检查：文件当前内容与保存时刻的签名不一致，说明快照之后
@@ -494,6 +538,7 @@ class CheckpointStore:
                             shutil.rmtree(p)
                         elif p.exists():
                             p.unlink()
+                        prune_created_dirs(p.parent, keep_root=keep_root)
                     elif data == DIR_MARKER:
                         # 改前是目录：重建目录本身即可，内容由逐文件条目还原
                         # （move_file 的源目录/被覆盖的目标目录，审查 A-3 修复）

@@ -818,6 +818,9 @@ def _msg_brief(m: Message) -> dict:
         # 本轮来源表（引用溯源）：历史恢复时渲染「来源 [1] [2]」chip，
         # 刷新/重开会话后仍可点回原网页核对。旧消息没有该字段，前端按空处理。
         "sources": getattr(m, "sources", None),
+        # 系统补记（如「撤销本轮改动」的回滚说明）：前端不挂用户消息操作，
+        # 避免误点「编辑重发」按 seq 截断会话
+        "system_note": bool(getattr(m, "system_note", False)),
     }
 
 
@@ -7752,9 +7755,15 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         cp_rt = self.runtimes.get(cp_sid) if cp_sid else None
         if cp_rt and cp_rt.run_task and not cp_rt.run_task.done():
             raise RuntimeError("该会话正在运行，等当前轮结束再回滚")
+        # 目录清理的硬边界：回滚会顺手收掉本轮隐式建出来的空目录（写
+        # docs/a.txt 带出的 docs/），但项目/工作目录本身永远不能是清理目标
+        try:
+            _, keep_root = await self._session_project(sid)
+        except Exception:  # noqa: BLE001 - 解析不出就退化为「只按创建时间判」
+            keep_root = None
         try:
             outcome = await asyncio.to_thread(
-                store.restore, checkpoint_id, force=force
+                store.restore, checkpoint_id, force=force, keep_root=keep_root
             )
         except CheckpointConflictError as e:
             return {
@@ -7779,6 +7788,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 else ""
             )
         )
+        # 系统补记：以 user 角色入历史（模型要知道文件已回滚），但不是用户
+        # 说的话——前端据此不挂编辑重发/引用，避免误触截断会话
+        note.system_note = True
         sid = (cp or {}).get("session_id") or sid
         agent = self.runtimes[sid].agent if sid and sid in self.runtimes else self.agent
         agent.history.append(note)

@@ -791,6 +791,12 @@
                   </label>
                   <span id="relay-run-status" class="dim small" role="status">尚未开始</span>
                 </div>
+                <!-- 副屏/主屏在等权限确认时抬到看板上：接力轮的事件写进各屏会话，
+                     用户盯着看板只会看到「执行中…」不动，需要一条显式提示 + 入口 -->
+                <div id="relay-perm" class="relay-perm hidden" role="status">
+                  <span id="relay-perm-text" class="relay-perm-text"></span>
+                  <button id="relay-perm-go" class="rp-mini" type="button">去确认</button>
+                </div>
                 <p class="settings-hint">
                   点「执行」让轮到的一方做完这一轮任务，完成后自动交棒，再点一次让另一方继续。
                   两屏都是完整会话：可以使用工具、读写文件，写入与执行照常征询你的确认。

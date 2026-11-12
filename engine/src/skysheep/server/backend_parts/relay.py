@@ -605,7 +605,9 @@ class RelaySettingsMixin:
         # 本轮 TurnFinished 收尾信息：到迭代上限时不能只看「最后一条 assistant
         # 正文」——最后一轮常常是纯 todo_write/工具调用（正文 0 字），会把
         # 「跑满 40 轮」误报成「没有产出文本」（2026-11-10 用户实例）。
-        turn_stop = {"reason": "", "iterations": 0}
+        # error：本轮引擎级错误（模型 403/断网等），空产出时据此报真因——
+        # 否则上游拒绝会被统一写成「没有产出文本」，用户查不出是 Key/网关的问题。
+        turn_stop = {"reason": "", "iterations": 0, "error": ""}
         try:
             while True:
                 pair = await self.store.relay_pair_get(pair_id)
@@ -678,16 +680,53 @@ class RelaySettingsMixin:
                 turn_out.clear()
                 turn_stop["reason"] = ""
                 turn_stop["iterations"] = 0
+                turn_stop["error"] = ""
 
-                async def turn_emit(ev: dict) -> None:
-                    if ev.get("kind") == "usage":
+                # 本轮归属（pair/side/sid）按默认参数绑进闭包：它们是循环变量，
+                # 直接引用会被 ruff B023 判成「下一圈改写后旧闭包读错值」
+                async def turn_emit(ev: dict, _pair_id=pair_id, _side=side,
+                                    _sid=sid) -> None:
+                    kind = ev.get("kind")
+                    if kind == "usage":
                         run_usage["in"] += int(ev.get("input_tokens") or 0)
                         run_usage["out"] += int(ev.get("output_tokens") or 0)
-                    elif ev.get("kind") == "assistant_message":
+                    elif kind == "assistant_message":
                         turn_out.append(_assistant_text_of(ev.get("message") or {}))
-                    elif ev.get("kind") == "turn_finished":
+                    elif kind == "turn_finished":
                         turn_stop["reason"] = str(ev.get("stop_reason") or "")
                         turn_stop["iterations"] = int(ev.get("iterations") or 0)
+                        # 本轮收口时把看板上的「等确认」提示一并撤掉：轮已被取消/
+                        # 出错时权限请求不会再有 permission_resolved 帧，留着的
+                        # 提示会把用户引到一张已经不存在的确认卡上
+                        await self._relay_dual_emit({
+                            "kind": "relay_pair_permission",
+                            "relay": {
+                                "pair_id": _pair_id, "side": _side,
+                                "session_id": _sid, "pending": False,
+                                "request_id": "", "tool_name": "",
+                            },
+                        })
+                    elif kind == "error":
+                        # 引擎级错误（模型 403 / 断网 / 上下文超限）：空产出时
+                        # 要把真因写进暂停说明，别让用户以为是模型「懒得说话」
+                        if not turn_stop["error"]:
+                            turn_stop["error"] = str(ev.get("message") or "")[:300]
+                    elif kind in ("permission_request", "permission_resolved"):
+                        # 权限确认对「盯看板的人」是隐形事件：接力轮的事件写进
+                        # 各屏会话，用户在看板上只看到「执行中…」永远不动。把
+                        # 它抬成一条 pair 级帧，看板据此提示并给「去确认」入口。
+                        pending = kind == "permission_request"
+                        await self._relay_dual_emit({
+                            "kind": "relay_pair_permission",
+                            "relay": {
+                                "pair_id": _pair_id,
+                                "side": _side,
+                                "session_id": _sid,
+                                "pending": pending,
+                                "request_id": str(ev.get("request_id") or ""),
+                                "tool_name": str(ev.get("tool_name") or ""),
+                            },
+                        })
                     await self._relay_dual_emit(ev)
 
                 try:
@@ -729,10 +768,14 @@ class RelaySettingsMixin:
                 # 历史里更早的文本与本轮无关（空产出保护不许被旧文本顶掉）
                 output = "" if stopped else (turn_out[-1] if turn_out else "")
                 if not stopped and not output.strip():
-                    # 空产出不能当作「完成」：连续交替时会空转、白烧预算
+                    # 空产出不能当作「完成」：连续交替时会空转、白烧预算。
+                    # 有引擎级错误时把真因一并写上（403/断网这类失败此前会被
+                    # 统一误报成「没有产出文本」）
+                    reason = "这一轮没有产出文本，已暂停"
+                    if turn_stop["error"]:
+                        reason += "：" + turn_stop["error"]
                     snapshot = await self.store.relay_pair_finish_turn(
-                        pair_id, turn_no, status="error",
-                        error="这一轮没有产出文本，已暂停",
+                        pair_id, turn_no, status="error", error=reason,
                     )
                     if snapshot is not None:
                         await self._relay_dual_broadcast(snapshot)

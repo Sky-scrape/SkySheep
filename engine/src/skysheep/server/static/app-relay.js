@@ -9,6 +9,7 @@ let relayDual = null;          // 最近一次快照 {pair|null, turns, main, pe
 let relayDualPairId = null;    // 当前接力的 pair id（没有则为 null）
 let relayDualOpenFor = null;   // 这份快照属于哪个主屏会话
 let relayDualBusy = false;     // 控制请求在飞（防连点）
+let relayDualPerm = null;      // 某一屏在等权限确认 {side,sessionId,toolName,requestId} | null
 let relayDualSaveTimer = null; // 任务编辑的防抖保存
 let relayDualSyncTimer = null; // 切会话时的面板刷新防抖
 let relayDualLoading = null;   // 正在进行的 dual_open（并发入口合流）
@@ -89,6 +90,8 @@ async function relayDualOpen(options = {}) {
     };
     relayDualPairId = relayDual.pair ? relayDual.pair.id : null;
     relayDualOpenFor = String(sid);
+    // 换了 pair/会话：上一份「等确认」提示不再适用（新快照里轮次状态会重判）
+    if (!relayDual.pair || relayDual.pair.state !== "running") relayDualPerm = null;
     relayDualRender();
     if (options.openPeer && data.peer) await relayDualShowPeer(data.peer);
     return data;
@@ -232,6 +235,7 @@ function relayDualRender() {
 
   relayDualFillInputs();
   relayDualRenderTurns();
+  relayDualRenderPerm();
 
   const start = relayEl("relay-run-start");
   const stop = relayEl("relay-run-stop");
@@ -408,7 +412,68 @@ function relayOnPairState(snapshot) {
     peer: prev.peer || { id: snapshot.pair.peer_session_id, title: RELAY_SIDE_LABEL.peer },
   };
   relayDualPairId = snapshot.pair.id;
+  // 轮次已不在跑：等确认的提示随之作废（取消/出错时不会再有 resolved 帧）
+  if (snapshot.pair.state !== "running") {
+    const turns = snapshot.turns || [];
+    const last = turns[turns.length - 1];
+    if (!last || last.status !== "running") relayDualPerm = null;
+  }
+  relayDualRenderPerm();
   relayDualRender();
+}
+
+/** 某一屏在等权限确认（后端 relay_pair_permission 帧）：看板据此给入口。
+ *  接力轮的事件写进各屏自己的会话，用户盯着看板只会看到「执行中…」不动——
+ *  没有这条提示，确认卡藏在另一个（常常还没打开的）标签里，接力就卡到超时。 */
+function relayOnPermission(frame) {
+  if (!frame || !relayDualPairId || frame.pair_id !== relayDualPairId) return;
+  relayDualPerm = frame.pending
+    ? {
+      side: frame.side === "peer" ? "peer" : "main",
+      sessionId: frame.session_id || "",
+      toolName: frame.tool_name || "",
+      requestId: frame.request_id || "",
+    }
+    : null;
+  relayDualRenderPerm();
+}
+
+function relayDualRenderPerm() {
+  const box = relayEl("relay-perm");
+  if (!box) return;
+  const text = relayEl("relay-perm-text");
+  if (!relayDualPerm) {
+    box.classList.add("hidden");
+    if (text) text.textContent = "";
+    return;
+  }
+  const label = RELAY_SIDE_LABEL[relayDualPerm.side] || "这一方";
+  if (text) {
+    text.textContent = `${label}正在等你确认：${relayDualPerm.toolName || "敏感操作"}`
+      + "（确认前这一轮不会继续）";
+  }
+  box.classList.remove("hidden");
+}
+
+/** 「去确认」：把在等确认的那一屏开到前台，并补出确认卡。
+ *  先激活它的标签（activateTab 会按 needsPerm/permData 恢复卡），再兜一次
+ *  restorePendingPermissions——事件到达时该会话可能还没有标签，卡的归属
+ *  信息可能只留在后端队列里。 */
+async function relayDualGoConfirm() {
+  if (!relayDualPerm) return;
+  const sid = relayDualPerm.sessionId;
+  if (!sid) { relayStatus("这一轮已经结束，无需确认"); return; }
+  let tab = typeof tabFor === "function" ? tabFor(sid) : null;
+  if (!tab && typeof openTabForSession === "function") {
+    const pair = relayPair();
+    const title = pair && pair.peer_session_id === sid
+      ? RELAY_SIDE_LABEL.peer : RELAY_SIDE_LABEL.main;
+    tab = openTabForSession(sid, title, {});
+  }
+  if (tab && typeof activateTab === "function") activateTab(tab);
+  if (typeof restorePendingPermissions === "function") {
+    await restorePendingPermissions();
+  }
 }
 
 function relayDualOnSessionChange() {
@@ -459,6 +524,8 @@ document.addEventListener("DOMContentLoaded", () => {
       else relayDualOpen({ createPeer: true, openPeer: true });
     });
   }
+  const permGo = relayEl("relay-perm-go");
+  if (permGo) permGo.addEventListener("click", () => { relayDualGoConfirm(); });
   ["relay-goal", "relay-main-task", "relay-peer-task"].forEach((id) => {
     const el = relayEl(id);
     if (el) el.addEventListener("input", relayDualScheduleSave);

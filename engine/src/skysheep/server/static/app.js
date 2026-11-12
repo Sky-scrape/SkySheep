@@ -5532,6 +5532,11 @@ function handleEvent(kind, data) {
     if (typeof relayOnVerify === "function") relayOnVerify(data && data.relay);
     return;
   }
+  // 接力某一屏在等权限确认：看板提示 + 「去确认」入口（确认卡本体仍在会话里）。
+  if (kind === "relay_pair_permission") {
+    if (typeof relayOnPermission === "function") relayOnPermission(data && data.relay);
+    return;
+  }
   // 旧的无工具串行接力事件（界面已不再使用）：保留钩子，避免旧后端混跑时报错。
   if (kind === "relay_state") {
     if (typeof relayOnState === "function") relayOnState(data && data.relay);
@@ -11546,6 +11551,12 @@ function paintHistorySlice(tab, messages, start, end) {
       if (m.role === "user") {
         addUser(m.text, m.images);
         el = curLog().lastElementChild;
+        // 系统补记（撤销本轮改动等）：气泡样式保留，但不挂用户消息操作——
+        // 点「编辑并重发」会按 seq 截断会话，误触等于删掉这一轮之后的全部内容
+        if (m.system_note && el) {
+          el.classList.add("system-note");
+          el.dataset.systemNote = "1";
+        }
       } else if (m.role === "assistant") {
         // 对抗报告消息：先重建问题清单卡（默认折叠），再放报告本体
         if (m.adversarial && ((m.adversarial.findings || []).length || m.adversarial.stats)) {
@@ -11600,12 +11611,21 @@ function finishHistoryRender(tab, forceBottom) {
 
 // ---------- 消息级操作：历史恢复后给用户消息挂（复制/编辑）；助手消息在渲染时已挂 ----------
 function attachHistoryOps(tab) {
-  tab.logEl.querySelectorAll(".msg.user[data-seq]").forEach((el) =>
-    attachMsgOps(el, tab, "user"));
+  tab.logEl.querySelectorAll(".msg.user[data-seq]").forEach((el) => {
+    // 系统补记不是用户说的话：只保留内容，不给编辑重发/引用类入口
+    if (el.dataset.systemNote === "1") return;
+    attachMsgOps(el, tab, "user");
+  });
 }
 
 async function msgEditResend(tab, el, seq) {
   if (tab.running) { addNotice("等当前轮结束再操作"); return; }
+  // 系统补记不是用户输入：编辑重发会按 seq 截断会话，对提示条没有意义（也是
+  // 误触代价最大的一种操作），直接拒绝
+  if (el && el.dataset && el.dataset.systemNote === "1") {
+    addNotice("这是系统提示，不能编辑重发");
+    return;
+  }
   try {
     const r = await request("session.truncate", {
       id: tab.sid, mode: "edit", seq: seq || undefined,

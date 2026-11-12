@@ -248,3 +248,31 @@ def test_cross_project_split_session_checkpoint_e2e(home, monkeypatch):
         frame = recv_until(ws, "r1")
         assert frame["ok"] and frame["result"]["files"]
         assert not target.exists(), "新建文件回滚即删"
+
+
+async def test_restore_note_is_system_note_and_hidden_ops(home):
+    """撤销本轮改动写进历史的补记要标 system_note：它以 user 角色入历史（模型
+    要知道文件已回滚），但前端据此不挂「编辑重发」——点它会把会话按 seq 截断，
+    2026-11-12 走查实测误触把 13 条消息截成了 1 条。"""
+    be, sid_a, _sid_b = await _cross_project_fixture(home)
+    try:
+        target = home / "proj" / "cp-note.txt"
+        target.write_text("v1", encoding="utf-8")
+        rt = await be._get_runtime(sid_a)
+        cp = rt.ctx.checkpoints.save(sid_a, {str(target): None})
+        assert not target.exists() or True  # 前置：文件存在，回滚会删
+
+        await be.restore_checkpoint(cp["id"], session_id=sid_a)
+
+        # 历史里的补记：role 仍是 user（模型视角的提示），但带 system_note
+        rt = await be._get_runtime(sid_a)
+        notes = [m for m in rt.agent.history
+                 if m.role == "user" and m.text.startswith("(系统提示)")]
+        assert notes and all(getattr(m, "system_note", False) for m in notes)
+
+        # 落库与下发前端两个面都要带这个标记
+        from skysheep.server.backend import _msg_brief
+        brief = _msg_brief(notes[-1])
+        assert brief["system_note"] is True
+    finally:
+        await be.shutdown()

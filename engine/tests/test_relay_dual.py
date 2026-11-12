@@ -1452,3 +1452,106 @@ async def test_dual_concurrent_first_start_creates_single_pair(home):
     finally:
         prov.gate.set()
         await be.shutdown()
+
+
+async def test_dual_permission_surfaces_relay_frames(home):
+    """接力轮里的权限确认要抬成 relay_pair_permission 帧。
+
+    接力轮的事件写进各屏自己的会话：用户盯着看板只看到「执行中…」永远不动，
+    确认卡藏在另一个（往往还没打开的）标签里——2026-11-12 走查实测就是这样
+    卡到单轮超时。后端补齐 pending/resolved 两种帧，看板据此提示并给入口。
+    """
+    prov = FakeProvider([
+        [ToolUseBlock(id="w1", name="write_file",
+                      input={"path": "note.txt", "content": "x"})],
+        [TextBlock(text="主屏产出")],
+    ])
+    be = await _mk(home, prov)
+    frames: list[dict] = []
+
+    async def _collect(ev):
+        frames.append(dict(ev))
+
+    be.ws_emitters.append(_collect)
+    try:
+        sid = (await be.new_session())["id"]
+        await _start_dual(be, sid, "d-perm-1", gate=_NO_GATE)
+        pending = None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            pending = next(
+                (f for f in frames
+                 if f.get("kind") == "relay_pair_permission"
+                 and (f.get("relay") or {}).get("pending")),
+                None,
+            )
+            if pending is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert pending is not None, "没有抬出 relay_pair_permission（pending）帧"
+        rel = pending["relay"]
+        assert rel["side"] == "main"
+        assert rel["tool_name"] == "write_file"
+        assert rel["session_id"] == sid
+        assert rel["request_id"], "帧里要带 request_id，前端才能判断是哪一条"
+
+        assert be.respond_permission(rel["request_id"], "allow_once") is True
+        resolved = None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            resolved = next(
+                (f for f in frames
+                 if f.get("kind") == "relay_pair_permission"
+                 and not (f.get("relay") or {}).get("pending")),
+                None,
+            )
+            if resolved is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert resolved is not None, "确认后没有 resolved 帧（看板上的提示不会撤）"
+        assert resolved["relay"]["session_id"] == sid
+    finally:
+        await be.shutdown()
+
+
+async def test_dual_permission_frame_carries_peer_side(home):
+    """副屏在等确认时帧里要标 side=peer：原始缺陷正是「副屏轮的事件全写进它
+    自己的会话」，用户盯着看板看不到任何异常（2026-11-12 走查）。"""
+    prov = FakeProvider([
+        [TextBlock(text="主屏产出")],                                   # 主屏轮：直接出文本
+        [ToolUseBlock(id="w1", name="write_file",
+                      input={"path": "peer.txt", "content": "x"})],     # 副屏轮：要确认
+        [TextBlock(text="副屏产出")],
+    ])
+    be = await _mk(home, prov)
+    frames: list[dict] = []
+
+    async def _collect(ev):
+        frames.append(dict(ev))
+
+    be.ws_emitters.append(_collect)
+    try:
+        sid = (await be.new_session())["id"]
+        await _start_dual(be, sid, "d-perm-peer-1", gate=_NO_GATE)
+        pair = await be.store.relay_pair_latest(sid)
+        await be.store.relay_pair_update(pair["id"], {"auto_alternate": True}, bump=False)
+
+        peer_frame = None
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            peer_frame = next(
+                (f for f in frames
+                 if f.get("kind") == "relay_pair_permission"
+                 and (f.get("relay") or {}).get("pending")
+                 and (f.get("relay") or {}).get("side") == "peer"),
+                None,
+            )
+            if peer_frame is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert peer_frame is not None, "副屏轮等确认时没有 side=peer 的帧"
+        assert peer_frame["relay"]["tool_name"] == "write_file"
+        assert peer_frame["relay"]["session_id"] != sid
+        assert be.respond_permission(peer_frame["relay"]["request_id"], "deny") is True
+    finally:
+        await be.shutdown()

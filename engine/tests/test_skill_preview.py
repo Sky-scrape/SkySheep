@@ -76,6 +76,56 @@ def test_preview_rejects_empty_and_missing(backend, tmp_path):
         _run(backend.preview_skill_install(str(bare), "global"))
 
 
+def _make_zip(tmp_path, name="pv-skill", desc="zip 预览", inner=None):
+    """zip 根级含技能文件夹的技能包（与界面粘贴本地 .zip 路径同一形态）。
+
+    inner(root) 可以往 zip 根再加别的技能文件夹（如非法名字的坏包）。
+    """
+    import zipfile
+
+    staging = tmp_path / "_ziproot"
+    staging.mkdir(exist_ok=True)
+    _make_pack(staging, name=name, desc=desc)
+    if inner is not None:
+        inner(staging)
+    zpath = tmp_path / f"{name}.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        for f in sorted(staging.rglob("*")):
+            zf.write(f, f.relative_to(staging))
+    return zpath
+
+
+def test_preview_local_zip_unpacks_before_scan(backend, tmp_path):
+    # 本地 .zip 不先解压就当目录扫，zip 文件里没有 SKILL.md 子目录，
+    # 预览必然报「没找到技能」——界面的两段式导入就永远装不进去（ui-1）
+    zpath = _make_zip(tmp_path)
+    r = _run(backend.preview_skill_install(str(zpath), "global", False))
+    assert r["count"] == 1
+    assert r["items"][0]["name"] == "pv-skill"
+    # 预览零落盘：暂存目录已清理，技能目录没有新东西
+    skills_dir = tmp_path / "home" / "skills"
+    assert not skills_dir.exists() or not any(skills_dir.iterdir())
+
+
+def test_preview_marks_invalid_names(backend, tmp_path):
+    # 预览与安装同一套名字校验：安装层必拒的名字（含路径分隔符）不进
+    # 「将要安装」清单，转进 invalid 并带原因（ui-2）
+    def plant_bad(root):
+        bad = root / "bad"
+        bad.mkdir()
+        (bad / "SKILL.md").write_text(
+            "---\nname: bad/path\ndescription: 非法名\n---\n", encoding="utf-8"
+        )
+
+    zpath = _make_zip(tmp_path, inner=plant_bad)
+    r = _run(backend.preview_skill_install(str(zpath), "global", False))
+    names = [it["name"] for it in r["items"]]
+    assert names == ["pv-skill"]
+    assert len(r["invalid"]) == 1
+    assert r["invalid"][0]["name"] == "bad/path"
+    assert "路径分隔符" in r["invalid"][0]["reason"]
+
+
 def _run(coro):
     import asyncio
 

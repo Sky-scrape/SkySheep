@@ -276,6 +276,55 @@ async def test_permission_queue_returns_recovery_fields(home):
             agent._pending.pop("req-1", None)
 
 
+class _FakeTeamOrch:
+    """最小团队编排器替身：只提供 permission.queue 枚举用的 agents()。"""
+
+    def __init__(self, agents):
+        self._agents = agents
+
+    def agents(self):
+        return list(self._agents)
+
+
+async def test_permission_queue_scans_team_member_agents(home):
+    """团队成员 Agent 的未决请求也进 permission.queue（collab-3）。
+
+    成员 Agent 挂在各会话编排器（不在 runtimes），决策路由已覆盖他们；
+    队列枚举不跟上，成员的确认卡刷新/断线后就无法重建——后端轮挂在等
+    决策上＝假死。
+    """
+    with make_client(home, ["好的"]) as client, client.websocket_connect("/ws") as ws:
+        backend = client.app.state.backend
+
+        from skysheep.security.gate import Decision, PendingPermission, Safety
+
+        pending = PendingPermission(
+            request_id="member-req-1",
+            tool_name="write_file",
+            arg_text="write_file path=b.txt content=x",
+            safety=Safety.WRITE,
+            detail="成员写入 b.txt",
+            _future=asyncio.get_running_loop().create_future(),
+        )
+        pending.resolve(Decision.ALLOW_ALWAYS)  # 只做字段断言，不真等决策
+
+        class _MemberAgent:
+            _pending = {"member-req-1": pending}
+
+        # 成员 Agent 挂在编排器上：按会话 sid 登记进 _teams
+        backend._teams["team-sid-1"] = _FakeTeamOrch([_MemberAgent()])
+        try:
+            r = _rpc(ws, "p3", "permission.queue")
+            assert r["ok"] is True
+            items = r["result"]["pending"]
+            hit = next(x for x in items if x["request_id"] == "member-req-1")
+            assert hit["session_id"] == "team-sid-1"
+            assert hit["tool_name"] == "write_file"
+            assert hit["detail"] == "成员写入 b.txt"
+        finally:
+            backend._teams.pop("team-sid-1", None)
+
+
 # ---- 3. 崩溃残留清扫：无头浏览器临时目录 ----
 #
 # sweep_orphan_browser_profiles 只删进程已死的 skysheep-edge-* 目录；

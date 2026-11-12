@@ -190,7 +190,10 @@ from ..skills.draft import build_skill_draft, save_skill_draft
 from ..skills.installer import (
     LOCAL_SKILL_SOURCES,
     SkillInstallError,
+    _safe_members,
     _scan_skills_in_dir,
+    _unpack_zip,
+    _validate_skill_name,
     install_from_url,
     remove_skill,
     scan_computer_skills,
@@ -279,6 +282,9 @@ class _CollabTeamTemplate(TeamTemplate):
     """TeamTemplate + 协作模板可选字段（只加在模板级，不动成员/总管子字典）。"""
 
     needs: str = "read"
+    # 协作模板的说明（画廊卡副文案）：kind=team 的模板转存 teams.json 时一并
+    # 带走，回读时还原；旧文件缺键取空串（读取方 getattr 兜底）。
+    desc: str = Field(default="", max_length=2000)
     tools_allow: list[str] = Field(default_factory=list)
     tools_deny: list[str] = Field(default_factory=list)
     budget: _CollabTeamTemplateBudget = Field(
@@ -4677,7 +4683,19 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             return meta
 
         if outcome.status == "error" and not report.strip():
-            # 发现者失败且没有任何可保留的产出：如实报错收尾
+            # 发现者失败且没有任何可保留的产出：如实报错收尾。
+            # 落一条标注失败的留痕消息再收尾——只发 TurnFinished(error) 的话
+            # 历史里没有 assistant 行，刷新后本轮对抗经历完全消失（用户感知
+            # 是「发出去的话石沉大海」）。留痕正文不含编造的结论；meta 照常
+            # 带 status=error，历史回放按 err 样式重建对抗卡。
+            note = "本轮对抗审查未完成"
+            err_text = str(outcome.error or "").strip()
+            if err_text:
+                note += f"：{err_text}"
+            assistant = Message.assistant([TextBlock(text=note)])
+            assistant.adversarial = meta
+            agent.history.append(assistant)
+            await emit_ev(AssistantMessage(message=assistant.model_dump()))
             await emit_ev(TurnFinished(
                 stop_reason="error", iterations=1, duration_ms=_adv_ms(),
             ))
@@ -5892,9 +5910,37 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             out["interrupted"] = self._teams_interrupted[sid]
         return out
 
+    async def _push_team_task_event(self, sid: str, task: dict) -> None:
+        """轮外广播工单板变化（team_task_updated，含 session_id）。
+
+        用户在工单卡上的改板（team.task_add / team.task_update）不经过任何
+        轮次发射链：编排器手里那份 emit 是上一轮的旧闭包，闲置时经它发出的
+        帧到不了前端——主会话团队卡靠请求响应就地更新，右侧团队室面板没有
+        这条路，就停在旧状态。这里按轮内事件同形状直接广播给在线连接；与
+        轮内事件重复时前端按工单编号幂等覆盖，无害。
+        """
+        ev = {
+            "kind": "team_task_updated",
+            "session_id": sid,
+            "task_id": str(task.get("id") or ""),
+            "title": str(task.get("title") or ""),
+            "assignee": str(task.get("assignee") or ""),
+            "type": str(task.get("type") or "exec"),
+            "status": str(task.get("status") or "pending"),
+            "redo": int(task.get("redo") or 0),
+            "detail": str(task.get("detail") or ""),
+            "source": dict(task.get("source") or {}),
+            "auto_dispatch": bool(task.get("auto_dispatch") or False),
+        }
+        for ws_emit in list(self.ws_emitters):
+            try:
+                spawn_bg(ws_emit(ev))
+            except RuntimeError:
+                pass
+
     async def team_task_add(self, params: dict) -> dict:
         """team.task_add：登记工单（待办）。指派对象必须在名册内，依赖必须存在。"""
-        _, orch = self._team_for(params)
+        sid, orch = self._team_for(params)
         deps = params.get("deps")
         task = await orch.task_add(
             str(params.get("title", "")),
@@ -5903,6 +5949,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             accept=str(params.get("accept", "") or ""),
             deps=[str(d) for d in deps] if isinstance(deps, list) else None,
         )
+        await self._push_team_task_event(sid, task)
         return {"task": task}
 
     async def adversarial_to_team_tasks(self, params: dict) -> dict:
@@ -5995,7 +6042,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         进行中（派工/重派/打回重做）后代发一条 director 的 assign 频道消息，
         让被派队员在频道里看到派工。
         """
-        _, orch = self._team_for(params)
+        sid, orch = self._team_for(params)
         status = str(params.get("status", ""))
         task = await orch.task_update(str(params.get("task_id", "")), status)
         assign_msg = None
@@ -6003,6 +6050,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             assign_msg = await orch.notify_assign(
                 str(task["id"]), note=str(params.get("note", "") or "")
             )
+        await self._push_team_task_event(sid, task)
         return {"task": task, "assign_message": assign_msg}
 
     async def team_stop(self, params: dict) -> dict:
@@ -6295,7 +6343,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return {
             "name": template.name,
             "kind": "team",
-            "desc": "",
+            # 团队模板自己的说明（_CollabTeamTemplate.desc，teams.json 随行落盘）；
+            # 基类 TeamTemplate 没有该字段时 getattr 兜底为空
+            "desc": str(getattr(template, "desc", "") or ""),
             "roles": roles,
             "aggregator": aggregator,
             "limits": {
@@ -6325,6 +6375,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     tools_deny.append(entry)
         return _CollabTeamTemplate(
             name=template.name,
+            desc=template.desc,
             director_mode=director_mode,
             director=TeamTemplateDirector(
                 provider=aggregator.provider if director_mode == "ai" else "",
@@ -8240,11 +8291,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return {"id": rule_id, "enabled": bool(enabled),
                 "rules": await self._enriched_rules()}
 
-    def check_whitelist_rule(self, tool: str, text: str) -> dict:
-        """规则测试器：当前规则会让这条调用直接放行、还是弹确认。"""
+    async def check_whitelist_rule(self, tool: str, text: str) -> dict:
+        """规则测试器：当前规则会让这条调用直接放行、还是弹确认。
+
+        解释前先从库里重载一遍项目规则：聊天权限卡「总是允许」走会话私有
+        gate 的 persist_rule（写库 + 只更新私有实例内存），主 gate 的规则
+        缓存不随那条路径刷新——不重载的话测试器会对实际已放行的规则报
+        「没有命中」，与聊天里的真实行为相反。
+        """
         tool = (tool or "").strip()
         if not tool:
             raise RuntimeError("工具名不能为空")
+        await self.gate.load_project_rules()
         return self.gate.explain(tool, text or "")
 
     async def export_whitelist(self) -> dict:
@@ -8608,29 +8666,45 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         tmp_zip: Path | None = None
         staged_tmp: Path | None = None
         try:
+            zip_to_stage: Path | None = None
             if is_url:
                 from ..skills.installer import download_to
                 try:
                     tmp_zip = await asyncio.to_thread(download_to, source)
                 except SkillInstallError as e:
                     raise RuntimeError(str(e)) from e
-                staged_tmp = Path(tempfile.mkdtemp(prefix="skysheep-skill-preview-"))
-                with zipfile.ZipFile(tmp_zip) as zf:
-                    zf.extractall(staged_tmp)
-                staged = staged_tmp
+                zip_to_stage = tmp_zip
             else:
                 staged = Path(source).expanduser()
-            if not staged.exists():
-                raise RuntimeError("路径不存在：" + source)
+                if not staged.exists():
+                    raise RuntimeError("路径不存在：" + source)
+                if staged.is_file() and staged.suffix.lower() == ".zip":
+                    # 本地 .zip 技能包：与网址来源同一套「先解压暂存再扫描」——
+                    # zip 文件本身扫不出 SKILL.md，直接当目录扫必然报「没找到技能」，
+                    # 界面的两段式导入就会卡死在预览这一步
+                    zip_to_stage = staged
+            if zip_to_stage is not None:
+                staged_tmp = Path(tempfile.mkdtemp(prefix="skysheep-skill-preview-"))
+                with zipfile.ZipFile(zip_to_stage) as zf:
+                    # 与 install_from_zip 同一套安全解压（挡绝对路径 / 穿越 / 符号链接）
+                    _unpack_zip(zf, _safe_members(zf), staged_tmp)
+                staged = staged_tmp
             roots = _scan_skills_in_dir(staged)
             if not roots:
                 raise RuntimeError(
                     f"在「{staged.name}」里没找到技能：技能包必须是含 SKILL.md 的文件夹"
                 )
             items = []
+            invalid: list[dict] = []
             for r in roots[:20]:  # 上限防烂包撑爆返回值
                 sk = _load_skill_from_dir(r, "global")
                 if sk is None:
+                    continue
+                try:
+                    _validate_skill_name(sk.name)
+                except SkillInstallError as e:
+                    # 预览与安装同一套名字校验：安装层必拒的名字不进「将要安装」清单
+                    invalid.append({"name": sk.name, "reason": str(e)})
                     continue
                 file_count = sum(1 for f in r.rglob("*") if f.is_file())
                 items.append({
@@ -8639,7 +8713,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     "version": sk.version,
                     "files": file_count,
                 })
-            if not items:
+            if not items and not invalid:
                 raise RuntimeError("技能包里没有可识别的 SKILL.md")
             clashes = [it["name"] for it in items if it["name"] in existing]
             return {
@@ -8649,6 +8723,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "overwrite": overwrite,
                 "clashes": clashes,
                 "needs_overwrite": bool(clashes and not overwrite),
+                "invalid": invalid,
             }
         finally:
             if tmp_zip is not None:

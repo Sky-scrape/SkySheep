@@ -86,6 +86,30 @@ def test_decode_paths():
     assert isinstance(out, str)
 
 
+def test_decode_windows_gbk_uses_oem_codepage(monkeypatch):
+    # Windows 上 cmd.exe 中文输出是 GBK 字节（sys.getfilesystemencoding() 恒为
+    # utf-8，救不了）：utf-8 严格解码失败后要按 OEM 代码页（中文系统 cp936）解
+    monkeypatch.setattr(shell, "IS_WINDOWS", True)
+    monkeypatch.setattr(shell, "_windows_oem_encoding", lambda: "cp936")
+    assert _decode("版本".encode("gbk")) == "版本"
+    assert _decode("echo 走查白名单测试".encode("gbk")) == "echo 走查白名单测试"
+
+
+def test_decode_windows_oem_unavailable_falls_back(monkeypatch):
+    # OEM 代码页探测失败（非 Windows / 异常）时退回原 utf-8/replace 行为，不抛
+    monkeypatch.setattr(shell, "IS_WINDOWS", True)
+    monkeypatch.setattr(shell, "_windows_oem_encoding", lambda: None)
+    out = _decode(b"\xff\xfe\x00abc")
+    assert isinstance(out, str)
+
+
+def test_decode_utf8_still_wins_on_windows(monkeypatch):
+    # UTF-8 输出（chcp 65001 / git / node 等）不受 OEM 回退影响
+    monkeypatch.setattr(shell, "IS_WINDOWS", True)
+    monkeypatch.setattr(shell, "_windows_oem_encoding", lambda: "cp437")
+    assert _decode("中文 ok".encode()) == "中文 ok"
+
+
 class _Pipe:
     """最小管道替身：按脚本吐 chunk，读空后返回 b""。"""
 

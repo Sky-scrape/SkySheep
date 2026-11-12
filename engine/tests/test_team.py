@@ -849,6 +849,11 @@ def test_team_full_flow_via_ws(home):
         assert assign["task_ref"] == tid
         assert any(e["event"] == "team_task_updated"
                    and e["data"]["status"] == "in_progress" for e in events2)
+        # 轮外广播（collab-7）：team.task_update 的工单事件必须带 session_id
+        # ——闲置时的改板不走轮次发射链，团队室面板/其他窗口全靠这帧更新
+        task_evs = [e for e in events2 if e["event"] == "team_task_updated"
+                    and e["data"]["status"] == "in_progress"]
+        assert task_evs and all(e["data"].get("session_id") for e in task_evs)
 
         # ---- team.get：快照口径 ----
         ws.send_json({"id": "g1", "method": "team.get", "params": {}})

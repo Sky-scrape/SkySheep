@@ -454,6 +454,15 @@ async def _h_permission_queue(backend: ServerBackend, params: dict, emit, local:
     if base is not None and only is None:
         # 基础 agent 不属于具体会话：只向本机公开（远程需要明确的会话归属）
         out.extend(_drain(getattr(base, "_pending", {}) or {}))
+    # 团队成员 Agent 挂在各自编排器（team.py 的 _MemberRuntime），不在 runtimes
+    # 里——决策路由（respond_permission）已经覆盖他们，队列枚举也得跟上：
+    # 否则成员的未决确认卡刷新/断线后无法重建，后端那轮挂在等决策上＝假死。
+    # 请求归属按建队会话的 sid（成员权限事件也走该会话的通道）
+    for team_sid, orch in getattr(backend, "_teams", {}).items():
+        if only is not None and team_sid != only:
+            continue
+        for member in orch.agents():
+            out.extend(_drain(getattr(member, "_pending", {}) or {}, team_sid))
     return {"pending": out}
 
 

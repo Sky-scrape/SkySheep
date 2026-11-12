@@ -178,13 +178,45 @@ def _shell_argv(command: str) -> list[str]:
     return ["/bin/bash", "-c", command]
 
 
+_OEM_ENCODING: str | None | bool = False  # False=还没探测过；None=探测失败
+
+
+def _windows_oem_encoding() -> str | None:
+    """Windows 控制台（cmd.exe）输出用的 OEM 代码页，如中文系统 cp936。
+
+    不能用 sys.getfilesystemencoding() 当回退：Windows Python 上它恒为 utf-8
+    （PEP 529），拿它再解一遍等于 utf-8/replace 二次解码，GBK 输出永远是乱码。
+    """
+    global _OEM_ENCODING
+    if _OEM_ENCODING is False:
+        try:
+            import ctypes
+
+            cp = ctypes.windll.kernel32.GetOEMCP()  # type: ignore[attr-defined]
+            _OEM_ENCODING = f"cp{cp}" if cp and cp > 0 else None
+        except Exception:  # noqa: BLE001 - 非 Windows / 探测失败一律回落
+            _OEM_ENCODING = None
+    return _OEM_ENCODING  # type: ignore[return-value]
+
+
 def _decode(raw: bytes | str) -> str:
     if isinstance(raw, str):
         return raw
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return raw.decode(sys.getfilesystemencoding(), errors="replace")
+        pass
+    if IS_WINDOWS:
+        # cmd.exe 输出按控制台代码页编码（中文系统 GBK/cp936），utf-8 严格解码
+        # 失败后按 OEM 代码页解；个别字节解不动就替换，不再走 utf-8 回退
+        # （那只会把 GBK 字节二次替换成乱码）。
+        oem = _windows_oem_encoding()
+        if oem:
+            try:
+                return raw.decode(oem, errors="replace")
+            except LookupError:
+                pass
+    return raw.decode(sys.getfilesystemencoding(), errors="replace")
 
 
 def _collect(pipe, acc: dict) -> None:

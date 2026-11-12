@@ -866,6 +866,34 @@ def test_settings_whitelist_enable_toggle(home, monkeypatch):
         assert not recv_until(ws, "x1")["ok"]
 
 
+def test_whitelist_check_reloads_rules_from_store(home, monkeypatch):
+    """规则测试器在解释前从库里重载项目规则（chat-2）。
+
+    聊天权限卡「总是允许」走会话私有 gate 的 persist_rule：规则落库但主 gate
+    的内存规则缓存不刷新。测试器若只读主 gate 缓存，会对实际已放行的规则报
+    「没有命中任何规则」，与聊天里的真实行为相反。
+    """
+    monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "whitelist.add",
+                      "params": {"tool": "run_command", "kind": "prefix",
+                                 "pattern": "echo 走查白名单测试"}})
+        assert recv_until(ws, "a1")["ok"]
+
+        # 复现聊天弹卡路径造成的「库里有、主 gate 缓存没有」：直接清空主 gate
+        # 的内存规则（等价于缓存未随落库刷新），库里那条规则原样保留
+        backend = client.app.state.backend
+        assert backend.gate is not None
+        backend.gate._project_rules.clear()
+
+        ws.send_json({"id": "k1", "method": "whitelist.check",
+                      "params": {"tool": "run_command",
+                                 "text": "echo 走查白名单测试 -x"}})
+        r = recv_until(ws, "k1")["result"]
+        assert r["allowed"] is True, r
+        assert r["hit"]["pattern"] == "echo 走查白名单测试"
+
+
 def test_settings_whitelist_check_export_import(home, monkeypatch):
     monkeypatch.setenv("SKYSHEEP_HOME", str(home / "home"))
     import asyncio

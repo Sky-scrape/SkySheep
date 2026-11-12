@@ -155,7 +155,7 @@ async def _h_whitelist_clear(backend: ServerBackend, params: dict, emit, local: 
 
 
 async def _h_whitelist_check(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return backend.check_whitelist_rule(
+    return await backend.check_whitelist_rule(
         str(params.get("tool", "")), str(params.get("text", ""))
     )
 

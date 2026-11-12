@@ -193,6 +193,30 @@ def test_collab_template_save_team_goes_to_teams_json(home):
     assert l1["result"]["team_templates"][0]["roles"][0]["needs"] == "write"
 
 
+def test_collab_template_save_team_keeps_desc(home):
+    """kind=team 模板的说明（desc）随 teams.json 落盘并在回读时还原（collab-1）。
+
+    此前 _collab_to_team_template 不带 desc、_team_template_to_collab 硬编码
+    空串：用户写的说明保存后静默丢失，画廊卡变成占位文案。
+    """
+    payload = _team_template()
+    payload["desc"] = "走查用：这条说明保存后不能丢"
+    with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "s1", "method": "collab.template_save",
+                      "params": {"template": payload}})
+        assert recv_until(ws, "s1")["ok"]
+        # 落 teams.json 的条目带 desc
+        teams_json = home / "home" / "teams.json"
+        on_disk = json.loads(teams_json.read_text(encoding="utf-8"))["templates"]
+        assert on_disk[0]["desc"] == "走查用：这条说明保存后不能丢"
+        # 列表回读（画廊数据源）desc 是真值而非硬编码空串
+        ws.send_json({"id": "l1", "method": "collab.template_list", "params": {}})
+        l1 = recv_until(ws, "l1")
+        team_rows = [t for t in l1["result"]["team_templates"]
+                     if t.get("name") == "交付小组"]
+        assert team_rows and team_rows[0]["desc"] == "走查用：这条说明保存后不能丢"
+
+
 def test_collab_template_save_rejects_roundtable_write_needs(home):
     """圆桌/对抗本期是纯文本协作：needs=write 保存期拒绝（中文原文）。"""
     payload = _roundtable_template()

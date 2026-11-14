@@ -414,7 +414,7 @@ class SearchConfig(BaseModel):
 
 class SkySheepConfig(BaseModel):
     default: str = "deepseek"
-    max_iterations: int = Field(default=40, ge=1, le=200)
+    max_iterations: int = Field(default=0, ge=0, le=200)
     context_limit_tokens: int = Field(default=1_000_000, ge=4_000)
     compaction_keep_recent: int = Field(default=8, ge=2)
     # 自动压缩总开关（默认开）：占用达到 compaction_trigger 时自动把旧历史
@@ -657,7 +657,7 @@ def load_config() -> SkySheepConfig:
     """
     merged = {k: v.model_copy() for k, v in PRESETS.items()}
     default = "deepseek"
-    max_iterations = 40
+    max_iterations = 0
     disabled: list[str] = []
     roundtable = RoundtableConfig()
     team = TeamConfig()
@@ -693,7 +693,7 @@ def load_config() -> SkySheepConfig:
         default = raw.get("default", default)
         # 手改配置越界/写成非数字时夹回合法区间（区间与下方 SkySheepConfig 的
         # Field 约束一致），别让启动炸在 pydantic 校验上——安全审查 M13
-        max_iterations = _clamp_int(raw, "max_iterations", max_iterations, 1, 200)
+        max_iterations = _clamp_int(raw, "max_iterations", max_iterations, 0, 200)
         context_limit = _clamp_int(raw, "context_limit_tokens", 1_000_000, 4_000)
         keep_recent = _clamp_int(raw, "compaction_keep_recent", 8, 2)
         try:
@@ -889,8 +889,8 @@ def set_advanced_settings_in_config(
     ripgrep 可选加速开关，落 [search] 段（目前只有配置写入通道，设置页
     暂无对应控件）。
     """
-    if max_iterations is not None and not 1 <= int(max_iterations) <= 200:
-        raise ConfigError("主循环最大轮数要在 1–200 之间")
+    if max_iterations is not None and not 0 <= int(max_iterations) <= 200:
+        raise ConfigError("主循环最大轮数要在 0–200 之间（0 = 不限制）")
     if context_limit_tokens is not None and not 4_000 <= int(context_limit_tokens) <= 2_000_000:
         raise ConfigError("上下文上限要在 4000–2000000 tokens 之间")
     if compaction_keep_recent is not None and not 2 <= int(compaction_keep_recent) <= 100:
@@ -1841,8 +1841,8 @@ CONFIG_TEMPLATE = """\
 # 默认使用的 provider 名称
 default = "deepseek"
 
-# 单次任务最大工具调用轮数
-max_iterations = 40
+# 单次任务最大工具调用轮数（0 = 不限制）
+max_iterations = 0
 
 [providers.deepseek]
 kind = "openai"

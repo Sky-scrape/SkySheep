@@ -64,8 +64,11 @@ class RelayWorkflow(RelayValue):
     edges: list[RelayEdge] = Field(default_factory=lambda: [
         RelayEdge(source="research", target="review"),
     ], max_length=31)
-    max_steps: int = Field(default=32, ge=1, le=100)
-    token_budget: int = Field(default=100000, ge=1024, le=10000000)
+    # 0 = 不限制（默认）：连续交替可一直推进；配正值时到该轮数暂停
+    max_steps: int = Field(default=0, ge=0, le=100)
+    # 0 = 不限制（默认）：连续交替不因累计用量被动停下；显式配正值时
+    # 仍按该预算兜底暂停（relay_token_budget），与每日/单轮预算的 0 语义一致
+    token_budget: int = Field(default=0, ge=0, le=10000000)
     max_no_progress: int = Field(default=2, ge=1, le=10)
     max_retries: int = Field(default=3, ge=1, le=5)
     termination_condition: Literal["terminal_node"] = "terminal_node"
@@ -101,7 +104,7 @@ class RelayWorkflow(RelayValue):
             current = outgoing[current]
         if seen != set(nodes):
             raise ValueError("存在从起始节点不可达的节点")
-        if self.max_steps < len(seen):
+        if self.max_steps and self.max_steps < len(seen):
             raise ValueError("max_steps 小于串行路径长度")
         return self
 

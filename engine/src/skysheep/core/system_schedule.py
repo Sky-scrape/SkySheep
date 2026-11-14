@@ -120,6 +120,17 @@ def build_schtasks_args(
             args += ["/SC", "DAILY", "/MO", str(minutes // 1440)]
         else:
             args += ["/SC", "MINUTE", "/MO", str(minutes)]
+    elif stype == "workdays":
+        # 周一至周五：schtasks 的 WEEKLY 支持多日 /D MON,TUE,WED,THU,FRI
+        args += ["/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI",
+                 "/ST", normalize_time_of_day(tod)]
+    elif stype == "cron":
+        # 任意 5 段表达式映射不到 schtasks 的参数面：明示拒绝而不是静默降级
+        # 成 DAILY（频次可能被放大 7/30 倍，无人值守下是安全面）
+        raise ValueError(
+            "Cron 表达式任务只在应用内调度，无法注册为 Windows 计划任务；"
+            "需要系统级无人值守时请改用「每天 / 每周 / 工作日」"
+        )
     elif stype == "weekly":
         raw_wd = cron_spec.get("weekday")
         wd = int(raw_wd) if raw_wd is not None else -1

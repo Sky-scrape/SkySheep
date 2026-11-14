@@ -46,6 +46,9 @@ class ModTool(Tool):
     read_only_hint = False
     destructive_hint = True
     idempotent_hint = False
+    # 第三方工具可能联网/访问本机之外的实体，按 MCP 规范保守声明（缺省 true
+    # 也是这个值，但纪律要求内置/本地工具显式写出，不靠基类缺省兜底）
+    open_world_hint = True
 
     def __init__(self, *, mod_id: str, name: str, description: str,
                  schema: dict, loaded_mod: object) -> None:

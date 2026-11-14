@@ -297,3 +297,27 @@ def test_usage_chart_frontend_wired(home):
     # CSS：线宽不随容器拉伸（non-scaling-stroke）、日期行均分
     assert "vector-effect: non-scaling-stroke" in css
     assert ".ut-line-dates" in css
+
+
+# ---------- ⑩½ 用量页统计口径（全部 / 本项目） ----------
+
+def test_usage_scope_pref_and_frontend(home):
+    """usage_scope 值域白名单（all/project）；前端两个报表都带口径、
+    切换后落偏好，并按后端实际生效的 scope 回填按钮。"""
+    frame = call(home, "ui.save", {"prefs": {"usage_scope": "project"}})
+    assert frame["ok"] and frame["result"]["prefs"]["usage_scope"] == "project"
+    assert read_ui_json(home)["usage_scope"] == "project"
+
+    frame = call(home, "ui.save", {"prefs": {"usage_scope": "everything"}})
+    assert "usage_scope" not in frame["result"]["prefs"]  # 非法值 = 删键回默认
+
+    js = read_app_bundle()
+    html = read_static("index.html")
+    assert 'id="usage-scope-tabs"' in html and "统计口径" in html
+    assert 'id="usage-scope-note"' in html
+    # 两个报表请求都带 scope；切换落 ui.json；启动回填 + 按返回口径回填按钮
+    assert '"usage.stats", { days: usageRangeDays, scope: usageScope }' in js
+    assert '"usage.collab_report", { days: 30, scope: usageScope }' in js
+    assert "saveUiPrefs({ usage_scope: usageScope })" in js
+    assert 'prefs.usage_scope === "project"' in js
+    assert "renderUsageScope" in js

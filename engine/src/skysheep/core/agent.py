@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -93,7 +94,7 @@ class Agent:
         registry: ToolRegistry,
         gate: PermissionGate,
         working_dir: Path | None,
-        max_iterations: int = 40,
+        max_iterations: int = 0,
         context_limit_tokens: int = 1_000_000,
         compaction_keep_recent: int = 8,
         compaction_trigger: float = 0.9,
@@ -502,7 +503,11 @@ class Agent:
         # 已尽力压缩仍超限（历史太短/摘要失败）：本轮不再逐迭代重试
         compaction_stuck = not self.compaction_auto
 
-        for iteration in range(1, self.max_iterations + 1):
+        # max_iterations <= 0 = 不限制（默认）：一直迭代到模型自己收尾；
+        # 配了正值时仍用 range，跑满后的 max_iterations 停止原因与提示不变
+        iteration_seq = (itertools.count(1) if self.max_iterations <= 0
+                         else range(1, self.max_iterations + 1))
+        for iteration in iteration_seq:
             iterations = iteration
             yield TurnStarted(iteration=iteration)
             # 引导：上一轮工具调用结束后、本轮模型调用前，把用户在这期间补的话

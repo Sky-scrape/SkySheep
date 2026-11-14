@@ -885,11 +885,14 @@ function collabPreviewHtml(pv) {
   const toolRows = tools.map((t) => {
     const mode = t.mode === "auto" ? "本次免确认" : "逐次确认";
     const note = String(t.note || "") || (t.known === false ? "当前工具表里没有这个工具，运行时会忽略" : "");
+    // 只有「免确认取决于复选框」的行做勾选联动：只读工具的 auto 与复选框无关，
+    // 未勾选时照常说「本次免确认」（走查 collab-5 的复核补丁）
+    const depends = t.grant_dependent === true;
+    const noteAsk = depends && t.note_ask ? String(t.note_ask) : "";
     return `<tr><td><code>${escapeHtml(collabToolLabel(t))}</code></td>` +
-      // 模板声明免确认的工具行打 pv-auto 标记：实际是否免确认还取决于下方
-      // 「本次运行中不再逐次确认」复选框，collabPreviewModal 里随勾选联动改写
-      `<td class="pv-mode${t.mode === "auto" ? " pv-auto" : ""}">${escapeHtml(mode)}</td>` +
-      `<td>${escapeHtml(note)}</td></tr>`;
+      `<td class="pv-mode${t.mode === "auto" ? " pv-auto" : ""}${depends ? " pv-dep" : ""}">${escapeHtml(mode)}</td>` +
+      `<td class="pv-note"${noteAsk ? ` data-note-ask="${escapeHtml(noteAsk)}" data-note-auto="${escapeHtml(note)}"` : ""}>` +
+      `${escapeHtml(noteAsk || note)}</td></tr>`;
   }).join("");
   const calls = Number(p.max_calls || 0);
   const secs = Number(p.max_seconds || 0);
@@ -960,12 +963,16 @@ function collabPreviewModal(preview) {
     const noConfirmEl = box.querySelector("#collab-pv-noconfirm");
     const readOnlyBtn = box.querySelector('[data-act="readonly"]');
     let settled = false;
-    // 工具表「本次」列与复选框联动：未勾选免确认时，模板声明 auto 的工具
-    // 实际仍逐次确认——标签照实改写，不再照抄模板声明误导（走查 collab-5）
+    // 工具表「本次」列与复选框联动：未勾选免确认时，模板声明 auto 且
+    // 依赖授权的工具（写入 / 命令前缀）实际仍逐次确认——标签与说明照实改写，
+    // 只读工具的 auto 不受复选框影响（grant_dependent=false），不参与改写。
     const syncModeCells = () => {
       const on = !!(noConfirmEl && noConfirmEl.checked);
-      box.querySelectorAll(".pv-mode.pv-auto").forEach((td) => {
+      box.querySelectorAll(".pv-mode.pv-dep").forEach((td) => {
         td.textContent = on ? "本次免确认" : "逐次确认（未勾选免确认）";
+      });
+      box.querySelectorAll(".pv-note[data-note-ask]").forEach((td) => {
+        td.textContent = on ? (td.dataset.noteAuto || "") : (td.dataset.noteAsk || "");
       });
     };
     if (noConfirmEl) noConfirmEl.addEventListener("change", syncModeCells);

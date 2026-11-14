@@ -555,6 +555,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 .split-col {
   flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
   border-left: 1px solid var(--line);
+  position: relative; /* 列内消息导航条按列定位 */
 }
 .split-col:first-child { border-left: none; }
 .split-head {
@@ -657,9 +658,14 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 #topbar { position: relative; z-index: 5; }
 #chat-main.has-split #chat-pet, #chat-main.has-split #jump-bottom { display: none; }
 #chat-main.has-split .chat-log { padding-right: 18px; }
-/* 消息导航条挂 #chat 全宽 right:8px、z-index:5 压过分屏列（z-index:4）：
-   不隐藏的话它浮在最右列内容上，圆点点了滚的还是主栏聊天流 */
-#chat-main.has-split #chat-minimap { display: none; }
+/* 分屏时主栏与每个分屏列各留一条自己的导航条（列是独立对话面，不能共用
+   主栏那条）：主栏那条按原样缩小一点留在 #chat 右缘，列里那条见
+   .split-col .chat-minimap；对应地给两侧聊天流留出圆点宽度 */
+#chat-main.has-split #chat .chat-log { padding-right: 64px; }
+#chat-main.has-split .split-col .split-log { padding-right: 52px; }
+#chat-main.has-split #chat-minimap {
+  transform: translateY(-50%) scale(.85); transform-origin: right center;
+}
 /* 跨项目会话的只读列：不渲染输入区，只给一句如实说明（配色全走主题变量，
    六套主题自动适配） */
 .split-readonly {
@@ -718,7 +724,7 @@ select option[value=""] { color: var(--dim); font-style: italic; }
    点它平滑跳到对应消息，悬停提示消息开头文字。视觉 6px 圆点、点击热区 10px
    （background-clip: content-box，外框比视觉大 4px 好点中）。
    只在内容可滚动且不止一条消息时出现；窄屏（≤860px）整个隐藏。 */
-#chat-minimap {
+.chat-minimap {
   position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
   width: 64px;
   display: flex; flex-direction: column; align-items: center; gap: 4px;
@@ -733,6 +739,12 @@ select option[value=""] { color: var(--dim); font-style: italic; }
 }
 .chat-minimap-dot:hover { opacity: .6; }
 .chat-minimap-dot.on { opacity: 1; }
+/* 分屏列里的导航条：同一套圆点/高亮/跳转，只是按列宽缩小一点
+   （用户口径「样式和只有一个屏幕时的一样」） */
+.split-col .chat-minimap {
+  right: 4px; top: calc(50% - 22px); width: 48px;
+  transform: translateY(-50%) scale(.8); transform-origin: right center;
+}
 /* 「跳至最新」浮标：离底部超过 120px 时出现（scrollLog 不再拽底），
    点它回底并恢复自动跟随。放宠物左侧、minimap 竖列右缘之外，互不遮挡。 */
 #jump-bottom {
@@ -2005,6 +2017,10 @@ html.code-wrap .md pre.has-lines { display: block; }
 /* 用量时间范围切换：复用 .seg-row 基类（HTML 上已同加），只收尺寸适配卡片头 */
 .usage-tabs { flex-shrink: 0; }
 .usage-tabs button { padding: 5px 13px; font-size: var(--fs-sm); }
+/* 「本项目」在没有打开项目时置灰（后端会把口径退化成全部） */
+.usage-tabs button:disabled { opacity: .45; cursor: default; }
+/* 口径说明压在统计磁贴上沿，跟卡片标题区分开 */
+#usage-scope-note { margin: -2px 0 8px; }
 /* Token 活动卡头右侧：图表类型 + 范围两组分段控件并排（card-head 是 space-between，
    两组包在一个容器里才不会被拆到两边） */
 .usage-head-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -4874,9 +4890,10 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 .input-menu .menu-item.active .mi-cmd, .input-menu .menu-item.active .mi-path { color: var(--blue); }
 .input-menu .menu-empty { padding: 10px; color: var(--dim); font-size: var(--fs-sm); text-align: center; }
 
-/* 排队提示条（Agent 工作时又发了消息） */
+/* 排队提示条（Agent 工作时又发了消息）：与 eta-chip 同族，必须按内容收缩——
+   .chat-log 是列向 flex，不给 align-self 会被拉伸成整行宽度 */
 .queue-chip {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-self: flex-start; align-items: center; gap: 6px;
   margin: 2px 0 6px; padding: 3px 10px;
   font-size: var(--fs-sm); color: var(--gold);
   background: var(--paper-raised); border: 1px dashed var(--line2);
@@ -8109,7 +8126,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 
 /* 窄屏（手机）：消息导航条退场还聊天区全宽（断点与 NARROW_MQ / @media 860px 一致） */
 @media (max-width: 860px) {
-  #chat-minimap { display: none; }
+  .chat-minimap { display: none; }
   .chat-log { padding-right: 0; }
 }
 
@@ -8811,9 +8828,33 @@ li.mod-row {
   border: 1px solid var(--line); border-radius: 999px;
   padding: 0 7px; line-height: 18px; white-space: nowrap;
 }
-.relay-turn-text {
-  margin: 4px 0 0; font-size: var(--fs-md); line-height: 1.6;
+.relay-turn-summary {
+  margin: 4px 0 0; font-size: var(--fs-md); line-height: 1.55;
   color: var(--text2); word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.relay-turn-summary.err { color: var(--bad); }
+.relay-turn-detail { margin-top: 3px; }
+.relay-turn-detail > summary {
+  cursor: pointer; font-size: var(--fs-sm); color: var(--text2);
+  list-style: none; width: fit-content;
+}
+.relay-turn-detail > summary::-webkit-details-marker { display: none; }
+.relay-turn-detail > summary::before {
+  content: "▸"; display: inline-block; width: 14px;
+}
+.relay-turn-detail[open] > summary::before { content: "▾"; }
+.relay-turn-full {
+  margin-top: 4px; max-height: 260px; overflow: auto;
+  background: var(--paper-sunken); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 8px 10px;
+  font-size: var(--fs-md);
+}
+.relay-turn-full > :first-child { margin-top: 0; }
+.relay-turn-full h1, .relay-turn-full h2,
+.relay-turn-full h3, .relay-turn-full h4 {
+  font-size: var(--fs-md); border-bottom: none; margin: 8px 0 4px;
 }
 @container (max-width: 520px) {
   .relay-task-grid { grid-template-columns: 1fr; }
@@ -9730,7 +9771,10 @@ li.mcp-failed { border-left: 0; }
 [dir="rtl"] #chat-main.has-split #cp-resizer { margin-right: 0; margin-left: var(--split-used, var(--split-w, 46%)); }
 [dir="rtl"] .chat-log { padding-right: 0; padding-left: 80px; }
 [dir="rtl"] #chat-main.has-split .chat-log { padding-left: 18px; }
-[dir="rtl"] #chat-minimap { right: auto; left: 8px; }
+[dir="rtl"] #chat-main.has-split #chat .chat-log { padding-left: 64px; }
+[dir="rtl"] #chat-main.has-split .split-col .split-log { padding-left: 52px; }
+[dir="rtl"] .chat-minimap { right: auto; left: 8px; }
+[dir="rtl"] .split-col .chat-minimap { right: auto; left: 4px; }
 [dir="rtl"] #jump-bottom { right: auto; left: 100px; }
 [dir="rtl"] pre, [dir="rtl"] code, [dir="rtl"] .term-screen,
 [dir="rtl"] .tool-diff, [dir="rtl"] .md pre, [dir="rtl"] .review-diff {

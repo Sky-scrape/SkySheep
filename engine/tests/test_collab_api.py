@@ -340,8 +340,17 @@ def test_collab_preview_team_fields_and_tools(home):
     by_name = {(t["name"], t["command_prefix"]): t for t in result["tools"]}
     run_cmd = by_name[("run_command", "git status")]
     assert run_cmd["known"] is True and run_cmd["mode"] == "auto"
+    assert run_cmd["grant_dependent"] is True
+    assert "未勾选免确认" in run_cmd["note_ask"]
     assert result["command_prefixes"] == ["git status"]
-    assert by_name[("write_file", "")]["mode"] == "auto"
+    write_file = by_name[("write_file", "")]
+    assert write_file["mode"] == "auto"
+    assert write_file["grant_dependent"] is True
+    assert "未勾选免确认" in write_file["note_ask"]
+    # 只读工具的自动放行与跑前清单复选框无关：不参与勾选联动
+    read_file = by_name[("read_file", "")]
+    assert read_file["mode"] == "auto" and read_file["grant_dependent"] is False
+    assert "note_ask" not in read_file
     assert by_name[("delete_file", "")]["mode"] == "confirm"
     assert "delete_file" in result["always_confirm"]
 
@@ -837,3 +846,23 @@ def test_team_resident_set_rejects_builtin_template(home):
 
         message = client.portal.call(run)
     assert "内置团队模板" in message and "复制" in message
+
+
+def test_auto_pool_demotes_auth_failed_services(home):
+    """自动挑模型（圆桌/对抗/团队自动成员）把鉴权失败的服务排到池尾。
+
+    配置里留着一个坏 Key 时，自动池仍包含它（全都坏时要有错误卡），但
+    有可用服务时不让它先上场——否则对抗发现者一挑到就整场 fail-fast。
+    """
+    with make_client(home, []) as client:
+        backend = client.app.state.backend
+        _configure_providers(backend, ["fa", "fb"])
+        names = [n for n, _m in backend._auto_pool_services()]
+        assert names.index("fa") < names.index("fb")
+        backend.provider_health.record_text_error("fa", "401 Unauthorized: invalid api key")
+        names = [n for n, _m in backend._auto_pool_services()]
+        assert names.index("fb") < names.index("fa")
+        # 恢复健康后回到配置顺序（稳定排序，不做永久降权）
+        backend.provider_health.record_ok("fa")
+        names = [n for n, _m in backend._auto_pool_services()]
+        assert names.index("fa") < names.index("fb")

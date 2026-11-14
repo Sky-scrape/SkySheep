@@ -569,15 +569,11 @@ function persistSessionTabs() { /* 由 renderTabs 内联执行（见上），保
 // 悬停提示消息开头文字。消息太多匀不下时等距抽样（一颗代表一段，跳到段首）：
 // 先按消息数封顶（超过 MINI_MAX_MSGS 条先对消息抽样，rebuild 不再逐条全量测量），
 // 再按可用高度封顶（短视口下圆点更少）。
-// 只在内容可滚动且不止一条消息时出现；随 attachTabLog 绑定当前标签的聊天流。
-const chatMinimap = document.createElement("div");
-chatMinimap.id = "chat-minimap";
-chatMinimap.className = "hidden";
-chatBox.appendChild(chatMinimap);
+// 主栏与每个分屏列各挂一条（createChatMinimap 一实例一流）：分屏列是独立
+// 对话面，不能共用主栏那条——共用时列里滚动的高亮/点击目标全指向主栏。
+// 只在内容可滚动且不止一条消息时出现；窄屏（≤860px）整个隐藏。
 const MINI_ITEM_H = 10, MINI_GAP = 4; // 与 app.css 的圆点热区高 / 列间距保持一致
 const MINI_MAX_MSGS = 150; // 消息数上限：超过就先对消息等距抽样，圆点从样本里选代表
-let miniLog = null, miniMut = null, miniRO = null, miniTargets = [], miniTops = [];
-let miniTimer = 0, miniRaf = 0, miniRemap = 0, miniGen = 0;
 
 // 消息在聊天流内容坐标系（= scrollTop / scrollTo 所在的坐标系）里的纵位。
 // 两个坑：
@@ -585,45 +581,16 @@ let miniTimer = 0, miniRaf = 0, miniRemap = 0, miniGen = 0;
 //     不除回 uiScale 会与 scrollTop 差一个缩放倍率（0.9 缩放时偏小 10%）；
 //     长对话里偏差累积，点圆点会落到错误位置、高亮也跟着错位。
 //  2) 入场动画 rise 带 translateY transform，会被 rect 算进去，
-//     所以必须在动画结束后校准（见 miniRebuild 里的 miniRemap）。
-function miniTopOf(el, logRect) {
-  const r = logRect || miniLog.getBoundingClientRect();
-  return (el.getBoundingClientRect().top - r.top) / uiScale + miniLog.scrollTop;
+//     所以必须在动画结束后校准（见 rebuild 里的 remap）。
+function miniTopOf(log, el, logRect) {
+  const r = logRect || log.getBoundingClientRect();
+  return (el.getBoundingClientRect().top - r.top) / uiScale + log.scrollTop;
 }
 
-function miniBind(log) {
-  if (miniLog === log) { miniSchedule(); return; }
-  if (miniMut) { miniMut.disconnect(); miniMut = null; }
-  if (miniRO) { miniRO.disconnect(); miniRO = null; }
-  // 旧流不再可见前先解绑它的 scroll 监听：来回切标签每次都重新 bind，
-  // 不解绑的话同一个 log 会越积越多的 scroll 回调（内存慢性泄漏）
-  if (miniLog) miniLog.removeEventListener("scroll", miniOnScroll);
-  clearTimeout(miniRemap);
-  miniGen++; // 换流后旧流的校准定时器作废
-  miniLog = log;
-  chatMinimap.textContent = "";
-  chatMinimap.classList.add("hidden");
-  if (!log) return;
-  miniMut = new MutationObserver(miniSchedule);
-  // 只观察 childList：流式渲染走 innerHTML 整树替换（childList 命中），
-  // 高度变化还有 ResizeObserver 兜底；characterData 会在流式期间被
-  // 逐字变更轰炸，防抖形同虚设
-  miniMut.observe(log, { childList: true, subtree: true });
-  miniRO = new ResizeObserver(miniSchedule);
-  miniRO.observe(log);
-  log.addEventListener("scroll", miniOnScroll, { passive: true });
-  miniSchedule();
-}
-
-function miniSchedule() {
-  clearTimeout(miniTimer);
-  miniTimer = setTimeout(miniRebuild, 160); // 流式输出逐字长高，防抖后统一重排
-}
-
-function miniMsgs() {
-  if (!miniLog) return [];
+function miniMsgsFor(log) {
+  if (!log) return [];
   const out = [];
-  for (const el of miniLog.children) {
+  for (const el of log.children) {
     // 只收真正的消息卡片：user / assistant / error。
     // 不能用 classList.contains("msg") 粗筛——.msg.notice（系统提示胶囊，如
     // 「已切换到规划模式」）与 .msg.plan-actions（计划执行按钮条）也带 msg 前缀，
@@ -633,6 +600,11 @@ function miniMsgs() {
     // 过程时间线里的中间说明（模型动手前说的话）：属于「操作过程」而非对话消息，
     // 不算右侧导航刻度（正常路径会把它收进过程框；没有过程框时留在流里也不该占一格）
     if (el.classList.contains("proc-note")) continue;
+    // 工具截图回填的伪 user 消息（“[screenshot] 上述工具…”）与系统补记不是
+    // 用户说的「对话」：算进刻度会出现「刻度条数明显多于对话」（接力一轮里
+    // 截图工具多的时候尤其明显，2026-11-14 用户实例）
+    if (el.classList.contains("screenshot-note")
+        || el.classList.contains("system-note")) continue;
     out.push(el);
   }
   return out;
@@ -641,120 +613,174 @@ function miniMsgs() {
 // 一个圆点必须对应一个「真能滚到」的位置：目标位置钳到可滚动范围内。
 // 不钳制的话，末尾几条消息的目标会超出 maxScroll，点了只能滚到底、
 // 高亮一律落到最后一颗（「点不动第 N 个圆点」的成因）。
-function miniScrollTarget(el, logRect) {
-  const maxScroll = Math.max(0, miniLog.scrollHeight - miniLog.clientHeight);
-  return Math.min(maxScroll, Math.max(0, miniTopOf(el, logRect) - 10));
+function miniScrollTarget(log, el, logRect) {
+  const maxScroll = Math.max(0, log.scrollHeight - log.clientHeight);
+  return Math.min(maxScroll, Math.max(0, miniTopOf(log, el, logRect) - 10));
 }
 
-function miniRebuild() {
-  if (!miniLog || !miniLog.isConnected) { chatMinimap.classList.add("hidden"); return; }
-  const msgs = miniMsgs();
-  const logH = miniLog.clientHeight;
-  const scrollable = msgs.length > 1 && miniLog.scrollHeight > logH + 4;
-  chatMinimap.classList.toggle("hidden", !scrollable);
-  if (!scrollable) { chatMinimap.textContent = ""; return; }
-  // 容器 rect 只读一次：循环里每条消息各读一次 getBoundingClientRect
-  // 会强制布局多次（长会话 rebuild 期间每秒多次全量布局的来源之一）
-  const logRect = miniLog.getBoundingClientRect();
-  // 消息数超上限先对消息等距抽样：下面这段逐条测量每条消息各读一次
-  // getBoundingClientRect，几千条消息的会话流式期间每轮 rebuild 全量量一遍太重。
-  // 抽样后每颗圆点仍对准样本里的真实消息（高亮与点击都按它算），末尾留一个
-  // 名额给最后一条消息——点最末一颗、贴底强制高亮都对准真正的结尾；
-  // 不超上限时 pool 就是原数组，行为与逐条测量完全一致。
-  let pool = msgs;
-  if (msgs.length > MINI_MAX_MSGS) {
-    pool = new Array(MINI_MAX_MSGS);
-    const s0 = msgs.length / MINI_MAX_MSGS;
-    for (let i = 0; i < MINI_MAX_MSGS; i++) {
-      pool[i] = i === MINI_MAX_MSGS - 1 ? msgs[msgs.length - 1] : msgs[Math.floor(i * s0)];
-    }
+/** 一条消息导航条实例：主栏一条，每个分屏列各一条（各自绑自己的聊天流）。 */
+function createChatMinimap(host, opts = {}) {
+  const root = document.createElement("div");
+  root.className = "chat-minimap hidden";
+  if (opts.id) root.id = opts.id;
+  host.appendChild(root);
+  let log = null, mut = null, ro = null, targets = [], tops = [];
+  let timer = 0, raf = 0, remap = 0, gen = 0;
+
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(rebuild, 160); // 流式输出逐字长高，防抖后统一重排
   }
-  // 目标位置相同的连续消息合并成一颗（保留最后一条——滚到底时看到的正是末尾那几条）。
-  // 内容只比视口高一点点时，末尾好几条的目标会被一起钳到底部；
-  // 不合并就会出现多颗点了没反应、高亮全落最后一颗的死圆点。
-  const slots = [];
-  for (const el of pool) {
-    const target = miniScrollTarget(el, logRect);
-    const last = slots[slots.length - 1];
-    if (last && Math.abs(last.target - target) < 1) last.el = el;
-    else slots.push({ el, target });
+
+  function bind(next) {
+    if (log === next) { schedule(); return; }
+    if (mut) { mut.disconnect(); mut = null; }
+    if (ro) { ro.disconnect(); ro = null; }
+    // 旧流不再可见前先解绑它的 scroll 监听：来回切标签每次都重新 bind，
+    // 不解绑的话同一个 log 会越积越多的 scroll 回调（内存慢性泄漏）
+    if (log) log.removeEventListener("scroll", onScroll);
+    clearTimeout(remap);
+    gen++; // 换流后旧流的校准定时器作废
+    log = next;
+    root.textContent = "";
+    root.classList.add("hidden");
+    if (!log) return;
+    mut = new MutationObserver(schedule);
+    // 只观察 childList：流式渲染走 innerHTML 整树替换（childList 命中），
+    // 高度变化还有 ResizeObserver 兜底；characterData 会在流式期间被
+    // 逐字变更轰炸，防抖形同虚设
+    mut.observe(log, { childList: true, subtree: true });
+    ro = new ResizeObserver(schedule);
+    ro.observe(log);
+    log.addEventListener("scroll", onScroll, { passive: true });
+    schedule();
   }
-  const availH = Math.max(120, Math.min(logH - 130, 560));
-  const maxDots = Math.max(1, Math.floor((availH + MINI_GAP) / (MINI_ITEM_H + MINI_GAP)));
-  const n = Math.min(slots.length, maxDots);
-  const step = slots.length / n;
-  miniTargets = []; miniTops = [];
-  // 就地复用已有圆点，只在数量变化时增删——不能像以前那样每次 textContent=""
-  // 重建整列：新插入的元素首帧就带着目标宽度，浏览器没有「起始值」可插值，
-  // transition 被直接跳过，于是滚动时宽度是一档一档跳变而不是渐变（实测复现）。
-  // 复用同一批元素后，宽度从旧值平滑变到新值，--mini-w 的 transition 才真正生效。
-  const bars = chatMinimap.children;
-  for (let i = 0; i < n; i++) {
-    const el = slots[Math.floor(i * step)].el;
-    let d = bars[i];
-    if (!d) {
-      d = document.createElement("div");
-      d.className = "chat-minimap-dot";
-      chatMinimap.appendChild(d);
+
+  function onScroll() {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; updateActive(); });
+  }
+
+  function rebuild() {
+    if (!log || !log.isConnected) { root.classList.add("hidden"); return; }
+    const msgs = miniMsgsFor(log);
+    const logH = log.clientHeight;
+    const scrollable = msgs.length > 1 && log.scrollHeight > logH + 4;
+    root.classList.toggle("hidden", !scrollable);
+    if (!scrollable) { root.textContent = ""; return; }
+    // 容器 rect 只读一次：循环里每条消息各读一次 getBoundingClientRect
+    // 会强制布局多次（长会话 rebuild 期间每秒多次全量布局的来源之一）
+    const logRect = log.getBoundingClientRect();
+    // 消息数超上限先对消息等距抽样：下面这段逐条测量每条消息各读一次
+    // getBoundingClientRect，几千条消息的会话流式期间每轮 rebuild 全量量一遍太重。
+    // 抽样后每颗圆点仍对准样本里的真实消息（高亮与点击都按它算），末尾留一个
+    // 名额给最后一条消息——点最末一颗、贴底强制高亮都对准真正的结尾；
+    // 不超上限时 pool 就是原数组，行为与逐条测量完全一致。
+    let pool = msgs;
+    if (msgs.length > MINI_MAX_MSGS) {
+      pool = new Array(MINI_MAX_MSGS);
+      const s0 = msgs.length / MINI_MAX_MSGS;
+      for (let i = 0; i < MINI_MAX_MSGS; i++) {
+        pool[i] = i === MINI_MAX_MSGS - 1 ? msgs[msgs.length - 1] : msgs[Math.floor(i * s0)];
+      }
     }
-    // title 只在消息定稿（有 seq）后算一次并缓存；流式中的消息内容未定，
-    // 每次重算（几千字的消息一次 rebuild 就是几千字符的扫描）
-    let txt;
-    if (el.dataset.seq) {
-      txt = el._miniTitle;
-      if (txt === undefined) {
+    // 目标位置相同的连续消息合并成一颗（保留最后一条——滚到底时看到的正是末尾那几条）。
+    // 内容只比视口高一点点时，末尾好几条的目标会被一起钳到底部；
+    // 不合并就会出现多颗点了没反应、高亮全落最后一颗的死圆点。
+    const slots = [];
+    for (const el of pool) {
+      const target = miniScrollTarget(log, el, logRect);
+      const last = slots[slots.length - 1];
+      if (last && Math.abs(last.target - target) < 1) last.el = el;
+      else slots.push({ el, target });
+    }
+    const availH = Math.max(120, Math.min(logH - 130, 560));
+    const maxDots = Math.max(1, Math.floor((availH + MINI_GAP) / (MINI_ITEM_H + MINI_GAP)));
+    const n = Math.min(slots.length, maxDots);
+    const step = slots.length / n;
+    targets = []; tops = [];
+    // 就地复用已有圆点，只在数量变化时增删——不能像以前那样每次 textContent=""
+    // 重建整列：新插入的元素首帧就带着目标宽度，浏览器没有「起始值」可插值，
+    // transition 被直接跳过，于是滚动时宽度是一档一档跳变而不是渐变（实测复现）。
+    // 复用同一批元素后，宽度从旧值平滑变到新值，--mini-w 的 transition 才真正生效。
+    const bars = root.children;
+    for (let i = 0; i < n; i++) {
+      const el = slots[Math.floor(i * step)].el;
+      let d = bars[i];
+      if (!d) {
+        d = document.createElement("div");
+        d.className = "chat-minimap-dot";
+        root.appendChild(d);
+      }
+      // title 只在消息定稿（有 seq）后算一次并缓存；流式中的消息内容未定，
+      // 每次重算（几千字的消息一次 rebuild 就是几千字符的扫描）
+      let txt;
+      if (el.dataset.seq) {
+        txt = el._miniTitle;
+        if (txt === undefined) {
+          txt = (el.textContent || "").trim().replace(/\s+/g, " ");
+          txt = txt.length > 80 ? txt.slice(0, 80) + "…" : txt;
+          el._miniTitle = txt;
+        }
+      } else {
         txt = (el.textContent || "").trim().replace(/\s+/g, " ");
         txt = txt.length > 80 ? txt.slice(0, 80) + "…" : txt;
-        el._miniTitle = txt;
       }
-    } else {
-      txt = (el.textContent || "").trim().replace(/\s+/g, " ");
-      txt = txt.length > 80 ? txt.slice(0, 80) + "…" : txt;
+      d.title = txt;
+      // onclick 每轮重绑：闭包捕获的是本条消息的滚动目标，复用元素时必须跟着换
+      d.onclick = () => log.scrollTo({ top: miniScrollTarget(log, el), behavior: "smooth" });
+      targets.push(el);
+      tops.push(miniTopOf(log, el, logRect));
     }
-    d.title = txt;
-    // onclick 每轮重绑：闭包捕获的是本条消息的滚动目标，复用元素时必须跟着换
-    d.onclick = () => miniLog.scrollTo({ top: miniScrollTarget(el), behavior: "smooth" });
-    miniTargets.push(el);
-    miniTops.push(miniTopOf(el, logRect));
+    // 多余的圆点从尾部移除（消息变少 / 容器变矮时）
+    while (root.children.length > n) root.removeChild(root.lastChild);
+    updateActive();
+    // 入场动画（320ms）结束的位置才作数：等它播完再校准一遍缓存的纵位与高亮
+    const g = ++gen;
+    clearTimeout(remap);
+    remap = setTimeout(() => {
+      if (g !== gen || !log || !log.isConnected) return;
+      // 必须包一层箭头函数：.map(miniTopOf) 会把数组索引当第二个参数传进去，
+      // 而 miniTopOf 的第二参是 logRect（矩形对象）——拿到索引后 r.top 是
+      // undefined，整列纵位全变 NaN，高亮就永远卡在第一颗。
+      tops = targets.map((el) => miniTopOf(log, el));
+      updateActive();
+    }, 480);
   }
-  // 多余的圆点从尾部移除（消息变少 / 容器变矮时）
-  while (chatMinimap.children.length > n) chatMinimap.removeChild(chatMinimap.lastChild);
-  miniUpdateActive();
-  // 入场动画（320ms）结束的位置才作数：等它播完再校准一遍缓存的纵位与高亮
-  const gen = ++miniGen;
-  clearTimeout(miniRemap);
-  miniRemap = setTimeout(() => {
-    if (gen !== miniGen || !miniLog || !miniLog.isConnected) return;
-    // 必须包一层箭头函数：.map(miniTopOf) 会把数组索引当第二个参数传进去，
-    // 而第二参是 logRect（矩形对象）——拿到索引后 r.top 是 undefined，
-    // 整列纵位全变 NaN，miniUpdateActive 里 NaN <= mark 恒为假，
-    // 高亮就永远卡在第一颗（滑动时看着像「从最后一个点直接跳到第一个点」）。
-    miniTops = miniTargets.map((el) => miniTopOf(el));
-    miniUpdateActive();
-  }, 480);
+
+  function updateActive() {
+    if (!log || root.classList.contains("hidden")) return;
+    const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+    const mark = log.scrollTop + 24; // 视口顶缘略下取当前消息：点哪颗亮哪颗，滚动时跟随最上可见消息
+    let on = 0;
+    for (let i = 0; i < tops.length; i++) if (tops[i] <= mark) on = i;
+    if (atBottom) on = tops.length - 1; // 贴底时末尾短消息到不了顶缘，强制亮最后一根
+    // 从亮条向上下渐变：紧邻的略长、越远越短，4 步外回到圆点；
+    // 宽度写在 --mini-w 上（CSS 的 width: var(--mini-w) 接住），transition 负责平滑
+    const bars = root.children;
+    for (let i = 0; i < bars.length; i++) {
+      const dist = Math.abs(i - on);
+      bars[i].classList.toggle("on", i === on);
+      bars[i].style.setProperty("--mini-w", (dist ? 10 + 22 * Math.max(0, 1 - dist / 4) : 32).toFixed(1) + "px");
+    }
+  }
+
+  function destroy() {
+    if (mut) { mut.disconnect(); mut = null; }
+    if (ro) { ro.disconnect(); ro = null; }
+    if (log) { log.removeEventListener("scroll", onScroll); log = null; }
+    clearTimeout(timer);
+    clearTimeout(remap);
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    root.remove();
+  }
+
+  if (opts.log) bind(opts.log);
+  return { bind, destroy, refresh: schedule, root };
 }
 
-function miniUpdateActive() {
-  if (!miniLog || chatMinimap.classList.contains("hidden")) return;
-  const atBottom = miniLog.scrollTop + miniLog.clientHeight >= miniLog.scrollHeight - 4;
-  const mark = miniLog.scrollTop + 24; // 视口顶缘略下取当前消息：点哪颗亮哪颗，滚动时跟随最上可见消息
-  let on = 0;
-  for (let i = 0; i < miniTops.length; i++) if (miniTops[i] <= mark) on = i;
-  if (atBottom) on = miniTops.length - 1; // 贴底时末尾短消息到不了顶缘，强制亮最后一根
-  // 从亮条向上下渐变：紧邻的略长、越远越短，4 步外回到圆点；
-  // 宽度写在 --mini-w 上（CSS 的 width: var(--mini-w) 接住），transition 负责平滑
-  const bars = chatMinimap.children;
-  for (let i = 0; i < bars.length; i++) {
-    const dist = Math.abs(i - on);
-    bars[i].classList.toggle("on", i === on);
-    bars[i].style.setProperty("--mini-w", (dist ? 10 + 22 * Math.max(0, 1 - dist / 4) : 32).toFixed(1) + "px");
-  }
-}
-
-function miniOnScroll() {
-  if (miniRaf) return;
-  miniRaf = requestAnimationFrame(() => { miniRaf = 0; miniUpdateActive(); });
-}
+// 主栏那一条保留原 id；每个分屏列在 openSplitPane 里各建一条
+const mainMinimap = createChatMinimap(chatBox, { id: "chat-minimap" });
 
 function attachTabLog(tab) {
   // 只挂当前激活标签的聊天流；其余保留在内存里（各自滚动位置天然保留）
@@ -765,7 +791,7 @@ function attachTabLog(tab) {
     });
     chatBox.appendChild(tab.logEl);
   }
-  miniBind(tab.logEl);
+  mainMinimap.bind(tab.logEl);
   updateJumpBottom(); // 浮标跟着当前可见的聊天流走
 }
 
@@ -1486,6 +1512,8 @@ async function openSplitPane(sid, title) {
     pane.logEl._followBottom = logNearBottom(pane.logEl);
   }, { passive: true });
   splitPanes.push(pane);
+  // 本列自己的消息导航条（与主栏同一套圆点/高亮/跳转；CSS 按列宽缩小一点）
+  pane.minimap = createChatMinimap(col, { log: pane.logEl });
   const reload = () => renderHistory(pane, info.messages || [], info.messages_offset);
   col.querySelector(".split-close").onclick = () => closeSplitPane(pane);
   col.querySelector(".split-refresh").onclick = async () => {
@@ -1995,6 +2023,7 @@ function closeSplitPane(pane, opts = {}) {
   // 闭包/观察器/标签字典里——反复开关列会持续积累（长会话里 _historyAll
   // 持着整会话消息引用，最重）。
   if (pane._cpRO) { pane._cpRO.disconnect(); pane._cpRO = null; }
+  if (pane.minimap) { pane.minimap.destroy(); pane.minimap = null; }
   pane._historyGen = (pane._historyGen || 0) + 1; // 在途的分批渲染 rAF 作废
   pane._historyAll = null;
   pane._historyStart = 0;
@@ -2233,6 +2262,11 @@ async function loadMsgImage(img) {
 function addUser(text, images, refs) {
   const d = document.createElement("div");
   d.className = "msg user";
+  // 工具截图回填的伪 user 消息（agent 为让模型看截图而补的说明）不是用户发言：
+  // 打标后不进右侧导航刻度，也不挂「编辑重发/引用」操作
+  if (String(text || "").trimStart().startsWith("[screenshot]")) {
+    d.classList.add("screenshot-note");
+  }
   // 蓝色气泡画在内层 .user-bubble 上：操作按钮行要常驻占位在气泡下方（外层不再有底色）
   const bubble = document.createElement("div");
   bubble.className = "user-bubble";
@@ -2420,190 +2454,6 @@ function appendStream(txt) {
       scrollLog();
     }, 80);
   }
-}
-
-// ---------- 思考行（思考型模型）：一行「💭 思考 · 3.3 秒 · 470 字」，点开看全文 ----------
-// 过程（思考 / 中间说明 / 工具行）按发生顺序排成一条时间线，与正文交错显示，
-// 不再整段摊开占屏；耗时优先用引擎实测值（历史恢复时带上），流式期间用本地跨度。
-function fmtThinkMs(ms) {
-  // 100ms 以下不显示（秒级以下的耗时没有信息量，只留字数）
-  if (!ms || ms < 100) return "";
-  const s = ms / 1000;
-  return s < 10 ? `${s.toFixed(1)} 秒` : `${Math.round(s)} 秒`;
-}
-
-function thinkMeta(el) {
-  const data = (el && el._think) || {};
-  const n = Math.round((data.text || "").length / 10) * 10;
-  const dur = fmtThinkMs(data.ms || 0);
-  const parts = [];
-  if (dur) parts.push(dur);
-  if (n) parts.push(`${n} 字`);
-  return parts.length ? parts.join(" · ") : "思考中…";
-}
-
-function updateThinkMeta(el) {
-  const meta = el && el.querySelector(".proc-meta");
-  if (meta) meta.textContent = thinkMeta(el);
-}
-
-function bindThinkRow(el) {
-  el.querySelector(".proc-head").onclick = () => {
-    el.classList.toggle("folded");
-    updateThinkMeta(el);
-  };
-}
-
-// 过程框：一轮里的思考行 / 工具行 / 中间说明整体套一层虚线框，框头可整体折叠。
-// 一轮结束（最终回答）时收口并收起；下一轮开始另起一个框。
-function procMetaText(box) {
-  if (!box) return "";
-  const steps = box.querySelectorAll(".tool-card").length;
-  const thinkMs = [...box.querySelectorAll(".proc-think")]
-    .reduce((n, el) => n + ((el._think && el._think.ms) || 0), 0);
-  const parts = [];
-  if (steps) parts.push(`${steps} 步`);
-  if (thinkMs) parts.push(`思考 ${fmtThinkMs(thinkMs)}`);
-  return parts.join(" · ");
-}
-
-function updateProcMeta(box) {
-  const meta = box && box.querySelector(".pb-meta");
-  if (meta) meta.textContent = procMetaText(box);
-}
-
-function buildProcBox(folded) {
-  const box = document.createElement("div");
-  box.className = "proc-box" + (folded ? " folded" : "");
-  box.innerHTML =
-    '<button type="button" class="proc-box-head">' +
-    '<span class="pb-ico">💭</span><span class="pb-title">操作过程</span>' +
-    '<span class="pb-meta"></span><span class="pb-caret">▶</span>' +
-    "</button>" +
-    '<div class="proc-box-body"></div>';
-  box.querySelector(".proc-box-head").onclick = () => {
-    box.classList.toggle("folded");
-    updateProcMeta(box);
-  };
-  return box;
-}
-
-function ensureProcBox(t) {
-  if (!t) return curLog();
-  if (!t.procBox || !t.procBox.isConnected) {
-    const box = buildProcBox(false); // 运行中默认展开，看得见过程在往前走
-    curLog().appendChild(box);
-    t.procBox = box.querySelector(".proc-box-body");
-  }
-  return t.procBox;
-}
-
-function ensureThinkEl(t) {
-  if (!t) return null;
-  // 设置里关掉「显示思考过程」：不建元素、不渲染，正文照常流式
-  if (!showThinking) return null;
-  if (!t.thinkEl || !t.thinkEl.isConnected) {
-    const el = document.createElement("div");
-    el.className = "proc-row proc-think folded";
-    el.innerHTML =
-      '<button type="button" class="proc-head">' +
-      '<span class="proc-ico">💭</span><span class="proc-name">思考</span>' +
-      '<span class="proc-meta">思考中…</span><span class="proc-caret">▶</span>' +
-      "</button>" +
-      '<div class="proc-body"><div class="md"></div></div>';
-    bindThinkRow(el);
-    const body = ensureProcBox(t);
-    body.appendChild(el);
-    updateProcMeta(body.parentElement);
-    t.thinkEl = el;
-    t.thinkText = "";
-  }
-  return t.thinkEl;
-}
-
-function appendThinking(txt) {
-  const t = curTab();
-  const el = ensureThinkEl(t);
-  if (!el) return;
-  // 首个思考增量记起点：思考耗时 = 首个增量 → 最后一个增量的跨度
-  if (!t.thinkT0) t.thinkT0 = Date.now();
-  t.thinkT1 = Date.now();
-  t.thinkText += txt;
-  // 元素自持一份摘要数据：历史恢复清空 tab 状态后仍可展开回看
-  el._think = { text: t.thinkText, ms: t.thinkMs || (t.thinkT0 && t.thinkT1 ? t.thinkT1 - t.thinkT0 : 0) };
-  // 节流渲染（同 appendStream 的增量方案）：思考文本往往比正文还长
-  if (!t._thinkRenderTimer) {
-    t._thinkRenderTimer = setTimeout(() => {
-      t._thinkRenderTimer = null;
-      if (!t.thinkEl || !t.thinkText) return;
-      const body = t.thinkEl.querySelector(".proc-body .md");
-      if (!body) return;
-      if (!t._thinkBody) t._thinkBody = initStreamBody(body, false);
-      const text = t.thinkText;
-      t._thinkBody.sealed = renderStreamPart(
-        t._thinkBody, text, t._thinkBody.sealed, streamSealCut(text, t._thinkBody.sealed));
-      updateThinkMeta(t.thinkEl);
-      scrollLog();
-    }, 80);
-  }
-}
-
-function finishThinking(t) {
-  if (!t || !t.thinkEl || !t.thinkText) return;
-  // 补上节流攒下的最后一次渲染（定稿按整文精确重画一次），再更新行头
-  if (t._thinkRenderTimer) {
-    clearTimeout(t._thinkRenderTimer);
-    t._thinkRenderTimer = null;
-    const body = t.thinkEl.querySelector(".proc-body .md");
-    if (body) body.innerHTML = renderMarkdown(t.thinkText);
-  }
-  t._thinkBody = null;
-  t.thinkEl._think = { text: t.thinkText, ms: t.thinkMs || (t.thinkT0 && t.thinkT1 ? t.thinkT1 - t.thinkT0 : 0) };
-  updateThinkMeta(t.thinkEl);
-  // 框头摘要里的「思考 X 秒」跟着定稿值走
-  const box = t.thinkEl.closest(".proc-box");
-  if (box) updateProcMeta(box);
-}
-
-// 历史恢复：同款思考行（默认折叠，点开看全文）
-function addThinkingDone(text, tab, ms) {
-  const t = tab || curTab();
-  if (!text || !showThinking) return null;
-  const el = document.createElement("div");
-  el.className = "proc-row proc-think folded";
-  el.innerHTML =
-    '<button type="button" class="proc-head">' +
-    '<span class="proc-ico">💭</span><span class="proc-name">思考</span>' +
-    '<span class="proc-meta"></span><span class="proc-caret">▶</span>' +
-    "</button>" +
-    '<div class="proc-body"><div class="md"></div></div>';
-  bindThinkRow(el);
-  el.querySelector(".proc-body .md").innerHTML = renderMarkdown(text);
-  el._think = { text, ms: ms || 0 };
-  updateThinkMeta(el);
-  // 历史渲染时收进当轮的过程框（paintHistorySlice 先备好）；实时/其他路径直接进聊天流。
-  // 判存在用 contains 而不是 isConnected：启动时日志还没挂进文档（先 renderHistory
-  // 后 activateTab），isConnected 恒为 false，会把框误判成「不存在」而把行丢到框外
-  const inBox = !!(t && t._histProcBox && t.logEl && t.logEl.contains(t._histProcBox));
-  const host = inBox ? t._histProcBox : curLog();
-  host.appendChild(el);
-  if (inBox) updateProcMeta(t._histProcBox.parentElement);
-  // 历史恢复的思考行是一次性的：随消息渲染后断开流式关联
-  if (t) { t.thinkEl = null; t.thinkText = ""; t.thinkMs = 0; }
-  return el;
-}
-
-// 历史渲染的过程框：连续的思考行/中间说明收进同一个虚线框，遇到回答或用户消息收口。
-// 用 tab.logEl.contains 判断框是否还在本栏（不能用 isConnected：启动时日志尚未挂进
-// 文档，isConnected 恒为 false，会一条消息开一个新框、行全掉到框外）
-function histProcBox(tab) {
-  if (!tab) return null;
-  if (!tab._histProcBox || !tab.logEl || !tab.logEl.contains(tab._histProcBox)) {
-    const box = buildProcBox(true); // 历史默认收起，框头一行摘要就能看完
-    curLog().appendChild(box);
-    tab._histProcBox = box.querySelector(".proc-box-body");
-  }
-  return tab._histProcBox;
 }
 
 function finishAssistant(rtMeta, seq, sources) {
@@ -5920,7 +5770,10 @@ function handleEvent(kind, data) {
       // 其他窗口 / 手机端发来的用户消息：轮次事件只发往发起连接，本连接
       // 不会经过 send() 的本地渲染路径，没有这条气泡就会「只见回复不见人话」。
       // 服务端已按连接排除发送方，这里不会与本地气泡重复。
-      const t = tabFor(data.session_id);
+      // 分屏列优先（接力副屏常开在分屏里）：只查 tabFor 会把副屏那一屏的
+      // 交接指令整条丢掉，用户只看到工具在跑、看不到这一轮的任务说明。
+      const t = tabFor(data.session_id)
+        || splitPanes.find((p) => p.sid === data.session_id);
       if (t && (data.text || (data.images || []).length)) {
         withTab(t, () => addUser(data.text || "", data.images));
         const el = t.logEl.lastElementChild;
@@ -8675,6 +8528,10 @@ async function renderTrustState() {
 // ---------- 用量统计（设置页  仪表盘布局：统计磁贴 / Token 活动柱状图 / 模型用量环形图 / 会话排行） ----------
 let usageRangeDays = 14; // 范围 tabs 记忆在本窗口内
 let usageChartType = "bar"; // 图表类型：bar=柱状（默认）| line=折线；偏好存 ui.json 的 usage_chart
+// 统计口径：all=全部项目 + 快聊（默认）| project=仅当前项目；偏好存 ui.json 的 usage_scope。
+// 默认「全部」是刻意的：用量页是「我花了多少 tokens」的个人报表，只看当前项目时，
+// 新建/刚打开的项目里还没有会话，整页会显示 0（而下方「今日已用」是全局口径）。
+let usageScope = "all";
 
 function usageFmtTokens(n) {
   n = n || 0;
@@ -8691,6 +8548,29 @@ function usageFmtDuration(seconds) {
   if (min < 60) return `${min} 分钟`;
   const h = Math.floor(min / 60);
   return `${h} 小时 ${min % 60} 分`;
+}
+
+// 统计口径：按钮状态与口径说明按后端「实际生效」的 scope 回填（远端连接会被
+// 收敛成项目口径），别让按钮显示的和数字算的不是一回事
+function renderUsageScope(r) {
+  const tabs = document.getElementById("usage-scope-tabs");
+  if (!tabs) return;
+  const hasProject = !!(r && r.project_name);
+  const scope = (r && r.scope) || usageScope;
+  tabs.querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.scope === scope);
+    if (b.dataset.scope === "project") {
+      b.disabled = !hasProject;
+      b.title = hasProject ? `只看当前项目「${r.project_name}」` : "当前没有打开的项目";
+    }
+  });
+  const note = document.getElementById("usage-scope-note");
+  if (note) {
+    note.hidden = false;
+    note.textContent = scope === "project"
+      ? `统计口径：仅当前项目「${(r && r.project_name) || ""}」（切到「全部」可看含快聊在内的总用量）`
+      : "统计口径：全部项目 + 快聊（跨项目合计；「今日已用」与预算是全局口径）";
+  }
 }
 
 function usageTiles(r) {
@@ -8847,7 +8727,10 @@ function renderUsageBudget(r) {
 
 async function loadUsage() {
   try {
-    const r = await request("usage.stats", { days: usageRangeDays });
+    const r = await request("usage.stats", { days: usageRangeDays, scope: usageScope });
+    // 后端可能把口径收敛（远端连接 / 没有打开项目）——以实际生效的为准
+    if (r.scope === "all" || r.scope === "project") usageScope = r.scope;
+    renderUsageScope(r);
     document.getElementById("usage-tiles").innerHTML = usageTiles(r);
     renderUsageBudget(r);
     // 空态不要撑出 220px 的死空间：有记录才保留图表高度
@@ -8885,6 +8768,15 @@ document.querySelectorAll("#usage-range-tabs button").forEach((b) => {
   b.onclick = () => {
     usageRangeDays = Number(b.dataset.days) || 14;
     document.querySelectorAll("#usage-range-tabs button").forEach((x) => x.classList.toggle("active", x === b));
+    loadUsage();
+  };
+});
+// 统计口径切换（全部 / 本项目）：落 ui.json 偏好，重拉整页（含协作成本）
+document.querySelectorAll("#usage-scope-tabs button").forEach((b) => {
+  b.onclick = () => {
+    usageScope = b.dataset.scope === "project" ? "project" : "all";
+    document.querySelectorAll("#usage-scope-tabs button").forEach((x) => x.classList.toggle("active", x === b));
+    saveUiPrefs({ usage_scope: usageScope });
     loadUsage();
   };
 });
@@ -8933,7 +8825,7 @@ async function loadUsageCollab() {
   const el = document.getElementById("usage-collab");
   if (!el) return;
   try {
-    const r = await request("usage.collab_report", { days: 30 });
+    const r = await request("usage.collab_report", { days: 30, scope: usageScope });
     const hasPrice = !!r.has_price;
     el.innerHTML = usageCollabGroup("今日", r.today || {}, hasPrice) +
       usageCollabGroup(`近 ${r.days || 30} 天`, r.forms || {}, hasPrice);
@@ -11834,6 +11726,8 @@ function attachHistoryOps(tab) {
   tab.logEl.querySelectorAll(".msg.user[data-seq]").forEach((el) => {
     // 系统补记不是用户说的话：只保留内容，不给编辑重发/引用类入口
     if (el.dataset.systemNote === "1") return;
+    // 工具截图回填的伪 user 消息同理：编辑重发会把截图说明当成用户输入回填
+    if (el.classList.contains("screenshot-note")) return;
     attachMsgOps(el, tab, "user");
   });
 }
@@ -13044,7 +12938,7 @@ function showHelp() {
       彻底退出期间错过的任务会在下次打开时补跑。想让它常驻，可在 设置  高级 打开「开机自动启动」。</div>
       <div class="faq-q">Agent 老是先停下来问我？</div>
       <div class="faq-a">它会先出计划／只做了只读调研时，多半是任务太模糊。把目标、文件、验证方式写清楚；
-      或在 设置  高级 里把「最多执行轮数」调大（默认 40）。</div>
+      或在 设置  高级 里把「最大执行轮数」设为 0（不限制）。</div>
       <div class="faq-q">误删了会话 / 数据不对劲？</div>
       <div class="faq-a">设置  关于 →「会话库备份」里可以恢复到一个较早的版本；
       同一页还能导出诊断包发给开发者排障。</div>
@@ -16920,6 +16814,10 @@ async function initUiPrefs() {
   usageChartType = prefs.usage_chart === "line" ? "line" : "bar";
   document.querySelectorAll("#usage-chart-tabs button").forEach((x) =>
     x.classList.toggle("active", x.dataset.chart === usageChartType));
+  // 用量页统计口径（all=全部项目 + 快聊默认 | project=仅当前项目）
+  usageScope = prefs.usage_scope === "project" ? "project" : "all";
+  document.querySelectorAll("#usage-scope-tabs button").forEach((x) =>
+    x.classList.toggle("active", x.dataset.scope === usageScope));
   // 组内会话的自定义拖动序（分组视图）：渲染前先填好缓存
   sessionOrderPrefs = (prefs.session_order && typeof prefs.session_order === "object")
     ? prefs.session_order : {};

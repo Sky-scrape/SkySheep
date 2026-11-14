@@ -982,14 +982,17 @@ class TeamOrchestrator:
             )
         self.rounds_used += 1
 
-        # 唤醒上下文：人设（系统提示词）+ 频道未读裁剪 + 名下工单，仅此三样
-        wake_prompt = self._build_wake_prompt(rt)
-        self.channel.mark_read(member_name)
-
+        # 唤醒上下文：人设（系统提示词）+ 频道未读裁剪 + 名下工单，仅此三样。
+        # 本轮工具能力要先算好再写进提示词：顾问型成员（无工具）必须被告知
+        # 「不能写文件/跑命令」，否则被 @ 点名干活时会编造「已创建文件并运行
+        # 通过」的执行报告（2026-11-12 真实模型走查）。
         exec_mode = bool(
             self.board.active_exec_tasks(member_name)
             and self._registry is not None and self._gate is not None
         )
+        wake_prompt = self._build_wake_prompt(rt, exec_mode)
+        self.channel.mark_read(member_name)
+
         agent = self._ensure_agent(rt, exec_mode)
         if agent is None:
             # Provider 构建失败（缺 Key 等）：失败隔离，错误注记留在频道里
@@ -1144,8 +1147,21 @@ class TeamOrchestrator:
             return f"- Persona: {persona}"
         return "- Persona:（未特别设定，尽职协作即可）"
 
-    def _build_wake_prompt(self, rt: _MemberRuntime) -> str:
-        """唤醒消息：频道未读（裁剪）+ 名下工单。绝不注入他人 history 或会话历史。"""
+    def _build_wake_prompt(
+        self, rt: _MemberRuntime, exec_mode: bool | None = None,
+    ) -> str:
+        """唤醒消息：频道未读（裁剪）+ 名下工单 + 本轮能力边界。
+
+        exec_mode 是「本轮是否挂了工作区工具表」：None 时按名下有进行中的
+        执行型工单推定（与 _run_member 同一判据）。顾问型/规划模式必须在
+        提示词里显式声明没有执行能力——否则模型会把「已创建文件、运行通过」
+        这类没发生的动作写进报告（真实模型走查发现）。
+        """
+        if exec_mode is None:
+            exec_mode = bool(
+                self.board.active_exec_tasks(rt.spec.name)
+                and self._registry is not None and self._gate is not None
+            )
         unread = self.channel.render_unread(rt.spec.name)
         sections: list[str] = []
         if unread:
@@ -1174,6 +1190,28 @@ class TeamOrchestrator:
             )
         if not sections:
             sections.append("（总管唤醒你：暂无新的频道消息与工单，请简短应答。）")
+        # 本轮能力边界：把「有没有工具」写成硬约束，压掉编造执行报告的诱因。
+        # 规划模式下即使名下是执行型工单，Agent 也只挂了只读表（见 _ensure_agent）。
+        if self.plan_mode:
+            sections.append(
+                "【本轮能力边界】当前处于规划模式：你只有只读工具，不能写入文件、"
+                "不能执行命令。不要声称已修改文件或已执行命令；请给出计划与待办，"
+                "由实际执行轮落地。"
+            )
+        elif exec_mode:
+            sections.append(
+                "【本轮能力边界】你名下有进行中的执行型工单，可以调用工作区工具"
+                "动手完成；写入与命令仍受权限门约束（用户可能逐次确认，被拒绝时"
+                "如实汇报原因）。只报告实际调用工具完成的结果，不要声称做了"
+                "没有发生的改动。"
+            )
+        else:
+            sections.append(
+                "【本轮能力边界】你本轮是纯文本顾问模式：没有挂载任何文件读写、"
+                "命令执行或联网工具。严禁声称「已创建/已修改文件」「已执行命令」"
+                "或「运行验证通过」——这些动作本轮做不到。需要落地时：给出完整"
+                "代码/步骤供用户采用，或请总管为用户登记执行型工单并派给执行成员。"
+            )
         sections.append(
             "请基于以上信息行动：有进行中的执行型工单就动手完成并汇报；"
             "被点名提问就直接回答。你的这条回复会作为报告发到团队频道。"

@@ -7,9 +7,24 @@ user_message 广播给除发起连接之外的所有在线前端（发起连接�
 按连接对象身份排除，避免重复）。
 """
 
+from conftest import read_app_bundle
 from test_server import make_client, recv_until
 
 from skysheep.messages import TextBlock
+
+
+def test_user_message_handler_renders_into_split_panes():
+    """分屏列（接力副屏）也要收到 user_message 气泡：只查 tabFor 会整条丢掉。
+
+    接力交接的 brief 是 relay worker 调 send() 时广播的 user_message；副屏通常
+    开在分屏列而不是主标签栏，旧实现只 tabFor 找不到接收方，副屏界面就只剩
+    工具在跑、看不到这一轮的任务说明（2026-11-14 用户实例）。
+    """
+    js = read_app_bundle()
+    start = js.index('case "user_message":')
+    end = js.index('case "cron_updated":', start)
+    seg = js[start:end]
+    assert "splitPanes.find" in seg
 
 
 def test_user_message_reaches_other_clients_not_sender(home):

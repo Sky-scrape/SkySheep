@@ -236,6 +236,18 @@ async def test_max_iterations_stops(tmp_path):
     assert events[-1].iterations == 3
 
 
+async def test_max_iterations_zero_means_unlimited(tmp_path):
+    """max_iterations=0（默认）= 不限制：工具循环一直跑到模型自己收尾。"""
+    tu = [ToolUseBlock(id="loop", name="list_dir", input={})]
+    provider = FakeProvider([tu, tu, tu, [TextBlock(text="完成")]])
+    agent = make_agent(provider, tmp_path, max_iterations=0)
+    events = await collect(agent, "loop", auto_respond=None)
+
+    assert events[-1].kind == "turn_finished"
+    assert events[-1].stop_reason == "end_turn"
+    assert events[-1].iterations == 4
+
+
 # ---- M12：取消路径的三处收尾 ----
 
 

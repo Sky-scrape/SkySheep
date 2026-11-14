@@ -937,6 +937,8 @@ function renderRunCenter(d) {
 function fmtCronSchedule(t) {
   if (t.schedule_type === "interval") return `每 ${t.interval_minutes} 分钟`;
   if (t.schedule_type === "daily") return `每天 ${t.time_of_day}`;
+  if (t.schedule_type === "workdays") return `工作日 ${t.time_of_day}`;
+  if (t.schedule_type === "cron") return `Cron：${t.time_of_day}`;
   const days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
   return `每周${days[t.weekday] || "?"} ${t.time_of_day}`;
 }
@@ -1155,7 +1157,9 @@ async function cronModal(existing) {
       <select id="cron-type" class="modal-input cron-select">
         <option value="interval" ${t.schedule_type === "interval" ? "selected" : ""}>每隔 N 分钟</option>
         <option value="daily" ${t.schedule_type === "daily" ? "selected" : ""}>每天固定时间</option>
+        <option value="workdays" ${t.schedule_type === "workdays" ? "selected" : ""}>工作日每天（周一至周五）</option>
         <option value="weekly" ${t.schedule_type === "weekly" ? "selected" : ""}>每周固定时间</option>
+        <option value="cron" ${t.schedule_type === "cron" ? "selected" : ""}>Cron 表达式（高级）</option>
       </select>
       <div id="cron-interval-wrap">
         <label>间隔（分钟）</label>
@@ -1168,6 +1172,15 @@ async function cronModal(existing) {
         <select id="cron-weekday" class="modal-input cron-select">
           ${days.map((d, i) => `<option value="${i}" ${t.weekday === i ? "selected" : ""}>${d}</option>`).join("")}
         </select>
+      </div>
+      <div id="cron-cron-wrap" class="hidden">
+        <label>Cron 表达式（分 时 日 月 周）</label>
+        <input id="cron-expr" class="modal-input" type="text" spellcheck="false"
+               placeholder="0 9 * * 1-5" value="${escapeHtml(t.schedule_type === "cron" ? t.time_of_day : "0 9 * * 1-5")}">
+        <p class="dim small">支持 <code>*</code>、单值、范围 <code>1-5</code>、列表 <code>1,3,5</code>、
+          步长 <code>*/15</code>；周字段 0 与 7 都表示周日，日与周同时受限时取「或」。
+          例：<code>0 9 * * 1-5</code> 工作日 9 点；<code>30 18 1 * *</code> 每月 1 号 18:30。
+          Cron 任务只在应用内调度，不能导出为系统计划任务。</p>
       </div>
       <label>预授权工具（无人值守运行时自动放行；不勾的会被自动拒绝）</label>
       <div class="cron-tools">${toolRows}</div>
@@ -1186,7 +1199,10 @@ async function cronModal(existing) {
   const syncType = () => {
     const v = box.querySelector("#cron-type").value;
     box.querySelector("#cron-interval-wrap").classList.toggle("hidden", v !== "interval");
-    box.querySelector("#cron-time-wrap").classList.toggle("hidden", v === "interval");
+    // Cron 表达式自己一个输入框；HH:MM 只给每天/工作日/每周
+    box.querySelector("#cron-time-wrap").classList.toggle(
+      "hidden", v === "interval" || v === "cron");
+    box.querySelector("#cron-cron-wrap").classList.toggle("hidden", v !== "cron");
     const wd = box.querySelector("#cron-weekday");
     box.querySelector("#cron-weekday-label").style.display = v === "weekly" ? "" : "none";
     wd.style.display = v === "weekly" ? "" : "none";
@@ -1255,6 +1271,10 @@ async function cronModal(existing) {
     const prompt = box.querySelector("#cron-prompt").value.trim();
     if (!prompt) throw new Error("任务指令不能为空");
     const stype = box.querySelector("#cron-type").value;
+    const cronExpr = box.querySelector("#cron-expr").value.trim();
+    if (stype === "cron" && !cronExpr) {
+      throw new Error("请填写 Cron 表达式（5 段：分 时 日 月 周）");
+    }
     const mode = box.querySelector("#cron-mode").value;
     if (mode === "team" && !box.querySelector("#cron-template").value) {
       throw new Error("团队任务必须选择团队模板（先在会话里建队并另存为模板）");
@@ -1266,7 +1286,10 @@ async function cronModal(existing) {
       prompt,
       schedule_type: stype,
       interval_minutes: Number(box.querySelector("#cron-interval").value) || 60,
-      time_of_day: box.querySelector("#cron-time").value || "09:00",
+      // cron 表达式复用 time_of_day 列（纯文本列，无需加列迁移）
+      time_of_day: stype === "cron"
+        ? cronExpr
+        : (box.querySelector("#cron-time").value || "09:00"),
       weekday: Number(box.querySelector("#cron-weekday").value) || 0,
       allowed_tools: picked,
       notify_channel: box.querySelector("#cron-notify").checked,

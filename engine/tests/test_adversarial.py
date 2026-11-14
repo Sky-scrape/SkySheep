@@ -219,6 +219,61 @@ async def test_finder_failure_is_error():
 
 
 @pytest.mark.asyncio
+async def test_finder_auth_failure_retries_with_fallback():
+    """发现者鉴权失败时换替补服务重试一次（坏 Key 配置不再判死整场）。"""
+    class Unauthorized(Provider):
+        name, model = "bad", "b1"
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            raise RuntimeError("401 Unauthorized: invalid api key")
+            yield  # pragma: no cover
+
+    backup = FakeProvider([[TextBlock(text=FINDER_JSON)]])
+    backup.name = "backup"
+    events, emit = collector()
+    outcome = await run_adversarial(
+        finder=make_member(Unauthorized()),
+        investigator=make_member(FakeProvider([[TextBlock(text=INVESTIGATOR_JSON)]])),
+        advisor=make_member(FakeProvider([[TextBlock(text=ADVISOR_JSON)]])),
+        judge=FakeProvider([[TextBlock(text=JUDGE_REPORT)]]),
+        history=[], user_text="目标", timeout_s=30, emit=emit,
+        finder_fallbacks=[make_member(backup)],
+    )
+    assert outcome.status == "done", outcome.error
+    assert len(outcome.findings) == 3
+    assert len(backup.calls) == 1
+    notices = [e.message for e in events if e.kind == "notice"]
+    assert any("自动换用 backup" in m for m in notices)
+    assert any("发现者已换用 backup" in m for m in notices)
+
+
+@pytest.mark.asyncio
+async def test_finder_format_failure_does_not_retry_fallback():
+    """JSON/格式类失败换模型大概率重演：不消耗替补，直接按失败隔离。"""
+    class BadFormat(Provider):
+        name, model = "badfmt", "b1"
+
+        async def stream(self, messages, tool_schemas, effort=None):
+            raise RuntimeError("model refused to answer")
+            yield  # pragma: no cover
+
+    backup = FakeProvider([[TextBlock(text=FINDER_JSON)]])
+    backup.name = "backup"
+    events, emit = collector()
+    outcome = await run_adversarial(
+        finder=make_member(BadFormat()),
+        investigator=make_member(FakeProvider([[TextBlock(text="{}")]])),
+        advisor=None,
+        judge=FakeProvider([[TextBlock(text="报告")]]),
+        history=[], user_text="目标", timeout_s=30, emit=emit,
+        finder_fallbacks=[make_member(backup)],
+    )
+    assert outcome.status == "error"
+    assert "发现阶段失败" in outcome.error
+    assert backup.calls == []
+
+
+@pytest.mark.asyncio
 async def test_investigator_failure_marks_pending():
     class Boom(Provider):
         name, model = "boom", "b1"

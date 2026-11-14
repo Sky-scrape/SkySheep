@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from ...bgtasks import spawn_bg
 from ...channels.cards import task_finish_card
 from ...channels.manager import _fmt_dur
-from ...core import system_schedule
+from ...core import cron_expr, system_schedule
 from ...core.collab_templates import is_builtin_template_name
 from ...core.review import review_output
 from ...core.run_ledger import (
@@ -1389,8 +1389,9 @@ class AutomationMixin:
         if not prompt:
             raise RuntimeError("任务指令不能为空")
         stype = str(params.get("schedule_type", "interval"))
-        if stype not in ("interval", "daily", "weekly"):
-            raise RuntimeError("schedule_type 只支持 interval / daily / weekly")
+        if stype not in ("interval", "daily", "weekly", "workdays", "cron"):
+            raise RuntimeError(
+                "schedule_type 只支持 interval / daily / weekly / workdays / cron")
         # 任务形态（定时团队，团队模式设计 §14）：agent = 单会话（既有行为）；
         # team = 到点按团队模板建队、AI 总管自动闭环。只收模板引用不收内联名册。
         mode = str(params.get("mode") or "agent").strip() or "agent"
@@ -1412,7 +1413,11 @@ class AutomationMixin:
         if problem:
             raise RuntimeError(problem)
         tod = str(params.get("time_of_day") or "").strip()
-        if tod:
+        if stype == "cron":
+            problem = cron_expr.validate(tod)
+            if problem:
+                raise RuntimeError("Cron 表达式不合法：" + problem)
+        elif tod:
             try:
                 tod = system_schedule.normalize_time_of_day(tod)
             except ValueError as e:
@@ -1473,8 +1478,9 @@ class AutomationMixin:
             kw["prompt"] = str(params["prompt"]).strip()
         if params.get("schedule_type") is not None:
             stype = str(params["schedule_type"])
-            if stype not in ("interval", "daily", "weekly"):
-                raise RuntimeError("schedule_type 只支持 interval / daily / weekly")
+            if stype not in ("interval", "daily", "weekly", "workdays", "cron"):
+                raise RuntimeError(
+                    "schedule_type 只支持 interval / daily / weekly / workdays / cron")
             kw["schedule_type"] = stype
         if params.get("interval_minutes") is not None:
             interval = max(1, int(params["interval_minutes"]))
@@ -1484,12 +1490,21 @@ class AutomationMixin:
             kw["interval_minutes"] = interval
         if params.get("time_of_day") is not None:
             tod = str(params["time_of_day"]).strip()
-            if tod:
+            effective_type = kw.get("schedule_type", task["schedule_type"])
+            if effective_type == "cron":
+                problem = cron_expr.validate(tod)
+                if problem:
+                    raise RuntimeError("Cron 表达式不合法：" + problem)
+            elif tod:
                 try:
                     tod = system_schedule.normalize_time_of_day(tod)
                 except ValueError as e:
                     raise RuntimeError(str(e)) from None
             kw["time_of_day"] = tod
+        elif kw.get("schedule_type") == "cron" and task["schedule_type"] != "cron":
+            # 从每天/每周改成 cron 时必须同时给表达式：旧 time_of_day 是 HH:MM，
+            # 不能悄悄当表达式用（"09:00" 也不是 5 段格式）
+            raise RuntimeError("改成 Cron 调度时必须在 time_of_day 里给出 5 段表达式")
         if params.get("weekday") is not None:
             kw["weekday"] = int(params["weekday"])
         if params.get("allowed_tools") is not None:
@@ -2027,6 +2042,8 @@ class AutomationMixin:
         wd = int(raw_wd) if raw_wd is not None else -1
         if stype == "interval":
             args += ["/SC", "MINUTE", "/MO", str(max(1, int(task.get("interval_minutes") or 1)))]
+        elif stype == "workdays":
+            args += ["/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI", "/ST", tod]
         elif stype == "weekly" and 0 <= wd <= 6:
             args += ["/SC", "WEEKLY", "/D", cls.SCHTASK_WEEKDAYS[wd], "/ST", tod]
         else:
@@ -2077,6 +2094,12 @@ class AutomationMixin:
                 return {"exported": False, "task_name": self.SCHTASK_TASK_PREFIX + str(tid),
                         "notice": "每周任务没有选择有效的星期几，无法导出为系统计划任务："
                                   "请在任务设置里选好星期几后再导出"}
+        if str(task.get("schedule_type") or "") == "cron":
+            # 任意 5 段表达式映射不到 schtasks 参数面：拒绝导出而不是降级成
+            # 每天（频次可能放大数倍，无人值守下是安全面）
+            return {"exported": False, "task_name": self.SCHTASK_TASK_PREFIX + str(tid),
+                    "notice": "Cron 表达式任务只在应用内调度，无法导出为系统计划任务；"
+                              "需要系统级执行请改用「每天 / 每周 / 工作日」"}
         task_name = self.SCHTASK_TASK_PREFIX + str(tid)
         rc, out = await self._schtasks()(
             *self._schtasks_create_args(task_name, entry, tid, task))

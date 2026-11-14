@@ -14,6 +14,8 @@ let relayDualSaveTimer = null; // 任务编辑的防抖保存
 let relayDualSyncTimer = null; // 切会话时的面板刷新防抖
 let relayDualLoading = null;   // 正在进行的 dual_open（并发入口合流）
 let relayDualSeq = 0;
+let relayTurnOpen = new Set(); // 展开了「详细内容」的轮次号（重渲染后保持）
+let relayTurnOpenPair = null;  // 上面那组展开状态属于哪个 pair
 
 const RELAY_SIDE_LABEL = { main: "主屏", peer: "副屏" };
 const RELAY_STATE_LABEL = {
@@ -151,12 +153,35 @@ function relayDualFillInputs() {
   }
 }
 
-function relayDualTurnPreview(turn) {
+function relayPlainSummary(text, limit = 96) {
+  /* 把一轮产出的 Markdown 压成一行干净摘要：去掉标题井号/强调/表格边线/
+     列表符号，取第一句；首句太短（如「完成：」）退回整段。 */
+  let s = String(text || "");
+  s = s.replace(/```[\s\S]*?```/g, " ");
+  s = s.replace(/`([^`\n]*)`/g, "$1");
+  s = s.replace(/!\[[^\]]*\]\([^)]*\)/g, " ");
+  s = s.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+  s = s.replace(/^\s{0,3}#{1,6}\s*/gm, "");
+  s = s.replace(/^\s*[-:| ]{3,}\s*$/gm, " ");
+  s = s.replace(/^\s*\|/gm, " ").replace(/\|\s*$/gm, " ");
+  s = s.replace(/^\s*>\s?/gm, "");
+  s = s.replace(/^\s*[-*+]\s+/gm, "");
+  s = s.replace(/^\s*\d+[.)]\s+/gm, "");
+  s = s.replace(/\*\*|__|~~/g, "");
+  s = s.replace(/[*_]/g, "");
+  s = s.replace(/\s+/g, " ").trim();
+  s = s.replace(/^[\s·•\-—]+/, "");
+  const first = s.match(/^[^。！？!?]*[。！？!?]/);
+  const sentence = first ? first[0].trim() : "";
+  const out = sentence.length >= 12 ? sentence : s;
+  return out.length > limit ? out.slice(0, limit) + "…" : out;
+}
+
+function relayDualTurnSummary(turn) {
   if (turn.status === "running") return "正在执行…";
   if (turn.status === "cancelled") return "已中断";
-  if (turn.status === "error") return (turn.error || "执行失败").slice(0, 120);
-  const text = (turn.output || "").trim().replace(/\s+/g, " ");
-  return text ? text.slice(0, 120) + (text.length > 120 ? "…" : "") : "（没有产出文本）";
+  if (turn.status === "error") return relayPlainSummary(turn.error || "执行失败", 120);
+  return relayPlainSummary(turn.output || "") || "（没有产出文本）";
 }
 
 function relayDualRenderTurns() {
@@ -165,6 +190,11 @@ function relayDualRenderTurns() {
   if (!box) return;
   while (box.firstChild) box.removeChild(box.firstChild);
   const turns = (relayDual && relayDual.turns) || [];
+  const pid = relayDual && relayDual.pair ? relayDual.pair.id : "";
+  if (relayTurnOpenPair !== pid) {
+    relayTurnOpenPair = pid;
+    relayTurnOpen.clear();
+  }
   if (count) count.textContent = turns.length ? `共 ${turns.length} 轮` : "";
   if (!turns.length) {
     const p = document.createElement("p");
@@ -203,12 +233,33 @@ function relayDualRenderTurns() {
     } else {
       head.appendChild(state);
     }
-    const body = document.createElement("p");
-    body.className = "relay-turn-text";
-    body.textContent = relayDualTurnPreview(turn);
-    if (turn.output) row.title = turn.output;
+    const summary = document.createElement("p");
+    summary.className = "relay-turn-summary" + (turn.status === "error" ? " err" : "");
+    const summaryText = relayDualTurnSummary(turn);
+    summary.textContent = summaryText;
+    summary.title = summaryText;
     row.appendChild(head);
-    row.appendChild(body);
+    row.appendChild(summary);
+    // 详细内容：完整产出（Markdown 照常渲染），默认收起，点开再看；
+    // 展开状态按轮次号记住，轮次刷新重渲染后不会把它折回去。
+    const fullText = String(turn.output || "").trim();
+    if (fullText) {
+      const det = document.createElement("details");
+      det.className = "relay-turn-detail";
+      const cap = document.createElement("summary");
+      cap.textContent = `详细内容（${fullText.length.toLocaleString()} 字）`;
+      const full = document.createElement("div");
+      full.className = "md relay-turn-full";
+      full.innerHTML = renderMarkdown(fullText);
+      det.appendChild(cap);
+      det.appendChild(full);
+      if (relayTurnOpen.has(turn.turn_no)) det.open = true;
+      det.addEventListener("toggle", () => {
+        if (det.open) relayTurnOpen.add(turn.turn_no);
+        else relayTurnOpen.delete(turn.turn_no);
+      });
+      row.appendChild(det);
+    }
     box.appendChild(row);
   });
 }
@@ -327,6 +378,7 @@ async function relayDualRun() {
   if (relayDualPairId) params.pair_id = relayDualPairId;
   relayDualBusy = true;
   relayDualRender();
+  let runError = "";
   try {
     const data = await request("relay.dual_run", params);
     relayDual = {
@@ -341,10 +393,13 @@ async function relayDualRun() {
     if (data.peer) await relayDualShowPeer(data.peer);
     relayStatus(`已交给${RELAY_SIDE_LABEL[data.pair.current_side] || "主屏"}执行…`);
   } catch (error) {
-    relayStatus("执行失败：" + error.message);
+    // 先记下来：finally 里的 render 会按 pair 状态重写状态行，把错误信息
+    // 覆盖成「已暂停：…」，用户看到的就是「点执行毫无反应」
+    runError = error.message;
   } finally {
     relayDualBusy = false;
     relayDualRender();
+    if (runError) relayStatus("执行失败：" + runError);
   }
 }
 

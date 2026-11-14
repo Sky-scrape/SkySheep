@@ -181,7 +181,7 @@ def test_load_config_unaffected_by_hooks(home):
     """hooks 是 config.toml 的额外表，不该让 load_config 解析失败。"""
     set_hooks_in_config(pre=[{"match": "*", "command": "a.bat"}])
     cfg = load_config()
-    assert cfg.max_iterations >= 1
+    assert 0 <= cfg.max_iterations <= 200
 
 
 # ---------------------------------------------------------------- stop / 启停 / 测试器

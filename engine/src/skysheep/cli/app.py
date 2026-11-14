@@ -1552,7 +1552,7 @@ def main(argv: list[str] | None = None) -> None:
                             "stream=NDJSON 事件流（每行一个事件、末行 kind=result，"
                             "协议见 docs/无头运行协议.md）")
     p_run.add_argument("--max-iterations", type=int, default=0,
-                       help="最大工具调用轮数（缺省用 config.toml 的 max_iterations）")
+                       help="最大工具调用轮数（0 = 不限制；缺省用 config.toml 的 max_iterations）")
     p_run.add_argument(
         "--trust-project", action="store_true",
         help="信任该项目自带的 .skysheep/ 配置（启用其 mcp.json 与项目级技能）；"

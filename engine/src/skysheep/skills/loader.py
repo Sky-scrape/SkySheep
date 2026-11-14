@@ -265,7 +265,7 @@ class SkillLoader:
             try:
                 data = json.loads(self.state_path.read_text(encoding="utf-8"))
                 disabled = set(data.get("disabled", []))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
                 pass
         for name, skill in self._skills.items():
             skill.enabled = name not in disabled
@@ -317,7 +317,7 @@ class SkillLoader:
             return {}
         try:
             data = json.loads(self.scope_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return {}
         raw = data.get("scopes") if isinstance(data, dict) else None
         if not isinstance(raw, dict):

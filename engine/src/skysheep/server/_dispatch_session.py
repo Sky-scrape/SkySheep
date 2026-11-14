@@ -335,12 +335,13 @@ async def _h_term_close(backend: ServerBackend, params: dict, emit, local: bool)
 
 
 async def _h_usage_stats(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
-    return await backend.usage_stats(params)
+    # local 决定 scope=all 是否生效：远端只认项目口径（B14：会话标题不跨项目）
+    return await backend.usage_stats(params, local=local)
 
 
 async def _h_usage_collab_report(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 只读报表：与 usage.stats 同姿态，远端照常可查（按项目口径收敛）
-    return await backend.usage_collab_report(params)
+    return await backend.usage_collab_report(params, local=local)
 
 
 async def _h_usage_pricing_set(backend: ServerBackend, params: dict, emit, local: bool) -> dict:

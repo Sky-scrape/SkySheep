@@ -9,6 +9,9 @@ def test_default_is_serial_draft_not_execution():
     cfg = RelayConfig()
     assert set(cfg.slots) == {"A", "B"}
     assert all(s.execution_mode == "propose" and not s.capabilities for s in cfg.slots.values())
+    # 默认不设护栏：轮次与 token 预算都是 0 = 不限制，显式配正值才生效
+    assert cfg.workflow.max_steps == 0
+    assert cfg.workflow.token_budget == 0
     assert RelayConfig.model_validate(cfg.model_dump()) == cfg
 
 

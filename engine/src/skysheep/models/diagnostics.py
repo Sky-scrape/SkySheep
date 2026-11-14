@@ -168,23 +168,30 @@ def _status_of(e: Exception) -> int | None:
     return status
 
 
+def classify_error_text(text: str, status: int | None = None) -> str:
+    """按错误文本（及可选状态码）归类，返回 ERROR_CATEGORIES 的类别名。
+
+    给「只拿得到错误字符串、拿不到异常对象」的路径用（协作成员/对抗角色的
+    失败是字符串回传的）：自动挑模型时要据此认出鉴权/网络类失败，避免
+    把替补模型也送到同一个坏服务上。
+    """
+    low = str(text or "").lower()
+    for cat, codes, markers in ERROR_CATEGORIES:
+        if status is not None and status in codes:
+            return cat
+        if any(m in low for m in markers):
+            return cat
+    if status == 404:
+        return "model_missing"
+    return "unknown"
+
+
 def diagnose_error(e: Exception) -> ErrorDiagnosis:
     """把上游异常分类并给出中文建议。永不抛异常。"""
     from ..core.provider_errors import is_transient_error
 
     status = _status_of(e)
-    text = str(e).lower()
-    category = "unknown"
-    for cat, codes, markers in ERROR_CATEGORIES:
-        if status is not None and status in codes:
-            category = cat
-            break
-        if any(m in text for m in markers):
-            category = cat
-            break
-    # 404 且文本没命中的兜底：测试连接最常见的"地址不对"
-    if category == "unknown" and status == 404:
-        category = "model_missing"
+    category = classify_error_text(str(e), status)
     title, advice = ADVICE.get(category, ADVICE["unknown"])
     return ErrorDiagnosis(
         category=category,
@@ -728,6 +735,23 @@ class HealthRegistry:
             title=diag.title,
             advice=diag.advice,
             error=str(getattr(diag, "status_code", "") or "") + " " + diag.title,
+            checked_at=time.time(),
+        )
+        self._health[name] = h
+        self._recent_errors[name] = time.time()
+        return h
+
+    def record_text_error(self, name: str, text: str) -> ProviderHealth:
+        """只拿得到错误字符串时的入口（协作成员/对抗角色的失败是字符串回传）。"""
+        category = classify_error_text(text)
+        title, advice = ADVICE.get(category, ADVICE["unknown"])
+        h = ProviderHealth(
+            name=name,
+            level="warn" if category in ("rate_limit", "balance") else "down",
+            category=category,
+            title=title,
+            advice=advice,
+            error=str(text or "")[:200],
             checked_at=time.time(),
         )
         self._health[name] = h

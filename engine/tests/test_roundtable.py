@@ -1285,3 +1285,44 @@ def test_roundtable_releases_member_providers_on_cancel(home):
                 break
             _time.sleep(0.02)
     assert member.closed == 1, "取消路径未释放成员 provider"
+
+
+# ---------- 协作轮的文件预读（纯文本成员「提到就带上」） ----------
+
+def test_preload_mentioned_files_reads_project_files(home):
+    """成员没有文件工具：用户点名的项目内文件由后端只读预取进本轮输入。"""
+    be = ServerBackend(working_dir=home / "proj")
+    src = home / "proj" / "src"
+    src.mkdir()
+    (src / "config.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (home / "proj" / "README.md").write_text("说明\n", encoding="utf-8")
+
+    section = be._preload_mentioned_files(
+        "帮我审查 src/config.py 和 README.md", [], home / "proj")
+    assert "文件：src/config.py" in section and "VALUE = 1" in section
+    assert "文件：README.md" in section
+
+    # 上下文已带过同名文件：不重复注入
+    already = [Message.user("这是 src/config.py 的内容：VALUE = 1")]
+    assert be._preload_mentioned_files("再看下 src/config.py", already, home / "proj") == ""
+
+    # 项目外路径 / 目录 / 不存在文件一律跳过（不是任意文件读取旁路）
+    outside = home / "outside.py"
+    outside.write_text("SECRET = 1\n", encoding="utf-8")
+    assert be._preload_mentioned_files(
+        f"看看 {outside} 和 src 和 nope.py", [], home / "proj") == ""
+
+    # 无工作目录或没点名文件：空串
+    assert be._preload_mentioned_files("审查 calc.py", [], None) == ""
+    assert be._preload_mentioned_files("随便聊聊", [], home / "proj") == ""
+
+
+def test_preload_mentioned_files_clips_large_file(home):
+    """单文件超限截断并带注记，避免大文件把协作上下文撑爆。"""
+    be = ServerBackend(working_dir=home / "proj")
+    big = home / "proj" / "big.txt"
+    big.write_text("x" * (ServerBackend._PRELOAD_PER_FILE_CHARS + 500), encoding="utf-8")
+    section = be._preload_mentioned_files("看下 big.txt", [], home / "proj")
+    assert "文件：big.txt" in section
+    assert "…（已截断）" in section
+    assert len(section) < ServerBackend._PRELOAD_TOTAL_CHARS + 1000

@@ -59,6 +59,7 @@ from ..events import (
 )
 from ..messages import Message, TextBlock, dialogue
 from ..models.base import Provider, ProviderDone, ProviderTextDelta
+from ..models.diagnostics import classify_error_text
 from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S, is_transient_error
 from .collab_budget import BudgetExceeded, RunBudget
 from .effort import resolve_auto_effort
@@ -76,6 +77,12 @@ VERDICT_PARTIAL = "partial"       # 部分成立（表述/严重度已被修正�
 VERDICT_PENDING = "pending"       # 调查阶段失败/取消：悬而未决，如实呈现
 _VALID_VERDICTS = {VERDICT_CONFIRMED, VERDICT_REFUTED, VERDICT_PARTIAL}
 _VALID_SEVERITIES = {"critical", "high", "medium", "low"}
+
+# 发现阶段值得换替补重试的错误类别：服务/网络/鉴权/额度/限流/模型名写错
+# 换一个服务都可能好；JSON 格式错、内容被拒等（unknown）换模型大概率重演。
+_FINDER_RETRY_CATEGORIES = frozenset({
+    "auth", "network", "rate_limit", "balance", "server", "model_missing",
+})
 
 # 阶段名（AdversarialPhase.phase 的词汇；前端按此渲染进度）
 PHASE_FINDER = "finder"
@@ -608,6 +615,7 @@ async def run_adversarial(
     max_findings: int = 20,
     prompts: dict[str, str] | None = None,
     budget: RunBudget | None = None,
+    finder_fallbacks: list[MemberSpec] | None = None,
 ) -> AdversarialOutcome:
     """跑一整场对抗：发现 → 调查 → 建议 → 裁判。
 
@@ -621,6 +629,10 @@ async def run_adversarial(
     - budget：RunBudget，每次真实 provider 调用前 spend()；超限抛
       BudgetExceeded，由本函数统一发 Notice 并以 error 收尾（已完成阶段的
       产出保留在 outcome 里），不再继续后续阶段；
+    - finder_fallbacks：发现者的替补模型（自动挑选路径专用）。发现阶段因
+      鉴权/网络/限流等「换一个服务可能就好了」的错误失败时，按序换替补
+      再试一次，仍失败才整场报错。显式指定模型的角色不传替补（用户的选择
+      不该被静默替换）。
     - 返回完整结果，不直接改写主历史；取消时 status=cancelled，已产出
       内容（裁决、方案、部分报告）保留。
     """
@@ -678,22 +690,63 @@ async def run_adversarial(
     try:
         # ---- 阶段一：发现者（穷尽式扫描） ----
         await emit(AdversarialPhase(phase=PHASE_FINDER))
-        if finder.provider is None:
-            outcome.error = f"发现者不可用：{finder.build_error or '模型服务不可用'}"
-            await emit(NoticeEvent(message=outcome.error))
-            return await _finish("error", outcome.error)
-
-        data, error, u_in, u_out, u_cached = await _call_json(
-            finder.provider,
-            _phase_messages(_system(PHASE_FINDER, FINDER_SYSTEM), history,
-                            FINDER_USER_TEMPLATE.format(target=target)),
-            timeout_s, emit, label="发现者", expect_key="findings", budget=budget,
-        )
-        _usage_row(PHASE_FINDER, finder, u_in, u_out, u_cached)
-        if error == "cancelled":
-            return await _finish("cancelled", "用户中止对抗审查（发现阶段）")
+        # 发现阶段是整场的硬前置（没有问题清单就没有后续），而自动挑选的
+        # 服务可能正好是坏 Key/连不上——按「同服务不重试、换服务试一次」的
+        # 原则给一次替补机会，别让一个坏配置把整场对抗判死。
+        finder_try: list[MemberSpec] = [finder]
+        if finder_fallbacks:
+            seen_pairs = {(finder.provider_name, finder.model)}
+            for cand in finder_fallbacks:
+                if cand is None or cand.provider is None:
+                    continue
+                pair = (cand.provider_name, cand.model)
+                # 同服务换模型也躲不开 Key/网关故障；只收不同服务的替补
+                if pair in seen_pairs or cand.provider_name == finder.provider_name:
+                    continue
+                seen_pairs.add(pair)
+                finder_try.append(cand)
+                break  # 只替补一次
+        data: dict | None = None
+        error = ""
+        attempt_error = ""
+        for attempt, cand in enumerate(finder_try):
+            if cand.provider is None:
+                error = cand.build_error or "模型服务不可用"
+                retryable = True
+            else:
+                data, error, u_in, u_out, u_cached = await _call_json(
+                    cand.provider,
+                    _phase_messages(_system(PHASE_FINDER, FINDER_SYSTEM), history,
+                                    FINDER_USER_TEMPLATE.format(target=target)),
+                    timeout_s, emit, label="发现者", expect_key="findings",
+                    budget=budget,
+                )
+                _usage_row(PHASE_FINDER, cand, u_in, u_out, u_cached)
+                if error == "cancelled":
+                    return await _finish("cancelled", "用户中止对抗审查（发现阶段）")
+                # 「换一个服务可能就好了」的错误才值得替补；JSON 格式错、
+                # 内容被拒这类换模型大概率重演，直接按失败隔离处理。
+                retryable = classify_error_text(error) in _FINDER_RETRY_CATEGORIES
+            if data is not None:
+                if attempt:
+                    finder = cand
+                    await emit(NoticeEvent(message=(
+                        f"发现者已换用 {cand.provider_name}/"
+                        f"{cand.model or '默认模型'} 完成本阶段。"
+                    )))
+                break
+            attempt_error = error
+            if attempt + 1 < len(finder_try) and retryable:
+                nxt = finder_try[attempt + 1]
+                await emit(NoticeEvent(message=(
+                    f"发现者 {cand.provider_name or '自动挑选'} 调用失败"
+                    f"（{error[:120]}），自动换用 {nxt.provider_name}"
+                    f"（{nxt.model or '默认模型'}）重试一次。"
+                )))
+                continue
+            break
         if data is None:
-            outcome.error = f"发现阶段失败：{error}"
+            outcome.error = f"发现阶段失败：{attempt_error or error}"
             await emit(NoticeEvent(message=outcome.error + "；本场对抗无法继续。"))
             return await _finish("error", outcome.error)
 

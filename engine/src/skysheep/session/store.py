@@ -1015,6 +1015,13 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         self._db = _SharedConnRetry(self._db)
         self._fts_dirty = False  # 索引写失败过 → 下次启动走查漏模式
         await self._setup_fts()
+        # 库文件来源留痕：排查「这一轮为什么没落库」先看用的是哪个库。
+        # 两个实例用不同 SKYSHEEP_HOME 时，日志里的路径是唯一能立刻分辨的线索。
+        logger.info(
+            "会话库已连接：%s（%s，库版本 %s/%s）",
+            self.path, "已有库" if existed else "本次新建",
+            db_version, SCHEMA_VERSION,
+        )
         return self
 
     async def _pre_migrate_backup(self) -> None:
@@ -1256,6 +1263,15 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                         raise
                 yield conn
                 await conn.commit()
+                # 提交后仍在事务里 = 事务没收尾（WAL/磁盘异常时 commit 可能不生效）。
+                # 静默继续会让后续写入叠在孤儿事务上，最终表现为「界面上聊了半天、
+                # 重启全没了」——宁可在这里显式失败并留日志。
+                if conn.in_transaction:
+                    await conn.rollback()
+                    raise RuntimeError(
+                        f"写事务提交后仍处于事务中（{self.path.name}）："
+                        "数据库可能只读、被占用或写到了别的库文件"
+                    )
             except BaseException:
                 try:
                     await conn.rollback()
@@ -2355,6 +2371,24 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             return seq, cur.lastrowid
 
         seq, row_id = await self._write_txn(txn)
+        if seq is None or row_id is None:
+            raise RuntimeError(
+                f"消息未写入会话库（会话 {session_id}）：写入返回空行号"
+            )
+        # 落库后按主键读回一次：提交成功但读不到 = 写到了别的库文件 / 主库被
+        # 替换 / 只读介质静默丢弃。这一条比「INSERT 没抛异常」贵不了多少，
+        # 却能把「界面正常、重启全空」这类无声丢数据变成当场可见的错误。
+        cur = await self._db.execute("SELECT 1 FROM messages WHERE id = ?", (row_id,))
+        exists = await cur.fetchone()
+        if exists is None:
+            logger.error(
+                "消息落库后读不回来：session=%s rowid=%s db=%s",
+                session_id, row_id, self.path,
+            )
+            raise RuntimeError(
+                "消息落库后读不回来：数据库可能被替换或写入未生效"
+                f"（会话 {session_id}，库 {self.path.name}）"
+            )
         message.seq = seq  # 回填给内存历史/前端 brief 用
         return row_id
 
@@ -3987,13 +4021,26 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
 
     @staticmethod
     def compute_next_run(row: dict, now: float | None = None) -> float:
-        """按调度类型计算下次运行时间（相对 last_run_at / 当前时间）。"""
+        """按调度类型计算下次运行时间（相对 last_run_at / 当前时间）。
+
+        类型：interval / daily / weekly / workdays（周一至周五）/ cron
+        （5 段表达式，存在 time_of_day 列里——纯文本列，无需加列迁移）。
+        """
         n = now if now is not None else time.time()
         stype = row.get("schedule_type", "interval")
         if stype == "interval":
             step = max(1, int(row.get("interval_minutes") or 0))
             base = row.get("last_run_at") or n
             return base + step * 60
+        if stype == "cron":
+            from ..core import cron_expr
+
+            try:
+                return cron_expr.next_run(str(row.get("time_of_day") or ""), n)
+            except cron_expr.CronExprError:
+                # 表达式坏了不能按 daily 静默跑（频次可能放大）；推到明天由
+                # 触发时的错误呈现暴露问题，入口校验已在 cron.add/update 拦过一次
+                return n + 24 * 3600
         try:
             hh, mm = map(int, str(row.get("time_of_day") or "00:00").split(":"))
         except ValueError:
@@ -4002,6 +4049,15 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             lt = time.localtime(n)
             today = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
             return today if today > n else today + 24 * 3600
+        if stype == "workdays":
+            # 工作日每天：跳过周六（5）/周日（6）；今天的点已过就找下一个工作日
+            lt = time.localtime(n)
+            day = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
+            for _ in range(8):
+                if day > n and time.localtime(day).tm_wday < 5:
+                    return day
+                day += 24 * 3600
+            return n + 24 * 3600
         if stype == "weekly":
             wd = int(row.get("weekday") if row.get("weekday") is not None else -1)
             if wd < 0:

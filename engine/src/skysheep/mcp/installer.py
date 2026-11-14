@@ -147,7 +147,9 @@ def load_servers(path: Path) -> dict[str, dict]:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        # UnicodeDecodeError 不是 OSError：手编成 GBK 的 mcp.json 以前会让
+        # 启动路径直接抛编码错误（11-07 评审的中危类），坏配置按空处理即可
         return {}
     # 顶层不是 JSON 对象（手编成数组/字符串等合法 JSON）也按空配置处理：
     # 直接 data.get 会在 list/str 上 AttributeError，而调用方只 except 自己的

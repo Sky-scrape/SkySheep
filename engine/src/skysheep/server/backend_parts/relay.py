@@ -62,7 +62,20 @@ _RELAY_PEER_TITLE_FALLBACK = "接力 · 副屏"
 
 def _relay_peer_title_for(main_title: str | None) -> str:
     main = (main_title or "").strip()
-    return f"{main} · {_RELAY_PEER_TITLE_SUFFIX}" if main else _RELAY_PEER_TITLE_FALLBACK
+    if not main:
+        return _RELAY_PEER_TITLE_FALLBACK
+    # 接力自动短名「接力 · 主屏 · xxx」：只换侧别，避免再叠一个「 · 副屏」
+    # 把本来已经缩短的名字又拉长
+    if main.startswith("接力 · 主屏"):
+        return main.replace("接力 · 主屏", "接力 · 副屏", 1)
+    return f"{main} · {_RELAY_PEER_TITLE_SUFFIX}"
+
+
+def _relay_short_goal(goal: str | None, limit: int = 14) -> str:
+    """总任务的一行短摘录（会话名用）：压空白、截断带省略号。"""
+    text = " ".join(str(goal or "").split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
 # 交接给下一轮时保留的上一轮输出长度（模型不需要全文，太长还会挤掉本轮预算）
 _RELAY_DUAL_PREV_CHARS = 6000
 
@@ -186,6 +199,9 @@ class RelaySettingsMixin:
                 # 首次创建 pair 的「查重 → 建行」实例级串行锁（全局一把，
                 # 见 _relay_dual_create_lock）
                 "create_lock": asyncio.Lock(),
+                # pair_id -> 一次性人工交接确认：复述核验失败暂停后，用户点
+                # 「执行」表示「我看过、按这个交接继续」，下一道交接门跳过协商
+                "manual_handoff": set(),
             }
         return st
 
@@ -209,7 +225,15 @@ class RelaySettingsMixin:
         if self.store is None:
             raise RuntimeError("relay_unavailable：存储不可用")
         pair = await self.store.relay_pair_get(pair_id)
-        if pair is None or pair["project_id"] != self._cur_project_id():
+        if pair is None:
+            raise ValueError("relay_not_found：接力任务不存在")
+        # 归属跟随主屏会话：项目会话必须与当前项目一致；快聊没有项目归属，
+        # 与快聊会话本身一样可在任意当前项目下本地操作——否则用户切一下项目
+        # （或重启恢复 active_project）就让已存在的接力变成 relay_not_found，
+        # 看板点执行毫无反应（2026-11-14 实例：pair=None、当前项目=engine）。
+        main = await self.store.get_session(pair["main_session_id"])
+        owner_pid = main.project_id if main is not None else pair["project_id"]
+        if owner_pid is not None and owner_pid != self._cur_project_id():
             # 不区分「不存在/不属本项目」，避免给枚举探测提供区分信号
             raise ValueError("relay_not_found：接力任务不存在")
         return pair
@@ -246,6 +270,11 @@ class RelaySettingsMixin:
             async with self._relay_dual_create_lock():
                 title = _relay_peer_title_for(main_title)
                 renamed: set[str] = set()
+                # 孤儿副屏按主屏会话自己的项目找：快聊主屏（project_id=None）
+                # 的副屏也在快聊里，拿当前项目去找会漏掉它、改名后误建新副屏
+                main = await self.store.get_session(main_session_id)
+                owner_pid = (main.project_id if main is not None
+                             else self._cur_project_id())
                 pairs = await self.store.relay_pairs_by_session(main_session_id)
                 peer_ids = {
                     p["peer_session_id"] for p in pairs
@@ -267,7 +296,7 @@ class RelaySettingsMixin:
                     if old_peer == title:
                         continue
                     orphans = await self.store.relay_rename_orphan_peers(
-                        self._cur_project_id(), old_peer, title,
+                        owner_pid, old_peer, title,
                     )
                     renamed.update(orphans)
             for peer_id in renamed:
@@ -279,6 +308,36 @@ class RelaySettingsMixin:
                         pass
         except Exception:  # noqa: BLE001 - 副屏改名联动失败不影响主流程
             pass
+
+    async def _relay_normalize_main_title(self, session, goal: str) -> None:
+        """把接力主屏的自动长标题收成短名：接力 · 主屏 · <总任务摘录>。
+
+        只动两类自动名：空标题（新会话第一句话就是接力指令）与旧版从指令
+        首 40 字截出来的「【接力 · 主屏】总任务…」；用户自己起的名字原样保留。
+        改名后联动副屏（绑定中的与还没绑 pair 的空副屏），避免侧栏出现
+        「【接力 · 主屏】总任务：…你这一轮的任务：… · 副屏」这种超长名字。
+
+        调用方必须不在 _relay_dual_create_lock 内：relay_sync_peer_title 自己要
+        拿这把锁（relay_dual_run 在锁外先调一次，锁内只做 pair 查重/建行）。
+        """
+        old = (session.title or "").strip()
+        if old and not old.startswith("【接力"):
+            return
+        short = _relay_short_goal(goal)
+        if not short:
+            return
+        title = f"接力 · 主屏 · {short}"
+        if title == old:
+            return
+        await self.store.set_title(session.id, title)
+        session.title = title  # 就地更新：后续推导副屏名用新主屏名
+        for ws_emit in list(self.ws_emitters):
+            try:
+                await ws_emit({"kind": "session_updated",
+                               "session_id": session.id, "title": title})
+            except Exception:  # noqa: BLE001 - 广播失败不影响命名
+                pass
+        await self.relay_sync_peer_title(session.id, title, old)
 
     # ---- RPC：open / save / get / run / stop ----
 
@@ -292,14 +351,20 @@ class RelaySettingsMixin:
         self._relay_reject_unknown(params, ("session_id", "create_peer"))
         session_id = self._relay_str(params, "session_id", maxlen=64)
         session = await self._get_owned_session(session_id, local=True)
-        project_id = await self._relay_session_project(session)
+        # 仍走归属校验（跨项目会话直接拒绝）；返回值只用于 pair 创建，这里不需要
+        await self._relay_session_project(session)
         pair = await self.store.relay_pair_latest(session_id)
+        if pair is not None:
+            # 旧版留下的超长自动名（【接力 · 主屏】总任务…）在这里顺手收短
+            await self._relay_normalize_main_title(session, pair["goal"])
         peer = None
         if pair is not None:
             peer = await self.store.get_session(pair["peer_session_id"])
         if peer is None:
+            # 副屏必须和主屏同项目：快聊主屏的副屏也留在快聊（fast-talk 工作
+            # 目录），不能因为「快聊按当前项目收编」就落进另一个项目里跑
             peer = await self.store.relay_peer_session(
-                project_id, _relay_peer_title_for(session.title),
+                session.project_id, _relay_peer_title_for(session.title),
                 create=bool(params.get("create_peer")),
                 exclude_pair_id=pair["id"] if pair else None,
             )
@@ -373,6 +438,14 @@ class RelaySettingsMixin:
         session = await self._get_owned_session(session_id, local=True)
         project_id = await self._relay_session_project(session)
 
+        # 接力主屏的自动长标题先收短（只有空标题/旧版【接力…名会动），副屏名
+        # 一并对齐。必须在 create_lock 之外：relay_sync_peer_title 自己要拿锁。
+        title_goal = str(params.get("goal") or "").strip()
+        if not title_goal:
+            latest = await self.store.relay_pair_latest(session_id)
+            title_goal = str((latest or {}).get("goal") or "")
+        await self._relay_normalize_main_title(session, title_goal)
+
         # 「查重 → 建行 / 换绑副屏」是 check-then-act，并发下必须串行化（先例：
         # 串行路径 relay_start 的 _relay_start_lock）：relay_pair_latest 与
         # relay_pair_create 之间隔着 relay_peer_session 等多个 await，两个并发
@@ -389,8 +462,10 @@ class RelaySettingsMixin:
             else:
                 pair = await self.store.relay_pair_latest(session_id)
             if pair is None:
+                # 副屏沿用主屏会话自己的项目（快聊→快聊），pair 仍按当前项目
+                # 收编以保留归属校验——副屏不允许因此跑到另一个项目的工作目录
                 peer = await self.store.relay_peer_session(
-                    project_id, _relay_peer_title_for(session.title)
+                    session.project_id, _relay_peer_title_for(session.title)
                 )
                 # 全新 pair：任何被占用的副屏都不复用（relay_peer_session 默认排他）
                 created = await self.store.relay_pair_create({
@@ -410,7 +485,7 @@ class RelaySettingsMixin:
             elif await self.store.get_session(pair["peer_session_id"]) is None:
                 # 副屏会话被用户删了：换一个新的副屏再跑，别把消息写进不存在的会话
                 peer = await self.store.relay_peer_session(
-                    project_id, _relay_peer_title_for(session.title),
+                    session.project_id, _relay_peer_title_for(session.title),
                     exclude_pair_id=pair["id"]
                 )
                 await self.store.relay_pair_update(
@@ -455,6 +530,10 @@ class RelaySettingsMixin:
         if not peer_task:
             raise ValueError("relay_invalid：请先填写副屏每一轮做什么")
         fields.update({"goal": goal, "main_task": main_task, "peer_task": peer_task})
+        # 复述核验失败后的暂停：用户点「执行」= 人工确认这次交接，下一道
+        # 交接门跳过复述协商（一次性，见 _relay_dual_handoff_gate）
+        if (pair.get("error") or {}).get("code") == "relay_verification_failed":
+            self._relay_dual_state()["manual_handoff"].add(pair["id"])
         fields["state"] = "running"
         fields["error"] = {}
         snapshot = await self.store.relay_pair_update(
@@ -613,23 +692,24 @@ class RelaySettingsMixin:
                 pair = await self.store.relay_pair_get(pair_id)
                 if pair is None or pair["state"] != "running":
                     return
-                # 上限兜底（轮次累计 + 本次运行 token）：越线即暂停等人决策，
-                # 不凭「还有 auto_alternate」无上限推进
+                # 上限兜底（轮次累计 + 本次运行 token）：显式配了正值才拦，
+                # 越线即暂停等人决策；两项默认都是 0=不限制
                 workflow = None
                 if getattr(self, "cfg", None) is not None:
                     workflow = getattr(self.cfg.relay, "workflow", None)
                 if workflow is None:
                     from ...relayconfig import RelayWorkflow as _RW
                     workflow = _RW()
-                if int(pair["turn_no"]) >= workflow.max_steps:
+                if workflow.max_steps > 0 and int(pair["turn_no"]) >= workflow.max_steps:
                     await self._relay_dual_park(
                         pair_id, "relay_max_steps",
                         f"已达接力轮次上限（{workflow.max_steps} 轮），已暂停")
                     return
-                if run_usage["in"] + run_usage["out"] >= workflow.token_budget:
+                budget = int(getattr(workflow, "token_budget", 0) or 0)
+                if budget > 0 and run_usage["in"] + run_usage["out"] >= budget:
                     await self._relay_dual_park(
                         pair_id, "relay_token_budget",
-                        f"已达接力 token 预算（{workflow.token_budget}），已暂停")
+                        f"已达接力 token 预算（{budget}），已暂停")
                     return
                 side = "peer" if pair["current_side"] == "peer" else "main"
                 sid = pair["peer_session_id"] if side == "peer" else pair["main_session_id"]
@@ -862,6 +942,8 @@ class RelaySettingsMixin:
         首轮或关闭核验）。返回 None 表示门没过：pair 已落成暂停并广播。
         """
         pair_id = pair["id"]
+        st = self._relay_dual_state()
+        manual = pair_id in st["manual_handoff"]
         effects = self._relay_dual_external_effects(
             [pair["main_session_id"], pair["peer_session_id"]]
         )
@@ -877,6 +959,11 @@ class RelaySettingsMixin:
                 "这些任务还可能改动工作区，请等它完成或取消后，再点执行继续。",
             )
             return None
+        if manual:
+            # 一次性消费：只跳过这一次交接，后续换手照常核验
+            st["manual_handoff"].discard(pair_id)
+            return brief, {"state": "", "attempts": 0, "restatement": "",
+                           "note": "用户手动确认交接，跳过复述核验"}
         if not (prev.strip() and bool(pair.get("auto_alternate"))
                 and bool(pair.get("verify_handoff", True))):
             # 没有交接材料（首轮），或由人工逐轮批准，或 pair 关闭了核验
@@ -991,7 +1078,7 @@ class RelaySettingsMixin:
                         receiver_prov,
                         _restatement_messages(
                             pair["goal"], label, task_text, handover_label, prev,
-                            own_prev,
+                            own_prev, feedback=last_fail,
                         ),
                         timeout_s=_RELAY_VERIFY_TIMEOUT,
                         max_output_chars=_RELAY_RESTATEMENT_MAX_CHARS * 4,
@@ -1843,7 +1930,7 @@ class RelaySettingsMixin:
             await self._relay_park(task_id, "relay_budget",
                                    "上下文容量不足以支撑接力所需的最小预算")
             return True
-        if task["step"] >= workflow.max_steps:
+        if workflow.max_steps > 0 and task["step"] >= workflow.max_steps:
             await self._relay_park(task_id, "relay_max_steps",
                                    f"已达最大步数（{workflow.max_steps}），已暂停")
             return True
@@ -1878,9 +1965,10 @@ class RelaySettingsMixin:
             int(n["usage"].get("input_tokens", 0)) + int(n["usage"].get("output_tokens", 0))
             for n in snapshot["nodes"]
         )
-        if used + est_input + reserved_output > workflow.token_budget:
+        budget = int(workflow.token_budget or 0)
+        if budget > 0 and used + est_input + reserved_output > budget:
             await self._relay_park(task_id, "relay_token_budget",
-                                   f"已达 token 预算（{workflow.token_budget}），已暂停")
+                                   f"已达 token 预算（{budget}），已暂停")
             return True
 
         built = self._relay_build_provider(task, node)
@@ -2038,8 +2126,13 @@ _NO_TOOL_SYSTEM = (
 
 def _restatement_messages(
     goal: str, label: str, task: str, handover_label: str, prev: str, own_prev: str,
+    *, feedback: str = "",
 ) -> list[Message]:
-    """接收方的复述请求：无工具、固定五节，供服务端做结构校验与移交方核验。"""
+    """接收方的复述请求：无工具、固定五节，供服务端做结构校验与移交方核验。
+
+    feedback 是上一次尝试的失败原因（结构不合格 / 移交方驳回理由）：第二次
+    起必须带上，否则三次提问一字不差，模型只会重复同一个错误，重试次数白烧。
+    """
     lines = [
         f"【接力交接 · 复述】你是接收方（{label}）。执行权即将由 {handover_label} 交给你，"
         "交接前请先只读复述你对当前局面的理解，不要执行任何操作。",
@@ -2049,6 +2142,11 @@ def _restatement_messages(
     ]
     if own_prev.strip():
         lines.append(f"你上一轮的输出：\n{own_prev.strip()}")
+    if feedback.strip():
+        lines.append(
+            "上一轮复述被驳回/不合格，原因如下（本次必须针对性修正，不要重复同样的错误）：\n"
+            f"{feedback.strip()}"
+        )
     lines.append(
         "请严格按以下小节输出（每节一行标题加正文，除这五节外不要输出别的内容）：\n"
         "【目标】用一句话写你理解的总任务\n"

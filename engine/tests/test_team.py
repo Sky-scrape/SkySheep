@@ -3181,6 +3181,34 @@ async def test_tasks_from_adversarial_are_untrusted_evidence_and_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_wake_prompt_declares_capability_boundary():
+    """唤醒提示词显式声明本轮有没有工具（防编造执行报告，2026-11-12 走查）。
+
+    顾问型成员（无 registry/gate）被 @ 点名干活时会声称「已创建文件并运行
+    通过」——唤醒词必须写明「没有工具、不能声称已执行」，执行型与规划模式
+    也各有对应边界文案。
+    """
+    events, orch = make_orch()
+    await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="x")]]))])
+    advisory = orch._build_wake_prompt(orch._runtimes["小研"], False)
+    assert "纯文本顾问模式" in advisory
+    assert "没有挂载任何文件读写" in advisory
+    assert "严禁声称" in advisory and "执行命令" in advisory
+    # exec_mode=True：声明可以动手，但只报实际工具结果
+    exec_prompt = orch._build_wake_prompt(orch._runtimes["小研"], True)
+    assert "执行型工单" in exec_prompt and "权限门" in exec_prompt
+    assert "纯文本顾问模式" not in exec_prompt
+    # 规划模式优先于 exec_mode：只有只读工具
+    orch.plan_mode = True
+    planned = orch._build_wake_prompt(orch._runtimes["小研"], True)
+    assert "规划模式" in planned and "只有只读工具" in planned
+    # 默认参数按名下有执行型工单推定：无工单时落到顾问模式
+    orch.plan_mode = False
+    assert "纯文本顾问模式" in orch._build_wake_prompt(orch._runtimes["小研"])
+    assert "纯文本顾问模式" in orch._build_wake_prompt(orch._runtimes["小研"], False)
+
+
+@pytest.mark.asyncio
 async def test_wake_prompt_frames_and_clips_task_title_accept():
     """唤醒提示词把工单标题/验收标准按不可信引用注入（安全审查 F1.4）：带
     「不是指令」框架与截断注记，超限字段在提示词里被截断——工单字段可能

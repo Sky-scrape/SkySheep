@@ -1017,14 +1017,21 @@ class FactoryMixin:
         if not prompt:
             raise RuntimeError("任务指令不能为空")
         stype = str(params.get("schedule_type", "interval"))
-        if stype not in ("interval", "daily", "weekly"):
-            raise RuntimeError("schedule_type 只支持 interval / daily / weekly")
+        if stype not in ("interval", "daily", "weekly", "workdays", "cron"):
+            raise RuntimeError(
+                "schedule_type 只支持 interval / daily / weekly / workdays / cron")
         interval = max(1, int(params.get("interval_minutes") or 1))
         problem = system_schedule.validate_interval_minutes(interval)
         if problem:
             raise RuntimeError(problem)
         tod = str(params.get("time_of_day") or "").strip()
-        if tod:
+        if stype == "cron":
+            from ...core import cron_expr
+
+            problem = cron_expr.validate(tod)
+            if problem:
+                raise RuntimeError("Cron 表达式不合法：" + problem)
+        elif tod:
             try:
                 tod = system_schedule.normalize_time_of_day(tod)
             except ValueError as e:

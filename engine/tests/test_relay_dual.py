@@ -72,6 +72,34 @@ class AlternatingProvider(Provider):
         yield ProviderDone(stop_reason="end_turn", input_tokens=5, output_tokens=5)
 
 
+class HeavyUsageProvider(Provider):
+    """每轮都上报大额用量（远超旧的默认 10 万预算），第三轮阻塞：
+
+    用于验证 token_budget 默认 0 = 不限制——累计用量再大也不会被预算闸
+    停在换手前。"""
+
+    name = "fake"
+    model = "fake-heavy"
+
+    def __init__(self, limit: int = 2) -> None:
+        super().__init__()
+        self.limit = limit
+        self.calls = 0
+        self.gate = asyncio.Event()
+        self.blocked = asyncio.Event()
+
+    async def stream(self, messages, tool_schemas, effort=None):
+        self.calls += 1
+        if self.calls > self.limit:
+            self.blocked.set()
+            await self.gate.wait()
+            yield ProviderTextDelta("继续")
+        else:
+            yield ProviderTextDelta(f"第{self.calls}轮产出")
+        yield ProviderDone(
+            stop_reason="end_turn", input_tokens=200_000, output_tokens=10_000)
+
+
 class ScriptedThenBlockProvider(Provider):
     """按脚本给文本（含逐调用计数），脚本耗尽后阻塞：把「连续交替」停在确定的一轮。"""
 
@@ -403,6 +431,157 @@ async def test_dual_empty_output_pauses_instead_of_spinning(home):
         await be.shutdown()
 
 
+async def test_dual_quick_chat_peer_mirrors_main_session(home):
+    """快聊主屏的副屏也必须留在快聊（不落到当前项目里）。
+
+    pair 仍按当前项目收编（归属校验/列表用它），但副屏会话自己的项目跟随
+    主屏——否则快聊主屏在 fast-talk、副屏却在当前项目根目录跑工具，看起来
+    就是「副屏跑到了另一个项目里」（2026-11-14 用户实例）。
+    """
+    prov = FakeProvider([[TextBlock(text="主屏产出")], [TextBlock(text="副屏产出")]])
+    be = await _mk(home, prov)
+    try:
+        # 真正的快聊会话（project_id=None）；new_session 会挂当前项目
+        sess = await be.store.create_session(None)
+        sid = sess.id
+        # 点「接力」先建副屏（dual_open 路径）也要留在快聊
+        opened = await be.relay_dual_open({"session_id": sid, "create_peer": True})
+        peer0 = await be.store.get_session(opened["peer"]["id"])
+        assert peer0 is not None and peer0.project_id is None
+        started = await _start_dual(be, sid, "d-quick-peer-1", _NO_GATE)
+        pair = started["pair"]
+        assert pair["peer_session_id"] == peer0.id  # 复用刚建的副屏
+        peer = await be.store.get_session(pair["peer_session_id"])
+        assert peer is not None
+        # pair 归属不变：快聊按当前项目收编
+        assert pair["project_id"] == be._cur_project_id()
+        # 副屏跟随主屏：快聊（project_id=None）→ 工作目录同为 fast-talk
+        assert peer.project_id is None
+        _, main_wd = await be._session_project(sid)
+        _, peer_wd = await be._session_project(peer.id)
+        assert main_wd == peer_wd
+    finally:
+        await be.shutdown()
+
+
+async def test_dual_project_session_peer_stays_in_project(home):
+    """项目会话的副屏仍落在同一项目（快聊镜像规则不放宽项目内接力）。"""
+    prov = FakeProvider([[TextBlock(text="主屏产出")], [TextBlock(text="副屏产出")]])
+    be = await _mk(home, prov)
+    try:
+        proj = be.project
+        assert proj is not None
+        sess = await be.store.create_session(proj.id, title="项目主屏")
+        started = await _start_dual(be, sess.id, "d-proj-peer-1", _NO_GATE)
+        peer = await be.store.get_session(started["pair"]["peer_session_id"])
+        assert peer is not None and peer.project_id == proj.id
+    finally:
+        await be.shutdown()
+
+
+async def test_dual_quick_chat_pair_stays_usable_after_project_switch(home):
+    """快聊 pair 不跟随「当前项目」：用户切到别的项目后仍能读/改/执行。
+
+    旧归属校验拿 pair.project_id 与当前项目比：快聊 pair（project_id=None）
+    一遇到当前项目就报 relay_not_found，看板点「执行」毫无反应——前端 finally
+    的 render 还会把错误覆盖成旧的暂停提示（2026-11-14 实例）。
+    """
+    prov = FakeProvider([[TextBlock(text="主屏产出")], [TextBlock(text="副屏产出")]])
+    be = await _mk(home, prov)
+    try:
+        sess = await be.store.create_session(None)
+        started = await _start_dual(be, sess.id, "d-quick-switch-1", _NO_GATE)
+        pair_id = started["pair"]["id"]
+        other = await be.store.get_or_create_project(str(home / "other-pkg"))
+        be.project = other  # 用户切到另一个项目
+        got = await be.relay_dual_get({"pair_id": pair_id})
+        assert got["pair"]["id"] == pair_id
+        saved = await be.relay_dual_save(
+            {"pair_id": pair_id, "auto_alternate": False})
+        assert saved["pair"]["auto_alternate"] is False
+    finally:
+        await be.shutdown()
+
+
+async def test_dual_project_pair_rejects_other_project(home):
+    """项目会话的 pair 仍按项目隔离：切到别的项目后不可操作。"""
+    prov = FakeProvider([[TextBlock(text="主屏产出")], [TextBlock(text="副屏产出")]])
+    be = await _mk(home, prov)
+    try:
+        proj = be.project
+        assert proj is not None
+        sess = await be.store.create_session(proj.id, title="项目主屏")
+        started = await _start_dual(be, sess.id, "d-proj-switch-1", _NO_GATE)
+        pair_id = started["pair"]["id"]
+        other = await be.store.get_or_create_project(str(home / "other-pkg"))
+        be.project = other
+        with pytest.raises(ValueError, match="relay_not_found"):
+            await be.relay_dual_get({"pair_id": pair_id})
+    finally:
+        await be.shutdown()
+
+
+def test_peer_title_keeps_short_side_name():
+    """自动短名「接力 · 主屏 · xxx」推副屏名时只换侧别，不再叠长。"""
+    from skysheep.server.backend_parts.relay import (
+        _relay_peer_title_for,
+        _relay_short_goal,
+    )
+
+    assert _relay_peer_title_for("接力 · 主屏 · 汽车调研") == "接力 · 副屏 · 汽车调研"
+    assert _relay_peer_title_for("我的汽车调研") == "我的汽车调研 · 副屏"
+    assert _relay_peer_title_for("") == "接力 · 副屏"
+    assert _relay_short_goal("  调研   中国的汽车行业  ") == "调研 中国的汽车行业"
+    assert _relay_short_goal("研" * 40).endswith("…")
+    assert len(_relay_short_goal("研" * 40)) == 15  # 14 字 + 省略号
+
+
+async def test_dual_auto_title_is_short(home):
+    """新会话第一句话就是接力指令：会话名收短，副屏按同一摘录命名。"""
+    prov = FakeProvider([[TextBlock(text="主屏产出")], [TextBlock(text="副屏产出")]])
+    be = await _mk(home, prov)
+    try:
+        sess = await be.store.create_session(None)
+        started = await _start_dual(be, sess.id, "d-title-1", _NO_GATE)
+        main = await be.store.get_session(sess.id)
+        peer = await be.store.get_session(started["pair"]["peer_session_id"])
+        assert main.title == "接力 · 主屏 · 完成示例任务"
+        assert peer.title == "接力 · 副屏 · 完成示例任务"
+    finally:
+        await be.shutdown()
+
+
+async def test_dual_keeps_user_given_title(home):
+    """用户自己起的会话名原样保留，副屏仍按「<主屏名> · 副屏」命名。"""
+    prov = FakeProvider([[TextBlock(text="主屏产出")], [TextBlock(text="副屏产出")]])
+    be = await _mk(home, prov)
+    try:
+        sess = await be.store.create_session(None, title="我的汽车调研")
+        started = await _start_dual(be, sess.id, "d-title-2", _NO_GATE)
+        main = await be.store.get_session(sess.id)
+        peer = await be.store.get_session(started["pair"]["peer_session_id"])
+        assert main.title == "我的汽车调研"
+        assert peer.title == "我的汽车调研 · 副屏"
+    finally:
+        await be.shutdown()
+
+
+async def test_dual_normalizes_legacy_long_title(home):
+    """旧版从接力指令首 40 字截出来的超长自动名，开跑时收成短名。"""
+    legacy = "【接力 · 主屏】总任务：调研中国的汽车行业你这一轮的任务：规划，制定方"
+    prov = FakeProvider([[TextBlock(text="主屏产出")], [TextBlock(text="副屏产出")]])
+    be = await _mk(home, prov)
+    try:
+        sess = await be.store.create_session(None, title=legacy)
+        started = await _start_dual(be, sess.id, "d-title-3", _NO_GATE)
+        main = await be.store.get_session(sess.id)
+        peer = await be.store.get_session(started["pair"]["peer_session_id"])
+        assert main.title == "接力 · 主屏 · 完成示例任务"
+        assert peer.title == "接力 · 副屏 · 完成示例任务"
+    finally:
+        await be.shutdown()
+
+
 async def test_dual_rejects_cross_project_session(home):
     prov = FakeProvider([TextBlock(text="x")])
     be = await _mk(home, prov)
@@ -612,6 +791,10 @@ async def test_dual_verify_reject_then_pass_on_second_attempt(home):
         assert gated["verify_attempts"] == 2
         assert "驳回" in gated["verify_note"]
         assert gated["restatement"] == restated2
+        # 第二次复述必须带上第一次的驳回理由，否则两次提问一字不差
+        second_prompt = prov.calls[3][-1].text
+        assert "上一轮复述被驳回" in second_prompt
+        assert "没提第一步的关键结果" in second_prompt
     finally:
         await be.shutdown()
 
@@ -644,6 +827,50 @@ async def test_dual_verify_exhausted_pauses_before_next_turn(home):
         # 结构失败在服务端拦截：核验调用一次都不发生（1 轮 + 3 次复述）
         assert len(prov.calls) == 4
     finally:
+        await be.shutdown()
+
+
+async def test_dual_manual_run_skips_verification_after_rejection(home):
+    """核验失败暂停后点「执行」= 人工确认这次交接：跳过复述协商（一次性）。"""
+    prov = ScriptedThenBlockProvider([
+        [TextBlock(text="主屏方案")],               # 第 1 轮
+        [TextBlock(text="我没理解，直接开始吧")],   # 复述 1-3：结构不合格
+        [TextBlock(text="我没理解，直接开始吧")],
+        [TextBlock(text="我没理解，直接开始吧")],
+        [TextBlock(text="副屏本轮产出")],           # 人工确认后的副屏轮
+    ])
+    be = await _mk(home, prov)
+    try:
+        sid = (await be.new_session())["id"]
+        started = await be.relay_dual_run({
+            "session_id": sid, "goal": "完成示例任务",
+            "main_task": "发布方案", "peer_task": "执行并反馈",
+            "auto_alternate": True, "verify_handoff": True,
+            "request_id": "v-manual-1", "expected_revision": 0,
+        })
+        pair_id = started["pair"]["id"]
+        await _wait_pair_state(be, pair_id, "paused")
+        snap = await be.store.relay_pair_snapshot(pair_id)
+        assert snap["pair"]["error"]["code"] == "relay_verification_failed"
+
+        # 用户点执行确认交接：这一轮不再复述，直接交给轮到的一方
+        await be.relay_dual_run({
+            "session_id": sid, "pair_id": pair_id,
+            "auto_alternate": True, "verify_handoff": True,
+            "request_id": "v-manual-2",
+            "expected_revision": snap["pair"]["revision"],
+        })
+        # 副屏轮跑完后，下一次换手的复述调用会耗尽脚本并阻塞
+        await asyncio.wait_for(prov.blocked.wait(), timeout=5)
+        snap = await be.store.relay_pair_snapshot(pair_id)
+        peer_turn = snap["turns"][1]
+        assert peer_turn["side"] == "peer" and peer_turn["status"] == "done"
+        assert peer_turn["verify_state"] == ""
+        assert "手动确认" in peer_turn["verify_note"]
+        # 人工确认只跳过一次：下一次换手已重新进入复述协商（第 6 次调用阻塞）
+        assert prov.calls == 6
+    finally:
+        prov.gate.set()
         await be.shutdown()
 
 
@@ -1021,6 +1248,31 @@ async def test_dual_worker_turn_cap_parks(home, monkeypatch):
         assert len(snap["turns"]) == 2, "到达上限即停"
         assert len(prov.calls) == 2
     finally:
+        await be.shutdown()
+
+
+async def test_dual_worker_token_budget_zero_is_unlimited(home):
+    """token_budget 默认 0 = 不限制：即使每轮用量远超旧的默认 10 万，连续
+    交替也照常换边，不会落成 relay_token_budget 暂停。"""
+    prov = HeavyUsageProvider(limit=2)
+    be = await _mk(home, prov)
+    try:
+        assert be.cfg.relay.workflow.token_budget == 0
+        assert be.cfg.relay.workflow.max_steps == 0
+        sid = (await be.new_session())["id"]
+        started = await _start_dual(be, sid, "d-tok-default-1", _NO_GATE)
+        pair_id = started["pair"]["id"]
+        await be.store.relay_pair_update(
+            pair_id, {"auto_alternate": True}, expect_states=("running",))
+        # 两轮自动跑完后，第三轮又轮到主屏并阻塞在那里
+        await asyncio.wait_for(prov.blocked.wait(), timeout=5)
+        snap = await be.store.relay_pair_snapshot(pair_id)
+        assert [t["side"] for t in snap["turns"]][:2] == ["main", "peer"]
+        assert all(t["status"] == "done" for t in snap["turns"][:2])
+        assert snap["pair"]["state"] == "running"
+        assert not (snap["pair"].get("error") or {}).get("code")
+    finally:
+        prov.gate.set()
         await be.shutdown()
 
 

@@ -432,6 +432,52 @@ async def test_usage_stats_quickchat_null_project_filter(store):
     assert (await store.usage_stats(14))["session_count"] == 2
 
 
+async def test_usage_scope_all_vs_project_and_remote(store):
+    """scope=all 把快聊/其他项目一起算；远端（local=False）只认项目口径。
+
+    用量页默认「全部」：有项目态只统计当前项目时，新建项目里还没有会话就整页
+    显示 0，而下方「今日已用」是全局口径——两个数字互相矛盾（2026-11-14 实测）。
+    """
+    from types import SimpleNamespace
+
+    from skysheep.server.backend import ServerBackend
+
+    proj = await store.get_or_create_project("/scope-proj")
+    sp = await store.create_session(proj.id, "项目会话")
+    sq = await store.create_session(None, "快聊会话")  # project_id=NULL
+    await store.add_usage(sp.id, "p1", "m1", 100, 50)
+    await store.add_usage(sq.id, "p1", "m1", 900, 90)
+
+    host = SimpleNamespace(
+        project=proj, store=store,
+        cfg=SimpleNamespace(providers={}, daily_token_budget=0),
+    )
+
+    # 缺省 auto：有项目态按项目（旧口径不变）
+    auto = await ServerBackend.usage_stats(host, {})
+    assert auto["scope"] == "project" and auto["project_name"] == proj.name
+    assert auto["total_in"] == 100
+
+    # 本机「全部」：快聊 + 项目会话都算，明细也下发
+    allr = await ServerBackend.usage_stats(host, {"scope": "all"})
+    assert allr["scope"] == "all" and allr["total_in"] == 1000
+    assert {r["sid"] for r in allr["by_session"]} == {sp.id, sq.id}
+
+    proj_only = await ServerBackend.usage_stats(host, {"scope": "project"})
+    assert proj_only["total_in"] == 100
+
+    # 远端：scope=all 被收敛成项目口径，会话标题不跨项目
+    remote = await ServerBackend.usage_stats(host, {"scope": "all"}, local=False)
+    assert remote["scope"] == "project" and remote["total_in"] == 100
+    assert [r["sid"] for r in remote["by_session"]] == [sp.id]
+
+    # 无项目态：project 退化成全局，但明细不下发（B14）
+    host.project = None
+    none_scope = await ServerBackend.usage_stats(host, {"scope": "project"})
+    assert none_scope["scope"] == "all" and none_scope["total_in"] == 1000
+    assert none_scope["by_session"] == []
+
+
 def test_checkpoint_restore_checks_session_ownership(home):
     """检查点凭 id 恢复/对比前先验会话归属（B12：cp id 顺序可枚举）。
 

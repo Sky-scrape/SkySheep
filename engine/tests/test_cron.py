@@ -916,3 +916,84 @@ async def test_cron_team_columns_legacy_db_migration(tmp_path):
         assert tasks[0]["is_team"] is False
     finally:
         await s.close()
+
+# ---- 工作日 / Cron 表达式调度（2026-11-13） ----
+
+
+async def test_compute_next_run_workdays_skips_weekend(store):
+    """工作日：周五 10:00 之后的下一次是周一 09:00（周六日不跑）。"""
+    # 2026-11-13 是周五
+    fri = _time.mktime((2026, 11, 13, 10, 0, 0, 0, 0, -1))
+    row = {"schedule_type": "workdays", "time_of_day": "09:00"}
+    nxt = store.compute_next_run(row, now=fri)
+    lt = _time.localtime(nxt)
+    assert lt.tm_wday == 0 and (lt.tm_hour, lt.tm_min) == (9, 0)
+    # 周三 08:00 之后 → 当天 09:00
+    wed = _time.mktime((2026, 11, 11, 8, 0, 0, 0, 0, -1))
+    same_day = store.compute_next_run(row, now=wed)
+    assert _time.localtime(same_day).tm_mday == 11
+
+
+async def test_compute_next_run_cron_expression(store):
+    from skysheep.core import cron_expr
+
+    # 工作日 9 点：周五 10:00 之后 → 周一 9:00
+    fri = _time.mktime((2026, 11, 13, 10, 0, 0, 0, 0, -1))
+    row = {"schedule_type": "cron", "time_of_day": "0 9 * * 1-5"}
+    nxt = store.compute_next_run(row, now=fri)
+    lt = _time.localtime(nxt)
+    assert lt.tm_wday == 0 and (lt.tm_hour, lt.tm_min) == (9, 0)
+
+    # 每月 1 号 18:30
+    nxt2 = cron_expr.next_run("30 18 1 * *", now=fri)
+    lt2 = _time.localtime(nxt2)
+    assert lt2.tm_mday == 1 and (lt2.tm_hour, lt2.tm_min) == (18, 30)
+
+    # 步长：每 15 分钟
+    nxt3 = cron_expr.next_run("*/15 * * * *", now=fri)
+    assert _time.localtime(nxt3).tm_min % 15 == 0
+
+    # 不合法表达式：校验给中文原因
+    assert "5 段" in (cron_expr.validate("0 9 * *") or "")
+    assert "超出范围" in (cron_expr.validate("99 * * * *") or "")
+    assert "起点大于终点" in (cron_expr.validate("0 9 * * 5-1") or "")
+
+
+def test_cron_workdays_and_cron_expr_via_ws(home):
+    from test_server import make_client, recv_until
+
+    with make_client(home, [[]]) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "w1", "method": "cron.add", "params": {
+            "name": "工作日日报", "prompt": "汇总", "schedule_type": "workdays",
+            "time_of_day": "09:00", "allowed_tools": ["read_file"],
+        }})
+        r1 = recv_until(ws, "w1")
+        assert r1["ok"], r1.get("error")
+        t1 = r1["result"]
+        assert t1["schedule_type"] == "workdays" and t1["next_run_at"] > 0
+        assert _time.localtime(t1["next_run_at"]).tm_wday < 5
+
+        ws.send_json({"id": "c1", "method": "cron.add", "params": {
+            "name": "Cron 任务", "prompt": "扫描", "schedule_type": "cron",
+            "time_of_day": "30 8 * * 1-5", "allowed_tools": ["read_file"],
+        }})
+        r2 = recv_until(ws, "c1")
+        assert r2["ok"], r2.get("error")
+        t2 = r2["result"]
+        assert t2["schedule_type"] == "cron" and t2["time_of_day"] == "30 8 * * 1-5"
+        assert t2["next_run_at"] > 0
+
+        # 非法表达式拒绝（入口校验，不静默降级）
+        ws.send_json({"id": "bad", "method": "cron.add", "params": {
+            "name": "坏表达式", "prompt": "x", "schedule_type": "cron",
+            "time_of_day": "99 * * * *",
+        }})
+        bad = recv_until(ws, "bad")
+        assert not bad["ok"] and "Cron 表达式不合法" in bad["error"]
+
+        # 从每天改成 cron 但没给表达式：拒绝（旧 HH:MM 不能当表达式）
+        ws.send_json({"id": "cu", "method": "cron.update", "params": {
+            "id": t1["id"], "schedule_type": "cron",
+        }})
+        cu = recv_until(ws, "cu")
+        assert not cu["ok"] and "5 段表达式" in cu["error"]

@@ -1363,9 +1363,13 @@ def test_history_proc_box_works_on_detached_log():
 
 def test_minimap_skips_process_items():
     """右侧悬浮刻度（minimap）只对应对话消息：过程时间线里的中间说明（proc-note）
-    曾经会被当成一条助手消息多占一格；过程框本身不是 .msg，但这里把两道口子都钉住。"""
+    曾经会被当成一条助手消息多占一格；过程框本身不是 .msg，但这里把两道口子都钉住。
+    分屏后每条聊天流一条刻度，取消息的函数带 log 参数（miniMsgsFor）。"""
     js = read_app_bundle()
-    i = js.index("function miniMsgs()")
+    i = js.index("function miniMsgsFor(log)")
     body = js[i:js.index("\n}\n", i)]
     assert 'if (!el.classList.contains("msg")) continue;' in body
     assert 'el.classList.contains("proc-note")' in body
+    # 截图回填与系统补记的伪 user 消息也不进刻度（2026-11-14）
+    assert 'el.classList.contains("screenshot-note")' in body
+    assert 'el.classList.contains("system-note")' in body

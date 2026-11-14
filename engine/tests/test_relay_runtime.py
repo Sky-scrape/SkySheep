@@ -305,6 +305,23 @@ async def test_token_budget_pauses(home):
         await be.shutdown()
 
 
+async def test_token_budget_default_unlimited(home):
+    """token_budget 默认 0 = 不限制：任务正常开跑、节点正常出报告，
+    不会一起步就被预算闸拦下。"""
+    prov = FakeProvider([[TextBlock(text="A")], [TextBlock(text="B")]])
+    be = await _mk(home, prov)
+    try:
+        sid = (await be.new_session())["id"]
+        snap = await _start(be, sid, workflow=_workflow(token_budget=0))
+        task_id = snap["task"]["id"]
+        snap = await _wait_snapshot(be, task_id, "waiting_confirmation")
+        assert snap["task"]["error"] == {}
+        assert _node(snap, "n1")["status"] == "reported"
+        assert len(prov.calls) == 1
+    finally:
+        await be.shutdown()
+
+
 async def test_restart_marks_task_interrupted(home):
     prov = GatedProvider("报告")
     be = await _mk(home, prov)

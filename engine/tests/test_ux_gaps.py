@@ -371,8 +371,10 @@ def test_set_advanced_settings_validation(home):
     assert cfg.context_limit_tokens == 128_000
     assert cfg.compaction_keep_recent == 12
     assert cfg.restrict_to_workdir is True
+    set_advanced_settings_in_config(max_iterations=0)  # 0 = 不限制，合法
+    assert load_config().max_iterations == 0
     with pytest.raises(ConfigError):
-        set_advanced_settings_in_config(max_iterations=0)
+        set_advanced_settings_in_config(max_iterations=201)
     with pytest.raises(ConfigError):
         set_advanced_settings_in_config(context_limit_tokens=100)
     with pytest.raises(ConfigError):
@@ -395,7 +397,7 @@ def test_advanced_ws_roundtrip_and_hot_effect(home):
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "a1", "method": "advanced.get"})
         d = recv_until(ws, "a1")["result"]
-        assert d["max_iterations"] == 40
+        assert d["max_iterations"] == 0  # 默认 0 = 不限制
         assert d["restrict_to_workdir"] is False
         assert d["compaction_auto"] is True  # 默认开
         assert d["autostart"]["supported"] in (True, False)  # 平台相关，不假设

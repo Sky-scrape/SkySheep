@@ -425,6 +425,14 @@ class MCPTool(Tool):
     重连再成功也修不好这些工具对象。
     """
 
+    # 类级保守声明（实例 __init__ 会按服务器注解逐项覆盖）：外部工具目录
+    # 若在实例化前读类属性，也不能拿到「猜的」缺省值
+    safety = Safety.WRITE
+    read_only_hint = False
+    destructive_hint = True
+    idempotent_hint = False
+    open_world_hint = True
+
     def __init__(self, manager: MCPManager, server_name: str, tool_name: str,
                  description: str, input_schema: dict, readonly: bool,
                  call_timeout: float | None = None,

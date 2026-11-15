@@ -49,7 +49,7 @@ def test_spectate_send_counts_delivered():
         enabled = True
         pure_outbound = True
 
-        async def configured(self):
+        def configured(self):
             return True
 
         async def send_text(self, chat_id, body):

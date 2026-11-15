@@ -71,7 +71,7 @@ def probe_node() -> tuple[bool, str]:
     try:
         out = subprocess.run(
             [exe, "--version"],
-            capture_output=True, text=True, timeout=5.0,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5.0,
             creationflags=_no_window_flags(),
         )
         if out.returncode != 0:

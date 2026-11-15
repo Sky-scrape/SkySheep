@@ -269,6 +269,11 @@
             <span id="subagents-badge" class="tb-badge hidden"></span>
           </button>
           <button id="btn-term" class="tb-icon" title="终端面板：多开命令行标签（Ctrl+`）" aria-label="终端面板"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="m7.5 9.5 3 2.5-3 2.5"/><path d="M12.5 15h4"/></svg></button>
+          <!-- 右栏形态互切（S3）：预览分栏 与 会话分屏 共用同一块右侧空间、互斥。
+               开着其中一个时出现这枚按钮，点一下换另一个（记住上次的分屏会话与预览页） -->
+          <button id="btn-pane-switch" class="tb-icon hidden" title="切换右栏形态" aria-label="切换右栏形态">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M14.5 5v14"/><path d="m7 9 2.5 3L7 15"/></svg>
+          </button>
           <button id="btn-tabs" class="tb-icon" title="展开 / 收起右侧面板" aria-label="展开或收起右侧面板"></button>
           <button id="btn-stop" class="btn-ghost danger" hidden>⏹ 停止</button>
         </header>
@@ -780,6 +785,11 @@
                     <textarea id="relay-peer-task" class="modal-input" rows="3"></textarea>
                   </div>
                 </div>
+                <!-- 下一轮附言（A4）：给下一次换手附带一句微调，注入那一轮的简报即清空。
+                     不落库：重启后为空（面板文案已说明），不为一句话升库版本 -->
+                <label for="relay-next-note">下一轮附言（只生效一次）</label>
+                <textarea id="relay-next-note" class="modal-input" rows="2"
+                          placeholder="下一轮换手时顺便叮嘱一句，例如「交回前先跑一遍测试」；随下一次换手注入后自动清空（重启后不保留）"></textarea>
                 <div class="relay-start-actions">
                   <button id="relay-run-start" class="btn-primary">开始接力</button>
                   <button id="relay-run-stop" class="rp-mini" disabled>中断</button>
@@ -1127,9 +1137,20 @@
               <div id="collab-tpl-form" class="toolcfg-form"></div>
             </div>
           </section>
-          <!-- 三个内置模式的引擎默认值：模板把「谁来做」抽走后，这里只剩上限与超时；默认折叠，避免和上方的模板画廊抢视线 -->
+          <!-- 三个内置模式的引擎默认值：模板把「谁来做」抽走后，这里只剩上限与超时；默认折叠，避免和上方的模板画廊抢视线。
+               S1：这里是「没有用模板 / 模板里没填」时的兜底；同一项在上方模板编辑器的「限额」
+               里填了非 0 就以模板为准。折起来时也能一眼看出谁覆盖谁，不用两处对照猜。 -->
           <details class="collab-defaults">
-            <summary>引擎默认值（高级）：圆桌 / 团队 / 对抗的成员上限与超时</summary>
+            <summary>引擎默认值（高级）：没用模板或模板没填时的兜底上限与超时</summary>
+            <!-- 这一行刻意 <90 字：设置页会把超过 90 字的长说明折进「说明」，
+                 而「谁覆盖谁」正是折叠状态下也要一眼看到的信息 -->
+            <p class="settings-hint">
+              <b>谁生效：</b>模板「限额」填了非 0 就以模板为准；填 0 或没用模板时用下面三张卡，团队另受模板预算约束。
+            </p>
+            <p class="settings-hint">
+              要按某类任务长期改参数，别在这里调——在上方「协作模板」点「复制」建一份自己的模板，
+              在模板的「限额」里填，运行时选中它即可（内置模板只读，复制后才能改）。
+            </p>
           <section class="settings-card">
             <div class="card-head"><h3>圆桌</h3></div>
             <p class="settings-hint" id="roundtable-hint"></p>
@@ -1378,6 +1399,44 @@
               <ul id="hooks-recent-list" class="list"></ul>
             </details>
             <p class="dim small" id="hooks-config-path"></p>
+          </section>
+
+          <!-- 模型自动分层（A3）：默认关；轻活走轻量模型、重活走主力模型，
+               会话里手动选过模型时一律不动（用户的决定优先） -->
+          <section class="settings-card" id="routing-card">
+            <div class="card-head">
+              <h3>模型自动分层</h3>
+              <span class="head-ops">
+                <button id="btn-routing-save" class="btn-ghost">保存</button>
+              </span>
+            </div>
+            <p class="settings-hint">
+              按任务复杂度自动换模型：寒暄 / 翻译 / 格式整理走轻量模型（更快更省），
+              调试 / 架构 / 多步作业走主力模型。
+            </p>
+            <p class="settings-hint">
+              只影响普通单 Agent 轮：团队 / 圆桌 / 对抗的模型由模板决定；
+              在会话里手动选过模型时不生效（你的选择优先）。
+            </p>
+            <div id="routing-status" class="card-status" hidden></div>
+            <div class="toolcfg-form">
+              <label class="toggle-row adv-toggle">
+                <input type="checkbox" id="routing-enabled">
+                <span>启用自动分层</span>
+              </label>
+              <div class="toolcfg-row">
+                <label>轻活模型</label>
+                <select id="routing-light-provider" class="sel-md"></select>
+                <input id="routing-light-model" class="num-md" type="text"
+                       placeholder="留空 = 该服务默认模型">
+              </div>
+              <div class="toolcfg-row">
+                <label>重活模型</label>
+                <select id="routing-heavy-provider" class="sel-md"></select>
+                <input id="routing-heavy-model" class="num-md" type="text"
+                       placeholder="留空 = 该服务默认模型（可不配）">
+              </div>
+            </div>
           </section>
 
           <section class="settings-card">
@@ -2839,6 +2898,8 @@
 <script src="/static/app-mods.js"></script>
 <!-- 操作过程时间线（思考行/工具行/过程框）：从 app.js 拆出的分区文件 -->
 <script src="/static/app-proc.js"></script>
+<!-- 消息导航条（minimap）：只定义函数，需排在 app.js 之前（app.js 顶层就 new 主栏实例） -->
+<script src="/static/app-minimap.js"></script>
 <script src="/static/app.js"></script>
 <!-- 协作模板（L1）：设置页画廊 / 模板编辑器 / 协作菜单分组 / 跑前清单。
      普通 script、零构建，先 app.js 后本文件——靠全局函数互调（app.js 侧的

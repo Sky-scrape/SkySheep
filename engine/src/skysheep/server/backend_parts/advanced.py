@@ -19,6 +19,7 @@ from ...config import (
     set_hooks_in_config,
     set_network_settings_in_config,
     skysheep_home,
+    update_config_section,
     update_provider_in_config,
 )
 from ...core.hooks import (
@@ -216,6 +217,12 @@ class SystemMixin(RelaySettingsMixin):
             "network_proxy": self.cfg.network.proxy,
             "network_no_proxy": self.cfg.network.no_proxy,
             "network_ca_cert": self.cfg.network.ca_cert,
+            # 模型自动分层（A3）：轻活/重活各自的 (服务, 模型)
+            "routing_enabled": bool(self.cfg.routing.enabled),
+            "routing_light_provider": self.cfg.routing.light_provider,
+            "routing_light_model": self.cfg.routing.light_model,
+            "routing_heavy_provider": self.cfg.routing.heavy_provider,
+            "routing_heavy_model": self.cfg.routing.heavy_model,
         }
 
     async def save_advanced_settings(self, params: dict) -> dict:
@@ -321,6 +328,29 @@ class SystemMixin(RelaySettingsMixin):
                 )
             except ConfigError as e:
                 raise RuntimeError(str(e)) from e
+        # 模型自动分层（A3）：四项 + 开关任一非 None 才写 [routing]。
+        # 服务名必须是已配置的服务（写错不静默存进去，否则路由永远不生效还查不出）
+        routing_keys = (
+            "routing_enabled", "routing_light_provider", "routing_light_model",
+            "routing_heavy_provider", "routing_heavy_model",
+        )
+        if any(params.get(k) is not None for k in routing_keys):
+            updates: dict = {}
+            for key, field, is_provider in (
+                ("routing_light_provider", "light_provider", True),
+                ("routing_heavy_provider", "heavy_provider", True),
+                # 模型是自由文本（服务默认模型留空），不做「已登记」校验
+                ("routing_light_model", "light_model", False),
+                ("routing_heavy_model", "heavy_model", False),
+            ):
+                if params.get(key) is not None:
+                    value = str(params.get(key) or "").strip()
+                    if is_provider and value and value not in self.cfg.providers:
+                        raise RuntimeError(f"未知服务：{value}（先在「模型服务」里配置）")
+                    updates[field] = value
+            if params.get("routing_enabled") is not None:
+                updates["enabled"] = bool(params.get("routing_enabled"))
+            update_config_section("routing", updates)
         self.cfg = load_config()
         # 出网设置热生效：子进程口径（run_command / 终端 / 钩子 / MCP stdio /
         # Mods Node）与 MCP 的 HTTP 客户端都跟着换，用户不必重启应用。

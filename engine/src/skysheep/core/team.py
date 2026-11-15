@@ -68,6 +68,7 @@ from .agent import Agent
 from .prompt import TEAM_DIRECTOR_PROMPT, TEAM_HUDDLE_PROMPT, TEAM_MEMBER_PROMPT
 from .report_prune import prune_report_files
 from .roundtable import MemberSpec, run_roundtable
+from .subagent import IsolatedGate
 from .team_board import (
     _DEFAULT_REDO_LIMIT,
     TEAM_ACCEPT_MAX_CHARS,
@@ -85,6 +86,7 @@ from .team_store import (  # noqa: F401
     TeamTemplateStore,
     validate_team_template_name,
 )
+from .worktree import commit_all, ensure_worktree, is_git_repo
 
 # 发给前端的事件回调（backend 负责转成 WS 帧广播；与 roundtable.EmitFn 同形）
 EmitFn = Callable[[AgentEvent], Awaitable[None]]
@@ -456,6 +458,45 @@ class HuddleRequest:
     context: str = ""
 
 
+class TeamIsolatedGate:
+    """团队隔离执行门（A1）：worktree 内写入直接放行，其余交还会话门（取严）。
+
+    与隔离子代理的差异：团队是交互式协作，命令确认有人应答——所以这里不把
+    命令一律预拒，而是把「工作区内写入」当作隔离自己的确认（分支可整体丢弃），
+    命令与工作区外写入仍交还给会话门（档位更严时按更严的来）。
+    出站密钥预拒绝与引擎主目录写入守卫照旧先于放行判定（与主门/隔离门同口径）。
+    """
+
+    def __init__(self, inner, member: str, workdir: Path) -> None:
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_member", member)
+        # 复用 IsolatedGate 的判定小件（_egress_pre_deny / _write_hits_engine_home /
+        # _write_target_inside_workdir），只是组合顺序不同
+        object.__setattr__(self, "_probe", IsolatedGate(working_dir=workdir))
+
+    async def authorize(self, tool, input_dict, **kwargs):
+        blocked = self._probe._egress_pre_deny(tool, input_dict)
+        if blocked is not None:
+            return blocked
+        if self._probe._write_hits_engine_home(tool, input_dict):
+            return await self._inner.authorize(tool, input_dict, **kwargs)
+        if tool.safety == Safety.READONLY:
+            return await self._inner.authorize(tool, input_dict, **kwargs)
+        if tool.safety == Safety.WRITE and self._probe._write_target_inside_workdir(
+            tool, input_dict
+        ):
+            return None  # 隔离工作区内写入 = 隔离本身的确认
+        return await self._inner.authorize(tool, input_dict, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in ("_inner", "_member", "_probe"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._inner, name, value)
+
 class TeamMemberGate:
     """会话既有 PermissionGate 的来源标注代理：**决策完全委托，只加标注**。
 
@@ -550,6 +591,7 @@ class TeamOrchestrator:
         compaction_trigger: float = 0.9,
         compaction_auto: bool = True,
         source_template: str = "",
+        isolate_exec: bool = False,
     ) -> None:
         if director_mode not in ("user", "ai"):
             raise TeamError(f"未知的总管形态：{director_mode}（只能是 user / ai）")
@@ -584,6 +626,11 @@ class TeamOrchestrator:
         self._max_members = self._cfg_value(cfg, "max_members", _DEFAULT_MAX_MEMBERS)
         self._redo_limit = self._cfg_value(cfg, "redo_limit", _DEFAULT_REDO_LIMIT)
         self._stall_limit = max(1, self._cfg_value(cfg, "stall_limit", _DEFAULT_STALL_LIMIT))
+        # A1 隔离执行（默认关）：执行型队员跑在各自的 git worktree 分支上，
+        # 写入不碰主工作区；完成时自动提交到该分支并提醒合并。只在 git 仓库
+        # 生效（非仓库/无工作目录时静默退化为共享工作区）。
+        self._isolate_exec = bool(isolate_exec)
+        self._member_worktrees: dict[str, tuple[Path, str]] = {}
 
         self.channel = TeamChannel(self._reports_dir)
         self.board = TeamBoard(self._redo_limit)
@@ -622,6 +669,10 @@ class TeamOrchestrator:
         # seq 一并记录——注入原文时把同文频道消息从总管未读剔除，保证总管
         # 对一条插话只见一次原文（不重复解读、不白耗 token）
         self._pending_user_notes: list[tuple[str, list[int]]] = []
+        # 宿主本轮带入的只读上下文（项目文件快照等，见 backend 的
+        # _preload_mentioned_files）：总管不挂文件工具，点名文件只看得到这段。
+        # 只在下一总管轮注入一次，注入后清空（与 _pending_user_notes 同生命周期）
+        self._pending_director_context: str = ""
         self._pending_huddles: list[HuddleRequest] = []  # 总管本轮排定的小会
         self._deliver_requested = False  # 总管经 team_deliver 请求交付
         self._deliver_prompted = False  # 已催过「全部完成请交付」（有新工单时复位）
@@ -1058,6 +1109,14 @@ class TeamOrchestrator:
             from_member=rt.spec.name, to_member="director", msg_kind="report",
             empty_note="（本轮没有产出）", seq=seq, parts=parts, suffix=suffix,
         )
+        if result.status == "done":
+            # A1 隔离执行：本轮的文件改动提交到该队员的 worktree 分支（无改动不发注记）
+            note = self._commit_member_worktree(rt)
+            if note:
+                msg = self.channel.post(
+                    "system", to_member="all", msg_kind="system", text=f"（{note}）",
+                )
+                await self._emit_message(msg)
         return result
 
     def _member_director_line(self) -> str:
@@ -1095,6 +1154,55 @@ class TeamOrchestrator:
             else "(none - quick chat only)",
         )
 
+    def _member_worktree(self, rt: _MemberRuntime) -> tuple[Path, str] | None:
+        """A1：取/建该队员的隔离 worktree；不可用时返回 None（退化为共享工作区）。
+
+        只有显式开启 isolate_exec、有工作目录且是 git 仓库时才建。目录与分支
+        都带 team_id 前缀，多支团队/多个项目互不撞名；同队同一队员复用同一个
+        worktree（跨轮、跨工单连续）。
+        """
+        if not self._isolate_exec or self._working_dir is None:
+            return None
+        cached = self._member_worktrees.get(rt.spec.name)
+        if cached is not None:
+            return cached
+        main = Path(self._working_dir)
+        if not is_git_repo(main):
+            return None
+        tag = (self.team_id or "team")[:8]
+        safe = "".join(
+            c if (c.isalnum() or c in "-_") else "-" for c in rt.spec.name
+        ).strip("-") or f"m{rt.index}"
+        branch = f"skysheep/team-{tag}-{safe}"
+        wt = main / ".skysheep" / "worktrees" / f"team-{tag}-{safe}"
+        try:
+            ensure_worktree(main, wt, branch)
+        except Exception:  # noqa: BLE001 - 建不出来就退化为共享工作区
+            return None
+        self._member_worktrees[rt.spec.name] = (wt, branch)
+        return wt, branch
+
+    def _commit_member_worktree(self, rt: _MemberRuntime) -> str:
+        """A1：把该队员 worktree 的改动提交到它的分支，返回频道注记（无改动返回空串）。
+
+        best-effort：提交失败不把已完成的一轮判成失败——改动都在 worktree 里，
+        注记里给出目录让人手动处理。合并永远由主会话完成（引擎不自动 merge）。
+        """
+        wt = self._member_worktrees.get(rt.spec.name)
+        if wt is None:
+            return ""
+        wt_dir, branch = wt
+        try:
+            sha = commit_all(wt_dir, f"team {self.team_id[:8]} · {rt.spec.name} · 第 {self.rounds_used} 轮")
+        except Exception as e:  # noqa: BLE001 - 提交失败只记注记
+            return (f"（隔离工作区提交失败：{e}；改动仍在 {wt_dir}，请手动检查。）")
+        if not sha:
+            return ""  # 这一轮没有文件改动
+        return (
+            f"隔离执行：队员「{rt.spec.name}」的改动已提交到分支 {branch}（{sha}），"
+            f"主工作区未受影响。复核与合并由主会话完成：git diff {branch} → git merge {branch}"
+        )
+
     def _ensure_agent(self, rt: _MemberRuntime, exec_mode: bool) -> Agent | None:
         """取或建成员 Agent，并按本轮模式切换工具表（Agent.history 跨轮保留）。"""
         if rt.spec.provider is None:
@@ -1104,13 +1212,24 @@ class TeamOrchestrator:
             # gate 理论上不会是 None（顾问型没有工具可调，门不会被触达；
             # 执行型在 exec_mode 里已要求门在场才挂工具表）——兜一个惰性
             # 空门只为满足 Agent 的类型契约，不构成第二套判定。
-            gate = TeamMemberGate(self._gate, rt.spec.name) if self._gate is not None \
-                else PermissionGate(working_dir=self._working_dir)
+            wt = self._member_worktree(rt)
+            if wt is not None:
+                # 隔离执行（A1）：工作目录换到该队员的 worktree；门=会话门（标注
+                # 队员来源）之上叠 IsolatedGate——工作区内写入自动放行，命令与
+                # 工作区外写入一律拒绝（隔离只覆盖文件写入，与隔离子代理同口径）
+                member_dir = wt[0]
+                inner = TeamMemberGate(self._gate, rt.spec.name) \
+                    if self._gate is not None else PermissionGate(working_dir=member_dir)
+                gate = TeamIsolatedGate(inner, rt.spec.name, member_dir)
+            else:
+                member_dir = self._working_dir
+                gate = TeamMemberGate(self._gate, rt.spec.name) \
+                    if self._gate is not None else PermissionGate(working_dir=self._working_dir)
             agent = Agent(
                 provider=rt.spec.provider,
                 registry=self._empty_registry,  # 下方按本轮模式再切
                 gate=gate,
-                working_dir=self._working_dir,
+                working_dir=member_dir,
                 max_iterations=self._max_iterations,
                 context_limit_tokens=rt.spec.context_limit_tokens or self._context_limit_tokens,
                 compaction_keep_recent=self._compaction_keep_recent,
@@ -1557,6 +1676,12 @@ class TeamOrchestrator:
                 "【用户插话（最高优先级，先于其他一切处理）】\n"
                 + "\n".join(f"- {t}" for t, _ in notes)
             )
+        if self._pending_director_context:
+            # 宿主带入的只读上下文（项目文件快照）：一次性注入，防止后续轮
+            # 反复吃同一段大文本。位置紧跟插话之后——总管把这轮活拆对之前先把
+            # 用户点到的文件看清楚（不挂文件工具，没有这段只能盲拆）。
+            sections.append(self._pending_director_context)
+            self._pending_director_context = ""
         forced = self._forced_directives()
         if forced:
             sections.append("【必须裁定（防失控上限已触发）】\n" + "\n".join(f"- {t}" for t in forced))
@@ -1653,8 +1778,14 @@ class TeamOrchestrator:
 
     # ---- AI 总管：自动循环（用户一句话目标 → 拆解 → 派工 → 收报 → 验收 → 交付）----
 
-    async def run_auto_turn(self, text: str, images: list | None = None) -> dict:
+    async def run_auto_turn(
+        self, text: str, images: list | None = None, director_context: str = "",
+    ) -> dict:
         """AI 总管自动闭环的一轮（用户消息驱动）：消息进频道 → 循环推进至空闲或终态。
+
+        director_context：宿主提前备好的只读上下文（如用户点名的项目文件快照），
+        只随下一总管轮注入、不进频道（频道里仍是用户原文）。总管不挂文件工具，
+        没有这段它就看不到用户提到的文件内容（F1 同类问题的文件版）。
 
         循环骨架：总管轮（拆解/派单/验收/裁定/交付，工具改板）→ 小会 →
         派发依赖就绪的待办工单 → 按名册唤醒名下有进行中工单的队员（轮毕
@@ -1683,6 +1814,8 @@ class TeamOrchestrator:
         self._idle_reason = ""
         # 下一总管轮最高优先级注入（设计 §2.1 插话权）；seqs 一并带上供未读剔除
         self._pending_user_notes.append((text, list(posted_seqs)))
+        if director_context:
+            self._pending_director_context = director_context
 
         self._loop_running = True
         woke: list[dict] = []
@@ -1744,7 +1877,9 @@ class TeamOrchestrator:
         self._idle_reason = idle_reason if self._finished is None else ""
         return self._turn_summary(posted_seqs, woke, finished=self.finished)
 
-    async def inject_user_message(self, text: str, images: list | None = None) -> dict:
+    async def inject_user_message(
+        self, text: str, images: list | None = None, director_context: str = "",
+    ) -> dict:
         """用户插话（AI 总管模式，设计 §2.1）：消息进频道 + 最高优先级注入总管下一轮。
 
         跨任务安全：循环推进中也可调用——只动频道与待注入清单（两侧都是
@@ -1772,6 +1907,9 @@ class TeamOrchestrator:
         posted_seqs = await self._post_user_message(text)
         self._idle_reason = ""
         self._pending_user_notes.append((text, list(posted_seqs)))
+        if director_context:
+            # 插话路径同样只喂总管（频道里保留用户原文），由下一总管轮取走
+            self._pending_director_context = director_context
         return {
             "posted_seqs": posted_seqs,
             "loop_running": self._loop_running,
@@ -1797,6 +1935,7 @@ class TeamOrchestrator:
             if rt.agent is not None:
                 rt.agent.set_system(self._member_system_prompt(rt.spec))
         self._pending_user_notes.clear()
+        self._pending_director_context = ""  # 未消费的只读上下文同样作废（没有总管轮了）
         self._pending_huddles.clear()
         self._deliver_requested = False
         self._stall_counts.clear()

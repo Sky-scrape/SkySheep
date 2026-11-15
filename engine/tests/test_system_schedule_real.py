@@ -25,7 +25,11 @@ def _schtasks_available() -> bool:
     try:
         r = subprocess.run(
             ["schtasks", "/Query", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=30,
+            # 中文 Windows 上 schtasks 按控制台代码页（GBK）输出：不给编码时
+            # 用 utf-8 严格解码会在 reader 线程里抛 UnicodeDecodeError
+            # （全量收集期就能触发一条 PytestUnhandledThreadExceptionWarning）
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30,
         )
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):

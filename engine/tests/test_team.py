@@ -2664,7 +2664,8 @@ def test_teamcfg_ws_roundtrip_clamp_and_hot_effect(home):
         got = q1["result"]
         assert set(got) == {"max_members", "member_timeout_s", "max_rounds",
                             "redo_limit", "stall_limit", "cron_resume_limit",
-                            "config_hint"}
+                            "isolated_tasks", "config_hint"}
+        assert got["isolated_tasks"] is False  # A1 隔离执行默认关
         assert (got["max_members"], got["member_timeout_s"], got["max_rounds"],
                 got["redo_limit"], got["stall_limit"],
                 got["cron_resume_limit"]) == (3, 300, 40, 2, 2, 1)
@@ -4040,3 +4041,37 @@ def test_template_team_specs_expand_multi_model_pool(home):
         ("fa", "ma"), ("fa", "mb"),
     ]
     assert specs[0].name == "调研员" and specs[1].name == "实施者"
+
+
+@pytest.mark.asyncio
+async def test_ai_director_receives_director_context_once(tmp_path):
+    """宿主带入的只读上下文（项目文件快照）只进总管唤醒、只注入一次。
+
+    总管不挂文件工具（O1）：用户点名的项目文件由 backend 预取后经
+    director_context 传入，必须出现在总管第一轮消息里、且不污染频道里的
+    用户原文；第二轮不再重复注入（大文本不反复吃 token）。
+    """
+    director = FakeProvider([
+        [TextBlock(text="先记录一下")],
+        [TextBlock(text="无事可做")],
+    ])
+    events, orch = make_ai_orch(director, working_dir=tmp_path)
+    await orch.create_team([spec("小研", FakeProvider([[TextBlock(text="好")]]))])
+
+    snapshot = "【本轮自动带入的项目文件】\n<<< 文件：calc.py >>>\nprint(1)\n<<< 文件结束 >>>"
+    await orch.run_auto_turn("审查 calc.py", director_context=snapshot)
+
+    first_turn_texts = [
+        m.text for m in director.calls[0][-1:] if getattr(m, "text", "")
+    ]
+    assert any(snapshot in t for t in first_turn_texts), "快照必须进总管首轮唤醒"
+    # 频道里的用户消息保持原文（快照只给总管看）
+    user_msgs = [m.text for m in orch.channel.messages if m.from_member == "user"]
+    assert user_msgs == ["审查 calc.py"]
+    assert all(snapshot not in m for m in user_msgs)
+    # 一次性：已被第一个总管轮取走，不会残留给后续轮
+    assert orch._pending_director_context == ""
+    later_turns = [
+        m.text for call in director.calls[1:] for m in call if getattr(m, "text", "")
+    ]
+    assert all(snapshot not in t for t in later_turns), "快照不应重复注入后续总管轮"

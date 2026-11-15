@@ -1807,3 +1807,56 @@ async def test_dual_permission_frame_carries_peer_side(home):
         assert be.respond_permission(peer_frame["relay"]["request_id"], "deny") is True
     finally:
         await be.shutdown()
+
+
+async def test_dual_next_note_injected_once(home):
+    """A4 下一轮附言：存运行期、随下一次换手注入 brief 一次即清空。
+
+    - relay_dual_save(next_note=...) 回包里回显；
+    - 点执行后该轮 brief 带「用户给这一轮的附言」，载荷里 next_note 变空；
+    - 再执行一方时 brief 不再带附言（一次性）。
+    """
+    prov = FakeProvider([
+        [TextBlock(text="主屏方案")],
+        [TextBlock(text="副屏执行")],
+        [TextBlock(text="主屏收尾")],
+    ])
+    be = await _mk(home, prov)
+    try:
+        sid = (await be.new_session())["id"]
+        started = await be.relay_dual_run({
+            "session_id": sid, "goal": "目标",
+            "main_task": "改方案", "peer_task": "改执行",
+            "request_id": "n1", "expected_revision": 0,
+        })
+        pair_id = started["pair"]["id"]
+        await _wait_pair_state(be, pair_id, "idle")
+
+        saved = await be.relay_dual_save({
+            "pair_id": pair_id, "next_note": "交回前先跑一遍测试",
+        })
+        assert saved["next_note"] == "交回前先跑一遍测试"
+
+        await be.relay_dual_run({
+            "session_id": sid, "pair_id": pair_id,
+            "request_id": "n2",
+            "expected_revision": (await be.store.relay_pair_get(pair_id))["revision"],
+        })
+        await _wait_pair_state(be, pair_id, "idle")
+        snap = await be.store.relay_pair_snapshot(pair_id)
+        first_brief = snap["turns"][-1]["brief"]
+        assert "用户给这一轮的附言" in first_brief
+        assert "交回前先跑一遍测试" in first_brief
+        # 注入即清空：载荷回显为空
+        assert (await be.relay_dual_get({"pair_id": pair_id}))["next_note"] == ""
+
+        await be.relay_dual_run({
+            "session_id": sid, "pair_id": pair_id,
+            "request_id": "n3",
+            "expected_revision": (await be.store.relay_pair_get(pair_id))["revision"],
+        })
+        await _wait_pair_state(be, pair_id, "idle")
+        snap2 = await be.store.relay_pair_snapshot(pair_id)
+        assert "交回前先跑一遍测试" not in snap2["turns"][-1]["brief"], "附言只吃一轮"
+    finally:
+        await be.shutdown()

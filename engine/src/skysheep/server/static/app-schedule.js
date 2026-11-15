@@ -939,6 +939,13 @@ function fmtCronSchedule(t) {
   if (t.schedule_type === "daily") return `每天 ${t.time_of_day}`;
   if (t.schedule_type === "workdays") return `工作日 ${t.time_of_day}`;
   if (t.schedule_type === "cron") return `Cron：${t.time_of_day}`;
+  if (t.schedule_type === "watch") {
+    // 文件夹变化触发：规格是 JSON（dir/glob/debounce_s），坏口径按原样显示
+    try {
+      const s = JSON.parse(t.time_of_day || "{}");
+      return `文件夹：${s.dir || "?"}${s.glob && s.glob !== "*" ? " / " + s.glob : ""}`;
+    } catch (e) { return "文件夹：配置无法解析"; }
+  }
   const days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
   return `每周${days[t.weekday] || "?"} ${t.time_of_day}`;
 }
@@ -1160,6 +1167,7 @@ async function cronModal(existing) {
         <option value="workdays" ${t.schedule_type === "workdays" ? "selected" : ""}>工作日每天（周一至周五）</option>
         <option value="weekly" ${t.schedule_type === "weekly" ? "selected" : ""}>每周固定时间</option>
         <option value="cron" ${t.schedule_type === "cron" ? "selected" : ""}>Cron 表达式（高级）</option>
+        <option value="watch" ${t.schedule_type === "watch" ? "selected" : ""}>文件夹有变化时（高级）</option>
       </select>
       <div id="cron-interval-wrap">
         <label>间隔（分钟）</label>
@@ -1182,6 +1190,20 @@ async function cronModal(existing) {
           例：<code>0 9 * * 1-5</code> 工作日 9 点；<code>30 18 1 * *</code> 每月 1 号 18:30。
           Cron 任务只在应用内调度，不能导出为系统计划任务。</p>
       </div>
+      <div id="cron-watch-wrap" class="hidden">
+        <label>监视目录</label>
+        <input id="cron-watch-dir" class="modal-input" type="text" spellcheck="false"
+               placeholder="例如：D:\下载\发票（目录必须已存在）">
+        <label>文件匹配（glob）</label>
+        <input id="cron-watch-glob" class="modal-input" type="text" spellcheck="false"
+               placeholder="*.pdf（留空 = 目录内所有文件）">
+        <label>防抖（秒）</label>
+        <input id="cron-watch-debounce" class="modal-input" type="number" min="0" max="600" step="1" value="5">
+        <p class="dim small">发现目录里有<b>新文件或内容变化</b>时排队跑一次（同名文件改写也算）；
+          保存一次大文件会连续改写多次，防抖窗口内的多次变化只触发一轮。
+          只在应用运行期间生效（文件夹触发器不能导出为系统计划任务），
+          与时间调度的任务一样走预授权工具与运行账本。</p>
+      </div>
       <label>预授权工具（无人值守运行时自动放行；不勾的会被自动拒绝）</label>
       <div class="cron-tools">${toolRows}</div>
       <label class="cron-notify"><input id="cron-notify" type="checkbox"${t.notify_channel ? " checked" : ""}> 完成后推送到聊天渠道</label>
@@ -1203,10 +1225,19 @@ async function cronModal(existing) {
     box.querySelector("#cron-time-wrap").classList.toggle(
       "hidden", v === "interval" || v === "cron");
     box.querySelector("#cron-cron-wrap").classList.toggle("hidden", v !== "cron");
+    box.querySelector("#cron-watch-wrap").classList.toggle("hidden", v !== "watch");
     const wd = box.querySelector("#cron-weekday");
     box.querySelector("#cron-weekday-label").style.display = v === "weekly" ? "" : "none";
     wd.style.display = v === "weekly" ? "" : "none";
   };
+  // 文件夹触发器规格回填（编辑既有 watch 任务时）
+  let watchSpec = { dir: "", glob: "*", debounce_s: 5 };
+  if (t.schedule_type === "watch") {
+    try { watchSpec = { ...watchSpec, ...JSON.parse(t.time_of_day || "{}") }; } catch (e) { /* 坏值按空 */ }
+  }
+  box.querySelector("#cron-watch-dir").value = watchSpec.dir || "";
+  box.querySelector("#cron-watch-glob").value = watchSpec.glob || "*";
+  box.querySelector("#cron-watch-debounce").value = watchSpec.debounce_s ?? 5;
   box.querySelector("#cron-type").addEventListener("change", syncType);
   syncType();
   // 模型选择：服务下拉决定模型候选；服务为空（跟随全局）时禁用模型下拉
@@ -1286,10 +1317,17 @@ async function cronModal(existing) {
       prompt,
       schedule_type: stype,
       interval_minutes: Number(box.querySelector("#cron-interval").value) || 60,
-      // cron 表达式复用 time_of_day 列（纯文本列，无需加列迁移）
+      // cron 表达式与文件夹触发规格都复用 time_of_day 列（纯文本列，
+      // 无需加列迁移）：cron 存表达式，watch 存 {dir, glob, debounce_s} JSON
       time_of_day: stype === "cron"
         ? cronExpr
-        : (box.querySelector("#cron-time").value || "09:00"),
+        : stype === "watch"
+          ? JSON.stringify({
+              dir: box.querySelector("#cron-watch-dir").value.trim(),
+              glob: box.querySelector("#cron-watch-glob").value.trim() || "*",
+              debounce_s: Number(box.querySelector("#cron-watch-debounce").value) || 0,
+            })
+          : (box.querySelector("#cron-time").value || "09:00"),
       weekday: Number(box.querySelector("#cron-weekday").value) || 0,
       allowed_tools: picked,
       notify_channel: box.querySelector("#cron-notify").checked,

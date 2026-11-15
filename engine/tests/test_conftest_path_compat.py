@@ -56,7 +56,7 @@ def test_repo_root_relative_test_path_collects_from_engine_dir():
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "engine/tests/test_roundtable.py",
          "--collect-only", "-q", "-p", "no:cacheprovider"],
-        cwd=ENGINE_ROOT, capture_output=True, text=True, timeout=120,
+        cwd=ENGINE_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "test_roundtable" in proc.stdout

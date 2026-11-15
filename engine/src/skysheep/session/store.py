@@ -969,7 +969,14 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         # 写事务的 journal 排他锁挡住；busy_timeout 兜住偶发的写写碰撞。
         # journal_mode 是库级持久属性，synchronous/busy_timeout 是连接级的，
         # 所以每次 connect 都要设全这三样。
-        await self._db.execute("PRAGMA journal_mode=WAL")
+        cur_jm = await self._db.execute("PRAGMA journal_mode=WAL")
+        jm_row = await cur_jm.fetchone()
+        self.journal_mode = str(jm_row[0]).lower() if jm_row and jm_row[0] else ""
+        if self.journal_mode and self.journal_mode != "wal":
+            logger.warning(
+                "会话库未进入 WAL 模式（实际模式=%s，路径=%s），并发写入可能退化",
+                self.journal_mode, self.path,
+            )
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA busy_timeout=5000")
         # 降级防护：库里版本号比程序新，说明这个库被更新版本的 SkySheep 打开过。
@@ -4024,10 +4031,17 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         """按调度类型计算下次运行时间（相对 last_run_at / 当前时间）。
 
         类型：interval / daily / weekly / workdays（周一至周五）/ cron
-        （5 段表达式，存在 time_of_day 列里——纯文本列，无需加列迁移）。
+        （5 段表达式，存在 time_of_day 列里——纯文本列，无需加列迁移）/
+        watch（文件夹变化触发：同样存在 time_of_day 列里，JSON 规格见
+        core/watchspec.py；不按时间到点，返回 0 停放）。
         """
         n = now if now is not None else time.time()
         stype = row.get("schedule_type", "interval")
+        if stype == "watch":
+            # 文件夹变化触发（A2）：不按时间到点。0 = 停放（due_cron_tasks 只收
+            # next_run_at > 0），由后端 watch 轮询器发现变化后把它顶到当前时刻，
+            # 交给既有扫描循环执行；跑完这里重新归 0。
+            return 0.0
         if stype == "interval":
             step = max(1, int(row.get("interval_minutes") or 0))
             base = row.get("last_run_at") or n

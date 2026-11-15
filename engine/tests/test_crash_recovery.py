@@ -81,7 +81,7 @@ def _run_and_die(script: str, *args: str) -> None:
     """跑一个注定硬退的子进程；返回码必须是非零（9 = os._exit(9)）。"""
     proc = subprocess.run(
         [sys.executable, "-c", script, *args],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )
     assert proc.returncode != 0, (
         f"子进程应被硬杀/退出，实际 returncode={proc.returncode}\n"
@@ -93,7 +93,7 @@ def _run_ok(script: str, *args: str) -> None:
     """跑一个应正常结束的制造器脚本（如造残留文件）。"""
     proc = subprocess.run(
         [sys.executable, "-c", script, *args],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )
     assert proc.returncode == 0, f"制造器脚本失败：{proc.stderr[-800:]}"
 

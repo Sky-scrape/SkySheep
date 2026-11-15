@@ -133,7 +133,7 @@ def test_spill_transcript_is_git_ignored(tmp_path):
     assert (scope / ".gitignore").read_text(encoding="utf-8") == "*\n"
     status = subprocess.run(
         ["git", "status", "--porcelain"], cwd=tmp_path, check=True,
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     ).stdout
     assert ".skysheep/transcripts" not in status, "会话原文被 git 当成未跟踪文件，会被 add -A 收走"
     assert IgnoreRules.load(tmp_path).matches(".skysheep/transcripts/x.md")

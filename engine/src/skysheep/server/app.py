@@ -262,6 +262,7 @@ def _no_store_static(app) -> None:
         "/static/app.js",
         # 操作过程时间线（思考行/工具行/过程框）：从 app.js 拆出的分区模块
         "/static/app-proc.js",
+        "/static/app-minimap.js",
         # 协作模板（画廊/编辑器/跑前清单）：前端零构建、无指纹，必须同版配套
         "/static/app-collab.js",
         "/static/app-teamroom.js",  # 团队室页签模块（index.html 加载清单强制对齐）

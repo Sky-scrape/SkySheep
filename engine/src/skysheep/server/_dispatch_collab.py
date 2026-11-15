@@ -75,6 +75,11 @@ async def _h_adversarial_compare(backend: ServerBackend, params: dict, emit, loc
     return await backend.adversarial_compare(params, local=local)
 
 
+async def _h_adversarial_fix_prompt(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
+    # 一键修复（O2）：只拼一段回填输入框的指令，不改库、不触发任何工具
+    return await backend.adversarial_fix_prompt(params, local=local)
+
+
 async def _h_roundtable_to_team_task(backend: ServerBackend, params: dict, emit, local: bool) -> dict:
     # 圆桌结论转工单（P5）：与 adversarial.to_team_tasks 同一收敛与拒绝口径
     return await backend.roundtable_to_team_task(_team_scoped_params(backend, params, local))
@@ -194,6 +199,7 @@ METHODS: dict[str, _WsMethod] = {
     "adversarial.to_team_tasks": _WsMethod(_h_adversarial_to_team_tasks),
     "adversarial.export": _WsMethod(_h_adversarial_export),
     "adversarial.compare": _WsMethod(_h_adversarial_compare),
+    "adversarial.fix_prompt": _WsMethod(_h_adversarial_fix_prompt),
     "roundtable.to_team_task": _WsMethod(_h_roundtable_to_team_task),
     "team.task_update": _WsMethod(_h_team_task_update),
     "team.stop": _WsMethod(_h_team_stop),

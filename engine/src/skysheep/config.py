@@ -138,6 +138,9 @@ class TeamConfig(BaseModel):
     # （run_auto_turn 因连续无进展退出）时自动补发续跑指令的次数上限。
     # 0 = 空闲即收队（照常产出《交付说明》与未尽事项）；上限 3 防空转烧 token
     cron_resume_limit: int = Field(default=1, ge=0, le=3)
+    # 隔离执行（A1，默认关）：执行型队员跑在各自的 git worktree 分支上，写入不碰主工作区；
+    # 每轮完成自动提交到该分支并在频道里提示合并（引擎不自动 merge）。非 git 项目自动退化为共享工作区
+    isolated_tasks: bool = False
 
 
 class AdversarialConfig(BaseModel):
@@ -151,6 +154,26 @@ class AdversarialConfig(BaseModel):
 
     max_findings: int = Field(default=20, ge=1, le=100)  # 单场候选问题上限（超出截断并提示）
     role_timeout_s: int = Field(default=300, ge=10)  # 单角色单次调用超时（裁判自动加倍）
+
+
+class RoutingConfig(BaseModel):
+    """模型自动分层路由（A3，config.toml [routing]）。
+
+    按任务复杂度把一轮对话交给不同档位的模型：寒暄 / 翻译 / 格式整理这类
+    轻活走「轻量模型」，调试 / 架构 / 多步作业走「主力模型」（可选），
+    中间档继续用会话当前模型。复杂度信号复用思考强度自动档的
+    core/effort.estimate_effort，不额外发请求、不额外花 token。
+
+    安全阀：默认关；只在本会话没有会话级模型覆盖时生效（用户在下拉里
+    手动选过模型 = 用户的决定优先，路由不碰）；团队 / 圆桌 / 对抗这些
+    多模型协作轮完全不参与路由（成员各自的模型由模板决定）。
+    """
+
+    enabled: bool = False
+    light_provider: str = ""
+    light_model: str = ""
+    heavy_provider: str = ""
+    heavy_model: str = ""
 
 
 class UsagePriceEntry(BaseModel):
@@ -471,6 +494,7 @@ class SkySheepConfig(BaseModel):
     roundtable: RoundtableConfig = Field(default_factory=RoundtableConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
     adversarial: AdversarialConfig = Field(default_factory=AdversarialConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
     relay: RelayConfig = Field(default_factory=RelayConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
@@ -662,6 +686,7 @@ def load_config() -> SkySheepConfig:
     roundtable = RoundtableConfig()
     team = TeamConfig()
     adversarial = AdversarialConfig()
+    routing = RoutingConfig()
     cron = CronConfig()
     websearch = WebSearchConfig()
     imagegen = ImageGenConfig()
@@ -723,6 +748,9 @@ def load_config() -> SkySheepConfig:
         adv_raw = raw.get("adversarial")
         if isinstance(adv_raw, dict):
             adversarial = _build_section_model(AdversarialConfig, adv_raw, "adversarial")
+        routing_raw = raw.get("routing")
+        if isinstance(routing_raw, dict):
+            routing = _build_section_model(RoutingConfig, routing_raw, "routing")
         cron_raw = raw.get("cron")
         if isinstance(cron_raw, dict):
             cron = _build_section_model(CronConfig, cron_raw, "cron")
@@ -839,6 +867,7 @@ def load_config() -> SkySheepConfig:
             roundtable=roundtable,
             team=team,
             adversarial=adversarial,
+            routing=routing,
             relay=raw.get("relay", {}),
             cron=cron,
             websearch=websearch,

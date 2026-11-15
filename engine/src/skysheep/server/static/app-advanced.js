@@ -286,7 +286,61 @@ async function renderAdvancedCfg() {
   } else {
     autoHint.textContent = "开启后开机自动启动，定时任务与日程提醒才能真正无人值守";
   }
+  await renderRoutingCfg(d);
   advancedStatus("");
+}
+
+// 模型自动分层（A3）：服务下拉来自 config.providers（Key 只回掩码），
+// 模型是自由文本（服务默认模型留空即可）。读取值随 advanced.get 一并回来。
+async function renderRoutingCfg(d) {
+  const q = (id) => document.getElementById(id);
+  const box = q("routing-enabled");
+  if (!box) return;
+  box.checked = !!d.routing_enabled;
+  q("routing-light-model").value = d.routing_light_model || "";
+  q("routing-heavy-model").value = d.routing_heavy_model || "";
+  let providers = {};
+  try {
+    providers = (await request("config.providers")).providers || {};
+  } catch (e) { /* 取不到就只留「不指定」，保存时后端仍校验服务名 */ }
+  const fill = (sel, current) => {
+    const opts = ['<option value="">不指定</option>'];
+    Object.keys(providers).forEach((name) => {
+      const pc = providers[name] || {};
+      opts.push(`<option value="${escapeHtml(name)}"${current === name ? " selected" : ""}>` +
+        `${escapeHtml(pc.label || name)}${pc.has_key ? "" : " · 未配置 Key"}</option>`);
+    });
+    if (current && !providers[current]) {
+      opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}（已不存在）</option>`);
+    }
+    sel.innerHTML = opts.join("");
+  };
+  fill(q("routing-light-provider"), d.routing_light_provider || "");
+  fill(q("routing-heavy-provider"), d.routing_heavy_provider || "");
+}
+
+async function saveRouting() {
+  const q = (id) => document.getElementById(id);
+  const el = q("routing-status");
+  el.hidden = true;
+  try {
+    await request("advanced.save", {
+      routing_enabled: q("routing-enabled").checked,
+      routing_light_provider: q("routing-light-provider").value || "",
+      routing_light_model: (q("routing-light-model").value || "").trim(),
+      routing_heavy_provider: q("routing-heavy-provider").value || "",
+      routing_heavy_model: (q("routing-heavy-model").value || "").trim(),
+    });
+    await renderAdvancedCfg();
+    el.textContent = "✓ 已保存（下一轮起生效）";
+    el.className = "card-status ok";
+    el.hidden = false;
+    autoHideStatus(el, el.textContent, true);
+  } catch (e) {
+    el.textContent = "✗ 保存失败：" + e.message;
+    el.className = "card-status bad";
+    el.hidden = false;
+  }
 }
 
 async function saveAdvanced() {

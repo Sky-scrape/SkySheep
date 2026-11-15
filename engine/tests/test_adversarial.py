@@ -956,3 +956,41 @@ async def test_judge_prompt_appends_to_builtin_system():
     system_text = judge.calls[0][0].text
     assert "自定义终审人设" in system_text
     assert "你是一场对抗性审查的终审裁判" in system_text
+
+
+def test_adversarial_fix_prompt_lists_confirmed_only(home):
+    """一键修复（O2）：只拼「成立 / 部分成立」的发现，推翻项不进修复指令；
+    正文来自库内 meta，前端不再拼装。"""
+    scripts = [
+        [[TextBlock(text=JUDGE_REPORT)]],
+        [[TextBlock(text=FINDER_JSON)]],
+        [[TextBlock(text=INVESTIGATOR_JSON)]],
+        [[TextBlock(text=ADVISOR_JSON)]],
+    ]
+    with make_adv_client(home, scripts) as client, client.websocket_connect("/ws") as ws:
+        ws.send_json({"id": "a1", "method": "chat.send", "params": {
+            "text": "审查这段代码：print(pop([]))",
+            "adversarial": True,
+            "members": [
+                {"provider": "fa", "model": "ma"},
+                {"provider": "fb", "model": "mb"},
+                {"provider": "fc", "model": "mc"},
+            ],
+        }})
+        frame = recv_until(ws, "a1", [])
+        sid = frame["result"]["session_id"]
+        ws.send_json({"id": "r1", "method": "session.resume", "params": {"id": sid}})
+        resume = recv_until(ws, "r1", [])
+        assistant = [m for m in resume["result"]["messages"] if m["role"] == "assistant"][-1]
+        ws.send_json({"id": "f1", "method": "adversarial.fix_prompt", "params": {
+            "session_id": sid, "seq": assistant["seq"],
+        }})
+        out = recv_until(ws, "f1")
+
+    assert out["ok"], out.get("error")
+    prompt, count = out["result"]["prompt"], out["result"]["count"]
+    assert count == 2  # F-001 成立 + F-002 部分成立；F-003 已推翻不计
+    assert "a.py:10" in prompt and "空列表调用 pop 会越界" in prompt
+    assert "日志记录了原始查询串" in prompt
+    assert "循环里重复编译正则" not in prompt, "已推翻的发现不得进修复指令"
+    assert "建议方案：日志脱敏后再落盘" in prompt, "修复建议要一并带进指令"

@@ -504,7 +504,12 @@ async def test_roundtable_chair_follows_session_model(home, monkeypatch):
         captured.update(kwargs)
         return _Outcome()
 
-    monkeypatch.setattr("skysheep.server.backend.run_roundtable", fake_run_roundtable)
+    # O5 拆块后圆桌轮主体在 backend_parts/roundtable_body.py：patch 落点
+    # 跟着实现走（backend.run_roundtable 已不是调用点）
+    monkeypatch.setattr(
+        "skysheep.server.backend_parts.roundtable_body.run_roundtable",
+        fake_run_roundtable,
+    )
 
     evs = []
 

@@ -115,6 +115,9 @@ async function relayDualShowPeer(peer) {
     return;
   }
   await openSplitPane(peer.id, peer.title || RELAY_SIDE_LABEL.peer);
+  // 接力开的列也算「有分屏」：顶栏 ⇄ 互切入口据此出现（openSplitPane 已同步，
+  // 这里再兜一次——副屏被替换/重建的路径不走同一分支）
+  syncPaneSwitchBtn();
 }
 
 /** 点主页面的「接力」：开右侧看板 + 把副屏会话打开在分栏里。 */
@@ -142,6 +145,7 @@ function relayDualFillInputs() {
   apply("relay-goal", pair ? pair.goal : "");
   apply("relay-main-task", pair ? pair.main_task : "");
   apply("relay-peer-task", pair ? pair.peer_task : "");
+  apply("relay-next-note", relayDual ? relayDual.next_note : "");
   const auto = relayEl("relay-auto-alternate");
   if (auto && document.activeElement !== auto) {
     auto.checked = !!(pair && pair.auto_alternate);
@@ -372,6 +376,7 @@ async function relayDualRun() {
     peer_task: peerTask,
     auto_alternate: !!(autoEl && autoEl.checked),
     verify_handoff: !verifyEl || !!verifyEl.checked,
+    next_note: (relayEl("relay-next-note") && relayEl("relay-next-note").value || "").trim(),
     request_id: relayRequestId(),
     expected_revision: pair ? pair.revision : 0,
   };
@@ -450,6 +455,7 @@ function relayDualScheduleSave() {
         peer_task: (peerTaskEl && peerTaskEl.value || "").trim(),
         auto_alternate: !!(autoEl && autoEl.checked),
         verify_handoff: !verifyEl || !!verifyEl.checked,
+        next_note: (relayEl("relay-next-note") && relayEl("relay-next-note").value || "").trim(),
       });
       if (data && data.pair && relayDualPairId === data.pair.id) {
         relayDual = { ...(relayDual || {}), ...data, pair: data.pair, turns: data.turns || [] };
@@ -474,6 +480,9 @@ function relayOnPairState(snapshot) {
     main: prev.main || { id: snapshot.pair.main_session_id, title: "当前会话" },
     peer: prev.peer || { id: snapshot.pair.peer_session_id, title: RELAY_SIDE_LABEL.peer },
   };
+  // 下一轮附言（A4）：开轮成功的广播会带空串（后端已消费），把输入框同步清空。
+  // 广播里没有该键（其它状态帧）时保留当前值，不清用户正在输入的内容
+  if (snapshot.next_note !== undefined) relayDual.next_note = snapshot.next_note;
   relayDualPairId = snapshot.pair.id;
   // 轮次已不在跑：等确认的提示随之作废（取消/出错时不会再有 resolved 帧）
   if (snapshot.pair.state !== "running") {
@@ -483,6 +492,8 @@ function relayOnPairState(snapshot) {
   }
   relayDualRenderPerm();
   relayDualRender();
+  relayDualFillInputs();  // 附言被消费后同步清空（字段聚焦时 fill 会跳过，不抢输入）
+  syncPaneSwitchBtn();    // 接力可能顺带开了副屏列：互切入口跟着刷新
 }
 
 /** 某一屏在等权限确认（后端 relay_pair_permission 帧）：看板据此给入口。
@@ -589,7 +600,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   const permGo = relayEl("relay-perm-go");
   if (permGo) permGo.addEventListener("click", () => { relayDualGoConfirm(); });
-  ["relay-goal", "relay-main-task", "relay-peer-task"].forEach((id) => {
+  ["relay-goal", "relay-main-task", "relay-peer-task", "relay-next-note"].forEach((id) => {
     const el = relayEl(id);
     if (el) el.addEventListener("input", relayDualScheduleSave);
   });

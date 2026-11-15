@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from ...bgtasks import spawn_bg
 from ...channels.cards import task_finish_card
 from ...channels.manager import _fmt_dur
-from ...core import cron_expr, system_schedule
+from ...core import cron_expr, system_schedule, watchspec
 from ...core.collab_templates import is_builtin_template_name
 from ...core.review import review_output
 from ...core.run_ledger import (
@@ -1212,18 +1212,110 @@ class AutomationMixin:
     # ---- 定时任务：无人值守的周期 Agent 运行 ----
 
     CRON_INTERVAL = 20  # 扫描周期（秒）
+    WATCH_INTERVAL = 5  # 文件夹变化轮询周期（秒）：本机目录 stat 很便宜
 
     def start_cron_loop(self) -> None:
         self._cron_task = asyncio.create_task(self._cron_loop())
+        # 文件夹变化触发器（A2）：与时间调度并行的一条轻量轮询。发现变化只把
+        # next_run_at 顶到当前时刻，执行仍走 _cron_loop 的既有链路（门控/通知/
+        # 运行账本/工厂观战全部复用），本轮询不直接跑模型。
+        self._watch_task = asyncio.create_task(self._watch_loop())
         # 启动对账只在真实进程跑：pytest 下夹具隔离的是 SKYSHEEP_HOME，管不住
         # 机器级的任务计划程序——schtasks /Query / /Delete 绝不能在测试里冒出来
         if "PYTEST_CURRENT_TEST" not in os.environ:
             spawn_bg(self._reconcile_system_schedule())
 
     def stop_cron_loop(self) -> None:
-        if getattr(self, "_cron_task", None):
-            self._cron_task.cancel()
-            self._cron_task = None
+        for attr in ("_cron_task", "_watch_task"):
+            task = getattr(self, attr, None)
+            if task:
+                task.cancel()
+                setattr(self, attr, None)
+
+    def _watch_state(self) -> dict:
+        """watch 轮询器的运行期状态：task_id → 基线签名 / 防抖窗口。
+
+        只在内存（重启后重建基线、不会因为「目录里本来就有文件」在启动时
+        误触发一次）。规格变更（目录/glob 改了）也按新基线重新起步。
+        """
+        st = getattr(self, "_watch_runtime", None)
+        if st is None:
+            st = self._watch_runtime = {}
+        return st
+
+    async def _watch_loop(self) -> None:
+        while True:
+            try:
+                await self._watch_pass()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass  # 单轮扫描失败不终止循环
+            await asyncio.sleep(self.WATCH_INTERVAL)
+
+    async def _watch_pass(self) -> None:
+        """单轮：扫每个启用的 watch 任务，有变化就把 next_run_at 顶到当前。
+
+        触发窗口用规格里的 debounce_s 防抖（保存一次大文件会连着改写多次，
+        每次都触发等于一个动作跑多轮）；窗口内的变化记 pending，到期那一轮
+        补触发一次，不会因为「最后一次变化落在窗口里」被永久丢掉。
+        触发用 CAS 之外的直接写：watch 任务没有其它触发方，写 next_run_at
+        是它唯一的「到点」来源。
+        """
+        state = self._watch_state()
+        try:
+            tasks = await self.store.list_cron_tasks()
+        except Exception:  # noqa: BLE001 - 读不到任务不影响主循环
+            return
+        now = time.time()
+        alive: set[int] = set()
+        for task in tasks:
+            if str(task.get("schedule_type") or "") != "watch" or not task.get("enabled"):
+                continue
+            tid = int(task["id"])
+            alive.add(tid)
+            try:
+                spec = watchspec.parse_spec(str(task.get("time_of_day") or ""))
+            except watchspec.WatchSpecError:
+                continue
+            scan = await asyncio.to_thread(watchspec.scan, spec)
+            key = (spec.directory, spec.pattern)
+            rec = state.get(tid)
+            if rec is None or rec.get("spec") != key:
+                # 首次见到 / 规格改了：建立基线，不触发（启动不空跑）
+                state[tid] = {"spec": key, "sig": scan.files,
+                              "last_trigger": 0.0, "pending": False}
+                continue
+            changed = watchspec.diff(rec["sig"], scan.files)
+            rec["sig"] = scan.files
+            if changed:
+                rec["pending"] = True
+                rec["changed"] = changed
+            if not rec.get("pending"):
+                continue
+            if now - float(rec.get("last_trigger") or 0.0) < spec.debounce_s:
+                continue  # 防抖窗口内：下一轮再看（pending 留着）
+            rec["pending"] = False
+            rec["last_trigger"] = now
+            names = rec.pop("changed", []) or []
+            summary = "、".join(names[:5]) + ("…" if len(names) > 5 else "")
+            try:
+                updated = await self.store.update_cron_task(tid, next_run_at=now)
+            except Exception:  # noqa: BLE001 - 写失败下一轮变化会再来
+                continue
+            self._broadcast_cron(updated)
+            for ws_emit in list(self.ws_emitters):
+                try:
+                    await ws_emit({"kind": "notice", "message": (
+                        f"文件夹触发器「{task.get('name') or tid}」检测到变化"
+                        f"（{summary or '未列出文件名'}）：已排队运行。"
+                    )})
+                except Exception:  # noqa: BLE001
+                    pass
+        # 已删除/停用任务的状态清掉，别让内存表只涨不落
+        for tid in list(state):
+            if tid not in alive:
+                state.pop(tid, None)
 
     async def _cron_loop(self) -> None:
         """周期扫描到点的定时任务，逐个后台运行。"""
@@ -1389,9 +1481,9 @@ class AutomationMixin:
         if not prompt:
             raise RuntimeError("任务指令不能为空")
         stype = str(params.get("schedule_type", "interval"))
-        if stype not in ("interval", "daily", "weekly", "workdays", "cron"):
+        if stype not in ("interval", "daily", "weekly", "workdays", "cron", "watch"):
             raise RuntimeError(
-                "schedule_type 只支持 interval / daily / weekly / workdays / cron")
+                "schedule_type 只支持 interval / daily / weekly / workdays / cron / watch")
         # 任务形态（定时团队，团队模式设计 §14）：agent = 单会话（既有行为）；
         # team = 到点按团队模板建队、AI 总管自动闭环。只收模板引用不收内联名册。
         mode = str(params.get("mode") or "agent").strip() or "agent"
@@ -1413,7 +1505,18 @@ class AutomationMixin:
         if problem:
             raise RuntimeError(problem)
         tod = str(params.get("time_of_day") or "").strip()
-        if stype == "cron":
+        watch_spec = None
+        if stype == "watch":
+            # 文件夹变化触发（A2）：tod 里存 JSON 规格；目录必须真实存在，
+            # glob 只匹配目录内（见 core/watchspec.py 的入口校验）。触发由
+            # 后端 watch 轮询器驱动，导出系统计划任务时明示拒绝（见下方同步段）。
+            try:
+                watch_spec = watchspec.parse_spec(tod)
+                watchspec.validate_spec(watch_spec)
+            except watchspec.WatchSpecError as e:
+                raise RuntimeError(str(e)) from None
+            tod = watchspec.dump_spec(watch_spec)
+        elif stype == "cron":
             problem = cron_expr.validate(tod)
             if problem:
                 raise RuntimeError("Cron 表达式不合法：" + problem)
@@ -1478,9 +1581,9 @@ class AutomationMixin:
             kw["prompt"] = str(params["prompt"]).strip()
         if params.get("schedule_type") is not None:
             stype = str(params["schedule_type"])
-            if stype not in ("interval", "daily", "weekly", "workdays", "cron"):
+            if stype not in ("interval", "daily", "weekly", "workdays", "cron", "watch"):
                 raise RuntimeError(
-                    "schedule_type 只支持 interval / daily / weekly / workdays / cron")
+                    "schedule_type 只支持 interval / daily / weekly / workdays / cron / watch")
             kw["schedule_type"] = stype
         if params.get("interval_minutes") is not None:
             interval = max(1, int(params["interval_minutes"]))
@@ -1495,6 +1598,14 @@ class AutomationMixin:
                 problem = cron_expr.validate(tod)
                 if problem:
                     raise RuntimeError("Cron 表达式不合法：" + problem)
+            elif effective_type == "watch":
+                # 文件夹变化触发：tod 是 JSON 规格（A2），入口校验同 cron_add
+                try:
+                    spec = watchspec.parse_spec(tod)
+                    watchspec.validate_spec(spec)
+                except watchspec.WatchSpecError as e:
+                    raise RuntimeError(str(e)) from None
+                tod = watchspec.dump_spec(spec)
             elif tod:
                 try:
                     tod = system_schedule.normalize_time_of_day(tod)
@@ -1505,6 +1616,8 @@ class AutomationMixin:
             # 从每天/每周改成 cron 时必须同时给表达式：旧 time_of_day 是 HH:MM，
             # 不能悄悄当表达式用（"09:00" 也不是 5 段格式）
             raise RuntimeError("改成 Cron 调度时必须在 time_of_day 里给出 5 段表达式")
+        elif kw.get("schedule_type") == "watch" and task["schedule_type"] != "watch":
+            raise RuntimeError("改成文件夹触发时必须在 time_of_day 里给出目录规格")
         if params.get("weekday") is not None:
             kw["weekday"] = int(params["weekday"])
         if params.get("allowed_tools") is not None:
@@ -2100,6 +2213,12 @@ class AutomationMixin:
             return {"exported": False, "task_name": self.SCHTASK_TASK_PREFIX + str(tid),
                     "notice": "Cron 表达式任务只在应用内调度，无法导出为系统计划任务；"
                               "需要系统级执行请改用「每天 / 每周 / 工作日」"}
+        if str(task.get("schedule_type") or "") == "watch":
+            # 文件夹变化触发由应用内轮询器驱动（A2）：schtasks 只有时间维度，
+            # 导出成「每分钟」等于把频率放大成固定轮询，触发语义完全变样。
+            return {"exported": False, "task_name": self.SCHTASK_TASK_PREFIX + str(tid),
+                    "notice": "文件夹变化触发的任务只在应用内调度（需要应用运行），"
+                              "无法导出为系统计划任务"}
         task_name = self.SCHTASK_TASK_PREFIX + str(tid)
         rc, out = await self._schtasks()(
             *self._schtasks_create_args(task_name, entry, tid, task))

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...messages import Message
+from ...messages import Message, TextBlock
 from ...models.base import Provider, ProviderDone, ProviderTextDelta
 
 if TYPE_CHECKING:
@@ -114,3 +114,32 @@ async def collect_stream_text(provider: Provider, prompt: str) -> str:
         elif isinstance(ev, ProviderDone):
             break
     return "".join(parts)
+
+
+def _dump_emit(emit: Callable[[dict], Awaitable[None]]) -> Callable[[object], Awaitable[None]]:
+    """把 Pydantic 事件对象 model_dump 后交给 emit 的闭包工厂。
+
+    圆桌 / 对抗 / 团队三处轮次实现此前各自定义了一份逐字相同的
+    ``async def emit_ev(ev): await emit(ev.model_dump())``（审查 C1），
+    提取到此处共用；O5 拆块后随 mixin 一起被 backend_parts 各模块引用。
+    """
+    async def _emit(ev) -> None:
+        await emit(ev.model_dump())
+
+    return _emit
+
+
+def _strip_image_blocks(history: list[Message]) -> list[Message]:
+    """剥掉历史里的图片块（纯文本协作轮用）。
+
+    成员模型与主席融合都不该看到图片：非多模态服务拿到图片块会直接报错，
+    整张成员卡就废了。图片仍随 user 消息持久化，后续普通轮能正常用到。
+    """
+    out: list[Message] = []
+    for m in history:
+        if any(getattr(b, "type", "") == "image" for b in m.content):
+            kept = [b for b in m.content if getattr(b, "type", "") != "image"]
+            out.append(m.model_copy(update={"content": kept or [TextBlock(text="")]}))
+        else:
+            out.append(m)
+    return out

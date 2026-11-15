@@ -203,5 +203,8 @@ fx.S.state = { projects: [] };
     driver = driver.replace("SOURCE", json.dumps(source)).replace("NAV", json.dumps(nav))
     script = tmp_path / "factory-ui.cjs"
     script.write_text(driver, encoding="utf-8")
-    result = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=20)
+    result = subprocess.run(
+        [node, str(script)], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=20,
+    )
     assert result.returncode == 0, result.stdout + result.stderr

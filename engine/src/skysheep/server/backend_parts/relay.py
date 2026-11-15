@@ -202,6 +202,11 @@ class RelaySettingsMixin:
                 # pair_id -> 一次性人工交接确认：复述核验失败暂停后，用户点
                 # 「执行」表示「我看过、按这个交接继续」，下一道交接门跳过协商
                 "manual_handoff": set(),
+                # pair_id -> 下一轮附言（A4）：用户在看板上写的一句微调指令，
+                # 随下一次换手的 brief 注入一轮、注入即清空。刻意不落库：这是
+                # 短命的运运行期意图，为它升库版本（v14）不划算；重启后清空
+                # 由面板文案如实说明。上限 2000 字符（避免把 brief 撑爆）。
+                "next_notes": {},
             }
         return st
 
@@ -247,6 +252,7 @@ class RelaySettingsMixin:
             **snapshot,
             "main": {"id": main.id, "title": main.title} if main else None,
             "peer": {"id": peer.id, "title": peer.title} if peer else None,
+            "next_note": self._relay_dual_state()["next_notes"].get(pair["id"], ""),
         }
 
     async def relay_sync_peer_title(
@@ -387,10 +393,14 @@ class RelaySettingsMixin:
 
     async def relay_dual_save(self, params: dict) -> dict:
         """保存总任务 / 两屏任务 / 自动交替 / 交接核验（只改内容，不推进 revision）
-        ——运行中也能改，下一轮生效。"""
+        ——运行中也能改，下一轮生效。
+
+        另收 next_note（A4 下一轮附言）：不落库、只存运行期，随下一次换手注入
+        一轮即清空（见 `_relay_dual_state()["next_notes"]`）。
+        """
         self._relay_reject_unknown(
             params, ("pair_id", "goal", "main_task", "peer_task", "auto_alternate",
-                     "verify_handoff")
+                     "verify_handoff", "next_note")
         )
         pair_id = self._relay_str(params, "pair_id", maxlen=64)
         await self._relay_dual_owned(pair_id)
@@ -405,9 +415,20 @@ class RelaySettingsMixin:
             fields["auto_alternate"] = bool(params.get("auto_alternate"))
         if "verify_handoff" in params:
             fields["verify_handoff"] = bool(params.get("verify_handoff"))
-        if not fields:
+        note = None
+        if "next_note" in params:
+            note = str(params.get("next_note") or "").strip()[:2000]
+            notes = self._relay_dual_state()["next_notes"]
+            if note:
+                notes[pair_id] = note
+            else:
+                notes.pop(pair_id, None)
+        if not fields and note is None:
             raise ValueError("relay_invalid：没有可保存的字段")
-        snapshot = await self.store.relay_pair_update(pair_id, fields, bump=False)
+        if fields:
+            snapshot = await self.store.relay_pair_update(pair_id, fields, bump=False)
+        else:
+            snapshot = await self.store.relay_pair_snapshot(pair_id)
         if snapshot is None:
             raise ValueError("relay_not_found：接力任务不存在")
         await self._relay_dual_broadcast(snapshot)
@@ -429,7 +450,8 @@ class RelaySettingsMixin:
         self._relay_reject_unknown(
             params,
             ("session_id", "pair_id", "goal", "main_task", "peer_task",
-             "auto_alternate", "verify_handoff", "request_id", "expected_revision"),
+             "auto_alternate", "verify_handoff", "request_id", "expected_revision",
+             "next_note"),
         )
         self._require_relay_lock()
         request_id = self._relay_request_id(params)
@@ -520,6 +542,14 @@ class RelaySettingsMixin:
             fields["auto_alternate"] = bool(params.get("auto_alternate"))
         if "verify_handoff" in params:
             fields["verify_handoff"] = bool(params.get("verify_handoff"))
+        # 下一轮附言（A4）：运行期一次性意图，进内存不进库；空串=清除
+        if "next_note" in params:
+            note = str(params.get("next_note") or "").strip()[:2000]
+            notes = self._relay_dual_state()["next_notes"]
+            if note:
+                notes[pair["id"]] = note
+            else:
+                notes.pop(pair["id"], None)
         goal = str(fields.get("goal", pair["goal"]) or "").strip()
         main_task = str(fields.get("main_task", pair["main_task"]) or "").strip()
         peer_task = str(fields.get("peer_task", pair["peer_task"]) or "").strip()
@@ -726,6 +756,12 @@ class RelaySettingsMixin:
                 prev = await self._relay_dual_prev_output(pair_id, side)
                 brief = _dual_brief(pair["goal"], label, task_text,
                                     "主屏" if side == "peer" else "副屏", prev)
+                # 下一轮附言（A4）：写进 brief 再进交接门——接收方的复述与核验
+                # 因此也覆盖用户这句微调，不会出现「核验过了但附言被吞掉」。
+                # 真正开轮成功才清空；交接门暂停/报错时附言留着，用户重试仍生效。
+                note = self._relay_dual_state()["next_notes"].get(pair_id, "")
+                if note:
+                    brief += f"\n\n【用户给这一轮的附言（必须照办）】\n{note}"
                 gate = await self._relay_dual_handoff_gate(pair, side, task_text, prev, brief)
                 if gate is None:
                     return  # 交接门没过：pair 已落成暂停并写明原因，等人决策
@@ -737,6 +773,10 @@ class RelaySettingsMixin:
                 if started is None:
                     await asyncio.sleep(0.05)
                     continue  # 状态/版本刚被改掉：回到循环顶部重新判定
+                if note:
+                    # 附言只吃一轮：附言已进本 brief，面板同步清空（广播里带上）
+                    self._relay_dual_state()["next_notes"].pop(pair_id, None)
+                    started["next_note"] = ""
                 turn_no = started["pair"]["turn_no"]
                 st["current"][pair_id] = {
                     "turn_no": turn_no, "side": side, "session_id": sid,

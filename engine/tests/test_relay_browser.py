@@ -45,15 +45,20 @@ async def test_relay_opens_peer_pane_and_runs_alternating(home):
             )
             await expect(page.locator("#relay-peer-chip")).to_contain_text("主屏甲 · 副屏")
             await expect(page.locator("#relay-run-start")).to_be_visible()
-            # 看板不再要求先读 JSON：直接填总任务与两屏任务
-            assert await page.locator("#rp-page-relay textarea").count() == 3
+            # 看板不再要求先读 JSON：总任务、两屏任务，外加 A4 的「下一轮附言」
+            assert await page.locator("#rp-page-relay textarea").count() == 4
 
             await page.fill("#relay-goal", "做一版发布方案并落地")
             await page.fill("#relay-main-task", "发布方案")
             await page.fill("#relay-peer-task", "执行并反馈")
+            # 附言随这一轮注入后被消费，界面同步清空（A4 的 UI 回归点）
+            await page.fill("#relay-next-note", "交回前先跑一遍测试")
             await page.click("#relay-run-start")
             await expect(page.locator("#relay-run-status")).to_contain_text(
                 "轮到副屏", timeout=15000
+            )
+            await expect(page.locator("#relay-next-note")).to_have_value(
+                "", timeout=15000
             )
             assert await page.locator("#relay-turn-list .relay-turn").count() == 1
             await expect(page.locator("#relay-turn-list")).to_contain_text("第 1 轮  主屏")

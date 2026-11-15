@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal
 
@@ -507,6 +508,38 @@ class MemoryWriteArgs(BaseModel):
     match: str = Field(default="", description="delete：要删除条目里包含的原文片段")
 
 
+# 写入冲突检测：新条目与现有条目的相似度阈值（SequenceMatcher，0~1）。
+# 0.72 档位依据：同一事实换个说法（「住在北京」vs「家住北京」）普遍 > 0.8，
+# 主题相近的不同事实（「喜欢咖啡」vs「喜欢茶」）普遍 < 0.6；取中间偏上，
+# 宁可多提示（提示无害，漏了旧条目要等定期整理兜底）也不静默。
+_MEMORY_CONFLICT_RATIO = 0.72
+_MEMORY_CONFLICT_TOP = 2
+_MEMORY_DATE_PREFIX_RE = re.compile(r"^- \[\d{4}-\d{2}-\d{2}\]\s*")
+
+
+def _conflicting_entries(content: str, lines: list[str]) -> list[str]:
+    """找出与要写入内容高度相似的现有记忆条目（可能重复或过时）。
+
+    写入时检测而不只在定期整理时消解（memory.py 维护提示词只覆盖后者）：
+    写入当下模型还知道这件事的来龙去脉，提示它顺手删旧条目成本最低。
+    纯机械比对（difflib，零依赖），判定交给提示：标注「可能重复/矛盾」，
+    不拦截写入——新信息照常落盘，旧条目由模型决定删不删。
+    """
+    new_core = _MEMORY_DATE_PREFIX_RE.sub("", content.strip()).strip().lower()
+    if len(new_core) < 4:
+        return []
+    scored: list[tuple[float, str]] = []
+    for ln in lines:
+        old = _MEMORY_DATE_PREFIX_RE.sub("", ln.strip()).strip().lower()
+        if not old or old == new_core:
+            continue  # 完全相同在上面已按重复拦截，不算冲突
+        ratio = SequenceMatcher(None, old, new_core).ratio()
+        if ratio >= _MEMORY_CONFLICT_RATIO:
+            scored.append((ratio, ln.strip()))
+    scored.sort(key=lambda x: -x[0])
+    return [ln for _r, ln in scored[:_MEMORY_CONFLICT_TOP]]
+
+
 class MemoryWriteTool(Tool):
     name = "memory_write"
     description = (
@@ -533,9 +566,17 @@ class MemoryWriteTool(Tool):
             lines = _read_lines(p)
             if any(content in ln for ln in lines):
                 return "already remembered（已有相同内容的记忆，不重复追加）"
+            conflicts = _conflicting_entries(content, lines)
             lines.append(f"- [{date.today().isoformat()}] {content}")
             _write_lines(p, lines)
-            return f"remembered: {content[:80]}"
+            result = f"remembered: {content[:80]}"
+            if conflicts:
+                result += (
+                    "\n⚠ 与现有记忆高度相似，可能重复或已过时，请核对"
+                    "（旧条目不再成立时用 delete 按片段删除）："
+                    + "\n".join("- " + c for c in conflicts)
+                )
+            return result
         if args.action == "list":
             lines = _read_lines(p)
             if not lines:

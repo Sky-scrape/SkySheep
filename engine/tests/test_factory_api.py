@@ -192,7 +192,7 @@ def test_factory_run_now_records_run_and_updates_state(home):
             "name", "project_name", "trigger", "status", "started_at",
             "finished_at", "duration_s", "result_excerpt", "error",
             "in_tokens", "out_tokens", "cached_tokens",
-            "denied_count", "denied_tools", "error_kind", "outcome", "outcome_source",
+            "denied_count", "tool_errors", "denied_tools", "error_kind", "outcome", "outcome_source",
             "config_snapshot", "review_note",
         }
         assert run["kind"] == "cron" and run["task_id"] == tid

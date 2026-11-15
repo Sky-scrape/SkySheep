@@ -156,6 +156,19 @@ class AdversarialConfig(BaseModel):
     role_timeout_s: int = Field(default=300, ge=10)  # 单角色单次调用超时（裁判自动加倍）
 
 
+class AgentConfig(BaseModel):
+    """Agent 循环级行为（config.toml [agent]）。
+
+    现在只有计划锚点自检间隔：长任务每隔 N 步（一次带工具调用的迭代算
+    一步）把 todo 清单进度注入一次，提醒模型对照用户最初的目标自查漂移。
+    语义级漂移没有便宜的机械判据（步数/停滞是结构性的），用「定期拍计划」
+    代替在线检测；0 = 关。默认 6：多数任务 6 步内收尾，几乎无感；真跑偏的
+    长任务在第 6、12 步各被拍一次。
+    """
+
+    drift_check_steps: int = Field(default=6, ge=0, le=100)
+
+
 class RoutingConfig(BaseModel):
     """模型自动分层路由（A3，config.toml [routing]）。
 
@@ -504,6 +517,8 @@ class SkySheepConfig(BaseModel):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    # Agent 循环级行为（[agent]）：计划锚点自检间隔等
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     # 全局出网设置（[network]）：代理 / 绕行名单 / 自签 CA。
     # 与 ProviderConfig.proxy 的分工见 network.py 的模块 docstring：
     # 这里是整台应用的出网口径，ProviderConfig.proxy 是单服务覆盖。

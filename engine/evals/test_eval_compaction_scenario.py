@@ -15,7 +15,7 @@ token 估算按 core/context.py 的口径（CJK 0.7 token/字）：场景用整�
 from __future__ import annotations
 
 from evals._harness import finished, make_agent, run_eval_turn
-from skysheep.core.context import SUMMARY_OPEN_TAG
+from skysheep.core.context import SUMMARY_OPEN_TAG, TRANSCRIPT_DIR
 from skysheep.messages import Message, TextBlock
 from skysheep.models.fake import FakeProvider
 
@@ -116,3 +116,50 @@ async def test_eval_compaction_triggers_on_overlong_history(home):
     )
     done = finished(events)
     assert not done, "本轮没有工具调用"
+
+
+async def test_eval_compaction_spill_keeps_key_fact(home):
+    """场景 35（压缩质量 · Spill 找回侧）：被摘要替换的关键事实必能从原文盘找回。
+
+    「压缩对决策质量的影响」在评测层钉的是机制保证，不是文本质量（摘要
+    本身有损、由真实模型决定写什么）：机制保证 = 原文 Spill 落盘 + 摘要尾部
+    续读指针。只要这两样在，被压掉的关键事实永远可经 read_file / grep 找回
+    ——「压缩不丢信息」的承诺落在这条可断言的链路上。
+    """
+    proj = home / "proj-spill"
+    key = "玄关柜背板厚度定为 18 毫米，铰链一律用阻尼款"
+    filler = "这是一段用于撑大上下文占用的中文历史消息，内容本身并不重要。" * 3
+    msgs = [Message.system("你是测试助手。")]
+    msgs.append(Message.user(f"第0轮提问：{key}\n{filler}"))
+    msgs.append(Message.assistant([TextBlock(text=f"第0轮回答：已记录。{filler}")]))
+    msgs.append(Message.user(f"第1轮提问：{filler}"))
+    msgs.append(Message.assistant([TextBlock(text=f"第1轮回答：{filler}")]))
+
+    provider = FakeProvider([
+        [TextBlock(text="摘要：用户此前在定玄关柜的参数，任务仍在进行。")],
+        [TextBlock(text="收到，接着上一轮继续。")],
+    ])
+    # keep_recent=1：关键事实所在的第 0 轮问答被摘要替换并 Spill，最近 1 条保留
+    agent = make_agent(provider, proj, context_limit_tokens=60,
+                       compaction_keep_recent=1)
+    agent.load_history(msgs)
+    events = await run_eval_turn(agent, "继续")
+    assert any(e.kind == "compaction" for e in events), "前置：压缩确实发生"
+
+    # 原文落盘：.skysheep/transcripts/ 下的 transcript 含关键事实原文
+    tdir = proj / ".skysheep" / TRANSCRIPT_DIR
+    files = list(tdir.glob("*.md"))
+    assert files, "压缩必须把原文 Spill 落盘（机制保证的一半）"
+    body = files[0].read_text(encoding="utf-8")
+    assert key in body, "被摘要替换的关键事实必须能在原文里一字不差地找回"
+    assert "[USER]" in body and "[ASSISTANT]" in body, "transcript 带角色标记"
+
+    # 摘要消息带续读指针：指向刚落的盘（机制保证的另一半）
+    summary_msg = next(
+        m for m in agent.history if m.text.lstrip().startswith(SUMMARY_OPEN_TAG)
+    )
+    assert "完整原文已落盘" in summary_msg.text
+    assert f".skysheep/{TRANSCRIPT_DIR}/" in summary_msg.text, "指针指向可续读的路径"
+    assert "read_file / grep 可续读" in summary_msg.text
+    # 轮照常完成
+    assert events[-1].kind == "turn_finished" and events[-1].stop_reason == "end_turn"

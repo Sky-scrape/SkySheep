@@ -177,6 +177,27 @@ async def test_usage_stats_session_count_and_models(store):
     assert (await store.usage_stats(14))["session_count"] == 2
 
 
+async def test_usage_stats_quality_rates(store):
+    """v14 轮级质量口径：轮成功率（引擎级失败算、用户停止不算）与工具报错率。"""
+    # 4 轮：1 轮失败；共 10 次工具调用、2 次报错
+    await store.add_usage("q1", "prov", "m", 100, 20, tool_calls=3, tool_errors=1, failed=0)
+    await store.add_usage("q1", "prov", "m", 100, 20, tool_calls=2, tool_errors=0, failed=1)
+    await store.add_usage("q2", "prov", "m", 100, 20, tool_calls=5, tool_errors=1, failed=0)
+    # 旧路径行（协作 / CLI 记账）不带质量口径：三列全 0，计入轮数但不计入工具分母
+    await store.add_usage("q3", "prov", "m", 100, 20)
+    st = await store.usage_stats(30)
+    q = st["quality"]
+    assert q["turns"] == 4 and q["turns_failed"] == 1
+    assert q["turn_success_rate"] == 0.75
+    assert q["tool_calls"] == 10 and q["tool_errors"] == 2
+    assert q["tool_error_rate"] == 0.2
+
+
+async def test_usage_stats_quality_none_when_empty(store):
+    """窗口内没有用量时 quality 为 None（前端不展示，不出「成功率 100%」假象）。"""
+    assert (await store.usage_stats(7))["quality"] is None
+
+
 async def test_fts_write_failure_is_recorded_and_repaired(tmp_path, monkeypatch):
     """索引写失败要留痕并置脏；下次启动走查漏模式把洞补上（低危项）。"""
     from skysheep.session.store import SessionStore
@@ -882,6 +903,7 @@ async def test_v13_migration_adds_project_removed_at_and_snippet_slash(tmp_path)
         cur = await store._db.execute("PRAGMA table_info(snippets)")
         assert "slash" in {row[1] for row in await cur.fetchall()}
         cur = await store._db.execute("PRAGMA user_version")
-        assert int((await cur.fetchone())[0]) == 13
+        # v12 旧库补列后应盖当前版本号（v14：usage_log 三列 + automation_runs.tool_errors）
+        assert int((await cur.fetchone())[0]) == 14
     finally:
         await store.close()

@@ -333,6 +333,7 @@ class RunLedger:
         error: str = "",
         session_id: str | None = None,
         denied_count: int = 0,
+        tool_errors: int = 0,
         denied_tools: str = "",
         error_kind: str = "",
         outcome: str = "",
@@ -359,7 +360,9 @@ class RunLedger:
         row = await self.store.finish_automation_run(
             int(run_id), status=str(status), result_excerpt=result_excerpt,
             error=error, session_id=session_id, **tokens,
-            denied_count=int(denied_count or 0), denied_tools=str(denied_tools or ""),
+            denied_count=int(denied_count or 0),
+            tool_errors=int(tool_errors or 0),
+            denied_tools=str(denied_tools or ""),
             error_kind=str(error_kind or ""),
             outcome=str(outcome or ""), outcome_source=str(outcome_source or ""),
             review_note=str(review_note or ""),

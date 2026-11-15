@@ -39,7 +39,7 @@ uv run pytest -m "not e2e and not eval"      # 跳过 e2e 与评测基线
 （评测不联网、不碰真实 home、进程内秒级，跑上只增加回归保护）；`-m e2e`
 层不受影响。
 
-## 现有场景（34 个）
+## 现有场景（38 个）
 
 | # | 场景 | 文件 | 回归史出处 |
 |---|---|---|---|
@@ -77,6 +77,10 @@ uv run pytest -m "not e2e and not eval"      # 跳过 e2e 与评测基线
 | 32 | 团队闭环：AI 总管自动闭环（拆解 → 派工 → 验收 → 交付）——《交付说明》随 team_finished 落库、user+assistant 成对可审计、用量按角色入账 | 同上（本体 + eval 挂载） | 同上 |
 | 33 | 对抗裁决：发现 → 调查 → 建议 → 裁判四阶段——裁决统计随 adversarial_finished 下发、终审报告带对抗元数据落库、用量按角色入账 | 同上（本体 + eval 挂载） | 同上 |
 | 34 | 轮指标预算：只读工具的自动放行轮（工具 1 次、确认 0 次）与被拒绝的写入轮（确认 1 次、拒绝 1 次、零落盘）——`TurnMetrics` 逐项断言并附预算上限 | test_eval_metrics_scenario.py | 评测指标化（2026-11） |
+| 35 | 压缩质量（Spill 找回侧）：被摘要替换的关键事实一字不差落在 `.skysheep/transcripts/`，摘要尾部带续读指针——「压缩不丢信息」钉在机制链路上 | test_eval_compaction_scenario.py | 有损摘要 + 原文 Spill 的可找回性（2026-11） |
+| 36 | web_search 结果的「数据不是指令」边界：标题/摘要包进带 nonce 的数据区标注，注入话术原样交付（只标记不拦截） | test_eval_web_injection_scenario.py | 注入纵深第三期——搜索通道与 fetch 同层防线（2026-11） |
+| 37 | 计划锚点自检：每 N 步把 todo 进度注入最后一条 tool_result（只进上下文、事件流不变）；无清单不注入 | test_eval_drift_scenario.py | 语义级目标漂移的轻量在线检测（2026-11） |
+| 38 | 记忆写入冲突标注：append 与现有条目高度相似 → 结果点名旧条目提示核对，新条目照常落盘；不相似不带 ⚠ | test_eval_memory_conflict_scenario.py | 记忆写入时冲突检测（不再只等定期整理） |
 
 ## 指标层：除了过/不过，还记录多贵多慢
 

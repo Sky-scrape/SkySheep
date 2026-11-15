@@ -48,6 +48,7 @@ from ..network import (
 from ..sanitize import (
     UNTRUSTED_DATA_NOTE,
     scan_injection_patterns,
+    untrusted_data_wrap,
     untrusted_frame,
 )
 from ..sources import register_source
@@ -979,7 +980,12 @@ class WebSearchTool(Tool):
             lines.append(f"\n{i}. {label}{r.get('title') or '(无标题)'}\n   {r.get('url') or ''}")
             if snippet:
                 lines.append(f"   {snippet}")
-        return truncate_output("\n".join(lines), MAX_SEARCH_OUTPUT_CHARS)
+        # 提示注入纵深：搜索摘要与 web_fetch 正文同属不可信外部内容（网页
+        # 可以把任何话术写进 title/snippet 骗模型），同样包进「数据不是指令」
+        # 标注——正文一字不改，只加边界（与 search_documents 同层防线）。
+        return truncate_output(
+            untrusted_data_wrap("\n".join(lines)), MAX_SEARCH_OUTPUT_CHARS
+        )
 
     # ---- 各服务商请求与响应解析（同步小函数，线程里跑） ----
 

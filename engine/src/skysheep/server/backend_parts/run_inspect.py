@@ -43,9 +43,11 @@ MAX_REPORT_CHARS = 12_000
 
 INSPECT_PROMPT = (
     "你是自动化运行的巡检员。下面是最近一批自动任务运行记录，一行一条，"
-    "字段：产线 | 状态 | 做成判定 | 错误类型 | 被权限拦下次数 | 时长 | 输入/输出 token | 产出摘要。\n\n"
+    "字段：产线 | 状态 | 做成判定 | 错误类型 | 被权限拦下次数 | 工具报错次数"
+    " | 时长 | 输入/输出 token | 产出摘要。\n\n"
     "只回答一个问题：这些运行里有没有「无效循环」或「偏离任务目标」的迹象？\n"
     "判定线索：同一产线反复失败且错误类型相同；被权限拦下很多次还在重试；"
+    "工具报错次数很多但状态仍是完成（带病跑完，产出可疑）；"
     "跑了很久但产出摘要为空或与任务无关；耗时/输出 token 远超同批中位数却无产出。\n\n"
     "要求：\n"
     "- 没有迹象就只输出一行「无需留意」；\n"
@@ -139,6 +141,7 @@ def build_digest(runs: list[dict]) -> str:
                 str(r.get("outcome") or "-"),
                 str(r.get("error_kind") or "-"),
                 str(r.get("denied_count") or 0),
+                str(r.get("tool_errors") or 0),
                 f"{dur / 60:.1f}min",
                 f"{int(r.get('in_tokens') or 0)}/{int(r.get('out_tokens') or 0)}",
                 _clip(r.get("result_excerpt") or r.get("error") or "-", 60),

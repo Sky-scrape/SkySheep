@@ -8544,6 +8544,29 @@ function renderUsageBudget(r) {
   el.hidden = false;
 }
 
+// 轮级质量口径（usage.stats 的 quality 块）：轮成功率与工具报错率。
+// 列是 2026-11 才加的，旧记录三列全 0——没有 quality 或轮数为 0 就不展示，
+// 避免拿空数据算出「成功率 100%」的假象。
+function renderUsageQuality(r) {
+  const el = document.getElementById("usage-quality");
+  if (!el) return;
+  const q = r.quality;
+  if (!q || !(q.turns > 0)) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const rate = Math.round((q.turn_success_rate || 0) * 1000) / 10;
+  let text = `近 ${usageRangeDays} 天 ${q.turns} 轮：成功率 ${rate}%` +
+    `（失败 ${q.turns_failed || 0} 轮，主动停止不算失败）`;
+  if (q.tool_calls > 0) {
+    const errRate = Math.round((q.tool_error_rate || 0) * 1000) / 10;
+    text += ` · 工具调用 ${q.tool_calls} 次、报错 ${q.tool_errors || 0} 次（${errRate}%）`;
+  }
+  el.textContent = text;
+  el.hidden = false;
+}
+
 async function loadUsage() {
   try {
     const r = await request("usage.stats", { days: usageRangeDays, scope: usageScope });
@@ -8552,6 +8575,7 @@ async function loadUsage() {
     renderUsageScope(r);
     document.getElementById("usage-tiles").innerHTML = usageTiles(r);
     renderUsageBudget(r);
+    renderUsageQuality(r);
     // 空态不要撑出 220px 的死空间：有记录才保留图表高度
     const trendEl = document.getElementById("usage-trend");
     trendEl.classList.toggle(

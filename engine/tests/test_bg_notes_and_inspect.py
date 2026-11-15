@@ -127,18 +127,26 @@ async def _seed_runs(store, count: int, *, status="ok", error_kind=""):
 def test_build_digest_is_one_line_per_run():
     runs = [{
         "kind": "cron", "task_id": 7, "status": "ok", "outcome": "ok",
-        "error_kind": "", "denied_count": 2, "duration_s": 90.0,
+        "error_kind": "", "denied_count": 2, "tool_errors": 3, "duration_s": 90.0,
         "in_tokens": 1000, "out_tokens": 200, "result_excerpt": "改了三个文件\n第二行",
     }]
     line = run_inspect.build_digest(runs)
     assert line.startswith("cron#7 | ok | ok")
     assert "2" in line and "1.5min" in line
+    assert "| 3 |" in line, "工具报错次数是独立一列（带病跑完的无效步骤信号）"
     assert "\n" not in line, "每条运行压成一行，模型按行读"
 
     long_line = run_inspect.build_digest([
         {**runs[0], "result_excerpt": "很长的产出" * 40}
     ])
     assert len(long_line) < 200, "产出摘要要截断，不能让一张表爆窗口"
+
+
+def test_build_digest_tool_errors_defaults_zero():
+    line = run_inspect.build_digest([
+        {"kind": "cron", "task_id": 1, "status": "done", "duration_s": 30.0},
+    ])
+    assert "| 0 |" in line, "旧行没有 tool_errors 字段时按 0 展示（列不能缺）"
 
 
 async def test_inspect_skips_when_too_few_runs(home, store):

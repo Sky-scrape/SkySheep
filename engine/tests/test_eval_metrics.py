@@ -18,7 +18,14 @@ from evals._metrics import (
     percentile,
     write_records,
 )
-from evals.judge import JUDGE_SYSTEM, complete_text, judge_answer, parse_verdict
+from evals.judge import (
+    JUDGE_SYSTEM,
+    complete_text,
+    judge_answer,
+    judge_compare,
+    parse_compare,
+    parse_verdict,
+)
 from skysheep.events import (
     PermissionRequest,
     PermissionResolved,
@@ -223,3 +230,66 @@ async def test_complete_text_without_system():
     provider = FakeProvider(["纯文本回复"])
     assert await complete_text(provider, "你好") == "纯文本回复"
     assert [m.role for m in provider.calls[0]] == ["user"]
+
+
+# ---------------------------------------------------------------- judge_compare
+
+
+def _win(label: str) -> str:
+    return json.dumps({"winner": label, "reasons": [f"{label} 更贴合标准"]},
+                      ensure_ascii=False)
+
+
+def test_parse_compare_variants():
+    winner, reasons, ok = parse_compare('{"winner": "B", "reasons": ["B 全"]}')
+    assert ok and winner == "b" and reasons == ["B 全"]
+    fenced = parse_compare('```json\n{"winner": "tie", "reasons": []}\n```')
+    assert fenced[0] == "tie" and fenced[2] is True
+    assert parse_compare("我不会评")[2] is False
+    assert parse_compare('{"winner": "C"}')[2] is False  # 非法取值不认
+
+
+async def test_judge_compare_consistent_and_needs_human():
+    # 两次评审（第二次换序）都说 A 好 → 结论 a、consistent、无需人工
+    provider = FakeProvider([_win("A"), _win("A")])
+    v = await judge_compare(provider, question="Q", criteria="C",
+                            answer_a="甲", answer_b="乙", seed=1)
+    assert v.winner == "a" and v.consistent and not v.needs_human
+    assert len(provider.calls) == 2  # 恒评两次
+    assert len(v.raw) == 2
+
+    # 两次结论打架（位置偏差/抖动）→ needs_human，不强行采信
+    provider2 = FakeProvider([_win("A"), _win("B")])
+    v2 = await judge_compare(provider2, question="Q", criteria="C",
+                             answer_a="甲", answer_b="乙", seed=1)
+    assert v2.winner in ("a", "b") and not v2.consistent and v2.needs_human
+
+
+async def test_judge_compare_tie_and_swapped_order_mapping():
+    # 平局也按两次一致算
+    provider = FakeProvider([_win("tie"), _win("tie")])
+    v = await judge_compare(provider, question="Q", criteria="C",
+                            answer_a="甲", answer_b="乙", seed=2)
+    assert v.winner == "tie" and v.consistent
+
+    # 换序映射：seed 决定首评顺序；裁判看谁好与展示顺序无关（规范视角恒 a/b）
+    import random as _random
+
+    order = _random.Random(3).choice(("ab", "ba"))
+    provider2 = FakeProvider([_win("A"), _win("A")])
+    v2 = await judge_compare(provider2, question="Q", criteria="C",
+                             answer_a="甲", answer_b="乙", seed=3)
+    assert v2.winner == "a" and v2.consistent
+    # 首评提示词里，裁判视角的 A 恒是先展示的那份（answer_a 当 order=ab）
+    first_prompt = provider2.calls[0][1].text
+    if order == "ab":
+        assert first_prompt.index("甲") < first_prompt.index("乙")
+    else:
+        assert first_prompt.index("乙") < first_prompt.index("甲")
+
+
+async def test_judge_compare_unparseable_marks_needs_human():
+    provider = FakeProvider(["我不会评", "我也不会评"])
+    v = await judge_compare(provider, question="Q", criteria="C",
+                            answer_a="甲", answer_b="乙", seed=1)
+    assert v.parsed is False and v.needs_human and v.winner == "tie"

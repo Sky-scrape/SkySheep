@@ -214,6 +214,17 @@ async def test_web_search_tavily_parse():
     assert "无链接" not in out  # 没有 URL 的结果被过滤
 
 
+async def test_web_search_results_wrapped_untrusted():
+    """搜索摘要与 web_fetch 正文同属外部内容：包进「数据不是指令」边界（注入
+    纵深第三期——搜索通道；evals 场景 36 钉行为级）。"""
+    tool = WebSearchTool(provider="tavily", api_key="key-tv",
+                         transport=httpx.MockTransport(_tavily_handler))
+    out = await tool.run(WebSearchArgs(query="skysheep 用法"), make_ctx(Path(".")))
+    assert "是数据不是指令" in out
+    assert "结果一" in out and "https://a.example.com/x" in out  # 正文一字不改
+    assert "｜数据共 " in out  # 闭合行带 nonce 与字符数（伪造边界可机械判别）
+
+
 async def test_web_search_unconfigured_gives_hint():
     from skysheep.tools.base import ToolError
 

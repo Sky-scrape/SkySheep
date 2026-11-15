@@ -37,7 +37,15 @@ from ..events import (
     TurnStarted,
     Usage,
 )
-from ..messages import ContentBlock, ImageBlock, Message, TextBlock, ThinkingBlock, ToolUseBlock
+from ..messages import (
+    ContentBlock,
+    ImageBlock,
+    Message,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ..models.base import (
     Provider,
     ProviderDone,
@@ -108,6 +116,11 @@ class Agent:
         sandbox_level: str = "job",
         use_ripgrep: bool = True,
         permission_timeout_s: float = 0.0,
+        # 计划锚点自检间隔（步=一次带工具调用的迭代）：>0 时每隔 N 步把 todo
+        # 清单进度注入一次，提醒模型对照用户最初的目标自查漂移（0 = 关）。
+        # 语义级目标漂移没有便宜的机械判据，用「定期拍计划」代替在线检测——
+        # 不加独立的复述调用，省一次模型往返。
+        drift_check_steps: int = 6,
         # 接力执行轮（接力模式设计 §4 第一条）：主副屏 worker 开轮时置位，
         # 工具上下文据此拒绝可派生自主执行的参数（shell 的 background=true）
         relay_execution: bool = False,
@@ -151,6 +164,8 @@ class Agent:
         # 确认卡等待上限（秒）：0 = 一直等（旧行为）。超过上限按拒绝继续本轮，
         # 避免用户离开后会话永久卡在「等待确认」。渠道/无头门有自己的超时。
         self.permission_timeout_s = max(0.0, float(permission_timeout_s or 0.0))
+        # 计划锚点自检间隔（步）：0 = 关。见构造参数注释。
+        self.drift_check_steps = max(0, int(drift_check_steps))
         self.history: list[Message] = []
         self._pending: dict[str, PendingPermission] = {}
         # 「引导」收件箱：一轮运行中用户补的话，不排队等下一轮，而是在下一次
@@ -713,6 +728,9 @@ class Agent:
             # 见 context._safe_recent_start）。事件线不受影响：ToolCallFinished
             # 的 images 仍按调用即时产出，事件与历史是两条线。
             deferred_screenshots: list[list[ImageBlock]] = []
+            # 本迭代最后一条 tool_result 消息（计划锚点提醒附在它后面进上下文；
+            # 不改事件流，前端观感不变——见 while 循环结束处的 3f）
+            last_tool_result: Message | None = None
             while i < len(tool_uses):
                 tu = tool_uses[i]
                 tool = self.registry.get(tu.name)
@@ -1033,6 +1051,7 @@ class Agent:
                                     b_tu.id, truncate_output(result), is_error=is_error
                                 )
                             )
+                            last_tool_result = self.history[-1]
                             # 图片按调用取回（_exec_tool 返回本次执行新增的）：
                             # 并发批共用同一个 ctx，整桶收割会把第二张截图
                             # 错配到第一个工具名下。user 消息本身延后到整批
@@ -1111,6 +1130,7 @@ class Agent:
                 self.history.append(
                     Message.tool_result(tu.id, truncate_output(result), is_error=is_error)
                 )
+                last_tool_result = self.history[-1]
                 # 工具产生的图片（screenshot）：按调用取回（_exec_tool 返回本次
                 # 执行新增的），user 消息延后到本条 assistant 的全部 tool_result
                 # 落齐后追加（见 while 循环前的注释）；同一事件仍带给前端内联展示
@@ -1143,6 +1163,19 @@ class Agent:
                             images=attached,
                         )
                     )
+
+            # 3f. 计划锚点自检：长任务每隔 N 步把 todo 清单进度注入一次，提醒
+            # 模型对照用户最初的目标自查漂移（Q1/Q9 的轻量在线检测）。附在
+            # 最后一条 tool_result 后面只进模型上下文，事件流与历史结构不变。
+            if (self.drift_check_steps > 0
+                    and iterations > 0
+                    and iterations % self.drift_check_steps == 0
+                    and last_tool_result is not None
+                    and last_tool_result.content
+                    and isinstance(last_tool_result.content[0], ToolResultBlock)):
+                note = self._drift_check_note()
+                if note:
+                    last_tool_result.content[0].content += "\n\n" + note
 
         if finished_by_error:
             stop_reason = "error"
@@ -1197,6 +1230,32 @@ class Agent:
             tools_total_ms=self._turn_tools_total_ms,
             model_retries=self._turn_model_retries,
         )
+
+    def _drift_check_note(self) -> str:
+        """计划锚点提醒文本；todo 清单为空（没用 todo_write）时返回空串不注入。
+
+        清单状态在 todo_write 工具实例上（工具自持），这里只读不写。提醒要求
+        模型在**下一步自己的输出里**对照原目标——不做独立的「复述」调用，
+        那是每次多一轮模型往返，长任务里太贵。
+        """
+        tool = self.registry.get("todo_write")
+        items = getattr(tool, "items", None) or []
+        if not items:
+            return ""
+        done = sum(1 for t in items if t.get("status") == "completed")
+        current = next(
+            (str(t.get("content") or "") for t in items if t.get("status") == "in_progress"),
+            "",
+        )
+        lines = [
+            f"【计划锚点】本任务已连续执行 {self.drift_check_steps} 步，"
+            "请对照用户最初的目标自查：",
+            f"- 清单进度 {done}/{len(items)}"
+            + (f"，当前步骤：{current}" if current else ""),
+            "- 还在按计划推进吗？有没有偏离目标或在某一步原地打转？",
+            "- 计划若已不合实际，先用 todo_write 修订清单再继续；发现偏离就说明并拉回来。",
+        ]
+        return "\n".join(lines)
 
     async def _exec_tool(
         self, tu: ToolUseBlock, tool: Tool, ctx: ToolContext,

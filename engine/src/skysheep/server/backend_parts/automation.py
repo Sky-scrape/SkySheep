@@ -108,6 +108,7 @@ def make_progress_emit(ledger, kind: str, task_id: int, facts: dict | None = Non
     state.setdefault("steps", 0)
     state.setdefault("tool", "")
     state.setdefault("denied", 0)
+    state.setdefault("tool_errors", 0)
     state.setdefault("denied_tools", {})
     pending: dict[str, str] = {}  # request_id → 工具名（deny 事件里没有工具名）
 
@@ -130,7 +131,12 @@ def make_progress_emit(ledger, kind: str, task_id: int, facts: dict | None = Non
         elif k == "tool_call_started":
             state["steps"] = int(state.get("steps") or 0) + 1
             state["tool"] = str(ev.get("name") or "")
-        elif k in ("tool_call_finished", "turn_started"):
+        elif k == "tool_call_finished":
+            # 工具报错次数（无效步骤信号）：巡检据此看「带病跑完」的运行
+            if ev.get("is_error"):
+                state["tool_errors"] = int(state.get("tool_errors") or 0) + 1
+            state["tool"] = ""
+        elif k == "turn_started":
             # 工具跑完到下一个工具开始之间没有「正在做的事」：清空而不是
             # 继续显示上一个工具名（那是谎报）
             state["tool"] = ""
@@ -897,6 +903,7 @@ async def run_cron_task_core(
         added = True
     started_at = time.time()  # 终态推送要报耗时（成功与失败两条路都要用）
     denied = 0                # 本轮被门控拒绝的工具次数（异常路径读不到 facts）
+    tool_errors = 0           # 本轮工具报错次数（同上，异常路径读不到 facts）
     # 运行账本（工厂观战）：开一条 running，收尾在成功 / 异常两路各写一次。
     # 记账失败不能拦住任务本身——工厂少一枚包裹，好过整条定时任务跑不动。
     ledger = ledger or RunLedger(store, emit=emit_run)
@@ -925,6 +932,7 @@ async def run_cron_task_core(
         runtime, _sid, stopped = out[0], out[1], out[2]
         facts = out[3] if len(out) > 3 and isinstance(out[3], dict) else {}
         denied = int(facts.get("denied") or 0)
+        tool_errors = int(facts.get("tool_errors") or 0)
         # 取本轮最后一条助手文本作为结果摘要
         last_text = ""
         for m in reversed(runtime.agent.history):
@@ -988,6 +996,7 @@ async def run_cron_task_core(
                     result_excerpt=last_text,
                     session_id=_sid,
                     denied_count=denied,
+                    tool_errors=tool_errors,
                     denied_tools=denied_tools_json(facts),
                     outcome=outcome,
                     outcome_source=source,
@@ -1023,7 +1032,7 @@ async def run_cron_task_core(
         if run is not None:
             try:
                 await ledger.finish(run["id"], status="cancelled", error="用户叫停",
-                                    denied_count=denied)
+                                    denied_count=denied, tool_errors=tool_errors)
             except Exception:  # noqa: BLE001 - 记账失败不影响取消
                 pass
         raise
@@ -1056,7 +1065,8 @@ async def run_cron_task_core(
         if run is not None:
             try:
                 await ledger.finish(run["id"], status="error", error=str(e)[:300],
-                                    denied_count=denied, error_kind=error_kind,
+                                    denied_count=denied, tool_errors=tool_errors,
+                                    error_kind=error_kind,
                                     outcome="failed", outcome_source="auto")
             except Exception:  # noqa: BLE001 - 记账失败不影响任务收尾
                 pass
@@ -2881,6 +2891,7 @@ class AutomationMixin:
                         result_excerpt=outcome["excerpt"], error=outcome["error"],
                         session_id=sid or None,
                         denied_count=node_denied,
+                        tool_errors=int(facts.get("tool_errors") or 0),
                         denied_tools=denied_tools_json(facts),
                         error_kind=(classify_run_error(outcome["error"])
                                     if outcome["status"] == "error" else ""),

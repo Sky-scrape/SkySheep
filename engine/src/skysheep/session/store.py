@@ -117,7 +117,10 @@ CREATE TABLE IF NOT EXISTS usage_log (
     ts REAL NOT NULL,
     in_tokens INTEGER NOT NULL DEFAULT 0,
     out_tokens INTEGER NOT NULL DEFAULT 0,
-    cached_tokens INTEGER NOT NULL DEFAULT 0
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    tool_calls INTEGER NOT NULL DEFAULT 0,
+    tool_errors INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts);
 CREATE TABLE IF NOT EXISTS snippets (
@@ -345,6 +348,7 @@ CREATE TABLE IF NOT EXISTS automation_runs (
     out_tokens INTEGER NOT NULL DEFAULT 0,
     cached_tokens INTEGER NOT NULL DEFAULT 0,
     denied_count INTEGER NOT NULL DEFAULT 0,
+    tool_errors INTEGER NOT NULL DEFAULT 0,
     denied_tools TEXT NOT NULL DEFAULT '',
     error_kind TEXT NOT NULL DEFAULT '',
     outcome TEXT NOT NULL DEFAULT '',
@@ -439,6 +443,13 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("relay_turns", "verify_attempts INTEGER NOT NULL DEFAULT 0"),
     ("relay_turns", "restatement TEXT NOT NULL DEFAULT ''"),
     ("relay_turns", "verify_note TEXT NOT NULL DEFAULT ''"),
+    # v14：usage_log 增轮级质量口径（每轮一行，见 add_usage）——tool_calls /
+    # tool_errors 支撑「工具报错率」，failed 支撑「轮成功率」；
+    # automation_runs 增 tool_errors（带病跑完的无效步骤信号，巡检消化）。
+    ("automation_runs", "tool_errors INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "tool_calls INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "tool_errors INTEGER NOT NULL DEFAULT 0"),
+    ("usage_log", "failed INTEGER NOT NULL DEFAULT 0"),
 )
 
 # 数据库结构版本：SCHEMA 或 _COLUMN_MIGRATIONS 每次变更时 +1。
@@ -464,10 +475,14 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 # v12：relay_pairs 增 verify_handoff（自动交替换手前先做复述核验，默认开）；
 #     relay_turns 增 verify_state / verify_attempts / restatement / verify_note
 #     （通过核验的那次复述与过程留痕，接力模式设计 §6 的类型化交接记录）。
+# v13：projects 增 removed_at（软移除）；snippets 增 slash（斜杠命令别名）。
+# v14：usage_log 增 tool_calls / tool_errors / failed（轮级质量口径，用量页
+#     出「轮成功率 / 工具报错率」）；automation_runs 增 tool_errors（巡检
+#     看「带病跑完」）。
 # 写入 PRAGMA user_version，用于降级检测——旧版程序打开新版库时，缺列补列
 # 只能「新版本向前兼容旧库」，反向没有保障（新列在新代码里可能有 NOT NULL
 # 语义，旧程序写出来的行会破约束）；拒绝打开并把后果说清楚，比静默写坏强。
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 @dataclass
@@ -2894,14 +2909,24 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
     async def add_usage(
         self, session_id: str, provider: str, model: str,
         in_tokens: int, out_tokens: int, cached_tokens: int = 0,
+        *, tool_calls: int = 0, tool_errors: int = 0, failed: int = 0,
     ) -> None:
+        """记一轮（或一次协作调用）的用量。
+
+        三个质量口径参数（v14，仅主聊天轮传）：tool_calls / tool_errors 支撑
+        「工具报错率」，failed 支撑「轮成功率」（口径见 backend 的收尾调用——
+        引擎级错误算失败，用户主动停止不算）。旧调用方不传即为 0，历史行
+        与协作路径（圆桌 / 团队 / 定时任务各自记账）不带这三项。
+        """
         if in_tokens <= 0 and out_tokens <= 0:
             return
         assert self._db
         await self._db.execute(
-            "INSERT INTO usage_log (session_id, provider, model, ts, in_tokens, out_tokens, cached_tokens)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session_id, provider, model, time.time(), in_tokens, out_tokens, max(0, cached_tokens)),
+            "INSERT INTO usage_log (session_id, provider, model, ts, in_tokens, out_tokens, cached_tokens,"
+            " tool_calls, tool_errors, failed)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, provider, model, time.time(), in_tokens, out_tokens, max(0, cached_tokens),
+             max(0, int(tool_calls)), max(0, int(tool_errors)), 1 if failed else 0),
         )
         await self._db.commit()
 
@@ -3036,10 +3061,38 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                 args,
             )
             by_provider = [dict(r) for r in await cur.fetchall()]
+            # 轮级质量口径（v14 列，旧行/协作路径为 0，不计入分母的字段照实汇总）：
+            # 轮成功率 = 1 - failed/total（用户主动停止不算失败）；工具报错率 =
+            # tool_errors/tool_calls。列是 2026-11 才加的，老库历史行三列全 0，
+            # 算出的「成功率 100%」只反映有记录的部分——前端为空时不展示即可。
+            cur = await self._db.execute(
+                "SELECT COUNT(*) AS turns, COALESCE(SUM(l.failed), 0) AS failed,"
+                " COALESCE(SUM(l.tool_calls), 0) AS tc, COALESCE(SUM(l.tool_errors), 0) AS te"
+                + join + cond,
+                args,
+            )
+            row = await cur.fetchone()
+            if row and int(row[0] or 0) > 0:
+                turns_total = int(row[0])
+                turns_failed = int(row[1] or 0)
+                tool_calls_sum = int(row[2] or 0)
+                tool_errors_sum = int(row[3] or 0)
+                quality = {
+                    "turns": turns_total,
+                    "turns_failed": turns_failed,
+                    "turn_success_rate": round(1.0 - turns_failed / turns_total, 4),
+                    "tool_calls": tool_calls_sum,
+                    "tool_errors": tool_errors_sum,
+                    "tool_error_rate": (
+                        round(tool_errors_sum / tool_calls_sum, 4) if tool_calls_sum > 0 else None
+                    ),
+                }
+            else:
+                quality = None
             streak_current, streak_longest = await self._usage_streaks(scoped, project_id)
             longest_chat = await self._longest_chat_span(scoped, project_id)
         except Exception:  # noqa: BLE001
-            pass
+            quality = None
         return {
             "by_day": by_day,
             "by_session": by_session,
@@ -3048,6 +3101,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "streak_current": streak_current,
             "streak_longest": streak_longest,
             "longest_chat_seconds": longest_chat,
+            "quality": quality,
         }
 
     async def _usage_streaks(self, scoped: bool, project_id) -> tuple[int, int]:
@@ -3294,6 +3348,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             "out_tokens": int(r["out_tokens"] or 0),
             "cached_tokens": int(r["cached_tokens"] or 0),
             "denied_count": int(r["denied_count"] or 0),
+            "tool_errors": int(r["tool_errors"] or 0),
             "denied_tools": r["denied_tools"] or "",
             "error_kind": r["error_kind"] or "",
             "outcome": r["outcome"] or "",
@@ -3360,6 +3415,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         out_tokens: int = 0,
         cached_tokens: int = 0,
         denied_count: int = 0,
+        tool_errors: int = 0,
         denied_tools: str = "",
         error_kind: str = "",
         outcome: str = "",
@@ -3375,6 +3431,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
 
         denied_count：本轮被无人值守门控拒绝的工具次数（0 = 没被拦）。这是
         「预授权工具没勾全」这类最常见故障的唯一痕迹。
+        tool_errors：本轮工具报错次数（带病跑完的无效步骤信号，巡检消化）。
         denied_tools：被拦工具名 → 次数的 JSON 快照（只留前几项），用于直接
         告诉用户该补哪些预授权工具。
         error_kind：失败归因分类（permission / model / path / budget / unknown）。
@@ -3396,7 +3453,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             " result_excerpt = ?, error = ?,"
             " session_id = COALESCE(?, session_id),"
             " in_tokens = ?, out_tokens = ?, cached_tokens = ?,"
-            " denied_count = ?, error_kind = ?,"
+            " denied_count = ?, tool_errors = ?, error_kind = ?,"
             " denied_tools = ?,"
             " outcome = CASE WHEN ? = '' THEN outcome ELSE ? END,"
             " outcome_source = CASE WHEN ? = '' THEN outcome_source ELSE ? END,"
@@ -3409,7 +3466,7 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
                 None if session_id is None else str(session_id),
                 max(0, int(in_tokens)), max(0, int(out_tokens)),
                 max(0, int(cached_tokens)),
-                max(0, int(denied_count)), str(error_kind or "")[:24],
+                max(0, int(denied_count)), max(0, int(tool_errors)), str(error_kind or "")[:24],
                 str(denied_tools or "")[:600],
                 str(outcome or ""), str(outcome or ""),
                 str(outcome_source or ""), str(outcome_source or ""),

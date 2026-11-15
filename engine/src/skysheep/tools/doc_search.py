@@ -150,6 +150,14 @@ class SearchDocumentsTool(Tool):
                     has_index = True
                 if not has_index:
                     notes.append("这个项目还没有文档索引，先调用 index_documents 建立索引再检索。")
+                else:
+                    # 索引在但零命中：给换路提示（路由边界），别让模型在
+                    # 「换词重试」上空转——该联网的联网、该通读的通读
+                    notes.append(
+                        "换个更具体的词或缩小 path 范围再试；若要找的信息可能不在"
+                        "本项目文档里（最新资讯、官方文档），改用 web_search 联网查；"
+                        "想通读原文用 read_document。"
+                    )
             return "\n".join([head, *notes]) if notes else head
 
         mode = "关键词检索（BM25）" if res["keyword_only"] else "混合检索（BM25 + 向量）"

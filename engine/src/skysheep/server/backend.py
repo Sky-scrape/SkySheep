@@ -574,6 +574,7 @@ def _turn_row(line: str, fields: dict) -> dict:
         "tool_calls": _turn_int(fields, "tool_calls"),
         "tool_ms": _turn_int(fields, "tool_ms"),
         "tool_errors": _turn_int(fields, "tool_errors"),
+        "dup_tool_calls": _turn_int(fields, "dup_tool_calls"),
         "slowest_tool": str(fields["slowest_tool"]) if fields.get("slowest_tool") else None,
         "slowest_tool_ms": _turn_int(fields, "slowest_tool_ms"),
         "permission_waits": _turn_int(fields, "permission_waits"),
@@ -1194,6 +1195,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             sandbox_level=self.cfg.shell.sandbox_level,
             use_ripgrep=self.cfg.search.use_ripgrep,
             permission_timeout_s=self.cfg.permission_timeout_s,
+            drift_check_steps=self.cfg.agent.drift_check_steps,
         )
         agent.on_provider_ok = self._provider_on_ok
         agent.on_provider_error = self._provider_on_error
@@ -3158,8 +3160,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "tool_calls": 0, "tool_ms": 0, "tool_errors": 0,
             "permission_waits": 0, "permission_ms": 0,
             "slowest_tool": "", "slowest_tool_ms": 0,
+            "dup_tool_calls": 0,
         }
         _perm_pending: dict[str, float] = {}
+        # 重复调用计数（无效步骤信号）：本轮「同工具 + 同参数」的再次尝试。
+        # 按 tool_call_started 数（被 loop_guard 拦下的重试也发 started）——
+        # 信用分配只到轮级：这个数 tells「这轮有多少步是白走的」。
+        _call_seen: dict[tuple[str, str], int] = {}
         # 本轮失败证据：Agent 会把 Provider 异常吞成 ErrorEvent 后正常收尾，
         # 外层看不到 Python 异常。只靠 turn_exc 判定终态会把失败轮写成
         # completed（运行中心显示“已完成”但错误摘要还在）。这里显式收集
@@ -3172,6 +3179,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if kind == "tool_call_started":
                 self.runs.update(run_id, state="tool_running",
                                  detail="正在执行 " + str(ev.get("name") or ""))
+                # 同工具 + 同参数的再次尝试：重复劳动计数（信用分配的轮级代理）
+                _ck = (
+                    str(ev.get("name") or ""),
+                    json.dumps(ev.get("input") or {}, ensure_ascii=False,
+                               sort_keys=True, default=str)[:2000],
+                )
+                _seen = _call_seen.get(_ck, 0) + 1
+                _call_seen[_ck] = _seen
+                if _seen > 1:
+                    turn_stats["dup_tool_calls"] += 1
             elif kind == "tool_call_finished":
                 self.runs.update(run_id, state="thinking")
             elif kind == "permission_request":
@@ -3637,12 +3654,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 模型（定时任务）都是独立 provider 实例，不能记成全局「当前服务」。
         try:
             prov = getattr(agent, "provider", None)
+            # 轮级质量口径（v14）：引擎级失败（异常 / ErrorEvent / stop_reason=error）
+            # 算 failed；用户主动停止不算——那是人走的，不是模型跑挂的。
+            turn_failed = bool(turn_exc) or bool(turn_fail)
             await self.store.add_usage(
                 sid,
                 getattr(prov, "name", "") or self.provider_name,
                 getattr(prov, "model", "") or self.provider_model,
                 agent.total_in_tokens - tin0, agent.total_out_tokens - tout0,
                 agent.total_cached_tokens - tcached0,
+                tool_calls=turn_stats["tool_calls"],
+                tool_errors=turn_stats["tool_errors"],
+                failed=1 if turn_failed else 0,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -3664,6 +3687,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 tool_calls=turn_stats["tool_calls"] or None,
                 tool_ms=turn_stats["tool_ms"] or None,
                 tool_errors=turn_stats["tool_errors"] or None,
+                dup_tool_calls=turn_stats["dup_tool_calls"] or None,
                 slowest_tool=turn_stats["slowest_tool"] or None,
                 slowest_tool_ms=turn_stats["slowest_tool_ms"] or None,
                 permission_waits=turn_stats["permission_waits"] or None,
@@ -6360,6 +6384,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "streak_current": st.get("streak_current", 0),
             "streak_longest": st.get("streak_longest", 0),
             "longest_chat_seconds": st.get("longest_chat_seconds", 0.0),
+            # 轮级质量口径（轮成功率 / 工具报错率；无数据为 None，前端不展示）
+            "quality": st.get("quality"),
             "cost": round(cost, 4),
             "has_price": any(p["price_in"] or p["price_out"] for p in prices.values()),
             # 每日预算与当日用量：用量页据此显示「今日已用 / 预算」，0 = 未设上限

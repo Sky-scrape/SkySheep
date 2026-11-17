@@ -573,7 +573,7 @@ def test_install_from_zip_rejects_traversing_skill_name(tmp_path, evil):
     (outside / "keep.txt").write_text("别动我", encoding="utf-8")
 
     zp = _zip_with_skill(tmp_path / "evil.zip", evil)
-    # overwrite=True 是市场「更新/重装」走的路径：不卡名字就是先删后写
+    # overwrite=True 是导入同名覆盖安装走的路径：不卡名字就是先删后写
     with pytest.raises(SkillInstallError):
         install_from_zip(zp, dest, existing=set(), overwrite=True)
 

@@ -57,14 +57,14 @@ def _make_repo(
 
 
 def test_real_repo_versions_consistent():
-    """真实仓库：五处版本号必须一致（漂移即红，README 路线图曾停在 v1.9）。"""
+    """真实仓库：七处版本号必须一致（漂移即红，README 路线图曾停在 v1.9）。"""
     ok, lines = cv.check()
     assert ok, "\n".join(lines)
 
 
 def test_mismatch_reported(tmp_path):
     root = _make_repo(tmp_path)
-    # 改坏一处：pyproject 与其余四处失配
+    # 改坏一处：pyproject 与其余六处失配
     (root / "engine" / "pyproject.toml").write_text(
         '[project]\nname = "fake"\nversion = "9.9.9"\n', encoding="utf-8"
     )

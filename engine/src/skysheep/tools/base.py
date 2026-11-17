@@ -166,10 +166,6 @@ class Tool(abc.ABC):
         工具可覆写（如 run_command 返回命令本身，让"命令前缀"规则有意义）。"""
         return json.dumps(input_dict, ensure_ascii=False)
 
-    def describe_call(self, args: BaseModel) -> str:
-        """人类可读的一次调用描述（用于确认弹窗与事件展示）。"""
-        return self.name + "(" + args.model_dump_json() + ")"
-
 
 # 「改前是目录」的哨兵。read_bytes 读不了目录，旧实现把目录一律记成 None
 # （语义=改前不存在）——回滚时 move_file 的源目录整树丢失、目标目录被连内容

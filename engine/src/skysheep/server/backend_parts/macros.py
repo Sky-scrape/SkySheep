@@ -21,9 +21,6 @@ from ...bgtasks import spawn_bg
 from ...core import macros as macro_lib
 from ...tools import ToolContext, ToolRegistry
 
-# 单步进度里保留的结果摘要长度（前端只显示一行）
-_STEP_PREVIEW_CHARS = 120
-
 
 class MacrosMixin:
     """宏库与重放（P13）。字段 `_macro_task` / `_macro_stop` 懒建。"""

@@ -21,8 +21,6 @@ from pathlib import Path
 # 且 wintheme 只依赖标准库，不会拖慢启动首帧。
 _DARK_BOOL_THEME = "night"
 _LIGHT_BOOL_THEME = "paper"
-_DARK_THEME_IDS = {"night", "indigo", "pine", "abyss", "scarlet", "lilac", "lime", "rouge",
-                   "obsidian", "inkred", "glowsea", "cocoa", "cinnabar"}
 
 # 失败页的代码块预览色与错误红：蓝主色与二十六主题共用，pre 三色与 err 逐主题取自
 # app.css 对应段落（pre 区在失败页里就是 --paper-sunken 底 + --line 边界）
@@ -73,7 +71,8 @@ def splash_html(static_dir: Path, theme: str = "paper", dark: bool | None = None
     if dark:
         theme = _DARK_BOOL_THEME
     pal = _palette(theme)
-    is_dark = theme in _DARK_THEME_IDS
+    from . import wintheme
+    is_dark = theme in wintheme.DARK_THEME_IDS
     logo = '<div class="logo-fallback">🐑</div>'
     names = (
         (

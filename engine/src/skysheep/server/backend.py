@@ -1109,7 +1109,6 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.runs = RunCenter(skysheep_home() / "runs.json")
         # 供应商健康登记：agent 循环上报成功/失败，设置页状态灯读它
         self.provider_health = HealthRegistry()
-        self._run_seq = 0  # 已弃用：运行 id 改由 RunCenter.allocate_id 跨重启唯一生成
         self._text_meta_cache: dict[str, tuple[int, str, str]] = {}
         self._token_failures: list[dict] = []  # 最近 TOKEN_FAILURE_LOG_MAX 条 {ts, ip, where}
         self._token_failure_total = 0  # 自启动以来的失败总数（留痕列表只留最近几条）
@@ -4647,21 +4646,6 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         for ag in orch.agents():
             provs.append(getattr(ag, "provider", None))
         self._release_turn_providers(provs)
-
-    def _teams_interrupt_all(self, reason: str) -> None:
-        """把所有活动团队就地标中断（项目切换：旧项目 runtime 全部失效，团队一并失效）。"""
-        for sid, orch in self._teams.items():
-            self._release_team_providers(orch)
-            self._teams_interrupted[sid] = {
-                "session_id": sid,
-                "team_id": orch.team_id,
-                "roster": [m.name for m in orch.roster],
-                "director_mode": orch.director_mode,
-                "status": "interrupted",
-                "interrupt_reason": reason,
-            }
-        self._teams.clear()
-        self._persist_team_state()
 
     def _team_provider_context_limit(self, name: str) -> int:
         """成员/总管模型的上下文窗口（按 provider 配置；0 = 编排器全局回退）。

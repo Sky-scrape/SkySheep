@@ -1781,23 +1781,6 @@ def disable_provider_in_config(name: str) -> None:
     _write_raw_config(p, raw)
 
 
-def enabled_models_of(name: str) -> list[str]:
-    """读取某服务当前已启用的模型列表（老配置自动从 model 字段迁移）。"""
-    p = config_path()
-    if not p.exists():
-        return []
-    try:
-        with p.open("rb") as f:
-            raw = tomllib.load(f)
-    except Exception:  # noqa: BLE001
-        return []
-    section = (raw.get("providers") or {}).get(name) or {}
-    models = [str(m) for m in (section.get("models") or [])]
-    if not models and section.get("model"):
-        models = [str(section["model"])]
-    return models
-
-
 def set_provider_models_in_config(name: str, models: list[str]) -> None:
     """整体写入某服务的已启用模型列表（model 字段不动，由保存/设默认负责）。"""
     cleaned = [str(m) for m in models]

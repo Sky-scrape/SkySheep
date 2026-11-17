@@ -6107,9 +6107,9 @@ details.map-phase summary::-webkit-details-marker { display: none; }
  *   ③ app.js 的 THEMES 表（主题卡名单与搜索索引都从它生成）
  *   ④ backend_parts/remote.py 的 THEME_PREFS / THEME_AUTO_LIGHT / THEME_AUTO_DARK
  *   ⑤ server/app.py 首帧注入的 auto 落点白名单
- *   ⑥ wintheme.py 的 THEME_PALETTE 与 DARK_THEME_IDS（标题栏/启动页/失败页）
- *   ⑦ bootpages.py 的 _ERR 与 _DARK_THEME_IDS
- *   ⑧ tests 里的主题名单（test_ui_prefs / test_wintheme）
+ *   ⑥ wintheme.py 的 THEME_PALETTE 与 DARK_THEME_IDS（标题栏/启动页/失败页）；
+ *      bootpages.py 的 _ERR
+ *   ⑦ tests 里的主题名单（test_ui_prefs / test_wintheme）
  * ============================================================ */
 
 /* —— 青瓷：龙泉青瓷的釉青——淡青灰瓷底，黛绿墨线，交互色是釉青本身 —— */

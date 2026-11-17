@@ -1,12 +1,14 @@
-; SkySheep Windows 安装包脚本（Inno Setup 6+）
+; SkySheep Windows 安装包脚本（Inno Setup 7）
 ;
 ; 用法：
 ;   1. 先打包 PyInstaller 产物（在 engine/ 目录）：
 ;      .venv\Scripts\pyinstaller.exe --noconfirm --clean SkySheep.spec
 ;      产物在 dist\SkySheep\（SkySheep.exe 及随附文件）
-;   2. 安装 Inno Setup 6（https://jrsoftware.org/isinfo.php），然后：
+;   2. 安装 Inno Setup 7（https://jrsoftware.org/isinfo.php），然后：
 ;      ISCC.exe tools\installer.iss
 ;      产物：installer\SkySheep-<版本>-setup.exe
+;      ISCC 路径也可交给 engine/tools/release.py 自动探测：SKYSHEEP_ISCC 环境变量
+;      优先，其次 D:\Inno Setup 7\ 与 Program Files 下的 Inno Setup 7/6（CI 上走 SKYSHEEP_ISCC）。
 ;
 ; 发版时注意：版本号与 pyproject.toml / src/skysheep/__init__.py 保持一致
 ; （0.6.0 起三处一致，版本以 pyproject.toml 为准；变更记录见 CHANGELOG.md）。注：

@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -64,8 +63,6 @@ from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S, is_transient_error
 from .collab_budget import BudgetExceeded, RunBudget
 from .effort import resolve_auto_effort
 from .roundtable import MemberSpec, clip_draft
-
-logger = logging.getLogger(__name__)
 
 # 发给前端的事件回调（与圆桌同一姿态：backend 负责转成 WS 帧广播）
 EmitFn = Callable[[AgentEvent], Awaitable[None]]

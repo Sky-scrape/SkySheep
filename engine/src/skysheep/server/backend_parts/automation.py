@@ -2033,21 +2033,6 @@ class AutomationMixin:
         """渠道推送目标（见模块级 _cron_push_targets_of；后端挂在 self.channels 上）。"""
         return _cron_push_targets_of(self.channels)
 
-    def _cron_push_body(self, task: dict, status: str, duration_s: float) -> str:
-        """终态摘要文案（见模块级 cron_push_body）。"""
-        return cron_push_body(task, status, duration_s)
-
-    async def _channel_push_cron(self, task: dict, status: str, duration_s: float) -> None:
-        """把定时任务终态摘要推到聊天渠道（纯推送，不需要回复）。"""
-        await push_text_to_targets(
-            self.channels, self._cron_push_body(task, status, duration_s)
-        )
-
-    def _spawn_cron_push(self, task: dict, status: str, duration_s: float) -> None:
-        """终态推送的 fire-and-forget 入口（见模块级 _fire_cron_push）。"""
-        _fire_cron_push(self.channels, task, status, duration_s,
-                        self._cron_push_body(task, status, duration_s))
-
     # ---- 每日预算告警推送（用量越线 → 渠道提醒，一天一档一条） ----
     # 复用 _cron_push_targets 的目标口径（含 Webhook 广播语义）。前提：告警
     # 跟着渠道走——没有启用且配置齐全的目标就等于不告警，护栏照常在本应用

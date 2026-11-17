@@ -1040,7 +1040,7 @@ class TaskManager:
             rdir = self._working_dir / ".skysheep" / "reports"
             rdir.mkdir(parents=True, exist_ok=True)
             path = rdir / f"{rec.id}-{rec.agent_type}.md"
-            path.write_text(result, encoding="utf-8")
+            write_text_atomic(path, result)
             rec.report_path = str(path)
             self._prune_reports(rdir)
         except OSError:

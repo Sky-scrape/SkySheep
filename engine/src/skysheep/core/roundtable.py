@@ -38,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from ..events import (
     AgentEvent,
@@ -668,7 +668,6 @@ async def run_roundtable(
     chair_model: str = "",
     chair_context_tokens: int = 0,
     member_history_turns: int = 0,
-    prompts: dict[int | str, str] | list[str] | None = None,
     chair_system: str = "",
     budget: RunBudget | None = None,
 ) -> RoundtableOutcome:
@@ -685,29 +684,12 @@ async def run_roundtable(
     已产出内容（含进行中成员已流出的部分草稿）保留。
 
     模板接入（全部可选，默认 None / 空 = 旧行为逐字不变）：
-    - prompts：按成员下标（int / "0"）或成员名给的模板人设，非空时覆盖
-      MemberSpec.prompt；与 MemberSpec 自带人设同时存在时以本参数为准；
     - chair_system：收口（融合主席）的附加系统提示词，追加在原 system_text
       之后，不替换既有身份提示词；
     - budget：RunBudget。成员与融合的每次真实 provider 调用前 spend()；某轮
       结束后一旦超限，立即发 Notice、把 outcome 标成 error 并返回，不再辩论/
       融合（已产出的成员草稿保留在 outcome.members）。
     """
-    if prompts:
-        resolved: list[MemberSpec] = []
-        for i, spec in enumerate(members):
-            if isinstance(prompts, dict):
-                text = (
-                    prompts.get(i)
-                    or prompts.get(str(i))
-                    or prompts.get(spec.name)
-                    or ""
-                )
-            else:
-                text = prompts[i] if i < len(prompts) else ""
-            text = (text or "").strip()
-            resolved.append(replace(spec, prompt=text) if text else spec)
-        members = resolved
     if (chair_system or "").strip():
         chair_system = chair_system.strip()
         system_text = f"{system_text}\n\n{chair_system}".strip()

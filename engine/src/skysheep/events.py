@@ -1,7 +1,8 @@
 """Agent 运行过程的统一事件流。
 
 Agent 循环、Provider 流式输出、权限交互、工具执行全部产生事件；
-CLI 与未来的 GUI/WebSocket 消费同一套事件，保证行为一致。
+CLI / GUI(pywebview) / WebSocket server 消费同一套事件，保证行为一致。
+WS 事件字段协议见 ``docs/无头运行协议.md``（事件字段以本模块为唯一事实来源）。
 """
 
 from __future__ import annotations

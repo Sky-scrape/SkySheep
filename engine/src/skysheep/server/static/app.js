@@ -9150,11 +9150,6 @@ async function applyWorkspaceData({ snap, sessions, projects, snippets }) {
   bootSnap = bootSnap ? { ...bootSnap, ...snap } : snap;
   // 后端最后一次报告的「无可用模型」状态：send() 的预检依据（每次 boot 刷新）
   providerBroken = !snap.provider || !!snap.provider_error;
-  const projPath = document.getElementById("project-path"); // 侧栏已移除工作目录框
-  if (projPath) {
-    projPath.textContent = snap.working_dir;
-    projPath.title = snap.working_dir;
-  }
   if (snap.provider_error) {
     showBanner("⚠ " + snap.provider_error.split("\n")[0] + " —— 配置好模型后即可开始对话。", [
       { label: "去配置", onClick: () => { hideBanner(); openSettings("providers"); } },

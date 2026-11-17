@@ -5,7 +5,7 @@
     用户输入 → [模型流式响应 → 工具调用 →（权限确认）→ 执行 → 结果回传] × N → 最终回复
 
 设计约定：
-- 所有过程以 AgentEvent 产出，CLI / GUI / 未来的 WebSocket server 消费同一套事件；
+- 所有过程以 AgentEvent 产出，CLI / GUI(pywebview) / WebSocket server 消费同一套事件；
 - 敏感操作通过 PermissionGate 授权：authorize() 返回 PendingPermission 时，
   循环产出 PermissionRequest 事件并挂起，前端调用 respond_permission() 恢复；
 - 历史保存在 self.history（归一化 Message），与会话存储无缝对接。

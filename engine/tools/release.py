@@ -13,7 +13,7 @@
     2  uv sync --locked                        §3-1
     3  lint / unit / e2e / eval 质量门          §2（--skip-quality 可跳过）
     4  PyInstaller 打包（不经 uv run）          §3-2
-    5  产物校验（exe / 内置技能 / manifest）     §3-3
+    5  产物校验（exe 在位）                     §3-3
     6  signtool 签名打包产物（未配置证书自动跳过）§3-4
     7  冒烟（临时 SKYSHEEP_HOME 起 exe）        §3-3
     8  ISCC 编译安装包                          §3-4
@@ -664,7 +664,7 @@ def build_steps(args: argparse.Namespace) -> list[Step]:
         Step("§3-1", "依赖同步 uv sync --locked", step_sync),
         Step("§2", "发布质量门（lint / unit / e2e / eval）", step_quality, "skip_quality"),
         Step("§3-2", "PyInstaller 打包（不经 uv run）", step_pack, "skip_pack"),
-        Step("§3-3", "产物校验（exe / 内置技能 / manifest）", step_verify_artifacts),
+        Step("§3-3", "产物校验（exe 在位）", step_verify_artifacts),
         Step("§3-4", "signtool 签名打包产物（未配置证书自动跳过）", step_sign_app),
         Step("§3-3", "冒烟（临时 SKYSHEEP_HOME 起 exe，GET / 应 200）", step_smoke, "skip_smoke"),
         Step("§3-4", "ISCC 编译安装包", step_installer, "skip_installer"),

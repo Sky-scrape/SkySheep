@@ -7,7 +7,7 @@
 安装结果必须是「一个技能一个文件夹，里面带 SKILL.md」——所以这里做三件事：
 1. 找到包里的技能根（用户可能选中了外层目录，或 zip 里套了一层）；
 2. 校验 SKILL.md 存在且能解析出名称，且不与已有技能重名（默认重名不覆盖，
-   报错让用户先改名；「更新/重装」走 overwrite=True 覆盖同名技能）；
+   报错让用户先改名；导入时的同名覆盖安装走 overwrite=True 覆盖同名技能）；
 3. 复制/解压进去。zip 解压逐条目检查路径，挡住 ../ 穿越与绝对路径。
 """
 
@@ -43,8 +43,8 @@ class SkillInstallError(Exception):
 #
 # SKILL.md frontmatter 里的 name 会被直接当成「技能目录名」拼安装落点，而它由
 # 技能包作者自由填写——任意第三方技能包都可能带恶意值。名字里带
-# `..`、路径分隔符或盘符就能把落点指到技能目录之外：配合 overwrite（市场「更新/
-# 重装」走这条路）先 rmtree_force 再落内容，等于任意目录删除 + 写入；remove_skill
+# `..`、路径分隔符或盘符就能把落点指到技能目录之外：配合 overwrite（导入时的
+# 同名覆盖安装）先 rmtree_force 再落内容，等于任意目录删除 + 写入；remove_skill
 # 同理。解压层那三重 zip-slip 防护拦不住这条，因为穿越发生在解压**之后**的落点
 # 拼接。所以所有落点一律经 _skill_target() 算出来，不得手拼 `root / name`。
 
@@ -260,7 +260,7 @@ def install_from_dir(
 ) -> dict:
     """把本机文件夹里的技能包复制到 dest_root。
 
-    overwrite=True 供「更新/重装」用：同名技能整目录替换（旧目录先进备份），
+    overwrite=True 供导入时的同名覆盖安装用：同名技能整目录替换（旧目录先进备份），
     而不是报错。装完在每个技能目录里写 .source.json 来源标记。
     """
     src_path = Path(src).expanduser()
@@ -435,7 +435,7 @@ def install_from_zip(
     only_under：只安装压缩包里这个子目录下的技能（给「从 GitHub 链接装仓库里
     某个 skills/xxx 子目录」用）。压缩包外层通常套着一层 repo-main 之类的目录，
     所以这里按「路径里包含这段连续目录」来匹配，不锚定开头。
-    overwrite=True 供「更新/重装」用：同名技能整目录替换（旧目录先进备份），
+    overwrite=True 供导入时的同名覆盖安装用：同名技能整目录替换（旧目录先进备份），
     而不是报错。装完在每个技能目录里写 .source.json 来源标记。
     """
     src_path = Path(src).expanduser()

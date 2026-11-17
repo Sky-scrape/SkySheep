@@ -31,7 +31,6 @@ DEFAULT_REPORT_TIME = "09:00"
 # 与日报共用同一个状态文件——一张卡片管两种节律，少一个要同步的地方。
 WEEK_DAYS = 7
 DEFAULT_WEEKLY_WEEKDAY = 0  # 0=周一 … 6=周日（与 datetime.weekday() 同口径）
-WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 # 周报汇总的运行条数上限（automation_runs 的分页上限 500）：超过只统计最近 500 条，
 # 报告里如实标注「仅统计最近 N 条」，不假装是全量。
 WEEKLY_RUN_LIMIT = 500

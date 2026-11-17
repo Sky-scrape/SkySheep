@@ -80,7 +80,7 @@ SkySheep 适合那些需要模型真正动手、又希望过程可见可控的�
 - **多模型协作**：协作（圆桌 / 团队 / 对抗三张内置模板，可复制编辑，跑前一次授权；团队常驻与协作页、定时团队）· 接力（主副屏交替 + 交接前复述核验）
 - **执行**：文件读写与精确编辑 · 命令执行（含后台进程）· 正则与通配搜索 · 网页抓取与搜索 · PDF / Word / Excel / PPT / CSV 读写 · 图片理解与 AI 画图 · 子代理（可跑在隔离 worktree）
 - **自动化**：定时任务 · 依赖流水线（DAG）· 工厂看板（跨项目场景化观战 · 成品垛 / 返工堆 · 昼夜与现实天气）· 日程提醒 · 导出 Windows 计划任务 · 飞书 / 微信 / Webhook 推送 · 每日运行日报
-- **扩展**：MCP（双传输 + 七个预设）· Skills（二十个官方模板）· Mods（实验性）· 全局出网（代理 / 绕行名单 / 自签 CA）
+- **扩展**：MCP（双传输 + 七个预设）· Skills（全局 / 项目两级）· Mods（实验性）· 全局出网（代理 / 绕行名单 / 自签 CA）
 - **桌面**：二十六套主题 · 手机远程与 Tailscale · 多标签终端 · 桌面宠物 · 中文全文搜索 · 按轮检查点回滚
 
 ## 🧠 设计理念
@@ -352,7 +352,7 @@ cd engine
 - 新工具必须在 `Tool` 上声明 `safety`，并显式声明 MCP 四注解；凡涉及写文件或执行命令，必须走 `PermissionGate`，这是不可绕过的
 - 文本读写一律走 `textio.py`（编码与行尾符安全），文件移动 / 删除 / 建目录用专用工具（可回滚），不要教 Agent 用 `run_command` 里的 `mv` / `rm` / `mkdir`
 - 新增可合并的流式事件类型时同步更新 `_MERGEABLE_DELTA_KINDS`，并保证轮末、异常、取消三条路径都 flush
-- 版本号六处一致由 `engine/tools/check_versions.py` 机械校验，`uv.lock` 那处由 `uv sync --locked` 兜住
+- 版本号七处一致由 `engine/tools/check_versions.py` 机械校验，`uv.lock` 那处由 `uv sync --locked` 兜住
 - 打包与打包冒烟直接用 `.venv` 里的可执行文件，不要经 `uv run`
 
 安全漏洞请通过 [SECURITY.md](SECURITY.md) 的私密渠道报告，不要开公开 issue；其余协作细节见 [CONTRIBUTING.md](CONTRIBUTING.md)，行为准则见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。遇到问题可通过应用内 设置 · 关于 →「💬 反馈问题」导出脱敏诊断包并直达反馈页。

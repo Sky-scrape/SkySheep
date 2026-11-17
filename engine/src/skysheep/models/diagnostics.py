@@ -181,8 +181,6 @@ def classify_error_text(text: str, status: int | None = None) -> str:
             return cat
         if any(m in low for m in markers):
             return cat
-    if status == 404:
-        return "model_missing"
     return "unknown"
 
 
@@ -724,8 +722,6 @@ class HealthRegistry:
 
     def __init__(self) -> None:
         self._health: dict[str, ProviderHealth] = {}
-        # 运行中错峰记录：agent 主循环每次报错时调 record_error
-        self._recent_errors: dict[str, float] = {}
 
     def record_error(self, name: str, diag: ErrorDiagnosis) -> ProviderHealth:
         h = ProviderHealth(
@@ -738,7 +734,6 @@ class HealthRegistry:
             checked_at=time.time(),
         )
         self._health[name] = h
-        self._recent_errors[name] = time.time()
         return h
 
     def record_text_error(self, name: str, text: str) -> ProviderHealth:
@@ -755,7 +750,6 @@ class HealthRegistry:
             checked_at=time.time(),
         )
         self._health[name] = h
-        self._recent_errors[name] = time.time()
         return h
 
     def record_ok(self, name: str, latency_ms: int = 0) -> ProviderHealth:
@@ -763,7 +757,6 @@ class HealthRegistry:
             name=name, level="ok", latency_ms=latency_ms, checked_at=time.time()
         )
         self._health[name] = h
-        self._recent_errors.pop(name, None)
         return h
 
     def set(self, h: ProviderHealth) -> None:
@@ -782,11 +775,3 @@ class HealthRegistry:
             else:
                 out.append(h.to_dict())
         return out
-
-
-def base_url_of(cfg_provider) -> str:
-    """ProviderConfig 的 base_url（预设缺省时按 kind 给默认）。"""
-    url = (getattr(cfg_provider, "base_url", "") or "").strip()
-    if url:
-        return url
-    return "anthropic 默认接口" if getattr(cfg_provider, "kind", "") == "anthropic" else ""

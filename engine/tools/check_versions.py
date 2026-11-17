@@ -1,4 +1,4 @@
-"""版本号一致性自检——发布清单 §1「版本号四处一致」的机械化（2026-09 审查发现 27）。
+"""版本号一致性自检——发布清单 §1「版本号七处一致」的机械化（2026-09 审查发现 27）。
 
 比对七处版本号是否一致：
 
@@ -54,7 +54,7 @@ def _read(root: Path, rel: Path, label: str) -> str:
 
 
 def read_versions(root: Path | None = None) -> dict[str, str]:
-    """从仓库根 ``root`` 读取五处版本号，返回 ``{来源: 版本}``；读不到/解析不出抛 ``ValueError``。"""
+    """从仓库根 ``root`` 读取七处版本号，返回 ``{来源: 版本}``；读不到/解析不出抛 ``ValueError``。"""
     root = root or _REPO_ROOT
     versions = {
         "engine/pyproject.toml": _extract(

@@ -111,23 +111,3 @@ def test_unserializable_field_does_not_raise():
 def test_plain_log_line_has_no_structured_payload():
     """普通日志行（没有标记）解析出 None：不会把无关日志误判成结构化事件。"""
     assert obs.parse_structured("2026-09-21 19:00:00 INFO skysheep: 服务就绪") is None
-
-
-def test_span_measures_elapsed_ms():
-    import time
-
-    with obs.span() as s:
-        time.sleep(0.05)
-    # 阈值取宽：Windows 下 sleep 精度有限（实测 sleep(0.02) 可能只过 14ms），
-    # 这里验证的是「计时器确实在计」，不是守时精度。
-    assert 20 <= s.ms <= 2000, s.ms
-
-
-def test_span_reports_running_elapsed_before_exit():
-    import time
-
-    s = obs.span()
-    time.sleep(0.05)
-    # 阈值取得宽松：这里验证的是「未退出上下文时返回当前已耗时」这个语义，
-    # 不该因为守时粒度或首轮导入抖动而变成脆弱用例。
-    assert s.ms >= 20, "未退出上下文时应返回从进入算起的当前耗时"

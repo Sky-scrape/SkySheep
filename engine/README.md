@@ -94,7 +94,7 @@ PE 子系统为 GUI，会以基础解释器的 `pythonw.exe` 运行）：
 产物 `dist/SkySheep/SkySheep.exe`（约 62 MB，onedir）。两个要点：入口用 `desktop.py`；
 前端资源靠 `sys._MEIPASS` 定位（`server/app.py` 的 `_static_dir`）。
 
-安装包用 `tools/installer.iss`（Inno Setup 6+，`ISCC.exe tools\installer.iss`）。静默部署要点：
+安装包用 `tools/installer.iss`（Inno Setup 7，`ISCC.exe tools\installer.iss`）。静默部署要点：
 安装器默认要求管理员权限，无人值守场景加 `/CURRENTUSER`（落到用户目录），
 例如 `SkySheep-1.9-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR="D:\SkySheep"`；
 卸载（含静默）在应用运行中会被拒绝（退出码非零），请先退出应用。

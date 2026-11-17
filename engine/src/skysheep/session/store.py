@@ -3687,16 +3687,6 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         await self._db.commit()
         return True
 
-    async def prune_factory_alerts(self, *, keep_days: int = 30) -> int:
-        """清掉很久没再告警的产线标记（顺手，不影响任何判定）。"""
-        assert self._db
-        cutoff = time.time() - max(1, int(keep_days)) * 86400.0
-        cur = await self._db.execute(
-            "DELETE FROM factory_alerts WHERE alerted_at < ?", (cutoff,)
-        )
-        await self._db.commit()
-        return max(0, int(cur.rowcount or 0))
-
     # ---- 任务编排（pipelines / pipeline_nodes）：按依赖顺序自动跑的 Agent 任务 ----
     # 流水线是「草稿 → 运行 → 终态」的容器；节点是 DAG 上的一个 headless 运行，
     # 依赖满足（dep_mode: all/any）才就绪，由服务层编排循环调度执行。
@@ -4843,7 +4833,3 @@ def export_messages_text(messages: list[Message]) -> str:
             continue
         lines.append(f"[{m.role.upper()}] {m.to_plain()}")
     return "\n\n".join(lines)
-
-
-def messages_to_json(messages: list[Message]) -> str:
-    return json.dumps([m.model_dump() for m in messages], ensure_ascii=False, indent=2)

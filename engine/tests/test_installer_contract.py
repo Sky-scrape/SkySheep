@@ -9,7 +9,7 @@
 - 覆盖安装防呆：AppMutex 防止应用运行时被覆盖出「半新半旧」目录；
 - 静默部署开关：/CURRENTUSER 降权、/RESTARTAPP 由程序内更新链路使用；
 - 用户数据边界：卸载清理只针对安装目录，绝不触碰 ~/.skysheep；
-- 版本号与 pyproject 一致（发版五处一致的一部分，另见 check_versions）。
+- 版本号与 pyproject 一致（发版七处一致的一部分，另见 check_versions）。
 
 另有「安装后首次启动」契约落在 test_upgrade_scenarios.py（全新
 SKYSHEEP_HOME 首启链路）与 test_desktop_launcher.py（启动兜底）。
@@ -93,7 +93,7 @@ def test_output_name_and_icon(iss_text):
 
 
 def test_installer_version_matches_pyproject(iss_text):
-    """MyAppVersion 与 pyproject.toml 一致（发版五处一致之一）。"""
+    """MyAppVersion 与 pyproject.toml 一致（发版七处一致之一）。"""
     import tomllib
 
     with open(_ENGINE / "pyproject.toml", "rb") as f:

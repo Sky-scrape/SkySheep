@@ -189,14 +189,13 @@ async def test_roundtable_template_prompt_overrides_member_system():
         events.append(event)
 
     outcome = await run_roundtable(
-        members=[_member(member, name="甲")],
+        members=[_member(member, name="甲", prompt="模板人设：只挑错")],
         chair=chair,
         system_text="主系统提示词",
         history=[],
         user_text="问题",
         timeout_s=10,
         emit=emit,
-        prompts={0: "模板人设：只挑错"},
     )
 
     assert outcome.status == "done"

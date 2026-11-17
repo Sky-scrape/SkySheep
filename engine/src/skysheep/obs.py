@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -94,33 +93,6 @@ def setup_file_logging(max_bytes: int = LOG_MAX_BYTES) -> Path | None:
         return path
     except OSError:
         return None
-
-
-class span:
-    """阶段耗时计时器：``with span() as s: ...`` 后读 ``s.ms``。
-
-    用 monotonic 计时，并在异常路径上照样可用（调用方自己决定要不要记）。
-    """
-
-    __slots__ = ("_t0", "_ms")
-
-    def __init__(self) -> None:
-        self._t0 = time.monotonic()
-        self._ms = 0
-
-    def __enter__(self) -> span:
-        self._t0 = time.monotonic()
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self._ms = int((time.monotonic() - self._t0) * 1000)
-
-    @property
-    def ms(self) -> int:
-        """已耗时（毫秒）。未退出上下文时返回从进入算起的当前值。"""
-        if self._ms:
-            return self._ms
-        return int((time.monotonic() - self._t0) * 1000)
 
 
 def parse_structured(line: str) -> dict | None:

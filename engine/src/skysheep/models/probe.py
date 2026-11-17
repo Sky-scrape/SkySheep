@@ -6,8 +6,6 @@ import httpx
 
 from ..network import NetworkConfig, is_local_base_url, make_async_httpx_client
 
-LMSTUDIO_BASE = "http://localhost:1234/v1"
-
 
 def _is_local(url: str | None) -> bool:
     """本机地址判定：实现上移到 network.is_local_base_url（M19）。

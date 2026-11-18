@@ -1179,23 +1179,6 @@ class PermissionGate:
             return False
         return True
 
-    def _resolve_arg_path(self, raw: str) -> Path | None:
-        """把路径参数解析成绝对路径（与 _path_inside_workdir 同一口径），解不出返回 None。"""
-        if self.working_dir is None:
-            return None
-        raw = str(raw or "").strip()
-        if raw.startswith("@"):
-            raw = raw[1:]
-        if not raw:
-            return None
-        try:
-            target = Path(raw)
-            if not target.is_absolute():
-                target = self.working_dir / target
-            return target.resolve()
-        except OSError:
-            return None
-
     @staticmethod
     def _delete_target(
         working_dir: Path | None, tool_name: str, input_dict: dict,

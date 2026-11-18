@@ -99,6 +99,19 @@ def read_versions(root: Path | None = None) -> dict[str, str]:
     if invalid:
         details = ", ".join(f"{label}={value}" for label, value in invalid.items())
         raise ValueError(f"版本号必须是三段式 semver（x.y.z）：{details}")
+    # 项目版本号是「连续小步进」：每段只取 0–9，满 10 进位。2.6.10 不是合法
+    # 版本（应写 2.7.0），2.9.9 的下一版是 3.0.0。这条规则曾两次被违反
+    # （2.6.10、以及 2.6.6 误写成 2.7.0），发布后返工重发成本很高，机械拦住。
+    invalid_style = {
+        label: value for label, value in versions.items()
+        if not re.fullmatch(r"(?:0|[1-9])\.(?:0|[1-9])\.(?:0|[1-9])", value)
+    }
+    if invalid_style:
+        details = ", ".join(f"{label}={value}" for label, value in invalid_style.items())
+        raise ValueError(
+            "版本号每段只取 0–9，满 10 进位（2.6.9 之后是 2.7.0，不存在 2.6.10；"
+            f"2.9.9 之后是 3.0.0）：{details}"
+        )
     return versions
 
 

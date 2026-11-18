@@ -102,6 +102,20 @@ def test_non_three_part_or_leading_zero_versions_fail_closed(tmp_path, version):
     assert "三段式 semver" in "\n".join(lines)
 
 
+def test_multi_digit_segment_rejected_by_numbering_rule(tmp_path):
+    """2.6.10 是合法三段式 semver，但违反「每段 0–9、满 10 进位」的项目规则。
+
+    2026-11-11 曾按 patch 发出 2.6.10，发布后几分钟内改号重发 2.7.0；
+    这条用例把版本号规则钉在发布预检里，而不是靠发版人记得。
+    """
+    root = _make_repo(tmp_path, version="2.6.10")
+    ok, lines = cv.check(root)
+    report = "\n".join(lines)
+    assert ok is False
+    assert "每段只取 0–9" in report
+    assert "2.7.0" in report
+
+
 @pytest.mark.parametrize("line", [
     "- **v12.3.4（✅ 当前版本）**：条目",
     "- **v12.3.4 (✅ current release)**: item",

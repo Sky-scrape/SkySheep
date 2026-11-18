@@ -1,11 +1,12 @@
-"""浏览器验证：起一个隔离 SKYSHEEP_HOME 的服务端，供 UI 检查脚本连。
+"""手动 UI 验证夹具：隔离 SKYSHEEP_HOME + FakeProvider 五轮脚本 + 8772 zip
+下载桩 + 8771 uvicorn，供人工过界面用。
 
 用法（在 engine/ 目录下）：python tools/ui_check_server.py
 - 应用在 http://127.0.0.1:8771/，HOME/项目目录都在系统临时目录里；
 - 8772 端口挂了一个静态桩，提供 pack.zip（模拟 GitHub 下载），并临时把
   127.0.0.1 加进下载白名单——仅本开发工具生效，不影响正式行为。
-- v0.7.0 用户旅程夹具：项目里预置 docx/pdf/xlsx 样例（文件树与 read_document
-  演示），FakeProvider 脚本依次演练 写文件→读文档→联网搜索→记忆→画图。
+- FakeProvider 脚本依次演练 写文件→读文档→联网搜索→记忆→画图，项目里
+  预置 docx/pdf/xlsx 样例（文件树与 read_document 演示）。
 """
 
 from __future__ import annotations

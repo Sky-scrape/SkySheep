@@ -225,13 +225,18 @@ async def test_roundtable_member_spec_prompt_and_alias():
     assert out1.status == "done"
     assert direct.calls[0][0].text == "字段人设"
 
+    # 兼容别名 system_prompt 已删除（契约统一用 prompt）：单传别名构造即拒绝
+    with pytest.raises(TypeError):
+        MemberSpec(provider_name="x", model="y", system_prompt="别名字段人设")
+
+    # 别名不再有独立生效面：prompt 为空的成员回落默认 MEMBER_SYSTEM
     out2 = await run_roundtable(
-        members=[_member(alias, system_prompt="别名字段人设")],
+        members=[_member(alias)],
         chair=FakeProvider(["融合二"]), system_text="系统", history=[],
         user_text="问题", timeout_s=10, emit=_collect,
     )
     assert out2.status == "done"
-    assert alias.calls[0][0].text == "别名字段人设"
+    assert alias.calls[0][0].text == MEMBER_SYSTEM
 
 
 @pytest.mark.asyncio

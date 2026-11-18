@@ -247,12 +247,10 @@ EmitFn = Callable[[AgentEvent], Awaitable[None]]
 class MemberSpec:
     """一个圆桌成员：provider/model 标识 + 已构建的 Provider 实例。
 
-    模板接入（1.9 协作模板）新增三个可选字段，全部默认空 = 旧行为逐字不变：
+    模板接入（1.9 协作模板）新增两个可选字段，全部默认空 = 旧行为逐字不变：
     - name：模板角色显示名（RoundtableStarted 与成员卡用）；
     - prompt：模板角色人设；非空时覆盖默认 MEMBER_SYSTEM（辩论轮拼在
-      DEBATE_SYSTEM 之前，不整体替换）；
-    - system_prompt：与 prompt 同义的兼容别名（契约里的叫法），两者都非空时
-      以 prompt 为准。
+      DEBATE_SYSTEM 之前，不整体替换）。
     """
 
     provider_name: str
@@ -262,12 +260,11 @@ class MemberSpec:
     role: str = ""  # 身份预设 id（MEMBER_ROLES 键；空 = 普通成员）
     name: str = ""
     prompt: str = ""
-    system_prompt: str = ""
 
     @property
     def template_prompt(self) -> str:
-        """模板人设（兼容 prompt / system_prompt 两个字段名，prompt 优先）。"""
-        return (self.prompt or self.system_prompt or "").strip()
+        """模板人设。"""
+        return self.prompt.strip()
 
 
 @dataclass

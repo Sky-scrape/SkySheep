@@ -239,7 +239,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 .modal-input:focus, .memory-text:focus, .ptask-input:focus,
 .form-grid input:not([type="checkbox"]):not([type="radio"]):focus, .form-grid select:focus, .form-grid textarea:focus,
 .flat-panel .field input:focus, .flat-panel .field select:focus, .add-row input:focus,
-.ob-keyline input:focus, .archive-mgr-tools input[type="text"]:focus, .archive-mgr-tools select:focus,
+.archive-mgr-tools input[type="text"]:focus, .archive-mgr-tools select:focus,
 .maintain-row select:focus, .rule-add-row input:focus, .rule-add-row select:focus,
 .rule-check input:focus, .rule-check .hook-test-input:focus, .rule-check .hook-test-cmd:focus,
 .hook-row .hook-match:focus, .hook-row .hook-cmd:focus, .pr-fields input:focus,
@@ -632,7 +632,6 @@ select option[value=""] { color: var(--dim); font-style: italic; }
   padding: 8px 11px; font: inherit; box-shadow: var(--shadow-sm);
 }
 .split-input:focus { outline: none; transform: translate(-1px, -1px); box-shadow: var(--shadow-md); }
-.split-cp-row { display: flex; align-items: center; gap: 8px; }
 .split-send { flex-shrink: 0; }
 /* 分屏列工具条：与主 composer 的图标行同款（cp-icon 直接复用）；
    协作按钮的状态配色与主栏一致（规划蓝 / 圆桌紫 / 团队绿） */
@@ -1432,11 +1431,6 @@ html.code-wrap .md pre.has-lines { display: block; }
 .agenda-reminder .ar-close:hover { color: var(--reg); }
 
 /* 规划模式开关 */
-.plan-toggle { flex-shrink: 0; }
-.plan-toggle.active {
-  background: var(--blue-weak); color: var(--blue); border-color: var(--blue);
-  box-shadow: var(--shadow-md);
-}
 .plan-actions { display: flex; align-items: center; gap: 6px; }
 
 /* 工具卡片内的 diff 视图 */
@@ -1618,18 +1612,8 @@ html.code-wrap .md pre.has-lines { display: block; }
 .cron-tool.locked { opacity: .62; cursor: default; }
 
 /* ---------- 任务编排（流水线，右面板标签） ---------- */
-/* 列表项沿用 .cron-item 骨架；节点状态用小胶囊一条排开，一眼看出推进到哪了 */
+/* 列表项沿用 .cron-item 骨架 */
 .pipeline-item { align-items: flex-start; }
-.pl-nodebar {
-  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px;
-}
-.pl-chip {
-  display: inline-flex; align-items: center; gap: 3px;
-  max-width: 100%; font-size: var(--fs-cap); line-height: 1.6;
-  padding: 0 7px; border-radius: var(--r-pill);
-  border: 1px solid var(--line2); color: var(--text2);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
 .pl-st-done { border-color: var(--ok); color: var(--ok); }
 .pl-st-running { border-color: var(--blue); color: var(--blue); }
 .pl-st-error { border-color: var(--reg); color: var(--reg); }
@@ -1875,7 +1859,7 @@ html.code-wrap .md pre.has-lines { display: block; }
 .subs-item.st-cancelled { border-left-color: var(--line2); opacity: .72; }
 .subs-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .subs-name { font-weight: var(--fw-bold); flex-shrink: 0; }
-.subs-dur, .subs-tools {
+.subs-dur {
   color: var(--dim); font-size: var(--fs-sm); font-variant-numeric: var(--num); flex-shrink: 0;
 }
 .subs-status {
@@ -1957,7 +1941,6 @@ html.code-wrap .md pre.has-lines { display: block; }
 }
 
 /* ---------- 用量统计（设置页） ---------- */
-.usage-summary { display: flex; gap: 18px; padding: 8px 0 4px; font-size: var(--fs-md); }
 .usage-block { margin-top: 10px; }
 .usage-block h4 { font-size: var(--fs-sm); color: var(--dim); margin-bottom: 4px; }
 .usage-row {
@@ -2114,14 +2097,6 @@ html.code-wrap .md pre.has-lines { display: block; }
   width: 42px; text-align: right; font-weight: var(--fw-bold);
   font-variant-numeric: var(--num); color: var(--text);
 }
-
-/* ---------- 圆桌对比开关 ---------- */
-.rt-compare-toggle {
-  display: flex; align-items: center; gap: 6px;
-  font-size: var(--fs-sm); color: var(--text2); padding: 2px 4px;
-  cursor: pointer;
-}
-.rt-compare-toggle input { accent-color: var(--ai); }
 
 /* 会话条目：平时右侧只显示相对时间，悬浮时时间让位给归档 / ⋯ 按钮 */
 /* 排除空列表提示（含 <br> 手动换行）与搜索结果项（各自有布局） */
@@ -2699,20 +2674,7 @@ html.code-wrap .md pre.has-lines { display: block; }
 .coop-mode-label { font-size: var(--fs-md); line-height: 18px; font-weight: var(--fw-semi); }
 .coop-mode-desc { font-size: var(--fs-sm); line-height: 1.45; color: var(--dim); }
 .coop-mode-item.active .coop-mode-label { color: var(--blue); }
-/* 选中模式行右侧的就地设置入口：点它进对应设置面板（圆桌 → 成员与辩论，团队 → 队员与总管） */
-.coop-row-settings {
-  margin-left: 6px; flex-shrink: 0; white-space: nowrap;
-  color: var(--blue); background: var(--blue-weak);
-  border-radius: var(--r-pill); padding: 2px 9px; font-size: var(--fs-sm); font-weight: var(--fw-bold);
-}
-.coop-row-settings:hover { background: var(--blue); color: var(--on-accent); }
 .coop-sep { height: 1px; background: var(--line); margin: 5px 4px; }
-.coop-entry {
-  display: block; width: 100%; text-align: left; padding: 7px 9px;
-  border: none; background: none; cursor: pointer; border-radius: var(--r-sm);
-  color: var(--text); font: inherit; font-size: var(--fs-md);
-}
-.coop-entry:hover { background: var(--paper-sunken); color: var(--blue); }
 .rt-menu-actions .btn-primary { padding: 5px 14px; font-size: var(--fs-sm); }
 /* 操作行只放按钮：不许收缩换行（此前「恢复自动」「确定」被长文案挤成竖排字） */
 .rt-menu-actions .link-btn,
@@ -3437,8 +3399,7 @@ html.code-wrap .md pre.has-lines { display: block; }
 .adversarial.folded .adv-steps,
 .adversarial.folded .adv-toolbar,
 .adversarial.folded .adv-findings,
-.adversarial.folded .adv-empty,
-.adversarial.folded .adv-phases { display: none; }
+.adversarial.folded .adv-empty { display: none; }
 .adversarial.err .rt-title { color: var(--reg); }
 .adversarial.cancelled .rt-title { color: var(--dim); }
 /* 四阶段流程条：发现 → 调查 → 建议 → 裁判。编号只在流程条里出现，
@@ -4262,8 +4223,6 @@ html.code-wrap .md pre.has-lines { display: block; }
 #provider-detail-body .pr-fields input:focus {
   outline: none; border-color: var(--blue)
 }
-#provider-detail-body .key-state { color: var(--dim); font-size: var(--fs-sm); }
-#provider-detail-body .key-state.missing { color: var(--reg); }
 #provider-detail-body .model-line .detect { font-size: var(--fs-sm); padding: 0 12px; }
 
 /* 添加视图：与详情页同皮的页内表单（不是弹层）。底部按钮右对齐，
@@ -4559,7 +4518,6 @@ html.code-wrap .md pre.has-lines { display: block; }
   overflow: hidden;
   color: var(--text2); font-size: var(--fs-sm); line-height: 1.5;
 }
-.gallery-item .gallery-install { flex-shrink: 0; font-size: var(--fs-sm); padding: 2px 8px; }
 /* 官方示例卡的格式徽标（SkySheep 格式 / Claude Code 插件格式）：只是区分
    两套 Mod API，不是状态，所以用最弱的视觉权重——不抢 item-name 与按钮 */
 .gallery-item .item-badge {
@@ -4628,7 +4586,6 @@ html.code-wrap .md pre.has-lines { display: block; }
 }
 .scan-foot select:focus { outline: none; border-color: var(--blue) }
 .scan-foot .btn-primary { margin-left: auto; padding: 6px 16px; font-size: var(--fs-md); letter-spacing: 1px; }
-.scan-scope { margin-top: 2px; }  /* 主题样式走 .form-grid（与导入技能弹窗同款 select） */
 .skill-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .skill-top .skill-name {
   background: none; border: none; padding: 0; cursor: pointer; text-align: left;
@@ -4692,22 +4649,21 @@ html.code-wrap .md pre.has-lines { display: block; }
 .skill-entry-go { flex-shrink: 0; color: var(--dim); font-size: var(--fs-title); line-height: 1; }
 .skill-entry:hover .skill-entry-go { color: var(--blue); }
 /* 折叠块（内置工具清单等）：默认收起、展开查阅 */
-.market-fold { margin-top: 4px; }
-.market-fold > summary {
+.fold-card { margin-top: 4px; }
+.fold-card > summary {
   cursor: pointer; font-size: var(--fs-md); font-weight: var(--fw-bold); color: var(--text);
   padding: 8px 11px; background: var(--paper-raised);
   border: 1.5px solid var(--line2); border-radius: var(--r-sm);
   list-style: none;
 }
-.market-fold > summary::-webkit-details-marker { display: none; }
-.market-fold > summary::before { content: "▸ "; color: var(--dim); }
-.market-fold[open] > summary::before { content: "▾ "; }
+.fold-card > summary::-webkit-details-marker { display: none; }
+.fold-card > summary::before { content: "▸ "; color: var(--dim); }
+.fold-card[open] > summary::before { content: "▾ "; }
 /* 内置工具清单折叠块：与上面的折叠块同一套样式 */
 #tool-list-fold { margin-top: 10px; }
 #tool-list-fold .settings-tool-list { margin-top: 8px; }
-.market-fold > summary:hover { border-color: var(--blue); color: var(--blue); }
-.market-fold[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-.market-fold-body { padding: 11px 1px 1px; }
+.fold-card > summary:hover { border-color: var(--blue); color: var(--blue); }
+.fold-card[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .item-name { font-weight: var(--fw-bold); font-size: var(--fs-md); flex-shrink: 0; }
 .settings-tool-list .item-desc, .settings-skill-list .item-desc { min-width: 0; }
 .item-desc { flex: 1; color: var(--dim); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4783,17 +4739,6 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
 }
 .form-grid textarea:focus { outline: none; border-color: var(--blue) }
 .form-grid textarea::placeholder { color: var(--dim); }
-
-/* MCP 常用服务模板：一排可点的小芯片，点了把表单填好 */
-.preset-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
-.preset-label { font-size: var(--fs-sm); color: var(--dim); flex-shrink: 0; }
-.preset-chip {
-  font-size: var(--fs-sm); padding: 4px 11px;
-  background: var(--paper-raised); color: var(--text2);
-  border: 1px solid var(--line2); border-radius: var(--r-pill);
-}
-.preset-chip:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-weak); }
-.preset-chip:active { transform: translate(1px, 1px); }
 
 /* 子代理页：列表行（自定义 + 内置共用同一套列宽，跨卡片也能对齐）
    名字/标签/描述各占固定列，名字长短不再影响后面列的位置 */
@@ -5592,8 +5537,6 @@ li.mcp-failed .mcp-bad { font-weight: var(--fw-bold); }
   transition: border-color var(--dur-fast), color var(--dur-fast);
 }
 .review-file:hover { border-color: var(--blue); color: var(--blue); }
-.review-file.st-created { color: var(--down); }
-.review-file.st-deleted, .review-file.st-gone { color: var(--reg); }
 #review-diff { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #review-diff.hidden { display: none; }
 #review-diff-body { flex: 1; overflow: auto; padding: 10px 12px; }
@@ -7386,13 +7329,13 @@ details.map-phase summary::-webkit-details-marker { display: none; }
 
 
 /* ---------- Mermaid 图表：滚动容器 + 主题适配 ---------- */
-.md .mermaid, .mermaid-box {
+.md .mermaid {
   overflow-x: auto; margin: 6px 0;
   background: var(--paper-sunken); border: 1px solid var(--line2);
   border-radius: var(--r-sm); padding: 8px; text-align: center;
 }
 .md .mermaid svg { max-width: 100%; height: auto; }
-.md .mermaid .error-text, .mermaid-box .mermaid-error { color: var(--reg); font-size: var(--fs-sm); }
+.md .mermaid .error-text { color: var(--reg); font-size: var(--fs-sm); }
 
 /* ---------- 分段选择（会话搜索范围、圆桌成员等沿用） ---------- */
 .seg-row {
@@ -8607,12 +8550,10 @@ li.mod-row {
 .coop-menu,
 .adv-menu,
 .team-menu { border-radius: var(--r-lg); }
-.coop-mode-item,
-.coop-entry { min-height: 42px; }
+.coop-mode-item { min-height: 42px; }
 .coop-mode-item.active {
   box-shadow: inset 3px 0 0 var(--blue);
 }
-.coop-row-settings { align-self: center; }
 .team-menu .tm-director,
 .team-menu .tm-template,
 .rt-menu-extra {
@@ -9253,8 +9194,6 @@ li.mod-row {
   background: var(--paper-raised); color: var(--text);
 }
 .fx-form textarea { resize: vertical; min-height: 64px; }
-.fx-form .fx-row { display: flex; gap: 8px; }
-.fx-form .fx-row > * { flex: 1; min-width: 0; }
 .fx-form .fx-check { display: flex; align-items: center; gap: 6px; font-weight: var(--fw-normal); }
 .fx-form .fx-hint { font-size: var(--fs-sm); color: var(--dim); line-height: 1.55; }
 .fx-form .fx-tools {

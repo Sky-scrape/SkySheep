@@ -196,6 +196,8 @@ def rank_by_embeddings(
     当轮回落规则评分——否则（进程刚启动 / 缓存被清空后的）首次检索要在调用
     线程串行补嵌全量条目（最多 _EMBED_MAX_ENTRIES 次 HTTP）；缓存由后台预热
     （schedule_warmup / warm_vec_cache）补齐，之后这里只剩查询向量一次请求。
+
+    生产无调用方（记忆三期已切 rank_by_hybrid），保留作纯嵌入对照/回退旋钮。
     """
     scores = cosine_scores(entries, query_text, deadline=deadline)
     if scores is None:

@@ -4740,13 +4740,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                         provider_name=provider_name,
                         model=model or getattr(provider, "model", ""),
                         provider=provider,
-                        role="", name=name, prompt=prompt, system_prompt=prompt,
+                        role="", name=name, prompt=prompt,
                     ))
                 except Exception as e:  # noqa: BLE001 - 构建失败降级错误成员卡
                     specs.append(MemberSpec(
                         provider_name=provider_name, model=model,
                         build_error=str(e)[:200],
-                        role="", name=name, prompt=prompt, system_prompt=prompt,
+                        role="", name=name, prompt=prompt,
                     ))
                 continue
             if auto is None:
@@ -4757,7 +4757,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 specs.append(MemberSpec(
                     provider_name="", model="",
                     build_error="未指定模型且没有已配置 Key 的服务",
-                    role="", name=name, prompt=prompt, system_prompt=prompt,
+                    role="", name=name, prompt=prompt,
                 ))
                 continue
             src = auto[cursor % len(auto)]
@@ -4765,7 +4765,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             specs.append(MemberSpec(
                 provider_name=src.provider_name, model=src.model,
                 provider=src.provider, build_error=src.build_error,
-                role="", name=name, prompt=prompt, system_prompt=prompt,
+                role="", name=name, prompt=prompt,
             ))
         return specs
 

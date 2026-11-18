@@ -95,6 +95,19 @@ def test_non_dict_top_level_config_tolerated(tmp_path):
     assert warnings and "顶层不是 JSON 对象" in warnings[0]
 
 
+def test_non_utf8_config_reports_warning(tmp_path):
+    """手编成 GBK 的 mcp.json 不能炸启动：按空配置处理并给出可读告警。
+
+    UnicodeDecodeError 不是 OSError（口径同 installer.load_servers 的修复），
+    load_mcp_configs 是启动路径唯一读配置的入口，漏捕会直接崩在 setup。
+    """
+    p = tmp_path / "mcp.json"
+    p.write_bytes('{"mcpServers": {"坏": {"command": "x"}}}'.encode("gbk"))
+    configs, warnings = load_mcp_configs(p, None)
+    assert configs == {}
+    assert warnings and "解码失败" in warnings[0] and p.name in warnings[0]
+
+
 class FakeSession:
     def __init__(self, result: CallToolResult) -> None:
         self.result = result

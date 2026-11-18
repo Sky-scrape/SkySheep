@@ -831,8 +831,6 @@ def _app_cmd(args) -> None:
     import time
     import webbrowser
 
-    import webview
-
     from .. import instance, previewwindows, wintheme
     from ..server.app import STATIC_DIR
 

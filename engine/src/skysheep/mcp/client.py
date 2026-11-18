@@ -322,6 +322,13 @@ def load_mcp_configs(
         except json.JSONDecodeError as e:
             warnings.append(f"{label}配置 {path.name} 解析失败（第 {e.lineno} 行）：{e.msg}，已按空配置处理")
             continue
+        except UnicodeError as e:
+            # UnicodeDecodeError 不是 OSError（口径同 installer.load_servers）：
+            # 手编成 GBK 的 mcp.json 以前会让启动路径直接抛编码错误炸掉
+            warnings.append(
+                f"{label}配置 {path.name} 解码失败（不是有效的 UTF-8 编码）：{e}，已按空配置处理"
+            )
+            continue
         except OSError as e:
             warnings.append(f"{label}配置 {path.name} 读取失败：{e}")
             continue

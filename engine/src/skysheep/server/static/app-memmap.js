@@ -120,12 +120,12 @@ function renderMemoryCandidates() {
   const title = document.getElementById("map-distill-title");
   if (title) title.textContent = n ? `记忆候选  ${n} 条待审` : "记忆候选  暂无待审";
   const tgl = `<label class="toggle-row check-row map-distill-toggle"
-    title="开启后每轮对话收尾，用当前模型挑出「值得长期记住」的候选（每轮至多 3 条，失败静默），采纳后才写入全局记忆。额外消耗一次模型调用；寒暄、过短的轮次不会触发。">
+    title="开启后每轮对话收尾，用当前模型挑出「值得长期记住」的候选（每轮至多 3 条，失败不提示），采纳后才写入全局记忆。额外消耗一次模型调用；寒暄、过短的轮次不会触发。">
     <input type="checkbox" id="map-distill-toggle"${distillState.enabled ? " checked" : ""}>
     <span>轮次自动沉淀</span></label>`;
   const rows = distillState.pending.map((c) =>
     `<div class="map-distill-item" data-cid="${escapeHtml(c.id)}">
-       <span class="map-distill-text" title="${escapeHtml(c.context || "（无上下文摘录）")}">${escapeHtml(c.text)}</span>
+       <span class="map-distill-text" title="${escapeHtml(c.context || "（没有原文摘录）")}">${escapeHtml(c.text)}</span>
        <span class="map-distill-ops">
          <button class="rp-mini" data-op="adopt" title="写入全局记忆（与既有记忆重复会自动跳过）">采纳</button>
          <button class="rp-mini" data-op="ignore" title="丢弃这条，同类信息之后不再被提出">忽略</button>

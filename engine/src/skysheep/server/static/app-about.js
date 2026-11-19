@@ -387,7 +387,7 @@ async function renderRetentionCfg() {
   // 隔离区目录常年为空；「当前 0 个文件」容易被误读成清理故障，行尾弱化说明一句
   q("retention-usage-quarantine").textContent = u.quarantine
     ? `当前 ${u.quarantine.files} 个文件，共 ${retentionBytes(u.quarantine.bytes)}` +
-      (u.quarantine.files === 0 ? "（注入隔离区未启用，此项通常为 0）" : "")
+      (u.quarantine.files === 0 ? "（隔离区未启用，此项通常为 0）" : "")
     : "";
   q("retention-usage-reports").textContent = u.reports
     ? `当前 ${u.reports.files} 个文件，共 ${retentionBytes(u.reports.bytes)}`

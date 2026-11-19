@@ -409,7 +409,7 @@ function collabSyncKindUi(kind) {
   if (hint) {
     hint.textContent = kind === "team"
       ? "团队可声明写入与命令前缀；发送前会列一次清单"
-      : "圆桌 / 对抗本期仍是纯文本：角色只读、不挂工具";
+      : "圆桌 / 对抗是纯文本协作：角色只读、不挂工具";
   }
   form.querySelectorAll(".collab-role-needs").forEach((sel) => {
     sel.disabled = kind !== "team";
@@ -440,7 +440,7 @@ function collabSyncKindUi(kind) {
         '<span class="dim small">秒；0 = 沿用配置</span></div>';
     } else {
       limits.innerHTML = '<p class="settings-hint collab-tpl-note">团队忽略这组限额：' +
-        '轮次上限由 设置 · 团队的「全局轮次上限」与下面的调用上限取小。</p>';
+        '轮次上限由 设置 · 团队的「全局轮次上限」与下面的调用上限中较小的一个生效。</p>';
     }
     // 回填草稿里的值（切类型/重画时保留已填内容）
     const draft = (collabEditorState && collabEditorState.draft) || {};
@@ -475,7 +475,7 @@ function collabFillEditorForm(draft, opts = {}) {
   form.innerHTML =
     '<div class="toolcfg-row"><label>名称</label>' +
     `<input id="collab-tpl-f-name" type="text" maxlength="60" placeholder="例如：交付小组" value="${escapeHtml(String(d.name || ""))}">` +
-    '<span class="dim small">唯一键；同名保存会覆盖</span></div>' +
+    '<span class="dim small">模板名不能重复；同名保存会覆盖旧的</span></div>' +
     '<div class="toolcfg-row"><label>说明</label>' +
     `<input id="collab-tpl-f-desc" type="text" maxlength="500" placeholder="一句话说明适合什么任务（可留空）" value="${escapeHtml(String(d.desc || ""))}">` +
     "</div>" +
@@ -491,7 +491,7 @@ function collabFillEditorForm(draft, opts = {}) {
     '<div class="collab-sec-title">角色</div>' +
     '<div id="collab-tpl-roles" class="collab-role-list"></div>' +
     '<div class="toolcfg-row"><button id="collab-tpl-add-role" class="btn-ghost" type="button">＋ 添加角色</button>' +
-    '<span class="dim small">1–12 个；圆桌 / 对抗本期只读、不挂工具</span></div>' +
+    '<span class="dim small">1–12 个；圆桌 / 对抗只读、不挂工具</span></div>' +
     '<div id="collab-tpl-team-tools" class="collab-team-tools">' +
     '<div class="toolcfg-row"><label>允许的工具</label>' +
     `<input id="collab-tpl-f-tools-allow" type="text" maxlength="2000"` +
@@ -501,7 +501,7 @@ function collabFillEditorForm(draft, opts = {}) {
     `<input id="collab-tpl-f-tools-deny" type="text" maxlength="2000"` +
     ' placeholder="逗号分隔；写在这里的优先于允许"' +
     ` value="${escapeHtml((Array.isArray(teamTools.deny) ? teamTools.deny : []).join(", "))}"></div>` +
-    '<p class="settings-hint collab-tpl-note">工具按<b>团队并集</b>生效（本期不做逐成员隔离）。' +
+    '<p class="settings-hint collab-tpl-note">团队所有成员共用这组工具。' +
     "删除类、引擎主目录写入、工作目录外写入不会被模板放行；" +
     "<code>run_command</code> 只能写成 <code>run_command:命令前缀</code>（例如 <code>run_command:git status</code>）。</p>" +
     "</div>" +
@@ -520,10 +520,10 @@ function collabFillEditorForm(draft, opts = {}) {
     '<div class="collab-sec-title">预算</div>' +
     '<div class="toolcfg-row"><label>调用上限</label>' +
     `<input id="collab-tpl-f-max-calls" type="number" min="0" max="500" class="num-sm" value="${Number(budget.max_calls || 0) || 0}">` +
-    '<span class="dim small">次 provider 调用（含重试与格式纠错）；0 = 不限</span></div>' +
+    '<span class="dim small">次模型调用（含重试）；0 = 不限</span></div>' +
     '<div class="toolcfg-row"><label>token 上限</label>' +
     `<input id="collab-tpl-f-max-tokens" type="number" min="0" class="num-sm" value="${Number(budget.max_tokens || 0) || 0}">` +
-    '<span class="dim small">0 = 不限；团队按运行级累计</span></div>' +
+    '<span class="dim small">0 = 不限；团队按整场运行累计</span></div>' +
     '<div class="toolcfg-row"><label>时长上限</label>' +
     `<input id="collab-tpl-f-max-seconds" type="number" min="0" max="86400" class="num-sm" value="${Number(budget.max_seconds || 0) || 0}">` +
     '<span class="dim small">秒；0 = 不限</span></div>' +
@@ -698,7 +698,7 @@ function collabTemplatePayload() {
       if ((COLLAB_NEEDS_ORDER[r.needs] || 0) > (COLLAB_NEEDS_ORDER[top] || 0)) top = r.needs;
     }
     if (top === "read" && (tools.allow.length || tools.deny.length)) {
-      return fail("团队最高 needs 是只读，不能声明工具：先把某个角色的 needs 改成「可写」或「可执行」");
+      return fail("团队的整体权限是只读，不能声明工具：先把某个角色的权限改成「可写」或「可执行」");
     }
     // 只对「允许」拦裸 run_command：deny 里写 run_command 是合法语义（整个工具禁用），
     // 后端 _normalize_tool_list 对 deny 也允许裸名
@@ -912,7 +912,7 @@ function collabPreviewHtml(pv) {
       ? `<p class="dim small">被合并掉的角色：${escapeHtml(dropped.join("、"))}（已配置 Key 的服务不足或模型重复）</p>`
       : "") +
     '<div class="collab-sec-title">工具与写入</div>' +
-    '<p class="dim small">写入范围：仅当前工作目录内。删除、引擎主目录写入、工作目录外写入一律回退逐次确认。</p>' +
+    '<p class="dim small">写入范围：仅当前工作目录内。删除、写引擎主目录、写工作目录之外一律逐次确认。</p>' +
     (prefixes.length
       ? `<p class="dim small">命令前缀：${prefixes.map((x) => `<code>${escapeHtml(String(x))}</code>`).join("、")}</p>`
       : '<p class="dim small">命令前缀：无（本次不授权运行任何命令）</p>') +
@@ -923,7 +923,7 @@ function collabPreviewHtml(pv) {
       ? `<p class="dim small">始终逐次确认：${always.map((x) => `<code>${escapeHtml(String(x))}</code>`).join("、")}</p>`
       : "") +
     (p.role_scoped === false
-      ? `<p class="dim small">${escapeHtml(String(p.role_scope_note || "工具按团队声明的并集生效；本期不做逐成员隔离。"))}</p>`
+      ? `<p class="dim small">${escapeHtml(String(p.role_scope_note || "团队所有成员共用这组工具。"))}</p>`
       : "") +
     '<div class="collab-sec-title">预计</div>' +
     `<p class="dim small">${calls ? `最多 ${calls} 次调用` : "调用次数不限"} · ` +
@@ -932,8 +932,8 @@ function collabPreviewHtml(pv) {
     // 团队的 estimated_calls 等于 max_calls（上限本身），再写一遍是重复
     (estCalls && estCalls !== calls ? ` · 预计 ${estCalls} 次调用` : "") +
     ` · ${escapeHtml(collabCostText(p))}</p>` +
-    '<p class="dim small">只免模板声明过、且落在工作目录内的写入与命令前缀；删除、DANGEROUS 工具、' +
-    '引擎主目录与工作目录外写入仍会逐次征询。</p>' +
+    '<p class="dim small">只免模板声明过、且落在工作目录内的写入与命令前缀；删除、高危工具、' +
+    '引擎主目录与工作目录外写入仍会逐次确认。</p>' +
     // 勾选项与只读按钮留在滚动区外：角色表 + 工具表可滚，但「本次不再逐次
     // 确认」和「先只读跑一遍」始终可见（冒烟：625px 高窗口里它们被压在
     // .collab-preview 的滚动区底部，用户只看到取消/开始）。说明文字留在

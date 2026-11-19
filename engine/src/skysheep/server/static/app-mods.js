@@ -154,16 +154,16 @@ function renderModsModeText(state) {
   const intro = document.getElementById("mods-intro");
   if (intro) {
     intro.innerHTML = claude
-      ? `Mod 是<b>第三方编写的事件处理扩展</b>：挂在工具调用前后、权限请求与回合生命周期上。
+      ? `Mod 是<b>第三方编写的事件处理扩展</b>：挂在工具调用前后、权限请求等环节上。
          本模式兼容 <b>Claude Code 插件格式</b>（<code>.claude-plugin/plugin.json</code>），
          Mod 可直接返回 <b>allow / ask / deny</b> 并<b>改写工具参数</b>。`
-      : `Mod 是<b>第三方编写的事件处理扩展</b>：挂在工具调用前后、权限请求与回合生命周期上，
+      : `Mod 是<b>第三方编写的事件处理扩展</b>：挂在工具调用前后、权限请求等环节上，
          做观察、提示或<b>收紧</b>（拒绝 / 要求确认）。`;
   }
   const safety = document.getElementById("mods-hint-safety");
   if (safety) {
     safety.innerHTML = claude
-      ? "<b>安全边界</b>：Mod 可放宽到自动放行、可改写参数——<b>只安装来源可信的 Mod</b>。引擎硬性守卫保留：出站密钥预拒绝、引擎主目录写入逐次确认、递归删除守卫。"
+      ? "<b>安全边界</b>：Mod 可放宽到自动放行、可改写参数——<b>只安装来源可信的 Mod</b>。引擎的底线保留：密钥外传会被拦、写引擎主目录仍逐次确认、递归删除仍会被拦。"
       : "<b>安全底线</b>：对权限门<b>只能收紧、永不放行</b>，也不能修改工具参数。";
   }
   const sandbox = document.getElementById("mods-hint-sandbox");
@@ -175,8 +175,8 @@ function renderModsModeText(state) {
   const uiHint = document.getElementById("mods-hint-ui");
   if (uiHint) {
     uiHint.innerHTML = claude
-      ? "界面片段仍是声明式元素树（box / text / button / input / select / image），由固定渲染器画；Mod 不能自由绘制界面。"
-      : "界面里的 Mod 片段是固定渲染器画的声明式小部件，Mod 无法自由绘制界面。";
+      ? "界面片段由固定组件（文本 / 按钮 / 输入框等）绘制；Mod 不能自由绘制界面。"
+      : "界面里的 Mod 片段由固定样式的小部件绘制，Mod 不能自由画界面。";
   }
   const rootHint = document.getElementById("mods-root-hint");
   if (rootHint) {
@@ -190,7 +190,7 @@ function renderModsModeText(state) {
     rootHint.appendChild(document.createTextNode(
       claude
         ? "；本模式认 Claude Code 插件标准位置 .claude-plugin/plugin.json（也兼容 mod.json）。安装来源是本机文件夹或 .zip 压缩包，安装前会先展示内容预览。"
-        : "；安装来源是本机文件夹（含 mod.json）或 .zip 压缩包。安装前会先展示内容预览，确认后才落盘。",
+        : "；安装来源是本机文件夹（含 mod.json）或 .zip 压缩包。安装前会先展示内容预览，确认后才写入。",
     ));
   }
   const rt = document.getElementById("mods-runtime-status");
@@ -237,14 +237,14 @@ function renderModsList(mods) {
       flags.push(`<span class="chip danger-mark" title="${escapeHtml(m.load_error)}">装载失败</span>`);
     }
     if (m.auto_deactivated) {
-      flags.push('<span class="chip danger-mark" title="连续超时 3 次，本进程内已停用；重启应用后恢复">超时自动停用</span>');
+      flags.push('<span class="chip danger-mark" title="连续超时 3 次，本次运行中已停用；重启应用后恢复">超时自动停用</span>');
     }
     if (m.cc_mods) {
-      flags.push('<span class="chip safe-mark" title="实验性兼容 Claude Code Mods 的清单与入口形状（子集）">CC 兼容  实验性</span>');
+      flags.push('<span class="chip safe-mark" title="兼容 Claude Code Mods 的部分功能（实验性）">CC 兼容  实验性</span>');
     }
     if (Number(m.errors) > 0) {
       // 运行期被丢弃/出错的动作数（本进程内）：解析丢弃的明细在「说明」的最近执行里（dropped 行）
-      flags.push(`<span class="chip danger-mark" title="本进程内出错/被丢弃的动作累计 ${m.errors} 次；明细见「说明」的最近执行">错误 ${m.errors}</span>`);
+      flags.push(`<span class="chip danger-mark" title="本次运行中出错或被跳过的动作累计 ${m.errors} 次；明细见「说明」的最近执行">错误 ${m.errors}</span>`);
     }
         li.innerHTML = `
       <label class="hook-enable" title="停用后保留安装，不再执行；重新勾选即恢复">
@@ -253,7 +253,7 @@ function renderModsList(mods) {
       <span class="mod-main">
         <span class="item-name">${escapeHtml(m.name)} <span class="dim small">v${escapeHtml(m.version || "")}  ${escapeHtml(m.source || "")}</span></span>
         <span class="item-desc">${escapeHtml(m.description || "")}</span>
-        <span class="dim small">${escapeHtml(hooks || "（未声明 hook）")}  ${escapeHtml(modPermLabel(m.permissions))}</span>
+        <span class="dim small">${escapeHtml(hooks || "（未声明挂点）")}  ${escapeHtml(modPermLabel(m.permissions))}</span>
         ${decl.join(" ")}
         ${m.load_error ? `<span class="dim small mod-err">${escapeHtml(m.load_error)}</span>` : ""}
       </span>

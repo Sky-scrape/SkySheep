@@ -1606,7 +1606,7 @@ function syncSplitBarToggles(pane) {
         : pane.rtOn ? "圆桌" : pane.teamOn ? "团队" : pane.advOn ? "对抗" : "";
     }
     coop.title = tplName
-      ? `模板「${tplName}」（每栏独立）：本栏消息按模板执行，发送后复位。点击可换模板`
+      ? `模板「${tplName}」（每栏独立）：本栏消息按模板执行，发送后取消。点击可换模板`
       : pane.rtOn ? "圆桌（每栏独立）：本栏消息由多个模型共同思考。点击可换模板"
       : pane.teamOn ? "团队（每栏独立）：本栏消息组建团队协作。点击可换模板"
       : pane.advOn ? "对抗（每栏独立）：本栏消息做对抗性审查。点击可换模板"
@@ -1626,7 +1626,7 @@ function showSplitCoopMenu(pane, btn) {
   // 模板册就绪时列模板（内置 / 我的），否则退回模式清单兜底——与主栏菜单同一口径
   const hasTemplates = typeof collabTplAll !== "undefined"
     && Array.isArray(collabTplAll) && collabTplAll.length > 0;
-  tip.textContent = hasTemplates ? "协作模板（本栏，发送后复位）：" : "协作模式（本栏，发送后复位）：";
+  tip.textContent = hasTemplates ? "协作模板（只对本栏消息生效）：" : "协作模式（只对本栏消息生效）：";
   menu.appendChild(tip);
 
   const clearPick = () => {
@@ -2103,7 +2103,7 @@ function addUser(text, images, refs) {
   if (refs && refs.length) {
     const line = document.createElement("div");
     line.className = "ref-line";
-    line.title = "被引用对话的记录已随消息注入 Agent 上下文";
+    line.title = "引用对话的内容会随消息一起发给 Agent";
     line.textContent = "🔗 引用对话：" + refs.map((r) => r.title || "未命名会话").join("、");
     bubble.appendChild(line);
   }
@@ -3132,7 +3132,7 @@ function rtToTeamActions(meta, seq, tab) {
     const form = document.createElement("div");
     form.className = "form-grid adv-to-team-form";
     form.appendChild(tcEl("p", "dim small adv-to-team-hint",
-      "把融合结论登记为执行型待办，工单停在待办状态；是否派工由你在工单板上显式操作。"
+      "登记为执行型待办，是否派工由你在工单板上手动操作。"
       + "同一结论重复登记不会重复建单。"));
     const assignee = document.createElement("select");
     roster.forEach((m) => {
@@ -3202,7 +3202,7 @@ function advTransferActions(meta, seq, tab) {
     const form = document.createElement("div");
     form.className = "form-grid adv-to-team-form";
     form.appendChild(tcEl("p", "dim small adv-to-team-hint",
-      "只登记为顾问型待办，工单停在待办状态；是否派工由你在工单板上显式操作。"
+      "只登记为顾问型待办，是否派工由你在工单板上手动操作。"
       + "对抗模型的输出是待核实内容，不是执行指令。"));
     const list = document.createElement("div");
     list.className = "adv-to-team-list";
@@ -3636,7 +3636,7 @@ function buildTeamCard(roster, directorMode, director) {
   const channelEl = tcEl("div", "tc-channel");
   const views = tcBuildViewTabs(card);
   const deliverBtn = tcEl("button", "tc-deliver", "交付");
-  deliverBtn.title = "确认交付：产出《交付说明》并关闭团队（未完成的工单会记为未尽事项），本会话恢复普通对话";
+  deliverBtn.title = "确认交付：产出《交付说明》并关闭团队，本会话恢复普通对话";
   deliverBtn.onclick = async () => {
     if (!(await confirmModal("交付会结束团队并产出《交付说明》（未完成的工单记为未尽事项），本会话恢复普通对话。确定交付？",
       { title: "确认交付", okLabel: "交付" }))) return;
@@ -3655,7 +3655,7 @@ function buildTeamCard(roster, directorMode, director) {
     }
   };
   const stopBtn = tcEl("button", "tc-stop", "收队");
-  stopBtn.title = "立即终止团队：正在发言的队员会把已产出的部分定稿进频道，随后产出《收队说明》";
+  stopBtn.title = "立即终止团队：发言中的队员定稿后产出《收队说明》";
   stopBtn.onclick = async () => {
     if (!(await confirmModal("收队会立即终止团队：正在发言的队员会把已产出的部分定稿进频道，随后产出《收队说明》，本会话恢复普通对话。确定收队？",
       { title: "确认收队", okLabel: "收队", danger: true }))) return;
@@ -3677,9 +3677,9 @@ function buildTeamCard(roster, directorMode, director) {
   // 工单板与团队频道保留；用户总管模式/终态后隐藏（tcUpdateRoster 同步显隐）
   const takeoverBtn = tcEl("button", "tc-takeover", "接管");
   takeoverBtn.hidden = true;
-  takeoverBtn.title = "接管：切回用户总管模式，正在推进的自动循环会被取消（正在发言的成员会把已产出的部分定稿进频道），工单板与团队频道保留";
+  takeoverBtn.title = "接管：切回你本人指挥，自动推进取消，工单板与频道保留";
   takeoverBtn.onclick = async () => {
-    if (!(await confirmModal("接管会切回用户总管模式：正在推进的自动循环会被取消（正在发言的成员会把已产出的部分定稿进频道），工单板与团队频道保留，此后由你直接指挥。确定接管？",
+    if (!(await confirmModal("接管后由你直接指挥：自动推进取消，工单板与频道保留。确定接管？",
       { title: "确认接管", okLabel: "接管" }))) return;
     const t = curTab();
     takeoverBtn.disabled = true;
@@ -3697,14 +3697,14 @@ function buildTeamCard(roster, directorMode, director) {
   // 存为模板（三期）：把当前名册与总管形态存成团队模板，之后建队可一键填入。
   // 终态后仍可用（收队的团队正是模板的好素材），所以不进 ended 隐藏清单
   const saveTplBtn = tcEl("button", "tc-savetpl", "另存为模板");
-  saveTplBtn.title = "把当前名册与总管形态存成团队模板：之后在输入框的团队面板里「从模板创建」一键填入";
+  saveTplBtn.title = "把当前队伍存成团队模板：之后在团队面板「从模板创建」一键复用";
   saveTplBtn.onclick = () => tcSaveTemplateModal(card);
   // 常驻开关（T3.2）：把这支队伍登记为跨会话常驻——定时团队任务触发时优先
   // 唤醒它（频道历史与工单板延续）而不是每次重建；再点一次解除。只在活动
   // 团队上可操作（快照对齐点亮，tcFinish 收口），终态后随卡隐藏
   const residentBtn = tcEl("button", "tc-resident", "常驻");
   residentBtn.hidden = true;
-  residentBtn.title = "常驻：把这支队伍登记为跨会话常驻，定时团队任务触发时优先唤醒它（频道历史与工单板延续）而不是每次重建；再点一次解除常驻";
+  residentBtn.title = "常驻：定时团队任务触发时优先唤醒这支队伍（频道历史与工单板延续）而不是每次重建；再点一次解除";
   residentBtn.onclick = async (e) => {
     e.stopPropagation();
     const t = curTab();
@@ -4214,7 +4214,7 @@ async function tcProbeResidentClear(card) {
     btn.disabled = false;
     btn.classList.remove("is-active");
     btn.textContent = "解除常驻";
-    btn.title = "解除常驻：撤销这支队伍的跨会话常驻登记（队伍已结束，登记仍在，定时任务仍会按它复用）";
+    btn.title = "解除常驻：定时任务不再按这支队伍复用";
   } catch (e) { /* 旧后端 / 断线：保持隐藏 */ }
 }
 
@@ -8315,7 +8315,7 @@ async function renderTrustState() {
     return;
   }
   if (!trust || trust.state === "clean") {
-    el.textContent = "本项目没有自带配置（无可信任之物）";
+    el.textContent = "本项目没有自带配置";
     return;
   }
   if (trust.state === "trusted") {
@@ -9386,8 +9386,8 @@ function renderCoopMenuItems(menu) {
   const tip = document.createElement("div");
   tip.className = "rt-menu-tip";
   tip.textContent = templateUI
-    ? "协作模板（本条消息生效，发送后复位）："
-    : "协作模式（本条消息生效，发送后复位）：";
+    ? "协作模板（只对本条消息生效）："
+    : "协作模式（只对本条消息生效）：";
   menu.appendChild(tip);
   const n = rtMembers ? rtMembers.length : 0;
   const tn = teamMembers ? teamMembers.length : 0;
@@ -9586,7 +9586,7 @@ async function buildRtSettingsInto(box, closeMenu) {
     '<option value="0">关闭  只独立作答</option>' +
     '<option value="1">1 轮  看彼此草稿后修订</option>' +
     '<option value="2">2 轮  修订两次</option></select>';
-  debRow.title = "成员先独立作答，再看到彼此草稿修订一轮后交主席融合；成本约翻倍，已收敛的成员自动跳过";
+  debRow.title = "成员先独立作答，再看到彼此草稿修订一轮后交主席融合；成本约翻倍，观点已一致的成员自动跳过";
   const debSel = debRow.querySelector("select");
   debSel.value = String(rtDebate);
   debSel.onchange = () => {
@@ -9974,7 +9974,7 @@ async function buildTeamSettingsInto(box, closeMenu) {
       personaInput.className = "mi-persona";
       personaInput.placeholder = "一句话人设（可选）";
       personaInput.value = saved.persona || "";
-      personaInput.title = "人设会写进这位队员的系统提示词，例如「资深行业分析师，先列证据再下结论」";
+      personaInput.title = "人设会告诉这位队员怎么思考和回答，例如「资深行业分析师，先列证据再下结论」";
       extra.append(nameInput, personaInput);
       // 在输入框里点击/输入不能触发 label 的勾选切换，也不能把浮层点没
       extra.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); });
@@ -10004,7 +10004,7 @@ async function buildTeamSettingsInto(box, closeMenu) {
     const dirMode = dirBox.querySelector('input[name="tm-dir-mode"]:checked');
     if (dirMode && dirMode.value === "ai") {
       const pick = dirBox.querySelector('input[name="tm-dir-model"]:checked');
-      if (!pick) { addNotice("已选 AI 总管：请先挑选担任总管的模型服务"); return; }
+      if (!pick) { addNotice("还没给 AI 总管挑模型：请先在列表里选一个"); return; }
       const di = pick.value.indexOf("/");
       teamDirector = { mode: "ai", provider: pick.value.slice(0, di), model: pick.value.slice(di + 1) };
     } else {
@@ -10871,7 +10871,7 @@ async function send() {
       const chip = document.createElement("div");
       chip.className = "queue-chip";
       chip.textContent = steerThisTurn
-        ? "🎯 已作为引导注入当前轮（下一次模型调用前生效）"
+        ? "🎯 已补进当前这一轮，引导正在进行的回答"
         : "⏳ 已排队（当前轮结束后自动执行）";
       curLog().appendChild(chip);
       scrollLog();
@@ -11739,7 +11739,7 @@ function addCheckpointBar(cp, tab) {
   btn.type = "button";
   btn.className = "cp-undo";
   btn.textContent = "↩ 撤销";
-  btn.title = "把这些文件恢复到本轮改动前的状态（run_command 造成的改动不在追踪范围）";
+  btn.title = "把这些文件恢复到本轮改动前的状态（Agent 跑命令造成的改动不在追踪范围）";
   btn.onclick = async () => {
     btn.disabled = true;
     btn.textContent = "回滚中…";
@@ -12253,7 +12253,7 @@ async function execSlash(cmd, face) {
       const r = await request("chat.status").catch(() => null);
       if (!r) break;
       if (!r.todos.length) {
-        addNotice("当前没有步骤清单。给 Agent 一个多步任务，它会用 todo_write 维护步骤。");
+        addNotice("当前没有步骤清单。给 Agent 一个多步任务，它会自动列出步骤。");
         break;
       }
       const icon = { pending: "○", in_progress: "◐", completed: "●" };
@@ -14427,7 +14427,7 @@ function renderTermTabbar() {
   const agentTab = document.createElement("span");
   agentTab.id = "td-agent";
   agentTab.className = "td-tab td-tab-agent" + (activeTermId === AGENT_TERM_ID ? " active" : "");
-  agentTab.title = "Agent 镜像：Agent 在本机跑过的命令与输出预览（只读）";
+  agentTab.title = "Agent 命令记录：在本机跑过的命令与输出预览（只读）";
   const agentCap = document.createElement("span");
   agentCap.className = "td-cap-agent";
   agentCap.textContent = "Agent";
@@ -15486,7 +15486,7 @@ async function loadTasks() {
         (tk ? `<span class="task-tokens">≈${fmtTokens(tk)}</span>` : "") + dur +
         `<span class="task-status">${escapeHtml(st)}</span>` +
         (live ? `<button class="cron-op" data-op="cancel" title="取消此任务">✕</button>` : "") +
-        `<button class="cron-op" data-op="pipeline" title="纳入编排（挂接为流水线节点）">⛓</button></div>` +
+        `<button class="cron-op" data-op="pipeline" title="纳入编排（作为一个环节依次执行）">⛓</button></div>` +
         `<div class="task-prompt">${escapeHtml(t.prompt)}</div>` +
         (t.result ? `<div class="task-result">${escapeHtml(t.result.slice(0, 300))}</div>` : "");
       item.querySelector('[data-op="pipeline"]').onclick = async (e) => {
@@ -15575,7 +15575,7 @@ function renderSubQueued(card) {
   const { live } = subLiveAreas(card);
   const line = document.createElement("div");
   line.className = "sub-line";
-  line.textContent = "⏳ 并发已满，已进入排队（空位出来自动开跑）";
+  line.textContent = "⏳ 后台任务位已满，已排队（空出来自动开跑）";
   live.appendChild(line);
 }
 
@@ -15730,7 +15730,7 @@ function subHudSpawned(data) {
   e.sessionId = data.session_id || e.sessionId;
   e.status = data.queued ? "queued" : "running";
   e.startedAt = Date.now() / 1000;
-  e.live = data.queued ? "⏳ 并发已满，排队中" : "";
+  e.live = data.queued ? "⏳ 后台任务位已满，排队中" : "";
   subHudPaint();
 }
 
@@ -15879,7 +15879,7 @@ function subHudRebuild(list, activeCount) {
   if (!list.length) {
     const empty = document.createElement("div");
     empty.className = "dim small subs-empty";
-    empty.textContent = "当前没有并行子会话。Agent 用 spawn_agent 派出的后台任务会实时出现在这里。";
+    empty.textContent = "还没有后台任务。Agent 派出的子任务会实时出现在这里。";
     subHudPanel.appendChild(empty);
     return;
   }
@@ -17536,7 +17536,7 @@ function memoryInjectNote(fullLen, injectLen) {
   const el = document.getElementById("memory-inject-note");
   if (!el) return;
   if (fullLen > injectLen && injectLen > 0) {
-    el.textContent = `⚠ 记忆共 ${fullLen} 字，超过单轮注入上限：每轮只注入最近 ${injectLen} 字（按行截断），` +
+    el.textContent = `⚠ 记忆共 ${fullLen} 字，超过单轮携带上限：每轮只带最近 ${injectLen} 字（按行截断），` +
       "更早的条目 Agent 看不到（文件里不会丢）；可精简表述或删掉过时条目。";
     el.hidden = false;
   } else {
@@ -17550,7 +17550,7 @@ function memoryAutoNote(text) {
   if (!el) return;
   const n = (text.match(/^\s*-\s*\[[^\]]*\]\s*\(自动\)/gm) || []).length;
   el.hidden = n === 0;
-  if (n) el.textContent = `有 ${n} 条带 (自动) 标记的记忆由归档提炼自动写入，建议偶尔审阅、清理不要的条目。`;
+  if (n) el.textContent = `有 ${n} 条记忆由「归档提炼」自动写入（带 (自动) 标记），建议偶尔审阅、清理不要的条目。`;
 }
 
 // ---- 全局自定义指令（~/.skysheep/instructions.md，每轮注入系统提示词） ----
@@ -17584,7 +17584,7 @@ document.getElementById("btn-instructions-save").onclick = async () => {
     if (status) {
       status.textContent = r.chars
         ? `已保存（${r.chars} 字），下一轮对话立即生效`
-        : "已清空全局指令；下一轮起不再注入";
+        : "已清空全局指令；下一轮起不再带上";
       status.className = "card-status ok";
       status.hidden = false;
       autoHideStatus(status, status.textContent, true);
@@ -17924,9 +17924,9 @@ async function loadLanPanel() {
 document.getElementById("lan-toggle").addEventListener("change", async (e) => {
   if (e.target.checked && !(await confirmModal(
     "开启手机控制？\n\n" +
-    "开启后，同一 Wi-Fi 下的设备凭令牌即可访问本机 SkySheep（完整界面与文件读写能力），" +
-    "地址为 http 明文传输，令牌会出现在地址栏与二维码里。\n\n" +
-    "只建议在可信网络使用；跨网络或不可信 Wi-Fi 请改用「远程访问（Tailscale）」。\n\n确定开启？",
+    "同一 Wi-Fi 下的设备凭令牌即可访问本机 SkySheep（完整界面与文件读写能力）；" +
+    "地址是 http 明文传输，令牌会显示在地址栏与二维码里。\n\n" +
+    "只建议在可信网络使用；跨网络请改用「远程访问（Tailscale）」。\n\n确定开启？",
     { title: "开启手机控制", okLabel: "开启", danger: true }
   ))) { e.target.checked = false; return; }
   try {
@@ -18202,7 +18202,7 @@ function channelCard(c) {
   const connDown = c.extra && c.extra.connected === false;
   const badge = isWebhook
     ? (c.enabled
-      ? '<span class="channel-badge on">已启用  纯出站推送</span>'
+      ? '<span class="channel-badge on">已启用  只往外发</span>'
       : '<span class="channel-badge">已关闭</span>')
     : (c.running
     ? (connDown
@@ -18246,7 +18246,7 @@ function channelCard(c) {
   // webhook 没有入站，名单语义反转（留空 = 广播），不存在「认领」步骤
   const needClaim = c.enabled && !isWebhook && !(c.allowed_ids || []).length;
   const hint = isWebhook
-    ? "纯出站推送：填好 URL 并启用后，定时与编排的运行摘要、每日运行日报等出站消息会以 JSON POST 到这个地址；发送失败只记日志，不重试。"
+    ? "只往外发：启用后，定时与编排的运行摘要、每日运行日报会推送到这个地址；发送失败只记日志，不重试。"
     : c.name === "weixin"
     ? (needClaim
       ? "已启用但名单还是空的：现在给机器人发一句话，下方出现「见过的来源」后点「加入允许名单」，它才会开始回复。"
@@ -18269,7 +18269,7 @@ function channelCard(c) {
     ${needClaim ? '<div class="channel-hint bad">⚠ 名单还是空的：现在机器人对一切消息保持沉默。先给它发一句话，再回来点「加入允许名单」。</div>' : ""}
     ${credBlock}
     ${isWebhook
-      ? '<div class="channel-hint">无需允许名单：webhook 不收消息，没有准入名单的概念——启用且填好 URL 即为推送目标（名单留空即广播）。</div>'
+      ? '<div class="channel-hint">webhook 只发不收，不需要允许名单；启用并填好地址即生效。</div>'
       : `<div class="channel-field">允许名单（每行一个 ${idLabel}；<b>空名单 = 拒绝一切</b>）</div>
     <textarea class="channel-ids" data-name="${c.name}" rows="3"
       placeholder="${idPlaceholder}">${escapeHtml(ids)}</textarea>
@@ -19189,14 +19189,14 @@ document.getElementById("run-inspect-now").onclick = async () => {
   const btn = document.getElementById("run-inspect-now");
   const last = document.getElementById("run-inspect-last");
   if (btn) { btn.disabled = true; }
-  if (last) last.textContent = "正在巡检…（读运行账本并调用一次模型，最长 90 秒）";
+  if (last) last.textContent = "正在巡检…（读运行记录并调用一次模型，最长 90 秒）";
   try {
     const r = await request("automation.inspect_now", {});
     if (r && r.ok) {
       addNotice("巡检完成，结论已更新到下方");
     } else {
       const why = {
-        too_few_runs: "最近窗口里的终态运行不足 3 条，样本太少不巡",
+        too_few_runs: "最近完成的运行不足 3 次，样本太少暂不巡检",
         no_provider: "没有可用模型：先在「模型服务」配置 API Key",
         provider_error: "模型调用失败，详情见日志",
         empty: "模型没有返回有效结论",
@@ -19226,7 +19226,7 @@ document.getElementById("interaction-mode").onchange = (e) => {
   interactionMode = e.target.value === "steer" ? "steer" : "queue";
   saveUiPrefs({ interaction_mode: interactionMode === "queue" ? null : interactionMode });
   addNotice(interactionMode === "steer"
-    ? "运行中发消息将作为「引导」注入当前轮（下一次模型调用前生效）"
+    ? "运行中发消息会补进当前这一轮，引导正在进行的回答"
     : "运行中发消息将排队，当前轮结束后自动执行");
 };
 document.getElementById("adv-compaction-auto").onchange = syncCompactionInputs;
@@ -19297,8 +19297,8 @@ document.getElementById("btn-migration-export").onclick = async () => {
       // 超过 64MB 改落盘（导出不拒绝）；但导入侧受同一上限约束（防 zip bomb），
       // 超大包只能拷贝存档，不能经「按路径导入」换回本机
       if (msg) {
-        msg.textContent = `包体 ${((r.size || 0) / 1024 / 1024).toFixed(1)}MB 超过 ${r.limit_mb}MB，`
-          + `已落盘：${r.path}（导入受同一上限约束，超大包仅供拷贝存档）`;
+        msg.textContent = `包 ${((r.size || 0) / 1024 / 1024).toFixed(1)}MB 超过上限 ${r.limit_mb}MB，`
+          + `已保存到：${r.path}（导入受同一上限约束，超大包仅供拷贝存档）`;
         msg.className = "io-msg ok";
       }
     } else {
@@ -19370,7 +19370,7 @@ document.getElementById("btn-migration-import-path").onclick = async () => {
   const msg = document.getElementById("migration-msg");
   const btn = document.getElementById("btn-migration-import-path");
   const path = ((input && input.value) || "").trim();
-  if (!path) { addNotice("先填迁移包在本机磁盘上的路径"); return; }
+  if (!path) { addNotice("先填写迁移包路径"); return; }
   const ok = await confirmModal(
     "导入将替换本机的会话库、技能、界面偏好与配置（模型密钥与 MCP 配置不进包、需重填）。"
     + "导入前会自动备份当前数据到 backups 目录，完成后需重启应用生效。确定导入？",
@@ -19400,8 +19400,7 @@ document.getElementById("migration-file").onchange = async () => {
   input.value = "";
   if (!file) return;
   if (file.size > 64 * 1024 * 1024) {
-    addNotice("包体超过 64MB：导入受同一尺寸上限约束（防 zip bomb），" +
-      "超过上限的迁移包无法导入，仅供拷贝存档。");
+    addNotice("迁移包超过 64MB 上限，无法导入；可另行拷贝存档。");
     return;
   }
   const b64 = await new Promise((resolve, reject) => {
@@ -19585,7 +19584,7 @@ document.getElementById("btn-mod-save-draft").onclick = () => {
   box.innerHTML = `
     <p class="dim small">把 Agent 回答里的两段代码粘贴到这里：清单 <code>mod.json</code>（会校验
     字段白名单与 id）与入口 <code>main.js</code>（README.md 可选）。保存为草稿<b>不会安装</b>——
-    保存后点「＋ 安装 Mod」，选择下面返回的草稿目录，预览确认后才落盘生效。</p>
+    保存后点「＋ 安装 Mod」，选择下面返回的草稿目录，预览确认后才生效。</p>
     <div class="form-grid">
       <label class="wide">mod.json（清单 JSON）
         <textarea data-f="manifest" rows="8" placeholder='{

@@ -282,7 +282,7 @@ async function renderAdvancedCfg() {
   } else if (st.enabled && st.stale) {
     autoHint.textContent = `已开启，但指向的是旧路径（可能换过安装位置）：${st.current}。重新保存一次即可更新。`;
   } else if (st.enabled) {
-    autoHint.textContent = `已开启：开机后自动在后台启动（关闭窗口时选「缩到系统托盘」即持续运行，定时任务才会按点触发）。`;
+    autoHint.textContent = `已开启：开机自动在后台启动（关窗选「缩到系统托盘」即常驻，定时任务按时触发）。`;
   } else {
     autoHint.textContent = "开启后开机自动启动，定时任务与日程提醒才能真正无人值守";
   }

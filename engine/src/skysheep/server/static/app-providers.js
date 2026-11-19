@@ -133,7 +133,7 @@ function renderProviderList() {
   if (hidden.length) {
     hiddenBox.innerHTML = `
       <h4>已停用的服务</h4>
-      <p class="settings-hint">停用只是从列表里隐藏：内置服务恢复时按最新出厂默认重建（默认模型可能已更新），已配置的 API Key 会保留；自定义服务配置原样保留，恢复后原样回来。</p>
+      <p class="settings-hint">停用只是从列表里隐藏，配置都保留：内置服务恢复时按最新出厂默认重建（默认模型可能已更新），API Key 不丢；自定义服务恢复后原样回来。</p>
       <div class="hidden-list">${hidden
         .map(
           (n) =>
@@ -184,7 +184,7 @@ async function closeProviderDetail() {
     const box = document.getElementById("provider-detail-body");
     if (box && detailSnapshot && detailFormFingerprint(box) !== detailSnapshot) {
       const ok = await confirmModal(
-        "当前服务有没保存的改动，返回列表会丢弃它们。确定返回？",
+        "当前服务有未保存的改动，返回后会丢失。确定返回？",
         { title: "有未保存的改动", okLabel: "丢弃并返回", danger: true }
       );
       if (!ok) return;
@@ -272,14 +272,14 @@ function renderProviderDetail(name) {
       <div class="toggle-row">
         <div>
           <div class="toggle-title">提供思考强度调节</div>
-          <div class="toggle-desc">在顶栏显示「思考」档位控件（自动 / 低 / 中 / 高）。「自动」不发送任何参数；若该服务的模型不认识推理参数，请关掉</div>
+          <div class="toggle-desc">在顶栏显示「思考」档位控件（自动 / 低 / 中 / 高）。「自动」不发送任何参数；模型不支持思考强度时请关掉</div>
         </div>
         <label class="switch"><input type="checkbox" data-f="supports_reasoning" checked><span class="slider"></span></label>
       </div>
       <div class="toggle-row">
         <div>
           <div class="toggle-title">模型支持图片输入（多模态）</div>
-          <div class="toggle-desc">关掉后：贴图、截图会先给出可读提示，而不是把图片塞给纯文本模型换来一句上游报错。纯文本模型（如 deepseek-chat）建议关掉</div>
+          <div class="toggle-desc">关掉后：贴图、截图会先给出可读提示，而不是直接报错。纯文本模型（如 deepseek-chat）建议关掉</div>
         </div>
         <label class="switch"><input type="checkbox" data-f="supports_vision" checked><span class="slider"></span></label>
       </div>
@@ -293,7 +293,7 @@ function renderProviderDetail(name) {
                value="${p.context_limit ? p.context_limit : ""}"
                placeholder="留空 = 用全局默认 ${p.global_context_limit || 1000000}"
                title="该服务模型真实的上下文窗口；填对了才能在撑爆之前自动压缩历史">
-        <div class="field-tip">按官方文档填模型的上下文窗口（如 64k 模型填 64000，128k 填 128000）。
+        <div class="field-tip">按官方文档填模型的上下文窗口（如 64k 模型填 64000）。
           留空则用全局默认（当前 ${(p.global_context_limit || 1000000).toLocaleString()}，可在 设置  高级 里改）；
           当前生效值 ${(p.effective_context_limit || p.global_context_limit || 0).toLocaleString()} tokens</div>
         <div class="field-tip ctx-note hidden"></div>
@@ -323,8 +323,8 @@ function renderProviderDetail(name) {
         <label>服务级代理（可选）</label>
         <input data-f="proxy" data-orig="${escapeHtml(proxyVal)}" value="${escapeHtml(proxyVal)}" placeholder="${proxyPlaceholder}" autocomplete="off"
           title="未单独设置 = 跟随全局代理；显式清空并保存 = 强制直连；填地址 = 仅该服务走此代理">
-        <div class="field-tip">${proxyStateTip}。三态：不动此框保存 = 保持现状（未设置时继续跟随全局）；
-          填 http(s):// 地址保存 = 仅该服务的 API 请求走此代理；把已有地址清空后保存 = 该服务强制直连。
+        <div class="field-tip">${proxyStateTip}。不填保存 = 保持现状（未设置时继续跟随全局）；
+          填 http(s):// 地址保存 = 仅该服务走此代理；清空已有地址再保存 = 该服务强制直连。
           全局代理在 设置  高级  网络。socks5:// 需额外依赖，推荐用本地代理软件的 http 端口</div>
       </div>
       <div class="field">
@@ -352,8 +352,8 @@ function renderProviderDetail(name) {
     <div class="sec-title-row">
       <h4 class="sec-title">连接测试</h4>
       <span class="conn-actions">
-        <button class="btn-ghost test-conn" type="button" title="做一次最小真实调用，验证 Key、地址与模型真的可用；同时探测模型是否在服务列表、上下文窗口多大">🔌 测试连接</button>
-        <button class="btn-ghost cap-probe" type="button" title="对流式输出、工具调用、图片输入、思考强度各发一次最小真实调用（会产生少量真实计费），测完给出「这个模型适合干什么」的结论">🧪 能力探测</button>
+        <button class="btn-ghost test-conn" type="button" title="发一条测试消息，验证 Key、地址与模型真的可用；同时看模型是否在服务列表、上下文窗口多大">🔌 测试连接</button>
+        <button class="btn-ghost cap-probe" type="button" title="对流式 / 工具 / 图片 / 思考强度逐项各试一次（会产生少量费用），测完给出「这个模型适合干什么」的结论">🧪 能力探测</button>
         <button class="btn-ghost copy-diag" type="button" hidden title="把最近一次测试与探测结果整理成脱敏文本并复制，方便发反馈或留档">📋 复制诊断</button>
       </span>
     </div>
@@ -603,7 +603,7 @@ function renderProviderDetail(name) {
       model: (p2activeModel() || "").trim(),
     };
     btn.disabled = true;
-    noteEl.textContent = "测试中…正在向该服务发起一次最小对话调用（几秒内完成）";
+    noteEl.textContent = "测试中…正在发一条测试消息（几秒内完成）";
     noteEl.className = "panel-note";
     detailEl.classList.add("hidden");
     try {
@@ -613,7 +613,7 @@ function renderProviderDetail(name) {
       if (r.ok) {
         const parts = [`✓ 连接正常（${r.latency_ms} ms）`];
         if (r.model_listed === true) parts.push("模型在服务列表中");
-        else if (r.model_listed === false) parts.push("⚠ 模型不在 /models 列表（部分服务不提供列表，可忽略）");
+        else if (r.model_listed === false) parts.push("⚠ 模型不在服务的模型列表里（部分服务不提供列表，可忽略）");
         if (r.context_limit) parts.push(`上下文窗口 ${r.context_limit.toLocaleString()} tokens`);
         noteEl.textContent = parts.join("  ");
         noteEl.className = "panel-note ok";
@@ -659,7 +659,7 @@ function renderProviderDetail(name) {
       model: (p2activeModel() || "").trim(),
     };
     btn.disabled = true;
-    noteEl.textContent = "探测中…正在对四项能力各发一次最小调用（流式 / 工具 / 图片 / 思考强度），会产生少量真实计费";
+    noteEl.textContent = "探测中…正在逐项测试流式 / 工具 / 图片 / 思考强度，会产生少量费用";
     noteEl.className = "panel-note";
     chipsEl.classList.add("hidden");
     sumEl.classList.add("hidden");

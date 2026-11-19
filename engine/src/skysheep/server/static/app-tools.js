@@ -75,7 +75,7 @@ async function renderProviderCfg(cfg) {
   const mode = providerModeOf(cfg.formId, d);
   const detail = mode === "custom" ? cfg.detailHtml(d) : "";
   form.innerHTML = `
-    <div class="toolcfg-row"><label>服务商</label>${providerPicker(d, cfg.labels, mode)}</div>
+    <div class="toolcfg-row"><label>模型服务</label>${providerPicker(d, cfg.labels, mode)}</div>
     ${detail}
     <div class="toolcfg-row">
       ${cfg.statusHtml(d)}
@@ -193,7 +193,7 @@ async function renderImagegenCfg() {
     statusHtml: (d) => `
       <span class="toolcfg-state ${d.has_key ? "ok" : ""}">${d.has_key
         ? "● 已就绪，当前用「" + (labels[d.resolved_provider] || d.resolved_provider) + " / " + d.resolved_model + "」"
-        : "○ 未配置：配好任一服务的 Key 即可零配置使用"}</span>`,
+        : "○ 未配置：自动使用「模型服务」里已配好的 Key"}</span>`,
     fields: ["base_url", "model"],
     pickParams: (form) => {
       const m = form.querySelector('[data-f="model"]');
@@ -279,7 +279,7 @@ async function renderRoundtableCfg() {
     </div>
     <div class="toolcfg-row"><label>成员历史上下文</label>
       <input type="number" data-f="member_history_turns" min="0" class="num-sm" value="${d.member_history_turns}">
-      <span class="dim small">轮（0 = 全量；只带最近 N 轮能省不少 token，主席融合始终吃全量）</span>
+      <span class="dim small">轮（0 = 不限制；只带最近几轮更省，主席汇总时始终看全部）</span>
     </div>
     <label class="toggle-row adv-toggle"><input type="checkbox" data-f="chair_answers"
       ${d.chair_answers ? "checked" : ""}><span>主席出草稿：当前主模型也作为成员先答一份</span></label>
@@ -323,7 +323,7 @@ async function renderAdversarialCfg() {
   form.innerHTML = `
     <div class="toolcfg-row"><label>单场问题上限</label>
       <input type="number" data-f="max_findings" min="1" max="100" class="num-sm" value="${d.max_findings}">
-      <span class="dim small">条（发现者超出按序截断并提示）</span>
+      <span class="dim small">条（超出上限时按顺序舍弃多余的，并给出提示）</span>
     </div>
     <div class="toolcfg-row"><label>单角色超时</label>
       <input type="number" data-f="role_timeout_s" min="10" class="num-sm" value="${d.role_timeout_s}">
@@ -384,15 +384,15 @@ async function renderTeamCfg() {
     </div>
     <div class="toolcfg-row"><label>无人值守续跑</label>
       <input type="number" data-f="cron_resume_limit" min="0" max="3" class="num-sm" value="${d.cron_resume_limit}">
-      <span class="dim small">次（定时团队任务总管空闲时自动补发续跑指令的次数，0 = 空闲即收队）</span>
+      <span class="dim small">次（定时团队任务里总管空闲时自动催续跑的次数，0 = 空闲即收队）</span>
     </div>
     <label class="toggle-row adv-toggle">
       <input type="checkbox" data-f="isolated_tasks"${d.isolated_tasks ? " checked" : ""}>
-      <span>隔离执行：执行型队员在各自的 git worktree 分支上动手，主工作区不受影响</span>
+      <span>隔离执行：执行型队员在各自独立的分支上动手，不影响主工作区</span>
     </label>
-    <p class="dim small">开启后每轮完成自动提交到 <code>skysheep/team-*</code> 分支，并在团队频道提示合并
-      （引擎不自动 merge，由你在会话里 <code>git merge</code>）；命令与工作区外写入仍走会话权限门。
-      非 git 仓库的项目自动退化为共享工作区。</p>
+    <p class="dim small">开启后每轮改动自动提交到 <code>skysheep/team-*</code> 分支，并在团队频道提示合并
+      （由你在会话里手动合并）；命令与工作区外写入仍照常逐次确认。
+      非 git 项目自动改回共享工作区。</p>
     <div class="toolcfg-row">
       <span class="toolcfg-state">● 保存后对<b>之后新建的团队</b>生效，进行中的团队沿用建队时的值</span>
       <span class="spacer"></span>
@@ -755,10 +755,10 @@ function editBuiltinModal(d, type, ov) {
         <input data-f="description" autocomplete="off" placeholder="${escapeHtml(defDesc)}"
                value="${escapeHtml(ov.description || "")}">
       </label>
-      <label class="wide">角色提示词（注入它的系统提示词，写清工作方法与输出要求；留空恢复内置默认）
+      <label class="wide">角色提示词（写给它的固定指令，写清工作方法与输出要求；留空恢复内置默认）
         <textarea data-f="prompt" rows="7" placeholder="${escapeHtml(defPrompt)}">${escapeHtml(ov.prompt || "")}</textarea>
       </label>
-      <p class="dim small">占位文字是内置默认值。工具集按内置型固定（安全边界不变）；模型与思考强度在列表行里改；改完点「保存」，想回到内置默认就清空两栏再保存。</p>
+      <p class="dim small">占位文字是内置默认值。工具范围固定不变（安全边界不变）；模型与思考强度在列表行里改。想恢复默认就清空两栏再保存。</p>
     </div>`;
   const resetBtn = document.createElement("button");
   resetBtn.className = "btn-ghost";
@@ -840,7 +840,7 @@ function subagentEditorModal(d, existing = null) {
         <input data-f="description" placeholder="审计仓库结构并输出风险清单" autocomplete="off"
                value="${isEdit ? escapeHtml(existing.description) : ""}">
       </label>
-      <label class="wide">专项指令（会注入它的系统提示词，写清工作方法与输出要求）
+      <label class="wide">专项指令（补充给它的固定要求，写清工作方法与输出格式）
         <textarea data-f="prompt" rows="6" placeholder="1. 先列出目录结构…&#10;2. 重点检查…&#10;3. 输出一份包含文件路径的报告">${isEdit ? escapeHtml(existing.prompt) : ""}</textarea>
       </label>
       <label>工具范围

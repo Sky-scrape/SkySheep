@@ -338,7 +338,7 @@ def test_cron_modal_review_toggle():
     js = read_app_bundle()
     for needle in ('id="cron-review-wrap"', 'id="cron-review"',
                    "跑完后让验收模型判一次", "params.review = mode === \"team\"",
-                   "验收只读、不联网、单轮"):
+                   "验收不联网、单轮完成"):
         assert needle in js, f"验收开关缺少 {needle}"
     assert "review: false" in js, "新建任务默认不做验收"
     assert "t.review ? \" checked\"" in js

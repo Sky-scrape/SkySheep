@@ -1155,8 +1155,8 @@ async function cronModal(existing) {
       <div id="cron-review-wrap">
         <label class="cron-notify"><input id="cron-review" type="checkbox"${t.review ? " checked" : ""}>
           跑完后让验收模型判一次「做成了没有」</label>
-        <p class="dim small">验收只读、不联网、单轮，默认关；只能把自动判定降级，
-          不会把有工具被拦的轮次评成做成。团队任务的验收由总管交付说明承担，不显示这一项。</p>
+        <p class="dim small">验收不联网、单轮完成，默认关；只会把结果改判为「未做成」，
+          不会把有工具被拦的轮次算成做成。团队任务的验收由总管交付说明承担，不显示这一项。</p>
       </div>
       <label id="cron-prompt-label">任务指令（Agent 每次到点执行的内容）</label>
       <textarea id="cron-prompt" class="modal-input" rows="3" placeholder="例如：扫描当前目录的 TODO 标记，汇总成一段进度报告">${isEdit ? escapeHtml(t.prompt) : ""}</textarea>
@@ -1211,7 +1211,7 @@ async function cronModal(existing) {
         渠道未启用或没有绑定聊天时静默跳过。渠道在 设置  聊天机器人渠道 里配置。</p>
       <p class="dim small">安全说明：定时任务无人值守运行，<b>只读工具本来就放行</b>；
         写入 / 执行类必须在这里勾选，否则运行时会自动拒绝。建议先只勾必要的。
-        <b>勾选 run_command 等于允许无人值守执行任意命令</b>——任务文本一旦被注入，预授权就是它的通行证，只在任务内容完全可信时勾选。</p>
+        <b>勾选 run_command 等于允许无人值守执行任意命令</b>——若任务内容里被塞进恶意指令，勾选的工具都会自动放行，只在指令完全可信时勾选。</p>
       <p class="dim small">运行前提：定时任务只在 <b>SkySheep 运行期间</b>触发（关窗时选「缩到系统托盘」它就继续在后台跑）。
         彻底退出期间错过的任务，会在下次打开应用时补跑一次。想让电脑一开机就守着，
         可在 设置  高级 里打开「开机自动启动」；想让应用彻底关闭也照常到点跑，
@@ -1350,7 +1350,7 @@ async function cronModal(existing) {
     const sync = r && r.schtask_sync;
     if (sync && sync.registered === false && sync.notice) {
       addNotice("定时任务已保存，但系统计划任务同步失败：" + sync.notice +
-        "（应用内调度不受影响；应用关闭期间的自动运行覆盖未生效）");
+        "（应用内到点照跑；应用关闭期间的自动运行没有保障）");
     } else {
       addNotice(isEdit ? "定时任务已更新" : "定时任务已创建，到点自动运行");
     }
@@ -1517,7 +1517,7 @@ async function loadPipelines() {
     li.innerHTML =
       `<div class="cron-main">
          <span class="cron-title">${escapeHtml(p.name)}</span>
-         <span class="cron-sched">${PL_PIPE_STATUS[p.status] || p.status}  节点 ${done}/${(p.nodes || []).length}  并发 ${p.concurrency}</span>
+         <span class="cron-sched">${PL_PIPE_STATUS[p.status] || p.status}  节点 ${done}/${(p.nodes || []).length}  同时跑 ${p.concurrency} 个</span>
          <div class="pl-graph-mount"></div>
        </div>`;
     const ops = document.createElement("span");
@@ -1587,7 +1587,7 @@ function pipelineModal(p, focusNodeId) {
     const rerun = n.kind !== "task" && n.status !== "running"
       ? `<button class="rp-mini" data-rerun="${n.id}">↻ 重跑这个节点${n.status === "done" ? "（含下游）" : ""}</button>` : "";
     const taskNote = n.kind === "task"
-      ? `<div class="dim small">跟随原任务的状态与产出，不占流水线并发；任务本身在「任务」页管理。</div>` : "";
+      ? `<div class="dim small">跟随原任务的状态与产出，不占同时运行名额；任务本身在「任务」页管理。</div>` : "";
     const ctl = PL_CONTROL[n.control];
     const ctlNote = ctl
       ? `<div class="dim small">${ctl.mark} ${ctl.label}：${ctl.hint}${n.control === "loop" ? `（当前第 ${n.runs || 0}/${n.max_runs} 轮）` : ""}</div>` : "";
@@ -1611,14 +1611,14 @@ function pipelineModal(p, focusNodeId) {
   box.innerHTML = `
     <div class="cron-fields">
       <p class="dim small">流水线「${escapeHtml(p.name)}」  ${PL_PIPE_STATUS[p.status] || p.status}  
-        每个节点是一次无人值守运行（预授权名单外的写/执行自动拒绝）；上游完成后下游自动开始，产出会注入下游的指令里。</p>
+        每个节点是一次无人值守运行（预授权名单外的写/执行自动拒绝）；上游完成后下游自动开始，上游产出会附在下游的指令里。</p>
       <div class="dim small" id="pl-usage" style="display:flex;gap:12px;align-items:center">
         <span>用量统计中…</span>
         <span class="spacer"></span>
         <button class="rp-mini" data-op="export">⇩ 导出 JSON</button>
       </div>
       <label class="cron-notify"><input id="pl-notify" type="checkbox"${p.notify_channel ? " checked" : ""}> 节点完成后推送到聊天渠道</label>
-      <p class="dim small">每个节点到终态都会推一条紧凑进度（失败必推）；整条流水线收尾时照常再推一条汇总。渠道在 设置  聊天机器人渠道 里配置。</p>
+      <p class="dim small">每个节点跑完都会推一条简短进度（失败必推）；整条流水线收尾时再推一条汇总。渠道在 设置  聊天机器人渠道 里配置。</p>
       <div id="pl-graph-wrap" class="pl-graph-wrap"></div>
       ${rows || '<div class="dim small">（没有节点）</div>'}
       <p class="dim small">要改节点/指令：删除后重建（Agent 对话里说一句也能帮你重排）。</p>
@@ -1628,7 +1628,7 @@ function pipelineModal(p, focusNodeId) {
     try {
       await request("pipeline.update", { id: p.id, notify_channel: e.target.checked });
       addNotice(e.target.checked
-        ? "已开启节点推送：每个节点到终态都会在聊天渠道收到进度"
+        ? "已开启节点推送：每个节点跑完都会在聊天渠道收到进度"
         : "已关闭节点推送");
     } catch (err) {
       addNotice("保存失败: " + err.message);
@@ -1893,7 +1893,7 @@ async function pipelineImportModal(preset) {
         <input id="pl-newname" class="modal-input" type="text" placeholder="例如：登录模块开发">
       </div>
       <div id="pl-prompt-wrap" class="hidden">
-        <label id="pl-prompt-label">这一轮要它做什么（在该会话已有的上下文里继续）</label>
+        <label id="pl-prompt-label">这一轮要它做什么（接着这个会话之前的内容继续）</label>
         <textarea id="pl-session-prompt" class="modal-input" rows="2" placeholder="例如：结合刚才的实现，把接口文档补全"></textarea>
       </div>
       <div id="pl-deps-wrap" class="hidden">
@@ -1903,14 +1903,14 @@ async function pipelineImportModal(preset) {
       <label class="pl-dep" id="pl-disable-wrap"><input type="checkbox" id="pl-disable-cron"> 导入后停用原定时任务（不再按周期独立运行）</label>
       <!-- 安全说明写成单行：模板里换行缩进会被 HTML 折叠成一个空格，
            恰好落在段落自动换行处时左缘就参差了（看着像没对齐） -->
-      <p class="dim small">安全说明：纳入的节点同样无人值守执行——只读工具放行，其余按节点预授权名单，名单外自动拒绝。挂接节点跟随原任务、不占并发额度；会话节点在该会话正被使用时会等空闲。</p>
+      <p class="dim small">安全说明：纳入的节点同样无人值守执行——只读工具放行，其余按节点预授权名单，名单外自动拒绝。挂接节点跟随原任务、不占同时运行名额；会话节点在该会话正被使用时会等空闲。</p>
     </div>`;
   const q = (sel) => box.querySelector(sel);
   const srcObjs = { cron: srcOptions.cron, task: srcOptions.task, session: srcOptions.session };
   const srcLabels = { cron: "选定时任务", task: "选任务簿任务", session: "选会话" };
   // 「新建任务」与「已有会话」共用同一条指令输入框，只换标签与示例
   const promptHints = {
-    session: ["这一轮要它做什么（在该会话已有的上下文里继续）", "例如：结合刚才的实现，把接口文档补全"],
+    session: ["这一轮要它做什么（接着这个会话之前的内容继续）", "例如：结合刚才的实现，把接口文档补全"],
     newtask: ["任务指令（启动后无人值守执行，可在面板里按节点补预授权）", "例如：把 docs 目录里的接口文档全部补全"],
   };
   const curSource = () => box.querySelector('input[name="pl-src"]:checked').value;

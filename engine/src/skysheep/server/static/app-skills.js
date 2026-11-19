@@ -198,7 +198,7 @@ function importSkillModal(prefill = "") {
           .join("\n")}`
       : "";
     const ok = await confirmModal(
-      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${clashNote}${invalidNote}\n\n技能内容来自外部包，会进入系统提示词。确认安装？`,
+      `将要安装 ${preview.count} 个技能到${scope === "project" ? "本项目" : "全局"}：\n\n${list}${clashNote}${invalidNote}\n\n技能内容来自外部包，会作为指令交给 AI 执行。确认安装？`,
       { title: "安装技能", okLabel: "安装" }
     );
     if (!ok) return;
@@ -358,7 +358,7 @@ async function saveSkillDraftModal() {
   }
   const box = document.createElement("div");
   box.innerHTML = `
-    <p class="dim small">已从当前会话机械提炼出草稿（不调模型）：目标取首条消息、
+    <p class="dim small">已从当前会话自动提炼出草稿（未调用模型）：目标取首条消息、
     步骤取实际用过的工具。${d.turn_count ? `共 ${d.turn_count} 轮有工具调用。` : "本会话没有工具调用，步骤要你自己补。"}
     下面各项都可以改，保存后立即生效，可在「MCP / Skills」页继续管理。</p>
     <div class="form-grid">
@@ -675,8 +675,8 @@ async function previewSkill(name) {
     return;
   }
   box.innerHTML =
-    `<p class="dim small">这是 SKILL.md 原文。Agent 平时只看得到名称与描述；
-     真正需要时它才用 load_skill 读取下面这段指令。</p>` +
+    `<p class="dim small">这是 SKILL.md 原文。AI 平时只看到名称与描述；
+     真正需要时才会读取下面这段指令。</p>` +
     `<pre class="skill-body">${escapeHtml(r.text || "")}</pre>`;
 }
 

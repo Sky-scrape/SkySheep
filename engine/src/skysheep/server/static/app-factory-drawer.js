@@ -254,7 +254,7 @@
     if (h.last_status === "empty") {
       return {
         level: "warn", title: "上次没有产出",
-        detail: "跑完了但没落地任何东西，看看提示词有没有让它写出来。",
+        detail: "跑完了但没产出任何东西，看看提示词有没有让它写出来。",
         act: "delegate", actText: "让 Agent 看看",
       };
     }

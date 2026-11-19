@@ -394,7 +394,7 @@ function trRenderEmpty(root, opts) {
     const box = tcEl("div", "teamroom-empty");
     box.appendChild(tcEl("div", "tr-empty-title", "上次团队协作已中断"));
     box.appendChild(tcEl("p", "dim small",
-      "上次团队中断：" + (opts.interrupted.interrupt_reason || "应用重启，团队已中断")));
+      "上次团队中断：" + (opts.interrupted.interrupt_reason || "应用重启所致")));
     const actions = tcEl("div", "tr-empty-actions");
     const replayBtn = tcEl("button", "rp-mini primary", "只读回放频道");
     replayBtn.onclick = () => trOpenInterruptedReplay(opts.interrupted);

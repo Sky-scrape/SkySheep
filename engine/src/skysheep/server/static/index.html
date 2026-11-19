@@ -99,9 +99,9 @@
         <button class="nav-item" data-act="relay" title="接力：主屏与副屏交替处理任务，每轮可指定执行屏幕；与输入框的圆桌、团队、对抗分开">接力</button>
         <!-- 协作入口（团队模式设计 §15.3.5，常驻团队 T3.2 落地后增设）：开协作页签；
              角标计活动团队数（常驻登记 + 当前会话进行中的团队，app-teamroom.js 维护） -->
-        <button class="nav-item" data-act="teamroom" id="nav-team" title="协作：多模型协作的频道、工单板与成员带三分区；角标计常驻登记与当前会话进行中的团队数">协作<span id="nav-team-badge" class="nav-badge hidden"></span></button>
+        <button class="nav-item" data-act="teamroom" id="nav-team" title="协作：频道、工单板与成员分区；角标是进行中的团队数">协作<span id="nav-team-badge" class="nav-badge hidden"></span></button>
         <button class="nav-item" data-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守">自动化</button>
-        <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，自动注入每一轮对话">项目记忆</button>
+        <button class="nav-item" data-act="memory" title="AGENTS.md 项目约定，每轮对话自动生效">项目记忆</button>
         <button class="nav-item" data-act="map" title="项目演化的可视化：时间线 + 主题图谱 + 演化摘要">记忆地图</button>
         <button class="nav-item" data-act="ext" title="技能包与 MCP 服务管理">MCP / Skills</button>
       </nav>
@@ -217,14 +217,14 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h5l2-4 3 8 2-4h6"/><circle cx="3.5" cy="12" r="1.2"/><circle cx="20.5" cy="12" r="1.2"/></svg>
     </button>
     <!-- 协作入口：与展开态 .side-menu 的「协作」同一顺序（§15.3.5）；图标与协作页签同款 -->
-    <button class="rail-btn" data-rail-act="teamroom" id="rail-team" title="协作：多模型协作的频道、工单板与成员带三分区；角标计常驻登记与当前会话进行中的团队数" aria-label="协作">
+    <button class="rail-btn" data-rail-act="teamroom" id="rail-team" title="协作：频道、工单板与成员分区；角标是进行中的团队数" aria-label="协作">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h16"/><path d="M4 10h8M4 13.5h6M4 17h8"/><rect x="15" y="9" width="5" height="10" rx="1"/><path d="M16.8 11.8h1.4M16.8 14h1.4"/></svg>
       <span id="rail-team-badge" class="rail-badge hidden"></span>
     </button>
     <button class="rail-btn" data-rail-act="auto" title="自动化：定时（到点自己干活）与编排（按依赖顺序自动跑），无人值守" aria-label="自动化">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5 3 2.5 5.5M19 3l2.5 2.5"/></svg>
     </button>
-    <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，自动注入每一轮对话" aria-label="项目记忆">
+    <button class="rail-btn" data-rail-act="memory" title="项目记忆：AGENTS.md 项目约定，每轮对话自动生效" aria-label="项目记忆">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h5.5A3.5 3.5 0 0 1 12 7.5V21a2.5 2.5 0 0 0-2.5-2.5H3Z"/><path d="M21 4h-5.5A3.5 3.5 0 0 0 12 7.5V21a2.5 2.5 0 0 1 2.5-2.5H21Z"/></svg>
     </button>
     <button class="rail-btn" data-rail-act="map" title="记忆地图：项目演化的可视化（时间线 + 主题图谱）" aria-label="记忆地图">
@@ -436,7 +436,7 @@
             <div id="td-tabs"></div>
             <button id="td-add" class="td-btn" title="新建 PowerShell 标签">＋</button>
             <span class="spacer"></span>
-            <button id="term-to-agent" class="td-btn" title="把当前终端最近输出作为上下文带入输入框">→ Agent</button>
+            <button id="term-to-agent" class="td-btn" title="把终端最近的输出带进输入框，让 Agent 参考">→ Agent</button>
             <button id="term-clear" class="td-btn" title="清空当前终端的屏显（不影响正在跑的程序）">清屏</button>
             <button id="td-close" class="td-btn" title="收起终端面板（会话继续在后台跑）">✕</button>
           </div>
@@ -461,7 +461,7 @@
 
           <section id="rp-page-review" class="rp-page hidden">
             <div class="rp-toolbar">
-              <span class="dim small">本会话中 Agent 改过的文件，点一轮查看改前 → 现在的差异。</span>
+              <span class="dim small">Agent 本会话改过的文件；点某一次改动，看改前改后的差异。</span>
               <span class="spacer"></span>
               <button id="review-refresh" class="rp-mini">刷新</button>
             </div>
@@ -475,7 +475,7 @@
               <div id="review-diff-body"></div>
             </div>
             <div class="rp-toolbar diag-toolbar">
-              <span class="dim small">轮次诊断：本会话每轮跑了多久、慢在哪（读自结构化日志，旧会话可能没有记录）。</span>
+              <span class="dim small">轮次诊断：本会话每轮跑了多久、慢在哪（读自运行日志，旧会话可能没有记录）。</span>
               <span class="spacer"></span>
               <button id="review-diag-refresh" class="rp-mini">刷新</button>
             </div>
@@ -579,7 +579,7 @@
             <!-- 外网站点大多拒绝被内嵌（X-Frame-Options / frame-ancestors），iframe 只会一片
                  白，不提前说明用户会以为是坏了。内网/本机地址不提示（由 app.js 按地址切换显隐） -->
             <div id="browser-hint" class="rp-browser-hint dim small hidden">
-              提示：很多公网站点出于安全禁止被内嵌，若这里一直空白就是被对方拒绝了——复制地址用系统浏览器打开即可。
+              提示：很多网站不允许在应用内打开，一直空白就是被网站拒绝了——复制地址用系统浏览器打开即可。
             </div>
             <div id="browser-empty" class="rp-empty">在地址栏输入网址即可在面板里预览——比如 Agent 刚帮你起好的本地开发服务器。</div>
           </section>
@@ -662,13 +662,13 @@
                  方法不可用（旧后端）时保持初始 hidden。 -->
             <div id="daily-report-row" class="rp-daily hidden">
               <label class="toggle-row check-row"
-                     title="开启后每天到设定时刻，把当天定时任务与任务编排的终态汇总成一条中文日报，经已启用的聊天渠道 / Webhook 推送一次；应用没开着错过时刻，开机后补发当天一份（送达失败当天不重试，次日照常）">
+                     title="开启后每天到设定时刻，把当天「定时 / 编排」的结果汇总成一条日报，经已启用的聊天渠道 / Webhook 推送；错过时刻会在开机后补发一份">
                 <input type="checkbox" id="daily-report-toggle">
                 <span>每日运行日报</span>
               </label>
               <input type="time" id="daily-report-time" value="09:00"
                      title="每天到这个时刻推送日报（24 小时制）">
-              <span class="dim small">到点把当天「定时 / 编排」的运行终态汇总成一条，经已启用的渠道推送</span>
+              <span class="dim small">到点把当天「定时 / 编排」的结果汇总成一条，经已启用的渠道推送</span>
               <textarea id="daily-report-template" rows="2" spellcheck="false"
                         placeholder="留空用内置格式；可用 {date} {cron_ok} {detail} 等占位符"
                         title="自定义日报模板（最长 2000 字符）。占位符：{date} 日期，{cron_ok} / {cron_fail} 定时任务的成败数，{pipe_done} / {pipe_fail} / {pipe_stop} 编排的完成 / 失败 / 已停止数，{detail} 失败明细多行（无失败时为「无」）；其余花括号原样保留"></textarea>
@@ -679,7 +679,7 @@
                  app-schedule.js 的 loadDailyReportRow 一起渲染。 -->
             <div id="weekly-report-row" class="rp-daily hidden">
               <label class="toggle-row check-row"
-                     title="开启后每周到设定那天的时刻，把最近 7 天的运行账本汇总成一条中文周报（总数 / 成功失败 / 失败原因 Top 3 / 最忙的一天），经已启用的聊天渠道 / Webhook 推送一次">
+                     title="开启后每周到设定那天的时刻，把最近 7 天的运行情况汇总成一条周报（总数 / 成败 / 失败原因 Top 3 / 最忙的一天），经已启用的聊天渠道 / Webhook 推送">
                 <input type="checkbox" id="weekly-report-toggle">
                 <span>每周运行周报</span>
               </label>
@@ -704,7 +704,7 @@
 
           <section id="rp-page-memory" class="rp-page hidden">
             <div class="rp-toolbar">
-              <span class="dim small">项目记忆（AGENTS.md）&nbsp;&nbsp;每轮对话自动注入</span>
+              <span class="dim small">项目记忆（AGENTS.md）&nbsp;&nbsp;每轮对话自动生效</span>
               <span class="spacer"></span>
               <button id="memory-reload" class="rp-mini" title="放弃修改，重新从磁盘读取">重读</button>
               <button id="memory-save" class="rp-mini primary">保存</button>
@@ -789,14 +789,14 @@
                      不落库：重启后为空（面板文案已说明），不为一句话升库版本 -->
                 <label for="relay-next-note">下一轮附言（只生效一次）</label>
                 <textarea id="relay-next-note" class="modal-input" rows="2"
-                          placeholder="下一轮换手时顺便叮嘱一句，例如「交回前先跑一遍测试」；随下一次换手注入后自动清空（重启后不保留）"></textarea>
+                          placeholder="下一轮换手时顺便叮嘱一句，例如「交回前先跑一遍测试」；只用一次，用完自动清空（重启后不保留）"></textarea>
                 <div class="relay-start-actions">
                   <button id="relay-run-start" class="btn-primary">开始接力</button>
                   <button id="relay-run-stop" class="rp-mini" disabled>中断</button>
                   <label class="relay-auto" title="每轮完成后自动让另一方接着执行，直到你点中断">
                     <input type="checkbox" id="relay-auto-alternate"> 连续交替
                   </label>
-                  <label class="relay-auto" title="自动换手前，接收方先无工具复述对交接内容的理解，移交方核验通过后才真正开轮；不通过就暂停等你处理">
+                  <label class="relay-auto" title="换手前，接手一方先复述一遍对交接内容的理解，对方确认后才开跑；没通过就先暂停">
                     <input type="checkbox" id="relay-verify-handoff" checked> 交接前复述核验
                   </label>
                   <span id="relay-run-status" class="dim small" role="status">尚未开始</span>
@@ -877,9 +877,8 @@
             <!-- 列表视图：紧凑展示每个服务，点一行进入它的配置 -->
             <div id="provider-list-view">
               <p class="settings-hint">
-                点哪一行就进哪个服务的配置。<b class="star">★</b> 是启动默认模型，「使用中」是当前对话所用模型。
-                列表里没有的服务（自建中转、公司内网、其他厂商）用右上角按钮自己添加；
-                用不到的进它的配置里移出列表即可——内置服务只是<b>停用</b>、随时可恢复，自定义服务才会真正<b>删除</b>。
+                点一行进入该服务的配置。<b class="star">★</b> 是启动默认模型，「使用中」是当前对话所用模型。
+                没有的服务点右上角添加；用不到的进它的配置里移出列表即可——内置服务只是<b>停用</b>、随时可恢复，自定义服务才会真正<b>删除</b>。
               </p>
               <div id="provider-status" class="card-status" hidden></div>
               <!-- 列表页签：默认（内置预设）/ 自定义（用户新增），沿用侧栏分段控件样式 -->
@@ -1052,8 +1051,8 @@
             <h3>浏览器控制</h3>
             <p class="settings-hint">
               让 Agent 能上网做事：把网页开在<b>你自己的浏览器</b>里给你看（打开网址 / 搜索），
-              或者在内置的<b>无头浏览器</b>里自己翻页、点按钮、填表单、读页面内容
-              （web_page 工具，页面你看不到，内容会回给模型）。
+              或者在内置的<b>后台浏览器</b>里自己翻页、点按钮、填表单、读页面内容
+              （页面你看不到，内容会回给模型）。
             </p>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="browser-control-toggle">
@@ -1088,14 +1087,14 @@
             <div class="bctl-row">
               <div class="bctl-row-main">
                 <b>清除缓存</b>
-                <span>清除 HTTP 缓存、代码与 GPU 缓存、Service Worker 缓存；保留 Cookie 与站点数据，页面下次访问重新联网取一遍。</span>
+                <span>清除网页缓存文件；保留 Cookie 与登录状态，下次打开网页重新下载。</span>
               </div>
               <button id="btn-browser-clear-cache" class="btn-ghost">清除缓存</button>
             </div>
             <div class="bctl-row">
               <div class="bctl-row-main">
                 <b>清除全部浏览器数据</b>
-                <span>删除 Cookie、站点数据、本地存储与缓存，等于把内置浏览器恢复成刚装好的样子。应用正在使用这份数据、无法在使用中删除，<b>点完会在下次启动应用时落地</b>；此操作不可撤销。</span>
+                <span>删除 Cookie、站点数据、本地存储与缓存，等于把内置浏览器恢复成刚装好的样子。应用正在使用这份数据，无法当场删除，<b>点完会在下次启动应用时删除</b>；此操作不可撤销。</span>
               </div>
               <button id="btn-browser-clear-all" class="btn-ghost danger">清除全部</button>
             </div>
@@ -1119,10 +1118,9 @@
               </span>
             </div>
             <p class="settings-hint">
-              模板把「谁来做、用什么模型、要不要动手」存成一份可复用的配置：圆桌、团队、对抗都能在
-              输入框「协作」菜单里一键选中。模板只能<b>收窄</b>权限——它关不掉权限确认，也不能把删除、
-              引擎主目录写入、工作目录外写入变成免确认；团队模板可在运行前勾选「本次不再逐次确认」，
-              只让<b>模板声明过</b>的写入（限工作目录内）与命令前缀免确认一次。
+              模板存下「谁来做、用什么模型、要不要动手」，圆桌、团队、对抗都能在输入框「协作」菜单一键选用。
+              模板只能<b>收紧</b>权限——关不掉权限确认，删除、写引擎主目录、写工作目录之外也不会变成免确认；
+              团队模板可在运行前勾选「本次不再逐次确认」，只免<b>模板声明过</b>的写入（限工作目录内）与命令前缀，免一次。
             </p>
             <div id="collab-tpl-status" class="card-status" hidden></div>
             <div id="collab-tpl-gallery" class="gallery-grid"></div>
@@ -1186,7 +1184,7 @@
             </p>
             <ul class="settings-hint hint-points">
               <li>在右侧「接力」看板里填写总任务、主屏任务、副屏任务，点「执行」让轮到的一方开始。</li>
-              <li>每次执行是一轮完整对话，工具与权限门照常生效；点「中断」会停下正在跑的那一轮，再点执行可继续。</li>
+              <li>每次执行是一轮完整对话，写入与执行照常征询确认；点「中断」会停下正在跑的那一轮，再点执行可继续。</li>
               <li>勾选「连续交替」可让两屏自动轮流执行，直到你中断；不勾选则每轮结束后停下来等你检查。</li>
               <li>两屏各自使用所在会话的模型，可在副屏输入栏单独切换。</li>
             </ul>
@@ -1277,8 +1275,8 @@
               你在对话中选择「总是允许」时保存的规则；删除后对应操作会重新询问。
             </p>
             <ul class="settings-hint hint-points">
-              <li>命令的前缀规则<b>不命中带 shell 拼接的命令</b>（如 <code>git status; rm -rf /</code>）。</li>
-              <li>键盘 / 鼠标 / 关窗口的「总是允许」只固化那一次的内容或动作。</li>
+              <li>命令的前缀规则<b>管不住带 shell 拼接的命令</b>（如 <code>git status; rm -rf /</code>）。</li>
+              <li>键盘 / 鼠标 / 关窗口的「总是允许」只记住那一次的内容或动作。</li>
             </ul>
             <div id="rule-add-form" class="rule-add-form hidden">
               <div class="rule-add-row">
@@ -1468,7 +1466,7 @@
               </label>
               <p class="dim small adv-toggle-desc">
                 长对话占用达到下面设定的比例时，自动把较早的历史替换成摘要接着聊，避免撞上模型上下文上限。
-                关闭后不再自动压缩，仅手动执行 <b>/compact</b> 时压缩（超窗会话将无法继续发消息，直到手动压缩）。
+                关闭后不再自动压缩，仅手动执行 <b>/compact</b> 时压缩（对话超出上限时，先手动压缩才能继续发消息）。
               </p>
               <div class="toolcfg-row">
                 <label>压缩触发比例</label>
@@ -1498,7 +1496,7 @@
               <div class="toolcfg-row">
                 <label>备用模型</label>
                 <input type="text" id="adv-fallback-model" placeholder="如 zhipu:glm-5.3（留空 = 不启用）">
-                <span class="dim small">主模型失败（鉴权/余额/服务异常）时自动切换到这个「服务:模型」</span>
+                <span class="dim small">主模型失败（密钥不对 / 余额不足 / 服务异常）时自动切换到这个「服务:模型」</span>
               </div>
             </div>
           </section>
@@ -1509,7 +1507,7 @@
               <button id="btn-network-save" class="btn-ghost">保存</button>
             </div>
             <p class="settings-hint">
-              全应用的出网口径：模型请求、联网搜索、网页抓取、MCP、命令子进程都遵循这里。
+              全应用访问网络都按这里的规则走：模型请求、联网搜索、网页抓取、MCP、命令子进程。
             </p>
             <div id="network-status" class="card-status" hidden></div>
             <div class="toolcfg-form">
@@ -1590,7 +1588,7 @@
               <label for="interaction-mode">交互行为</label>
               <select id="interaction-mode">
                 <option value="queue">排队 —— 当前轮结束后自动执行</option>
-                <option value="steer">引导 —— 注入当前轮，下一次模型调用前生效</option>
+                <option value="steer">引导 —— 补进当前这一轮，模型下次回复前生效</option>
               </select>
               <span class="dim small">引导适合「方向不对，补充一句」；排队适合另外一件独立的事</span>
             </div>
@@ -1625,7 +1623,7 @@
             <p class="dim small adv-toggle-desc">
               关闭时（默认），定时任务仅在应用运行期间生效——SkySheep 没开着就不到点执行。
               开启后，应用内新建 / 修改的定时任务会同步注册进 Windows 任务计划程序，
-              到点由系统拉起引擎独立执行，不依赖 SkySheep 在运行。
+              到点由系统直接运行，不依赖 SkySheep 开着。
             </p>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="adv-job-containment">
@@ -1653,7 +1651,7 @@
               <span id="adv-trust-state" class="dim small">读取中…</span>
             </div>
             <p class="dim small adv-toggle-desc">
-              项目目录下的 <b>.skysheep/</b>（mcp.json 与 skills/）是随仓库一起分发的数据，
+              项目目录下的 <b>.skysheep/</b>（mcp.json 与 skills/）是项目文件夹自带的数据，
               首次打开时会先问一句是否信任，确认前不会执行其中的命令、也不会把技能拼进系统提示词。
               信任按项目记忆，配置内容一变就需要重新确认；全局配置不受影响。
             </p>
@@ -1689,13 +1687,13 @@
                  Claude 兼容（Node.js 无沙箱）。默认文案是 quickjs 口径，Claude 模式下
                  JS 会换掉，避免出现「只能收紧」这种与实际能力相反的安全承诺。 -->
             <p class="settings-hint" id="mods-intro">
-              Mod 是<b>第三方编写的事件处理扩展</b>：挂在工具调用前后、权限请求与回合生命周期上，
+              Mod 是<b>第三方编写的事件处理扩展</b>：挂在工具调用前后、权限请求等环节上，
               做观察、提示或<b>收紧</b>（拒绝 / 要求确认）。
             </p>
             <ul class="settings-hint hint-points" id="mods-hints">
-              <li id="mods-hint-safety"><b>安全底线</b>：对权限门<b>只能收紧、永不放行</b>，也不能修改工具参数。</li>
+              <li id="mods-hint-safety"><b>安全底线</b>：对权限确认<b>只能收紧、永不放行</b>，也不能修改工具参数。</li>
               <li id="mods-hint-sandbox">代码跑在引擎侧沙箱，无文件 / 网络 / 进程能力。</li>
-              <li id="mods-hint-ui">界面里的 Mod 片段是固定渲染器画的声明式小部件，Mod 无法自由绘制界面。</li>
+              <li id="mods-hint-ui">界面里的 Mod 片段由固定样式的小部件绘制，Mod 不能自由画界面。</li>
             </ul>
             <div id="mods-runtime-status" class="card-status" hidden></div>
             <div id="mods-status" class="card-status" hidden></div>
@@ -1711,7 +1709,7 @@
             </div>
             <p class="settings-hint" id="mods-root-hint">
               安装位置在本机用户目录的 <code>.skysheep\mods\</code>；安装来源是本机文件夹（含 mod.json）
-              或 .zip 压缩包。安装前会先展示内容预览，确认后才落盘。
+              或 .zip 压缩包。安装前会先展示内容预览，确认后才写入。
             </p>
             <!-- mods-root-hint 的文案由 renderModsCfg 按运行模式覆写：Claude 兼容模式
                  同时认 .claude-plugin/plugin.json，与 quickjs 模式的说明不同 -->
@@ -1743,8 +1741,7 @@
               随应用内置的示例 Mod（离线可装），按当前运行模式展示：
               <b>上下文天气</b>把上下文占用做成天气式状态条；
               <b>高危命令影响面</b>让高危命令一律逐次确认并附影响面说明（只收紧、不放行）。
-              两套示例分别演示 SkySheep 格式与 Claude Code 插件格式的写法，
-              也是「Mod 怎么写」的参考实现。
+              两套示例分别对应 SkySheep 与 Claude Code 两种格式，也是学写 Mod 的例子。
             </p>
             <div id="mods-official-grid" class="gallery-grid">
               <span class="dim small skeleton">正在加载官方示例…</span>
@@ -1807,7 +1804,7 @@
             </p>
             <ul class="settings-hint hint-points">
               <li>渠道<b>默认关闭</b>；启用前必须先把你的账号加入<b>允许名单</b>——没有名单的机器人等于对所有人开放。</li>
-              <li><b>Webhook</b> 是纯出站的推送目标：只把定时与编排的运行摘要、每日运行日报等出站消息 POST 到你配置的地址，不收消息。</li>
+              <li><b>Webhook</b> 只往外发：把定时与编排的运行摘要、每日运行日报推送到你填的地址，不收消息。</li>
             </ul>
             <details class="rule-check-fold">
               <summary>安全边界与凭据说明（只读模式 / 群聊风险 / 审批规则 / 凭据要求）</summary>
@@ -1838,7 +1835,7 @@
               记忆是 Agent 自己记下的<b>事实</b>。
             </p>
             <ul class="settings-hint hint-points">
-              <li>每轮对话注入，对所有项目、所有会话生效；只对本机生效，远程设备需单独配置。</li>
+              <li>每轮对话带上，对所有项目、所有会话生效；只对本机生效，远程设备需单独配置。</li>
               <li>最多 8000 字；写「回答先给结论」「不要用表情符号」这类可执行的规则，效果最好。</li>
               <li>保存后下一轮立即生效，不需要重启。</li>
             </ul>
@@ -1854,7 +1851,7 @@
             </div>
             <p class="settings-hint">
               跨项目生效的用户记忆：Agent 对话中说「记住我喜欢…」时会自动写进来（格式为
-              <b>- [日期] 内容</b> 的列表），每一轮对话都会注入。
+              <b>- [日期] 内容</b> 的列表），每一轮对话都会带上。
             </p>
             <ul class="settings-hint hint-points">
               <li>这里可以直接查看、修改；保存后对所有会话立即生效。</li>
@@ -2042,8 +2039,8 @@
               <span>仅窗口失焦时提示音</span>
             </label>
             <p class="dim small adv-toggle-desc">
-              合成短音，不引资源文件；勾选提示音时试听一声。默认只在窗口失焦时响
-              （前台人已在看，不必响），取消勾选则每次都响。默认关闭提示音。
+              内置合成短音，无需额外文件；勾选提示音时会试听一声。默认只在窗口失焦时响
+              （人已在看，不必响），取消勾选则每次都响。提示音总开关默认关闭。
             </p>
           </section>
           <section class="settings-card">
@@ -2056,7 +2053,7 @@
               <span>显示思考过程</span>
             </label>
             <p class="dim small adv-toggle-desc">
-              关闭后不再渲染模型的思考块（正文与工具调用不受影响）；可随时打开，
+              关闭后不再显示模型的思考内容（正文与工具调用不受影响）；可随时打开，
               新产生的思考会重新显示。
             </p>
             <label class="toggle-row adv-toggle">
@@ -2064,8 +2061,8 @@
               <span>显示待办卡片</span>
             </label>
             <p class="dim small adv-toggle-desc">
-              开启后 Agent 调用 todo_write 时，消息流里的工具卡会变成任务进度清单；
-              关闭则保留普通工具卡（右侧「任务清单」面板不受影响）。
+              开启后 Agent 更新任务步骤时，消息流里直接显示任务进度清单；
+              关闭则保留普通工具卡（右侧「任务」面板不受影响）。
             </p>
           </section>
           <section class="settings-card" id="window-card">
@@ -2115,7 +2112,7 @@
             </p>
             <ul class="settings-hint hint-points">
               <li>「跟随系统」：按 Windows 深浅色自动落到下面选的浅色 / 深色主题（默认纸墨 / 夜墨）。</li>
-              <li>「定时切换」：设定时段内用深色落点、时段外用浅色落点（深浅落点同「跟随系统」的下拉）。</li>
+              <li>「定时切换」：设定时段内用深色主题、时段外用浅色主题（主题在「跟随系统时」的下拉里选）。</li>
               <li>选中具体主题后不再随系统切换。</li>
             </ul>
             <div id="theme-grid" class="theme-grid">
@@ -2279,7 +2276,7 @@
               <label>到
                 <input type="time" id="theme-timed-to" value="07:00">
               </label>
-              <small class="settings-hint">可跨零点（19:00 → 07:00）；深浅落点用「跟随系统时」选的主题</small>
+              <small class="settings-hint">可跨零点（19:00 → 07:00）；深浅主题用「跟随系统时」选的</small>
             </div>
           
           </section>
@@ -2491,9 +2488,9 @@
               </div>
             </div>
             <p class="settings-hint">
-              事后回头看「跑完了，但跑歪了吗」：按下面的间隔把最近一段窗口里的自动运行终态压成一张紧凑表，
-              问一次模型「有没有无效循环、有没有偏离任务目标」，结论落成报告。只建议、不自动改配置；
-              只读运行账本，不读会话正文。巡检要真实调用模型，<b>默认关闭</b>。
+              事后回头看「跑完了，但跑歪了吗」：按下面的间隔把最近的自动运行结果汇总成一张表，
+              问一次模型「有没有空转、有没有偏离目标」，给出报告。只建议、不自动改配置；
+              只读运行记录，不读会话正文。巡检要真实调用模型，<b>默认关闭</b>。
             </p>
             <label class="toggle-row adv-toggle"
                    title="开启后按巡检间隔自动执行；也可以随时点右上角「立即巡检」手动跑一次">
@@ -2568,9 +2565,8 @@
             </div>
             <p class="settings-hint">
               按「普通 / 圆桌 / 团队 / 对抗」四种协作形态分列 token 消耗。
-              轮次按用量入账行计：普通会话每轮一行，圆桌 / 团队 / 对抗每名成员各记一行。
-              会话形态由会话内消息的协作标记判定，判不出的归「普通」；
-              统计口径跟随上方「全部 / 本项目」切换。
+              普通会话每轮记一行，圆桌 / 团队 / 对抗每名成员各记一行；认不出形态的归「普通」。
+              统计范围跟随上方「全部 / 本项目」切换。
             </p>
             <div id="usage-collab"></div>
             <div id="usage-pricing" class="usage-pricing"></div>
@@ -2628,7 +2624,7 @@
                 开发者看不到，也不会上传到任何中转服务器。以下是本机的数据位置。
               </p>
               <p class="settings-hint">
-                <b>需要知道的边界</b>：对话内容会按你的配置直接发送给所选的模型服务商
+                <b>请注意</b>：对话内容会按你的配置直接发送给所选的模型服务商
                 （OpenAI / DeepSeek / 智谱等），由各自的服务条款与隐私政策约束；
                 SkySheep 只在你的电脑与那家服务之间转发，不经手也不留存。
               </p>
@@ -2726,7 +2722,7 @@
               <span class="io-msg"></span>
             </div>
             <p class="settings-hint" style="margin-top:10px">
-              换机迁移还需要会话记录与技能文件时，用下面的完整导出：含会话数据库快照、技能目录与打码配置，
+              换机迁移还需要会话记录与技能文件时，用下面的完整导出：含会话数据库完整备份、技能目录与打码配置，
               打包后存到数据目录 exports\ 文件夹。
             </p>
             <div class="io-row">
@@ -2756,13 +2752,13 @@
               </span>
             </div>
             <p class="settings-hint">
-              把这台机器的会话、技能、界面偏好与配置打包带走，在新机器上导入即可续用。<b>模型密钥与 MCP 配置不进包</b>（防丢包泄密），导入后到设置里重填。
+              把这台机器的会话、技能、界面偏好与配置打包带走，在新机器上导入即可续用。<b>模型密钥与 MCP 配置不进包</b>（防止包丢了泄密），导入后到设置里重填。
             </p>
             <ul class="settings-hint hint-points">
               <li>导入会<b>替换</b>本机的会话库、技能、界面偏好与配置；导入前自动把当前数据备份到 backups 目录。</li>
               <li>导入完成后需<b>重启应用</b>生效；会话/定时任务/团队自动循环进行中时导入会被拒绝。</li>
-              <li>包体超过 <b>64MB</b>（大会话库常见）时导出会自动改成<b>落盘</b>：包写到
-                <code>~/.skysheep/migrations/</code>，界面给出路径，不去挤浏览器传输。</li>
+              <li>包超过 <b>64MB</b>（大会话库常见）时改为直接保存到
+                <code>~/.skysheep/migrations/</code>，界面上给出路径。</li>
             </ul>
             <label class="toggle-row check-row" title="勾上后，包里同名技能会整目录替换本机那份（本机同名技能里的额外文件会被移走备份），不与本机合并；不勾则叠加覆盖（本机多出的文件保留）">
               <input type="checkbox" id="migration-skills-replace">

@@ -771,7 +771,7 @@ async def test_spawn_announce_queued_flag_reflects_reality(tmp_path):
     """L18：立即开跑的后台任务 spawned 事件 queued=False；满员进队的才是 True。
 
     旧实现 announce 在 _launch 置 running 之前读 TaskRecord 默认 status
-    （"queued"），立即开跑的任务被前端渲染成「并发已满，已进入排队」，与
+    （"queued"），立即开跑的任务被前端渲染成「后台任务位已满，已排队」，与
     实际相反。挪到 _launch 之后，标志与真实状态一致。
     """
     import contextlib

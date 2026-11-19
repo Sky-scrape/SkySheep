@@ -70,8 +70,8 @@ function ruleAddWarning(tool, kind) {
   if (kind !== "exact" && (tool === "keyboard" || tool === "clipboard_write"))
     return {
       danger: false,
-      text: "键盘 / 剪贴板不按动作整类放行：整类放行等于允许向任意焦点窗口输入任意内容 / "
-        + "把任意内容写进剪贴板，建议改用「仅此一条」。",
+      text: "键盘 / 剪贴板不按动作整类放行：整类放行等于允许往任何窗口键入任意内容、"
+        + "改写剪贴板，建议改用「仅此一条」。",
     };
   if (kind === "prefix" && tool === "window")
     return {
@@ -99,7 +99,7 @@ function updateRuleAddFormState() {
     hint.textContent = "整个工具：该工具的所有调用都会直接放行。";
   } else if (kind === "prefix") {
     patternInput.placeholder = "如 git status / click";
-    hint.textContent = "前缀：以这段文本开头的调用都放行（命令类工具不含带 shell 拼接的命令）。";
+    hint.textContent = "前缀：以这段文本开头的调用都放行（分号、管道拼接的命令除外）。";
   } else if (kind === "exact") {
     patternInput.placeholder = "与调用文本完全一致的内容";
     hint.textContent = "仅此一条：与这段文本完全一致的调用才放行。";
@@ -789,9 +789,8 @@ function deleteProviderModal(name, isPreset) {
   const box = document.createElement("div");
   box.innerHTML = isPreset
     ? `<p>确定停用内置服务 <b>${escapeHtml(name)}</b> 吗？</p>
-       <p class="dim small">它会从列表里消失（配置保留，本机 config.toml 不再加载它），
-       之后可以在列表下方的「已停用的服务」里点「恢复」找回来；恢复时按最新出厂默认重建，
-       API Key 会保留。</p>`
+       <p class="dim small">会从列表里消失，配置与 API Key 都保留；之后在列表下方的
+       「已停用的服务」里点「恢复」找回（恢复时按最新出厂默认重建）。</p>`
     : `<p>确定删除自定义模型服务 <b>${escapeHtml(name)}</b> 吗？</p>
        <p class="dim small">只会从本机 config.toml 里移除这一项；内置服务与历史会话不受影响。</p>`;
   showModal(isPreset ? "停用内置服务" : "删除模型服务", box, async () => {

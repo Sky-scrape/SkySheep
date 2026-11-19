@@ -37,7 +37,7 @@ function applyBrowserStatus(d) {
       : "内置浏览器把 Cookie、站点数据与缓存存在数据目录里；当前还没有生成数据（用过右侧预览面板或打开过应用窗口后才会出现）。";
   }
   if (d.pending_reset) {
-    browserCtlStatus("browser-data-status", "已登记：下次启动应用时清空 Cookie 与站点数据。");
+    browserCtlStatus("browser-data-status", "已安排：下次启动应用时清空 Cookie 与站点数据。");
   }
 }
 
@@ -72,7 +72,7 @@ async function clearBrowserData(mode) {
     const ok = await confirmModal(
       "清除内置浏览器的全部数据？\n\n" +
       "Cookie、站点数据、本地存储与缓存都会被删掉，网站登录状态随之丢失，无法撤销。\n" +
-      "应用正在使用这份数据，删除会在下次启动应用时落地。",
+      "应用正在使用这份数据，删除会在下次启动应用时执行。",
       { title: "确认清除", okLabel: "清除全部", danger: true });
     if (!ok) return;
   }
@@ -84,14 +84,14 @@ async function clearBrowserData(mode) {
       ? `已清除 ${r.removed} 项缓存${r.freed_bytes ? `，释放 ${fmtBrowserBytes(r.freed_bytes)}` : ""}`
       : "没有需要清除的缓存";
     const stuck = r.failed ? `；另有 ${r.failed} 项被占用，重启应用后再清一次` : "";
-    const temp = r.temp_profiles_removed ? `；顺带清掉 ${r.temp_profiles_removed} 份无头浏览器残留` : "";
+    const temp = r.temp_profiles_removed ? `；顺带清掉 ${r.temp_profiles_removed} 份浏览器临时残留` : "";
     applyBrowserStatus(await request("browser.status"));
-    // 结果提示放在回读之后：回读会把「已登记待清除」的常驻提示写上，
+    // 结果提示放在回读之后：回读会把「已安排待清除」的常驻提示写上，
     // 顺序反了这次的明细（清掉几项、释放多少）会被那行盖掉
     if (mode === "all") {
       browserCtlStatus(
         "browser-data-status",
-        `已登记：下次启动应用时清空 Cookie 与站点数据（应用正在使用这份数据，只能启动时删）；本次${cleared}${stuck}${temp}。`);
+        `已安排：下次启动应用时清空 Cookie 与站点数据（应用正在使用这份数据，只能启动时删）；本次${cleared}${stuck}${temp}。`);
     } else {
       browserCtlStatus("browser-data-status", `${cleared}${stuck}${temp}。`);
     }

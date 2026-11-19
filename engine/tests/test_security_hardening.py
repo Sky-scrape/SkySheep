@@ -738,7 +738,7 @@ def test_host_header_must_point_at_this_machine():
     assert not _request_host_allowed("evil.example:8765", ("127.0.0.1", 5000))
     assert _request_host_allowed("127.0.0.1:8765", ("127.0.0.1", 5000))
     # 非本机对端（局域网 / Tailscale）不校：它们可能用机器名、mDNS 名或自定义
-    # 域名访问，一律拒绍会直接打断远程控制；这些来源本来就靠令牌把关
+    # 域名访问，一律拒绝会直接打断远程控制；这些来源本来就靠令牌把关
     assert _request_host_allowed("nas.local:8765", ("192.168.1.20", 5000))
     assert _request_host_allowed("", ("100.64.0.7", 5000))
     # TestClient 的固定 Host 只在 peer 确实是 TestClient 时认

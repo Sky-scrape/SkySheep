@@ -567,7 +567,7 @@ async def test_window_close_is_exact_only():
     assert await gate.authorize(wt, {"action": "close", "title": "记事本"}) is None
     # 另一个标题：必须重新确认（子串匹配很容易误中整个应用）
     p = await gate.authorize(wt, {"action": "close", "title": "记事"})
-    assert p is not None and p.note and "子串" in p.note
+    assert p is not None and p.note and "按标题包含匹配" in p.note
 
 
 async def test_window_activate_still_action_prefixed():

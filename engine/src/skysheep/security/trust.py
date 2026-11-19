@@ -303,7 +303,7 @@ def describe_sources(project_root: Path) -> list[dict]:
         items.append({
             "kind": "skill",
             "name": md.parent.name,
-            "detail": "会注入系统提示词的技能 (.skysheep/skills/" + md.parent.name + "/SKILL.md)",
+            "detail": "会交给 AI 的技能 (.skysheep/skills/" + md.parent.name + "/SKILL.md)",
             "readonly": False,
         })
     return items

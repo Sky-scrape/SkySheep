@@ -179,7 +179,7 @@ def _host_guard(app) -> None:
     async def _reject_foreign_host(request, call_next):
         if not _request_host_allowed(request.headers.get("host", ""), request.client):
             # 421 Misdirected Request：语义正好是「本服务器不愿为该 Host 服务」
-            return JSONResponse({"detail": "Host 不指向本机，已拒绍"}, status_code=421)
+            return JSONResponse({"detail": "Host 不指向本机，已拒绝"}, status_code=421)
         resp = await call_next(request)
         # 界面不允许被外部页面嵌进 iframe（安全审查低危项）：点击劫持面收掉。
         # /preview 自己的 iframe 是内嵌资源、不受这条限制（只作用于本响应）
@@ -526,8 +526,7 @@ def create_app(
         "<p style='opacity:.6'>令牌在桌面端 设置 · 手机控制 里查看</p>"
         "<p style='opacity:.6'>从主屏幕图标（独立窗口）打开时没有地址栏："
         "请先用手机浏览器打开带 token 的地址完成验证，再回到本应用。</p>"
-        "<p style='opacity:.6'>若打开一直失败，确认电脑端 SkySheep 正在运行"
-        "（离线时浏览器只会显示打不开，与令牌无关）。</p></div></body></html>"
+        "<p style='opacity:.6'>若一直打不开，请确认电脑端 SkySheep 正在运行。</p></div></body></html>"
     )
 
     @app.middleware("http")

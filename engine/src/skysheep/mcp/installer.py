@@ -92,7 +92,7 @@ def normalize_server(raw: dict) -> MCPServerConfig:
         raise MCPInstallError(
             "env 含不允许的环境变量：" + "、".join(banned)
             + "。这些变量会改变目标程序的运行时行为（可执行文件查找路径、"
-            "运行时注入选项等），请从配置里删掉它们后再导入"
+            "运行时选项等），请从配置里删掉它们后再导入"
         )
     if cfg.headers and not all(
         isinstance(k, str) and isinstance(v, str) and k.strip()

@@ -2769,7 +2769,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 后端多参数同给报参数错。模板轮已由模板决定 kind，跳过这条检查。
         if tpl is None and sum(bool(m) for m in (team, roundtable, adversarial)) > 1:
             raise RuntimeError(
-                "「团队」「圆桌」「对抗」不能同时开启：同一条消息只能选一种协作模式。"
+                "「团队」「圆桌」「对抗」不能同时开启，同一条消息只能选一个。"
             )
         # 轮次起点重验工作区信任（审查 P2-4）：会话运行期间项目级配置被外部
         # 改动（git pull 等）时，趁本轮开始断开项目级 MCP、重发现技能。
@@ -3973,9 +3973,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "member_history_turns": rt.member_history_turns,
             "configured_services": len(self._configured_services()),
             "config_hint": (
-                "圆桌让多个模型并行独立作答，再由主席（当前主模型）融合成一份答案，"
+                "圆桌让多个模型并行独立作答，再由主席（当前主模型）汇总成一份答案，"
                 "token 成本约为单模型的「成员数 + 1」倍；每多一轮辩论修订，成员成本"
-                "再翻一倍（草稿已收敛的成员会自动跳过，雷同草稿在融合时自动去重）。"
+                "再翻一倍（观点已一致的成员会自动跳过，雷同草稿在融合时自动去重）。"
                 "成员来自「模型服务」里已配好 Key 的服务，可在输入框的圆桌面板逐个"
                 "勾选并指定身份（批评者 / 事实核查员等）。圆桌全程不调用工具、不写文件。"
             ),
@@ -4095,8 +4095,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if preload:
             adv_text = f"{question}\n\n{preload}"
             await emit_ev(NoticeEvent(message=(
-                "对抗角色没有文件工具：已自动带入用户点名的项目文件只读快照"
-                "（最多 3 个，含截断）。"
+                "对抗角色没有文件工具：已把你点名的项目文件（只读）带给角色，"
+                "最多 3 个，过长会截取。"
             )))
 
         # 上下文压缩护栏：四个角色都吃会话上下文，超限先压缩（同圆桌）
@@ -4400,8 +4400,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             "role_timeout_s": adv.role_timeout_s,
             "configured_services": len(self._configured_services()),
             "config_hint": (
-                "对抗让多个模型以攻防立场接力审查：发现者穷尽式找问题（宁滥勿缺），"
-                "调查者逐条对抗验证（力求推翻误报），建议者给代码级修复方案，裁判"
+                "对抗让多个模型接力审查：发现者只管找问题（宁滥勿缺），"
+                "调查者逐条验证（力求推翻误报），建议者给修复方案，裁判"
                 "（当前主模型）过滤噪音并产出终审报告。成员按勾选顺序承担前三个"
                 "角色，不足时自动复用同一个模型——单一模型也能自我对抗。全程纯"
                 "文本协作，不调用工具、不写文件。成本约为「角色数 + 1」次调用。"
@@ -5091,8 +5091,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             declared = len([r for r in (tpl.get("roles") or []) if isinstance(r, dict)])
             if len(specs) < declared:
                 await emit(NoticeEvent(
-                    message=f"模板的 {declared} 个角色按（服务, 模型）去重后组成 "
-                            f"{len(specs)} 名队员：已配置 Key 的服务不足或模型重复"
+                    message=f"模板的 {declared} 个角色去重后组成 "
+                            f"{len(specs)} 名队员：有的服务没配 Key，或角色重复"
                 ))
         # 模板 max_calls 是 provider 调用次数（含重试/格式纠错），不是轮次：
         # 给每个成员与 AI 总管的 provider 套一层计数代理，团队链路（含小会）
@@ -5269,7 +5269,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if isinstance(team_gate, GrantedGate):
                 orch.set_gate(object.__getattribute__(team_gate, "_inner"))
                 await emit_ev(NoticeEvent(
-                    message="远程连接驱动已有团队：本次运行的模板免确认授权已收回，"
+                    message="本次由远程连接操作该团队，模板的免确认授权已收回，"
                             "后续操作改为逐次确认。"
                 ))
 
@@ -5397,8 +5397,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                         director_context = ""
                 if director_context:
                     await emit_ev(NoticeEvent(message=(
-                        "团队总管没有文件工具：已自动带入用户点名的项目文件只读快照"
-                        "（最多 3 个，含截断；频道里仍是你的原文）。"
+                        "团队总管没有文件工具：已把你点名的项目文件（只读）带给总管，"
+                        "最多 3 个，过长会截取；频道里仍是你的原文。"
                     )))
                 if orch.loop_running:
                     # 循环推进中的插话：只进频道并排进总管下一轮（最高优先级段），
@@ -5876,8 +5876,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                 "团队让多个模型分工协作：总管拆解目标、登记工单，队员按工单真实"
                 "读写文件、运行命令（照常走权限确认），完成后交付。成员来自「模型"
                 "服务」里已配好 Key 的服务，在输入框的团队面板勾选并写一句话人设；"
-                "下面的上限用于防止自动循环失控。「无人值守续跑」用于定时团队任务："
-                "总管空闲时自动补发续跑指令的次数（0 = 空闲即收队）。改动对之后新建"
+                "下面的上限用于防止自动循环失控。「无人值守续跑」是定时团队任务里"
+                "总管空闲时自动催续跑的次数（0 = 空闲即收队）。改动对之后新建"
                 "的团队生效，进行中的团队沿用建队时的值。"
             ),
         }
@@ -6049,8 +6049,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             # 内置团队模板只在代码里、不落盘：常驻/定时复用都要按名字回查模板册，
             # 给可执行的出路而不是一句「不存在」
             raise TeamError(
-                f"「{template}」是内置团队模板，未落盘；请先在 设置 · 多模型协作里"
-                "「复制」为自己的模板再设为常驻"
+                f"「{template}」是内置团队模板，不能直接设为常驻；请先在 设置 · 多模型协作 里"
+                "「复制」成自己的模板再设为常驻"
             )
         if template and not any(
             t.name == template for t in self.team_templates.templates
@@ -7131,7 +7131,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         if not text:
             raise RuntimeError("没有可润色的内容")
         if not self.provider:
-            raise RuntimeError("没有可用模型——先在设置里配好提供商再试")
+            raise RuntimeError("没有可用模型——先在 设置 · 模型服务 里配好再试")
         prompt = (
             "请把下面这条给 AI 助手的提示词改写得更清晰、更结构化：保留原意与全部细节，"
             "补齐缺失的背景交代，可按「背景 / 任务 / 要求」等小块组织；"
@@ -9076,8 +9076,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             conn.close()
         if ver > SCHEMA_VERSION:
             raise RuntimeError(
-                f"导出包的会话库由更新版本的 SkySheep 创建（库版本 {ver} > "
-                f"当前程序支持 {SCHEMA_VERSION}）。请先升级本机 SkySheep 再导入，"
+                f"导出包来自更新版本的 SkySheep（数据版本 {ver}，本机支持 "
+                f"{SCHEMA_VERSION}）。请先升级本机 SkySheep 再导入，"
                 "或改用只含配置的「导入设置」。"
             )
         return ver

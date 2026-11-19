@@ -193,7 +193,7 @@ async def test_move_file_overwriting_directory_falls_back(inner, project):
         MoveFileTool(), {"source": "srcdir", "destination": "dstdir", "overwrite": True}
     )
     assert pending is not None
-    assert "删除语义永不自动放行" in pending.note
+    assert "删除类操作从不自动放行" in pending.note
     pending.resolve(Decision.DENY)
 
 
@@ -291,8 +291,8 @@ async def test_inner_note_is_kept(inner):
     gate = _gate(inner, prefixes=["git status"])
     pending = await gate.authorize(RunCommandTool(), {"command": "git status; rm -rf /"})
     assert pending is not None
-    assert pending.note.startswith("本次运行模板授权：命令含管道/拼接或解释器代码旗标；")
-    assert "该命令以白名单里的前缀开头" in pending.note
+    assert pending.note.startswith("本次运行模板授权：命令含管道/拼接，或带直接执行代码的参数；")
+    assert "这条命令以白名单前缀开头" in pending.note
     pending.resolve(Decision.DENY)
 
 

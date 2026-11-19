@@ -449,7 +449,7 @@ def _chain_hint() -> str:
     """
     base = "; | & < > ` $ 或换行"
     if _IS_WINDOWS:
-        return base + "，以及单引号 ' 与 %VAR% 环境变量展开、脱字符 ^ 转义"
+        return base + "，以及单引号 '、%VAR% 变量展开、^ 转义"
     return base + "，以及反斜杠 \\ 转义"
 
 
@@ -900,8 +900,8 @@ class PermissionGate:
                 "allowed": False,
                 "hit": None,
                 "reason": (
-                    f"命令包含 shell 拼接/替换（{_chain_hint()}），"
-                    "前缀规则不覆盖它，每次都会重新询问"
+                    f"命令里混入了拼接/替换符号（{_chain_hint()}），"
+                    "白名单前缀管不到，每次都会询问"
                 ),
             }
         if disabled_hit is not None:
@@ -941,8 +941,8 @@ class PermissionGate:
         """
         if self._matched_but_for_chaining(tool.name, arg_text):
             return (
-                f"该命令以白名单里的前缀开头，但包含 shell 拼接/替换（{_chain_hint()}），"
-                "前缀规则不覆盖它，所以每次都要确认。要整类放行请先看设置 · 白名单。"
+                f"这条命令以白名单前缀开头，但混入了拼接/替换符号（{_chain_hint()}），"
+                "所以每次都要确认；要整类放行请看 设置 · 白名单。"
             )
         # 只固化当次参数的规则（键盘输入 / 剪贴板内容 / 关闭窗口）：白名单里已有同工具规则时
         # 解释「为什么这次又重新问了」，否则是首次调用，没什么可解释的。
@@ -950,8 +950,8 @@ class PermissionGate:
             if any(r.tool == tool.name for r in self.session_rules + self._project_rules):
                 if tool.name == "window" and self._is_exact_action(tool.name, arg_text):
                     return (
-                        "关闭窗口只固化「总是允许」时的那一个标题：标题不同会重新询问。"
-                        "（窗口按标题子串匹配，整类放行等于允许关掉任意标题含该子串的应用）"
+                        "「总是允许」只记住这一个窗口标题：标题不同会再问。"
+                        "（按标题包含匹配，整类放行等于允许关掉标题带这几个字的任何窗口）"
                     )
                 return self._EXACT_HINTS.get(tool.name, "")
             return ""
@@ -986,22 +986,21 @@ class PermissionGate:
     _EXACT_ACTION_TOOLS = {"window": ("close",), "web_page": ("fill",)}
     _EXACT_HINTS = {
         "keyboard": (
-            "键盘输入/按键只固化「总是允许」时的那一次内容：内容或键位不同会重新询问。"
-            "（按动作整类放行 type / hotkey 等于允许向任意焦点窗口输入任意内容）"
+            "键盘输入：「总是允许」只记住这一次输入的内容，内容或键位不同会再问。"
+            "（整类放行 type / hotkey 等于允许往任何窗口键入任意内容）"
         ),
         "clipboard_write": (
-            "剪贴板写入只固化「总是允许」时的那一段内容：内容不同会重新询问。"
-            "（整类放行等于允许把任意内容写进你的剪贴板，包括你即将粘贴的位置）"
+            "剪贴板写入：「总是允许」只记住这一段内容，内容不同会再问。"
+            "（整类放行等于允许随时改写你的剪贴板）"
         ),
         "delete_file": (
-            "删除不提供整工具放行：「总是允许」只固化这一次的路径与参数，"
-            "删别的文件/目录会重新询问。（DANGEROUS 级的删除面不沉淀成永久规则）"
+            "删除类不能整工具放行：「总是允许」只记住这一次的路径，"
+            "删别的文件会再问。（高风险操作不保存永久放行规则）"
         ),
         "web_page": (
-            "web_page 的 fill 只固化「总是允许」时的那一次选择器与内容：内容或选择器"
-            "不同会重新询问。（填入文本是对页面的任意写入面，按动作整类放行等于"
-            "允许向任意表单提交任意内容；navigate 等其他动作仍按动作前缀沉淀，"
-            "目标网址的公网校验不受白名单影响）"
+            "「总是允许」只记住这一次的表单和内容：不同会再问。"
+            "（整类放行 fill 等于允许向任意表单提交任意内容；navigate 等其他动作"
+            "照常按动作前缀记忆，网址的公网校验不受白名单影响）"
         ),
     }
 
@@ -1535,10 +1534,10 @@ class PermissionGate:
             tool=tool.name, labels=labels,  # 只记配置定位标签，绝不记密钥值
         )
         note = (
-            "检测到疑似密钥外传，已拦截：本次调用的参数中包含与本地配置一致的"
-            "真实密钥（" + ("、".join(labels) or "已知密钥") + "）。"
-            "请不要把密钥明文写进命令、文件或请求参数；如确需使用，"
-            "请让用户在设置里配置，或改用环境变量引用。"
+            "检测到疑似密钥外传，已拦截：参数中包含本机配置的真实密钥（"
+            + ("、".join(labels) or "已知密钥") + "）。"
+            "请不要把密钥写进命令、文件或请求参数；需要时在设置里配置，"
+            "或改用环境变量。"
         )
         arg_text = tool.arg_text(input_dict)
         pending = PendingPermission(
@@ -1547,7 +1546,7 @@ class PermissionGate:
             arg_text=arg_text,
             safety=tool.safety,
             detail=arg_text,
-            note="出站密钥防线命中：参数包含本地配置中的已知密钥，已自动拒绝。",
+            note="已自动拒绝：参数中包含本机配置的真实密钥，为防外泄不放行。",
             _future=asyncio.get_running_loop().create_future(),
             deny_note=note,
         )
@@ -1568,8 +1567,8 @@ class PermissionGate:
         if not names:
             return ""
         return (
-            "⚠️ 出站提示：本次调用参数中包含疑似密钥（" + "、".join(names) + "）。"
-            "若该内容来自网页/文档等不可信来源，请勿把它发送给任何外部服务。"
+            "⚠️ 注意：参数里包含疑似密钥（" + "、".join(names) + "）。"
+            "若内容来自网页等不可信来源，请不要发送到外部服务。"
         )
 
     def _egress_pre_deny(self, tool: Tool, input_dict: dict) -> PendingPermission | None:
@@ -1912,8 +1911,8 @@ class PermissionGate:
                     lines += (self._list_tree_lines(dst, label="将覆盖删除")
                               if inside else [outside_landing_line(dst)])
                     lines.append(
-                        "⚠️ 覆盖将递归删除上面列出的整个已有目录（含全部子目录与文件）"
-                        "后再移入；要保留旧内容请先换个目标名或把旧目录改名。"
+                        "⚠️ 覆盖会先递归删除上面列出的整个目录（含全部内容）再移入；"
+                        "要保留请先换个目标名或把旧目录改名。"
                     )
                 elif not dst.is_dir():
                     lines += (self._list_tree_lines(dst, label="将覆盖删除")
@@ -2291,13 +2290,13 @@ class GrantedGate:
                 return "后台进程管理动作（read/kill/list）不在命令前缀授权范围"
             text = tool.arg_text(input_dict)
             if _has_shell_chain(text) or _has_code_exec_flag(text):
-                return "命令含管道/拼接或解释器代码旗标"
+                return "命令含管道/拼接，或带直接执行代码的参数"
             if any(_prefix_match(text, rule.pattern) for rule in rules):
                 return "该命令未通过命令前缀规则的其它安全判定"
             return ""
         if tool.safety == Safety.WRITE and tool.name in self._allowed:
             if inner._write_is_actually_delete(tool, input_dict):
-                return "该调用会递归删除已有目录，删除语义永不自动放行"
+                return "该调用会删除整个已有目录；删除类操作从不自动放行"
             if inner._write_hits_engine_home(tool, input_dict):
                 return "写入落点在引擎数据目录（~/.skysheep）内"
             if not inner._write_target_inside_workdir(tool, input_dict):

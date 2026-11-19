@@ -287,7 +287,7 @@ METHODS: dict[str, _WsMethod] = {
     ),
     "macro.replay": _WsMethod(
         _h_macro_replay, local_only=True,
-        local_error="宏重放会注入本机键鼠动作，只能在桌面端本机发起",
+        local_error="宏重放会直接操作本机键鼠，只能在桌面端本机发起",
     ),
     "macro.stop": _WsMethod(
         _h_macro_stop, local_only=True,

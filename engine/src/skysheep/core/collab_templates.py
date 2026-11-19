@@ -369,14 +369,14 @@ def validate_collab_template(
             label = _KIND_LABELS[template.kind]
             if role.needs != "read":
                 raise CollabTemplateError(
-                    f"{label}模板的角色「{role.name}」只能是只读（needs=read）："
-                    f"本期{label}仍是纯文本协作，不挂工具"
+                    f"{label}模板的角色「{role.name}」只能是只读："
+                    f"{label}是纯文本协作，不挂工具"
                 )
             if role.tools_allow or role.tools_deny:
                 raise CollabTemplateError(
                     f"{label}模板的角色「{role.name}」不能声明工具"
-                    "（tools_allow / tools_deny 必须为空）："
-                    f"本期{label}仍是纯文本协作"
+                    "（允许 / 禁止的工具必须为空）："
+                    f"{label}是纯文本协作"
                 )
 
         if template.kind == "team" and role.provider and role.model:

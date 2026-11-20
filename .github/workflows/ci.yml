@@ -172,6 +172,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # release.py 的 CHANGELOG 覆盖预检要 v<上一版>..HEAD 的完整历史与 tag。
+          # actions/checkout 默认 depth=1 且不取 tag：脚本的 previous_tag 会取空、
+          # 区间退回只看 HEAD，tag 构建会「空过」，手动 dispatch 又可能误红。
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v10.2.0

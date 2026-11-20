@@ -38,6 +38,12 @@
 - **新增《Agent 工程问题对照》**：`docs/Agent工程问题对照.md`，13 道业界高频
   Agent 工程题逐题对照本项目的实现机制与取舍（含「不做」的理由），当架构
   体检表与对外讲设计含金量的素材。
+- **返工防线机械守卫三件套**：版本号每段只取 0–9（`check_versions.py` 直接拒绝
+  `2.6.10` 一类写法）、消息摘要字段契约（`test_message_brief_contract.py` 钉住
+  `_msg_brief` 的字段，防刷新后功能静默消失）、CHANGELOG 覆盖预检
+  （`engine/tools/check_changelog_coverage.py` 逐条核对 `v<上一版>..HEAD` 的
+  feat/fix/perf 是否进过 CHANGELOG，默认只报告、`--strict` 才拦）。根因与取舍
+  见 `docs/返工复盘-2026-11.md` §4。
 
 ### 变更
 
@@ -50,6 +56,24 @@
   接力 等）一律不动；安全语义在改短时保留原话——密钥外传拦截文案保留
   「检测到疑似密钥外传，已拦截」前缀，目录覆盖警示保留「递归删除」；顺手修一处
   错别字（远程 Host 校验「已拒绍」→「已拒绝」）。PWA 壳 SW_VERSION v136 → v137。
+- **发布链与前端守卫补强（2026-11-20 批次）**：`AGENTS.md` 施工图按当前目录与
+  架构修订；CLI 的 `wait_task` 与引擎同口径（按会话归属校验）；前端补加载顺序与
+  主题切换守卫用例；CHANGELOG 覆盖预检接进 `release.py` 必经路径（`--strict`
+  不可跳过）；`release.py` 增加 SW_VERSION 提示级对账；静态资源清单注释清理。
+
+### 修复
+
+- **历史包袱拍板项落地（9 项）**：手编成 GBK 的 `mcp.json` 不再让启动抛编码错误
+  （读取按空配置处理并给可读告警，口径同技能安装配置）；`skysheep app` 在缺
+  pywebview 的环境恢复「自动走浏览器」降级（`--browser` 显式路径不变）；删除
+  `MemberSpec.system_prompt` 兼容别名与 `app.css` 23 类死样式（`.market-fold`
+  残留改名 `.fold-card`）；数据保留页隔离区行补「未启用」说明。
+- **主题登记守卫与发布预检补洞（2026-11-20 复核）**：主题对齐用例补齐 `app.css`
+  清单里漏掉的登记处——设置页静态主题卡、两个「跟随系统」下拉、
+  `wintheme.DARK_THEME_IDS`、`THEME_AUTO_LIGHT/DARK`，加主题漏登记不再全绿；
+  CI 发布候选 job 的 checkout 改为取全历史与 tag（`fetch-depth: 0` /
+  `fetch-tags: true`），浅克隆下 CHANGELOG 覆盖预检显式报错退出，不再退化成
+  只查 HEAD 而空过。
 
 ## [2.7.1] - 2026-11-15
 

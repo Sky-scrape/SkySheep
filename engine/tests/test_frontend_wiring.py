@@ -1154,14 +1154,42 @@ def test_static_lists_stay_aligned_with_index_html():
 
 
 def test_frontend_modules_keep_required_load_order():
-    scripts = [url.rsplit("/", 1)[-1] for url in _index_html_script_urls()]
-    positions = {name: scripts.index(name) for name in (
-        "app-skills.js", "app.js", "app-factory.js", "app-tools.js",
-    )}
+    """app.js 在顶层（脚本执行时、DOMContentLoaded 之前）就引用了设置页等分区模块的
+    函数，所以被引用的文件必须先于 app.js 执行；app.js 自己则是后续分区文件的依赖前置。
 
-    assert positions["app-skills.js"] < positions["app.js"]
-    assert positions["app.js"] < positions["app-factory.js"]
-    assert positions["app.js"] < positions["app-tools.js"]
+    node --check 只能查语法，查不出「引用了还没赋值的函数变量」——那会在页面加载时
+    抛 ReferenceError，表现成整页白屏。新增 app-*.js 若被 app.js 顶层引用，把文件加进
+    下面的 before_app 清单（本用例按名单定位并断言顺序）。
+    """
+    scripts = [url.rsplit("/", 1)[-1] for url in _index_html_script_urls()]
+    # 先于 app.js：app.js 顶层调用它们的函数
+    before_app = (
+        "app-skills.js", "app-minimap.js", "app-whitelist.js",
+        "app-providers.js", "app-advanced.js", "app-about.js",
+    )
+    # 后于 app.js：它们反过来依赖 app.js 的顶层定义
+    after_app = ("app-factory.js", "app-tools.js")
+    names = before_app + ("app.js",) + after_app
+
+    missing = [name for name in names if name not in scripts]
+    assert not missing, (
+        "index.html 的 script 标签缺少本用例点名的模块：\n  "
+        + "\n  ".join(missing)
+        + "\n要么在 index.html 登记该文件，要么从本用例的顺序清单里删掉。"
+    )
+    positions = {name: scripts.index(name) for name in names}
+
+    hint = (
+        "加载顺序反了：app.js 顶层就引用了它的函数，脚本执行时会抛 ReferenceError（整页白屏），"
+        "而 node --check 查不出来。两种修法任选：\n"
+        "  ① 给 app.js 顶层引用加 typeof 守卫（typeof fn === \"function\" 再调用）；\n"
+        "  ② 把引用挪进调用时函数（DOMContentLoaded / 事件回调里）。\n"
+        "若该文件确实要后加载（被 app.js 依赖），把文件加进本用例的 after_app 清单。"
+    )
+    for name in before_app:
+        assert positions[name] < positions["app.js"], f"{name} 必须排在 app.js 之前。\n" + hint
+    for name in after_app:
+        assert positions["app.js"] < positions[name], f"{name} 必须排在 app.js 之后。\n" + hint
 
 
 # ---------- 预览分栏：浏览页从右面板搬进主区 + 独立预览窗 ----------

@@ -111,10 +111,7 @@ from ..core.runs import (
 )
 from ..core.subagent import (
     BUILTIN_ROLE_PROMPTS,
-    CheckTaskTool,
-    SpawnAgentTool,
     TaskManager,
-    WaitTaskTool,
 )
 from ..core.subagent_store import (
     BUILTIN_AGENT_TYPES,
@@ -193,6 +190,7 @@ from ..tools import (
     ToolRegistry,
     default_tools,
 )
+from ..tools.assembly import register_subagent_tools
 from ..tools.memory import (
     render_memory_section,
 )
@@ -2081,10 +2079,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         registry.register(LoadSkillTool(self.skills))
         if ctx is not None and ctx.own:
             # 跨项目列：绑定会话所属项目（ctx.tasks/project_id 在 _own_ctx 已定）
-            if self.cfg.subagent_enabled and ctx.project_id is not None and ctx.tasks is not None:
-                registry.register(SpawnAgentTool(ctx.tasks))
-                registry.register(CheckTaskTool(ctx.tasks))
-                registry.register(WaitTaskTool(ctx.tasks))
+            register_subagent_tools(
+                registry, ctx.tasks,
+                enabled=self.cfg.subagent_enabled and ctx.project_id is not None,
+            )
             if ctx.project_id is not None:
                 registry.register(PipelineWriteTool(
                     self.store, lambda: ctx.project_id, lambda: ctx.tasks,
@@ -2092,10 +2090,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         else:
             # 无项目态不注册子代理/编排：子代理要工作目录、流水线绑定项目，
             # 没项目时给了模型也只会空转；切回项目后重建注册表自动恢复
-            if self.cfg.subagent_enabled and self.project is not None:
-                registry.register(SpawnAgentTool(self.tasks))
-                registry.register(CheckTaskTool(self.tasks))
-                registry.register(WaitTaskTool(self.tasks))
+            register_subagent_tools(
+                registry, self.tasks,
+                enabled=self.cfg.subagent_enabled and self.project is not None,
+            )
             # 任务编排：Agent 可以排流水线（草稿），启动与否由用户在面板决定
             if self.project is not None:
                 registry.register(PipelineWriteTool(

@@ -107,15 +107,15 @@ def test_read_ui_theme_returns_theme_id(home):
 
 
 def test_read_ui_theme_all_theme_ids(home):
-    """二十六套主题 id 直接命中，不再落进「跟随系统」兜底。"""
+    """色板里的每套主题 id 都直接命中，不再落进「跟随系统」兜底。
+
+    清单从 THEME_PALETTE 派生（色板与 app.js 的 THEMES 表逐项同步，见
+    test_theme_alignment），不再手抄——手抄元组漂移时，新主题会静默落回纸墨/夜墨。
+    """
     base = home / "home"
     base.mkdir(parents=True, exist_ok=True)
-    for theme_id in (
-        "paper", "celadon", "kaki", "mint", "bean", "mustard", "sprout", "silver",
-        "blade", "sakura", "meadow", "heather", "caramel",
-        "night", "indigo", "pine", "abyss", "scarlet", "lilac", "lime", "rouge",
-        "obsidian", "inkred", "glowsea", "cocoa", "cinnabar",
-    ):
+    assert len(wintheme.THEME_PALETTE) >= 2, "色板至少要有浅/深两套，空表会让本用例空转"
+    for theme_id in wintheme.THEME_PALETTE:
         (base / "ui.json").write_text(json.dumps({"theme": theme_id}), encoding="utf-8")
         assert wintheme.read_ui_theme(base) == theme_id
 

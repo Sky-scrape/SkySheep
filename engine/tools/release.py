@@ -12,14 +12,16 @@
     1  完整版本一致性预检                      §1
     2  uv sync --locked                        §3-1
     3  lint / unit / e2e / eval 质量门          §2（--skip-quality 可跳过）
-    4  PyInstaller 打包（不经 uv run）          §3-2
-    5  产物校验（exe 在位）                     §3-3
-    6  signtool 签名打包产物（未配置证书自动跳过）§3-4
-    7  冒烟（临时 SKYSHEEP_HOME 起 exe）        §3-3
-    8  ISCC 编译安装包                          §3-4
-    9  signtool 签名安装包（未配置证书自动跳过）  §3-4
-   10  安装包 sha256 附件                       §4-5
-   11  gh release create 上传                   §4-2/§4-3（仅 --upload）
+    4  CHANGELOG 覆盖预检（--strict，不可跳过）  §4
+    5  SW_VERSION 提示级对账（只告警）           §4
+    6  PyInstaller 打包（不经 uv run）          §3-2
+    7  产物校验（exe 在位）                     §3-3
+    8  signtool 签名打包产物（未配置证书自动跳过）§3-4
+    9  冒烟（临时 SKYSHEEP_HOME 起 exe）        §3-3
+   10  ISCC 编译安装包                          §3-4
+   11  signtool 签名安装包（未配置证书自动跳过）  §3-4
+   12  安装包 sha256 附件                       §4-5
+   13  gh release create 上传                   §4-2/§4-3（仅 --upload）
 
 代码签名（可选但强烈推荐）：配置 SKYSHEEP_SIGN_PFX（+ 可选 SKYSHEEP_SIGN_PFX_PASSWORD）
 或 SKYSHEEP_SIGN_CERT_SHA1（按指纹取「当前用户\\个人」证书存储）即自动签名，
@@ -85,6 +87,8 @@ _ISCC_CANDIDATES = (
 # 版本号正则与 tools/check_versions.py 保持同款，避免两处各认一套写法
 _PYPROJECT_VERSION_RE = re.compile(r'(?m)^version\s*=\s*"([^"]+)"')
 _ISS_VERSION_RE = re.compile(r'(?m)^#define MyAppVersion\s+"([^"]+)"')
+# 上一发布 tag：只认 vX.Y.Z（与 check_changelog_coverage.py 同款）
+_TAG_RE = re.compile(r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
 # 冒烟：desktop.log 里的服务地址行「服务已启动: http://127.0.0.1:<port>/」
 _URL_IN_LOG_RE = re.compile(r"http://127\.0\.0\.1:(\d+)/")
 
@@ -209,6 +213,23 @@ def step_versions() -> None:
     _run([sys.executable, str(_ENGINE_DIR / "tools" / "check_versions.py")], cwd=_REPO_ROOT)
 
 
+def step_changelog_coverage() -> None:
+    """清单 §4：CHANGELOG 覆盖预检（--strict），不可跳过。
+
+    ``--skip-quality`` 会跳过整个质量门，不能把这条守卫塞进 step_quality；
+    ack 清单在同目录 changelog_coverage_ack.txt：历史遗留、已由后续提交补记的
+    提交登记在那里，报告标 [ack] 且不计入失败，新提交漏记仍会在此拦下。
+    """
+    _run(
+        [
+            sys.executable,
+            str(_ENGINE_DIR / "tools" / "check_changelog_coverage.py"),
+            "--strict",
+        ],
+        cwd=_REPO_ROOT,
+    )
+
+
 def step_quality() -> None:
     """本地发布同样执行 lint、单测（含覆盖率门槛）、真实 socket 与行为评测。
 
@@ -234,6 +255,52 @@ def step_sync() -> None:
     if not uv:
         raise RuntimeError("PATH 上找不到 uv（https://docs.astral.sh/uv/），无法同步依赖")
     _run([uv, "sync", "--locked"], cwd=_ENGINE_DIR)
+
+
+def _previous_release_tag(exclude_version: str) -> str | None:
+    """最近的发布 tag（排除与当前待发版本同名的 tag）；找不到返回 None。"""
+    proc = subprocess.run(  # noqa: S603 - 参数固定，无 shell
+        ["git", "tag", "--list", "v*", "--sort=-v:refname"],
+        cwd=str(_REPO_ROOT),
+        env=_child_env(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"跑 git 取上一发布 tag 失败（退出码 {proc.returncode}）：{proc.stderr.strip()}"
+        )
+    tags = [
+        tag for tag in proc.stdout.split()
+        if _TAG_RE.match(tag) and tag[1:] != exclude_version
+    ]
+    return tags[0] if tags else None
+
+
+def step_sw_version_note() -> None:
+    """清单 §4 的提示级对账：壳文件变了却没升 SW_VERSION 只告警，不拦发布。
+
+    2026-11-18 复盘已否决「内容指纹自动校验」的硬门禁方案（每次前端改动都多
+    一步机械更新，收益/摩擦比不划算），这里保持提示级：check_sw_version.py
+    默认退出 0，只有 --strict 才在漏升时退出 1。
+    """
+    version = pyproject_version()
+    base = _previous_release_tag(version)
+    if base is None:
+        print("  找不到上一发布 tag，跳过 SW_VERSION 对账")
+        return
+    _run(
+        [
+            sys.executable,
+            str(_ENGINE_DIR / "tools" / "check_sw_version.py"),
+            "--base",
+            base,
+        ],
+        cwd=_REPO_ROOT,
+    )
 
 
 def step_pack() -> None:
@@ -663,6 +730,9 @@ def build_steps(args: argparse.Namespace) -> list[Step]:
         Step("§1", "完整版本一致性预检", step_versions),
         Step("§3-1", "依赖同步 uv sync --locked", step_sync),
         Step("§2", "发布质量门（lint / unit / e2e / eval）", step_quality, "skip_quality"),
+        # CHANGELOG 覆盖预检不可跳过：--skip-quality 只豁免质量门，不豁免发布预检
+        Step("§4", "CHANGELOG 覆盖预检（--strict，不可跳过）", step_changelog_coverage),
+        Step("§4", "SW_VERSION 提示级对账（壳文件变了版本没变只告警）", step_sw_version_note),
         Step("§3-2", "PyInstaller 打包（不经 uv run）", step_pack, "skip_pack"),
         Step("§3-3", "产物校验（exe 在位）", step_verify_artifacts),
         Step("§3-4", "signtool 签名打包产物（未配置证书自动跳过）", step_sign_app),
@@ -693,8 +763,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "代码签名：配置 SKYSHEEP_SIGN_PFX（+可选 SKYSHEEP_SIGN_PFX_PASSWORD）或\n"
             "SKYSHEEP_SIGN_CERT_SHA1 即自动签名，未配置则自动跳过并提示；两者都配且\n"
             "PFX 未配密码时优先 /sha1（证书存储路径、命令行不传密码，发布更建议用它）。\n"
-            "阶段对应清单条目：1=§1 2=§3-1 3=§2 4=§3-2 5=§3-3 6=签名 7=§3-3 8=§3-4 "
-            "9=签名 10=§4-5 11=上传（仅 --upload）。\n"
+            "阶段对应清单条目：1=§1 2=§3-1 3=§2 4=§4（CHANGELOG 预检）5=§4（SW_VERSION 提示）"
+            "6=§3-2 7=§3-3 8=签名 9=§3-3 10=§3-4 11=签名 12=§4-5 13=上传（仅 --upload）。\n"
             "失败即非零退出，并打印已到达的步骤。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

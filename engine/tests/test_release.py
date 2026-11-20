@@ -7,6 +7,7 @@
 import argparse
 import importlib.util
 import inspect
+import re
 import sys
 from pathlib import Path
 
@@ -54,6 +55,22 @@ def test_quality_gate_is_skippable_for_ci():
     )
     quality = next(s for s in release.build_steps(args) if s.title.startswith("发布质量门"))
     assert quality.skip_flag == "skip_quality"
+
+
+def test_changelog_precheck_is_strict_and_unskippable():
+    """CHANGELOG 覆盖预检是发布前必过的守卫：没有跳过开关，且以 --strict 调用。
+
+    ``--skip-quality`` 只豁免 §2 质量门；把它当成「预检也可以跳过」会让漏记
+    提交在 tag 推出后才被发现。CI 发布候选同样走这条路径（release.py
+    --skip-quality），所以这里钉两件事：步骤没有 skip_flag、子进程带 --strict。
+    """
+    args = argparse.Namespace(
+        skip_pack=False, skip_smoke=False, skip_installer=False, skip_quality=True, upload=False
+    )
+    step = next(s for s in release.build_steps(args) if "CHANGELOG 覆盖预检" in s.title)
+    assert step.skip_flag is None, "CHANGELOG 预检不能被任何 --skip-* 跳过"
+    src = inspect.getsource(release.step_changelog_coverage)
+    assert '"--strict"' in src or "'--strict'" in src
 
 
 def test_iscc_honors_env_override(monkeypatch, tmp_path):
@@ -143,6 +160,27 @@ def test_ci_workflow_has_release_candidate_job():
     smoke = inspect.getsource(release.step_smoke)
     assert "SKYSHEEP_HOME" in smoke and "SKYSHEEP_INSTANCE" in smoke
     assert "_URL_IN_LOG_RE" in inspect.getsource(release._wait_ready), "端口必须从日志解析，不能写死"
+
+
+def test_ci_package_job_fetches_full_history_for_release_precheck():
+    """发布候选 job 必须取全历史与 tag，否则不可跳过的 CHANGELOG 预检会退化成只查 HEAD。
+
+    actions/checkout 默认 depth=1 且不取 tag：浅克隆里 previous_tag 取空，
+    collect 退回 ``git log HEAD``——tag 构建空过，手动 dispatch 可能把一条
+    漏记的 feat/fix 误判成候选失败。checkout 的 with 必须钉住全历史与 tag。
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    ci = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    package = re.search(r"(?ms)^  package:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)", ci)
+    assert package, "CI 缺少 package job"
+    checkout = re.search(
+        r"(?ms)^      - name: Checkout\s*\n(.*?)(?=^      - name: |\Z)",
+        package.group(1),
+    )
+    assert checkout, "package job 缺少 Checkout 步骤"
+    block = checkout.group(1)
+    assert "fetch-depth: 0" in block, "发布候选必须取全历史，否则 CHANGELOG 预检只看 HEAD"
+    assert "fetch-tags: true" in block, "发布候选必须取 tag，否则找不到 v<上一版>"
 
 
 def test_printable_cmd_masks_pfx_password():

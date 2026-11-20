@@ -71,7 +71,8 @@ doing it inline - surveying unfamiliar code structure, searching across many fil
 comparing several documents, or gathering background before a large change are all \
 subagent jobs. It keeps your context clean for planning and edits. Give the subagent a \
 self-contained prompt (it cannot see this conversation), then use its report. For \
-long-running research use background=true and poll check_task while you keep working. \
+long-running research use background=true and poll check_task while you keep working, \
+or use wait_task for a single blocking wait. \
 When a custom subagent type listed in spawn_agent's description matches the task, \
 prefer it over the built-in explore/task.
 

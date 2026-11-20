@@ -22,10 +22,13 @@
  * ─────────────────────────────────────────────────────────────────────── */
 
 // ---------- 历史导航兜底（本应用只有一个页面） ----------
-// 触屏边滑 / 鼠标侧键的后退手势会把窗口带回启动动画页——那是一张没有脚本的
-// 静态页（bootpages.splash_html），回去了就没人再导航回来，窗口永远停在
-// 「正在启动」。这里压一个同地址哨兵并逐次补压：后退/前进手势被原地吞掉，
-// 永远走不出本页（desktop.py 另有看守兜底，覆盖本脚本尚未执行的空窗）。
+// 桌面壳这一侧已经两层关死：触屏边滑 / 触控板横滑由 webviewargs.py（2.6.0）
+// 在引擎层整体关掉滑动历史导航，鼠标侧键等系统注入的后退由 2.6.7 修好的
+// APPCOMMAND 窗口过程（desktop.py 的 _install_no_history_nav）吞掉。
+// 这里的同地址哨兵主要留给 --browser 模式：系统浏览器自带的后退按钮没有那两层，
+// 退回去会落到没有脚本的启动动画页（bootpages.splash_html），再没人导航回来，
+// 窗口永远停在「正在启动」。哨兵逐次补压，后退/前进被原地吞掉，永远走不出本页
+// （desktop.py 另有导航看守兜底，覆盖本脚本尚未执行的空窗）。
 history.pushState(null, "", location.href);
 addEventListener("popstate", () => history.pushState(null, "", location.href));
 
@@ -13155,12 +13158,12 @@ document.querySelectorAll("#settings-nav li[data-target]").forEach((li) => {
 });
 
 // ---------- 设置内搜索：按卡片标题与正文过滤，点结果跳到对应页并高亮那张卡 ----------
-// 38 张卡片没有分组锚点时找一项要靠翻页；搜索框在页顶常驻，输入即出结果。
+// 设置卡较多、又没有分组锚点时，找一项要靠翻页；搜索框在页顶常驻，输入即出结果。
 const settingsSearchInput = document.getElementById("settings-search");
 const settingsSearchResults = document.getElementById("settings-search-results");
 
 // 卡片索引缓存：索引项持有 card 元素引用与全量正文（textContent）。设置卡片是
-// 静态 HTML（除非设置页被重渲染，内容不変），每键全量重扫 48 张卡（读 textContent）
+// 静态 HTML（除非设置页被重渲染，内容不変），每键全量重扫所有设置卡（读 textContent）
 // 纯属浪费——首次构建后缓存复用；失效靠 renderSettings 后主动清除（见
 // invalidateSettingsCardIndex）。
 let _settingsCardIndexCache = null;

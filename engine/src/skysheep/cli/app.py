@@ -39,7 +39,7 @@ from ..config import (
 from ..core import Agent, build_system_prompt
 from ..core.hooks import HookRunner, hooks_from_config, load_raw_config
 from ..core.review import review_output
-from ..core.subagent import CheckTaskTool, SpawnAgentTool, TaskManager
+from ..core.subagent import TaskManager
 from ..core.team_store import TeamTemplateStore
 from ..events import ErrorEvent, PermissionResolved, TextDelta, TurnFinished
 from ..mcp import MCPManager, load_mcp_configs
@@ -54,6 +54,7 @@ from ..session import SessionStore, export_messages_text
 from ..session.writer_lease import WriterLease
 from ..skills import SkillLoader
 from ..tools import ChangeRecorder, ToolRegistry, default_tools
+from ..tools.assembly import register_subagent_tools
 from ..tools.memory import render_memory_section
 from ..tools.shell import set_child_network
 from ..tools.skill import LoadSkillTool
@@ -222,8 +223,8 @@ class ChatApp:
             network=self.cfg.network,
         ))
         registry.register(LoadSkillTool(self.skills))
-        registry.register(SpawnAgentTool(self.tasks))
-        registry.register(CheckTaskTool(self.tasks))
+        # 子代理三件套与 server 同一份清单（含 wait_task）；CLI 从此也遵守设置页开关
+        register_subagent_tools(registry, self.tasks, enabled=self.cfg.subagent_enabled)
         for t in mcp_tools:
             registry.register(t)
 
@@ -1017,8 +1018,8 @@ async def _assemble_headless_engine(store, working_dir: Path, cfg, provider_obj,
         network=cfg.network,
     ))
     registry.register(LoadSkillTool(skills))
-    registry.register(SpawnAgentTool(tasks))
-    registry.register(CheckTaskTool(tasks))
+    # 子代理三件套与 server 同一份清单（含 wait_task）；无头路径同样遵守设置页开关
+    register_subagent_tools(registry, tasks, enabled=cfg.subagent_enabled)
     for t in mcp_tools:
         registry.register(t)
 

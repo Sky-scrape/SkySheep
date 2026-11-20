@@ -1192,14 +1192,18 @@ def test_index_explicit_theme_id_injects_data_theme(home):
 
 
 def test_ui_prefs_theme_whitelist(home):
-    """theme 键值域：二十六套主题 id + auto + timed + 旧版 light/dark；未知值丢弃、null 恢复默认。"""
-    for val in (
-        "auto", "timed", "light", "dark",
-        "paper", "celadon", "kaki", "mint", "bean", "mustard", "sprout", "silver",
-        "blade", "sakura", "meadow", "heather", "caramel",
-        "night", "indigo", "pine", "abyss", "scarlet", "lilac", "lime", "rouge",
-        "obsidian", "inkred", "glowsea", "cocoa", "cinnabar",
-    ):
+    """theme 键值域：后端 THEME_PREFS 逐值可存（全部主题 id + auto + timed +
+    旧版 light/dark）；未知值丢弃、null 恢复默认。
+
+    期望值直接从白名单派生（backend_parts/remote.py 定义、backend 再导出，
+    就是 ui.save 实际用的那一份），不再手抄——新主题只改了 THEMES 没进白名单时，
+    「存不进」这种回归只有本用例能拦。
+    """
+    from skysheep.server.backend import THEME_PREFS
+
+    # 非主题值必须留在白名单里：auto/timed 是设置页的两种模式，light/dark 是旧版两档
+    assert {"auto", "timed", "light", "dark"} <= set(THEME_PREFS)
+    for val in THEME_PREFS:
         frame = call_ui(home, "ui.save", {"prefs": {"theme": val}})
         assert frame["result"]["prefs"] == {"theme": val}
     frame = call_ui(home, "ui.save", {"prefs": {"theme": "solarized"}})

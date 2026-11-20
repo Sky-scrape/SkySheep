@@ -81,3 +81,25 @@ def test_collect_marks_only_relevant_commits(monkeypatch):
     assert [c.subject for c in commits] == ["fix: 有记录", "feat: 没记录"]
     assert commits[0].touched_changelog is True
     assert commits[1].touched_changelog is False
+
+
+def test_is_shallow_repository(monkeypatch):
+    monkeypatch.setattr(cc, "_git", lambda *args, **kwargs: "true\n")
+    assert cc.is_shallow_repository(Path(".")) is True
+    monkeypatch.setattr(cc, "_git", lambda *args, **kwargs: "false\n")
+    assert cc.is_shallow_repository(Path(".")) is False
+
+
+def test_main_rejects_shallow_clone(monkeypatch, capsys):
+    """浅克隆里只能看见 HEAD：必须显式失败。
+
+    CI 的 checkout 默认 depth=1 且不取 tag，previous_tag 会取空、collect 退回
+    ``git log HEAD``——tag 构建因此「空过」，手动 dispatch 又可能误红。历史不全
+    时宁可报错要求 fetch-depth: 0，也不能给一个看起来通过的预检结果。
+    """
+    monkeypatch.setattr(cc, "_git", lambda *args, **kwargs: "true\n")
+    rc = cc.main(["--current-version", "2.7.1"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "浅克隆" in err
+    assert "fetch-depth: 0" in err

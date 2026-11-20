@@ -875,6 +875,7 @@ mark.search-hit-mark {
   align-self: flex-end; max-width: 70%;
 }
 /* 蓝色气泡移到内层：操作按钮行（常驻）能占位在气泡下方而不是叠在气泡里 */
+/* 实际生效外观见后续 inset 阴影覆盖段；改样式先 grep 全部出现点 */
 .user-bubble {
   background: var(--blue); color: var(--on-accent);
   border: 2px solid var(--ink-line); border-radius: var(--r-md);
@@ -899,6 +900,7 @@ mark.search-hit-mark {
   font-size: var(--fs-sm);
 }
 .msg.assistant { align-self: flex-start; width: 100%; }
+/* 实际生效外观见后续 inset 阴影覆盖段；改样式先 grep 全部出现点 */
 .msg.assistant .md {
   background: var(--card); border: 1.5px solid var(--line2); border-radius: var(--r-md);
   padding: 12px 16px; box-shadow: var(--shadow-sm); line-height: 1.75;
@@ -8368,9 +8370,6 @@ li.mod-row {
   border-left: 3px solid var(--blue);
   padding: 13px 17px;
   box-shadow: 2px 2px 0 color-mix(in srgb, var(--blue) 16%, transparent), var(--shadow-sm);
-}
-.user-bubble {
-  border-color: color-mix(in srgb, var(--ink-line) 80%, var(--blue));
 }
 
 

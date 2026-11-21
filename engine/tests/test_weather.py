@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import httpx
 
-from skysheep.core.weather import WeatherService, weather_kind
+from skysheep.integrations.weather import WeatherService, weather_kind
 
 
 def _ok_handler(calls: list[str]):

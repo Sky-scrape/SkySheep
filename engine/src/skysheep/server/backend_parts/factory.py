@@ -770,7 +770,7 @@ class FactoryMixin:
         """现实天气：仅在设置里显式开启并填了城市时联网。
 
         先城市名地理编码、再按坐标取当前天气 / 昼夜 / 日出日落；结果在
-        ``core.weather.WeatherService`` 里缓存 30 分钟，失败时优先沿用上一份
+        ``integrations.weather.WeatherService`` 里缓存 30 分钟，失败时优先沿用上一份
         可用数据（``stale=true``），不让场景因为没有网络就突然放晴。
         未开启时返回 ``{enabled: false, weather: null}``，前端据此隐藏天气信息。
         """
@@ -779,7 +779,7 @@ class FactoryMixin:
             return {"enabled": False, "weather": None}
         svc = getattr(self, "_weather_service", None)
         if svc is None:
-            from ...core.weather import WeatherService
+            from ...integrations.weather import WeatherService
             svc = WeatherService(getattr(self.cfg, "network", None))
             self._weather_service = svc
         # 设置页改代理 / 自签 CA 后热更新出网方式

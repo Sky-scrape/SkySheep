@@ -28,6 +28,11 @@
 - 角色可由同一模型承担：角色差异来自系统提示词与阶段材料，不要求四个
   不同服务；缺省裁判用当前主模型（同圆桌主席），进攻/防守角色从成员解析
   （成员不足时按序复用同一个，见 backend 的角色映射）；
+- 成员单轮的流式收集/超时/瞬态重试/取消协议在共享运行时
+  core/member_runtime.py（run_member_text）里统一实现（与圆桌成员/融合
+  同源），_run_text_turn 是薄壳；对抗与圆桌的三点差异由策略字段显式表达：
+  超时/重试文案前缀用阶段名、用量每次尝试清零重计、BudgetExceeded 原样
+  上抛（吞掉会继续烧下一阶段）；
 - 瞬态错误复用 agent.py 的判定与重试节奏；JSON 解析失败追加一次「格式
   纠错」重试（把原始回复与错误回喂给模型自己修），再失败按失败隔离降级：
   发现失败→整场如实报错（没有问题清单，后续阶段无从谈起）；调查失败→
@@ -55,12 +60,12 @@ from ..events import (
     TextDelta,
 )
 from ..messages import Message, TextBlock, dialogue
-from ..models.base import Provider, ProviderDone, ProviderTextDelta
+from ..models.base import Provider
 from ..models.diagnostics import classify_error_text
-from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S, is_transient_error
+from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S
 from .collab_budget import BudgetExceeded, RunBudget
 from .collab_common import EmitFn, MemberSpec, clip_draft, notice_retry
-from .effort import resolve_auto_effort
+from .member_runtime import MemberTurnPolicy, run_member_text
 
 # ---- 裁决词汇 ----
 VERDICT_CONFIRMED = "confirmed"   # 调查员确认成立
@@ -268,65 +273,38 @@ async def _run_text_turn(
 ) -> tuple[str, str, int, int, int]:
     """一次纯文本模型调用：流式收集 + 瞬态重试 + 超时，失败隔离在自身。
 
+    主体循环（流式收集/超时/瞬态重试/取消协议/用量）在共享运行时
+    member_runtime.run_member_text 里统一实现（与圆桌成员/融合同源），
+    本函数是薄壳：签名与五元组返回保持不变，对外零感知。对抗与圆桌的
+    三点差异由策略字段显式表达——超时/重试文案前缀用阶段名（label）、
+    用量每次尝试清零重计、BudgetExceeded 原样上抛（吞掉会被当成阶段失败、
+    继续烧下一阶段）。
+
     stream_out=True 时把文本增量作为 TextDelta 转发（裁判阶段用：最终
     报告直接流进主对话，与圆桌融合文本同姿态）。返回
     (text, error, input_tokens, output_tokens, cached_tokens)；
     error="cancelled" 表示用户取消，已产出文本照常返回（同圆桌 _run_fusion）。
     """
-    parts: list[str] = []
-    usage_in = usage_out = usage_cached = 0
-
-    async def consume() -> None:
-        nonlocal usage_in, usage_out, usage_cached
-        # 模板预算：每次真实 provider 调用前计数（含重试与格式纠错）
-        if budget is not None:
-            budget.spend()
-        async for pe in provider.stream(
-            messages, [], effort=resolve_auto_effort(provider, messages),
-        ):
-            if isinstance(pe, ProviderTextDelta):
-                parts.append(pe.text)
-                if stream_out:
-                    await emit(TextDelta(text=pe.text))
-            elif isinstance(pe, ProviderDone):
-                usage_in += pe.input_tokens
-                usage_out += pe.output_tokens
-                usage_cached += pe.cached_tokens
-
-    error = ""
-    try:
-        for attempt in range(1, MAX_STREAM_RETRIES + 2):
-            parts = []
-            usage_in = usage_out = usage_cached = 0
-            retryable = False
-            try:
-                await asyncio.wait_for(consume(), timeout=timeout_s)
-                return "".join(parts), "", usage_in, usage_out, usage_cached
-            except BudgetExceeded:
-                # 预算耗尽不是本阶段的失败，必须原样上抛让主流程统一收尾；
-                # 若落进下面的通用 except 会被吞成本阶段失败、继续烧下一阶段。
-                raise
-            except TimeoutError:
-                error = f"{label}超时（>{timeout_s} 秒）"
-                retryable = not parts and attempt <= MAX_STREAM_RETRIES
-            except Exception as e:  # noqa: BLE001 - 任何异常都归入本次调用失败，不上抛
-                error = str(e)[:200]
-                retryable = (
-                    not parts and attempt <= MAX_STREAM_RETRIES and is_transient_error(e)
-                )
-            if retryable:
-                await notice_retry(
-                    emit, label, error, attempt,
-                    subject="对抗", base_delay_s=RETRY_BASE_DELAY_S,
-                )
-                continue
-            break  # 超时 / 非瞬态错误 / 已有内容：停止重试
-    except asyncio.CancelledError:
-        # 用户取消：已流出的部分文本交给调用方保留（同圆桌融合取消语义）
-        asyncio.current_task().uncancel()
-        return "".join(parts), "cancelled", usage_in, usage_out, usage_cached
-
-    return "".join(parts), error, usage_in, usage_out, usage_cached
+    # 重试节奏与通知都按本模块命名空间里的名字显式传入：monkeypatch
+    # adversarial.RETRY_BASE_DELAY_S / adv.notice_retry 的既有测试写法保持生效。
+    turn = await run_member_text(
+        provider, messages,
+        timeout_s=timeout_s, emit=emit,
+        policy=MemberTurnPolicy(
+            retries=MAX_STREAM_RETRIES,
+            base_delay_s=RETRY_BASE_DELAY_S,
+            retry_subject="对抗",
+            retry_label=label,
+            timeout_label=label,
+            absorb_cancel=True,  # 取消就地收敛：部分文本随返回值交还 caller
+            reset_usage_per_attempt=True,  # 各阶段用量每次尝试清零重计
+            budget_policy="propagate",  # 预算耗尽原样上抛，主流程统一收尾
+        ),
+        on_delta=(lambda text: emit(TextDelta(text=text))) if stream_out else None,
+        budget=budget,
+        notice=notice_retry,
+    )
+    return turn.text, turn.error, turn.input_tokens, turn.output_tokens, turn.cached_tokens
 
 
 async def _call_json(

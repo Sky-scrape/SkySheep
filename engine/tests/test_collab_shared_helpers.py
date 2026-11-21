@@ -5,7 +5,9 @@ notice_retry 此前在圆桌与对抗两处逐字级重复（仅「圆桌成员/
 - 通知文案按 subject 称谓拼装、错误截 120 字符、退避自 base_delay_s 指数翻倍
   封顶 10 秒、次数以 MAX_STREAM_RETRIES 计；
 - 圆桌/对抗的真实重试路径确实走同一份实现（is 溯源 + monkeypatch 计数），
-  模块里不许再长出私有副本；
+  模块里不许再长出私有副本；成员循环本体三处（圆桌成员/圆桌融合/对抗
+  文本轮）迁到共享运行时 member_runtime（run_member_text）后，溯源同步
+  钉到它（对抗差异以 MemberTurnPolicy 字段显式表达）；
 - MemberSpec / clip_draft / EmitFn 同样单源（圆桌、对抗、团队取到同一对象）；
 - TeamOrchestrator 显式声明 collab_budget 字段（RunBudget | None，默认 None），
   不再是 backend 建队时运行时贴上去的动态属性。
@@ -19,6 +21,7 @@ from typing import get_type_hints
 import pytest
 
 import skysheep.core.adversarial as adv
+import skysheep.core.member_runtime as mr
 import skysheep.core.roundtable as rt
 import skysheep.core.team as team_mod
 from skysheep.core import collab_common as cc
@@ -164,19 +167,44 @@ async def test_roundtable_retry_dispatches_shared_impl(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_adversarial_retry_dispatches_shared_impl(monkeypatch):
-    """替换共享名后对抗真实重试路径必须经它——模块若私藏副本则计数为 0。"""
+    """替换共享名后对抗真实重试路径必须经它——模块若私藏副本则计数为 0。
+
+    成员循环本体迁到 member_runtime 后，溯源同步钉过去：_run_text_turn 内部
+    调的就是 member_runtime.run_member_text 的同一对象，且对抗与圆桌的差异
+    以 MemberTurnPolicy 字段显式表达（文案前缀用阶段名、用量清零重计、
+    BudgetExceeded 上抛、取消就地收敛）。重试节奏常量按本模块命名空间传入，
+    monkeypatch adv.RETRY_BASE_DELAY_S / adv.notice_retry 的锚点保持生效。
+    """
     calls: list[dict] = []
 
     async def spy(emit, label, error, attempt, **kw):
         calls.append({"label": label, "error": error, "attempt": attempt, **kw})
 
     monkeypatch.setattr(adv, "notice_retry", spy)
+
+    real = mr.run_member_text
+    turns: list[mr.MemberTurnPolicy] = []
+
+    async def runtime_spy(provider, messages, **kw):
+        turns.append(kw["policy"])
+        return await real(provider, messages, **kw)
+
+    monkeypatch.setattr(adv, "run_member_text", runtime_spy)
     flaky = FlakyProvider()
     events, emit = collector()
 
     await _run_text_turn(flaky, [Message.user("被审内容")], 30, emit, label="调查员")
 
-    assert flaky.calls == 2
+    assert flaky.calls == 2  # 委托给真实运行时：重试确实发生
+    assert len(turns) == 1
+    policy = turns[0]
+    assert policy.retry_label == "调查员" and policy.timeout_label == "调查员"
+    assert policy.retry_subject == "对抗"
+    assert policy.absorb_cancel is True
+    assert policy.reset_usage_per_attempt is True
+    assert policy.budget_policy == "propagate"
+    assert policy.retries == adv.MAX_STREAM_RETRIES
+    assert policy.base_delay_s == adv.RETRY_BASE_DELAY_S
     assert len(calls) == 1
     assert calls[0]["label"] == "调查员"
     assert calls[0]["attempt"] == 1
@@ -185,7 +213,12 @@ async def test_adversarial_retry_dispatches_shared_impl(monkeypatch):
 
 
 def test_single_implementation_identity():
-    """圆桌、对抗、团队引用的都是 collab_common 的同一对象；私有副本不复存在。"""
+    """圆桌、对抗、团队引用的都是 collab_common 的同一对象；私有副本不复存在。
+
+    成员循环本体三处（圆桌成员/圆桌融合/对抗文本轮）同样单源：_run_text_turn
+    （薄壳再导出）与 _run_fusion（薄壳）内部都是 member_runtime.run_member_text
+    ——模块绑定 is 溯源，行为经上面的 monkeypatch 计数断言钉。
+    """
     assert rt.notice_retry is cc.notice_retry
     assert adv.notice_retry is cc.notice_retry
     assert cc.notice_retry.__module__ == "skysheep.core.collab_common"  # import 溯源
@@ -199,6 +232,11 @@ def test_single_implementation_identity():
     assert team_mod.MemberSpec is cc.MemberSpec
     assert rt.EmitFn is cc.EmitFn
     assert adv.EmitFn is cc.EmitFn
+
+    # 成员循环本体三条路径同源：薄壳引用的就是运行时的同一对象
+    assert rt.run_member_text is mr.run_member_text
+    assert adv.run_member_text is mr.run_member_text
+    assert adv.MemberTurnPolicy is mr.MemberTurnPolicy
 
 
 def test_clip_draft_marker_single_source():

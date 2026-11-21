@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from skysheep.core.checkpoints import (
 from skysheep.core.hooks import HookRule, HookRunner, hooks_from_config
 from skysheep.core.uptodate import is_newer_version
 from skysheep.messages import TextBlock
+from skysheep.obs import parse_structured
 from skysheep.tools import ChangeRecorder, ToolContext, ToolRegistry, default_tools
 from skysheep.tools.docs import ReadDocumentArgs, ReadDocumentTool
 from skysheep.tools.imagegen import GenerateImageArgs, GenerateImageTool
@@ -650,6 +652,34 @@ def test_resolve_imagegen(home, monkeypatch):
     monkeypatch.setenv("SILICONFLOW_API_KEY", "sk")
     got = resolve_imagegen(load_config())
     assert got and got["provider"] == "siliconflow" and got["model"] == "Kwai-Kolors/Kolors"
+
+
+def test_websearch_imagegen_resolve_failure_logs_and_returns_none(home, monkeypatch, caplog):
+    """配置解析抛异常（≠未配置）：仍返 None（工具不注册，行为不变），但各记
+    一条 obs warning 指明哪个能力未启用——用户配错后不再静默失效。"""
+    from skysheep.server.backend import ServerBackend
+
+    backend = ServerBackend(working_dir=home / "proj")
+    backend.cfg = load_config()
+
+    def boom(cfg):
+        raise RuntimeError("配置档坏了")
+
+    monkeypatch.setattr("skysheep.server.backend.resolve_websearch", boom)
+    monkeypatch.setattr("skysheep.server.backend.resolve_imagegen", boom)
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        assert backend._websearch_kwargs() is None
+        assert backend._imagegen_kwargs() is None
+    warnings = [r for r in caplog.records
+                if r.name == "skysheep.obs" and r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    payloads = [parse_structured(r.getMessage()) for r in warnings]
+    assert {p["capability"] for p in payloads} == {"websearch", "imagegen"}
+    assert all(
+        p is not None and p["ev"] == "capability_resolve_failed"
+        and "RuntimeError" in p["error"]
+        for p in payloads
+    )
 
 
 # ---- WS 协议：新方法 + /preview ----

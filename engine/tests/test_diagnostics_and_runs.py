@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -309,6 +310,26 @@ def test_run_center_persists_snapshot(tmp_path):
     rc2 = RunCenter(p)
     assert rc2.get("run-1") is not None
     assert rc2.get("run-1").state == "completed"
+
+
+def test_run_center_save_failure_swallows_but_logs_debug(tmp_path, caplog):
+    """快照写失败（盘满/权限）：照旧吞错不反噬运行，但 debug 留线索（except 审计 #20）。
+
+    失败注入不 monkeypatch：把落点父目录造成一个文件，save() 里的 mkdir
+    必然抛 OSError（FileExistsError 一族），走 except 分支；注册结果不受影响。
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a dir", encoding="utf-8")
+    rc = RunCenter(blocker / "runs.json")  # 快照落点的父目录是文件：写入必失败
+    with caplog.at_level(logging.DEBUG, logger="skysheep"):
+        rc.register("run-1", "turn", "s1")  # register 收尾调 save()
+    # fail-open 语义不变：吞错后登记照常生效
+    assert rc.get("run-1") is not None
+    recs = [r for r in caplog.records
+            if r.name == "skysheep.core.runs" and "运行快照写失败" in r.getMessage()]
+    assert recs, "快照写失败必须留一条 debug 线索"
+    assert recs[0].levelno == logging.DEBUG
+    assert recs[0].exc_info is not None  # 带异常：盘满/权限的根因可查
 
 
 def test_run_center_trims_terminal_keep(tmp_path):

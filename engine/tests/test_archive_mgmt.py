@@ -25,6 +25,7 @@ from skysheep.config import (
     load_config,
     set_archive_in_config,
 )
+from skysheep.server.backend_parts.archive_mgmt import ArchiveMgmtMixin
 from skysheep.session.store import SessionStore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -316,6 +317,35 @@ def test_auto_archive_pass_limit_caps_batch(home):
         rest = asyncio.run(backend._auto_archive_pass())
         assert len(rest) == 3
         assert set(first) | set(rest) == set(sids)
+
+
+async def test_archive_loop_swallows_pass_errors(caplog):
+    """单轮抛错不终止循环且留 warning（带异常类型）；CancelledError 照常向上抛。"""
+    import logging
+
+    calls = []
+
+    async def _pass(self):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("archive boom")
+        raise asyncio.CancelledError()
+
+    class _Stub(ArchiveMgmtMixin):
+        store = None
+        cfg = None
+        _auto_archive_pass = _pass
+
+    _Stub.ARCHIVE_FIRST_DELAY_S = 0.0
+    _Stub.ARCHIVE_CHECK_INTERVAL_S = 0.0
+    stub = _Stub()
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        with pytest.raises(asyncio.CancelledError):
+            await stub._archive_loop()
+    assert len(calls) >= 2, "第一轮抛错后循环要继续（不能因单轮失败终止）"
+    warn = [r for r in caplog.records if "auto_archive_loop_failed" in r.getMessage()]
+    assert warn, "单轮失败必须留 obs.warning（归档静默失效无从排查）"
+    assert "RuntimeError: archive boom" in warn[0].getMessage(), "warning 要带异常类型"
 
 
 # ---------- ⑤ 前端接线（锁源码里的接线存在） ----------

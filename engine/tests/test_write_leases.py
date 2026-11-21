@@ -7,10 +7,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+
+from test_server import make_client, recv_until
 
 from skysheep.core.agent import Agent
 from skysheep.messages import TextBlock, ToolUseBlock
 from skysheep.models.fake import FakeProvider
+from skysheep.obs import parse_structured
 from skysheep.security import leases
 from skysheep.security.gate import PermissionGate
 from skysheep.tools import ReadFileTool, RunCommandTool, ToolContext, ToolRegistry, WriteFileTool
@@ -239,3 +243,65 @@ async def test_lease_cancel_mid_claim_releases_held(tmp_path):
     lease_a.release()
     lease_c.release()
     assert hub._entries == {}
+
+
+# ---------------------------------------------------------------- 降级留痕
+
+
+async def test_exec_tool_claim_failure_logs_and_proceeds(tmp_path, monkeypatch, caplog):
+    """领租约抛异常：fail-open 但 fail-visible——照常执行（行为不变），另记
+    一条 obs 结构化 warning（带 tool 名与目标路径），不再静默降级。"""
+    agent = _make_agent(tmp_path)
+
+    async def boom(tool, input_dict, owner=""):
+        raise RuntimeError("租约枢纽故障")
+
+    monkeypatch.setattr(agent.gate, "claim_write", boom)
+    tu = ToolUseBlock(id="t4", name="write_file",
+                      input={"path": "lease-crash.txt", "content": "照常写入"})
+    ctx = ToolContext(working_dir=tmp_path, session_id="sX")
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        result, is_error, _ms, _diff, _images = await agent._exec_tool(
+            tu, agent.registry.get("write_file"), ctx
+        )
+    # 行为不变：lease=None 照常执行，文件写成功、无错误、无冲突注记
+    assert is_error is False and "wrote" in result
+    assert "并行写入" not in result
+    assert (tmp_path / "lease-crash.txt").read_text(encoding="utf-8") == "照常写入"
+    # 留痕：obs.warning(ev=lease_claim_failed, tool, target, error)
+    warnings = [r for r in caplog.records
+                if r.name == "skysheep.obs" and r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    payload = parse_structured(warnings[0].getMessage())
+    assert payload is not None and payload["ev"] == "lease_claim_failed"
+    assert payload["tool"] == "write_file"
+    assert payload["target"] == "lease-crash.txt"
+    assert "RuntimeError" in payload["error"]
+
+
+def test_panel_fs_write_claim_failure_logs_and_saves(home, monkeypatch, caplog):
+    """面板 fs.write 领租约抛异常：fail-open 但 fail-visible——照常保存
+    （行为不变），另记 obs 结构化 warning（tool=fs.write + 目标路径）。"""
+    class _BoomHub:
+        async def claim(self, paths, owner="", wait_s=3.0):
+            raise RuntimeError("租约枢纽故障")
+
+    monkeypatch.setattr("skysheep.server.backend.leases.hub_for", lambda wd: _BoomHub())
+    (home / "proj" / "panel.txt").write_text("旧内容", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
+            ws.send_json({"id": "p1", "method": "fs.write",
+                          "params": {"path": "panel.txt", "text": "面板新内容"}})
+            r = recv_until(ws, "p1")
+    # 行为不变：保存成功
+    assert r["ok"] and r["result"]["saved"] is True
+    assert (home / "proj" / "panel.txt").read_text(encoding="utf-8") == "面板新内容"
+    # 留痕：obs.warning(ev=lease_claim_failed, tool=fs.write, target, error)
+    warnings = [rec for rec in caplog.records
+                if rec.name == "skysheep.obs" and rec.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    payload = parse_structured(warnings[0].getMessage())
+    assert payload is not None and payload["ev"] == "lease_claim_failed"
+    assert payload["tool"] == "fs.write"
+    assert payload["target"] == "panel.txt"
+    assert "RuntimeError" in payload["error"]

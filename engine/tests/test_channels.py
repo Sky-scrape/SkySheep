@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -1367,6 +1368,44 @@ async def test_manager_enabled_without_token_reports_error():
     # 错误文案是平台无关的兑底：不同平台缺的凭据字段不同，不能写死字段名
     assert "凭据" in item["error"]
     await mgr.stop()
+
+
+async def test_manager_stop_failure_is_logged_and_keeps_stopping_others(caplog):
+    """渠道 stop() 失败不再静默（审计 #18）：logger.warning 留痕渠道名与异常，
+    同时失败语义保持不变——不中断循环、其余渠道照常收尾、注册表照样清空。
+    飞书 CLI 常驻 bus 残留会让下次启用撞「已有连接」限流（feishu._stop_daemon
+    文档串），没有这行日志排障无从下手。"""
+
+    class _RecordingStop:
+        def __init__(self, name):
+            self.name = name
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+
+    class _BoomStop(_RecordingStop):
+        async def stop(self):
+            self.stopped = True
+            raise RuntimeError("端口占用")
+
+    mgr = ChannelManager(_FakeHost(), lambda: {})
+    boom = _BoomStop("feishu")  # 第一个渠道 stop 抛异常
+    healthy = _RecordingStop("weixin")  # 排在异常渠道之后，验证循环继续
+    mgr.channels = {"feishu": boom, "weixin": healthy}
+
+    with caplog.at_level(logging.WARNING, logger="skysheep.channels"):
+        await mgr.stop()
+
+    records = [r for r in caplog.records if "停止失败" in r.getMessage()]
+    assert len(records) == 1, "每个失败渠道留一条 warning，不多不少"
+    assert records[0].levelno == logging.WARNING
+    text = records[0].getMessage()
+    assert "feishu" in text, "日志要带渠道名（注册键）"
+    assert "端口占用" in text, "日志要带异常内容"
+    # 语义不变：异常渠道也被遍历到，其后的渠道照常收尾，注册表清空
+    assert boom.stopped and healthy.stopped
+    assert mgr.channels == {}
 
 
 async def test_onboarding_claim_flow_after_empty_allowlist_enable():

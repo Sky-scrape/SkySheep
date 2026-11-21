@@ -59,6 +59,10 @@ from ..tools.memory import render_memory_section
 from ..tools.shell import set_child_network
 from ..tools.skill import LoadSkillTool
 
+# CLI 无人值守路径（cron run 等）的留痕出口：无人值守没人盯着终端，
+# 记账/收尾类失败唯一能查的就是日志
+logger = logging.getLogger("skysheep.cli")
+
 
 def _data_hint(rel: str) -> str:
     """数据目录下的路径提示：在用户主目录里显示成 ``~/...``，否则给绝对路径。
@@ -1375,8 +1379,17 @@ async def _cron_run_async(
                     agent.total_in_tokens, agent.total_out_tokens,
                     agent.total_cached_tokens,
                 )
-            except Exception:  # noqa: BLE001 - 用量记录失败不影响执行
-                pass
+            except Exception as exc:  # noqa: BLE001 - 用量记录失败不影响执行
+                # except-audit #19：无人值守记账失败原来完全无声，usage_log 缺数
+                # 无从发现；debug 留痕（token 数也入日志，成本可事后重建），
+                # 不影响执行（fail-open 语义保持）
+                logger.debug(
+                    "cron 任务轮用量记账失败（不入 usage_log，成本报表将缺数）："
+                    "session=%s provider=%s in=%s out=%s cached=%s: %s",
+                    sid, name, agent.total_in_tokens,
+                    agent.total_out_tokens, agent.total_cached_tokens,
+                    exc, exc_info=True,
+                )
             # 验收工位（可选，默认关）：只读、单轮，结论交给 run_cron_task_core
             # 与自动判定合并（只能降级，不能升级）
             review = None
@@ -1406,8 +1419,16 @@ async def _cron_run_async(
                                 int(review.get("out_tokens") or 0),
                                 int(review.get("cached_tokens") or 0),
                             )
-                        except Exception:  # noqa: BLE001 - 用量是附加信息
-                            pass
+                        except Exception as exc:  # noqa: BLE001 - 用量是附加信息
+                            # except-audit #19：同上，验收轮记账失败也要留痕
+                            logger.debug(
+                                "验收工位用量记账失败（不入 usage_log，成本报表将缺数）："
+                                "session=%s provider=%s in=%s out=%s cached=%s: %s",
+                                sid, name, int(review.get("in_tokens") or 0),
+                                int(review.get("out_tokens") or 0),
+                                int(review.get("cached_tokens") or 0),
+                                exc, exc_info=True,
+                            )
             if error is not None or stop_reason not in ("end_turn", "max_iterations"):
                 # 异常结束按失败收尾：run_cron_task_core 回写错误状态、渠道必推
                 raise RuntimeError(error or f"轮次异常结束（{stop_reason}）")

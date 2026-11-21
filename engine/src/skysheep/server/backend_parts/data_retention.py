@@ -40,6 +40,7 @@ from ...config import (
 )
 from ...instance import data_home
 from ...obs import info as obs_info
+from ...obs import warning as obs_warning
 from ...session.store import SessionStore
 from ...textio import write_text_atomic
 
@@ -347,8 +348,13 @@ class RetentionMixin:
                 await run_retention_pass(self.store, self.cfg)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001 - 单轮失败只留痕，不终止巡检
+                # fail-visible：清理停摆（过期文件无声累积）用户无感知，留一条
+                # 线索；巡检每小时一轮，至多一条 warning，不刷屏
+                obs_warning(
+                    "retention_sweep_failed", "保留策略巡检单轮失败，本轮跳过",
+                    error=f"{type(e).__name__}: {e}"[:200],
+                )
             await asyncio.sleep(self.RETENTION_CHECK_INTERVAL_S)
 
     async def retention_status(self) -> dict:

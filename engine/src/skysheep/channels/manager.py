@@ -164,11 +164,14 @@ class ChannelManager:
         return self.status()
 
     async def stop(self) -> None:
-        for channel in self.channels.values():
+        for name, channel in self.channels.items():
             try:
                 await channel.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001 - 单个渠道停不掉不影响其余渠道收尾
+                # 停失败必须留痕（审计 #18）：飞书 CLI 的常驻 bus 没停掉会残留
+                # 长连接，下次启用撞「已有连接」限流（见 feishu._stop_daemon 文档串），
+                # 静默 pass 时排障无从下手。
+                logger.warning("渠道 %s 停止失败：%s", name, e)
         self.channels = {}
 
     def _make_state_sink(self, name: str):

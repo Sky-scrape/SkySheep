@@ -10,6 +10,7 @@ Cookie 的边界、全部数据必须留给下次启动）；⑤ 前端接线（
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -272,6 +273,30 @@ def test_clear_browser_data_lock_serializes_same_instance(home, monkeypatch):
         assert calls == ["enter", "enter", "exit", "exit", "enter", "exit"], calls
 
     asyncio.run(main())
+
+
+def test_startup_sweep_failure_logs_warning(home, monkeypatch, caplog):
+    """启动清扫抛异常：不影响启动（fail-open），但与成功路径的 info 对称留
+    一条 warning 线索——残留目录会继续占盘，不能再无迹可循。"""
+    from skysheep.config import skysheep_home
+
+    def boom():
+        raise OSError("TEMP 只读")
+
+    monkeypatch.setattr(browser_cdp, "sweep_orphan_browser_profiles", boom)
+    # crash.flag 存在 = 「上次未正常关闭」，setup 才会进入清扫分支
+    # （隔离 home 此刻还没建，先补目录再落旗子）
+    flag = skysheep_home() / "crash.flag"
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("crashed", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="skysheep"):
+        with make_client(home, []):
+            pass  # lifespan 已完整跑过 setup；断言只看日志
+    warnings = [r for r in caplog.records
+                if r.name == "skysheep" and r.levelno == logging.WARNING
+                and "无头浏览器残留目录清扫失败" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "OSError" in warnings[0].getMessage() and "TEMP 只读" in warnings[0].getMessage()
 
 
 def test_save_browser_settings_toggles_and_restarts_headless(home, monkeypatch):

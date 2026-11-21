@@ -816,8 +816,10 @@ async def run_cron_team_turn_core(
         try:
             for provider_name, model, tin, tout in rows:
                 await store.add_usage(sid, provider_name, model, tin, tout, 0)
-        except Exception:  # noqa: BLE001 - 记账失败不影响本轮结果
-            pass
+        except Exception as e:  # noqa: BLE001 - 记账失败不影响本轮结果，但要留痕备查
+            obs_warning("cron", "cron team usage persist failed",
+                        task_id=task.get("id"), session_id=sid,
+                        rows=len(rows), error=str(e)[:200])
         if after_usage is not None:
             await after_usage()
 
@@ -904,17 +906,16 @@ async def run_cron_task_core(
     started_at = time.time()  # 终态推送要报耗时（成功与失败两条路都要用）
     denied = 0                # 本轮被门控拒绝的工具次数（异常路径读不到 facts）
     tool_errors = 0           # 本轮工具报错次数（同上，异常路径读不到 facts）
+    run = None                # 本轮运行行（开账本被取消/失败时保持 None：不进账本）
     # 运行账本（工厂观战）：开一条 running，收尾在成功 / 异常两路各写一次。
     # 记账失败不能拦住任务本身——工厂少一枚包裹，好过整条定时任务跑不动。
+    # 开账本失败已在 RunLedger.start 内部 warning 留痕并返回 None（kind +
+    # task_id + 异常），这里拿 None 继续跑，不再各包一层静默 try。
     ledger = ledger or RunLedger(store, emit=emit_run)
-    run = None
-    try:
-        run = await ledger.start(
-            "cron", task_id, project_id=task.get("project_id"),
-            trigger="manual" if force else "schedule",
-        )
-    except Exception:  # noqa: BLE001
-        run = None
+    run = await ledger.start(
+        "cron", task_id, project_id=task.get("project_id"),
+        trigger="manual" if force else "schedule",
+    )
     try:
         try:
             if timeout_s and float(timeout_s) > 0:
@@ -989,21 +990,20 @@ async def run_cron_task_core(
                         )[:200]
                     else:
                         outcome, source = verdict, "reviewer"
-            try:
-                await ledger.finish(
-                    run["id"],
-                    status=run_status,
-                    result_excerpt=last_text,
-                    session_id=_sid,
-                    denied_count=denied,
-                    tool_errors=tool_errors,
-                    denied_tools=denied_tools_json(facts),
-                    outcome=outcome,
-                    outcome_source=source,
-                    review_note=review_note,
-                )
-            except Exception:  # noqa: BLE001 - 记账失败不影响任务收尾
-                pass
+            # 收尾记账失败在 RunLedger.finish 内部 warning 留痕吞掉：
+            # 不影响任务收尾，账本少一次终态不该拖死任务行回写
+            await ledger.finish(
+                run["id"],
+                status=run_status,
+                result_excerpt=last_text,
+                session_id=_sid,
+                denied_count=denied,
+                tool_errors=tool_errors,
+                denied_tools=denied_tools_json(facts),
+                outcome=outcome,
+                outcome_source=source,
+                review_note=review_note,
+            )
         return task
     except asyncio.CancelledError:
         # 用户叫停（工厂页「叫停」按钮）：这不是故障，也不是「中断」——
@@ -1030,11 +1030,9 @@ async def run_cron_task_core(
         except Exception:  # noqa: BLE001 - 收尾失败也要让取消继续
             pass
         if run is not None:
-            try:
-                await ledger.finish(run["id"], status="cancelled", error="用户叫停",
-                                    denied_count=denied, tool_errors=tool_errors)
-            except Exception:  # noqa: BLE001 - 记账失败不影响取消
-                pass
+            # 取消收尾的记账失败在 RunLedger.finish 内部留痕吞掉，不影响取消
+            await ledger.finish(run["id"], status="cancelled", error="用户叫停",
+                                denied_count=denied, tool_errors=tool_errors)
         raise
     except Exception as e:  # noqa: BLE001 - 任务失败也要回写状态
         error_kind = classify_run_error(str(e))
@@ -1060,16 +1058,18 @@ async def run_cron_task_core(
             duration = time.time() - started_at
             _fire_cron_push(channels, task, "error", duration,
                             cron_push_body(task, "error", duration))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as we:  # noqa: BLE001 - 收尾失败不拦失败路径，但要留痕备查
+            # 变量名不能叫 e：except 块结束会 del 绑定名，把外层正在处理的
+            # 原异常 e 一并删掉（下方 ledger.finish 还要用它拼错误摘要）
+            obs_warning("cron", "cron failure writeback failed",
+                        task_id=task_id, error=str(we)[:200])
         if run is not None:
-            try:
-                await ledger.finish(run["id"], status="error", error=str(e)[:300],
-                                    denied_count=denied, tool_errors=tool_errors,
-                                    error_kind=error_kind,
-                                    outcome="failed", outcome_source="auto")
-            except Exception:  # noqa: BLE001 - 记账失败不影响任务收尾
-                pass
+            # 失败收尾的记账失败在 RunLedger.finish 内部留痕吞掉：账本停在
+            # running 比少一条错误记录更误导排障，但都不该再拦收尾本身
+            await ledger.finish(run["id"], status="error", error=str(e)[:300],
+                                denied_count=denied, tool_errors=tool_errors,
+                                error_kind=error_kind,
+                                outcome="failed", outcome_source="auto")
         # 连续失败聚合告警：同一条产线每天最多一条（见 alert_repeated_failures）
         await alert_repeated_failures(
             store, notify, channels, task or {"id": task_id},
@@ -1392,14 +1392,14 @@ class AutomationMixin:
         ledger = getattr(self, "run_ledger", None)
         if ledger is None:
             return
-        try:
-            run = await ledger.start("cron", tid, project_id=task.get("project_id"))
+        # 记账失败已在 RunLedger 内部 warning 留痕吞掉（start 返回 None /
+        # finish 返回 None），不拦扫描循环——「上次失败」缺一枚包裹好过停摆
+        run = await ledger.start("cron", tid, project_id=task.get("project_id"))
+        if run is not None:
             await ledger.finish(
                 run["id"], status="error", error=text,
                 error_kind="path", outcome="failed", outcome_source="auto",
             )
-        except Exception:  # noqa: BLE001 - 记账失败不拦扫描循环
-            pass
 
     async def _cron_pass(self) -> None:
         due = await self.store.due_cron_tasks()
@@ -1419,10 +1419,9 @@ class AutomationMixin:
                 if self._cron_skip_mark.get(tid) == nra:
                     continue
                 self._cron_skip_mark[tid] = nra
-                try:
-                    await self.run_ledger.skipped(row)
-                except Exception:  # noqa: BLE001 - 记账失败不拦扫描循环
-                    pass
+                # 记账失败已在 RunLedger.skipped 内部 warning 留痕吞掉，
+                # 不拦扫描循环
+                await self.run_ledger.skipped(row)
                 continue
             self._cron_skip_mark.pop(tid, None)
             if not await self._cron_target_ready(row):
@@ -2733,13 +2732,13 @@ class AutomationMixin:
                 runs=(node["runs"] or 0) + 1, last_error="",
             )
             self._broadcast_pipeline(await self.store.get_pipeline(pipe["id"]))
-            try:
-                run = await self.run_ledger.start(
-                    "pipeline_node", node["id"], project_id=run_pid,
-                    pipeline_id=pipe["id"], trigger=trigger,
-                )
-            except Exception:  # noqa: BLE001 - 记账失败不拦节点执行
-                run = None
+            # 记账失败不能拦节点执行——开账本失败已在 RunLedger.start 内部
+            # warning 留痕并返回 None（node id + 异常），本轮不进账本但节点照跑；
+            # run=None 就是 finally 里「跳过收尾记账」的开关
+            run = await self.run_ledger.start(
+                "pipeline_node", node["id"], project_id=run_pid,
+                pipeline_id=pipe["id"], trigger=trigger,
+            )
 
             prompt = await self._compose_node_prompt(
                 node, attempt=int(node.get("runs") or 1), prev_error=prev_error,
@@ -2870,21 +2869,20 @@ class AutomationMixin:
                 node_denied = int(facts.get("denied") or 0)
                 node_outcome = outcome_for(str(outcome["status"]),
                                            denied_count=node_denied)
-                try:
-                    await self.run_ledger.finish(
-                        run["id"], status=outcome["status"],
-                        result_excerpt=outcome["excerpt"], error=outcome["error"],
-                        session_id=sid or None,
-                        denied_count=node_denied,
-                        tool_errors=int(facts.get("tool_errors") or 0),
-                        denied_tools=denied_tools_json(facts),
-                        error_kind=(classify_run_error(outcome["error"])
-                                    if outcome["status"] == "error" else ""),
-                        outcome=node_outcome,
-                        outcome_source="auto" if node_outcome else "",
-                    )
-                except Exception:  # noqa: BLE001 - 记账失败不影响节点收尾
-                    pass
+                # 收尾记账失败在 RunLedger.finish 内部 warning 留痕吞掉，
+                # 不影响节点收尾
+                await self.run_ledger.finish(
+                    run["id"], status=outcome["status"],
+                    result_excerpt=outcome["excerpt"], error=outcome["error"],
+                    session_id=sid or None,
+                    denied_count=node_denied,
+                    tool_errors=int(facts.get("tool_errors") or 0),
+                    denied_tools=denied_tools_json(facts),
+                    error_kind=(classify_run_error(outcome["error"])
+                                if outcome["status"] == "error" else ""),
+                    outcome=node_outcome,
+                    outcome_source="auto" if node_outcome else "",
+                )
             # 连续失败聚合告警：与定时任务同一阈值、同一按线每天一条去重。
             # 装配线已有逐节点的渠道推送，这里只补桌面通知，不重复推渠道。
             if str(outcome["status"]) in ("error", "empty"):

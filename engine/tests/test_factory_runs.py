@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -285,6 +286,67 @@ async def test_run_ledger_prunes_every_n_starts(store, tmp_path, monkeypatch):
     assert old["id"] not in {r["id"] for r in await store.list_automation_runs(limit=100)}
 
 
+async def test_run_ledger_swallows_store_failures_and_warns(
+        store, tmp_path, monkeypatch, caplog):
+    """记账契约：账本库操作失败不向调用方抛——内部 warning 留痕后吞掉。
+
+    start / finish / skipped 失败返回 None（调用方按「本轮不进账本 / 账本没
+    写成」继续），progress 返回 False；「记账失败不拦任务」由账本统一兜底，
+    automation.py 各调用点不再各包一层静默 try（静默丢账曾是最难查的坑）。
+    每条留痕都带得上定位用的标识：start/skipped 带 task_id、finish 带
+    run_id 与 status，异常原文一并进日志。
+    """
+    proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
+    task = await store.add_cron_task(proj.id, "日报", "干活", "daily")
+    ledger = RunLedger(store, emit=lambda _ev: None)  # progress 走到推送才看 emit
+
+    async def broken_add(*_a, **_kw):
+        raise RuntimeError("账本库写不进")
+
+    # start：开账本失败 → None + warning（kind / task_id / 异常）
+    monkeypatch.setattr(store, "add_automation_run", broken_add)
+    with caplog.at_level(logging.WARNING, logger="skysheep.run_ledger"):
+        assert await ledger.start("cron", task["id"]) is None
+    start_warns = [r for r in caplog.records if "运行账本开启失败" in r.getMessage()]
+    assert start_warns, "吞错必须留痕"
+    assert f"kind=cron task_id={task['id']}" in start_warns[-1].getMessage()
+    assert "账本库写不进" in start_warns[-1].getMessage()
+
+    # finish：收尾失败 → None + warning（run_id / status / 异常）
+    monkeypatch.undo()
+    run = await ledger.start("cron", task["id"])
+    assert run is not None
+
+    async def broken_finish(*_a, **_kw):
+        raise RuntimeError("账本库写不进")
+
+    monkeypatch.setattr(store, "finish_automation_run", broken_finish)
+    with caplog.at_level(logging.WARNING, logger="skysheep.run_ledger"):
+        assert await ledger.finish(run["id"], status="done") is None
+    finish_warns = [r for r in caplog.records if "运行账本收尾失败" in r.getMessage()]
+    assert finish_warns, "吞错必须留痕"
+    assert f"run_id={run['id']} status=done" in finish_warns[-1].getMessage()
+    assert "账本库写不进" in finish_warns[-1].getMessage()
+
+    # skipped：记跳过失败 → None + warning（task_id / 异常）
+    monkeypatch.undo()
+    monkeypatch.setattr(store, "add_automation_run", broken_add)
+    with caplog.at_level(logging.WARNING, logger="skysheep.run_ledger"):
+        assert await ledger.skipped(task) is None
+    skip_warns = [r for r in caplog.records if "运行账本记跳过失败" in r.getMessage()]
+    assert skip_warns, "吞错必须留痕"
+    assert f"task_id={task['id']}" in skip_warns[-1].getMessage()
+    monkeypatch.undo()
+    assert await store.list_automation_runs(status="skipped") == [], "失败不落半行"
+
+    # progress：进度推送失败 → False + warning（emit 钩子里没有 try 包它，
+    # 推进度绝不能把无人值守运行带崩）；用非法 task_id 触发 int 转换失败
+    with caplog.at_level(logging.WARNING, logger="skysheep.run_ledger"):
+        assert ledger.progress("cron", "不是数字", tool="x") is False
+    prog_warns = [r for r in caplog.records if "运行进度推送失败" in r.getMessage()]
+    assert prog_warns, "吞错必须留痕"
+
+
 # ---------- 埋点：定时任务 ----------
 
 async def test_run_cron_task_core_writes_done_empty_and_error_rows(store, tmp_path):
@@ -333,6 +395,68 @@ async def test_run_cron_task_core_writes_done_empty_and_error_rows(store, tmp_pa
     await store.update_cron_task(task["id"], enabled=0)
     await run_cron_task_core(store, task["id"], execute=ok_execute, emit_run=events.append)
     assert len(await store.list_automation_runs(limit=100)) == 3
+
+
+async def test_cron_task_still_completes_when_ledger_start_fails(
+        store, tmp_path, monkeypatch, caplog):
+    """开账本失败：本轮不进账本但任务照跑（记账失败不拦任务）。
+
+    以前这里是一层无日志的静默 try（run=None），账本坏了连排障线索都没有；
+    现在失败在 RunLedger.start 内部 warning 留痕，任务行回写、重排、推送
+    一个不少——账本少一枚包裹，好过整条定时任务跑不动。
+    """
+    proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
+    task = await store.add_cron_task(proj.id, "日报", "干活", "interval", interval_minutes=10)
+
+    async def broken_add(*_a, **_kw):
+        raise RuntimeError("账本库炸了")
+
+    monkeypatch.setattr(store, "add_automation_run", broken_add)
+
+    async def ok_execute(_task):
+        return _runtime("完成"), "sid-no-ledger", False
+
+    with caplog.at_level(logging.WARNING, logger="skysheep.run_ledger"):
+        final = await run_cron_task_core(store, task["id"], force=True,
+                                         execute=ok_execute)
+
+    assert final is not None and final["last_status"] == "ok", "记账失败不拦任务"
+    assert final["next_run_at"] > 0, "照常重排下一轮"
+    assert await store.list_automation_runs() == [], "本轮不进账本"
+    warns = [r for r in caplog.records if "运行账本开启失败" in r.getMessage()]
+    assert warns, "吞错必须留痕"
+    msg = warns[-1].getMessage()
+    assert f"kind=cron task_id={task['id']}" in msg and "账本库炸了" in msg
+
+
+async def test_cron_failure_writeback_failure_warns_and_keeps_ledger(
+        store, tmp_path, monkeypatch, caplog):
+    """失败收尾里的回写/通知失败：obs 留痕但不拦失败路径——账本 error 行
+    照常写，错误摘要取自原异常（以前这层 try 连日志都没有）。"""
+    proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
+    task = await store.add_cron_task(proj.id, "日报", "干活", "interval", interval_minutes=10)
+
+    async def broken_update(*_a, **_kw):
+        raise RuntimeError("任务表炸了")
+
+    monkeypatch.setattr(store, "update_cron_task", broken_update)
+
+    async def boom(_task):
+        raise RuntimeError("模型炸了")
+
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        final = await run_cron_task_core(store, task["id"], force=True, execute=boom)
+
+    warns = [r for r in caplog.records
+             if "cron failure writeback failed" in r.getMessage()]
+    assert warns, "回写失败必须留痕"
+    assert f'"task_id":{task["id"]}' in warns[-1].getMessage()
+    assert "任务表炸了" in warns[-1].getMessage()
+    # 回写失败不拦失败收尾：账本 error 行照常落（错误摘要取自原异常）
+    rows = await store.list_automation_runs()
+    assert len(rows) == 1 and rows[0]["status"] == "error"
+    assert "模型炸了" in rows[0]["error"]
+    assert final is not None, "失败收尾照常返回任务行（不向上抛）"
 
 
 async def test_run_cron_review_can_only_downgrade_outcome(store, tmp_path):
@@ -403,6 +527,36 @@ async def test_cron_pass_records_skipped_once_per_due_batch(store, tmp_path):
     await store.update_cron_task(task["id"], next_run_at=time.time() - 1)
     await dummy._cron_pass()
     assert len(await store.list_automation_runs(limit=100)) == 2
+
+
+async def test_cron_pass_survives_ledger_failure_when_marking_skipped(
+        store, tmp_path, monkeypatch, caplog):
+    """扫描循环的 skipped 记账失败不拦扫描：RunLedger.skipped 内部吞错留痕，
+    _cron_pass 不抛、下一轮照常扫（以前是调用点静默 try，坏账无线索）。"""
+    proj = await store.get_or_create_project(str(tmp_path / "厂区"), "一号厂")
+    task = await store.add_cron_task(proj.id, "长跑", "干活", "interval", interval_minutes=5)
+    await store.update_cron_task(task["id"], next_run_at=time.time() - 5)
+
+    class _Pass(AutomationMixin):
+        pass
+
+    dummy = _Pass()
+    dummy.store = store
+    dummy._cron_running = {task["id"]: None}
+    dummy._cron_skip_mark = {}
+    dummy.run_ledger = RunLedger(store)
+
+    async def broken_add(*_a, **_kw):
+        raise RuntimeError("账本库炸了")
+
+    monkeypatch.setattr(store, "add_automation_run", broken_add)
+    with caplog.at_level(logging.WARNING, logger="skysheep.run_ledger"):
+        await dummy._cron_pass()  # 不得上抛：扫描循环 20 秒后还要再扫
+
+    assert await store.list_automation_runs() == [], "记账失败不落半行"
+    warns = [r for r in caplog.records if "运行账本记跳过失败" in r.getMessage()]
+    assert warns, "吞错必须留痕"
+    assert f"task_id={task['id']}" in warns[-1].getMessage()
 
 
 # ---------- 埋点：编排节点 ----------
@@ -582,6 +736,36 @@ async def test_pipeline_node_failure_writes_exactly_one_error_row(store, tmp_pat
     # 节点行仍是既有错误语义（不被账本改动影响）
     after = await store.get_pipeline_node(node["id"])
     assert after["status"] == "error"
+
+
+async def test_pipeline_node_still_completes_when_ledger_start_fails(
+        store, tmp_path, monkeypatch, caplog):
+    """流水线节点开账本失败不拦节点执行：节点照常跑完落状态，本轮不进账本，
+    失败在 RunLedger.start 内部 warning 留痕（node id + 异常）。"""
+    proj, pipe, node = await _make_pipeline(store, tmp_path, name="账本坏")
+    runner = _NodeRunner(store, tmp_path / "厂区", project_id=proj.id)
+    runtime_agent = SimpleNamespace(
+        history=[Message.assistant([TextBlock(text="构建完成")])],
+        set_system=lambda _system: None,
+    )
+    runner._build_agent = lambda **_kw: runtime_agent
+
+    async def broken_add(*_a, **_kw):
+        raise RuntimeError("账本库炸了")
+
+    monkeypatch.setattr(store, "add_automation_run", broken_add)
+
+    with caplog.at_level(logging.WARNING, logger="skysheep.run_ledger"):
+        await runner._run_pipeline_node(pipe, node)
+
+    assert await store.list_automation_runs(pipeline_id=pipe["id"]) == [], (
+        "开账本失败：本轮不进账本")
+    after = await store.get_pipeline_node(node["id"])
+    assert after["status"] == "done", "记账失败不拦节点执行"
+    warns = [r for r in caplog.records if "运行账本开启失败" in r.getMessage()]
+    assert warns, "吞错必须留痕"
+    msg = warns[-1].getMessage()
+    assert f"kind=pipeline_node task_id={node['id']}" in msg and "账本库炸了" in msg
 
 
 async def test_pipeline_busy_precheck_does_not_create_run_row(store, tmp_path):
@@ -1000,3 +1184,52 @@ async def test_factory_run_mark_overrides_outcome_and_health(store, tmp_path):
 
     with pytest.raises(RuntimeError):
         await host.factory_run_mark({"run_id": run["id"], "outcome": "乱写"})
+
+
+# ---------- 留痕锚点：定时团队用量记账失败不影响交付（CLI 冒烟同链路） ----------
+
+def test_cron_team_usage_persist_failure_only_warns(home, monkeypatch, caplog):
+    """定时团队的用量入账失败：obs 留痕但交付主流程不受影响（last_status 仍 ok）。
+
+    「记账失败不影响本轮结果」的老注释过去连一行日志都没有——用量悄悄丢账
+    无从发现；现在 obs_warning("cron", "cron team usage persist failed") 带
+    任务 id / 会话 id / 异常留痕。夹具复用 test_cli_cron_run 的团队冒烟
+    （模板建队 + AI 总管闭环），add_usage 在 store 类上打断，命中且仅命中
+    团队收尾的那一处入账。
+    """
+    import asyncio
+
+    import pytest
+    from test_cli_cron_run import (
+        _DIRECTOR_CLOSED_LOOP,
+        _make_team_task,
+        _patch_provider_pool,
+        _seed_team_template,
+    )
+
+    import skysheep.cli.app as cli_app
+    from skysheep.session.store import SessionStore as _StoreCls
+
+    _patch_provider_pool(monkeypatch, [
+        [TextBlock(text="主模型不参与团队轮")],
+        [TextBlock(text="巡检完成：未见异常")],
+        _DIRECTOR_CLOSED_LOOP,
+    ])
+    _seed_team_template("夜班小队")
+    task = asyncio.run(_make_team_task(home))
+
+    async def broken_usage(self, *a, **k):
+        raise RuntimeError("用量库炸了")
+
+    monkeypatch.setattr(_StoreCls, "add_usage", broken_usage)
+
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        with pytest.raises(SystemExit) as ei:
+            cli_app.main(["cron", "run", str(task["id"])])
+    assert ei.value.code == 0, "记账失败不影响本轮结果（照常交付）"
+
+    warns = [r for r in caplog.records
+             if "cron team usage persist failed" in r.getMessage()]
+    assert warns, "吞错必须留痕"
+    msg = warns[-1].getMessage()
+    assert f'"task_id":{task["id"]}' in msg and "用量库炸了" in msg

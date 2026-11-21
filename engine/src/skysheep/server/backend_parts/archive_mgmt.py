@@ -17,6 +17,7 @@ import time
 
 from ...config import ConfigError, load_config, set_archive_in_config
 from ...obs import info as obs_info
+from ...obs import warning as obs_warning
 
 
 class ArchiveMgmtMixin:
@@ -46,8 +47,13 @@ class ArchiveMgmtMixin:
                 await self._auto_archive_pass()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001 - 单轮失败只留痕，不终止巡检
+                # fail-visible：归档长期静默失效（会话不归档/不清理）最难查；
+                # 巡检每小时一轮，至多一条 warning，不刷屏
+                obs_warning(
+                    "auto_archive_loop_failed", "自动归档巡检单轮失败，本轮跳过",
+                    error=f"{type(e).__name__}: {e}"[:200],
+                )
             await asyncio.sleep(self.ARCHIVE_CHECK_INTERVAL_S)
 
     def _archive_cfg(self):

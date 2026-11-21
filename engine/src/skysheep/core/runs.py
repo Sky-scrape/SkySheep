@@ -19,11 +19,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..textio import write_text_atomic
+
+logger = logging.getLogger("skysheep.core.runs")
 
 # 状态机。合法迁移不做硬校验（登记方都是引擎自身代码，乱序说明有 bug，
 # 记日志即可）；前端按 level 分组展示。
@@ -188,8 +191,11 @@ class RunCenter:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             write_text_atomic(self.path, json.dumps(payload, ensure_ascii=False))
-        except Exception:  # noqa: BLE001 - 快照失败不影响运行
-            pass
+        except Exception:  # noqa: BLE001 - 快照失败不影响运行（有意 fail-open）
+            # 快照只服务崩溃恢复，写失败不能反噬运行本身；但盘满/权限类失败
+            # 要留线索（except 审计 #20），否则重启后运行中心丢最近任务列表
+            # 且失败原因不可查。
+            logger.debug("运行快照写失败（忽略，不影响运行）：%s", self.path, exc_info=True)
 
     # ---- 登记 ----
 

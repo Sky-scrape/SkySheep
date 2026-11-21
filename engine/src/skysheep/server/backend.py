@@ -1899,8 +1899,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     logging.getLogger("skysheep").info(
                         "启动清扫：清理 %d 个无头浏览器残留目录", removed
                     )
-        except Exception:  # noqa: BLE001 - 清扫失败不影响启动
-            pass
+        except Exception as e:  # noqa: BLE001 - 清扫失败不影响启动
+            # 与上面成功路径的 info 对称：清扫失效（残留目录会继续占盘）
+            # 至少留一条线索，不挡启动。
+            logging.getLogger("skysheep").warning(
+                "启动清扫：无头浏览器残留目录清扫失败（%s: %s）", type(e).__name__, e
+            )
         # 「远程连接」固定项目不再启动即建：没有渠道会话时侧栏不出现这个分组，
         # 删除后也不再复活；渠道真正收到消息时经 _remote_project_id 幂等重建
         # 快聊 / 远程连接的固定工作目录：数据目录下真实文件夹（fast-talk /
@@ -2020,7 +2024,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     def _websearch_kwargs(self) -> dict | None:
         try:
             return resolve_websearch(self.cfg)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # 解析失败 ≠ 未配置：后者本就返回 None 且无异常。这里吞掉的是
+            # 意外故障，warning 留痕——否则用户配错后联网搜索静默消失，
+            # 模型只会说「工具不存在」，无从排查。
+            obs_warning(
+                "capability_resolve_failed",
+                "联网搜索配置解析失败，该能力未启用（工具不注册）",
+                capability="websearch",
+                error=f"{type(e).__name__}: {e}",
+            )
             return None
 
     def _configured_services(self) -> list[dict]:
@@ -2050,7 +2063,16 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
     def _imagegen_kwargs(self) -> dict | None:
         try:
             return resolve_imagegen(self.cfg)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # 解析失败 ≠ 未配置：后者本就返回 None 且无异常。这里吞掉的是
+            # 意外故障，warning 留痕——否则用户配错后画图静默消失，
+            # 模型只会说「工具不存在」，无从排查。
+            obs_warning(
+                "capability_resolve_failed",
+                "画图配置解析失败，该能力未启用（工具不注册）",
+                capability="imagegen",
+                error=f"{type(e).__name__}: {e}",
+            )
             return None
 
 
@@ -6771,7 +6793,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
                     owner=(self.session.id if self.session else ""),
                     wait_s=3.0,
                 )
-            except Exception:  # noqa: BLE001 - 租约是协调不是闸门，故障不挡保存
+            except Exception as e:  # noqa: BLE001 - 租约是协调不是闸门，故障不挡保存
+                # fail-open 但 fail-visible：与 agent 侧（core/agent.py 的
+                # lease_claim_failed）同款留痕——面板保存失去与并行 Agent 写
+                # 的冲突协调，本次覆盖不再带注记，保存本身不受影响。
+                obs_warning(
+                    "lease_claim_failed",
+                    "面板保存的写租约领取失败：本次保存失去并行冲突协调（照常保存）",
+                    tool="fs.write",
+                    target=rel,
+                    session=(self.session.id if self.session else None),
+                    error=f"{type(e).__name__}: {e}",
+                )
                 lease = None
         try:
             try:

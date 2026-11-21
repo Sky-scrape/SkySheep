@@ -19,6 +19,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from .. import obs
 from ..events import (
     AgentEvent,
     AssistantMessage,
@@ -1289,7 +1290,19 @@ class Agent:
         if tool.safety != Safety.READONLY:
             try:
                 lease = await self.gate.claim_write(tool, tu.input, owner=ctx.session_id)
-            except Exception:  # noqa: BLE001 - 租约是协调不是闸门，故障不挡执行
+            except Exception as e:  # noqa: BLE001 - 租约是协调不是闸门，故障不挡执行
+                # fail-open 但 fail-visible：领租约失败时并行写同文件的冲突协调
+                # 本次缺席（覆盖不再带注记，权限确认不受影响），留一条结构化
+                # 日志给「为什么没等到对方」类排查。
+                target = tu.input.get(getattr(tool, "write_target_arg", "path") or "path")
+                obs.warning(
+                    "lease_claim_failed",
+                    "写租约领取失败：本次写入失去并行冲突协调（照常执行）",
+                    tool=tool.name,
+                    target=str(target) if target else None,
+                    session=ctx.session_id,
+                    error=f"{type(e).__name__}: {e}",
+                )
                 lease = None
         try:
             try:

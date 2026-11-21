@@ -179,7 +179,14 @@ def config_snapshot_json(kind: str, rec: dict | None) -> str:
 
 
 class RunLedger:
-    """``automation_runs`` 的写入口（实例由 ServerBackend 持有）。"""
+    """``automation_runs`` 的写入口（实例由 ServerBackend 持有）。
+
+    记账契约：「记账失败不拦任务」。start / finish / skipped / progress 的
+    库操作失败一律在内部 warning 留痕后吞掉——start / skipped / finish 返回
+    None（调用方按「本轮不进账本 / 账本没写成」继续），progress 返回 False；
+    调用方不必再各包一层 try。取消不在吞错范围（CancelledError 是
+    BaseException，照常穿透到调用方）。
+    """
 
     #: 每多少次 start 清理一次历史（设计稿 §8.1：启动与每 100 次插入各清一次）
     PRUNE_EVERY = 100
@@ -254,44 +261,54 @@ class RunLedger:
         project_id: int | None = None,
         pipeline_id: int | None = None,
         trigger: str = "schedule",
-    ) -> dict:
-        """开一条运行（status=running）并发 ``started`` 事件。"""
+    ) -> dict | None:
+        """开一条运行（status=running）并发 ``started`` 事件；失败返回 None。
+
+        开账本失败（任务/节点读不到、库写不进等）只 warning 留痕（kind +
+        task_id + 异常）并返回 None，本轮不进账本但绝不拦任务本身——
+        无人值守任务跑不成账是排障最难的坑，拦任务更是灾难。
+        """
         kind = str(kind)
-        name = ""
-        rec: dict | None = None
-        if kind == "pipeline_node":
-            rec = await self.store.get_pipeline_node(int(task_id))
-            if rec is not None:
-                name = str(rec.get("title") or "")
-                if pipeline_id is None:
-                    pipeline_id = rec.get("pipeline_id")
-                if project_id is None:
-                    node_pipe_id = rec.get("pipeline_id")
-                    if node_pipe_id is not None:
-                        pipe = await self.store.get_pipeline(int(node_pipe_id))
-                        if pipe is not None:
-                            project_id = pipe.get("project_id")
-        else:
-            rec = await self.store.get_cron_task(int(task_id))
-            if rec is not None:
-                name = str(rec.get("name") or "")
-                if project_id is None:
-                    project_id = rec.get("project_id")
-        row = await self.store.add_automation_run(
-            kind=kind, task_id=int(task_id), pipeline_id=pipeline_id,
-            project_id=project_id, trigger=str(trigger), status="running",
-            config_snapshot=config_snapshot_json(kind, rec),
-        )
-        run = {**row, "name": name,
-               "project_name": await self._project_name(project_id)}
-        self._active[(kind, int(task_id))] = {
-            "id": int(run["id"]), "pipeline_id": pipeline_id,
-        }
-        self._starts += 1
-        self._emit("started", run)
-        if self._starts % self.PRUNE_EVERY == 0:
-            await self.maybe_prune()
-        return run
+        try:
+            name = ""
+            rec: dict | None = None
+            if kind == "pipeline_node":
+                rec = await self.store.get_pipeline_node(int(task_id))
+                if rec is not None:
+                    name = str(rec.get("title") or "")
+                    if pipeline_id is None:
+                        pipeline_id = rec.get("pipeline_id")
+                    if project_id is None:
+                        node_pipe_id = rec.get("pipeline_id")
+                        if node_pipe_id is not None:
+                            pipe = await self.store.get_pipeline(int(node_pipe_id))
+                            if pipe is not None:
+                                project_id = pipe.get("project_id")
+            else:
+                rec = await self.store.get_cron_task(int(task_id))
+                if rec is not None:
+                    name = str(rec.get("name") or "")
+                    if project_id is None:
+                        project_id = rec.get("project_id")
+            row = await self.store.add_automation_run(
+                kind=kind, task_id=int(task_id), pipeline_id=pipeline_id,
+                project_id=project_id, trigger=str(trigger), status="running",
+                config_snapshot=config_snapshot_json(kind, rec),
+            )
+            run = {**row, "name": name,
+                   "project_name": await self._project_name(project_id)}
+            self._active[(kind, int(task_id))] = {
+                "id": int(run["id"]), "pipeline_id": pipeline_id,
+            }
+            self._starts += 1
+            self._emit("started", run)
+            if self._starts % self.PRUNE_EVERY == 0:
+                await self.maybe_prune()
+            return run
+        except Exception as e:  # noqa: BLE001 - 记账失败不拦任务，留痕后按「本轮不进账本」继续
+            logger.warning("运行账本开启失败（忽略）：kind=%s task_id=%s：%s",
+                           kind, task_id, e)
+            return None
 
     def progress(self, kind: str, task_id: int, *, tool: str = "",
                  steps: int | None = None, denied: int | None = None) -> bool:
@@ -304,25 +321,30 @@ class RunLedger:
         ``denied``：本轮累计被门控拒绝的工具次数。它是「预授权没勾全」的
         唯一实时痕迹（无人值守下拒绝事件不进前端），有值时才带上。
         """
-        if self.emit is None:
+        try:
+            if self.emit is None:
+                return False
+            active = self._active.get((str(kind), int(task_id)))
+            if active is None:
+                return False
+            rid = int(active["id"])
+            now = time.monotonic()
+            if now - self._last_progress.get(rid, 0.0) < self.MIN_PROGRESS_INTERVAL:
+                return False
+            self._last_progress[rid] = now
+            payload = {"id": rid, "kind": str(kind), "task_id": int(task_id),
+                       "pipeline_id": active.get("pipeline_id"),
+                       "progress": {"tool": str(tool or ""), "at": time.time()}}
+            if steps is not None:
+                payload["progress"]["steps"] = max(0, int(steps))
+            if denied:
+                payload["progress"]["denied"] = max(0, int(denied))
+            self._emit("progress", payload)
+            return True
+        except Exception as e:  # noqa: BLE001 - 进度是观测面，失败不影响运行
+            logger.warning("运行进度推送失败（忽略）：kind=%s task_id=%s：%s",
+                           kind, task_id, e)
             return False
-        active = self._active.get((str(kind), int(task_id)))
-        if active is None:
-            return False
-        rid = int(active["id"])
-        now = time.monotonic()
-        if now - self._last_progress.get(rid, 0.0) < self.MIN_PROGRESS_INTERVAL:
-            return False
-        self._last_progress[rid] = now
-        payload = {"id": rid, "kind": str(kind), "task_id": int(task_id),
-                   "pipeline_id": active.get("pipeline_id"),
-                   "progress": {"tool": str(tool or ""), "at": time.time()}}
-        if steps is not None:
-            payload["progress"]["steps"] = max(0, int(steps))
-        if denied:
-            payload["progress"]["denied"] = max(0, int(denied))
-        self._emit("progress", payload)
-        return True
 
     async def finish(
         self,
@@ -340,37 +362,46 @@ class RunLedger:
         outcome_source: str = "",
         review_note: str = "",
     ) -> dict | None:
-        """收尾一条运行并发 ``finished`` 事件；行不存在返回 None。
+        """收尾一条运行并发 ``finished`` 事件；行不存在或库操作失败返回 None。
 
         收尾时按「会话 + 本次运行的时间窗」回填 token 用量：定时任务每次运行
         新建会话，会话续跑型编排节点则复用会话，时间窗把范围收回到本次。
         用量查不到（无会话 / usage_log 已清）就写 0，不影响收尾。
+
+        收尾失败（库写不进等）只 warning 留痕并返回 None，绝不拦任务收尾——
+        账本停在 running 的「幽灵运行」比少一条终态更误导排障，
+        但两者都不该把整条任务/节点拖死。
         """
-        row = await self.store.get_automation_run(int(run_id))
-        sid = session_id if session_id is not None else (row or {}).get("session_id")
-        tokens = {"in_tokens": 0, "out_tokens": 0, "cached_tokens": 0}
-        if row is not None and sid:
-            try:
-                tokens = await self.store.session_usage_between(
-                    str(sid), float(row.get("started_at") or 0))
-            except Exception as e:  # noqa: BLE001 - 用量是附加信息，查不到就记 0
-                logger.debug("运行用量汇总失败（忽略）：%s", e)
-        self._active.pop(self._active_key(run_id), None)
-        self._last_progress.pop(int(run_id), None)
-        row = await self.store.finish_automation_run(
-            int(run_id), status=str(status), result_excerpt=result_excerpt,
-            error=error, session_id=session_id, **tokens,
-            denied_count=int(denied_count or 0),
-            tool_errors=int(tool_errors or 0),
-            denied_tools=str(denied_tools or ""),
-            error_kind=str(error_kind or ""),
-            outcome=str(outcome or ""), outcome_source=str(outcome_source or ""),
-            review_note=str(review_note or ""),
-        )
-        run = await self._decorate(row)
-        if run is not None:
-            self._emit("finished", run)
-        return run
+        try:
+            row = await self.store.get_automation_run(int(run_id))
+            sid = session_id if session_id is not None else (row or {}).get("session_id")
+            tokens = {"in_tokens": 0, "out_tokens": 0, "cached_tokens": 0}
+            if row is not None and sid:
+                try:
+                    tokens = await self.store.session_usage_between(
+                        str(sid), float(row.get("started_at") or 0))
+                except Exception as e:  # noqa: BLE001 - 用量是附加信息，查不到就记 0
+                    logger.debug("运行用量汇总失败（忽略）：%s", e)
+            self._active.pop(self._active_key(run_id), None)
+            self._last_progress.pop(int(run_id), None)
+            row = await self.store.finish_automation_run(
+                int(run_id), status=str(status), result_excerpt=result_excerpt,
+                error=error, session_id=session_id, **tokens,
+                denied_count=int(denied_count or 0),
+                tool_errors=int(tool_errors or 0),
+                denied_tools=str(denied_tools or ""),
+                error_kind=str(error_kind or ""),
+                outcome=str(outcome or ""), outcome_source=str(outcome_source or ""),
+                review_note=str(review_note or ""),
+            )
+            run = await self._decorate(row)
+            if run is not None:
+                self._emit("finished", run)
+            return run
+        except Exception as e:  # noqa: BLE001 - 记账失败不拦任务收尾，留痕即可
+            logger.warning("运行账本收尾失败（忽略）：run_id=%s status=%s：%s",
+                           run_id, status, e)
+            return None
 
     def _active_key(self, run_id: int) -> tuple[str, int]:
         """按运行 id 反查登记键（没有登记时返回一个必然不存在的键）。"""
@@ -379,31 +410,37 @@ class RunLedger:
                 return key
         return ("", -1)
 
-    async def skipped(self, task: dict, *, project_id: int | None = None) -> dict:
-        """直接写一条已结束的 ``skipped`` 行（到点时上一轮仍在跑）。
+    async def skipped(self, task: dict, *, project_id: int | None = None) -> dict | None:
+        """直接写一条已结束的 ``skipped`` 行（到点时上一轮仍在跑）；失败返回 None。
 
         同一「到点批次」只记一次由调用方按 (task_id, next_run_at) 去重——
-        否则长跑期间每 20 秒的扫描都会堆一行。
+        否则长跑期间每 20 秒的扫描都会堆一行。记账失败只 warning 留痕并返回
+        None，不拦扫描循环。
         """
-        tid = int(task.get("id") or 0)
-        pid = project_id if project_id is not None else task.get("project_id")
-        now = time.time()
-        row = await self.store.add_automation_run(
-            kind="cron", task_id=tid, project_id=pid,
-            trigger="schedule", status="skipped", started_at=now,
-            config_snapshot=config_snapshot_json("cron", task),
-        )
-        row = await self.store.finish_automation_run(
-            row["id"], status="skipped", finished_at=now, duration_s=0.0,
-            error="上一轮仍在运行，本次到点跳过",
-        )
-        run = {
-            **row,
-            "name": str(task.get("name") or ""),
-            "project_name": await self._project_name(pid),
-        }
-        self._emit("finished", run)
-        return run
+        try:
+            tid = int(task.get("id") or 0)
+            pid = project_id if project_id is not None else task.get("project_id")
+            now = time.time()
+            row = await self.store.add_automation_run(
+                kind="cron", task_id=tid, project_id=pid,
+                trigger="schedule", status="skipped", started_at=now,
+                config_snapshot=config_snapshot_json("cron", task),
+            )
+            row = await self.store.finish_automation_run(
+                row["id"], status="skipped", finished_at=now, duration_s=0.0,
+                error="上一轮仍在运行，本次到点跳过",
+            )
+            run = {
+                **row,
+                "name": str(task.get("name") or ""),
+                "project_name": await self._project_name(pid),
+            }
+            self._emit("finished", run)
+            return run
+        except Exception as e:  # noqa: BLE001 - 记账失败不拦扫描循环，留痕即可
+            logger.warning("运行账本记跳过失败（忽略）：task_id=%s：%s",
+                           task.get("id"), e)
+            return None
 
     async def mark_interrupted(self) -> int:
         """启动收尾：残留的 running 统一标为 interrupted，返回条数。"""

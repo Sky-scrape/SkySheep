@@ -426,3 +426,59 @@ def test_cron_run_cli_applies_review(home, cron_task, monkeypatch):
     assert row["status"] == "done"
     assert row["outcome"] == "failed" and row["outcome_source"] == "reviewer"
     assert "没有结论" in row["review_note"]
+
+
+def test_cron_run_cli_usage_accounting_failure_leaves_debug_log(
+        home, cron_task, monkeypatch, caplog):
+    """except-audit #19：cron 任务轮与验收工位的用量记账失败不再完全无声。
+
+    记账失败照旧不影响执行（fail-open 语义保持、退出码仍 0），但两处都要留
+    debug 痕迹——无人值守的 token 消耗不入 usage_log，成本报表缺数时唯一
+    能查的就是这条日志（token 数随日志留底，可事后重建）。
+    """
+    import logging
+
+    import skysheep.cli.app as cli_app
+    from skysheep.session.store import SessionStore
+
+    async def enable_review():
+        store = await SessionStore(db_path()).connect()
+        try:
+            await store.update_cron_task(cron_task["id"], review=1)
+        finally:
+            await store.close()
+
+    asyncio.run(enable_review())
+    # 主轮一组脚本，验收轮一组（verdict ok + FakeProvider 自带的 11/7 token
+    # 让 review.get("in_tokens") 非零——第二处记账必须真的被尝试）
+    provider = FakeProvider([
+        [TextBlock(text="今日汇总：完成")],
+        [TextBlock(text='{"verdict":"ok","reason":"有可核对结论"}')],
+    ])
+    _patch_provider(monkeypatch, provider)
+
+    calls = {"n": 0}
+
+    async def _boom_add_usage(self, *_a, **_k):
+        calls["n"] += 1
+        raise RuntimeError("usage_log 库不可写")
+
+    monkeypatch.setattr(SessionStore, "add_usage", _boom_add_usage)
+
+    with caplog.at_level(logging.DEBUG, logger="skysheep.cli"):
+        with pytest.raises(SystemExit) as ei:
+            cli_app.main(["cron", "run", str(cron_task["id"])])
+    assert ei.value.code == 0, "记账失败不影响执行（fail-open 语义保持）"
+    assert calls["n"] == 2, "主轮与验收轮的记账各被尝试一次"
+
+    records = [r for r in caplog.records
+               if r.name == "skysheep.cli" and r.levelno == logging.DEBUG
+               and "用量记账失败" in r.getMessage()]
+    assert len(records) == 2, "两处记账失败各留一条 debug 记录"
+    messages = [r.getMessage() for r in records]
+    assert any("cron 任务轮用量记账失败" in m for m in messages), \
+        "主轮记账失败必须留痕"
+    assert any("验收工位用量记账失败" in m for m in messages), \
+        "验收轮记账失败必须留痕"
+    assert all(r.exc_info is not None for r in records), \
+        "debug 记录带原始 traceback，方便定位库错误"

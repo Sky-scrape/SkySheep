@@ -591,9 +591,10 @@ def test_log_sweep_skips_disabled_categories(monkeypatch):
     assert logged[0][1]["key"] == "b"
 
 
-async def test_retention_loop_swallows_pass_errors(monkeypatch):
-    """单轮抛错不终止循环；CancelledError 照常向上抛。"""
+async def test_retention_loop_swallows_pass_errors(monkeypatch, caplog):
+    """单轮抛错不终止循环且留 warning（带异常类型）；CancelledError 照常向上抛。"""
     import asyncio as _aio
+    import logging
 
     calls = []
 
@@ -612,9 +613,13 @@ async def test_retention_loop_swallows_pass_errors(monkeypatch):
     _Stub.RETENTION_FIRST_DELAY_S = 0.0
     _Stub.RETENTION_CHECK_INTERVAL_S = 0.0
     stub = _Stub()
-    with pytest.raises(_aio.CancelledError):
-        await stub._retention_loop()
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        with pytest.raises(_aio.CancelledError):
+            await stub._retention_loop()
     assert len(calls) >= 2, "第一轮抛错后循环要继续（不能因单轮失败终止）"
+    warn = [r for r in caplog.records if "retention_sweep_failed" in r.getMessage()]
+    assert warn, "单轮失败必须留 obs.warning（清理停摆无痕无从排查）"
+    assert "RuntimeError: sweep boom" in warn[0].getMessage(), "warning 要带异常类型"
 
 
 async def test_retention_loop_start_stop(monkeypatch):

@@ -18,8 +18,10 @@
   （PER_PROVIDER_CONCURRENCY），避免同一把 API Key 并发多路触发限流；
 - 主历史只保留「user(问题) + assistant(融合答案)」，草稿通过事件流与
   消息元数据留存，不进入主历史；
-- 瞬态错误复用 agent.py 的判定与重试节奏；只在还没吐出任何内容时重试
-  （否则重放会导致卡片文本重复）；成员卡死由 member_timeout_s 截断；
+- 成员单轮与主席融合的流式收集/超时/瞬态重试/取消协议在共享运行时
+  member_runtime（run_member_text）里统一实现；瞬态错误判定与重试节奏
+  复用 agent.py 的常量与 helper，只在还没吐出任何内容时重试（否则重放
+  会导致卡片文本重复）；成员卡死由 member_timeout_s 截断；
 - 草稿截断有两层：单成员草稿经共享 clip_draft 按 collab_common 的
   DRAFT_CHAR_LIMIT 上限截断 + 融合/辩论提示词里
   全部草稿的总字符预算（融合按主席剩余上下文估算，见 _fusion_draft_budget），
@@ -49,8 +51,8 @@ from ..events import (
     Usage,
 )
 from ..messages import Message, dialogue
-from ..models.base import Provider, ProviderDone, ProviderTextDelta
-from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S, is_transient_error
+from ..models.base import Provider
+from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S
 from .collab_budget import RunBudget
 from .collab_common import (
     DRAFT_CLIP_MARK,
@@ -60,7 +62,7 @@ from .collab_common import (
     notice_retry,
 )
 from .context import estimate_text_tokens, estimate_tokens
-from .effort import resolve_auto_effort
+from .member_runtime import MemberTurnPolicy, run_member_text
 
 MEMBER_SYSTEM = (
     "你是圆桌讨论的成员之一。请针对用户的问题独立给出你的最佳回答："
@@ -322,14 +324,20 @@ async def _run_member(
     live_parts: list[str] | None = None,
     budget: RunBudget | None = None,
 ) -> MemberResult:
-    """一个成员一轮作答：重试/超时/容错都收敛在自己身上，失败不影响其他成员。
+    """一个成员一轮作答：失败不影响其他成员。
+
+    主体循环（流式收集/超时/瞬态重试/取消协议/用量）在共享运行时
+    member_runtime.run_member_text 里统一实现，本函数是薄壳：只负责
+    消息拼装与 MemberResult/终态事件组装；信号量、预算、共享草稿桶都
+    只经参数交给运行时，编排（fail_counts/辩论调度/取消回收）留在
+    run_roundtable。取消继续穿透（薄壳不捕 CancelledError）。
 
     history 不含本次提问（由本函数拼在最后），保证成员消息序列规整。
     round_no 用于事件 round 字段（前端区分独立作答轮与辩论修订轮）。
     extra_instruction 非空时（辩论轮）附加在用户问题之后注入其他成员草稿。
     semaphore 是同 provider_name 成员共享的并发闸（见 PER_PROVIDER_CONCURRENCY）。
-    live_parts 是调用方持有的共享草稿桶：本函数把流式增量实时写进去，
-    取消时调用方能收回已流出的部分文本（与融合路径的取消语义对齐）。
+    live_parts 是调用方持有的共享草稿桶：流式增量实时写进去，取消时调用方
+    能收回已流出的部分文本（与融合路径的取消语义对齐）。
     """
     result = MemberResult(spec=spec, index=index)
 
@@ -369,61 +377,36 @@ async def _run_member(
     # 共享草稿桶：重试只在还没有任何内容时发生，clear() 不会丢已提交的文本
     parts: list[str] = live_parts if live_parts is not None else []
 
-    async def stream_once() -> None:
-        # 自动档：成员作答同样按任务复杂度实时估档
-        async for pe in spec.provider.stream(
-            messages, [], effort=resolve_auto_effort(spec.provider, messages),
-        ):
-            if isinstance(pe, ProviderTextDelta):
-                parts.append(pe.text)
-                await emit(RoundtableMemberDelta(
-                    member_index=index, round=round_no, text=pe.text,
-                ))
-            elif isinstance(pe, ProviderDone):
-                result.input_tokens += pe.input_tokens
-                result.output_tokens += pe.output_tokens
-                result.cached_tokens += pe.cached_tokens
-
-    async def consume() -> None:
-        # 预算计数点在最内层真实调用：重试的每次真实请求都计一次。
-        # BudgetExceeded 不在这里吞：让它落到下面的通用 except，转成该成员
-        # 的 error 终态（不会二次 finish("done")），由 run_roundtable 统一收尾。
-        if budget is not None:
-            budget.spend()
-        if semaphore is not None:
-            async with semaphore:
-                await stream_once()
-        else:
-            await stream_once()
-
-    for attempt in range(1, MAX_STREAM_RETRIES + 2):
-        parts.clear()
-        error = ""
-        retryable = False
-        try:
-            await asyncio.wait_for(consume(), timeout=timeout_s)
-            result.text = "".join(parts)
-            return await finish("done")
-        except TimeoutError:
-            error = f"作答超时（>{timeout_s} 秒）"
-            retryable = not parts and attempt <= MAX_STREAM_RETRIES
-        except Exception as e:  # noqa: BLE001 - 任何异常都归入该成员的失败，不上抛
-            error = str(e)[:200]
-            retryable = (
-                not parts and attempt <= MAX_STREAM_RETRIES and is_transient_error(e)
-            )
-        if retryable:
-            await notice_retry(
-                emit, _label(spec), error, attempt,
-                subject="圆桌成员", base_delay_s=RETRY_BASE_DELAY_S,
-            )
-            continue
-        # 超时 / 非瞬态错误 / 已吐出内容：如实失败，保留已有草稿片段
-        if parts:
-            result.text = "".join(parts)
-        return await finish("error", error)
-
-    return await finish("error", "重试次数用尽")  # pragma: no cover - 防御性兜底
+    # 重试节奏与通知都按本模块命名空间里的名字显式传入：monkeypatch
+    # roundtable.RETRY_BASE_DELAY_S / rt.notice_retry 的既有测试写法保持生效。
+    turn = await run_member_text(
+        spec.provider, messages,
+        timeout_s=timeout_s, emit=emit,
+        policy=MemberTurnPolicy(
+            retries=MAX_STREAM_RETRIES,
+            base_delay_s=RETRY_BASE_DELAY_S,
+            retry_subject="圆桌成员",
+            retry_label=_label(spec),
+            timeout_label="作答",
+            absorb_cancel=False,  # 取消穿透：run_roundtable 外层从桶里回收草稿
+            reset_usage_per_attempt=False,  # 成员用量跨重试尝试累计
+            budget_policy="turn_error",  # 预算耗尽落成员 error 终态，不上抛
+        ),
+        on_delta=lambda text: emit(RoundtableMemberDelta(
+            member_index=index, round=round_no, text=text,
+        )),
+        budget=budget,
+        semaphore=semaphore,
+        parts=parts,
+        notice=notice_retry,
+    )
+    result.text = turn.text
+    result.input_tokens += turn.input_tokens
+    result.output_tokens += turn.output_tokens
+    result.cached_tokens += turn.cached_tokens
+    if turn.error:
+        return await finish("error", turn.error)
+    return await finish("done")
 
 
 def _drafts_others(
@@ -490,59 +473,36 @@ async def _run_fusion(
 ) -> tuple[str, str, int, int, int]:
     """主席融合：流式产出最终答案。返回 (text, error, input_tokens, output_tokens, cached_tokens)。
 
+    主体循环（流式收集/超时/瞬态重试/取消协议/用量）在共享运行时
+    member_runtime.run_member_text 里统一实现，本函数是薄壳：签名与
+    五元组返回保持不变，run_roundtable 的融合调用点零感知。融合与对抗
+    文本轮同款策略——超时/重试文案前缀「融合」、用量每次尝试清零重计、
+    取消就地收敛（已流出文本随返回值交还调用方落库，不把 CancelledError
+    向上抛，避免丢失已流出的内容）；BudgetExceeded 与普通失败同路径，
+    落融合 error 文案。
+
     失败但已有部分文本时，保留部分文本一并返回（用户已经看到了，落库保持一致）。
-    取消时同样返回已产出的部分文本（error="cancelled"），由调用方决定落库；
-    不把 CancelledError 向上抛，避免丢失已流出的内容。
     """
-    parts: list[str] = []
-    usage_in = usage_out = usage_cached = 0
-
-    async def consume() -> None:
-        nonlocal usage_in, usage_out, usage_cached
-        # 融合调用同样计入模板预算（重试的每次真实调用都计）
-        if budget is not None:
-            budget.spend()
-        async for pe in chair.stream(
-            messages, [], effort=resolve_auto_effort(chair, messages),
-        ):
-            if isinstance(pe, ProviderTextDelta):
-                parts.append(pe.text)
-                await emit(TextDelta(text=pe.text))
-            elif isinstance(pe, ProviderDone):
-                usage_in += pe.input_tokens
-                usage_out += pe.output_tokens
-                usage_cached += pe.cached_tokens
-
-    error = ""
-    try:
-        for attempt in range(1, MAX_STREAM_RETRIES + 2):
-            parts = []
-            usage_in = usage_out = usage_cached = 0
-            retryable = False
-            try:
-                await asyncio.wait_for(consume(), timeout=timeout_s)
-                return "".join(parts), "", usage_in, usage_out, usage_cached
-            except TimeoutError:
-                error = f"融合超时（>{timeout_s} 秒）"
-                retryable = not parts and attempt <= MAX_STREAM_RETRIES
-            except Exception as e:  # noqa: BLE001
-                error = str(e)[:200]
-                retryable = (
-                    not parts and attempt <= MAX_STREAM_RETRIES and is_transient_error(e)
-                )
-            if retryable:
-                await notice_retry(
-                    emit, "融合", error, attempt,
-                    subject="圆桌成员", base_delay_s=RETRY_BASE_DELAY_S,
-                )
-                continue
-            break  # 超时 / 非瞬态错误 / 已有内容：停止重试
-    except asyncio.CancelledError:
-        # 用户取消：已流出的部分文本交给调用方落库
-        asyncio.current_task().uncancel()
-        return "".join(parts), "cancelled", usage_in, usage_out, usage_cached
-
-    return "".join(parts), error, usage_in, usage_out, usage_cached
+    # 重试节奏与通知都按本模块命名空间里的名字显式传入：monkeypatch
+    # roundtable.RETRY_BASE_DELAY_S / rt.notice_retry 的既有测试写法保持生效。
+    turn = await run_member_text(
+        chair, messages,
+        timeout_s=timeout_s, emit=emit,
+        policy=MemberTurnPolicy(
+            retries=MAX_STREAM_RETRIES,
+            base_delay_s=RETRY_BASE_DELAY_S,
+            retry_subject="圆桌成员",
+            retry_label="融合",
+            timeout_label="融合",
+            absorb_cancel=True,  # 取消就地收敛：部分文本随返回值交还调用方
+            reset_usage_per_attempt=True,  # 融合用量每次尝试清零重计
+            budget_policy="turn_error",  # 预算耗尽落融合 error，与普通失败同路径
+        ),
+        on_delta=lambda text: emit(TextDelta(text=text)),
+        budget=budget,
+        notice=notice_retry,
+    )
+    return turn.text, turn.error, turn.input_tokens, turn.output_tokens, turn.cached_tokens
 
 
 async def _run_round(

@@ -252,7 +252,9 @@ class CollabGalleryMixin:
         return {
             "templates": templates,
             "team_templates": team_templates,
-            "skipped": int(getattr(self.collab_templates, "skipped", 0) or 0),
+            # CollabTemplateStore.__init__ 总是初始化 skipped（core/collab_templates.py），
+            # 直取即可，无需 getattr 防御
+            "skipped": int(self.collab_templates.skipped),
         }
 
     async def collab_template_save(self, params: dict) -> dict:

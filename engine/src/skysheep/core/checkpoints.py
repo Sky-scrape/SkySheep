@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import stat
 import threading
@@ -34,6 +35,8 @@ from pathlib import Path
 
 from ..textio import write_bytes_atomic, write_text_atomic
 from ..tools.base import DIR_MARKER
+
+logger = logging.getLogger("skysheep.core.checkpoints")
 
 MAX_CHECKPOINTS = 50  # 每个会话保留的检查点数（按会话分桶淘汰）
 # 字节上限（安全审查 M15）：旧实现只按「条数」淘汰，一轮里改过的文件内容
@@ -353,7 +356,13 @@ class CheckpointStore:
             cp["blobs"] = blobs
             cp["sizes"] = sizes
             return True
-        except OSError:
+        except OSError as e:
+            # 落盘失败不能静默：内存副本还在（回滚仍可用），但重启后就没了，
+            # 至少在日志里留下「这条检查点只活在本轮」的线索
+            logger.warning(
+                "checkpoint: 检查点 %s 落盘失败（%s），本次只保留内存副本",
+                cp.get("id"), e,
+            )
             return False
 
     def _prune(self) -> None:

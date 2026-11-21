@@ -17,15 +17,24 @@
   绝不因嵌入失败让检索不可用。
 - **失效判定按 size + mtime**：检索前逐条比对，变了就标 stale 不参与检索并
   提示重建；不每次检索都重算 sha256（等于把文档重新解析一遍）。
+- **检索带进程内缓存**：已载入分块与 BM25 的语料侧统计（逐块分词/文档频率/
+  平均长度）按「库文件 stamp（size + mtime_ns）」整库缓存，命中时省掉每次
+  查询的落库读与重新分词。失效依据是库文件本身：任何写库（``index_paths``
+  或外部直改）都会改变 stamp 而自然换代，``index_paths`` 写后另显式失效
+  兜底 mtime 粒度粗的文件系统。缓存只复用语料统计、不打乱排序：同一输入
+  两次检索结果逐字段一致。
 - 所有函数是同步的（SQLite + 解析都是阻塞活），工具层统一 ``asyncio.to_thread``。
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 import sqlite3
+import threading
 import time
 from array import array
+from collections import Counter, OrderedDict
 from pathlib import Path
 
 from . import retrieval
@@ -227,6 +236,7 @@ def index_paths(
     db_path = index_db_path(project)
     conn = _connect(db_path)
     stats = {"indexed": 0, "chunks": 0, "embedded": 0, "skipped": skipped}
+    changed = 0  # 本连接写过行（commit 后读 total_changes）；有写才显式失效检索缓存
     deadline = time.monotonic() + max(0.0, embed_budget_s)
     embed_ok = embeddings_available(deadline=deadline)
     vec_model = ""
@@ -292,8 +302,15 @@ def index_paths(
             stats["indexed"] += 1
             stats["chunks"] += len(pieces)
         conn.commit()
+        changed = conn.total_changes
     finally:
         conn.close()
+    if changed:
+        # 写库必然改变库文件 stamp，检索缓存会自然换代；这里再显式失效一次，
+        # 兜底 mtime 粒度粗的文件系统——FAT 的 2 秒粒度上「同尺寸紧邻两次写」
+        # 可能给出相同 stamp，只靠 stamp 比对会残留旧代。零写入（增量跳过）
+        # 不动缓存，避免无谓的重载。
+        _drop_search_cache(db_path)
     return stats
 
 
@@ -323,6 +340,173 @@ def _load_chunks(
     return rows
 
 
+# ---- 检索缓存 ----
+# 检索路径原本每次查询都把全部 chunks 从 sqlite 载入内存并重新分词（BM25 的
+# 语料侧统计）。这里按「库文件 stamp（size + mtime_ns）」把两笔代价缓存成
+# 进程内状态：分块行按 (库, 范围) 缓存；BM25 语料统计再按 fresh 集合细分。
+# 失效依据是库文件本身：任何写库（index_paths 或外部直改）都会改变 stamp 而
+# 整库自然换代，无需逐个通知；index_paths 写后仍显式失效一次，兜底 mtime
+# 粒度粗的文件系统（FAT 的 2 秒粒度上「同尺寸紧邻两次写」可能给出相同 stamp）。
+# 并发：search 与 index_paths 都经 asyncio.to_thread 跑在线程池里
+# （tools/doc_search.py），命中/未命中/换代都要线程安全。锁只保护容器本身；
+# 未命中时的 sqlite 载入与分词在锁外做——同键必同值，并发重复算一次是良性
+# 浪费，不换正确性。
+
+_CACHE_LOCK = threading.Lock()
+# db 路径 -> 该库的已载入分块（按查询范围分桶）。只留最近几个库：桌面会话通常
+# 只开一个项目，而测试进程里 tmp 项目会不断产生新路径，不设上限会把整个进程
+# 碰过的分块都驻留在内存里。
+_ROWS_CACHE: OrderedDict[str, _RowsEntry] = OrderedDict()
+_ROWS_CACHE_MAX = 4
+# (库路径, stamp, 范围, fresh 集) -> BM25 语料统计。上限防长期会话里源文件反复
+# 改动攒出大量换代条目（旧 stamp 条目不再命中，等 LRU 淘汰）。
+_BM25_CACHE: OrderedDict[tuple, tuple] = OrderedDict()
+_BM25_CACHE_MAX = 32
+
+
+class _RowsEntry:
+    """单个索引库的已载入分块；stamp 是库文件的 (st_size, st_mtime_ns)。"""
+
+    __slots__ = ("stamp", "scopes")
+
+    def __init__(self, stamp: tuple[int, int]) -> None:
+        self.stamp = stamp
+        self.scopes: dict[tuple[str | None, bool], list] = {}
+
+
+def _db_stamp(db_path: Path) -> tuple[int, int] | None:
+    try:
+        st = db_path.stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
+def _drop_db_locked(key: str) -> None:
+    """按库路径整库失效（调用方必须已持 _CACHE_LOCK）。"""
+    _ROWS_CACHE.pop(key, None)
+    for k in [k for k in _BM25_CACHE if k[0] == key]:
+        del _BM25_CACHE[k]
+
+
+def _drop_search_cache(db_path: Path) -> None:
+    with _CACHE_LOCK:
+        _drop_db_locked(str(db_path))
+
+
+def _scoped_rows(
+    conn: sqlite3.Connection, db_path: Path, stamp: tuple[int, int] | None,
+    prefix: str | None, exact: bool, fresh: set[str],
+) -> list[tuple[str, int, int, str, bytes | None]]:
+    """当前范围与 fresh 集合下的分块行；命中缓存时不再读库。
+
+    stamp 必须在载入**之前**取：载入中途若库被并发写，载到的行配上旧 stamp，
+    下一次 stat 对不上就整库作废；反过来（载入后取）会把跨代混装的行钉在
+    新代上，缓存从此一直错。
+    """
+    if stamp is None:  # 库文件 stat 失败的窄竞态：退回无缓存直读，语义不变
+        return [r for r in _load_chunks(conn, prefix, exact) if r[0] in fresh]
+    key = str(db_path)
+    scope = (prefix, exact)
+    with _CACHE_LOCK:
+        entry = _ROWS_CACHE.get(key)
+        if entry is not None and entry.stamp != stamp:
+            _drop_db_locked(key)  # 外部直写换了代：整库（含语料统计）作废
+            entry = None
+        if entry is None:
+            entry = _RowsEntry(stamp)
+            _ROWS_CACHE[key] = entry
+            while len(_ROWS_CACHE) > _ROWS_CACHE_MAX:
+                _ROWS_CACHE.popitem(last=False)
+            cached = None
+        else:
+            _ROWS_CACHE.move_to_end(key)
+            cached = entry.scopes.get(scope)
+    if cached is None:
+        cached = _load_chunks(conn, prefix, exact)
+        with _CACHE_LOCK:
+            cur = _ROWS_CACHE.get(key)
+            # 存回前复核 stamp：载入期间库若被写，这份行属于旧代，不得进新代
+            if cur is not None and cur.stamp == stamp:
+                cur.scopes.setdefault(scope, cached)
+    return [r for r in cached if r[0] in fresh]
+
+
+def _bm25_build_corpus(
+    texts: list[str],
+) -> tuple[list[Counter[str]], float, Counter[str]]:
+    """BM25 语料侧预计算（与查询无关的一半）：逐块分词、文档频率、平均长度。
+
+    打分公式与常量归 ``retrieval``：这里只把与查询无关、可跨查询复用的统计
+    提出来缓存；查询侧见 ``_bm25_scores_from_corpus``，与 ``retrieval.bm25_scores``
+    逐行对齐，由 test_docindex.py 的契约测试钉住。
+    """
+    doc_terms = [Counter(retrieval.tokenize(t)) for t in texts]
+    n = len(texts)
+    avgdl = sum(sum(c.values()) for c in doc_terms) / n if n else 0.0
+    avgdl = avgdl or 1.0
+    df: Counter[str] = Counter()
+    for c in doc_terms:
+        df.update(c.keys())
+    return doc_terms, avgdl, df
+
+
+def _bm25_corpus_cached(
+    db_path: Path, stamp: tuple[int, int], prefix: str | None, exact: bool,
+    fresh: set[str], texts: list[str],
+) -> tuple[list[Counter[str]], float, Counter[str]]:
+    """按 (库, stamp, 范围, fresh 集) 缓存语料统计。
+
+    BM25 的 df/avgdl 定义在「参与本批打分的文档」上：范围（prefix）与
+    fresh（源文件未变更）任一变化都会改变语料，因此必须进键；库 stamp
+    在键里兜住 index_paths 之外的写库方（外部直改不经过显式失效）。
+    fresh 集合相同 ⇒ 从已缓存分块里筛出的子集相同 ⇒ 统计可复用。
+    """
+    key = (str(db_path), stamp, prefix, exact, frozenset(fresh))
+    with _CACHE_LOCK:
+        cached = _BM25_CACHE.get(key)
+        if cached is not None:
+            _BM25_CACHE.move_to_end(key)
+            return cached
+    corpus = _bm25_build_corpus(texts)
+    with _CACHE_LOCK:
+        _BM25_CACHE[key] = corpus
+        _BM25_CACHE.move_to_end(key)
+        while len(_BM25_CACHE) > _BM25_CACHE_MAX:
+            _BM25_CACHE.popitem(last=False)
+    return corpus
+
+
+def _bm25_scores_from_corpus(
+    query: str, corpus: tuple[list[Counter[str]], float, Counter[str]],
+) -> list[float]:
+    """查询侧 BM25 打分：公式与 ``retrieval.bm25_scores`` 完全一致（契约测试
+    钉住），只是 doc_terms/df/avgdl 来自缓存而不是现算。"""
+    doc_terms, avgdl, df = corpus
+    n = len(doc_terms)
+    if not n:
+        return []
+    q_terms = Counter(retrieval.tokenize(query))
+    if not q_terms:
+        return [0.0] * n
+    k1, b = retrieval.BM25_K1, retrieval.BM25_B
+    idf = {
+        t: math.log(1.0 + (n - df[t] + 0.5) / (df[t] + 0.5)) for t in q_terms
+    }
+    scores: list[float] = []
+    for c in doc_terms:
+        dl = sum(c.values()) or 1
+        s = 0.0
+        for t, qtf in q_terms.items():
+            tf = c.get(t)
+            if not tf:
+                continue
+            denom = tf + k1 * (1 - b + b * dl / avgdl)
+            s += qtf * idf[t] * (tf * (k1 + 1)) / denom
+        scores.append(s)
+    return scores
+
+
 def search(
     project: Path, target: Path | None, query: str, top_k: int = 5,
 ) -> dict:
@@ -343,6 +527,7 @@ def search(
             "missing": [prefix] if prefix else [], "keyword_only": True,
         }
     conn = _connect(db_path)
+    stamp = _db_stamp(db_path)  # 必须在载入分块之前取（见 _scoped_rows 注释）
     try:
         docs = conn.execute("SELECT path, size, mtime, vec_model FROM docs").fetchall()
         stale: list[str] = []
@@ -363,10 +548,7 @@ def search(
                 if vec_model == OLLAMA_EMBED_MODEL:
                     # 换过嵌入模型：旧向量维度/语义都不再可信，该文档退回纯 BM25
                     vec_ok.add(rel)
-        rows = [
-            r for r in _load_chunks(conn, prefix, exact)
-            if r[0] in fresh
-        ]
+        rows = _scoped_rows(conn, db_path, stamp, prefix, exact, fresh)
     finally:
         conn.close()
 
@@ -375,7 +557,11 @@ def search(
         return {"results": [], "stale": stale, "missing": missing, "keyword_only": True}
 
     texts = [r[3] for r in rows]
-    bm25 = retrieval.bm25_scores(query, texts)
+    if stamp is None:
+        bm25 = retrieval.bm25_scores(query, texts)
+    else:
+        corpus = _bm25_corpus_cached(db_path, stamp, prefix, exact, fresh, texts)
+        bm25 = _bm25_scores_from_corpus(query, corpus)
     cos: list[float] | None = None
     chunk_vecs = [_vec_from_blob(r[4]) if r[0] in vec_ok else None for r in rows]
     if any(chunk_vecs):

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from skysheep.core.mods_tool import ModTool
 from skysheep.core.subagent import CheckTaskTool, SpawnAgentTool, WaitTaskTool
 from skysheep.tools import ToolRegistry, default_tools
-from skysheep.tools.base import Tool
+from skysheep.tools.base import Safety, Tool
 from skysheep.tools.history import SearchHistoryTool
 from skysheep.tools.pipeline import PipelineWriteTool
 from skysheep.tools.schedule import ScheduleWriteTool
@@ -82,6 +82,43 @@ CONTEXTUAL_TOOLS = [
     "wait_task",
 ]
 
+# safety（本地权限门的放行策略）与 read_only_hint（对外宿主/工具目录在调用前
+# 的分级提示）是两个不同轴，通常同向（只读工具两边都「不改环境」，写/危险
+# 工具两边都「有写动作」）。个别工具有意让两者方向相反，每条理由与工具定义
+# 处的代码注释一致；契约测试（test_annotation_mismatch_must_be_whitelisted）
+# 遍历全部内置工具，出现任何不在此表的新不一致一律红；白名单里的陈旧条目
+# （工具已改注解、不再不一致）也会被 test_intentional_mismatch_whitelist_
+# has_no_stale_entry 揪出来，防止这份表烂掉。
+INTENTIONAL_ANNOTATION_MISMATCHES: dict[str, str] = {
+    "clipboard_read": (
+        "读操作本身不改环境，故 read_only_hint=True；剪贴板常驻密码管理器刚复制的"
+        "凭据等敏感内容，须与 clipboard_write 同一确认姿态，故 safety=WRITE（安全审查 D4）。"
+    ),
+    "todo_write": (
+        "待办清单只存引擎内存态、不触工作区文件，故 safety=READONLY 自动放行；"
+        "每次调用全量覆盖清单、对环境有写动作，故 read_only_hint=False"
+        "（同参数重复写入结果一致，同时 idempotent_hint=True）。"
+    ),
+    "memory_write": (
+        "只写 SkySheep 自有记忆文件、没有任意路径写面，故 safety=READONLY；"
+        "落点在引擎主目录 ~/.skysheep/memory.md 且注入所有会话 system prompt、"
+        "append/delete 走逐次确认（审查 FINDING 2），对宿主按有写动作标注 read_only_hint=False。"
+    ),
+    "schedule_write": (
+        "只写 SkySheep 自有日程库、safety=READONLY 免权限确认；"
+        "add/update/delete 对环境有写动作，故 read_only_hint=False 如实标注。"
+    ),
+    "pipeline_write": (
+        "只写 SkySheep 自有流水线库、safety=READONLY 免权限确认；"
+        "create/update_node 等对环境有写动作，故 read_only_hint=False 如实标注。"
+    ),
+    "spawn_agent": (
+        "派生本身只是登记子任务（子代理内的写/命令操作会被 SubagentGate 自动拒绝），"
+        "故 safety=READONLY；派生的子代理会真实执行任务，对外按「有写动作」如实标注"
+        " read_only_hint=False。"
+    ),
+}
+
 
 def _build(name: str) -> Tool:
     if name == "schedule_write":
@@ -116,6 +153,17 @@ def _annotations(name: str) -> dict:
     schema = _build(name).to_schema()
     assert set(schema) == {"name", "description", "input_schema", "annotations"}
     return schema["annotations"]
+
+
+def _annotation_mismatch(tool: Tool) -> bool:
+    """safety 与 read_only_hint 是否方向相反（两种形态之一）：
+
+    - safety=READONLY（本地权限门按只读自动放行）但 read_only_hint=False
+      （对外宿主按「有写动作」提示）；
+    - safety 非 READONLY（本地默认需确认）但 read_only_hint=True
+      （对外宿主按「不改环境」提示）。
+    """
+    return (tool.safety == Safety.READONLY) != bool(tool.read_only_hint)
 
 
 def test_default_registry_has_exactly_the_documented_tools():
@@ -222,3 +270,37 @@ def test_mod_tool_exports_annotations_and_preserves_raw_schema():
         "openWorldHint": True,
     }
     assert all(isinstance(value, bool) for value in exported["annotations"].values())
+
+
+@pytest.mark.parametrize("name", DEFAULT_TOOLS + CONTEXTUAL_TOOLS)
+def test_annotation_mismatch_must_be_whitelisted(name):
+    """机械契约：safety ↔ read_only_hint 方向相反必须是登记过的有意设计。
+
+    两者语义不同轴（safety 管本地权限门，read_only_hint 管对外宿主呈现），
+    但新工具默认应同向；出现任何不在 INTENTIONAL_ANNOTATION_MISMATCHES
+    白名单里的新不一致一律红。属有意设计就登记理由；属标错只改
+    read_only_hint 注解——safety 影响权限门的 UX 行为，不要动。
+    """
+    tool = _build(name)
+    if _annotation_mismatch(tool):
+        assert name in INTENTIONAL_ANNOTATION_MISMATCHES, (
+            f"{name} 出现新的 safety/read_only_hint 方向不一致"
+            f"（safety={tool.safety.value}，read_only_hint={tool.read_only_hint}）。"
+            "若是无意标错请改 read_only_hint 注解；若属有意设计请在"
+            " INTENTIONAL_ANNOTATION_MISMATCHES 登记理由。"
+        )
+
+
+def test_intentional_mismatch_whitelist_has_no_stale_entry():
+    """白名单不许养陈旧条目：工具注解改齐、不再不一致的名字必须移出白名单。
+
+    漏登记的方向会在上面的参数化契约里红，这里反向兜住「条目已过时」，
+    两头夹住白名单与真实不一致集合恒等。
+    """
+    mismatching = {
+        t.name
+        for t in (_build(name) for name in DEFAULT_TOOLS + CONTEXTUAL_TOOLS)
+        if _annotation_mismatch(t)
+    }
+    stale = sorted(set(INTENTIONAL_ANNOTATION_MISMATCHES) - mismatching)
+    assert not stale, f"白名单陈旧条目（这些工具已不再方向不一致，请移除）：{stale}"

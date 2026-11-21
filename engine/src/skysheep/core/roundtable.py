@@ -20,7 +20,8 @@
   消息元数据留存，不进入主历史；
 - 瞬态错误复用 agent.py 的判定与重试节奏；只在还没吐出任何内容时重试
   （否则重放会导致卡片文本重复）；成员卡死由 member_timeout_s 截断；
-- 草稿截断有两层：单成员 DRAFT_CHAR_LIMIT 字符上限 + 融合/辩论提示词里
+- 草稿截断有两层：单成员草稿经共享 clip_draft 按 collab_common 的
+  DRAFT_CHAR_LIMIT 上限截断 + 融合/辩论提示词里
   全部草稿的总字符预算（融合按主席剩余上下文估算，见 _fusion_draft_budget），
   防止多成员长草稿把上下文撑爆；
 - 辩论轮跳过两类成员：已收敛（上一轮修订没改动文本）不再花钱；
@@ -37,11 +38,9 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from ..events import (
-    AgentEvent,
     NoticeEvent,
     RoundtableMemberDelta,
     RoundtableMemberFinished,
@@ -53,6 +52,13 @@ from ..messages import Message, dialogue
 from ..models.base import Provider, ProviderDone, ProviderTextDelta
 from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S, is_transient_error
 from .collab_budget import RunBudget
+from .collab_common import (
+    DRAFT_CLIP_MARK,
+    EmitFn,
+    MemberSpec,
+    clip_draft,
+    notice_retry,
+)
 from .context import estimate_text_tokens, estimate_tokens
 from .effort import resolve_auto_effort
 
@@ -100,10 +106,6 @@ FUSION_INSTRUCTION = (
     "不要提及「成员」「草稿」「模型A/B」等融合过程。"
 )
 
-# 单成员草稿进入融合/辩论提示词的字符上限：长草稿截断（带标记），
-# 防止 8 个成员的长草稿把主席/成员自己的上下文撑爆。
-DRAFT_CHAR_LIMIT = 12_000
-
 # 融合/辩论提示词里全部草稿的总字符预算（主席上下文未知时的兜底上限；
 # 主席上下文已知时融合预算按剩余空间另算，见 _fusion_draft_budget）。
 DRAFTS_TOTAL_CHAR_LIMIT = 48_000
@@ -127,16 +129,6 @@ DEDUPE_MIN_CHARS = 600
 DEDUPE_SIMILARITY = 0.9
 
 
-def clip_draft(text: str) -> str:
-    """草稿过长时截断（带省略标记），保护融合/辩论提示词不爆上下文。"""
-    if len(text) <= DRAFT_CHAR_LIMIT:
-        return text
-    return text[:DRAFT_CHAR_LIMIT] + "\n…（草稿过长，已截断）"
-
-
-_DRAFT_CLIP_MARK = "\n…（草稿过长，已截断）"
-
-
 def clip_drafts_total(texts: list[str], budget: int) -> list[str]:
     """草稿总字符超预算时按长度等比压缩（带截断标记）。
 
@@ -149,7 +141,7 @@ def clip_drafts_total(texts: list[str], budget: int) -> list[str]:
     scale = budget / total
     clipped = [
         t if len(t) <= (keep := max(MIN_KEPT_DRAFT_CHARS, int(len(t) * scale)))
-        else t[:keep] + _DRAFT_CLIP_MARK
+        else t[:keep] + DRAFT_CLIP_MARK
         for t in texts
     ]
     over = sum(len(t) for t in clipped) - budget
@@ -159,7 +151,7 @@ def clip_drafts_total(texts: list[str], budget: int) -> list[str]:
         scale2 = max(0.0, 1.0 - over / total2)
         clipped = [
             t if len(t) <= 200
-            else t[: max(120, int(len(t) * scale2) - len(_DRAFT_CLIP_MARK))] + _DRAFT_CLIP_MARK
+            else t[: max(120, int(len(t) * scale2) - len(DRAFT_CLIP_MARK))] + DRAFT_CLIP_MARK
             for t in clipped
         ]
     return clipped
@@ -239,32 +231,9 @@ def _fusion_draft_budget(
     return min(DRAFTS_TOTAL_CHAR_LIMIT, max(floor, room))
 
 
-# 发给前端的事件回调（backend 负责把它转成 WS 帧广播）
-EmitFn = Callable[[AgentEvent], Awaitable[None]]
-
-
-@dataclass
-class MemberSpec:
-    """一个圆桌成员：provider/model 标识 + 已构建的 Provider 实例。
-
-    模板接入（1.9 协作模板）新增两个可选字段，全部默认空 = 旧行为逐字不变：
-    - name：模板角色显示名（RoundtableStarted 与成员卡用）；
-    - prompt：模板角色人设；非空时覆盖默认 MEMBER_SYSTEM（辩论轮拼在
-      DEBATE_SYSTEM 之前，不整体替换）。
-    """
-
-    provider_name: str
-    model: str
-    provider: Provider | None = None  # 构建失败（如缺 Key）时为 None，作答时直接报错
-    build_error: str = ""
-    role: str = ""  # 身份预设 id（MEMBER_ROLES 键；空 = 普通成员）
-    name: str = ""
-    prompt: str = ""
-
-    @property
-    def template_prompt(self) -> str:
-        """模板人设。"""
-        return self.prompt.strip()
+# MemberSpec / EmitFn 定义在 collab_common.py（圆桌/对抗/团队共用的小件），
+# 经上方 import 引入并在本模块再导出——backend.py 与测试沿用
+# `from skysheep.core.roundtable import MemberSpec` 的既有写法。
 
 
 @dataclass
@@ -444,7 +413,10 @@ async def _run_member(
                 not parts and attempt <= MAX_STREAM_RETRIES and is_transient_error(e)
             )
         if retryable:
-            await _notice_retry(emit, _label(spec), error, attempt)
+            await notice_retry(
+                emit, _label(spec), error, attempt,
+                subject="圆桌成员", base_delay_s=RETRY_BASE_DELAY_S,
+            )
             continue
         # 超时 / 非瞬态错误 / 已吐出内容：如实失败，保留已有草稿片段
         if parts:
@@ -452,15 +424,6 @@ async def _run_member(
         return await finish("error", error)
 
     return await finish("error", "重试次数用尽")  # pragma: no cover - 防御性兜底
-
-
-async def _notice_retry(emit: EmitFn, label: str, error: str, attempt: int) -> None:
-    delay = min(RETRY_BASE_DELAY_S * (2 ** (attempt - 1)), 10.0)
-    await emit(NoticeEvent(
-        message=f"圆桌成员 {label} 调用失败（{error[:120]}），"
-                f"{delay:.0f} 秒后自动重试（第 {attempt}/{MAX_STREAM_RETRIES} 次）…"
-    ))
-    await asyncio.sleep(delay)
 
 
 def _drafts_others(
@@ -568,7 +531,10 @@ async def _run_fusion(
                     not parts and attempt <= MAX_STREAM_RETRIES and is_transient_error(e)
                 )
             if retryable:
-                await _notice_retry(emit, "融合", error, attempt)
+                await notice_retry(
+                    emit, "融合", error, attempt,
+                    subject="圆桌成员", base_delay_s=RETRY_BASE_DELAY_S,
+                )
                 continue
             break  # 超时 / 非瞬态错误 / 已有内容：停止重试
     except asyncio.CancelledError:

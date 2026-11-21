@@ -65,6 +65,7 @@ from ..security.gate import PermissionGate
 from ..textio import write_text_atomic
 from ..tools.base import Safety, Tool, ToolContext, ToolError, ToolRegistry
 from .agent import Agent
+from .collab_budget import RunBudget
 from .prompt import TEAM_DIRECTOR_PROMPT, TEAM_HUDDLE_PROMPT, TEAM_MEMBER_PROMPT
 from .report_prune import prune_report_files
 from .roundtable import MemberSpec, run_roundtable
@@ -564,6 +565,12 @@ class TeamOrchestrator:
       收紧，权限语义零放松）。总管 Agent 不透传 hooks/mods——总管只有内部
       团队工具，会话级拦截手段对板面操作没有意义。
     """
+
+    # 模板运行预算（collab_budget.RunBudget）：宿主在建队后挂上（backend.py
+    # 的 orch.collab_budget = run_budget，None = 本队未带模板），同一支队伍的
+    # 后续消息复用这一份——预算线随团队生命周期延续，不因每轮新建而重置；
+    # token 累计另经宿主持有的 collab_tokens dict 跨轮回填进 RunBudget。
+    collab_budget: RunBudget | None = None
 
     def __init__(
         self,

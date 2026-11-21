@@ -43,7 +43,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from ..events import (
@@ -52,7 +51,6 @@ from ..events import (
     AdversarialPhase,
     AdversarialStarted,
     AdversarialVerdict,
-    AgentEvent,
     NoticeEvent,
     TextDelta,
 )
@@ -61,11 +59,8 @@ from ..models.base import Provider, ProviderDone, ProviderTextDelta
 from ..models.diagnostics import classify_error_text
 from .agent import MAX_STREAM_RETRIES, RETRY_BASE_DELAY_S, is_transient_error
 from .collab_budget import BudgetExceeded, RunBudget
+from .collab_common import EmitFn, MemberSpec, clip_draft, notice_retry
 from .effort import resolve_auto_effort
-from .roundtable import MemberSpec, clip_draft
-
-# 发给前端的事件回调（与圆桌同一姿态：backend 负责转成 WS 帧广播）
-EmitFn = Callable[[AgentEvent], Awaitable[None]]
 
 # ---- 裁决词汇 ----
 VERDICT_CONFIRMED = "confirmed"   # 调查员确认成立
@@ -261,15 +256,6 @@ def extract_json_object(text: str) -> dict | None:
     return None
 
 
-async def _notice_retry(emit: EmitFn, label: str, error: str, attempt: int) -> None:
-    delay = min(RETRY_BASE_DELAY_S * (2 ** (attempt - 1)), 10.0)
-    await emit(NoticeEvent(
-        message=f"对抗 {label} 调用失败（{error[:120]}），"
-                f"{delay:.0f} 秒后自动重试（第 {attempt}/{MAX_STREAM_RETRIES} 次）…"
-    ))
-    await asyncio.sleep(delay)
-
-
 async def _run_text_turn(
     provider: Provider,
     messages: list[Message],
@@ -329,7 +315,10 @@ async def _run_text_turn(
                     not parts and attempt <= MAX_STREAM_RETRIES and is_transient_error(e)
                 )
             if retryable:
-                await _notice_retry(emit, label, error, attempt)
+                await notice_retry(
+                    emit, label, error, attempt,
+                    subject="对抗", base_delay_s=RETRY_BASE_DELAY_S,
+                )
                 continue
             break  # 超时 / 非瞬态错误 / 已有内容：停止重试
     except asyncio.CancelledError:

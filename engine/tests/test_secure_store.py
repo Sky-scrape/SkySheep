@@ -9,6 +9,7 @@ Windows（或 crypt32 不可用）的路径用 monkeypatch sys.platform 覆盖�
 from __future__ import annotations
 
 import base64
+import logging
 import sys
 
 import pytest
@@ -34,6 +35,14 @@ def _reset_migration_flag():
     config._migration_attempted = False
     yield
     config._migration_attempted = False
+
+
+@pytest.fixture(autouse=True)
+def _reset_degradation_flag():
+    """降级标记是模块级进程内存活：每个用例前复位，互不串味。"""
+    secure_store._degraded_reason = None
+    yield
+    secure_store._degraded_reason = None
 
 
 def _write_config(raw_text: str):
@@ -109,6 +118,68 @@ def test_channel_secret_key_selection():
         assert secure_store.is_channel_secret_key(key), key
     for key in miss:
         assert not secure_store.is_channel_secret_key(key), key
+
+
+# ---- 进程内降级标记（设置页「凭据未能加密」提示的数据源） ----
+
+
+def test_degradation_defaults_clean():
+    """没发生过降级时标记干净：degraded=False、reason=None。"""
+    assert secure_store.degradation() == {"degraded": False, "reason": None}
+
+
+@DPAPI
+def test_encrypt_success_does_not_mark_degraded():
+    """正常加密路径不点亮降级标记（标记只在失败路径置位）。"""
+    enc = secure_store.encrypt_value("sk-ok-1")
+    assert enc.startswith(secure_store.DPAPI_PREFIX)
+    assert secure_store.degradation()["degraded"] is False
+
+
+@DPAPI
+def test_encrypt_failure_marks_degraded_and_warns(monkeypatch, caplog):
+    """CryptProtectData 调用失败：明文保留（不拖垮配置写入）+ warning 留痕
+    + 降级标记点亮（设置页据此亮「凭据未能加密」提示）。"""
+    crypt32 = secure_store._crypt32
+    assert crypt32 is not None, "前提：DPAPI 已可用、DLL 已加载"
+
+    def fail(*_a, **_k):
+        return 0  # BOOL FALSE：模拟 CryptProtectData 调用失败
+
+    monkeypatch.setattr(crypt32, "CryptProtectData", fail)
+    with caplog.at_level(logging.WARNING, logger="skysheep.secure_store"):
+        out = secure_store.encrypt_value("sk-degraded-1")
+    assert out == "sk-degraded-1", "加密失败必须原样返回明文"
+    assert "DPAPI 加密失败" in caplog.text, "warning 必须留痕"
+    st = secure_store.degradation()
+    assert st["degraded"] is True
+    assert "DPAPI 加密失败" in st["reason"]
+
+
+@DPAPI
+def test_dpapi_unavailable_on_windows_marks_degraded(monkeypatch):
+    """Windows 上 DPAPI 不可用（crypt32 加载失败）的明文直返路径也要点亮标记：
+    该路径此前连日志以外的可见痕迹都没有。"""
+    monkeypatch.setattr(secure_store, "dpapi_available", lambda: False)
+    assert secure_store.encrypt_value("sk-plain-1") == "sk-plain-1"
+    st = secure_store.degradation()
+    assert st["degraded"] is True
+    assert "不可用" in st["reason"]
+
+
+def test_non_windows_plaintext_is_baseline_not_degradation(monkeypatch):
+    """非 Windows 的明文是平台基线（跨平台取舍，见模块 docstring），
+    不算降级、不点亮提示——否则 Linux/macOS 开发机会常亮误导性警示。"""
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert secure_store.encrypt_value("sk-linux-1") == "sk-linux-1"
+    assert secure_store.degradation() == {"degraded": False, "reason": None}
+
+
+def test_first_failure_reason_is_kept():
+    """只记首因：后续失败不覆盖第一条现场（排障看第一条）。"""
+    secure_store._mark_degraded("第一条")
+    secure_store._mark_degraded("第二条")
+    assert secure_store.degradation() == {"degraded": True, "reason": "第一条"}
 
 
 # ---- config 读写透明化 ----

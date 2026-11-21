@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from ... import secure_store
 from ...config import (
     ConfigError,
     config_path,
@@ -213,6 +214,10 @@ class SystemMixin(RelaySettingsMixin):
             # 全局唤起热键（仅 Windows 桌面版生效；其它平台 supported=False）
             "hotkey": self._hotkey_pref(),
             "hotkey_supported": sys.platform == "win32",
+            # 凭据加密降级（进程内存活标记）：DPAPI 加密失败时凭据按明文写回
+            # config.toml（只留了日志，重启后用户无从知晓已退回明文），设置页
+            # 据此亮「凭据未能加密」提示，不让「已加密」的用户被静默降级
+            "credential_crypto": secure_store.degradation(),
             # 全局出网设置（设置 · 高级 · 网络卡三字段）
             "network_proxy": self.cfg.network.proxy,
             "network_no_proxy": self.cfg.network.no_proxy,
@@ -370,8 +375,10 @@ class SystemMixin(RelaySettingsMixin):
             combo = str(hotkey).strip()
             try:
                 await self._write_ui_prefs({"hotkey": combo or None})
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001 - 写盘失败回可读错误，设置项不落
+                # 与同函数开机自启分支同一口径：吞掉会让前端拿到「保存成功」，
+                # 重启后用户才发现热键没生效且无任何报错
+                raise RuntimeError(f"全局热键保存失败：{e}") from None
 
         autostart = params.get("autostart")
         if autostart is not None:

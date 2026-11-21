@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 
@@ -137,3 +138,73 @@ def test_sandbox_settings_frontend_wired(home):
     # 设置内搜索按卡片文字命中：三份文案都在 .settings-card 文本里
     # （settingsCardIndex 直接读 textContent，无需额外登记）
     assert html.index('id="settings-page-advanced"') < html.index("系统级定时调度")
+
+
+# ---------- ④ 凭据加密降级提示（进程内标记 → advanced.get 载荷 → 前端） ----------
+
+def test_advanced_get_credential_crypto_default_clean(home, monkeypatch):
+    """advanced.get 回传 credential_crypto；进程内未发生过降级时是干净状态。"""
+    import skysheep.secure_store as secure_store
+
+    monkeypatch.setattr(secure_store, "_degraded_reason", None)
+    frame = call(home, "advanced.get")
+    assert frame["ok"]
+    assert frame["result"]["credential_crypto"] == {"degraded": False, "reason": None}
+
+
+def test_advanced_get_credential_crypto_degraded(home, monkeypatch):
+    """进程内发生过一次加密降级 → 载荷点亮 degraded 并带原因，
+    设置页据此亮「凭据未能加密」提示（不能只留在日志里）。"""
+    import skysheep.secure_store as secure_store
+
+    monkeypatch.setattr(
+        secure_store, "_degraded_reason", "DPAPI 加密失败，凭据按明文保存：测试注入"
+    )
+    frame = call(home, "advanced.get")
+    assert frame["ok"]
+    cc = frame["result"]["credential_crypto"]
+    assert cc["degraded"] is True
+    assert "明文" in cc["reason"]
+
+
+def test_credential_crypto_notice_wired():
+    """降级提示的前端接线就位：index.html 挂点 + app-advanced.js 渲染与
+    「知道了」关闭。锚稳定 id 与载荷字段名（credential_crypto），不锚文案。"""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="adv-credential-crypto-warn"' in html
+    js = read_app_bundle()
+    assert "credential_crypto" in js, "渲染必须读 advanced.get 的降级载荷字段"
+    assert 'q("adv-credential-crypto-warn")' in js
+    assert "btn-crypto-warn-dismiss" in js
+
+
+# ---------- ⑤ 全局热键保存失败必须回错（与开机自启同一 RuntimeError 口径） ----------
+
+def test_advanced_save_hotkey_failure_reports_error(home, monkeypatch):
+    """热键偏好写盘失败要回可读错误，不能静默吞掉让前端拿到「保存成功」：
+    此前是 except pass，用户重启后才发现热键没生效且无任何报错。
+    模拟磁盘故障锚在 preferences 模块实际落盘调用（write_text_atomic）；
+    只对含热键值的写入失败——启动期 _bind_project 的 ui.json 写入照常放行。"""
+    import skysheep.server.backend_parts.preferences as prefs_mod
+
+    real = prefs_mod.write_text_atomic
+
+    def boom(path, text, **kwargs):
+        if "Ctrl+Shift+F9" in text:
+            raise OSError("模拟磁盘故障")
+        return real(path, text, **kwargs)
+
+    monkeypatch.setattr(prefs_mod, "write_text_atomic", boom)
+    frame = call(home, "advanced.save", {"hotkey": "Ctrl+Shift+F9"})
+    assert not frame["ok"]
+    assert "全局热键保存失败" in frame["error"]
+    assert "模拟磁盘故障" in frame["error"], "底层原因要透传给前端"
+
+
+def test_advanced_save_hotkey_success_still_roundtrips(home):
+    """正常路径不受影响：热键保存成功且落 ui.json（守住改动没有误伤主路径；
+    与 test_settings_extras.test_hotkey_pref_and_parser 的回环断言同口径）。"""
+    frame = call(home, "advanced.save", {"hotkey": "Ctrl+Shift+F9"})
+    assert frame["ok"]
+    ui = json.loads((home / "home" / "ui.json").read_text(encoding="utf-8"))
+    assert ui.get("hotkey") == "Ctrl+Shift+F9"

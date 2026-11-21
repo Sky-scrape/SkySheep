@@ -157,6 +157,34 @@ def dpapi_available() -> bool:
         return False
 
 
+# ---- 进程内降级标记（设置页「凭据未能加密」提示的数据源，审计 #8） ----
+
+# 本进程内发生过「该加密却没加密成」的首条原因；None = 未发生过。
+# 模块级存活：明文一旦落盘，事实不因后一次加密成功而消失，标记保持点亮
+# 直到进程退出（前端提示可关闭，引擎侧不重置）。CPython 下字符串赋值原子，
+# 加密可从多线程配置写路径并发进入，不加锁——竞争只影响保留哪条首因，
+# 不影响正确性。
+_degraded_reason: str | None = None
+
+
+def degradation() -> dict:
+    """进程内凭据加密降级状态：``{"degraded": bool, "reason": str | None}``。
+
+    非 Windows 的明文是平台基线（模块 docstring 的跨平台取舍），不算降级；
+    Windows 上 DPAPI 不可用（crypt32/kernel32 加载失败）或 CryptProtectData
+    调用失败算降级——静态防护从密文静默退化为明文，只留日志用户看不见，
+    设置页据此亮「凭据未能加密」提示。
+    """
+    return {"degraded": _degraded_reason is not None, "reason": _degraded_reason}
+
+
+def _mark_degraded(reason: str) -> None:
+    """点亮降级标记：只记首因，后续失败不覆盖第一条现场（排障看第一条）。"""
+    global _degraded_reason
+    if _degraded_reason is None:
+        _degraded_reason = reason
+
+
 def encrypt_value(plain: str) -> str:
     """明文凭据 → ``dpapi:<base64>`` 密文。
 
@@ -167,6 +195,11 @@ def encrypt_value(plain: str) -> str:
     if not plain or is_encrypted(plain):
         return plain
     if not dpapi_available():
+        # 非 Windows 是设计内明文基线，不点亮标记；Windows 走到这里是
+        # crypt32/kernel32 加载失败（dpapi_available 已记 warning），
+        # 明文落盘要让设置页看得见，不能只留在日志
+        if sys.platform == "win32":
+            _mark_degraded("DPAPI 不可用（crypt32/kernel32 加载失败），凭据按明文保存")
         return plain
     try:
         crypt32, kernel32 = _load_crypto_dlls()
@@ -185,6 +218,7 @@ def encrypt_value(plain: str) -> str:
             kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
         return DPAPI_PREFIX + base64.b64encode(raw).decode("ascii")
     except Exception as e:  # noqa: BLE001 - 加密失败不能拖垮配置写入
+        _mark_degraded(f"DPAPI 加密失败，凭据按明文保存：{e}")
         logger.warning("DPAPI 加密失败，凭据按明文保留：%s", e)
         return plain
 

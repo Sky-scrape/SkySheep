@@ -223,6 +223,9 @@ function advancedStatus(text, ok = true) {
 
 // 加载时记下的热键：保存后判断是否变了——热键要重启才生效，提示不能撒谎
 let advancedLoadedHotkey = "";
+// 凭据加密降级提示是否已收起（本次页面会话内一次性）：引擎侧降级标记按进程
+// 存活（明文已落盘的事实不随一次加密成功消失），刷新页面后提示会再出现
+let credentialCryptoDismissed = false;
 
 async function renderAdvancedCfg() {
   let d;
@@ -285,6 +288,23 @@ async function renderAdvancedCfg() {
     autoHint.textContent = `已开启：开机自动在后台启动（关窗选「缩到系统托盘」即常驻，定时任务按时触发）。`;
   } else {
     autoHint.textContent = "开启后开机自动启动，定时任务与日程提醒才能真正无人值守";
+  }
+  // 凭据加密降级提示：DPAPI 加密失败时凭据按明文落盘、只留日志——「已加密」
+  // 的用户被静默降级必须看得见（reason 是引擎侧记录的失败首因）
+  const cryptoWarn = q("adv-credential-crypto-warn");
+  if (cryptoWarn) {
+    const cc = d.credential_crypto || {};
+    if (cc.degraded && !credentialCryptoDismissed) {
+      cryptoWarn.innerHTML = "⚠ 凭据未能加密，已按明文保存，请检查 DPAPI 环境" +
+        (cc.reason ? `（${escapeHtml(cc.reason)}）` : "") +
+        ' <button class="btn-ghost" id="btn-crypto-warn-dismiss">知道了</button>';
+      cryptoWarn.hidden = false;
+      const dismiss = cryptoWarn.querySelector("#btn-crypto-warn-dismiss");
+      if (dismiss) dismiss.onclick = () => {
+        credentialCryptoDismissed = true;
+        cryptoWarn.hidden = true;
+      };
+    }
   }
   await renderRoutingCfg(d);
   advancedStatus("");

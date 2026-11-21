@@ -1607,6 +1607,10 @@
             <p class="settings-hint">
               这些开关影响 Agent 能碰什么、以及它能自己醒着干活的范围。
             </p>
+            <!-- 凭据加密降级提示（renderAdvancedCfg 按 advanced.get 的
+                 credential_crypto 进程内标记点亮；「知道了」只在本次页面
+                 会话内收起，引擎重启前刷新后仍会再出现） -->
+            <div class="card-status bad" id="adv-credential-crypto-warn" hidden></div>
             <label class="toggle-row adv-toggle">
               <input type="checkbox" id="adv-restrict-workdir">
               <span>仅允许 Agent 访问当前工作目录</span>

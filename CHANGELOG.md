@@ -38,6 +38,41 @@
   原子性的一部分），用户可见行为逐点不变——既有圆桌 38 条与对抗 28 条测试
   零改动全绿，新增运行时行为断言 22 条（流式收集、超时截断、取消保文本、
   重试仅在未吐内容时、用量双口径、预算透传/落 error 双策略）。
+- **权限门判定收敛单一决策源 `security/decision.py`（渠道门取严闭合）**：
+  needs_confirm（并发只读批收集期预检）与 authorize（串行真正授权）原本各自
+  维护一份手写判定序，靠注释与对照测试钉住同步——历史上已漂过两次
+  （memory_write 事故 FINDING 2 的引擎主目录守卫、出站密钥审查 H1 的
+  READONLY 预检）。现在两函数都改为消费新建 `security/decision.py` 的同一份
+  纯同步 `decide()`（ALLOW / CONFIRM / DENY 三档；reason 机读码只进日志与
+  测试，不进 PermissionRequest 事件流，前端契约不变）：needs_confirm 只做
+  「结论 ≠ ALLOW」的布尔投影，authorize 只消费结论落预拒绝 / 确认卡 /
+  白名单记账，两函数对调用方的签名契约不变，结构上不可能再各写各的。
+  统一按分歧取严落地，用户可见变化如实列三条：渠道会话闭合档位旁路——
+  桌面端「自动允许写入 / 完全访问」档位不再同步写到渠道门上，渠道门的批
+  预检覆写为只认「渠道 authorize 也认的纯只读放行」，其余一律断批回串行
+  由渠道门 authorize 裁决；此前桌面开完全访问或渠道门被白名单点亮后，
+  memory_write 这类名义只读的调用会在渠道会话的并发批内零确认直执行，
+  而串行 authorize 本会给确认 / 拒绝。批预检判定域取严——出站密钥扫描扩到
+  全部安全级（旧版只扫名义只读候选；当前批收集只收只读候选，此条是防
+  「预检与授权再漂移」的取严兜底）。判定序统一取 authorize 序——出站密钥
+  预拒先于 Mods 收紧声明，既命中收紧又含已知密钥的调用稳定落「已拦截」
+  而非确认卡。新增 `tests/test_gate_decision_sync.py` 82 用例钉三读同源
+  （decide / needs_confirm / authorize 等价矩阵、十四门形态 × 只读候选跨门
+  等价、force 旗标全域、上述取严回归与 memory_write 事故回归），既有权限门
+  测试零改动全绿。
+- **工程质量：天气服务迁出 core、内置工具注册收敛单一清单**：其一，
+  `core/weather.py` 整体迁至新包 `integrations/weather.py`（git 重命名，
+  内容零差异），新建 `integrations/` 定位为「只依赖引擎基础设施出网、
+  不参与 Agent 循环」的外部服务薄客户端包，与 core/ 平级；活引用仅工厂
+  懒导入与测试导入两处改路径，WS 方法名 `factory.weather` 与 config 键
+  不变，用户无感。其二，`tools/__init__.py` 的内置工具注册原本三处手工
+  同步（import 块、default_tools 函数体、__all__）外加一处平行名单
+  COMPUTER_TOOL_NAMES，收敛为单一 `_TOOL_SPECS` 清单（31 条，顺序与改前
+  构造顺序逐位一致，档位写错直接 ValueError 拒绝构造）；default_tools()
+  改为按档位过滤、按注入标记构造的机械循环，COMPUTER_TOOL_NAMES 与
+  __all__ 的工具类名由清单派生——新增工具漏改一处即静默缺席的问题在
+  结构上消除，注册结果与改前一致（DEFAULT_TOOLS / CONTROL_TOOLS 契约
+  测试零改动全绿）。
 
 ## [2.7.2] - 2026-11-20
 

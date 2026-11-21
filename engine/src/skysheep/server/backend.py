@@ -7232,12 +7232,21 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         默认档（permission.set_mode / ui.json 的 accept_edits）是所有未覆盖
         会话的当前值；只有 session.accept_set 显式覆盖过的会话才脱离默认
         （那正是「按会话独立」的语义）。runtime 的门在 _runtime_gate 里是
-        私有副本，不随 self.gate 原地变，所以默认档变化要在这里显式追平。"""
+        私有副本，不随 self.gate 原地变，所以默认档变化要在这里显式追平。
+
+        渠道门跳过（design-gate-sync §3.6 加固）：渠道姿态只由渠道门决定，
+        authorize 不读档位（无人值守口径），档位本就不该出现在一个不消费
+        它的门上——写上去只会让继承的批预检谓词读到与渠道 authorize 分歧
+        的档位（分歧 D2）。"""
         for sid, rt in self.runtimes.items():
             if sid in self._session_accepts:
                 continue
             g = rt.agent.gate
-            if g is not None and g is not self.gate:
+            if (
+                g is not None
+                and g is not self.gate
+                and not isinstance(g, ChannelGate)
+            ):
                 g.auto_accept_write = self.gate.auto_accept_write
                 g.auto_accept_all = self.gate.auto_accept_all
 
@@ -7297,14 +7306,19 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         引擎默认档（permission.set_mode）仍是新会话的起点。
 
         本机专属（local_only）：放宽档只由本机用户切换（安全审查根因一，
-        与 permission.set_mode 同一收口）；调档记日志，事后可追溯。"""
+        与 permission.set_mode 同一收口）；调档记日志，事后可追溯。
+
+        渠道门跳过（design-gate-sync §3.6 加固，与 _sync_default_accept_to_
+        runtimes 同口径）：渠道会话的授权面只由渠道门决定，桌面侧给渠道
+        会话调档不得把引擎档带到无人值守通道的渠道门上。"""
         if mode not in ("confirm", "accept_edits", "full_access"):
             raise RuntimeError("权限模式只支持 confirm / accept_edits / full_access")
         await self._get_owned_session(session_id, local=True)
         v = {"confirm": 0, "accept_edits": 1, "full_access": 2}[mode]
         self._session_accepts[session_id] = v
         rt = self.runtimes.get(session_id)
-        if rt is not None and rt.agent.gate is not None:
+        if rt is not None and rt.agent.gate is not None \
+                and not isinstance(rt.agent.gate, ChannelGate):
             rt.agent.gate.auto_accept_write = v in (1, 2)
             rt.agent.gate.auto_accept_all = v == 2
         logger.info(

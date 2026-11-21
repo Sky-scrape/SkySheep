@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING
 from .. import obs
 from ..tools.base import Safety, Tool
 from . import leases
+from .decision import Tier, decide
 
 if TYPE_CHECKING:
     from ..session.store import SessionStore
@@ -1430,58 +1431,20 @@ class PermissionGate:
     def needs_confirm(self, tool: Tool, input_dict: dict) -> bool:
         """authorize 是否会对这次调用要求用户确认（纯判定，无副作用）。
 
-        供 Agent 的并发只读批收集在**收集期**预检批内候选：名义 READONLY 但
-        落点在引擎主目录的工具（_ENGINE_HOME_FIXED_WRITERS，如 memory_write）
-        的逐次确认守卫在 authorize 里位于 READONLY 短路**之前**，批收集若只看
-        safety 分级就会把它们收进并发批零确认直达执行（安全审查：并发只读批
-        绕门）。预检命中即断批回退串行路径，真正的 authorize（创建
-        PendingPermission、触发 on_request）仍只在那里调一次——预检若走真
-        authorize，回退串行会对同一次调用二次触发确认回调。
+        供 Agent 的并发只读批收集在**收集期**预检批内候选：预检只断批、真
+        authorize（创建 PendingPermission、触发 on_request）仍只在那里调一次
+        ——预检若走真 authorize，回退串行会对同一次调用二次触发确认回调。
+        只对 READONLY 候选有意义（批收集先做 safety 判定才问这里）。
 
-        Mods 收紧声明（extra_confirm）命中时这里必须返回 True：与 authorize
-        的「命中即跳过 READONLY 短路」同位（在 READONLY 预检之前），否则名义
-        READONLY 且被 Mod 要求确认的调用会被收进并发批绕过逐次确认。
-
-        READONLY 分支还带出站密钥扫描（审查 H1，与 GrantedGate.needs_confirm
-        同款判定）：READONLY+open_world 工具（web_fetch / web_search）的参数
-        是出站通道，authorize 顶端的已知密钥预拒绝（_egress_pre_deny）在批
-        路径上不可达——批对第 2..n 个成员只调本谓词就直接执行，预检不拦等于
-        config.toml/mcp.json 里的真实凭据零确认外发。命中（scan["ok"] 为
-        False）报 True 断批，回退串行由 authorize 预拒绝落 DENY。
-
-        只对 READONLY 候选有意义（批收集先做 safety 判定才问这里）；子类门
-        （HeadlessGate / ChannelGate / SubagentGate / IsolatedGate）对 READONLY
-        的放行口径与本判定一致（READONLY 短路均只让引擎主目录守卫之外的调用
-        过去），预检命中回退串行后由各自 authorize 给出最终结论。子类门不挂
-        mods（构造点不传 extra_confirm），此处对它们恒为 False。
-        与 authorize 的各自动放行分支同序同条件，改 authorize 时必须同步改
-        这里；一致性由 tests/test_gate_home_guard.py 的对照用例钉住。
+        判定与 authorize 单一同源：统一走 security/decision.py 的 ``decide()``，
+        本方法只是「结论 ≠ ALLOW」的布尔投影，两函数结构上不可能再各自漂移
+        （原两份手写判定序已漂过两次——memory_write 事故 FINDING 2 的引擎主
+        目录守卫、出站密钥审查 H1 的 READONLY 预检——均收编进 decide）。
+        DENY（egress 已知密钥预拒）同样映射 True：断批回退串行，由 authorize
+        预拒绝落 DENY。一致性由 tests/test_gate_decision_sync.py 的等价矩阵
+        与 tests/test_gate_home_guard.py 的对照用例共同钉住。
         """
-        if self._extra_confirm_required(tool, input_dict):
-            return True
-        if tool.safety == Safety.READONLY and not self._write_hits_engine_home(tool, input_dict):
-            # 出站密钥预检先于免确认放行：已知密钥命中时批路径拿不到 authorize
-            # 的预拒绝，必须在这里断批（scan 为 None——非开放网络只读、无字符串
-            # 参数、防线故障降级——按未扫描处理，保持原放行语义不扩大打击面）。
-            scan = self._egress_scan(tool, input_dict)
-            if scan is not None and not scan["ok"]:
-                return True
-            return False
-        if self.auto_accept_all:
-            return False
-        if (
-            self.auto_accept_write
-            and tool.safety == Safety.WRITE
-            and self._write_target_inside_workdir(tool, input_dict)
-            and not self._write_is_actually_delete(tool, input_dict)
-        ):
-            return False
-        rule = self._matching_rule(tool, tool.arg_text(input_dict))
-        return not (
-            rule is not None
-            and not self._write_is_actually_delete(tool, input_dict)
-            and not self._write_hits_engine_home(tool, input_dict)
-        )
+        return decide(self, tool, input_dict).tier is not Tier.ALLOW
 
     # ---- 出站密钥防线（提示注入纵深防御，security/egress.py） ----
     #
@@ -1600,93 +1563,32 @@ class PermissionGate:
         主目录写入仍逐次确认（全局技能/凭据文件跨信任边界，Mod 不得放开）。
         两者同时为 True 时 force_pending 优先（更保守）。
         """
-        # 出站密钥防线（提示注入纵深防御）：先于一切放行分支，见上方方法组说明
-        blocked = self._egress_pre_deny(tool, input_dict)
-        if blocked is not None:
-            return blocked
-        if force_pending:
-            # force_pending 时不提供「总是允许」：否则用户点一次就把 Mod 的
-            # 逐次确认永久关掉（规则落库后下次不再询问），等于绕过 Mod 意志
-            pending = await self._build_pending(tool, input_dict, always_rule=None)
-            return pending
-        # Mods 收紧声明（require_confirm_tools）命中即跳过下方全部自动放行分支，
-        # 落到 pending 创建：即使 READONLY 短路 / 完全访问档 / 自动允许写入档 /
-        # 白名单本会放行，被 Mod 点名的工具一律回落逐次确认——只收紧，不放行。
-        extra_required = self._extra_confirm_required(tool, input_dict)
-        # 引擎主目录写入守卫必须在 READONLY 短路**之前**：memory_write 名义
-        # READONLY 却写 ~/.skysheep/memory.md，而该文件注入所有项目所有会话的
-        # system prompt——短路在前会让 P2-7 守卫对它结构性不可达（第二轮审查
-        # FINDING 2）。命中不在此放行，落到下方逐次确认；规则放行分支同样被
-        # 本守卫拦下（含整工具 always），与 P2-7 口径一致：引擎主目录写入
-        # 由白名单、自动允许写入、无人值守名单、渠道名单四路都拦得住，规则
-        # 沉淀不出放行。
-        # 唯一的例外是「完全访问」档（auto_accept_all）：那是用户显式选择的
-        # 「一切放行」，按设计也放行引擎主目录写入——与本守卫是同一语义的两面，
-        # 不是漏挡（审计 L01 把「永远逐次确认」的措辞收窄成上面这条四路口径）。
-        # 不想让引擎数据目录被无确认改写，就别开该档。
-        engine_home_write = self._write_hits_engine_home(tool, input_dict)
-        # Claude Code 兼容模式的 tool.check=allow：跳过引擎自动放行判定。
-        # 硬性守卫保留，Mod 也不得放开：
-        # - 引擎主目录写入（全局技能/凭据跨信任边界）
-        # - 名义是移动、实为递归删除（move_file overwrite 覆盖目录）
-        # - 旧 Mods 收紧声明（extra_required，两管理器互斥时为 False）
-        if force_allow:
-            if (
-                not engine_home_write
-                and not self._write_is_actually_delete(tool, input_dict)
-                and not extra_required
-            ):
-                return None
+        # 判定统一走 security/decision.py 的 decide()（单一决策源）：分支序
+        # 与原 authorize 逐点同构，本方法只消费结论做三件事——DENY 落预拒绝、
+        # CONFIRM 落 _build_pending、ALLOW 侧完成白名单命中记账。egress 的
+        # 扫描结果随决策结构带回，预拒绝免二次扫描。
+        d = decide(self, tool, input_dict,
+                   force_pending=force_pending, force_allow=force_allow)
+        if d.tier is Tier.DENY:
+            # egress 已知密钥预拒绝：decide 保证 DENY 分支必带 scan 原始结果
+            return self._egress_denied(tool, input_dict, d.scan)
+        if d.tier is Tier.CONFIRM:
+            if force_pending:
+                # force_pending 时不提供「总是允许」：否则用户点一次就把 Mod 的
+                # 逐次确认永久关掉（规则落库后下次不再询问），等于绕过 Mod 意志
+                return await self._build_pending(tool, input_dict, always_rule=None)
             return await self._build_pending(
-                tool, input_dict, extra_required=extra_required,
+                tool, input_dict, extra_required=d.extra_required,
             )
-        if tool.safety == Safety.READONLY and not engine_home_write and not extra_required:
-            return None
-        # 完全访问档：写入与执行都自动放行（白名单之外的全部放开）。这是用户
-        # 显式选择的「一切放行」档，引擎主目录写入也在其内（口径见上方注释与
-        # SECURITY.md「完全访问档的边界」），Mods 的收紧声明仍然压得住它。
-        if self.auto_accept_all and not extra_required:
-            return None
-        # 自动允许写入档：只放行 WRITE 级，且目标必须确认在工作目录内；
-        # 高危（执行命令）、目录外写入、以及「名义上是移动实为删目录」仍逐次确认
-        if (
-            self.auto_accept_write
-            and tool.safety == Safety.WRITE
-            and self._write_target_inside_workdir(tool, input_dict)
-            and not self._write_is_actually_delete(tool, input_dict)
-            and not extra_required
-        ):
-            return None
-        arg_text = tool.arg_text(input_dict)
-        rule = self._matching_rule(tool, arg_text)
-        if (
-            rule is not None
-            # 白名单命中也不放行「名义是移动、实为递归删除」的调用：它等效
-            # delete_file（DANGEROUS，永不自动放行）的删除面，任何档位/规则
-            # 都要逐次确认——只靠 auto_accept_write 分支的守卫挡不住白名单
-            # 整工具放行（审查 A-1/A-2）。
-            and not self._write_is_actually_delete(tool, input_dict)
-            # 白名单命中也不放行落进引擎自身数据目录的写入：全局技能会注入
-            # 所有项目（含未信任项目）的 system prompt，config.toml 是凭据
-            # 本体——沉淀一条整工具规则就等于跨信任边界的自由写入面
-            # （审查 P2-7），与上一条同级，退回逐次确认。READONLY 分级的
-            # memory_write 也走到这里（READONLY 短路已被上方守卫跳过）。
-            and not engine_home_write
-            # Mods 收紧声明命中时白名单同样放不了行（前面档位分支已被跳过，
-            # 这里是最后一条提前放行路径，必须同守）
-            and not extra_required
-        ):
-            # 命中记账：只记有库 id 的项目级规则（次数 + 最近命中时间，
-            # 设置页展示用）。记账失败不影响放行——这只是统计。
-            if rule.rule_id is not None and self.store is not None:
-                try:
-                    await self.store.record_rule_hit(rule.rule_id)
-                except Exception:  # noqa: BLE001
-                    pass
-            return None
-        return await self._build_pending(
-            tool, input_dict, extra_required=extra_required,
-        )
+        # ALLOW：白名单命中记账（只记有库 id 的项目级规则，次数 + 最近命中
+        # 时间，设置页展示用）。记账失败不影响放行——这只是统计；批路径的
+        # 成员不过 authorize，其白名单命中不记账是现状，保持不变。
+        if d.rule is not None and d.rule.rule_id is not None and self.store is not None:
+            try:
+                await self.store.record_rule_hit(d.rule.rule_id)
+            except Exception:  # noqa: BLE001 - 记账失败不影响放行
+                pass
+        return None
 
     async def _build_pending(
         self, tool: Tool, input_dict: dict, *, extra_required: bool = False,

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from ..security.decision import Tier, decide
 from ..security.gate import Decision, PendingPermission, PermissionGate
 from ..tools.base import Safety, Tool
 
@@ -182,6 +183,26 @@ class ChannelGate(PermissionGate):
                 pass
             self.waiting.pop(pending.request_id, None)
         return pending
+
+    def needs_confirm(self, tool: Tool, input_dict: dict) -> bool:
+        """并发只读批收集期预检的渠道门覆写（design-gate-sync §3.6，分歧 D2/D2b）。
+
+        Agent 的并发只读批对第 2..n 个成员只问本谓词就直接执行，不经
+        authorize；而上方 authorize 有意不走 super()（引擎档与项目白名单都
+        不随渠道会话生效，见其内注记）。继承的谓词却照读 decide 的档位
+        （auto_accept_all / auto_accept_write）与白名单分支——桌面开
+        full_access 或渠道门被 persist_rule 点亮白名单后，memory_write 这类
+        名义只读的调用会在批内零确认直执行，串行 authorize 却落确认/拒绝。
+
+        取严闭合：decide 判为 ALLOW、且理由是渠道 authorize 也认的 READONLY
+        短路（本文件 authorize 的只读放行）才报 False；档位 / 白名单 / force
+        来源的 ALLOW 一律报 True 断批，回串行落本门 authorize。一致性由
+        tests/test_gate_decision_sync.py 的 D2 / D2b 格钉住。
+        """
+        d = decide(self, tool, input_dict)
+        if d.tier is not Tier.ALLOW:
+            return True
+        return d.reason != "readonly"
 
     @staticmethod
     async def _wait(pending: PendingPermission) -> None:

@@ -18,12 +18,15 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 from urllib.parse import quote
 
 import pytest
 
+from skysheep import obs
 from skysheep.config import ProviderConfig, load_config
 from skysheep.sanitize import UNTRUSTED_DATA_NOTE
+from skysheep.security import egress
 from skysheep.security.egress import collect_secrets, reset_cache, scan_outbound
 from skysheep.security.gate import (
     Decision,
@@ -547,3 +550,56 @@ async def test_gate_generic_note_for_readonly_open_world(home):
         WebFetchTool(), {"url": f"https://docs.example/?q={token}", "max_chars": 2000}
     )
     assert "疑似密钥" in note and "GitHub Token" in note
+
+
+# ---- 防线降级留痕：except 分支不再无声（降级行为不变，只补 obs 告警） ----
+
+
+def _obs_events(caplog) -> list[dict]:
+    """caplog 记录里的结构化事件（obs.parse_structured 解不出的丢弃）。"""
+    out = []
+    for r in caplog.records:
+        payload = obs.parse_structured(r.getMessage())
+        if payload:
+            out.append(payload)
+    return out
+
+
+def test_mcp_json_corrupt_logs_degraded_warning(home, caplog):
+    """mcp.json 损坏：仍按空表降级（行为不变），但留 obs 告警——远程 MCP 凭据
+    面从已知密钥表消失不能无声（审计 #2）。"""
+    home_dir = home / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    (home_dir / "mcp.json").write_text("{ 这不是合法 JSON", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        out = egress._mcp_secret_map()
+    assert out == {}, "降级行为不变：读不了按空表"
+    faults = [p for p in _obs_events(caplog) if p.get("ev") == "egress_mcp_json_failed"]
+    assert faults, "损坏的 mcp.json 必须留 egress_mcp_json_failed 告警"
+    assert faults[0].get("err"), "告警带异常摘要（无文件内容）"
+
+
+def test_mcp_json_missing_is_normal_no_warning(home, caplog):
+    """mcp.json 不存在 = 从未配置过 MCP 服务器，本就无凭据面：空表且不告警
+    （常态缺省刷警告只会误导，与「损坏/权限」的真故障区分开）。"""
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        out = egress._mcp_secret_map()
+    assert out == {}
+    assert not [
+        p for p in _obs_events(caplog) if p.get("ev") == "egress_mcp_json_failed"
+    ], "文件缺失是常态缺省，不算防线降级"
+
+
+def test_config_corrupt_logs_degraded_warning(home, caplog):
+    """config.toml 损坏：scan_outbound(known=None) 走 _known_map 仍按空表降级
+    （行为不变），但留 obs 告警（审计 #3）。load_config 对文件缺失不抛，能
+    走到 except 的都是解析失败的真故障。"""
+    home_dir = home / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    (home_dir / "config.toml").write_text("[providers.demo\nbroken", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        res = scan_outbound("git status")
+    assert res == {"ok": True, "redacted": "git status", "hits": []}, "降级行为不变"
+    faults = [p for p in _obs_events(caplog) if p.get("ev") == "egress_config_failed"]
+    assert faults, "损坏的 config.toml 必须留 egress_config_failed 告警"
+    assert "failed to parse" in faults[0].get("err", "")

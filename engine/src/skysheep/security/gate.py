@@ -1484,7 +1484,14 @@ class PermissionGate:
                 ok = ok and bool(res["ok"])
                 hits.extend(res["hits"])
             return {"ok": ok, "hits": hits}
-        except Exception:  # noqa: BLE001  防线故障按未扫描降级，绝不挡执行
+        except Exception as e:  # noqa: BLE001  防线故障按未扫描降级，绝不挡执行
+            # 留痕不挡执行：放行判定保持「返回 None = 未扫描」不变（fail-open
+            # 是本防线的既定取舍，见 egress.py 模块说明）。告警逐次记录，供事后
+            # 排查「防线为何整轮静默」；异常文本只含错误位置/路径，无参数内容。
+            obs.warning(
+                "egress_scan_failed", "出站密钥扫描故障，按未扫描降级",
+                tool=tool.name, err=str(e),
+            )
             return None
 
     def _egress_denied(self, tool: Tool, input_dict: dict, scan: dict) -> PendingPermission:

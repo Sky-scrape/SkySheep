@@ -42,7 +42,7 @@ import time
 from typing import Any
 from urllib.parse import quote, quote_plus
 
-from .. import secure_store
+from .. import obs, secure_store
 
 # 短于该长度的配置值不收（多为占位符，不是真实密钥）：
 # 已知值匹配按子串命中，太短的值会把大量普通词误判成密钥外传。
@@ -104,8 +104,10 @@ def _mcp_secret_map() -> dict[str, str]:
 
     mcp.json 明文 JSON 落盘且 read_file 默认可达（~/.skysheep/mcp.json），是
     与 config.toml 同级的真实凭据源，必须纳入同一道防线。文件读不了 / 解析
-    失败按空表降级（防线只许降级、不许打瘫）。项目级 .skysheep/mcp.json 不
-    在此收集：它随仓库分发、经 workspace trust 门控，属另一条信任边界。
+    失败按空表降级（防线只许降级、不许打瘫）；损坏 / 权限等真故障留 obs 告警
+    （凭据面从已知密钥表消失不能无声），文件不存在是「从未配置过 MCP」的常态
+    缺省、不算降级，不告警。项目级 .skysheep/mcp.json 不在此收集：它随仓库
+    分发、经 workspace trust 门控，属另一条信任边界。
     """
     out: dict[str, str] = {}
     try:
@@ -113,7 +115,15 @@ def _mcp_secret_map() -> dict[str, str]:
 
         raw = (skysheep_home() / "mcp.json").read_text(encoding="utf-8")
         data = json.loads(raw)
-    except Exception:  # noqa: BLE001  读不了 = 无已知密钥，防线降级
+    except FileNotFoundError:
+        return out  # 本就无 MCP 凭据面可扫，正常缺省
+    except Exception as e:  # noqa: BLE001  读不了 = 无已知密钥，防线降级
+        # 留痕不拦执行；频度受 _known_map 的 30s TTL 约束（TTL 内至多一次）。
+        # 异常文本只含错误位置与文件路径，不含文件内容。
+        obs.warning(
+            "egress_mcp_json_failed", "mcp.json 读不了，MCP 凭据不进已知密钥表",
+            err=str(e),
+        )
         return out
     servers = data.get("mcpServers") if isinstance(data, dict) else None
     if not isinstance(servers, dict):
@@ -207,7 +217,14 @@ def _known_map() -> dict[str, str]:
         from ..config import load_config  # noqa: PLC0415  延迟导入防环
 
         m = _secret_map(load_config())
-    except Exception:  # noqa: BLE001  读不了配置 = 无已知密钥，防线降级
+    except Exception as e:  # noqa: BLE001  读不了配置 = 无已知密钥，防线降级
+        # load_config 对缺失 config.toml 返回默认配置、不抛（config.py 只在
+        # 解析失败时抛 ConfigError），走到这里都是真故障：留痕不拦执行
+        # （TTL 内至多一次）；行为不变，仍按空表降级。
+        obs.warning(
+            "egress_config_failed", "config.toml 读不了，配置密钥不进已知密钥表",
+            err=str(e),
+        )
         m = {}
     # mcp.json（远程 MCP 鉴权头 / stdio 凭据 env）与 config.toml 同一道防线；
     # _mcp_secret_map 自身吞掉一切异常，读不了按空表合并

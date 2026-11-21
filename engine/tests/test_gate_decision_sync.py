@@ -23,11 +23,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import NamedTuple
 
 import pytest
 from pydantic import BaseModel
 
+from skysheep import obs
 from skysheep.channels.gate import ChannelGate
 from skysheep.core.subagent import IsolatedGate, SubagentGate
 from skysheep.core.team import TeamIsolatedGate, TeamMemberGate
@@ -588,23 +590,32 @@ async def test_generic_key_shape_not_over_blocked(home, known_secret_config):
 
 
 async def test_egress_scan_fault_degrades_to_not_scanned(
-    home, engine_home, known_secret_config, monkeypatch,
+    home, engine_home, known_secret_config, monkeypatch, caplog,
 ):
-    """防线自身故障按「未扫描」降级（egress 模块说明口径）：不挡执行、不预拒。"""
+    """防线自身故障按「未扫描」降级（egress 模块说明口径）：不挡执行、不预拒；
+    降级必须留 obs 告警（ev=egress_scan_failed）——「未扫描=放行」的静默
+    fail-open 不能连事后排查的痕迹都没有。"""
     def boom(text):
         raise RuntimeError("防线故障（测试桩）")
 
     monkeypatch.setattr(egress, "scan_outbound", boom)
     gate = PermissionGate(working_dir=home / "proj")
     inp = _wfetch_generic(home)
-    assert gate.needs_confirm(WFETCH, inp) is False
-    assert await gate.authorize(WFETCH, inp) is None
-    # 已知密钥形态的调用在故障下不再预拒，但 WRITE/DANGEROUS 照走逐次确认
-    d = decide(gate, RC, _rc_key(home))
-    assert (d.tier, d.reason) == (Tier.CONFIRM, "default_confirm")
-    pending = await gate.authorize(RC, _rc_key(home))
+    with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
+        assert gate.needs_confirm(WFETCH, inp) is False
+        assert await gate.authorize(WFETCH, inp) is None
+        # 已知密钥形态的调用在故障下不再预拒，但 WRITE/DANGEROUS 照走逐次确认
+        d = decide(gate, RC, _rc_key(home))
+        assert (d.tier, d.reason) == (Tier.CONFIRM, "default_confirm")
+        pending = await gate.authorize(RC, _rc_key(home))
     assert pending is not None and not pending._future.done()
     pending.resolve(Decision.DENY)
+    # 留痕断言：故障记为结构化告警，带工具名与异常摘要（无参数内容）
+    payloads = [obs.parse_structured(r.getMessage()) for r in caplog.records]
+    faults = [p for p in payloads if p and p.get("ev") == "egress_scan_failed"]
+    assert faults, "扫描故障必须留 egress_scan_failed 告警"
+    assert {p.get("tool") for p in faults} == {WFETCH.name, RC.name}
+    assert all("防线故障（测试桩）" in p.get("err", "") for p in faults)
 
 
 # ---- memory_write 历史事故（FINDING 2）回归：主门档位/白名单/Mods 全格 ----

@@ -36,6 +36,7 @@ from types import SimpleNamespace
 import pytest
 
 from skysheep.messages import Message
+from skysheep.server.backend_parts.collab_body import CollabBodyMixin
 from skysheep.session.store import SessionStore
 
 
@@ -562,8 +563,12 @@ async def test_migration_import_busy_refused_over_ws(home):
 # ---- P24 v2：超大包落盘模式 / 按路径导入 / 技能替换口径 ----
 
 
-class _MigHost:
-    """只要 mixin 需要的几个属性，不背整个 backend。"""
+class _MigHost(CollabBodyMixin):
+    """只要 mixin 需要的几个属性，不背整个 backend。
+
+    CollabBodyMixin 提供 team_orchestrators()（批 6 的 _teams 收敛入口），
+    替身因此与真实 ServerBackend 走同一份读取实现。
+    """
 
     def __init__(self, store=None):
         self.store = store

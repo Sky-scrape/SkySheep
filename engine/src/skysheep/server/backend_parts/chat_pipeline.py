@@ -21,10 +21,11 @@ D1 会话与运行时域（backend.py Mixin 拆分批 5a 外迁件）。从 back
 `_PERSIST_HARVEST_TIMEOUT`。backend_parts 各模块不得 import backend
 （会成环，见 backend_parts/__init__.py 的文件头约定），故由内核单向注入。
 
-跨域只读（设计 §3.3 雷区，批 6 统一收敛）：本文件内 4 处 `self._teams`
-成员判定（send 一处、_run_turn_pipeline 三处，含「建队轮已开跑、_teams
-尚未登记」窗口期重验守卫）——批 5a 逐字搬移、保持裸访问不动，不许顺手
-改成 accessor。
+跨域只读（设计 §3.3 雷区 `_teams`，批 6 已收敛）：本文件 4 处成员判定
+（send 一处、_run_turn_pipeline 三处，含「建队轮已开跑、_teams 尚未登记」
+窗口期重验守卫）全部走 D2 CollabBodyMixin 的 team_active(sid)——send 处的
+`target_sid is not None` 前置留在调用侧；本文件不再裸碰 `_teams`（批 5a
+的裸访问已在本批收口）。
 
 字段所有权（D1，本批只注记不搬）：`_titling`（自动标题单飞集合）、
 `_persist_tasks`（在飞落库任务，_persist_turn 写、delete_session 等）、
@@ -286,7 +287,7 @@ class ChatPipelineMixin:
             await self._ready_runtime_for_send(session_id, local=local)
         # 会话级活动团队：进行中的团队把该会话的后续消息全部吸进团队频道
         #（设计 §3——团队进行中不再进普通回合），即便前端没带 team 标志。
-        active_team = target_sid is not None and target_sid in self._teams
+        active_team = target_sid is not None and self.team_active(target_sid)
         if active_team and (roundtable or adversarial):
             mode_name = "圆桌" if roundtable else "对抗"
             raise RuntimeError(
@@ -624,7 +625,7 @@ class ChatPipelineMixin:
         # 本轮是否接受「引导」注入：普通单 Agent 轮可以；圆桌/团队/对抗
         # 是多模型流水线，主 Agent 收件箱不参与那些阶段，发送方回落到排队。
         runtime.steerable = not (
-            roundtable or team or adversarial or (sid in self._teams)
+            roundtable or team or adversarial or (self.team_active(sid))
         )
         # 单轮 token 上限（单轮护栏）：估算本轮请求体积（历史 + 本条消息），
         # 超上限直接拒绝——每日预算防线的前置，避免「一轮就烧掉全天额度」。
@@ -836,7 +837,7 @@ class ChatPipelineMixin:
         #（§13.5 一律进频道、不做意图识别）——按 team_bound 判，不按本轮
         # flag 判（活动团队把没带标志的消息也吸进频道，前缀漏进频道文本会
         # 误导队员）。团队期间攒下的注记等收队/交付后的下一普通轮照常注入。
-        team_bound = team or sid in self._teams
+        team_bound = team or self.team_active(sid)
         # 「& 引用对话」：把被引用会话的记录拼在消息最前面注入本轮上下文
         #（与 PLAN_MODE_PREFIX 同一套做法，随用户消息一起持久化）。
         if refs and not team_bound:
@@ -932,7 +933,7 @@ class ChatPipelineMixin:
         routed_prev: Provider | None = None
         routed_now: Provider | None = None
         try:
-            if team or sid in self._teams:
+            if team or self.team_active(sid):
                 if roundtable or adversarial:
                     # 排队轮重验团队/圆桌/对抗同轮互斥（send() 的守卫只在入队
                     # 时刻判定）：消息在「建队轮已开跑、_teams 尚未登记」的窗口

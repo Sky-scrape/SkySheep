@@ -5,12 +5,15 @@
 并行清单必须同时加契约测试）。
 """
 
+import types
+
 from skysheep.server.backend import BUILTIN_SNIPPETS, ServerBackend
 from skysheep.server.backend_parts.advanced import SystemMixin
 from skysheep.server.backend_parts.automation import AutomationMixin
 from skysheep.server.backend_parts.channels import ChannelsMixin
 from skysheep.server.backend_parts.chat_pipeline import ChatPipelineMixin
 from skysheep.server.backend_parts.checkpoints import CheckpointsMixin
+from skysheep.server.backend_parts.collab_body import CollabBodyMixin
 from skysheep.server.backend_parts.factory import FactoryMixin
 from skysheep.server.backend_parts.memory import MemoryMixin
 from skysheep.server.backend_parts.permission_modes import PermissionModesMixin
@@ -279,15 +282,19 @@ def test_batch5a_checkpoint_diff_helpers_moved_with_checkpoints_mixin():
         assert not hasattr(backend_module, name), name
 
 
-def test_batch5a_teams_member_checks_left_bare_until_batch6():
-    """批 5a 红线（设计 §3.3 雷区 `_teams`）：本批对 4 处成员判定（send 1 处、
-    _run_turn_pipeline 3 处，含「建队轮已开跑、_teams 尚未登记」窗口期重验）
-    只做逐字搬移、保持裸访问；收敛成 team_active() 是批 6 的事。防越批改动。"""
+def test_batch6_chat_pipeline_member_checks_converged_to_team_active():
+    """批 6 收敛（设计 §3.3 雷区 `_teams`）：批 5a 逐字搬来的 4 处成员判定
+    （send 1 处、_run_turn_pipeline 3 处，含「建队轮已开跑、_teams 尚未登记」
+    窗口期重验）全部改走 D2 CollabBodyMixin 的 team_active(sid)；send 处的
+    `target_sid is not None` 前置留在调用侧。裸访问归零。"""
     import inspect
 
     src = inspect.getsource(ChatPipelineMixin)
-    assert src.count("in self._teams") == 4
-    assert "team_active" not in src
+    assert "self._teams" not in src
+    assert src.count("self.team_active(") == 4
+    assert "in self._teams" not in src
+    # 窗口期重验注释原意保留（「建队轮已开跑、_teams 尚未登记」）
+    assert "建队轮已开跑、_teams 尚未登记" in src
 
 
 
@@ -363,29 +370,22 @@ def test_batch5b_memory_helpers_merged_into_memory_mixin():
         assert getattr(ServerBackend, name) is getattr(MemoryMixin, name), name
 
 
-def test_batch5b_teams_bare_access_unchanged_until_batch6():
-    """批 5b 红线（设计 §3.3 雷区 `_teams`）：ProjectMgmtMixin 的 _bind_project
-    切项目中断块（own-ctx 分屏列豁免 + interrupt_reason 注记 + 条件 persist）与
-    ChatPipelineMixin 的 4 处成员判定都逐字搬移、保持裸访问；收敛成
-    team_interrupt_for_project_switch() / team_active() 是批 6 的事。"""
+def test_batch6_project_switch_converged_to_write_wrapper():
+    """批 6 收敛（设计 §3.3 雷区 `_teams`）：ProjectMgmtMixin 的 _bind_project
+    切项目中断块（own-ctx 分屏列豁免 + interrupt_reason 注记 + 条件 persist）
+    整块收在 D2 CollabBodyMixin.team_interrupt_for_project_switch()；本文件只
+    调封装，不再碰 `_teams` / `_teams_interrupted`。"""
     import inspect
 
-    from skysheep.server.backend_parts.chat_pipeline import ChatPipelineMixin as Chat
-
-    chat_src = inspect.getsource(Chat)
-    assert chat_src.count("in self._teams") == 4
-    assert "team_active" not in chat_src
-
     proj_src = inspect.getsource(ProjectMgmtMixin)
-    # self._teams 的裸访问 4 处（另外 2 处是 self._teams_interrupted 的子串）
-    assert proj_src.count("self._teams") - proj_src.count("self._teams_interrupted") == 4
-    assert proj_src.count("self._teams_interrupted") == 2
-    assert proj_src.count("项目已切换，团队已中断") == 1
-    assert proj_src.count("_persist_team_state()") == 1
-    assert "if self._teams:" in proj_src
-    assert "self._teams.pop(sid)" in proj_src
-    assert "rt.ctx.own" in proj_src
-    assert "team_interrupt_for_project_switch" not in proj_src
+    assert "self._teams" not in proj_src
+    assert "self.team_interrupt_for_project_switch()" in proj_src
+    # 团队块的标记随块进了 D2 封装（rt.ctx.own 另有 runtime 失效循环在用，
+    # 故只锚团队块独有的三处标记）
+    assert "self._teams.pop(sid)" not in proj_src
+    assert "self._teams_interrupted[sid]" not in proj_src
+    assert "项目已切换，团队已中断" not in proj_src
+    assert "_persist_team_state()" not in proj_src
 
 
 def test_batch5b_session_history_window_stays_in_kernel():
@@ -395,3 +395,224 @@ def test_batch5b_session_history_window_stays_in_kernel():
         assert name in ServerBackend.__dict__, name
         assert name not in SessionModelMixin.__dict__, name
         assert hasattr(ServerBackend, name), name
+
+# ---- 批 6（D2 多模型协作）：CollabBodyMixin 外迁与 _teams 跨域收敛 ----
+
+_BATCH6_MOVED_MEMBERS = [
+    "_build_member_provider", "_auto_pool_rank", "_auto_pool_services", "_resolve_members",
+    "roundtable_detail", "roundtable_save",
+    "_adversarial_body", "adversarial_detail", "adversarial_save", "adversarial_export",
+    "adversarial_fix_prompt", "adversarial_compare",
+    "_load_team_state", "_persist_team_state", "_release_team_providers",
+    "_team_provider_context_limit", "_resolve_team_members", "_template_member_specs",
+    "_expand_auto_pool", "_template_team_specs", "_template_allowed_tools",
+    "_team_registry_for_template", "_team_budget_check", "_team_message_sink",
+    "_team_create", "_team_meta", "_team_body", "_flush_team_usage", "_team_for",
+    "_cancel_team_turn_and_settle", "team_get", "team_room", "_push_team_task_event",
+    "team_task_add", "adversarial_to_team_tasks", "roundtable_to_team_task",
+    "team_task_update", "team_stop", "team_deliver", "team_takeover",
+    "team_config_detail", "team_config_save", "team_template_list", "team_template_save",
+    "team_template_remove", "team_resident_set", "team_resident_clear",
+    "team_resident_get", "team_log",
+    # 类属性（frozenset，不可变）：_auto_pool_rank 的坏服务降权表
+    "_BAD_POOL_CATEGORIES",
+]
+
+
+def test_batch6_collab_body_mixin_is_direct_base_and_members_resolve_there():
+    """批 6（D2）：CollabBodyMixin 为直接基类，49 个方法 + _BAD_POOL_CATEGORIES
+    自主类整段搬入；主类不再自带，经 MRO 仍可达且解析到新 Mixin（设计 §4.1 批 6）。"""
+    assert CollabBodyMixin in ServerBackend.__bases__
+    names = _mro_names()
+    assert names.index("CollabBodyMixin") == len(names) - 2  # 紧邻 object，既有顺序未扰动
+    for name in _BATCH6_MOVED_MEMBERS:
+        assert name in CollabBodyMixin.__dict__, name
+        assert name not in ServerBackend.__dict__, name
+        assert getattr(ServerBackend, name) is getattr(CollabBodyMixin, name), name
+    assert len(_BATCH6_MOVED_MEMBERS) == 50  # 49 方法 + 1 类属性
+
+
+def test_batch6_mixin_has_no_init_and_no_mutable_class_attrs():
+    """纪律：新 Mixin 无 __init__、无类级可变属性（状态由主类 __init__ 一次铺齐）。"""
+    assert "__init__" not in CollabBodyMixin.__dict__
+    class_attrs = {
+        k: v for k, v in CollabBodyMixin.__dict__.items()
+        if not callable(v) and not k.startswith("__")
+    }
+    assert set(class_attrs) == {"_BAD_POOL_CATEGORIES"}
+    assert isinstance(class_attrs["_BAD_POOL_CATEGORIES"], frozenset)
+
+
+def _fake_collab_body_host():
+    """最小宿主：只铺五个跨域入口用到的状态与两个被调依赖。"""
+
+    class Fake(CollabBodyMixin):
+        def __init__(self):
+            self._teams = {}
+            self._teams_interrupted = {}
+            self._team_state_path = None
+            self.runtimes = {}
+            self.persisted = 0
+            self.released = []
+
+        def _persist_team_state(self):
+            self.persisted += 1
+
+        def _release_team_providers(self, orch):
+            self.released.append(orch)
+
+    return Fake
+
+
+class _FakeOrch:
+    def __init__(self, team_id):
+        self.team_id = team_id
+        self.roster = [types.SimpleNamespace(name="队员甲")]
+        self.director_mode = "user"
+
+
+def test_batch6_teams_accessors_are_read_only_dict_forms():
+    """三个只读 accessor 按形态对号（设计 §3.3）：成员判定 / 键式取 / dict 本体遍历。"""
+    be = _fake_collab_body_host()()
+    o1, o2 = object(), object()
+    be._teams = {"s1": o1, "s2": o2}
+    # 成员判定：sid in self._teams
+    assert be.team_active("s1") is True
+    assert be.team_active("s3") is False
+    # 键式取：.get(sid)
+    assert be.team_orchestrator("s2") is o2
+    assert be.team_orchestrator("s3") is None
+    # 返回 dict 本体（不是 values 视图、不是副本）：values 遍历与 items 键遍历都可用
+    assert be.team_orchestrators() is be._teams
+    assert list(be.team_orchestrators().keys()) == ["s1", "s2"]
+    assert list(be.team_orchestrators().values()) == [o1, o2]
+    # getattr 防御沿既有写法：setup 早期尚未铺字段时按空表处理
+    assert CollabBodyMixin.team_orchestrators(object.__new__(CollabBodyMixin)) == {}
+
+
+def test_batch6_team_write_wrappers_semantics():
+    """两个写封装与原块逐字等价：摘队（返回编排器、条件 persist）与切项目中断
+    （own-ctx 分屏列豁免、释放 provider、interrupt_reason 注记、条件 persist）。"""
+    Fake = _fake_collab_body_host()
+
+    # ① team_detach_for_delete ≡ pop 编排器 → pop 中断记录 → 条件 _persist_team_state
+    be = Fake()
+    orch = _FakeOrch("t1")
+    be._teams = {"sid": orch}
+    be._teams_interrupted = {"sid": {"session_id": "sid"}}
+    assert be.team_detach_for_delete("sid") is orch
+    assert be._teams == {}
+    assert be._teams_interrupted == {}
+    assert be.persisted == 1  # 有摘除 → 回写
+    assert be.team_detach_for_delete("missing") is None
+    assert be.persisted == 1  # 无摘除且 _team_state_path 为 None → 不回写
+
+    # ② team_interrupt_for_project_switch：own-ctx 分屏列的团队不随主栏切换失效
+    be = Fake()
+    own, alien = _FakeOrch("t-own"), _FakeOrch("t-alien")
+    be.runtimes = {
+        "own": types.SimpleNamespace(ctx=types.SimpleNamespace(own=True)),
+        "main": types.SimpleNamespace(ctx=types.SimpleNamespace(own=False)),
+    }
+    be._teams = {"own": own, "main": alien}
+    be.team_interrupt_for_project_switch()
+    assert list(be._teams) == ["own"]
+    assert be.released == [alien]
+    rec = be._teams_interrupted["main"]
+    assert rec["team_id"] == "t-alien"
+    assert rec["status"] == "interrupted"
+    assert rec["interrupt_reason"] == "项目已切换，团队已中断"
+    assert rec["roster"] == ["队员甲"]
+    assert be.persisted == 1
+
+    # 源码级：豁免过滤与中断原因确实在封装里（不是靠调用方拼）
+    import inspect
+
+    src = inspect.getsource(CollabBodyMixin.team_interrupt_for_project_switch)
+    for token in ("rt.ctx.own", "项目已切换，团队已中断", "_release_team_providers",
+                  "_persist_team_state"):
+        assert token in src, token
+    src = inspect.getsource(CollabBodyMixin.team_detach_for_delete)
+    for token in ("self._teams.pop(session_id, None)",
+                  "self._teams_interrupted.pop(session_id, None)",
+                  "_persist_team_state()"):
+        assert token in src, token
+
+
+def test_batch6_teams_bare_access_only_in_collab_body():
+    """收敛后不再有跨域裸读：collab_body.py 之外只剩主类 __init__ 的字段声明。
+
+    15 处跨域调用点（2 写 + 13 读）按域点名锚定形态；分发层第 16 处
+    （_dispatch_chat.py 的 _h_permission_queue）按降级条款保留裸读 + 注记。"""
+    import inspect
+    import pathlib
+    import re
+
+    import skysheep.server as server_pkg
+    import skysheep.server.backend as backend_module
+    from skysheep.server.backend_parts import (
+        advanced,
+        automation,
+        channels,
+        lifecycle,
+        migration,
+        mods,
+        project_mgmt,
+        spectate,
+    )
+
+    root = pathlib.Path(server_pkg.__file__).parent
+    files = sorted(root.glob("*.py")) + sorted((root / "backend_parts").glob("*.py"))
+    hits = []
+    for path in files:
+        if path.name == "collab_body.py":
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"self\._teams\b", line):  # 排除 _teams_interrupted
+                hits.append((path.name, lineno, line.strip()))
+    # 唯一例外：主类 __init__ 的字段声明（状态仍由主类一次铺齐）
+    assert len(hits) == 1, hits
+    assert hits[0][0] == "backend.py"
+    assert hits[0][2].startswith("self._teams: dict[str, TeamOrchestrator] = {}")
+
+    # 15 处调用点逐域锚形态
+    assert inspect.getsource(backend_module.ServerBackend.respond_permission).count(
+        "self.team_orchestrators().values()") == 1
+    assert inspect.getsource(advanced).count("self.team_orchestrators().values()") == 1
+    assert inspect.getsource(mods).count("self.team_orchestrators().values()") == 2
+    assert inspect.getsource(spectate).count("self.team_orchestrators().values()") == 1
+    assert inspect.getsource(migration).count("self.team_orchestrators().items()") == 1
+    assert inspect.getsource(channels).count("self.team_orchestrator(session_id)") == 1
+    assert inspect.getsource(automation).count("self.team_orchestrator(resident.session_id)") == 2
+    assert inspect.getsource(lifecycle).count(
+        "self.team_detach_for_delete(session_id)") == 1
+    assert inspect.getsource(project_mgmt).count(
+        "self.team_interrupt_for_project_switch()") == 1
+
+
+def test_batch6_collab_body_helpers_moved_and_kernel_injections():
+    """模块级 helper 随迁、两个对抗助手只转发同一对象、_PERSIST_HARVEST_TIMEOUT
+    留内核单向注入（设计 §4.0/批 6 helper 清单）。"""
+    import inspect
+
+    import skysheep.server.backend as backend_module
+    from skysheep.server.backend_parts import collab_body
+
+    # 两个对抗助手：tests/test_adversarial.py 从 backend 模块 import，必须同一对象
+    assert backend_module._adversarial_fingerprints is collab_body._adversarial_fingerprints
+    assert backend_module._adversarial_report_markdown is collab_body._adversarial_report_markdown
+    assert collab_body._adversarial_fingerprints.__module__ == (
+        "skysheep.server.backend_parts.collab_body"
+    )
+    assert "def _adversarial_fingerprints" not in inspect.getsource(backend_module)
+
+    # 域内 helper/常量随迁：backend 模块名不再暴露（防第二份定义漂移）
+    for name in ("_TEAM_INTERRUPTED_KEEP", "TEAM_DIGEST_EXCERPT_CHARS", "_team_digest",
+                 "_ROOM_TASK_STATUSES", "_room_empty_stats", "_room_stats",
+                 "_ADV_VERDICT_LABELS", "_ADV_SEV_LABELS", "_ADV_ROLE_LABELS"):
+        assert hasattr(collab_body, name), name
+        assert not hasattr(backend_module, name), name
+
+    # 内核常量留 backend.py，运行期单向注入 D2 模块（同 chat_pipeline 先例）
+    assert backend_module._PERSIST_HARVEST_TIMEOUT == 10.0
+    assert collab_body._PERSIST_HARVEST_TIMEOUT == backend_module._PERSIST_HARVEST_TIMEOUT

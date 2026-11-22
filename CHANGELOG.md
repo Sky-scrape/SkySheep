@@ -620,6 +620,82 @@
   PermissionModesMixin，已在本批一并订正（纯注记，不动方法体）。
   用户可见行为零变化：纯内部结构重构，WS 方法面、事件契约、权限门与前端
   零改动。
+- **工程质量：backend.py 按 Mixin 分批拆分批 6（D2 多模型协作域，收口批）——
+  CollabBodyMixin 外迁与 `_teams` 跨域 15 处收敛，backend.py 4649→2138 行**：
+  沿用批 1/2/5a 走通的施工模板（抽 HEAD 双拍快照 → 锚点断言 + 行号切片搬迁 →
+  重拍快照逐项 diff → 定向测试），本批兼作拆分批收口：D2 整域外迁、`_teams`
+  跨域调用点一次收敛干净。其一，外迁：新建
+  `backend_parts/collab_body.py`（2673 行），`CollabBodyMixin` 承载三段
+  职责——成员装配（`_build_member_provider` / `_auto_pool_rank` /
+  `_auto_pool_services` / `_resolve_members`，坏服务降权表
+  `_BAD_POOL_CATEGORIES` 随行）、圆桌与对抗（`roundtable_detail` /
+  `roundtable_save`、`_adversarial_body` 四角色流水线、
+  `adversarial_detail` / `adversarial_save` / `adversarial_export` /
+  `adversarial_fix_prompt` / `adversarial_compare`）、团队（建队与一轮
+  团队轮、工单板与频道、团队设置与模板、常驻团队登记、`team.log` 回放），
+  共 49 个方法（方法体 2191 行、原类体区 2285 行）逐字搬移；模块级
+  helper / 常量 11 个名字随迁（`_TEAM_INTERRUPTED_KEEP` / 三个 `_ADV_*`
+  标签表 / `_adversarial_fingerprints` / `_adversarial_report_markdown` /
+  `TEAM_DIGEST_EXCERPT_CHARS` / `_team_digest` / `_ROOM_TASK_STATUSES` /
+  `_room_empty_stats` / `_room_stats`）与类属性 `_BAD_POOL_CATEGORIES`
+  （frozenset）。新 Mixin 无 `__init__`、无类级可变属性，状态仍由主类
+  `__init__` 一次铺齐；头文档写明字段所有权（`_teams` / `_teams_interrupted`
+  / `_team_state_path` 归 D2、域内裸访问，`resident_teams` 由主类构造、D2 只
+  经 store API 读写不重赋）与五个跨域入口（3 只读 accessor + 2 写封装）的
+  语义。其二，接线与随迁：ServerBackend 基类列表末尾（ProjectMgmtMixin 之后、
+  object 之前）追加 `CollabBodyMixin`（D2 分组注释，直接基类 35→36、MRO
+  37→38 类）；backend.py 删除已迁段落，同时撤掉因此变为未使用的 46 个导入名
+  （ruff F401 核实）；两个对抗报告助手以 import 行转发同一对象
+  （`backend._adversarial_fingerprints is collab_body._adversarial_fingerprints`
+  为 True，契约测试锚定，`test_adversarial.py` 的既有导入点不变）；
+  `_PERSIST_HARVEST_TIMEOUT` 留内核（批 5a 起同时供 `_run_turn_pipeline`），
+  由 backend.py 模块末尾单向注入 collab_body（沿 chat_pipeline 先例），方法体
+  保持 100% 逐字。其三，`_teams` 收敛：15 处跨域调用点（2 写 + 13 读，grep
+  计数核实）全部改走五个入口——成员判定 4 处（chat_pipeline 的 `send` 1 +
+  `_run_turn_pipeline` 3，`send` 的 `target_sid is not None` 前置与「建队轮
+  已开跑、`_teams` 尚未登记」窗口期重验注释原意保留）→ `team_active(sid)`；
+  键式取 3 处（channels 的 `_sync_team_gate` + automation 的两处 resident live
+  判定）→ `team_orchestrator(sid)`；遍历 6 处（backend 的
+  `respond_permission` 1、advanced 1、mods 2、spectate 1、migration 的
+  `.items()` 判忙 1）→ `team_orchestrators()`（返回 dict 本体，values /
+  items 按形态用）；写块 2 处——lifecycle 的 `delete_session` 摘队收进
+  `team_detach_for_delete`（保留 orch 供在飞轮收尾后释放 provider）、
+  project_mgmt 的 `_bind_project` 切项目中断收进
+  `team_interrupt_for_project_switch`（own-ctx 分屏列豁免、
+  `interrupt_reason="项目已切换，团队已中断"`、条件 persist 原样）。第 16 处
+  （`_dispatch_chat.py` 的 `_h_permission_queue`）在分发层，超出设计 §3.3 的
+  ≤15 闸门，按降级条款保留裸读 + 注记，本批不动；D2 域内裸访问不变。其四，
+  注记收口：chat_pipeline / project_mgmt / lifecycle / migration（文件头 +
+  模块 docstring + 方法 docstring）/ advanced / mods / spectate / channels /
+  automation 的未来时写法全部改成实况（「批 6 已收敛」），「不收敛，注记」
+  只留在确实不收敛的项上（mcp / mods / channels 等文件的其它跨域读写、
+  team_templates / resident_teams 等只读面）；backend.py `__init__` 加 D2
+  字段所有权注记指向 CollabBodyMixin，跨域口径行改为「批 6 已收敛：五个入口
+  见 CollabBodyMixin」。
+  其五，契约测试：`tests/test_backend_mixin_layout.py` 翻转两条旧断言（批 5a /
+  5b 的「留批 6」裸访问红线 → 收敛后形态
+  `test_batch6_chat_pipeline_member_checks_converged_to_team_active` /
+  `test_batch6_project_switch_converged_to_write_wrapper`），另新增 6 条批 6
+  契约——直接基类 + 50 成员解析、无 `__init__` / 无可变类属性、三个 accessor
+  语义（含 dict 本体与 getattr 兜底）、两个写封装行为（源码含豁免与中断
+  原因）、collab_body 之外裸 `self._teams` 唯一例外是主类 `__init__` 字段
+  声明且 15 处逐域形态锚定、helper 随迁与内核注入，`test_batch6_*` 共 8 条；
+  既有断言零削弱，其余断言未动。test_migration.py / test_spectate.py 的极简
+  宿主改为混入 CollabBodyMixin（accessor 与真实 ServerBackend 走同一份读取
+  实现），断言未动。其六，硬验证：属性集快照（git archive 抽 HEAD 74faef4
+  与工作区各真实 import）——MRO 只多 CollabBodyMixin 且紧邻 object，主类
+  lost 50 / gained 0（49 方法 + `_BAD_POOL_CATEGORIES`，与搬移清单逐一相符），
+  其余 35 个类 `__dict__` 无增减，`dir(ServerBackend)` 新增恰为 5 个入口；
+  逐字校验 60 项（49 方法 + 5 helper + 6 常量）AST 全等、文本逐行全等（行尾
+  规范化后），被迁方法体内相对导入 0 处（无需 `..` → `...` 深度改写）。
+  七道门全部通过：点名 16 个测试文件 459 passed、快速验收 42 passed / 3
+  skipped、机械守卫组 71 passed、全量 non-e2e 4394 passed / 14 skipped、
+  e2e 36 passed / 3 skipped、ruff `All checks passed!`、行尾门 15 个本批文本
+  文件均为纯 CRLF 或纯 LF、无混行且双 CR 为 0。行为锚点在批 6 前置补测（HEAD
+  74faef4：切项目团队中断与 own-ctx 豁免两条用户可见路径），本批只做结构
+  收敛、语义未动。
+  用户可见行为零变化：纯内部结构重构，WS 方法面、事件契约、权限门与前端
+  零改动。
 
 ## [2.7.2] - 2026-11-20
 

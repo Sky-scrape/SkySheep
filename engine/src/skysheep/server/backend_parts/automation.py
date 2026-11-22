@@ -15,12 +15,13 @@ CLI 的 ``skysheep cron run`` 与测试直连导入同一入口。
 （十个，逐字段注记见 backend.py __init__ 的 D3 块）；`run_ledger` 实例由
 内核 setup 构造，本域记账消费（cron 扫描与编排节点首尾各记一次）。
 
-跨域读写（不收敛，注记，设计 §3.3）：`automation_busy()`（批 4 雷区收敛①）
+跨域读写（设计 §3.3）：`automation_busy()`（批 4 雷区收敛①）
 把 `_cron_running`/`_pipeline_running` 的「忙」合判供给 D1
 LifecycleMixin._backup_busy_message（备份/恢复/迁移导入/存储清理共用的
 预检），D1 不再裸读这两表；读 D2 的 `_teams`（常驻复用 `_resident_team_is_live`
-与 `_resident_wake_board` 键式取活动团队，批 6 收敛为
-team_orchestrator(sid)）、`team_templates`（定时团队轮读模板校验，只读）、
+与 `_resident_wake_board` 键式取活动团队，批 6 已收敛为
+team_orchestrator(sid)）、`team_templates`（定时团队轮读模板校验，只读，
+不收敛）、
 `resident_teams`（常驻登记，只读）；读 D6 的 `mods`（定时团队轮重建
 registry 时传参，只读）；内核 `ws_emitters`（提醒/任务终态广播，只许遍历
 emit）与 D4 的 `channels`（终态推送/预算告警出站）只消费不增删；
@@ -1989,7 +1990,7 @@ class AutomationMixin:
         的代价只是本轮跳过。team_id 对不上的活动实例（同会话用同模板重建的
         别的队伍）不算「仍活动」，照常复用登记队伍——频道不同，不冲突。
         """
-        live = getattr(self, "_teams", {}).get(resident.session_id)
+        live = self.team_orchestrator(resident.session_id)
         return live is not None and getattr(live, "team_id", "") == resident.team_id
 
     async def _resident_wake_board(self, resident: ResidentTeamEntry) -> list[dict]:
@@ -2009,7 +2010,7 @@ class AutomationMixin:
         3. 注册表快照 resident.board——会话已不存在 / 无团队 meta / meta
            属于别的队伍的兜底（cron 建的登记没有交互会话，沿既有口径）。
         """
-        live = getattr(self, "_teams", {}).get(resident.session_id)
+        live = self.team_orchestrator(resident.session_id)
         if live is not None and getattr(live, "team_id", "") == resident.team_id:
             return [t.to_dict() for t in live.board.tasks()]
         if self.store is not None and resident.session_id:

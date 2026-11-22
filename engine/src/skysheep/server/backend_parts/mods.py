@@ -7,10 +7,11 @@ ModManager 本体在 core/mods.py；这里只做服务层的目录落点、confi
 
 字段所有权（D6，设计 §3.2）：`mods`、`mods_claude`、`_pending_mod_install`。
 
-跨域只读（不收敛，注记，设计 §3.3 雷区表）：`_reload_mods` 读 `self._teams`
-（D2 团队成员 Agent 钩子热更同步，本文件 217/284 两处 `.values()` 遍历，284
-处裸读、217 处带 getattr 防御——批 6 收敛时由 `team_orchestrators()` 统一）；
-D3 automation.py 重建 registry 时只读传参 `self.mods`。
+跨域只读（设计 §3.3 雷区表）：`_reload_mods` / `_reload_mods_claude` 读 D2
+活动团队（团队成员 Agent 的 Mod / Claude 兼容管理器同步），两处 `.values()`
+遍历批 6 已收敛为 `team_orchestrators().values()`（原 `_reload_mods_claude`
+处的 getattr 防御并入该 accessor），本文件不再裸碰 `_teams`；D3 automation.py
+重建 registry 时只读传参 `self.mods`（不收敛，注记）。
 """
 
 from __future__ import annotations
@@ -222,7 +223,7 @@ class ModsMixin:
         for ag in self._for_each_agent():
             if ag is not None:
                 ag.mods_claude = manager
-        for orch in getattr(self, "_teams", {}).values():
+        for orch in self.team_orchestrators().values():
             for ag in orch.agents():
                 ag.mods_claude = manager
 
@@ -289,7 +290,7 @@ class ModsMixin:
                 ag.mods = self.mods
         # 团队成员 Agent 不在 _for_each_agent（那是全局状态刷新的枚举面，成员
         # 系统词独立），但 Mod 拦截对队员同样生效：经各团队编排器补推一轮
-        for orch in self._teams.values():
+        for orch in self.team_orchestrators().values():
             for ag in orch.agents():
                 ag.mods = self.mods
         # 旧模式刷新时也同步 Claude 管理器：两种模式的 Mod 装在同一 root，

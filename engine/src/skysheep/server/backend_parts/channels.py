@@ -12,13 +12,13 @@ D4 渠道与远端域（backend.py Mixin 拆分批 3 起挂域注记，设计 §
 `channels`、`_channel_gates`、`_channel_names`、`_channel_last_chat`、
 `_weixin_login_channel`。
 
-跨域读写（不收敛，注记，设计 §3.3 雷区表）：`_channel_gates`/`_channel_names`
+跨域读写（设计 §3.3 雷区表）：`_channel_gates`/`_channel_names`
 由 D1 LifecycleMixin.delete_session 清登记残键（lifecycle.py delete_session
-行内注记约 :312-317；两域文件头互指留待后续批，
-改动需双方批次会签）；`_channel_names` 另被内核 _reload_agent_history 读
-（backend.py，渠道会话系统提示词加 CHANNEL_STYLE，批 5 后随
-ChatPipelineMixin 落 D1）；`_sync_team_gate` 键式读 `self._teams`（D2 活动
-团队，渠道入站同步团队门，批 6 收敛为 team_orchestrator(sid)）。
+行内注记；两域文件头互指，改动需双方批次会签）；`_channel_names` 另被
+ChatPipelineMixin._reload_agent_history 读（D1，渠道会话系统提示词加
+CHANNEL_STYLE）；`_sync_team_gate` 的键式取批 6 已收敛——走 D2
+CollabBodyMixin 的 team_orchestrator(sid)（渠道入站同步团队门），本文件
+不再裸碰 `_teams`。
 """
 
 from __future__ import annotations
@@ -614,7 +614,7 @@ class ChannelsMixin:
         包装；只换 runtime.agent.gate 不会影响既有团队。TeamOrchestrator
         的 set_gate 会同时刷新已建成员 Agent。
         """
-        orch = self._teams.get(session_id)
+        orch = self.team_orchestrator(session_id)
         setter = getattr(orch, "set_gate", None)
         if callable(setter):
             setter(gate)

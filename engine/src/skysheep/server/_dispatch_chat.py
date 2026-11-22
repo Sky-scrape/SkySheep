@@ -402,7 +402,11 @@ async def _h_permission_queue(backend: ServerBackend, params: dict, emit, local:
     # 团队成员 Agent 挂在各自编排器（team.py 的 _MemberRuntime），不在 runtimes
     # 里——决策路由（respond_permission）已经覆盖他们，队列枚举也得跟上：
     # 否则成员的未决确认卡刷新/断线后无法重建，后端那轮挂在等决策上＝假死。
-    # 请求归属按建队会话的 sid（成员权限事件也走该会话的通道）
+    # 请求归属按建队会话的 sid（成员权限事件也走该会话的通道）。
+    # 批 6 降级条款（设计 §3.3 判断标准）：本处是分发层读点，超出该表的
+    # ≤15 闸门（重数出的第 16 处），保留裸读并注记——只许这样遍历读，不许
+    # 在此增删 _teams；等价写法 backend.team_orchestrators().items() 留待
+    # 后续批评估。
     for team_sid, orch in getattr(backend, "_teams", {}).items():
         if only is not None and team_sid != only:
             continue

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from skysheep.server._dispatch_automation import METHODS
+from skysheep.server.backend_parts.collab_body import CollabBodyMixin
 from skysheep.server.backend_parts.spectate import SpectateMixin, compose_spectate_digest
 
 
@@ -58,7 +59,7 @@ def test_spectate_send_counts_delivered():
     class _Mgr:
         channels = {"c": _Chan()}
 
-    class _Be(SpectateMixin):
+    class _Be(SpectateMixin, CollabBodyMixin):
         channels = _Mgr()
         _teams = {}
 

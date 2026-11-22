@@ -10,9 +10,9 @@ D5 前端服务面板域（backend.py Mixin 拆分批 1 起挂域注记）。
 relay 方法调用，原继承纯属接线取巧；RelaySettingsMixin 改为
 ServerBackend 基类列表的显式直接基类（MRO 顺序与属性集保持不变）。
 
-跨域只读（不收敛，注记）：`_reload_hooks` 读 `self._teams`（D2 团队
-成员 Agent 钩子热更同步）；`advanced_settings`/`save_advanced_settings`
-读 `self.mcp`（D6 出网设置热生效）。
+跨域只读：`_reload_hooks` 经 team_orchestrators().values() 遍历 D2 的活动
+团队（成员 Agent 钩子热更同步，批 6 已收敛）；`advanced_settings` /
+`save_advanced_settings` 读 `self.mcp`（D6 出网设置热生效，不收敛，注记）。
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ class SystemMixin:
             ag.hooks = self.hooks
         # 团队成员 Agent 的钩子同步热更（成员不在 _for_each_agent，构造时
         # 注入的 HookRunner 不跟着刷新就会对队员悄悄失效）
-        for orch in self._teams.values():
+        for orch in self.team_orchestrators().values():
             for ag in orch.agents():
                 ag.hooks = self.hooks
 

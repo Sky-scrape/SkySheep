@@ -13,9 +13,10 @@ push_text_to_targets（本文件 import）。
 字段所有权：本域无自有 D3 字段（主类 __init__ 一次铺齐、本 Mixin 无
 __init__，设计 §3.1）。
 
-跨域只读（不收敛，注记，设计 §3.3）：`_teams`（D2 活动团队，values 遍历
-取各队 snapshot，批 6 收敛为 team_orchestrators() 返回 dict 本体）；
-`channels`（D4 字段，getattr 防御读，spectate_send 的出站目标）。
+跨域只读（设计 §3.3）：活动团队经 team_orchestrators() 取（values 遍历各队
+snapshot，批 6 已收敛，返回 dict 本体；原 `getattr(...) or {}` 防御并入该
+accessor）；`channels`（D4 字段，getattr 防御读，spectate_send 的出站目标，
+不收敛，注记）。
 """
 
 from __future__ import annotations
@@ -81,7 +82,7 @@ class SpectateMixin:
     async def spectate_digest(self) -> dict:
         state: dict[str, Any] = await self.factory_state()
         teams: list[dict] = []
-        for team in (getattr(self, "_teams", {}) or {}).values():
+        for team in self.team_orchestrators().values():
             try:
                 snap = team.snapshot()
             except Exception:  # noqa: BLE001 - 单队快照失败不拖垮整份摘要

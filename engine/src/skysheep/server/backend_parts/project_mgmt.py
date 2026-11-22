@@ -9,13 +9,12 @@ D1 会话与运行时域（backend.py Mixin 拆分批 5b 外迁件）。从 back
 不能反向 import backend（成环）；助手本身纯静态（按实例身份拼 skysheep://
 激活 URI），行为逐字不变。
 
-跨域写（设计 §3.3 雷区 `_teams`，批 6 统一收敛）：_bind_project 的切项目
-中断块对 `_teams` / `_teams_interrupted` 是**裸访问**——`if self._teams` 起、
+跨域写（设计 §3.3 雷区 `_teams`，批 6 已收敛）：_bind_project 的切项目中断
+整块收在 D2 CollabBodyMixin 的 team_interrupt_for_project_switch()——含
+「跨项目分屏列 own-ctx 豁免」过滤（rt.ctx.own 的会话不随主栏切项目失效）、
 按 sid pop → _release_team_providers → 登记 `interrupt_reason="项目已切换，
-团队已中断"` → 条件 _persist_team_state，其中含「跨项目分屏列 own-ctx 豁免」
-的过滤（rt.ctx.own 的会话不随主栏切项目失效）。本批逐字搬移、保持裸访问
-不动；批 6 把整块收成 team_interrupt_for_project_switch() 后，本文件只许调
-封装、不许再碰这两个 dict（设计 §5 风险 2）。内核 setup 也走 _bind_project
+团队已中断"` → 条件 _persist_team_state。本文件只调封装，不再碰 `_teams`
+/ `_teams_interrupted`（设计 §5 风险 2）。内核 setup 也走 _bind_project
 （connect_mcp=False 的启动路径）。
 
 字段所有权：无 D1 自有字段（`_teams*` 归 D2；`instructions_file` /
@@ -141,25 +140,10 @@ class ProjectMgmtMixin:
         # 旧项目的活动团队一并失效：成员 Agent 挂着旧项目的工具表与权限门，
         # 不能让切项目后的消息继续路由进旧团队（登记转「已中断」供 team.get 展示）。
         # 跨项目分屏列的团队除外：成员挂的是会话所属项目的工具表与权限门
-        # （_own_ctx），不随主栏切换失效。
-        if self._teams:
-            for sid in [
-                sid for sid in list(self._teams)
-                if not ((rt := self.runtimes.get(sid)) is not None
-                        and rt.ctx is not None and rt.ctx.own)
-            ]:
-                orch = self._teams.pop(sid)
-                self._release_team_providers(orch)
-                self._teams_interrupted[sid] = {
-                    "session_id": sid,
-                    "team_id": orch.team_id,
-                    "roster": [m.name for m in orch.roster],
-                    "director_mode": orch.director_mode,
-                    "status": "interrupted",
-                    "interrupt_reason": "项目已切换，团队已中断",
-                }
-            if self._teams or self._teams_interrupted:
-                self._persist_team_state()
+        # （_own_ctx），不随主栏切换失效。整块收在 D2 CollabBodyMixin 的
+        # team_interrupt_for_project_switch()（批 6）：本文件只调封装，不再碰
+        # _teams / _teams_interrupted（设计 §5 风险 2）。
+        self.team_interrupt_for_project_switch()
         # 旧项目的会话 runtime 全部失效：停任务、落空排队轮、释放、清空。
         # 排队轮的 Future 必须逐个落空（与 delete_session 同一口径）：否则那些
         # 发消息的请求要么等到被取消的轮在旧上下文里交棒空跑一轮后拿到裸

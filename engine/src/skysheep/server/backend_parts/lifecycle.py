@@ -16,9 +16,10 @@ ChatPipelineMixin._run_turn_pipeline 建并登记，任务体是 _persist_turn�
 （D4 登记表）只在删除会话时清（池写权约定见设计 §3.3）。
 跨域只读已收敛：忙判走批 4 的 automation_busy()（_backup_busy_message 不裸读
 `_cron_running` / `_pipeline_running`）。跨域写（`_teams`，设计 §3.3 雷区，
-批 6 收敛）：delete_session 内 pop → pop interrupted → 条件
-_persist_team_state 三行本批保持裸访问不动，批 6 换成
-team_detach_for_delete(sid) 后本文件只许调封装。
+批 6 已收敛）：delete_session 的摘队三行（pop → pop interrupted → 条件
+_persist_team_state）收在 D2 CollabBodyMixin 的 team_detach_for_delete(sid)，
+本文件只调封装；被摘出的编排器仍由这里等在飞轮收尾之后再
+_release_team_providers（原注释保留在调用点），删会话不再裸碰 `_teams`。
 """
 
 from __future__ import annotations
@@ -307,10 +308,7 @@ class LifecycleMixin:
         # 团队先摘出登记（此后不再接新事件），但 provider 的释放要等在飞的轮
         # 真正收尾之后：取消是异步投递，立刻释放 httpx 连接池会让正在收尾的
         # 成员轮/总管轮撞上「连接已关闭」，半截发言与落库都跟着丢。
-        orch = self._teams.pop(session_id, None)
-        self._teams_interrupted.pop(session_id, None)
-        if orch is not None or self._team_state_path is not None:
-            self._persist_team_state()
+        orch = self.team_detach_for_delete(session_id)
         rt = self.runtimes.pop(session_id, None)
         self._session_models.pop(session_id, None)  # 会话级模型覆盖随删除清掉
         self._session_efforts.pop(session_id, None)  # 会话级思考档位同款清理

@@ -467,6 +467,66 @@
   daily_report.py / run_inspect.py / budget_alert.py 按设计维持现状未加
   注记。用户可见行为零变化：纯内部结构重构（一搬一增均为 MRO 解析内的
   等价归位），WS 方法面、事件契约、权限门与前端零改动。
+- **工程质量：backend.py 按 Mixin 分批拆分批 5a（D1 会话与运行时前半）——
+  ChatPipelineMixin / CheckpointsMixin 外迁，全库最大单方法 _run_turn_pipeline
+  搬移，backend.py 7698→6231 行**：沿用批 1/2 走通的施工模板（抽 HEAD 双拍
+  快照 → 锚点断言 + 行号切片搬迁 → 重拍快照逐项 diff → 定向测试）。其一，
+  外迁：新建 `backend_parts/chat_pipeline.py`（1349 行），`ChatPipelineMixin`
+  承载 11 个方法与 5 个不可变常量——入参预处理 `_sanitize_images` /
+  `_sanitize_refs` / `_recent_turn_seconds` / `_build_refs_context`、唯一对话
+  入口 `send`（320 行：会话解析、运行级授权、引导、排队、团队 / 圆桌 / 对抗
+  同轮互斥与分流）、全库最大单方法 `_run_turn_pipeline`（722 行：模型调用、
+  工具循环、流式合并、权限挂起、上下文压缩、轮末落库与收尾冲刷）、
+  `_auto_title` / `_reload_agent_history` / `_persist_turn` / `_run_queued` /
+  `cancel_run`，常量 `IMAGE_MEDIA_TYPES` / `MAX_IMAGES_PER_TURN` /
+  `MAX_IMAGE_B64_CHARS` / `REF_MAX_SESSIONS` / `REF_MAX_CHARS`；新建
+  `backend_parts/checkpoints.py`（239 行），`CheckpointsMixin` 承载 5 个方法
+  （`_checkpoint_store_for_session` / `list_checkpoints` /
+  `restore_checkpoint` / `_check_checkpoint_ownership` / `checkpoint_diff`）
+  与模块级 `MAX_DIFF_CHARS` / `_decode_bytes` / `_unified_diff` /
+  `_checkpoint_diff_files`；21 个类成员（含 5 个常量）逐一落位、方法体逐字
+  保留，唯一机械改写是两处方法内相对导入因包层级 +1 改层（`..` → `...`）。
+  `_decode_bytes` 设计未点名但仅被 `_checkpoint_diff_files` 消费（全库仅 2
+  处引用），留在主类会成死代码、新文件又够不到，故随迁并纳入模块级逐字比对。
+  其二，接线：
+  ServerBackend 基类列表末尾追加 `ChatPipelineMixin, CheckpointsMixin`
+  （D1 分组注释）；内核事件广播 `_broadcast_ws` 按设计 §2.0 留在主类，契约
+  测试钉住它不在新 Mixin 的 `__dict__`。其三，内核共用件 seam（与设计的
+  唯一结构性偏差，已注记）：`StreamDeltaMerger` 与 `_MERGEABLE_DELTA_KINDS`
+  按设计 §2.0/§6 永不随域迁移，仍定义在 backend.py（`StreamDeltaMerger`
+  的 `__module__` 不变，既有测试锚点不动）；但 backend_parts/`__init__.py`
+  明定各 Mixin 模块不得 import backend（会成环），方法内局部 import 又会
+  改方法体，故由 backend.py 在自身定义完成后以一条 `# noqa: E402` 的模块
+  末尾 import 把 Mixin 运行期需要的 `StreamDeltaMerger` / `QueuedTurn` /
+  `_stamp_turn_estimate` / `_PERSIST_HARVEST_TIMEOUT` 四个名字单向注入
+  chat_pipeline 模块命名空间，新文件侧另用 `if TYPE_CHECKING:` 做类型声明
+  ——方法体因此保持 100% 逐字；契约测试断言注入的是内核同一对象、新文件
+  无第二份定义。其四，import 面：随搬移撤掉 14 个不再使用的导入名
+  （difflib / CHANNEL_STYLE / CheckpointConflictError / PLAN_MODE_PREFIX /
+  PermissionResolved / QueueUpdated / TaskEstimate / estimate_task /
+  is_compaction_summary / obs_info / export_messages_text / schedule_warmup /
+  pop_bg_notes / collect_stream_text），删前 grep 确认无测试或其它模块经
+  backend 模块名引用。其五，逐字红线：`_teams` 成员判定 4 处（send 1 处、
+  _run_turn_pipeline 3 处，含「建队轮已开跑、_teams 尚未登记」窗口期重验
+  守卫）保持裸访问逐字未动，收敛进 team_active() 是批 6 的事（设计 §3.3），
+  契约测试断言源码含 `in self._teams` 恰 4 处且无 team_active。其六，硬
+  验证：git archive 抽 HEAD 与工作区各真实 import 一遍拍快照——
+  dir(ServerBackend) 全属性集 diff 为空（809 名）；MRO 既有 31 类相对顺序
+  逐位不变（既有部分 diff 为空），唯一新增即末尾 ChatPipelineMixin、
+  CheckpointsMixin 两个基类（共 33 类）；per-class 唯一差异是主类 `__dict__`
+  的 21 个成员移入两新 Mixin 的 `__dict__`（经 MRO 仍可达）；模块顶层名
+  229→214（减 18 增 3，净差恰为 14 个导入名 + 4 个随迁助手）；WS 方法注册表
+  零改动（全部 `_dispatch_*.py` 无 diff）。其七，流式 flush 三路径契约专项
+  验证：`_run_turn_pipeline` 的 finally 收尾仍调 `merger.aclose()`，轮末 /
+  异常 / 取消三条路径都要走到（漏一条即回答缺尾），而 merger 是内核同一
+  对象（见其三），合并窗口、首条立即发、非增量事件先冲刷的语义随对象一起
+  原样保留；定向实跑 `tests/test_backend_mixin_layout.py`（4 条批 5a 契约：
+  成员归位、merger 不随迁且同一对象、检查点 diff 助手落位、`_teams` 四读点）
+  + `tests/test_stream_merge.py`（尾部定时冲刷 / 重复 flush 幂等 / 并发嵌套
+  flush / 长流不丢字）+ `tests/test_multi_session.py`（取消与二次取消收尾
+  落库不跳过）= 44 passed。既有测试断言零调整（test_backend_mixin_layout.py
+  89 行全是新增、0 行删除）。用户可见行为零变化：纯内部结构重构，WS 方法面、
+  事件契约、权限门与前端零改动。
 
 ## [2.7.2] - 2026-11-20
 

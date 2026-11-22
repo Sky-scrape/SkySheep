@@ -1,7 +1,7 @@
 // app-proc.js —— 操作过程时间线（思考行 / 工具行 / 中间说明）与一轮一个过程框。
 // 从 app.js 拆出（20k 行巨石）；普通 script 全局函数互调，加载顺序见 index.html。
-// 依赖 app.js 里的渲染助手（renderMarkdown / initStreamBody / renderStreamPart /
-// streamSealCut / scrollLog / curLog / curTab / showThinking），都在调用时解析。
+// 依赖 app.js 里的渲染助手（renderMarkdown / showThinking）与 app-chat.js 里的流式助手
+// （initStreamBody / renderStreamPart / streamSealCut / scrollLog / curLog / curTab），都在调用时解析。
 
 // ---------- 思考行（思考型模型）：一行「💭 思考 · 3.3 秒 · 470 字」，点开看全文 ----------
 // 过程（思考 / 中间说明 / 工具行）按发生顺序排成一条时间线，与正文交错显示，

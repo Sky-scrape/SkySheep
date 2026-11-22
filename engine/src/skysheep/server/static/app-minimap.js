@@ -1,8 +1,8 @@
 /** 消息导航条（minimap）分区文件：从 app.js 拆出（O5 第二批拆块）。
  *  普通 script、零构建：只定义函数与常量，不顶层执行；
- *  主栏那一条的实例仍在 app.js 里创建（`const mainMinimap = ...`），
- *  所以本文件必须排在 app.js 之前加载（index.html 里已如此登记）。
- *  依赖的全局：chatBox / uiScale（均由 app.js 提供，调用时已就绪）。
+ *  主栏那一条的实例现在 app-chat.js 里创建（`const mainMinimap = ...`），
+ *  所以本文件必须排在 app-chat.js 之前加载（index.html 里已如此登记）。
+ *  依赖的全局：chatBox / uiScale（分别由 app-chat.js / app.js 提供，调用时已就绪）。
  */
 
 // ---------- 消息导航条（minimap）：右侧一列小圆点，一颗对应一条消息 ----------

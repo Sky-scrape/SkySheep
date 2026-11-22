@@ -2901,8 +2901,14 @@
 <script src="/static/app-mods.js"></script>
 <!-- 操作过程时间线（思考行/工具行/过程框）：从 app.js 拆出的分区文件 -->
 <script src="/static/app-proc.js"></script>
-<!-- 消息导航条（minimap）：只定义函数，需排在 app.js 之前（app.js 顶层就 new 主栏实例） -->
+<!-- 消息导航条（minimap）：只定义函数，需排在 app.js 之前（app-chat.js 顶层就 new 主栏实例） -->
 <script src="/static/app-minimap.js"></script>
+<!-- 聊天渲染（会话标签/贴底跟随/minimap 挂点/输入区会话记忆）+ 流式增量渲染：
+     从 app.js 拆出的分区文件（路线图第 3 批）。普通 script、零构建。
+     必须排在 app.js 之前：app.js 顶层就引用本文件的绑定（chatBox 的 scroll 监听、
+     updateCoopHint 经 activeTab 画协作按钮初始档），后载会在脚本执行期命中 TDZ；
+     本文件顶层只依赖 DOM 与 app-minimap.js（上一标签），自包含 -->
+<script src="/static/app-chat.js"></script>
 <script src="/static/app.js"></script>
 <!-- 协作卡片渲染（圆桌 rt* / 团队 tc* / 对抗 adv* 系）：从 app.js 拆出的分区文件。
      普通 script、零构建，先 app.js 后本文件（卡片函数调用 app.js 的渲染助手，

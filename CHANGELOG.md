@@ -162,6 +162,34 @@
   app.js 卡片区段两端各留一行指路注释。剩余的协作发起区（setWorkMode /
   showCoopMenu 等）留待第 3 批续搬进同一文件，本批不动。用户可见行为零变化：
   纯移动不改逻辑，DOM / 文案 / CSS / 事件契约零改动。
+- **工程质量：聊天与流式渲染两板拆出 `static/app-chat.js`（前端拆分路线图第 3 批）**：
+  app.js 里还压着两段自成一体的渲染——会话标签 / 贴底跟随 / 输入区会话记忆的聊天
+  渲染板（34 个顶层符号）与用户气泡到轮末定格的流式渲染板（8 个），共 42 个顶层
+  符号。本批整段原子搬入新建 `static/app-chat.js`（774 行 = 8 行文件头 + 聊天渲染板
+  + 1 行分隔注释 + 流式渲染板，符号保序、逻辑一字未改），app.js 由 17689 行降至
+  16928 行，两板原位各留一行指路注释；fmtTokens / addNotice / 历史渲染系 / 页签
+  拖动 / 分屏 / 侧栏按设计留驻 app.js（跨区共用或属后续批次），jump-bottom 跳转
+  接线与 persistSessionTabs._last 两条顶层语句随板迁移。与第 2 批（app-cards.js）
+  的关键差别是加载方向反过来：app-chat.js 必须先于 app.js 加载——app.js 顶层就
+  值引用 chatBox（scroll 监听接线），启动调用 updateCoopHint 又经 activeTab 读
+  协作模板名，let/const 的 TDZ 让 typeof 守卫彻底无效，先载是唯一干净解；而
+  app-chat.js 顶层只依赖 DOM 与 app-minimap.js（mainMinimap 实例），自包含，
+  运行期对 app.js 助手的调用全在事件回调里解析。所以本批一处 typeof 守卫都没加，
+  改以常驻断言闭环：新增 `test_app_chat_movers_and_appchat_toplevel_clean` 钉
+  三条不变量——42 符号在 bundle 里恰好各声明一次且都在 app-chat.js（搬丢即调用点
+  白屏、搬错文件即重名静默覆盖，从此是红灯）；globalProviderName 一行内含
+  globalModelName / globalSupportsVision 两个同句名字（顶层声明扫描只捕行首名），
+  整行由行级断言钉在 app-chat.js 只增不删；app-chat.js 顶层语句块零「app.js 独有」
+  引用——本文件先于 app.js 执行，顶层引用 app.js 的声明会在加载期直接 TDZ 白屏，
+  要新增顶层接线就搬进 app-chat.js 或经评审改断言，不开静默豁免。配套登记：
+  index.html 加载顺序定为 app-minimap.js → app-chat.js → app.js（app-chat.js 顶层
+  就 new 主栏 minimap 实例，app-minimap.js 行注释同步改写）；app.py
+  `_no_store_static` 登记该路径；sw.js SHELL_URLS 加一项并递增 SW_VERSION
+  （v139→v140）；test_frontend_wiring 的 before_app 清单登记，既有断言零改动；
+  app-proc.js 与 app-minimap.js 文件头注释把搬家符号的来源改指 app-chat.js。
+  侧栏区留待下一批续搬进 app-sidebar.js（测试注释已登记平行名单接续方式），
+  协作发起区（setWorkMode / showCoopMenu 等）仍留驻 app.js。用户可见行为零变化：
+  纯移动不改逻辑，DOM / 文案 / CSS / 事件契约零改动。
 
 ## [2.7.2] - 2026-11-20
 

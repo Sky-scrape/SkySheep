@@ -524,6 +524,117 @@ def test_app_cards_movers_and_appjs_top_level_clean():
         "或经评审后改本断言）：\n  " + "\n  ".join(offenders))
 
 
+# ---------- 聊天渲染拆分（路线图第 3 批）：app-chat.js 搬家名单 + 顶层自包含 ----------
+
+# 第 3 批搬家名单（2026-11-22 区域扫描机械产出，逐字抄入）：聊天渲染板 34 个 +
+# 流式渲染板 8 个 = 42 个顶层符号，自 app.js 两区段保序迁入 app-chat.js。
+# app-chat.js 先于 app.js 加载（before_app，见 test_frontend_modules_keep_required_load_order）：
+# app.js 顶层值引用 chatBox（scroll 监听接线）、并经启动调用 updateCoopHint 读
+# activeTab——let/const 的 TDZ 让 typeof 守卫无效，先载是唯一干净解。
+# globalProviderName 一行另有 globalModelName / globalSupportsVision 两个同句名字
+# （_top_level_decls 只捕行首名），整行由下方用例的行级断言钉住；
+# 侧栏批（app-sidebar.js）续搬后在旁新增平行名单。
+APP_CHAT_MOVERS = (
+    # 聊天渲染板（会话标签/贴底跟随/minimap 挂点/输入区会话记忆/标签激活）
+    "chatBox", "chatTabs", "activeTab", "routeTab", "sessionMeta", "newTabObj",
+    "tabFor", "curTab", "curLog", "dropEmptyHint", "FOLLOW_BOTTOM_SLOP",
+    "JUMP_BOTTOM_GAP", "logNearBottom", "logDistanceFromBottom", "curLogEl",
+    "updateJumpBottom", "scrollLog", "followLogBottom", "withTab", "renderTabs",
+    "persistSessionTabs", "mainMinimap", "attachTabLog", "composerBySid",
+    "globalProviderName", "composerState", "saveComposerState",
+    "restoreComposerState", "migrateComposerSid", "refreshActiveSessionBadges",
+    "activateTab", "openTabForSession", "isBlankTab", "loadTabHistory",
+    # 流式渲染板（用户气泡/流式气泡/定稿切块/字符渐显/轮末定格）
+    "addUser", "beginAssistant", "streamSealCut", "animateStreamChars",
+    "renderStreamPart", "initStreamBody", "appendStream", "finishAssistant",
+)
+assert len(APP_CHAT_MOVERS) == len(set(APP_CHAT_MOVERS)) == 42
+
+
+def test_app_chat_movers_and_appchat_toplevel_clean():
+    """聊天渲染拆分（路线图第 3 批）的两条常驻不变量（镜像第 2 批 ①③）。
+
+    ① 搬家名单落位：APP_CHAT_MOVERS 每个符号在拼接 bundle 里恰好声明一次、
+       且声明文件是 app-chat.js——「搬丢 / 搬错文件 / 抄写夹带」常驻红灯；
+    ② app-chat.js 顶层语句块只能引用「本文件声明 ∪ 加载顺序在本文件之前的
+       文件声明」（2026-11-22 复核建议，替换首版「零 app.js 独有」的弱口径）：
+       本文件先于 app.js 加载，顶层引用任何后载文件的绑定 = 必炸
+       （TDZ / ReferenceError 白屏）——后载符号（app.js / app-cards.js /
+       app-teamroom.js / …）一并拦下，同时盖住 app-minimap.js 相对顺序与
+       后载文件两个盲区。谁要在 app-chat.js 顶层引用后载符号，必须经评审
+       有意识地改本断言——不开静默豁免。
+    """
+    import re
+
+    decls_by_file = {}
+    for name in _bundle_js_files():
+        path = STATIC_DIR / name
+        if path.is_file():
+            decls_by_file[name] = _top_level_decls(path.read_text(encoding="utf-8"))
+    problems = []
+    for sym in APP_CHAT_MOVERS:
+        where = [f for f, decls in decls_by_file.items() if sym in decls]
+        if not where:
+            problems.append(f"{sym}：bundle 里找不到声明（搬家时丢符号）")
+        elif where != ["app-chat.js"]:
+            problems.append(f"{sym}：声明在 {where}，应恰好在 app-chat.js 一次")
+    assert not problems, "app-chat.js 搬家名单落位不符：\n  " + "\n  ".join(problems)
+
+    # 多名 let 行只被 _top_level_decls 捕获行首名，整行单独钉住（防「顺手整理」搬走）
+    chat_src = (STATIC_DIR / "app-chat.js").read_text(encoding="utf-8")
+    assert re.search(
+        r'^let globalProviderName = "", globalModelName = "", globalSupportsVision = true;$',
+        chat_src, re.M), (
+        "globalProviderName 一行三名（全局生效模型镜像）必须整体留在 app-chat.js")
+
+    # ② col-0 顶层语句块扫描（第 2 批 ③ 同款算法，另加一条：首行即注释开头的
+    #    整块跳过——JSDoc 续行可无 * 前缀，如 restoreComposerState 的文档）
+    order = list(_bundle_js_files())
+    allowed: set[str] = set()
+    seen_chat = False
+    for name in order:
+        allowed |= set(decls_by_file.get(name, []))
+        if name == "app-chat.js":
+            seen_chat = True
+            break
+    assert seen_chat, "加载顺序里找不到 app-chat.js（index.html 派生清单变了？）"
+    all_decls: set[str] = set()
+    for decls in decls_by_file.values():
+        all_decls |= set(decls)
+    banned = all_decls - allowed
+    lines = chat_src.splitlines()
+    blocks: list[list[str]] = []
+    cur: list[str] = []
+    for line in lines:
+        if line[:1] not in ("", " ", "\t"):  # col-0 起始 → 开新块
+            if cur:
+                blocks.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        blocks.append(cur)
+    decl_re = re.compile(r"^(?:async\s+)?function\b|^(?:let|const|var|class)\b")
+    offenders = []
+    for block in blocks:
+        first = block[0]
+        if first.lstrip().startswith(("//", "/*")):
+            continue  # 注释块（整块；块内其余行必为缩进续行/注释，不含顶层代码）
+        if not first.strip() or decl_re.match(first):
+            continue
+        if all((not ln.strip()) or ln.lstrip().startswith(("//", "/*", "*"))
+               for ln in block):
+            continue  # 注释块
+        text = "\n".join(block)
+        hit = sorted(banned & set(re.findall(r"[A-Za-z_$][\w$]*", text)))
+        if hit:
+            offenders.append(f"引用后载符号 {','.join(hit)}：{first.strip()[:60]}")
+    assert not offenders, (
+        "app-chat.js 顶层语句块引用了后载文件的顶层声明"
+        "（本文件先于它们加载，加载期命中 TDZ / ReferenceError 白屏；把引用挪进函数体，"
+        "或经评审后改本断言）：\n  " + "\n  ".join(offenders))
+
+
 def test_run_center_names_stay_distinct():
     """运行中心两处入口的名字护栏（2026-10-10 修复的重名事故回归）。
 
@@ -1266,10 +1377,12 @@ def test_frontend_modules_keep_required_load_order():
     下面的 before_app 清单（本用例按名单定位并断言顺序）。
     """
     scripts = [url.rsplit("/", 1)[-1] for url in _index_html_script_urls()]
-    # 先于 app.js：app.js 顶层调用它们的函数
+    # 先于 app.js：app.js 顶层调用它们的函数（app-chat.js 还被 app.js 顶层值引用
+    # chatBox、经启动调用 updateCoopHint 读 activeTab——let/const 的 TDZ 让
+    # typeof 守卫无效，先载是唯一干净解，见 APP_CHAT_MOVERS 用例）
     before_app = (
-        "app-events.js", "app-skills.js", "app-minimap.js", "app-whitelist.js",
-        "app-providers.js", "app-advanced.js", "app-about.js",
+        "app-events.js", "app-skills.js", "app-minimap.js", "app-chat.js",
+        "app-whitelist.js", "app-providers.js", "app-advanced.js", "app-about.js",
     )
     # 后于 app.js：它们反过来依赖 app.js 的顶层定义
     after_app = ("app-cards.js", "app-factory.js", "app-tools.js")

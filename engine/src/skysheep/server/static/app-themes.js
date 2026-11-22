@@ -12,7 +12,9 @@
 //       浓巧 cocoa / 丹金 cinnabar。
 // 每套主题是 app.css 文件尾部的一个完整 [data-theme=…] 变量组，切换 = 换 <html> 的 data-theme；
 // auto 时浅色落纸墨、深色落夜墨。light/dark 是旧版两档值，读取时映射回 paper/night。
-// 与 backend_parts/remote.py 的 THEME_PREFS 白名单、index.html 的主题卡片一一对应，改主题列表要同步。
+// backend_parts/remote.py 的 THEME_PREFS / THEME_AUTO_LIGHT / THEME_AUTO_DARK 由
+// tools/gen_theme_prefs.py 从本表生成（勿手改，重跑工具即可）；index.html 的主题卡片
+// 与首帧兜底仍需手工同步（test_theme_alignment.py 机械校验）。
 const THEMES = {
   paper: { name: "纸墨", dark: false },
   celadon: { name: "青瓷", dark: false },

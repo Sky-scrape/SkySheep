@@ -6051,6 +6051,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
  *   ② index.html 首帧兜底底色、设置页主题卡片、两个「跟随系统落点」下拉
  *   ③ app-themes.js 的 THEMES 表（主题卡名单与搜索索引都从它生成）
  *   ④ backend_parts/remote.py 的 THEME_PREFS / THEME_AUTO_LIGHT / THEME_AUTO_DARK
+ *      （由 tools/gen_theme_prefs.py 从 app-themes.js 生成，改主题后重跑该工具）
  *   ⑤ server/app.py 首帧注入的 auto 落点白名单
  *   ⑥ wintheme.py 的 THEME_PALETTE 与 DARK_THEME_IDS（标题栏/启动页/失败页）；
  *      bootpages.py 的 _ERR

@@ -213,3 +213,23 @@ def test_themes_table_lives_in_app_themes_js():
     assert "const THEMES = {" in read_static("app-themes.js")
     assert "const THEMES = {" not in read_static("app.js"), (
         "THEMES 真源已拆至 app-themes.js，app.js 的副本会分叉名单（改 app-themes.js）")
+
+
+def test_remote_theme_lists_are_generated_from_app_themes():
+    """remote.py 的三份主题名单必须与生成器的现算结果逐字一致（派生优先于手抄）。
+
+    THEME_PREFS / THEME_AUTO_LIGHT / THEME_AUTO_DARK 现在由
+    tools/gen_theme_prefs.py 从 app-themes.js 的 THEMES 表生成（块首尾有哨兵）。
+    手改任一 id 或改表后忘重跑工具，这里直接红——集合相等断言抓不到「顺序变
+    了 / 少了个 id 但其它处也少了」这类漂移。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "gen_theme_prefs", ROOT / "tools" / "gen_theme_prefs.py")
+    assert spec and spec.loader
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    assert gen.main(["--check"]) == 0, (
+        "remote.py 的主题名单过期：重跑 python -I engine/tools/gen_theme_prefs.py"
+    )

@@ -30,7 +30,10 @@ events.py 本体),app.js 的比较一律查表引用。本文件四条用例锁�
 当前只出现在 handleEvent 的 case 里。后端 WS 广播的非引擎 kind
 (update_progress / relay_pair_* / session_updated / cron_updated 等)不经
 events.py 事件类,不进 AP_EVENTS 表,前端分支仍是字面量——残余扫描只对
-引擎 kind 生效,不误伤它们(广播 kind 出仓属后续批次)。
+引擎 kind 生效,不误伤它们。广播 kind 出仓已评估为不做:服务端 ``"kind": "…"``
+字面量里混着嵌套载荷字段(task / phase / pair 等),没有统一的 emit 注册表,
+按字面量派生会同时误收与漏收,两处真源反而更难守;改名风险已由两侧行为测试
+(更新进度、relay_pair_*、term_*、session_updated 等)覆盖。
 """
 
 from __future__ import annotations

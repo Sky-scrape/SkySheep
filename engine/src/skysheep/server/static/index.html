@@ -2911,7 +2911,8 @@
 <script src="/static/app-chat.js"></script>
 <!-- 主题配色表（26 套数据表，唯一事实来源）：从 app.js 拆出的数据文件（路线图第 4 批）。
      普通 script、零构建，先于 app.js 加载（app.js 主题系函数事件期读本表）；
-     app.css 的主题变量组、index.html 的主题卡与首帧兜底、remote.py 的 THEME_PREFS、
+     app.css 的主题变量组、index.html 的主题卡与首帧兜底、remote.py 的 THEME_PREFS
+     （由 tools/gen_theme_prefs.py 从本表生成）、
      wintheme 色板均以它对齐（test_theme_alignment.py 机械校验）；纯数据、零顶层语句 -->
 <script src="/static/app-themes.js"></script>
 <script src="/static/app.js"></script>

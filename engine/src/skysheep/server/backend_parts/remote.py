@@ -174,8 +174,11 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
 # 菀雾 heather、醇巧 caramel；深色：夜墨 night、黛夜 indigo、松烟 pine、深海 abyss、
 # 赤青 scarlet、雾紫 lilac、青柠 lime、胭脂 rouge、曜金 obsidian、墨朱 inkred、
 # 沉海 glowsea、浓巧 cocoa、丹金 cinnabar。
-# 与 app.js 的 THEMES 表、app.css 的 [data-theme=…] 段、index.html 设置页的主题卡片、
-# app.py 首帧注入、wintheme 色板一一对应，改主题列表要同步（清单见 app.css 主题段开头）。
+# 与 app-themes.js 的 THEMES 表、app.css 的 [data-theme=…] 段、index.html 设置页的主题卡片、
+# app.py 首帧注入、wintheme 色板一一对应（清单见 app.css 主题段开头）。
+# 下面三份名单由 tools/gen_theme_prefs.py 从 app-themes.js 生成，勿手改；
+# 改主题后重跑该工具，契约测试（test_theme_alignment.py）用 --check 防漂移。
+# --- BEGIN GENERATED THEME IDS（tools/gen_theme_prefs.py 从 app-themes.js 生成，勿手改）---
 THEME_PREFS = (
     "auto", "timed", "light", "dark",
     "paper", "celadon", "kaki", "mint", "bean", "mustard", "sprout", "silver",
@@ -193,6 +196,7 @@ THEME_AUTO_DARK = (
     "night", "indigo", "pine", "abyss", "scarlet", "lilac", "lime", "rouge",
     "obsidian", "inkred", "glowsea", "cocoa", "cinnabar",
 )
+# --- END GENERATED THEME IDS ---
 
 
 def client_origin(client) -> str:

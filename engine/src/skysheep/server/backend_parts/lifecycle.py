@@ -1,6 +1,24 @@
 """会话生命周期：新建/打开/激活/截断/归属校验、删除/改名/置顶/归档、会话库备份与恢复。
 
 从 backend.py 按职责注释整段搬入。方法体逐字保留，逻辑不变。
+
+D1 域挂域注记（拆分批 5b，设计 §2.1 D1）：本文件是「会话生命周期」面。
+与批 5b 外迁件的交叉点（字段构造都在主类 __init__，改动需双方会签）——
+删除（delete_session）/ 清空空会话（cleanup_empty_sessions）路径上本文件清理
+`_session_models` / `_default_model_sessions` / `_session_efforts` /
+`_session_accepts` 四个会话级覆盖（owner 在 SessionModelMixin /
+PermissionModesMixin）、同步 `_manually_named`、回收 runtime（delete_session
+先 cancel_run 再摘；cleanup_empty_sessions 只摘不在跑、无排队的）。等待
+`_persist_tasks` 里后台落库任务的只在 delete_session——任务由
+ChatPipelineMixin._run_turn_pipeline 建并登记，任务体是 _persist_turn。
+截断（truncate_session）只做 store.truncate_from + runtime 历史重载，
+不做上述内存态清理、等待与 runtime 回收。`_channel_gates` / `_channel_names`
+（D4 登记表）只在删除会话时清（池写权约定见设计 §3.3）。
+跨域只读已收敛：忙判走批 4 的 automation_busy()（_backup_busy_message 不裸读
+`_cron_running` / `_pipeline_running`）。跨域写（`_teams`，设计 §3.3 雷区，
+批 6 收敛）：delete_session 内 pop → pop interrupted → 条件
+_persist_team_state 三行本批保持裸访问不动，批 6 换成
+team_detach_for_delete(sid) 后本文件只许调封装。
 """
 
 from __future__ import annotations

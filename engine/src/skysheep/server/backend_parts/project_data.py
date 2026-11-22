@@ -5,6 +5,13 @@
 「任务清单」页签）、会话导出（md / html 单文件）、项目记忆读写（左侧
 「项目记忆」入口）；导出辅助（_fmt_export_dur / _export_*_html /
 _html_escape / EXPORT_HTML_TEMPLATE）随 export_session 同域落位。
+
+D1 域挂域注记（拆分批 5b，设计 §2.1 D1）：本文件是「项目与会话数据」面。
+字段所有权（D1，构造在主类 __init__）：`instructions_file` /
+`instructions_text`（项目说明 AGENTS.md 的装载结果）本文件读写（项目记忆
+读取、保存与 mtime 冲突检测写回 instructions_text 后刷新系统词）；装载/
+切项目由 _bind_project（ProjectMgmtMixin）写，读取还有
+SessionModelMixin._context_detail 与内核 snapshot。本 Mixin 无 __init__。
 """
 
 from __future__ import annotations

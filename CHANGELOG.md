@@ -527,6 +527,99 @@
   落库不跳过）= 44 passed。既有测试断言零调整（test_backend_mixin_layout.py
   89 行全是新增、0 行删除）。用户可见行为零变化：纯内部结构重构，WS 方法面、
   事件契约、权限门与前端零改动。
+- **工程质量：backend.py 按 Mixin 分批拆分批 5b（D1 会话与运行时后半，
+  批 5 收口）——SessionModel / PermissionModes / Usage / ProjectMgmt 四个新
+  Mixin 外迁，backend.py 6231→4649 行**：沿用批 1/2/5a 走通的施工模板
+  （抽 HEAD 双拍快照 → 锚点断言 + 行号切片搬迁 → 重拍快照逐项 diff →
+  定向测试）。其一，外迁：
+  新建 `backend_parts/session_model.py`（784 行），`SessionModelMixin` 承载
+  25 个方法——分叉 / 恢复（`fork_session` / `resume_session`）、会话级模型与
+  思考档位（`session_model_switch` / `session_model_get` /
+  `session_reasoning_get` / `session_reasoning_set`）、全局模型切换与「新会话
+  默认模型」「辅助对话模型」两套偏好、模型三段解析与 provider 生命周期
+  （`_session_effective_model` / `_runtime_provider` /
+  `_apply_model_routing` / `_release_turn_providers` /
+  `_close_provider_after`）、会话观测（`compact_now` / `status` /
+  `_context_detail` / `_estimate_session_context`）；新建
+  `backend_parts/permission_modes.py`（157 行），`PermissionModesMixin`
+  承载 7 个方法（`permission_mode` /
+  `_apply_gate_accept_pref` / `_sync_default_accept_to_runtimes` /
+  `set_permission_mode` / `_accept_mode_of` / `session_accept_get` /
+  `session_accept_set`），方法体 113 行原样搬移（设计估 ~310 行偏高，7 个
+  清单方法一个不缺，非漏搬）；新建 `backend_parts/usage.py`（463 行），
+  `UsageMixin` 承载 `usage_stats` / 协作成本看板（`usage_collab_report` /
+  `usage_pricing_set` / `_fold_usage_cost`）/ `turn_breakdown` 与
+  `_MARK_ADVERSARIAL` / `_MARK_ROUNDTABLE` / `_MARK_TEAM` 三个不可变 SQL
+  片段；新建 `backend_parts/project_mgmt.py`（375 行），`ProjectMgmtMixin`
+  承载 `_bind_project` / `switch_project` / `delete_project` /
+  `remove_project` / `restore_project` / `project_admin_list` /
+  `_toast_blocking`。记忆域三件并入既有 `backend_parts/memory.py`：
+  `_memory_retrieval_query` / `compose_system` / `compose_system_for`
+  （系统提示词组装唯一实现，主类不再自带）。
+  其二，接线与随迁：ServerBackend 基类列表末尾追加
+  `SessionModelMixin, PermissionModesMixin, UsageMixin, ProjectMgmtMixin`
+  （D1 分组注释、保序插入）。随迁与否按导入期求值判定：
+  `turn_breakdown` 的形参默认值在导入期求值，故轮次日志的模块级件
+  （`TURN_LOG_LIMIT_DEFAULT` / `TURN_LOG_LIMIT_MAX` / `_LOG_TS_RE` /
+  `_log_line_ts` / `_turn_int` / `_turn_row` / `_load_turn_rows`）随方法
+  整体落 usage.py（沿批 5a checkpoints 随迁 `MAX_DIFF_CHARS` 等的先例），
+  backend.py 以 import 转发测试锚点用到的 5 个名字，
+  `tests/test_turn_breakdown.py` 与 `tests/test_app_file_logging.py` 从
+  `skysheep.server.backend` 取用的既有锚点不变；`HISTORY_SYNC_LIMIT` /
+  `_msg_brief` / `_window_briefs` 只在调用期使用，仍由内核在模块末尾单向
+  注入 session_model 模块（`_msg_brief.__module__` 仍是
+  `skysheep.server.backend`，`test_message_brief_contract.py` 锚点不动）。
+  其三，机械改写与注记：`_toast_blocking` 是 staticmethod，体内
+  `ServerBackend._toast_launch_uri()` 无法保留（backend_parts 不得 import
+  backend，成环），改为 `PreferencesMixin._toast_launch_uri()`——该助手
+  定义在 D6 `preferences.py:330`，纯静态拼 `skysheep://` 激活 URI、无状态，
+  行为逐字相同；`test_m4_features.py` 的 monkeypatch 经 MRO 照常生效。
+  注记面：lifecycle.py / memory.py / project_data.py 文件头挂 D1 域注记
+  （会话级覆盖清理义务、`instructions_file` / `instructions_text` 双写
+  面、`_teams` 删除路径留批 6），backend.py `__init__` 加 13 个 D1 字段
+  所有权注记（会话级模型 / 默认模型快照 / 思考档位 / 权限档位 / 标题单飞 /
+  在飞落库 / 记忆单飞 / 项目说明，每条消费方均 grep 核实）；
+  `backend_parts/__init__.py` 模块文档按实况订正（批 5a 后「backend 保留
+  对话主流程」已过期，改为「保留运行时内核 + 各外迁件落点」）。
+  其四，注释完整性自验：按行号自底向上删除时，D5 区间删完后原「# ----
+  模型/配置操作 ----」节标头上移、恰好落入 D4 删除区间被吞——已补回
+  （`add_provider_model` 之前，backend.py:4379）。随后普查删除区间内的
+  全部注释行，只剩 2 条为有意合并/替换：「新会话默认模型」节标头与
+  「设置/清除走 WS」合并成一条（后句原文保留在 session_model.py），
+  「系统提示词 / 会话」节标头半边并入 memory.py 的「系统提示词组装与记忆
+  检索查询」小节。
+  其五，逐字红线：`_teams` 成员判定保持裸访问——ChatPipelineMixin 4 处
+  逐字未动（契约测试 `in self._teams` 恰 4 处、无 team_active），
+  ProjectMgmtMixin._bind_project 的切项目中断块（`rt.ctx.own` 分屏列豁免、
+  `interrupt_reason="项目已切换，团队已中断"`、条件 `_persist_team_state`）
+  逐字搬移，`self._teams` 裸访问 4 处、`self._teams_interrupted` 2 处，
+  未引入任何 accessor；收敛进 `team_active()` /
+  `team_interrupt_for_project_switch()` 是批 6 的事（设计 §3.3）。刻意不搬
+  并注记：`peek_session_messages` / `session_messages_earlier`（设计 §2.1
+  D1 外迁清单未列，会话只读历史窗口随内核留 backend.py，节标头改为
+  「会话只读历史窗口」）、`add_provider_model` / `remove_provider_model`
+  （同属未列清单）。
+  其六，硬验证：git archive 抽 HEAD 与工作区各真实 import 一遍拍快照——
+  dir(ServerBackend) 全属性集 diff 为空（809 名）；MRO 既有 32 类相对顺序
+  逐位不变（既有部分 diff 为空），唯一新增即末尾四个 D1 Mixin（33→37 类，
+  object 前）；per-class 差异是主类 `__dict__` 的 50 个成员移入四个新 Mixin
+  与 MemoryMixin 的 `__dict__`（经 MRO 仍可达），既有类无其它增减；模块
+  顶层名 215→201（随方法撤掉 19 个导入名，新增 4 个 Mixin 导入名与
+  `_session_model_module`）；WS 方法注册表零改动（全部 `_dispatch_*.py`
+  无 diff）。其七，契约测试：`tests/test_backend_mixin_layout.py` 新增 5 条
+  批 5b 契约——四 Mixin 直继基类且 47 个成员逐一落位（主类不再自带、经
+  MRO 可达且解析到新 Mixin）、内核件注入或转发（`HISTORY_SYNC_LIMIT` /
+  `_msg_brief` / `_window_briefs` 同一对象，轮次日志 5 个名字与 usage.py
+  同一对象、`turn_breakdown.__defaults__` 与 usage 常量一致）、memory 三件
+  并入、`_teams` 裸访问计数、`peek_session_messages` /
+  `session_messages_earlier` 留内核；既有测试断言零调整（112 行全是新增、
+  0 行删除）。定向实跑 `test_backend_mixin_layout.py` +
+  `test_turn_breakdown.py` + `test_app_file_logging.py` +
+  `test_m4_features.py` = 54 passed。收口：`backend_parts/settings_io.py:22`
+  的 `_apply_gate_accept_pref` 注记原写「主类，批 5 外迁」，5b 后该实现属
+  PermissionModesMixin，已在本批一并订正（纯注记，不动方法体）。
+  用户可见行为零变化：纯内部结构重构，WS 方法面、事件契约、权限门与前端
+  零改动。
 
 ## [2.7.2] - 2026-11-20
 

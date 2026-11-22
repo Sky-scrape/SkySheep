@@ -1,7 +1,20 @@
-"""记忆体系：归档自动提炼、定期整理、全局 memory.md 编辑与项目记忆地图。
+"""记忆体系：归档自动提炼、定期整理、全局 memory.md 编辑与项目记忆地图；
+系统提示词组装与记忆检索查询（批 5b 并入）。
 
 从 backend.py 按职责注释整段搬入（提炼/整理纯函数在 tools/memory.py，
 这里是与模型和存储接线的那一半）。方法体逐字保留，逻辑不变。
+
+D1 域挂域注记（拆分批 5b，设计 §2.1 D1）：本文件是「记忆与系统提示词」面。
+批 5b 并入的 `_memory_retrieval_query` / `compose_system` /
+`compose_system_for` 是系统提示词组装的唯一实现——chat_pipeline 的 send 与
+runtime 首建/热更、定时任务与流水线按目标目录组装系统词都经
+self.compose_system* 调用（消费方见 chat_pipeline.py / automation.py）。
+
+字段所有权（D1，构造在主类 __init__）：`_digesting` / `_maintaining` /
+`_map_generating` / `_memory_io_lock` 由本文件独占；`instructions_file` /
+`instructions_text` 本文件在定期整理项目记忆后刷新 instructions_text，
+装载/切项目由 _bind_project（ProjectMgmtMixin）写，读取还有 project_data.py
+（项目记忆读写面）与内核 snapshot。本 Mixin 无 __init__、无类级可变属性。
 """
 
 from __future__ import annotations
@@ -21,12 +34,16 @@ from ...config import (
     set_memory_maintenance_in_config,
     set_memory_map_config,
 )
+from ...core import Agent, build_system_prompt
 from ...core.checkpoints import CheckpointStore
 from ...core.prompt import (
     MAX_GLOBAL_INSTRUCTIONS_CHARS,
     MAX_INSTRUCTIONS_CHARS,
     global_instructions_path,
     load_global_instructions,
+    load_project_instructions,
+    render_global_instructions_section,
+    render_instructions_section,
 )
 from ...session.store import Project
 from ...textio import decode_bytes, write_text_atomic, write_text_file
@@ -46,6 +63,7 @@ from ...tools.memory import (
     parse_digest,
     parse_memory_entries,
     remember_lines,
+    render_memory_section,
     save_maintenance_state,
 )
 from ...tools.memory_distill import (
@@ -69,6 +87,59 @@ class MemoryMixin:
 
     方法自 backend.py 按职责注释逐字搬入。
     """
+    # ---- 系统提示词组装与记忆检索查询（批 5b 自 backend.py 并入） ----
+
+    def _memory_retrieval_query(self, text: str, agent: Agent) -> str:
+        """记忆检索化（第一期）的查询串：本轮用户消息 + 最近几条对话摘要。
+
+        截断只为控查询体积（词元化是 O(len)），不改变相关性的来源构成；重新
+        生成轮 text 为空串，查询自然落在历史末尾被重跑的那条用户消息上。
+        system/tool 消息不是对话语义的来源，跳过；拿不到任何内容返回空串，
+        render_memory_section 按约定整块注入。
+        """
+        parts = [text.strip()] if text.strip() else []
+        recent: list[str] = []
+        for m in reversed(agent.history):
+            if m.role not in ("user", "assistant"):
+                continue
+            t = (m.text or "").strip()
+            if not t:
+                continue
+            recent.append(t[:300])
+            if len(recent) >= 3:
+                break
+        parts.extend(reversed(recent))
+        return "\n".join(parts)[:4000]
+
+    def compose_system(self, memory_query: str = "") -> str:
+        return self.compose_system_for(self.working_dir, memory_query=memory_query)
+
+    def compose_system_for(self, workdir: Path | None, memory_query: str = "") -> str:
+        """无人值守跨项目运行（定时任务/流水线节点）按目标目录组装系统提示词。
+
+        工作目录与项目约定（AGENTS.md）必须取目标目录的——否则提示词里写着
+        A 目录、实际却在 B 目录干活，Agent 会找错地方；技能段沿用当前装载的
+        SkillLoader（按目录重挂载过重），全局记忆本就跨项目。
+        workdir 为 None 是无项目态（兜底：引擎没开项目且会话缺归属记录），
+        提示词里说明没有工作目录、文件工具会拒绝。快聊/远程连接固定在数据
+        目录 fast-talk / remote-control 文件夹（快聊不与 default 混用），
+        不落 None 分支，文件工具可用。
+        memory_query 是记忆检索化（第一期）的查询串（「本轮用户消息 + 最近对话
+        摘要」，见 _memory_retrieval_query）：记忆超过 MEMORY_RETRIEVAL_THRESHOLD
+        时只注入相关条目；空串表示拿不到本轮查询（轮外的 set_system 场景），
+        render_memory_section 按约定整块注入、行为与检索化之前一致。
+        """
+        instr_file, instr_text = (
+            load_project_instructions(workdir) if workdir is not None else (None, "")
+        )
+        return (
+            build_system_prompt(workdir)
+            + self.skills.render_prompt_section()
+            + render_instructions_section(instr_file, instr_text)
+            + render_global_instructions_section(load_global_instructions())
+            + render_memory_section(query_text=memory_query)
+        )
+
 
     # ---- 归档自动记忆（提炼纯函数在 tools/memory.py） ----
 

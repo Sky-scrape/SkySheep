@@ -12,13 +12,18 @@ from skysheep.server.backend_parts.channels import ChannelsMixin
 from skysheep.server.backend_parts.chat_pipeline import ChatPipelineMixin
 from skysheep.server.backend_parts.checkpoints import CheckpointsMixin
 from skysheep.server.backend_parts.factory import FactoryMixin
+from skysheep.server.backend_parts.memory import MemoryMixin
+from skysheep.server.backend_parts.permission_modes import PermissionModesMixin
+from skysheep.server.backend_parts.project_mgmt import ProjectMgmtMixin
 from skysheep.server.backend_parts.relay import RelaySettingsMixin
 from skysheep.server.backend_parts.remote import RemoteMixin
+from skysheep.server.backend_parts.session_model import SessionModelMixin
 from skysheep.server.backend_parts.settings_io import SettingsIOMixin
 from skysheep.server.backend_parts.skills import SkillsMixin
 from skysheep.server.backend_parts.spectate import SpectateMixin
 from skysheep.server.backend_parts.subagent import SubagentMixin
 from skysheep.server.backend_parts.trust import TrustMixin
+from skysheep.server.backend_parts.usage import UsageMixin
 from skysheep.server.backend_parts.whitelist import WhitelistMixin
 from skysheep.server.backend_parts.workspace_panel import WorkspacePanelMixin
 
@@ -283,3 +288,110 @@ def test_batch5a_teams_member_checks_left_bare_until_batch6():
     src = inspect.getsource(ChatPipelineMixin)
     assert src.count("in self._teams") == 4
     assert "team_active" not in src
+
+
+
+def test_batch5b_mixins_are_direct_bases_and_members_resolve_there():
+    """批 5b（D1 会话与运行时后半）：SessionModelMixin / PermissionModesMixin /
+    UsageMixin / ProjectMgmtMixin 自主类整簇搬入；主类不再自带，经 MRO 仍可达且
+    解析到新 Mixin（主类残留同名副本会遮蔽），设计 §4.1 批 5 行（5b = SessionModel/
+    PermissionModes/Usage/ProjectMgmt）。"""
+    for mixin in (SessionModelMixin, PermissionModesMixin, UsageMixin, ProjectMgmtMixin):
+        assert mixin in ServerBackend.__mro__, mixin.__name__
+    moved_members = {
+        SessionModelMixin: [
+            "fork_session", "resume_session", "session_model_switch", "session_model_get",
+            "session_reasoning_get", "session_reasoning_set", "switch_model",
+            "set_default_model", "default_model_state", "_default_model_pref",
+            "_aux_model_pref", "aux_model_state", "set_aux_model", "reasoning_state",
+            "set_reasoning_effort", "_model_private_sessions",
+            "_session_effective_model", "_runtime_provider", "_apply_model_routing",
+            "_release_turn_providers", "_close_provider_after", "compact_now",
+            "_context_detail", "status", "_estimate_session_context",
+        ],
+        PermissionModesMixin: [
+            "permission_mode", "_apply_gate_accept_pref",
+            "_sync_default_accept_to_runtimes", "set_permission_mode",
+            "_accept_mode_of", "session_accept_get", "session_accept_set",
+        ],
+        UsageMixin: [
+            "usage_stats", "_fold_usage_cost", "usage_collab_report",
+            "usage_pricing_set", "turn_breakdown", "_MARK_ADVERSARIAL",
+            "_MARK_ROUNDTABLE", "_MARK_TEAM",
+        ],
+        ProjectMgmtMixin: [
+            "_bind_project", "switch_project", "delete_project", "remove_project",
+            "restore_project", "project_admin_list", "_toast_blocking",
+        ],
+    }
+    for mixin, members in moved_members.items():
+        for name in members:
+            assert name in mixin.__dict__, (mixin.__name__, name)
+            assert name not in ServerBackend.__dict__, name
+            assert hasattr(ServerBackend, name), name  # 经 MRO 仍可达
+            assert getattr(ServerBackend, name) is getattr(mixin, name), name
+
+
+def test_batch5b_kernel_helpers_injected_or_forwarded():
+    """内核共用件不随迁（设计 §2.0/§6）：
+    ① 历史窗口口径（HISTORY_SYNC_LIMIT）与历史 brief 组装（_msg_brief /
+    _window_briefs）留 backend.py，由内核在模块末尾单向注入 SessionModelMixin；
+    ② 轮次日志件随 turn_breakdown 落 usage.py（形参默认值在导入期求值，必须与
+    定义同模块），backend 模块名继续转发——tests/test_turn_breakdown.py 与
+    tests/test_app_file_logging.py 的既有导入锚点不变。"""
+    import skysheep.server.backend as backend_module
+    from skysheep.server.backend_parts import session_model as sm
+    from skysheep.server.backend_parts import usage as us
+
+    assert sm.HISTORY_SYNC_LIMIT is backend_module.HISTORY_SYNC_LIMIT
+    assert sm._msg_brief is backend_module._msg_brief
+    assert sm._window_briefs is backend_module._window_briefs
+    assert sm._msg_brief.__module__ == "skysheep.server.backend"
+    for name in ("TURN_LOG_LIMIT_DEFAULT", "TURN_LOG_LIMIT_MAX",
+                 "_load_turn_rows", "_turn_row", "_log_line_ts"):
+        assert getattr(backend_module, name) is getattr(us, name), name
+    assert UsageMixin.turn_breakdown.__defaults__ == ("", us.TURN_LOG_LIMIT_DEFAULT)
+
+
+def test_batch5b_memory_helpers_merged_into_memory_mixin():
+    """_memory_retrieval_query / compose_system / compose_system_for 并入
+    MemoryMixin（设计 §2.1 D1 记忆类小件）：系统提示词组装单处实现，主类不再自带。"""
+
+    for name in ("_memory_retrieval_query", "compose_system", "compose_system_for"):
+        assert name in MemoryMixin.__dict__, name
+        assert name not in ServerBackend.__dict__, name
+        assert getattr(ServerBackend, name) is getattr(MemoryMixin, name), name
+
+
+def test_batch5b_teams_bare_access_unchanged_until_batch6():
+    """批 5b 红线（设计 §3.3 雷区 `_teams`）：ProjectMgmtMixin 的 _bind_project
+    切项目中断块（own-ctx 分屏列豁免 + interrupt_reason 注记 + 条件 persist）与
+    ChatPipelineMixin 的 4 处成员判定都逐字搬移、保持裸访问；收敛成
+    team_interrupt_for_project_switch() / team_active() 是批 6 的事。"""
+    import inspect
+
+    from skysheep.server.backend_parts.chat_pipeline import ChatPipelineMixin as Chat
+
+    chat_src = inspect.getsource(Chat)
+    assert chat_src.count("in self._teams") == 4
+    assert "team_active" not in chat_src
+
+    proj_src = inspect.getsource(ProjectMgmtMixin)
+    # self._teams 的裸访问 4 处（另外 2 处是 self._teams_interrupted 的子串）
+    assert proj_src.count("self._teams") - proj_src.count("self._teams_interrupted") == 4
+    assert proj_src.count("self._teams_interrupted") == 2
+    assert proj_src.count("项目已切换，团队已中断") == 1
+    assert proj_src.count("_persist_team_state()") == 1
+    assert "if self._teams:" in proj_src
+    assert "self._teams.pop(sid)" in proj_src
+    assert "rt.ctx.own" in proj_src
+    assert "team_interrupt_for_project_switch" not in proj_src
+
+
+def test_batch5b_session_history_window_stays_in_kernel():
+    """设计 §2.1 D1 外迁清单未列 peek_session_messages / session_messages_earlier：
+    会话只读历史窗口（分屏 peek 与 messages.earlier）随内核留 backend.py。"""
+    for name in ("peek_session_messages", "session_messages_earlier"):
+        assert name in ServerBackend.__dict__, name
+        assert name not in SessionModelMixin.__dict__, name
+        assert hasattr(ServerBackend, name), name

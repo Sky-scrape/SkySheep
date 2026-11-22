@@ -19,7 +19,7 @@ migration.py 导入侧对库内自动化/白名单/渠道绑定表与 config.tom
 跨域只读（不收敛，注记）：`self._backup_busy_message` /
 `self._rebuild_after_db_replace`（D1 LifecycleMixin）、`relay_freeze_all`
 （D2 RelaySettingsMixin）、`self._sync_mcp_changes`（D6 McpMixin）、
-`self._apply_gate_accept_pref`（主类，批 5 外迁）、`self._read_ui_prefs`
+`self._apply_gate_accept_pref`（D1 PermissionModesMixin）、`self._read_ui_prefs`
 （D6 PreferencesMixin）、`self.skills` / `self.subagent_store` / `self.store`
 （装配型单例，消费在本域）——经共享 self 取用。
 """

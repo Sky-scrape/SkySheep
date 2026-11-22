@@ -7,7 +7,9 @@
 
 from skysheep.server.backend import BUILTIN_SNIPPETS, ServerBackend
 from skysheep.server.backend_parts.advanced import SystemMixin
+from skysheep.server.backend_parts.channels import ChannelsMixin
 from skysheep.server.backend_parts.relay import RelaySettingsMixin
+from skysheep.server.backend_parts.remote import RemoteMixin
 from skysheep.server.backend_parts.settings_io import SettingsIOMixin
 from skysheep.server.backend_parts.skills import SkillsMixin
 from skysheep.server.backend_parts.subagent import SubagentMixin
@@ -142,3 +144,19 @@ def test_batch2_settings_io_static_helpers_no_longer_reference_host_class():
         src = inspect.getsource(meth)
         assert "ServerBackend." not in src
         assert "SettingsIOMixin._" in src
+
+
+def test_batch3_d4_mixins_are_direct_bases_and_remote_helpers_stay_in_kernel():
+    """批 3（D4 渠道与远端）：既有 ChannelsMixin/RemoteMixin 归位=挂域注记，
+    零方法搬移（设计 §2.1 D4 表 + §4.1 批 3 行）；_remote_workdir/
+    _remote_project_id/is_remote_project 三个小方法按批内决策留内核——设计
+    §2.0 把 is_remote_project 列进前门契约、§3.2 把 _remote_project_id_cache
+    列进内核字段，三者被内核 _session_project/setup/history_sync 消费，随
+    RemoteMixin 外迁会把内核工作目录解析倒挂成对 D4 的依赖。"""
+    for mixin in (ChannelsMixin, RemoteMixin):
+        assert mixin in ServerBackend.__mro__, mixin.__name__
+    for name in ("_remote_workdir", "_remote_project_id", "is_remote_project"):
+        assert name in ServerBackend.__dict__, name          # 留在内核主类
+        assert name not in ChannelsMixin.__dict__, name      # 未随 D4 外迁
+        assert name not in RemoteMixin.__dict__, name
+        assert hasattr(ServerBackend, name), name            # 经 MRO 仍可达

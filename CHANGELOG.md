@@ -372,6 +372,42 @@
   test_skills_scan 的 LOCAL_SKILL_SOURCES 迁到 backend_parts.skills，被
   patch 对象与全部行为断言均不变）。用户可见行为零变化：纯内部结构重构，
   WS 方法面、事件契约、权限门与前端零改动。
+- **工程质量：backend.py 按 Mixin 分批拆分批 3（D4 渠道与远端）——ChannelsMixin /
+  RemoteMixin 归位挂域注记，零方法搬移，backend.py 7635→7688 行**：沿用批 1/2
+  走通的施工模板做第三批；渠道与远端两簇在早前批次已整装
+  `backend_parts/channels.py` 与 `backend_parts/remote.py`，本批按设计
+  （§2.1）定为「归位」批——领域只落在文件头所有权注记上，实际搬移 0 行
+  （纯注记与 docstring 批注净增 53 行），channels.py / remote.py 各在文件头
+  挂一段 D4 域注记，方法体一字未动。其一，域注记：channels.py 文件头写明
+  渠道域整装——channel.* 10 个 WS 方法全在本 Mixin（_dispatch_ops.py 注册）、
+  渠道五字段所有权（channels / _channel_gates / _channel_names /
+  _channel_last_chat / _weixin_login_channel）与跨域读写点照实登记（D1
+  LifecycleMixin.delete_session 清登记残键、内核 _reload_agent_history 读
+  _channel_names、_sync_team_gate 键式读 _teams）；remote.py 文件头写明远端
+  域整装——15 字段所有权（令牌与访问留痕五字段 + ws_connections + 更新链路
+  九字段）、ws_connections / token_generation / token_throttle 的 app.py
+  记账语义（握手 append、断连 remove、世代快照、验令牌调 blocked /
+  note_success / note_failure——记账在 app 侧调用，策略与留痕落点都在本域）、
+  内核 snapshot 对 update_info / update_success / update_failure /
+  _is_frozen 只读（boot 契约口径）。其二，三个小方法按批内决策留内核并
+  注记：_remote_workdir / _remote_project_id / is_remote_project 不随
+  RemoteMixin 外迁——三者被内核 _session_project / setup / history_sync
+  消费，_remote_project_id_cache 是设计 §3.2 内核字段、is_remote_project
+  在设计 §2.0 前门契约清单，外迁会把内核工作目录解析倒挂成对 D4 的依赖，
+  docstring 加批注记写明归属依据。其三，backend.py __init__ 20 个 D4 字段
+  逐字段所有权注记（更新链路 9、渠道 5、令牌与访问留痕 5、ws_connections 1），
+  每处含消费方（RemoteMixin / ChannelsMixin 方法名）与跨域读写点（D1
+  delete_session 清登记、内核 _reload_agent_history 读 _channel_names、
+  app.py 记账、内核 snapshot 只读）。其四，契约测试：
+  `tests/test_backend_mixin_layout.py` 新增批 3 契约——ChannelsMixin /
+  RemoteMixin 是 ServerBackend 直接基类、三个小方法留在主类 __dict__ 未随
+  D4 外迁且经 MRO 仍可达，仿批 1/2 先例；既有测试断言零削弱（本批只新增
+  一条测试）。硬验证按批 1/2 同款配方实测：git archive 抽 HEAD 与工作区各
+  真实 import 一遍拍快照——MRO / dir(ServerBackend) 属性集 / per-class
+  成员映射 diff 为空（本批不新增基类不搬方法，快照零差异即「纯注记」的
+  机械证明）；全部 342 个 WS 方法注册表（含 local_only 标记与 local_gate
+  挂钩）HEAD 与工作区逐项一致，local_only 零回归。用户可见行为零变化：
+  纯内部注记重构，WS 方法面、事件契约、权限门与前端零改动。
 
 ## [2.7.2] - 2026-11-20
 

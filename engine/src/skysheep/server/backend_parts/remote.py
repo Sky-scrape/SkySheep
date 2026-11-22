@@ -4,6 +4,27 @@
 Tailscale 网段、安装包下载校验等模块级小件也随职责区落在本模块，
 由 backend 引用（保持 `skysheep.server.backend` 命名空间里的旧名字可见）。
 方法体逐字保留，逻辑不变。
+
+D4 渠道与远端域（backend.py Mixin 拆分批 3 起挂域注记，设计 §2.1）：LAN/远程
+接入、令牌世代与节流、更新检查与应用、一键重启——「远端可达性 + 自更新」
+一条链（都吃 request_shutdown/restart_hook/token_*/update_*）。
+
+字段所有权（D4，设计 §3.2，主类 __init__ 一次铺齐、本 Mixin 无 __init__）：
+`token_throttle`、`token_generation`、`_token_failures`、
+`_token_failure_total`、`_access_log`、`ws_connections`、`update_info`、
+`update_error`、`update_success`、`update_failure`、`_pending_update`、
+`_pending_update_version`、`_pending_update_verified`、`_auto_update_task`、
+`_is_frozen`（20 个 D4 字段中 15 个在本域，其余 5 个在 ChannelsMixin）。
+
+跨域读写（不收敛，注记，设计 §3.3）：`ws_connections` 由 server/app.py
+记账（ws_endpoint 握手 append、断连 remove，条目含世代与 kick 句柄），
+本域按语义消费——connections_summary/lan_kick 读、
+revoke_remote_connections 踢线；`token_generation` 由 app.py 握手读世代
+快照（轮换后旧世代连接在端内踢线），本域轮换/开关远程时 +1；
+`token_throttle` 由 app.py 验令牌路径（_lan_token_guard 中间件与
+ws_endpoint 握手）调 blocked/note_success/note_failure，策略与留痕落点都
+在本域；内核 snapshot 只读 update_info/update_success/update_failure/
+_is_frozen（boot 契约口径，snapshot 聚合返回）。
 """
 
 from __future__ import annotations

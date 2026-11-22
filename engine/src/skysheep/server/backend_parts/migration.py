@@ -51,6 +51,15 @@
 忙碌保护在 mixin 层（``MigrationMixin.migration_import``）：会话/定时/
 流水线在飞走 ``_backup_busy_message``，团队自动循环在飞（``_teams`` 任一
 ``loop_running``）单独拒绝。
+
+D6 基础设施与迁移域（backend.py Mixin 拆分批 2 起挂域注记）。批 2 注记：
+settings.export/import 与整机导入（backend_parts/settings_io.py）是同一
+安全模型的两半，必须同域（设计 §2.1）——迁移红线「降防护不随包生效」
+两边各实现一遍（本文件导出/导入侧 + settings_io.py 的
+``_strip_accept_edits_from_ui_export``），改任一侧必须同批核对另一侧。
+跨域只读（不收敛，注记，设计 §3.3 雷区表）：``migration_import`` 读
+``self._teams``（D2 判忙，`.items()` 键遍历，本文件 804 行——批 6 收敛时由
+``team_orchestrators()`` 统一）。
 """
 
 from __future__ import annotations

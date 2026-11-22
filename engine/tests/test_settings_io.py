@@ -83,7 +83,7 @@ def test_settings_import_never_enables_accept_edits(home):
 
 def test_settings_import_goes_through_atomic_entries(home, monkeypatch):
     """设置导入的落盘必须全部走 textio 原子入口（write_bytes_atomic /
-    write_text_atomic），backend.py 内绑定的入口被记录调用；卫兵把
+    write_text_atomic），实现模块内绑定的入口被记录调用；卫兵把
     「直接 Path.write_bytes / Path.write_text 写这三个目标」当场炸出，
     防止将来回退成非原子写。"""
     import json
@@ -91,15 +91,19 @@ def test_settings_import_goes_through_atomic_entries(home, monkeypatch):
 
     from test_server import make_client, recv_until
 
-    import skysheep.server.backend as backend_mod
+    # 锚点调整（拆分批 2）：settings.import / _strip_accept_edits /
+    # 回滚 helpers 随 SettingsIOMixin 迁至 backend_parts/settings_io.py，
+    # 其 textio 原子入口导入随迁——patch 目标从 backend 模块名换到新落点
+    # 模块名，被 patch 的对象与断言均不变
+    import skysheep.server.backend_parts.settings_io as settings_io_mod
     from skysheep.config import skysheep_home
 
     home_dir = skysheep_home()
     home_dir.mkdir(parents=True, exist_ok=True)
     (home_dir / "config.toml").write_text("[providers.old]\napi_key = 'old'\n", encoding="utf-8")
 
-    real_ba = backend_mod.write_bytes_atomic
-    real_ta = backend_mod.write_text_atomic
+    real_ba = settings_io_mod.write_bytes_atomic
+    real_ta = settings_io_mod.write_text_atomic
     via_atomic: list[tuple[str, str]] = []  # (入口种类, 文件名)
 
     def rec_ba(path, data, **kw):
@@ -110,8 +114,8 @@ def test_settings_import_goes_through_atomic_entries(home, monkeypatch):
         via_atomic.append(("text", path.name))
         return real_ta(path, text, *args, **kw)
 
-    monkeypatch.setattr(backend_mod, "write_bytes_atomic", rec_ba)
-    monkeypatch.setattr(backend_mod, "write_text_atomic", rec_ta)
+    monkeypatch.setattr(settings_io_mod, "write_bytes_atomic", rec_ba)
+    monkeypatch.setattr(settings_io_mod, "write_text_atomic", rec_ta)
 
     # 卫兵：导入目标若被绕开原子入口直接 Path 写，立刻失败（只盯这三个名字，
     # 不影响启动期其他文件的正常写法）

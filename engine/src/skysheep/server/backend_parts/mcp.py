@@ -1,6 +1,17 @@
 """MCP 接线：配置装载路径、后台连接、差量同步/重连与服务的导入/保存/删除/启停。
 
+D6 基础设施与迁移域（backend.py Mixin 拆分批 2 起挂域注记）。
 从 backend.py 按职责注释整段搬入。方法体逐字保留，逻辑不变。
+
+字段所有权（D6，设计 §3.2）：`mcp`（MCPManager）、`mcp_configs`、
+`mcp_tools`、`_mcp_connect_task`、`mcp_warnings`——均为本域消费，主类
+__init__ 一次铺齐（本 Mixin 不带 __init__）。
+
+批 2 注记：项目级配置的信任门（`_project_mcp_path_if_trusted` /
+`_mcp_reconnect_gate`）实现面在 backend_parts/trust.py（TrustMixin，同域
+D6），本文件经 `self.` 取用。跨域只读（不收敛，注记）：D5 advanced.py 读
+`self.mcp`（出网设置热生效）；settings_io.py（同域）导入后调
+`self._sync_mcp_changes`。
 """
 
 from __future__ import annotations

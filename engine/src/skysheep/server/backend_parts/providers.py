@@ -1,11 +1,15 @@
 """模型服务管理与诊断：设置页服务清单、增删改、探针检测、测试连接与备用模型。
 
+D6 基础设施与迁移域（backend.py Mixin 拆分批 2 起挂域注记）。
 从 backend.py 按职责注释整段搬入。方法体逐字保留，逻辑不变。
 覆盖模型服务的管理面：设置页清单（providers_detail）、增删改与启用/停用、
 模型与上下文探测（probe_models / probe_context）、服务保存（save_provider）、
 测试连接与健康状态（model_test_connection / providers_health）、备用模型
 （_fallback_target / _switch_to_fallback）；_mask_key 为同区 Key 掩码助手，
 webtools 的设置卡共用。
+
+跨域只读（不收敛，注记）：`provider_health`（内核 HealthRegistry）——
+本文件写诊断记录，D2 roundtable_body.py 只读。
 """
 
 from __future__ import annotations

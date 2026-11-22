@@ -1,6 +1,12 @@
 """用户偏好与通知：ui.json 读写清洗、界面/布局常量、Windows 系统通知（toast）。
 
+D6 基础设施与迁移域（backend.py Mixin 拆分批 2 起挂域注记）。
 从 backend.py 按职责注释整段搬入。方法体逐字保留，逻辑不变。
+
+批 2 注记：trust.* 六个 WS 方法虽在本域（prefs）分发，实现面已随本域外迁到
+backend_parts/trust.py（TrustMixin，同域 D6）——分发表 _dispatch_prefs.py
+零改动。STRING_PREFS 等界面常量仍留在 backend.py 主类（本文件经
+`self.STRING_PREFS` 取用，MRO 语义不变）。
 """
 
 from __future__ import annotations

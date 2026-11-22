@@ -114,8 +114,12 @@ def test_scan_local_ws_roundtrip(home, monkeypatch):
     # 真实 Path.home() 因机器而异（本机可能真装着别家技能），扫过的目录必须指向临时区
     fake_claude = home / "claude-skills"
     make_skill_dir(fake_claude, "borrowed-skill", "从别家扫来的")
+    # 锚点调整（拆分批 2）：scan_local_skills 随 SkillsMixin 迁至
+    # backend_parts/skills.py，其 LOCAL_SKILL_SOURCES 导入随迁——patch 目标
+    # 从 backend 模块名换到新落点模块名，被 patch 的对象与断言均不变
     monkeypatch.setattr(
-        "skysheep.server.backend.LOCAL_SKILL_SOURCES", [("Claude Code", str(fake_claude))]
+        "skysheep.server.backend_parts.skills.LOCAL_SKILL_SOURCES",
+        [("Claude Code", str(fake_claude))],
     )
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "s", "method": "skills.scan_local", "params": {}})

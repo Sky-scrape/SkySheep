@@ -8,6 +8,11 @@
 from skysheep.server.backend import BUILTIN_SNIPPETS, ServerBackend
 from skysheep.server.backend_parts.advanced import SystemMixin
 from skysheep.server.backend_parts.relay import RelaySettingsMixin
+from skysheep.server.backend_parts.settings_io import SettingsIOMixin
+from skysheep.server.backend_parts.skills import SkillsMixin
+from skysheep.server.backend_parts.subagent import SubagentMixin
+from skysheep.server.backend_parts.trust import TrustMixin
+from skysheep.server.backend_parts.whitelist import WhitelistMixin
 from skysheep.server.backend_parts.workspace_panel import WorkspacePanelMixin
 
 # 拆分前 MRO 上既有的重名（主类 respond_permission 遮蔽 TerminalPanelMixin 的同名
@@ -77,3 +82,63 @@ def test_mixins_still_have_no_init():
         if cls in (ServerBackend, object):
             continue
         assert "__init__" not in cls.__dict__, cls.__name__
+
+
+def test_batch2_mixins_are_direct_bases_and_members_resolve_there():
+    """批 2 外迁块（D6 基础设施与迁移）：方法/类属性全部由五个新 Mixin 提供，
+    主类不再自带；经 MRO 仍可达（subagent_store 字段所有权划 D6）。"""
+    for mixin in (SkillsMixin, WhitelistMixin, SubagentMixin, TrustMixin,
+                  SettingsIOMixin):
+        assert mixin in ServerBackend.__mro__, mixin.__name__
+    moved_members = {
+        SkillsMixin: [
+            "toggle_skill", "set_skill_scope", "skill_body", "_skill_root",
+            "preview_skill_install", "install_skill", "scan_local_skills",
+            "delete_skill", "_skill_safety_lookup", "save_skill_from_session",
+            "save_skill_draft", "_project_skills_dir",
+        ],
+        WhitelistMixin: [
+            "list_whitelist_rules", "_enriched_rules", "_stale_fields",
+            "_validate_whitelist_rule", "add_whitelist_rule",
+            "clear_whitelist_rules", "remove_whitelist_rule",
+            "set_whitelist_rule_enabled", "check_whitelist_rule",
+            "export_whitelist", "import_whitelist",
+        ],
+        SubagentMixin: [
+            "subagent_settings", "save_subagent_settings", "_subagent_provider",
+            "_subagent_registry", "subagents_detail", "save_subagent_builtin",
+            "save_subagent_custom", "delete_subagent_custom",
+        ],
+        TrustMixin: [
+            "trust", "_project_mcp_path_if_trusted",
+            "_project_skills_dir_if_trusted", "_mcp_reconnect_gate",
+            "trust_status", "trust_list", "trust_revoke_path", "trust_grant",
+            "trust_revoke", "_reload_project_skills", "recheck_trust_before_turn",
+        ],
+        SettingsIOMixin: [
+            "settings_export", "export_full_data", "settings_preview_import",
+            "settings_import", "_strip_accept_edits_from_ui_export",
+            "_full_import_zip_path", "_validate_staged_db", "_stage_full_import",
+            "_snapshot_config_files", "_restore_config_files_from",
+            "_rollback_config_files", "_replace_store_db",
+            "_undo_store_db_replace", "preview_import_full", "import_full_data",
+            "SETTINGS_EXPORT_FILES", "FULL_IMPORT_KNOWN_TOP",
+        ],
+    }
+    for mixin, members in moved_members.items():
+        for name in members:
+            assert name in mixin.__dict__, (mixin.__name__, name)
+            assert name not in ServerBackend.__dict__, name
+            assert hasattr(ServerBackend, name), name  # 经 MRO 仍可达
+
+
+def test_batch2_settings_io_static_helpers_no_longer_reference_host_class():
+    """搬移注记：settings_io 内原 `ServerBackend._xxx` 静态自引用已改为
+    SettingsIOMixin 自身——同一实现，MRO 上仅此一份；防止新文件反向依赖宿主。"""
+    import inspect
+
+    for meth in (SettingsIOMixin._restore_config_files_from,
+                 SettingsIOMixin.import_full_data):
+        src = inspect.getsource(meth)
+        assert "ServerBackend." not in src
+        assert "SettingsIOMixin._" in src

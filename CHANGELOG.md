@@ -319,6 +319,59 @@
   test_write_leases.py 的 monkeypatch 目标随落点改名（backend → workspace_panel，
   被 patch 对象与全部行为断言不变，注释写明缘由）。用户可见行为零变化：纯内部
   结构重构，WS 方法、事件契约、权限门与前端零改动。
+- **工程质量：backend.py 按 Mixin 分批拆分批 2（最大一片：D6 基础设施与迁移）——
+  Whitelist / Skills / Trust / Subagent / SettingsIO 五个新 Mixin 外迁，
+  backend.py 9228→7635 行**：沿用批 1 走通的施工模板（抽 HEAD 双拍快照 →
+  锚点断言 + 行号切片搬迁 → 重拍快照逐项 diff → 定向测试）扩大切割面，
+  59 个类成员行号校验后逐字切割、方法体逐字保留，`_dispatch_*.py` 与全部
+  342 个 WS 方法注册表零改动。其一，外迁：新建
+  `backend_parts/whitelist.py`（192 行，WhitelistMixin，白名单规则增删改查 /
+  校验 / 导入导出 11 个方法）、`backend_parts/skills.py`（353 行，
+  SkillsMixin，技能开关 / 装卸 / 扫描 / 草稿 / 会话保存 12 个方法）、
+  `backend_parts/trust.py`（155 行，TrustMixin，11 个成员——`trust` 属性、
+  trust.* WS 方法族与每轮对话起点的热路径 `recheck_trust_before_turn`）、
+  `backend_parts/subagent.py`（264 行，SubagentMixin，子代理设置与定义管理
+  8 个方法，`subagent_store` 字段所有权注记划归本域）、
+  `backend_parts/settings_io.py`（804 行，SettingsIOMixin，设置导出 / 导入与
+  整机迁移包导入侧 15 个方法 + SETTINGS_EXPORT_FILES /
+  FULL_IMPORT_KNOWN_TOP 两个类属性；文件头注记与 migration.py 是同一安全
+  模型的两半、必须同域——迁移红线「降防护不随包生效」两侧各实现一遍，
+  改任一侧必须同批核对另一侧）。其二，接线：ServerBackend 基类列表 24→29，
+  五个新 Mixin 带「D6 基础设施与迁移」分组注释作为整块插入、紧随
+  RoundtableBodyMixin；import 面同步清理——skills.installer / draft /
+  loader 整撤，security.trust 只留 WorkspaceTrust 供 __init__ 注解，
+  RULE_KINDS / _is_arbitrary_exec_prefix / ProviderConfig /
+  set_subagent_settings_in_config / BUILTIN_* / COMPUTER_TOOL_NAMES /
+  record_audit / zipfile / date / write_bytes_atomic 随消费方撤出，均经
+  grep 证明残留代码零引用。其三，注记：preferences / mcp / mods /
+  providers / migration 五个既有 Mixin 文件头挂 D6 域注记（字段所有权
+  mcp* / mods / mods_claude / _pending_mod_install；跨域只读点位照实
+  登记——mods 217 / 284 两处与 migration 804 行读 `self._teams`，批 6
+  收敛时统一；trust.* 信任门实现面已迁 trust.py，分发表不动）；
+  STRING_PREFS 类属性按设计批 2 清单不动（仍留主类，preferences.py 经
+  self 取用）；backend.py 原「# ---- 设置页 ----」节标头因唯一内容（子代理
+  块）外迁暂成孤头，按最小 diff 保留，批 5 重排时处置。其四，施工中修复
+  一处机械改层真问题：外迁方法体内 6 处相对导入在 backend_parts 包深度下
+  解析错误（`from .. import support` 等指向 skysheep.server 而非
+  skysheep）——双拍快照只 import 模块，顶层导入写错即红，函数体内延迟导入
+  却盖不住；由 probe_export.py 走真实 WS 调用复现 data.export_full 报错后
+  定位修正，施工模板固化「快照之外必须真实 WS 调用抽验」一层。其五，硬
+  验证：git archive 抽 HEAD 与工作区各真实 import 一遍拍快照逐项比对——
+  ServerBackend 全属性集（MRO 解析名集合）diff 为空；MRO 既有类相对顺序
+  逐位不变，唯一新增五个 D6 Mixin 整块紧随 RoundtableBodyMixin。施工约束
+  「不移动文件」：只从 backend.py 切出新文件，既有文件零移动、零改名、
+  零删除（git status 无 R / D 条目），五个新件均为新增。其六，契约测试：
+  `tests/test_backend_mixin_layout.py` 增批 2 契约——五新 Mixin 直继基类、
+  59 个外迁成员逐一落位（新 Mixin `__dict__` 提供、主类 `__dict__` 不再
+  自带、经 MRO 仍可达）、settings_io 原 3 处 `ServerBackend._xxx` 静态
+  自引用改指 SettingsIOMixin 自身（同一实现 MRO 上仅此一份，新文件不得
+  反向依赖宿主）、MRO 无新增重名遮蔽、全部 Mixin 无 __init__ 施工纪律；
+  既有测试断言未削弱，patch 锚点随落点改名并沿用批 1 先例在测试内注明
+  缘由（test_settings_io / test_data_migration 的 write_bytes_atomic /
+  write_text_atomic patch 目标迁到 backend_parts.settings_io，
+  test_skills_scan 的 LOCAL_SKILL_SOURCES 迁到 backend_parts.skills，被
+  patch 对象与全部行为断言均不变）。用户可见行为零变化：纯内部结构重构，
+  WS 方法面、事件契约、权限门与前端零改动。
 
 ## [2.7.2] - 2026-11-20
 

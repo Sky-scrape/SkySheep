@@ -1,8 +1,16 @@
 """Mods 扩展（实验性）的服务端接线：清单/安装（两段确认）/启停/删除/草稿/测试器。
 
+D6 基础设施与迁移域（backend.py Mixin 拆分批 2 起挂域注记）。
 ModManager 本体在 core/mods.py；这里只做服务层的目录落点、config 读写与热生效
 （_reload_mods 推给所有活动 Agent，照 _reload_hooks 的模式）。全部写方法都登记为
 本机专属（app.py 里 local_only=True）。
+
+字段所有权（D6，设计 §3.2）：`mods`、`mods_claude`、`_pending_mod_install`。
+
+跨域只读（不收敛，注记，设计 §3.3 雷区表）：`_reload_mods` 读 `self._teams`
+（D2 团队成员 Agent 钩子热更同步，本文件 217/284 两处 `.values()` 遍历，284
+处裸读、217 处带 getattr 防御——批 6 收敛时由 `team_orchestrators()` 统一）；
+D3 automation.py 重建 registry 时只读传参 `self.mods`。
 """
 
 from __future__ import annotations

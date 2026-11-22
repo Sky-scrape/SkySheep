@@ -284,7 +284,11 @@ def test_import_full_rolls_back_when_second_config_write_fails(home, monkeypatch
     """
     from test_server import make_client, recv_until
 
-    import skysheep.server.backend as backend_mod
+    # 锚点调整（拆分批 2）：import_full_data / 配置恢复 / 回滚 helpers 随
+    # SettingsIOMixin 迁至 backend_parts/settings_io.py，其 write_bytes_atomic
+    # 导入随迁——patch 目标从 backend 模块名换到新落点模块名，被 patch 的
+    # 对象与断言均不变
+    import skysheep.server.backend_parts.settings_io as settings_io_mod
     from skysheep.config import skysheep_home
 
     home_dir = skysheep_home()
@@ -299,7 +303,7 @@ def test_import_full_rolls_back_when_second_config_write_fails(home, monkeypatch
     })
 
     # 只让 memory.md 的写入失败（模拟磁盘/权限错误），config.toml 正常写入
-    real_atomic = backend_mod.write_bytes_atomic
+    real_atomic = settings_io_mod.write_bytes_atomic
     atomic_calls: list[str] = []
 
     def flaky_atomic(path, data, **kw):
@@ -308,7 +312,7 @@ def test_import_full_rolls_back_when_second_config_write_fails(home, monkeypatch
             raise PermissionError(13, "permission denied (probe)")
         return real_atomic(path, data, **kw)
 
-    monkeypatch.setattr(backend_mod, "write_bytes_atomic", flaky_atomic)
+    monkeypatch.setattr(settings_io_mod, "write_bytes_atomic", flaky_atomic)
     with make_client(home, []) as client, client.websocket_connect("/ws") as ws:
         ws.send_json({"id": "i1", "method": "data.import_full",
                       "params": {"path": str(zip_path)}})

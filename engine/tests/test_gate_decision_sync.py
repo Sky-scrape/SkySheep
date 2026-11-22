@@ -416,6 +416,28 @@ async def test_mods_hit_carries_extra_required_into_pending_note(home):
     pending.resolve(Decision.DENY)
 
 
+async def test_extra_confirm_query_failure_three_reads_agree(home):
+    """Mods 回调抛异常 → 取严（2026-11 except 审计 #4 用户拍板）：三读一致。
+
+    单一决策源下 needs_confirm 与 authorize 消费同一份 extra 兜底，异常按
+    「要求确认」处理后两边天然同结论——READONLY 短路也被压住；确认卡说明
+    行落通用文案（lambda 无 describe_confirm），不因说明端缺位炸卡。
+    """
+    gate = PermissionGate(
+        working_dir=home / "proj",
+        extra_confirm=lambda t, i: 1 / 0,
+    )
+    tool, inp = READ, {"path": "a.txt"}
+    d = decide(gate, tool, inp)
+    assert (d.tier, d.reason, d.extra_required) == (
+        Tier.CONFIRM, "mods_extra_confirm", True)
+    assert gate.needs_confirm(tool, inp) is True
+    pending = await gate.authorize(tool, inp)
+    assert pending is not None
+    assert "Mods 收紧声明命中" in (pending.note or "")
+    pending.resolve(Decision.DENY)
+
+
 # ---- 跨门 READONLY 候选域等价（批收集的实际判定域） ----
 # 批收集先做 safety 过滤（core/agent.py 只收 READONLY 成员）才问 needs_confirm，
 # 所以跨门等价钉在 READONLY 候选域。档位仍只打在主门上（子类门构造点不传档位，

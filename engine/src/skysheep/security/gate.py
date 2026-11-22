@@ -1417,16 +1417,20 @@ class PermissionGate:
     def _extra_confirm_required(self, tool: Tool, input_dict: dict) -> bool:
         """Mods 收紧声明是否命中本次调用（只收紧：True = 强制逐次确认）。
 
-        查询异常按「不干预」（回落门原行为）；命中时 authorize/needs_confirm
-        会跳过全部自动放行分支。与命中说明（describe_confirm）两读都发生在
-        authorize 的同步段内（之间无 await），多 Agent 并发不会错配文案。
+        查询异常按「要求确认」处理（取严，2026-11 except 审计 #4 用户拍板）：
+        判定不了就当 Mod 点了名——多确认一次无害，漏确认不可逆。needs_confirm
+        与 authorize 都经 decision.decide 消费本方法，异常兜底取严后两边天然
+        得到同一结论（test_gate_decision_sync.py 钉住）。命中时 authorize/
+        needs_confirm 会跳过全部自动放行分支。与命中说明（describe_confirm）
+        两读都发生在 authorize 的同步段内（之间无 await），多 Agent 并发不会
+        错配文案。
         """
         if self.extra_confirm is None:
             return False
         try:
             return bool(self.extra_confirm(tool, input_dict))
-        except Exception:  # noqa: BLE001 - 查询失败按不干预，绝不影响门原判定
-            return False
+        except Exception:  # noqa: BLE001 - 查询失败取严：视为要求确认（多确认无害）
+            return True
 
     def needs_confirm(self, tool: Tool, input_dict: dict) -> bool:
         """authorize 是否会对这次调用要求用户确认（纯判定，无副作用）。
@@ -1644,12 +1648,18 @@ class PermissionGate:
             pass
         if extra_required:
             # 用户看得见为什么多了一次确认：点名是哪个 Mod 要求的（描述查询与
-            # 命中判定同在 authorize 的同步段内，多 Agent 并发不会错配）
+            # 命中判定同在 authorize 的同步段内，多 Agent 并发不会错配）。
+            # 说明查询失败落通用文案：extra_required 取严后（查询异常也按命中），
+            # 描述端同样可能坏——说明行丢展示不能把确认卡本身炸掉
             describe = getattr(getattr(self.extra_confirm, "__self__", None),
                                "describe_confirm", None)
+            try:
+                detail = describe(tool.name) if describe is not None else ""
+            except Exception:  # noqa: BLE001 - 说明查询失败只丢展示行
+                detail = ""
             mod_line = (
-                f"Mods 收紧声明命中：{describe(tool.name)} 要求该工具逐次确认"
-                if describe is not None
+                f"Mods 收紧声明命中：{detail} 要求该工具逐次确认"
+                if detail
                 else "Mods 收紧声明命中：该工具被要求逐次确认（设置 · Mods 扩展 可查看）"
             )
             pending.note = (pending.note + "\n" if pending.note else "") + mod_line

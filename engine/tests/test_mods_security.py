@@ -3,9 +3,10 @@
 锁 1：handler 返回闭集外动作（allow / decision:allow_once / modifyInput）一律无效，
       工具按原路径过门——代码里不存在「Mod 决策可达 resolve(ALLOW_*)」的路径。
 锁 2：veto 后 self._pending 无残留（respond_permission 返回 delivered=False，M12）。
-锁 3：gate.extra_confirm 无法放行——返回 False / None / 抛异常时 authorize 行为与
-      不装 Mod 完全一致（含 auto_accept_all 档）；命中时只把「自动放行」降级为
-      「逐次确认」（pending 创建），绝不 return None。
+锁 3：gate.extra_confirm 无法放行——返回 False / None 时 authorize 行为与不装
+      Mod 完全一致（含 auto_accept_all 档）；查询异常取严按「需要确认」回落
+      （2026-11 except 审计 #4/#5 用户拍板，多层兜底同口径）；命中时只把
+      「自动放行」降级为「逐次确认」（pending 创建），绝不 return None。
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from skysheep.core.agent import Agent
 from skysheep.core.mods import ModManager, mods_root
 from skysheep.events import ModUI
 from skysheep.messages import TextBlock, ToolUseBlock
-from skysheep.security.gate import PermissionGate, WhitelistRule
+from skysheep.security.gate import Decision, PermissionGate, WhitelistRule
 from skysheep.tools import ToolRegistry, default_tools
 
 
@@ -172,10 +173,12 @@ async def test_perm_modui_still_flows_without_veto(home):
 
 
 async def test_extra_confirm_cannot_release_anything(home):
-    """extra_confirm 返回 False / None / 抛异常：authorize 与不装 Mod 完全一致。
+    """extra_confirm 返回 False / None：authorize 与不装 Mod 完全一致。
 
     用一张「完全访问 + 整工具白名单」的放行门做基线：READONLY 短路与白名单
     放行都不受 extra_confirm 的 False 分支影响（False 永远 ≠ 放行指令）。
+    抛异常不再沿用旧「不干预」：取严按「需要确认」回落，见
+    test_extra_confirm_query_failure_requires_confirm。
     """
 
     # 基线门：auto_accept_all + always 白名单 → 任意调用都返回 None
@@ -183,23 +186,81 @@ async def test_extra_confirm_cannot_release_anything(home):
     baseline.auto_accept_all = True
     baseline.session_rules.append(WhitelistRule(tool="write_file", kind="always"))
 
-    # Mod 查询永远返回 False（甚至抛异常）——门行为必须零漂移
+    # Mod 查询永远返回 False / None ——门行为必须零漂移
     gate_false = write_gate(home / "proj",
                             extra_confirm=lambda tool, inp: False)
-    gate_raise = write_gate(home / "proj",
-                            extra_confirm=lambda tool, inp: 1 / 0)
     gate_none = write_gate(home / "proj",
                            extra_confirm=lambda tool, inp: None)
-    for gate in (gate_false, gate_raise, gate_none):
+    for gate in (gate_false, gate_none):
         gate.auto_accept_all = True
         gate.session_rules.append(WhitelistRule(tool="write_file", kind="always"))
 
     registry = ToolRegistry(default_tools())
     read_tool = registry.get("read_file")
     write_tool = registry.get("write_file")
-    for gate in (baseline, gate_false, gate_raise, gate_none):
+    for gate in (baseline, gate_false, gate_none):
         assert await gate.authorize(read_tool, {"path": "x.txt"}) is None
         assert await gate.authorize(write_tool, {"path": "a.txt", "content": "y"}) is None
+
+
+async def test_extra_confirm_query_failure_requires_confirm(home):
+    """extra_confirm 回调抛异常 → 取严：一律回落逐次确认（审计 #4/#5 拍板）。
+
+    「完全访问 + 整工具白名单」本会全放行的门，查询一坏就全部回到确认：
+    判定不了就当 Mod 点了名（多确认无害，漏确认不可逆）——READONLY 短路、
+    档位、白名单全被压住，needs_confirm 与 authorize 结论一致（单一决策源
+    decide 结构上保证，这里再用真实门双读钉一次）。
+    """
+    gate = write_gate(home / "proj", extra_confirm=lambda tool, inp: 1 / 0)
+    gate.auto_accept_all = True
+    gate.session_rules.append(WhitelistRule(tool="write_file", kind="always"))
+
+    registry = ToolRegistry(default_tools())
+    read_tool = registry.get("read_file")
+    write_tool = registry.get("write_file")
+    for tool, inp in (
+        (read_tool, {"path": "x.txt"}),
+        (write_tool, {"path": "a.txt", "content": "y"}),
+    ):
+        assert gate.needs_confirm(tool, inp) is True
+        pending = await gate.authorize(tool, inp)
+        assert pending is not None, "防线故障绝不扩大放行面"
+        # 命中说明查询同样坏（lambda 无 __self__）→ 落通用文案，确认卡不炸
+        assert "Mods 收紧声明命中" in pending.note
+        assert "设置 · Mods 扩展" in pending.note
+        pending.resolve(Decision.DENY)
+
+
+async def test_mods_manager_query_failure_is_fail_closed(home, monkeypatch):
+    """ModManager.extra_confirm 内层查询异常 → True（取严），与门外层兜底同口径。
+
+    两层兜底（mods.extra_confirm 的 requires_confirm 查询、
+    gate._extra_confirm_required 的回调调用）必须同改同口径：任一层坏都回落
+    逐次确认。 Mods 关闭（enabled=False）不是异常路径，仍按「不干预」。
+    """
+
+    def boom(*a, **k):
+        raise RuntimeError("Mods 查询故障（测试桩）")
+
+    mgr = ModManager(enabled=True, enabled_ids=[])
+    monkeypatch.setattr(mgr, "requires_confirm", boom)
+    monkeypatch.setattr(mgr, "describe_confirm", boom)
+    tool = ToolRegistry(default_tools()).get("write_file")
+    assert mgr.extra_confirm(tool, {}) is True
+
+    # 接到真实权限门上：READONLY 也被取严拦下；describe 一并坏 → 通用文案
+    gate = write_gate(home / "proj", extra_confirm=mgr.extra_confirm)
+    read_tool = ToolRegistry(default_tools()).get("read_file")
+    assert gate.needs_confirm(read_tool, {"path": "a.txt"}) is True
+    pending = await gate.authorize(read_tool, {"path": "a.txt"})
+    assert pending is not None
+    assert "Mods 收紧声明命中" in pending.note
+    assert "设置 · Mods 扩展" in pending.note
+    pending.resolve(Decision.DENY)
+
+    # Mods 关闭不是异常：照旧「不干预」
+    assert ModManager(enabled=False).extra_confirm(tool, {}) is False
+    mgr.close()
 
 
 async def test_extra_confirm_only_downgrades_auto_allow(home):

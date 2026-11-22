@@ -7,7 +7,8 @@
   turnStop 五个挂点全部位于 authorize() 完成之后；门之前/门内的 Mod 面只有 declarative
   静态表（纯 Python 求值）：``deny_tools`` 在 authorize 之前命中即拒绝（少执行），
   ``require_confirm_tools`` 经 PermissionGate.extra_confirm 只会把「自动放行」降级为
-  「逐次确认」——该接口没有「返回 False 来放行」的语义，False/None/异常一律「不干预」。
+  「逐次确认」——该接口没有「返回 False 来放行」的语义，False/None 一律「不干预」；
+  查询异常取严按「要求确认」处理（2026-11 except 审计 #5 用户拍板，多确认无害）。
 - **动作闭集、无 allow 无 modify**：handler 返回经 :func:`_parse_action_result` 白名单
   解析，合法键只有 {deny, note, ui}；出现 allow / modifyInput 等任何闭集外键一律丢弃
   并计错误（fail-closed，与 gate.normalize_decision 同姿态）。
@@ -1132,15 +1133,18 @@ class ModManager:
     def extra_confirm(self, tool: object, input_dict: dict) -> bool:
         """PermissionGate.extra_confirm 契约：命中收紧声明才返回 True。
 
-        **该接口没有「返回 False 来放行」的语义**——False / None / 异常一律
-        「不干预」，门按原逻辑走（只收紧不放松的结构保证之一）。
+        **该接口没有「返回 False 来放行」的语义**——False / None 一律
+        「不干预」，门按原逻辑走（只收紧不放松的结构保证之一）；查询异常
+        返回 True（取严，2026-11 except 审计 #5 用户拍板）：判定不了就当
+        该工具要求确认，多确认一次无害。本兜底与 gate._extra_confirm_required
+        的异常兜底是同一取严口径的两层，改一处必须同改另一处。
         """
         if not self.enabled:
             return False
         try:
             return self.requires_confirm(getattr(tool, "name", ""))
-        except Exception:  # noqa: BLE001 - 查询失败按不干预
-            return False
+        except Exception:  # noqa: BLE001 - 查询失败取严：视为要求确认（多确认无害）
+            return True
 
     # ---- JS 分发（全部在权限门之后） ----
 

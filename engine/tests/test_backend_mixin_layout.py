@@ -7,11 +7,14 @@
 
 from skysheep.server.backend import BUILTIN_SNIPPETS, ServerBackend
 from skysheep.server.backend_parts.advanced import SystemMixin
+from skysheep.server.backend_parts.automation import AutomationMixin
 from skysheep.server.backend_parts.channels import ChannelsMixin
+from skysheep.server.backend_parts.factory import FactoryMixin
 from skysheep.server.backend_parts.relay import RelaySettingsMixin
 from skysheep.server.backend_parts.remote import RemoteMixin
 from skysheep.server.backend_parts.settings_io import SettingsIOMixin
 from skysheep.server.backend_parts.skills import SkillsMixin
+from skysheep.server.backend_parts.spectate import SpectateMixin
 from skysheep.server.backend_parts.subagent import SubagentMixin
 from skysheep.server.backend_parts.trust import TrustMixin
 from skysheep.server.backend_parts.whitelist import WhitelistMixin
@@ -160,3 +163,34 @@ def test_batch3_d4_mixins_are_direct_bases_and_remote_helpers_stay_in_kernel():
         assert name not in ChannelsMixin.__dict__, name      # 未随 D4 外迁
         assert name not in RemoteMixin.__dict__, name
         assert hasattr(ServerBackend, name), name            # 经 MRO 仍可达
+
+
+def test_batch4_d3_mixins_are_direct_bases_and_emit_moved_to_factory():
+    """批 4（D3 自动化与任务）：AutomationMixin/FactoryMixin/SpectateMixin
+    归位=挂域注记，零方法搬移（设计 §2.1 D3 表 + §4.1 批 4 行）；唯二例外：
+    ① _emit_factory_run 自主类并入 FactoryMixin（factory_run 事件出口，设计
+    §4.1 批 4①）——backend.py setup 构造 RunLedger 与 automation 派发
+    run_cron_task_core 时经 MRO 照常取用；② 雷区收敛① automation_busy()
+    accessor 落 AutomationMixin（_cron_running/_pipeline_running 合判，设计
+    §3.3）。"""
+    for mixin in (AutomationMixin, FactoryMixin, SpectateMixin):
+        assert mixin in ServerBackend.__mro__, mixin.__name__
+    assert "_emit_factory_run" in FactoryMixin.__dict__
+    assert "_emit_factory_run" not in ServerBackend.__dict__
+    assert hasattr(ServerBackend, "_emit_factory_run")       # 经 MRO 仍可达
+    assert "automation_busy" in AutomationMixin.__dict__
+    assert "automation_busy" not in ServerBackend.__dict__
+    assert hasattr(ServerBackend, "automation_busy")         # 经 MRO 仍可达
+
+
+def test_batch4_lifecycle_busy_check_goes_through_accessor():
+    """批 4 雷区收敛①：lifecycle 的备份/恢复预检经 automation_busy() 合判
+    cron/流水线在飞，不再裸读 _cron_running/_pipeline_running（防裸读回潮）。"""
+    import inspect
+
+    from skysheep.server.backend_parts.lifecycle import LifecycleMixin
+
+    src = inspect.getsource(LifecycleMixin._backup_busy_message)
+    assert "self.automation_busy()" in src
+    assert "self._cron_running" not in src
+    assert "self._pipeline_running" not in src

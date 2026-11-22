@@ -975,6 +975,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 在途落库的全局写锁：多会话并行时进度写彼此串行，减少与其它
         # 单语句写的锁碰撞（真正的一致性由 store 的写事务兜底）
         self._progress_write_lock = asyncio.Lock()
+        # D3 字段所有权（拆分批 4 注记，设计 §3.2）：无人值守自动化的十个字段
+        # 由 AutomationMixin（backend_parts/automation.py）消费——
+        # _reminder_task/_cron_task（提醒与 cron 扫描循环句柄，
+        # start/stop_*_loop 写）、_cron_running（在跑登记表：task_id → 运行
+        # 句柄，防重复触发 + 工厂「叫停」）、_cron_skip_mark（长跑任务到点
+        # 跳过去重）、_schtasks_runner（schtasks 执行入口注入点，测试替换）、
+        # _pipeline_task/_pipeline_running/_pipeline_node_tasks/
+        # _pipeline_manual_triggers/_pipeline_busy_until（编排循环句柄、节点
+        # 并发账、节点句柄、手动重排标记与续跑退避表）。跨域只读（不收敛，
+        # 注记，设计 §3.3 雷区收敛①）：_cron_running/_pipeline_running 的
+        # 「忙」语义经批 4 新增的 automation_busy() accessor（automation.py）
+        # 供 D1 LifecycleMixin._backup_busy_message 合判，D1 不再裸读这两表。
         self._reminder_task: asyncio.Task | None = None
         self._cron_task: asyncio.Task | None = None
         # 正在跑的定时任务：task_id → 运行句柄（防重复触发 + 供工厂「叫停」）。
@@ -986,6 +998,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._cron_skip_mark: dict[int, float] = {}
         # 工厂运行账本（automation_runs）：store 在 setup() 里才连上，实例也在
         # 那里创建；先占位，属性名保持不变（流水线/扫描循环按它记账）。
+        # 所有权划 D3（拆分批 4 注记，设计 §3.2）：D3 域内消费——automation
+        # 记账（cron 扫描/编排节点）、factory 热更保留策略（factory.save）；
+        # 内核 setup 只做构造与启动收尾（mark_interrupted/maybe_prune）。
         self.run_ledger: RunLedger | None = None
         # schtasks 执行入口的注入点（测试替换成假 runner，绝不真建系统计划任务）
         self._schtasks_runner = None
@@ -1068,6 +1083,11 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 运行中心：全产品可观测运行（主轮/子代理任务）统一登记 + 崩溃恢复。
         # 快照落 ~/.skysheep/runs.json（write_text_atomic），启动装载把上次
         # 在跑的记为 interrupted（见 core/runs.py）。
+        # D3 字段所有权（拆分批 4 注记，设计 §3.2/§4.1 批 4②）：呈现口径在
+        # D3——factory.live/factory_state 读 RunCenter 快照（backend_parts/
+        # factory.py，getattr 防御读）；跨域消费（不收敛，注记）：内核主轮
+        # 状态机写状态（_run_turn_pipeline，批 5 后随 ChatPipelineMixin 落
+        # D1）、项目任务簿与 _bind_project 注入 run_center（内核）。
         self.runs = RunCenter(skysheep_home() / "runs.json")
         # 供应商健康登记：agent 循环上报成功/失败，设置页状态灯读它
         self.provider_health = HealthRegistry()
@@ -1771,20 +1791,6 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
     # ---- 生命周期 ----
 
-    def _emit_factory_run(self, ev: dict) -> None:
-        """广播 factory_run 事件（同步出口，RunLedger 在运行首尾各调一次）。
-
-        ev 形如 ``{"kind": "factory_run", "phase": ..., "run": {...}}``；ws_emit
-        会把它包成 ``{"event": "factory_run", "data": ev}``。顶层刻意不带
-        session_id（run 里的会话 id 嵌在 run 内）——前端通用路由会把任何带
-        顶层 session_id 的事件当聊天事件开标签页。
-        """
-        for ws_emit in list(self.ws_emitters):
-            try:
-                spawn_bg(ws_emit(ev))
-            except Exception:  # noqa: BLE001 - 单个连接异常不影响其它广播
-                pass
-
     async def setup(self) -> None:
         self.cfg = load_config()
         # 全局出网设置先落到子进程环境口径上：run_command / 终端 / 钩子 /
@@ -1794,6 +1800,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self.store = self._store_override or await SessionStore(db_path()).connect()
         # 工厂运行账本：automation_runs 的写入口 + factory_run 事件出口。
         # 保留策略取 [factory] 配置；factory.save 保存后热更新这两项。
+        # 事件出口 _emit_factory_run 自拆分批 4 起由 FactoryMixin 提供
+        # （backend_parts/factory.py），此处经 MRO 取到。
         _factory_cfg = getattr(self.cfg, "factory", None)
         self.run_ledger = RunLedger(
             self.store, emit=self._emit_factory_run,

@@ -2,8 +2,20 @@
 
 定位见 docs/远程观战设计.md：纯呈现——摘要全部来自工厂/团队的只读快照，
 不含对话正文、任务 prompt、预授权名单、绝对路径与任何密钥；两个 WS 方法
-都 local_only，推送复用 cron 收尾同款的渠道出站小件（未配置静默、失败只
-记日志），不给无人值守开任何新的写通道。
+都 local_only（_dispatch_automation.py 注册），推送复用 cron 收尾同款的
+渠道出站小件（未配置静默、失败只记日志），不给无人值守开任何新的写通道。
+
+D3 自动化与任务域（backend.py Mixin 拆分批 4 起挂域注记，设计 §2.1）：
+归 D3 而非 D4——它是「看自动化」不是「做远端」：数据源是工厂/团队的只读
+快照（factory_state 与各队 team.snapshot），出站复用 automation 的
+push_text_to_targets（本文件 import）。
+
+字段所有权：本域无自有 D3 字段（主类 __init__ 一次铺齐、本 Mixin 无
+__init__，设计 §3.1）。
+
+跨域只读（不收敛，注记，设计 §3.3）：`_teams`（D2 活动团队，values 遍历
+取各队 snapshot，批 6 收敛为 team_orchestrators() 返回 dict 本体）；
+`channels`（D4 字段，getattr 防御读，spectate_send 的出站目标）。
 """
 
 from __future__ import annotations

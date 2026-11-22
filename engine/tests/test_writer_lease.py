@@ -52,8 +52,13 @@ def test_backup_precheck_refuses_when_other_process_writes(home):
     class _Backend(LifecycleMixin):
         _base_run_task = None
         runtimes: dict = {}
-        _cron_running = False
-        _pipeline_running = False
+
+        def automation_busy(self) -> str | None:
+            # 拆分批 4 起 _backup_busy_message 经 automation_busy() 合判
+            # cron/流水线在飞（D3 accessor）；本极简宿主不含 AutomationMixin，
+            # 以「无人值守空闲」桩替代（原 _cron_running/_pipeline_running
+            # 两字段桩随之作废）。
+            return None
 
     be = _Backend()
     assert be._backup_busy_message("恢复") is None

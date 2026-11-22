@@ -408,6 +408,65 @@
   机械证明）；全部 342 个 WS 方法注册表（含 local_only 标记与 local_gate
   挂钩）HEAD 与工作区逐项一致，local_only 零回归。用户可见行为零变化：
   纯内部注记重构，WS 方法面、事件契约、权限门与前端零改动。
+- **工程质量：backend.py 按 Mixin 分批拆分批 4（D3 自动化与任务）——
+  AutomationMixin / FactoryMixin / SpectateMixin 归位挂域注记，一搬一增
+  （`_emit_factory_run` 并入 FactoryMixin、新增 `automation_busy()`
+  accessor），backend.py 7690→7698 行**：沿用批 1/2 走通的施工模板做第四批；
+  与批 3 同为「归位」批，但形态是纯注记与代码搬移的混合，分别写明如下。
+  其一，方法搬移：`_emit_factory_run`（backend.py 原「生命周期」段
+  :1774-1786，13 行）方法体逐字并入 FactoryMixin「公共小件」段首
+  （backend_parts/factory.py），docstring 加「自拆分批 4 起自 backend.py
+  并入本域」批注；两处调用点零改动——backend.py setup 构造 RunLedger
+  （emit=）与 automation.py 派发 run_cron_task_core（emit_run=）均经 MRO
+  照常解析到新落点，setup 注记补一句出口落位。其二，accessor 新增（设计
+  §3.3 雷区收敛①，owner=D3）：automation.py 新增 `automation_busy()`——
+  返回占用方可读名词（「定时任务」/「流水线节点」，空闲 None），判定与
+  lifecycle 原两处裸读逐字等价（`_cron_running` dict / `_pipeline_running`
+  set 非空即占用）；lifecycle.py `_backup_busy_message`（备份/恢复/迁移导入/
+  存储清理共用的预检，设计 §4.1 所称「删除会话判忙」按实况注记）两处裸读
+  （原 :428-431）换成 accessor 单点合判，用户可见文案
+  f"有{kind}正在运行，等它结束再{action}" 与原两串逐字符相同——这是批内
+  唯一的判定收敛代码改动，test_migration 的 match="定时任务" 断言原样通过
+  即靠此对齐。其三，纯注记（批 3 remote.py / channels.py 同款形态）：D3 域
+  注记落三文件头——automation.py 写明域内职责（定时任务/流水线/提醒/日报/
+  预算告警/运行账本记账，「定时与编排」全在本 Mixin；模块级
+  run_cron_task_core 与后端扫描循环共用同一条执行路径、CLI 与测试直连同一
+  入口）、十个字段所有权（逐字段注记见 backend.py __init__）与 run_ledger
+  记账消费、跨域读写点照实登记（读 D2 `_teams` / team_templates /
+  resident_teams、读 D6 `mods`、内核 `ws_emitters` 只许遍历 emit、D4
+  `channels` 终态推送与预算告警出站）；factory.py 写明「跨项目自动化观战
+  数据面」定位（读 `_cron_running` 并发闸余量与「叫停」句柄、读 `run_ledger`
+  热更保留策略、派工复用 AutomationMixin._run_cron_task）、`runs`（运行中心
+  RunCenter）所有权划入本域（state.live 口径即 RunCenter 快照）、
+  `ws_emitters` 由 `_emit_factory_run` 遍历 emit 只许遍历不许增删；
+  spectate.py 写明归 D3 不归 D4 的理由（「看自动化」不是「做远端」：数据源
+  是工厂/团队只读快照、出站复用 automation 的 push_text_to_targets、
+  spectate.snapshot / spectate.send 两方法 local_only 注册在
+  _dispatch_automation.py）与本域无自有 D3 字段；backend.py __init__ 三段
+  字段所有权注记块（十个 automation 字段 + run_ledger + runs，共 12 个 D3
+  字段全覆盖，每条含消费方与跨域读写点）。每条「消费方是谁」声称均先
+  grep 核实后才写入（_resident_team_is_live / _resident_wake_board 键式读
+  `_teams`、factory 对 `_cron_running` / `run_ledger` 的 getattr 防御读、
+  spectate 两方法注册）。其四，硬验证：git archive 抽 HEAD 与工作区各真实
+  import 一遍拍快照（完整 MRO / dir(ServerBackend) 全属性集 / per-class
+  vars / 模块顶层名四类）逐项比对——MRO 逐项 diff 为空（31 类，本批不新增
+  基类、不改基类顺序）；属性集与 per-class 成员面的差异恰好只有批内声明的
+  两处：`_emit_factory_run` 由主类 __dict__ 移入 FactoryMixin.__dict__
+  （dir() 集合不变、经 MRO 仍可达）、`automation_busy` 由 AutomationMixin
+  新增（dir() 集合唯一新增项）；模块顶层名零增减（230 个）。其五，契约
+  测试：tests/test_backend_mixin_layout.py 按批 3 先例新增两条——三 Mixin
+  直继基类 + `_emit_factory_run` / `automation_busy` 落位（新落点 __dict__
+  提供、主类 __dict__ 不再自带、经 MRO 仍可达）+ lifecycle 预检经 accessor
+  不再裸读（inspect.getsource 锚：源码含 self.automation_busy()、不含两处
+  裸读名）。既有测试断言未削弱，唯一锚点调整是 test_writer_lease.py 的
+  极简宿主 _Backend(LifecycleMixin)：原以 _cron_running=False /
+  _pipeline_running=False 两字段桩喂旧裸读，改走 accessor 后该宿主不含
+  AutomationMixin 会 AttributeError，把两字段桩换成 automation_busy() 返回
+  None 的桩（测试内注释写明缘由），既有 4 条断言逐字未动。RunLedger
+  「warning 留痕后吞错」契约与预算告警语义未触碰；设计 §6 点名的辅助模块
+  daily_report.py / run_inspect.py / budget_alert.py 按设计维持现状未加
+  注记。用户可见行为零变化：纯内部结构重构（一搬一增均为 MRO 解析内的
+  等价归位），WS 方法面、事件契约、权限门与前端零改动。
 
 ## [2.7.2] - 2026-11-20
 

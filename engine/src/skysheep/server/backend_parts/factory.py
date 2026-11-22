@@ -30,6 +30,22 @@
 全部方法在 WS 层 local_only=True（跨项目枚举面不对远程开放，见 server/app.py）。
 运行账本（automation_runs）的读写细节在 ``core/run_ledger.py`` 与
 ``session/store.py``，这里只做聚合与展示口径。
+
+D3 自动化与任务域（backend.py Mixin 拆分批 4 起挂域注记，设计 §2.1）：工厂
+是跨项目自动化的观战数据面——读 `_cron_running`（并发闸余量与「叫停」句柄）
+与 `run_ledger`（热更保留策略），派工复用 AutomationMixin._run_cron_task。
+
+字段所有权（D3，设计 §3.2，主类 __init__ 一次铺齐、本 Mixin 无 __init__）：
+`runs`（运行中心 RunCenter）——批 4 把它的所有权划入本域，理由：``state.live``
+口径即 RunCenter 快照；跨域消费注记见 backend.py __init__ 的 runs 注记块。
+同域只读（不收敛，注记）：`_cron_running`、`run_ledger`（主域字段注记见
+automation.py 文件头）。
+
+跨域读写（不收敛，注记，设计 §3.3）：内核字段 `ws_emitters` 由本域
+`_emit_factory_run`（批 4 自 backend.py 并入：RunLedger 的 factory_run 事件
+同步出口，backend.py setup 构造 RunLedger 时与 automation.py 派发
+run_cron_task_core 时经 MRO 取用）遍历 emit——只许遍历 emit，不许增删
+（内核注记）。
 """
 
 from __future__ import annotations
@@ -278,6 +294,21 @@ class FactoryMixin:
     """工厂：状态聚合、运行历史、派工、启停、新建产线与配置读写。"""
 
     # ---- 公共小件 ----
+
+    def _emit_factory_run(self, ev: dict) -> None:
+        """广播 factory_run 事件（同步出口，RunLedger 在运行首尾各调一次）。
+
+        自拆分批 4 起自 backend.py 并入本域（设计 §4.1 批 4①，方法体逐字
+        搬移）。ev 形如 ``{"kind": "factory_run", "phase": ..., "run": {...}}``；
+        ws_emit 会把它包成 ``{"event": "factory_run", "data": ev}``。顶层刻意
+        不带 session_id（run 里的会话 id 嵌在 run 内）——前端通用路由会把任何
+        带顶层 session_id 的事件当聊天事件开标签页。
+        """
+        for ws_emit in list(self.ws_emitters):
+            try:
+                spawn_bg(ws_emit(ev))
+            except Exception:  # noqa: BLE001 - 单个连接异常不影响其它广播
+                pass
 
     def _factory_config(self) -> dict:
         """[factory] 配置的展示口径（cfg 尚未加载时按默认值兜底）。"""

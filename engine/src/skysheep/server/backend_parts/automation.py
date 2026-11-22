@@ -2,6 +2,30 @@
 
 从 backend.py 按职责注释整段搬入：无人值守门控别名 CronGate 与
 HeadlessGate 同义，随职责区落在本模块。方法体逐字保留，逻辑不变。
+
+D3 自动化与任务域（backend.py Mixin 拆分批 4 起挂域注记，设计 §2.1）：
+定时任务 / 流水线 / 提醒 / 日报 / 预算告警 / 运行账本记账——「定时与编排」
+全在本 Mixin；``run_cron_task_core`` 与后端扫描循环共用同一条执行路径，
+CLI 的 ``skysheep cron run`` 与测试直连导入同一入口。
+
+字段所有权（D3，设计 §3.2，主类 __init__ 一次铺齐、本 Mixin 无 __init__）：
+`_reminder_task`、`_cron_task`、`_cron_running`、`_cron_skip_mark`、
+`_schtasks_runner`、`_pipeline_task`、`_pipeline_running`、
+`_pipeline_node_tasks`、`_pipeline_manual_triggers`、`_pipeline_busy_until`
+（十个，逐字段注记见 backend.py __init__ 的 D3 块）；`run_ledger` 实例由
+内核 setup 构造，本域记账消费（cron 扫描与编排节点首尾各记一次）。
+
+跨域读写（不收敛，注记，设计 §3.3）：`automation_busy()`（批 4 雷区收敛①）
+把 `_cron_running`/`_pipeline_running` 的「忙」合判供给 D1
+LifecycleMixin._backup_busy_message（备份/恢复/迁移导入/存储清理共用的
+预检），D1 不再裸读这两表；读 D2 的 `_teams`（常驻复用 `_resident_team_is_live`
+与 `_resident_wake_board` 键式取活动团队，批 6 收敛为
+team_orchestrator(sid)）、`team_templates`（定时团队轮读模板校验，只读）、
+`resident_teams`（常驻登记，只读）；读 D6 的 `mods`（定时团队轮重建
+registry 时传参，只读）；内核 `ws_emitters`（提醒/任务终态广播，只许遍历
+emit）与 D4 的 `channels`（终态推送/预算告警出站）只消费不增删；
+factory_run 事件出口 `self._emit_factory_run` 批 4 起由 FactoryMixin 提供
+（backend_parts/factory.py）。
 """
 
 from __future__ import annotations
@@ -1092,6 +1116,26 @@ class AutomationMixin:
 
     方法自 backend.py 按职责注释逐字搬入。
     """
+
+    # ---- 无人值守忙判定（跨域 accessor，批 4 雷区收敛①） ----
+
+    def automation_busy(self) -> str | None:
+        """cron / 流水线是否有任务在跑（设计 §3.3 雷区收敛①，owner=D3）。
+
+        返回占用方的可读名词（「定时任务」/「流水线节点」），空闲返回 None；
+        文案由调用方拼（D1 LifecycleMixin._backup_busy_message 的
+        「有 X 正在运行，等它结束再<动作>」口径不变），本方法只回答「谁在占」。
+        消费方（2026-11-22 grep 核实）：lifecycle.py `_backup_busy_message`
+        （备份/恢复/迁移导入/存储清理共用的预检）与 settings_io.py 全量导出（:103）/导入（:621）两处。
+        判定与原两处裸读逐字
+        等价：`self._cron_running`（dict，非空即占用）→ `self._pipeline_running`
+        （set，非空即占用），getattr 防御仅为极简测试宿主兜底。
+        """
+        if getattr(self, "_cron_running", None):
+            return "定时任务"
+        if getattr(self, "_pipeline_running", None):
+            return "流水线节点"
+        return None
 
     # ---- 日程：增删改查 + 到点提醒广播 ----
 

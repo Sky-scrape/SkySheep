@@ -425,10 +425,12 @@ class LifecycleMixin:
         for rt in self.runtimes.values():
             if rt.run_task and not rt.run_task.done():
                 return f"还有会话正在运行，先停止（Esc）或等它结束再{action}"
-        if self._cron_running:
-            return f"有定时任务正在运行，等它结束再{action}"
-        if self._pipeline_running:
-            return f"有流水线节点正在运行，等它结束再{action}"
+        # 定时任务/流水线在飞：D3 字段的「忙」合判经批 4 收敛的
+        # automation_busy() accessor 取（设计 §3.3 雷区收敛①；D1 不再裸读
+        # _cron_running/_pipeline_running，两表所有权注记在 automation.py）。
+        busy_kind = self.automation_busy()
+        if busy_kind:
+            return f"有{busy_kind}正在运行，等它结束再{action}"
         # 跨进程（审计 L26）：schtasks 拉起的 cron-run 子进程、命令行会话、headless
         # run 不在本进程的 runtimes 里，进程内预检看不见它们；它们整段持写者租约，
         # 这里探一次——别人还握着就拒绝，免得替换窗口里的提交随旧 inode 丢掉。

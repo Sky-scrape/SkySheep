@@ -3,6 +3,22 @@
 从 backend.py 按职责注释整段搬入：渠道预授权告警名单等模块级小件随职责区
 落在本模块，backend 引用以保持旧命名空间可见（测试直接 import）。
 方法体逐字保留，逻辑不变。
+
+D4 渠道与远端域（backend.py Mixin 拆分批 3 起挂域注记，设计 §2.1）：飞书/
+微信遥控端整装在本 Mixin——绑定键 / 批合并 / 斜杠命令 / 渠道门控，channel.*
+10 个 WS 方法（_dispatch_ops.py 注册，实现全在此）。
+
+字段所有权（D4，设计 §3.2，主类 __init__ 一次铺齐、本 Mixin 无 __init__）：
+`channels`、`_channel_gates`、`_channel_names`、`_channel_last_chat`、
+`_weixin_login_channel`。
+
+跨域读写（不收敛，注记，设计 §3.3 雷区表）：`_channel_gates`/`_channel_names`
+由 D1 LifecycleMixin.delete_session 清登记残键（lifecycle.py delete_session
+行内注记约 :312-317；两域文件头互指留待后续批，
+改动需双方批次会签）；`_channel_names` 另被内核 _reload_agent_history 读
+（backend.py，渠道会话系统提示词加 CHANNEL_STYLE，批 5 后随
+ChatPipelineMixin 落 D1）；`_sync_team_gate` 键式读 `self._teams`（D2 活动
+团队，渠道入站同步团队门，批 6 收敛为 team_orchestrator(sid)）。
 """
 
 from __future__ import annotations

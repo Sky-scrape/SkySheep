@@ -1009,6 +1009,18 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 记忆文件的写互斥：归档提炼的追加、定期整理的整稿覆盖、设置页整稿保存
         # 三条写路径共用（整理读旧稿 → 调模型的窗口里可能有人写入，见 _maintain_memory）
         self._memory_io_lock = asyncio.Lock()
+        # D4 字段所有权（拆分批 3 注记，设计 §3.2）：更新链路九个字段由
+        # RemoteMixin（backend_parts/remote.py）消费——update_info（发现的新
+        # 版本：静默检查 _check_update_quietly 与手动 check_update 写）、
+        # update_error（手动检查失败原因，check_update 写）、update_success/
+        # update_failure（更新对账终态：consume_update_marker 启动结算写、
+        # dismiss_update_failure 清）、_pending_update/_pending_update_version/
+        # _pending_update_verified（下载完成写、_update_ready 读）、
+        # _auto_update_task（自动下载句柄，_check_update_quietly 写）、
+        # _is_frozen（安装版判定，getattr(sys,"frozen") 一次性铺定）。
+        # 跨域只读（不收敛，注记）：内核 snapshot 读 update_info/
+        # update_success/update_failure/_is_frozen（boot 契约口径，
+        # snapshot 聚合返回）。
         self.update_info: dict | None = None  # {"version","url","notes"}：发现的新版本
         self.update_error: str | None = None  # 手动检查时的失败原因（进设置 · 关于）
         # 更新结果对账（更新可信度）：consume_update_marker 在启动时结算，
@@ -1020,11 +1032,32 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         self._pending_update_verified: bool = False  # 下载时是否核对了 .sha256
         self._auto_update_task: asyncio.Task | None = None  # 后台自动下载句柄
         self._is_frozen: bool = bool(getattr(sys, "frozen", False))  # 安装版=True，源码版=False
+        # D4 字段所有权（拆分批 3 注记，设计 §3.2）：渠道五字段由 ChannelsMixin
+        # （backend_parts/channels.py）消费——channels（实例在 setup 建：
+        # ChannelManager(self, self._channels_config)）、_channel_gates/
+        # _channel_names（渠道入站登记：会话 id → 门控/平台名）、
+        # _channel_last_chat（平台名 → 最近入站 chat_id，回执复用）、
+        # _weixin_login_channel（未启用微信时的扫码登录一次性实例）。
+        # 跨域读写（不收敛，注记，设计 §3.3 雷区表）：_channel_gates/
+        # _channel_names 由 D1 LifecycleMixin.delete_session 清登记残键
+        # （lifecycle.py delete_session 行内注记约 :312-317；互指留待后续批）；
+        # _channel_names 另被内核
+        # _reload_agent_history 读（渠道会话系统提示词加 CHANNEL_STYLE，
+        # 批 5 后随 ChatPipelineMixin 落 D1）。
         self.channels: ChannelManager | None = None  # 聊天软件渠道（Bot Channel）
         self._channel_gates: dict[str, ChannelGate] = {}  # 渠道会话 id → 门控
         self._channel_names: dict[str, str] = {}  # 渠道会话 id → 平台名（反向查找）
         self._channel_last_chat: dict[str, str] = {}  # 平台名 → 最近一次入站的 chat_id
         self._weixin_login_channel = None  # 未启用微信时，仅供扫码登录用的一次性实例
+        # D4 字段所有权（拆分批 3 注记，设计 §3.2）：令牌与访问留痕五字段由
+        # RemoteMixin（backend_parts/remote.py）消费——token_throttle（验证
+        # 失败的即时节流）、token_generation（令牌世代，轮换 +1）、
+        # _token_failures/_token_failure_total（失败留痕与总数）、_access_log
+        # （最近成功的远程访问）。跨域调用（不收敛，注记）：server/app.py 验
+        # 令牌路径（_lan_token_guard 中间件与 ws_endpoint 握手）调
+        # token_throttle.blocked/note_success/note_failure，握手读
+        # token_generation 记世代快照（轮换后旧世代连接在端内踢线）——
+        # 记账在 app 侧调用，策略与留痕落点都在本域。
         # 访问令牌的失败节流与留痕：设置页展示「有谁在试你的门」，节流让连错
         # 变得不划算。都是内存态，重启即清空（真实排查看桌面日志）。
         self.token_throttle = TokenThrottle()
@@ -1046,6 +1079,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 最近成功的远程访问（HTTP/WS 验令牌通过）：只留最近的，重启清零。
         # 与失败留痕对称，设置页展示「最近访问」；只记 ip/时间/渠道，不记令牌。
         self._access_log: list[dict] = []  # {ts, ip, where}
+        # D4 字段所有权（拆分批 3 注记，设计 §3.2）：ws_connections 由
+        # RemoteMixin 按语义消费——connections_summary/lan_kick 读、
+        # revoke_remote_connections 踢线（无条件踢全部非本机连接；token_generation
+        # 世代比对是另一条机制，在 app.py 分发前置拦截）。
+        # 跨域读写（不收敛，注记）：server/app.py 记账——ws_endpoint 握手
+        # append、断连 remove；广播仍走 ws_emitters。
         # 在线 WS 连接登记：与 ws_emitters 平行维护（广播仍走 emitters，零侵入），
         # 条目 {emit, ip, origin, connected_at, ua, kick}。仅内存态。
         self.ws_connections: list[dict] = []
@@ -1191,7 +1230,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return self._fixed_workdir("fast-talk")
 
     def _remote_workdir(self) -> Path:
-        """远程连接（渠道）会话的工作目录：数据目录下的 remote-control 文件夹。"""
+        """远程连接（渠道）会话的工作目录：数据目录下的 remote-control 文件夹。
+
+        D4 批注记（拆分批 3，设计 §2.1 外迁块批内决策）：留内核——与
+        _quick_workdir 同属固定工作目录族，被内核 _session_project 调用，
+        setup 启动即建，跨域只读另有 D1 lifecycle.py 的 session 详情路径；
+        随 RemoteMixin 外迁会把内核工作目录解析倒挂成对 D4 的依赖。"""
         return self._fixed_workdir("remote-control")
 
     async def _session_project(self, session_id: str) -> tuple[int | None, Path | None]:
@@ -1930,7 +1974,13 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         store.ensure_remote_project。ensure=False 用于归属比对类的只读查询
         （_get_owned_session / 分屏 interactive 判定）：项目不存在时不创建、
         返回 None——没有项目就没有渠道会话，比对自然不命中。缓存失效：
-        项目被删除时在 delete_project 里重置，下次渠道使用经 ensure 重建。"""
+        项目被删除时在 delete_project 里重置，下次渠道使用经 ensure 重建。
+
+        D4 批注记（拆分批 3，设计 §2.1 外迁块批内决策）：留内核——被内核
+        peek_session_messages（session.peek_messages 分屏 interactive 判定）调用，跨域只读另有 D1
+        lifecycle.py 的会话列表路径；缓存 _remote_project_id_cache 本身
+        就是内核字段（设计 §3.2），失效点在 delete_project/remove_project/
+        restore_project（批 5 后落 D1 ProjectMgmtMixin）。"""
         if self._remote_project_id_cache is not None:
             return self._remote_project_id_cache
         proj = (await self.store.ensure_remote_project()) if ensure \
@@ -1941,7 +1991,12 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         return proj.id
 
     def is_remote_project(self, project) -> bool:
-        """按哨兵路径判断是否「远程连接」固定项目（同步，project.list 等渲染用）。"""
+        """按哨兵路径判断是否「远程连接」固定项目（同步，project.list 等渲染用）。
+
+        D4 批注记（拆分批 3，设计 §2.0/§2.1）：留内核——设计 §2.0 把它列进
+        前门契约（project.list 渲染消费，分发在 _dispatch_files.py）；
+        delete_project/remove_project/restore_project 的哨兵路径分支同属
+        内核项目管理面，批 5 后随 ProjectMgmtMixin 落 D1。"""
         try:
             return project.root_path == self.store.REMOTE_PROJECT_PATH
         except AttributeError:

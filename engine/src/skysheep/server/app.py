@@ -260,6 +260,8 @@ def _no_store_static(app) -> None:
         # 缓存供旧副本，与新 backend / 新 app.js 混跑（审计 M18/L29）；清单漂移
         # 由 tests/test_frontend_wiring.py 的三清单对齐断言机械守住
         "/static/app.js",
+        # 主题配色表（26 套，对齐测试唯一真源；先于 app.js 加载）
+        "/static/app-themes.js",
         # 引擎事件 kind 常量表（生成文件，gen_frontend_events.py 产出）：
         # 先于 app.js 加载，必须同版配套，同样禁缓存
         "/static/app-events.js",
@@ -270,6 +272,8 @@ def _no_store_static(app) -> None:
         "/static/app-minimap.js",
         # 聊天渲染+流式增量渲染：从 app.js 拆出的分区模块（先于 app.js 加载）
         "/static/app-chat.js",
+        # 侧栏（视图/拖动排序/搜索/会话菜单）：从 app.js 拆出的分区模块
+        "/static/app-sidebar.js",
         # 协作模板（画廊/编辑器/跑前清单）：前端零构建、无指纹，必须同版配套
         "/static/app-collab.js",
         "/static/app-teamroom.js",  # 团队室页签模块（index.html 加载清单强制对齐）

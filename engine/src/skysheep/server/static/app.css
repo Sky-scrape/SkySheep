@@ -6049,7 +6049,7 @@ details.map-phase summary::-webkit-details-marker { display: none; }
  * 新增主题同步清单（漏一处就会「选了不生效 / 标题栏不跟」）：
  *   ① 本文件加 [data-theme="id"] 完整变量组 + ::selection
  *   ② index.html 首帧兜底底色、设置页主题卡片、两个「跟随系统落点」下拉
- *   ③ app.js 的 THEMES 表（主题卡名单与搜索索引都从它生成）
+ *   ③ app-themes.js 的 THEMES 表（主题卡名单与搜索索引都从它生成）
  *   ④ backend_parts/remote.py 的 THEME_PREFS / THEME_AUTO_LIGHT / THEME_AUTO_DARK
  *   ⑤ server/app.py 首帧注入的 auto 落点白名单
  *   ⑥ wintheme.py 的 THEME_PALETTE 与 DARK_THEME_IDS（标题栏/启动页/失败页）；

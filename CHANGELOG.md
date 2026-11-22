@@ -224,6 +224,55 @@
   边界：正常路径完全不变——当天有真实数据时返回值、告警分档、护栏判定与展示
   均与改前一致（既有 test_usage_today 等用例零改动），新增 None 回落留痕、
   「未知」告警防重发与「先真实低档后未知补最高档」回归用例。
+- **工程质量：侧栏整板拆出 `static/app-sidebar.js`（前端拆分路线图第 3b 批）**：
+  app.js 的侧栏分区自成一体——经典视图渲染 / 折叠窄栏 rail / 无障碍键盘 / 分组视
+  图 / 拖动排序状态机 / 会话搜索与消息跳转 / 会话操作菜单，共 66 个顶层符号 + 6
+  条顶层接线语句（view-toggle / fold-all / 搜索框 / 菜单收起 ×2 /
+  wireListDrag.active 初始化）。本批整簇原子搬入新建 `static/app-sidebar.js`
+  （1458 行 = 7 行文件头 + 1 空行 + 1450 行板体逐字平移，符号保序、逻辑一字未改，
+  板体与原区段逐字节一致），app.js 由 16928 行降至 15481 行，接缝留两行指路注释
+  （写明「弹层四件套被本文件加载期取值引用，留驻 app.js」的 tail 裁决）。加载期
+  可达性按设计复核：app.js 对 66 符号零加载期引用（区段外 42 个命中块逐一复核——
+  wireListDrag 三处接线全在回调体、initUiPrefs 的搬家符号引用全在首个 await 之后、
+  顶层同步调用仅 initUiPrefs() 一处），互调全在事件回调运行时解析，所以本批一处
+  typeof 守卫都没加，改以常驻断言闭环：新增
+  `test_app_sidebar_movers_and_toplevel_clean` 钉三条不变量——66 符号在 bundle 里
+  恰好各声明一次且都在 app-sidebar.js（搬丢即调用点白屏、搬错文件即重名静默覆盖，
+  从此是红灯）；app-sidebar.js 顶层语句块自包含（第 3 批用例 ② 同款 union 口径：
+  只准引用本文件声明 ∪ 先载文件声明，顶层引用后载绑定即 TDZ 白屏，要新增顶层接线
+  就搬进本文件或经评审改断言，不开静默豁免）；弹层四件套仍声明在 app.js——app.js
+  顶层有 `modal-cancel.onclick = hideModal` 的加载期取值引用，被「顺手整理」搬进
+  after_app 模块即白屏，把 tail 裁决从一次性结论升级为常驻不变量。配套登记：
+  index.html 在 app.js 标签后加注释 + script 标签（加载顺序 app.js →
+  app-sidebar.js → app-cards.js）；app.py `_no_store_static` 带分区注释登记该路
+  径；sw.js SHELL_URLS 加一项并递增 SW_VERSION（v140→v141）；
+  test_frontend_wiring 的 after_app 清单登记（首项），唯一跨界切片
+  （test_ui_prefs 的 showSessionMenu 区段）改为直读 app-sidebar.js、断言文本不变；
+  打包零改动（spec 按目录整收）。用户可见行为零变化：纯移动不改逻辑，DOM / 文案
+  / CSS / 事件契约零改动。
+- **工程质量：THEMES 表出仓 `static/app-themes.js`（前端拆分路线图第 4 批）**：
+  26 套主题的 `const THEMES` 纯数据表（id → 名称 + 深浅）此前埋在 app.js 主题区
+  段，是 app.css 变量组、index.html 主题卡、remote.py 白名单、wintheme 色板等七
+  处登记的对齐真源（test_theme_alignment.py 机械校验）。本批把表出仓为独立数据文
+  件 `static/app-themes.js`（43 行 = 5 行自述头注释 + 1 空行 + 37 行原样平移单元
+  ——表说明注释 / 同步注记 / `const THEMES`，纯数据、零顶层语句，逐字节与原文一致），
+  app.js 原位留一行指路注释，再降至 15445 行。生成决策按设计裁决——生成器不随本
+  批：出仓后表已不在 app.js，落点形态无先例、既有对齐测试已是等价护栏、单独生成
+  收益窄，且本批的输入 app.js 自身正在搬家、批次边界干净；只做物理搬家 + 对齐测
+  试演进，remote.py / wintheme.py / bootpages.py 零改动。对齐测试演进：
+  test_theme_alignment.py 真源锚从 app.js 换到 app-themes.js（docstring 与
+  assert 消息同步改写，解析逻辑、登记集合与 dark 派生一字未动；
+  `_themes_from_app_js` 函数名沿用出仓前叫法并注明缘由——将来生成器 recipe 引用此
+  名），新增 `test_themes_table_lives_in_app_themes_js` 落位断言：真源恰在
+  app-themes.js 一处、app.js 不留副本（谁抄副本谁分叉名单，红灯）；
+  test_frontend_wiring 的 before_app 清单登记（纯数据表先于 app.js 求值，零成本
+  消 TDZ）。配套登记：index.html 插在 app-chat.js 与 app.js 之间（先于 app.js 加
+  载）；app.py `_no_store_static` 在 app.js 条目后登记；sw.js SHELL_URLS 加一项
+  并递增 SW_VERSION（v141→v142）；app.css「新增主题同步清单」③ 由 app.js 改指
+  app-themes.js（该文件本批唯一改动行）；打包零改动（spec 按目录整收）。用户可见
+  行为零变化：纯数据搬家，26 套主题逐字不变，全部消费点（xtermTheme /
+  initUiPrefs 续体 / 主题系函数 / 两个「跟随系统」下拉 onchange / openPalette）
+  都在函数体与回调内，加载期零顶层引用，DOM / 文案 / CSS 零改动。
 
 ## [2.7.2] - 2026-11-20
 

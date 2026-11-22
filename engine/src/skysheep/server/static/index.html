@@ -2909,7 +2909,16 @@
      updateCoopHint 经 activeTab 画协作按钮初始档），后载会在脚本执行期命中 TDZ；
      本文件顶层只依赖 DOM 与 app-minimap.js（上一标签），自包含 -->
 <script src="/static/app-chat.js"></script>
+<!-- 主题配色表（26 套数据表，唯一事实来源）：从 app.js 拆出的数据文件（路线图第 4 批）。
+     普通 script、零构建，先于 app.js 加载（app.js 主题系函数事件期读本表）；
+     app.css 的主题变量组、index.html 的主题卡与首帧兜底、remote.py 的 THEME_PREFS、
+     wintheme 色板均以它对齐（test_theme_alignment.py 机械校验）；纯数据、零顶层语句 -->
+<script src="/static/app-themes.js"></script>
 <script src="/static/app.js"></script>
+<!-- 侧栏（经典/分组/rail 视图/无障碍/拖动排序/会话搜索/操作菜单）：从 app.js 拆出的分区文件。
+     普通 script、零构建，先 app.js 后本文件——本文件的函数由 app.js 与各分区模块
+     在事件回调里调用（运行时解析）；本文件顶层接线只依赖 DOM 与自身符号 -->
+<script src="/static/app-sidebar.js"></script>
 <!-- 协作卡片渲染（圆桌 rt* / 团队 tc* / 对抗 adv* 系）：从 app.js 拆出的分区文件。
      普通 script、零构建，先 app.js 后本文件（卡片函数调用 app.js 的渲染助手，
      全部在事件回调里运行时解析）；团队室页签（app-teamroom.js）复用本文件的

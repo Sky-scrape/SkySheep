@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from conftest import read_app_bundle
 from test_server import make_client, recv_until
+
+# 用例可能从任意 cwd 启动（仓库根 / engine/），静态资源一律按本文件定位成
+# 绝对路径；与 conftest._STATIC_DIR 及 test_frontend_wiring.STATIC_DIR 的写法同源。
+STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "skysheep" / "server" / "static"
 
 
 def call_ui(home, method, params=None):
@@ -1394,9 +1399,12 @@ def test_close_tab_only_closes_tab(home):
     assert "session.delete" not in close, "关标签不得顺带删会话"
     assert "tab.logEl.remove();" in close, "只从对话页收掉页签"
     assert 'request("stop"' in close, "跑着的标签先停（这不是删除会话）"
-    # 删除入口仍在左侧：会话行 ⋯ 菜单（带确认弹窗）+ 底部批量清空会话
-    menu = js[js.index("function showSessionMenu("):]
-    menu = menu[:menu.index("function showTabMenu(")]
+    # 删除入口仍在左侧：会话行 ⋯ 菜单（带确认弹窗）+ 底部批量清空会话。
+    # showSessionMenu 已拆至 app-sidebar.js（路线图第 3b 批）：直接读该文件切片，
+    # 锚到文件尾（其后只有菜单收起的两条顶层接线语句）；deleteSessionModal
+    # 留驻 app.js，下一行切片照旧读 bundle
+    sidebar = (STATIC_DIR / "app-sidebar.js").read_text(encoding="utf-8")
+    menu = sidebar[sidebar.index("function showSessionMenu("):]
     assert "删除会话" in menu and "deleteSessionModal" in menu
     assert 'request("session.delete"' in js[js.index("function deleteSessionModal("):]
     assert "session.cleanup_empty" in js, "空会话批量清理入口在侧栏底部"

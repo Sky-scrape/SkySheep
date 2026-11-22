@@ -1,4 +1,4 @@
-"""主题登记对齐：以 app.js 的 THEMES 表为唯一真源，机械校验 app.css 列出的七处登记。
+"""主题登记对齐：以 app-themes.js 的 THEMES 表为唯一真源，机械校验 app.css 列出的七处登记。
 
 app.css 主题段开头的「新增主题同步清单」点名七处（漏一处就表现为「选了不生效 /
 标题栏不跟 / 首帧闪白」），本用例逐处比对；期望值一律从 THEMES 表与它的 dark
@@ -6,7 +6,7 @@ app.css 主题段开头的「新增主题同步清单」点名七处（漏一处
 
   ① static/app.css            [data-theme="id"] 完整变量组（+ ::selection）
   ② static/index.html         首帧兜底底色、设置页主题卡、两个「跟随系统」下拉
-  ③ static/app.js             THEMES 表（本用例的真源）
+  ③ static/app-themes.js      THEMES 表（本用例的真源）
   ④ backend_parts/remote.py   THEME_PREFS / THEME_AUTO_LIGHT / THEME_AUTO_DARK
   ⑤ server/app.py             首帧注入（THEME_IDS 由 THEME_PREFS 派生，不另立名单）
   ⑥ wintheme.THEME_PALETTE / DARK_THEME_IDS；bootpages._ERR
@@ -38,14 +38,16 @@ def read_static(name: str) -> str:
 
 
 def _themes_from_app_js() -> dict[str, bool]:
-    """app.js 顶层 `const THEMES = {...}`：主题 id → 是否深色（唯一事实来源）。
+    """app-themes.js 顶层 `const THEMES = {...}`：主题 id → 是否深色（唯一事实来源）。
 
     dark 布尔同时决定「跟随系统」的深浅落点、标题栏色板与首帧兜底，必须和 id
     一一对上，所以这里连值一起解析，后面的深浅两族期望值都从它派生。
+    （表已于第 4 批出仓到 app-themes.js；函数名沿用出仓前叫法，见设计 §B3 将来
+    生成器 recipe 对本名的引用。）
     """
-    js = read_static("app.js")
+    js = read_static("app-themes.js")
     m = re.search(r"^const THEMES = \{(.*?)^\};", js, re.M | re.S)
-    assert m, "app.js 必须保留顶层 `const THEMES = {...}` 字面量（主题名单的唯一事实来源）"
+    assert m, "app-themes.js 必须保留顶层 `const THEMES = {...}` 字面量（主题名单的唯一事实来源）"
     themes: dict[str, bool] = {}
     # 顶层键缩进两格，值形如 { name: "纸墨", dark: false }
     for name, body in re.findall(
@@ -165,7 +167,7 @@ _REGISTRIES = _registered_sets(_THEMES)
 def test_theme_ids_registered_everywhere(where: str, registered: set[str],
                                          expected: set[str]):
     """THEMES 表里的每个 id 都必须在 `where` 处登记，且该处不许留已下线的死 id。"""
-    assert _THEMES, "app.js 的 THEMES 表不能为空"
+    assert _THEMES, "app-themes.js 的 THEMES 表不能为空"
     missing = sorted(expected - registered)
     extra = sorted(registered - expected)
     detail = []
@@ -174,8 +176,8 @@ def test_theme_ids_registered_everywhere(where: str, registered: set[str],
     if extra:
         detail.append("多出（THEMES 里没有的死 id）：" + "、".join(extra))
     assert not detail, (
-        f"{where} 与 app.js 的 THEMES 表不一致——\n  " + "\n  ".join(detail)
-        + f"\n主题名单以 app.js 的 THEMES 为准（当前 {len(_THEMES)} 套），"
+        f"{where} 与 app-themes.js 的 THEMES 表不一致——\n  " + "\n  ".join(detail)
+        + f"\n主题名单以 app-themes.js 的 THEMES 为准（当前 {len(_THEMES)} 套），"
         "加/删主题时把 app.css 主题段开头那七处一起改。"
     )
 
@@ -199,3 +201,15 @@ def test_dark_theme_ids_match_theme_table():
         "DARK_THEME_IDS 多出 THEMES 里没有的 id（只允许旧版 dark 别名）："
         + "、".join(sorted(extra))
     )
+
+
+def test_themes_table_lives_in_app_themes_js():
+    """THEMES 表出仓（第 4 批）后的落位不变量：真源恰在 app-themes.js 一处，app.js 不留副本。
+
+    app-themes.js 先于 app.js 加载（before_app）；app.js 若「顺手抄一份」副本，
+    两处名单必然分叉（主题卡名单与命令面板动作都从全局 THEMES 取），改动真源
+    时副本静默过期——出现副本就直接拦下。
+    """
+    assert "const THEMES = {" in read_static("app-themes.js")
+    assert "const THEMES = {" not in read_static("app.js"), (
+        "THEMES 真源已拆至 app-themes.js，app.js 的副本会分叉名单（改 app-themes.js）")

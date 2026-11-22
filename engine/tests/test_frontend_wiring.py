@@ -635,6 +635,136 @@ def test_app_chat_movers_and_appchat_toplevel_clean():
         "或经评审后改本断言）：\n  " + "\n  ".join(offenders))
 
 
+# ---------- 侧栏拆分（路线图第 3b 批）：app-sidebar.js 搬家名单 + 顶层自包含 ----------
+
+# 第 3b 批搬家名单（2026-11-22 区域扫描机械产出，逐字抄入）：侧栏板 66 个顶层符号
+# （经典视图渲染 / 折叠窄栏 rail / 无障碍键盘 / 分组视图 / 拖动排序状态机 /
+# 会话搜索与消息跳转 / 会话操作菜单），自 app.js 侧栏分区整板保序迁入
+# app-sidebar.js，随板 6 条顶层接线语句（view-toggle / fold-all / search input /
+# 菜单收起 ×2 / wireListDrag.active 初始化——是语句不是符号，不入本清单）。
+# 加载顺序 after_app：app.js 对这批符号零加载期引用，互调全在事件回调
+# （运行时解析），零 typeof 守卫；弹层四件套 / 标签命名 / 下载助手 /
+# setModelChip 留驻 app.js（tail 裁决，见下方用例 ③）。
+APP_SIDEBAR_MOVERS = (
+    # ① 侧栏状态与经典视图渲染
+    "sessionSearchActive", "activeSessionSid", "classicViewGk", "classicQuickAvailable",
+    "refreshSessions", "renderPlainList", "renderSessionExtras",
+    # ② 折叠窄栏（mini rail）+ 无障碍
+    "activeTagFilter", "RAIL_SESSION_MAX", "railInitial", "renderRailSessions",
+    "wireRowKeyboard", "renderSessionItem",
+    # ③ 分组视图状态
+    "sidebarView", "groupSeq", "projGroupState", "lastGroupedCurrentKey",
+    "groupedClickGk", "lastGroupedHighlightKey", "sessionOrderPrefs", "tabOrderPrefs",
+    "quickPosPref", "quickAnchor", "lastGroupedListByGroup", "GROUP_PREVIEW", "SUB_MARK",
+    "SUB_MARKS", "subParentTitleOf", "findParentInGroup", "orderedSessionList",
+    "groupState",
+    # ④ 视图切换 + 分组渲染
+    "applySidebarView", "groupHeads", "syncFoldAllBtn", "foldAllBtn",
+    "refreshSessionsGrouped", "renderProjectGroup",
+    # ⑤ 拖动排序状态机
+    "wireListDrag", "dragHalfPos", "switchToGroupProject", "wireGroupDrag",
+    "clearDragVisual", "commitProjectOrder", "wireSessionDrag", "wirePlainListDrag",
+    "clearSessionDragVisual", "commitSessionOrder",
+    # ⑥ 引用与归档
+    "addSessionRef", "quoteThisSession", "archiveSession", "openArchiveModal",
+    # ⑦ 会话搜索与消息跳转
+    "searchEl", "searchTimer", "highlightSnippet", "renderSessionList",
+    "revealSidebarListHead", "MESSAGE_JUMP_WAIT_MS", "MESSAGE_JUMP_FLASH_MS",
+    "MESSAGE_JUMP_MAX_PRELOAD_ROUNDS", "jumpToMessageSeq", "paintJumpTarget",
+    "showSearchHitInMessage",
+    # ⑧ 会话操作菜单
+    "menuEl", "placeMenuAt", "svgIcon", "showSessionMenu",
+)
+assert len(APP_SIDEBAR_MOVERS) == len(set(APP_SIDEBAR_MOVERS)) == 66
+
+
+def test_app_sidebar_movers_and_toplevel_clean():
+    """侧栏拆分（路线图第 3b 批）的三条常驻不变量（镜像第 3 批用例的最强形态）。
+
+    ① 搬家名单落位：APP_SIDEBAR_MOVERS 每个符号在拼接 bundle 里恰好声明一次、
+       且声明文件是 app-sidebar.js——「搬丢 / 搬错文件 / 抄写夹带」常驻红灯；
+    ② app-sidebar.js 顶层作用域自包含（第 3 批用例 ② 同款 union 口径）：顶层
+       语句块只准引用「本文件声明 ∪ 加载顺序在本文件之前的文件声明
+       （app-events…app.js）」，后载符号（app-cards / app-collab / app-teamroom /
+       app-factory* / app-tools / app-macros）一律拦下——本文件后于 app.js 加载、
+       先于它们加载，顶层引用后载绑定 = 必炸（TDZ / ReferenceError 白屏）。
+       今日 6 条接线语句只引用自身符号与 DOM；将来谁在 app-sidebar.js 顶层
+       引用后载符号，必须经评审有意识地改本断言——不开静默豁免；
+    ③ 弹层四件套仍声明在 app.js：app.js 顶层有 `modal-cancel.onclick = hideModal`
+       的加载期取值引用，被「顺手整理」搬进 after_app 模块即白屏——把「tail
+       裁决不搬弹层」从一次性结论升级为常驻不变量。
+    """
+    import re
+
+    decls_by_file = {}
+    for name in _bundle_js_files():
+        path = STATIC_DIR / name
+        if path.is_file():
+            decls_by_file[name] = _top_level_decls(path.read_text(encoding="utf-8"))
+    problems = []
+    for sym in APP_SIDEBAR_MOVERS:
+        where = [f for f, decls in decls_by_file.items() if sym in decls]
+        if not where:
+            problems.append(f"{sym}：bundle 里找不到声明（搬家时丢符号）")
+        elif where != ["app-sidebar.js"]:
+            problems.append(f"{sym}：声明在 {where}，应恰好在 app-sidebar.js 一次")
+    assert not problems, "app-sidebar.js 搬家名单落位不符：\n  " + "\n  ".join(problems)
+
+    # ② col-0 顶层语句块扫描（第 3 批用例 ② 同款算法 + union 口径）
+    order = list(_bundle_js_files())
+    allowed: set[str] = set()
+    seen_sidebar = False
+    for name in order:
+        allowed |= set(decls_by_file.get(name, []))
+        if name == "app-sidebar.js":
+            seen_sidebar = True
+            break
+    assert seen_sidebar, "加载顺序里找不到 app-sidebar.js（index.html 派生清单变了？）"
+    all_decls: set[str] = set()
+    for decls in decls_by_file.values():
+        all_decls |= set(decls)
+    banned = all_decls - allowed
+    sidebar_src = (STATIC_DIR / "app-sidebar.js").read_text(encoding="utf-8")
+    lines = sidebar_src.splitlines()
+    blocks: list[list[str]] = []
+    cur: list[str] = []
+    for line in lines:
+        if line[:1] not in ("", " ", "\t"):  # col-0 起始 → 开新块
+            if cur:
+                blocks.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        blocks.append(cur)
+    decl_re = re.compile(r"^(?:async\s+)?function\b|^(?:let|const|var|class)\b")
+    offenders = []
+    for block in blocks:
+        first = block[0]
+        if first.lstrip().startswith(("//", "/*")):
+            continue  # 注释块（整块；块内其余行必为缩进续行/注释，不含顶层代码）
+        if not first.strip() or decl_re.match(first):
+            continue
+        if all((not ln.strip()) or ln.lstrip().startswith(("//", "/*", "*"))
+               for ln in block):
+            continue  # 注释块
+        text = "\n".join(block)
+        hit = sorted(banned & set(re.findall(r"[A-Za-z_$][\w$]*", text)))
+        if hit:
+            offenders.append(f"引用后载符号 {','.join(hit)}：{first.strip()[:60]}")
+    assert not offenders, (
+        "app-sidebar.js 顶层语句块引用了后载文件的顶层声明"
+        "（本文件先于它们加载，加载期命中 TDZ / ReferenceError 白屏；把引用挪进函数体，"
+        "或经评审后改本断言）：\n  " + "\n  ".join(offenders))
+
+    # ③ 弹层四件套留驻 app.js（tail 裁决的常驻版）
+    app_decls = set(decls_by_file.get("app.js", []))
+    for sym in ("showModal", "hideModal", "modalFocusables", "modalTriggerEl"):
+        assert sym in app_decls, (
+            f"弹层四件套 {sym} 必须留在 app.js（app.js 顶层加载期取值引用 hideModal，"
+            "搬进 after_app 模块即白屏）")
+
+
 def test_run_center_names_stay_distinct():
     """运行中心两处入口的名字护栏（2026-10-10 修复的重名事故回归）。
 
@@ -1383,9 +1513,15 @@ def test_frontend_modules_keep_required_load_order():
     before_app = (
         "app-events.js", "app-skills.js", "app-minimap.js", "app-chat.js",
         "app-whitelist.js", "app-providers.js", "app-advanced.js", "app-about.js",
+        # 主题配色表（第 4 批出仓）：今日 app.js 对 THEMES 零加载期引用（消费全在
+        # 函数体/回调内），纯数据 const 零依赖自包含——先载是零成本消除未来 TDZ
+        # 的保守登记，落位不变量见 test_theme_alignment.py
+        "app-themes.js",
     )
-    # 后于 app.js：它们反过来依赖 app.js 的顶层定义
-    after_app = ("app-cards.js", "app-factory.js", "app-tools.js")
+    # 后于 app.js：它们反过来依赖 app.js 的顶层定义。app-sidebar.js 最紧邻 app.js——
+    # app.js 对其 66 个搬家符号零加载期引用，互调全在事件回调（运行时解析），
+    # 见 APP_SIDEBAR_MOVERS 用例
+    after_app = ("app-sidebar.js", "app-cards.js", "app-factory.js", "app-tools.js")
     names = before_app + ("app.js",) + after_app
 
     missing = [name for name in names if name not in scripts]

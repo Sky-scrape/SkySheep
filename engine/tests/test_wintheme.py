@@ -109,7 +109,7 @@ def test_read_ui_theme_returns_theme_id(home):
 def test_read_ui_theme_all_theme_ids(home):
     """色板里的每套主题 id 都直接命中，不再落进「跟随系统」兜底。
 
-    清单从 THEME_PALETTE 派生（色板与 app.js 的 THEMES 表逐项同步，见
+    清单从 THEME_PALETTE 派生（色板与 app-themes.js 的 THEMES 表逐项同步，见
     test_theme_alignment），不再手抄——手抄元组漂移时，新主题会静默落回纸墨/夜墨。
     """
     base = home / "home"

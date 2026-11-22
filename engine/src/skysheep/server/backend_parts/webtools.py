@@ -1,5 +1,6 @@
 """联网搜索 / AI 画图 / 语音输入：设置页配置与语音转写。
 
+D5 前端服务面板域（backend.py Mixin 拆分批 1 起挂域注记）。
 从 backend.py 按职责注释整段搬入。方法体逐字保留，逻辑不变。
 三个设置卡同属「给 web 工具与语音转写配服务」的职责区：读写
 config.toml 的 websearch / imagegen / speech 段并热更新工具实例。

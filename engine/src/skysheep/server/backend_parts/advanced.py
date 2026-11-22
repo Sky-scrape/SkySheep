@@ -1,9 +1,18 @@
 """高级设置与系统集成：设置页高级卡、钩子设置、本地目录/诊断、首启激活。
 
+D5 前端服务面板域（backend.py Mixin 拆分批 1 起挂域注记）。
 从 backend.py 按职责注释整段搬入。方法体逐字保留，逻辑不变。
 覆盖四个相邻职责区：高级设置（主循环轮数 / 上下文上限 / 压缩保留 /
 目录限制 / 开机自启 / 热键）、钩子（设置页读写与测试）、本地目录与
 诊断包（系统集成入口）、首启激活（演示模式）。
+
+拆分批 1 注记：SystemMixin 与 RelaySettingsMixin 解耦——本文件内 0 处
+relay 方法调用，原继承纯属接线取巧；RelaySettingsMixin 改为
+ServerBackend 基类列表的显式直接基类（MRO 顺序与属性集保持不变）。
+
+跨域只读（不收敛，注记）：`_reload_hooks` 读 `self._teams`（D2 团队
+成员 Agent 钩子热更同步）；`advanced_settings`/`save_advanced_settings`
+读 `self.mcp`（D6 出网设置热生效）。
 """
 
 from __future__ import annotations
@@ -31,10 +40,9 @@ from ...core.hooks import (
     recent_hook_runs,
 )
 from ...tools.shell import set_child_network
-from .relay import RelaySettingsMixin
 
 
-class SystemMixin(RelaySettingsMixin):
+class SystemMixin:
     """高级设置、钩子设置与系统集成（目录/诊断/首启激活）。
 
     方法自 backend.py 按职责注释逐字搬入。

@@ -286,7 +286,11 @@ def test_panel_fs_write_claim_failure_logs_and_saves(home, monkeypatch, caplog):
         async def claim(self, paths, owner="", wait_s=3.0):
             raise RuntimeError("租约枢纽故障")
 
-    monkeypatch.setattr("skysheep.server.backend.leases.hub_for", lambda wd: _BoomHub())
+    # 锚点调整（拆分批 1）：fs_write 随 WorkspacePanelMixin 迁至 backend_parts/
+    # workspace_panel.py，其 leases 导入随迁——patch 目标从 backend 模块名换到
+    # 新落点模块名，被 patch 的对象与断言均不变
+    monkeypatch.setattr(
+        "skysheep.server.backend_parts.workspace_panel.leases.hub_for", lambda wd: _BoomHub())
     (home / "proj" / "panel.txt").write_text("旧内容", encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger="skysheep.obs"):
         with make_client(home, []) as client, client.websocket_connect("/ws") as ws:

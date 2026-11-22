@@ -1,8 +1,21 @@
 """右侧面板：终端标签（常驻 PowerShell 伪终端）与辅助对话。
 
+D5 前端服务面板域（backend.py Mixin 拆分批 1 起挂域注记）。
 从 backend.py 按职责注释整段搬入：TerminalSlot / TerminalManager 是
 模块级类（backend 经由本模块取用），类方法挂在 TerminalPanelMixin 上，
 由 Backend 继承组装。方法体逐字保留，逻辑不变。
+
+字段所有权（D5）：`term`（TerminalManager 实例，主类 __init__ 一次铺齐）、
+`aux_histories`（辅助对话消息体）——均为本域消费。
+
+`aux_histories` 双域写分区注记（批 1，设计 §3.3 次雷）：key 空间按 sid
+分区——D1（会话模型语义，主类 session.aux_model_* / delete_session 等）
+只写 `aux_histories[sid]` 元数据（切辅助模型时建/删条目、清空），本域
+TerminalPanelMixin 写消息体（`aux_histories[sid]` 列表内 append/pop）；
+若后续出现同 key 交叉写，再在 owner 域收只读 accessor。
+
+设计 §6 明确本文件「只加注记不搬方法」：PTY 生命周期与 Windows 进程树
+管理紧耦合，自包含度最高，再拆只剩"为拆而拆"。
 """
 
 from __future__ import annotations

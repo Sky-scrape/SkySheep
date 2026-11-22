@@ -273,6 +273,52 @@
   行为零变化：纯数据搬家，26 套主题逐字不变，全部消费点（xtermTheme /
   initUiPrefs 续体 / 主题系函数 / 两个「跟随系统」下拉 onchange / openPalette）
   都在函数体与回调内，加载期零顶层引用，DOM / 文案 / CSS 零改动。
+- **工程质量：backend.py 按 Mixin 分批拆分批 1 开工（热身域：D5 前端服务面板）——
+  SystemMixin 与 RelaySettingsMixin 解耦，工作区面板簇外迁
+  `backend_parts/workspace_panel.py`**：backend.py 单体瘦身与 app.js 前端拆分同
+  思路，第 1 批选前端服务面板域做热身——只动一处类声明与一个新文件，施工面最小，
+  把施工法走通给后续 5 批当可复制模板（抽 HEAD 双拍快照 → 锚点断言 + 行号切片
+  搬迁 → 函数内导入改层排查 → 重拍快照逐项 diff → 定向测试）。其一，解耦：
+  SystemMixin 不再继承 RelaySettingsMixin——advanced.py 内 0 处 relay 方法调用，
+  原继承纯属接线取巧；RelaySettingsMixin 改为 ServerBackend 基类列表的显式直接
+  基类、紧随 SystemMixin，属性查找语义不变。其二，外迁：新建
+  `backend_parts/workspace_panel.py`（527 行），`WorkspacePanelMixin` 承载设计
+  点名的全部 17 个类成员（fs_read / fs_write / workspace_files、路径校验与
+  扫描常量 _workspace_path / _validate_rel_path / _BAD_NAME_CHARS /
+  _RESERVED_NAMES / SKIP_DIRS / MAX_FILES、提示词库播种 / 找回 / 润色 / 导入
+  导出六件、内部辅助 _file_text_meta / _walk_workspace_files，实际搬移 484 行）
+  与模块级内置提示词示例 `BUILTIN_SNIPPETS` 整块，方法体逐字保留；
+  WorkspacePanelMixin 置于 WebtoolsMixin 之后（D5 分组、保序插入），backend.py
+  由 9705 行降至 9228 行。backend.py 顶部保留
+  `from .backend_parts.workspace_panel import BUILTIN_SNIPPETS`（noqa F401）
+  re-export，`_dispatch_files.py` 与测试的 `from .backend import BUILTIN_SNIPPETS`
+  引用面不变；仅被 fs_write 使用的 `leases` 导入与 textio 的 `encode_text` 随
+  消费方迁出（textio 其余三个名字留守），已 grep 全仓 src / tests / tools /
+  examples / evals 确认无人经 backend 模块引用这两个随迁名。其三，注记：D5 七
+  文件（advanced / terminal / webtools / macros / data_retention / archive_mgmt /
+  browser_data）文件头挂「D5 前端服务面板域」注记；terminal.py 按设计只加注记
+  不搬方法——加 term / aux_histories 字段所有权与 aux_histories 双域写分区注记
+  （D1 只写元数据、D5 写消息体）；backend.py __init__ 三处字段声明（term /
+  aux_histories / _text_meta_cache）加所有权注记。其四，硬验证：git archive 抽
+  HEAD 与工作区各真实 import 一遍，拍 dir(ServerBackend) 全属性集 / 完整 MRO /
+  per-class vars / 模块顶层名四类快照逐项比对——dir(ServerBackend) 属性集 diff
+  为空；MRO 既有类相对顺序逐位不变、唯一新增 WorkspacePanelMixin 紧随
+  WebtoolsMixin；per-class 唯一例外是 SystemMixin 解耦后直继 object 自持
+  __dict__ / __weakref__ 描述符（拆分前从 RelaySettingsMixin 继承），属解耦的
+  结构副产品、实例行为无差异；backend 模块顶层除上述四个名字外零增减。施工已知
+  例外一条：被迁方法体内 4 处函数内相对导入因包层级 +1 机械改层（`from ..tools.docs`
+  / `from ..textio` ×2 / `from ..core.ignore` → 三点版），初跑定向测试即红
+  （ModuleNotFoundError: skysheep.server.tools），改层后全绿——后续批次施工模板
+  固化「新文件 `grep -n 'from \.\.'` 必须 0 命中（顶层三层与函数内都查）」。
+  其五，契约测试：新增 `tests/test_backend_mixin_layout.py` 5 条——解耦关系
+  （RelaySettingsMixin 不在 SystemMixin.__mro__、在 ServerBackend MRO 上紧随
+  SystemMixin）、17 成员外迁落位（WorkspacePanelMixin.__dict__ 提供、主类
+  __dict__ 不再自带、经 MRO 仍可达）、BUILTIN_SNIPPETS re-export 与新落点是
+  同一对象、MRO 禁止新增重名遮蔽（既有唯一重名 respond_permission 白名单
+  登记）、全部 Mixin 无 __init__ 施工纪律；既有测试断言未削弱，唯一锚点调整是
+  test_write_leases.py 的 monkeypatch 目标随落点改名（backend → workspace_panel，
+  被 patch 对象与全部行为断言不变，注释写明缘由）。用户可见行为零变化：纯内部
+  结构重构，WS 方法、事件契约、权限门与前端零改动。
 
 ## [2.7.2] - 2026-11-20
 

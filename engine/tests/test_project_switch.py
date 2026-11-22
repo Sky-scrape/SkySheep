@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from test_server import make_client, recv_until  # helpers（home fixture 在 conftest.py）
@@ -189,3 +190,88 @@ async def test_switch_project_fails_queued_turns_readably(home):
     assert not be.runtimes, "旧项目 runtime 应全部清空"
     assert not be._base_queue, "基底队列应清空"
     await be.shutdown()
+
+
+async def _team_backend_with_state(home, state):
+    """最小装配：真 setup（store/cfg/gate 齐）+ 隔离的团队登记文件。"""
+    be = ServerBackend(working_dir=home / "proj",
+                       provider_factory=lambda: FakeProvider([]),
+                       team_state_path=state)
+    await be.setup()
+    return be
+
+
+async def _orch(working_dir, name):
+    from skysheep.core.team import TeamMemberSpec, TeamOrchestrator
+
+    async def emit(ev):
+        pass
+
+    orch = TeamOrchestrator(emit=emit, working_dir=working_dir)
+    await orch.create_team([TeamMemberSpec(
+        name=name, provider_name="p", model="m",
+        provider=FakeProvider([]), persona="")])
+    return orch
+
+
+async def test_switch_project_marks_active_team_interrupted(home):
+    """切项目把旧项目的活动团队转「已中断」：team.get 能展示中断原因与名册，
+    登记随 _persist_team_state 落盘（重启后仍可凭 team_id 回放频道）。"""
+    state = home / "team_active.json"
+    proj2 = home / "proj2-team"
+    proj2.mkdir()
+    be = await _team_backend_with_state(home, state)
+    try:
+        sid = "sess-team"
+        orch = await _orch(home / "proj", "小研")
+        be._teams[sid] = orch
+
+        r = await be.switch_project(str(proj2))
+        assert r["switched"]
+
+        assert sid not in be._teams, "旧项目的活动团队必须摘除"
+        got = be.team_get({"session_id": sid})
+        assert got["active"] is False and got["team"] is None
+        rec = got["interrupted"]
+        assert rec["status"] == "interrupted"
+        assert rec["interrupt_reason"] == "项目已切换，团队已中断"
+        assert rec["team_id"] == orch.team_id
+        assert rec["roster"] == ["小研"]
+        # 落盘：活动名单清空，中断登记带原因与 team_id
+        saved = json.loads(state.read_text(encoding="utf-8"))
+        assert saved["teams"] == []
+        assert [t["session_id"] for t in saved["interrupted"]] == [sid]
+        assert saved["interrupted"][0]["interrupt_reason"] == "项目已切换，团队已中断"
+    finally:
+        await be.shutdown()
+
+
+async def test_bind_project_keeps_own_context_team(home):
+    """跨项目分屏列的反例：runtime 绑定会话自己的项目（ctx.own=True）时，
+    主栏切项目不摘它的团队、不写中断登记。"""
+    from types import SimpleNamespace
+
+    state = home / "team_active.json"
+    proj2 = home / "proj2-own"
+    proj2.mkdir()
+    be = await _team_backend_with_state(home, state)
+    own_sid = "sess-own"
+    try:
+        orch = await _orch(home / "proj", "小盾")
+        be._teams[own_sid] = orch
+        # 假 runtime 只为本断言存在：_bind_project 的 own 分支先于其余属性访问命中。
+        # agent 指向基底（_reload_mods 经 _for_each_agent 要求它存在）。
+        be.runtimes[own_sid] = SimpleNamespace(
+            sid=own_sid, ctx=SimpleNamespace(own=True), agent=be._base_agent)
+
+        await be._bind_project(proj2, connect_mcp=False)
+
+        assert own_sid in be._teams, "跨项目分屏列的团队不随主栏切换失效"
+        assert own_sid not in be._teams_interrupted
+        assert be.team_get({"session_id": own_sid})["active"] is True
+        saved = json.loads(state.read_text(encoding="utf-8"))
+        assert [t["session_id"] for t in saved["teams"]] == [own_sid]
+        assert saved["interrupted"] == []
+    finally:
+        be.runtimes.pop(own_sid, None)  # 假 runtime 不参与收尾
+        await be.shutdown()

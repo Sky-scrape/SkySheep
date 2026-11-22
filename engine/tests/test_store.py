@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import sqlite3
+
 import pytest
 
 from skysheep.messages import Message, TextBlock, ToolUseBlock
@@ -153,6 +156,23 @@ async def test_usage_today(store):
     )
     await store._db.commit()
     assert await store.usage_today() == 150
+
+
+async def test_usage_today_db_failure_returns_none(store, monkeypatch, caplog):
+    """用量库查询失败 → 回落 None 并留 warning（2026-11 except 审计 #9 取严）。
+
+    不再静默当 0——那会让当日 token 预算告警永不触发（fail-open）；护栏与
+    告警消费侧把 None 按「未知」处理（见 automation._check_budget_alerts）。
+    当天有真实数据时的行为由 test_usage_today 单独钉住。
+    """
+
+    async def boom(sql, args=()):
+        raise sqlite3.OperationalError("disk I/O error（测试桩）")
+
+    monkeypatch.setattr(store._db, "execute", boom)
+    with caplog.at_level(logging.WARNING, logger="skysheep.store"):
+        assert await store.usage_today() is None
+    assert "usage_today" in caplog.text
 
 
 async def test_usage_stats_session_count_and_models(store):

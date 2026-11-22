@@ -108,3 +108,19 @@ def alert_body(tier: int, used: int, budget: int) -> str:
         f"每日预算：{budget:,} tokens（已用 {pct}%）",
         f"建议：{advice}",
     ])
+
+
+def alert_body_unknown(budget: int) -> str:
+    """用量读不到（store.usage_today 回落 None）时的告警文案。
+
+    取严口径（2026-11 except 审计 #9 用户拍板）：读不到仪表不能当 0 放过，
+    告警照发；但数字栏如实写「未知」，不编一个 0，也不谎称「继续发会被
+    护栏拦下」——护栏在用量恢复前按放行走（坏仪表不停对话，见
+    _check_budget_alerts 的 None 分支）。
+    """
+    return "\n".join([
+        "🐑 SkySheep 预算提醒：今日 token 用量读取失败",
+        "今日用量：未知（用量记录暂时读不到）",
+        f"每日预算：{budget:,} tokens（已按越线处理发出本条提醒）",
+        "建议：请查看引擎日志确认用量库状态；用量恢复后告警照常按真实数字计算。",
+    ])

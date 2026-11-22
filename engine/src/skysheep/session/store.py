@@ -3159,8 +3159,14 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
         row = await cur.fetchone()
         return float(row["span"] or 0) if row and row["span"] else 0.0
 
-    async def usage_today(self) -> int:
-        """今天（本地时区零点起）累计消耗的 token 总量，供每日预算护栏判断。"""
+    async def usage_today(self) -> int | None:
+        """今天（本地时区零点起）累计消耗的 token 总量，供每日预算护栏判断。
+
+        查询失败返回 None（取严，2026-11 except 审计 #9 用户拍板）：护栏与
+        团队预算钩子把 None 按「未越线」放行（坏仪表不停对话，原口径不变）；
+        预算告警把 None 按已越最高档处理——读不到不能当 0 骗过告警。当天有
+        真实数据时返回值不变。
+        """
         assert self._db
         lt = time.localtime()
         midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
@@ -3171,8 +3177,11 @@ class SessionStore(SchedulesMixin, SnippetsMixin):
             )
             row = await cur.fetchone()
             return int(row[0] or 0)
-        except Exception:  # noqa: BLE001
-            return 0
+        except Exception as e:  # noqa: BLE001 - 读不到按未知（None）上报，留痕
+            logger.warning(
+                "usage_today 查询失败，当日用量按未知（None）上报：%s", e,
+            )
+            return None
 
     # ---- 定时任务（cron_tasks）：无人值守的周期 Agent 任务 ----
 

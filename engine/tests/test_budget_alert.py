@@ -209,6 +209,58 @@ async def test_state_save_failure_only_logs(store, home, monkeypatch, caplog):
     assert not ba.state_path().exists(), "失败时不应留下半个状态文件"
 
 
+# ---- 用量读不到（None）：取严按已越最高档告警 ----
+
+
+class _UnknownStore:
+    """用量读不到的替身：模拟 usage_today 库异常回落 None（审计 #9 取严）。"""
+
+    async def usage_today(self):
+        return None
+
+
+async def test_usage_unknown_pushes_unknown_alert(home):
+    """用量读不到 → 按已越最高档（100 档）推「未知」告警，同日不重发。
+
+    取严口径（2026-11 except 审计 #9 用户拍板）：读不到不能当 0 放过——
+    告警照发，但数字栏如实写未知，也不谎称「继续发会被护栏拦下」（护栏
+    与团队钩子在恢复前按放行走）。
+    """
+    ch = _FakeChannel()
+    host = _host(_UnknownStore(), _FakeMgr(ch))
+    await host._check_budget_alerts()
+    await _drain_bg()
+    assert len(ch.sent) == 1
+    body = ch.sent[0][1]
+    assert "读取失败" in body and "未知" in body
+    assert "已达上限" not in body, "不谎称护栏会拦（护栏按放行走）"
+    assert "约 None" not in body, "数字栏不出现 Python 字面量"
+    state = load_state()
+    assert state["sent"] == [100] and state["date"] == ba.today_str()
+
+    # 同日不重发（100 档已认领）
+    ch.sent.clear()
+    await host._check_budget_alerts()
+    await _drain_bg()
+    assert ch.sent == []
+
+
+async def test_usage_unknown_after_real_80_still_alerts_100(store, home):
+    """白天真实用量发过 80 档、库随后坏掉：未知仍补推 100 档并记账。"""
+    ch = _FakeChannel()
+    await _seed_usage(store, 8_500)
+    host = _host(store, _FakeMgr(ch))
+    await host._check_budget_alerts()
+    await _drain_bg()
+    assert load_state()["sent"] == [80]
+
+    broken = _host(_UnknownStore(), _FakeMgr(ch))
+    await broken._check_budget_alerts()
+    await _drain_bg()
+    assert len(ch.sent) == 2 and "读取失败" in ch.sent[1][1]
+    assert load_state()["sent"] == [80, 100]
+
+
 # ---- 渠道未启用 / 无目标 / 预算未设：静默跳过 ----
 
 

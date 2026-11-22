@@ -2857,7 +2857,9 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # 给可读的出路而不是让费用悄悄滚大。演示模式不受限（不产生真实费用）。
         if self.cfg.daily_token_budget > 0 and not getattr(self.provider, "demo_mode", False):
             used_today = await self.store.usage_today()
-            if used_today >= self.cfg.daily_token_budget:
+            # None = 用量库读不到（2026-11 except 审计 #9 取严口径）：护栏保持
+            # 原「读不到按未越线放行」——坏仪表不停对话；取严落在预算告警侧
+            if used_today is not None and used_today >= self.cfg.daily_token_budget:
                 raise RuntimeError(
                     f"已触发每日 token 预算护栏：今天已用约 {used_today:,} tokens，"
                     f"达到上限 {self.cfg.daily_token_budget:,}。\n"
@@ -4944,9 +4946,10 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
 
         与 send() 入口的护栏同口径：cfg.daily_token_budget > 0 且当日
         usage_log 汇总（store.usage_today）已达上限即「越线」；演示模式不产生
-        真实费用，豁免同既有判定。读不到用量按未越线放行——坏掉的仪表不该
-        停掉团队，费用护栏由宿主其余路径兜底（编排器对钩子异常同样按未越线
-        处理，这里不吞第二次）。异步实现：usage_today 是 async，编排器的
+        真实费用，豁免同既有判定。读不到用量（usage_today 回落 None，2026-11
+        except 审计 #9 取严口径下护栏/团队钩子仍按放行）按未越线放行——坏掉
+        的仪表不该停掉团队，费用护栏由宿主其余路径兜底（编排器对钩子异常同样
+        按未越线处理，这里不吞第二次）。异步实现：usage_today 是 async，编排器的
         _budget_over 对 awaitable 返回值照常等待。
 
         模板预算（本期）：run_budget 非空时先把跨轮累计的 token（run_tokens
@@ -4967,7 +4970,8 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
             if getattr(self.provider, "demo_mode", False):
                 return False
             used_today = await self.store.usage_today()
-            return used_today >= budget
+            # None = 用量库读不到（审计 #9 取严口径下护栏/团队钩子按放行）
+            return used_today is not None and used_today >= budget
 
         return check
 

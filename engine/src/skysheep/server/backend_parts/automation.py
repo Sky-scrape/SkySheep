@@ -42,6 +42,9 @@ from .budget_alert import (
     alert_body as budget_alert_body,
 )
 from .budget_alert import (
+    alert_body_unknown as budget_alert_body_unknown,
+)
+from .budget_alert import (
     default_state as budget_alert_default_state,
 )
 from .budget_alert import (
@@ -594,7 +597,9 @@ async def run_cron_team_turn_core(
         if getattr(provider, "demo_mode", False):
             return False
         used_today = await store.usage_today()
-        return used_today >= budget
+        # None = 用量库读不到（2026-11 except 审计 #9 取严口径）：与 send()
+        # 护栏同口径按未越线放行——坏仪表不该停掉团队；取严落在预算告警侧
+        return used_today is not None and used_today >= budget
 
     # 频道消息落库钩子（三期）：接到项目库的 team_messages 表（team.log 回放）。
     # 落库是 best-effort 旁路：失败记 obs 警告不外溢——不能让落库问题拖垮团队轮
@@ -2055,12 +2060,19 @@ class AutomationMixin:
             return
         try:
             used = await self.store.usage_today()
-        except Exception:  # noqa: BLE001 - 用量读不到就不告警，不影响轮次
-            return
+        except Exception:  # noqa: BLE001 - usage_today 内部已回落 None；桩异常同口径按未知
+            used = None
         # ---- 认领段（无 await）：同日同档最多一条 ----
         today = budget_alert_today()
         state = load_budget_alert_state(today=today)  # 日期对不上即跨天重置
-        due = budget_due_tiers(used, budget, state["sent"])
+        if used is None:
+            # 取严（2026-11 except 审计 #9 用户拍板）：用量读不到不能当 0
+            # 放过——按已越最高档（100 档）处理，推一条「用量未知」告警并
+            # 认领 100 档防重发；护栏在恢复前仍按放行走（坏仪表不停对话），
+            # 文案不谎称「继续发会被拦」（见 budget_alert.alert_body_unknown）
+            due = [100] if 100 not in state["sent"] else []
+        else:
+            due = budget_due_tiers(used, budget, state["sent"])
         if not due:
             return
         fresh = budget_alert_default_state()
@@ -2075,7 +2087,10 @@ class AutomationMixin:
             return
         # ---- 推送段（fire-and-forget）----
         for tier in due:
-            body = budget_alert_body(tier, used, budget)
+            body = (
+                budget_alert_body_unknown(budget) if used is None
+                else budget_alert_body(tier, used, budget)
+            )
             try:
                 spawn_bg(push_text_to_targets(self.channels, body, what="预算告警"))
             except RuntimeError:
@@ -3738,7 +3753,9 @@ class AutomationMixin:
         pipe_items.sort(key=lambda x: x["at"], reverse=True)
 
         try:
-            used = int(await self.store.usage_today())
+            raw = await self.store.usage_today()
+            # None = 用量库读不到（审计 #9 取严口径）：总览是展示面，按 0 展示
+            used = int(raw) if raw is not None else 0
         except Exception:  # noqa: BLE001 - 用量读不到按 0 展示，总览不能整卡崩
             used = 0
         # 预算字段缺失（前置版本）/未设（0）→ None：UI 隐藏预算段

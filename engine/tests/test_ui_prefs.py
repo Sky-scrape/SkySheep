@@ -1507,10 +1507,12 @@ def test_split_pane_state_invariants(home):
 
     sync = js[js.index("if (splitPanes.includes(routeTab)) {"):]
     sync = sync[:sync.index("\n}")]
-    assert 'kind === "queue_updated"' in sync, "列头运行点由 queue_updated 驱动重画"
-    assert 'kind === "assistant_message"' not in sync, \
+    # 源码形状锚（无稳定 id 可用，套件惯例）：kind 比较已迁移为 AP_EVENTS 常量
+    # 引用，锚同步换成常量形态；正负锚语义原样（轮末信号只认 queue_updated）
+    assert 'kind === AP_EVENTS.QUEUE_UPDATED' in sync, "列头运行点由 queue_updated 驱动重画"
+    assert 'kind === AP_EVENTS.ASSISTANT_MESSAGE' not in sync, \
         "assistant_message 是中间轮信号，不当轮末用"
-    assert 'kind === "task_finished"' not in sync, \
+    assert 'kind === AP_EVENTS.TASK_FINISHED' not in sync, \
         "task_finished 是后台子代理任务终态，不当轮末用"
     assert "pane.permData = null" in sync, "确认解决后列上的待确认数据一并清掉"
 

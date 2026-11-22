@@ -5271,7 +5271,7 @@ function flushReplayBuf(t) {
   for (const m of queued) {
     if (typeof m.data.ev_seq === "number" && m.data.ev_seq <= t.lastSeq) continue;
     handleEvent(m.event, m.data);
-    if (m.event === "turn_finished") finished = true;
+    if (m.event === AP_EVENTS.TURN_FINISHED) finished = true;
   }
   return finished;
 }
@@ -5308,7 +5308,7 @@ async function resumeEventStreams() {
         for (const ev of r.events || []) {
           if (typeof ev.ev_seq === "number" && ev.ev_seq <= t.lastSeq) continue;
           handleEvent(ev.kind, ev);
-          if (ev.kind === "turn_finished") gotFinished = true;
+          if (ev.kind === AP_EVENTS.TURN_FINISHED) gotFinished = true;
         }
         // 补帧期间的实时帧排在本批之后（seq 更大），先放缓冲再解锁
         if (flushReplayBuf(t)) gotFinished = true;
@@ -5391,9 +5391,9 @@ function handleEvent(kind, data) {
     if (!routeTab.lastSeq || data.ev_seq > routeTab.lastSeq) routeTab.lastSeq = data.ev_seq;
   }
   switch (kind) {
-    case "thinking_delta": appendThinking(data.text); break;
-    case "text_delta": appendStream(data.text); break;
-    case "assistant_message": {
+    case AP_EVENTS.THINKING_DELTA: appendThinking(data.text); break;
+    case AP_EVENTS.TEXT_DELTA: appendStream(data.text); break;
+    case AP_EVENTS.ASSISTANT_MESSAGE: {
       // 有流式元素（普通轮/主席融合/对抗报告）→ 收尾；无流式元素（对比模式的成员回答）→ 直接渲染完整气泡
       const t = curTab();
       const meta = data.message && (data.message.roundtable || data.message.adversarial);
@@ -5442,25 +5442,25 @@ function handleEvent(kind, data) {
       }
       break;
     }
-    case "roundtable_started": beginRoundtable(data.members || [], data.rounds || 1); break;
-    case "roundtable_member_delta": rtMemberDelta(data); break;
-    case "roundtable_member_finished": rtMemberFinished(data); break;
-    case "adversarial_started": beginAdversarial(data.roles || []); break;
-    case "adversarial_phase": advSetPhase(data.phase, data.note || ""); break;
-    case "adversarial_finding_proposed": advAddFinding(data); break;
-    case "adversarial_verdict": advApplyVerdict(data); break;
-    case "adversarial_finished": advFinished(data); break;
+    case AP_EVENTS.ROUNDTABLE_STARTED: beginRoundtable(data.members || [], data.rounds || 1); break;
+    case AP_EVENTS.ROUNDTABLE_MEMBER_DELTA: rtMemberDelta(data); break;
+    case AP_EVENTS.ROUNDTABLE_MEMBER_FINISHED: rtMemberFinished(data); break;
+    case AP_EVENTS.ADVERSARIAL_STARTED: beginAdversarial(data.roles || []); break;
+    case AP_EVENTS.ADVERSARIAL_PHASE: advSetPhase(data.phase, data.note || ""); break;
+    case AP_EVENTS.ADVERSARIAL_FINDING_PROPOSED: advAddFinding(data); break;
+    case AP_EVENTS.ADVERSARIAL_VERDICT: advApplyVerdict(data); break;
+    case AP_EVENTS.ADVERSARIAL_FINISHED: advFinished(data); break;
     // 团队五事件在喂团队卡的同时喂团队室容器（同一套 tc* 渲染函数，
     // app-teamroom.js 的 trRoomFeed 分发；页签未打开时那边只累计未读）
-    case "team_started": beginTeam(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnStarted", data); break;
-    case "team_message_delta": teamMemberDelta(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnDelta", data); break;
-    case "team_message": teamMsgFinal(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnMsg", data); break;
-    case "team_task_updated": teamTaskUpdated(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnTask", data); break;
-    case "team_finished": teamFinished(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnFinish", data); break;
-    case "tool_call_started": addToolCard(data); agentTermOnStart(data); break;
-    case "tool_call_finished": finishToolCard(data); agentTermOnFinish(data); break;
-    case "subagent_spawned": onSubagentSpawned(data); break;
-    case "subagent_event": onSubagentEvent(data); break;
+    case AP_EVENTS.TEAM_STARTED: beginTeam(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnStarted", data); break;
+    case AP_EVENTS.TEAM_MESSAGE_DELTA: teamMemberDelta(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnDelta", data); break;
+    case AP_EVENTS.TEAM_MESSAGE: teamMsgFinal(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnMsg", data); break;
+    case AP_EVENTS.TEAM_TASK_UPDATED: teamTaskUpdated(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnTask", data); break;
+    case AP_EVENTS.TEAM_FINISHED: teamFinished(data); if (typeof trRoomFeed === "function") trRoomFeed("trOnFinish", data); break;
+    case AP_EVENTS.TOOL_CALL_STARTED: addToolCard(data); agentTermOnStart(data); break;
+    case AP_EVENTS.TOOL_CALL_FINISHED: finishToolCard(data); agentTermOnFinish(data); break;
+    case AP_EVENTS.SUBAGENT_SPAWNED: onSubagentSpawned(data); break;
+    case AP_EVENTS.SUBAGENT_EVENT: onSubagentEvent(data); break;
     // 电脑控制操作回放（P13）：重放进度与终态交给 app-macros.js 渲染
     case "macro_progress":
       if (typeof macroOnProgress === "function") macroOnProgress(data);
@@ -5468,11 +5468,11 @@ function handleEvent(kind, data) {
     case "macro_finished":
       if (typeof macroOnFinished === "function") macroOnFinished(data);
       break;
-    case "task_finished": onTaskFinished(data); break;
-    case "permission_request":
+    case AP_EVENTS.TASK_FINISHED: onTaskFinished(data); break;
+    case AP_EVENTS.PERMISSION_REQUEST:
       showPermission(data); // 通知统一在 showPermission 里发（活动/后台各一份）
       break;
-    case "permission_resolved": {
+    case AP_EVENTS.PERMISSION_RESOLVED: {
       // 只收起「这一张」卡：多标签同时各挂一张确认卡时，后台标签的 resolved
       // 不该把活动标签正在显示的另一张真卡也藏掉（藏掉后 permRequest 已 null，
       // 真卡按钮会静默失效，只能靠切标签恢复）
@@ -5499,20 +5499,20 @@ function handleEvent(kind, data) {
       }
       break;
     }
-    case "usage":
+    case AP_EVENTS.USAGE:
       usageIn += data.input_tokens || 0;
       usageOut += data.output_tokens || 0;
       renderUsage();
       break;
-    case "todo_updated": {
+    case AP_EVENTS.TODO_UPDATED: {
       renderTodoPanel(data.items);
       const t = curTab();
       if (t) t._lastTodoItems = data.items;
       renderTodoFlowCard(data.items, t);
       break;
     }
-    case "task_estimate": showTaskEstimate(data); break;
-    case "schedule_updated": {
+    case AP_EVENTS.TASK_ESTIMATE: showTaskEstimate(data); break;
+    case AP_EVENTS.SCHEDULE_UPDATED: {
       if (rightViewVisible("agenda")) loadAgenda();
       break;
     }
@@ -5531,7 +5531,7 @@ function handleEvent(kind, data) {
       }
       break;
     }
-    case "mod_ui":
+    case AP_EVENTS.MOD_UI:
       // Claude 兼容模式的元素树走 onModUiTree；旧的 widget 词表走 onModUi
       if (data.payload && data.payload.tree) onModUiTree(data);
       else onModUi(data);
@@ -5635,7 +5635,7 @@ function handleEvent(kind, data) {
       if (typeof factoryOnAutomationChanged === "function") factoryOnAutomationChanged();
       break;
     }
-    case "notice": addNotice("⏳ " + data.message); break;
+    case AP_EVENTS.NOTICE: addNotice("⏳ " + data.message); break;
     case "memory_digest": addNotice("🧠 " + data.message); break;
     case "memory_maintain": addNotice("🧹 " + data.message); break;
     case "map_updated": {
@@ -5646,10 +5646,10 @@ function handleEvent(kind, data) {
       if (rightViewVisible("map")) loadMemoryMap();
       break;
     }
-    case "compaction":
+    case AP_EVENTS.COMPACTION:
       addNotice(`🗜 上下文压缩：${data.before_messages} → ${data.after_messages} 条消息`);
       break;
-    case "error": {
+    case AP_EVENTS.ERROR: {
       finishAssistant();
       const d = document.createElement("div");
       d.className = "msg error";
@@ -5658,7 +5658,7 @@ function handleEvent(kind, data) {
       scrollLog();
       break;
     }
-    case "queue_updated":
+    case AP_EVENTS.QUEUE_UPDATED:
       // 每轮结束都会推；pending>0 = 还有排队轮（含刚接棒的）在跑，保持运行态
       setRunning((data.pending || 0) > 0, routeTab);
       if (!(data.pending > 0)) {
@@ -5704,7 +5704,7 @@ function handleEvent(kind, data) {
       }
       break;
     }
-    case "turn_finished": {
+    case AP_EVENTS.TURN_FINISHED: {
       finishAssistant();
       // 用引擎实测耗时定格芯片：前端本地计时从收到预估事件算起，与引擎的
       // 墙钟起点差一个网络往返，两个数字对不上（刷新后又变成引擎值）。
@@ -5729,13 +5729,13 @@ function handleEvent(kind, data) {
   // 非活动标签提前 return，不会自己调 paintSplitHead）
   if (splitPanes.includes(routeTab)) {
     const pane = routeTab;
-    if (kind === "queue_updated") {
+    if (kind === AP_EVENTS.QUEUE_UPDATED) {
       paintSplitHead(pane);
-    } else if (kind === "permission_request") {
+    } else if (kind === AP_EVENTS.PERMISSION_REQUEST) {
       pane.needsPerm = true;
       pane.permData = data; // 列头 🔒 点击时转移到主栏标签恢复确认卡
       paintSplitHead(pane);
-    } else if (kind === "permission_resolved") {
+    } else if (kind === AP_EVENTS.PERMISSION_RESOLVED) {
       pane.needsPerm = false;
       pane.permData = null;
       paintSplitHead(pane);
@@ -15604,14 +15604,14 @@ function subLiveAreas(card) {
 
 function renderSubEvent(card, ev) {
   const { live, report } = subLiveAreas(card);
-  if (ev.kind === "tool_call_started") {
+  if (ev.kind === AP_EVENTS.TOOL_CALL_STARTED) {
     const line = document.createElement("div");
     line.className = "sub-line";
     line.dataset.cid = ev.tool_call_id || "";
     line.textContent = "▶ " + (ev.name || "") + " " + oneLine(ev.input || {});
     live.appendChild(line);
     while (live.children.length > 100) live.removeChild(live.firstChild);
-  } else if (ev.kind === "tool_call_finished") {
+  } else if (ev.kind === AP_EVENTS.TOOL_CALL_FINISHED) {
     let line = ev.tool_call_id ? live.querySelector(`[data-cid="${CSS.escape(ev.tool_call_id)}"]`) : null;
     if (!line) {
       line = document.createElement("div");
@@ -15620,7 +15620,7 @@ function renderSubEvent(card, ev) {
     }
     line.classList.add(ev.is_error ? "err" : "ok");
     line.textContent = (ev.is_error ? "✗ " : "✓ ") + (ev.name || "") + ` (${ev.duration_ms || 0}ms)`;
-  } else if (ev.kind === "text_delta") {
+  } else if (ev.kind === AP_EVENTS.TEXT_DELTA) {
     // 增量追加：textContent += 每条 delta 都要整体重写字符串节点，长报告 O(n²)
     report.insertAdjacentText("beforeend", ev.text || "");
     if (!card._subScrollTimer) {
@@ -15629,7 +15629,7 @@ function renderSubEvent(card, ev) {
         report.scrollTop = report.scrollHeight;
       }, 80);
     }
-  } else if (ev.kind === "assistant_message") {
+  } else if (ev.kind === AP_EVENTS.ASSISTANT_MESSAGE) {
     const text = messageText(ev.message);
     if (text) report.textContent = text; // 用最终完整文本覆盖增量拼接
   }
@@ -15741,20 +15741,20 @@ function subHudEvent(data) {
   const e = subHudEntry(data.task_id);
   if (!e.agentType) e.agentType = data.agent_type || "";
   const ev = data.event || {};
-  if (ev.kind === "tool_call_started") {
+  if (ev.kind === AP_EVENTS.TOOL_CALL_STARTED) {
     e.tools += 1;
     e.live = "▶ " + (ev.name || "") + " " + oneLine(ev.input || {});
-  } else if (ev.kind === "tool_call_finished") {
+  } else if (ev.kind === AP_EVENTS.TOOL_CALL_FINISHED) {
     e.live = (ev.is_error ? "✗ " : "✓ ") + (ev.name || "") +
       (ev.duration_ms ? ` (${ev.duration_ms}ms)` : "");
   }
-  if (ev.kind === "tool_call_started" || ev.kind === "text_delta") {
+  if (ev.kind === AP_EVENTS.TOOL_CALL_STARTED || ev.kind === AP_EVENTS.TEXT_DELTA) {
     if (e.status === "queued") e.status = "running";
   }
   // 子会话里跑的也是本机的命令：同一份输出喂给终端面板的 Agent 镜像，
   // 否则「看见 Agent 在本机做了什么」只覆盖主会话，漏掉并行的那几路
-  if (ev.kind === "tool_call_started") agentTermOnStart(ev, e.agentType);
-  else if (ev.kind === "tool_call_finished") agentTermOnFinish(ev, e.agentType);
+  if (ev.kind === AP_EVENTS.TOOL_CALL_STARTED) agentTermOnStart(ev, e.agentType);
+  else if (ev.kind === AP_EVENTS.TOOL_CALL_FINISHED) agentTermOnFinish(ev, e.agentType);
   subHudPaint();
 }
 

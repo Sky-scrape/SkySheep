@@ -1064,7 +1064,7 @@ def test_permission_resolved_clears_only_matching_tab():
     数据，卡永久消失，而后端那一轮还挂在权限门上无限等待。
     """
     js = read_app_bundle()
-    i = js.index('case "permission_resolved":')
+    i = js.index('case AP_EVENTS.PERMISSION_RESOLVED:')
     body = js[i:js.index("break;", i)]
     # 必须按 request_id 匹配标签，不能无条件清 routeTab
     assert "t.permData.request_id === rid" in body, (
@@ -1164,7 +1164,7 @@ def test_frontend_modules_keep_required_load_order():
     scripts = [url.rsplit("/", 1)[-1] for url in _index_html_script_urls()]
     # 先于 app.js：app.js 顶层调用它们的函数
     before_app = (
-        "app-skills.js", "app-minimap.js", "app-whitelist.js",
+        "app-events.js", "app-skills.js", "app-minimap.js", "app-whitelist.js",
         "app-providers.js", "app-advanced.js", "app-about.js",
     )
     # 后于 app.js：它们反过来依赖 app.js 的顶层定义
@@ -1344,8 +1344,8 @@ def test_process_timeline_rows_are_chronological():
     assert 'bubble.classList.add("proc-note")' in js
     assert ".msg.assistant.proc-note .md" in css
     # 一次模型调用结束清掉思考行状态（下一次另起一行）
-    k = js.index('case "assistant_message"')
-    seg = js[k:js.index('case "roundtable_started"', k)]
+    k = js.index('case AP_EVENTS.ASSISTANT_MESSAGE')
+    seg = js[k:js.index('case AP_EVENTS.ROUNDTABLE_STARTED', k)]
     assert "finishThinking(t);" in seg
     assert "t.thinkEl = null;" in seg and 't.thinkText = "";' in seg
 

@@ -113,6 +113,33 @@
   实理由；`tools/__init__.py` 一字未动。另有 4 个哨兵用例（ReadFileTool /
   LoadSkillTool / TeamAssignTool / MCPTool）钉住四种「类进入
   `__subclasses__`」的导入路径，防收集断链后完备性检查假绿。
+- **工程质量：前端事件 kind 常量出仓（`static/app-events.js` 单一来源）**：前端
+  app.js 的 48 处引擎事件比较（handleEvent 的 case 标签与相等判断、重放缓冲、
+  事件流恢复、子事件渲染等）全是裸字面量——拼错一个字母只会让分支静默不命中，
+  此前只有上一批加的事件 kind 契约做「引擎反射 ↔ 前端字面」扫描对照，没有任何
+  东西保证字面本身写对。现在把这层关系升级为生成物：新增
+  `engine/tools/gen_frontend_events.py` 反射 events.py 拿全部 34 个事件 kind
+  字面值，生成 `static/app-events.js` 的 `AP_EVENTS` 冻结常量表（NAME =
+  kind.upper()，按 kind 字典序，产物提交入库、不含时间戳），app.js 的 48 处
+  比较全部改为查表引用；生成器自带防呆（事件类缺 Literal 字面默认值、kind
+  重复、数量低于下限 30 一律抛错拒绝生成）与 `--check` 模式（EOL 归一化逐字
+  比对，不一致打 unified diff 退出 1）。事件 kind 契约测试从 2 用例增至
+  4 用例、断言只增不减：盘上产物与引擎反射双射 + 逐字新鲜度比对（忘重跑生成
+  即红，报错带 diff 与重跑命令）；前端裸字面量禁令（引擎 kind 谁写回谁红，
+  误伤边界写进 docstring、优先修命名不开豁免清单）；既有覆盖对照与 ALLOWLIST
+  防过期守卫原样保留（豁免条目 turn_started 及写实理由不变，命中集从
+  「字面三形态」扩为「字面 ∪ AP_EVENTS 引用三形态」，表外引用即拼错常量名
+  直接红）。配套登记四处：index.html 尾部 script 块第一个标签挂 app-events.js
+  （先于 app.js 加载，同 app-minimap 先例）、app.py `_no_store_static` 加该
+  路径、sw.js SHELL_URLS 加一项并递增 SW_VERSION（v137→v138）、
+  test_frontend_wiring 的 before_app 清单登记；打包零改动（spec 按目录整收）。
+  既有测试锚点只换锚不削弱：test_frontend_wiring 三处 case 段锚与 test_ui_prefs
+  的正负锚全部换成常量形态，段内断言原样。用户可见行为零变化：48 处全部是
+  行内单 token 等价替换（`case "x":` → `case AP_EVENTS.X:`），分支逻辑 / 顺序 /
+  兜底未动，DOM / 文案 / CSS 零改动；后端直接广播的非引擎 kind
+  （update_progress / relay_pair_* / session_updated 等约 22 种）不经
+  events.py 事件类，不进本表、前端分支保持字面量，广播 kind 出仓属后续批次
+  （产物头注释与契约测试均写明）。
 
 ## [2.7.2] - 2026-11-20
 

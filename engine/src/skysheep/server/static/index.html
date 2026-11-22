@@ -2885,6 +2885,8 @@
 <!-- mermaid（3.3MB）、xterm、highlight.js、qrcode 全部按需加载：首次渲染图表 /
      首次开终端 / 首个代码块高亮 / 首次画二维码时，才由 app.js 的 loadLib 注入
      script——首屏不再同步解析这几百 KB 到几 MB 的库，冷启动更快 -->
+<!-- 引擎事件 kind 常量表（生成文件），必须先于 app.js 加载 -->
+<script src="/static/app-events.js"></script>
 <script src="/static/app-projects.js"></script>
 <script src="/static/app-schedule.js"></script>
 <script src="/static/app-providers.js"></script>

@@ -2904,12 +2904,17 @@
 <!-- 消息导航条（minimap）：只定义函数，需排在 app.js 之前（app.js 顶层就 new 主栏实例） -->
 <script src="/static/app-minimap.js"></script>
 <script src="/static/app.js"></script>
+<!-- 协作卡片渲染（圆桌 rt* / 团队 tc* / 对抗 adv* 系）：从 app.js 拆出的分区文件。
+     普通 script、零构建，先 app.js 后本文件（卡片函数调用 app.js 的渲染助手，
+     全部在事件回调里运行时解析）；团队室页签（app-teamroom.js）复用本文件的
+     tc* 系，故本文件必须先于 app-teamroom.js 加载 -->
+<script src="/static/app-cards.js"></script>
 <!-- 协作模板（L1）：设置页画廊 / 模板编辑器 / 协作菜单分组 / 跑前清单。
      普通 script、零构建，先 app.js 后本文件——靠全局函数互调（app.js 侧的
      调用一律带 typeof 守卫），数据走 collab.template_* 与 team.template_list -->
 <script src="/static/app-collab.js"></script>
 <!-- 团队室（独立页签）：普通 script、零构建，先 app.js 后本文件——三分区
-     容器复用 app.js 的团队卡 tc* 渲染系（buildTeamCard / tcUpsertMsg /
+     容器复用 app-cards.js 的团队卡 tc* 渲染系（buildTeamCard / tcUpsertMsg /
      tcRenderTasks…），页签装载走 app.js 的 RIGHT_TAB_LOADERS.teamroom；
      五团队事件由 app.js 的分发分支经 trRoomFeed 同源喂入 -->
 <script src="/static/app-teamroom.js"></script>

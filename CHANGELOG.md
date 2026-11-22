@@ -140,6 +140,28 @@
   （update_progress / relay_pair_* / session_updated 等约 22 种）不经
   events.py 事件类，不进本表、前端分支保持字面量，广播 kind 出仓属后续批次
   （产物头注释与契约测试均写明）。
+- **工程质量：协作卡片渲染整簇拆出 `static/app-cards.js`（前端拆分路线图第 2 批）**：
+  app.js 的协作卡片区段自成一体——圆桌 rt* 簇 13、对抗 adv* 簇 26、团队 tc* 簇
+  53 共 92 个顶层符号（含历史回放卡），只被事件分发与协作入口在运行期调用，
+  却在单文件里占着 2300 多行。本批整簇原子搬入新建 `static/app-cards.js`
+  （2358 行 = 6 行文件头 + 2352 行逐字平移，符号保序、逻辑一字未改），app.js
+  由 20039 行降至 17689 行；共享助手 fmtTokens 是唯一例外、按设计留驻 app.js
+  （任务页签与工厂视图也在用）；顶层语句块里唯一引用搬家符号的 window
+  resize 接线（圆桌对照卡断点重排）随簇迁移——搬前扫描仅此 1 块、搬后为零，
+  所以本批一处 typeof 守卫都没加（不同于 app-collab.js「app.js 侧调用一律带
+  守卫」的形态），改以常驻断言闭环：新增
+  `test_app_cards_movers_and_appjs_top_level_clean` 钉三条不变量——92 符号在
+  bundle 里恰好各声明一次且都在 app-cards.js（搬丢即调用点白屏、搬错文件即
+  重名静默覆盖，从此是红灯）、fmtTokens 必须仍在 app.js、app.js 顶层语句块
+  零搬家符号引用（要新增顶层接线就搬进 app-cards.js，或经评审改断言，不开
+  静默豁免）。配套登记：index.html 尾部加载顺序定为 app.js → app-cards.js →
+  app-collab.js → app-teamroom.js（团队室页签复用本文件的 tc* 渲染系，
+  `test_team_room_tab_wiring` 顺序断言从两链加强为三链，app-teamroom.js 文件
+  头注释同步改指）；app.py no_store 集合登记该路径；sw.js SHELL_URLS 加一项
+  并递增 SW_VERSION（v138→v139）；test_frontend_wiring 的 after_app 清单登记。
+  app.js 卡片区段两端各留一行指路注释。剩余的协作发起区（setWorkMode /
+  showCoopMenu 等）留待第 3 批续搬进同一文件，本批不动。用户可见行为零变化：
+  纯移动不改逻辑，DOM / 文案 / CSS / 事件契约零改动。
 
 ## [2.7.2] - 2026-11-20
 

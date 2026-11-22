@@ -263,6 +263,8 @@ def _no_store_static(app) -> None:
         # 引擎事件 kind 常量表（生成文件，gen_frontend_events.py 产出）：
         # 先于 app.js 加载，必须同版配套，同样禁缓存
         "/static/app-events.js",
+        # 协作卡片渲染（圆桌/对抗/团队卡）：从 app.js 拆出的分区模块
+        "/static/app-cards.js",
         # 操作过程时间线（思考行/工具行/过程框）：从 app.js 拆出的分区模块
         "/static/app-proc.js",
         "/static/app-minimap.js",

@@ -424,6 +424,106 @@ def test_no_cross_file_top_level_name_collisions():
         + "\n  ".join(sorted(dups)))
 
 
+# ---------- 协作卡片拆分（路线图第 2 批）：app-cards.js 搬家名单 + app.js 顶层干净 ----------
+
+# 第 2 批搬家名单（2026-11-22 区域扫描机械产出，逐字抄入）：圆桌 rt* 簇 13 +
+# 对抗 adv* 簇 26 + 团队 tc* 簇 53 = 92 个顶层符号，自 app.js 卡片区段保序迁入
+# app-cards.js。共享助手 fmtTokens 例外留驻 app.js（任务页签与工厂视图共用）；
+# 另有 1 条 window resize 接线语句随簇迁移——它是语句不是符号，不入本清单。
+# 第 3 批协作发起区（setWorkMode/showCoopMenu/build*SettingsInto…）续搬后在本清单增补。
+APP_CARDS_MOVERS = (
+    # 圆桌卡簇（rt）
+    "addRtBadge", "quoteRoundtableDraft", "buildRtCardShell", "buildRtMemberCard",
+    "RT_DRAFT_CLAMP_PX", "rtSyncClamp", "rtToggleDraft", "rtClampResizeTimer",
+    "beginRoundtable", "setMemberRound", "rtMemberDelta", "rtMemberFinished",
+    "buildRtReplayCard",
+    # 对抗卡簇（adv）
+    "ADV_PHASES", "ADV_SEVERITY_LABEL", "ADV_VERDICT_LABEL", "ADV_VERDICT_FILTERS",
+    "ADV_SEVERITY_FILTERS", "advRoleLabel", "advRolesTitle", "advFindingRow",
+    "advBuildFlow", "advBuildToolbar", "advRowCounts", "advUpdateStats", "advApplyFilter",
+    "advToggleFold", "beginAdversarial", "advSetPhase", "advAddFinding", "advApplyVerdict",
+    "advExportActions", "advRenderCompare", "rtToTeamActions", "advAttachTransfer",
+    "advTransferActions", "advFinished", "buildAdvReplayCard", "addAdvBadge",
+    # 团队卡簇（tc）
+    "tcAvatar", "tcEl", "TEAM_TASK_COLUMNS", "tcColumnKey", "tcCanTransition",
+    "tcBuildKanban", "tcBuildViewTabs", "tcSetView", "tcMarkChannelNew",
+    "tcSyncChannelCount", "tcSyncBoardCounts", "tcSyncAttendance", "buildTeamCard",
+    "buildTaskForm", "TEAM_TASK_OPS", "buildTaskRow", "tcTaskTransition",
+    "tcTaskUpdateRequest", "tcUpsertTask", "tcRenderTasks", "tcMemberTokens",
+    "tcUpdateRoster", "tcSyncTakeover", "tcSaveTemplateModal", "tcContinueTeam",
+    "tcSetSub", "tcSetStatus", "tcClearIdle", "tcProbeResidentClear", "tcFinish",
+    "buildMsgRow", "tcIsHuddleNote", "tcUpsertMsg", "tcOpenStreamRow", "updateTeamCard",
+    "lastTeamCard", "teamCardFor", "beginTeam", "tcDirectorOfEvent", "teamMemberDelta",
+    "teamMsgFinal", "teamTaskUpdated", "teamFinished", "refreshTeamState",
+    "applyTeamSnapshot", "applyTeamMeta", "buildTeamReplayCard", "tcDirectorOfSnapshot",
+    "teamLogCache", "TEAM_LOG_CACHE_MAX", "tcFetchFullLog", "tcApplyLogRows", "addTeamBadge",
+)
+assert len(APP_CARDS_MOVERS) == len(set(APP_CARDS_MOVERS)) == 92
+
+
+def test_app_cards_movers_and_appjs_top_level_clean():
+    """协作卡片拆分（路线图第 2 批）的三条常驻不变量。
+
+    ① 搬家名单落位：APP_CARDS_MOVERS 每个符号在拼接 bundle 里恰好声明一次、
+       且声明文件是 app-cards.js——「搬丢」（调用点 ReferenceError 白屏）与
+       「搬错文件 / 抄写夹带」（重名静默覆盖）从此是常驻红灯；
+    ② 共享助手 fmtTokens 仍声明在 app.js：它被任务页签 loadTasks / openTaskDetail
+       与 app-factory*.js 共用，被「顺手整理」搬走即埋事件期 ReferenceError；
+    ③ app.js 顶层语句块（含回调体）零 APP_CARDS_MOVERS 引用：卡片函数对 app.js
+       只有事件期引用（typeof 守卫抽检的机械化）。谁想在 app.js 顶层引用卡片
+       函数，必须把接线挪进 app-cards.js，或经评审有意识地改本断言——不开静默豁免。
+    """
+    decls_by_file = {}
+    for name in _bundle_js_files():
+        path = STATIC_DIR / name
+        if path.is_file():
+            decls_by_file[name] = _top_level_decls(path.read_text(encoding="utf-8"))
+    problems = []
+    for sym in APP_CARDS_MOVERS:
+        where = [f for f, decls in decls_by_file.items() if sym in decls]
+        if not where:
+            problems.append(f"{sym}：bundle 里找不到声明（搬家时丢符号）")
+        elif where != ["app-cards.js"]:
+            problems.append(f"{sym}：声明在 {where}，应恰好在 app-cards.js 一次")
+    assert not problems, "app-cards.js 搬家名单落位不符：\n  " + "\n  ".join(problems)
+    assert "fmtTokens" in decls_by_file.get("app.js", []), (
+        "共享助手 fmtTokens 必须留在 app.js（任务页签与 app-factory*.js 也用），不许搬走")
+
+    # ③ col-0 顶层语句块扫描：块 = col-0 起始行到下一个 col-0 行；跳过声明块、
+    #    纯 `}` 收尾块与注释块（// 与 /* */），其余为顶层语句块（含回调体）
+    import re
+
+    lines = read_static("app.js").splitlines()
+    blocks: list[list[str]] = []
+    cur: list[str] = []
+    for line in lines:
+        if line[:1] not in ("", " ", "\t"):  # col-0 起始 → 开新块
+            if cur:
+                blocks.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        blocks.append(cur)
+    decl_re = re.compile(r"^(?:async\s+)?function\b|^(?:let|const|var|class)\b")
+    offenders = []
+    for block in blocks:
+        first = block[0]
+        if not first.strip() or decl_re.match(first):
+            continue
+        if all((not ln.strip()) or ln.lstrip().startswith(("//", "/*", "*"))
+               for ln in block):
+            continue  # 注释块
+        text = "\n".join(block)
+        for sym in APP_CARDS_MOVERS:
+            if re.search(r"\b" + re.escape(sym) + r"\b", text):
+                offenders.append(f"引用 {sym}：{first.strip()[:60]}")
+    assert not offenders, (
+        "app.js 顶层语句块引用了已拆至 app-cards.js 的符号"
+        "（加载期 ReferenceError 白屏；把接线挪进 app-cards.js，"
+        "或经评审后改本断言）：\n  " + "\n  ".join(offenders))
+
+
 def test_run_center_names_stay_distinct():
     """运行中心两处入口的名字护栏（2026-10-10 修复的重名事故回归）。
 
@@ -765,8 +865,12 @@ def test_team_room_tab_wiring():
     assert 'teamroom: { title: "协作", sub: "频道  工单  成员" }' in js
     assert "teamroom: (force) => loadTeamRoom(force)" in js
     assert 'id="rp-page-teamroom"' in html and 'id="teamroom-root"' in html
-    assert html.index('<script src="/static/app-teamroom.js">') > html.index(
-        '<script src="/static/app.js">')
+    # 三链顺序（路线图第 2 批）：app.js → app-cards.js（团队室复用的 tc* 渲染系所在）
+    # → app-teamroom.js；团队室复用 app-cards.js 的 tc* 系，加载顺序不得颠倒
+    i_app = html.index('<script src="/static/app.js">')
+    i_cards = html.index('<script src="/static/app-cards.js">')
+    i_room = html.index('<script src="/static/app-teamroom.js">')
+    assert i_app < i_cards < i_room, "团队室复用 app-cards.js 的 tc* 系，加载顺序不得颠倒"
 
     # 三分区容器：buildTeamCard 整卡重排，_ui 同形，频道主区 + 工单板右栏
     assert "function buildTeamRoomCard(roster, directorMode, director)" in js
@@ -1168,7 +1272,7 @@ def test_frontend_modules_keep_required_load_order():
         "app-providers.js", "app-advanced.js", "app-about.js",
     )
     # 后于 app.js：它们反过来依赖 app.js 的顶层定义
-    after_app = ("app-factory.js", "app-tools.js")
+    after_app = ("app-cards.js", "app-factory.js", "app-tools.js")
     names = before_app + ("app.js",) + after_app
 
     missing = [name for name in names if name not in scripts]

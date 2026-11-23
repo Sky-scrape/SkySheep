@@ -379,6 +379,34 @@ def test_download_setup_refuses_host_outside_allowlist(tmp_path, monkeypatch):
 # ---- 断点续传（Range / 206 / 服务端不认 Range） ----
 
 
+def test_update_dir_reuses_partial_across_process_restart(tmp_path, monkeypatch):
+    """弱网续传：应用重启后仍找回同一版本的 .part 目录（不再从零开始）。
+
+    _update_dirs 只是进程内缓存；重启后靠目录里的版本标记找回上一次的随机
+    目录。20KB/s 下一份 44MB 安装包要 40 分钟，重启就清零等于永远下不完。
+    """
+    import tempfile as _tempfile
+
+    monkeypatch.setattr(_tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(remote_mod, "_update_dirs", {})
+
+    first = remote_mod._update_dir("2.7.2")
+    (first / remote_mod.PART_NAME).write_bytes(b"partial-bytes")
+    remote_mod._update_dirs.clear()  # 模拟重启：进程内缓存清空
+
+    again = remote_mod._update_dir("2.7.2")
+    assert again == first, "重启后应复用带 .part 的同版本目录"
+    assert (again / remote_mod.PART_NAME).read_bytes() == b"partial-bytes"
+
+    # 不同版本、或目录里没有 .part 的，一律另开新目录
+    other_version = remote_mod._update_dir("2.7.3")
+    assert other_version != first
+    (first / remote_mod.PART_NAME).unlink()
+    remote_mod._update_dirs.clear()
+    fresh = remote_mod._update_dir("2.7.2")
+    assert fresh != first, "没有 .part 可续传时不复用旧目录"
+
+
 def test_download_setup_resumes_from_existing_part(tmp_path, monkeypatch):
     payload = _payload(1 << 20)
     dest = tmp_path / "setup.exe"

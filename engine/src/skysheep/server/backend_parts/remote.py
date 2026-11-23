@@ -1384,6 +1384,32 @@ def _fetch_setup_sha256(url: str) -> str:
 # 还能接着上次的 .part 续传，而不是换个随机目录从头下。目录名仍是 mkdtemp
 # 随机串（同机抢置仍需猜中随机名），只是同一会话内不再重复新建。
 _update_dirs: dict[str, Path] = {}
+# 随机更新目录里的版本标记：跨应用重启按它找回同一版本的 .part（见 _update_dir）
+_UPDATE_DIR_MARKER = ".skysheep-update-version"
+
+
+def _resumable_update_dir(tmp: Path, version: str) -> Path | None:
+    """找回同一版本、带未完成 .part 的随机更新目录（没有则 None）。
+
+    只认「目录里有同版本标记 + download.part 存在」两者齐备的目录，取最新的
+    一个。被抢占的目录不会造成坏包：续传只是把它的内容当前缀，最终整包 sha256
+    （发布页附件，经 TLS 取回）对不上就整包丢弃。
+    """
+    best: Path | None = None
+    best_mtime = -1.0
+    for d in tmp.glob("skysheep-update-*"):
+        try:
+            if not d.is_dir() or not (d / PART_NAME).is_file():
+                continue
+            marker = (d / _UPDATE_DIR_MARKER).read_text(encoding="utf-8").strip()
+            if marker != version:
+                continue
+            mtime = d.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best, best_mtime = d, mtime
+    return best
 
 
 def _update_dir(version: str = "") -> Path:
@@ -1394,8 +1420,11 @@ def _update_dir(version: str = "") -> Path:
     「文件已存在」而照装不误。随机目录名使抢置需要先猜中 128 位随机串。
     旧目录按修改时间清（>24h），避免每轮更新都往 %TEMP% 里堆几十 MB。
 
-    传了 version 时按版本复用本进程内已建的目录：断掉重来（用户再点一次）
-    能接着 .part 续传，不再重新下一遍 42MB。
+    传了 version 时按版本复用：先查本进程内已建的目录，没有就按目录里的
+    版本标记找回头一次下载开的随机目录（跨应用重启续传）——弱链路下 44MB
+    往往要分几次才下得完，重启后从零开始等于永远下不完。目录名仍是 128 位
+    随机串；被抢先放置的目录只会被当作「已下载前缀」，最终整包 sha256 对不上
+    就丢弃，装不上坏包。
     """
     tmp = Path(tempfile.gettempdir())
     for old in tmp.glob("skysheep-update-*"):
@@ -1410,9 +1439,17 @@ def _update_dir(version: str = "") -> Path:
             if cached.is_dir():
                 return cached
             _update_dirs.pop(version, None)
+        resumed = _resumable_update_dir(tmp, version)
+        if resumed is not None:
+            _update_dirs[version] = resumed
+            return resumed
     created = Path(tempfile.mkdtemp(prefix="skysheep-update-"))
     if version:
         _update_dirs[version] = created
+        try:
+            (created / _UPDATE_DIR_MARKER).write_text(version, encoding="utf-8")
+        except OSError:
+            pass
     return created
 
 

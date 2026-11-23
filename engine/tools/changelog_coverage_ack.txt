@@ -8,3 +8,9 @@
 6718abd    # 返工防线守卫：本次补记进 Unreleased
 4909c1d68  # 历史包袱清理：本次补记进 Unreleased
 8b3d54c7e  # 11-19 引擎文案修复，本次补记（已并入 Unreleased「去 AI 味」条目）
+23afaafdb  # docindex 缓存：条目由后续提交补记进 Unreleased（文档检索进程内缓存）
+2c53f2667  # egress/MCP 日志：条目由后续提交补记进 Unreleased（内部契约与测试守卫）
+6b8d161c7  # except 补日志：同上，条目由后续提交补记进 Unreleased
+cb3eadfe5  # DPAPI 降级可见化：同上，条目由后续提交补记进 Unreleased
+dae0aab32  # Mods 取严：条目由后续提交补记进 Unreleased（未发布补两条安全取严条目）
+5cebe16af  # usage_today 取严：同上，条目由后续提交补记进 Unreleased

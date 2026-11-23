@@ -175,9 +175,14 @@ def parse_table(text: str) -> dict[str, str]:
     return rows
 
 
-def build() -> str:
-    """渲染完整产物文件。输出不含时间戳，--check 与测试可做纯逐字比对。"""
-    items = table_items()
+def build(items: list[tuple[str, str]] | None = None) -> str:
+    """渲染完整产物文件。输出不含时间戳，--check 与测试可做纯逐字比对。
+
+    ``items`` 可复用在调用方已经反射过的结果上，避免重复反射 events.py
+    （main 的 --check 与生成路径都要拿条目数，曾因此反射两遍）。
+    """
+    if items is None:
+        items = table_items()
     rows = "\n".join(f'  {name}: "{kind}",' for name, kind in items)
     return _HEADER.format(regen_cmd=_REGEN_CMD, count=len(items)) + rows + "\n" + _FOOTER
 
@@ -209,8 +214,8 @@ def main() -> int:
         help="不落盘，只校验盘上产物与现算内容一致（EOL 归一化逐字比对，不一致退出 1）")
     args = parser.parse_args()
 
-    content = build()
     items = table_items()
+    content = build(items)
     rel = _OUTPUT_PATH.relative_to(Path(__file__).resolve().parents[2])
 
     if args.check:

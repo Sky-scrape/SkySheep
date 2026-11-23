@@ -13,7 +13,8 @@ PermissionModesMixin）、同步 `_manually_named`、回收 runtime（delete_ses
 ChatPipelineMixin._run_turn_pipeline 建并登记，任务体是 _persist_turn。
 截断（truncate_session）只做 store.truncate_from + runtime 历史重载，
 不做上述内存态清理、等待与 runtime 回收。`_channel_gates` / `_channel_names`
-（D4 登记表）只在删除会话时清（池写权约定见设计 §3.3）。
+（D4 登记表）只在删除会话时清；登记表所有权与写权约定见
+backend_parts/channels.py 文件头（D4 域注记，两域文件头互指）。
 跨域只读已收敛：忙判走批 4 的 automation_busy()（_backup_busy_message 不裸读
 `_cron_running` / `_pipeline_running`）。跨域写（`_teams`，设计 §3.3 雷区，
 批 6 已收敛）：delete_session 的摘队三行（pop → pop interrupted → 条件

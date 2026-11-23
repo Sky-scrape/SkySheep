@@ -543,7 +543,8 @@ def test_batch6_teams_bare_access_only_in_collab_body():
     """收敛后不再有跨域裸读：collab_body.py 之外只剩主类 __init__ 的字段声明。
 
     15 处跨域调用点（2 写 + 13 读）按域点名锚定形态；分发层第 16 处
-    （_dispatch_chat.py 的 _h_permission_queue）按降级条款保留裸读 + 注记。"""
+    （_dispatch_chat.py 的 _h_permission_queue）经 backend.team_orchestrators()
+    取 dict 本体，同样不裸碰 `_teams`。"""
     import inspect
     import pathlib
     import re
@@ -583,6 +584,11 @@ def test_batch6_teams_bare_access_only_in_collab_body():
     assert inspect.getsource(spectate).count("self.team_orchestrators().values()") == 1
     assert inspect.getsource(migration).count("self.team_orchestrators().items()") == 1
     assert inspect.getsource(channels).count("self.team_orchestrator(session_id)") == 1
+    from skysheep.server import _dispatch_chat
+
+    assert inspect.getsource(_dispatch_chat).count(
+        "backend.team_orchestrators().items()") == 1
+    assert inspect.getsource(_dispatch_chat).count('backend, "_teams"') == 0
     assert inspect.getsource(automation).count("self.team_orchestrator(resident.session_id)") == 2
     assert inspect.getsource(lifecycle).count(
         "self.team_detach_for_delete(session_id)") == 1

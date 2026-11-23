@@ -664,7 +664,9 @@
   `team_interrupt_for_project_switch`（own-ctx 分屏列豁免、
   `interrupt_reason="项目已切换，团队已中断"`、条件 persist 原样）。第 16 处
   （`_dispatch_chat.py` 的 `_h_permission_queue`）在分发层，超出设计 §3.3 的
-  ≤15 闸门，按降级条款保留裸读 + 注记，本批不动；D2 域内裸访问不变。其四，
+  ≤15 闸门，批 6 先按降级条款保留裸读 + 注记；随后收尾提交把该处也改为经
+  `team_orchestrators().items()` 取 dict 本体（语义零变化），最终 collab_body.py
+  之外只剩主类 `__init__` 的字段声明；D2 域内裸访问不变。其四，
   注记收口：chat_pipeline / project_mgmt / lifecycle / migration（文件头 +
   模块 docstring + 方法 docstring）/ advanced / mods / spectate / channels /
   automation 的未来时写法全部改成实况（「批 6 已收敛」），「不收敛，注记」

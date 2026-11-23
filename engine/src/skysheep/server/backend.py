@@ -711,7 +711,7 @@ class ServerBackend(AutomationMixin, ChannelsMixin, MemoryMixin,
         # _weixin_login_channel（未启用微信时的扫码登录一次性实例）。
         # 跨域读写（不收敛，注记，设计 §3.3 雷区表）：_channel_gates/
         # _channel_names 由 D1 LifecycleMixin.delete_session 清登记残键
-        # （lifecycle.py delete_session 行内注记约 :312-317；互指留待后续批）；
+        # （lifecycle.py 文件头与 delete_session 行内注记；两域文件头互指）；
         # _channel_names 另被内核
         # _reload_agent_history 读（渠道会话系统提示词加 CHANNEL_STYLE，
         # 批 5 后随 ChatPipelineMixin 落 D1）。

@@ -53,7 +53,9 @@ load()，本域只经 store API 读登记（team.get / team.room 的 resident �
   登记 interrupt_reason="项目已切换，团队已中断" → 条件 persist）。
 
 第 16 处读点（server/_dispatch_chat.py 的 _h_permission_queue）在分发层，超出
-设计 §3.3 的 ≤15 闸门，按降级条款保留裸读 + 注记，本批不动。读 D1/D3 的状态
+设计 §3.3 的 ≤15 闸门，本批先按降级条款保留裸读 + 注记；收尾提交把该处也改为
+经 team_orchestrators().items() 取 dict 本体（语义零变化），最终本文件之外只剩
+主类 __init__ 的字段声明。读 D1/D3 的状态
 按既有注记：_get_owned_session（D1 归属校验）、runtimes 的 ctx.own /
 project_id（内核池）、_session_effective_model 与 _release_turn_providers（D1
 SessionModelMixin）、_check_budget_alerts（D3 AutomationMixin，预算告警）、

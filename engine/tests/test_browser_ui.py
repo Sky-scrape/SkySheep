@@ -211,3 +211,69 @@ async def test_pet_keeps_position_when_split_pane_closes(home):
             assert after["display"] != "none"
             assert (after["left"], after["top"]) == (before["left"], before["top"]), \
                 "关掉副屏后小羊应回到原处（落点被窄容器改写过？）"
+
+
+async def test_long_modal_caps_height_and_scrolls_body(home):
+    """长表单弹层不出画：框限制在视口内，标题与底部按钮固定，正文区自己滚。
+
+    回归：通用弹窗此前没有高度上限，长表单（定时任务：字段 + 预授权工具表 +
+    三段说明）在 620px 高的窗口里撑到满屏，整层靠遮罩滚动——标题被滚出视口、
+    底部的取消/创建要滚很远才够得着。上限与滚动层写在 .modal-box /
+    #modal-content 的通用规则里，这里用最长的那个弹窗锚住行为。
+    """
+    async with live_server(home, [[TextBlock(text="好")]]) as base:
+        async with browser_page(base, width=1000, height=620) as page:
+            await _open_main_view(page)
+            await page.wait_for_selector("#input", timeout=10000)
+            # 等 bootsnap 到位（cronModal 要用工具清单/服务清单；WS 未连上时 request 会失败）。
+            # 注意 bootSnap 是 app-providers.js 里的顶层 let（全局词法绑定），不是 window 属性
+            ready = await page.evaluate("""async () => {
+                for (let i = 0; i < 100; i++) {
+                    if (typeof bootSnap !== "undefined" && bootSnap) return true;
+                    await new Promise((r) => setTimeout(r, 50));
+                }
+                return false;
+            }""")
+            assert ready, "boot 快照未在 5 秒内就绪"
+            # cronModal 是全局 async 函数：等它内部的两次 request 拉完再断言
+            await page.evaluate("async () => { await cronModal(); }")
+            await expect(page.locator("#modal:not(.hidden)")).to_have_count(1)
+            await expect(page.locator("#modal-title")).to_have_text("新建定时任务")
+            m = await page.evaluate("""() => {
+                const box = document.querySelector('#modal .modal-box');
+                const content = document.getElementById('modal-content');
+                const r = box.getBoundingClientRect();
+                const title = box.querySelector('h3').getBoundingClientRect();
+                const ops = box.querySelector('.modal-ops').getBoundingClientRect();
+                return {
+                  vw: innerWidth, vh: innerHeight,
+                  top: r.top, bottom: r.bottom, left: r.left, right: r.right,
+                  titleTop: title.top, titleBottom: title.bottom,
+                  opsTop: ops.top, opsBottom: ops.bottom,
+                  scrollable: content.scrollHeight > content.clientHeight + 1,
+                  overflowY: getComputedStyle(content).overflowY,
+                };
+            }""")
+            assert m["top"] >= -1 and m["bottom"] <= m["vh"] + 1, \
+                f"弹层超出视口上下边界：{m['top']}..{m['bottom']} / {m['vh']}"
+            assert m["left"] >= -1 and m["right"] <= m["vw"] + 1, \
+                f"弹层超出视口左右边界：{m['left']}..{m['right']} / {m['vw']}"
+            # 标题在框上部、操作条在框下部，且都留在视口内（不是被滚出去的状态）
+            assert m["top"] <= m["titleTop"] and m["titleBottom"] <= m["opsTop"]
+            assert m["opsBottom"] <= m["bottom"] + 1
+            # 正文区是唯一滚动层：内容超高时必须能滚，而不是把框撑出视口
+            assert m["scrollable"], "长表单内容应超出可视高度（用例前提）"
+            assert m["overflowY"] == "auto", "正文区应自己滚"
+            # 预授权工具表：权限徽章贴所在格右缘（同一列形成一条竖线）。
+            # 回归：徽章原先紧跟在变长的工具名后面，起点随名字宽度漂移，
+            # 同一列看起来是锯齿（read_file 只读 与 write_file 写入 差 6px）
+            gaps = await page.evaluate("""() => {
+                return [...document.querySelectorAll('.cron-tool')].map((c) => {
+                    const cell = c.getBoundingClientRect();
+                    const chip = c.querySelector('.chip').getBoundingClientRect();
+                    return Math.round((cell.right - chip.right) * 10) / 10;
+                });
+            }""")
+            assert gaps, "预授权工具表为空（用例前提）"
+            assert all(0 <= g <= 6 for g in gaps), \
+                f"权限徽章没贴齐所在格右缘（应形成竖直一列）：{gaps}"

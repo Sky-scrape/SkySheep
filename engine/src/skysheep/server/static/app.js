@@ -3016,6 +3016,9 @@ function showModal(title, contentEl, onOk, okLabel = "确定") {
   okBtn.textContent = okLabel;
   okBtn.disabled = false;
   document.getElementById("modal").classList.remove("hidden");
+  // 正文区是独立滚动层：遮罩隐藏时赋 scrollTop 不生效（无布局），
+  // 必须在显示之后归零，否则上一个弹层滚到一半关掉、新弹层会接着往下的位置
+  content.scrollTop = 0;
   // 焦点闭环入口：等一拍再接管——不少调用方打开后会自行聚焦输入框，
   // 焦点仍留在弹层外（纯确认框）时才聚焦「取消」，不与调用方抢
   setTimeout(() => {
@@ -3032,6 +3035,8 @@ function showModal(title, contentEl, onOk, okLabel = "确定") {
     } catch (e) {
       err.textContent = "✗ " + e.message;
       err.hidden = false;
+      // 正文区是独立滚动层（长表单在框内滚）：报错落在可视区外时滚到眼前
+      err.scrollIntoView({ block: "nearest" });
     } finally {
       okBtn.disabled = false;
     }

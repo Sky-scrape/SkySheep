@@ -1542,6 +1542,32 @@ html.code-wrap .md pre.has-lines { display: block; }
   padding-right: 32px;
 }
 .cron-fields select.modal-input:disabled { opacity: .75; }
+/* 定时任务/编排/提示词这类字段密集的弹层：比确认类弹窗宽一档——
+   560px 下说明文字与工具勾选表的换行明显减少，整体矮一截 */
+.modal-box:has(.cron-fields) { max-width: 560px; }
+/* 两列字段行（服务/模型、频率/间隔、时间/星期）：并排省一段纵向高度。
+   字段各自带标签；只显示一个字段时（如仅「间隔」）自动占满整行。
+   间距：跟在字段标题后的行只补 4px（标题与控件原本就是这个距离），
+   跟在输入框后的行补 8px，与普通 label 的 margin-top 一致 */
+.cron-row2 { display: flex; align-items: flex-start; gap: 10px; margin-top: 8px; }
+.cron-row2 > * { flex: 1 1 0; min-width: 0; }
+.cron-fields > label + .cron-row2 { margin-top: 4px; }
+.cron-field { display: flex; flex-direction: column; min-width: 0; }
+/* 弹层里的长说明（推送/安全/运行前提）：默认收起只留一行摘要，
+   避免三段说明把弹层撑到满屏；内容原文不动，展开即看 */
+.cron-hints { margin-top: 10px; }
+.cron-hints > summary {
+  cursor: pointer; color: var(--dim); font-size: var(--fs-sm);
+  padding: 4px 0; user-select: none; width: fit-content;
+}
+.cron-hints > summary:hover { color: var(--text); }
+.cron-hints[open] > summary { margin-bottom: 2px; }
+.cron-hints p { margin: 4px 0; }
+/* 手机宽度：两列字段退回单列，下拉文字不被挤断 */
+@media (max-width: 480px) {
+  .cron-row2 { flex-direction: column; gap: 0; }
+  .cron-row2 > .cron-field + .cron-field { margin-top: 8px; }
+}
 
 /* 设置·高级：独立开关行靠左排（card-head 里的 .toggle-row 是两端对齐，这里不沿用）。
    gap 必须显式写回 8px：文件后部另有一条 .toggle-row { gap: 16px } 的两端对齐
@@ -1605,12 +1631,19 @@ html.code-wrap .md pre.has-lines { display: block; }
   border-radius: var(--r-sm); padding: 7px 9px; margin-top: 2px;
 }
 .cron-tool {
-  display: flex; align-items: center; gap: 6px;
+  /* 三列：勾选框 / 工具名 / 权限徽章。徽章贴所在列的右缘、按名字长短不再左右
+     乱跳（原先名字后紧跟徽章，只读/写入/高危 的起点随名字宽度漂移，同一列看
+     起来齐一排「锯齿」）；名字列吃掉剩余宽度，过长才省略 */
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 6px;
   font-size: var(--fs-sm); font-weight: var(--fw-normal); color: var(--text2);
   padding: 2px 3px; border-radius: var(--r-xs); cursor: pointer;
 }
 .cron-tool:hover { background: var(--paper-inset); }
-.cron-tool .ct-name { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.cron-tool .ct-name {
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .cron-tool.locked { opacity: .62; cursor: default; }
 
 /* ---------- 任务编排（流水线，右面板标签） ---------- */
@@ -2415,8 +2448,14 @@ html.code-wrap .md pre.has-lines { display: block; }
   border-radius: var(--r-lg);
   box-shadow: 5px 6px 0 color-mix(in srgb, var(--ink-line) 18%, transparent), var(--shadow-lg);
   padding: var(--sp-5) var(--sp-5) var(--sp-4); max-width: 480px; width: 100%;
+  /* 视口内高度上限（百分比相对 .overlay 的内容框，zoom 缩放也成立）：
+     长内容的弹层在正文区自己滚，标题与底部取消/确定固定在框上。
+     此前没有上限，整层靠遮罩滚动——标题会被滚出视口（表单类弹层尤其明显），
+     定长高度只写在 :has(.archive-wrap) 那几条个案规则里 */
+  max-height: 100%; display: flex; flex-direction: column;
   margin: auto; animation: ui-modal-in var(--dur-fast) var(--ease-out);
 }
+.modal-box > h3 { flex: none; }
 .modal-box::before {
   content: ""; position: absolute; left: 0; right: 0; top: 0; height: 4px;
   border-radius: var(--r-lg) var(--r-lg) 0 0; background: var(--blue);
@@ -2424,7 +2463,12 @@ html.code-wrap .md pre.has-lines { display: block; }
 /* 帮助弹窗内容多（上手 / 快捷键 / FAQ），给宽一点、正文区自己滚 */
 .modal-box:has(.help-body) { max-width: 600px; }
 .modal-box h3 { font-size: var(--fs-title); margin-bottom: 12px; padding-top: 2px; }
-#modal-content { font-size: var(--fs-base); line-height: 1.7; }
+/* 正文区是唯一滚动层：min-height:0 让 flex 子项能收缩到内容以下（否则溢出的
+   高度会撑破 .modal-box 的上限）；overscroll 收住，滚到底不带动背后的页面 */
+#modal-content {
+  font-size: var(--fs-base); line-height: 1.7;
+  flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+}
 #modal-content p { margin: 6px 0; }
 .memory-text {
   width: 100%; min-height: 220px; resize: vertical; margin-top: 8px;
@@ -2437,7 +2481,7 @@ html.code-wrap .md pre.has-lines { display: block; }
   padding: 8px 10px; font: inherit;
 }
 .modal-input:focus { outline: none; border-color: var(--blue); }
-.modal-ops { display: flex; justify-content: flex-end; gap: 9px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.modal-ops { display: flex; justify-content: flex-end; gap: 9px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); flex: none; }
 .move-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .move-opt {
   display: flex; align-items: center; gap: 8px;
@@ -9811,11 +9855,10 @@ li.mcp-failed { border-left: 0; }
 }
 .collab-defaults[open] > summary { margin-bottom: 8px; }
 .collab-defaults .settings-card { margin-top: 10px; }
-/* 跑前清单内容高（角色表 + 工具表 + 勾选项 + 只读按钮），窄高窗口下让
-   #modal-content 自己滚：整层滚会把标题滚出视口（冒烟复现），标题与底部
-   取消/开始必须固定。 */
-.modal-box:has(.collab-preview-wrap) { max-height: 88vh; display: flex; flex-direction: column; }
-.modal-box:has(.collab-preview-wrap) #modal-content { overflow-y: auto; min-height: 0; }
+/* 跑前清单内容高（角色表 + 工具表 + 勾选项 + 只读按钮）：正文区自滚与固定
+   标题/按钮由通用 .modal-box 规则兜住，这里只再收一档总高与表区上限，
+   620px 高窗口也能一屏放下 */
+.modal-box:has(.collab-preview-wrap) { max-height: 88vh; }
 /* 表区再收一档：给勾选项与只读按钮留出固定高度，620px 高窗口也能一屏放下 */
 .modal-box:has(.collab-preview-wrap) .collab-preview { max-height: 50vh; }
 .collab-preview-wrap { display: flex; flex-direction: column; gap: 8px; }

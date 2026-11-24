@@ -1144,11 +1144,13 @@ async function cronModal(existing) {
       </div>
       <div id="cron-model-wrap">
         <label>模型（可选）</label>
-        <select id="cron-provider" class="modal-input cron-select">
-          <option value="">${followLabel}</option>
-          ${orphanProvider}${providerOptions}
-        </select>
-        <select id="cron-model" class="modal-input cron-select"></select>
+        <div class="cron-row2">
+          <select id="cron-provider" class="modal-input cron-select">
+            <option value="">${followLabel}</option>
+            ${orphanProvider}${providerOptions}
+          </select>
+          <select id="cron-model" class="modal-input cron-select"></select>
+        </div>
         <p class="dim small">留空跟随全局；指定后这条产线单独用这个服务 / 模型跑
           （日报用便宜模型、周报用强模型）。团队任务的模型由团队模板决定，不显示这一项。</p>
       </div>
@@ -1160,26 +1162,34 @@ async function cronModal(existing) {
       </div>
       <label id="cron-prompt-label">任务指令（Agent 每次到点执行的内容）</label>
       <textarea id="cron-prompt" class="modal-input" rows="3" placeholder="例如：扫描当前目录的 TODO 标记，汇总成一段进度报告">${isEdit ? escapeHtml(t.prompt) : ""}</textarea>
-      <label>频率</label>
-      <select id="cron-type" class="modal-input cron-select">
-        <option value="interval" ${t.schedule_type === "interval" ? "selected" : ""}>每隔 N 分钟</option>
-        <option value="daily" ${t.schedule_type === "daily" ? "selected" : ""}>每天固定时间</option>
-        <option value="workdays" ${t.schedule_type === "workdays" ? "selected" : ""}>工作日每天（周一至周五）</option>
-        <option value="weekly" ${t.schedule_type === "weekly" ? "selected" : ""}>每周固定时间</option>
-        <option value="cron" ${t.schedule_type === "cron" ? "selected" : ""}>Cron 表达式（高级）</option>
-        <option value="watch" ${t.schedule_type === "watch" ? "selected" : ""}>文件夹有变化时（高级）</option>
-      </select>
-      <div id="cron-interval-wrap">
-        <label>间隔（分钟）</label>
-        <input id="cron-interval" class="modal-input" type="number" min="1" max="525600" step="5" value="${t.interval_minutes}">
+      <div class="cron-row2">
+        <div class="cron-field">
+          <label>频率</label>
+          <select id="cron-type" class="modal-input cron-select">
+            <option value="interval" ${t.schedule_type === "interval" ? "selected" : ""}>每隔 N 分钟</option>
+            <option value="daily" ${t.schedule_type === "daily" ? "selected" : ""}>每天固定时间</option>
+            <option value="workdays" ${t.schedule_type === "workdays" ? "selected" : ""}>工作日每天（周一至周五）</option>
+            <option value="weekly" ${t.schedule_type === "weekly" ? "selected" : ""}>每周固定时间</option>
+            <option value="cron" ${t.schedule_type === "cron" ? "selected" : ""}>Cron 表达式（高级）</option>
+            <option value="watch" ${t.schedule_type === "watch" ? "selected" : ""}>文件夹有变化时（高级）</option>
+          </select>
+        </div>
+        <div id="cron-interval-wrap" class="cron-field">
+          <label>间隔（分钟）</label>
+          <input id="cron-interval" class="modal-input" type="number" min="1" max="525600" step="5" value="${t.interval_minutes}">
+        </div>
       </div>
-      <div id="cron-time-wrap" class="hidden">
-        <label>时间（HH:MM）</label>
-        <input id="cron-time" class="modal-input" type="time" value="${escapeHtml(t.time_of_day)}">
-        <label id="cron-weekday-label">星期几</label>
-        <select id="cron-weekday" class="modal-input cron-select">
-          ${days.map((d, i) => `<option value="${i}" ${t.weekday === i ? "selected" : ""}>${d}</option>`).join("")}
-        </select>
+      <div id="cron-time-wrap" class="hidden cron-row2">
+        <div class="cron-field">
+          <label>时间（HH:MM）</label>
+          <input id="cron-time" class="modal-input" type="time" value="${escapeHtml(t.time_of_day)}">
+        </div>
+        <div id="cron-weekday-wrap" class="cron-field">
+          <label>星期几</label>
+          <select id="cron-weekday" class="modal-input cron-select">
+            ${days.map((d, i) => `<option value="${i}" ${t.weekday === i ? "selected" : ""}>${d}</option>`).join("")}
+          </select>
+        </div>
       </div>
       <div id="cron-cron-wrap" class="hidden">
         <label>Cron 表达式（分 时 日 月 周）</label>
@@ -1207,15 +1217,18 @@ async function cronModal(existing) {
       <label>预授权工具（无人值守运行时自动放行；不勾的会被自动拒绝）</label>
       <div class="cron-tools">${toolRows}</div>
       <label class="cron-notify"><input id="cron-notify" type="checkbox"${t.notify_channel ? " checked" : ""}> 完成后推送到聊天渠道</label>
-      <p class="dim small">任务跑完（成功或失败）会在飞书/微信渠道收到一条摘要：状态、耗时与结果节选；
-        渠道未启用或没有绑定聊天时静默跳过。渠道在 设置  聊天机器人渠道 里配置。</p>
-      <p class="dim small">安全说明：定时任务无人值守运行，<b>只读工具本来就放行</b>；
-        写入 / 执行类必须在这里勾选，否则运行时会自动拒绝。建议先只勾必要的。
-        <b>勾选 run_command 等于允许无人值守执行任意命令</b>——若任务内容里被塞进恶意指令，勾选的工具都会自动放行，只在指令完全可信时勾选。</p>
-      <p class="dim small">运行前提：定时任务只在 <b>SkySheep 运行期间</b>触发（关窗时选「缩到系统托盘」它就继续在后台跑）。
-        彻底退出期间错过的任务，会在下次打开应用时补跑一次。想让电脑一开机就守着，
-        可在 设置  高级 里打开「开机自动启动」；想让应用彻底关闭也照常到点跑，
-        可在任务卡片上点「⊞」导出为系统计划任务（Windows）。</p>
+      <details class="cron-hints">
+        <summary>运行说明与安全须知（推送渠道 / 预授权风险 / 后台触发）</summary>
+        <p class="dim small">任务跑完（成功或失败）会在飞书/微信渠道收到一条摘要：状态、耗时与结果节选；
+          渠道未启用或没有绑定聊天时静默跳过。渠道在 设置  聊天机器人渠道 里配置。</p>
+        <p class="dim small">安全说明：定时任务无人值守运行，<b>只读工具本来就放行</b>；
+          写入 / 执行类必须在这里勾选，否则运行时会自动拒绝。建议先只勾必要的。
+          <b>勾选 run_command 等于允许无人值守执行任意命令</b>——若任务内容里被塞进恶意指令，勾选的工具都会自动放行，只在指令完全可信时勾选。</p>
+        <p class="dim small">运行前提：定时任务只在 <b>SkySheep 运行期间</b>触发（关窗时选「缩到系统托盘」它就继续在后台跑）。
+          彻底退出期间错过的任务，会在下次打开应用时补跑一次。想让电脑一开机就守着，
+          可在 设置  高级 里打开「开机自动启动」；想让应用彻底关闭也照常到点跑，
+          可在任务卡片上点「⊞」导出为系统计划任务（Windows）。</p>
+      </details>
     </div>`;
   // 与任务列表里的卡片一致：频率切换时显隐对应字段
   const syncType = () => {
@@ -1226,9 +1239,8 @@ async function cronModal(existing) {
       "hidden", v === "interval" || v === "cron");
     box.querySelector("#cron-cron-wrap").classList.toggle("hidden", v !== "cron");
     box.querySelector("#cron-watch-wrap").classList.toggle("hidden", v !== "watch");
-    const wd = box.querySelector("#cron-weekday");
-    box.querySelector("#cron-weekday-label").style.display = v === "weekly" ? "" : "none";
-    wd.style.display = v === "weekly" ? "" : "none";
+    // 星期几只给「每周」：整格隐藏，同行的「时间」会自动占满整行
+    box.querySelector("#cron-weekday-wrap").classList.toggle("hidden", v !== "weekly");
   };
   // 文件夹触发器规格回填（编辑既有 watch 任务时）
   let watchSpec = { dir: "", glob: "*", debounce_s: 5 };

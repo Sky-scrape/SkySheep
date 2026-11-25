@@ -14924,7 +14924,7 @@ document.getElementById("run-inspect-now").onclick = async () => {
   try {
     const r = await request("automation.inspect_now", {});
     if (r && r.ok) {
-      addNotice("巡检完成，结论已更新到下方");
+      addNotice("巡检完成，结论已更新到卡片里");
     } else {
       const why = {
         too_few_runs: "最近完成的运行不足 3 次，样本太少暂不巡检",

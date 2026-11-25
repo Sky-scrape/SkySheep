@@ -945,6 +945,9 @@ def test_sidebar_no_project_state_and_empty_text(home):
     pg_add = pg_add[:pg_add.index("}")]
     assert "opacity: 0" not in pg_add, "＋ 常显（悬停才现会让入口难以发现）"
     assert ".quick-row" in css and "quick-row" in js, "快聊行沿用项目行（激活态高亮）"
+    # 组头没有时间标签，不能继承会话行的 72px 行尾时间槽——否则 ✕/＋ 离右缘
+    # 空出一大截、标题被挤成「e..」（2026-11-25 用户截图反馈）
+    assert ":not(.has-snippet):not(.pgroup-head) {" in css, "组头不吃行尾时间预留槽"
 
     # 5. 不报数字：会话标题与各分组头都不挂条数——列表本身按行陈列，
     #    标题旁再挂个数字是噪声（2026-09-22 应用户要求移除）

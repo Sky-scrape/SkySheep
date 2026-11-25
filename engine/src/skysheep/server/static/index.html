@@ -2464,26 +2464,11 @@
         </section>
 
         <section class="settings-page hidden" id="settings-page-runs">
-          <!-- 与自动化页「今日运行」卡片（app-schedule.js 的 loadRunCenter）注意区分：
-               本页列表由 app.js 的 loadRunsPage 渲染（名称刻意错开，防跨文件覆盖） -->
-          <section class="settings-card">
-            <div class="card-head">
-              <h3>运行中心</h3>
-              <div class="usage-head-right">
-                <button id="runs-refresh" class="btn-ghost">刷新</button>
-              </div>
-            </div>
-            <p class="settings-hint">
-              所有 Agent 正在跑与跑过的事：主对话轮、后台子代理任务。
-              等待确认的运行可以直接进入对应会话处理；失败或被应用重启打断的运行可以一键重发。
-            </p>
-            <div id="perm-queue-box"></div>
-            <div id="runs-list"></div>
-          </section>
-
           <!-- 运行巡检：事后回头看「跑完了，但跑歪了吗」。数据源 automation.inspect_status /
                inspect_save / inspect_now（_dispatch_automation.py 已注册，默认关）；
-               app.js 的 loadRunInspectCard 渲染与保存。方法不可用（旧后端）时整卡保持 hidden。 -->
+               app.js 的 loadRunInspectCard 渲染与保存。方法不可用（旧后端）时整卡保持 hidden。
+               放在运行列表上方（2026-11-25 用户指定）：巡检是新设置的入口，不该沉到
+               几十条运行记录下面才看得见。 -->
           <section class="settings-card hidden" id="run-inspect-card">
             <div class="card-head">
               <h3>运行巡检</h3>
@@ -2512,6 +2497,23 @@
               <span class="dim small">每次巡检回看最近这段窗口的运行（1–744），默认 24</span>
             </div>
             <p id="run-inspect-last" class="dim small"></p>
+          </section>
+
+          <!-- 与自动化页「今日运行」卡片（app-schedule.js 的 loadRunCenter）注意区分：
+               本页列表由 app.js 的 loadRunsPage 渲染（名称刻意错开，防跨文件覆盖） -->
+          <section class="settings-card">
+            <div class="card-head">
+              <h3>运行中心</h3>
+              <div class="usage-head-right">
+                <button id="runs-refresh" class="btn-ghost">刷新</button>
+              </div>
+            </div>
+            <p class="settings-hint">
+              所有 Agent 正在跑与跑过的事：主对话轮、后台子代理任务。
+              等待确认的运行可以直接进入对应会话处理；失败或被应用重启打断的运行可以一键重发。
+            </p>
+            <div id="perm-queue-box"></div>
+            <div id="runs-list"></div>
           </section>
         </section>
 

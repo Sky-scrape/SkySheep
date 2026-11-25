@@ -2353,8 +2353,10 @@ body:has(.agenda-reminder:not(.notice-toast)) .notice-toast { top: 96px; }
 }
 
 /* 会话条目：平时右侧只显示相对时间，悬浮时时间让位给归档 / ⋯ 按钮 */
-/* 排除空列表提示（含 <br> 手动换行）与搜索结果项（各自有布局） */
-#session-list li:not(.empty-hint):not(.s-group):not(.has-snippet) {
+/* 排除空列表提示（含 <br> 手动换行）与搜索结果项（各自有布局）；
+   分组视图的文件夹组头（.pgroup-head）也没有时间标签，不能吃下面那 72px
+   预留槽——否则组头的 ✕/＋ 离右缘空出一大截、标题被挤成「e..」 */
+#session-list li:not(.empty-hint):not(.s-group):not(.has-snippet):not(.pgroup-head) {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   /* 行尾固定槽位：时间（62px + right:8px）与归档/⋯ 叠在同一块区域里交叉淡入淡出，
      悬停不再改变行宽、标题省略位置也不跳；72px 给长时间留出余量，不压标题 */

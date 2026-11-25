@@ -316,3 +316,17 @@ def test_run_center_frontend_wiring():
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     assert ".rp-runcard" in css
     assert "#run-center-detail" in css and ".rc-list" in css
+
+
+def test_settings_runs_page_puts_inspect_card_first():
+    """设置·运行中心页：运行巡检卡排在运行列表上方（2026-11-25 用户指定）。
+
+    巡检是这一页的设置入口，沉到几十条运行记录下面才看得见；DOM 顺序即视觉
+    顺序，这里锚住它，防止后续加卡时又被排到列表之后。
+    """
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    page = html[
+        html.index('id="settings-page-runs"'):html.index('id="settings-page-usage"')
+    ]
+    assert page.index('id="run-inspect-card"') < page.index('id="runs-list"'), \
+        "运行巡检卡应排在运行列表（#runs-list）之前"

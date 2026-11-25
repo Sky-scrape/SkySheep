@@ -14,3 +14,5 @@
 cb3eadfe5  # DPAPI 降级可见化：同上，条目由后续提交补记进 Unreleased
 dae0aab32  # Mods 取严：条目由后续提交补记进 Unreleased（未发布补两条安全取严条目）
 5cebe16af  # usage_today 取严：同上，条目由后续提交补记进 Unreleased
+cdeeee8    # 发布正文 sha256 按实际产物对齐：发布清单 §4 的既定步骤，非用户可见变更
+b5893ba    # 组头 ＋ 位置与巡检卡排位：条目由后续提交补记进 2.7.4 修复段
